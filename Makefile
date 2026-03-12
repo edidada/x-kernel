@@ -232,6 +232,11 @@ distclean: clean
 clean_c::
 	rm -rf $(app-objs)
 
+coverage:
+	@mkdir -p coverage-report
+	@cp platforms/x86_64-qemu-virt/defconfig .config
+	@make UNITTEST=y run
+
 # Note: gen-const is kept as PHONY to allow manual invocation,
 # but the actual dependency is on $(CONFIG_RS) which is file-based
 .PHONY: all defconfig oldconfig menuconfig saveconfig gen-const \
