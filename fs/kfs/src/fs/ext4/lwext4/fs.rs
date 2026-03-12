@@ -10,7 +10,7 @@ use fs_ng_vfs::{
 };
 use kdriver::BlockDevice as KBlockDevice;
 use kspin::{SpinNoPreempt as Mutex, SpinNoPreemptGuard as MutexGuard};
-use lwext4_rust::{FsConfig, ffi::EXT4_ROOT_INO};
+use klwext4_rust::{FsConfig, ffi::EXT4_ROOT_INO};
 
 use super::{
     Ext4Disk, Inode,
@@ -27,7 +27,7 @@ pub struct Ext4Filesystem {
 impl Ext4Filesystem {
     pub fn new(dev: KBlockDevice) -> VfsResult<Filesystem> {
         let ext4 =
-            lwext4_rust::Ext4Filesystem::new(Ext4Disk(dev), EXT4_CONFIG).map_err(into_vfs_err)?;
+            klwext4_rust::Ext4Filesystem::new(Ext4Disk(dev), EXT4_CONFIG).map_err(into_vfs_err)?;
 
         let fs = Arc::new(Self {
             inner: Mutex::new(ext4),

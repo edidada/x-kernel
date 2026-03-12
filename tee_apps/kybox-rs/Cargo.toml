@@ -1,0 +1,14 @@
+[package]
+name = "kybox-rs"
+version = "0.1.0"
+authors = ["huanfuxi <huanfuxi@kylinos.cn>"]
+license = "Apache-2.0"
+edition = "2024"
+
+[dependencies]
+xtee-utee = { path = "../../tee/xtee-utee" }
+rand = { version = "0.4" }
+mbedtls-smx = { version = "0.13.4", default-features = false, features = [
+    "std",
+] }
+num_enum = { version = "0.7.3", default-features = false }

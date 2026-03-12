@@ -10,7 +10,7 @@ pub use fs::*;
 pub use inode::*;
 #[allow(unused_imports)]
 use kdriver::{BlockDevice as KBlockDevice, prelude::BlockDriverOps};
-use lwext4_rust::{BlockDevice, Ext4Error, Ext4Result, ffi::EIO};
+use klwext4_rust::{BlockDevice, Ext4Error, Ext4Result, ffi::EIO};
 
 pub(crate) struct Ext4Disk(KBlockDevice);
 

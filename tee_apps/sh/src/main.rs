@@ -1,8 +1,7 @@
-// SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
-// See LICENSES for license details.
-
-use std::process::{Child, Command, Stdio};
+use std::{
+    process::{Child, Command, Stdio},
+    thread, time,
+};
 
 fn spawn_app(path: &str) -> Option<Child> {
     match Command::new(path)
@@ -23,33 +22,31 @@ fn spawn_app(path: &str) -> Option<Child> {
 }
 
 fn main() {
-    println!("tee_init: starting foreground init");
+    println!("tee_init: starting");
 
-    let apps_env = option_env!("TEE_INIT_APPS").unwrap_or("");
-    let apps: Vec<String> = apps_env
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect();
-
-    let children: Vec<(String, Child)> = apps
-        .iter()
-        .filter_map(|path| spawn_app(path).map(|child| (path.to_string(), child)))
-        .collect();
-
-    if children.is_empty() {
-        println!("tee_init: no apps to spawn, exiting");
+    let vsock_mgr = spawn_app("/tee/vsock-manager");
+    if vsock_mgr.is_none() {
+        println!("tee_init: failed to start vsock-manager, aborting");
         return;
     }
+    println!("tee_init: vsock-manager started");
 
-    for (path, mut child) in children {
-        match child.wait() {
-            Ok(status) => {
-                println!("tee_init: {path} exited with {status}");
-            }
-            Err(err) => {
-                println!("tee_init: failed to wait {path}: {err}");
+    thread::sleep(time::Duration::from_secs(1));
+
+    let ta = spawn_app("/tee/kybox-rs");
+    if ta.is_some() {
+        println!("tee_init: kybox started");
+    } else {
+        println!("tee_init: failed to start kybox");
+    }
+
+    // 两个都是后台任务，等它们结束
+    let mut children = vec![("/tee/vsock-manager", vsock_mgr), ("/tee/ta", ta)];
+    for (name, child) in &mut children {
+        if let Some(c) = child {
+            match c.wait() {
+                Ok(status) => println!("tee_init: {name} exited with {status}"),
+                Err(err) => println!("tee_init: failed to wait {name}: {err}"),
             }
         }
     }
