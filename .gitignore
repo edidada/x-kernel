@@ -27,3 +27,6 @@ Cargo.lock
 auto.conf
 autoconf.h
 target/kbuild/
+
+# Coverage report
+coverage-report/

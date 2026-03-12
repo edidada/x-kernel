@@ -1,6 +1,6 @@
 EXTRACT_COV = env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo run -p extract_cov --
 CONVERT_COV = env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= cargo run -p convert_cov --
-out_target := $(TARGET_DIR)/$(TARGET)/$(MODE)
+out_target := coverage-report# $(TARGET_DIR)/$(TARGET)/$(MODE)
 cov_profraw := $(out_target)/default.profraw
 cov_prodata := $(out_target)/default.profdata
 cov_export := $(out_target)/coverage.info
