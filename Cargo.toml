@@ -11,8 +11,8 @@ members = [
 
     "platforms/bootloader",
     "tee_apps/sh",
-    "tee_apps/tee_app1",
-    "tee_apps/tee_app2",
+    "tee_apps/vsock-manager",
+    "tee_apps/kybox-rs",
 ]
 exclude = []
 

@@ -33,10 +33,10 @@ tee_apps:
 	for app in $(APP_DIRS); do \
 		echo "==> Building $$app ($(TARGET))"; \
 		if [ "$$app" = "$(SH_APP)" ]; then \
-			TEE_INIT_APPS="$(TEE_INIT_APPS)" $(CARGO_ENV) \
+			TEE_INIT_APPS="$(TEE_INIT_APPS)"  \
 				$(CARGO_BUILD) --manifest-path $$app/Cargo.toml; \
 		else \
-			$(CARGO_ENV) $(CARGO_BUILD) --manifest-path $$app/Cargo.toml; \
+			$(CARGO_BUILD) --manifest-path $$app/Cargo.toml; \
 		fi; \
 	done
 	@set -e; \

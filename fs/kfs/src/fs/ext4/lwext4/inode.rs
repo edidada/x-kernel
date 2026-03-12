@@ -11,7 +11,7 @@ use fs_ng_vfs::{
     VfsResult, WeakDirEntry,
 };
 use kpoll::{IoEvents, Pollable};
-use lwext4_rust::{FileAttr, InodeType};
+use klwext4_rust::{FileAttr, InodeType};
 
 use super::{
     Ext4Filesystem,
@@ -29,7 +29,7 @@ impl Inode {
         Arc::new(Self { fs, ino, this })
     }
 
-    fn create_entry(&self, entry: &lwext4_rust::DirEntry, name: impl Into<String>) -> DirEntry {
+    fn create_entry(&self, entry: &klwext4_rust::DirEntry, name: impl Into<String>) -> DirEntry {
         let reference = Reference::new(
             self.this.as_ref().and_then(WeakDirEntry::upgrade),
             name.into(),

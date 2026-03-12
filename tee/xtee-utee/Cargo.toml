@@ -1,0 +1,16 @@
+[package]
+name = "xtee-utee"
+version = "0.1.0"
+authors = ["huangsiyuan <huangsiyuan@kylinos.cn>"]
+license = "Apache-2.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+crossbeam-channel = "0.5.15"
+num_enum = "0.7"
+postcard = { version = "1.1", features = ["alloc"] }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0.18"
+
+rust-libutee = { path = "../rust-libutee" }
