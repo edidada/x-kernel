@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 use crate::{
     tee_api_defines::{
         TEE_NUM_PARAMS, TEE_PARAM_TYPE_GET, TEE_PARAM_TYPE_MEMREF_INOUT,

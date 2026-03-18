@@ -1,6 +1,8 @@
-use mbedtls::Error;
-use mbedtls::cipher::raw::CipherPadding;
-use mbedtls::cipher::{Cipher, Encryption, Traditional, Type, raw};
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+use mbedtls::cipher::{Cipher, Encryption, Traditional, raw};
 
 const SM4_KEY_BIT_SIZE: usize = 128;
 const BOX_CIPHER_ID: raw::CipherId = raw::CipherId::SM4;

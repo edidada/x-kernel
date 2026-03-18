@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 use crate::api::tee_api_panic::TEE_Panic;
 use crate::syscalls::syscall_table::{_utee_get_time, _utee_set_ta_time, _utee_wait};
 use crate::tee_api_defines::{

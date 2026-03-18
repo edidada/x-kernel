@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 use crate::api::tee_api_mm::TEE_Free;
 use crate::api::tee_api_mm::TEE_Malloc;
 use crate::tee_api_defines::*;
