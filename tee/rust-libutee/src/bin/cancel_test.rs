@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 use rust_utee::api::tee_api_cancel::{
     TEE_GetCancellationFlag, TEE_MaskCancellation, TEE_UnmaskCancellation,
 };

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
 // Auto-generated syscall table using define_utee_syscalls!
 // Parameter types use primitive usize/pointer-friendly types to avoid
 // tight coupling with api type definitions in other modules.

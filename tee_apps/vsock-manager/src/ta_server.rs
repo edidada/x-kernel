@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
@@ -12,7 +16,7 @@ use std::{
 use dashmap::DashSet;
 use postcard::from_bytes;
 
-use crate::protocal::TARequest;
+use crate::protocol::TARequest;
 
 const SERVER_SOCKET_PATH: &str = "/tmp/server.sock";
 
