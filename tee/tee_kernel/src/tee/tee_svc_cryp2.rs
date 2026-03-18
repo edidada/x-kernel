@@ -1638,6 +1638,8 @@ pub mod tests_cryp {
 
     #[unittest::def_test(custom)]
     fn test_cryp_hash_sm3() {
+        kprintln!("进行SM3 HASH测试");
+        kprintln!("-------------输入-------------");
         let mut state: u32 = 0;
         let res = tee_cryp_state_alloc(
             TEE_ALG_SM3,
@@ -1653,6 +1655,7 @@ pub mod tests_cryp {
 
         let data = b"abc";
 
+        kprintln!("输入数据: {:?}", data);
         let res = tee_cryp_hash_update(state, &data[..]);
         assert!(res.is_ok());
 
@@ -1660,6 +1663,8 @@ pub mod tests_cryp {
         let res = tee_cryp_hash_final(state, &[], &mut hash);
         assert!(res.is_ok());
         let hash_size = res.unwrap();
+        kprintln!("-------------输出-------------");
+        kprintln!("数据摘要值: {:?}", &hash[..hash_size]);
 
         assert_eq!(hash_size, 32);
         assert_eq!(
@@ -1697,6 +1702,8 @@ pub mod tests_cryp {
 
     #[unittest::def_test(custom)]
     fn test_cryp_hmac_sm3() {
+        kprintln!("进行SM3 HMAC测试");
+        kprintln!("-------------输入-------------");
         let mut state: u32 = 0;
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result = syscall_cryp_obj_alloc(TEE_TYPE_HMAC_SM3 as _, 128, obj_id.as_user_ref());
@@ -1741,6 +1748,8 @@ pub mod tests_cryp {
 
         let data = b"abc";
 
+        kprintln!("输入数据: {:?}", data);
+        kprintln!("密钥: {:?}", key);
         let res = tee_cryp_hash_update(state, &data[..]);
         assert!(res.is_ok());
 
@@ -1748,6 +1757,8 @@ pub mod tests_cryp {
         let res = tee_cryp_hash_final(state, &[], &mut hash);
         assert!(res.is_ok());
         let hash_size = res.unwrap();
+        kprintln!("-------------输出-------------");
+        kprintln!("数据摘要值: {:?}", &hash[..hash_size]);
 
         assert_eq!(hash_size, 32);
         assert_eq!(
@@ -1758,10 +1769,14 @@ pub mod tests_cryp {
                 0x10, 0xaa, 0xa0, 0x37
             ]
         );
+        kprintln!("-------------输出-------------");
+        kprintln!("通过");
     }
 
     #[unittest::def_test(custom)]
     fn test_cryp_sm4_ecb_encrypt() {
+        kprintln!("进行SM4 ECB加密测试");
+        kprintln!("-------------输入-------------");
         let mut state: u32 = 0;
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
@@ -1804,6 +1819,9 @@ pub mod tests_cryp {
         let data1 = b"abcdefghabcdefgh";
         let data2 = b"1234567890987654";
 
+        kprintln!("密钥: {:?}", key);
+        kprintln!("输入数据1: {:?}", data1);
+        kprintln!("输入数据2: {:?}", data2);
         let res = tee_cryp_cipher_init(state, None, CipherPaddingMode::None);
         assert!(res.is_ok());
 
@@ -1869,6 +1887,8 @@ pub mod tests_cryp {
 
     #[unittest::def_test(custom)]
     fn test_cryp_sm4_ecb_decrypt() {
+        kprintln!("进行SM4 ECB解密测试");
+        kprintln!("-------------输入-------------");
         let mut state: u32 = 0;
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
@@ -1917,6 +1937,9 @@ pub mod tests_cryp {
             0x81, 0xd7,
         ];
 
+        kprintln!("密钥: {:?}", key);
+        kprintln!("输入数据1: {:?}", data1);
+        kprintln!("输入数据2: {:?}", data2);
         let res = tee_cryp_cipher_init(state, None, CipherPaddingMode::None);
         assert!(res.is_ok());
 
@@ -1942,6 +1965,8 @@ pub mod tests_cryp {
 
     #[unittest::def_test(custom)]
     fn test_cryp_sm4_cbc_encrypt() {
+        kprintln!("进行SM4 CBC加密测试");
+        kprintln!("-------------输入-------------");
         let mut state: u32 = 0;
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
@@ -1984,6 +2009,9 @@ pub mod tests_cryp {
         let data = b"abcdefghabcdefgh1234567890987654";
         let iv = b"1234qwerasdfzxcv";
 
+        kprintln!("密钥: {:?}", key);
+        kprintln!("输入数据: {:?}", data);
+        kprintln!("初始向量: {:?}", iv);
         let res = tee_cryp_cipher_init(state, Some(&iv[..]), CipherPaddingMode::Pkcs7);
         assert!(res.is_ok());
 
@@ -2009,10 +2037,16 @@ pub mod tests_cryp {
                 0x4f, 0xe2, 0xb1, 0xbc, 0xd1, 0x96
             ]
         );
+        kprintln!("-------------输出-------------");
+        kprintln!("输出密文: {:?}", &out[..total_len]);
+        kprintln!("-------------验证-------------");
+        kprintln!("通过");
     }
 
     #[unittest::def_test(custom)]
     fn test_cryp_sm4_cbc_decrypt() {
+        kprintln!("进行SM4 CBC解密测试");
+        kprintln!("-------------输入-------------");
         let mut state: u32 = 0;
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
@@ -2061,6 +2095,10 @@ pub mod tests_cryp {
         ];
         let iv = b"1234qwerasdfzxcv";
 
+        kprintln!("密钥: {:?}", key);
+        kprintln!("输入数据: {:?}", data);
+        kprintln!("初始向量: {:?}", iv);
+
         let res = tee_cryp_cipher_init(state, Some(&iv[..]), CipherPaddingMode::Pkcs7);
         assert!(res.is_ok());
 
@@ -2078,10 +2116,16 @@ pub mod tests_cryp {
 
         assert_eq!(total_len, 32);
         assert_eq!(&out[..32], *b"abcdefghabcdefgh1234567890987654");
+        kprintln!("-------------输出-------------");
+        kprintln!("输出明文: {:?}", &out[..total_len]);
+        kprintln!("-------------验证-------------");
+        kprintln!("通过");
     }
 
     #[unittest::def_test(custom)]
     fn test_cryp_sm4_gcm_encrypt() {
+        kprintln!("进行SM4 GCM加密测试");
+        kprintln!("-------------输入-------------");
         let mut state: u32 = 0;
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
@@ -2138,6 +2182,10 @@ pub mod tests_cryp {
             0xFE, 0xED, 0xFA, 0xCE, 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED, 0xFA, 0xCE, 0xDE, 0xAD,
             0xBE, 0xEF, 0xAB, 0xAD, 0xDA, 0xD2,
         ];
+        kprintln!("密钥: {:?}", key);
+        kprintln!("输入数据: {:?}", data);
+        kprintln!("初始随机向量: {:?}", nonce);
+        kprintln!("附加数据: {:?}", ad);
         let mut tag = [0u8; 16];
         let mut out = [0u8; 80];
         let mut total_len = 0;
@@ -2155,6 +2203,10 @@ pub mod tests_cryp {
         let res = tee_cryp_authenc_enc_final(state, None, &mut out[total_len..], &mut tag);
         assert!(res.is_ok());
         total_len += res.unwrap();
+
+        kprintln!("-------------输出-------------");
+        kprintln!("输出数据: {:?}", &out[..total_len]);
+        kprintln!("认证标签: {:?}", tag);
 
         assert_eq!(total_len, 64);
         assert_eq!(
@@ -2205,6 +2257,8 @@ pub mod tests_cryp {
 
     #[unittest::def_test(custom)]
     fn test_cryp_sm4_gcm_decrypt() {
+        kprintln!("进行SM4 GCM解密测试");
+        kprintln!("-------------输入-------------");
         let mut state: u32 = 0;
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let result = syscall_cryp_obj_alloc(TEE_TYPE_SM4 as _, 128, obj_id.as_user_ref());
@@ -2268,6 +2322,12 @@ pub mod tests_cryp {
         let mut out = [0u8; 80];
         let mut total_len = 0;
 
+        kprintln!("密钥: {:?}", key);
+        kprintln!("输入数据: {:?}", data);
+        kprintln!("初始随机向量: {:?}", nonce);
+        kprintln!("附加数据: {:?}", ad);
+        kprintln!("认证标签: {:?}", tag);
+
         let res = tee_cryp_authenc_init(state, &nonce);
         assert!(res.is_ok());
 
@@ -2292,10 +2352,16 @@ pub mod tests_cryp {
                 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA
             ]
         );
+        kprintln!("-------------输出-------------");
+        kprintln!("输出数据: {:?}", &out[..total_len]);
+        kprintln!("-------------验证-------------");
+        kprintln!("通过");
     }
 
     #[unittest::def_test(custom)]
     fn test_cryp_sm2_sign_verify() {
+        kprintln!("进行SM2签名与验证测试");
+        kprintln!("-------------输入-------------");
         // alloc sm2 key pair
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let res = syscall_cryp_obj_alloc(TEE_TYPE_SM2_DSA_KEYPAIR as _, 256, obj_id.as_user_ref());
@@ -2314,6 +2380,7 @@ pub mod tests_cryp {
         assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
         assert_eq!(obj.attr.len(), 1);
         assert!(matches!(obj.attr[0], TeeCryptObj::ecc_keypair(_)));
+        kprintln!("密钥对: {:?}", obj.attr[0]);
         drop(obj);
 
         let mut obj_id_pub = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -2327,6 +2394,16 @@ pub mod tests_cryp {
 
         let res = syscall_cryp_obj_copy(obj_id_pub as _, obj_id as _);
         assert!(res.is_ok());
+
+        let obj_arc = tee_obj_get(obj_id_pub as tee_obj_id_type);
+        assert!(obj_arc.is_ok());
+        let obj_arc = obj_arc.unwrap();
+        let obj = obj_arc.lock();
+        match &obj.attr[0] {
+            TeeCryptObj::ecc_public_key(x) => kprintln!("公钥: {:?}", x),
+            _ => kprintln!("公钥: 错误"),
+        }
+        drop(obj);
 
         let mut state: u32 = 0;
         let res = tee_cryp_state_alloc(
@@ -2351,17 +2428,26 @@ pub mod tests_cryp {
         let data = b"SIGNATURE TEST SIGNATURE TEST SI";
         let mut signature1 = [0u8; 141];
         let mut signature2 = [0u8; 141];
+        kprintln!("输入数据: {:?}", data);
 
         let res = tee_cryp_asymm_operate(state, data, &mut signature1, None);
         assert!(res.is_ok());
         let len = res.unwrap();
+        kprintln!("生成签名: {:?}", &signature1[..len]);
 
         let res = tee_cryp_asymm_verify(state_pub, data, &signature1[..len]);
         assert!(res.is_ok());
+
+        kprintln!("-------------验证-------------");
+        kprintln!("输入签名: {:?}", &signature1[..len]);
+        kprintln!("Success");
+        kprintln!("通过");
     }
 
     #[unittest::def_test(custom)]
     fn test_cryp_sm2_enc_dec() {
+        kprintln!("进行SM2加密与解密测试");
+        kprintln!("-------------输入-------------");
         // alloc sm2 key pair
         let mut obj_id = TestUserValue::<c_uint>::from_value(0).unwrap();
         let res = syscall_cryp_obj_alloc(TEE_TYPE_SM2_PKE_KEYPAIR as _, 256, obj_id.as_user_ref());
@@ -2380,6 +2466,7 @@ pub mod tests_cryp {
         assert_eq!(obj.info.objectUsage, TEE_USAGE_DEFAULT);
         assert_eq!(obj.attr.len(), 1);
         assert!(matches!(obj.attr[0], TeeCryptObj::ecc_keypair(_)));
+        kprintln!("密钥对: {:?}", obj.attr[0]);
         drop(obj);
 
         let mut obj_id_pub = TestUserValue::<c_uint>::from_value(0).unwrap();
@@ -2393,6 +2480,16 @@ pub mod tests_cryp {
 
         let res = syscall_cryp_obj_copy(obj_id_pub as _, obj_id as _);
         assert!(res.is_ok());
+
+        let obj_arc = tee_obj_get(obj_id_pub as tee_obj_id_type);
+        assert!(obj_arc.is_ok());
+        let obj_arc = obj_arc.unwrap();
+        let obj = obj_arc.lock();
+        match &obj.attr[0] {
+            TeeCryptObj::ecc_public_key(x) => kprintln!("公钥: {:?}", x),
+            _ => kprintln!("公钥: 错误"),
+        }
+        drop(obj);
 
         let mut state_enc: u32 = 0;
         let res = tee_cryp_state_alloc(
@@ -2420,6 +2517,8 @@ pub mod tests_cryp {
         let mut clear1 = [0u8; 141];
         let mut clear2 = [0u8; 141];
 
+        kprintln!("输入数据: {:?}", data);
+
         let res = tee_cryp_asymm_operate(state_enc, data, &mut cipher1, None);
         assert!(res.is_ok());
         let mut len1 = res.unwrap();
@@ -2440,5 +2539,12 @@ pub mod tests_cryp {
 
         assert_eq!(&clear1[..len3], &clear2[..len4]);
         assert_eq!(&clear1[..len3], data);
+        kprintln!("-------------输出-------------");
+        kprintln!("第一次加密密文: {:?}", &cipher1[..len1]);
+        kprintln!("第二次加密密文: {:?}", &cipher2[..len2]);
+        kprintln!("第一次解密明文: {:?}", &clear1[..len3]);
+        kprintln!("第二次解密明文: {:?}", &clear2[..len4]);
+        kprintln!("-------------验证-------------");
+        kprintln!("通过");
     }
 }
