@@ -235,6 +235,7 @@ clean_c::
 coverage:
 	@mkdir -p coverage-report
 	@cp platforms/x86_64-qemu-virt/defconfig .config
+	@make ARCH=x86_64 teefs
 	@make UNITTEST=y run
 
 # Note: gen-const is kept as PHONY to allow manual invocation,
