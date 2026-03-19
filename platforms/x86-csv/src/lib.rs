@@ -16,6 +16,6 @@ mod mp;
 mod power;
 pub mod psci;
 
-x86_peripherals::console_if_impl!(ConsoleImpl, irq = None);
+x86_peripherals::console_if_impl!(ConsoleImpl, irq = Some(4));
 x86_peripherals::time_if_impl!(GlobalTimerImpl);
 x86_peripherals::irq_if_impl!(IntrManagerImpl);
