@@ -436,16 +436,22 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         SimpleDir::new_maker(fs.clone(), Arc::new(event::input_devices(fs.clone()))),
     );
 
+    // /dev/dice is only meaningful when pvmfw (or similar) has published a
+    // DICE handover region in the device tree's /reserved-memory. Without it
+    // (e.g. a --protected-vm-without-firmware run), skip the node entirely
+    // instead of panicking inside DiceNodeInfo::new.
     #[cfg(all(feature = "dice", target_os = "none"))]
-    root.add(
-        "dice",
-        Device::new(
-            fs.clone(),
-            NodeType::CharacterDevice,
-            DeviceId::new(30, 0),
-            Arc::new(dice::DiceNodeInfo::new()),
-        ),
-    );
+    if dice::available() {
+        root.add(
+            "dice",
+            Device::new(
+                fs.clone(),
+                NodeType::CharacterDevice,
+                DeviceId::new(30, 0),
+                Arc::new(dice::DiceNodeInfo::new()),
+            ),
+        );
+    }
 
     if dtb::snapshot_available() {
         root.add(

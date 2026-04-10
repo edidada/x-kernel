@@ -1,0 +1,716 @@
+[2026-04-10T08:08:34.021064520+00:00 DEBUG crosvm::crosvm::sys::linux] creating hypervisor: Kvm { device: Some("/dev/kvm") }
+[2026-04-10T08:08:34.022209820+00:00 INFO  crosvm::crosvm::sys::linux::device_helpers] Trying to attach block device: /data/local/tmp/jose/disk.img
+[2026-04-10T08:08:34.022294360+00:00 INFO  disk] disk size 1073741824
+[boot] entered primary switched cpu=0 dtb=0xffe00000 kimage_voffset=0xffff7fff80000000
+[boot] boot linear RAM map extended from DT
+[boot] handoff to kruntime boot_info=0xffff800003694b58
+[boot] kruntime primary start cpu=0 boot_info=0xffff800003694b58
+[boot] firmware: DTB at 0xffe00000
+[boot] firmware: DTB capture region=0xffe00000..0x100000000
+[boot] firmware: chosen stdout-path=/U6_16550A@3f8
+[boot] firmware: chosen bootargs=panic=-1 console=ttyS0
+[boot] firmware: using chosen bootargs as cmdline=panic=-1 console=ttyS0
+[boot] kruntime memory regions ready
+[boot] kruntime allocator ready
+[boot] memory space map ready
+
+                 ++
+             *  ***
+           *******
+         *******++
+      ********+===
+    ******#*+======
+   *******#***++===
+   *********+**===
+  ##*********##==                  ====+
+%##****++==+****#                ***+=**
+#****++=====++****##            ********
+####*+=======+******===-     ***#*##****
+ #%#******+**+==++**=======+*+*#%
+ %#****+******=====+====+++==**
+  #*********##***###********##%
+   ***##%#%%%%*****#*###*****#%
+   *#%%%#%%%%%****   %%*******#%
+   #%%%%%%          %%%##***###%%
+    **#%           %%%%#% **#**##
+   ###%%         %%%%%   %%%***
+ %%%%%%        %%%%%%%  %%%%#*
+ %%%%%%                %%%%%%+=
+
+arch = aarch64
+platform = aarch64-crosvm-virt
+target = aarch64-unknown-none-softfloat
+build_mode = release
+build_machine = jose@jose-kylin
+build_time = 2026-04-10T08:06:57Z
+log_level = debug
+backtrace = true
+smp = 2
+
+Boot at 2026-04-10 16:08:34.011479860 UTC
+
+[37m[83641.148391 kruntime:207] [32mLogging is enabled.[m
+[m[37m[83641.149208 kruntime:208] [32mPrimary CPU 0 started, boot_info = 0xffff800003694b58.[m
+[m[37m[83641.150902 kalloc:243] [36mexpand heap memory: [0xffff0000ffa00000, 0xffff0000ffb00000)[m
+[m[37m[83641.160377 kalloc:243] [36mexpand heap memory: [0xffff000083800000, 0xffff000083c00000)[m
+[m[37m[83641.178323 kalloc:243] [36mexpand heap memory: [0xffff0000ff000000, 0xffff0000ff800000)[m
+[m[37m[83641.211247 kalloc:243] [36mexpand heap memory: [0xffff0000fc000000, 0xffff0000fe000000)[m
+[m[37m[83641.350084 kalloc:243] [36mexpand heap memory: [0xffff000084000000, 0xffff000088000000)[m
+[m[37m[83641.475139 backtrace::dwarf:144] [32mInitialized addr2line context successfully.[m
+[m[37m[83641.475840 kruntime:234] [32mInitialize platform devices...[m
+[m[37m[83641.476356 aarch64_crosvm_virt::init:42] [32mcpu_id 0[m
+[m[37m[83641.476823 irq_driver::gic::gicv3:30] [36mInitialize GICv3 CPU Interface...[m
+[m[37m[83641.477522 ktask::api:94] [32mInitialize scheduling...[m
+[m[37m[83641.478127 ktask::task:170] [36mnew task: Task(1, "idle")[m
+[m[37m[83641.478731 ktask::task:170] [36mnew task: Task(3, "gc")[m
+[m[37m[83641.479272 ktask::api:99] [32m  use Round-robin scheduler.[m
+[m[37m[83641.479865 kdriver:132] [32mInitialize device drivers...[m
+[m[37m[83641.480412 kdriver:133] [32m  device model: static[m
+[m[37m[83641.480962 pci:81] [32mPCI host from device tree: cam=Cam ecam=0x10000 size=0x1000000 bus_range=0x0..=0x0[m
+[m[37m[83641.481904 pci:157] [32mPCI bus using DT host: cam=MmioCam ecam=0x10000 bus_end=0x0[m
+[m[37m[83641.482638 memspace::backend::linear:41] [36mLinear::map: VA:0xffff800020053000..VA:0xffff800020063000 -> PA:0x10000..PA:0x20000 READ | WRITE | DEVICE[m
+[m[37m[83641.483938 kdriver::bus::pci:27] [32mPCI config space: source=device-tree, ecam=0x10000, bus_end=0x0[m
+[m[37m[83641.484820 pci:214] [32mPCI BAR allocator from device tree: cpu_base=0x2000000 size=0x2000000 prefetchable=false[m
+[m[37m[83641.485767 kdriver::bus::pci:46] [36mPCI 00:00.0: 8086:1237 (class 06.00, rev 00) Standard[m
+[m[37m[83641.486705 kdriver::bus::pci:46] [36mPCI 00:01.0: 1af4:1042 (class 01.80, rev 01) Standard[m
+[m[37m[83641.487526 pci:408] [36m  BAR 0: MEM [0x2000000, 0x2008000)[m
+[m[37m[83641.488238 virtio:228] [32mvirtio PCI IRQ fallback: bdf=DeviceFunction { bus: 0, device: 1, function: 0 } hwirq=36 base=0x23[m
+[m[37m[83641.489363 memspace::backend::linear:41] [36mLinear::map: VA:0xffff800020063000..VA:0xffff800020064000 -> PA:0x2000000..PA:0x2001000 READ | WRITE | DEVICE[m
+[m[37m[83641.490634 memspace::backend::linear:41] [36mLinear::map: VA:0xffff800020064000..VA:0xffff800020065000 -> PA:0x2003000..PA:0x2004000 READ | WRITE | DEVICE[m
+[m[37m[83641.491895 memspace::backend::linear:41] [36mLinear::map: VA:0xffff800020065000..VA:0xffff800020066000 -> PA:0x2001000..PA:0x2002000 READ | WRITE | DEVICE[m
+[m[37m[83641.493198 memspace::backend::linear:41] [36mLinear::map: VA:0xffff800020066000..VA:0xffff800020067000 -> PA:0x2002000..PA:0x2003000 READ | WRITE | DEVICE[m
+[m[37m[83641.494462 virtio:161] [32mPCI virtio device at DeviceFunction { bus: 0, device: 1, function: 0 }: IRQ = 4097[m
+[m[37m[83641.495419 kvirtiodrivers::transport:88] [36mDevice features: BlkFeature(SEG_MAX | BLK_SIZE | FLUSH | MQ | DISCARD | WRITE_ZEROES | RING_EVENT_IDX | VERSION_1 | ACCESS_PLATFORM)[m
+[m[37m[83641.496869 kvirtiodrivers::device::blk:64] [32mfound a block device of size 1048576KB[m
+[m[37m[83641.498341 kdriver::bus::pci:53] [32mregistered a new Block device at 00:01.0: "virtio-blk"[m
+[m[37m[83641.499737 kdriver::bus::pci:46] [36mPCI 00:02.0: 1af4:1045 (class 08.80, rev 01) Standard[m
+[m[37m[83641.501068 pci:408] [36m  BAR 0: MEM [0x2008000, 0x2010000)[m
+[m[37m[83641.502158 kdriver::bus::pci:46] [36mPCI 00:03.0: 1b36:0011 (class ff.ff, rev 01) Standard[m
+[m[37m[83641.503478 pci:408] [36m  BAR 0: MEM [0x2010000, 0x2010010)[m
+[m[37m[83641.505371 kdriver:140] [36mnumber of NICs: 0[m
+[m[37m[83641.506085 kdriver:148] [36mnumber of block devices: 1[m
+[m[37m[83641.506916 kdriver:151] [36m  block device 0: "virtio-blk"[m
+[m[37m[83641.507850 kdriver:156] [36mnumber of graphics devices: 0[m
+[m[37m[83641.508752 kdriver:164] [36mnumber of input devices: 0[m
+[m[37m[83641.509609 kdriver:172] [36mnumber of vsock devices: 0[m
+[m[37m[83641.510469 kfs:40] [32mInitialize filesystem subsystem...[m
+[m[37m[83641.511386 kfs:57] [32m  use block device 0: "virtio-blk"[m
+[m[37m[83641.512346 rsext4::ext4:206] [36mStart mounting Ext4 filesystem...[m
+[m[37m[83641.528973 rsext4::ext4:222] [36mSuperblock magic verified[m
+[m[37m[83641.529870 rsext4::ext4:232] [36mBlock group count: 8[m
+[m[37m[83641.530744 rsext4::ext4:465] [36mLoading group descriptors: 8 groups, desc_size = 64 bytes[m
+[m[37m[83641.531818 rsext4::ext4:497] [36mSuccessfully loaded 8 group descriptors[m
+[m[37m[83641.532520 rsext4::ext4:236] [36mLoaded 8 group descriptors[m
+[m[37m[83641.533112 rsext4::ext4:241] [36mAllocators initialized[m
+[m[37m[83641.533678 rsext4::ext4:245] [36mBitmap cache initialized (lazy loading)[m
+[m[37m[83641.534363 rsext4::ext4:256] [36mInode cache initialized[m
+[m[37m[83641.534987 rsext4::ext4:260] [36mData block cache initialized[m
+[m[37m[83641.535649 rsext4::tool:60] [36mSuperblock info: Ext4Superblock { s_inodes_count: 65536, s_blocks_count_lo: 262144, s_r_blocks_count_lo: 13107, s_free_blocks_count_lo: 246902, s_free_inodes_count: 65007, s_first_data_block: 0, s_log_block_size: 2, s_log_cluster_size: 2, s_blocks_per_group: 32768, s_clusters_per_group: 32768, s_inodes_per_group: 8192, s_mtime: 1772420419, s_wtime: 1772420419, s_mnt_count: 1, s_max_mnt_count: 65535, s_magic: 61267, s_state: 1, s_errors: 1, s_minor_rev_level: 0, s_lastcheck: 1772420419, s_checkinterval: 0, s_creator_os: 0, s_rev_level: 1, s_def_resuid: 0, s_def_resgid: 0, s_first_ino: 11, s_inode_size: 256, s_block_group_nr: 0, s_feature_compat: 60, s_feature_incompat: 706, s_feature_ro_compat: 107, s_uuid: [189, 116, 37, 140, 150, 150, 79, 100, 129, 239, 215, 162, 220, 27, 148, 153], s_volume_name: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], s_last_mounted: [47, 104, 111, 109, 101, 47, 121, 101, 97, 110, 47, 99, 111, 100, 101, 47, 107, 121, 108, 105, 110, 45, 114, 111, 111, 116, 102, 115, 47, 109, 110, 116, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], s_algorithm_usage_bitmap: 0, s_prealloc_blocks: 0, s_prealloc_dir_blocks: 0, s_reserved_gdt_blocks: 127, s_journal_uuid: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], s_journal_inum: 8, s_journal_dev: 0, s_last_orphan: 0, s_hash_seed: [210791203, 2236316036, 2790913709, 3938240481], s_def_hash_version: 1, s_jnl_backup_type: 1, s_desc_size: 64, s_default_mount_opts: 12, s_first_meta_bg: 0, s_mkfs_time: 1772420419, s_jnl_blocks: [127754, 4, 0, 0, 8192, 131072, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 33554432], s_blocks_count_hi: 0, s_r_blocks_count_hi: 0, s_free_blocks_count_hi: 0, s_min_extra_isize: 32, s_want_extra_isize: 32, s_flags: 1, s_raid_stride: 0, s_mmp_interval: 0, s_mmp_block: 0, s_raid_stripe_width: 0, s_log_groups_per_flex: 4, s_checksum_type: 0, s_encryption_level: 0, s_reserved_pad: 0, s_kbytes_written: 10565, s_snapshot_inum: 0, s_snapshot_id: 0, s_snapshot_r_blocks_count: 0, s_snapshot_list: 0, s_error_count: 0, s_first_error_time: 0, s_first_error_ino: 0, s_first_error_block: 0, s_first_error_func: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], s_first_error_line: 0, s_last_error_time: 0, s_last_error_ino: 0, s_last_error_line: 0, s_last_error_block: 0, s_last_error_func: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], s_mount_opts: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], s_usr_quota_inum: 0, s_grp_quota_inum: 0, s_overhead_blocks: 12949, s_backup_bgs: [0, 0], s_encrypt_algos: [0, 0, 0, 0], s_encrypt_pw_salt: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], s_lpf_ino: 0, s_prj_quota_inum: 0, s_checksum_seed: 0, s_wtime_hi: 0, s_mtime_hi: 0, s_mkfs_time_hi: 0, s_lastcheck_hi: 0, s_first_error_time_hi: 0, s_last_error_time_hi: 0, s_first_error_errcode: 0, s_last_error_errcode: 0, s_encoding: 0, s_encoding_flags: 0, s_orphan_file_inum: 0, s_reserved: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], s_checksum: 0 }[m
+[m[37m[83641.563961 rsext4::tool:61] [36mBlock group descriptors:[m
+[m[37m[83641.564538 rsext4::tool:64] [36mGroup descriptor: Ext4GroupDesc { bg_block_bitmap_lo: 129, bg_inode_bitmap_lo: 137, bg_inode_table_lo: 145, bg_free_blocks_count_lo: 28423, bg_free_inodes_count_lo: 7679, bg_used_dirs_count_lo: 84, bg_flags: 4, bg_exclude_bitmap_lo: 0, bg_block_bitmap_csum_lo: 0, bg_inode_bitmap_csum_lo: 0, bg_itable_unused_lo: 0, bg_checksum: 0, bg_block_bitmap_hi: 0, bg_inode_bitmap_hi: 0, bg_inode_table_hi: 0, bg_free_blocks_count_hi: 0, bg_free_inodes_count_hi: 0, bg_used_dirs_count_hi: 0, bg_itable_unused_hi: 0, bg_exclude_bitmap_hi: 0, bg_block_bitmap_csum_hi: 0, bg_inode_bitmap_csum_hi: 0, bg_reserved: 0 }[m
+[m[37m[83641.569871 rsext4::tool:64] [36mGroup descriptor: Ext4GroupDesc { bg_block_bitmap_lo: 130, bg_inode_bitmap_lo: 138, bg_inode_table_lo: 657, bg_free_blocks_count_lo: 30450, bg_free_inodes_count_lo: 8184, bg_used_dirs_count_lo: 8, bg_flags: 4, bg_exclude_bitmap_lo: 0, bg_block_bitmap_csum_lo: 0, bg_inode_bitmap_csum_lo: 0, bg_itable_unused_lo: 0, bg_checksum: 0, bg_block_bitmap_hi: 0, bg_inode_bitmap_hi: 0, bg_inode_table_hi: 0, bg_free_blocks_count_hi: 0, bg_free_inodes_count_hi: 0, bg_used_dirs_count_hi: 0, bg_itable_unused_hi: 0, bg_exclude_bitmap_hi: 0, bg_block_bitmap_csum_hi: 0, bg_inode_bitmap_csum_hi: 0, bg_reserved: 0 }[m
+[m[37m[83641.575270 rsext4::tool:64] [36mGroup descriptor: Ext4GroupDesc { bg_block_bitmap_lo: 131, bg_inode_bitmap_lo: 139, bg_inode_table_lo: 1169, bg_free_blocks_count_lo: 32768, bg_free_inodes_count_lo: 8189, bg_used_dirs_count_lo: 3, bg_flags: 4, bg_exclude_bitmap_lo: 0, bg_block_bitmap_csum_lo: 0, bg_inode_bitmap_csum_lo: 0, bg_itable_unused_lo: 0, bg_checksum: 0, bg_block_bitmap_hi: 0, bg_inode_bitmap_hi: 0, bg_inode_table_hi: 0, bg_free_blocks_count_hi: 0, bg_free_inodes_count_hi: 0, bg_used_dirs_count_hi: 0, bg_itable_unused_hi: 0, bg_exclude_bitmap_hi: 0, bg_block_bitmap_csum_hi: 0, bg_inode_bitmap_csum_hi: 0, bg_reserved: 0 }[m
+[m[37m[83641.580575 rsext4::tool:64] [36mGroup descriptor: Ext4GroupDesc { bg_block_bitmap_lo: 132, bg_inode_bitmap_lo: 140, bg_inode_table_lo: 1681, bg_free_blocks_count_lo: 32639, bg_free_inodes_count_lo: 8189, bg_used_dirs_count_lo: 3, bg_flags: 4, bg_exclude_bitmap_lo: 0, bg_block_bitmap_csum_lo: 0, bg_inode_bitmap_csum_lo: 0, bg_itable_unused_lo: 0, bg_checksum: 0, bg_block_bitmap_hi: 0, bg_inode_bitmap_hi: 0, bg_inode_table_hi: 0, bg_free_blocks_count_hi: 0, bg_free_inodes_count_hi: 0, bg_used_dirs_count_hi: 0, bg_itable_unused_hi: 0, bg_exclude_bitmap_hi: 0, bg_block_bitmap_csum_hi: 0, bg_inode_bitmap_csum_hi: 0, bg_reserved: 0 }[m
+[m[37m[83641.585890 rsext4::tool:64] [36mGroup descriptor: Ext4GroupDesc { bg_block_bitmap_lo: 133, bg_inode_bitmap_lo: 141, bg_inode_table_lo: 2193, bg_free_blocks_count_lo: 24576, bg_free_inodes_count_lo: 8190, bg_used_dirs_count_lo: 2, bg_flags: 4, bg_exclude_bitmap_lo: 0, bg_block_bitmap_csum_lo: 0, bg_inode_bitmap_csum_lo: 0, bg_itable_unused_lo: 0, bg_checksum: 0, bg_block_bitmap_hi: 0, bg_inode_bitmap_hi: 0, bg_inode_table_hi: 0, bg_free_blocks_count_hi: 0, bg_free_inodes_count_hi: 0, bg_used_dirs_count_hi: 0, bg_itable_unused_hi: 0, bg_exclude_bitmap_hi: 0, bg_block_bitmap_csum_hi: 0, bg_inode_bitmap_csum_hi: 0, bg_reserved: 0 }[m
+[m[37m[83641.591224 rsext4::tool:64] [36mGroup descriptor: Ext4GroupDesc { bg_block_bitmap_lo: 134, bg_inode_bitmap_lo: 142, bg_inode_table_lo: 2705, bg_free_blocks_count_lo: 32639, bg_free_inodes_count_lo: 8192, bg_used_dirs_count_lo: 0, bg_flags: 4, bg_exclude_bitmap_lo: 0, bg_block_bitmap_csum_lo: 0, bg_inode_bitmap_csum_lo: 0, bg_itable_unused_lo: 0, bg_checksum: 0, bg_block_bitmap_hi: 0, bg_inode_bitmap_hi: 0, bg_inode_table_hi: 0, bg_free_blocks_count_hi: 0, bg_free_inodes_count_hi: 0, bg_used_dirs_count_hi: 0, bg_itable_unused_hi: 0, bg_exclude_bitmap_hi: 0, bg_block_bitmap_csum_hi: 0, bg_inode_bitmap_csum_hi: 0, bg_reserved: 0 }[m
+[m[37m[83641.596535 rsext4::tool:64] [36mGroup descriptor: Ext4GroupDesc { bg_block_bitmap_lo: 135, bg_inode_bitmap_lo: 143, bg_inode_table_lo: 3217, bg_free_blocks_count_lo: 32768, bg_free_inodes_count_lo: 8192, bg_used_dirs_count_lo: 0, bg_flags: 4, bg_exclude_bitmap_lo: 0, bg_block_bitmap_csum_lo: 0, bg_inode_bitmap_csum_lo: 0, bg_itable_unused_lo: 0, bg_checksum: 0, bg_block_bitmap_hi: 0, bg_inode_bitmap_hi: 0, bg_inode_table_hi: 0, bg_free_blocks_count_hi: 0, bg_free_inodes_count_hi: 0, bg_used_dirs_count_hi: 0, bg_itable_unused_hi: 0, bg_exclude_bitmap_hi: 0, bg_block_bitmap_csum_hi: 0, bg_inode_bitmap_csum_hi: 0, bg_reserved: 0 }[m
+[m[37m[83641.601828 rsext4::tool:64] [36mGroup descriptor: Ext4GroupDesc { bg_block_bitmap_lo: 136, bg_inode_bitmap_lo: 144, bg_inode_table_lo: 3729, bg_free_blocks_count_lo: 32639, bg_free_inodes_count_lo: 8192, bg_used_dirs_count_lo: 0, bg_flags: 4, bg_exclude_bitmap_lo: 0, bg_block_bitmap_csum_lo: 0, bg_inode_bitmap_csum_lo: 0, bg_itable_unused_lo: 0, bg_checksum: 0, bg_block_bitmap_hi: 0, bg_inode_bitmap_hi: 0, bg_inode_table_hi: 0, bg_free_blocks_count_hi: 0, bg_free_inodes_count_hi: 0, bg_used_dirs_count_hi: 0, bg_itable_unused_hi: 0, bg_exclude_bitmap_hi: 0, bg_block_bitmap_csum_hi: 0, bg_inode_bitmap_csum_hi: 0, bg_reserved: 0 }[m
+[m[37m[83641.606966 rsext4::ext4:280] [36mChecking root directory...[m
+[m[37m[83641.607810 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83641.608384 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83641.613869 rsext4::ext4:296] [36mChecking lost+found directory...[m
+[m[37m[83641.614532 rsext4::ext4:305] [36ms_lpf_ino is 0, lost+found inode hint missing in superblock[m
+[m[37m[83641.615414 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83641.615991 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83641.621478 rsext4::hashtree:85] [36mStarting hash tree lookup: Ok("lost+found")[m
+[m[37m[83641.622252 rsext4::hashtree:329] [36mUsing linear search: Ok("lost+found")[m
+[m[37m[83641.623269 rsext4::ext4:158] [36mFound it: /lost+found ![m
+[m[37m[83641.623845 rsext4::ext4:311] [32m/lost+found exists (path resolution)[m
+[m[37m[83641.624881 rsext4::ext4:426] [36mBitmap usage: inodes used = 25089, data blocks used = 4345[m
+[m[37m[83641.625730 rsext4::ext4:433] [32mExt4 filesystem mounted[m
+[m[37m[83641.626297 rsext4::ext4:434] [32m  - block size: 4096 bytes[m
+[m[37m[83641.626888 rsext4::ext4:435] [32m  - total blocks: 262144[m
+[m[37m[83641.627475 rsext4::ext4:436] [32m  - free blocks: 246902[m
+[m[37m[83641.628030 rsext4::ext4:437] [32m  - total inodes: 65536[m
+[m[37m[83641.628594 rsext4::ext4:438] [32m  - free inodes: 65007[m
+[m[37m[83641.629335 rsext4::ext4:1058] [32mExt4 filesystem mounted[m
+[m[37m[83641.629979 kfs:60] [32m  filesystem type: "ext4"[m
+[m[37m[83641.630528 knet:68] [32mInitialize network subsystem...[m
+[m[37m[83641.631960 knet:108] [33m  No network device found![m
+[m[37m[83641.632505 knet:113] [32mDevice: lo[m
+[m[37m[83641.653123 knet:143] [32mInitialize vsock subsystem...[m
+[m[37m[83641.653715 knet:150] [33m  No vsock device found![m
+[m[37m[83641.654280 fbdevice:20] [32mInitialize framebuffer subsystem...[m
+[m[37m[83641.654942 fbdevice:26] [33m  No framebuffer device found![m
+[m[37m[83641.655597 inputdev:23] [32mInitialize input subsystem...[m
+[m[37m[83641.656228 kruntime::mp:28] [36mstarting CPU 1...[m
+[m[37m[83641.656769 aarch64_peripherals::psci:107] [32mStarting CPU 1 ON ...[m
+[m[37m[83641.657666 kruntime:264] [32mInitialize interrupt handlers...[m
+[m[37m[83641.657667 kruntime::mp:48] [32mSecondary CPU 1 started.[m
+[m[37m[83641.658359 kruntime:415] [32mAllocator state: heap used=0x652ba00, heap avail=0x2229600, pages used=30050, pages avail=480104, usages=UsageStats { RustHeap: 62963816, VirtMem: 0, PageCache: 0, PageTable: 4227072, Dma: 4202496, Global: 0 }[m
+[m[37m[83641.660532 irq_driver::gic::gicv3:30] [36mInitialize GICv3 CPU Interface...[m
+[m[37m[83641.662622 kruntime:356] [32mFound physcial memory regions:[m
+[m[37m[83641.665560 ktask::task:170] [36mnew task: Task(5, "gc")[m
+[m[37m[83641.665911 kruntime:291] [32m  [PA:0x80001000, PA:0x802ef000) [VA:0xffff800000001000, VA:0xffff8000002ef000) .text (READ | EXECUTE | RESERVED)[m
+[m[37m[83641.668467 kruntime::mp:59] [32mSecondary CPU 1 init OK.[m
+[m[37m[83641.669687 kruntime:291] [32m  [PA:0x802ef000, PA:0x8368c000) [VA:0xffff8000002ef000, VA:0xffff80000368c000) .rodata (READ | RESERVED)[m
+[m[37m[83641.673356 kruntime:291] [32m  [PA:0x8368c000, PA:0x83696000) [VA:0xffff80000368c000, VA:0xffff800003696000) .data .tdata .tbss .percpu (READ | WRITE | RESERVED)[m
+[m[37m[83641.674941 kruntime:291] [32m  [PA:0x83696000, PA:0x83716000) [VA:0xffff800003696000, VA:0xffff800003716000) boot stack (READ | WRITE | RESERVED)[m
+[m[37m[83641.676273 kruntime:291] [32m  [PA:0x83716000, PA:0x8372b000) [VA:0xffff800003716000, VA:0xffff80000372b000) .bss (READ | WRITE | RESERVED)[m
+[m[37m[83641.677570 kruntime:301] [32m  [PA:0x8372b000, PA:0xffe00000) free memory (READ | WRITE | FREE)[m
+[m[37m[83641.678483 kruntime:301] [32m  [PA:0xffe00000, PA:0xffe01000) firmware reserved (READ | WRITE | RESERVED)[m
+[m[37m[83641.679422 kruntime:301] [32m  [PA:0xffe01000, PA:0x100000000) free memory (READ | WRITE | FREE)[m
+[m[37m[83641.680308 kruntime:387] [32mFound runtime device/iomap regions:[m
+[m[37m[83641.680942 kruntime:313] [32m  [PA:0x0, PA:0x2000) [VA:0xffff800020000000, VA:0xffff800020002000) boot-uart[m
+[m[37m[83641.681901 kruntime:313] [32m  [PA:0x2000, PA:0x3000) [VA:0xffff800020002000, VA:0xffff800020003000) pl031[m
+[m[37m[83641.682849 kruntime:313] [32m  [PA:0x3fff0000, PA:0x40000000) [VA:0xffff800020003000, VA:0xffff800020013000) gicd[m
+[m[37m[83641.683875 kruntime:313] [32m  [PA:0x3ffb0000, PA:0x3fff0000) [VA:0xffff800020013000, VA:0xffff800020053000) gicr[m
+[m[37m[83641.684878 kruntime:313] [32m  [PA:0x10000, PA:0x20000) [VA:0xffff800020053000, VA:0xffff800020063000) pci-ecam[m
+[m[37m[83641.685868 kruntime:313] [32m  [PA:0x2000000, PA:0x2001000) [VA:0xffff800020063000, VA:0xffff800020064000) virtio-mmio-hal[m
+[m[37m[83641.686948 kruntime:313] [32m  [PA:0x2003000, PA:0x2004000) [VA:0xffff800020064000, VA:0xffff800020065000) virtio-mmio-hal[m
+[m[37m[83641.688097 kruntime:313] [32m  [PA:0x2001000, PA:0x2002000) [VA:0xffff800020065000, VA:0xffff800020066000) virtio-mmio-hal[m
+[m[37m[83641.689186 kruntime:313] [32m  [PA:0x2002000, PA:0x2003000) [VA:0xffff800020066000, VA:0xffff800020067000) virtio-mmio-hal[m
+[m[37m[83641.690262 kruntime:274] [32mPrimary CPU 0 init OK.[m
+[m[37m[83641.690847 0:2 kserveices:36] [32mInitialize VFS...[m
+[m[37m[83641.690890 1:5 ktask::run_queue:423] [36mtask block: Task(5, "gc")[m
+[m[37m[83641.698458 0:3 ktask::run_queue:423] [36mtask block: Task(3, "gc")[m
+[m[37m[83641.703875 0:2 kserveices::vfs::dev::dtb:29] [32mCaptured DTB snapshot: paddr=0xffe00000 size=0x200000[m
+[m[37m[83641.705440 0:2 ktask::task:170] [36mnew task: Task(6, "tty-reader")[m
+[m[37m[83641.706129 0:2 ktask::run_queue:240] [36mtask add: Task(6, "tty-reader") on run_queue 0[m
+[m[37m[83641.707215 0:2 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83641.707879 0:2 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83641.713629 0:2 kserveices::vfs:50] [32mMounted devfs at /dev[m
+[m[37m[83641.714399 0:2 kserveices::vfs:50] [32mMounted tmpfs at /dev/shm[m
+[m[37m[83641.715067 0:2 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83641.715733 0:2 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83641.721610 0:2 kserveices::vfs:50] [32mMounted tmpfs at /tmp[m
+[m[37m[83641.722374 0:2 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83641.722997 0:2 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83641.728807 0:2 kserveices::vfs:50] [32mMounted proc at /proc[m
+[m[37m[83641.729433 0:2 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83641.730052 0:2 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83641.735797 0:2 kserveices::vfs:50] [32mMounted tmpfs at /sys[m
+[m[37m[83641.736864 0:2 ktask::task:170] [36mnew task: Task(7, "dev-log-server")[m
+[m[37m[83641.737631 0:2 ktask::run_queue:240] [36mtask add: Task(7, "dev-log-server") on run_queue 1[m
+[m[37m[83641.738541 0:2 kserveices:40] [32mInitialize /proc/interrupts...[m
+[m[37m[83641.739207 0:2 kserveices:45] [32mInitialize alarm...[m
+[m[37m[83641.739775 0:2 ktask::task:170] [36mnew task: Task(8, "alarm_task")[m
+[m[37m[83641.740512 0:2 ktask::run_queue:240] [36mtask add: Task(8, "alarm_task") on run_queue 0[m
+[m[37m[83641.741415 0:2 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83641.741610 1:7 ktask::run_queue:423] [36mtask block: Task(7, "dev-log-server")[m
+[m[37m[83641.742022 0:2 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83641.750503 0:6 ktask::run_queue:423] [36mtask block: Task(6, "tty-reader")[m
+[m[37m[83641.751299 0:8 ktask::run_queue:423] [36mtask block: Task(8, "alarm_task")[m
+[m[37m[83641.752032 0:2 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83641.752647 0:2 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83641.759488 0:2 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83641.760141 0:2 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83641.765948 0:2 memspace::backend::linear:41] [36mLinear::map: VA:0x60001000..VA:0x60002000 -> PA:0x80158000..PA:0x80159000 READ | EXECUTE | USER[m
+[m[37m[83641.767405 0:2 kcore::mm:222] [36mLoading dynamic linker: /lib/ld-musl-aarch64.so.1[m
+[m[37m[83641.768300 0:2 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83641.768977 0:2 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83641.774890 0:2 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83641.775549 0:2 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83641.781344 0:2 kcore::mm:105] [36mMapping ELF segment: [0x1000, 0xd0fdc) flags: X R[m
+[m[37m[83641.782121 0:2 memspace_file::cow:164] [36mCow::map: VA:0x1000..VA:0xd1000 READ | EXECUTE | USER[m
+[m[37m[83641.782971 0:2 kcore::mm:105] [36mMapping ELF segment: [0xdd728, 0xe1b10) flags:  WR[m
+[m[37m[83641.783706 0:2 memspace_file::cow:164] [36mCow::map: VA:0xdd000..VA:0xe2000 READ | WRITE | USER[m
+[m[37m[83641.784546 0:2 kcore::mm:105] [36mMapping ELF segment: [0x4000000, 0x40a189c) flags: X R[m
+[m[37m[83641.785374 0:2 memspace_file::cow:164] [36mCow::map: VA:0x4000000..VA:0x40a2000 READ | EXECUTE | USER[m
+[m[37m[83641.786238 0:2 kcore::mm:105] [36mMapping ELF segment: [0x40bfb00, 0x40c2f10) flags:  WR[m
+[m[37m[83641.786983 0:2 memspace_file::cow:164] [36mCow::map: VA:0x40bf000..VA:0x40c3000 READ | WRITE | USER[m
+[m[37m[83641.787928 0:2 kcore::mm:322] [36mMapping user stack: VA:0x7ffefff80000 -> VA:0x7fff00000000[m
+[m[37m[83641.788761 0:2 memspace_file::cow:164] [36mCow::map: VA:0x7ffefff80000..VA:0x7fff00000000 READ | WRITE | USER[m
+[m[37m[83641.789820 0:2 memspace_file::cow:164] [36mCow::map: VA:0x40000000..VA:0x40010000 READ | WRITE | USER[m
+[m[37m[83641.790960 0:2 ktask::task:170] [36mnew task: Task(9, "busybox")[m
+[m[37m[83641.791967 0:2 ktask::run_queue:240] [36mtask add: Task(9, "busybox") on run_queue 1[m
+[m[37m[83641.792763 0:2 ktask::run_queue:423] [36mtask block: Task(2, "main")[m
+[m[37m[83641.800994 1:9 kserveices::task:44] [32mEnter user space: ip=0x4069604, sp=0x7ffefffffe60[m
+[m[37m[83641.811095 1:9 ksyscall::dispatch:666] [36mSyscall set_tid_address return Ok(9)[m
+[m[37m[83641.816248 1:9 ksyscall::dispatch:666] [36mSyscall brk return Ok(1073741824)[m
+[m[37m[83641.819265 1:9 ksyscall::dispatch:666] [36mSyscall brk return Ok(1073750016)[m
+[m[37m[83641.822994 1:9 ksyscall::mm::mmap:147] [36msys_mmap <= addr: 0x40000000, length: 0x1000, prot: MmapProt(0x0), flags: MmapFlags(PRIVATE | FIXED | ANONYMOUS), fd: -1, offset: 0[m
+[m[37m[83641.829396 1:9 memspace_file::cow:169] [36mCow::unmap: VA:0x40000000..VA:0x40001000[m
+[m[37m[83641.832799 1:9 memspace_file::cow:164] [36mCow::map: VA:0x40000000..VA:0x40001000 USER[m
+[m[37m[83641.836284 1:9 ksyscall::dispatch:666] [36mSyscall mmap return Ok(1073741824)[m
+[m[37m[83641.840555 1:9 ksyscall::mm::mmap:286] [36msys_mprotect <= addr: 0x40bf000, length: 1000, prot: MmapProt(READ)[m
+[m[37m[83641.844731 1:9 ksyscall::dispatch:666] [36mSyscall mprotect return Ok(0)[m
+[m[37m[83641.850799 1:9 ksyscall::mm::mmap:286] [36msys_mprotect <= addr: 0xdd000, length: 4000, prot: MmapProt(READ)[m
+[m[37m[83641.854884 1:9 ksyscall::dispatch:666] [36mSyscall mprotect return Ok(0)[m
+[m[37m[83641.863612 1:9 ksyscall::dispatch:666] [36mSyscall getuid return Ok(0)[m
+[m[37m[83641.868782 1:9 ksyscall::mm::mmap:147] [36msys_mmap <= addr: 0x0, length: 0x1000, prot: MmapProt(READ | WRITE), flags: MmapFlags(PRIVATE | ANONYMOUS), fd: -1, offset: 0[m
+[m[37m[83641.873417 1:9 memspace_file::cow:164] [36mCow::map: VA:0xd1000..VA:0xd2000 READ | WRITE | USER[m
+[m[37m[83641.875588 1:9 ksyscall::dispatch:666] [36mSyscall mmap return Ok(856064)[m
+[m[37m[83641.877393 1:9 ksyscall::mm::mmap:147] [36msys_mmap <= addr: 0x0, length: 0x1000, prot: MmapProt(READ | WRITE), flags: MmapFlags(PRIVATE | ANONYMOUS), fd: -1, offset: 0[m
+[m[37m[83641.881186 1:9 memspace_file::cow:164] [36mCow::map: VA:0xd2000..VA:0xd3000 READ | WRITE | USER[m
+[m[37m[83641.883362 1:9 ksyscall::dispatch:666] [36mSyscall mmap return Ok(860160)[m
+[m[37m[83641.885580 1:9 ksyscall::dispatch:666] [36mSyscall getpid return Ok(9)[m
+[m[37m[83641.887459 1:9 ksyscall::mm::mmap:147] [36msys_mmap <= addr: 0x0, length: 0x2000, prot: MmapProt(READ | WRITE), flags: MmapFlags(PRIVATE | ANONYMOUS), fd: -1, offset: 0[m
+[m[37m[83641.934316 1:9 memspace_file::cow:164] [36mCow::map: VA:0xd3000..VA:0xd5000 READ | WRITE | USER[m
+[m[37m[83641.936436 1:9 ksyscall::dispatch:666] [36mSyscall mmap return Ok(864256)[m
+[m[37m[83641.938595 1:9 ksyscall::signal:84] [36msys_rt_sigprocmask <= {}[m
+[m[37m[83641.939831 1:9 ksyscall::dispatch:666] [36mSyscall rt_sigprocmask return Ok(0)[m
+[m[37m[83641.941267 1:9 ksyscall::signal:112] [36msys_rt_sigaction <= signo: SIGCHLD, act: SignalAction { flags: SignalActionFlags(RESTORER), mask: {SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS, SIGRT3, SIGRT4, SIGRT5, SIGRT6, SIGRT7, SIGRT8, SIGRT9, SIGRT10, SIGRT11, SIGRT12, SIGRT13, SIGRT14, SIGRT15, SIGRT16, SIGRT17, SIGRT18, SIGRT19, SIGRT20, SIGRT21, SIGRT22, SIGRT23, SIGRT24, SIGRT25, SIGRT26, SIGRT27, SIGRT28, SIGRT29, SIGRT30, SIGRT31, SIGRT32}, disposition: Handler(0x47af0), restorer: Some(0x4051c50) }[m
+[m[37m[83641.952974 1:9 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83641.955929 1:9 ksyscall::dispatch:666] [36mSyscall getppid return Err(KErrorKind::NoSuchProcess)[m
+[m[37m[83641.958314 1:9 ksyscall::mm::mmap:147] [36msys_mmap <= addr: 0x0, length: 0x1000, prot: MmapProt(READ | WRITE), flags: MmapFlags(PRIVATE | ANONYMOUS), fd: -1, offset: 0[m
+[m[37m[83641.961104 1:9 memspace_file::cow:164] [36mCow::map: VA:0xd5000..VA:0xd6000 READ | WRITE | USER[m
+[m[37m[83641.962819 1:9 ksyscall::dispatch:666] [36mSyscall mmap return Ok(872448)[m
+[m[37m[83641.964601 1:9 ksyscall::dispatch:666] [36mSyscall uname return Ok(0)[m
+[m[37m[83641.965964 1:9 ksyscall::fs::ctl:277] [36msys_getcwd => cwd: /[m
+[m[37m[83641.967162 1:9 kserveices::mm:259] [36mPage fault at VA:0x7ffeffffeba0, access_flags: WRITE[m
+[m[37m[83641.968835 1:9 ksyscall::dispatch:666] [36mSyscall getcwd return Ok(140733193382816)[m
+[m[37m[83641.971052 1:9 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83641.972540 1:9 ksyscall::signal:112] [36msys_rt_sigaction <= signo: SIGINT, act: SignalAction { flags: SignalActionFlags(RESTORER), mask: {SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS, SIGRT3, SIGRT4, SIGRT5, SIGRT6, SIGRT7, SIGRT8, SIGRT9, SIGRT10, SIGRT11, SIGRT12, SIGRT13, SIGRT14, SIGRT15, SIGRT16, SIGRT17, SIGRT18, SIGRT19, SIGRT20, SIGRT21, SIGRT22, SIGRT23, SIGRT24, SIGRT25, SIGRT26, SIGRT27, SIGRT28, SIGRT29, SIGRT30, SIGRT31, SIGRT32}, disposition: Handler(0x47af0), restorer: Some(0x4051c50) }[m
+[m[37m[83641.984033 1:9 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83641.985444 1:9 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83641.986841 1:9 ksyscall::signal:112] [36msys_rt_sigaction <= signo: SIGQUIT, act: SignalAction { flags: SignalActionFlags(RESTORER), mask: {SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS, SIGRT3, SIGRT4, SIGRT5, SIGRT6, SIGRT7, SIGRT8, SIGRT9, SIGRT10, SIGRT11, SIGRT12, SIGRT13, SIGRT14, SIGRT15, SIGRT16, SIGRT17, SIGRT18, SIGRT19, SIGRT20, SIGRT21, SIGRT22, SIGRT23, SIGRT24, SIGRT25, SIGRT26, SIGRT27, SIGRT28, SIGRT29, SIGRT30, SIGRT31, SIGRT32}, disposition: Ignore, restorer: Some(0x4051c50) }[m
+[m[37m[83641.998141 1:9 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83641.999557 1:9 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83642.004944 1:9 ksyscall::fs::io:104] [36msys_write <= fd: 1, buf: 0xd1f30, len: 33[m
+[mWelcome to [96m[1mKylin X[0m!
+[37m[83642.009416 1:9 ksyscall::dispatch:666] [36mSyscall write return Ok(33)[m
+[m[37m[83642.012432 1:9 ksyscall::fs::stat:62] [36msys_fstatat <= dirfd: -100, path: Some("/sbin/env"), flags: 0[m
+[m[37m[83642.016535 1:9 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83642.019208 1:9 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83642.032080 1:9 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83642.032928 1:9 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83642.040398 1:9 ksyscall::dispatch:666] [36mSyscall fstatat return Err(KErrorKind::NotFound)[m
+[m[37m[83642.041768 1:9 ksyscall::fs::stat:62] [36msys_fstatat <= dirfd: -100, path: Some("/usr/sbin/env"), flags: 0[m
+[m[37m[83642.043066 1:9 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83642.043910 1:9 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83642.051293 1:9 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83642.052137 1:9 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83642.059709 1:9 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83642.060343 1:9 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83642.066246 1:9 ksyscall::dispatch:666] [36mSyscall fstatat return Err(KErrorKind::NotFound)[m
+[m[37m[83642.067105 1:9 ksyscall::fs::stat:62] [36msys_fstatat <= dirfd: -100, path: Some("/bin/env"), flags: 0[m
+[m[37m[83642.068055 1:9 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83642.068684 1:9 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83642.074559 1:9 ksyscall::dispatch:666] [36mSyscall fstatat return Err(KErrorKind::NotFound)[m
+[m[37m[83642.075433 1:9 ksyscall::fs::stat:62] [36msys_fstatat <= dirfd: -100, path: Some("/usr/bin/env"), flags: 0[m
+[m[37m[83642.076418 1:9 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83642.077038 1:9 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83642.082846 1:9 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83642.083489 1:9 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83642.089470 1:9 ksyscall::dispatch:666] [36mSyscall fstatat return Ok(0)[m
+[m[37m[83642.090468 1:9 ksyscall::signal:84] [36msys_rt_sigprocmask <= {SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS, SIGRT3, SIGRT4, SIGRT5, SIGRT6, SIGRT7, SIGRT8, SIGRT9, SIGRT10, SIGRT11, SIGRT12, SIGRT13, SIGRT14, SIGRT15, SIGRT16, SIGRT17, SIGRT18, SIGRT19, SIGRT20, SIGRT21, SIGRT22, SIGRT23, SIGRT24, SIGRT25, SIGRT26, SIGRT27, SIGRT28, SIGRT29, SIGRT30, SIGRT31, SIGRT32}[m
+[m[37m[83642.095328 1:9 ksyscall::dispatch:666] [36mSyscall rt_sigprocmask return Ok(0)[m
+[m[37m[83642.096024 1:9 ksyscall::signal:84] [36msys_rt_sigprocmask <= {SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS, SIGRTMIN, SIGRT1, SIGRT2, SIGRT3, SIGRT4, SIGRT5, SIGRT6, SIGRT7, SIGRT8, SIGRT9, SIGRT10, SIGRT11, SIGRT12, SIGRT13, SIGRT14, SIGRT15, SIGRT16, SIGRT17, SIGRT18, SIGRT19, SIGRT20, SIGRT21, SIGRT22, SIGRT23, SIGRT24, SIGRT25, SIGRT26, SIGRT27, SIGRT28, SIGRT29, SIGRT30, SIGRT31, SIGRT32}[m
+[m[37m[83642.100759 1:9 ksyscall::dispatch:666] [36mSyscall rt_sigprocmask return Ok(0)[m
+[m[37m[83642.101565 1:9 ksyscall::task::clone:182] [36mdo_clone <= flags: CloneFlags(0x0), exit_signal: 17, stack: 0x0, ptid: 0x0, ctid: 0x40c2030, tls: 0x40c2000, pidfd: 0x0[m
+[m[37m[83642.102953 1:9 ktask::task:170] [36mnew task: Task(10, "busybox")[m
+[m[37m[83642.103750 1:9 memspace_file::cow:164] [36mCow::map: VA:0x1000..VA:0xd1000 READ | EXECUTE | USER[m
+[m[37m[83642.104634 1:9 memspace_file::cow:164] [36mCow::map: VA:0xd1000..VA:0xd2000 READ | WRITE | USER[m
+[m[37m[83642.105481 1:9 memspace_file::cow:164] [36mCow::map: VA:0xd2000..VA:0xd3000 READ | WRITE | USER[m
+[m[37m[83642.106304 1:9 memspace_file::cow:164] [36mCow::map: VA:0xd3000..VA:0xd5000 READ | WRITE | USER[m
+[m[37m[83642.107150 1:9 memspace_file::cow:164] [36mCow::map: VA:0xd5000..VA:0xd6000 READ | WRITE | USER[m
+[m[37m[83642.107993 1:9 memspace_file::cow:164] [36mCow::map: VA:0xdd000..VA:0xe1000 READ | USER[m
+[m[37m[83642.108771 1:9 memspace_file::cow:164] [36mCow::map: VA:0xe1000..VA:0xe2000 READ | WRITE | USER[m
+[m[37m[83642.109667 1:9 memspace_file::cow:164] [36mCow::map: VA:0x4000000..VA:0x40a2000 READ | EXECUTE | USER[m
+[m[37m[83642.110546 1:9 memspace_file::cow:164] [36mCow::map: VA:0x40bf000..VA:0x40c0000 READ | USER[m
+[m[37m[83642.111381 1:9 memspace_file::cow:164] [36mCow::map: VA:0x40c0000..VA:0x40c3000 READ | WRITE | USER[m
+[m[37m[83642.112333 1:9 memspace_file::cow:164] [36mCow::map: VA:0x40000000..VA:0x40001000 USER[m
+[m[37m[83642.113195 1:9 memspace_file::cow:164] [36mCow::map: VA:0x40001000..VA:0x40010000 READ | WRITE | USER[m
+[m[37m[83642.114118 1:9 memspace::backend::linear:41] [36mLinear::map: VA:0x60001000..VA:0x60002000 -> PA:0x80158000..PA:0x80159000 READ | EXECUTE | USER[m
+[m[37m[83642.115439 1:9 memspace_file::cow:164] [36mCow::map: VA:0x7ffefff80000..VA:0x7fff00000000 READ | WRITE | USER[m
+[m[37m[83642.116785 1:9 ktask::run_queue:240] [36mtask add: Task(10, "busybox") on run_queue 0[m
+[m[37m[83642.117588 1:9 ksyscall::dispatch:666] [36mSyscall clone return Ok(10)[m
+[m[37m[83642.118241 1:9 ksyscall::signal:84] [36msys_rt_sigprocmask <= {SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS, SIGRT3, SIGRT4, SIGRT5, SIGRT6, SIGRT7, SIGRT8, SIGRT9, SIGRT10, SIGRT11, SIGRT12, SIGRT13, SIGRT14, SIGRT15, SIGRT16, SIGRT17, SIGRT18, SIGRT19, SIGRT20, SIGRT21, SIGRT22, SIGRT23, SIGRT24, SIGRT25, SIGRT26, SIGRT27, SIGRT28, SIGRT29, SIGRT30, SIGRT31, SIGRT32}[m
+[m[37m[83642.118569 0:10 kserveices::task:44] [32mEnter user space: ip=0x404839c, sp=0x7ffefffff5f0[m
+[m[37m[83642.122702 1:9 ksyscall::dispatch:666] [36mSyscall rt_sigprocmask return Ok(0)[m
+[m[37m[83642.126336 0:10 ksyscall::dispatch:666] [36mSyscall set_tid_address return Ok(10)[m
+[m[37m[83642.126943 1:9 ksyscall::signal:84] [36msys_rt_sigprocmask <= {}[m
+[m[37m[83642.130882 1:9 ksyscall::dispatch:666] [36mSyscall rt_sigprocmask return Ok(0)[m
+[m[37m[83642.130996 0:10 ksyscall::signal:84] [36msys_rt_sigprocmask <= {SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS, SIGRT3, SIGRT4, SIGRT5, SIGRT6, SIGRT7, SIGRT8, SIGRT9, SIGRT10, SIGRT11, SIGRT12, SIGRT13, SIGRT14, SIGRT15, SIGRT16, SIGRT17, SIGRT18, SIGRT19, SIGRT20, SIGRT21, SIGRT22, SIGRT23, SIGRT24, SIGRT25, SIGRT26, SIGRT27, SIGRT28, SIGRT29, SIGRT30, SIGRT31, SIGRT32}[m
+[m[37m[83642.131939 1:9 ksyscall::task::wait:75] [32msys_waitpid <= pid: -1, options: WaitOptions(0x0)[m
+[m[37m[83642.151412 0:10 ksyscall::dispatch:666] [36mSyscall rt_sigprocmask return Ok(0)[m
+[m[37m[83642.152292 1:9 ktask::run_queue:423] [36mtask block: Task(9, "busybox")[m
+[m[37m[83642.155395 0:10 ksyscall::signal:84] [36msys_rt_sigprocmask <= {}[m
+[m[37m[83642.158730 0:10 ksyscall::dispatch:666] [36mSyscall rt_sigprocmask return Ok(0)[m
+[m[37m[83642.162203 0:10 ksyscall::signal:112] [36msys_rt_sigaction <= signo: SIGQUIT, act: SignalAction { flags: SignalActionFlags(RESTORER), mask: {SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS, SIGRT3, SIGRT4, SIGRT5, SIGRT6, SIGRT7, SIGRT8, SIGRT9, SIGRT10, SIGRT11, SIGRT12, SIGRT13, SIGRT14, SIGRT15, SIGRT16, SIGRT17, SIGRT18, SIGRT19, SIGRT20, SIGRT21, SIGRT22, SIGRT23, SIGRT24, SIGRT25, SIGRT26, SIGRT27, SIGRT28, SIGRT29, SIGRT30, SIGRT31, SIGRT32}, disposition: Default, restorer: Some(0x4051c50) }[m
+[m[37m[83642.184615 0:10 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83642.187563 0:10 ksyscall::task::execve:53] [36msys_execve <= path: "/usr/bin/env", args: ["env"], envs: ["SHLVL=1", "HOME=/root", "PWD=/"][m
+[m[37m[83642.192237 0:10 memspace_file::cow:169] [36mCow::unmap: VA:0x1000..VA:0xd1000[m
+[m[37m[83642.195249 0:10 memspace_file::cow:169] [36mCow::unmap: VA:0xd1000..VA:0xd2000[m
+[m[37m[83642.197085 0:10 memspace_file::cow:169] [36mCow::unmap: VA:0xd2000..VA:0xd3000[m
+[m[37m[83642.198903 0:10 memspace_file::cow:169] [36mCow::unmap: VA:0xd3000..VA:0xd5000[m
+[m[37m[83642.200716 0:10 memspace_file::cow:169] [36mCow::unmap: VA:0xd5000..VA:0xd6000[m
+[m[37m[83642.202555 0:10 memspace_file::cow:169] [36mCow::unmap: VA:0xdd000..VA:0xe1000[m
+[m[37m[83642.204467 0:10 memspace_file::cow:169] [36mCow::unmap: VA:0xe1000..VA:0xe2000[m
+[m[37m[83642.206312 0:10 memspace_file::cow:169] [36mCow::unmap: VA:0x4000000..VA:0x40a2000[m
+[m[37m[83642.208265 0:10 memspace_file::cow:169] [36mCow::unmap: VA:0x40bf000..VA:0x40c0000[m
+[m[37m[83642.210140 0:10 memspace_file::cow:169] [36mCow::unmap: VA:0x40c0000..VA:0x40c3000[m
+[m[37m[83642.212087 0:10 memspace_file::cow:169] [36mCow::unmap: VA:0x40000000..VA:0x40001000[m
+[m[37m[83642.214164 0:10 memspace_file::cow:169] [36mCow::unmap: VA:0x40001000..VA:0x40010000[m
+[m[37m[83642.216162 0:10 memspace::backend::linear:50] [36mLinear::unmap: VA:0x60001000..VA:0x60002000 -> PA:0x80158000..PA:0x80159000[m
+[m[37m[83642.218898 0:10 memspace_file::cow:169] [36mCow::unmap: VA:0x7ffefff80000..VA:0x7fff00000000[m
+[m[37m[83642.221057 0:10 memspace::backend::linear:41] [36mLinear::map: VA:0x60001000..VA:0x60002000 -> PA:0x80158000..PA:0x80159000 READ | EXECUTE | USER[m
+[m[37m[83642.224211 0:10 kcore::mm:222] [36mLoading dynamic linker: /lib/ld-musl-aarch64.so.1[m
+[m[37m[83642.226174 0:10 kcore::mm:105] [36mMapping ELF segment: [0x1000, 0xd0fdc) flags: X R[m
+[m[37m[83642.227855 0:10 memspace_file::cow:164] [36mCow::map: VA:0x1000..VA:0xd1000 READ | EXECUTE | USER[m
+[m[37m[83642.229405 0:10 kcore::mm:105] [36mMapping ELF segment: [0xdd728, 0xe1b10) flags:  WR[m
+[m[37m[83642.230789 0:10 memspace_file::cow:164] [36mCow::map: VA:0xdd000..VA:0xe2000 READ | WRITE | USER[m
+[m[37m[83642.232352 0:10 kcore::mm:105] [36mMapping ELF segment: [0x4000000, 0x40a189c) flags: X R[m
+[m[37m[83642.233903 0:10 memspace_file::cow:164] [36mCow::map: VA:0x4000000..VA:0x40a2000 READ | EXECUTE | USER[m
+[m[37m[83642.235649 0:10 kcore::mm:105] [36mMapping ELF segment: [0x40bfb00, 0x40c2f10) flags:  WR[m
+[m[37m[83642.237158 0:10 memspace_file::cow:164] [36mCow::map: VA:0x40bf000..VA:0x40c3000 READ | WRITE | USER[m
+[m[37m[83642.238792 0:10 kcore::mm:322] [36mMapping user stack: VA:0x7ffefff80000 -> VA:0x7fff00000000[m
+[m[37m[83642.240375 0:10 memspace_file::cow:164] [36mCow::map: VA:0x7ffefff80000..VA:0x7fff00000000 READ | WRITE | USER[m
+[m[37m[83642.242184 0:10 memspace_file::cow:164] [36mCow::map: VA:0x40000000..VA:0x40010000 READ | WRITE | USER[m
+[m[37m[83642.244260 0:10 ksyscall::dispatch:666] [36mSyscall execve return Ok(0)[m
+[m[37m[83642.246324 0:10 ksyscall::dispatch:666] [36mSyscall set_tid_address return Ok(10)[m
+[m[37m[83642.247952 0:10 ksyscall::dispatch:666] [36mSyscall brk return Ok(1073741824)[m
+[m[37m[83642.249246 0:10 ksyscall::dispatch:666] [36mSyscall brk return Ok(1073750016)[m
+[m[37m[83642.250601 0:10 ksyscall::mm::mmap:147] [36msys_mmap <= addr: 0x40000000, length: 0x1000, prot: MmapProt(0x0), flags: MmapFlags(PRIVATE | FIXED | ANONYMOUS), fd: -1, offset: 0[m
+[m[37m[83642.253413 0:10 memspace_file::cow:169] [36mCow::unmap: VA:0x40000000..VA:0x40001000[m
+[m[37m[83642.254867 0:10 memspace_file::cow:164] [36mCow::map: VA:0x40000000..VA:0x40001000 USER[m
+[m[37m[83642.256316 0:10 ksyscall::dispatch:666] [36mSyscall mmap return Ok(1073741824)[m
+[m[37m[83642.257751 0:10 ksyscall::mm::mmap:286] [36msys_mprotect <= addr: 0x40bf000, length: 1000, prot: MmapProt(READ)[m
+[m[37m[83642.259407 0:10 ksyscall::dispatch:666] [36mSyscall mprotect return Ok(0)[m
+[m[37m[83642.260613 0:10 ksyscall::mm::mmap:286] [36msys_mprotect <= addr: 0xdd000, length: 4000, prot: MmapProt(READ)[m
+[m[37m[83642.261920 0:10 ksyscall::dispatch:666] [36mSyscall mprotect return Ok(0)[m
+[m[37m[83642.263059 0:10 ksyscall::dispatch:666] [36mSyscall getuid return Ok(0)[m
+[m[37m[83642.267085 0:10 ksyscall::fs::ctl:40] [36msys_ioctl <= fd: 1, cmd: 21523, arg: 140733193386552[m
+[m[37m[83642.268183 0:10 ksyscall::dispatch:666] [36mSyscall ioctl return Ok(0)[m
+[m[37m[83642.269099 0:10 ksyscall::fs::io:110] [36msys_writev <= fd: 1, iovcnt: 2[m
+[mSHLVL=1
+[37m[83642.270060 0:10 ksyscall::dispatch:666] [36mSyscall writev return Ok(8)[m
+[m[37m[83642.270921 0:10 ksyscall::fs::io:110] [36msys_writev <= fd: 1, iovcnt: 2[m
+[mHOME=/root
+[37m[83642.272036 0:10 ksyscall::dispatch:666] [36mSyscall writev return Ok(11)[m
+[m[37m[83642.273012 0:10 ksyscall::fs::io:110] [36msys_writev <= fd: 1, iovcnt: 2[m
+[mPWD=/
+[37m[83642.274035 0:10 ksyscall::dispatch:666] [36mSyscall writev return Ok(6)[m
+[m[37m[83642.275126 0:10 kserveices::task:181] [32mTask(10, "busybox") exit with code: 0[m
+[m[37m[83642.276149 0:10 kcore::task:511] [36mSend signal SIGCHLD to process 9[m
+[m[37m[83642.277001 0:10 ktask::run_queue:271] [36mtask unblock: Task(9, "busybox") on run_queue 1[m
+[m[37m[83642.278038 0:10 ksyscall::dispatch:666] [36mSyscall exit_group return Ok(0)[m
+[m[37m[83642.278953 0:10 ktask::run_queue:367] [36mtask exit: Task(10, "busybox"), exit_code=0[m
+[m[37m[83642.279998 0:10 ktask::run_queue:271] [36mtask unblock: Task(3, "gc") on run_queue 0[m
+[m[37m[83642.281008 0:3 ktask::task:600] [36mtask drop: Task(10, "busybox")[m
+[m[37m[83642.281856 0:3 memspace_file::cow:169] [36mCow::unmap: VA:0x1000..VA:0xd1000[m
+[m[37m[83642.282338 1:9 ksyscall::dispatch:666] [36mSyscall wait4 return Err(KErrorKind::Interrupted)[m
+[m[37m[83642.282851 0:3 memspace_file::cow:169] [36mCow::unmap: VA:0xdd000..VA:0xe1000[m
+[m[37m[83642.286117 1:9 ksignal::api::thread:83] [36mHandle signal: SIGCHLD[m
+[m[37m[83642.287056 0:3 memspace_file::cow:169] [36mCow::unmap: VA:0xe1000..VA:0xe2000[m
+[m[37m[83642.289531 1:9 kserveices::mm:259] [36mPage fault at VA:0x7ffeffffe280, access_flags: WRITE[m
+[m[37m[83642.290469 0:3 memspace_file::cow:169] [36mCow::unmap: VA:0x4000000..VA:0x40a2000[m
+[m[37m[83642.293811 1:9 ksyscall::dispatch:666] [36mSyscall rt_sigreturn return Ok(-4)[m
+[m[37m[83642.294661 0:3 memspace_file::cow:169] [36mCow::unmap: VA:0x40bf000..VA:0x40c0000[m
+[m[37m[83642.297660 1:9 ksyscall::task::wait:75] [32msys_waitpid <= pid: -1, options: WaitOptions(0x0)[m
+[m[37m[83642.298443 0:3 memspace_file::cow:169] [36mCow::unmap: VA:0x40c0000..VA:0x40c3000[m
+[m[37m[83642.302168 1:9 ksyscall::dispatch:666] [36mSyscall wait4 return Ok(10)[m
+[m[37m[83642.302946 0:3 memspace_file::cow:169] [36mCow::unmap: VA:0x40000000..VA:0x40001000[m
+[m[37m[83642.305786 1:9 ksyscall::task::wait:75] [32msys_waitpid <= pid: -1, options: WaitOptions(WNOHANG)[m
+[m[37m[83642.306590 0:3 memspace_file::cow:169] [36mCow::unmap: VA:0x40001000..VA:0x40010000[m
+[m[37m[83642.310278 1:9 ksyscall::dispatch:666] [36mSyscall wait4 return Err(LinuxError::ECHILD)[m
+[m[37m[83642.311152 0:3 memspace::backend::linear:50] [36mLinear::unmap: VA:0x60001000..VA:0x60002000 -> PA:0x80158000..PA:0x80159000[m
+[m[37m[83642.314694 1:9 ksyscall::fs::io:104] [36msys_write <= fd: 1, buf: 0xd5080, len: 1[m
+[m[37m[
+83642.315706 0:3 memspace_file::cow:169] [36mCow::unmap: VA:0x7ffefff80000..VA:0x7fff00000000[m
+[m[37m[83642.319009 1:9 ksyscall::dispatch:666] [36mSyscall write return Ok(1)[m
+[m[37m[83642.319909 0:3 ktask::run_queue:423] [36mtask block: Task(3, "gc")[m
+[m[37m[83642.322818 1:9 ksyscall::fs::io:104] [36msys_write <= fd: 1, buf: 0x40c2fb0, len: 41[m
+[mUse [1m[3mapk[0m to install packages.
+[37m[83642.328082 1:9 ksyscall::dispatch:666] [36mSyscall write return Ok(41)[m
+[m[37m[83642.330713 1:9 ksyscall::fs::io:104] [36msys_write <= fd: 1, buf: 0xd5090, len: 1[m
+[m
+[37m[83642.333793 1:9 ksyscall::dispatch:666] [36mSyscall write return Ok(1)[m
+[m[37m[83642.336937 1:9 ksyscall::fs::ctl:67] [36msys_chdir <= path: /root[m
+[m[37m[83642.339455 1:9 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83642.341913 1:9 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83642.361428 1:9 ksyscall::dispatch:666] [36mSyscall chdir return Ok(0)[m
+[m[37m[83642.362859 1:9 ksyscall::fs::stat:62] [36msys_fstatat <= dirfd: -100, path: Some("/sbin/sh"), flags: 0[m
+[m[37m[83642.364778 1:9 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83642.366032 1:9 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83642.377593 1:9 ksyscall::dispatch:666] [36mSyscall fstatat return Err(KErrorKind::NotFound)[m
+[m[37m[83642.379445 1:9 ksyscall::fs::stat:62] [36msys_fstatat <= dirfd: -100, path: Some("/usr/sbin/sh"), flags: 0[m
+[m[37m[83642.381676 1:9 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83642.382997 1:9 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83642.393488 1:9 ksyscall::dispatch:666] [36mSyscall fstatat return Err(KErrorKind::NotFound)[m
+[m[37m[83642.394726 1:9 ksyscall::fs::stat:62] [36msys_fstatat <= dirfd: -100, path: Some("/bin/sh"), flags: 0[m
+[m[37m[83642.396113 1:9 ksyscall::dispatch:666] [36mSyscall fstatat return Ok(0)[m
+[m[37m[83642.397110 1:9 ksyscall::signal:84] [36msys_rt_sigprocmask <= {SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS, SIGRT3, SIGRT4, SIGRT5, SIGRT6, SIGRT7, SIGRT8, SIGRT9, SIGRT10, SIGRT11, SIGRT12, SIGRT13, SIGRT14, SIGRT15, SIGRT16, SIGRT17, SIGRT18, SIGRT19, SIGRT20, SIGRT21, SIGRT22, SIGRT23, SIGRT24, SIGRT25, SIGRT26, SIGRT27, SIGRT28, SIGRT29, SIGRT30, SIGRT31, SIGRT32}[m
+[m[37m[83642.404248 1:9 ksyscall::dispatch:666] [36mSyscall rt_sigprocmask return Ok(0)[m
+[m[37m[83642.405325 1:9 ksyscall::signal:84] [36msys_rt_sigprocmask <= {SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS, SIGRTMIN, SIGRT1, SIGRT2, SIGRT3, SIGRT4, SIGRT5, SIGRT6, SIGRT7, SIGRT8, SIGRT9, SIGRT10, SIGRT11, SIGRT12, SIGRT13, SIGRT14, SIGRT15, SIGRT16, SIGRT17, SIGRT18, SIGRT19, SIGRT20, SIGRT21, SIGRT22, SIGRT23, SIGRT24, SIGRT25, SIGRT26, SIGRT27, SIGRT28, SIGRT29, SIGRT30, SIGRT31, SIGRT32}[m
+[m[37m[83642.412613 1:9 ksyscall::dispatch:666] [36mSyscall rt_sigprocmask return Ok(0)[m
+[m[37m[83642.413701 1:9 ksyscall::task::clone:182] [36mdo_clone <= flags: CloneFlags(0x0), exit_signal: 17, stack: 0x0, ptid: 0x0, ctid: 0x40c2030, tls: 0x40c2000, pidfd: 0x0[m
+[m[37m[83642.415783 1:9 ktask::task:170] [36mnew task: Task(11, "busybox")[m
+[m[37m[83642.416767 1:9 memspace_file::cow:164] [36mCow::map: VA:0x1000..VA:0xd1000 READ | EXECUTE | USER[m
+[m[37m[83642.418044 1:9 memspace_file::cow:164] [36mCow::map: VA:0xd1000..VA:0xd2000 READ | WRITE | USER[m
+[m[37m[83642.419337 1:9 memspace_file::cow:164] [36mCow::map: VA:0xd2000..VA:0xd3000 READ | WRITE | USER[m
+[m[37m[83642.420670 1:9 memspace_file::cow:164] [36mCow::map: VA:0xd3000..VA:0xd5000 READ | WRITE | USER[m
+[m[37m[83642.421980 1:9 memspace_file::cow:164] [36mCow::map: VA:0xd5000..VA:0xd6000 READ | WRITE | USER[m
+[m[37m[83642.423224 1:9 memspace_file::cow:164] [36mCow::map: VA:0xdd000..VA:0xe1000 READ | USER[m
+[m[37m[83642.424115 1:9 memspace_file::cow:164] [36mCow::map: VA:0xe1000..VA:0xe2000 READ | WRITE | USER[m
+[m[37m[83642.425117 1:9 memspace_file::cow:164] [36mCow::map: VA:0x4000000..VA:0x40a2000 READ | EXECUTE | USER[m
+[m[37m[83642.426141 1:9 memspace_file::cow:164] [36mCow::map: VA:0x40bf000..VA:0x40c0000 READ | USER[m
+[m[37m[83642.427095 1:9 memspace_file::cow:164] [36mCow::map: VA:0x40c0000..VA:0x40c3000 READ | WRITE | USER[m
+[m[37m[83642.428096 1:9 memspace_file::cow:164] [36mCow::map: VA:0x40000000..VA:0x40001000 USER[m
+[m[37m[83642.429009 1:9 memspace_file::cow:164] [36mCow::map: VA:0x40001000..VA:0x40010000 READ | WRITE | USER[m
+[m[37m[83642.430021 1:9 memspace::backend::linear:41] [36mLinear::map: VA:0x60001000..VA:0x60002000 -> PA:0x80158000..PA:0x80159000 READ | EXECUTE | USER[m
+[m[37m[83642.431456 1:9 memspace_file::cow:164] [36mCow::map: VA:0x7ffefff80000..VA:0x7fff00000000 READ | WRITE | USER[m
+[m[37m[83642.432660 1:9 ktask::run_queue:240] [36mtask add: Task(11, "busybox") on run_queue 1[m
+[m[37m[83642.433551 1:9 ksyscall::dispatch:666] [36mSyscall clone return Ok(11)[m
+[m[37m[83642.434308 1:9 ksyscall::signal:84] [36msys_rt_sigprocmask <= {SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS, SIGRT3, SIGRT4, SIGRT5, SIGRT6, SIGRT7, SIGRT8, SIGRT9, SIGRT10, SIGRT11, SIGRT12, SIGRT13, SIGRT14, SIGRT15, SIGRT16, SIGRT17, SIGRT18, SIGRT19, SIGRT20, SIGRT21, SIGRT22, SIGRT23, SIGRT24, SIGRT25, SIGRT26, SIGRT27, SIGRT28, SIGRT29, SIGRT30, SIGRT31, SIGRT32}[m
+[m[37m[83642.439556 1:9 ksyscall::dispatch:666] [36mSyscall rt_sigprocmask return Ok(0)[m
+[m[37m[83642.440447 1:9 ksyscall::signal:84] [36msys_rt_sigprocmask <= {}[m
+[m[37m[83642.441197 1:9 ksyscall::dispatch:666] [36mSyscall rt_sigprocmask return Ok(0)[m
+[m[37m[83642.442065 1:9 ksyscall::task::wait:75] [32msys_waitpid <= pid: -1, options: WaitOptions(0x0)[m
+[m[37m[83642.443031 1:9 ktask::run_queue:423] [36mtask block: Task(9, "busybox")[m
+[m[37m[83642.443793 1:11 kserveices::task:44] [32mEnter user space: ip=0x404839c, sp=0x7ffefffff5f0[m
+[m[37m[83642.444730 1:11 ksyscall::dispatch:666] [36mSyscall set_tid_address return Ok(11)[m
+[m[37m[83642.445599 1:11 ksyscall::signal:84] [36msys_rt_sigprocmask <= {SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS, SIGRT3, SIGRT4, SIGRT5, SIGRT6, SIGRT7, SIGRT8, SIGRT9, SIGRT10, SIGRT11, SIGRT12, SIGRT13, SIGRT14, SIGRT15, SIGRT16, SIGRT17, SIGRT18, SIGRT19, SIGRT20, SIGRT21, SIGRT22, SIGRT23, SIGRT24, SIGRT25, SIGRT26, SIGRT27, SIGRT28, SIGRT29, SIGRT30, SIGRT31, SIGRT32}[m
+[m[37m[83642.450800 1:11 ksyscall::dispatch:666] [36mSyscall rt_sigprocmask return Ok(0)[m
+[m[37m[83642.451674 1:11 ksyscall::signal:84] [36msys_rt_sigprocmask <= {}[m
+[m[37m[83642.452405 1:11 ksyscall::dispatch:666] [36mSyscall rt_sigprocmask return Ok(0)[m
+[m[37m[83642.453272 1:11 ksyscall::signal:112] [36msys_rt_sigaction <= signo: SIGQUIT, act: SignalAction { flags: SignalActionFlags(RESTORER), mask: {SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS, SIGRT3, SIGRT4, SIGRT5, SIGRT6, SIGRT7, SIGRT8, SIGRT9, SIGRT10, SIGRT11, SIGRT12, SIGRT13, SIGRT14, SIGRT15, SIGRT16, SIGRT17, SIGRT18, SIGRT19, SIGRT20, SIGRT21, SIGRT22, SIGRT23, SIGRT24, SIGRT25, SIGRT26, SIGRT27, SIGRT28, SIGRT29, SIGRT30, SIGRT31, SIGRT32}, disposition: Default, restorer: Some(0x4051c50) }[m
+[m[37m[83642.459149 1:11 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83642.459931 1:11 ksyscall::task::execve:53] [36msys_execve <= path: "/bin/sh", args: ["sh", "--login"], envs: ["SHLVL=1", "HOME=/root", "OLDPWD=/", "PWD=/root"][m
+[m[37m[83642.461375 1:11 memspace_file::cow:169] [36mCow::unmap: VA:0x1000..VA:0xd1000[m
+[m[37m[83642.462106 1:11 memspace_file::cow:169] [36mCow::unmap: VA:0xd1000..VA:0xd2000[m
+[m[37m[83642.462811 1:11 memspace_file::cow:169] [36mCow::unmap: VA:0xd2000..VA:0xd3000[m
+[m[37m[83642.463536 1:11 memspace_file::cow:169] [36mCow::unmap: VA:0xd3000..VA:0xd5000[m
+[m[37m[83642.464230 1:11 memspace_file::cow:169] [36mCow::unmap: VA:0xd5000..VA:0xd6000[m
+[m[37m[83642.464932 1:11 memspace_file::cow:169] [36mCow::unmap: VA:0xdd000..VA:0xe1000[m
+[m[37m[83642.465634 1:11 memspace_file::cow:169] [36mCow::unmap: VA:0xe1000..VA:0xe2000[m
+[m[37m[83642.466332 1:11 memspace_file::cow:169] [36mCow::unmap: VA:0x4000000..VA:0x40a2000[m
+[m[37m[83642.467091 1:11 memspace_file::cow:169] [36mCow::unmap: VA:0x40bf000..VA:0x40c0000[m
+[m[37m[83642.467813 1:11 memspace_file::cow:169] [36mCow::unmap: VA:0x40c0000..VA:0x40c3000[m
+[m[37m[83642.468563 1:11 memspace_file::cow:169] [36mCow::unmap: VA:0x40000000..VA:0x40001000[m
+[m[37m[83642.469318 1:11 memspace_file::cow:169] [36mCow::unmap: VA:0x40001000..VA:0x40010000[m
+[m[37m[83642.470093 1:11 memspace::backend::linear:50] [36mLinear::unmap: VA:0x60001000..VA:0x60002000 -> PA:0x80158000..PA:0x80159000[m
+[m[37m[83642.471164 1:11 memspace_file::cow:169] [36mCow::unmap: VA:0x7ffefff80000..VA:0x7fff00000000[m
+[m[37m[83642.472017 1:11 memspace::backend::linear:41] [36mLinear::map: VA:0x60001000..VA:0x60002000 -> PA:0x80158000..PA:0x80159000 READ | EXECUTE | USER[m
+[m[37m[83642.473234 1:11 kcore::mm:222] [36mLoading dynamic linker: /lib/ld-musl-aarch64.so.1[m
+[m[37m[83642.473994 1:11 kcore::mm:105] [36mMapping ELF segment: [0x1000, 0xd0fdc) flags: X R[m
+[m[37m[83642.474753 1:11 memspace_file::cow:164] [36mCow::map: VA:0x1000..VA:0xd1000 READ | EXECUTE | USER[m
+[m[37m[83642.475604 1:11 kcore::mm:105] [36mMapping ELF segment: [0xdd728, 0xe1b10) flags:  WR[m
+[m[37m[83642.476361 1:11 memspace_file::cow:164] [36mCow::map: VA:0xdd000..VA:0xe2000 READ | WRITE | USER[m
+[m[37m[83642.477196 1:11 kcore::mm:105] [36mMapping ELF segment: [0x4000000, 0x40a189c) flags: X R[m
+[m[37m[83642.477998 1:11 memspace_file::cow:164] [36mCow::map: VA:0x4000000..VA:0x40a2000 READ | EXECUTE | USER[m
+[m[37m[83642.478877 1:11 kcore::mm:105] [36mMapping ELF segment: [0x40bfb00, 0x40c2f10) flags:  WR[m
+[m[37m[83642.479715 1:11 memspace_file::cow:164] [36mCow::map: VA:0x40bf000..VA:0x40c3000 READ | WRITE | USER[m
+[m[37m[83642.480643 1:11 kcore::mm:322] [36mMapping user stack: VA:0x7ffefff80000 -> VA:0x7fff00000000[m
+[m[37m[83642.481498 1:11 memspace_file::cow:164] [36mCow::map: VA:0x7ffefff80000..VA:0x7fff00000000 READ | WRITE | USER[m
+[m[37m[83642.482468 1:11 memspace_file::cow:164] [36mCow::map: VA:0x40000000..VA:0x40010000 READ | WRITE | USER[m
+[m[37m[83642.483463 1:11 ksyscall::dispatch:666] [36mSyscall execve return Ok(0)[m
+[m[37m[83642.484309 1:11 ksyscall::dispatch:666] [36mSyscall set_tid_address return Ok(11)[m
+[m[37m[83642.485125 1:11 ksyscall::dispatch:666] [36mSyscall brk return Ok(1073741824)[m
+[m[37m[83642.485831 1:11 ksyscall::dispatch:666] [36mSyscall brk return Ok(1073750016)[m
+[m[37m[83642.486547 1:11 ksyscall::mm::mmap:147] [36msys_mmap <= addr: 0x40000000, length: 0x1000, prot: MmapProt(0x0), flags: MmapFlags(PRIVATE | FIXED | ANONYMOUS), fd: -1, offset: 0[m
+[m[37m[83642.487995 1:11 memspace_file::cow:169] [36mCow::unmap: VA:0x40000000..VA:0x40001000[m
+[m[37m[83642.488757 1:11 memspace_file::cow:164] [36mCow::map: VA:0x40000000..VA:0x40001000 USER[m
+[m[37m[83642.489527 1:11 ksyscall::dispatch:666] [36mSyscall mmap return Ok(1073741824)[m
+[m[37m[83642.490287 1:11 ksyscall::mm::mmap:286] [36msys_mprotect <= addr: 0x40bf000, length: 1000, prot: MmapProt(READ)[m
+[m[37m[83642.491263 1:11 ksyscall::dispatch:666] [36mSyscall mprotect return Ok(0)[m
+[m[37m[83642.492087 1:11 ksyscall::mm::mmap:286] [36msys_mprotect <= addr: 0xdd000, length: 4000, prot: MmapProt(READ)[m
+[m[37m[83642.493033 1:11 ksyscall::dispatch:666] [36mSyscall mprotect return Ok(0)[m
+[m[37m[83642.493771 1:11 ksyscall::dispatch:666] [36mSyscall getuid return Ok(0)[m
+[m[37m[83642.494493 1:11 ksyscall::mm::mmap:147] [36msys_mmap <= addr: 0x0, length: 0x1000, prot: MmapProt(READ | WRITE), flags: MmapFlags(PRIVATE | ANONYMOUS), fd: -1, offset: 0[m
+[m[37m[83642.495890 1:11 memspace_file::cow:164] [36mCow::map: VA:0xd1000..VA:0xd2000 READ | WRITE | USER[m
+[m[37m[83642.496733 1:11 ksyscall::dispatch:666] [36mSyscall mmap return Ok(856064)[m
+[m[37m[83642.497413 1:11 ksyscall::mm::mmap:147] [36msys_mmap <= addr: 0x0, length: 0x1000, prot: MmapProt(READ | WRITE), flags: MmapFlags(PRIVATE | ANONYMOUS), fd: -1, offset: 0[m
+[m[37m[83642.498782 1:11 memspace_file::cow:164] [36mCow::map: VA:0xd2000..VA:0xd3000 READ | WRITE | USER[m
+[m[37m[83642.499652 1:11 ksyscall::dispatch:666] [36mSyscall mmap return Ok(860160)[m
+[m[37m[83642.500400 1:11 ksyscall::dispatch:666] [36mSyscall getpid return Ok(11)[m
+[m[37m[83642.501117 1:11 ksyscall::mm::mmap:147] [36msys_mmap <= addr: 0x0, length: 0x2000, prot: MmapProt(READ | WRITE), flags: MmapFlags(PRIVATE | ANONYMOUS), fd: -1, offset: 0[m
+[m[37m[83642.502507 1:11 memspace_file::cow:164] [36mCow::map: VA:0xd3000..VA:0xd5000 READ | WRITE | USER[m
+[m[37m[83642.503333 1:11 ksyscall::dispatch:666] [36mSyscall mmap return Ok(864256)[m
+[m[37m[83642.504041 1:11 ksyscall::signal:84] [36msys_rt_sigprocmask <= {}[m
+[m[37m[83642.504645 1:11 ksyscall::dispatch:666] [36mSyscall rt_sigprocmask return Ok(0)[m
+[m[37m[83642.505362 1:11 ksyscall::signal:112] [36msys_rt_sigaction <= signo: SIGCHLD, act: SignalAction { flags: SignalActionFlags(RESTORER), mask: {SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS, SIGRT3, SIGRT4, SIGRT5, SIGRT6, SIGRT7, SIGRT8, SIGRT9, SIGRT10, SIGRT11, SIGRT12, SIGRT13, SIGRT14, SIGRT15, SIGRT16, SIGRT17, SIGRT18, SIGRT19, SIGRT20, SIGRT21, SIGRT22, SIGRT23, SIGRT24, SIGRT25, SIGRT26, SIGRT27, SIGRT28, SIGRT29, SIGRT30, SIGRT31, SIGRT32}, disposition: Handler(0x47af0), restorer: Some(0x4051c50) }[m
+[m[37m[83642.511015 1:11 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83642.511942 1:11 ksyscall::dispatch:666] [36mSyscall getppid return Ok(9)[m
+[m[37m[83642.512725 1:11 ksyscall::dispatch:666] [36mSyscall uname return Ok(0)[m
+[m[37m[83642.513379 1:11 ksyscall::mm::mmap:147] [36msys_mmap <= addr: 0x0, length: 0x1000, prot: MmapProt(READ | WRITE), flags: MmapFlags(PRIVATE | ANONYMOUS), fd: -1, offset: 0[m
+[m[37m[83642.514748 1:11 memspace_file::cow:164] [36mCow::map: VA:0xd5000..VA:0xd6000 READ | WRITE | USER[m
+[m[37m[83642.515581 1:11 ksyscall::dispatch:666] [36mSyscall mmap return Ok(872448)[m
+[m[37m[83642.516265 1:11 ksyscall::fs::stat:62] [36msys_fstatat <= dirfd: -100, path: Some("/root"), flags: 0[m
+[m[37m[83642.517148 1:11 ksyscall::dispatch:666] [36mSyscall fstatat return Ok(0)[m
+[m[37m[83642.517809 1:11 ksyscall::fs::stat:62] [36msys_fstatat <= dirfd: -100, path: Some("."), flags: 0[m
+[m[37m[83642.518640 1:11 ksyscall::dispatch:666] [36mSyscall fstatat return Ok(0)[m
+[m[37m[83642.519384 1:11 ksyscall::fs::ctl:40] [36msys_ioctl <= fd: 0, cmd: 21523, arg: 140733193387128[m
+[m[37m[83642.520256 1:11 ksyscall::dispatch:666] [36mSyscall ioctl return Ok(0)[m
+[m[37m[83642.520943 1:11 ksyscall::fs::ctl:40] [36msys_ioctl <= fd: 1, cmd: 21523, arg: 140733193387128[m
+[m[37m[83642.521798 1:11 ksyscall::dispatch:666] [36mSyscall ioctl return Ok(0)[m
+[m[37m[83642.522446 1:11 ksyscall::signal:112] [36msys_rt_sigaction <= signo: SIGHUP, act: SignalAction { flags: SignalActionFlags(RESTART | RESTORER), mask: {}, disposition: Default, restorer: Some(0x4051c50) }[m
+[m[37m[83642.524071 1:11 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83642.524805 1:11 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83642.525514 1:11 ksyscall::signal:112] [36msys_rt_sigaction <= signo: SIGINT, act: SignalAction { flags: SignalActionFlags(RESTORER), mask: {SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS, SIGRT3, SIGRT4, SIGRT5, SIGRT6, SIGRT7, SIGRT8, SIGRT9, SIGRT10, SIGRT11, SIGRT12, SIGRT13, SIGRT14, SIGRT15, SIGRT16, SIGRT17, SIGRT18, SIGRT19, SIGRT20, SIGRT21, SIGRT22, SIGRT23, SIGRT24, SIGRT25, SIGRT26, SIGRT27, SIGRT28, SIGRT29, SIGRT30, SIGRT31, SIGRT32}, disposition: Handler(0x47af0), restorer: Some(0x4051c50) }[m
+[m[37m[83642.531085 1:11 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83642.531792 1:11 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83642.532483 1:11 ksyscall::signal:112] [36msys_rt_sigaction <= signo: SIGQUIT, act: SignalAction { flags: SignalActionFlags(RESTORER), mask: {SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS, SIGRT3, SIGRT4, SIGRT5, SIGRT6, SIGRT7, SIGRT8, SIGRT9, SIGRT10, SIGRT11, SIGRT12, SIGRT13, SIGRT14, SIGRT15, SIGRT16, SIGRT17, SIGRT18, SIGRT19, SIGRT20, SIGRT21, SIGRT22, SIGRT23, SIGRT24, SIGRT25, SIGRT26, SIGRT27, SIGRT28, SIGRT29, SIGRT30, SIGRT31, SIGRT32}, disposition: Ignore, restorer: Some(0x4051c50) }[m
+[m[37m[83642.538034 1:11 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83642.538741 1:11 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83642.539471 1:11 ksyscall::signal:112] [36msys_rt_sigaction <= signo: SIGTERM, act: SignalAction { flags: SignalActionFlags(RESTORER), mask: {SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS, SIGRT3, SIGRT4, SIGRT5, SIGRT6, SIGRT7, SIGRT8, SIGRT9, SIGRT10, SIGRT11, SIGRT12, SIGRT13, SIGRT14, SIGRT15, SIGRT16, SIGRT17, SIGRT18, SIGRT19, SIGRT20, SIGRT21, SIGRT22, SIGRT23, SIGRT24, SIGRT25, SIGRT26, SIGRT27, SIGRT28, SIGRT29, SIGRT30, SIGRT31, SIGRT32}, disposition: Ignore, restorer: Some(0x4051c50) }[m
+[m[37m[83642.545109 1:11 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83642.546073 1:11 ksyscall::mm::mmap:147] [36msys_mmap <= addr: 0x0, length: 0x11000, prot: MmapProt(READ | WRITE), flags: MmapFlags(PRIVATE | ANONYMOUS), fd: -1, offset: 0[m
+[m[37m[83642.547495 1:11 memspace_file::cow:164] [36mCow::map: VA:0xe2000..VA:0xf3000 READ | WRITE | USER[m
+[m[37m[83642.548338 1:11 ksyscall::dispatch:666] [36mSyscall mmap return Ok(925696)[m
+[m[37m[83642.549328 1:11 ksyscall::fs::fd_ops:144] [36msys_openat <= -100 "/dev/tty" 0o400002 0o0[m
+[m[37m[83642.550188 1:11 ksyscall::dispatch:666] [36mSyscall openat return Ok(3)[m
+[m[37m[83642.550862 1:11 ksyscall::fs::fd_ops:268] [36msys_fcntl <= fd: 3 cmd: 1030 arg: 10[m
+[m[37m[83642.551636 1:11 ksyscall::dispatch:666] [36mSyscall fcntl return Ok(4)[m
+[m[37m[83642.552282 1:11 ksyscall::fs::fd_ops:268] [36msys_fcntl <= fd: 4 cmd: 2 arg: 1[m
+[m[37m[83642.552989 1:11 ksyscall::dispatch:666] [36mSyscall fcntl return Ok(0)[m
+[m[37m[83642.553675 1:11 ksyscall::fs::fd_ops:166] [36msys_close <= 3[m
+[m[37m[83642.554257 1:11 kserveices::file:303] [36mclose_file_like <= count: 2[m
+[m[37m[83642.554894 1:11 ksyscall::dispatch:666] [36mSyscall close return Ok(0)[m
+[m[37m[83642.555585 1:11 ksyscall::fs::ctl:40] [36msys_ioctl <= fd: 4, cmd: 21519, arg: 140733193387052[m
+[m[37m[83642.556423 1:11 ksyscall::dispatch:666] [36mSyscall ioctl return Ok(0)[m
+[m[37m[83642.557080 1:11 ksyscall::dispatch:666] [36mSyscall getpgid return Ok(9)[m
+[m[37m[83642.557755 1:11 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83642.558456 1:11 ksyscall::signal:112] [36msys_rt_sigaction <= signo: SIGTSTP, act: SignalAction { flags: SignalActionFlags(RESTORER), mask: {SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS, SIGRT3, SIGRT4, SIGRT5, SIGRT6, SIGRT7, SIGRT8, SIGRT9, SIGRT10, SIGRT11, SIGRT12, SIGRT13, SIGRT14, SIGRT15, SIGRT16, SIGRT17, SIGRT18, SIGRT19, SIGRT20, SIGRT21, SIGRT22, SIGRT23, SIGRT24, SIGRT25, SIGRT26, SIGRT27, SIGRT28, SIGRT29, SIGRT30, SIGRT31, SIGRT32}, disposition: Ignore, restorer: Some(0x4051c50) }[m
+[m[37m[83642.564232 1:11 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83642.564948 1:11 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83642.565661 1:11 ksyscall::signal:112] [36msys_rt_sigaction <= signo: SIGTTOU, act: SignalAction { flags: SignalActionFlags(RESTORER), mask: {SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS, SIGRT3, SIGRT4, SIGRT5, SIGRT6, SIGRT7, SIGRT8, SIGRT9, SIGRT10, SIGRT11, SIGRT12, SIGRT13, SIGRT14, SIGRT15, SIGRT16, SIGRT17, SIGRT18, SIGRT19, SIGRT20, SIGRT21, SIGRT22, SIGRT23, SIGRT24, SIGRT25, SIGRT26, SIGRT27, SIGRT28, SIGRT29, SIGRT30, SIGRT31, SIGRT32}, disposition: Ignore, restorer: Some(0x4051c50) }[m
+[m[37m[83642.571375 1:11 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83642.572105 1:11 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83642.572818 1:11 ksyscall::dispatch:666] [36mSyscall setpgid return Err(KErrorKind::NoSuchProcess)[m
+[m[37m[83642.573777 1:11 ksyscall::fs::ctl:40] [36msys_ioctl <= fd: 4, cmd: 21520, arg: 140733193387036[m
+[m[37m[83642.574633 1:11 ksyscall::dispatch:666] [36mSyscall ioctl return Ok(0)[m
+[m[37m[83642.575432 1:11 ksyscall::fs::fd_ops:144] [36msys_openat <= -100 "/etc/profile" 0o2400000 0o0[m
+[m[37m[83642.576299 1:11 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83642.576901 1:11 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83642.582539 1:11 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83642.583157 1:11 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83642.588737 1:11 ksyscall::dispatch:666] [36mSyscall openat return Ok(3)[m
+[m[37m[83642.589407 1:11 ksyscall::fs::fd_ops:268] [36msys_fcntl <= fd: 3 cmd: 2 arg: 1[m
+[m[37m[83642.590128 1:11 ksyscall::dispatch:666] [36mSyscall fcntl return Ok(0)[m
+[m[37m[83642.590790 1:11 ksyscall::fs::fd_ops:268] [36msys_fcntl <= fd: 3 cmd: 1030 arg: 10[m
+[m[37m[83642.591572 1:11 ksyscall::dispatch:666] [36mSyscall fcntl return Ok(5)[m
+[m[37m[83642.592236 1:11 ksyscall::fs::fd_ops:268] [36msys_fcntl <= fd: 5 cmd: 2 arg: 1[m
+[m[37m[83642.592957 1:11 ksyscall::dispatch:666] [36mSyscall fcntl return Ok(0)[m
+[m[37m[83642.593623 1:11 ksyscall::fs::fd_ops:166] [36msys_close <= 3[m
+[m[37m[83642.594218 1:11 kserveices::file:303] [36mclose_file_like <= count: 2[m
+[m[37m[83642.594868 1:11 ksyscall::dispatch:666] [36mSyscall close return Ok(0)[m
+[m[37m[83642.595726 1:11 ksyscall::fs::io:86] [36msys_read <= fd: 5, buf: 0xd3b00, len: 2047[m
+[m[37m[83642.596666 1:11 ksyscall::dispatch:666] [36mSyscall read return Ok(547)[m
+[m[37m[83642.597467 1:11 ksyscall::dispatch:666] [36mSyscall umask return Ok(18)[m
+[m[37m[83642.598147 1:11 ksyscall::dispatch:666] [36mSyscall umask return Ok(0)[m
+[m[37m[83642.599043 1:11 ksyscall::dispatch:666] [36mSyscall umask return Ok(18)[m
+[m[37m[83642.600276 1:11 ksyscall::mm::mmap:147] [36msys_mmap <= addr: 0x0, length: 0x4000, prot: MmapProt(READ | WRITE), flags: MmapFlags(PRIVATE | ANONYMOUS), fd: -1, offset: 0[m
+[m[37m[83642.601751 1:11 memspace_file::cow:164] [36mCow::map: VA:0xd6000..VA:0xda000 READ | WRITE | USER[m
+[m[37m[83642.602614 1:11 ksyscall::dispatch:666] [36mSyscall mmap return Ok(876544)[m
+[m[37m[83642.603396 1:11 ksyscall::fs::fd_ops:144] [36msys_openat <= -100 "/etc/profile.d/" 0o2440000 0o0[m
+[m[37m[83642.604271 1:11 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83642.604873 1:11 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83642.610496 1:11 ksyscall::dispatch:666] [36mSyscall openat return Ok(3)[m
+[m[37m[83642.611196 1:11 ksyscall::fs::fd_ops:268] [36msys_fcntl <= fd: 3 cmd: 2 arg: 1[m
+[m[37m[83642.611936 1:11 ksyscall::dispatch:666] [36mSyscall fcntl return Ok(0)[m
+[m[37m[83642.612626 1:11 ksyscall::fs::ctl:168] [36msys_getdents64 <= fd: 3, buf: 0xd45c8, len: 2048[m
+[m[37m[83642.613590 1:11 ksyscall::dispatch:666] [36mSyscall getdents64 return Ok(160)[m
+[m[37m[83642.614506 1:11 ksyscall::fs::ctl:168] [36msys_getdents64 <= fd: 3, buf: 0xd45c8, len: 2048[m
+[m[37m[83642.615349 1:11 ksyscall::dispatch:666] [36mSyscall getdents64 return Ok(0)[m
+[m[37m[83642.616051 1:11 ksyscall::fs::fd_ops:166] [36msys_close <= 3[m
+[m[37m[83642.616640 1:11 kserveices::file:303] [36mclose_file_like <= count: 1[m
+[m[37m[83642.617289 1:11 ksyscall::dispatch:666] [36mSyscall close return Ok(0)[m
+[m[37m[83642.617960 1:11 ksyscall::mm::mmap:272] [36msys_munmap <= addr: 0xd6000, length: 4000[m
+[m[37m[83642.618736 1:11 memspace_file::cow:169] [36mCow::unmap: VA:0xd6000..VA:0xda000[m
+[m[37m[83642.619496 1:11 ksyscall::dispatch:666] [36mSyscall munmap return Ok(0)[m
+[m[37m[83642.620213 1:11 ksyscall::fs::stat:62] [36msys_fstatat <= dirfd: -100, path: Some("/etc/profile.d/20locale.sh"), flags: 0[m
+[m[37m[83642.621334 1:11 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83642.621946 1:11 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83642.627461 1:11 ksyscall::dispatch:666] [36mSyscall fstatat return Ok(0)[m
+[m[37m[83642.628151 1:11 ksyscall::dispatch:666] [36mSyscall geteuid return Ok(0)[m
+[m[37m[83642.628860 1:11 ksyscall::fs::fd_ops:144] [36msys_openat <= -100 "/etc/profile.d/20locale.sh" 0o2400000 0o0[m
+[m[37m[83642.629832 1:11 ksyscall::dispatch:666] [36mSyscall openat return Ok(3)[m
+[m[37m[83642.630496 1:11 ksyscall::fs::fd_ops:268] [36msys_fcntl <= fd: 3 cmd: 2 arg: 1[m
+[m[37m[83642.631230 1:11 ksyscall::dispatch:666] [36mSyscall fcntl return Ok(0)[m
+[m[37m[83642.631902 1:11 ksyscall::fs::fd_ops:268] [36msys_fcntl <= fd: 3 cmd: 1030 arg: 10[m
+[m[37m[83642.632654 1:11 ksyscall::dispatch:666] [36mSyscall fcntl return Ok(6)[m
+[m[37m[83642.633306 1:11 ksyscall::fs::fd_ops:268] [36msys_fcntl <= fd: 6 cmd: 2 arg: 1[m
+[m[37m[83642.634002 1:11 ksyscall::dispatch:666] [36mSyscall fcntl return Ok(0)[m
+[m[37m[83642.634655 1:11 ksyscall::fs::fd_ops:166] [36msys_close <= 3[m
+[m[37m[83642.635243 1:11 kserveices::file:303] [36mclose_file_like <= count: 2[m
+[m[37m[83642.635887 1:11 ksyscall::dispatch:666] [36mSyscall close return Ok(0)[m
+[m[37m[83642.636575 1:11 ksyscall::fs::io:86] [36msys_read <= fd: 6, buf: 0xd45c0, len: 2047[m
+[m[37m[83642.637462 1:11 ksyscall::dispatch:666] [36mSyscall read return Ok(97)[m
+[m[37m[83642.638152 1:11 ksyscall::fs::io:86] [36msys_read <= fd: 6, buf: 0xd45c0, len: 2047[m
+[m[37m[83642.638912 1:11 ksyscall::dispatch:666] [36mSyscall read return Ok(0)[m
+[m[37m[83642.639599 1:11 ksyscall::fs::fd_ops:166] [36msys_close <= 6[m
+[m[37m[83642.640205 1:11 kserveices::file:303] [36mclose_file_like <= count: 1[m
+[m[37m[83642.641211 1:11 rsext4::ext4:553] [36mWriting back group descriptors: 8 descriptors, desc_size = 64 bytes[m
+[m[37m[83642.642279 1:11 rsext4::ext4:605] [36mGroup descriptors written back[m
+[m[37m[83642.642959 1:11 rsext4::jbd2::jbd2:61] [36m[JBD2 commit] begin: tid=5 updates_len=3 head=0 start_block=131072 max_len=8192 seq_in_superblock=5 s_start=0[m
+[m[37m[83642.644252 1:11 rsext4::jbd2::jbd2:107] [36m[JBD2 commit] tid=5 tag_idx=0 t_blocknr=145 t_flags=0x0[m
+[m[37m[83642.645139 1:11 rsext4::jbd2::jbd2:107] [36m[JBD2 commit] tid=5 tag_idx=1 t_blocknr=173 t_flags=0x0[m
+[m[37m[83642.646013 1:11 rsext4::jbd2::jbd2:107] [36m[JBD2 commit] tid=5 tag_idx=2 t_blocknr=1 t_flags=0x8[m
+[m[37m[83642.647117 1:11 rsext4::jbd2::jbd2:117] [36m[JBD2 commit] tid=5 descriptor_block_id=131073 (absolute)[m
+[m[37m[83642.648176 1:11 rsext4::jbd2::jbd2:139] [36m[JBD2 commit] tid=5 meta_idx=0 journal_block_id=131074 (absolute) target_phys_block=145[m
+[m[37m[83642.649343 1:11 rsext4::jbd2::jbd2:139] [36m[JBD2 commit] tid=5 meta_idx=1 journal_block_id=131075 (absolute) target_phys_block=173[m
+[m[37m[83642.650513 1:11 rsext4::jbd2::jbd2:139] [36m[JBD2 commit] tid=5 meta_idx=2 journal_block_id=131076 (absolute) target_phys_block=1[m
+[m[37m[83642.651698 1:11 rsext4::jbd2::jbd2:153] [36m[JBD2 BUFFER] BUFFER ALREADY CLEA[m
+[m[37m[83642.652410 1:11 rsext4::jbd2::jbd2:176] [36m[JBD2 commit] tid=5 commit_block_id=131077 (absolute)[m
+[m[37m[83642.653438 1:11 rsext4::jbd2::jbd2:201] [36m[JBD2 commit] end: tid=5 new_sequence=6[m
+[m[37m[83642.654359 1:11 rsext4::ext4:553] [36mWriting back group descriptors: 8 descriptors, desc_size = 64 bytes[m
+[m[37m[83642.655407 1:11 rsext4::ext4:605] [36mGroup descriptors written back[m
+[m[37m[83642.656047 1:11 rsext4::jbd2::jbd2:61] [36m[JBD2 commit] begin: tid=6 updates_len=1 head=0 start_block=131072 max_len=8192 seq_in_superblock=6 s_start=0[m
+[m[37m[83642.657311 1:11 rsext4::jbd2::jbd2:107] [36m[JBD2 commit] tid=6 tag_idx=0 t_blocknr=1 t_flags=0x8[m
+[m[37m[83642.658333 1:11 rsext4::jbd2::jbd2:117] [36m[JBD2 commit] tid=6 descriptor_block_id=131073 (absolute)[m
+[m[37m[83642.659313 1:11 rsext4::jbd2::jbd2:139] [36m[JBD2 commit] tid=6 meta_idx=0 journal_block_id=131074 (absolute) target_phys_block=1[m
+[m[37m[83642.660509 1:11 rsext4::jbd2::jbd2:153] [36m[JBD2 BUFFER] BUFFER ALREADY CLEA[m
+[m[37m[83642.661248 1:11 rsext4::jbd2::jbd2:176] [36m[JBD2 commit] tid=6 commit_block_id=131075 (absolute)[m
+[m[37m[83642.662292 1:11 rsext4::jbd2::jbd2:201] [36m[JBD2 commit] end: tid=6 new_sequence=7[m
+[m[37m[83642.663055 1:11 ksyscall::dispatch:666] [36mSyscall close return Ok(0)[m
+[m[37m[83642.663757 1:11 ksyscall::fs::io:86] [36msys_read <= fd: 5, buf: 0xd3b00, len: 2047[m
+[m[37m[83642.664531 1:11 ksyscall::dispatch:666] [36mSyscall read return Ok(0)[m
+[m[37m[83642.665180 1:11 ksyscall::fs::fd_ops:166] [36msys_close <= 5[m
+[m[37m[83642.665766 1:11 kserveices::file:303] [36mclose_file_like <= count: 1[m
+[m[37m[83642.666698 1:11 rsext4::ext4:553] [36mWriting back group descriptors: 8 descriptors, desc_size = 64 bytes[m
+[m[37m[83642.667777 1:11 rsext4::ext4:605] [36mGroup descriptors written back[m
+[m[37m[83642.668415 1:11 rsext4::jbd2::jbd2:61] [36m[JBD2 commit] begin: tid=7 updates_len=2 head=0 start_block=131072 max_len=8192 seq_in_superblock=7 s_start=0[m
+[m[37m[83642.669694 1:11 rsext4::jbd2::jbd2:107] [36m[JBD2 commit] tid=7 tag_idx=0 t_blocknr=175 t_flags=0x0[m
+[m[37m[83642.670568 1:11 rsext4::jbd2::jbd2:107] [36m[JBD2 commit] tid=7 tag_idx=1 t_blocknr=1 t_flags=0x8[m
+[m[37m[83642.671591 1:11 rsext4::jbd2::jbd2:117] [36m[JBD2 commit] tid=7 descriptor_block_id=131073 (absolute)[m
+[m[37m[83642.672534 1:11 rsext4::jbd2::jbd2:139] [36m[JBD2 commit] tid=7 meta_idx=0 journal_block_id=131074 (absolute) target_phys_block=175[m
+[m[37m[83642.673676 1:11 rsext4::jbd2::jbd2:139] [36m[JBD2 commit] tid=7 meta_idx=1 journal_block_id=131075 (absolute) target_phys_block=1[m
+[m[37m[83642.674819 1:11 rsext4::jbd2::jbd2:153] [36m[JBD2 BUFFER] BUFFER ALREADY CLEA[m
+[m[37m[83642.675532 1:11 rsext4::jbd2::jbd2:176] [36m[JBD2 commit] tid=7 commit_block_id=131076 (absolute)[m
+[m[37m[83642.676568 1:11 rsext4::jbd2::jbd2:201] [36m[JBD2 commit] end: tid=7 new_sequence=8[m
+[m[37m[83642.677479 1:11 rsext4::ext4:553] [36mWriting back group descriptors: 8 descriptors, desc_size = 64 bytes[m
+[m[37m[83642.678532 1:11 rsext4::ext4:605] [36mGroup descriptors written back[m
+[m[37m[83642.679190 1:11 rsext4::jbd2::jbd2:61] [36m[JBD2 commit] begin: tid=8 updates_len=1 head=0 start_block=131072 max_len=8192 seq_in_superblock=8 s_start=0[m
+[m[37m[83642.680516 1:11 rsext4::jbd2::jbd2:107] [36m[JBD2 commit] tid=8 tag_idx=0 t_blocknr=1 t_flags=0x8[m
+[m[37m[83642.681554 1:11 rsext4::jbd2::jbd2:117] [36m[JBD2 commit] tid=8 descriptor_block_id=131073 (absolute)[m
+[m[37m[83642.682503 1:11 rsext4::jbd2::jbd2:139] [36m[JBD2 commit] tid=8 meta_idx=0 journal_block_id=131074 (absolute) target_phys_block=1[m
+[m[37m[83642.683660 1:11 rsext4::jbd2::jbd2:153] [36m[JBD2 BUFFER] BUFFER ALREADY CLEA[m
+[m[37m[83642.684367 1:11 rsext4::jbd2::jbd2:176] [36m[JBD2 commit] tid=8 commit_block_id=131075 (absolute)[m
+[m[37m[83642.685400 1:11 rsext4::jbd2::jbd2:201] [36m[JBD2 commit] end: tid=8 new_sequence=9[m
+[m[37m[83642.686171 1:11 ksyscall::dispatch:666] [36mSyscall close return Ok(0)[m
+[m[37m[83642.686852 1:11 ksyscall::fs::fd_ops:144] [36msys_openat <= -100 "/root/.profile" 0o2400000 0o0[m
+[m[37m[83642.687728 1:11 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83642.688324 1:11 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83642.693862 1:11 ksyscall::dispatch:666] [36mSyscall openat return Err(KErrorKind::NotFound)[m
+[m[37m[83642.695062 1:11 ksyscall::fs::stat:62] [36msys_fstatat <= dirfd: -100, path: Some("MAILPATH"), flags: 0[m
+[m[37m[83642.695991 1:11 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83642.696584 1:11 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83642.702068 1:11 ksyscall::dispatch:666] [36mSyscall fstatat return Err(KErrorKind::NotFound)[m
+[m[37m[83642.703411 1:11 ksyscall::fs::ctl:40] [36msys_ioctl <= fd: 0, cmd: 21505, arg: 140733193386096[m
+[m[37m[83642.704261 1:11 ksyscall::dispatch:666] [36mSyscall ioctl return Ok(0)[m
+[m[37m[83642.705363 1:11 ksyscall::fs::fd_ops:144] [36msys_openat <= -100 "/root/.ash_history" 0o400000 0o666[m
+[m[37m[83642.706265 1:11 rsext4::ext4:189] [36mRoot inode i_mode: 16877[m
+[m[37m[83642.706860 1:11 rsext4::ext4:190] [36mRoot inode detail: Ext4Inode { i_mode: 16877, i_uid: 0, i_size_lo: 4096, i_atime: 1772420419, i_ctime: 1772420419, i_mtime: 1769548774, i_dtime: 0, i_gid: 0, i_links_count: 20, i_blocks_lo: 8, i_flags: 524288, l_i_version: 19, i_block: [127754, 4, 0, 0, 1, 4241, 0, 0, 0, 0, 0, 0, 0, 0, 0], i_generation: 0, i_file_acl_lo: 0, i_size_high: 0, i_obso_faddr: 0, l_i_blocks_high: 0, l_i_file_acl_high: 0, l_i_uid_high: 0, l_i_gid_high: 0, l_i_checksum_lo: 0, l_i_reserved: 0, i_extra_isize: 32, i_checksum_hi: 0, i_ctime_extra: 3735579164, i_mtime_extra: 0, i_atime_extra: 3575118000, i_crtime: 1772420419, i_crtime_extra: 0, i_version_hi: 0, i_projid: 0 }[m
+[m[37m[83642.712242 1:11 ksyscall::dispatch:666] [36mSyscall openat return Err(KErrorKind::NotFound)[m
+[m[37m[83642.713243 1:11 ksyscall::mm::mmap:147] [36msys_mmap <= addr: 0x0, length: 0x7000, prot: MmapProt(READ | WRITE), flags: MmapFlags(PRIVATE | ANONYMOUS), fd: -1, offset: 0[m
+[m[37m[83642.714657 1:11 memspace_file::cow:164] [36mCow::map: VA:0xd6000..VA:0xdd000 READ | WRITE | USER[m
+[m[37m[83642.715518 1:11 ksyscall::dispatch:666] [36mSyscall mmap return Ok(876544)[m
+[m[37m[83642.716275 1:11 ksyscall::fs::ctl:40] [36msys_ioctl <= fd: 0, cmd: 21506, arg: 140733193386160[m
+[m[37m[83642.717147 1:11 ksyscall::dispatch:666] [36mSyscall ioctl return Ok(0)[m
+[m[37m[83642.717806 1:11 ksyscall::fs::ctl:40] [36msys_ioctl <= fd: 0, cmd: 21523, arg: 140733193385824[m
+[m[37m[83642.718645 1:11 ksyscall::dispatch:666] [36mSyscall ioctl return Ok(0)[m
+[m[37m[83642.719337 1:11 ksyscall::dispatch:666] [36mSyscall uname return Ok(0)[m
+[m[37m[83642.720037 1:11 ksyscall::dispatch:666] [36mSyscall geteuid return Ok(0)[m
+[m[37m[83642.720743 1:11 ksyscall::fs::io:110] [36msys_writev <= fd: 2, iovcnt: 1[m
+[mkylin-x:~# [37m[83642.721542 1:11 ksyscall::dispatch:666] [36mSyscall writev return Ok(11)[m
+[m[37m[83642.722223 1:11 ksyscall::io_mpx::poll:36] [36mdo_poll fds=[pollfd { fd: 0, events: 1, revents: 0 }] timeout=Some(0ns)[m
+[m[37m[83642.723349 1:11 ksyscall::dispatch:666] [36mSyscall ppoll return Ok(0)[m
+[m[37m[83642.724018 1:11 ksyscall::fs::io:110] [36msys_writev <= fd: 2, iovcnt: 1[m
+[m[6n[37m[83642.724721 1:11 ksyscall::dispatch:666] [36mSyscall writev return Ok(4)[m
+[m[37m[83642.725392 1:11 ksyscall::signal:112] [36msys_rt_sigaction <= signo: SIGWINCH, act: SignalAction { flags: SignalActionFlags(RESTART | RESTORER), mask: {}, disposition: Handler(0xa7958), restorer: Some(0x4051c50) }[m
+[m[37m[83642.727155 1:11 ksyscall::dispatch:666] [36mSyscall rt_sigaction return Ok(0)[m
+[m[37m[83642.728219 1:11 ksyscall::io_mpx::poll:36] [36mdo_poll fds=[pollfd { fd: 0, events: 1, revents: 0 }] timeout=None[m
+[m[37m[83642.729218 1:11 ktask::run_queue:423] [36mtask block: Task(11, "busybox")[m
+[m

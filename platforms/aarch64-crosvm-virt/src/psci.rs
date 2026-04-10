@@ -84,8 +84,10 @@ impl PlatformDmaIf for DmaPlatformImpl {
 
 #[impl_dev_interface]
 impl PlatformMmioIf for MmioPlatformImpl {
-    fn prepare(paddr: usize, size: usize) -> kerrno::KResult {
-        do_xmap_granules(paddr, size);
+    fn prepare(_paddr: usize, _size: usize) -> kerrno::KResult {
+        // Non-protected VM without pvmfw: skip the KVM MMIO guard HVC chain.
+        // Regular KVM already sets up the guest stage-2 mapping, so
+        // iomap_device just needs to continue into map_linear.
         Ok(())
     }
 }

@@ -1,0 +1,134 @@
+diff --git a/core/kservices/src/vfs/dev/dice.rs b/core/kservices/src/vfs/dev/dice.rs
+index c7322ff9..b881d4f8 100644
+--- a/core/kservices/src/vfs/dev/dice.rs
++++ b/core/kservices/src/vfs/dev/dice.rs
+@@ -33,6 +33,17 @@ pub struct DiceNodeInfo<'a> {
+ const DICE_COMPATIBLE: &str = "kylin,open-dice";
+ const MAX_DICE_DATA_SIZE: usize = 0x1000; // 4KB
+ 
++/// Whether the DICE handover region is described in the device tree.
++///
++/// On AVF protected VMs the pvmfw writes the DICE chain into guest memory
++/// and adds a `/reserved-memory` node for it; without pvmfw (e.g. a
++/// `--protected-vm-without-firmware` run) that node is absent and
++/// `DiceNodeInfo::new()` would panic. Callers should gate `/dev/dice`
++/// construction on this check.
++pub fn available() -> bool {
++    dice_region().is_some()
++}
++
+ impl DiceNodeInfo<'static> {
+     pub fn new() -> Self {
+         DiceNodeInfo {
+diff --git a/core/kservices/src/vfs/dev/mod.rs b/core/kservices/src/vfs/dev/mod.rs
+index b029c5bd..1b82d5a8 100644
+--- a/core/kservices/src/vfs/dev/mod.rs
++++ b/core/kservices/src/vfs/dev/mod.rs
+@@ -437,16 +437,22 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
+         SimpleDir::new_maker(fs.clone(), Arc::new(event::input_devices(fs.clone()))),
+     );
+ 
++    // /dev/dice is only meaningful when pvmfw (or similar) has published a
++    // DICE handover region in the device tree's /reserved-memory. Without it
++    // (e.g. a --protected-vm-without-firmware run), skip the node entirely
++    // instead of panicking inside DiceNodeInfo::new.
+     #[cfg(all(feature = "dice", target_os = "none"))]
+-    root.add(
+-        "dice",
+-        Device::new(
+-            fs.clone(),
+-            NodeType::CharacterDevice,
+-            DeviceId::new(30, 0),
+-            Arc::new(dice::DiceNodeInfo::new()),
+-        ),
+-    );
++    if dice::available() {
++        root.add(
++            "dice",
++            Device::new(
++                fs.clone(),
++                NodeType::CharacterDevice,
++                DeviceId::new(30, 0),
++                Arc::new(dice::DiceNodeInfo::new()),
++            ),
++        );
++    }
+ 
+     #[cfg(feature = "sev")]
+     root.add(
+diff --git a/drivers/kdriver/src/structs/mod.rs b/drivers/kdriver/src/structs/mod.rs
+index 79149d0f..579d2dfd 100644
+--- a/drivers/kdriver/src/structs/mod.rs
++++ b/drivers/kdriver/src/structs/mod.rs
+@@ -92,7 +92,7 @@ impl<D> DeviceContainer<D> {
+     /// container). Returns `None` if there are not enough devices.
+     #[allow(dead_code)]
+     pub fn take_nth(&mut self, n: usize) -> Option<D> {
+-        if self.len() >= n {
++        if n < self.len() {
+             Some(self.0.remove(n))
+         } else {
+             None
+diff --git a/fs/kfs/src/lib.rs b/fs/kfs/src/lib.rs
+index dfa6ebfa..7cb36719 100644
+--- a/fs/kfs/src/lib.rs
++++ b/fs/kfs/src/lib.rs
+@@ -42,11 +42,12 @@ pub fn init_filesystems(mut block_devs: DeviceContainer<KBlockDevice>) {
+     let dev = {
+         #[cfg(feature = "crosvm")]
+         {
+-            // must have two block devices: secure and non-secure
+-            // we only use the second blk
++            // Prefer the second blk (non-secure rootfs when secure+non-secure
++            // are both present); fall back to the only blk if there is just one.
+             block_devs
+                 .take_nth(1)
+-                .expect("Less than two block devices found!")
++                .or_else(|| block_devs.take_nth(0))
++                .expect("No block device found!")
+         }
+         #[cfg(not(feature = "crosvm"))]
+         {
+diff --git a/platforms/aarch64-crosvm-virt/src/init.rs b/platforms/aarch64-crosvm-virt/src/init.rs
+index 20b97604..e8714a73 100644
+--- a/platforms/aarch64-crosvm-virt/src/init.rs
++++ b/platforms/aarch64-crosvm-virt/src/init.rs
+@@ -7,16 +7,16 @@ use kbuild_config::PSCI_METHOD;
+ use kplat::boot::{BootHandler, BootInfo};
+ use log::*;
+ 
+-fn map_kvm_guarded_mmio() {
+-    crate::psci::kvm_guard_granule_init();
+-}
++// fn map_kvm_guarded_mmio() {
++//     crate::psci::kvm_guard_granule_init();
++// }
+ 
+ struct BootHandlerImpl;
+ #[impl_dev_interface]
+ impl BootHandler for BootHandlerImpl {
+     fn prepare_boot_memory(boot_info: &BootInfo) {
+-        map_kvm_guarded_mmio();
+-        let _ = boot_info;
++        // map_kvm_guarded_mmio();
++        // let _ = boot_info;
+     }
+ 
+     fn firmware_init(_boot_info: &BootInfo) {
+diff --git a/platforms/aarch64-crosvm-virt/src/psci.rs b/platforms/aarch64-crosvm-virt/src/psci.rs
+index 2be8fbaa..9250c2f4 100644
+--- a/platforms/aarch64-crosvm-virt/src/psci.rs
++++ b/platforms/aarch64-crosvm-virt/src/psci.rs
+@@ -84,8 +84,10 @@ impl PlatformDmaIf for DmaPlatformImpl {
+ 
+ #[impl_dev_interface]
+ impl PlatformMmioIf for MmioPlatformImpl {
+-    fn prepare(paddr: usize, size: usize) -> kerrno::KResult {
+-        do_xmap_granules(paddr, size);
++    fn prepare(_paddr: usize, _size: usize) -> kerrno::KResult {
++        // Non-protected VM without pvmfw: skip the KVM MMIO guard HVC chain.
++        // Regular KVM already sets up the guest stage-2 mapping, so
++        // iomap_device just needs to continue into map_linear.
+         Ok(())
+     }
+ }

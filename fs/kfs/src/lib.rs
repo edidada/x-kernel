@@ -52,11 +52,12 @@ pub fn init_filesystems(mut block_devs: DeviceContainer<BlockDevice>) {
     let dev = {
         #[cfg(feature = "crosvm")]
         {
-            // must have two block devices: secure and non-secure
-            // we only use the second blk
+            // Prefer the second blk (non-secure rootfs when secure+non-secure
+            // are both present); fall back to the only blk if there is just one.
             block_devs
                 .take_nth(1)
-                .expect("Less than two block devices found!")
+                .or_else(|| block_devs.take_nth(0))
+                .expect("No block device found!")
         }
         #[cfg(not(feature = "crosvm"))]
         {
