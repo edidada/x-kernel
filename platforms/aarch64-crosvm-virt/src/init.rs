@@ -7,16 +7,15 @@ use kbuild_config::PSCI_METHOD;
 use kplat::boot::{BootHandler, BootInfo};
 use log::*;
 
-// fn map_kvm_guarded_mmio() {
-//     crate::psci::kvm_guard_granule_init();
-// }
-
 struct BootHandlerImpl;
 #[impl_dev_interface]
 impl BootHandler for BootHandlerImpl {
-    fn prepare_boot_memory(boot_info: &BootInfo) {
-        // map_kvm_guarded_mmio();
-        // let _ = boot_info;
+    fn prepare_boot_memory(_boot_info: &BootInfo) {
+        // Probe KVM MMIO guard.  When pvmfw has enrolled the VM, this caches
+        // the guard granule size so that later iomap_device() calls go through
+        // the MMIO_GUARD_MAP HVC.  When no pvmfw ran, the probe is a harmless
+        // no-op and GUARD_GRANULE stays unset.
+        crate::psci::kvm_guard_granule_init();
     }
 
     fn firmware_init(_boot_info: &BootInfo) {

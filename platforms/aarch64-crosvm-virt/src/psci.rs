@@ -28,11 +28,28 @@ pub fn psci_hvc_call(func: u32, arg0: usize, arg1: usize, arg2: usize) -> (usize
     (ret0, ret1)
 }
 /// Query and cache the KVM MMIO guard granule size.
+///
+/// When pvmfw has enrolled the VM into MMIO guard mode, this HVC returns the
+/// guard granule size.  When no pvmfw ran (or the hypervisor does not support
+/// MMIO guard), the call returns an error and we leave GUARD_GRANULE unset so
+/// that later code can fall back to the unguarded path.
 pub fn kvm_guard_granule_init() {
     let (guard_granule, guard_has_range) =
         psci_hvc_call(ARM_SMCCC_VENDOR_HYP_KVM_MMIO_GUARD_INFO_FUNC_ID, 0, 0, 0);
-    assert_eq!(guard_has_range, 0x1);
-    GUARD_GRANULE.call_once(|| guard_granule);
+    // guard_granule is the page size; guard_has_range == 1 means range-based
+    // guard is supported.  A negative / zero return means not enrolled.
+    if guard_has_range == 0x1 && guard_granule > 0 {
+        log::info!(
+            "[mmio-guard] enrolled, granule = {:#x}",
+            guard_granule
+        );
+        GUARD_GRANULE.call_once(|| guard_granule);
+    } else {
+        log::info!(
+            "[mmio-guard] not active (granule={:#x}, has_range={:#x}), MMIO guard disabled",
+            guard_granule, guard_has_range
+        );
+    }
 }
 fn __invoke_mmioguard(phys_addr: usize, _nr_granules: usize, map: bool) -> usize {
     let func_id: u32 = if map {
@@ -84,10 +101,21 @@ impl PlatformDmaIf for DmaPlatformImpl {
 
 #[impl_dev_interface]
 impl PlatformMmioIf for MmioPlatformImpl {
-    fn prepare(_paddr: usize, _size: usize) -> kerrno::KResult {
-        // Non-protected VM without pvmfw: skip the KVM MMIO guard HVC chain.
-        // Regular KVM already sets up the guest stage-2 mapping, so
-        // iomap_device just needs to continue into map_linear.
+    fn prepare(paddr: usize, size: usize) -> kerrno::KResult {
+        if let Some(&granule) = GUARD_GRANULE.get() {
+            // pvmfw enrolled MMIO guard — must map each granule via HVC before
+            // the guest stage-1 mapping becomes usable.
+            let aligned_start = paddr & !(granule - 1);
+            let aligned_end = (paddr + size + granule - 1) & !(granule - 1);
+            let nr_granules = (aligned_end - aligned_start) / granule;
+            log::debug!(
+                "[mmio-guard] mapping paddr={:#x} size={:#x} ({} granules)",
+                aligned_start, aligned_end - aligned_start, nr_granules
+            );
+            do_xmap_granules(aligned_start, aligned_end - aligned_start);
+        }
+        // If GUARD_GRANULE is unset, no pvmfw ran → MMIO guard not active →
+        // regular KVM already allows the access via stage-2.
         Ok(())
     }
 }
