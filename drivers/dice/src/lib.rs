@@ -20,6 +20,10 @@ const MAX_DICE_DATA_SIZE: usize = 0x1000;
 pub const DICE_IOCTL_GET_HANDOVER: u32 = 0x9000_7A00;
 pub const DICE_IOCTL_GET_RAW_HANDOVER: u32 = 0x9000_7A01;
 
+pub fn available() -> bool {
+    dice_region().is_some()
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct DiceDevice {
     region: (VirtAddr, usize),

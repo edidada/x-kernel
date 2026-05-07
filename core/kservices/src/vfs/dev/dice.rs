@@ -22,18 +22,7 @@ pub struct DiceNodeInfo;
 
 type DiceUserBuffer = [usize; 3];
 
-/// Whether the DICE handover region is described in the device tree.
-///
-/// On AVF protected VMs the pvmfw writes the DICE chain into guest memory
-/// and adds a `/reserved-memory` node for it; without pvmfw (e.g. a
-/// `--protected-vm-without-firmware` run) that node is absent and
-/// `DiceNodeInfo::new()` would panic. Callers should gate `/dev/dice`
-/// construction on this check.
-pub fn available() -> bool {
-    dice_region().is_some()
-}
-
-impl DiceNodeInfo<'static> {
+impl DiceNodeInfo {
     pub fn new() -> Self {
         Self
     }

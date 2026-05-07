@@ -441,7 +441,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     // (e.g. a --protected-vm-without-firmware run), skip the node entirely
     // instead of panicking inside DiceNodeInfo::new.
     #[cfg(all(feature = "dice", target_os = "none"))]
-    if dice::available() {
+    if dice_driver::available() {
         root.add(
             "dice",
             Device::new(
