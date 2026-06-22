@@ -24,16 +24,17 @@ impl AllocError {
     }
 }
 
-/// Maps an allocation-layer error into the canonical kernel error domain.
-pub const fn map_alloc_error(error: AllocError) -> kerrno::KError {
-    error.into_kerror()
+impl From<AllocError> for kerrno::KError {
+    fn from(error: AllocError) -> Self {
+        error.into_kerror()
+    }
 }
 
 #[cfg(unittest)]
 mod tests {
     use unittest::def_test;
 
-    use super::{AllocError, map_alloc_error};
+    use super::AllocError;
 
     #[def_test]
     fn maps_all_phase1_variants_to_nomemory() {
@@ -45,13 +46,13 @@ mod tests {
     }
 
     #[def_test]
-    fn free_function_mapping_matches_method() {
+    fn from_alloc_error_matches_method() {
         assert_eq!(
-            map_alloc_error(AllocError::NoMemory),
+            kerrno::KError::from(AllocError::NoMemory),
             AllocError::NoMemory.into_kerror()
         );
         assert_eq!(
-            map_alloc_error(AllocError::UnsupportedContext),
+            kerrno::KError::from(AllocError::UnsupportedContext),
             AllocError::UnsupportedContext.into_kerror()
         );
     }

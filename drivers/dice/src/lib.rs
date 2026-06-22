@@ -59,23 +59,10 @@ impl DiceDevice {
             dice_parse_handover(handover).map_err(|_| KError::InvalidInput)?;
 
         let total_len = cdi_attest.len() + cdi_seal.len() + chain.len();
-        let mut derived = KVec::try_with_capacity(total_len, AllocContext::Sleepable)
-            .map_err(|_| KError::NoMemory)?;
-        for &byte in cdi_attest {
-            derived
-                .try_push(byte, AllocContext::Sleepable)
-                .map_err(|_| KError::NoMemory)?;
-        }
-        for &byte in cdi_seal {
-            derived
-                .try_push(byte, AllocContext::Sleepable)
-                .map_err(|_| KError::NoMemory)?;
-        }
-        for &byte in chain {
-            derived
-                .try_push(byte, AllocContext::Sleepable)
-                .map_err(|_| KError::NoMemory)?;
-        }
+        let mut derived = KVec::try_with_capacity(total_len, AllocContext::Sleepable)?;
+        derived.try_extend_from_slice(cdi_attest, AllocContext::Sleepable)?;
+        derived.try_extend_from_slice(cdi_seal, AllocContext::Sleepable)?;
+        derived.try_extend_from_slice(chain, AllocContext::Sleepable)?;
         Ok(derived)
     }
 }

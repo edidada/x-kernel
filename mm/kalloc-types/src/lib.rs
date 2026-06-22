@@ -21,7 +21,7 @@ mod fault_injection;
 mod kbox;
 mod kvec;
 
-pub use alloc_error::{AllocError, map_alloc_error};
+pub use alloc_error::AllocError;
 pub use collect::try_collect_vec;
 pub use context::AllocContext;
 pub use kbox::KBox;

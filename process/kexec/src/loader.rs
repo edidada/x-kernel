@@ -448,8 +448,7 @@ impl ElfLoader {
             ldso.as_ref()
                 .map_or_else(|| elf.entry(), |ldso| ldso.entry()),
         );
-        let auxv = try_collect_vec(elf.aux_vector(PAGE_SIZE_4K, ldso.map(|elf| elf.base())))
-            .map_err(map_alloc_error)?;
+        let auxv = try_collect_vec(elf.aux_vector(PAGE_SIZE_4K, ldso.map(|elf| elf.base())))?;
 
         Ok((entry, auxv))
     }
@@ -487,6 +486,7 @@ fn script_interpreter_args(line: &str, script_path: &str, original_args: &[Strin
         .chain(original_args.iter().skip(1).cloned())
         .collect()
 }
+
 
 fn load_user_app_request_inner(
     uspace: &mut MmSpace,

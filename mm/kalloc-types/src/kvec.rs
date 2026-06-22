@@ -318,6 +318,52 @@ impl<T> KVec<T> {
     }
 }
 
+impl<T: Copy> KVec<T> {
+    /// Appends a copied slice, growing the vector explicitly if needed.
+    ///
+    /// On failure the vector keeps its previous contents and length.
+    ///
+    /// Only [`AllocContext::Sleepable`] is supported in phase 1.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError::NoMemory`] when growth is required and the kernel
+    /// allocator cannot satisfy it.
+    ///
+    /// Returns [`AllocError::UnsupportedContext`] when the caller requests an
+    /// allocation context reserved for a later phase.
+    pub fn try_extend_from_slice(
+        &mut self,
+        values: &[T],
+        context: AllocContext,
+    ) -> Result<(), AllocError> {
+        if values.len() > self.cap - self.len {
+            self.try_reserve(values.len(), context)?;
+        } else {
+            require_supported_context(context)?;
+        }
+
+        if values.is_empty() {
+            return Ok(());
+        }
+
+        // SAFETY: `try_reserve` above guaranteed enough spare capacity for
+        // `values.len()` more elements. The source slice is valid for reads,
+        // the destination range starts at the first uninitialized slot in the
+        // owned buffer, and the regions cannot overlap because the source
+        // lives outside this vector allocation.
+        unsafe {
+            ptr::copy_nonoverlapping(
+                values.as_ptr(),
+                self.ptr.as_ptr().add(self.len),
+                values.len(),
+            );
+        }
+        self.len += values.len();
+        Ok(())
+    }
+}
+
 impl<T> Drop for KVec<T> {
     fn drop(&mut self) {
         if self.len != 0 {
@@ -478,6 +524,16 @@ mod tests {
     }
 
     #[def_test]
+    fn try_extend_from_slice_appends_bulk() {
+        let mut vec = KVec::try_with_capacity(1, AllocContext::Sleepable).unwrap();
+        vec.try_push(3_u32, AllocContext::Sleepable).unwrap();
+        vec.try_extend_from_slice(&[5_u32, 8_u32, 13_u32], AllocContext::Sleepable)
+            .unwrap();
+        assert_eq!(vec.as_slice(), &[3, 5, 8, 13]);
+        assert!(vec.capacity() >= vec.len());
+    }
+
+    #[def_test]
     fn try_with_capacity_rejects_unsupported_context() {
         let err = KVec::<u32>::try_with_capacity(4, AllocContext::Atomic).unwrap_err();
         assert_eq!(err, AllocError::UnsupportedContext);
@@ -496,6 +552,17 @@ mod tests {
     fn try_push_rejects_unsupported_context_without_mutation() {
         let mut vec = KVec::<u32>::new();
         let err = vec.try_push(9, AllocContext::ReservedCritical).unwrap_err();
+        assert_eq!(err, AllocError::UnsupportedContext);
+        assert!(vec.is_empty());
+        assert_eq!(vec.as_slice(), &[]);
+    }
+
+    #[def_test]
+    fn try_extend_from_slice_rejects_unsupported_context_without_mutation() {
+        let mut vec = KVec::<u32>::new();
+        let err = vec
+            .try_extend_from_slice(&[9_u32, 10_u32], AllocContext::ReservedCritical)
+            .unwrap_err();
         assert_eq!(err, AllocError::UnsupportedContext);
         assert!(vec.is_empty());
         assert_eq!(vec.as_slice(), &[]);
@@ -703,5 +770,18 @@ mod tests {
         let err = vec.try_push(99, AllocContext::Sleepable).unwrap_err();
         assert_eq!(err, AllocError::NoMemory);
         assert_eq!(vec.as_slice(), &[0, 1, 2, 3]);
+    }
+
+    #[def_test(serial)]
+    fn extend_from_slice_growth_failure_keeps_existing_prefix() {
+        let mut vec = KVec::try_with_capacity(1, AllocContext::Sleepable).unwrap();
+        vec.try_push(3_u32, AllocContext::Sleepable).unwrap();
+
+        let _guard = fail_next_allocation();
+        let err = vec
+            .try_extend_from_slice(&[5_u32, 8_u32], AllocContext::Sleepable)
+            .unwrap_err();
+        assert_eq!(err, AllocError::NoMemory);
+        assert_eq!(vec.as_slice(), &[3]);
     }
 }

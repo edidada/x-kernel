@@ -7,7 +7,7 @@
 extern crate alloc;
 
 use kaddr_layout::{IOMAP_VADDR, IOMAP_VSIZE};
-use kalloc_types::{AllocContext, KVec, KVecIntoIter};
+use kalloc_types::{AllocContext, AllocError, KVec, KVecIntoIter};
 use khal::paging::MappingFlags;
 use kspin::SpinNoIrq;
 use memaddr::{MemoryAddr, PhysAddr, VirtAddr, VirtAddrRange, va};
@@ -20,6 +20,12 @@ pub enum IoMapError {
     InvalidRange,
     MappingFailed,
     NoMemory,
+}
+
+impl From<AllocError> for IoMapError {
+    fn from(_: AllocError) -> Self {
+        Self::NoMemory
+    }
 }
 
 /// A registered device MMIO region.
@@ -90,12 +96,9 @@ pub fn register_fixed_device_region(
 /// Return an iterator over runtime-registered device MMIO regions.
 pub fn device_regions() -> Result<DeviceRegionIter, IoMapError> {
     let regions = DEVICE_REGISTRY.lock();
-    let mut snapshot = KVec::try_with_capacity(regions.len(), AllocContext::Sleepable)
-        .map_err(|_| IoMapError::NoMemory)?;
+    let mut snapshot = KVec::try_with_capacity(regions.len(), AllocContext::Sleepable)?;
     for entry in regions.iter() {
-        snapshot
-            .try_push(entry.region, AllocContext::Sleepable)
-            .map_err(|_| IoMapError::NoMemory)?;
+        snapshot.try_push(entry.region, AllocContext::Sleepable)?;
     }
     Ok(snapshot.into_iter())
 }
@@ -162,15 +165,13 @@ pub fn iomap_device(
         name,
         vaddr: Some(mapped_start),
     };
-    regions
-        .try_push(
-            RegionEntry {
-                region,
-                refs: RegionRefs::Counted(1),
-            },
-            AllocContext::Sleepable,
-        )
-        .map_err(|_| IoMapError::NoMemory)?;
+    regions.try_push(
+        RegionEntry {
+            region,
+            refs: RegionRefs::Counted(1),
+        },
+        AllocContext::Sleepable,
+    )?;
     Ok(mapped_start + paddr.align_offset_4k())
 }
 
@@ -226,15 +227,13 @@ fn register_region(region: DeviceRegion) -> Result<(), IoMapError> {
         return Ok(());
     }
 
-    regions
-        .try_push(
-            RegionEntry {
-                region,
-                refs: RegionRefs::Pinned,
-            },
-            AllocContext::Sleepable,
-        )
-        .map_err(|_| IoMapError::NoMemory)?;
+    regions.try_push(
+        RegionEntry {
+            region,
+            refs: RegionRefs::Pinned,
+        },
+        AllocContext::Sleepable,
+    )?;
     Ok(())
 }
 
