@@ -105,6 +105,7 @@ kalloc = { path = "mm/kalloc" }
 fat = { path = "fs/filesystems/fat" }
 fs_block = { path = "fs/block" }
 fs_boot = { path = "fs/boot" }
+kalloc_types = { path = "mm/kalloc-types", package = "kalloc-types" }
 procfs = { path = "fs/filesystems/procfs" }
 devfs = { path = "fs/filesystems/devfs" }
 fs9p = { path = "fs/filesystems/fs9p", default-features = false }

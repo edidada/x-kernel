@@ -9,6 +9,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
+kalloc_types.workspace = true
 kerrno.workspace = true
 khal.workspace = true
 memaddr.workspace = true

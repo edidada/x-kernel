@@ -6,9 +6,8 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
-
 use kaddr_layout::{IOMAP_VADDR, IOMAP_VSIZE};
+use kalloc_types::{AllocContext, KVec, KVecIntoIter};
 use khal::paging::MappingFlags;
 use kspin::SpinNoIrq;
 use memaddr::{MemoryAddr, PhysAddr, VirtAddr, VirtAddrRange, va};
@@ -33,7 +32,7 @@ pub struct DeviceRegion {
 }
 
 /// Iterator over registered device MMIO regions.
-pub type DeviceRegionIter = alloc::vec::IntoIter<DeviceRegion>;
+pub type DeviceRegionIter = KVecIntoIter<DeviceRegion>;
 
 /// Lifetime policy of a registered MMIO region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,7 +50,7 @@ struct RegionEntry {
     refs: RegionRefs,
 }
 
-static DEVICE_REGISTRY: SpinNoIrq<Vec<RegionEntry>> = SpinNoIrq::new(Vec::new());
+static DEVICE_REGISTRY: SpinNoIrq<KVec<RegionEntry>> = SpinNoIrq::new(KVec::new());
 
 // Boot/runtime layout ownership lives in kaddr_layout. memspace only consumes
 // the dedicated I/O VA window and allocates device mappings from that range.
@@ -89,13 +88,16 @@ pub fn register_fixed_device_region(
 }
 
 /// Return an iterator over runtime-registered device MMIO regions.
-pub fn device_regions() -> DeviceRegionIter {
-    DEVICE_REGISTRY
-        .lock()
-        .iter()
-        .map(|entry| entry.region)
-        .collect::<Vec<_>>()
-        .into_iter()
+pub fn device_regions() -> Result<DeviceRegionIter, IoMapError> {
+    let regions = DEVICE_REGISTRY.lock();
+    let mut snapshot = KVec::try_with_capacity(regions.len(), AllocContext::Sleepable)
+        .map_err(|_| IoMapError::NoMemory)?;
+    for entry in regions.iter() {
+        snapshot
+            .try_push(entry.region, AllocContext::Sleepable)
+            .map_err(|_| IoMapError::NoMemory)?;
+    }
+    Ok(snapshot.into_iter())
 }
 
 /// Map a device MMIO region and register it for diagnostics.
@@ -160,11 +162,15 @@ pub fn iomap_device(
         name,
         vaddr: Some(mapped_start),
     };
-    regions.try_reserve(1).map_err(|_| IoMapError::NoMemory)?;
-    regions.push(RegionEntry {
-        region,
-        refs: RegionRefs::Counted(1),
-    });
+    regions
+        .try_push(
+            RegionEntry {
+                region,
+                refs: RegionRefs::Counted(1),
+            },
+            AllocContext::Sleepable,
+        )
+        .map_err(|_| IoMapError::NoMemory)?;
     Ok(mapped_start + paddr.align_offset_4k())
 }
 
@@ -220,11 +226,15 @@ fn register_region(region: DeviceRegion) -> Result<(), IoMapError> {
         return Ok(());
     }
 
-    regions.try_reserve(1).map_err(|_| IoMapError::NoMemory)?;
-    regions.push(RegionEntry {
-        region,
-        refs: RegionRefs::Pinned,
-    });
+    regions
+        .try_push(
+            RegionEntry {
+                region,
+                refs: RegionRefs::Pinned,
+            },
+            AllocContext::Sleepable,
+        )
+        .map_err(|_| IoMapError::NoMemory)?;
     Ok(())
 }
 

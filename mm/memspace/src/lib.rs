@@ -21,7 +21,7 @@ mod lifetime;
 mod vma;
 
 use kaddr_layout::{KERNEL_ASPACE_BASE, KERNEL_ASPACE_SIZE};
-use kerrno::LinuxResult;
+use kerrno::{LinuxError, LinuxResult};
 use khal::{
     mem::{MemFlags, MemoryRegion, memory_regions, p2v},
     paging::MappingFlags,
@@ -99,7 +99,10 @@ pub fn new_kernel_layout() -> LinuxResult<MmSpace> {
     for region in memory_regions() {
         map_memory_region(&mut vmspace, region)?;
     }
-    for region in device_regions() {
+    for region in device_regions().map_err(|err| match err {
+        IoMapError::NoMemory => LinuxError::ENOMEM,
+        IoMapError::InvalidRange | IoMapError::MappingFailed => LinuxError::EINVAL,
+    })? {
         let mut mapped = MemoryRegion::new_mmio(region.paddr.as_usize(), region.size, region.name);
         mapped.vaddr = region.vaddr;
         map_memory_region(&mut vmspace, mapped)?;

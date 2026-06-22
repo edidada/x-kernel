@@ -485,11 +485,18 @@ fn log_memory_regions() {
         );
     }
 
-    let device_regions = memspace::device_regions().collect::<Vec<_, MAX_REGION_LOG_SUMMARIES>>();
-    if !device_regions.is_empty() {
-        info!("Found runtime device/iomap regions:");
-        for region in device_regions {
-            log_device_region(&region);
+    match memspace::device_regions() {
+        Ok(device_regions) => {
+            let device_regions = device_regions.collect::<Vec<_, MAX_REGION_LOG_SUMMARIES>>();
+            if !device_regions.is_empty() {
+                info!("Found runtime device/iomap regions:");
+                for region in device_regions {
+                    log_device_region(&region);
+                }
+            }
+        }
+        Err(err) => {
+            warn!("failed to snapshot runtime device/iomap regions: {:?}", err);
         }
     }
 }

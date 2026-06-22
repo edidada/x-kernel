@@ -9,6 +9,7 @@ use core::{ffi::CStr, iter};
 
 use filemap::new_file_private_vma;
 use kcred::Cred;
+use kalloc_types::{KVec, map_alloc_error, try_collect_vec};
 use kernel_elf_parser::{AuxEntry, ELFHeaders, ELFHeadersBuilder, ELFParser, app_stack_region};
 use kerrno::{KError, KResult};
 use khal::paging::{MappingFlags, PageSize};
@@ -324,6 +325,7 @@ impl ElfCacheEntry {
 struct ElfLoader(LruCache<ElfCacheEntry, 32>);
 type CacheProbeResult = Result<(), Vec<u8>>;
 type PreparedImageResult = Result<PreparedExecImage, (BinPrm, Vec<u8>)>;
+type LoadResult = Result<(VirtAddr, KVec<AuxEntry>), Vec<u8>>;
 
 impl ElfLoader {
     const fn new() -> Self {
@@ -446,9 +448,8 @@ impl ElfLoader {
             ldso.as_ref()
                 .map_or_else(|| elf.entry(), |ldso| ldso.entry()),
         );
-        let auxv = elf
-            .aux_vector(PAGE_SIZE_4K, ldso.map(|elf| elf.base()))
-            .collect::<Vec<_>>();
+        let auxv = try_collect_vec(elf.aux_vector(PAGE_SIZE_4K, ldso.map(|elf| elf.base())))
+            .map_err(map_alloc_error)?;
 
         Ok((entry, auxv))
     }

@@ -10,6 +10,7 @@ extern crate alloc;
 
 use alloc::{vec, vec::Vec};
 
+use kalloc_types::{AllocContext, KVec};
 use kerrno::{KError, KResult};
 use memaddr::{VirtAddr, pa};
 use of::dice_region;
@@ -49,7 +50,7 @@ impl DiceDevice {
         Ok(buffer)
     }
 
-    pub fn derive_handover_data(&self, code_hash: &[u8]) -> KResult<Vec<u8>> {
+    pub fn derive_handover_data(&self, code_hash: &[u8]) -> KResult<KVec<u8>> {
         let handover_data = self.read_raw_handover_data()?;
         let mut handover_buf = vec![0u8; handover_data.len()];
         let handover = dice_main_flow_chain_codehash(&handover_data, code_hash, &mut handover_buf)
@@ -58,13 +59,23 @@ impl DiceDevice {
             dice_parse_handover(handover).map_err(|_| KError::InvalidInput)?;
 
         let total_len = cdi_attest.len() + cdi_seal.len() + chain.len();
-        let mut derived = Vec::new();
-        derived
-            .try_reserve_exact(total_len)
+        let mut derived = KVec::try_with_capacity(total_len, AllocContext::Sleepable)
             .map_err(|_| KError::NoMemory)?;
-        derived.extend_from_slice(cdi_attest);
-        derived.extend_from_slice(cdi_seal);
-        derived.extend_from_slice(chain);
+        for &byte in cdi_attest {
+            derived
+                .try_push(byte, AllocContext::Sleepable)
+                .map_err(|_| KError::NoMemory)?;
+        }
+        for &byte in cdi_seal {
+            derived
+                .try_push(byte, AllocContext::Sleepable)
+                .map_err(|_| KError::NoMemory)?;
+        }
+        for &byte in chain {
+            derived
+                .try_push(byte, AllocContext::Sleepable)
+                .map_err(|_| KError::NoMemory)?;
+        }
         Ok(derived)
     }
 }
@@ -73,6 +84,6 @@ pub fn read_raw_handover_data() -> KResult<Vec<u8>> {
     DiceDevice::new()?.read_raw_handover_data()
 }
 
-pub fn derive_handover_data(code_hash: &[u8]) -> KResult<Vec<u8>> {
+pub fn derive_handover_data(code_hash: &[u8]) -> KResult<KVec<u8>> {
     DiceDevice::new()?.derive_handover_data(code_hash)
 }

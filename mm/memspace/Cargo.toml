@@ -14,6 +14,7 @@ smp = ["page_table/smp"]
 anon = { workspace = true }
 kalloc = { workspace = true }
 kcpu_id_map = { workspace = true }
+kalloc_types = { workspace = true }
 kerrno = { workspace = true }
 khal = { workspace = true }
 kplat = { workspace = true }
