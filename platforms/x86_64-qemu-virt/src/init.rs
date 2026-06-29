@@ -30,7 +30,11 @@ impl BootHandler for BootHandlerImpl {
         timer_driver::x86_lapic_tsc::early_init(
             timer_driver::x86_lapic_tsc::TimerConfig::platform_static(TIMER_FREQUENCY_HZ as u64),
         );
-        kernel_boot::bootln!("timer init");
+        kernel_boot::bootln!(
+            "timer init: tsc_freq={} kHz source={}",
+            timer_driver::x86_lapic_tsc::frequency_khz(),
+            timer_driver::x86_lapic_tsc::frequency_source()
+        );
         console_driver::init(console_driver::ConsoleConfig::ioport(
             console_driver::boot_console_io_port(),
             Some(
