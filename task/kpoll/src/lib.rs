@@ -117,14 +117,22 @@ impl Inner {
             self.stats.register_count += 1;
         }
 
+        for i in 0..self.len() {
+            // SAFETY: `len()` is capped by `cursor`, which only counts entries
+            // that were previously written with `Waker` values.
+            let old = unsafe { self.entries[i].assume_init_ref() };
+            if old.will_wake(waker) {
+                return;
+            }
+        }
+
         let slot = self.cursor % POLL_SET_CAPACITY;
         if self.cursor >= POLL_SET_CAPACITY {
             // SAFETY: once `cursor >= POLL_SET_CAPACITY`, every slot in the
-            // ring buffer has been initialized at least once before reuse.
-            let old = unsafe { self.entries[slot].assume_init_read() };
-            if !old.will_wake(waker) {
-                old.wake();
-            }
+            // ring buffer has been initialized at least once before reuse. The
+            // old waker is dropped without waking because registration must not
+            // synthesize readiness.
+            unsafe { self.entries[slot].assume_init_drop() };
             self.cursor = ((slot + 1) % POLL_SET_CAPACITY) + POLL_SET_CAPACITY;
         } else {
             self.cursor += 1;

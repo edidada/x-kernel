@@ -14,6 +14,11 @@ read -r -a tee_test_bins <<< "${TEE_TEST_BINS:-storage_test cryp_test}"
 : "${HOSTFWD_PORT:?HOSTFWD_PORT is required}"
 : "${VSOCK_CID:?VSOCK_CID is required}"
 
+default_libutee_ref="f4a2b891945638818a3601f219df4be47f01f23c"
+if [ -z "${LIBUTEE_REF:-}" ] || [ "${LIBUTEE_REF}" = "null" ]; then
+    LIBUTEE_REF="${default_libutee_ref}"
+fi
+
 if [ "${#tee_test_bins[@]}" -eq 0 ]; then
     echo "TEE_TEST_BINS must contain at least one test binary" >&2
     exit 2
@@ -22,13 +27,15 @@ fi
 libutee_dir="/xkernel-target/libutee-${arch}"
 mkdir -p "${libutee_dir}"
 
-echo "==> Syncing rust-libutee..."
+echo "==> Syncing rust-libutee (${LIBUTEE_REF})..."
 if [ -d "${libutee_dir}/.git" ]; then
-    git -C "${libutee_dir}" fetch --depth 1 origin HEAD
-    git -C "${libutee_dir}" reset --hard FETCH_HEAD
+    git -C "${libutee_dir}" remote set-url origin "${LIBUTEE_REPO}"
 else
-    git clone --depth 1 "${LIBUTEE_REPO}" "${libutee_dir}"
+    git -C "${libutee_dir}" init
+    git -C "${libutee_dir}" remote add origin "${LIBUTEE_REPO}"
 fi
+git -C "${libutee_dir}" fetch --depth 1 origin "${LIBUTEE_REF}"
+git -C "${libutee_dir}" reset --hard FETCH_HEAD
 
 echo "==> Building TEE tests for ${musl_target}: ${tee_test_bins[*]}"
 (

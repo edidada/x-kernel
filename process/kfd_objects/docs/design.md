@@ -139,6 +139,7 @@ fd 路径暴露语义。
 - interest table；
 - ready queue；
 - level / edge / oneshot 触发状态；
+- edge-triggered 写就绪已上报状态；
 - `poll(IN)` 与 ready queue 可见性的对应关系。
 
 它不处理：

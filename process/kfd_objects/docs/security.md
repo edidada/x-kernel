@@ -45,6 +45,7 @@ ktask timer runtime / generic fd readiness
   `PIPE_BUF` 原子写入语义保持一致。
 - `Signalfd::read/poll` 必须围绕同一 pending signal 可见性与 mask 语义保持一致。
 - `Epoll` 的 interest table、ready queue 与 trigger mode 必须围绕同一就绪语义保持一致。
+- edge-triggered 写就绪在同一 ready 周期内只上报一次，避免 sticky `OUT` 通过 stale wake 反复入队。
 
 ## 并发模型
 
@@ -85,6 +86,7 @@ timer runtime 回调与 `read/poll/settime` 可能并发发生。
 - `SpinNoPreempt<HashMap<...>>` 保护 interest table；
 - `SpinNoPreempt<VecDeque<...>>` 保护 ready queue；
 - `AtomicBool` 跟踪 interest 是否已经入队；
+- `AtomicBool` 跟踪 edge-triggered 写就绪是否已经上报；
 - `PollSet` 维护 `epoll_wait` 侧唤醒。
 
 watched file 的 fd table 解析现在由 syscall adapter 完成。
@@ -107,7 +109,7 @@ watched file 失效后的清理维护同一个状态机。
 | T-10 | `signalfd` mask 更新与 `read/poll` 观察不一致 | 中 | mask 经 `RwLock` 更新，并在更新后唤醒 poller 重新观察 |
 | T-11 | `signalfd` 将不可捕获信号暴露给用户态 fd 语义 | 低 | syscall adapter 统一移除 `SIGKILL` / `SIGSTOP` |
 | T-12 | `epoll` ready queue 去重失效导致重复唤醒、事件风暴或 `MOD` 后丢失事件 | 中 | `in_ready_queue` 位与 ready queue 统一维护；`MOD` 替换已入队 interest 时同步替换 ready queue 中的 `Weak` |
-| T-13 | `epoll` oneshot / edge-triggered 状态机错误 | 高 | `TriggerMode` 集中建模并在消费路径统一更新 |
+| T-13 | `epoll` oneshot / edge-triggered 状态机错误 | 高 | `TriggerMode` 与 edge 写就绪已上报状态在消费路径统一更新 |
 | T-14 | watched file 失效后 interest 清理不完整 | 中 | ready 消费路径在 `Weak` 升级失败后立即回收 interest |
 
 ## 审计清单

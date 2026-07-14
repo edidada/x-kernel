@@ -25,17 +25,26 @@ pipeline {
         string(name: 'PROJECT_REPO', defaultValue: 'https://gitee.com/openkylin/x-kernel')
         string(name: 'DEFAULT_BRANCH', defaultValue: 'main')
         string(name: 'LIBUTEE_REPO', defaultValue: 'https://gitee.com/openkylin/rust-libutee')
+        string(name: 'LIBUTEE_REF', defaultValue: 'f4a2b891945638818a3601f219df4be47f01f23c')
         string(name: 'TEST_HARNESS_REPO', defaultValue: 'https://gitee.com/openkylin/starry-test-harness')
         string(name: 'TEST_HARNESS_BRANCH', defaultValue: 'master')
+        string(name: 'TEST_HARNESS_REF', defaultValue: '2f9244c581015c06e259752d7956887a984e47c2')
     }
 
     environment {
         CI = 'true'
+        // Git ownership checks can fail before any pipeline step has a chance
+        // to call markSafeDirectory() inside the containerized workspace.
+        GIT_CONFIG_COUNT = '1'
+        GIT_CONFIG_KEY_0 = 'safe.directory'
+        GIT_CONFIG_VALUE_0 = '*'
         PROJECT_REPO = "${params.PROJECT_REPO}"
         DEFAULT_BRANCH = "${params.DEFAULT_BRANCH}"
         LIBUTEE_REPO = "${params.LIBUTEE_REPO}"
+        LIBUTEE_REF = "${params.LIBUTEE_REF}"
         TEST_HARNESS_REPO = "${params.TEST_HARNESS_REPO}"
         TEST_HARNESS_BRANCH = "${params.TEST_HARNESS_BRANCH}"
+        TEST_HARNESS_REF = "${params.TEST_HARNESS_REF}"
         AUX_RUST_TOOLCHAIN = 'nightly-2026-03-08'
         CARGO_TERM_COLOR = 'always'
         CARGO_TERM_QUIET = 'true'
@@ -387,6 +396,15 @@ stdbuf -oL -eL make build
             dir('test-harness') {
                 gitCheckoutWithToken(env.TEST_HARNESS_REPO, env.TEST_HARNESS_BRANCH)
                 markSafeDirectory()
+                sh label: "Pin starry-test-harness ${arch}", script: """#!/bin/bash
+set -euo pipefail
+${stageLogTeeLine(stageName)}
+test_harness_ref="\${TEST_HARNESS_REF:-}"
+if [ -n "\${test_harness_ref}" ] && [ "\${test_harness_ref}" != "null" ]; then
+    git checkout --detach "\${test_harness_ref}"
+fi
+echo "starry-test-harness HEAD: \$(git rev-parse HEAD)"
+"""
 
                 withEnv(["XKERNEL_REMOTE=${pwd()}/..", "ARCH=${arch}",
                          "STARRY_SKIP_BUILD=1",

@@ -29,7 +29,7 @@ krlimit.workspace = true
 kresources.workspace = true
 ksignal.workspace = true
 ksync.workspace = true
-ktask.workspace = true
+ktask = { workspace = true, features = ["task_ext"] }
 ktimer.workspace = true
 klazy.workspace = true
 memspace.workspace = true

@@ -453,7 +453,10 @@ impl SocketOps for TcpSocket {
 
             match result {
                 Ok(0) => break,
-                Ok(len) => total_sent += len,
+                Ok(len) => {
+                    poll_interfaces();
+                    total_sent += len;
+                }
                 Err(_) if total_sent > 0 => return Ok(total_sent),
                 Err(err) => return Err(err),
             }
