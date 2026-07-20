@@ -9,7 +9,7 @@ use core::{ffi::CStr, iter};
 
 use filemap::new_file_private_vma;
 use kcred::Cred;
-use kalloc_types::{KVec, map_alloc_error, try_collect_vec};
+use kalloc_types::{KVec, try_collect_vec};
 use kernel_elf_parser::{AuxEntry, ELFHeaders, ELFHeadersBuilder, ELFParser, app_stack_region};
 use kerrno::{KError, KResult};
 use khal::paging::{MappingFlags, PageSize};
@@ -325,7 +325,6 @@ impl ElfCacheEntry {
 struct ElfLoader(LruCache<ElfCacheEntry, 32>);
 type CacheProbeResult = Result<(), Vec<u8>>;
 type PreparedImageResult = Result<PreparedExecImage, (BinPrm, Vec<u8>)>;
-type LoadResult = Result<(VirtAddr, KVec<AuxEntry>), Vec<u8>>;
 
 impl ElfLoader {
     const fn new() -> Self {
@@ -425,7 +424,7 @@ impl ElfLoader {
         &mut self,
         uspace: &mut MmSpace,
         prepared: &PreparedExecImage,
-    ) -> KResult<(VirtAddr, Vec<AuxEntry>)> {
+    ) -> KResult<(VirtAddr, KVec<AuxEntry>)> {
         // Point of no return: from here on the old user image is discarded and
         // all remaining work must consume prevalidated, already-pinned objects.
         uspace.clear();
@@ -486,7 +485,6 @@ fn script_interpreter_args(line: &str, script_path: &str, original_args: &[Strin
         .chain(original_args.iter().skip(1).cloned())
         .collect()
 }
-
 
 fn load_user_app_request_inner(
     uspace: &mut MmSpace,

@@ -372,11 +372,10 @@ mod tests {
     use unittest::def_test;
 
     use super::*;
-    use crate::fault_injection::{fail_allocations_after, fail_next_allocation};
+    use crate::fault_injection::fail_next_allocation;
 
     #[derive(Debug)]
     struct DropTracker<'a> {
-        id: usize,
         drops: &'a AtomicUsize,
     }
 
@@ -494,22 +493,10 @@ mod tests {
     fn drop_cleans_all_elements() {
         let drops = AtomicUsize::new(0);
         let mut d = KVecDeque::new();
-        d.try_push_back(
-            DropTracker {
-                id: 1,
-                drops: &drops,
-            },
-            AllocContext::Sleepable,
-        )
-        .unwrap();
-        d.try_push_back(
-            DropTracker {
-                id: 2,
-                drops: &drops,
-            },
-            AllocContext::Sleepable,
-        )
-        .unwrap();
+        d.try_push_back(DropTracker { drops: &drops }, AllocContext::Sleepable)
+            .unwrap();
+        d.try_push_back(DropTracker { drops: &drops }, AllocContext::Sleepable)
+            .unwrap();
         drop(d);
         assert_eq!(drops.load(Ordering::SeqCst), 2);
     }
@@ -518,14 +505,8 @@ mod tests {
     fn clear_drops_elements() {
         let drops = AtomicUsize::new(0);
         let mut d = KVecDeque::new();
-        d.try_push_back(
-            DropTracker {
-                id: 1,
-                drops: &drops,
-            },
-            AllocContext::Sleepable,
-        )
-        .unwrap();
+        d.try_push_back(DropTracker { drops: &drops }, AllocContext::Sleepable)
+            .unwrap();
         d.clear();
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert!(d.is_empty());

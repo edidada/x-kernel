@@ -890,7 +890,6 @@ mod tests {
     #[derive(Debug, Clone)]
     struct CloneTracker<'a> {
         id: usize,
-        clones: &'a AtomicUsize,
         drops: &'a AtomicUsize,
     }
 
@@ -912,18 +911,15 @@ mod tests {
 
     #[def_test]
     fn try_extend_cloned_into_empty() {
-        let clone_count = AtomicUsize::new(0);
         let drop_count = AtomicUsize::new(0);
 
         let src = crate::kvec![
             CloneTracker {
                 id: 1,
-                clones: &clone_count,
                 drops: &drop_count,
             },
             CloneTracker {
                 id: 2,
-                clones: &clone_count,
                 drops: &drop_count,
             },
         ]
@@ -942,14 +938,12 @@ mod tests {
 
     #[def_test]
     fn try_extend_cloned_appends_to_existing() {
-        let clone_count = AtomicUsize::new(0);
         let drop_count = AtomicUsize::new(0);
 
         let mut vec = KVec::try_with_capacity(4, AllocContext::Sleepable).unwrap();
         vec.try_push(
             CloneTracker {
                 id: 10,
-                clones: &clone_count,
                 drops: &drop_count,
             },
             AllocContext::Sleepable,
@@ -959,12 +953,10 @@ mod tests {
         let src = crate::kvec![
             CloneTracker {
                 id: 20,
-                clones: &clone_count,
                 drops: &drop_count,
             },
             CloneTracker {
                 id: 30,
-                clones: &clone_count,
                 drops: &drop_count,
             },
         ]
