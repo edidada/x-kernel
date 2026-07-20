@@ -19,6 +19,7 @@ tracking = ["kalloc/tracking"]
 
 [dependencies]
 alloc-engine.workspace = true
+hashbrown.workspace = true
 kalloc.workspace = true
 kerrno.workspace = true
 unittest.workspace = true

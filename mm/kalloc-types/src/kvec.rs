@@ -364,6 +364,106 @@ impl<T: Copy> KVec<T> {
     }
 }
 
+impl<T: Clone> KVec<T> {
+    /// Appends elements cloned from `values`, growing the vector if needed.
+    ///
+    /// Each element is individually cloned via `T::clone`. On failure the
+    /// vector keeps its previous contents and length.
+    ///
+    /// Only [`AllocContext::Sleepable`] is supported in phase 1.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError::NoMemory`] when growth is required and the kernel
+    /// allocator cannot satisfy it.
+    ///
+    /// Returns [`AllocError::UnsupportedContext`] when the caller requests an
+    /// allocation context reserved for a later phase.
+    ///
+    /// # Panics
+    ///
+    /// If a `T::clone` call panics, already-cloned elements are dropped before
+    /// the panic propagates, and the vector remains in its previous state.
+    pub fn try_extend_cloned_from_slice(
+        &mut self,
+        values: &[T],
+        context: AllocContext,
+    ) -> Result<(), AllocError> {
+        if values.len() > self.cap - self.len {
+            self.try_reserve(values.len(), context)?;
+        } else {
+            require_supported_context(context)?;
+        }
+
+        if values.is_empty() {
+            return Ok(());
+        }
+
+        // Guard: on panic during cloning, drop the elements we've already
+        // written and restore the old length.
+        struct CloneGuard<'a, T> {
+            vec: &'a mut KVec<T>,
+            start: usize,
+            cloned: usize,
+        }
+
+        impl<T> Drop for CloneGuard<'_, T> {
+            fn drop(&mut self) {
+                // SAFETY: The range [start, start+cloned) contains
+                // initialized elements that were written by the clone loop.
+                // Dropping them and resetting len preserves the KVec
+                // invariant (only elements in [0, len) are initialized).
+                unsafe {
+                    core::ptr::drop_in_place(core::ptr::slice_from_raw_parts_mut(
+                        self.vec.ptr.as_ptr().add(self.start),
+                        self.cloned,
+                    ));
+                }
+                // The caller's panic will prevent reaching the post-loop
+                // len update; restoring old len means the vector looks
+                // exactly like it did before try_extend_cloned_from_slice.
+            }
+        }
+
+        let start = self.len;
+        let mut guard = CloneGuard {
+            vec: self,
+            start,
+            cloned: 0,
+        };
+
+        for value in values {
+            // SAFETY: try_reserve above ensured capacity for at least
+            // `values.len()` more elements. The slot at start+cloned is
+            // within the allocation and currently uninitialized.
+            unsafe {
+                guard
+                    .vec
+                    .ptr
+                    .as_ptr()
+                    .add(start + guard.cloned)
+                    .write(value.clone());
+            }
+            guard.cloned += 1;
+        }
+
+        // All clones succeeded. Disarm the guard.
+        let cloned_count = guard.cloned;
+        core::mem::forget(guard);
+
+        // SAFETY: The cloned_count elements written above are now fully
+        // owned by the vector. Advancing len brings them into the
+        // initialized prefix, satisfying the KVec invariant.
+        unsafe {
+            // Reborrow self to get past the guard borrow.
+            let this: &mut KVec<T> = &mut *(self as *mut KVec<T>);
+            this.len += cloned_count;
+        }
+
+        Ok(())
+    }
+}
+
 impl<T> Drop for KVec<T> {
     fn drop(&mut self) {
         if self.len != 0 {
@@ -783,5 +883,124 @@ mod tests {
             .unwrap_err();
         assert_eq!(err, AllocError::NoMemory);
         assert_eq!(vec.as_slice(), &[3]);
+    }
+
+    // -- try_extend_cloned_from_slice -----------------------------------
+
+    #[derive(Debug, Clone)]
+    struct CloneTracker<'a> {
+        id: usize,
+        clones: &'a AtomicUsize,
+        drops: &'a AtomicUsize,
+    }
+
+    impl Drop for CloneTracker<'_> {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl Clone for DropTracker<'_> {
+        fn clone(&self) -> Self {
+            Self {
+                id: self.id,
+                drops: self.drops,
+                sum: self.sum,
+            }
+        }
+    }
+
+    #[def_test]
+    fn try_extend_cloned_into_empty() {
+        let clone_count = AtomicUsize::new(0);
+        let drop_count = AtomicUsize::new(0);
+
+        let src = crate::kvec![
+            CloneTracker {
+                id: 1,
+                clones: &clone_count,
+                drops: &drop_count,
+            },
+            CloneTracker {
+                id: 2,
+                clones: &clone_count,
+                drops: &drop_count,
+            },
+        ]
+        .unwrap();
+
+        let mut vec = KVec::try_with_capacity(2, AllocContext::Sleepable).unwrap();
+        vec.try_extend_cloned_from_slice(&src, AllocContext::Sleepable)
+            .unwrap();
+        assert_eq!(vec.len(), 2);
+        assert_eq!(vec.as_slice()[0].id, 1);
+        assert_eq!(vec.as_slice()[1].id, 2);
+
+        drop(vec);
+        assert_eq!(drop_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[def_test]
+    fn try_extend_cloned_appends_to_existing() {
+        let clone_count = AtomicUsize::new(0);
+        let drop_count = AtomicUsize::new(0);
+
+        let mut vec = KVec::try_with_capacity(4, AllocContext::Sleepable).unwrap();
+        vec.try_push(
+            CloneTracker {
+                id: 10,
+                clones: &clone_count,
+                drops: &drop_count,
+            },
+            AllocContext::Sleepable,
+        )
+        .unwrap();
+
+        let src = crate::kvec![
+            CloneTracker {
+                id: 20,
+                clones: &clone_count,
+                drops: &drop_count,
+            },
+            CloneTracker {
+                id: 30,
+                clones: &clone_count,
+                drops: &drop_count,
+            },
+        ]
+        .unwrap();
+        vec.try_extend_cloned_from_slice(&src, AllocContext::Sleepable)
+            .unwrap();
+
+        assert_eq!(vec.len(), 3);
+        assert_eq!(vec.as_slice()[0].id, 10);
+        assert_eq!(vec.as_slice()[1].id, 20);
+        assert_eq!(vec.as_slice()[2].id, 30);
+    }
+
+    #[def_test]
+    fn try_extend_cloned_empty_is_noop() {
+        let mut vec = KVec::try_with_capacity(4, AllocContext::Sleepable).unwrap();
+        vec.try_push(1_u32, AllocContext::Sleepable).unwrap();
+        let empty: &[u32] = &[];
+        vec.try_extend_cloned_from_slice(empty, AllocContext::Sleepable)
+            .unwrap();
+        assert_eq!(vec.len(), 1);
+        assert_eq!(vec.as_slice(), &[1]);
+    }
+
+    #[def_test(serial)]
+    fn try_extend_cloned_growth_failure_preserves_content() {
+        let mut vec = KVec::try_with_capacity(1, AllocContext::Sleepable).unwrap();
+        vec.try_push(1_u32, AllocContext::Sleepable).unwrap();
+
+        let _guard = fail_next_allocation();
+        let err = vec
+            .try_extend_cloned_from_slice(&[2_u32, 3_u32], AllocContext::Sleepable)
+            .unwrap_err();
+        assert_eq!(err, AllocError::NoMemory);
+        // The original content must be intact.
+        assert_eq!(vec.as_slice(), &[1]);
+        assert_eq!(vec.len(), 1);
     }
 }

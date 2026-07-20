@@ -17,9 +17,9 @@
 
 - 公共类型 `AllocError`
 - 公共类型 `AllocContext`
-- 公共包装类型 `KBox<T>` / `KVec<T>`
-- 公共 helper `try_collect_vec`
-- 公共 helper `map_alloc_error`
+- 公共包装类型 `KBox<T>` / `KVec<T>` / `KVecDeque<T>` / `KArc<T>` / `KWeak<T>` / `KString`
+- 公共包装类型 `KHashMap<K, V>` / `KBTreeMap<K, V>` / `KBTreeSet<T>` / `KBinaryHeap<T>`
+- 公共 helper `try_collect_vec` / `kvec![]` / `TryClone`
 
 当前不涉及：
 
@@ -41,6 +41,40 @@
   - `ptr::copy_nonoverlapping`：扩容时搬运已初始化元素到新缓冲区
   - `ptr::write`：向未初始化尾槽写入新元素
   - `ptr::drop_in_place`：销毁已初始化前缀
+- `src/karc.rs`
+  - `ptr::write`：向未初始化的 `KArcInner` header 字段和 `data` 写入值
+  - `ptr::drop_in_place`：在 `Drop` 中销毁 data
+  - `ptr::read`：在 `try_unwrap` 中读出 data
+  - `kalloc::global_allocator().dealloc()`：在最后一个引用释放时
+    回收 `KArcInner` 分配
+  - `ManuallyDrop`：在 `new_cyclic` 中防止临时 `KWeak` 的 Drop
+    不正确地递减 refcount
+- `src/kstring.rs`
+  - `str::from_utf8_unchecked`：在 `as_str()` 中将内部字节缓冲区解释为
+    UTF-8 `&str`
+  - `String::from_utf8_unchecked`：在 `into_string()` 中将内部字节转移
+    到标准 `String`
+- `src/kvecdeque.rs`
+  - `ptr::write` / `ptr::read`：环形缓冲区元素的读写
+  - `ptr::copy_nonoverlapping`：扩容时搬运元素到新缓冲区
+  - `ptr::drop_in_place`：析构已初始化元素
+  - `slice::from_raw_parts`：暴露已初始化段为切片
+  - `kalloc::global_allocator().dealloc()`：回收旧缓冲区
+- `src/kbtree/node.rs`（移植自 std B 树实现）
+  - `ptr::write` / `ptr::read` / `ptr::copy_nonoverlapping`：B 树节点
+    内 key/value/edge 的读写与搬运
+  - `ptr::drop_in_place`：节点析构
+  - `NonNull::new_unchecked`：将全局分配器返回的指针包装为 `NonNull`
+  - `kalloc::global_allocator().dealloc()`：节点分裂/合并时回收旧节点
+  - `Box::from_raw`：将 raw 指针重装为 `Box` 以移交所有权
+- `src/kbtree/map.rs`（移植自 std B 树实现）
+  - `ptr::read` / `ptr::write`：迭代器内部的状态搬运
+  - `unreachable!()`：不可达分支标记
+  - `mem::replace` / `mem::take`：树重组时的所有权转移
+- `src/khashmap.rs`
+  - 无直接 unsafe 代码；所有不安全操作由 `hashbrown::HashMap` 负责
+- `src/kbinaryheap.rs`
+  - 无直接 unsafe 代码；所有不安全操作由 `BinaryHeap` 负责
 
 ## 内存安全不变量
 
@@ -55,6 +89,33 @@
   - `pop` / `truncate` / `clear` / `swap_remove` 必须对被移除元素执行恰好一次
     所有权转移或析构，不能泄漏也不能双 drop。
 - `try_collect_vec` 失败时不得向调用方暴露部分收集成功的 `KVec<T>`。
+- `KArc<T>` / `KWeak<T>` 必须维护以下不变量：
+  - `KArcInner<T>` 分配始终为 `Layout::new::<KArcInner<T>>()` 描述的
+    一个连续分配单元。
+  - `strong` 和 `weak` 计数永远不会溢出（溢出时 abort，与 std 行为一致）。
+  - `strong >= 1` 时 `data` 一定处于已初始化且存活状态；`strong == 0`
+    时 `data` 已经被析构。
+  - `KArc::new_cyclic` 在构造期间保持 `strong = 0`，在 data 写入完成后
+    才原子地设 `strong = 1`（Release），确保闭包内的 `KWeak::upgrade()`
+    返回 `None`，不会观察到未初始化的 data。
+  - `KWeak::upgrade` 的 CAS 循环必须在观察到 `strong == 0` 后安全返回
+    `None`，不得产生悬空指针。
+  - `weak` 计数始终 >= `strong` 计数（每个 `KArc` 持有一个隐式 weak）。
+- `KString` 必须维护以下不变量：
+  - 内部字节缓冲区 `KVec<u8>` 始终包含合法 UTF-8 字节序列。
+  - 所有修改内部缓冲区的变体方法（`try_push`、`try_push_str`、
+    `try_push_fmt`）仅写入合法 UTF-8 片段。
+  - `as_str()` 的 `unsafe` 调用安全依赖于以上 UTF-8 不变量的维护。
+- `KVecDeque<T>` 必须维护以下不变量：
+  - 环形缓冲区 `ptr` 指向 `cap` 个连续槽位，`[head, head+len)` 内元素已初始化
+    （可能 wrap around），其余槽位未初始化。
+  - `try_push_back` / `try_push_front` / `try_reserve` 失败时不得破坏已有元素。
+- `KHashMap<K, V>` 不维护额外的内存安全不变量；`hashbrown::HashMap` 的
+  `try_reserve` 在 OOM 时通过 `Allocator` trait 返回错误（前提是全局分配器
+  在 OOM 时返回 null 而非 panic）。
+- `KBTreeMap<K, V>` / `KBTreeSet<T>` 的 B 树节点分配全部通过 `KBox::try_new`
+  进行，OOM 时返回 `AllocError`。B 树的结构不变量（统一深度、节点容量）
+  由移植自标准库的代码维护。
 - 公共 API 不暴露内部所有权表示，避免调用者绕过后续 fallible 语义边界。
 - `AllocError` 与 `AllocContext` 不携带悬垂引用或原始指针。
 
@@ -62,7 +123,9 @@
 
 - 当前骨架不声明新的并发不变量。
 - `KBox<T>` / `KVec<T>` 的线程安全属性取决于内部元素类型和未来实现。
-- 本 crate 不包含内部共享可变全局状态，因此没有额外锁顺序问题。
+- `KArc<T>` / `KWeak<T>` 通过 `AtomicUsize` 引用计数实现线程安全共享。
+- `KHashMap<K,V>`（包装 `hashbrown::HashMap`）和 `KBTreeMap` / `KBTreeSet`
+  的线程安全取决于内部元素类型，本 crate 不引入额外的锁顺序问题。
 
 ## 威胁分析
 
@@ -87,6 +150,8 @@
 | 调用者未采用新类型层 | 继续直接使用 `Vec`/`Box` infallible API | 该路径仍可能 panic-on-OOM | 迁移范围外行为不变 | 后续任务按路径迁移 |
 | `AllocContext` 语义被误解为已实现 | 调用者依赖 `NoWait`/`Atomic` | 语义假设错误 | 可能引入未来设计返工 | 文档明确仅 `Sleepable` 会在后续阶段支持 |
 | 包装类型暴露过多内部细节 | 公共字段或过宽 API | 难以保持未来不变量 | 后续扩展受阻 | 当前字段私有，API 极窄 |
+| B 树移植代码的 unsafe 块缺少 SAFETY 注释 | 对移植代码启用 `undocumented_unsafe_blocks` lint | clippy 报错 | 开发者可能手动添加不准确的注释 | 通过 `#![allow]` 屏蔽该 lint，未来由 B 树专家补充 |
+| B 树内部分配失败未被调用方处理 | `KBTreeMap::try_insert` 返回 `Err` 但调用方忽略 | 操作失败但调用方继续执行 | 可能访问未正确构造的树状态 | 所有公开 insert 方法返回 `Result`，调用方必须处理 |
 
 ## 故障管理
 
@@ -109,7 +174,13 @@
   分配上下文，需要新增独立签名而不是静默改变现有 helper 语义。
 - 当前已补 UT 覆盖成功路径、上下文拒绝、RAII drop、ZST、基础删除语义，
   以及 test-only failure injection 下的确定性 OOM 路径。
-- 当前没有 `Arc`、`String` 等配套类型。
+- `KArc<T>` / `KWeak<T>` / `KString` 已提供，覆盖 `Arc` / `Weak` /
+  `String` 的可失败替代。
+- `KHashMap<K,V>` / `KBTreeMap<K,V>` / `KBTreeSet<T>` / `KBinaryHeap<T>` /
+  `KVecDeque<T>` 已提供，覆盖 `HashMap` / `BTreeMap` / `BTreeSet` /
+  `BinaryHeap` / `VecDeque` 的可失败替代。
+- `TryClone` trait 目前仅为原始类型和 `Option<T>` 提供 impl；对于自定义类型，
+  需手动实现 `TryClone` 才能使用 `KBTreeMap::try_clone` 等操作。
 - 当前没有 no-wait / atomic / reserve-backed 真实行为。
 
 ## 审计清单

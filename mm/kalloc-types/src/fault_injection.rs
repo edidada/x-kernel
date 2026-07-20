@@ -10,7 +10,7 @@ const DISABLED: usize = usize::MAX;
 
 static ALLOCATIONS_BEFORE_FAILURE: AtomicUsize = AtomicUsize::new(DISABLED);
 
-pub(crate) struct AllocationFailureGuard {
+pub struct AllocationFailureGuard {
     previous: usize,
 }
 
@@ -20,16 +20,16 @@ impl Drop for AllocationFailureGuard {
     }
 }
 
-pub(crate) fn fail_allocations_after(successful_allocations: usize) -> AllocationFailureGuard {
+pub fn fail_allocations_after(successful_allocations: usize) -> AllocationFailureGuard {
     let previous = ALLOCATIONS_BEFORE_FAILURE.swap(successful_allocations, Ordering::SeqCst);
     AllocationFailureGuard { previous }
 }
 
-pub(crate) fn fail_next_allocation() -> AllocationFailureGuard {
+pub fn fail_next_allocation() -> AllocationFailureGuard {
     fail_allocations_after(0)
 }
 
-pub(crate) fn maybe_fail_allocation() -> Result<(), AllocError> {
+pub fn maybe_fail_allocation() -> Result<(), AllocError> {
     loop {
         let remaining = ALLOCATIONS_BEFORE_FAILURE.load(Ordering::SeqCst);
         if remaining == DISABLED {

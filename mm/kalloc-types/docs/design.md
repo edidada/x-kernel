@@ -25,32 +25,74 @@ mm/kalloc-types/
 │   ├── collect.rs
 │   ├── context.rs
 │   ├── fault_injection.rs
+│   ├── karc.rs
+│   ├── kbinaryheap.rs
 │   ├── kbox.rs
+│   ├── kbtree/
+│   │   ├── mod.rs
+│   │   ├── map.rs
+│   │   ├── node.rs
+│   │   ├── search.rs
+│   │   └── set.rs
+│   ├── khashmap.rs
+│   ├── kstring.rs
 │   ├── kvec.rs
-│   └── lib.rs
+│   ├── kvecdeque.rs
+│   ├── lib.rs
+│   └── try_clone.rs
 └── docs/
     ├── design.md
     └── security.md
 ```
 
-当前骨架阶段覆盖：
+当前阶段覆盖：
 
-- `AllocError`
-- `AllocContext`
+- `AllocError` / `AllocContext`
 - `KBox<T>`
-- `KVec<T>`
+- `KVec<T>` / `KVecDeque<T>`
+- `KArc<T>` / `KWeak<T>`
+- `KString`
+- `KHashMap<K, V>` — fallible 哈希表，包装 `hashbrown::HashMap`
+- `KBTreeMap<K, V>` / `KBTreeSet<T>` — fallible B 树，fork 自 std 实现
+- `KBinaryHeap<T>` — fallible 优先队列
+- `TryClone` — fallible clone trait
+- `kvec![]` — fallible 向量构造宏
 
-当前已实现的第一批 fallible API：
+当前已实现的 fallible API：
 
 - `KBox::try_new`
 - `KBox::try_new_uninit`
 - `KVec::try_with_capacity`
 - `KVec::try_reserve`
 - `KVec::try_push`
+- `KVec::try_extend_from_slice`
+- `KVec::try_extend_cloned_from_slice`
 - `KVec::pop`
 - `KVec::truncate`
 - `KVec::clear`
 - `KVec::swap_remove`
+- `KArc::try_new`
+- `KArc::try_new_cyclic`
+- `KArc::downgrade` (→ `KWeak<T>`)
+- `KWeak::upgrade` (→ `Option<KArc<T>>`)
+- `KArc::try_unwrap`
+- `KArc::ptr_eq` / `KWeak::ptr_eq`
+- `KArc::strong_count` / `KArc::weak_count`
+- `KString::try_with_capacity`
+- `KString::try_from_str`
+- `KString::try_push` / `KString::try_push_str`
+- `KString::try_push_fmt`
+- `KVecDeque::try_with_capacity`
+- `KVecDeque::try_push_back` / `try_push_front`
+- `KVecDeque::pop_front` / `pop_back`
+- `KHashMap::try_with_capacity` / `try_reserve`
+- `KHashMap::try_insert` / `get` / `remove` / `iter`
+- `KBTreeMap::try_new` / `try_insert` / `try_entry`
+- `KBTreeMap::get` / `remove` / `iter` / `range`
+- `KBTreeSet::try_insert` / `contains` / `remove` / `iter`
+- `KBinaryHeap::try_push` / `pop` / `peek`
+- `TryClone::try_clone`
+- `kvec![a, b, c]` — 返回 `Result<KVec<T>, AllocError>`
 - `try_collect_vec`
 - `map_alloc_error`
 - test-only failure injection for deterministic OOM-path coverage
@@ -124,8 +166,23 @@ alloc-engine / page allocator
 
 ## Drop / 资源释放
 
-当前 `KBox<T>` 已经通过 `kalloc::global_allocator()` 实现显式可失败构造，
-成功后仍然转入 `Box<T>` 的 RAII 所有权模型。`KVec<T>` 则直接拥有 raw
-buffer，并通过 `kalloc::global_allocator()` 实现显式可失败的预分配、扩容和
-追加入口，失败时保持容器旧状态有效；基础删除/截断操作也由 `KVec<T>`
-自带 RAII 负责元素析构。Drop 语义分别由 `Box<T>` 和 `KVec<T>` 自身维护。
+`KBox<T>` 通过 `kalloc::global_allocator()` 实现显式可失败构造，成功后转入
+`Box<T>` 的 RAII 所有权模型。`KVec<T>` / `KVecDeque<T>` 直接拥有 raw buffer，
+通过 `kalloc::global_allocator()` 实现 fallible 分配，失败时保持容器旧状态有效。
+`KArc<T>` 通过原子引用计数管理共享所有权，`Drop` 时递减计数并在最后一个引用
+释放时回收分配。`KBTreeMap` / `KBTreeSet` 内部使用 `KBox<T>` 管理 B 树节点，
+删除操作自动回收节点内存。
+
+## B 树移植说明
+
+`KBTreeMap` / `KBTreeSet` 的实现移植自标准库 `std::collections::BTreeMap` /
+`BTreeSet`（经 `fallible_collections` 适配）。标准库的 `BTreeMap` 每次插入
+都可能在内部分配新节点，且没有 `try_reserve` 等 fallible API。移植版本将所有
+内部分配点（`Root::new_leaf`、`node.push_level`、节点分裂）改为通过
+`KBox::try_new` 分配，使 `try_insert` / `try_entry` 等方法能够返回
+`AllocError` 而非 panic。
+
+移植代码中保留了标准库的 unsafe 块，它们的正确性由上游保证。`node.rs`、
+`map.rs` 中通过 `#![allow]` 屏蔽了部分移植代码特有的 lint（如
+`undocumented_unsafe_blocks`），这些 unsafe 块的 SAFETY 注释需 B 树算法
+专业知识，不宜机械添加。

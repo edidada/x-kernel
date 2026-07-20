@@ -75,6 +75,15 @@ impl<T> KBox<T> {
     pub fn into_inner(self) -> T {
         *self.inner
     }
+
+    /// Consumes the wrapper and returns the inner `Box<T>`.
+    ///
+    /// This is useful for integrating with code that expects a standard
+    /// `Box` (e.g. B-tree node storage). The `Box` will use the same
+    /// allocator (`kalloc::global_allocator()`) for deallocation.
+    pub fn into_box(self) -> Box<T> {
+        self.inner
+    }
 }
 
 impl<T> KBox<MaybeUninit<T>> {
