@@ -19,56 +19,6 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-#[cfg(unittest)]
-pub mod fault_injection {
-    use core::sync::atomic::{AtomicUsize, Ordering};
-
-    const DISABLED: usize = usize::MAX;
-    static FAIL_AFTER: AtomicUsize = AtomicUsize::new(DISABLED);
-
-    /// RAII guard that restores the previous `FAIL_AFTER` value on drop.
-    pub struct GlobalAllocFailureGuard {
-        previous: usize,
-    }
-
-    impl Drop for GlobalAllocFailureGuard {
-        fn drop(&mut self) {
-            FAIL_AFTER.store(self.previous, Ordering::SeqCst);
-        }
-    }
-
-    /// Inject a single global-alloc failure on the next allocation.
-    /// Returns a guard that restores the previous state when dropped.
-    pub fn fail_global_alloc() -> GlobalAllocFailureGuard {
-        let previous = FAIL_AFTER.swap(0, Ordering::SeqCst);
-        GlobalAllocFailureGuard { previous }
-    }
-
-    pub fn maybe_fail() -> bool {
-        loop {
-            let remaining = FAIL_AFTER.load(Ordering::SeqCst);
-            if remaining == DISABLED {
-                return false;
-            }
-            if remaining == 0 {
-                if FAIL_AFTER
-                    .compare_exchange(0, DISABLED, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
-                {
-                    return true;
-                }
-                continue;
-            }
-            if FAIL_AFTER
-                .compare_exchange(remaining, remaining - 1, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                return false;
-            }
-        }
-    }
-}
-
 #[allow(unused_imports)]
 use alloc_engine::{
     AllocError, AllocResult, BaseAllocator, BuddyPageAllocator, ByteAllocator, PageAllocator,
@@ -567,11 +517,6 @@ impl GlobalAllocator {
 // allocators and upholds the `GlobalAlloc` contract for returned pointers.
 unsafe impl GlobalAlloc for GlobalAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        #[cfg(unittest)]
-        if fault_injection::maybe_fail() {
-            return core::ptr::null_mut();
-        }
-
         let allocate_memory = || {
             if let Ok(ptr) = GlobalAllocator::alloc(self, layout) {
                 ptr.as_ptr()

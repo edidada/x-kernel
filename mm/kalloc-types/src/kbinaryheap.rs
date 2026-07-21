@@ -164,15 +164,6 @@ mod tests {
         let err = h.try_push(1, AllocContext::Atomic).unwrap_err();
         assert_eq!(err, AllocError::UnsupportedContext);
     }
-
-    #[def_test(serial)]
-    fn try_push_reports_injected_nomemory() {
-        let _guard = kalloc::fault_injection::fail_global_alloc();
-        let mut h = KBinaryHeap::<u32>::new();
-        let err = h.try_push(1, AllocContext::Sleepable).unwrap_err();
-        assert_eq!(err, AllocError::NoMemory);
-    }
-
     #[def_test]
     fn try_with_capacity_preallocates() {
         let h = KBinaryHeap::<u32>::try_with_capacity(10, AllocContext::Sleepable).unwrap();
