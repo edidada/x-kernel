@@ -63,7 +63,10 @@ macro_rules! kvec {
     // kvec![elem1, elem2, ...]
     ($($x:expr),+ $(,)?) => {{
         (|| -> Result<$crate::KVec<_>, $crate::AllocError> {
-            let mut v = $crate::KVec::new();
+            let mut v = $crate::KVec::try_with_capacity(
+                $crate::kvec_count!($($x),+),
+                $crate::AllocContext::Sleepable,
+            )?;
             $( v.try_push($x, $crate::AllocContext::Sleepable)?; )+
             Ok(v)
         })()
@@ -82,4 +85,13 @@ macro_rules! kvec {
     () => {
         Ok::<$crate::KVec<_>, $crate::AllocError>($crate::KVec::new())
     };
+}
+
+/// Count the number of expressions in a comma-separated list without
+/// evaluating any of them. Used internally by [`kvec!`].
+#[doc(hidden)]
+#[macro_export]
+macro_rules! kvec_count {
+    () => (0usize);
+    ($head:expr $(, $rest:expr)*) => (1usize + $crate::kvec_count!($($rest),*));
 }

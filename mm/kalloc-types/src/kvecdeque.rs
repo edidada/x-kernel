@@ -143,17 +143,33 @@ impl<T> KVecDeque<T> {
         let new_ptr = alloc_buffer::<T>(new_cap, context)?;
 
         // Copy existing elements contiguously starting at index 0.
+        // Use bulk copies instead of per-element loops: unwrapped buffers
+        // need one copy_nonoverlapping, wrapped buffers need two.
         if self.len > 0 && size_of::<T>() != 0 {
-            for logical in 0..self.len {
-                let src = self.physical_index(logical);
-                // SAFETY: src is within the old buffer and initialized;
-                // dst is within the new buffer (freshly allocated) at an
-                // uninitialised slot.
+            let (front_len, back_len) = if self.head + self.len <= self.cap {
+                (self.len, 0)
+            } else {
+                (self.cap - self.head, self.len - (self.cap - self.head))
+            };
+
+            // SAFETY: front segment [head, head+front_len) is initialized
+            // in the old buffer; destination in the new buffer is
+            // uninitialised and non-overlapping (freshly allocated).
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    self.ptr.as_ptr().add(self.head),
+                    new_ptr.as_ptr(),
+                    front_len,
+                );
+            }
+            if back_len > 0 {
+                // SAFETY: back segment [0, back_len) wraps around from the
+                // start of the old buffer.
                 unsafe {
                     ptr::copy_nonoverlapping(
-                        self.ptr.as_ptr().add(src),
-                        new_ptr.as_ptr().add(logical),
-                        1,
+                        self.ptr.as_ptr(),
+                        new_ptr.as_ptr().add(front_len),
+                        back_len,
                     );
                 }
             }
@@ -302,7 +318,35 @@ impl<T> KVecDeque<T> {
 
     /// Removes all elements while keeping the allocated buffer for reuse.
     pub fn clear(&mut self) {
-        while self.pop_front().is_some() {}
+        if size_of::<T>() == 0 || self.len == 0 {
+            self.head = 0;
+            self.len = 0;
+            return;
+        }
+
+        let (front_len, back_len) = if self.head + self.len <= self.cap {
+            (self.len, 0)
+        } else {
+            (self.cap - self.head, self.len - (self.cap - self.head))
+        };
+
+        // SAFETY: The front and back ranges contain initialized elements
+        // exclusively owned by self. Dropping them in place is equivalent
+        // to dropping each element individually.
+        unsafe {
+            if front_len > 0 {
+                ptr::drop_in_place(ptr::slice_from_raw_parts_mut(
+                    self.ptr.as_ptr().add(self.head),
+                    front_len,
+                ));
+            }
+            if back_len > 0 {
+                ptr::drop_in_place(ptr::slice_from_raw_parts_mut(self.ptr.as_ptr(), back_len));
+            }
+        }
+
+        self.head = 0;
+        self.len = 0;
     }
 }
 

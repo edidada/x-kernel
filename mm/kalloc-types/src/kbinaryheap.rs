@@ -167,7 +167,7 @@ mod tests {
 
     #[def_test(serial)]
     fn try_push_reports_injected_nomemory() {
-        kalloc::fault_injection::fail_global_alloc();
+        let _guard = kalloc::fault_injection::fail_global_alloc();
         let mut h = KBinaryHeap::<u32>::new();
         let err = h.try_push(1, AllocContext::Sleepable).unwrap_err();
         assert_eq!(err, AllocError::NoMemory);

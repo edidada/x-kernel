@@ -148,12 +148,6 @@ impl<T> KVec<T> {
         self.ptr.as_ptr()
     }
 
-    /// Returns a mutable pointer to the underlying buffer.
-    pub fn as_mut_ptr_dup(&mut self) -> *mut T {
-        // placeholder, remove
-        self.ptr.as_ptr()
-    }
-
     /// Sets the vector's length without dropping or initializing elements.
     ///
     /// # Safety
@@ -509,6 +503,11 @@ impl<T: crate::TryClone> crate::TryClone for KVec<T> {
 
 impl<T> crate::TryExtend<T> for KVec<T> {
     fn try_extend<I: IntoIterator<Item = T>>(&mut self, iter: I) -> Result<(), AllocError> {
+        let iter = iter.into_iter();
+        let (lower, _) = iter.size_hint();
+        if lower > self.cap - self.len {
+            self.try_reserve(lower, AllocContext::Sleepable)?;
+        }
         for item in iter {
             self.try_push(item, AllocContext::Sleepable)?;
         }

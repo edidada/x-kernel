@@ -77,6 +77,17 @@ impl KString {
         }
     }
 
+    /// Creates a `KString` from a byte vector without checking for valid UTF-8.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that `kvec` contains valid UTF-8. Violating
+    /// this invariant leads to UB in [`as_str`](Self::as_str) and anything
+    /// that dereferences to `&str`.
+    pub unsafe fn from_utf8_unchecked(kvec: KVec<u8>) -> Self {
+        Self { inner: kvec }
+    }
+
     /// Returns the length of the string in bytes (not chars).
     pub fn len(&self) -> usize {
         self.inner.len()
@@ -298,15 +309,6 @@ unsafe impl Send for KString {}
 // SAFETY: &KString provides only &str through Deref, and &str: Sync.
 // The UTF-8 invariant is read-only and does not prevent sharing.
 unsafe impl Sync for KString {}
-
-/// Infallible conversion from `KVec<u8>` to `KString`.
-///
-/// The caller must guarantee `kvec` contains valid UTF-8.
-impl From<KVec<u8>> for KString {
-    fn from(kvec: KVec<u8>) -> Self {
-        Self { inner: kvec }
-    }
-}
 
 impl From<KString> for crate::KVec<u8> {
     fn from(k: KString) -> Self {

@@ -354,7 +354,7 @@ mod tests {
 
     #[def_test(serial)]
     fn try_insert_reports_injected_nomemory() {
-        kalloc::fault_injection::fail_global_alloc();
+        let _guard = kalloc::fault_injection::fail_global_alloc();
         let mut m = KHashMap::<u32, u32>::new();
         let err = m.try_insert(1, 2, AllocContext::Sleepable).unwrap_err();
         assert_eq!(err, AllocError::NoMemory);

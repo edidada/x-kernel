@@ -26,8 +26,22 @@ pub mod fault_injection {
     const DISABLED: usize = usize::MAX;
     static FAIL_AFTER: AtomicUsize = AtomicUsize::new(DISABLED);
 
-    pub fn fail_global_alloc() {
-        FAIL_AFTER.store(0, Ordering::SeqCst);
+    /// RAII guard that restores the previous `FAIL_AFTER` value on drop.
+    pub struct GlobalAllocFailureGuard {
+        previous: usize,
+    }
+
+    impl Drop for GlobalAllocFailureGuard {
+        fn drop(&mut self) {
+            FAIL_AFTER.store(self.previous, Ordering::SeqCst);
+        }
+    }
+
+    /// Inject a single global-alloc failure on the next allocation.
+    /// Returns a guard that restores the previous state when dropped.
+    pub fn fail_global_alloc() -> GlobalAllocFailureGuard {
+        let previous = FAIL_AFTER.swap(0, Ordering::SeqCst);
+        GlobalAllocFailureGuard { previous }
     }
 
     pub fn maybe_fail() -> bool {
@@ -37,8 +51,13 @@ pub mod fault_injection {
                 return false;
             }
             if remaining == 0 {
-                FAIL_AFTER.store(DISABLED, Ordering::SeqCst);
-                return true;
+                if FAIL_AFTER
+                    .compare_exchange(0, DISABLED, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    return true;
+                }
+                continue;
             }
             if FAIL_AFTER
                 .compare_exchange(remaining, remaining - 1, Ordering::SeqCst, Ordering::SeqCst)
