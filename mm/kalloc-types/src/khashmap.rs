@@ -34,7 +34,9 @@ impl<K, V> KHashMap<K, V> {
             inner: HashMap::new(),
         }
     }
+}
 
+impl<K: Eq + Hash, V> KHashMap<K, V> {
     /// Creates an empty map with at least the given capacity.
     ///
     /// Only [`AllocContext::Sleepable`] is supported in phase 1.
@@ -45,7 +47,10 @@ impl<K, V> KHashMap<K, V> {
     /// satisfy the pre-allocation.
     pub fn try_with_capacity(capacity: usize, context: AllocContext) -> Result<Self, AllocError> {
         require_supported_context(context)?;
-        let inner = HashMap::with_capacity(capacity);
+        let mut inner = HashMap::new();
+        inner
+            .try_reserve(capacity)
+            .map_err(|_| AllocError::NoMemory)?;
         Ok(Self { inner })
     }
 }

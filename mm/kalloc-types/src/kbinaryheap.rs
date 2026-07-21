@@ -30,9 +30,19 @@ impl<T: Ord> KBinaryHeap<T> {
     }
 
     /// Creates an empty heap with at least the given capacity.
+    ///
+    /// Only [`AllocContext::Sleepable`] is supported in phase 1.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError::NoMemory`] when the kernel allocator cannot
+    /// satisfy the pre-allocation.
     pub fn try_with_capacity(capacity: usize, context: AllocContext) -> Result<Self, AllocError> {
         require_supported_context(context)?;
-        let inner = BinaryHeap::with_capacity(capacity);
+        let mut inner = BinaryHeap::new();
+        inner
+            .try_reserve(capacity)
+            .map_err(|_| AllocError::NoMemory)?;
         Ok(Self { inner })
     }
 
@@ -79,11 +89,6 @@ impl<T: Ord> KBinaryHeap<T> {
     /// Removes all elements, keeping the allocated buffer.
     pub fn clear(&mut self) {
         self.inner.clear();
-    }
-
-    /// Consumes the heap and returns the underlying vector in arbitrary order.
-    pub fn into_vec(self) -> alloc::vec::Vec<T> {
-        self.inner.into_vec()
     }
 }
 

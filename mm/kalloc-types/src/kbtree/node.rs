@@ -39,7 +39,6 @@
 // - A node of length `n` has `n` keys, `n` values, and (in an internal node) `n + 1` edges.
 //   This implies that even an empty internal node has at least one edge.
 
-use alloc::boxed::Box;
 use core::{
     alloc::Layout,
     marker::PhantomData,
@@ -50,11 +49,11 @@ use core::{
 
 use crate::{AllocContext, AllocError, KBox};
 
-/// Allocate `value` on the heap via fallible `KBox`, returning a standard
-/// `Box<T>` or `AllocError`. Uses Sleepable context (nodes are always
-/// allocated in sleepable kernel paths).
-fn try_alloc_box<T>(value: T) -> Result<Box<T>, AllocError> {
-    KBox::try_new(value, AllocContext::Sleepable).map(|kb| kb.into_box())
+/// Allocate `value` on the heap via fallible `KBox`, returning an owned
+/// `NonNull` pointer or `AllocError`. The caller must eventually deallocate
+/// via `kalloc::global_allocator().dealloc()`.
+fn try_alloc_node<T>(value: T) -> Result<NonNull<T>, AllocError> {
+    KBox::try_new(value, AllocContext::Sleepable).map(|kb| kb.into_raw())
 }
 
 /// Stable-compatible replacement for `MaybeUninit::slice_as_ptr`.
@@ -201,19 +200,12 @@ struct BoxedNode<K, V> {
 }
 
 impl<K, V> BoxedNode<K, V> {
-    fn from_leaf(node: Box<LeafNode<K, V>>) -> Self {
-        BoxedNode {
-            // SAFETY: Box::into_raw returns a valid non-null pointer.
-            ptr: unsafe { NonNull::new_unchecked(Box::into_raw(node)) },
-        }
+    fn from_leaf(node: NonNull<LeafNode<K, V>>) -> Self {
+        BoxedNode { ptr: node }
     }
 
-    fn from_internal(node: Box<InternalNode<K, V>>) -> Self {
-        unsafe {
-            BoxedNode {
-                ptr: NonNull::new_unchecked(Box::into_raw(node) as *mut LeafNode<K, V>),
-            }
-        }
+    fn from_internal(node: NonNull<InternalNode<K, V>>) -> Self {
+        BoxedNode { ptr: node.cast() }
     }
 
     unsafe fn from_ptr(ptr: NonNull<LeafNode<K, V>>) -> Self {
@@ -255,7 +247,7 @@ impl<K, V> Root<K, V> {
 
     pub fn new_leaf() -> Result<Self, AllocError> {
         Ok(Root {
-            node: BoxedNode::from_leaf(try_alloc_box(unsafe { LeafNode::new() })?),
+            node: BoxedNode::from_leaf(try_alloc_node(unsafe { LeafNode::new() })?),
             height: 0,
         })
     }
@@ -293,10 +285,12 @@ impl<K, V> Root<K, V> {
         &mut self,
     ) -> Result<NodeRef<marker::Mut<'_>, K, V, marker::Internal>, AllocError> {
         debug_assert!(!self.is_shared_root());
-        let mut new_node = try_alloc_box(unsafe { InternalNode::new() })?;
+        let mut new_node = try_alloc_node(unsafe { InternalNode::new() })?;
+        // SAFETY: new_node was just allocated above; it is valid and exclusively owned.
+        let new_node = unsafe { new_node.as_mut() };
         new_node.edges[0].write(unsafe { BoxedNode::from_ptr(self.node.as_ptr()) });
 
-        self.node = BoxedNode::from_internal(new_node);
+        self.node = BoxedNode::from_internal(NonNull::from(new_node));
         self.height += 1;
 
         let mut ret = NodeRef {
@@ -1216,7 +1210,8 @@ impl<'a, K, V> Handle<NodeRef<marker::Mut<'a>, K, V, marker::Leaf>, marker::KV> 
     > {
         debug_assert!(!self.node.is_shared_root());
         unsafe {
-            let mut new_node = try_alloc_box(LeafNode::new())?;
+            let mut new_node = try_alloc_node(LeafNode::new())?;
+            let new_node = new_node.as_mut();
 
             let k = ptr::read(self.node.keys().get_unchecked(self.idx));
             let v = ptr::read(self.node.vals().get_unchecked(self.idx));
@@ -1242,7 +1237,7 @@ impl<'a, K, V> Handle<NodeRef<marker::Mut<'a>, K, V, marker::Leaf>, marker::KV> 
                 k,
                 v,
                 Root {
-                    node: BoxedNode::from_leaf(new_node),
+                    node: BoxedNode::from_leaf(NonNull::from(new_node)),
                     height: 0,
                 },
             ))
@@ -1288,7 +1283,8 @@ impl<'a, K, V> Handle<NodeRef<marker::Mut<'a>, K, V, marker::Internal>, marker::
         AllocError,
     > {
         unsafe {
-            let mut new_node = try_alloc_box(InternalNode::new())?;
+            let mut new_node = try_alloc_node(InternalNode::new())?;
+            let new_node = new_node.as_mut();
 
             let k = ptr::read(self.node.keys().get_unchecked(self.idx));
             let v = ptr::read(self.node.vals().get_unchecked(self.idx));
@@ -1316,7 +1312,7 @@ impl<'a, K, V> Handle<NodeRef<marker::Mut<'a>, K, V, marker::Internal>, marker::
             new_node.data.len = new_len as u16;
 
             let mut new_root = Root {
-                node: BoxedNode::from_internal(new_node),
+                node: BoxedNode::from_internal(NonNull::from(new_node)),
                 height,
             };
 

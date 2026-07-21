@@ -26,7 +26,7 @@ mod khashmap;
 mod kstring;
 mod kvec;
 mod kvecdeque;
-mod try_clone;
+mod try_traits;
 
 pub use alloc_error::AllocError;
 pub use collect::try_collect_vec;
@@ -39,7 +39,9 @@ pub use khashmap::KHashMap;
 pub use kstring::KString;
 pub use kvec::{KVec, KVecIntoIter};
 pub use kvecdeque::KVecDeque;
-pub use try_clone::TryClone;
+pub use try_traits::{
+    TryBitAnd, TryBitOr, TryBitXor, TryClone, TryExtend, TryFromIterator, TrySub,
+};
 
 /// Construct a [`KVec<T>`] from a list of elements or a repeated expression,
 /// analogous to `alloc::vec!`, but fallible.

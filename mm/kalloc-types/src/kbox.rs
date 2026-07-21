@@ -2,17 +2,17 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::boxed::Box;
 use core::{
     alloc::Layout,
-    mem::MaybeUninit,
+    marker::PhantomData,
+    mem::{ManuallyDrop, MaybeUninit},
     ops::{Deref, DerefMut},
-    ptr::NonNull,
+    ptr::{self, NonNull},
 };
 
 use crate::{AllocContext, AllocError, context::require_supported_context};
 
-fn alloc_box_storage<T>(context: AllocContext) -> Result<NonNull<T>, AllocError> {
+fn alloc_storage<T>(context: AllocContext) -> Result<NonNull<T>, AllocError> {
     require_supported_context(context)?;
 
     #[cfg(unittest)]
@@ -25,10 +25,20 @@ fn alloc_box_storage<T>(context: AllocContext) -> Result<NonNull<T>, AllocError>
     Ok(ptr.cast())
 }
 
+unsafe fn dealloc_storage<T>(ptr: NonNull<T>) {
+    let layout = Layout::new::<T>();
+    // SAFETY: caller guarantees ptr was allocated via alloc_storage<T>.
+    kalloc::global_allocator().dealloc(ptr.cast(), layout);
+}
+
 /// Explicitly fallible single-object heap allocation.
-#[derive(Debug)]
+///
+/// Unlike `alloc::boxed::Box`, `KBox` stores a raw `NonNull` pointer and
+/// calls `kalloc::global_allocator()` directly for allocation and
+/// deallocation. No infallible allocation types appear in its definition.
 pub struct KBox<T> {
-    inner: Box<T>,
+    ptr: NonNull<T>,
+    _marker: PhantomData<T>,
 }
 
 impl<T> KBox<T> {
@@ -44,10 +54,11 @@ impl<T> KBox<T> {
     /// Returns [`AllocError::UnsupportedContext`] when the caller requests an
     /// allocation context reserved for a later phase.
     pub fn try_new(value: T, context: AllocContext) -> Result<Self, AllocError> {
-        let mut boxed = Self::try_new_uninit(context)?;
-        (*boxed).write(value);
-        // SAFETY: The value was written to the owned heap slot immediately
-        // above, so it is fully initialized before conversion.
+        let boxed = Self::try_new_uninit(context)?;
+        // SAFETY: pointer is valid and uninitialized; writing moves `value` into
+        // the heap slot.
+        unsafe { boxed.ptr.as_ptr().cast::<T>().write(value) };
+        // SAFETY: the value was just written above, so the slot is initialized.
         Ok(unsafe { boxed.assume_init() })
     }
 
@@ -63,26 +74,44 @@ impl<T> KBox<T> {
     /// Returns [`AllocError::UnsupportedContext`] when the caller requests an
     /// allocation context reserved for a later phase.
     pub fn try_new_uninit(context: AllocContext) -> Result<KBox<MaybeUninit<T>>, AllocError> {
-        let ptr = alloc_box_storage::<MaybeUninit<T>>(context)?;
-        // SAFETY: `ptr` comes from the kernel global allocator with a layout
-        // that exactly matches `MaybeUninit<T>`, so re-wrapping it as `Box` is
-        // valid and transfers ownership into RAII.
-        let inner = unsafe { Box::from_raw(ptr.as_ptr()) };
-        Ok(KBox { inner })
+        let ptr = alloc_storage::<MaybeUninit<T>>(context)?;
+        Ok(KBox {
+            ptr,
+            _marker: PhantomData,
+        })
     }
 
-    /// Consumes the wrapper and returns the owned value.
+    /// Consumes the wrapper and returns the owned value, deallocating the
+    /// heap storage.
     pub fn into_inner(self) -> T {
-        *self.inner
+        let this = ManuallyDrop::new(self);
+        // SAFETY: KBox owns the heap slot, so reading it out is valid.
+        // The storage is deallocated below without dropping the value again.
+        let value = unsafe { ptr::read(this.ptr.as_ptr()) };
+        // SAFETY: ptr was allocated via alloc_storage<T>, no drop needed
+        // because the value was moved out.
+        unsafe { dealloc_storage::<T>(this.ptr) };
+        value
     }
 
-    /// Consumes the wrapper and returns the inner `Box<T>`.
+    /// Consumes the wrapper and returns the raw pointer, leaking the
+    /// allocation (the caller takes ownership of the memory).
+    pub fn into_raw(self) -> NonNull<T> {
+        let this = ManuallyDrop::new(self);
+        this.ptr
+    }
+
+    /// Creates a `KBox` from a raw pointer previously returned by
+    /// [`into_raw`](Self::into_raw).
     ///
-    /// This is useful for integrating with code that expects a standard
-    /// `Box` (e.g. B-tree node storage). The `Box` will use the same
-    /// allocator (`kalloc::global_allocator()`) for deallocation.
-    pub fn into_box(self) -> Box<T> {
-        self.inner
+    /// # Safety
+    ///
+    /// `ptr` must have been obtained from `KBox::into_raw()`.
+    pub unsafe fn from_raw(ptr: NonNull<T>) -> Self {
+        Self {
+            ptr,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -93,11 +122,23 @@ impl<T> KBox<MaybeUninit<T>> {
     ///
     /// The caller must ensure the wrapped value has been fully initialized.
     pub unsafe fn assume_init(self) -> KBox<T> {
-        let ptr = Box::into_raw(self.inner).cast::<T>();
-        // SAFETY: The caller guarantees the pointee is initialized, and the
-        // allocation still belongs to the same `Box`.
-        let inner = unsafe { Box::from_raw(ptr) };
-        KBox { inner }
+        let this = ManuallyDrop::new(self);
+        let ptr = this.ptr.cast::<T>();
+        KBox {
+            ptr,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> Drop for KBox<T> {
+    fn drop(&mut self) {
+        // SAFETY: ptr was allocated via alloc_storage<T> and the value is
+        // fully initialized (KBox invariant).
+        unsafe {
+            ptr::drop_in_place(self.ptr.as_ptr());
+            dealloc_storage::<T>(self.ptr);
+        }
     }
 }
 
@@ -117,15 +158,30 @@ impl<T> Deref for KBox<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.inner
+        // SAFETY: ptr is valid and the value is initialized (KBox invariant).
+        unsafe { self.ptr.as_ref() }
     }
 }
 
 impl<T> DerefMut for KBox<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
+        // SAFETY: ptr is valid, the value is initialized, and we have &mut self
+        // giving exclusive access.
+        unsafe { self.ptr.as_mut() }
     }
 }
+
+impl<T: core::fmt::Debug> core::fmt::Debug for KBox<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(&**self, f)
+    }
+}
+
+// SAFETY: KBox owns its heap allocation exclusively — same rationale as
+// `Box<T>` for both Send and Sync.
+unsafe impl<T: Send> Send for KBox<T> {}
+// SAFETY: &KBox<T> provides &T through Deref; sharing is sound when T: Sync.
+unsafe impl<T: Sync> Sync for KBox<T> {}
 
 #[cfg(unittest)]
 mod tests {
@@ -151,5 +207,15 @@ mod tests {
         let _guard = fail_next_allocation();
         let err = KBox::try_new(13_u32, AllocContext::Sleepable).unwrap_err();
         assert_eq!(err, crate::AllocError::NoMemory);
+    }
+
+    #[def_test]
+    fn into_raw_and_from_raw_roundtrip() {
+        let boxed = KBox::try_new(42_u32, AllocContext::Sleepable).unwrap();
+        let raw = boxed.into_raw();
+        // SAFETY: `raw` was just obtained from `KBox::into_raw()` above,
+        // satisfying the precondition of `from_raw`.
+        let restored = unsafe { KBox::from_raw(raw) };
+        assert_eq!(*restored, 42);
     }
 }

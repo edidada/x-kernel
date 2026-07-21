@@ -12,7 +12,7 @@ use core::{
     slice,
 };
 
-use crate::{AllocContext, AllocError, context::require_supported_context};
+use crate::{AllocContext, AllocError, TryExtend, context::require_supported_context};
 
 const MIN_NON_ZERO_CAPACITY: usize = 4;
 
@@ -126,9 +126,41 @@ impl<T> KVec<T> {
         self.cap
     }
 
+    /// Returns the uninitialized spare capacity as `MaybeUninit<T>`.
+    pub fn spare_capacity_mut(&mut self) -> &mut [core::mem::MaybeUninit<T>] {
+        // SAFETY: the range [len, cap) is within the allocation and
+        // uninitialized, so exposing it as MaybeUninit is sound.
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                self.ptr.as_ptr().add(self.len) as *mut core::mem::MaybeUninit<T>,
+                self.cap - self.len,
+            )
+        }
+    }
+
     /// Returns whether the vector is empty.
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    /// Returns a mutable pointer to the underlying buffer.
+    pub fn as_mut_ptr(&mut self) -> *mut T {
+        self.ptr.as_ptr()
+    }
+
+    /// Returns a mutable pointer to the underlying buffer.
+    pub fn as_mut_ptr_dup(&mut self) -> *mut T {
+        // placeholder, remove
+        self.ptr.as_ptr()
+    }
+
+    /// Sets the vector's length without dropping or initializing elements.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure all elements in `[old_len, new_len)` are initialized.
+    pub unsafe fn set_len(&mut self, new_len: usize) {
+        self.len = new_len;
     }
 
     /// Returns a shared slice view of the stored elements.
@@ -226,8 +258,9 @@ impl<T> KVec<T> {
     /// Appends one value, growing the vector explicitly if needed.
     ///
     /// On failure the vector keeps its previous contents and length. The input
-    /// `value` is dropped if capacity growth fails because this phase-1 API
-    /// returns only [`AllocError`] rather than an ownership-carrying error.
+    /// `value` is dropped on **any** error path (capacity growth failure or
+    /// unsupported context) because this phase-1 API returns only
+    /// [`AllocError`] rather than an ownership-carrying error.
     ///
     /// Only [`AllocContext::Sleepable`] is supported in phase 1.
     ///
@@ -464,6 +497,33 @@ impl<T: Clone> KVec<T> {
     }
 }
 
+impl<T: crate::TryClone> crate::TryClone for KVec<T> {
+    fn try_clone(&self) -> Result<Self, AllocError> {
+        let mut new = Self::try_with_capacity(self.len, AllocContext::Sleepable)?;
+        for item in self.iter() {
+            new.try_push(item.try_clone()?, AllocContext::Sleepable)?;
+        }
+        Ok(new)
+    }
+}
+
+impl<T> crate::TryExtend<T> for KVec<T> {
+    fn try_extend<I: IntoIterator<Item = T>>(&mut self, iter: I) -> Result<(), AllocError> {
+        for item in iter {
+            self.try_push(item, AllocContext::Sleepable)?;
+        }
+        Ok(())
+    }
+}
+
+impl<T> crate::TryFromIterator<T> for KVec<T> {
+    fn try_from_iter<I: IntoIterator<Item = T>>(iter: I) -> Result<Self, AllocError> {
+        let mut v = KVec::new();
+        v.try_extend(iter)?;
+        Ok(v)
+    }
+}
+
 impl<T> Drop for KVec<T> {
     fn drop(&mut self) {
         if self.len != 0 {
@@ -501,6 +561,56 @@ impl<T> Deref for KVec<T> {
 impl<T> DerefMut for KVec<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.as_mut_slice()
+    }
+}
+
+impl<T: PartialEq> PartialEq for KVec<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl<T: Eq> Eq for KVec<T> {}
+
+impl<T: PartialEq> PartialEq<[T]> for KVec<T> {
+    fn eq(&self, other: &[T]) -> bool {
+        self.as_slice() == other
+    }
+}
+
+impl<T: PartialEq> PartialEq<&[T]> for KVec<T> {
+    fn eq(&self, other: &&[T]) -> bool {
+        self.as_slice() == *other
+    }
+}
+
+impl<T: PartialEq, const N: usize> PartialEq<[T; N]> for KVec<T> {
+    fn eq(&self, other: &[T; N]) -> bool {
+        self.as_slice() == other
+    }
+}
+
+impl<T: PartialEq, const N: usize> PartialEq<&[T; N]> for KVec<T> {
+    fn eq(&self, other: &&[T; N]) -> bool {
+        self.as_slice() == *other
+    }
+}
+
+impl<T: PartialOrd> PartialOrd for KVec<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        self.as_slice().partial_cmp(other.as_slice())
+    }
+}
+
+impl<T: Ord> Ord for KVec<T> {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.as_slice().cmp(other.as_slice())
+    }
+}
+
+impl<T: core::hash::Hash> core::hash::Hash for KVec<T> {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.as_slice().hash(state);
     }
 }
 
@@ -548,6 +658,15 @@ impl<T> Drop for KVecIntoIter<T> {
 
         let layout = Layout::array::<T>(self.cap).expect("live KVec layout must be valid");
         kalloc::global_allocator().dealloc(self.ptr.cast(), layout);
+    }
+}
+
+impl<'a, T> IntoIterator for &'a KVec<T> {
+    type IntoIter = core::slice::Iter<'a, T>;
+    type Item = &'a T;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
     }
 }
 

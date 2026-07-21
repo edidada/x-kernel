@@ -116,7 +116,7 @@ impl<T> KVecDeque<T> {
 
     /// Computes the physical index of logical position `i` (0..len).
     fn physical_index(&self, logical: usize) -> usize {
-        debug_assert!(logical < self.len || (self.len == 0 && logical == 0));
+        debug_assert!(logical <= self.len);
         if self.cap == 0 || size_of::<T>() == 0 {
             return 0;
         }
@@ -170,12 +170,18 @@ impl<T> KVecDeque<T> {
 
     /// Appends an element to the back of the deque.
     ///
-    /// On failure the deque keeps its previous contents.
+    /// On failure the deque keeps its previous contents. The input `value`
+    /// is dropped on **any** error path (OOM or unsupported context) because
+    /// this phase-1 API returns only [`AllocError`] rather than an
+    /// ownership-carrying error.
     ///
     /// # Errors
     ///
     /// Returns [`AllocError::NoMemory`] when growth is required and the kernel
     /// allocator cannot satisfy it.
+    ///
+    /// Returns [`AllocError::UnsupportedContext`] when the caller requests an
+    /// allocation context reserved for a later phase.
     pub fn try_push_back(&mut self, value: T, context: AllocContext) -> Result<(), AllocError> {
         if self.len == self.cap {
             self.try_reserve(1, context)?;
@@ -196,11 +202,17 @@ impl<T> KVecDeque<T> {
 
     /// Prepends an element to the front of the deque.
     ///
-    /// On failure the deque keeps its previous contents.
+    /// On failure the deque keeps its previous contents. The input `value`
+    /// is dropped on **any** error path (OOM or unsupported context) because
+    /// this phase-1 API returns only [`AllocError`] rather than an
+    /// ownership-carrying error.
     ///
     /// # Errors
     ///
     /// Returns [`AllocError::NoMemory`] when growth is required.
+    ///
+    /// Returns [`AllocError::UnsupportedContext`] when the caller requests an
+    /// allocation context reserved for a later phase.
     pub fn try_push_front(&mut self, value: T, context: AllocContext) -> Result<(), AllocError> {
         if self.len == self.cap {
             self.try_reserve(1, context)?;

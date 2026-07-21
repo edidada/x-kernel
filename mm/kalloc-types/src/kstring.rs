@@ -9,7 +9,7 @@
 //! takes an explicit [`AllocContext`](crate::AllocContext) and returns
 //! `Result<_, AllocError>` instead of panicking on out-of-memory.
 
-use core::{fmt, ops::Deref, str};
+use core::{cmp::Ordering, fmt, ops::Deref, str};
 
 use crate::{AllocContext, AllocError, KVec};
 
@@ -64,6 +64,17 @@ impl KString {
         // On error, inner is dropped (RAII), no partial state leaked.
         inner.try_extend_from_slice(s.as_bytes(), context)?;
         Ok(Self { inner })
+    }
+
+    /// Creates a `KString` from a `KVec<u8>`, validating UTF-8.
+    ///
+    /// Returns `Err(kvec)` if the bytes are not valid UTF-8.
+    pub fn from_utf8(kvec: KVec<u8>) -> Result<Self, KVec<u8>> {
+        if core::str::from_utf8(&kvec).is_ok() {
+            Ok(Self { inner: kvec })
+        } else {
+            Err(kvec)
+        }
     }
 
     /// Returns the length of the string in bytes (not chars).
@@ -186,20 +197,6 @@ impl KString {
     pub fn clear(&mut self) {
         self.inner.clear();
     }
-
-    /// Converts this `KString` into a standard `alloc::string::String`.
-    ///
-    /// This is an infallible conversion — the existing allocation is
-    /// transferred into the returned `String` without a reallocation.
-    pub fn into_string(self) -> alloc::string::String {
-        // SAFETY: The KString invariant guarantees valid UTF-8.
-        // We copy the bytes into a standard String, then forget self
-        // so its KVec<u8> Drop doesn't double-free (the String owns
-        // its own copy).
-        let s = alloc::string::String::from(self.as_str());
-        core::mem::forget(self);
-        s
-    }
 }
 
 // -- Trait implementations -----------------------------------------------
@@ -207,6 +204,14 @@ impl KString {
 impl Default for KString {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::TryClone for KString {
+    fn try_clone(&self) -> Result<Self, AllocError> {
+        Ok(Self {
+            inner: self.inner.try_clone()?,
+        })
     }
 }
 
@@ -242,6 +247,44 @@ impl AsRef<[u8]> for KString {
     }
 }
 
+impl PartialEq for KString {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for KString {}
+
+impl PartialEq<str> for KString {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for KString {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialOrd for KString {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for KString {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl core::hash::Hash for KString {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state);
+    }
+}
+
 impl Drop for KString {
     fn drop(&mut self) {
         // KVec<u8>::drop handles deallocation.
@@ -256,9 +299,21 @@ unsafe impl Send for KString {}
 // The UTF-8 invariant is read-only and does not prevent sharing.
 unsafe impl Sync for KString {}
 
-impl From<KString> for alloc::string::String {
-    fn from(kstring: KString) -> Self {
-        kstring.into_string()
+/// Infallible conversion from `KVec<u8>` to `KString`.
+///
+/// The caller must guarantee `kvec` contains valid UTF-8.
+impl From<KVec<u8>> for KString {
+    fn from(kvec: KVec<u8>) -> Self {
+        Self { inner: kvec }
+    }
+}
+
+impl From<KString> for crate::KVec<u8> {
+    fn from(k: KString) -> Self {
+        let k = core::mem::ManuallyDrop::new(k);
+        // SAFETY: ManuallyDrop prevents double-free. We take ownership
+        // of the inner KVec, which is a valid buffer from kalloc.
+        unsafe { core::ptr::read(&k.inner) }
     }
 }
 
@@ -357,12 +412,7 @@ mod tests {
         assert!(formatted.contains("dbg"));
     }
 
-    #[def_test]
-    fn into_string_conversion() {
-        let s = KString::try_from_str("convert me", AllocContext::Sleepable).unwrap();
-        let owned: alloc::string::String = s.into();
-        assert_eq!(owned, "convert me");
-    }
+    // into_string removed — KString replaces String in all paths.
 
     #[def_test]
     fn as_ref_str() {

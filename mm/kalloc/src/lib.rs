@@ -31,16 +31,22 @@ pub mod fault_injection {
     }
 
     pub fn maybe_fail() -> bool {
-        let remaining = FAIL_AFTER.load(Ordering::SeqCst);
-        if remaining == DISABLED {
-            return false;
+        loop {
+            let remaining = FAIL_AFTER.load(Ordering::SeqCst);
+            if remaining == DISABLED {
+                return false;
+            }
+            if remaining == 0 {
+                FAIL_AFTER.store(DISABLED, Ordering::SeqCst);
+                return true;
+            }
+            if FAIL_AFTER
+                .compare_exchange(remaining, remaining - 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return false;
+            }
         }
-        if remaining == 0 {
-            FAIL_AFTER.store(DISABLED, Ordering::SeqCst);
-            return true;
-        }
-        FAIL_AFTER.fetch_sub(1, Ordering::SeqCst);
-        false
     }
 }
 

@@ -12,7 +12,7 @@ use core::{
     fmt,
     fmt::Debug,
     hash::{Hash, Hasher},
-    iter::{FromIterator, FusedIterator, Peekable},
+    iter::{FusedIterator, Peekable},
     marker::PhantomData,
     mem,
     ops::{
@@ -154,7 +154,7 @@ impl<K, V> Drop for BTreeMap<K, V> {
     }
 }
 
-use crate::TryClone;
+use crate::{TryClone, TryExtend};
 
 impl<K: TryClone, V: TryClone> TryClone for BTreeMap<K, V> {
     fn try_clone(&self) -> Result<BTreeMap<K, V>, AllocError> {
@@ -230,86 +230,6 @@ impl<K: TryClone, V: TryClone> TryClone for BTreeMap<K, V> {
                 root: node::Root::shared_empty_root(),
                 length: 0,
             })
-        } else {
-            clone_subtree(self.root.as_ref())
-        }
-    }
-}
-
-impl<K: Clone, V: Clone> Clone for BTreeMap<K, V> {
-    fn clone(&self) -> BTreeMap<K, V> {
-        fn clone_subtree<'a, K: Clone, V: Clone>(
-            node: node::NodeRef<marker::Immut<'a>, K, V, marker::LeafOrInternal>,
-        ) -> BTreeMap<K, V>
-        where
-            K: 'a,
-            V: 'a,
-        {
-            match node.force() {
-                Leaf(leaf) => {
-                    let mut out_tree = BTreeMap {
-                        root: node::Root::new_leaf().expect("Out of Mem"),
-                        length: 0,
-                    };
-
-                    {
-                        let mut out_node = match out_tree.root.as_mut().force() {
-                            Leaf(leaf) => leaf,
-                            Internal(_) => unreachable!(),
-                        };
-
-                        let mut in_edge = leaf.first_edge();
-                        while let Ok(kv) = in_edge.right_kv() {
-                            let (k, v) = kv.into_kv();
-                            in_edge = kv.right_edge();
-
-                            out_node.push(k.clone(), v.clone());
-                            out_tree.length += 1;
-                        }
-                    }
-
-                    out_tree
-                }
-                Internal(internal) => {
-                    let mut out_tree = clone_subtree(internal.first_edge().descend());
-
-                    {
-                        let mut out_node = out_tree.root.push_level().expect("Out of Mem");
-                        let mut in_edge = internal.first_edge();
-                        while let Ok(kv) = in_edge.right_kv() {
-                            let (k, v) = kv.into_kv();
-                            in_edge = kv.right_edge();
-
-                            let k = (*k).clone();
-                            let v = (*v).clone();
-                            let subtree = clone_subtree(in_edge.descend());
-
-                            // We can't destructure subtree directly
-                            // because BTreeMap implements Drop
-                            let (subroot, sublength) = unsafe {
-                                let root = ptr::read(&subtree.root);
-                                let length = subtree.length;
-                                mem::forget(subtree);
-                                (root, length)
-                            };
-
-                            out_node.push(k, v, subroot);
-                            out_tree.length += 1 + sublength;
-                        }
-                    }
-
-                    out_tree
-                }
-            }
-        }
-
-        if self.is_empty() {
-            // Ideally we'd call `BTreeMap::new` here, but that has the `K:
-            // Ord` constraint, which this method lacks.
-            BTreeMap {
-                root: node::Root::shared_empty_root(),
-                length: 0,
-            }
         } else {
             clone_subtree(self.root.as_ref())
         }
@@ -847,16 +767,16 @@ impl<K: Ord, V> BTreeMap<K, V> {
     /// assert_eq!(a[&5], "f");
     /// ```
 
-    pub fn append(&mut self, other: &mut Self) {
+    pub fn try_append(&mut self, other: &mut Self) -> Result<(), AllocError> {
         // Do we have to append anything at all?
         if other.is_empty() {
-            return;
+            return Ok(());
         }
 
         // We can just swap `self` and `other` if `self` is empty.
         if self.is_empty() {
             mem::swap(self, other);
-            return;
+            return Ok(());
         }
 
         // First, we merge `self` and `other` into a sorted sequence in linear time.
@@ -868,8 +788,9 @@ impl<K: Ord, V> BTreeMap<K, V> {
         };
 
         // Second, we build a tree from the sorted sequence in linear time.
-        self.build_from_sorted_iter(iter);
+        self.build_from_sorted_iter(iter)?;
         self.fix_right_edge();
+        Ok(())
     }
 
     /// Constructs a double-ended iterator over a sub-range of elements in the map.
@@ -999,8 +920,11 @@ impl<K: Ord, V> BTreeMap<K, V> {
         })
     }
 
-    fn build_from_sorted_iter<I: Iterator<Item = (K, V)>>(&mut self, iter: I) {
-        self.ensure_root_is_owned().expect("Out Of Mem");
+    fn build_from_sorted_iter<I: Iterator<Item = (K, V)>>(
+        &mut self,
+        iter: I,
+    ) -> Result<(), AllocError> {
+        self.ensure_root_is_owned()?;
         let mut cur_node = last_leaf_edge(self.root.as_mut()).into_node();
         // Iterate through all key-value pairs, pushing them into nodes at the right level.
         for (key, value) in iter {
@@ -1026,7 +950,7 @@ impl<K: Ord, V> BTreeMap<K, V> {
                         }
                         Err(node) => {
                             // We are at the top, create a new root node and push there.
-                            open_node = node.into_root_mut().push_level().expect("Out of Mem");
+                            open_node = node.into_root_mut().push_level()?;
                             break;
                         }
                     }
@@ -1034,9 +958,9 @@ impl<K: Ord, V> BTreeMap<K, V> {
 
                 // Push key-value pair and new right subtree.
                 let tree_height = open_node.height() - 1;
-                let mut right_tree = node::Root::new_leaf().expect("Out of Mem");
+                let mut right_tree = node::Root::new_leaf()?;
                 for _ in 0..tree_height {
-                    right_tree.push_level().expect("Out of Mem");
+                    right_tree.push_level()?;
                 }
                 open_node.push(key, value, right_tree);
 
@@ -1046,6 +970,7 @@ impl<K: Ord, V> BTreeMap<K, V> {
 
             self.length += 1;
         }
+        Ok(())
     }
 
     fn fix_right_edge(&mut self) {
@@ -1801,28 +1726,20 @@ impl<'a, K, V> RangeMut<'a, K, V> {
     }
 }
 
-impl<K: Ord, V> FromIterator<(K, V)> for BTreeMap<K, V> {
-    #[inline]
-    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> BTreeMap<K, V> {
+impl<K: Ord, V> crate::TryFromIterator<(K, V)> for BTreeMap<K, V> {
+    fn try_from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Result<Self, AllocError> {
         let mut map = BTreeMap::new();
-        map.extend(iter);
-        map
+        map.try_extend(iter)?;
+        Ok(map)
     }
 }
 
-impl<K: Ord, V> Extend<(K, V)> for BTreeMap<K, V> {
-    #[inline]
-    fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
-        iter.into_iter().for_each(move |(k, v)| {
-            self.try_insert(k, v).expect("Out of Mem");
-        });
-    }
-}
-
-impl<'a, K: Ord + Copy, V: Copy> Extend<(&'a K, &'a V)> for BTreeMap<K, V> {
-    #[inline]
-    fn extend<I: IntoIterator<Item = (&'a K, &'a V)>>(&mut self, iter: I) {
-        self.extend(iter.into_iter().map(|(&key, &value)| (key, value)));
+impl<K: Ord, V> crate::TryExtend<(K, V)> for BTreeMap<K, V> {
+    fn try_extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) -> Result<(), AllocError> {
+        for (k, v) in iter {
+            self.try_insert(k, v)?;
+        }
+        Ok(())
     }
 }
 

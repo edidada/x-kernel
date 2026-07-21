@@ -218,17 +218,22 @@ impl<T> KArc<T> {
     /// Returns `Err(self)` if there are other strong references.
     pub fn try_unwrap(this: Self) -> Result<T, Self> {
         // SAFETY: `this.ptr` points to a live KArcInner<T>.
-        let strong = unsafe { (*this.ptr.as_ptr()).strong.load(Ordering::Relaxed) };
-        if strong != 1 {
+        // Use CAS to atomically claim the last strong ref and prevent a
+        // concurrent KWeak::upgrade() from racing past us.
+        let prev = unsafe {
+            (*this.ptr.as_ptr())
+                .strong
+                .compare_exchange(1, 0, Ordering::Acquire, Ordering::Relaxed)
+        };
+        if prev.is_err() {
             return Err(this);
         }
 
-        // We hold the only strong reference. Prevent the KArc Drop from
-        // running (it would double-drop data and corrupt the weak count).
+        // We hold the only strong reference (now atomically set to 0).
+        // Prevent the KArc Drop from running.
         let this = ManuallyDrop::new(this);
 
-        // SAFETY: strong==1 means no other KArc can observe the data. Reading
-        // it out transfers ownership to the caller.
+        // SAFETY: strong was atomically set to 0; no other KArc can exist.
         let data = unsafe { ptr::read(ptr::addr_of!((*this.ptr.as_ptr()).data)) };
 
         // Release the implicit weak reference held by this KArc.

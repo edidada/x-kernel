@@ -12,15 +12,15 @@ use core::{
         max,
     },
     fmt::{self, Debug},
-    iter::{FromIterator, FusedIterator, Peekable},
-    ops::{BitAnd, BitOr, BitXor, RangeBounds, Sub},
+    iter::{FusedIterator, Peekable},
+    ops::RangeBounds,
 };
 
 use super::{
     Recover,
     map::{self, BTreeMap, Keys},
 };
-use crate::AllocError;
+use crate::{AllocError, TryExtend, TryFromIterator};
 
 // FIXME(conventions): implement bounded iterators
 
@@ -69,7 +69,7 @@ use crate::AllocError;
 ///     println!("{}", book);
 /// }
 /// ```
-#[derive(Clone, Hash, PartialEq, Eq, Ord, PartialOrd)]
+#[derive(Hash, PartialEq, Eq, Ord, PartialOrd)]
 
 pub struct BTreeSet<T> {
     map: BTreeMap<T, ()>,
@@ -762,8 +762,8 @@ impl<T: Ord> BTreeSet<T> {
     /// ```
 
     #[inline(always)]
-    pub fn append(&mut self, other: &mut Self) {
-        self.map.append(&mut other.map);
+    pub fn try_append(&mut self, other: &mut Self) -> Result<(), AllocError> {
+        self.map.try_append(&mut other.map)
     }
 
     /// Splits the collection into two at the given key. Returns everything after the given key,
@@ -880,12 +880,11 @@ impl<T> BTreeSet<T> {
     }
 }
 
-impl<T: Ord> FromIterator<T> for BTreeSet<T> {
-    #[inline]
-    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> BTreeSet<T> {
+impl<T: Ord> crate::TryFromIterator<T> for BTreeSet<T> {
+    fn try_from_iter<I: IntoIterator<Item = T>>(iter: I) -> Result<Self, AllocError> {
         let mut set = BTreeSet::new();
-        set.extend(iter);
-        set
+        set.try_extend(iter)?;
+        Ok(set)
     }
 }
 
@@ -923,19 +922,20 @@ impl<'a, T> IntoIterator for &'a BTreeSet<T> {
     }
 }
 
-impl<T: Ord> Extend<T> for BTreeSet<T> {
-    #[inline]
-    fn extend<Iter: IntoIterator<Item = T>>(&mut self, iter: Iter) {
-        iter.into_iter().for_each(move |elem| {
-            self.try_insert(elem).expect("Out of Mem");
-        });
+impl<T: Ord> crate::TryExtend<T> for BTreeSet<T> {
+    fn try_extend<I: IntoIterator<Item = T>>(&mut self, iter: I) -> Result<(), AllocError> {
+        for elem in iter {
+            self.try_insert(elem)?;
+        }
+        Ok(())
     }
 }
 
-impl<'a, T: 'a + Ord + Copy> Extend<&'a T> for BTreeSet<T> {
-    #[inline]
-    fn extend<I: IntoIterator<Item = &'a T>>(&mut self, iter: I) {
-        self.extend(iter.into_iter().cloned());
+impl<T: crate::TryClone> crate::TryClone for BTreeSet<T> {
+    fn try_clone(&self) -> Result<Self, AllocError> {
+        Ok(BTreeSet {
+            map: self.map.try_clone()?,
+        })
     }
 }
 
@@ -947,91 +947,35 @@ impl<T: Ord> Default for BTreeSet<T> {
     }
 }
 
-impl<T: Ord + Clone> Sub<&BTreeSet<T>> for &BTreeSet<T> {
+impl<T: Ord + Clone> crate::TrySub<&BTreeSet<T>> for &BTreeSet<T> {
     type Output = BTreeSet<T>;
 
-    /// Returns the difference of `self` and `rhs` as a new `BTreeSet<T>`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeSet;
-    ///
-    /// let a: BTreeSet<_> = vec![1, 2, 3].into_iter().collect();
-    /// let b: BTreeSet<_> = vec![3, 4, 5].into_iter().collect();
-    ///
-    /// let result = &a - &b;
-    /// let result_vec: Vec<_> = result.into_iter().collect();
-    /// assert_eq!(result_vec, [1, 2]);
-    /// ```
-    fn sub(self, rhs: &BTreeSet<T>) -> BTreeSet<T> {
-        self.difference(rhs).cloned().collect()
+    fn try_sub(self, rhs: &BTreeSet<T>) -> Result<BTreeSet<T>, AllocError> {
+        BTreeSet::try_from_iter(self.difference(rhs).cloned())
     }
 }
 
-impl<T: Ord + Clone> BitXor<&BTreeSet<T>> for &BTreeSet<T> {
+impl<T: Ord + Clone> crate::TryBitXor<&BTreeSet<T>> for &BTreeSet<T> {
     type Output = BTreeSet<T>;
 
-    /// Returns the symmetric difference of `self` and `rhs` as a new `BTreeSet<T>`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeSet;
-    ///
-    /// let a: BTreeSet<_> = vec![1, 2, 3].into_iter().collect();
-    /// let b: BTreeSet<_> = vec![2, 3, 4].into_iter().collect();
-    ///
-    /// let result = &a ^ &b;
-    /// let result_vec: Vec<_> = result.into_iter().collect();
-    /// assert_eq!(result_vec, [1, 4]);
-    /// ```
-    fn bitxor(self, rhs: &BTreeSet<T>) -> BTreeSet<T> {
-        self.symmetric_difference(rhs).cloned().collect()
+    fn try_bitxor(self, rhs: &BTreeSet<T>) -> Result<BTreeSet<T>, AllocError> {
+        BTreeSet::try_from_iter(self.symmetric_difference(rhs).cloned())
     }
 }
 
-impl<T: Ord + Clone> BitAnd<&BTreeSet<T>> for &BTreeSet<T> {
+impl<T: Ord + Clone> crate::TryBitAnd<&BTreeSet<T>> for &BTreeSet<T> {
     type Output = BTreeSet<T>;
 
-    /// Returns the intersection of `self` and `rhs` as a new `BTreeSet<T>`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeSet;
-    ///
-    /// let a: BTreeSet<_> = vec![1, 2, 3].into_iter().collect();
-    /// let b: BTreeSet<_> = vec![2, 3, 4].into_iter().collect();
-    ///
-    /// let result = &a & &b;
-    /// let result_vec: Vec<_> = result.into_iter().collect();
-    /// assert_eq!(result_vec, [2, 3]);
-    /// ```
-    fn bitand(self, rhs: &BTreeSet<T>) -> BTreeSet<T> {
-        self.intersection(rhs).cloned().collect()
+    fn try_bitand(self, rhs: &BTreeSet<T>) -> Result<BTreeSet<T>, AllocError> {
+        BTreeSet::try_from_iter(self.intersection(rhs).cloned())
     }
 }
 
-impl<T: Ord + Clone> BitOr<&BTreeSet<T>> for &BTreeSet<T> {
+impl<T: Ord + Clone> crate::TryBitOr<&BTreeSet<T>> for &BTreeSet<T> {
     type Output = BTreeSet<T>;
 
-    /// Returns the union of `self` and `rhs` as a new `BTreeSet<T>`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeSet;
-    ///
-    /// let a: BTreeSet<_> = vec![1, 2, 3].into_iter().collect();
-    /// let b: BTreeSet<_> = vec![3, 4, 5].into_iter().collect();
-    ///
-    /// let result = &a | &b;
-    /// let result_vec: Vec<_> = result.into_iter().collect();
-    /// assert_eq!(result_vec, [1, 2, 3, 4, 5]);
-    /// ```
-    fn bitor(self, rhs: &BTreeSet<T>) -> BTreeSet<T> {
-        self.union(rhs).cloned().collect()
+    fn try_bitor(self, rhs: &BTreeSet<T>) -> Result<BTreeSet<T>, AllocError> {
+        BTreeSet::try_from_iter(self.union(rhs).cloned())
     }
 }
 
