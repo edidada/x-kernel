@@ -36,7 +36,13 @@ pub fn maybe_fail_allocation() -> Result<(), AllocError> {
             return Ok(());
         }
         if remaining == 0 {
-            return Err(AllocError::NoMemory);
+            if ALLOCATIONS_BEFORE_FAILURE
+                .compare_exchange(0, DISABLED, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return Err(AllocError::NoMemory);
+            }
+            continue;
         }
         if ALLOCATIONS_BEFORE_FAILURE
             .compare_exchange(remaining, remaining - 1, Ordering::SeqCst, Ordering::SeqCst)
