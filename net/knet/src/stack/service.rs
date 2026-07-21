@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! Network service wrapper around smoltcp interface.
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, string::String, sync::Arc};
 use core::{
     pin::Pin,
     task::{Context, Waker},
@@ -25,9 +25,9 @@ use smoltcp::{
 
 use crate::{
     LISTEN_TABLE, SOCKET_SET,
+    device::{LinkSnapshot, NeighborUpdate},
     ip::{IpAddress, IpListenEndpoint},
-    netlink::RtnetlinkState,
-    router::Router,
+    router::{Ipv4AddrEntry, NetworkSnapshot, Router, Rule},
 };
 
 const IPV4_HEADER_LEN: usize = 20;
@@ -55,13 +55,15 @@ impl Service {
         let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
         let iface = Interface::new(config, &mut router, to_smoltcp_instant(monotonic_time()));
 
-        Self {
+        let mut service = Self {
             iface,
             router,
             timeout: None,
             timeout_deadline: None,
             timeout_poll: Arc::new(PollSet::new()),
-        }
+        };
+        service.sync_interface_ipv4_addrs();
+        service
     }
 
     pub fn poll(&mut self, sockets: &mut SocketSet) -> bool {
@@ -215,23 +217,139 @@ impl Service {
         Ok(source_waker)
     }
 
-    pub fn sync_netlink(&mut self, state: &RtnetlinkState) {
-        self.router.sync_netlink(state);
+    fn sync_interface_ipv4_addrs(&mut self) {
+        let local_ipv4_addrs = self.router.local_ipv4_addrs();
         self.iface.update_ip_addrs(|ip_addrs| {
             ip_addrs.clear();
-            for addr in &state.addrs {
-                if let SmoltcpIpAddress::Ipv4(ipv4) = addr.address {
-                    let _ = ip_addrs.push(SmoltcpIpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
-                        ipv4,
-                        addr.prefix_len,
-                    )));
-                }
+            for addr in local_ipv4_addrs {
+                let _ = ip_addrs.push(SmoltcpIpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
+                    addr.address().into(),
+                    addr.prefix_len(),
+                )));
             }
         });
     }
 
+    pub fn network_snapshot(&self) -> NetworkSnapshot {
+        self.router.network_snapshot()
+    }
+
+    pub fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
+        self.router.link_snapshot_for_ifindex(ifindex)
+    }
+
+    pub fn set_device_name(&mut self, dev: usize, name: String) -> Result<(), LinuxError> {
+        if self
+            .router
+            .network_snapshot()
+            .links
+            .iter()
+            .any(|link| link.ifindex != dev as i32 + 1 && link.name == name)
+        {
+            return Err(LinuxError::EEXIST);
+        }
+        if self
+            .router
+            .link_snapshot_for_ifindex(dev as i32 + 1)
+            .is_none()
+        {
+            return Err(LinuxError::ENODEV);
+        }
+        self.router.set_device_name(dev, name);
+        Ok(())
+    }
+
+    pub fn set_device_mtu(&mut self, dev: usize, mtu: usize) -> Result<(), LinuxError> {
+        if self
+            .router
+            .link_snapshot_for_ifindex(dev as i32 + 1)
+            .is_none()
+        {
+            return Err(LinuxError::ENODEV);
+        }
+        self.router.set_device_mtu(dev, mtu);
+        Ok(())
+    }
+
+    pub fn set_device_link_up(&mut self, dev: usize, is_up: bool) -> Result<(), LinuxError> {
+        if self
+            .router
+            .link_snapshot_for_ifindex(dev as i32 + 1)
+            .is_none()
+        {
+            return Err(LinuxError::ENODEV);
+        }
+        self.router.set_device_link_up(dev, is_up);
+        Ok(())
+    }
+
+    pub fn add_ipv4_addr(&mut self, entry: Ipv4AddrEntry) -> Result<(), LinuxError> {
+        if self
+            .router
+            .link_snapshot_for_ifindex(entry.dev as i32 + 1)
+            .is_none()
+        {
+            return Err(LinuxError::ENODEV);
+        }
+        self.router.add_ipv4_addr(entry);
+        self.router
+            .set_device_ipv4_addr(entry.dev, Some(entry.addr));
+        self.sync_interface_ipv4_addrs();
+        Ok(())
+    }
+
+    pub fn remove_ipv4_addr(
+        &mut self,
+        entry: Ipv4AddrEntry,
+    ) -> Result<Option<crate::ip::Ipv4Cidr>, LinuxError> {
+        self.router.remove_ipv4_addr(entry);
+        let next_addr = self.router.first_ipv4_addr_for_device(entry.dev);
+        self.router.set_device_ipv4_addr(entry.dev, next_addr);
+        self.sync_interface_ipv4_addrs();
+        Ok(next_addr)
+    }
+
+    pub fn add_route_rule(&mut self, rule: Rule) -> Result<(), LinuxError> {
+        if self
+            .router
+            .link_snapshot_for_ifindex(rule.dev as i32 + 1)
+            .is_none()
+        {
+            return Err(LinuxError::ENODEV);
+        }
+        self.router.add_route_rule(rule);
+        Ok(())
+    }
+
+    pub fn remove_route_rule(&mut self, route: Rule) -> Result<(), LinuxError> {
+        self.router.remove_exact_route_rule(route);
+        Ok(())
+    }
+
+    pub fn apply_neighbor_update(&mut self, update: NeighborUpdate) -> Result<(), LinuxError> {
+        if self
+            .router
+            .link_snapshot_for_ifindex(update.dev as i32 + 1)
+            .is_none()
+        {
+            return Err(LinuxError::ENODEV);
+        }
+        self.router.apply_neighbor_update(update);
+        Ok(())
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn replace_router_for_tests(&mut self, router: Router) {
+        self.router = router;
+        self.sync_interface_ipv4_addrs();
+    }
+
     pub fn remove_device_by_model_id(&mut self, id: kdevice::DeviceId) -> bool {
-        self.router.remove_device_by_model_id(id)
+        let removed = self.router.remove_device_by_model_id(id);
+        if removed {
+            self.sync_interface_ipv4_addrs();
+        }
+        removed
     }
 
     pub fn send_link_frame(&mut self, ifindex: i32, frame: &[u8]) -> KResult<usize> {

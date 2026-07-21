@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! Loopback network device implementation.
-use alloc::collections::VecDeque;
+use alloc::{collections::VecDeque, string::String};
 
 use ::core::task::Waker;
 use kpoll::{PollContext, PollRegisterError};
@@ -13,7 +13,10 @@ use ktime_types::MonotonicInstant;
 use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::SOCKET_BUFFER_SIZE,
-    device::NetDevice,
+    device::{
+        LINK_FLAG_LOOPBACK, LINK_FLAG_LOWER_UP, LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind,
+        LinkSnapshot, NetDevice,
+    },
     ip::IpAddress,
 };
 
@@ -34,6 +37,10 @@ use crate::{
 /// Service re-registers the same source waker on every wait, and the new
 /// `PollSet` does not dedupe, so waiters would accumulate until the next RX.
 pub struct LoopbackDevice {
+    name: String,
+    flags: u32,
+    mtu: usize,
+    operstate: u8,
     queue: VecDeque<PacketBuf>,
     /// Aggregated Service RX/timeout waker. Must not be replaced by a
     /// task-local waker from a bypass of `Service::register_rx_waker`.
@@ -43,6 +50,10 @@ impl LoopbackDevice {
     /// Create a new loopback device.
     pub fn new() -> Self {
         Self {
+            name: String::from("lo"),
+            flags: LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOOPBACK | LINK_FLAG_LOWER_UP,
+            mtu: 65_536,
+            operstate: 0,
             queue: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
             rx_waker: Mutex::new(None),
         }
@@ -51,7 +62,20 @@ impl LoopbackDevice {
 
 impl NetDevice for LoopbackDevice {
     fn name(&self) -> &str {
-        "lo"
+        &self.name
+    }
+
+    fn link_snapshot(&self, ifindex: i32) -> LinkSnapshot {
+        LinkSnapshot {
+            ifindex,
+            name: self.name.clone(),
+            flags: self.flags,
+            mtu: self.mtu,
+            operstate: self.operstate,
+            kind: LinkKind::Loopback,
+            hardware_addr: [0; 6],
+            broadcast_addr: [0; 6],
+        }
     }
 
     fn poll_rx(&mut self, _ifindex: i32, _timestamp: MonotonicInstant) -> Option<PacketBuf> {
@@ -110,5 +134,23 @@ impl NetDevice for LoopbackDevice {
             *registered = Some(source_waker.clone());
         }
         Ok(())
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
+    fn set_mtu(&mut self, mtu: usize) {
+        self.mtu = mtu;
+    }
+
+    fn set_link_up(&mut self, is_up: bool) {
+        if is_up {
+            self.flags |= LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOWER_UP;
+            self.operstate = 0;
+        } else {
+            self.flags &= !(LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOWER_UP);
+            self.operstate = 2;
+        }
     }
 }

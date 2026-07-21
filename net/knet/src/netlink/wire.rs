@@ -5,9 +5,9 @@
 use alloc::{string::String, vec::Vec};
 
 use kerrno::LinuxError;
-use smoltcp::wire::{IpAddress, Ipv4Address, Ipv6Address};
 
 use super::*;
+use crate::ip::{IpAddress, Ipv4Address, Ipv6Address};
 
 pub(crate) mod link {
     pub(crate) mod attr {
@@ -34,9 +34,11 @@ pub(crate) mod route {
     pub(crate) const FAMILY_IPV6: u8 = 10;
     pub(crate) const TABLE_MAIN: u8 = 254;
     pub(crate) const PROTOCOL_BOOT: u8 = 3;
+    #[allow(dead_code)]
     pub(crate) const SCOPE_UNIVERSE: u8 = 0;
     // Reserved for future route deletion / nowhere-scope handling.
     // pub(crate) const SCOPE_NOWHERE: u8 = 255;
+    #[allow(dead_code)]
     pub(crate) const SCOPE_HOST: u8 = 254;
     pub(crate) const TYPE_UNICAST: u8 = 1;
 

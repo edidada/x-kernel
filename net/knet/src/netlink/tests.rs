@@ -4,12 +4,12 @@
 
 extern crate alloc;
 
-use alloc::{format, string::String, vec, vec::Vec};
-use core::sync::atomic::Ordering;
+use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
+use ::core::{sync::atomic::Ordering, task::Waker};
 use kerrno::LinuxError;
+use khal::time::TimeValue;
 use kio::Cursor;
-use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address};
 use unittest::def_test;
 
 use super::{
@@ -22,26 +22,177 @@ use super::{
     },
     *,
 };
-use crate::{RecvOptions, SocketAddrEx, socket::SocketOps};
+use crate::{
+    RecvOptions, SERVICE, SocketAddrEx,
+    buf::PacketBuf,
+    device::{
+        LINK_FLAG_BROADCAST, LINK_FLAG_LOOPBACK, LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST,
+        LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind, LinkSnapshot, NeighborUpdate, NetDevice,
+    },
+    ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
+    router::{
+        Ipv4AddrEntry, ROUTE_PROTOCOL_BOOT, ROUTE_SCOPE_HOST, ROUTE_SCOPE_UNIVERSE,
+        ROUTE_TABLE_MAIN, ROUTE_TYPE_UNICAST, RouteAttrs, Router, Rule,
+    },
+    service::Service,
+    socket::SocketOps,
+};
+
+struct TestDevice {
+    link: LinkSnapshot,
+    neighbors: Vec<NeighborUpdate>,
+}
+
+impl TestDevice {
+    fn new(link: LinkSnapshot) -> Self {
+        Self {
+            link,
+            neighbors: Vec::new(),
+        }
+    }
+}
+
+impl NetDevice for TestDevice {
+    fn name(&self) -> &str {
+        &self.link.name
+    }
+
+    fn link_snapshot(&self, ifindex: i32) -> LinkSnapshot {
+        LinkSnapshot {
+            ifindex,
+            ..self.link.clone()
+        }
+    }
+
+    fn poll_rx(&mut self, _ifindex: i32, _timestamp: TimeValue) -> Option<PacketBuf> {
+        None
+    }
+
+    fn send_ip_packet(
+        &mut self,
+        _ifindex: i32,
+        _next_hop: IpAddress,
+        _packet: PacketBuf,
+        _timestamp: TimeValue,
+    ) -> bool {
+        false
+    }
+
+    fn register_rx_waker(&self, _waker: &Waker) {}
+
+    fn set_name(&mut self, name: String) {
+        self.link.name = name;
+    }
+
+    fn set_mtu(&mut self, mtu: usize) {
+        self.link.mtu = mtu;
+    }
+
+    fn set_link_up(&mut self, is_up: bool) {
+        if is_up {
+            self.link.flags |= LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOWER_UP;
+            self.link.operstate = 6;
+        } else {
+            self.link.flags &= !(LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOWER_UP);
+            self.link.operstate = 2;
+        }
+    }
+
+    fn apply_neighbor_update(&mut self, update: NeighborUpdate) {
+        if let Some(existing) = self
+            .neighbors
+            .iter_mut()
+            .find(|neighbor| neighbor.dst == update.dst)
+        {
+            *existing = update;
+        } else {
+            self.neighbors.push(update);
+        }
+    }
+
+    fn neighbor_snapshots(&self, _dev: usize) -> Vec<NeighborUpdate> {
+        self.neighbors.clone()
+    }
+}
 
 fn init_test_state() {
-    let state = build_initial_state(
-        IpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
-            Ipv4Address::new(127, 0, 0, 1),
-            8,
-        )),
-        Some(IpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
-            Ipv4Address::new(192, 168, 1, 2),
-            24,
-        ))),
-        Some([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]),
+    let mut router = Router::new();
+    let lo_ip = Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8);
+    let lo_dev = router.add_device(Box::new(TestDevice::new(LinkSnapshot {
+        ifindex: 1,
+        name: String::from("lo"),
+        flags: LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOOPBACK | LINK_FLAG_LOWER_UP,
+        mtu: 65_536,
+        operstate: 0,
+        kind: LinkKind::Loopback,
+        hardware_addr: [0; 6],
+        broadcast_addr: [0; 6],
+    })));
+    router.add_ipv4_addr(Ipv4AddrEntry {
+        dev: lo_dev,
+        addr: lo_ip,
+        scope: ROUTE_SCOPE_HOST,
+    });
+    router.add_route_rule(Rule::with_route_attrs(
+        lo_ip.into(),
+        None,
+        lo_dev,
+        lo_ip.address().into(),
+        65_536,
+        route_attrs(ROUTE_SCOPE_HOST, Some(lo_ip.address().into())),
+    ));
+
+    let eth0_ip = Ipv4Cidr::new(Ipv4Address::new(192, 168, 1, 2), 24);
+    let eth0_dev = router.add_device(Box::new(TestDevice::new(LinkSnapshot {
+        ifindex: 2,
+        name: String::from("eth0"),
+        flags: LINK_FLAG_UP
+            | LINK_FLAG_RUNNING
+            | LINK_FLAG_BROADCAST
+            | LINK_FLAG_MULTICAST
+            | LINK_FLAG_LOWER_UP,
+        mtu: 1500,
+        operstate: 6,
+        kind: LinkKind::Ethernet,
+        hardware_addr: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
+        broadcast_addr: [0xff; 6],
+    })));
+    router.add_ipv4_addr(Ipv4AddrEntry {
+        dev: eth0_dev,
+        addr: eth0_ip,
+        scope: ROUTE_SCOPE_UNIVERSE,
+    });
+    router.add_route_rule(Rule::with_route_attrs(
+        Ipv4Cidr::new(eth0_ip.address(), 32).into(),
+        None,
+        lo_dev,
+        eth0_ip.address().into(),
+        65_536,
+        route_attrs(ROUTE_SCOPE_HOST, Some(eth0_ip.address().into())),
+    ));
+    router.add_route_rule(Rule::with_route_attrs(
+        Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).into(),
         Some(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 1))),
+        eth0_dev,
+        eth0_ip.address().into(),
         1500,
-    );
-    if ROUTE_STATE.is_inited() {
-        *ROUTE_STATE.write() = state;
+        route_attrs(ROUTE_SCOPE_UNIVERSE, Some(eth0_ip.address().into())),
+    ));
+
+    if SERVICE.is_inited() {
+        SERVICE.lock().replace_router_for_tests(router);
     } else {
-        init_route_state(state);
+        SERVICE.init_once(ksync::Mutex::new(Service::new(router)));
+    }
+}
+
+fn route_attrs(scope: u8, prefsrc: Option<IpAddress>) -> RouteAttrs {
+    RouteAttrs {
+        table: ROUTE_TABLE_MAIN,
+        protocol: ROUTE_PROTOCOL_BOOT,
+        scope,
+        route_type: ROUTE_TYPE_UNICAST,
+        prefsrc,
     }
 }
 
@@ -62,42 +213,28 @@ fn attr(kind: u16, payload: &[u8]) -> Vec<u8> {
 }
 
 #[def_test(serial)]
-fn test_build_initial_state_contains_links_and_routes() {
-    let state = build_initial_state(
-        IpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
-            Ipv4Address::new(127, 0, 0, 1),
-            8,
-        )),
-        Some(IpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
-            Ipv4Address::new(10, 0, 2, 15),
-            24,
-        ))),
-        Some([1, 2, 3, 4, 5, 6]),
-        Some(IpAddress::Ipv4(Ipv4Address::new(10, 0, 2, 2))),
-        1500,
-    );
+fn test_owner_snapshot_contains_links_and_routes() {
+    init_test_state();
+    let state = SERVICE.lock().network_snapshot();
 
     assert_eq!(state.links.len(), 2);
     assert_eq!(state.addrs.len(), 2);
     assert_eq!(state.links[0].name, "lo");
     assert_eq!(state.links[1].name, "eth0");
     assert!(state.routes.iter().any(|route| {
-        route.dst == Some(IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)))
-            && route.dst_len == 8
+        route.filter == IpCidr::Ipv4(Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8))
             && route.scope == wire_route::SCOPE_HOST
-            && route.gateway.is_none()
+            && route.via.is_none()
     }));
     assert!(state.routes.iter().any(|route| {
-        route.dst == Some(IpAddress::Ipv4(Ipv4Address::new(10, 0, 2, 15)))
-            && route.dst_len == 32
+        route.filter == IpCidr::Ipv4(Ipv4Cidr::new(Ipv4Address::new(192, 168, 1, 2), 32))
             && route.scope == wire_route::SCOPE_HOST
-            && route.gateway.is_none()
+            && route.via.is_none()
     }));
     assert!(state.routes.iter().any(|route| {
-        route.dst.is_none()
-            && route.dst_len == 0
+        route.filter.prefix_len() == 0
             && route.scope == wire_route::SCOPE_UNIVERSE
-            && route.gateway == Some(IpAddress::Ipv4(Ipv4Address::new(10, 0, 2, 2)))
+            && route.via == Some(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 1)))
     }));
 }
 
@@ -108,8 +245,8 @@ fn test_parse_link_update_name_and_mtu() {
     push_u8(&mut payload, 0);
     push_u16_ne(&mut payload, ARPHRD_ETHER);
     push_i32_ne(&mut payload, 2);
-    push_u32_ne(&mut payload, IFF_UP);
-    push_u32_ne(&mut payload, IFF_UP);
+    push_u32_ne(&mut payload, LINK_FLAG_UP);
+    push_u32_ne(&mut payload, LINK_FLAG_UP);
     payload.extend(attr(wire_link::attr::IFNAME, b"eth1\0"));
     payload.extend(attr(wire_link::attr::MTU, &1400u32.to_ne_bytes()));
 
@@ -125,17 +262,17 @@ fn test_update_link_state_rename_and_down() {
     let request = LinkUpdateRequest {
         index: 2,
         flags: 0,
-        change: IFF_UP,
+        change: LINK_FLAG_UP,
         name: Some(String::from("ens3")),
         mtu: Some(1400),
     };
     update_link_state(request).unwrap();
 
-    let state = route_state();
-    let link = state.links.iter().find(|link| link.index == 2).unwrap();
+    let state = SERVICE.lock().network_snapshot();
+    let link = state.links.iter().find(|link| link.ifindex == 2).unwrap();
     assert_eq!(link.name, "ens3");
     assert_eq!(link.mtu, 1400);
-    assert_eq!(link.flags & IFF_UP, 0);
+    assert_eq!(link.flags & LINK_FLAG_UP, 0);
 }
 
 #[def_test(serial)]
@@ -151,10 +288,12 @@ fn test_add_replace_and_delete_address() {
 
     add_addr_state(req, NLM_F_CREATE | NLM_F_EXCL).unwrap();
     assert!(
-        route_state()
+        SERVICE
+            .lock()
+            .network_snapshot()
             .addrs
             .iter()
-            .any(|addr| addr.address == req.address && addr.index == 2)
+            .any(|addr| IpAddress::Ipv4(addr.addr.address()) == req.address && addr.dev == 1)
     );
 
     let replaced = AddrRequest {
@@ -163,18 +302,25 @@ fn test_add_replace_and_delete_address() {
     };
     add_addr_state(replaced, NLM_F_REPLACE).unwrap();
     assert!(
-        route_state()
+        SERVICE
+            .lock()
+            .network_snapshot()
             .addrs
             .iter()
-            .any(|addr| addr.address == replaced.address && addr.scope == wire_route::SCOPE_HOST)
+            .any(
+                |addr| IpAddress::Ipv4(addr.addr.address()) == replaced.address
+                    && addr.scope == wire_route::SCOPE_HOST
+            )
     );
 
     del_addr_state(replaced).unwrap();
     assert!(
-        !route_state()
+        !SERVICE
+            .lock()
+            .network_snapshot()
             .addrs
             .iter()
-            .any(|addr| addr.address == replaced.address && addr.index == 2)
+            .any(|addr| IpAddress::Ipv4(addr.addr.address()) == replaced.address && addr.dev == 1)
     );
 }
 
@@ -184,10 +330,10 @@ fn test_add_and_delete_route() {
     let req = RouteRequest {
         family: wire_route::FAMILY_IPV4,
         dst_len: 24,
-        table: RT_TABLE_MAIN,
+        table: ROUTE_TABLE_MAIN,
         protocol: wire_route::PROTOCOL_BOOT,
         scope: wire_route::SCOPE_UNIVERSE,
-        route_type: RTN_UNICAST,
+        route_type: ROUTE_TYPE_UNICAST,
         oif: 2,
         dst: Some(IpAddress::Ipv4(Ipv4Address::new(172, 16, 0, 0))),
         gateway: Some(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 1))),
@@ -196,18 +342,22 @@ fn test_add_and_delete_route() {
 
     add_route_state(req, NLM_F_CREATE | NLM_F_EXCL).unwrap();
     assert!(
-        route_state()
+        SERVICE
+            .lock()
+            .network_snapshot()
             .routes
             .iter()
-            .any(|route| route.dst == req.dst && route.gateway == req.gateway)
+            .any(|route| route.filter.address() == req.dst.unwrap() && route.via == req.gateway)
     );
 
     del_route_state(req).unwrap();
     assert!(
-        !route_state()
+        !SERVICE
+            .lock()
+            .network_snapshot()
             .routes
             .iter()
-            .any(|route| route.dst == req.dst && route.gateway == req.gateway)
+            .any(|route| route.filter.address() == req.dst.unwrap() && route.via == req.gateway)
     );
 }
 
@@ -225,10 +375,12 @@ fn test_add_and_replace_neighbour() {
 
     add_neigh_state(req, NLM_F_CREATE | NLM_F_REPLACE).unwrap();
     assert!(
-        route_state()
-            .neighs
+        SERVICE
+            .lock()
+            .network_snapshot()
+            .neighbors
             .iter()
-            .any(|neigh| neigh.dst == req.dst && neigh.lladdr == req.lladdr)
+            .any(|neigh| neigh.dst == req.dst && Some(neigh.hardware_addr) == req.lladdr)
     );
 
     let replaced = NeighRequest {
@@ -237,10 +389,12 @@ fn test_add_and_replace_neighbour() {
     };
     add_neigh_state(replaced, NLM_F_REPLACE).unwrap();
     assert!(
-        route_state()
-            .neighs
+        SERVICE
+            .lock()
+            .network_snapshot()
+            .neighbors
             .iter()
-            .any(|neigh| neigh.dst == replaced.dst && neigh.lladdr == replaced.lladdr)
+            .any(|neigh| neigh.dst == replaced.dst && Some(neigh.hardware_addr) == replaced.lladdr)
     );
 }
 
@@ -336,14 +490,14 @@ fn test_publish_kobject_uevent_appends_monotonic_seqnum() {
     let first = queue.pop_front().unwrap();
     let second = queue.pop_front().unwrap();
 
-    let first_seq = core::str::from_utf8(&first.data)
+    let first_seq = ::core::str::from_utf8(&first.data)
         .unwrap()
         .split('\0')
         .find_map(|entry| entry.strip_prefix("SEQNUM="))
         .unwrap()
         .parse::<u64>()
         .unwrap();
-    let second_seq = core::str::from_utf8(&second.data)
+    let second_seq = ::core::str::from_utf8(&second.data)
         .unwrap()
         .split('\0')
         .find_map(|entry| entry.strip_prefix("SEQNUM="))

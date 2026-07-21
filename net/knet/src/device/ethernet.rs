@@ -14,7 +14,10 @@ use ktime_types::{MonotonicInstant, TimeSpan};
 use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::ETHERNET_MAX_PENDING_PACKETS,
-    device::NetDevice as NetDeviceOps,
+    device::{
+        LINK_FLAG_BROADCAST, LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST, LINK_FLAG_RUNNING,
+        LINK_FLAG_UP, LinkKind, LinkSnapshot, NeighborUpdate, NetDevice as NetDeviceOps,
+    },
     ip::{IpAddress, Ipv4Cidr},
     packet,
     wire::{
@@ -40,11 +43,13 @@ struct PendingTxPacket {
 
 /// Ethernet device backed by a driver-provided NIC.
 pub struct EthernetDevice {
-    #[allow(dead_code)]
     name: String,
+    flags: u32,
+    mtu: usize,
+    operstate: u8,
     inner: ClassDevice<NetDeviceImpl>,
     neighbors: HashMap<IpAddress, Option<ArpNeighbor>>,
-    ip: Ipv4Cidr,
+    ip: Option<Ipv4Cidr>,
 
     pending_tx: VecDeque<PendingTxPacket>,
 }
@@ -56,9 +61,16 @@ impl EthernetDevice {
     pub fn new(name: String, inner: ClassDevice<NetDeviceImpl>, ip: Ipv4Cidr) -> Self {
         Self {
             name,
+            flags: LINK_FLAG_UP
+                | LINK_FLAG_RUNNING
+                | LINK_FLAG_BROADCAST
+                | LINK_FLAG_MULTICAST
+                | LINK_FLAG_LOWER_UP,
+            mtu: crate::consts::STANDARD_MTU,
+            operstate: 6,
             inner,
             neighbors: HashMap::new(),
-            ip,
+            ip: Some(ip),
             pending_tx: VecDeque::with_capacity(ETHERNET_MAX_PENDING_PACKETS),
         }
     }
@@ -203,6 +215,10 @@ impl EthernetDevice {
     }
 
     fn send_arp_request(&mut self, ifindex: i32, target_ip: IpAddress) {
+        let Some(local_ip) = self.ip else {
+            warn!("Cannot resolve ARP without a local IPv4 address");
+            return;
+        };
         let IpAddress::Ipv4(target_ipv4) = target_ip else {
             warn!("IPv6 address ARP is not supported: {}", target_ip);
             return;
@@ -212,7 +228,7 @@ impl EthernetDevice {
         let arp_packet = ArpIpv4Packet {
             operation: ArpOperation::Request,
             source_hardware_addr: self.mac_addr(),
-            source_protocol_addr: self.ip.address(),
+            source_protocol_addr: local_ip.address(),
             target_hardware_addr: MacAddress::BROADCAST,
             target_protocol_addr: target_ipv4,
         };
@@ -261,7 +277,10 @@ impl EthernetDevice {
         {
             return;
         }
-        if self.ip.address() != target_protocol_addr {
+        let Some(local_ip) = self.ip else {
+            return;
+        };
+        if local_ip.address() != target_protocol_addr {
             return;
         }
 
@@ -278,7 +297,7 @@ impl EthernetDevice {
             let response = ArpIpv4Packet {
                 operation: ArpOperation::Reply,
                 source_hardware_addr: self.mac_addr(),
-                source_protocol_addr: self.ip.address(),
+                source_protocol_addr: local_ip.address(),
                 target_hardware_addr: source_hardware_addr,
                 target_protocol_addr: source_protocol_addr,
             };
@@ -343,6 +362,19 @@ impl NetDeviceOps for EthernetDevice {
         &self.name
     }
 
+    fn link_snapshot(&self, ifindex: i32) -> LinkSnapshot {
+        LinkSnapshot {
+            ifindex,
+            name: self.name.clone(),
+            flags: self.flags,
+            mtu: self.mtu,
+            operstate: self.operstate,
+            kind: LinkKind::Ethernet,
+            hardware_addr: self.mac_addr().0,
+            broadcast_addr: [0xff; 6],
+        }
+    }
+
     fn device_id(&self) -> Option<kdevice::DeviceId> {
         Some(self.inner.id())
     }
@@ -381,7 +413,11 @@ impl NetDeviceOps for EthernetDevice {
         }
 
         packet.set_ifindex(ifindex);
-        if next_hop.is_broadcast() || self.ip.broadcast().map(IpAddress::Ipv4) == Some(next_hop) {
+        let Some(local_ip) = self.ip else {
+            warn!("Dropping IPv4 packet without a local IPv4 address");
+            return false;
+        };
+        if next_hop.is_broadcast() || local_ip.broadcast().map(IpAddress::Ipv4) == Some(next_hop) {
             self.send_ipv4_packet_to(ifindex, MacAddress::BROADCAST, &packet);
             return false;
         }
@@ -432,32 +468,54 @@ impl NetDeviceOps for EthernetDevice {
         Ok(())
     }
 
-    fn sync_netlink(
-        &mut self,
-        name: Option<&str>,
-        ipv4_addr: Option<Ipv4Cidr>,
-        neighbors: &[(IpAddress, [u8; 6])],
-    ) {
-        if let Some(name) = name {
-            self.name = name.into();
-        }
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
 
-        if let Some(ipv4_addr) = ipv4_addr {
-            self.ip = ipv4_addr;
-        }
+    fn set_ipv4_addr(&mut self, addr: Option<Ipv4Cidr>) {
+        self.ip = addr;
+    }
 
-        self.neighbors.clear();
-        for (dst_addr, hardware_addr) in neighbors {
+    fn set_mtu(&mut self, mtu: usize) {
+        self.mtu = mtu;
+    }
+
+    fn set_link_up(&mut self, is_up: bool) {
+        if is_up {
+            self.flags |= LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOWER_UP;
+            self.operstate = 6;
+        } else {
+            self.flags &= !(LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOWER_UP);
+            self.operstate = 2;
+        }
+    }
+
+    fn apply_neighbor_update(&mut self, update: NeighborUpdate) {
+        if let IpAddress::Ipv4(ipv4) = update.dst {
             self.neighbors.insert(
-                *dst_addr,
+                IpAddress::Ipv4(ipv4),
                 Some(ArpNeighbor {
-                    hardware_address: MacAddress(*hardware_addr),
+                    hardware_address: MacAddress(update.hardware_addr),
                     expires_at: MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(
                         u64::MAX / 2,
                     )),
                 }),
             );
         }
+    }
+
+    fn neighbor_snapshots(&self, dev: usize) -> Vec<NeighborUpdate> {
+        self.neighbors
+            .iter()
+            .filter_map(|(dst, neighbor)| {
+                let neighbor = neighbor.as_ref()?;
+                Some(NeighborUpdate {
+                    dev,
+                    dst: *dst,
+                    hardware_addr: neighbor.hardware_address.0,
+                })
+            })
+            .collect()
     }
 }
 

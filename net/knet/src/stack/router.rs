@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! Routing table and route selection.
-use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
 
 use kerrno::{KError, KResult, LinuxError};
 use ktime_types::MonotonicInstant;
@@ -22,31 +22,77 @@ use crate::{
     LISTEN_TABLE,
     buf::{PacketBuf, PacketOwner},
     consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
-    device::NetDevice,
-    ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
-    netlink::{RT_TABLE_MAIN, RTN_UNICAST, RtnetlinkState},
+    device::{LinkSnapshot, NeighborUpdate, NetDevice},
+    ip::{IpAddress, IpCidr, Ipv4Cidr},
     udp, udp_err,
 };
 
-#[derive(Debug)]
+pub(crate) const ROUTE_TABLE_MAIN: u8 = 254;
+pub(crate) const ROUTE_PROTOCOL_BOOT: u8 = 3;
+pub(crate) const ROUTE_SCOPE_UNIVERSE: u8 = 0;
+pub(crate) const ROUTE_SCOPE_HOST: u8 = 254;
+pub(crate) const ROUTE_TYPE_UNICAST: u8 = 1;
+
+#[derive(Clone, Copy, Debug)]
 pub struct Rule {
     pub filter: IpCidr,
     pub via: Option<IpAddress>,
     pub dev: usize,
     pub src: IpAddress,
     pub mtu: usize,
+    pub table: u8,
+    pub protocol: u8,
+    pub scope: u8,
+    pub route_type: u8,
+    pub prefsrc: Option<IpAddress>,
 }
 
 impl Rule {
-    pub fn new(filter: IpCidr, via: Option<IpAddress>, dev: usize, src: IpAddress) -> Self {
+    pub fn with_route_attrs(
+        filter: IpCidr,
+        via: Option<IpAddress>,
+        dev: usize,
+        src: IpAddress,
+        mtu: usize,
+        attrs: RouteAttrs,
+    ) -> Self {
         Self {
             filter,
             via,
             dev,
             src,
-            mtu: STANDARD_MTU,
+            mtu,
+            table: attrs.table,
+            protocol: attrs.protocol,
+            scope: attrs.scope,
+            route_type: attrs.route_type,
+            prefsrc: attrs.prefsrc,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RouteAttrs {
+    pub table: u8,
+    pub protocol: u8,
+    pub scope: u8,
+    pub route_type: u8,
+    pub prefsrc: Option<IpAddress>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Ipv4AddrEntry {
+    pub dev: usize,
+    pub addr: Ipv4Cidr,
+    pub scope: u8,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct NetworkSnapshot {
+    pub links: Vec<LinkSnapshot>,
+    pub addrs: Vec<Ipv4AddrEntry>,
+    pub routes: Vec<Rule>,
+    pub neighbors: Vec<NeighborUpdate>,
 }
 
 // TODO(mivik): optimize
@@ -72,8 +118,20 @@ impl RouteTable {
             .find(|rule| rule.filter.contains_addr(dst))
     }
 
-    pub fn clear(&mut self) {
-        self.rules.clear();
+    pub fn rules(&self) -> &[Rule] {
+        &self.rules
+    }
+
+    pub fn remove_exact_rule(&mut self, route: Rule) {
+        self.rules.retain(|rule| !same_route_rule(*rule, route));
+    }
+
+    pub fn update_device_mtu(&mut self, dev: usize, mtu: usize) {
+        for rule in &mut self.rules {
+            if rule.dev == dev {
+                rule.mtu = mtu;
+            }
+        }
     }
 
     pub fn remove_device(&mut self, dev: usize) {
@@ -89,7 +147,7 @@ impl RouteTable {
 pub struct Router {
     rx_queue: VecDeque<PacketBuf>,
     tx_queue: VecDeque<PacketBuf>,
-    local_ipv4_addrs: Vec<Ipv4Cidr>,
+    ipv4_addrs: Vec<Ipv4AddrEntry>,
     ipv4_reassembler: Ipv4Reassembler,
     next_ipv4_identification: u16,
     pub(crate) devices: Vec<Box<dyn NetDevice>>,
@@ -100,7 +158,7 @@ impl Router {
         Self {
             rx_queue: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
             tx_queue: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
-            local_ipv4_addrs: Vec::new(),
+            ipv4_addrs: Vec::new(),
             ipv4_reassembler: Ipv4Reassembler::new(),
             next_ipv4_identification: 1,
             devices: Vec::new(),
@@ -137,10 +195,6 @@ impl Router {
         Ok(())
     }
 
-    pub fn add_rule(&mut self, rule: Rule) {
-        self.table.add_rule(rule);
-    }
-
     pub fn add_device(&mut self, device: Box<dyn NetDevice>) -> usize {
         self.devices.push(device);
         self.devices.len() - 1
@@ -156,78 +210,111 @@ impl Router {
         };
         self.devices.remove(pos);
         self.table.remove_device(pos);
+        self.ipv4_addrs.retain(|addr| addr.dev != pos);
+        for addr in &mut self.ipv4_addrs {
+            if addr.dev > pos {
+                addr.dev -= 1;
+            }
+        }
         true
     }
 
-    pub fn sync_netlink(&mut self, state: &RtnetlinkState) {
-        for (dev_index, device) in self.devices.iter_mut().enumerate() {
-            let ifindex = dev_index as i32 + 1;
-            let link = state.links.iter().find(|link| link.index == ifindex);
-            let ipv4_addr = state
-                .addrs
+    pub fn local_ipv4_addrs(&self) -> Vec<Ipv4Cidr> {
+        self.ipv4_addrs.iter().map(|entry| entry.addr).collect()
+    }
+
+    pub fn network_snapshot(&self) -> NetworkSnapshot {
+        NetworkSnapshot {
+            links: self
+                .devices
                 .iter()
-                .find(|addr| addr.index == ifindex as u32 && addr.family == 2)
-                .and_then(|addr_state| match addr_state.address {
-                    SmoltcpIpAddress::Ipv4(addr) => {
-                        Some(Ipv4Cidr::new(addr.into(), addr_state.prefix_len))
-                    }
-                    SmoltcpIpAddress::Ipv6(_) => None,
-                });
-            let neighbors: Vec<_> = state
-                .neighs
+                .enumerate()
+                .map(|(dev, device)| device.link_snapshot(dev as i32 + 1))
+                .collect(),
+            addrs: self.ipv4_addrs.clone(),
+            routes: self.table.rules().to_vec(),
+            neighbors: self
+                .devices
                 .iter()
-                .filter(|neigh| neigh.ifindex == ifindex as u32)
-                .filter_map(|neigh| {
-                    let hardware_addr = neigh.lladdr?;
-                    Some((super::from_smoltcp_ip_address(neigh.dst), hardware_addr))
-                })
-                .collect();
-            device.sync_netlink(link.map(|link| link.name.as_str()), ipv4_addr, &neighbors);
+                .enumerate()
+                .flat_map(|(dev, device)| device.neighbor_snapshots(dev))
+                .collect(),
         }
+    }
 
-        self.table.clear();
-        self.local_ipv4_addrs.clear();
-        self.local_ipv4_addrs
-            .extend(state.addrs.iter().filter_map(|addr| match addr.address {
-                SmoltcpIpAddress::Ipv4(ipv4) => Some(Ipv4Cidr::new(ipv4.into(), addr.prefix_len)),
-                SmoltcpIpAddress::Ipv6(_) => None,
-            }));
-        for route in state.routes.iter().filter(|route| {
-            route.family == 2 && route.table == RT_TABLE_MAIN && route.route_type == RTN_UNICAST
-        }) {
-            let dev = route.oif.saturating_sub(1) as usize;
-            if dev >= self.devices.len() {
-                continue;
-            }
+    pub fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
+        if ifindex <= 0 {
+            return None;
+        }
+        self.devices
+            .get((ifindex - 1) as usize)
+            .map(|device| device.link_snapshot(ifindex))
+    }
 
-            let filter = match route.dst {
-                Some(SmoltcpIpAddress::Ipv4(addr)) => {
-                    IpCidr::Ipv4(Ipv4Cidr::new(addr.into(), route.dst_len))
-                }
-                None => IpCidr::Ipv4(Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, route.dst_len)),
-                Some(SmoltcpIpAddress::Ipv6(_)) => continue,
-            };
-            let src = route
-                .prefsrc
-                .or_else(|| {
-                    state.addrs.iter().find_map(|addr| {
-                        (addr.index == route.oif && addr.family == 2).then_some(addr.address)
-                    })
-                })
-                .map(super::from_smoltcp_ip_address)
-                .unwrap_or(filter.address());
-            let mut rule = Rule::new(
-                filter,
-                route.gateway.map(super::from_smoltcp_ip_address),
-                dev,
-                src,
-            );
-            rule.mtu = state
-                .links
-                .iter()
-                .find(|link| link.index == route.oif as i32)
-                .map_or(STANDARD_MTU, |link| link.mtu as usize);
+    pub fn add_ipv4_addr(&mut self, entry: Ipv4AddrEntry) {
+        if entry.dev >= self.devices.len() {
+            return;
+        }
+        if let Some(existing) = self
+            .ipv4_addrs
+            .iter_mut()
+            .find(|existing| existing.dev == entry.dev && existing.addr == entry.addr)
+        {
+            *existing = entry;
+            return;
+        }
+        self.ipv4_addrs.push(entry);
+    }
+
+    pub fn remove_ipv4_addr(&mut self, entry: Ipv4AddrEntry) {
+        self.ipv4_addrs
+            .retain(|addr| addr.dev != entry.dev || addr.addr != entry.addr);
+    }
+
+    pub fn first_ipv4_addr_for_device(&self, dev: usize) -> Option<Ipv4Cidr> {
+        self.ipv4_addrs
+            .iter()
+            .find_map(|entry| (entry.dev == dev).then_some(entry.addr))
+    }
+
+    pub fn add_route_rule(&mut self, rule: Rule) {
+        if rule.dev < self.devices.len() {
             self.table.add_rule(rule);
+        }
+    }
+
+    pub fn remove_exact_route_rule(&mut self, route: Rule) {
+        self.table.remove_exact_rule(route);
+    }
+
+    pub fn set_device_name(&mut self, dev: usize, name: String) {
+        if let Some(device) = self.devices.get_mut(dev) {
+            device.set_name(name);
+        }
+    }
+
+    pub fn set_device_ipv4_addr(&mut self, dev: usize, addr: Option<Ipv4Cidr>) {
+        if let Some(device) = self.devices.get_mut(dev) {
+            device.set_ipv4_addr(addr);
+        }
+    }
+
+    pub fn set_device_mtu(&mut self, dev: usize, mtu: usize) {
+        if let Some(device) = self.devices.get_mut(dev) {
+            device.set_mtu(mtu);
+            self.table.update_device_mtu(dev, mtu);
+        }
+    }
+
+    pub fn set_device_link_up(&mut self, dev: usize, is_up: bool) {
+        if let Some(device) = self.devices.get_mut(dev) {
+            device.set_link_up(is_up);
+        }
+    }
+
+    pub fn apply_neighbor_update(&mut self, update: NeighborUpdate) {
+        if let Some(device) = self.devices.get_mut(update.dev) {
+            device.apply_neighbor_update(update);
         }
     }
 
@@ -492,16 +579,15 @@ impl Router {
     fn is_local_ipv4_destination(&self, dst_addr: crate::ip::Ipv4Address) -> bool {
         dst_addr.is_broadcast()
             || dst_addr.is_multicast()
-            || self
-                .local_ipv4_addrs
-                .iter()
-                .any(|addr| addr.address() == dst_addr || addr.broadcast() == Some(dst_addr))
+            || self.ipv4_addrs.iter().any(|entry| {
+                entry.addr.address() == dst_addr || entry.addr.broadcast() == Some(dst_addr)
+            })
     }
 
     fn is_local_ipv4_source(&self, src_addr: crate::ip::Ipv4Address) -> bool {
-        self.local_ipv4_addrs
+        self.ipv4_addrs
             .iter()
-            .any(|addr| addr.address() == src_addr)
+            .any(|entry| entry.addr.address() == src_addr)
     }
 
     fn is_valid_ipv4_broadcast_source(&self, src_addr: crate::ip::Ipv4Address) -> bool {
@@ -516,6 +602,17 @@ impl Router {
                 ipv4::PROTOCOL_TCP | ipv4::PROTOCOL_UDP | ipv4::PROTOCOL_ICMP
             )
     }
+}
+
+fn same_route_rule(lhs: Rule, rhs: Rule) -> bool {
+    lhs.filter == rhs.filter
+        && lhs.via == rhs.via
+        && lhs.dev == rhs.dev
+        && lhs.table == rhs.table
+        && lhs.protocol == rhs.protocol
+        && lhs.scope == rhs.scope
+        && lhs.route_type == rhs.route_type
+        && lhs.prefsrc == rhs.prefsrc
 }
 
 pub struct TxToken<'a>(&'a mut VecDeque<PacketBuf>);

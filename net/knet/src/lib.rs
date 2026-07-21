@@ -52,7 +52,10 @@ use crate::{
     device::{EthernetDevice, LoopbackDevice},
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
     listen_table::ListenTable,
-    router::{Router, Rule},
+    router::{
+        Ipv4AddrEntry, ROUTE_PROTOCOL_BOOT, ROUTE_SCOPE_HOST, ROUTE_SCOPE_UNIVERSE,
+        ROUTE_TABLE_MAIN, ROUTE_TYPE_UNICAST, RouteAttrs, Router, Rule,
+    },
     service::Service,
     wrapper::SocketSetWrapper,
 };
@@ -72,21 +75,32 @@ pub fn init_network() {
     let lo_dev = router.add_device(Box::new(LoopbackDevice::new()));
 
     let lo_ip = Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8);
-    router.add_rule(Rule::new(
+    router.add_ipv4_addr(Ipv4AddrEntry {
+        dev: lo_dev,
+        addr: lo_ip,
+        scope: ROUTE_SCOPE_HOST,
+    });
+    router.add_route_rule(Rule::with_route_attrs(
         lo_ip.into(),
         None,
         lo_dev,
         lo_ip.address().into(),
+        65_536,
+        RouteAttrs {
+            table: ROUTE_TABLE_MAIN,
+            protocol: ROUTE_PROTOCOL_BOOT,
+            scope: ROUTE_SCOPE_HOST,
+            route_type: ROUTE_TYPE_UNICAST,
+            prefsrc: Some(lo_ip.address().into()),
+        },
     ));
 
-    let mut eth0_mac = None;
     let mut eth0_irq = None;
-    let eth0_ip = if let Some(handle) = net_devs.pop() {
+    if let Some(handle) = net_devs.pop() {
         let device_id = handle.id();
         info!("  use NIC 0: {:?}", handle.name());
 
         let eth0_address = wire::MacAddress(handle.mac().0);
-        eth0_mac = Some(handle.mac().0);
         eth0_irq = handle.irq();
         let eth0_ip = Ipv4Cidr::new(IP.parse().expect("Invalid IPv4 address"), IP_PREFIX);
 
@@ -96,48 +110,54 @@ pub fn init_network() {
             eth0_ip,
         )));
 
-        router.add_rule(Rule::new(
+        let gateway = IpAddress::Ipv4(GATEWAY.parse().expect("Invalid gateway address"));
+        router.add_ipv4_addr(Ipv4AddrEntry {
+            dev: eth0_dev,
+            addr: eth0_ip,
+            scope: ROUTE_SCOPE_UNIVERSE,
+        });
+        router.add_route_rule(Rule::with_route_attrs(
+            Ipv4Cidr::new(eth0_ip.address(), 32).into(),
+            None,
+            lo_dev,
+            eth0_ip.address().into(),
+            65_536,
+            RouteAttrs {
+                table: ROUTE_TABLE_MAIN,
+                protocol: ROUTE_PROTOCOL_BOOT,
+                scope: ROUTE_SCOPE_HOST,
+                route_type: ROUTE_TYPE_UNICAST,
+                prefsrc: Some(eth0_ip.address().into()),
+            },
+        ));
+        router.add_route_rule(Rule::with_route_attrs(
             Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).into(),
-            Some(IpAddress::Ipv4(
-                GATEWAY.parse().expect("Invalid gateway address"),
-            )),
+            Some(gateway),
             eth0_dev,
             eth0_ip.address().into(),
+            STANDARD_MTU,
+            RouteAttrs {
+                table: ROUTE_TABLE_MAIN,
+                protocol: ROUTE_PROTOCOL_BOOT,
+                scope: ROUTE_SCOPE_UNIVERSE,
+                route_type: ROUTE_TYPE_UNICAST,
+                prefsrc: Some(eth0_ip.address().into()),
+            },
         ));
 
         info!("eth0:");
         info!("  mac:  {}", eth0_address);
         info!("  ip:   {}", eth0_ip);
         subscribe_network_unregister(device_id);
-
-        Some(eth0_ip)
     } else {
         warn!("  No network device found!");
-        None
     };
 
     for dev in &router.devices {
         info!("Device: {}", dev.name());
     }
 
-    let mut service = Service::new(router);
-    service.iface.update_ip_addrs(|ip_addrs| {
-        ip_addrs.push(to_smoltcp_ipv4_cidr(lo_ip)).unwrap();
-        if let Some(eth0_ip) = eth0_ip {
-            ip_addrs.push(to_smoltcp_ipv4_cidr(eth0_ip)).unwrap();
-        }
-    });
-    SERVICE.init_once(Mutex::new(service));
-
-    let netlink_state = netlink::build_initial_state(
-        to_smoltcp_ipv4_cidr(lo_ip),
-        eth0_ip.map(to_smoltcp_ipv4_cidr),
-        eth0_mac,
-        GATEWAY.parse().ok(),
-        STANDARD_MTU as u32,
-    );
-    netlink::init_route_state(netlink_state.clone());
-    SERVICE.lock().sync_netlink(&netlink_state);
+    SERVICE.init_once(Mutex::new(Service::new(router)));
 
     SOCKET_SET.init_once(SocketSetWrapper::new());
     LISTEN_TABLE.init_once(ListenTable::new());
@@ -146,13 +166,6 @@ pub fn init_network() {
     if let Some(irq) = eth0_irq {
         EthernetDevice::spawn_rx_task(irq);
     }
-}
-
-fn to_smoltcp_ipv4_cidr(cidr: Ipv4Cidr) -> smoltcp::wire::IpCidr {
-    smoltcp::wire::IpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
-        cidr.address().into(),
-        cidr.prefix_len(),
-    ))
 }
 
 fn subscribe_network_unregister(id: kdevice::DeviceId) {

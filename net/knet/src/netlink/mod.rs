@@ -12,15 +12,12 @@
 
 use alloc::{
     collections::VecDeque,
-    string::String,
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::sync::atomic::AtomicU64;
 
-use ksync::{Mutex, RwLock, static_lock};
-use lazyinit::LazyInit;
-use smoltcp::wire::IpAddress;
+use ::core::sync::atomic::AtomicU64;
+use ksync::{Mutex, RwLock};
 
 use crate::{SERVICE, general::GeneralOptions};
 
@@ -30,10 +27,7 @@ mod socket;
 mod tests;
 mod wire;
 
-pub(crate) use route::{build_initial_state, init_route_state, link_state_for_ifindex};
 pub use socket::{NetlinkSocket, publish_kobject_uevent};
-pub(crate) const RT_TABLE_MAIN: u8 = wire::route::TABLE_MAIN;
-pub(crate) const RTN_UNICAST: u8 = wire::route::TYPE_UNICAST;
 
 pub const NETLINK_ROUTE: i32 = 0;
 pub(super) const NETLINK_KOBJECT_UEVENT: i32 = 15;
@@ -65,74 +59,9 @@ pub(super) const RTM_NEWNEIGH: u16 = 28;
 // pub(super) const RT_SCOPE_NOWHERE: u8 = 255;
 // pub(super) const RTM_NEWNEIGH_FAMILY: u8 = 0;
 
-pub(crate) const IFF_UP: u32 = 1 << 0;
-pub(super) const IFF_BROADCAST: u32 = 1 << 1;
-pub(super) const IFF_LOOPBACK: u32 = 1 << 3;
-pub(super) const IFF_RUNNING: u32 = 1 << 6;
-pub(super) const IFF_MULTICAST: u32 = 1 << 12;
-pub(super) const IFF_LOWER_UP: u32 = 1 << 16;
-
 pub(super) const ARPHRD_LOOPBACK: u16 = 772;
 pub(super) const ARPHRD_ETHER: u16 = 1;
-
-#[derive(Clone, Debug)]
-pub(crate) struct LinkState {
-    pub(crate) index: i32,
-    pub(crate) name: String,
-    pub(crate) flags: u32,
-    pub(crate) mtu: u32,
-    pub(crate) operstate: u8,
-    pub(crate) link_type: u16,
-    pub(crate) mac: [u8; 6],
-    pub(crate) broadcast: [u8; 6],
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct AddrState {
-    pub(crate) index: u32,
-    pub(crate) family: u8,
-    pub(crate) prefix_len: u8,
-    pub(crate) scope: u8,
-    pub(crate) address: IpAddress,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct RouteState {
-    pub(crate) family: u8,
-    pub(crate) dst_len: u8,
-    pub(crate) table: u8,
-    pub(crate) protocol: u8,
-    pub(crate) scope: u8,
-    pub(crate) route_type: u8,
-    pub(crate) oif: u32,
-    pub(crate) dst: Option<IpAddress>,
-    pub(crate) gateway: Option<IpAddress>,
-    pub(crate) prefsrc: Option<IpAddress>,
-}
-
-#[derive(Clone, Copy, Debug)]
-#[expect(dead_code)]
-pub(crate) struct NeighState {
-    pub(crate) family: u8,
-    pub(crate) ifindex: u32,
-    pub(crate) state: u16,
-    pub(crate) flags: u8,
-    pub(crate) dst: IpAddress,
-    pub(crate) lladdr: Option<[u8; 6]>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct RtnetlinkState {
-    pub(crate) links: Vec<LinkState>,
-    pub(crate) addrs: Vec<AddrState>,
-    pub(crate) routes: Vec<RouteState>,
-    pub(crate) neighs: Vec<NeighState>,
-}
-
-pub(super) static ROUTE_STATE: LazyInit<RwLock<RtnetlinkState>> = LazyInit::new();
-static_lock! {
-    pub(super) static UEVENT_SUBSCRIBERS: Mutex<Vec<Weak<NetlinkSocketInner>>> = Mutex::new(Vec::new());
-}
+pub(super) static UEVENT_SUBSCRIBERS: Mutex<Vec<Weak<NetlinkSocketInner>>> = Mutex::new(Vec::new());
 pub(super) static UEVENT_SEQNUM: AtomicU64 = AtomicU64::new(0);
 pub(super) const NETLINK_RX_QUEUE_LIMIT: usize = 64 * 1024;
 

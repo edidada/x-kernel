@@ -153,7 +153,7 @@ core/kruntime
   跨 `Pending` 存活，并在注册后复查 readiness，以同时保证取消清理
   和关闭 check/register 竞态。
 - **不要求固定当前进程线程才能访问全局状态**：
-  `SERVICE`、`SOCKET_SET` 和 `ROUTE_STATE`
+  `SERVICE` 和 `SOCKET_SET`
   的共享访问主要依赖全局锁和原子状态，
   但 syscall 语义相关路径仍由 `posix/net`
   负责提供进程文件描述符与凭据语境。
@@ -191,25 +191,26 @@ Busy ──operation error────────────> previous state
 | `Connected` | `Closed` | shutdown 或底层状态进入关闭路径 |
 | `Busy` | 原状态 | `StateGuard::transit` 内部操作返回错误 |
 
-### rtnetlink 控制面状态
+### rtnetlink 配置更新
 
 ```text
-build_initial_state
-        │
+rtnetlink request
+        │ parse and validate
         v
-ROUTE_STATE
-        │ RTM_NEWLINK / RTM_NEWADDR / RTM_NEWROUTE / RTM_NEWNEIGH
-        v
-updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / devices
+Service narrow mutation
         │
-        └─RTM_GETLINK / RTM_GETADDR / RTM_GETROUTE──> netlink dump
+        ├─> Router: addresses and routes
+        ├─> NetDevice: link and neighbor state
+        └─> smoltcp Interface: compatible IP address view
+                    │
+                    └─NetworkSnapshot──> netlink dump
 ```
 
 | 从 | 到 | 触发条件 |
 |----|----|----------|
-| 初始 state | `ROUTE_STATE` | `init_network` 调用 `build_initial_state` 与 `init_route_state` |
-| `ROUTE_STATE` | 更新后的 `ROUTE_STATE` | `apply_newlink`、`apply_newaddr`、`apply_newroute`、`apply_newneigh` |
-| 更新后的 `ROUTE_STATE` | data-plane 同步 | `update_route_state` 调用 `SERVICE.lock().sync_netlink` |
+| rtnetlink request | `Service` mutation | `apply_newlink`、`apply_newaddr`、`apply_newroute`、`apply_newneigh` 完成校验 |
+| `Service` mutation | owner state | `Router` 或 `NetDevice` 的窄接口更新对应配置 |
+| owner state | netlink dump | `Service::network_snapshot` 读取当前配置快照 |
 
 ## 算法流程
 
@@ -219,8 +220,7 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 2. 添加 `LoopbackDevice`，注册 `127.0.0.1/8` 路由。
 3. 从 `DeviceContainer<NetDevice>` 取首个 NIC，包装成 `EthernetDevice`，注册默认 IPv4 路由。
 4. 创建 `Service`，把 loopback 和 Ethernet 地址写入 smoltcp `Interface`。
-5. 初始化 rtnetlink 初始状态，并同步到 `Service`、`Router` 和设备。
-6. 初始化全局 `SOCKET_SET`、`LISTEN_TABLE` 和 UDP PCB registry。
+5. 初始化全局 `SOCKET_SET`、`LISTEN_TABLE` 和 UDP PCB registry。
 
 ### RX 推进
 
@@ -277,9 +277,9 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 
 1. `NetlinkSocket::send` 把用户请求交给 `handle_route_request`。
 2. `NlMsgHeader::read` 和各类 `parse_*` helper 校验 netlink header 与 attribute。
-3. dump 请求从 `ROUTE_STATE` 生成 multi-part response。
-4. mutation 请求构造新的 `RtnetlinkState`，失败时返回 netlink error。
-5. 成功更新后同步到 `Service`，带 `NLM_F_ACK` 时返回 ack。
+3. dump 请求通过 `Service::network_snapshot` 读取 `Router` 和 `NetDevice` 当前持有的配置，并生成 multi-part response。
+4. mutation 请求通过 `Service` 的窄接口直接更新地址、路由、链路或邻居的 owner，失败时返回 netlink error。
+5. 地址更新同时刷新 smoltcp `Interface` 的兼容地址视图，带 `NLM_F_ACK` 时返回 ack。
 
 ## 并发模型
 
@@ -297,8 +297,8 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 - Unix stream 每个 endpoint 的 `tx_order: SpinNoPreempt<()>` 是对应发送方向的共享排序点。本端 write shutdown、对端 read shutdown、write index 发布和对端空队列 EOF 判定都经过该锁。固定锁序为 `channel` mutex 后取得单个 `tx_order`，两个方向的顺序锁不会同时持有。
 - Unix stream 的用户数据复制和 `PollSet` 唤醒在 `tx_order` 外执行。send 先写入未发布的 vacant 区域，再在锁内复检关闭状态并推进 write index；recv 读取为空后在锁内复查 occupied 长度和关闭状态；shutdown 完成状态发布并复制 peer endpoint 引用后释放 `channel` mutex，再执行 waiter 唤醒。
 - Unix stream 每个 endpoint 分别持有 readable、writable 和 connection-state 三组 `PollSet`。写入只唤醒 peer readable waiter，读取跨过发送缓冲低水位时只唤醒 peer writable waiter，半关闭只唤醒受影响方向，完整关闭通过 connection-state waiter 通知双方。
-- netlink `ROUTE_STATE` 使用 `RwLock`，rx queue 和 subscriber 列表使用 `Mutex`。
-- RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 使用调用方传入的同一个 `PollContext` 注册聚合 `timeout_poll` 和相关 Ethernet IRQ source，registration 由跨越 `Pending` 的 `PollRegistrations` 统一管理。loopback 仍保存 `timeout_poll` 的聚合 waker（`Mutex<Option<Waker>>`），多任务广播由 `timeout_poll` 完成；设备层不得保存调用方的裸 waker或绕过 `Service` 注册互不等价的 task waker。
+- rtnetlink 配置由 `SERVICE` mutex 串行访问，netlink rx queue 和 subscriber 列表使用 `Mutex`。
+- RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 使用调用方传入的 `PollContext` 注册聚合 `timeout_poll`，再把该聚合 source waker 交给单 waker 设备，并让 Ethernet 直接把当前等待注册到 IRQ source。loopback 保存 `timeout_poll` 的聚合 waker（`Mutex<Option<Waker>>`），多任务广播由 `timeout_poll` 完成；设备层不得保存调用方的裸 waker或绕过 `Service` 注册互不等价的 task waker。
 
 ## 设计决策
 
@@ -308,11 +308,12 @@ UDP PCB、bind 冲突检查、收发队列、IPv4 校验、分片重组、输出
 TCP、raw IP、IPv6 和 DNS 继续通过 smoltcp socket set 推进，协议推进仍依赖显式 `poll_interfaces` 调用。
 该边界让 UDP 不再依赖 smoltcp socket handle，同时保留现有 TCP 和 raw socket 行为。
 
-### 控制面状态与 data-plane 同步
+### 数据路径持有网络配置
 
-rtnetlink mutation 先更新 `RtnetlinkState`，再同步到 `Service`、`Router`、smoltcp `Interface` 和 `NetDevice`。
-这种结构让 netlink dump 有稳定的 ABI presentation，也让路由表和设备地址能通过同一状态来源重建。
-代价是 dump 当前读取控制面状态，运行时统计、驱动瞬时状态和 smoltcp 内部计数没有完整反查。
+地址和路由由 `Router` 持有，链路属性和邻居表由对应 `NetDevice` 持有。
+rtnetlink mutation 通过 `Service` 的窄接口直接修改 owner，dump 使用 `NetworkSnapshot` 读取同一份状态。
+该结构移除控制面镜像及其全量同步路径，smoltcp `Interface` 只保留协议兼容所需的地址视图。
+`NetworkSnapshot` 只表达 rtnetlink ABI 所需的配置字段，不包含驱动瞬时统计和 smoltcp 内部计数。
 
 ### pathname Unix socket 显式传递凭据
 

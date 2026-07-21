@@ -3,6 +3,8 @@
 // See LICENSES for license details.
 
 //! Network device abstractions.
+use alloc::{string::String, vec::Vec};
+
 use ::core::task::Waker;
 use kerrno::KResult;
 use kpoll::{PollContext, PollRegisterError};
@@ -23,9 +25,44 @@ use crate::{
     ip::{IpAddress, Ipv4Cidr},
 };
 
+pub(crate) const LINK_FLAG_UP: u32 = 1 << 0;
+pub(crate) const LINK_FLAG_BROADCAST: u32 = 1 << 1;
+pub(crate) const LINK_FLAG_LOOPBACK: u32 = 1 << 3;
+pub(crate) const LINK_FLAG_RUNNING: u32 = 1 << 6;
+pub(crate) const LINK_FLAG_MULTICAST: u32 = 1 << 12;
+pub(crate) const LINK_FLAG_LOWER_UP: u32 = 1 << 16;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LinkKind {
+    Loopback,
+    Ethernet,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LinkSnapshot {
+    pub(crate) ifindex: i32,
+    pub(crate) name: String,
+    pub(crate) flags: u32,
+    pub(crate) mtu: usize,
+    pub(crate) operstate: u8,
+    pub(crate) kind: LinkKind,
+    pub(crate) hardware_addr: [u8; 6],
+    pub(crate) broadcast_addr: [u8; 6],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NeighborUpdate {
+    pub(crate) dev: usize,
+    pub(crate) dst: IpAddress,
+    pub(crate) hardware_addr: [u8; 6],
+}
+
 /// Trait implemented by network device backends.
 pub trait NetDevice: Send + Sync {
     fn name(&self) -> &str;
+
+    /// Returns the link-layer state owned by this device.
+    fn link_snapshot(&self, ifindex: i32) -> LinkSnapshot;
 
     /// Device-model ID for driver-backed devices.
     fn device_id(&self) -> Option<kdevice::DeviceId> {
@@ -68,12 +105,23 @@ pub trait NetDevice: Send + Sync {
         context: &mut PollContext<'_>,
     ) -> Result<(), PollRegisterError>;
 
-    /// Synchronizes device state prepared by the control-plane adapter.
-    fn sync_netlink(
-        &mut self,
-        _name: Option<&str>,
-        _ipv4_addr: Option<Ipv4Cidr>,
-        _neighbors: &[(IpAddress, [u8; 6])],
-    ) {
+    /// Updates the user-visible interface name for this device.
+    fn set_name(&mut self, _name: String) {}
+
+    /// Updates the IPv4 address used by this device backend.
+    fn set_ipv4_addr(&mut self, _addr: Option<Ipv4Cidr>) {}
+
+    /// Updates the device MTU.
+    fn set_mtu(&mut self, _mtu: usize) {}
+
+    /// Updates the administrative link state.
+    fn set_link_up(&mut self, _is_up: bool) {}
+
+    /// Applies one neighbor-table update to this device.
+    fn apply_neighbor_update(&mut self, _update: NeighborUpdate) {}
+
+    /// Returns resolved neighbor entries owned by this device.
+    fn neighbor_snapshots(&self, _dev: usize) -> Vec<NeighborUpdate> {
+        Vec::new()
     }
 }

@@ -59,8 +59,8 @@ driver layer / smoltcp / ringbuf
 因此威胁分析重点应覆盖：
 
 - 外部网络包是否能触发越界、panic、状态不一致或资源耗尽；
-- 控制面 mutation 是否会让 `ROUTE_STATE`
-  与 data-plane 同步失配；
+- 控制面 mutation 是否绕过 `Service` 的窄接口，导致 `Router`、`NetDevice`
+  或 smoltcp 兼容地址视图失配；
 - driver buffer、socket handle、ring buffer
   是否可能因生命周期管理错误破坏内存安全；
 - IRQ 路径与普通协议推进路径是否可能发生竞态或延迟放大。
@@ -219,7 +219,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-06 | listen backlog 被 SYN 洪泛占满 | 中 | 大量连接请求命中同一 listener | backlog 被 clamp 到 `LISTEN_QUEUE_SIZE`；超限丢弃并记录 warn |
 | T-07 | raw socket 被无权限调用者创建 | 中 | syscall 层没有实施权限门禁 | `knet` 层只封装 raw socket 行为；权限策略应保留在 `posix/net::sys_socket` |
 | T-08 | netlink RX queue 被 uevent 或 response 填满 | 中 | 订阅者不消费，publisher 持续写入 | `NETLINK_RX_QUEUE_LIMIT` 限制单 socket queue 字节数，超限丢弃 |
-| T-09 | 路由状态与 data-plane 不一致 | 中 | rtnetlink mutation 只更新控制面或同步过程中出错 | `update_route_state` 写入 `ROUTE_STATE` 后调用 `SERVICE.lock().sync_netlink`；新增 mutation 需复用该路径 |
+| T-09 | 网络配置的 owner 状态不一致 | 中 | rtnetlink mutation 绕过 `Service`，或地址更新遗漏 smoltcp 兼容视图 | 地址和路由由 `Router` 持有，链路和邻居由 `NetDevice` 持有；mutation 通过 `Service` 窄接口更新 owner，dump 从 `NetworkSnapshot` 读取同一状态 |
 | T-10 | 外部网络包触发 parser panic | 中 | malformed Ethernet、ARP、IP、UDP 或 TCP packet 进入 RX | Ethernet 和 ARP 使用 `zerocopy` checked view，IPv4 与 UDP 使用 crate 内 checked parser，TCP、raw IP 和 IPv6 使用 smoltcp checked parser；错误包直接丢弃 |
 | T-11 | 中断上下文误用导致锁竞争或延迟放大 | 中 | IRQ waker 回调中直接推进 `SERVICE`、`SOCKET_SET` 或执行阻塞 socket 操作 | 中断路径只注册和唤醒 waker，协议推进保留在普通 poll 路径 |
 | T-12 | driver buffer 或 DMA 输入破坏 packet 边界 | 高 | 驱动返回长度异常、数据在 recycle 后继续被访问、TX/RX buffer 生命周期使用错误 | RX 数据只在 `NetBufHandle` recycle 前解析和复制；外部帧使用 checked parser；TX buffer 由 driver handle 管理 |
@@ -252,7 +252,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | F-06 | TCP accepted child abort | 握手期间 peer reset 或 smoltcp child 关闭 | `accept` 返回 `ConnectionAborted` | 应用重试 accept | 4 | `ListenTable::accept` 清理 closed child 并继续扫描队列 |
 | F-07 | poll waker 丢失 | device mask 错误、timeout 或 Ethernet IRQ source 未注册、注册所有者未跨 `Pending` 存活或缺少 register 后复查 | socket 阻塞等待延迟 | 应用 IO latency 上升或连接超时 | 3 | bind/connect 后更新 device mask；`Service::register_rx_waker` 使用同一个 `PollContext` 注册 timeout poll 和相关 Ethernet IRQ source；调用方持有 `PollRegistrations` 并在注册后复查 readiness |
 | F-08 | malformed netlink request | header 或 attr 长度非法 | 返回 empty response 或 netlink error | 调用者请求失败 | 4 | checked reader 和 error response 处理 |
-| F-09 | ROUTE_STATE 未初始化 | netlink route 请求早于 `init_route_state` | panic 或空状态 | netlink 功能不可用 | 2 | 初始化路径在 `init_network` 中创建初始 state；新增启动路径需保持顺序 |
+| F-09 | SERVICE 尚未初始化 | netlink route 请求早于 `init_network` | mutation 或 dump 无法访问网络配置 | netlink 功能不可用 | 2 | `ensure_service_inited` 返回 `ENODEV`；启动路径需先完成 `init_network` |
 | F-10 | Unix stream peer 提前关闭 | channel 被 shutdown 或 drop | send 在无发送进度时返回 `BrokenPipe`，已有进度时返回部分字节数；recv 排空本端缓冲后返回 EOF；peer 关闭时丢弃未读输入则返回一次 `ConnectionReset`；poll 报告 `RDHUP`、`HUP` 或 `ERR` | 应用感知连接关闭 | 4 | endpoint atomic 记录双方半关闭状态与待处理 reset；per-direction `tx_order` 统一关闭与数据顺序；三组 `PollSet` 按受影响事件定向唤醒 |
 | F-11 | 中断上下文执行重型网络推进 | IRQ 路径误调用 socket send、recv 或 `poll_interfaces` | 锁竞争、调度延迟或死锁 | 网络 IO 延迟上升，严重时系统卡顿 | 2 | IRQ 路径只做 waker notification，实际协议推进由 task 上下文执行 |
 | F-12 | RX buffer recycle 顺序错误 | frame payload 在 `recycle_rx` 后仍被引用 | 读取悬垂数据或数据损坏 | packet 解析异常，严重时破坏内存安全 | 1 | `EthernetDevice::poll_rx` 在 recycle 前完成解析和复制；新增设备适配需保持同样生命周期 |
@@ -291,7 +291,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - `RTM_GETNEIGH` dump 尚未实现，neighbor 只通过 `RTM_NEWNEIGH` mutation 进入控制面。
 - IPv4 输出使用匹配路由的接口 MTU，ICMP Fragmentation Needed 中的 next-hop MTU 只进入 UDP error queue，尚未形成动态 PMTU cache。
 - IPv4 输出分片只支持无 options 的栈内生成报文，尚未实现 options copy 语义。
-- `ROUTE_STATE` dump 没有覆盖所有 live runtime 状态。
+- `NetworkSnapshot` 只覆盖 rtnetlink ABI 所需的配置，未包含驱动瞬时统计和 smoltcp 内部计数。
 - raw socket 创建权限由 syscall 层承担，`knet` 构造器自身没有进程凭据参数。
 - Ethernet 设备只处理 IPv4 ARP，IPv6 NDP、非 Ethernet 链路和多队列 NIC 抽象仍待扩展。
 - crate 内 UDP 数据路径当前只支持 IPv4；IPv6 UDP 继续由 smoltcp DNS 路径使用，普通 UDP socket 不提供 IPv6 收发。
@@ -303,7 +303,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 
 - 每个 `unsafe` 块均有 `SAFETY:` 注释。
 - 新增 smoltcp socket handle 的生命周期受 `SOCKET_SET` 保护。
-- 新增 route 或 device mutation 通过 `update_route_state` 或等效同步路径更新 data-plane。
+- 新增 route 或 device mutation 通过 `Service` 窄接口更新对应 owner，并让 dump 从同一 owner 读取。
 - 新增 netlink parser 先校验 header 长度、attribute 长度、family 和 index。
 - 新增 ring buffer 操作的 advance count 来自同一锁内同一批 slices。
 - Unix stream 的 write index 发布、方向关闭和空队列 EOF 判定保持同一个 per-direction 排序点，方向锁内不执行用户复制或 `PollSet` 唤醒，shutdown 在释放 `channel` mutex 后执行 waiter 唤醒。
