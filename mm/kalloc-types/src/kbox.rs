@@ -101,6 +101,32 @@ impl<T> KBox<T> {
         this.ptr
     }
 
+    /// Consumes and leaks the `KBox`, returning a mutable reference,
+    /// `&'a mut T`. This is the fallible analogue of [`alloc::boxed::Box::leak`].
+    ///
+    /// The allocation will never be freed — it lives until the kernel shuts down.
+    /// This is useful for static / global data that must outlive any single
+    /// subsystem.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let x = KBox::try_new(42, AllocContext::Sleepable)?;
+    /// let static_ref: &'static mut i32 = KBox::leak(x);
+    /// *static_ref += 1;
+    /// assert_eq!(*static_ref, 43);
+    /// ```
+    pub fn leak<'a>(self) -> &'a mut T
+    where
+        T: 'a,
+    {
+        let ptr = self.into_raw();
+        // SAFETY: ptr was allocated via alloc_storage<T> and is valid.
+        // We intentionally leak self so the memory will never be freed,
+        // making the returned reference effectively 'static.
+        unsafe { &mut *ptr.as_ptr() }
+    }
+
     /// Creates a `KBox` from a raw pointer previously returned by
     /// [`into_raw`](Self::into_raw).
     ///
@@ -217,5 +243,14 @@ mod tests {
         // satisfying the precondition of `from_raw`.
         let restored = unsafe { KBox::from_raw(raw) };
         assert_eq!(*restored, 42);
+    }
+
+    #[def_test]
+    fn leak_returns_static_mut_ref() {
+        let boxed = KBox::try_new(99_u32, AllocContext::Sleepable).unwrap();
+        let static_ref: &mut u32 = KBox::leak(boxed);
+        assert_eq!(*static_ref, 99);
+        *static_ref += 1;
+        assert_eq!(*static_ref, 100);
     }
 }

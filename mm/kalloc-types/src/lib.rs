@@ -38,9 +38,13 @@ pub use kbtree::{map::BTreeMap as KBTreeMap, set::BTreeSet as KBTreeSet};
 pub use khashmap::KHashMap;
 pub use kstring::KString;
 pub use kvec::{KVec, KVecIntoIter};
+pub type Arc<T> = KArc<T>;
+pub type Vec<T> = KVec<T>;
+pub type String = KString;
+pub type Box<T> = KBox<T>;
 pub use kvecdeque::KVecDeque;
 pub use try_traits::{
-    TryBitAnd, TryBitOr, TryBitXor, TryClone, TryExtend, TryFromIterator, TrySub,
+    TryBitAnd, TryBitOr, TryBitXor, TryClone, TryCollect, TryExtend, TryFromIterator, TrySub,
 };
 
 /// Construct a [`KVec<T>`] from a list of elements or a repeated expression,
@@ -84,6 +88,55 @@ macro_rules! kvec {
     // kvec![]
     () => {
         Ok::<$crate::KVec<_>, $crate::AllocError>($crate::KVec::new())
+    };
+}
+/// Fallible alternative to `alloc::vec!`, returns `Result<KVec<T>, AllocError>`.
+#[macro_export]
+macro_rules! vec {
+    ($($x:expr),+ $(,)?) => { $crate::kvec!($($x),+) };
+    ($elem:expr; $n:expr) => { $crate::kvec!($elem; $n) };
+    () => { $crate::kvec!() };
+}
+
+/// Construct a [`KString`] from a format string, analogous to `format!`, but fallible.
+///
+/// Returns `Result<KString, AllocError>`. The first argument is the
+/// [`AllocContext`] (typically [`AllocContext::Sleepable`]).
+///
+/// # Examples
+///
+/// ```ignore
+/// let msg = kformat!(AllocContext::Sleepable, "error code={}", e)?;
+/// let info = kformat!(ctx, "{}:{}", file, line)?;
+/// ```
+///
+/// Panics do not occur on OOM — the error propagates to the caller.
+#[macro_export]
+macro_rules! kformat {
+    ($ctx:expr, $($arg:tt)*) => {{
+        let mut s = $crate::KString::new();
+        match s.try_push_fmt(format_args!($($arg)*), $ctx) {
+            Ok(()) => Ok(s),
+            Err(e) => Err(e),
+        }
+    }};
+}
+
+/// Fallible alternative to `format!`, returns `Result<KString, AllocError>`.
+///
+/// This shadows the standard `format!` macro when imported from this crate,
+/// using [`AllocContext::Sleepable`] as the default context.
+///
+/// # Examples
+///
+/// ```ignore
+/// use kalloc_types::format;
+/// let msg = format!("error code={}", e)?;
+/// ```
+#[macro_export]
+macro_rules! format {
+    ($($arg:tt)*) => {
+        $crate::kformat!($crate::AllocContext::Sleepable, $($arg)*)
     };
 }
 

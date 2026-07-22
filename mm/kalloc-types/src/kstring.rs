@@ -328,7 +328,10 @@ mod tests {
     use unittest::def_test;
 
     use super::*;
-    use crate::fault_injection::{fail_allocations_after, fail_next_allocation};
+    use crate::{
+        fault_injection::{fail_allocations_after, fail_next_allocation},
+        kformat,
+    };
 
     #[def_test]
     fn new_is_empty() {
@@ -454,5 +457,26 @@ mod tests {
         assert_eq!(err, AllocError::NoMemory);
         // The old content must still be intact.
         assert_eq!(s.as_str(), "hello");
+    }
+
+    #[def_test]
+    fn kformat_creates_new_string() {
+        let msg = kformat!(AllocContext::Sleepable, "x={}, y={}", 10, "ok").unwrap();
+        assert_eq!(msg.as_str(), "x=10, y=ok");
+    }
+
+    #[def_test]
+    fn kformat_with_no_args() {
+        let msg = kformat!(AllocContext::Sleepable, "static").unwrap();
+        assert_eq!(msg.as_str(), "static");
+    }
+
+    #[def_test(serial)]
+    fn kformat_reports_injected_nomemory() {
+        let _guard = fail_next_allocation();
+        // kformat constructs an empty KString first, then pushes formatted bytes.
+        // The push may trigger a grow, which we inject a failure for.
+        let err = kformat!(AllocContext::Sleepable, "x={}", 42_u32).unwrap_err();
+        assert_eq!(err, AllocError::NoMemory);
     }
 }

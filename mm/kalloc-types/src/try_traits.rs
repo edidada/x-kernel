@@ -28,6 +28,20 @@ pub trait TryFromIterator<A>: Sized {
     fn try_from_iter<I: IntoIterator<Item = A>>(iter: I) -> Result<Self, AllocError>;
 }
 
+/// Extension trait that adds `.try_collect()` to all iterators.
+///
+/// Falls back to [`TryFromIterator::try_from_iter`].
+pub trait TryCollect: Iterator {
+    fn try_collect<B: TryFromIterator<Self::Item>>(self) -> Result<B, AllocError>
+    where
+        Self: Sized,
+    {
+        B::try_from_iter(self)
+    }
+}
+
+impl<I: Iterator> TryCollect for I {}
+
 /// Fallible set difference — like `Sub` (`-`) but returns `Result`.
 pub trait TrySub<Rhs = Self>: Sized {
     type Output;
