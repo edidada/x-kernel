@@ -66,7 +66,7 @@ any_firmware_driver = []
 fxmac = ["any_firmware_driver", "net"]
 ahci = ["any_firmware_driver", "block"]
 bcm2835-sdhci = ["any_firmware_driver", "block"]
-sdmmc = ["any_firmware_driver", "block"]
+sdmmc = ["any_firmware_driver", "block", "block/sdmmc"]
 
 default = []
 

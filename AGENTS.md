@@ -28,6 +28,12 @@ Current shared skills:
   Linux memory-management semantic knowledge base for X-Kernel MM design,
   covering address space, VMA, mmap, faults, anonymous memory, file-backed
   mmap, COW, brk, madvise, msync, and mlock.
+- `docs/ai/skills/linux-driver-port/SKILL.md`:
+  translate a Linux C driver (platform/PCI) into x-kernel Rust, mapping Linux
+  kernel APIs to existing x-kernel APIs (MMIO/IRQ/DMA/sync/publish) and
+  reporting missing subsystems (clk/regmap/gpio/phy/...) as gaps. Triggerable
+  via `/linux-driver-port` (entry at `.claude/skills/linux-driver-port/`).
+  Worked example: dwcmshc SD/MMC for RK3588.
 
 ## Project Overview
 

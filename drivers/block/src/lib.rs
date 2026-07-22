@@ -21,8 +21,8 @@ pub mod ramdisk_image;
 
 // #[cfg(feature = "ahci")]
 // pub mod ahci;
-// #[cfg(feature = "sdmmc")]
-// pub mod sdmmc;
+#[cfg(feature = "sdmmc")]
+pub mod sdmmc;
 
 #[doc(no_inline)]
 pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};

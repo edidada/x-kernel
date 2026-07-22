@@ -1,0 +1,455 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! DesignWare Mobile Storage Host Controller (dw_mshc) controller layer.
+//!
+//! Transcribed from the upstream Linux driver logic in
+//! `drivers/mmc/host/dw_mmc.c`:
+//!   * controller bring-up sequence — `dw_mci_probe`
+//!   * CIU clock setup — `dw_mci_setup_bus`
+//!   * command issue + `wait_while_busy` + START-clear — `mci_send_cmd`
+//!   * command-flag construction — `dw_mci_prepare_command`
+//!   * response extraction — `dw_mci_command_complete`
+//!   * PIO FIFO transfer — `dw_mci_read_data_pio` / `dw_mci_write_data_pio`
+//!
+//! Execution model difference from Linux: x-kernel has no mmc core, no generic
+//! IRQ/threaded-completion state machine, and no `readl_poll_timeout`. We run
+//! the controller in **synchronous polling mode** (INTMASK left at 0; command
+//! completion is awaited by polling RINTSTS). This mirrors the U-Boot dw_mmc
+//! driver and is sufficient for a minimal block driver. See the gap report for
+//! what this leaves out (IRQ-driven state machine, IDMAC, tuning).
+
+use driver_base::{DriverError, DriverResult};
+
+use super::regs::{
+    self, clkena,
+    cmd::{self},
+    hcon, int, off, set_fifoth, status, verid,
+};
+
+/// Maximum time (ns) to wait for a controller bit to clear / an interrupt to
+/// fire. Mirrors Linux's `500 * USEC_PER_MSEC` poll timeout.
+const POLL_TIMEOUT_NS: u64 = 500_000_000;
+
+/// Poll `cond` until it returns `true` or the timeout (ns) elapses. Returns
+/// `false` on timeout. Uses the monotonic hardware tick counter so it works in
+/// any context without the scheduler.
+fn wait_until_ns<F: FnMut() -> bool>(timeout_ns: u64, mut cond: F) -> bool {
+    let start = khal::time::monotonic_time_nanos();
+    loop {
+        if cond() {
+            return true;
+        }
+        if khal::time::monotonic_time_nanos().wrapping_sub(start) >= timeout_ns {
+            return false;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// The DesignWare MMC controller. Owns the MMIO window (mapped by the glue
+/// layer) and drives it with polling.
+pub struct DwMciHost {
+    /// Kernel virtual base address of the controller register window.
+    base: usize,
+    /// Offset of the data FIFO register (0x100 or 0x200, set from VERID).
+    fifo_off: usize,
+    /// FIFO depth in FIFO-words.
+    fifo_depth: u32,
+    /// log2 of the FIFO item size in bytes (we use 32-bit access → 2).
+    data_shift: u32,
+    /// Card interface clock rate the bootloader established (Hz). Source of
+    /// truth for CLKDIV math. **Gap**: real value should be read from the DT
+    /// `clock-frequency` property via a clk provider (none yet); we take a
+    /// caller-supplied default.
+    bus_hz: u32,
+    /// Controller version ID.
+    verid: u32,
+}
+
+impl DwMciHost {
+    /// Construct a handle around an already-mapped MMIO window.
+    ///
+    /// # Safety
+    ///
+    /// `base` must be a valid, exclusively-owned kernel virtual address mapping
+    /// the full dw_mshc register block (at least through 0x138), alive for the
+    /// lifetime of this host. The caller (glue layer) obtains it via
+    /// `iomap_first_mmio`.
+    pub unsafe fn new(base: usize, bus_hz: u32) -> Self {
+        Self {
+            base,
+            fifo_off: off::DATA_240A_OFFSET,
+            fifo_depth: 0,
+            data_shift: 2,
+            bus_hz,
+            verid: 0,
+        }
+    }
+
+    #[inline]
+    fn reg_ptr(&self, reg: usize) -> *mut u32 {
+        (self.base + reg) as *mut u32
+    }
+
+    #[inline]
+    fn readl(&self, reg: usize) -> u32 {
+        // SAFETY: `base` maps the register block (see `new`'s safety contract);
+        // all accessed offsets are 4-byte aligned 32-bit registers.
+        unsafe { self.reg_ptr(reg).read_volatile() }
+    }
+
+    #[inline]
+    fn writel(&self, reg: usize, val: u32) {
+        // SAFETY: same as `readl`.
+        unsafe { self.reg_ptr(reg).write_volatile(val) };
+    }
+
+    #[inline]
+    fn fifo_read32(&self) -> u32 {
+        // SAFETY: fifo_off points at the data FIFO within the same mapping.
+        unsafe { self.reg_ptr(self.fifo_off).read_volatile() }
+    }
+
+    #[inline]
+    fn fifo_write32(&self, val: u32) {
+        // SAFETY: same as `fifo_read32`.
+        unsafe { self.reg_ptr(self.fifo_off).write_volatile(val) };
+    }
+
+    /// Reset the controller/FIFO/DMA logic. Mirrors `dw_mci_ctrl_reset`.
+    /// Returns `false` if a reset bit never self-clears.
+    fn ctrl_reset(&self, flags: u32) -> bool {
+        let ctrl = self.readl(off::CTRL) | flags;
+        self.writel(off::CTRL, ctrl);
+        wait_until_ns(POLL_TIMEOUT_NS, || self.readl(off::CTRL) & flags == 0)
+    }
+
+    /// Controller bring-up. Mirrors the relevant PIO-mode subset of
+    /// `dw_mci_probe` (resets, interrupt clear, FIFOTH, clock-gate, VERID).
+    pub fn init(&mut self) -> DriverResult {
+        if !self.ctrl_reset(regs::ctrl::ALL_RESET_FLAGS) {
+            log::error!("sdmmc: controller reset timed out");
+            return Err(DriverError::Io);
+        }
+
+        // Clear raw interrupts and mask all (polling mode keeps IRQs off).
+        self.writel(off::RINTSTS, 0xFFFF_FFFF);
+        self.writel(off::INTMASK, 0);
+        self.writel(off::TMOUT, 0xFFFF_FFFF);
+
+        // FIFO depth: read from FIFOTH RX_WMark (probe does this when DT
+        // doesn't give fifo-depth). RK3588 sdmmc reports 256.
+        let fifoth = self.readl(off::FIFOTH);
+        self.fifo_depth = regs::fifo_depth_from_fifoth(fifoth);
+        self.data_shift = 2; // 32-bit FIFO access (see gap report)
+
+        // FIFOTH: MSIZE=8 (0x2), RX_WMark=depth/2-1, TX_WMark=depth/2.
+        let rx = self.fifo_depth / 2 - 1;
+        let tx = self.fifo_depth / 2;
+        self.writel(off::FIFOTH, set_fifoth(0x2, rx, tx));
+
+        // Gate CIU clock before first setup_bus().
+        self.writel(off::CLKENA, 0);
+        self.writel(off::CLKSRC, 0);
+
+        // VERID selects the FIFO data-register offset.
+        self.verid = verid(self.readl(off::VERID));
+        self.fifo_off = if self.verid < regs::DW_MMC_240A {
+            off::DATA_OFFSET
+        } else {
+            off::DATA_240A_OFFSET
+        };
+
+        let hcon_val = self.readl(off::HCON);
+        log::info!(
+            "sdmmc: dw_mshc verid={:#06x} fifo_depth={} hdata_width={} trans_mode={}",
+            self.verid,
+            self.fifo_depth,
+            hcon::hdata_width(hcon_val),
+            hcon::trans_mode(hcon_val)
+        );
+        Ok(())
+    }
+
+    /// Issue an update-clock command (CMD with UPD_CLK|PRV_DAT_WAIT, no
+    /// response). Mirrors `mci_send_cmd(slot, UPD_CLK|PRV_DAT_WAIT, 0)` used
+    /// inside `dw_mci_setup_bus`.
+    fn send_upd_clk(&self) -> DriverResult {
+        self.send_cmd_raw(cmd::UPD_CLK | cmd::PRV_DAT_WAIT, 0)
+    }
+
+    /// Configure CIU clock divider + enable, and the bus width. Mirrors
+    /// `dw_mci_setup_bus` (the clock!=0 path) plus the CTYPE write at its end.
+    pub fn setup_bus(&self, clock_hz: u32, width: u32) -> DriverResult {
+        if clock_hz == 0 || self.bus_hz == 0 {
+            self.writel(off::CLKENA, 0);
+            self.send_upd_clk()?;
+            return Ok(());
+        }
+
+        // div computation mirrors dw_mci_setup_bus exactly.
+        let mut div = self.bus_hz / clock_hz;
+        if !self.bus_hz.is_multiple_of(clock_hz) && self.bus_hz > clock_hz {
+            div += 1;
+        }
+        div = if self.bus_hz != clock_hz {
+            div.div_ceil(2)
+        } else {
+            0
+        };
+
+        // disable clock
+        self.writel(off::CLKENA, 0);
+        self.writel(off::CLKSRC, 0);
+        self.send_upd_clk()?;
+        // set divider
+        self.writel(off::CLKDIV, div);
+        self.send_upd_clk()?;
+        // enable clock (slot 0). LOW_PWR kept on for non-SDIO card.
+        self.writel(off::CLKENA, clkena::ENABLE | clkena::LOW_PWR);
+        self.send_upd_clk()?;
+
+        self.writel(off::CTYPE, width);
+        Ok(())
+    }
+
+    /// Wait while the card is busy on the data lines (mirrors
+    /// `dw_mci_wait_while_busy`, keyed on PRV_DAT_WAIT).
+    fn wait_while_busy(&self, cmd_flags: u32) {
+        if cmd_flags & cmd::PRV_DAT_WAIT != 0 {
+            wait_until_ns(POLL_TIMEOUT_NS, || {
+                self.readl(off::STATUS) & status::BUSY == 0
+            });
+        }
+    }
+
+    /// Lowest-level command issue: write CMDARG, wait-while-busy, write
+    /// CMD=START|flags, poll until START self-clears. Mirrors `mci_send_cmd`.
+    fn send_cmd_raw(&self, cmd_flags: u32, arg: u32) -> DriverResult {
+        self.writel(off::CMDARG, arg);
+        self.wait_while_busy(cmd_flags);
+        self.writel(off::CMD, cmd::START | cmd_flags);
+        if !wait_until_ns(POLL_TIMEOUT_NS, || self.readl(off::CMD) & cmd::START == 0) {
+            log::error!("sdmmc: CMD start never cleared (flags={:#x})", cmd_flags);
+            return Err(DriverError::Io);
+        }
+        Ok(())
+    }
+
+    /// Set block size / byte count for the upcoming data transfer. Mirrors
+    /// `__dw_mci_start_request` data setup.
+    pub fn set_block_params(&self, blksz: u32, bytcnt: u32) {
+        self.writel(off::BLKSIZ, blksz);
+        self.writel(off::BYTCNT, bytcnt);
+    }
+
+    /// Poll the raw interrupt status until any of `mask` bits fire (or
+    /// timeout). Clears the fired bits.
+    fn wait_int(&self, mask: u32) -> Option<u32> {
+        let fired = wait_until_ns(POLL_TIMEOUT_NS, || self.readl(off::RINTSTS) & mask != 0);
+        if !fired {
+            return None;
+        }
+        let v = self.readl(off::RINTSTS) & mask;
+        self.writel(off::RINTSTS, v); // clear
+        Some(v)
+    }
+
+    /// Issue a command and synchronously await completion. `flags` are the
+    /// `cmd::*` bits from [`Self::build_cmd_flags`]. Returns the 4-word
+    /// response (only [0] valid for short responses).
+    pub fn send_command(&self, flags: u32, arg: u32) -> DriverResult<[u32; 4]> {
+        self.send_cmd_raw(flags, arg)?;
+
+        let want_resp = flags & cmd::RESP_EXP != 0;
+        let wait_mask = if want_resp {
+            int::CMD_DONE | int::CMD_ERROR_FLAGS
+        } else {
+            int::CMD_DONE
+        };
+        let status = self.wait_int(wait_mask).ok_or(DriverError::Io)?;
+
+        if status & int::CMD_ERROR_FLAGS != 0 {
+            // Mirror dw_mci_command_complete error decoding.
+            if status & int::RTO != 0 {
+                return Err(DriverError::Io); // response timeout
+            }
+            if flags & cmd::RESP_CRC != 0 && status & int::RCRC != 0 {
+                return Err(DriverError::Io);
+            }
+            if status & int::RESP_ERR != 0 {
+                return Err(DriverError::Io);
+            }
+        }
+
+        let resp = [
+            self.readl(off::RESP0),
+            self.readl(off::RESP1),
+            self.readl(off::RESP2),
+            self.readl(off::RESP3),
+        ];
+        Ok(resp)
+    }
+
+    /// Build CMD-register flags from an SD/MMC opcode + response/data kind.
+    /// Mirrors `dw_mci_prepare_command`.
+    pub fn build_cmd_flags(
+        opcode: u32,
+        arg: u32,
+        resp_kind: RespKind,
+        data: bool,
+        write: bool,
+        stop: bool,
+    ) -> (u32, u32) {
+        let mut f = cmd::indx(opcode);
+
+        // STOP / abort commands (CMD12, CMD0, CMD15). Mirrors prepare_command.
+        if stop {
+            f |= cmd::STOP;
+        } else if opcode != 13 && data {
+            f |= cmd::PRV_DAT_WAIT;
+        }
+
+        match resp_kind {
+            RespKind::None => {}
+            RespKind::Short => f |= cmd::RESP_EXP | cmd::RESP_CRC,
+            RespKind::ShortBusy => f |= cmd::RESP_EXP | cmd::RESP_CRC,
+            RespKind::Long => f |= cmd::RESP_EXP | cmd::RESP_CRC | cmd::RESP_LONG,
+            // R3 (OCR) / R7: response present, no CRC check.
+            RespKind::ShortNoCrc => f |= cmd::RESP_EXP,
+        }
+
+        if data {
+            f |= cmd::DAT_EXP;
+            if write {
+                f |= cmd::DAT_WR;
+            }
+        }
+        // RK3588 uses the hold register; mirror USE_HOLD_REG (card flag NO_USE
+        // not set).
+        f |= cmd::USE_HOLD_REG;
+
+        let _ = arg;
+        (f, arg)
+    }
+
+    /// Read `len` bytes from the FIFO into `buf` during a read data transfer.
+    /// Mirrors `dw_mci_read_data_pio` (polling form): drain FIFO by the count
+    /// reported in STATUS until DATA_OVER fires.
+    pub fn pio_read(&self, buf: &mut [u8]) -> DriverResult {
+        let mut off_b = 0usize;
+        loop {
+            let fcnt_bytes = (status::fcnt(self.readl(off::STATUS)) << self.data_shift) as usize;
+            if fcnt_bytes > 0 && off_b < buf.len() {
+                let n = fcnt_bytes.min(buf.len() - off_b) & !0x3;
+                if n > 0 {
+                    // Drain full 32-bit words from the FIFO.
+                    for i in (0..n).step_by(4) {
+                        let w = self.fifo_read32();
+                        let p = off_b + i;
+                        buf[p..p + 4].copy_from_slice(&w.to_le_bytes());
+                    }
+                    off_b += n;
+                }
+            }
+            // Check completion (also drain tail below word boundary).
+            if self.readl(off::RINTSTS) & int::DATA_OVER != 0 {
+                // Drain any residual words.
+                while off_b + 4 <= buf.len() {
+                    let w = self.fifo_read32();
+                    buf[off_b..off_b + 4].copy_from_slice(&w.to_le_bytes());
+                    off_b += 4;
+                }
+                // Tail bytes < 4: read one word and take the low bytes.
+                if off_b < buf.len() {
+                    let w = self.fifo_read32().to_le_bytes();
+                    let tail = buf.len() - off_b;
+                    buf[off_b..].copy_from_slice(&w[..tail]);
+                }
+                self.writel(off::RINTSTS, int::DATA_OVER);
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        Ok(())
+    }
+
+    /// Write `buf` to the FIFO during a write data transfer. Mirrors
+    /// `dw_mci_write_data_pio` (polling form): fill FIFO by free-word count
+    /// until DATA_OVER fires.
+    pub fn pio_write(&self, buf: &[u8]) -> DriverResult {
+        let mut off_b = 0usize;
+        while off_b + 4 <= buf.len() {
+            let free = ((self.fifo_depth - status::fcnt(self.readl(off::STATUS)))
+                << self.data_shift) as usize;
+            if free >= 4 {
+                let mut w = [0u8; 4];
+                w.copy_from_slice(&buf[off_b..off_b + 4]);
+                self.fifo_write32(u32::from_le_bytes(w));
+                off_b += 4;
+            }
+            if self.readl(off::RINTSTS) & int::DATA_ERROR_FLAGS != 0 {
+                self.writel(off::RINTSTS, int::DATA_ERROR_FLAGS);
+                return Err(DriverError::Io);
+            }
+            core::hint::spin_loop();
+        }
+        // Tail bytes: pad to a word.
+        if off_b < buf.len() {
+            let mut w = [0u8; 4];
+            w[..buf.len() - off_b].copy_from_slice(&buf[off_b..]);
+            self.fifo_write32(u32::from_le_bytes(w));
+            off_b = buf.len();
+        }
+        // Wait for transfer to fully complete.
+        if !wait_until_ns(POLL_TIMEOUT_NS, || {
+            self.readl(off::RINTSTS) & int::DATA_OVER != 0
+        }) {
+            return Err(DriverError::Io);
+        }
+        self.writel(off::RINTSTS, int::DATA_OVER);
+        let _ = off_b;
+        Ok(())
+    }
+
+    /// True if a card is physically present (CDETECT bit 0 == 0). Source:
+    /// `dw_mci_get_cd`.
+    pub fn card_present(&self) -> bool {
+        self.readl(off::CDETECT) & 0x1 == 0
+    }
+}
+
+/// Response kind, mirroring Linux MMC_RSP_* classification.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RespKind {
+    /// No response (CMD0... when not expecting one).
+    None,
+    /// R1/R5/R6: 48-bit, CRC checked.
+    Short,
+    /// R1b: 48-bit with busy (treated like Short at the controller level).
+    ShortBusy,
+    /// R2 (CID/CSD): 136-bit.
+    Long,
+    /// R3 (OCR) / R7: 48-bit, CRC NOT checked.
+    ShortNoCrc,
+}
+
+/// Common SD bus widths usable with `DwMciHost::setup_bus`. Values are the
+/// CTYPE register encodings (bit 0 = 4-bit, bit 16 = 8-bit, 0 = 1-bit).
+pub mod bus_width {
+    /// 1-bit bus (CTYPE = 0).
+    pub const WIDTH_1BIT: u32 = 0;
+    /// 4-bit bus (CTYPE bit 0).
+    pub const WIDTH_4BIT: u32 = 1 << 0;
+    /// 8-bit bus (CTYPE bit 16).
+    pub const WIDTH_8BIT: u32 = 1 << 16;
+}
+
+/// Card-identification clock and base data-transfer clock (legacy default
+/// speed). Mirrors mmc core's f_min (400 kHz) and the default-speed 25 MHz.
+pub mod clock {
+    pub const CARD_IDENT: u32 = 400_000;
+    pub const CARD_DEFAULT: u32 = 25_000_000;
+}

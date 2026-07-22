@@ -85,6 +85,14 @@ config RTC_PADDR
     help
       Define the base address for the RTC (Real-Time Clock) device.
 
+config SDMMC_PADDR
+    hex "dw_mshc SD/MMC controller base address"
+    help
+      Physical base address of the dw_mshc SD card controller used by the
+      platform-static device registration path. RK3588 sdmmc is at
+      0xfe2c0000. Set to 0 to skip static registration and rely on the
+      device-tree node instead.
+
 menu "IRQ Configuration"
 
 config PMU_IRQ
@@ -192,6 +200,14 @@ config KFEAT_DRIVER_RAMDISK_STATIC
       matching filesystem backend (KFEAT_FS_EXT4 by default; KFEAT_FS_FAT if a
       FAT image is used). The image is embedded in .data, so the kernel binary
       grows by roughly the image size.
+
+config KFEAT_DRIVER_SDMMC
+    bool "dw_mshc SD card controller (RK3588 sdmmc)"
+    help
+      Enable the DesignWare Mobile Storage Host Controller (dw_mshc) SD card
+      driver — a from-scratch port of the upstream Linux dw_mmc /
+      dw_mmc-rockchip controller behaviour. Targets the RK3588 SD card
+      interface at 0xfe2c0000 (DT compatible "rockchip,rk3588-dw-mshc").
 
 comment "Network drivers"
 

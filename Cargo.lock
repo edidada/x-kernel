@@ -346,6 +346,7 @@ name = "block"
 version = "0.2.0-dev"
 dependencies = [
  "driver_base",
+ "khal",
  "kspin 0.2.0-dev",
  "log",
  "unittest",

@@ -32,7 +32,7 @@ pub(crate) const BCM2835_SDHCI: FirmwareMatchSpec = FirmwareMatchSpec {
 #[cfg(feature = "sdmmc")]
 pub(crate) const SDMMC: FirmwareMatchSpec = FirmwareMatchSpec {
     alias: "sdmmc",
-    dt_compatibles: &["snps,dwcmshc", "arm,pl18x"],
+    dt_compatibles: &["rockchip,rk3588-dw-mshc", "rockchip,rk3288-dw-mshc"],
     acpi_ids: &[],
 };
 

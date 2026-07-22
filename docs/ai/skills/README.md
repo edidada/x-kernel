@@ -51,3 +51,8 @@ Current skills:
   multi-agent design-first workflow for X-Kernel memory subsystem topics,
   coordinating Linux semantic analysis, X-Kernel adaptation, arbiter review,
   and implementation task splitting without code generation.
+- `linux-driver-port/`:
+  translate a Linux C driver (platform/PCI) into x-kernel Rust, mapping Linux
+  kernel APIs to existing x-kernel APIs (MMIO/IRQ/DMA/sync/publish) and
+  reporting missing subsystems (clk/regmap/gpio/phy/...) as gaps; includes a
+  worked dwcmshc SD/MMC example for RK3588 peripheral adaptation.
