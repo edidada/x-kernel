@@ -17,6 +17,10 @@
 /mnt
 *.swp
 *.swo
+*.cmd
+*.scr
+*.dtb
+*.dts
 
 # Code statistics cache
 /.cache/

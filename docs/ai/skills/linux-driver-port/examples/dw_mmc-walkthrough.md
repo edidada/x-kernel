@@ -109,3 +109,100 @@ drivers/block/src/sdmmc/
 2. **执行模型可以降级**：Linux 的中断状态机 → 起步用同步轮询（U-Boot 式），大幅降低复杂度，够块驱动用。
 3. **构建系统 feature 链是隐蔽坑**：x-kernel 的 `KFEAT_*` 必须在 Kconfig 定义 → gen-cargo 转 feature → kfeat → kdriver → block 逐层传递。任何一层断，驱动都进不了镜像且**不报错**（静默不编译）。
 4. **PIO + 轮询 + 基础速率**是最小可用切面；高速/DMA/UHS 是清晰的后续迭代项（缺口已记录）。
+
+---
+
+## 复盘：真机 Io 失败——从预言到验证（Orange Pi 5 Plus）
+
+上面这份 walkthrough 在"验证状态"里留了一条没勾的项：
+
+> `[ ] 真机 RK3588 冒烟：bus_hz 校准是关键——若默认 100 MHz 与 U-Boot 实配不符，卡识别会失败`
+
+然后把驱动刷上 Orange Pi 5 Plus 真机，日志正是预言的那个失败：
+
+```text
+[14.487] sdmmc: dw_mshc verid=0x270a fifo_depth=128 hdata_width=1 trans_mode=0
+[14.491] sdmmc: failed to initialize card at FirmwareNode { id: 0 }: Io
+[14.492] driver sdmmc probe failed for descriptor DeviceDescId(0): Io
+[14.493] sdmmc: dw_mshc verid=0x270a fifo_depth=256 hdata_width=1 trans_mode=0   # 第二个节点(sdio)
+[14.494] sdmmc: failed to initialize card at FirmwareNode { id: 1 }: Io
+```
+
+`verid/fifo_depth` 能读出来 → MMIO 映射没问题；但卡识别直接 `Io`。这是一次**教科书式的"P5 全绿、P6 挂"**——也是这次复盘要固化的教训。
+
+### 定位方法：拿 U-Boot 当"已知可用"基线
+
+关键动作：**别从零猜，先确认同一块板、同一个控制器在 U-Boot 下是好的**。OPi5+ 上 `mmc info`：
+
+```text
+Device: mmc@fe2c0000      Bus Speed: 50000000   Mode: SD High Speed (50MHz)
+Bus Width: 4-bit   SD version 3.0   High Capacity   Capacity: 116.2 GiB
+```
+
+U-Boot 能完整枚举同一张卡（50 MHz / 4-bit）→ 硬件、时钟、供电、卡本身**全部 OK**。那么 x-kernel 这版挂掉**只能是驱动序列漏了东西**。这就把搜索范围从"硬件/固件/驱动"收窄到"驱动序列差异"。
+
+### 真正的根因：命令索引被截断成 5 位（一条铁律 1 翻译错误）
+
+加了可观测性后，真相一条日志就暴露了：
+
+```text
+sdmmc: CMD8 resp=0x000001aa (expect 0x000001aa)   # 卡活着！时钟/供电/pinmux/bus_hz 全 OK
+sdmmc: CMD55 error rintsts=0x100 (RTO)            # 但 CMD55 卡不回
+```
+
+CMD8 正确回显 `0x1aa` = SD v2.0 卡正常应答。这说明**时钟、供电、pinmux、bus_hz 全都没问题**——卡一直在好好回话。那 CMD55 为什么 RTO？唯一可能是**发出去的命令本身是错的**。
+
+定位到 [regs.rs](../../../../../drivers/block/src/sdmmc/regs.rs) 的 `cmd::indx`：
+
+```rust
+pub const fn indx(n: u32) -> u32 { n & 0x1f }   // ← 错：5 位
+```
+
+dw_mshc 的 `CMD` 寄存器命令索引在 `[5:0]`（6 位，因为第一个 flag 位 `RESP_EXP` 在 bit 6），掩码应是 `0x3f`。`& 0x1f` 把 **opcode ≥ 32 的命令索引截断了**：
+
+| 命令 | opcode | `&0x1f` | `&0x3f` |
+|------|--------|---------|---------|
+| CMD8 | 8 | 8 ✓ | 8 ✓ |
+| CMD55 | 55 | **23 ✗** | 55 ✓ |
+| ACMD41 | 41 | **9 ✗** | 41 ✓ |
+
+于是控制器向卡发了索引 23（不是 55），卡不认 → RTO。CMD8（8<32）没被截，所以一路正常。改成 `n & 0x3f` 后，卡完整枚举：`card ready sdhc=true rca=0x5048 capacity=243679232 blocks (118984 MiB)`——和 U-Boot 报的 116.2 GiB 完全一致。
+
+> 对照上游：Linux `dw_mci_prepare_command` 是 `cmdr = cmd->opcode`，**直接写原值、不做掩码**（opcode ≤ 63 本就落在 6 位里）。本移植多加的 `& 0x1f` 既不在 `dw_mmc.h` 里，也不在 Linux 里——正是铁律 1（"硬件是真相，原样照搬"）的违反，也是 Phase 3 可追溯校验（skill ②）本该拦下的：画像声称"regs.rs 逐字照搬 dw_mmc.h"，实际 `indx` 偷偷偏离了。
+
+### 走过的弯路（值得记的"合理但错"的假设）
+
+定位到 `indx` 之前，先猜了两个根因，都**合理、都改了、但都不是真凶**：
+
+1. **漏写 `PWREN`**（对照 U-Boot `dwmci_init` 第二行 `PWREN=1`、Linux `MMC_POWER_UP`）——加了。但卡从头到尾都正常回 CMD8，说明供电从来不是问题。
+2. **`bus_hz` 硬编码**（DT 无 `clock-frequency`，只有 `max-frequency=150M`≠CIU 速率）——查 U-Boot 实测改 50 MHz。但 50 MHz 给出的 ID 时钟本来就对，walkthrough 预言的"bus_hz 错→卡识别失败"**并没有发生**。
+
+这两个改动**仍然保留**：`PWREN=1` 是对照参考的正确写法（防御性，DT 也带 `vmmc-supply`）；`bus_hz=50MHz` 是 U-Boot 实测值，且 **clk-rate 缺口对高速模式是真的**（见 skill ①）。只是它们**不是这次的 blocker**。
+
+> 教训：**别锚定在自己预言的假设上**。walkthrough 一开始就预言"bus_hz 会炸"，结果真机一炸就先往 bus_hz/PWREN 上想——但数据（CMD8=0x1aa）一出来就该知道时钟/供电没问题、问题在命令本身。让数据带路，别让预言带路。
+
+### 可观测性是破局点
+
+裸 `Io` 给不出任何信息。加上"`CMD8 resp=…` + `CMD{opcode} error rintsts=…`"后，**一条日志**就把范围从"时钟/供电/pinmux/命令"收窄到"命令本身"。这正是 skill ③⑤ 给 Phase 6 立"可观测性是前提"的原因——没有它，这次大概率还在 bus_hz 上打转。
+
+### 已落地的修复
+
+驱动侧（[regs.rs](../../../../../drivers/block/src/sdmmc/regs.rs) / [host.rs](../../../../../drivers/block/src/sdmmc/host.rs) / [mod.rs](../../../../../drivers/block/src/sdmmc/mod.rs) / [胶水层](../../../../../drivers/kdriver/src/driver_registry/block/sdmmc.rs)）：
+
+1. **`indx`：`&0x1f` → `&0x3f`**（THE fix，命令索引 6 位）。
+2. **可观测性**：`send_command` 失败打印 `CMD{opcode} error rintsts={..} status={..} ({RTO/RCRC/...})`；`CMD8 resp` 打印；`log_clock_state` dump `CLKDIV/CLKENA/PWREN/...`（对照 U-Boot）。
+3. `PWREN=1`（防御性，对照 U-Boot/Linux）。
+4. `bus_hz=50MHz` + probe 打印（clk-rate 缺口照报，高速需 clk 框架校准）。
+
+> 遗留（非阻塞）：`fifo_depth` 读取在 U-Boot 预置过 FIFOTH 时会读到真实值的一半（`1+RX_WMark`，而 U-Boot 已把 RX_WMark 设成 depth/2-1）。不影响枚举/PIO 正确性（PIO 按 STATUS 的 FCNT 走），仅 watermark 偏小。后续可读 DT `fifo-depth` 或 HCON 的 fifo 字段修正。
+
+skill 侧（本次同步改）：
+
+- **①** clk 缺口拆 `clk-enable`(works-around) / `clk-rate`(取不到真值=smoke-blocker)，写明 Rockchip `max-frequency` ≠ CIU 速率（[gaps.md](../knowledge/gaps.md) + [api-mapping §8](../knowledge/api-mapping.md)）。
+- **②** Phase 1 产出"编号参考序列清单"，Phase 3 加可追溯校验——**这次的 `indx` 错就是它本该拦下的**。
+- **③⑤** 新增 **Phase 6 带机校验/triage**：可观测性前提 + 按设备类 smoke 验收（SD=完整枚举+读块）+ 症状→原因表 + 对照 U-Boot dump 差异。
+- **④** gaps.md 新增"真机 bring-up 易踩的坑"（PWREN / CDETECT 不可信 / 多节点）。
+
+### 这次复盘要带走的一句话
+
+> **真机失败时，先上可观测性，别先上假设。** 这次 blocker 是一条 `&0x1f` 该写 `&0x3f` 的寄存器位宽错误——它只咬 opcode≥32 的命令（CMD0~31 全好），所以"前面都正常、到 CMD55 突然挂"是它的指纹。预言中的 bus_hz 风险反而是红鲱鱼。教训三连：(1) 每条错误路径必须 dump 状态寄存器（P6 前提）；(2) 别让预言锚定方向，让数据带路；(3) 铁律 1 的"原样照搬"要靠 Phase 3 可追溯校验兜底——`dw_mmc.h` 里没有 `&0x1f`，代码里就不该有。

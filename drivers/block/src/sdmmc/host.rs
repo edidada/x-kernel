@@ -129,6 +129,16 @@ impl DwMciHost {
     /// Controller bring-up. Mirrors the relevant PIO-mode subset of
     /// `dw_mci_probe` (resets, interrupt clear, FIFOTH, clock-gate, VERID).
     pub fn init(&mut self) -> DriverResult {
+        // Power on the card BEFORE reset. Mirrors U-Boot `dwmci_init`
+        // (`dwmci_writel(DWMCI_PWREN, 1)` as its second line) and Linux
+        // `dw_mci_set_ios` MMC_POWER_UP (`PWREN |= 1 << slot->id`). The dw_mshc
+        // `PWREN` output gates the card's vmmc rail — on Orange Pi 5 Plus the
+        // `mmc@fe2c0000` node has `vmmc-supply`, so the rail is switchable.
+        // Leaving PWREN=0 means the card never powers up and every
+        // identification command times out (RTO). CTRL reset does not clear
+        // PWREN, so writing it first (like both reference drivers) is safe.
+        self.writel(off::PWREN, 1);
+
         if !self.ctrl_reset(regs::ctrl::ALL_RESET_FLAGS) {
             log::error!("sdmmc: controller reset timed out");
             return Err(DriverError::Io);
@@ -164,11 +174,12 @@ impl DwMciHost {
 
         let hcon_val = self.readl(off::HCON);
         log::info!(
-            "sdmmc: dw_mshc verid={:#06x} fifo_depth={} hdata_width={} trans_mode={}",
+            "sdmmc: dw_mshc verid={:#06x} fifo_depth={} hdata_width={} trans_mode={} bus_hz={}",
             self.verid,
             self.fifo_depth,
             hcon::hdata_width(hcon_val),
-            hcon::trans_mode(hcon_val)
+            hcon::trans_mode(hcon_val),
+            self.bus_hz,
         );
         Ok(())
     }
@@ -257,10 +268,11 @@ impl DwMciHost {
         Some(v)
     }
 
-    /// Issue a command and synchronously await completion. `flags` are the
-    /// `cmd::*` bits from [`Self::build_cmd_flags`]. Returns the 4-word
-    /// response (only [0] valid for short responses).
-    pub fn send_command(&self, flags: u32, arg: u32) -> DriverResult<[u32; 4]> {
+    /// Issue a command and synchronously await completion. `opcode` is used
+    /// only for diagnostics. `flags` are the `cmd::*` bits from
+    /// [`Self::build_cmd_flags`]. Returns the 4-word response (only [0] valid
+    /// for short responses).
+    pub fn send_command(&self, opcode: u8, flags: u32, arg: u32) -> DriverResult<[u32; 4]> {
         self.send_cmd_raw(flags, arg)?;
 
         let want_resp = flags & cmd::RESP_EXP != 0;
@@ -269,19 +281,30 @@ impl DwMciHost {
         } else {
             int::CMD_DONE
         };
-        let status = self.wait_int(wait_mask).ok_or(DriverError::Io)?;
+        let status = match self.wait_int(wait_mask) {
+            Some(s) => s,
+            None => {
+                log::error!(
+                    "sdmmc: CMD{} no completion (timeout) flags={:#x} rintsts={:#x} status={:#x}",
+                    opcode,
+                    flags,
+                    self.readl(off::RINTSTS),
+                    self.readl(off::STATUS)
+                );
+                return Err(DriverError::Io);
+            }
+        };
 
         if status & int::CMD_ERROR_FLAGS != 0 {
             // Mirror dw_mci_command_complete error decoding.
-            if status & int::RTO != 0 {
-                return Err(DriverError::Io); // response timeout
-            }
-            if flags & cmd::RESP_CRC != 0 && status & int::RCRC != 0 {
-                return Err(DriverError::Io);
-            }
-            if status & int::RESP_ERR != 0 {
-                return Err(DriverError::Io);
-            }
+            log::error!(
+                "sdmmc: CMD{} error rintsts={:#x} status={:#x} ({})",
+                opcode,
+                status,
+                self.readl(off::STATUS),
+                cmd_err_name(status, flags & cmd::RESP_CRC),
+            );
+            return Err(DriverError::Io);
         }
 
         let resp = [
@@ -418,6 +441,42 @@ impl DwMciHost {
     /// `dw_mci_get_cd`.
     pub fn card_present(&self) -> bool {
         self.readl(off::CDETECT) & 0x1 == 0
+    }
+
+    /// Dump the clock/power programming for bring-up triage. Compare these
+    /// against U-Boot's values (`md.l fe2c0008`, `md.l fe2c0010`, ...) on the
+    /// same board — the first mismatch localizes the bug. See the skill's
+    /// Phase 6 §6.4 "compare against known-good reference".
+    pub fn log_clock_state(&self, tag: &str) {
+        log::info!(
+            "sdmmc: {} clock state: CLKENA={:#x} CLKDIV={:#x}({}) CLKSRC={:#x} CTYPE={:#x} \
+             PWREN={:#x} UHS_REG={:#x} STATUS={:#x}",
+            tag,
+            self.readl(off::CLKENA),
+            self.readl(off::CLKDIV),
+            self.readl(off::CLKDIV) & 0xff,
+            self.readl(off::CLKSRC),
+            self.readl(off::CTYPE),
+            self.readl(off::PWREN),
+            self.readl(off::UHS_REG),
+            self.readl(off::STATUS),
+        );
+    }
+}
+
+/// Name the dominant cause of a command-complete error from its RINTSTS bits.
+/// Mirrors the decode order in Linux `dw_mci_command_complete`.
+fn cmd_err_name(status: u32, crc_expected: u32) -> &'static str {
+    if status & int::RTO != 0 {
+        "response timeout (RTO) — card absent / unpowered / wrong clock"
+    } else if crc_expected != 0 && status & int::RCRC != 0 {
+        "response CRC error (RCRC)"
+    } else if status & int::RESP_ERR != 0 {
+        "response error (RESP_ERR)"
+    } else if status & int::HLE != 0 {
+        "hardware locked (HLE) — command issued while CIU busy"
+    } else {
+        "unknown command error"
     }
 }
 

@@ -5,7 +5,7 @@
 > 第一次跑请同步对照 [`examples/dwcmshc-walkthrough.md`](../examples/dwcmshc-walkthrough.md)——它是这份流程的完整实例。
 
 ```
-P0 采集 → P1 分析 → P2 映射 → P3 生成 → P4 缺口报告 → P5 集成校验
+P0 采集 → P1 分析 → P2 映射 → P3 生成 → P4 缺口报告 → P5 集成校验 → P6 带机校验/triage
 ```
 
 ---
@@ -39,7 +39,20 @@ P0 采集 → P1 分析 → P2 映射 → P3 生成 → P4 缺口报告 → P5 �
 5. **私有数据结构**：`struct xxx_priv` 的字段 → 映射到 Rust 结构体。
 6. **设备类操作**：`net_device_ops` / `block_device_operations` / `file_operations` 的每个回调 → 对应 trait 方法。
 
-**产出**：一份"驱动画像"文档（markdown），含上面 6 项。后续 P2/P3 都基于它。
+> **铁律 1 强化——"参考序列"必须钉死在一个来源上**：probe/初始化序列**选一个**参考实现（U-Boot **或** Linux，通常是那个在你目标板上已知能跑的——RK3588 SD 卡就选 U-Boot `dwmci_init`，因为 U-Boot `mmc info` 证明它能枚举同一张卡），把它的初始化函数**逐行编号**抄成一张清单：
+>
+> ```text
+> ① PWREN = 1                      // dwmci_init 第 2 行
+> ② ctrl_reset(ALL_RESET_FLAGS)    // wait_reset
+> ③ setup_bus(f_min=400kHz)        // 含 CLKDIV/CLKENA/UPD_CLK 三段
+> ④ RINTSTS=0xFFFFFFFF; INTMASK=0; TMOUT=0xFFFFFFFF
+> ⑤ FIFOTH=...
+> ...
+> ```
+>
+> 这张"编号清单"是 Phase 3 可追溯校验的输入。**禁止把 U-Boot 和 Linux 各抄一半混着用**——混抄最容易各自漏步骤（dw_mmc 移植就因为这样漏了 U-Boot 的 `PWREN=1` 和 Linux 的 `bus_hz/=RK3288_CLKGEN_DIV`）。
+
+**产出**：一份"驱动画像"文档（markdown），含上面 6 项 + **编号参考序列清单**。后续 P2/P3 都基于它。
 
 ---
 
@@ -74,8 +87,9 @@ P0 采集 → P1 分析 → P2 映射 → P3 生成 → P4 缺口报告 → P5 �
 2. **胶水层** `driver_registry/<bus>/<name>.rs`：`impl DeviceDriver` + `probe_device`（取 MMIO→new→publish）+ `descriptor()`。
 3. **注册三连**：`firmware_specs.rs`（compatible）+ `<bus>/mod.rs`（DRIVER_FACTORIES）+ `Cargo.toml`（feature）。
 4. 每处 `unsafe` 写 `// SAFETY:`；每个缺口点留 `// TODO(gap): <子系统> 缺失，见 gap-report` 并按 P2 的处置实现替代/TODO。
+5. **可追溯校验（铁律 1 的验收）**：拿 Phase 1 的"编号参考序列清单"逐条对代码——**每一条编号步骤必须在生成的 Rust 代码里找到对应**（寄存器写、延时、顺序）。任何一条对不上 = 漏翻译，回去补。这一步专治"画像写了、代码漏了"：dw_mmc 移植的画像里写了 `bus_hz/=RK3288_CLKGEN_DIV(2)`，代码却没落地，就是缺这道核对。
 
-**产出**：两个 .rs 文件 + 三处改动。
+**产出**：两个 .rs 文件 + 三处改动 + **一张"编号步骤→代码位置"对照表**（贴进 gap-report 或 PR 描述）。
 
 ---
 
@@ -105,7 +119,59 @@ P0 采集 → P1 分析 → P2 映射 → P3 生成 → P4 缺口报告 → P5 �
 5. 若有 blocker 导致 probe 返回 `Unsupported`，日志应体现，并在 gap-report 标注。
 6. 把 build/clippy 结果回填 gap-report 的"可编译性结论"与"集成状态"清单。
 
-**产出**：通过的构建 + 填完的集成状态清单 + （可选）实机/QEMU 冒烟。
+**产出**：通过的构建 + 填完的集成状态清单。
+
+> ⚠️ **编译过 + 注册上 ≠ 驱动可用**。P5 只证明驱动进得了镜像、会被 probe。驱动**真正在硬件上工作**要靠 Phase 6 验收——dw_mmc 移植就是 P5 全绿、真机却 `failed to initialize card: Io`。"寄存器能读出 verid/fifo_depth"也只说明 MMIO 通了，**不代表卡识别/数据通路 OK**。不要在 P5 就宣告完成。
+
+---
+
+## Phase 6 — 带机校验与 triage（Bring-up & Triage）
+
+**目标**：证明驱动**在目标硬件上真的工作**，而不只是编进镜像。这是"受限可用"结论的唯一依据。**没有跑通 P6，不得在缺口报告里写"可用"**。
+
+### 6.1 可观测性是前提（先加再加不得）
+
+在跑真机**之前**，给驱动的**每条错误路径**加状态转储，否则出了问题只能瞎猜：
+
+- 每个返回 `Io`/超时/错误的地方，连同失败点的**状态寄存器**一起 `log::error!`（MMC：`RINTSTS`/`STATUS`/`CMD`；网卡的 `ISR`/`STATUS`；…），并标注是哪一步（哪条 CMD / 哪个操作）。
+- 错误码要能区分原因：MMC 把 `RTO`（response timeout）和 `RCRC`/`RESP_ERR`/`HLE` 分别命名打印——`RTO` 通常意味着"没卡 / 没上电 / 时钟错"，`HLE` 意味着"CIU 还忙就发了命令"。
+- 参考：[block/src/sdmmc/host.rs](../../../../../drivers/block/src/sdmmc/host.rs) 的 `send_command` 在失败时打印 `CMD{opcode} error rintsts={..} ({cmd_err_name})`。
+
+> 一条裸的 `return Err(DriverError::Io)` 在真机 bring-up 阶段是**不可接受**的——它把"挂在哪一步、什么原因"全吞了。
+
+### 6.2 验收标准（smoke gate——按设备类选）
+
+P5 的"probe 被调用 + publish"只是门槛。真正的验收是**该设备类的代表操作在真机（或高保真 QEMU 模型）上跑通**：
+
+- **块设备 / SD / eMMC**：卡片完整枚举——`CMD0→CMD8→CMD55+ACMD41(OCR power-up)→CMD2(CID)→CMD3(RCA)→CMD9(CSD, 解出容量)→CMD7(select)→ACMD6(4-bit)→读出一个块`。日志里应看到 RCA、容量、`card ready`，且 `read_block` 返回正确数据。
+- **网卡**：link up、能收发（ping/ARP 通）。
+- **char（UART 等）**：能读写、波特率正确。
+- 通用：**`publish_*` 之后，用户态或内核侧能完成一次完整 I/O 并拿到正确结果**。
+
+> 部分通过也要记：dw_mmc 当前是"枚举通 + 单块读写"——高速/UHS/DMA/多块是缺口。把**跑通的边界**写进 gap-report，别夸大。
+
+### 6.3 差异诊断表（症状 → 原因）
+
+真机失败时按此定位（以 MMC 为例，其他设备类同理）：
+
+| 症状（日志） | 首选怀疑 | 怎么验 |
+|--------------|---------|--------|
+| `CMD0` 之后所有 CMD 都 `RTO` | 卡没上电（`PWREN`）/ 没时钟（`CLKENA`/`CLKDIV`）/ `bus_hz` 错 | 对照 U-Boot dump `PWREN/CLKENA/CLKDIV/RINTSTS` |
+| 仅 `CMD8`/`ACMD41` `RTO`，`CMD0` 过 | 非 SDHC 卡 / 老卡；或卡在但电压不对 | 看 `CMD8` 回显、`OCR` |
+| `HLE`（hardware locked） | CIU 还忙就发了下一条命令（`UPD_CLK` 没等完） | 查 `send_cmd` 是否等 `START` 自清 |
+| `RCRC` 一片 | 信号完整性 / 相位（缺 phy tuning）/ 时钟过速 | 降到基础速率再试 |
+| 读块数据错（容量对、内容错） | FIFO 宽度/`data_shift`、字节序、`BLKSIZ/BYTCNT` | 核对 `HCON.hdata_width`、PIO 取数 |
+| probe 没被调用 | 注册三连断（feature 链 / compatible 不匹配） | 回 P5 |
+
+### 6.4 对照"已知可用"参考（最高效的定位手段）
+
+当被移植的控制器在**同一块板**上已有 Linux/U-Boot 在驱动时（RK3588 几乎总是如此），**别从零猜**：
+
+1. 在 U-Boot 下用其调试命令读真值：MMC 用 `mmc info` / `mmc dev` / 读寄存器；记下 bus speed、bus width、RCA、容量。
+2. 在 x-kernel 下 dump 同一组寄存器（`PWREN/CLKENA/CLKDIV/CTYPE/UHS_REG/RINTSTS`），**逐个对比**。
+3. 第一个不一致的寄存器 = bug 所在。dw_mmc 的 `PWREN=0`（应为 1）就是这么一眼看出来的。
+
+**产出**：一份"带机验证记录"（哪些设备类的代表操作跑通、边界在哪、对照 U-Boot 的寄存器差异、遗留缺口），回填 gap-report 的"集成状态/可用性结论"。P6 没过的项 = 驱动在该维度**不可用**，如实标注。
 
 ---
 

@@ -20,10 +20,19 @@ use crate::driver_registry::{BoxedDriver, firmware_specs::SDMMC};
 /// Card interface clock the bootloader is assumed to have configured for the
 /// `sdmmc` controller, in Hz. Used for CLKDIV math.
 ///
-/// **Gap**: the real value should come from the DT `clock-frequency` property
-/// via a clk (CRU) provider — x-kernel has no clk framework yet. This default
-/// matches the common RK3588 SDK configuration and may need per-board tuning.
-const SDMMC_BUS_HZ: u32 = 100_000_000;
+/// **Gap / bring-up note**: the authoritative source is the CIU clock rate,
+/// which Linux reads via the clk framework (`clk_get_rate(ciu_clk)`) and
+/// Rockchip further divides by `RK3288_CLKGEN_DIV` (=2). x-kernel has no clk
+/// framework, and the Orange Pi 5 Plus `mmc@fe2c0000` DT node has **no**
+/// `clock-frequency` property (only `max-frequency = <150_000_000>`, which is
+/// the card-clock cap, NOT the CIU rate — do not use it for CLKDIV math).
+///
+/// This constant is therefore an empirical fallback. 50 MHz is what U-Boot
+/// reports for the card on this exact board (`mmc info` → Bus Speed 50000000,
+/// "SD High Speed (50MHz)"), and is logged at probe so a mismatch is visible.
+/// If card identification fails with CMDx RTO, suspect this value first and
+/// cross-check against U-Boot's reported bus speed.
+const SDMMC_BUS_HZ: u32 = 50_000_000;
 
 struct SdmmcDriver;
 

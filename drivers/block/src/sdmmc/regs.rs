@@ -124,9 +124,14 @@ pub mod cmd {
     pub const RESP_LONG: u32 = 1 << 7;
     pub const RESP_EXP: u32 = 1 << 6;
 
+    /// Command index into CMD[5:0]. dw_mmc.h lays the first flag bit (RESP_EXP)
+    /// at bit 6, so the index field is 6 bits wide (mask 0x3f), covering
+    /// opcodes 0..=63. Masking to 0x1f silently mangles any opcode >= 32
+    /// (e.g. CMD55 -> 23, ACMD41 -> 9) and the card stops responding (RTO).
+    /// Linux writes the raw opcode (`cmdr = cmd->opcode`); this matches.
     #[inline]
     pub const fn indx(n: u32) -> u32 {
-        n & 0x1f
+        n & 0x3f
     }
 }
 

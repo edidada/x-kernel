@@ -75,7 +75,7 @@ impl SdmmcDriver {
     fn cmd(&self, opcode: u32, arg: u32, resp: RespKind) -> DriverResult<[u32; 4]> {
         let host = self.inner.lock();
         let (flags, _) = DwMciHost::build_cmd_flags(opcode, arg, resp, false, false, false);
-        host.send_command(flags, arg)
+        host.send_command(opcode as u8, flags, arg)
     }
 
     /// Issue APP_CMD (CMD55) then an application command (ACMD*).
@@ -95,10 +95,10 @@ impl SdmmcDriver {
             false,
             false,
         );
-        host.send_command(f55, rca << 16)?;
+        host.send_command(op::APP_CMD as u8, f55, rca << 16)?;
 
         let (facmd, _) = DwMciHost::build_cmd_flags(acmd_opcode, arg, resp, false, false, false);
-        host.send_command(facmd, arg)
+        host.send_command(acmd_opcode as u8, facmd, arg)
     }
 
     /// Run SD card identification: reset → voltage check → OCR → CID → RCA →
@@ -106,11 +106,16 @@ impl SdmmcDriver {
     fn init_card(&mut self) -> DriverResult {
         {
             let host = self.inner.lock();
+            // NOTE: the controller's native CDETECT is unreliable on many RK boards
+            // (e.g. Orange Pi 5 Plus reads "present" on both sdmmc and sdio nodes,
+            // including the one with no card). Treat this only as a fast-path skip;
+            // a genuinely card-less node is still distinguished by a CMDx RTO below.
             if !host.card_present() {
-                log::warn!("sdmmc: no card detected (CDETECT)");
+                log::warn!("sdmmc: no card detected (CDETECT) — skipping");
                 return Err(DriverError::Io);
             }
             host.setup_bus(clock::CARD_IDENT, bus_width::WIDTH_1BIT)?;
+            host.log_clock_state("card-ident");
         }
 
         // CMD0 GO_IDLE_STATE with INIT clock (80 init clocks). No response.
@@ -118,11 +123,12 @@ impl SdmmcDriver {
             let host = self.inner.lock();
             let (f0, _) =
                 DwMciHost::build_cmd_flags(op::GO_IDLE, 0, RespKind::None, false, false, true);
-            host.send_command(f0 | regs::cmd::INIT, 0)?;
+            host.send_command(op::GO_IDLE as u8, f0 | regs::cmd::INIT, 0)?;
         }
 
         // CMD8 SEND_IF_COND: SD v2.0 check, expect 0x1AA echoed.
         let r8 = self.cmd(op::SEND_IF_COND, 0x1aa, RespKind::ShortNoCrc)?;
+        log::info!("sdmmc: CMD8 resp={:#010x} (expect 0x000001aa)", r8[0]);
         if r8[0] & 0xfff != 0x1aa {
             log::warn!(
                 "sdmmc: CMD8 mismatch {:#x}; assuming non-SDHC card",
@@ -205,7 +211,7 @@ impl BlockDevice for SdmmcDriver {
             false,
             false,
         );
-        host.send_command(flags, block_id as u32)?;
+        host.send_command(op::READ_SINGLE_BLOCK as u8, flags, block_id as u32)?;
         host.pio_read(buf)
     }
 
@@ -220,7 +226,7 @@ impl BlockDevice for SdmmcDriver {
             true,
             false,
         );
-        host.send_command(flags, block_id as u32)?;
+        host.send_command(op::WRITE_SINGLE_BLOCK as u8, flags, block_id as u32)?;
         host.pio_write(buf)
     }
 

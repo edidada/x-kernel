@@ -219,6 +219,8 @@ pub trait Device: Send + Sync {
 | `of_property_read_string` | 经 `FdtNode` property 接口（`of::fdt()` 取底层 `LinuxFdt`） | 较薄，按需用 |
 | `of_match_node` | 由总线层用 `FirmwareMatchSpec.dt_compatibles` 自动匹配 | 驱动侧只声明 spec |
 
+> **读时钟频率的坑（MMC/I2C/UART/SPI 算分频都会撞）**：Linux 用 `clk_get_rate(ciu_clk)` 取输入时钟速率，x-kernel 无 clk 框架。别想当然读 DT `clock-frequency`——**Rockchip 的 MMC 节点通常只有 `max-frequency`，没有 `clock-frequency`**，而 `max-frequency` 是卡时钟上限（caps），**不是** CIU 输入速率，**不能**当分频分母。取不到真值时按 smoke-blocker 上报，常量值对照 U-Boot `mmc info` 核对，详见 [gaps.md §clk 维度 B](gaps.md#维度-bclk-rateclk_get_rate--clk_set_rate--最容易被误判为-works-around)。
+
 ---
 
 ## 9. 地址转换（DMA / 物理-虚拟）

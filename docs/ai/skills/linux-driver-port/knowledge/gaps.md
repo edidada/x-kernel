@@ -23,11 +23,29 @@ x-kernel 目前只实现了驱动模型的"主干"：MMIO / IRQ / coherent DMA /
 
 ### clk framework（`clk_get` / `clk_prepare_enable` / `clk_set_rate` / `clk_get_rate`）
 
+clk 要按**两个独立维度**分别定级——这是 dw_mmc 移植踩过的真坑（见 [dw_mmc-walkthrough 复盘](../examples/dw_mmc-walkthrough.md#复盘真机-io-失败从预言到验证)）：把整个 clk 笼统标 `works-around`，会让"必须知道 CIU 速率才能算 CLKDIV"这件事被"firmware 供着时钟"这句话掩盖。
+
 - **现状**：x-kernel 无通用时钟框架。RK3588 的时钟由 bootloader（U-Boot/TPL/SPL）配好，内核侧多数驱动**继承**当前时钟配置直接用。
-- **阻塞**：通常 `works-around`。若驱动**主动改频率**（`clk_set_rate`，如 MMC 选卡频、I2C 定速率），则该路径 `blocker`。
-- **替代**：删除所有 `clk_prepare_enable`/`clk_disable_unprepare` 调用，注释"clock assumed enabled by firmware"；频率相关逻辑用固定常量或读硬件状态推断，缺口照报。
+
+#### 维度 A：clk-enable（`clk_prepare_enable` / `clk_disable_unprepare`）
+
+- **阻塞**：`works-around`。firmware 已把时钟供着，删掉 enable/disable 即可，注释 "clock assumed enabled by firmware"。
+- **替代**：删除所有 `clk_prepare_enable`/`clk_disable_unprepare` 调用。
+
+#### 维度 B：clk-rate（`clk_get_rate` / `clk_set_rate`）—— **最容易被误判为 works-around**
+
+驱动**算硬件分频**时需要知道输入时钟速率本身，例如：MMC 的 `CLKDIV = f(ciu_rate, target_card_clock)`、I2C 的 SCL 分频、UART 的 baud divisor、SPI 的速率。**这跟"时钟开没开"是两回事。**
+
+- **阻塞**：分两种——
+  - 能**取到真值**（DT 有 `clock-frequency`，或可从硬件状态推断）→ `works-around`：读出来用，缺口照报。
+  - **取不到真值**（DT 无 `clock-frequency`、又无 clk 框架读 `clk_get_rate`）→ 这是 **smoke-path blocker**：分频算错 → 卡识别/通信失败。**不得用一个"看起来合理"的常量静默糊弄过去当成 works-around。**
+- **Rockchip 特别注意**（OPi5+ 实测）：
+  - RK 的 DT 里 sdmmc 节点**通常只有 `max-frequency`，没有 `clock-frequency`**。`max-frequency` 是"卡时钟上限"（caps），**不是** CIU 输入速率——**绝对不能拿它当 CLKDIV 的分母**。Linux 走 `clk_get_rate(ciu_clk)`，再除 `RK3288_CLKGEN_DIV(=2)` 得到 `host->bus_hz`。
+  - 无 clk 框架时，唯一可靠来源是**对照 U-Boot**：在目标板上跑 U-Boot 的 `mmc info`（或等价），读它报的 Bus Speed / bus_hz，作为常量并**在 probe 时打印**，方便核对。
+- **替代（取不到真值时）**：用 U-Boot 实测值作常量 + probe 日志标注来源 + 在缺口报告里写明"smoke-blocker，需 clk(CRU) provider 校准"；**CLKDIV 公式照搬 Linux**（含 Rockchip 的 ÷2，见 [api-mapping §6](api-mapping.md)）。
 - **报告口径**：
-  > `clk` — works-around. Driver calls `clk_prepare_enable`×N and `clk_set_rate` in `set_rate`. Removed enable/disable (firmware provides clock); `set_rate` path left as TODO with `# MMC clock selection not supported` — needs clk framework (CRU) provider.
+  > `clk-enable` — works-around. Removed `clk_prepare_enable`×N (firmware provides clock).
+  > `clk-rate` — **smoke-blocker** (ci_clk). No clk framework to read `clk_get_rate(ciu_clk)`; DT has no `clock-frequency` (only `max-frequency`, which is NOT the CIU rate). CLKDIV computed from a hardcoded `bus_hz=50MHz` (U-Boot `mmc info` value, logged at probe) using the Linux formula incl. RK3288_CLKGEN_DIV. Card-ID clock ≈400 kHz is correct; high-speed correctness depends on this guess — must calibrate via clk(CRU) provider.
 
 ### regmap（`devm_regmap_init_mmio` / `regmap_update_bits`）
 
@@ -143,6 +161,26 @@ x-kernel 目前只实现了驱动模型的"主干"：MMIO / IRQ / coherent DMA /
 | `pm_runtime` | 仅 `DeviceDriver::suspend/resume` | optional | 删 runtime pm 调用，保留系统级 suspend/resume |
 
 ---
+
+## 真机 bring-up 易踩的坑（非子系统缺口，但会让"编译通过"的驱动在硬件上挂掉）
+
+这些不是"缺哪个子系统"，而是**硬件现实**——移植时稍不留意就会让 P5 全绿、P6 挂掉。dw_mmc 移植一次踩中三个。Bring-up 时对照 [Phase 6](../workflow/port-workflow.md#phase-6--带机校验与-triagebring-up--triage) 逐条排查。
+
+### PWREN / 卡上电使能（`PWREN` 寄存器）
+
+- **坑**：dw_mshc 的 `PWREN` 输出控制卡槽 vmmc 供电。Linux 在 `set_ios` 的 `MMC_POWER_UP` 写 `PWREN |= 1<<slot`，U-Boot `dwmci_init` 第二行就写 `PWREN=1`。**漏写 = 卡不上电 = 所有 CMD `RTO`**。
+- **特别地**：DT 里有 `vmmc-supply`（如 OPi5+ 的 sdmmc）说明供电是可开关的，**必须**显式使能；CTRL reset 不会清 PWREN（两份参考都在 reset 前写它且能跑），所以像 U-Boot 那样在 init 开头写一次即可。
+- **处置**：probe 初始化序列**第一步**写 `PWREN=1`（对照参考驱动，见 [port-workflow P1 编号序列](../workflow/port-workflow.md)）。
+
+### CDETECT（native card detect）不可信
+
+- **坑**：控制器自带的 `CDETECT` 卡检测在很多 RK 板子上**不可靠**——OPi5+ 上 sdmmc 和 sdio 两个节点都读"有卡"（包括没插卡的那个）。原因：板子用 GPIO CD（`cd-gpios`）或干脆没接 CDETECT 引脚。
+- **处置**：**不要**拿 `CDETECT` 当"卡在不在"的硬门去 abort probe；最多当快速跳过路径。真要区分"无卡"靠 CMD 超时（`RTO`），并在日志里写清。Linux 也是 `dw_mci_get_cd` 先查 GPIO CD，CDETECT 只是兜底。
+
+### 一个 `compatible` 命中多个节点（sdmmc + sdio）
+
+- **坑**：RK3588 的 sdmmc 和 sdio 节点 `compatible` 相同（`rockchip,rk3588-dw-mshc`）。驱动会**对两个节点都 probe**，其中没插卡的那个必然失败。
+- **处置**：**逐节点容忍失败**——没设备的节点失败是正常的，不要当成"驱动坏了"。在胶水层按节点 `device.location()` 打日志区分；无卡节点返回错误（`Io`/`Unsupported`）即可，别让它的失败噪音盖住真正该工作的节点。真要只绑 SD 卡槽，可按 MMIO 基址（`first_mmio().base`，OPi5+ sdmmc=`0xfe2c0000`、sdio=`0xfe2d0000`）过滤，但那属于板级硬编码，慎用。
 
 ## 级联缺口（常见组合）
 
