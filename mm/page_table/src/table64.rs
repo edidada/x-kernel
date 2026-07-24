@@ -150,6 +150,36 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
         Self::try_new_inner(true)
     }
 
+    /// Wrap an **existing** page-table root for in-place mutation.
+    ///
+    /// Unlike [`try_new`](Self::try_new) / [`try_new_kernel`](Self::try_new_kernel),
+    /// this does **not** allocate a root frame: it borrows an already-installed
+    /// root (e.g. the live kernel page table) so its mappings can be inspected
+    /// or modified in place using the architecture's own walk + TLB logic.
+    ///
+    /// # Safety
+    ///
+    /// - `root_paddr` must be a valid, page-aligned root of a page table whose
+    ///   ownership is **not** transferred here.
+    /// - The returned value must **not** be dropped normally: [`Drop`] for
+    ///   `PageTable64` frees the root frame and all sub-tables, which would
+    ///   destroy the borrowed table. Wrap it in [`ManuallyDrop`] or
+    ///   [`mem::forget`] it.
+    /// - The paging handler (`H`) must already be initialised.
+    pub unsafe fn from_root(root_paddr: PhysAddr, is_kernel: bool) -> Self {
+        Self {
+            root_paddr,
+            #[cfg(feature = "copy-from")]
+            borrowed_entries: bitmaps::Bitmap::new(),
+            is_kernel,
+            #[cfg(target_arch = "aarch64")]
+            user_asid_provider: None,
+            #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+            user_cpu_mask_provider: None,
+            _phantom: PhantomData,
+        }
+    }
+
     fn try_new_inner(is_kernel: bool) -> PtResult<Self> {
         let root_paddr = Self::alloc_table()?;
         Ok(Self {

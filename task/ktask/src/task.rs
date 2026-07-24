@@ -1077,18 +1077,23 @@ impl Drop for TaskInner {
 struct TaskStack {
     ptr: NonNull<u8>,
     layout: Layout,
-    /// Saved PTE of the unmapped guard page (aarch64), restored on drop so the
-    /// virtual range stays reusable. Meaningful only when `guarded` is true.
-    saved_pte: u64,
-    /// Whether the bottom guard page was unmapped.
-    guarded: bool,
+    /// The unmapped guard page at the bottom of the allocation, if installed.
+    guard: Option<GuardSlot>,
+}
+
+/// Saved mapping of a stack-bottom guard page, restored on drop.
+struct GuardSlot {
+    va: usize,
+    phys: memaddr::PhysAddr,
+    flags: khal::paging::MappingFlags,
 }
 
 impl TaskStack {
     /// One page is reserved at the bottom of the allocation and unmapped in the
     /// kernel page table. Any write there (stack overflow, or an out-of-bounds
-    /// write) triggers a data abort at the writer's PC, which the page-fault
-    /// handler reports with `ELR_EL1` = the faulting instruction.
+    /// write) triggers a page fault at the writer's PC instead of silently
+    /// corrupting neighbouring memory. Works on every architecture via the
+    /// shared `page_table` walk + TLB logic.
     const GUARD_PAGE: usize = memaddr::PAGE_SIZE_4K;
 
     pub fn alloc(size: usize) -> Self {
@@ -1099,22 +1104,10 @@ impl TaskStack {
         // owned exclusively by this `TaskStack`.
         let ptr = NonNull::new(unsafe { alloc::alloc::alloc(layout) }).unwrap();
         let base = ptr.as_ptr() as usize;
-        let mut guarded = false;
-        let mut saved_pte = 0u64;
-        #[cfg(target_arch = "aarch64")]
-        {
-            // Unmap the bottom page (guard page). `unmap_kernel_4k` returns the
-            // saved PTE, or None if the VA isn't a 4K leaf (then: no guard).
-            if let Some(saved) = karch::unmap_kernel_4k(base) {
-                saved_pte = saved;
-                guarded = true;
-            }
-        }
         Self {
             ptr,
             layout,
-            saved_pte,
-            guarded,
+            guard: unmap_kernel_guard(base),
         }
     }
 
@@ -1128,17 +1121,54 @@ impl TaskStack {
 impl Drop for TaskStack {
     fn drop(&mut self) {
         // Restore the guard page so the virtual range is reusable before freeing.
-        if self.guarded {
-            #[cfg(target_arch = "aarch64")]
-            {
-                let base = self.ptr.as_ptr() as usize;
-                karch::remap_kernel_4k(base, self.saved_pte);
-            }
+        if let Some(g) = self.guard.take() {
+            remap_kernel_guard(g);
         }
         // SAFETY: `ptr` and `layout` are the exact allocation pair created in
         // `TaskStack::alloc`, and `drop` runs exactly once for this stack.
         unsafe { alloc::alloc::dealloc(self.ptr.as_ptr(), self.layout) }
     }
+}
+
+/// Unmap the 4 KiB kernel page at `va` (the guard page). Returns its mapping so
+/// it can be restored by [`remap_kernel_guard`]. Returns `None` if the page is
+/// not a 4 KiB leaf (e.g. covered by a huge mapping) or the paging handler is
+/// not ready yet (early boot).
+fn unmap_kernel_guard(va: usize) -> Option<GuardSlot> {
+    use core::mem::ManuallyDrop;
+
+    use khal::paging::PageSize;
+    let root_phys = memaddr::PhysAddr::from_usize(kernel_root_phys());
+    // SAFETY: `root_phys` is the live kernel page-table root, which we do not
+    // own; it is wrapped in `ManuallyDrop` so `PageTable64::drop` (which would
+    // free the root and all sub-tables) never runs. The paging handler is
+    // initialised before any post-boot task stack is allocated.
+    let mut pt = ManuallyDrop::new(unsafe { khal::paging::PageTable::from_root(root_phys, true) });
+    match pt.modify().unmap(VirtAddr::from_usize(va)) {
+        Ok((phys, flags, PageSize::Size4K)) => Some(GuardSlot { va, phys, flags }),
+        _ => None,
+    }
+}
+
+/// Restore the guard page cleared by [`unmap_kernel_guard`].
+fn remap_kernel_guard(g: GuardSlot) {
+    use core::mem::ManuallyDrop;
+
+    use khal::paging::PageSize;
+    let root_phys = memaddr::PhysAddr::from_usize(kernel_root_phys());
+    // SAFETY: see `unmap_kernel_guard`; `ManuallyDrop` prevents freeing the root.
+    let mut pt = ManuallyDrop::new(unsafe { khal::paging::PageTable::from_root(root_phys, true) });
+    let _ = pt.modify().map(
+        VirtAddr::from_usize(g.va),
+        g.phys,
+        PageSize::Size4K,
+        g.flags,
+    );
+}
+
+/// Page-aligned physical address of the live kernel page-table root.
+fn kernel_root_phys() -> usize {
+    karch::read_kernel_page_table().as_usize() & !(memaddr::PAGE_SIZE_4K - 1)
 }
 
 /// A wrapper of [`KtaskRef`] as the current task.
