@@ -11,6 +11,8 @@
 
 extern crate alloc;
 
+pub mod partition;
+
 use alloc::{boxed::Box, sync::Arc, vec};
 use core::mem;
 

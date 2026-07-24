@@ -206,3 +206,33 @@ skill 侧（本次同步改）：
 ### 这次复盘要带走的一句话
 
 > **真机失败时，先上可观测性，别先上假设。** 这次 blocker 是一条 `&0x1f` 该写 `&0x3f` 的寄存器位宽错误——它只咬 opcode≥32 的命令（CMD0~31 全好），所以"前面都正常、到 CMD55 突然挂"是它的指纹。预言中的 bus_hz 风险反而是红鲱鱼。教训三连：(1) 每条错误路径必须 dump 状态寄存器（P6 前提）；(2) 别让预言锚定方向，让数据带路；(3) 铁律 1 的"原样照搬"要靠 Phase 3 可追溯校验兜底——`dw_mmc.h` 里没有 `&0x1f`，代码里就不该有。
+
+---
+
+## 复盘二：数据通路 bring-up——PIO 读不出栈 + 分区表（Orange Pi 5 Plus）
+
+复盘一让卡识别通了（CMD0..7 全过、`card ready`）。但真机**一读块就挂**——数据通路第一次上真机，又踩了两层坑。这次复盘固化这两层。
+
+### 症状演进（每层都靠可观测性收窄）
+
+1. **fs_boot 第一次 `read_block` 卡死**（连错误都没有）。给 `pio_read`/`pio_write` 补上 `DATA_ERROR_FLAGS` 检查 + 超时 + `rintsts/status` dump（复盘一那条"每条错误路径必须 dump"的落实）后，变成有信息的超时。
+2. **`drained 1024/1024`**：kext4 读超级块要 1024 字节（跨 2 块），驱动却写死 `BYTCNT=512`、只发 CMD17，`pio_read` 完成分支还按 `buf.len()` 去排空 FIFO（读到空 FIFO）。修：`read_block`/`write_block` **逐块循环**履行 `BlockDevice` 的"buffer 可跨多块"契约（[block/src/lib.rs](../../../../../drivers/block/src/lib.rs) trait 文档）；`pio_read` 改严格按 `FCNT` 排空（`drain_rx`，**绝不空读** FIFO）。
+3. 逐块后变 **`drained 512/512` 仍 timeout**：单块 CMD17、`bytcnt=512 blksiz=512 cmd=...` 全对，但 `DATA_OVER` 永远不来、FIFO 满着。加"双偏移 pop-test"（卡空闲时读 `0x200`/`0x100` 看 `fcnt` 降不降）→ **两个偏移都不弹**。
+4. 对照 Linux 源码（`dw_mmc.c`/`dw_mmc-rockchip.c`）定位：RK3588 dw_mshc 的 `HCON TRANS_MODE=0` = 内部 IDMAC，**U-Boot 和 Linux 都走 DMA、不走 PIO**；U-Boot 留下 `CTRL.USE_IDMAC`(bit25)/`DMA_ENABLE`(bit5) 置位，而 `ctrl_reset` 的 DMA_RESET 脉冲**不清这两个配置位** → FIFO 输出仍路由给未配置的 DMA 引擎 → PIO 读数据口永远不出栈、`DATA_OVER` 永远不来。修：init 显式清这两位（正是 Linux `dw_mci_submit_data` 进 PIO 时做的事）。
+5. 读通后 **`InvalidMagic(0x0062)`**：读块已完全正确（`CTRL=0x0` PIO、FIFO 按序排出）。读 block 0 见 `MBR sig 0xAA55`、`p1 type=0xEE @LBA 1`——**GPT 保护性 MBR**，ext4 在分区里、不在 LBA 0，而 fs_boot 直挂裸设备。修：在 [fs/block/src/partition.rs](../../../../../fs/block/src/partition.rs) 加 GPT/MBR 解析 + `PartitionBlockDevice`（按起始 LBA 偏移读写），[kext4_vfs mount_bdev](../../../../../fs/bridges/kext4_vfs/src/fs.rs) 挂载前先找分区、包一层再挂。
+
+### 已落地的修复
+
+驱动侧（[regs.rs](../../../../../drivers/block/src/sdmmc/regs.rs) / [host.rs](../../../../../drivers/block/src/sdmmc/host.rs) / [mod.rs](../../../../../drivers/block/src/sdmmc/mod.rs)）：
+
+1. **init 显式清 `CTRL.USE_IDMAC | DMA_ENABLE`**（THE fix of 数据通路；见 [gaps.md](../knowledge/gaps.md) "CTRL DMA 位"坑）。
+2. **`pio_read`/`pio_write` FCNT-bound**：`drain_rx`/`fill_tx` 严格按 `FCNT`/剩余空间排/填，**绝不空读/空写 FIFO**；每轮查 `DATA_ERROR_FLAGS` + 超时，失败 dump `rintsts/status`。
+3. **`read_block`/`write_block` 逐块循环**：履行多块契约，每块独立 `BYTCNT=512`、`DATA_OVER` 精确对齐。
+
+FS 侧：
+
+4. **分区解析**：`fs_block::partition` 提供 `find_root_partition_lba`（GPT 为主、MBR 兜底）+ `PartitionBlockDevice`；ext4 桥挂载前解析、按偏移挂。
+
+### 这次复盘要带走的一句话
+
+> **PIO 在"本该走 DMA 的 IP"上是带电作业。** 这颗 dw_mshc 的设计路径是 IDMAC，U-Boot 把 `CTRL` 的 DMA 位置上了就不撤；`ctrl_reset` 只复位 DMA 逻辑、不清配置位——于是 PIO 的 FIFO 读永远不出栈，且**不报任何错误**（数据照进 FIFO、`DATA_OVER` 就是不来）。指纹："命令/时钟/契约全对、数据在流、FIFO 满着、无错误位、无 `DATA_OVER`"。修法就一行：进 PIO 前显式清 `USE_IDMAC`+`DMA_ENABLE`，对照 Linux `dw_mci_submit_data`。教训：(1) 移植 PIO 驱动到"设计走 DMA 的 IP"时，**必须**清前任留下的 DMA 配置位，别假设 reset 会清；(2) "数据正确但位置不对"（`InvalidMagic` 而 `CTRL=0x0`、FIFO 正常）是分区/布局问题，不是驱动问题——dump 块内容 + 查 MBR/GPT 一步分清；(3) 复盘一的"每条错误路径必须 dump"这次又救了命——没有它，PIO 不出栈会是一个无声死循环。

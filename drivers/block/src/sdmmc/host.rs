@@ -149,6 +149,22 @@ impl DwMciHost {
         self.writel(off::INTMASK, 0);
         self.writel(off::TMOUT, 0xFFFF_FFFF);
 
+        // Force PIO mode. U-Boot drove this controller through the internal
+        // DMAC (HCON TRANS_MODE = IDMAC on RK3588), leaving CTRL.USE_IDMAC
+        // (bit 25) and CTRL.DMA_ENABLE (bit 5) set. `ctrl_reset` above pulses
+        // the DMA-reset bit but does NOT clear those config bits, so without
+        // this the FIFO output stays routed to the (here-unconfigured) DMA
+        // engine — PIO reads of the data port then never pop the FIFO and
+        // DATA_OVER never fires (exactly the real-HW hang). Linux clears both
+        // when submitting a PIO transfer (dw_mci_submit_data); mirror that
+        // once at init.
+        let ctrl = self.readl(off::CTRL) & !(regs::ctrl::USE_IDMAC | regs::ctrl::DMA_ENABLE);
+        self.writel(off::CTRL, ctrl);
+        log::info!(
+            "sdmmc: CTRL={:#x} (USE_IDMAC/DMA_ENABLE cleared for PIO)",
+            self.readl(off::CTRL)
+        );
+
         // FIFO depth: read from FIFOTH RX_WMark (probe does this when DT
         // doesn't give fifo-depth). RK3588 sdmmc reports 256.
         let fifoth = self.readl(off::FIFOTH);
@@ -268,6 +284,30 @@ impl DwMciHost {
         Some(v)
     }
 
+    /// If `rintsts` carries a data-transfer error, clear those bits, log the
+    /// dominant cause (full `rintsts` + `status` for triage), and return
+    /// `Err(Io)`; otherwise return `Ok(())`. This is the data-path analogue of
+    /// the error decode in `send_command`/`dw_mci_command_complete`. A data
+    /// error sets an error bit and **never** sets `DATA_OVER`, so the PIO loops
+    /// must consult this on every iteration — without it they spin forever.
+    /// That silent infinite spin was the real-HW hang (see the walkthrough's P6
+    /// retrospective: every error path must dump the status registers). `dir`
+    /// is "read"/"write" for the log line.
+    fn data_err_abort(&self, rintsts: u32, dir: &str) -> DriverResult<()> {
+        if rintsts & int::DATA_ERROR_FLAGS == 0 {
+            return Ok(());
+        }
+        self.writel(off::RINTSTS, rintsts & int::DATA_ERROR_FLAGS);
+        log::error!(
+            "sdmmc: {} data error rintsts={:#x} status={:#x} ({})",
+            dir,
+            rintsts,
+            self.readl(off::STATUS),
+            data_err_name(rintsts),
+        );
+        Err(DriverError::Io)
+    }
+
     /// Issue a command and synchronously await completion. `opcode` is used
     /// only for diagnostics. `flags` are the `cmd::*` bits from
     /// [`Self::build_cmd_flags`]. Returns the 4-word response (only [0] valid
@@ -358,41 +398,62 @@ impl DwMciHost {
         (f, arg)
     }
 
-    /// Read `len` bytes from the FIFO into `buf` during a read data transfer.
-    /// Mirrors `dw_mci_read_data_pio` (polling form): drain FIFO by the count
-    /// reported in STATUS until DATA_OVER fires.
+    /// Drain whole 32-bit words from the RX FIFO into `out`, copying at most
+    /// `out.len()` bytes and never more than the FIFO currently holds (FCNT).
+    /// Reading the data register with an empty FIFO is undefined on this IP —
+    /// it inflates the byte count with phantom words and desyncs the data state
+    /// machine — so every drain is strictly FCNT-bounded. Returns bytes copied.
+    fn drain_rx(&self, out: &mut [u8]) -> usize {
+        let fcnt_bytes = (status::fcnt(self.readl(off::STATUS)) << self.data_shift) as usize;
+        let n = fcnt_bytes.min(out.len()) & !0x3;
+        for i in (0..n).step_by(4) {
+            let w = self.fifo_read32();
+            out[i..i + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        n
+    }
+
+    /// Read `buf.len()` bytes from the FIFO into `buf` during a read data
+    /// transfer. Mirrors `dw_mci_read_data_pio` (polling form): drain whatever
+    /// the FIFO holds (FCNT-bounded) until `DATA_OVER` fires, then drain the
+    /// residual. Aborts — clearing the error bits and dumping `rintsts`/
+    /// `status` — on any data error or on `POLL_TIMEOUT_NS`. A data error sets
+    /// an error bit and never DATA_OVER; without these checks the loop spins
+    /// forever (the real-HW hang). The caller sizes the transfer via `BYTCNT`
+    /// (`set_block_params`), so `DATA_OVER` fires exactly when the requested
+    /// bytes have arrived.
     pub fn pio_read(&self, buf: &mut [u8]) -> DriverResult {
         let mut off_b = 0usize;
+        let start = khal::time::monotonic_time_nanos();
         loop {
-            let fcnt_bytes = (status::fcnt(self.readl(off::STATUS)) << self.data_shift) as usize;
-            if fcnt_bytes > 0 && off_b < buf.len() {
-                let n = fcnt_bytes.min(buf.len() - off_b) & !0x3;
-                if n > 0 {
-                    // Drain full 32-bit words from the FIFO.
-                    for i in (0..n).step_by(4) {
-                        let w = self.fifo_read32();
-                        let p = off_b + i;
-                        buf[p..p + 4].copy_from_slice(&w.to_le_bytes());
-                    }
-                    off_b += n;
-                }
+            // A data error never raises DATA_OVER — check it first or the
+            // drain loop spins forever (the real-HW hang).
+            let rintsts = self.readl(off::RINTSTS);
+            self.data_err_abort(rintsts, "read")?;
+
+            if off_b < buf.len() {
+                off_b += self.drain_rx(&mut buf[off_b..]);
             }
-            // Check completion (also drain tail below word boundary).
-            if self.readl(off::RINTSTS) & int::DATA_OVER != 0 {
-                // Drain any residual words.
-                while off_b + 4 <= buf.len() {
-                    let w = self.fifo_read32();
-                    buf[off_b..off_b + 4].copy_from_slice(&w.to_le_bytes());
-                    off_b += 4;
-                }
-                // Tail bytes < 4: read one word and take the low bytes.
+            if rintsts & int::DATA_OVER != 0 {
+                // Transfer complete; drain any words still in the FIFO.
                 if off_b < buf.len() {
-                    let w = self.fifo_read32().to_le_bytes();
-                    let tail = buf.len() - off_b;
-                    buf[off_b..].copy_from_slice(&w[..tail]);
+                    self.drain_rx(&mut buf[off_b..]);
                 }
                 self.writel(off::RINTSTS, int::DATA_OVER);
                 break;
+            }
+
+            if khal::time::monotonic_time_nanos().wrapping_sub(start) >= POLL_TIMEOUT_NS {
+                log::error!(
+                    "sdmmc: read data timeout rintsts={:#x} status={:#x} (no DATA_OVER/error \
+                     within {}ms; drained {}/{})",
+                    self.readl(off::RINTSTS),
+                    self.readl(off::STATUS),
+                    POLL_TIMEOUT_NS / 1_000_000,
+                    off_b,
+                    buf.len(),
+                );
+                return Err(DriverError::Io);
             }
             core::hint::spin_loop();
         }
@@ -401,10 +462,14 @@ impl DwMciHost {
 
     /// Write `buf` to the FIFO during a write data transfer. Mirrors
     /// `dw_mci_write_data_pio` (polling form): fill FIFO by free-word count
-    /// until DATA_OVER fires.
+    /// until DATA_OVER fires. Both the fill loop and the completion wait are
+    /// error-checked and timeout-bounded (see `pio_read`): a data error or a
+    /// transfer that never progresses otherwise spins forever.
     pub fn pio_write(&self, buf: &[u8]) -> DriverResult {
         let mut off_b = 0usize;
+        let start = khal::time::monotonic_time_nanos();
         while off_b + 4 <= buf.len() {
+            self.data_err_abort(self.readl(off::RINTSTS), "write")?;
             let free = ((self.fifo_depth - status::fcnt(self.readl(off::STATUS)))
                 << self.data_shift) as usize;
             if free >= 4 {
@@ -413,8 +478,14 @@ impl DwMciHost {
                 self.fifo_write32(u32::from_le_bytes(w));
                 off_b += 4;
             }
-            if self.readl(off::RINTSTS) & int::DATA_ERROR_FLAGS != 0 {
-                self.writel(off::RINTSTS, int::DATA_ERROR_FLAGS);
+            if khal::time::monotonic_time_nanos().wrapping_sub(start) >= POLL_TIMEOUT_NS {
+                log::error!(
+                    "sdmmc: write data (fill) timeout rintsts={:#x} status={:#x} (filled {}/{})",
+                    self.readl(off::RINTSTS),
+                    self.readl(off::STATUS),
+                    off_b,
+                    buf.len(),
+                );
                 return Err(DriverError::Io);
             }
             core::hint::spin_loop();
@@ -424,16 +495,25 @@ impl DwMciHost {
             let mut w = [0u8; 4];
             w[..buf.len() - off_b].copy_from_slice(&buf[off_b..]);
             self.fifo_write32(u32::from_le_bytes(w));
-            off_b = buf.len();
         }
-        // Wait for transfer to fully complete.
-        if !wait_until_ns(POLL_TIMEOUT_NS, || {
-            self.readl(off::RINTSTS) & int::DATA_OVER != 0
-        }) {
-            return Err(DriverError::Io);
+        // Wait for the transfer to fully complete (error-checked + bounded).
+        loop {
+            let rintsts = self.readl(off::RINTSTS);
+            self.data_err_abort(rintsts, "write")?;
+            if rintsts & int::DATA_OVER != 0 {
+                self.writel(off::RINTSTS, int::DATA_OVER);
+                break;
+            }
+            if khal::time::monotonic_time_nanos().wrapping_sub(start) >= POLL_TIMEOUT_NS {
+                log::error!(
+                    "sdmmc: write data (complete) timeout rintsts={:#x} status={:#x}",
+                    rintsts,
+                    self.readl(off::STATUS),
+                );
+                return Err(DriverError::Io);
+            }
+            core::hint::spin_loop();
         }
-        self.writel(off::RINTSTS, int::DATA_OVER);
-        let _ = off_b;
         Ok(())
     }
 
@@ -477,6 +557,29 @@ fn cmd_err_name(status: u32, crc_expected: u32) -> &'static str {
         "hardware locked (HLE) — command issued while CIU busy"
     } else {
         "unknown command error"
+    }
+}
+
+/// Name the dominant cause of a data-transfer error from its RINTSTS bits. The
+/// full `rintsts` is logged alongside, so this is only the headline cause.
+/// Mirrors the decode priority in Linux `dw_mci_data_complete`.
+fn data_err_name(status: u32) -> &'static str {
+    if status & int::SBE != 0 {
+        "start-bit error (SBE) — bus width mismatch (card vs controller)"
+    } else if status & int::DCRC != 0 {
+        "data CRC error (DCRC) — wrong clock / width / tuning"
+    } else if status & int::DRTO != 0 {
+        "data read timeout (DRTO) — card did not send data"
+    } else if status & int::FRUN != 0 {
+        "FIFO underrun/overrun (FRUN) — drain/fill too slow or depth wrong"
+    } else if status & int::HTO != 0 {
+        "host starvation timeout (HTO)"
+    } else if status & int::EBE != 0 {
+        "end-bit error (EBE)"
+    } else if status & int::HLE != 0 {
+        "hardware locked (HLE) — data command issued while CIU busy"
+    } else {
+        "unknown data error"
     }
 }
 

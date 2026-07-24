@@ -52,7 +52,24 @@ impl Ext4Filesystem {
         dev: ClassDevice<KBlockDevice>,
         superblock_flags: SuperBlockFlags,
     ) -> VfsResult<Arc<SuperBlock>> {
-        let device: Arc<dyn BlockDevice> = Arc::new(dev);
+        let raw: Arc<dyn BlockDevice> = Arc::new(dev);
+        // Mount from the first partition if the device has a partition table
+        // (GPT/MBR); otherwise treat the raw device as a direct filesystem.
+        let start_lba = match fs_block::partition::find_root_partition_lba(&*raw) {
+            Ok(lba) => lba,
+            Err(err) => {
+                warn!("KExt4: partition table parse failed ({err:?}); mounting raw device");
+                0
+            }
+        };
+        let device: Arc<dyn BlockDevice> = if start_lba == 0 {
+            raw
+        } else {
+            info!("KExt4: mounting root partition at LBA {}", start_lba);
+            Arc::new(fs_block::partition::PartitionBlockDevice::new(
+                raw, start_lba,
+            ))
+        };
         let core = match KExt4Core::mount(device.clone()) {
             Ok(core) => core,
             Err(Ext4Error::NeedsRecovery) => {

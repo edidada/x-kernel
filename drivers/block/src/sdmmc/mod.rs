@@ -201,33 +201,71 @@ impl BlockDevice for SdmmcDriver {
     }
 
     fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+        // The block-device contract (see `BlockDevice::read_block`) lets the
+        // buffer span several contiguous device blocks. Issue one
+        // READ_SINGLE_BLOCK per block instead of a single CMD17 sized to 512:
+        // a single 512-byte transfer for a larger buffer never reaches the
+        // caller's size and `DATA_OVER` (which fires at BYTCNT) never aligns,
+        // so the read hangs. Each block here is its own 512-byte transfer
+        // (BYTCNT = BLKSIZ = 512) so DATA_OVER fires exactly per block.
         let host = self.inner.lock();
-        host.set_block_params(BLOCK_SIZE as u32, BLOCK_SIZE as u32);
-        let (flags, _) = DwMciHost::build_cmd_flags(
-            op::READ_SINGLE_BLOCK,
-            block_id as u32,
-            RespKind::Short,
-            true,
-            false,
-            false,
-        );
-        host.send_command(op::READ_SINGLE_BLOCK as u8, flags, block_id as u32)?;
-        host.pio_read(buf)
+        let mut blk = block_id;
+        let mut off = 0usize;
+        while off < buf.len() {
+            let want = BLOCK_SIZE.min(buf.len() - off);
+            host.set_block_params(BLOCK_SIZE as u32, BLOCK_SIZE as u32);
+            let (flags, _) = DwMciHost::build_cmd_flags(
+                op::READ_SINGLE_BLOCK,
+                blk as u32,
+                RespKind::Short,
+                true,
+                false,
+                false,
+            );
+            host.send_command(op::READ_SINGLE_BLOCK as u8, flags, blk as u32)?;
+            if want == BLOCK_SIZE {
+                host.pio_read(&mut buf[off..off + BLOCK_SIZE])?;
+            } else {
+                // Sub-block tail: read a full block into scratch, copy prefix.
+                let mut scratch = [0u8; BLOCK_SIZE];
+                host.pio_read(&mut scratch)?;
+                buf[off..off + want].copy_from_slice(&scratch[..want]);
+            }
+            off += want;
+            blk += 1;
+        }
+        Ok(())
     }
 
     fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
+        // Mirror `read_block`: one WRITE_SINGLE_BLOCK per device block so each
+        // transfer's BYTCNT (=512) matches a single block exactly.
         let host = self.inner.lock();
-        host.set_block_params(BLOCK_SIZE as u32, BLOCK_SIZE as u32);
-        let (flags, _) = DwMciHost::build_cmd_flags(
-            op::WRITE_SINGLE_BLOCK,
-            block_id as u32,
-            RespKind::Short,
-            true,
-            true,
-            false,
-        );
-        host.send_command(op::WRITE_SINGLE_BLOCK as u8, flags, block_id as u32)?;
-        host.pio_write(buf)
+        let mut blk = block_id;
+        let mut off = 0usize;
+        while off < buf.len() {
+            let want = BLOCK_SIZE.min(buf.len() - off);
+            host.set_block_params(BLOCK_SIZE as u32, BLOCK_SIZE as u32);
+            let (flags, _) = DwMciHost::build_cmd_flags(
+                op::WRITE_SINGLE_BLOCK,
+                blk as u32,
+                RespKind::Short,
+                true,
+                true,
+                false,
+            );
+            host.send_command(op::WRITE_SINGLE_BLOCK as u8, flags, blk as u32)?;
+            if want == BLOCK_SIZE {
+                host.pio_write(&buf[off..off + BLOCK_SIZE])?;
+            } else {
+                let mut scratch = [0u8; BLOCK_SIZE];
+                scratch[..want].copy_from_slice(&buf[off..off + want]);
+                host.pio_write(&scratch)?;
+            }
+            off += want;
+            blk += 1;
+        }
+        Ok(())
     }
 
     fn flush(&self) -> DriverResult {

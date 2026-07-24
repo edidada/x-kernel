@@ -1530,6 +1530,7 @@ dependencies = [
 name = "fs_block"
 version = "0.2.0-dev"
 dependencies = [
+ "block",
  "kclass",
  "kiface",
  "kvfs",

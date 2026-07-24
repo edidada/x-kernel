@@ -182,6 +182,14 @@ clk 要按**两个独立维度**分别定级——这是 dw_mmc 移植踩过的�
 - **坑**：RK3588 的 sdmmc 和 sdio 节点 `compatible` 相同（`rockchip,rk3588-dw-mshc`）。驱动会**对两个节点都 probe**，其中没插卡的那个必然失败。
 - **处置**：**逐节点容忍失败**——没设备的节点失败是正常的，不要当成"驱动坏了"。在胶水层按节点 `device.location()` 打日志区分；无卡节点返回错误（`Io`/`Unsupported`）即可，别让它的失败噪音盖住真正该工作的节点。真要只绑 SD 卡槽，可按 MMIO 基址（`first_mmio().base`，OPi5+ sdmmc=`0xfe2c0000`、sdio=`0xfe2d0000`）过滤，但那属于板级硬编码，慎用。
 
+### CTRL 的 DMA 位（把 PIO 驱动跑在"设计走 DMA 的 IP"上）
+
+- **坑**：dw_mshc 的 `HCON TRANS_MODE` 决定数据通路——RK3588 是 `0`=内部 IDMAC，**U-Boot 和 Linux 都走 DMA**。U-Boot 跑过会把 `CTRL.USE_IDMAC`(bit25) 和 `CTRL.DMA_ENABLE`(bit5) 置位；而 `ctrl_reset(ALL_RESET_FLAGS)` 里的 `DMA_RESET` 只是**脉冲式复位 DMA 逻辑、不清这两个配置位**。于是 FIFO 输出仍被路由给"未配置的 DMA 引擎"：PIO 读数据寄存器（`0x200`）**永远不出栈**，`DATA_OVER` 永远不置位，且**不报任何数据错误**——表现是无声死循环/超时。指纹：命令/时钟/`BYTCNT`/`BLKSIZ` 全对、数据照进 FIFO（`FCNT` 在涨）、FIFO 满着、`RINTSTS` 只有 `RXDR`、无 `DATA_OVER`、无错误位。
+- **处置**：init 里显式清这两位（`CTRL &= ~(USE_IDMAC|DMA_ENABLE)`），对照 Linux `dw_mci_submit_data` 进 PIO 前的清理。**别假设 `ctrl_reset` 会清配置位**——它只发复位脉冲。
+- **诊断手法**：卡空闲（传输已停）时连读几次数据寄存器看 `FCNT` 降不降（"pop-test"）；不降 = 读不出栈。定位到"读不出栈"后，对照 Linux 源码看 PIO 进入时还额外清了什么 → 锁定 DMA 位。
+- **报告口径**：
+  > `PIO vs IDMAC` — works-around（驱动侧已绕过）。RK3588 dw_mshc `TRANS_MODE=IDMAC`（U-Boot/Linux 走 DMA）；本驱动用 PIO 轮询，**init 显式清 `CTRL.USE_IDMAC/DMA_ENABLE`**（U-Boot 残留，`ctrl_reset` 不清）使 FIFO 输出回到 PIO 口。无 IDMAC 描述符/scatter-gather，性能受限；高速/UHS 需补 IDMAC。
+
 ## 级联缺口（常见组合）
 
 RK3588 上很多外设会撞**级联缺口**，缺口报告要把链条写清楚，方便排优先级：
