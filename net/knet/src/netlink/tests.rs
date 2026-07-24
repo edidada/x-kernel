@@ -16,7 +16,7 @@ use super::{
     route::*,
     socket::publish_kobject_uevent,
     wire::{
-        NlMsgHeader, addr as wire_addr, build_nlmsg, link as wire_link, neigh as wire_neigh,
+        NlMsgHeader, RtMsg, addr as wire_addr, build_nlmsg, link as wire_link, neigh as wire_neigh,
         push_attr, push_i32_ne, push_u8, push_u16_ne, push_u32_ne, read_i32_ne, read_u16_ne,
         route as wire_route,
     },
@@ -29,7 +29,7 @@ use crate::{
         LINK_FLAG_BROADCAST, LINK_FLAG_LOOPBACK, LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST,
         LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind, LinkSnapshot, NeighborUpdate, NetDevice,
     },
-    ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
+    ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr, Ipv6Address},
     router::{
         Ipv4AddrEntry, ROUTE_PROTOCOL_BOOT, ROUTE_SCOPE_HOST, ROUTE_SCOPE_UNIVERSE,
         ROUTE_TABLE_MAIN, ROUTE_TYPE_UNICAST, RouteAttrs, Router, Rule,
@@ -108,6 +108,10 @@ impl NetDevice for TestDevice {
         } else {
             self.neighbors.push(update);
         }
+    }
+
+    fn has_neighbor(&self, dst: IpAddress) -> bool {
+        self.neighbors.iter().any(|neighbor| neighbor.dst == dst)
     }
 
     fn neighbor_snapshots(&self, _dev: usize) -> Vec<NeighborUpdate> {
@@ -330,7 +334,7 @@ fn test_add_and_delete_route() {
     let req = RouteRequest {
         family: wire_route::FAMILY_IPV4,
         dst_len: 24,
-        table: ROUTE_TABLE_MAIN,
+        table: u32::from(ROUTE_TABLE_MAIN),
         protocol: wire_route::PROTOCOL_BOOT,
         scope: wire_route::SCOPE_UNIVERSE,
         route_type: ROUTE_TYPE_UNICAST,
@@ -380,7 +384,7 @@ fn test_add_and_replace_neighbour() {
             .network_snapshot()
             .neighbors
             .iter()
-            .any(|neigh| neigh.dst == req.dst && Some(neigh.hardware_addr) == req.lladdr)
+            .any(|neigh| neigh.dst == req.dst && neigh.hardware_addr == req.lladdr)
     );
 
     let replaced = NeighRequest {
@@ -394,7 +398,157 @@ fn test_add_and_replace_neighbour() {
             .network_snapshot()
             .neighbors
             .iter()
-            .any(|neigh| neigh.dst == replaced.dst && Some(neigh.hardware_addr) == replaced.lladdr)
+            .any(|neigh| neigh.dst == replaced.dst && neigh.hardware_addr == replaced.lladdr)
+    );
+}
+
+#[def_test(serial)]
+fn test_add_incomplete_neighbour_without_link_address() {
+    init_test_state();
+    let req = NeighRequest {
+        family: wire_route::FAMILY_IPV4,
+        ifindex: 2,
+        state: wire_neigh::STATE_INCOMPLETE,
+        flags: 0,
+        dst: IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 11)),
+        lladdr: None,
+    };
+
+    add_neigh_state(req, NLM_F_CREATE).unwrap();
+
+    assert!(
+        SERVICE
+            .lock()
+            .network_snapshot()
+            .neighbors
+            .iter()
+            .any(|neigh| neigh.dst == req.dst && neigh.hardware_addr.is_none())
+    );
+}
+
+#[def_test(serial)]
+fn test_reject_unsupported_rtnetlink_mutations() {
+    init_test_state();
+    let ipv6 = IpAddress::Ipv6(Ipv6Address::UNSPECIFIED);
+    let addr = AddrRequest {
+        index: 2,
+        family: wire_route::FAMILY_IPV6,
+        prefix_len: 128,
+        scope: wire_route::SCOPE_UNIVERSE,
+        address: ipv6,
+    };
+    assert_eq!(
+        add_addr_state(addr, NLM_F_CREATE),
+        Err(LinuxError::EAFNOSUPPORT)
+    );
+
+    let route = RouteRequest {
+        family: wire_route::FAMILY_IPV4,
+        dst_len: 24,
+        table: 100,
+        protocol: wire_route::PROTOCOL_BOOT,
+        scope: wire_route::SCOPE_UNIVERSE,
+        route_type: ROUTE_TYPE_UNICAST,
+        oif: 2,
+        dst: Some(IpAddress::Ipv4(Ipv4Address::new(172, 16, 0, 0))),
+        gateway: None,
+        prefsrc: None,
+    };
+    assert_eq!(
+        add_route_state(route, NLM_F_CREATE),
+        Err(LinuxError::EOPNOTSUPP)
+    );
+
+    let neigh = NeighRequest {
+        family: wire_route::FAMILY_IPV6,
+        ifindex: 2,
+        state: wire_neigh::STATE_PERMANENT,
+        flags: 0,
+        dst: ipv6,
+        lladdr: Some([1, 2, 3, 4, 5, 6]),
+    };
+    assert_eq!(
+        add_neigh_state(neigh, NLM_F_CREATE),
+        Err(LinuxError::EAFNOSUPPORT)
+    );
+}
+
+#[def_test(serial)]
+fn test_reject_extended_unsupported_route_table() {
+    init_test_state();
+    let mut payload = Vec::new();
+    RtMsg {
+        family: wire_route::FAMILY_IPV4,
+        dst_len: 24,
+        src_len: 0,
+        tos: 0,
+        table: 0,
+        protocol: wire_route::PROTOCOL_BOOT,
+        scope: wire_route::SCOPE_UNIVERSE,
+        route_type: ROUTE_TYPE_UNICAST,
+        flags: 0,
+    }
+    .write(&mut payload);
+    push_attr(
+        &mut payload,
+        wire_route::attr::DST,
+        &Ipv4Address::new(172, 17, 0, 0).octets(),
+    );
+    push_attr(&mut payload, wire_route::attr::OIF, &2u32.to_ne_bytes());
+    push_attr(&mut payload, wire_route::attr::TABLE, &510u32.to_ne_bytes());
+    let request = build_nlmsg(
+        RTM_NEWROUTE,
+        23,
+        NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK,
+        payload,
+    );
+
+    let packets = handle_route_request(&request);
+
+    assert_eq!(packets.len(), 1);
+    assert_eq!(read_u16_ne(&packets[0].data, 4), Some(NLMSG_ERROR));
+    assert_eq!(
+        read_i32_ne(&packets[0].data, NLMSG_HDR_LEN),
+        Some(-(LinuxError::EOPNOTSUPP.into_raw()))
+    );
+}
+
+#[def_test(serial)]
+fn test_reject_unsupported_neighbour_state_and_flags() {
+    init_test_state();
+    let req = NeighRequest {
+        family: wire_route::FAMILY_IPV4,
+        ifindex: 2,
+        state: wire_neigh::STATE_PERMANENT,
+        flags: 0,
+        dst: IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 12)),
+        lladdr: None,
+    };
+    assert_eq!(add_neigh_state(req, NLM_F_CREATE), Err(LinuxError::EINVAL));
+    assert_eq!(
+        add_neigh_state(
+            NeighRequest {
+                flags: 1,
+                lladdr: Some([1, 2, 3, 4, 5, 6]),
+                ..req
+            },
+            NLM_F_CREATE,
+        ),
+        Err(LinuxError::EOPNOTSUPP)
+    );
+}
+
+#[def_test]
+fn test_dump_error_omits_done_message() {
+    let request = build_nlmsg(RTM_GETLINK, 13, NLM_F_REQUEST, Vec::new());
+    let header = NlMsgHeader::read(&request).unwrap();
+    let packets = finish_dump(&request, &header, Err(LinuxError::ENODEV));
+
+    assert_eq!(packets.len(), 1);
+    assert_eq!(read_u16_ne(&packets[0].data, 4), Some(NLMSG_ERROR));
+    assert_eq!(
+        read_i32_ne(&packets[0].data, NLMSG_HDR_LEN),
+        Some(-(LinuxError::ENODEV.into_raw()))
     );
 }
 

@@ -251,6 +251,31 @@ impl Router {
             .map(|device| device.link_snapshot(ifindex))
     }
 
+    pub fn has_device(&self, dev: usize) -> bool {
+        dev < self.devices.len()
+    }
+
+    pub fn is_device_name_in_use(&self, dev: usize, name: &str) -> bool {
+        self.devices
+            .iter()
+            .enumerate()
+            .any(|(other_dev, device)| other_dev != dev && device.name() == name)
+    }
+
+    pub fn ipv4_addr_entries(&self) -> &[Ipv4AddrEntry] {
+        &self.ipv4_addrs
+    }
+
+    pub fn route_rules(&self) -> &[Rule] {
+        self.table.rules()
+    }
+
+    pub fn has_neighbor(&self, dev: usize, dst: IpAddress) -> bool {
+        self.devices
+            .get(dev)
+            .is_some_and(|device| device.has_neighbor(dst))
+    }
+
     pub fn add_ipv4_addr(&mut self, entry: Ipv4AddrEntry) {
         if entry.dev >= self.devices.len() {
             return;

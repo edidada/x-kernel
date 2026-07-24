@@ -53,6 +53,7 @@ pub(crate) mod route {
 }
 
 pub(crate) mod neigh {
+    pub(crate) const STATE_INCOMPLETE: u16 = 0x01;
     pub(crate) const STATE_PERMANENT: u16 = 0x80;
 
     pub(crate) mod attr {
@@ -377,8 +378,12 @@ pub(super) fn align(len: usize) -> usize {
     (len + NLMSG_ALIGNTO - 1) & !(NLMSG_ALIGNTO - 1)
 }
 
-pub(super) fn normalize_route_table(table: u8) -> u8 {
-    if table == 0 { route::TABLE_MAIN } else { table }
+pub(super) fn normalize_route_table(table: u32) -> u32 {
+    if table == 0 {
+        u32::from(route::TABLE_MAIN)
+    } else {
+        table
+    }
 }
 
 pub(super) fn normalize_route_protocol(protocol: u8) -> u8 {

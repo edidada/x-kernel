@@ -17,7 +17,7 @@ use alloc::{
 };
 
 use ::core::sync::atomic::AtomicU64;
-use ksync::{Mutex, RwLock};
+use ksync::{Mutex, RwLock, static_lock};
 
 use crate::{SERVICE, general::GeneralOptions};
 
@@ -61,7 +61,10 @@ pub(super) const RTM_NEWNEIGH: u16 = 28;
 
 pub(super) const ARPHRD_LOOPBACK: u16 = 772;
 pub(super) const ARPHRD_ETHER: u16 = 1;
-pub(super) static UEVENT_SUBSCRIBERS: Mutex<Vec<Weak<NetlinkSocketInner>>> = Mutex::new(Vec::new());
+static_lock! {
+    pub(super) static UEVENT_SUBSCRIBERS: Mutex<Vec<Weak<NetlinkSocketInner>>> =
+        Mutex::new(Vec::new());
+}
 pub(super) static UEVENT_SEQNUM: AtomicU64 = AtomicU64::new(0);
 pub(super) const NETLINK_RX_QUEUE_LIMIT: usize = 64 * 1024;
 

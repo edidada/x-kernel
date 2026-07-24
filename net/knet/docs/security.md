@@ -180,7 +180,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 
 1. `SocketHandle` 生命周期：任何 smoltcp socket handle 在访问前必须仍存在于 `SOCKET_SET`。
 2. `SocketSet` 互斥访问：所有 `SocketSet` 读写必须经过 `SOCKET_SET.inner` 的 mutex。
-3. `Service` 互斥访问：smoltcp `Interface`、`Router` 和设备 dispatch 必须在 `SERVICE.lock()` 内推进。
+3. `Service` 互斥访问：smoltcp `Interface`、`Router` 和设备 dispatch 必须在 `SERVICE.lock()` 内推进；一次 rtnetlink mutation 的状态检查与 owner 更新必须位于同一临界区。
 4. ring buffer publish 规则：Unix stream 和 vsock 只能发布已经写入的字节，只能消费当前 occupied 区域内的字节。Unix stream 的 write index 发布、方向关闭和空队列 EOF 判定由同一个方向锁排序。
 5. driver buffer 生命周期：`NetBufHandle::data` 只在 handle 被 recycle 前使用，RX handle 必须在处理后归还。
 6. netlink message 边界：所有 payload 读取必须先经过 header 长度、attribute 长度和 family 校验。
@@ -288,7 +288,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 
 ## 已知限制
 
-- `RTM_GETNEIGH` dump 尚未实现，neighbor 只通过 `RTM_NEWNEIGH` mutation 进入控制面。
+- `RTM_GETNEIGH` dump 尚未实现，neighbor 只通过 `RTM_NEWNEIGH` mutation 写入设备邻居表；当前支持 `NUD_INCOMPLETE` 和 `NUD_PERMANENT`，其余 NUD state 与非零 neighbor flags 返回 `EOPNOTSUPP`。
 - IPv4 输出使用匹配路由的接口 MTU，ICMP Fragmentation Needed 中的 next-hop MTU 只进入 UDP error queue，尚未形成动态 PMTU cache。
 - IPv4 输出分片只支持无 options 的栈内生成报文，尚未实现 options copy 语义。
 - `NetworkSnapshot` 只覆盖 rtnetlink ABI 所需的配置，未包含驱动瞬时统计和 smoltcp 内部计数。

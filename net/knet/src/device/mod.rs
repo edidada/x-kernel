@@ -54,7 +54,7 @@ pub(crate) struct LinkSnapshot {
 pub(crate) struct NeighborUpdate {
     pub(crate) dev: usize,
     pub(crate) dst: IpAddress,
-    pub(crate) hardware_addr: [u8; 6],
+    pub(crate) hardware_addr: Option<[u8; 6]>,
 }
 
 /// Trait implemented by network device backends.
@@ -120,7 +120,12 @@ pub trait NetDevice: Send + Sync {
     /// Applies one neighbor-table update to this device.
     fn apply_neighbor_update(&mut self, _update: NeighborUpdate) {}
 
-    /// Returns resolved neighbor entries owned by this device.
+    /// Returns whether this device owns a neighbor entry for `dst`.
+    fn has_neighbor(&self, _dst: IpAddress) -> bool {
+        false
+    }
+
+    /// Returns neighbor entries owned by this device.
     fn neighbor_snapshots(&self, _dev: usize) -> Vec<NeighborUpdate> {
         Vec::new()
     }

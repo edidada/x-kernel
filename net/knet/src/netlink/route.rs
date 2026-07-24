@@ -17,12 +17,13 @@ use super::{
     *,
 };
 use crate::{
-    device::{LINK_FLAG_UP as IFF_UP, LinkKind, LinkSnapshot, NeighborUpdate},
+    device::{LINK_FLAG_UP, LinkKind, LinkSnapshot, NeighborUpdate},
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
     router::{
         Ipv4AddrEntry, NetworkSnapshot, ROUTE_TABLE_MAIN, ROUTE_TYPE_UNICAST,
         RouteAttrs as RouterRouteAttrs, Rule,
     },
+    service::Service,
 };
 
 #[derive(Clone, Debug)]
@@ -47,7 +48,7 @@ pub(super) struct AddrRequest {
 pub(super) struct RouteRequest {
     pub(super) family: u8,
     pub(super) dst_len: u8,
-    pub(super) table: u8,
+    pub(super) table: u32,
     pub(super) protocol: u8,
     pub(super) scope: u8,
     pub(super) route_type: u8,
@@ -85,7 +86,7 @@ struct RouteRequestAttrs {
     dst: Option<IpAddress>,
     gateway: Option<IpAddress>,
     prefsrc: Option<IpAddress>,
-    table: Option<u8>,
+    table: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -122,11 +123,10 @@ pub(super) fn handle_route_request(request: &[u8]) -> Vec<NetlinkPacket> {
     let payload = request
         .get(NLMSG_HDR_LEN..(header.len as usize).min(request.len()))
         .unwrap_or(&[]);
-    let is_dump = matches!(header.msg_type, RTM_GETLINK | RTM_GETADDR | RTM_GETROUTE);
-    let mut packets = match header.msg_type {
-        RTM_GETLINK => dump_links(&header, payload),
-        RTM_GETADDR => dump_addrs(&header, payload),
-        RTM_GETROUTE => dump_routes(&header, payload),
+    match header.msg_type {
+        RTM_GETLINK => finish_dump(request, &header, dump_links(&header, payload)),
+        RTM_GETADDR => finish_dump(request, &header, dump_addrs(&header, payload)),
+        RTM_GETROUTE => finish_dump(request, &header, dump_routes(&header, payload)),
         RTM_NEWLINK => apply_newlink(request, &header, payload),
         RTM_NEWADDR => apply_newaddr(request, &header, payload),
         RTM_DELADDR => apply_deladdr(request, &header, payload),
@@ -137,42 +137,51 @@ pub(super) fn handle_route_request(request: &[u8]) -> Vec<NetlinkPacket> {
             from: NetlinkAddr { pid: 0, groups: 0 },
             data: build_error_response(request, LinuxError::EOPNOTSUPP),
         }],
-    };
-    if is_dump {
-        packets.push(NetlinkPacket {
-            from: NetlinkAddr { pid: 0, groups: 0 },
-            data: build_done_response(&header),
-        });
     }
-    packets
 }
 
-fn dump_links(request: &NlMsgHeader, _payload: &[u8]) -> Vec<NetlinkPacket> {
-    network_snapshot()
-        .unwrap_or_default()
+pub(super) fn finish_dump(
+    request: &[u8],
+    header: &NlMsgHeader,
+    result: Result<Vec<NetlinkPacket>, LinuxError>,
+) -> Vec<NetlinkPacket> {
+    match result {
+        Ok(mut packets) => {
+            packets.push(NetlinkPacket {
+                from: NetlinkAddr { pid: 0, groups: 0 },
+                data: build_done_response(header),
+            });
+            packets
+        }
+        Err(errno) => error_packets(request, errno),
+    }
+}
+
+fn dump_links(request: &NlMsgHeader, _payload: &[u8]) -> Result<Vec<NetlinkPacket>, LinuxError> {
+    Ok(network_snapshot()?
         .links
         .into_iter()
         .map(|link| NetlinkPacket {
             from: NetlinkAddr { pid: 0, groups: 0 },
             data: build_link_message(request, link),
         })
-        .collect()
+        .collect())
 }
 
-fn dump_addrs(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
+fn dump_addrs(request: &NlMsgHeader, payload: &[u8]) -> Result<Vec<NetlinkPacket>, LinuxError> {
     let family = payload
         .first()
         .copied()
         .filter(|family| *family != 0)
         .unwrap_or(wire_route::FAMILY_IPV4);
-    let snapshot = network_snapshot().unwrap_or_default();
-    snapshot
-        .addrs
+    let NetworkSnapshot { links, addrs, .. } = network_snapshot()?;
+    if family != wire_route::FAMILY_IPV4 {
+        return Ok(Vec::new());
+    }
+    Ok(addrs
         .into_iter()
-        .filter(|_| family == wire_route::FAMILY_IPV4)
         .map(|addr| {
-            let label = snapshot
-                .links
+            let label = links
                 .iter()
                 .find(|link| link.ifindex as usize == addr.dev + 1)
                 .map(|link| link.name.as_str())
@@ -182,17 +191,16 @@ fn dump_addrs(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
                 data: build_addr_message(request, addr, label),
             }
         })
-        .collect()
+        .collect())
 }
 
-fn dump_routes(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
+fn dump_routes(request: &NlMsgHeader, payload: &[u8]) -> Result<Vec<NetlinkPacket>, LinuxError> {
     let family = payload
         .first()
         .copied()
         .filter(|family| *family != 0)
         .unwrap_or(wire_route::FAMILY_IPV4);
-    network_snapshot()
-        .unwrap_or_default()
+    Ok(network_snapshot()?
         .routes
         .into_iter()
         .filter(|route| route_family(*route) == family)
@@ -200,7 +208,7 @@ fn dump_routes(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
             from: NetlinkAddr { pid: 0, groups: 0 },
             data: build_route_message(request, route),
         })
-        .collect()
+        .collect())
 }
 
 fn apply_newlink(request: &[u8], header: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
@@ -248,31 +256,27 @@ fn apply_newneigh(request: &[u8], header: &NlMsgHeader, payload: &[u8]) -> Vec<N
 pub(super) fn update_link_state(request: LinkUpdateRequest) -> Result<(), LinuxError> {
     ensure_service_inited()?;
     let dev = dev_index_from_link_index(request.index).ok_or(LinuxError::ENODEV)?;
-    let name = request.name.clone();
-    let mtu = request.mtu;
-    if let Some(name) = name {
-        SERVICE.lock().set_device_name(dev, name)?;
+    let mut service = SERVICE.lock();
+    if let Some(name) = request.name {
+        service.set_device_name(dev, name)?;
     }
-    if let Some(mtu) = mtu {
-        SERVICE.lock().set_device_mtu(dev, mtu as usize)?;
+    if let Some(mtu) = request.mtu {
+        service.set_device_mtu(dev, mtu as usize)?;
     }
-    if request.change & IFF_UP != 0 {
-        SERVICE
-            .lock()
-            .set_device_link_up(dev, request.flags & IFF_UP != 0)?;
+    if request.change & LINK_FLAG_UP != 0 {
+        service.set_device_link_up(dev, request.flags & LINK_FLAG_UP != 0)?;
     }
     Ok(())
 }
 
 pub(super) fn add_addr_state(request: AddrRequest, flags: u16) -> Result<(), LinuxError> {
     let dev = dev_index_from_ifindex(request.index).ok_or(LinuxError::ENODEV)?;
-    let snapshot = network_snapshot()?;
-    ensure_link_exists(&snapshot, request.index)?;
-    let Some(addr) = ipv4_cidr_from_addr_request(request) else {
-        return Ok(());
-    };
-    let existing = snapshot
-        .addrs
+    let addr = ipv4_cidr_from_addr_request(request)?;
+    ensure_service_inited()?;
+    let mut service = SERVICE.lock();
+    ensure_link_exists(&service, request.index)?;
+    let existing = service
+        .ipv4_addr_entries()
         .iter()
         .any(|entry| same_addr_entry(*entry, &request));
     if existing && flags & NLM_F_REPLACE == 0 {
@@ -281,7 +285,7 @@ pub(super) fn add_addr_state(request: AddrRequest, flags: u16) -> Result<(), Lin
     if !existing && flags & NLM_F_CREATE == 0 && flags & NLM_F_EXCL != 0 {
         return Err(LinuxError::ENOENT);
     }
-    SERVICE.lock().add_ipv4_addr(Ipv4AddrEntry {
+    service.add_ipv4_addr(Ipv4AddrEntry {
         dev,
         addr,
         scope: request.scope,
@@ -290,34 +294,27 @@ pub(super) fn add_addr_state(request: AddrRequest, flags: u16) -> Result<(), Lin
 
 pub(super) fn del_addr_state(request: AddrRequest) -> Result<(), LinuxError> {
     let dev = dev_index_from_ifindex(request.index).ok_or(LinuxError::ENODEV)?;
-    let Some(addr) = ipv4_cidr_from_addr_request(request) else {
-        return Err(LinuxError::EADDRNOTAVAIL);
-    };
-    let snapshot = network_snapshot()?;
-    let Some(entry) = snapshot
-        .addrs
+    let addr = ipv4_cidr_from_addr_request(request)?;
+    ensure_service_inited()?;
+    let mut service = SERVICE.lock();
+    let Some(entry) = service
+        .ipv4_addr_entries()
         .iter()
         .copied()
         .find(|entry| same_addr_entry(*entry, &request))
     else {
         return Err(LinuxError::EADDRNOTAVAIL);
     };
-    SERVICE
-        .lock()
-        .remove_ipv4_addr(Ipv4AddrEntry { dev, addr, ..entry })?;
+    service.remove_ipv4_addr(Ipv4AddrEntry { dev, addr, ..entry })?;
     Ok(())
 }
 
 pub(super) fn add_route_state(request: RouteRequest, flags: u16) -> Result<(), LinuxError> {
-    let snapshot = network_snapshot()?;
-    if request.oif != 0 {
-        ensure_link_exists(&snapshot, request.oif)?;
-    }
-    let Some(rule) = route_rule_from_request(request, &snapshot) else {
-        return Ok(());
-    };
-    let existing = snapshot
-        .routes
+    ensure_service_inited()?;
+    let mut service = SERVICE.lock();
+    let rule = route_rule_from_request(request, &service)?;
+    let existing = service
+        .route_rules()
         .iter()
         .copied()
         .find(|route| same_route_rule(*route, &request));
@@ -325,15 +322,19 @@ pub(super) fn add_route_state(request: RouteRequest, flags: u16) -> Result<(), L
         if flags & NLM_F_REPLACE == 0 {
             return Err(LinuxError::EEXIST);
         }
-        SERVICE.lock().remove_route_rule(existing)?;
+        service.remove_route_rule(existing)?;
     }
-    SERVICE.lock().add_route_rule(rule)
+    service.add_route_rule(rule)
 }
 
 pub(super) fn del_route_state(request: RouteRequest) -> Result<(), LinuxError> {
-    let snapshot = network_snapshot()?;
-    let removed_routes: Vec<_> = snapshot
-        .routes
+    if request.family != wire_route::FAMILY_IPV4 {
+        return Err(LinuxError::EAFNOSUPPORT);
+    }
+    ensure_service_inited()?;
+    let mut service = SERVICE.lock();
+    let removed_routes: Vec<_> = service
+        .route_rules()
         .iter()
         .copied()
         .filter(|route| same_route_rule(*route, &request))
@@ -342,40 +343,32 @@ pub(super) fn del_route_state(request: RouteRequest) -> Result<(), LinuxError> {
         return Err(LinuxError::ESRCH);
     }
     for route in removed_routes {
-        SERVICE.lock().remove_route_rule(route)?;
+        service.remove_route_rule(route)?;
     }
     Ok(())
 }
 
 pub(super) fn add_neigh_state(request: NeighRequest, flags: u16) -> Result<(), LinuxError> {
     if request.family != wire_route::FAMILY_IPV4 {
-        return Ok(());
+        return Err(LinuxError::EAFNOSUPPORT);
     }
-    let _state = normalize_neigh_state(request.state);
-    let _flags = request.flags;
-    let snapshot = network_snapshot()?;
-    ensure_link_exists(&snapshot, request.ifindex)?;
-    let existing = snapshot
-        .neighbors
-        .iter()
-        .any(|neigh| neigh.dev as u32 + 1 == request.ifindex && neigh.dst == request.dst);
+    ensure_service_inited()?;
+    let mut service = SERVICE.lock();
+    ensure_link_exists(&service, request.ifindex)?;
+    let update = neighbor_update_from_request(request)?;
+    let existing = service.has_neighbor(update.dev, update.dst);
     if existing && flags & NLM_F_REPLACE == 0 {
         return Err(LinuxError::EEXIST);
     }
     if !existing && flags & NLM_F_CREATE == 0 {
         return Err(LinuxError::ENOENT);
     }
-    let Some(update) = neighbor_update_from_request(request) else {
-        return Ok(());
-    };
-    SERVICE.lock().apply_neighbor_update(update)
+    service.apply_neighbor_update(update)
 }
 
-fn ensure_link_exists(snapshot: &NetworkSnapshot, ifindex: u32) -> Result<(), LinuxError> {
-    snapshot
-        .links
-        .iter()
-        .any(|link| link.ifindex as u32 == ifindex)
+fn ensure_link_exists(service: &Service, ifindex: u32) -> Result<(), LinuxError> {
+    dev_index_from_ifindex(ifindex)
+        .is_some_and(|dev| service.has_device(dev))
         .then_some(())
         .ok_or(LinuxError::ENODEV)
 }
@@ -390,7 +383,7 @@ fn same_addr_entry(entry: Ipv4AddrEntry, request: &AddrRequest) -> bool {
 fn same_route_rule(route: Rule, request: &RouteRequest) -> bool {
     route_family(route) == request.family
         && route.filter.prefix_len() == request.dst_len
-        && route.table == normalize_route_table(request.table)
+        && u32::from(route.table) == normalize_route_table(request.table)
         && route.protocol == normalize_route_protocol(request.protocol)
         && route.scope == request.scope
         && route.route_type == normalize_route_type(request.route_type)
@@ -400,11 +393,19 @@ fn same_route_rule(route: Rule, request: &RouteRequest) -> bool {
         && route.prefsrc == request.prefsrc
 }
 
-fn neighbor_update_from_request(request: NeighRequest) -> Option<NeighborUpdate> {
-    Some(NeighborUpdate {
-        dev: request.ifindex.checked_sub(1)? as usize,
+fn neighbor_update_from_request(request: NeighRequest) -> Result<NeighborUpdate, LinuxError> {
+    if request.flags != 0 {
+        return Err(LinuxError::EOPNOTSUPP);
+    }
+    let hardware_addr = match normalize_neigh_state(request.state) {
+        wire_neigh::STATE_INCOMPLETE => None,
+        wire_neigh::STATE_PERMANENT => Some(request.lladdr.ok_or(LinuxError::EINVAL)?),
+        _ => return Err(LinuxError::EOPNOTSUPP),
+    };
+    Ok(NeighborUpdate {
+        dev: request.ifindex.checked_sub(1).ok_or(LinuxError::ENODEV)? as usize,
         dst: request.dst,
-        hardware_addr: request.lladdr?,
+        hardware_addr,
     })
 }
 
@@ -438,7 +439,7 @@ fn parse_route_request(payload: &[u8]) -> Result<RouteRequest, LinuxError> {
     Ok(RouteRequest {
         family: info.family,
         dst_len: info.dst_len,
-        table: attrs.table.unwrap_or(info.table),
+        table: attrs.table.unwrap_or(u32::from(info.table)),
         protocol: info.protocol,
         scope: info.scope,
         route_type: info.route_type,
@@ -510,7 +511,7 @@ fn parse_route_attrs(family: u8, attrs: Vec<NlAttr<'_>>) -> Result<RouteRequestA
             wire_route::attr::PREFSRC | wire_route::attr::SRC => {
                 parsed.prefsrc = Some(parse_ip_by_family(family, attr.payload)?)
             }
-            wire_route::attr::TABLE => parsed.table = Some(read_u32_payload(attr.payload)? as u8),
+            wire_route::attr::TABLE => parsed.table = Some(read_u32_payload(attr.payload)?),
             _ => {}
         }
     }
@@ -650,54 +651,54 @@ fn dev_index_from_ifindex(ifindex: u32) -> Option<usize> {
     ifindex.checked_sub(1).map(|index| index as usize)
 }
 
-fn ipv4_cidr_from_addr_request(request: AddrRequest) -> Option<Ipv4Cidr> {
+fn ipv4_cidr_from_addr_request(request: AddrRequest) -> Result<Ipv4Cidr, LinuxError> {
     if request.family != wire_route::FAMILY_IPV4 {
-        return None;
+        return Err(LinuxError::EAFNOSUPPORT);
     }
     match request.address {
-        IpAddress::Ipv4(ipv4) => Some(Ipv4Cidr::new(ipv4, request.prefix_len)),
-        IpAddress::Ipv6(_) => None,
+        IpAddress::Ipv4(ipv4) => Ok(Ipv4Cidr::new(ipv4, request.prefix_len)),
+        IpAddress::Ipv6(_) => Err(LinuxError::EAFNOSUPPORT),
     }
 }
 
-fn route_rule_from_request(request: RouteRequest, snapshot: &NetworkSnapshot) -> Option<Rule> {
-    if request.family != wire_route::FAMILY_IPV4
-        || normalize_route_table(request.table) != ROUTE_TABLE_MAIN
+fn route_rule_from_request(request: RouteRequest, service: &Service) -> Result<Rule, LinuxError> {
+    if request.family != wire_route::FAMILY_IPV4 {
+        return Err(LinuxError::EAFNOSUPPORT);
+    }
+    if normalize_route_table(request.table) != u32::from(ROUTE_TABLE_MAIN)
         || normalize_route_type(request.route_type) != ROUTE_TYPE_UNICAST
     {
-        return None;
+        return Err(LinuxError::EOPNOTSUPP);
     }
     let filter = match request
         .dst
         .unwrap_or(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED))
     {
         IpAddress::Ipv4(addr) => IpCidr::Ipv4(Ipv4Cidr::new(addr, request.dst_len)),
-        IpAddress::Ipv6(_) => return None,
+        IpAddress::Ipv6(_) => return Err(LinuxError::EAFNOSUPPORT),
     };
-    let dev = request.oif.checked_sub(1)? as usize;
+    let dev = request.oif.checked_sub(1).ok_or(LinuxError::EOPNOTSUPP)? as usize;
     let src = request
         .prefsrc
         .or_else(|| {
-            snapshot
-                .addrs
-                .iter()
-                .find_map(|addr| (addr.dev == dev).then_some(IpAddress::Ipv4(addr.addr.address())))
+            service
+                .first_ipv4_addr_for_device(dev)
+                .map(|addr| IpAddress::Ipv4(addr.address()))
         })
         .unwrap_or(filter.address());
-    let mtu = snapshot
-        .links
-        .iter()
-        .find(|link| link.ifindex == request.oif as i32)
-        .map(|link| link.mtu)?;
+    let mtu = service
+        .link_snapshot_for_ifindex(request.oif as i32)
+        .map(|link| link.mtu)
+        .ok_or(LinuxError::ENODEV)?;
 
-    Some(Rule::with_route_attrs(
+    Ok(Rule::with_route_attrs(
         filter,
         request.gateway,
         dev,
         src,
         mtu,
         RouterRouteAttrs {
-            table: normalize_route_table(request.table),
+            table: ROUTE_TABLE_MAIN,
             protocol: normalize_route_protocol(request.protocol),
             scope: request.scope,
             route_type: normalize_route_type(request.route_type),

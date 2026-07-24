@@ -278,7 +278,7 @@ Service narrow mutation
 1. `NetlinkSocket::send` 把用户请求交给 `handle_route_request`。
 2. `NlMsgHeader::read` 和各类 `parse_*` helper 校验 netlink header 与 attribute。
 3. dump 请求通过 `Service::network_snapshot` 读取 `Router` 和 `NetDevice` 当前持有的配置，并生成 multi-part response。
-4. mutation 请求通过 `Service` 的窄接口直接更新地址、路由、链路或邻居的 owner，失败时返回 netlink error。
+4. mutation 请求获取一次 `SERVICE` mutex，在同一临界区内检查当前 owner 状态并通过 `Service` 的窄接口更新地址、路由、链路或邻居，失败时返回 netlink error。
 5. 地址更新同时刷新 smoltcp `Interface` 的兼容地址视图，带 `NLM_F_ACK` 时返回 ack。
 
 ## 并发模型
@@ -297,7 +297,7 @@ Service narrow mutation
 - Unix stream 每个 endpoint 的 `tx_order: SpinNoPreempt<()>` 是对应发送方向的共享排序点。本端 write shutdown、对端 read shutdown、write index 发布和对端空队列 EOF 判定都经过该锁。固定锁序为 `channel` mutex 后取得单个 `tx_order`，两个方向的顺序锁不会同时持有。
 - Unix stream 的用户数据复制和 `PollSet` 唤醒在 `tx_order` 外执行。send 先写入未发布的 vacant 区域，再在锁内复检关闭状态并推进 write index；recv 读取为空后在锁内复查 occupied 长度和关闭状态；shutdown 完成状态发布并复制 peer endpoint 引用后释放 `channel` mutex，再执行 waiter 唤醒。
 - Unix stream 每个 endpoint 分别持有 readable、writable 和 connection-state 三组 `PollSet`。写入只唤醒 peer readable waiter，读取跨过发送缓冲低水位时只唤醒 peer writable waiter，半关闭只唤醒受影响方向，完整关闭通过 connection-state waiter 通知双方。
-- rtnetlink 配置由 `SERVICE` mutex 串行访问，netlink rx queue 和 subscriber 列表使用 `Mutex`。
+- rtnetlink mutation 的状态检查与 owner 更新由同一次 `SERVICE` mutex 获取串行化，netlink rx queue 和 subscriber 列表使用 `Mutex`。
 - RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 使用调用方传入的 `PollContext` 注册聚合 `timeout_poll`，再把该聚合 source waker 交给单 waker 设备，并让 Ethernet 直接把当前等待注册到 IRQ source。loopback 保存 `timeout_poll` 的聚合 waker（`Mutex<Option<Waker>>`），多任务广播由 `timeout_poll` 完成；设备层不得保存调用方的裸 waker或绕过 `Service` 注册互不等价的 task waker。
 
 ## 设计决策

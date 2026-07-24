@@ -494,26 +494,30 @@ impl NetDeviceOps for EthernetDevice {
         if let IpAddress::Ipv4(ipv4) = update.dst {
             self.neighbors.insert(
                 IpAddress::Ipv4(ipv4),
-                Some(ArpNeighbor {
-                    hardware_address: MacAddress(update.hardware_addr),
+                update.hardware_addr.map(|hardware_addr| ArpNeighbor {
+                    hardware_address: MacAddress(hardware_addr),
                     expires_at: MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(
                         u64::MAX / 2,
                     )),
+                }),
                 }),
             );
         }
     }
 
+    fn has_neighbor(&self, dst: IpAddress) -> bool {
+        self.neighbors.contains_key(&dst)
+    }
+
     fn neighbor_snapshots(&self, dev: usize) -> Vec<NeighborUpdate> {
         self.neighbors
             .iter()
-            .filter_map(|(dst, neighbor)| {
-                let neighbor = neighbor.as_ref()?;
-                Some(NeighborUpdate {
-                    dev,
-                    dst: *dst,
-                    hardware_addr: neighbor.hardware_address.0,
-                })
+            .map(|(dst, neighbor)| NeighborUpdate {
+                dev,
+                dst: *dst,
+                hardware_addr: neighbor
+                    .as_ref()
+                    .map(|neighbor| neighbor.hardware_address.0),
             })
             .collect()
     }

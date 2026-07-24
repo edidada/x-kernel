@@ -239,24 +239,34 @@ impl Service {
     }
 
     pub fn set_device_name(&mut self, dev: usize, name: String) -> Result<(), LinuxError> {
-        if self
-            .router
-            .network_snapshot()
-            .links
-            .iter()
-            .any(|link| link.ifindex != dev as i32 + 1 && link.name == name)
-        {
-            return Err(LinuxError::EEXIST);
-        }
-        if self
-            .router
-            .link_snapshot_for_ifindex(dev as i32 + 1)
-            .is_none()
-        {
+        if !self.router.has_device(dev) {
             return Err(LinuxError::ENODEV);
+        }
+        if self.router.is_device_name_in_use(dev, &name) {
+            return Err(LinuxError::EEXIST);
         }
         self.router.set_device_name(dev, name);
         Ok(())
+    }
+
+    pub fn has_device(&self, dev: usize) -> bool {
+        self.router.has_device(dev)
+    }
+
+    pub fn ipv4_addr_entries(&self) -> &[Ipv4AddrEntry] {
+        self.router.ipv4_addr_entries()
+    }
+
+    pub fn first_ipv4_addr_for_device(&self, dev: usize) -> Option<crate::ip::Ipv4Cidr> {
+        self.router.first_ipv4_addr_for_device(dev)
+    }
+
+    pub fn route_rules(&self) -> &[Rule] {
+        self.router.route_rules()
+    }
+
+    pub fn has_neighbor(&self, dev: usize, dst: crate::ip::IpAddress) -> bool {
+        self.router.has_neighbor(dev, dst)
     }
 
     pub fn set_device_mtu(&mut self, dev: usize, mtu: usize) -> Result<(), LinuxError> {
