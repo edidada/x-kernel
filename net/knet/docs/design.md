@@ -20,6 +20,7 @@ net/knet/
 ├── Cargo.toml
 └── src/
     ├── lib.rs
+    ├── poller.rs
     ├── device/
     │   ├── mod.rs
     │   ├── ethernet.rs
@@ -43,6 +44,7 @@ net/knet/
     │   └── state.rs
     ├── stack/
     │   ├── fragment.rs
+    │   ├── ingress.rs
     │   ├── ipv4.rs
     │   ├── mod.rs
     │   ├── service.rs
@@ -84,7 +86,8 @@ core/kruntime
 │ Service                  │
 │  ├─ smoltcp Interface    │
 │  ├─ Router               │
-│  └─ timeout PollSet      │
+│  ├─ IngressProcessor     │
+│  └─ reusable batches     │
 └──────────┬───────────────┘
            │
            v
@@ -113,9 +116,12 @@ core/kruntime
 | 组件 | 职责 |
 |------|------|
 | `init_network` | 创建 loopback 与首个 Ethernet 设备，建立默认路由，初始化 `Service`、`SocketSetWrapper`、`ListenTable` 和 rtnetlink 初始状态 |
-| `Service` | 持有 smoltcp `Interface`、`Router`、poll timeout 和 RX waker 注册入口 |
-| `Router` | 管理设备列表、带 MTU 的路由表、`PacketBuf` RX/TX 队列、IPv4 输入校验、分片重组、输出分片、next-hop 选择和设备 dispatch |
+| `poller` | 维护 scheduled、missed 和 active 状态，按后台预算或 socket assist 预算推进 RX、smoltcp timer 和 TX |
+| `Service` | 持有加锁的 smoltcp `Interface`、`Router`、`IngressProcessor`、可复用 batch、poll timeout 和 RX waker 注册入口 |
+| `Router` | 管理设备列表、RX 设备游标、带 MTU 的路由表、smoltcp ingress queue、control/data TX queue、IPv4 输出分片、next-hop 选择和 budget dispatch |
+| `IngressProcessor` | 在 Router 锁外校验和重组 IPv4 输入，执行 crate 内 UDP 分流、UDP error 与 TCP listen snoop，并生成 ICMPv4 control packet |
 | `NetDevice` | 抽象 loopback、Ethernet 和 feature gated vsock 设备后端，通过 `PacketBuf` 转移报文所有权，并使用 crate 内地址类型和 `MonotonicInstant` 表达设备边界 |
+
 | `PacketBuf` | 保存报文数据、协议偏移、接口索引、包类型、校验状态和当前所有者 |
 | `link::wire` | 使用 `zerocopy` 校验和构造 Ethernet 与 Ethernet/IPv4 ARP 头部 |
 | `stack::ipv4` | 使用 `etherparse` 校验和构造 IPv4 与 ICMPv4 头部，并执行输出分片 |
@@ -145,7 +151,8 @@ core/kruntime
   并推进较重的数据路径，应在普通任务上下文中运行。
 - **IRQ 路径只做通知**：
   设备中断回调应只负责唤醒等待者或登记事件，
-  不应直接执行完整的协议推进或阻塞式 socket 语义。
+  不应直接执行完整的协议推进或阻塞式 socket 语义；
+  Ethernet IRQ 任务只调度 `knet-poller`，数据面在普通任务上下文推进。
 - **允许阻塞的路径依赖 poll/waker 语义**：
   阻塞式 socket 操作依赖 `PollSet`、waker
   和 timeout 注册机制。`Pollable::register` 只能通过调用方提供的
@@ -209,7 +216,20 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 |----|----|----------|
 | 初始 state | `ROUTE_STATE` | `init_network` 调用 `build_initial_state` 与 `init_route_state` |
 | `ROUTE_STATE` | 更新后的 `ROUTE_STATE` | `apply_newlink`、`apply_newaddr`、`apply_newroute`、`apply_newneigh` |
-| 更新后的 `ROUTE_STATE` | data-plane 同步 | `update_route_state` 调用 `SERVICE.lock().sync_netlink` |
+| 更新后的 `ROUTE_STATE` | data-plane 同步 | `update_route_state` 调用 `SERVICE.sync_netlink` |
+
+### NAPI 风格推进状态
+
+```text
+idle ──schedule──> scheduled ──poll──> active
+  ^                    │                 │
+  │                    └──event──> missed
+  └────no backlog and no missed─────────┘
+```
+
+`scheduled` 表示存在待推进工作，`active` 保证同一时刻只有一个执行者进入
+`Service::poll_budgeted`，`missed` 记录 active 期间到达的新事件。
+完成一轮后仍有 backlog 或 missed 时继续保持 scheduled。
 
 ## 算法流程
 
@@ -218,27 +238,27 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 1. `init_network` 创建 `Router`。
 2. 添加 `LoopbackDevice`，注册 `127.0.0.1/8` 路由。
 3. 从 `DeviceContainer<NetDevice>` 取首个 NIC，包装成 `EthernetDevice`，注册默认 IPv4 路由。
-4. 创建 `Service`，把 loopback 和 Ethernet 地址写入 smoltcp `Interface`。
-5. 初始化 rtnetlink 初始状态，并同步到 `Service`、`Router` 和设备。
-6. 初始化全局 `SOCKET_SET`、`LISTEN_TABLE` 和 UDP PCB registry。
+4. 创建 `Service`，初始化内部 `Interface`、`Router`、`IngressProcessor` 和可复用 batch。
+5. 初始化 rtnetlink 初始状态，并同步到 `Service`、`Router`、`Interface`、`IngressProcessor` 和设备。
+6. 初始化全局 `SOCKET_SET`、`LISTEN_TABLE` 和 UDP PCB 及异步错误 registry。
 
 ### RX 推进
 
-1. `poll_interfaces` 获取 `SERVICE` 和 `SOCKET_SET` 锁。
-2. `Service::poll` 调用 `Router::poll`，设备以 `PacketBuf` 形式逐包转移 RX 所有权。
-3. `Router::poll` 根据网络层版本分流，IPv4 包先校验头部、长度、校验和和本地目的地址。
-4. IPv4 分片进入 `Ipv4Reassembler`。完整数据报进入 crate 内 UDP 分流，未命中 socket 的单播 UDP 触发 ICMPv4 Port Unreachable。
-5. UDP PCB 按 FIFO 保留已入队的数据报；`connect` 更新后续入包的 peer 匹配，不重排或丢弃连接前已入队的数据报。
-6. TCP、raw IP、ICMP 和 IPv6 数据继续进入 smoltcp RX adapter，`Interface::poll` 驱动兼容期协议 socket。
+1. Ethernet IRQ 任务调用 `NetworkPoller::schedule`；socket send、recv 和 readiness 路径通过 `poll_interfaces` 执行 assist budget。
+2. 首次事件把 poller 从 idle 切换到 scheduled，重复事件设置 missed，active 保证同一时刻只有一个执行者进入 `Service::poll_budgeted`。
+3. `Router::drain_rx_budgeted_into` 按 RX budget 从设备轮转拉取 `PacketBuf`，`next_rx_device` 在设备间保持公平并随设备删除修正。
+4. `IngressProcessor` 在 Router 锁外校验 IPv4 头、长度、校验和与本地目的地址，并完成 IPv4 分片重组。
+5. 完整 UDP 数据报进入 crate 内 UDP PCB 分流，未命中 socket 的单播 UDP 触发 ICMPv4 Port Unreachable。UDP PCB 按 FIFO 保留已入队数据报，`connect` 只影响后续入包的 peer 匹配。
+6. TCP、raw IP、ICMP 和 IPv6 packet 进入有界 smoltcp ingress queue，`Interface::poll` 驱动兼容期协议 socket。
 7. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
-8. `Router::dispatch` 把 crate 内 UDP 和 smoltcp 生成的 TX IP 包按路由发到设备。
-9. loopback 或设备 TX 触发后继续返回 `true`，外层循环继续推进。
+8. `Router::dispatch_budgeted` 先处理 control TX queue，再处理 data TX queue，单轮发送数量受 TX budget 限制。
+9. 当前轮仍有 RX、ingress 或 TX backlog，或者推进期间收到 missed 事件时，poller 保持 scheduled 并继续下一轮；后台任务连续执行达到轮次上限后重新唤醒自身。
 
 ### TX 路由
 
-1. crate 内 UDP 根据目的地址选择源地址和匹配路由的 MTU，在单个预分配 buffer 中写入 payload、UDP 头和 IPv4 头后提交到 `Router` 的 TX 队列。smoltcp 协议也通过同一队列提交 IP 包。
-2. `IP_MTU_DISCOVER` 决定 UDP IPv4 头部的 DF 标志。超出路由 MTU 且允许分片的包由 `fragment_output_packet` 拆分，DF 包返回 `EMSGSIZE`。
-3. `Router::dispatch` 接管所有权，并按 IP 版本解析目的地址；IPv4 输出先按实际长度更新 `total_len` 和头部校验和。
+1. crate 内 UDP 在 Router mutex 内检查队列容量、选择源地址和路由 MTU，写入 UDP 与 IPv4 头后提交到 data TX queue。smoltcp 生成的 IP 包进入同一 data TX queue，`IngressProcessor` 生成的 ICMPv4 错误进入 control TX queue。
+2. `IP_MTU_DISCOVER` 决定 UDP IPv4 头部的 DF 标志。超出路由 MTU且允许分片的包由 `fragment_output_packet` 拆分，DF 包返回 `EMSGSIZE`。
+3. `Router::dispatch_budgeted` 优先接管 control packet，再按 IP 版本解析目的地址；IPv4 输出先按实际长度更新 `total_len` 和头部校验和。
 4. 广播或组播包复制到所有设备。
 5. 单播包通过 `RouteTable::lookup` 选择最长前缀路由。
 6. Ethernet 设备先查 ARP neighbor cache，命中后通过 `link::wire` 封装 Ethernet frame。
@@ -252,7 +272,7 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 ### TCP listen 和 accept
 
 1. `TcpSocket::listen` 把本地 endpoint 注册到 `ListenTable`。
-2. `Router::poll` snoop 首个 SYN 包，并调用 `ListenTable::incoming_tcp_packet`。
+2. `IngressProcessor` snoop 首个 SYN 包，并调用 `ListenTable::incoming_tcp_packet`。
 3. `ListenTable` 为新连接创建一个 smoltcp TCP socket，放入 SYN 队列。
 4. 后续 poll 观察到连接可接受后移动到 accept 队列。
 5. `TcpSocket::accept` 取出 `AcceptedTcp`，构造新的 connected `TcpSocket`。
@@ -283,7 +303,9 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 
 ## 并发模型
 
-- 全局 `SERVICE` 是 `LazyInit<Mutex<Service>>`，串行化 smoltcp `Interface` 和 `Router` 访问。
+- 全局 `SERVICE` 是 `LazyInit<Service>`。`Service` 内部分别使用 mutex 保护 smoltcp `Interface`、`Router`、`IngressProcessor`、timeout 和可复用 batch。
+- `NetworkPoller` 使用 scheduled、missed 和 active 原子状态串行化数据面执行。后台预算为 512 个 RX packet、256 个 TX packet 和 32 个 timer event，socket assist 预算为 16、16 和 8，后台单次唤醒最多连续执行 4 轮。
+- RX 设备拉取和 TX dispatch 位于 Router 锁内，IPv4 校验、过滤和 snoop 位于 Router 锁外。smoltcp ingress queue 有固定容量，队列满时先推进 Interface 和 TX，再继续拉取设备 packet。
 - 全局 `SOCKET_SET` 内部使用 `Mutex<SocketSet>`，所有 smoltcp socket handle 访问都通过 `with_socket_mut` 串行化。
 - `UDP_PCB_REGISTRY` 按端口分为 256 个 bucket，每个 bucket 独立加锁；每个 UDP PCB 的接收队列、endpoint、错误队列和 option 状态分别受锁或 atomic 保护。
 - `Ipv4Reassembler` 位于 `Router` 内，并由 `SERVICE` mutex 串行访问。
@@ -307,6 +329,12 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 UDP PCB、bind 冲突检查、收发队列、IPv4 校验、分片重组、输出分片和 ICMPv4 差错均由 crate 内类型管理。
 TCP、raw IP、IPv6 和 DNS 继续通过 smoltcp socket set 推进，协议推进仍依赖显式 `poll_interfaces` 调用。
 该边界让 UDP 不再依赖 smoltcp socket handle，同时保留现有 TCP 和 raw socket 行为。
+
+### NAPI 风格预算推进
+
+IRQ、socket assist 和后台任务共享同一个 `NetworkPoller`。scheduled 表示存在待推进工作，missed 记录 active 期间到达的新事件，active 提供单执行者约束。低于 budget 且没有 backlog 和 missed 时完成调度。该状态机避免每个 IRQ 创建独立推进任务，同时限制单次普通任务占用数据面的时间。
+
+RX、TX 与 timer 使用独立预算。control TX 优先于 data TX，避免 ICMP 错误和协议控制流量长期滞后。socket OUT waiter 同时注册 poller TX waiter，TX dispatch 释放队列容量后执行定向唤醒。
 
 ### 控制面状态与 data-plane 同步
 

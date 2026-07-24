@@ -92,11 +92,9 @@ impl TcpSocket {
         };
         let bound_endpoint = endpoint_from_ip_endpoint(local_endpoint);
         *result.bound_endpoint.lock() = bound_endpoint;
-        result.general.set_device_mask(
-            SERVICE
-                .lock()
-                .smoltcp_device_mask_for_addr(&remote_endpoint.addr),
-        );
+        result
+            .general
+            .set_device_mask(SERVICE.smoltcp_device_mask_for_addr(&remote_endpoint.addr));
         result
     }
 }
@@ -282,7 +280,7 @@ impl SocketOps for TcpSocket {
                 self.register_bound_endpoint(endpoint)?;
                 *self.bound_endpoint.lock() = endpoint;
                 self.general
-                    .set_device_mask(SERVICE.lock().smoltcp_device_mask_for(&endpoint));
+                    .set_device_mask(SERVICE.smoltcp_device_mask_for(&endpoint));
                 Ok(())
             })
     }
@@ -305,11 +303,8 @@ impl SocketOps for TcpSocket {
                 let remote_endpoint = IpEndpoint::from(remote_addr);
                 let mut bound_endpoint = *self.bound_endpoint.lock();
                 if bound_endpoint.addr.is_none() {
-                    bound_endpoint.addr = Some(
-                        SERVICE
-                            .lock()
-                            .get_smoltcp_source_address(&remote_endpoint.addr)?,
-                    );
+                    bound_endpoint.addr =
+                        Some(SERVICE.get_smoltcp_source_address(&remote_endpoint.addr)?);
                 }
                 if bound_endpoint.port == 0 {
                     let local_addr = bound_endpoint
@@ -323,19 +318,19 @@ impl SocketOps for TcpSocket {
                 }
 
                 let result = {
-                    let mut service = crate::SERVICE.lock();
-                    let context = service.iface.context();
-                    self.with_smol_socket(|socket| {
-                        socket
-                            .connect(context, remote_endpoint, bound_endpoint)
-                            .map_err(|e| match e {
-                                smol::ConnectError::InvalidState => k_err_type!(AlreadyConnected),
-                                smol::ConnectError::Unaddressable => {
-                                    k_err_type!(ConnectionRefused, "unaddressable")
-                                }
-                            })?;
-                        Ok::<(), KError>(())
-                    })
+                    let mut sockets = SOCKET_SET.inner.lock();
+                    let mut iface = crate::SERVICE.iface.lock();
+                    let context = iface.context();
+                    let socket = sockets.get_mut::<smol::Socket>(self.dispatch_irq);
+                    socket
+                        .connect(context, remote_endpoint, bound_endpoint)
+                        .map_err(|e| match e {
+                            smol::ConnectError::InvalidState => k_err_type!(AlreadyConnected),
+                            smol::ConnectError::Unaddressable => {
+                                k_err_type!(ConnectionRefused, "unaddressable")
+                            }
+                        })?;
+                    Ok::<(), KError>(())
                 };
                 if let Err(err) = result {
                     if should_register {
@@ -348,11 +343,8 @@ impl SocketOps for TcpSocket {
                 if should_register {
                     self.bound_registered.store(true, Ordering::Release);
                 }
-                self.general.set_device_mask(
-                    SERVICE
-                        .lock()
-                        .smoltcp_device_mask_for_addr(&remote_endpoint.addr),
-                );
+                self.general
+                    .set_device_mask(SERVICE.smoltcp_device_mask_for_addr(&remote_endpoint.addr));
                 Ok(())
             })?;
 
@@ -398,7 +390,7 @@ impl SocketOps for TcpSocket {
                     self.bound_registered.store(true, Ordering::Release);
                 }
                 self.general
-                    .set_device_mask(SERVICE.lock().smoltcp_device_mask_for(&bound_endpoint));
+                    .set_device_mask(SERVICE.smoltcp_device_mask_for(&bound_endpoint));
                 Ok(())
             })?;
         } else {
@@ -587,7 +579,9 @@ impl Pollable for TcpSocket {
         context: &mut PollContext<'_>,
         events: IoEvents,
     ) -> Result<(), PollRegisterError> {
-        if events.intersects(IoEvents::IN | IoEvents::OUT | IoEvents::RDHUP) {
+        if events.contains(IoEvents::OUT) {
+            self.general.register_tx_waker(context)?;
+        } else if events.intersects(IoEvents::IN | IoEvents::RDHUP) {
             self.general.register_rx_waker(context)?;
         }
         if self.is_listening()

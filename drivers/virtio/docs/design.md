@@ -351,7 +351,7 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 
 **接收流程**：
 
-1. 中断到来时调用 `recv()`：先 `ack_interrupt()`，再 `poll_receive()` 获取令牌
+1. 中断回调通过 `handle_virtio_net_irq()` 确认设备中断，后续 `recv()` 调用 `poll_receive()` 获取令牌
 2. 从 `rx_buffers[token]` 取出缓冲区，调用 `receive_complete()` 读取帧头和包长度
 3. 设置 `hdr_len` 和 `payload_len`，返回 `NetBufHandle`
 4. 上层处理完毕后调用 `recycle_rx()`：`receive_begin()` 重新提交缓冲区，存回 `rx_buffers[new_token]`

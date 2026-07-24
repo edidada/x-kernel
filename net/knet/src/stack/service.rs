@@ -2,8 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Network service wrapper around smoltcp interface.
-use alloc::{boxed::Box, sync::Arc};
+//! Network service with budgeted data-plane progression.
+
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
     pin::Pin,
     task::{Context, Waker},
@@ -12,10 +13,11 @@ use core::{
 use kerrno::{KError, KResult, LinuxError};
 use khal::time::monotonic_time;
 use kpoll::{PollContext, PollRegisterError, PollSet};
+use ksync::Mutex;
 use ktask::future::sleep_until;
 use ktime_types::{MonotonicInstant, TimeSpan};
 use smoltcp::{
-    iface::{Interface, SocketSet},
+    iface::{Interface, PollResult},
     time::Instant as SmoltcpInstant,
     wire::{
         HardwareAddress, IpAddress as SmoltcpIpAddress, IpCidr as SmoltcpIpCidr,
@@ -25,12 +27,16 @@ use smoltcp::{
 
 use crate::{
     LISTEN_TABLE, SOCKET_SET,
+    buf::PacketBuf,
     ip::{IpAddress, IpListenEndpoint},
     netlink::RtnetlinkState,
+    poller::{PollBudget, PollProgress},
     router::Router,
+    stack::ingress::IngressProcessor,
 };
 
 const IPV4_HEADER_LEN: usize = 20;
+const RX_INGRESS_BATCH_PACKETS: usize = 64;
 
 fn to_smoltcp_instant(instant: MonotonicInstant) -> SmoltcpInstant {
     let micros = instant.span_since_origin().as_micros();
@@ -43,36 +49,108 @@ fn from_smoltcp_instant(instant: SmoltcpInstant) -> MonotonicInstant {
     MonotonicInstant::from_span_since_origin(TimeSpan::from_micros(micros))
 }
 
+struct TimeoutState {
+    future: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    deadline: Option<MonotonicInstant>,
+}
+
 pub struct Service {
-    pub iface: Interface,
-    router: Router,
-    timeout: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
-    timeout_deadline: Option<MonotonicInstant>,
+    pub(crate) iface: Mutex<Interface>,
+    router: Mutex<Router>,
+    ingress: Mutex<IngressProcessor>,
+    rx_batch: Mutex<Vec<PacketBuf>>,
+    accepted_batch: Mutex<Vec<PacketBuf>>,
+    control_batch: Mutex<Vec<Vec<u8>>>,
+    timeout: Mutex<TimeoutState>,
     timeout_poll: Arc<PollSet>,
 }
+
 impl Service {
     pub fn new(mut router: Router) -> Self {
         let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
         let iface = Interface::new(config, &mut router, to_smoltcp_instant(monotonic_time()));
 
         Self {
-            iface,
-            router,
-            timeout: None,
-            timeout_deadline: None,
+            iface: Mutex::new(iface),
+            router: Mutex::new(router),
+            ingress: Mutex::new(IngressProcessor::new()),
+            rx_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
+            accepted_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
+            control_batch: Mutex::new(Vec::new()),
+            timeout: Mutex::new(TimeoutState {
+                future: None,
+                deadline: None,
+            }),
             timeout_poll: Arc::new(PollSet::new()),
         }
     }
 
-    pub fn poll(&mut self, sockets: &mut SocketSet) -> bool {
-        let current = monotonic_time();
-        let smoltcp_timestamp = to_smoltcp_instant(current);
+    pub fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
+        let device_timestamp = monotonic_time();
+        let mut rx_packets = 0;
+        let mut rx_has_more = false;
+        let mut rx_remaining = budget.rx_packets;
+        let mut sockets = SOCKET_SET.inner.lock();
+        let mut control_packets = self.control_batch.lock();
+        control_packets.clear();
 
-        self.router.poll(current, sockets);
-        self.iface
-            .poll(smoltcp_timestamp, &mut self.router, sockets);
-        LISTEN_TABLE.wake_touched_acceptors(sockets);
-        self.router.dispatch(current)
+        while rx_remaining > 0 {
+            let mut rx_batch = self.rx_batch.lock();
+            let mut router = self.router.lock();
+            let batch_budget = rx_remaining
+                .min(RX_INGRESS_BATCH_PACKETS)
+                .min(router.ingress_capacity());
+            if batch_budget == 0 {
+                rx_has_more = true;
+                break;
+            }
+            let drain =
+                router.drain_rx_budgeted_into(device_timestamp, batch_budget, &mut rx_batch);
+            drop(router);
+            rx_packets += drain.work_done;
+            rx_remaining = rx_remaining.saturating_sub(drain.work_done);
+
+            let mut accepted_packets = self.accepted_batch.lock();
+            self.ingress.lock().handle_rx_packets(
+                device_timestamp,
+                &mut rx_batch,
+                &mut accepted_packets,
+                &mut control_packets,
+                &mut sockets,
+            );
+            let mut router = self.router.lock();
+            router.enqueue_ingress_packets(&mut accepted_packets);
+            for packet in control_packets.drain(..) {
+                if let Err(err) = router.queue_control_ipv4_packet(packet) {
+                    warn!("Dropping network control packet: {}", err);
+                }
+            }
+            rx_has_more = drain.has_more;
+            if !drain.has_more || drain.work_done == 0 {
+                break;
+            }
+        }
+
+        let mut router = self.router.lock();
+        let iface_changed = self.iface.lock().poll(
+            to_smoltcp_instant(device_timestamp),
+            &mut *router,
+            &mut sockets,
+        );
+        LISTEN_TABLE.wake_touched_acceptors(&mut sockets);
+        drop(sockets);
+
+        let ingress_has_more = router.has_pending_ingress();
+        let (tx_packets, tx_has_more) =
+            router.dispatch_budgeted(device_timestamp, budget.tx_packets);
+        PollProgress {
+            rx_packets,
+            tx_packets,
+            timer_events: usize::from(
+                budget.timer_events > 0 && iface_changed == PollResult::SocketStateChanged,
+            ),
+            has_more: rx_has_more || ingress_has_more || tx_has_more,
+        }
     }
 
     pub fn get_smoltcp_source_address(
@@ -81,6 +159,7 @@ impl Service {
     ) -> KResult<SmoltcpIpAddress> {
         let dst_addr = super::from_smoltcp_ip_address(*dst_addr);
         self.router
+            .lock()
             .table
             .lookup(&dst_addr)
             .map(|rule| super::to_smoltcp_ip_address(rule.src))
@@ -97,13 +176,15 @@ impl Service {
     pub fn smoltcp_device_mask_for_addr(&self, addr: &SmoltcpIpAddress) -> u32 {
         let addr = super::from_smoltcp_ip_address(*addr);
         self.router
+            .lock()
             .table
             .lookup(&addr)
-            .map_or(u32::MAX, |it| 1u32 << it.dev)
+            .map_or(u32::MAX, |rule| 1u32 << rule.dev)
     }
 
     pub fn get_source_address(&self, dst_addr: &IpAddress) -> KResult<IpAddress> {
         self.router
+            .lock()
             .table
             .lookup(dst_addr)
             .map(|rule| rule.src)
@@ -111,42 +192,42 @@ impl Service {
     }
 
     pub fn can_send_ip_packet(&self) -> bool {
-        self.router.can_enqueue_tx_packet()
+        self.router.lock().can_enqueue_tx_packet()
     }
 
-    pub fn prepare_ipv4_packet_send(
+    pub fn prepare_and_send_ipv4_packet(
         &self,
         bound_src: Option<IpAddress>,
         dst_addr: &IpAddress,
-        packet_len: usize,
-    ) -> KResult<IpAddress> {
-        if !self.router.can_enqueue_tx_packet() {
+        packet: &mut Option<Vec<u8>>,
+        prepare: impl FnOnce(&mut [u8], IpAddress, Option<usize>) -> KResult,
+    ) -> KResult {
+        let mut router = self.router.lock();
+        let packet_len = packet.as_ref().ok_or(KError::InvalidInput)?.len();
+        if !router.can_enqueue_tx_packet() {
             return Err(KError::WouldBlock);
         }
 
         let source_addr = match bound_src {
             Some(addr) => addr,
-            None => self
-                .router
+            None => router
                 .table
                 .lookup(dst_addr)
                 .map(|rule| rule.src)
                 .ok_or(KError::from(LinuxError::ENETUNREACH))?,
         };
-        let packet_count = output_ipv4_packet_count(&self.router, dst_addr, packet_len)?;
-        if !self.router.can_enqueue_tx_packets(packet_count) {
+        let packet_count = output_ipv4_packet_count(&router, dst_addr, packet_len)?;
+        if !router.can_enqueue_tx_packets(packet_count) {
             return Err(KError::WouldBlock);
         }
 
-        Ok(source_addr)
-    }
-
-    pub fn send_ipv4_packet(&mut self, packet: alloc::vec::Vec<u8>) -> KResult {
-        self.router.queue_ipv4_packet(packet)
-    }
-
-    pub fn ipv4_route_mtu(&self, dst_addr: &IpAddress) -> Option<usize> {
-        self.router.route_mtu(dst_addr)
+        let route_mtu = router.route_mtu(dst_addr);
+        prepare(
+            packet.as_deref_mut().ok_or(KError::InvalidInput)?,
+            source_addr,
+            route_mtu,
+        )?;
+        router.queue_ipv4_packet(packet.take().ok_or(KError::InvalidInput)?)
     }
 
     pub fn device_mask_for(&self, endpoint: &IpListenEndpoint) -> u32 {
@@ -158,55 +239,57 @@ impl Service {
 
     pub fn device_mask_for_addr(&self, addr: &IpAddress) -> u32 {
         self.router
+            .lock()
             .table
             .lookup(addr)
             .map_or(u32::MAX, |rule| 1u32 << rule.dev)
     }
 
     pub fn register_rx_waker(
-        &mut self,
+        &self,
         mask: u32,
         context: &mut PollContext<'_>,
     ) -> Result<Waker, PollRegisterError> {
-        context.register(&self.timeout_poll)?;
+        context.register(self.timeout_poll.as_ref())?;
         let source_waker = Waker::from(self.timeout_poll.clone());
 
         let current = monotonic_time();
+        let sockets = SOCKET_SET.inner.lock();
         let next = self
             .iface
-            .poll_at(to_smoltcp_instant(current), &SOCKET_SET.inner.lock());
+            .lock()
+            .poll_at(to_smoltcp_instant(current), &sockets);
+        drop(sockets);
 
-        if let Some(t) = next {
-            let deadline = from_smoltcp_instant(t);
-
-            let should_reset = match self.timeout_deadline {
+        let mut timeout = self.timeout.lock();
+        if let Some(next) = next {
+            let deadline = from_smoltcp_instant(next);
+            let should_reset = match timeout.deadline {
                 None => true,
                 Some(old_deadline) => current >= old_deadline || deadline < old_deadline,
             };
 
             if should_reset {
-                self.timeout = None;
-                self.timeout_deadline = Some(deadline);
-
-                let mut fut = Box::pin(sleep_until(deadline));
+                timeout.future = None;
+                timeout.deadline = Some(deadline);
+                let mut future = Box::pin(sleep_until(deadline));
                 let wake = Waker::from(self.timeout_poll.clone());
-                let mut cx = Context::from_waker(&wake);
-
-                if fut.as_mut().poll(&mut cx).is_ready() {
-                    self.timeout_deadline = None;
+                let mut context = Context::from_waker(&wake);
+                if future.as_mut().poll(&mut context).is_ready() {
+                    timeout.deadline = None;
                     self.timeout_poll.wake();
-                    return Ok(source_waker);
                 } else {
-                    self.timeout = Some(fut);
+                    timeout.future = Some(future);
                 }
             }
         } else {
-            self.timeout = None;
-            self.timeout_deadline = None;
+            timeout.future = None;
+            timeout.deadline = None;
         }
+        drop(timeout);
 
-        for (i, device) in self.router.devices.iter().enumerate() {
-            if mask & (1 << i) != 0 {
+        for (index, device) in self.router.lock().devices.iter().enumerate() {
+            if mask & (1 << index) != 0 {
                 // Ethernet registers the current context directly on the IRQ
                 // source. Loopback keeps the timeout_poll-backed source waker.
                 device.register_rx_waker(&source_waker, context)?;
@@ -215,9 +298,15 @@ impl Service {
         Ok(source_waker)
     }
 
-    pub fn sync_netlink(&mut self, state: &RtnetlinkState) {
-        self.router.sync_netlink(state);
-        self.iface.update_ip_addrs(|ip_addrs| {
+    pub fn sync_netlink(&self, state: &RtnetlinkState) {
+        let mut router = self.router.lock();
+        router.sync_netlink(state);
+        let local_ipv4_addrs = router.local_ipv4_addrs();
+
+        self.ingress
+            .lock()
+            .update_local_ipv4_addrs(&local_ipv4_addrs);
+        self.iface.lock().update_ip_addrs(|ip_addrs| {
             ip_addrs.clear();
             for addr in &state.addrs {
                 if let SmoltcpIpAddress::Ipv4(ipv4) = addr.address {
@@ -230,12 +319,12 @@ impl Service {
         });
     }
 
-    pub fn remove_device_by_model_id(&mut self, id: kdevice::DeviceId) -> bool {
-        self.router.remove_device_by_model_id(id)
+    pub fn remove_device_by_model_id(&self, id: kdevice::DeviceId) -> bool {
+        self.router.lock().remove_device_by_model_id(id)
     }
 
-    pub fn send_link_frame(&mut self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
-        self.router.send_link_frame(ifindex, frame)
+    pub fn send_link_frame(&self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
+        self.router.lock().send_link_frame(ifindex, frame)
     }
 }
 

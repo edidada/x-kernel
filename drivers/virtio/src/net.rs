@@ -396,7 +396,6 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
     }
 
     fn recv(&self) -> DriverResult<NetBufHandle> {
-        self.inner.lock().ack_interrupt();
         let mut bufs = self.bufs.lock();
         let token = {
             let inner = self.inner.lock();

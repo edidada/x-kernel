@@ -687,7 +687,7 @@ where
         state.clone()
     };
     if SERVICE.is_inited() {
-        SERVICE.lock().sync_netlink(&new_state);
+        SERVICE.sync_netlink(&new_state);
     }
     Ok(())
 }

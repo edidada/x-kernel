@@ -74,7 +74,7 @@ impl EthernetDevice {
                 let mut registrations = PollRegistrations::new();
                 ktask::future::block_on(poll_fn(move |cx| {
                     loop {
-                        crate::poll_interfaces();
+                        crate::poller::network_poller().schedule(crate::poller::PollReason::RxIrq);
                         let mut context = registrations.context(cx);
                         if irq_notify::register_source_waker(irq, NET_RX_IRQ_SOURCE, &mut context)
                             .is_err()
@@ -87,7 +87,7 @@ impl EthernetDevice {
                         }
                         drop(context);
                         // Recheck after register to close the IRQ/register race.
-                        crate::poll_interfaces();
+                        crate::poller::network_poller().schedule(crate::poller::PollReason::RxIrq);
                         return Poll::<()>::Pending;
                     }
                 }));

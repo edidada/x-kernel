@@ -98,7 +98,7 @@ impl RawSocket {
         if let Some(local) = *self.local_addr.read() {
             return Ok(local);
         }
-        SERVICE.lock().get_smoltcp_source_address(&remote)
+        SERVICE.get_smoltcp_source_address(&remote)
     }
 
     fn parse_ip_packet<'a>(&self, packet: &'a [u8]) -> KResult<(IpAddress, &'a [u8])> {
@@ -168,7 +168,7 @@ impl SocketOps for RawSocket {
         let device_mask = if local.is_unspecified() {
             u32::MAX
         } else {
-            SERVICE.lock().smoltcp_device_mask_for(&IpListenEndpoint {
+            SERVICE.smoltcp_device_mask_for(&IpListenEndpoint {
                 addr: Some(local),
                 port: 0,
             })
@@ -181,11 +181,11 @@ impl SocketOps for RawSocket {
         let remote_addr = remote_addr.into_ip()?;
         let remote = self.check_ip_version(remote_addr.ip().into())?;
         if self.local_addr.read().is_none() {
-            *self.local_addr.write() = Some(SERVICE.lock().get_smoltcp_source_address(&remote)?);
+            *self.local_addr.write() = Some(SERVICE.get_smoltcp_source_address(&remote)?);
         }
         *self.peer_addr.write() = Some(remote);
         self.general
-            .set_device_mask(SERVICE.lock().smoltcp_device_mask_for(&IpListenEndpoint {
+            .set_device_mask(SERVICE.smoltcp_device_mask_for(&IpListenEndpoint {
                 addr: Some(remote),
                 port: 0,
             }));
@@ -383,7 +383,11 @@ impl Pollable for RawSocket {
         events: IoEvents,
     ) -> Result<(), PollRegisterError> {
         if events.intersects(IoEvents::IN | IoEvents::OUT) {
-            let source_waker = self.general.register_rx_waker(context)?;
+            let source_waker = if events.contains(IoEvents::OUT) {
+                self.general.register_tx_waker(context)?
+            } else {
+                self.general.register_rx_waker(context)?
+            };
             self.with_smol_socket(|socket| {
                 if events.contains(IoEvents::IN) {
                     socket.register_recv_waker(&source_waker);

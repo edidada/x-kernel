@@ -21,6 +21,7 @@ mod device;
 mod ip;
 mod link;
 pub mod netlink;
+mod poller;
 mod socket;
 mod stack;
 mod transport;
@@ -34,7 +35,6 @@ use alloc::{borrow::ToOwned, boxed::Box, sync::Arc};
 use kclass::{ClassDevice, VsockDeviceImpl, subscribe_vsock_available, vsock_devices};
 use kclass::{NetDevice, net_devices};
 use kdevice::subscribe_device_removed;
-use ksync::Mutex;
 use lazyinit::LazyInit;
 pub use link::packet;
 pub(crate) use link::{buf, wire};
@@ -60,7 +60,7 @@ use crate::{
 static LISTEN_TABLE: LazyInit<ListenTable> = LazyInit::new();
 static SOCKET_SET: LazyInit<SocketSetWrapper> = LazyInit::new();
 
-static SERVICE: LazyInit<Mutex<Service>> = LazyInit::new();
+static SERVICE: LazyInit<Service> = LazyInit::new();
 
 /// Initializes the network subsystem by NIC devices.
 pub fn init_network() {
@@ -120,15 +120,6 @@ pub fn init_network() {
         info!("Device: {}", dev.name());
     }
 
-    let mut service = Service::new(router);
-    service.iface.update_ip_addrs(|ip_addrs| {
-        ip_addrs.push(to_smoltcp_ipv4_cidr(lo_ip)).unwrap();
-        if let Some(eth0_ip) = eth0_ip {
-            ip_addrs.push(to_smoltcp_ipv4_cidr(eth0_ip)).unwrap();
-        }
-    });
-    SERVICE.init_once(Mutex::new(service));
-
     let netlink_state = netlink::build_initial_state(
         to_smoltcp_ipv4_cidr(lo_ip),
         eth0_ip.map(to_smoltcp_ipv4_cidr),
@@ -136,8 +127,10 @@ pub fn init_network() {
         GATEWAY.parse().ok(),
         STANDARD_MTU as u32,
     );
+    let service = Service::new(router);
+    service.sync_netlink(&netlink_state);
+    SERVICE.init_once(service);
     netlink::init_route_state(netlink_state.clone());
-    SERVICE.lock().sync_netlink(&netlink_state);
 
     SOCKET_SET.init_once(SocketSetWrapper::new());
     LISTEN_TABLE.init_once(ListenTable::new());
@@ -160,7 +153,7 @@ fn subscribe_network_unregister(id: kdevice::DeviceId) {
         if removed_id != id || !SERVICE.is_inited() {
             return;
         }
-        if SERVICE.lock().remove_device_by_model_id(id) {
+        if SERVICE.remove_device_by_model_id(id) {
             warn!("network: detached removed device {:?}", id);
         }
     }));
@@ -212,5 +205,5 @@ fn register_vsock_handle(handle: ClassDevice<VsockDeviceImpl>) {
 }
 
 pub fn poll_interfaces() {
-    while SERVICE.lock().poll(&mut SOCKET_SET.inner.lock()) {}
+    poller::network_poller().assist_once();
 }
