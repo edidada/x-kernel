@@ -395,6 +395,13 @@ impl TaskInner {
     where
         F: FnOnce() + Send + 'static,
     {
+        // The kernel-stack size for a user task is a kernel responsibility,
+        // not the caller's: a user task can execute any syscall path (notably
+        // fork, which duplicates the whole address space), so it must use the
+        // standard `KERNEL_STACK_SIZE`. Letting callers pass an arbitrary
+        // `stack_size` previously caused undersized stacks (e.g. 64 KiB) that
+        // overflow during deep kernel paths and silently corrupt neighbouring
+        // memory.
         Self::new_with_identity(
             entry,
             name,
@@ -1070,28 +1077,64 @@ impl Drop for TaskInner {
 struct TaskStack {
     ptr: NonNull<u8>,
     layout: Layout,
+    /// Saved PTE of the unmapped guard page (aarch64), restored on drop so the
+    /// virtual range stays reusable. Meaningful only when `guarded` is true.
+    saved_pte: u64,
+    /// Whether the bottom guard page was unmapped.
+    guarded: bool,
 }
 
 impl TaskStack {
+    /// One page is reserved at the bottom of the allocation and unmapped in the
+    /// kernel page table. Any write there (stack overflow, or an out-of-bounds
+    /// write) triggers a data abort at the writer's PC, which the page-fault
+    /// handler reports with `ELR_EL1` = the faulting instruction.
+    const GUARD_PAGE: usize = memaddr::PAGE_SIZE_4K;
+
     pub fn alloc(size: usize) -> Self {
-        let layout = Layout::from_size_align(size, 16).unwrap();
+        let total = size + Self::GUARD_PAGE;
+        // page-aligned so the guard page is exactly one whole page
+        let layout = Layout::from_size_align(total, Self::GUARD_PAGE).unwrap();
+        // SAFETY: `layout` is validated above and the returned allocation is
+        // owned exclusively by this `TaskStack`.
+        let ptr = NonNull::new(unsafe { alloc::alloc::alloc(layout) }).unwrap();
+        let base = ptr.as_ptr() as usize;
+        let mut guarded = false;
+        let mut saved_pte = 0u64;
+        #[cfg(target_arch = "aarch64")]
+        {
+            // Unmap the bottom page (guard page). `unmap_kernel_4k` returns the
+            // saved PTE, or None if the VA isn't a 4K leaf (then: no guard).
+            if let Some(saved) = karch::unmap_kernel_4k(base) {
+                saved_pte = saved;
+                guarded = true;
+            }
+        }
         Self {
-            // SAFETY: `layout` is validated above and the returned allocation
-            // is owned exclusively by this `TaskStack`.
-            ptr: NonNull::new(unsafe { alloc::alloc::alloc(layout) }).unwrap(),
+            ptr,
             layout,
+            saved_pte,
+            guarded,
         }
     }
 
     pub fn top(&self) -> VirtAddr {
-        // SAFETY: adding `layout.size()` to the base allocation pointer yields
-        // the one-past-the-end stack-top address represented as `VirtAddr`.
+        // SAFETY: adding `layout.size()` (usable + guard page) to the base
+        // pointer yields the one-past-the-end stack-top address.
         VirtAddr::from(self.ptr.as_ptr().wrapping_add(self.layout.size()) as usize)
     }
 }
 
 impl Drop for TaskStack {
     fn drop(&mut self) {
+        // Restore the guard page so the virtual range is reusable before freeing.
+        if self.guarded {
+            #[cfg(target_arch = "aarch64")]
+            {
+                let base = self.ptr.as_ptr() as usize;
+                karch::remap_kernel_4k(base, self.saved_pte);
+            }
+        }
         // SAFETY: `ptr` and `layout` are the exact allocation pair created in
         // `TaskStack::alloc`, and `drop` runs exactly once for this stack.
         unsafe { alloc::alloc::dealloc(self.ptr.as_ptr(), self.layout) }

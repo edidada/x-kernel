@@ -31,8 +31,8 @@ pub use irq::{
     prepare_enter_user_irq, restore_irq, save_irq_and_disable,
 };
 pub use mmu::{
-    HwPageTableRoot, read_kernel_page_table, read_user_page_table, write_kernel_page_table,
-    write_user_page_table,
+    HwPageTableRoot, read_kernel_page_table, read_user_page_table, remap_kernel_4k,
+    unmap_kernel_4k, write_kernel_page_table, write_user_page_table,
 };
 pub use rng::{cpu_rng_available, init_cpu_rng, read_cpu_random};
 pub use tlb::{flush_tlb, flush_tlb_asid, flush_tlb_va_asid};
