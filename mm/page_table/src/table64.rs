@@ -169,7 +169,7 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
     ///   destroy the borrowed table. Wrap it in [`ManuallyDrop`] or
     ///   [`mem::forget`] it.
     /// - The paging handler (`H`) must already be initialised.
-    pub unsafe fn from_root(root_paddr: PhysAddr, is_kernel: bool) -> Self {
+    pub(crate) unsafe fn from_root(root_paddr: PhysAddr, is_kernel: bool) -> Self {
         Self {
             root_paddr,
             #[cfg(feature = "copy-from")]
@@ -366,6 +366,75 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
         }
         H::dealloc_frame(table_paddr);
     }
+}
+
+/// Unmap a single 4 KiB leaf from any page table given its physical root.
+///
+/// The returned physical address and flags can be used to restore the mapping
+/// later with [`map_kernel_leaf_4k`].
+///
+/// Returns `None` if `va` is not mapped as a 4 KiB leaf (e.g. covered by a
+/// huge page, or not present).
+///
+/// # Safety
+///
+/// The caller must ensure **exclusive access** to the page table identified by
+/// `root` — no other CPU or thread may concurrently modify the same table
+/// (including through a different virtual alias of the same root).
+pub unsafe fn unmap_kernel_leaf_4k<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler>(
+    root: PhysAddr,
+    va: M::VirtAddr,
+) -> Option<(PhysAddr, PagingFlags)> {
+    // SAFETY: precondition — caller guarantees exclusive access to `root`.
+    let mut pt =
+        core::mem::ManuallyDrop::new(unsafe { PageTable64::<M, PTE, H>::from_root(root, true) });
+    // Query read-only first: `PageTableMut::unmap` is destructive — it clears
+    // the PTE before returning the page size. If `va` is covered by a huge page
+    // (2 MiB / 1 GiB), we must not touch it at all.
+    if !matches!(pt.query(va), Ok((_, _, PageSize::Size4K))) {
+        return None;
+    }
+    // Now safe to unmap: we know the leaf is exactly 4 KiB.
+    match pt.modify().unmap(va) {
+        Ok((phys, flags, _)) => Some((phys, flags)),
+        _ => None,
+    }
+    // PageTableMut::Drop handles kernel TLB broadcast.
+}
+
+/// Map a single 4 KiB leaf into any page table given its physical root.
+///
+/// This is the inverse of [`unmap_kernel_leaf_4k`]: it restores a mapping
+/// previously removed by that function.
+///
+/// # Safety
+///
+/// The caller must ensure **exclusive access** to the page table identified by
+/// `root` — no other CPU or thread may concurrently modify the same table.
+pub unsafe fn map_kernel_leaf_4k<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler>(
+    root: PhysAddr,
+    va: M::VirtAddr,
+    phys: PhysAddr,
+    flags: PagingFlags,
+) where
+    M::VirtAddr: core::fmt::Debug,
+{
+    // SAFETY: precondition — caller guarantees exclusive access to `root`.
+    let mut pt =
+        core::mem::ManuallyDrop::new(unsafe { PageTable64::<M, PTE, H>::from_root(root, true) });
+    // If this fails the physical page is leaked, but in the only production
+    // call site (guard page restore during TaskStack::drop) the VA lies within
+    // the stack allocation about to be freed and the kernel page-table
+    // structure is stable across the stack's lifetime.
+    if let Err(e) = pt.modify().map(va, phys, PageSize::Size4K, flags) {
+        log::warn!(
+            "map_kernel_leaf_4k: failed to map va={:?} -> pa={:?}: {:?}",
+            va,
+            phys,
+            e,
+        );
+    }
+    // PageTableMut::Drop handles kernel TLB broadcast.
 }
 
 impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop for PageTable64<M, PTE, H> {

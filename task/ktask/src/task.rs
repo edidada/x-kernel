@@ -1130,23 +1130,25 @@ impl Drop for TaskStack {
     }
 }
 
+/// Serializes guard-page unmap/remap operations on the live kernel page table.
+/// Without this lock, two CPUs allocating or freeing task stacks concurrently
+/// could create overlapping `&mut` references to the same page table entries
+/// via separate `PageTableMut` handles on the same root.
+static GUARD_PAGE_LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
+
 /// Unmap the 4 KiB kernel page at `va` (the guard page). Returns its mapping so
 /// it can be restored by [`remap_kernel_guard`]. Returns `None` if the page is
 /// not a 4 KiB leaf (e.g. covered by a huge mapping) or the paging handler is
 /// not ready yet (early boot).
 fn unmap_kernel_guard(va: usize) -> Option<GuardSlot> {
-    use core::mem::ManuallyDrop;
-
-    use khal::paging::PageSize;
     let root_phys = memaddr::PhysAddr::from_usize(kernel_root_phys());
-    // SAFETY: `root_phys` is the live kernel page-table root, which we do not
-    // own; it is wrapped in `ManuallyDrop` so `PageTable64::drop` (which would
-    // free the root and all sub-tables) never runs. The paging handler is
-    // initialised before any post-boot task stack is allocated.
-    let mut pt = ManuallyDrop::new(unsafe { khal::paging::PageTable::from_root(root_phys, true) });
-    match pt.modify().unmap(VirtAddr::from_usize(va)) {
-        Ok((phys, flags, PageSize::Size4K)) => Some(GuardSlot { va, phys, flags }),
-        _ => {
+    let _lock = GUARD_PAGE_LOCK.lock();
+    // SAFETY: `GUARD_PAGE_LOCK` guarantees exclusive access to the kernel page
+    // table root for guard page operations across all CPUs. No other subsystem
+    // modifies PTEs in the task-stack VA range.
+    match unsafe { khal::paging::unmap_kernel_leaf_4k(root_phys, VirtAddr::from_usize(va)) } {
+        Some((phys, flags)) => Some(GuardSlot { va, phys, flags }),
+        None => {
             warn!(
                 "ktask: guard page unmap failed for va={:#x}; stack overflow protection disabled",
                 va,
@@ -1158,26 +1160,32 @@ fn unmap_kernel_guard(va: usize) -> Option<GuardSlot> {
 
 /// Restore the guard page cleared by [`unmap_kernel_guard`].
 fn remap_kernel_guard(g: GuardSlot) {
-    use core::mem::ManuallyDrop;
-
-    use khal::paging::PageSize;
     let root_phys = memaddr::PhysAddr::from_usize(kernel_root_phys());
-    // SAFETY: see `unmap_kernel_guard`; `ManuallyDrop` prevents freeing the root.
-    let mut pt = ManuallyDrop::new(unsafe { khal::paging::PageTable::from_root(root_phys, true) });
-    // If remap fails the physical page is leaked, but this cannot happen: the
-    // guard VA lies within the stack allocation that is about to be freed, and
-    // the kernel page-table structure is stable across the stack's lifetime.
-    let _ = pt.modify().map(
-        VirtAddr::from_usize(g.va),
-        g.phys,
-        PageSize::Size4K,
-        g.flags,
-    );
+    let _lock = GUARD_PAGE_LOCK.lock();
+    // SAFETY: `GUARD_PAGE_LOCK` guarantees exclusive access (see `unmap_kernel_guard`).
+    unsafe {
+        khal::paging::map_kernel_leaf_4k(root_phys, VirtAddr::from_usize(g.va), g.phys, g.flags);
+    }
 }
 
 /// Page-aligned physical address of the live kernel page-table root.
+///
+/// Cached from the first call (boot path, before any user process exists)
+/// because on x86_64 and RISC-V `read_kernel_page_table()` reads the shared
+/// kernel+user root register (CR3 / satp), which after a user process switch
+/// points to the user's page table — **not** the master kernel page table
+/// owned by `KERNEL_ASPACE`. AArch64 and LoongArch64 have dedicated kernel
+/// root registers (TTBR1 / PGDH) and are not affected.
 fn kernel_root_phys() -> usize {
-    karch::read_kernel_page_table().as_usize() & !(memaddr::PAGE_SIZE_4K - 1)
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static ROOT: AtomicU64 = AtomicU64::new(0);
+    let root = ROOT.load(Ordering::Relaxed) as usize;
+    if root != 0 {
+        return root;
+    }
+    let root = karch::read_kernel_page_table().as_usize() & !(memaddr::PAGE_SIZE_4K - 1);
+    ROOT.store(root as u64, Ordering::Relaxed);
+    root
 }
 
 /// A wrapper of [`KtaskRef`] as the current task.
