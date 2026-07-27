@@ -128,6 +128,9 @@ pub struct PageTable64<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler>
     user_asid_provider: Option<UserAsidProvider>,
     #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
     user_cpu_mask_provider: Option<UserCpuMaskProvider>,
+    /// `true` when created via [`from_root`](Self::from_root) — the root is
+    /// borrowed, so [`Drop`] must not free it.
+    borrowed_root: bool,
     _phantom: PhantomData<(M, PTE, H)>,
 }
 
@@ -176,6 +179,7 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
             user_asid_provider: None,
             #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
             user_cpu_mask_provider: None,
+            borrowed_root: true,
             _phantom: PhantomData,
         }
     }
@@ -191,6 +195,7 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
             user_asid_provider: None,
             #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
             user_cpu_mask_provider: None,
+            borrowed_root: false,
             _phantom: PhantomData,
         })
     }
@@ -365,6 +370,11 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
 
 impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop for PageTable64<M, PTE, H> {
     fn drop(&mut self) {
+        debug_assert!(
+            !self.borrowed_root,
+            "PageTable64::from_root() table must not be dropped normally; wrap it in ManuallyDrop \
+             or mem::forget it"
+        );
         let root = self.table_of(self.root_paddr);
         #[allow(unused_variables)]
         for (i, entry) in root.iter().enumerate() {

@@ -1146,7 +1146,13 @@ fn unmap_kernel_guard(va: usize) -> Option<GuardSlot> {
     let mut pt = ManuallyDrop::new(unsafe { khal::paging::PageTable::from_root(root_phys, true) });
     match pt.modify().unmap(VirtAddr::from_usize(va)) {
         Ok((phys, flags, PageSize::Size4K)) => Some(GuardSlot { va, phys, flags }),
-        _ => None,
+        _ => {
+            warn!(
+                "ktask: guard page unmap failed for va={:#x}; stack overflow protection disabled",
+                va,
+            );
+            None
+        }
     }
 }
 
@@ -1158,6 +1164,9 @@ fn remap_kernel_guard(g: GuardSlot) {
     let root_phys = memaddr::PhysAddr::from_usize(kernel_root_phys());
     // SAFETY: see `unmap_kernel_guard`; `ManuallyDrop` prevents freeing the root.
     let mut pt = ManuallyDrop::new(unsafe { khal::paging::PageTable::from_root(root_phys, true) });
+    // If remap fails the physical page is leaked, but this cannot happen: the
+    // guard VA lies within the stack allocation that is about to be freed, and
+    // the kernel page-table structure is stable across the stack's lifetime.
     let _ = pt.modify().map(
         VirtAddr::from_usize(g.va),
         g.phys,
@@ -1316,4 +1325,55 @@ mod tests_on_cpu_mask {
             assert!(mask.get(3));
         }
     }
+}
+
+#[cfg(unittest)]
+mod tests_task_stack {
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+
+    /// Allocating and dropping a `TaskStack` must succeed; the guard page
+    /// may be absent (e.g. early boot before the paging handler is ready)
+    /// but the data-structure invariants must hold.
+    #[def_test]
+    fn task_stack_alloc_drop_roundtrip() {
+        for size in [0x1000, 0x4000, 0x10000, 0x20000] {
+            let stack = TaskStack::alloc(size);
+            assert_eq!(stack.layout.size(), size + TaskStack::GUARD_PAGE);
+            let base = stack.ptr.as_ptr() as usize;
+            let expected_top = base + size + TaskStack::GUARD_PAGE;
+            assert_eq!(
+                stack.top().as_usize(),
+                expected_top,
+                "top() should return base + usable + guard"
+            );
+            // `drop` restores the guard page (if it was installed) and frees
+            // the allocation.
+            core::mem::drop(stack);
+        }
+    }
+
+    /// The guard page fills exactly one page at the bottom of the allocation.
+    /// Verify the alignment invariant: the allocation is page-aligned, so the
+    /// guard page is exactly one whole page.
+    #[def_test]
+    fn guard_page_is_page_aligned() {
+        let stack = TaskStack::alloc(0x4000);
+        let base = stack.ptr.as_ptr() as usize;
+        assert_eq!(
+            base % memaddr::PAGE_SIZE_4K,
+            0,
+            "stack allocation must be page-aligned so the guard page covers exactly one page"
+        );
+        core::mem::drop(stack);
+    }
+
+    // Writing to the guard page must trigger a page fault at the writer's PC
+    // instead of silently corrupting adjacent memory. This is validated at
+    // runtime by the kernel fault handler whenever a stack overflows; a unit
+    // test cannot install a kernel page table and therefore cannot reproduce
+    // the exact fault path. The guard page may legitimately not be installed
+    // when the VA is covered by a huge page or the paging handler is not yet
+    // initialised (early boot) — a warning is logged in those cases.
 }
