@@ -230,6 +230,8 @@ idle ──schedule──> scheduled ──poll──> active
 `scheduled` 表示存在待推进工作，`active` 保证同一时刻只有一个执行者进入
 `Service::poll_budgeted`，`missed` 记录 active 期间到达的新事件。
 完成一轮后仍有 backlog 或 missed 时继续保持 scheduled。
+`Interface::poll_at` 返回的下一次协议 deadline 由 `Service` 注册为 timer，
+到期后调度 poller 并唤醒正在等待 socket readiness 的任务。
 
 ## 算法流程
 
@@ -252,7 +254,8 @@ idle ──schedule──> scheduled ──poll──> active
 6. TCP、raw IP、ICMP 和 IPv6 packet 进入有界 smoltcp ingress queue，`Interface::poll` 驱动兼容期协议 socket。
 7. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
 8. `Router::dispatch_budgeted` 先处理 control TX queue，再处理 data TX queue，单轮发送数量受 TX budget 限制。
-9. 当前轮仍有 RX、ingress 或 TX backlog，或者推进期间收到 missed 事件时，poller 保持 scheduled 并继续下一轮；后台任务连续执行达到轮次上限后重新唤醒自身。
+9. `Interface::poll_at` 返回下一次协议 deadline，`Service` 更新 timer；deadline 到期时重新调度 poller。
+10. 当前轮仍有 RX、ingress 或 TX backlog，或者推进期间收到 missed 事件时，poller 保持 scheduled 并继续下一轮；后台任务连续执行达到轮次上限后重新唤醒自身。
 
 ### TX 路由
 
@@ -320,7 +323,7 @@ idle ──schedule──> scheduled ──poll──> active
 - Unix stream 的用户数据复制和 `PollSet` 唤醒在 `tx_order` 外执行。send 先写入未发布的 vacant 区域，再在锁内复检关闭状态并推进 write index；recv 读取为空后在锁内复查 occupied 长度和关闭状态；shutdown 完成状态发布并复制 peer endpoint 引用后释放 `channel` mutex，再执行 waiter 唤醒。
 - Unix stream 每个 endpoint 分别持有 readable、writable 和 connection-state 三组 `PollSet`。写入只唤醒 peer readable waiter，读取跨过发送缓冲低水位时只唤醒 peer writable waiter，半关闭只唤醒受影响方向，完整关闭通过 connection-state waiter 通知双方。
 - netlink `ROUTE_STATE` 使用 `RwLock`，rx queue 和 subscriber 列表使用 `Mutex`。
-- RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 使用调用方传入的同一个 `PollContext` 注册聚合 `timeout_poll` 和相关 Ethernet IRQ source，registration 由跨越 `Pending` 的 `PollRegistrations` 统一管理。loopback 仍保存 `timeout_poll` 的聚合 waker（`Mutex<Option<Waker>>`），多任务广播由 `timeout_poll` 完成；设备层不得保存调用方的裸 waker或绕过 `Service` 注册互不等价的 task waker。
+- RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 使用调用方传入的同一个 `PollContext` 注册聚合 `timeout_poll` 和相关 Ethernet IRQ source，registration 由跨越 `Pending` 的 `PollRegistrations` 统一管理。loopback 仍保存 `timeout_poll` 的聚合 waker（`Mutex<Option<Waker>>`），多任务广播由 `timeout_poll` 完成；设备层不得保存调用方的裸 waker 或绕过 `Service` 注册互不等价的 task waker。每次 `Interface::poll` 也会刷新独立的协议 timer，使 TCP 重传等 deadline 不依赖阻塞中的 socket waiter。
 
 ## 设计决策
 
@@ -332,9 +335,9 @@ TCP、raw IP、IPv6 和 DNS 继续通过 smoltcp socket set 推进，协议推�
 
 ### NAPI 风格预算推进
 
-IRQ、socket assist 和后台任务共享同一个 `NetworkPoller`。scheduled 表示存在待推进工作，missed 记录 active 期间到达的新事件，active 提供单执行者约束。低于 budget 且没有 backlog 和 missed 时完成调度。该状态机避免每个 IRQ 创建独立推进任务，同时限制单次普通任务占用数据面的时间。
+IRQ、socket assist、协议 timer 和后台任务共享同一个 `NetworkPoller`。scheduled 表示存在待推进工作，missed 记录 active 期间到达的新事件，active 提供单执行者约束。低于 budget 且没有 backlog 和 missed 时完成调度。active 已由其他执行者持有时，竞争者直接退出，由持有者根据 backlog 或 missed 决定后续唤醒，避免后台任务自唤醒空转。该状态机避免每个 IRQ 创建独立推进任务，同时限制单次普通任务占用数据面的时间。
 
-RX、TX 与 timer 使用独立预算。control TX 优先于 data TX，避免 ICMP 错误和协议控制流量长期滞后。socket OUT waiter 同时注册 poller TX waiter，TX dispatch 释放队列容量后执行定向唤醒。
+RX、TX 与 timer 使用独立预算。control TX 优先于 data TX，避免 ICMP 错误和协议控制流量长期滞后。socket OUT waiter 同时注册 poller TX waiter，TX dispatch 释放队列容量后执行定向唤醒。未来协议 deadline 通过 sleep future 唤醒 socket waiter，并以 `PollReason::Timer` 调度 poller。
 
 ### 控制面状态与 data-plane 同步
 

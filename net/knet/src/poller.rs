@@ -41,6 +41,7 @@ lazy_static! {
 pub(crate) enum PollReason {
     RxIrq,
     Assist,
+    Timer,
 }
 
 #[derive(Clone, Copy)]
@@ -162,7 +163,9 @@ impl NetworkPoller {
             return false;
         }
         if self.active.swap(true, Ordering::AcqRel) {
-            return true;
+            // The active owner will observe any concurrent schedule through
+            // `missed`; a contender must not self-wake while waiting for it.
+            return false;
         }
 
         let progress = self.run_once(budget);
@@ -180,7 +183,9 @@ impl NetworkPoller {
         if progress.tx_packets > 0 {
             self.tx_waiters.wake();
         }
-        let _ = (progress.rx_packets, progress.timer_events);
+        debug_assert!(progress.rx_packets <= budget.rx_packets);
+        debug_assert!(progress.tx_packets <= budget.tx_packets);
+        debug_assert!(progress.timer_events <= budget.timer_events);
         progress
     }
 
@@ -209,4 +214,31 @@ pub(crate) fn network_poller() -> &'static NetworkPoller {
 
 fn poller_task() {
     NETWORK_POLLER.run_task();
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::{assert, def_test};
+
+    use super::*;
+
+    const TEST_BUDGET: PollBudget = PollBudget {
+        rx_packets: 1,
+        tx_packets: 1,
+        timer_events: 1,
+    };
+
+    #[def_test]
+    fn active_contender_does_not_request_repoll() {
+        let poller = NetworkPoller::new(NetworkPollerConfig {
+            background_budget: TEST_BUDGET,
+            assist_budget: TEST_BUDGET,
+            background_max_rounds: 1,
+        });
+        poller.scheduled.store(true, Ordering::Release);
+        poller.active.store(true, Ordering::Release);
+
+        assert!(!poller.poll_scheduled_once(TEST_BUDGET));
+        assert!(poller.scheduled.load(Ordering::Acquire));
+    }
 }

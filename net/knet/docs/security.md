@@ -195,6 +195,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 15. UDP 接收边界：UDP 长度、校验和和 payload range 通过 checked parser 验证，单个 PCB 的接收队列上限为 1024 个数据报。
 16. IPv4 输出边界：输出 MTU 来自匹配路由；DF 包超过 MTU 时返回 `EMSGSIZE`，允许分片的包只按 8 字节对齐切分 payload。
 17. poller 完成条件：只有 RX、ingress 和 TX 均无 backlog，并且 active 期间没有 missed event 时，scheduled 才能回到 idle。
+18. 协议 timer 条件：每次 `Interface::poll` 后必须用 `poll_at` 刷新下一次 deadline，timer 到期必须重新调度 poller。
 
 ## 线程安全
 
@@ -235,6 +236,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-21 | 内核任务隐式读取用户凭据 | 高 | 启动期 pathname bind 调用普通 `SocketOps::bind`，当前线程不存在或主体错误 | 内核调用者使用 `bind_with_cred` 显式传入 `initial_cred()` 等已选择凭据；普通入口只服务当前用户任务 |
 | T-22 | Unix stream 在 EOF 后发布数据 | 中 | send、shutdown 与 peer recv 并发交错，关闭状态和 write index 缺少共同排序 | 每个发送方向使用共享 `tx_order`；send 在锁内复检后发布，recv 在锁内复查 empty 和 closed，Channel 释放前先发布关闭状态 |
 | T-23 | poller 在 active 期间丢失新事件 | 中 | IRQ 或 socket assist 在本轮完成判定附近到达 | schedule 对已 scheduled 状态设置 missed；完成路径在清除 scheduled 前后各复检 missed，并在 backlog 未清空时保持 scheduled |
+| T-24 | smoltcp 协议 timer 缺少推进事件 | 中 | TCP 重传或 keep-alive deadline 到期时没有设备 IRQ 或 socket 调用 | 每次 Interface poll 后通过 `poll_at` 注册 timer；到期后调度 poller 并唤醒 socket waiter |
 
 影响等级定义：
 
@@ -252,7 +254,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | F-04 | driver TX buffer 分配失败 | NIC driver 返回 `alloc_tx_buf` 错误 | 当前 frame 未发送 | 网络吞吐下降或连接超时 | 3 | 记录 warn 并返回；上层 poller 可继续重试 |
 | F-05 | UDP ICMP error queue 丢失 | PCB registry 未注册、ICMP 引用头无效或 socket 已关闭 | `SO_ERROR` 或 error queue 缺失 | 应用无法获得异步网络错误 | 4 | socket 创建时初始化 PCB registry，bind 时登记 PCB，Drop 时注销；ICMP 引用报文使用允许截断 payload 的 IPv4 头解析路径 |
 | F-06 | TCP accepted child abort | 握手期间 peer reset 或 smoltcp child 关闭 | `accept` 返回 `ConnectionAborted` | 应用重试 accept | 4 | `ListenTable::accept` 清理 closed child 并继续扫描队列 |
-| F-07 | poll waker 丢失 | device mask 错误、timeout 或 Ethernet IRQ source 未注册、注册所有者未跨 `Pending` 存活或缺少 register 后复查 | socket 阻塞等待延迟 | 应用 IO latency 上升或连接超时 | 3 | bind/connect 后更新 device mask；`Service::register_rx_waker` 使用同一个 `PollContext` 注册 timeout poll 和相关 Ethernet IRQ source；调用方持有 `PollRegistrations` 并在注册后复查 readiness |
+| F-07 | poll waker 或协议 timer 丢失 | device mask 错误、timeout 或 Ethernet IRQ source 未注册、注册所有者未跨 `Pending` 存活、缺少 register 后复查或 poller 未按 deadline 调度 | socket 阻塞等待延迟，TCP 重传或 keep-alive 延后 | 应用 IO latency 上升或连接超时 | 3 | bind/connect 后更新 device mask；`Service::register_rx_waker` 使用同一个 `PollContext` 注册 timeout poll 和相关 Ethernet IRQ source；调用方持有 `PollRegistrations` 并在注册后复查 readiness；每次 Interface poll 后按 `poll_at` deadline 调度 poller |
 | F-08 | malformed netlink request | header 或 attr 长度非法 | 返回 empty response 或 netlink error | 调用者请求失败 | 4 | checked reader 和 error response 处理 |
 | F-09 | ROUTE_STATE 未初始化 | netlink route 请求早于 `init_route_state` | panic 或空状态 | netlink 功能不可用 | 2 | 初始化路径在 `init_network` 中创建初始 state；新增启动路径需保持顺序 |
 | F-10 | Unix stream peer 提前关闭 | channel 被 shutdown 或 drop | send 在无发送进度时返回 `BrokenPipe`，已有进度时返回部分字节数；recv 排空本端缓冲后返回 EOF；peer 关闭时丢弃未读输入则返回一次 `ConnectionReset`；poll 报告 `RDHUP`、`HUP` 或 `ERR` | 应用感知连接关闭 | 4 | endpoint atomic 记录双方半关闭状态与待处理 reset；per-direction `tx_order` 统一关闭与数据顺序；三组 `PollSet` 按受影响事件定向唤醒 |
@@ -314,7 +316,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - 新增外部网络输入使用 checked parser。
 - IPv4 分片重组改动保持队列数量、内存和超时上限，并拒绝重叠 range。
 - UDP registry 改动保持 bind、connect、普通接收和 ICMP error lookup 使用同一 PCB 所有权来源。
-- 修改 poller 状态机时验证 scheduled、missed 和 active 的完成竞态；新增 backlog 必须进入 `PollProgress::has_more`。
+- 修改 poller 状态机时验证 scheduled、missed 和 active 的完成竞态；新增 backlog 必须进入 `PollProgress::has_more`，未来协议 deadline 必须通过 timer 重新调度 poller。
 - 新增 socket option 明确 errno、阻塞语义和 poll readiness。
 - 新增 pathname Unix socket 入口使用单次凭据快照，并让全部 VFS 操作显式接收该快照。
 - pathname bind 保持排他创建、`0777 & !umask` mode 和 fs credential owner；connect/sendto

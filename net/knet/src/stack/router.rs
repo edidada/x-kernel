@@ -164,8 +164,8 @@ impl Router {
         true
     }
 
-    pub fn local_ipv4_addrs(&self) -> Vec<Ipv4Cidr> {
-        self.local_ipv4_addrs.clone()
+    pub fn local_ipv4_addrs(&self) -> &[Ipv4Cidr] {
+        &self.local_ipv4_addrs
     }
 
     pub fn sync_netlink(&mut self, state: &RtnetlinkState) {

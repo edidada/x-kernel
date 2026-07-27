@@ -4,7 +4,7 @@
 
 //! Network service with budgeted data-plane progression.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, task::Wake, vec::Vec};
 use core::{
     pin::Pin,
     task::{Context, Waker},
@@ -54,6 +54,21 @@ struct TimeoutState {
     deadline: Option<MonotonicInstant>,
 }
 
+struct TimeoutWake {
+    socket_waiters: Arc<PollSet>,
+}
+
+impl Wake for TimeoutWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.socket_waiters.as_ref().wake();
+        crate::poller::network_poller().schedule(crate::poller::PollReason::Timer);
+    }
+}
+
 pub struct Service {
     pub(crate) iface: Mutex<Interface>,
     router: Mutex<Router>,
@@ -92,10 +107,11 @@ impl Service {
         let mut rx_remaining = budget.rx_packets;
         let mut sockets = SOCKET_SET.inner.lock();
         let mut control_packets = self.control_batch.lock();
+        let mut rx_batch = self.rx_batch.lock();
+        let mut accepted_packets = self.accepted_batch.lock();
         control_packets.clear();
 
         while rx_remaining > 0 {
-            let mut rx_batch = self.rx_batch.lock();
             let mut router = self.router.lock();
             let batch_budget = rx_remaining
                 .min(RX_INGRESS_BATCH_PACKETS)
@@ -110,7 +126,6 @@ impl Service {
             rx_packets += drain.work_done;
             rx_remaining = rx_remaining.saturating_sub(drain.work_done);
 
-            let mut accepted_packets = self.accepted_batch.lock();
             self.ingress.lock().handle_rx_packets(
                 device_timestamp,
                 &mut rx_batch,
@@ -132,11 +147,12 @@ impl Service {
         }
 
         let mut router = self.router.lock();
-        let iface_changed = self.iface.lock().poll(
-            to_smoltcp_instant(device_timestamp),
-            &mut *router,
-            &mut sockets,
-        );
+        let current = to_smoltcp_instant(device_timestamp);
+        let mut iface = self.iface.lock();
+        let iface_changed = iface.poll(current, &mut *router, &mut sockets);
+        let next_poll = iface.poll_at(current, &sockets);
+        drop(iface);
+        self.update_poll_timeout(device_timestamp, next_poll);
         LISTEN_TABLE.wake_touched_acceptors(&mut sockets);
         drop(sockets);
 
@@ -260,7 +276,19 @@ impl Service {
             .lock()
             .poll_at(to_smoltcp_instant(current), &sockets);
         drop(sockets);
+        self.update_poll_timeout(current, next);
 
+        for (index, device) in self.router.lock().devices.iter().enumerate() {
+            if mask & (1 << index) != 0 {
+                // Ethernet registers the current context directly on the IRQ
+                // source. Loopback keeps the timeout_poll-backed source waker.
+                device.register_rx_waker(&source_waker, context)?;
+            }
+        }
+        Ok(source_waker)
+    }
+
+    fn update_poll_timeout(&self, current: MonotonicInstant, next: Option<SmoltcpInstant>) {
         let mut timeout = self.timeout.lock();
         if let Some(next) = next {
             let deadline = from_smoltcp_instant(next);
@@ -273,11 +301,14 @@ impl Service {
                 timeout.future = None;
                 timeout.deadline = Some(deadline);
                 let mut future = Box::pin(sleep_until(deadline));
-                let wake = Waker::from(self.timeout_poll.clone());
+                let wake = Waker::from(Arc::new(TimeoutWake {
+                    socket_waiters: self.timeout_poll.clone(),
+                }));
                 let mut context = Context::from_waker(&wake);
                 if future.as_mut().poll(&mut context).is_ready() {
                     timeout.deadline = None;
-                    self.timeout_poll.wake();
+                    self.timeout_poll.as_ref().wake();
+                    crate::poller::network_poller().schedule(crate::poller::PollReason::Timer);
                 } else {
                     timeout.future = Some(future);
                 }
@@ -286,26 +317,18 @@ impl Service {
             timeout.future = None;
             timeout.deadline = None;
         }
-        drop(timeout);
-
-        for (index, device) in self.router.lock().devices.iter().enumerate() {
-            if mask & (1 << index) != 0 {
-                // Ethernet registers the current context directly on the IRQ
-                // source. Loopback keeps the timeout_poll-backed source waker.
-                device.register_rx_waker(&source_waker, context)?;
-            }
-        }
-        Ok(source_waker)
     }
 
     pub fn sync_netlink(&self, state: &RtnetlinkState) {
+        // Keep the Router locked until all derived views are refreshed so a
+        // new RX batch cannot observe a partially synchronized configuration.
         let mut router = self.router.lock();
         router.sync_netlink(state);
         let local_ipv4_addrs = router.local_ipv4_addrs();
 
         self.ingress
             .lock()
-            .update_local_ipv4_addrs(&local_ipv4_addrs);
+            .update_local_ipv4_addrs(local_ipv4_addrs);
         self.iface.lock().update_ip_addrs(|ip_addrs| {
             ip_addrs.clear();
             for addr in &state.addrs {
