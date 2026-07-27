@@ -29,6 +29,7 @@ use crate::{
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     poll_interfaces,
+    poller::{PollReason, network_poller},
     state::*,
 };
 
@@ -430,7 +431,6 @@ impl SocketOps for TcpSocket {
             let result = self
                 .general
                 .send_poller_with_nonblocking(self, nonblocking, || {
-                    poll_interfaces();
                     self.with_smol_socket(|socket| {
                         if self.tx_closed.load(Ordering::Acquire) {
                             Err(KError::BrokenPipe)
@@ -454,7 +454,7 @@ impl SocketOps for TcpSocket {
             match result {
                 Ok(0) => break,
                 Ok(len) => {
-                    poll_interfaces();
+                    network_poller().schedule(PollReason::Assist);
                     total_sent += len;
                 }
                 Err(_) if total_sent > 0 => return Ok(total_sent),

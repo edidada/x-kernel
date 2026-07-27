@@ -196,6 +196,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 16. IPv4 输出边界：输出 MTU 来自匹配路由；DF 包超过 MTU 时返回 `EMSGSIZE`，允许分片的包只按 8 字节对齐切分 payload。
 17. poller 完成条件：只有 RX、ingress 和 TX 均无 backlog，并且 active 期间没有 missed event 时，scheduled 才能回到 idle。
 18. 协议 timer 条件：每次 `Interface::poll` 后必须用 `poll_at` 刷新下一次 deadline，timer 到期必须重新调度 poller。
+19. TCP TX 交接条件：send 向 smoltcp socket buffer 写入数据后必须调度后台 poller，数据面 owner 负责协议推进和 TX dispatch。
 
 ## 线程安全
 
@@ -237,6 +238,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-22 | Unix stream 在 EOF 后发布数据 | 中 | send、shutdown 与 peer recv 并发交错，关闭状态和 write index 缺少共同排序 | 每个发送方向使用共享 `tx_order`；send 在锁内复检后发布，recv 在锁内复查 empty 和 closed，Channel 释放前先发布关闭状态 |
 | T-23 | poller 在 active 期间丢失新事件 | 中 | IRQ 或 socket assist 在本轮完成判定附近到达 | schedule 对已 scheduled 状态设置 missed；完成路径在清除 scheduled 前后各复检 missed，并在 backlog 未清空时保持 scheduled |
 | T-24 | smoltcp 协议 timer 缺少推进事件 | 中 | TCP 重传或 keep-alive deadline 到期时没有设备 IRQ 或 socket 调用 | 每次 Interface poll 后通过 `poll_at` 注册 timer；到期后调度 poller 并唤醒 socket waiter |
+| T-25 | TCP send 写入的数据缺少后台推进 | 中 | 可写快路径只更新 socket buffer，返回前没有调度 poller | 每次成功写入后以 `PollReason::Assist` 调度 poller；TX dispatch 释放容量后唤醒 OUT waiter |
 
 影响等级定义：
 

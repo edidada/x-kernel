@@ -246,7 +246,7 @@ idle ──schedule──> scheduled ──poll──> active
 
 ### RX 推进
 
-1. Ethernet IRQ 任务调用 `NetworkPoller::schedule`；socket send、recv 和 readiness 路径通过 `poll_interfaces` 执行 assist budget。
+1. Ethernet IRQ 任务调用 `NetworkPoller::schedule`；socket recv 和 readiness 路径通过 `poll_interfaces` 执行 assist budget；TCP send 可写快路径把数据写入 socket buffer 后调度后台 poller。
 2. 首次事件把 poller 从 idle 切换到 scheduled，重复事件设置 missed，active 保证同一时刻只有一个执行者进入 `Service::poll_budgeted`。
 3. `Router::drain_rx_budgeted_into` 按 RX budget 从设备轮转拉取 `PacketBuf`，`next_rx_device` 在设备间保持公平并随设备删除修正。
 4. `IngressProcessor` 在 Router 锁外校验 IPv4 头、长度、校验和与本地目的地址，并完成 IPv4 分片重组。
@@ -259,13 +259,14 @@ idle ──schedule──> scheduled ──poll──> active
 
 ### TX 路由
 
-1. crate 内 UDP 在 Router mutex 内检查队列容量、选择源地址和路由 MTU，写入 UDP 与 IPv4 头后提交到 data TX queue。smoltcp 生成的 IP 包进入同一 data TX queue，`IngressProcessor` 生成的 ICMPv4 错误进入 control TX queue。
-2. `IP_MTU_DISCOVER` 决定 UDP IPv4 头部的 DF 标志。超出路由 MTU且允许分片的包由 `fragment_output_packet` 拆分，DF 包返回 `EMSGSIZE`。
-3. `Router::dispatch_budgeted` 优先接管 control packet，再按 IP 版本解析目的地址；IPv4 输出先按实际长度更新 `total_len` 和头部校验和。
-4. 广播或组播包复制到所有设备。
-5. 单播包通过 `RouteTable::lookup` 选择最长前缀路由。
-6. Ethernet 设备先查 ARP neighbor cache，命中后通过 `link::wire` 封装 Ethernet frame。
-7. 未命中时发送 ARP request，并把 IP 包放入 `pending_tx` 等待 neighbor 解析。
+1. TCP send 可写快路径完成 smoltcp socket buffer 写入和后台 poller 调度，数据面 assist 由后台 poller 执行。
+2. crate 内 UDP 在 Router mutex 内检查队列容量、选择源地址和路由 MTU，写入 UDP 与 IPv4 头后提交到 data TX queue。smoltcp 生成的 IP 包进入同一 data TX queue，`IngressProcessor` 生成的 ICMPv4 错误进入 control TX queue。
+3. `IP_MTU_DISCOVER` 决定 UDP IPv4 头部的 DF 标志。超出路由 MTU 且允许分片的包由 `fragment_output_packet` 拆分，DF 包返回 `EMSGSIZE`。
+4. `Router::dispatch_budgeted` 优先接管 control packet，再按 IP 版本解析目的地址；IPv4 输出先按实际长度更新 `total_len` 和头部校验和。
+5. 广播或组播包复制到所有设备。
+6. 单播包通过 `RouteTable::lookup` 选择最长前缀路由。
+7. Ethernet 设备先查 ARP neighbor cache，命中后通过 `link::wire` 封装 Ethernet frame。
+8. 未命中时发送 ARP request，并把 IP 包放入 `pending_tx` 等待 neighbor 解析。
 
 当前实现保留 smoltcp TCP、raw socket 和 IPv6 推进。UDP、IPv4 分片重组、输出分片和 ICMPv4 UDP 差错报告使用 crate 内实现。
 `PacketBuf`、`link::wire` 和 `stack::ipv4` 提供设备与 crate 内 IPv4/UDP 数据路径共用的报文表示和 parser/emitter。
@@ -330,14 +331,14 @@ idle ──schedule──> scheduled ──poll──> active
 ### UDP 与 IPv4 数据路径迁出 smoltcp
 
 UDP PCB、bind 冲突检查、收发队列、IPv4 校验、分片重组、输出分片和 ICMPv4 差错均由 crate 内类型管理。
-TCP、raw IP、IPv6 和 DNS 继续通过 smoltcp socket set 推进，协议推进仍依赖显式 `poll_interfaces` 调用。
+TCP、raw IP、IPv6 和 DNS 继续通过 smoltcp socket set 推进，协议推进依赖后台 poller 调度和显式 `poll_interfaces` assist。
 该边界让 UDP 不再依赖 smoltcp socket handle，同时保留现有 TCP 和 raw socket 行为。
 
 ### NAPI 风格预算推进
 
 IRQ、socket assist、协议 timer 和后台任务共享同一个 `NetworkPoller`。scheduled 表示存在待推进工作，missed 记录 active 期间到达的新事件，active 提供单执行者约束。低于 budget 且没有 backlog 和 missed 时完成调度。active 已由其他执行者持有时，竞争者直接退出，由持有者根据 backlog 或 missed 决定后续唤醒，避免后台任务自唤醒空转。该状态机避免每个 IRQ 创建独立推进任务，同时限制单次普通任务占用数据面的时间。
 
-RX、TX 与 timer 使用独立预算。control TX 优先于 data TX，避免 ICMP 错误和协议控制流量长期滞后。socket OUT waiter 同时注册 poller TX waiter，TX dispatch 释放队列容量后执行定向唤醒。未来协议 deadline 通过 sleep future 唤醒 socket waiter，并以 `PollReason::Timer` 调度 poller。
+RX、TX 与 timer 使用独立预算。control TX 优先于 data TX，避免 ICMP 错误和协议控制流量长期滞后。TCP send 可写快路径向 smoltcp socket buffer 写入数据并调度后台 poller，连续发送由后台 owner 完成协议推进和 TX dispatch。socket OUT waiter 同时注册 poller TX waiter，TX dispatch 释放队列容量后执行定向唤醒。协议 deadline 通过 sleep future 唤醒 socket waiter，并以 `PollReason::Timer` 调度 poller。
 
 ### 控制面状态与 data-plane 同步
 
