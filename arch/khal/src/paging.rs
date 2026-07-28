@@ -113,6 +113,10 @@ pub unsafe fn unmap_kernel_leaf_4k(
 ///
 /// This is the inverse of [`unmap_kernel_leaf_4k`].
 ///
+/// # Errors
+///
+/// Returns [`PagingError`] if the map fails.
+///
 /// # Safety
 /// The caller must ensure exclusive access to the kernel page table.
 #[inline]
@@ -121,7 +125,7 @@ pub unsafe fn map_kernel_leaf_4k(
     va: VirtAddr,
     phys: PhysAddr,
     flags: MappingFlags,
-) {
+) -> PagingResult<()> {
     // The caller of this `unsafe fn` guarantees exclusive access to the kernel
     // page table, satisfying the precondition of the underlying generic.
     cfg_if::cfg_if! {

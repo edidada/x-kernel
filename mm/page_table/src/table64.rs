@@ -407,6 +407,11 @@ pub unsafe fn unmap_kernel_leaf_4k<M: PagingMetaData, PTE: PageTableEntry, H: Pa
 /// This is the inverse of [`unmap_kernel_leaf_4k`]: it restores a mapping
 /// previously removed by that function.
 ///
+/// # Errors
+///
+/// Returns [`PtError`] if the map operation fails (e.g. the VA is already
+/// mapped, or intermediate table allocation fails).
+///
 /// # Safety
 ///
 /// The caller must ensure **exclusive access** to the page table identified by
@@ -416,24 +421,11 @@ pub unsafe fn map_kernel_leaf_4k<M: PagingMetaData, PTE: PageTableEntry, H: Pagi
     va: M::VirtAddr,
     phys: PhysAddr,
     flags: PagingFlags,
-) where
-    M::VirtAddr: core::fmt::Debug,
-{
+) -> PtResult<()> {
     // SAFETY: precondition — caller guarantees exclusive access to `root`.
     let mut pt =
         core::mem::ManuallyDrop::new(unsafe { PageTable64::<M, PTE, H>::from_root(root, true) });
-    // If this fails the physical page is leaked, but in the only production
-    // call site (guard page restore during TaskStack::drop) the VA lies within
-    // the stack allocation about to be freed and the kernel page-table
-    // structure is stable across the stack's lifetime.
-    if let Err(e) = pt.modify().map(va, phys, PageSize::Size4K, flags) {
-        log::warn!(
-            "map_kernel_leaf_4k: failed to map va={:?} -> pa={:?}: {:?}",
-            va,
-            phys,
-            e,
-        );
-    }
+    pt.modify().map(va, phys, PageSize::Size4K, flags)
     // PageTableMut::Drop handles kernel TLB broadcast.
 }
 

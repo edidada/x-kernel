@@ -1121,12 +1121,19 @@ impl TaskStack {
 impl Drop for TaskStack {
     fn drop(&mut self) {
         // Restore the guard page so the virtual range is reusable before freeing.
+        // If restoration fails the guard VA is still unmapped; returning a range
+        // with an unmapped hole to the allocator would cause spurious page faults
+        // on reuse. Leak the allocation instead — this should never happen, but
+        // leaking is safer than silently corrupting the heap's VA space.
+        let mut ok = true;
         if let Some(g) = self.guard.take() {
-            remap_kernel_guard(g);
+            ok = remap_kernel_guard(g);
         }
-        // SAFETY: `ptr` and `layout` are the exact allocation pair created in
-        // `TaskStack::alloc`, and `drop` runs exactly once for this stack.
-        unsafe { alloc::alloc::dealloc(self.ptr.as_ptr(), self.layout) }
+        if ok {
+            // SAFETY: `ptr` and `layout` are the exact allocation pair created in
+            // `TaskStack::alloc`, and `drop` runs exactly once for this stack.
+            unsafe { alloc::alloc::dealloc(self.ptr.as_ptr(), self.layout) }
+        }
     }
 }
 
@@ -1159,12 +1166,24 @@ fn unmap_kernel_guard(va: usize) -> Option<GuardSlot> {
 }
 
 /// Restore the guard page cleared by [`unmap_kernel_guard`].
-fn remap_kernel_guard(g: GuardSlot) {
+///
+/// Returns `true` on success. On failure the guard VA remains unmapped; the
+/// caller (TaskStack::drop) must not return the VA range to the allocator.
+fn remap_kernel_guard(g: GuardSlot) -> bool {
     let root_phys = memaddr::PhysAddr::from_usize(kernel_root_phys());
     let _lock = GUARD_PAGE_LOCK.lock();
     // SAFETY: `GUARD_PAGE_LOCK` guarantees exclusive access (see `unmap_kernel_guard`).
-    unsafe {
-        khal::paging::map_kernel_leaf_4k(root_phys, VirtAddr::from_usize(g.va), g.phys, g.flags);
+    match unsafe {
+        khal::paging::map_kernel_leaf_4k(root_phys, VirtAddr::from_usize(g.va), g.phys, g.flags)
+    } {
+        Ok(()) => true,
+        Err(e) => {
+            error!(
+                "ktask: guard page remap failed for va={:#x}: {:?}; leaking stack allocation",
+                g.va, e,
+            );
+            false
+        }
     }
 }
 
