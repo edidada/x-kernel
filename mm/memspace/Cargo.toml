@@ -8,6 +8,7 @@ homepage.workspace = true
 
 [features]
 default = []
+vmap_stack = []
 smp = ["page_table/smp"]
 
 [dependencies]

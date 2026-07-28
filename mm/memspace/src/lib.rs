@@ -17,8 +17,10 @@ pub mod backend;
 mod cpu_residency;
 mod fault;
 mod iomap;
+mod kernel_stack;
 mod lifetime;
 mod vma;
+mod vmalloc;
 
 use kaddr_layout::{KERNEL_ASPACE_BASE, KERNEL_ASPACE_SIZE};
 use kerrno::LinuxResult;
@@ -135,6 +137,9 @@ pub fn init_memory_management() {
     unsafe { karch::write_kernel_page_table(kernel_page_table_root().into()) };
     // flush all TLB
     karch::flush_tlb(None);
+    // Register kernel stack allocator so ktask can allocate stacks without
+    // depending on memspace directly (avoids circular dep with ksync/ktask).
+    kernel_stack::register();
 }
 
 /// Initializes kernel paging for secondary CPUs.

@@ -8,14 +8,12 @@ use alloc::{boxed::Box, string::String, sync::Arc};
 #[cfg(feature = "snapshot")]
 use core::sync::atomic::AtomicU64;
 use core::{
-    alloc::Layout,
     any::Any,
     cell::{Cell, UnsafeCell},
     fmt,
     future::poll_fn,
     mem::ManuallyDrop,
     ops::Deref,
-    ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering},
     task::Poll,
 };
@@ -1075,154 +1073,28 @@ impl Drop for TaskInner {
 }
 
 struct TaskStack {
-    ptr: NonNull<u8>,
-    layout: Layout,
-    /// The unmapped guard page at the bottom of the allocation, if installed.
-    guard: Option<GuardSlot>,
-}
-
-/// Saved mapping of a stack-bottom guard page, restored on drop.
-struct GuardSlot {
-    va: usize,
-    phys: memaddr::PhysAddr,
-    flags: khal::paging::MappingFlags,
+    mapping: Option<khal::stack::KernelStackMapping>,
 }
 
 impl TaskStack {
-    /// One page is reserved at the bottom of the allocation and unmapped in the
-    /// kernel page table. Any write there (stack overflow, or an out-of-bounds
-    /// write) triggers a page fault at the writer's PC instead of silently
-    /// corrupting neighbouring memory. Works on every architecture via the
-    /// shared `page_table` walk + TLB logic.
-    const GUARD_PAGE: usize = memaddr::PAGE_SIZE_4K;
-
     pub fn alloc(size: usize) -> Self {
-        // `size` includes the guard page quota; the guard page is carved out of
-        // the allocation (first page unmapped), not added on top.  This avoids
-        // wasting a physical page per stack — see Phase 1 plan.
-        let layout = Layout::from_size_align(size, Self::GUARD_PAGE).unwrap();
-        // SAFETY: `layout` is validated above and the returned allocation is
-        // owned exclusively by this `TaskStack`.
-        let ptr = NonNull::new(unsafe { alloc::alloc::alloc(layout) }).unwrap();
-        let base = ptr.as_ptr() as usize;
+        let mapping = khal::stack::alloc(size).expect("failed to allocate kernel stack");
         Self {
-            ptr,
-            layout,
-            guard: unmap_kernel_guard(base),
+            mapping: Some(mapping),
         }
     }
 
     pub fn top(&self) -> VirtAddr {
-        // SAFETY: adding `layout.size()` to the base pointer yields the
-        // one-past-the-end stack-top address. The guard page is at the bottom
-        // (base); usable stack starts at base + GUARD_PAGE.
-        VirtAddr::from(self.ptr.as_ptr().wrapping_add(self.layout.size()) as usize)
+        self.mapping.as_ref().unwrap().top()
     }
 }
 
 impl Drop for TaskStack {
     fn drop(&mut self) {
-        // Restore the guard page so the virtual range is reusable before freeing.
-        // If restoration fails the guard VA is still unmapped; returning a range
-        // with an unmapped hole to the allocator would cause spurious page faults
-        // on reuse. Leak the allocation instead — this should never happen, but
-        // leaking is safer than silently corrupting the heap's VA space.
-        let mut ok = true;
-        if let Some(g) = self.guard.take() {
-            ok = remap_kernel_guard(g);
-        }
-        if ok {
-            // SAFETY: `ptr` and `layout` are the exact allocation pair created in
-            // `TaskStack::alloc`, and `drop` runs exactly once for this stack.
-            unsafe { alloc::alloc::dealloc(self.ptr.as_ptr(), self.layout) }
+        if let Some(m) = self.mapping.take() {
+            khal::stack::free(m);
         }
     }
-}
-
-/// Serializes guard-page unmap/remap operations on the live kernel page table.
-/// Without this lock, two CPUs allocating or freeing task stacks concurrently
-/// could create overlapping `&mut` references to the same page table entries
-/// via separate `PageTableMut` handles on the same root.
-static GUARD_PAGE_LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
-
-/// Unmap the 4 KiB kernel page at `va` (the guard page). Returns its mapping so
-/// it can be restored by [`remap_kernel_guard`]. Returns `None` if the page is
-/// not a 4 KiB leaf (e.g. covered by a huge mapping) or the paging handler is
-/// not ready yet (early boot).
-fn unmap_kernel_guard(va: usize) -> Option<GuardSlot> {
-    let root_phys = memaddr::PhysAddr::from_usize(kernel_root_phys());
-    // SAFETY: `GUARD_PAGE_LOCK` guarantees exclusive access to the kernel page
-    // table root for guard page operations across all CPUs. The TLB flush is
-    // deferred until after the lock is released so that other CPUs spinning on
-    // this lock with IRQs disabled can still receive the TLB IPI.
-    let (result, mut flush) = {
-        let _lock = GUARD_PAGE_LOCK.lock();
-        // SAFETY: `GUARD_PAGE_LOCK` guarantees exclusive access to the kernel
-        // page table for guard page operations across all CPUs.
-        unsafe { khal::paging::unmap_kernel_leaf_4k(root_phys, VirtAddr::from_usize(va)) }
-    };
-    // TLB shootdown must happen outside the lock: `flush_tlb_all_cpus` sends
-    // synchronous IPIs; if another CPU is waiting for GUARD_PAGE_LOCK with IRQs
-    // off it could never acknowledge.
-    flush.execute();
-    match result {
-        Some((phys, flags)) => Some(GuardSlot { va, phys, flags }),
-        None => {
-            warn!(
-                "ktask: guard page unmap failed for va={:#x}; stack overflow protection disabled",
-                va,
-            );
-            None
-        }
-    }
-}
-
-/// Restore the guard page cleared by [`unmap_kernel_guard`].
-///
-/// Returns `true` on success. On failure the guard VA remains unmapped; the
-/// caller (TaskStack::drop) must not return the VA range to the allocator.
-fn remap_kernel_guard(g: GuardSlot) -> bool {
-    let root_phys = memaddr::PhysAddr::from_usize(kernel_root_phys());
-    // SAFETY: see `unmap_kernel_guard` — lock serialises PTE access, TLB flush
-    // is deferred outside the lock.
-    let (result, mut flush) = {
-        let _lock = GUARD_PAGE_LOCK.lock();
-        // SAFETY: `GUARD_PAGE_LOCK` guarantees exclusive access (see `unmap_kernel_guard`).
-        unsafe {
-            khal::paging::map_kernel_leaf_4k(root_phys, VirtAddr::from_usize(g.va), g.phys, g.flags)
-        }
-    };
-    flush.execute();
-    match result {
-        Ok(()) => true,
-        Err(e) => {
-            error!(
-                "ktask: guard page remap failed for va={:#x}: {:?}; leaking stack allocation",
-                g.va, e,
-            );
-            false
-        }
-    }
-}
-
-/// Page-aligned physical address of the live kernel page-table root.
-///
-/// Cached from the first call (boot path, before any user process exists)
-/// because on x86_64 and RISC-V `read_kernel_page_table()` reads the shared
-/// kernel+user root register (CR3 / satp), which after a user process switch
-/// points to the user's page table — **not** the master kernel page table
-/// owned by `KERNEL_ASPACE`. AArch64 and LoongArch64 have dedicated kernel
-/// root registers (TTBR1 / PGDH) and are not affected.
-fn kernel_root_phys() -> usize {
-    use core::sync::atomic::{AtomicU64, Ordering};
-    static ROOT: AtomicU64 = AtomicU64::new(0);
-    let root = ROOT.load(Ordering::Relaxed) as usize;
-    if root != 0 {
-        return root;
-    }
-    let root = karch::read_kernel_page_table().as_usize() & !(memaddr::PAGE_SIZE_4K - 1);
-    ROOT.store(root as u64, Ordering::Relaxed);
-    root
 }
 
 /// A wrapper of [`KtaskRef`] as the current task.
@@ -1374,50 +1246,23 @@ mod tests_on_cpu_mask {
 
 #[cfg(unittest)]
 mod tests_task_stack {
-    use unittest::{assert_eq, def_test};
+    use unittest::def_test;
 
     use super::*;
 
-    /// Allocating and dropping a `TaskStack` must succeed; the guard page
-    /// may be absent (e.g. early boot before the paging handler is ready)
-    /// but the data-structure invariants must hold.
     #[def_test]
     fn task_stack_alloc_drop_roundtrip() {
         for size in [0x1000, 0x4000, 0x10000, 0x20000] {
             let stack = TaskStack::alloc(size);
-            // `size` is the total allocation (guard page included).
-            assert_eq!(stack.layout.size(), size);
-            let base = stack.ptr.as_ptr() as usize;
-            let expected_top = base + size;
-            assert_eq!(
-                stack.top().as_usize(),
-                expected_top,
-                "top() should return base + size (guard included in allocation)"
-            );
+            // `top()` must return a valid address ≥ size (stack grows down).
+            assert!(stack.top().as_usize() >= size);
             core::mem::drop(stack);
         }
     }
 
-    /// The guard page fills exactly one page at the bottom of the allocation.
-    /// Verify the alignment invariant: the allocation is page-aligned, so the
-    /// guard page is exactly one whole page.
-    #[def_test]
-    fn guard_page_is_page_aligned() {
-        let stack = TaskStack::alloc(0x4000);
-        let base = stack.ptr.as_ptr() as usize;
-        assert_eq!(
-            base % memaddr::PAGE_SIZE_4K,
-            0,
-            "stack allocation must be page-aligned so the guard page covers exactly one page"
-        );
-        core::mem::drop(stack);
-    }
-
-    // Writing to the guard page must trigger a page fault at the writer's PC
-    // instead of silently corrupting adjacent memory. This is validated at
-    // runtime by the kernel fault handler whenever a stack overflows; a unit
-    // test cannot install a kernel page table and therefore cannot reproduce
-    // the exact fault path. The guard page may legitimately not be installed
-    // when the VA is covered by a huge page or the paging handler is not yet
-    // initialised (early boot) — a warning is logged in those cases.
+    // When VMAP_STACK=n there is no guard page — stack overflow silently
+    // corrupts adjacent memory (the trade-off for zero page-table overhead).
+    // When VMAP_STACK=y the guard page is a pure VA hole managed by memspace;
+    // any write triggers a page fault at the writer's PC.  Integration tests
+    // on QEMU verify this behaviour.
 }

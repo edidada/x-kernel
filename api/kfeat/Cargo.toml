@@ -75,6 +75,9 @@ alloc_slab = ["alloc", "alloc-engine/slab", "kalloc/slab"]
 alloc_buddy = ["alloc", "alloc-engine/buddy", "kalloc/buddy"]
 dma = []
 
+# Kernel stack
+vmap_stack = ["memspace/vmap_stack"]
+
 # Task scheduler (driven by core/ktask/Kconfig)
 sched_fifo = ["ktask/sched_fifo"]
 sched_rr = ["ktask/sched_rr"]

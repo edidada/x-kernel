@@ -181,6 +181,16 @@ config BOOT_STACK_SIZE
     help
       Specify the stack size for the boot process in bytes.
 
+config KFEAT_VMAP_STACK
+    bool "Virtually-mapped kernel stacks with guard pages"
+    default y
+    help
+      Allocate kernel stacks from a dedicated virtual address arena with
+      a guard page as a pure VA hole (no physical page consumed).
+      Per‑CPU caching avoids repeated TLB shootdown on task create/destroy.
+
+      When disabled, stacks come from the global heap with no guard page.
+
 config NR_CPUS
     usize "Maximum number of CPUs (NR_CPUS)"
     range 1 8
