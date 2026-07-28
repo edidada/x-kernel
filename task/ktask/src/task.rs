@@ -1097,9 +1097,10 @@ impl TaskStack {
     const GUARD_PAGE: usize = memaddr::PAGE_SIZE_4K;
 
     pub fn alloc(size: usize) -> Self {
-        let total = size + Self::GUARD_PAGE;
-        // page-aligned so the guard page is exactly one whole page
-        let layout = Layout::from_size_align(total, Self::GUARD_PAGE).unwrap();
+        // `size` includes the guard page quota; the guard page is carved out of
+        // the allocation (first page unmapped), not added on top.  This avoids
+        // wasting a physical page per stack — see Phase 1 plan.
+        let layout = Layout::from_size_align(size, Self::GUARD_PAGE).unwrap();
         // SAFETY: `layout` is validated above and the returned allocation is
         // owned exclusively by this `TaskStack`.
         let ptr = NonNull::new(unsafe { alloc::alloc::alloc(layout) }).unwrap();
@@ -1112,8 +1113,9 @@ impl TaskStack {
     }
 
     pub fn top(&self) -> VirtAddr {
-        // SAFETY: adding `layout.size()` (usable + guard page) to the base
-        // pointer yields the one-past-the-end stack-top address.
+        // SAFETY: adding `layout.size()` to the base pointer yields the
+        // one-past-the-end stack-top address. The guard page is at the bottom
+        // (base); usable stack starts at base + GUARD_PAGE.
         VirtAddr::from(self.ptr.as_ptr().wrapping_add(self.layout.size()) as usize)
     }
 }
@@ -1149,11 +1151,21 @@ static GUARD_PAGE_LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
 /// not ready yet (early boot).
 fn unmap_kernel_guard(va: usize) -> Option<GuardSlot> {
     let root_phys = memaddr::PhysAddr::from_usize(kernel_root_phys());
-    let _lock = GUARD_PAGE_LOCK.lock();
     // SAFETY: `GUARD_PAGE_LOCK` guarantees exclusive access to the kernel page
-    // table root for guard page operations across all CPUs. No other subsystem
-    // modifies PTEs in the task-stack VA range.
-    match unsafe { khal::paging::unmap_kernel_leaf_4k(root_phys, VirtAddr::from_usize(va)) } {
+    // table root for guard page operations across all CPUs. The TLB flush is
+    // deferred until after the lock is released so that other CPUs spinning on
+    // this lock with IRQs disabled can still receive the TLB IPI.
+    let (result, mut flush) = {
+        let _lock = GUARD_PAGE_LOCK.lock();
+        // SAFETY: `GUARD_PAGE_LOCK` guarantees exclusive access to the kernel
+        // page table for guard page operations across all CPUs.
+        unsafe { khal::paging::unmap_kernel_leaf_4k(root_phys, VirtAddr::from_usize(va)) }
+    };
+    // TLB shootdown must happen outside the lock: `flush_tlb_all_cpus` sends
+    // synchronous IPIs; if another CPU is waiting for GUARD_PAGE_LOCK with IRQs
+    // off it could never acknowledge.
+    flush.execute();
+    match result {
         Some((phys, flags)) => Some(GuardSlot { va, phys, flags }),
         None => {
             warn!(
@@ -1171,11 +1183,17 @@ fn unmap_kernel_guard(va: usize) -> Option<GuardSlot> {
 /// caller (TaskStack::drop) must not return the VA range to the allocator.
 fn remap_kernel_guard(g: GuardSlot) -> bool {
     let root_phys = memaddr::PhysAddr::from_usize(kernel_root_phys());
-    let _lock = GUARD_PAGE_LOCK.lock();
-    // SAFETY: `GUARD_PAGE_LOCK` guarantees exclusive access (see `unmap_kernel_guard`).
-    match unsafe {
-        khal::paging::map_kernel_leaf_4k(root_phys, VirtAddr::from_usize(g.va), g.phys, g.flags)
-    } {
+    // SAFETY: see `unmap_kernel_guard` — lock serialises PTE access, TLB flush
+    // is deferred outside the lock.
+    let (result, mut flush) = {
+        let _lock = GUARD_PAGE_LOCK.lock();
+        // SAFETY: `GUARD_PAGE_LOCK` guarantees exclusive access (see `unmap_kernel_guard`).
+        unsafe {
+            khal::paging::map_kernel_leaf_4k(root_phys, VirtAddr::from_usize(g.va), g.phys, g.flags)
+        }
+    };
+    flush.execute();
+    match result {
         Ok(()) => true,
         Err(e) => {
             error!(
@@ -1367,16 +1385,15 @@ mod tests_task_stack {
     fn task_stack_alloc_drop_roundtrip() {
         for size in [0x1000, 0x4000, 0x10000, 0x20000] {
             let stack = TaskStack::alloc(size);
-            assert_eq!(stack.layout.size(), size + TaskStack::GUARD_PAGE);
+            // `size` is the total allocation (guard page included).
+            assert_eq!(stack.layout.size(), size);
             let base = stack.ptr.as_ptr() as usize;
-            let expected_top = base + size + TaskStack::GUARD_PAGE;
+            let expected_top = base + size;
             assert_eq!(
                 stack.top().as_usize(),
                 expected_top,
-                "top() should return base + usable + guard"
+                "top() should return base + size (guard included in allocation)"
             );
-            // `drop` restores the guard page (if it was installed) and frees
-            // the allocation.
             core::mem::drop(stack);
         }
     }

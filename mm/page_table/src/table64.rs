@@ -384,7 +384,7 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
 pub unsafe fn unmap_kernel_leaf_4k<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler>(
     root: PhysAddr,
     va: M::VirtAddr,
-) -> Option<(PhysAddr, PagingFlags)> {
+) -> (Option<(PhysAddr, PagingFlags)>, KernelTlbFlush) {
     // SAFETY: precondition — caller guarantees exclusive access to `root`.
     let mut pt =
         core::mem::ManuallyDrop::new(unsafe { PageTable64::<M, PTE, H>::from_root(root, true) });
@@ -392,20 +392,31 @@ pub unsafe fn unmap_kernel_leaf_4k<M: PagingMetaData, PTE: PageTableEntry, H: Pa
     // the PTE before returning the page size. If `va` is covered by a huge page
     // (2 MiB / 1 GiB), we must not touch it at all.
     if !matches!(pt.query(va), Ok((_, _, PageSize::Size4K))) {
-        return None;
+        return (None, KernelTlbFlush::none());
     }
     // Now safe to unmap: we know the leaf is exactly 4 KiB.
-    match pt.modify().unmap(va) {
+    let mut pt_mut = pt.modify();
+    let result = match pt_mut.unmap(va) {
         Ok((phys, flags, _)) => Some((phys, flags)),
         _ => None,
-    }
-    // PageTableMut::Drop handles kernel TLB broadcast.
+    };
+    // Steal the flush state so PageTableMut::Drop does NOT do a synchronous
+    // TLB shootdown inside the caller's lock.  The caller must execute the
+    // flush after releasing any IRQ-disabling locks.
+    let flush = match pt_mut.take_flush_state() {
+        ToFlush::None => KernelTlbFlush::none(),
+        _ => KernelTlbFlush::new::<M>(),
+    };
+    (result, flush)
 }
 
 /// Map a single 4 KiB leaf into any page table given its physical root.
 ///
 /// This is the inverse of [`unmap_kernel_leaf_4k`]: it restores a mapping
 /// previously removed by that function.
+///
+/// Returns a [`KernelTlbFlush`] token whose [`execute`](KernelTlbFlush::execute)
+/// must be called **after** releasing any lock that disables local IRQs.
 ///
 /// # Errors
 ///
@@ -421,12 +432,18 @@ pub unsafe fn map_kernel_leaf_4k<M: PagingMetaData, PTE: PageTableEntry, H: Pagi
     va: M::VirtAddr,
     phys: PhysAddr,
     flags: PagingFlags,
-) -> PtResult<()> {
+) -> (PtResult<()>, KernelTlbFlush) {
     // SAFETY: precondition — caller guarantees exclusive access to `root`.
     let mut pt =
         core::mem::ManuallyDrop::new(unsafe { PageTable64::<M, PTE, H>::from_root(root, true) });
-    pt.modify().map(va, phys, PageSize::Size4K, flags)
-    // PageTableMut::Drop handles kernel TLB broadcast.
+    let mut pt_mut = pt.modify();
+    let result = pt_mut.map(va, phys, PageSize::Size4K, flags);
+    // Steal flush state — see unmap_kernel_leaf_4k.
+    let flush = match pt_mut.take_flush_state() {
+        ToFlush::None => KernelTlbFlush::none(),
+        _ => KernelTlbFlush::new::<M>(),
+    };
+    (result, flush)
 }
 
 impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop for PageTable64<M, PTE, H> {
@@ -452,6 +469,62 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop for PageTabl
 }
 
 const FLUSH_THRESHOLD: usize = 16;
+
+/// Deferred kernel TLB shootdown token.
+///
+/// Created when a guard‑page mutation clears a kernel PTE.  Carries a
+/// monomorphized function pointer that will execute the architecture‑specific
+/// `flush_tlb_all_cpus(None)` without the caller needing to know the concrete
+/// `M: PagingMetaData` type.
+///
+/// The caller **must** call [`execute`](Self::execute) **after** releasing any
+/// lock that disables local IRQs (e.g. `SpinNoIrq`).  Calling it inside such a
+/// lock may deadlock: the synchronous TLB IPI handshake waits for remote CPUs
+/// that may be spinning on the same lock with IRQs off.
+#[must_use]
+pub struct KernelTlbFlush {
+    do_flush: Option<fn()>,
+}
+
+impl KernelTlbFlush {
+    pub(crate) fn none() -> Self {
+        Self { do_flush: None }
+    }
+
+    /// Create a token that will call `M::flush_tlb_all_cpus(None)` on
+    /// [`execute`](Self::execute).  `M` is captured at monomorphization time
+    /// so the caller never needs to name it.
+    pub(crate) fn new<M: PagingMetaData>() -> Self {
+        fn do_flush<M: PagingMetaData>() {
+            M::flush_tlb_all_cpus(None);
+        }
+        Self {
+            do_flush: Some(do_flush::<M>),
+        }
+    }
+
+    /// Execute the deferred TLB shootdown.  Safe to call more than once
+    /// (subsequent calls are no‑ops after the first).
+    pub fn execute(&mut self) {
+        if let Some(f) = self.do_flush.take() {
+            f();
+        }
+    }
+}
+
+impl Drop for KernelTlbFlush {
+    fn drop(&mut self) {
+        // If the caller forgets to call execute(), do the flush here — but
+        // warn because the caller may be inside a lock that disables IRQs.
+        if self.do_flush.is_some() {
+            log::warn!(
+                "KernelTlbFlush dropped without explicit execute(); TLB shootdown may deadlock if \
+                 called inside an IRQ-disabling lock"
+            );
+            self.execute();
+        }
+    }
+}
 
 enum ToFlush<M: PagingMetaData> {
     None,
@@ -525,6 +598,13 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
             }
             ToFlush::Full => {}
         }
+    }
+
+    /// Take the pending TLB-flush state, replacing it with [`ToFlush::None`].
+    /// After this call, [`Drop`] is a no-op — the caller is responsible for
+    /// executing the returned flush (if any) at the right time.
+    fn take_flush_state(&mut self) -> ToFlush<M> {
+        core::mem::replace(&mut self.flush, ToFlush::None)
     }
 
     fn table_of_mut(&mut self, paddr: PhysAddr) -> &'a mut [PTE] {
