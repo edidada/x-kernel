@@ -6,6 +6,8 @@ use alloc::sync::Arc;
 
 use kvfs::{DirMaker, DirMapping, NodeType, SimpleDir, SimpleDirOps, SimpleFile, SimpleFs};
 
+#[cfg(feature = "net")]
+use crate::net_nodes;
 use crate::{basic_nodes, device_nodes, irq_nodes, mem_nodes, task_nodes, trace_nodes};
 
 pub fn builder(fs: Arc<SimpleFs>) -> DirMaker {
@@ -15,6 +17,8 @@ pub fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     device_nodes::root::add_root_entries(&mut root, fs.clone());
     irq_nodes::root::add_root_entries(&mut root, fs.clone());
     mem_nodes::root::add_root_entries(&mut root, fs.clone());
+    #[cfg(feature = "net")]
+    net_nodes::root::add_root_entries(&mut root, fs.clone());
     root.add(
         "mounts",
         SimpleFile::new(fs.clone(), NodeType::Symlink, || Ok("self/mounts")),

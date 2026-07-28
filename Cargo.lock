@@ -3815,6 +3815,7 @@ dependencies = [
  "kdevice",
  "khal",
  "klockstat",
+ "knet",
  "kprocess",
  "ktask",
  "ktracing",

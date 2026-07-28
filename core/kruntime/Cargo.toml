@@ -31,7 +31,7 @@ fs9p = [
 ]
 fs_times = ["fs", "rsext4_vfs?/times", "kext4_vfs?/times"]
 fs_ebpf = ["fs", "fs_boot/ebpf"]
-net = ["kdriver/net", "dep:knet"]
+net = ["kdriver/net", "dep:knet", "fs_boot?/net"]
 vsock = ["net", "kdriver/vsock"]
 vsock_tipc_bridge = []
 

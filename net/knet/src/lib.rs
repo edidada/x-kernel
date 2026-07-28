@@ -21,6 +21,7 @@ mod device;
 mod ip;
 mod link;
 pub mod netlink;
+pub use netlink::route_state;
 mod socket;
 mod stack;
 mod transport;

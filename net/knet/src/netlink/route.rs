@@ -656,7 +656,7 @@ fn error_packets(request: &[u8], errno: LinuxError) -> Vec<NetlinkPacket> {
     }]
 }
 
-pub(crate) fn route_state() -> RtnetlinkState {
+pub fn route_state() -> RtnetlinkState {
     if ROUTE_STATE.is_inited() {
         (*ROUTE_STATE.read()).clone()
     } else {

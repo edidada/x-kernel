@@ -11,6 +11,7 @@ homepage.workspace = true
 default = []
 ebpf = ["dep:bpffs"]
 fs9p = ["dep:v9fs", "kclass/virtio-9p"]
+net = ["procfs/net"]
 rootfs-secondary-block = []
 
 [dependencies]
