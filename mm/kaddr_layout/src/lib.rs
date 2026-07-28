@@ -24,6 +24,7 @@ pub struct LayoutConsts {
     pub iomap_vsize: usize,
     pub kimage_vaddr: usize,
     pub kimage_vsize: usize,
+    pub vmalloc_base: usize,
 }
 
 /// User-space virtual memory layout constants (per-architecture).
@@ -93,6 +94,7 @@ pub const IOMAP_VADDR: usize = CURRENT_LAYOUT.iomap_vaddr;
 pub const IOMAP_VSIZE: usize = CURRENT_LAYOUT.iomap_vsize;
 pub const KIMAGE_VADDR: usize = CURRENT_LAYOUT.kimage_vaddr;
 pub const KIMAGE_VSIZE: usize = CURRENT_LAYOUT.kimage_vsize;
+pub const VMALLOC_BASE: usize = CURRENT_LAYOUT.vmalloc_base;
 pub const BOOT_IO_VADDR: usize = IOMAP_VADDR;
 pub const BOOT_IO_VSIZE: usize = IOMAP_VSIZE;
 

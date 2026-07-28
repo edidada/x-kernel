@@ -24,6 +24,7 @@ pub const LAYOUT: LayoutConsts = LayoutConsts {
     iomap_vsize: 0x0000_0000_2000_0000,
     kimage_vaddr: 0xffff_ffe0_0000_0000,
     kimage_vsize: 0x0000_0000_2000_0000,
+    vmalloc_base: 0xffff_ffe0_4000_0000, // iomap end
 };
 
 // RISC-V Sv39 user VA layout (low half, 38-bit):

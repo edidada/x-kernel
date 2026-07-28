@@ -6,7 +6,7 @@
 
 use alloc::vec::Vec;
 
-use kaddr_layout::{IOMAP_VADDR, IOMAP_VSIZE, KERNEL_ASPACE_BASE, KERNEL_ASPACE_SIZE};
+use kaddr_layout::{KERNEL_ASPACE_BASE, KERNEL_ASPACE_SIZE, VMALLOC_BASE};
 use kalloc::global_allocator;
 use kerrno::{KError, KResult};
 use khal::{mem::v2p, paging::MappingFlags};
@@ -20,9 +20,9 @@ pub struct VmRegion {
 }
 
 fn vmalloc_range() -> VirtAddrRange {
-    let after_fixed = IOMAP_VADDR + IOMAP_VSIZE;
-    let remaining = KERNEL_ASPACE_SIZE.saturating_sub(after_fixed - KERNEL_ASPACE_BASE);
-    VirtAddrRange::from_start_size(VirtAddr::from(after_fixed), remaining)
+    let start = VirtAddr::from(VMALLOC_BASE);
+    let end = VirtAddr::from(KERNEL_ASPACE_BASE) + KERNEL_ASPACE_SIZE;
+    VirtAddrRange::from_start_size(start, end.as_usize().saturating_sub(VMALLOC_BASE))
 }
 
 pub fn alloc(size: usize, guard_pages: usize) -> KResult<(VmRegion, Vec<usize>)> {
