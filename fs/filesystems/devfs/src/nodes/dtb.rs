@@ -9,8 +9,13 @@ use lazyinit::LazyInit;
 
 use crate::{DeviceFile, add_device_entry};
 
-/// Decode a big-endian u32 from an unaligned byte pointer (like Linux libfdt's
-/// `fdt32_ld`).  Safe to call on any readable pointer regardless of alignment.
+/// Decode a big-endian u32 from a byte pointer (like Linux libfdt's `fdt32_ld`).
+///
+/// Tolerates unaligned pointers by reading `[u8; 4]` (alignment 1).
+///
+/// # Safety
+///
+/// `p..p+4` must be within a valid readable memory region.
 unsafe fn read_be_u32(p: *const u8) -> u32 {
     // SAFETY: caller guarantees `p..p+4` is readable.
     let bytes = unsafe { core::ptr::read_volatile(p as *const [u8; 4]) };

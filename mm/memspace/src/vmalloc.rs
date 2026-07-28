@@ -27,6 +27,9 @@ fn vmalloc_range() -> VirtAddrRange {
 
 pub fn alloc(size: usize, guard_pages: usize) -> KResult<(VmRegion, Vec<usize>)> {
     let guard = guard_pages * PAGE_SIZE_4K;
+    if size <= guard {
+        return Err(KError::NoMemory);
+    }
     let nr_pages = (size - guard) / PAGE_SIZE_4K;
 
     let mut aspace = kernel_layout().lock();
@@ -38,18 +41,40 @@ pub fn alloc(size: usize, guard_pages: usize) -> KResult<(VmRegion, Vec<usize>)>
     let mut dm_vas = Vec::with_capacity(nr_pages);
     for i in 0..nr_pages {
         let page_va = va + guard + i * PAGE_SIZE_4K;
-        let dm_va = global_allocator()
-            .alloc_pages(1, PAGE_SIZE_4K, kalloc::UsageKind::VirtMem)
-            .map_err(|_| KError::NoMemory)?;
+        let dm_va =
+            match global_allocator().alloc_pages(1, PAGE_SIZE_4K, kalloc::UsageKind::VirtMem) {
+                Ok(v) => v,
+                Err(_) => {
+                    // Unwind: unmap + free already-mapped pages.
+                    if i > 0 {
+                        let _ = aspace.unmap(va + guard, i * PAGE_SIZE_4K);
+                    }
+                    for v in dm_vas {
+                        global_allocator().dealloc_pages(v, 1, kalloc::UsageKind::VirtMem);
+                    }
+                    return Err(KError::NoMemory);
+                }
+            };
         let pa = v2p(VirtAddr::from(dm_va));
-        aspace
+        if aspace
             .map_linear(
                 page_va,
                 pa,
                 PAGE_SIZE_4K,
                 MappingFlags::READ | MappingFlags::WRITE,
             )
-            .map_err(|_| KError::NoMemory)?;
+            .is_err()
+        {
+            // `dm_va` not pushed to vec yet; free it + unwind prior pages.
+            global_allocator().dealloc_pages(dm_va, 1, kalloc::UsageKind::VirtMem);
+            if i > 0 {
+                let _ = aspace.unmap(va + guard, i * PAGE_SIZE_4K);
+            }
+            for v in dm_vas {
+                global_allocator().dealloc_pages(v, 1, kalloc::UsageKind::VirtMem);
+            }
+            return Err(KError::NoMemory);
+        }
         dm_vas.push(dm_va);
     }
 
@@ -58,11 +83,19 @@ pub fn alloc(size: usize, guard_pages: usize) -> KResult<(VmRegion, Vec<usize>)>
 
 pub fn free(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
     let guard = guard_pages * PAGE_SIZE_4K;
+    if region.size <= guard {
+        return;
+    }
     let usable = region.size - guard;
     let usable_start = region.va + guard;
 
     let mut aspace = kernel_layout().lock();
-    let _ = aspace.unmap(usable_start, usable);
+    if let Err(e) = aspace.unmap(usable_start, usable) {
+        warn!(
+            "vmalloc::free: unmap {:?} size {:#x} failed: {:?}",
+            usable_start, usable, e
+        );
+    }
     drop(aspace);
 
     for dm_va in pages {

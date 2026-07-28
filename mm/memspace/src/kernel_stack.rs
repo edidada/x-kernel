@@ -56,10 +56,12 @@ fn free_heap(mapping: KernelStackMapping) {
 
 #[allow(dead_code)]
 fn alloc_vm(size: usize) -> KResult<KernelStackMapping> {
-    let (region, pages) = crate::vmalloc::alloc(size, /* guard_pages */ 1)?;
+    // `size` is the requested usable stack; we add one guard page on top.
+    let total = size + memaddr::PAGE_SIZE_4K;
+    let (region, pages) = crate::vmalloc::alloc(total, /* guard_pages */ 1)?;
     Ok(KernelStackMapping {
         va: region.va,
-        size: region.size,
+        size: total,
         guard_size: memaddr::PAGE_SIZE_4K,
         pages,
     })
@@ -67,12 +69,13 @@ fn alloc_vm(size: usize) -> KResult<KernelStackMapping> {
 
 #[allow(dead_code)]
 fn free_vm(mapping: KernelStackMapping) {
+    let guard_pages = mapping.guard_size / memaddr::PAGE_SIZE_4K;
     crate::vmalloc::free(
         crate::vmalloc::VmRegion {
             va: mapping.va,
             size: mapping.size,
         },
-        1,
+        guard_pages,
         mapping.pages,
     );
 }

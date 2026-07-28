@@ -41,16 +41,13 @@ impl KernelStackMapping {
 // ── Backing allocator ─────────────────────────────────────────────────
 
 struct StackOps {
-    alloc: unsafe fn(usize) -> KResult<KernelStackMapping>,
-    free: unsafe fn(KernelStackMapping),
+    alloc: fn(usize) -> KResult<KernelStackMapping>,
+    free: fn(KernelStackMapping),
 }
 
 static OPS: LazyInit<StackOps> = LazyInit::new();
 
-pub fn register_ops(
-    alloc: unsafe fn(usize) -> KResult<KernelStackMapping>,
-    free: unsafe fn(KernelStackMapping),
-) {
+pub fn register_ops(alloc: fn(usize) -> KResult<KernelStackMapping>, free: fn(KernelStackMapping)) {
     OPS.init_once(StackOps { alloc, free });
 }
 
@@ -84,7 +81,6 @@ impl StackCache {
     fn push(&mut self, m: KernelStackMapping) -> Option<KernelStackMapping> {
         for slot in &mut self.slots {
             if slot.is_none() {
-                // Zero the stack before caching (no data leak between tasks).
                 let start = m.usable_start().as_usize();
                 let len = m.usable_size();
                 // SAFETY: the usable range is mapped and owned by this stack.
@@ -108,13 +104,11 @@ pub fn alloc(size: usize) -> KResult<KernelStackMapping> {
     if let Some(m) = with_cache(|c| c.take()) {
         return Ok(m);
     }
-    // SAFETY: ops registered at boot before any task stack is allocated.
-    unsafe { (ops().alloc)(size) }
+    (ops().alloc)(size)
 }
 
 pub fn free(mapping: KernelStackMapping) {
     if let Some(m) = with_cache(|c| c.push(mapping)) {
-        // SAFETY: mapping returned by `alloc`; ops registered at boot.
-        unsafe { (ops().free)(m) }
+        (ops().free)(m)
     }
 }
