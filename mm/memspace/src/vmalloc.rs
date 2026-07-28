@@ -14,15 +14,11 @@ use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 
 use crate::kernel_layout;
 
-/// A virtually-contiguous allocation.
 pub struct VmRegion {
     pub va: VirtAddr,
     pub size: usize,
 }
 
-/// VA range for vmalloc: starts above the iomap window so `unmap` does
-/// not destroy direct-map PTEs (`KERNEL_ASPACE_BASE == linear_map_vaddr`
-/// on all architectures).
 fn vmalloc_range() -> VirtAddrRange {
     let after_fixed = IOMAP_VADDR + IOMAP_VSIZE;
     let remaining = KERNEL_ASPACE_SIZE.saturating_sub(after_fixed - KERNEL_ASPACE_BASE);
@@ -31,8 +27,7 @@ fn vmalloc_range() -> VirtAddrRange {
 
 pub fn alloc(size: usize, guard_pages: usize) -> KResult<(VmRegion, Vec<usize>)> {
     let guard = guard_pages * PAGE_SIZE_4K;
-    let usable = size - guard;
-    let nr_pages = usable / PAGE_SIZE_4K;
+    let nr_pages = (size - guard) / PAGE_SIZE_4K;
 
     let mut aspace = kernel_layout().lock();
     let limit = vmalloc_range();
@@ -40,7 +35,7 @@ pub fn alloc(size: usize, guard_pages: usize) -> KResult<(VmRegion, Vec<usize>)>
         .find_free_area(limit.start, size, limit, PAGE_SIZE_4K)
         .ok_or(KError::NoMemory)?;
 
-    let mut pages = Vec::with_capacity(nr_pages);
+    let mut dm_vas = Vec::with_capacity(nr_pages);
     for i in 0..nr_pages {
         let page_va = va + guard + i * PAGE_SIZE_4K;
         let dm_va = global_allocator()
@@ -55,10 +50,10 @@ pub fn alloc(size: usize, guard_pages: usize) -> KResult<(VmRegion, Vec<usize>)>
                 MappingFlags::READ | MappingFlags::WRITE,
             )
             .map_err(|_| KError::NoMemory)?;
-        pages.push(dm_va);
+        dm_vas.push(dm_va);
     }
 
-    Ok((VmRegion { va, size }, pages))
+    Ok((VmRegion { va, size }, dm_vas))
 }
 
 pub fn free(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
@@ -68,6 +63,8 @@ pub fn free(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
 
     let mut aspace = kernel_layout().lock();
     let _ = aspace.unmap(usable_start, usable);
+    drop(aspace);
+
     for dm_va in pages {
         global_allocator().dealloc_pages(dm_va, 1, kalloc::UsageKind::VirtMem);
     }
