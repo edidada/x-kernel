@@ -11,9 +11,9 @@
 use alloc::vec::Vec;
 
 use kerrno::KResult;
+use kspin::NoPreempt;
 use lazyinit::LazyInit;
 use memaddr::VirtAddr;
-
 /// Handle to an allocated kernel stack.  Owns the physical-page handles
 /// so `free` can dealloc without walking the page table.
 #[derive(Debug)]
@@ -57,6 +57,11 @@ fn ops() -> &'static StackOps {
 }
 
 // ── Per‑CPU cache ─────────────────────────────────────────────────────
+//
+// Only stacks of `KERNEL_STACK_SIZE` are cached — they dominate the
+// allocation churn (every user-task create/destroy).  Small kernel
+// threads (e.g. migration) use custom sizes and bypass the cache
+// so a 4 KiB slot can never be returned for a 256 KiB request.
 
 const CACHE_SLOTS: usize = 2;
 
@@ -98,16 +103,29 @@ fn with_cache<R>(f: impl FnOnce(&mut StackCache) -> R) -> R {
     f(unsafe { &mut *CACHE.current_ref_mut_raw() })
 }
 
+/// Only the standard user-task stack size is cache-worthy.
+fn cacheable(size: usize) -> bool {
+    size == kbuild_config::KERNEL_STACK_SIZE
+}
+
 // ── Public API ────────────────────────────────────────────────────────
 
 pub fn alloc(size: usize) -> KResult<KernelStackMapping> {
-    if let Some(m) = with_cache(|c| c.take()) {
+    let _guard = NoPreempt::new();
+    if cacheable(size)
+        && let Some(m) = with_cache(|c| c.take())
+    {
         return Ok(m);
     }
     (ops().alloc)(size)
 }
 
 pub fn free(mapping: KernelStackMapping) {
+    let _guard = NoPreempt::new();
+    if !cacheable(mapping.usable_size()) {
+        (ops().free)(mapping);
+        return;
+    }
     if let Some(m) = with_cache(|c| c.push(mapping)) {
         (ops().free)(m)
     }
