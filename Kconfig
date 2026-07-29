@@ -183,7 +183,7 @@ config BOOT_STACK_SIZE
 
 config KFEAT_VMAP_STACK
     bool "Virtually-mapped kernel stacks with guard pages"
-    default y
+    default n
     help
       Allocate kernel stacks from a dedicated virtual address arena with
       a guard page as a pure VA hole (no physical page consumed).
