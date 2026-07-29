@@ -22,7 +22,10 @@ use crate::{
     LISTEN_TABLE,
     buf::{PacketBuf, PacketOwner},
     consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
-    device::{LinkKind, LinkSnapshot, NeighborUpdate, NetDevice},
+    device::{
+        LinkConfigUpdate, LinkKind, LinkSnapshot, NeighborUpdate, NetDevice,
+        validate_interface_name,
+    },
     ip::{IpAddress, IpCidr, Ipv4Cidr},
     udp, udp_err,
 };
@@ -369,13 +372,6 @@ impl Router {
         dev < self.devices.len()
     }
 
-    pub fn is_device_name_in_use(&self, dev: usize, name: &str) -> bool {
-        self.devices
-            .iter()
-            .enumerate()
-            .any(|(other_dev, device)| other_dev != dev && device.name() == name)
-    }
-
     pub fn ipv4_addr_entries(&self) -> &[Ipv4AddrEntry] {
         &self.ipv4_addrs
     }
@@ -538,35 +534,97 @@ impl Router {
             .any(|entry| entry.addr.is_directed_broadcast(addr))
     }
 
-    pub fn add_route_rule(&mut self, rule: Rule) {
-        if rule.dev < self.devices.len() {
-            self.table.add_rule(rule);
-        }
+    pub fn add_route_rule(&mut self, rule: Rule) -> Result<(), LinuxError> {
+        self.validate_configured_route(rule)?;
+        self.table.add_rule(rule);
+        Ok(())
+    }
+
+    pub fn replace_route_rule(
+        &mut self,
+        existing: Rule,
+        replacement: Rule,
+    ) -> Result<(), LinuxError> {
+        self.validate_configured_route(replacement)?;
+        self.table.remove_exact_rule(existing);
+        self.table.add_rule(replacement);
+        Ok(())
     }
 
     pub fn remove_exact_route_rule(&mut self, route: Rule) {
         self.table.remove_exact_rule(route);
     }
 
-    pub fn set_device_name(&mut self, dev: usize, name: String) {
-        if let Some(device) = self.devices.get_mut(dev) {
+    pub fn update_device_link(
+        &mut self,
+        dev: usize,
+        update: LinkConfigUpdate,
+    ) -> Result<(), LinuxError> {
+        let device = self.devices.get(dev).ok_or(LinuxError::ENODEV)?;
+        if let Some(name) = update.name.as_deref() {
+            validate_interface_name(name)?;
+            if self
+                .devices
+                .iter()
+                .enumerate()
+                .any(|(other_dev, device)| other_dev != dev && device.name() == name)
+            {
+                return Err(LinuxError::EEXIST);
+            }
+        }
+        if let Some(mtu) = update.mtu {
+            device.link_kind().validate_mtu(mtu)?;
+        }
+
+        let LinkConfigUpdate { name, mtu, is_up } = update;
+        let device = &mut self.devices[dev];
+        if let Some(mtu) = mtu {
+            device.set_mtu(mtu)?;
+        }
+        if let Some(name) = name {
             device.set_name(name);
         }
-    }
-
-    pub fn set_device_mtu(&mut self, dev: usize, mtu: usize) -> Result<(), LinuxError> {
-        self.devices
-            .get_mut(dev)
-            .ok_or(LinuxError::ENODEV)?
-            .set_mtu(mtu)?;
-        self.recompute_effective_mtu();
+        if let Some(is_up) = is_up {
+            device.set_link_up(is_up);
+        }
+        if mtu.is_some() {
+            self.recompute_effective_mtu();
+        }
         Ok(())
     }
 
-    pub fn set_device_link_up(&mut self, dev: usize, is_up: bool) {
-        if let Some(device) = self.devices.get_mut(dev) {
-            device.set_link_up(is_up);
+    fn validate_configured_route(&self, rule: Rule) -> Result<(), LinuxError> {
+        if !rule.is_configured() {
+            return Err(LinuxError::EINVAL);
         }
+        if rule.table != ROUTE_TABLE_MAIN || rule.route_type != ROUTE_TYPE_UNICAST {
+            return Err(LinuxError::EOPNOTSUPP);
+        }
+        if !matches!(rule.filter, IpCidr::Ipv4(_)) {
+            return Err(LinuxError::EAFNOSUPPORT);
+        }
+        if rule.dev >= self.devices.len() {
+            return Err(LinuxError::ENODEV);
+        }
+        if let Some(prefsrc) = rule.preferred_source()
+            && !self.has_ipv4_address(prefsrc)
+        {
+            return Err(LinuxError::EINVAL);
+        }
+        if let Some(gateway) = rule.via {
+            let IpAddress::Ipv4(gateway_addr) = gateway else {
+                return Err(LinuxError::EAFNOSUPPORT);
+            };
+            if !gateway_addr.is_unicast()
+                || self.is_ipv4_directed_broadcast_for_device(rule.dev, gateway_addr)
+            {
+                return Err(LinuxError::EINVAL);
+            }
+            if !self.has_ipv4_subnet_for_device(rule.dev, gateway) {
+                return Err(LinuxError::ENETUNREACH);
+            }
+        }
+        Ok(())
     }
 
     pub fn apply_neighbor_update(&mut self, update: NeighborUpdate) -> Result<(), LinuxError> {

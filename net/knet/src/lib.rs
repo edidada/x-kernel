@@ -101,18 +101,20 @@ pub fn init_network() {
                 scope: ROUTE_SCOPE_UNIVERSE,
             })
             .expect("Ethernet IPv4 address must fit the interface");
-        router.add_route_rule(Rule::with_route_attrs(
-            Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).into(),
-            Some(gateway),
-            eth0_dev,
-            RouteAttrs {
-                table: ROUTE_TABLE_MAIN,
-                protocol: ROUTE_PROTOCOL_BOOT,
-                scope: ROUTE_SCOPE_UNIVERSE,
-                route_type: ROUTE_TYPE_UNICAST,
-                prefsrc: None,
-            },
-        ));
+        router
+            .add_route_rule(Rule::with_route_attrs(
+                Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).into(),
+                Some(gateway),
+                eth0_dev,
+                RouteAttrs {
+                    table: ROUTE_TABLE_MAIN,
+                    protocol: ROUTE_PROTOCOL_BOOT,
+                    scope: ROUTE_SCOPE_UNIVERSE,
+                    route_type: ROUTE_TYPE_UNICAST,
+                    prefsrc: None,
+                },
+            ))
+            .expect("the default gateway must be reachable through eth0");
 
         info!("eth0:");
         info!("  mac:  {}", eth0_address);

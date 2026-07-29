@@ -14,12 +14,13 @@ use kio::Cursor;
 use unittest::def_test;
 
 use super::{
-    route::*,
+    rtnetlink::*,
     socket::publish_kobject_uevent,
     wire::{
-        IfAddrMsg, IfInfoMsg, NlMsgHeader, RtMsg, addr as wire_addr, build_nlmsg, ip_addr_bytes,
-        link as wire_link, neigh as wire_neigh, parse_attrs, push_attr, push_i32_ne, push_u8,
-        push_u16_ne, push_u32_ne, read_i32_ne, read_u16_ne, route as wire_route,
+        IfAddrMsg, IfInfoMsg, NLMSG_DONE, NLMSG_ERROR, NlMsgHeader, RtMsg, addr as wire_addr,
+        build_nlmsg, ip_addr_bytes, link as wire_link, neigh as wire_neigh, parse_attrs, push_attr,
+        push_i32_ne, push_u8, push_u16_ne, push_u32_ne, read_i32_ne, read_u16_ne,
+        route as wire_route,
     },
     *,
 };
@@ -28,8 +29,8 @@ use crate::{
     buf::PacketBuf,
     device::{
         LINK_FLAG_BROADCAST, LINK_FLAG_LOOPBACK, LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST,
-        LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind, LinkSnapshot, LoopbackDevice, NeighborState,
-        NeighborUpdate, NetDevice,
+        LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkConfigUpdate, LinkKind, LinkSnapshot, LoopbackDevice,
+        NeighborState, NeighborUpdate, NetDevice,
     },
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr, Ipv6Address},
     router::{
@@ -40,6 +41,34 @@ use crate::{
     service::Service,
     socket::SocketOps,
 };
+
+fn ifindex(index: u32) -> InterfaceIndex {
+    InterfaceIndex::new(index).unwrap()
+}
+
+fn update_link_state(request: LinkUpdateRequest) -> Result<(), LinuxError> {
+    request.apply()
+}
+
+fn add_addr_state(request: AddrRequest, flags: u16) -> Result<(), LinuxError> {
+    request.add(RequestFlags::from_raw(flags))
+}
+
+fn del_addr_state(request: AddrRequest) -> Result<(), LinuxError> {
+    request.delete()
+}
+
+fn add_route_state(request: RouteRequest, flags: u16) -> Result<(), LinuxError> {
+    request.add(RequestFlags::from_raw(flags))
+}
+
+fn del_route_state(request: RouteRequest) -> Result<(), LinuxError> {
+    request.delete()
+}
+
+fn add_neigh_state(request: NeighRequest, flags: u16) -> Result<(), LinuxError> {
+    request.add(RequestFlags::from_raw(flags))
+}
 
 struct TestDevice {
     device_id: Option<kdevice::DeviceId>,
@@ -214,12 +243,14 @@ fn init_test_state() -> TestNetworkState {
             scope: ROUTE_SCOPE_UNIVERSE,
         })
         .unwrap();
-    router.add_route_rule(Rule::with_route_attrs(
-        Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).into(),
-        Some(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 1))),
-        eth0_dev,
-        route_attrs(ROUTE_SCOPE_UNIVERSE, None),
-    ));
+    router
+        .add_route_rule(Rule::with_route_attrs(
+            Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).into(),
+            Some(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 1))),
+            eth0_dev,
+            route_attrs(ROUTE_SCOPE_UNIVERSE, None),
+        ))
+        .unwrap();
 
     if SERVICE.is_inited() {
         SERVICE.lock().replace_router_for_tests(router);
@@ -278,12 +309,17 @@ fn ipv4_route_request(dst: Ipv4Address, gateway: Option<Ipv4Address>) -> RouteRe
         protocol: wire_route::PROTOCOL_BOOT,
         scope: wire_route::SCOPE_UNIVERSE,
         route_type: ROUTE_TYPE_UNICAST,
-        oif: 2,
+        oif: Some(ifindex(2)),
         dst: Some(IpAddress::Ipv4(dst)),
         src: None,
         gateway: gateway.map(IpAddress::Ipv4),
         prefsrc: None,
     }
+}
+
+#[def_test]
+fn test_interface_index_rejects_zero() {
+    assert_eq!(InterfaceIndex::new(0), Err(LinuxError::ENODEV));
 }
 
 #[def_test(serial)]
@@ -325,7 +361,7 @@ fn test_owner_state_contains_links_addresses_and_routes() {
 fn test_link_dump_omits_unmodelled_lower_link() {
     init_test_state();
     let request = build_nlmsg(RTM_GETLINK, 2, NLM_F_REQUEST, Vec::new());
-    let packets = handle_route_request(&request);
+    let packets = handle_rtnetlink_request(&request);
     let eth0 = packets
         .iter()
         .find(|packet| {
@@ -353,7 +389,7 @@ fn test_route_without_preferred_source_selects_gateway_subnet_address() {
     let address = Ipv4Address::new(10, 0, 0, 2);
     add_addr_state(
         AddrRequest {
-            index: 2,
+            index: ifindex(2),
             family: wire_route::FAMILY_IPV4,
             prefix_len: 24,
             scope: wire_route::SCOPE_UNIVERSE,
@@ -385,7 +421,7 @@ fn test_route_without_preferred_source_selects_gateway_subnet_address() {
 fn test_unicast_egress_mtu_comes_from_selected_device() {
     init_test_state();
     update_link_state(LinkUpdateRequest {
-        index: 1,
+        index: ifindex(1),
         flags: 0,
         change: 0,
         name: None,
@@ -490,19 +526,23 @@ fn test_remove_device_cleans_owner_state_and_reindexes_remaining_device() {
         .unwrap();
 
     let removed_route = Ipv4Cidr::new(Ipv4Address::new(172, 27, 0, 0), 24);
-    router.add_route_rule(Rule::with_route_attrs(
-        removed_route.into(),
-        Some(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 1))),
-        removed_dev,
-        route_attrs(ROUTE_SCOPE_UNIVERSE, None),
-    ));
+    router
+        .add_route_rule(Rule::with_route_attrs(
+            removed_route.into(),
+            Some(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 1))),
+            removed_dev,
+            route_attrs(ROUTE_SCOPE_UNIVERSE, None),
+        ))
+        .unwrap();
     let remaining_route = Ipv4Cidr::new(Ipv4Address::new(198, 51, 100, 0), 24);
-    router.add_route_rule(Rule::with_route_attrs(
-        remaining_route.into(),
-        Some(IpAddress::Ipv4(Ipv4Address::new(10, 0, 0, 1))),
-        remaining_dev,
-        route_attrs(ROUTE_SCOPE_UNIVERSE, None),
-    ));
+    router
+        .add_route_rule(Rule::with_route_attrs(
+            remaining_route.into(),
+            Some(IpAddress::Ipv4(Ipv4Address::new(10, 0, 0, 1))),
+            remaining_dev,
+            route_attrs(ROUTE_SCOPE_UNIVERSE, None),
+        ))
+        .unwrap();
 
     if SERVICE.is_inited() {
         SERVICE.lock().replace_router_for_tests(router);
@@ -550,8 +590,8 @@ fn test_parse_link_update_name_and_mtu() {
     payload.extend(attr(wire_link::attr::IFNAME, b"eth1\0"));
     payload.extend(attr(wire_link::attr::MTU, &1400u32.to_ne_bytes()));
 
-    let request = parse_link_update(&payload).unwrap();
-    assert_eq!(request.index, 2);
+    let request = LinkUpdateRequest::decode(&payload).unwrap();
+    assert_eq!(request.index, ifindex(2));
     assert_eq!(request.name, Some(String::from("eth1")));
     assert_eq!(request.mtu, Some(1400));
 }
@@ -560,7 +600,7 @@ fn test_parse_link_update_name_and_mtu() {
 fn test_update_link_state_rename_and_down() {
     init_test_state();
     let request = LinkUpdateRequest {
-        index: 2,
+        index: ifindex(2),
         flags: 0,
         change: LINK_FLAG_UP,
         name: Some(String::from("ens3")),
@@ -608,7 +648,7 @@ fn test_reject_invalid_link_name_and_mtu_without_partial_update() {
     for name in ["", ".", "..", "eth/1", "eth:1", "eth 1", "1234567890123456"] {
         assert_eq!(
             update_link_state(LinkUpdateRequest {
-                index: 2,
+                index: ifindex(2),
                 flags: 0,
                 change: 0,
                 name: Some(String::from(name)),
@@ -620,7 +660,7 @@ fn test_reject_invalid_link_name_and_mtu_without_partial_update() {
     for mtu in [67, 1501, 65_536] {
         assert_eq!(
             update_link_state(LinkUpdateRequest {
-                index: 2,
+                index: ifindex(2),
                 flags: 0,
                 change: 0,
                 name: None,
@@ -629,6 +669,17 @@ fn test_reject_invalid_link_name_and_mtu_without_partial_update() {
             Err(LinuxError::EINVAL)
         );
     }
+    assert_eq!(
+        SERVICE.lock().update_device_link(
+            1,
+            LinkConfigUpdate {
+                name: Some(String::from("ens3")),
+                mtu: Some(1501),
+                is_up: Some(false),
+            },
+        ),
+        Err(LinuxError::EINVAL)
+    );
 
     let link = SERVICE
         .lock()
@@ -636,13 +687,14 @@ fn test_reject_invalid_link_name_and_mtu_without_partial_update() {
         .expect("eth0 remains present");
     assert_eq!(link.name, "eth0");
     assert_eq!(link.mtu, 1500);
+    assert_ne!(link.flags & LINK_FLAG_UP, 0);
 }
 
 #[def_test(serial)]
 fn test_add_replace_and_delete_address() {
     let state = init_test_state();
     let req = AddrRequest {
-        index: 2,
+        index: ifindex(2),
         family: wire_route::FAMILY_IPV4,
         prefix_len: 24,
         scope: wire_route::SCOPE_UNIVERSE,
@@ -684,7 +736,7 @@ fn test_add_replace_and_delete_address() {
 fn test_secondary_address_takes_over_routes_and_source() {
     let state = init_test_state();
     let secondary = AddrRequest {
-        index: 2,
+        index: ifindex(2),
         family: wire_route::FAMILY_IPV4,
         prefix_len: 24,
         scope: wire_route::SCOPE_UNIVERSE,
@@ -700,7 +752,7 @@ fn test_secondary_address_takes_over_routes_and_source() {
         protocol: wire_route::PROTOCOL_BOOT,
         scope: wire_route::SCOPE_UNIVERSE,
         route_type: ROUTE_TYPE_UNICAST,
-        oif: 2,
+        oif: Some(ifindex(2)),
         dst: Some(IpAddress::Ipv4(Ipv4Address::new(172, 20, 0, 0))),
         src: None,
         gateway: None,
@@ -754,7 +806,7 @@ fn test_ipv4_address_capacity_is_enforced_without_partial_update() {
     for host in 10..16 {
         add_addr_state(
             AddrRequest {
-                index: 2,
+                index: ifindex(2),
                 family: wire_route::FAMILY_IPV4,
                 prefix_len: 24,
                 scope: wire_route::SCOPE_UNIVERSE,
@@ -769,7 +821,7 @@ fn test_ipv4_address_capacity_is_enforced_without_partial_update() {
     assert_eq!(state.eth0_ipv4_addrs.lock().len(), 7);
     add_addr_state(
         AddrRequest {
-            index: 2,
+            index: ifindex(2),
             family: wire_route::FAMILY_IPV4,
             prefix_len: 24,
             scope: wire_route::SCOPE_HOST,
@@ -782,7 +834,7 @@ fn test_ipv4_address_capacity_is_enforced_without_partial_update() {
     assert_eq!(
         add_addr_state(
             AddrRequest {
-                index: 2,
+                index: ifindex(2),
                 family: wire_route::FAMILY_IPV4,
                 prefix_len: 24,
                 scope: wire_route::SCOPE_UNIVERSE,
@@ -807,7 +859,7 @@ fn test_add_and_delete_route() {
         protocol: wire_route::PROTOCOL_BOOT,
         scope: wire_route::SCOPE_UNIVERSE,
         route_type: ROUTE_TYPE_UNICAST,
-        oif: 2,
+        oif: Some(ifindex(2)),
         dst: Some(IpAddress::Ipv4(Ipv4Address::new(172, 16, 0, 0))),
         src: None,
         gateway: Some(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 1))),
@@ -844,7 +896,7 @@ fn test_route_without_dst_attribute_uses_zero_prefix() {
         protocol: wire_route::PROTOCOL_BOOT,
         scope: wire_route::SCOPE_UNIVERSE,
         route_type: ROUTE_TYPE_UNICAST,
-        oif: 2,
+        oif: Some(ifindex(2)),
         dst: None,
         src: None,
         gateway: None,
@@ -861,7 +913,7 @@ fn test_route_without_dst_attribute_uses_zero_prefix() {
         protocol: 0,
         scope: wire_route::SCOPE_NOWHERE,
         route_type: 0,
-        oif: 0,
+        oif: None,
         ..request
     })
     .unwrap();
@@ -883,7 +935,7 @@ fn test_address_owned_routes_reject_control_plane_replace_and_delete() {
         protocol: ROUTE_PROTOCOL_KERNEL,
         scope: ROUTE_SCOPE_LINK,
         route_type: ROUTE_TYPE_UNICAST,
-        oif: 2,
+        oif: Some(ifindex(2)),
         dst: Some(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 0))),
         src: None,
         gateway: None,
@@ -913,7 +965,7 @@ fn test_route_rejects_nonlocal_preferred_source() {
         protocol: wire_route::PROTOCOL_BOOT,
         scope: wire_route::SCOPE_UNIVERSE,
         route_type: ROUTE_TYPE_UNICAST,
-        oif: 2,
+        oif: Some(ifindex(2)),
         dst: Some(IpAddress::Ipv4(Ipv4Address::new(172, 21, 0, 0))),
         src: None,
         gateway: None,
@@ -931,7 +983,7 @@ fn test_add_and_replace_neighbour() {
     let state = init_test_state();
     let req = NeighRequest {
         family: wire_route::FAMILY_IPV4,
-        ifindex: 2,
+        ifindex: ifindex(2),
         state: wire_neigh::STATE_PERMANENT,
         flags: 0,
         dst: IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 10)),
@@ -966,7 +1018,7 @@ fn test_add_incomplete_neighbour_without_link_address() {
     let state = init_test_state();
     let req = NeighRequest {
         family: wire_route::FAMILY_IPV4,
-        ifindex: 2,
+        ifindex: ifindex(2),
         state: wire_neigh::STATE_INCOMPLETE,
         flags: 0,
         dst: IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 11)),
@@ -995,7 +1047,7 @@ fn test_loopback_rejects_neighbor_mutation() {
     }
     let req = NeighRequest {
         family: wire_route::FAMILY_IPV4,
-        ifindex: 1,
+        ifindex: ifindex(1),
         state: wire_neigh::STATE_PERMANENT,
         flags: 0,
         dst: IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 2)),
@@ -1033,7 +1085,7 @@ fn test_reject_unsupported_rtnetlink_mutations() {
     init_test_state();
     let ipv6 = IpAddress::Ipv6(Ipv6Address::UNSPECIFIED);
     let addr = AddrRequest {
-        index: 2,
+        index: ifindex(2),
         family: wire_route::FAMILY_IPV6,
         prefix_len: 128,
         scope: wire_route::SCOPE_UNIVERSE,
@@ -1052,7 +1104,7 @@ fn test_reject_unsupported_rtnetlink_mutations() {
         protocol: wire_route::PROTOCOL_BOOT,
         scope: wire_route::SCOPE_UNIVERSE,
         route_type: ROUTE_TYPE_UNICAST,
-        oif: 2,
+        oif: Some(ifindex(2)),
         dst: Some(IpAddress::Ipv4(Ipv4Address::new(172, 16, 0, 0))),
         src: None,
         gateway: None,
@@ -1065,7 +1117,7 @@ fn test_reject_unsupported_rtnetlink_mutations() {
 
     let neigh = NeighRequest {
         family: wire_route::FAMILY_IPV6,
-        ifindex: 2,
+        ifindex: ifindex(2),
         state: wire_neigh::STATE_PERMANENT,
         flags: 0,
         dst: ipv6,
@@ -1097,7 +1149,7 @@ fn test_reject_ipv4_prefix_lengths_above_32() {
         NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
         addr_payload,
     );
-    let addr_packets = handle_route_request(&addr_request);
+    let addr_packets = handle_rtnetlink_request(&addr_request);
     assert_eq!(
         read_i32_ne(&addr_packets[0].data, NLMSG_HDR_LEN),
         Some(-(LinuxError::EINVAL.into_raw()))
@@ -1132,7 +1184,7 @@ fn test_reject_ipv4_prefix_lengths_above_32() {
         NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
         route_payload,
     );
-    let route_packets = handle_route_request(&route_request);
+    let route_packets = handle_rtnetlink_request(&route_request);
     assert_eq!(
         read_i32_ne(&route_packets[0].data, NLMSG_HDR_LEN),
         Some(-(LinuxError::EINVAL.into_raw()))
@@ -1146,7 +1198,7 @@ fn test_reject_ipv4_prefix_lengths_above_32() {
         assert_eq!(
             add_addr_state(
                 AddrRequest {
-                    index: 2,
+                    index: ifindex(2),
                     family: wire_route::FAMILY_IPV4,
                     prefix_len: 24,
                     scope: wire_route::SCOPE_UNIVERSE,
@@ -1191,7 +1243,7 @@ fn test_rta_src_is_not_treated_as_preferred_source() {
         &ip_addr_bytes(preferred_source),
     );
 
-    let request = parse_route_request(&payload).unwrap();
+    let request = RouteRequest::decode(&payload).unwrap();
     assert_eq!(request.src_len, 24);
     assert_eq!(request.src, Some(source));
     assert_eq!(request.prefsrc, Some(preferred_source));
@@ -1242,7 +1294,7 @@ fn test_reject_extended_unsupported_route_table() {
         payload,
     );
 
-    let packets = handle_route_request(&request);
+    let packets = handle_rtnetlink_request(&request);
 
     assert_eq!(packets.len(), 1);
     assert_eq!(read_u16_ne(&packets[0].data, 4), Some(NLMSG_ERROR));
@@ -1251,7 +1303,7 @@ fn test_reject_extended_unsupported_route_table() {
         Some(-(LinuxError::EOPNOTSUPP.into_raw()))
     );
 
-    let request = parse_route_request(
+    let request = RouteRequest::decode(
         &request[NLMSG_HDR_LEN..NlMsgHeader::read(&request).unwrap().len as usize],
     )
     .unwrap();
@@ -1271,7 +1323,10 @@ fn test_delete_route_rejects_unsupported_type_and_invalid_oif() {
         Err(LinuxError::EOPNOTSUPP)
     );
     assert_eq!(
-        del_route_state(RouteRequest { oif: 99, ..request }),
+        del_route_state(RouteRequest {
+            oif: Some(ifindex(99)),
+            ..request
+        }),
         Err(LinuxError::ENODEV)
     );
 }
@@ -1281,7 +1336,7 @@ fn test_reject_unsupported_neighbour_state_and_flags() {
     init_test_state();
     let req = NeighRequest {
         family: wire_route::FAMILY_IPV4,
-        ifindex: 2,
+        ifindex: ifindex(2),
         state: wire_neigh::STATE_PERMANENT,
         flags: 0,
         dst: IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 12)),
@@ -1319,7 +1374,7 @@ fn test_dump_error_omits_done_message() {
 fn test_dump_routes_returns_done_message() {
     init_test_state();
     let header = nl_header(RTM_GETROUTE, NLM_F_REQUEST, 7);
-    let packets = handle_route_request(&build_nlmsg(
+    let packets = handle_rtnetlink_request(&build_nlmsg(
         RTM_GETROUTE,
         7,
         NLM_F_REQUEST,
@@ -1350,7 +1405,7 @@ fn test_ack_response_for_newaddr() {
         NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
         payload,
     );
-    let packets = handle_route_request(&request);
+    let packets = handle_rtnetlink_request(&request);
 
     assert_eq!(packets.len(), 1);
     assert_eq!(read_u16_ne(&packets[0].data, 4), Some(NLMSG_ERROR));
@@ -1759,7 +1814,7 @@ fn test_route_selector_delete_removes_one_matching_rule() {
         protocol: 0,
         scope: wire_route::SCOPE_NOWHERE,
         route_type: 0,
-        oif: 0,
+        oif: None,
         gateway: None,
         ..ipv4_route_request(destination, None)
     };
@@ -1781,7 +1836,7 @@ fn test_create_excl_and_replace_flag_precedence() {
     let state = init_test_state();
 
     let address = AddrRequest {
-        index: 2,
+        index: ifindex(2),
         family: wire_route::FAMILY_IPV4,
         prefix_len: 24,
         scope: wire_route::SCOPE_UNIVERSE,
@@ -1825,7 +1880,7 @@ fn test_create_excl_and_replace_flag_precedence() {
 
     let neighbor = NeighRequest {
         family: wire_route::FAMILY_IPV4,
-        ifindex: 2,
+        ifindex: ifindex(2),
         state: wire_neigh::STATE_PERMANENT,
         flags: 0,
         dst: IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 82)),
@@ -1864,6 +1919,21 @@ fn test_route_rejects_unreachable_gateway_without_state_change() {
     assert!(!SERVICE.lock().route_snapshot().iter().any(|existing| {
         existing.is_configured() && existing.filter == IpCidr::Ipv4(Ipv4Cidr::new(destination, 24))
     }));
+
+    let direct_destination = Ipv4Address::new(172, 25, 0, 0);
+    assert_eq!(
+        SERVICE.lock().add_route_rule(Rule::with_route_attrs(
+            Ipv4Cidr::new(direct_destination, 24).into(),
+            Some(IpAddress::Ipv4(Ipv4Address::new(198, 51, 100, 1))),
+            1,
+            route_attrs(ROUTE_SCOPE_UNIVERSE, None),
+        )),
+        Err(LinuxError::ENETUNREACH)
+    );
+    assert!(!SERVICE.lock().route_snapshot().iter().any(|existing| {
+        existing.is_configured()
+            && existing.filter == IpCidr::Ipv4(Ipv4Cidr::new(direct_destination, 24))
+    }));
 }
 
 #[def_test(serial)]
@@ -1897,7 +1967,7 @@ fn test_route_rejects_known_unsupported_priority_attribute() {
         payload,
     );
 
-    let packets = handle_route_request(&request);
+    let packets = handle_rtnetlink_request(&request);
     assert_eq!(packets.len(), 1);
     assert_eq!(read_u16_ne(&packets[0].data, 4), Some(NLMSG_ERROR));
     assert_eq!(

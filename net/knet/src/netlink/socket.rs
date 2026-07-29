@@ -13,7 +13,7 @@ use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use super::{
     NETLINK_KOBJECT_UEVENT, NETLINK_ROUTE, NLMSG_HDR_LEN, NetlinkAddr, NetlinkPacket,
     NetlinkRxQueue, NetlinkSocketInner, UEVENT_SEQNUM, UEVENT_SUBSCRIBERS,
-    route::{build_error_response, handle_route_request},
+    rtnetlink::{build_error_response, handle_rtnetlink_request},
     wire::{NlMsgHeader, align},
 };
 use crate::{
@@ -51,7 +51,7 @@ impl NetlinkSocket {
                     data: build_error_response(request, LinuxError::EPERM),
                 }]
             }
-            NETLINK_ROUTE => handle_route_request(request),
+            NETLINK_ROUTE => handle_rtnetlink_request(request),
             NETLINK_KOBJECT_UEVENT => Vec::new(),
             _ => vec![NetlinkPacket {
                 from: NetlinkAddr { pid: 0, groups: 0 },

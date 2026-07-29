@@ -16,9 +16,9 @@ use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::ETHERNET_MAX_PENDING_PACKETS,
     device::{
-        ETHERNET_MAX_MTU, IPV4_MIN_MTU, LINK_FLAG_BROADCAST, LINK_FLAG_LOWER_UP,
-        LINK_FLAG_MULTICAST, LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind, LinkSnapshot,
-        NeighborState, NeighborUpdate, NetDevice as NetDeviceOps,
+        LINK_FLAG_BROADCAST, LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST, LINK_FLAG_RUNNING,
+        LINK_FLAG_UP, LinkKind, LinkSnapshot, NeighborState, NeighborUpdate,
+        NetDevice as NetDeviceOps,
     },
     ip::{IpAddress, Ipv4Cidr},
     packet,
@@ -756,9 +756,7 @@ impl NetDeviceOps for EthernetDevice {
     }
 
     fn set_mtu(&mut self, mtu: usize) -> Result<(), LinuxError> {
-        if !(IPV4_MIN_MTU..=ETHERNET_MAX_MTU).contains(&mtu) {
-            return Err(LinuxError::EINVAL);
-        }
+        LinkKind::Ethernet.validate_mtu(mtu)?;
         self.mtu = mtu;
         Ok(())
     }

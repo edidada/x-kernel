@@ -2,12 +2,40 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+//! Linux netlink ABI constants, carrier structures, and byte-level codecs.
+//!
+//! The layouts and values follow `include/uapi/linux/netlink.h`,
+//! `include/uapi/linux/if_arp.h`, and `include/uapi/linux/rtnetlink.h`.
+
 use alloc::{string::String, vec::Vec};
 
 use kerrno::LinuxError;
 
-use super::*;
 use crate::ip::{IpAddress, Ipv4Address, Ipv6Address};
+
+pub(super) const NLM_F_REQUEST: u16 = 0x0001;
+pub(super) const NLM_F_MULTI: u16 = 0x0002;
+pub(super) const NLM_F_ACK: u16 = 0x0004;
+pub(super) const NLM_F_REPLACE: u16 = 0x0100;
+pub(super) const NLM_F_EXCL: u16 = 0x0200;
+pub(super) const NLM_F_CREATE: u16 = 0x0400;
+pub(super) const NLMSG_ERROR: u16 = 0x0002;
+pub(super) const NLMSG_DONE: u16 = 0x0003;
+pub(super) const NLMSG_HDR_LEN: usize = 16;
+pub(super) const NLMSG_ALIGNTO: usize = 4;
+
+pub(super) const RTM_NEWLINK: u16 = 16;
+pub(super) const RTM_GETLINK: u16 = 18;
+pub(super) const RTM_NEWADDR: u16 = 20;
+pub(super) const RTM_DELADDR: u16 = 21;
+pub(super) const RTM_GETADDR: u16 = 22;
+pub(super) const RTM_NEWROUTE: u16 = 24;
+pub(super) const RTM_DELROUTE: u16 = 25;
+pub(super) const RTM_GETROUTE: u16 = 26;
+pub(super) const RTM_NEWNEIGH: u16 = 28;
+
+pub(super) const ARPHRD_ETHER: u16 = 1;
+pub(super) const ARPHRD_LOOPBACK: u16 = 772;
 
 pub(crate) mod link {
     pub(crate) mod attr {

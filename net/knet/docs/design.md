@@ -32,7 +32,7 @@ net/knet/
     │   └── wire.rs
     ├── netlink/
     │   ├── mod.rs
-    │   ├── route.rs
+    │   ├── rtnetlink.rs
     │   ├── socket.rs
     │   └── wire.rs
     ├── socket/
@@ -195,10 +195,13 @@ Busy ──operation error────────────> previous state
 
 ```text
 rtnetlink request
-        │ parse and validate
+        │ decode raw ABI
+        v
+   RtnlRequest enum
+        │ protocol flags and selectors
         v
 Service narrow mutation
-        │
+        │ validate owner invariants
         ├─> Router: addresses and routes
         ├─> NetDevice: link and neighbor state
         └─> smoltcp Interface: compatible IP address view
@@ -208,8 +211,9 @@ Service narrow mutation
 
 | 从 | 到 | 触发条件 |
 |----|----|----------|
-| rtnetlink request | `Service` mutation | `apply_newlink`、`apply_newaddr`、`apply_newroute`、`apply_newneigh` 完成校验 |
-| `Service` mutation | owner state | `Router` 或 `NetDevice` 的窄接口更新对应配置 |
+| rtnetlink request | `RtnlRequest` | `RtnlRequest::decode` 根据 `RTM_*` 形成对应查询或 mutation variant |
+| `RtnlRequest` | `Service` mutation | 对象请求处理 `NLM_F_*`、selector 和 unsupported ABI 语义，再提交 kernel-owned 类型 |
+| `Service` mutation | owner state | `Router` 校验接口名称、设备 MTU、路由能力、`prefsrc` 和 gateway invariant，再由 `Router` 或 `NetDevice` 更新对应配置 |
 | owner state | netlink dump | `Service::link_snapshots`、`Service::ipv4_addr_snapshots` 或 `Service::route_snapshot` 在对应 dump 持有的一次 `SERVICE` 锁定期间读取 owner |
 
 ## 算法流程
@@ -284,11 +288,11 @@ smoltcp 的单个 `Interface` 仍共享所有设备的最小 MTU，因此 TCP �
 ### rtnetlink 请求
 
 1. POSIX send 路径和 socket file write 路径分别在每次操作入口取得当前调用者的 `Cred` 快照，通过 `Socket::send_with_cred` 传给 `NetlinkSocket::send_with_cred`；socket 不缓存调用者权限。
-2. `NlMsgHeader::read`、批次拆分和各类 `parse_*` helper 校验每条 netlink message 的 header、对齐边界与 attribute；批次 framing 错误在处理任何 message 前返回 syscall `EINVAL`。
+2. `wire` 模块集中定义 Linux netlink UAPI 常量、carrier 和 byte codec；`NlMsgHeader::read` 和批次拆分校验每条 netlink message 的 header 与对齐边界，`RtnlRequest::decode` 再调用对象请求类型的 `decode` 方法校验 attribute，并把非零接口编号转换成 `InterfaceIndex`；批次 framing 错误在处理任何 message 前返回 syscall `EINVAL`。
 3. 仅含查询的批次逐条生成 response，仅含 mutation 的批次在预留 RX response 空间后逐条执行；混合查询和 mutation 的批次在修改 owner 前返回 syscall `EOPNOTSUPP`。
 4. 每条 mutation 使用本次发送携带的凭据检查权限。无权限请求在 RX queue 中生成带 `EPERM` 的 `NLMSG_ERROR`，response 入队后发送入口返回已消费的请求长度。
 5. link、address 和 route dump 分别通过 `Service::link_snapshots`、`Service::ipv4_addr_snapshots` 和 `Service::route_snapshot` 读取当前 owner，并生成 multi-part response。
-6. mutation 请求获取一次 `SERVICE` mutex，在同一临界区内检查当前 owner 状态并通过 `Service` 的窄接口更新地址、路由、链路或邻居，失败时返回 netlink error。
+6. mutation 请求获取一次 `SERVICE` mutex，在同一临界区内处理 rtnetlink flag 和 selector，再通过 `Service` 的窄接口提交更新；`Router` 和 `NetDevice` 在写入前校验 owner invariant，失败时返回 netlink error。
 7. 地址更新同时维护自动生成的 local 和 connected 路由、smoltcp `Interface` 的兼容地址视图以及 Ethernet pending 状态。
 8. source-specific、metric、multipath 和其他未实现的语义属性返回 `EOPNOTSUPP`；不支持邻居表的设备同样返回 `EOPNOTSUPP`，带 `NLM_F_ACK` 的成功请求返回 ack。
 
@@ -325,6 +329,9 @@ TCP、raw IP、IPv6 和 DNS 继续通过 smoltcp socket set 推进，协议推�
 地址和路由由 `Router` 持有，链路属性和邻居表由对应 `NetDevice` 持有。
 rtnetlink mutation 通过 `Service` 的窄接口直接修改 owner，link、address 和 route dump 分别使用
 `link_snapshots`、`ipv4_addr_snapshots` 和 `route_snapshot` 读取同一份状态。
+接口名称与 MTU 通过单个 `LinkConfigUpdate` 在校验完成后提交，避免多字段请求产生部分更新。
+配置路由的设备索引、table、type、`prefsrc` 和 gateway 可达性由 `Router` 统一校验，
+新增和替换路径无法绕过该约束。
 每类快照均在对应 dump 所持有的一次 `SERVICE` 锁定期间完整创建，地址快照把地址配置与当时的设备 label 配对，
 避免 dump 离开 owner 临界区后重新查询易变的设备属性。
 该结构移除控制面镜像及其全量同步路径，smoltcp `Interface` 只保留协议兼容所需的地址视图。

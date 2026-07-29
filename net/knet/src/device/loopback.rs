@@ -15,8 +15,8 @@ use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::SOCKET_BUFFER_SIZE,
     device::{
-        IPV4_MIN_MTU, LINK_FLAG_LOOPBACK, LINK_FLAG_LOWER_UP, LINK_FLAG_RUNNING, LINK_FLAG_UP,
-        LOOPBACK_MAX_MTU, LinkKind, LinkSnapshot, NetDevice,
+        LINK_FLAG_LOOPBACK, LINK_FLAG_LOWER_UP, LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind,
+        LinkSnapshot, NetDevice,
     },
     ip::IpAddress,
 };
@@ -167,9 +167,7 @@ impl NetDevice for LoopbackDevice {
     }
 
     fn set_mtu(&mut self, mtu: usize) -> Result<(), LinuxError> {
-        if !(IPV4_MIN_MTU..=LOOPBACK_MAX_MTU).contains(&mtu) {
-            return Err(LinuxError::EINVAL);
-        }
+        LinkKind::Loopback.validate_mtu(mtu)?;
         self.mtu = mtu;
         Ok(())
     }
@@ -192,6 +190,7 @@ mod tests {
     use unittest::def_test;
 
     use super::*;
+    use crate::device::IPV4_MIN_MTU;
 
     #[def_test]
     fn loopback_rechecks_current_mtu_before_enqueue() {

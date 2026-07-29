@@ -21,46 +21,21 @@ use ksync::{Mutex, RwLock, static_lock};
 
 use crate::{SERVICE, general::GeneralOptions};
 
-mod route;
+mod rtnetlink;
 mod socket;
 #[cfg(unittest)]
 mod tests;
 mod wire;
 
 pub use socket::{NetlinkSocket, publish_kobject_uevent};
+use wire::{
+    ARPHRD_ETHER, ARPHRD_LOOPBACK, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_MULTI, NLM_F_REPLACE,
+    NLM_F_REQUEST, NLMSG_HDR_LEN, RTM_DELADDR, RTM_DELROUTE, RTM_GETADDR, RTM_GETLINK,
+    RTM_GETROUTE, RTM_NEWADDR, RTM_NEWLINK, RTM_NEWNEIGH, RTM_NEWROUTE,
+};
 
 pub const NETLINK_ROUTE: i32 = 0;
 pub(super) const NETLINK_KOBJECT_UEVENT: i32 = 15;
-pub(super) const NLM_F_REQUEST: u16 = 0x0001;
-pub(super) const NLM_F_ACK: u16 = 0x0004;
-pub(super) const NLM_F_REPLACE: u16 = 0x0100;
-pub(super) const NLM_F_EXCL: u16 = 0x0200;
-pub(super) const NLM_F_CREATE: u16 = 0x0400;
-pub(super) const NLM_F_MULTI: u16 = 0x0002;
-pub(super) const NLMSG_ERROR: u16 = 0x0002;
-pub(super) const NLMSG_DONE: u16 = 0x0003;
-pub(super) const NLMSG_HDR_LEN: usize = 16;
-pub(super) const NLMSG_ALIGNTO: usize = 4;
-
-pub(super) const RTM_NEWLINK: u16 = 16;
-// Reserved for future RTM_DELLINK support.
-// pub(super) const RTM_DELLINK: u16 = 17;
-pub(super) const RTM_GETLINK: u16 = 18;
-pub(super) const RTM_NEWADDR: u16 = 20;
-pub(super) const RTM_DELADDR: u16 = 21;
-pub(super) const RTM_GETADDR: u16 = 22;
-pub(super) const RTM_NEWROUTE: u16 = 24;
-pub(super) const RTM_DELROUTE: u16 = 25;
-pub(super) const RTM_GETROUTE: u16 = 26;
-pub(super) const RTM_NEWNEIGH: u16 = 28;
-
-// Reserved for future kernel-originated route protocol handling.
-// pub(super) const RTPROT_KERNEL: u8 = 2;
-// pub(super) const RT_SCOPE_NOWHERE: u8 = 255;
-// pub(super) const RTM_NEWNEIGH_FAMILY: u8 = 0;
-
-pub(super) const ARPHRD_LOOPBACK: u16 = 772;
-pub(super) const ARPHRD_ETHER: u16 = 1;
 static_lock! {
     pub(super) static UEVENT_SUBSCRIBERS: Mutex<Vec<Weak<NetlinkSocketInner>>> =
         Mutex::new(Vec::new());

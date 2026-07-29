@@ -188,11 +188,11 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 3. `Service` 互斥访问：smoltcp `Interface`、`Router` 和设备 dispatch 必须在 `SERVICE.lock()` 内推进；一次 rtnetlink mutation 的状态检查与 owner 更新必须位于同一临界区。
 4. ring buffer publish 规则：Unix stream 和 vsock 只能发布已经写入的字节，只能消费当前 occupied 区域内的字节。Unix stream 的 write index 发布、方向关闭和空队列 EOF 判定由同一个方向锁排序。
 5. driver buffer 生命周期：`NetBufHandle::data` 只在 handle 被 recycle 前使用，RX handle 必须在处理后归还。
-6. netlink message 边界：所有 payload 读取必须先经过单条 header 长度、批次对齐边界、attribute 长度和 family 校验。
+6. netlink message 边界：所有 payload 读取必须先经过单条 header 长度、批次对齐边界、attribute 长度和 family 校验，非零接口编号在进入 mutation 逻辑前转换成 `InterfaceIndex`。
 7. netlink credential 边界：每次 `send` 或 `write` 必须传入当前调用者的独立 `Cred` 快照，netlink socket 不得缓存调用者权限。
 8. netlink batch 执行边界：混合查询和 mutation 的批次必须在 owner 更新前拒绝；同类 mutation 执行前必须为完整批次预留 response queue 空间。
-9. route index 边界：rtnetlink route 的 `oif` 转换成设备索引后必须检查 `dev < devices.len()`。
-10. 网络配置 owner：地址和路由只由 `Router` 持有，链路和邻居只由对应 `NetDevice` 持有；mutation 必须经 `Service` 窄接口更新 owner。
+9. route index 边界：rtnetlink route 的非零 `oif` 由 `InterfaceIndex` 表达，转换成设备索引后必须检查 `dev < devices.len()`。
+10. 网络配置 owner：地址和路由只由 `Router` 持有，链路和邻居只由对应 `NetDevice` 持有；mutation 必须经 `Service` 窄接口更新 owner，接口名称、MTU 和配置路由 invariant 必须由 owner API 校验。
 11. 地址生命周期：地址新增和删除必须同步重建自动 local、connected 路由和 smoltcp 地址视图；源地址从全局本机地址集合消失时，必须清理固定 `prefsrc` 已失效的路由与跨设备使用该源地址的 ARP pending 包。
 12. dump 快照一致性：每类 link、address 和 route dump 必须从对应请求持有的一次 `SERVICE` 临界区完整创建窄快照，地址与设备 label 必须在临界区内完成配对。
 13. static init 顺序：创建 socket 前必须完成 `init_network` 初始化 `SERVICE`、`SOCKET_SET` 和 `LISTEN_TABLE`。
@@ -225,12 +225,12 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-01 | 初始化顺序错误导致 `LazyInit` 访问未初始化对象 | 高 | socket 在 `init_network` 前创建或 poll | 启动路径由 `core/kruntime` 先调用 `init_network`；新增入口需保留该顺序 |
 | T-02 | smoltcp socket handle 已删除后继续访问 | 高 | listener 关闭、accepted child 清理与并发 socket 操作交错 | `SocketSet` 访问由 mutex 串行化；`ListenTable::unlisten` drain 后删除 handle；调用点需避免缓存 handle 后跨释放点使用 |
 | T-03 | ring buffer index 推进超过实际写入或读取长度 | 高 | `advance_write_index` 或 `advance_read_index` 的 count 与切片来源不一致 | count 由持有 channel mutex 时取得的同一批 slices 计算；unsafe 注释固定不变量 |
-| T-04 | 恶意 netlink 消息越界读取或构造非法状态 | 高 | 用户传入短 header、错误批次对齐、畸形 attr、非法 family、非法 ifindex 或未实现的语义属性 | `NlMsgHeader::read`、批次拆分、`parse_attrs`、`parse_ip_by_family` 和 route index 检查拒绝非法输入；未实现语义返回 `EOPNOTSUPP` |
+| T-04 | 恶意 netlink 消息越界读取或构造非法状态 | 高 | 用户传入短 header、错误批次对齐、畸形 attr、非法 family、非法 ifindex 或未实现的语义属性 | `NlMsgHeader::read`、批次拆分、`RtnlRequest::decode`、对象请求类型的 `decode` 方法、`parse_attrs`、`parse_ip_by_family` 和 `InterfaceIndex` 转换拒绝非法输入；未实现语义返回 `EOPNOTSUPP` |
 | T-05 | ARP spoofing 污染 neighbor cache | 中 | 外部主机发送伪造 ARP reply 或 request | 当前校验 unicast MAC、广播和本机目标 IP；动态学习不得覆盖 `NUD_PERMANENT` 项，其他邻居仍依赖网络隔离 |
 | T-06 | listen backlog 被 SYN 洪泛占满 | 中 | 大量连接请求命中同一 listener | backlog 被 clamp 到 `LISTEN_QUEUE_SIZE`；超限丢弃并记录 warn |
 | T-07 | raw socket 被无权限调用者创建 | 中 | syscall 层没有实施权限门禁 | `posix/net::sys_socket` 在创建 AF_INET raw 和 AF_PACKET socket 前检查当前凭据，当前 pre-capabilities 模型要求有效 UID 为 0 |
 | T-08 | netlink RX queue 被 uevent 或 response 填满 | 中 | 订阅者不消费，publisher 持续写入 | `NETLINK_RX_QUEUE_LIMIT` 限制单 socket queue 字节数，超限丢弃 |
-| T-09 | 网络配置的 owner 状态不一致 | 中 | rtnetlink mutation 绕过 `Service`，地址更新遗漏自动路由、smoltcp 兼容视图或 pending 清理，或不支持的设备静默接受邻居更新 | 地址和路由由 `Router` 持有，链路和邻居由 `NetDevice` 持有；mutation 通过 `Service` 窄接口更新 owner，dump 使用三类窄快照，不支持的邻居 mutation 返回 `EOPNOTSUPP` |
+| T-09 | 网络配置的 owner 状态不一致 | 中 | 控制入口绕过 owner invariant，地址更新遗漏自动路由、smoltcp 兼容视图或 pending 清理，或不支持的设备静默接受邻居更新 | 地址和路由由 `Router` 持有，链路和邻居由 `NetDevice` 持有；`Service` 通过 `LinkConfigUpdate` 和路由 mutation API 提交更新，`Router` 在写入前统一校验，dump 使用三类窄快照 |
 | T-10 | 外部网络包触发 parser panic | 中 | malformed Ethernet、ARP、IP、UDP 或 TCP packet 进入 RX | Ethernet 和 ARP 使用 `zerocopy` checked view，IPv4 与 UDP 使用 crate 内 checked parser，TCP、raw IP 和 IPv6 使用 smoltcp checked parser；错误包直接丢弃 |
 | T-11 | 中断上下文误用导致锁竞争或延迟放大 | 中 | IRQ waker 回调中直接推进 `SERVICE`、`SOCKET_SET` 或执行阻塞 socket 操作 | 中断路径只注册和唤醒 waker，协议推进保留在普通 poll 路径 |
 | T-12 | driver buffer 或 DMA 输入破坏 packet 边界 | 高 | 驱动返回长度异常、数据在 recycle 后继续被访问、TX/RX buffer 生命周期使用错误 | RX 数据只在 `NetBufHandle` recycle 前解析和复制；外部帧使用 checked parser；TX buffer 由 driver handle 管理 |
@@ -331,11 +331,11 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 
 - 每个 `unsafe` 块均有 `SAFETY:` 注释。
 - 新增 smoltcp socket handle 的生命周期受 `SOCKET_SET` 保护。
-- 新增 route 或 device mutation 通过 `Service` 窄接口更新对应 owner，并让每类 dump 从对应请求持有的一次 `SERVICE` 临界区完整创建窄快照。
+- 新增 route 或 device mutation 通过 `Service` 窄接口更新对应 owner，owner API 在写入前完成接口名称、MTU、设备索引、路由能力、`prefsrc` 和 gateway 校验，并让每类 dump 从对应请求持有的一次 `SERVICE` 临界区完整创建窄快照。
 - 地址 mutation 同步维护 local、connected 路由、固定 `prefsrc` 有效性、smoltcp 地址视图和 ARP pending，`Router` 最多保留 8 个地址；replace 已有地址保持原 scope。
 - 动态选源按 scope 过滤，并优先选择前缀覆盖 gateway 或直连 next-hop 的地址；link down 的设备不参与单播源地址和出接口选择。
 - 每次 netlink `send` 或 `write` 传入当前调用者的 `Cred` 快照，socket 不缓存权限；无权限 mutation 生成带 `EPERM` 的 `NLMSG_ERROR`。
-- 新增 netlink parser 先校验单条 header 长度、批次对齐边界、attribute 长度、family 和 index；未实现的语义属性显式返回 `EOPNOTSUPP`。
+- 新增 netlink parser 先校验单条 header 长度和批次对齐边界，再通过 `RtnlRequest::decode` 与对象请求类型的 `decode` 方法校验 attribute、family 和 index；未实现的语义属性显式返回 `EOPNOTSUPP`。
 - 仅含查询或仅含 mutation 的 netlink 批次支持逐条处理，混合查询和 mutation 批次在 owner 更新前返回 `EOPNOTSUPP`，mutation 批次执行前预留完整 response 空间。
 - ARP request 使用实际 packet source 作为 SPA，Router 全局本机地址均可回复 request；主动重试使用设备 deadline，可重试 TX 失败保留 pending，源地址从全局本机集合消失时跨设备清理 pending。
 - UDP 和 raw IP 使用实际出口 MTU，定向广播使用路由设备 MTU，全局广播使用参与设备最小 MTU，普通 IPv4 multicast socket 发送返回 `EOPNOTSUPP`；设备最终 TX 复核当前 MTU；smoltcp 单 `Interface` 的全局最小 MTU 限制需保持明确。

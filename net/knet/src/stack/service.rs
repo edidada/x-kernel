@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! Network service wrapper around smoltcp interface.
-use alloc::{boxed::Box, string::String, sync::Arc};
+use alloc::{boxed::Box, sync::Arc};
 use core::{
     pin::Pin,
     task::{Context, Waker},
@@ -25,7 +25,7 @@ use smoltcp::{
 
 use crate::{
     LISTEN_TABLE, SOCKET_SET,
-    device::{LinkSnapshot, NeighborUpdate},
+    device::{LinkConfigUpdate, LinkSnapshot, NeighborUpdate},
     ip::{IpAddress, IpListenEndpoint},
     router::{Ipv4AddrEntry, Ipv4AddrSnapshot, Router, Rule},
 };
@@ -298,17 +298,6 @@ impl Service {
         self.router.link_snapshot_for_ifindex(ifindex)
     }
 
-    pub fn set_device_name(&mut self, dev: usize, name: String) -> Result<(), LinuxError> {
-        if !self.router.has_device(dev) {
-            return Err(LinuxError::ENODEV);
-        }
-        if self.router.is_device_name_in_use(dev, &name) {
-            return Err(LinuxError::EEXIST);
-        }
-        self.router.set_device_name(dev, name);
-        Ok(())
-    }
-
     pub fn has_device(&self, dev: usize) -> bool {
         self.router.has_device(dev)
     }
@@ -329,18 +318,6 @@ impl Service {
         self.router.is_ipv4_bindable_broadcast(addr)
     }
 
-    pub fn has_ipv4_subnet_for_device(&self, dev: usize, addr: crate::ip::IpAddress) -> bool {
-        self.router.has_ipv4_subnet_for_device(dev, addr)
-    }
-
-    pub fn is_ipv4_directed_broadcast_for_device(
-        &self,
-        dev: usize,
-        addr: crate::ip::Ipv4Address,
-    ) -> bool {
-        self.router.is_ipv4_directed_broadcast_for_device(dev, addr)
-    }
-
     pub fn route_rules(&self) -> &[Rule] {
         self.router.route_rules()
     }
@@ -349,22 +326,19 @@ impl Service {
         self.router.has_neighbor(dev, dst)
     }
 
-    pub fn set_device_mtu(&mut self, dev: usize, mtu: usize) -> Result<(), LinuxError> {
-        self.router.set_device_mtu(dev, mtu)?;
-        self.rebuild_interface();
-        Ok(())
-    }
-
-    pub fn set_device_link_up(&mut self, dev: usize, is_up: bool) -> Result<(), LinuxError> {
-        if self
-            .router
-            .link_snapshot_for_ifindex(dev as i32 + 1)
-            .is_none()
-        {
-            return Err(LinuxError::ENODEV);
+    pub fn update_device_link(
+        &mut self,
+        dev: usize,
+        update: LinkConfigUpdate,
+    ) -> Result<(), LinuxError> {
+        let mtu_changed = update.mtu.is_some();
+        let link_state_changed = update.is_up.is_some();
+        self.router.update_device_link(dev, update)?;
+        if mtu_changed {
+            self.rebuild_interface();
+        } else if link_state_changed {
+            self.notify_poll_deadline_changed();
         }
-        self.router.set_device_link_up(dev, is_up);
-        self.notify_poll_deadline_changed();
         Ok(())
     }
 
@@ -392,15 +366,15 @@ impl Service {
     }
 
     pub fn add_route_rule(&mut self, rule: Rule) -> Result<(), LinuxError> {
-        if self
-            .router
-            .link_snapshot_for_ifindex(rule.dev as i32 + 1)
-            .is_none()
-        {
-            return Err(LinuxError::ENODEV);
-        }
-        self.router.add_route_rule(rule);
-        Ok(())
+        self.router.add_route_rule(rule)
+    }
+
+    pub fn replace_route_rule(
+        &mut self,
+        existing: Rule,
+        replacement: Rule,
+    ) -> Result<(), LinuxError> {
+        self.router.replace_route_rule(existing, replacement)
     }
 
     pub fn remove_route_rule(&mut self, route: Rule) -> Result<(), LinuxError> {

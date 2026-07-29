@@ -34,11 +34,42 @@ pub(crate) const LINK_FLAG_LOWER_UP: u32 = 1 << 16;
 pub(crate) const IPV4_MIN_MTU: usize = 68;
 pub(crate) const ETHERNET_MAX_MTU: usize = 1500;
 pub(crate) const LOOPBACK_MAX_MTU: usize = 65_536;
+const INTERFACE_NAME_MAX_LEN: usize = 15;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LinkKind {
     Loopback,
     Ethernet,
+}
+
+impl LinkKind {
+    pub(crate) fn validate_mtu(self, mtu: usize) -> Result<(), LinuxError> {
+        let max_mtu = match self {
+            Self::Loopback => LOOPBACK_MAX_MTU,
+            Self::Ethernet => ETHERNET_MAX_MTU,
+        };
+        (IPV4_MIN_MTU..=max_mtu)
+            .contains(&mtu)
+            .then_some(())
+            .ok_or(LinuxError::EINVAL)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct LinkConfigUpdate {
+    pub(crate) name: Option<String>,
+    pub(crate) mtu: Option<usize>,
+    pub(crate) is_up: Option<bool>,
+}
+
+pub(crate) fn validate_interface_name(name: &str) -> Result<(), LinuxError> {
+    let is_invalid = name.is_empty()
+        || name.len() > INTERFACE_NAME_MAX_LEN
+        || matches!(name, "." | "..")
+        || name
+            .bytes()
+            .any(|byte| byte == b'/' || byte == b':' || byte.is_ascii_whitespace());
+    (!is_invalid).then_some(()).ok_or(LinuxError::EINVAL)
 }
 
 #[derive(Clone, Debug)]
