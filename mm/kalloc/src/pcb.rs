@@ -118,10 +118,10 @@ impl<const COUNT: usize> PerCpuBytes<COUNT> {
 
     /// Bulk-fill the cache from the global allocator.
     ///
-    /// Allocates `COUNT * 2 / 3` objects individually, pushes all but
+    /// Allocates `COUNT * 3 / 4` objects individually, pushes all but
     /// the first into the cache, and returns the first to the caller.
     fn refill(&mut self, balloc: &mut impl ByteAllocator, layout: Layout) -> AllocResult<usize> {
-        let nr_to_alloc = COUNT * 2 / 3;
+        let nr_to_alloc = COUNT * 3 / 4;
 
         // Allocate the first object — this is the one we return.
         let first = balloc.allocate(layout).inspect_err(|_| {
@@ -150,10 +150,10 @@ impl<const COUNT: usize> PerCpuBytes<COUNT> {
 
     /// Bulk-drain entries from the cache back to the global allocator.
     ///
-    /// Frees the given object plus up to `COUNT * 2 / 3` additional
+    /// Frees the given object plus up to `COUNT * 3 / 4` additional
     /// objects popped from the cache.
     fn drain(&mut self, balloc: &mut impl ByteAllocator, free_addr: usize, layout: Layout) {
-        let nr_to_drain = COUNT * 2 / 3;
+        let nr_to_drain = COUNT * 3 / 4;
 
         // Free the passed-in object.
         // SAFETY: `free_addr` came from a prior successful allocation
@@ -187,15 +187,15 @@ impl<const COUNT: usize> PerCpuBytes<COUNT> {
 /// Per-CPU byte-object cache: collects per-bucket caches for all 9 sizes.
 #[derive(Clone, Copy)]
 struct PerCpuByteSet {
-    cache_8: PerCpuBytes<32>,
-    cache_16: PerCpuBytes<32>,
-    cache_32: PerCpuBytes<24>,
-    cache_64: PerCpuBytes<16>,
-    cache_128: PerCpuBytes<12>,
-    cache_256: PerCpuBytes<8>,
-    cache_512: PerCpuBytes<6>,
-    cache_1024: PerCpuBytes<4>,
-    cache_2048: PerCpuBytes<2>,
+    cache_8: PerCpuBytes<48>,
+    cache_16: PerCpuBytes<48>,
+    cache_32: PerCpuBytes<40>,
+    cache_64: PerCpuBytes<32>,
+    cache_128: PerCpuBytes<24>,
+    cache_256: PerCpuBytes<16>,
+    cache_512: PerCpuBytes<10>,
+    cache_1024: PerCpuBytes<8>,
+    cache_2048: PerCpuBytes<4>,
 }
 
 impl PerCpuByteSet {
@@ -315,7 +315,7 @@ pub(crate) fn fill_cache(layout: Layout, balloc: &mut impl ByteAllocator) -> All
 
 /// Bulk-drain the cache for `layout`'s bucket to the global byte allocator.
 ///
-/// Called when [`try_free`] returned `false`.  Pops up to `COUNT * 2 / 3`
+/// Called when [`try_free`] returned `false`.  Pops up to `COUNT * 3 / 4`
 /// additional objects from the cache and returns them all to the global pool.
 ///
 /// Must be called while holding the global balloc lock (IRQs disabled).
