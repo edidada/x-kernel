@@ -36,19 +36,42 @@ pub(crate) mod route {
     pub(crate) const PROTOCOL_BOOT: u8 = 3;
     #[allow(dead_code)]
     pub(crate) const SCOPE_UNIVERSE: u8 = 0;
-    // Reserved for future route deletion / nowhere-scope handling.
-    // pub(crate) const SCOPE_NOWHERE: u8 = 255;
     #[allow(dead_code)]
     pub(crate) const SCOPE_HOST: u8 = 254;
+    pub(crate) const SCOPE_NOWHERE: u8 = 255;
     pub(crate) const TYPE_UNICAST: u8 = 1;
 
     pub(crate) mod attr {
         pub(crate) const DST: u16 = 1;
         pub(crate) const SRC: u16 = 2;
+        pub(crate) const IIF: u16 = 3;
         pub(crate) const OIF: u16 = 4;
         pub(crate) const GATEWAY: u16 = 5;
+        pub(crate) const PRIORITY: u16 = 6;
         pub(crate) const PREFSRC: u16 = 7;
+        pub(crate) const METRICS: u16 = 8;
+        pub(crate) const MULTIPATH: u16 = 9;
+        pub(crate) const PROTOINFO: u16 = 10;
+        pub(crate) const FLOW: u16 = 11;
+        pub(crate) const CACHEINFO: u16 = 12;
+        pub(crate) const SESSION: u16 = 13;
+        pub(crate) const MP_ALGO: u16 = 14;
         pub(crate) const TABLE: u16 = 15;
+        pub(crate) const MARK: u16 = 16;
+        pub(crate) const MFC_STATS: u16 = 17;
+        pub(crate) const VIA: u16 = 18;
+        pub(crate) const NEWDST: u16 = 19;
+        pub(crate) const PREF: u16 = 20;
+        pub(crate) const ENCAP_TYPE: u16 = 21;
+        pub(crate) const ENCAP: u16 = 22;
+        pub(crate) const EXPIRES: u16 = 23;
+        pub(crate) const PAD: u16 = 24;
+        pub(crate) const UID: u16 = 25;
+        pub(crate) const TTL_PROPAGATE: u16 = 26;
+        pub(crate) const IP_PROTO: u16 = 27;
+        pub(crate) const SPORT: u16 = 28;
+        pub(crate) const DPORT: u16 = 29;
+        pub(crate) const NH_ID: u16 = 30;
     }
 }
 
@@ -77,13 +100,15 @@ impl NlMsgHeader {
         if buf.len() < NLMSG_HDR_LEN {
             return None;
         }
-        Some(Self {
+        let header = Self {
             len: read_u32_ne(buf, 0)?,
             msg_type: read_u16_ne(buf, 4)?,
             flags: read_u16_ne(buf, 6)?,
             seq: read_u32_ne(buf, 8)?,
             pid: read_u32_ne(buf, 12)?,
-        })
+        };
+        let len = header.len as usize;
+        (NLMSG_HDR_LEN..=buf.len()).contains(&len).then_some(header)
     }
 }
 

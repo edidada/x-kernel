@@ -3,10 +3,10 @@
 // See LICENSES for license details.
 
 //! Network device abstractions.
-use alloc::{string::String, vec::Vec};
+use alloc::string::String;
 
 use ::core::task::Waker;
-use kerrno::KResult;
+use kerrno::{KResult, LinuxError};
 use kpoll::{PollContext, PollRegisterError};
 use ktime_types::MonotonicInstant;
 
@@ -31,6 +31,9 @@ pub(crate) const LINK_FLAG_LOOPBACK: u32 = 1 << 3;
 pub(crate) const LINK_FLAG_RUNNING: u32 = 1 << 6;
 pub(crate) const LINK_FLAG_MULTICAST: u32 = 1 << 12;
 pub(crate) const LINK_FLAG_LOWER_UP: u32 = 1 << 16;
+pub(crate) const IPV4_MIN_MTU: usize = 68;
+pub(crate) const ETHERNET_MAX_MTU: usize = 1500;
+pub(crate) const LOOPBACK_MAX_MTU: usize = 65_536;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LinkKind {
@@ -50,16 +53,31 @@ pub(crate) struct LinkSnapshot {
     pub(crate) broadcast_addr: [u8; 6],
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NeighborState {
+    Incomplete,
+    Permanent { hardware_addr: [u8; 6] },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct NeighborUpdate {
     pub(crate) dev: usize,
     pub(crate) dst: IpAddress,
-    pub(crate) hardware_addr: Option<[u8; 6]>,
+    pub(crate) state: NeighborState,
 }
 
 /// Trait implemented by network device backends.
 pub trait NetDevice: Send + Sync {
     fn name(&self) -> &str;
+
+    /// Returns the link-layer kind without allocating a snapshot.
+    fn link_kind(&self) -> LinkKind;
+
+    /// Returns the configured IP-layer MTU.
+    fn mtu(&self) -> usize;
+
+    /// Returns whether the device can currently receive and transmit packets.
+    fn is_link_up(&self) -> bool;
 
     /// Returns the link-layer state owned by this device.
     fn link_snapshot(&self, ifindex: i32) -> LinkSnapshot;
@@ -105,28 +123,54 @@ pub trait NetDevice: Send + Sync {
         context: &mut PollContext<'_>,
     ) -> Result<(), PollRegisterError>;
 
+    /// Returns the earliest device-maintenance deadline.
+    ///
+    /// Callers use this deadline to schedule polling even when no receive
+    /// interrupt or transport timer is pending.
+    fn next_poll_at(&self) -> Option<MonotonicInstant> {
+        None
+    }
+
     /// Updates the user-visible interface name for this device.
     fn set_name(&mut self, _name: String) {}
 
-    /// Updates the IPv4 address used by this device backend.
-    fn set_ipv4_addr(&mut self, _addr: Option<Ipv4Cidr>) {}
+    /// Replaces the assigned and globally local IPv4 address projections.
+    ///
+    /// `assigned_addrs` drives device-specific routing and broadcast handling.
+    /// `local_addrs` lets link backends apply the stack's weak-host receive
+    /// semantics without querying the control-plane owner.
+    fn set_ipv4_addrs(&mut self, _assigned_addrs: &[Ipv4Cidr], _local_addrs: &[Ipv4Cidr]) {}
+
+    /// Drops queued packets whose IPv4 source address is no longer local.
+    fn remove_pending_ipv4_source(&mut self, _addr: crate::ip::Ipv4Address) {}
 
     /// Updates the device MTU.
-    fn set_mtu(&mut self, _mtu: usize) {}
+    ///
+    /// # Errors
+    ///
+    /// Returns `EINVAL` when `mtu` is outside the backend's supported range.
+    fn set_mtu(&mut self, _mtu: usize) -> Result<(), LinuxError> {
+        Err(LinuxError::EOPNOTSUPP)
+    }
 
     /// Updates the administrative link state.
+    ///
+    /// Backends stop receiving and transmitting packets while the link is down.
     fn set_link_up(&mut self, _is_up: bool) {}
 
     /// Applies one neighbor-table update to this device.
-    fn apply_neighbor_update(&mut self, _update: NeighborUpdate) {}
+    ///
+    /// Device kinds without an IPv4 neighbor table reject the update.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EOPNOTSUPP` when the device has no IPv4 neighbor table.
+    fn apply_neighbor_update(&mut self, _update: NeighborUpdate) -> Result<(), LinuxError> {
+        Err(LinuxError::EOPNOTSUPP)
+    }
 
     /// Returns whether this device owns a neighbor entry for `dst`.
     fn has_neighbor(&self, _dst: IpAddress) -> bool {
         false
-    }
-
-    /// Returns neighbor entries owned by this device.
-    fn neighbor_snapshots(&self, _dev: usize) -> Vec<NeighborUpdate> {
-        Vec::new()
     }
 }

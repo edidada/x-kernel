@@ -6,6 +6,7 @@
 use alloc::{collections::VecDeque, string::String};
 
 use ::core::task::Waker;
+use kerrno::LinuxError;
 use kpoll::{PollContext, PollRegisterError};
 use ksync::Mutex;
 use ktime_types::MonotonicInstant;
@@ -14,8 +15,8 @@ use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::SOCKET_BUFFER_SIZE,
     device::{
-        LINK_FLAG_LOOPBACK, LINK_FLAG_LOWER_UP, LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind,
-        LinkSnapshot, NetDevice,
+        IPV4_MIN_MTU, LINK_FLAG_LOOPBACK, LINK_FLAG_LOWER_UP, LINK_FLAG_RUNNING, LINK_FLAG_UP,
+        LOOPBACK_MAX_MTU, LinkKind, LinkSnapshot, NetDevice,
     },
     ip::IpAddress,
 };
@@ -65,6 +66,18 @@ impl NetDevice for LoopbackDevice {
         &self.name
     }
 
+    fn link_kind(&self) -> LinkKind {
+        LinkKind::Loopback
+    }
+
+    fn mtu(&self) -> usize {
+        self.mtu
+    }
+
+    fn is_link_up(&self) -> bool {
+        self.flags & LINK_FLAG_UP != 0
+    }
+
     fn link_snapshot(&self, ifindex: i32) -> LinkSnapshot {
         LinkSnapshot {
             ifindex,
@@ -79,6 +92,9 @@ impl NetDevice for LoopbackDevice {
     }
 
     fn poll_rx(&mut self, _ifindex: i32, _timestamp: MonotonicInstant) -> Option<PacketBuf> {
+        if !self.is_link_up() {
+            return None;
+        }
         self.queue.pop_front()
     }
 
@@ -89,6 +105,16 @@ impl NetDevice for LoopbackDevice {
         mut packet: PacketBuf,
         _timestamp: MonotonicInstant,
     ) -> bool {
+        if !self.is_link_up() {
+            return false;
+        }
+        if packet
+            .network_packet()
+            .is_none_or(|network_packet| network_packet.len() > self.mtu)
+        {
+            warn!("Dropping packet exceeding loopback MTU {}", self.mtu);
+            return false;
+        }
         if self.queue.len() >= SOCKET_BUFFER_SIZE {
             warn!(
                 "Loopback device buffer is full, dropping packet to {}",
@@ -140,8 +166,12 @@ impl NetDevice for LoopbackDevice {
         self.name = name;
     }
 
-    fn set_mtu(&mut self, mtu: usize) {
+    fn set_mtu(&mut self, mtu: usize) -> Result<(), LinuxError> {
+        if !(IPV4_MIN_MTU..=LOOPBACK_MAX_MTU).contains(&mtu) {
+            return Err(LinuxError::EINVAL);
+        }
         self.mtu = mtu;
+        Ok(())
     }
 
     fn set_link_up(&mut self, is_up: bool) {
@@ -152,5 +182,30 @@ impl NetDevice for LoopbackDevice {
             self.flags &= !(LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOWER_UP);
             self.operstate = 2;
         }
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use alloc::vec;
+
+    use unittest::def_test;
+
+    use super::*;
+
+    #[def_test]
+    fn loopback_rechecks_current_mtu_before_enqueue() {
+        let mut device = LoopbackDevice::new();
+        device.set_mtu(IPV4_MIN_MTU).unwrap();
+        let packet =
+            PacketBuf::from_ip_packet_vec(0, vec![0; IPV4_MIN_MTU + 1], PacketOwner::Ipv4Stack);
+
+        assert!(!device.send_ip_packet(
+            1,
+            IpAddress::Ipv4(crate::ip::Ipv4Address::new(127, 0, 0, 1)),
+            packet,
+            MonotonicInstant::ORIGIN,
+        ));
+        assert!(device.queue.is_empty());
     }
 }

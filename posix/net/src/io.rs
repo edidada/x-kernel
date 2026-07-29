@@ -165,13 +165,15 @@ fn send_impl(
     if file.is_nonblocking() {
         send_flags |= SendFlags::DONT_WAIT;
     }
-    let sent = socket.send(
+    let cred = kprocess::current_cred();
+    let sent = socket.send_with_cred(
         &mut src,
         SendOptions {
             to: addr,
             flags: send_flags,
             ancillary,
         },
+        &cred,
     )?;
 
     Ok(sent as isize)

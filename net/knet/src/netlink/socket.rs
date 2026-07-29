@@ -5,14 +5,16 @@
 use alloc::{format, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::Ordering;
 
+use kcred::Cred;
 use kerrno::{KError, KResult, LinuxError};
 use kio::prelude::*;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 
 use super::{
-    NETLINK_KOBJECT_UEVENT, NETLINK_ROUTE, NetlinkAddr, NetlinkPacket, NetlinkRxQueue,
-    NetlinkSocketInner, UEVENT_SEQNUM, UEVENT_SUBSCRIBERS,
+    NETLINK_KOBJECT_UEVENT, NETLINK_ROUTE, NLMSG_HDR_LEN, NetlinkAddr, NetlinkPacket,
+    NetlinkRxQueue, NetlinkSocketInner, UEVENT_SEQNUM, UEVENT_SUBSCRIBERS,
     route::{build_error_response, handle_route_request},
+    wire::{NlMsgHeader, align},
 };
 use crate::{
     RecvOptions, SendOptions, Shutdown, SocketAddrEx, SocketOps,
@@ -41,23 +43,116 @@ impl NetlinkSocket {
         (*self.inner.local_addr.read()).ok_or(KError::NotConnected)
     }
 
-    fn push_response(&self, packet: NetlinkPacket) -> KResult {
-        if !self.inner.rx_queue.lock().push_back(packet) {
-            return Err(LinuxError::ENOBUFS.into());
-        }
-        self.inner.poll_rx.wake();
-        Ok(())
-    }
-
-    fn handle_request(&self, request: Vec<u8>) -> Vec<NetlinkPacket> {
+    fn handle_request(&self, request: &[u8], is_privileged: bool) -> Vec<NetlinkPacket> {
         match self.inner.protocol {
-            NETLINK_ROUTE => handle_route_request(&request),
+            NETLINK_ROUTE if route_request_requires_privilege(request) && !is_privileged => {
+                vec![NetlinkPacket {
+                    from: NetlinkAddr { pid: 0, groups: 0 },
+                    data: build_error_response(request, LinuxError::EPERM),
+                }]
+            }
+            NETLINK_ROUTE => handle_route_request(request),
             NETLINK_KOBJECT_UEVENT => Vec::new(),
             _ => vec![NetlinkPacket {
                 from: NetlinkAddr { pid: 0, groups: 0 },
-                data: build_error_response(&request, LinuxError::EPROTONOSUPPORT),
+                data: build_error_response(request, LinuxError::EPROTONOSUPPORT),
             }],
         }
+    }
+
+    pub(crate) fn send_with_cred(
+        &self,
+        src: impl Read + IoBuf,
+        options: SendOptions,
+        cred: &Cred,
+    ) -> KResult<usize> {
+        self.send_inner(src, options, cred.is_privileged())
+    }
+
+    fn send_inner(
+        &self,
+        mut src: impl Read + IoBuf,
+        options: SendOptions,
+        is_privileged: bool,
+    ) -> KResult<usize> {
+        self.local_addr_inner()?;
+        let mut request = Vec::with_capacity(src.remaining());
+        src.read_to_end(&mut request)?;
+
+        match options.to {
+            Some(SocketAddrEx::Netlink(addr))
+                if self.inner.protocol == NETLINK_ROUTE && (addr.pid != 0 || addr.groups != 0) =>
+            {
+                return Err(LinuxError::EOPNOTSUPP.into());
+            }
+            Some(SocketAddrEx::Netlink(_)) => {}
+            Some(_) => return Err(KError::InvalidInput),
+            None => {}
+        }
+
+        if self.inner.protocol == NETLINK_ROUTE {
+            let requests = split_route_requests(&request)?;
+            let has_mutation = requests
+                .iter()
+                .any(|request| route_request_requires_privilege(request));
+            if has_mutation
+                && requests
+                    .iter()
+                    .any(|request| !route_request_requires_privilege(request))
+            {
+                return Err(LinuxError::EOPNOTSUPP.into());
+            }
+
+            let mut queue = self.inner.rx_queue.lock();
+            if has_mutation {
+                let reserved_bytes = requests.iter().try_fold(0usize, |total, request| {
+                    total.checked_add(max_error_response_len(request))
+                });
+                if !reserved_bytes.is_some_and(|bytes| queue.can_push_bytes(bytes)) {
+                    return Err(LinuxError::ENOBUFS.into());
+                }
+            }
+
+            let mut responses = Vec::new();
+            for request in requests {
+                responses.extend(self.handle_request(request, is_privileged));
+            }
+            let response_bytes = responses
+                .iter()
+                .try_fold(0usize, |total, packet| total.checked_add(packet.data.len()));
+            if !response_bytes.is_some_and(|bytes| queue.can_push_bytes(bytes)) {
+                return Err(LinuxError::ENOBUFS.into());
+            }
+            let has_responses = !responses.is_empty();
+            for packet in responses {
+                let pushed = queue.push_back(packet);
+                debug_assert!(pushed, "netlink response capacity was prevalidated");
+            }
+            drop(queue);
+            if has_responses {
+                self.inner.poll_rx.wake();
+            }
+        } else {
+            let responses = self.handle_request(&request, is_privileged);
+            let mut queue = self.inner.rx_queue.lock();
+            let response_bytes = responses
+                .iter()
+                .try_fold(0usize, |total, packet| total.checked_add(packet.data.len()));
+            if !response_bytes.is_some_and(|bytes| queue.can_push_bytes(bytes)) {
+                return Err(LinuxError::ENOBUFS.into());
+            }
+            let has_responses = !responses.is_empty();
+            for packet in responses {
+                let pushed = queue.push_back(packet);
+                debug_assert!(pushed, "netlink response capacity was prevalidated");
+            }
+            drop(queue);
+            if has_responses {
+                self.inner.poll_rx.wake();
+            }
+        }
+
+        Ok(request.len())
     }
 
     fn update_uevent_subscription(&self, addr: NetlinkAddr) {
@@ -117,6 +212,9 @@ impl Configurable for NetlinkSocket {
 impl SocketOps for NetlinkSocket {
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         let addr = local_addr.into_netlink()?;
+        if self.inner.protocol == NETLINK_ROUTE && addr.groups != 0 {
+            return Err(LinuxError::EOPNOTSUPP.into());
+        }
         *self.inner.local_addr.write() = Some(addr);
         self.update_uevent_subscription(addr);
         self.inner.poll_rx.wake();
@@ -129,22 +227,8 @@ impl SocketOps for NetlinkSocket {
         Err(KError::OperationNotSupported)
     }
 
-    fn send(&self, mut src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
-        self.local_addr_inner()?;
-        let mut request = Vec::with_capacity(src.remaining());
-        src.read_to_end(&mut request)?;
-
-        match options.to {
-            Some(SocketAddrEx::Netlink(_addr)) => {}
-            Some(_) => return Err(KError::InvalidInput),
-            None => {}
-        }
-
-        for packet in self.handle_request(request.clone()) {
-            self.push_response(packet)?;
-        }
-
-        Ok(request.len())
+    fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
+        self.send_inner(src, options, false)
     }
 
     fn recv(&self, mut dst: impl Write + IoBufMut, mut options: RecvOptions<'_>) -> KResult<usize> {
@@ -185,6 +269,44 @@ impl SocketOps for NetlinkSocket {
     fn shutdown(&self, _how: Shutdown) -> KResult {
         Err(KError::OperationNotSupported)
     }
+}
+
+fn route_request_requires_privilege(request: &[u8]) -> bool {
+    let Some(header) = NlMsgHeader::read(request) else {
+        return false;
+    };
+    matches!(
+        header.msg_type,
+        super::RTM_NEWLINK
+            | super::RTM_NEWADDR
+            | super::RTM_DELADDR
+            | super::RTM_NEWROUTE
+            | super::RTM_DELROUTE
+            | super::RTM_NEWNEIGH
+    )
+}
+
+fn split_route_requests(mut datagram: &[u8]) -> Result<Vec<&[u8]>, LinuxError> {
+    let mut requests = Vec::new();
+    while !datagram.is_empty() {
+        let header = NlMsgHeader::read(datagram).ok_or(LinuxError::EINVAL)?;
+        let message_len = header.len as usize;
+        requests.push(&datagram[..message_len]);
+
+        let aligned_len = align(message_len);
+        if aligned_len <= datagram.len() {
+            datagram = &datagram[aligned_len..];
+        } else if message_len == datagram.len() {
+            datagram = &[];
+        } else {
+            return Err(LinuxError::EINVAL);
+        }
+    }
+    Ok(requests)
+}
+
+fn max_error_response_len(request: &[u8]) -> usize {
+    align(NLMSG_HDR_LEN + core::mem::size_of::<i32>() + request.len())
 }
 
 impl Pollable for NetlinkSocket {

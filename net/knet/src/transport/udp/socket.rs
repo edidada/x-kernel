@@ -132,6 +132,7 @@ impl UdpSocket {
             return Err(KError::BrokenPipe);
         }
 
+        let is_connected_send = to.is_none();
         let remote_endpoint = match to {
             Some(addr) => IpEndpoint::from(addr.into_ip()?),
             None => self
@@ -159,11 +160,19 @@ impl UdpSocket {
         )?;
         self.state()
             .send_poller_with_nonblocking(self, flags.nonblocking(), || {
+                let mut service = SERVICE.lock();
                 let bound_source_addr = self
                     .state()
                     .local_endpoint()
-                    .and_then(|local| (!local.addr.is_unspecified()).then_some(local.addr));
-                let mut service = SERVICE.lock();
+                    .map(|local| {
+                        udp_bound_source(
+                            local.addr,
+                            |addr| service.has_ipv4_address(addr),
+                            |addr| service.is_ipv4_broadcast(addr),
+                        )
+                    })
+                    .transpose()?
+                    .flatten();
                 let source_addr = service.prepare_ipv4_packet_send(
                     bound_source_addr,
                     &remote_endpoint.addr,
@@ -182,6 +191,10 @@ impl UdpSocket {
                 // atomic, so a packet is consumed only after the queue has
                 // enough room for every output fragment.
                 service.send_ipv4_packet(packet.take().ok_or(KError::InvalidInput)?)?;
+                if is_connected_send {
+                    self.state()
+                        .set_peer_endpoint(Some((remote_endpoint, source_addr)));
+                }
                 drop(service);
                 poll_interfaces();
                 Ok(payload_len)
@@ -189,12 +202,17 @@ impl UdpSocket {
     }
 
     fn source_addr_for(&self, remote_addr: IpAddress) -> KResult<IpAddress> {
+        let service = SERVICE.lock();
         if let Some(local) = self.state().local_endpoint()
-            && !local.addr.is_unspecified()
+            && let Some(source) = udp_bound_source(
+                local.addr,
+                |addr| service.has_ipv4_address(addr),
+                |addr| service.is_ipv4_broadcast(addr),
+            )?
         {
-            return Ok(local.addr);
+            return Ok(source);
         }
-        SERVICE.lock().get_source_address(&remote_addr)
+        service.get_source_address(&remote_addr)
     }
 
     fn write_datagram(
@@ -356,12 +374,20 @@ impl SocketOps for UdpSocket {
         if !matches!(local_addr, SocketAddr::V4(_)) {
             return Err(KError::from(LinuxError::EAFNOSUPPORT));
         }
+        if self.state().local_endpoint().is_some() {
+            k_bail!(InvalidInput, "already bound");
+        }
+        let local_endpoint = IpEndpoint::from(local_addr);
+        {
+            let service = SERVICE.lock();
+            validate_udp_bind_address(
+                local_endpoint.addr,
+                |addr| service.has_ipv4_address(addr),
+                |addr| service.is_ipv4_bindable_broadcast(addr),
+            )?;
+        }
 
         if local_addr.port() == 0 {
-            if self.state().local_endpoint().is_some() {
-                k_bail!(InvalidInput, "already bound");
-            }
-
             let reuse_address = self.state().reuse_address();
             let endpoint = registry::bind_udp_explicit_ephemeral_pcb(
                 self.pcb.clone(),
@@ -380,7 +406,7 @@ impl SocketOps for UdpSocket {
             return Ok(());
         }
 
-        self.bind_endpoint(IpEndpoint::from(local_addr))
+        self.bind_endpoint(local_endpoint)
     }
 
     fn connect(&self, remote_addr: SocketAddrEx) -> KResult {
@@ -483,10 +509,47 @@ fn validate_remote_endpoint(endpoint: IpEndpoint) -> KResult {
     if !matches!(endpoint.addr, IpAddress::Ipv4(_)) {
         return Err(KError::from(LinuxError::EAFNOSUPPORT));
     }
+    if endpoint.addr.is_multicast() {
+        return Err(KError::OperationNotSupported);
+    }
     if endpoint.port == 0 || endpoint.addr.is_unspecified() {
         k_bail!(InvalidInput, "invalid address");
     }
     Ok(())
+}
+
+fn validate_udp_bind_address(
+    addr: IpAddress,
+    is_local: impl FnOnce(IpAddress) -> bool,
+    is_broadcast: impl FnOnce(IpAddress) -> bool,
+) -> Result<(), LinuxError> {
+    if addr.is_unspecified() || addr.is_multicast() {
+        return Ok(());
+    }
+    if is_local(addr) {
+        return Ok(());
+    }
+    if addr.is_broadcast() || is_broadcast(addr) {
+        return Ok(());
+    }
+    Err(LinuxError::EADDRNOTAVAIL)
+}
+
+fn udp_bound_source(
+    addr: IpAddress,
+    is_local: impl FnOnce(IpAddress) -> bool,
+    is_broadcast: impl FnOnce(IpAddress) -> bool,
+) -> Result<Option<IpAddress>, LinuxError> {
+    if addr.is_unspecified() || addr.is_multicast() {
+        return Ok(None);
+    }
+    if is_local(addr) {
+        return Ok(Some(addr));
+    }
+    if addr.is_broadcast() || is_broadcast(addr) {
+        return Ok(None);
+    }
+    Err(LinuxError::ENETUNREACH)
 }
 
 fn should_set_dont_fragment(mtu_discovery: u8, packet_len: usize, path_mtu: Option<usize>) -> bool {
@@ -679,5 +742,81 @@ mod tests {
             1500,
             Some(1500)
         ));
+    }
+
+    #[def_test]
+    fn udp_payload_respects_ipv4_total_length_field() {
+        assert_eq!(
+            UDP_MAX_PAYLOAD_LEN,
+            u16::MAX as usize - IPV4_HEADER_LEN - UDP_HEADER_LEN
+        );
+    }
+
+    #[def_test]
+    fn udp_multicast_endpoint_is_rejected() {
+        let endpoint = IpEndpoint {
+            addr: Ipv4Address::new(224, 0, 0, 1).into(),
+            port: 1234,
+        };
+
+        assert_eq!(
+            validate_remote_endpoint(endpoint),
+            Err(KError::OperationNotSupported)
+        );
+    }
+
+    #[def_test]
+    fn udp_bind_requires_a_local_explicit_address() {
+        let unspecified = IpAddress::Ipv4(Ipv4Address::UNSPECIFIED);
+        let broadcast = IpAddress::Ipv4(Ipv4Address::BROADCAST);
+        let directed_broadcast = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 255));
+        let multicast = IpAddress::Ipv4(Ipv4Address::new(224, 0, 0, 1));
+        let local = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1));
+
+        assert_eq!(
+            validate_udp_bind_address(unspecified, |_| false, |_| false),
+            Ok(())
+        );
+        assert_eq!(
+            validate_udp_bind_address(broadcast, |_| false, |_| false),
+            Ok(())
+        );
+        assert_eq!(
+            validate_udp_bind_address(directed_broadcast, |_| false, |_| true),
+            Ok(())
+        );
+        assert_eq!(
+            validate_udp_bind_address(multicast, |_| false, |_| false),
+            Ok(())
+        );
+        assert_eq!(
+            validate_udp_bind_address(local, |_| true, |_| false),
+            Ok(())
+        );
+        assert_eq!(
+            validate_udp_bind_address(local, |_| false, |_| false),
+            Err(LinuxError::EADDRNOTAVAIL)
+        );
+    }
+
+    #[def_test]
+    fn udp_explicit_source_must_remain_local() {
+        let source = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1));
+        let broadcast = IpAddress::Ipv4(Ipv4Address::BROADCAST);
+        let directed_broadcast = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 255));
+
+        assert_eq!(
+            udp_bound_source(source, |_| true, |_| false),
+            Ok(Some(source))
+        );
+        assert_eq!(udp_bound_source(broadcast, |_| false, |_| false), Ok(None));
+        assert_eq!(
+            udp_bound_source(directed_broadcast, |_| false, |_| true),
+            Ok(None)
+        );
+        assert_eq!(
+            udp_bound_source(source, |_| false, |_| false),
+            Err(LinuxError::ENETUNREACH)
+        );
     }
 }

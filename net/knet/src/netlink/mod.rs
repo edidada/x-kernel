@@ -113,6 +113,11 @@ impl NetlinkRxQueue {
     pub(super) fn is_empty(&self) -> bool {
         self.packets.is_empty()
     }
+
+    pub(super) fn can_push_bytes(&self, bytes: usize) -> bool {
+        bytes <= NETLINK_RX_QUEUE_LIMIT
+            && self.bytes.saturating_add(bytes) <= NETLINK_RX_QUEUE_LIMIT
+    }
 }
 
 pub(super) struct NetlinkSocketInner {

@@ -66,6 +66,7 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             knet::Socket::Udp(Box::new(UdpSocket::new()))
         }
         (AF_INET, SOCK_RAW) => {
+            ensure_raw_network_privilege(cred.is_privileged())?;
             if proto != IPPROTO_ICMP as u32 {
                 return Err(KError::from(LinuxError::EPROTONOSUPPORT));
             }
@@ -89,9 +90,7 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             knet::Socket::Netlink(Box::new(NetlinkSocket::new(proto as i32)))
         }
         (AF_PACKET, SOCK_RAW) | (AF_PACKET, SOCK_DGRAM) => {
-            if !cred.is_privileged() {
-                return Err(KError::from(LinuxError::EPERM));
-            }
+            ensure_raw_network_privilege(cred.is_privileged())?;
             if proto > u16::MAX as u32 {
                 return Err(KError::from(LinuxError::EPROTONOSUPPORT));
             }
@@ -125,6 +124,12 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
         .map(|fd| fd as isize)
 }
 
+fn ensure_raw_network_privilege(is_privileged: bool) -> KResult {
+    is_privileged
+        .then_some(())
+        .ok_or_else(|| KError::from(LinuxError::EPERM))
+}
+
 /// Bind a socket to a local address
 pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<isize> {
     let addr = SocketAddrEx::read_from_user(addr, addrlen)?;
@@ -132,6 +137,22 @@ pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<
     socket_from_fd(fd)?.bind(addr)?;
 
     Ok(0)
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::def_test;
+
+    use super::*;
+
+    #[def_test]
+    fn raw_network_socket_creation_requires_privilege() {
+        assert_eq!(ensure_raw_network_privilege(true), Ok(()));
+        assert_eq!(
+            ensure_raw_network_privilege(false),
+            Err(KError::from(LinuxError::EPERM))
+        );
+    }
 }
 
 /// Initiate a connection to a remote address

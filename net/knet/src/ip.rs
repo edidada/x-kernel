@@ -40,6 +40,10 @@ impl Ipv4Address {
     pub(crate) fn is_multicast(self) -> bool {
         (224..=239).contains(&self.0[0])
     }
+
+    pub(crate) fn is_unicast(self) -> bool {
+        !(self.is_unspecified() || self.is_broadcast() || self.is_multicast())
+    }
 }
 
 impl From<Ipv4Addr> for Ipv4Address {
@@ -85,6 +89,10 @@ impl Ipv6Address {
     pub(crate) fn is_unspecified(self) -> bool {
         self == Self::UNSPECIFIED
     }
+
+    pub(crate) fn is_multicast(self) -> bool {
+        self.0[0] == 0xff
+    }
 }
 
 impl From<Ipv6Addr> for Ipv6Address {
@@ -121,6 +129,13 @@ impl IpAddress {
 
     pub(crate) fn is_broadcast(self) -> bool {
         matches!(self, Self::Ipv4(addr) if addr.is_broadcast())
+    }
+
+    pub(crate) fn is_multicast(self) -> bool {
+        match self {
+            Self::Ipv4(addr) => addr.is_multicast(),
+            Self::Ipv6(addr) => addr.is_multicast(),
+        }
     }
 }
 
@@ -193,6 +208,15 @@ impl Ipv4Cidr {
         self.prefix_len
     }
 
+    pub(crate) fn network(self) -> Self {
+        let mask = prefix_mask(self.prefix_len);
+        let addr = u32::from_be_bytes(self.address.octets()) & mask;
+        Self::new(
+            Ipv4Address::from_octets(addr.to_be_bytes()),
+            self.prefix_len,
+        )
+    }
+
     pub(crate) fn broadcast(self) -> Option<Ipv4Address> {
         if self.prefix_len > 32 {
             return None;
@@ -200,6 +224,10 @@ impl Ipv4Cidr {
         let mask = prefix_mask(self.prefix_len);
         let addr = u32::from_be_bytes(self.address.octets());
         Some(Ipv4Address::from_octets((addr | !mask).to_be_bytes()))
+    }
+
+    pub(crate) fn is_directed_broadcast(self, addr: Ipv4Address) -> bool {
+        self.prefix_len < 31 && self.broadcast() == Some(addr)
     }
 
     pub(crate) fn contains_addr(self, addr: &IpAddress) -> bool {
@@ -337,13 +365,30 @@ mod tests {
 
         assert_eq!(cidr.address(), addr);
         assert_eq!(cidr.prefix_len(), 24);
+        assert_eq!(
+            cidr.network(),
+            Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 0), 24)
+        );
         assert_eq!(cidr.broadcast(), Some(Ipv4Address::new(192, 0, 2, 255)));
+        assert!(cidr.is_directed_broadcast(Ipv4Address::new(192, 0, 2, 255)));
+        assert!(
+            !Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 0), 31)
+                .is_directed_broadcast(Ipv4Address::new(192, 0, 2, 1))
+        );
+        assert!(
+            !Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 1), 32)
+                .is_directed_broadcast(Ipv4Address::new(192, 0, 2, 1))
+        );
         assert!(cidr.contains_addr(&IpAddress::from(addr)));
         assert_eq!(ip_cidr.address(), IpAddress::from(addr));
         assert_eq!(ip_cidr.prefix_len(), 24);
         assert!(ip_cidr.contains_addr(&IpAddress::from(addr)));
         assert!(IpAddress::from(Ipv4Address::UNSPECIFIED).is_unspecified());
         assert!(IpAddress::from(Ipv4Address::BROADCAST).is_broadcast());
+        assert!(addr.is_unicast());
+        assert!(!Ipv4Address::UNSPECIFIED.is_unicast());
+        assert!(!Ipv4Address::BROADCAST.is_unicast());
+        assert!(!Ipv4Address::new(224, 0, 0, 1).is_unicast());
     }
 
     #[def_test]
@@ -357,6 +402,8 @@ mod tests {
 
         assert_eq!(addr.octets(), octets);
         assert!(!addr.is_unspecified());
+        assert!(!addr.is_multicast());
+        assert!(Ipv6Address::from_octets([0xff; 16]).is_multicast());
         assert!(Ipv6Address::UNSPECIFIED.is_unspecified());
         assert_eq!(endpoint.to_string(), "101:101:101:101:101:101:101:101:8080");
     }

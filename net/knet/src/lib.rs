@@ -48,7 +48,7 @@ pub(crate) use transport::udp_err;
 pub use transport::{raw, tcp, udp};
 
 use crate::{
-    consts::{GATEWAY, IP, IP_PREFIX, STANDARD_MTU},
+    consts::{GATEWAY, IP, IP_PREFIX},
     device::{EthernetDevice, LoopbackDevice},
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
     listen_table::ListenTable,
@@ -75,73 +75,42 @@ pub fn init_network() {
     let lo_dev = router.add_device(Box::new(LoopbackDevice::new()));
 
     let lo_ip = Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8);
-    router.add_ipv4_addr(Ipv4AddrEntry {
-        dev: lo_dev,
-        addr: lo_ip,
-        scope: ROUTE_SCOPE_HOST,
-    });
-    router.add_route_rule(Rule::with_route_attrs(
-        lo_ip.into(),
-        None,
-        lo_dev,
-        lo_ip.address().into(),
-        65_536,
-        RouteAttrs {
-            table: ROUTE_TABLE_MAIN,
-            protocol: ROUTE_PROTOCOL_BOOT,
+    router
+        .add_ipv4_addr(Ipv4AddrEntry {
+            dev: lo_dev,
+            addr: lo_ip,
             scope: ROUTE_SCOPE_HOST,
-            route_type: ROUTE_TYPE_UNICAST,
-            prefsrc: Some(lo_ip.address().into()),
-        },
-    ));
+        })
+        .expect("loopback IPv4 address must fit the interface");
 
-    let mut eth0_irq = None;
+    let mut has_ethernet_device = false;
     if let Some(handle) = net_devs.pop() {
         let device_id = handle.id();
         info!("  use NIC 0: {:?}", handle.name());
 
         let eth0_address = wire::MacAddress(handle.mac().0);
-        eth0_irq = handle.irq();
         let eth0_ip = Ipv4Cidr::new(IP.parse().expect("Invalid IPv4 address"), IP_PREFIX);
 
-        let eth0_dev = router.add_device(Box::new(EthernetDevice::new(
-            "eth0".to_owned(),
-            handle,
-            eth0_ip,
-        )));
+        let eth0_dev = router.add_device(Box::new(EthernetDevice::new("eth0".to_owned(), handle)));
 
         let gateway = IpAddress::Ipv4(GATEWAY.parse().expect("Invalid gateway address"));
-        router.add_ipv4_addr(Ipv4AddrEntry {
-            dev: eth0_dev,
-            addr: eth0_ip,
-            scope: ROUTE_SCOPE_UNIVERSE,
-        });
-        router.add_route_rule(Rule::with_route_attrs(
-            Ipv4Cidr::new(eth0_ip.address(), 32).into(),
-            None,
-            lo_dev,
-            eth0_ip.address().into(),
-            65_536,
-            RouteAttrs {
-                table: ROUTE_TABLE_MAIN,
-                protocol: ROUTE_PROTOCOL_BOOT,
-                scope: ROUTE_SCOPE_HOST,
-                route_type: ROUTE_TYPE_UNICAST,
-                prefsrc: Some(eth0_ip.address().into()),
-            },
-        ));
+        router
+            .add_ipv4_addr(Ipv4AddrEntry {
+                dev: eth0_dev,
+                addr: eth0_ip,
+                scope: ROUTE_SCOPE_UNIVERSE,
+            })
+            .expect("Ethernet IPv4 address must fit the interface");
         router.add_route_rule(Rule::with_route_attrs(
             Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).into(),
             Some(gateway),
             eth0_dev,
-            eth0_ip.address().into(),
-            STANDARD_MTU,
             RouteAttrs {
                 table: ROUTE_TABLE_MAIN,
                 protocol: ROUTE_PROTOCOL_BOOT,
                 scope: ROUTE_SCOPE_UNIVERSE,
                 route_type: ROUTE_TYPE_UNICAST,
-                prefsrc: Some(eth0_ip.address().into()),
+                prefsrc: None,
             },
         ));
 
@@ -149,6 +118,7 @@ pub fn init_network() {
         info!("  mac:  {}", eth0_address);
         info!("  ip:   {}", eth0_ip);
         subscribe_network_unregister(device_id);
+        has_ethernet_device = true;
     } else {
         warn!("  No network device found!");
     };
@@ -163,8 +133,8 @@ pub fn init_network() {
     LISTEN_TABLE.init_once(ListenTable::new());
     udp::init_udp_registry();
 
-    if let Some(irq) = eth0_irq {
-        EthernetDevice::spawn_rx_task(irq);
+    if has_ethernet_device {
+        EthernetDevice::spawn_rx_task();
     }
 }
 

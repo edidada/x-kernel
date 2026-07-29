@@ -27,7 +27,7 @@ use crate::{
     LISTEN_TABLE, SOCKET_SET,
     device::{LinkSnapshot, NeighborUpdate},
     ip::{IpAddress, IpListenEndpoint},
-    router::{Ipv4AddrEntry, NetworkSnapshot, Router, Rule},
+    router::{Ipv4AddrEntry, Ipv4AddrSnapshot, Router, Rule},
 };
 
 const IPV4_HEADER_LEN: usize = 20;
@@ -74,7 +74,9 @@ impl Service {
         self.iface
             .poll(smoltcp_timestamp, &mut self.router, sockets);
         LISTEN_TABLE.wake_touched_acceptors(sockets);
-        self.router.dispatch(current)
+        let poll_next = self.router.dispatch(current);
+        self.schedule_next_poll(sockets);
+        poll_next
     }
 
     pub fn get_smoltcp_source_address(
@@ -83,10 +85,29 @@ impl Service {
     ) -> KResult<SmoltcpIpAddress> {
         let dst_addr = super::from_smoltcp_ip_address(*dst_addr);
         self.router
-            .table
-            .lookup(&dst_addr)
-            .map(|rule| super::to_smoltcp_ip_address(rule.src))
+            .source_address_for(&dst_addr)
+            .map(super::to_smoltcp_ip_address)
             .ok_or(KError::from(LinuxError::ENETUNREACH))
+    }
+
+    pub fn egress_mtu(&self, dst_addr: &SmoltcpIpAddress) -> KResult<usize> {
+        let dst_addr = super::from_smoltcp_ip_address(*dst_addr);
+        self.router.egress_mtu_for(&dst_addr)
+    }
+
+    pub fn has_local_address(&self, addr: &SmoltcpIpAddress) -> bool {
+        self.router
+            .has_ipv4_address(super::from_smoltcp_ip_address(*addr))
+    }
+
+    pub fn is_smoltcp_ipv4_broadcast(&self, addr: &SmoltcpIpAddress) -> bool {
+        self.router
+            .is_ipv4_broadcast(super::from_smoltcp_ip_address(*addr))
+    }
+
+    pub fn is_smoltcp_ipv4_bindable_broadcast(&self, addr: &SmoltcpIpAddress) -> bool {
+        self.router
+            .is_ipv4_bindable_broadcast(super::from_smoltcp_ip_address(*addr))
     }
 
     pub fn smoltcp_device_mask_for(&self, endpoint: &SmoltcpIpListenEndpoint) -> u32 {
@@ -106,9 +127,7 @@ impl Service {
 
     pub fn get_source_address(&self, dst_addr: &IpAddress) -> KResult<IpAddress> {
         self.router
-            .table
-            .lookup(dst_addr)
-            .map(|rule| rule.src)
+            .source_address_for(dst_addr)
             .ok_or(KError::from(LinuxError::ENETUNREACH))
     }
 
@@ -127,12 +146,11 @@ impl Service {
         }
 
         let source_addr = match bound_src {
-            Some(addr) => addr,
+            Some(addr) if self.router.has_ipv4_address(addr) => addr,
+            Some(_) => return Err(LinuxError::ENETUNREACH.into()),
             None => self
                 .router
-                .table
-                .lookup(dst_addr)
-                .map(|rule| rule.src)
+                .source_address_for(dst_addr)
                 .ok_or(KError::from(LinuxError::ENETUNREACH))?,
         };
         let packet_count = output_ipv4_packet_count(&self.router, dst_addr, packet_len)?;
@@ -173,39 +191,7 @@ impl Service {
         context.register(&self.timeout_poll)?;
         let source_waker = Waker::from(self.timeout_poll.clone());
 
-        let current = monotonic_time();
-        let next = self
-            .iface
-            .poll_at(to_smoltcp_instant(current), &SOCKET_SET.inner.lock());
-
-        if let Some(t) = next {
-            let deadline = from_smoltcp_instant(t);
-
-            let should_reset = match self.timeout_deadline {
-                None => true,
-                Some(old_deadline) => current >= old_deadline || deadline < old_deadline,
-            };
-
-            if should_reset {
-                self.timeout = None;
-                self.timeout_deadline = Some(deadline);
-
-                let mut fut = Box::pin(sleep_until(deadline));
-                let wake = Waker::from(self.timeout_poll.clone());
-                let mut cx = Context::from_waker(&wake);
-
-                if fut.as_mut().poll(&mut cx).is_ready() {
-                    self.timeout_deadline = None;
-                    self.timeout_poll.wake();
-                    return Ok(source_waker);
-                } else {
-                    self.timeout = Some(fut);
-                }
-            }
-        } else {
-            self.timeout = None;
-            self.timeout_deadline = None;
-        }
+        self.schedule_next_poll(&SOCKET_SET.inner.lock());
 
         for (i, device) in self.router.devices.iter().enumerate() {
             if mask & (1 << i) != 0 {
@@ -217,21 +203,95 @@ impl Service {
         Ok(source_waker)
     }
 
+    fn schedule_next_poll(&mut self, sockets: &SocketSet<'_>) {
+        let smoltcp_now = now();
+        let monotonic_now = monotonic_time();
+        let interface_deadline = self.iface.poll_at(smoltcp_now, sockets).map(|next| {
+            let delay_micros = next
+                .total_micros()
+                .saturating_sub(smoltcp_now.total_micros()) as u64;
+            monotonic_now + core::time::Duration::from_micros(delay_micros)
+        });
+        let deadline = match (interface_deadline, self.router.next_poll_at()) {
+            (Some(interface), Some(device)) => Some(interface.min(device)),
+            (Some(interface), None) => Some(interface),
+            (None, Some(device)) => Some(device),
+            (None, None) => None,
+        };
+
+        if let Some(deadline) = deadline {
+            let should_reset = match self.timeout_deadline {
+                None => true,
+                Some(old_deadline) => monotonic_now >= old_deadline || deadline < old_deadline,
+            };
+
+            if should_reset {
+                self.timeout = None;
+                self.timeout_deadline = Some(deadline);
+
+                let delay = deadline.saturating_sub(monotonic_now);
+                let mut fut = Box::pin(sleep(delay));
+                let wake = Waker::from(self.timeout_poll.clone());
+                let mut cx = Context::from_waker(&wake);
+
+                if fut.as_mut().poll(&mut cx).is_ready() {
+                    self.timeout_deadline = None;
+                    self.timeout_poll.wake();
+                } else {
+                    self.timeout = Some(fut);
+                }
+            }
+        } else {
+            self.timeout = None;
+            self.timeout_deadline = None;
+        }
+    }
+
+    fn notify_poll_deadline_changed(&mut self) {
+        self.timeout = None;
+        self.timeout_deadline = None;
+        self.timeout_poll.wake();
+    }
+
     fn sync_interface_ipv4_addrs(&mut self) {
         let local_ipv4_addrs = self.router.local_ipv4_addrs();
-        self.iface.update_ip_addrs(|ip_addrs| {
+        Self::replace_interface_ipv4_addrs(&mut self.iface, &local_ipv4_addrs);
+    }
+
+    fn replace_interface_ipv4_addrs(iface: &mut Interface, addrs: &[crate::ip::Ipv4Cidr]) {
+        debug_assert!(addrs.len() <= smoltcp::config::IFACE_MAX_ADDR_COUNT);
+        iface.update_ip_addrs(|ip_addrs| {
             ip_addrs.clear();
-            for addr in local_ipv4_addrs {
-                let _ = ip_addrs.push(SmoltcpIpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
-                    addr.address().into(),
-                    addr.prefix_len(),
-                )));
+            for addr in addrs {
+                ip_addrs
+                    .push(SmoltcpIpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
+                        addr.address().into(),
+                        addr.prefix_len(),
+                    )))
+                    .expect("Router validates the smoltcp address capacity");
             }
         });
     }
 
-    pub fn network_snapshot(&self) -> NetworkSnapshot {
-        self.router.network_snapshot()
+    fn rebuild_interface(&mut self) {
+        let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
+        let mut iface = Interface::new(config, &mut self.router, now());
+        let local_ipv4_addrs = self.router.local_ipv4_addrs();
+        Self::replace_interface_ipv4_addrs(&mut iface, &local_ipv4_addrs);
+        self.iface = iface;
+        self.notify_poll_deadline_changed();
+    }
+
+    pub fn link_snapshots(&self) -> alloc::vec::Vec<LinkSnapshot> {
+        self.router.link_snapshots()
+    }
+
+    pub fn ipv4_addr_snapshots(&self) -> alloc::vec::Vec<Ipv4AddrSnapshot> {
+        self.router.ipv4_addr_snapshots()
+    }
+
+    pub fn route_snapshot(&self) -> alloc::vec::Vec<Rule> {
+        self.router.route_snapshot()
     }
 
     pub fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
@@ -257,8 +317,28 @@ impl Service {
         self.router.ipv4_addr_entries()
     }
 
-    pub fn first_ipv4_addr_for_device(&self, dev: usize) -> Option<crate::ip::Ipv4Cidr> {
-        self.router.first_ipv4_addr_for_device(dev)
+    pub fn has_ipv4_address(&self, addr: crate::ip::IpAddress) -> bool {
+        self.router.has_ipv4_address(addr)
+    }
+
+    pub fn is_ipv4_broadcast(&self, addr: crate::ip::IpAddress) -> bool {
+        self.router.is_ipv4_broadcast(addr)
+    }
+
+    pub fn is_ipv4_bindable_broadcast(&self, addr: crate::ip::IpAddress) -> bool {
+        self.router.is_ipv4_bindable_broadcast(addr)
+    }
+
+    pub fn has_ipv4_subnet_for_device(&self, dev: usize, addr: crate::ip::IpAddress) -> bool {
+        self.router.has_ipv4_subnet_for_device(dev, addr)
+    }
+
+    pub fn is_ipv4_directed_broadcast_for_device(
+        &self,
+        dev: usize,
+        addr: crate::ip::Ipv4Address,
+    ) -> bool {
+        self.router.is_ipv4_directed_broadcast_for_device(dev, addr)
     }
 
     pub fn route_rules(&self) -> &[Rule] {
@@ -270,14 +350,8 @@ impl Service {
     }
 
     pub fn set_device_mtu(&mut self, dev: usize, mtu: usize) -> Result<(), LinuxError> {
-        if self
-            .router
-            .link_snapshot_for_ifindex(dev as i32 + 1)
-            .is_none()
-        {
-            return Err(LinuxError::ENODEV);
-        }
-        self.router.set_device_mtu(dev, mtu);
+        self.router.set_device_mtu(dev, mtu)?;
+        self.rebuild_interface();
         Ok(())
     }
 
@@ -290,6 +364,7 @@ impl Service {
             return Err(LinuxError::ENODEV);
         }
         self.router.set_device_link_up(dev, is_up);
+        self.notify_poll_deadline_changed();
         Ok(())
     }
 
@@ -301,22 +376,19 @@ impl Service {
         {
             return Err(LinuxError::ENODEV);
         }
-        self.router.add_ipv4_addr(entry);
-        self.router
-            .set_device_ipv4_addr(entry.dev, Some(entry.addr));
+        self.router.add_ipv4_addr(entry)?;
         self.sync_interface_ipv4_addrs();
+        self.notify_poll_deadline_changed();
         Ok(())
     }
 
-    pub fn remove_ipv4_addr(
-        &mut self,
-        entry: Ipv4AddrEntry,
-    ) -> Result<Option<crate::ip::Ipv4Cidr>, LinuxError> {
-        self.router.remove_ipv4_addr(entry);
-        let next_addr = self.router.first_ipv4_addr_for_device(entry.dev);
-        self.router.set_device_ipv4_addr(entry.dev, next_addr);
+    pub fn remove_ipv4_addr(&mut self, entry: Ipv4AddrEntry) -> Result<(), LinuxError> {
+        if !self.router.remove_ipv4_addr(entry) {
+            return Err(LinuxError::EADDRNOTAVAIL);
+        }
         self.sync_interface_ipv4_addrs();
-        Ok(next_addr)
+        self.notify_poll_deadline_changed();
+        Ok(())
     }
 
     pub fn add_route_rule(&mut self, rule: Rule) -> Result<(), LinuxError> {
@@ -344,20 +416,21 @@ impl Service {
         {
             return Err(LinuxError::ENODEV);
         }
-        self.router.apply_neighbor_update(update);
+        self.router.apply_neighbor_update(update)?;
+        self.notify_poll_deadline_changed();
         Ok(())
     }
 
     #[cfg(unittest)]
     pub(crate) fn replace_router_for_tests(&mut self, router: Router) {
         self.router = router;
-        self.sync_interface_ipv4_addrs();
+        self.rebuild_interface();
     }
 
     pub fn remove_device_by_model_id(&mut self, id: kdevice::DeviceId) -> bool {
         let removed = self.router.remove_device_by_model_id(id);
         if removed {
-            self.sync_interface_ipv4_addrs();
+            self.rebuild_interface();
         }
         removed
     }
@@ -376,9 +449,7 @@ fn output_ipv4_packet_count(
         return Err(LinuxError::EMSGSIZE.into());
     }
 
-    let Some(mtu) = router.route_mtu(dst_addr) else {
-        return Ok(1);
-    };
+    let mtu = router.egress_mtu_for(dst_addr)?;
     if packet_len <= mtu {
         return Ok(1);
     }

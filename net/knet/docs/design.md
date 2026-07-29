@@ -112,7 +112,7 @@ core/kruntime
 
 | 组件 | 职责 |
 |------|------|
-| `init_network` | 创建 loopback 与首个 Ethernet 设备，建立默认路由，初始化 `Service`、`SocketSetWrapper`、`ListenTable` 和 rtnetlink 初始状态 |
+| `init_network` | 创建 loopback 与首个 Ethernet 设备，建立初始地址和默认路由，初始化 `Service`、`SocketSetWrapper` 与 `ListenTable` |
 | `Service` | 持有 smoltcp `Interface`、`Router`、poll timeout 和 RX waker 注册入口 |
 | `Router` | 管理设备列表、带 MTU 的路由表、`PacketBuf` RX/TX 队列、IPv4 输入校验、分片重组、输出分片、next-hop 选择和设备 dispatch |
 | `NetDevice` | 抽象 loopback、Ethernet 和 feature gated vsock 设备后端，通过 `PacketBuf` 转移报文所有权，并使用 crate 内地址类型和 `MonotonicInstant` 表达设备边界 |
@@ -203,14 +203,14 @@ Service narrow mutation
         ├─> NetDevice: link and neighbor state
         └─> smoltcp Interface: compatible IP address view
                     │
-                    └─NetworkSnapshot──> netlink dump
+                    └─narrow snapshots──> link, address and route dump
 ```
 
 | 从 | 到 | 触发条件 |
 |----|----|----------|
 | rtnetlink request | `Service` mutation | `apply_newlink`、`apply_newaddr`、`apply_newroute`、`apply_newneigh` 完成校验 |
 | `Service` mutation | owner state | `Router` 或 `NetDevice` 的窄接口更新对应配置 |
-| owner state | netlink dump | `Service::network_snapshot` 读取当前配置快照 |
+| owner state | netlink dump | `Service::link_snapshots`、`Service::ipv4_addr_snapshots` 或 `Service::route_snapshot` 在对应 dump 持有的一次 `SERVICE` 锁定期间读取 owner |
 
 ## 算法流程
 
@@ -239,15 +239,23 @@ Service narrow mutation
 1. crate 内 UDP 根据目的地址选择源地址和匹配路由的 MTU，在单个预分配 buffer 中写入 payload、UDP 头和 IPv4 头后提交到 `Router` 的 TX 队列。smoltcp 协议也通过同一队列提交 IP 包。
 2. `IP_MTU_DISCOVER` 决定 UDP IPv4 头部的 DF 标志。超出路由 MTU 且允许分片的包由 `fragment_output_packet` 拆分，DF 包返回 `EMSGSIZE`。
 3. `Router::dispatch` 接管所有权，并按 IP 版本解析目的地址；IPv4 输出先按实际长度更新 `total_len` 和头部校验和。
-4. 广播或组播包复制到所有设备。
-5. 单播包通过 `RouteTable::lookup` 选择最长前缀路由。
-6. Ethernet 设备先查 ARP neighbor cache，命中后通过 `link::wire` 封装 Ethernet frame。
-7. 未命中时发送 ARP request，并把 IP 包放入 `pending_tx` 等待 neighbor 解析。
+4. IPv4 广播包复制到参与转发且处于 up 状态的设备，并以这些设备的最小 MTU 作为发送上限；普通 IPv4 multicast socket 发送返回 `EOPNOTSUPP`。
+5. 单播包通过 `RouteTable::lookup` 选择最长前缀路由，处于 down 状态的设备不参与源地址和出接口选择。
+6. 带固定 `prefsrc` 的路由使用该地址；动态选源先按地址 scope 过滤，再优先选择其前缀覆盖 gateway 或直连 next-hop 的地址。
+7. crate 内 UDP 和 smoltcp raw IP 在提交报文前按对应出口 MTU 与 IP 长度字段上限检查长度，超限返回 `EMSGSIZE`。
+8. Ethernet 设备先查 ARP neighbor cache，命中后通过 `link::wire` 封装 Ethernet frame。
+9. `NUD_INCOMPLETE` 和 cache miss 把 IP 包及其实际源地址放入 `pending_tx`，ARP request 使用该源地址作为 SPA；设备维护 deadline 主动推进重试。
+10. 可重试的 TX 失败保留 pending 包和重试状态，硬错误记录后丢弃对应包；源地址从全局本机地址集合消失时，跨设备移除使用该源地址的 pending 包。
+11. ARP 报文的 target protocol address 命中全局本机地址集合时可被接收，包含其他接口的本地地址。
+12. `NUD_PERMANENT` 直接提供固定 MAC 映射，动态 ARP 学习不会覆盖该配置。
+13. link 进入 down 状态后，loopback 和 Ethernet 停止普通 IP 收发，Ethernet raw frame 发送返回 `ENETDOWN`。
 
 当前实现保留 smoltcp TCP、raw socket 和 IPv6 推进。UDP、IPv4 分片重组、输出分片和 ICMPv4 UDP 差错报告使用 crate 内实现。
 `PacketBuf`、`link::wire` 和 `stack::ipv4` 提供设备与 crate 内 IPv4/UDP 数据路径共用的报文表示和 parser/emitter。
 路由表和设备接口使用 `crate::ip` 地址类型，设备时间使用 `ktime::MonotonicInstant`。
 `Router`、`Service` 和初始化入口在 smoltcp 兼容边界完成地址与时间转换。
+smoltcp 的单个 `Interface` 仍共享所有设备的最小 MTU，因此 TCP 和其他经该
+`Interface` 发送的流量受全局最小 MTU 的保守约束。
 
 ### TCP listen 和 accept
 
@@ -275,11 +283,14 @@ Service narrow mutation
 
 ### rtnetlink 请求
 
-1. `NetlinkSocket::send` 把用户请求交给 `handle_route_request`。
-2. `NlMsgHeader::read` 和各类 `parse_*` helper 校验 netlink header 与 attribute。
-3. dump 请求通过 `Service::network_snapshot` 读取 `Router` 和 `NetDevice` 当前持有的配置，并生成 multi-part response。
-4. mutation 请求获取一次 `SERVICE` mutex，在同一临界区内检查当前 owner 状态并通过 `Service` 的窄接口更新地址、路由、链路或邻居，失败时返回 netlink error。
-5. 地址更新同时刷新 smoltcp `Interface` 的兼容地址视图，带 `NLM_F_ACK` 时返回 ack。
+1. POSIX send 路径和 socket file write 路径分别在每次操作入口取得当前调用者的 `Cred` 快照，通过 `Socket::send_with_cred` 传给 `NetlinkSocket::send_with_cred`；socket 不缓存调用者权限。
+2. `NlMsgHeader::read`、批次拆分和各类 `parse_*` helper 校验每条 netlink message 的 header、对齐边界与 attribute；批次 framing 错误在处理任何 message 前返回 syscall `EINVAL`。
+3. 仅含查询的批次逐条生成 response，仅含 mutation 的批次在预留 RX response 空间后逐条执行；混合查询和 mutation 的批次在修改 owner 前返回 syscall `EOPNOTSUPP`。
+4. 每条 mutation 使用本次发送携带的凭据检查权限。无权限请求在 RX queue 中生成带 `EPERM` 的 `NLMSG_ERROR`，response 入队后发送入口返回已消费的请求长度。
+5. link、address 和 route dump 分别通过 `Service::link_snapshots`、`Service::ipv4_addr_snapshots` 和 `Service::route_snapshot` 读取当前 owner，并生成 multi-part response。
+6. mutation 请求获取一次 `SERVICE` mutex，在同一临界区内检查当前 owner 状态并通过 `Service` 的窄接口更新地址、路由、链路或邻居，失败时返回 netlink error。
+7. 地址更新同时维护自动生成的 local 和 connected 路由、smoltcp `Interface` 的兼容地址视图以及 Ethernet pending 状态。
+8. source-specific、metric、multipath 和其他未实现的语义属性返回 `EOPNOTSUPP`；不支持邻居表的设备同样返回 `EOPNOTSUPP`，带 `NLM_F_ACK` 的成功请求返回 ack。
 
 ## 并发模型
 
@@ -298,7 +309,8 @@ Service narrow mutation
 - Unix stream 的用户数据复制和 `PollSet` 唤醒在 `tx_order` 外执行。send 先写入未发布的 vacant 区域，再在锁内复检关闭状态并推进 write index；recv 读取为空后在锁内复查 occupied 长度和关闭状态；shutdown 完成状态发布并复制 peer endpoint 引用后释放 `channel` mutex，再执行 waiter 唤醒。
 - Unix stream 每个 endpoint 分别持有 readable、writable 和 connection-state 三组 `PollSet`。写入只唤醒 peer readable waiter，读取跨过发送缓冲低水位时只唤醒 peer writable waiter，半关闭只唤醒受影响方向，完整关闭通过 connection-state waiter 通知双方。
 - rtnetlink mutation 的状态检查与 owner 更新由同一次 `SERVICE` mutex 获取串行化，netlink rx queue 和 subscriber 列表使用 `Mutex`。
-- RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 使用调用方传入的 `PollContext` 注册聚合 `timeout_poll`，再把该聚合 source waker 交给单 waker 设备，并让 Ethernet 直接把当前等待注册到 IRQ source。loopback 保存 `timeout_poll` 的聚合 waker（`Mutex<Option<Waker>>`），多任务广播由 `timeout_poll` 完成；设备层不得保存调用方的裸 waker或绕过 `Service` 注册互不等价的 task waker。
+- rtnetlink 每次发送携带独立的凭据快照；批量 mutation 在执行前预留完整 response 空间，避免 queue 满后只提交批次前缀。
+- RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 通过调用方传入的 `PollContext` 注册聚合 `timeout_poll`，调度 smoltcp timeout 和 ARP 主动重试 deadline，并向选定设备注册当前等待；Ethernet 直接把当前等待注册到 IRQ source，loopback 保存 `timeout_poll` 的聚合 waker（`Mutex<Option<Waker>>`），多任务广播由 `timeout_poll` 完成；设备层不得保存调用方的裸 waker或绕过 `Service` 注册互不等价的 task waker。
 
 ## 设计决策
 
@@ -311,9 +323,41 @@ TCP、raw IP、IPv6 和 DNS 继续通过 smoltcp socket set 推进，协议推�
 ### 数据路径持有网络配置
 
 地址和路由由 `Router` 持有，链路属性和邻居表由对应 `NetDevice` 持有。
-rtnetlink mutation 通过 `Service` 的窄接口直接修改 owner，dump 使用 `NetworkSnapshot` 读取同一份状态。
+rtnetlink mutation 通过 `Service` 的窄接口直接修改 owner，link、address 和 route dump 分别使用
+`link_snapshots`、`ipv4_addr_snapshots` 和 `route_snapshot` 读取同一份状态。
+每类快照均在对应 dump 所持有的一次 `SERVICE` 锁定期间完整创建，地址快照把地址配置与当时的设备 label 配对，
+避免 dump 离开 owner 临界区后重新查询易变的设备属性。
 该结构移除控制面镜像及其全量同步路径，smoltcp `Interface` 只保留协议兼容所需的地址视图。
-`NetworkSnapshot` 只表达 rtnetlink ABI 所需的配置字段，不包含驱动瞬时统计和 smoltcp 内部计数。
+三类快照只表达各自已实现的 dump 字段，不收集尚未提供 `RTM_GETNEIGH` 的邻居表，
+也不包含驱动瞬时统计和 smoltcp 内部计数。
+
+`Router` 在地址新增和删除时重建该设备的自动路由，每个地址产生 local `/32` 路由，
+每个前缀产生 connected 路由；固定 `prefsrc` 已失效的配置路由同时删除。
+`Router` 最多保存 8 个 IPv4 地址，该全局容量与 smoltcp `Interface` 地址槽一致。
+replace 已存在地址只确认其存在，不修改原 scope。动态选源按 route scope 过滤候选地址，
+并优先选择前缀覆盖 gateway 或直连 next-hop 的地址。
+
+当前内部路由模型没有独立 local table 和 local route type。自动 local `/32` 仍以 main table、
+unicast type 和 loopback egress 表达，rtnetlink dump 对外呈现这组内部属性。
+Ethernet 邻居项显式区分待探测、动态可达和永久配置状态，避免把“尚未发出请求”和“请求已在途”压缩成同一表示。
+
+### 出口 MTU 的双层约束
+
+UDP 和 raw IP 能在提交完整报文前取得目标地址，因此单播和定向广播按最终路由设备 MTU
+检查，全局广播按全部参与设备的最小 MTU 检查，普通 IPv4 multicast socket 发送返回
+`EOPNOTSUPP`。
+处于 down 状态的设备不计入参与集合。Ethernet 和 loopback 在最终 TX 边界按当前设备 MTU
+再次复核报文长度，覆盖报文排队后 MTU 下调的并发窗口。
+smoltcp 仍以单个 `Interface` 推进 TCP 等协议，该 `Interface` 的 capability MTU 取所有设备
+的最小值，形成更保守的全局上限。该限制保留跨设备共享 `Interface` 时的安全报文长度。
+
+### rtnetlink 语义子集
+
+路由配置只接受当前 owner 模型能够完整表达的 IPv4、main table、unicast 和单出接口语义。
+source-specific route、metric、multipath 及其他会改变查找或选路结果但尚未建模的属性
+返回 `EOPNOTSUPP`，避免接收后丢弃属性并产生与请求不一致的路由。
+当前未发布 route multicast notification，`NETLINK_ROUTE` bind 的非零 group mask
+和发送目标中的非零 pid 或 group 均返回 `EOPNOTSUPP`。
 
 ### pathname Unix socket 显式传递凭据
 
@@ -347,9 +391,12 @@ Unix stream 的双向 channel 为两端保存独立的 `StreamEndpoint`，endpoi
 
 ### Ethernet ARP pending queue
 
-Ethernet 设备为未解析 next-hop 保留 `pending_tx`。
-同一个 next-hop 的 ARP 回复到达后，设备按队头顺序发送等待中的 IP 包。
-当前队列存在 head-of-line blocking，长时间 unresolved 的 next-hop 会阻塞后续 pending 包。
+Ethernet 设备为未解析 next-hop 保留 `pending_tx`，每个 pending 包同时保留实际 IP 源地址。
+ARP request 使用对应包的源地址作为 SPA，ARP request 的 target 命中 Router 全局本机地址集合时均可回复。
+设备维护逻辑按 next-hop 推进 pending 包和主动重试 deadline，一个 unresolved next-hop
+不会阻塞其他已解析 next-hop。`WouldBlock`、`ResourceBusy` 等可重试 TX 失败保留原包，
+硬错误只移除对应包。源地址从全局本机地址集合消失时，地址配置更新会跨设备清理对应
+pending 包，避免后续使用失效 SPA。
 
 ### vsock-TIPC bridge
 

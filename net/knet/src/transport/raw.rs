@@ -30,6 +30,9 @@ use crate::{
     poll_interfaces,
 };
 
+const IPV4_HEADER_LEN: usize = 20;
+const IPV6_HEADER_LEN: usize = 40;
+
 pub(crate) fn new_raw_socket(
     ip_version: IpVersion,
     ip_protocol: IpProtocol,
@@ -95,10 +98,15 @@ impl RawSocket {
     }
 
     fn local_address_for(&self, remote: IpAddress) -> KResult<IpAddress> {
-        if let Some(local) = *self.local_addr.read() {
+        let service = SERVICE.lock();
+        if let Some(local) = validate_explicit_bound_source(
+            *self.local_addr.read(),
+            |address| service.has_local_address(&address),
+            |address| service.is_smoltcp_ipv4_broadcast(&address),
+        )? {
             return Ok(local);
         }
-        SERVICE.lock().get_smoltcp_source_address(&remote)
+        service.get_smoltcp_source_address(&remote)
     }
 
     fn parse_ip_packet<'a>(&self, packet: &'a [u8]) -> KResult<(IpAddress, &'a [u8])> {
@@ -164,11 +172,19 @@ impl SocketOps for RawSocket {
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         let local_addr = local_addr.into_ip()?;
         let local = self.check_ip_version(local_addr.ip().into())?;
+        let service = SERVICE.lock();
+        validate_raw_bind_address(
+            local,
+            |address| service.has_local_address(&address),
+            |address| service.is_smoltcp_ipv4_bindable_broadcast(&address),
+        )?;
         *self.local_addr.write() = Some(local);
-        let device_mask = if local.is_unspecified() {
+        let device_mask = if is_dynamic_bound_source(local, |address| {
+            service.is_smoltcp_ipv4_broadcast(&address)
+        }) {
             u32::MAX
         } else {
-            SERVICE.lock().smoltcp_device_mask_for(&IpListenEndpoint {
+            service.smoltcp_device_mask_for(&IpListenEndpoint {
                 addr: Some(local),
                 port: 0,
             })
@@ -180,8 +196,9 @@ impl SocketOps for RawSocket {
     fn connect(&self, remote_addr: SocketAddrEx) -> KResult {
         let remote_addr = remote_addr.into_ip()?;
         let remote = self.check_ip_version(remote_addr.ip().into())?;
+        let local = self.local_address_for(remote)?;
         if self.local_addr.read().is_none() {
-            *self.local_addr.write() = Some(SERVICE.lock().get_smoltcp_source_address(&remote)?);
+            *self.local_addr.write() = Some(local);
         }
         *self.peer_addr.write() = Some(remote);
         self.general
@@ -200,6 +217,10 @@ impl SocketOps for RawSocket {
         let remote = self.remote_address(&options)?;
         let local = self.local_address_for(remote)?;
         let payload_len = src.remaining();
+        let egress_mtu = SERVICE.lock().egress_mtu(&remote)?;
+        validate_raw_payload_len_for_mtu(payload_len, self.ip_version, egress_mtu)?;
+        let mut payload = vec![0u8; payload_len];
+        src.read_exact(&mut payload)?;
 
         self.general
             .send_poller_with_nonblocking(self, options.flags.nonblocking(), || {
@@ -283,8 +304,8 @@ impl SocketOps for RawSocket {
                         }
                     }
 
-                    let written = src.read(&mut buf[header_len..])?;
-                    Ok(written)
+                    buf[header_len..].copy_from_slice(&payload);
+                    Ok(payload_len)
                 })
             })
     }
@@ -404,6 +425,64 @@ impl Drop for RawSocket {
     }
 }
 
+fn validate_explicit_bound_source(
+    local: Option<IpAddress>,
+    is_local: impl FnOnce(IpAddress) -> bool,
+    is_broadcast: impl FnOnce(IpAddress) -> bool,
+) -> Result<Option<IpAddress>, LinuxError> {
+    let Some(address) = local.filter(|address| !is_dynamic_bound_source(*address, is_broadcast))
+    else {
+        return Ok(None);
+    };
+    if !is_local(address) {
+        return Err(LinuxError::ENETUNREACH);
+    }
+    Ok(Some(address))
+}
+
+fn validate_raw_bind_address(
+    address: IpAddress,
+    is_local: impl FnOnce(IpAddress) -> bool,
+    is_broadcast: impl FnOnce(IpAddress) -> bool,
+) -> Result<(), LinuxError> {
+    if !is_dynamic_bound_source(address, is_broadcast) && !is_local(address) {
+        return Err(LinuxError::EADDRNOTAVAIL);
+    }
+    Ok(())
+}
+
+fn is_dynamic_bound_source(
+    address: IpAddress,
+    is_broadcast: impl FnOnce(IpAddress) -> bool,
+) -> bool {
+    address.is_unspecified()
+        || address.is_multicast()
+        || matches!(address, IpAddress::Ipv4(address) if address.is_broadcast())
+        || is_broadcast(address)
+}
+
+fn validate_raw_payload_len_for_mtu(
+    payload_len: usize,
+    ip_version: IpVersion,
+    mtu: usize,
+) -> Result<(), LinuxError> {
+    let header_len = match ip_version {
+        IpVersion::Ipv4 => IPV4_HEADER_LEN,
+        IpVersion::Ipv6 => IPV6_HEADER_LEN,
+    };
+    let packet_len = payload_len
+        .checked_add(header_len)
+        .ok_or(LinuxError::EMSGSIZE)?;
+    let exceeds_ip_length = match ip_version {
+        IpVersion::Ipv4 => packet_len > u16::MAX as usize,
+        IpVersion::Ipv6 => payload_len > u16::MAX as usize,
+    };
+    if packet_len > mtu || exceeds_ip_length {
+        return Err(LinuxError::EMSGSIZE);
+    }
+    Ok(())
+}
+
 #[cfg(unittest)]
 mod tests {
     use alloc::{vec, vec::Vec};
@@ -415,6 +494,134 @@ mod tests {
 
     use super::*;
     use crate::options::{Configurable, GetSocketOption, SetSocketOption};
+
+    #[def_test]
+    fn raw_ipv4_payload_respects_egress_mtu() {
+        const MTU: usize = 1500;
+
+        assert_eq!(
+            validate_raw_payload_len_for_mtu(MTU - IPV4_HEADER_LEN, IpVersion::Ipv4, MTU),
+            Ok(())
+        );
+        assert_eq!(
+            validate_raw_payload_len_for_mtu(MTU - IPV4_HEADER_LEN + 1, IpVersion::Ipv4, MTU),
+            Err(LinuxError::EMSGSIZE)
+        );
+    }
+
+    #[def_test]
+    fn raw_ipv4_payload_respects_total_length_field() {
+        const LOOPBACK_MTU: usize = 65_536;
+        const MAX_PAYLOAD: usize = u16::MAX as usize - IPV4_HEADER_LEN;
+
+        assert_eq!(
+            validate_raw_payload_len_for_mtu(MAX_PAYLOAD, IpVersion::Ipv4, LOOPBACK_MTU),
+            Ok(())
+        );
+        assert_eq!(
+            validate_raw_payload_len_for_mtu(MAX_PAYLOAD + 1, IpVersion::Ipv4, LOOPBACK_MTU),
+            Err(LinuxError::EMSGSIZE)
+        );
+    }
+
+    #[def_test]
+    fn raw_ipv6_payload_respects_egress_mtu() {
+        const MTU: usize = 1500;
+
+        assert_eq!(
+            validate_raw_payload_len_for_mtu(MTU - IPV6_HEADER_LEN, IpVersion::Ipv6, MTU),
+            Ok(())
+        );
+        assert_eq!(
+            validate_raw_payload_len_for_mtu(MTU - IPV6_HEADER_LEN + 1, IpVersion::Ipv6, MTU),
+            Err(LinuxError::EMSGSIZE)
+        );
+    }
+
+    #[def_test]
+    fn raw_unspecified_bound_address_defers_source_selection() {
+        assert_eq!(
+            validate_explicit_bound_source(
+                Some(IpAddress::Ipv4(Ipv4Addr::UNSPECIFIED)),
+                |_| false,
+                |_| false
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            validate_explicit_bound_source(
+                Some(IpAddress::Ipv6(Ipv6Addr::UNSPECIFIED)),
+                |_| false,
+                |_| false
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            validate_explicit_bound_source(
+                Some(IpAddress::Ipv4(Ipv4Addr::BROADCAST)),
+                |_| false,
+                |_| false
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            validate_explicit_bound_source(
+                Some(IpAddress::Ipv4(Ipv4Addr::new(224, 0, 0, 1))),
+                |_| false,
+                |_| false
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            validate_explicit_bound_source(
+                Some(IpAddress::Ipv4(Ipv4Addr::new(192, 0, 2, 255))),
+                |_| false,
+                |_| true
+            ),
+            Ok(None)
+        );
+    }
+
+    #[def_test]
+    fn raw_bind_accepts_dynamic_source_addresses() {
+        assert_eq!(
+            validate_raw_bind_address(IpAddress::Ipv4(Ipv4Addr::UNSPECIFIED), |_| false, |_| false),
+            Ok(())
+        );
+        assert_eq!(
+            validate_raw_bind_address(IpAddress::Ipv4(Ipv4Addr::BROADCAST), |_| false, |_| false),
+            Ok(())
+        );
+        assert_eq!(
+            validate_raw_bind_address(
+                IpAddress::Ipv4(Ipv4Addr::new(224, 0, 0, 1)),
+                |_| false,
+                |_| false
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_raw_bind_address(
+                IpAddress::Ipv4(Ipv4Addr::new(192, 0, 2, 255)),
+                |_| false,
+                |_| true
+            ),
+            Ok(())
+        );
+    }
+
+    #[def_test]
+    fn raw_explicit_source_must_remain_local() {
+        let source = IpAddress::Ipv4(Ipv4Addr::new(192, 0, 2, 2));
+        assert_eq!(
+            validate_explicit_bound_source(Some(source), |_| true, |_| false),
+            Ok(Some(source))
+        );
+        assert_eq!(
+            validate_explicit_bound_source(Some(source), |_| false, |_| false),
+            Err(LinuxError::ENETUNREACH)
+        );
+    }
 
     fn ipv4_packet_bytes(src: Ipv4Addr, dst: Ipv4Addr, payload: &[u8]) -> Vec<u8> {
         let repr = Ipv4Repr {
@@ -534,8 +741,8 @@ mod tests {
         assert_eq!(
             socket
                 .local_address_for(IpAddress::Ipv4(Ipv4Addr::new(198, 51, 100, 9)))
-                .unwrap(),
-            IpAddress::Ipv4(Ipv4Addr::new(192, 0, 2, 44))
+                .unwrap_err(),
+            KError::from(LinuxError::ENETUNREACH)
         );
     }
 
