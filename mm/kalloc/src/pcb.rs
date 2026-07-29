@@ -37,9 +37,6 @@ const MAX_BUCKET_SIZE: usize = 2048;
 /// Upper-bound sizes for each bucket, in ascending order.
 const BUCKET_SIZES: [usize; BUCKET_COUNT] = [8, 16, 32, 64, 128, 256, 512, 1024, 2048];
 
-/// Max cached entries per bucket (small objects → larger cache).
-const BUCKET_COUNTS: [usize; BUCKET_COUNT] = [32, 32, 24, 16, 12, 8, 6, 4, 2];
-
 /// Map a layout to a bucket index. Returns `None` for sizes or alignments
 /// exceeding [`MAX_BUCKET_SIZE`].
 fn bucket_index(layout: Layout) -> Option<usize> {
@@ -128,7 +125,10 @@ impl<const COUNT: usize> PerCpuBytes<COUNT> {
 
         // Allocate the first object — this is the one we return.
         let first = balloc.allocate(layout).inspect_err(|_| {
-            log::warn!("pcb refill(COUNT={}): first alloc failed", COUNT);
+            log::debug!(
+                "pcb refill(COUNT={}): first alloc failed (heap may expand)",
+                COUNT
+            );
         })?;
 
         // Push the tail objects into the cache.
@@ -398,12 +398,8 @@ mod tests {
     fn test_constants() {
         assert_eq!(BUCKET_COUNT, 9);
         assert_eq!(BUCKET_SIZES.len(), BUCKET_COUNT);
-        assert_eq!(BUCKET_COUNTS.len(), BUCKET_COUNT);
         for &s in &BUCKET_SIZES {
             assert!(s <= MAX_BUCKET_SIZE);
-        }
-        for &c in &BUCKET_COUNTS {
-            assert!(c >= 1);
         }
     }
 }
