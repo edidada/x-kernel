@@ -40,9 +40,8 @@ fn kernel_virt_to_phys(vaddr: usize) -> usize {
 }
 
 mod page;
+mod pcb;
 mod pcp;
-#[cfg(feature = "slab")]
-mod scp;
 pub use page::GlobalPage;
 
 #[cfg(feature = "tracking")]
@@ -224,14 +223,13 @@ impl GlobalAllocator {
             return self.large_alloc(layout);
         }
 
-        // Fast path: try per-CPU slab cache first (lock-free).
-        #[cfg(feature = "slab")]
+        // Fast path: try per-CPU cache first (lock-free).
         {
             let _guard = IrqSave::new();
-            if let Some(addr) = scp::try_alloc(layout) {
+            if let Some(addr) = pcb::try_alloc(layout) {
                 drop(_guard);
                 self.usages.lock().alloc(UsageKind::RustHeap, layout.size());
-                // SAFETY: addr came from a valid slab allocation.
+                // SAFETY: addr came from a valid allocation.
                 return Ok(unsafe { core::ptr::NonNull::new_unchecked(addr as *mut u8) });
             }
         }
@@ -240,37 +238,29 @@ impl GlobalAllocator {
 
         // Double-check: an interrupt may have freed objects to our cache
         // between the fast-path miss and lock acquisition.
-        #[cfg(feature = "slab")]
         {
             // IRQs already disabled by SpinNoIrq.
-            if let Some(addr) = scp::try_alloc(layout) {
+            if let Some(addr) = pcb::try_alloc(layout) {
                 self.usages.lock().alloc(UsageKind::RustHeap, layout.size());
-                // SAFETY: addr came from a valid slab allocation.
+                // SAFETY: addr came from a valid allocation.
                 return Ok(unsafe { core::ptr::NonNull::new_unchecked(addr as *mut u8) });
             }
         }
 
         loop {
             let heap_ready = self.heap_ready.load(Ordering::Acquire);
-            #[cfg(feature = "slab")]
             if heap_ready {
-                match scp::fill_cache(layout, &mut balloc) {
+                match pcb::fill_cache(layout, &mut *balloc) {
                     Ok(addr) => {
                         self.usages.lock().alloc(UsageKind::RustHeap, layout.size());
-                        // SAFETY: addr came from a valid slab allocation.
+                        // SAFETY: addr came from a valid allocation.
                         return Ok(unsafe { core::ptr::NonNull::new_unchecked(addr as *mut u8) });
                     }
                     Err(AllocError::NoMemory) => {
-                        // Slab internal buddy exhausted; fall through to expansion.
+                        // Byte allocator exhausted; fall through to expansion.
                     }
                     Err(e) => return Err(e),
                 }
-            }
-
-            #[cfg(not(feature = "slab"))]
-            if heap_ready && let Ok(ptr) = balloc.allocate(layout) {
-                self.usages.lock().alloc(UsageKind::RustHeap, layout.size());
-                return Ok(ptr);
             }
 
             let old_size = if heap_ready { balloc.total_bytes() } else { 0 };
@@ -360,21 +350,17 @@ impl GlobalAllocator {
                 .dealloc(UsageKind::RustHeap, layout.size());
 
             // Fast path: try to cache the freed object per-CPU.
-            #[cfg(feature = "slab")]
             {
                 let _guard = IrqSave::new();
-                if scp::try_free(layout, ptr.as_ptr() as usize) {
+                if pcb::try_free(layout, ptr.as_ptr() as usize) {
                     return; // Cached; done.
                 }
                 drop(_guard);
 
-                // Cache full: lock and bulk-drain to global slab.
+                // Cache full: lock and bulk-drain to global allocator.
                 let mut balloc = self.balloc.lock();
-                scp::drain_cache(layout, &mut balloc, ptr.as_ptr() as usize);
+                pcb::drain_cache(layout, &mut *balloc, ptr.as_ptr() as usize);
             }
-
-            #[cfg(not(feature = "slab"))]
-            self.balloc.lock().deallocate(ptr, layout);
         }
     }
 
