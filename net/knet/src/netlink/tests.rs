@@ -142,7 +142,13 @@ impl NetDevice for TestDevice {
         false
     }
 
-    fn register_rx_waker(&self, _waker: &Waker) {}
+    fn register_rx_waker(
+        &self,
+        _source_waker: &Waker,
+        _context: &mut kpoll::PollContext<'_>,
+    ) -> Result<(), kpoll::PollRegisterError> {
+        Ok(())
+    }
 
     fn set_name(&mut self, name: String) {
         self.link.name = name;

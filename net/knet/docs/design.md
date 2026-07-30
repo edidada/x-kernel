@@ -314,7 +314,8 @@ smoltcp 的单个 `Interface` 仍共享所有设备的最小 MTU，因此 TCP �
 - Unix stream 每个 endpoint 分别持有 readable、writable 和 connection-state 三组 `PollSet`。写入只唤醒 peer readable waiter，读取跨过发送缓冲低水位时只唤醒 peer writable waiter，半关闭只唤醒受影响方向，完整关闭通过 connection-state waiter 通知双方。
 - rtnetlink mutation 的状态检查与 owner 更新由同一次 `SERVICE` mutex 获取串行化，netlink rx queue 和 subscriber 列表使用 `Mutex`。
 - rtnetlink 每次发送携带独立的凭据快照；批量 mutation 在执行前预留完整 response 空间，避免 queue 满后只提交批次前缀。
-- RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 通过调用方传入的 `PollContext` 注册聚合 `timeout_poll`，调度 smoltcp timeout 和 ARP 主动重试 deadline，并向选定设备注册当前等待；Ethernet 直接把当前等待注册到 IRQ source，loopback 保存 `timeout_poll` 的聚合 waker（`Mutex<Option<Waker>>`），多任务广播由 `timeout_poll` 完成；设备层不得保存调用方的裸 waker或绕过 `Service` 注册互不等价的 task waker。
+- RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 通过同一个 `PollContext` 把当前等待注册到聚合 `timeout_poll` 和相关 Ethernet IRQ source，调用方持有的 `PollRegistrations` 统一管理这些注册的取消与释放。loopback 只保存 `timeout_poll` 的聚合 waker（`Mutex<Option<Waker>>`），多任务广播仍由 `timeout_poll` 完成；不得绕过 `Service` 向 loopback 注册互不等价的 task waker。每次 `Interface::poll` 也会刷新独立的协议 timer，使 TCP 重传等 deadline 不依赖阻塞中的 socket waiter。
+- RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 通过同一个 `PollContext` 把当前等待注册到聚合 `timeout_poll` 和相关 Ethernet IRQ source，调用方持有的 `PollRegistrations` 统一管理这些注册的取消与释放。loopback 只保存 `timeout_poll` 的聚合 waker（`Mutex<Option<Waker>>`），多任务广播仍由 `timeout_poll` 完成；不得绕过 `Service` 向 loopback 注册互不等价的 task waker。每次 `Interface::poll` 也会刷新独立的协议 timer，使 TCP 重传等 deadline 不依赖阻塞中的 socket waiter。
 
 ## 设计决策
 
@@ -378,10 +379,10 @@ Linux 可从任务上下文隐式读取 `current_cred()`，但 knet 也服务于
 ### 设备 mask 驱动 RX 唤醒
 
 每个 socket 根据 bind 或 connect 结果记录设备 mask。
-等待 RX 时只向相关设备注册 waker，同时注册 smoltcp poll timeout。
-smoltcp `poll_at` 使用传入 timestamp 的同一 epoch 返回期限；兼容边界在
-`SmoltcpInstant` 与 `MonotonicInstant` 之间直接映射时间点。过期的 smoltcp deadline
-因此仍是过期的单调 deadline，不再计算有符号 delay，也不会经过 `as u64` 窄化。
+等待 RX 时只向相关 Ethernet IRQ source 注册当前任务，同时注册 smoltcp poll timeout。
+两项注册使用调用方传入的同一个 `PollContext`，生命周期由跨越 `Pending` 的
+`PollRegistrations` 管理。loopback 保留单个 `timeout_poll` 源 waker，
+包到达后由该 poll set 广播给当前等待任务。
 这个设计减少无关设备中断唤醒，但依赖路由和地址同步保持 mask 准确。
 
 ### TCP listen 表独立于 smoltcp listener socket
