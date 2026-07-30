@@ -218,15 +218,19 @@ impl GlobalAllocator {
     /// to avoid fragmenting the slab heap and are served directly from the
     /// page allocator.
     pub fn alloc(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
-        // Large allocations: go directly to the page allocator.
-        if layout.size() > PAGE_SIZE_4K / 2 {
+        // Large size or alignment: go directly to the page allocator.
+        // PCB buckets cover up to 2048 in both dimensions; anything beyond
+        // that would be rejected by every bucket and treated as NoMemory,
+        // causing spurious heap expansion.
+        if layout.size() > PAGE_SIZE_4K / 2 || layout.align() > PAGE_SIZE_4K / 2 {
             return self.large_alloc(layout);
         }
 
         // Fast path: try per-CPU cache first (lock-free).
         {
             let _guard = IrqSave::new();
-            if let Some(addr) = pcb::try_alloc(layout) {
+            // SAFETY: IRQs disabled by IrqSave above.
+            if let Some(addr) = unsafe { pcb::try_alloc(layout) } {
                 drop(_guard);
                 self.usages.lock().alloc(UsageKind::RustHeap, layout.size());
                 // SAFETY: addr came from a valid allocation.
@@ -239,8 +243,8 @@ impl GlobalAllocator {
         // Double-check: an interrupt may have freed objects to our cache
         // between the fast-path miss and lock acquisition.
         {
-            // IRQs already disabled by SpinNoIrq.
-            if let Some(addr) = pcb::try_alloc(layout) {
+            // SAFETY: IRQs already disabled by SpinNoIrq lock above.
+            if let Some(addr) = unsafe { pcb::try_alloc(layout) } {
                 self.usages.lock().alloc(UsageKind::RustHeap, layout.size());
                 // SAFETY: addr came from a valid allocation.
                 return Ok(unsafe { core::ptr::NonNull::new_unchecked(addr as *mut u8) });
@@ -250,7 +254,8 @@ impl GlobalAllocator {
         loop {
             let heap_ready = self.heap_ready.load(Ordering::Acquire);
             if heap_ready {
-                match pcb::fill_cache(layout, &mut *balloc) {
+                // SAFETY: IRQs disabled by SpinNoIrq lock.
+                match unsafe { pcb::fill_cache(layout, &mut *balloc) } {
                     Ok(addr) => {
                         self.usages.lock().alloc(UsageKind::RustHeap, layout.size());
                         // SAFETY: addr came from a valid allocation.
@@ -339,8 +344,8 @@ impl GlobalAllocator {
     ///
     /// [`alloc`]: GlobalAllocator::alloc
     pub fn dealloc(&self, ptr: NonNull<u8>, layout: Layout) {
-        // Large allocations bypassed the byte allocator.
-        if layout.size() > PAGE_SIZE_4K / 2 {
+        // Large size or alignment: bypassed the byte allocator.
+        if layout.size() > PAGE_SIZE_4K / 2 || layout.align() > PAGE_SIZE_4K / 2 {
             let pages = layout.size().div_ceil(PAGE_SIZE_4K);
             // dealloc_pages handles usages tracking internally.
             self.dealloc_pages(ptr.as_ptr() as usize, pages, UsageKind::RustHeap);
@@ -352,14 +357,16 @@ impl GlobalAllocator {
             // Fast path: try to cache the freed object per-CPU.
             {
                 let _guard = IrqSave::new();
-                if pcb::try_free(layout, ptr.as_ptr() as usize) {
+                // SAFETY: IRQs disabled by IrqSave above.
+                if unsafe { pcb::try_free(layout, ptr.as_ptr() as usize) } {
                     return; // Cached; done.
                 }
                 drop(_guard);
 
                 // Cache full: lock and bulk-drain to global allocator.
                 let mut balloc = self.balloc.lock();
-                pcb::drain_cache(layout, &mut *balloc, ptr.as_ptr() as usize);
+                // SAFETY: IRQs disabled by SpinNoIrq lock.
+                unsafe { pcb::drain_cache(layout, &mut *balloc, ptr.as_ptr() as usize) };
             }
         }
     }

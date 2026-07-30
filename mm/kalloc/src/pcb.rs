@@ -10,10 +10,9 @@
 //! lock by caching freed objects per-CPU and bulk-filling / bulk-draining
 //! when the cache is empty or full.
 //!
-//! Objects are bucketed by size into 9 bins (8..2048 bytes).  The cache
-//! works with any [`ByteAllocator`] backend (slab, buddy, TLSF) — it only
-//! calls [`ByteAllocator::allocate`] / [`ByteAllocator::deallocate`] through
-//! the trait, so all three compile-time allocator choices benefit automatically.
+//! Objects are bucketed by [`SizeClass`](alloc_engine::SizeClass), reusing
+//! the same size-class model used by the slab allocator.  Each class gets
+//! its own per-CPU LIFO cache.
 //!
 //! # Safety
 //!
@@ -22,36 +21,27 @@
 
 use core::alloc::Layout;
 
-use alloc_engine::{AllocResult, ByteAllocator};
+use alloc_engine::{AllocResult, ByteAllocator, SizeClass};
 
-// ---------------------------------------------------------------------------
-// Bucket definitions
-// ---------------------------------------------------------------------------
-
-/// Number of size buckets.
-const BUCKET_COUNT: usize = 9;
-
-/// Maximum object size handled by the per-CPU cache.
-const MAX_BUCKET_SIZE: usize = 2048;
-
-/// Upper-bound sizes for each bucket, in ascending order.
-const BUCKET_SIZES: [usize; BUCKET_COUNT] = [8, 16, 32, 64, 128, 256, 512, 1024, 2048];
-
-/// Map a layout to a bucket index. Returns `None` for sizes or alignments
-/// exceeding [`MAX_BUCKET_SIZE`].
-fn bucket_index(layout: Layout) -> Option<usize> {
-    let required = layout.size().max(layout.align());
-    if required > MAX_BUCKET_SIZE {
-        return None;
-    }
-    BUCKET_SIZES.iter().position(|&s| required <= s)
+/// Return the canonical [`Layout`] for a size class.
+///
+/// Every object in a given class is allocated and freed with this layout,
+/// regardless of the caller's original layout.  This guarantees a single
+/// (size, align) pair per bucket, so that allocators which rely on the
+/// layout for block-header lookup (TLSF) or alignment invariants remain
+/// correct even when different callers route to the same class.
+fn canonical_layout(class: SizeClass) -> Layout {
+    let size = class.size();
+    // SAFETY: size is a power of two in [8, 2048]; alignment equal to
+    // size always succeeds.
+    unsafe { Layout::from_size_align_unchecked(size, size) }
 }
 
 // ---------------------------------------------------------------------------
-// PerCpuBytes — per-CPU cache for one size bucket
+// PerCpuBytes — per-CPU cache for one size class
 // ---------------------------------------------------------------------------
 
-/// Per-CPU cache for a single size bucket.
+/// Per-CPU cache for a single size class.
 ///
 /// Stores freed object addresses in a simple LIFO array.
 /// Uses the same pattern as [`super::pcp::PerCpuPages`].
@@ -88,12 +78,6 @@ impl<const COUNT: usize> PerCpuBytes<COUNT> {
         Ok(())
     }
 
-    /// Current number of cached entries.
-    #[allow(dead_code)]
-    fn len(&self) -> usize {
-        self.size as usize
-    }
-
     /// Allocate one object, possibly refilling from the global byte allocator.
     ///
     /// Double-checks the cache before refilling: an interrupt may have
@@ -118,8 +102,8 @@ impl<const COUNT: usize> PerCpuBytes<COUNT> {
 
     /// Bulk-fill the cache from the global allocator.
     ///
-    /// Allocates `COUNT * 3 / 4` objects individually, pushes all but
-    /// the first into the cache, and returns the first to the caller.
+    /// Allocates `COUNT * 3 / 4` objects, pushes all but the first
+    /// into the cache, and returns the first to the caller.
     fn refill(&mut self, balloc: &mut impl ByteAllocator, layout: Layout) -> AllocResult<usize> {
         let nr_to_alloc = COUNT * 3 / 4;
 
@@ -181,82 +165,79 @@ impl<const COUNT: usize> PerCpuBytes<COUNT> {
 }
 
 // ---------------------------------------------------------------------------
-// PerCpuByteSet — aggregate for all nine size buckets
+// PerCpuByteSet — aggregate for all nine size classes
 // ---------------------------------------------------------------------------
 
-/// Per-CPU byte-object cache: collects per-bucket caches for all 9 sizes.
+/// Per-CPU byte cache: collects per-class caches for all 9 [`SizeClass`] values.
 #[derive(Clone, Copy)]
 struct PerCpuByteSet {
-    cache_8: PerCpuBytes<48>,
-    cache_16: PerCpuBytes<48>,
-    cache_32: PerCpuBytes<40>,
-    cache_64: PerCpuBytes<32>,
-    cache_128: PerCpuBytes<24>,
-    cache_256: PerCpuBytes<16>,
-    cache_512: PerCpuBytes<10>,
-    cache_1024: PerCpuBytes<8>,
-    cache_2048: PerCpuBytes<4>,
+    class_8: PerCpuBytes<48>,
+    class_16: PerCpuBytes<48>,
+    class_32: PerCpuBytes<40>,
+    class_64: PerCpuBytes<32>,
+    class_128: PerCpuBytes<24>,
+    class_256: PerCpuBytes<16>,
+    class_512: PerCpuBytes<10>,
+    class_1024: PerCpuBytes<8>,
+    class_2048: PerCpuBytes<4>,
 }
 
 impl PerCpuByteSet {
     const fn new() -> Self {
         Self {
-            cache_8: PerCpuBytes::new(),
-            cache_16: PerCpuBytes::new(),
-            cache_32: PerCpuBytes::new(),
-            cache_64: PerCpuBytes::new(),
-            cache_128: PerCpuBytes::new(),
-            cache_256: PerCpuBytes::new(),
-            cache_512: PerCpuBytes::new(),
-            cache_1024: PerCpuBytes::new(),
-            cache_2048: PerCpuBytes::new(),
+            class_8: PerCpuBytes::new(),
+            class_16: PerCpuBytes::new(),
+            class_32: PerCpuBytes::new(),
+            class_64: PerCpuBytes::new(),
+            class_128: PerCpuBytes::new(),
+            class_256: PerCpuBytes::new(),
+            class_512: PerCpuBytes::new(),
+            class_1024: PerCpuBytes::new(),
+            class_2048: PerCpuBytes::new(),
         }
     }
 }
 
-/// Dispatch a bucket index to the matching named cache field.
-///
-/// Each arm binds `$c` as `&mut PerCpuBytes<COUNT>`.
-macro_rules! with_bucket {
-    ($cache:expr, $idx:expr, | $c:ident | $body:expr) => {
-        match $idx {
-            0 => {
-                let $c = &mut $cache.cache_8;
+/// Dispatch a [`SizeClass`] to the matching named cache field.
+macro_rules! with_class {
+    ($cache:expr, $class:expr, | $c:ident | $body:expr) => {
+        match $class {
+            SizeClass::Bytes8 => {
+                let $c = &mut $cache.class_8;
                 $body
             }
-            1 => {
-                let $c = &mut $cache.cache_16;
+            SizeClass::Bytes16 => {
+                let $c = &mut $cache.class_16;
                 $body
             }
-            2 => {
-                let $c = &mut $cache.cache_32;
+            SizeClass::Bytes32 => {
+                let $c = &mut $cache.class_32;
                 $body
             }
-            3 => {
-                let $c = &mut $cache.cache_64;
+            SizeClass::Bytes64 => {
+                let $c = &mut $cache.class_64;
                 $body
             }
-            4 => {
-                let $c = &mut $cache.cache_128;
+            SizeClass::Bytes128 => {
+                let $c = &mut $cache.class_128;
                 $body
             }
-            5 => {
-                let $c = &mut $cache.cache_256;
+            SizeClass::Bytes256 => {
+                let $c = &mut $cache.class_256;
                 $body
             }
-            6 => {
-                let $c = &mut $cache.cache_512;
+            SizeClass::Bytes512 => {
+                let $c = &mut $cache.class_512;
                 $body
             }
-            7 => {
-                let $c = &mut $cache.cache_1024;
+            SizeClass::Bytes1024 => {
+                let $c = &mut $cache.class_1024;
                 $body
             }
-            8 => {
-                let $c = &mut $cache.cache_2048;
+            SizeClass::Bytes2048 => {
+                let $c = &mut $cache.class_2048;
                 $body
             }
-            _ => unreachable!("invalid bucket index: {}", $idx),
         }
     };
 }
@@ -275,15 +256,17 @@ static PCB_CACHE: PerCpuByteSet = PerCpuByteSet::new();
 /// Try to pop an object for `layout` from the per-CPU cache.
 ///
 /// Returns `None` if the corresponding cache is empty, or if the layout
-/// exceeds the maximum bucket size.
+/// exceeds the maximum size class.
 ///
 /// # Safety
 ///
-/// Must be called with local IRQs disabled.
+/// Must be called with local IRQs disabled to prevent interrupt handlers
+/// on the same CPU from re-entering the per-CPU cache and creating aliased
+/// `&mut` references.
 #[inline]
-pub(crate) fn try_alloc(layout: Layout) -> Option<usize> {
-    let idx = bucket_index(layout)?;
-    PCB_CACHE.with_current(|cache| with_bucket!(cache, idx, |c| c.try_pop()))
+pub(crate) unsafe fn try_alloc(layout: Layout) -> Option<usize> {
+    let class = SizeClass::from_layout(layout)?;
+    PCB_CACHE.with_current(|cache| with_class!(cache, class, |c| c.try_pop()))
 }
 
 /// Try to push a freed object into the per-CPU cache.
@@ -293,42 +276,55 @@ pub(crate) fn try_alloc(layout: Layout) -> Option<usize> {
 ///
 /// # Safety
 ///
-/// Must be called with local IRQs disabled.
+/// Must be called with local IRQs disabled to prevent interrupt handlers
+/// on the same CPU from re-entering the per-CPU cache and creating aliased
+/// `&mut` references.
 #[inline]
-pub(crate) fn try_free(layout: Layout, addr: usize) -> bool {
-    let Some(idx) = bucket_index(layout) else {
+pub(crate) unsafe fn try_free(layout: Layout, addr: usize) -> bool {
+    let Some(class) = SizeClass::from_layout(layout) else {
         return false;
     };
-    PCB_CACHE.with_current(|cache| with_bucket!(cache, idx, |c| c.try_push(addr).is_ok()))
+    PCB_CACHE.with_current(|cache| with_class!(cache, class, |c| c.try_push(addr).is_ok()))
 }
 
-/// Bulk-fill the cache for `layout`'s bucket from the global byte allocator.
+/// Bulk-fill the cache for `layout`'s size class from the global byte allocator.
 ///
-/// Called when [`try_alloc`] returned `None`.  Allocates a batch of objects
-/// from the global allocator, fills the cache, and returns one object.
+/// Called when [`try_alloc`] returned `None`.  Uses the class's canonical
+/// layout so that all objects in a bucket share the same (size, align).
+///
+/// # Safety
 ///
 /// Must be called while holding the global balloc lock (IRQs disabled).
-pub(crate) fn fill_cache(layout: Layout, balloc: &mut impl ByteAllocator) -> AllocResult<usize> {
-    let idx = bucket_index(layout).ok_or(alloc_engine::AllocError::NoMemory)?;
-    PCB_CACHE.with_current(|cache| with_bucket!(cache, idx, |c| c.alloc(balloc, layout)))
+pub(crate) unsafe fn fill_cache(
+    layout: Layout,
+    balloc: &mut impl ByteAllocator,
+) -> AllocResult<usize> {
+    let class = SizeClass::from_layout(layout).ok_or(alloc_engine::AllocError::NoMemory)?;
+    let canonical = canonical_layout(class);
+    PCB_CACHE.with_current(|cache| with_class!(cache, class, |c| c.alloc(balloc, canonical)))
 }
 
-/// Bulk-drain the cache for `layout`'s bucket to the global byte allocator.
+/// Bulk-drain the cache for `layout`'s size class to the global byte allocator.
 ///
-/// Called when [`try_free`] returned `false`.  Pops up to `COUNT * 3 / 4`
-/// additional objects from the cache and returns them all to the global pool.
+/// Called when [`try_free`] returned `false`.  Uses the class's canonical
+/// layout so deallocation matches the layout that was used during allocation.
+///
+/// # Safety
 ///
 /// Must be called while holding the global balloc lock (IRQs disabled).
-pub(crate) fn drain_cache(layout: Layout, balloc: &mut impl ByteAllocator, addr: usize) {
-    let Some(idx) = bucket_index(layout) else {
-        // Layout exceeds bucket limits; fall back to direct deallocation.
+pub(crate) unsafe fn drain_cache(layout: Layout, balloc: &mut impl ByteAllocator, addr: usize) {
+    let Some(class) = SizeClass::from_layout(layout) else {
+        // Layout exceeds size-class limits; fall back to direct deallocation
+        // using the caller's original layout (no cache involvement).
         // SAFETY: addr came from a prior allocation with this layout.
         unsafe {
             balloc.deallocate(core::ptr::NonNull::new_unchecked(addr as *mut u8), layout);
         }
         return;
     };
-    PCB_CACHE.with_current(|cache| with_bucket!(cache, idx, |c| c.dealloc(balloc, addr, layout)))
+    let canonical = canonical_layout(class);
+    PCB_CACHE
+        .with_current(|cache| with_class!(cache, class, |c| c.dealloc(balloc, addr, canonical)))
 }
 
 // ---------------------------------------------------------------------------
@@ -343,24 +339,10 @@ mod tests {
     use super::*;
 
     #[def_test]
-    fn test_cache_new_empty() {
-        let mut cache = PerCpuBytes::<12>::new();
-        assert_eq!(cache.len(), 0);
-        assert_eq!(cache.try_pop(), None);
-    }
-
-    #[def_test]
     fn test_cache_push_pop() {
         let mut cache = PerCpuBytes::<6>::new();
         assert!(cache.try_push(0x1000).is_ok());
-        assert_eq!(cache.len(), 1);
         assert_eq!(cache.try_pop(), Some(0x1000));
-        assert_eq!(cache.len(), 0);
-    }
-
-    #[def_test]
-    fn test_cache_pop_empty_returns_none() {
-        let mut cache = PerCpuBytes::<12>::new();
         assert_eq!(cache.try_pop(), None);
     }
 
@@ -370,7 +352,6 @@ mod tests {
         for i in 0..4 {
             assert!(cache.try_push(0x1000 * (i + 1)).is_ok());
         }
-        assert_eq!(cache.len(), 4);
         assert_eq!(cache.try_push(0xFFFF_0000), Err(0xFFFF_0000));
     }
 
@@ -386,20 +367,19 @@ mod tests {
     }
 
     #[def_test]
-    fn test_bucket_index() {
-        use core::alloc::Layout;
+    fn test_size_class_routing() {
         let l = Layout::from_size_align(64, 8).unwrap();
-        assert_eq!(bucket_index(l), Some(3)); // BUCKET_SIZES[3] = 64
+        assert_eq!(SizeClass::from_layout(l), Some(SizeClass::Bytes64));
         let l = Layout::from_size_align(4096, 8).unwrap();
-        assert_eq!(bucket_index(l), None); // exceeds MAX_BUCKET_SIZE
+        assert_eq!(SizeClass::from_layout(l), None);
     }
 
     #[def_test]
-    fn test_constants() {
-        assert_eq!(BUCKET_COUNT, 9);
-        assert_eq!(BUCKET_SIZES.len(), BUCKET_COUNT);
-        for &s in &BUCKET_SIZES {
-            assert!(s <= MAX_BUCKET_SIZE);
+    fn test_canonical_layout() {
+        for &class in &SizeClass::ALL {
+            let layout = canonical_layout(class);
+            assert_eq!(layout.size(), class.size());
+            assert_eq!(layout.align(), class.size());
         }
     }
 }
