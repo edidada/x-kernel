@@ -121,7 +121,6 @@ core/kruntime
 | `Router` | 管理设备列表、RX 设备游标、带 MTU 的路由表、smoltcp ingress queue、control/data TX queue、IPv4 输出分片、next-hop 选择和 budget dispatch |
 | `IngressProcessor` | 在 Router 锁外校验和重组 IPv4 输入，执行 crate 内 UDP 分流、UDP error 与 TCP listen snoop，并生成 ICMPv4 control packet |
 | `NetDevice` | 抽象 loopback、Ethernet 和 feature gated vsock 设备后端，通过 `PacketBuf` 转移报文所有权，并使用 crate 内地址类型和 `MonotonicInstant` 表达设备边界 |
-
 | `PacketBuf` | 保存报文数据、协议偏移、接口索引、包类型、校验状态和当前所有者 |
 | `link::wire` | 使用 `zerocopy` 校验和构造 Ethernet 与 Ethernet/IPv4 ARP 头部 |
 | `stack::ipv4` | 使用 `etherparse` 校验和构造 IPv4 与 ICMPv4 头部，并执行输出分片 |
@@ -324,7 +323,7 @@ idle ──schedule──> scheduled ──poll──> active
 - Unix stream 的用户数据复制和 `PollSet` 唤醒在 `tx_order` 外执行。send 先写入未发布的 vacant 区域，再在锁内复检关闭状态并推进 write index；recv 读取为空后在锁内复查 occupied 长度和关闭状态；shutdown 完成状态发布并复制 peer endpoint 引用后释放 `channel` mutex，再执行 waiter 唤醒。
 - Unix stream 每个 endpoint 分别持有 readable、writable 和 connection-state 三组 `PollSet`。写入只唤醒 peer readable waiter，读取跨过发送缓冲低水位时只唤醒 peer writable waiter，半关闭只唤醒受影响方向，完整关闭通过 connection-state waiter 通知双方。
 - netlink `ROUTE_STATE` 使用 `RwLock`，rx queue 和 subscriber 列表使用 `Mutex`。
-- RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 使用调用方传入的同一个 `PollContext` 注册聚合 `timeout_poll` 和相关 Ethernet IRQ source，registration 由跨越 `Pending` 的 `PollRegistrations` 统一管理。loopback 仍保存 `timeout_poll` 的聚合 waker（`Mutex<Option<Waker>>`），多任务广播由 `timeout_poll` 完成；设备层不得保存调用方的裸 waker 或绕过 `Service` 注册互不等价的 task waker。每次 `Interface::poll` 也会刷新独立的协议 timer，使 TCP 重传等 deadline 不依赖阻塞中的 socket waiter。
+- RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 通过同一个 `PollContext` 把当前等待注册到 `timeout_poll` 和 Ethernet IRQ source，调用方持有的 `PollRegistrations` 统一管理两项注册的取消与释放。loopback 只保存 `timeout_poll` 的聚合 waker，多任务广播由 `timeout_poll` 完成。每次 `Interface::poll` 也会刷新独立的协议 timer，使 TCP 重传等 deadline 不依赖阻塞中的 socket waiter。
 
 ## 设计决策
 
@@ -358,7 +357,10 @@ Linux 可从任务上下文隐式读取 `current_cred()`，但 knet 也服务于
 ### 设备 mask 驱动 RX 唤醒
 
 每个 socket 根据 bind 或 connect 结果记录设备 mask。
-等待 RX 时只向相关设备注册 waker，同时注册 smoltcp poll timeout。
+等待 RX 时只向相关 Ethernet IRQ source 注册当前任务，同时注册 smoltcp poll timeout。
+两项注册使用调用方传入的同一个 `PollContext`，生命周期由跨越 `Pending` 的
+`PollRegistrations` 管理。loopback 保留单个 `timeout_poll` 源 waker，
+包到达后由该 poll set 广播给当前等待任务。
 smoltcp `poll_at` 使用传入 timestamp 的同一 epoch 返回期限；兼容边界在
 `SmoltcpInstant` 与 `MonotonicInstant` 之间直接映射时间点。过期的 smoltcp deadline
 因此仍是过期的单调 deadline，不再计算有符号 delay，也不会经过 `as u64` 窄化。
