@@ -26,7 +26,7 @@ endchoice
 choice
     prompt "Ext4 implementation"
     depends on KFEAT_FS_EXT4
-    default KFEAT_FS_EXT4_KEXT4
+    default KFEAT_FS_EXT4_RSEXT4
 
 config KFEAT_FS_EXT4_RSEXT4
     bool "rsext4 compatibility backend"
