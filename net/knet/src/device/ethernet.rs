@@ -16,9 +16,9 @@ use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::ETHERNET_MAX_PENDING_PACKETS,
     device::{
-        LINK_FLAG_BROADCAST, LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST, LINK_FLAG_RUNNING,
-        LINK_FLAG_UP, LinkKind, LinkSnapshot, NeighborState, NeighborUpdate,
-        NetDevice as NetDeviceOps,
+        ETHERNET_MAX_MTU, IPV4_MIN_MTU, LINK_FLAG_BROADCAST, LINK_FLAG_LOWER_UP,
+        LINK_FLAG_MULTICAST, LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind, LinkSnapshot,
+        NeighborState, NeighborUpdate, NetDevice as NetDeviceOps,
     },
     ip::{IpAddress, Ipv4Cidr},
     packet,
@@ -175,9 +175,6 @@ impl EthernetDevice {
                     loop {
                         crate::poll_interfaces();
                         let mut context = registrations.context(cx);
-                        // Keep knet-rx on the IRQ source directly. Routing
-                        // through SERVICE::register_rx_waker also arms
-                        // timeout_poll and can busy-spin this task.
                         if kirq::register_irq_source_waker(irq, NET_RX_IRQ_SOURCE, &mut context)
                             .is_err()
                         {
@@ -756,7 +753,9 @@ impl NetDeviceOps for EthernetDevice {
     }
 
     fn set_mtu(&mut self, mtu: usize) -> Result<(), LinuxError> {
-        LinkKind::Ethernet.validate_mtu(mtu)?;
+        if !(IPV4_MIN_MTU..=ETHERNET_MAX_MTU).contains(&mtu) {
+            return Err(LinuxError::EINVAL);
+        }
         self.mtu = mtu;
         Ok(())
     }

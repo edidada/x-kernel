@@ -74,9 +74,11 @@ impl Service {
         self.iface
             .poll(smoltcp_timestamp, &mut self.router, sockets);
         LISTEN_TABLE.wake_touched_acceptors(sockets);
-        let poll_next = self.router.dispatch(current);
-        self.schedule_next_poll(sockets);
-        poll_next
+        // Keep timeout arming on the wait path (`register_rx_waker`) only.
+        // Calling `schedule_next_poll` here (especially with `router.next_poll_at`)
+        // can wake `timeout_poll` waiters from every `poll_interfaces` iteration and
+        // livelock concurrent loopback TCP under the SERVICE/SOCKET_SET locks.
+        self.router.dispatch(current)
     }
 
     pub fn get_smoltcp_source_address(

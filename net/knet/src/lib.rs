@@ -83,12 +83,13 @@ pub fn init_network() {
         })
         .expect("loopback IPv4 address must fit the interface");
 
-    let mut has_ethernet_device = false;
+    let mut eth0_irq = None;
     if let Some(handle) = net_devs.pop() {
         let device_id = handle.id();
         info!("  use NIC 0: {:?}", handle.name());
 
         let eth0_address = wire::MacAddress(handle.mac().0);
+        eth0_irq = handle.irq();
         let eth0_ip = Ipv4Cidr::new(IP.parse().expect("Invalid IPv4 address"), IP_PREFIX);
 
         let eth0_dev = router.add_device(Box::new(EthernetDevice::new("eth0".to_owned(), handle)));
@@ -120,7 +121,6 @@ pub fn init_network() {
         info!("  mac:  {}", eth0_address);
         info!("  ip:   {}", eth0_ip);
         subscribe_network_unregister(device_id);
-        has_ethernet_device = true;
     } else {
         warn!("  No network device found!");
     };
@@ -135,8 +135,8 @@ pub fn init_network() {
     LISTEN_TABLE.init_once(ListenTable::new());
     udp::init_udp_registry();
 
-    if has_ethernet_device {
-        EthernetDevice::spawn_rx_task();
+    if let Some(irq) = eth0_irq {
+        EthernetDevice::spawn_rx_task(irq);
     }
 }
 
