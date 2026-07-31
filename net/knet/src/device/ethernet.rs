@@ -163,30 +163,72 @@ impl EthernetDevice {
     }
 
     /// Spawn the RX poll task for an initialized network stack.
-    pub(crate) fn spawn_rx_task() {
+    ///
+    /// Register the task-owned [`PollContext`] directly with the Ethernet IRQ
+    /// source. Do not route `knet-rx` through [`crate::SERVICE::register_rx_waker`]:
+    /// that path also arms `timeout_poll`, and a zero-delay deadline wake would
+    /// busy-spin this task and starve socket progress (including loopback TCP).
+    pub(crate) fn spawn_rx_task(irq: usize) {
         let _ = ktask::spawn_with_name(
-            || {
-                use core::{future::poll_fn, task::Poll};
+            move || {
+                use alloc::boxed::Box;
+                use core::{
+                    future::{Future, poll_fn},
+                    pin::Pin,
+                    task::Poll,
+                    time::Duration,
+                };
 
+                use khal::time::monotonic_time;
                 use kpoll::PollRegistrations;
+                use ktask::future::sleep;
 
                 let mut registrations = PollRegistrations::new();
+                // Holds the armed device-deadline sleep across `Pending` so its
+                // waker stays registered until the next IRQ/timer wake.
+                let mut device_timer: Option<Pin<Box<dyn Future<Output = ()> + Send>>> = None;
                 ktask::future::block_on(poll_fn(move |cx| {
                     loop {
                         crate::poll_interfaces();
+                        drop(device_timer.take());
+
                         let mut context = registrations.context(cx);
                         if kirq::register_irq_source_waker(irq, NET_RX_IRQ_SOURCE, &mut context)
                             .is_err()
                         {
                             drop(context);
-                            // Sleeping without a progress registration would
-                            // stall RX forever; retry under memory pressure.
+                            // Sleeping without an IRQ registration would stall
+                            // RX forever; yield and retry under memory pressure.
                             ktask::yield_now();
                             continue;
                         }
                         drop(context);
-                        // Recheck after registration to close the wakeup race.
+
+                        // Drive ARP / pending-TX deadlines here instead of via
+                        // socket `timeout_poll` (see Service::schedule_next_poll).
+                        // Never busy-spin on an already-due deadline: pending TX can
+                        // remain at TimeValue::ZERO across a poll, which would
+                        // otherwise starve the rest of the stack under TCG.
+                        let now = monotonic_time();
+                        let device_deadline = crate::SERVICE.lock().device_next_poll_at();
+                        let delay = match device_deadline {
+                            Some(deadline) if deadline > now => deadline.saturating_sub(now),
+                            Some(_) => Duration::from_millis(1),
+                            None => {
+                                // Recheck after register to close the IRQ/register race.
+                                crate::poll_interfaces();
+                                return Poll::<()>::Pending;
+                            }
+                        };
+                        let mut fut = Box::pin(sleep(delay));
+                        if fut.as_mut().poll(cx).is_ready() {
+                            continue;
+                        }
+                        device_timer = Some(fut);
+                        // Recheck after register to close the IRQ/register race.
                         crate::poll_interfaces();
+                        // Keep `device_timer` alive across this `Pending` return.
+                        debug_assert!(device_timer.is_some());
                         return Poll::<()>::Pending;
                     }
                 }));

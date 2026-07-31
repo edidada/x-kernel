@@ -74,10 +74,9 @@ impl Service {
         self.iface
             .poll(smoltcp_timestamp, &mut self.router, sockets);
         LISTEN_TABLE.wake_touched_acceptors(sockets);
-        // Keep timeout arming on the wait path (`register_rx_waker`) only.
-        // Calling `schedule_next_poll` here (especially with `router.next_poll_at`)
-        // can wake `timeout_poll` waiters from every `poll_interfaces` iteration and
-        // livelock concurrent loopback TCP under the SERVICE/SOCKET_SET locks.
+        // Keep timeout arming on the wait path (`register_rx_waker`) only, and
+        // only for smoltcp interface timers. Device deadlines (ARP/pending TX)
+        // are driven by `knet-rx`, not by waking every socket waiter.
         self.router.dispatch(current)
     }
 
@@ -205,21 +204,27 @@ impl Service {
         Ok(source_waker)
     }
 
+    /// Earliest device-maintained poll deadline (ARP / pending TX), if any.
+    ///
+    /// Driven by `knet-rx`, not by socket `register_rx_waker`: merging this into
+    /// the shared `timeout_poll` path wakes every waiter whenever a pending
+    /// packet uses `TimeValue::ZERO`, which livelocks concurrent loopback TCP
+    /// under slow TCG.
+    pub(crate) fn device_next_poll_at(&self) -> Option<TimeValue> {
+        self.router.next_poll_at()
+    }
+
     fn schedule_next_poll(&mut self, sockets: &SocketSet<'_>) {
         let smoltcp_now = now();
         let monotonic_now = monotonic_time();
-        let interface_deadline = self.iface.poll_at(smoltcp_now, sockets).map(|next| {
+        // Socket waiters only arm smoltcp interface timers (same as main).
+        // Device deadlines are owned by `knet-rx`.
+        let deadline = self.iface.poll_at(smoltcp_now, sockets).map(|next| {
             let delay_micros = next
                 .total_micros()
                 .saturating_sub(smoltcp_now.total_micros()) as u64;
             monotonic_now + core::time::Duration::from_micros(delay_micros)
         });
-        let deadline = match (interface_deadline, self.router.next_poll_at()) {
-            (Some(interface), Some(device)) => Some(interface.min(device)),
-            (Some(interface), None) => Some(interface),
-            (None, Some(device)) => Some(device),
-            (None, None) => None,
-        };
 
         if let Some(deadline) = deadline {
             let should_reset = match self.timeout_deadline {
