@@ -103,8 +103,12 @@ impl NetlinkSocket {
                 return Err(LinuxError::EOPNOTSUPP.into());
             }
 
-            let mut queue = self.inner.rx_queue.lock();
+            // Preflight capacity under rx_queue only. handle_request takes
+            // SERVICE; never nest SERVICE under a netlink rx_queue lock, or a
+            // future SERVICE-held route notification that pushes rx_queue will
+            // deadlock. Lock order: SERVICE before any netlink rx_queue.
             if has_mutation {
+                let queue = self.inner.rx_queue.lock();
                 let reserved_bytes = requests.iter().try_fold(0usize, |total, request| {
                     total.checked_add(max_error_response_len(request))
                 });
@@ -117,42 +121,33 @@ impl NetlinkSocket {
             for request in requests {
                 responses.extend(self.handle_request(request, is_privileged));
             }
-            let response_bytes = responses
-                .iter()
-                .try_fold(0usize, |total, packet| total.checked_add(packet.data.len()));
-            if !response_bytes.is_some_and(|bytes| queue.can_push_bytes(bytes)) {
-                return Err(LinuxError::ENOBUFS.into());
-            }
-            let has_responses = !responses.is_empty();
-            for packet in responses {
-                let pushed = queue.push_back(packet);
-                debug_assert!(pushed, "netlink response capacity was prevalidated");
-            }
-            drop(queue);
-            if has_responses {
-                self.inner.poll_rx.wake();
-            }
+            self.push_responses(responses)?;
         } else {
             let responses = self.handle_request(&request, is_privileged);
-            let mut queue = self.inner.rx_queue.lock();
-            let response_bytes = responses
-                .iter()
-                .try_fold(0usize, |total, packet| total.checked_add(packet.data.len()));
-            if !response_bytes.is_some_and(|bytes| queue.can_push_bytes(bytes)) {
-                return Err(LinuxError::ENOBUFS.into());
-            }
-            let has_responses = !responses.is_empty();
-            for packet in responses {
-                let pushed = queue.push_back(packet);
-                debug_assert!(pushed, "netlink response capacity was prevalidated");
-            }
-            drop(queue);
-            if has_responses {
-                self.inner.poll_rx.wake();
-            }
+            self.push_responses(responses)?;
         }
 
         Ok(request.len())
+    }
+
+    fn push_responses(&self, responses: Vec<NetlinkPacket>) -> KResult {
+        let mut queue = self.inner.rx_queue.lock();
+        let response_bytes = responses
+            .iter()
+            .try_fold(0usize, |total, packet| total.checked_add(packet.data.len()));
+        if !response_bytes.is_some_and(|bytes| queue.can_push_bytes(bytes)) {
+            return Err(LinuxError::ENOBUFS.into());
+        }
+        let has_responses = !responses.is_empty();
+        for packet in responses {
+            let pushed = queue.push_back(packet);
+            debug_assert!(pushed, "netlink response capacity was prevalidated");
+        }
+        drop(queue);
+        if has_responses {
+            self.inner.poll_rx.wake();
+        }
+        Ok(())
     }
 
     fn update_uevent_subscription(&self, addr: NetlinkAddr) {

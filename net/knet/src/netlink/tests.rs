@@ -585,6 +585,51 @@ fn test_remove_device_cleans_owner_state_and_reindexes_remaining_device() {
 }
 
 #[def_test(serial)]
+fn test_rebuild_address_routes_without_loopback_keeps_connected_prefix() {
+    let mut router = Router::new();
+    let eth0_ip = Ipv4Cidr::new(Ipv4Address::new(192, 168, 1, 2), 24);
+    let eth0_dev = router.add_device(Box::new(TestDevice::new(
+        LinkSnapshot {
+            ifindex: 1,
+            name: String::from("eth0"),
+            flags: LINK_FLAG_UP
+                | LINK_FLAG_RUNNING
+                | LINK_FLAG_BROADCAST
+                | LINK_FLAG_MULTICAST
+                | LINK_FLAG_LOWER_UP,
+            mtu: 1500,
+            operstate: 6,
+            kind: LinkKind::Ethernet,
+            hardware_addr: [0x02, 0, 0, 0, 0, 2],
+            broadcast_addr: [0xff; 6],
+        },
+        Some(eth0_ip),
+    )));
+    router
+        .add_ipv4_addr(Ipv4AddrEntry {
+            dev: eth0_dev,
+            addr: eth0_ip,
+            scope: ROUTE_SCOPE_UNIVERSE,
+        })
+        .unwrap();
+
+    let routes = router.route_snapshot();
+    let network = eth0_ip.network();
+    assert!(routes.iter().any(|route| {
+        !route.is_configured()
+            && route.filter == network.into()
+            && route.dev == eth0_dev
+            && route.scope == ROUTE_SCOPE_LINK
+            && route.protocol == ROUTE_PROTOCOL_KERNEL
+    }));
+    assert!(!routes.iter().any(|route| {
+        !route.is_configured()
+            && route.filter == Ipv4Cidr::new(eth0_ip.address(), 32).into()
+            && route.scope == ROUTE_SCOPE_HOST
+    }));
+}
+
+#[def_test(serial)]
 fn test_parse_link_update_name_and_mtu() {
     let mut payload = Vec::new();
     push_u8(&mut payload, 17);

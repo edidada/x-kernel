@@ -679,26 +679,28 @@ impl Router {
 
     fn rebuild_ipv4_address_routes(&mut self) {
         self.table.remove_ipv4_address_routes();
-        let Some(loopback_dev) = self
+        // Local /32 host routes egress via loopback. Missing loopback must
+        // only skip those entries; connected prefix routes still use the
+        // address owner device and must be reinstalled after the clear above.
+        let loopback_dev = self
             .devices
             .iter()
-            .position(|device| device.link_kind() == LinkKind::Loopback)
-        else {
-            return;
-        };
+            .position(|device| device.link_kind() == LinkKind::Loopback);
 
         let entries = self.ipv4_addrs.clone();
         let mut routed_prefixes = Vec::new();
         for entry in entries {
-            self.table.add_rule(Rule::for_ipv4_address(
-                Ipv4Cidr::new(entry.addr.address(), 32),
-                loopback_dev,
-                entry,
-                Ipv4AddressRouteKind::Local,
-                ROUTE_TABLE_MAIN,
-                ROUTE_SCOPE_HOST,
-                ROUTE_TYPE_UNICAST,
-            ));
+            if let Some(loopback_dev) = loopback_dev {
+                self.table.add_rule(Rule::for_ipv4_address(
+                    Ipv4Cidr::new(entry.addr.address(), 32),
+                    loopback_dev,
+                    entry,
+                    Ipv4AddressRouteKind::Local,
+                    ROUTE_TABLE_MAIN,
+                    ROUTE_SCOPE_HOST,
+                    ROUTE_TYPE_UNICAST,
+                ));
+            }
 
             let network = entry.addr.network();
             if entry.addr.prefix_len() == 32

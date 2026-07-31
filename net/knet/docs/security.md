@@ -190,10 +190,10 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 5. driver buffer 生命周期：`NetBufHandle::data` 只在 handle 被 recycle 前使用，RX handle 必须在处理后归还。
 6. netlink message 边界：所有 payload 读取必须先经过单条 header 长度、批次对齐边界、attribute 长度和 family 校验，非零接口编号在进入 mutation 逻辑前转换成 `InterfaceIndex`。
 7. netlink credential 边界：每次 `send` 或 `write` 必须传入当前调用者的独立 `Cred` 快照，netlink socket 不得缓存调用者权限。
-8. netlink batch 执行边界：混合查询和 mutation 的批次必须在 owner 更新前拒绝；同类 mutation 执行前必须为完整批次预留 response queue 空间。
+8. netlink batch 执行边界：混合查询和 mutation 的批次必须在 owner 更新前拒绝；同类 mutation 执行前必须为完整批次预留 response queue 空间。response 生成在 `rx_queue` 锁外完成，只在 push 时持有该锁；`SERVICE` 临界区内不得再锁任何 netlink `rx_queue`（锁顺序：`SERVICE` 先于 netlink `rx_queue`）。
 9. route index 边界：rtnetlink route 的非零 `oif` 由 `InterfaceIndex` 表达，转换成设备索引后必须检查 `dev < devices.len()`。
 10. 网络配置 owner：地址和路由只由 `Router` 持有，链路和邻居只由对应 `NetDevice` 持有；mutation 必须经 `Service` 窄接口更新 owner，接口名称、MTU 和配置路由 invariant 必须由 owner API 校验。
-11. 地址生命周期：地址新增和删除必须同步重建自动 local、connected 路由和 smoltcp 地址视图；源地址从全局本机地址集合消失时，必须清理固定 `prefsrc` 已失效的路由与跨设备使用该源地址的 ARP pending 包。
+11. 地址生命周期：地址新增和删除必须同步重建自动 local、connected 路由和 smoltcp 地址视图；缺少 loopback 时只跳过依赖其 egress 的自动 local `/32`，仍须安装 connected prefix 路由；源地址从全局本机地址集合消失时，必须清理固定 `prefsrc` 已失效的路由与跨设备使用该源地址的 ARP pending 包。
 12. dump 快照一致性：每类 link、address 和 route dump 必须从对应请求持有的一次 `SERVICE` 临界区完整创建窄快照，地址与设备 label 必须在临界区内完成配对。
 13. static init 顺序：创建 socket 前必须完成 `init_network` 初始化 `SERVICE`、`SOCKET_SET` 和 `LISTEN_TABLE`。
 14. pathname credential 一致性：一次 Unix pathname bind 的查找、创建和属主初始化必须使用同一份 `Cred` 快照。
