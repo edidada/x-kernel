@@ -209,16 +209,24 @@ impl EthernetDevice {
                         // Never busy-spin on an already-due deadline: pending TX can
                         // remain at TimeValue::ZERO across a poll, which would
                         // otherwise starve the rest of the stack under TCG.
-                        let now = monotonic_time();
-                        let device_deadline = crate::SERVICE.lock().device_next_poll_at();
+                        let mut now = monotonic_time();
+                        let mut device_deadline = crate::SERVICE.lock().device_next_poll_at();
+                        if device_deadline.is_none() {
+                            // Recheck after register to close the IRQ/register race.
+                            // The recheck may enqueue ARP/pending-TX work that
+                            // introduces a deadline; arm `device_timer` below
+                            // instead of returning Pending with no timer wake.
+                            crate::poll_interfaces();
+                            now = monotonic_time();
+                            device_deadline = crate::SERVICE.lock().device_next_poll_at();
+                        }
                         let delay = match device_deadline {
                             Some(deadline) if deadline > now => deadline.saturating_sub(now),
                             Some(_) => Duration::from_millis(1),
-                            None => {
-                                // Recheck after register to close the IRQ/register race.
-                                crate::poll_interfaces();
-                                return Poll::<()>::Pending;
-                            }
+                            // Still no deadline after the one-shot recheck: wait
+                            // for IRQ only. Do not `continue` — that would
+                            // livelock when the deadline stays None.
+                            None => return Poll::<()>::Pending,
                         };
                         let mut fut = Box::pin(sleep(delay));
                         if fut.as_mut().poll(cx).is_ready() {
