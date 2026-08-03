@@ -19,6 +19,7 @@
 
 extern crate alloc;
 
+mod clk;
 mod dma;
 mod irq;
 mod mmio;
@@ -27,7 +28,10 @@ mod provider;
 use alloc::boxed::Box;
 
 /// A single resource associated with a device.
-#[derive(Debug, Clone, Copy)]
+///
+/// Not `Copy`: the [`Clock`](ResourceDesc::Clock) variant owns a `SmallVec`,
+/// so descriptors are moved or `.clone()`d.
+#[derive(Debug, Clone)]
 pub enum ResourceDesc {
     /// Memory-mapped I/O region.
     Mmio(crate::mmio::MmioRegion),
@@ -37,6 +41,8 @@ pub enum ResourceDesc {
     Irq(crate::irq::IrqResource),
     /// Coherent DMA buffer request.
     Dma(crate::dma::DmaSpec),
+    /// A clock consumed by the device (from DT `clocks`/`clock-names`).
+    Clock(crate::clk::ClkDesc),
 }
 
 /// A collection of resources for a single device.
@@ -80,6 +86,7 @@ pub trait DeviceResource {
     fn register_cleanup(&self, cleanup: Box<dyn FnOnce() + Send>);
 }
 
+pub use clk::*;
 pub use dma::*;
 pub use irq::*;
 pub use mmio::*;

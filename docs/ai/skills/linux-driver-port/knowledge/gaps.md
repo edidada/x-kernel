@@ -25,7 +25,7 @@ x-kernel 目前只实现了驱动模型的"主干"：MMIO / IRQ / coherent DMA /
 
 clk 要按**两个独立维度**分别定级——这是 dw_mmc 移植踩过的真坑（见 [dw_mmc-walkthrough 复盘](../examples/dw_mmc-walkthrough.md#复盘真机-io-失败从预言到验证)）：把整个 clk 笼统标 `works-around`，会让"必须知道 CIU 速率才能算 CLKDIV"这件事被"firmware 供着时钟"这句话掩盖。
 
-- **现状**：x-kernel 无通用时钟框架。RK3588 的时钟由 bootloader（U-Boot/TPL/SPL）配好，内核侧多数驱动**继承**当前时钟配置直接用。
+- **现状**：x-kernel **已有 Tier-0 中性时钟框架** `drivers/clk/`（`ClkProvider` trait + phandle 键多 provider 注册表 + `clk::devm_clk_get(device,name)` 消费者 API（device-res 形式）+ `FixedClockProvider`），详见 [`clk-subsystem.md`](clk-subsystem.md)。Tier 0 只做**只读速率查询**（退役硬编码时钟常量）；enable/set_rate/PLL/速率变更传播是 Tier 1/2（未实现）。RK3588 的时钟由 bootloader（U-Boot/TPL/SPL）配好，内核侧多数驱动**继承**当前配置直接用。维度定级仍按下文，但"无框架"已不成立——rate 维度现在看的是**对应 provider 是否可用**。
 
 #### 维度 A：clk-enable（`clk_prepare_enable` / `clk_disable_unprepare`）
 
@@ -37,15 +37,15 @@ clk 要按**两个独立维度**分别定级——这是 dw_mmc 移植踩过的�
 驱动**算硬件分频**时需要知道输入时钟速率本身，例如：MMC 的 `CLKDIV = f(ciu_rate, target_card_clock)`、I2C 的 SCL 分频、UART 的 baud divisor、SPI 的速率。**这跟"时钟开没开"是两回事。**
 
 - **阻塞**：分两种——
-  - 能**取到真值**（DT 有 `clock-frequency`，或可从硬件状态推断）→ `works-around`：读出来用，缺口照报。
-  - **取不到真值**（DT 无 `clock-frequency`、又无 clk 框架读 `clk_get_rate`）→ 这是 **smoke-path blocker**：分频算错 → 卡识别/通信失败。**不得用一个"看起来合理"的常量静默糊弄过去当成 works-around。**
+  - 能**取到真值**（`clk::devm_clk_get(device,name)` 返回的 `Clk` 能查到速率：总线预解析了该时钟、且注册了对应 provider）→ `works-around`：读出来用，缺口照报。
+  - **provider 不可用**（`devm_clk_get` 返回 `Err`/速率 `None`：该 phandle 没注册 provider，如 SCMI/CRU 后端未启用）→ 仍是该时钟的 **smoke-path blocker**：分频算错 → 卡识别/通信失败。**不得用一个"看起来合理"的常量静默糊弄过去当成 works-around**；走 fallback（U-Boot 实测值 + probe 日志标注来源），缺口照报，诊断见 [`clk-subsystem.md`](clk-subsystem.md)。
 - **Rockchip 特别注意**（OPi5+ 实测）：
-  - RK 的 DT 里 sdmmc 节点**通常只有 `max-frequency`，没有 `clock-frequency`**。`max-frequency` 是"卡时钟上限"（caps），**不是** CIU 输入速率——**绝对不能拿它当 CLKDIV 的分母**。Linux 走 `clk_get_rate(ciu_clk)`，再除 `RK3288_CLKGEN_DIV(=2)` 得到 `host->bus_hz`。
+  - RK 的 DT 里 sdmmc 节点**通常只有 `max-frequency`，没有 `clock-frequency`**。`max-frequency` 是"卡时钟上限"（caps），**不是** CIU 输入速率——**绝对不能拿它当 CLKDIV 的分母**。真值走 `clk_get_rate(ciu_clk)`：RK3288 的 dw_mmc-rockchip 还会 ÷`RK3288_CLKGEN_DIV(=2)`；**RK3588 经 SCMI 的 ciu 直接用 `RATE_GET` 返回值，不 ÷2**。
   - 无 clk 框架时，唯一可靠来源是**对照 U-Boot**：在目标板上跑 U-Boot 的 `mmc info`（或等价），读它报的 Bus Speed / bus_hz，作为常量并**在 probe 时打印**，方便核对。
-- **替代（取不到真值时）**：用 U-Boot 实测值作常量 + probe 日志标注来源 + 在缺口报告里写明"smoke-blocker，需 clk(CRU) provider 校准"；**CLKDIV 公式照搬 Linux**（含 Rockchip 的 ÷2，见 [api-mapping §6](api-mapping.md)）。
+- **替代（取不到真值时）**：用 U-Boot 实测值作常量 + probe 日志标注来源 + 在缺口报告里写明"smoke-blocker，需 clk(CRU) provider 校准"；**CLKDIV 公式照搬 Linux**（÷2 仅 rk3288；RK3588 SCMI 直接用 `RATE_GET`，见 [clk-subsystem.md](clk-subsystem.md)）。
 - **报告口径**：
   > `clk-enable` — works-around. Removed `clk_prepare_enable`×N (firmware provides clock).
-  > `clk-rate` — **smoke-blocker** (ci_clk). No clk framework to read `clk_get_rate(ciu_clk)`; DT has no `clock-frequency` (only `max-frequency`, which is NOT the CIU rate). CLKDIV computed from a hardcoded `bus_hz=50MHz` (U-Boot `mmc info` value, logged at probe) using the Linux formula incl. RK3288_CLKGEN_DIV. Card-ID clock ≈400 kHz is correct; high-speed correctness depends on this guess — must calibrate via clk(CRU) provider.
+  > `clk-rate` — Tier-0 框架已落地（`drivers/clk/`）：`clk::devm_clk_get(device,"ciu")` 走 phandle 键多 provider 注册表（时钟经总线预解析为 `ResourceDesc::Clock`）。RK3588 sdmmc 的 `ciu` 经 SCMI provider（`CLOCK_RATE_GET`）解析到真值（~49.5 MHz），dw_mshc 直接用作 `bus_hz`。曾因 SCMI 消息头位段记反（`message_id`/`token`）误判成"固件 stub"——实为 header bug，已修正（详见 [`clk-subsystem.md`](clk-subsystem.md)）。
 
 ### regmap（`devm_regmap_init_mmio` / `regmap_update_bits`）
 

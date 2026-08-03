@@ -117,6 +117,12 @@ pub fn init_drivers() {
     // Initialize global object/metadata stores before any device is activated.
     kdevice::init_device_registry();
 
+    // Register the neutral, cross-platform clock providers before any consumer
+    // is probed. `fixed-clock` makes every crystal/OSC the bootloader left
+    // running queryable; no-op without a device tree. SoC-specific providers
+    // (CRU, SCMI) register from their own probes.
+    clk::register_fixed_clocks();
+
     let _registry = discover_unified();
 
     log_class_summary();

@@ -1,0 +1,23 @@
+[package]
+name = "clk"
+edition.workspace = true
+description = "OS-neutral clock (clk) subsystem: provider/consumer rate query"
+documentation = "https://kylin-x-kernel.github.io/clk"
+keywords = ["driver", "clock", "clk", "x-kernel"]
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+categories.workspace = true
+
+[lib]
+name = "clk"
+
+[dependencies]
+of = { workspace = true }
+device_res = { workspace = true }
+kspin = { workspace = true }
+smallvec = { version = "1.15", features = ["const_generics", "union"] }
+log = { workspace = true }
+unittest = { workspace = true }

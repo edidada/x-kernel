@@ -12,4 +12,5 @@ pub mod nmi;
 #[cfg(feature = "pmu")]
 pub mod pmu;
 pub mod psci;
+pub mod scmi;
 pub mod smccc;

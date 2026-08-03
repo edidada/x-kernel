@@ -39,6 +39,9 @@ kcpu = { workspace = true }
 kcpu_id_map = { workspace = true }
 kerrno = { workspace = true }
 kplat = { workspace = true }
+clk = { workspace = true }
+memspace = { workspace = true }
+kspin = { workspace = true }
 kbuild_config = { workspace = true }
 kernel_boot = { workspace = true }
 klazy = { workspace = true }

@@ -599,6 +599,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "clk"
+version = "0.2.0-dev"
+dependencies = [
+ "device-res",
+ "kspin 0.2.0-dev",
+ "log",
+ "of",
+ "smallvec",
+ "unittest",
+]
+
+[[package]]
 name = "cmac"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2135,6 +2147,7 @@ dependencies = [
  "block",
  "cfg-if",
  "char_driver",
+ "clk",
  "console-driver",
  "crate_interface 0.3.0",
  "device-res",
@@ -2580,6 +2593,7 @@ name = "kplat-aarch64"
 version = "0.2.0-dev"
 dependencies = [
  "aarch64-pmuv3",
+ "clk",
  "console-driver",
  "heapless",
  "irq-driver",
@@ -2592,10 +2606,12 @@ dependencies = [
  "khal",
  "klazy",
  "kplat",
+ "kspin 0.2.0-dev",
  "ktime",
  "lazyinit",
  "log",
  "memaddr",
+ "memspace",
  "of",
  "percpu",
  "rtc-driver",

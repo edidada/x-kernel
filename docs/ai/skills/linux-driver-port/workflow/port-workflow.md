@@ -173,6 +173,27 @@ P5 的"probe 被调用 + publish"只是门槛。真正的验收是**该设备类
 
 **产出**：一份"带机验证记录"（哪些设备类的代表操作跑通、边界在哪、对照 U-Boot 的寄存器差异、遗留缺口），回填 gap-report 的"集成状态/可用性结论"。P6 没过的项 = 驱动在该维度**不可用**，如实标注。
 
+### 6.5 固件后端子系统（SCMI / SMC / PSCI）triage
+
+当驱动的某条路径把请求转发给**安全固件**（SCMI 时钟/复位、PSCI、其它 SMCCC 服务）时，错误不再来自设备寄存器，而来自固件返回的状态码。别拿 6.3 的寄存器 dump 那套去猜——按**命令探针阶梯**定位（由弱到强各发一次，`log::warn!` 结果）：
+
+| 探针 | 通了的含义 |
+|------|------|
+| 最简命令、**无 payload**（如 SCMI base `VERSION`） | 传输（SMC/HVC）、共享内存布局对；**但不证明消息头位段对**（VERSION 的 msg=0/token=0 会掩盖位段错误，见下） |
+| 目标协议的最简命令（如 clock 协议 `VERSION`） | 协议路由对 |
+| **规范强制、带 payload 的命令**（如 base `MESSAGE_ATTRIBUTES`） | 通 → 头位段**和** payload 帧格式都对（关键判据） |
+| 真正想发的命令（如 clock `RATE_GET`） | 目标 |
+
+判读（**⚠ VERSION 会骗人**）：
+
+- 无 payload 的命令（如 VERSION）通、**带 payload 的命令挂** → **先怀疑消息头位段，再怀疑 payload 帧格式**。SCMI 头位段记反时（`message_id`/`token` 位置错）VERSION 仍然通（msg=0、token=0，放哪都一样），但 `message_id≠0` 的命令会被固件当成 VERSION → 带 payload 的报 `PROTOCOL_ERROR`，**症状和"固件 stub"几乎一样**。判据：拿已知能用的实现（Linux `pack_scmi_header` / 上游 `arm-scmi-rs`，`MSG_ID_MASK=GENMASK(7,0)`、`MSG_TOKEN_ID_MASK=GENMASK(27,18)`）逐位核对，再怀疑固件。
+- 头位段确认无误、带 payload 的强制命令仍挂 → 才看 payload 帧格式（length 约定 / 偏移）。
+- 上述都通、唯独目标命令挂 → 固件不支持该命令。
+- 真正的固件 stub（只实现 VERSION）**存在但很罕见**；认定前必须先用已知正确的头编码排除自己这边。
+- SCMI 状态码速查：`0` SUCCESS、`-1` NOT_SUPPORTED、`-2` INVALID_PARAMETERS、`-4` NOT_FOUND、`-10` PROTOCOL_ERROR。响应 `length`（错误响应 = header+status = 8 字节）可反推 length 字段约定，核对自己的请求格式。
+
+> 实例（RK3588 SCMI 时钟，见 [`clk-subsystem.md`](../knowledge/clk-subsystem.md)）：`base VERSION` 返回 `0x20000`、但 `MESSAGE_ATTRIBUTES`/`RATE_GET` 都 `-10`，一度**误判为固件 stub**——实为 SCMI 消息头位段记反（`message_id` 应在 `[7:0]`、`token` 在 `[27:18]`），VERSION 把它掩盖了；改正后 `ciu` 经 `RATE_GET` 解析到 ~49.5 MHz。教训：VERSION 通 ≠ 头位段对。
+
 ---
 
 ## 常见陷阱
@@ -181,4 +202,6 @@ P5 的"probe 被调用 + publish"只是门槛。真正的验收是**该设备类
 - **凭印象写 x-kernel API**：把 `devm_ioremap` 写成不存在的 `ioremap`。**每条都查表/查源码**（铁律 2）。
 - **悄悄 stub blocker**：把 `phy_power_on` 删掉当没事。**gap-report 必须写明**（铁律 4）。
 - **改了硬件序列**：自作主张合并/省略寄存器步骤或改延时。**照搬**（铁律 1）。
+- **凭记忆写位段/协议格式常量**：把 SCMI 消息头的 `message_id`/`token` 位段记反（应 `message_id[7:0]`、`token[27:18]`），编得过、还可能恰好跑通。**即使记得也要打开 Linux 源码逐位核对；优先抄参考实现的掩码**（铁律 1/2 延伸，详见 SKILL.md"协议/位段常量纪律"）。源码本地没有（`drivers/*` 内部 .h/.c）时联网取或标 `UNVERIFIED`，不得静默凭记忆落地。
+- **拿全零字段当基线验证位段**：SCMI `VERSION`（`msg=0`/`token=0`）位段错也照样通——用它"验证 header 编码对"是假阳性。**验证位段必须用非零字段**（见 §6.5）。
 - **漏注册三连之一**：只写了 .rs 没加 feature，驱动根本不进镜像。**用骨架检查表逐项打钩**。

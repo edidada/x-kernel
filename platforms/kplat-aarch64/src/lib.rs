@@ -12,6 +12,8 @@
 #![cfg(target_arch = "aarch64")]
 #![cfg(k_plat_name = "kplat-aarch64")]
 
+extern crate alloc;
+
 #[macro_use]
 extern crate kplat;
 #[macro_use]

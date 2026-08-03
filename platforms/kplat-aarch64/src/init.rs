@@ -42,6 +42,11 @@ impl BootHandler {
         }
         irq_driver::gic::init_from_device_tree();
         console_driver::register_input_irq_handler();
+
+        // Register the SCMI clock provider (rate query) so SCMI-owned clocks —
+        // e.g. the sdmmc CIU clock on RK3588 — resolve before driver probing.
+        // A no-op (debug log) on platforms without an SCMI clock node.
+        crate::peripherals::scmi::init_clock_provider();
     }
 
     fn final_init(_boot_info: &BootInfo) {

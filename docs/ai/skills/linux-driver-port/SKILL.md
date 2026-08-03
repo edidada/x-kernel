@@ -12,15 +12,25 @@ description: Use when porting a Linux C driver (platform/PCI) to x-kernel Rust, 
 
 ## 五条铁律（决定产出质量，必须遵守）
 
-1. **硬件是真相。** 寄存器布局、bit 位定义、初始化序列、magic number、时序与延时——这些是硬件事实，**原样忠实翻译**，不做"优化"、不做"简化"、不擅自合并步骤。怀疑时以上游 Linux 驱动为准。
+1. **硬件/协议是真相。** 寄存器布局、bit 位定义、**协议线格式（SCMI/SMBus/… 的 message header/payload 位段）**、初始化序列、magic number、时序与延时——这些是硬件/协议事实，**原样忠实翻译**，不做"优化"、不做"简化"、不擅自合并步骤。怀疑时以上游 Linux 驱动 / 规范为准。
 
-2. **绝不编造 API。** x-kernel 这边用到的每一个接口，都必须能在 [`knowledge/api-mapping.md`](knowledge/api-mapping.md) 或项目源码里找到依据。**查不到的 = 缺口**，不得凭印象写一个"看起来像"的调用。
+2. **绝不编造 API，也绝不凭记忆写常量/位段。** x-kernel 这边用到的每一个接口，**以及从 Linux 翻译过来的每一个 bit 位段、协议线格式（message header/payload layout）、magic number、struct 字段偏移**，都必须能在 [`knowledge/api-mapping.md`](knowledge/api-mapping.md)、项目源码、或 Linux 源码（头 / .c）里找到**逐位依据**。**查不到的 = 缺口**，不得凭印象/记忆写一个"看起来像"的值——位段最容易记反（见下方"协议/位段常量纪律"）。
 
 3. **RAII 优先，最小化 `unsafe`。** 生命周期交给 `devm_*` / `Arc` / `Io` / `Box` / `DmaCoherent` 等 RAII 句柄。必须用 `unsafe` 的地方（如把映射后的 vaddr 交给硬件层）写 `// SAFETY:` 注释，说明不变量。遵循 [`code-guidelines`](../code-guidelines/SKILL.md)。
 
 4. **缺口必报、不静默绕过。** 任何无法映射的 Linux 子系统（clk、regmap、gpio、pinctrl、reset、regulator、iommu、phy、workqueue…）必须进缺口报告（见 [`templates/gap-report.md`](templates/gap-report.md)），标注阻塞程度与可行替代，交人决策。**绝不悄悄 stub 掉一个关键依赖让驱动"看起来能跑"。**
 
 5. **遵循项目规范。** 编码风格走 [`code-guidelines`](../code-guidelines/SKILL.md)；构建/检查/运行走 [`build-workflow`](../build-workflow/SKILL.md)。
+
+## 协议/位段常量纪律（铁律 1/2 的延伸——最容易栽的地方）
+
+位段、协议线格式、magic number 这类常量，是**凭记忆最易记反、出错最隐蔽**的一类：API 写错了编译器会报，**位段错了能编过，甚至可能恰好跑通**（全零字段的命令掩盖错误）。纪律：
+
+- **即使你"记得"，也必须打开源码逐位核对后再写。** 典型雷区：消息头里 `message_id` / `token` 的位段（SCMI 是 `message_id[7:0]`、`token[27:18]`，见 [`clk-subsystem.md`](knowledge/clk-subsystem.md)）。
+- **优先复制参考实现的掩码，而非凭记忆重算。** Linux 的 `pack_*` 宏 / 现成 Rust 栈（如 `arm-scmi-rs` 的 `MSG_*_MASK = GENMASK(...)`）逐字抄最稳。
+- **源码本地没有时**（常见于 `drivers/*` 内部的 `.h`/`.c`，headers 包不含）：联网取；取不到就**显式标 `// UNVERIFIED — 待对照 Linux 源码` 并进缺口报告**，**不得静默凭记忆落地**。
+- **没核对的常量，不要写进注释 / rustdoc 当作事实。** 把错的位段用注释"背书"会让后续审查也绕过去——本次 SCMI header bug 就是这样：错误的 `message_id[25:18]` 被写进 doc 注释当"规范"，一路没人质疑。
+- **带机验证位段时，别用全零字段做基线。** SCMI `VERSION`（`msg=0`/`token=0`）位段错也照样通——验证位段必须用非零字段，详见 [port-workflow §6.5](workflow/port-workflow.md)。
 
 ## 这个 skill 的文件地图（progressive disclosure）
 
@@ -31,6 +41,7 @@ description: Use when porting a Linux C driver (platform/PCI) to x-kernel Rust, 
 | [`knowledge/driver-anatomy.md`](knowledge/driver-anatomy.md) | 开始前 | x-kernel 驱动的**双层结构**（胶水层 + 硬件逻辑层）与**注册三连**，附真实样例 |
 | [`knowledge/api-mapping.md`](knowledge/api-mapping.md) | Phase 2 映射时 | **★ 核心**：Linux API → x-kernel API 分类映射表 |
 | [`knowledge/gaps.md`](knowledge/gaps.md) | 撞到缺失子系统时 | **★ 核心**：已知缺失子系统清单 + 现状 + 替代方案 + 报告口径 |
+| [`knowledge/clk-subsystem.md`](knowledge/clk-subsystem.md) | 撞 clk / `clk_get_rate` 时 | Tier-0 clk 框架（`drivers/clk/`）分层 + 消费者用法 + SCMI header 位段坑（VERSION 掩盖 bug）与诊断 |
 | [`templates/driver-skeleton.md`](templates/driver-skeleton.md) | Phase 3 生成代码时 | 标准 Rust 驱动骨架（可直接填空） |
 | [`templates/gap-report.md`](templates/gap-report.md) | Phase 4 写报告时 | 缺口报告固定格式 |
 | [`workflow/port-workflow.md`](workflow/port-workflow.md) | 贯穿全程 | Phase 0–6 详解（P6=真机带机校验/triage） |

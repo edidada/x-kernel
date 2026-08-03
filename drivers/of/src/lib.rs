@@ -201,7 +201,7 @@ fn parse_interrupt_by_controller(
     }
 }
 
-fn find_node_by_phandle(phandle: u32) -> Option<FdtNode<'static, 'static>> {
+pub fn find_node_by_phandle(phandle: u32) -> Option<FdtNode<'static, 'static>> {
     fdt()?.all_nodes().find(|node| {
         property_u32(*node, "phandle").or_else(|| property_u32(*node, "linux,phandle"))
             == Some(phandle)

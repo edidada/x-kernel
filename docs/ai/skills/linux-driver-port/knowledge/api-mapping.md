@@ -202,6 +202,8 @@ pub trait Device: Send + Sync {
 **`DriverError` 全集**：`AlreadyExists / WouldBlock / BadState / InvalidInput / Io / NoMemory / ResourceBusy / Unsupported`。
 **`ResError` 全集**（device-res）：`InvalidResource / MappingFailed / NoMemory / Busy / Unsupported / NoProvider`。
 
+> **早期 init 的 `log::*` 是静默的**：`khal::early_driver_init()`（kruntime:311）早于 "Logging is enabled"（:322）。在 `early_driver_init` / 平台 init 里写 `log::info!`/`warn!` **什么都打不出来**——诊断改用 `kernel_boot::bootln!("...")`（走 boot 控制台，日志里带 `[boot]` 前缀，和 `[boot] rtc init skipped ...` 同一通道）。运行时（driver probe 之后）才用 `log::*`。
+
 ---
 
 ## 8. 设备树属性读取
@@ -212,14 +214,15 @@ pub trait Device: Send + Sync {
 |-------|---------------|-------------|
 | `of_property_read_u32(node, "x", &val)` | `of::property_u32(node, "x") -> Option<u32>` | [of/src/lib.rs:89](../../../../../drivers/of/src/lib.rs#L89) |
 | `of_find_compatible_node` | `of::find_compatible("vendor,x") -> Option<FdtNode>` | |
-| `of_find_node_by_name/path` | `of::find_node("/path")` / `resolve_node(path_or_alias)` | |
+| `of_find_node_by_name/path` | `of::find_node("/path")` / `resolve_node(path_or_alias)` | `resolve_node` 走别名/路径，偶有不稳；稳健按结构找：`fdt.all_nodes().find(...)`（见 [`clk-subsystem.md` 常见坑](clk-subsystem.md#常见坑)） |
+| 取设备的**时钟**（`clocks`/`clock-names`） | `clk::devm_clk_get(device, "ciu") -> ResResult<Clk>` | 总线在枚举时已预解析成 `ResourceDesc::Clock`（同 mmio/irq），驱动按名取、**不碰 DT**（见 [`clk-subsystem.md`](clk-subsystem.md)）。注：`DeviceObject` 仍不带原始 DT 节点——读 `clocks` 以外的自定义 DT 属性仍要从别处拿节点（已知局限） |
 | `of_get_named_gpio` | **缺口**：无 gpio；见 [`gaps.md`](gaps.md) | |
 | `of_irq_by_resource / of_irq_get` | `device.first_irq()`（已解析）或 `of::first_interrupt_desc(node)` | |
 | `of_address_to_resource` | `device.first_mmio()`（已解析） | |
 | `of_property_read_string` | 经 `FdtNode` property 接口（`of::fdt()` 取底层 `LinuxFdt`） | 较薄，按需用 |
 | `of_match_node` | 由总线层用 `FirmwareMatchSpec.dt_compatibles` 自动匹配 | 驱动侧只声明 spec |
 
-> **读时钟频率的坑（MMC/I2C/UART/SPI 算分频都会撞）**：Linux 用 `clk_get_rate(ciu_clk)` 取输入时钟速率，x-kernel 无 clk 框架。别想当然读 DT `clock-frequency`——**Rockchip 的 MMC 节点通常只有 `max-frequency`，没有 `clock-frequency`**，而 `max-frequency` 是卡时钟上限（caps），**不是** CIU 输入速率，**不能**当分频分母。取不到真值时按 smoke-blocker 上报，常量值对照 U-Boot `mmc info` 核对，详见 [gaps.md §clk 维度 B](gaps.md#维度-bclk-rateclk_get_rate--clk_set_rate--最容易被误判为-works-around)。
+> **读时钟频率（MMC/I2C/UART/SPI 算分频都会撞）**：Linux 用 `clk_get_rate(ciu_clk)` 取输入时钟速率；x-kernel 走 `clk::devm_clk_get(device, "ciu")`（总线已把 `clocks`/`clock-names` 预解析成 `ResourceDesc::Clock`，驱动按名取，不碰 DT）。别想当然读 DT `clock-frequency`——**Rockchip 的 MMC 节点通常只有 `max-frequency`，没有 `clock-frequency`**，而 `max-frequency` 是卡时钟上限（caps），**不是** CIU 输入速率，**不能**当分频分母。`devm_clk_get` 失败或速率 `None`（provider 不可用，如该 phandle 还没注册 provider / SCMI·CRU 后端未启用）时按 smoke-blocker 回退常量（对照 U-Boot `mmc info` 核对），详见 [`clk-subsystem.md`](clk-subsystem.md) 与 [gaps.md §clk 维度 B](gaps.md#维度-bclk-rateclk_get_rate--clk_set_rate--最容易被误判为-works-around)。
 
 ---
 
@@ -242,6 +245,6 @@ pub trait Device: Send + Sync {
 
 以下 Linux 子系统在 x-kernel **当前无对应实现**，转写时几乎必撞，**一律按缺口上报**，不得静默 stub：
 
-`clk framework` · `regmap` · `gpio (gpiod)` · `pinctrl` · `reset controller` · `regulator` · `iommu` · `phy` · `workqueue/tasklet` · `completion`（用 `WaitQueue` 替代并记录）· `udelay/mdelay` · `hrtimer/timerfd` · `i2c/spi/watchdog/rtc/mmc subsystem`（无对应 `DeviceKind`/class）· `vmalloc` · `RCU` · `kmem_cache`。
+`clk framework`（**已有 Tier-0 速率查询** `drivers/clk/`，见 [`clk-subsystem.md`](clk-subsystem.md)；enable/set_rate/PLL/速率变更传播仍缺）· `regmap` · `gpio (gpiod)` · `pinctrl` · `reset controller` · `regulator` · `iommu` · `phy` · `workqueue/tasklet` · `completion`（用 `WaitQueue` 替代并记录）· `udelay/mdelay` · `hrtimer/timerfd` · `i2c/spi/watchdog/rtc/mmc subsystem`（无对应 `DeviceKind`/class）· `vmalloc` · `RCU` · `kmem_cache`。
 
 替代方案与报告口径见 [`gaps.md`](gaps.md)。

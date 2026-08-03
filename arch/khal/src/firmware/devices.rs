@@ -55,12 +55,15 @@ pub enum FirmwareSource {
 /// against per-driver firmware ID tables. Resources are optional because not
 /// every firmware node carries them. `source` records which firmware table the
 /// description came from so consumers do not have to hard-code an origin.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct FirmwareDevice {
     pub firmware_id: &'static str,
     pub source: FirmwareSource,
     pub mmio: Option<MmioResource>,
     pub irq: Option<InterruptInfo>,
+    /// Clocks the device consumes, parsed from DT `clocks`/`clock-names`
+    /// (empty for ACPI/static devices or when the node has no `clocks`).
+    pub clocks: alloc::vec::Vec<device_res::ClkDesc>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -210,12 +213,77 @@ pub fn for_each_compatible(
                 size: reg.size,
             });
         let irq = of::first_interrupt_desc(node);
+        let clocks = parse_clocks(node);
 
         visitor(FirmwareDevice {
             firmware_id,
             source: FirmwareSource::DeviceTree,
             mmio,
             irq,
+            clocks,
         });
     }
+}
+
+/// Cap on `#clock-cells` per clock entry — anything bigger is a malformed DT;
+/// real clock specifiers are at most a few cells.
+const MAX_CLOCK_SPECIFIER_CELLS: usize = 8;
+
+/// Parse a DT node's `clocks`/`clock-names` into clock descriptors.
+///
+/// Each `clocks` entry is `phandle + #clock-cells-of-that-producer` words; the
+/// producer's `#clock-cells` is resolved from its node via the phandle (so a
+/// `clocks` list may mix producers). Names come from `clock-names`, parallel by
+/// index (a clock without a matching name gets an empty name slice). Returns an
+/// empty vector when the node has no `clocks` property. Malformed entries stop
+/// the parse early (already-collected entries are returned).
+fn parse_clocks(node: of::FdtNode<'static, 'static>) -> alloc::vec::Vec<device_res::ClkDesc> {
+    let Some(property) = node.property("clocks") else {
+        return alloc::vec::Vec::new();
+    };
+    let bytes = property.value;
+    if bytes.len() % 4 != 0 {
+        return alloc::vec::Vec::new();
+    }
+
+    let words: alloc::vec::Vec<u32> = bytes
+        .chunks_exact(4)
+        .filter_map(|chunk| chunk.try_into().ok())
+        .map(u32::from_be_bytes)
+        .collect();
+
+    // `clock-names` stringlist, parallel by index (slices into the static DTB).
+    let names: alloc::vec::Vec<&'static [u8]> = node
+        .property("clock-names")
+        .map(|p| {
+            p.value
+                .split(|&byte| byte == 0)
+                .filter(|segment| !segment.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut out = alloc::vec::Vec::new();
+    let mut cursor = 0usize;
+    let mut index = 0usize;
+    while cursor < words.len() {
+        let phandle = words[cursor];
+        cursor += 1;
+
+        let cell_count = of::find_node_by_phandle(phandle)
+            .and_then(|producer| producer.property_u32("#clock-cells"))
+            .map(|value| value as usize)
+            .unwrap_or(0);
+        if cell_count > MAX_CLOCK_SPECIFIER_CELLS || cursor + cell_count > words.len() {
+            break;
+        }
+
+        let specifier = &words[cursor..cursor + cell_count];
+        cursor += cell_count;
+
+        let name = names.get(index).copied().unwrap_or(b"");
+        out.push(device_res::ClkDesc::new(name, phandle, specifier));
+        index += 1;
+    }
+    out
 }

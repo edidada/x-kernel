@@ -59,10 +59,10 @@ pub struct DwMciHost {
     fifo_depth: u32,
     /// log2 of the FIFO item size in bytes (we use 32-bit access → 2).
     data_shift: u32,
-    /// Card interface clock rate the bootloader established (Hz). Source of
-    /// truth for CLKDIV math. **Gap**: real value should be read from the DT
-    /// `clock-frequency` property via a clk provider (none yet); we take a
-    /// caller-supplied default.
+    /// Card interface (CIU) input clock rate in Hz — the source of truth for
+    /// `CLKDIV` math. The glue layer resolves this via the `clk` framework
+    /// (`clk::devm_clk_get` → SCMI/CRU provider on RK3588) and passes it in;
+    /// this layer is agnostic to where it came from.
     bus_hz: u32,
     /// Controller version ID.
     verid: u32,

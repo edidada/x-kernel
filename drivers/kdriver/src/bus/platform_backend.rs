@@ -97,6 +97,9 @@ impl PlatformBackend {
                         kdevice::irq_trigger_from_firmware(irq.trigger),
                     )));
                 }
+                for clock in &dev.clocks {
+                    resources.push(ResourceDesc::Clock(clock.clone()));
+                }
 
                 let registration = if dev.firmware_id == VIRTIO_MMIO_DT_COMPATIBLE {
                     match dev.mmio {

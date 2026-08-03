@@ -34,6 +34,33 @@ use crate::driver_registry::{BoxedDriver, firmware_specs::SDMMC};
 /// cross-check against U-Boot's reported bus speed.
 const SDMMC_BUS_HZ: u32 = 50_000_000;
 
+/// Resolve the dw_mshc CIU input rate via the `clk` framework, falling back to
+/// the empirical U-Boot value when no provider answers yet.
+///
+/// The bus pre-parses `clocks`/`clock-names` into the device's resources, so we
+/// resolve `ciu` through `clk::devm_clk_get` directly — no DT node lookup. On
+/// RK3588 `ciu` is SCMI-owned; `CLOCK_RATE_GET` returns the CIU reference rate
+/// (~49.5 MHz), used verbatim as `bus_hz` (no further division). If the clock
+/// can't be resolved or has no rate we keep the 50 MHz value U-Boot reports.
+fn resolve_ciu_rate(device: &kdevice::DeviceObject) -> u32 {
+    let rate = clk::devm_clk_get(device, "ciu")
+        .ok()
+        .and_then(|clk| clk.rate());
+    match rate {
+        Some(hz) => {
+            log::info!("sdmmc: ciu clock resolved via clk framework: {} Hz", hz);
+            hz as u32
+        }
+        None => {
+            log::warn!(
+                "sdmmc: ciu clock unresolved; falling back to {} Hz",
+                SDMMC_BUS_HZ
+            );
+            SDMMC_BUS_HZ
+        }
+    }
+}
+
 struct SdmmcDriver;
 
 impl DeviceDriver for SdmmcDriver {
@@ -57,11 +84,13 @@ impl DeviceDriver for SdmmcDriver {
         let (vaddr, _) = crate::iomap_first_mmio(device.as_ref(), "sdmmc")?;
         let vaddr = vaddr.as_ptr() as usize;
 
+        let bus_hz = resolve_ciu_rate(device.as_ref());
+
         // SAFETY: `iomap_first_mmio` returned a kernel virtual address that
         // exclusively maps the device's first MMIO region (the dw_mshc register
         // block) and lives at least as long as `device`. `SdmmcDriver::new`
         // touches only this mapping during controller bring-up.
-        let dev = match unsafe { block::sdmmc::SdmmcDriver::new(vaddr, SDMMC_BUS_HZ) } {
+        let dev = match unsafe { block::sdmmc::SdmmcDriver::new(vaddr, bus_hz) } {
             Ok(d) => d,
             Err(e) => {
                 log::error!(
