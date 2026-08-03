@@ -3,13 +3,13 @@
 ## 定位
 
 `knet` 提供 x-kernel 的内核网络栈抽象。
-它把驱动层网卡、smoltcp 协议栈、socket 对象、轮询唤醒、Unix domain socket、netlink 和可选 vsock 组合成统一的 `SocketOps` 接口。
+它把驱动层网卡、crate 内与 smoltcp 协议路径、socket 对象、轮询唤醒、Unix domain socket、netlink 和可选 vsock 组合成统一的 `SocketOps` 接口。
 上层 `posix/net` 负责 syscall 参数解析和文件描述符接入，`core/kruntime` 负责启动期设备注入，`knet` 负责协议状态、路由、收发推进和 socket 语义。
 
 ## 背景
 
 x-kernel 运行在 `no_std` 内核环境中，无法直接使用 Linux 内核网络栈或标准库网络类型。
-当前实现由 crate 内 IPv4、UDP 和 ICMPv4 数据路径处理 UDP 收发、分片与差错报告，smoltcp 继续处理 TCP、raw IP、IPv6 和 DNS，并提供兼容期 interface poll 模型。
+当前实现由 crate 内 IPv4、raw IPv4、UDP 和 ICMPv4 数据路径处理 raw/UDP 收发、IPv4 分片、ICMP echo reply 与差错报告，smoltcp 继续处理 TCP、IPv6 和 DNS，并提供兼容期 interface poll 模型。
 
 ## 范围
 
@@ -96,10 +96,11 @@ core/kruntime
 │  ├─ LoopbackDevice       │
 │  └─ EthernetDevice       │
 └──────┬──────────────┬────┘
-       │ UDP / ICMPv4 │ TCP / raw / IPv6 / DNS
+       │ UDP / raw    │ TCP / IPv6 / DNS
+       │ ICMPv4       │
        v              v
 ┌──────────────────┐  ┌──────────────────────────┐
-│ UDP PCB registry │  │ SocketSetWrapper         │
+│ UDP/raw registry │  │ SocketSetWrapper         │
 │ and socket queues│  │  └─ smoltcp SocketSet    │
 └────────┬─────────┘  └──────────┬───────────────┘
          │                       │
@@ -114,7 +115,7 @@ core/kruntime
 
 | 组件 | 职责 |
 |------|------|
-| `init_network` | 创建 loopback 与首个 Ethernet 设备，建立初始地址和默认路由，初始化 `Service`、`SocketSetWrapper` 与 `ListenTable` |
+| `init_network` | 创建 loopback 与首个 Ethernet 设备，建立初始地址和默认路由，初始化 `Service`、raw/UDP registry、`SocketSetWrapper` 与 `ListenTable` |
 | `Service` | 持有 smoltcp `Interface`、`Router`、poll timeout 和 RX waker 注册入口 |
 | `Router` | 管理设备列表、带 MTU 的路由表、`PacketBuf` RX/TX 队列、IPv4 输入校验、分片重组、输出分片、next-hop 选择和设备 dispatch |
 | `NetDevice` | 抽象 loopback、Ethernet 和 feature gated vsock 设备后端，通过 `PacketBuf` 转移报文所有权，并使用 crate 内地址类型和 `MonotonicInstant` 表达设备边界 |
@@ -126,6 +127,7 @@ core/kruntime
 | `stack::ipv4` | 使用 `etherparse` 校验和构造 IPv4 与 ICMPv4 头部，并执行输出分片 |
 | `stack::fragment` | 按源地址、目的地址、标识、协议和接口重组本地 IPv4 分片，并限制队列数量、内存和存活时间 |
 | `transport::udp` | 维护 UDP PCB registry、接收队列、bind 与 connect 状态、校验和、socket option、异步错误和 IPv4 收发 |
+| `transport::raw` | 维护 IPv4 raw socket registry、协议号和地址过滤、完整 IPv4 包接收队列、poll 唤醒与 IPv4 头部构造 |
 | `SocketSetWrapper` | 串行化 smoltcp socket set 访问，并在新增 socket 时通知等待者 |
 | `ListenTable` | 管理 TCP listen backlog、SYN 队列、accept 队列和 accept waker |
 | `GeneralOptions` | 统一管理 nonblock、reuseaddr、超时和设备 mask |
@@ -229,29 +231,29 @@ Service narrow mutation
 2. 添加 `LoopbackDevice`，注册 `127.0.0.1/8` 路由。
 3. 从 `DeviceContainer<NetDevice>` 取首个 NIC，包装成 `EthernetDevice`，注册默认 IPv4 路由。
 4. 创建 `Service`，把 loopback 和 Ethernet 地址写入 smoltcp `Interface`。
-5. 初始化全局 `SOCKET_SET`、`LISTEN_TABLE` 和 UDP PCB registry。
+5. 初始化 raw socket registry、`SOCKET_SET`、`LISTEN_TABLE` 和 UDP PCB registry。
 
 ### RX 推进
 
 1. `poll_interfaces` 获取 `SERVICE` 和 `SOCKET_SET` 锁。
 2. `Service::poll` 调用 `Router::poll`，设备以 `PacketBuf` 形式逐包转移 RX 所有权。
 3. `Router::poll` 根据网络层版本分流，IPv4 包先校验头部、长度、校验和和本地目的地址。
-4. IPv4 分片进入 `Ipv4Reassembler`。完整数据报进入 crate 内 UDP 分流，未命中 socket 的单播 UDP 触发 ICMPv4 Port Unreachable。
+4. IPv4 分片进入 `Ipv4Reassembler`。完整数据报先复制给匹配的 raw socket，再进入 crate 内 UDP 分流，未命中 socket 的单播 UDP 触发 ICMPv4 Port Unreachable。
 5. UDP PCB 按 FIFO 保留已入队的数据报；`connect` 更新后续入包的 peer 匹配，不重排或丢弃连接前已入队的数据报。
-6. TCP、raw IP、ICMP 和 IPv6 数据继续进入 smoltcp RX adapter，`Interface::poll` 驱动兼容期协议 socket。
+6. TCP、IPv6 和 DNS 数据进入 smoltcp RX adapter，`Interface::poll` 驱动兼容期协议 socket；raw IPv4 由 crate 内 registry 接收，ICMPv4 Echo Request 由 crate 内路径生成 Echo Reply，ICMPv4 报文同时交给 raw socket 与 UDP error queue。
 7. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
-8. `Router::dispatch` 把 crate 内 UDP 和 smoltcp 生成的 TX IP 包按路由发到设备。
+8. `Router::dispatch` 把 crate 内 raw/UDP 和 smoltcp 生成的 TX IP 包按路由发到设备。
 9. loopback 或设备 TX 触发后继续返回 `true`，外层循环继续推进。
 
 ### TX 路由
 
-1. crate 内 UDP 根据目的地址选择源地址和匹配路由的 MTU，在单个预分配 buffer 中写入 payload、UDP 头和 IPv4 头后提交到 `Router` 的 TX 队列。smoltcp 协议也通过同一队列提交 IP 包。
+1. crate 内 raw/UDP 根据目的地址选择源地址和匹配路由的 MTU，在预分配 buffer 中写入 payload、传输头和 IPv4 头后提交到 `Router` 的 TX 队列。smoltcp 协议也通过同一队列提交 IP 包。
 2. `IP_MTU_DISCOVER` 决定 UDP IPv4 头部的 DF 标志。超出路由 MTU 且允许分片的包由 `fragment_output_packet` 拆分，DF 包返回 `EMSGSIZE`。
 3. `Router::dispatch` 接管所有权，并按 IP 版本解析目的地址；IPv4 输出先按实际长度更新 `total_len` 和头部校验和。
 4. IPv4 广播包复制到参与转发且处于 up 状态的设备，并以这些设备的最小 MTU 作为发送上限；普通 IPv4 multicast socket 发送返回 `EOPNOTSUPP`。
 5. 单播包通过 `RouteTable::lookup` 选择最长前缀路由，处于 down 状态的设备不参与源地址和出接口选择。
 6. 带固定 `prefsrc` 的路由使用该地址；动态选源先按地址 scope 过滤，再优先选择其前缀覆盖 gateway 或直连 next-hop 的地址。
-7. crate 内 UDP 和 smoltcp raw IP 在提交报文前按对应出口 MTU 与 IP 长度字段上限检查长度，超限返回 `EMSGSIZE`。
+7. crate 内 UDP 和 raw IPv4 在提交报文前检查 IPv4 长度字段上限；UDP 的 DF 报文超过出口 MTU 返回 `EMSGSIZE`，允许分片的 UDP 与 raw IPv4 按 8 字节偏移对齐执行输出分片。
 8. `EthernetDevice` 把 IPv4 next-hop 和 `PacketBuf` 交给本设备的 `NeighborResolver`，只执行 resolver 返回的发送或 ARP request action。
 9. `NeighborResolver` 在 `NUD_INCOMPLETE` 或 cache miss 时保存 IP 包及其实际源地址，ARP request action 使用该源地址作为 SPA；设备 poller 只负责执行 action 并提供维护时钟。
 10. `NeighborResolver` 把动态项的可达时间以 300 秒为基准，使用每个邻居的稳定散列分布到 `[150, 450)` 秒；可达时间到期后转入 `STALE` 并继续保留旧 MAC。
@@ -261,10 +263,10 @@ Service narrow mutation
 14. 动态 MAC 更新受 1 秒锁定时间约束，`NUD_PERMANENT` 直接提供固定 MAC 映射，动态 ARP 学习不会覆盖该配置。
 15. link 进入 down 状态后，loopback 和 Ethernet 停止普通 IP 收发，Ethernet raw frame 发送返回 `ENETDOWN`。
 
-当前实现保留 smoltcp TCP、raw socket 和 IPv6 推进。UDP、IPv4 分片重组、输出分片和 ICMPv4 UDP 差错报告使用 crate 内实现。
+当前实现保留 smoltcp TCP、IPv6 和 DNS 推进。raw socket、UDP、IPv4 分片重组、输出分片、ICMPv4 echo reply 和 UDP 差错报告使用 crate 内实现。
 `PacketBuf`、`link::wire`、`link::arp` 和 `stack::ipv4` 提供设备与 crate 内 IPv4/UDP 数据路径共用的报文表示和 parser/emitter；`neighbor::NeighborResolver` 只依赖链路地址和时间，不依赖具体 NIC driver。
 路由表和设备接口使用 `crate::ip` 地址类型，设备时间使用 `ktime_types::MonotonicInstant`。
-`Router`、`Service` 和初始化入口在 smoltcp 兼容边界完成地址与时间转换。
+`Router`、`Service` 和初始化入口只在 smoltcp 兼容边界完成地址与时间转换；raw/UDP 使用 crate 内地址和报文类型。
 smoltcp 的单个 `Interface` 仍共享所有设备的最小 MTU，因此 TCP 和其他经该
 `Interface` 发送的流量受全局最小 MTU 的保守约束。
 
@@ -326,11 +328,11 @@ smoltcp 的单个 `Interface` 仍共享所有设备的最小 MTU，因此 TCP �
 
 ## 设计决策
 
-### UDP 与 IPv4 数据路径迁出 smoltcp
+### UDP、raw 与 IPv4 数据路径迁出 smoltcp
 
-UDP PCB、bind 冲突检查、收发队列、IPv4 校验、分片重组、输出分片和 ICMPv4 差错均由 crate 内类型管理。
-TCP、raw IP、IPv6 和 DNS 继续通过 smoltcp socket set 推进，协议推进仍依赖显式 `poll_interfaces` 调用。
-该边界让 UDP 不再依赖 smoltcp socket handle，同时保留现有 TCP 和 raw socket 行为。
+UDP PCB、raw socket registry、bind 过滤、收发队列、IPv4 校验、分片重组、输出分片和 ICMPv4 差错均由 crate 内类型管理。
+TCP、IPv6 和 DNS 继续通过 smoltcp socket set 推进，协议推进仍依赖显式 `poll_interfaces` 调用。
+该边界让 UDP 和 raw socket 不依赖 smoltcp socket handle，同时保留现有 TCP socket 行为。
 
 ### 数据路径持有网络配置
 

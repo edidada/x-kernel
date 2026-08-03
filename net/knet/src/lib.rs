@@ -132,6 +132,7 @@ pub fn init_network() {
 
     SERVICE.init_once(Mutex::new(Service::new(router)));
 
+    raw::init_raw_registry();
     SOCKET_SET.init_once(SocketSetWrapper::new());
     LISTEN_TABLE.init_once(ListenTable::new());
     udp::init_udp_registry();

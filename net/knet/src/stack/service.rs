@@ -91,26 +91,6 @@ impl Service {
             .ok_or(KError::from(LinuxError::ENETUNREACH))
     }
 
-    pub fn egress_mtu(&self, dst_addr: &SmoltcpIpAddress) -> KResult<usize> {
-        let dst_addr = super::from_smoltcp_ip_address(*dst_addr);
-        self.router.egress_mtu_for(&dst_addr)
-    }
-
-    pub fn has_local_address(&self, addr: &SmoltcpIpAddress) -> bool {
-        self.router
-            .has_ipv4_address(super::from_smoltcp_ip_address(*addr))
-    }
-
-    pub fn is_smoltcp_ipv4_broadcast(&self, addr: &SmoltcpIpAddress) -> bool {
-        self.router
-            .is_ipv4_broadcast(super::from_smoltcp_ip_address(*addr))
-    }
-
-    pub fn is_smoltcp_ipv4_bindable_broadcast(&self, addr: &SmoltcpIpAddress) -> bool {
-        self.router
-            .is_ipv4_bindable_broadcast(super::from_smoltcp_ip_address(*addr))
-    }
-
     pub fn smoltcp_device_mask_for(&self, endpoint: &SmoltcpIpListenEndpoint) -> u32 {
         match endpoint.addr {
             Some(addr) => self.smoltcp_device_mask_for_addr(&addr),

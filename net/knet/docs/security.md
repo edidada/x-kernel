@@ -33,7 +33,7 @@ driver layer / smoltcp / ringbuf
 - pathname Unix socket 操作信任入口传入的 `Cred` 快照与当前系统调用主体一致；
   kvfs 负责逐级 search、父目录 mutation 和 inode DAC 检查。
 - `knet` 信任 driver 层返回的 `NetBufHandle` 数据切片在 handle 生命周期内有效。
-- `knet` 使用基于 `zerocopy` 和 `etherparse` 的 crate 内 checked parser 校验 Ethernet、ARP、IPv4 和 UDP 数据，并继续依赖 smoltcp 校验 TCP、raw IP 和 IPv6 数据；`link::wire` 只处理 Ethernet frame，`link::arp` 负责 ARP packet validity，`neighbor::NeighborResolver` 负责 cache、pending queue 和 retry state。
+- `knet` 使用基于 `zerocopy` 和 `etherparse` 的 crate 内 checked parser 校验 Ethernet、ARP、IPv4、raw IPv4 和 UDP 数据，并继续依赖 smoltcp 校验 TCP 和 IPv6 数据；`link::wire` 只处理 Ethernet frame，`link::arp` 负责 ARP packet validity，`neighbor::NeighborResolver` 负责 cache、pending queue 和 retry state。
 - 设备层只接收经 `Router` 控制面适配后的 crate 内地址、CIDR 和带明确状态的邻居项；不支持邻居表的设备拒绝对应 mutation。
 - unsafe 边界由 crate 内部封装，外部调用者没有直接调用 unsafe API 的入口。
 
@@ -203,7 +203,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 18. 网络类型边界：`RouteTable` 和 `NetDevice` 不暴露 smoltcp 地址或时间类型；控制面与协议兼容转换由 `Router`、`Service` 和初始化入口完成。
 19. IPv4 重组边界：分片按源地址、目的地址、标识、协议和接口隔离；被已有区间完全覆盖的分片按重复包丢弃，部分重叠或范围矛盾会删除整条队列；重组状态受 64 条队列、4 MiB 高水位、3 MiB 低水位和 30 秒超时限制。
 20. UDP 接收边界：UDP 长度、校验和和 payload range 通过 checked parser 验证，单个 PCB 的接收队列上限为 1024 个数据报。
-21. IPv4 输出边界：输出长度必须同时满足出口 MTU 和 IPv4 `total_len` 字段上限；设备 TX 在最终发送点复核当前 MTU，DF 包超过 MTU 时返回 `EMSGSIZE`，允许分片的包只按 8 字节对齐切分 payload。
+21. IPv4 输出边界：输出长度必须满足 IPv4 `total_len` 字段上限；设备 TX 在最终发送点复核当前 MTU，DF 包超过 MTU 时返回 `EMSGSIZE`，允许分片的 UDP 与 raw IPv4 按 8 字节对齐切分 payload。
 22. 本地地址投影边界：Router 的全局本地地址集合用于固定源地址校验和 weak-host ARP 接收，设备所属地址集合单独用于广播和出接口判断。
 
 ## 线程安全
@@ -231,7 +231,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-07 | raw socket 被无权限调用者创建 | 中 | syscall 层没有实施权限门禁 | `posix/net::sys_socket` 在创建 AF_INET raw 和 AF_PACKET socket 前检查当前凭据，当前 pre-capabilities 模型要求有效 UID 为 0 |
 | T-08 | netlink RX queue 被 uevent 或 response 填满 | 中 | 订阅者不消费，publisher 持续写入 | `NETLINK_RX_QUEUE_LIMIT` 限制单 socket queue 字节数，超限丢弃 |
 | T-09 | 网络配置的 owner 状态不一致 | 中 | 控制入口绕过 owner invariant，地址更新遗漏自动路由、smoltcp 兼容视图或 pending 清理，或不支持的设备静默接受邻居更新 | 地址和路由由 `Router` 持有，链路和邻居由 `NetDevice` 持有；`Service` 通过 `LinkConfigUpdate` 和路由 mutation API 提交更新，`Router` 在写入前统一校验，dump 使用三类窄快照 |
-| T-10 | 外部网络包触发 parser panic | 中 | malformed Ethernet、ARP、IP、UDP 或 TCP packet 进入 RX | Ethernet 和 ARP 使用 `zerocopy` checked view，IPv4 与 UDP 使用 crate 内 checked parser，TCP、raw IP 和 IPv6 使用 smoltcp checked parser；错误包直接丢弃 |
+| T-10 | 外部网络包触发 parser panic | 中 | malformed Ethernet、ARP、IP、UDP 或 TCP packet 进入 RX | Ethernet 和 ARP 使用 `zerocopy` checked view，IPv4、raw IPv4 与 UDP 使用 crate 内 checked parser，TCP 和 IPv6 使用 smoltcp checked parser；错误包直接丢弃 |
 | T-11 | 中断上下文误用导致锁竞争或延迟放大 | 中 | IRQ waker 回调中直接推进 `SERVICE`、`SOCKET_SET` 或执行阻塞 socket 操作 | 中断路径只注册和唤醒 waker，协议推进保留在普通 poll 路径 |
 | T-12 | driver buffer 或 DMA 输入破坏 packet 边界 | 高 | 驱动返回长度异常、数据在 recycle 后继续被访问、TX/RX buffer 生命周期使用错误 | RX 数据只在 `NetBufHandle` recycle 前解析和复制；外部帧使用 checked parser；TX buffer 由 driver handle 管理 |
 | T-13 | vsock-TIPC bridge 误把普通 AF_VSOCK 连接路由到 TIPC | 中 | 事件分流没有区分桥接端口或已桥接连接 | bridge 只接管静态 port map 和自己的 connection id，未命中事件继续交给 `VSOCK_CONN_MANAGER` |
@@ -280,7 +280,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | F-19 | 无权限 netlink mutation | 当前发送凭据不具备配置权限 | mutation 不执行，RX queue 收到 `NLMSG_ERROR` 和 `EPERM` | 调用者配置失败 | 4 | 每次发送重新检查凭据；error 入队后发送入口返回已消费请求长度 |
 | F-20 | 混合 query 和 mutation 批次 | 单次发送包含两类请求 | 整批未执行并返回 syscall `EOPNOTSUPP` | 调用者需拆分批次 | 4 | 批次分类在 owner mutation 和 response 生成前完成 |
 | F-21 | 本机源地址彻底删除时存在 ARP pending | pending 包仍使用已经从全局本机地址集合消失的源地址 | 旧包无法继续合法发送 | 邻居解析重试产生错误 SPA | 3 | 地址投影更新时跨设备清理使用该源地址的 pending 包 |
-| F-22 | IP 报文超过出口 MTU 或 IPv4 长度上限 | 并发降低 MTU、路由缓存过期或 payload 超过 `total_len` 表示范围 | 当前报文在设备边界丢弃，预检路径返回 `EMSGSIZE` | 当前数据报未发送 | 4 | 发送前使用路由 MTU 和 IP 长度字段上限校验，设备 TX 最终按当前 MTU复核 |
+| F-22 | IP 报文超过出口 MTU 或 IPv4 长度上限 | 并发降低 MTU、路由缓存过期或 payload 超过 `total_len` 表示范围 | DF 报文或无法分片的报文返回 `EMSGSIZE`，允许分片的报文拆分后发送 | 当前数据报发送失败或按分片发送 | 4 | 发送前计算输出分片数量，Router 按当前 MTU 执行分片，设备 TX 最终复核 MTU 和 IPv4 长度上限 |
 
 严重度定义：
 
@@ -297,10 +297,10 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - source-specific、metric、multipath 和其他未实现的路由语义属性返回 `EOPNOTSUPP`。
 - malformed Ethernet、ARP、IP、UDP、TCP 包在 RX 路径丢弃，并通过 warn 或 trace 记录。
 - UDP PCB 接收队列和 Router TX 队列满时映射为丢包或 `WouldBlock`，poller 负责等待 IO readiness。
-- smoltcp buffer 和 Unix stream ring buffer 满时映射为 `WouldBlock`，poller 负责等待 IO readiness；非阻塞 Unix stream send 已有进度时返回部分字节数。
+- smoltcp TCP buffer、raw/UDP 接收队列和 Unix stream ring buffer 满时映射为 `WouldBlock` 或丢弃新包，poller 负责等待 IO readiness；非阻塞 Unix stream send 已有进度时返回部分字节数。
 - loopback 和 Ethernet 队列满时丢包并记录 warn。
 - link down 后设备停止普通 IP 收发，Ethernet raw frame 发送返回 `ENETDOWN`。
-- UDP 和 raw IP 超过选定出口 MTU 时返回 `EMSGSIZE`。
+- UDP 的 DF 报文超过选定出口 MTU 时返回 `EMSGSIZE`，允许分片的 UDP 与 raw IP 按出口 MTU 分片；出口 MTU 小于 IPv4 头部或总长超过字段上限时返回 `EMSGSIZE`。
 - panic 路径主要来自初始化顺序、内部 invariant 破坏和 `expect` 断言；新增公开入口应先返回 `KError`，再进入内部断言区。
 
 ## 隐私分析
@@ -319,7 +319,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - source-specific route、metric、multipath、非 main table、非 unicast type 和其他未建模的选路语义返回 `EOPNOTSUPP`。
 - `NETLINK_ROUTE` multicast notification 尚未实现，bind 的非零 group mask 以及发送目标中的非零 pid 或 group 返回 `EOPNOTSUPP`。
 - 自动 local `/32` 在当前内部模型中仍表示为 main table、unicast type 和 loopback egress，尚未拆分独立 local table 与 local route type。
-- crate 内 UDP 按路由 MTU 执行 DF 检查或输出分片，raw IP 按实际出口设备 MTU 检查；普通 IPv4 multicast socket 发送尚未实现并返回 `EOPNOTSUPP`。TCP 和其他 smoltcp `Interface` 流量仍受所有设备最小 MTU 的保守上限约束。
+- crate 内 UDP 按路由 MTU 执行 DF 检查或输出分片，raw IP 按实际出口设备 MTU 输出分片；普通 IPv4 multicast socket 发送尚未实现并返回 `EOPNOTSUPP`。TCP 和其他 smoltcp `Interface` 流量仍受所有设备最小 MTU 的保守上限约束。
 - raw socket 创建权限由 syscall 层承担，`knet` 构造器自身没有进程凭据参数。
 - Ethernet 设备只处理 IPv4 ARP，IPv6 NDP、非 Ethernet 链路和多队列 NIC 抽象仍待扩展。
 - crate 内 UDP 数据路径当前只支持 IPv4；IPv6 UDP 继续由 smoltcp DNS 路径使用，普通 UDP socket 不提供 IPv6 收发。

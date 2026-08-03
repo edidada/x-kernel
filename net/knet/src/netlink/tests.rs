@@ -435,10 +435,10 @@ fn test_unicast_egress_mtu_comes_from_selected_device() {
     })
     .unwrap();
 
-    let external = smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::new(8, 8, 8, 8));
-    let loopback = smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::new(127, 0, 0, 1));
-    assert_eq!(SERVICE.lock().egress_mtu(&external), Ok(1500));
-    assert_eq!(SERVICE.lock().egress_mtu(&loopback), Ok(68));
+    let external = IpAddress::Ipv4(Ipv4Address::new(8, 8, 8, 8));
+    let loopback = IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1));
+    assert_eq!(SERVICE.lock().ipv4_route_mtu(&external), Some(1500));
+    assert_eq!(SERVICE.lock().ipv4_route_mtu(&loopback), Some(68));
 }
 
 #[def_test(serial)]
@@ -681,13 +681,14 @@ fn test_update_link_state_rename_and_down() {
             .iter()
             .any(|snapshot| snapshot.entry.dev == 1 && snapshot.label == "ens3")
     );
-    let destination = smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::new(8, 8, 8, 8));
+    let destination = IpAddress::Ipv4(Ipv4Address::new(8, 8, 8, 8));
+    assert_eq!(SERVICE.lock().ipv4_route_mtu(&destination), None);
+    let smoltcp_destination =
+        smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::new(8, 8, 8, 8));
     assert_eq!(
-        SERVICE.lock().egress_mtu(&destination),
-        Err(LinuxError::ENETDOWN.into())
-    );
-    assert_eq!(
-        SERVICE.lock().get_smoltcp_source_address(&destination),
+        SERVICE
+            .lock()
+            .get_smoltcp_source_address(&smoltcp_destination),
         Err(LinuxError::ENETUNREACH.into())
     );
 }

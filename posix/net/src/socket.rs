@@ -28,9 +28,9 @@ use knet::{
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK, O_RDWR},
     net::{
-        AF_INET, AF_INET6, AF_NETLINK, AF_PACKET, AF_UNIX, AF_VSOCK, IPPROTO_ICMP, IPPROTO_TCP,
-        IPPROTO_UDP, SHUT_RD, SHUT_RDWR, SHUT_WR, SOCK_DGRAM, SOCK_RAW, SOCK_SEQPACKET,
-        SOCK_STREAM, sockaddr, socklen_t,
+        AF_INET, AF_INET6, AF_NETLINK, AF_PACKET, AF_UNIX, AF_VSOCK, IPPROTO_TCP, IPPROTO_UDP,
+        SHUT_RD, SHUT_RDWR, SHUT_WR, SOCK_DGRAM, SOCK_RAW, SOCK_SEQPACKET, SOCK_STREAM, sockaddr,
+        socklen_t,
     },
 };
 use posix_types::{UserConstPtr, UserPtr};
@@ -67,10 +67,13 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
         }
         (AF_INET, SOCK_RAW) => {
             ensure_raw_network_privilege(cred.is_privileged())?;
-            if proto != IPPROTO_ICMP as u32 {
+            if proto > u8::MAX as u32 {
                 return Err(KError::from(LinuxError::EPROTONOSUPPORT));
             }
-            knet::Socket::Raw(Box::new(RawSocket::new(IpVersion::Ipv4, IpProtocol::Icmp)))
+            knet::Socket::Raw(Box::new(RawSocket::new(
+                IpVersion::Ipv4,
+                IpProtocol::from_ipv4_number(proto as u8),
+            )))
         }
         // IPv6 is not exposed yet because the address family lacks full support.
         // The previous raw ICMPv6-only path was removed with this policy.

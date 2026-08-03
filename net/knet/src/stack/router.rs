@@ -27,7 +27,7 @@ use crate::{
         validate_interface_name,
     },
     ip::{IpAddress, IpCidr, Ipv4Cidr},
-    udp, udp_err,
+    raw, udp, udp_err,
 };
 
 pub(crate) const ROUTE_TABLE_MAIN: u8 = 254;
@@ -858,6 +858,16 @@ impl Router {
             return;
         }
 
+        let raw_accepted = if let Some(ip_packet) = packet.network_packet() {
+            snoop_udp_error_packet(ip_packet);
+            matches!(
+                raw::handle_ipv4_input(header, ip_packet),
+                raw::InputDisposition::Accepted
+            )
+        } else {
+            false
+        };
+
         if header.protocol() == ipv4::PROTOCOL_UDP {
             let packet_type = packet.packet_type();
             let (disposition, returned_packet) = udp::handle_ipv4_packet(header, packet);
@@ -882,7 +892,20 @@ impl Router {
             }
         }
 
+        if header.protocol() == ipv4::PROTOCOL_ICMP {
+            if header.dst_addr().is_unicast()
+                && self.is_local_ipv4_source(header.dst_addr())
+                && let Some(ip_packet) = packet.network_packet()
+            {
+                self.queue_icmpv4_echo_reply(header, ip_packet);
+            }
+            return;
+        }
+
         if self.should_emit_protocol_unreachable(header) {
+            if raw_accepted {
+                return;
+            }
             if let Some(ip_packet) = packet.network_packet() {
                 self.queue_icmpv4_error(
                     Icmpv4Error::ProtocolUnreachable,
@@ -895,7 +918,6 @@ impl Router {
         }
 
         if let Some(ip_packet) = packet.network_packet() {
-            snoop_udp_error_packet(ip_packet);
             snoop_tcp_packet(ip_packet, sockets);
         }
         self.rx_queue.push_back(packet);
@@ -1002,6 +1024,15 @@ impl Router {
             packet,
             PacketOwner::Ipv4Stack,
         ));
+    }
+
+    fn queue_icmpv4_echo_reply(&mut self, request_header: Ipv4Header, request_packet: &[u8]) {
+        let Some(packet) = ipv4::build_icmpv4_echo_reply(request_header, request_packet) else {
+            return;
+        };
+        if let Err(error) = self.queue_ipv4_packet(packet) {
+            debug!("Dropping ICMPv4 echo reply: {:?}", error);
+        }
     }
 
     fn is_local_ipv4_destination(&self, dst_addr: crate::ip::Ipv4Address) -> bool {
