@@ -20,6 +20,7 @@ mod consts;
 mod device;
 mod ip;
 mod link;
+mod neighbor;
 pub mod netlink;
 mod socket;
 mod stack;

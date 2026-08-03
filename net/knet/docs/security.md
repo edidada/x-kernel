@@ -33,7 +33,7 @@ driver layer / smoltcp / ringbuf
 - pathname Unix socket 操作信任入口传入的 `Cred` 快照与当前系统调用主体一致；
   kvfs 负责逐级 search、父目录 mutation 和 inode DAC 检查。
 - `knet` 信任 driver 层返回的 `NetBufHandle` 数据切片在 handle 生命周期内有效。
-- `knet` 使用基于 `zerocopy` 和 `etherparse` 的 crate 内 checked parser 校验 Ethernet、ARP、IPv4 和 UDP 数据，并继续依赖 smoltcp 校验 TCP、raw IP 和 IPv6 数据。
+- `knet` 使用基于 `zerocopy` 和 `etherparse` 的 crate 内 checked parser 校验 Ethernet、ARP、IPv4 和 UDP 数据，并继续依赖 smoltcp 校验 TCP、raw IP 和 IPv6 数据；`link::wire` 只处理 Ethernet frame，`link::arp` 负责 ARP packet validity，`neighbor::NeighborResolver` 负责 cache、pending queue 和 retry state。
 - 设备层只接收经 `Router` 控制面适配后的 crate 内地址、CIDR 和带明确状态的邻居项；不支持邻居表的设备拒绝对应 mutation。
 - unsafe 边界由 crate 内部封装，外部调用者没有直接调用 unsafe API 的入口。
 
@@ -45,7 +45,7 @@ driver layer / smoltcp / ringbuf
 
 经检查，本模块直接或间接接触以下边界：
 
-- **网络输入**：Ethernet、ARP、IPv4、TCP、UDP、raw IP 包；
+- **网络输入**：Ethernet、ARP、IPv4、TCP、UDP、raw IP 包；Ethernet 和 ARP 的 parser 与 neighbor state machine 分属独立模块；
 - **设备输入**：driver 提供的 `NetBufHandle`、IRQ 唤醒、RX/TX 缓冲区生命周期；
 - **控制面输入**：每次发送携带的调用者凭据、批量 netlink message、header、attribute、
   route mutation 和 neighbor 更新；
@@ -226,7 +226,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-02 | smoltcp socket handle 已删除后继续访问 | 高 | listener 关闭、accepted child 清理与并发 socket 操作交错 | `SocketSet` 访问由 mutex 串行化；`ListenTable::unlisten` drain 后删除 handle；调用点需避免缓存 handle 后跨释放点使用 |
 | T-03 | ring buffer index 推进超过实际写入或读取长度 | 高 | `advance_write_index` 或 `advance_read_index` 的 count 与切片来源不一致 | count 由持有 channel mutex 时取得的同一批 slices 计算；unsafe 注释固定不变量 |
 | T-04 | 恶意 netlink 消息越界读取或构造非法状态 | 高 | 用户传入短 header、错误批次对齐、畸形 attr、非法 family、非法 ifindex 或未实现的语义属性 | `NlMsgHeader::read`、批次拆分、`RtnlRequest::decode`、对象请求类型的 `decode` 方法、`parse_attrs`、`parse_ip_by_family` 和 `InterfaceIndex` 转换拒绝非法输入；未实现语义返回 `EOPNOTSUPP` |
-| T-05 | ARP spoofing 污染 neighbor cache | 中 | 外部主机发送伪造 ARP reply 或 request | 当前校验 unicast MAC、广播和本机目标 IP；动态学习不得覆盖 `NUD_PERMANENT` 项，其他邻居仍依赖网络隔离 |
+| T-05 | ARP spoofing 污染 neighbor cache | 中 | 外部主机发送伪造 ARP reply 或 request | 校验 unicast MAC、广播和本机目标 IP；request 与非 host-directed 报文只进入 `STALE`；动态 MAC 更新受 1 秒锁定时间约束，且不得覆盖 `NUD_PERMANENT` 项；其他邻居仍依赖网络隔离 |
 | T-06 | listen backlog 被 SYN 洪泛占满 | 中 | 大量连接请求命中同一 listener | backlog 被 clamp 到 `LISTEN_QUEUE_SIZE`；超限丢弃并记录 warn |
 | T-07 | raw socket 被无权限调用者创建 | 中 | syscall 层没有实施权限门禁 | `posix/net::sys_socket` 在创建 AF_INET raw 和 AF_PACKET socket 前检查当前凭据，当前 pre-capabilities 模型要求有效 UID 为 0 |
 | T-08 | netlink RX queue 被 uevent 或 response 填满 | 中 | 订阅者不消费，publisher 持续写入 | `NETLINK_RX_QUEUE_LIMIT` 限制单 socket queue 字节数，超限丢弃 |
@@ -261,8 +261,8 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 |------|----------|----------|----------|----------|--------|----------|
 | F-01 | 网络设备缺失 | `DeviceContainer<NetDevice>` 为空 | 只有 loopback 可用 | 对外 TCP、UDP、raw IP 返回无路由或连接失败 | 3 | `init_network` 记录 warn，`Service::get_source_address` 返回 `ENETUNREACH` |
 | F-02 | 目的地址无路由 | `RouteTable::lookup` 未命中 | 当前发送失败 | 应用连接失败 | 3 | connect 或 send 路径返回 `ENETUNREACH`，dispatch 路径 warn 后丢弃 |
-| F-03 | Ethernet pending queue 满 | ARP 未解析且 `pending_tx` 达到上限 | 新进入的 IP 包丢弃 | 单目的或多目的通信丢包 | 3 | 记录 warn；维护逻辑按 next-hop 推进，单个 unresolved next-hop 不阻塞其他已解析目标 |
-| F-04 | driver TX 失败 | NIC driver 在 buffer 回收、分配或发送阶段返回 `WouldBlock`、`ResourceBusy` 或硬错误 | 当前 frame 未发送 | 网络吞吐下降或连接超时 | 3 | 可重试错误保留 pending 包并等待维护 deadline；硬错误记录后移除对应包 |
+| F-03 | Ethernet pending queue 满或 ARP 解析失败 | ARP 未解析且 `pending_tx` 达到上限，或 6 次 request 未得到应答 | 新进入的 IP 包丢弃，已排队包在失败时清理 | 单目的或多目的通信丢包并由上层超时 | 3 | 记录 warn；维护逻辑按 next-hop 推进，单个 unresolved next-hop 不阻塞其他已解析目标；失败项进入 `FAILED` 并设置回收 deadline |
+| F-04 | driver TX 失败 | NIC driver 在 buffer 回收、分配或发送阶段返回 `WouldBlock`、`ResourceBusy` 或硬错误 | 当前 frame 未发送 | 网络吞吐下降或连接超时 | 3 | 可重试错误保留 pending 包并等待维护 deadline；硬错误记录后移除对应包；ARP probe 仍受 6 次上限约束 |
 | F-05 | UDP ICMP error queue 丢失 | PCB registry 未注册、ICMP 引用头无效或 socket 已关闭 | `SO_ERROR` 或 error queue 缺失 | 应用无法获得异步网络错误 | 4 | socket 创建时初始化 PCB registry，bind 时登记 PCB，Drop 时注销；ICMP 引用报文使用允许截断 payload 的 IPv4 头解析路径 |
 | F-06 | TCP accepted child abort | 握手期间 peer reset 或 smoltcp child 关闭 | `accept` 返回 `ConnectionAborted` | 应用重试 accept | 4 | `ListenTable::accept` 清理 closed child 并继续扫描队列 |
 | F-07 | poll waker 或协议 timer 丢失 | device mask 错误、timeout 或 Ethernet IRQ source 未注册、注册所有者未跨 `Pending` 存活、缺少 register 后复查或 poller 未按 deadline 调度 | socket 阻塞等待延迟，TCP 重传或 keep-alive 延后 | 应用 IO latency 上升或连接超时 | 3 | bind/connect 后更新 device mask；`Service::register_rx_waker` 通过同一个 `PollContext` 直接注册 timeout poll 和相关 Ethernet IRQ source；调用方持有 `PollRegistrations` 并在注册后复查 readiness；每次 Interface poll 后按 `poll_at` deadline 调度 poller |
@@ -311,7 +311,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 
 ## 已知限制
 
-- `RTM_GETNEIGH` dump 尚未实现；控制面通过 `RTM_NEWNEIGH` 写入 Ethernet 邻居表，ARP RX 继续维护动态邻居。当前支持 `NUD_INCOMPLETE` 和 `NUD_PERMANENT`，前者在首次 egress 时发起 ARP，后者不接受动态 ARP 覆盖；其余 NUD state、非零 neighbor flags 和非 Ethernet 设备返回 `EOPNOTSUPP`。
+- `RTM_GETNEIGH` dump 尚未实现；控制面通过 `RTM_NEWNEIGH` 写入 Ethernet 邻居表，ARP RX 继续维护动态邻居。控制面当前支持 `NUD_INCOMPLETE` 和 `NUD_PERMANENT`，设备内部还维护 `REACHABLE`、`STALE`、`DELAY`、`PROBE` 和 `FAILED`，前者在首次 egress 时发起 ARP，后者不接受动态 ARP 覆盖；其余控制面 NUD state、非零 neighbor flags 和非 Ethernet 设备返回 `EOPNOTSUPP`。
 - IPv4 输出使用匹配路由的接口 MTU，ICMP Fragmentation Needed 中的 next-hop MTU 只进入 UDP error queue，尚未形成动态 PMTU cache。
 - IPv4 输出分片只支持无 options 的栈内生成报文，尚未实现 options copy 语义。
 - `link_snapshots`、`ipv4_addr_snapshots` 和 `route_snapshot` 只覆盖各自已实现的 dump 字段，未包含邻居表、驱动瞬时统计和 smoltcp 内部计数。
@@ -337,7 +337,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - 每次 netlink `send` 或 `write` 传入当前调用者的 `Cred` 快照，socket 不缓存权限；无权限 mutation 生成带 `EPERM` 的 `NLMSG_ERROR`。
 - 新增 netlink parser 先校验单条 header 长度和批次对齐边界，再通过 `RtnlRequest::decode` 与对象请求类型的 `decode` 方法校验 attribute、family 和 index；未实现的语义属性显式返回 `EOPNOTSUPP`。
 - 仅含查询或仅含 mutation 的 netlink 批次支持逐条处理，混合查询和 mutation 批次在 owner 更新前返回 `EOPNOTSUPP`，mutation 批次执行前预留完整 response 空间。
-- ARP request 使用实际 packet source 作为 SPA，Router 全局本机地址均可回复 request；主动重试使用设备 deadline，可重试 TX 失败保留 pending，源地址从全局本机集合消失时跨设备清理 pending。
+- ARP request 使用实际 packet source 作为 SPA，Router 全局本机地址均可回复 request；动态邻居过期后保留旧 MAC，实际发包进入 `DELAY`，随后进行最多 6 次 `PROBE`；失败时清理对应 pending，设备 deadline 负责重试和动态项回收。可重试 TX 失败保留 pending，源地址从全局本机集合消失时跨设备清理 pending。
 - UDP 和 raw IP 使用实际出口 MTU，定向广播使用路由设备 MTU，全局广播使用参与设备最小 MTU，普通 IPv4 multicast socket 发送返回 `EOPNOTSUPP`；设备最终 TX 复核当前 MTU；smoltcp 单 `Interface` 的全局最小 MTU 限制需保持明确。
 - 新增 ring buffer 操作的 advance count 来自同一锁内同一批 slices。
 - Unix stream 的 write index 发布、方向关闭和空队列 EOF 判定保持同一个 per-direction 排序点，方向锁内不执行用户复制或 `PollSet` 唤醒，shutdown 在释放 `channel` mutex 后执行 waiter 唤醒。

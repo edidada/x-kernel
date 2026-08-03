@@ -27,9 +27,11 @@ net/knet/
     │   └── vsock.rs
     ├── link/
     │   ├── buf.rs
+    │   ├── arp.rs
     │   ├── mod.rs
     │   ├── packet.rs
     │   └── wire.rs
+    ├── neighbor.rs
     ├── netlink/
     │   ├── mod.rs
     │   ├── rtnetlink.rs
@@ -117,7 +119,10 @@ core/kruntime
 | `Router` | 管理设备列表、带 MTU 的路由表、`PacketBuf` RX/TX 队列、IPv4 输入校验、分片重组、输出分片、next-hop 选择和设备 dispatch |
 | `NetDevice` | 抽象 loopback、Ethernet 和 feature gated vsock 设备后端，通过 `PacketBuf` 转移报文所有权，并使用 crate 内地址类型和 `MonotonicInstant` 表达设备边界 |
 | `PacketBuf` | 保存报文数据、协议偏移、接口索引、包类型、校验状态和当前所有者 |
-| `link::wire` | 使用 `zerocopy` 校验和构造 Ethernet 与 Ethernet/IPv4 ARP 头部 |
+| `device::EthernetDevice` | 适配 NIC driver，完成 Ethernet 帧收发、链路状态和设备级 action 执行，不持有 ARP 状态机 |
+| `link::wire` | 使用 `zerocopy` 校验和构造 Ethernet 头部，并提供 Ethernet frame view |
+| `link::arp` | 使用 `zerocopy` 编解码 ARP/IPv4 头部，校验目标地址和本机地址集合，生成 ARP receive event |
+| `neighbor::NeighborResolver` | 持有每个设备的 neighbor cache、pending TX、探测重试、状态迁移和维护 deadline |
 | `stack::ipv4` | 使用 `etherparse` 校验和构造 IPv4 与 ICMPv4 头部，并执行输出分片 |
 | `stack::fragment` | 按源地址、目的地址、标识、协议和接口重组本地 IPv4 分片，并限制队列数量、内存和存活时间 |
 | `transport::udp` | 维护 UDP PCB registry、接收队列、bind 与 connect 状态、校验和、socket option、异步错误和 IPv4 收发 |
@@ -247,16 +252,18 @@ Service narrow mutation
 5. 单播包通过 `RouteTable::lookup` 选择最长前缀路由，处于 down 状态的设备不参与源地址和出接口选择。
 6. 带固定 `prefsrc` 的路由使用该地址；动态选源先按地址 scope 过滤，再优先选择其前缀覆盖 gateway 或直连 next-hop 的地址。
 7. crate 内 UDP 和 smoltcp raw IP 在提交报文前按对应出口 MTU 与 IP 长度字段上限检查长度，超限返回 `EMSGSIZE`。
-8. Ethernet 设备先查 ARP neighbor cache，命中后通过 `link::wire` 封装 Ethernet frame。
-9. `NUD_INCOMPLETE` 和 cache miss 把 IP 包及其实际源地址放入 `pending_tx`，ARP request 使用该源地址作为 SPA；设备维护 deadline 主动推进重试。
-10. 可重试的 TX 失败保留 pending 包和重试状态，硬错误记录后丢弃对应包；源地址从全局本机地址集合消失时，跨设备移除使用该源地址的 pending 包。
-11. ARP 报文的 target protocol address 命中全局本机地址集合时可被接收，包含其他接口的本地地址。
-12. `NUD_PERMANENT` 直接提供固定 MAC 映射，动态 ARP 学习不会覆盖该配置。
-13. link 进入 down 状态后，loopback 和 Ethernet 停止普通 IP 收发，Ethernet raw frame 发送返回 `ENETDOWN`。
+8. `EthernetDevice` 把 IPv4 next-hop 和 `PacketBuf` 交给本设备的 `NeighborResolver`，只执行 resolver 返回的发送或 ARP request action。
+9. `NeighborResolver` 在 `NUD_INCOMPLETE` 或 cache miss 时保存 IP 包及其实际源地址，ARP request action 使用该源地址作为 SPA；设备 poller 只负责执行 action 并提供维护时钟。
+10. `NeighborResolver` 把动态项的可达时间以 300 秒为基准，使用每个邻居的稳定散列分布到 `[150, 450)` 秒；可达时间到期后转入 `STALE` 并继续保留旧 MAC。
+11. 首个实际发包把 `STALE` 转入 `DELAY`，旧 MAC 立即用于发送；5 秒后进入 `PROBE`，继续使用旧 MAC 并每秒发送 ARP request，最多记录 6 次尝试。
+12. 6 次 ARP 尝试仍未收到更新时进入 `FAILED`，清理该 next-hop 的 pending 包并等待动态项回收；可重试的 TX 失败由 resolver 保留 pending 包和重试状态，硬错误由设备丢弃对应包。
+13. `link::arp` 负责 ARP 报文 checked parse 和本机目标校验，target protocol address 命中全局本机地址集合时可被接收，面向本机的 ARP reply 生成 `REACHABLE` observation，request 和其他非 host-directed 报文生成 `STALE` observation。
+14. 动态 MAC 更新受 1 秒锁定时间约束，`NUD_PERMANENT` 直接提供固定 MAC 映射，动态 ARP 学习不会覆盖该配置。
+15. link 进入 down 状态后，loopback 和 Ethernet 停止普通 IP 收发，Ethernet raw frame 发送返回 `ENETDOWN`。
 
 当前实现保留 smoltcp TCP、raw socket 和 IPv6 推进。UDP、IPv4 分片重组、输出分片和 ICMPv4 UDP 差错报告使用 crate 内实现。
-`PacketBuf`、`link::wire` 和 `stack::ipv4` 提供设备与 crate 内 IPv4/UDP 数据路径共用的报文表示和 parser/emitter。
-路由表和设备接口使用 `crate::ip` 地址类型，设备时间使用 `ktime::MonotonicInstant`。
+`PacketBuf`、`link::wire`、`link::arp` 和 `stack::ipv4` 提供设备与 crate 内 IPv4/UDP 数据路径共用的报文表示和 parser/emitter；`neighbor::NeighborResolver` 只依赖链路地址和时间，不依赖具体 NIC driver。
+路由表和设备接口使用 `crate::ip` 地址类型，设备时间使用 `ktime_types::MonotonicInstant`。
 `Router`、`Service` 和初始化入口在 smoltcp 兼容边界完成地址与时间转换。
 smoltcp 的单个 `Interface` 仍共享所有设备的最小 MTU，因此 TCP 和其他经该
 `Interface` 发送的流量受全局最小 MTU 的保守约束。
@@ -327,7 +334,7 @@ TCP、raw IP、IPv6 和 DNS 继续通过 smoltcp socket set 推进，协议推�
 
 ### 数据路径持有网络配置
 
-地址和路由由 `Router` 持有，链路属性和邻居表由对应 `NetDevice` 持有。
+地址和路由由 `Router` 持有，链路属性由对应 `NetDevice` 持有，邻居解析状态由设备组合的 `NeighborResolver` 持有。
 rtnetlink mutation 通过 `Service` 的窄接口直接修改 owner，link、address 和 route dump 分别使用
 `link_snapshots`、`ipv4_addr_snapshots` 和 `route_snapshot` 读取同一份状态。
 接口名称与 MTU 通过单个 `LinkConfigUpdate` 在校验完成后提交，避免多字段请求产生部分更新。
@@ -349,7 +356,7 @@ replace 已存在地址只确认其存在，不修改原 scope。动态选源按
 
 当前内部路由模型没有独立 local table 和 local route type。自动 local `/32` 仍以 main table、
 unicast type 和 loopback egress 表达，rtnetlink dump 对外呈现这组内部属性。
-Ethernet 邻居项显式区分待探测、动态可达和永久配置状态，避免把“尚未发出请求”和“请求已在途”压缩成同一表示。
+`NeighborResolver` 的 Ethernet 邻居项显式区分 `INCOMPLETE`、`REACHABLE`、`STALE`、`DELAY`、`PROBE`、`FAILED` 和永久配置状态，缓存查找、发包触发探测、探测失败和动态回收各自使用独立状态；`EthernetDevice` 通过 `NeighborAction` 与 resolver 交互，后续链路设备可以复用状态机和 pending 队列。
 
 ### 出口 MTU 的双层约束
 
@@ -404,9 +411,10 @@ Unix stream 的双向 channel 为两端保存独立的 `StreamEndpoint`，endpoi
 Ethernet 设备为未解析 next-hop 保留 `pending_tx`，每个 pending 包同时保留实际 IP 源地址。
 ARP request 使用对应包的源地址作为 SPA，ARP request 的 target 命中 Router 全局本机地址集合时均可回复。
 设备维护逻辑按 next-hop 推进 pending 包和主动重试 deadline，一个 unresolved next-hop
-不会阻塞其他已解析 next-hop。`WouldBlock`、`ResourceBusy` 等可重试 TX 失败保留原包，
-硬错误只移除对应包。源地址从全局本机地址集合消失时，地址配置更新会跨设备清理对应
-pending 包，避免后续使用失效 SPA。
+不会阻塞其他已解析 next-hop。单个 next-hop 最多进行 6 次 ARP request，失败时清理该
+next-hop 的全部 pending 包并保留 `FAILED` 回收 deadline。`WouldBlock`、`ResourceBusy`
+等可重试 TX 失败保留原包，硬错误只移除对应包。源地址从全局本机地址集合消失时，地址
+配置更新会跨设备清理对应 pending 包，避免后续使用失效 SPA。
 
 ### vsock-TIPC bridge
 

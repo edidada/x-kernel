@@ -20,6 +20,7 @@ pub use loopback::*;
 #[cfg(feature = "vsock")]
 pub use vsock::*;
 
+pub(crate) use crate::neighbor::{NeighborState, NeighborUpdate};
 use crate::{
     buf::PacketBuf,
     ip::{IpAddress, Ipv4Cidr},
@@ -82,19 +83,6 @@ pub(crate) struct LinkSnapshot {
     pub(crate) kind: LinkKind,
     pub(crate) hardware_addr: [u8; 6],
     pub(crate) broadcast_addr: [u8; 6],
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum NeighborState {
-    Incomplete,
-    Permanent { hardware_addr: [u8; 6] },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct NeighborUpdate {
-    pub(crate) dev: usize,
-    pub(crate) dst: IpAddress,
-    pub(crate) state: NeighborState,
 }
 
 /// Trait implemented by network device backends.
