@@ -155,7 +155,7 @@ impl EthernetDevice {
         size: usize,
         f: F,
         proto: wire::EtherType,
-    ) -> Result<Option<CapturedFrame>, DriverError>
+    ) -> DriverResult<Option<CapturedFrame>>
     where
         F: FnOnce(&mut [u8]),
     {
@@ -179,7 +179,7 @@ impl EthernetDevice {
         size: usize,
         f: F,
         proto: wire::EtherType,
-    ) -> Result<(), DriverError>
+    ) -> DriverResult<()>
     where
         F: FnOnce(&mut [u8]),
     {
@@ -196,7 +196,7 @@ impl EthernetDevice {
         ifindex: i32,
         dst: MacAddress,
         packet: &PacketBuf,
-    ) -> Result<(), DriverError> {
+    ) -> DriverResult<()> {
         if !self.is_link_up() {
             return Err(DriverError::BadState);
         }
