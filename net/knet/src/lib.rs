@@ -135,6 +135,7 @@ pub fn init_network() {
     SOCKET_SET.init_once(SocketSetWrapper::new());
     LISTEN_TABLE.init_once(ListenTable::new());
     udp::init_udp_registry();
+    poller::network_poller().start();
 
     if let Some(irq) = eth0_irq {
         EthernetDevice::spawn_rx_task(irq);
@@ -204,6 +205,9 @@ fn register_vsock_handle(handle: ClassDevice<VsockDeviceImpl>) {
     }
 }
 
+/// Assists one already scheduled network polling round from task context.
+///
+/// The call does not publish new work or wait for another executor.
 pub fn poll_interfaces() {
     poller::network_poller().assist_once();
 }

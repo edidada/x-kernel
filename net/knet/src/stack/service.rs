@@ -65,7 +65,7 @@ impl Wake for TimeoutWake {
 
     fn wake_by_ref(self: &Arc<Self>) {
         self.socket_waiters.as_ref().wake();
-        crate::poller::network_poller().schedule(crate::poller::PollReason::Timer);
+        crate::poller::network_poller().notify(crate::poller::PollReason::Timer);
     }
 }
 
@@ -103,7 +103,6 @@ impl Service {
     pub fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
         let device_timestamp = monotonic_time();
         let mut rx_packets = 0;
-        let mut rx_has_more = false;
         let mut rx_remaining = budget.rx_packets;
         let mut sockets = SOCKET_SET.inner.lock();
         let mut control_packets = self.control_batch.lock();
@@ -117,7 +116,6 @@ impl Service {
                 .min(RX_INGRESS_BATCH_PACKETS)
                 .min(router.ingress_capacity());
             if batch_budget == 0 {
-                rx_has_more = true;
                 break;
             }
             let drain =
@@ -140,7 +138,6 @@ impl Service {
                     warn!("Dropping network control packet: {}", err);
                 }
             }
-            rx_has_more = drain.has_more;
             if !drain.has_more || drain.work_done == 0 {
                 break;
             }
@@ -152,11 +149,14 @@ impl Service {
         let iface_changed = iface.poll(current, &mut *router, &mut sockets);
         let next_poll = iface.poll_at(current, &sockets);
         drop(iface);
+        let timer_has_more = has_immediate_timer_work(current, next_poll);
         self.update_poll_timeout(device_timestamp, next_poll);
         LISTEN_TABLE.wake_touched_acceptors(&mut sockets);
         drop(sockets);
 
         let ingress_has_more = router.has_pending_ingress();
+        let rx_has_more = router.has_immediate_rx_work();
+        let tx_capacity_before = router.available_tx_packet_slots();
         let (tx_packets, tx_has_more) =
             router.dispatch_budgeted(device_timestamp, budget.tx_packets);
         PollProgress {
@@ -165,7 +165,8 @@ impl Service {
             timer_events: usize::from(
                 budget.timer_events > 0 && iface_changed == PollResult::SocketStateChanged,
             ),
-            has_more: rx_has_more || ingress_has_more || tx_has_more,
+            tx_capacity_changed: router.available_tx_packet_slots() > tx_capacity_before,
+            has_more: rx_has_more || ingress_has_more || tx_has_more || timer_has_more,
         }
     }
 
@@ -290,6 +291,7 @@ impl Service {
 
     fn update_poll_timeout(&self, current: MonotonicInstant, next: Option<SmoltcpInstant>) {
         let mut timeout = self.timeout.lock();
+        let mut should_notify_timer = false;
         if let Some(next) = next {
             let deadline = from_smoltcp_instant(next);
             let should_reset = match timeout.deadline {
@@ -307,8 +309,7 @@ impl Service {
                 let mut context = Context::from_waker(&wake);
                 if future.as_mut().poll(&mut context).is_ready() {
                     timeout.deadline = None;
-                    self.timeout_poll.as_ref().wake();
-                    crate::poller::network_poller().schedule(crate::poller::PollReason::Timer);
+                    should_notify_timer = true;
                 } else {
                     timeout.future = Some(future);
                 }
@@ -316,6 +317,12 @@ impl Service {
         } else {
             timeout.future = None;
             timeout.deadline = None;
+        }
+        drop(timeout);
+
+        if should_notify_timer {
+            self.timeout_poll.as_ref().wake();
+            crate::poller::network_poller().notify(crate::poller::PollReason::Timer);
         }
     }
 
@@ -351,6 +358,10 @@ impl Service {
     }
 }
 
+fn has_immediate_timer_work(current: SmoltcpInstant, next_poll: Option<SmoltcpInstant>) -> bool {
+    next_poll.is_some_and(|deadline| deadline <= current)
+}
+
 fn output_ipv4_packet_count(
     router: &Router,
     dst_addr: &IpAddress,
@@ -383,7 +394,7 @@ fn output_ipv4_packet_count(
 
 #[cfg(unittest)]
 mod tests {
-    use unittest::def_test;
+    use unittest::{assert, def_test};
 
     use super::*;
 
@@ -404,5 +415,20 @@ mod tests {
             deadline.checked_duration_since(current),
             Some(TimeSpan::from_micros(2_500))
         );
+    }
+
+    #[def_test]
+    fn future_timer_is_not_immediate_work() {
+        let current = SmoltcpInstant::from_millis(10);
+        let future = SmoltcpInstant::from_millis(11);
+
+        assert!(!has_immediate_timer_work(current, Some(future)));
+    }
+
+    #[def_test]
+    fn due_timer_is_immediate_work() {
+        let current = SmoltcpInstant::from_millis(10);
+
+        assert!(has_immediate_timer_work(current, Some(current)));
     }
 }

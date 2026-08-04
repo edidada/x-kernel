@@ -120,6 +120,10 @@ impl Router {
         self.data_tx_queue.len() < DATA_TX_QUEUE_SIZE
     }
 
+    pub(crate) fn available_tx_packet_slots(&self) -> usize {
+        DATA_TX_QUEUE_SIZE.saturating_sub(self.data_tx_queue.len())
+    }
+
     pub fn can_enqueue_tx_packets(&self, packet_count: usize) -> bool {
         self.data_tx_queue
             .len()
@@ -250,7 +254,7 @@ impl Router {
         if budget == 0 || self.devices.is_empty() {
             return RxDrain {
                 work_done: 0,
-                has_more: false,
+                has_more: self.has_immediate_rx_work(),
             };
         }
 
@@ -268,7 +272,7 @@ impl Router {
                     self.next_rx_device = next_device_index(dev_index, device_count);
                     return RxDrain {
                         work_done,
-                        has_more: true,
+                        has_more: self.has_immediate_rx_work(),
                     };
                 }
 
@@ -468,6 +472,10 @@ impl Router {
         !self.control_tx_queue.is_empty() || !self.data_tx_queue.is_empty()
     }
 
+    pub(crate) fn has_immediate_rx_work(&self) -> bool {
+        self.devices.iter().any(|device| device.has_rx_work())
+    }
+
     fn adjust_rx_device_cursor_after_remove(&mut self, removed_index: usize) {
         if self.devices.is_empty() {
             self.next_rx_device = 0;
@@ -486,6 +494,78 @@ fn next_device_index(dev_index: usize, device_count: usize) -> usize {
 
 fn tx_packet_buf(packet: Vec<u8>) -> PacketBuf {
     PacketBuf::from_ip_packet_vec(0, packet, PacketOwner::Ipv4Stack)
+}
+
+#[cfg(unittest)]
+mod tests {
+    use alloc::{boxed::Box, vec, vec::Vec};
+
+    use khal::time::TimeValue;
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::*;
+    use crate::device::LoopbackDevice;
+
+    fn router_with_ready_loopback_packet() -> Router {
+        let mut router = Router::new();
+        let loopback = router.add_device(Box::new(LoopbackDevice::new()));
+        let packet = PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::Ipv4Stack);
+        let _ = router.devices[loopback].send_ip_packet(
+            1,
+            IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)),
+            packet,
+            TimeValue::ZERO,
+        );
+        router
+    }
+
+    #[def_test]
+    fn exact_rx_budget_does_not_report_empty_device() {
+        let mut router = router_with_ready_loopback_packet();
+        let mut packets = Vec::new();
+
+        let drain = router.drain_rx_budgeted_into(TimeValue::ZERO, 1, &mut packets);
+
+        assert_eq!(drain.work_done, 1);
+        assert!(!drain.has_more);
+    }
+
+    #[def_test]
+    fn zero_rx_budget_reports_ready_device() {
+        let mut router = router_with_ready_loopback_packet();
+        let mut packets = Vec::new();
+
+        let drain = router.drain_rx_budgeted_into(TimeValue::ZERO, 0, &mut packets);
+
+        assert_eq!(drain.work_done, 0);
+        assert!(drain.has_more);
+    }
+
+    #[def_test]
+    fn control_dispatch_does_not_free_data_tx_capacity() {
+        let mut router = Router::new();
+        router
+            .control_tx_queue
+            .push_back(tx_packet_buf(vec![0; 20]));
+        let capacity_before = router.available_tx_packet_slots();
+
+        let (work_done, _) = router.dispatch_budgeted(TimeValue::ZERO, 1);
+
+        assert_eq!(work_done, 1);
+        assert_eq!(router.available_tx_packet_slots(), capacity_before);
+    }
+
+    #[def_test]
+    fn data_dispatch_frees_data_tx_capacity() {
+        let mut router = Router::new();
+        router.data_tx_queue.push_back(tx_packet_buf(vec![0; 20]));
+        let capacity_before = router.available_tx_packet_slots();
+
+        let (work_done, _) = router.dispatch_budgeted(TimeValue::ZERO, 1);
+
+        assert_eq!(work_done, 1);
+        assert_eq!(router.available_tx_packet_slots(), capacity_before + 1);
+    }
 }
 
 pub struct TxToken<'a>(&'a mut VecDeque<PacketBuf>);

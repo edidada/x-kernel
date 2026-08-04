@@ -28,6 +28,7 @@ use crate::{
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     poll_interfaces,
+    poller::{PollReason, network_poller},
 };
 
 pub(crate) fn new_raw_socket(
@@ -204,7 +205,7 @@ impl SocketOps for RawSocket {
         self.general
             .send_poller_with_nonblocking(self, options.flags.nonblocking(), || {
                 poll_interfaces();
-                self.with_smol_socket(|socket| {
+                let written = self.with_smol_socket(|socket| {
                     if !socket.can_send() {
                         return Err(KError::WouldBlock);
                     }
@@ -285,7 +286,10 @@ impl SocketOps for RawSocket {
 
                     let written = src.read(&mut buf[header_len..])?;
                     Ok(written)
-                })
+                })?;
+                network_poller().notify(PollReason::Tx);
+                poll_interfaces();
+                Ok(written)
             })
     }
 

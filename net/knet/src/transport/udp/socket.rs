@@ -24,6 +24,7 @@ use crate::{
     ipv4,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     poll_interfaces,
+    poller::{PollReason, network_poller},
     udp_err::QueuedUdpError,
 };
 
@@ -168,6 +169,7 @@ impl UdpSocket {
                         self.write_datagram(packet, remote_endpoint, source_addr, dont_fragment)
                     },
                 )?;
+                network_poller().notify(PollReason::Tx);
                 poll_interfaces();
                 Ok(payload_len)
             })

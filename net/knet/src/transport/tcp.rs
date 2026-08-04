@@ -241,11 +241,13 @@ impl Configurable for TcpSocket {
                 self.with_smol_socket(|socket| {
                     socket.set_nagle_enabled(!no_delay);
                 });
+                network_poller().notify(PollReason::Tx);
             }
             O::KeepAlive(keep_alive) => {
                 self.with_smol_socket(|socket| {
                     socket.set_keep_alive(keep_alive.then(|| Duration::from_secs(75)));
                 });
+                network_poller().notify(PollReason::Timer);
             }
             _ => return Ok(OptionHandled::No),
         }
@@ -348,6 +350,8 @@ impl SocketOps for TcpSocket {
                     .set_device_mask(SERVICE.smoltcp_device_mask_for_addr(&remote_endpoint.addr));
                 Ok(())
             })?;
+
+        network_poller().notify(PollReason::Tx);
 
         // Hack: let the server listen
         ktask::yield_now();
@@ -454,7 +458,7 @@ impl SocketOps for TcpSocket {
             match result {
                 Ok(0) => break,
                 Ok(len) => {
-                    network_poller().schedule(PollReason::Assist);
+                    network_poller().notify(PollReason::Tx);
                     total_sent += len;
                 }
                 Err(_) if total_sent > 0 => return Ok(total_sent),
@@ -469,33 +473,38 @@ impl SocketOps for TcpSocket {
         if self.rx_closed.load(Ordering::Acquire) {
             return Err(KError::NotConnected);
         }
-        self.general
-            .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
-                poll_interfaces();
-                self.with_smol_socket(|socket| {
-                    if socket.can_recv() {
-                        if options.flags.contains(RecvFlags::PEEK) {
-                            dst.write(
+        let received =
+            self.general
+                .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
+                    poll_interfaces();
+                    self.with_smol_socket(|socket| {
+                        if socket.can_recv() {
+                            if options.flags.contains(RecvFlags::PEEK) {
+                                dst.write(
+                                    socket
+                                        .peek(dst.remaining_mut())
+                                        .map_err(|_| k_err_type!(NotConnected, "not connected?"))?,
+                                )
+                            } else {
                                 socket
-                                    .peek(dst.remaining_mut())
-                                    .map_err(|_| k_err_type!(NotConnected, "not connected?"))?,
-                            )
+                                    .recv(|buf| {
+                                        let result = dst.write(buf);
+                                        let len = result.unwrap_or(0);
+                                        (len, result)
+                                    })
+                                    .map_err(|_| k_err_type!(NotConnected, "not connected?"))?
+                            }
+                        } else if !socket.may_recv() {
+                            Ok(0)
                         } else {
-                            socket
-                                .recv(|buf| {
-                                    let result = dst.write(buf);
-                                    let len = result.unwrap_or(0);
-                                    (len, result)
-                                })
-                                .map_err(|_| k_err_type!(NotConnected, "not connected?"))?
+                            Err(KError::WouldBlock)
                         }
-                    } else if !socket.may_recv() {
-                        Ok(0)
-                    } else {
-                        Err(KError::WouldBlock)
-                    }
-                })
-            })
+                    })
+                })?;
+        if received > 0 && !options.flags.contains(RecvFlags::PEEK) {
+            network_poller().notify(PollReason::Tx);
+        }
+        Ok(received)
     }
 
     fn local_addr(&self) -> KResult<SocketAddrEx> {
@@ -535,6 +544,7 @@ impl SocketOps for TcpSocket {
                 self.with_smol_socket(|socket| {
                     socket.close();
                 });
+                network_poller().notify(PollReason::Tx);
             }
             if how == Shutdown::Both {
                 self.state.set(State::Closed);
@@ -580,7 +590,8 @@ impl Pollable for TcpSocket {
         events: IoEvents,
     ) -> Result<(), PollRegisterError> {
         if events.contains(IoEvents::OUT) {
-            self.general.register_tx_waker(context)?;
+            let source_waker = self.general.register_tx_waker(context)?;
+            self.with_smol_socket(|socket| socket.register_send_waker(&source_waker));
         } else if events.intersects(IoEvents::IN | IoEvents::RDHUP) {
             self.general.register_rx_waker(context)?;
         }
