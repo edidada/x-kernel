@@ -88,6 +88,14 @@ enum Cmd {
         r#def: Option<String>,
     },
 
+    /// 机械查 provider crate 的 OS-agnostic 红线(Cargo.toml 不得依赖 k*/of)。fail-closed。
+    ///
+    /// 反例:只查依赖红线,不查 trait 完整性/注册表可注入(那是设计判断,走需求 issue)。
+    CheckProviderCrate {
+        /// provider crate 的 Cargo.toml 路径。
+        path: PathBuf,
+    },
+
     /// 在一份 Linux 源码(文件/目录)里扫出用到的、且当前是缺口的子系统符号。
     ///
     /// 反例:scan 不改任何文件;它只提示「这些符号对应的缺口必须在报告里写明」。

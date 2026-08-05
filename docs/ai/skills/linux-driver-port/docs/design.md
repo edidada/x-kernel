@@ -217,7 +217,9 @@ multi-provider"的滑坡。五判据(物理基础设施 / 多生产者 / 消费�
 收益>成本)定义在 provider-boundary.json。判据是判断而非机械检查,故:
 
 - `requirements gen` 渲染判据表 + 该 gap 的已记录评估(✓/✗/?),未记录留 `?` + ⚠ 提示。
+- provider 类 issue 还渲染「实现质量清单(Stage 2)」节:三 cross-kernel 坑(注册键/trait 完整性/注册表可注入),从 clk 实证归纳。
 - `check-data` 对 provider 类 gap 无判据记录 → WARN(非 error,因为留空≠错,只=没论证)。
+- `check-provider-crate <Cargo.toml>` 机械查红线:声称 OS-agnostic 的 provider crate 不得依赖 k*/of。这是三坑里唯一机械可查的(其余两条是设计判断)。
 
 判据评估(per_gap_assessment)采用**渐进填充**(b 选项):现有分类是凭直觉的,未逐条
 论证;clk 已论证(全 pass,因 clk-subsystem.md 实际写过),其余 provider gap 留空待填。

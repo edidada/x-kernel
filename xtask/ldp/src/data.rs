@@ -206,4 +206,8 @@ pub struct ProviderBoundary {
     /// verdict 为 "pass"/"fail"/"unknown"。保留为 Value 做轻量查询。
     #[serde(default)]
     pub per_gap_assessment: serde_json::Value,
+    /// Stage 2 实现质量坑(firmware-specific-key/incomplete-trait/global-static-registry)
+    /// + redline。保留为 Value 做 light 渲染。与 criteria(Stage 1)分开。
+    #[serde(default)]
+    pub impl_pitfalls: serde_json::Value,
 }

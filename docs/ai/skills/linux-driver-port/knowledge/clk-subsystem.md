@@ -5,15 +5,18 @@ x-kernel 已落地 **Tier-0** 的中性时钟框架 `drivers/clk/`，外加 RK35
 ## 分层（平台中性是关键）
 
 ```text
-drivers/clk/                              中性框架（所有平台共用，照搬 device-res 四件套）
-  ClkProvider trait                       get_rate(specifier) -> Option<u64>
-  注册表                                  phandle -> Arc<dyn ClkProvider>（多 provider）
+drivers/clk/                              中性框架（所有平台共用；**OS-agnostic**，不依赖任何 k* / of crate）
+  ClkProvider trait                       get_rate + enable/disable/set_rate/is_enabled（Tier 0 给默认实现，锁死形状）
+  ClkRegistry（可注入）+ register_provider   name -> Arc<dyn ClkProvider>（多 provider；core-only 自旋锁，无 kspin）
   Clk 句柄 + clk::devm_clk_get(device, name)  消费者 API（device-res 形式）
-  FixedClockProvider                      compatible="fixed-clock"（跨平台标准 provider）
+  FixedClockProvider                      纯实现（rate 固定，无 DT 依赖）
+drivers/kdriver/src/clk_fixed.rs         register_fixed_clocks（DT 遍历在此，不进 clk crate）
 platforms/kplat-aarch64/.../scmi.rs       SoC/固件专属 provider（SCMI-over-SMC，AArch64 only）
 ```
 
-> 与 `device-res` 的关系：时钟和 MMIO/IRQ/DMA 一样走 **Desc + devm** 形式——总线把 `clocks`/`clock-names` 预解析成 `device_res::ClkDesc`（`ResourceDesc::Clock` 变体），驱动用 `clk::devm_clk_get(device, name)` 取。唯一区别：MMIO/IRQ/DMA 是**单全局** provider（`Once<&dyn>`），而时钟有**多个**生产者（CRU、SCMI、每个晶振……），所以 clk 注册表是 **phandle 键的多 provider 表**（`SpinNoIrq<Vec<(u32, Arc<dyn ClkProvider>)>>`）。
+> **OS-agnostic 红线**：`drivers/clk/` 的 `Cargo.toml` 不得依赖任何 `k*` crate（kspin 等）或 `of`（DT）crate——这些是固件描述/宿主锁 concern，由上层（kdriver 的 DT 遍历、bus 层的 DT 解析）承担。这样 clk 能被任意内核/固件后端复用。中性用 **provider name**（DT 路径=节点名去 `@unit`）作注册键，而非 phandle（phandle 是 DT 特有，ACPI/PCI 平台没有）。
+
+> 与 `device-res` 的关系：时钟和 MMIO/IRQ/DMA 一样走 **Desc + devm** 形式——总线把 `clocks`/`clock-names` 预解析成 `device_res::ClkDesc`（`ResourceDesc::Clock` 变体，带 `provider: &'static str`），驱动用 `clk::devm_clk_get(device, name)` 取。与 MMIO/IRQ/DMA 的区别：后者是**单全局** provider，而时钟有**多个**生产者（CRU、SCMI、每个晶振……），所以 clk 注册表是 **name 键的多 provider 表**，且做成可注入 `ClkRegistry`（进程全局默认 + 测试可自建，不再需 `reset_registry`）。
 
 判定一条东西放哪层：
 - 跟 SoC 寄存器/PLL/分频表绑死 → **按平台门控**的 SoC 层（如 RK3588 CRU、`kplat-aarch64/.../scmi.rs`）。
@@ -32,9 +35,9 @@ let bus_hz = clk::devm_clk_get(device.as_ref(), "ciu")   // ResResult<Clk>
     .unwrap_or(FALLBACK_HZ) as u32;
 ```
 
-- `devm_clk_get` 在设备的 `resources()` 里按名找 `ResourceDesc::Clock`，拿 phandle 查 clk 的多 provider 注册表，返回 `Clk` 句柄；`.rate()` 查速率。找不到该时钟 → `Err(InvalidResource)`；没注册 provider → `Err(NoProvider)`。
-- **驱动不再需要 DT 节点**——没有 `find_node_by_reg_base` 之类的 hack（早期版本有，随 device-res 化已移除）。
-- 注册时机：`kdriver::init_drivers()` 里 `clk::register_fixed_clocks()`；SoC provider 在平台 init（kplat `early_driver_init`）注册。都在消费者 probe 之前。
+- `devm_clk_get` 在设备的 `resources()` 里按名找 `ResourceDesc::Clock`，拿 `desc.provider`（OS 中性 name）查 clk 的多 provider 注册表，返回 `Clk` 句柄；`.rate()` 查速率。找不到该时钟 → `Err(InvalidResource)`；没注册 provider → `Err(NoProvider)`。
+- **驱动不碰 DT，也不需要 provider 的 phandle**——phandle→name 的翻译在总线层（`khal::firmware::devices` 解析 `clocks` 时用 `of::node_name_key` 去后缀）一次性完成。没有 `find_node_by_reg_base` 之类的 hack。
+- 注册时机：`kdriver::init_drivers()` 里 `clk_fixed::register_fixed_clocks()`；SoC provider（SCMI）在平台 init（kplat `early_driver_init`）用 `of::node_name_key(protocol.name)` 注册。都在消费者 probe 之前。
 
 样例：[kdriver/.../block/sdmmc.rs](../../../../../drivers/kdriver/src/driver_registry/block/sdmmc.rs) 的 `resolve_ciu_rate`。
 
@@ -89,7 +92,7 @@ sdmmc 的 `ciu` 是 SCMI 时钟（DT `clocks = <&scmi_clk 9>`，`#clock-cells=<1
 
 ## 报告口径
 
-> `clk-rate` — Tier-0 框架已落地（`drivers/clk/`）：`clk::devm_clk_get(device,"ciu")` 走 phandle 键多 provider 注册表（时钟经总线预解析为 `ResourceDesc::Clock`，驱动不碰 DT）。RK3588 sdmmc 的 `ciu` 经 SCMI provider 查询（`CLOCK_RATE_GET`），返回 ciu 参考时钟（~49.5 MHz），dw_mshc 直接用作 `bus_hz`。曾把 SCMI 消息头位段记反（`message_id`/`token`），VERSION 能通但 RATE_GET 报 `PROTOCOL_ERROR`、被误判成"固件 stub"——实为 header 位段 bug（`message_id[7:0]`、`token[27:18]`），改正后 `ciu` 解析到真值。详见上文"RK3588 SCMI 实测"。
+> `clk-rate` — Tier-0 框架已落地（`drivers/clk/`）：`clk::devm_clk_get(device,"ciu")` 走 **name 键**多 provider 注册表（时钟经总线预解析为 `ResourceDesc::Clock`，provider name 由总线从 DT 节点名去 `@unit` 得出，驱动/clk crate 都不碰 phandle）。RK3588 sdmmc 的 `ciu` 经 SCMI provider 查询（`CLOCK_RATE_GET`），返回 ciu 参考时钟（~49.5 MHz），dw_mshc 直接用作 `bus_hz`。曾把 SCMI 消息头位段记反（`message_id`/`token`），VERSION 能通但 RATE_GET 报 `PROTOCOL_ERROR`、被误判成"固件 stub"——实为 header 位段 bug（`message_id[7:0]`、`token[27:18]`），改正后 `ciu` 解析到真值。详见上文"RK3588 SCMI 实测"。
 
 ## 位段守护（harness）
 

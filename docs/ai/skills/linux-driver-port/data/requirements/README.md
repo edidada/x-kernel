@@ -27,19 +27,21 @@ ldp requirements confirm <id> --status confirmed   # 人工确认
 
 新发现的缺口(gaps.json 未列)默认归 `framework`,标 `📝 proposed` 待人工归类。
 
-## Provider 判据(防 provider 泛滥)
+## Provider 判据 + 实现质量清单(防 provider 泛滥 + 半成品 OS-agnostic)
 
-provider 类 issue(multi-provider/single-provider)额外渲染「分类依据(provider 判据)」节,
-强制把"该不该抽 provider"从默认值变成必须逐条过的清单。五判据(物理基础设施 /
-多生产者 / 消费者泛化 / 契约跨内核稳定 / 收益>成本)定义在
-[`provider-boundary.json`](../provider-boundary.json)。
+provider 类 issue(multi-provider/single-provider)额外渲染两节:
 
-- **五条全 pass** → 值得抽 provider。
-- **任一 fail** → 改归类(改 gaps.json 的 infra_type,可能该是 subsystem-class 或 driver-missing)。
-- **未记录** → 全 `?` + ⚠ 提示;`ldp check-data` 也会 WARN。
+- **分类依据(provider 判据,Stage 1)**:五判据(物理基础设施 / 多生产者 / 消费者泛化 /
+  契约跨内核稳定 / 收益>成本)。五条全 pass → 值得抽。未记录留 `?`,`ldp check-data` WARN。
+- **实现质量清单(cross-kernel 坑,Stage 2)**:provider 已确认该抽后,避免「名义 OS-agnostic
+  实际被绑死」。三坑(从 clk 实证归纳):注册键用了固件描述特定物 / trait 只定当前 Tier /
+  注册表全局静态不可注入。其中「Cargo.toml 不得依赖 k*/of」是机械可查红线:
 
-判据评估(per_gap_assessment)**渐进填充**:clk 已论证(全 pass),其余 provider gap
-留空待填。填进 `data/provider-boundary.json` 的 `per_gap_assessment.<gap_id>` 后重新 gen。
+```bash
+ldp check-provider-crate drivers/clk/Cargo.toml   # 机械查 provider crate 的 OS-agnostic 红线
+```
+
+判据评估 + impl 坑定义在 [`provider-boundary.json`](../provider-boundary.json),渐进填充。
 
 ## 状态机
 

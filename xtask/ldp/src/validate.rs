@@ -262,6 +262,68 @@ pub fn scan_source(gaps: &Gaps, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// `ldp check-provider-crate <Cargo.toml>`:机械查 provider crate 的 OS-agnostic 红线。
+///
+/// provider-boundary.json 的 redline:声称 OS-agnostic 的 provider crate,Cargo.toml
+/// 不得依赖任何 `k*` crate(kspin/khal/...)或 `of`(DT)crate。这是 provider 三坑里
+/// 唯一机械可查的一条(其余两条是设计判断,走需求 issue 的实现质量清单)。
+///
+/// 判据:dep 名 == "of",或 dep 名以 `k` 开头且第二字符是小写字母(=k 前缀内核 crate)。
+/// 不误伤 smallvec/log/device_res/unittest 等。
+pub fn check_provider_crate(manifest: &Path) -> usize {
+    let raw = match std::fs::read_to_string(manifest) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: 读 {} 失败: {e}", manifest.display());
+            return 1;
+        }
+    };
+    let mut errors = 0usize;
+    let mut in_deps = false;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_deps = trimmed == "[dependencies]"
+                || trimmed == "[dev-dependencies]"
+                || (trimmed.starts_with("[target.") && trimmed.ends_with(".dependencies]"));
+            continue;
+        }
+        if !in_deps {
+            continue;
+        }
+        let Some(eq) = trimmed.find('=') else {
+            continue;
+        };
+        let dep = trimmed[..eq].trim();
+        let dep = dep.split('.').next().unwrap_or(dep).trim();
+        if dep.is_empty()
+            || !dep
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            continue;
+        }
+        let violates = dep == "of"
+            || (dep.starts_with('k') && dep.len() > 1 && dep.as_bytes()[1].is_ascii_lowercase());
+        if violates {
+            eprintln!(
+                "ERROR [provider-crate] {} 依赖 `{dep}` — 违反 OS-agnostic 红线(provider crate 不得依赖 k*/of)。",
+                manifest.display()
+            );
+            errors += 1;
+        }
+    }
+    if errors == 0 {
+        println!(
+            "✓ {} 无 k*/of 依赖(provider crate 的 OS-agnostic 红线满足)。",
+            manifest.display()
+        );
+    } else {
+        eprintln!("✗ {errors} 处违反红线(见上)。修法见 provider-boundary.json 的 impl_pitfalls。");
+    }
+    errors
+}
+
 fn collect_source_files(path: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<(), String> {
     if path.is_file() {
         if let Some(e) = path.extension()

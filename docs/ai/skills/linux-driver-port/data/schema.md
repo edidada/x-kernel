@@ -15,7 +15,7 @@
 | `gaps.json` | 结构化数据(经验知识库) | 缺失子系统清单,带 status 状态机 + 生效/失效治理 | 改 JSON → `ldp gen-doc` 重生成 md |
 | `bitfield-defs.json` | 结构化数据(经验知识库) | 协议/寄存器位段定义,附 GENMASK 依据 + 已知错误布局 | 改 JSON |
 | `golden/dwcmshc.json` | 结构化数据(回归基线) | dwcmshc walkthrough 的期望映射/缺口/位段断言 | 改 JSON → `ldp golden` 验证 |
-| `provider-boundary.json` | 政策(provider 判据) | 五判据 + A/B/concrete 三分 + 边界表 + per-gap 判据评估 | 改 JSON → requirements gen 渲染判据节;check-data WARN nudge |
+| `provider-boundary.json` | 政策(provider 判据 + impl 坑) | 五判据(Stage 1 该不该抽)+ impl_pitfalls(Stage 2 怎么抽干净)+ A/B/concrete 三分 + 边界表 + per-gap 评估 | 改 JSON → requirements gen 渲染;check-data/check-provider-crate 查 |
 | `trace/*.jsonl` | 不可变轨迹(Ch8 在线循环) | 每次 port 撞到的缺口/未映射 API/位段坑 | `ldp trace add`(append-only,无 edit/delete) |
 | `staging/candidates.json` | 候选区(Ch8 离线循环) | 轨迹聚合的候选条目,带 support_count | `ldp staging aggregate` 生成;`promote` 标状态 |
 | `requirements/*.md` + `index.json` | 需求 issue(可决策) | 每个缺口一个需求 md + 状态索引 | `ldp requirements gen` 生成;`confirm` 改状态 |

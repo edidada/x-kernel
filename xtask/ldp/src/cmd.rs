@@ -26,6 +26,12 @@ pub fn help() {
     println!("                           不验位段逻辑;位段用 check-bitfields。");
     println!("  check-bitfields          位段自洽 + 揪 false-pass(SCMI VERSION 类 bug)。");
     println!("                           不碰源码路径;数据完整性用 check-data。");
+    println!(
+        "  check-provider-crate <f> 机械查 provider crate 的 OS-agnostic 红线(不得依赖 k*/of)。"
+    );
+    println!(
+        "                           只查依赖红线;trait 完整性/注册表可注入是设计判断,走需求 issue。"
+    );
     println!("  scan <path>              扫一份 Linux 源码里用到的缺口符号。只提示不改文件。");
     println!("  gen-doc                  从 data/*.json 生成 knowledge/*.md(数据为源)。");
     println!("                           不改 JSON;真相源在 JSON。");
@@ -81,6 +87,14 @@ pub fn run(cmd: Cmd) -> ExitCode {
             0
         }),
         Cmd::CheckData => with_data(|api, gaps, bf| validate::check_data(&api, &gaps, &bf)),
+        Cmd::CheckProviderCrate { path } => {
+            let n = validate::check_provider_crate(&path);
+            if n == 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
         Cmd::CheckBitfields { r#def } => with_data(move |_api, _gaps, bf| {
             let target = match r#def.as_ref() {
                 Some(name) => {

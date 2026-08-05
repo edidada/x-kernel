@@ -475,6 +475,39 @@ fn provider_criteria_section(pb: &crate::data::ProviderBoundary, gap_id: &str) -
         "- B 类(device class 契约):纵向「是什么设备」,每内核重写数据面,**不是 provider**。\n",
     );
     s.push_str("- concrete(具体驱动):寄存器层复用 + 数据面重写,**不是 provider**。\n\n");
+    s.push_str(&impl_pitfalls_section(pb));
+    s
+}
+
+/// 生成「实现质量清单(cross-kernel 坑)」节。provider 类 issue 在分类判据之后渲染。
+/// 这是 Stage 2:provider 已确认该抽之后,怎么避免「半成品 OS-agnostic」。
+/// 三坑从 clk 实证归纳(firmware-specific-key/incomplete-trait/global-static-registry)。
+fn impl_pitfalls_section(pb: &crate::data::ProviderBoundary) -> String {
+    let mut s = String::new();
+    let Some(pits) = pb.impl_pitfalls.get("pits").and_then(|v| v.as_array()) else {
+        return s; // 无 pits 定义则不渲染
+    };
+    s.push_str("## 实现质量清单(cross-kernel 坑,Stage 2)\n\n");
+    s.push_str("provider 已确认该抽。**实现时逐条对照,避免「名义 OS-agnostic 实际被绑死」**:\n\n");
+    s.push_str("| 坑 | 错误做法 | 正确做法 | 机械查? |\n");
+    s.push_str("|----|---------|---------|--------|\n");
+    for p in pits {
+        let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+        let wrong = p.get("wrong").and_then(|v| v.as_str()).unwrap_or("");
+        let right = p.get("right").and_then(|v| v.as_str()).unwrap_or("");
+        let check = p.get("check").and_then(|v| v.as_str()).unwrap_or("人工");
+        s.push_str(&format!("| **{name}** | {wrong} | {right} | {check} |\n"));
+    }
+    s.push('\n');
+    if let Some(redline) = pb.impl_pitfalls.get("redline") {
+        let rule = redline.get("rule").and_then(|v| v.as_str()).unwrap_or("");
+        let cmd = redline
+            .get("cmd")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ldp check-provider-crate <Cargo.toml>");
+        s.push_str(&format!("> 🔴 红线(机械可查):{rule}\n>   `{cmd}`\n\n"));
+    }
+    s.push_str("三坑从 clk 实证归纳(详见 `data/provider-boundary.json` 的 impl_pitfalls)。\n\n");
     s
 }
 
