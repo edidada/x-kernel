@@ -1,0 +1,82 @@
+{
+  "$comment": "Provider 边界政策(判据 + A/B/concrete 三分 + per-gap 评估记录)。与 gaps.json 分离:gaps.json 存粗分类(infra_type),本文件存「为什么是 provider」的细判据 + 边界表。判据来自对 provider 滑坡的反模式分析。per-gap 评估留空(渐进填充,b 选项):现有分类是凭直觉的,未逐条论证——WARN nudge 提醒补,不阻塞。",
+  "criteria": [
+    {
+      "id": "physical-infra",
+      "name": "物理基础设施",
+      "question": "是 SoC 物理性服务设施(供时钟/供电/引脚/映射),物理存在?",
+      "pass_means": "倾向 provider(A 类能力)",
+      "fail_means": "具体设备 → 不是 provider"
+    },
+    {
+      "id": "multi-producer",
+      "name": "多生产者",
+      "question": "该能力有 ≥2 个独立来源,各管自己的命名空间?",
+      "pass_means": "多 provider 注册表",
+      "fail_means": "单一来源 → 直接写具体类型,不抽 provider"
+    },
+    {
+      "id": "consumer-generic",
+      "name": "消费者泛化",
+      "question": "消费者写「我要这个能力」,不关心是谁提供的(按名字/id 取)?",
+      "pass_means": "consumer API 走 device-res",
+      "fail_means": "消费者绑定具体实例 → device class(B 类),不是 provider"
+    },
+    {
+      "id": "contract-cross-kernel",
+      "name": "契约跨内核稳定",
+      "question": "能力语义在 Linux/RTOS/x-kernel 高度一致?",
+      "pass_means": "OS-agnostic 的领地",
+      "fail_means": "数据面语义分歧 → 不抽 provider,每内核重写"
+    },
+    {
+      "id": "cost-benefit",
+      "name": "收益 > 成本",
+      "question": "至少 N 个实现 × M 个消费者(provider trait 有足够复用面)?",
+      "pass_means": "值得抽",
+      "fail_means": "1×1 纯样板成本 → 不抽"
+    }
+  ],
+  "classification": {
+    "A_provider_capability": {
+      "desc": "横向「我能提供什么能力」,多个 provider 各提供一部分,驱动按名字/id 消费。OS-agnostic 的目标:换内核,能力获取方式不变。",
+      "examples": ["clk", "regulator", "gpio", "pinctrl", "phy", "regmap", "DMA", "MMIO", "IRQ"],
+      "infra_types": ["multi-provider", "single-provider"]
+    },
+    "B_device_class_contract": {
+      "desc": "纵向「我是什么设备」,一个驱动实现它,上层子系统消费它。消费者绑定具体实例。数据面契约(buffer/所有权/零拷贝)跨内核根本不同,强行抽 provider 反而失去复用——每内核还是要重写数据面。",
+      "examples": ["BlockDevice", "NetDevice", "CharDevice", "DisplayDevice"],
+      "infra_types": ["subsystem-class"]
+    },
+    "concrete_driver": {
+      "desc": "具体设备驱动。不是 provider,是寄存器层复用 + 数据面重写的实现。",
+      "examples": ["e1000", "ahci", "pl011", "dwcmshc"],
+      "infra_types": ["driver-missing"]
+    }
+  },
+  "boundary_table": [
+    {"thing": "MMIO / IRQ / DMA", "kind": "A 类基础能力", "is_provider": true, "cross_kernel": true, "note": "单全局 provider(device-res)"},
+    {"thing": "clk / regulator / gpio / pinctrl / phy / regmap", "kind": "A 类基础设施", "is_provider": true, "cross_kernel": true, "note": "phandle 键多 provider 注册表"},
+    {"thing": "iommu", "kind": "A 类服务", "is_provider": true, "cross_kernel": "partial", "note": "domain/映射生命周期语义跨内核差异大,provider 化覆盖子集"},
+    {"thing": "block / net / char / display 数据面", "kind": "B 类设备契约", "is_provider": false, "cross_kernel": false, "note": "每内核重写数据面;sk_buff/mbuf/MDL 模型根本不同"},
+    {"thing": "e1000 / ahci / pl011 等具体驱动", "kind": "具体设备实现", "is_provider": false, "cross_kernel": "partial", "note": "仅寄存器层可复用"},
+    {"thing": "VFS / sched / mm 等内核服务", "kind": "内核服务", "is_provider": false, "cross_kernel": false, "note": "每内核独有"}
+  ],
+  "grey_areas": [
+    {"thing": "iommu attach", "verdict": "值得抽 provider", "caveat": "语义不完整(domain/映射生命周期跨内核差异大),需标注「provider 化覆盖子集」"},
+    {"thing": "gpio", "verdict": "倾向抽 provider", "caveat": "和 pinctrl 边界模糊;既是基础设施(pinctrl 近亲)又常被当简单设备(LED/按键)"},
+    {"thing": "firmware request (request_firmware)", "verdict": "倾向不抽", "caveat": "加载途径(sysfs/initramfs/EFI/网络)差异极大,Linux 自己都没抽象干净;每内核各写"}
+  ],
+  "principle": "宁可先不抽,等出现 ≥2 个实现 × ≥2 个消费者的真实需求时再抽。早抽代价(trait 形状锁死、被迫破坏性变更)远大于晚抽代价(临时直接调用)。",
+  "per_gap_assessment": {
+    "$comment": "per-gap 五判据评估,渐进填充(b 选项)。留空 = 现有分类凭直觉,未逐条论证。check-data 对 provider 类 gap 无记录的 WARN nudge。格式:{ gap_id: { criterion_id: 'pass'|'fail'|'unknown', note?: '' } }",
+    "clk-framework": {
+      "physical-infra": "pass",
+      "multi-producer": "pass",
+      "consumer-generic": "pass",
+      "contract-cross-kernel": "pass",
+      "cost-benefit": "pass",
+      "note": "clk-subsystem.md 已论证:晶振物理存在、CRU/SCMI/fixed-clock 多 provider、devm_clk_get 按名取、get_rate/enable 语义通用、数十 provider×数十驱动。唯一已逐条论证的 gap。"
+    }
+  }
+}

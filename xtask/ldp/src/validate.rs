@@ -20,6 +20,7 @@ use crate::repo;
 pub fn check_data(api: &ApiMapping, gaps: &Gaps, bf: &BitfieldDefs) -> usize {
     let mut errors = 0usize;
     let mut no_source = 0usize;
+    let mut warnings = 0usize;
 
     // api-mapping:每条带 source 的,path 必须存在(铁律 2 数据化)。
     // 无 source 的(std 等价物如 Mutex/atomic/log/Box)不警告——它们是显然映射。
@@ -78,6 +79,24 @@ pub fn check_data(api: &ApiMapping, gaps: &Gaps, bf: &BitfieldDefs) -> usize {
         }
     }
 
+    // provider 边界 nudge(可选,不阻塞):provider 类 gap 在 provider-boundary.json
+    // 里无判据记录 → WARN。判据是判断,留空≠错,只=没论证(不 fail-closed)。
+    let pb = crate::repo::load_provider_boundary();
+    if let Ok(pb) = &pb {
+        for g in &gaps.subsystems {
+            if g.infra_type == "multi-provider" || g.infra_type == "single-provider" {
+                let has = pb.per_gap_assessment.get(&g.id).is_some();
+                if !has {
+                    eprintln!(
+                        "WARN  [provider-boundary] `{}` 是 `{}` 但无判据评估记录。填 data/provider-boundary.json 的 per_gap_assessment.{} 后重新 gen。",
+                        g.id, g.infra_type, g.id
+                    );
+                    warnings += 1;
+                }
+            }
+        }
+    }
+
     // bitfields:字段位段合法 + 不重叠(正确布局)。
     for def in &bf.defs {
         if let Err(e) = check_def_layout(def) {
@@ -87,8 +106,9 @@ pub fn check_data(api: &ApiMapping, gaps: &Gaps, bf: &BitfieldDefs) -> usize {
     }
 
     println!(
-        "check-data: {} 错误 (api={}, gaps={}, bitfields={}; 其中 {} 条 landed 映射无 source—多为 std 等价物,正常)",
+        "check-data: {} 错误, {} 警告 (api={}, gaps={}, bitfields={}; 其中 {} 条 landed 映射无 source—多为 std 等价物,正常;provider 判据缺失警告见上)",
         errors,
+        warnings,
         api.sections.iter().map(|s| s.rows.len()).sum::<usize>(),
         gaps.subsystems.len(),
         bf.defs.len(),

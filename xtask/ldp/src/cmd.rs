@@ -341,6 +341,13 @@ fn run_requirements(action: RequirementsAction) -> ExitCode {
                     return ExitCode::from(1);
                 }
             };
+            let pb = match repo::load_provider_boundary() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(1);
+                }
+            };
             let findings = match (from_scan, from_trace) {
                 (Some(path), None) => match requirements::findings_from_scan(&gaps, &path) {
                     Ok(f) => f,
@@ -369,7 +376,7 @@ fn run_requirements(action: RequirementsAction) -> ExitCode {
                 println!("未发现缺口(没有命中任何已知 gap 符号)。这份源码可能只用主干 API。");
                 return ExitCode::SUCCESS;
             }
-            match requirements::gen_issues(&gaps, &findings) {
+            match requirements::gen_issues(&gaps, &pb, &findings) {
                 Ok((_reqs, new, updated)) => {
                     println!(
                         "生成需求 issue:{} 个(新建 {}, 更新 {})。目录:{}",

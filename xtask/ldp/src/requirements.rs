@@ -242,6 +242,7 @@ fn issue_id(gap_id: &str, symbol: &str) -> String {
 /// 生成/更新需求 issue(幂等:已存在的 id 保留 status/confirmed_ts)。
 pub fn gen_issues(
     gaps: &Gaps,
+    pb: &crate::data::ProviderBoundary,
     findings: &[Finding],
 ) -> Result<(Vec<Requirement>, usize, usize), String> {
     let mut idx = load_index();
@@ -292,7 +293,7 @@ pub fn gen_issues(
             confirmed_ts,
             file,
         };
-        write_issue_md(&req, gap_meta.as_ref(), gaps, &f.note, &f.source)?;
+        write_issue_md(&req, gap_meta.as_ref(), gaps, pb, &f.note, &f.source)?;
         produced.push(req.clone());
         if is_new {
             new_count += 1;
@@ -320,6 +321,7 @@ fn write_issue_md(
     req: &Requirement,
     gap: Option<&GapSubsystem>,
     gaps: &Gaps,
+    pb: &crate::data::ProviderBoundary,
     finding_note: &str,
     source: &str,
 ) -> Result<(), String> {
@@ -394,6 +396,12 @@ fn write_issue_md(
         }
     }
 
+    // 分类依据(provider 判据):仅 provider 类 issue 显式应用五判据。
+    // 这是从「懒省事顺手标 provider」护坡的关键——让人在确认时逐条过判据。
+    if req.infra_type == "multi-provider" || req.infra_type == "single-provider" {
+        out.push_str(&provider_criteria_section(pb, &req.gap_id));
+    }
+
     // 核心价值:按 infra_type 给「建议实现路径」。
     out.push_str("## 建议实现路径\n\n");
     out.push_str(impl_path_template(&req.infra_type, gap));
@@ -416,6 +424,66 @@ fn write_issue_md(
     }
     std::fs::write(&path, out).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(())
+}
+
+/// 生成「分类依据(provider 判据)」节。provider 类 issue 专用。
+/// 列五判据 + 该 gap 的已记录评估(✓/✗/?)。未记录的留 unknown
+/// (b 选项:渐进填充)。把「该不该抽 provider」从默认值变成必须逐条过的清单。
+fn provider_criteria_section(pb: &crate::data::ProviderBoundary, gap_id: &str) -> String {
+    let mut s = String::new();
+    s.push_str("## 分类依据(provider 判据)\n\n");
+    s.push_str("该缺口被归为 provider 类。在确认前,请逐条核对判据——");
+    s.push_str(
+        "**五条全 pass 才值得抽 provider;任一 fail → 改归类(改 gaps.json 的 infra_type)。**\n\n",
+    );
+    s.push_str("| 判据 | 问题 | 本 gap 评估 |\n");
+    s.push_str("|------|------|------------|\n");
+    let assessment = if !gap_id.is_empty() {
+        pb.per_gap_assessment.get(gap_id)
+    } else {
+        None
+    };
+    for c in &pb.criteria {
+        let verdict_cell = assessment
+            .and_then(|a| a.get(&c.id))
+            .and_then(|v| v.as_str())
+            .map(render_verdict)
+            .unwrap_or_else(|| "? 待评估".to_string());
+        s.push_str(&format!(
+            "| **{}** | {} | {} |\n",
+            c.name, c.question, verdict_cell
+        ));
+    }
+    s.push('\n');
+    // 已记录的 note。
+    if let Some(note) = assessment
+        .and_then(|a| a.get("note"))
+        .and_then(|v| v.as_str())
+    {
+        s.push_str(&format!("> 已记录论证:{}\n\n", note));
+    } else {
+        s.push_str("> ⚠ 未逐条论证(默认归类)。请据实填写 `data/provider-boundary.json` 的 ");
+        s.push_str(&format!(
+            "`per_gap_assessment.{gap_id}` 后重新 `ldp requirements gen`。\n\n"
+        ));
+    }
+    s.push_str("判据参考(完整边界表 + A/B/concrete 三分见 `data/provider-boundary.json`):\n");
+    s.push_str(
+        "- A 类(provider 能力):横向「提供什么能力」,多 provider × 多消费者,OS-agnostic 目标。\n",
+    );
+    s.push_str(
+        "- B 类(device class 契约):纵向「是什么设备」,每内核重写数据面,**不是 provider**。\n",
+    );
+    s.push_str("- concrete(具体驱动):寄存器层复用 + 数据面重写,**不是 provider**。\n\n");
+    s
+}
+
+fn render_verdict(v: &str) -> String {
+    match v {
+        "pass" => "✓ pass".to_string(),
+        "fail" => "✗ fail(改归类!)".to_string(),
+        _ => "? 待评估".to_string(),
+    }
 }
 
 /// 按 infra_type 给实现路径模板。

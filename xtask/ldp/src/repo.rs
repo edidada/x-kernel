@@ -61,6 +61,12 @@ pub fn load_gaps() -> Result<Gaps, String> {
 pub fn load_bitfields() -> Result<BitfieldDefs, String> {
     read_json(&bitfield_path())
 }
+pub fn provider_boundary_path() -> PathBuf {
+    data_dir().join("provider-boundary.json")
+}
+pub fn load_provider_boundary() -> Result<crate::data::ProviderBoundary, String> {
+    read_json(&provider_boundary_path())
+}
 
 /// 仓库根下某个相对路径是否存在(目录或文件)。
 pub fn repo_path_exists(rel: &str) -> bool {

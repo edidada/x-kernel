@@ -32,6 +32,7 @@ description: >-
 | (数据/文档一致性) | — | `ldp golden`(walkthrough 断言对照数据)+ `ldp gen-doc`(md 由 JSON 生成) |
 | (经验沉淀,Ch8) | — | `ldp trace`(记轨迹)+ `staging`(≥2 支持才发布,不污染正式库) |
 | (需求决策) | — | `ldp requirements`(缺口→分类→需求 issue,人工确认后再移植) |
+| (provider 边界) | — | provider 类 issue 渲染五判据 + check-data WARN nudge(防 provider 泛滥) |
 
 > 铁律 3(RAII)和 5(规范)由 `code-guidelines` / `build-workflow` 兜底,不在 ldp 范围。
 

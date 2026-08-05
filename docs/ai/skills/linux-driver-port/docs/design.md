@@ -209,6 +209,25 @@ DeviceKind,单纯驱动缺失直接写)。需求 issue 按分类给模板,让人
 安全边界(与 staging 一致):`gen` 不改 gaps.json;`confirm` 才改状态;终态保护
 (landed/rejected 拒绝重复变更);幂等(同 gap_id+symbol 重新 gen 保留 status)。
 
+### Provider 边界(provider-boundary.json)
+
+provider 类 gap(multi-provider/single-provider)在 issue 里额外渲染「分类依据(provider
+判据)」节,强制把"该不该抽 provider"从默认值变成必须逐条过的清单——堵住"顺手标
+multi-provider"的滑坡。五判据(物理基础设施 / 多生产者 / 消费者泛化 / 契约跨内核稳定 /
+收益>成本)定义在 provider-boundary.json。判据是判断而非机械检查,故:
+
+- `requirements gen` 渲染判据表 + 该 gap 的已记录评估(✓/✗/?),未记录留 `?` + ⚠ 提示。
+- `check-data` 对 provider 类 gap 无判据记录 → WARN(非 error,因为留空≠错,只=没论证)。
+
+判据评估(per_gap_assessment)采用**渐进填充**(b 选项):现有分类是凭直觉的,未逐条
+论证;clk 已论证(全 pass,因 clk-subsystem.md 实际写过),其余 provider gap 留空待填。
+这诚实承认现状,把判据变成"今后新分类必须过、旧分类慢慢回填"的闸门。
+
+**为什么判据不做成 `check-provider-boundary` 命令?** 它没有机械可判的核心(契约跨内核
+稳定吗/消费者写不写泛化代码——无法从代码自动判定),单独成命令会产出假阳性噪音。
+判据走"决策产物"(requirements issue),nudge 走现有 check-data。这与位段 false-pass
+不同(位段能机械判定 → 会失败的 check)。
+
 ## Drop / 资源释放
 
 进程级,无自定义 Drop。`ldp` 进程结束即释放所有资源(文件句柄由 OS 回收)。

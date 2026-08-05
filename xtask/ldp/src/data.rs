@@ -184,3 +184,26 @@ impl BitField {
         }
     }
 }
+
+/// provider-boundary.json 里一条判据。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderCriterion {
+    pub id: String,
+    pub name: String,
+    pub question: String,
+    #[serde(default)]
+    pub pass_means: String,
+    #[serde(default)]
+    pub fail_means: String,
+}
+
+/// provider-boundary.json 顶层。
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ProviderBoundary {
+    #[serde(default)]
+    pub criteria: Vec<ProviderCriterion>,
+    /// per_gap_assessment 是 object,键为 gap_id,值为 {criterion_id: verdict}。
+    /// verdict 为 "pass"/"fail"/"unknown"。保留为 Value 做轻量查询。
+    #[serde(default)]
+    pub per_gap_assessment: serde_json::Value,
+}
