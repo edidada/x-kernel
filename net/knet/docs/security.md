@@ -194,7 +194,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 14. IPv4 重组边界：分片按源地址、目的地址、标识、协议和接口隔离；被已有区间完全覆盖的分片按重复包丢弃，部分重叠或范围矛盾会删除整条队列；重组状态受 64 条队列、4 MiB 高水位、3 MiB 低水位和 30 秒超时限制。
 15. UDP 接收边界：UDP 长度、校验和和 payload range 通过 checked parser 验证，单个 PCB 的接收队列上限为 1024 个数据报。
 16. IPv4 输出边界：输出 MTU 来自匹配路由；DF 包超过 MTU 时返回 `EMSGSIZE`，允许分片的包只按 8 字节对齐切分 payload。
-17. poller 完成条件：唯一执行者通过一次 CAS 从 `RUNNING` 或 `RUNNING_PENDING` 发布 `IDLE` 或 `SCHEDULED`；RX、ingress、TX 和已到期 timer 均无立即工作且执行期间没有通知时才能进入 `IDLE`。
+17. poller 完成条件：唯一执行者通过一次 CAS 从 `RUNNING` 或 `RUNNING_PENDING` 发布 `IDLE` 或 `SCHEDULED`；RX、ingress、TX 和已到期 timer 均无立即工作且执行期间没有通知时才能进入 `IDLE`。后台执行者一次批次最多推进四轮，达到上限且仍有立即工作时保留 `SCHEDULED` 并唤醒下一批。
 18. 协议 timer 条件：每次 `Interface::poll` 后必须用 `poll_at` 刷新下一次 deadline；尚未到期的 timer 不进入 `PollProgress::has_more`，到期后必须通过 `notify(PollReason::Timer)` 发布工作。
 19. TX 交接条件：socket 或 Router 产生 TX 工作后必须通过 `notify(PollReason::Tx)` 发布；Router data TX queue 容量实际增加时必须设置 `tx_capacity_changed`，TX waiter 只依据该字段执行全局容量唤醒。
 20. TCP 关闭生命周期：用户文件对象释放后，含有待发送数据、FIN 或重传状态的 smoltcp handle 必须继续保留在 `SOCKET_SET`；接收队列存在未读数据时必须保留 abort handle 直到 RST 发出；协议进入 `Closed` 后才能删除。只有 orphan `FIN_WAIT_2` 状态受 60 秒回收期限约束。
@@ -273,7 +273,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | F-16 | UDP DF 数据报超过路由 MTU | `IP_MTU_DISCOVER` 要求 DF 且 packet 长度超过路由 MTU | 当前发送失败 | 应用收到 `EMSGSIZE` | 4 | 发送前读取路由 MTU，Router 拒绝对 DF 包执行输出分片 |
 | F-17 | 启动期 Unix pathname bind panic | 内核任务调用隐式 `current_cred()`，但尚无当前用户线程 | `/dev/log` 等内核 socket 无法绑定 | 启动中断 | 2 | 启动期调用 `bind_with_cred` 并显式传入 `initial_cred()`；保留可用的初始 fs context |
 | F-18 | smoltcp 过期 poll 期限变成超长等待 | 有符号微秒差值为负后通过 `as u64` 转换 | socket timer 被设置到远未来 | TCP 数据路径停顿，可能伴随 timer IRQ 异常 | 2 | 在同一 epoch 下直接把 `SmoltcpInstant` 映射为 `MonotonicInstant`，并用 `u64::try_from` 转换微秒；单测覆盖过期、未来期限和负值钳制 |
-| F-19 | RX 或 TX backlog 长期占用推进任务 | 持续高包率超过单轮 budget | 单轮处理达到上限并留下 backlog | 其他任务调度延迟或网络吞吐下降 | 3 | RX、TX 和 timer 使用独立预算；每次后台 Future poll 只执行一轮，剩余 backlog 通过重新唤醒进入下一轮 |
+| F-19 | RX 或 TX backlog 长期占用推进任务 | 持续高包率超过单轮 budget | 批次处理达到轮数上限并留下 backlog | 其他任务调度延迟或网络吞吐下降 | 3 | RX、TX 和 timer 使用独立预算；后台 Future poll 每批最多连续执行四轮，达到上限后重新唤醒并归还执行权，剩余 backlog 进入下一批 |
 | F-20 | TCP peer 在本地文件关闭后不发送 FIN | peer 已确认本地 FIN，协议 handle 长期停留在 orphan `FIN_WAIT_2` | deferred-close registry 持续持有 socket buffer | 网络内存随失联连接增长 | 3 | 进入 `FIN_WAIT_2` 时设置 60 秒期限，期限进入统一 poll timer，到期后回收 handle |
 
 严重度定义：

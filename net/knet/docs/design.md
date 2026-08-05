@@ -234,7 +234,7 @@ IDLE ──notify──────────────> SCHEDULED
 |----------|------|----------|----------|
 | `IDLE` | `notify` | `SCHEDULED` | 唤醒后台任务 |
 | `SCHEDULED` | `notify` | `SCHEDULED` | 已有唤醒保持有效 |
-| `SCHEDULED` | 后台或 assist 获取执行权 | `RUNNING` | 当前执行者运行一轮 |
+| `SCHEDULED` | 后台或 assist 获取执行权 | `RUNNING` | 当前执行者运行一轮或一批有界轮次 |
 | `RUNNING` | `notify` | `RUNNING_PENDING` | 当前执行者完成时负责后续唤醒 |
 | `RUNNING_PENDING` | `notify` | `RUNNING_PENDING` | pending 状态保持 |
 | `RUNNING` | 完成且没有立即工作 | `IDLE` | 无唤醒 |
@@ -271,7 +271,7 @@ IDLE ──notify──────────────> SCHEDULED
 7. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
 8. `Router::dispatch_budgeted` 先处理 control TX queue，再处理 data TX queue，单轮发送数量受 TX budget 限制。
 9. `Interface::poll_at` 与 orphan `FIN_WAIT_2` deadline 共同决定下一次网络 deadline，`Service` 将其写入原子 deadline；每次系统 tick 检查该值，到期后通过 `notify(PollReason::Timer)` 发布工作。尚未到期的 deadline 不进入 `PollProgress::has_more`。
-10. `PollProgress::has_more` 只汇报当前可立即处理的 RX、ingress、TX 或已到期 timer 工作。每次后台 Future poll 只调用一次 `Service::poll_budgeted`，剩余工作通过 `SCHEDULED` 状态重新唤醒任务，在下一次 Future poll 中处理。
+10. `PollProgress::has_more` 只汇报当前可立即处理的 RX、ingress、TX 或已到期 timer 工作。后台 Future poll 在一次获得执行权后连续调用有限轮次的 `Service::poll_budgeted`；达到后台轮数上限或没有立即工作时归还执行权，仍有 backlog 时通过 `SCHEDULED` 状态唤醒下一批。批次执行期间保持 `RUNNING` 或 `RUNNING_PENDING`，assist 无法获取执行权。
 
 ### TX 路由
 
@@ -324,7 +324,7 @@ IDLE ──notify──────────────> SCHEDULED
 ## 并发模型
 
 - 全局 `SERVICE` 是 `LazyInit<Service>`。`Service` 内部分别使用 mutex 保护 smoltcp `Interface`、`Router`、`IngressProcessor` 和可复用 batch。网络 timer deadline 使用 `AtomicU64` 保存，系统 tick 回调只执行原子检查、waiter 唤醒和 poller 通知。
-- `NetworkPoller` 使用一个 `AtomicU8` 保存 `IDLE`、`SCHEDULED`、`RUNNING` 和 `RUNNING_PENDING`。后台预算为 512 个 RX packet、256 个 TX packet 和 32 个 timer event，socket assist 预算为 16、16 和 8。每次后台 Future poll 和每次 assist 最多执行一轮。
+- `NetworkPoller` 使用一个 `AtomicU8` 保存 `IDLE`、`SCHEDULED`、`RUNNING` 和 `RUNNING_PENDING`。后台预算为 512 个 RX packet、256 个 TX packet 和 32 个 timer event，socket assist 预算为 16、16 和 8。每次后台 Future poll 最多连续执行四轮，每次 assist 最多执行一轮；达到批次上限后唤醒下一批并归还执行权。
 - RX 设备拉取和 TX dispatch 位于 Router 锁内，IPv4 校验、过滤和 snoop 位于 Router 锁外。smoltcp ingress queue 有固定容量，队列满时先推进 Interface 和 TX，再继续拉取设备 packet。
 - 全局 `SOCKET_SET` 内部使用 `Mutex<SocketSetState>`，其中的 smoltcp socket set 与 TCP deferred-close 元数据共享同一所有权锁。关闭、登记、协议推进和回收不会跨两个 mutex 交接 handle。
 - `UDP_PCB_REGISTRY` 按端口分为 256 个 bucket，每个 bucket 独立加锁；每个 UDP PCB 的接收队列、endpoint、错误队列和 option 状态分别受锁或 atomic 保护。
@@ -354,7 +354,7 @@ TCP、raw IP、IPv6 和 DNS 继续通过 smoltcp socket set 推进，协议推�
 
 IRQ、socket TX 生产路径、协议 timer 和后台任务共享同一个 `NetworkPoller`。`notify` 使用状态低位发布 pending 工作，`SCHEDULED` 到 `RUNNING` 的 CAS 提供单执行者约束，完成 CAS 同时归还执行权并发布下一状态。执行期间到达的通知把状态变为 `RUNNING_PENDING`，完成路径据此发布 `SCHEDULED` 并唤醒后台任务。assist 在 `IDLE`、`RUNNING` 和 `RUNNING_PENDING` 上直接返回，不创建事件，也不等待执行权。
 
-RX、TX 与 timer 使用独立预算。control TX 优先于 data TX，避免 ICMP 错误和协议控制流量长期滞后。TCP send 可写快路径向 smoltcp socket buffer 写入数据并发布 TX 通知，连续发送由后台 owner 完成协议推进和 TX dispatch。TCP 和 raw socket 直接向 smoltcp 注册聚合 send waker；Router data TX queue 的可用 packet slot 实际增加时，`PollProgress::tx_capacity_changed` 触发 poller TX waiter 唤醒。协议 deadline 通过 sleep future 唤醒 socket waiter，并以 `PollReason::Timer` 通知 poller。
+RX、TX 与 timer 使用独立预算。control TX 优先于 data TX，避免 ICMP 错误和协议控制流量长期滞后。TCP send 可写快路径向 smoltcp socket buffer 写入数据并发布 TX 通知，连续发送由后台 owner 在有界批次内完成协议推进和 TX dispatch。TCP 和 raw socket 直接向 smoltcp 注册聚合 send waker；Router data TX queue 的可用 packet slot 实际增加时，`PollProgress::tx_capacity_changed` 触发 poller TX waiter 唤醒。协议与 deferred-close deadline 写入原子值，系统 tick 到期后唤醒 socket waiter，并以 `PollReason::Timer` 通知 poller。
 
 ### 控制面状态与 data-plane 同步
 

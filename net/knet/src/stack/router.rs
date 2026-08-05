@@ -320,7 +320,11 @@ impl Router {
         dev.send_link_frame(ifindex, frame)
     }
 
-    pub fn dispatch_budgeted(&mut self, timestamp: MonotonicInstant, budget: usize) -> (usize, bool) {
+    pub fn dispatch_budgeted(
+        &mut self,
+        timestamp: MonotonicInstant,
+        budget: usize,
+    ) -> (usize, bool) {
         if budget == 0 {
             return (0, self.has_queued_tx_packets());
         }

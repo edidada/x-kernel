@@ -27,6 +27,8 @@ const DEFAULT_ASSIST_BUDGET: PollBudget = PollBudget {
     timer_events: 8,
 };
 
+const BACKGROUND_MAX_ROUNDS: usize = 4;
+
 lazy_static! {
     static ref NETWORK_POLLER: NetworkPoller = NetworkPoller::new(NetworkPollerConfig {
         background_budget: DEFAULT_BACKGROUND_BUDGET,
@@ -157,13 +159,36 @@ impl NetworkPoller {
             }
             drop(context);
 
-            // Registering before the single execution attempt closes the
+            // Registering before the first execution attempt closes the
             // check/register race. A pre-registration notification remains in
-            // `Scheduled` for this attempt, while completion can wake the newly
-            // installed registration when another round is required.
-            self.poll_scheduled_once(self.background_budget);
+            // `Scheduled` for this batch, while completion can wake the newly
+            // installed registration when another batch is required.
+            self.poll_background_batch();
             Poll::<()>::Pending
         }));
+    }
+
+    fn poll_background_batch(&self) {
+        self.poll_background_batch_with(|budget| self.run_once(budget));
+    }
+
+    fn poll_background_batch_with(&self, mut poll_once: impl FnMut(PollBudget) -> PollProgress) {
+        if !self.try_start_run() {
+            return;
+        }
+
+        let mut has_more = false;
+        for _ in 0..BACKGROUND_MAX_ROUNDS {
+            has_more = poll_once(self.background_budget).has_more;
+            if !has_more {
+                break;
+            }
+        }
+
+        // Keep ownership across the batch, then release it exactly once. When
+        // the limit is reached with backlog, finish_run schedules the next
+        // batch and gives the scheduler a chance to run other tasks.
+        self.finish_run(has_more);
     }
 
     fn poll_scheduled_once(&self, budget: PollBudget) {
@@ -247,6 +272,8 @@ fn poller_task() {
 
 #[cfg(unittest)]
 mod tests {
+    use core::cell::Cell;
+
     use unittest::{assert, def_test};
 
     use super::*;
@@ -335,5 +362,80 @@ mod tests {
 
         poller.finish_run(false);
         assert!(poller.load_state() == PollerState::Idle);
+    }
+
+    #[def_test]
+    fn background_batch_holds_ownership_until_work_is_drained() {
+        let poller = NetworkPoller::new(NetworkPollerConfig {
+            background_budget: TEST_BUDGET,
+            assist_budget: TEST_BUDGET,
+        });
+        poller
+            .state
+            .store(PollerState::Scheduled as u8, Ordering::Release);
+        let rounds = Cell::new(0);
+        let ownership_held = Cell::new(true);
+
+        poller.poll_background_batch_with(|_| {
+            ownership_held.set(
+                ownership_held.get()
+                    && poller.load_state() == PollerState::Running
+                    && !poller.try_start_run(),
+            );
+            let current_round = rounds.get() + 1;
+            rounds.set(current_round);
+            PollProgress {
+                has_more: current_round < 3,
+                ..PollProgress::default()
+            }
+        });
+
+        assert!(rounds.get() == 3);
+        assert!(ownership_held.get());
+        assert!(poller.load_state() == PollerState::Idle);
+    }
+
+    #[def_test]
+    fn background_batch_schedules_work_after_reaching_round_limit() {
+        let poller = NetworkPoller::new(NetworkPollerConfig {
+            background_budget: TEST_BUDGET,
+            assist_budget: TEST_BUDGET,
+        });
+        poller
+            .state
+            .store(PollerState::Scheduled as u8, Ordering::Release);
+        let rounds = Cell::new(0);
+
+        poller.poll_background_batch_with(|_| {
+            rounds.set(rounds.get() + 1);
+            PollProgress {
+                has_more: true,
+                ..PollProgress::default()
+            }
+        });
+
+        assert!(rounds.get() == BACKGROUND_MAX_ROUNDS);
+        assert!(poller.load_state() == PollerState::Scheduled);
+    }
+
+    #[def_test]
+    fn notification_during_background_batch_schedules_follow_up_work() {
+        let poller = NetworkPoller::new(NetworkPollerConfig {
+            background_budget: TEST_BUDGET,
+            assist_budget: TEST_BUDGET,
+        });
+        poller
+            .state
+            .store(PollerState::Scheduled as u8, Ordering::Release);
+        let pending_observed = Cell::new(false);
+
+        poller.poll_background_batch_with(|_| {
+            poller.notify(PollReason::Rx);
+            pending_observed.set(poller.load_state() == PollerState::RunningPending);
+            PollProgress::default()
+        });
+
+        assert!(pending_observed.get());
+        assert!(poller.load_state() == PollerState::Scheduled);
     }
 }
