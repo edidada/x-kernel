@@ -87,8 +87,8 @@ impl EthernetDevice {
                         drop(context);
                         // Register before publishing the RX recheck so an IRQ
                         // arriving across this boundary either wakes this task
-                        // or is covered by the scheduled data-plane scan.
-                        crate::poller::network_poller().notify(crate::poller::PollReason::Rx);
+                        // or is covered by the bounded data-plane batch.
+                        crate::poller::network_poller().publish_and_poll_rx();
                         return Poll::<()>::Pending;
                     }
                 }));

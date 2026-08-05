@@ -527,6 +527,7 @@ impl SocketOps for TcpSocket {
         if self.rx_closed.load(Ordering::Acquire) {
             return Err(KError::NotConnected);
         }
+        let mut should_poll_rx_window = false;
         let received =
             self.general
                 .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
@@ -540,13 +541,24 @@ impl SocketOps for TcpSocket {
                                         .map_err(|_| k_err_type!(NotConnected, "not connected?"))?,
                                 )
                             } else {
-                                socket
+                                let receive_capacity_bytes = socket.recv_capacity();
+                                let available_before_bytes =
+                                    receive_capacity_bytes.saturating_sub(socket.recv_queue());
+                                let result = socket
                                     .recv(|buf| {
                                         let result = dst.write(buf);
                                         let len = result.unwrap_or(0);
                                         (len, result)
                                     })
-                                    .map_err(|_| k_err_type!(NotConnected, "not connected?"))?
+                                    .map_err(|_| k_err_type!(NotConnected, "not connected?"))?;
+                                if let Ok(received) = result {
+                                    should_poll_rx_window = should_poll_receive_window(
+                                        receive_capacity_bytes,
+                                        available_before_bytes,
+                                        received,
+                                    );
+                                }
+                                result
                             }
                         } else if !socket.may_recv() {
                             Ok(0)
@@ -555,8 +567,8 @@ impl SocketOps for TcpSocket {
                         }
                     })
                 })?;
-        if received > 0 && !options.flags.contains(RecvFlags::PEEK) {
-            network_poller().notify(PollReason::Tx);
+        if should_poll_rx_window {
+            network_poller().notify(PollReason::RxWindow);
         }
         Ok(received)
     }
@@ -588,6 +600,23 @@ impl SocketOps for TcpSocket {
     fn shutdown(&self, how: Shutdown) -> KResult {
         self.shutdown_inner(how, true, true)
     }
+}
+
+fn should_poll_receive_window(
+    receive_capacity_bytes: usize,
+    available_before_bytes: usize,
+    received_bytes: usize,
+) -> bool {
+    // Keep this calculation aligned with smoltcp Socket::new so dependency
+    // upgrades cannot silently narrow the zero-window range covered here.
+    let capacity_bit_len = usize::BITS as usize - receive_capacity_bytes.leading_zeros() as usize;
+    let max_window_scale_shift = capacity_bit_len.saturating_sub(16);
+    let max_window_scale_quantum_bytes = 1usize << max_window_scale_shift;
+
+    // A peer without window scaling needs the first notification after a full
+    // buffer is consumed. A scaled peer can still see a zero window until one
+    // complete scale quantum is free, so each read in that range must poll.
+    received_bytes > 0 && available_before_bytes < max_window_scale_quantum_bytes
 }
 
 impl Pollable for TcpSocket {
@@ -819,6 +848,31 @@ mod tests {
             addr: addr.map(IpAddress::Ipv4),
             port,
         }
+    }
+
+    #[def_test]
+    fn recv_window_poll_requires_consumed_data() {
+        assert!(!should_poll_receive_window(64 * 1024, 0, 0));
+        assert!(!should_poll_receive_window(64 * 1024, 1, 0));
+    }
+
+    #[def_test]
+    fn recv_window_poll_covers_the_scaled_zero_window_range() {
+        assert!(should_poll_receive_window(64 * 1024, 0, 1));
+        assert!(should_poll_receive_window(64 * 1024, 1, 1));
+        assert!(should_poll_receive_window(64 * 1024, 1, 4096));
+    }
+
+    #[def_test]
+    fn recv_window_poll_stops_after_the_scale_quantum() {
+        assert!(!should_poll_receive_window(64 * 1024, 2, 4096));
+        assert!(!should_poll_receive_window(64 * 1024, 4096, 4096));
+    }
+
+    #[def_test]
+    fn recv_window_poll_covers_unscaled_receive_buffers() {
+        assert!(should_poll_receive_window(64 * 1024 - 1, 0, 1));
+        assert!(!should_poll_receive_window(64 * 1024 - 1, 1, 1));
     }
 
     #[def_test]

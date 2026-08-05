@@ -39,6 +39,7 @@ lazy_static! {
 #[derive(Clone, Copy)]
 pub(crate) enum PollReason {
     Rx,
+    RxWindow,
     Tx,
     Timer,
 }
@@ -122,20 +123,41 @@ impl NetworkPoller {
     ///
     /// This method may run in IRQ-adjacent paths and does not acquire a sleepable
     /// lock or execute the network data plane.
-    pub(crate) fn notify(&self, _reason: PollReason) {
-        // The low bit means pending work in both execution modes. One RMW maps
-        // Idle to Scheduled and Running to RunningPending, while same-state RMWs
-        // publish producer-side work without creating redundant wakes.
-        let previous = PollerState::from_raw(
-            self.state
-                .fetch_or(PollerState::Scheduled as u8, Ordering::AcqRel),
-        );
+    pub(crate) fn notify(&self, reason: PollReason) {
+        let previous = self.publish_work(reason);
         if previous == PollerState::Idle {
             // Every Idle-to-Scheduled transition owns its matching wake. A
             // concurrent completion either observes the pending bit or finishes
             // first and leaves this transition responsible for the wake.
             self.waiters.wake();
         }
+    }
+
+    /// Publishes RX work and executes a bounded batch in the RX waiter task.
+    ///
+    /// The caller must run in task context without holding spinlocks or other
+    /// device and data-plane locks because this path may acquire sleepable
+    /// mutexes. Poller ownership and the background batch limit still apply.
+    pub(crate) fn publish_and_poll_rx(&self) {
+        self.publish_and_poll_rx_with(|budget| self.run_once(budget));
+    }
+
+    fn publish_work(&self, _reason: PollReason) -> PollerState {
+        // The low bit means pending work in both execution modes. One RMW maps
+        // Idle to Scheduled and Running to RunningPending, while same-state RMWs
+        // publish producer-side work without creating redundant wakes.
+        PollerState::from_raw(
+            self.state
+                .fetch_or(PollerState::Scheduled as u8, Ordering::AcqRel),
+        )
+    }
+
+    fn publish_and_poll_rx_with(&self, poll_once: impl FnMut(PollBudget) -> PollProgress) {
+        // This task immediately competes for ownership, so an Idle transition
+        // does not need a second task wake. A concurrent owner observes
+        // RunningPending and schedules the follow-up batch when it finishes.
+        self.publish_work(PollReason::Rx);
+        self.poll_background_batch_with(poll_once);
     }
 
     pub(crate) fn register_tx_waker(
@@ -306,6 +328,48 @@ mod tests {
         });
 
         poller.notify(PollReason::Tx);
+        assert!(poller.load_state() == PollerState::Scheduled);
+    }
+
+    #[def_test]
+    fn rx_task_publishes_and_polls_inline() {
+        let poller = NetworkPoller::new(NetworkPollerConfig {
+            background_budget: TEST_BUDGET,
+            assist_budget: TEST_BUDGET,
+        });
+        let rounds = Cell::new(0);
+        let ownership_held = Cell::new(false);
+
+        poller.publish_and_poll_rx_with(|_| {
+            rounds.set(rounds.get() + 1);
+            ownership_held.set(poller.load_state() == PollerState::Running);
+            PollProgress::default()
+        });
+
+        assert!(rounds.get() == 1);
+        assert!(ownership_held.get());
+        assert!(poller.load_state() == PollerState::Idle);
+    }
+
+    #[def_test]
+    fn rx_task_defers_to_a_running_owner() {
+        let poller = NetworkPoller::new(NetworkPollerConfig {
+            background_budget: TEST_BUDGET,
+            assist_budget: TEST_BUDGET,
+        });
+        poller
+            .state
+            .store(PollerState::Running as u8, Ordering::Release);
+        let rounds = Cell::new(0);
+
+        poller.publish_and_poll_rx_with(|_| {
+            rounds.set(rounds.get() + 1);
+            PollProgress::default()
+        });
+
+        assert!(rounds.get() == 0);
+        assert!(poller.load_state() == PollerState::RunningPending);
+        poller.finish_run(false);
         assert!(poller.load_state() == PollerState::Scheduled);
     }
 
