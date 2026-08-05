@@ -4,8 +4,6 @@
 
 //! AArch64 peripheral drivers and firmware interface helpers.
 
-#[cfg(any(feature = "kvm-guest-mem-share", feature = "kvm-mmio-guard"))]
-pub mod kvm;
 pub mod memory;
 #[cfg(any(feature = "nmi-pmu", feature = "nmi-sdei"))]
 pub mod nmi;

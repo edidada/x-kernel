@@ -6,7 +6,7 @@
 //!
 //! This crate provides:
 //! - Generic AArch64 device-tree platform implementation of the `kplat` HAL
-//! - ARM64 common peripheral drivers (PSCI, SMCCC, KVM hypercalls, PMU, NMI)
+//! - ARM64 common peripheral drivers (PSCI, SMCCC, PMU, NMI)
 
 #![no_std]
 #![cfg(target_arch = "aarch64")]

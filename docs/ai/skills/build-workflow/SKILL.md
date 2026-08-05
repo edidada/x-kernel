@@ -182,7 +182,6 @@ make run XKMAKE_ARGS='--memory 2g --smp 2'
 make run XKMAKE_ARGS='--no-net --no-block'
 make run XKMAKE_ARGS='--disk-image images/rootfs.img'
 make run XKMAKE_ARGS='--no-vsock'
-make run ACCEL=n
 make run QEMU_ARGS='-d guest_errors'
 make run QEMU_ARGS='-no-reboot'
 ```

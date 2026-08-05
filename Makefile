@@ -14,7 +14,6 @@
 # * QEMU / runtime — `make run`, `make justrun`, `make debug`:
 #     - DISK_IMG            virtio-blk backing disk image (see RAMDISK_IMG below)
 #     - NET / BLK / VSOCK   Enable virtio-net / virtio-blk / vhost-vsock (y/n)
-#     - ACCEL               Enable KVM (linux) / HVF (macOS) acceleration (y/n)
 #     - GRAPHIC             Enable graphical output + virtio-gpu (y/n)
 #     - UEFI                Boot x86_64 via OVMF `.uefi.img` instead of LinuxBoot (y/n)
 #     - MEM                 Guest memory size (default 1g)
@@ -93,7 +92,6 @@ UNITTEST_CRATE ?=
 NET ?= y
 BLK ?= y
 VSOCK ?= y
-ACCEL ?= y
 UEFI ?= n
 GRAPHIC ?= n
 MEM ?=
@@ -129,7 +127,6 @@ XKMAKE_RUN_ARGS := \
 	$(if $(filter n,$(NET)),--no-net) \
 	$(if $(filter n,$(BLK)),--no-block) \
 	$(if $(filter n,$(VSOCK)),--no-vsock) \
-	$(if $(filter n,$(ACCEL)),--no-accel) \
 	$(if $(filter y,$(GRAPHIC)),--graphic) \
 	$(if $(strip $(MEM)),--memory "$(MEM)") \
 	$(if $(strip $(SMP)),--smp "$(SMP)")

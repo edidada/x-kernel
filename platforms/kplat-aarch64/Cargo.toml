@@ -24,8 +24,6 @@ nmi-pmu = ["pmr", "pmu"]
 nmi-sdei = []
 console-pl011 = ["console_driver/pl011"]
 console-ns16550-mmio = ["console_driver/ns16550-mmio"]
-kvm-guest-mem-share = []
-kvm-mmio-guard = []
 
 [dependencies]
 log = "0.4"

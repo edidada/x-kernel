@@ -121,11 +121,8 @@ impl PmuCounter {
     ///
     /// This starts the counter and enables overflow interrupt.
     pub fn enable(&self) {
-        // Clear all pending overflow flags first — KVM leaves garbage in
-        // uninitialised event counters whose overflow bits would otherwise
-        // cause an interrupt storm.  We do NOT bulk-clear PMCNTENCLR_EL0 or
-        // PMINTENCLR_EL1 because KVM may misinterpret those writes and
-        // disable the entire vPMU.
+        // Clear stale overflow state before enabling the selected counter to
+        // prevent an immediate interrupt storm.
         msr!(PMOVSCLR_EL0, !0u64);
         isb!();
 

@@ -4,8 +4,7 @@
 
 use std::{
     env, fs,
-    os::unix::fs::FileTypeExt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::Command,
 };
 
@@ -40,10 +39,7 @@ pub(crate) fn run(bundle: &Bundle, args: &RunArgs) -> Result<()> {
                 .to_string(),
         );
 
-    let accel = (!args.no_accel)
-        .then(|| hardware_accel(context.config.arch()))
-        .flatten();
-    add_platform_args(&mut command, bundle, args, qemu_program, accel)?;
+    add_platform_args(&mut command, bundle, args, qemu_program)?;
     add_devices(&mut command, bundle, args, qemu_program)?;
     if !args.graphic {
         command.arg("-nographic");
@@ -67,67 +63,24 @@ fn qemu_program(arch: KernelArch) -> &'static str {
     }
 }
 
-/// Hardware acceleration backend (KVM on Linux, HVF on macOS) available when
-/// the host can run the guest arch natively. Returns the QEMU accelerator
-/// backend name, or `None` when only software emulation (TCG) is usable.
-///
-fn hardware_accel(guest: KernelArch) -> Option<&'static str> {
-    let arch_matches = matches!(
-        (env::consts::ARCH, guest),
-        ("x86_64", KernelArch::X86_64)
-            | ("aarch64", KernelArch::Aarch64)
-            | ("riscv64", KernelArch::Riscv64)
-    );
-    if !arch_matches {
-        return None;
-    }
-    match env::consts::OS {
-        "macos" => Some("hvf"),
-        "linux" if !is_wsl() && is_character_device(Path::new("/dev/kvm")) => Some("kvm"),
-        _ => None,
-    }
-}
-
-fn is_character_device(path: &Path) -> bool {
-    fs::metadata(path).is_ok_and(|metadata| metadata.file_type().is_char_device())
-}
-
-/// Whether the Linux host is really WSL/WSL2, where KVM is unavailable.
-fn is_wsl() -> bool {
-    fs::read_to_string("/proc/sys/kernel/osrelease")
-        .is_ok_and(|release| release.to_ascii_lowercase().contains("microsoft"))
-}
-
 fn add_platform_args(
     command: &mut Process,
     bundle: &Bundle,
     args: &RunArgs,
     qemu_program: &str,
-    accel: Option<&str>,
 ) -> Result<()> {
     let context = &bundle.context;
     match context.config.platform() {
         "kplat-aarch64" => {
             let machine = "virt,virtualization=on,gic-version=3";
-            let cpu = if accel.is_some() {
-                "host"
-            } else {
-                "cortex-a76"
-            };
             command
-                .args(["-cpu", cpu, "-machine", machine, "-kernel"])
+                .args(["-cpu", "cortex-a76", "-machine", machine, "-kernel"])
                 .arg(direct_kernel(bundle)?);
-            if let Some(backend) = accel {
-                command.args(["-accel", backend]);
-            }
         }
         "kplat-riscv64" => {
             command
                 .args(["-machine", "virt", "-bios", "default", "-kernel"])
                 .arg(direct_kernel(bundle)?);
-            if let Some(backend) = accel {
-                command.args(["-cpu", "host", "-accel", backend]);
-            }
         }
         "kplat-loongarch64" => {
             command
@@ -135,7 +88,7 @@ fn add_platform_args(
                 .arg(direct_kernel(bundle)?);
         }
         "kplat-x86_64" => {
-            add_x86_boot_args(command, bundle, args, qemu_program, accel)?;
+            add_x86_boot_args(command, bundle, args, qemu_program)?;
         }
         platform => {
             return Err(Error::Message(format!(
@@ -160,7 +113,6 @@ fn add_x86_boot_args(
     bundle: &Bundle,
     args: &RunArgs,
     qemu_program: &str,
-    accel: Option<&str>,
 ) -> Result<()> {
     let BootArtifacts::X86 {
         linuxboot_image,
@@ -177,17 +129,12 @@ fn add_x86_boot_args(
             command
                 .args(["-machine", "q35", "-kernel"])
                 .arg(linuxboot_image);
-            if let Some(backend) = accel {
-                command.args(["-cpu", "host", "-accel", backend]);
-            } else {
-                command.args(["-cpu", "max,+vmx"]);
-            }
+            command.args(["-cpu", "max,+vmx"]);
         }
         X86BootMode::Uefi => {
             let firmware = resolve_ovmf(bundle, args, qemu_program)?;
-            let cpu = if accel.is_some() { "host" } else { "max,+vmx" };
             command
-                .args(["-cpu", cpu, "-machine", "q35"])
+                .args(["-cpu", "max,+vmx", "-machine", "q35"])
                 .arg("-drive")
                 .arg(format!(
                     "if=pflash,format=raw,unit=0,file={},readonly=on",
@@ -203,9 +150,6 @@ fn add_x86_boot_args(
                     "if=ide,format=raw,index=0,file={}",
                     uefi_image.display()
                 ));
-            if let Some(backend) = accel {
-                command.args(["-accel", backend]);
-            }
         }
     }
     Ok(())

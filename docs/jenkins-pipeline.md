@@ -45,8 +45,8 @@ sha256:b5e1c4fbf92b2e653fce0a8a4a171c893e960a782ae2288d20b10fd575ade09f
 OCI index 只包含原生 `linux/amd64` 和 `linux/arm64` 镜像。镜像默认用户是
 `jenkins`（`1000:1000`），设备补充组 GID 是 `36`。
 
-宿主机必须将 `/dev/kvm` 和 `/dev/vhost-vsock` 持久设置为 group `36`、mode
-`0660`。流水线只显式传入这两个设备并执行 `--group-add 36`，不使用
+宿主机必须将 `/dev/vhost-vsock` 持久设置为 group `36`、mode
+`0660`。流水线只显式传入该设备并执行 `--group-add 36`，不使用
 `--privileged`、root 用户或 Docker Socket。
 
 ## Workspace

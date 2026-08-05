@@ -197,10 +197,6 @@ pub(crate) struct RunArgs {
     #[arg(long)]
     pub(crate) no_vsock: bool,
 
-    /// Disable host hardware acceleration.
-    #[arg(long)]
-    pub(crate) no_accel: bool,
-
     /// Enable graphical output.
     #[arg(long)]
     pub(crate) graphic: bool,

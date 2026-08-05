@@ -223,20 +223,6 @@ config KFEAT_DWARF
       Keep DWARF sections in the image and enable backtrace symbolication
       support in the kernel.
 
-config KFEAT_KVM_GUEST_MEM_SHARE
-    bool "Enable KVM guest memory share/unshare hooks"
-    depends on ARCH_AARCH64
-    help
-      Enable the platform DMA hooks that issue the KVM vendor hypercalls
-      needed to share and unshare guest memory with the host.
-
-config KFEAT_KVM_MMIO_GUARD
-    bool "Enable KVM MMIO guard mapping hooks"
-    depends on ARCH_AARCH64
-    help
-      Enable the platform MMIO hooks that use the KVM vendor MMIO guard
-      hypercalls before mapping guarded device ranges.
-
 config KFEAT_ARM_TIMER_RESUME_FIXUP
     bool "Enable AArch64 virtual timer resume fixup"
     depends on ARCH_AARCH64
