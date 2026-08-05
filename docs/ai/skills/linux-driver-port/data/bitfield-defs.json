@@ -1,0 +1,65 @@
+{
+  "$comment": "真相源。位段定义附 GENMASK 原始依据(参数保真,Ch4第4条)。known_wrong_layouts + verification_traces 让 ldp check-bitfields 能把 VERSION 骗人那类 bug 变成 fail-closed 检查:把每个 trace 在正确布局与每个错误布局下分别打包,打包值相同 = false-pass。",
+  "defs": [
+    {
+      "id": "scmi-msg-header",
+      "name": "SCMI Message Header",
+      "spec_ref": "ARM SCMI spec / Linux pack_scmi_header / ax_driver arm-scmi-rs MsgHeader::pack",
+      "width": 32,
+      "fields": [
+        {"name": "message_id",   "lsb": 0,  "msb": 7,  "genmask": "GENMASK(7,0)"},
+        {"name": "message_type", "lsb": 8,  "msb": 9,  "genmask": "GENMASK(9,8)"},
+        {"name": "protocol_id",  "lsb": 10, "msb": 17, "genmask": "GENMASK(17,10)"},
+        {"name": "token",        "lsb": 18, "msb": 27, "genmask": "GENMASK(27,18)"}
+      ],
+      "reference_impl": {
+        "source": "ax_driver arm-scmi-rs MsgHeader::pack",
+        "masks": {
+          "MSG_ID_MASK": "GENMASK(7,0)",
+          "MSG_TYPE_MASK": "GENMASK(9,8)",
+          "MSG_PROTOCOL_ID_MASK": "GENMASK(17,10)",
+          "MSG_TOKEN_ID_MASK": "GENMASK(27,18)"
+        }
+      },
+      "known_wrong_layouts": [
+        {
+          "desc": "message_id 与 token 的字段名互换(token 占 [7:0],message_id 占 [27:18])—— 本次 RK3588 SCMI 移植的实际 bug:记反了 message_id/token 的位置",
+          "fields": [
+            {"name": "token",        "lsb": 0,  "msb": 7},
+            {"name": "message_type", "lsb": 8,  "msb": 9},
+            {"name": "protocol_id",  "lsb": 10, "msb": 17},
+            {"name": "message_id",   "lsb": 18, "msb": 27}
+          ]
+        }
+      ],
+      "verification_traces": [
+        {
+          "name": "base VERSION (msg=0, token=0)",
+          "fields": {"message_id": 0, "message_type": 0, "protocol_id": 16, "token": 0},
+          "distinguishes_layout": false,
+          "self_note": "msg=0/token=0 → 正确布局与'互换'错误布局打包结果都是 0x4000(protocol_id)。VERSION 通 ≠ 位段对。这是 ldp 必须报的 false-pass(文档化,不报错)。"
+        },
+        {
+          "name": "base PROTOCOL_ATTRIBUTES (msg=1, token=0)",
+          "fields": {"message_id": 1, "message_type": 0, "protocol_id": 16, "token": 0},
+          "distinguishes_layout": true,
+          "self_note": "message_id=1 非零 → 正确布局(0x4001)与错误布局(0x44000)不同,能区分。比 VERSION 强一档,但仍只用 message_id 区分。"
+        },
+        {
+          "name": "clock CLOCK_RATE_GET (msg=6, proto=0x14, token=1)",
+          "fields": {"message_id": 6, "message_type": 0, "protocol_id": 20, "token": 1},
+          "distinguishes_layout": true,
+          "self_note": "message_id≠0 且 token≠0 → 两布局打包必然不同,最强区分。验证位段必须用这种非零字段用例(铁律1/2延伸)。"
+        }
+      ],
+      "status_codes": {
+        "0": "SUCCESS",
+        "-1": "NOT_SUPPORTED",
+        "-2": "INVALID_PARAMETERS",
+        "-4": "NOT_FOUND",
+        "-10": "PROTOCOL_ERROR"
+      },
+      "diagnostic_note": "错误响应 length=8 = header(4)+status(4),证明 length 约定'含 header',可反推请求 length 字段约定。"
+    }
+  ]
+}

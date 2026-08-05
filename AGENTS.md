@@ -31,8 +31,18 @@ Current shared skills:
 - `docs/ai/skills/linux-driver-port/SKILL.md`:
   translate a Linux C driver (platform/PCI) into x-kernel Rust, mapping Linux
   kernel APIs to existing x-kernel APIs (MMIO/IRQ/DMA/sync/publish) and
-  reporting missing subsystems (clk/regmap/gpio/phy/...) as gaps. Triggerable
-  via `/linux-driver-port` (entry at `.claude/skills/linux-driver-port/`).
+  reporting missing subsystems (clk/regmap/gpio/phy/...) as gaps. A **harness**,
+  not just docs: structured truth source lives in `data/*.json` (api-mapping /
+  gaps / bitfield-defs / golden) and is enforced by the `ldp` CLI
+  (`xtask/ldp/`) — `ldp check-data`, `ldp check-bitfields` (catches SCMI
+  VERSION-style false-passes), `ldp scan`, `ldp golden`, `ldp gen-doc`
+  (regenerates `knowledge/*.md` from JSON). `ldp trace`/`staging` record and
+  gate experience (Ch8 evolution loop, ≥2-support promote threshold);
+  `ldp requirements gen/confirm` turn missing-subsystem findings into
+  classified requirement issues (multi-provider / single-provider / framework /
+  subsystem-class / driver-missing) for human decision before porting proceeds.
+  Triggerable via `/linux-driver-port` (entry at `.claude/skills/linux-driver-port/`).
+  Architecture: `docs/ai/skills/linux-driver-port/docs/design.md`.
   Worked example: dwcmshc SD/MMC for RK3588.
 
 ## Project Overview

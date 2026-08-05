@@ -1,6 +1,16 @@
 ---
 name: linux-driver-port
-description: Port a Linux C driver (platform/PCI) to x-kernel Rust and adapt it to existing x-kernel APIs, flagging any missing subsystem as a gap. Use when adapting RK3588 / new-SoC peripherals (MMC, net, i2c, spi, watchdog, ...) by translating from the upstream Linux driver. Covers API mapping (MMIO/IRQ/DMA/sync/publish), the two-layer driver structure, gap reporting for missing subsystems (clk/regmap/gpio/phy/...), and a worked dwcmshc SD/MMC example. Trigger with /linux-driver-port.
+description: >-
+  Use when porting a Linux C driver (platform/PCI) to x-kernel Rust by
+  translating from the upstream driver and adapting to existing x-kernel APIs
+  (MMIO/IRQ/DMA/sync/publish), reporting every missing subsystem as a gap.
+  Covers API mapping, the two-layer driver structure, gap reporting, and a
+  worked dwcmshc SD/MMC example. Trigger with /linux-driver-port.
+  Do NOT use this for: writing a driver from scratch with no Linux reference
+  (use driver-anatomy + code-guidelines instead); pure userspace/device-tree
+  work; or choosing which SoC peripheral to enable next (that is a planning
+  decision, not a port). This skill only translates an *existing* Linux driver
+  faithfully — it will not invent hardware behavior.
 ---
 
 # Linux Driver Port（入口）
@@ -16,13 +26,27 @@ description: Port a Linux C driver (platform/PCI) to x-kernel Rust and adapt it 
 
 ## 快速启动
 
-1. **先读总纲与铁律**：[`docs/ai/skills/linux-driver-port/SKILL.md`](../../../docs/ai/skills/linux-driver-port/SKILL.md)（五条铁律是质量底线）。
-2. **按工作流走**：[`workflow/port-workflow.md`](../../../docs/ai/skills/linux-driver-port/workflow/port-workflow.md)（Phase 0–5）。
-3. **查映射表**：[`knowledge/api-mapping.md`](../../../docs/ai/skills/linux-driver-port/knowledge/api-mapping.md)（Linux→x-kernel API）。
-4. **撞到缺失子系统**：[`knowledge/gaps.md`](../../../docs/ai/skills/linux-driver-port/knowledge/gaps.md)。
-5. **写代码**：[`templates/driver-skeleton.md`](../../../docs/ai/skills/linux-driver-port/templates/driver-skeleton.md)。
-6. **写报告**：[`templates/gap-report.md`](../../../docs/ai/skills/linux-driver-port/templates/gap-report.md)。
-7. **参照实例**：[`examples/dwcmshc-walkthrough.md`](../../../docs/ai/skills/linux-driver-port/examples/dwcmshc-walkthrough.md)（Linux dwcmshc → x-kernel 完整走查）。
+1. **先读总纲与铁律**: [`docs/ai/skills/linux-driver-port/SKILL.md`](../../../docs/ai/skills/linux-driver-port/SKILL.md)(五条铁律是质量底线)。
+2. **这是 harness,不是纯文档**——skill 带可执行约束(`ldp`)。在仓库根跑:
+   ```bash
+   ldp help              # 全部子命令与边界(反例)
+   ldp lookup <api>      # 查某条 Linux API 的 x-kernel 对应
+   ldp gaps              # 列缺失子系统
+   ldp check-bitfields   # 揪位段 false-pass(SCMI VERSION 那类 bug)
+   ldp scan <linux源码>  # 扫源码用到的缺口符号
+   ldp golden dwcmshc    # 跑 golden 回归
+   ldp trace add <port> --kind gap --linux <sym>   # 记 port 轨迹(Ch8)
+   ldp staging aggregate && ldp staging review    # 轨迹→候选,≥2 支持可发布
+   ldp requirements gen --from-scan <src>         # 缺口→需求 issue(按类给实现路径)
+   ldp requirements list                          # 看哪些待人工确认
+   ```
+   没装到 PATH 时:`cargo run --manifest-path xtask/Cargo.toml -p ldp -- <子命令>`。
+3. **按工作流走**: [`workflow/port-workflow.md`](../../../docs/ai/skills/linux-driver-port/workflow/port-workflow.md)(Phase 0–6)。
+4. **查映射表**: `ldp lookup <api>` 或 [`knowledge/api-mapping.md`](../../../docs/ai/skills/linux-driver-port/knowledge/api-mapping.md)。
+5. **撞到缺失子系统**: `ldp gaps` 或 [`knowledge/gaps.md`](../../../docs/ai/skills/linux-driver-port/knowledge/gaps.md)。
+6. **写代码**: [`templates/driver-skeleton.md`](../../../docs/ai/skills/linux-driver-port/templates/driver-skeleton.md)。
+7. **写报告**: [`templates/gap-report.md`](../../../docs/ai/skills/linux-driver-port/templates/gap-report.md)。
+8. **参照实例**: [`examples/dwcmshc-walkthrough.md`](../../../docs/ai/skills/linux-driver-port/examples/dwcmshc-walkthrough.md)(Linux dwcmshc → x-kernel 完整走查;也是 golden 基线)。
 
 ## 用法示例
 

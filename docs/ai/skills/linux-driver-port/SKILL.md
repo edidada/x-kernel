@@ -1,79 +1,144 @@
 ---
 name: linux-driver-port
-description: Use when porting a Linux C driver (platform/PCI) to x-kernel Rust, e.g. adapting RK3588 / new-SoC peripherals. Translates Linux kernel APIs to existing x-kernel APIs (MMIO/IRQ/DMA/sync/publish) and reports any subsystem that has no x-kernel equivalent as a gap for human decision. Invoke with /linux-driver-port.
+description: >-
+  Use when porting a Linux C driver (platform/PCI) to x-kernel Rust by
+  translating from the upstream driver and adapting to existing x-kernel APIs
+  (MMIO/IRQ/DMA/sync/publish), reporting every missing subsystem as a gap.
+  Covers API mapping, the two-layer driver structure, gap reporting, and a
+  worked dwcmshc SD/MMC example. Trigger with /linux-driver-port.
+  Do NOT use this for: writing a driver from scratch with no Linux reference
+  (use driver-anatomy + code-guidelines instead); pure userspace/device-tree
+  work; or choosing which SoC peripheral to enable next (that is a planning
+  decision, not a port). This skill only translates an *existing* Linux driver
+  faithfully — it will not invent hardware behavior.
 ---
 
 # Linux Driver Port Skill
 
-把一个 **Linux C 驱动** 转写成符合 x-kernel 框架的 **Rust 驱动**，并自动适配项目接口：
-**有对应实现的 Linux API → 改调本项目接口；缺少对应实现的 → 写进缺口报告，由人决策。**
+把一个 **Linux C 驱动** 转写成符合 x-kernel 框架的 **Rust 驱动**:
+**有对应实现的 Linux API → 改调本项目接口;缺少对应实现的 → 写进缺口报告,由人决策。**
 
-典型场景：为 RK3588 等新平台补外设驱动（MMC、网卡、I2C、SPI、看门狗…），不想逐个手写，而是以 Linux 上游驱动为蓝本翻译。
+典型场景:为 RK3588 等新平台补外设驱动(MMC、网卡、I2C、SPI、看门狗…),以 Linux 上游驱动为蓝本翻译。
 
-## 五条铁律（决定产出质量，必须遵守）
+## 这个 skill 现在是 harness,不只是文档
 
-1. **硬件/协议是真相。** 寄存器布局、bit 位定义、**协议线格式（SCMI/SMBus/… 的 message header/payload 位段）**、初始化序列、magic number、时序与延时——这些是硬件/协议事实，**原样忠实翻译**，不做"优化"、不做"简化"、不擅自合并步骤。怀疑时以上游 Linux 驱动 / 规范为准。
+本 skill 不止是 markdown。它有一组**可执行约束**(`ldp` CLI),把下面五条铁律里有四条变成**会失败的检查**:
 
-2. **绝不编造 API，也绝不凭记忆写常量/位段。** x-kernel 这边用到的每一个接口，**以及从 Linux 翻译过来的每一个 bit 位段、协议线格式（message header/payload layout）、magic number、struct 字段偏移**，都必须能在 [`knowledge/api-mapping.md`](knowledge/api-mapping.md)、项目源码、或 Linux 源码（头 / .c）里找到**逐位依据**。**查不到的 = 缺口**，不得凭印象/记忆写一个"看起来像"的值——位段最容易记反（见下方"协议/位段常量纪律"）。
+| 铁律 | 散文 | ldp 怎么强制 |
+|------|------|-------------|
+| 1 硬件/协议是真相 | ✓ | `ldp check-bitfields` 校验位段定义自洽(非零字段验证) |
+| 2 绝不编造 API/位段 | ✓ | `ldp check-data`(source.path 必须在仓库存在)+ `check-bitfields` |
+| 4 缺口必报、不静默绕过 | ✓ | `ldp scan <源码>` 揪出用到的缺口符号,强制提示入报告 |
+| (数据/文档一致性) | — | `ldp golden`(walkthrough 断言对照数据)+ `ldp gen-doc`(md 由 JSON 生成) |
+| (经验沉淀,Ch8) | — | `ldp trace`(记轨迹)+ `staging`(≥2 支持才发布,不污染正式库) |
+| (需求决策) | — | `ldp requirements`(缺口→分类→需求 issue,人工确认后再移植) |
 
-3. **RAII 优先，最小化 `unsafe`。** 生命周期交给 `devm_*` / `Arc` / `Io` / `Box` / `DmaCoherent` 等 RAII 句柄。必须用 `unsafe` 的地方（如把映射后的 vaddr 交给硬件层）写 `// SAFETY:` 注释，说明不变量。遵循 [`code-guidelines`](../code-guidelines/SKILL.md)。
+> 铁律 3(RAII)和 5(规范)由 `code-guidelines` / `build-workflow` 兜底,不在 ldp 范围。
 
-4. **缺口必报、不静默绕过。** 任何无法映射的 Linux 子系统（clk、regmap、gpio、pinctrl、reset、regulator、iommu、phy、workqueue…）必须进缺口报告（见 [`templates/gap-report.md`](templates/gap-report.md)），标注阻塞程度与可行替代，交人决策。**绝不悄悄 stub 掉一个关键依赖让驱动"看起来能跑"。**
+`ldp` 用法:`cd` 到仓库根,跑 `ldp help`。数据层(真相源)在 `data/*.json`,改数据后跑 `ldp gen-doc` 重生成 `knowledge/*.md`。
 
-5. **遵循项目规范。** 编码风格走 [`code-guidelines`](../code-guidelines/SKILL.md)；构建/检查/运行走 [`build-workflow`](../build-workflow/SKILL.md)。
+```bash
+# 仓库根下:
+ldp lookup readl            # 查某条 Linux API 的 x-kernel 对应
+ldp gaps --status missing   # 列缺失子系统
+ldp check-data              # 校验数据完整性(fail-closed)
+ldp check-bitfields         # 校验位段 + 揪 VERSION 类 false-pass(fail-closed)
+ldp scan drivers/mmc/host/sdhci-of-dwcmshc.c   # 扫源码用到的缺口符号
+ldp golden dwcmshc          # 跑 golden 回归(walkthrough 断言 vs 当前数据)
+ldp gen-doc                 # 从 data/*.json 重生成 knowledge/*.md
 
-## 协议/位段常量纪律（铁律 1/2 的延伸——最容易栽的地方）
+# Ch8 经验沉淀(port 撞到东西时记轨迹,事后离线发布):
+ldp trace add dw_wdt-rk3588 --kind gap --linux clk_set_rate --note 'probe needs rate'
+ldp staging aggregate && ldp staging review
+ldp staging promote --id gap:clk_set_rate   # ≥2 支持才放行;不自动改 data/
 
-位段、协议线格式、magic number 这类常量，是**凭记忆最易记反、出错最隐蔽**的一类：API 写错了编译器会报，**位段错了能编过，甚至可能恰好跑通**（全零字段的命令掩盖错误）。纪律：
+# 需求决策(扫驱动发现缺口→生成需求 issue→人工确认):
+ldp requirements gen --from-scan drivers/watchdog/dw_wdt.c
+ldp requirements list                      # 看哪些待确认(proposed)
+ldp requirements confirm req-clk-framework --status confirmed
+```
 
-- **即使你"记得"，也必须打开源码逐位核对后再写。** 典型雷区：消息头里 `message_id` / `token` 的位段（SCMI 是 `message_id[7:0]`、`token[27:18]`，见 [`clk-subsystem.md`](knowledge/clk-subsystem.md)）。
-- **优先复制参考实现的掩码，而非凭记忆重算。** Linux 的 `pack_*` 宏 / 现成 Rust 栈（如 `arm-scmi-rs` 的 `MSG_*_MASK = GENMASK(...)`）逐字抄最稳。
-- **源码本地没有时**（常见于 `drivers/*` 内部的 `.h`/`.c`，headers 包不含）：联网取；取不到就**显式标 `// UNVERIFIED — 待对照 Linux 源码` 并进缺口报告**，**不得静默凭记忆落地**。
-- **没核对的常量，不要写进注释 / rustdoc 当作事实。** 把错的位段用注释"背书"会让后续审查也绕过去——本次 SCMI header bug 就是这样：错误的 `message_id[25:18]` 被写进 doc 注释当"规范"，一路没人质疑。
-- **带机验证位段时，别用全零字段做基线。** SCMI `VERSION`（`msg=0`/`token=0`）位段错也照样通——验证位段必须用非零字段，详见 [port-workflow §6.5](workflow/port-workflow.md)。
+> 没装 `ldp` 到 PATH 时,直接 `cargo run --manifest-path xtask/Cargo.toml -p ldp -- <子命令>`。
 
-## 这个 skill 的文件地图（progressive disclosure）
+## 五条铁律(决定产出质量,必须遵守)
 
-本文件只放总纲。按工作流阶段按需读取对应文件：
+1. **硬件/协议是真相。** 寄存器布局、bit 位定义、**协议线格式(SCMI/SMBus/… 的 message header/payload 位段)**、初始化序列、magic number、时序与延时——这些是硬件/协议事实,**原样忠实翻译**,不做"优化"、不擅自合并步骤。怀疑时以上游 Linux 驱动/规范为准。位段定义写进 `data/bitfield-defs.json`,由 `ldp check-bitfields` 守护。
+
+2. **绝不编造 API,也绝不凭记忆写常量/位段。** x-kernel 这边用到的每一个接口,**以及从 Linux 翻译过来的每一个 bit 位段、协议线格式、magic number、struct 字段偏移**,都必须能在 `data/api-mapping.json`(有 source 证据)、项目源码、或 Linux 源码里找到**逐位依据**。查不到的 = 缺口。位段最容易记反——SCMI `message_id`/`token` 那次 bug 就是凭记忆写错,VERSION 恰好通,一路没人质疑。`ldp check-data` 会校验 source.path 真实存在,`check-bitfields` 会揪"用全零字段(VERSION)验证位段"这种假阳性。
+
+3. **RAII 优先,最小化 `unsafe`。** 生命周期交给 `devm_*`/`Arc`/`Io`/`Box`/`DmaCoherent` 等 RAII 句柄。必须用 `unsafe` 的地方写 `// SAFETY:` 注释。遵循 [`code-guidelines`](../code-guidelines/SKILL.md)。
+
+4. **缺口必报、不静默绕过。** 任何无法映射的 Linux 子系统必须进缺口报告(用 [`templates/gap-report.md`](templates/gap-report.md)),标注阻塞程度。`data/gaps.json` 是已知缺口库;`ldp scan <源码>` 会告诉你这份 Linux 驱动用到了哪些缺口符号,提醒它们**必须**在报告里写明。
+
+5. **遵循项目规范。** 编码风格走 [`code-guidelines`](../code-guidelines/SKILL.md);构建/检查/运行走 [`build-workflow`](../build-workflow/SKILL.md)。
+
+## 协议/位段常量纪律(铁律 1/2 的延伸——最容易栽的地方)
+
+位段、协议线格式、magic number 是**凭记忆最易记反、出错最隐蔽**的一类:API 写错编译器会报,**位段错了能编过,甚至可能恰好跑通**(全零字段掩盖错误)。纪律:
+
+- **即使"记得",也必须打开源码逐位核对后再写**,优先复制参考实现的掩码(如 SCMI 的 `MSG_*_MASK = GENMASK(...)`)。
+- **位段定义进 `data/bitfield-defs.json`**,附 GENMASK 依据 + 已知错误布局(`known_wrong_layouts`)。`ldp check-bitfields` 会把每条验证用例在正确布局与错误布局下分别打包,打包值相同 = false-pass。
+- **验证位段必须用非零字段**,别用全零字段(VERSION)做基线——这正是 `bitfield-defs.json` 里 VERSION 被标 `distinguishes_layout:false` 的原因。
+- **源码本地没有时**:联网取;取不到就显式标 `// UNVERIFIED — 待对照 Linux 源码` 并进缺口报告,**不得静默凭记忆落地**。把错的位段写进注释/rustdoc 当事实会让后续审查绕过去。
+
+## 数据层(真相源)与文档层(生成物)
+
+```
+data/                          ← 真相源(改这里)
+  api-mapping.json               Linux API → x-kernel API(每条带 source + keywords)
+  gaps.json                      缺失子系统(status 状态机 + 维度分级 + 治理)
+  bitfield-defs.json             位段定义(GENMASK + known_wrong_layouts + verification_traces)
+  golden/dwcmshc.json            golden 回归基线(walkthrough 断言)
+knowledge/                     ← 生成物(ldp gen-doc 产出,勿手改)
+  api-mapping.md                 由 api-mapping.json 生成
+  gaps.md                        由 gaps.json 生成
+```
+
+**原则:改数据(改 JSON),不改文档;文档是构建产物。** `schema.md` 解释字段语义。
+
+## 文件地图(progressive disclosure)
+
+本文件只放总纲。按工作流阶段按需读取对应文件:
 
 | 文件 | 何时读 | 内容 |
 |------|--------|------|
-| [`knowledge/driver-anatomy.md`](knowledge/driver-anatomy.md) | 开始前 | x-kernel 驱动的**双层结构**（胶水层 + 硬件逻辑层）与**注册三连**，附真实样例 |
-| [`knowledge/api-mapping.md`](knowledge/api-mapping.md) | Phase 2 映射时 | **★ 核心**：Linux API → x-kernel API 分类映射表 |
-| [`knowledge/gaps.md`](knowledge/gaps.md) | 撞到缺失子系统时 | **★ 核心**：已知缺失子系统清单 + 现状 + 替代方案 + 报告口径 |
-| [`knowledge/clk-subsystem.md`](knowledge/clk-subsystem.md) | 撞 clk / `clk_get_rate` 时 | Tier-0 clk 框架（`drivers/clk/`）分层 + 消费者用法 + SCMI header 位段坑（VERSION 掩盖 bug）与诊断 |
-| [`templates/driver-skeleton.md`](templates/driver-skeleton.md) | Phase 3 生成代码时 | 标准 Rust 驱动骨架（可直接填空） |
+| [`knowledge/driver-anatomy.md`](knowledge/driver-anatomy.md) | 开始前 | x-kernel 驱动**双层结构**(胶水层+硬件逻辑层)与**注册三连**,附真实样例 |
+| `ldp lookup` / [`knowledge/api-mapping.md`](knowledge/api-mapping.md) | Phase 2 映射时 | **★ 核心**:Linux API → x-kernel API 分类映射表(数据为源) |
+| `ldp gaps` / [`knowledge/gaps.md`](knowledge/gaps.md) | 撞到缺失子系统时 | **★ 核心**:已知缺失子系统清单 + 现状 + 替代方案(数据为源) |
+| [`knowledge/clk-subsystem.md`](knowledge/clk-subsystem.md) | 撞 clk / `clk_get_rate` 时 | Tier-0 clk 框架分层 + 消费者用法 + SCMI header 位段坑 |
+| [`templates/driver-skeleton.md`](templates/driver-skeleton.md) | Phase 3 生成代码时 | 标准 Rust 驱动骨架(可直接填空) |
 | [`templates/gap-report.md`](templates/gap-report.md) | Phase 4 写报告时 | 缺口报告固定格式 |
-| [`workflow/port-workflow.md`](workflow/port-workflow.md) | 贯穿全程 | Phase 0–6 详解（P6=真机带机校验/triage） |
-| [`examples/dwcmshc-walkthrough.md`](examples/dwcmshc-walkthrough.md) | 需要参照时 | ★ 完整 demo：Linux `dwcmshc` MMC → x-kernel，对照项目真实实现 |
+| [`workflow/port-workflow.md`](workflow/port-workflow.md) | 贯穿全程 | Phase 0–6 详解(P6=真机带机校验/triage) |
+| [`examples/dwcmshc-walkthrough.md`](examples/dwcmshc-walkthrough.md) | 需要参照时 | ★ 完整 demo:Linux dwcmshc → x-kernel(golden 基线) |
 
-## 工作流一览（详见 `workflow/port-workflow.md`）
+## 工作流一览(详见 `workflow/port-workflow.md`)
 
 ```
-P0 采集 → P1 分析 → P2 映射 → P3 生成 → P4 缺口报告 → P5 集成校验 → P6 带机校验/triage
+P0 采集 → P1 分析 → P2 映射 → P3 生成 → P4 缺口报告 → P5 集成校验 → P6 带机校验/triage → P7 经验沉淀
 ```
 
-- **P0 采集**：确定 Linux 源文件路径、目标 `compatible`、目标 `DeviceKind`/总线、x-kernel 落点目录。
-- **P1 分析**：通读 Linux 驱动，产出"驱动画像"（probe 步骤、依赖子系统、所用内核 API、寄存器初始化序列、中断逻辑、私有数据结构）+ **编号参考序列清单**（钉死在一个来源：U-Boot 或 Linux）。
-- **P2 映射**：逐条 Linux API 查 `api-mapping.md`——命中记替换，未命中记缺口。
-- **P3 生成**：按骨架生成**硬件逻辑层** + **胶水层** + **注册三连**；硬件序列忠实翻译 + **可追溯校验**（P1 每条编号步骤都对得上代码）。
-- **P4 缺口报告**：按模板产出，标阻塞程度（blocker / works-around / optional）与替代方案。
-- **P5 集成校验**：改 `firmware_specs.rs` / `<bus>/mod.rs` / `Cargo.toml`；按 `build-workflow` 跑 build + clippy；记录结果。**编译过≠可用**。
-- **P6 带机校验/triage**：加错误路径可观测性（dump 状态寄存器）；真机跑通该设备类的代表操作（SD 卡=完整枚举+读块）；对照 U-Boot dump 寄存器差异定位。**P6 没过 = 驱动不可用**，缺口报告如实标。
+- **P0 采集**:确定 Linux 源文件路径、目标 `compatible`、`DeviceKind`/总线、x-kernel 落点。
+- **P1 分析**:通读 Linux 驱动,产出"驱动画像" + **编号参考序列清单**(钉死在一个来源:U-Boot 或 Linux)。
+- **P2 映射**:逐条 Linux API 跑 `ldp lookup`(命中记替换) / `ldp scan`(揪缺口符号)。
+- **P3 生成**:按骨架生成硬件逻辑层 + 胶水层 + 注册三连;硬件序列忠实翻译 + 可追溯校验。
+- **P4 缺口报告**:按模板产出,标阻塞程度。`ldp scan` 的结果填进报告。
+- **P5 集成校验**:改 `firmware_specs.rs`/`<bus>/mod.rs`/`Cargo.toml`;按 `build-workflow` 跑 build + clippy。**编译过≠可用**。
+- **P6 带机校验/triage**:加错误路径可观测性;真机跑通该设备类的代表操作。**P6 没过 = 驱动不可用**。
+- **P7 经验沉淀(Ch8)**:`ldp trace` 记撞墙点,`ldp staging` 把 ≥2 支持的候选沉淀进正式知识库。
 
 ## 一次产出的交付物
 
-1. **硬件逻辑层**：`drivers/<class>/src/<name>.rs`（如 `drivers/block/src/xxx.rs`）——寄存器操作、初始化序列、中断处理。
-2. **胶水层**：`drivers/kdriver/src/driver_registry/<bus>/<name>.rs`——`impl DeviceDriver` + `probe_device` + `descriptor()`。
-3. **注册三连改动**：`firmware_specs.rs`（compatible）、`<bus>/mod.rs`（`DRIVER_FACTORIES` + feature gate）、`drivers/kdriver/Cargo.toml`（feature）。
-4. **缺口报告**：缺失子系统、阻塞程度、替代方案、可编译性结论。
+1. **硬件逻辑层**:`drivers/<class>/src/<name>.rs`——寄存器操作、初始化序列、中断处理。
+2. **胶水层**:`drivers/kdriver/src/driver_registry/<bus>/<name>.rs`——`impl DeviceDriver` + `probe_device` + `descriptor()`。
+3. **注册三连改动**:`firmware_specs.rs`、`<bus>/mod.rs`、`drivers/kdriver/Cargo.toml`。
+4. **缺口报告**:缺失子系统、阻塞程度、替代方案、可编译性结论。
 
 ## 触发方式
 
-- 命令式：在 Claude Code 里输入 `/linux-driver-port`（由 `.claude/skills/linux-driver-port/SKILL.md` 入口加载本共享知识）。
-- 文档式：直接读本目录下文件，或经 `AGENTS.md` / `CLAUDE.md` 引用加载。
+- 命令式:在 Claude Code 里输入 `/linux-driver-port`(由 `.claude/skills/linux-driver-port/SKILL.md` 入口加载本共享知识)。
+- 文档式:直接读本目录下文件,或经 `AGENTS.md`/`CLAUDE.md` 引用加载。
 
 ## 相关 skill
 
 - [`build-workflow`](../build-workflow/SKILL.md) —— 构建、clippy、运行、平台 target。
-- [`code-guidelines`](../code-guidelines/SKILL.md) —— Rust 内核编码与审查规范（unsafe、命名、并发）。
+- [`code-guidelines`](../code-guidelines/SKILL.md) —— Rust 内核编码与审查规范(unsafe、命名、并发)。

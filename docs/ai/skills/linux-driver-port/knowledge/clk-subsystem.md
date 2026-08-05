@@ -90,3 +90,7 @@ sdmmc 的 `ciu` 是 SCMI 时钟（DT `clocks = <&scmi_clk 9>`，`#clock-cells=<1
 ## 报告口径
 
 > `clk-rate` — Tier-0 框架已落地（`drivers/clk/`）：`clk::devm_clk_get(device,"ciu")` 走 phandle 键多 provider 注册表（时钟经总线预解析为 `ResourceDesc::Clock`，驱动不碰 DT）。RK3588 sdmmc 的 `ciu` 经 SCMI provider 查询（`CLOCK_RATE_GET`），返回 ciu 参考时钟（~49.5 MHz），dw_mshc 直接用作 `bus_hz`。曾把 SCMI 消息头位段记反（`message_id`/`token`），VERSION 能通但 RATE_GET 报 `PROTOCOL_ERROR`、被误判成"固件 stub"——实为 header 位段 bug（`message_id[7:0]`、`token[27:18]`），改正后 `ciu` 解析到真值。详见上文"RK3588 SCMI 实测"。
+
+## 位段守护（harness）
+
+SCMI 消息头的位段定义已进 [`data/bitfield-defs.json`](../data/bitfield-defs.json)（附 GENMASK 依据 + 已知错误布局 + 验证用例）。跑 `ldp check-bitfields` 会把每条验证用例在正确布局与错误布局下分别打包——**VERSION（msg=0/token=0）会被标为文档化 false-pass**（它无法区分正确/错误布局，正是当年骗人的根由）；若有人误标 VERSION "能区分"，check-bitfields 会报矛盾并退出码 1。新位段定义一律走这条流程，不要凭记忆写进代码/注释。
