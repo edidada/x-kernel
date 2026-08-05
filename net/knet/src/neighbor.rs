@@ -7,7 +7,7 @@
 use alloc::{collections::VecDeque, vec::Vec};
 
 use hashbrown::HashMap;
-use khal::time::{Duration, TimeValue};
+use ktime_types::{MonotonicInstant, TimeSpan};
 
 use crate::{
     buf::PacketBuf,
@@ -42,7 +42,7 @@ pub(crate) enum NeighborObservation {
 pub(crate) struct PendingTxPacket {
     pub(crate) next_hop: IpAddress,
     pub(crate) source_addr: IpAddress,
-    pub(crate) next_attempt_at: TimeValue,
+    pub(crate) next_attempt_at: MonotonicInstant,
     pub(crate) is_broadcast: bool,
     pub(crate) packet: PacketBuf,
 }
@@ -52,7 +52,7 @@ impl PendingTxPacket {
         Self {
             next_hop,
             source_addr,
-            next_attempt_at: TimeValue::ZERO,
+            next_attempt_at: MonotonicInstant::ORIGIN,
             is_broadcast: false,
             packet,
         }
@@ -66,7 +66,7 @@ impl PendingTxPacket {
         Self {
             next_hop,
             source_addr,
-            next_attempt_at: TimeValue::ZERO,
+            next_attempt_at: MonotonicInstant::ORIGIN,
             is_broadcast: true,
             packet,
         }
@@ -100,32 +100,32 @@ pub(crate) enum NeighborSendDecision {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NeighborEntry {
     Incomplete {
-        next_request_at: TimeValue,
+        next_request_at: MonotonicInstant,
         probes_sent: u8,
     },
     Reachable {
         hardware_address: MacAddress,
-        expires_at: TimeValue,
-        updated_at: TimeValue,
+        expires_at: MonotonicInstant,
+        updated_at: MonotonicInstant,
     },
     Stale {
         hardware_address: MacAddress,
-        stale_since: TimeValue,
-        updated_at: TimeValue,
+        stale_since: MonotonicInstant,
+        updated_at: MonotonicInstant,
     },
     Delay {
         hardware_address: MacAddress,
-        probe_at: TimeValue,
-        updated_at: TimeValue,
+        probe_at: MonotonicInstant,
+        updated_at: MonotonicInstant,
     },
     Probe {
         hardware_address: MacAddress,
-        next_request_at: TimeValue,
+        next_request_at: MonotonicInstant,
         probes_sent: u8,
-        updated_at: TimeValue,
+        updated_at: MonotonicInstant,
     },
     Failed {
-        failed_at: TimeValue,
+        failed_at: MonotonicInstant,
     },
     Permanent {
         hardware_address: MacAddress,
@@ -136,7 +136,7 @@ impl NeighborEntry {
     fn from_control_state(state: NeighborState) -> Self {
         match state {
             NeighborState::Incomplete => Self::Incomplete {
-                next_request_at: TimeValue::ZERO,
+                next_request_at: MonotonicInstant::ORIGIN,
                 probes_sent: 0,
             },
             NeighborState::Permanent { hardware_addr } => Self::Permanent {
@@ -148,7 +148,7 @@ impl NeighborEntry {
     fn new_dynamic(
         hardware_address: MacAddress,
         protocol_address: IpAddress,
-        now: TimeValue,
+        now: MonotonicInstant,
         observation: NeighborObservation,
     ) -> Self {
         match observation {
@@ -170,7 +170,7 @@ impl NeighborEntry {
         &mut self,
         hardware_address: MacAddress,
         protocol_address: IpAddress,
-        now: TimeValue,
+        now: MonotonicInstant,
         observation: NeighborObservation,
     ) {
         if matches!(self, Self::Permanent { .. }) || !self.can_update_dynamic(hardware_address, now)
@@ -180,7 +180,7 @@ impl NeighborEntry {
         *self = Self::new_dynamic(hardware_address, protocol_address, now, observation);
     }
 
-    fn can_update_dynamic(&self, hardware_address: MacAddress, now: TimeValue) -> bool {
+    fn can_update_dynamic(&self, hardware_address: MacAddress, now: MonotonicInstant) -> bool {
         match self {
             Self::Reachable {
                 hardware_address: current,
@@ -201,15 +201,12 @@ impl NeighborEntry {
                 hardware_address: current,
                 updated_at,
                 ..
-            } => {
-                *current == hardware_address
-                    || now >= updated_at.saturating_add(NeighborResolver::LOCK_TIME)
-            }
+            } => *current == hardware_address || now >= *updated_at + NeighborResolver::LOCK_TIME,
             Self::Incomplete { .. } | Self::Failed { .. } | Self::Permanent { .. } => true,
         }
     }
 
-    fn record_request_attempt(&mut self, now: TimeValue) {
+    fn record_request_attempt(&mut self, now: MonotonicInstant) {
         match self {
             Self::Incomplete {
                 next_request_at,
@@ -221,7 +218,7 @@ impl NeighborEntry {
                 ..
             } => {
                 *probes_sent = (*probes_sent).saturating_add(1);
-                *next_request_at = now.saturating_add(NeighborResolver::REQUEST_RETRY_INTERVAL);
+                *next_request_at = now + NeighborResolver::REQUEST_RETRY_INTERVAL;
             }
             Self::Reachable { .. }
             | Self::Stale { .. }
@@ -231,27 +228,25 @@ impl NeighborEntry {
         }
     }
 
-    fn next_poll_at(&self) -> Option<TimeValue> {
+    fn next_poll_at(&self) -> Option<MonotonicInstant> {
         match self {
             Self::Incomplete {
                 next_request_at, ..
             } => Some(*next_request_at),
             Self::Reachable { expires_at, .. } => Some(*expires_at),
             Self::Stale { stale_since, .. } => {
-                Some(stale_since.saturating_add(NeighborResolver::NEIGHBOR_GC_TIME))
+                Some(*stale_since + NeighborResolver::NEIGHBOR_GC_TIME)
             }
             Self::Delay { probe_at, .. } => Some(*probe_at),
             Self::Probe {
                 next_request_at, ..
             } => Some(*next_request_at),
-            Self::Failed { failed_at } => {
-                Some(failed_at.saturating_add(NeighborResolver::NEIGHBOR_GC_TIME))
-            }
+            Self::Failed { failed_at } => Some(*failed_at + NeighborResolver::NEIGHBOR_GC_TIME),
             Self::Permanent { .. } => None,
         }
     }
 
-    fn transmit_hardware_address(&mut self, now: TimeValue) -> Option<MacAddress> {
+    fn transmit_hardware_address(&mut self, now: MonotonicInstant) -> Option<MacAddress> {
         match *self {
             Self::Permanent { hardware_address }
             | Self::Delay {
@@ -281,7 +276,7 @@ impl NeighborEntry {
                 hardware_address,
                 stale_since,
                 updated_at,
-            } if now < stale_since.saturating_add(NeighborResolver::NEIGHBOR_GC_TIME) => {
+            } if now < stale_since + NeighborResolver::NEIGHBOR_GC_TIME => {
                 *self = Self::Delay {
                     hardware_address,
                     probe_at: now + NeighborResolver::DELAY_PROBE_TIME,
@@ -297,7 +292,7 @@ impl NeighborEntry {
         }
     }
 
-    fn needs_request(&self, now: TimeValue) -> bool {
+    fn needs_request(&self, now: MonotonicInstant) -> bool {
         match self {
             Self::Incomplete {
                 next_request_at, ..
@@ -313,7 +308,7 @@ impl NeighborEntry {
         }
     }
 
-    fn should_fail(&self, now: TimeValue) -> bool {
+    fn should_fail(&self, now: MonotonicInstant) -> bool {
         match self {
             Self::Incomplete {
                 next_request_at,
@@ -336,7 +331,7 @@ impl NeighborEntry {
         matches!(self, Self::Failed { .. })
     }
 
-    fn restart_resolution(&mut self, now: TimeValue) {
+    fn restart_resolution(&mut self, now: MonotonicInstant) {
         if self.is_failed() {
             *self = Self::Incomplete {
                 next_request_at: now,
@@ -368,7 +363,7 @@ impl NeighborCache {
         &mut self,
         protocol_address: IpAddress,
         hardware_address: MacAddress,
-        now: TimeValue,
+        now: MonotonicInstant,
         observation: NeighborObservation,
     ) {
         let target = protocol_address;
@@ -390,14 +385,14 @@ impl NeighborCache {
     fn transmit_hardware_address(
         &mut self,
         target: IpAddress,
-        now: TimeValue,
+        now: MonotonicInstant,
     ) -> Option<MacAddress> {
         self.entries
             .get_mut(&target)
             .and_then(|entry| entry.transmit_hardware_address(now))
     }
 
-    fn needs_request(&self, target: IpAddress, now: TimeValue) -> bool {
+    fn needs_request(&self, target: IpAddress, now: MonotonicInstant) -> bool {
         self.entries
             .get(&target)
             .is_some_and(|entry| entry.needs_request(now))
@@ -409,23 +404,23 @@ impl NeighborCache {
             .is_some_and(NeighborEntry::is_failed)
     }
 
-    fn restart_resolution(&mut self, target: IpAddress, now: TimeValue) {
+    fn restart_resolution(&mut self, target: IpAddress, now: MonotonicInstant) {
         if let Some(entry) = self.entries.get_mut(&target) {
             entry.restart_resolution(now);
         }
     }
 
-    fn record_request_attempt(&mut self, target: IpAddress, now: TimeValue) {
+    fn record_request_attempt(&mut self, target: IpAddress, now: MonotonicInstant) {
         self.entries
             .entry(target)
             .or_insert(NeighborEntry::Incomplete {
-                next_request_at: TimeValue::ZERO,
+                next_request_at: MonotonicInstant::ORIGIN,
                 probes_sent: 0,
             })
             .record_request_attempt(now);
     }
 
-    fn maintain(&mut self, now: TimeValue) -> Vec<NeighborMaintenance> {
+    fn maintain(&mut self, now: MonotonicInstant) -> Vec<NeighborMaintenance> {
         let mut maintenance = Vec::new();
         for (target, entry) in &mut self.entries {
             match entry {
@@ -441,7 +436,7 @@ impl NeighborCache {
                     };
                 }
                 NeighborEntry::Stale { stale_since, .. }
-                    if now >= stale_since.saturating_add(NeighborResolver::NEIGHBOR_GC_TIME) =>
+                    if now >= *stale_since + NeighborResolver::NEIGHBOR_GC_TIME =>
                 {
                     maintenance.push(NeighborMaintenance::Remove(*target));
                 }
@@ -459,7 +454,7 @@ impl NeighborCache {
                     maintenance.push(NeighborMaintenance::Request(*target));
                 }
                 NeighborEntry::Failed { failed_at }
-                    if now >= failed_at.saturating_add(NeighborResolver::NEIGHBOR_GC_TIME) =>
+                    if now >= *failed_at + NeighborResolver::NEIGHBOR_GC_TIME =>
                 {
                     maintenance.push(NeighborMaintenance::Remove(*target));
                 }
@@ -485,7 +480,7 @@ impl NeighborCache {
         maintenance
     }
 
-    fn next_poll_at(&self) -> Option<TimeValue> {
+    fn next_poll_at(&self) -> Option<MonotonicInstant> {
         self.entries
             .values()
             .filter_map(NeighborEntry::next_poll_at)
@@ -496,7 +491,7 @@ impl NeighborCache {
         self.entries.contains_key(&target)
     }
 
-    fn next_poll_at_for(&self, target: IpAddress) -> Option<TimeValue> {
+    fn next_poll_at_for(&self, target: IpAddress) -> Option<MonotonicInstant> {
         self.entries
             .get(&target)
             .and_then(NeighborEntry::next_poll_at)
@@ -510,13 +505,13 @@ pub(crate) struct NeighborResolver {
 }
 
 impl NeighborResolver {
-    const DELAY_PROBE_TIME: Duration = Duration::from_secs(5);
-    const LOCK_TIME: Duration = Duration::from_secs(1);
+    const DELAY_PROBE_TIME: TimeSpan = TimeSpan::from_secs(5);
+    const LOCK_TIME: TimeSpan = TimeSpan::from_secs(1);
     const MAX_PROBES: u8 = 6;
-    const NEIGHBOR_GC_TIME: Duration = Duration::from_secs(60);
-    const NEIGHBOR_REACHABLE_TIME: Duration = Duration::from_secs(300);
-    const REQUEST_RETRY_INTERVAL: Duration = Duration::from_secs(1);
-    const TX_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+    const NEIGHBOR_GC_TIME: TimeSpan = TimeSpan::from_secs(60);
+    const NEIGHBOR_REACHABLE_TIME: TimeSpan = TimeSpan::from_secs(300);
+    const REQUEST_RETRY_INTERVAL: TimeSpan = TimeSpan::from_secs(1);
+    const TX_RETRY_INTERVAL: TimeSpan = TimeSpan::from_secs(1);
 
     pub(crate) fn new() -> Self {
         Self {
@@ -530,7 +525,7 @@ impl NeighborResolver {
         next_hop: IpAddress,
         source_addr: IpAddress,
         packet: PacketBuf,
-        now: TimeValue,
+        now: MonotonicInstant,
     ) -> NeighborSendDecision {
         let hardware_address = self.cache.transmit_hardware_address(next_hop, now);
         if let Some(hardware_address) = hardware_address {
@@ -567,12 +562,12 @@ impl NeighborResolver {
         PendingTxPacket::new_broadcast(next_hop, source_addr, packet)
     }
 
-    pub(crate) fn requeue(&mut self, mut packet: PendingTxPacket, now: TimeValue) {
-        packet.next_attempt_at = now.saturating_add(Self::TX_RETRY_INTERVAL);
+    pub(crate) fn requeue(&mut self, mut packet: PendingTxPacket, now: MonotonicInstant) {
+        packet.next_attempt_at = now + Self::TX_RETRY_INTERVAL;
         self.enqueue_pending(packet);
     }
 
-    pub(crate) fn record_request_attempt(&mut self, target: IpAddress, now: TimeValue) {
+    pub(crate) fn record_request_attempt(&mut self, target: IpAddress, now: MonotonicInstant) {
         self.cache.record_request_attempt(target, now);
     }
 
@@ -580,7 +575,7 @@ impl NeighborResolver {
         &mut self,
         protocol_address: IpAddress,
         hardware_address: MacAddress,
-        now: TimeValue,
+        now: MonotonicInstant,
         observation: NeighborObservation,
         fallback_source_addr: Option<IpAddress>,
     ) -> Vec<NeighborAction> {
@@ -594,7 +589,7 @@ impl NeighborResolver {
         &mut self,
         target: IpAddress,
         state: NeighborState,
-        now: TimeValue,
+        now: MonotonicInstant,
         fallback_source_addr: Option<IpAddress>,
     ) -> Vec<NeighborAction> {
         self.cache.apply_control_state(target, state);
@@ -604,13 +599,13 @@ impl NeighborResolver {
 
     pub(crate) fn poll(
         &mut self,
-        now: TimeValue,
+        now: MonotonicInstant,
         fallback_source_addr: Option<IpAddress>,
     ) -> Vec<NeighborAction> {
         self.collect_actions(now, fallback_source_addr)
     }
 
-    pub(crate) fn next_poll_at(&self) -> Option<TimeValue> {
+    pub(crate) fn next_poll_at(&self) -> Option<MonotonicInstant> {
         match (self.earliest_pending_poll_at(), self.cache.next_poll_at()) {
             (Some(pending), Some(neighbor)) => Some(pending.min(neighbor)),
             (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
@@ -629,7 +624,7 @@ impl NeighborResolver {
 
     fn collect_actions(
         &mut self,
-        now: TimeValue,
+        now: MonotonicInstant,
         fallback_source_addr: Option<IpAddress>,
     ) -> Vec<NeighborAction> {
         let mut request_targets = Vec::new();
@@ -711,7 +706,7 @@ impl NeighborResolver {
     fn mark_pending_due(&mut self, target: IpAddress) {
         for pending in &mut self.pending_tx {
             if pending.next_hop == target {
-                pending.next_attempt_at = TimeValue::ZERO;
+                pending.next_attempt_at = MonotonicInstant::ORIGIN;
             }
         }
     }
@@ -729,7 +724,7 @@ impl NeighborResolver {
             .unwrap_or_else(|| Self::unspecified_address(target))
     }
 
-    fn earliest_pending_poll_at(&self) -> Option<TimeValue> {
+    fn earliest_pending_poll_at(&self) -> Option<MonotonicInstant> {
         self.pending_tx
             .iter()
             .map(|pending| {
@@ -738,8 +733,8 @@ impl NeighborResolver {
                 } else {
                     self.cache.next_poll_at_for(pending.next_hop)
                 };
-                if pending.next_attempt_at == TimeValue::ZERO {
-                    neighbor_deadline.unwrap_or(TimeValue::ZERO)
+                if pending.next_attempt_at == MonotonicInstant::ORIGIN {
+                    neighbor_deadline.unwrap_or(MonotonicInstant::ORIGIN)
                 } else {
                     neighbor_deadline
                         .map(|deadline| deadline.min(pending.next_attempt_at))
@@ -752,7 +747,7 @@ impl NeighborResolver {
     fn dynamic_reachable_time(
         hardware_address: MacAddress,
         protocol_address: IpAddress,
-    ) -> Duration {
+    ) -> TimeSpan {
         // A stable per-neighbor spread avoids synchronized expirations without
         // making early boot depend on a random source.
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;
@@ -777,7 +772,7 @@ impl NeighborResolver {
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
         let base_secs = Self::NEIGHBOR_REACHABLE_TIME.as_secs();
-        Duration::from_secs(base_secs / 2 + hash % base_secs)
+        TimeSpan::from_secs(base_secs / 2 + hash % base_secs)
     }
 
     fn unspecified_address(target: IpAddress) -> IpAddress {
@@ -798,13 +793,13 @@ mod tests {
     #[def_test]
     fn incomplete_control_neighbor_requires_arp_request() {
         let mut neighbor = NeighborEntry::from_control_state(NeighborState::Incomplete);
-        let now = TimeValue::from_secs(10);
+        let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(10));
 
         assert!(neighbor.needs_request(now));
         neighbor.record_request_attempt(now);
 
         assert!(!neighbor.needs_request(
-            now + NeighborResolver::REQUEST_RETRY_INTERVAL - Duration::from_nanos(1)
+            now + NeighborResolver::REQUEST_RETRY_INTERVAL - TimeSpan::from_nanos(1)
         ));
         assert!(neighbor.needs_request(now + NeighborResolver::REQUEST_RETRY_INTERVAL));
         assert_eq!(neighbor.transmit_hardware_address(now), None);
@@ -812,12 +807,12 @@ mod tests {
 
     #[def_test]
     fn expired_dynamic_neighbor_keeps_mac_during_delay() {
-        let expires_at = TimeValue::from_secs(10);
+        let expires_at = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(10));
         let hardware_address = MacAddress([1, 2, 3, 4, 5, 6]);
         let mut neighbor = NeighborEntry::Reachable {
             hardware_address,
             expires_at,
-            updated_at: TimeValue::ZERO,
+            updated_at: MonotonicInstant::ORIGIN,
         };
 
         assert!(!neighbor.needs_request(expires_at));
@@ -828,7 +823,7 @@ mod tests {
         assert!(matches!(neighbor, NeighborEntry::Delay { .. }));
 
         assert!(!neighbor.needs_request(
-            expires_at + NeighborResolver::DELAY_PROBE_TIME - Duration::from_nanos(1)
+            expires_at + NeighborResolver::DELAY_PROBE_TIME - TimeSpan::from_nanos(1)
         ));
         assert_eq!(
             neighbor.next_poll_at(),
@@ -838,7 +833,7 @@ mod tests {
 
     #[def_test]
     fn arp_request_attempts_reach_failed_state() {
-        let now = TimeValue::from_secs(10);
+        let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(10));
         let target = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1));
         let source_addr = Ipv4Address::new(192, 0, 2, 99);
         let mut resolver = NeighborResolver::new();
@@ -852,12 +847,12 @@ mod tests {
         resolver.pending_tx = VecDeque::from([pending_packet(target, source_addr, now)]);
 
         for attempt in 0..NeighborResolver::MAX_PROBES {
-            let attempt_at = now + Duration::from_secs(u64::from(attempt));
+            let attempt_at = now + TimeSpan::from_secs(u64::from(attempt));
             assert!(resolver.cache.needs_request(target, attempt_at));
             resolver.cache.record_request_attempt(target, attempt_at);
         }
 
-        let failed_at = now + Duration::from_secs(u64::from(NeighborResolver::MAX_PROBES));
+        let failed_at = now + TimeSpan::from_secs(u64::from(NeighborResolver::MAX_PROBES));
         // Drive the transition through maintain()/poll, not by hand-writing Failed.
         let actions = resolver.poll(failed_at, None);
         assert!(
@@ -887,12 +882,12 @@ mod tests {
         neighbor.learn_dynamic(
             MacAddress([6, 5, 4, 3, 2, 1]),
             IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1)),
-            TimeValue::ZERO,
+            MonotonicInstant::ORIGIN,
             NeighborObservation::Reachable,
         );
 
         assert_eq!(
-            neighbor.transmit_hardware_address(TimeValue::ZERO),
+            neighbor.transmit_hardware_address(MonotonicInstant::ORIGIN),
             Some(permanent_addr)
         );
     }
@@ -900,7 +895,7 @@ mod tests {
     #[def_test]
     fn non_host_directed_arp_learning_is_stale_and_uses_old_mac() {
         let hardware_address = MacAddress([1, 2, 3, 4, 5, 6]);
-        let now = TimeValue::from_secs(10);
+        let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(10));
         let protocol_address = Ipv4Address::new(192, 0, 2, 1);
         let mut neighbor = NeighborEntry::new_dynamic(
             hardware_address,
@@ -921,7 +916,7 @@ mod tests {
     fn dynamic_mac_update_obeys_locktime() {
         let old_hardware_address = MacAddress([1, 2, 3, 4, 5, 6]);
         let new_hardware_address = MacAddress([6, 5, 4, 3, 2, 1]);
-        let updated_at = TimeValue::from_secs(10);
+        let updated_at = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(10));
         let protocol_address = Ipv4Address::new(192, 0, 2, 1);
         let mut neighbor = NeighborEntry::new_dynamic(
             old_hardware_address,
@@ -933,7 +928,7 @@ mod tests {
         neighbor.learn_dynamic(
             new_hardware_address,
             IpAddress::Ipv4(protocol_address),
-            updated_at + NeighborResolver::LOCK_TIME - Duration::from_nanos(1),
+            updated_at + NeighborResolver::LOCK_TIME - TimeSpan::from_nanos(1),
             NeighborObservation::Reachable,
         );
         assert_eq!(
@@ -962,15 +957,15 @@ mod tests {
         );
         let base = NeighborResolver::NEIGHBOR_REACHABLE_TIME.as_secs();
 
-        assert!(reachable_time >= Duration::from_secs(base / 2));
-        assert!(reachable_time < Duration::from_secs(base + base / 2));
+        assert!(reachable_time >= TimeSpan::from_secs(base / 2));
+        assert!(reachable_time < TimeSpan::from_secs(base + base / 2));
     }
 
     #[def_test]
     fn pending_packet_preserves_ipv4_source() {
         let target = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1));
         let source_addr = Ipv4Address::new(192, 0, 2, 99);
-        let pending = pending_packet(target, source_addr, TimeValue::ZERO);
+        let pending = pending_packet(target, source_addr, MonotonicInstant::ORIGIN);
 
         assert_eq!(pending.next_hop, target);
         assert_eq!(pending.source_addr, IpAddress::Ipv4(source_addr));
@@ -984,25 +979,30 @@ mod tests {
         resolver.pending_tx = VecDeque::from([pending_packet(
             target,
             source_addr,
-            TimeValue::from_secs(30),
+            MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(30)),
         )]);
         resolver.cache.entries.insert(
             target,
             NeighborEntry::Incomplete {
-                next_request_at: TimeValue::from_secs(20),
+                next_request_at: MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(20)),
                 probes_sent: 1,
             },
         );
 
         assert_eq!(
             resolver.earliest_pending_poll_at(),
-            Some(TimeValue::from_secs(20))
+            Some(MonotonicInstant::from_span_since_origin(
+                TimeSpan::from_secs(20)
+            ))
         );
 
-        resolver.pending_tx.front_mut().unwrap().next_attempt_at = TimeValue::from_secs(10);
+        resolver.pending_tx.front_mut().unwrap().next_attempt_at =
+            MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(10));
         assert_eq!(
             resolver.earliest_pending_poll_at(),
-            Some(TimeValue::from_secs(10))
+            Some(MonotonicInstant::from_span_since_origin(
+                TimeSpan::from_secs(10)
+            ))
         );
     }
 
@@ -1014,14 +1014,21 @@ mod tests {
         resolver.pending_tx = VecDeque::from([pending_packet(
             target,
             source_addr,
-            TimeValue::from_secs(20),
+            MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(20)),
         )]);
 
-        assert!(resolver.poll(TimeValue::from_secs(10), None).is_empty());
+        assert!(
+            resolver
+                .poll(
+                    MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(10)),
+                    None
+                )
+                .is_empty()
+        );
         assert_eq!(resolver.pending_tx.len(), 1);
         assert_eq!(
             resolver.pending_tx.front().unwrap().next_attempt_at,
-            TimeValue::from_secs(20)
+            MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(20))
         );
     }
 
@@ -1035,13 +1042,13 @@ mod tests {
             pending_packet(
                 IpAddress::Ipv4(Ipv4Address::new(198, 51, 100, 1)),
                 removed_source,
-                TimeValue::ZERO,
+                MonotonicInstant::ORIGIN,
             ),
-            pending_packet(retained_target, retained_source, TimeValue::ZERO),
+            pending_packet(retained_target, retained_source, MonotonicInstant::ORIGIN),
             pending_packet(
                 IpAddress::Ipv4(Ipv4Address::new(198, 51, 100, 3)),
                 removed_source,
-                TimeValue::from_secs(10),
+                MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(10)),
             ),
         ]);
 
@@ -1058,13 +1065,13 @@ mod tests {
         let permanent = NeighborEntry::Permanent {
             hardware_address: MacAddress([1, 2, 3, 4, 5, 6]),
         };
-        let dynamic_expiry = TimeValue::from_secs(30);
+        let dynamic_expiry = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(30));
         let dynamic = NeighborEntry::Reachable {
             hardware_address: MacAddress([6, 5, 4, 3, 2, 1]),
             expires_at: dynamic_expiry,
-            updated_at: TimeValue::ZERO,
+            updated_at: MonotonicInstant::ORIGIN,
         };
-        let incomplete_deadline = TimeValue::from_secs(20);
+        let incomplete_deadline = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(20));
         let incomplete = NeighborEntry::Incomplete {
             next_request_at: incomplete_deadline,
             probes_sent: 1,
@@ -1078,7 +1085,7 @@ mod tests {
     fn pending_packet(
         next_hop: IpAddress,
         source_addr: Ipv4Address,
-        next_attempt_at: TimeValue,
+        next_attempt_at: MonotonicInstant,
     ) -> PendingTxPacket {
         PendingTxPacket {
             next_hop,

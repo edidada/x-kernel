@@ -634,7 +634,7 @@ impl Router {
             .apply_neighbor_update(update)
     }
 
-    pub fn next_poll_at(&self) -> Option<TimeValue> {
+    pub fn next_poll_at(&self) -> Option<MonotonicInstant> {
         self.devices
             .iter()
             .filter_map(|device| device.next_poll_at())

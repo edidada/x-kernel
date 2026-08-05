@@ -12,7 +12,7 @@ use core::{
 use kerrno::{KError, KResult, LinuxError};
 use khal::time::monotonic_time;
 use kpoll::{PollContext, PollRegisterError, PollSet};
-use ktask::future::sleep_until;
+use ktask::future::sleep;
 use ktime_types::{MonotonicInstant, TimeSpan};
 use smoltcp::{
     iface::{Interface, SocketSet},
@@ -38,6 +38,7 @@ fn to_smoltcp_instant(instant: MonotonicInstant) -> SmoltcpInstant {
     SmoltcpInstant::from_micros_const(micros)
 }
 
+#[cfg_attr(not(unittest), allow(dead_code))]
 fn from_smoltcp_instant(instant: SmoltcpInstant) -> MonotonicInstant {
     let micros = u64::try_from(instant.total_micros()).unwrap_or(0);
     MonotonicInstant::from_span_since_origin(TimeSpan::from_micros(micros))
@@ -188,14 +189,14 @@ impl Service {
     ///
     /// Driven by `knet-rx`, not by socket `register_rx_waker`: merging this into
     /// the shared `timeout_poll` path wakes every waiter whenever a pending
-    /// packet uses `TimeValue::ZERO`, which livelocks concurrent loopback TCP
+    /// packet uses `MonotonicInstant::ORIGIN`, which livelocks concurrent loopback TCP
     /// under slow TCG.
-    pub(crate) fn device_next_poll_at(&self) -> Option<TimeValue> {
+    pub(crate) fn device_next_poll_at(&self) -> Option<MonotonicInstant> {
         self.router.next_poll_at()
     }
 
     fn schedule_next_poll(&mut self, sockets: &SocketSet<'_>) {
-        let smoltcp_now = now();
+        let smoltcp_now = to_smoltcp_instant(monotonic_time());
         let monotonic_now = monotonic_time();
         // Socket waiters only arm smoltcp interface timers (same as main).
         // Device deadlines are owned by `knet-rx`.
@@ -203,7 +204,7 @@ impl Service {
             let delay_micros = next
                 .total_micros()
                 .saturating_sub(smoltcp_now.total_micros()) as u64;
-            monotonic_now + core::time::Duration::from_micros(delay_micros)
+            monotonic_now + TimeSpan::from_micros(delay_micros)
         });
 
         if let Some(deadline) = deadline {
@@ -216,7 +217,7 @@ impl Service {
                 self.timeout = None;
                 self.timeout_deadline = Some(deadline);
 
-                let delay = deadline.saturating_sub(monotonic_now);
+                let delay = deadline.saturating_duration_since(monotonic_now);
                 let mut fut = Box::pin(sleep(delay));
                 let wake = Waker::from(self.timeout_poll.clone());
                 let mut cx = Context::from_waker(&wake);
@@ -262,7 +263,11 @@ impl Service {
 
     fn rebuild_interface(&mut self) {
         let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
-        let mut iface = Interface::new(config, &mut self.router, now());
+        let mut iface = Interface::new(
+            config,
+            &mut self.router,
+            to_smoltcp_instant(monotonic_time()),
+        );
         let local_ipv4_addrs = self.router.local_ipv4_addrs();
         Self::replace_interface_ipv4_addrs(&mut iface, &local_ipv4_addrs);
         self.iface = iface;

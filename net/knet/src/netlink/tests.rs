@@ -9,8 +9,8 @@ use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 use ::core::{sync::atomic::Ordering, task::Waker};
 use kcred::Cred;
 use kerrno::LinuxError;
-use khal::time::TimeValue;
 use kio::Cursor;
+use ktime_types::MonotonicInstant;
 use unittest::def_test;
 
 use super::{
@@ -128,7 +128,7 @@ impl NetDevice for TestDevice {
         self.device_id
     }
 
-    fn poll_rx(&mut self, _ifindex: i32, _timestamp: TimeValue) -> Option<PacketBuf> {
+    fn poll_rx(&mut self, _ifindex: i32, _timestamp: MonotonicInstant) -> Option<PacketBuf> {
         None
     }
 
@@ -137,7 +137,7 @@ impl NetDevice for TestDevice {
         _ifindex: i32,
         _next_hop: IpAddress,
         _packet: PacketBuf,
-        _timestamp: TimeValue,
+        _timestamp: MonotonicInstant,
     ) -> bool {
         false
     }
@@ -1128,7 +1128,7 @@ fn test_loopback_link_down_blocks_ip_send() {
         1,
         IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)),
         packet,
-        TimeValue::ZERO,
+        MonotonicInstant::ORIGIN,
     ));
 }
 

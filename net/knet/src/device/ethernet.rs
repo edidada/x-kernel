@@ -5,10 +5,11 @@
 //! Ethernet device adapter.
 use alloc::{string::String, vec::Vec};
 
-use kirq::IrqEventSource;
 use kclass::{ClassDevice, prelude::*};
 use kerrno::{KError, KResult, LinuxError};
-use khal::time::{TimeValue, monotonic_time};
+use khal::time::monotonic_time;
+use kirq::IrqEventSource;
+use ktime_types::{MonotonicInstant, TimeSpan};
 
 use crate::{
     buf::{PacketBuf, PacketOwner},
@@ -75,7 +76,6 @@ impl EthernetDevice {
                     future::{Future, poll_fn},
                     pin::Pin,
                     task::Poll,
-                    time::Duration,
                 };
 
                 use khal::time::monotonic_time;
@@ -106,7 +106,7 @@ impl EthernetDevice {
                         // Drive ARP / pending-TX deadlines here instead of via
                         // socket `timeout_poll` (see Service::schedule_next_poll).
                         // Never busy-spin on an already-due deadline: pending TX can
-                        // remain at TimeValue::ZERO across a poll, which would
+                        // remain at MonotonicInstant::ORIGIN across a poll, which would
                         // otherwise starve the rest of the stack under TCG.
                         let mut now = monotonic_time();
                         let mut device_deadline = crate::SERVICE.lock().device_next_poll_at();
@@ -120,8 +120,10 @@ impl EthernetDevice {
                             device_deadline = crate::SERVICE.lock().device_next_poll_at();
                         }
                         let delay = match device_deadline {
-                            Some(deadline) if deadline > now => deadline.saturating_sub(now),
-                            Some(_) => Duration::from_millis(1),
+                            Some(deadline) if deadline > now => {
+                                deadline.saturating_duration_since(now)
+                            }
+                            Some(_) => TimeSpan::from_millis(1),
                             // Still no deadline after the one-shot recheck: wait
                             // for IRQ only. Do not `continue` — that would
                             // livelock when the deadline stays None.
@@ -224,7 +226,7 @@ impl EthernetDevice {
         &mut self,
         ifindex: i32,
         frame_data: &[u8],
-        timestamp: TimeValue,
+        timestamp: MonotonicInstant,
     ) -> Option<PacketBuf> {
         let Some(frame) = wire::EthernetFrameRef::new_checked(frame_data) else {
             warn!("Dropping malformed Ethernet frame");
@@ -262,7 +264,7 @@ impl EthernetDevice {
         None
     }
 
-    fn send_arp_request(&mut self, ifindex: i32, request: NeighborRequest, now: TimeValue) {
+    fn send_arp_request(&mut self, ifindex: i32, request: NeighborRequest, now: MonotonicInstant) {
         let IpAddress::Ipv4(target_ipv4) = request.target else {
             warn!("IPv6 address ARP is not supported: {}", request.target);
             self.neighbor_resolver
@@ -322,7 +324,7 @@ impl EthernetDevice {
         ifindex: i32,
         hardware_address: MacAddress,
         pending: PendingTxPacket,
-        now: TimeValue,
+        now: MonotonicInstant,
     ) {
         if let Err(err) = self.send_ipv4_packet_to(ifindex, hardware_address, &pending.packet)
             && err.should_retry()
@@ -335,7 +337,7 @@ impl EthernetDevice {
         &mut self,
         ifindex: i32,
         actions: Vec<NeighborAction>,
-        now: TimeValue,
+        now: MonotonicInstant,
     ) {
         for action in actions {
             match action {
@@ -355,7 +357,7 @@ impl EthernetDevice {
         ifindex: i32,
         frame_destination: MacAddress,
         payload: &[u8],
-        now: TimeValue,
+        now: MonotonicInstant,
     ) {
         let local_hardware_addr = self.mac_addr();
         let Some(event) = arp::parse_receive(
@@ -393,7 +395,7 @@ impl EthernetDevice {
         self.execute_neighbor_actions(ifindex, actions, now);
     }
 
-    fn process_pending_packets(&mut self, ifindex: i32, now: TimeValue) {
+    fn process_pending_packets(&mut self, ifindex: i32, now: MonotonicInstant) {
         let fallback_source_addr = self
             .assigned_ipv4_addrs
             .first()
@@ -447,7 +449,7 @@ impl NetDeviceOps for EthernetDevice {
         Some(self.inner.id())
     }
 
-    fn poll_rx(&mut self, ifindex: i32, timestamp: TimeValue) -> Option<PacketBuf> {
+    fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> Option<PacketBuf> {
         if !self.is_link_up() {
             return None;
         }
@@ -477,7 +479,7 @@ impl NetDeviceOps for EthernetDevice {
         ifindex: i32,
         next_hop: IpAddress,
         mut packet: PacketBuf,
-        timestamp: TimeValue,
+        timestamp: MonotonicInstant,
     ) -> bool {
         if !self.is_link_up() {
             return false;
@@ -555,7 +557,7 @@ impl NetDeviceOps for EthernetDevice {
         Ok(())
     }
 
-    fn next_poll_at(&self) -> Option<TimeValue> {
+    fn next_poll_at(&self) -> Option<MonotonicInstant> {
         self.is_link_up()
             .then(|| self.neighbor_resolver.next_poll_at())
             .flatten()
