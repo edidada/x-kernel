@@ -136,6 +136,7 @@ pub fn init_network() {
     LISTEN_TABLE.init_once(ListenTable::new());
     udp::init_udp_registry();
     poller::network_poller().start();
+    ktask::register_timer_callback(|_| SERVICE.handle_timer_tick());
 
     if let Some(irq) = eth0_irq {
         EthernetDevice::spawn_rx_task(irq);

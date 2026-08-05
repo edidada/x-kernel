@@ -126,7 +126,7 @@ core/kruntime
 | `stack::ipv4` | 使用 `etherparse` 校验和构造 IPv4 与 ICMPv4 头部，并执行输出分片 |
 | `stack::fragment` | 按源地址、目的地址、标识、协议和接口重组本地 IPv4 分片，并限制队列数量、内存和存活时间 |
 | `transport::udp` | 维护 UDP PCB registry、接收队列、bind 与 connect 状态、校验和、socket option、异步错误和 IPv4 收发 |
-| `SocketSetWrapper` | 串行化 smoltcp socket set 访问，并在新增 socket 时通知等待者 |
+| `SocketSetWrapper` | 串行化 smoltcp socket set 与 TCP deferred-close 元数据访问，并在新增 socket 时通知等待者 |
 | `ListenTable` | 管理 TCP listen backlog、SYN 队列、accept 队列和 accept waker |
 | `GeneralOptions` | 统一管理 nonblock、reuseaddr、超时和设备 mask |
 | `SocketOps` | 上层 socket syscall 使用的统一操作接口 |
@@ -270,12 +270,12 @@ IDLE ──notify──────────────> SCHEDULED
 6. TCP、raw IP、ICMP 和 IPv6 packet 进入有界 smoltcp ingress queue，`Interface::poll` 驱动兼容期协议 socket。
 7. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
 8. `Router::dispatch_budgeted` 先处理 control TX queue，再处理 data TX queue，单轮发送数量受 TX budget 限制。
-9. `Interface::poll_at` 返回下一次协议 deadline，`Service` 更新 timer；尚未到期的 deadline 不进入 `PollProgress::has_more`，到期 timer 通过 `notify(PollReason::Timer)` 发布工作。
+9. `Interface::poll_at` 与 orphan `FIN_WAIT_2` deadline 共同决定下一次网络 deadline，`Service` 将其写入原子 deadline；每次系统 tick 检查该值，到期后通过 `notify(PollReason::Timer)` 发布工作。尚未到期的 deadline 不进入 `PollProgress::has_more`。
 10. `PollProgress::has_more` 只汇报当前可立即处理的 RX、ingress、TX 或已到期 timer 工作。每次后台 Future poll 只调用一次 `Service::poll_budgeted`，剩余工作通过 `SCHEDULED` 状态重新唤醒任务，在下一次 Future poll 中处理。
 
 ### TX 路由
 
-1. TCP connect、send、receive window update 和 close，raw send 以及 UDP data queue 提交完成后发布真实 TX 通知；调用方可随后通过 `assist_once` 协助执行已调度的一轮。
+1. TCP connect、send、receive window update 和 close，raw send 以及 UDP data queue 提交完成后发布真实 TX 通知；调用方可随后通过 `assist_once` 协助执行已调度的一轮。TCP 文件关闭不会立即删除仍处于协议关闭过程中的 handle。
 2. crate 内 UDP 在 Router mutex 内检查队列容量、选择源地址和路由 MTU，写入 UDP 与 IPv4 头后提交到 data TX queue。smoltcp 生成的 IP 包进入同一 data TX queue，`IngressProcessor` 生成的 ICMPv4 错误进入 control TX queue。
 3. `IP_MTU_DISCOVER` 决定 UDP IPv4 头部的 DF 标志。超出路由 MTU 且允许分片的包由 `fragment_output_packet` 拆分，DF 包返回 `EMSGSIZE`。
 4. `Router::dispatch_budgeted` 优先接管 control packet，再按 IP 版本解析目的地址；IPv4 输出先按实际长度更新 `total_len` 和头部校验和。
@@ -323,10 +323,10 @@ IDLE ──notify──────────────> SCHEDULED
 
 ## 并发模型
 
-- 全局 `SERVICE` 是 `LazyInit<Service>`。`Service` 内部分别使用 mutex 保护 smoltcp `Interface`、`Router`、`IngressProcessor`、timeout 和可复用 batch。
+- 全局 `SERVICE` 是 `LazyInit<Service>`。`Service` 内部分别使用 mutex 保护 smoltcp `Interface`、`Router`、`IngressProcessor` 和可复用 batch。网络 timer deadline 使用 `AtomicU64` 保存，系统 tick 回调只执行原子检查、waiter 唤醒和 poller 通知。
 - `NetworkPoller` 使用一个 `AtomicU8` 保存 `IDLE`、`SCHEDULED`、`RUNNING` 和 `RUNNING_PENDING`。后台预算为 512 个 RX packet、256 个 TX packet 和 32 个 timer event，socket assist 预算为 16、16 和 8。每次后台 Future poll 和每次 assist 最多执行一轮。
 - RX 设备拉取和 TX dispatch 位于 Router 锁内，IPv4 校验、过滤和 snoop 位于 Router 锁外。smoltcp ingress queue 有固定容量，队列满时先推进 Interface 和 TX，再继续拉取设备 packet。
-- 全局 `SOCKET_SET` 内部使用 `Mutex<SocketSet>`，所有 smoltcp socket handle 访问都通过 `with_socket_mut` 串行化。
+- 全局 `SOCKET_SET` 内部使用 `Mutex<SocketSetState>`，其中的 smoltcp socket set 与 TCP deferred-close 元数据共享同一所有权锁。关闭、登记、协议推进和回收不会跨两个 mutex 交接 handle。
 - `UDP_PCB_REGISTRY` 按端口分为 256 个 bucket，每个 bucket 独立加锁；每个 UDP PCB 的接收队列、endpoint、错误队列和 option 状态分别受锁或 atomic 保护。
 - `Ipv4Reassembler` 位于 `Router` 内，并由 `SERVICE` mutex 串行访问。
 - `LISTEN_TABLE` 用 `Mutex<HashMap<...>>` 管理 listener；每个 entry 的 `accept_poll`
@@ -457,6 +457,7 @@ bridge v1 只转发 bytes，不转发 TIPC handles 或 memrefs。
 ## Drop / 资源释放
 
 - `SocketSetWrapper::remove` 按 smoltcp handle 移除 socket。
+- TCP 文件对象 Drop 时先对 smoltcp socket 发起协议关闭。已经进入 `Closed` 且没有待发送复位报文的 handle 立即删除；接收队列存在未读数据时改用 abort 并保留 handle，直到 poller 发出 RST。其余 handle 转移到 deferred-close registry，继续参与 poller 推进、payload 发送、FIN、ACK 和重传。poller 在协议进入 `Closed` 后回收 handle。脱离文件对象引用的连接进入 `FIN_WAIT_2` 后启动 60 秒回收期限，并把该 deadline 合并到协议 poll timer；其他关闭状态不附加统一期限。
 - TCP listener 关闭时，`ListenTable::unlisten` 标记 entry closed，drain child handles，并从 `SOCKET_SET` 删除。
 - Unix stream listener 在 `Drop` 中清空 bind slot，释放 pending connection request。
 - Unix stream channel 被 `Option<Channel>` 持有。shutdown 在对应方向锁内更新 endpoint 的读写关闭状态并唤醒受影响方向。`Channel::drop` 在释放 ring producer 和 consumer 前发布双向关闭状态并唤醒双方 connection-state waiter；peer 的 `recv` 先消费已发布数据，缓冲区耗尽后返回 EOF，`poll` 报告 `RDHUP`。关闭端丢弃自身接收队列中的未读数据时，对端记录一次 `ConnectionReset`，由 `recv` 或 `SO_ERROR` 消费。

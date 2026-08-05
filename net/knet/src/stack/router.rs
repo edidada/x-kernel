@@ -500,7 +500,7 @@ fn tx_packet_buf(packet: Vec<u8>) -> PacketBuf {
 mod tests {
     use alloc::{boxed::Box, vec, vec::Vec};
 
-    use khal::time::TimeValue;
+    use ktime_types::MonotonicInstant;
     use unittest::{assert, assert_eq, def_test};
 
     use super::*;
@@ -514,7 +514,7 @@ mod tests {
             1,
             IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)),
             packet,
-            TimeValue::ZERO,
+            MonotonicInstant::ORIGIN,
         );
         router
     }
@@ -524,7 +524,7 @@ mod tests {
         let mut router = router_with_ready_loopback_packet();
         let mut packets = Vec::new();
 
-        let drain = router.drain_rx_budgeted_into(TimeValue::ZERO, 1, &mut packets);
+        let drain = router.drain_rx_budgeted_into(MonotonicInstant::ORIGIN, 1, &mut packets);
 
         assert_eq!(drain.work_done, 1);
         assert!(!drain.has_more);
@@ -535,7 +535,7 @@ mod tests {
         let mut router = router_with_ready_loopback_packet();
         let mut packets = Vec::new();
 
-        let drain = router.drain_rx_budgeted_into(TimeValue::ZERO, 0, &mut packets);
+        let drain = router.drain_rx_budgeted_into(MonotonicInstant::ORIGIN, 0, &mut packets);
 
         assert_eq!(drain.work_done, 0);
         assert!(drain.has_more);
@@ -549,7 +549,7 @@ mod tests {
             .push_back(tx_packet_buf(vec![0; 20]));
         let capacity_before = router.available_tx_packet_slots();
 
-        let (work_done, _) = router.dispatch_budgeted(TimeValue::ZERO, 1);
+        let (work_done, _) = router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1);
 
         assert_eq!(work_done, 1);
         assert_eq!(router.available_tx_packet_slots(), capacity_before);
@@ -561,7 +561,7 @@ mod tests {
         router.data_tx_queue.push_back(tx_packet_buf(vec![0; 20]));
         let capacity_before = router.available_tx_packet_slots();
 
-        let (work_done, _) = router.dispatch_budgeted(TimeValue::ZERO, 1);
+        let (work_done, _) = router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1);
 
         assert_eq!(work_done, 1);
         assert_eq!(router.available_tx_packet_slots(), capacity_before + 1);

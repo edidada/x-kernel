@@ -4,17 +4,16 @@
 
 //! Network service with budgeted data-plane progression.
 
-use alloc::{boxed::Box, sync::Arc, task::Wake, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::{
-    pin::Pin,
-    task::{Context, Waker},
+    sync::atomic::{AtomicU64, Ordering},
+    task::Waker,
 };
 
 use kerrno::{KError, KResult, LinuxError};
 use khal::time::monotonic_time;
 use kpoll::{PollContext, PollRegisterError, PollSet};
 use ksync::Mutex;
-use ktask::future::sleep_until;
 use ktime_types::{MonotonicInstant, TimeSpan};
 use smoltcp::{
     iface::{Interface, PollResult},
@@ -49,24 +48,8 @@ fn from_smoltcp_instant(instant: SmoltcpInstant) -> MonotonicInstant {
     MonotonicInstant::from_span_since_origin(TimeSpan::from_micros(micros))
 }
 
-struct TimeoutState {
-    future: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
-    deadline: Option<MonotonicInstant>,
-}
-
-struct TimeoutWake {
-    socket_waiters: Arc<PollSet>,
-}
-
-impl Wake for TimeoutWake {
-    fn wake(self: Arc<Self>) {
-        self.wake_by_ref();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.socket_waiters.as_ref().wake();
-        crate::poller::network_poller().notify(crate::poller::PollReason::Timer);
-    }
+pub(crate) fn now() -> SmoltcpInstant {
+    to_smoltcp_instant(monotonic_time())
 }
 
 pub struct Service {
@@ -76,7 +59,7 @@ pub struct Service {
     rx_batch: Mutex<Vec<PacketBuf>>,
     accepted_batch: Mutex<Vec<PacketBuf>>,
     control_batch: Mutex<Vec<Vec<u8>>>,
-    timeout: Mutex<TimeoutState>,
+    timeout_deadline_micros: AtomicU64,
     timeout_poll: Arc<PollSet>,
 }
 
@@ -92,10 +75,7 @@ impl Service {
             rx_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
             accepted_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
             control_batch: Mutex::new(Vec::new()),
-            timeout: Mutex::new(TimeoutState {
-                future: None,
-                deadline: None,
-            }),
+            timeout_deadline_micros: AtomicU64::new(0),
             timeout_poll: Arc::new(PollSet::new()),
         }
     }
@@ -144,13 +124,15 @@ impl Service {
         }
 
         let mut router = self.router.lock();
-        let current = to_smoltcp_instant(device_timestamp);
+        let current = now();
         let mut iface = self.iface.lock();
         let iface_changed = iface.poll(current, &mut *router, &mut sockets);
-        let next_poll = iface.poll_at(current, &sockets);
+        let deferred_close_deadline = sockets.reap_deferred_tcp_closes(current);
+        let next_poll =
+            earliest_poll_deadline(iface.poll_at(current, &sockets), deferred_close_deadline);
         drop(iface);
         let timer_has_more = has_immediate_timer_work(current, next_poll);
-        self.update_poll_timeout(device_timestamp, next_poll);
+        self.update_poll_timeout(current, next_poll);
         LISTEN_TABLE.wake_touched_acceptors(&mut sockets);
         drop(sockets);
 
@@ -270,12 +252,12 @@ impl Service {
         context.register(self.timeout_poll.as_ref())?;
         let source_waker = Waker::from(self.timeout_poll.clone());
 
-        let current = monotonic_time();
+        let current = now();
         let sockets = SOCKET_SET.inner.lock();
-        let next = self
-            .iface
-            .lock()
-            .poll_at(to_smoltcp_instant(current), &sockets);
+        let next = earliest_poll_deadline(
+            self.iface.lock().poll_at(current, &sockets),
+            sockets.deferred_tcp_close_deadline(),
+        );
         drop(sockets);
         self.update_poll_timeout(current, next);
 
@@ -289,41 +271,47 @@ impl Service {
         Ok(source_waker)
     }
 
-    fn update_poll_timeout(&self, current: MonotonicInstant, next: Option<SmoltcpInstant>) {
-        let mut timeout = self.timeout.lock();
-        let mut should_notify_timer = false;
-        if let Some(next) = next {
-            let deadline = from_smoltcp_instant(next);
-            let should_reset = match timeout.deadline {
-                None => true,
-                Some(old_deadline) => current >= old_deadline || deadline < old_deadline,
-            };
+    fn update_poll_timeout(&self, current: SmoltcpInstant, next: Option<SmoltcpInstant>) {
+        let Some(next) = next else {
+            self.timeout_deadline_micros.store(0, Ordering::Release);
+            return;
+        };
 
-            if should_reset {
-                timeout.future = None;
-                timeout.deadline = Some(deadline);
-                let mut future = Box::pin(sleep_until(deadline));
-                let wake = Waker::from(Arc::new(TimeoutWake {
-                    socket_waiters: self.timeout_poll.clone(),
-                }));
-                let mut context = Context::from_waker(&wake);
-                if future.as_mut().poll(&mut context).is_ready() {
-                    timeout.deadline = None;
-                    should_notify_timer = true;
-                } else {
-                    timeout.future = Some(future);
-                }
-            }
-        } else {
-            timeout.future = None;
-            timeout.deadline = None;
+        if next <= current {
+            self.timeout_deadline_micros.store(0, Ordering::Release);
+            self.publish_timer_expiration();
+            return;
         }
-        drop(timeout);
 
-        if should_notify_timer {
-            self.timeout_poll.as_ref().wake();
-            crate::poller::network_poller().notify(crate::poller::PollReason::Timer);
+        let deadline = u64::try_from(next.total_micros())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        self.timeout_deadline_micros
+            .store(deadline, Ordering::Release);
+    }
+
+    pub(crate) fn handle_timer_tick(&self) {
+        let deadline = self.timeout_deadline_micros.load(Ordering::Acquire);
+        if deadline == 0
+            || u64::try_from(now().total_micros())
+                .unwrap_or(0)
+                .saturating_add(1)
+                < deadline
+        {
+            return;
         }
+        if self
+            .timeout_deadline_micros
+            .compare_exchange(deadline, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.publish_timer_expiration();
+        }
+    }
+
+    fn publish_timer_expiration(&self) {
+        self.timeout_poll.as_ref().wake();
+        crate::poller::network_poller().notify(crate::poller::PollReason::Timer);
     }
 
     pub fn sync_netlink(&self, state: &RtnetlinkState) {
@@ -360,6 +348,16 @@ impl Service {
 
 fn has_immediate_timer_work(current: SmoltcpInstant, next_poll: Option<SmoltcpInstant>) -> bool {
     next_poll.is_some_and(|deadline| deadline <= current)
+}
+
+fn earliest_poll_deadline(
+    protocol: Option<SmoltcpInstant>,
+    deferred_close: Option<SmoltcpInstant>,
+) -> Option<SmoltcpInstant> {
+    match (protocol, deferred_close) {
+        (Some(protocol), Some(close)) => Some(protocol.min(close)),
+        (protocol, close) => protocol.or(close),
+    }
 }
 
 fn output_ipv4_packet_count(
@@ -430,5 +428,13 @@ mod tests {
         let current = SmoltcpInstant::from_millis(10);
 
         assert!(has_immediate_timer_work(current, Some(current)));
+    }
+
+    #[def_test]
+    fn deferred_close_deadline_can_precede_protocol_deadline() {
+        let close = SmoltcpInstant::from_millis(10);
+        let protocol = SmoltcpInstant::from_millis(20);
+
+        assert!(earliest_poll_deadline(Some(protocol), Some(close)) == Some(close));
     }
 }

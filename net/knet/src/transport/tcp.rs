@@ -121,6 +121,60 @@ impl TcpSocket {
         SOCKET_SET.with_socket_mut::<smol::Socket, _, _>(self.dispatch_irq, f)
     }
 
+    // File close must inspect the receive queue before any protocol packet is
+    // dispatched so unread data can select the TCP reset path.
+    fn shutdown_inner(
+        &self,
+        how: Shutdown,
+        close_protocol: bool,
+        progress_immediately: bool,
+    ) -> KResult {
+        if how.has_read() {
+            self.rx_closed.store(true, Ordering::Release);
+            self.poll_rx_closed.wake();
+        }
+
+        // stream
+        if self.state() == State::Connected {
+            if how.has_write() {
+                self.tx_closed.store(true, Ordering::Release);
+                if close_protocol {
+                    self.with_smol_socket(|socket| {
+                        socket.close();
+                    });
+                }
+                if progress_immediately {
+                    network_poller().notify(PollReason::Tx);
+                }
+            }
+            if how == Shutdown::Both {
+                self.state.set(State::Closed);
+                self.unregister_bound_endpoint();
+                *self.bound_endpoint.lock() = empty_endpoint();
+            }
+            if progress_immediately {
+                poll_interfaces();
+            }
+        }
+
+        // listener
+        if let Ok(guard) = self.state.lock(State::Listening) {
+            guard.transit(State::Closed, || {
+                let bound_endpoint = self.bound_endpoint()?;
+                LISTEN_TABLE.unlisten(bound_endpoint);
+                self.unregister_bound_endpoint();
+                *self.bound_endpoint.lock() = empty_endpoint();
+                if progress_immediately {
+                    poll_interfaces();
+                }
+                Ok(())
+            })?;
+        }
+
+        // ignore for other states
+        Ok(())
+    }
+
     fn bound_endpoint(&self) -> KResult<IpListenEndpoint> {
         let endpoint = *self.bound_endpoint.lock();
         if endpoint.port == 0 {
@@ -532,42 +586,7 @@ impl SocketOps for TcpSocket {
     }
 
     fn shutdown(&self, how: Shutdown) -> KResult {
-        if how.has_read() {
-            self.rx_closed.store(true, Ordering::Release);
-            self.poll_rx_closed.wake();
-        }
-
-        // stream
-        if self.state() == State::Connected {
-            if how.has_write() {
-                self.tx_closed.store(true, Ordering::Release);
-                self.with_smol_socket(|socket| {
-                    socket.close();
-                });
-                network_poller().notify(PollReason::Tx);
-            }
-            if how == Shutdown::Both {
-                self.state.set(State::Closed);
-                self.unregister_bound_endpoint();
-                *self.bound_endpoint.lock() = empty_endpoint();
-            }
-            poll_interfaces();
-        }
-
-        // listener
-        if let Ok(guard) = self.state.lock(State::Listening) {
-            guard.transit(State::Closed, || {
-                let bound_endpoint = self.bound_endpoint()?;
-                LISTEN_TABLE.unlisten(bound_endpoint);
-                self.unregister_bound_endpoint();
-                *self.bound_endpoint.lock() = empty_endpoint();
-                poll_interfaces();
-                Ok(())
-            })?;
-        }
-
-        // ignore for other states
-        Ok(())
+        self.shutdown_inner(how, true, true)
     }
 }
 
@@ -611,12 +630,32 @@ impl Pollable for TcpSocket {
 
 impl Drop for TcpSocket {
     fn drop(&mut self) {
-        if let Err(err) = self.shutdown(Shutdown::Both) {
+        if let Err(err) = self.shutdown_inner(Shutdown::Both, false, false) {
             warn!("TCP socket {}: shutdown failed: {}", self.dispatch_irq, err);
         }
         self.unregister_bound_endpoint();
-        SOCKET_SET.remove(self.dispatch_irq);
-        // This is crucial for the close messages to be sent.
+
+        let mut sockets = SOCKET_SET.inner.lock();
+        let socket = sockets.get_mut::<smol::Socket>(self.dispatch_irq);
+        let has_unread_data = socket.can_recv();
+        let is_protocol_closed = {
+            // Linux aborts a TCP close with unread receive data. Keep the
+            // handle until smoltcp dispatches the resulting reset packet.
+            if has_unread_data {
+                socket.abort();
+            } else {
+                socket.close();
+            }
+            socket.state() == smol::State::Closed
+        };
+        if is_protocol_closed && !has_unread_data && socket.local_endpoint().is_none() {
+            sockets.remove(self.dispatch_irq);
+            return;
+        }
+
+        sockets.defer_tcp_close(self.dispatch_irq);
+        drop(sockets);
+        network_poller().notify(PollReason::Tx);
         poll_interfaces();
     }
 }
@@ -740,7 +779,7 @@ mod tests {
     use alloc::vec;
     use core::net::Ipv4Addr;
 
-    use smoltcp::wire::Ipv4Address;
+    use smoltcp::{time::Instant, wire::Ipv4Address};
     use unittest::def_test;
 
     use super::*;
@@ -821,6 +860,32 @@ mod tests {
             TcpSocket::send_state_error(smol::State::TimeWait),
             KError::BrokenPipe
         );
+    }
+
+    #[def_test]
+    fn deferred_close_reaps_protocol_closed_socket() {
+        let current = Instant::from_millis(10);
+        let mut sockets = crate::wrapper::SocketSetState::new();
+        let handle = sockets.add(new_tcp_socket());
+        sockets.defer_tcp_close(handle);
+
+        let next_deadline = sockets.reap_deferred_tcp_closes(current);
+
+        assert_eq!(next_deadline, None);
+        assert_eq!(sockets.iter().count(), 0);
+    }
+
+    #[def_test]
+    fn deferred_close_does_not_impose_deadline_on_live_socket() {
+        let current = Instant::from_millis(10);
+        let mut socket = new_tcp_socket();
+        socket.listen(49152).unwrap();
+        let mut sockets = crate::wrapper::SocketSetState::new();
+        let handle = sockets.add(socket);
+        sockets.defer_tcp_close(handle);
+
+        assert_eq!(sockets.reap_deferred_tcp_closes(current), None);
+        assert_eq!(sockets.iter().count(), 1);
     }
 
     #[def_test]
