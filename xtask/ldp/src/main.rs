@@ -21,9 +21,12 @@ use clap::{Parser, Subcommand};
 mod bitfield;
 mod cmd;
 mod data;
+mod extract;
 mod gendoc;
 mod golden;
+mod layout;
 mod query;
+mod references;
 mod repo;
 mod requirements;
 mod staging;
@@ -76,16 +79,26 @@ enum Cmd {
 
     /// 校验数据完整性(JSON 可解析、source.path 存在、字段齐全)。fail-closed。
     ///
-    /// 反例:check-data 不校验位段逻辑;位段用 check-bitfields。
+    /// 反例:check-data 不校验位段布局;布局用 check-layout。
     CheckData,
 
-    /// 校验位段定义自洽 + 揪 false-pass(VERSION 骗人那类)。fail-closed。
+    /// 校验布局声明 ↔ 参考真值(以及可选的驱动代码)。fail-closed。
     ///
-    /// 反例:check-bitfields 不碰源码路径;数据完整性用 check-data。
-    CheckBitfields {
-        /// 只检查指定 def id。
+    /// 从钉死的本地参考树机械导出位段真值,diff claim。取代旧
+    /// check-bitfields 的自指范式(检查 JSON 跟自己的关系)。
+    ///
+    /// 反例:check-layout 不验 source.path;数据完整性用 check-data。
+    CheckLayout {
+        /// 只查某个 port 的布局(scope=port);省略则只查 protocol 级。
         #[arg(long)]
-        r#def: Option<String>,
+        port: Option<String>,
+    },
+
+    /// [兼容别名] 等价于 `check-layout`。旧 check-bitfields 的自指逻辑已删除。
+    CheckBitfields {
+        /// 传给 check-layout 的 --port。
+        #[arg(long, alias = "def")]
+        port: Option<String>,
     },
 
     /// 机械查 provider crate 的 OS-agnostic 红线(Cargo.toml 不得依赖 k*/of)。fail-closed。
@@ -117,6 +130,15 @@ enum Cmd {
         name: Option<String>,
     },
 
+    /// 参考树注册表:把"以 Linux/U-Boot 源码为参考"变成机器可验
+    /// (必须是本地 submodule/vendored 目录,拒绝 web search)。fail-closed。
+    ///
+    /// 反例:ref check 只验本地就位 + pin 标记;不联网核对远程。
+    Ref {
+        #[command(subcommand)]
+        action: RefAction,
+    },
+
     /// 记录/查看 port 轨迹(Ch8 在线循环,append-only 不可变)。
     ///
     /// 反例:trace 不会自动并入正式 data/;要发布用 `staging promote`。
@@ -140,6 +162,14 @@ enum Cmd {
         #[command(subcommand)]
         action: RequirementsAction,
     },
+}
+
+#[derive(Subcommand)]
+enum RefAction {
+    /// 列已注册参考树 + 本地状态(就位/缺失/pin)。
+    List,
+    /// 校验所有 required 参考本地就位且可确认 pin。fail-closed。
+    Check,
 }
 
 #[derive(Subcommand)]

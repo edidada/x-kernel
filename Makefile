@@ -350,7 +350,7 @@ ldp:
 	@$(LDP) help
 
 ldp-check:
-	@$(LDP) check-data && $(LDP) check-bitfields
+	@$(LDP) ref check && $(LDP) check-data && $(LDP) check-layout
 
 ldp-gen-doc:
 	@$(LDP) gen-doc

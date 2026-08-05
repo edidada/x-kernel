@@ -8,8 +8,8 @@ use std::process::ExitCode;
 
 use crate::Cmd;
 use crate::data::BitfieldDefs;
-use crate::{RequirementsAction, StagingAction, TraceAction};
-use crate::{data, gendoc, golden, query, repo, requirements, staging, trace, validate};
+use crate::{RefAction, RequirementsAction, StagingAction, TraceAction};
+use crate::{data, gendoc, golden, layout, query, references, repo, requirements, staging, trace, validate};
 
 /// 主动工具发现:打印每个子命令的用途 + 边界(反例)+ 示例。
 pub fn help() {
@@ -23,9 +23,12 @@ pub fn help() {
     println!("                           不查缺口;缺口用 gaps。");
     println!("  gaps [--status S] [--id] 列/筛缺失子系统。不扫源码;源码用 scan。");
     println!("  check-data               数据完整性(JSON/source.path/字段)。fail-closed。");
-    println!("                           不验位段逻辑;位段用 check-bitfields。");
-    println!("  check-bitfields          位段自洽 + 揪 false-pass(SCMI VERSION 类 bug)。");
-    println!("                           不碰源码路径;数据完整性用 check-data。");
+    println!("                           不验位段布局;布局用 check-layout。");
+    println!("  ref list/check           参考树注册表(本地 Linux/U-Boot 源码)。fail-closed。");
+    println!("                           必须本地目录(拒绝 web search);vendor 方法见 data/references/README.md。");
+    println!("  check-layout [--port]    布局声明 ↔ 参考真值(以及可选驱动代码)。fail-closed。");
+    println!("                           从钉死参考机械导出位段,diff claim;取代旧 check-bitfields 自指范式。");
+    println!("                           旧 check-bitfields 为兼容别名(转发)。",);
     println!(
         "  check-provider-crate <f> 机械查 provider crate 的 OS-agnostic 红线(不得依赖 k*/of)。"
     );
@@ -61,7 +64,7 @@ pub fn help() {
     println!();
     println!("五条铁律里有四条已被 ldp 变成会失败的检查:");
     println!("  铁律2 不编造 API   → check-data(source.path 必须存在)");
-    println!("  铁律1/2 位段忠实   → check-bitfields(非零字段验证,false-pass fail-closed)");
+    println!("  铁律1/2 位段忠实   → check-layout(从钉死参考机械导出位段,diff claim/驱动)");
     println!("  铁律4 缺口必报     → scan(源码里用到的缺口符号强制提示)");
     println!("  数据/文档一致性    → golden + gen-doc(walkthrough 不漂移,md 不手改)");
     println!("  经验沉淀           → trace + staging(≥2 条轨迹支持才发布,Ch8 进化闭环)");
@@ -87,28 +90,13 @@ pub fn run(cmd: Cmd) -> ExitCode {
             0
         }),
         Cmd::CheckData => with_data(|api, gaps, bf| validate::check_data(&api, &gaps, &bf)),
-        Cmd::CheckProviderCrate { path } => {
-            let n = validate::check_provider_crate(&path);
-            if n == 0 {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            }
+        Cmd::CheckLayout { port } => {
+            with_data(move |_api, _gaps, bf| layout::check_layout(&bf, port.as_deref()))
         }
-        Cmd::CheckBitfields { r#def } => with_data(move |_api, _gaps, bf| {
-            let target = match r#def.as_ref() {
-                Some(name) => {
-                    let defs: Vec<_> = bf.defs.into_iter().filter(|d| &d.id == name).collect();
-                    if defs.is_empty() {
-                        eprintln!("error: 没有 def id = `{name}`");
-                        return 1;
-                    }
-                    BitfieldDefs { defs }
-                }
-                None => bf,
-            };
-            validate::check_bitfields(&target)
-        }),
+        Cmd::CheckBitfields { port } => {
+            // 兼容别名:旧 check-bitfields 的自指逻辑已删除,转发到 check-layout。
+            with_data(move |_api, _gaps, bf| layout::check_layout(&bf, port.as_deref()))
+        }
         Cmd::Scan { path } => {
             with_data(
                 |_api, gaps, _bf| match validate::scan_source(&gaps, &path) {
@@ -119,6 +107,14 @@ pub fn run(cmd: Cmd) -> ExitCode {
                     }
                 },
             )
+        }
+        Cmd::CheckProviderCrate { path } => {
+            let n = validate::check_provider_crate(&path);
+            if n == 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
         }
         Cmd::GenDoc => with_data(|api, gaps, _bf| {
             gendoc::gen_api_mapping(&api);
@@ -174,9 +170,28 @@ pub fn run(cmd: Cmd) -> ExitCode {
             help();
             ExitCode::SUCCESS
         }
+        Cmd::Ref { action } => run_ref(action),
         Cmd::Trace { action } => run_trace(action),
         Cmd::Staging { action } => run_staging(action),
         Cmd::Requirements { action } => run_requirements(action),
+    }
+}
+
+/// 参考树注册表。
+fn run_ref(action: RefAction) -> ExitCode {
+    match action {
+        RefAction::List => {
+            references::list();
+            ExitCode::SUCCESS
+        }
+        RefAction::Check => {
+            let n = references::check();
+            if n == 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
     }
 }
 

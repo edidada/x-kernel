@@ -2,15 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Data model for the linux-driver-port skill knowledge base.
-//!
-//! `data/*.json` 是唯一真相源;本模块负责反序列化并提供查询。
-//! 字段语义见 `docs/ai/skills/linux-driver-port/data/schema.md`。
-
 //! 数据层(`data/*.json`)的反序列化模型。
 //!
 //! 这些结构体是为了**忠实建模 JSON schema**而存在的;部分字段当前未被命令消费,
-//! 但保留它们以保证真相源完整、向前兼容。
+//! 但保留它们以保证真相源完整、向前兼容。字段语义见
+//! `docs/ai/skills/linux-driver-port/data/schema.md`。
 
 #![allow(dead_code)]
 
@@ -109,57 +105,138 @@ pub struct Gaps {
     pub cascade_gaps: Vec<serde_json::Value>,
 }
 
-/// 位段定义里的一个字段。
+/// 布局字段声明:移植方声称该字段占 [lsb, msb],并锚到参考符号。
+///
+/// `ref_symbol` 指向参考树里一个机械可导出的符号(Linux 的 `#define`
+/// `MSG_ID_MASK GENMASK(7,0)` 等);`claim` 是移植方写进 JSON 的声明,
+/// 由 `ldp check-layout` 与参考导出真值比对(以及可选地与驱动代码实际
+/// 写法比对)。
 #[derive(Debug, Clone, Deserialize)]
-pub struct BitField {
+pub struct FieldClaim {
     pub name: String,
+    /// 参考树内的符号名(如 `MSG_ID_MASK`)。提取器据参考文件机械导出
+    /// 它的 [lsb, msb] 真值,与 `claim` 比对。
+    pub ref_symbol: String,
+    /// 移植方声明。`lsb`/`msb` 是被验证的断言(抄对了吗),非自由字段。
+    pub claim: FieldSpan,
+}
+
+/// 一个字段占的位段 [lsb, msb](闭区间,与 GENMASK 一致)。
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+pub struct FieldSpan {
     pub lsb: u32,
     pub msb: u32,
-    #[serde(default)]
-    pub genmask: String,
 }
 
-/// 一条验证用例。
-#[derive(Debug, Clone, Deserialize)]
-pub struct VerificationTrace {
-    pub name: String,
-    /// 字段名 → 值。值可能不是整数(serde_json::Number),用 u64 解析。
-    pub fields: serde_json::Value,
-    /// 数据自评:这条 trace 能否区分正确布局与已知错误布局。
-    /// true/false 由 check-bitfields 与实际打包结果交叉验证。
-    /// 字符串形如 "partial" 也允许,按"非 true"处理。
-    #[serde(default)]
-    pub distinguishes_layout: serde_json::Value,
-    #[serde(default)]
-    pub self_note: String,
+impl FieldSpan {
+    /// 该位段的掩码(若 msb>=63 则返回全 1)。
+    pub fn mask(&self) -> u64 {
+        let width = self.msb.saturating_sub(self.lsb) + 1;
+        if width >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << width) - 1
+        }
+    }
+    pub fn width(&self) -> u32 {
+        self.msb.saturating_sub(self.lsb) + 1
+    }
 }
 
-/// 一个已知错误布局。
-#[derive(Debug, Clone, Deserialize)]
-pub struct WrongLayout {
-    pub desc: String,
-    pub fields: Vec<BitField>,
-}
-
-/// 位段定义。
+/// 某个寄存器/协议 wire 布局的参考锚定声明。
+///
+/// 旧的 `known_wrong_layouts` / `verification_traces` 自指范式已删除:
+/// 布局真值由 `ref` 钉死的参考树机械导出,`fields[].claim` 是被验证的
+/// 移植方声明,不再靠人手写"我猜会怎么记错"。
 #[derive(Debug, Clone, Deserialize)]
 pub struct BitfieldDef {
     pub id: String,
     pub name: String,
+    /// `protocol`(全局共享,如 SCMI header)或 `port`(某次移植专属)。
+    #[serde(default = "default_scope_protocol")]
+    pub scope: String,
+    /// `scope=port` 时必填;该布局属于哪个移植任务。
+    #[serde(default)]
+    pub port: String,
+    /// 参考锚:`{tree, file}`。`tree` 是 references.json 里注册的参考树 id;
+    /// `file` 是该树内的相对路径。check-layout 据此提取真值。
+    pub r#ref: LayoutRef,
+    /// 可选:驱动代码锚。填了则 check-layout 额外提取驱动代码里的位声明,
+    /// 与 claim 比对(D2:驱动实现 ↔ 声明)。
+    #[serde(default)]
+    pub driver_src: Option<DriverSrc>,
+    pub width: u32,
     #[serde(default)]
     pub spec_ref: String,
-    pub width: u32,
-    pub fields: Vec<BitField>,
+    pub fields: Vec<FieldClaim>,
+    /// 人类文档(不承重):如状态码映射、诊断备注。
     #[serde(default)]
-    pub known_wrong_layouts: Vec<WrongLayout>,
+    pub status_codes: serde_json::Value,
     #[serde(default)]
-    pub verification_traces: Vec<VerificationTrace>,
+    pub diagnostic_note: String,
+}
+
+fn default_scope_protocol() -> String {
+    "protocol".to_string()
+}
+
+/// 参考锚:钉到某个参考树的某个文件。
+#[derive(Debug, Clone, Deserialize)]
+pub struct LayoutRef {
+    /// references.json 里某 `trees[].id`。
+    pub tree: String,
+    /// 参考树内相对路径(如 `drivers/firmware/arm_scmi/common.h`)。
+    pub file: String,
+}
+
+/// 驱动代码锚:D2 声明侧来源。
+/// `anchor` 指向驱动里的一个 `const fn`(位段打包函数)或 `const`(单字段),
+/// 提取器从其位表达式抽出实际位声明。
+#[derive(Debug, Clone, Deserialize)]
+pub struct DriverSrc {
+    pub path: String,
+    pub anchor: String,
 }
 
 /// bitfield-defs.json 顶层。
 #[derive(Debug, Clone, Deserialize)]
 pub struct BitfieldDefs {
     pub defs: Vec<BitfieldDef>,
+}
+
+/// references.json:参考树注册表。
+///
+/// 把"以 Linux/U-Boot 源码为参考"变成机器可验:每个参考必须是本地目录
+/// (submodule 或 vendored 快照),带 git pin。拒绝 web search —— 缺参考
+/// 即 fail-closed,这正是"太容易忘了"的结构性解法:必须在场才能过。
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct References {
+    #[serde(default)]
+    pub trees: Vec<Reference>,
+}
+
+/// 一棵参考树。
+#[derive(Debug, Clone, Deserialize)]
+pub struct Reference {
+    pub id: String,
+    /// 仓库内路径(submodule 或 vendored)。必须真实存在。
+    pub path: String,
+    /// `linux` / `u-boot` / `other`。决定提取器期望的文件形态。
+    #[serde(default = "default_kind_linux")]
+    pub kind: String,
+    /// git pin(tag/commit)。submodule 则由 .gitmodules 钉,vendored 则手动记。
+    #[serde(default)]
+    pub pin: String,
+    /// `true` = 缺它或 pin 不匹配即 fail-closed;`false` = 仅提示。
+    #[serde(default = "default_true")]
+    pub required: bool,
+}
+
+fn default_kind_linux() -> String {
+    "linux".to_string()
+}
+fn default_true() -> bool {
+    true
 }
 
 impl MappingRow {
@@ -172,16 +249,10 @@ impl MappingRow {
     }
 }
 
-impl BitField {
-    pub fn width(&self) -> u32 {
-        self.msb.saturating_sub(self.lsb) + 1
-    }
-    pub fn field_mask(&self) -> u64 {
-        if self.width() >= 64 {
-            u64::MAX
-        } else {
-            (1u64 << self.width()) - 1
-        }
+impl FieldClaim {
+    /// 该字段在布局里的位段(取自 claim)。
+    pub fn span(&self) -> FieldSpan {
+        self.claim
     }
 }
 

@@ -16,8 +16,8 @@ linux-driver-port skill 把"以 Linux C 驱动为蓝本,翻译成 x-kernel Rust 
 升级的直接动因是一次真机 bug:SCMI 消息头 `message_id`/`token` 位段被凭记忆写反,
 而 VERSION(`msg=0`/`token=0`)恰好通,于是位段错误一路没人质疑,被误判成"固件 stub"。
 这暴露了纯散文 skill 的根本缺陷:**铁律只是声明,没有任何执行层强制**——动作都执行了,
-任务从未真正完成(假成功)。本设计把"位段错了 VERSION 会骗人"这句散文,变成 `ldp check-bitfields`
-里一个会失败的检查。
+任务从未真正完成(假成功)。本设计把"位段错了 VERSION 会骗人"这句散文,变成 `ldp check-layout`
+里一个会失败的检查——通过从钉死的参考树机械导出布局真值,diff 移植方声明。
 
 ## 范围
 
@@ -67,8 +67,9 @@ linux-driver-port skill 把"以 Linux C 驱动为蓝本,翻译成 x-kernel Rust 
   `keywords` 是 Ch3 上下文前缀,`lookup` 据此匹配,不只匹配字面。
 - `gaps.json`:每项带 `status`(open/workaround/partial/missing/landed)状态机(Ch3 治理)
   + `dimensions`(clk 的 enable/rate 二维度)或 `severity_branches`(条件定级)。
-- `bitfield-defs.json`:每个 def 带 `fields`(附 GENMASK)+ `known_wrong_layouts`
-  + `verification_traces`(自评 `distinguishes_layout`)。
+- `bitfield-defs.json`:每个 def 带 `fields`(每项锡到参考符号 `ref_symbol` + 移植方 `claim`)
+  + `ref{tree,file}`(锡 references.json 注册的本地参考树) + 可选 `driver_src{path,anchor}`。
+  旧的自指字段(`known_wrong_layouts`/`verification_traces`/`genmask`)已删除。
 - `golden/dwcmshc.json`:walkthrough 的期望映射/缺口/结论,机器可查。
 
 ### 执行层(ldp)
@@ -80,9 +81,12 @@ linux-driver-port skill 把"以 Linux C 驱动为蓝本,翻译成 x-kernel Rust 
 |------|------|
 | `data.rs` | JSON 反序列化模型(忠实建模 schema,`#[allow(dead_code)]` 保留未消费字段) |
 | `repo.rs` | 仓库根定位(`CARGO_MANIFEST_DIR` 上溯两级)+ 数据文件加载 |
-| `bitfield.rs` | 位段打包 + false-pass 判定(`classify_trace`) |
+| `bitfield.rs` | 位段打包工具(供 diff 提示用;旧 `classify_trace`/`Verdict` 已删) |
+| `extract.rs` | A 档 C 宏提取(GENMASK/BIT/裸 0x)+ D2 Rust 提取(`(p&M)<<S`/`1<<N`/`0xNN`) |
+| `references.rs` | `ref list/check`:参考树本地就位 + pin 标记(fail-closed) |
+| `layout.rs` | `check-layout`:claim ↔ reference ↔ driver 三方 diff |
+| `validate.rs` | check-data / scan / check-provider-crate |
 | `query.rs` | summary / lookup(结构化候选+显式截断)/ gaps |
-| `validate.rs` | check-data / check-bitfields / scan |
 | `golden.rs` | golden 回归 + severity 多形态匹配 |
 | `trace.rs` | port 轨迹(Ch8 在线循环):append-only + 路径防护 |
 | `staging.rs` | 轨迹聚合 + 候选管理 + promote 门槛(Ch8 离线循环) |
@@ -90,28 +94,60 @@ linux-driver-port skill 把"以 Linux C 驱动为蓝本,翻译成 x-kernel Rust 
 | `gendoc.rs` | gen-doc(表格从 JSON 生成 + 受保护附录块) |
 | `cmd.rs` / `main.rs` | 分发 + 自描述 help + 退出码 |
 
-## 核心算法:位段 false-pass 检测(约束支柱)
+## 核心算法:布局参考锡定(约束支柱)
 
-把"VERSION 会骗人""验证位段必须用非零字段"变成精确的、无启发式的检查。
+把"VERSION 会骗人"变成精确检查的方式,**不是**旧的自指范式,而是**参考锡定**:
+布局真值从钉死的本地参考树机械导出,diff 移植方声明。
 
-**判据**:对每条 `verification_trace`,在**正确布局**与每个 `known_wrong_layout` 下分别打包;
-打包值相同 → 这条 trace **无法区分**这两种布局。
+### 为什么旧范式(自指)被重构
 
+旧 `check-bitfields` 检查的是 `bitfield-defs.json` **跟自己**的关系(`known_wrong_layouts`
+vs `verification_traces`),从不检查 JSON 跟 Linux 参考的关系。SCMI `message_id`/`token`
+记反那类 bug 的根因是"人从参考抄错",而旧检查只能抓"已被手写进 `known_wrong_layouts`
+的那一种"抄错方式 —— 是已修 bug 的事后回归,不是预防。另外存在结构性不对称:
+`api-mapping.json` 的 `source.path`(指 x-kernel 自己源码)被 `check-data` 硬验存在(强、对);
+一到 Linux 侧参考,就退化成不可验的散文串(`genmask`/`spec_ref`)。**我方证据硬、参考证据软**
+—— 正是 bug 能溜进去的地方。
+
+### 新范式(参考锡定)
+
+三方比对,三方都是机器可读:
+
+1. **claim ↔ reference**:`fields[].claim`(移植方声明)必须等于参考树里 `ref_symbol`
+   机械导出的真值。抽取器认 Linux 受限词汇表:`#define NAME GENMASK(h,l)` / `GENMASK_ULL` /
+   `BIT(n)` / `(1 << n)` / 裸 `#define NAME 0xNN`(偏移)。这抓住"人从参考抄错了"
+   (SCMI message_id/token 记反,重构后可预防)。
+2. **driver ↔ claim**(可选,填了 `driver_src` 才查):驱动代码实际写法必须等于 claim。
+   抽取器认 x-kernel 高度统一的位惯法:`const fn name(p..) { (p & M) << S | .. }`
+   (位段打包函数)、`const NAME = 1 << N`(单位位)、`const NAME = 0xNN`(偏移)。这抓住
+   "声明对、代码错"(最后一层转录)。
+
+```text
+reference(Linux C header) -- 机械导出 --> layout_ref   (真值)
+        │                                            ↑
+        │ claim ↔ reference diff        (抄对了吗?)
+        ↓                                            │
+claim(JSON) --driver ↔ claim diff (可选)--> driver(Rust) 实际写法
 ```
-pack(layout, values) = Σ_field (values[field] & widthmask(field)) << field.lsb
-```
 
-`known_wrong_layout` 以正确字段名为准、按名覆盖位段(忠实表达"记反了某些字段的位置")。
+对比旧范式的额外收益:**VERSION 假阳性问题消失** —— 新范式比的是"字段在哪"
+(位置 diff),不是"打包出什么数",无需凑非零字段躲全零假阳性。算法同时更正确(对到参考)
+且更简单(位置 diff,无需 `Verdict` 四态枚举、无需 `known_wrong_layouts`)。
 
-**交叉验证 trace 自评**(`distinguishes_layout` 字段):
+### 参考树(为什么必须本地、拒绝 web search)
 
-| 打包结果 | 自评=true | 自评=false |
-|----------|-----------|------------|
-| 相同(无法区分) | **矛盾 → fail-closed**(数据撒谎) | 文档化 false-pass(正常,如 VERSION) |
-| 不同(能区分) | 确认(正常) | 欠精确(无害提示) |
+参考必须是本地目录(submodule 或 vendored 快照),带 git pin。理由:harness 要能**重新**
+机械导出真值;web 链接无法满足"机器可重新导出 + 钉死版本"。缺参考 → `ref check` /
+`check-layout` 都 **fail-closed**。这把"太容易忘了拉参考"变成结构性强制:必须在场才能过
+(见 `data/references/README.md` 的 vendor 流程)。
 
-实测:VERSION(msg=0/token=0)在正确/错误布局下都打包成 `0x4000` → 文档化 false-pass;
-若有人把它标"能区分",`check-bitfields` 报矛盾并退出码 1。这就是 SCMI bug 的可执行化。
+### 局限(诚实)
+
+- A 档(C 宏提取)抓不了 `struct foo { u32 a; }` 字段偏移 —— 那要 B 档(pahole/BTF),未实现。
+  但 Linux MMIO 驱动多数用 `#define` 偏移而非 struct,A 档覆盖面已很大。
+- 提取器是受限词法器,非通用 C/Rust 解析器;认明确词汇表(GENMASK/BIT/裸 0x/`(p&M)<<S`)。
+  撞到未知写法会 fail-closed("找不到符号的位声明"),不会静默通过。
+- 真实参考需人工 vendor(见 README);机制保证未 vendor 即 fail-closed,不靠纪律。
 
 ## 验证支柱:golden 回归
 
@@ -236,9 +272,14 @@ multi-provider"的滑坡。五判据(物理基础设施 / 多生产者 / 消费�
 
 ## 已知限制
 
-- **位段检测依赖人正确填写 `known_wrong_layouts`**:能抓"已知错误布局"的 false-pass,
-  但抓不了尚未记录的新错误布局。trace 的 `bitfield-pitfall` 事件 + staging 是
-  补充新错误布局的入口(但仍需人逐位核对后填进 `bitfield-defs.json`)。
+- **位段提取是受限词法器(A 档 C 宏)**:认 GENMASK/BIT/裸 `0xNN` 等 Linux 词汇,抓不了
+  `struct foo { u32 a; }` 字段偏移(那要 B 档 pahole/BTF,未实现)。撞到未知写法会
+  fail-closed("找不到符号的位声明"),不会静默通过。trace 的 `bitfield-pitfall` 事件
+  仍是记录新坑的入口。
+- **真实参考需人工 vendor**:机制保证未 vendor 即 fail-closed;但 vendor 哪些子树、
+  钉哪个 pin 是人工决策。合成 test-fixture 仅供提取器单元测试,非真实 Linux。
+- **D2 driver 提取认统一惯法**:`const fn`(打包)/`1<<N`/`0xNN`。驱动若用花样写法
+  (bitfield crate/复杂表达式),提取器报"没找到"而非误断 —— 覆盖面可扩展。
 - **golden 覆盖面**:目前只有 dwcmshc 一份基线。新 walkthrough 应补对应 golden。
 - **scan 是字面符号匹配**:不解析 C 语法,可能漏掉宏包装的调用;过短符号(如 `RCU`)
   有轻微误匹配风险(代价低:多提示一条缺口,不会静默漏报)。

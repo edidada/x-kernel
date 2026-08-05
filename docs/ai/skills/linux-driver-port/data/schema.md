@@ -13,8 +13,10 @@
 |------|------|------|----------|
 | `api-mapping.json` | 结构化数据(经验知识库) | Linux API → x-kernel API 映射,每条带 source 证据 + context 检索前缀 | 改 JSON → `ldp gen-doc` 重生成 md |
 | `gaps.json` | 结构化数据(经验知识库) | 缺失子系统清单,带 status 状态机 + 生效/失效治理 | 改 JSON → `ldp gen-doc` 重生成 md |
-| `bitfield-defs.json` | 结构化数据(经验知识库) | 协议/寄存器位段定义,附 GENMASK 依据 + 已知错误布局 | 改 JSON |
+| `bitfield-defs.json` | 结构化数据(经验知识库) | 寄存器/协议 wire 布局声明,每字段锡到参考符号 + 移植方 claim | 改 JSON(锡 references.json 注册的参考树) |
 | `golden/dwcmshc.json` | 结构化数据(回归基线) | dwcmshc walkthrough 的期望映射/缺口/位段断言 | 改 JSON → `ldp golden` 验证 |
+| `references.json` | 参考树注册表(机器可验参考) | Linux/U-Boot 等参考树(本地 submodule/vendored,带 pin) | 改 JSON + vendor 参考子树(见 references/README.md) |
+| `references/` | 本地参考源 + fixture | vendored 参考子树(如 linux sparse 子集) + 合成测试 fixture | vendor 参考;改后 `ldp ref check` 验 |
 | `provider-boundary.json` | 政策(provider 判据 + impl 坑) | 五判据(Stage 1 该不该抽)+ impl_pitfalls(Stage 2 怎么抽干净)+ A/B/concrete 三分 + 边界表 + per-gap 评估 | 改 JSON → requirements gen 渲染;check-data/check-provider-crate 查 |
 | `trace/*.jsonl` | 不可变轨迹(Ch8 在线循环) | 每次 port 撞到的缺口/未映射 API/位段坑 | `ldp trace add`(append-only,无 edit/delete) |
 | `staging/candidates.json` | 候选区(Ch8 离线循环) | 轨迹聚合的候选条目,带 support_count | `ldp staging aggregate` 生成;`promote` 标状态 |
@@ -62,15 +64,39 @@
 
 ### `bitfield-defs.json`
 
-- `fields`: 位段列表,每个带 `{name, lsb, msb}` + `genmask` 原始依据(参数保真,Ch4 第 4 条)。
-- `known_wrong_layouts`: 已知错误布局(本次 SCMI bug 的 `message_id[25:18]` 版本)。
-  `ldp check-bitfields` 会把每个 `verification_trace` 在正确布局与每个错误布局下分别打包,
-  若打包结果相同 → 标 `false-pass`(这就是 VERSION 骗人那一类的可执行化)。
-- `verification_traces`: 验证用例,带 `distinguishes_layout` 自评字段 + `note`。
+布局声明采用**参考锡定**范式(取代旧的自指范式):
+
+- `scope`:`protocol`(全局共享,如 SCMI header)或 `port`(某次移植专属,配 `port` 字段)。
+- `ref`:`{tree, file}`。`tree` 是 `references.json` 里注册的参考树 id;`file` 是该树内相对路径。
+  `ldp check-layout` 从 `<tree>/<file>` 机械导出位段真值。
+- `driver_src`(可选):`{path, anchor}`。锡到 x-kernel 驱动代码里的一个 `const fn`(位段打包函数)
+  或 `const`(单位字段);`check-layout` 额外提取驱动实际写法,diff claim(D2:驱动实现 ↔ 声明)。
+- `fields[]`:每项 `{name, ref_symbol, claim}`。
+  - `ref_symbol`:参考树里机械可导出的符号名(如 Linux `#define MSG_ID_MASK GENMASK(7,0)`)。
+  - `claim`:`{lsb, msb}` 移植方声明。**被验证的断言**,非自由字段。
+  - `check-layout` 对每个字段:`claim` 必须等于参考机械导出的真值(以及,若有 `driver_src`,
+    驱动实际写法)。
+- `status_codes` / `spec_ref` / `diagnostic_note`:人类文档,不承重。
+
+**已删除(旧自指范式)**:`known_wrong_layouts` + `verification_traces` + `fields[].genmask`。
+旧的 `check-bitfields` 检查 JSON 跟自己的关系(`known_wrong_layouts` vs `verification_traces`),
+从不检查 JSON 跟 Linux 参考的关系 —— SCMI `message_id`/`token` 记反那类 bug 只能被
+"已被手写进 known_wrong_layouts 的那一种"抄错方式抓到(事后回归,非预防)。
+`check-layout` 从钉死参考机械导出真值,直接抓"从参考抄错"本身。
+
+### `references.json`
+
+- `trees[]`:每项 `{id, path, kind, pin, required}`。
+- `path`:仓库内路径(submodule 或 vendored)。**必须本地目录,拒绝 web search** ——
+  缺参考即 fail-closed,这是"太容易忘了拉参考"的结构性解法。
+- `kind`:`linux`/`u-boot`/`other`(决定提取器期望的文件形态)。
+- `pin`:git tag/commit(submodule 由 `.gitmodules` 钉;vendored 由目录下 `VENDORED.txt` 首行记)。
+- `required`:`true` = 缺失即 fail-closed。
 
 ## 验证门(`ldp` 的约束支柱,fail-closed)
 
+- `ldp ref check`:所有 required 参考树本地就位且可确认 pin。
 - `ldp check-data`:`source.path` 必须在仓库内存在;JSON 必须能解析;必填字段不缺。
-- `ldp check-bitfields`:位段定义自洽;验证用例不得是 false-pass。
+- `ldp check-layout [--port]`:布局声明 ↔ 参考真值(以及可选驱动代码)。从参考机械导出位段,diff claim。
 - `ldp golden <name>`:golden 断言全部命中当前数据。
 - `ldp validate-gap-report <file>`:报告里声明的缺口/映射必须在数据里有据可查。

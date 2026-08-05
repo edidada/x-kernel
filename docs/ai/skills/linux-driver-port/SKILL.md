@@ -26,8 +26,7 @@ description: >-
 
 | 铁律 | 散文 | ldp 怎么强制 |
 |------|------|-------------|
-| 1 硬件/协议是真相 | ✓ | `ldp check-bitfields` 校验位段定义自洽(非零字段验证) |
-| 2 绝不编造 API/位段 | ✓ | `ldp check-data`(source.path 必须在仓库存在)+ `check-bitfields` |
+| 1 硬件/协议是真相 | ✓ | `ldp check-layout` 从参考机械导出布局,diff claim || 2 绝不编造 API/位段 | ✓ | `ldp check-data`(source.path 必须在仓库存在)+ `check-layout` + `ref check` |
 | 4 缺口必报、不静默绕过 | ✓ | `ldp scan <源码>` 揪出用到的缺口符号,强制提示入报告 |
 | (数据/文档一致性) | — | `ldp golden`(walkthrough 断言对照数据)+ `ldp gen-doc`(md 由 JSON 生成) |
 | (经验沉淀,Ch8) | — | `ldp trace`(记轨迹)+ `staging`(≥2 支持才发布,不污染正式库) |
@@ -43,7 +42,8 @@ description: >-
 ldp lookup readl            # 查某条 Linux API 的 x-kernel 对应
 ldp gaps --status missing   # 列缺失子系统
 ldp check-data              # 校验数据完整性(fail-closed)
-ldp check-bitfields         # 校验位段 + 揪 VERSION 类 false-pass(fail-closed)
+ldp ref check                # 校验本地参考树就位(fail-closed,拒绝 web search)
+ldp check-layout             # 布局声明 ↔ 参考真值(以及驱动代码)(fail-closed)
 ldp scan drivers/mmc/host/sdhci-of-dwcmshc.c   # 扫源码用到的缺口符号
 ldp golden dwcmshc          # 跑 golden 回归(walkthrough 断言 vs 当前数据)
 ldp gen-doc                 # 从 data/*.json 重生成 knowledge/*.md
@@ -63,9 +63,9 @@ ldp requirements confirm req-clk-framework --status confirmed
 
 ## 五条铁律(决定产出质量,必须遵守)
 
-1. **硬件/协议是真相。** 寄存器布局、bit 位定义、**协议线格式(SCMI/SMBus/… 的 message header/payload 位段)**、初始化序列、magic number、时序与延时——这些是硬件/协议事实,**原样忠实翻译**,不做"优化"、不擅自合并步骤。怀疑时以上游 Linux 驱动/规范为准。位段定义写进 `data/bitfield-defs.json`,由 `ldp check-bitfields` 守护。
+1. **硬件/协议是真相。** 寄存器布局、bit 位定义、**协议线格式(SCMI/SMBus/… 的 message header/payload 位段)**、初始化序列、magic number、时序与延时——这些是硬件/协议事实,**原样忠实翻译**,不做"优化"、不擅自合并步骤。怀疑时以上游 Linux 驱动/规范为准。位段声明写进 `data/bitfield-defs.json`,由 `ldp check-layout` 从钉死的参考树机械导出真值守护。
 
-2. **绝不编造 API,也绝不凭记忆写常量/位段。** x-kernel 这边用到的每一个接口,**以及从 Linux 翻译过来的每一个 bit 位段、协议线格式、magic number、struct 字段偏移**,都必须能在 `data/api-mapping.json`(有 source 证据)、项目源码、或 Linux 源码里找到**逐位依据**。查不到的 = 缺口。位段最容易记反——SCMI `message_id`/`token` 那次 bug 就是凭记忆写错,VERSION 恰好通,一路没人质疑。`ldp check-data` 会校验 source.path 真实存在,`check-bitfields` 会揪"用全零字段(VERSION)验证位段"这种假阳性。
+2. **绝不编造 API,也绝不凭记忆写常量/位段。** x-kernel 这边用到的每一个接口,**以及从 Linux 翻译过来的每一个 bit 位段、协议线格式、magic number、struct 字段偏移**,都必须能在 `data/api-mapping.json`(有 source 证据)、项目源码、或**本地参考树**里找到**逐位依据**。查不到的 = 缺口。位段最容易记反——SCMI `message_id`/`token` 那次 bug 就是凭记忆写错。`ldp ref check` 校验参考树本地就位(拒绝 web search),`check-layout` 从参考机械导出位段真值,diff `claim`(以及驱动代码实际写法),直接抓"从参考抄错"本身。
 
 3. **RAII 优先,最小化 `unsafe`。** 生命周期交给 `devm_*`/`Arc`/`Io`/`Box`/`DmaCoherent` 等 RAII 句柄。必须用 `unsafe` 的地方写 `// SAFETY:` 注释。遵循 [`code-guidelines`](../code-guidelines/SKILL.md)。
 
@@ -78,7 +78,7 @@ ldp requirements confirm req-clk-framework --status confirmed
 位段、协议线格式、magic number 是**凭记忆最易记反、出错最隐蔽**的一类:API 写错编译器会报,**位段错了能编过,甚至可能恰好跑通**(全零字段掩盖错误)。纪律:
 
 - **即使"记得",也必须打开源码逐位核对后再写**,优先复制参考实现的掩码(如 SCMI 的 `MSG_*_MASK = GENMASK(...)`)。
-- **位段定义进 `data/bitfield-defs.json`**,附 GENMASK 依据 + 已知错误布局(`known_wrong_layouts`)。`ldp check-bitfields` 会把每条验证用例在正确布局与错误布局下分别打包,打包值相同 = false-pass。
+- **位段声明进 `data/bitfield-defs.json`**:每字段锡 `ref_symbol` + 写 `claim{lsb,msb}`,`ref` 锡 `references.json` 注册的本地参考树。`ldp check-layout` 从参考机械导出位段真值(MSG_ID_MASK GENMASK(7,0) → [0,7]),diff `claim`。旧的 `known_wrong_layouts`/`verification_traces` 自指范式已删。
 - **验证位段必须用非零字段**,别用全零字段(VERSION)做基线——这正是 `bitfield-defs.json` 里 VERSION 被标 `distinguishes_layout:false` 的原因。
 - **源码本地没有时**:联网取;取不到就显式标 `// UNVERIFIED — 待对照 Linux 源码` 并进缺口报告,**不得静默凭记忆落地**。把错的位段写进注释/rustdoc 当事实会让后续审查绕过去。
 
@@ -88,7 +88,8 @@ ldp requirements confirm req-clk-framework --status confirmed
 data/                          ← 真相源(改这里)
   api-mapping.json               Linux API → x-kernel API(每条带 source + keywords)
   gaps.json                      缺失子系统(status 状态机 + 维度分级 + 治理)
-  bitfield-defs.json             位段定义(GENMASK + known_wrong_layouts + verification_traces)
+  bitfield-defs.json             布局声明(ref_symbol 锡参考 + claim;参考锡定范式)
+  references.json + references/  本地参考树(必须本地,拒绝 web search;见 references/README.md)
   golden/dwcmshc.json            golden 回归基线(walkthrough 断言)
 knowledge/                     ← 生成物(ldp gen-doc 产出,勿手改)
   api-mapping.md                 由 api-mapping.json 生成

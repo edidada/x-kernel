@@ -45,6 +45,9 @@ pub fn bitfield_path() -> PathBuf {
 pub fn golden_dir() -> PathBuf {
     data_dir().join("golden")
 }
+pub fn references_path() -> PathBuf {
+    data_dir().join("references.json")
+}
 
 /// 读取并解析一个 JSON 文件,失败时给出带路径的可读错误。
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
@@ -60,6 +63,9 @@ pub fn load_gaps() -> Result<Gaps, String> {
 }
 pub fn load_bitfields() -> Result<BitfieldDefs, String> {
     read_json(&bitfield_path())
+}
+pub fn load_references() -> Result<crate::data::References, String> {
+    read_json(&references_path())
 }
 pub fn provider_boundary_path() -> PathBuf {
     data_dir().join("provider-boundary.json")

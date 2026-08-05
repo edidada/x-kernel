@@ -12,7 +12,6 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::bitfield::{Verdict, classify_trace};
 use crate::data::{ApiMapping, BitfieldDef, BitfieldDefs, Gaps};
 use crate::repo;
 
@@ -120,99 +119,25 @@ pub fn check_data(api: &ApiMapping, gaps: &Gaps, bf: &BitfieldDefs) -> usize {
 fn check_def_layout(def: &BitfieldDef) -> Result<(), String> {
     let mut occupied: BTreeMap<u32, String> = BTreeMap::new();
     for f in &def.fields {
-        if f.msb < f.lsb {
-            return Err(format!("字段 `{}` msb({}) < lsb({})", f.name, f.msb, f.lsb));
-        }
-        if f.msb >= def.width {
+        if f.claim.msb < f.claim.lsb {
             return Err(format!(
-                "字段 `{}` msb({}) >= 总宽({})",
-                f.name, f.msb, def.width
+                "字段 `{}` msb({}) < lsb({})",
+                f.name, f.claim.msb, f.claim.lsb
             ));
         }
-        for b in f.lsb..=f.msb {
+        if f.claim.msb >= def.width {
+            return Err(format!(
+                "字段 `{}` msb({}) >= 总宽({})",
+                f.name, f.claim.msb, def.width
+            ));
+        }
+        for b in f.claim.lsb..=f.claim.msb {
             if let Some(prev) = occupied.insert(b, f.name.clone()) {
                 return Err(format!("字段 `{}` 与 `{}` 在 bit {} 重叠", f.name, prev, b));
             }
         }
     }
     Ok(())
-}
-
-/// `ldp check-bitfields`:位段 false-pass 检测。返回错误数。
-///
-/// 对每条 verification_trace,在正确布局与每个 known_wrong_layout 下分别打包;
-/// 打包值相同却自评"能区分" → 矛盾(fail-closed)。
-pub fn check_bitfields(bf: &BitfieldDefs) -> usize {
-    let mut errors = 0usize;
-    let mut notes = 0usize;
-    let mut confirms = 0usize;
-
-    for def in &bf.defs {
-        println!("══ {} ({}) ══", def.id, def.name);
-        if def.known_wrong_layouts.is_empty() {
-            println!("  (无 known_wrong_layouts,跳过 false-pass 检测)");
-            continue;
-        }
-        for trace in &def.verification_traces {
-            print!("  · {} :", trace.name);
-            let mut trace_bad = false;
-            for wrong in &def.known_wrong_layouts {
-                match classify_trace(def, &wrong.fields, trace) {
-                    Ok(Verdict::DocumentedFalsePass { packed }) => {
-                        notes += 1;
-                        println!();
-                        println!(
-                            "      ⚠ 文档化 false-pass(打包=0x{:x}) — 这条 trace 无法区分正确布局与错误布局「{}」",
-                            packed, wrong.desc
-                        );
-                    }
-                    Ok(Verdict::Contradiction { correct, wrong: w }) => {
-                        errors += 1;
-                        trace_bad = true;
-                        println!();
-                        println!(
-                            "      ✗ 矛盾!trace 自评能区分,但打包值相同(correct=0x{:x} == wrong=0x{:x})「{}」",
-                            correct, w, wrong.desc
-                        );
-                        println!(
-                            "        → 数据在撒谎。这种 trace 不能用来验证位段(VERSION 骗人那一类)。"
-                        );
-                    }
-                    Ok(Verdict::Confirmed { correct, wrong: w }) => {
-                        confirms += 1;
-                        print!(" 区分(correct=0x{:x} ≠ wrong=0x{:x})", correct, w);
-                    }
-                    Ok(Verdict::OverPessimistic { correct, wrong: w }) => {
-                        print!(" 能区分但自评悲观(0x{:x} ≠ 0x{:x})", correct, w);
-                    }
-                    Err(e) => {
-                        errors += 1;
-                        trace_bad = true;
-                        println!();
-                        println!("      ✗ 解析失败:{}", e);
-                    }
-                }
-            }
-            if !trace_bad {
-                println!();
-            }
-            if !trace.self_note.is_empty() {
-                println!("      note: {}", trace.self_note);
-            }
-        }
-    }
-
-    println!("────────────────────────────────────────");
-    println!(
-        "check-bitfields: {} 确认, {} 文档化 false-pass, {} 矛盾/错误",
-        confirms, notes, errors
-    );
-    if errors > 0 {
-        eprintln!("✗ FAIL: 位段验证用例存在矛盾,数据不可信。");
-    } else if notes > 0 {
-        println!("ℹ 有 {} 条文档化 false-pass(正常,如 VERSION)。", notes);
-    }
-    errors
 }
 
 /// `ldp scan`:在一份 Linux 源码(文件/目录)里扫出用到的缺口符号。
