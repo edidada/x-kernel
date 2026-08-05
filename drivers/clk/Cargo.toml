@@ -15,9 +15,6 @@ categories.workspace = true
 name = "clk"
 
 [dependencies]
-of = { workspace = true }
 device_res = { workspace = true }
-kspin = { workspace = true }
 smallvec = { version = "1.15", features = ["const_generics", "union"] }
-log = { workspace = true }
 unittest = { workspace = true }

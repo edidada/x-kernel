@@ -50,8 +50,8 @@ mod registry;
 use alloc::sync::Arc;
 
 pub use consumer::devm_clk_get;
-pub use providers::{FixedClockProvider, register_fixed_clocks};
-pub use registry::register_provider;
+pub use providers::FixedClockProvider;
+pub use registry::{ClkRegistry, register_provider};
 use smallvec::SmallVec;
 
 /// Largest number of clock-specifier cells a provider's `clocks` entry can
@@ -68,16 +68,63 @@ pub(crate) const MAX_SPECIFIER_CELLS: usize = 2;
 ///
 /// Implementations must be `Send + Sync`: the registry is a global shared by
 /// every CPU and a registration outlives the probe that made it.
+/// Provider-operation errors. Tier 0 only ever produces `Unsupported`; the
+/// richer variants are declared now so the trait shape is stable when Tier 1
+/// providers (real enable / set_rate implementations) arrive — they populate
+/// the variants instead of reshaping the API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClkError {
+    /// This provider cannot perform the operation for the given specifier
+    /// (Tier 0's default for every mutating op; also a real Tier 1 answer when
+    /// a clock genuinely has no enable gate / no rate divider).
+    Unsupported,
+    /// The specifier does not name a clock this provider owns.
+    BadSpecifier,
+    /// The hardware refused the operation (gate stuck, PLL did not lock, ...).
+    Hardware,
+}
+
+/// A clock producer: a DT node carrying `#clock-cells` that answers rate
+/// queries (and, in later tiers, enable / `set_rate`) for the clocks it owns.
+///
+/// `specifier` is the sequence of u32 cells following the provider's phandle in
+/// a consumer's `clocks = <&provider N M ...>` property. For a `#clock-cells =
+/// <0>` provider (e.g. `fixed-clock`) it is empty.
+///
+/// **API stability:** every method is declared now with a Tier 0 default.
+/// Tier 1 providers override the mutating methods; the method set itself does
+/// not change, so adapters written against this trait keep compiling.
+///
+/// Implementations must be `Send + Sync`: the registry is a global shared by
+/// every CPU and a registration outlives the probe that made it.
 pub trait ClkProvider: Send + Sync {
     /// Current rate of the selected clock in Hz, or `None` if the provider
     /// cannot describe this specifier (unknown id, not powered, ...).
     fn get_rate(&self, specifier: &[u32]) -> Option<u64>;
 
-    // Tier 1+ — deliberately not yet implemented. Declared here as a reminder
-    // that the consumer API is designed to grow these without reshaping:
-    //   fn enable(&self, specifier: &[u32]) -> ClkResult;
-    //   fn disable(&self, specifier: &[u32]);
-    //   fn set_rate(&self, specifier: &[u32], rate_hz: u64) -> ClkResult<u64>;
+    /// Enable the clock (refcount-managed in Tier 1). Tier 0 default: the
+    /// clock is assumed already enabled by firmware, so this is a no-op.
+    fn enable(&self, _specifier: &[u32]) -> Result<(), ClkError> {
+        Ok(())
+    }
+
+    /// Disable the clock. Tier 0 default: refuses — firmware-enabled clocks
+    /// must not be turned off by a driver that cannot turn them back on.
+    fn disable(&self, _specifier: &[u32]) -> Result<(), ClkError> {
+        Err(ClkError::Unsupported)
+    }
+
+    /// Set the rate in Hz, returning the rounded rate the hardware actually
+    /// selected. Tier 0 default: unsupported (rate is read-only).
+    fn set_rate(&self, _specifier: &[u32], _rate_hz: u64) -> Result<u64, ClkError> {
+        Err(ClkError::Unsupported)
+    }
+
+    /// Whether the clock is currently enabled, if the provider can tell.
+    /// Tier 0 default: unknown.
+    fn is_enabled(&self, _specifier: &[u32]) -> Option<bool> {
+        None
+    }
 }
 
 /// A resolved clock: the provider that owns it plus the specifier that selects
@@ -106,6 +153,27 @@ impl Clk {
     pub fn rate(&self) -> Option<u64> {
         self.provider.get_rate(&self.specifier)
     }
+
+    /// Enable this clock. See [`ClkProvider::enable`].
+    pub fn enable(&self) -> Result<(), ClkError> {
+        self.provider.enable(&self.specifier)
+    }
+
+    /// Disable this clock. See [`ClkProvider::disable`].
+    pub fn disable(&self) -> Result<(), ClkError> {
+        self.provider.disable(&self.specifier)
+    }
+
+    /// Set this clock's rate in Hz, returning the rounded rate. See
+    /// [`ClkProvider::set_rate`].
+    pub fn set_rate(&self, rate_hz: u64) -> Result<u64, ClkError> {
+        self.provider.set_rate(&self.specifier, rate_hz)
+    }
+
+    /// Whether this clock is enabled, if known. See [`ClkProvider::is_enabled`].
+    pub fn is_enabled(&self) -> Option<bool> {
+        self.provider.is_enabled(&self.specifier)
+    }
 }
 
 #[cfg(unittest)]
@@ -116,29 +184,18 @@ mod tests {
     //! DTB, so it is exercised on hardware at probe time, not here. These tests
     //! pin the framework contract — providers are routed by phandle, the
     //! specifier reaches the provider, and `devm_clk_get` resolves a named clock
-    //! on a device.
+    //! on a device. Routing/shadowing/isolation of the registry itself are
+    //! covered in `registry::tests`; here we exercise only what `lib` owns:
+    //! the `FixedClockProvider` rate, the `Clk` handle, and `devm_clk_get`.
+    //! Tests use distinct provider names so the process-global registry needs
+    //! no reset between them.
 
     use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 
     use device_res::{ClkDesc, DeviceResource, ResourceDesc};
-    use kspin::SpinNoIrq;
     use unittest::def_test;
 
-    use crate::{
-        Clk, ClkProvider, FixedClockProvider, devm_clk_get, register_provider,
-        registry::{reset_registry, try_provider},
-    };
-
-    /// Serialises tests that touch the shared global registry.
-    static TEST_SERIAL: SpinNoIrq<()> = SpinNoIrq::new(());
-
-    /// Returns a fixed rate regardless of specifier.
-    struct FixedRate(u64);
-    impl ClkProvider for FixedRate {
-        fn get_rate(&self, _specifier: &[u32]) -> Option<u64> {
-            Some(self.0)
-        }
-    }
+    use crate::{ClkProvider, FixedClockProvider, devm_clk_get, register_provider};
 
     /// Echoes the first specifier cell as `cell * 1 MHz`, modelling a provider
     /// that keys its clocks by an id cell (`#clock-cells = <1>`).
@@ -153,53 +210,6 @@ mod tests {
     fn fixed_clock_provider_returns_its_rate() {
         let provider = FixedClockProvider::new(24_000_000);
         assert_eq!(provider.get_rate(&[]), Some(24_000_000));
-    }
-
-    #[def_test]
-    fn registry_routes_by_phandle_and_specifier() {
-        let _guard = TEST_SERIAL.lock();
-        reset_registry();
-
-        register_provider(0x10, Arc::new(FixedRate(50_000_000)));
-        register_provider(0x20, Arc::new(IdClock));
-
-        let fixed = try_provider(0x10).expect("phandle 0x10 registered");
-        assert_eq!(fixed.get_rate(&[]), Some(50_000_000));
-
-        let keyed = try_provider(0x20).expect("phandle 0x20 registered");
-        assert_eq!(keyed.get_rate(&[9]), Some(9_000_000));
-
-        assert!(
-            try_provider(0xdead).is_none(),
-            "unregistered phandle resolves"
-        );
-    }
-
-    #[def_test]
-    fn reregistration_shadows_the_earlier_provider() {
-        let _guard = TEST_SERIAL.lock();
-        reset_registry();
-
-        register_provider(0x30, Arc::new(FixedRate(1)));
-        register_provider(0x30, Arc::new(FixedRate(2)));
-
-        assert_eq!(
-            try_provider(0x30).unwrap().get_rate(&[]),
-            Some(2),
-            "latest registration for a phandle must win",
-        );
-    }
-
-    #[def_test]
-    fn clk_handle_delegates_rate_to_its_provider() {
-        let _guard = TEST_SERIAL.lock();
-        reset_registry();
-
-        register_provider(0x2c2, Arc::new(IdClock));
-        let provider = try_provider(0x2c2).unwrap();
-        let clk = Clk::new(provider, smallvec::smallvec![0x2c2]);
-
-        assert_eq!(clk.rate(), Some(0x2c2_u64 * 1_000_000));
     }
 
     /// A minimal `DeviceResource` whose resources are fixed at construction —
@@ -217,24 +227,26 @@ mod tests {
 
     #[def_test]
     fn devm_clk_get_resolves_a_named_clock() {
-        let _guard = TEST_SERIAL.lock();
-        reset_registry();
-        register_provider(0x0e, Arc::new(IdClock));
+        // Mirrors RK3588 sdmmc: `ciu = <&scmi_clk 9>` → provider "scmi_clk", id 9.
+        register_provider("scmi_clk", Arc::new(IdClock));
 
-        // Mirrors RK3588 sdmmc: `ciu = <&scmi_clk 9>` → phandle 0x0e, id 9.
         let device = ClockDevice {
-            resources: vec![ResourceDesc::Clock(ClkDesc::new(b"ciu", 0x0e, &[9]))],
+            resources: vec![ResourceDesc::Clock(ClkDesc::new(b"ciu", "scmi_clk", &[9]))],
         };
 
         let clk = devm_clk_get(&device, "ciu").expect("ciu clock present");
         assert_eq!(clk.rate(), Some(9_000_000));
 
-        // Unknown name → no matching resource → InvalidResource.
+        // Unknown consumer name → no matching resource → InvalidResource.
         assert!(devm_clk_get(&device, "biu").is_err());
 
-        // Known name but no provider registered for its phandle → NoProvider.
+        // Known consumer name but a provider nobody registered → NoProvider.
         let unbound = ClockDevice {
-            resources: vec![ResourceDesc::Clock(ClkDesc::new(b"ciu", 0xff, &[1]))],
+            resources: vec![ResourceDesc::Clock(ClkDesc::new(
+                b"ciu",
+                "never_registered",
+                &[1],
+            ))],
         };
         assert!(devm_clk_get(&unbound, "ciu").is_err());
     }

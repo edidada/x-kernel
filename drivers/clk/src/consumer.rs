@@ -36,6 +36,6 @@ pub fn devm_clk_get(device: &dyn DeviceResource, name: &str) -> Result<Clk, ResE
             _ => None,
         })
         .ok_or(ResError::InvalidResource)?;
-    let provider = try_provider(desc.phandle).ok_or(ResError::NoProvider)?;
+    let provider = try_provider(desc.provider).ok_or(ResError::NoProvider)?;
     Ok(Clk::new(provider, desc.specifier.clone()))
 }

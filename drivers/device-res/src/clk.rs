@@ -17,20 +17,28 @@ pub struct ClkDesc {
     /// The `clock-names` entry for this clock (a slice into the static DTB).
     /// Empty when the device has `clocks` but no `clock-names`.
     pub name: &'static [u8],
-    /// DT phandle of the clock producer node.
-    pub phandle: u32,
-    /// The `#clock-cells` specifier words following the phandle in `clocks`.
+    /// OS-neutral name of the clock **producer** (the provider registered under
+    /// this key in the `clk` registry). For the DT path this is the producer
+    /// node's name with the `@unit` address suffix stripped (e.g.
+    /// `scmi_clk`, `xin24m`), derived by the bus layer — not the raw DT phandle,
+    /// so the descriptor and registry are firmware-description-agnostic and a
+    /// future ACPI/PCI backend can use its own naming without changing this
+    /// type.
+    pub provider: &'static str,
+    /// The `#clock-cells` specifier words selecting the clock within the
+    /// provider.
     pub specifier: smallvec::SmallVec<[u32; 2]>,
 }
 
 impl ClkDesc {
-    /// Build a clock descriptor. `specifier` is the `#clock-cells` words (the
-    /// caller passes a plain slice; this hides the `SmallVec` so callers need
-    /// not depend on `smallvec`).
-    pub fn new(name: &'static [u8], phandle: u32, specifier: &[u32]) -> Self {
+    /// Build a clock descriptor. `provider` is the producer's OS-neutral name
+    /// (DT path: the producer node name with `@unit` stripped); `specifier` is
+    /// the `#clock-cells` words (the caller passes a plain slice; this hides
+    /// the `SmallVec` so callers need not depend on `smallvec`).
+    pub fn new(name: &'static [u8], provider: &'static str, specifier: &[u32]) -> Self {
         Self {
             name,
-            phandle,
+            provider,
             specifier: smallvec::SmallVec::from_slice(specifier),
         }
     }

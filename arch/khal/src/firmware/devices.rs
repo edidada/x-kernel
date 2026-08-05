@@ -281,8 +281,17 @@ fn parse_clocks(node: of::FdtNode<'static, 'static>) -> alloc::vec::Vec<device_r
         let specifier = &words[cursor..cursor + cell_count];
         cursor += cell_count;
 
+        // Resolve the producer node once (already needed for `#clock-cells`)
+        // to derive its OS-neutral name: the node name with the `@unit`
+        // address suffix stripped. This name is the provider key the `clk`
+        // registry uses, so `ClkDesc` and the registry stay firmware-
+        // description-agnostic (no DT phandle leaks into the descriptor).
+        let producer_name = of::find_node_by_phandle(phandle)
+            .map(|producer| of::node_name_key(producer.name))
+            .unwrap_or("");
+
         let name = names.get(index).copied().unwrap_or(b"");
-        out.push(device_res::ClkDesc::new(name, phandle, specifier));
+        out.push(device_res::ClkDesc::new(name, producer_name, specifier));
         index += 1;
     }
     out

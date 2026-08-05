@@ -240,13 +240,10 @@ pub fn init_clock_provider() {
         return;
     };
 
-    let Some(phandle) = protocol
-        .property_u32("phandle")
-        .or_else(|| protocol.property_u32("linux,phandle"))
-    else {
-        kernel_boot::bootln!("scmi-clk: protocol node has no phandle; skipping");
-        return;
-    };
+    // The provider's OS-neutral name is the protocol node's name with the
+    // `@unit` suffix stripped; the bus layer derives the same key when it
+    // builds `ClkDesc` from a consumer's `clocks = <&scmi_clk N>`.
+    let provider_name = of::node_name_key(protocol.name);
 
     // Transport parameters live on the parent `arm,scmi-smc` node.
     let Some(func_id) = protocol.parent_property_u32("arm,smc-id") else {
@@ -289,12 +286,12 @@ pub fn init_clock_provider() {
     }
 
     register_provider(
-        phandle,
+        provider_name,
         Arc::new(ScmiClockProvider::new(func_id, shmem_base)),
     );
     kernel_boot::bootln!(
-        "scmi-clk: registered provider phandle={:#x} doorbell={:#x} shmem={:#x}",
-        phandle,
+        "scmi-clk: registered provider name={:?} doorbell={:#x} shmem={:#x}",
+        provider_name,
         func_id,
         region.base
     );

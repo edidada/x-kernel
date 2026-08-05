@@ -75,6 +75,7 @@ kalloc = { workspace = true, optional = true }
 kdma.workspace = true
 device_res = { workspace = true }
 driver_base = { workspace = true }
+of = { workspace = true }
 kclass = { workspace = true }
 kdevice = { workspace = true }
 irq_notify = { workspace = true }

@@ -218,6 +218,19 @@ fn interrupt_parent_node(node: FdtNode<'static, 'static>) -> Option<FdtNode<'sta
     find_node_by_phandle(phandle)
 }
 
+/// Strip the DT unit-address suffix (`@...`) from a node name, returning the
+/// stable name used as an OS-neutral provider key. e.g.
+/// `"clock-controller@fd7c0000"` → `"clock-controller"`, `"scmi_clk"` →
+/// `"scmi_clk"`. The lifetime is that of the input, so a `&'static str` node
+/// name yields a `&'static str` key.
+pub fn node_name_key(name: &str) -> &str {
+    match name.find('@') {
+        Some(i) => &name[..i],
+        None => name,
+    }
+}
+
+/// Borrow the parsed device tree, if one was installed at boot.
 pub fn fdt() -> Option<&'static LinuxFdt<'static>> {
     FDT.get()
 }

@@ -603,9 +603,6 @@ name = "clk"
 version = "0.2.0-dev"
 dependencies = [
  "device-res",
- "kspin 0.2.0-dev",
- "log",
- "of",
  "smallvec",
  "unittest",
 ]
@@ -2169,6 +2166,7 @@ dependencies = [
  "memaddr",
  "memspace",
  "net",
+ "of",
  "pci",
  "smallvec",
  "unittest",

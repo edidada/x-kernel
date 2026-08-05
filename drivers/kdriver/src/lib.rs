@@ -29,6 +29,7 @@ extern crate alloc;
 extern crate log;
 
 mod bus;
+mod clk_fixed;
 pub mod driver_registry;
 mod enumeration;
 mod manager;
@@ -121,7 +122,7 @@ pub fn init_drivers() {
     // is probed. `fixed-clock` makes every crystal/OSC the bootloader left
     // running queryable; no-op without a device tree. SoC-specific providers
     // (CRU, SCMI) register from their own probes.
-    clk::register_fixed_clocks();
+    clk_fixed::register_fixed_clocks();
 
     let _registry = discover_unified();
 
