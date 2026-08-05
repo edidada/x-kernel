@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Top-level feature selection for [X-Kernel].
+//! Top-level feature selection for the XHyper EL2 runtime substrate.
 //!
 //! # Cargo Features
 //!
@@ -19,31 +19,11 @@
 //!     - `alloc_buddy`: Use the buddy system allocator.
 //!     - `paging`: Enable page table manipulation.
 //!     - `tls`: Enable thread-local storage.
-//! - Upperlayer stacks (fs, net, display)
-//!     - File system support is gated by Kconfig `KFEAT_FS`; Cargo features
-//!       expose concrete filesystem capabilities such as `fs_ext4`.
-//!     - `myfs`: Allow users to define their custom filesystems to override the default.
-//!     - `net`: Enable networking support.
-//!     - `display`: Enable graphics support.
-//! - Device drivers (selected independently from the upperlayer stacks; a
-//!   filesystem feature no longer implies a specific block driver, so
-//!   non-virtio platforms can plug in their own drivers).
-//!     - `driver_virtio_blk`: virtio-blk block device driver.
-//!     - `driver_virtio_net`: virtio-net NIC driver (implies `net`).
-//!     - `driver_virtio_gpu`: virtio-gpu display driver (implies `display`).
-//!     - `driver_virtio_input`: virtio-input device driver (implies `input`).
-//!     - `driver_virtio_socket`: virtio-vsock transport driver (implies `vsock`).
-//!     - `driver_virtio_9p`: virtio-9p transport driver.
-//!     - `driver_ramdisk`: Use the RAM disk to emulate the block device.
-//!     - `driver-ixgbe`: Enable the Intel 82599 10Gbit NIC driver.
-//!     - `driver-bcm2835-sdhci`: Enable the BCM2835 SDHCI driver (Raspberry Pi SD card).
+//!
+//! Only the allocator, AArch64 platform, SMP, console, and RR scheduler are
+//! aggregated here. POSIX, syscall, filesystem, network, TEE, and VMM business
+//! crates are deliberately outside the image dependency graph.
 #![no_std]
 
 #[cfg(feature = "platform_kplat_aarch64")]
 extern crate kplat_aarch64;
-#[cfg(feature = "platform_kplat_loongarch64")]
-extern crate kplat_loongarch64;
-#[cfg(feature = "platform_kplat_riscv64")]
-extern crate kplat_riscv64;
-#[cfg(feature = "platform_kplat_x86_64")]
-extern crate kplat_x86_64;

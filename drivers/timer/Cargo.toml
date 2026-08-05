@@ -12,7 +12,6 @@ documentation.workspace = true
 [features]
 default = []
 arm-timer-resume-fixup = []
-vmm = []
 
 [dependencies]
 khal = { workspace = true }

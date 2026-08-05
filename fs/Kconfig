@@ -2,7 +2,7 @@ menu "File Systems"
 
 config KFEAT_FS
     bool "Enable filesystem support"
-    default y
+    default n
     help
       Enable the kernel filesystem stack and related runtime support.
 

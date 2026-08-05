@@ -117,43 +117,39 @@ endmenu # IRQ Configuration
 
 menu "Device Drivers Features"
 
-choice
-    prompt "Virtio Bus Type"
-    default KFEAT_VIRTIO_BUS_PCI
-
 config KFEAT_VIRTIO_BUS_PCI
     bool "PCI Virtio_Bus Support"
+    default n
     help
       Enable PCI virtio bus support.
 
 config KFEAT_VIRTIO_BUS_MMIO
     bool "MMIO Virtio_Bus Support"
+    default n
     help
       Enable MMIO virtio bus support.
 
-endchoice
-
 config KFEAT_RTC
     bool "RTC (Real Time Clock) Support"
-    default y
+    default n
     help
       Enable Real Time Clock driver subsystem.
 
 config KFEAT_DISPLAY
     bool "Display Driver Support"
-    default y
+    default n
     help
       Enable display driver support (virtio-gpu, fbdevice, etc).
 
 config KFEAT_INPUT
     bool "Input Driver Support"
-    default y
+    default n
     help
       Enable input driver support (virtio-input, inputdev, etc).
 
 config KFEAT_CHAR
     bool "Character Driver Support"
-    default y
+    default n
     help
       Enable runtime character device support. This covers devices that are
       exposed after early boot handoff or through the unified driver pipeline.
@@ -215,7 +211,7 @@ comment "Character drivers"
 
 config KFEAT_DRIVER_CONSOLE_PL011
     bool "PL011 UART backend (early console)"
-    depends on KFEAT_CHAR && ARCH_AARCH64
+    depends on ARCH_AARCH64
     default y if MACHINE_AARCH64_QEMU
     help
       Build the PL011 UART backend used by the early-boot console and the

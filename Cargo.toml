@@ -32,7 +32,6 @@ categories = ["os", "no-std"]
 # Internal: API and core services
 kfeat = { path = "api/kfeat" }
 ksignal = { path = "process/ksignal" }
-ksyscall = { path = "core/ksyscall" }
 
 # Internal: architecture and platform support
 karch = { path = "arch/karch" }
@@ -59,8 +58,6 @@ ktime = { path = "core/ktime" }
 
 # Internal: tracing and debugging
 ktracing = { path = "core/ktracing" }
-kbpf = { path = "core/kbpf" }
-kuaccess = { path = "core/kuaccess" }
 
 # Internal: task scheduling and synchronization
 kpoll = { path = "task/kpoll" }
@@ -69,12 +66,8 @@ ksync = { path = "task/ksync" }
 ktask = { path = "task/ktask" }
 ksched = { path = "task/ksched" }
 linked_list_r4l = "0.3"
-
-# Internal: process management
-kfutex = { path = "process/kfutex" }
 fs_context = { path = "process/fs_context" }
 kfd = { path = "process/kfd" }
-kfd_objects = { path = "process/kfd_objects" }
 kexec = { path = "process/kexec" }
 krlimit = { path = "process/krlimit" }
 kresources = { path = "process/kresources" }
@@ -83,15 +76,7 @@ kns = { path = "process/kns" }
 ktimer = { path = "process/ktimer" }
 kprocess = { path = "process/kprocess" }
 osvm = { path = "process/osvm" }
-
-# Internal: POSIX ABI compatibility
-posix-ipc = { path = "posix/ipc" }
-posix-fs = { path = "posix/fs" }
-posix-mm = { path = "posix/mm" }
-posix-net = { path = "posix/net" }
-posix-process = { path = "posix/process" }
 posix-types = { path = "posix/types" }
-posix-bpf = { path = "posix/bpf" }
 
 # Internal: memory and filesystem
 alloc-engine = { path = "mm/alloc-engine" }
@@ -156,20 +141,13 @@ x86_apic = { path = "drivers/x86-apic", package = "x86-apic" }
 
 # Internal: platform variants
 kplat-aarch64 = { path = "platforms/kplat-aarch64", default-features = false }
-kplat-loongarch64 = { path = "platforms/kplat-loongarch64" }
-kplat-riscv64 = { path = "platforms/kplat-riscv64" }
-kplat-x86_64 = { path = "platforms/kplat-x86_64" }
 
 # Internal: tee
 tee_crypto = { version = "=0.1.4", default-features = false }
-tee_kernel = { path = "tee/tee_kernel" }
 tee_raw_sys = { path = "tee/tee_raw_sys" }
 tee_task_iface = { path = "tee/tee_task_iface" }
 tasign = { version = "=0.2.4", default-features = false }
 xdice = { path = "tee/xdice", default-features = false, features = ["nostd"] }
-
-# Internal: virtualization
-kvmm = { path = "virt/kvmm" }
 
 # Internal: Trusty IPC
 tipc = { path = "tee/tipc" }
@@ -185,8 +163,6 @@ kidentity = { path = "process/kidentity" }
 klogger = { path = "util/klogger" }
 macros = { path = "util/macros" }
 unittest = { path = "util/unittest" }
-unittest_support = { path = "util/unittest_support" }
-xcover = { path = "util/xcover" }
 klockstat = { path = "util/klockstat" }
 klockstat-macros = { path = "util/klockstat-macros" }
 
@@ -228,7 +204,6 @@ safe-mmio = "0.3.0"
 slab = { version = "0.4.9", default-features = false }
 smallvec = { version = "1.15", default-features = false, features = ["const_generics", "const_new", "union"] }
 smoltcp = { version = "=0.13.0", default-features = false }
-smccc = "0.2.3"
 strum = { version = "0.27", default-features = false, features = ["derive"] }
 syn = { version = "2.0", features = ["full"] }
 virtio-drivers = { version = "0.13.1", default-features = false, package = "kvirtiodrivers" }

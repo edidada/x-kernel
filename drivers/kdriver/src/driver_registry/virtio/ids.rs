@@ -11,6 +11,7 @@
 //! constants defined here so supported VirtIO PCI mappings are updated in
 //! exactly one place.
 
+#[cfg(feature = "virtio")]
 use driver_base::DeviceKind;
 
 /// VirtIO device type codes (see VirtIO spec § 4.1.2).
@@ -43,6 +44,7 @@ pub fn pci_device_id_to_virtio_type(device_id: u16) -> Option<u32> {
 
 /// Translate the driver-framework device kind reported by a VirtIO transport
 /// probe into the VirtIO device type code used by descriptor matching.
+#[cfg(feature = "virtio")]
 pub const fn device_kind_to_virtio_type(kind: DeviceKind) -> Option<u32> {
     match kind {
         DeviceKind::Net => Some(virtio_type::NET),

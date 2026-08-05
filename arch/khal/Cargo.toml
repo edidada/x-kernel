@@ -17,7 +17,6 @@ ignored-paths = ["src/dummy.rs"]
 default = []
 smp = ["kplat/smp",]
 fp-simd = ["kcpu/fp-simd",]
-vmm = ["kernel_boot/vmm"]
 nmi = ["kplat/nmi", "kspin/pmr", "kcpu/pmr"]
 pmu = ["kplat/pmu"]
 tls = ["kcpu/tls"]
@@ -29,7 +28,7 @@ irq = []
 kalloc = { workspace = true }
 boot_info = { workspace = true }
 firmware_handoff = { workspace = true }
-kcpu = { workspace = true }
+kcpu.workspace = true
 kplat.workspace = true
 kbuild_config.workspace = true
 kernel_boot.workspace = true

@@ -3,40 +3,15 @@ name = "entry"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "X TeeOS Entry Crate"
+description = "XHyper EL2 runtime entry"
 license.workspace = true
 homepage.workspace = true
 
-[features]
-unittest = ["dep:unittest", "dep:unittest_support"]
-dma-trace = ["kfeat/dma-trace"]
-
 [dependencies]
-kvfs.workspace = true
-kcred.workspace = true
-kvmm.workspace = true
-fs_context.workspace = true
-xcover.workspace = true
 kfeat.workspace = true
-khal.workspace = true
 kiface.workspace = true
 klogger.workspace = true
 kruntime.workspace = true
 ktask.workspace = true
-kprocess.workspace = true
-kuaccess.workspace = true
-ksyscall.workspace = true
-kbuild_config.workspace = true
 kernel-image-metadata = { workspace = true, features = ["kernel"] }
 kcpu_id_map.workspace = true
-linux-raw-sys.workspace = true
-posix-process.workspace = true
-unittest = { workspace = true, optional = true }
-unittest_support = { workspace = true, optional = true }
-
-[target.'cfg(any(target_arch = "aarch64", target_arch = "x86_64"))'.dependencies]
-tee_kernel.workspace = true
-
-[package.metadata.vendor-filter]
-platforms = ["riscv64gc-unknown-none-elf", "loongarch64-unknown-none-softfloat"]
-all-features = true

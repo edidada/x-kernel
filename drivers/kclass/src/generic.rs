@@ -24,13 +24,16 @@ struct ClassDeviceInner<T> {
     name: String,
     device_kind: DeviceKind,
     irq: Option<usize>,
+    #[cfg_attr(not(feature = "input"), allow(dead_code))]
     metadata: ClassDeviceMetadata,
 }
 
+#[cfg_attr(not(feature = "input"), allow(dead_code))]
 pub(crate) struct ClassDeviceMetadata {
     input_identity: Option<InputIdentity>,
 }
 
+#[cfg_attr(not(feature = "input"), allow(dead_code))]
 struct InputIdentity {
     physical_location: String,
     unique_id: String,
@@ -43,6 +46,7 @@ impl ClassDeviceMetadata {
         }
     }
 
+    #[cfg_attr(not(feature = "input"), allow(dead_code))]
     pub(crate) fn input(physical_location: String, unique_id: String) -> Self {
         Self {
             input_identity: Some(InputIdentity {
@@ -171,6 +175,7 @@ impl<T> ClassDevice<T> {
         self.inner.parent.state() == DeviceState::Active
     }
 
+    #[cfg_attr(not(feature = "input"), allow(dead_code))]
     pub(crate) fn input_physical_location(&self) -> &str {
         self.inner
             .metadata
@@ -179,6 +184,7 @@ impl<T> ClassDevice<T> {
             .map_or("", |identity| identity.physical_location.as_str())
     }
 
+    #[cfg_attr(not(feature = "input"), allow(dead_code))]
     pub(crate) fn input_unique_id(&self) -> &str {
         self.inner
             .metadata

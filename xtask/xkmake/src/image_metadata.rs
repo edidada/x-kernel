@@ -52,7 +52,7 @@ struct BuildProvenance {
     pub(crate) default_log_level: String,
     pub(crate) backtrace: bool,
     pub(crate) nr_cpus_max: usize,
-    pub(crate) vmm_enabled: bool,
+    pub(crate) hypervisor_enabled: bool,
     pub(crate) config_sha256: String,
     pub(crate) git_commit: String,
     pub(crate) git_dirty: String,
@@ -84,7 +84,7 @@ impl BuildInfoRequest {
                 default_log_level: configured_log_level(context).to_string(),
                 backtrace: context.config.is_enabled("KFEAT_DWARF"),
                 nr_cpus_max: context.config.nr_cpus(),
-                vmm_enabled: context.config.is_enabled("KFEAT_VMM"),
+                hypervisor_enabled: true,
                 config_sha256,
                 git_commit,
                 git_dirty,
@@ -117,7 +117,7 @@ impl BuildInfo {
         writeln!(payload, "log_level = {}", self.provenance.default_log_level).unwrap();
         writeln!(payload, "backtrace = {}", self.provenance.backtrace).unwrap();
         writeln!(payload, "nr_cpus_max = {}", self.provenance.nr_cpus_max).unwrap();
-        writeln!(payload, "vmm = {}", on_off(self.provenance.vmm_enabled)).unwrap();
+        writeln!(payload, "hypervisor = {}", on_off(self.provenance.hypervisor_enabled)).unwrap();
         writeln!(payload, "config_sha256 = {}", self.provenance.config_sha256).unwrap();
         writeln!(payload, "git_commit = {}", self.provenance.git_commit).unwrap();
         writeln!(payload, "git_dirty = {}", self.provenance.git_dirty).unwrap();

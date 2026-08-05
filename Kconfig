@@ -218,7 +218,7 @@ config TIMER_FREQUENCY_HZ
 
 config KFEAT_DWARF
     bool "Enable DWARF debug sections and symbolication"
-    default y
+    default n
     help
       Keep DWARF sections in the image and enable backtrace symbolication
       support in the kernel.
@@ -271,7 +271,4 @@ source "mm/Kconfig"
 source "net/Kconfig"
 source "tee/Kconfig"
 source "task/Kconfig"
-source "core/kbpf/Kconfig"
-source "virt/Kconfig"
-
 source "drivers/Kconfig"

@@ -2,7 +2,7 @@ menu "Task Scheduler"
 
 choice
     prompt "Scheduler algorithm"
-    default KFEAT_SCHED_EEVDF
+    default KFEAT_SCHED_RR
 
 config KFEAT_SCHED_FIFO
     bool "FIFO cooperative scheduler"

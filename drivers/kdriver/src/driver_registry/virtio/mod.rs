@@ -32,6 +32,7 @@ use crate::driver_registry::BoxedDriver;
 // Helpers
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "virtio")]
 struct VirtioDriver {
     name: &'static str,
     kind: DeviceKind,
@@ -40,6 +41,7 @@ struct VirtioDriver {
     matcher: VirtioTypeMatcher,
 }
 
+#[cfg(feature = "virtio")]
 impl DeviceDriver for VirtioDriver {
     fn name(&self) -> &'static str {
         self.name
@@ -66,6 +68,7 @@ impl DeviceDriver for VirtioDriver {
     }
 }
 
+#[cfg(feature = "virtio")]
 fn make_virtio_driver(
     name: &'static str,
     kind: DeviceKind,
@@ -81,6 +84,7 @@ fn make_virtio_driver(
     })
 }
 
+#[cfg(feature = "virtio")]
 macro_rules! virtio_driver_pair {
     (
         $pci_ctor:ident, $mmio_ctor:ident, $kind:expr, $vtype:expr, $pci_name:expr, $mmio_name:expr
@@ -306,6 +310,7 @@ virtio_driver_pair!(
     "virtio-9p-mmio"
 );
 
+#[cfg(feature = "virtio")]
 const DRIVER_FACTORIES: &[crate::driver_registry::DriverFactory] = &[
     #[cfg(feature = "virtio-net")]
     virtio_net_pci_descriptor,

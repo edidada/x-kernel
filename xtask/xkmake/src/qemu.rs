@@ -71,8 +71,6 @@ fn qemu_program(arch: KernelArch) -> &'static str {
 /// the host can run the guest arch natively. Returns the QEMU accelerator
 /// backend name, or `None` when only software emulation (TCG) is usable.
 ///
-/// Independent of `KFEAT_VMM`, which only controls nested-virt / VMX exposure
-/// — mirroring the semantics of the former `scripts/make/qemu.mk`.
 fn hardware_accel(guest: KernelArch) -> Option<&'static str> {
     let arch_matches = matches!(
         (env::consts::ARCH, guest),
@@ -110,11 +108,7 @@ fn add_platform_args(
     let context = &bundle.context;
     match context.config.platform() {
         "kplat-aarch64" => {
-            let machine = if context.config.is_enabled("KFEAT_VMM") {
-                "virt,virtualization=on"
-            } else {
-                "virt,gic-version=3"
-            };
+            let machine = "virt,virtualization=on,gic-version=3";
             let cpu = if accel.is_some() {
                 "host"
             } else {
@@ -178,7 +172,6 @@ fn add_x86_boot_args(
         ));
     };
 
-    let vmm = bundle.context.config.is_enabled("KFEAT_VMM");
     match args.boot.unwrap_or(X86BootMode::Linuxboot) {
         X86BootMode::Linuxboot => {
             command
@@ -186,20 +179,13 @@ fn add_x86_boot_args(
                 .arg(linuxboot_image);
             if let Some(backend) = accel {
                 command.args(["-cpu", "host", "-accel", backend]);
-            } else if vmm {
+            } else {
                 command.args(["-cpu", "max,+vmx"]);
             }
-            // Otherwise no `-cpu`; QEMU uses its default — unchanged.
         }
         X86BootMode::Uefi => {
             let firmware = resolve_ovmf(bundle, args, qemu_program)?;
-            let cpu = if accel.is_some() {
-                "host"
-            } else if vmm {
-                "max,+vmx"
-            } else {
-                "max"
-            };
+            let cpu = if accel.is_some() { "host" } else { "max,+vmx" };
             command
                 .args(["-cpu", cpu, "-machine", "q35"])
                 .arg("-drive")

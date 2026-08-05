@@ -69,13 +69,7 @@ impl From<PsciError> for KError {
 }
 fn psci_call(func: u32, arg0: usize, arg1: usize, arg2: usize) -> Result<(), PsciError> {
     // VHE: kernel runs at EL2 so HVC traps to self; must use SMC.
-    let result = if cfg!(feature = "vmm") {
-        smccc::smc_call(func, arg0, arg1, arg2)
-    } else if PSCI_METHOD_HVC.load(Ordering::Acquire) {
-        smccc::hvc_call(func, arg0, arg1, arg2)
-    } else {
-        smccc::smc_call(func, arg0, arg1, arg2)
-    };
+    let result = smccc::smc_call(func, arg0, arg1, arg2);
     let ret = result.x0;
     if ret == 0 {
         Ok(())

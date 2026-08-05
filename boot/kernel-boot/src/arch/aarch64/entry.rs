@@ -379,8 +379,7 @@ fn enable_fp() {
 
 /// Exception-level initialization for early boot.
 ///
-/// With the `vmm` feature, stays in EL2 with VHE (E2H=1, TGE=1).
-/// Without it, drops from EL2/EL3 to EL1 via `switch_to_el1`.
+/// Initializes the hypervisor host at EL2 with VHE (E2H=1, TGE=1).
 ///
 /// # Safety
 ///
@@ -388,14 +387,8 @@ fn enable_fp() {
 /// register state, before normal kernel execution begins.
 #[unsafe(link_section = ".idmap.text")]
 unsafe fn el_init() {
-    #[cfg(feature = "vmm")]
     // SAFETY: caller guarantees early-boot context with EL2 entry state.
     unsafe {
         el::init_el2_vhe();
-    }
-    #[cfg(not(feature = "vmm"))]
-    // SAFETY: caller guarantees early-boot context with EL2/EL3 entry state.
-    unsafe {
-        el::switch_to_el1();
     }
 }

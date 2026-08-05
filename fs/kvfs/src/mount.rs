@@ -35,7 +35,7 @@ bitflags::bitflags! {
     /// Per-mount flags, converted from the user-visible `MS_*` constants
     /// during the `mount(2)` syscall.
     ///
-    /// See [`per_mount_flags`] in `posix/fs/src/mount.rs` for the mapping.
+    /// These values follow the Linux per-mount flag ABI.
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub struct MountFlags: u32 {
         /// Mount read-only.

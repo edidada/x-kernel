@@ -26,7 +26,6 @@ console-pl011 = ["console_driver/pl011"]
 console-ns16550-mmio = ["console_driver/ns16550-mmio"]
 kvm-guest-mem-share = []
 kvm-mmio-guard = []
-vmm = ["timer_driver/vmm"]
 
 [dependencies]
 log = "0.4"
@@ -43,7 +42,7 @@ kbuild_config = { workspace = true }
 kernel_boot = { workspace = true }
 klazy = { workspace = true }
 rtc_driver = { workspace = true }
-timer_driver = { workspace = true }
+timer_driver.workspace = true
 memaddr = { workspace = true }
 lazyinit = "0.2"
 heapless = "0.9"
