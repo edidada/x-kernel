@@ -84,6 +84,19 @@ UAPP_TOOL := env \
 		--manifest-path xtask/Cargo.toml \
 		-p uapp --
 
+# linux-driver-port skill harness (see docs/ai/skills/linux-driver-port).
+# Truth source: docs/ai/skills/linux-driver-port/data/*.json. Enforces the
+# skill's iron rules as failing checks; regenerates knowledge/*.md from JSON.
+LDP_TARGET_DIR ?= $(TARGET_DIR)/tools/ldp
+LDP := env \
+	CARGO_BUILD_TARGET=$(HOST_TARGET) \
+	RUSTFLAGS= \
+	CARGO_ENCODED_RUSTFLAGS= \
+	cargo run --quiet \
+		--target-dir $(LDP_TARGET_DIR) \
+		--manifest-path xtask/Cargo.toml \
+		-p ldp --
+
 # QEMU virtio-blk backing file. Distinct from RAMDISK_IMG (embedded into the
 # kernel at build time when KFEAT_DRIVER_RAMDISK_STATIC=y).
 DISK_IMG ?= $(CURDIR)/disk.img
@@ -160,6 +173,7 @@ _HOOKS_BOOTSTRAP := $(shell \
 .PHONY: rootfs uapps rootfs-uapps teefs disk_img ramdisk_img
 .PHONY: install-tools check_deps deps check_header header fmt hooks clean distclean symbolize
 .PHONY: ci-test
+.PHONY: ldp ldp-check ldp-check-data ldp-gen-doc ldp-golden ldp-evolve ldp-requirements
 
 all: build
 
@@ -345,6 +359,34 @@ fmt:
 hooks:
 	@git config core.hooksPath "$$(git rev-parse --show-toplevel)/.githooks"
 	@echo "x-kernel: git hooks enabled -> $$(git config --get core.hooksPath)"
+
+## linux-driver-port skill harness targets.
+## Run after editing docs/ai/skills/linux-driver-port/data/*.json.
+ldp:
+	@$(LDP) help
+
+ldp-check:
+	@$(LDP) ref check && $(LDP) check-data && $(LDP) check-layout
+
+## 不依赖 vendor 参考树的轻量验证门(改完 JSON 后快速自检):
+## check-data(完整性)+ golden(walkthrough 不漂移)+ gen-doc(md 同步)。
+## 完整门(含 check-layout,需 vendor 参考树)用 ldp-check。
+ldp-check-data:
+	@$(LDP) check-data && $(LDP) golden && $(LDP) gen-doc
+
+ldp-gen-doc:
+	@$(LDP) gen-doc
+
+ldp-golden:
+	@$(LDP) golden
+
+## 聚合轨迹并展示可发布候选(Ch8 离线进化)。
+ldp-evolve:
+	@$(LDP) staging aggregate && $(LDP) staging review
+
+## 列需求 issue(看哪些待人工确认)。
+ldp-requirements:
+	@$(LDP) requirements list
 
 ci-test: build
 	@set -eu; \

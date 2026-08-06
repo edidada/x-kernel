@@ -7,6 +7,7 @@ prefer the shared skill at:
 
 - `docs/ai/skills/build-workflow/SKILL.md`
 - `docs/ai/skills/code-guidelines/SKILL.md`
+- `docs/ai/skills/linux-driver-port/SKILL.md` (port a Linux driver to x-kernel Rust; trigger with `/linux-driver-port`)
 
 This shared skill is the canonical source for:
 
