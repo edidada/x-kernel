@@ -20,7 +20,7 @@ net/knet/
 ├── Cargo.toml
 └── src/
     ├── lib.rs
-    ├── poller.rs
+    ├── poller/
     ├── device/
     │   ├── mod.rs
     │   ├── ethernet.rs
@@ -116,7 +116,7 @@ core/kruntime
 | 组件 | 职责 |
 |------|------|
 | `init_network` | 创建 loopback 与首个 Ethernet 设备，建立默认路由，初始化网络全局状态，并启动后台 poller 与 Ethernet RX 任务 |
-| `poller` | 使用单个 `AtomicU8` 四态状态机串行化执行者，按后台预算或 socket assist 预算推进 RX、smoltcp timer 和 TX |
+| `poller` | 使用单个 `AtomicU8` 四态状态机串行化执行者，按固定或自适应预算单轮推进 RX、smoltcp timer 和 TX |
 | `Service` | 持有加锁的 smoltcp `Interface`、`Router`、`IngressProcessor`、可复用 batch、poll timeout 和 RX waker 注册入口 |
 | `Router` | 管理设备列表、RX 设备游标、带 MTU 的路由表、smoltcp ingress queue、control/data TX queue、IPv4 输出分片、next-hop 选择和 budget dispatch |
 | `IngressProcessor` | 在 Router 锁外校验和重组 IPv4 输入，执行 crate 内 UDP 分流、UDP error 与 TCP listen snoop，并生成 ICMPv4 control packet |
@@ -234,7 +234,7 @@ IDLE ──notify──────────────> SCHEDULED
 |----------|------|----------|----------|
 | `IDLE` | `notify` | `SCHEDULED` | 唤醒后台任务 |
 | `SCHEDULED` | `notify` | `SCHEDULED` | 已有唤醒保持有效 |
-| `SCHEDULED` | 后台、Ethernet RX 任务或 assist 获取执行权 | `RUNNING` | 当前执行者运行一轮或一批有界轮次 |
+| `SCHEDULED` | 后台、Ethernet RX 任务或 assist 获取执行权 | `RUNNING` | 当前执行者运行一轮有界预算推进 |
 | `RUNNING` | `notify` | `RUNNING_PENDING` | 当前执行者完成时负责后续唤醒 |
 | `RUNNING_PENDING` | `notify` | `RUNNING_PENDING` | pending 状态保持 |
 | `RUNNING` | 完成且没有立即工作 | `IDLE` | 无唤醒 |
@@ -244,8 +244,8 @@ IDLE ──notify──────────────> SCHEDULED
 `SCHEDULED` 表示已发布待推进工作，`RUNNING` 表示唯一执行者持有执行权，
 `RUNNING_PENDING` 记录执行期间到达的新通知。完成路径通过一次 CAS 同时归还执行权
 并发布 `IDLE` 或 `SCHEDULED`，通知与完成并发时由同一原子修改序列保留事件。
-Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前任务内竞争批次执行权。
-它从 `IDLE` 发布工作时省去后台任务唤醒；已有执行者时，`RUNNING_PENDING` 负责安排后续批次。
+Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前任务内竞争单轮执行权。
+它从 `IDLE` 发布工作时省去后台任务唤醒；已有执行者时，`RUNNING_PENDING` 负责安排后续轮次。
 `Interface::poll_at` 返回的下一次协议 deadline 由 `Service` 注册为 timer，
 到期后调度 poller 并唤醒正在等待 socket readiness 的任务。
 
@@ -260,11 +260,11 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 5. 初始化 rtnetlink 初始状态，并同步到 `Service`、`Router`、`Interface`、`IngressProcessor` 和设备。
 6. 初始化全局 `SOCKET_SET`、`LISTEN_TABLE` 和 UDP PCB 及异步错误 registry。
 7. 启动常驻 `knet-poller` 后台任务。
-8. 启动 Ethernet RX 任务；硬中断只唤醒该任务，RX 任务发布工作并尝试执行一个有界 poller 批次。
+8. 启动 Ethernet RX 任务；硬中断只唤醒该任务，RX 任务发布工作并尝试执行一轮 poller 推进。
 
 ### RX 推进
 
-1. Ethernet RX 任务注册下一次 IRQ waker 后调用 `NetworkPoller::publish_and_poll_rx`，在当前任务内发布 RX 并尝试执行有界批次；socket recv 和 readiness 路径通过 `poll_interfaces` 尝试执行一次已有工作；TCP、UDP 和 raw TX 生产路径通过 `notify(PollReason::Tx)` 发布工作。TCP 从可编码为零窗口的低余量接收缓冲区消费数据时通过 `notify(PollReason::RxWindow)` 主动重开对端窗口。
+1. Ethernet RX 任务注册下一次 IRQ waker 后调用 `NetworkPoller::publish_and_poll_rx`，在当前任务内发布 RX 并尝试执行一轮；socket recv 和 readiness 路径通过 `poll_interfaces` 尝试执行一次已有工作；TCP、UDP 和 raw TX 生产路径通过 `notify(PollReason::Tx)` 发布工作。TCP 从可编码为零窗口的低余量接收缓冲区消费数据时通过 `notify(PollReason::RxWindow)` 主动重开对端窗口。
 2. 普通 `notify` 在 `IDLE` 上发布 `SCHEDULED` 并唤醒后台任务；RX 任务发布后直接竞争执行权。执行期间的新工作进入 `RUNNING_PENDING`；RX 任务、后台任务和 assist 只有一个能够通过 `SCHEDULED` 到 `RUNNING` 的 CAS。
 3. `Router::drain_rx_budgeted_into` 按 RX budget 从设备轮转拉取 `PacketBuf`，`next_rx_device` 在设备间保持公平并随设备删除修正。
 4. `IngressProcessor` 在 Router 锁外校验 IPv4 头、长度、校验和与本地目的地址，并完成 IPv4 分片重组。
@@ -273,7 +273,7 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 7. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
 8. `Router::dispatch_budgeted` 先处理 control TX queue，再处理 data TX queue，单轮发送数量受 TX budget 限制。
 9. `Interface::poll_at` 与 orphan `FIN_WAIT_2` deadline 共同决定下一次网络 deadline，`Service` 将其写入原子 deadline；每次系统 tick 检查该值，到期后通过 `notify(PollReason::Timer)` 发布工作。尚未到期的 deadline 不进入 `PollProgress::has_more`。
-10. `PollProgress::has_more` 只汇报当前可立即处理的 RX、ingress、TX 或已到期 timer 工作。RX 任务或后台 Future 获得批次执行权后连续调用有限轮次的 `Service::poll_budgeted`；达到批次轮数上限或没有立即工作时归还执行权，仍有 backlog 时通过 `SCHEDULED` 状态唤醒下一批。批次执行期间保持 `RUNNING` 或 `RUNNING_PENDING`，assist 无法获取执行权。
+10. `PollProgress::has_more` 只汇报当前可立即处理的 RX、ingress、TX 或已到期 timer 工作。RX 任务或后台 Future 每次 `poll` 只执行一轮 `Service::poll_budgeted`；仍有立即工作时通过 `SCHEDULED` 重新唤醒进入下一轮。执行期间保持 `RUNNING` 或 `RUNNING_PENDING`，assist 无法获取执行权。
 
 ### TX 路由
 
@@ -325,8 +325,8 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 
 ## 并发模型
 
-- 全局 `SERVICE` 是 `LazyInit<Service>`。`Service` 内部分别使用 mutex 保护 smoltcp `Interface`、`Router`、`IngressProcessor` 和可复用 batch。网络 timer deadline 使用 `AtomicU64` 保存，系统 tick 回调只执行原子检查、waiter 唤醒和 poller 通知。
-- `NetworkPoller` 使用一个 `AtomicU8` 保存 `IDLE`、`SCHEDULED`、`RUNNING` 和 `RUNNING_PENDING`。RX 任务与后台任务的批次预算为 512 个 RX packet、256 个 TX packet 和 32 个 timer event，socket assist 预算为 16、16 和 8。每个批次最多连续执行四轮，每次 assist 最多执行一轮；达到批次上限后唤醒下一批并归还执行权。
+- 全局 `SERVICE` 是 `LazyInit<Service>`。`Service` 内部分别使用 mutex 保护 smoltcp `Interface`、`Router`、`IngressProcessor` 和可复用 batch。网络 timer deadline 使用 `AtomicU64` 保存，系统 tick 回调只执行原子检查、waiter 唤醒和 poller 通知。自适应预算控制器使用独立的 `SpinNoPreempt`，取快照和写回反馈时不得与 `SERVICE` 相关锁同时持有。
+- `NetworkPoller` 使用一个 `AtomicU8` 保存 `IDLE`、`SCHEDULED`、`RUNNING` 和 `RUNNING_PENDING`。默认自适应模式下 RX/TX/Timer 预算分别从 256/128/8 起步，并受 min/max 约束；固定模式下后台预算为 512/256/32。socket assist 预算固定为 16、16 和 8。每次 `poll` 只推进一轮，仍有立即工作时重新调度。
 - RX 设备拉取和 TX dispatch 位于 Router 锁内，IPv4 校验、过滤和 snoop 位于 Router 锁外。smoltcp ingress queue 有固定容量，队列满时先推进 Interface 和 TX，再继续拉取设备 packet。
 - 全局 `SOCKET_SET` 内部使用 `Mutex<SocketSetState>`，其中的 smoltcp socket set 与 TCP deferred-close 元数据共享同一所有权锁。关闭、登记、协议推进和回收不会跨两个 mutex 交接 handle。
 - `UDP_PCB_REGISTRY` 按端口分为 256 个 bucket，每个 bucket 独立加锁；每个 UDP PCB 的接收队列、endpoint、错误队列和 option 状态分别受锁或 atomic 保护。
@@ -349,14 +349,16 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 ### UDP 与 IPv4 数据路径迁出 smoltcp
 
 UDP PCB、bind 冲突检查、收发队列、IPv4 校验、分片重组、输出分片和 ICMPv4 差错均由 crate 内类型管理。
-TCP、raw IP、IPv6 和 DNS 继续通过 smoltcp socket set 推进，协议推进依赖 Ethernet RX 任务的有界批次、后台 poller 调度和显式 `poll_interfaces` assist。
+TCP、raw IP、IPv6 和 DNS 继续通过 smoltcp socket set 推进，协议推进依赖 Ethernet RX 任务的单轮推进、后台 poller 调度和显式 `poll_interfaces` assist。
 该边界让 UDP 不再依赖 smoltcp socket handle，同时保留现有 TCP 和 raw socket 行为。
 
 ### NAPI 风格预算推进
 
-Ethernet RX 任务、socket TX 生产路径、协议 timer 和后台任务共享同一个 `NetworkPoller`。`notify` 与 `publish_and_poll_rx` 使用状态低位发布 pending 工作，`SCHEDULED` 到 `RUNNING` 的 CAS 提供单执行者约束，完成 CAS 同时归还执行权并发布下一状态。RX 任务在发布后直接竞争有界批次执行权，避免再经过一次任务唤醒。执行期间到达的通知把状态变为 `RUNNING_PENDING`，完成路径据此发布 `SCHEDULED` 并唤醒后台任务。assist 在 `IDLE`、`RUNNING` 和 `RUNNING_PENDING` 上直接返回，不创建事件，也不等待执行权。
+Ethernet RX 任务、socket TX 生产路径、协议 timer 和后台任务共享同一个 `NetworkPoller`。`notify` 与 `publish_and_poll_rx` 使用状态低位发布 pending 工作，`SCHEDULED` 到 `RUNNING` 的 CAS 提供单执行者约束，完成 CAS 同时归还执行权并发布下一状态。RX 任务在发布后直接竞争单轮执行权，避免再经过一次任务唤醒。执行期间到达的通知把状态变为 `RUNNING_PENDING`，完成路径据此发布 `SCHEDULED` 并唤醒后台任务。assist 在 `IDLE`、`RUNNING` 和 `RUNNING_PENDING` 上直接返回，不创建事件，也不等待执行权。
 
-RX、TX 与 timer 使用独立预算。control TX 优先于 data TX，避免 ICMP 错误和协议控制流量长期滞后。TCP send 可写快路径向 smoltcp socket buffer 写入数据并发布 TX 通知，连续发送由 poller owner 在有界批次内完成协议推进和 TX dispatch。TCP recv 在消费前接收缓冲区余量低于最大窗口缩放量子时发布 `RxWindow` 通知，释放 socket-set mutex 后由 poller 推进窗口更新；达到缩放量子后的接收窗口增长复用 RX 和已登记的 timer 推进。TCP 和 raw socket 直接向 smoltcp 注册聚合 send waker；Router data TX queue 的可用 packet slot 实际增加时，`PollProgress::tx_capacity_changed` 触发 poller TX waiter 唤醒。协议与 deferred-close deadline 写入原子值，系统 tick 到期后唤醒 socket waiter，并以 `PollReason::Timer` 通知 poller。
+每次 `Future::poll` 只执行一个预算轮次。RX、TX 与 timer 使用独立预算，默认走轻量自适应控制器：每 8 轮评估一次增长，窗口内至少 5 轮“预算耗尽且仍有该类工作”才允许扩张；轮次耗时低于时间上限 50% 时翻倍，处于 50%–75% 时增加一个最小预算单位，处于 75%–100% 时保持；达到时间上限时超限类别立即减半并进入 8 轮冷却期。`Interface::poll` 消耗的时间归入 RX（ingress 由 RX 预算注入），仅当本轮无 RX/TX 完成量且仍有到期 timer 时才归为 Timer 超限。空闲轮次保持预算，不统计精确队列长度，也不使用浮点、除法或 EWMA。时间检查每处理 16 个工作项执行一次（RX drain chunk 亦不超过 16）。Timer 预算固定为最小值且超限不触发收缩，`timer_more` 只表示仍有已经到期的 timer，并由独立 deadline 唤醒推进。`KFEAT_NET_FIXED_POLL_BUDGET` 可切换回固定预算。assist 使用固定小预算且不反馈控制器。控制器锁与 `SERVICE` 锁永不同时持有。
+
+control TX 优先于 data TX，避免 ICMP 错误和协议控制流量长期滞后。TCP send 可写快路径向 smoltcp socket buffer 写入数据并发布 TX 通知，连续发送由 poller owner 在有界单轮内完成协议推进和 TX dispatch，剩余工作通过重新调度继续。TCP recv 在消费前接收缓冲区余量低于最大窗口缩放量子时发布 `RxWindow` 通知，释放 socket-set mutex 后由 poller 推进窗口更新；达到缩放量子后的接收窗口增长复用 RX 和已登记的 timer 推进。TCP 和 raw socket 直接向 smoltcp 注册聚合 send waker；Router data TX queue 的可用 packet slot 实际增加时，`PollProgress::tx_capacity_changed` 触发 poller TX waiter 唤醒。协议与 deferred-close deadline 写入原子值，系统 tick 到期后唤醒 socket waiter，并以 `PollReason::Timer` 通知 poller。poller 统计覆盖预算增减、时间超限、每轮处理量、重新调度次数和每 CPU 占用。
 
 ### 控制面状态与 data-plane 同步
 

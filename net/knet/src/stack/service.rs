@@ -29,7 +29,7 @@ use crate::{
     buf::PacketBuf,
     ip::{IpAddress, IpListenEndpoint},
     netlink::RtnetlinkState,
-    poller::{PollBudget, PollProgress},
+    poller::{BudgetKind, PollBudget, PollProgress, ROUND_TIME_CAP, TIME_CHECK_INTERVAL},
     router::Router,
     stack::ingress::IngressProcessor,
 };
@@ -43,6 +43,7 @@ fn to_smoltcp_instant(instant: MonotonicInstant) -> SmoltcpInstant {
     SmoltcpInstant::from_micros_const(micros)
 }
 
+#[cfg(unittest)]
 fn from_smoltcp_instant(instant: SmoltcpInstant) -> MonotonicInstant {
     let micros = u64::try_from(instant.total_micros()).unwrap_or(0);
     MonotonicInstant::from_span_since_origin(TimeSpan::from_micros(micros))
@@ -81,9 +82,12 @@ impl Service {
     }
 
     pub fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
-        let device_timestamp = monotonic_time();
+        let start = monotonic_time();
+        let device_timestamp = start;
+        let mut overrun = None;
         let mut rx_packets = 0;
         let mut rx_remaining = budget.rx_packets;
+        let mut since_time_check = 0usize;
         let mut sockets = SOCKET_SET.inner.lock();
         let mut control_packets = self.control_batch.lock();
         let mut rx_batch = self.rx_batch.lock();
@@ -91,9 +95,20 @@ impl Service {
         control_packets.clear();
 
         while rx_remaining > 0 {
+            if since_time_check >= TIME_CHECK_INTERVAL {
+                since_time_check = 0;
+                if monotonic_time().saturating_duration_since(start) >= ROUND_TIME_CAP {
+                    overrun = Some(BudgetKind::Rx);
+                    break;
+                }
+            }
+
             let mut router = self.router.lock();
+            // Cap each drain at TIME_CHECK_INTERVAL so the wall-time check
+            // runs at least once every 16 completed RX items.
             let batch_budget = rx_remaining
                 .min(RX_INGRESS_BATCH_PACKETS)
+                .min(TIME_CHECK_INTERVAL)
                 .min(router.ingress_capacity());
             if batch_budget == 0 {
                 break;
@@ -103,6 +118,7 @@ impl Service {
             drop(router);
             rx_packets += drain.work_done;
             rx_remaining = rx_remaining.saturating_sub(drain.work_done);
+            since_time_check = since_time_check.saturating_add(drain.work_done);
 
             self.ingress.lock().handle_rx_packets(
                 device_timestamp,
@@ -123,6 +139,10 @@ impl Service {
             }
         }
 
+        // Always run Interface::poll after RX, even when RX hit the time cap
+        // or timer budget is zero. This digests ingress, advances TCP state,
+        // and refreshes poll_at deadlines (T-24). Timer budget only affects
+        // timer_events accounting and exhaustion feedback.
         let mut router = self.router.lock();
         let current = now();
         let mut iface = self.iface.lock();
@@ -131,24 +151,80 @@ impl Service {
         let next_poll =
             earliest_poll_deadline(iface.poll_at(current, &sockets), deferred_close_deadline);
         drop(iface);
-        let timer_has_more = has_immediate_timer_work(current, next_poll);
+        let timer_more = has_immediate_timer_work(current, next_poll);
         self.update_poll_timeout(current, next_poll);
         LISTEN_TABLE.wake_touched_acceptors(&mut sockets);
         drop(sockets);
 
         let ingress_has_more = router.has_pending_ingress();
         let rx_has_more = router.has_immediate_rx_work();
+        let rx_more = rx_has_more || ingress_has_more;
         let tx_capacity_before = router.available_tx_packet_slots();
-        let (tx_packets, tx_has_more) =
-            router.dispatch_budgeted(device_timestamp, budget.tx_packets);
+
+        // iface.poll can consume most of the round budget while draining
+        // smoltcp ingress injected by RX. Attribute that overrun to RX only
+        // when this round actually ingested packets; a timer-only round that
+        // blows the cap falls through to the Timer attribution below.
+        if overrun.is_none()
+            && rx_packets > 0
+            && monotonic_time().saturating_duration_since(start) >= ROUND_TIME_CAP
+        {
+            overrun = Some(BudgetKind::Rx);
+        }
+
+        let mut tx_packets = 0;
+        let mut tx_has_more = router.has_queued_tx_packets();
+        let mut tx_remaining = if overrun.is_some() {
+            0
+        } else {
+            budget.tx_packets
+        };
+        while tx_remaining > 0 {
+            let chunk = tx_remaining.min(TIME_CHECK_INTERVAL);
+            let (done, more) = router.dispatch_budgeted(device_timestamp, chunk);
+            tx_packets += done;
+            tx_remaining = tx_remaining.saturating_sub(done);
+            tx_has_more = more;
+            if done < chunk {
+                break;
+            }
+            if monotonic_time().saturating_duration_since(start) >= ROUND_TIME_CAP {
+                overrun = Some(BudgetKind::Tx);
+                break;
+            }
+        }
+
+        let timer_events =
+            usize::from(budget.timer_events > 0 && iface_changed == PollResult::SocketStateChanged);
+        let elapsed = monotonic_time().saturating_duration_since(start);
+        // Timer work is a single Interface::poll. Remaining due timers count as
+        // exhaustion when the timer budget slot was open this round.
+        let timer_exhausted = budget.timer_events > 0 && timer_more;
+        // Only attribute Timer overrun when RX/TX were idle this round and due
+        // timers remain after poll; otherwise iface.poll cost belongs to RX.
+        if overrun.is_none()
+            && timer_exhausted
+            && rx_packets == 0
+            && tx_packets == 0
+            && elapsed >= ROUND_TIME_CAP
+        {
+            overrun = Some(BudgetKind::Timer);
+        }
+
         PollProgress {
             rx_packets,
             tx_packets,
-            timer_events: usize::from(
-                budget.timer_events > 0 && iface_changed == PollResult::SocketStateChanged,
-            ),
+            timer_events,
             tx_capacity_changed: router.available_tx_packet_slots() > tx_capacity_before,
-            has_more: rx_has_more || ingress_has_more || tx_has_more || timer_has_more,
+            rx_exhausted: budget.rx_packets > 0 && rx_packets >= budget.rx_packets && rx_more,
+            tx_exhausted: budget.tx_packets > 0 && tx_packets >= budget.tx_packets && tx_has_more,
+            timer_exhausted,
+            rx_more,
+            tx_more: tx_has_more,
+            timer_more,
+            has_more: rx_more || tx_has_more || timer_more,
+            elapsed,
+            overrun,
         }
     }
 

@@ -12,6 +12,7 @@ documentation.workspace = true
 [features]
 vsock = ["kclass/vsock"]
 vsock_tipc_bridge = ["vsock", "dep:tipc"]
+fixed-poll-budget = []
 
 [dependencies]
 unittest = { workspace = true }
@@ -44,6 +45,8 @@ zerocopy = { workspace = true }
 async-channel = { version = "2.5.0", default-features = false }
 event-listener = { version = "5.4.0", default-features = false }
 async-trait = "0.1.88"
+percpu = { workspace = true }
+kbuild_config = { workspace = true }
 
 [dependencies.smoltcp]
 workspace = true

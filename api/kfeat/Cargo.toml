@@ -95,6 +95,7 @@ fs_times = ["kruntime/fs_times"]
 # the `driver_*` features below.
 net = ["dep:knet", "kruntime/net"]
 vsock = ["net", "kruntime/vsock", "knet/vsock", "ksyscall/vsock"]
+net_fixed_poll_budget = ["knet/fixed-poll-budget"]
 
 # Display (subsystem only; pick a driver via `driver_*`).
 display = ["dep:fbdevice", "kruntime/display"]

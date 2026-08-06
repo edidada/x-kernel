@@ -472,7 +472,7 @@ impl Router {
             .or_else(|| self.data_tx_queue.pop_front())
     }
 
-    fn has_queued_tx_packets(&self) -> bool {
+    pub(crate) fn has_queued_tx_packets(&self) -> bool {
         !self.control_tx_queue.is_empty() || !self.data_tx_queue.is_empty()
     }
 

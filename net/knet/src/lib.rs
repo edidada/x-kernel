@@ -38,6 +38,7 @@ use kdevice::subscribe_device_removed;
 use lazyinit::LazyInit;
 pub use link::packet;
 pub(crate) use link::{buf, wire};
+pub use poller::{PollerStatsSnapshot, poller_stats_snapshot};
 pub use socket::{
     file::{sock_alloc_file, sock_from_file},
     options, *,

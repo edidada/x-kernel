@@ -11,4 +11,12 @@ config KFEAT_VSOCK
     help
       Enable AF_VSOCK support for guest and host communication.
 
+config KFEAT_NET_FIXED_POLL_BUDGET
+    bool "Use fixed network poller budgets"
+    depends on KFEAT_NET
+    default n
+    help
+      Disable adaptive RX/TX/Timer poll budgets and use the compile-time
+      fixed background budget for every owned poller round.
+
 endmenu
