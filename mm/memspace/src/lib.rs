@@ -21,7 +21,7 @@ mod lifetime;
 mod vma;
 
 use kaddr_layout::{KERNEL_ASPACE_BASE, KERNEL_ASPACE_SIZE};
-use kerrno::LinuxResult;
+use kerrno::KResult;
 use khal::{
     mem::{MemFlags, MemoryRegion, memory_regions, p2v},
     paging::MappingFlags,
@@ -76,7 +76,7 @@ fn mem_to_mapping_flags(f: MemFlags) -> MappingFlags {
     flags
 }
 
-fn map_memory_region(vmspace: &mut MmSpace, region: MemoryRegion) -> LinuxResult<()> {
+fn map_memory_region(vmspace: &mut MmSpace, region: MemoryRegion) -> KResult<()> {
     let start = region.paddr.align_down_4k();
     let end = (region.paddr + region.size).align_up_4k();
     let target_va = match region.vaddr {
@@ -93,7 +93,7 @@ fn map_memory_region(vmspace: &mut MmSpace, region: MemoryRegion) -> LinuxResult
 }
 
 /// Creates a new address space for kernel itself.
-pub fn new_kernel_layout() -> LinuxResult<MmSpace> {
+pub fn new_kernel_layout() -> KResult<MmSpace> {
     let mut vmspace =
         MmSpace::new_empty_kernel(va!(KERNEL_ASPACE_BASE as _), KERNEL_ASPACE_SIZE as _)?;
     for region in memory_regions() {

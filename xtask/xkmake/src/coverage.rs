@@ -22,10 +22,14 @@ use crate::{
 
 const GUEST_PROFRAW_PATH: &str = "/.llvm-cov/default.profraw";
 const COVERAGE_IGNORE_REGEX: &str =
-    "/target/|/api/kapi/src/syscall/|/api/linux_sysno/src/|/boot/kernel-boot/";
+    "/target/|/api/kapi/src/syscall/|/boot/kernel-boot/";
 
 pub(crate) fn generate(bundle: &Bundle, args: &RunArgs) -> Result<()> {
     if !bundle.context.unittest {
+        return Ok(());
+    }
+    if args.no_block {
+        println!("Skipping unit-test coverage reports because block devices are disabled.");
         return Ok(());
     }
 

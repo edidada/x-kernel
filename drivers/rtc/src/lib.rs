@@ -17,6 +17,7 @@ mod goldfish;
 #[cfg(feature = "pl031")]
 mod pl031;
 
+#[cfg(any(feature = "goldfish", feature = "pl031", unittest))]
 fn system_time_from_unsigned_seconds(seconds: u64) -> Option<SystemTime> {
     i64::try_from(seconds)
         .ok()

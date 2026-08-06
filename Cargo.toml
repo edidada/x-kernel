@@ -5,7 +5,6 @@ members = [
     "entry",
     # boot and loader
     "boot/*",
-    "tee/tee_crypto",
 ]
 exclude = [
     # platform-specific boot code that is not intended to be built as part of the main workspace
@@ -31,7 +30,6 @@ categories = ["os", "no-std"]
 [workspace.dependencies]
 # Internal: API and core services
 kfeat = { path = "api/kfeat" }
-ksignal = { path = "process/ksignal" }
 
 # Internal: architecture and platform support
 karch = { path = "arch/karch" }
@@ -45,19 +43,16 @@ kplat = { path = "platforms/kplat" }
 boot_info = { path = "boot/boot-info", package = "boot-info" }
 firmware_handoff = { path = "boot/firmware-handoff", package = "firmware-handoff" }
 kernel_boot = { path = "boot/kernel-boot", package = "kernel-boot" }
-kernel-elf-parser = { path = "boot/kernel_elf_parser" }
 kernel_elf_loader = { path = "boot/kernel-elf-loader", package = "kernel-elf-loader" }
 x86_boot_common = { path = "boot/x86-boot-common", package = "x86-boot-common" }
 
 # Internal: core runtime and services
-kcred = { path = "process/kcred" }
 kruntime = { path = "core/kruntime" }
 klazy = { path = "util/klazy" }
 ktime_types = { path = "util/ktime_types" }
 ktime = { path = "core/ktime" }
 
 # Internal: tracing and debugging
-ktracing = { path = "core/ktracing" }
 
 # Internal: task scheduling and synchronization
 kpoll = { path = "task/kpoll" }
@@ -66,52 +61,19 @@ ksync = { path = "task/ksync" }
 ktask = { path = "task/ktask" }
 ksched = { path = "task/ksched" }
 linked_list_r4l = "0.3"
-fs_context = { path = "process/fs_context" }
-kfd = { path = "process/kfd" }
-kexec = { path = "process/kexec" }
-krlimit = { path = "process/krlimit" }
-kresources = { path = "process/kresources" }
-kcgroup = { path = "process/kcgroup" }
-kns = { path = "process/kns" }
-ktimer = { path = "process/ktimer" }
-kprocess = { path = "process/kprocess" }
-osvm = { path = "process/osvm" }
-posix-types = { path = "posix/types" }
 
 # Internal: memory and filesystem
 alloc-engine = { path = "mm/alloc-engine" }
-kvfs = { path = "fs/kvfs" }
-bpffs = { path = "fs/filesystems/bpffs" }
-memfs = { path = "fs/filesystems/memfs" }
 kaddr_layout = { path = "mm/kaddr_layout" }
 kalloc = { path = "mm/kalloc" }
-fat = { path = "fs/filesystems/fat" }
-fs_block = { path = "fs/block" }
-fs_boot = { path = "fs/boot" }
-procfs = { path = "fs/filesystems/procfs" }
-devfs = { path = "fs/filesystems/devfs" }
-fs9p = { path = "fs/filesystems/fs9p", default-features = false }
-kext4_vfs = { path = "fs/bridges/kext4_vfs" }
-v9fs = { path = "fs/bridges/v9fs" }
 memaddr = { path = "mm/memaddr" }
 anon = { path = "mm/anon" }
 memspace = { path = "mm/memspace" }
-filemap = { path = "mm/filemap" }
-pagecache = { path = "mm/pagecache" }
 page_table = { path = "mm/page_table" }
 vmobj = { path = "mm/vmobj" }
-kext4 = { path = "fs/filesystems/kext4", default-features = false }
 
 # Internal: IO and network subsystem
-fbdevice = { path = "io/fbdevice" }
-drmdevice = { path = "io/drmdevice" }
-inputdev = { path = "io/inputdev" }
 kdma = { path = "io/kdma" }
-kio = { path = "io/kio" }
-iov_iter = { path = "io/iov_iter" }
-knet = { path = "net/knet" }
-ktty = { path = "io/ktty" }
-watchdog = { path = "io/watchdog" }
 
 # Internal: drivers
 aarch64-pmuv3 = { path = "drivers/aarch64-pmuv3" }
@@ -132,7 +94,6 @@ virtio = { path = "drivers/virtio" }
 vsock = { path = "drivers/vsock" }
 acpi = { path = "drivers/acpi" }
 of = { path = "drivers/of" }
-dice_driver = { path = "drivers/dice", package = "dice-driver" }
 irq_notify = { path = "drivers/irq-notify", package = "irq-notify" }
 irq_driver = { path = "drivers/irq", package = "irq-driver" }
 rtc_driver = { path = "drivers/rtc", package = "rtc-driver" }
@@ -142,76 +103,39 @@ x86_apic = { path = "drivers/x86-apic", package = "x86-apic" }
 # Internal: platform variants
 kplat-aarch64 = { path = "platforms/kplat-aarch64", default-features = false }
 
-# Internal: tee
-tee_crypto = { version = "=0.1.4", default-features = false }
-tee_raw_sys = { path = "tee/tee_raw_sys" }
-tee_task_iface = { path = "tee/tee_task_iface" }
-tasign = { version = "=0.2.4", default-features = false }
-xdice = { path = "tee/xdice", default-features = false, features = ["nostd"] }
-
-# Internal: Trusty IPC
-tipc = { path = "tee/tipc" }
-tipc_handle = { path = "tee/tipc_handle" }
-
 # Internal: utilities and tooling
 backtrace = { path = "util/backtrace" }
 kbuild_config = { path = "util/kbuild_config" }
 kernel-image-metadata = { path = "boot/kernel-image-metadata" }
 kerrno = { path = "util/kerrno" }
 kiface = { path = "util/kiface" }
-kidentity = { path = "process/kidentity" }
 klogger = { path = "util/klogger" }
 macros = { path = "util/macros" }
 unittest = { path = "util/unittest" }
-klockstat = { path = "util/klockstat" }
-klockstat-macros = { path = "util/klockstat-macros" }
 
 # External crates
 bitflags = "2.10"
-bytemuck = { version = "1.23", features = ["unsound_ptr_pod_impl"] }
 cfg-if = "1.0"
 zerocopy = { version = "0.8", features = ["derive"] }
-zeroize = { version = "1.9", default-features = false }
-uuid = { version = "0.8", default-features = false }
 chrono = { version = "0.4", default-features = false }
 crate_interface = { version = "0.3", features = ["weak_default"] }
-enum_dispatch = "0.3"
-etherparse = { version = "0.20.2", default-features = false }
 event-listener = { version = "5.4.0", default-features = false }
-extern-trait = "0.2"
-fatfs = { version = "0.1.0-pre.0", default-features = false, package = "axfatfs" }
-hashbrown = "0.16"
 lazyinit = "0.2"
-linux-raw-sys = { version = "0.11", default-features = false, features = [
-    "no_std",
-    "general",
-    "net",
-    "prctl",
-    "system",
-] }
-linux_sysno = { path = "api/linux_sysno", default-features = false }
 linkme = "0.3.33"
 lock_api = { version = "0.4", default-features = false }
 log = "0.4"
 int_ratio = "0.1"
-ouroboros = { version = "0.18.5", default-features = false }
 paste = "1.0"
 percpu = "0.4"
 proc-macro2 = "1.0"
 quote = "1.0"
 
 safe-mmio = "0.3.0"
-slab = { version = "0.4.9", default-features = false }
 smallvec = { version = "1.15", default-features = false, features = ["const_generics", "const_new", "union"] }
-smoltcp = { version = "=0.13.0", default-features = false }
 strum = { version = "0.27", default-features = false, features = ["derive"] }
 syn = { version = "2.0", features = ["full"] }
 virtio-drivers = { version = "0.13.1", default-features = false, package = "kvirtiodrivers" }
 # Pinned: 0.15.5's `nightly`->`step_trait` (pulled in by `x2apic`) needs Step methods absent from rustc 1.95.0; bump after nightly-2026-07-10+.
 x86_64 = { version = "=0.15.4", features = ["instructions"] }
-ktracepoint = "0.5"
-static-keys = "0.8"
-flatten_objects = "0.2.4"
-weak-map = "0.1.1"
 tock-registers = "0.10.1"
 xmas-elf = { version = "0.9", default-features = false }

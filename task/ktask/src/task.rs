@@ -11,7 +11,6 @@ use core::sync::atomic::AtomicU64;
 use core::sync::atomic::AtomicUsize;
 use core::{
     alloc::Layout,
-    any::Any,
     cell::{Cell, UnsafeCell},
     fmt,
     future::poll_fn,
@@ -38,40 +37,6 @@ use crate::{KCpuMask, KTask, KtaskRef, future::block_on, yield_now};
 enum TaskIdentity {
     Idle,
     Internal,
-    KernelThread {
-        task_number: Arc<kidentity::PidHandle>,
-    },
-    User {
-        task_number: Arc<kidentity::PidHandle>,
-        user_runtime: UserRuntimeSlot,
-    },
-}
-
-impl TaskIdentity {
-    fn thread_pid(&self) -> Option<&Arc<kidentity::PidHandle>> {
-        match self {
-            Self::KernelThread { task_number, .. } | Self::User { task_number, .. } => {
-                Some(task_number)
-            }
-            Self::Idle | Self::Internal => None,
-        }
-    }
-
-    fn trace_id(&self) -> u64 {
-        match self {
-            Self::Idle | Self::Internal => 0,
-            Self::KernelThread { task_number, .. } | Self::User { task_number, .. } => {
-                task_number.root_nr() as u64
-            }
-        }
-    }
-
-    fn user_runtime(&self) -> Option<&dyn UserTaskRuntime> {
-        match self {
-            Self::User { user_runtime, .. } => user_runtime.get(),
-            Self::Idle | Self::Internal | Self::KernelThread { .. } => None,
-        }
-    }
 }
 
 /// The possible states of a task.
@@ -88,65 +53,6 @@ pub enum TaskState {
     /// Task is exited and waiting for being dropped.
     Exited  = 4,
 }
-
-/// Scheduler callbacks and type-erased access for a user-task runtime.
-///
-/// The scheduler invokes these callbacks with preemption disabled while
-/// switching tasks. Implementations must not sleep, block, recursively schedule,
-/// or depend on ordinary current-process state. Shared state accessed by
-/// callbacks must be synchronized for concurrent scheduler activity.
-pub trait UserTaskRuntime: Send + Sync + Any {
-    /// Called when the task is switched in.
-    fn on_enter(&self) {}
-    /// Called when the task is switched out.
-    fn on_leave(&self) {}
-    /// Marks that the current CPU may retain TLB state for this task's user
-    /// address space.
-    fn set_user_mm_resident_cpu(&self, _cpu_id: LogicalCpuId) {}
-    /// Returns the latest valid hardware user page-table root for switch-in.
-    fn switch_page_table_root(&self) -> Option<karch::HwPageTableRoot> {
-        None
-    }
-
-    /// Returns this runtime as [`Any`] for process-domain type recovery.
-    fn as_any(&self) -> &dyn Any;
-}
-
-/// Holds the user runtime attached to a `User`-identity task.
-///
-/// A user task always carries its runtime from construction (see
-/// [`TaskInner::new_user`]); there is no longer an empty state that gets filled
-/// in later, so this is effectively an immutable, single-shot container.
-struct UserRuntimeSlot {
-    value: UnsafeCell<Option<Box<dyn UserTaskRuntime>>>,
-}
-
-impl UserRuntimeSlot {
-    fn ready(user_runtime: Box<dyn UserTaskRuntime>) -> Self {
-        Self {
-            value: UnsafeCell::new(Some(user_runtime)),
-        }
-    }
-
-    fn get(&self) -> Option<&dyn UserTaskRuntime> {
-        // SAFETY: this type does not establish synchronization on its own. Its
-        // soundness relies on the surrounding invariant that a `UserRuntimeSlot`
-        // is populated by `ready()` before the owning `TaskInner` is shared, and
-        // that sharing happens via `Arc<TaskInner>` publication — the `Arc`
-        // atomic ref-count store provides the happens-before edge that lets
-        // readers on other threads observe the value written here. Once
-        // published the runtime is never replaced, so the returned shared
-        // reference remains valid for the task's lifetime.
-        unsafe { (&*self.value.get()).as_deref() }
-    }
-}
-
-// SAFETY: the runtime is set once before the task is shared and is never
-// mutated afterwards; readers only observe it through shared references.
-unsafe impl Send for UserRuntimeSlot {}
-// SAFETY: see `Send` above — the runtime is immutable after construction and
-// only shared references are exposed, so concurrent access is sound.
-unsafe impl Sync for UserRuntimeSlot {}
 
 // How many held locks we track per task (debug only).
 #[cfg(feature = "snapshot")]
@@ -307,20 +213,7 @@ impl TaskInner {
         Self::new_with_identity(entry, name, stack_size, TaskIdentity::Internal)
     }
 
-    /// Creates a PID-less kernel thread.
-    ///
-    /// Unlike [`Self::new_kthread`], this task carries an `Internal` identity and
-    /// therefore does **not** allocate a root PID handle — it mirrors FreeBSD's
-    /// `kthread_add`, which attaches a kernel worker to the kernel's PID-0
-    /// process rather than giving it its own PID. This keeps the ordinary PID
-    /// number space reserved for user processes and explicitly visible kernel
-    /// threads.
-    ///
-    /// Use this for ordinary kernel worker threads (RX/TX pollers, deferred
-    /// handlers, lazy initializers) and for the single boot-time thread that
-    /// runs late subsystem initialization. The thread is otherwise a normal
-    /// runnable kernel-context task: it gets time-sliced, may block, and exits
-    /// normally when its work is done.
+    /// Creates a kernel worker task.
     pub fn new_pidless_kthread<F>(entry: F, name: String, stack_size: usize) -> Self
     where
         F: FnOnce() + Send + 'static,
@@ -328,11 +221,7 @@ impl TaskInner {
         Self::new_internal(entry, name, stack_size)
     }
 
-    /// Creates a Linux-visible kernel thread in the root/default PID namespace.
-    ///
-    /// This constructor is for `ktask`-owned kernel-thread creation paths.
-    /// User-thread identity allocation must stay in the process domain and use
-    /// [`Self::new_user`] with a preallocated [`kidentity::PidHandle`].
+    /// Creates a kernel thread without a userspace identity.
     pub fn new_kthread<F>(entry: F, name: String, stack_size: usize) -> KResult<Self>
     where
         F: FnOnce() + Send + 'static,
@@ -341,56 +230,18 @@ impl TaskInner {
             entry,
             name,
             stack_size,
-            TaskIdentity::KernelThread {
-                task_number: kidentity::allocate_root_pid_handle()?,
-            },
+            TaskIdentity::Internal,
         ))
     }
 
-    /// Creates a user thread with a preallocated thread identity and runtime.
-    ///
-    /// Callers must allocate the thread identity in the correct PID namespace
-    /// before constructing the task, so process/thread-group/publication state
-    /// can be built around the same handle before the task becomes runnable.
-    /// User tasks always receive the kernel-configured kernel stack size;
-    /// callers cannot weaken that execution invariant.
-    /// The runtime is installed during construction;
-    /// a user task can therefore never be observed without its runtime.
-    pub fn new_user<F>(
-        entry: F,
-        name: String,
-        task_number: Arc<kidentity::PidHandle>,
-        user_runtime: Box<dyn UserTaskRuntime>,
-    ) -> Self
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        Self::new_with_identity(
-            entry,
-            name,
-            kbuild_config::KERNEL_STACK_SIZE,
-            TaskIdentity::User {
-                task_number,
-                user_runtime: UserRuntimeSlot::ready(user_runtime),
-            },
-        )
-    }
-
-    /// Returns the shared task-number handle, if the task has one.
-    pub fn task_number(&self) -> Option<&Arc<kidentity::PidHandle>> {
-        self.identity.thread_pid()
-    }
-
-    /// Returns the Linux-style root/global trace identifier.
+    /// Returns the scheduler-local trace identifier.
     pub fn trace_id(&self) -> u64 {
-        self.identity.trace_id()
+        self as *const _ as usize as u64
     }
 
     /// Returns the scheduler-internal owner key.
     pub fn owner_key(&self) -> u64 {
-        self.task_number()
-            .map(|task_number| task_number.root_nr() as u64)
-            .unwrap_or_else(|| self as *const _ as usize as u64)
+        self as *const _ as usize as u64
     }
 
     /// Gets the name of the task.
@@ -433,11 +284,6 @@ impl TaskInner {
                 return Poll::Pending;
             }
         }))
-    }
-
-    /// Returns the runtime attached to this task, if any.
-    pub fn user_runtime(&self) -> Option<&dyn UserTaskRuntime> {
-        self.identity.user_runtime()
     }
 
     /// Returns a mutable reference to the task context.
@@ -846,10 +692,7 @@ impl TaskInner {
 impl fmt::Debug for TaskInner {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut ds = f.debug_struct("TaskInner");
-        ds.field("task_number", &self.task_number())
-            .field("has_user_runtime", &self.user_runtime().is_some())
-            .field("name", &self.name)
-            .field("state", &self.state());
+        ds.field("name", &self.name).field("state", &self.state());
 
         #[cfg(feature = "snapshot")]
         {
@@ -987,7 +830,7 @@ extern "C" fn task_entry() -> ! {
     crate::exit(0);
 }
 
-#[cfg(all(feature = "smp", unittest))]
+#[cfg(all(feature = "smp", test))]
 mod tests_on_cpu_mask {
     use unittest::{assert, assert_eq, def_test};
 

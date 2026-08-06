@@ -4,7 +4,15 @@
 
 //! CPU control operations for AArch64.
 
+use aarch64_cpu::registers::{CurrentEL, Readable};
+
 use super::irq::disable_local_irq;
+
+/// Returns the current AArch64 exception level.
+#[inline]
+pub fn current_exception_level() -> u8 {
+    CurrentEL.read(CurrentEL::EL) as u8
+}
 
 /// Halt the current CPU.
 ///

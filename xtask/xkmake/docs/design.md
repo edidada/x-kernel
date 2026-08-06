@@ -90,6 +90,7 @@ LCOV 到 Cobertura XML 的转换是 unittest 覆盖率流程的内部阶段，�
 4. 以结构化参数启动 QEMU，并传播退出状态。
 5. unittest QEMU 成功退出后，从磁盘镜像提取 `default.profraw`，依次生成
    `default.profdata`、`coverage.txt`、`coverage.info` 和 `coverage.xml`。
+   使用 `--no-block` 运行时不会有 guest 覆盖率文件，因此跳过该提取阶段。
 
 覆盖率产物位于 `target/<rust-target>/<profile>/`。开始生成前会删除旧
 产物，任一步失败都会使本次 run 失败，避免 CI 消费过期报告。

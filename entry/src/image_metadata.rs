@@ -22,4 +22,7 @@ pub(crate) fn print() {
     }
 
     kprintln!("smp = {}", kcpu_id_map::nr_cpus());
+    let current_el = karch::current_exception_level();
+    kprintln!("current_el = EL{current_el}");
+    assert_eq!(current_el, 2, "XHyper runtime must execute at EL2");
 }

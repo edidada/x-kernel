@@ -1,150 +1,135 @@
-# X-Kernel
+# XHyper
 
-[中文版](README_CN.md)
+XHyper 是基于 X-Kernel 裁剪得到的 Type-1 虚拟机基座。内核直接运行在
+AArch64 EL2/VHE，保留启动、架构抽象、内存管理、中断、时钟、SMP、设备驱动
+和 RR 调度器，并在 `kruntime` 初始化完成后进入 `entry`。
 
-X-Kernel is a multi-architecture monolithic kernel written in Rust. It provides a modular subsystem design covering memory management, process scheduling, file systems, networking, device drivers, and TEE (Trusted Execution Environment) support. The kernel targets multiple hardware architectures (AArch64, x86_64, RISC-V 64, LoongArch64) and runs on both virtual and physical platforms.
+当前代码不包含 Linux syscall ABI、POSIX、用户进程、文件系统、网络协议栈、
+TEE 和 VM/vCPU 业务层。驱动与多架构底层代码仍然保留，当前默认配置和验证
+目标为 AArch64 QEMU virt。
 
-This project is inspired by [StarryOS](https://github.com/Starry-OS/StarryOS), an experimental monolithic OS based on [ArceOS](https://github.com/arceos-org/arceos), developed by Tsinghua University.
+## 环境要求
 
-## Supported Architectures
+构建和运行至少需要：
 
-- [x] RISC-V 64
-- [x] LoongArch64
-- [x] AArch64
-- [x] x86_64
+- Git、GNU Make；
+- `rust-toolchain.toml` 指定的 Rust nightly 工具链；
+- Rust target `aarch64-unknown-none-softfloat`；
+- `cargo-binutils` 和 `rust-objcopy`；
+- `qemu-system-aarch64`。
 
-## Supported Platforms
-- [x] QEMU
-- [x] [Hygon CSV Environment](https://docs.opencloudos.org/OCS/Virtualization_and_Containers_Guide/CCP_Hygon_UserGuide/)
-- [x] Linux kylin-x Pkvm Virtual Machine
+在 Debian/Ubuntu 上可安装 QEMU：
 
-## Features
-- [x] Tee support
-
-## Quick Start
-### 1. Install dependencies
 ```bash
-# Rust toolchain
+sudo apt install qemu-system-arm
 rustup target add aarch64-unknown-none-softfloat
-
-# QEMU (Debian/Ubuntu)
-sudo apt install qemu-system
+cargo install cargo-binutils
+rustup component add llvm-tools-preview
 ```
 
-### Musl toolchain
-| Architecture | GCC Version | Musl Version | Origin Link |
-|--------------|-------------|--------------|-------------|
-| x86_64     | 11.2.1      | git-b76f37f (2021-09-23) | [musl.cc](https://musl.cc/x86_64-linux-musl-cross.tgz) |
-| aarch64    | 11.2.1      | git-b76f37f (2021-09-23) | [musl.cc](https://musl.cc/aarch64-linux-musl-cross.tgz) |
-| riscv64    | 11.2.1      | git-b76f37f (2021-09-23) | [musl.cc](https://musl.cc/riscv64-linux-musl-cross.tgz) |
-| loongarch64 | 13.2.0      | 1.2.5 | [LoongsonLab](https://github.com/LoongsonLab/oscomp-toolchains-for-oskernel/releases/download/loongarch64-linux-musl-cross-gcc-13.2.0/loongarch64-linux-musl-cross.tgz) |
+## 构建与启动
 
-### 2. Config kernel
+所有构建、运行和测试命令执行前，都应先从平台 defconfig 生成 `.config`：
 
-#### start from a platform defconfig
 ```bash
-cp platforms/aarch64-qemu-virt/defconfig .config
+cp platforms/kplat-aarch64/qemu_defconfig .config
 make defconfig
 ```
 
-`make defconfig` expands the copied minimal `defconfig` into a full `.config`.
+构建内核：
 
-#### change configuration
-If you want to change the kernel configuration, use the following command to open the menuconfig interface:
-```bash
-make menuconfig
-```
-
-This updates the `.config` file in the project root, which is then used for builds.
-
-#### refresh an existing configuration after Kconfig changes
-```bash
-make oldconfig
-```
-
-This is the Linux-style interactive refresh flow: it reloads the current `.config` and asks you to confirm values for newly introduced symbols.
-
-```bash
-make olddefconfig
-```
-
-This is the non-interactive Linux-style refresh flow: it reloads the current `.config` and automatically fills newly introduced symbols with their Kconfig defaults.
-
-#### save the current configuration back to a minimal defconfig
-```bash
-make savedefconfig
-```
-
-This writes a minimized `./defconfig` containing only values that differ from Kconfig defaults. It is useful when updating a platform defconfig after menuconfig changes.
-
-### 3. Prepare rootfs
-
-Download a pre-built root filesystem image:
-
-```bash
-make rootfs
-make rootfs ROOTFS_VARIANT=debian-busybox
-make rootfs ROOTFS_VARIANT=debian-systemd
-```
-
-Install repository uapps into the image with `make uapps`, or perform both
-steps with `make rootfs-uapps`. A custom image can be selected through
-`DISK_IMG` or `xkmake run --disk-image`.
-
-### 4. Build
-You can build the kernel
 ```bash
 make build
 ```
-This expands `.config` when needed and creates a versioned bundle under
-`target/xkmake/<platform>/<profile>/`.
 
-### 5. Build and run on QEMU
-we support directly running the kernel on QEMU
+产物位于：
+
+```text
+target/xkmake/kplat-aarch64/release/
+├── bundle.toml
+├── kernel.bin
+└── kernel.elf
+```
+
+使用 QEMU 启动：
 
 ```bash
-cp platforms/aarch64-qemu-virt/defconfig .config
+make run XKMAKE_ARGS='--no-block --no-net'
+```
+
+启动完成后会展示 build info、Build ID 和 SMP 数量，并进入串口 shell：
+
+```text
+XHyper EL2 runtime initialized
+xhyper> echo hello
+hello
+xhyper> exit
+```
+
+shell 目前仅支持：
+
+- `echo <内容>`：输出参数；
+- `exit`：关闭虚拟机。
+
+可通过 `XKMAKE_ARGS` 调整 QEMU 内存和 CPU 数量：
+
+```bash
+make run XKMAKE_ARGS='--no-block --no-net --memory 2g --smp 2'
+```
+
+## 目录结构
+
+```text
+api/        顶层 feature 聚合与公共接口
+arch/       CPU、HAL、IPI 和各架构底层实现
+boot/       启动协议、引导入口和镜像构建信息
+core/       EL2 核心运行时、日志与时间基础设施
+drivers/    控制台、中断、时钟、PCI、VirtIO 等设备驱动
+entry/      XHyper 运行入口、构建信息展示和最小 shell
+io/         驱动仍需使用的底层 DMA 支持
+mm/         分配器、页表、内核地址空间和映射支持
+platforms/  平台适配、Kconfig 和 defconfig
+task/       内核任务、同步原语、轮询和 RR 调度器
+util/       通用工具、宏、错误类型和内核测试框架
+xtask/      XKMake 构建、镜像打包和 QEMU 编排工具
+docs/       设计文档、开发规范和 AI 工作流
+```
+
+## 测试与检查
+
+运行 QEMU 内核单元测试：
+
+```bash
+make unittest XKMAKE_ARGS='--no-block --no-net'
+```
+
+限制到指定 crate：
+
+```bash
+make unittest UNITTEST_CRATE=memspace XKMAKE_ARGS='--no-block --no-net'
+```
+
+无块设备模式不会生成 guest 覆盖率文件，因此会跳过覆盖率提取。需要覆盖率报告
+时必须提供可用的磁盘镜像和 `debugfs`、`rust-profdata`、`rust-cov`。
+
+运行静态检查和格式化：
+
+```bash
+make clippy
+cargo +nightly-2026-03-08 fmt --all
+```
+
+建议提交前至少执行：
+
+```bash
+cp platforms/kplat-aarch64/qemu_defconfig .config
 make defconfig
-make run
-
-cp platforms/x86_64-qemu-virt/defconfig .config
-make defconfig
-make run
-make run UEFI=y
-
-# x86-csv UEFI + SEV launch helper
-bash scripts/start.sh
-```
-
-For x86_64, `make build` creates both `kernel.bzimg` and `kernel.uefi.img` in
-the bundle. `make run` uses LinuxBoot by default; `make run UEFI=y` selects
-OVMF/UEFI. Custom firmware paths can be supplied with `OVMF_CODE` and
-`OVMF_VARS_TEMPLATE`.
-
-Pass run options through `XKMAKE_ARGS`:
-
-```bash
-make run XKMAKE_ARGS='--memory 2g --smp 2 --no-net'
-make run XKMAKE_ARGS='--no-vsock'
-make run XKMAKE_ARGS='-- --d guest_errors'
-```
-
-Kernel unit tests use the same build-and-QEMU path:
-
-```bash
-make unittest
-make unittest UNITTEST_CRATE=kvfs,kprocess
-```
-
-Successful unit-test runs generate `coverage.txt`, `coverage.info`, and
-`coverage.xml` under `target/<rust-target>/<profile>/`.
-
-Generate workspace API documentation with the configured feature set:
-
-```bash
-make doc
-make doc_check_missing
+make build
+make clippy
+make unittest XKMAKE_ARGS='--no-block --no-net'
+cargo +nightly-2026-03-08 fmt --all
 ```
 
 ## License
-This project is now released under the Apache License 2.0. See the [LICENSE](./LICENSE) and [NOTICE](./NOTICE) files for details.
+
+本项目使用 Apache License 2.0，详见 [LICENSE](LICENSE) 和 [NOTICE](NOTICE)。

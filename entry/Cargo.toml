@@ -7,11 +7,17 @@ description = "XHyper EL2 runtime entry"
 license.workspace = true
 homepage.workspace = true
 
+[features]
+unittest = ["dep:unittest"]
+
 [dependencies]
 kfeat.workspace = true
+karch.workspace = true
+khal.workspace = true
 kiface.workspace = true
 klogger.workspace = true
 kruntime.workspace = true
 ktask.workspace = true
 kernel-image-metadata = { workspace = true, features = ["kernel"] }
 kcpu_id_map.workspace = true
+unittest = { workspace = true, optional = true }

@@ -3,38 +3,37 @@
 // See LICENSES for license details.
 
 use bitflags::bitflags;
-use linux_raw_sys::general::*;
 
 bitflags! {
     /// I/O events.
     #[derive(Debug, Clone, Copy)]
     pub struct IoEvents: u32 {
         /// Available for read.
-        const IN = POLLIN;
+        const IN = 0x0001;
         /// Urgent data for read.
-        const PRI = POLLPRI;
+        const PRI = 0x0002;
         /// Available for write.
-        const OUT = POLLOUT;
+        const OUT = 0x0004;
         /// Error condition.
-        const ERR = POLLERR;
+        const ERR = 0x0008;
         /// Hang up.
-        const HUP = POLLHUP;
+        const HUP = 0x0010;
         /// Invalid request.
-        const NVAL = POLLNVAL;
+        const NVAL = 0x0020;
         /// Equivalent to [`IN`](Self::IN).
-        const RDNORM = POLLRDNORM;
+        const RDNORM = 0x0040;
         /// Priority band data can be read.
-        const RDBAND = POLLRDBAND;
+        const RDBAND = 0x0080;
         /// Equivalent to [`OUT`](Self::OUT).
-        const WRNORM = POLLWRNORM;
+        const WRNORM = 0x0100;
         /// Priority data can be written.
-        const WRBAND = POLLWRBAND;
+        const WRBAND = 0x0200;
         /// Message.
-        const MSG = POLLMSG;
+        const MSG = 0x0400;
         /// Remove.
-        const REMOVE = POLLREMOVE;
+        const REMOVE = 0x1000;
         /// Stream socket peer closed its write half.
-        const RDHUP = POLLRDHUP;
+        const RDHUP = 0x2000;
         /// Events reported even when callers did not request them.
         const ALWAYS_POLL = Self::ERR.bits() | Self::HUP.bits();
     }

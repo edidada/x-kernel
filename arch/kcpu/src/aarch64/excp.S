@@ -151,7 +151,6 @@ enter_user:
     msr     sp_el0, x8
     msr     tpidr_el0, x9
 
-    bl      kcpu_prepare_enter_user_irq
     mov     sp, x19
 
 .Lexception_return:

@@ -57,9 +57,6 @@ fn handle_page_fault(tf: &mut ExceptionContext, access_flags: PageFaultFlags) {
     if dispatch_irq_trap!(PAGE_FAULT, vaddr, access_flags) {
         return;
     }
-    if tf.fixup_exception() {
-        return;
-    }
     core::hint::cold_path();
     panic!(
         "Unhandled EL1 Page Fault @ {:#x}, fault_vaddr={:#x}, ESR={:#x} ({:?}):\n{:#x?}\n{}",

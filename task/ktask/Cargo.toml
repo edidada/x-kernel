@@ -30,7 +30,6 @@ test = ["percpu/sp-naive"]
 
 [dependencies]
 kerrno.workspace = true
-kidentity.workspace = true
 khal.workspace = true
 ktime_types.workspace = true
 ktime.workspace = true
@@ -53,4 +52,4 @@ percpu = { workspace = true }
 kbuild_config = { workspace = true }
 karch = { workspace = true }
 klazy = { workspace = true }
-unittest = { workspace = true }
+unittest.workspace = true

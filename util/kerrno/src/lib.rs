@@ -2,44 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-// Kernel error types and errno conversions.
-//
-// # Code Similarity Compliance Notice
-//
-// This module implements standard POSIX errno error codes and their Rust
-// idiomatic representations. Code similarities with other projects are due to:
-//
-// 1. **Standard Error Code Definitions**: POSIX/Linux errno values are
-//    industry-standard constants (e.g., EINVAL, EACCES, EPERM) that must
-//    match across all implementations for compatibility.
-//
-// 2. **Rust Idiomatic Patterns**: Common Rust patterns for error handling,
-//    including:
-//    - `From`/`TryFrom` trait implementations for error conversions
-//    - Enum-based error kinds with discriminants
-//    - Display/Debug implementations following std::io::Error conventions
-//    - Result type aliases (`KResult<T>`)
-//
-// 3. **Design References**: Implementation inspired by and compatible with:
-//    - [std::io::ErrorKind] https://doc.rust-lang.org/std/io/enum.ErrorKind.html
-//    - [ArceOS axerrno crate] SPDX-License-Identifier: Apache-2.0
-//    - Linux kernel errno definitions
-//
-// These similarities are **expected and necessary** for:
-// - Cross-platform error code compatibility
-// - Idiomatic Rust error handling conventions
-// - Standard library API consistency
-//
-// The code patterns (enum definitions, trait implementations, macro patterns)
-// are common Rust idioms and not subject to copyright as functional requirements.
-
 #![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
 
 use core::fmt;
 
-pub use linux_sysno::Errno as LinuxError;
 use strum::EnumCount;
 
 /// The error kind type used by x-kernel.
@@ -285,224 +253,53 @@ impl fmt::Display for KErrorKind {
     }
 }
 
-impl From<KErrorKind> for LinuxError {
-    fn from(e: KErrorKind) -> Self {
-        use KErrorKind::*;
-        match e {
-            AddrInUse => LinuxError::EADDRINUSE,
-            AlreadyConnected => LinuxError::EISCONN,
-            AlreadyExists => LinuxError::EEXIST,
-            ArgumentListTooLong => LinuxError::E2BIG,
-            BadAddress | BadState => LinuxError::EFAULT,
-            BadFileDescriptor => LinuxError::EBADF,
-            BrokenPipe => LinuxError::EPIPE,
-            ConnectionAborted => LinuxError::ECONNABORTED,
-            ConnectionRefused => LinuxError::ECONNREFUSED,
-            ConnectionReset => LinuxError::ECONNRESET,
-            CrossesDevices => LinuxError::EXDEV,
-            DirectoryNotEmpty => LinuxError::ENOTEMPTY,
-            FileTooLarge => LinuxError::EFBIG,
-            FilesystemLoop => LinuxError::ELOOP,
-            IllegalBytes => LinuxError::EILSEQ,
-            InProgress => LinuxError::EINPROGRESS,
-            Interrupted => LinuxError::EINTR,
-            InvalidExecutable => LinuxError::ENOEXEC,
-            InvalidInput | InvalidData => LinuxError::EINVAL,
-            Io => LinuxError::EIO,
-            IsADirectory => LinuxError::EISDIR,
-            NameTooLong => LinuxError::ENAMETOOLONG,
-            NoMemory => LinuxError::ENOMEM,
-            NoSuchDevice => LinuxError::ENODEV,
-            NoSuchProcess => LinuxError::ESRCH,
-            NotADirectory => LinuxError::ENOTDIR,
-            NotASocket => LinuxError::ENOTSOCK,
-            NotATty => LinuxError::ENOTTY,
-            NotConnected => LinuxError::ENOTCONN,
-            NotFound => LinuxError::ENOENT,
-            OperationNotPermitted => LinuxError::EPERM,
-            OperationNotSupported => LinuxError::EOPNOTSUPP,
-            OutOfRange => LinuxError::ERANGE,
-            PermissionDenied => LinuxError::EACCES,
-            ReadOnlyFilesystem => LinuxError::EROFS,
-            ResourceBusy => LinuxError::EBUSY,
-            StorageFull => LinuxError::ENOSPC,
-            TimedOut => LinuxError::ETIMEDOUT,
-            TooManyOpenFiles => LinuxError::EMFILE,
-            UnexpectedEof | WriteZero => LinuxError::EIO,
-            Unsupported => LinuxError::ENOSYS,
-            WouldBlock => LinuxError::EAGAIN,
-        }
-    }
-}
-
-impl TryFrom<LinuxError> for KErrorKind {
-    type Error = LinuxError;
-
-    fn try_from(e: LinuxError) -> Result<Self, Self::Error> {
-        use KErrorKind::*;
-        Ok(match e {
-            LinuxError::EADDRINUSE => AddrInUse,
-            LinuxError::EISCONN => AlreadyConnected,
-            LinuxError::EEXIST => AlreadyExists,
-            LinuxError::E2BIG => ArgumentListTooLong,
-            LinuxError::EFAULT => BadAddress,
-            LinuxError::EBADF => BadFileDescriptor,
-            LinuxError::EPIPE => BrokenPipe,
-            LinuxError::ECONNABORTED => ConnectionAborted,
-            LinuxError::ECONNREFUSED => ConnectionRefused,
-            LinuxError::ECONNRESET => ConnectionReset,
-            LinuxError::EXDEV => CrossesDevices,
-            LinuxError::ENOTEMPTY => DirectoryNotEmpty,
-            LinuxError::EFBIG => FileTooLarge,
-            LinuxError::ELOOP => FilesystemLoop,
-            LinuxError::EILSEQ => IllegalBytes,
-            LinuxError::EINPROGRESS => InProgress,
-            LinuxError::EINTR => Interrupted,
-            LinuxError::ENOEXEC => InvalidExecutable,
-            LinuxError::EINVAL => InvalidInput,
-            LinuxError::EIO => Io,
-            LinuxError::EISDIR => IsADirectory,
-            LinuxError::ENAMETOOLONG => NameTooLong,
-            LinuxError::ENOMEM => NoMemory,
-            LinuxError::ENODEV => NoSuchDevice,
-            LinuxError::ESRCH => NoSuchProcess,
-            LinuxError::ENOTDIR => NotADirectory,
-            LinuxError::ENOTSOCK => NotASocket,
-            LinuxError::ENOTTY => NotATty,
-            LinuxError::ENOTCONN => NotConnected,
-            LinuxError::ENOENT => NotFound,
-            LinuxError::EPERM => OperationNotPermitted,
-            LinuxError::EOPNOTSUPP => OperationNotSupported,
-            LinuxError::ERANGE => OutOfRange,
-            LinuxError::EACCES => PermissionDenied,
-            LinuxError::EROFS => ReadOnlyFilesystem,
-            LinuxError::EBUSY => ResourceBusy,
-            LinuxError::ENOSPC => StorageFull,
-            LinuxError::ETIMEDOUT => TimedOut,
-            LinuxError::EMFILE => TooManyOpenFiles,
-            LinuxError::ENOSYS => Unsupported,
-            LinuxError::EAGAIN => WouldBlock,
-            _ => {
-                return Err(e);
-            }
-        })
-    }
-}
-
-/// The error type used by x-kernel.
+/// The error type used by X-Kernel internals.
 #[repr(transparent)]
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct KError(i32);
-
-enum KErrorData {
-    Ky(KErrorKind),
-    Linux(LinuxError),
-}
+pub struct KError(KErrorKind);
 
 impl KError {
-    const fn new_ax(kind: KErrorKind) -> Self {
-        KError(kind.code())
+    const fn new(kind: KErrorKind) -> Self {
+        Self(kind)
     }
 
-    fn new_linux(kind: LinuxError) -> Self {
-        KError(-kind.into_raw())
-    }
-
-    fn data(&self) -> KErrorData {
-        if self.0 < 0 {
-            KErrorData::Linux(LinuxError::new(-self.0))
-        } else {
-            let kind = KErrorKind::from_code(self.0)
-                .unwrap_or_else(|| panic!("invalid positive KError code: {}", self.0));
-            KErrorData::Ky(kind)
-        }
-    }
-
-    /// Returns the error code value in `i32`.
+    /// Returns the internal error code value.
     pub const fn code(self) -> i32 {
-        self.0
+        self.0.code()
     }
 
-    /// Returns a canonicalized version of this error.
-    ///
-    /// This method tries to convert [`LinuxError`] variants into their
-    /// corresponding [`KErrorKind`] variants if possible.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use kerrno::{KError, KErrorKind, LinuxError};
-    /// let linux_err = KError::from(LinuxError::EACCES);
-    /// let canonical_err = linux_err.canonicalize();
-    /// assert_eq!(canonical_err, KError::from(KErrorKind::PermissionDenied));
-    /// ```
-    pub fn canonicalize(self) -> Self {
-        KErrorKind::try_from(self).map_or_else(Into::into, Into::into)
+    /// Returns this already-canonical internal error unchanged.
+    pub const fn canonicalize(self) -> Self {
+        self
     }
-}
 
-impl<E: Into<KErrorKind>> From<E> for KError {
-    fn from(e: E) -> Self {
-        KError::new_ax(e.into())
-    }
-}
-
-impl From<LinuxError> for KError {
-    fn from(e: LinuxError) -> Self {
-        KError::new_linux(e)
-    }
-}
-
-impl From<KError> for LinuxError {
-    fn from(e: KError) -> Self {
-        match e.data() {
-            KErrorData::Ky(kind) => LinuxError::from(kind),
-            KErrorData::Linux(kind) => kind,
-        }
-    }
-}
-
-impl TryFrom<KError> for KErrorKind {
-    type Error = LinuxError;
-
-    fn try_from(e: KError) -> Result<Self, Self::Error> {
-        match e.data() {
-            KErrorData::Ky(kind) => Ok(kind),
-            KErrorData::Linux(e) => e.try_into(),
-        }
-    }
-}
-
-impl KError {
+    /// Constructs an error from an internal error code.
     pub fn try_from_i32(value: i32) -> Result<Self, i32> {
-        if KErrorKind::try_from(value).is_ok() {
-            return Ok(KError(value));
-        }
-        if value < 0 {
-            let linux = LinuxError::new(value.checked_neg().ok_or(value)?);
-            if linux.name().is_some() {
-                return Ok(KError(value));
-            }
-        }
-        Err(value)
+        KErrorKind::try_from(value).map(Self).map_err(|_| value)
+    }
+}
+
+impl From<KErrorKind> for KError {
+    fn from(error: KErrorKind) -> Self {
+        Self::new(error)
+    }
+}
+
+impl From<KError> for KErrorKind {
+    fn from(error: KError) -> Self {
+        error.0
     }
 }
 
 impl fmt::Debug for KError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.data() {
-            KErrorData::Ky(kind) => write!(f, "KErrorKind::{:?}", kind),
-            KErrorData::Linux(kind) => write!(f, "LinuxError::{:?}", kind),
-        }
+        write!(f, "KErrorKind::{:?}", self.0)
     }
 }
 
 impl fmt::Display for KError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.data() {
-            KErrorData::Ky(kind) => write!(f, "{}", kind),
-            KErrorData::Linux(kind) => write!(f, "{}", kind),
-        }
+        self.0.fmt(f)
     }
 }
 
@@ -512,7 +309,7 @@ macro_rules! kerror_consts {
         impl KError {
             $(
                 #[doc = concat!("An [`KError`] with kind [`KErrorKind::", stringify!($name), "`].")]
-                pub const $name: Self = Self::new_ax(KErrorKind::$name);
+                pub const $name: Self = Self::new(KErrorKind::$name);
             )*
         }
     };
@@ -667,9 +464,6 @@ macro_rules! k_bail {
     };
 }
 
-/// A specialized [`Result`] type with [`LinuxError`] as the error type.
-pub type LinuxResult<T = ()> = Result<T, LinuxError>;
-
 #[doc(hidden)]
 pub mod __priv {
     pub use log::warn;
@@ -679,201 +473,16 @@ pub mod __priv {
 mod tests {
     use strum::EnumCount;
 
-    use crate::{KError, KErrorKind, LinuxError};
+    use crate::{KError, KErrorKind};
 
     #[test]
-    fn test_try_from() {
+    fn internal_codes_round_trip() {
         let max_code = KErrorKind::COUNT as i32;
-        assert_eq!(max_code, 45);
         assert_eq!(max_code, KError::FileTooLarge.code());
-
-        assert_eq!(KError::AddrInUse.code(), 1);
         assert_eq!(Ok(KError::AddrInUse), KError::try_from_i32(1));
-        assert_eq!(Ok(KError::AlreadyConnected), KError::try_from_i32(2));
-        assert_eq!(
-            Ok(KError::ConnectionAborted),
-            KError::try_from_i32(KError::ConnectionAborted.code())
-        );
         assert_eq!(Ok(KError::FileTooLarge), KError::try_from_i32(max_code));
-        assert_eq!(Err(max_code + 1), KError::try_from_i32(max_code + 1));
         assert_eq!(Err(0), KError::try_from_i32(0));
-        assert_eq!(Err(i32::MAX), KError::try_from_i32(i32::MAX));
-    }
-
-    #[test]
-    fn test_conversion() {
-        for i in 1.. {
-            let err = LinuxError::new(i);
-            if err.name().is_none() {
-                break;
-            }
-            assert_eq!(err.into_raw(), i);
-            let e = KError::from(err);
-            assert_eq!(e.code(), -i);
-            assert_eq!(LinuxError::from(e), err);
-        }
-    }
-}
-
-#[cfg(unittest)]
-mod tests_unittest {
-    use alloc::format;
-
-    use unittest::def_test;
-
-    use crate::{KError, KErrorKind, LinuxError};
-
-    const KIND_LINUX_PAIRS: &[(KErrorKind, LinuxError)] = &[
-        (KErrorKind::AddrInUse, LinuxError::EADDRINUSE),
-        (KErrorKind::AlreadyConnected, LinuxError::EISCONN),
-        (KErrorKind::AlreadyExists, LinuxError::EEXIST),
-        (KErrorKind::ArgumentListTooLong, LinuxError::E2BIG),
-        (KErrorKind::BadAddress, LinuxError::EFAULT),
-        (KErrorKind::BadFileDescriptor, LinuxError::EBADF),
-        (KErrorKind::BadState, LinuxError::EFAULT),
-        (KErrorKind::BrokenPipe, LinuxError::EPIPE),
-        (KErrorKind::ConnectionAborted, LinuxError::ECONNABORTED),
-        (KErrorKind::ConnectionRefused, LinuxError::ECONNREFUSED),
-        (KErrorKind::ConnectionReset, LinuxError::ECONNRESET),
-        (KErrorKind::CrossesDevices, LinuxError::EXDEV),
-        (KErrorKind::DirectoryNotEmpty, LinuxError::ENOTEMPTY),
-        (KErrorKind::FileTooLarge, LinuxError::EFBIG),
-        (KErrorKind::FilesystemLoop, LinuxError::ELOOP),
-        (KErrorKind::IllegalBytes, LinuxError::EILSEQ),
-        (KErrorKind::InProgress, LinuxError::EINPROGRESS),
-        (KErrorKind::Interrupted, LinuxError::EINTR),
-        (KErrorKind::InvalidData, LinuxError::EINVAL),
-        (KErrorKind::InvalidExecutable, LinuxError::ENOEXEC),
-        (KErrorKind::InvalidInput, LinuxError::EINVAL),
-        (KErrorKind::Io, LinuxError::EIO),
-        (KErrorKind::IsADirectory, LinuxError::EISDIR),
-        (KErrorKind::NameTooLong, LinuxError::ENAMETOOLONG),
-        (KErrorKind::NoMemory, LinuxError::ENOMEM),
-        (KErrorKind::NoSuchDevice, LinuxError::ENODEV),
-        (KErrorKind::NoSuchProcess, LinuxError::ESRCH),
-        (KErrorKind::NotADirectory, LinuxError::ENOTDIR),
-        (KErrorKind::NotASocket, LinuxError::ENOTSOCK),
-        (KErrorKind::NotATty, LinuxError::ENOTTY),
-        (KErrorKind::NotConnected, LinuxError::ENOTCONN),
-        (KErrorKind::NotFound, LinuxError::ENOENT),
-        (KErrorKind::OperationNotPermitted, LinuxError::EPERM),
-        (KErrorKind::OperationNotSupported, LinuxError::EOPNOTSUPP),
-        (KErrorKind::OutOfRange, LinuxError::ERANGE),
-        (KErrorKind::PermissionDenied, LinuxError::EACCES),
-        (KErrorKind::ReadOnlyFilesystem, LinuxError::EROFS),
-        (KErrorKind::ResourceBusy, LinuxError::EBUSY),
-        (KErrorKind::StorageFull, LinuxError::ENOSPC),
-        (KErrorKind::TimedOut, LinuxError::ETIMEDOUT),
-        (KErrorKind::TooManyOpenFiles, LinuxError::EMFILE),
-        (KErrorKind::UnexpectedEof, LinuxError::EIO),
-        (KErrorKind::Unsupported, LinuxError::ENOSYS),
-        (KErrorKind::WouldBlock, LinuxError::EAGAIN),
-        (KErrorKind::WriteZero, LinuxError::EIO),
-    ];
-
-    #[def_test]
-    fn test_kerrorkind_as_str_and_code() {
-        assert_eq!(KErrorKind::AddrInUse.as_str(), "Address in use");
-        assert_eq!(
-            KErrorKind::InvalidExecutable.as_str(),
-            "Invalid executable format"
-        );
-        assert_eq!(KErrorKind::WouldBlock.as_str(), "Operation would block");
-        assert_eq!(KErrorKind::AddrInUse.code(), 1);
-    }
-
-    #[def_test]
-    fn test_kerrorkind_try_from_rejects_invalid_values() {
-        assert_eq!(KErrorKind::try_from(0), Err(0));
-        assert_eq!(KErrorKind::try_from(-1), Err(-1));
-        assert!(KErrorKind::try_from(1).is_ok());
-        assert!(KErrorKind::try_from(i32::MAX).is_err());
-    }
-
-    #[def_test]
-    fn test_kerror_linux_and_kernel_conversions() {
-        let linux = KError::from(LinuxError::EACCES);
-        assert_eq!(linux.code(), -LinuxError::EACCES.into_raw());
-        assert_eq!(
-            linux.canonicalize(),
-            KError::from(KErrorKind::PermissionDenied)
-        );
-
-        let kernel = KError::from(KErrorKind::BadFileDescriptor);
-        assert_eq!(LinuxError::from(kernel), LinuxError::EBADF);
-        assert_eq!(
-            KErrorKind::try_from(kernel),
-            Ok(KErrorKind::BadFileDescriptor)
-        );
-    }
-
-    #[def_test]
-    fn test_kerror_try_from_i32_and_formatting() {
-        let linux = KError::try_from_i32(-LinuxError::ENOENT.into_raw()).unwrap();
-        assert_eq!(linux.code(), -LinuxError::ENOENT.into_raw());
-        assert_eq!(LinuxError::from(linux), LinuxError::ENOENT);
-
-        let kernel = KError::try_from_i32(KErrorKind::TimedOut.code()).unwrap();
-        assert_eq!(kernel.code(), KErrorKind::TimedOut.code());
-        assert_eq!(KErrorKind::try_from(kernel), Ok(KErrorKind::TimedOut));
-
-        assert_eq!(KError::try_from_i32(0), Err(0));
-    }
-
-    #[def_test]
-    fn test_kerrorkind_to_linuxerror_mapping_table() {
-        for &(kind, linux) in KIND_LINUX_PAIRS {
-            assert_eq!(LinuxError::from(kind), linux);
-            assert!(!kind.as_str().is_empty());
-            assert_eq!(format!("{kind}"), kind.as_str());
-        }
-    }
-
-    #[def_test]
-    fn test_linuxerror_to_kerrorkind_mapping_and_error_cases() {
-        for &(kind, linux) in KIND_LINUX_PAIRS {
-            let mapped = KErrorKind::try_from(linux);
-            if matches!(
-                kind,
-                KErrorKind::BadState
-                    | KErrorKind::InvalidData
-                    | KErrorKind::UnexpectedEof
-                    | KErrorKind::WriteZero
-            ) {
-                continue;
-            }
-            assert_eq!(mapped, Ok(kind));
-        }
-
-        assert_eq!(
-            KErrorKind::try_from(LinuxError::EDEADLK),
-            Err(LinuxError::EDEADLK)
-        );
-    }
-
-    #[def_test]
-    fn test_kerror_debug_display_and_canonicalize() {
-        let kernel = KError::from(KErrorKind::ReadOnlyFilesystem);
-        assert_eq!(format!("{kernel}"), "Read-only filesystem");
-        assert!(format!("{kernel:?}").contains("ReadOnlyFilesystem"));
-
-        let linux = KError::from(LinuxError::EPIPE);
-        assert!(format!("{linux}").contains("Broken pipe"));
-        assert!(format!("{linux:?}").contains("LinuxError"));
-        assert_eq!(linux.canonicalize(), KError::from(KErrorKind::BrokenPipe));
-
-        let unmapped = KError::from(LinuxError::EDEADLK);
-        assert_eq!(unmapped.canonicalize(), unmapped);
-        assert_eq!(KErrorKind::try_from(unmapped), Err(LinuxError::EDEADLK));
-    }
-
-    #[def_test]
-    fn test_kerror_constants_and_try_from_i32_invalid_linux() {
-        assert_eq!(
-            KError::PermissionDenied.code(),
-            KErrorKind::PermissionDenied.code()
-        );
-        assert_eq!(KError::WouldBlock.code(), KErrorKind::WouldBlock.code());
-        assert_eq!(KError::try_from_i32(-123456), Err(-123456));
+        assert_eq!(Err(-1), KError::try_from_i32(-1));
+        assert_eq!(Err(max_code + 1), KError::try_from_i32(max_code + 1));
     }
 }

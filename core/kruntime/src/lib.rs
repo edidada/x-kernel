@@ -14,8 +14,6 @@
 //! - `smp`: SMP bring-up (`rust_main_secondary`, `mp`)
 //! - `ipi`: Inter-processor interrupts (`kipi`)
 //! - `fs` / `fs9p` / `net` / `vsock` / `display` / `input`: driver and subsystem init
-//! - `rtc`: Wall-clock banner at boot
-//! - `watchdog` / `watchdog_hardlockup`: Watchdog on primary/secondary CPUs
 //! - `pmu`: PMU overflow IRQ handler
 //! - `arm-timer-resume-fixup`: repair virtual timer regressions after idle/WFI
 //! - `rootfs-secondary-block`: mount the secondary block device as the root FS
@@ -25,12 +23,6 @@
 #![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
-
-// The root filesystem choice selects exactly one `fs_block::RootFileSystem` provider.
-#[cfg(feature = "fs_fat")]
-extern crate fat as _;
-#[cfg(feature = "fs_ext4")]
-extern crate kext4_vfs as _;
 
 #[macro_use]
 extern crate klogger;
@@ -49,7 +41,6 @@ use kcpu_id_map::KCpuMaskExt;
 use kernel_boot::PrimaryKernelEntry;
 #[cfg(not(feature = "smp"))]
 use kernel_boot::SecondaryKernelEntry;
-use khal::mem::MemFlags;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 
 #[cfg(feature = "smp")]
@@ -115,19 +106,12 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 static INITED_CPUS: AtomicUsize = AtomicUsize::new(0);
 
-/// High-level system-init handoff performed after runtime bring-up.
-///
-/// The provider owns policy-level startup such as runtime feature init and
-/// spawning the first user program (PID 1) as a fresh user task. The provider
-/// returns once init has been published and activated.
+/// Hypervisor handoff performed after runtime bring-up.
 #[kiface::interface]
-pub trait SystemInitEntry {
-    /// Spawn PID 1 and return once it is runnable.
+pub trait HypervisorRuntimeEntry {
+    /// Enters the hypervisor runtime policy layer.
     fn enter();
 }
-
-const MAX_REGION_LOG_SUMMARIES: usize = 64;
-const REGION_LOG_SUMMARY_THRESHOLD: usize = 8;
 
 const fn configured_log_level() -> &'static str {
     if kbuild_config::LOG_LEVEL_ERROR {
@@ -145,16 +129,6 @@ const fn configured_log_level() -> &'static str {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct RegionLogSummary {
-    name: &'static str,
-    flags: MemFlags,
-    count: usize,
-    total_size: usize,
-    first_start: usize,
-    last_end: usize,
-}
-
 fn is_init_ok() -> bool {
     // Wait for all *discovered* CPUs (enumerated from the DT/ACPI at boot),
     // not the compile-time `NR_CPUS` cap. Using the cap would deadlock whenever
@@ -163,12 +137,7 @@ fn is_init_ok() -> bool {
     INITED_CPUS.load(Ordering::Acquire) == kcpu_id_map::nr_cpus()
 }
 
-/// Run late subsystem initialization on the PID-less late-init bootstrap thread.
-///
-/// The thread starts in kernel context, brings up secondary CPUs and late
-/// subsystems, then crosses [`SystemInitEntry`], which spawns PID 1 init, before
-/// returning. Because the late-init thread holds an `Internal` identity and
-/// allocates no root PID itself, init receives the system's first root PID.
+/// Runs late subsystem initialization on the bootstrap kernel task.
 fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     #[cfg(feature = "smp")]
     {
@@ -181,36 +150,11 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     }
 
     kdriver::init_drivers();
-    #[cfg(feature = "char")]
-    ktty::tty::try_handoff_console();
-
-    #[cfg(feature = "display")]
-    fbdevice::fb_init();
-    #[cfg(feature = "input")]
-    inputdev::init_input();
-
-    #[cfg(feature = "fs")]
-    {
-        fs_boot::prepare_namespace();
-        fs_boot::mount_virtual_filesystems();
-    }
-
-    #[cfg(feature = "fs9p")]
-    fs_boot::mount_host_share("/mnt/hostshare");
-
-    #[cfg(feature = "net")]
-    knet::init_network();
-    #[cfg(feature = "vsock")]
-    knet::init_vsock();
-
     #[cfg(feature = "ipi")]
     kipi::init();
 
     #[cfg(feature = "smp")]
     kipi::tlb::mark_all_cpus_started();
-
-    #[cfg(feature = "watchdog")]
-    watchdog::init_primary();
 
     init_setup::init_cb();
     finish_allocator_init();
@@ -223,22 +167,13 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
         core::hint::spin_loop();
     }
 
-    // Depends on cross-CPU task spawn, so it must run after every secondary CPU
-    // has registered its run queue (the `is_init_ok` barrier above).
-    #[cfg(feature = "vsock_tipc_bridge")]
-    knet::start_vsock_bridge();
-
-    // Spawn PID 1 after all PID-less late initialization has completed.
-    // `enter()` returns after the init task has been published and activated.
-    SystemInitEntry::enter();
+    HypervisorRuntimeEntry::enter();
 
     // The late-init thread has finished its job; `task_entry` will exit it.
 }
 
-/// Prepare the PID-less late-init bootstrap thread on the boot CPU.
+/// Prepares the late-init bootstrap task on the boot CPU.
 ///
-/// This task runs all late subsystem initialization, spawns PID 1 init, then
-/// exits. It carries an `Internal` identity, so it consumes no root PID number.
 /// Secondary run queues are not registered at activation time, so the thread
 /// is pinned to the boot CPU via a one-shot CPU mask.
 fn prepare_late_init_on_primary(cpu_id: kcpu_id_map::LogicalCpuId) -> ktask::KtaskRef {
@@ -309,14 +244,6 @@ pub fn rust_main(arg: usize) -> ! {
     khal::early_driver_init();
 
     kprintln!("{}", LOGO);
-    #[cfg(feature = "rtc")]
-    kprintln!(
-        "Boot at {}\n",
-        chrono::DateTime::from_timestamp_nanos(
-            i64::try_from(ktime::realtime().unix_nanos()).unwrap_or(i64::MAX)
-        ),
-    );
-
     klogger::init_klogger();
     klogger::set_log_level(configured_log_level()); // no effect if set `log-level-*` features
     info!("Logging is enabled.");
@@ -357,20 +284,17 @@ pub fn rust_main(arg: usize) -> ! {
     info!("Initialize interrupt handlers...");
     init_interrupt();
 
-    // PID 0 is the scheduler-internal boot task. Activate a single PID-less
-    // late-init bootstrap thread (Internal identity, no root PID) that brings
-    // up late subsystems and then spawns PID 1 init. Pinning it to the boot CPU
+    // Activate a single late-init bootstrap task that brings up late
+    // subsystems and enters the hypervisor runtime. Pinning it to the boot CPU
     // keeps it independent of secondary run queues, which are not registered
     // yet.
     let late_init = prepare_late_init_on_primary(cpu_id);
     ktask::activate_task(&late_init);
     info!("Started late-init bootstrap thread.");
 
-    // The boot task is PID 0 and remains outside the ordinary PID namespace.
-    // Once the late-init thread is runnable it has no further initialization
-    // role.
+    // Once the late-init task is runnable, the boot task has no further role.
     ktask::future::block_on(core::future::pending::<()>());
-    unreachable!("PID 0 boot task must remain parked");
+    unreachable!("boot task must remain parked");
 }
 
 #[kiface::provide]
@@ -389,8 +313,6 @@ impl SecondaryKernelEntry {
 }
 
 fn log_memory_regions() {
-    use heapless::Vec;
-
     fn log_region(region: &khal::mem::MemoryRegion) {
         let reserved_source = if region.flags.contains(khal::mem::MemFlags::RSVD) {
             khal::mem::reserved::describe_reserved_memory_region(region)
@@ -425,71 +347,15 @@ fn log_memory_regions() {
         }
     }
 
-    let mut summaries = Vec::<RegionLogSummary, MAX_REGION_LOG_SUMMARIES>::new();
-    for region in khal::mem::memory_regions() {
-        let start = region.paddr.as_usize();
-        let end = start + region.size;
-        if let Some(summary) = summaries.iter_mut().find(|summary| {
-            summary.name == region.name && summary.flags.bits() == region.flags.bits()
-        }) {
-            summary.count += 1;
-            summary.total_size += region.size;
-            summary.first_start = summary.first_start.min(start);
-            summary.last_end = summary.last_end.max(end);
-        } else {
-            summaries
-                .push(RegionLogSummary {
-                    name: region.name,
-                    flags: region.flags,
-                    count: 1,
-                    total_size: region.size,
-                    first_start: start,
-                    last_end: end,
-                })
-                .expect("too many region log summaries");
-        }
-    }
-
     info!("Found physcial memory regions:");
     for region in khal::mem::memory_regions() {
-        let summary = summaries
-            .iter()
-            .find(|summary| {
-                summary.name == region.name && summary.flags.bits() == region.flags.bits()
-            })
-            .expect("missing memory region log summary");
-        if should_summarize_region(summary) {
-            continue;
-        }
         log_region(&region);
     }
 
-    for summary in summaries {
-        if !should_summarize_region(&summary) {
-            continue;
-        }
-        info!(
-            "  {}: {} regions, total {:#x}, span [PA:{:#x}, PA:{:#x}) ({:?})",
-            summary.name,
-            summary.count,
-            summary.total_size,
-            summary.first_start,
-            summary.last_end,
-            summary.flags
-        );
+    info!("Found runtime device/iomap regions:");
+    for region in memspace::device_regions() {
+        log_device_region(&region);
     }
-
-    let device_regions = memspace::device_regions().collect::<Vec<_, MAX_REGION_LOG_SUMMARIES>>();
-    if !device_regions.is_empty() {
-        info!("Found runtime device/iomap regions:");
-        for region in device_regions {
-            log_device_region(&region);
-        }
-    }
-}
-
-fn should_summarize_region(summary: &RegionLogSummary) -> bool {
-    summary.count >= REGION_LOG_SUMMARY_THRESHOLD && summary.name.starts_with("uefi ")
 }
 
 fn init_allocator() {

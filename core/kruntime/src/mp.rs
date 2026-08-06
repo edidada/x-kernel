@@ -117,9 +117,6 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
 
     karch::enable_local_irq();
 
-    #[cfg(feature = "watchdog")]
-    watchdog::init_secondary();
-
     ktask::run_idle();
 }
 

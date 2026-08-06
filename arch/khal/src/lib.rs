@@ -100,7 +100,7 @@ pub mod context {
     };
 }
 
-pub use kcpu::{instrs as asm, userspace as uspace};
+pub use kcpu::instrs as asm;
 #[cfg(feature = "smp")]
 pub use kplat::boot::final_init_ap as final_init_secondary;
 

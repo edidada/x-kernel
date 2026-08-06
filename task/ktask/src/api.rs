@@ -15,7 +15,7 @@ use kspin::NoPreemptIrqSave;
 use crate::run_queue::task_run_queue;
 pub(crate) use crate::run_queue::{current_run_queue, select_run_queue, select_wake_run_queue};
 pub use crate::{
-    task::{CurrentTask, TaskInner, TaskState, UserTaskRuntime},
+    task::{CurrentTask, TaskInner, TaskState},
     timers::register_timer_callback,
     wait_queue::WaitQueue,
 };
@@ -238,19 +238,7 @@ pub fn activate_task(task: &KtaskRef) {
     select_run_queue::<NoPreemptIrqSave>(task).add_task(task.clone());
 }
 
-/// Spawns a PID-less kernel worker thread with the given parameters.
-///
-/// The new thread carries an `Internal` identity and therefore allocates no
-/// root PID handle, mirroring FreeBSD's `kthread_add` (which attaches the
-/// thread to the kernel's PID-0 process). This keeps the ordinary PID number
-/// space reserved for user processes and explicitly visible kernel threads.
-/// The thread is otherwise a normal runnable
-/// kernel-context task: it gets time-sliced, may block, and exits normally.
-///
-/// Kernel threads that must own a Linux-visible PID should be built explicitly
-/// with [`TaskInner::new_kthread`].
-/// User threads must not use this helper; they must be created through the
-/// process-domain staged publication path.
+/// Spawns a kernel worker task with the given parameters.
 pub fn spawn_raw<F>(f: F, name: String, stack_size: usize) -> KtaskRef
 where
     F: FnOnce() + Send + 'static,

@@ -975,11 +975,9 @@ impl RunQueue {
             return;
         }
 
-        let cpu_id = this_cpu_id();
-
         // Fire the context switch tracepoint.
         #[cfg(feature = "sched_stat")]
-        sched_stat_inc(&sched_stat_cpu(cpu_id).switch);
+        sched_stat_inc(&sched_stat_cpu(this_cpu_id()).switch);
         fire_context_switch(prev_task.trace_id(), next_task.trace_id());
 
         // Claim the task as running, we do this before switching to it
@@ -990,38 +988,12 @@ impl RunQueue {
             next_task.set_on_cpu_mask_bit(this_cpu_id());
         }
 
-        if let Some(runtime) = next_task.user_runtime() {
-            // Publish the CPU in the next mm before switching hardware state
-            // so concurrent flushers can over-target but never miss this CPU.
-            // We intentionally do not clear the previous mm here: code after
-            // `switch_to()` runs only when the old task is scheduled again, so
-            // eager clear-after-switch is not a sound timing point.
-            runtime.set_user_mm_resident_cpu(cpu_id);
-        }
-
-        {
-            if let Some(runtime) = prev_task.user_runtime() {
-                runtime.on_leave()
-            }
-            if let Some(runtime) = next_task.user_runtime() {
-                runtime.on_enter()
-            }
-        }
-
         // SAFETY: scheduling owns both task contexts here, IRQs are disabled,
         // and the percpu scheduler/task pointers being updated are local to
         // the current CPU.
         unsafe {
             let prev_ctx_ptr = prev_task.ctx_mut_ptr();
             let next_ctx_ptr = next_task.ctx_mut_ptr();
-
-            #[cfg(target_arch = "aarch64")]
-            if let Some(root) = next_task
-                .user_runtime()
-                .and_then(|runtime| runtime.switch_page_table_root())
-            {
-                (*next_ctx_ptr).set_page_table_root(root);
-            }
 
             // Store the weak pointer of **prev_task** in percpu variable `PREV_TASK`.
             #[cfg(feature = "smp")]

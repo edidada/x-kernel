@@ -1427,10 +1427,7 @@ impl MmSpace {
                 }
             }
             Err(err) => {
-                if matches!(
-                    KErrorKind::try_from(err.canonicalize()),
-                    Ok(KErrorKind::NoMemory)
-                ) {
+                if KErrorKind::from(err.canonicalize()) == KErrorKind::NoMemory {
                     PageFaultOutcome::OutOfMemory
                 } else {
                     warn!("Failed to populate pages for {vaddr:?} ({flags:?}): {err}");
@@ -1448,15 +1445,13 @@ impl MmSpace {
     ) -> PageFaultOutcome {
         match result {
             Ok(completion) => self.finish_backend_fault(vaddr, flags, Ok(completion)),
-            Err(err) => match KErrorKind::try_from(err.canonicalize()) {
-                Ok(KErrorKind::NoMemory) => PageFaultOutcome::OutOfMemory,
-                Ok(
-                    KErrorKind::BadAddress
-                    | KErrorKind::InvalidData
-                    | KErrorKind::InvalidInput
-                    | KErrorKind::Io
-                    | KErrorKind::UnexpectedEof,
-                ) => PageFaultOutcome::BusError,
+            Err(err) => match KErrorKind::from(err.canonicalize()) {
+                KErrorKind::NoMemory => PageFaultOutcome::OutOfMemory,
+                KErrorKind::BadAddress
+                | KErrorKind::InvalidData
+                | KErrorKind::InvalidInput
+                | KErrorKind::Io
+                | KErrorKind::UnexpectedEof => PageFaultOutcome::BusError,
                 _ => {
                     warn!("Failed to populate file-backed pages for {vaddr:?} ({flags:?}): {err}");
                     PageFaultOutcome::Failed

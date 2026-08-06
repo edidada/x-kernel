@@ -22,7 +22,7 @@ pub use cache::{
     clean_dcache_line_to_poc, clean_dcache_range_to_poc, flush_icache_all, flush_icache_all_local,
     flush_icache_range, flush_icache_remote,
 };
-pub use cpu::{await_interrupts, stop_cpu};
+pub use cpu::{await_interrupts, current_exception_level, stop_cpu};
 pub use fp::enable_fp;
 #[allow(deprecated)]
 pub use irq::{
