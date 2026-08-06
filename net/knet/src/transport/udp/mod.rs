@@ -14,7 +14,7 @@ mod wait;
 
 pub use self::socket::UdpSocket;
 pub(crate) use self::{
-    input::{InputDisposition, handle_ipv4_packet},
+    input::{InputDisposition, handle_ipv4_packet, handle_ipv6_packet},
     registry::{init_udp_registry, lookup_udp_error_state},
     state::UdpSocketQueuedError,
 };
@@ -25,11 +25,21 @@ pub(crate) use self::{
 };
 
 const IPV4_HEADER_LEN: usize = 20;
-const IPV4_DEFAULT_TTL: u8 = 64;
+const IPV6_HEADER_LEN: usize = 40;
+const IPV6_DEFAULT_HOP_LIMIT: u8 = 64;
+const IPV4_DEFAULT_TTL: u8 = IPV6_DEFAULT_HOP_LIMIT;
 const UDP_HEADER_LEN: usize = 8;
 const UDP_RX_QUEUE_CAPACITY: usize = 1024;
 const UDP_RX_QUEUE_RETAINED_CAPACITY: usize = 64;
 const UDP_MAX_PAYLOAD_LEN: usize = u16::MAX as usize - IPV4_HEADER_LEN - UDP_HEADER_LEN;
+const UDP_MAX_IPV6_PAYLOAD_LEN: usize = u16::MAX as usize - IPV6_HEADER_LEN - UDP_HEADER_LEN;
+
+/// Address family bound to a UDP socket.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AddressFamily {
+    Ipv4,
+    Ipv6,
+}
 
 #[cfg(unittest)]
 mod tests {

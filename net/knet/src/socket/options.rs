@@ -89,6 +89,9 @@ define_options! {
     RecvErr(bool),
     MtuDiscover(u8),
 
+    // ---- IPv6 options ----
+    Ipv6Only(bool),
+
     // ---- Packet socket options (PACKET_*) ----
     PacketStatistics(PacketStatistics),
     PacketAddMembership(PacketMembership),

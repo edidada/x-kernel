@@ -76,6 +76,9 @@ impl fmt::Display for Ipv4Address {
 pub(crate) struct Ipv6Address([u8; 16]);
 
 impl Ipv6Address {
+    pub(crate) const ALL_NODES_LINK_LOCAL: Self =
+        Self([0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    pub(crate) const LOCALHOST: Self = Self([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
     pub(crate) const UNSPECIFIED: Self = Self([0; 16]);
 
     pub(crate) const fn from_octets(octets: [u8; 16]) -> Self {
@@ -88,6 +91,52 @@ impl Ipv6Address {
 
     pub(crate) fn is_unspecified(self) -> bool {
         self == Self::UNSPECIFIED
+    }
+
+    pub(crate) fn is_loopback(self) -> bool {
+        self == Self::LOCALHOST
+    }
+
+    pub(crate) fn is_multicast(self) -> bool {
+        self.0[0] == 0xff
+    }
+
+    pub(crate) fn is_link_local(self) -> bool {
+        self.0[0] == 0xfe && (self.0[1] & 0xc0) == 0x80
+    }
+
+    /// Derives a link-local address from a 48-bit MAC via modified EUI-64.
+    pub(crate) fn link_local_from_mac(mac: [u8; 6]) -> Self {
+        let mut octets = [0u8; 16];
+        octets[0] = 0xfe;
+        octets[1] = 0x80;
+        octets[8] = mac[0] ^ 0x02;
+        octets[9] = mac[1];
+        octets[10] = mac[2];
+        octets[11] = 0xff;
+        octets[12] = 0xfe;
+        octets[13] = mac[3];
+        octets[14] = mac[4];
+        octets[15] = mac[5];
+        Self(octets)
+    }
+
+    /// Solicited-node multicast address for this unicast address (RFC 4291).
+    pub(crate) fn solicited_node_multicast(self) -> Self {
+        let mut octets = [0u8; 16];
+        octets[0] = 0xff;
+        octets[1] = 0x02;
+        octets[11] = 0x01;
+        octets[12] = 0xff;
+        octets[13] = self.0[13];
+        octets[14] = self.0[14];
+        octets[15] = self.0[15];
+        Self(octets)
+    }
+
+    /// Maps an IPv6 multicast address to the Ethernet multicast MAC.
+    pub(crate) fn multicast_mac(self) -> [u8; 6] {
+        [0x33, 0x33, self.0[12], self.0[13], self.0[14], self.0[15]]
     }
 }
 
@@ -125,6 +174,13 @@ impl IpAddress {
 
     pub(crate) fn is_broadcast(self) -> bool {
         matches!(self, Self::Ipv4(addr) if addr.is_broadcast())
+    }
+
+    pub(crate) fn is_multicast(self) -> bool {
+        match self {
+            Self::Ipv4(addr) => addr.is_multicast(),
+            Self::Ipv6(addr) => addr.is_multicast(),
+        }
     }
 }
 
@@ -243,26 +299,72 @@ impl fmt::Display for Ipv4Cidr {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct Ipv6Cidr {
+    address: Ipv6Address,
+    prefix_len: u8,
+}
+
+impl Ipv6Cidr {
+    pub(crate) const fn new(address: Ipv6Address, prefix_len: u8) -> Self {
+        Self {
+            address,
+            prefix_len,
+        }
+    }
+
+    pub(crate) const fn address(self) -> Ipv6Address {
+        self.address
+    }
+
+    pub(crate) const fn prefix_len(self) -> u8 {
+        self.prefix_len
+    }
+
+    pub(crate) fn contains_addr(self, addr: &IpAddress) -> bool {
+        let IpAddress::Ipv6(addr) = *addr else {
+            return false;
+        };
+        ipv6_prefix_equal(self.address.octets(), addr.octets(), self.prefix_len)
+    }
+}
+
+impl From<Ipv6Cidr> for IpCidr {
+    fn from(cidr: Ipv6Cidr) -> Self {
+        Self::Ipv6(cidr)
+    }
+}
+
+impl fmt::Display for Ipv6Cidr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.address, self.prefix_len)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum IpCidr {
     Ipv4(Ipv4Cidr),
+    Ipv6(Ipv6Cidr),
 }
 
 impl IpCidr {
     pub(crate) fn address(self) -> IpAddress {
         match self {
             Self::Ipv4(cidr) => IpAddress::Ipv4(cidr.address()),
+            Self::Ipv6(cidr) => IpAddress::Ipv6(cidr.address()),
         }
     }
 
     pub(crate) fn prefix_len(self) -> u8 {
         match self {
             Self::Ipv4(cidr) => cidr.prefix_len(),
+            Self::Ipv6(cidr) => cidr.prefix_len(),
         }
     }
 
     pub(crate) fn contains_addr(self, addr: &IpAddress) -> bool {
         match self {
             Self::Ipv4(cidr) => cidr.contains_addr(addr),
+            Self::Ipv6(cidr) => cidr.contains_addr(addr),
         }
     }
 }
@@ -338,6 +440,25 @@ fn prefix_mask(prefix_len: u8) -> u32 {
     }
 }
 
+fn ipv6_prefix_equal(lhs: [u8; 16], rhs: [u8; 16], prefix_len: u8) -> bool {
+    if prefix_len == 0 {
+        return true;
+    }
+    if prefix_len >= 128 {
+        return lhs == rhs;
+    }
+    let full_bytes = (prefix_len / 8) as usize;
+    let rem_bits = prefix_len % 8;
+    if lhs[..full_bytes] != rhs[..full_bytes] {
+        return false;
+    }
+    if rem_bits == 0 {
+        return true;
+    }
+    let mask = 0xffu8 << (8 - rem_bits);
+    (lhs[full_bytes] & mask) == (rhs[full_bytes] & mask)
+}
+
 #[cfg(unittest)]
 mod tests {
     use alloc::string::ToString;
@@ -371,10 +492,18 @@ mod tests {
             addr: Some(IpAddress::from(addr)),
             port: 8080,
         };
+        let cidr = Ipv6Cidr::new(addr, 64);
+        let link_local = Ipv6Address::link_local_from_mac([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
 
         assert_eq!(addr.octets(), octets);
         assert!(!addr.is_unspecified());
         assert!(Ipv6Address::UNSPECIFIED.is_unspecified());
+        assert!(Ipv6Address::LOCALHOST.is_loopback());
+        assert!(Ipv6Address::ALL_NODES_LINK_LOCAL.is_multicast());
+        assert!(link_local.is_link_local());
+        assert!(cidr.contains_addr(&IpAddress::from(addr)));
+        assert_eq!(IpCidr::from(cidr).prefix_len(), 64);
         assert_eq!(endpoint.to_string(), "101:101:101:101:101:101:101:101:8080");
+        assert_eq!(addr.solicited_node_multicast().octets()[13..], [1, 1, 1]);
     }
 }
