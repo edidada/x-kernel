@@ -348,6 +348,7 @@ dependencies = [
  "driver_base",
  "khal",
  "kspin 0.2.0-dev",
+ "ktime_types",
  "log",
  "unittest",
 ]

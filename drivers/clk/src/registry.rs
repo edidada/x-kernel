@@ -16,7 +16,8 @@
 //! This keeps the registry firmware-description-agnostic: the `clk` crate knows
 //! nothing about phandles or the device tree, so an ACPI/PCI backend can drive
 //! the same registry with its own naming. The DT→name translation lives once,
-//! in the bus layer that builds `ClkDesc`.
+//! outside this crate — in the firmware layer that parses `clocks`, which the
+//! bus layer then turns into `ClkDesc`.
 //!
 //! # Injectable, with a process-global default
 //!

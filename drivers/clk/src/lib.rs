@@ -180,7 +180,7 @@ impl Clk {
 mod tests {
     //! Unit tests for the registry routing, the `Clk` handle delegation, and the
     //! `devm_clk_get` device-resource entry point. The bus-layer DT parsing
-    //! (`clocks`/`clock-names` → `ClkDesc`) lives in `khal` and needs a real
+    //! (`clocks`/`clock-names` → a firmware-neutral descriptor) lives in `khal` and needs a real
     //! DTB, so it is exercised on hardware at probe time, not here. These tests
     //! pin the framework contract — providers are routed by phandle, the
     //! specifier reaches the provider, and `devm_clk_get` resolves a named clock

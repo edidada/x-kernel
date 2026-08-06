@@ -63,13 +63,42 @@ pub struct FirmwareDevice {
     pub irq: Option<InterruptInfo>,
     /// Clocks the device consumes, parsed from DT `clocks`/`clock-names`
     /// (empty for ACPI/static devices or when the node has no `clocks`).
-    pub clocks: alloc::vec::Vec<device_res::ClkDesc>,
+    /// Firmware-neutral; the bus layer converts each [`ClockResource`] into a
+    /// `device_res::ClkDesc` when assembling the device's resource set.
+    pub clocks: alloc::vec::Vec<ClockResource>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct MmioResource {
     pub base: usize,
     pub size: usize,
+}
+
+/// One clock a device consumes, in firmware-neutral form — the clock analogue
+/// of [`MmioResource`] / [`InterruptInfo`]. This layer deliberately does **not**
+/// depend on the driver-framework resource model: the bus layer converts this
+/// into a `device_res::ClkDesc` at the resource-assembly boundary, exactly as
+/// it converts [`MmioResource`] into an MMIO resource descriptor.
+///
+/// `provider` is the producer's OS-neutral name and is the **registry key** the
+/// `clk` subsystem routes clock lookups by. It is an opaque `&'static str`
+/// here, derived once (via `of::node_name_key`) from the producer DT node; both
+/// the consumer path (this struct) and the producer-registration path call
+/// `of::node_name_key` on the same node, so the two sides agree by
+/// construction. This crate passes the string through untouched — it never
+/// re-derives or transforms it.
+#[derive(Debug, Clone)]
+pub struct ClockResource {
+    /// The `clock-names` entry for this clock (a slice into the static DTB).
+    /// Empty when the device has `clocks` but no `clock-names`.
+    pub name: &'static [u8],
+    /// OS-neutral name of the clock **producer** — the registry key. A slice
+    /// into the static DTB (the producer node name with its `@unit` suffix
+    /// stripped).
+    pub provider: &'static str,
+    /// The `#clock-cells` specifier words selecting the clock within the
+    /// provider.
+    pub specifier: alloc::vec::Vec<u32>,
 }
 
 /// Returns `true` if any firmware device description (DT or ACPI) has been
@@ -237,7 +266,7 @@ const MAX_CLOCK_SPECIFIER_CELLS: usize = 8;
 /// index (a clock without a matching name gets an empty name slice). Returns an
 /// empty vector when the node has no `clocks` property. Malformed entries stop
 /// the parse early (already-collected entries are returned).
-fn parse_clocks(node: of::FdtNode<'static, 'static>) -> alloc::vec::Vec<device_res::ClkDesc> {
+fn parse_clocks(node: of::FdtNode<'static, 'static>) -> alloc::vec::Vec<ClockResource> {
     let Some(property) = node.property("clocks") else {
         return alloc::vec::Vec::new();
     };
@@ -284,14 +313,18 @@ fn parse_clocks(node: of::FdtNode<'static, 'static>) -> alloc::vec::Vec<device_r
         // Resolve the producer node once (already needed for `#clock-cells`)
         // to derive its OS-neutral name: the node name with the `@unit`
         // address suffix stripped. This name is the provider key the `clk`
-        // registry uses, so `ClkDesc` and the registry stay firmware-
+        // registry uses, so the descriptor and the registry stay firmware-
         // description-agnostic (no DT phandle leaks into the descriptor).
         let producer_name = of::find_node_by_phandle(phandle)
             .map(|producer| of::node_name_key(producer.name))
             .unwrap_or("");
 
         let name = names.get(index).copied().unwrap_or(b"");
-        out.push(device_res::ClkDesc::new(name, producer_name, specifier));
+        out.push(ClockResource {
+            name,
+            provider: producer_name,
+            specifier: specifier.to_vec(),
+        });
         index += 1;
     }
     out

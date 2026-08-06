@@ -12,6 +12,7 @@
 //! `khal::firmware::devices` abstraction, so this backend stays
 //! firmware-agnostic.
 
+use device_res::ClkDesc;
 use driver_base::DriverResult;
 use kdevice::{
     BusId, BusTypeId, DeviceIdentity, DeviceLocation, DiscoveryOrigin, IrqResource, MmioRegion,
@@ -98,7 +99,11 @@ impl PlatformBackend {
                     )));
                 }
                 for clock in &dev.clocks {
-                    resources.push(ResourceDesc::Clock(clock.clone()));
+                    resources.push(ResourceDesc::Clock(ClkDesc::new(
+                        clock.name,
+                        clock.provider,
+                        &clock.specifier,
+                    )));
                 }
 
                 let registration = if dev.firmware_id == VIRTIO_MMIO_DT_COMPATIBLE {

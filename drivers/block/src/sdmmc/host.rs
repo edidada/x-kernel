@@ -21,6 +21,7 @@
 //! what this leaves out (IRQ-driven state machine, IDMAC, tuning).
 
 use driver_base::{DriverError, DriverResult};
+use ktime_types::TimeSpan;
 
 use super::regs::{
     self, clkena,
@@ -33,15 +34,15 @@ use super::regs::{
 const POLL_TIMEOUT_NS: u64 = 500_000_000;
 
 /// Poll `cond` until it returns `true` or the timeout (ns) elapses. Returns
-/// `false` on timeout. Uses the monotonic hardware tick counter so it works in
-/// any context without the scheduler.
+/// `false` on timeout. Uses the monotonic clock so it works in any context
+/// without the scheduler.
 fn wait_until_ns<F: FnMut() -> bool>(timeout_ns: u64, mut cond: F) -> bool {
-    let start = khal::time::monotonic_time_nanos();
+    let deadline = khal::time::monotonic_time() + TimeSpan::from_nanos(timeout_ns);
     loop {
         if cond() {
             return true;
         }
-        if khal::time::monotonic_time_nanos().wrapping_sub(start) >= timeout_ns {
+        if khal::time::monotonic_time() >= deadline {
             return false;
         }
         core::hint::spin_loop();
@@ -424,7 +425,7 @@ impl DwMciHost {
     /// bytes have arrived.
     pub fn pio_read(&self, buf: &mut [u8]) -> DriverResult {
         let mut off_b = 0usize;
-        let start = khal::time::monotonic_time_nanos();
+        let deadline = khal::time::monotonic_time() + TimeSpan::from_nanos(POLL_TIMEOUT_NS);
         loop {
             // A data error never raises DATA_OVER — check it first or the
             // drain loop spins forever (the real-HW hang).
@@ -443,7 +444,7 @@ impl DwMciHost {
                 break;
             }
 
-            if khal::time::monotonic_time_nanos().wrapping_sub(start) >= POLL_TIMEOUT_NS {
+            if khal::time::monotonic_time() >= deadline {
                 log::error!(
                     "sdmmc: read data timeout rintsts={:#x} status={:#x} (no DATA_OVER/error \
                      within {}ms; drained {}/{})",
@@ -467,7 +468,7 @@ impl DwMciHost {
     /// transfer that never progresses otherwise spins forever.
     pub fn pio_write(&self, buf: &[u8]) -> DriverResult {
         let mut off_b = 0usize;
-        let start = khal::time::monotonic_time_nanos();
+        let deadline = khal::time::monotonic_time() + TimeSpan::from_nanos(POLL_TIMEOUT_NS);
         while off_b + 4 <= buf.len() {
             self.data_err_abort(self.readl(off::RINTSTS), "write")?;
             let free = ((self.fifo_depth - status::fcnt(self.readl(off::STATUS)))
@@ -478,7 +479,7 @@ impl DwMciHost {
                 self.fifo_write32(u32::from_le_bytes(w));
                 off_b += 4;
             }
-            if khal::time::monotonic_time_nanos().wrapping_sub(start) >= POLL_TIMEOUT_NS {
+            if khal::time::monotonic_time() >= deadline {
                 log::error!(
                     "sdmmc: write data (fill) timeout rintsts={:#x} status={:#x} (filled {}/{})",
                     self.readl(off::RINTSTS),
@@ -504,7 +505,7 @@ impl DwMciHost {
                 self.writel(off::RINTSTS, int::DATA_OVER);
                 break;
             }
-            if khal::time::monotonic_time_nanos().wrapping_sub(start) >= POLL_TIMEOUT_NS {
+            if khal::time::monotonic_time() >= deadline {
                 log::error!(
                     "sdmmc: write data (complete) timeout rintsts={:#x} status={:#x}",
                     rintsts,
