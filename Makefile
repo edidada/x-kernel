@@ -52,7 +52,7 @@ XKMAKE := env \
 	CARGO_BUILD_TARGET=$(HOST_TARGET) \
 	RUSTFLAGS= \
 	CARGO_ENCODED_RUSTFLAGS= \
-	cargo run --quiet \
+	cargo run \
 		--target-dir $(XKMAKE_TARGET_DIR) \
 		--manifest-path xtask/Cargo.toml \
 		-p xkmake --
@@ -60,7 +60,7 @@ XCONFIG := env \
 	CARGO_BUILD_TARGET=$(HOST_TARGET) \
 	RUSTFLAGS= \
 	CARGO_ENCODED_RUSTFLAGS= \
-	cargo run --quiet \
+	cargo run \
 		--target-dir $(XCONFIG_TARGET_DIR) \
 		--manifest-path xtask/Cargo.toml \
 		-p xconfig --bin xconf --
