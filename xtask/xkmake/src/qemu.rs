@@ -51,6 +51,9 @@ pub(crate) fn run(bundle: &Bundle, args: &RunArgs) -> Result<()> {
         context.config.platform(),
         context.config.target()
     );
+    if context.verbosity == 0 && !context.dry_run {
+        println!("QEMU command: {}", command.command_lines());
+    }
     command.run()
 }
 

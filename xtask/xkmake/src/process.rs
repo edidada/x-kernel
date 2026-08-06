@@ -66,6 +66,20 @@ impl Process {
         self
     }
 
+    /// Render the command as a copy-pasteable shell command.
+    pub(crate) fn command_lines(&self) -> String {
+        let mut parts = vec![self.command.get_program().to_string_lossy().into_owned()];
+        parts.extend(
+            self.command
+                .get_args()
+                .map(|arg| shell_quote(arg.to_string_lossy().as_ref())),
+        );
+        if let Some(path) = &self.stdout_path {
+            parts.push(format!("> {}", shell_quote(&path.display().to_string())));
+        }
+        parts.join(" ")
+    }
+
     pub(crate) fn run(&mut self) -> Result<()> {
         if self.verbosity > 0 || self.dry_run {
             println!("+ {:#?}", self.command);
@@ -125,6 +139,23 @@ impl Process {
         }
         Ok(())
     }
+}
+
+fn shell_quote(arg: &str) -> String {
+    let needs_quoting = arg.is_empty()
+        || arg.chars().any(|c| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '\'' | '"' | '\\' | '$' | '`' | '|' | '&' | ';' | '<' | '>' | '(' | ')'
+                        | '*' | '?' | '[' | ']' | '~' | '#' | '!' | '^' | '{' | '}' | '=' | ':'
+                        | '%' | ',' | '+' | '@'
+                )
+        });
+    if !needs_quoting {
+        return arg.to_string();
+    }
+    format!("'{}'", arg.replace('\'', "'\\''"))
 }
 
 fn pending_output_path(output_path: &Path) -> Result<PathBuf> {
