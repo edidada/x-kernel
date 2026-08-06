@@ -113,20 +113,11 @@ XKMAKE_RUN_ARGS := \
 	$(if $(strip $(MEM)),--memory "$(MEM)") \
 	$(if $(strip $(SMP)),--smp "$(SMP)")
 
-_HOOKS_BOOTSTRAP := $(shell \
-	top=$$(git rev-parse --show-toplevel 2>/dev/null); \
-	if [ -n "$$top" ] && [ -x "$$top/.githooks/pre-commit" ]; then \
-		cur=$$(git config --get core.hooksPath 2>/dev/null); \
-		if [ -z "$$cur" ] || [ ! -x "$$cur/pre-commit" ]; then \
-			git config core.hooksPath "$$top/.githooks"; \
-		fi; \
-	fi)
-
 .PHONY: all build run justrun debug disasm clippy doc doc_check_missing
 .PHONY: unittest unittest_no_fail_fast
 .PHONY: defconfig oldconfig olddefconfig menuconfig saveconfig savedefconfig gen-const
 .PHONY: teefs disk_img ramdisk_img
-.PHONY: install-tools check_deps deps check_header header fmt hooks clean distclean
+.PHONY: install-tools check_deps deps check_header header fmt clean distclean
 .PHONY: ci-test
 
 all: build
@@ -280,10 +271,6 @@ header:
 
 fmt:
 	@cargo +nightly-2026-03-08 fmt --all
-
-hooks:
-	@git config core.hooksPath "$$(git rev-parse --show-toplevel)/.githooks"
-	@echo "x-kernel: git hooks enabled -> $$(git config --get core.hooksPath)"
 
 ci-test: build
 	@set -eu; \
