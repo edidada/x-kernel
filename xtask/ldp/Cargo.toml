@@ -1,0 +1,14 @@
+[package]
+name = "ldp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "linux-driver-port skill harness: data-as-source lookup, bitfield validation, gap scanning, golden regression, and doc generation."
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "1.1.2"
