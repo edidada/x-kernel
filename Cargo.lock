@@ -1310,6 +1310,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "kvmm"
+version = "0.2.0-dev"
+dependencies = [
+ "kaddr_layout",
+ "kalloc",
+ "kcpu_id_map",
+ "khal",
+ "ksync",
+ "ktask",
+ "ktime_types",
+ "log",
+ "percpu",
+]
+
+[[package]]
 name = "lazyinit"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

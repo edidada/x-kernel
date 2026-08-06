@@ -91,6 +91,7 @@ mm/         分配器、页表、内核地址空间和映射支持
 platforms/  平台适配、Kconfig 和 defconfig
 task/       内核任务、同步原语、轮询和 RR 调度器
 util/       通用工具、宏、错误类型和内核测试框架
+virt/       VM/vCPU、Stage-2 页表和架构虚拟化核心（当前未接入启动路径）
 xtask/      XKMake 构建、镜像打包和 QEMU 编排工具
 docs/       设计文档、开发规范和 AI 工作流
 ```

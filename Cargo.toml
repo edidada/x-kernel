@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     # kernel entry
     "entry",
+    # dormant VMM core; not linked by the current EL2 runtime entry
+    "virt/kvmm",
     # boot and loader
     "boot/*",
 ]
