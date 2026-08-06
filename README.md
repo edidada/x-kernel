@@ -4,9 +4,9 @@ XHyper 是基于 X-Kernel 裁剪得到的 Type-1 虚拟机基座。内核直接�
 AArch64 EL2/VHE，保留启动、架构抽象、内存管理、中断、时钟、SMP、设备驱动
 和 RR 调度器，并在 `kruntime` 初始化完成后进入 `entry`。
 
-当前代码不包含 Linux syscall ABI、POSIX、用户进程、文件系统、网络协议栈、
-TEE 和 VM/vCPU 业务层。驱动与多架构底层代码仍然保留，当前默认配置和验证
-目标为 AArch64 QEMU virt。
+当前代码不包含 Linux syscall ABI、POSIX、用户进程、文件系统、socket、
+TEE 和 VM/vCPU 业务层。保留块设备、网络设备及其底层协议接口；驱动与
+多架构底层代码仍然保留，当前默认配置和验证目标为 AArch64 QEMU virt。
 
 ## 环境要求
 
@@ -16,16 +16,20 @@ TEE 和 VM/vCPU 业务层。驱动与多架构底层代码仍然保留，当前�
 - `rust-toolchain.toml` 指定的 Rust nightly 工具链；
 - Rust target `aarch64-unknown-none-softfloat`；
 - `cargo-binutils` 和 `rust-objcopy`；
+- `e2fsprogs`（提供 `mkfs.ext4`，用于创建空白磁盘镜像）；
 - `qemu-system-aarch64`。
 
 在 Debian/Ubuntu 上可安装 QEMU：
 
 ```bash
-sudo apt install qemu-system-arm
+sudo apt install e2fsprogs qemu-system-arm
 rustup target add aarch64-unknown-none-softfloat
 cargo install cargo-binutils
 rustup component add llvm-tools-preview
+make install-tools
 ```
+
+`make install-tools` 会安装项目构建、检查和格式化流程所需的固定版本工具。
 
 ## 构建与启动
 
@@ -54,8 +58,16 @@ target/xkmake/kplat-aarch64/release/
 使用 QEMU 启动：
 
 ```bash
-make run XKMAKE_ARGS='--no-block --no-net'
+make disk_img
+make run
 ```
+
+`make disk_img` 默认创建 64 MiB 的空白 ext4 镜像 `disk.img`。可通过
+`DISK_IMG` 和 `DISK_IMG_SIZE` 指定路径和容量。
+
+默认配置会让 QEMU 提供 `virtio-blk` 和 `virtio-net`。启动日志中的
+`block device initialized` 与 `network device initialized` 会分别显示块容量、
+MAC 地址和队列深度，用于确认设备已经被内核探测并完成初始化。
 
 启动完成后会展示 build info、Build ID 和 SMP 数量，并进入串口 shell：
 
@@ -74,7 +86,7 @@ shell 目前仅支持：
 可通过 `XKMAKE_ARGS` 调整 QEMU 内存和 CPU 数量：
 
 ```bash
-make run XKMAKE_ARGS='--no-block --no-net --memory 2g --smp 2'
+make run XKMAKE_ARGS='--memory 2g --smp 2'
 ```
 
 ## 目录结构

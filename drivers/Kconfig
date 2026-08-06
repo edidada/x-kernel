@@ -163,11 +163,10 @@ comment "Block device drivers"
 
 config KFEAT_DRIVER_VIRTIO_BLK
     bool "virtio-blk block device"
-    depends on KFEAT_FS
-    default y
+    default n
     help
-      Enable the virtio-blk block device driver. Required by virtio-based
-      virtual platforms (QEMU/CrosVM) when a disk-backed filesystem is in use.
+      Enable the kernel-native virtio-blk block device driver. This publishes
+      a block device independently of any filesystem or userspace ABI.
 
 config KFEAT_DRIVER_RAMDISK
     bool "RAM disk block device"
@@ -193,11 +192,10 @@ comment "Network drivers"
 
 config KFEAT_DRIVER_VIRTIO_NET
     bool "virtio-net NIC"
-    depends on KFEAT_NET
-    default y
+    default n
     help
-      Enable the virtio-net NIC driver. Required by virtio-based virtual
-      platforms (QEMU/CrosVM) when networking is in use.
+      Enable the kernel-native virtio-net NIC driver. This publishes the raw
+      Ethernet device independently of sockets, processes, or a userspace ABI.
 
 config KFEAT_DRIVER_VIRTIO_SOCKET
     bool "virtio-vsock transport"

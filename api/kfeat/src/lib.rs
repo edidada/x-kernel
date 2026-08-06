@@ -20,10 +20,18 @@
 //!     - `paging`: Enable page table manipulation.
 //!     - `tls`: Enable thread-local storage.
 //!
-//! Only the allocator, AArch64 platform, SMP, console, and RR scheduler are
-//! aggregated here. POSIX, syscall, filesystem, network, TEE, and VMM business
-//! crates are deliberately outside the image dependency graph.
+//! Allocator, all four architecture platform crates, SMP, hardware driver
+//! mappings, and the RR scheduler remain available here. POSIX, syscall,
+//! filesystem, socket/process networking, TEE, and VMM business crates are
+//! deliberately outside the default image dependency graph. Kernel-native
+//! block and network device drivers remain selectable independently.
 #![no_std]
 
 #[cfg(feature = "platform_kplat_aarch64")]
 extern crate kplat_aarch64;
+#[cfg(feature = "platform_kplat_loongarch64")]
+extern crate kplat_loongarch64;
+#[cfg(feature = "platform_kplat_riscv64")]
+extern crate kplat_riscv64;
+#[cfg(feature = "platform_kplat_x86_64")]
+extern crate kplat_x86_64;

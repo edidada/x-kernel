@@ -34,7 +34,7 @@ The root `Makefile` provides short, stable command names and launches host
 tools in host-only target directories. It does not parse `.config`, derive
 Cargo features, construct image paths, or assemble QEMU command lines.
 
-Repository utilities such as rootfs download, uapp installation, image
+Repository utilities such as image
 creation, formatting, dependency checks, and cleanup remain Make targets.
 When they need resolved product information, they query `xkmake config`
 instead of parsing `.config`.

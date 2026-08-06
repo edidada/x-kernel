@@ -13,6 +13,7 @@
 #
 # * QEMU / runtime — `make run`, `make justrun`, `make debug`:
 #     - DISK_IMG            virtio-blk backing disk image (see RAMDISK_IMG below)
+#     - DISK_IMG_SIZE       Empty ext4 disk image size in MiB (default 64)
 #     - NET / BLK / VSOCK   Enable virtio-net / virtio-blk / vhost-vsock (y/n)
 #     - GRAPHIC             Enable graphical output + virtio-gpu (y/n)
 #     - UEFI                Boot x86_64 via OVMF `.uefi.img` instead of LinuxBoot (y/n)
@@ -39,17 +40,12 @@
 #     - RAMDISK_ROOTFS      Source image to inject a minimal /bin/sh + musl
 #                           runtime from (default DISK_IMG; empty = empty ramdisk)
 #
-# * Root filesystem download (`make rootfs`):
-#     - ROOTFS_URL          Base URL for prebuilt rootfs images
-#     - ROOTFS_VARIANT      Rootfs variant (default alpine-busybox)
-
 .DEFAULT_GOAL := build
 
 HOST_TARGET := $(shell rustc -vV | sed -n 's/^host: //p')
 TARGET_DIR ?= $(CURDIR)/target
 XKMAKE_TARGET_DIR ?= $(TARGET_DIR)/tools/xkmake
 XCONFIG_TARGET_DIR ?= $(TARGET_DIR)/tools/xconfig
-UAPP_TARGET_DIR ?= $(TARGET_DIR)/tools/uapp
 XTASK_TARGET_DIR ?= $(CURDIR)/xtask/target
 
 XKMAKE := env \
@@ -68,24 +64,14 @@ XCONFIG := env \
 		--target-dir $(XCONFIG_TARGET_DIR) \
 		--manifest-path xtask/Cargo.toml \
 		-p xconfig --bin xconf --
-UAPP_TOOL := env \
-	CARGO_BUILD_TARGET=$(HOST_TARGET) \
-	RUSTFLAGS= \
-	CARGO_ENCODED_RUSTFLAGS= \
-	cargo run --quiet \
-		--target-dir $(UAPP_TARGET_DIR) \
-		--manifest-path xtask/Cargo.toml \
-		-p uapp --
-
 # QEMU virtio-blk backing file. Distinct from RAMDISK_IMG (embedded into the
 # kernel at build time when KFEAT_DRIVER_RAMDISK_STATIC=y).
 DISK_IMG ?= $(CURDIR)/disk.img
+DISK_IMG_SIZE ?= 64
 RAMDISK_IMG ?= $(CURDIR)/ramdisk.img
 RAMDISK_IMG_SIZE ?= 8
 RAMDISK_IMG_FS ?= ext4
 RAMDISK_ROOTFS ?= $(DISK_IMG)
-ROOTFS_URL ?= https://gitee.com/openkylin/x-kernel-image/releases/download/rootfs
-ROOTFS_VARIANT ?= alpine-busybox
 
 UNITTEST ?= n
 UNITTEST_CRATE ?=
@@ -97,10 +83,6 @@ GRAPHIC ?= n
 MEM ?=
 SMP ?=
 QEMU_ARGS ?=
-
-UAPPS ?= all
-UAPP_DIR ?= $(CURDIR)/uapps
-UAPP_AUTOSTART_TARGET ?= /etc/profile.d/99-autostart.sh
 
 OBJDUMP ?= rust-objdump -d --print-imm-hex --x86-asm-syntax=intel
 GDB ?= gdb
@@ -143,7 +125,7 @@ _HOOKS_BOOTSTRAP := $(shell \
 .PHONY: all build run justrun debug disasm clippy doc doc_check_missing
 .PHONY: unittest unittest_no_fail_fast
 .PHONY: defconfig oldconfig olddefconfig menuconfig saveconfig savedefconfig gen-const
-.PHONY: rootfs uapps rootfs-uapps teefs disk_img ramdisk_img
+.PHONY: teefs disk_img ramdisk_img
 .PHONY: install-tools check_deps deps check_header header fmt hooks clean distclean
 .PHONY: ci-test
 
@@ -224,50 +206,26 @@ gen-const:
 		--output-dir "$(TARGET_DIR)/kbuild/$$platform" \
 		--kconfig Kconfig --srctree .
 
-rootfs:
-	@set -eu; \
-	arch="$$($(XKMAKE) config arch)"; \
-	image="x-kernel-$(ROOTFS_VARIANT)-$$arch.img"; \
-	if [ ! -f "$$image" ]; then \
-		echo "Image not found, downloading $$image..."; \
-		curl -f -L "$(ROOTFS_URL)/$$image.xz" -o "$$image.xz"; \
-		xz -df "$$image.xz"; \
-	fi; \
-	cp "$$image" "$(DISK_IMG)"
-
-uapps:
-	@test -f "$(DISK_IMG)" || { echo "disk image not found: $(DISK_IMG); run 'make rootfs' first"; exit 1; }
-	@set -eu; \
-	arch="$$($(XKMAKE) config arch)"; \
-	target="$$($(XKMAKE) config target)"; \
-	platform="$$($(XKMAKE) config platform)"; \
-	cross_compile="$$($(XKMAKE) config cross-compile)"; \
-	$(UAPP_TOOL) install \
-		$(UAPP_ARGS) \
-		--uapps-dir "$(UAPP_DIR)" \
-		--disk-img "$(DISK_IMG)" \
-		--select "$(UAPPS)" \
-		--autostart-target "$(UAPP_AUTOSTART_TARGET)" \
-		--repo-root "$(CURDIR)" \
-		--build-dir "$(TARGET_DIR)/uapps" \
-		--arch "$$arch" \
-		--target "$$target" \
-		--plat-name "$$platform" \
-		--cross-compile "$$cross_compile"
-
-rootfs-uapps: rootfs uapps
-
 teefs:
 	@arch="$$($(XKMAKE) config arch)"; \
 	$(MAKE) -C tee_apps ARCH="$$arch" DISK_IMG="$(DISK_IMG)" TARGET_DIR="$(TARGET_DIR)"
 
 disk_img:
-	@if [ -e "$(DISK_IMG)" ]; then \
+	@set -eu; \
+	if [ -e "$(DISK_IMG)" ]; then \
 		echo "warning: disk image already exists: $(DISK_IMG)"; \
 	else \
-		echo "Creating FAT32 disk image $(DISK_IMG)..."; \
-		dd if=/dev/zero of="$(DISK_IMG)" bs=1M count=64; \
-		mkfs.fat -F 32 "$(DISK_IMG)"; \
+		command -v mkfs.ext4 >/dev/null 2>&1 || { \
+			echo "error: mkfs.ext4 is required to create $(DISK_IMG)" >&2; \
+			exit 1; \
+		}; \
+		echo "Creating empty ext4 disk image $(DISK_IMG) ($(DISK_IMG_SIZE) MiB)..."; \
+		tmp="$(DISK_IMG).tmp.$$$$"; \
+		trap 'rm -f "$$tmp"' EXIT INT TERM; \
+		truncate -s "$(DISK_IMG_SIZE)M" "$$tmp"; \
+		mkfs.ext4 -q -F -b 4096 -O ^metadata_csum,^64bit "$$tmp"; \
+		mv "$$tmp" "$(DISK_IMG)"; \
+		trap - EXIT INT TERM; \
 	fi
 
 ramdisk_img:

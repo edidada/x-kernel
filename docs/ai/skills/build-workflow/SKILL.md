@@ -30,7 +30,8 @@ Do not use a bare `cargo check -p <crate>` as the main kernel validation path.
 - the target architecture's musl cross toolchain;
 - the matching QEMU system emulator for `make run`;
 - `cargo-shear 1.13.2` and `licensure 0.8.1` for repository hygiene checks;
-- an ext4 `disk.img` when the configured virtio block device is enabled.
+- `mkfs.ext4` for `make disk_img`, and an ext4 `disk.img` when the configured
+  virtio block device is enabled.
 - for unit-test coverage: `debugfs`, `rust-profdata`, and `rust-cov`;
 - for x86_64 boot media: `mkfs.fat`, mtools (`mmd` and `mcopy`), and OVMF/EDK2
   firmware for UEFI execution.
@@ -215,9 +216,6 @@ The thin Makefile retains repository-level utility targets that do not own
 kernel configuration or QEMU policy:
 
 ```bash
-make rootfs
-make uapps
-make rootfs-uapps
 make teefs
 make disk_img
 make ramdisk_img
@@ -233,8 +231,8 @@ make distclean
 
 `make check_deps` runs the pinned `cargo-shear 1.13.2` analyzer through
 `xkmake hygiene deps`. Use `make deps` to apply its unused-dependency fixes.
-The check covers the root, `xtask`, `tee_apps`, and `uapps/hello` Cargo
-workspaces. Cargo-shear warnings remain advisory; dependency errors fail the
+The check covers the root, `xtask`, and `tee_apps` Cargo workspaces. Cargo-shear
+warnings remain advisory; dependency errors fail the
 command.
 
 `make check_header` runs the pinned `licensure 0.8.1` analyzer through

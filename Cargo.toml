@@ -104,6 +104,9 @@ x86_apic = { path = "drivers/x86-apic", package = "x86-apic" }
 
 # Internal: platform variants
 kplat-aarch64 = { path = "platforms/kplat-aarch64", default-features = false }
+kplat-loongarch64 = { path = "platforms/kplat-loongarch64" }
+kplat-riscv64 = { path = "platforms/kplat-riscv64" }
+kplat-x86_64 = { path = "platforms/kplat-x86_64" }
 
 # Internal: utilities and tooling
 backtrace = { path = "util/backtrace" }

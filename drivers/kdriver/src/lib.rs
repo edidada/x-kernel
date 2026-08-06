@@ -120,6 +120,7 @@ pub fn init_drivers() {
     let _registry = discover_unified();
 
     log_class_summary();
+    log_storage_and_network_devices();
     log_device_core_summary();
     log_device_ownership_summary();
 }
@@ -217,6 +218,52 @@ fn log_class_summary() {
         .filter(|r| r.state == kdevice::DeviceState::Active)
         .count();
     debug!("total devices: {} ({} active)", records.len(), active);
+}
+
+fn log_storage_and_network_devices() {
+    #[cfg(feature = "virtio-blk")]
+    {
+        use kclass::BlockDevice;
+
+        for device in kclass::block_devices() {
+            let blocks = device.num_blocks();
+            let block_size = device.block_size();
+            info!(
+                "block device initialized: name={}, driver={}, location={:?}, blocks={}, \
+                 block_size={}, capacity_bytes={}",
+                device.name(),
+                device.driver_name(),
+                device.location(),
+                blocks,
+                block_size,
+                blocks.saturating_mul(block_size as u64),
+            );
+        }
+    }
+
+    #[cfg(feature = "virtio-net")]
+    {
+        use kclass::NetDevice;
+
+        for device in kclass::net_devices() {
+            let mac = device.mac().0;
+            info!(
+                "network device initialized: name={}, driver={}, location={:?}, \
+                 mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, rx_queue={}, tx_queue={}",
+                device.name(),
+                device.driver_name(),
+                device.location(),
+                mac[0],
+                mac[1],
+                mac[2],
+                mac[3],
+                mac[4],
+                mac[5],
+                device.rx_queue_len(),
+                device.tx_queue_len(),
+            );
+        }
+    }
 }
 
 fn log_device_core_summary() {

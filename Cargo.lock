@@ -1037,6 +1037,9 @@ dependencies = [
  "khal",
  "kipi",
  "kplat-aarch64",
+ "kplat-loongarch64",
+ "kplat-riscv64",
+ "kplat-x86_64",
  "kruntime",
  "kspin 0.2.0-dev",
  "ktask",
@@ -1165,12 +1168,83 @@ dependencies = [
 ]
 
 [[package]]
+name = "kplat-loongarch64"
+version = "0.2.0-dev"
+dependencies = [
+ "chrono",
+ "console-driver",
+ "kaddr_layout",
+ "karch",
+ "kbuild_config",
+ "kcpu",
+ "kcpu_id_map",
+ "kernel-boot",
+ "kerrno",
+ "khal",
+ "kplat",
+ "kspin 0.2.0-dev",
+ "ktime",
+ "ktime_types",
+ "lazyinit",
+ "log",
+ "loongArch64",
+ "memspace",
+]
+
+[[package]]
 name = "kplat-macros"
 version = "0.2.0-dev"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "kplat-riscv64"
+version = "0.2.0-dev"
+dependencies = [
+ "console-driver",
+ "irq-driver",
+ "karch",
+ "kcpu",
+ "kcpu_id_map",
+ "kernel-boot",
+ "kerrno",
+ "khal",
+ "kplat",
+ "ktime",
+ "log",
+ "rtc-driver",
+ "sbi-rt",
+ "timer-driver",
+]
+
+[[package]]
+name = "kplat-x86_64"
+version = "0.2.0-dev"
+dependencies = [
+ "boot-info",
+ "console-driver",
+ "irq-driver",
+ "karch",
+ "kbuild_config",
+ "kcpu",
+ "kcpu_id_map",
+ "kernel-boot",
+ "kerrno",
+ "khal",
+ "klazy",
+ "kplat",
+ "kspin 0.2.0-dev",
+ "ktime",
+ "ktime_types",
+ "log",
+ "multiboot2",
+ "rtc-driver",
+ "timer-driver",
+ "x86-apic",
+ "x86_64",
 ]
 
 [[package]]

@@ -18,10 +18,17 @@ smp = [
     "kruntime/smp",
     "ktask/smp",
     "kspin/smp",
-    "kplat-aarch64/smp",
+    "kplat-aarch64?/smp",
+    "kplat-loongarch64?/smp",
+    "kplat-riscv64?/smp",
+    "kplat-x86_64?/smp",
 ]
 ipi = ["dep:kipi", "khal/ipi", "kruntime/ipi"]
 fp-simd = ["khal/fp-simd"]
+dma-trace = ["kdriver/dma-trace"]
+arm_timer_resume_fixup = ["kruntime/arm-timer-resume-fixup", "ktask/arm-timer-resume-fixup"]
+pci_non_ecam = ["kdriver/pci-non-ecam"]
+pmu = ["kruntime/pmu"]
 
 sched_rr = ["ktask/sched_rr"]
 
@@ -31,8 +38,28 @@ alloc_tlsf = ["alloc", "alloc-engine/tlsf", "kalloc/tlsf"]
 alloc_buddy = ["alloc", "alloc-engine/buddy", "kalloc/buddy"]
 
 platform_kplat_aarch64 = ["dep:kplat-aarch64", "fp-simd", "smp"]
+platform_kplat_x86_64 = ["dep:kplat-x86_64", "fp-simd", "smp"]
+platform_kplat_riscv64 = ["dep:kplat-riscv64", "fp-simd", "smp"]
+platform_kplat_loongarch64 = ["dep:kplat-loongarch64", "fp-simd", "smp"]
 driver_console_pl011 = ["kdriver/console-pl011"]
+driver_console_ns16550_mmio = ["kdriver/console-ns16550-mmio"]
+driver_console_ns16550_ioport = ["kdriver/console-ns16550-ioport"]
 driver_serial_pl011 = ["kdriver/serial-pl011"]
+driver_serial_ns16550_mmio = ["kdriver/serial-ns16550-mmio"]
+driver_serial_ns16550_ioport = ["kdriver/serial-ns16550-ioport"]
+driver_virtio_blk = ["kdriver/virtio-blk"]
+driver_virtio_net = ["kdriver/virtio-net"]
+driver_virtio_gpu = ["kdriver/virtio-gpu"]
+driver_virtio_input = ["kdriver/virtio-input"]
+driver_virtio_socket = ["kdriver/virtio-socket"]
+driver_virtio_9p = ["kdriver/virtio-9p"]
+driver_ramdisk = ["kdriver/ramdisk"]
+driver_ramdisk_static = ["kdriver/ramdisk-static"]
+driver_ixgbe = ["kdriver/ixgbe"]
+driver_fxmac = ["kdriver/fxmac"]
+driver_ahci = ["kdriver/ahci"]
+driver_bcm2835_sdhci = ["kdriver/bcm2835-sdhci"]
+driver_sdmmc = ["kdriver/sdmmc"]
 dwarf = ["backtrace/dwarf"]
 
 [dependencies]
@@ -43,6 +70,9 @@ kdriver.workspace = true
 khal.workspace = true
 kipi = { workspace = true, optional = true }
 kplat-aarch64 = { workspace = true, optional = true, features = ["fp-simd"] }
+kplat-x86_64 = { workspace = true, optional = true, features = ["fp-simd"] }
+kplat-riscv64 = { workspace = true, optional = true, features = ["fp-simd"] }
+kplat-loongarch64 = { workspace = true, optional = true, features = ["fp-simd"] }
 kruntime.workspace = true
 kspin.workspace = true
 ktask.workspace = true

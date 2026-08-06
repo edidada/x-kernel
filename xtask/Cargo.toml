@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "xconfig",
     "xkmake",
-    "uapp",
 ]
 
 [workspace.package]

@@ -244,7 +244,7 @@ fn run_cargo_shear(root: &Path, relative_path: &str, fix: bool) -> Result<()> {
     let mut process = Process::new("cargo-shear", false, 0);
     // `--locked` is only meaningful where a `Cargo.lock` is committed: it
     // forbids the analysis from creating or updating the lockfile. The nested
-    // tooling projects (`xtask`, `tee_apps`, `uapps/hello`) keep their
+    // tooling projects (`xtask`, `tee_apps`) keep their
     // lockfiles gitignored, so on a fresh checkout no lock exists and
     // `--locked` would refuse to create one. Let cargo regenerate those on
     // demand instead.

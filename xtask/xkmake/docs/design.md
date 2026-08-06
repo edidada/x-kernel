@@ -108,10 +108,10 @@ LCOV 到 Cobertura XML 的转换是 unittest 覆盖率流程的内部阶段，�
 
 1. 校验 PATH 中的 `cargo-shear` 版本与 XKMake 固定版本一致；
    工具缺失或版本不符时引导执行 `make install-tools`。
-2. 对根 workspace、`xtask`、`tee_apps` 和 `uapps/hello` 依次执行检查。
+2. 对根 workspace、`xtask` 和 `tee_apps` 依次执行检查。
 3. 仅对 `Cargo.lock` 被 Git 跟踪的 workspace（内核根 workspace）传递
    `--locked`，防止卫生检查隐式改写已提交的 lockfile；`xtask`、
-   `tee_apps`、`uapps/hello` 的 lockfile 被 gitignore，没有已提交锁，
+   `tee_apps` 的 lockfile 被 gitignore，没有已提交锁，
    不传 `--locked`，由 cargo 按需生成。
 4. `--fix` 仅透传 cargo-shear 的依赖删除能力；warning 保持提示语义，
    error 或任何 workspace 检查失败都会终止命令。
