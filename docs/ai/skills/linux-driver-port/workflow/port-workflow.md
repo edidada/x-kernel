@@ -5,7 +5,7 @@
 > 第一次跑请同步对照 [`examples/dwcmshc-walkthrough.md`](../examples/dwcmshc-walkthrough.md)——它是这份流程的完整实例。
 
 ```
-P0 采集 → P1 分析 → P2 映射 → P3 生成 → P4 缺口报告 → P4.5 需求 issue → P5 集成校验 → P6 带机校验/triage → P7 经验沉淀
+P0 采集 → P1 分析 → P2 映射(+scan 报告草稿) → P2.5 blocker 决策门 → P3 生成 → P4 缺口报告(补全草稿) → P4.5 需求 issue(实现期跟踪) → P5 集成校验 → P6 带机校验/triage → P7 经验沉淀
 ```
 
 ---
@@ -67,9 +67,42 @@ P0 采集 → P1 分析 → P2 映射 → P3 生成 → P4 缺口报告 → P4.5
    - 若 gaps 已列该子系统 → 按其"替代"方案处理，标阻塞程度，归入"缺口"。
    - 若 gaps 未列 → 按 [gaps.md 判断框架](../knowledge/gaps.md#判断框架) 定级，自己补一条缺口（现状"项目未找到实现"）。
 4. 对寄存器序列：标注哪些位操作可直接翻译、哪些依赖缺失子系统（如"这步 `clk_set_rate` 决定频率，无 clk 框架→TODO"）。
-5. **撞到位段/协议常量**（SCMI header、寄存器位段等）：位段定义写进 `data/bitfield-defs.json`（附 GENMASK 依据），跑 `ldp check-bitfields` 守护——它能揪出"用全零字段(VERSION)验证位段"这类假阳性。绝不凭记忆写位段（铁律 1/2）。
+5. **撞到位段/协议常量**（SCMI header、寄存器位段等）：位段定义写进 `data/bitfield-defs.json`（每字段 `ref_symbol` + `claim{lsb,msb}`，锚到 `references.json` 注册的本地参考树），跑 `ldp check-layout` 守护——它从钉死的参考机械导出位段真值 diff 你的 `claim`，抓"从参考抄错"。绝不凭记忆写位段（铁律 1/2）。
+6. **跑缺口扫描 + 先出报告**：`ldp scan <Linux源码路径> --report <name>-gap-report.md`——报告草稿
+   在生成代码**之前**落盘（「先报告、后生成」），不是 P4 事后补。
+7. **过 blocker 决策门**：`ldp scan <Linux源码路径> --gate`——命中的可阻塞缺口（严重度模型含
+   blocker/conditional）必须先有**已决策**的需求 issue（见下方「P2.5 决策门」）。退出 1 = 还有缺口
+   没决策，**不得进入 P3 写代码**。
 
 **产出**：两份清单——「已映射 API」（Linux→x-kernel 对应表）+「缺口」（子系统/用法/处置）。
+
+### P2.5 — blocker 决策门（先报告、后生成）
+
+**目标**：让"scan 发现有缺口"这件事在写代码之前就变成一次显式的人工决策，
+堵住"先写 stub、报告后补、甚至补成对代码的事后解释"的假成功路径。
+
+**判据**：缺口按严重度模型分两类——
+
+- **可阻塞缺口**（`severity`/`dimensions`/`severity_branches` 含 `blocker` 或 `conditional`，
+  或未声明严重度；`ldp scan` 的「严重度模型」列会显示）：必须先决策才能生成代码。
+- **明确非阻塞缺口**（纯 `works-around`/`optional`，如 regmap/pinctrl/workqueue）：不触发门，
+  按 gaps.json 的 workaround 处置直接进入 P3。
+
+**步骤**：
+
+```bash
+ldp scan <Linux源码路径> --report <name>-gap-report.md   # ① 草稿落盘(含「阻塞项汇总」)
+ldp requirements gen --from-scan <Linux源码路径>          # ② 每个缺口生成需求 issue
+ldp requirements show <id>                                 # ③ 审阅:背景/实现路径/验收标准
+ldp requirements confirm <id> --status confirmed           # ④ 人工决策:决定实现
+# 或明确接受"该驱动当前不可用":confirm --status rejected,并在报告里标注
+ldp scan <Linux源码路径> --gate                            # ⑤ 门通过(退出 0)才进 P3
+```
+
+> 决策对象是**跨 port 的需求 backlog**（这个缺口要不要实现、怎么实现），不是"本驱动要不要绕过"。
+> conditional 分支（如 clk-rate 的 rate_resolvable vs provider_unavailable）由你按本驱动的实际
+> 用法判定：判定为 works-around 时同样要生成 issue 并 confirm/reject 留档，避免"看起来合理就
+> 静默绕过"。`--gate` 只查"缺口有没有决策"，不替你判断分支。
 
 > **经验沉淀（Ch8）**：撞到 `ldp lookup` 未命中的 API 或缺口子系统用法时，跑
 > `ldp trace add <port-name> --kind <lookup-miss|gap> --linux <符号> --note '<上下文>'`
@@ -82,6 +115,9 @@ P0 采集 → P1 分析 → P2 映射 → P3 生成 → P4 缺口报告 → P4.5
 ## Phase 3 — 生成（Generate）
 
 **目标**：按骨架写出 Rust 代码。**铁律 1 + 3**。
+
+> ⚠ **前置条件**：P2.5 决策门已通过（`ldp scan <源码> --gate` 退出 0）。可阻塞缺口未决策时
+> 不得开始生成——先补决策，否则写出来的 stub 大概率是白费，还容易把报告带偏。
 
 **步骤**（按 [`driver-skeleton.md`](../templates/driver-skeleton.md) 填空）：
 1. **硬件逻辑层** `drivers/<class>/src/<name>.rs`：
@@ -101,20 +137,22 @@ P0 采集 → P1 分析 → P2 映射 → P3 生成 → P4 缺口报告 → P4.5
 ## Phase 4 — 缺口报告（Report）
 
 **目标**：把 P2 的缺口清单 + P3 的处置，整理成给人看的报告。**铁律 4**。
+报告草稿已在 P2 由 `ldp scan --report` 落盘——**P4 是往草稿里填证据，不是从零写**：
+逐条处置（具体到改了哪段代码）、P3 的"编号步骤→代码位置"对照表、P5/P6 的集成与真机结论。
 
 **步骤**：按 [`gap-report.md`](../templates/gap-report.md) 填：
 1. 头部（compatible、DeviceKind、落点、移植结论）。
-2. 依赖子系统清单（勾选有无）。**跑 `ldp scan <Linux源码路径>` 自动揪出这份驱动用到的、且当前是缺口的子系统符号**，确保不漏报（铁律 4 的自动化）。
+2. 依赖子系统清单（勾选有无）——草稿已按 `ldp scan` 命中自动填好，确认无漏报（铁律 4 的自动化）。
 3. 逐条缺口表（子系统 / 阻塞程度 / Linux 用法 / x-kernel 处置 / 建议）——"处置"必须具体到改了哪段代码。
 4. blocker 汇总 + 可编译性结论 + 后续行动优先级。
 
 **产出**：`<name>-gap-report.md`（建议放 `docs/ai/skills/linux-driver-port/examples/` 旁或驱动目录）。
 
-### P4.5 — 缺口转需求 issue（决策门）
+### P4.5 — 缺口转需求 issue（机制与实现期跟踪）
 
-**目标**：把 P4 发现的缺口，尤其 blocker，转成**可决策的需求 issue**——每个缺口一个 md，
-给出分类 + 实现路径 + 验收标准，等人工确认后再进 P5。这避免了"撞到 blocker 就静默 stub
-或凭记忆硬写"。
+**目标**：把缺口转成**可决策的需求 issue**——每个缺口一个 md，给出分类 + 实现路径 + 验收标准。
+**决策门本身已前移到 P2.5（生成代码之前）**，本节保留完整命令说明，并覆盖实现期间的状态跟踪
+（`in-progress` / `landed` / `rejected`）。
 
 **步骤**：
 
@@ -131,9 +169,10 @@ ldp requirements confirm <id> --status confirmed   # 人工确认
 ```
 
 **判据**：
-- **blocker 缺口无替代** → 必须生成需求 issue 并获 confirmed，才能进 P5（否则驱动不可用，
-  P5 没意义）。或人工明确接受"该驱动当前内核不可用"，在 gap-report 标注。
-- **works-around 缺口** → 可继续 P5（有限制），需求 issue 照生成供后续补全。
+- **blocker 缺口无替代** → 必须生成需求 issue 并获 confirmed（或明确接受"该驱动当前不可用"，
+  标 rejected），**才能进入 P3 生成代码**——否则写 stub 是白费，还容易假成功。`ldp scan <源码> --gate`
+  是这道门的机械检查。
+- **works-around 缺口** → 可进入 P3（有限制），需求 issue 照生成供后续补全。
 - **分类不对** → 编辑 `data/gaps.json` 对应 subsystem 的 `infra_type` 字段，重新 gen。
 
 **产出**：`data/requirements/` 下若干 issue md + `index.json`（状态机：
@@ -273,6 +312,6 @@ ldp staging promote --id <id>  # 门槛检查 → 标 promoted + 打印入库指
 - **凭印象写 x-kernel API**：把 `devm_ioremap` 写成不存在的 `ioremap`。**每条都查表/查源码**（铁律 2）。
 - **悄悄 stub blocker**：把 `phy_power_on` 删掉当没事。**gap-report 必须写明**（铁律 4）。
 - **改了硬件序列**：自作主张合并/省略寄存器步骤或改延时。**照搬**（铁律 1）。
-- **凭记忆写位段/协议格式常量**：把 SCMI 消息头的 `message_id`/`token` 位段记反（应 `message_id[7:0]`、`token[27:18]`），编得过、还可能恰好跑通。**即使记得也要打开 Linux 源码逐位核对；优先抄参考实现的掩码**（铁律 1/2 延伸，详见 SKILL.md"协议/位段常量纪律"）。源码本地没有（`drivers/*` 内部 .h/.c）时联网取或标 `UNVERIFIED`，不得静默凭记忆落地。位段定义进 `data/bitfield-defs.json`，`ldp check-bitfields` 会守护（含已知错误布局的 false-pass 检测）。
-- **拿全零字段当基线验证位段**：SCMI `VERSION`（`msg=0`/`token=0`）位段错也照样通——用它"验证 header 编码对"是假阳性。**验证位段必须用非零字段**（见 §6.5）。`ldp check-bitfields` 会把 VERSION 这类标为文档化 false-pass。
+- **凭记忆写位段/协议格式常量**：把 SCMI 消息头的 `message_id`/`token` 位段记反（应 `message_id[7:0]`、`token[27:18]`），编得过、还可能恰好跑通。**即使记得也要打开 Linux 源码逐位核对；优先抄参考实现的掩码**（铁律 1/2 延伸，详见 SKILL.md"协议/位段常量纪律"）。源码本地没有（`drivers/*` 内部 .h/.c）时联网取或标 `UNVERIFIED`，不得静默凭记忆落地。位段定义进 `data/bitfield-defs.json`（每字段锚 `ref_symbol`），`ldp check-layout` 从钉死参考机械导出真值 diff `claim` 守护。
+- **拿全零字段当基线验证位段**：SCMI `VERSION`（`msg=0`/`token=0`）位段错也照样通——用它"验证 header 编码对"是假阳性。**验证位段必须用非零字段**（见 §6.5）；VERSION 这类全零字段在 `bitfield-defs.json` 标 `distinguishes_layout:false`，`check-layout` 不拿它当布局判据。
 - **漏注册三连之一**：只写了 .rs 没加 feature，驱动根本不进镜像。**用骨架检查表逐项打钩**。

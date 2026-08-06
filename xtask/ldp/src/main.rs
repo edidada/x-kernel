@@ -13,8 +13,7 @@
 //!
 //! 用法见 `ldp help`。设计依据见 `docs/ai/skills/linux-driver-port/docs/design.md`。
 
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::{path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
 
@@ -111,10 +110,21 @@ enum Cmd {
 
     /// 在一份 Linux 源码(文件/目录)里扫出用到的、且当前是缺口的子系统符号。
     ///
-    /// 反例:scan 不改任何文件;它只提示「这些符号对应的缺口必须在报告里写明」。
+    /// 铁律 4(缺口必报)的数据化:命中即提示。加 `--report <out.md>` 直接产出
+    /// 缺口报告草稿(「先报告、后生成」的第一步);加 `--gate` 检查 blocker 决策门
+    /// —— 命中的可阻塞缺口若无已决策需求 issue,退出码 1,禁止进入代码生成。
+    ///
+    /// 反例:scan 不判断某缺口在本驱动里是否真是 blocker(conditional 需人工
+    /// 按实际用法选分支,记进需求 issue/报告);它只保证「缺口必须先有决策」。
     Scan {
         /// Linux 源码路径(文件或目录)。
         path: PathBuf,
+        /// 把命中结果渲染成缺口报告草稿并写到这个 markdown 路径。
+        #[arg(long)]
+        report: Option<PathBuf>,
+        /// 检查 blocker 决策门(存在未决策的可阻塞缺口即退出 1)。
+        #[arg(long)]
+        gate: bool,
     },
 
     /// 从 data/*.json 重新生成 knowledge/*.md(数据为源)。

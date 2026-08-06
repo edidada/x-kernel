@@ -125,19 +125,32 @@ pub fn add(
     Ok(())
 }
 
-/// 读一个 port 轨迹的全部事件。
-pub fn read(port: &str) -> Result<Vec<TraceEvent>, String> {
-    let path = trace_path(port)?;
-    let raw = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+/// 解析一个轨迹文件的内容:逐行反序列化,**坏行跳过并记 warning**(不连坐整文件)。
+/// 轨迹是不可变证据(Ch8 在线循环),一行损坏不该让整个 port 的证据被
+/// aggregate/staging 静默丢弃——那是错误的容错方向。
+fn parse_events(raw: &str) -> (Vec<TraceEvent>, Vec<String>) {
     let mut events = Vec::new();
+    let mut warnings = Vec::new();
     for (i, line) in raw.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let ev: TraceEvent = serde_json::from_str(line)
-            .map_err(|e| format!("{}:{} 解析失败: {e}", path.display(), i + 1))?;
-        events.push(ev);
+        match serde_json::from_str::<TraceEvent>(line) {
+            Ok(ev) => events.push(ev),
+            Err(e) => warnings.push(format!(":{} 解析失败(已跳过该行): {e}", i + 1)),
+        }
+    }
+    (events, warnings)
+}
+
+/// 读一个 port 轨迹的全部事件。坏行跳过 + warn(不 abort 整文件);文件不存在才 Err。
+pub fn read(port: &str) -> Result<Vec<TraceEvent>, String> {
+    let path = trace_path(port)?;
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let (events, warnings) = parse_events(&raw);
+    for w in &warnings {
+        eprintln!("WARN [trace] {}{w}", path.display());
     }
     Ok(events)
 }
@@ -188,5 +201,20 @@ mod tests {
         assert!(sanitize_port("../etc").is_err());
         assert!(sanitize_port("a/b").is_err());
         assert!(sanitize_port("a b").is_err());
+    }
+
+    #[test]
+    fn parse_events_skips_bad_lines_not_whole_file() {
+        // 一份混入坏行的轨迹:坏行应被跳过 + 记 warning,合法行照样返回。
+        // 旧行为是第一行坏数据就让整个文件 Err → aggregate 静默丢整个 port 的证据。
+        let raw = "{\"ts\":1,\"kind\":\"gap\",\"linux\":\"clk_get_rate\",\"note\":\"x\"}\n\
+                   not json at all\n\
+                   {\"ts\":2,\"kind\":\"lookup-miss\",\"linux\":\"foo\"}\n\
+                   {\"bad\": \"missing required fields\"}";
+        let (events, warnings) = parse_events(raw);
+        assert_eq!(events.len(), 2, "2 条合法事件必须保留");
+        assert_eq!(events[0].linux, "clk_get_rate");
+        assert_eq!(events[1].linux, "foo");
+        assert_eq!(warnings.len(), 2, "2 行坏数据各一条 warning");
     }
 }

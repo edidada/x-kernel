@@ -45,7 +45,7 @@ pub fn extract_c_symbol(src: &str, symbol: &str) -> Result<ExtractedC, String> {
             continue;
         };
         let body = if raw.trim_end().ends_with('\\') {
-            join_continuation(src, i)
+            join_continuation(body, src, i)
         } else {
             body.to_string()
         };
@@ -91,8 +91,11 @@ fn match_define<'a>(line: &'a str, symbol: &str) -> Option<&'a str> {
         return None;
     }
     let body = tail.trim_start();
-    // 函数宏 `NAME(args)`(NAME 与 `(` 紧贴)不适用位段 MASK,跳过。
-    if body.starts_with('(') && raw_head_symbol(t) == head {
+    // 函数宏 `NAME(args)`:NAME 与 `(` 之间无空白。判据是 t 里 head 之后紧跟 `(`,
+    // 而非 `body.starts_with('(')`——后者会把 `NAME (1 << n)` 这类带括号的对象宏
+    // 也误杀(body 已 trim 掉 head 与 `(` 之间的空白)。
+    let is_function_macro = t.as_bytes().get(sym_end) == Some(&b'(');
+    if is_function_macro && raw_head_symbol(t) == head {
         return None;
     }
     Some(body)
@@ -172,17 +175,26 @@ fn strip_c_comment(line: &str) -> &str {
     }
 }
 
-/// 把从 `start_line` 开始、以 `\` 续行的多行 define 拼成一行。
-fn join_continuation(src: &str, start_line: usize) -> String {
-    let mut out = String::new();
-    for raw in src.lines().skip(start_line) {
-        let t = raw.trim_start();
-        if let Some(stripped) = t.strip_suffix('\\') {
-            out.push_str(stripped.trim_end());
-            out.push(' ');
-        } else {
-            out.push_str(t.trim_end());
-            break;
+/// 把多行 `#define` 续行拼回一个 body 字符串。
+/// `first_body` 是首行 symbol 之后的文本(可能带尾 `\`,由 match_define 返回);
+/// 从 `start_line + 1` 起收集续行(逐行去尾 `\`)。
+///
+/// 注意:旧实现 `skip(start_line)` 把首行整行(含 `#define NAME`)也并进来,
+/// 导致 parse_genmask 因前缀不是 `GENMASK` 而失败 —— 多行 define 静默提取不到。
+fn join_continuation(first_body: &str, src: &str, start_line: usize) -> String {
+    let mut out = first_body.trim_end().trim_end_matches('\\').trim_end().to_string();
+    for raw in src.lines().skip(start_line + 1) {
+        let t = raw.trim();
+        match t.strip_suffix('\\') {
+            Some(stripped) => {
+                out.push(' ');
+                out.push_str(stripped.trim());
+            }
+            None => {
+                out.push(' ');
+                out.push_str(t);
+                break;
+            }
         }
     }
     out
@@ -599,5 +611,64 @@ const fn pack_header(protocol: u32, message: u32, token: u32) -> u32 {
         let (val, line) = try_const_scalar(src, "CTRL").unwrap();
         assert_eq!(val, 0);
         assert_eq!(line, 1);
+    }
+
+    #[test]
+    fn c_one_shift_form_parses() {
+        // `(1 << n)` 形态的位定义。
+        let src = "#define FOO (1 << 5)\n";
+        assert_eq!(
+            extract_c_symbol(src, "FOO").unwrap(),
+            ExtractedC::Span(ExtractedSpan {
+                name: "FOO".into(),
+                span: FieldSpan { lsb: 5, msb: 5 },
+                line: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn c_function_macro_is_skipped() {
+        // 函数宏 `NAME(args)` 不是位段 MASK,必须跳过(否则会把 (x) 当 body)。
+        let src = "#define FOO(x) ((x) << 1)\n#define BAR BIT(3)\n";
+        assert!(extract_c_symbol(src, "FOO").is_err(), "函数宏不应被当位段提取");
+        // 同名 symbol 后面有真正的位定义也照常取到。
+        assert_eq!(
+            extract_c_symbol(src, "BAR").unwrap(),
+            ExtractedC::Span(ExtractedSpan {
+                name: "BAR".into(),
+                span: FieldSpan { lsb: 3, msb: 3 },
+                line: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn c_multiline_genmask_parses() {
+        // 多行续行 define(内核 header 常见)。旧 join_continuation 会把 `#define NAME`
+        // 也并进来导致 parse_genmask 失败 —— 这里回归它。
+        let src = "#define BIG GENMASK(31, \\\n                   0)\n";
+        assert_eq!(
+            extract_c_symbol(src, "BIG").unwrap(),
+            ExtractedC::Span(ExtractedSpan {
+                name: "BIG".into(),
+                span: FieldSpan { lsb: 0, msb: 31 },
+                line: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn c_genmask_high_lt_low_errors() {
+        // high < low 的 GENMASK 非法,提取器应拒绝(fail-closed,不臆造布局)。
+        let src = "#define BAD GENMASK(3, 5)\n";
+        assert!(extract_c_symbol(src, "BAD").is_err());
+    }
+
+    #[test]
+    fn rust_missing_anchor_errors() {
+        // 驱动里没有该 anchor 时 fail-closed,不静默返回空。
+        let src = "pub const UNRELATED: u32 = 0;\n";
+        assert!(extract_rust_anchor(src, "pack_header").is_err());
     }
 }

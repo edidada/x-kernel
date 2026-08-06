@@ -196,12 +196,16 @@ pub fn promote_guidance(c: &Candidate) {
             );
         }
         "bitfield-pitfall" => {
-            println!("  → 加进 data/bitfield-defs.json 对应 def 的 known_wrong_layouts:");
+            println!("  → 按参考锚定范式加进 data/bitfield-defs.json(旧字段 known_wrong_layouts/verification_traces 已删):");
             println!(
-                "    · 附 {{desc, fields:[{{name,lsb,msb}}]}}(从 Linux 源码逐位核对 + GENMASK 依据)。"
+                "    · 新建或扩展 def:id / scope / ref{{tree,file}} / width;每个易错字段写 ref_symbol + claim{{lsb,msb}}。"
             );
             println!(
-                "    · 同时补一条 verification_traces,用**非零字段**(避免 VERSION 类 false-pass)。"
+                "    · ref.tree 必须是 references.json 注册的本地参考树;check-layout 从 ref_symbol 机械导出真值 diff claim。"
+            );
+            println!("    · 用**非零字段**做基线(别用 VERSION 类全零字段掩盖错误)。");
+            println!(
+                "    · 要同时比对驱动实际写法,填 driver_src{{path,anchor}}(const fn 位段打包 / const 1<<N / const 0xNN)。"
             );
         }
         other => println!("  (未知 kind `{other}`)"),

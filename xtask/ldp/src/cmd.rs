@@ -6,10 +6,10 @@
 
 use std::process::ExitCode;
 
-use crate::Cmd;
-use crate::data::BitfieldDefs;
-use crate::{RefAction, RequirementsAction, StagingAction, TraceAction};
-use crate::{data, gendoc, golden, layout, query, references, repo, requirements, staging, trace, validate};
+use crate::{
+    Cmd, RefAction, RequirementsAction, StagingAction, TraceAction, data, data::BitfieldDefs,
+    gendoc, golden, layout, query, references, repo, requirements, staging, trace, validate,
+};
 
 /// 主动工具发现:打印每个子命令的用途 + 边界(反例)+ 示例。
 pub fn help() {
@@ -25,17 +25,29 @@ pub fn help() {
     println!("  check-data               数据完整性(JSON/source.path/字段)。fail-closed。");
     println!("                           不验位段布局;布局用 check-layout。");
     println!("  ref list/check           参考树注册表(本地 Linux/U-Boot 源码)。fail-closed。");
-    println!("                           必须本地目录(拒绝 web search);vendor 方法见 data/references/README.md。");
+    println!(
+        "                           必须本地目录(拒绝 web search);vendor 方法见 \
+         data/references/README.md。"
+    );
     println!("  check-layout [--port]    布局声明 ↔ 参考真值(以及可选驱动代码)。fail-closed。");
-    println!("                           从钉死参考机械导出位段,diff claim;取代旧 check-bitfields 自指范式。");
+    println!(
+        "                           从钉死参考机械导出位段,diff claim;取代旧 check-bitfields \
+         自指范式。"
+    );
     println!("                           旧 check-bitfields 为兼容别名(转发)。",);
     println!(
         "  check-provider-crate <f> 机械查 provider crate 的 OS-agnostic 红线(不得依赖 k*/of)。"
     );
     println!(
-        "                           只查依赖红线;trait 完整性/注册表可注入是设计判断,走需求 issue。"
+        "                           只查依赖红线;trait 完整性/注册表可注入是设计判断,走需求 \
+         issue。"
     );
-    println!("  scan <path>              扫一份 Linux 源码里用到的缺口符号。只提示不改文件。");
+    println!("  scan <path> [--report <out.md>] [--gate]  扫源码命中缺口符号(信息输出)。");
+    println!("                           --report 直接产出缺口报告草稿(先报告、后生成的第一步);");
+    println!(
+        "                           --gate 检查 blocker 决策门:可阻塞缺口无已决策需求 issue \
+         即退出 1。"
+    );
     println!("  gen-doc                  从 data/*.json 生成 knowledge/*.md(数据为源)。");
     println!("                           不改 JSON;真相源在 JSON。");
     println!("  golden [name]            跑 golden 回归(walkthrough 断言对照数据)。");
@@ -51,7 +63,9 @@ pub fn help() {
     println!("  ldp lookup readl");
     println!("  ldp gaps --status missing");
     println!("  ldp check-bitfields");
-    println!("  ldp scan drivers/mmc/host/sdhci-of-dwcmshc.c");
+    println!(
+        "  ldp scan drivers/mmc/host/sdhci-of-dwcmshc.c --report dwcmshc-gap-report.md --gate"
+    );
     println!("  ldp golden dwcmshc");
     println!("  ldp gen-doc");
     println!(
@@ -65,7 +79,7 @@ pub fn help() {
     println!("五条铁律里有四条已被 ldp 变成会失败的检查:");
     println!("  铁律2 不编造 API   → check-data(source.path 必须存在)");
     println!("  铁律1/2 位段忠实   → check-layout(从钉死参考机械导出位段,diff claim/驱动)");
-    println!("  铁律4 缺口必报     → scan(源码里用到的缺口符号强制提示)");
+    println!("  铁律4 缺口必报     → scan --report(草稿落盘)+ --gate(blocker 未决策即失败)");
     println!("  数据/文档一致性    → golden + gen-doc(walkthrough 不漂移,md 不手改)");
     println!("  经验沉淀           → trace + staging(≥2 条轨迹支持才发布,Ch8 进化闭环)");
 }
@@ -86,6 +100,15 @@ pub fn run(cmd: Cmd) -> ExitCode {
             }
         }),
         Cmd::Gaps { status, id } => with_data(|_api, gaps, _bf| {
+            if let Some(st) = status.as_deref()
+                && !validate::is_valid_gap_status(st)
+            {
+                eprintln!(
+                    "error: --status `{st}` 无效,应为 {:?}(拼写错误会静默返回空结果)",
+                    validate::GAP_STATUSES
+                );
+                return 1;
+            }
             query::list_gaps(&gaps, status.as_deref(), id.as_deref());
             0
         }),
@@ -97,17 +120,67 @@ pub fn run(cmd: Cmd) -> ExitCode {
             // 兼容别名:旧 check-bitfields 的自指逻辑已删除,转发到 check-layout。
             with_data(move |_api, _gaps, bf| layout::check_layout(&bf, port.as_deref()))
         }
-        Cmd::Scan { path } => {
-            with_data(
-                |_api, gaps, _bf| match validate::scan_source(&gaps, &path) {
-                    Ok(()) => 0,
+        Cmd::Scan { path, report, gate } => with_data(|_api, gaps, _bf| {
+            let mut failed = 0usize;
+            // 1) 信息输出(命中提示;原有行为)。
+            let res = match validate::scan_hits(&gaps, &path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return 1;
+                }
+            };
+            validate::print_scan_result(&res);
+            // 2) 缺口报告草稿:先报告(P2 就落盘,不是 P4 事后补)。
+            if let Some(out) = &report {
+                match validate::render_report_draft(&res, &path, out) {
+                    Ok(()) => println!("已写缺口报告草稿 → {}", out.display()),
                     Err(e) => {
                         eprintln!("error: {e}");
-                        1
+                        failed += 1;
                     }
-                },
-            )
-        }
+                }
+            }
+            // 3) blocker 决策门:后生成(P2→P3 边界;未决策退出 1)。
+            if gate {
+                match requirements::findings_from_scan(&gaps, &path) {
+                    Ok(findings) => {
+                        let blocks = requirements::gate_blockers(&gaps, &findings);
+                        if blocks.is_empty() {
+                            println!("✓ 决策门通过:命中的可阻塞缺口均有已决策需求 issue。");
+                        } else {
+                            failed += 1;
+                            println!(
+                                "✗ 决策门未通过:{} 个可阻塞缺口尚无决策(先报告、后生成):",
+                                blocks.len()
+                            );
+                            for b in &blocks {
+                                let st = b
+                                    .req_status
+                                    .as_deref()
+                                    .map(|s| format!("(现状:{s})"))
+                                    .unwrap_or_else(|| "(无需求 issue)".to_string());
+                                println!("  - {} `{}` 命中 {} {st}", b.name, b.gap_id, b.symbol);
+                                println!(
+                                    "    下一步:ldp requirements gen --from-scan <路径> && ldp \
+                                     requirements confirm <id> --status confirmed"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        failed += 1;
+                    }
+                }
+            } else if !res.hits.is_empty() {
+                println!(
+                    "  (提示:加 --report <draft.md> 直接产出缺口报告草稿;加 --gate 检查 blocker \
+                     决策门)"
+                );
+            }
+            if failed > 0 { 1 } else { 0 }
+        }),
         Cmd::CheckProviderCrate { path } => {
             let n = validate::check_provider_crate(&path);
             if n == 0 {
@@ -225,7 +298,8 @@ fn run_trace(action: TraceAction) -> ExitCode {
                         .unwrap_or_default();
                     println!("已追加 → {p}");
                     println!(
-                        "  (轨迹不可变;发布进正式 data/ 需 `ldp staging aggregate && ldp staging promote`)"
+                        "  (轨迹不可变;发布进正式 data/ 需 `ldp staging aggregate && ldp staging \
+                         promote`)"
                     );
                     ExitCode::SUCCESS
                 }
@@ -415,7 +489,8 @@ fn run_requirements(action: RequirementsAction) -> ExitCode {
                         requirements::requirements_dir().display()
                     );
                     println!(
-                        "下一步:`ldp requirements list` 看全部,`ldp requirements confirm <id> --status confirmed` 人工确认。"
+                        "下一步:`ldp requirements list` 看全部,`ldp requirements confirm <id> \
+                         --status confirmed` 人工确认。"
                     );
                     ExitCode::SUCCESS
                 }

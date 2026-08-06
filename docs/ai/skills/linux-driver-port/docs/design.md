@@ -44,15 +44,16 @@ linux-driver-port skill 把"以 Linux C 驱动为蓝本,翻译成 x-kernel Rust 
 │   每条映射带 source 证据 + keywords 检索前缀;gaps 带 status 状态机│
 ├─────────────────────────────────────────────────────────────────┤
 │ 工具支柱    ldp CLI(整合的多子命令,不拆成一堆独立工具)          │
-│   lookup/gaps/summary/check-data/check-bitfields/scan/gen-doc/   │
-│   golden。返回结构化候选 + 显式截断;description 含反例            │
+│   lookup/gaps/summary/check-data/check-layout/scan/gen-doc/      │
+│   golden/ref/trace/staging/requirements。结构化候选 + 显式截断    │
 ├─────────────────────────────────────────────────────────────────┤
 │ 约束支柱    fail-closed 默认:                                    │
-│   check-data(source.path 必须存在)、check-bitfields(位段自洽)、 │
-│   scan(用到的缺口符号强制提示入报告)                             │
+│   check-data(source.path/位段锚存在/重复 id)、check-layout(位段  │
+│   ↔ 参考真值)、scan --report(缺口报告草稿落盘,先报告)+ --gate   │
+│   (可阻塞缺口未决策即失败,后生成)                                │
 ├─────────────────────────────────────────────────────────────────┤
 │ 验证支柱    golden 回归(walkthrough 断言 ↔ 当前数据)、           │
-│   check-bitfields(false-pass 检测)、gen-doc 幂等                 │
+│   check-layout(位段 ↔ 参考漂移检测)、gen-doc 幂等               │
 ├─────────────────────────────────────────────────────────────────┤
 │ 纠正支柱    trace(不可变轨迹)+ staging(候选区 + 门槛发布)。     │
 │   promote fail-closed(支持<2/重复/状态错);并入 data/ 后靠       │
@@ -230,7 +231,15 @@ ldp trace add → trace/*.jsonl  ldp staging aggregate → staging/candidates.js
 
 ## 需求决策(Requirements)
 
-把"发现缺口"从"记下来"升级为"可决策的需求 issue"。这是工作流 P4.5 的落地。
+把"发现缺口"从"记下来"升级为"可决策的需求 issue"。这是工作流 P2.5/P4.5 的落地。
+
+**决策门前移到生成代码之前(先报告、后生成)。** 早期版本的门在 P4.5(生成代码之后、
+集成之前),实践暴露的问题:scan 发现 blocker 后仍然先写 stub/TODO 代码、报告后补,
+报告容易变成"对已写代码的事后解释",甚至假成功。现改为 P2 由
+`ldp scan <源码> --report <草稿>` 直接落盘缺口报告草稿,`ldp scan <源码> --gate`
+检查可阻塞缺口(严重度模型含 blocker/conditional)是否已有**已决策**的需求 issue
+(confirmed/in-progress/landed/rejected);未决策即退出 1,禁止进入代码生成。
+works-around 缺口不触发门,按 gaps.json 的 workaround 处置直接进入生成。
 
 ```
 scan/trace 发现缺口
@@ -298,5 +307,6 @@ multi-provider"的滑坡。五判据(物理基础设施 / 多生产者 / 消费�
 - [ ] `knowledge/api-mapping.md`/`gaps.md` 顶部有生成 banner,未被手改?
 - [ ] port 过程撞到缺口/未映射 API,用 `ldp trace add` 记轨迹了?
 - [ ] 发布候选前 `ldp staging aggregate && review`,确认 ≥2 支持再 `promote`?
-- [ ] blocker 缺口用 `ldp requirements gen --from-scan` 生成需求 issue 并人工 `confirm` 了?
+- [ ] 生成代码前,`ldp scan <源码> --report <草稿> --gate` 过了?(可阻塞缺口已
+      gen + confirm/reject,报告草稿已落盘)
 - [ ] 新缺口的 `infra_type` 分类正确?(不对应 gaps.json,重新 gen 验证)

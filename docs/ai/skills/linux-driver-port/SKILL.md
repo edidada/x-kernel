@@ -27,7 +27,7 @@ description: >-
 | 铁律 | 散文 | ldp 怎么强制 |
 |------|------|-------------|
 | 1 硬件/协议是真相 | ✓ | `ldp check-layout` 从参考机械导出布局,diff claim || 2 绝不编造 API/位段 | ✓ | `ldp check-data`(source.path 必须在仓库存在)+ `check-layout` + `ref check` |
-| 4 缺口必报、不静默绕过 | ✓ | `ldp scan <源码>` 揪出用到的缺口符号,强制提示入报告 |
+| 4 缺口必报、不静默绕过 | ✓ | `ldp scan <源码> --report <草稿>` 直接产出缺口报告草稿(先报告);`--gate` 在可阻塞缺口未决策时失败(后生成) |
 | (数据/文档一致性) | — | `ldp golden`(walkthrough 断言对照数据)+ `ldp gen-doc`(md 由 JSON 生成) |
 | (经验沉淀,Ch8) | — | `ldp trace`(记轨迹)+ `staging`(≥2 支持才发布,不污染正式库) |
 | (需求决策) | — | `ldp requirements`(缺口→分类→需求 issue,人工确认后再移植) |
@@ -44,7 +44,9 @@ ldp gaps --status missing   # 列缺失子系统
 ldp check-data              # 校验数据完整性(fail-closed)
 ldp ref check                # 校验本地参考树就位(fail-closed,拒绝 web search)
 ldp check-layout             # 布局声明 ↔ 参考真值(以及驱动代码)(fail-closed)
-ldp scan drivers/mmc/host/sdhci-of-dwcmshc.c   # 扫源码用到的缺口符号
+ldp scan drivers/mmc/host/sdhci-of-dwcmshc.c \
+  --report docs/ai/skills/linux-driver-port/examples/dwcmshc-gap-report.md --gate
+# 扫源码 → 报告草稿落盘(先报告)→ blocker 决策门(未决策退出 1,禁止先写代码)
 ldp golden dwcmshc          # 跑 golden 回归(walkthrough 断言 vs 当前数据)
 ldp gen-doc                 # 从 data/*.json 重生成 knowledge/*.md
 
@@ -60,6 +62,8 @@ ldp requirements confirm req-clk-framework --status confirmed
 ```
 
 > 没装 `ldp` 到 PATH 时,直接 `cargo run --manifest-path xtask/Cargo.toml -p ldp -- <子命令>`。
+
+> 完整命令参考、数据格式、验证门与已知坑见 [`docs/ldp-usage.md`](docs/ldp-usage.md)。
 
 ## 五条铁律(决定产出质量,必须遵守)
 
@@ -108,6 +112,7 @@ knowledge/                     ← 生成物(ldp gen-doc 产出,勿手改)
 | `ldp lookup` / [`knowledge/api-mapping.md`](knowledge/api-mapping.md) | Phase 2 映射时 | **★ 核心**:Linux API → x-kernel API 分类映射表(数据为源) |
 | `ldp gaps` / [`knowledge/gaps.md`](knowledge/gaps.md) | 撞到缺失子系统时 | **★ 核心**:已知缺失子系统清单 + 现状 + 替代方案(数据为源) |
 | [`knowledge/clk-subsystem.md`](knowledge/clk-subsystem.md) | 撞 clk / `clk_get_rate` 时 | Tier-0 clk 框架分层 + 消费者用法 + SCMI header 位段坑 |
+| [`docs/ldp-usage.md`](docs/ldp-usage.md) | 跑命令/维护数据/过验证门时 | ldp CLI 详细使用说明:命令参考、数据格式、工作流、退出码与坑 |
 | [`templates/driver-skeleton.md`](templates/driver-skeleton.md) | Phase 3 生成代码时 | 标准 Rust 驱动骨架(可直接填空) |
 | [`templates/gap-report.md`](templates/gap-report.md) | Phase 4 写报告时 | 缺口报告固定格式 |
 | [`workflow/port-workflow.md`](workflow/port-workflow.md) | 贯穿全程 | Phase 0–6 详解(P6=真机带机校验/triage) |
@@ -116,14 +121,15 @@ knowledge/                     ← 生成物(ldp gen-doc 产出,勿手改)
 ## 工作流一览(详见 `workflow/port-workflow.md`)
 
 ```
-P0 采集 → P1 分析 → P2 映射 → P3 生成 → P4 缺口报告 → P5 集成校验 → P6 带机校验/triage → P7 经验沉淀
+P0 采集 → P1 分析 → P2 映射(+scan 报告草稿) → P2.5 blocker 决策门 → P3 生成 → P4 缺口报告(补全草稿) → P5 集成校验 → P6 带机校验/triage → P7 经验沉淀
 ```
 
 - **P0 采集**:确定 Linux 源文件路径、目标 `compatible`、`DeviceKind`/总线、x-kernel 落点。
 - **P1 分析**:通读 Linux 驱动,产出"驱动画像" + **编号参考序列清单**(钉死在一个来源:U-Boot 或 Linux)。
-- **P2 映射**:逐条 Linux API 跑 `ldp lookup`(命中记替换) / `ldp scan`(揪缺口符号)。
+- **P2 映射**:逐条 Linux API 跑 `ldp lookup`(命中记替换) / `ldp scan --report`(揪缺口符号 + 报告草稿落盘)。
+- **P2.5 blocker 决策门**:可阻塞缺口(严重度模型含 blocker/conditional)先生成需求 issue 并人工决策,`ldp scan <源码> --gate` 退出 0 才允许生成代码。
 - **P3 生成**:按骨架生成硬件逻辑层 + 胶水层 + 注册三连;硬件序列忠实翻译 + 可追溯校验。
-- **P4 缺口报告**:按模板产出,标阻塞程度。`ldp scan` 的结果填进报告。
+- **P4 缺口报告**:往 P2 的草稿里填证据(逐条处置、参考序列对照表、集成结论),标阻塞程度。
 - **P5 集成校验**:改 `firmware_specs.rs`/`<bus>/mod.rs`/`Cargo.toml`;按 `build-workflow` 跑 build + clippy。**编译过≠可用**。
 - **P6 带机校验/triage**:加错误路径可观测性;真机跑通该设备类的代表操作。**P6 没过 = 驱动不可用**。
 - **P7 经验沉淀(Ch8)**:`ldp trace` 记撞墙点,`ldp staging` 把 ≥2 支持的候选沉淀进正式知识库。

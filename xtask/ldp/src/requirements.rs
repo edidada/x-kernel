@@ -11,15 +11,18 @@
 //! 不同缺口的补法天差地别(clk 要多 provider 注册表,i2c 要新 DeviceKind,
 //! 单纯驱动缺失直接写代码),需求文档必须给出对应路径才能"等人工确认"。
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use serde::{Deserialize, Serialize};
 
-use crate::data::{GapSubsystem, Gaps};
-use crate::repo;
-use crate::trace;
+use crate::{
+    data::{GapSubsystem, Gaps},
+    repo, trace,
+};
 
 /// 有效的 infra_type 取值。
 pub const INFRA_TYPES: &[&str] = &[
@@ -77,7 +80,7 @@ pub struct Index {
     pub requirements: Vec<Requirement>,
 }
 
-fn load_index() -> Index {
+pub fn load_index() -> Index {
     repo::read_json::<Index>(&index_path()).unwrap_or_default()
 }
 
@@ -117,46 +120,19 @@ pub struct Finding {
 
 /// 从 scan 结果构造 findings。返回的每条对应一个要生成 issue 的缺口。
 pub fn findings_from_scan(gaps: &Gaps, path: &Path) -> Result<Vec<Finding>, String> {
-    // 复用 validate::scan 的扫描逻辑:读源码,找命中的 gap symbols。
-    let mut files = Vec::new();
-    collect_source_files(path, &mut files)?;
-    if files.is_empty() {
-        return Err(format!("`{}` 下没有 .c/.h 文件", path.display()));
-    }
-    let mut corpus = String::new();
-    for f in &files {
-        if let Ok(s) = std::fs::read_to_string(f) {
-            corpus.push_str(&s);
-        }
-    }
+    // 复用 validate::scan_hits 的扫描逻辑(同一份命中,避免两处字面匹配漂移)。
+    let res = crate::validate::scan_hits(gaps, path)?;
     let source = format!("scan:{}", path.display());
-    let mut findings = Vec::new();
-    let mut seen: BTreeMap<String, &GapSubsystem> = BTreeMap::new();
-    for g in &gaps.subsystems {
-        if g.symbols.iter().any(|s| corpus.contains(s.as_str())) {
-            // 按 gap 聚合(同一 gap 的多个 symbol 命中只产一个 issue)。
-            let hits: Vec<&String> = g
-                .symbols
-                .iter()
-                .filter(|s| corpus.contains(s.as_str()))
-                .collect();
-            let note = format!(
-                "命中符号: {}",
-                hits.iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            seen.entry(g.id.clone()).or_insert(g);
-            findings.push(Finding {
-                gap_id: g.id.clone(),
-                symbol: hits[0].clone(),
-                source: source.clone(),
-                note,
-            });
-        }
-    }
-    Ok(findings)
+    Ok(res
+        .hits
+        .into_iter()
+        .map(|h| Finding {
+            gap_id: h.gap.id.clone(),
+            symbol: h.hits[0].clone(),
+            source: source.clone(),
+            note: format!("命中符号: {}", h.hits.join(", ")),
+        })
+        .collect())
 }
 
 /// 从一个 port 的轨迹构造 findings(trace 里 kind=lookup-miss/gap 的)。
@@ -186,37 +162,6 @@ pub fn findings_from_trace(port: &str) -> Result<Vec<Finding>, String> {
         }
     }
     Ok(by_gap.into_values().collect())
-}
-
-fn collect_source_files(path: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    if path.is_file() {
-        if let Some(e) = path.extension()
-            && (e == "c" || e == "h")
-        {
-            out.push(path.to_path_buf());
-        }
-        return Ok(());
-    }
-    if !path.is_dir() {
-        return Err(format!("`{}` 不是文件也不是目录", path.display()));
-    }
-    for entry in std::fs::read_dir(path).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let p = entry.path();
-        if p.is_dir() {
-            if let Some(name) = p.file_name().and_then(|n| n.to_str())
-                && matches!(name, ".git" | "Documentation" | "tools" | "samples")
-            {
-                continue;
-            }
-            collect_source_files(&p, out)?;
-        } else if let Some(e) = p.extension()
-            && (e == "c" || e == "h")
-        {
-            out.push(p);
-        }
-    }
-    Ok(())
 }
 
 /// 稳定的 issue id(幂等:同 gap_id+symbol 多次 gen 不变)。
@@ -415,8 +360,14 @@ fn write_issue_md(
     out.push_str("---\n\n");
     out.push_str("> **人工确认流程**:审查本文件 → `ldp requirements confirm ");
     out.push_str(&req.id);
-    out.push_str("` 标 `confirmed` → 进入实现 → 实现后把对应 gaps.json 条目的 `status` 改 `landed` 并跑 `ldp check-data && gen-doc`。\n");
-    out.push_str("> 分类若不对,编辑 `data/gaps.json` 对应 subsystem 的 `infra_type` 字段后重新 `ldp requirements gen`。\n");
+    out.push_str(
+        "` 标 `confirmed` → 进入实现 → 实现后把对应 gaps.json 条目的 `status` 改 `landed` 并跑 \
+         `ldp check-data && gen-doc`。\n",
+    );
+    out.push_str(
+        "> 分类若不对,编辑 `data/gaps.json` 对应 subsystem 的 `infra_type` 字段后重新 `ldp \
+         requirements gen`。\n",
+    );
 
     // 幂等:内容不变不写。
     if std::fs::read_to_string(&path).unwrap_or_default() == out {
@@ -523,45 +474,42 @@ fn render_verdict(v: &str) -> String {
 fn impl_path_template(infra: &str, _gap: Option<&GapSubsystem>) -> &'static str {
     match infra {
         "multi-provider" => {
-            "按 clk 模式(provider 模式):\n\
-             1. 定义 `Provider` trait(核心操作,如 `get_rate`/`enable`/`set_rate`)。\n\
-             2. 建 **phandle 键的多 provider 注册表**(`SpinNoIrq<Vec<(u32, Arc<dyn Provider>)>>`),\n\
-             \t因为这类子系统有多个生产者(多个 controller/PHY/regulator)。\n\
-             3. consumer API 走 device-res 形式:`devm_get(device, name)`,总线把 DT\n\
-             \t(`clocks`/`resets`/`phys`/`*-supply`)预解析成 `ResourceDesc` 变体,驱动不碰 DT。\n\
-             4. DT 解析放总线层(`khal::firmware::devices`),平台 provider 在 `early_driver_init` 注册。\n\
-             5. 参考:`drivers/clk/`(Tier-0 实现)。\n\n\
-             > 这是工作量最大的一类(约 1-2k 行),因为它要建一整套 provider/consumer 框架。\n"
+            "按 clk 模式(provider 模式):\n1. 定义 `Provider` trait(核心操作,如 \
+             `get_rate`/`enable`/`set_rate`)。\n2. 建 **phandle 键的多 provider \
+             注册表**(`SpinNoIrq<Vec<(u32, Arc<dyn \
+             Provider>)>>`),\n\t因为这类子系统有多个生产者(多个 controller/PHY/regulator)。\n3. \
+             consumer API 走 device-res 形式:`devm_get(device, name)`,总线把 \
+             DT\n\t(`clocks`/`resets`/`phys`/`*-supply`)预解析成 `ResourceDesc` 变体,驱动不碰 \
+             DT。\n4. DT 解析放总线层(`khal::firmware::devices`),平台 provider 在 \
+             `early_driver_init` 注册。\n5. 参考:`drivers/clk/`(Tier-0 实现)。\n\n> \
+             这是工作量最大的一类(约 1-2k 行),因为它要建一整套 provider/consumer 框架。\n"
         }
         "single-provider" => {
-            "按 device-res/dma 模式(单全局 provider):\n\
-             1. 定义 `Provider` trait。\n\
-             2. 用单全局 provider(`Once<&dyn Provider>`),因为这类子系统整个系统只有一个后端\n\
-             \t(如 DMA、MMIO 映射方式)。\n\
-             3. consumer API:`devm_*` 形式,生命周期挂设备。\n\
-             4. 参考:`drivers/device-res/`。\n"
+            "按 device-res/dma 模式(单全局 provider):\n1. 定义 `Provider` trait。\n2. 用单全局 \
+             provider(`Once<&dyn Provider>`),因为这类子系统整个系统只有一个后端\n\t(如 DMA、MMIO \
+             映射方式)。\n3. consumer API:`devm_*` 形式,生命周期挂设备。\n4. \
+             参考:`drivers/device-res/`。\n"
         }
         "framework" => {
-            "关键子框架(非 provider 模式,需具体框架设计):\n\
-             1. 识别这个框架的核心抽象(如 regmap=寄存器 RMW,workqueue=延后执行,timer=定时回调)。\n\
-             2. 设计 trait + 实现,通常基于现有原语(`Io`/`ktask`/`WaitQueue`)。\n\
-             3. 不需要 provider 注册表或新 DeviceKind。\n\
-             4. 工作量因框架而异,先评估是否值得建框架 vs. 驱动侧就地替代(见 gaps.json 的 workaround)。\n"
+            "关键子框架(非 provider 模式,需具体框架设计):\n1. 识别这个框架的核心抽象(如 \
+             regmap=寄存器 RMW,workqueue=延后执行,timer=定时回调)。\n2. 设计 trait + \
+             实现,通常基于现有原语(`Io`/`ktask`/`WaitQueue`)。\n3. 不需要 provider 注册表或新 \
+             DeviceKind。\n4. 工作量因框架而异,先评估是否值得建框架 vs. 驱动侧就地替代(见 \
+             gaps.json 的 workaround)。\n"
         }
         "subsystem-class" => {
-            "新设备类(需扩展 DeviceKind):\n\
-             1. 在 `DeviceKind` 加新变体(如 `I2c`/`Spi`/`Watchdog`/`Rtc`)。\n\
-             2. 定义该类的 trait(如 `I2cController`),含总线操作。\n\
-             3. 加 `kclass::publish_<class>(device, Box::new(dev))` 宏。\n\
-             4. 子设备(总线上的从设备)如何挂载是设计重点(如 i2c controller 要能注册子 i2c 设备)。\n\
-             5. 参考:`publish_block`/`publish_net`/`publish_char` 现有模式。\n\
-             \t**这是 RK3588 i2c/spi 移植最常见的 blocker。**\n"
+            "新设备类(需扩展 DeviceKind):\n1. 在 `DeviceKind` 加新变体(如 \
+             `I2c`/`Spi`/`Watchdog`/`Rtc`)。\n2. 定义该类的 trait(如 \
+             `I2cController`),含总线操作。\n3. 加 `kclass::publish_<class>(device, Box::new(dev))` \
+             宏。\n4. 子设备(总线上的从设备)如何挂载是设计重点(如 i2c controller 要能注册子 i2c \
+             设备)。\n5. 参考:`publish_block`/`publish_net`/`publish_char` 现有模式。\n\t**这是 \
+             RK3588 i2c/spi 移植最常见的 blocker。**\n"
         }
         "driver-missing" => {
-            "单纯驱动缺失(基础设施都在):\n\
-             1. 底层 DeviceKind + publish_* + 所需子系统都已有,只是这个具体驱动没移植。\n\
-             2. 直接按 `templates/driver-skeleton.md` 走 Phase 0-6,不动基础设施。\n\
-             3. 不需要新建框架;本 issue 的价值在于记录「哪些驱动待移植」的 backlog。\n"
+            "单纯驱动缺失(基础设施都在):\n1. 底层 DeviceKind + publish_* + \
+             所需子系统都已有,只是这个具体驱动没移植。\n2. 直接按 `templates/driver-skeleton.md` \
+             走 Phase 0-6,不动基础设施。\n3. 不需要新建框架;本 issue \
+             的价值在于记录「哪些驱动待移植」的 backlog。\n"
         }
         _ => "分类未知(待人工在 gaps.json 设 `infra_type`)。参考其它 issue 的实现路径模板。\n",
     }
@@ -569,19 +517,17 @@ fn impl_path_template(infra: &str, _gap: Option<&GapSubsystem>) -> &'static str 
 
 /// 验收标准模板(精简,按类给可检查项)。
 fn acceptance_template(infra: &str) -> String {
-    let common = "- [ ] `ldp check-data && ldp check-bitfields && ldp golden` 全过\n\
-                  - [ ] gaps.json 对应条目 `status` 改 `landed`\n";
+    let common = "- [ ] `ldp check-data && ldp check-bitfields && ldp golden` 全过\n- [ ] \
+                  gaps.json 对应条目 `status` 改 `landed`\n";
     let specific = match infra {
         "multi-provider" | "single-provider" => {
-            "- [ ] Provider trait + 注册表实现\n\
-             - [ ] consumer API(`devm_*`)可用,至少一个驱动验证\n\
-             - [ ] DT 解析在总线层生效(驱动不碰 DT)\n"
+            "- [ ] Provider trait + 注册表实现\n- [ ] consumer \
+             API(`devm_*`)可用,至少一个驱动验证\n- [ ] DT 解析在总线层生效(驱动不碰 DT)\n"
         }
         "framework" => "- [ ] 框架核心抽象可用\n- [ ] 至少一个驱动用新框架替代 workaround\n",
         "subsystem-class" => {
-            "- [ ] DeviceKind 新变体已加\n\
-             - [ ] publish_* 宏可用\n\
-             - [ ] 至少一个 controller 驱动 + 子设备挂载验证\n"
+            "- [ ] DeviceKind 新变体已加\n- [ ] publish_* 宏可用\n- [ ] 至少一个 controller 驱动 + \
+             子设备挂载验证\n"
         }
         "driver-missing" => "- [ ] 驱动按 skeleton 实现,build + clippy 过\n- [ ] P6 带机验证\n",
         _ => "",
@@ -600,6 +546,200 @@ impl Requirement {
             _ => "❓",
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gaps_with(severity: &str, id: &str) -> Gaps {
+        serde_json::from_str(&format!(
+            r#"{{
+                "subsystems": [
+                    {{
+                        "id": "{id}",
+                        "name": "test gap",
+                        "symbols": ["clk_get_rate"],
+                        "status": "missing",
+                        "severity": "{severity}"
+                    }}
+                ]
+            }}"#
+        ))
+        .unwrap()
+    }
+
+    fn finding(gap_id: &str) -> Finding {
+        Finding {
+            gap_id: gap_id.to_string(),
+            symbol: "clk_get_rate".to_string(),
+            source: "scan:drivers/foo.c".to_string(),
+            note: String::new(),
+        }
+    }
+
+    fn req(gap_id: &str, status: &str) -> Requirement {
+        Requirement {
+            id: format!("req-{gap_id}"),
+            gap_id: gap_id.to_string(),
+            title: String::new(),
+            infra_type: "framework".to_string(),
+            status: status.to_string(),
+            source: String::new(),
+            symbol: "clk_get_rate".to_string(),
+            created_ts: 0,
+            confirmed_ts: None,
+            file: String::new(),
+        }
+    }
+
+    #[test]
+    fn gate_passes_for_non_blocking_gap() {
+        let gaps = gaps_with("works-around", "regmap");
+        let idx = Index {
+            requirements: vec![],
+        };
+        let blocks = gate_blockers_with_index(&gaps, &[finding("regmap")], &idx);
+        assert!(blocks.is_empty(), "works-around 缺口不触发决策门");
+    }
+
+    #[test]
+    fn gate_fails_for_undecided_blocker_and_passes_after_confirm() {
+        let gaps = gaps_with("blocker", "phy");
+        let empty = Index {
+            requirements: vec![],
+        };
+        let blocks = gate_blockers_with_index(&gaps, &[finding("phy")], &empty);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].gap_id, "phy");
+        assert_eq!(blocks[0].req_status, None);
+
+        let proposed = Index {
+            requirements: vec![req("phy", "proposed")],
+        };
+        let blocks = gate_blockers_with_index(&gaps, &[finding("phy")], &proposed);
+        assert_eq!(blocks.len(), 1, "proposed 仍是未决策");
+        assert_eq!(blocks[0].req_status.as_deref(), Some("proposed"));
+
+        let confirmed = Index {
+            requirements: vec![req("phy", "confirmed")],
+        };
+        let blocks = gate_blockers_with_index(&gaps, &[finding("phy")], &confirmed);
+        assert!(blocks.is_empty(), "confirmed 即已决策,门通过");
+    }
+
+    #[test]
+    fn gate_fails_for_new_undecided_gap() {
+        let gaps = gaps_with("works-around", "regmap");
+        let idx = Index {
+            requirements: vec![],
+        };
+        let mut f = finding("regmap");
+        f.gap_id = String::new(); // 新发现(gaps.json 未列)
+        let blocks = gate_blockers_with_index(&gaps, &[f], &idx);
+        assert_eq!(blocks.len(), 1, "新发现缺口保守按可阻塞处理");
+    }
+}
+
+/// 需求 issue 状态里「已决策」的集合。
+///
+/// confirmed / in-progress / landed = 决定实现(含进行中/已落地);
+/// rejected = 明确不实现(例如本次移植接受"该驱动当前不可用",报告里标注)。
+/// proposed 是待决策,不通过门。
+pub fn is_decided_status(status: &str) -> bool {
+    matches!(status, "confirmed" | "in-progress" | "landed" | "rejected")
+}
+
+/// 某个 gap 是否已有已决策的需求 issue(决策门通过判据)。
+pub fn gap_has_decided_requirement(gap_id: &str) -> bool {
+    load_index()
+        .requirements
+        .iter()
+        .any(|r| r.gap_id == gap_id && is_decided_status(&r.status))
+}
+
+/// 某个 gap 的需求 issue 摘要(人类可读):`无` / `req-x(status)`,多个用分号连。
+pub fn requirement_summary(gap_id: &str) -> String {
+    let idx = load_index();
+    let reqs: Vec<&Requirement> = idx
+        .requirements
+        .iter()
+        .filter(|r| r.gap_id == gap_id)
+        .collect();
+    if reqs.is_empty() {
+        return "无".to_string();
+    }
+    reqs.iter()
+        .map(|r| format!("`{}`({})", r.id, r.status))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// 决策门未通过的缺口条目。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateBlock {
+    pub gap_id: String,
+    pub name: String,
+    pub symbol: String,
+    /// 当前需求 issue 状态:None = 尚未生成 issue;Some = 某条 issue 的状态。
+    pub req_status: Option<String>,
+}
+
+/// 决策门:一次 scan 命中的、可阻塞的缺口里,哪些尚无已决策需求 issue。
+///
+/// 返回未通过门的缺口(每条带当前需求状态,便于报错定位)。空 = 门通过。
+/// 判定口径:`gap.may_block_port()`(严重度模型含 blocker/conditional);
+/// 门通过 = 存在 confirmed/in-progress/landed/rejected 的需求 issue。
+/// gaps.json 未列的新发现缺口按可阻塞保守处理(必须有人决策)。
+pub fn gate_blockers(gaps: &Gaps, findings: &[Finding]) -> Vec<GateBlock> {
+    gate_blockers_with_index(gaps, findings, &load_index())
+}
+
+/// gate_blockers 的可注入实现(测试用;进程全局 index 是默认)。
+fn gate_blockers_with_index(gaps: &Gaps, findings: &[Finding], idx: &Index) -> Vec<GateBlock> {
+    let mut out = Vec::new();
+    for f in findings {
+        let Some(g) = gaps.subsystems.iter().find(|g| g.id == f.gap_id) else {
+            // 新发现缺口(gaps.json 未列):保守按可阻塞处理。
+            let decided = idx
+                .requirements
+                .iter()
+                .any(|r| r.symbol == f.symbol && is_decided_status(&r.status));
+            if !decided {
+                out.push(GateBlock {
+                    gap_id: f.gap_id.clone(),
+                    name: f.symbol.clone(),
+                    symbol: f.symbol.clone(),
+                    req_status: idx
+                        .requirements
+                        .iter()
+                        .find(|r| r.symbol == f.symbol)
+                        .map(|r| r.status.clone()),
+                });
+            }
+            continue;
+        };
+        if !g.may_block_port() {
+            continue;
+        }
+        let decided = idx
+            .requirements
+            .iter()
+            .any(|r| r.gap_id == f.gap_id && is_decided_status(&r.status));
+        if !decided {
+            out.push(GateBlock {
+                gap_id: g.id.clone(),
+                name: g.name.clone(),
+                symbol: f.symbol.clone(),
+                req_status: idx
+                    .requirements
+                    .iter()
+                    .find(|r| r.gap_id == f.gap_id)
+                    .map(|r| r.status.clone()),
+            });
+        }
+    }
+    out
 }
 
 /// 列所有需求(按状态分组可过滤)。

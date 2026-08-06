@@ -48,8 +48,8 @@ pub fn summary(api: &ApiMapping, gaps: &Gaps, bf_defs: usize, golden: usize) {
     println!("下一步:");
     println!("  ldp lookup <api>     查某条 Linux API 的 x-kernel 对应");
     println!("  ldp gaps             列缺失子系统");
-    println!("  ldp check-data       校验数据完整性(source.path 是否存在)");
-    println!("  ldp check-bitfields  校验位段定义 + 揪 false-pass(SCMI VERSION 类 bug)");
+    println!("  ldp check-data       校验数据完整性(source.path / 位段锚 / 重复 id)");
+    println!("  ldp check-layout     位段声明 ↔ 参考真值(从钉死参考机械导出,diff claim)");
     println!("  ldp golden           跑 golden 回归");
     println!("  ldp help             全部子命令与边界");
 }
@@ -59,6 +59,10 @@ struct Hit<'a> {
     section: &'a str,
     row: &'a MappingRow,
     score: usize,
+    /// 强命中:有 keyword 精确等于查询词,或 linux 名精确等于查询词。
+    /// 全部命中都不是强命中时,lookup 会补一条缺口提示——避免弱子串命中
+    /// 把一个真实但未映射的 API 误判成"已映射"(铁律 4:缺口必报)。
+    exact: bool,
 }
 
 /// `ldp lookup`:结构化候选查询。
@@ -70,12 +74,13 @@ pub fn lookup(api: &ApiMapping, query: &str) -> Result<(), String> {
     let mut hits: Vec<Hit> = Vec::new();
     for sec in &api.sections {
         for row in &sec.rows {
-            let score = score_row(row, &q);
+            let (score, exact) = score_row(row, &q);
             if score > 0 {
                 hits.push(Hit {
                     section: &sec.title,
                     row,
                     score,
+                    exact,
                 });
             }
         }
@@ -118,28 +123,42 @@ pub fn lookup(api: &ApiMapping, query: &str) -> Result<(), String> {
         }
         println!("{src}");
     }
+    // 全部命中都是弱子串匹配时补缺口提示:一个含短词的长查询(如
+    // `totally_made_up_api_xyz` 含 "up")会命中 semaphore,但那不是"已映射"——
+    // 若查询的是真实 API,这种假命中会让缺口被静默漏报(铁律 4)。
+    if !hits.iter().any(|h| h.exact) {
+        println!("────────────────────────────────────────");
+        println!("⚠ 以上均为模糊子串匹配(无 keyword / linux 名精确命中)。");
+        println!("  若查询的是真实 Linux API,按铁律 4 先当潜在缺口处理:");
+        println!("  查 `ldp gaps`,或逐条核对后再决定补映射还是报缺口——别因有命中就认定\"已映射\"。");
+    }
     Ok(())
 }
 
-fn score_row(row: &MappingRow, q: &str) -> usize {
+fn score_row(row: &MappingRow, q: &str) -> (usize, bool) {
     let mut score = 0;
+    let mut exact = false;
     for kw in &row.keywords {
         let kwl = kw.to_ascii_lowercase();
         if kwl == q {
             score += 10;
+            exact = true;
         } else if kwl.contains(q) || q.contains(&kwl) {
             score += 4;
         }
     }
     let linux = row.linux.to_ascii_lowercase();
     let xk = row.xkernel.to_ascii_lowercase();
+    if linux == q {
+        exact = true;
+    }
     if linux.contains(q) {
         score += 3;
     }
     if xk.contains(q) {
         score += 2;
     }
-    score
+    (score, exact)
 }
 
 /// `ldp gaps`:列出/筛选缺失子系统。
@@ -194,4 +213,48 @@ fn print_gap(g: &GapSubsystem) {
         }
     }
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(keywords: &[&str], linux: &str) -> MappingRow {
+        MappingRow {
+            linux: linux.into(),
+            xkernel: "x".into(),
+            note: String::new(),
+            source: None,
+            keywords: keywords.iter().map(|s| s.to_string()).collect(),
+            status: "landed".into(),
+        }
+    }
+
+    #[test]
+    fn exact_keyword_is_strong() {
+        // 真实查询命中精确 keyword → 强命中。
+        let (score, exact) = score_row(&row(&["readl", "writel"], "readl/writel"), "readl");
+        assert!(exact, "keyword 精确命中应判为强");
+        assert!(score >= 10);
+    }
+
+    #[test]
+    fn long_fake_query_containing_short_keyword_is_weak() {
+        // 长假 API 含短 keyword "up" → 仅子串反向命中 → 弱。
+        // 这正是会把一个真实但未映射的 API 误判成"已映射"的危险情形,
+        // lookup 据此补缺口提示(R1)。
+        let (score, exact) = score_row(
+            &row(&["up", "down", "semaphore"], "struct semaphore / down/up"),
+            "totally_made_up_api_xyz",
+        );
+        assert!(!exact, "仅子串反向命中应判为弱");
+        assert!(score > 0 && score < 10);
+    }
+
+    #[test]
+    fn linux_name_exact_is_strong_without_keyword() {
+        // 无 keyword 时,linux 名精确等于查询也算强。
+        let (_, exact) = score_row(&row(&[], "clk_get_rate"), "clk_get_rate");
+        assert!(exact);
+    }
 }

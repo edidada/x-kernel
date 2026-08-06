@@ -91,6 +91,10 @@ pub struct GapDimension {
     pub name: String,
     pub linux: Vec<String>,
     pub severity: String,
+    /// 维度级条件定级分支(与子系统级 severity_branches 同构;clk-rate
+    /// 的 rate_resolvable/provider_unavailable 就是放在维度里的)。
+    #[serde(default)]
+    pub severity_branches: serde_json::Value,
     #[serde(default)]
     pub workaround: String,
     #[serde(default)]
@@ -138,6 +142,7 @@ impl FieldSpan {
             (1u64 << width) - 1
         }
     }
+
     pub fn width(&self) -> u32 {
         self.msb.saturating_sub(self.lsb) + 1
     }
@@ -254,6 +259,82 @@ impl FieldClaim {
     pub fn span(&self) -> FieldSpan {
         self.claim
     }
+}
+
+impl GapSubsystem {
+    /// 严重度模型里是否存在"可能阻塞本次移植"的取值。
+    ///
+    /// 判定:顶层 `severity`、任一 `dimension`、任一 `severity_branch` 出现
+    /// `blocker` 或 `conditional`,或未声明严重度(空)——按 gaps.json 的
+    /// triage 框架「拿不准按 blocker 上报」。纯 works-around/optional 的
+    /// 缺口不触发决策门。
+    pub fn may_block_port(&self) -> bool {
+        let risky = |sev: &str| matches!(sev, "blocker" | "conditional" | "");
+        if risky(&self.severity) {
+            return true;
+        }
+        if self.dimensions.iter().any(|d| risky(&d.severity)) {
+            return true;
+        }
+        for map in self.severity_branch_maps() {
+            if map.values().any(|v| {
+                v.get("severity")
+                    .and_then(|s| s.as_str())
+                    .is_some_and(risky)
+            }) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 人类可读的严重度模型摘要(报告/决策门输出用)。
+    pub fn severity_summary(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.severity.is_empty() {
+            parts.push(self.severity.clone());
+        }
+        for d in &self.dimensions {
+            parts.push(format!("{}={}", d.name, d.severity));
+            for (k, v) in branch_map(&d.severity_branches) {
+                let sev = branch_severity(v);
+                parts.push(format!("{}.{}={sev}", d.name, k));
+            }
+        }
+        for (k, v) in branch_map(&self.severity_branches) {
+            let sev = branch_severity(v);
+            parts.push(format!("{k}={sev}"));
+        }
+        if parts.is_empty() {
+            "未声明".to_string()
+        } else {
+            parts.join("; ")
+        }
+    }
+
+    /// 所有严重度分支 map(子系统级 + 各维度级),供 may_block/摘要共用。
+    fn severity_branch_maps(&self) -> Vec<&serde_json::Map<String, serde_json::Value>> {
+        let mut maps = Vec::new();
+        if let Some(m) = self.severity_branches.as_object() {
+            maps.push(m);
+        }
+        for d in &self.dimensions {
+            if let Some(m) = d.severity_branches.as_object() {
+                maps.push(m);
+            }
+        }
+        maps
+    }
+}
+
+fn branch_map(v: &serde_json::Value) -> Vec<(&str, &serde_json::Value)> {
+    v.as_object()
+        .map(|m| m.iter().map(|(k, v)| (k.as_str(), v)).collect())
+        .unwrap_or_default()
+}
+
+fn branch_severity(v: &serde_json::Value) -> &str {
+    v.get("severity").and_then(|s| s.as_str()).unwrap_or("?")
 }
 
 /// provider-boundary.json 里一条判据。

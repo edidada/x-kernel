@@ -23,7 +23,6 @@ data/references/
   linux/               ← Linux 参考树(vendored 子集 或 submodule)
     VENDORED.txt       ← vendored 时:首行记 pin(tag/commit),证明来源可复现
     ...                <子树,如 drivers/firmware/arm_scmi/common.h>
-  test-fixtures/       ← 合成 fixture(非真实 Linux,仅供提取器单元测试)
 ```
 
 ## 如何 vendor Linux 子集(推荐:sparse-checkout 最小子集)

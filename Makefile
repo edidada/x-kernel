@@ -162,7 +162,7 @@ _HOOKS_BOOTSTRAP := $(shell \
 .PHONY: rootfs uapps rootfs-uapps teefs disk_img ramdisk_img
 .PHONY: install-tools check_deps deps check_header header fmt hooks clean distclean
 .PHONY: ci-test
-.PHONY: ldp ldp-check ldp-gen-doc ldp-golden ldp-evolve ldp-requirements
+.PHONY: ldp ldp-check ldp-check-data ldp-gen-doc ldp-golden ldp-evolve ldp-requirements
 
 all: build
 
@@ -351,6 +351,12 @@ ldp:
 
 ldp-check:
 	@$(LDP) ref check && $(LDP) check-data && $(LDP) check-layout
+
+## 不依赖 vendor 参考树的轻量验证门(改完 JSON 后快速自检):
+## check-data(完整性)+ golden(walkthrough 不漂移)+ gen-doc(md 同步)。
+## 完整门(含 check-layout,需 vendor 参考树)用 ldp-check。
+ldp-check-data:
+	@$(LDP) check-data && $(LDP) golden && $(LDP) gen-doc
 
 ldp-gen-doc:
 	@$(LDP) gen-doc
