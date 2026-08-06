@@ -9,7 +9,7 @@
 ## 背景
 
 x-kernel 运行在 `no_std` 内核环境中，无法直接使用 Linux 内核网络栈或标准库网络类型。
-当前实现由 crate 内 IPv4、UDP 和 ICMPv4 数据路径处理 UDP 收发、分片与差错报告，smoltcp 继续处理 TCP、raw IP、IPv6 和 DNS，并提供兼容期 interface poll 模型。
+当前实现由 crate 内 IPv4/IPv6、UDP 和 ICMPv4/ICMPv6 数据路径处理 UDP 收发、IPv4 分片与差错报告，以及 NDP 邻居发现；smoltcp 继续处理 TCP（含 TCPv6）、raw IP 和 DNS，并提供兼容期 interface poll 模型。
 
 ## 范围
 
@@ -46,6 +46,9 @@ net/knet/
     │   ├── fragment.rs
     │   ├── ingress.rs
     │   ├── ipv4.rs
+    │   ├── ipv6.rs
+    │   ├── icmpv6.rs
+    │   ├── ndp.rs
     │   ├── mod.rs
     │   ├── service.rs
     │   ├── router.rs
@@ -97,8 +100,8 @@ core/kruntime
 │  ├─ LoopbackDevice       │
 │  └─ EthernetDevice       │
 └──────┬──────────────┬────┘
-       │ UDP / ICMPv4 │ TCP / raw / IPv6 / DNS
-       v              v
+       │ UDP / ICMPv4/v6 / NDP │ TCP / raw / DNS
+       v                       v
 ┌──────────────────┐  ┌──────────────────────────┐
 │ UDP PCB registry │  │ SocketSetWrapper         │
 │ and socket queues│  │  └─ smoltcp SocketSet    │
@@ -115,22 +118,25 @@ core/kruntime
 
 | 组件 | 职责 |
 |------|------|
-| `init_network` | 创建 loopback 与首个 Ethernet 设备，建立默认路由，初始化网络全局状态，并启动后台 poller 与 Ethernet RX 任务 |
+| `init_network` | 创建 loopback 与首个 Ethernet 设备，建立默认 IPv4/IPv6 路由与 link-local，初始化网络全局状态与 rtnetlink 初始状态，并启动后台 poller 与 Ethernet RX 任务 |
 | `poller` | 使用单个 `AtomicU8` 四态状态机串行化执行者，按后台预算或 socket assist 预算推进 RX、smoltcp timer 和 TX |
-| `Service` | 持有加锁的 smoltcp `Interface`、`Router`、`IngressProcessor`、可复用 batch、poll timeout 和 RX waker 注册入口 |
-| `Router` | 管理设备列表、RX 设备游标、带 MTU 的路由表、smoltcp ingress queue、control/data TX queue、IPv4 输出分片、next-hop 选择和 budget dispatch |
-| `IngressProcessor` | 在 Router 锁外校验和重组 IPv4 输入，执行 crate 内 UDP 分流、UDP error 与 TCP listen snoop，并生成 ICMPv4 control packet |
-| `NetDevice` | 抽象 loopback 和 Ethernet 设备后端，持有接口名、MTU、管理 up 状态和 link snapshot，通过 `PacketBuf` 转移报文所有权，并使用 crate 内地址类型和 `MonotonicInstant` 表达设备边界 |
+| `Service` | 持有加锁的 smoltcp `Interface`、`Router`、`IngressProcessor`、可复用 batch、IPv6 动作 batch、poll timeout 和 RX waker 注册入口 |
+| `Router` | 管理设备列表、RX 设备游标、带 MTU 的路由表、smoltcp ingress queue、control/data TX queue、IPv4 输出分片、IPv6 输出与 NDP/ICMPv6、next-hop 选择和 budget dispatch |
+| `IngressProcessor` | 在 Router 锁外校验和重组 IPv4 输入，解析 IPv6 输入，执行 crate 内 UDP 分流、UDP error 与 TCP listen snoop，并生成 ICMPv4/ICMPv6 control packet 与 NDP 动作 |
+| `NetDevice` | 抽象 loopback、Ethernet 和 feature gated vsock 设备后端，持有接口名、MTU、管理 up 状态、link snapshot 与 IPv6 地址/邻居状态，通过 `PacketBuf` 转移报文所有权，并使用 crate 内地址类型和 `MonotonicInstant` 表达设备边界 |
 | `PacketBuf` | 保存报文数据、协议偏移、接口索引、包类型、校验状态和当前所有者 |
 | `link::wire` | 使用 `zerocopy` 校验和构造 Ethernet 与 Ethernet/IPv4 ARP 头部 |
 | `stack::ipv4` | 使用 `etherparse` 校验和构造 IPv4 与 ICMPv4 头部，并执行输出分片 |
+| `stack::ipv6` | 解析/构造 IPv6 固定头，跳过可识别扩展头，定位上层协议；Fragment 头暂不重组 |
+| `stack::icmpv6` | ICMPv6 echo 应答与 Destination Unreachable 差错生成 |
+| `stack::ndp` | Neighbor Solicitation/Advertisement 构造与解析 |
 | `stack::fragment` | 按源地址、目的地址、标识、协议和接口重组本地 IPv4 分片，并限制队列数量、内存和存活时间 |
-| `transport::udp` | 维护 UDP PCB registry、接收队列、bind 与 connect 状态、校验和、socket option、异步错误和 IPv4 收发 |
+| `transport::udp` | 维护 UDP PCB registry、接收队列、bind 与 connect 状态、校验和、socket option、异步错误和 IPv4/IPv6 收发 |
 | `SocketSetWrapper` | 串行化 smoltcp socket set 与 TCP deferred-close 元数据访问，并在新增 socket 时通知等待者 |
 | `ListenTable` | 管理 TCP listen backlog、SYN 队列、accept 队列和 accept waker |
 | `GeneralOptions` | 统一管理 nonblock、reuseaddr、超时和设备 mask |
 | `SocketOps` | 上层 socket syscall 使用的统一操作接口 |
-| `netlink` | 提供 AF_NETLINK socket、kobject uevent 和有限 rtnetlink 控制面 |
+| `netlink` | 提供 AF_NETLINK socket、kobject uevent 和有限 rtnetlink 控制面（含 IPv4/IPv6 地址与路由） |
 | `unix` | 提供 Unix domain stream 与 datagram transport；pathname 地址通过 kvfs 查找或创建 socket inode |
 | `vsock` | 在 `vsock` feature 下提供 virtio-vsock stream 支持 |
 
@@ -305,11 +311,11 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 
 1. `init_network` 创建 `Router`。
 2. 添加 `LoopbackDevice`，由 `Router` 注册 `127.0.0.1/8` 地址并生成 local、connected 路由。
-3. 从 `DeviceContainer<NetDevice>` 取首个 NIC，包装成 `EthernetDevice`，注册默认 IPv4 路由。
+3. 从 `DeviceContainer<NetDevice>` 取首个 NIC，包装成 `EthernetDevice`，自动派生 EUI-64 link-local，注册默认 IPv4 路由。
 4. 创建 `Service`，初始化内部 `Interface`、`Router`、`IngressProcessor` 和可复用 batch。
-5. 初始化 rtnetlink 路由和邻居状态，并同步到 `Service`、`Router`、`Interface`、`IngressProcessor` 和设备；IPv4 地址投影由 Router 地址条目生成，link 初始状态由设备构造器建立。
+5. 初始化 rtnetlink 路由和邻居状态，追加 `::1/128` 与 eth0 `fe80::/64` on-link 路由，并同步到 `Service`、`Router`、`Interface`、`IngressProcessor` 和设备；IPv4 地址投影由 Router 地址条目生成，IPv6 地址由 rtnetlink 状态同步，link 初始状态由设备构造器建立。
 6. 初始化全局 `SOCKET_SET`、`LISTEN_TABLE` 和 UDP PCB 及异步错误 registry。
-7. 启动常驻 `knet-poller` 后台任务。
+7. 启动常驻 `knet-poller` 后台任务，并注册协议 timer 回调。
 8. 启动 Ethernet RX 任务；硬中断只唤醒该任务，RX 任务发布工作并尝试执行一个有界 poller 批次。
 
 ### RX 推进
@@ -317,9 +323,9 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 1. Ethernet RX 任务注册下一次 IRQ waker 后调用 `NetworkPoller::publish_and_poll_rx`，在当前任务内发布 RX 并尝试执行有界批次；socket recv 和 readiness 路径通过 `poll_interfaces` 尝试执行一次已有工作；TCP、UDP 和 raw TX 生产路径通过 `notify(PollReason::Tx)` 发布工作。TCP 从可编码为零窗口的低余量接收缓冲区消费数据时通过 `notify(PollReason::RxWindow)` 主动重开对端窗口。
 2. 普通 `notify` 在 `IDLE` 上发布 `SCHEDULED` 并唤醒后台任务；RX 任务发布后直接竞争执行权。执行期间的新工作进入 `RUNNING_PENDING`；RX 任务、后台任务和 assist 只有一个能够通过 `SCHEDULED` 到 `RUNNING` 的 CAS。
 3. `Router::drain_rx_budgeted_into` 按 RX budget 从设备轮转拉取 `PacketBuf`，`next_rx_device` 在设备间保持公平并随设备删除修正。
-4. `IngressProcessor` 在 Router 锁外校验 IPv4 头、长度、校验和与本地目的地址，并完成 IPv4 分片重组。
-5. 完整 UDP 数据报进入 crate 内 UDP PCB 分流，未命中 socket 的单播 UDP 触发 ICMPv4 Port Unreachable。UDP PCB 按 FIFO 保留已入队数据报，`connect` 只影响后续入包的 peer 匹配。
-6. TCP、raw IP、ICMP 和 IPv6 packet 进入有界 smoltcp ingress queue。`Service` 先执行 `poll_maintenance`，再按 RX budget 逐个调用 `poll_ingress_single`，并按 TX budget 调用有界的 `poll_egress`。达到预算或时间边界后，剩余 ingress 保持 FIFO 顺序并进入后续轮次。
+4. `IngressProcessor` 在 Router 锁外校验 IPv4/IPv6 头、长度、校验和与本地目的地址，并完成 IPv4 分片重组；IPv6 跳过可识别扩展头，含 Fragment 头的报文暂交 smoltcp。
+5. 完整 UDP 数据报进入 crate 内 UDP PCB 分流（IPv4/IPv6），未命中 socket 的单播 UDP 触发 ICMPv4/ICMPv6 Port Unreachable。ICMPv6 NDP（NS/NA）解析为动作 batch，由 `Service` 在 Router 锁内更新设备邻居表或发送 NA；Echo Request 由 `stack::icmpv6` 应答。UDP PCB 按 FIFO 保留已入队数据报，`connect` 只影响后续入包的 peer 匹配。
+6. TCP、raw IP、ICMP 和其余 IPv6 packet 进入有界 smoltcp ingress queue。`Service` 先执行 `poll_maintenance`，再按 RX budget 逐个调用 `poll_ingress_single`，并按 TX budget 调用有界的 `poll_egress`。达到预算或时间边界后，剩余 ingress 保持 FIFO 顺序并进入后续轮次。
 7. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
 8. `Router::dispatch_budgeted` 先处理 control TX queue，再处理 data TX queue，单轮发送数量受 TX budget 限制。
 9. `Interface::poll_at` 与 orphan `FIN_WAIT_2` deadline 共同决定下一次网络 deadline，`Service` 将其写入原子 deadline；`register_timer_callback(TIMER_SAMPLE_PERIOD)` 周期采样该值，到期后通过 `notify(PollReason::Timer)` 发布工作。尚未到期的 deadline 不进入 `PollProgress::has_more`。
@@ -328,17 +334,17 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 ### TX 路由
 
 1. TCP connect、send 和 close，raw send 以及 UDP data queue 提交完成后发布真实 TX 通知；TCP recv 只在消费前的 smoltcp 接收缓冲区余量低于最大窗口缩放量子时发布 `RxWindow` 通知，覆盖未缩放零窗口和缩放后仍编码为零的窗口。达到缩放量子后的窗口增长随 RX 或已登记的协议 timer poll 推进，避免每次应用读取都创建后台工作。调用方可随后通过 `assist_once` 协助执行已调度的一轮。TCP 文件关闭不会立即删除仍处于协议关闭过程中的 handle。
-2. crate 内 UDP 在 Router mutex 内选择处于管理 up 状态的输出设备、源地址和路由 MTU；路由缺失或输出设备管理 down 时返回 `ENETUNREACH`。写入 UDP 与 IPv4 头后提交到 data TX queue。smoltcp 生成的 IP 包进入同一 data TX queue，`IngressProcessor` 生成的 ICMPv4 错误进入 control TX queue。
+2. crate 内 UDP 在 Router mutex 内检查队列容量、选择源地址和路由 MTU，并确认输出设备处于管理 up 状态；路由缺失或输出设备管理 down 时返回 `ENETUNREACH`。写入 UDP 与 IPv4/IPv6 头后提交到 data TX queue。IPv6 输出不分片，超出路径 MTU 直接返回 `EMSGSIZE`。smoltcp 生成的 IP 包进入同一 data TX queue，`IngressProcessor` 生成的 ICMPv4/ICMPv6 错误与 NDP/ICMPv6 应答进入 control TX queue。
 3. `IP_MTU_DISCOVER` 决定 UDP IPv4 头部的 DF 标志。超出路由 MTU 且允许分片的包由 `fragment_output_packet` 拆分，DF 包返回 `EMSGSIZE`。
-4. `Router::dispatch_budgeted` 优先接管 control packet，再按 IP 版本解析源地址和目的地址；IPv4 输出先按实际长度更新 `total_len` 和头部校验和，并将已校验的源地址随报文传给 `NetDevice`。
-5. 广播或组播包复制到所有设备；`0.0.0.0` 到 `255.255.255.255` 的受限广播允许在设备尚未分配 IPv4 地址时直接发送，用于 DHCP 初始化流量。
-6. 单播包通过 `RouteTable::lookup` 选择最长前缀路由。
-7. Ethernet 设备先查 ARP neighbor cache，命中后通过 `link::wire` 封装 Ethernet frame。
-8. 未命中时发送 ARP request，并把 IP 包放入 `pending_tx` 等待 neighbor 解析。
+4. `Router::dispatch_budgeted` 优先接管 control packet，再按 IP 版本解析源地址和目的地址；IPv4 输出先按实际长度更新 `total_len` 和头部校验和，并将已校验的源地址随报文传给 `NetDevice`。IPv6 输出更新 `payload_length`。
+5. 广播或组播包复制到所有设备；`0.0.0.0` 到 `255.255.255.255` 的受限广播允许在设备尚未分配 IPv4 地址时直接发送，用于 DHCP 初始化流量。IPv6 组播直接映射 Ethernet 组播 MAC（`33:33:xx:xx:xx:xx`）。
+6. 单播包通过 `RouteTable::lookup` 选择最长前缀路由；IPv6 link-local 目的直接 on-link。
+7. Ethernet 设备先查邻居 cache（IPv4 用 ARP，IPv6 用 NDP），命中后通过 `link::wire` 封装对应 EtherType 的 Ethernet frame。
+8. 未命中时发送 ARP request 或 NDP Neighbor Solicitation，并把 IP 包放入 `pending_tx` 等待邻居解析。
 
-当前实现保留 smoltcp TCP、raw socket 和 IPv6 推进。UDP、IPv4 分片重组、输出分片和 ICMPv4 UDP 差错报告使用 crate 内实现。
-`PacketBuf`、`link::wire` 和 `stack::ipv4` 提供设备与 crate 内 IPv4/UDP 数据路径共用的报文表示和 parser/emitter。
-路由表和设备接口使用 `crate::ip` 地址类型，设备时间使用 `ktime::MonotonicInstant`。
+当前实现保留 smoltcp TCP（含 TCPv6）、raw socket 和 DNS 推进。UDP、IPv4 分片重组、输出分片、ICMPv4/ICMPv6 UDP 差错报告和 NDP 使用 crate 内实现。
+`PacketBuf`、`link::wire`、`stack::ipv4`、`stack::ipv6` 提供设备与 crate 内 IP/UDP 数据路径共用的报文表示和 parser/emitter。
+路由表和设备接口使用 `crate::ip` 地址类型（含 `Ipv6Cidr`），设备时间使用 `ktime::MonotonicInstant`。
 `Router`、`Service` 和初始化入口在 smoltcp 兼容边界完成地址与时间转换。
 
 ### TCP listen 和 accept
@@ -406,10 +412,12 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 
 ## 设计决策
 
-### UDP 与 IPv4 数据路径迁出 smoltcp
+### UDP 与 IP 数据路径迁出 smoltcp
 
-UDP PCB、bind 冲突检查、收发队列、IPv4 校验、分片重组、输出分片和 ICMPv4 差错均由 crate 内类型管理。
-TCP、raw IP、IPv6 和 DNS 继续通过 smoltcp socket set 推进，协议推进依赖 Ethernet RX 任务的有界批次、后台 poller 调度和显式 `poll_interfaces` assist。
+UDP PCB、bind 冲突检查、收发队列、IPv4/IPv6 校验、IPv4 分片重组、输出分片、ICMPv4/ICMPv6 差错和 NDP 均由 crate 内类型管理。
+TCP（含 TCPv6）、raw IP 和 DNS 继续通过 smoltcp socket set 推进，协议推进依赖 Ethernet RX 任务的有界批次、后台 poller 调度和显式 `poll_interfaces` assist。
+AF_INET6 UDP socket 默认 `IPV6_V6ONLY=1`，不做 v4-mapped 双栈。
+IPv6 扩展头仅跳过定位上层协议；Fragment 头暂不重组。不实现 SLAAC/DHCPv6。
 该边界让 UDP 不再依赖 smoltcp socket handle，同时保留现有 TCP 和 raw socket 行为。
 
 ### NAPI 风格预算推进

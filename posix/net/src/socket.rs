@@ -71,9 +71,19 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             }
             knet::Socket::Raw(Box::new(RawSocket::new(IpVersion::Ipv4, IpProtocol::Icmp)))
         }
-        // IPv6 is not exposed yet because the address family lacks full support.
-        // The previous raw ICMPv6-only path was removed with this policy.
-        (AF_INET6, _) => return Err(KError::from(LinuxError::EAFNOSUPPORT)),
+        (AF_INET6, SOCK_STREAM) => {
+            if proto != 0 && proto != IPPROTO_TCP as u32 {
+                return Err(KError::from(LinuxError::EPROTONOSUPPORT));
+            }
+            knet::Socket::Tcp(Box::new(TcpSocket::new()))
+        }
+        (AF_INET6, SOCK_DGRAM) => {
+            if proto != 0 && proto != IPPROTO_UDP as u32 {
+                return Err(KError::from(LinuxError::EPROTONOSUPPORT));
+            }
+            knet::Socket::Udp(Box::new(UdpSocket::new_v6()))
+        }
+        (AF_INET6, _) => return Err(KError::from(LinuxError::ESOCKTNOSUPPORT)),
         (AF_UNIX, SOCK_STREAM) => {
             // Unix domain stream socket
             knet::Socket::Unix(Box::new(UnixDomainSocket::new(StreamTransport::new(pid))))

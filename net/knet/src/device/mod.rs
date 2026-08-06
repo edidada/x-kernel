@@ -22,7 +22,8 @@ pub use vsock::*;
 
 use crate::{
     buf::PacketBuf,
-    ip::{IpAddress, Ipv4Cidr},
+    ip::{IpAddress, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
+    wire::MacAddress,
 };
 
 pub(crate) const LINK_FLAG_UP: u32 = 1 << 0;
@@ -57,6 +58,32 @@ const INTERFACE_NAME_MAX_LEN: usize = 15;
 pub(crate) enum LinkKind {
     Loopback,
     Ethernet,
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::def_test;
+
+    use super::*;
+
+    #[def_test]
+    fn ethernet_mtu_validation_accepts_only_supported_boundaries() {
+        assert_eq!(LinkKind::Ethernet.validate_mtu(IPV4_MIN_MTU), Ok(()));
+        assert_eq!(LinkKind::Ethernet.validate_mtu(ETHERNET_MAX_MTU), Ok(()));
+        assert_eq!(
+            LinkKind::Ethernet.validate_mtu(IPV4_MIN_MTU - 1),
+            Err(LinuxError::EINVAL)
+        );
+        assert_eq!(
+            LinkKind::Ethernet.validate_mtu(ETHERNET_MAX_MTU + 1),
+            Err(LinuxError::EINVAL)
+        );
+    }
+
+    #[def_test]
+    fn interface_name_rejects_linux_whitespace_bytes() {
+        assert_eq!(validate_interface_name("eth\x0b1"), Err(LinuxError::EINVAL));
+    }
 }
 
 impl LinkKind {
@@ -203,30 +230,29 @@ pub trait NetDevice: Send + Sync {
 
     /// Synchronizes neighbor entries prepared by the control-plane adapter.
     fn sync_neighbors(&mut self, _neighbors: &[(IpAddress, [u8; 6])]) {}
-}
 
-#[cfg(unittest)]
-mod tests {
-    use unittest::def_test;
+    /// Replaces the IPv6 addresses prepared by the control-plane adapter.
+    fn set_ipv6_addrs(&mut self, _addrs: &[Ipv6Cidr]) {}
 
-    use super::*;
+    /// Learns or refreshes a neighbor link-layer mapping.
+    fn learn_neighbor(&mut self, _addr: IpAddress, _mac: MacAddress) {}
 
-    #[def_test]
-    fn ethernet_mtu_validation_accepts_only_supported_boundaries() {
-        assert_eq!(LinkKind::Ethernet.validate_mtu(IPV4_MIN_MTU), Ok(()));
-        assert_eq!(LinkKind::Ethernet.validate_mtu(ETHERNET_MAX_MTU), Ok(()));
-        assert_eq!(
-            LinkKind::Ethernet.validate_mtu(IPV4_MIN_MTU - 1),
-            Err(LinuxError::EINVAL)
-        );
-        assert_eq!(
-            LinkKind::Ethernet.validate_mtu(ETHERNET_MAX_MTU + 1),
-            Err(LinuxError::EINVAL)
-        );
+    /// Returns IPv6 addresses configured on this device.
+    fn ipv6_addrs(&self) -> &[Ipv6Cidr] {
+        &[]
     }
 
-    #[def_test]
-    fn interface_name_rejects_linux_whitespace_bytes() {
-        assert_eq!(validate_interface_name("eth\x0b1"), Err(LinuxError::EINVAL));
+    /// Returns the device MAC address when the medium is Ethernet.
+    fn hardware_addr(&self) -> Option<MacAddress> {
+        None
+    }
+
+    /// Selects a suitable IPv6 source address for NDP on this device.
+    fn ipv6_link_local(&self) -> Option<Ipv6Address> {
+        self.ipv6_addrs()
+            .iter()
+            .map(|cidr| cidr.address())
+            .find(|addr| addr.is_link_local())
+            .or_else(|| self.ipv6_addrs().first().map(|cidr| cidr.address()))
     }
 }

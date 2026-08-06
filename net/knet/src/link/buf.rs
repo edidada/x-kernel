@@ -31,6 +31,7 @@ pub(crate) enum PacketOwner {
     DeviceRx,
     DeviceTx,
     Ipv4Stack,
+    Ipv6Stack,
     Loopback,
 }
 

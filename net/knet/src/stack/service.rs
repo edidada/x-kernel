@@ -34,7 +34,10 @@ use crate::{
     netlink::RtnetlinkState,
     poller::{PollBudget, PollProgress},
     router::{DeviceRemoval, Router},
-    stack::ingress::IngressProcessor,
+    stack::{
+        ingress::{IngressProcessor, Ipv6Action},
+        ndp,
+    },
 };
 
 const IPV4_HEADER_LEN: usize = 20;
@@ -78,6 +81,7 @@ pub struct Service {
     rx_batch: Mutex<Vec<PacketBuf>>,
     accepted_batch: Mutex<Vec<PacketBuf>>,
     control_batch: Mutex<Vec<Vec<u8>>>,
+    ipv6_action_batch: Mutex<Vec<Ipv6Action>>,
     timeout_deadline_micros: AtomicU64,
     timeout_poll: Arc<PollSet>,
     #[cfg(unittest)]
@@ -96,6 +100,7 @@ impl Service {
             rx_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
             accepted_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
             control_batch: Mutex::new(Vec::new()),
+            ipv6_action_batch: Mutex::new(Vec::new()),
             timeout_deadline_micros: AtomicU64::new(0),
             timeout_poll: Arc::new(PollSet::new()),
             #[cfg(unittest)]
@@ -120,7 +125,9 @@ impl Service {
         let mut control_packets = self.control_batch.lock();
         let mut rx_batch = self.rx_batch.lock();
         let mut accepted_packets = self.accepted_batch.lock();
+        let mut ipv6_actions = self.ipv6_action_batch.lock();
         control_packets.clear();
+        ipv6_actions.clear();
 
         while rx_remaining > 0 {
             if rx_packets_since_time_check >= POLL_TIME_CHECK_INTERVAL_WORK_ITEMS {
@@ -152,15 +159,17 @@ impl Service {
                 &mut rx_batch,
                 &mut accepted_packets,
                 &mut control_packets,
+                &mut ipv6_actions,
                 &mut sockets,
             );
             let mut router = self.router.lock();
             router.enqueue_ingress_packets(&mut accepted_packets);
             for packet in control_packets.drain(..) {
-                if let Err(err) = router.queue_control_ipv4_packet(packet) {
+                if let Err(err) = router.queue_control_ip_packet(packet) {
                     warn!("Dropping network control packet: {}", err);
                 }
             }
+            apply_ipv6_actions(&mut router, &mut ipv6_actions);
             if !drain.has_more || drain.work_done == 0 {
                 break;
             }
@@ -328,6 +337,42 @@ impl Service {
         router.queue_ipv4_packet(packet.take().ok_or(KError::InvalidInput)?)
     }
 
+    /// Resolves the IPv6 source address and rejects oversized packets.
+    ///
+    /// IPv6 is not fragmented by the local stack, so a packet larger than the
+    /// route MTU fails with `EMSGSIZE`.
+    pub fn prepare_ipv6_packet_send(
+        &self,
+        bound_src: Option<IpAddress>,
+        dst_addr: &IpAddress,
+        packet_len: usize,
+    ) -> KResult<IpAddress> {
+        let router = self.router.lock();
+        if !router.can_enqueue_tx_packet() {
+            return Err(KError::WouldBlock);
+        }
+
+        let source_addr = match bound_src {
+            Some(addr) => addr,
+            None => router
+                .table
+                .lookup(dst_addr)
+                .map(|rule| rule.src)
+                .ok_or(KError::from(LinuxError::ENETUNREACH))?,
+        };
+        if let Some(mtu) = router.route_mtu(dst_addr)
+            && packet_len > mtu
+        {
+            return Err(LinuxError::EMSGSIZE.into());
+        }
+
+        Ok(source_addr)
+    }
+
+    pub fn send_ipv6_packet(&self, packet: alloc::vec::Vec<u8>) -> KResult {
+        self.router.lock().queue_ipv6_packet(packet)
+    }
+
     pub fn device_mask_for(&self, endpoint: &IpListenEndpoint) -> u32 {
         match endpoint.addr {
             Some(addr) => self.device_mask_for_addr(&addr),
@@ -420,25 +465,43 @@ impl Service {
         let mut router = self.router.lock();
         router.sync_netlink(state);
         let local_ipv4_addrs = router.local_ipv4_addrs();
-        self.replace_local_ipv4_views(&local_ipv4_addrs);
+        let local_ipv6_addrs = router.local_ipv6_addrs().to_vec();
+        self.replace_local_ip_views(&local_ipv4_addrs, &local_ipv6_addrs);
     }
 
     fn sync_local_ipv4_views(&self) {
-        let local_ipv4_addrs = self.router.lock().local_ipv4_addrs();
-        self.replace_local_ipv4_views(&local_ipv4_addrs);
+        let router = self.router.lock();
+        let local_ipv4_addrs = router.local_ipv4_addrs();
+        let local_ipv6_addrs = router.local_ipv6_addrs().to_vec();
+        drop(router);
+        self.replace_local_ip_views(&local_ipv4_addrs, &local_ipv6_addrs);
     }
 
-    fn replace_local_ipv4_views(&self, addrs: &[crate::ip::Ipv4Cidr]) {
-        self.ingress.lock().update_local_ipv4_addrs(addrs);
+    fn replace_local_ip_views(
+        &self,
+        ipv4_addrs: &[crate::ip::Ipv4Cidr],
+        ipv6_addrs: &[crate::ip::Ipv6Cidr],
+    ) {
+        {
+            let mut ingress = self.ingress.lock();
+            ingress.update_local_ipv4_addrs(ipv4_addrs);
+            ingress.update_local_ipv6_addrs(ipv6_addrs);
+        }
         self.iface.lock().update_ip_addrs(|ip_addrs| {
             ip_addrs.clear();
-            for addr in addrs {
+            for addr in ipv4_addrs {
                 ip_addrs
                     .push(SmoltcpIpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
                         addr.address().into(),
                         addr.prefix_len(),
                     )))
                     .expect("Router validates the smoltcp address capacity");
+            }
+            for addr in ipv6_addrs {
+                let _ = ip_addrs.push(SmoltcpIpCidr::Ipv6(smoltcp::wire::Ipv6Cidr::new(
+                    addr.address().into(),
+                    addr.prefix_len(),
+                )));
             }
         });
     }
@@ -504,7 +567,8 @@ impl Service {
         }
         router.add_ipv4_addr(entry)?;
         let local_ipv4_addrs = router.local_ipv4_addrs();
-        self.replace_local_ipv4_views(&local_ipv4_addrs);
+        let local_ipv6_addrs = router.local_ipv6_addrs().to_vec();
+        self.replace_local_ip_views(&local_ipv4_addrs, &local_ipv6_addrs);
         Ok(())
     }
 
@@ -518,7 +582,8 @@ impl Service {
         }
         let is_last_owner = !router.has_ipv4_address(entry.addr.address());
         let local_ipv4_addrs = router.local_ipv4_addrs();
-        self.replace_local_ipv4_views(&local_ipv4_addrs);
+        let local_ipv6_addrs = router.local_ipv6_addrs().to_vec();
+        self.replace_local_ip_views(&local_ipv4_addrs, &local_ipv6_addrs);
         Ok(is_last_owner)
     }
 
@@ -564,7 +629,8 @@ impl Service {
             self.rebuild_interface(&mut router, &mut iface);
         }
         let local_ipv4_addrs = router.local_ipv4_addrs();
-        self.replace_local_ipv4_views(&local_ipv4_addrs);
+        let local_ipv6_addrs = router.local_ipv6_addrs().to_vec();
+        self.replace_local_ip_views(&local_ipv4_addrs, &local_ipv6_addrs);
         Some(removal)
     }
 
@@ -628,6 +694,35 @@ fn earliest_poll_deadline(
     match (protocol, deferred_close) {
         (Some(protocol), Some(close)) => Some(protocol.min(close)),
         (protocol, close) => protocol.or(close),
+    }
+}
+
+fn apply_ipv6_actions(router: &mut Router, actions: &mut Vec<Ipv6Action>) {
+    for action in actions.drain(..) {
+        match action {
+            Ipv6Action::LearnNeighbor { ifindex, addr, mac } => {
+                if let Some(dev) = router.devices.get_mut(ifindex.saturating_sub(1) as usize) {
+                    dev.learn_neighbor(IpAddress::Ipv6(addr), mac);
+                }
+            }
+            Ipv6Action::ReplyAdvertisement {
+                ifindex,
+                target,
+                dst,
+                solicited,
+            } => {
+                let mac = router
+                    .devices
+                    .get(ifindex.saturating_sub(1) as usize)
+                    .and_then(|dev| dev.hardware_addr());
+                if let Some(mac) = mac
+                    && let Some(na) =
+                        ndp::build_neighbor_advertisement(target, dst, target, mac, solicited)
+                {
+                    let _ = router.queue_control_ip_packet(na);
+                }
+            }
+        }
     }
 }
 

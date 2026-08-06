@@ -10,8 +10,9 @@ use kio::prelude::*;
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 
 use super::{
-    IPV4_HEADER_LEN, UDP_HEADER_LEN, UDP_MAX_PAYLOAD_LEN,
-    output::{ipv4_pair, write_udp_header},
+    AddressFamily, IPV4_HEADER_LEN, IPV6_HEADER_LEN, UDP_HEADER_LEN, UDP_MAX_IPV6_PAYLOAD_LEN,
+    UDP_MAX_PAYLOAD_LEN,
+    output::{ipv4_pair, ipv6_pair, write_udp_header, write_udp_header_v6},
     pcb::{RecvMode, UdpDatagram, UdpPcb},
     registry,
     state::UdpSocketState,
@@ -20,8 +21,8 @@ use crate::{
     AncillaryData, KernelAncillaryData, RecvFlags, RecvOptions, SERVICE, SendFlags, SendOptions,
     Shutdown, SocketAddrEx, SocketOps,
     consts::{UDP_RX_BUF_LEN, UDP_TX_BUF_LEN},
-    ip::{IpAddress, IpEndpoint, Ipv4Address},
-    ipv4,
+    ip::{IpAddress, IpEndpoint, Ipv4Address, Ipv6Address},
+    ipv4, ipv6,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     poll_interfaces,
     poller::{PollReason, network_poller},
@@ -46,16 +47,27 @@ struct RecvErrorMsg<'a> {
 /// A UDP socket that provides POSIX-like APIs.
 pub struct UdpSocket {
     pub(super) pcb: Arc<UdpPcb>,
+    family: AddressFamily,
 }
 
 impl UdpSocket {
-    /// Creates a new UDP socket.
+    /// Creates a new IPv4 UDP socket.
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
+        Self::new_with_family(AddressFamily::Ipv4)
+    }
+
+    /// Creates a new IPv6 UDP socket (V6-only by default).
+    pub fn new_v6() -> Self {
+        Self::new_with_family(AddressFamily::Ipv6)
+    }
+
+    fn new_with_family(family: AddressFamily) -> Self {
         registry::init_udp_registry();
         let state = UdpSocketState::new();
         Self {
             pcb: UdpPcb::new(state),
+            family,
         }
     }
 
@@ -121,11 +133,12 @@ impl UdpSocket {
         }
 
         let reuse_address = self.state().reuse_address();
-        let endpoint = registry::bind_udp_auto_ephemeral_pcb(
-            self.pcb.clone(),
-            Ipv4Address::UNSPECIFIED.into(),
-            reuse_address,
-        )?;
+        let local_addr = match self.family {
+            AddressFamily::Ipv4 => Ipv4Address::UNSPECIFIED.into(),
+            AddressFamily::Ipv6 => Ipv6Address::UNSPECIFIED.into(),
+        };
+        let endpoint =
+            registry::bind_udp_auto_ephemeral_pcb(self.pcb.clone(), local_addr, reuse_address)?;
         self.state()
             .set_device_mask(SERVICE.device_mask_for(&registry::listen_endpoint(endpoint)));
         info!(
@@ -168,12 +181,24 @@ impl UdpSocket {
                 .map(|(endpoint, _)| endpoint)
                 .map_err(|_| KError::from(LinuxError::EDESTADDRREQ))?,
         };
-        validate_remote_endpoint(remote_endpoint)?;
+        self.validate_remote_endpoint(remote_endpoint)?;
 
         if self.state().local_endpoint().is_none() {
             self.bind_ephemeral()?;
         }
 
+        match remote_endpoint.addr {
+            IpAddress::Ipv4(_) => self.send_reader_v4(src, remote_endpoint, flags),
+            IpAddress::Ipv6(_) => self.send_reader_v6(src, remote_endpoint, flags),
+        }
+    }
+
+    fn send_reader_v4(
+        &self,
+        src: &mut (impl Read + IoBuf),
+        remote_endpoint: IpEndpoint,
+        flags: SendFlags,
+    ) -> KResult<usize> {
         let payload_len = src.remaining();
         if payload_len > UDP_MAX_PAYLOAD_LEN {
             return Err(LinuxError::EMSGSIZE.into());
@@ -200,10 +225,50 @@ impl UdpSocket {
                         let mtu_discovery = *self.pcb.mtu_discovery.read();
                         let dont_fragment =
                             should_set_dont_fragment(mtu_discovery, packet_len, route_mtu);
-                        self.write_datagram(packet, remote_endpoint, source_addr, dont_fragment)
+                        self.write_datagram_v4(packet, remote_endpoint, source_addr, dont_fragment)
                     },
                 )?;
                 network_poller().notify(PollReason::Tx);
+                poll_interfaces();
+                Ok(payload_len)
+            })
+    }
+
+    fn send_reader_v6(
+        &self,
+        src: &mut (impl Read + IoBuf),
+        remote_endpoint: IpEndpoint,
+        flags: SendFlags,
+    ) -> KResult<usize> {
+        let payload_len = src.remaining();
+        if payload_len > UDP_MAX_IPV6_PAYLOAD_LEN {
+            return Err(LinuxError::EMSGSIZE.into());
+        }
+        let packet_len = IPV6_HEADER_LEN + UDP_HEADER_LEN + payload_len;
+        let mut packet = Some(vec![0u8; packet_len]);
+        src.read_exact(
+            packet
+                .as_mut()
+                .and_then(|packet| packet.get_mut(IPV6_HEADER_LEN + UDP_HEADER_LEN..))
+                .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?,
+        )?;
+        self.state()
+            .send_poller_with_nonblocking(self, flags.nonblocking(), || {
+                let bound_source_addr = self
+                    .state()
+                    .local_endpoint()
+                    .and_then(|local| (!local.addr.is_unspecified()).then_some(local.addr));
+                let source_addr = SERVICE.prepare_ipv6_packet_send(
+                    bound_source_addr,
+                    &remote_endpoint.addr,
+                    packet_len,
+                )?;
+                self.write_datagram_v6(
+                    packet.as_mut().ok_or(KError::InvalidInput)?,
+                    remote_endpoint,
+                    source_addr,
+                )?;
+                SERVICE.send_ipv6_packet(packet.take().ok_or(KError::InvalidInput)?)?;
                 poll_interfaces();
                 Ok(payload_len)
             })
@@ -218,7 +283,7 @@ impl UdpSocket {
         SERVICE.get_source_address(&remote_addr)
     }
 
-    fn write_datagram(
+    fn write_datagram_v4(
         &self,
         packet: &mut [u8],
         remote_endpoint: IpEndpoint,
@@ -251,6 +316,54 @@ impl UdpSocket {
             dont_fragment,
         )
         .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))
+    }
+
+    fn write_datagram_v6(
+        &self,
+        packet: &mut [u8],
+        remote_endpoint: IpEndpoint,
+        source_addr: IpAddress,
+    ) -> KResult {
+        let local = self
+            .state()
+            .local_endpoint()
+            .ok_or(KError::from(LinuxError::EDESTADDRREQ))?;
+        let source_port = local.port;
+        let hop_limit = *self.pcb.ttl.read();
+        let (src_addr, dst_addr) = ipv6_pair(source_addr, remote_endpoint.addr)?;
+        write_udp_header_v6(
+            packet
+                .get_mut(IPV6_HEADER_LEN..)
+                .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?,
+            src_addr,
+            dst_addr,
+            source_port,
+            remote_endpoint.port,
+        )
+        .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?;
+        ipv6::write_ipv6_packet_header(packet, src_addr, dst_addr, ipv6::PROTOCOL_UDP, hop_limit)
+            .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))
+    }
+
+    fn validate_remote_endpoint(&self, endpoint: IpEndpoint) -> KResult {
+        let family_ok = matches!(
+            (self.family, endpoint.addr),
+            (AddressFamily::Ipv4, IpAddress::Ipv4(_)) | (AddressFamily::Ipv6, IpAddress::Ipv6(_))
+        );
+        if !family_ok {
+            return Err(KError::from(LinuxError::EAFNOSUPPORT));
+        }
+        if endpoint.port == 0 || endpoint.addr.is_unspecified() {
+            k_bail!(InvalidInput, "invalid address");
+        }
+        Ok(())
+    }
+
+    fn addr_matches_family(&self, addr: SocketAddr) -> bool {
+        matches!(
+            (self.family, addr),
+            (AddressFamily::Ipv4, SocketAddr::V4(_)) | (AddressFamily::Ipv6, SocketAddr::V6(_))
+        )
     }
 
     fn recv_payload(
@@ -340,6 +453,12 @@ impl Configurable for UdpSocket {
             GetSocketOption::MtuDiscover(mtu_discovery) => {
                 **mtu_discovery = *self.pcb.mtu_discovery.read();
             }
+            GetSocketOption::Ipv6Only(ipv6_only) => {
+                if self.family != AddressFamily::Ipv6 {
+                    return Ok(OptionHandled::No);
+                }
+                **ipv6_only = self.state().ipv6_only();
+            }
             _ => return Ok(OptionHandled::No),
         }
         Ok(OptionHandled::Yes)
@@ -365,6 +484,17 @@ impl Configurable for UdpSocket {
                 }
                 *self.pcb.mtu_discovery.write() = *mtu_discovery;
             }
+            SetSocketOption::Ipv6Only(ipv6_only) => {
+                if self.family != AddressFamily::Ipv6 {
+                    return Ok(OptionHandled::No);
+                }
+                // Changing V6ONLY after bind is rejected by Linux; keep the
+                // same policy until dual-stack delivery is implemented.
+                if self.state().local_endpoint().is_some() {
+                    return Err(KError::from(LinuxError::EINVAL));
+                }
+                self.state().set_ipv6_only(*ipv6_only);
+            }
             _ => return Ok(OptionHandled::No),
         }
         Ok(OptionHandled::Yes)
@@ -374,7 +504,7 @@ impl Configurable for UdpSocket {
 impl SocketOps for UdpSocket {
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         let local_addr = local_addr.into_ip()?;
-        if !matches!(local_addr, SocketAddr::V4(_)) {
+        if !self.addr_matches_family(local_addr) {
             return Err(KError::from(LinuxError::EAFNOSUPPORT));
         }
 
@@ -409,7 +539,7 @@ impl SocketOps for UdpSocket {
         }
 
         let remote_addr = remote_addr.into_ip()?;
-        if !matches!(remote_addr, SocketAddr::V4(_)) {
+        if !self.addr_matches_family(remote_addr) {
             return Err(KError::from(LinuxError::EAFNOSUPPORT));
         }
         if self.state().local_endpoint().is_none() {
@@ -417,7 +547,7 @@ impl SocketOps for UdpSocket {
         }
 
         let remote_endpoint = IpEndpoint::from(remote_addr);
-        validate_remote_endpoint(remote_endpoint)?;
+        self.validate_remote_endpoint(remote_endpoint)?;
         let source_addr = self.source_addr_for(remote_endpoint.addr)?;
         self.state()
             .set_peer_endpoint(Some((remote_endpoint, source_addr)));
@@ -495,16 +625,6 @@ impl SocketOps for UdpSocket {
         debug!("UDP socket: shutting down");
         Ok(())
     }
-}
-
-fn validate_remote_endpoint(endpoint: IpEndpoint) -> KResult {
-    if !matches!(endpoint.addr, IpAddress::Ipv4(_)) {
-        return Err(KError::from(LinuxError::EAFNOSUPPORT));
-    }
-    if endpoint.port == 0 || endpoint.addr.is_unspecified() {
-        k_bail!(InvalidInput, "invalid address");
-    }
-    Ok(())
 }
 
 fn should_set_dont_fragment(mtu_discovery: u8, packet_len: usize, path_mtu: Option<usize>) -> bool {
@@ -653,7 +773,7 @@ mod tests {
         packet[IPV4_HEADER_LEN + UDP_HEADER_LEN..].copy_from_slice(&[1, 2, 3, 4]);
 
         socket
-            .write_datagram(
+            .write_datagram_v4(
                 &mut packet,
                 remote_endpoint,
                 IpAddress::Ipv4(src_addr),

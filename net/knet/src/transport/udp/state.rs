@@ -50,6 +50,7 @@ pub(crate) struct UdpSocketState {
     read_shutdown: AtomicBool,
     write_shutdown: AtomicBool,
     recv_err: AtomicBool,
+    ipv6_only: AtomicBool,
     socket_error: AtomicI32,
     error_queue: Mutex<VecDeque<UdpSocketQueuedError>>,
     waiters: UdpSocketWaiters,
@@ -65,6 +66,8 @@ impl UdpSocketState {
             read_shutdown: AtomicBool::new(false),
             write_shutdown: AtomicBool::new(false),
             recv_err: AtomicBool::new(false),
+            // Linux defaults IPV6_V6ONLY to 1 for new AF_INET6 sockets.
+            ipv6_only: AtomicBool::new(true),
             socket_error: AtomicI32::new(0),
             error_queue: Mutex::new(VecDeque::new()),
             waiters: UdpSocketWaiters::new(),
@@ -117,6 +120,14 @@ impl UdpSocketState {
 
     pub(crate) fn recv_err_enabled(&self) -> bool {
         self.recv_err.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn ipv6_only(&self) -> bool {
+        self.ipv6_only.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_ipv6_only(&self, enabled: bool) {
+        self.ipv6_only.store(enabled, Ordering::Relaxed);
     }
 
     pub(crate) fn enqueue_error(&self, error: UdpSocketQueuedError) {

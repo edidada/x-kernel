@@ -28,8 +28,8 @@ use crate::{
         LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind, LinkSendSnapshot, LinkSnapshot,
         NetDevice as NetDeviceOps,
     },
-    ip::{IpAddress, Ipv4Cidr},
-    packet,
+    ip::{IpAddress, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
+    ndp, packet,
     wire::{
         ArpIpv4Packet, ArpOperation, ETHERNET_HEADER_LEN, EtherType, EthernetFrameRef, MacAddress,
         emit_ethernet_header,
@@ -272,6 +272,7 @@ pub struct EthernetDevice {
     neighbors: HashMap<IpAddress, Option<ArpNeighbor>>,
     assigned_ipv4_addrs: Vec<Ipv4Cidr>,
     local_ipv4_addrs: Vec<Ipv4Cidr>,
+    ipv6_addrs: Vec<Ipv6Cidr>,
 
     pending_tx: VecDeque<PendingTxPacket>,
     rx_source: Option<Arc<NetRxPollSource>>,
@@ -303,6 +304,8 @@ impl EthernetDevice {
             warn!("knet: NetRx softirq unavailable; Ethernet RX uses timeout polling fallback");
             None
         };
+        let mac = MacAddress(inner.mac().0);
+        let link_local = Ipv6Cidr::new(Ipv6Address::link_local_from_mac(mac.bytes()), 64);
         Self {
             name,
             flags: LINK_FLAG_UP
@@ -316,6 +319,7 @@ impl EthernetDevice {
             neighbors: HashMap::new(),
             assigned_ipv4_addrs: Vec::new(),
             local_ipv4_addrs: Vec::new(),
+            ipv6_addrs: alloc::vec![link_local],
             pending_tx: VecDeque::with_capacity(ETHERNET_MAX_PENDING_PACKETS),
             rx_source,
         }
@@ -410,7 +414,13 @@ impl EthernetDevice {
         }
     }
 
-    fn send_ipv4_packet_to(&mut self, ifindex: i32, dst: MacAddress, packet: &PacketBuf) {
+    fn send_ip_packet_to(
+        &mut self,
+        ifindex: i32,
+        dst: MacAddress,
+        packet: &PacketBuf,
+        ethertype: EtherType,
+    ) {
         if !self.is_link_up() {
             return;
         }
@@ -430,8 +440,15 @@ impl EthernetDevice {
             dst,
             ip_packet.len(),
             |buf| buf.copy_from_slice(ip_packet),
-            EtherType::Ipv4,
+            ethertype,
         );
+    }
+
+    fn ethertype_for_next_hop(next_hop: IpAddress) -> EtherType {
+        match next_hop {
+            IpAddress::Ipv4(_) => EtherType::Ipv4,
+            IpAddress::Ipv6(_) => EtherType::Ipv6,
+        }
     }
 
     fn handle_rx_frame(
@@ -459,12 +476,16 @@ impl EthernetDevice {
         );
         packet::publish_link_packet(&packet_buf);
 
-        if !dst_addr.is_broadcast() && dst_addr != MacAddress::ZERO && dst_addr != self.mac_addr() {
+        let is_for_us = dst_addr.is_broadcast()
+            || dst_addr == MacAddress::ZERO
+            || dst_addr == self.mac_addr()
+            || dst_addr.is_multicast();
+        if !is_for_us {
             return None;
         }
 
         match ethertype {
-            EtherType::Ipv4 => {
+            EtherType::Ipv4 | EtherType::Ipv6 => {
                 return Some(packet_buf);
             }
             EtherType::Arp => self.handle_arp_packet(ifindex, frame.payload(), timestamp),
@@ -481,7 +502,6 @@ impl EthernetDevice {
         source_addr: crate::ip::Ipv4Address,
     ) {
         let IpAddress::Ipv4(target_ipv4) = target_ip else {
-            warn!("IPv6 address ARP is not supported: {}", target_ip);
             return;
         };
         if source_addr.is_unspecified() {
@@ -510,6 +530,83 @@ impl EthernetDevice {
         );
 
         self.neighbors.insert(target_ip, None);
+    }
+
+    fn send_neighbor_solicitation(&mut self, ifindex: i32, target: Ipv6Address) {
+        let Some(src_addr) = self.ipv6_link_local() else {
+            warn!("No IPv6 source address for NDP solicitation");
+            return;
+        };
+        debug!("Requesting NDP for {}", target);
+        let Some(ns_packet) = ndp::build_neighbor_solicitation(src_addr, target, self.mac_addr())
+        else {
+            return;
+        };
+        let dst_mac = MacAddress(target.solicited_node_multicast().multicast_mac());
+        self.send_to(
+            ifindex,
+            dst_mac,
+            ns_packet.len(),
+            |buf| buf.copy_from_slice(&ns_packet),
+            EtherType::Ipv6,
+        );
+        self.neighbors.insert(IpAddress::Ipv6(target), None);
+    }
+
+    fn resolve_next_hop(
+        &mut self,
+        ifindex: i32,
+        next_hop: IpAddress,
+        ipv4_source: crate::ip::Ipv4Address,
+    ) {
+        match next_hop {
+            IpAddress::Ipv4(_) => self.send_arp_request(ifindex, next_hop, ipv4_source),
+            IpAddress::Ipv6(addr) => self.send_neighbor_solicitation(ifindex, addr),
+        }
+    }
+
+    fn flush_pending(&mut self, ifindex: i32, now: MonotonicInstant) {
+        enum PendingAction {
+            Send(MacAddress),
+            Keep,
+            Refresh,
+        }
+
+        let mut kept_packets = Vec::with_capacity(ETHERNET_MAX_PENDING_PACKETS);
+        for _ in 0..ETHERNET_MAX_PENDING_PACKETS {
+            let Some(pending) = self.pending_tx.pop_front() else {
+                break;
+            };
+
+            let action = match self.neighbors.get(&pending.next_hop) {
+                Some(Some(neighbor)) if neighbor.expires_at > now => {
+                    PendingAction::Send(neighbor.hardware_address)
+                }
+                Some(Some(_)) => PendingAction::Refresh,
+                _ => PendingAction::Keep,
+            };
+
+            match action {
+                PendingAction::Send(hardware_address) => {
+                    let ethertype = Self::ethertype_for_next_hop(pending.next_hop);
+                    self.send_ip_packet_to(ifindex, hardware_address, &pending.packet, ethertype);
+                }
+                PendingAction::Keep => kept_packets.push(pending),
+                PendingAction::Refresh => {
+                    self.neighbors.remove(&pending.next_hop);
+                    self.resolve_next_hop(ifindex, pending.next_hop, pending.source_addr);
+                    kept_packets.push(pending);
+                }
+            }
+        }
+
+        for pending in kept_packets {
+            if self.pending_tx.len() >= ETHERNET_MAX_PENDING_PACKETS {
+                warn!("Pending packets buffer is full, dropping packet");
+            } else {
+                self.pending_tx.push_back(pending);
+            }
+        }
     }
 
     fn handle_arp_packet(&mut self, ifindex: i32, payload: &[u8], now: MonotonicInstant) {
@@ -580,46 +677,7 @@ impl EthernetDevice {
             );
         }
 
-        enum PendingAction {
-            Send(MacAddress),
-            Keep,
-            Refresh,
-        }
-
-        let mut kept_packets = Vec::with_capacity(ETHERNET_MAX_PENDING_PACKETS);
-        for _ in 0..ETHERNET_MAX_PENDING_PACKETS {
-            let Some(pending) = self.pending_tx.pop_front() else {
-                break;
-            };
-
-            let action = match self.neighbors.get(&pending.next_hop) {
-                Some(Some(neighbor)) if neighbor.expires_at > now => {
-                    PendingAction::Send(neighbor.hardware_address)
-                }
-                Some(Some(_)) => PendingAction::Refresh,
-                _ => PendingAction::Keep,
-            };
-
-            match action {
-                PendingAction::Send(hardware_address) => {
-                    self.send_ipv4_packet_to(ifindex, hardware_address, &pending.packet)
-                }
-                PendingAction::Keep => kept_packets.push(pending),
-                PendingAction::Refresh => {
-                    self.neighbors.remove(&pending.next_hop);
-                    self.send_arp_request(ifindex, pending.next_hop, pending.source_addr);
-                    kept_packets.push(pending);
-                }
-            }
-        }
-
-        for pending in kept_packets {
-            if self.pending_tx.len() >= ETHERNET_MAX_PENDING_PACKETS {
-                warn!("Pending packets buffer is full, dropping packet");
-            } else {
-                self.pending_tx.push_back(pending);
-            }
-        }
+        self.flush_pending(ifindex, now);
     }
 }
 
@@ -704,51 +762,71 @@ impl NetDeviceOps for EthernetDevice {
         if !self.is_link_up() {
             return false;
         }
-        if !matches!(next_hop, IpAddress::Ipv4(_)) {
-            warn!("Dropping IPv6 packet on IPv4-only Ethernet device");
-            return false;
-        }
-        let IpAddress::Ipv4(source_addr) = source_addr else {
-            warn!("Dropping packet with a non-IPv4 source on IPv4-only Ethernet device");
-            return false;
-        };
 
         packet.set_ifindex(ifindex);
         let Some(ip_packet) = packet.network_packet() else {
-            warn!("Dropping malformed IPv4 output packet");
+            warn!("Dropping malformed output packet");
             return false;
         };
-        let is_limited_broadcast = next_hop.is_broadcast();
-        if !is_ipv4_source_usable_for_egress(next_hop, source_addr, &self.assigned_ipv4_addrs) {
-            warn!("Dropping IPv4 packet without a local IPv4 source");
-            return false;
-        }
         if ip_packet.len() > self.mtu {
             warn!("Dropping packet exceeding Ethernet MTU {}", self.mtu);
             return false;
         }
-        let is_directed_broadcast = matches!(next_hop, IpAddress::Ipv4(next_hop) if self
-            .assigned_ipv4_addrs
-            .iter()
-            .any(|addr| addr.is_directed_broadcast(next_hop)));
-        if is_limited_broadcast || is_directed_broadcast {
-            self.send_ipv4_packet_to(ifindex, MacAddress::BROADCAST, &packet);
-            return false;
+
+        let ipv4_source = match next_hop {
+            IpAddress::Ipv4(_) => {
+                let IpAddress::Ipv4(source_addr) = source_addr else {
+                    warn!("Dropping packet with a non-IPv4 source on Ethernet device");
+                    return false;
+                };
+                if !is_ipv4_source_usable_for_egress(
+                    next_hop,
+                    source_addr,
+                    &self.assigned_ipv4_addrs,
+                ) {
+                    warn!("Dropping IPv4 packet without a local IPv4 source");
+                    return false;
+                }
+                source_addr
+            }
+            IpAddress::Ipv6(_) => crate::ip::Ipv4Address::UNSPECIFIED,
+        };
+
+        match next_hop {
+            IpAddress::Ipv4(_)
+                if next_hop.is_broadcast()
+                    || matches!(next_hop, IpAddress::Ipv4(next_hop) if self
+                        .assigned_ipv4_addrs
+                        .iter()
+                        .any(|addr| addr.is_directed_broadcast(next_hop))) =>
+            {
+                self.send_ip_packet_to(ifindex, MacAddress::BROADCAST, &packet, EtherType::Ipv4);
+                return false;
+            }
+            IpAddress::Ipv6(addr) if addr.is_multicast() => {
+                self.send_ip_packet_to(
+                    ifindex,
+                    MacAddress(addr.multicast_mac()),
+                    &packet,
+                    EtherType::Ipv6,
+                );
+                return false;
+            }
+            _ => {}
         }
 
+        let ethertype = Self::ethertype_for_next_hop(next_hop);
         let need_request = match self.neighbors.get(&next_hop) {
             Some(Some(neighbor)) if neighbor.expires_at > timestamp => {
-                self.send_ipv4_packet_to(ifindex, neighbor.hardware_address, &packet);
+                self.send_ip_packet_to(ifindex, neighbor.hardware_address, &packet, ethertype);
                 return false;
             }
             Some(Some(_)) => true,
-            // Request already sent
             Some(None) => false,
             None => true,
         };
-        // Only send ARP request if we haven't already requested it
         if need_request {
-            self.send_arp_request(ifindex, next_hop, source_addr);
+            self.resolve_next_hop(ifindex, next_hop, ipv4_source);
         }
         if self.pending_tx.len() >= ETHERNET_MAX_PENDING_PACKETS {
             warn!("Pending packets buffer is full, dropping packet");
@@ -756,7 +834,7 @@ impl NetDeviceOps for EthernetDevice {
         }
         self.pending_tx.push_back(PendingTxPacket {
             next_hop,
-            source_addr,
+            source_addr: ipv4_source,
             packet,
         });
         false
@@ -830,6 +908,38 @@ impl NetDeviceOps for EthernetDevice {
                 }),
             );
         }
+    }
+
+    fn set_ipv6_addrs(&mut self, addrs: &[Ipv6Cidr]) {
+        if !addrs.is_empty() {
+            self.ipv6_addrs = addrs.to_vec();
+        }
+    }
+
+    fn learn_neighbor(&mut self, addr: IpAddress, mac: MacAddress) {
+        self.neighbors.insert(
+            addr,
+            Some(ArpNeighbor {
+                hardware_address: mac,
+                expires_at: MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(
+                    u64::MAX / 2,
+                )),
+            }),
+        );
+        // Flush any packets waiting on this neighbor using a synthetic "now"
+        // far in the future so the freshly learned entry is considered valid.
+        let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(u64::MAX / 4));
+        if let Some(ifindex) = self.pending_tx.front().map(|p| p.packet.ifindex()) {
+            self.flush_pending(ifindex, now);
+        }
+    }
+
+    fn ipv6_addrs(&self) -> &[Ipv6Cidr] {
+        &self.ipv6_addrs
+    }
+
+    fn hardware_addr(&self) -> Option<MacAddress> {
+        Some(self.mac_addr())
     }
 }
 

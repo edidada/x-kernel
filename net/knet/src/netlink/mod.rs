@@ -27,7 +27,7 @@ mod rtnetlink;
 mod socket;
 #[cfg(unittest)]
 mod tests;
-mod wire;
+pub(crate) mod wire;
 
 pub(crate) use rtnetlink::{build_initial_state, init_route_state, remove_device_state};
 pub use socket::{NetlinkSocket, publish_kobject_uevent};
@@ -70,6 +70,15 @@ pub(super) const ARPHRD_LOOPBACK: u16 = 772;
 pub(super) const ARPHRD_ETHER: u16 = 1;
 
 #[derive(Clone, Copy, Debug)]
+pub(crate) struct AddrState {
+    pub(crate) index: u32,
+    pub(crate) family: u8,
+    pub(crate) prefix_len: u8,
+    pub(crate) scope: u8,
+    pub(crate) address: IpAddress,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct RouteState {
     pub(crate) family: u8,
     pub(crate) dst_len: u8,
@@ -96,6 +105,7 @@ pub(crate) struct NeighState {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RtnetlinkState {
+    pub(crate) addrs: Vec<AddrState>,
     pub(crate) routes: Vec<RouteState>,
     pub(crate) neighs: Vec<NeighState>,
 }

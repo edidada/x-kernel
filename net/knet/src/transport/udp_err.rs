@@ -4,14 +4,17 @@
 
 //! UDP asynchronous error queue support.
 
-use ::core::net::{SocketAddr, SocketAddrV4};
-use etherparse::{Icmpv4Slice, Icmpv4Type, UdpHeaderSlice};
+use ::core::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
+use etherparse::{
+    Icmpv4Slice, Icmpv4Type, Icmpv6Slice, Icmpv6Type, UdpHeaderSlice, icmpv6::DestUnreachableCode,
+};
 use kerrno::LinuxError;
 
 use super::udp::{self, UdpSocketQueuedError};
 use crate::{
-    SocketErrorInfo, SocketErrorOrigin,
+    SocketErrorInfo, SocketErrorOrigin, icmpv6,
     ipv4::{self, Ipv4Header},
+    ipv6::{self, Ipv6Header},
 };
 
 const ICMPV4_DST_UNREACHABLE: u8 = 3;
@@ -40,6 +43,15 @@ const ICMPV4_CODE_FRAG_EXPIRED: u8 = 1;
 pub(crate) type QueuedUdpError = UdpSocketQueuedError;
 
 fn queue_ipv4_error(local: SocketAddrV4, remote: SocketAddrV4, error: QueuedUdpError) {
+    if let Some(state) = udp::lookup_udp_error_state(local.into(), remote.into()) {
+        if state.peer_endpoint().is_some() {
+            state.record_socket_error(error.ancillary.errno);
+        }
+        state.enqueue_error(error);
+    }
+}
+
+fn queue_ipv6_error(local: SocketAddrV6, remote: SocketAddrV6, error: QueuedUdpError) {
     if let Some(state) = udp::lookup_udp_error_state(local.into(), remote.into()) {
         if state.peer_endpoint().is_some() {
             state.record_socket_error(error.ancillary.errno);
@@ -89,6 +101,27 @@ fn icmpv4_errno(icmp: &Icmpv4Slice<'_>) -> Option<(LinuxError, u32)> {
         }
         ICMPV4_TIME_EXCEEDED if error_code == ICMPV4_CODE_FRAG_EXPIRED => None,
         ICMPV4_TIME_EXCEEDED => Some((LinuxError::EPROTO, 0)),
+        _ => None,
+    }
+}
+
+fn icmpv6_errno(icmp: &Icmpv6Slice<'_>) -> Option<(LinuxError, u32)> {
+    match icmp.icmp_type() {
+        Icmpv6Type::DestinationUnreachable(code) => {
+            let errno = match code {
+                DestUnreachableCode::NoRoute => LinuxError::ENETUNREACH,
+                DestUnreachableCode::Prohibited => LinuxError::EACCES,
+                DestUnreachableCode::BeyondScope => LinuxError::EHOSTUNREACH,
+                DestUnreachableCode::Address => LinuxError::EHOSTUNREACH,
+                DestUnreachableCode::Port => LinuxError::ECONNREFUSED,
+                DestUnreachableCode::SourceAddressFailedPolicy => LinuxError::EACCES,
+                DestUnreachableCode::RejectRoute => LinuxError::EACCES,
+            };
+            Some((errno, 0))
+        }
+        Icmpv6Type::PacketTooBig { mtu } => Some((LinuxError::EMSGSIZE, mtu)),
+        Icmpv6Type::TimeExceeded(_) => Some((LinuxError::EHOSTUNREACH, 0)),
+        Icmpv6Type::ParameterProblem(_) => Some((LinuxError::EPROTO, 0)),
         _ => None,
     }
 }
@@ -158,6 +191,80 @@ pub(crate) fn inspect_icmpv4_error(packet: &[u8]) {
         },
     };
     queue_ipv4_error(local, remote, error);
+}
+
+/// Inspect an IPv6 ICMPv6 error and queue it for the affected UDP socket.
+///
+/// Mirrors the IPv4 path: parse outer IPv6 + ICMPv6, validate the checksum,
+/// then recover the quoted IPv6 + UDP headers that identify the socket.
+pub(crate) fn inspect_icmpv6_error(packet: &[u8]) {
+    let ip_packet = match Ipv6Header::parse_input(packet) {
+        Ok(header) if header.next_header() == ipv6::PROTOCOL_ICMPV6 => header,
+        _ => return,
+    };
+    let icmp_packet = match ipv6::payload(packet, &ip_packet) {
+        Some(payload) => payload,
+        _ => return,
+    };
+    let icmp = match Icmpv6Slice::from_slice(icmp_packet) {
+        Ok(icmp) => icmp,
+        Err(_) => return,
+    };
+    if !icmpv6::has_valid_checksum(ip_packet.src_addr(), ip_packet.dst_addr(), icmp_packet) {
+        return;
+    }
+    let error_type = icmp.type_u8();
+    let error_code = icmp.code_u8();
+    // Only error messages (type < 128) are delivered to sockets.
+    if error_type >= 128 {
+        return;
+    }
+    let Some((errno, info)) = icmpv6_errno(&icmp) else {
+        return;
+    };
+
+    let original_packet = icmp.payload();
+    let original_ip = match Ipv6Header::parse_icmp_quote(original_packet) {
+        Ok(header) if header.next_header() == ipv6::PROTOCOL_UDP => header,
+        _ => return,
+    };
+    let original_udp = match original_packet.get(original_ip.header_len()..) {
+        Some(payload) => payload,
+        _ => return,
+    };
+    let udp_header = match UdpHeaderSlice::from_slice(original_udp) {
+        Ok(header) => header,
+        _ => return,
+    };
+
+    let local = SocketAddrV6::new(
+        original_ip.src_addr().into(),
+        udp_header.source_port(),
+        0,
+        0,
+    );
+    let remote = SocketAddrV6::new(
+        original_ip.dst_addr().into(),
+        udp_header.destination_port(),
+        0,
+        0,
+    );
+    let offender = SocketAddr::V6(SocketAddrV6::new(ip_packet.src_addr().into(), 0, 0, 0));
+    let payload_start = udp_header.slice().len().min(original_udp.len());
+    let error = QueuedUdpError {
+        payload: original_udp[payload_start..].to_vec(),
+        addr: SocketAddr::V6(remote),
+        ancillary: SocketErrorInfo {
+            errno,
+            origin: SocketErrorOrigin::Icmp,
+            error_type,
+            error_code,
+            info,
+            data: 0,
+            offender: Some(offender),
+        },
+    };
+    queue_ipv6_error(local, remote, error);
 }
 
 #[cfg(unittest)]

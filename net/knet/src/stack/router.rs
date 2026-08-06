@@ -10,10 +10,13 @@ use ktime_types::MonotonicInstant;
 use smoltcp::{
     phy::{DeviceCapabilities, Medium},
     time::Instant,
-    wire::{IpAddress as SmoltcpIpAddress, Ipv6Packet},
+    wire::IpAddress as SmoltcpIpAddress,
 };
 
-use super::ipv4::{self, Ipv4Error, Ipv4Header};
+use super::{
+    ipv4::{self, Ipv4Error, Ipv4Header},
+    ipv6::{Ipv6Error, Ipv6Header},
+};
 pub(crate) use crate::netlink::{
     RT_SCOPE_HOST as ROUTE_SCOPE_HOST, RT_SCOPE_LINK as ROUTE_SCOPE_LINK,
     RT_SCOPE_UNIVERSE as ROUTE_SCOPE_UNIVERSE, RT_TABLE_MAIN as ROUTE_TABLE_MAIN,
@@ -24,7 +27,7 @@ use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
     device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NetDevice},
-    ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
+    ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
     netlink::RtnetlinkState,
 };
 
@@ -261,6 +264,7 @@ pub struct Router {
     data_tx_queue: VecDeque<PacketBuf>,
     next_rx_device: usize,
     ipv4_addrs: Vec<Ipv4AddrEntry>,
+    local_ipv6_addrs: Vec<Ipv6Cidr>,
     next_ipv4_identification: u16,
     pub(crate) devices: Vec<Box<dyn NetDevice>>,
     pub(crate) table: RouteTable,
@@ -279,6 +283,7 @@ impl Router {
             data_tx_queue: VecDeque::with_capacity(DATA_TX_QUEUE_SIZE),
             next_rx_device: 0,
             ipv4_addrs: Vec::new(),
+            local_ipv6_addrs: Vec::new(),
             next_ipv4_identification: 1,
             devices: Vec::new(),
             table: RouteTable::new(),
@@ -349,6 +354,18 @@ impl Router {
         Ok(())
     }
 
+    pub fn queue_ipv6_packet(&mut self, packet: Vec<u8>) -> KResult {
+        if !self.can_enqueue_tx_packet() {
+            return Err(KError::WouldBlock);
+        }
+        self.data_tx_queue.push_back(PacketBuf::from_ip_packet_vec(
+            0,
+            packet,
+            PacketOwner::Ipv6Stack,
+        ));
+        Ok(())
+    }
+
     pub fn add_rule(&mut self, rule: Rule) {
         self.table.add_rule(rule);
     }
@@ -405,6 +422,10 @@ impl Router {
 
     pub fn local_ipv4_addrs(&self) -> Vec<Ipv4Cidr> {
         self.ipv4_addrs.iter().map(|entry| entry.addr).collect()
+    }
+
+    pub fn local_ipv6_addrs(&self) -> &[Ipv6Cidr] {
+        &self.local_ipv6_addrs
     }
 
     /// Returns the MTU advertised through the smoltcp device capabilities.
@@ -557,6 +578,17 @@ impl Router {
     pub fn sync_netlink(&mut self, state: &RtnetlinkState) {
         for (dev_index, device) in self.devices.iter_mut().enumerate() {
             let ifindex = dev_index as i32 + 1;
+            let ipv6_addrs: Vec<_> = state
+                .addrs
+                .iter()
+                .filter(|addr| addr.index == ifindex as u32 && addr.family == 10)
+                .filter_map(|addr_state| match addr_state.address {
+                    SmoltcpIpAddress::Ipv6(addr) => {
+                        Some(Ipv6Cidr::new(addr.into(), addr_state.prefix_len))
+                    }
+                    SmoltcpIpAddress::Ipv4(_) => None,
+                })
+                .collect();
             let neighbors: Vec<_> = state
                 .neighs
                 .iter()
@@ -567,11 +599,20 @@ impl Router {
                 })
                 .collect();
             device.sync_neighbors(&neighbors);
+            if !ipv6_addrs.is_empty() {
+                device.set_ipv6_addrs(&ipv6_addrs);
+            }
         }
 
         self.table.clear();
+        self.local_ipv6_addrs.clear();
+        self.local_ipv6_addrs
+            .extend(state.addrs.iter().filter_map(|addr| match addr.address {
+                SmoltcpIpAddress::Ipv6(ipv6) => Some(Ipv6Cidr::new(ipv6.into(), addr.prefix_len)),
+                SmoltcpIpAddress::Ipv4(_) => None,
+            }));
         for route in state.routes.iter().filter(|route| {
-            route.family == 2
+            (route.family == 2 || route.family == 10)
                 && route.table == ROUTE_TABLE_MAIN
                 && route.route_type == ROUTE_TYPE_UNICAST
         }) {
@@ -580,18 +621,29 @@ impl Router {
                 continue;
             }
 
-            let filter = match route.dst {
-                Some(SmoltcpIpAddress::Ipv4(addr)) => {
+            let filter = match (route.family, route.dst) {
+                (2, Some(SmoltcpIpAddress::Ipv4(addr))) => {
                     IpCidr::Ipv4(Ipv4Cidr::new(addr.into(), route.dst_len))
                 }
-                None => IpCidr::Ipv4(Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, route.dst_len)),
-                Some(SmoltcpIpAddress::Ipv6(_)) => continue,
+                (2, None) => IpCidr::Ipv4(Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, route.dst_len)),
+                (10, Some(SmoltcpIpAddress::Ipv6(addr))) => {
+                    IpCidr::Ipv6(Ipv6Cidr::new(addr.into(), route.dst_len))
+                }
+                (10, None) => IpCidr::Ipv6(Ipv6Cidr::new(Ipv6Address::UNSPECIFIED, route.dst_len)),
+                _ => continue,
             };
             let src = route
                 .prefsrc
                 .or_else(|| {
-                    self.first_ipv4_addr_for_device(route.oif)
-                        .map(|addr| SmoltcpIpAddress::Ipv4(addr.address().into()))
+                    if route.family == 2 {
+                        self.first_ipv4_addr_for_device(route.oif)
+                            .map(|addr| SmoltcpIpAddress::Ipv4(addr.address().into()))
+                    } else {
+                        state.addrs.iter().find_map(|addr| {
+                            (addr.index == route.oif && addr.family == route.family)
+                                .then_some(addr.address)
+                        })
+                    }
                 })
                 .map(super::from_smoltcp_ip_address)
                 .unwrap_or(filter.address());
@@ -811,42 +863,7 @@ impl Router {
                     poll_next |= self.dispatch_ipv4_packet(packet, timestamp);
                 }
                 Some(6) => {
-                    let (src_addr, dst_addr, is_multicast) = {
-                        let ip_packet =
-                            Ipv6Packet::new_checked(ip_packet).expect("got invalid IPv6 packet");
-                        (
-                            IpAddress::Ipv6(ip_packet.src_addr().into()),
-                            IpAddress::Ipv6(ip_packet.dst_addr().into()),
-                            ip_packet.dst_addr().is_multicast(),
-                        )
-                    };
-                    if is_multicast {
-                        for (dev_index, dev) in self.devices.iter_mut().enumerate() {
-                            poll_next |= dev.send_ip_packet(
-                                dev_index as i32 + 1,
-                                dst_addr,
-                                src_addr,
-                                packet.clone(),
-                                timestamp,
-                            );
-                        }
-                    } else {
-                        let Some(rule) = self.table.lookup(&dst_addr) else {
-                            warn!("No route found for destination: {}", dst_addr);
-                            continue;
-                        };
-                        assert_eq!(rule.src, src_addr);
-
-                        let next_hop = rule.via.unwrap_or(dst_addr);
-                        let dev = &mut self.devices[rule.dev];
-                        poll_next |= dev.send_ip_packet(
-                            rule.dev as i32 + 1,
-                            next_hop,
-                            src_addr,
-                            packet,
-                            timestamp,
-                        );
-                    }
+                    poll_next |= self.dispatch_ipv6_packet(packet, timestamp);
                 }
                 _ => debug!("Dropping packet with invalid IP version"),
             }
@@ -910,6 +927,69 @@ impl Router {
         dev.send_ip_packet(rule.dev as i32 + 1, next_hop, src_addr, packet, timestamp)
     }
 
+    fn dispatch_ipv6_packet(&mut self, mut packet: PacketBuf, timestamp: MonotonicInstant) -> bool {
+        let header = match Ipv6Header::prepare_output_packet(&mut packet) {
+            Ok(header) => header,
+            Err(Ipv6Error::Malformed | Ipv6Error::Fragmented) => return false,
+        };
+
+        let src_addr = IpAddress::Ipv6(header.src_addr());
+        let dst_addr = IpAddress::Ipv6(header.dst_addr());
+        if !self.is_local_ipv6_source(header.src_addr()) && !header.src_addr().is_multicast() {
+            warn!("Dropping IPv6 packet with non-local source {}", src_addr);
+            return false;
+        }
+
+        if dst_addr.is_multicast() {
+            let device_count = self.devices.len();
+            let Some((last_device, preceding_devices)) = self.devices.split_last_mut() else {
+                return false;
+            };
+
+            let mut poll_next = false;
+            for (dev_index, dev) in preceding_devices.iter_mut().enumerate() {
+                poll_next |= dev.send_ip_packet(
+                    dev_index as i32 + 1,
+                    dst_addr,
+                    src_addr,
+                    packet.clone(),
+                    timestamp,
+                );
+            }
+            poll_next |= last_device.send_ip_packet(
+                device_count as i32,
+                dst_addr,
+                src_addr,
+                packet,
+                timestamp,
+            );
+            return poll_next;
+        }
+
+        if header.dst_addr().is_link_local() {
+            let Some(dev_index) = self
+                .devices
+                .iter()
+                .position(|dev| dev.ipv6_link_local().is_some())
+            else {
+                warn!("No link-local capable device for destination: {}", dst_addr);
+                return false;
+            };
+            let next_hop = dst_addr;
+            let dev = &mut self.devices[dev_index];
+            return dev.send_ip_packet(dev_index as i32 + 1, next_hop, src_addr, packet, timestamp);
+        }
+
+        let Some(rule) = self.table.lookup(&dst_addr) else {
+            warn!("No route found for destination: {}", dst_addr);
+            return false;
+        };
+
+        let next_hop = rule.via.unwrap_or(dst_addr);
+        let dev = &mut self.devices[rule.dev];
+        dev.send_ip_packet(rule.dev as i32 + 1, next_hop, src_addr, packet, timestamp)
+    }
+
     fn fragment_ipv4_packet_for_output(&mut self, packet: Vec<u8>) -> KResult<Vec<Vec<u8>>> {
         let header = Ipv4Header::parse_output(&packet).map_err(|_| KError::InvalidInput)?;
         let dst_addr = IpAddress::Ipv4(header.dst_addr());
@@ -936,15 +1016,27 @@ impl Router {
             .any(|entry| entry.addr.address() == src_addr)
     }
 
+    fn is_local_ipv6_source(&self, src_addr: Ipv6Address) -> bool {
+        self.local_ipv6_addrs
+            .iter()
+            .any(|addr| addr.address() == src_addr)
+    }
+
     fn is_valid_ipv4_broadcast_source(&self, src_addr: crate::ip::Ipv4Address) -> bool {
         src_addr.is_unspecified() || self.is_local_ipv4_source(src_addr)
     }
 
-    pub fn queue_control_ipv4_packet(&mut self, packet: Vec<u8>) -> KResult {
+    pub fn queue_control_ip_packet(&mut self, packet: Vec<u8>) -> KResult {
         if self.control_tx_queue.len() >= CONTROL_TX_QUEUE_SIZE {
             return Err(KError::WouldBlock);
         }
-        self.control_tx_queue.push_back(tx_packet_buf(packet));
+        let owner = if matches!(ipv4::ip_version(&packet), Some(6)) {
+            PacketOwner::Ipv6Stack
+        } else {
+            PacketOwner::Ipv4Stack
+        };
+        self.control_tx_queue
+            .push_back(PacketBuf::from_ip_packet_vec(0, packet, owner));
         Ok(())
     }
 
@@ -976,10 +1068,6 @@ impl Router {
 fn next_device_index(dev_index: usize, device_count: usize) -> usize {
     debug_assert!(device_count > 0);
     (dev_index + 1) % device_count
-}
-
-fn tx_packet_buf(packet: Vec<u8>) -> PacketBuf {
-    PacketBuf::from_ip_packet_vec(0, packet, PacketOwner::Ipv4Stack)
 }
 
 #[cfg(unittest)]
@@ -1031,9 +1119,11 @@ mod tests {
     #[def_test]
     fn control_dispatch_does_not_free_data_tx_capacity() {
         let mut router = Router::new();
-        router
-            .control_tx_queue
-            .push_back(tx_packet_buf(vec![0; 20]));
+        router.control_tx_queue.push_back(PacketBuf::from_ip_packet_vec(
+            0,
+            vec![0; 20],
+            PacketOwner::Ipv4Stack,
+        ));
         let capacity_before = router.available_tx_packet_slots();
 
         let (work_done, _) = router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1);
@@ -1045,7 +1135,11 @@ mod tests {
     #[def_test]
     fn data_dispatch_frees_data_tx_capacity() {
         let mut router = Router::new();
-        router.data_tx_queue.push_back(tx_packet_buf(vec![0; 20]));
+        router.data_tx_queue.push_back(PacketBuf::from_ip_packet_vec(
+            0,
+            vec![0; 20],
+            PacketOwner::Ipv4Stack,
+        ));
         let capacity_before = router.available_tx_packet_slots();
 
         let (work_done, _) = router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1);

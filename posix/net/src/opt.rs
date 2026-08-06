@@ -22,6 +22,8 @@ const PROTO_TCP: u32 = linux_raw_sys::net::IPPROTO_TCP as u32;
 
 const PROTO_IP: u32 = linux_raw_sys::net::IPPROTO_IP as u32;
 
+const PROTO_IPV6: u32 = linux_raw_sys::net::IPPROTO_IPV6 as u32;
+
 const PACKET_ADD_MEMBERSHIP: u32 = 1;
 const PACKET_DROP_MEMBERSHIP: u32 = 2;
 const PACKET_STATISTICS: u32 = 6;
@@ -178,6 +180,8 @@ macro_rules! call_dispatch {
             (PROTO_IP, IP_TTL) => Ttl as Int<u8>,
             (PROTO_IP, IP_RECVERR) => RecvErr as IntBool,
             (PROTO_IP, IP_MTU_DISCOVER) => MtuDiscover as Int<u8>,
+
+            (PROTO_IPV6, IPV6_V6ONLY) => Ipv6Only as IntBool,
 
             (SOL_PACKET, PACKET_STATISTICS) => PacketStatistics as PacketStats,
             (SOL_PACKET, PACKET_ADD_MEMBERSHIP) => PacketAddMembership as PacketMembershipConv,
