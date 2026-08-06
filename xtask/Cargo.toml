@@ -4,6 +4,7 @@ members = [
     "xconfig",
     "xkmake",
     "uapp",
+    "ldp",
 ]
 
 [workspace.package]

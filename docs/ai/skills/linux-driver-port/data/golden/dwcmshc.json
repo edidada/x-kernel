@@ -1,0 +1,31 @@
+{
+  "$comment": "Golden 回归基线。把 dwcmshc walkthrough 声明的映射/缺口变成机器可查的断言。改了数据,ldp golden dwcmshc 立刻告诉你有没有把 walkthrough 带歪(Ch6 FAIL_TO_PASS/PASS_TO_PASS + Ch8 文档/数据漂移检测)。",
+  "id": "dwcmshc",
+  "title": "Linux dwcmshc → x-kernel SD/MMC 完整走查",
+  "source_doc": "examples/dwcmshc-walkthrough.md",
+  "real_impl": {
+    "hardware_layer": "drivers/block/src/sdmmc.rs",
+    "glue_layer": "drivers/kdriver/src/driver_registry/block/sdmmc.rs"
+  },
+  "expected_api_mappings": [
+    {"linux": "devm_ioremap", "xkernel_contains": "iomap_first_mmio", "source_substring": "kdriver/src/lib.rs"},
+    {"linux": "readl", "xkernel_contains": "read32"},
+    {"linux": "add_disk", "xkernel_contains": "publish_block"},
+    {"linux": "spin_lock_irqsave", "xkernel_contains": "SpinNoIrq"},
+    {"linux": "dev_err", "xkernel_contains": "log"}
+  ],
+  "expected_gaps": [
+    {"id": "", "label": "sdhci-core / mmc-core / sdhci-pltfm 框架", "severity": "blocker", "handling": "不复用框架,改用 simple_sdmmc"},
+    {"id": "clk-framework", "label": "clk framework", "severity": "works-around", "handling": "删 enable;选频缺失(仅基础速率)"},
+    {"id": "phy", "label": "phy", "severity": "works-around", "handling": "vendor 寄存器固定配置,不走 phy 框架"},
+    {"id": "pinctrl", "label": "pinctrl", "severity": "works-around", "handling": "firmware 已 mux"},
+    {"id": "regmap", "label": "regmap(vendor GRF)", "severity": "works-around", "handling": "需要时用 Io RMW helper"},
+    {"id": "workqueue", "label": "mmc-core workqueue 下半部", "severity": "works-around", "handling": "simple_sdmmc 轮询/阻塞完成"}
+  ],
+  "expected_verdict": "受限可用(基础 SD/MMC;高速/HS200/HS400 未支持)",
+  "assertions": [
+    "expected_api_mappings 里每条都能在 api-mapping.json 找到对应条目(否则 walkthrough 引用了编造的 API)",
+    "expected_gaps 里带标准 id(clk-framework/phy/pinctrl/regmap/workqueue)的必须命中 gaps.json 且 severity 一致(否则 walkthrough 与缺口库漂移)",
+    "framework 缺口无标准 id(本项目独有的'子框架'概念),允许只做存在性提示"
+  ]
+}

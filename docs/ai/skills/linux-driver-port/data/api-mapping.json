@@ -1,0 +1,693 @@
+{
+  "$comment": "真相源。knowledge/api-mapping.md 由 ldp gen-doc 生成。每条带 source 证据(铁律2) + keywords 检索前缀(Ch3)。改这里,别改 md。",
+  "conventions": {
+    "dev": "&DeviceObject 或 Arc<DeviceObject>",
+    "DriverResult": "Result<T, DriverError>",
+    "ResResult": "Result<T, ResError>"
+  },
+  "sections": [
+    {
+      "id": "driver-model",
+      "title": "驱动模型与注册",
+      "order": 1,
+      "rows": [
+        {
+          "linux": "struct platform_driver + .probe/.remove",
+          "xkernel": "impl DeviceDriver for XxxDriver (probe_device/remove)",
+          "note": "DeviceDriver trait 的 probe_device/remove/suspend/resume/shutdown;除 probe_device 外都有默认实现",
+          "source": {"path": "drivers/kdevice/src/driver/mod.rs"},
+          "keywords": ["platform_driver", "probe", "remove", "DeviceDriver", "module_platform_driver"]
+        },
+        {
+          "linux": "static const struct of_device_id xxx_match[] / of_match_table",
+          "xkernel": "const XXX: FirmwareMatchSpec { alias, dt_compatibles, acpi_ids }",
+          "note": "dt_compatibles 即匹配表",
+          "source": {"path": "drivers/kdriver/src/driver_registry/firmware_specs.rs"},
+          "keywords": ["of_device_id", "of_match_table", "FirmwareMatchSpec", "compatible"]
+        },
+        {
+          "linux": "module_platform_driver(xxx) / module_init",
+          "xkernel": "pub(super) fn descriptor() -> BoxedDriver { Arc::new(XxxDriver) } + 编译期 DRIVER_FACTORIES",
+          "note": "无运行时 module",
+          "source": {"path": "drivers/kdriver/src/driver_registry"},
+          "keywords": ["module_platform_driver", "module_init", "descriptor", "DRIVER_FACTORIES"]
+        },
+        {
+          "linux": "platform_set_drvdata / platform_get_drvdata",
+          "xkernel": "用 Arc<T> 持有私有数据,经 kclass::publish_* 发布",
+          "note": "无直接等价;drvdata 模式 → RAII 所有权替代",
+          "source": null,
+          "keywords": ["platform_set_drvdata", "platform_get_drvdata", "drvdata", "Arc"]
+        },
+        {
+          "linux": "module_pci_driver",
+          "xkernel": "同 platform,但 bus_types() 返回 &[BusTypeId::PCI]",
+          "note": "",
+          "source": {"path": "drivers/kdevice/src/bus/bus_type.rs"},
+          "keywords": ["module_pci_driver", "pci", "BusTypeId"]
+        },
+        {
+          "linux": "MODULE_AUTHOR/LICENSE/DESCRIPTION",
+          "xkernel": "文件头 SPDX 许可注释",
+          "note": "// SPDX-License-Identifier: Apache-2.0",
+          "source": null,
+          "keywords": ["MODULE_AUTHOR", "SPDX", "license"]
+        }
+      ]
+    },
+    {
+      "id": "mmio",
+      "title": "设备资源 — MMIO 寄存器",
+      "order": 2,
+      "rows": [
+        {
+          "linux": "platform_get_resource(pdev, IORESOURCE_MEM, n)",
+          "xkernel": "device.first_mmio()(首个区域)或遍历 device.resources()",
+          "note": "多区域时遍历 resources()",
+          "source": {"path": "drivers/kdevice/src/device/object.rs", "line": 132},
+          "keywords": ["platform_get_resource", "IORESOURCE_MEM", "first_mmio", "resources"]
+        },
+        {
+          "linux": "devm_platform_ioremap_resource / devm_ioremap",
+          "xkernel": "胶水:crate::iomap_first_mmio(dev, \"name\")? 返回 (NonNull<u8>, size);底层 device_res::devm_iomap(dev, region, \"name\")",
+          "note": "推荐 vaddr 模式",
+          "source": {"path": "drivers/kdriver/src/lib.rs", "line": 93},
+          "keywords": ["devm_platform_ioremap_resource", "devm_ioremap", "iomap_first_mmio", "devm_iomap", "ioremap"]
+        },
+        {
+          "linux": "ioremap(非 devm)",
+          "xkernel": "Io::map(MmioRegion{base,size}, \"name\")?(RAII,drop 时 unmap)",
+          "note": "",
+          "source": {"path": "drivers/device-res/src/mmio.rs"},
+          "keywords": ["ioremap", "Io::map", "MmioRegion"]
+        },
+        {
+          "linux": "readl/writel, readb/readw/readq, writeb…",
+          "xkernel": "Io::read32(offset) / write32(offset, val);另有 read8/16/64、write8/16/64",
+          "note": "带边界检查 + Acquire/Release fence",
+          "source": {"path": "drivers/device-res/src/mmio.rs"},
+          "keywords": ["readl", "writel", "readb", "readw", "readq", "writeb", "Io::read32", "Io::write32"]
+        },
+        {
+          "linux": "ioread32/iowrite32",
+          "xkernel": "同上(Io 句柄方法)",
+          "note": "",
+          "source": {"path": "drivers/device-res/src/mmio.rs"},
+          "keywords": ["ioread32", "iowrite32", "Io"]
+        },
+        {
+          "linux": "devm_platform_get_and_ioremap_resource",
+          "xkernel": "first_mmio() + devm_iomap(或直接 iomap_first_mmio)",
+          "note": "",
+          "source": null,
+          "keywords": ["devm_platform_get_and_ioremap_resource"]
+        },
+        {
+          "linux": "memcpy_fromio / memcpy_toio",
+          "xkernel": "用 Io::as_ptr()->NonNull<u8> 自行 volatile 拷贝(无封装 helper)",
+          "note": "无 helper",
+          "source": null,
+          "keywords": ["memcpy_fromio", "memcpy_toio"]
+        }
+      ]
+    },
+    {
+      "id": "irq",
+      "title": "设备资源 — 中断(IRQ)",
+      "order": 3,
+      "rows": [
+        {
+          "linux": "platform_get_irq(pdev, n) / of_irq_get",
+          "xkernel": "device.first_irq() -> Option<IrqResource>(已解析)",
+          "note": "",
+          "source": {"path": "drivers/kdevice/src/device/object.rs", "line": 140},
+          "keywords": ["platform_get_irq", "of_irq_get", "first_irq", "IrqResource"]
+        },
+        {
+          "linux": "devm_request_irq(dev, irq, handler, flags, name, data)",
+          "xkernel": "device_res::devm_request_irq(dev, irq: IrqResource, Arc<dyn IrqHandler>)? 或胶水 helper",
+          "note": "",
+          "source": {"path": "drivers/device-res/src/irq.rs"},
+          "keywords": ["devm_request_irq", "request_irq", "IrqHandler"]
+        },
+        {
+          "linux": "request_irq(非 devm)",
+          "xkernel": "Irq::request(irq, Arc<dyn IrqHandler>)?(RAII,drop 释放)",
+          "note": "",
+          "source": {"path": "drivers/device-res/src/irq.rs"},
+          "keywords": ["request_irq", "Irq::request"]
+        },
+        {
+          "linux": "irqreturn_t (*handler)(int irq, void *data)",
+          "xkernel": "impl IrqHandler { fn handle(&self) -> IrqEvent };闭包 Fn()->IrqEvent + Send+Sync 自动实现",
+          "note": "可直接 Arc::new(|| { … IrqEvent::HANDLED })",
+          "source": {"path": "drivers/device-res/src/irq.rs"},
+          "keywords": ["irqreturn_t", "irq_handler_t", "IrqHandler", "IrqEvent"]
+        },
+        {
+          "linux": "IRQ_HANDLED / IRQ_NONE",
+          "xkernel": "IrqEvent::HANDLED / IrqEvent::NOT_HANDLED(另有 from_sources(u8))",
+          "note": "",
+          "source": {"path": "drivers/device-res/src/irq.rs"},
+          "keywords": ["IRQ_HANDLED", "IRQ_NONE", "IrqEvent"]
+        },
+        {
+          "linux": "IRQF_TRIGGER_*",
+          "xkernel": "IrqTrigger::{EdgeRising, EdgeFalling, LevelHigh, LevelLow, Unknown(u32)}",
+          "note": "DT 已解析时直接用 first_irq() 的 trigger",
+          "source": {"path": "drivers/device-res/src/irq.rs"},
+          "keywords": ["IRQF_TRIGGER", "IrqTrigger"]
+        },
+        {
+          "linux": "disable_irq/enable_irq",
+          "xkernel": "Irq::set_enabled(bool)",
+          "note": "",
+          "source": {"path": "drivers/device-res/src/irq.rs"},
+          "keywords": ["disable_irq", "enable_irq", "set_enabled"]
+        },
+        {
+          "linux": "free_irq",
+          "xkernel": "drop Irq 句柄(RAII)",
+          "note": "",
+          "source": {"path": "drivers/device-res/src/irq.rs"},
+          "keywords": ["free_irq", "drop"]
+        },
+        {
+          "linux": "request_threaded_irq / 中断下半部",
+          "xkernel": "缺口:无线程化 IRQ;上半部用 IrqHandler,延后处理见 gaps(workqueue)",
+          "note": "status=missing",
+          "source": null,
+          "keywords": ["request_threaded_irq", "threaded_irq", "tasklet"],
+          "status": "missing"
+        }
+      ]
+    },
+    {
+      "id": "dma",
+      "title": "设备资源 — DMA",
+      "order": 4,
+      "rows": [
+        {
+          "linux": "dmam_alloc_coherent / dma_alloc_coherent",
+          "xkernel": "device_res::devm_alloc_coherent(dev, DmaSpec)? 返回 (NonNull<u8>, bus_addr: u64)",
+          "note": "",
+          "source": {"path": "drivers/device-res/src/dma.rs"},
+          "keywords": ["dmam_alloc_coherent", "dma_alloc_coherent", "devm_alloc_coherent", "DmaSpec"]
+        },
+        {
+          "linux": "dma_alloc_coherent(非 devm)",
+          "xkernel": "DmaCoherent::alloc(DmaSpec)?(RAII);类型化 CoherentBox<T>::alloc / CoherentArray<T>::alloc",
+          "note": "",
+          "source": {"path": "drivers/device-res/src/dma.rs"},
+          "keywords": ["dma_alloc_coherent", "DmaCoherent", "CoherentBox", "CoherentArray"]
+        },
+        {
+          "linux": "DMA_TO_DEVICE/BIDIRECTIONAL/FROM_DEVICE",
+          "xkernel": "DmaDirection::{DriverToDevice, Bidirectional, DeviceToDriver}",
+          "note": "DmaSpec::new 默认 Bidirectional;.with_direction(d) 覆盖",
+          "source": {"path": "drivers/device-res/src/dma.rs"},
+          "keywords": ["DMA_TO_DEVICE", "DMA_BIDIRECTIONAL", "DMA_FROM_DEVICE", "DmaDirection"]
+        },
+        {
+          "linux": "dma_free_coherent",
+          "xkernel": "drop DmaCoherent(RAII)",
+          "note": "",
+          "source": {"path": "drivers/device-res/src/dma.rs"},
+          "keywords": ["dma_free_coherent"]
+        },
+        {
+          "linux": "dma_map_single / dma_unmap_single(streaming)",
+          "xkernel": "DmaOp::map_streaming(默认 Unsupported,看宿主是否实现)",
+          "note": "多数路径走 coherent",
+          "source": {"path": "drivers/device-res/src/dma.rs"},
+          "keywords": ["dma_map_single", "dma_unmap_single", "map_streaming"]
+        },
+        {
+          "linux": "dma_sync_single_for_cpu/device",
+          "xkernel": "DmaOp::sync_for_cpu/sync_for_device(默认 no-op)",
+          "note": "coherent 内存无需 sync",
+          "source": {"path": "drivers/device-res/src/dma.rs"},
+          "keywords": ["dma_sync_single_for_cpu", "sync_for_cpu", "sync_for_device"]
+        },
+        {
+          "linux": "dma_set_mask_and_coherent",
+          "xkernel": "当前无显式掩码 API;RK3588 aarch64 默认 64-bit",
+          "note": "视为可选,缺口记录",
+          "source": null,
+          "keywords": ["dma_set_mask_and_coherent", "dma_mask"]
+        }
+      ]
+    },
+    {
+      "id": "publish",
+      "title": "设备类发布(把驱动实例挂进系统)",
+      "order": 5,
+      "rows": [
+        {
+          "linux": "register_netdev / net_device_ops",
+          "xkernel": "impl NetDevice for … + kclass::publish_net(device, Box::new(dev))?",
+          "note": "宏生成",
+          "source": {"path": "drivers/kclass/src/lib.rs", "line": 478},
+          "keywords": ["register_netdev", "net_device_ops", "publish_net", "NetDevice"]
+        },
+        {
+          "linux": "block_device_operations + add_disk / gendisk",
+          "xkernel": "impl BlockDevice for … + kclass::publish_block(device, Box::new(dev))?",
+          "note": "",
+          "source": {"path": "drivers/block/src/lib.rs"},
+          "keywords": ["block_device_operations", "add_disk", "gendisk", "publish_block", "BlockDevice"]
+        },
+        {
+          "linux": "misc_register / cdev_init+add / tty_register_driver",
+          "xkernel": "impl CharDevice for … + impl Device + kclass::publish_char(device, Box::new(dev))?",
+          "note": "",
+          "source": {"path": "drivers/kdriver/src/driver_registry/char/serial.rs"},
+          "keywords": ["misc_register", "cdev_init", "tty_register_driver", "publish_char", "CharDevice"]
+        },
+        {
+          "linux": "platform_device_register(静态设备)",
+          "xkernel": "平台后端的 static device 机制(一般无需驱动侧操作)",
+          "note": "",
+          "source": null,
+          "keywords": ["platform_device_register"]
+        },
+        {
+          "linux": "i2c/spi/watchdog/rtc/… subsystem 注册",
+          "xkernel": "缺口:无对应 DeviceKind 与 class;见 gaps",
+          "note": "RK3588 移植最常见的阻塞点;status=missing",
+          "source": null,
+          "keywords": ["i2c_add_adapter", "spi_register_master", "watchdog", "rtc", "publish_i2c"],
+          "status": "missing"
+        }
+      ]
+    },
+    {
+      "id": "sync",
+      "title": "同步与并发",
+      "order": 6,
+      "rows": [
+        {
+          "linux": "spinlock_t + spin_lock_irqsave/restore",
+          "xkernel": "kspin::SpinNoIrq<T>(SpinNoIrq::new(t),.lock() 取 guard)",
+          "note": "最常用",
+          "source": {"path": "task/kspin"},
+          "keywords": ["spinlock_t", "spin_lock_irqsave", "SpinNoIrq", "spin_lock"]
+        },
+        {
+          "linux": "spin_lock(不关中断,仅防抢占)",
+          "xkernel": "kspin::SpinNoPreempt<T>",
+          "note": "",
+          "source": {"path": "task/kspin"},
+          "keywords": ["spin_lock", "SpinNoPreempt"]
+        },
+        {
+          "linux": "raw_spinlock_t",
+          "xkernel": "kspin::SpinRaw<T>",
+          "note": "",
+          "source": {"path": "task/kspin"},
+          "keywords": ["raw_spinlock_t", "SpinRaw"]
+        },
+        {
+          "linux": "rwlock_t",
+          "xkernel": "kspin::SpinRwNoIrq<T>",
+          "note": "",
+          "source": {"path": "task/kspin"},
+          "keywords": ["rwlock_t", "SpinRwNoIrq"]
+        },
+        {
+          "linux": "DEFINE_MUTEX / mutex_lock/unlock",
+          "xkernel": "ksync::Mutex<T>(.lock())",
+          "note": "可睡眠上下文",
+          "source": null,
+          "keywords": ["mutex_lock", "DEFINE_MUTEX", "ksync::Mutex"]
+        },
+        {
+          "linux": "rwlock(可睡眠)",
+          "xkernel": "ksync::RwLock<T>(.read()/.write())",
+          "note": "",
+          "source": null,
+          "keywords": ["rwlock", "ksync::RwLock"]
+        },
+        {
+          "linux": "struct semaphore / down/up",
+          "xkernel": "ksync::Semaphore::new(n)(.acquire()/.try_acquire())",
+          "note": "",
+          "source": null,
+          "keywords": ["semaphore", "down", "up", "Semaphore"]
+        },
+        {
+          "linux": "atomic_t / atomic_set/atomic_read/atomic_inc",
+          "xkernel": "core::sync::atomic::{AtomicU32, AtomicUsize, …} + Ordering",
+          "note": "",
+          "source": null,
+          "keywords": ["atomic_t", "atomic_set", "atomic_read", "AtomicU32"]
+        },
+        {
+          "linux": "wait_event*/wait_queue_head_t",
+          "xkernel": "ktask::WaitQueue(.wait()/.wait_until(closure)/.wait_timeout(dur)/.notify_one(true)/.notify_all(true))",
+          "note": "",
+          "source": {"path": "task/ktask/src/wait_queue.rs"},
+          "keywords": ["wait_event", "wait_queue_head_t", "WaitQueue"]
+        },
+        {
+          "linux": "struct completion / wait_for_completion",
+          "xkernel": "无直接等价 → 用 WaitQueue 替代(缺口记录)",
+          "note": "见 gaps;status=workaround",
+          "source": {"path": "task/ktask/src/wait_queue.rs"},
+          "keywords": ["completion", "wait_for_completion"],
+          "status": "workaround"
+        },
+        {
+          "linux": "workqueue / INIT_WORK / schedule_work",
+          "xkernel": "缺口:无 workqueue/tasklet;见 gaps",
+          "note": "延后工作需自建内核线程或上报;status=missing",
+          "source": null,
+          "keywords": ["workqueue", "INIT_WORK", "schedule_work", "tasklet"],
+          "status": "missing"
+        },
+        {
+          "linux": "RCU",
+          "xkernel": "缺口:无 RCU;用 Arc/RwLock 替代并记录",
+          "note": "status=workaround",
+          "source": null,
+          "keywords": ["RCU", "rcu_read_lock"],
+          "status": "workaround"
+        }
+      ]
+    },
+    {
+      "id": "mem",
+      "title": "内存分配",
+      "order": 7,
+      "rows": [
+        {
+          "linux": "kmalloc/kzalloc + kfree",
+          "xkernel": "Box::new(x) / Vec::new() / alloc::vec![];kfree 由 drop 完成",
+          "note": "alloc crate",
+          "source": null,
+          "keywords": ["kmalloc", "kzalloc", "kfree", "Box", "Vec"]
+        },
+        {
+          "linux": "devm_kmalloc/devm_kzalloc",
+          "xkernel": "Box::new(x),生命周期挂设备时用 device.register_cleanup(Box::new(|| …))",
+          "note": "无专用 devm 分配器;RAII + cleanup",
+          "source": null,
+          "keywords": ["devm_kmalloc", "devm_kzalloc", "register_cleanup"]
+        },
+        {
+          "linux": "kcalloc / 数组分配",
+          "xkernel": "vec![T::default(); n] 或 Vec::with_capacity(n)",
+          "note": "",
+          "source": null,
+          "keywords": ["kcalloc", "Vec"]
+        },
+        {
+          "linux": "kmem_cache_create(slab)",
+          "xkernel": "缺口:无 slab cache;用 Box/Vec,性能敏感上报",
+          "note": "status=optional",
+          "source": null,
+          "keywords": ["kmem_cache_create", "slab", "kmem_cache"],
+          "status": "missing"
+        },
+        {
+          "linux": "get_zeroed_page / __get_free_page",
+          "xkernel": "axalloc::global_allocator().alloc_pages(pages, PAGE_SIZE_4K, UsageKind::Dma)",
+          "note": "fxmac 用法",
+          "source": {"path": "drivers/kdriver/src/driver_registry/net/fxmac.rs", "line": 27},
+          "keywords": ["get_zeroed_page", "__get_free_page", "alloc_pages", "alloc_pages"]
+        },
+        {
+          "linux": "alloc_pages / __get_free_pages",
+          "xkernel": "同 get_zeroed_page",
+          "note": "",
+          "source": null,
+          "keywords": ["alloc_pages", "__get_free_pages"]
+        },
+        {
+          "linux": "vmalloc",
+          "xkernel": "缺口:无 vmalloc 等价;大缓冲用 DMA coherent 或上报",
+          "note": "status=workaround",
+          "source": null,
+          "keywords": ["vmalloc"],
+          "status": "workaround"
+        },
+        {
+          "linux": "kmap/kunmap",
+          "xkernel": "无(aarch64 直接用虚拟地址)",
+          "note": "",
+          "source": null,
+          "keywords": ["kmap", "kunmap"]
+        },
+        {
+          "linux": "copy_to_user/copy_from_user",
+          "xkernel": "无用户态拷贝 API;char 设备在 CharDevice::read/write 里直接操作 &mut [u8]/&[u8]",
+          "note": "",
+          "source": null,
+          "keywords": ["copy_to_user", "copy_from_user", "CharDevice"]
+        }
+      ]
+    },
+    {
+      "id": "time",
+      "title": "时间、延迟与定时",
+      "order": 8,
+      "rows": [
+        {
+          "linux": "msleep(ms) / schedule_timeout",
+          "xkernel": "ktask::sleep(core::time::Duration::from_millis(ms))",
+          "note": "",
+          "source": {"path": "task/ktask/src/api.rs", "line": 336},
+          "keywords": ["msleep", "schedule_timeout", "ktask::sleep"]
+        },
+        {
+          "linux": "msleep_interruptible",
+          "xkernel": "ktask::sleep + WaitQueue 条件",
+          "note": "",
+          "source": null,
+          "keywords": ["msleep_interruptible"]
+        },
+        {
+          "linux": "usleep_range",
+          "xkernel": "ktask::sleep(Duration::from_micros(..))",
+          "note": "",
+          "source": null,
+          "keywords": ["usleep_range"]
+        },
+        {
+          "linux": "udelay / mdelay(忙等)",
+          "xkernel": "缺口:无 busy-wait helper;core::hint::spin_loop() 自旋 + monotonic_time_nanos 截止循环",
+          "note": "见 gaps;status=workaround",
+          "source": null,
+          "keywords": ["udelay", "mdelay", "ndelay", "busy_wait"],
+          "status": "workaround"
+        },
+        {
+          "linux": "jiffies / msecs_to_jiffies / time_after",
+          "xkernel": "khal::time::monotonic_time_nanos() / TimeValue 自行换算",
+          "note": "",
+          "source": null,
+          "keywords": ["jiffies", "msecs_to_jiffies", "time_after", "monotonic_time_nanos"]
+        },
+        {
+          "linux": "ktime_get / ktime_get_ns",
+          "xkernel": "khal::time::monotonic_time_nanos()",
+          "note": "",
+          "source": null,
+          "keywords": ["ktime_get", "ktime_get_ns", "monotonic_time_nanos"]
+        },
+        {
+          "linux": "setup_timer / timer_setup / mod_timer",
+          "xkernel": "缺口:无通用软定时器;ktask 有 register_timer_callback(很薄);hrtimer 缺",
+          "note": "见 gaps;status=workaround",
+          "source": null,
+          "keywords": ["setup_timer", "timer_setup", "mod_timer", "hrtimer"],
+          "status": "workaround"
+        }
+      ]
+    },
+    {
+      "id": "log-err",
+      "title": "日志与错误处理",
+      "order": 9,
+      "rows": [
+        {
+          "linux": "dev_info/dev_err/dev_warn/dev_dbg",
+          "xkernel": "log::info!/error!/warn!/debug!(无 dev_ 变体,自行拼 device.location()/name)",
+          "note": "早期 init 的 log::* 静默,改用 kernel_boot::bootln!",
+          "source": null,
+          "keywords": ["dev_info", "dev_err", "dev_warn", "dev_dbg", "log", "bootln"]
+        },
+        {
+          "linux": "printk / pr_info/pr_err",
+          "xkernel": "log::info! 等",
+          "note": "",
+          "source": null,
+          "keywords": ["printk", "pr_info", "pr_err"]
+        },
+        {
+          "linux": "-ENOMEM",
+          "xkernel": "DriverError::NoMemory",
+          "note": "",
+          "source": {"path": "drivers/driver_base/src/lib.rs", "line": 137},
+          "keywords": ["ENOMEM", "NoMemory"]
+        },
+        {
+          "linux": "-EINVAL",
+          "xkernel": "DriverError::InvalidInput",
+          "note": "",
+          "source": {"path": "drivers/driver_base/src/lib.rs", "line": 137},
+          "keywords": ["EINVAL", "InvalidInput"]
+        },
+        {
+          "linux": "-ENODEV/-ENXIO",
+          "xkernel": "DriverError::BadState 或 InvalidInput(视语义)",
+          "note": "",
+          "source": {"path": "drivers/driver_base/src/lib.rs", "line": 137},
+          "keywords": ["ENODEV", "ENXIO", "BadState"]
+        },
+        {
+          "linux": "-EBUSY",
+          "xkernel": "DriverError::ResourceBusy",
+          "note": "",
+          "source": {"path": "drivers/driver_base/src/lib.rs", "line": 137},
+          "keywords": ["EBUSY", "ResourceBusy"]
+        },
+        {
+          "linux": "-EIO",
+          "xkernel": "DriverError::Io",
+          "note": "",
+          "source": {"path": "drivers/driver_base/src/lib.rs", "line": 137},
+          "keywords": ["EIO", "Io"]
+        },
+        {
+          "linux": "-ENOTSUPP/-EOPNOTSUPP",
+          "xkernel": "DriverError::Unsupported",
+          "note": "",
+          "source": {"path": "drivers/driver_base/src/lib.rs", "line": 137},
+          "keywords": ["ENOTSUPP", "EOPNOTSUPP", "Unsupported"]
+        },
+        {
+          "linux": "-EEXIST",
+          "xkernel": "DriverError::AlreadyExists",
+          "note": "",
+          "source": {"path": "drivers/driver_base/src/lib.rs", "line": 137},
+          "keywords": ["EEXIST", "AlreadyExists"]
+        },
+        {
+          "linux": "错误传播 < 0 返回 + IS_ERR",
+          "xkernel": "? 运算符 + DriverResult<T> / ResResult<T>;map_err 在两套错误间转换",
+          "note": "",
+          "source": null,
+          "keywords": ["IS_ERR", "Result", "map_err", "DriverResult", "ResResult"]
+        }
+      ]
+    },
+    {
+      "id": "dt",
+      "title": "设备树属性读取",
+      "order": 10,
+      "rows": [
+        {
+          "linux": "of_property_read_u32(node, \"x\", &val)",
+          "xkernel": "of::property_u32(node, \"x\") -> Option<u32>",
+          "note": "",
+          "source": {"path": "drivers/of/src/lib.rs", "line": 89},
+          "keywords": ["of_property_read_u32", "property_u32"]
+        },
+        {
+          "linux": "of_find_compatible_node",
+          "xkernel": "of::find_compatible(\"vendor,x\") -> Option<FdtNode>",
+          "note": "",
+          "source": {"path": "drivers/of/src/lib.rs"},
+          "keywords": ["of_find_compatible_node", "find_compatible"]
+        },
+        {
+          "linux": "of_find_node_by_name/path",
+          "xkernel": "of::find_node(\"/path\") / resolve_node(path_or_alias)",
+          "note": "resolve_node 偶有不稳;稳健按结构找 fdt.all_nodes().find(...)",
+          "source": {"path": "drivers/of/src/lib.rs"},
+          "keywords": ["of_find_node_by_name", "of_find_node_by_path", "find_node", "resolve_node"]
+        },
+        {
+          "linux": "取设备时钟(clocks/clock-names)",
+          "xkernel": "clk::devm_clk_get(device, \"ciu\") -> ResResult<Clk>(总线已预解析 ResourceDesc::Clock)",
+          "note": "驱动不碰 DT;详见 clk-subsystem",
+          "source": {"path": "docs/ai/skills/linux-driver-port/knowledge/clk-subsystem.md"},
+          "status": "missing",
+          "keywords": ["clocks", "clock-names", "devm_clk_get", "clk_get_rate", "Clk"]
+        },
+        {
+          "linux": "of_get_named_gpio",
+          "xkernel": "缺口:无 gpio;见 gaps",
+          "note": "status=missing",
+          "source": null,
+          "keywords": ["of_get_named_gpio", "gpio", "gpiod"],
+          "status": "missing"
+        },
+        {
+          "linux": "of_irq_by_resource / of_irq_get",
+          "xkernel": "device.first_irq()(已解析)或 of::first_interrupt_desc(node)",
+          "note": "",
+          "source": null,
+          "keywords": ["of_irq_by_resource", "of_irq_get", "first_interrupt_desc"]
+        },
+        {
+          "linux": "of_address_to_resource",
+          "xkernel": "device.first_mmio()(已解析)",
+          "note": "",
+          "source": null,
+          "keywords": ["of_address_to_resource"]
+        },
+        {
+          "linux": "of_property_read_string",
+          "xkernel": "经 FdtNode property 接口(of::fdt() 取底层 LinuxFdt)",
+          "note": "较薄",
+          "source": null,
+          "keywords": ["of_property_read_string", "FdtNode"]
+        },
+        {
+          "linux": "of_match_node",
+          "xkernel": "由总线层用 FirmwareMatchSpec.dt_compatibles 自动匹配",
+          "note": "驱动侧只声明 spec",
+          "source": null,
+          "keywords": ["of_match_node"]
+        }
+      ]
+    },
+    {
+      "id": "addr",
+      "title": "地址转换(DMA / 物理-虚拟)",
+      "order": 11,
+      "rows": [
+        {
+          "linux": "virt_to_phys",
+          "xkernel": "khal::mem::v2p(VirtAddr) -> PhysAddr",
+          "note": "",
+          "source": {"path": "drivers/kdriver/src/driver_registry/net/fxmac.rs", "line": 18},
+          "keywords": ["virt_to_phys", "v2p"]
+        },
+        {
+          "linux": "phys_to_virt",
+          "xkernel": "khal::mem::p2v(PhysAddr) -> VirtAddr",
+          "note": "",
+          "source": null,
+          "keywords": ["phys_to_virt", "p2v"]
+        },
+        {
+          "linux": "PAGE_SIZE",
+          "xkernel": "khal::mem::PAGE_SIZE_4K",
+          "note": "",
+          "source": null,
+          "keywords": ["PAGE_SIZE", "PAGE_SIZE_4K"]
+        },
+        {
+          "linux": "物理地址类型",
+          "xkernel": "khal::mem::PhysAddr::from_usize / VirtAddr::from_usize",
+          "note": "serial.rs 用法",
+          "source": null,
+          "keywords": ["PhysAddr", "VirtAddr", "from_usize"]
+        }
+      ]
+    }
+  ]
+}
