@@ -255,4 +255,9 @@ pub trait NetDevice: Send + Sync {
             .find(|addr| addr.is_link_local())
             .or_else(|| self.ipv6_addrs().first().map(|cidr| cidr.address()))
     }
+
+    /// Selects a unicast source address for replies to multicast ICMPv6.
+    fn ipv6_echo_source(&self) -> Option<Ipv6Address> {
+        self.ipv6_link_local()
+    }
 }

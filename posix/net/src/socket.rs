@@ -75,7 +75,7 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             if proto != 0 && proto != IPPROTO_TCP as u32 {
                 return Err(KError::from(LinuxError::EPROTONOSUPPORT));
             }
-            knet::Socket::Tcp(Box::new(TcpSocket::new()))
+            knet::Socket::Tcp(Box::new(TcpSocket::new_v6()))
         }
         (AF_INET6, SOCK_DGRAM) => {
             if proto != 0 && proto != IPPROTO_UDP as u32 {

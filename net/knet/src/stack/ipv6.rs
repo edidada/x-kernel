@@ -15,7 +15,7 @@ use crate::{
 };
 
 pub(crate) const PROTOCOL_ICMPV6: u8 = 58;
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub(crate) const PROTOCOL_TCP: u8 = 6;
 pub(crate) const PROTOCOL_UDP: u8 = 17;
 
@@ -44,7 +44,6 @@ pub(crate) struct Ipv6Header {
     transport_offset: usize,
     /// Total length of the IPv6 packet including the base header.
     total_len: usize,
-    #[allow(dead_code)]
     traffic_class: u8,
 }
 

@@ -221,6 +221,12 @@ impl RouteTable {
             .find(|rule| rule.filter.contains_addr(dst))
     }
 
+    pub fn lookup_on_device(&self, dst: &IpAddress, dev: usize) -> Option<&Rule> {
+        self.rules
+            .iter()
+            .find(|rule| rule.dev == dev && rule.filter.contains_addr(dst))
+    }
+
     pub fn clear(&mut self) {
         self.rules.clear();
     }
@@ -1020,6 +1026,29 @@ impl Router {
         self.local_ipv6_addrs
             .iter()
             .any(|addr| addr.address() == src_addr)
+    }
+
+    pub(crate) fn echo_reply_source(
+        &self,
+        request_header: Ipv6Header,
+        ifindex: i32,
+    ) -> Option<Ipv6Address> {
+        let request_dst = request_header.dst_addr();
+        if !request_dst.is_multicast() {
+            return Some(request_dst);
+        }
+        if let Some(IpAddress::Ipv6(addr)) = self
+            .table
+            .lookup(&IpAddress::Ipv6(request_header.src_addr()))
+            .map(|rule| rule.src)
+            && !addr.is_unspecified()
+            && !addr.is_multicast()
+        {
+            return Some(addr);
+        }
+        let dev = self.devices.get(ifindex.saturating_sub(1) as usize)?;
+        let addr = dev.ipv6_echo_source()?;
+        (!addr.is_unspecified() && !addr.is_multicast()).then_some(addr)
     }
 
     fn is_valid_ipv4_broadcast_source(&self, src_addr: crate::ip::Ipv4Address) -> bool {

@@ -5,12 +5,12 @@
 //! TCP socket implementation.
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::{
-    net::{Ipv4Addr, SocketAddr},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::atomic::{AtomicBool, Ordering},
 };
 
 use hashbrown::HashMap;
-use kerrno::{KError, KResult, k_bail, k_err_type};
+use kerrno::{KError, KResult, LinuxError, k_bail, k_err_type};
 use kio::prelude::*;
 use klazy::lazy_static;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
@@ -40,6 +40,13 @@ pub(crate) fn new_tcp_socket() -> smol::Socket<'static> {
     )
 }
 
+/// Address family bound to a TCP socket.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AddressFamily {
+    Ipv4,
+    Ipv6,
+}
+
 /// A TCP socket that provides POSIX-like APIs.
 pub struct TcpSocket {
     state: StateLock,
@@ -47,6 +54,8 @@ pub struct TcpSocket {
     bound_endpoint: Mutex<IpListenEndpoint>,
     accepted_remote_endpoint: Option<IpEndpoint>,
     bound_registered: AtomicBool,
+    family: AddressFamily,
+    ipv6_only: AtomicBool,
 
     general: GeneralOptions,
     rx_closed: AtomicBool,
@@ -57,6 +66,15 @@ pub struct TcpSocket {
 impl TcpSocket {
     /// Creates a new TCP socket.
     pub fn new() -> Self {
+        Self::new_with_family(AddressFamily::Ipv4)
+    }
+
+    /// Creates a new IPv6 TCP socket (V6-only by default).
+    pub fn new_v6() -> Self {
+        Self::new_with_family(AddressFamily::Ipv6)
+    }
+
+    fn new_with_family(family: AddressFamily) -> Self {
         let dispatch_irq = SOCKET_SET.add(new_tcp_socket());
         Self {
             state: StateLock::new(State::Idle),
@@ -64,6 +82,8 @@ impl TcpSocket {
             bound_endpoint: Mutex::new(empty_endpoint()),
             accepted_remote_endpoint: None,
             bound_registered: AtomicBool::new(false),
+            family,
+            ipv6_only: AtomicBool::new(true),
 
             general: GeneralOptions::new(),
             rx_closed: AtomicBool::new(false),
@@ -78,6 +98,8 @@ impl TcpSocket {
         dispatch_irq: SocketHandle,
         local_endpoint: IpEndpoint,
         remote_endpoint: IpEndpoint,
+        family: AddressFamily,
+        ipv6_only: bool,
     ) -> Self {
         let result = Self {
             state: StateLock::new(State::Connected),
@@ -85,6 +107,8 @@ impl TcpSocket {
             bound_endpoint: Mutex::new(empty_endpoint()),
             accepted_remote_endpoint: Some(remote_endpoint),
             bound_registered: AtomicBool::new(false),
+            family,
+            ipv6_only: AtomicBool::new(ipv6_only),
 
             general: GeneralOptions::new(),
             rx_closed: AtomicBool::new(false),
@@ -183,6 +207,14 @@ impl TcpSocket {
         Ok(endpoint)
     }
 
+    fn addr_matches_family(&self, addr: &SocketAddr) -> bool {
+        match (self.family, addr) {
+            (AddressFamily::Ipv4, SocketAddr::V4(_)) => true,
+            (AddressFamily::Ipv6, SocketAddr::V6(v6)) => v6.ip().to_ipv4_mapped().is_none(),
+            _ => false,
+        }
+    }
+
     fn send_state_error(state: smol::State) -> KError {
         match state {
             smol::State::Listen | smol::State::SynSent | smol::State::SynReceived => {
@@ -278,6 +310,12 @@ impl Configurable for TcpSocket {
             O::TcpInfo(_) => {
                 // TODO(mivik): implement TCP diagnostics
             }
+            O::Ipv6Only(ipv6_only) => {
+                if self.family != AddressFamily::Ipv6 {
+                    return Ok(OptionHandled::No);
+                }
+                **ipv6_only = self.ipv6_only.load(Ordering::Relaxed);
+            }
             _ => return Ok(OptionHandled::No),
         }
         Ok(OptionHandled::Yes)
@@ -303,6 +341,17 @@ impl Configurable for TcpSocket {
                 });
                 network_poller().notify(PollReason::Timer);
             }
+            O::Ipv6Only(ipv6_only) => {
+                if self.family != AddressFamily::Ipv6 {
+                    return Ok(OptionHandled::No);
+                }
+                // Linux rejects changing V6ONLY after bind; the accepted
+                // socket inherits the listener's family and V6ONLY value.
+                if self.bound_endpoint.lock().port != 0 {
+                    return Err(KError::from(LinuxError::EINVAL));
+                }
+                self.ipv6_only.store(*ipv6_only, Ordering::Relaxed);
+            }
             _ => return Ok(OptionHandled::No),
         }
         Ok(OptionHandled::Yes)
@@ -311,6 +360,9 @@ impl Configurable for TcpSocket {
 impl SocketOps for TcpSocket {
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         let mut local_addr = local_addr.into_ip()?;
+        if !self.addr_matches_family(&local_addr) {
+            return Err(KError::from(LinuxError::EAFNOSUPPORT));
+        }
         self.state
             .lock(State::Idle)
             .map_err(|_| k_err_type!(InvalidInput, "already bound"))?
@@ -344,6 +396,9 @@ impl SocketOps for TcpSocket {
 
     fn connect(&self, remote_addr: SocketAddrEx) -> KResult {
         let remote_addr = remote_addr.into_ip()?;
+        if !self.addr_matches_family(&remote_addr) {
+            return Err(KError::from(LinuxError::EAFNOSUPPORT));
+        }
         self.state
             .lock(State::Idle)
             .map_err(|state| {
@@ -476,6 +531,8 @@ impl SocketOps for TcpSocket {
                         accepted.handle,
                         accepted.local_endpoint,
                         accepted.remote_endpoint,
+                        self.family,
+                        self.ipv6_only.load(Ordering::Relaxed),
                     )))
                 })
             })
@@ -578,9 +635,13 @@ impl SocketOps for TcpSocket {
             .with_smol_socket(|socket| socket.local_endpoint().map(endpoint_from_ip_endpoint))
             .unwrap_or_else(|| *self.bound_endpoint.lock());
         Ok(SocketAddrEx::Ip(SocketAddr::new(
-            endpoint
-                .addr
-                .map_or_else(|| Ipv4Addr::UNSPECIFIED.into(), Into::into),
+            endpoint.addr.map_or_else(
+                || match self.family {
+                    AddressFamily::Ipv4 => Ipv4Addr::UNSPECIFIED.into(),
+                    AddressFamily::Ipv6 => Ipv6Addr::UNSPECIFIED.into(),
+                },
+                Into::into,
+            ),
             endpoint.port,
         )))
     }

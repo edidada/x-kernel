@@ -14,6 +14,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use hashbrown::HashMap;
 use kclass::{ClassDevice, prelude::*};
 use kerrno::{KError, KResult, LinuxError};
+use khal::time::monotonic_time;
 use kpoll::PollSet;
 use kspin::SpinNoIrq;
 use ktime_types::{MonotonicInstant, TimeSpan};
@@ -248,6 +249,14 @@ fn run_net_rx_softirq() {
     }
 }
 
+/// Neighbor cache entry.
+enum NeighborEntry {
+    /// Resolved link-layer mapping with an expiry deadline.
+    Resolved(ArpNeighbor),
+    /// A request was sent and the mapping is still being resolved.
+    Pending(MonotonicInstant),
+}
+
 /// ARP table entry mapping an IP address to a MAC address.
 struct ArpNeighbor {
     hardware_address: MacAddress,
@@ -269,7 +278,7 @@ pub struct EthernetDevice {
     mtu: usize,
     operstate: u8,
     inner: ClassDevice<NetDeviceImpl>,
-    neighbors: HashMap<IpAddress, Option<ArpNeighbor>>,
+    neighbors: HashMap<IpAddress, NeighborEntry>,
     assigned_ipv4_addrs: Vec<Ipv4Cidr>,
     local_ipv4_addrs: Vec<Ipv4Cidr>,
     ipv6_addrs: Vec<Ipv6Cidr>,
@@ -500,6 +509,7 @@ impl EthernetDevice {
         ifindex: i32,
         target_ip: IpAddress,
         source_addr: crate::ip::Ipv4Address,
+        now: MonotonicInstant,
     ) {
         let IpAddress::Ipv4(target_ipv4) = target_ip else {
             return;
@@ -529,10 +539,16 @@ impl EthernetDevice {
             EtherType::Arp,
         );
 
-        self.neighbors.insert(target_ip, None);
+        self.neighbors
+            .insert(target_ip, NeighborEntry::Pending(now));
     }
 
-    fn send_neighbor_solicitation(&mut self, ifindex: i32, target: Ipv6Address) {
+    fn send_neighbor_solicitation(
+        &mut self,
+        ifindex: i32,
+        target: Ipv6Address,
+        now: MonotonicInstant,
+    ) {
         let Some(src_addr) = self.ipv6_link_local() else {
             warn!("No IPv6 source address for NDP solicitation");
             return;
@@ -550,7 +566,8 @@ impl EthernetDevice {
             |buf| buf.copy_from_slice(&ns_packet),
             EtherType::Ipv6,
         );
-        self.neighbors.insert(IpAddress::Ipv6(target), None);
+        self.neighbors
+            .insert(IpAddress::Ipv6(target), NeighborEntry::Pending(now));
     }
 
     fn resolve_next_hop(
@@ -558,10 +575,11 @@ impl EthernetDevice {
         ifindex: i32,
         next_hop: IpAddress,
         ipv4_source: crate::ip::Ipv4Address,
+        now: MonotonicInstant,
     ) {
         match next_hop {
-            IpAddress::Ipv4(_) => self.send_arp_request(ifindex, next_hop, ipv4_source),
-            IpAddress::Ipv6(addr) => self.send_neighbor_solicitation(ifindex, addr),
+            IpAddress::Ipv4(_) => self.send_arp_request(ifindex, next_hop, ipv4_source, now),
+            IpAddress::Ipv6(addr) => self.send_neighbor_solicitation(ifindex, addr, now),
         }
     }
 
@@ -579,10 +597,10 @@ impl EthernetDevice {
             };
 
             let action = match self.neighbors.get(&pending.next_hop) {
-                Some(Some(neighbor)) if neighbor.expires_at > now => {
+                Some(NeighborEntry::Resolved(neighbor)) if neighbor.expires_at > now => {
                     PendingAction::Send(neighbor.hardware_address)
                 }
-                Some(Some(_)) => PendingAction::Refresh,
+                Some(NeighborEntry::Resolved(_)) => PendingAction::Refresh,
                 _ => PendingAction::Keep,
             };
 
@@ -594,11 +612,18 @@ impl EthernetDevice {
                 PendingAction::Keep => kept_packets.push(pending),
                 PendingAction::Refresh => {
                     self.neighbors.remove(&pending.next_hop);
-                    self.resolve_next_hop(ifindex, pending.next_hop, pending.source_addr);
+                    self.resolve_next_hop(ifindex, pending.next_hop, pending.source_addr, now);
                     kept_packets.push(pending);
                 }
             }
         }
+
+        self.neighbors.retain(|_, entry| match entry {
+            NeighborEntry::Resolved(neighbor) => neighbor.expires_at > now,
+            NeighborEntry::Pending(since) => {
+                now.saturating_duration_since(*since) < Self::NEIGHBOR_TTL
+            }
+        });
 
         for pending in kept_packets {
             if self.pending_tx.len() >= ETHERNET_MAX_PENDING_PACKETS {
@@ -650,7 +675,7 @@ impl EthernetDevice {
         debug!("ARP: {} -> {}", source_protocol_addr, source_hardware_addr);
         self.neighbors.insert(
             IpAddress::Ipv4(source_protocol_addr),
-            Some(ArpNeighbor {
+            NeighborEntry::Resolved(ArpNeighbor {
                 hardware_address: source_hardware_addr,
                 expires_at: now + Self::NEIGHBOR_TTL,
             }),
@@ -817,16 +842,18 @@ impl NetDeviceOps for EthernetDevice {
 
         let ethertype = Self::ethertype_for_next_hop(next_hop);
         let need_request = match self.neighbors.get(&next_hop) {
-            Some(Some(neighbor)) if neighbor.expires_at > timestamp => {
+            Some(NeighborEntry::Resolved(neighbor)) if neighbor.expires_at > timestamp => {
                 self.send_ip_packet_to(ifindex, neighbor.hardware_address, &packet, ethertype);
                 return false;
             }
-            Some(Some(_)) => true,
-            Some(None) => false,
+            Some(NeighborEntry::Resolved(_)) => true,
+            Some(NeighborEntry::Pending(since)) => {
+                timestamp.saturating_duration_since(*since) >= Self::NEIGHBOR_TTL
+            }
             None => true,
         };
         if need_request {
-            self.resolve_next_hop(ifindex, next_hop, ipv4_source);
+            self.resolve_next_hop(ifindex, next_hop, ipv4_source, timestamp);
         }
         if self.pending_tx.len() >= ETHERNET_MAX_PENDING_PACKETS {
             warn!("Pending packets buffer is full, dropping packet");
@@ -898,9 +925,11 @@ impl NetDeviceOps for EthernetDevice {
     fn sync_neighbors(&mut self, neighbors: &[(IpAddress, [u8; 6])]) {
         self.neighbors.clear();
         for (dst_addr, hardware_addr) in neighbors {
+            // Netlink-managed static neighbors stay until the control plane
+            // removes them, unlike dynamically learned entries with a TTL.
             self.neighbors.insert(
                 *dst_addr,
-                Some(ArpNeighbor {
+                NeighborEntry::Resolved(ArpNeighbor {
                     hardware_address: MacAddress(*hardware_addr),
                     expires_at: MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(
                         u64::MAX / 2,
@@ -917,18 +946,16 @@ impl NetDeviceOps for EthernetDevice {
     }
 
     fn learn_neighbor(&mut self, addr: IpAddress, mac: MacAddress) {
+        let now = monotonic_time();
         self.neighbors.insert(
             addr,
-            Some(ArpNeighbor {
+            NeighborEntry::Resolved(ArpNeighbor {
                 hardware_address: mac,
-                expires_at: MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(
-                    u64::MAX / 2,
-                )),
+                expires_at: now + Self::NEIGHBOR_TTL,
             }),
         );
-        // Flush any packets waiting on this neighbor using a synthetic "now"
-        // far in the future so the freshly learned entry is considered valid.
-        let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(u64::MAX / 4));
+        // Flush packets waiting on this neighbor with the real current time;
+        // the newly learned entry is valid for NEIGHBOR_TTL from now.
         if let Some(ifindex) = self.pending_tx.front().map(|p| p.packet.ifindex()) {
             self.flush_pending(ifindex, now);
         }
