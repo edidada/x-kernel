@@ -40,6 +40,11 @@ pub(crate) enum Ipv6Action {
         dst: Ipv6Address,
         solicited: bool,
     },
+    EchoReply {
+        ifindex: i32,
+        header: Ipv6Header,
+        packet: Vec<u8>,
+    },
 }
 
 pub(crate) struct IngressProcessor {
@@ -236,19 +241,15 @@ impl IngressProcessor {
                 return;
             };
 
-            if icmpv6::is_ndp_message(header, ip_packet) {
-                let local: Vec<_> = self.local_ipv6_addrs.iter().map(|c| c.address()).collect();
-                let learn_ns = ndp::learn_from_neighbor_solicitation(header, ip_packet);
-                let action = ndp::handle_ndp_input(header, ip_packet, &local);
-
-                if let Some((addr, mac)) = learn_ns {
+            if let Some(input) = ndp::handle_ndp_input(header, ip_packet, &self.local_ipv6_addrs) {
+                if let Some((addr, mac)) = input.learn {
                     ipv6_actions.push(Ipv6Action::LearnNeighbor {
                         ifindex,
                         addr,
                         mac,
                     });
                 }
-                if let Some(action) = action {
+                if let Some(action) = input.action {
                     match action {
                         NdpAction::LearnNeighbor { addr, mac } => {
                             ipv6_actions.push(Ipv6Action::LearnNeighbor {
@@ -274,10 +275,12 @@ impl IngressProcessor {
                 return;
             }
 
-            if icmpv6::is_echo_request(header, ip_packet)
-                && let Some(reply) = icmpv6::build_echo_reply(header, ip_packet)
-            {
-                control_packets.push(reply);
+            if icmpv6::is_echo_request(header, ip_packet) {
+                ipv6_actions.push(Ipv6Action::EchoReply {
+                    ifindex,
+                    header,
+                    packet: ip_packet.to_vec(),
+                });
             }
             return;
         }

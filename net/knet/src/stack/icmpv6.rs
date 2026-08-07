@@ -19,20 +19,28 @@ const ICMPV6_ERROR_QUOTE_BYTES: usize = 1232;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Icmpv6Error {
     PortUnreachable,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     ProtocolUnreachable,
 }
 
 /// Builds an ICMPv6 echo reply for a validated echo request packet.
+///
+/// `reply_src` is the source address of the reply. For unicast requests it
+/// must be the request destination; for multicast/anycast requests RFC 4443
+/// §4.2 requires a unicast address of the receiving interface.
 pub(crate) fn build_echo_reply(
     request_header: Ipv6Header,
     request_packet: &[u8],
+    reply_src: Ipv6Address,
 ) -> Option<Vec<u8>> {
     let icmp = ipv6::payload(request_packet, &request_header)?;
     let slice = Icmpv6Slice::from_slice(icmp).ok()?;
     let Icmpv6Type::EchoRequest(echo) = slice.icmp_type() else {
         return None;
     };
+    if request_header.src_addr().is_unspecified() || request_header.src_addr().is_multicast() {
+        return None;
+    }
     if !has_valid_checksum(request_header.src_addr(), request_header.dst_addr(), icmp) {
         return None;
     }
@@ -41,7 +49,7 @@ pub(crate) fn build_echo_reply(
     let reply_type = Icmpv6Type::EchoReply(echo);
     let icmp_header = Icmpv6Header::with_checksum(
         reply_type,
-        request_header.dst_addr().octets(),
+        reply_src.octets(),
         request_header.src_addr().octets(),
         echo_payload,
     )
@@ -51,7 +59,7 @@ pub(crate) fn build_echo_reply(
     let mut packet = vec![0u8; IPV6_HEADER_LEN + icmp_len];
     ipv6::write_ipv6_packet_header(
         &mut packet,
-        request_header.dst_addr(),
+        reply_src,
         request_header.src_addr(),
         PROTOCOL_ICMPV6,
         IPV6_DEFAULT_HOP_LIMIT,
@@ -68,7 +76,7 @@ pub(crate) fn build_icmpv6_error_packet(
     offending_header: Ipv6Header,
     offending_packet: &[u8],
 ) -> Option<Vec<u8>> {
-    if !can_send_icmpv6_error(packet_type, offending_header) {
+    if !can_send_icmpv6_error(packet_type, offending_header, offending_packet) {
         return None;
     }
 
@@ -124,20 +132,6 @@ pub(crate) fn is_echo_request(header: Ipv6Header, packet: &[u8]) -> bool {
     )
 }
 
-pub(crate) fn is_ndp_message(header: Ipv6Header, packet: &[u8]) -> bool {
-    if header.next_header() != PROTOCOL_ICMPV6 {
-        return false;
-    }
-    let Some(icmp) = ipv6::payload(packet, &header) else {
-        return false;
-    };
-    matches!(
-        Icmpv6Slice::from_slice(icmp).map(|s| s.type_u8()),
-        Ok(etherparse::icmpv6::TYPE_NEIGHBOR_SOLICITATION
-            | etherparse::icmpv6::TYPE_NEIGHBOR_ADVERTISEMENT)
-    )
-}
-
 pub(crate) fn has_valid_checksum(
     src_addr: Ipv6Address,
     dst_addr: Ipv6Address,
@@ -156,15 +150,32 @@ pub(crate) fn has_valid_checksum(
     expected == slice.checksum()
 }
 
-fn can_send_icmpv6_error(packet_type: PacketType, offending_header: Ipv6Header) -> bool {
+fn can_send_icmpv6_error(
+    packet_type: PacketType,
+    offending_header: Ipv6Header,
+    offending_packet: &[u8],
+) -> bool {
     if packet_type != PacketType::Host {
         return false;
     }
-    if offending_header.src_addr().is_unspecified() || offending_header.is_multicast() {
+    if offending_header.src_addr().is_unspecified()
+        || offending_header.src_addr().is_multicast()
+        || offending_header.is_multicast()
+    {
         return false;
     }
-    // Do not generate errors in response to ICMPv6 errors (type < 128).
-    true
+    if offending_header.next_header() != PROTOCOL_ICMPV6 {
+        return true;
+    }
+    let Some(icmp) = ipv6::payload(offending_packet, &offending_header) else {
+        return false;
+    };
+    let Some(icmp_type) = Icmpv6Slice::from_slice(icmp).ok().map(|s| s.type_u8()) else {
+        return false;
+    };
+    // RFC 4443 §2.4(e): never answer an ICMPv6 error (type < 128) or a
+    // Redirect (type 137) with another error.
+    icmp_type >= 128 && icmp_type != 137
 }
 
 #[cfg(unittest)]
@@ -201,7 +212,7 @@ mod tests {
         let packet = build_ipv6_packet(src, dst, PROTOCOL_ICMPV6, 64, &icmp).unwrap();
         let header = Ipv6Header::parse_input(&packet).unwrap();
 
-        let reply = build_echo_reply(header, &packet).expect("echo reply");
+        let reply = build_echo_reply(header, &packet, dst).expect("echo reply");
         let reply_header = Ipv6Header::parse_input(&reply).unwrap();
         assert_eq!(reply_header.src_addr(), dst);
         assert_eq!(reply_header.dst_addr(), src);
@@ -210,6 +221,60 @@ mod tests {
         let slice = Icmpv6Slice::from_slice(reply_icmp).unwrap();
         assert!(matches!(slice.icmp_type(), Icmpv6Type::EchoReply(_)));
         assert_eq!(slice.payload(), &data);
+    }
+
+    #[def_test]
+    fn test_echo_reply_to_multicast_uses_unicast_source() {
+        let (src, _) = sample_addrs();
+        let multicast_dst =
+            Ipv6Address::from_octets([0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let reply_src =
+            Ipv6Address::from_octets([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3]);
+        let data = [9, 8, 7, 6];
+        let icmp = {
+            let header = Icmpv6Header::with_checksum(
+                Icmpv6Type::EchoRequest(IcmpEchoHeader { id: 1, seq: 2 }),
+                src.octets(),
+                multicast_dst.octets(),
+                &data,
+            )
+            .unwrap();
+            let mut bytes = header.to_bytes().to_vec();
+            bytes.extend_from_slice(&data);
+            bytes
+        };
+        let packet = build_ipv6_packet(src, multicast_dst, PROTOCOL_ICMPV6, 64, &icmp).unwrap();
+        let header = Ipv6Header::parse_input(&packet).unwrap();
+
+        let reply = build_echo_reply(header, &packet, reply_src).expect("echo reply");
+        let reply_header = Ipv6Header::parse_input(&reply).unwrap();
+        assert_eq!(reply_header.src_addr(), reply_src);
+        assert_eq!(reply_header.dst_addr(), src);
+    }
+
+    #[def_test]
+    fn test_echo_reply_rejects_multicast_and_unspecified_sources() {
+        let (_, dst) = sample_addrs();
+        for bad_src in [
+            Ipv6Address::UNSPECIFIED,
+            Ipv6Address::from_octets([0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+        ] {
+            let icmp = {
+                let header = Icmpv6Header::with_checksum(
+                    Icmpv6Type::EchoRequest(IcmpEchoHeader { id: 1, seq: 2 }),
+                    bad_src.octets(),
+                    dst.octets(),
+                    &[1, 2, 3, 4],
+                )
+                .unwrap();
+                let mut bytes = header.to_bytes().to_vec();
+                bytes.extend_from_slice(&[1, 2, 3, 4]);
+                bytes
+            };
+            let packet = build_ipv6_packet(bad_src, dst, PROTOCOL_ICMPV6, 64, &icmp).unwrap();
+            let header = Ipv6Header::parse_input(&packet).unwrap();
+            assert!(build_echo_reply(header, &packet, dst).is_none());
+        }
     }
 
     #[def_test]

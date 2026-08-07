@@ -32,7 +32,9 @@ const UDP_HEADER_LEN: usize = 8;
 const UDP_RX_QUEUE_CAPACITY: usize = 1024;
 const UDP_RX_QUEUE_RETAINED_CAPACITY: usize = 64;
 const UDP_MAX_PAYLOAD_LEN: usize = u16::MAX as usize - IPV4_HEADER_LEN - UDP_HEADER_LEN;
-const UDP_MAX_IPV6_PAYLOAD_LEN: usize = u16::MAX as usize - IPV6_HEADER_LEN - UDP_HEADER_LEN;
+// IPv6 payload_length and UDP length both exclude the 40-byte IPv6 base header,
+// so the maximum UDP payload is 65535 - 8 rather than 65535 - 40 - 8.
+const UDP_MAX_IPV6_PAYLOAD_LEN: usize = u16::MAX as usize - UDP_HEADER_LEN;
 
 /// Address family bound to a UDP socket.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

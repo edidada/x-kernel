@@ -9,7 +9,7 @@ use alloc::{vec, vec::Vec};
 use etherparse::{Icmpv6Header, Icmpv6Slice, Icmpv6Type, icmpv6::NeighborAdvertisementHeader};
 
 use crate::{
-    ip::Ipv6Address,
+    ip::{Ipv6Address, Ipv6Cidr},
     ipv6::{self, IPV6_HEADER_LEN, Ipv6Header, PROTOCOL_ICMPV6},
     wire::MacAddress,
 };
@@ -19,6 +19,9 @@ const NDP_OPTION_SOURCE_LLA: u8 = 1;
 const NDP_OPTION_TARGET_LLA: u8 = 2;
 const NDP_LLA_OPTION_LEN: usize = 8;
 const NDP_TARGET_LEN: usize = 16;
+// etherparse's NeighborSolicitation/NeighborAdvertisement header already
+// covers the 4-byte Reserved/R/S/O field, so the payload only carries the
+// 16-byte target plus the 8-byte LLA option (RFC 4861 §4.3/§4.4).
 const NDP_BASE_PAYLOAD_LEN: usize = NDP_TARGET_LEN + NDP_LLA_OPTION_LEN;
 
 /// Result of processing an inbound NDP message.
@@ -32,6 +35,14 @@ pub(crate) enum NdpAction {
         dst: Ipv6Address,
         solicited: bool,
     },
+}
+
+/// Parsed inbound NDP message with all validation already applied.
+pub(crate) struct NdpInput {
+    /// Neighbor mapping extracted from a solicitation's source LLA option.
+    pub(crate) learn: Option<(Ipv6Address, MacAddress)>,
+    /// Action to take for the parsed message.
+    pub(crate) action: Option<NdpAction>,
 }
 
 /// Builds an IPv6 Neighbor Solicitation packet for the given target.
@@ -92,12 +103,13 @@ pub(crate) fn build_neighbor_advertisement(
     assemble_ndp_packet(src_addr, dst_addr, &icmp_header, &icmp_payload)
 }
 
-/// Parses an inbound ICMPv6 NDP message and returns the action to take.
+/// Parses an inbound ICMPv6 NDP message after hop-limit and checksum
+/// validation and returns the learning/action result.
 pub(crate) fn handle_ndp_input(
     header: Ipv6Header,
     packet: &[u8],
-    local_addrs: &[Ipv6Address],
-) -> Option<NdpAction> {
+    local_addrs: &[Ipv6Cidr],
+) -> Option<NdpInput> {
     if header.hop_limit() != NDP_HOP_LIMIT {
         return None;
     }
@@ -118,57 +130,46 @@ pub(crate) fn handle_ndp_input(
 fn parse_neighbor_solicitation(
     header: Ipv6Header,
     payload: &[u8],
-    local_addrs: &[Ipv6Address],
-) -> Option<NdpAction> {
+    local_addrs: &[Ipv6Cidr],
+) -> Option<NdpInput> {
     if payload.len() < NDP_TARGET_LEN {
         return None;
     }
     let target = Ipv6Address::from_octets(payload[..NDP_TARGET_LEN].try_into().ok()?);
-    if !local_addrs.contains(&target) {
-        return None;
-    }
-
-    let dst = if header.src_addr().is_unspecified() {
-        Ipv6Address::ALL_NODES_LINK_LOCAL
+    let learn = if header.src_addr().is_unspecified() {
+        None
     } else {
-        header.src_addr()
+        find_lla_option(&payload[NDP_TARGET_LEN..], NDP_OPTION_SOURCE_LLA)
+            .map(|mac| (header.src_addr(), mac))
     };
-    let solicited = !header.src_addr().is_unspecified();
-    Some(NdpAction::ReplyAdvertisement {
-        target,
-        dst,
-        solicited,
-    })
+    let action = local_addrs
+        .iter()
+        .any(|cidr| cidr.address() == target)
+        .then(|| {
+            let dst = if header.src_addr().is_unspecified() {
+                Ipv6Address::ALL_NODES_LINK_LOCAL
+            } else {
+                header.src_addr()
+            };
+            NdpAction::ReplyAdvertisement {
+                target,
+                dst,
+                solicited: !header.src_addr().is_unspecified(),
+            }
+        });
+    Some(NdpInput { learn, action })
 }
 
-/// Extracts a source-link-layer neighbor mapping from an NS, if present.
-pub(crate) fn learn_from_neighbor_solicitation(
-    header: Ipv6Header,
-    packet: &[u8],
-) -> Option<(Ipv6Address, MacAddress)> {
-    let icmp = ipv6::payload(packet, &header)?;
-    let slice = Icmpv6Slice::from_slice(icmp).ok()?;
-    if !matches!(slice.icmp_type(), Icmpv6Type::NeighborSolicitation) {
-        return None;
-    }
-    let payload = slice.payload();
-    if payload.len() < NDP_TARGET_LEN {
-        return None;
-    }
-    let mac = find_lla_option(&payload[NDP_TARGET_LEN..], NDP_OPTION_SOURCE_LLA)?;
-    if header.src_addr().is_unspecified() {
-        return None;
-    }
-    Some((header.src_addr(), mac))
-}
-
-fn parse_neighbor_advertisement(payload: &[u8]) -> Option<NdpAction> {
+fn parse_neighbor_advertisement(payload: &[u8]) -> Option<NdpInput> {
     if payload.len() < NDP_TARGET_LEN {
         return None;
     }
     let target = Ipv6Address::from_octets(payload[..NDP_TARGET_LEN].try_into().ok()?);
     let mac = find_lla_option(&payload[NDP_TARGET_LEN..], NDP_OPTION_TARGET_LLA)?;
-    Some(NdpAction::LearnNeighbor { addr: target, mac })
+    Some(NdpInput {
+        learn: None,
+        action: Some(NdpAction::LearnNeighbor { addr: target, mac }),
+    })
 }
 
 fn assemble_ndp_packet(
@@ -241,18 +242,15 @@ mod tests {
         assert_eq!(header.dst_addr(), target.solicited_node_multicast());
         assert_eq!(header.hop_limit(), NDP_HOP_LIMIT);
 
-        let learned = learn_from_neighbor_solicitation(header, &packet).unwrap();
-        assert_eq!(learned.0, src);
-        assert_eq!(learned.1, mac);
-
-        let action = handle_ndp_input(header, &packet, &[target]).unwrap();
+        let input = handle_ndp_input(header, &packet, &[Ipv6Cidr::new(target, 64)]).unwrap();
+        assert_eq!(input.learn, Some((src, mac)));
         assert_eq!(
-            action,
-            NdpAction::ReplyAdvertisement {
+            input.action,
+            Some(NdpAction::ReplyAdvertisement {
                 target,
                 dst: src,
                 solicited: true,
-            }
+            })
         );
     }
 
@@ -264,7 +262,10 @@ mod tests {
 
         let packet = build_neighbor_advertisement(src, dst, src, mac, true).unwrap();
         let header = Ipv6Header::parse_input(&packet).unwrap();
-        let action = handle_ndp_input(header, &packet, &[]).unwrap();
-        assert_eq!(action, NdpAction::LearnNeighbor { addr: src, mac });
+        let input = handle_ndp_input(header, &packet, &[]).unwrap();
+        assert_eq!(
+            input.action,
+            Some(NdpAction::LearnNeighbor { addr: src, mac })
+        );
     }
 }

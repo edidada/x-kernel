@@ -66,7 +66,9 @@ impl UdpSocketState {
             read_shutdown: AtomicBool::new(false),
             write_shutdown: AtomicBool::new(false),
             recv_err: AtomicBool::new(false),
-            // Linux defaults IPV6_V6ONLY to 1 for new AF_INET6 sockets.
+            // Linux takes the default from net.ipv6.bindv6only (0 = dual-stack);
+            // this stack deliberately defaults to V6-only until v4-mapped
+            // dual-stack delivery is implemented.
             ipv6_only: AtomicBool::new(true),
             socket_error: AtomicI32::new(0),
             error_queue: Mutex::new(VecDeque::new()),

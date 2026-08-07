@@ -373,13 +373,14 @@ impl IpCidr {
 pub(crate) struct IpEndpoint {
     pub(crate) addr: IpAddress,
     pub(crate) port: u16,
+    pub(crate) scope_id: u32,
 }
 
 impl From<SocketAddr> for IpEndpoint {
     fn from(addr: SocketAddr) -> Self {
-        Self {
-            addr: addr.ip().into(),
-            port: addr.port(),
+        match addr {
+            SocketAddr::V4(addr) => Self::from(addr),
+            SocketAddr::V6(addr) => Self::from(addr),
         }
     }
 }
@@ -389,6 +390,7 @@ impl From<SocketAddrV4> for IpEndpoint {
         Self {
             addr: IpAddress::Ipv4((*addr.ip()).into()),
             port: addr.port(),
+            scope_id: 0,
         }
     }
 }
@@ -398,6 +400,7 @@ impl From<SocketAddrV6> for IpEndpoint {
         Self {
             addr: IpAddress::Ipv6((*addr.ip()).into()),
             port: addr.port(),
+            scope_id: addr.scope_id(),
         }
     }
 }
@@ -406,7 +409,12 @@ impl From<IpEndpoint> for SocketAddr {
     fn from(endpoint: IpEndpoint) -> Self {
         match endpoint.addr {
             IpAddress::Ipv4(addr) => Self::V4(SocketAddrV4::new(addr.into(), endpoint.port)),
-            IpAddress::Ipv6(addr) => Self::V6(SocketAddrV6::new(addr.into(), endpoint.port, 0, 0)),
+            IpAddress::Ipv6(addr) => Self::V6(SocketAddrV6::new(
+                addr.into(),
+                endpoint.port,
+                0,
+                endpoint.scope_id,
+            )),
         }
     }
 }

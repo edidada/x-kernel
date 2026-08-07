@@ -35,6 +35,7 @@ use crate::{
     poller::{PollBudget, PollProgress},
     router::{DeviceRemoval, Router},
     stack::{
+        icmpv6,
         ingress::{IngressProcessor, Ipv6Action},
         ndp,
     },
@@ -304,6 +305,23 @@ impl Service {
         self.router.lock().route_mtu(dst_addr)
     }
 
+    pub fn get_source_address_scoped(
+        &self,
+        dst_addr: &IpAddress,
+        scope_id: u32,
+    ) -> KResult<IpAddress> {
+        if scope_id == 0 {
+            return self.get_source_address(dst_addr);
+        }
+        let dev = scope_id.saturating_sub(1) as usize;
+        self.router
+            .lock()
+            .table
+            .lookup_on_device(dst_addr, dev)
+            .map(|rule| rule.src)
+            .ok_or(KError::from(LinuxError::ENETUNREACH))
+    }
+
     pub fn can_send_ip_packet(&self) -> bool {
         self.router.lock().can_enqueue_tx_packet()
     }
@@ -346,6 +364,7 @@ impl Service {
         bound_src: Option<IpAddress>,
         dst_addr: &IpAddress,
         packet_len: usize,
+        scope_id: u32,
     ) -> KResult<IpAddress> {
         let router = self.router.lock();
         if !router.can_enqueue_tx_packet() {
@@ -354,11 +373,16 @@ impl Service {
 
         let source_addr = match bound_src {
             Some(addr) => addr,
-            None => router
-                .table
-                .lookup(dst_addr)
-                .map(|rule| rule.src)
-                .ok_or(KError::from(LinuxError::ENETUNREACH))?,
+            None => {
+                let rule = if scope_id == 0 {
+                    router.table.lookup(dst_addr)
+                } else {
+                    let dev = scope_id.saturating_sub(1) as usize;
+                    router.table.lookup_on_device(dst_addr, dev)
+                };
+                rule.map(|rule| rule.src)
+                    .ok_or(KError::from(LinuxError::ENETUNREACH))?
+            }
         };
         if let Some(mtu) = router.route_mtu(dst_addr)
             && packet_len > mtu
@@ -386,6 +410,18 @@ impl Service {
             .table
             .lookup(addr)
             .map_or(u32::MAX, |rule| 1u32 << rule.dev)
+    }
+
+    pub fn device_mask_for_scoped_addr(&self, addr: &IpAddress, scope_id: u32) -> u32 {
+        if scope_id == 0 {
+            return self.device_mask_for_addr(addr);
+        }
+        let dev = scope_id.saturating_sub(1) as usize;
+        if dev < self.router.lock().devices.len() {
+            1u32 << dev
+        } else {
+            u32::MAX
+        }
     }
 
     pub fn register_rx_waker(
@@ -720,6 +756,20 @@ fn apply_ipv6_actions(router: &mut Router, actions: &mut Vec<Ipv6Action>) {
                         ndp::build_neighbor_advertisement(target, dst, target, mac, solicited)
                 {
                     let _ = router.queue_control_ip_packet(na);
+                }
+            }
+            Ipv6Action::EchoReply {
+                ifindex,
+                header,
+                packet,
+            } => {
+                let Some(reply_src) = router.echo_reply_source(header, ifindex) else {
+                    continue;
+                };
+                if let Some(reply) = icmpv6::build_echo_reply(header, &packet, reply_src)
+                    && let Err(err) = router.queue_control_ip_packet(reply)
+                {
+                    warn!("Failed to queue ICMPv6 echo reply: {}", err);
                 }
             }
         }

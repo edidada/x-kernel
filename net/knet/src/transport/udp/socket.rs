@@ -262,6 +262,7 @@ impl UdpSocket {
                     bound_source_addr,
                     &remote_endpoint.addr,
                     packet_len,
+                    remote_endpoint.scope_id,
                 )?;
                 self.write_datagram_v6(
                     packet.as_mut().ok_or(KError::InvalidInput)?,
@@ -274,13 +275,13 @@ impl UdpSocket {
             })
     }
 
-    fn source_addr_for(&self, remote_addr: IpAddress) -> KResult<IpAddress> {
+    fn source_addr_for(&self, remote: &IpEndpoint) -> KResult<IpAddress> {
         if let Some(local) = self.state().local_endpoint()
             && !local.addr.is_unspecified()
         {
             return Ok(local.addr);
         }
-        SERVICE.get_source_address(&remote_addr)
+        SERVICE.get_source_address_scoped(&remote.addr, remote.scope_id)
     }
 
     fn write_datagram_v4(
@@ -360,10 +361,11 @@ impl UdpSocket {
     }
 
     fn addr_matches_family(&self, addr: SocketAddr) -> bool {
-        matches!(
-            (self.family, addr),
-            (AddressFamily::Ipv4, SocketAddr::V4(_)) | (AddressFamily::Ipv6, SocketAddr::V6(_))
-        )
+        match (self.family, addr) {
+            (AddressFamily::Ipv4, SocketAddr::V4(_)) => true,
+            (AddressFamily::Ipv6, SocketAddr::V6(addr)) => addr.ip().to_ipv4_mapped().is_none(),
+            _ => false,
+        }
     }
 
     fn recv_payload(
@@ -548,11 +550,12 @@ impl SocketOps for UdpSocket {
 
         let remote_endpoint = IpEndpoint::from(remote_addr);
         self.validate_remote_endpoint(remote_endpoint)?;
-        let source_addr = self.source_addr_for(remote_endpoint.addr)?;
+        let source_addr = self.source_addr_for(&remote_endpoint)?;
         self.state()
             .set_peer_endpoint(Some((remote_endpoint, source_addr)));
-        self.state()
-            .set_device_mask(SERVICE.device_mask_for_addr(&remote_endpoint.addr));
+        self.state().set_device_mask(
+            SERVICE.device_mask_for_scoped_addr(&remote_endpoint.addr, remote_endpoint.scope_id),
+        );
         debug!("UDP socket: connected to {}", remote_endpoint);
         Ok(())
     }

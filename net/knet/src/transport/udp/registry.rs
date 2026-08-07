@@ -130,6 +130,7 @@ impl UdpPcbRegistry {
             let endpoint = IpEndpoint {
                 addr: local_addr,
                 port,
+                scope_id: 0,
             };
             let mut bucket = self.bucket(endpoint.port).lock();
             if !bucket.contains_bind_conflict(listen_endpoint(endpoint), reuse_address) {
@@ -455,11 +456,19 @@ fn delivery_score(
 
 fn local_endpoint_matches(endpoint: IpEndpoint, addr: SocketAddr) -> bool {
     endpoint.port == addr.port()
+        && address_family_matches(endpoint.addr, addr.ip())
         && (endpoint.addr.is_unspecified() || endpoint_addr_matches(endpoint.addr, addr.ip()))
 }
 
 pub(super) fn endpoint_matches_addr(endpoint: IpEndpoint, addr: SocketAddr) -> bool {
     endpoint.port == addr.port() && endpoint_addr_matches(endpoint.addr, addr.ip())
+}
+
+fn address_family_matches(endpoint_addr: IpAddress, addr: IpAddr) -> bool {
+    matches!(
+        (endpoint_addr, addr),
+        (IpAddress::Ipv4(_), IpAddr::V4(_)) | (IpAddress::Ipv6(_), IpAddr::V6(_))
+    )
 }
 
 fn endpoint_addr_matches(endpoint_addr: IpAddress, addr: IpAddr) -> bool {
@@ -506,11 +515,11 @@ fn listen_addrs_overlap(a: Option<IpAddress>, b: Option<IpAddress>) -> bool {
 mod tests {
     use alloc::{sync::Arc, vec};
 
-    use ::core::net::{SocketAddr, SocketAddrV4};
+    use ::core::net::{Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
     use unittest::def_test;
 
     use super::*;
-    use crate::ip::Ipv4Address;
+    use crate::ip::{Ipv4Address, Ipv6Address};
 
     fn endpoint(addr: Ipv4Address, port: u16) -> IpEndpoint {
         SocketAddrV4::new(ipv4_to_core(addr), port).into()
@@ -518,6 +527,15 @@ mod tests {
 
     fn socket_addr(addr: Ipv4Address, port: u16) -> SocketAddr {
         SocketAddr::V4(SocketAddrV4::new(ipv4_to_core(addr), port))
+    }
+
+    fn ipv6_socket_addr(addr: Ipv6Address, port: u16, scope_id: u32) -> SocketAddr {
+        SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::from(addr.octets()),
+            port,
+            0,
+            scope_id,
+        ))
     }
 
     fn clear_registry() {
@@ -713,6 +731,48 @@ mod tests {
         .expect("wildcard connected PCB should match");
 
         assert!(Arc::ptr_eq(&selected, &wildcard_connected));
+        clear_registry();
+    }
+
+    #[def_test(serial)]
+    fn wildcard_lookup_is_family_isolated() {
+        clear_registry();
+
+        let v6_wildcard = IpEndpoint {
+            addr: IpAddress::Ipv6(Ipv6Address::UNSPECIFIED),
+            port: 8085,
+            scope_id: 0,
+        };
+        let v6_pcb = UdpPcb::new(UdpSocketState::new());
+        bind_udp_pcb(v6_pcb.clone(), v6_wildcard, false).unwrap();
+
+        let v4_packet = (
+            socket_addr(Ipv4Address::new(192, 0, 2, 9), 8085),
+            socket_addr(Ipv4Address::new(198, 51, 100, 9), 49152),
+        );
+        assert!(
+            lookup_udp_pcb(v4_packet.0, v4_packet.1).is_none(),
+            "IPv6 wildcard bind must not receive IPv4 datagrams"
+        );
+
+        let v6_packet = (
+            ipv6_socket_addr(
+                Ipv6Address::from_octets([
+                    0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9,
+                ]),
+                8085,
+                0,
+            ),
+            ipv6_socket_addr(
+                Ipv6Address::from_octets([
+                    0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10,
+                ]),
+                49152,
+                0,
+            ),
+        );
+        assert!(lookup_udp_pcb(v6_packet.0, v6_packet.1).is_some());
+
         clear_registry();
     }
 

@@ -18,7 +18,7 @@ use crate::{
         IF_OPER_DOWN, IF_OPER_UNKNOWN, LINK_FLAG_LOOPBACK, LINK_FLAG_LOWER_UP, LINK_FLAG_RUNNING,
         LINK_FLAG_UP, LOOPBACK_MAX_MTU, LinkKind, LinkSendSnapshot, LinkSnapshot, NetDevice,
     },
-    ip::IpAddress,
+    ip::{IpAddress, Ipv6Address},
 };
 
 /// Loopback device backed by an in-memory queue.
@@ -193,6 +193,10 @@ impl NetDevice for LoopbackDevice {
             self.flags &= !(LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOWER_UP);
             self.operstate = IF_OPER_DOWN;
         }
+    }
+
+    fn ipv6_echo_source(&self) -> Option<Ipv6Address> {
+        Some(Ipv6Address::LOCALHOST)
     }
 }
 
