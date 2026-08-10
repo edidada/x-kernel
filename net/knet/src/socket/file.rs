@@ -69,6 +69,11 @@ impl FileOperations for SocketFileOps {
         socket.send(src, options)
     }
 
+    fn ioctl(&self, file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
+        let socket = Self::socket(file)?;
+        crate::interface::sock_dev_ioctl(&socket, file, cmd, arg)
+    }
+
     fn poll(&self, file: &VfsFile) -> IoEvents {
         Self::socket(file)
             .map(|socket| socket.poll())

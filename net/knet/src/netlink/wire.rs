@@ -26,6 +26,7 @@ pub(crate) mod addr {
         pub(crate) const ADDRESS: u16 = 1;
         pub(crate) const LOCAL: u16 = 2;
         pub(crate) const LABEL: u16 = 3;
+        pub(crate) const BROADCAST: u16 = 4;
     }
 }
 

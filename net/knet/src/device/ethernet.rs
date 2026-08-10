@@ -15,7 +15,7 @@ use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::ETHERNET_MAX_PENDING_PACKETS,
     device::NetDevice as NetDeviceOps,
-    ip::{IpAddress, Ipv4Cidr},
+    ip::{IpAddress, Ipv4Address, Ipv4Cidr},
     packet,
     wire::{
         ArpIpv4Packet, ArpOperation, ETHERNET_HEADER_LEN, EtherType, EthernetFrameRef, MacAddress,
@@ -45,6 +45,11 @@ pub struct EthernetDevice {
     inner: ClassDevice<NetDeviceImpl>,
     neighbors: HashMap<IpAddress, Option<ArpNeighbor>>,
     ip: Ipv4Cidr,
+    /// Independent directed broadcast from the control plane.
+    ///
+    /// `None` means this address has no directed broadcast (for example after
+    /// address deletion, or for prefixes without a broadcast).
+    broadcast: Option<Ipv4Address>,
 
     pending_tx: VecDeque<PendingTxPacket>,
 }
@@ -54,13 +59,19 @@ impl EthernetDevice {
 
     /// Create a new Ethernet device wrapper.
     pub fn new(name: String, inner: ClassDevice<NetDeviceImpl>, ip: Ipv4Cidr) -> Self {
+        let broadcast = ip.broadcast();
         Self {
             name,
             inner,
             neighbors: HashMap::new(),
             ip,
+            broadcast,
             pending_tx: VecDeque::with_capacity(ETHERNET_MAX_PENDING_PACKETS),
         }
+    }
+
+    fn directed_broadcast(&self) -> Option<Ipv4Address> {
+        self.broadcast
     }
 
     /// Spawn the RX poll task for an initialized network stack.
@@ -381,7 +392,9 @@ impl NetDeviceOps for EthernetDevice {
         }
 
         packet.set_ifindex(ifindex);
-        if next_hop.is_broadcast() || self.ip.broadcast().map(IpAddress::Ipv4) == Some(next_hop) {
+        if next_hop.is_broadcast()
+            || self.directed_broadcast().map(IpAddress::Ipv4) == Some(next_hop)
+        {
             self.send_ipv4_packet_to(ifindex, MacAddress::BROADCAST, &packet);
             return false;
         }
@@ -436,14 +449,23 @@ impl NetDeviceOps for EthernetDevice {
         &mut self,
         name: Option<&str>,
         ipv4_addr: Option<Ipv4Cidr>,
+        broadcast: Option<[u8; 4]>,
         neighbors: &[(IpAddress, [u8; 6])],
     ) {
         if let Some(name) = name {
             self.name = name.into();
         }
 
-        if let Some(ipv4_addr) = ipv4_addr {
-            self.ip = ipv4_addr;
+        match ipv4_addr {
+            Some(ipv4_addr) => {
+                self.ip = ipv4_addr;
+                self.broadcast = broadcast.map(Ipv4Address::from_octets);
+            }
+            None => {
+                // Address deletion must drop the old primary so ARP replies stop.
+                self.ip = Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0);
+                self.broadcast = None;
+            }
         }
 
         self.neighbors.clear();

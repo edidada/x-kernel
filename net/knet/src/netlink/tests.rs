@@ -147,6 +147,7 @@ fn test_add_replace_and_delete_address() {
         prefix_len: 24,
         scope: wire_route::SCOPE_UNIVERSE,
         address: IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 99)),
+        broadcast: None,
     };
 
     add_addr_state(req, NLM_F_CREATE | NLM_F_EXCL).unwrap();

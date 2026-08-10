@@ -44,14 +44,16 @@ driver layer / smoltcp / ringbuf
 
 - **网络输入**：Ethernet、ARP、IPv4、TCP、UDP、raw IP 包；
 - **设备输入**：driver 提供的 `NetBufHandle`、IRQ 唤醒、RX/TX 缓冲区生命周期；
-- **控制面输入**：netlink header、attribute、route mutation、neighbor 更新；
+- **控制面输入**：netlink header、attribute、route mutation、neighbor 更新，
+  以及传统 socket ioctl 的 `ifreq` / `ifconf` 用户结构；
 - **Unix / vsock 输入**：peer socket 数据、连接建立与关闭事件，
   以及 pathname Unix socket 经 kvfs 解析的路径和 inode；
 - **上层 syscall 语义输入**：由 `posix/net` 传入的 socket 地址族、
-  socket option、阻塞语义和权限决策结果。
+  socket option、阻塞语义和权限决策结果；
+  SET 类网络 ioctl 额外读取当前任务凭据以近似 `CAP_NET_ADMIN`。
 
-本模块不直接解引用用户指针，
-而是信任 `posix/net` 先完成用户内存访问、长度校验和权限检查。
+本模块通过 `osvm` 对 ioctl 用户结构做 checked copy，不直接解引用用户指针。
+对普通 socket payload，本模块继续信任 `posix/net` 先完成用户内存访问、长度校验和权限检查。
 本模块也不直接执行 DMA 编程，
 但会消费由 driver 层提供的网络缓冲区，
 因此仍需把 driver buffer 生命周期视为关键边界。
@@ -215,6 +217,8 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-02 | smoltcp socket handle 已删除后继续访问 | 高 | listener 关闭、accepted child 清理与并发 socket 操作交错 | `SocketSet` 访问由 mutex 串行化；`ListenTable::unlisten` drain 后删除 handle；调用点需避免缓存 handle 后跨释放点使用 |
 | T-03 | ring buffer index 推进超过实际写入或读取长度 | 高 | `advance_write_index` 或 `advance_read_index` 的 count 与切片来源不一致 | count 由持有 channel mutex 时取得的同一批 slices 计算；unsafe 注释固定不变量 |
 | T-04 | 恶意 netlink 消息越界读取或构造非法状态 | 高 | 用户传入短 header、畸形 attr、非法 family、非法 ifindex | `NlMsgHeader::read`、`parse_attrs`、`parse_ip_by_family` 和 route index 检查拒绝非法输入 |
+| T-04a | 恶意 `ifreq`/`ifconf` 越界写或信息泄漏 | 高 | 超大 `ifc_len`、非法用户指针 | 固定 LP64 ABI 尺寸，全部用户读写经 `osvm` checked copy；`SIOCGIFCONF` 输出记录先清零。多数 `SIOCGIF*` GET 路径在用户提交的 `ifreq` 上覆盖目标字段后回写，尾部 padding 可能保留用户输入，但不读未初始化内核内存 |
+| T-04b | 非特权调用者修改网络接口 | 高 | 无特权进程调用 `SIOCSIFFLAGS`/`SIOCSIFADDR` 等 | SET 路径用 `current_cred().is_privileged()` 近似 `CAP_NET_ADMIN`，失败返回 `EPERM` |
 | T-05 | ARP spoofing 污染 neighbor cache | 中 | 外部主机发送伪造 ARP reply 或 request | 当前校验 unicast MAC、广播和本机目标 IP；完整邻居安全策略仍依赖网络隔离 |
 | T-06 | listen backlog 被 SYN 洪泛占满 | 中 | 大量连接请求命中同一 listener | backlog 被 clamp 到 `LISTEN_QUEUE_SIZE`；超限丢弃并记录 warn |
 | T-07 | raw socket 被无权限调用者创建 | 中 | syscall 层没有实施权限门禁 | `knet` 层只封装 raw socket 行为；权限策略应保留在 `posix/net::sys_socket` |
@@ -296,6 +300,8 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - Ethernet 设备只处理 IPv4 ARP，IPv6 NDP、非 Ethernet 链路和多队列 NIC 抽象仍待扩展。
 - crate 内 UDP 数据路径当前只支持 IPv4；IPv6 UDP 继续由 smoltcp DNS 路径使用，普通 UDP socket 不提供 IPv6 收发。
 - vsock-TIPC bridge v1 不转发 TIPC handles 或 memrefs，也不为 vsock send credit 建立持久重试队列。
+- 传统 ioctl 当前只覆盖 BusyBox `ifconfig` 常用的 IPv4 查询/设置命令；改 MAC、IPv6、接口别名、ethtool 等仍返回 `ENOTTY`。
+- SET ioctl 使用 `euid == 0` 近似 Linux `CAP_NET_ADMIN`，尚未接入完整 capability 模型。
 
 ## 审计清单
 
@@ -303,8 +309,9 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 
 - 每个 `unsafe` 块均有 `SAFETY:` 注释。
 - 新增 smoltcp socket handle 的生命周期受 `SOCKET_SET` 保护。
-- 新增 route 或 device mutation 通过 `update_route_state` 或等效同步路径更新 data-plane。
+- 新增 route 或 device mutation 通过 `mutate_route_state` 或等效同步路径更新 data-plane。
 - 新增 netlink parser 先校验 header 长度、attribute 长度、family 和 index。
+- 新增 socket ioctl 命令校验 `ifreq`/`ifconf` 尺寸、接口名 NUL 终止、地址族和权限，并清零用户输出 padding。
 - 新增 ring buffer 操作的 advance count 来自同一锁内同一批 slices。
 - Unix stream 的 write index 发布、方向关闭和空队列 EOF 判定保持同一个 per-direction 排序点，方向锁内不执行用户复制或 `PollSet` 唤醒，shutdown 在释放 `channel` mutex 后执行 waiter 唤醒。
 - 新增外部网络输入使用 checked parser。

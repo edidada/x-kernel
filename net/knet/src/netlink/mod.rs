@@ -30,7 +30,13 @@ mod socket;
 mod tests;
 mod wire;
 
-pub(crate) use route::{build_initial_state, init_route_state, link_state_for_ifindex};
+pub(crate) use route::{
+    build_initial_state, del_primary_ipv4_addr, init_route_state, ipv4_mask_from_prefix,
+    link_state_for_ifindex, link_state_for_name, primary_ipv4_addr, route_state, set_link_mtu,
+    set_link_up, set_primary_ipv4_addr, set_primary_ipv4_broadcast, set_primary_ipv4_netmask,
+};
+#[cfg(unittest)]
+pub(crate) use route::{inet_abc_len, ipv4_prefix_from_mask};
 pub use socket::{NetlinkSocket, publish_kobject_uevent};
 pub(crate) const RT_TABLE_MAIN: u8 = wire::route::TABLE_MAIN;
 pub(crate) const RTN_UNICAST: u8 = wire::route::TYPE_UNICAST;
@@ -69,11 +75,11 @@ pub(crate) const IFF_UP: u32 = 1 << 0;
 pub(super) const IFF_BROADCAST: u32 = 1 << 1;
 pub(super) const IFF_LOOPBACK: u32 = 1 << 3;
 pub(super) const IFF_RUNNING: u32 = 1 << 6;
-pub(super) const IFF_MULTICAST: u32 = 1 << 12;
+pub(crate) const IFF_MULTICAST: u32 = 1 << 12;
 pub(super) const IFF_LOWER_UP: u32 = 1 << 16;
 
-pub(super) const ARPHRD_LOOPBACK: u16 = 772;
-pub(super) const ARPHRD_ETHER: u16 = 1;
+pub(crate) const ARPHRD_LOOPBACK: u16 = 772;
+pub(crate) const ARPHRD_ETHER: u16 = 1;
 
 #[derive(Clone, Debug)]
 pub(crate) struct LinkState {
@@ -94,6 +100,11 @@ pub(crate) struct AddrState {
     pub(crate) prefix_len: u8,
     pub(crate) scope: u8,
     pub(crate) address: IpAddress,
+    /// Independent IPv4 broadcast address for ioctl/netlink presentation.
+    ///
+    /// `None` means the address has no broadcast (for example loopback, IPv6,
+    /// or prefix length >= 31).
+    pub(crate) broadcast: Option<[u8; 4]>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -129,7 +140,7 @@ pub(crate) struct RtnetlinkState {
     pub(crate) neighs: Vec<NeighState>,
 }
 
-pub(super) static ROUTE_STATE: LazyInit<RwLock<RtnetlinkState>> = LazyInit::new();
+pub(crate) static ROUTE_STATE: LazyInit<RwLock<RtnetlinkState>> = LazyInit::new();
 static_lock! {
     pub(super) static UEVENT_SUBSCRIBERS: Mutex<Vec<Weak<NetlinkSocketInner>>> = Mutex::new(Vec::new());
 }

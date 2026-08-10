@@ -28,6 +28,23 @@ use crate::{
     udp, udp_err,
 };
 
+#[derive(Clone, Copy, Debug)]
+struct LocalIpv4Addr {
+    cidr: Ipv4Cidr,
+    /// Directed broadcast from control plane; `None` means none.
+    broadcast: Option<Ipv4Address>,
+}
+
+impl LocalIpv4Addr {
+    fn address(self) -> Ipv4Address {
+        self.cidr.address()
+    }
+
+    fn broadcast(self) -> Option<Ipv4Address> {
+        self.broadcast
+    }
+}
+
 #[derive(Debug)]
 pub struct Rule {
     pub filter: IpCidr,
@@ -89,7 +106,9 @@ impl RouteTable {
 pub struct Router {
     rx_queue: VecDeque<PacketBuf>,
     tx_queue: VecDeque<PacketBuf>,
-    local_ipv4_addrs: Vec<Ipv4Cidr>,
+    local_ipv4_addrs: Vec<LocalIpv4Addr>,
+    /// Per-device administrative up state mirrored from `ROUTE_STATE` link flags.
+    device_up: Vec<bool>,
     ipv4_reassembler: Ipv4Reassembler,
     next_ipv4_identification: u16,
     pub(crate) devices: Vec<Box<dyn NetDevice>>,
@@ -101,6 +120,7 @@ impl Router {
             rx_queue: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
             tx_queue: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
             local_ipv4_addrs: Vec::new(),
+            device_up: Vec::new(),
             ipv4_reassembler: Ipv4Reassembler::new(),
             next_ipv4_identification: 1,
             devices: Vec::new(),
@@ -156,23 +176,30 @@ impl Router {
         };
         self.devices.remove(pos);
         self.table.remove_device(pos);
+        if pos < self.device_up.len() {
+            self.device_up.remove(pos);
+        }
         true
     }
 
     pub fn sync_netlink(&mut self, state: &RtnetlinkState) {
+        self.device_up.clear();
         for (dev_index, device) in self.devices.iter_mut().enumerate() {
             let ifindex = dev_index as i32 + 1;
             let link = state.links.iter().find(|link| link.index == ifindex);
-            let ipv4_addr = state
+            let is_up = link.is_some_and(|link| link.flags & crate::netlink::IFF_UP != 0);
+            self.device_up.push(is_up);
+            let ipv4_entry = state
                 .addrs
                 .iter()
-                .find(|addr| addr.index == ifindex as u32 && addr.family == 2)
-                .and_then(|addr_state| match addr_state.address {
-                    SmoltcpIpAddress::Ipv4(addr) => {
-                        Some(Ipv4Cidr::new(addr.into(), addr_state.prefix_len))
-                    }
-                    SmoltcpIpAddress::Ipv6(_) => None,
-                });
+                .find(|addr| addr.index == ifindex as u32 && addr.family == 2);
+            let ipv4_addr = ipv4_entry.and_then(|addr_state| match addr_state.address {
+                SmoltcpIpAddress::Ipv4(addr) => {
+                    Some(Ipv4Cidr::new(addr.into(), addr_state.prefix_len))
+                }
+                SmoltcpIpAddress::Ipv6(_) => None,
+            });
+            let broadcast = ipv4_entry.and_then(|addr| addr.broadcast);
             let neighbors: Vec<_> = state
                 .neighs
                 .iter()
@@ -182,19 +209,37 @@ impl Router {
                     Some((super::from_smoltcp_ip_address(neigh.dst), hardware_addr))
                 })
                 .collect();
-            device.sync_netlink(link.map(|link| link.name.as_str()), ipv4_addr, &neighbors);
+            device.sync_netlink(
+                link.map(|link| link.name.as_str()),
+                ipv4_addr,
+                broadcast,
+                &neighbors,
+            );
         }
 
         self.table.clear();
         self.local_ipv4_addrs.clear();
         self.local_ipv4_addrs
             .extend(state.addrs.iter().filter_map(|addr| match addr.address {
-                SmoltcpIpAddress::Ipv4(ipv4) => Some(Ipv4Cidr::new(ipv4.into(), addr.prefix_len)),
+                SmoltcpIpAddress::Ipv4(ipv4) => Some(LocalIpv4Addr {
+                    cidr: Ipv4Cidr::new(ipv4.into(), addr.prefix_len),
+                    broadcast: addr.broadcast.map(Ipv4Address::from_octets),
+                }),
                 SmoltcpIpAddress::Ipv6(_) => None,
             }));
         for route in state.routes.iter().filter(|route| {
             route.family == 2 && route.table == RT_TABLE_MAIN && route.route_type == RTN_UNICAST
         }) {
+            let link_up = state
+                .links
+                .iter()
+                .find(|link| link.index == route.oif as i32)
+                .is_some_and(|link| link.flags & crate::netlink::IFF_UP != 0);
+            if !link_up {
+                // Mirror Linux fib_sync_down_dev: routes on administratively down
+                // interfaces are not selected for data-plane forwarding.
+                continue;
+            }
             let dev = route.oif.saturating_sub(1) as usize;
             if dev >= self.devices.len() {
                 continue;
@@ -231,6 +276,10 @@ impl Router {
         }
     }
 
+    fn is_device_up(&self, dev_index: usize) -> bool {
+        self.device_up.get(dev_index).copied().unwrap_or(false)
+    }
+
     pub fn poll(&mut self, timestamp: MonotonicInstant, sockets: &mut SocketSet<'_>) {
         for expired in self.ipv4_reassembler.remove_expired(timestamp) {
             self.queue_icmpv4_error(
@@ -241,6 +290,10 @@ impl Router {
             );
         }
         for dev_index in 0..self.devices.len() {
+            if !self.is_device_up(dev_index) {
+                // Administratively down interfaces stop RX like Linux `__dev_close`.
+                continue;
+            }
             let ifindex = dev_index as i32 + 1;
             while self.rx_queue.len() < SOCKET_BUFFER_SIZE {
                 let packet = {
@@ -296,7 +349,11 @@ impl Router {
                         )
                     };
                     if is_multicast {
+                        let device_up = self.device_up.clone();
                         for (dev_index, dev) in self.devices.iter_mut().enumerate() {
+                            if !device_up.get(dev_index).copied().unwrap_or(false) {
+                                continue;
+                            }
                             poll_next |= dev.send_ip_packet(
                                 dev_index as i32 + 1,
                                 dst_addr,
@@ -419,13 +476,19 @@ impl Router {
                 return false;
             };
 
+            let device_up = self.device_up.clone();
             let mut poll_next = false;
             for (dev_index, dev) in preceding_devices.iter_mut().enumerate() {
+                if !device_up.get(dev_index).copied().unwrap_or(false) {
+                    continue;
+                }
                 poll_next |=
                     dev.send_ip_packet(dev_index as i32 + 1, dst_addr, packet.clone(), timestamp);
             }
-            poll_next |=
-                last_device.send_ip_packet(device_count as i32, dst_addr, packet, timestamp);
+            if device_up.get(device_count - 1).copied().unwrap_or(false) {
+                poll_next |=
+                    last_device.send_ip_packet(device_count as i32, dst_addr, packet, timestamp);
+            }
             return poll_next;
         }
 

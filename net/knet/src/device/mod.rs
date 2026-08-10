@@ -69,10 +69,15 @@ pub trait NetDevice: Send + Sync {
     ) -> Result<(), PollRegisterError>;
 
     /// Synchronizes device state prepared by the control-plane adapter.
+    ///
+    /// `ipv4_addr` of `None` clears the device primary IPv4 address.
+    /// `broadcast` is the independent directed-broadcast address from the
+    /// control plane (`None` means the address has no directed broadcast).
     fn sync_netlink(
         &mut self,
         _name: Option<&str>,
         _ipv4_addr: Option<Ipv4Cidr>,
+        _broadcast: Option<[u8; 4]>,
         _neighbors: &[(IpAddress, [u8; 6])],
     ) {
     }

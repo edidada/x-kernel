@@ -18,6 +18,7 @@ extern crate alloc;
 
 mod consts;
 mod device;
+mod interface;
 mod ip;
 mod link;
 pub mod netlink;

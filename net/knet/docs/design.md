@@ -126,6 +126,7 @@ core/kruntime
 | `GeneralOptions` | 统一管理 nonblock、reuseaddr、超时和设备 mask |
 | `SocketOps` | 上层 socket syscall 使用的统一操作接口 |
 | `netlink` | 提供 AF_NETLINK socket、kobject uevent 和有限 rtnetlink 控制面 |
+| `interface` | 提供 BusyBox `ifconfig` 使用的传统 SIOCGIF*/SIOCSIF* socket ioctl，与 rtnetlink 共用 `ROUTE_STATE` |
 | `unix` | 提供 Unix domain stream 与 datagram transport；pathname 地址通过 kvfs 查找或创建 socket inode |
 | `vsock` | 在 `vsock` feature 下提供 virtio-vsock stream 支持 |
 
@@ -199,17 +200,19 @@ build_initial_state
         v
 ROUTE_STATE
         │ RTM_NEWLINK / RTM_NEWADDR / RTM_NEWROUTE / RTM_NEWNEIGH
+        │ SIOCSIFFLAGS / SIOCSIFADDR / SIOCSIFNETMASK / SIOCSIFBRDADDR / SIOCSIFMTU
         v
 updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / devices
         │
-        └─RTM_GETLINK / RTM_GETADDR / RTM_GETROUTE──> netlink dump
+        ├─RTM_GETLINK / RTM_GETADDR / RTM_GETROUTE──> netlink dump
+        └─SIOCGIF* / SIOCGIFCONF───────────────────> traditional ioctl
 ```
 
 | 从 | 到 | 触发条件 |
 |----|----|----------|
 | 初始 state | `ROUTE_STATE` | `init_network` 调用 `build_initial_state` 与 `init_route_state` |
-| `ROUTE_STATE` | 更新后的 `ROUTE_STATE` | `apply_newlink`、`apply_newaddr`、`apply_newroute`、`apply_newneigh` |
-| 更新后的 `ROUTE_STATE` | data-plane 同步 | `update_route_state` 调用 `SERVICE.lock().sync_netlink` |
+| `ROUTE_STATE` | 更新后的 `ROUTE_STATE` | `apply_newlink`、`apply_newaddr`、`apply_newroute`、`apply_newneigh`，以及 `interface` ioctl SET 路径 |
+| 更新后的 `ROUTE_STATE` | data-plane 同步 | `mutate_route_state` 调用 `SERVICE.lock().sync_netlink` |
 
 ## 算法流程
 
@@ -281,6 +284,23 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 4. mutation 请求构造新的 `RtnetlinkState`，失败时返回 netlink error。
 5. 成功更新后同步到 `Service`，带 `NLM_F_ACK` 时返回 ack。
 
+### 传统网络设备 ioctl
+
+1. `sys_ioctl` 把 socket fd 委托给 `SocketFileOps::ioctl`。
+2. `interface::sock_dev_ioctl` 按命令分发到 SIOCGIF*/SIOCSIF* 处理函数。
+3. GET 路径从 `ROUTE_STATE` 读取 link/addr；SET 路径检查特权凭据后经 `mutate_route_state` 更新。
+4. `SIOCGIFCONF` 支持 NULL size probe、按 40 字节 LP64 `ifreq` 写入，以及容量不足时的静默截断。
+5. `SIOCSIFADDR` 使用 Linux classful 默认 prefix/broadcast；`0.0.0.0` 删除主 IPv4 地址。
+6. 未实现命令继续返回 `ENOTTY`。
+
+当前支持矩阵：
+
+| 命令 | 行为 |
+|------|------|
+| `SIOCGIFCONF` / `SIOCGIFNAME` / `SIOCGIFFLAGS` / `SIOCGIFADDR` / `SIOCGIFNETMASK` / `SIOCGIFBRDADDR` / `SIOCGIFHWADDR` / `SIOCGIFMTU` / `SIOCGIFINDEX` | 查询 |
+| `SIOCGIFMETRIC` / `SIOCGIFTXQLEN` | BusyBox 展示兼容占位 |
+| `SIOCSIFFLAGS` / `SIOCSIFADDR` / `SIOCSIFNETMASK` / `SIOCSIFBRDADDR` / `SIOCSIFMTU` | 设置 |
+
 ## 并发模型
 
 - 全局 `SERVICE` 是 `LazyInit<Mutex<Service>>`，串行化 smoltcp `Interface` 和 `Router` 访问。
@@ -310,8 +330,9 @@ TCP、raw IP、IPv6 和 DNS 继续通过 smoltcp socket set 推进，协议推�
 
 ### 控制面状态与 data-plane 同步
 
-rtnetlink mutation 先更新 `RtnetlinkState`，再同步到 `Service`、`Router`、smoltcp `Interface` 和 `NetDevice`。
-这种结构让 netlink dump 有稳定的 ABI presentation，也让路由表和设备地址能通过同一状态来源重建。
+rtnetlink mutation 与传统 ioctl mutation 都先更新 `RtnetlinkState`，再同步到 `Service`、`Router`、smoltcp `Interface` 和 `NetDevice`。
+这种结构让 netlink dump 和 `ifconfig` ioctl 共用单一事实源，也让路由表和设备地址能通过同一状态来源重建。
+`Router::sync_netlink` 会跳过 `IFF_UP` 已清除接口上的路由，使 `ifconfig eth0 down` 后不再选中该接口的外发路由。
 代价是 dump 当前读取控制面状态，运行时统计、驱动瞬时状态和 smoltcp 内部计数没有完整反查。
 
 ### pathname Unix socket 显式传递凭据

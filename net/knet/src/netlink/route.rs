@@ -34,6 +34,7 @@ pub(super) struct AddrRequest {
     pub(super) prefix_len: u8,
     pub(super) scope: u8,
     pub(super) address: IpAddress,
+    pub(super) broadcast: Option<[u8; 4]>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -70,6 +71,7 @@ struct LinkAttrs {
 struct AddrAttrs {
     address: Option<IpAddress>,
     local: Option<IpAddress>,
+    broadcast: Option<[u8; 4]>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -89,14 +91,305 @@ struct NeighAttrs {
 
 impl From<AddrRequest> for AddrState {
     fn from(value: AddrRequest) -> Self {
+        let broadcast = value.broadcast.or_else(|| match value.address {
+            IpAddress::Ipv4(addr) if value.prefix_len < 31 => {
+                Some(ipv4_auto_broadcast(addr.octets(), value.prefix_len))
+            }
+            _ => None,
+        });
         Self {
             index: value.index,
             family: value.family,
             prefix_len: value.prefix_len,
             scope: value.scope,
             address: value.address,
+            broadcast,
         }
     }
+}
+
+fn ipv4_prefix_mask(prefix_len: u8) -> u32 {
+    if prefix_len == 0 {
+        0
+    } else if prefix_len >= 32 {
+        !0
+    } else {
+        !0u32 << (32 - prefix_len)
+    }
+}
+
+fn ipv4_auto_broadcast(addr: [u8; 4], prefix_len: u8) -> [u8; 4] {
+    let host = u32::from_be_bytes(addr);
+    let mask = ipv4_prefix_mask(prefix_len);
+    (host | !mask).to_be_bytes()
+}
+
+/// Classful prefix length used by Linux `SIOCSIFADDR` defaults.
+pub(crate) fn inet_abc_len(addr: [u8; 4]) -> Option<u8> {
+    if addr == [0, 0, 0, 0] || addr == [255, 255, 255, 255] {
+        return Some(0);
+    }
+    match addr[0] {
+        // Linux `IN_CLASSA` includes 127/8.
+        1..=127 => Some(8),
+        128..=191 => Some(16),
+        192..=223 => Some(24),
+        // Linux `IN_CLASSE` maps 240–254 to /32; 255.255.255.255 is handled above.
+        240..=254 => Some(32),
+        _ => None,
+    }
+}
+
+pub(crate) fn ipv4_mask_from_prefix(prefix_len: u8) -> [u8; 4] {
+    ipv4_prefix_mask(prefix_len).to_be_bytes()
+}
+
+pub(crate) fn ipv4_prefix_from_mask(mask: [u8; 4]) -> Option<u8> {
+    let value = u32::from_be_bytes(mask);
+    let inverted = !value;
+    if inverted != 0 && inverted.wrapping_add(1) & inverted != 0 {
+        return None;
+    }
+    Some(value.count_ones() as u8)
+}
+
+pub(crate) fn link_state_for_name(name: &str) -> Option<LinkState> {
+    if !ROUTE_STATE.is_inited() {
+        return None;
+    }
+    ROUTE_STATE
+        .read()
+        .links
+        .iter()
+        .find(|link| link.name == name)
+        .cloned()
+}
+
+pub(crate) fn primary_ipv4_addr(ifindex: u32) -> Option<AddrState> {
+    if !ROUTE_STATE.is_inited() {
+        return None;
+    }
+    ROUTE_STATE
+        .read()
+        .addrs
+        .iter()
+        .find(|addr| addr.index == ifindex && addr.family == wire_route::FAMILY_IPV4)
+        .cloned()
+}
+
+pub(crate) fn set_link_up(ifindex: i32, is_up: bool) -> Result<(), LinuxError> {
+    update_link_state(LinkUpdateRequest {
+        index: ifindex,
+        flags: if is_up { IFF_UP } else { 0 },
+        change: IFF_UP,
+        name: None,
+        mtu: None,
+    })
+}
+
+pub(crate) fn set_link_mtu(ifindex: i32, mtu: u32) -> Result<(), LinuxError> {
+    mutate_route_state(|state| {
+        let link = state
+            .links
+            .iter_mut()
+            .find(|link| link.index == ifindex)
+            .ok_or(LinuxError::ENODEV)?;
+        let (min_mtu, max_mtu) = if link.link_type == ARPHRD_LOOPBACK {
+            (0u32, 65_536u32)
+        } else {
+            // Linux ETH_MIN_MTU / ETH_MAX_MTU.
+            (68u32, 65_535u32)
+        };
+        if mtu < min_mtu || mtu > max_mtu {
+            return Err(LinuxError::EINVAL);
+        }
+        link.mtu = mtu;
+        Ok(())
+    })
+}
+
+fn sync_prefsrc_and_local_route(
+    state: &mut RtnetlinkState,
+    ifindex: u32,
+    old_addr: Option<IpAddress>,
+    new_addr: Option<(IpAddress, u8)>,
+) {
+    if let Some(old) = old_addr {
+        // Initial eth0 host /32 routes use loopback `oif=1`. Match by destination
+        // and host scope so address updates do not leave stale local routes.
+        state.routes.retain(|route| {
+            !(route.family == wire_route::FAMILY_IPV4
+                && route.dst_len == 32
+                && route.dst == Some(old)
+                && route.gateway.is_none()
+                && route.scope == wire_route::SCOPE_HOST)
+        });
+        for route in &mut state.routes {
+            if route.oif == ifindex && route.prefsrc == Some(old) {
+                route.prefsrc = new_addr.map(|(addr, _)| addr);
+            }
+        }
+    }
+
+    if let Some((addr, _prefix_len)) = new_addr {
+        let exists = state.routes.iter().any(|route| {
+            route.family == wire_route::FAMILY_IPV4
+                && route.dst_len == 32
+                && route.dst == Some(addr)
+                && route.gateway.is_none()
+                && route.scope == wire_route::SCOPE_HOST
+        });
+        if !exists {
+            // Mirror Linux local-table host routes: deliver via loopback.
+            state.routes.push(RouteState {
+                family: wire_route::FAMILY_IPV4,
+                dst_len: 32,
+                table: wire_route::TABLE_MAIN,
+                protocol: wire_route::PROTOCOL_BOOT,
+                scope: wire_route::SCOPE_HOST,
+                route_type: wire_route::TYPE_UNICAST,
+                oif: 1,
+                dst: Some(addr),
+                gateway: None,
+                prefsrc: Some(addr),
+            });
+        }
+        for route in &mut state.routes {
+            if route.oif == ifindex && route.prefsrc.is_none() && route.gateway.is_some() {
+                route.prefsrc = Some(addr);
+            }
+        }
+    }
+}
+
+pub(crate) fn set_primary_ipv4_addr(
+    ifindex: u32,
+    addr: [u8; 4],
+    has_broadcast_flag: bool,
+) -> Result<(), LinuxError> {
+    let prefix_len = inet_abc_len(addr).ok_or(LinuxError::EINVAL)?;
+    let ip = IpAddress::Ipv4(smoltcp::wire::Ipv4Address::from_octets(addr));
+    let broadcast = if has_broadcast_flag && prefix_len < 31 {
+        Some(ipv4_auto_broadcast(addr, prefix_len))
+    } else {
+        None
+    };
+
+    mutate_route_state(|state| {
+        ensure_link_exists(state, ifindex)?;
+        let old = state
+            .addrs
+            .iter()
+            .find(|entry| entry.index == ifindex && entry.family == wire_route::FAMILY_IPV4)
+            .map(|entry| entry.address);
+
+        if let Some(existing) = state
+            .addrs
+            .iter_mut()
+            .find(|entry| entry.index == ifindex && entry.family == wire_route::FAMILY_IPV4)
+        {
+            // Linux returns success without rewriting mask/broadcast when the
+            // primary address value is unchanged.
+            if existing.address == ip {
+                return Ok(());
+            }
+            existing.address = ip;
+            existing.prefix_len = prefix_len;
+            existing.scope = if ifindex == 1 {
+                wire_route::SCOPE_HOST
+            } else {
+                wire_route::SCOPE_UNIVERSE
+            };
+            existing.broadcast = broadcast;
+        } else {
+            state.addrs.push(AddrState {
+                index: ifindex,
+                family: wire_route::FAMILY_IPV4,
+                prefix_len,
+                scope: if ifindex == 1 {
+                    wire_route::SCOPE_HOST
+                } else {
+                    wire_route::SCOPE_UNIVERSE
+                },
+                address: ip,
+                broadcast,
+            });
+        }
+
+        sync_prefsrc_and_local_route(state, ifindex, old, Some((ip, prefix_len)));
+        Ok(())
+    })
+}
+
+pub(crate) fn del_primary_ipv4_addr(ifindex: u32) -> Result<(), LinuxError> {
+    mutate_route_state(|state| {
+        ensure_link_exists(state, ifindex)?;
+        let Some(pos) = state
+            .addrs
+            .iter()
+            .position(|entry| entry.index == ifindex && entry.family == wire_route::FAMILY_IPV4)
+        else {
+            // Linux returns success even when deleting a missing 0.0.0.0 address.
+            return Ok(());
+        };
+        let old = state.addrs[pos].address;
+        state.addrs.remove(pos);
+        sync_prefsrc_and_local_route(state, ifindex, Some(old), None);
+        Ok(())
+    })
+}
+
+pub(crate) fn set_primary_ipv4_netmask(ifindex: u32, mask: [u8; 4]) -> Result<(), LinuxError> {
+    let prefix_len = ipv4_prefix_from_mask(mask).ok_or(LinuxError::EINVAL)?;
+    mutate_route_state(|state| {
+        ensure_link_exists(state, ifindex)?;
+        let addr = state
+            .addrs
+            .iter_mut()
+            .find(|entry| entry.index == ifindex && entry.family == wire_route::FAMILY_IPV4)
+            .ok_or(LinuxError::EADDRNOTAVAIL)?;
+        if addr.prefix_len == prefix_len {
+            return Ok(());
+        }
+
+        let IpAddress::Ipv4(ipv4) = addr.address else {
+            return Err(LinuxError::EADDRNOTAVAIL);
+        };
+        let old_prefix = addr.prefix_len;
+        let old_auto = if old_prefix < 31 {
+            Some(ipv4_auto_broadcast(ipv4.octets(), old_prefix))
+        } else {
+            None
+        };
+        if addr.broadcast == old_auto {
+            addr.broadcast = if prefix_len < 31 {
+                Some(ipv4_auto_broadcast(ipv4.octets(), prefix_len))
+            } else {
+                None
+            };
+        }
+        addr.prefix_len = prefix_len;
+        Ok(())
+    })
+}
+
+pub(crate) fn set_primary_ipv4_broadcast(
+    ifindex: u32,
+    broadcast: [u8; 4],
+) -> Result<(), LinuxError> {
+    mutate_route_state(|state| {
+        ensure_link_exists(state, ifindex)?;
+        let addr = state
+            .addrs
+            .iter_mut()
+            .find(|entry| entry.index == ifindex && entry.family == wire_route::FAMILY_IPV4)
+            .ok_or(LinuxError::EADDRNOTAVAIL)?;
+        if addr.broadcast == Some(broadcast) {
+            return Ok(());
+        }
+        addr.broadcast = Some(broadcast);
+        Ok(())
+    })
 }
 
 impl From<RouteRequest> for RouteState {
@@ -451,6 +744,7 @@ fn parse_addr_request(payload: &[u8]) -> Result<AddrRequest, LinuxError> {
         prefix_len: info.prefix_len,
         scope: info.scope,
         address: attrs.local.or(attrs.address).ok_or(LinuxError::EINVAL)?,
+        broadcast: attrs.broadcast,
     })
 }
 
@@ -511,6 +805,15 @@ fn parse_addr_attrs(family: u8, attrs: Vec<NlAttr<'_>>) -> Result<AddrAttrs, Lin
             wire_addr::attr::ADDRESS => {
                 parsed.address = Some(parse_ip_by_family(family, attr.payload)?)
             }
+            wire_addr::attr::BROADCAST if family == wire_route::FAMILY_IPV4 => {
+                if attr.payload.len() != 4 {
+                    return Err(LinuxError::EINVAL);
+                }
+                let mut octets = [0u8; 4];
+                octets.copy_from_slice(attr.payload);
+                parsed.broadcast = Some(octets);
+            }
+            wire_addr::attr::BROADCAST => {}
             wire_addr::attr::LABEL => {
                 let _ = parse_string(attr.payload)?;
             }
@@ -593,6 +896,9 @@ fn build_addr_message(request: &NlMsgHeader, addr: AddrState, label: &str) -> Ve
     let ip_bytes = ip_addr_bytes(addr.address);
     push_attr(&mut payload, wire_addr::attr::ADDRESS, &ip_bytes);
     push_attr(&mut payload, wire_addr::attr::LOCAL, &ip_bytes);
+    if let Some(broadcast) = addr.broadcast {
+        push_attr(&mut payload, wire_addr::attr::BROADCAST, &broadcast);
+    }
     push_attr_str(&mut payload, wire_addr::attr::LABEL, label);
 
     build_nlmsg(RTM_NEWADDR, request.seq, NLM_F_MULTI, payload)
@@ -681,13 +987,13 @@ fn mutate_route_state<F>(f: F) -> Result<(), LinuxError>
 where
     F: FnOnce(&mut RtnetlinkState) -> Result<(), LinuxError>,
 {
-    let new_state = {
-        let mut state = ROUTE_STATE.write();
-        f(&mut state)?;
-        state.clone()
-    };
+    let mut state = ROUTE_STATE.write();
+    f(&mut state)?;
     if SERVICE.is_inited() {
-        SERVICE.lock().sync_netlink(&new_state);
+        // Hold the control-plane write lock across data-plane sync so a newer
+        // mutation cannot publish first and then be overwritten by an older
+        // snapshot.
+        SERVICE.lock().sync_netlink(&state);
     }
     Ok(())
 }
@@ -719,6 +1025,7 @@ pub(crate) fn build_initial_state(
         prefix_len: lo_ip.prefix_len(),
         scope: wire_route::SCOPE_HOST,
         address: lo_ip.address(),
+        broadcast: None,
     });
     state.routes.push(RouteState {
         family: wire_route::FAMILY_IPV4,
@@ -744,6 +1051,12 @@ pub(crate) fn build_initial_state(
             mac: eth0_mac.unwrap_or([0; 6]),
             broadcast: [0xff; 6],
         });
+        let eth0_broadcast = match eth0_ip.address() {
+            IpAddress::Ipv4(addr) if eth0_ip.prefix_len() < 31 => {
+                Some(ipv4_auto_broadcast(addr.octets(), eth0_ip.prefix_len()))
+            }
+            _ => None,
+        };
         state.addrs.push(AddrState {
             index: 2,
             family: match eth0_ip.address() {
@@ -753,6 +1066,7 @@ pub(crate) fn build_initial_state(
             prefix_len: eth0_ip.prefix_len(),
             scope: wire_route::SCOPE_UNIVERSE,
             address: eth0_ip.address(),
+            broadcast: eth0_broadcast,
         });
         state.routes.push(RouteState {
             family: wire_route::FAMILY_IPV4,

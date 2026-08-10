@@ -52,8 +52,9 @@ kfd resources / kvfs / device and pipe implementations
 | fd 编号 | 几乎所有 fd syscall | 已关闭 fd、类型不匹配、fd 复用、`CLOEXEC`/非阻塞标志混淆 |
 | 当前进程状态 | `chdir`、`openat`、`close_range` | 进程资源锁、fs_struct 更新、umask 和当前目录语义 |
 | VFS magic link | `/proc/self/fd/<fd>`、`/proc/<pid>/fd/<fd>` | 跨进程 fd 访问、目标进程退出、fd 表并发变化、no-follow 策略 |
-| VFS/设备对象 | `open`、`ioctl`、`mount`、`syncfs` | 设备特定 ioctl、终端对象、mount flags、文件系统实现差异 |
+| VFS/设备对象 | `open`、`ioctl`、`mount`、`syncfs` | 设备特定 ioctl、终端对象、socket 网络设备 ioctl、mount flags、文件系统实现差异 |
 | FIEMAP 可变长输出 | `ioctl(FS_IOC_FIEMAP)` | 用户声明的 extent 数量、header 后数组地址、后端返回的块映射 |
+| 网络设备 ioctl | socket fd 上的 `SIOCGIF*` / `SIOCSIF*` | `ifreq`/`ifconf` 用户结构由 `knet` 通过 `osvm` 校验；本层只做 fd 查找与对象委托 |
 | fd-to-fd 复制 | `sendfile`、`copy_file_range`、`splice` | 源目标类型错误、offset 指针 TOCTOU、同文件重叠、阻塞语义 |
 
 本 crate 不直接访问 MMIO、PIO、DMA、固件表或架构内联汇编。
