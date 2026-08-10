@@ -630,5 +630,6 @@ fn map_dev_err(err: DriverError) -> KError {
         DriverError::ResourceBusy => KError::ResourceBusy,
         DriverError::Unsupported => KError::OperationNotSupported,
         DriverError::BadState => KError::BadState,
+        DriverError::ReadOnly => KError::OperationNotPermitted,
     }
 }
