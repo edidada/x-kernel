@@ -420,7 +420,11 @@ AF_INET6 UDP/TCP socket 默认 `IPV6_V6ONLY=1`，不做 v4-mapped 双栈。
 IPv6 扩展头仅跳过定位上层协议；Fragment 头暂不重组。不实现 SLAAC/DHCPv6。
 该边界让 UDP 不再依赖 smoltcp socket handle，同时保留现有 TCP 和 raw socket 行为。
 
-IPv6 link-local 收发使用 `sin6_scope_id` 选择接口：接收路径写入报文到达的接口索引，发送路径按 scope 选择路由和源地址。
+IPv6 link-local 收发使用 `sin6_scope_id` 选择接口：接收路径写入报文到达的接口索引，
+UDP bind registry、endpoint 匹配和设备 mask 保留该 scope，发送路径按 scope 选择路由和源地址。
+IPv6 endpoint 的文本格式遵循 `[address%scope]:port`，避免地址与端口之间的冒号歧义。
+当前不实现 `IPV6_FLOWINFO_SEND` 或 flow-label 路由；`sockaddr_in6.sin6_flowinfo`
+进入原生 endpoint 时会被有意归零，`getsockname`、`getpeername` 和接收地址也返回零。
 邻居缓存中动态学习条目（ARP/NDP）使用 300 秒 TTL，未解析占位条目超时后清理；netlink 静态邻居保持到控制面移除。
 
 ### NAPI 风格预算推进
