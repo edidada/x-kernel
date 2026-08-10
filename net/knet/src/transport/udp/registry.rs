@@ -123,6 +123,7 @@ impl UdpPcbRegistry {
         &self,
         pcb: Arc<UdpPcb>,
         local_addr: IpAddress,
+        scope_id: u32,
         kind: UdpBindKind,
         reuse_address: bool,
     ) -> KResult<IpEndpoint> {
@@ -130,7 +131,7 @@ impl UdpPcbRegistry {
             let endpoint = IpEndpoint {
                 addr: local_addr,
                 port,
-                scope_id: 0,
+                scope_id,
             };
             let mut bucket = self.bucket(endpoint.port).lock();
             if !bucket.contains_bind_conflict(listen_endpoint(endpoint), reuse_address) {
@@ -381,16 +382,23 @@ pub(super) fn bind_udp_auto_ephemeral_pcb(
     reuse_address: bool,
 ) -> KResult<IpEndpoint> {
     init_udp_registry();
-    UDP_PCB_REGISTRY.bind_ephemeral(pcb, local_addr, UdpBindKind::Auto, reuse_address)
+    UDP_PCB_REGISTRY.bind_ephemeral(pcb, local_addr, 0, UdpBindKind::Auto, reuse_address)
 }
 
 pub(super) fn bind_udp_explicit_ephemeral_pcb(
     pcb: Arc<UdpPcb>,
     local_addr: IpAddress,
+    scope_id: u32,
     reuse_address: bool,
 ) -> KResult<IpEndpoint> {
     init_udp_registry();
-    UDP_PCB_REGISTRY.bind_ephemeral(pcb, local_addr, UdpBindKind::Explicit, reuse_address)
+    UDP_PCB_REGISTRY.bind_ephemeral(
+        pcb,
+        local_addr,
+        scope_id,
+        UdpBindKind::Explicit,
+        reuse_address,
+    )
 }
 
 pub(super) fn unregister_udp_pcb(pcb: &Arc<UdpPcb>) {
@@ -458,10 +466,13 @@ fn local_endpoint_matches(endpoint: IpEndpoint, addr: SocketAddr) -> bool {
     endpoint.port == addr.port()
         && address_family_matches(endpoint.addr, addr.ip())
         && (endpoint.addr.is_unspecified() || endpoint_addr_matches(endpoint.addr, addr.ip()))
+        && endpoint_scope_matches(endpoint, addr)
 }
 
 pub(super) fn endpoint_matches_addr(endpoint: IpEndpoint, addr: SocketAddr) -> bool {
-    endpoint.port == addr.port() && endpoint_addr_matches(endpoint.addr, addr.ip())
+    endpoint.port == addr.port()
+        && endpoint_addr_matches(endpoint.addr, addr.ip())
+        && endpoint_scope_matches(endpoint, addr)
 }
 
 fn address_family_matches(endpoint_addr: IpAddress, addr: IpAddr) -> bool {
@@ -479,10 +490,22 @@ fn endpoint_addr_matches(endpoint_addr: IpAddress, addr: IpAddr) -> bool {
     }
 }
 
+fn endpoint_scope_matches(endpoint: IpEndpoint, addr: SocketAddr) -> bool {
+    match (endpoint.addr, addr) {
+        (IpAddress::Ipv6(endpoint_addr), SocketAddr::V6(addr))
+            if endpoint_addr.is_link_local() || endpoint_addr.is_multicast() =>
+        {
+            endpoint.scope_id == 0 || endpoint.scope_id == addr.scope_id()
+        }
+        _ => true,
+    }
+}
+
 pub(super) fn listen_endpoint(endpoint: IpEndpoint) -> IpListenEndpoint {
     IpListenEndpoint {
         addr: (!endpoint.addr.is_unspecified()).then_some(endpoint.addr),
         port: endpoint.port,
+        scope_id: endpoint.scope_id,
     }
 }
 
@@ -498,15 +521,20 @@ fn udp_bind_entries_conflict(
     new_endpoint: IpListenEndpoint,
     new_reuse_address: bool,
 ) -> bool {
-    let same_bind_scope = listen_addrs_overlap(existing_endpoint.addr, new_endpoint.addr);
+    let same_bind_scope = listen_endpoints_overlap(existing_endpoint, new_endpoint);
     let both_allow_reuse = existing_reuse_address && new_reuse_address;
 
     same_bind_scope && !both_allow_reuse
 }
 
-fn listen_addrs_overlap(a: Option<IpAddress>, b: Option<IpAddress>) -> bool {
-    match (a, b) {
+fn listen_endpoints_overlap(a: IpListenEndpoint, b: IpListenEndpoint) -> bool {
+    match (a.addr, b.addr) {
         (None, _) | (_, None) => true,
+        (Some(IpAddress::Ipv6(a_addr)), Some(IpAddress::Ipv6(b_addr)))
+            if a_addr == b_addr && (a_addr.is_link_local() || a_addr.is_multicast()) =>
+        {
+            a.scope_id == 0 || b.scope_id == 0 || a.scope_id == b.scope_id
+        }
         (Some(a), Some(b)) => a == b,
     }
 }
@@ -650,6 +678,54 @@ mod tests {
 
         assert_ne!(first.port, second.port);
 
+        clear_registry();
+    }
+
+    #[def_test(serial)]
+    fn ipv6_scoped_bind_preserves_scope_and_isolates_interfaces() {
+        clear_registry();
+
+        let link_local =
+            Ipv6Address::from_octets([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let local_scope_2 = IpEndpoint::from(ipv6_socket_addr(link_local, 8086, 2));
+        let local_scope_3 = IpEndpoint::from(ipv6_socket_addr(link_local, 8086, 3));
+        let pcb_scope_2 = bind_test_pcb(local_scope_2, false);
+        let pcb_scope_3 = bind_test_pcb(local_scope_3, false);
+        let remote = ipv6_socket_addr(
+            Ipv6Address::from_octets([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]),
+            49152,
+            3,
+        );
+
+        assert_eq!(listen_endpoint(local_scope_2).scope_id, 2);
+        assert_eq!(listen_endpoint(local_scope_3).scope_id, 3);
+        assert!(Arc::ptr_eq(
+            &lookup_udp_pcb(ipv6_socket_addr(link_local, 8086, 2), remote)
+                .expect("scope 2 bind should receive packets from interface 2"),
+            &pcb_scope_2
+        ));
+        assert!(Arc::ptr_eq(
+            &lookup_udp_pcb(ipv6_socket_addr(link_local, 8086, 3), remote)
+                .expect("scope 3 bind should receive packets from interface 3"),
+            &pcb_scope_3
+        ));
+
+        clear_registry();
+    }
+
+    #[def_test(serial)]
+    fn explicit_ephemeral_bind_preserves_ipv6_scope() {
+        clear_registry();
+
+        let endpoint = bind_udp_explicit_ephemeral_pcb(
+            UdpPcb::new(UdpSocketState::new()),
+            IpAddress::Ipv6(Ipv6Address::LOCALHOST),
+            9,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(endpoint.scope_id, 9);
         clear_registry();
     }
 

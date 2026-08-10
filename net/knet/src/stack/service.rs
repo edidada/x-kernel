@@ -399,7 +399,8 @@ impl Service {
 
     pub fn device_mask_for(&self, endpoint: &IpListenEndpoint) -> u32 {
         match endpoint.addr {
-            Some(addr) => self.device_mask_for_addr(&addr),
+            Some(addr) => self.device_mask_for_scoped_addr(&addr, endpoint.scope_id),
+            None if endpoint.scope_id != 0 => self.device_mask_for_scope_id(endpoint.scope_id),
             None => u32::MAX,
         }
     }
@@ -416,6 +417,10 @@ impl Service {
         if scope_id == 0 {
             return self.device_mask_for_addr(addr);
         }
+        self.device_mask_for_scope_id(scope_id)
+    }
+
+    fn device_mask_for_scope_id(&self, scope_id: u32) -> u32 {
         let dev = scope_id.saturating_sub(1) as usize;
         if dev < self.router.lock().devices.len() {
             1u32 << dev

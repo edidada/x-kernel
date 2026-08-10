@@ -639,6 +639,7 @@ fn parse_addr_request(payload: &[u8]) -> Result<AddrRequest, LinuxError> {
     // Linux derives the legacy IPv4 `ifa_flags` bits from address ordering
     // and lifetimes, so this permanent-address subset accepts the field
     // without treating it as independently mutable state.
+    validate_prefix_len(info.family, info.prefix_len)?;
     let attrs = parse_addr_attrs(info.family, parse_attrs(&payload[IfAddrMsg::SIZE..])?)?;
     if let (Some(address), Some(local)) = (attrs.address, attrs.local)
         && address != local
@@ -656,6 +657,7 @@ fn parse_addr_request(payload: &[u8]) -> Result<AddrRequest, LinuxError> {
 
 fn parse_route_request(payload: &[u8]) -> Result<RouteRequest, LinuxError> {
     let info = RtMsg::read(payload)?;
+    validate_prefix_len(info.family, info.dst_len)?;
     let attrs = parse_route_attrs(info.family, parse_attrs(&payload[RtMsg::SIZE..])?)?;
     Ok(RouteRequest {
         family: info.family,
@@ -669,6 +671,41 @@ fn parse_route_request(payload: &[u8]) -> Result<RouteRequest, LinuxError> {
         gateway: attrs.gateway,
         prefsrc: attrs.prefsrc,
     })
+}
+
+fn validate_prefix_len(family: u8, prefix_len: u8) -> Result<(), LinuxError> {
+    let max_prefix_len = match family {
+        wire_route::FAMILY_IPV4 => 32,
+        wire_route::FAMILY_IPV6 => 128,
+        _ => return Err(LinuxError::EAFNOSUPPORT),
+    };
+    if prefix_len > max_prefix_len {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(())
+}
+
+#[cfg(unittest)]
+mod prefix_len_tests {
+    use unittest::def_test;
+
+    use super::*;
+
+    #[def_test]
+    fn rtnetlink_rejects_out_of_range_prefix_lengths() {
+        assert!(validate_prefix_len(wire_route::FAMILY_IPV4, 0).is_ok());
+        assert!(validate_prefix_len(wire_route::FAMILY_IPV4, 32).is_ok());
+        assert_eq!(
+            validate_prefix_len(wire_route::FAMILY_IPV4, 33),
+            Err(LinuxError::EINVAL)
+        );
+        assert!(validate_prefix_len(wire_route::FAMILY_IPV6, 0).is_ok());
+        assert!(validate_prefix_len(wire_route::FAMILY_IPV6, 128).is_ok());
+        assert_eq!(
+            validate_prefix_len(wire_route::FAMILY_IPV6, 129),
+            Err(LinuxError::EINVAL)
+        );
+    }
 }
 
 fn parse_neigh_request(payload: &[u8]) -> Result<NeighRequest, LinuxError> {

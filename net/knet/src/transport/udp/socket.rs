@@ -519,6 +519,10 @@ impl SocketOps for UdpSocket {
             let endpoint = registry::bind_udp_explicit_ephemeral_pcb(
                 self.pcb.clone(),
                 local_addr.ip().into(),
+                match local_addr {
+                    SocketAddr::V4(_) => 0,
+                    SocketAddr::V6(addr) => addr.scope_id(),
+                },
                 reuse_address,
             )?;
             self.state()

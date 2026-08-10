@@ -239,9 +239,20 @@ pub(crate) struct Ipv4Cidr {
 
 impl Ipv4Cidr {
     pub(crate) const fn new(address: Ipv4Address, prefix_len: u8) -> Self {
-        Self {
-            address,
-            prefix_len,
+        match Self::try_new(address, prefix_len) {
+            Some(cidr) => cidr,
+            None => panic!("IPv4 prefix length must not exceed 32"),
+        }
+    }
+
+    pub(crate) const fn try_new(address: Ipv4Address, prefix_len: u8) -> Option<Self> {
+        if prefix_len <= 32 {
+            Some(Self {
+                address,
+                prefix_len,
+            })
+        } else {
+            None
         }
     }
 
@@ -263,9 +274,6 @@ impl Ipv4Cidr {
     }
 
     pub(crate) fn broadcast(self) -> Option<Ipv4Address> {
-        if self.prefix_len > 32 {
-            return None;
-        }
         let mask = prefix_mask(self.prefix_len);
         let addr = u32::from_be_bytes(self.address.octets());
         Some(Ipv4Address::from_octets((addr | !mask).to_be_bytes()))
@@ -306,9 +314,20 @@ pub(crate) struct Ipv6Cidr {
 
 impl Ipv6Cidr {
     pub(crate) const fn new(address: Ipv6Address, prefix_len: u8) -> Self {
-        Self {
-            address,
-            prefix_len,
+        match Self::try_new(address, prefix_len) {
+            Some(cidr) => cidr,
+            None => panic!("IPv6 prefix length must not exceed 128"),
+        }
+    }
+
+    pub(crate) const fn try_new(address: Ipv6Address, prefix_len: u8) -> Option<Self> {
+        if prefix_len <= 128 {
+            Some(Self {
+                address,
+                prefix_len,
+            })
+        } else {
+            None
         }
     }
 
@@ -369,6 +388,11 @@ impl IpCidr {
     }
 }
 
+/// An IP address and transport port used by the native stack.
+///
+/// IPv6 flow information is intentionally not represented because the stack
+/// does not implement `IPV6_FLOWINFO_SEND` or flow-label routing. Conversions
+/// from [`SocketAddrV6`] therefore normalize `flowinfo` to zero.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct IpEndpoint {
     pub(crate) addr: IpAddress,
@@ -421,7 +445,12 @@ impl From<IpEndpoint> for SocketAddr {
 
 impl fmt::Display for IpEndpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.addr, self.port)
+        match self.addr {
+            IpAddress::Ipv4(addr) => write!(f, "{}:{}", addr, self.port),
+            IpAddress::Ipv6(addr) => {
+                SocketAddrV6::new(addr.into(), self.port, 0, self.scope_id).fmt(f)
+            }
+        }
     }
 }
 
@@ -429,12 +458,19 @@ impl fmt::Display for IpEndpoint {
 pub(crate) struct IpListenEndpoint {
     pub(crate) addr: Option<IpAddress>,
     pub(crate) port: u16,
+    pub(crate) scope_id: u32,
 }
 
 impl fmt::Display for IpListenEndpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.addr {
-            Some(addr) => write!(f, "{}:{}", addr, self.port),
+            Some(IpAddress::Ipv4(addr)) => write!(f, "{}:{}", addr, self.port),
+            Some(IpAddress::Ipv6(addr)) => {
+                SocketAddrV6::new(addr.into(), self.port, 0, self.scope_id).fmt(f)
+            }
+            None if self.scope_id != 0 => {
+                SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, self.port, 0, self.scope_id).fmt(f)
+            }
             None => write!(f, "*:{}", self.port),
         }
     }
@@ -452,7 +488,7 @@ fn ipv6_prefix_equal(lhs: [u8; 16], rhs: [u8; 16], prefix_len: u8) -> bool {
     if prefix_len == 0 {
         return true;
     }
-    if prefix_len >= 128 {
+    if prefix_len == 128 {
         return lhs == rhs;
     }
     let full_bytes = (prefix_len / 8) as usize;
@@ -493,15 +529,50 @@ mod tests {
     }
 
     #[def_test]
-    fn test_ipv6_and_listen_endpoint_helpers() {
+    fn test_cidr_prefix_boundaries() {
+        let ipv4 = Ipv4Address::new(192, 0, 2, 1);
+        let ipv4_default = Ipv4Cidr::new(ipv4, 0);
+        let ipv4_host = Ipv4Cidr::new(ipv4, 32);
+        assert!(ipv4_default.contains_addr(&IpAddress::Ipv4(Ipv4Address::new(203, 0, 113, 9))));
+        assert!(ipv4_host.contains_addr(&IpAddress::Ipv4(ipv4)));
+        assert!(!ipv4_host.contains_addr(&IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 2))));
+        assert!(Ipv4Cidr::try_new(ipv4, 33).is_none());
+
+        let ipv6 =
+            Ipv6Address::from_octets([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let ipv6_next =
+            Ipv6Address::from_octets([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let ipv6_outside_127 =
+            Ipv6Address::from_octets([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        assert!(Ipv6Cidr::new(ipv6, 0).contains_addr(&IpAddress::Ipv6(Ipv6Address::LOCALHOST)));
+        assert!(Ipv6Cidr::new(ipv6, 64).contains_addr(&IpAddress::Ipv6(ipv6_next)));
+        assert!(Ipv6Cidr::new(ipv6, 127).contains_addr(&IpAddress::Ipv6(ipv6_next)));
+        assert!(!Ipv6Cidr::new(ipv6, 127).contains_addr(&IpAddress::Ipv6(ipv6_outside_127)));
+        assert!(Ipv6Cidr::new(ipv6, 128).contains_addr(&IpAddress::Ipv6(ipv6)));
+        assert!(!Ipv6Cidr::new(ipv6, 128).contains_addr(&IpAddress::Ipv6(ipv6_next)));
+        assert!(Ipv6Cidr::try_new(ipv6, 129).is_none());
+        assert!(Ipv6Cidr::try_new(ipv6, u8::MAX).is_none());
+    }
+
+    #[def_test]
+    fn test_ipv6_endpoint_display_and_conversion() {
         let octets = [1; 16];
         let addr = Ipv6Address::from_octets(octets);
-        let endpoint = IpListenEndpoint {
+        let endpoint = IpEndpoint {
+            addr: IpAddress::from(addr),
+            port: 8080,
+            scope_id: 7,
+        };
+        let listen_endpoint = IpListenEndpoint {
             addr: Some(IpAddress::from(addr)),
             port: 8080,
+            scope_id: 7,
         };
         let cidr = Ipv6Cidr::new(addr, 64);
         let link_local = Ipv6Address::link_local_from_mac([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let socket_addr = SocketAddrV6::new(addr.into(), 8080, 0x1234, 7);
+        let converted = IpEndpoint::from(socket_addr);
+        let round_trip = SocketAddr::from(converted);
 
         assert_eq!(addr.octets(), octets);
         assert!(!addr.is_unspecified());
@@ -511,7 +582,42 @@ mod tests {
         assert!(link_local.is_link_local());
         assert!(cidr.contains_addr(&IpAddress::from(addr)));
         assert_eq!(IpCidr::from(cidr).prefix_len(), 64);
-        assert_eq!(endpoint.to_string(), "101:101:101:101:101:101:101:101:8080");
+        assert_eq!(
+            endpoint.to_string(),
+            "[101:101:101:101:101:101:101:101%7]:8080"
+        );
+        assert_eq!(listen_endpoint.to_string(), endpoint.to_string());
+        assert_eq!(
+            IpListenEndpoint {
+                addr: None,
+                port: 8080,
+                scope_id: 7,
+            }
+            .to_string(),
+            "[::%7]:8080"
+        );
+        assert_eq!(converted.scope_id, 7);
+        assert_eq!(
+            round_trip,
+            SocketAddr::V6(SocketAddrV6::new(addr.into(), 8080, 0, 7))
+        );
         assert_eq!(addr.solicited_node_multicast().octets()[13..], [1, 1, 1]);
+    }
+
+    #[def_test]
+    fn test_ipv4_endpoint_display() {
+        let endpoint = IpEndpoint {
+            addr: IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 1)),
+            port: 8080,
+            scope_id: 0,
+        };
+        let listen_endpoint = IpListenEndpoint {
+            addr: Some(endpoint.addr),
+            port: endpoint.port,
+            scope_id: 0,
+        };
+
+        assert_eq!(endpoint.to_string(), "192.168.1.1:8080");
+        assert_eq!(listen_endpoint.to_string(), endpoint.to_string());
     }
 }

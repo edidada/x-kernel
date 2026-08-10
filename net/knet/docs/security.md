@@ -33,7 +33,9 @@ driver layer / smoltcp / ringbuf
   kvfs 负责逐级 search、父目录 mutation 和 inode DAC 检查。
 - `knet` 信任 driver 层返回的 `NetBufHandle` 数据切片在 handle 生命周期内有效。
 - `knet` 使用基于 `zerocopy` 和 `etherparse` 的 crate 内 checked parser 校验 Ethernet、ARP、IPv4/IPv6、UDP 和 ICMPv4/ICMPv6/NDP 数据，并继续依赖 smoltcp 校验 TCP 与 raw IP 数据。
-- 设备层只接收经 `Router` 控制面适配后的 crate 内地址、CIDR 和邻居项。
+- 设备层只接收经 `Router` 控制面适配后的 crate 内地址、CIDR 和邻居项；
+  rtnetlink 边界拒绝 IPv4 大于 32、IPv6 大于 128 的 prefix，
+  crate 内 CIDR 构造器也以断言保护该不变量。
 - unsafe 边界由 crate 内部封装，外部调用者没有直接调用 unsafe API 的入口。
 
 ## 外部边界 / 攻击面
