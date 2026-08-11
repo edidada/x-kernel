@@ -27,6 +27,7 @@ use smoltcp::{
 use crate::{
     LISTEN_TABLE, SOCKET_SET,
     buf::PacketBuf,
+    device::{LinkConfigUpdate, LinkSnapshot},
     ip::{IpAddress, IpListenEndpoint},
     netlink::RtnetlinkState,
     poller::{PollBudget, PollProgress},
@@ -432,6 +433,53 @@ impl Service {
 
     pub fn remove_device_by_model_id(&self, id: kdevice::DeviceId) -> bool {
         self.router.lock().remove_device_by_model_id(id)
+    }
+
+    fn rebuild_interface(&self, router: &mut Router, iface: &mut Interface) {
+        let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
+        let mut new_iface = Interface::new(config, router, to_smoltcp_instant(monotonic_time()));
+        let current_addrs = iface.ip_addrs().to_vec();
+        new_iface.update_ip_addrs(|ip_addrs| {
+            for addr in current_addrs {
+                let _ = ip_addrs.push(addr);
+            }
+        });
+        *iface = new_iface;
+        self.timeout_deadline_micros.store(0, Ordering::Release);
+        self.timeout_poll.wake();
+    }
+
+    pub fn link_snapshots(&self) -> Vec<LinkSnapshot> {
+        self.router.lock().link_snapshots()
+    }
+
+    pub fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
+        self.router.lock().link_snapshot_for_ifindex(ifindex)
+    }
+
+    pub fn update_device_link(
+        &self,
+        dev: usize,
+        update: LinkConfigUpdate,
+    ) -> Result<(), LinuxError> {
+        let mtu_changed = update.mtu.is_some();
+        let mut router = self.router.lock();
+        router.update_device_link(dev, update)?;
+        if mtu_changed {
+            let mut iface = self.iface.lock();
+            self.rebuild_interface(&mut router, &mut iface);
+        }
+        Ok(())
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn replace_router_for_tests(&self, mut router: Router) {
+        let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
+        let iface = Interface::new(config, &mut router, to_smoltcp_instant(monotonic_time()));
+        *self.router.lock() = router;
+        *self.iface.lock() = iface;
+        self.timeout_deadline_micros.store(0, Ordering::Release);
+        self.timeout_poll.wake();
     }
 
     pub fn send_link_frame(&self, ifindex: i32, frame: &[u8]) -> KResult<usize> {

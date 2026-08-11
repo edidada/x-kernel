@@ -3,8 +3,10 @@
 // See LICENSES for license details.
 
 //! Network device abstractions.
+use alloc::string::String;
+
 use ::core::task::Waker;
-use kerrno::KResult;
+use kerrno::{KResult, LinuxError};
 use kpoll::{PollContext, PollRegisterError};
 use ktime_types::MonotonicInstant;
 
@@ -23,9 +25,80 @@ use crate::{
     ip::{IpAddress, Ipv4Cidr},
 };
 
+pub(crate) const LINK_FLAG_UP: u32 = 1 << 0;
+pub(crate) const LINK_FLAG_BROADCAST: u32 = 1 << 1;
+pub(crate) const LINK_FLAG_LOOPBACK: u32 = 1 << 3;
+pub(crate) const LINK_FLAG_RUNNING: u32 = 1 << 6;
+pub(crate) const LINK_FLAG_MULTICAST: u32 = 1 << 12;
+pub(crate) const LINK_FLAG_LOWER_UP: u32 = 1 << 16;
+pub(crate) const IPV4_MIN_MTU: usize = 68;
+pub(crate) const ETHERNET_MAX_MTU: usize = 1500;
+pub(crate) const LOOPBACK_MAX_MTU: usize = 65_536;
+const INTERFACE_NAME_MAX_LEN: usize = 15;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LinkKind {
+    Loopback,
+    Ethernet,
+}
+
+impl LinkKind {
+    pub(crate) fn validate_mtu(self, mtu: usize) -> Result<(), LinuxError> {
+        let max_mtu = match self {
+            Self::Loopback => LOOPBACK_MAX_MTU,
+            Self::Ethernet => ETHERNET_MAX_MTU,
+        };
+        (IPV4_MIN_MTU..=max_mtu)
+            .contains(&mtu)
+            .then_some(())
+            .ok_or(LinuxError::EINVAL)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct LinkConfigUpdate {
+    pub(crate) name: Option<String>,
+    pub(crate) mtu: Option<usize>,
+    pub(crate) is_up: Option<bool>,
+}
+
+pub(crate) fn validate_interface_name(name: &str) -> Result<(), LinuxError> {
+    let is_invalid = name.is_empty()
+        || name.len() > INTERFACE_NAME_MAX_LEN
+        || matches!(name, "." | "..")
+        || name
+            .bytes()
+            .any(|byte| byte == b'/' || byte == b':' || byte.is_ascii_whitespace());
+    (!is_invalid).then_some(()).ok_or(LinuxError::EINVAL)
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LinkSnapshot {
+    pub(crate) ifindex: i32,
+    pub(crate) name: String,
+    pub(crate) flags: u32,
+    pub(crate) mtu: usize,
+    pub(crate) operstate: u8,
+    pub(crate) kind: LinkKind,
+    pub(crate) hardware_addr: [u8; 6],
+    pub(crate) broadcast_addr: [u8; 6],
+}
+
 /// Trait implemented by network device backends.
 pub trait NetDevice: Send + Sync {
     fn name(&self) -> &str;
+
+    /// Returns the link-layer kind without allocating a snapshot.
+    fn link_kind(&self) -> LinkKind;
+
+    /// Returns the configured IP-layer MTU.
+    fn mtu(&self) -> usize;
+
+    /// Returns whether the device can currently receive and transmit packets.
+    fn is_link_up(&self) -> bool;
+
+    /// Returns the link-layer state owned by this device.
+    fn link_snapshot(&self, ifindex: i32) -> LinkSnapshot;
 
     /// Device-model ID for driver-backed devices.
     fn device_id(&self) -> Option<kdevice::DeviceId> {
@@ -72,12 +145,23 @@ pub trait NetDevice: Send + Sync {
         context: &mut PollContext<'_>,
     ) -> Result<(), PollRegisterError>;
 
-    /// Synchronizes device state prepared by the control-plane adapter.
-    fn sync_netlink(
-        &mut self,
-        _name: Option<&str>,
-        _ipv4_addr: Option<Ipv4Cidr>,
-        _neighbors: &[(IpAddress, [u8; 6])],
-    ) {
+    /// Updates the user-visible interface name for this device.
+    fn set_name(&mut self, _name: String) {}
+
+    /// Updates the device MTU.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EINVAL` when `mtu` is outside the backend's supported range.
+    fn set_mtu(&mut self, _mtu: usize) -> Result<(), LinuxError> {
+        Err(LinuxError::EOPNOTSUPP)
     }
+
+    /// Updates the administrative link state.
+    ///
+    /// Backends stop receiving and transmitting packets while the link is down.
+    fn set_link_up(&mut self, _is_up: bool) {}
+
+    /// Synchronizes address and neighbor state prepared by the control-plane adapter.
+    fn sync_netlink(&mut self, _ipv4_addr: Option<Ipv4Cidr>, _neighbors: &[(IpAddress, [u8; 6])]) {}
 }

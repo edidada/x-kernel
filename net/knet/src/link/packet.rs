@@ -23,8 +23,8 @@ use ksync::{Mutex, RwLock};
 use crate::{
     RecvFlags, RecvOptions, SERVICE, SendOptions, Shutdown, SocketAddrEx, SocketOps,
     buf::{PacketBuf, PacketType},
+    device::{LINK_FLAG_UP, LinkSnapshot},
     general::GeneralOptions,
-    netlink::{IFF_UP, LinkState, link_state_for_ifindex},
     options::{
         Configurable, GetSocketOption, OptionHandled, PacketMembership, PacketStatistics,
         SetSocketOption,
@@ -262,7 +262,7 @@ impl PacketSocket {
             addr.protocol
         };
         let link = validate_link_for_send(addr.ifindex, payload.len(), PacketSocketKind::Datagram)?;
-        let frame = build_datagram_frame(addr, link.mac, protocol, payload)?;
+        let frame = build_datagram_frame(addr, link.hardware_addr, protocol, payload)?;
 
         self.send_raw(addr.ifindex, &frame, nonblocking)
             .map(|_| payload.len())
@@ -616,22 +616,24 @@ fn validate_link_for_send(
     ifindex: i32,
     data_len: usize,
     kind: PacketSocketKind,
-) -> KResult<LinkState> {
-    let link = link_state_for_ifindex(ifindex).ok_or(KError::from(LinuxError::ENODEV))?;
+) -> KResult<LinkSnapshot> {
+    let link = SERVICE
+        .link_snapshot_for_ifindex(ifindex)
+        .ok_or(KError::from(LinuxError::ENODEV))?;
     validate_link_state_for_send(&link, data_len, kind)?;
     Ok(link)
 }
 
 fn validate_link_state_for_send(
-    link: &LinkState,
+    link: &LinkSnapshot,
     data_len: usize,
     kind: PacketSocketKind,
 ) -> KResult {
-    if link.flags & IFF_UP == 0 {
+    if link.flags & LINK_FLAG_UP == 0 {
         return Err(LinuxError::ENETDOWN.into());
     }
 
-    let mtu = link.mtu as usize;
+    let mtu = link.mtu;
     match kind {
         PacketSocketKind::Raw => {
             if data_len < ETHERNET_HEADER_LEN {
@@ -687,7 +689,7 @@ fn validate_ifindex(ifindex: i32) -> KResult {
     if ifindex <= 0 {
         return Err(LinuxError::ENXIO.into());
     }
-    if link_state_for_ifindex(ifindex).is_some() {
+    if SERVICE.link_snapshot_for_ifindex(ifindex).is_some() {
         Ok(())
     } else {
         Err(LinuxError::ENODEV.into())
@@ -695,7 +697,7 @@ fn validate_ifindex(ifindex: i32) -> KResult {
 }
 
 fn validate_ifindex_or_any(ifindex: i32) -> KResult {
-    if ifindex == 0 || link_state_for_ifindex(ifindex).is_some() {
+    if ifindex == 0 || SERVICE.link_snapshot_for_ifindex(ifindex).is_some() {
         Ok(())
     } else {
         Err(LinuxError::ENODEV.into())
@@ -711,7 +713,7 @@ mod tests {
     use unittest::def_test;
 
     use super::*;
-    use crate::{RecvOptions, SendOptions, SocketAddrEx};
+    use crate::{RecvOptions, SendOptions, SocketAddrEx, device::LinkKind};
 
     const ETH_P_IP: u16 = 0x0800;
     const TEST_LOCAL_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 1];
@@ -732,16 +734,16 @@ mod tests {
         publish_link_frame(ifindex, &frame, TEST_LOCAL_MAC);
     }
 
-    fn test_link_state(flags: u32, mtu: u32) -> LinkState {
-        LinkState {
-            index: 2,
+    fn test_link_state(flags: u32, mtu: usize) -> LinkSnapshot {
+        LinkSnapshot {
+            ifindex: 2,
             name: String::from("eth0"),
             flags,
             mtu,
             operstate: 6,
-            link_type: ARPHRD_ETHER,
-            mac: TEST_LOCAL_MAC,
-            broadcast: [0xff; 6],
+            kind: LinkKind::Ethernet,
+            hardware_addr: TEST_LOCAL_MAC,
+            broadcast_addr: [0xff; 6],
         }
     }
 
@@ -1094,7 +1096,7 @@ mod tests {
 
     #[def_test(serial)]
     fn test_send_link_state_validation() {
-        let up_link = test_link_state(IFF_UP, 1500);
+        let up_link = test_link_state(LINK_FLAG_UP, 1500);
         let down_link = test_link_state(0, 1500);
 
         assert_eq!(
@@ -1108,34 +1110,25 @@ mod tests {
         assert_eq!(
             validate_link_state_for_send(
                 &up_link,
-                ETHERNET_HEADER_LEN + up_link.mtu as usize + 1,
+                ETHERNET_HEADER_LEN + up_link.mtu + 1,
                 PacketSocketKind::Raw,
             ),
             Err(LinuxError::EMSGSIZE.into())
         );
         assert_eq!(
-            validate_link_state_for_send(
-                &up_link,
-                up_link.mtu as usize + 1,
-                PacketSocketKind::Datagram,
-            ),
+            validate_link_state_for_send(&up_link, up_link.mtu + 1, PacketSocketKind::Datagram,),
             Err(LinuxError::EMSGSIZE.into())
         );
         assert!(
             validate_link_state_for_send(
                 &up_link,
-                ETHERNET_HEADER_LEN + up_link.mtu as usize,
+                ETHERNET_HEADER_LEN + up_link.mtu,
                 PacketSocketKind::Raw,
             )
             .is_ok()
         );
         assert!(
-            validate_link_state_for_send(
-                &up_link,
-                up_link.mtu as usize,
-                PacketSocketKind::Datagram
-            )
-            .is_ok()
+            validate_link_state_for_send(&up_link, up_link.mtu, PacketSocketKind::Datagram).is_ok()
         );
     }
 
