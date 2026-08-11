@@ -28,11 +28,28 @@ use crate::{
 pub(crate) const LINK_FLAG_UP: u32 = 1 << 0;
 pub(crate) const LINK_FLAG_BROADCAST: u32 = 1 << 1;
 pub(crate) const LINK_FLAG_LOOPBACK: u32 = 1 << 3;
+const LINK_FLAG_POINTOPOINT: u32 = 1 << 4;
 pub(crate) const LINK_FLAG_RUNNING: u32 = 1 << 6;
+const LINK_FLAG_MASTER: u32 = 1 << 10;
+const LINK_FLAG_SLAVE: u32 = 1 << 11;
 pub(crate) const LINK_FLAG_MULTICAST: u32 = 1 << 12;
 pub(crate) const LINK_FLAG_LOWER_UP: u32 = 1 << 16;
+const LINK_FLAG_DORMANT: u32 = 1 << 17;
+const LINK_FLAG_ECHO: u32 = 1 << 18;
+pub(crate) const LINK_FLAG_VOLATILE: u32 = LINK_FLAG_LOOPBACK
+    | LINK_FLAG_POINTOPOINT
+    | LINK_FLAG_BROADCAST
+    | LINK_FLAG_ECHO
+    | LINK_FLAG_MASTER
+    | LINK_FLAG_SLAVE
+    | LINK_FLAG_RUNNING
+    | LINK_FLAG_LOWER_UP
+    | LINK_FLAG_DORMANT;
+pub(crate) const IF_OPER_UNKNOWN: u8 = 0;
+pub(crate) const IF_OPER_DOWN: u8 = 2;
+pub(crate) const IF_OPER_UP: u8 = 6;
 pub(crate) const IPV4_MIN_MTU: usize = 68;
-pub(crate) const ETHERNET_MAX_MTU: usize = 1500;
+pub(crate) const ETHERNET_MAX_MTU: usize = crate::consts::STANDARD_MTU;
 pub(crate) const LOOPBACK_MAX_MTU: usize = 65_536;
 const INTERFACE_NAME_MAX_LEN: usize = 15;
 
@@ -66,9 +83,9 @@ pub(crate) fn validate_interface_name(name: &str) -> Result<(), LinuxError> {
     let is_invalid = name.is_empty()
         || name.len() > INTERFACE_NAME_MAX_LEN
         || matches!(name, "." | "..")
-        || name
-            .bytes()
-            .any(|byte| byte == b'/' || byte == b':' || byte.is_ascii_whitespace());
+        || name.bytes().any(|byte| {
+            byte == b'/' || byte == b':' || byte == b'\x0b' || byte.is_ascii_whitespace()
+        });
     (!is_invalid).then_some(()).ok_or(LinuxError::EINVAL)
 }
 
@@ -82,6 +99,13 @@ pub(crate) struct LinkSnapshot {
     pub(crate) kind: LinkKind,
     pub(crate) hardware_addr: [u8; 6],
     pub(crate) broadcast_addr: [u8; 6],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LinkSendSnapshot {
+    pub(crate) is_up: bool,
+    pub(crate) mtu: usize,
+    pub(crate) hardware_addr: [u8; 6],
 }
 
 /// Trait implemented by network device backends.
@@ -99,6 +123,9 @@ pub trait NetDevice: Send + Sync {
 
     /// Returns the link-layer state owned by this device.
     fn link_snapshot(&self, ifindex: i32) -> LinkSnapshot;
+
+    /// Returns the allocation-free link state needed by packet transmission.
+    fn link_send_snapshot(&self) -> LinkSendSnapshot;
 
     /// Device-model ID for driver-backed devices.
     fn device_id(&self) -> Option<kdevice::DeviceId> {
@@ -164,4 +191,30 @@ pub trait NetDevice: Send + Sync {
 
     /// Synchronizes address and neighbor state prepared by the control-plane adapter.
     fn sync_netlink(&mut self, _ipv4_addr: Option<Ipv4Cidr>, _neighbors: &[(IpAddress, [u8; 6])]) {}
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::def_test;
+
+    use super::*;
+
+    #[def_test]
+    fn ethernet_mtu_validation_accepts_only_supported_boundaries() {
+        assert_eq!(LinkKind::Ethernet.validate_mtu(IPV4_MIN_MTU), Ok(()));
+        assert_eq!(LinkKind::Ethernet.validate_mtu(ETHERNET_MAX_MTU), Ok(()));
+        assert_eq!(
+            LinkKind::Ethernet.validate_mtu(IPV4_MIN_MTU - 1),
+            Err(LinuxError::EINVAL)
+        );
+        assert_eq!(
+            LinkKind::Ethernet.validate_mtu(ETHERNET_MAX_MTU + 1),
+            Err(LinuxError::EINVAL)
+        );
+    }
+
+    #[def_test]
+    fn interface_name_rejects_linux_whitespace_bytes() {
+        assert_eq!(validate_interface_name("eth\x0b1"), Err(LinuxError::EINVAL));
+    }
 }

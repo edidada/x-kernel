@@ -19,7 +19,7 @@ use super::{
     },
     *,
 };
-use crate::device::{LINK_FLAG_UP, LinkConfigUpdate, LinkKind, LinkSnapshot};
+use crate::device::{LINK_FLAG_UP, LINK_FLAG_VOLATILE, LinkConfigUpdate, LinkKind, LinkSnapshot};
 
 #[derive(Clone, Debug)]
 pub(super) struct LinkUpdateRequest {
@@ -356,19 +356,31 @@ pub(super) fn update_link_state(request: LinkUpdateRequest) -> Result<(), LinuxE
     if request.index <= 0 {
         return Err(LinuxError::ENODEV);
     }
-    if request.change & !LINK_FLAG_UP != 0 {
+    if !SERVICE.is_inited() {
+        return Err(LinuxError::ENODEV);
+    }
+
+    let current_flags = SERVICE
+        .link_snapshot_for_ifindex(request.index)
+        .ok_or(LinuxError::ENODEV)?
+        .flags;
+    // Linux treats a zero change mask with nonzero flags as an all-bits mask
+    // for backward compatibility. Device-owned volatile flags are preserved.
+    let change = if request.change == 0 && request.flags != 0 {
+        u32::MAX
+    } else {
+        request.change
+    };
+    let changed_flags = change & (request.flags ^ current_flags);
+    if changed_flags & !(LINK_FLAG_UP | LINK_FLAG_VOLATILE) != 0 {
         return Err(LinuxError::EOPNOTSUPP);
     }
-    if !SERVICE.is_inited() {
-        return Err(LinuxError::ENETDOWN);
-    }
     SERVICE.update_device_link(
-        (request.index - 1) as usize,
+        request.index,
         LinkConfigUpdate {
             name: request.name,
             mtu: request.mtu.map(|mtu| mtu as usize),
-            is_up: (request.change & LINK_FLAG_UP != 0)
-                .then_some(request.flags & LINK_FLAG_UP != 0),
+            is_up: (change & LINK_FLAG_UP != 0).then_some(request.flags & LINK_FLAG_UP != 0),
         },
     )
 }

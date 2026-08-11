@@ -23,12 +23,13 @@ use ksync::{Mutex, RwLock};
 use crate::{
     RecvFlags, RecvOptions, SERVICE, SendOptions, Shutdown, SocketAddrEx, SocketOps,
     buf::{PacketBuf, PacketType},
-    device::{LINK_FLAG_UP, LinkSnapshot},
+    device::LinkSendSnapshot,
     general::GeneralOptions,
     options::{
         Configurable, GetSocketOption, OptionHandled, PacketMembership, PacketStatistics,
         SetSocketOption,
     },
+    service::Service,
     wire::{ETHERNET_HEADER_LEN, EthernetFrameRef},
 };
 
@@ -233,6 +234,32 @@ impl PacketSocket {
         (*self.inner.local_addr.read()).unwrap_or_else(|| PacketAddr::new(self.inner.protocol, 0))
     }
 
+    fn send_with_link<T, F>(
+        &self,
+        ifindex: i32,
+        data_len: usize,
+        kind: PacketSocketKind,
+        nonblocking: bool,
+        mut operation: F,
+    ) -> KResult<T>
+    where
+        F: FnMut(&Service, LinkSendSnapshot) -> KResult<T>,
+    {
+        self.inner
+            .general
+            .send_poller_with_nonblocking(self, nonblocking, || {
+                if !SERVICE.is_inited() {
+                    return Err(LinuxError::ENODEV.into());
+                }
+                let service: &Service = &SERVICE;
+                let link = service
+                    .link_send_snapshot_for_ifindex(ifindex)
+                    .ok_or(KError::from(LinuxError::ENODEV))?;
+                validate_link_state_for_send(&link, data_len, kind)?;
+                operation(service, link)
+            })
+    }
+
     // TODO: Implement PACKET_MR_PROMISC with device-side promiscuous-mode
     // reference counts, then clear memberships automatically when the socket
     // is dropped. PACKET_MR_MULTICAST and PACKET_MR_ALLMULTI should go through
@@ -245,14 +272,13 @@ impl PacketSocket {
     }
 
     fn send_raw(&self, ifindex: i32, frame: &[u8], nonblocking: bool) -> KResult<usize> {
-        self.inner
-            .general
-            .send_poller_with_nonblocking(self, nonblocking, || {
-                if !SERVICE.is_inited() {
-                    return Err(KError::NotFound);
-                }
-                SERVICE.send_link_frame(ifindex, frame)
-            })
+        self.send_with_link(
+            ifindex,
+            frame.len(),
+            PacketSocketKind::Raw,
+            nonblocking,
+            |service, _link| service.send_link_frame(ifindex, frame),
+        )
     }
 
     fn send_datagram(&self, addr: PacketAddr, payload: &[u8], nonblocking: bool) -> KResult<usize> {
@@ -261,11 +287,19 @@ impl PacketSocket {
         } else {
             addr.protocol
         };
-        let link = validate_link_for_send(addr.ifindex, payload.len(), PacketSocketKind::Datagram)?;
-        let frame = build_datagram_frame(addr, link.hardware_addr, protocol, payload)?;
+        let mut frame = build_datagram_frame(addr, [0; 6], protocol, payload)?;
 
-        self.send_raw(addr.ifindex, &frame, nonblocking)
-            .map(|_| payload.len())
+        self.send_with_link(
+            addr.ifindex,
+            payload.len(),
+            PacketSocketKind::Datagram,
+            nonblocking,
+            |service, link| {
+                frame[6..12].copy_from_slice(&link.hardware_addr);
+                service.send_link_frame(addr.ifindex, &frame)?;
+                Ok(payload.len())
+            },
+        )
     }
 
     fn statistics(&self) -> PacketStatistics {
@@ -340,14 +374,11 @@ impl SocketOps for PacketSocket {
                 Err(KError::NotConnected)
             };
         }
-        validate_ifindex(addr.ifindex)?;
-
         let mut data = Vec::with_capacity(src.remaining());
         src.read_to_end(&mut data)?;
 
         match self.inner.kind {
             PacketSocketKind::Raw => {
-                validate_link_for_send(addr.ifindex, data.len(), PacketSocketKind::Raw)?;
                 self.send_raw(addr.ifindex, &data, options.flags.nonblocking())
             }
             PacketSocketKind::Datagram => {
@@ -612,24 +643,12 @@ fn build_datagram_frame(
     Ok(frame)
 }
 
-fn validate_link_for_send(
-    ifindex: i32,
-    data_len: usize,
-    kind: PacketSocketKind,
-) -> KResult<LinkSnapshot> {
-    let link = SERVICE
-        .link_snapshot_for_ifindex(ifindex)
-        .ok_or(KError::from(LinuxError::ENODEV))?;
-    validate_link_state_for_send(&link, data_len, kind)?;
-    Ok(link)
-}
-
 fn validate_link_state_for_send(
-    link: &LinkSnapshot,
+    link: &LinkSendSnapshot,
     data_len: usize,
     kind: PacketSocketKind,
 ) -> KResult {
-    if link.flags & LINK_FLAG_UP == 0 {
+    if !link.is_up {
         return Err(LinuxError::ENETDOWN.into());
     }
 
@@ -685,19 +704,8 @@ fn protocol_to_host(protocol: u16) -> u16 {
     u16::from_be(protocol)
 }
 
-fn validate_ifindex(ifindex: i32) -> KResult {
-    if ifindex <= 0 {
-        return Err(LinuxError::ENXIO.into());
-    }
-    if SERVICE.link_snapshot_for_ifindex(ifindex).is_some() {
-        Ok(())
-    } else {
-        Err(LinuxError::ENODEV.into())
-    }
-}
-
 fn validate_ifindex_or_any(ifindex: i32) -> KResult {
-    if ifindex == 0 || SERVICE.link_snapshot_for_ifindex(ifindex).is_some() {
+    if ifindex == 0 || SERVICE.is_inited() && SERVICE.has_device(ifindex) {
         Ok(())
     } else {
         Err(LinuxError::ENODEV.into())
@@ -706,14 +714,14 @@ fn validate_ifindex_or_any(ifindex: i32) -> KResult {
 
 #[cfg(unittest)]
 mod tests {
-    use alloc::{string::String, vec};
+    use alloc::vec;
 
     use kio::{Cursor, IoBufMut, Write};
     use kpoll::{IoEvents, Pollable};
     use unittest::def_test;
 
     use super::*;
-    use crate::{RecvOptions, SendOptions, SocketAddrEx, device::LinkKind};
+    use crate::{RecvOptions, SendOptions, SocketAddrEx};
 
     const ETH_P_IP: u16 = 0x0800;
     const TEST_LOCAL_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 1];
@@ -734,16 +742,11 @@ mod tests {
         publish_link_frame(ifindex, &frame, TEST_LOCAL_MAC);
     }
 
-    fn test_link_state(flags: u32, mtu: usize) -> LinkSnapshot {
-        LinkSnapshot {
-            ifindex: 2,
-            name: String::from("eth0"),
-            flags,
+    fn test_link_state(is_up: bool, mtu: usize) -> LinkSendSnapshot {
+        LinkSendSnapshot {
+            is_up,
             mtu,
-            operstate: 6,
-            kind: LinkKind::Ethernet,
             hardware_addr: TEST_LOCAL_MAC,
-            broadcast_addr: [0xff; 6],
         }
     }
 
@@ -1096,8 +1099,8 @@ mod tests {
 
     #[def_test(serial)]
     fn test_send_link_state_validation() {
-        let up_link = test_link_state(LINK_FLAG_UP, 1500);
-        let down_link = test_link_state(0, 1500);
+        let up_link = test_link_state(true, 1500);
+        let down_link = test_link_state(false, 1500);
 
         assert_eq!(
             validate_link_state_for_send(&down_link, ETHERNET_HEADER_LEN, PacketSocketKind::Raw),

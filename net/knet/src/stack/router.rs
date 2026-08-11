@@ -17,7 +17,7 @@ use super::ipv4::{self, Ipv4Error, Ipv4Header};
 use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
-    device::{LinkConfigUpdate, LinkSnapshot, NetDevice, validate_interface_name},
+    device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NetDevice},
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
     netlink::{RT_TABLE_MAIN, RTN_UNICAST, RtnetlinkState},
 };
@@ -116,8 +116,28 @@ impl Router {
         let rule = self.table.lookup(dst)?;
         self.devices
             .get(rule.dev)
-            .filter(|device| device.is_link_up())
             .map(|device| device.mtu().min(u16::MAX as usize))
+    }
+
+    /// Returns the source address for an output route with an active device.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ENETUNREACH` when the route or its device is absent, or when
+    /// the selected device is administratively down.
+    pub fn output_route_source(&self, dst: &IpAddress) -> KResult<IpAddress> {
+        let rule = self
+            .table
+            .lookup(dst)
+            .ok_or(KError::from(LinuxError::ENETUNREACH))?;
+        let device = self
+            .devices
+            .get(rule.dev)
+            .ok_or(KError::from(LinuxError::ENETUNREACH))?;
+        if !device.is_link_up() {
+            return Err(LinuxError::ENETUNREACH.into());
+        }
+        Ok(rule.src)
     }
 
     pub fn can_enqueue_tx_packet(&self) -> bool {
@@ -178,6 +198,11 @@ impl Router {
         &self.local_ipv4_addrs
     }
 
+    /// Returns the MTU advertised through the smoltcp device capabilities.
+    pub fn effective_mtu(&self) -> usize {
+        self.effective_mtu
+    }
+
     pub fn link_snapshots(&self) -> Vec<LinkSnapshot> {
         self.devices
             .iter()
@@ -187,22 +212,36 @@ impl Router {
     }
 
     pub fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
-        if ifindex <= 0 {
-            return None;
-        }
+        let dev_index = Self::device_index(ifindex)?;
         self.devices
-            .get((ifindex - 1) as usize)
+            .get(dev_index)
             .map(|device| device.link_snapshot(ifindex))
     }
 
+    pub fn has_device(&self, ifindex: i32) -> bool {
+        Self::device_index(ifindex).is_some_and(|dev_index| self.devices.get(dev_index).is_some())
+    }
+
+    pub fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
+        let dev_index = Self::device_index(ifindex)?;
+        self.devices
+            .get(dev_index)
+            .map(|device| device.link_send_snapshot())
+    }
+
+    /// Applies a validated link update.
+    ///
+    /// Returns `Ok(true)` when the effective device MTU changed and the
+    /// smoltcp interface must be rebuilt to refresh its cached capabilities.
     pub fn update_device_link(
         &mut self,
-        dev: usize,
+        ifindex: i32,
         update: LinkConfigUpdate,
-    ) -> Result<(), LinuxError> {
+    ) -> Result<bool, LinuxError> {
+        let dev = Self::device_index(ifindex).ok_or(LinuxError::ENODEV)?;
         let device = self.devices.get(dev).ok_or(LinuxError::ENODEV)?;
         if let Some(name) = update.name.as_deref() {
-            validate_interface_name(name)?;
+            crate::device::validate_interface_name(name)?;
             if self
                 .devices
                 .iter()
@@ -216,6 +255,9 @@ impl Router {
             device.link_kind().validate_mtu(mtu)?;
         }
 
+        let is_mtu_changed = update.mtu.is_some_and(|mtu| mtu != device.mtu());
+        let effective_mtu = self.effective_mtu;
+
         let LinkConfigUpdate { name, mtu, is_up } = update;
         let device = &mut self.devices[dev];
         if let Some(mtu) = mtu {
@@ -227,10 +269,14 @@ impl Router {
         if let Some(is_up) = is_up {
             device.set_link_up(is_up);
         }
-        if mtu.is_some() {
+        if is_mtu_changed {
             self.recompute_effective_mtu();
         }
-        Ok(())
+        Ok(self.effective_mtu != effective_mtu)
+    }
+
+    fn device_index(ifindex: i32) -> Option<usize> {
+        (ifindex > 0).then_some((ifindex - 1) as usize)
     }
 
     pub fn sync_netlink(&mut self, state: &RtnetlinkState) {
@@ -373,10 +419,7 @@ impl Router {
     }
 
     pub fn send_link_frame(&mut self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
-        if ifindex <= 0 {
-            return Err(KError::InvalidInput);
-        }
-        let dev_index = (ifindex - 1) as usize;
+        let dev_index = Self::device_index(ifindex).ok_or(KError::InvalidInput)?;
         let dev = self
             .devices
             .get_mut(dev_index)

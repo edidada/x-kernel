@@ -15,8 +15,8 @@ use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::SOCKET_BUFFER_SIZE,
     device::{
-        LINK_FLAG_LOOPBACK, LINK_FLAG_LOWER_UP, LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind,
-        LinkSnapshot, NetDevice,
+        IF_OPER_DOWN, IF_OPER_UNKNOWN, LINK_FLAG_LOOPBACK, LINK_FLAG_LOWER_UP, LINK_FLAG_RUNNING,
+        LINK_FLAG_UP, LOOPBACK_MAX_MTU, LinkKind, LinkSendSnapshot, LinkSnapshot, NetDevice,
     },
     ip::IpAddress,
 };
@@ -53,8 +53,8 @@ impl LoopbackDevice {
         Self {
             name: String::from("lo"),
             flags: LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOOPBACK | LINK_FLAG_LOWER_UP,
-            mtu: 65_536,
-            operstate: 0,
+            mtu: LOOPBACK_MAX_MTU,
+            operstate: IF_OPER_UNKNOWN,
             queue: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
             rx_waker: Mutex::new(None),
         }
@@ -88,6 +88,14 @@ impl NetDevice for LoopbackDevice {
             kind: LinkKind::Loopback,
             hardware_addr: [0; 6],
             broadcast_addr: [0; 6],
+        }
+    }
+
+    fn link_send_snapshot(&self) -> LinkSendSnapshot {
+        LinkSendSnapshot {
+            is_up: self.is_link_up(),
+            mtu: self.mtu,
+            hardware_addr: [0; 6],
         }
     }
 
@@ -179,10 +187,10 @@ impl NetDevice for LoopbackDevice {
     fn set_link_up(&mut self, is_up: bool) {
         if is_up {
             self.flags |= LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOWER_UP;
-            self.operstate = 0;
+            self.operstate = IF_OPER_UNKNOWN;
         } else {
             self.flags &= !(LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOWER_UP);
-            self.operstate = 2;
+            self.operstate = IF_OPER_DOWN;
         }
     }
 }
@@ -210,5 +218,23 @@ mod tests {
             MonotonicInstant::ORIGIN,
         ));
         assert!(device.queue.is_empty());
+    }
+
+    #[def_test]
+    fn loopback_link_state_updates_are_idempotent() {
+        let mut device = LoopbackDevice::new();
+        assert_eq!(device.mtu(), LOOPBACK_MAX_MTU);
+
+        device.set_link_up(false);
+        device.set_link_up(false);
+        let down = device.link_snapshot(1);
+        assert_eq!(down.flags & LINK_FLAG_UP, 0);
+        assert_eq!(down.operstate, IF_OPER_DOWN);
+
+        device.set_link_up(true);
+        device.set_link_up(true);
+        let up = device.link_snapshot(1);
+        assert_ne!(up.flags & LINK_FLAG_UP, 0);
+        assert_eq!(up.operstate, IF_OPER_UNKNOWN);
     }
 }

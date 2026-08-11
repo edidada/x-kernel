@@ -24,8 +24,9 @@ use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::ETHERNET_MAX_PENDING_PACKETS,
     device::{
-        LINK_FLAG_BROADCAST, LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST, LINK_FLAG_RUNNING,
-        LINK_FLAG_UP, LinkKind, LinkSnapshot, NetDevice as NetDeviceOps,
+        IF_OPER_DOWN, IF_OPER_UP, LINK_FLAG_BROADCAST, LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST,
+        LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind, LinkSendSnapshot, LinkSnapshot,
+        NetDevice as NetDeviceOps,
     },
     ip::{IpAddress, Ipv4Cidr},
     packet,
@@ -300,7 +301,7 @@ impl EthernetDevice {
                 | LINK_FLAG_MULTICAST
                 | LINK_FLAG_LOWER_UP,
             mtu: crate::consts::STANDARD_MTU,
-            operstate: 6,
+            operstate: IF_OPER_UP,
             inner,
             neighbors: HashMap::new(),
             ip,
@@ -628,6 +629,14 @@ impl NetDeviceOps for EthernetDevice {
         }
     }
 
+    fn link_send_snapshot(&self) -> LinkSendSnapshot {
+        LinkSendSnapshot {
+            is_up: self.is_link_up(),
+            mtu: self.mtu,
+            hardware_addr: self.mac_addr().0,
+        }
+    }
+
     fn device_id(&self) -> Option<kdevice::DeviceId> {
         Some(self.inner.id())
     }
@@ -748,10 +757,10 @@ impl NetDeviceOps for EthernetDevice {
     fn set_link_up(&mut self, is_up: bool) {
         if is_up {
             self.flags |= LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOWER_UP;
-            self.operstate = 6;
+            self.operstate = IF_OPER_UP;
         } else {
             self.flags &= !(LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOWER_UP);
-            self.operstate = 2;
+            self.operstate = IF_OPER_DOWN;
         }
     }
 
