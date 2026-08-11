@@ -8,7 +8,7 @@
 - the clock-tree node that caches rate/accuracy and serializes reference-counted
   gating and rate/parent changes ([`ClkCore`], [`ClkBuilder`]),
 - the global provider registry consumers query ([`ClkLookup`], [`ClkTable`],
-  [`set_clk_provider`]),
+  [`register_provider`]),
 - the consumer handle returned to drivers ([`ClkHandle`]),
 - the reusable building-block clock types ([`FixedRate`], [`FixedFactor`],
   [`Gate`], [`Mux`], [`Divider`], [`Composite`]).
@@ -23,7 +23,7 @@ this crate; they live in a sibling crate and register their outputs here.
 [`ClkBuilder`]: ../src/core.rs
 [`ClkLookup`]: ../src/provider.rs
 [`ClkTable`]: ../src/lookup.rs
-[`set_clk_provider`]: ../src/provider.rs
+[`register_provider`]: ../src/provider.rs
 [`ClkHandle`]: ../src/handle.rs
 [`FixedRate`]: ../src/basic/fixed_rate.rs
 [`FixedFactor`]: ../src/basic/fixed_factor.rs
@@ -62,7 +62,7 @@ OS-neutral: porting the framework to another kernel only requires reimplementing
 | `src/ops.rs` | `ClkHwOps` provider trait (the `clk_ops` equivalent), with the two-phase `prepare`/`enable` gate and the `RoundResult`-returning `round_rate`. |
 | `src/core.rs` | `ClkCore` tree node + `ClkBuilder`; rate/accuracy caching, reference-counted gating, rate/parent write propagation, global clock lock, and rate-change notifiers. |
 | `src/handle.rs` | `ClkHandle`, the consumer-side reference. |
-| `src/provider.rs` | `ClkLookup` trait + global registry (`set_clk_provider`, `clk_get_by_*`). |
+| `src/provider.rs` | `ClkLookup` trait + global provider *list* keyed by `ProviderId` (`register_provider`, `clk_get_by_*`). |
 | `src/lookup.rs` | `ClkTable`, a ready name- and index-keyed `ClkLookup`. |
 | `src/reg.rs` | `ClkRegAccess` trait + `MmioClkReg` default impl. |
 | `src/event.rs` | `ClkEvent`, `NotifierResult`, and the `ClkNotifier` subscriber type. |
@@ -81,7 +81,9 @@ overrides the methods relevant to it.
 
 The gate is two-phase on purpose:
 
-- `prepare` / `unprepare` may sleep (slow setup, PLL lock wait);
+- `prepare` / `unprepare` carry the slow, controller-global setup; like all
+  callbacks they run under a spinlock and **must not sleep** — a PLL lock wait is
+  a bounded busy-wait on a status bit, never a scheduler sleep;
 - `enable` / `disable` must be atomic (toggle a gate bit only).
 
 `round_rate` returns a [`RoundResult`] carrying both the closest achievable
@@ -113,11 +115,14 @@ it remains usable from contexts that cannot block.
 
 ### `ClkLookup` / `ClkTable` / registry
 
-A platform installs one `ClkLookup` during early init via `set_clk_provider`;
-consumers resolve clocks by name or DT index through `clk_get_by_name` /
-`clk_get_by_index`. Production reads the registry through `klazy::Once` (a single
-acquire load after install); `--cfg unittest` swaps in a replaceable slot so
-each test can stand up a mock provider.
+A SoC has several clock controllers (CCU, PMUCRU, video CCU, ...). Each
+registers its own `ClkLookup` under a `ProviderId` (its DT phandle) via
+`register_provider`; the registry keeps a *list* of providers, not a single
+one. Consumers resolve a clock by `(provider_id, index)` — the two cells of a
+DT `clocks = <&ccu 5>` specifier — through `clk_get_by_index`, or by a
+globally-unique name through `clk_get_by_name`. Two controllers may both
+publish index 0 without colliding, because the registry keys on the provider id
+first. This mirrors Linux's `of_clk_providers` list.
 
 `ClkTable` is the recommended helper: it stores both a name map and an index
 vector behind a spin lock, is `const`-constructible for a `static`, and answers
@@ -161,7 +166,7 @@ controller driver
    |-- builds ClkHwOps (basic type or custom PLL)
    |-- ClkBuilder::new(name, ops).parent(..).flags(..).build()  -> Arc<ClkCore>
    |-- ClkTable::register(index, name, core)
-   \-- once per controller: set_clk_provider(&TABLE)
+   \-- register_provider(&TABLE)  (each controller its own id)
 ```
 
 ### Resolution (consumer side, driver probe)
@@ -190,8 +195,13 @@ calling the hardware op once when the count reaches zero.
   probe/boot operations. They must not run in interrupt context.
 - `enable`/`disable` are the atomic fast path and may run with IRQs disabled,
   matching Linux. A provider's `enable`/`disable` must not sleep.
-- The framework holds `SpinNoIrq` locks only briefly (to read/update a node's
-  cached state); hardware ops and parent recursion run outside those locks.
+- `prepare`/`unprepare` run serialized under the global `CLK_LOCK` (a spinlock),
+  **not** a sleepable mutex: a provider's `prepare` must not sleep either. Slow
+  work that needs to wait (a PLL lock) must be a **bounded busy-wait** polling a
+  status bit, never a scheduler sleep.
+- Hardware callbacks run *under* the global lock and the node's spinlock
+  together, not outside them. They must be quick, non-sleeping, and must not
+  re-enter the framework (see the `Re-entrancy` note on `ClkHwOps`).
 
 ## Concurrency
 
@@ -218,8 +228,11 @@ calling the hardware op once when the count reaches zero.
   (gate/mux/divider) never depend on a host MMIO mechanism; `MmioClkReg` is one
   default impl, and tests inject an array-backed mock.
 - **`RATE` is `u64` Hz**, matching Linux's `unsigned long`.
-- **Per-node locks, not a global clock lock.** Trades tree-wide atomicity for
-  simpler, deadlock-free propagation; acceptable for the current boot/probe use.
+- **Per-node spinlocks plus a global `CLK_LOCK`.** Sleepable mutations take the
+  global lock (atomic w.r.t. other changes); `enable`/`disable` stay on the
+  per-node lock so they remain usable where blocking is impossible. Parent
+  recursion releases the child lock first to keep lock ordering
+  parent-before-child.
 
 ## Adding a Clock Controller Driver
 
@@ -303,8 +316,9 @@ pub fn init_ccu(ccu_vaddr: usize) {
 
 ### Step 4 — install the provider once, during platform init
 
-A controller calls `set_clk_provider` exactly once, before any consumer resolves
-a clock. This belongs in the platform's early init (alongside
+Each controller registers itself with `register_provider` (each under its own
+`ProviderId`, usually the DT phandle) before any consumer resolves its clocks.
+This belongs in the platform's early init (alongside
 `install_resource_provider`):
 
 ```rust
@@ -315,7 +329,7 @@ pub fn early_driver_init() {
 
     let ccu_vaddr = /* discovered from device tree */;
     my_ccu_driver::init_ccu(ccu_vaddr);
-    kclk::set_clk_provider(&my_ccu_driver::CCU);
+    kclk::register_provider(&my_ccu_driver::CCU);
 }
 ```
 
@@ -330,9 +344,13 @@ use device_res::{Clk, ClkSpec, devm_clk_get};
 use kdriver::devm_clk_get;
 
 fn probe(uart: &DeviceObject) -> DriverResult {
+    // by_name (a DT clock-names entry) or by the two cells:
+    //   ClkSpec::by_phandle_index(phandle_of_ccu, 5)
     let clk: Clk = devm_clk_get(uart, ClkSpec::by_name("baudclk"))
         .map_err(map_res_err)?;
     clk.prepare_enable().map_err(map_res_err)?;
+    // Full consumer surface (round_rate/set_rate/set_parent/register_notifier)
+    // is available on Clk too, so drivers never bypass device-res for DVFS.
     let rate = clk.get_rate();
     // ... program the UART divisor from `rate` ...
     Ok(())
@@ -340,7 +358,11 @@ fn probe(uart: &DeviceObject) -> DriverResult {
 ```
 
 The handle is released automatically when the device's probe fails or it is
-removed (the `devm_` cleanup drops it), so no explicit `put` is needed.
+removed (the `devm_` cleanup drops the reference), so no explicit `put` is
+needed. Note this only reclaims the **reference** — it does *not* call
+`disable_unprepare`. A driver that enabled a clock must balance it in its own
+remove path; otherwise the `prepare`/`enable` counts leak and the clock stays
+on. (This matches Linux `devm_clk_get`.)
 
 ### Step 6 — custom PLL (when basic types are not enough)
 
@@ -355,7 +377,8 @@ pub struct MyPll { reg: Arc<dyn kclk::ClkRegAccess> }
 
 impl ClkHwOps for MyPll {
     fn prepare(&self) -> ClkResult {
-        // power up, wait for lock (sleepable slow path)
+        // power up, then bounded busy-wait on the LOCK status bit
+        // (callbacks run under a spinlock; never scheduler-sleep)
         Ok(())
     }
     fn unprepare(&self) -> ClkResult { Ok(()) }
@@ -381,22 +404,26 @@ Arc::new(MyPll { reg })).parent(..).build()`.
 
 ## Known Limitations
 
+- **Callbacks must not sleep.** The global lock is a spinlock, not a sleepable
+  mutex; a provider `prepare` that needs to wait must bounded-busy-wait a
+  status bit. (A sleepable mutex is future work if a PLL genuinely needs
+  scheduler sleep.)
 - **Notifiers fire only on the entry node.** A `set_rate` that propagates up
-  the tree delivers events only to the node on which it was called;
-  intermediate parents reprogrammed during propagation do not receive separate
-  notifications. Linux walks the whole chain; matching that is future work.
-- **The global lock is a spinlock, not a sleepable mutex.** A provider `prepare`
-  that genuinely needs to block (e.g. busy-waiting a PLL lock for milliseconds)
-  will spin with IRQs/preemption intact under `SpinRaw`; such a PLL should be
-  migrated to a sleepable mutex once x-kernel has a lightweight one suitable for
-  boot-time use.
+  the tree delivers events only to the node on which it was called; intermediate
+  parents reprogrammed during propagation do not receive separate notifications.
+- **No orphan re-parenting.** Parents must be registered before children
+  (`ClkBuilder::parent` takes an `Arc<ClkCore>`); there is no Linux-style
+  deferred-probe adoption of an orphan slot.
+- **Register writes are not atomic across shared words.** The default
+  `ClkRegAccess::reg_modify` is a non-atomic read-modify-write. The atomic
+  `enable`/`disable` path bypasses `CLK_LOCK`, so gate and rate fields that
+  share a register word must use a controller with an atomic set/clear register
+  pair (override `reg_modify`), or live in separate words.
 - **No `clk_save_context` / `clk_restore_context`** for suspend/resume yet; the
   hooks would be straightforward but x-kernel has no PM framework to drive them.
-- **DT `clocks`/`clock-names` parsing** is not in this crate; resolving a DT
-  phandle spec to a `(provider, index)` pair is the job of the platform/of layer
-  (`of::find_node_by_phandle` already exists, mirroring the interrupt-cell
-  parser), which then calls `clk_get_by_index`. Name lookup (`clk_get_by_name`)
-  is offered directly for controllers that publish names.
+- **`IGNORE_UNUSED` / `IS_CRITICAL` / `GET_RATE_NOCACHE`** are reserved flags
+  (see `flags.rs`): accepted but not yet honored. `SET_RATE_GATE` *is* honored
+  (gate around `set_rate`/`set_parent`).
 
 ## Testing
 
@@ -412,6 +439,7 @@ Arc::new(MyPll { reg })).parent(..).build()`.
 - two-phase gating propagation with reference counting and failure roll-back;
 - `Composite` dispatch to sub-nodes;
 - provider name/index resolution and missing-clock handling;
+- **multi-provider disambiguation**: two controllers publishing index 0;
 - `SET_RATE_PARENT` pass-through propagation (mux → divider);
 - rate-change notifiers: `Pre`/`Post` delivery around `set_rate`;
 - notifier veto aborting a change with `ClkError::Aborted`;

@@ -32,8 +32,11 @@ safety contract is documented on `MmioClkReg::new`:
 
 - the caller guarantees `base` is a valid, word-aligned, mapped MMIO window;
 - the window remains live for the lifetime of every clock node sharing it;
-- `Send`/`Sync` are implemented because MMIO windows are process-global and
-  never move, and the framework serializes writes per node.
+- `Send`/`sync` are implemented because MMIO windows are process-global and
+  never move. The framework serializes the *sleepable* write paths
+  (`set_rate`/`set_parent`/`prepare`) under the global `CLK_LOCK`, but the
+  *atomic* `enable`/`disable` path bypasses it; see the *Known Limitations* note
+  on register-word sharing.
 
 No other `unsafe` exists in the crate. `Gate`/`Mux`/`Divider` field math is safe
 over `ClkRegAccess`; `ClkCore` parent recursion uses only safe `Arc` clones.
