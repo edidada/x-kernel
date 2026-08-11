@@ -28,7 +28,7 @@ use crate::{
     consts::{RAW_RX_BUF_LEN, RAW_TX_BUF_LEN},
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
-    poller::{PollReason, assist_once, network_poller},
+    poller::{AdvanceReason, assist_once, network_poller},
 };
 
 pub(crate) fn new_raw_socket(
@@ -292,7 +292,7 @@ impl SocketOps for RawSocket {
                     let written = src.read(&mut buf[header_len..])?;
                     Ok(written)
                 })?;
-                network_poller().notify(PollReason::Tx);
+                network_poller().notify(AdvanceReason::TX);
                 assist_once();
                 Ok(written)
             })

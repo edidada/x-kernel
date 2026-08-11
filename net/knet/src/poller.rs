@@ -4,6 +4,9 @@
 
 //! Budgeted network data-plane poller.
 
+use core::sync::atomic::{AtomicU8, Ordering};
+
+use bitflags::bitflags;
 use klazy::lazy_static;
 use kpoll::{PollContext, PollRegisterError, PollSet};
 
@@ -30,12 +33,17 @@ lazy_static! {
     });
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum PollReason {
-    Rx,
-    RxWindow,
-    Tx,
-    Timer,
+bitflags! {
+    /// Work classes that require data-plane advancement.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub(crate) struct AdvanceReason: u8 {
+        /// Device or protocol ingress is ready.
+        const RX = 1 << 0;
+        /// Socket or device egress is ready.
+        const TX = 1 << 1;
+        /// A protocol or deferred-close timer has expired.
+        const TIMER = 1 << 2;
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -52,10 +60,10 @@ pub(crate) struct PollProgress {
     pub timer_events: usize,
     /// Whether this round increased data TX queue capacity.
     pub tx_capacity_changed: bool,
-    /// Whether work is ready for immediate processing in another round.
+    /// Typed work that remains ready for another immediate round.
     ///
     /// A future protocol timer deadline does not count as immediate work.
-    pub has_more: bool,
+    pub more: AdvanceReason,
 }
 
 pub(crate) struct NetworkPollerConfig {
@@ -65,6 +73,12 @@ pub(crate) struct NetworkPollerConfig {
 
 pub(crate) struct NetworkPoller {
     tx_waiters: PollSet,
+    /// Work classes published before the corresponding kwork notification.
+    ///
+    /// Producers use `Release` before queueing work, and the executor uses an
+    /// `AcqRel` swap so the acquired reasons also synchronize prior data-plane
+    /// updates with the poll round.
+    pending_reasons: AtomicU8,
     poller: kwork::BudgetedPoller<PollBudget, fn(PollBudget) -> kwork::BudgetedPollProgress>,
 }
 
@@ -72,6 +86,7 @@ impl NetworkPoller {
     fn new(config: NetworkPollerConfig) -> Self {
         Self {
             tx_waiters: PollSet::new(),
+            pending_reasons: AtomicU8::new(0),
             poller: kwork::BudgetedPoller::new(
                 "knet-poller",
                 config.background_budget,
@@ -93,8 +108,14 @@ impl NetworkPoller {
     ///
     /// This method may run in IRQ-adjacent paths and does not acquire a sleepable
     /// lock or execute the network data plane.
-    pub(crate) fn notify(&self, reason: PollReason) {
-        let _ = reason;
+    pub(crate) fn notify(&self, reason: AdvanceReason) {
+        if reason.is_empty() {
+            return;
+        }
+        // Publish reasons before the kwork state transition so an executor
+        // acquiring scheduled work observes the matching data-plane updates.
+        self.pending_reasons
+            .fetch_or(reason.bits(), Ordering::Release);
         let _ = self.poller.notify_irq_safe();
     }
 
@@ -115,7 +136,11 @@ impl NetworkPoller {
             return PollProgress::default();
         }
 
-        let progress = SERVICE.poll_budgeted(budget);
+        let reasons =
+            AdvanceReason::from_bits_truncate(self.pending_reasons.swap(0, Ordering::AcqRel));
+        let progress = SERVICE.poll_budgeted(budget, reasons);
+        self.pending_reasons
+            .fetch_or(progress.more.bits(), Ordering::Release);
         if progress.tx_capacity_changed {
             self.tx_waiters.wake();
         }
@@ -139,6 +164,6 @@ pub(crate) fn assist_once() {
 
 fn poll_network_once(budget: PollBudget) -> kwork::BudgetedPollProgress {
     kwork::BudgetedPollProgress {
-        has_more: NETWORK_POLLER.run_once(budget).has_more,
+        has_more: !NETWORK_POLLER.run_once(budget).more.is_empty(),
     }
 }

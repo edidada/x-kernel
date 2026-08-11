@@ -28,7 +28,7 @@ use crate::{
     consts::{TCP_RX_BUF_LEN, TCP_TX_BUF_LEN},
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
-    poller::{PollReason, assist_once, network_poller},
+    poller::{AdvanceReason, assist_once, network_poller},
     state::*,
 };
 
@@ -143,7 +143,7 @@ impl TcpSocket {
                     });
                 }
                 if progress_immediately {
-                    network_poller().notify(PollReason::Tx);
+                    network_poller().notify(AdvanceReason::TX);
                 }
             }
             if how == Shutdown::Both {
@@ -294,13 +294,13 @@ impl Configurable for TcpSocket {
                 self.with_smol_socket(|socket| {
                     socket.set_nagle_enabled(!no_delay);
                 });
-                network_poller().notify(PollReason::Tx);
+                network_poller().notify(AdvanceReason::TX);
             }
             O::KeepAlive(keep_alive) => {
                 self.with_smol_socket(|socket| {
                     socket.set_keep_alive(keep_alive.then(|| Duration::from_secs(75)));
                 });
-                network_poller().notify(PollReason::Timer);
+                network_poller().notify(AdvanceReason::TIMER);
             }
             _ => return Ok(OptionHandled::No),
         }
@@ -404,7 +404,7 @@ impl SocketOps for TcpSocket {
                 Ok(())
             })?;
 
-        network_poller().notify(PollReason::Tx);
+        network_poller().notify(AdvanceReason::TX);
 
         // Hack: let the server listen
         ktask::yield_now();
@@ -429,7 +429,7 @@ impl SocketOps for TcpSocket {
                 // The one-shot nonblocking poll does not register a waker.
                 // Republish work so TCP keeps progressing after connect
                 // returns `EINPROGRESS`.
-                network_poller().notify(PollReason::Tx);
+                network_poller().notify(AdvanceReason::TX);
                 Err(KError::InProgress)
             }
             _ => result,
@@ -524,7 +524,7 @@ impl SocketOps for TcpSocket {
             match result {
                 Ok(0) => break,
                 Ok(len) => {
-                    network_poller().notify(PollReason::Tx);
+                    network_poller().notify(AdvanceReason::TX);
                     total_sent += len;
                 }
                 Err(_) if total_sent > 0 => return Ok(total_sent),
@@ -580,7 +580,7 @@ impl SocketOps for TcpSocket {
                     })
                 })?;
         if should_poll_rx_window {
-            network_poller().notify(PollReason::RxWindow);
+            network_poller().notify(AdvanceReason::RX);
         }
         Ok(received)
     }
@@ -696,7 +696,7 @@ impl Drop for TcpSocket {
 
         sockets.defer_tcp_close(self.dispatch_irq);
         drop(sockets);
-        network_poller().notify(PollReason::Tx);
+        network_poller().notify(AdvanceReason::TX);
         assist_once();
     }
 }

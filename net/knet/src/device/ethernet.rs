@@ -248,7 +248,7 @@ fn run_net_rx_softirq() {
     }
 
     if wake_count > 0 {
-        crate::poller::network_poller().notify(crate::poller::PollReason::Rx);
+        crate::poller::network_poller().notify(crate::poller::AdvanceReason::RX);
     }
 
     if has_deferred_pending || has_more_packets {

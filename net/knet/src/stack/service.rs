@@ -31,7 +31,7 @@ use crate::{
     buf::PacketBuf,
     device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborUpdate},
     ip::{IpAddress, IpListenEndpoint},
-    poller::{PollBudget, PollProgress},
+    poller::{AdvanceReason, PollBudget, PollProgress},
     router::{NeighborUpdatePolicy, Router, Rule},
     stack::ingress::{IngressProcessor, prepare_smoltcp_ingress},
 };
@@ -117,7 +117,13 @@ impl Service {
     /// transport and device handlers may acquire sleepable mutexes. Shared
     /// progression locks are acquired with `try_lock`; contention leaves the
     /// pending batches intact and reports immediate work for a later round.
-    pub fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
+    pub fn poll_budgeted(&self, budget: PollBudget, reasons: AdvanceReason) -> PollProgress {
+        if reasons.is_empty() {
+            return PollProgress::default();
+        }
+
+        let do_rx = reasons.contains(AdvanceReason::RX);
+        let do_timer = reasons.contains(AdvanceReason::TIMER);
         let round_started_at = monotonic_time();
         let device_timestamp = round_started_at;
         let mut control_packets = self.control_batch.lock();
@@ -125,11 +131,11 @@ impl Service {
         let mut accepted_packets = self.accepted_batch.lock();
 
         if !self.try_flush_ingress_batches(&mut accepted_packets, &mut control_packets) {
-            return deferred_poll_progress(0, 0, 0, false);
+            return deferred_poll_progress(0, 0, 0, false, reasons);
         }
 
         let Some(mut router) = self.router.try_lock() else {
-            return deferred_poll_progress(0, 0, 0, false);
+            return deferred_poll_progress(0, 0, 0, false, reasons);
         };
         let tx_capacity_before = router.available_tx_packet_slots();
         let (mut tx_packets, mut has_reached_time_limit) = dispatch_tx_budgeted(
@@ -142,39 +148,43 @@ impl Service {
         drop(router);
         let mut tx_remaining = budget.tx_packets.saturating_sub(tx_packets);
 
-        let rx_progress = self.poll_device_rx_budgeted(
-            device_timestamp,
-            round_started_at,
-            if has_reached_time_limit {
-                0
-            } else {
-                budget.rx_packets
-            },
-            &mut rx_batch,
-            &mut accepted_packets,
-            &mut control_packets,
-        );
+        let rx_progress = if do_rx {
+            self.poll_device_rx_budgeted(
+                device_timestamp,
+                round_started_at,
+                if has_reached_time_limit {
+                    0
+                } else {
+                    budget.rx_packets
+                },
+                &mut rx_batch,
+                &mut accepted_packets,
+                &mut control_packets,
+            )
+        } else {
+            DeviceRxProgress::default()
+        };
         let mut rx_packets = rx_progress.packets;
         has_reached_time_limit |= rx_progress.has_reached_time_limit;
         if rx_progress.has_lock_contention {
-            return deferred_poll_progress(rx_packets, tx_packets, 0, tx_capacity_changed);
+            return deferred_poll_progress(rx_packets, tx_packets, 0, tx_capacity_changed, reasons);
         }
 
         let Some(mut sockets) = SOCKET_SET.inner.try_lock() else {
-            return deferred_poll_progress(rx_packets, tx_packets, 0, tx_capacity_changed);
+            return deferred_poll_progress(rx_packets, tx_packets, 0, tx_capacity_changed, reasons);
         };
         let Some(mut router) = self.router.try_lock() else {
-            return deferred_poll_progress(rx_packets, tx_packets, 0, tx_capacity_changed);
+            return deferred_poll_progress(rx_packets, tx_packets, 0, tx_capacity_changed, reasons);
         };
         let current = now();
         let Some(mut iface) = self.iface.try_lock() else {
-            return deferred_poll_progress(rx_packets, tx_packets, 0, tx_capacity_changed);
+            return deferred_poll_progress(rx_packets, tx_packets, 0, tx_capacity_changed, reasons);
         };
         // Maintenance and one egress pass remain bounded and preserve protocol
         // progress after bulk RX or TX reaches the round time limit.
         iface.poll_maintenance(current);
 
-        let ingress_progress = if has_reached_time_limit {
+        let ingress_progress = if has_reached_time_limit || !do_rx {
             SmoltcpIngressProgress::default()
         } else {
             poll_smoltcp_ingress_budgeted(
@@ -240,7 +250,7 @@ impl Service {
         drop(router);
 
         let rx_remaining = budget.rx_packets.saturating_sub(rx_packets);
-        if !has_reached_time_limit && rx_remaining > 0 {
+        if do_rx && !has_reached_time_limit && rx_remaining > 0 {
             let tail_progress = self.poll_device_rx_budgeted(
                 device_timestamp,
                 round_started_at,
@@ -256,6 +266,7 @@ impl Service {
                     tx_packets,
                     usize::from(budget.timer_events > 0 && has_socket_state_change),
                     tx_capacity_changed,
+                    reasons,
                 );
             }
         }
@@ -266,17 +277,30 @@ impl Service {
                 tx_packets,
                 usize::from(budget.timer_events > 0 && has_socket_state_change),
                 tx_capacity_changed,
+                reasons,
             );
         };
         let ingress_has_more = router.has_pending_ingress();
         let rx_has_more = router.has_immediate_rx_work();
         let (_, tx_has_more) = router.dispatch_budgeted(device_timestamp, 0);
+        let mut more = AdvanceReason::empty();
+        if rx_has_more || ingress_has_more {
+            more |= AdvanceReason::RX;
+        }
+        if tx_has_more || stack_tx_passes >= stack_tx_pass_limit {
+            more |= AdvanceReason::TX;
+        }
+        if timer_has_more {
+            more |= AdvanceReason::TIMER;
+        }
         PollProgress {
             rx_packets,
             tx_packets,
-            timer_events: usize::from(budget.timer_events > 0 && has_socket_state_change),
+            timer_events: usize::from(
+                do_timer && budget.timer_events > 0 && has_socket_state_change,
+            ),
             tx_capacity_changed,
-            has_more: rx_has_more || ingress_has_more || tx_has_more || timer_has_more,
+            more,
         }
     }
 
@@ -576,7 +600,7 @@ impl Service {
 
     fn publish_timer_expiration(&self) {
         self.timeout_poll.as_ref().wake();
-        crate::poller::network_poller().notify(crate::poller::PollReason::Timer);
+        crate::poller::network_poller().notify(crate::poller::AdvanceReason::TIMER);
     }
 
     fn sync_local_ipv4_views(&self) {
@@ -854,13 +878,14 @@ fn deferred_poll_progress(
     tx_packets: usize,
     timer_events: usize,
     tx_capacity_changed: bool,
+    reasons: AdvanceReason,
 ) -> PollProgress {
     PollProgress {
         rx_packets,
         tx_packets,
         timer_events,
         tx_capacity_changed,
-        has_more: true,
+        more: reasons,
     }
 }
 
@@ -1041,11 +1066,11 @@ mod tests {
         let service = Service::new(Router::new());
         let _router = service.router.lock();
 
-        let progress = service.poll_budgeted(TEST_POLL_BUDGET);
+        let progress = service.poll_budgeted(TEST_POLL_BUDGET, AdvanceReason::RX);
 
         assert_eq!(progress.rx_packets, 0);
         assert_eq!(progress.tx_packets, 0);
-        assert!(progress.has_more);
+        assert!(progress.more.contains(AdvanceReason::RX));
     }
 
     #[def_test(serial)]

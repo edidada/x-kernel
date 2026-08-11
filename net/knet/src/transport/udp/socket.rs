@@ -23,7 +23,7 @@ use crate::{
     ip::{IpAddress, IpEndpoint, Ipv4Address},
     ipv4,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
-    poller::{PollReason, assist_once, network_poller},
+    poller::{AdvanceReason, assist_once, network_poller},
     udp_err::QueuedUdpError,
 };
 
@@ -210,7 +210,7 @@ impl UdpSocket {
                         self.write_datagram(packet, remote_endpoint, source_addr, dont_fragment)
                     },
                 )?;
-                network_poller().notify(PollReason::Tx);
+                network_poller().notify(AdvanceReason::TX);
                 assist_once();
                 Ok(payload_len)
             })
