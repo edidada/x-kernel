@@ -15,7 +15,6 @@ use crate::{
 };
 
 pub(crate) const PROTOCOL_ICMPV6: u8 = 58;
-#[expect(dead_code)]
 pub(crate) const PROTOCOL_TCP: u8 = 6;
 pub(crate) const PROTOCOL_UDP: u8 = 17;
 

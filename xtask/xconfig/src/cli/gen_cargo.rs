@@ -303,6 +303,11 @@ fn generate_cargo_config(config: &HashMap<String, String>, opts: &BuildOpts) -> 
         "RUST_TARGET_PATH".to_string(),
         format!("platforms/{}", plat_name),
     );
+    // The default capacity of two drops the IPv6 addresses after knet adds
+    // the loopback and Ethernet IPv4 addresses.
+    if features.iter().any(|feature| feature == "net") {
+        envs.insert("SMOLTCP_IFACE_MAX_ADDR_COUNT".to_string(), "8".into());
+    }
 
     #[derive(Serialize)]
     struct CargoConfig {
