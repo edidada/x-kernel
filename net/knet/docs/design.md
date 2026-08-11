@@ -314,6 +314,7 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 3. 从 `DeviceContainer<NetDevice>` 取首个 NIC，包装成 `EthernetDevice`，自动派生 EUI-64 link-local，注册默认 IPv4 路由。
 4. 创建 `Service`，初始化内部 `Interface`、`Router`、`IngressProcessor` 和可复用 batch。
 5. 初始化 rtnetlink 路由和邻居状态，追加 `::1/128` 与 eth0 `fe80::/64` on-link 路由，并同步到 `Service`、`Router`、`Interface`、`IngressProcessor` 和设备；IPv4 地址投影由 Router 地址条目生成，IPv6 地址由 rtnetlink 状态同步，link 初始状态由设备构造器建立。
+   构建时通过 `SMOLTCP_IFACE_MAX_ADDR_COUNT=8`（`KFEAT_NET` 启用时由 xconfig 注入）保证 smoltcp `Interface` 能容纳双栈地址；默认容量 2 会静默丢弃 IPv6 并导致 TCPv6 失败。
 6. 初始化全局 `SOCKET_SET`、`LISTEN_TABLE` 和 UDP PCB 及异步错误 registry。
 7. 启动常驻 `knet-poller` 后台任务，并注册协议 timer 回调。
 8. 启动 Ethernet RX 任务；硬中断只唤醒该任务，RX 任务发布工作并尝试执行一个有界 poller 批次。

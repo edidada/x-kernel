@@ -57,6 +57,10 @@ config KFEAT_CHAR
     bool
     default y
 
+config KFEAT_NET
+    bool
+    default y
+
 config KFEAT_DRIVER_CONSOLE_PL011
     bool
     depends on KFEAT_CHAR && PLATFORM_KPLAT_AARCH64
@@ -76,6 +80,7 @@ config KFEAT_DRIVER_CONSOLE_PL011
     let cargo_config = fs::read_to_string(temp_dir.path().join(".cargo/.xconfig.toml")).unwrap();
     assert!(cargo_config.contains("kfeat/driver_console_pl011"));
     assert!(cargo_config.contains("kfeat/platform_kplat_aarch64"));
+    assert!(cargo_config.contains("SMOLTCP_IFACE_MAX_ADDR_COUNT = \"8\""));
 }
 
 #[test]
