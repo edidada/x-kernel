@@ -21,6 +21,7 @@
 
 extern crate alloc;
 
+mod clk;
 mod dma;
 mod irq;
 mod mmio;
@@ -40,6 +41,8 @@ pub enum ResourceDesc {
     Irq(crate::irq::IrqResource),
     /// Coherent DMA buffer request.
     Dma(crate::dma::DmaSpec),
+    /// Clock consumer specifier.
+    Clk(crate::clk::ClkSpec),
 }
 
 /// A collection of resources for a single device.
@@ -58,6 +61,10 @@ pub enum ResError {
     Busy,
     /// The host does not support this kind of resource.
     Unsupported,
+    /// No resource provider has been installed yet.
+    NoProvider,
+    /// The named or indexed resource does not exist.
+    NotFound,
 }
 
 /// Result type for resource operations.
@@ -81,6 +88,7 @@ pub trait DeviceResource {
     fn register_cleanup(&self, cleanup: Box<dyn FnOnce() + Send>);
 }
 
+pub use clk::*;
 pub use dma::*;
 pub use irq::*;
 pub use mmio::*;

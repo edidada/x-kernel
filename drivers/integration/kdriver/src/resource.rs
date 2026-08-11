@@ -32,6 +32,7 @@ fn map_res_err(err: ResError) -> DriverError {
         ResError::NoMemory => DriverError::NoMemory,
         ResError::Busy => DriverError::ResourceBusy,
         ResError::Unsupported => DriverError::Unsupported,
+        ResError::NoProvider | ResError::NotFound => DriverError::InvalidInput,
     }
 }
 
