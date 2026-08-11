@@ -2073,6 +2073,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kclk"
+version = "0.2.0-dev"
+dependencies = [
+ "bitflags 2.13.1",
+ "klazy",
+ "kspin 0.2.0-dev",
+ "unittest",
+]
+
+[[package]]
 name = "kcpu"
 version = "0.2.0-dev"
 dependencies = [
@@ -2169,6 +2179,7 @@ dependencies = [
  "kalloc",
  "kbuild_config",
  "kclass",
+ "kclk",
  "kdevice",
  "kdma",
  "khal",

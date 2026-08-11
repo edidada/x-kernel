@@ -1,0 +1,68 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! Common clock framework core for x-kernel.
+//!
+//! This crate is the in-kernel analogue of the Linux `drivers/clk/clk.c` core
+//! plus the basic reusable clock types. It provides:
+//!
+//! - [`ClkHwOps`], the provider-side hardware operation trait (the `clk_ops`
+//!   equivalent), including the two-phase `prepare`/`enable` gate.
+//! - [`ClkCore`], a clock-tree node that caches rate/accuracy and serializes
+//!   reference-counted gating and rate/parent changes that propagate to the
+//!   selected parent.
+//! - [`ClkLookup`] / [`set_clk_provider`] / [`ClkTable`], the global provider
+//!   registry that consumers query via [`clk_get_by_name`] /
+//!   [`clk_get_by_index`].
+//! - [`ClkHandle`], the consumer-side reference returned to drivers.
+//! - Basic composable types in [`basic`]: [`FixedRate`], [`FixedFactor`],
+//!   [`Gate`], [`Mux`], [`Divider`], [`Composite`].
+//!
+//! Concrete clock-controller drivers (SoC PLL/mux/divider chips) register their
+//! outputs here, mirroring how the [`device_res`] capability providers are
+//! wired into the kernel.
+//!
+//! [`device_res`]: device_res
+#![no_std]
+#![warn(missing_docs)]
+
+extern crate alloc;
+
+pub mod basic;
+
+mod core;
+mod error;
+mod event;
+mod flags;
+mod handle;
+mod lookup;
+mod ops;
+mod provider;
+mod rate;
+mod reg;
+
+#[cfg(unittest)]
+mod tests;
+
+pub use core::{ClkBuilder, ClkCore};
+
+pub use basic::{Composite, Divider, DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux};
+pub use error::{ClkError, ClkResult};
+pub use event::{ClkEvent, ClkNotifier, NotifierResult};
+pub use flags::ClkFlags;
+pub use handle::ClkHandle;
+pub use lookup::ClkTable;
+pub use ops::ClkHwOps;
+#[cfg(unittest)]
+pub(crate) use provider::reset_clk_provider;
+pub use provider::{
+    ClkLookup, clk_get_by_index, clk_get_by_name, set_clk_provider, try_clk_provider,
+};
+pub use rate::{Rate, RoundResult};
+pub use reg::{ClkRegAccess, MmioClkReg};
+
+/// Index into a provider's clock table.
+///
+/// Corresponds to the cell value in a DT `clocks = <&phandle N>` specifier.
+pub type ClkIndex = u32;
