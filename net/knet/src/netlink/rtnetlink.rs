@@ -268,25 +268,28 @@ fn dump_links(request: &NlMsgHeader, _payload: &[u8]) -> Vec<NetlinkPacket> {
 }
 
 fn dump_addrs(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
-    let family = payload
-        .first()
-        .copied()
-        .filter(|family| *family != 0)
-        .unwrap_or(wire_route::FAMILY_IPV4);
-    if !SERVICE.is_inited() {
-        return Vec::new();
+    let family = payload.first().copied().filter(|family| *family != 0);
+    let dump_ipv4 = family.is_none() || family == Some(wire_route::FAMILY_IPV4);
+    let dump_ipv6 = family.is_none() || family == Some(wire_route::FAMILY_IPV6);
+    let links = if SERVICE.is_inited() {
+        SERVICE.link_snapshots()
+    } else {
+        Vec::new()
+    };
+    let mut packets = Vec::new();
+    if dump_ipv4 && SERVICE.is_inited() {
+        packets.extend(
+            SERVICE
+                .ipv4_addr_snapshots()
+                .into_iter()
+                .map(|snapshot| NetlinkPacket {
+                    from: NetlinkAddr { pid: 0, groups: 0 },
+                    data: build_ipv4_addr_message(request, snapshot.entry, &snapshot.label),
+                }),
+        );
     }
-    match family {
-        wire_route::FAMILY_IPV4 => SERVICE
-            .ipv4_addr_snapshots()
-            .into_iter()
-            .map(|snapshot| NetlinkPacket {
-                from: NetlinkAddr { pid: 0, groups: 0 },
-                data: build_ipv4_addr_message(request, snapshot.entry, &snapshot.label),
-            })
-            .collect(),
-        wire_route::FAMILY_IPV6 => {
-            let links = SERVICE.link_snapshots();
+    if dump_ipv6 {
+        packets.extend(
             route_state()
                 .addrs
                 .into_iter()
@@ -301,23 +304,18 @@ fn dump_addrs(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
                         from: NetlinkAddr { pid: 0, groups: 0 },
                         data: build_ipv6_addr_message(request, addr, label),
                     }
-                })
-                .collect()
-        }
-        _ => Vec::new(),
+                }),
+        );
     }
+    packets
 }
 
 fn dump_routes(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
-    let family = payload
-        .first()
-        .copied()
-        .filter(|family| *family != 0)
-        .unwrap_or(wire_route::FAMILY_IPV4);
+    let family = payload.first().copied().filter(|family| *family != 0);
     route_state()
         .routes
         .into_iter()
-        .filter(|route| route.family == family)
+        .filter(|route| family.is_none() || family == Some(route.family))
         .map(|route| NetlinkPacket {
             from: NetlinkAddr { pid: 0, groups: 0 },
             data: build_route_message(request, route),

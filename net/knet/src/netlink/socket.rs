@@ -46,6 +46,13 @@ impl NetlinkSocket {
         (*self.inner.local_addr.read()).ok_or(KError::NotConnected)
     }
 
+    fn ensure_local_addr(&self) {
+        let mut local_addr = self.inner.local_addr.write();
+        if local_addr.is_none() {
+            *local_addr = Some(NetlinkAddr::default());
+        }
+    }
+
     fn handle_request(&self, request: &[u8], is_privileged: bool) -> Vec<NetlinkPacket> {
         match self.inner.protocol {
             NETLINK_ROUTE if route_request_requires_privilege(request) && !is_privileged => {
@@ -231,6 +238,7 @@ impl SocketOps for NetlinkSocket {
     fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
         // Credential-free callers cannot establish authority. Kernel callers
         // performing rtnetlink mutations must use send_with_cred explicitly.
+        self.ensure_local_addr();
         self.send_inner(src, options, false)
     }
 
