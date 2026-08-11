@@ -2077,7 +2077,6 @@ name = "kclk"
 version = "0.2.0-dev"
 dependencies = [
  "bitflags 2.13.1",
- "klazy",
  "kspin 0.2.0-dev",
  "unittest",
 ]

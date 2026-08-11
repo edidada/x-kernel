@@ -315,15 +315,53 @@ impl ClkConsumer for KclkConsumer {
     fn is_enabled(&self) -> ResResult<bool> {
         self.0.is_enabled().map_err(map_clk_err)
     }
+
+    fn round_rate(&self, rate: u64) -> ResResult<u64> {
+        self.0.round_rate(rate).map_err(map_clk_err)
+    }
+
+    fn set_rate(&self, rate: u64) -> ResResult<u64> {
+        self.0.set_rate(rate).map_err(map_clk_err)
+    }
+
+    fn set_parent(&self, index: u8) -> ResResult<()> {
+        self.0.set_parent(index).map_err(map_clk_err)
+    }
+
+    fn register_notifier(&self, cb: device_res::ClkNotifier) -> ResResult<()> {
+        // Bridge the framework-agnostic callback to kclk's notifier, translating
+        // the event types both ways.
+        let kclk_cb: kclk::ClkNotifier = Arc::new(move |event| {
+            let mapped = match *event {
+                kclk::ClkEvent::PreRateChange { old, new } => {
+                    device_res::ClkRateEvent::PreRateChange { old, new }
+                }
+                kclk::ClkEvent::PostRateChange { old, new } => {
+                    device_res::ClkRateEvent::PostRateChange { old, new }
+                }
+                kclk::ClkEvent::RateChangeAborted { old, attempted } => {
+                    device_res::ClkRateEvent::RateChangeAborted { old, attempted }
+                }
+            };
+            match cb(&mapped) {
+                device_res::NotifierVote::Proceed => kclk::NotifierResult::Proceed,
+                device_res::NotifierVote::Stop => kclk::NotifierResult::Stop,
+            }
+        });
+        self.0.register_notifier(kclk_cb);
+        Ok(())
+    }
 }
 
 impl ClkOp for HostResourceProvider {
     fn get_clock(&self, spec: ClkSpec) -> ResResult<Arc<dyn ClkConsumer>> {
-        // Name takes precedence (a DT `clock-names` entry); otherwise fall back
-        // to the provider-relative index from the `clocks` cell.
+        // A name (DT clock-names) resolves globally across all providers;
+        // otherwise the two DT cells select (provider phandle, local index).
         let handle = match spec.name() {
             Some(name) => kclk::clk_get_by_name(name).ok_or(ResError::NotFound)?,
-            None => kclk::clk_get_by_index(spec.index()).ok_or(ResError::NotFound)?,
+            None => {
+                kclk::clk_get_by_index(spec.provider(), spec.index()).ok_or(ResError::NotFound)?
+            }
         };
         Ok(Arc::new(KclkConsumer(handle)))
     }

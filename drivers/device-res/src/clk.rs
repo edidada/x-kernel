@@ -19,33 +19,95 @@ use crate::{
     provider::{clk_provider, try_clk_provider},
 };
 
+/// A rate-change event delivered to a [`ClkNotifier`] subscriber.
+///
+/// This is device-res's own view of the event: it carries only the rates, not
+/// any framework-specific type, so the resource layer never imports a concrete
+/// clock framework. The host backend translates to/from its native event type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClkRateEvent {
+    /// The rate is about to change from `old` to `new`; a subscriber may veto.
+    PreRateChange {
+        /// Current rate, before the change.
+        old: u64,
+        /// Proposed new rate.
+        new: u64,
+    },
+    /// The rate has changed from `old` to `new`.
+    PostRateChange {
+        /// Previous rate.
+        old: u64,
+        /// New rate now in effect.
+        new: u64,
+    },
+    /// A rate change was vetoed or failed; the rate remains `old`.
+    RateChangeAborted {
+        /// Rate that remains in effect.
+        old: u64,
+        /// Rate that was attempted.
+        attempted: u64,
+    },
+}
+
+/// Whether a [`ClkRateEvent::PreRateChange`] may proceed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NotifierVote {
+    /// Allow the change to proceed.
+    #[default]
+    Proceed,
+    /// Veto an upcoming rate change.
+    Stop,
+}
+
+/// A clock rate-change subscriber callback, framework-agnostic.
+///
+/// The host backend wraps this in whatever concrete notifier type its clock
+/// framework expects. Implementations run under the framework's clock lock and
+/// must be quick, non-sleeping, and non-re-entrant.
+pub type ClkNotifier = Arc<dyn Fn(&ClkRateEvent) -> NotifierVote + Send + Sync>;
+
 /// A specifier describing which clock a device consumes.
 ///
-/// Resolution prefers [`name`](Self::name) (a DT `clock-names` entry) and falls
-/// back to [`index`](Self::index) (the cell position in `clocks`).
+/// Mirrors the two cells of a DT `clocks = <&phandle index>` specifier: the
+/// `provider` is the phandle selecting *which* controller, and `index` is the
+/// output within that controller. For consumer convenience, a globally-unique
+/// `name` (a `clock-names` entry) may be used instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClkSpec {
     name: Option<&'static str>,
+    provider: u32,
     index: u32,
 }
 
 impl ClkSpec {
-    /// Describe a clock by its consumer connection name.
+    /// Describe a clock by its consumer connection name (globally unique across
+    /// all providers).
     pub const fn by_name(name: &'static str) -> Self {
         Self {
             name: Some(name),
+            provider: 0,
             index: 0,
         }
     }
 
-    /// Describe a clock by its position in the provider's `clocks` cell array.
-    pub const fn by_index(index: u32) -> Self {
-        Self { name: None, index }
+    /// Describe a clock by `(provider, index)`, the two cells of a DT
+    /// `clocks = <&phandle index>` specifier.
+    pub const fn by_phandle_index(provider: u32, index: u32) -> Self {
+        Self {
+            name: None,
+            provider,
+            index,
+        }
     }
 
-    /// The consumer connection name, if described by firmware.
+    /// The consumer connection name, if resolved by name.
     pub const fn name(&self) -> Option<&'static str> {
         self.name
+    }
+
+    /// The provider identifier (the controller's DT phandle).
+    pub const fn provider(&self) -> u32 {
+        self.provider
     }
 
     /// The provider-relative index.
@@ -57,9 +119,10 @@ impl ClkSpec {
 /// OS-agnostic consumer handle returned by the clock capability provider.
 ///
 /// Host kernels implement this by wrapping their own clock handle so device-res
-/// never depends on a concrete framework type. Operations mirror the Linux
-/// `struct clk` consumer API: rates are read-only here; mutable rate and parent
-/// operations belong to the clock framework core, not the resource layer.
+/// never depends on a concrete framework type. The trait is the full consumer
+/// surface — gating, rate, parent, and rate-change notification — so a driver
+/// never needs to reach past the resource layer for clock control, matching how
+/// MMIO and IRQ expose their full capability here.
 pub trait ClkConsumer: Send + Sync {
     /// Stable identifier of the underlying clock (for logging).
     fn name(&self) -> &str;
@@ -75,6 +138,19 @@ pub trait ClkConsumer: Send + Sync {
 
     /// Whether the hardware reports the clock as enabled.
     fn is_enabled(&self) -> ResResult<bool>;
+
+    /// Closest achievable rate for `rate` without changing state.
+    fn round_rate(&self, rate: u64) -> ResResult<u64>;
+
+    /// Program a new rate; returns the rate now in effect.
+    fn set_rate(&self, rate: u64) -> ResResult<u64>;
+
+    /// Select parent `index` and refresh the cached rate.
+    fn set_parent(&self, index: u8) -> ResResult<()>;
+
+    /// Register a subscriber invoked around rate changes. The callback is
+    /// owned by the provider and lives for the clock's lifetime.
+    fn register_notifier(&self, cb: ClkNotifier) -> ResResult<()>;
 }
 
 /// Clock capability: resolve a [`ClkSpec`] into a consumer handle.
@@ -139,5 +215,25 @@ impl Clk {
     /// Whether the hardware reports the clock as enabled.
     pub fn is_enabled(&self) -> ResResult<bool> {
         self.consumer.is_enabled()
+    }
+
+    /// Closest achievable rate for `rate` without changing state.
+    pub fn round_rate(&self, rate: u64) -> ResResult<u64> {
+        self.consumer.round_rate(rate)
+    }
+
+    /// Program a new rate; returns the rate now in effect.
+    pub fn set_rate(&self, rate: u64) -> ResResult<u64> {
+        self.consumer.set_rate(rate)
+    }
+
+    /// Select parent `index` and refresh the cached rate.
+    pub fn set_parent(&self, index: u8) -> ResResult<()> {
+        self.consumer.set_parent(index)
+    }
+
+    /// Register a subscriber invoked around rate changes.
+    pub fn register_notifier(&self, cb: ClkNotifier) -> ResResult<()> {
+        self.consumer.register_notifier(cb)
     }
 }

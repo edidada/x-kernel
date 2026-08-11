@@ -15,7 +15,6 @@ categories.workspace = true
 default = []
 
 [dependencies]
-klazy = { workspace = true }
 kspin = { workspace = true }
 bitflags = { workspace = true }
 unittest = { workspace = true }

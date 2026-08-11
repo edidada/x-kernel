@@ -4,88 +4,121 @@
 
 //! Global clock provider registry.
 //!
-//! A platform installs a single [`ClkLookup`] during early init via
-//! [`set_clk_provider`]; consumers then resolve clocks by name or index through
-//! [`clk_get_by_name`] / [`clk_get_by_index`].
+//! A real SoC has several clock controllers (CCU, PMUCRU, video CCU, ...), each
+//! publishing its own outputs. The registry therefore holds a *list* of
+//! providers, each tagged with a [`ProviderId`] (normally the DT phandle of the
+//! controller node). A consumer resolves a clock by `(provider_id, index)` —
+//! the two cells of a DT `clocks = <&ccu 5>` specifier — or, for convenience, by
+//! a globally-unique name.
 //!
-//! This mirrors the [`device_res`] capability-provider pattern: production uses
-//! [`klazy::Once`] for lock-free reads (a single acquire load after install),
-//! while `--cfg unittest` swaps in a replaceable slot so tests can stand up a
-//! mock provider even after the host kernel has installed the real one.
+//! This mirrors Linux's `of_clk_providers` list: the phandle first selects the
+//! provider, then the index is interpreted within that provider's local
+//! namespace.
 
-use alloc::sync::Arc;
+use alloc::{collections::BTreeMap, sync::Arc};
 
-#[cfg(not(unittest))]
-use klazy::Once;
+use kspin::SpinNoIrq;
 
-use crate::{ClkCore, ClkHandle};
+use crate::{ClkCore, ClkHandle, ClkIndex};
+
+/// Identifier of a registered provider.
+///
+/// In practice this is the DT phandle of the controller node, so a consumer
+/// `clocks = <&ccu 5>` specifier maps to `(phandle_of_ccu, 5)`. We keep it an
+/// opaque `u32` rather than coupling to a DT type so the registry stays usable
+/// without firmware (static platform configurations, tests).
+pub type ProviderId = u32;
 
 /// Resolves a consumer clock specifier to a registered node.
 ///
-/// A clock-controller driver implements this to expose its outputs — typically
-/// backed by an onecell/simple lookup table indexed by the DT `clocks` cell.
+/// A clock-controller driver implements this to expose its outputs. `index` is
+/// provider-local: two controllers may both publish index 0 without colliding
+/// because the registry keys on the provider id first.
 pub trait ClkLookup: Send + Sync {
-    /// Resolve a clock by firmware name (e.g. a DT `clock-names` entry).
-    fn get_by_name(&self, name: &str) -> Option<Arc<ClkCore>>;
+    /// The provider id used to register this provider (usually its DT phandle).
+    fn provider_id(&self) -> ProviderId;
 
     /// Resolve a clock by the provider-relative index from a DT phandle spec.
-    fn get_by_index(&self, index: crate::ClkIndex) -> Option<Arc<ClkCore>>;
-}
+    fn get_by_index(&self, index: ClkIndex) -> Option<Arc<ClkCore>>;
 
-// Production registry: a single install, lock-free reads thereafter.
-#[cfg(not(unittest))]
-static CLK_PROVIDER: Once<&'static dyn ClkLookup> = Once::new();
-
-// Test registry: replaceable so each test can swap in a mock.
-#[cfg(unittest)]
-static CLK_PROVIDER: kspin::SpinNoIrq<Option<&'static dyn ClkLookup>> = kspin::SpinNoIrq::new(None);
-
-/// Install the global clock provider. Must be called exactly once during early
-/// kernel init, before any consumer resolves a clock.
-#[cfg(not(unittest))]
-pub fn set_clk_provider(provider: &'static dyn ClkLookup) {
-    CLK_PROVIDER.call_once(|| provider);
-}
-
-/// Install the global clock provider (test variant, replaceable).
-#[cfg(unittest)]
-pub fn set_clk_provider(provider: &'static dyn ClkLookup) {
-    *CLK_PROVIDER.lock() = Some(provider);
-}
-
-/// Uninstall the global clock provider.
-///
-/// Only available under `--cfg unittest`, where the registry is replaceable;
-/// lets each test start from a known-empty registry.
-#[cfg(unittest)]
-pub fn reset_clk_provider() {
-    *CLK_PROVIDER.lock() = None;
-}
-
-fn provider() -> Option<&'static dyn ClkLookup> {
-    #[cfg(not(unittest))]
-    {
-        CLK_PROVIDER.get().copied()
-    }
-    #[cfg(unittest)]
-    {
-        *CLK_PROVIDER.lock()
+    /// Resolve a clock by firmware name (a DT `clock-names` entry).
+    ///
+    /// Name lookup is global across the SoC; names must therefore be unique
+    /// across all providers that publish them. Returning `None` lets the
+    /// registry try the next provider.
+    fn get_by_name(&self, name: &str) -> Option<Arc<ClkCore>> {
+        let _ = name;
+        None
     }
 }
 
-/// Peek at the installed provider without installing one.
-///
-/// Returns [`None`] before [`set_clk_provider`] has run.
-pub fn try_clk_provider() -> Option<&'static dyn ClkLookup> {
-    provider()
+/// The provider list, keyed by [`ProviderId`].
+struct Registry {
+    providers: BTreeMap<ProviderId, &'static dyn ClkLookup>,
 }
 
-/// Resolve a clock by firmware name into a consumer handle.
+impl Registry {
+    const fn new() -> Self {
+        Self {
+            providers: BTreeMap::new(),
+        }
+    }
+
+    fn register(&mut self, provider: &'static dyn ClkLookup) {
+        self.providers.insert(provider.provider_id(), provider);
+    }
+
+    fn unregister(&mut self, id: ProviderId) {
+        self.providers.remove(&id);
+    }
+
+    fn by_index(&self, id: ProviderId, index: ClkIndex) -> Option<Arc<ClkCore>> {
+        self.providers.get(&id)?.get_by_index(index)
+    }
+
+    fn by_name(&self, name: &str) -> Option<Arc<ClkCore>> {
+        // Names are globally unique; the first provider that claims it wins.
+        self.providers.values().find_map(|p| p.get_by_name(name))
+    }
+}
+
+static REGISTRY: SpinNoIrq<Registry> = SpinNoIrq::new(Registry::new());
+
+/// Register a clock provider under its [`ProviderId`].
+///
+/// Called during platform/controller init. A re-registration of an existing id
+/// replaces the previous provider, which is the expected behavior when a
+/// controller is re-probed.
+pub fn register_provider(provider: &'static dyn ClkLookup) {
+    REGISTRY.lock().register(provider);
+}
+
+/// Remove a previously-registered provider. Mainly for `--cfg unittest` and for
+/// controller removal.
+pub fn unregister_provider(id: ProviderId) {
+    REGISTRY.lock().unregister(id);
+}
+
+/// Whether any provider has been registered yet.
+pub fn provider_installed() -> bool {
+    !REGISTRY.lock().providers.is_empty()
+}
+
+/// Clear the whole registry. Only available under `--cfg unittest`.
+#[cfg(unittest)]
+pub fn reset_providers() {
+    REGISTRY.lock().providers.clear();
+}
+
+/// Resolve a clock by `(provider_id, index)` into a consumer handle.
+pub fn clk_get_by_index(provider_id: ProviderId, index: ClkIndex) -> Option<ClkHandle> {
+    REGISTRY
+        .lock()
+        .by_index(provider_id, index)
+        .map(ClkHandle::new)
+}
+
+/// Resolve a clock by globally-unique name into a consumer handle.
 pub fn clk_get_by_name(name: &str) -> Option<ClkHandle> {
-    provider()?.get_by_name(name).map(ClkHandle::new)
-}
-
-/// Resolve a clock by provider-relative index into a consumer handle.
-pub fn clk_get_by_index(index: crate::ClkIndex) -> Option<ClkHandle> {
-    provider()?.get_by_index(index).map(ClkHandle::new)
+    REGISTRY.lock().by_name(name).map(ClkHandle::new)
 }

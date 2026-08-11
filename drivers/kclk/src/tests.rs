@@ -17,7 +17,7 @@ use unittest::{assert_eq, def_test};
 use crate::{
     ClkBuilder, ClkError, ClkEvent, ClkFlags, ClkHandle, ClkHwOps, ClkRegAccess, ClkTable, Divider,
     DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux, NotifierResult, basic::Composite,
-    clk_get_by_index, clk_get_by_name, reset_clk_provider, set_clk_provider,
+    clk_get_by_index, clk_get_by_name, register_provider, reset_providers, unregister_provider,
 };
 
 /// Array-backed register accessor for testing field math.
@@ -389,36 +389,38 @@ fn composite_dispatches_rate_and_gate_to_sub_nodes() {
 #[def_test]
 fn provider_resolves_by_name_and_index() {
     let _serial = PROVIDER_SERIAL.lock();
-    static TABLE: ClkTable = ClkTable::new();
+    static TABLE: ClkTable = ClkTable::new(0x10);
     TABLE.clear();
-    reset_clk_provider();
+    reset_providers();
 
     let osc = ClkBuilder::new("osc24m", FixedRate::new(24_000_000).into_ops())
         .build()
         .unwrap();
     TABLE.register(0, "osc24m", osc);
 
-    set_clk_provider(&TABLE);
+    register_provider(&TABLE);
 
     let by_name = clk_get_by_name("osc24m").expect("name lookup should resolve");
     assert_eq!(by_name.get_rate(), 24_000_000);
 
-    let by_index = clk_get_by_index(0).expect("index lookup should resolve");
+    let by_index = clk_get_by_index(0x10, 0).expect("index lookup should resolve");
     assert_eq!(by_index.name(), "osc24m");
 
     // Missing clocks yield None without panic.
     assert!(clk_get_by_name("nope").is_none());
-    assert!(clk_get_by_index(99).is_none());
+    assert!(clk_get_by_index(0x10, 99).is_none());
+    // Wrong provider id yields None too.
+    assert!(clk_get_by_index(0x99, 0).is_none());
 
-    reset_clk_provider();
+    reset_providers();
 }
 
 #[def_test]
 fn consumer_handle_prepare_enable_through_provider() {
     let _serial = PROVIDER_SERIAL.lock();
-    static TABLE: ClkTable = ClkTable::new();
+    static TABLE: ClkTable = ClkTable::new(0x20);
     TABLE.clear();
-    reset_clk_provider();
+    reset_providers();
 
     let reg = Arc::new(MockReg::new());
     let parent = ClkBuilder::new("p", FixedRate::new(100_000_000).into_ops())
@@ -433,16 +435,16 @@ fn consumer_handle_prepare_enable_through_provider() {
     .unwrap();
     TABLE.register(5, "uart_clk", gate);
 
-    set_clk_provider(&TABLE);
+    register_provider(&TABLE);
 
     // A consumer resolves the clock the way a driver would, by DT index.
-    let clk = clk_get_by_index(5).expect("uart_clk should resolve");
+    let clk = clk_get_by_index(0x20, 5).expect("uart_clk should resolve");
     assert_eq!(clk.is_enabled().unwrap(), false);
     clk.prepare_enable().unwrap();
     assert!(clk.is_enabled().unwrap());
     assert_eq!(reg.word(0) & (1 << 3), 1 << 3);
 
-    reset_clk_provider();
+    reset_providers();
 }
 
 // ---------------------------------------------------------------------------
@@ -585,4 +587,46 @@ fn fixed_factor_propagates_rate_to_parent_via_flag() {
     assert_eq!(ff.get_rate(), 100_000_000);
     // The divider parent was reprogrammed to supply 200 MHz.
     assert_eq!(div.get_rate(), 200_000_000);
+}
+
+// ---------------------------------------------------------------------------
+// Multiple providers: two controllers each publishing index 0 must not collide.
+// Validates the multi-provider fix — the DT phandle disambiguates providers.
+// ---------------------------------------------------------------------------
+
+#[def_test]
+fn two_providers_index_zero_do_not_collide() {
+    let _serial = PROVIDER_SERIAL.lock();
+    static CCU: ClkTable = ClkTable::new(0x10);
+    static PMUCRU: ClkTable = ClkTable::new(0x11);
+    CCU.clear();
+    PMUCRU.clear();
+    reset_providers();
+
+    // Both controllers publish their own index-0 clock at different rates.
+    let ccu_clk = ClkBuilder::new("ccu_osc", FixedRate::new(24_000_000).into_ops())
+        .build()
+        .unwrap();
+    let pmu_clk = ClkBuilder::new("pmu_osc", FixedRate::new(32_768).into_ops())
+        .build()
+        .unwrap();
+    CCU.register(0, "ccu_osc", ccu_clk);
+    PMUCRU.register(0, "pmu_osc", pmu_clk);
+
+    register_provider(&CCU);
+    register_provider(&PMUCRU);
+
+    // Same index 0, different provider id -> different clocks, no overwrite.
+    assert_eq!(clk_get_by_index(0x10, 0).unwrap().get_rate(), 24_000_000);
+    assert_eq!(clk_get_by_index(0x11, 0).unwrap().get_rate(), 32_768);
+
+    // Names stay globally unique and resolve regardless of provider.
+    assert_eq!(clk_get_by_name("pmu_osc").unwrap().get_rate(), 32_768);
+
+    // Unregistering one provider removes only its clocks.
+    unregister_provider(0x10);
+    assert!(clk_get_by_index(0x10, 0).is_none());
+    assert!(clk_get_by_index(0x11, 0).is_some());
+
+    reset_providers();
 }

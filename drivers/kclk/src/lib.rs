@@ -12,9 +12,9 @@
 //! - [`ClkCore`], a clock-tree node that caches rate/accuracy and serializes
 //!   reference-counted gating and rate/parent changes that propagate to the
 //!   selected parent.
-//! - [`ClkLookup`] / [`set_clk_provider`] / [`ClkTable`], the global provider
+//! - [`ClkLookup`] / [`register_provider`] / [`ClkTable`], the global provider
 //!   registry that consumers query via [`clk_get_by_name`] /
-//!   [`clk_get_by_index`].
+//!   [`clk_get_by_index`] (by `(provider_id, index)`).
 //! - [`ClkHandle`], the consumer-side reference returned to drivers.
 //! - Basic composable types in [`basic`]: [`FixedRate`], [`FixedFactor`],
 //!   [`Gate`], [`Mux`], [`Divider`], [`Composite`].
@@ -55,9 +55,10 @@ pub use handle::ClkHandle;
 pub use lookup::ClkTable;
 pub use ops::ClkHwOps;
 #[cfg(unittest)]
-pub(crate) use provider::reset_clk_provider;
+pub use provider::reset_providers;
 pub use provider::{
-    ClkLookup, clk_get_by_index, clk_get_by_name, set_clk_provider, try_clk_provider,
+    ClkLookup, ProviderId, clk_get_by_index, clk_get_by_name, provider_installed,
+    register_provider, unregister_provider,
 };
 pub use rate::{Rate, RoundResult};
 pub use reg::{ClkRegAccess, MmioClkReg};

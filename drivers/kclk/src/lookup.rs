@@ -2,36 +2,42 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Ready-made [`ClkLookup`] implementation for clock-controller providers.
+//! Ready-made [`ClkLookup`] implementation for one clock controller.
 //!
 //! A clock controller publishes its outputs at fixed DT binding indices
-//! (`clocks = <&ccu 5>` → index 5) and, for consumer convenience, by name
-//! (a `clock-names` entry). [`ClkTable`] stores both views behind a single
-//! spin lock and answers either query; a controller driver fills it during
-//! probe and hands a `&'static` reference to [`crate::set_clk_provider`].
+//! (`clocks = <&ccu 5>` → index 5 within *this* controller) and, for consumer
+//! convenience, by name (a `clock-names` entry). [`ClkTable`] stores both views
+//! behind a single spin lock and answers either query; a controller driver
+//! fills it during probe, assigns it a [`ProviderId`] (its DT phandle), and
+//! registers it via [`crate::register_provider`].
 
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 
 use kspin::SpinNoIrq;
 
-use crate::{ClkCore, ClkIndex, ClkLookup};
+use crate::{ClkCore, ClkIndex, ClkLookup, ProviderId};
 
-/// Name- and index-keyed table of registered clock nodes.
+/// Name- and index-keyed table of the outputs of one clock controller.
 ///
 /// `const`-constructible so it can live in a `static`:
 ///
 /// ```
-/// static CCU_TABLE: kclk::ClkTable = kclk::ClkTable::new();
+/// static CCU_TABLE: kclk::ClkTable = kclk::ClkTable::new(0x1);
 /// ```
 pub struct ClkTable {
+    provider_id: ProviderId,
     by_index: SpinNoIrq<Vec<Option<Arc<ClkCore>>>>,
     by_name: SpinNoIrq<BTreeMap<&'static str, Arc<ClkCore>>>,
 }
 
 impl ClkTable {
-    /// Create an empty table. `const`, so usable in `static` initializers.
-    pub const fn new() -> Self {
+    /// Create an empty table bound to controller `provider_id`.
+    ///
+    /// `provider_id` is normally the DT phandle of the controller node, so a
+    /// consumer `clocks = <&ccu 5>` specifier resolves here.
+    pub const fn new(provider_id: ProviderId) -> Self {
         Self {
+            provider_id,
             by_index: SpinNoIrq::new(Vec::new()),
             by_name: SpinNoIrq::new(BTreeMap::new()),
         }
@@ -61,13 +67,11 @@ impl ClkTable {
     }
 }
 
-impl Default for ClkTable {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ClkLookup for ClkTable {
+    fn provider_id(&self) -> ProviderId {
+        self.provider_id
+    }
+
     fn get_by_name(&self, name: &str) -> Option<Arc<ClkCore>> {
         self.by_name.lock().get(name).cloned()
     }
@@ -76,6 +80,6 @@ impl ClkLookup for ClkTable {
         self.by_index
             .lock()
             .get(index as usize)
-            .and_then(|c| c.clone())
+            .and_then(Option::clone)
     }
 }
