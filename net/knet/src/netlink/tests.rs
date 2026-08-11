@@ -11,7 +11,7 @@ use kcred::Cred;
 use kerrno::LinuxError;
 use kio::Cursor;
 use ktime_types::MonotonicInstant;
-use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address};
+use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address, Ipv6Address};
 use unittest::def_test;
 
 use super::{
@@ -800,6 +800,85 @@ fn test_dump_routes_returns_done_message() {
     let seq = header.seq;
     assert_eq!(read_u16_ne(&last.data, 4), Some(NLMSG_DONE));
     assert_eq!(seq, 7);
+}
+
+#[def_test(serial)]
+fn test_dump_addrs_with_unspecified_family_returns_ipv6() {
+    init_test_state();
+    ROUTE_STATE.write().addrs.push(AddrState {
+        index: 2,
+        family: wire_route::FAMILY_IPV6,
+        prefix_len: 64,
+        scope: wire_route::SCOPE_LINK,
+        address: IpAddress::Ipv6(Ipv6Address::LOCALHOST),
+    });
+
+    let packets =
+        handle_rtnetlink_request(&build_nlmsg(RTM_GETADDR, 8, NLM_F_REQUEST, vec![0; 12]));
+
+    assert_eq!(packets.len(), 4);
+    assert!(packets[..packets.len() - 1].iter().any(|packet| {
+        packet
+            .data
+            .windows(16)
+            .any(|window| window == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+    }));
+    assert_eq!(read_u16_ne(&packets[3].data, 4), Some(NLMSG_DONE));
+}
+
+#[def_test(serial)]
+fn test_dump_routes_with_unspecified_family_returns_ipv6() {
+    init_test_state();
+    ROUTE_STATE.write().routes.push(RouteState {
+        family: wire_route::FAMILY_IPV6,
+        dst_len: 128,
+        table: wire_route::TABLE_MAIN,
+        protocol: wire_route::PROTOCOL_BOOT,
+        scope: wire_route::SCOPE_HOST,
+        route_type: wire_route::TYPE_UNICAST,
+        oif: 1,
+        dst: Some(IpAddress::Ipv6(Ipv6Address::LOCALHOST)),
+        gateway: None,
+        prefsrc: Some(IpAddress::Ipv6(Ipv6Address::LOCALHOST)),
+    });
+
+    let packets =
+        handle_rtnetlink_request(&build_nlmsg(RTM_GETROUTE, 9, NLM_F_REQUEST, vec![0; 12]));
+
+    assert!(
+        packets[..packets.len() - 1]
+            .iter()
+            .any(|packet| packet.data.get(NLMSG_HDR_LEN).copied() == Some(wire_route::FAMILY_IPV6))
+    );
+    assert_eq!(
+        read_u16_ne(&packets[packets.len() - 1].data, 4),
+        Some(NLMSG_DONE)
+    );
+}
+
+#[def_test(serial)]
+fn test_unbound_send_auto_binds_netlink_socket() {
+    init_test_state();
+    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let request = build_nlmsg(RTM_GETADDR, 9, NLM_F_REQUEST, vec![0; 12]);
+
+    assert_eq!(
+        socket
+            .send(Cursor::new(request.as_slice()), SendOptions::default())
+            .unwrap(),
+        request.len()
+    );
+    let SocketAddrEx::Netlink(local_addr) = socket.local_addr().unwrap() else {
+        panic!("netlink socket returned a non-netlink local address");
+    };
+    assert_eq!(local_addr, NetlinkAddr::default());
+
+    let mut response = vec![0; 1024];
+    let received = socket
+        .recv(Cursor::new(response.as_mut_slice()), RecvOptions::default())
+        .unwrap();
+    assert!(received >= NLMSG_HDR_LEN);
+    assert_eq!(read_u16_ne(&response, 4), Some(RTM_NEWADDR));
 }
 
 #[def_test(serial)]

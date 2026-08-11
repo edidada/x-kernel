@@ -243,20 +243,12 @@ impl IngressProcessor {
 
             if let Some(input) = ndp::handle_ndp_input(header, ip_packet, &self.local_ipv6_addrs) {
                 if let Some((addr, mac)) = input.learn {
-                    ipv6_actions.push(Ipv6Action::LearnNeighbor {
-                        ifindex,
-                        addr,
-                        mac,
-                    });
+                    ipv6_actions.push(Ipv6Action::LearnNeighbor { ifindex, addr, mac });
                 }
                 if let Some(action) = input.action {
                     match action {
                         NdpAction::LearnNeighbor { addr, mac } => {
-                            ipv6_actions.push(Ipv6Action::LearnNeighbor {
-                                ifindex,
-                                addr,
-                                mac,
-                            });
+                            ipv6_actions.push(Ipv6Action::LearnNeighbor { ifindex, addr, mac });
                         }
                         NdpAction::ReplyAdvertisement {
                             target,
@@ -358,12 +350,9 @@ fn queue_icmpv6_error(
     offending_header: Ipv6Header,
     offending_packet: &[u8],
 ) {
-    let Some(packet) = icmpv6::build_icmpv6_error_packet(
-        error,
-        packet_type,
-        offending_header,
-        offending_packet,
-    ) else {
+    let Some(packet) =
+        icmpv6::build_icmpv6_error_packet(error, packet_type, offending_header, offending_packet)
+    else {
         return;
     };
     control_packets.push(packet);

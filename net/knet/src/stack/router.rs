@@ -271,6 +271,10 @@ pub struct Router {
     next_rx_device: usize,
     ipv4_addrs: Vec<Ipv4AddrEntry>,
     local_ipv6_addrs: Vec<Ipv6Cidr>,
+    // Local delivery keeps the ingress interface so scoped IPv6 sockets match it.
+    local_rx_queue: VecDeque<PacketBuf>,
+    // Link-local packets addressed to this host must bypass Ethernet/NDP.
+    local_ipv6_devices: Vec<(Ipv6Address, usize)>,
     next_ipv4_identification: u16,
     pub(crate) devices: Vec<Box<dyn NetDevice>>,
     pub(crate) table: RouteTable,
@@ -290,6 +294,8 @@ impl Router {
             next_rx_device: 0,
             ipv4_addrs: Vec::new(),
             local_ipv6_addrs: Vec::new(),
+            local_rx_queue: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
+            local_ipv6_devices: Vec::new(),
             next_ipv4_identification: 1,
             devices: Vec::new(),
             table: RouteTable::new(),
@@ -612,11 +618,20 @@ impl Router {
 
         self.table.clear();
         self.local_ipv6_addrs.clear();
-        self.local_ipv6_addrs
-            .extend(state.addrs.iter().filter_map(|addr| match addr.address {
-                SmoltcpIpAddress::Ipv6(ipv6) => Some(Ipv6Cidr::new(ipv6.into(), addr.prefix_len)),
-                SmoltcpIpAddress::Ipv4(_) => None,
-            }));
+        self.local_ipv6_devices.clear();
+        for addr in &state.addrs {
+            let SmoltcpIpAddress::Ipv6(ipv6) = addr.address else {
+                continue;
+            };
+            self.local_ipv6_addrs
+                .push(Ipv6Cidr::new(ipv6.into(), addr.prefix_len));
+            let Some(dev) = addr.index.checked_sub(1).map(|index| index as usize) else {
+                continue;
+            };
+            if dev < self.devices.len() {
+                self.local_ipv6_devices.push((ipv6.into(), dev));
+            }
+        }
         for route in state.routes.iter().filter(|route| {
             (route.family == 2 || route.family == 10)
                 && route.table == ROUTE_TABLE_MAIN
@@ -778,7 +793,7 @@ impl Router {
         packets: &mut Vec<PacketBuf>,
     ) -> RxDrain {
         packets.clear();
-        if budget == 0 || self.devices.is_empty() {
+        if budget == 0 || (self.devices.is_empty() && self.local_rx_queue.is_empty()) {
             return RxDrain {
                 work_done: 0,
                 has_more: self.has_immediate_rx_work(),
@@ -786,6 +801,17 @@ impl Router {
         }
 
         let mut work_done = 0;
+
+        // Locally looped packets keep their ingress interface so scoped IPv6
+        // sockets match the device that originated them.
+        while work_done < budget {
+            let Some(packet) = self.local_rx_queue.pop_front() else {
+                break;
+            };
+            work_done += 1;
+            packets.push(packet);
+        }
+
         let device_count = self.devices.len();
         if self.next_rx_device >= device_count {
             self.next_rx_device = 0;
@@ -946,6 +972,22 @@ impl Router {
             return false;
         }
 
+        if let Some((_, dev_index)) = self
+            .local_ipv6_devices
+            .iter()
+            .find(|(addr, _)| *addr == header.dst_addr())
+            .copied()
+        {
+            if self.local_rx_queue.len() >= SOCKET_BUFFER_SIZE {
+                warn!("Local IPv6 receive queue is full, dropping packet");
+                return false;
+            }
+            packet.set_ifindex(dev_index as i32 + 1);
+            packet.set_owner(PacketOwner::DeviceRx);
+            self.local_rx_queue.push_back(packet);
+            return true;
+        }
+
         if dst_addr.is_multicast() {
             let device_count = self.devices.len();
             let Some((last_device, preceding_devices)) = self.devices.split_last_mut() else {
@@ -1080,7 +1122,7 @@ impl Router {
     }
 
     pub(crate) fn has_immediate_rx_work(&self) -> bool {
-        self.devices.iter().any(|device| device.has_rx_work())
+        !self.local_rx_queue.is_empty() || self.devices.iter().any(|device| device.has_rx_work())
     }
 
     fn adjust_rx_device_cursor_after_remove(&mut self, removed_index: usize) {
@@ -1148,11 +1190,13 @@ mod tests {
     #[def_test]
     fn control_dispatch_does_not_free_data_tx_capacity() {
         let mut router = Router::new();
-        router.control_tx_queue.push_back(PacketBuf::from_ip_packet_vec(
-            0,
-            vec![0; 20],
-            PacketOwner::Ipv4Stack,
-        ));
+        router
+            .control_tx_queue
+            .push_back(PacketBuf::from_ip_packet_vec(
+                0,
+                vec![0; 20],
+                PacketOwner::Ipv4Stack,
+            ));
         let capacity_before = router.available_tx_packet_slots();
 
         let (work_done, _) = router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1);
@@ -1164,11 +1208,13 @@ mod tests {
     #[def_test]
     fn data_dispatch_frees_data_tx_capacity() {
         let mut router = Router::new();
-        router.data_tx_queue.push_back(PacketBuf::from_ip_packet_vec(
-            0,
-            vec![0; 20],
-            PacketOwner::Ipv4Stack,
-        ));
+        router
+            .data_tx_queue
+            .push_back(PacketBuf::from_ip_packet_vec(
+                0,
+                vec![0; 20],
+                PacketOwner::Ipv4Stack,
+            ));
         let capacity_before = router.available_tx_packet_slots();
 
         let (work_done, _) = router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1);
