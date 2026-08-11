@@ -1,0 +1,109 @@
+# kclk - Security And Reliability
+
+## Trust Model
+
+Firmware (device-tree / ACPI) descriptions, MMIO register contents, and
+platform-supplied register base addresses are external inputs. The framework
+trusts its own invariants (reference counts, cached rate, parent links) and
+treats everything read from or described by hardware as untrusted numeric data.
+
+A clock controller driver is a trust boundary: it translates firmware
+descriptions into `ClkHwOps` behavior. The framework core (`kclk`) validates the
+*shape* of operations (parent indices in range, non-zero dividers, rate change
+results) but not their *correctness* — programming a divider with a nonsense
+field encoding is the controller driver's responsibility.
+
+## External Boundaries
+
+- **Firmware register base addresses** are consumed by the controller driver to
+  build an `MmioClkReg`. The framework receives an already-mapped virtual
+  address; mapping validity is owned by `memspace` / `device-res`.
+- **MMIO register contents** are read by `Gate`, `Mux`, and `Divider` through
+  `ClkRegAccess`. They are treated as untrusted integers; field extraction never
+  indexes out of bounds.
+- **Consumer clock specifiers** (`ClkSpec` name/index) come from drivers and, in
+  the future, from DT parsing. An unknown name or out-of-range index yields
+  `None` / `NotFound`, never a panic.
+
+## Unsafe Code
+
+`MmioClkReg` holds a raw `*mut u8` and performs volatile loads/stores. Its
+safety contract is documented on `MmioClkReg::new`:
+
+- the caller guarantees `base` is a valid, word-aligned, mapped MMIO window;
+- the window remains live for the lifetime of every clock node sharing it;
+- `Send`/`sync` are implemented because MMIO windows are process-global and
+  never move. The framework serializes the *sleepable* write paths
+  (`set_rate`/`set_parent`/`prepare`) under the global `CLK_LOCK`, but the
+  *atomic* `enable`/`disable` path bypasses it; see the *Known Limitations* note
+  on register-word sharing.
+
+No other `unsafe` exists in the crate. `Gate`/`Mux`/`Divider` field math is safe
+over `ClkRegAccess`; `ClkCore` parent recursion uses only safe `Arc` clones.
+
+## Invariants
+
+- Consumers only ever hold `ClkHandle` (or `device_res::Clk`); they cannot reach
+  `ClkHwOps` or the raw register accessor.
+- `enable_count` / `prepare_count` never go below zero (decrement guards).
+- A hardware gate op (`prepare`/`enable`/`disable`/`unprepare`) is invoked at
+  most once per 0→1 / 1→0 count transition.
+- `set_parent` rejects an out-of-range or orphan (unmapped) parent slot before
+  touching hardware.
+- A divider never divides by zero: `rate_for` treats a zero divider as
+  pass-through, and `raw_to_div` clamps a decoded zero to 1.
+- Cached rate is refreshed under the node lock after every successful
+  `set_rate` / `set_parent`.
+- All sleepable mutations are serialized by the global `CLK_LOCK`, so a rate
+  change is atomic with respect to other changes and `get_rate` never observes
+  a half-updated tree.
+- Notifier callbacks run under `CLK_LOCK`; they must not sleep, block, or
+  re-enter the framework (no `clk_get_*` / `set_rate` / `enable`).
+
+## Threat Analysis
+
+| ID | Threat | Impact | Trigger | Existing control |
+|----|--------|--------|---------|------------------|
+| T-01 | Invalid MMIO base passed to `MmioClkReg` | High | Controller driver hands a wrong/unmapped address | Safety contract is documented on `new`; the controller driver (and `memspace` mapping it supplies) owns validity. Residual risk is the caller's. |
+| T-02 | Out-of-range parent index | Medium | Firmware or driver requests parent `N` beyond the table | `ClkCore::set_parent` returns `InvalidParent` without touching hardware. |
+| T-03 | Zero or huge decoded divider | Medium | Register field decodes to 0, or a divider that would overflow | `rate_for` passes through on 0; `closest_div`/`div_to_raw` clamp to the field width; `FixedFactor::scale` rejects overflow with `InvalidRate`. |
+| T-04 | Concurrent rate change on a sibling | Low | Two probes reprogram overlapping subtrees | Serialized by the global `CLK_LOCK`; only one sleepable mutation runs at a time across the whole tree. |
+| T-05 | Provider lookup before install | Low | Driver resolves a clock before `set_clk_provider` | Returns `None` / `NoProvider`; no panic. |
+| T-06 | Subscriber blocks or re-enters the framework in a notifier | High | A `ClkNotifier` callback sleeps or calls `set_rate`/`get_rate` re-entrantly | Documented constraint: callbacks run under `CLK_LOCK` and must be quick and non-re-entrant. Audit checklist enforces it. |
+| T-07 | `set_rate` reprograms a clock a consumer depends on without notice | Medium | DVFS changes a shared PLL underneath a display | Rate-change notifiers deliver `Pre`/`Post` events; a `Pre` veto aborts with `Aborted`. |
+
+## Failure Modes
+
+| ID | Failure mode | Local effect | System effect | Severity | Handling |
+|----|--------------|--------------|---------------|----------|----------|
+| F-01 | A hardware `prepare`/`enable` fails mid-chain | Parent already enabled | Clock left disabled | 3 | Roll-back: the parent's count is decremented and its hardware op reversed before returning the error. |
+| F-02 | `set_rate` unsupported on a node without `SET_RATE_PARENT` | Rate unchanged | Driver sees `NotSupported` | 3 | Propagated as `ClkError::NotSupported` → `ResError::Unsupported`. |
+| F-03 | `set_parent` to an orphan slot | Parent unchanged | Driver sees `InvalidParent` | 3 | Rejected before any register write. |
+| F-04 | Provider not installed at lookup time | `None` returned | Consumer driver decides fallback | 3 | `try_clk_provider` / `try_get` let the caller distinguish "absent" from "error". |
+| F-05 | Divider field width >= 32 | Configuration error | Probe-time panic | 2 | `1u32 << width` is undefined behavior at width >= 32; `Divider::new` asserts `width` is in `1..32` (hard `assert!`, not debug-only, so release builds fail loudly too). |
+
+## Known Limitations
+
+- No authenticity/integrity check on firmware-described clocks; a misconfigured
+  tree produces wrong but representable rates.
+- Notifiers fire only on the node where `set_rate` was called; intermediate
+  parents changed during upward propagation receive no separate notification.
+- The global lock is a spinlock; a provider `prepare` that needs to block for
+  milliseconds will spin. A sleepable mutex is future work.
+- `MmioClkReg` correctness depends on the caller's mapping; the crate cannot
+  verify it.
+
+## Audit Checklist
+
+- Confirm every `MmioClkReg::new` receives an address returned by the device
+  mapper (`memspace::iomap_device` / `devm_iomap`).
+- Confirm a controller driver keeps all bit fields within a 32-bit word and
+  validates `width`/`shift` against its register layout.
+- Confirm new `ClkHwOps` impls do not re-enter the framework (no nested
+  `clk_get_*` / `set_rate`) from within an op callback.
+- Confirm any registered `ClkNotifier` is quick, non-sleeping, and does not call
+  back into the clock framework (it runs under `CLK_LOCK`).
+- Confirm consumers that veto rate changes handle `ClkError::Aborted`.
+- Confirm `set_parent` callers handle `InvalidParent` rather than ignoring it.
+- Confirm consumers release clocks via `devm_` (preferred) or explicit drop, so
+  reference counts return to zero on probe failure / removal.

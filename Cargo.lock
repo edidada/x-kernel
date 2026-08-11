@@ -2119,6 +2119,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kclk"
+version = "0.2.0-dev"
+dependencies = [
+ "bitflags 2.13.1",
+ "kspin 0.2.0-dev",
+ "unittest",
+]
+
+[[package]]
 name = "kcpu"
 version = "0.2.0-rc1"
 dependencies = [
@@ -2223,6 +2232,7 @@ dependencies = [
  "karch",
  "kbuild_config",
  "kclass",
+ "kclk",
  "kdevice",
  "kdma",
  "khal",

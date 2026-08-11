@@ -8,6 +8,8 @@ members = [
     "boot/*",
     "task/kworkerpool",
     "task/kworkqueue",
+    # clock subsystem core
+    "drivers/kclk",
     "tee/tee_crypto",
     "tee/xdice",
 ]
@@ -158,6 +160,9 @@ virtio = { path = "drivers/devices/virtio" }
 device_res_xkernel = { path = "drivers/adapters/xkernel/device-res", package = "device-res-xkernel" }
 kdriver = { path = "drivers/integration/kdriver" }
 
+# Internal: clock subsystem core
+kclk = { path = "drivers/kclk" }
+
 # Internal: platform, firmware, and host driver support
 aarch64-pmuv3 = { path = "drivers/platform/aarch64-pmuv3" }
 console_driver = { path = "drivers/platform/console", package = "console-driver" }
@@ -170,7 +175,6 @@ irq_driver = { path = "drivers/platform/irq", package = "irq-driver" }
 rtc_driver = { path = "drivers/platform/rtc", package = "rtc-driver" }
 timer_driver = { path = "drivers/platform/timer", package = "timer-driver" }
 x86_apic = { path = "drivers/platform/x86-apic", package = "x86-apic" }
-
 # Internal: platform variants
 kplat-aarch64 = { path = "platforms/kplat-aarch64", default-features = false }
 kplat-loongarch64 = { path = "platforms/kplat-loongarch64" }
