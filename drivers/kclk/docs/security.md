@@ -80,7 +80,7 @@ over `ClkRegAccess`; `ClkCore` parent recursion uses only safe `Arc` clones.
 | F-02 | `set_rate` unsupported on a node without `SET_RATE_PARENT` | Rate unchanged | Driver sees `NotSupported` | 3 | Propagated as `ClkError::NotSupported` → `ResError::Unsupported`. |
 | F-03 | `set_parent` to an orphan slot | Parent unchanged | Driver sees `InvalidParent` | 3 | Rejected before any register write. |
 | F-04 | Provider not installed at lookup time | `None` returned | Consumer driver decides fallback | 3 | `try_clk_provider` / `try_get` let the caller distinguish "absent" from "error". |
-| F-05 | Register field wider than 32 bits requested | Configuration error | Build-time or probe panic | 2 | `Divider` field width is a `u8` applied to a `u32` word; the controller driver must keep fields within 32 bits. |
+| F-05 | Divider field width >= 32 | Configuration error | Probe-time panic | 2 | `1u32 << width` is undefined behavior at width >= 32; `Divider::new` asserts `width` is in `1..32` (hard `assert!`, not debug-only, so release builds fail loudly too). |
 
 ## Known Limitations
 

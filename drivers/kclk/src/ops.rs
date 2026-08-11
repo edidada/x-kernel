@@ -96,6 +96,19 @@ pub trait ClkHwOps: Send + Sync {
     /// honored only when the node carries
     /// [`ClkFlags::SET_RATE_PARENT`](crate::ClkFlags::SET_RATE_PARENT).
     ///
+    /// # Contract for `parent_target`
+    ///
+    /// Returning a `parent_target` *declares that this node's rate is fully
+    /// determined by its parent* (it is rate-transparent — a mux, a fixed
+    /// factor, or a node with no programmable field of its own). When the
+    /// framework honors such a request it reprograms the parent and then
+    /// reports this node's new rate via [`recalc_rate`](Self::recalc_rate); it
+    /// will **not** call [`set_rate`](Self::set_rate) on this node. A node that
+    /// both wants its parent changed *and* has its own programmable divider
+    /// should not use `parent_target`: it should set its parent via
+    /// `SET_RATE_PARENT` separately and program its own field through
+    /// `set_rate` in the non-upward branch.
+    ///
     /// Default: the node cannot change rate; report the parent rate and do not
     /// request a parent change.
     fn round_rate(&self, _rate: Rate, parent_rate: Rate) -> ClkResult<RoundResult> {

@@ -51,7 +51,10 @@ impl Divider {
         table: Option<&'static [u32]>,
         flags: DividerFlags,
     ) -> Self {
-        debug_assert!(width > 0 && width < 32, "divider width must be in 1..32");
+        // Soundness: `1u32 << width` is UB at width >= 32. This is a driver
+        // configuration error, so fail hard (not debug_assert, which is
+        // compiled out of release builds where the UB would be silent).
+        assert!(width > 0 && width < 32, "divider width must be in 1..32");
         Self {
             reg,
             offset,
