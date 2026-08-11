@@ -364,7 +364,7 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 
 **接收流程**：
 
-1. 中断到来时调用 `recv()`：先 `ack_interrupt()`，再 `poll_receive()` 获取令牌
+1. IRQ handler 调用 `ack_interrupt()` 确认设备事件并调度 RX；任务上下文调用 `recv()`，直接通过 `poll_receive()` 获取令牌
 2. 从 `rx_buffers[token]` 取出缓冲区，调用 `receive_complete()` 读取帧头和包长度
 3. 设置 `hdr_len` 和 `payload_len`，返回 `NetBufHandle`
 4. 上层处理完毕后调用 `recycle_rx()`：`receive_begin()` 重新提交缓冲区，存回 `rx_buffers[new_token]`
@@ -374,6 +374,7 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 1. `register_virtio_net_irq(irq, inner)`：将 `VirtIoNetIrqHandle` 存入全局 `NET_IRQ_HANDLES`
 2. 若该 IRQ 首次注册（`REGISTERED_NET_IRQS` 去重），调用 `Irq::request(resource, Arc::new(handle_virtio_net_irq))` 注册中断，guard 存入 `NET_IRQ_GUARDS`
 3. 中断到来时 `handle_virtio_net_irq()` 遍历所有句柄，调用 `ack_interrupt()` 确认中断，返回 `IrqReturn::Handled`
+4. `ack_interrupt()` 仅由 IRQ handler 调用，避免 RX 任务清除运行期间新到达但尚未调度的设备事件
 
 ### Vsock 连接管理
 
