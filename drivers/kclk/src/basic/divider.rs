@@ -40,6 +40,9 @@ pub struct Divider {
 
 impl Divider {
     /// Create a divider clock.
+    ///
+    /// `width` must be in `1..32`; a width of 32 would shift a `u32` out of
+    /// range (undefined behavior) and is rejected with a debug assertion.
     pub fn new(
         reg: Arc<dyn ClkRegAccess>,
         offset: usize,
@@ -48,6 +51,7 @@ impl Divider {
         table: Option<&'static [u32]>,
         flags: DividerFlags,
     ) -> Self {
+        debug_assert!(width > 0 && width < 32, "divider width must be in 1..32");
         Self {
             reg,
             offset,

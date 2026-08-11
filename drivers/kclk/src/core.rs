@@ -304,20 +304,52 @@ impl ClkCore {
         let parent_rate = self.parent_rate();
         let rounded = self.ops.round_rate(rate, parent_rate)?;
 
-        let actual = if let Some(target) = rounded
+        // Glitch avoidance: if requested, gate across the reprogram and restore
+        // afterwards. Matches Linux's SET_RATE_GATE. The restore is best-effort
+        // (an op that rejects re-enable surfaces its error) but never leaves the
+        // clock silently gated below its previous state.
+        let gate_around = self.flags.contains(ClkFlags::SET_RATE_GATE);
+        let was_enabled = if gate_around {
+            self.is_enabled().unwrap_or(false)
+        } else {
+            false
+        };
+        if gate_around && was_enabled {
+            self.ops.disable();
+        }
+
+        let result = self.program_rate(rounded.rate, parent_rate);
+
+        if gate_around && was_enabled {
+            let _ = self.ops.enable();
+        }
+
+        let actual = result?;
+        self.state.lock().rate = actual;
+        Ok(actual)
+    }
+
+    /// Program `rate` against `parent_rate`, honoring `SET_RATE_PARENT` by
+    /// reprogramming the parent first and then this node. Symmetric with
+    /// `round_rate_locked`: a node whose `round_rate` returns `parent_target`
+    /// is reprogrammed locally against the new parent rate too, so the achieved
+    /// rate matches what `round_rate` promised.
+    fn program_rate(&self, rounded_rate: Rate, parent_rate: Rate) -> ClkResult<Rate> {
+        let rounded = self.ops.round_rate(rounded_rate, parent_rate)?;
+        if let Some(target) = rounded
             .parent_target
             .filter(|_| self.flags.contains(ClkFlags::SET_RATE_PARENT))
         {
-            // Forward to the parent: reprogram it, then recalc ourselves.
+            // Forward to the parent, then reprogram ourselves against the new
+            // parent rate. Using set_rate (not just recalc) honors a node that
+            // both requests a parent change *and* has its own programmable
+            // field, keeping set_rate(r) == round_rate(r).
             let parent = self.parent_node().ok_or(ClkError::NotSupported)?;
             let actual_parent = parent.set_rate_locked(target)?;
-            self.ops.recalc_rate(actual_parent)?
+            self.ops.set_rate(rounded.rate, actual_parent)
         } else {
-            self.ops.set_rate(rounded.rate, parent_rate)?
-        };
-
-        self.state.lock().rate = actual;
-        Ok(actual)
+            self.ops.set_rate(rounded.rate, parent_rate)
+        }
     }
 
     // ---- parent selection ----
@@ -325,7 +357,9 @@ impl ClkCore {
     /// Select parent `index` and refresh the cached rate and accuracy.
     ///
     /// Serialized by [`CLK_LOCK`]. The new parent must already be registered at
-    /// `index`; selecting an unmapped (orphan) slot is rejected.
+    /// `index`. When [`ClkFlags::SET_RATE_GATE`] is set, the clock is gated
+    /// across the mux switch and restored afterwards, to avoid glitches on
+    /// running hardware.
     pub fn set_parent(&self, index: u8) -> ClkResult {
         let _guard = CLK_LOCK.lock();
         if index as usize >= self.parents.len() {
@@ -336,7 +370,22 @@ impl ClkCore {
         let Some(parent) = self.parents[index as usize].clone() else {
             return Err(ClkError::InvalidParent);
         };
-        self.ops.set_parent(index)?;
+
+        // Glitch avoidance around the mux switch.
+        let gate_around = self.flags.contains(ClkFlags::SET_RATE_GATE);
+        let was_enabled = if gate_around {
+            self.is_enabled().unwrap_or(false)
+        } else {
+            false
+        };
+        if gate_around && was_enabled {
+            self.ops.disable();
+        }
+        let switch = self.ops.set_parent(index);
+        if gate_around && was_enabled {
+            let _ = self.ops.enable();
+        }
+        switch?;
 
         let parent_rate = parent.get_rate();
         let parent_accuracy = parent.get_accuracy();

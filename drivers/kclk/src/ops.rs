@@ -11,21 +11,38 @@
 //!
 //! # The two-phase gate
 //!
-//! Clock enabling is split into two phases so slow, sleepable setup is kept off
-//! the atomic path:
+//! Clock enabling is split into two phases:
 //!
-//! - [`prepare`](ClkHwOps::prepare) / [`unprepare`](ClkHwOps::unprepare) may
-//!   sleep and perform slow setup (unlock a bus, wait for a PLL to lock).
-//! - [`enable`](ClkHwOps::enable) / [`disable`](ClkHwOps::disable) must be
-//!   atomic and only toggle a gate bit.
+//! - [`prepare`](ClkHwOps::prepare) / [`unprepare`](ClkHwOps::unprepare) carry
+//!   the slow, controller-global setup;
+//! - [`enable`](ClkHwOps::enable) / [`disable`](ClkHwOps::disable) toggle only
+//!   a gate bit and stay usable where blocking is impossible.
+//!
+//! **Both phases run with IRQs/preemption intact but cannot sleep.** All
+//! callbacks execute under the framework's global clock lock plus the node's
+//! spinlock (see `core.rs` and the crate design doc); a callback that blocks
+//! or sleeps will stall every other CPU that touches the clock tree. Slow work
+//! that genuinely needs to wait (a PLL lock) must be implemented as a
+//! **bounded busy-wait** that polls a status bit with a timeout, never a sleep.
+//!
+//! This is intentionally narrower than Linux's `may sleep` contract: the
+//! framework uses a spinlock, not a sleepable mutex, to avoid pulling the
+//! scheduler into the clock core. The two phases still earn their keep because
+//! `enable`/`disable` deliberately bypass the global lock (they may run from
+//! contexts that cannot take it), whereas `prepare`/`unprepare` are serialized
+//! by it.
 //!
 //! # Re-entrancy
 //!
-//! All callbacks run under the framework's global clock lock (for sleepable
-//! operations) or the per-node spinlock (for the atomic gate). A callback must
-//! not re-enter the clock framework: do not call `clk_get_*`, `set_rate`,
-//! `set_parent`, `prepare`, or `enable` from within an op, or the lock
-//! deadlocks. Touching the node's own registers is the expected work.
+//! All callbacks run under the framework's global clock lock (for the
+//! prepare/rate/parent paths) plus the per-node spinlock. A callback must not:
+//! - sleep or block (no scheduler waits; use bounded busy-wait for PLL lock);
+//! - re-enter the clock framework (`clk_get_*`, `set_rate`, `set_parent`,
+//!   `prepare`, `enable`) — the lock deadlocks;
+//! - acquire any lock that could be held in reverse order during tree
+//!   propagation.
+//!
+//! Touching the node's own registers is the expected work.
 
 use crate::{ClkError, ClkResult, Rate, RoundResult};
 

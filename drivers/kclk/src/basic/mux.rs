@@ -83,10 +83,13 @@ impl Mux {
 
 impl ClkHwOps for Mux {
     fn num_parents(&self) -> u8 {
-        match self.table {
-            Some(table) => table.len() as u8,
-            None => (self.mask + 1) as u8,
-        }
+        let count = match self.table {
+            Some(table) => table.len(),
+            None => (self.mask + 1) as usize,
+        };
+        // The framework's parent index is a `u8`; a field that can encode 256
+        // values cannot be represented. Cap defensively rather than wrap to 0.
+        count.min(u8::MAX as usize) as u8
     }
 
     fn get_parent(&self) -> ClkResult<u8> {
