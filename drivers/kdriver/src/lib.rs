@@ -50,7 +50,9 @@ pub use self::{
     bus::manager::{BusManager, default_bus_manager},
     driver_registry::{BusOwnershipSummary, DriverOwnershipSummary, OwnershipSummary},
     manager::{DeviceManager, device_manager, discover_unified},
-    resource::{devm_alloc_coherent, devm_iomap, devm_request_irq, install_resource_provider},
+    resource::{
+        devm_alloc_coherent, devm_clk_get, devm_iomap, devm_request_irq, install_resource_provider,
+    },
 };
 
 #[cfg(feature = "virtio")]

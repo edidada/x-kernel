@@ -79,6 +79,7 @@ driver_base = { workspace = true }
 kclass = { workspace = true }
 kdevice = { workspace = true }
 kirq = { workspace = true }
+kclk = { workspace = true }
 block = { workspace = true, optional = true }
 char_driver = { workspace = true, optional = true }
 console_driver = { workspace = true, optional = true }

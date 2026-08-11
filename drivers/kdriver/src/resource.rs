@@ -19,10 +19,10 @@ use alloc::sync::Arc;
 use core::{alloc::Layout, ptr::NonNull};
 
 use device_res::{
-    DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, IrqController as DevIrqController,
-    IrqEvent as DevIrqEvent, IrqHandler as DevIrqHandler, IrqHandlerToken, IrqOp, IrqResource,
-    IrqRouteDesc, IrqTrigger as DevIrqTrigger, MmioMapping, MmioOp, MmioRegion, MsiResource,
-    ResError, ResResult,
+    ClkConsumer, ClkOp, ClkSpec, DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec,
+    IrqController as DevIrqController, IrqEvent as DevIrqEvent, IrqHandler as DevIrqHandler,
+    IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc, IrqTrigger as DevIrqTrigger, MmioMapping,
+    MmioOp, MmioRegion, MsiResource, ResError, ResResult,
 };
 use driver_base::{DriverError, DriverResult};
 use kdevice::DeviceObject;
@@ -286,6 +286,62 @@ pub fn install_resource_provider() {
     device_res::set_mmio_provider(&HOST_PROVIDER);
     device_res::set_dma_provider(&HOST_PROVIDER);
     device_res::set_irq_provider(&HOST_PROVIDER);
+    device_res::set_clk_provider(&HOST_PROVIDER);
+}
+
+/// Adapter wrapping a `kclk` consumer handle as a device-res [`ClkConsumer`].
+///
+/// Lives here, not in `kclk`, so `kclk` stays free of any `device_res`
+/// dependency — mirroring how `kirq` never depends on devres.
+struct KclkConsumer(kclk::ClkHandle);
+
+impl ClkConsumer for KclkConsumer {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    fn get_rate(&self) -> u64 {
+        self.0.get_rate()
+    }
+
+    fn prepare_enable(&self) -> ResResult<()> {
+        self.0.prepare_enable().map_err(map_clk_err)
+    }
+
+    fn disable_unprepare(&self) {
+        self.0.disable_unprepare()
+    }
+
+    fn is_enabled(&self) -> ResResult<bool> {
+        self.0.is_enabled().map_err(map_clk_err)
+    }
+}
+
+impl ClkOp for HostResourceProvider {
+    fn get_clock(&self, spec: ClkSpec) -> ResResult<Arc<dyn ClkConsumer>> {
+        // Name takes precedence (a DT `clock-names` entry); otherwise fall back
+        // to the provider-relative index from the `clocks` cell.
+        let handle = match spec.name() {
+            Some(name) => kclk::clk_get_by_name(name).ok_or(ResError::NotFound)?,
+            None => kclk::clk_get_by_index(spec.index()).ok_or(ResError::NotFound)?,
+        };
+        Ok(Arc::new(KclkConsumer(handle)))
+    }
+}
+
+/// Translate a `kclk` error into the device-res resource error vocabulary.
+fn map_clk_err(err: kclk::ClkError) -> ResError {
+    match err {
+        kclk::ClkError::NoProvider => ResError::NoProvider,
+        kclk::ClkError::NotFound => ResError::NotFound,
+        kclk::ClkError::NotSupported => ResError::Unsupported,
+        kclk::ClkError::InvalidRate => ResError::InvalidResource,
+        kclk::ClkError::InvalidParent => ResError::InvalidResource,
+        kclk::ClkError::Busy => ResError::Busy,
+        kclk::ClkError::Io => ResError::MappingFailed,
+        kclk::ClkError::ParentError | kclk::ClkError::BadState => ResError::InvalidResource,
+        kclk::ClkError::Aborted => ResError::Busy,
+    }
 }
 
 /// Translate a device-res DMA direction into the matching `kdma` direction.
@@ -330,6 +386,7 @@ fn map_res_err(err: ResError) -> DriverError {
         ResError::Busy => DriverError::ResourceBusy,
         ResError::Unsupported => DriverError::Unsupported,
         ResError::NoProvider => DriverError::BadState,
+        ResError::NotFound => DriverError::InvalidInput,
     }
 }
 
@@ -367,6 +424,14 @@ pub fn devm_alloc_coherent(
     spec: DmaSpec,
 ) -> DriverResult<(NonNull<u8>, u64)> {
     device_res::devm_alloc_coherent(device, spec).map_err(map_res_err)
+}
+
+/// Resolve a clock specifier and tie its lifetime to `device`.
+///
+/// Returns a cloneable [`device_res::Clk`] handle; the device-managed reference
+/// is released when the device's probe fails or it is removed.
+pub fn devm_clk_get(device: &DeviceObject, spec: ClkSpec) -> DriverResult<device_res::Clk> {
+    device_res::devm_clk_get(device, spec).map_err(map_res_err)
 }
 
 #[cfg(unittest)]
