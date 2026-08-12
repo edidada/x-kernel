@@ -49,6 +49,10 @@ impl PciIrqState {
         matches!(self, Self::Failed)
     }
 
+    pub(super) fn is_msix(&self) -> bool {
+        matches!(self, Self::Msix(_))
+    }
+
     pub(super) fn msix_mut(&mut self) -> Option<&mut PciMsixState> {
         match self {
             Self::Msix(msix) => Some(msix),

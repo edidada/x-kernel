@@ -6,20 +6,34 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use int_ratio::Ratio;
 use klazy::Once;
-use log::info;
+use log::{info, warn};
 use raw_cpuid::CpuId;
+use x86_64::instructions::port::Port;
 
 use crate::TimerSource;
 
 const LAPIC_TICKS_PER_SEC: u64 = 1_000_000_000;
+const MIN_TSC_FREQUENCY_HZ: u64 = 1_000_000;
+const MAX_TSC_FREQUENCY_HZ: u64 = 100_000_000_000;
+const PIT_FREQUENCY_HZ: u64 = 1_193_182;
+const PIT_CALIBRATION_TICKS: u16 = 59_659;
+const PIT_CALIBRATION_ROUNDS: usize = 3;
+const PIT_MAX_POLLS: usize = 1_000_000;
 static INIT_TICK: AtomicU64 = AtomicU64::new(0);
-static CPU_FREQ_MHZ: AtomicU64 = AtomicU64::new(0);
+static TSC_FREQUENCY_HZ: AtomicU64 = AtomicU64::new(0);
 static TSC_TICKS_TO_NANOS_RATIO: Once<Ratio> = Once::new();
 static NANOS_TO_TSC_TICKS_RATIO: Once<Ratio> = Once::new();
 static NANOS_TO_LAPIC_TICKS_RATIO: Once<Ratio> = Once::initialized(Ratio::new(
     LAPIC_TICKS_PER_SEC as u32,
     ktime_types::NANOS_PER_SEC as u32,
 ));
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TscFrequencySource {
+    CpuidLeaf15,
+    PitChannel2,
+    Platform(TimerSource),
+}
 
 #[kplat::impl_dev_interface]
 impl khal::time::MonotonicTimerIf {
@@ -56,13 +70,17 @@ impl khal::time::MonotonicTimerIf {
     }
 }
 
+/// Configuration used when architectural TSC calibration is unavailable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimerConfig {
+    /// Platform estimate used as a bounded-calibration timeout and fallback.
     pub nominal_frequency_hz: u64,
+    /// Provenance of the platform estimate.
     pub source: TimerSource,
 }
 
 impl TimerConfig {
+    /// Creates a configuration backed by a static platform frequency.
     pub const fn platform_static(nominal_frequency_hz: u64) -> Self {
         Self {
             nominal_frequency_hz,
@@ -71,39 +89,132 @@ impl TimerConfig {
     }
 }
 
+/// Calibrates the TSC and establishes the monotonic timer conversion ratios.
+///
+/// # Panics
+///
+/// Panics when the platform fallback falls outside the supported frequency
+/// range or the selected frequency cannot be represented by the fixed-point
+/// conversion ratios.
 pub fn early_init(config: TimerConfig) {
     assert!(
-        config.nominal_frequency_hz >= 1_000_000,
-        "x86 LAPIC/TSC timer frequency must be at least 1MHz"
+        is_valid_tsc_frequency(config.nominal_frequency_hz),
+        "x86 LAPIC/TSC timer frequency must be between 1MHz and 100GHz"
     );
-    let mut freq_mhz = config.nominal_frequency_hz / 1_000_000;
-
-    if let Some(freq) = CpuId::new()
-        .get_processor_frequency_info()
-        .map(|info| info.processor_base_frequency())
-        .filter(|freq| *freq > 0)
-    {
-        freq_mhz = freq as u64;
-    }
+    let (frequency_hz, source) = detect_tsc_frequency(config);
+    let frequency_khz = frequency_hz / 1_000;
     assert!(
-        u32::try_from(freq_mhz).is_ok(),
-        "TSC frequency must fit in u32 MHz"
+        u32::try_from(frequency_khz).is_ok(),
+        "TSC frequency must fit in u32 kHz"
     );
-    CPU_FREQ_MHZ.store(freq_mhz, Ordering::Relaxed);
-    let freq_mhz_u32 = freq_mhz as u32;
+    TSC_FREQUENCY_HZ.store(frequency_hz, Ordering::Relaxed);
+    let frequency_khz = frequency_khz as u32;
     TSC_TICKS_TO_NANOS_RATIO
-        .call_once(|| Ratio::new(ktime_types::NANOS_PER_MICROS as u32, freq_mhz_u32));
+        .call_once(|| Ratio::new(ktime_types::NANOS_PER_MILLIS as u32, frequency_khz));
     NANOS_TO_TSC_TICKS_RATIO
-        .call_once(|| Ratio::new(freq_mhz_u32, ktime_types::NANOS_PER_MICROS as u32));
-    info!(
-        "TSC frequency: {} MHz",
-        CPU_FREQ_MHZ.load(Ordering::Relaxed)
-    );
+        .call_once(|| Ratio::new(frequency_khz, ktime_types::NANOS_PER_MILLIS as u32));
+    info!("TSC frequency: {} Hz ({:?})", frequency_hz, source);
     // SAFETY: `_rdtsc` is available on the x86_64 target and is used here during
     // early timer initialization to capture the monotonic TSC baseline.
     INIT_TICK.store(unsafe { core::arch::x86_64::_rdtsc() }, Ordering::Relaxed);
 }
 
+fn detect_tsc_frequency(config: TimerConfig) -> (u64, TscFrequencySource) {
+    if let Some(frequency_hz) = CpuId::new()
+        .get_tsc_info()
+        .and_then(|info| info.tsc_frequency())
+        .filter(|frequency_hz| is_valid_tsc_frequency(*frequency_hz))
+    {
+        return (frequency_hz, TscFrequencySource::CpuidLeaf15);
+    }
+
+    if let Some(frequency_hz) = calibrate_tsc_with_pit(config.nominal_frequency_hz) {
+        return (frequency_hz, TscFrequencySource::PitChannel2);
+    }
+
+    warn!(
+        "TSC calibration unavailable; using platform frequency {} Hz ({:?})",
+        config.nominal_frequency_hz, config.source
+    );
+    (
+        config.nominal_frequency_hz,
+        TscFrequencySource::Platform(config.source),
+    )
+}
+
+fn calibrate_tsc_with_pit(nominal_frequency_hz: u64) -> Option<u64> {
+    let mut minimum_frequency_hz = None;
+    for _ in 0..PIT_CALIBRATION_ROUNDS {
+        let delta_tsc = measure_tsc_with_pit(nominal_frequency_hz)?;
+        let frequency_hz = tsc_frequency_from_pit_delta(delta_tsc)?;
+        if !is_valid_tsc_frequency(frequency_hz) {
+            warn!("PIT produced an invalid TSC frequency: {} Hz", frequency_hz);
+            continue;
+        }
+        minimum_frequency_hz = Some(
+            minimum_frequency_hz.map_or(frequency_hz, |minimum: u64| minimum.min(frequency_hz)),
+        );
+    }
+    minimum_frequency_hz
+}
+
+fn measure_tsc_with_pit(nominal_frequency_hz: u64) -> Option<u64> {
+    let timeout_ticks = nominal_frequency_hz.clamp(1_000_000_000, 100_000_000_000) / 2;
+
+    // SAFETY: ports 0x42, 0x43, and 0x61 are the legacy PIT channel 2 data,
+    // PIT command, and speaker/gate control ports on the x86 PC platform.
+    // `early_init` runs on the bootstrap CPU before other code can use PIT
+    // channel 2. The original gate/speaker value is restored before return.
+    let (delta_tsc, is_completed) = unsafe {
+        let mut control = Port::<u8>::new(0x61);
+        let saved_control = control.read();
+        control.write(saved_control & !0x03);
+
+        let mut command = Port::<u8>::new(0x43);
+        let mut data = Port::<u8>::new(0x42);
+        command.write(0xb0);
+        data.write(PIT_CALIBRATION_TICKS as u8);
+        data.write((PIT_CALIBRATION_TICKS >> 8) as u8);
+
+        let tsc_start = core::arch::x86_64::_rdtsc();
+        control.write((saved_control & !0x02) | 0x01);
+        let mut is_completed = false;
+        for _ in 0..PIT_MAX_POLLS {
+            if control.read() & 0x20 != 0 {
+                is_completed = true;
+                break;
+            }
+            if core::arch::x86_64::_rdtsc().wrapping_sub(tsc_start) > timeout_ticks {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        let tsc_end = core::arch::x86_64::_rdtsc();
+        control.write(saved_control);
+        (tsc_end.wrapping_sub(tsc_start), is_completed)
+    };
+
+    if !is_completed {
+        warn!("PIT TSC calibration timed out");
+        return None;
+    }
+    (delta_tsc != 0).then_some(delta_tsc)
+}
+
+fn tsc_frequency_from_pit_delta(delta_tsc: u64) -> Option<u64> {
+    if delta_tsc == 0 {
+        return None;
+    }
+    let frequency_hz =
+        u128::from(delta_tsc) * u128::from(PIT_FREQUENCY_HZ) / u128::from(PIT_CALIBRATION_TICKS);
+    u64::try_from(frequency_hz).ok()
+}
+
+const fn is_valid_tsc_frequency(frequency_hz: u64) -> bool {
+    frequency_hz >= MIN_TSC_FREQUENCY_HZ && frequency_hz <= MAX_TSC_FREQUENCY_HZ
+}
+
+/// Programs the bootstrap CPU's local APIC timer in one-shot mode.
 pub fn init_primary() {
     // SAFETY: the bootstrap CPU has already initialized the local APIC, and the
     // helper holds its lock while programming the LAPIC timer registers.
@@ -117,6 +228,7 @@ pub fn init_primary() {
     }
 }
 
+/// Programs the current secondary CPU's local APIC timer in one-shot mode.
 pub fn init_secondary() {
     // SAFETY: secondary CPUs call this only after LAPIC bring-up; the helper
     // programs the current CPU's private LAPIC timer state to match the BSP's
@@ -131,6 +243,7 @@ pub fn init_secondary() {
     }
 }
 
+/// Reads the current monotonic TSC tick count relative to early initialization.
 #[inline]
 pub fn now_ticks() -> khal::time::TimerTicks {
     khal::time::TimerTicks::from_raw(read_tsc_ticks_raw())
@@ -159,25 +272,26 @@ pub(crate) fn nanos_to_ticks(nanos: u64) -> u64 {
         .mul_trunc(nanos)
 }
 
+/// Returns the calibrated TSC frequency in hertz.
 #[inline]
 pub fn freq() -> u64 {
-    cpu_freq_mhz()
-        .checked_mul(1_000_000)
-        .expect("TSC frequency overflow")
+    tsc_frequency_hz()
 }
 
 #[inline]
-fn cpu_freq_mhz() -> u64 {
-    let freq_mhz = CPU_FREQ_MHZ.load(Ordering::Relaxed);
-    assert!(freq_mhz != 0, "x86 LAPIC/TSC timer is not initialized");
-    freq_mhz
+fn tsc_frequency_hz() -> u64 {
+    let frequency_hz = TSC_FREQUENCY_HZ.load(Ordering::Relaxed);
+    assert!(frequency_hz != 0, "x86 LAPIC/TSC timer is not initialized");
+    frequency_hz
 }
 
+/// Returns the IRQ vector assigned to the local APIC timer.
 #[inline]
 pub fn interrupt_id() -> usize {
     x86_apic::APIC_TIMER_VECTOR as usize
 }
 
+/// Arms the current CPU's one-shot local APIC timer for `deadline`.
 pub fn arm_timer(deadline: ktime_types::MonotonicInstant) {
     let now_ns = ticks_to_nanos(now_ticks().as_raw());
     let deadline_ns = deadline.as_nanos_u64_saturating();
@@ -209,5 +323,28 @@ pub fn disarm_timer() {
         x86_apic::with_local_apic(|lapic| {
             lapic.set_timer_initial(0);
         });
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::*;
+
+    #[def_test]
+    fn test_pit_delta_converts_to_tsc_frequency() {
+        let frequency_hz = tsc_frequency_from_pit_delta(150_000_000).unwrap();
+
+        assert!((2_999_000_000..=3_001_000_000).contains(&frequency_hz));
+        assert_eq!(tsc_frequency_from_pit_delta(0), None);
+    }
+
+    #[def_test]
+    fn test_tsc_frequency_bounds() {
+        assert!(!is_valid_tsc_frequency(MIN_TSC_FREQUENCY_HZ - 1));
+        assert!(is_valid_tsc_frequency(MIN_TSC_FREQUENCY_HZ));
+        assert!(is_valid_tsc_frequency(MAX_TSC_FREQUENCY_HZ));
+        assert!(!is_valid_tsc_frequency(MAX_TSC_FREQUENCY_HZ + 1));
     }
 }

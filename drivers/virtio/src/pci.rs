@@ -84,6 +84,14 @@ impl PciTransport {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+fn msix_interrupt_status() -> InterruptStatus {
+    // The config and queue MSI-X table entries currently share one allocated
+    // IRQ, so delivery means that either source needs inspection. The ISR
+    // status register is unused while MSI-X is enabled.
+    InterruptStatus::from_bits_retain(0b11)
+}
+
 impl Transport for PciTransport {
     fn device_type(&self) -> DeviceType {
         self.inner.device_type()
@@ -208,6 +216,11 @@ impl Transport for PciTransport {
     }
 
     fn ack_interrupt(&mut self) -> InterruptStatus {
+        #[cfg(target_arch = "x86_64")]
+        if self.irq_state.is_msix() {
+            return msix_interrupt_status();
+        }
+
         self.inner.ack_interrupt()
     }
 
@@ -225,6 +238,21 @@ impl Transport for PciTransport {
         value: T,
     ) -> VirtIoResult<()> {
         self.inner.write_config_space(offset, value)
+    }
+}
+
+#[cfg(all(unittest, target_arch = "x86_64"))]
+mod tests {
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::msix_interrupt_status;
+
+    #[def_test]
+    fn test_msix_delivery_reports_all_shared_vector_sources() {
+        let status = msix_interrupt_status();
+
+        assert!(!status.is_empty());
+        assert_eq!(status.bits(), 0b11);
     }
 }
 

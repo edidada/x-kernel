@@ -253,6 +253,7 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 | F-08 | `probe_mmio_device` panic | 传入空指针 | 初始化中断 | 系统启动失败 | 1 | 调用者必须验证地址有效性 |
 | F-09 | 网络缓冲区 token 不匹配 | 内部状态不一致 | DMA 到错误地址 | 内存破坏 | 1 | `assert_eq!` 和 `is_some()` 检查；`BadState` 错误返回 |
 | F-10 | 网络 RX 事件丢失 | IRQ handler 和任务上下文都调用 `ack_interrupt()`，任务上下文清除新到事件 | virtio RX 队列停止推进并重复触发未处理 IRQ | TCP 接收窗口降为零，host→guest 传输超时 | 2 | 已注册 IRQ 时仅由 handler 调用 `ack_interrupt()`，`recv()` 仅消费已完成队列项；纯轮询模式由 `recv()` 确认中断 |
+| F-11 | MSI-X 网络中断被判定为空 | MSI-X 启用时继续读取未使用的 ISR 状态寄存器 | RX scheduler 未被唤醒，中断被 IRQ core 记为未处理并持续重发 | 网络吞吐下降并形成未处理中断风暴 | 2 | x86_64 `PciTransport` 根据 MSI-X 状态生成配置和队列候选位；legacy INTx 继续读取 ISR，保留共享线判定 |
 
 ## 故障管理
 
@@ -274,8 +275,7 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 
 ## 已知限制
 
-1. **MSI-X 未启用**：x86_64 上的 MSI-X 支持代码已编写但被注释掉（TODO），
-   当前所有架构使用 legacy IRQ，可能导致中断共享问题。
+1. **MSI-X 覆盖范围**：x86_64 仅对 VirtIO 网络设备启用 MSI-X，配置和队列表项共享同一个 IRQ；其他 VirtIO 设备继续使用 legacy IRQ。
 2. **无超时机制**：9p 设备的 `request()` 同步等待响应，无超时保护，
    恶意或故障设备可能导致调用者永久阻塞。
 3. **input 设备硬编码路径**：`physical_location()` 返回固定字符串 `"virtio0/input0"`，

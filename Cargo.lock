@@ -2161,6 +2161,7 @@ dependencies = [
  "display",
  "driver_base",
  "input",
+ "kaddr_layout",
  "kalloc",
  "kbuild_config",
  "kclass",
@@ -5032,6 +5033,7 @@ dependencies = [
  "unittest",
  "x2apic",
  "x86-apic",
+ "x86_64",
 ]
 
 [[package]]

@@ -12,6 +12,10 @@ use device_res::{
     try_dma_provider,
 };
 use driver_base::{Device, DriverResult};
+#[cfg(target_arch = "x86_64")]
+use kaddr_layout::{KIMAGE_VADDR, KIMAGE_VSIZE, LINEAR_MAP_VADDR, LINEAR_MAP_VSIZE};
+#[cfg(target_arch = "x86_64")]
+use khal::mem::{VirtAddr, v2p};
 use virtio::{BufferDirection, PhysAddr, VirtIoHal};
 
 cfg_if! {
@@ -151,17 +155,20 @@ pub struct VirtIoHalImpl;
 // mappings of the MMIO window, and that `share` / `unshare` keep CPU and
 // device views of a buffer coherent.
 //
-// This implementation upholds those invariants by routing every operation
-// through the `device_res` provider rather than x-kernel APIs directly:
+// This implementation upholds those invariants as follows:
 // * `dma_alloc` / `dma_dealloc` use `alloc_coherent` / `free_coherent`, which
 //   return a paired (`cpu_addr`, `bus_addr`) for the same region and free it
 //   in one call;
 // * `mmio_phys_to_virt` uses `map_mmio`, which installs (or reuses) a kernel
 //   mapping covering the requested MMIO range before returning a virtual
 //   pointer;
-// * `share` / `unshare` use `map_streaming` / `unmap_streaming`, which perform
-//   the cache maintenance and IOMMU bookkeeping required to keep CPU and
-//   device views in sync for the requested `BufferDirection`.
+// * when `VIRTIO_F_ACCESS_PLATFORM` is active, `share` / `unshare` use
+//   `map_streaming` / `unmap_streaming` for cache maintenance and platform DMA
+//   address translation;
+// * without that feature, x86_64 buffers are passed directly only after their
+//   physical pages are verified contiguous. Non-contiguous buffers continue
+//   through the provider's bounce mapping, and x86 cache coherency keeps the
+//   direct path's CPU and device views consistent for the queue-owned lifetime.
 const fn hal_direction(direction: BufferDirection) -> DmaDirection {
     match direction {
         BufferDirection::DriverToDevice => DmaDirection::DriverToDevice,
@@ -170,9 +177,44 @@ const fn hal_direction(direction: BufferDirection) -> DmaDirection {
     }
 }
 
-// SAFETY: every method routes hardware access through the `device_res`
-// provider, so the HAL holds no x-kernel state; DMA / MMIO ownership
-// invariants are delegated to the installed provider.
+#[cfg(target_arch = "x86_64")]
+fn try_identity_dma_address(buffer: NonNull<[u8]>) -> Option<PhysAddr> {
+    let address = buffer.as_ptr() as *mut u8 as usize;
+    let length = buffer.len();
+    if length == 0 {
+        return None;
+    }
+    let end = address.checked_add(length)?;
+    let is_in_window = |start: usize, size: usize| {
+        if address < start {
+            return Some(false);
+        }
+        let offset = address - start;
+        Some(offset <= size && length <= size - offset)
+    };
+    let is_in_kimage = is_in_window(KIMAGE_VADDR, KIMAGE_VSIZE)?;
+    let is_in_linear_map = is_in_window(LINEAR_MAP_VADDR, LINEAR_MAP_VSIZE)?;
+    if !is_in_kimage && !is_in_linear_map {
+        return None;
+    }
+    let physical = v2p(VirtAddr::from_usize(address)).as_usize();
+    let mut next_page = address.checked_add(PAGE_SIZE_4K - (address & (PAGE_SIZE_4K - 1)))?;
+    while next_page < end {
+        let expected = physical.checked_add(next_page - address)?;
+        let actual = v2p(VirtAddr::from_usize(next_page)).as_usize();
+        if actual != expected {
+            return None;
+        }
+        next_page = next_page.checked_add(PAGE_SIZE_4K)?;
+    }
+    Some(physical as PhysAddr)
+}
+
+// SAFETY: DMA and MMIO allocation lifetimes are delegated to the installed
+// provider. Streaming mappings use the provider whenever platform DMA access
+// was negotiated. The x86_64 identity branch is restricted to normal kernel
+// allocations covered by `v2p`; the VirtIO caller retains each allocation
+// until the matching `unshare`, and x86 hardware supplies coherent DMA.
 unsafe impl VirtIoHal for VirtIoHalImpl {
     fn dma_alloc(
         pages: usize,
@@ -246,8 +288,13 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
     unsafe fn share(
         buffer: NonNull<[u8]>,
         direction: BufferDirection,
-        _access_platform: bool,
+        access_platform: bool,
     ) -> PhysAddr {
+        #[cfg(target_arch = "x86_64")]
+        if !access_platform && let Some(paddr) = try_identity_dma_address(buffer) {
+            return paddr;
+        }
+
         match dma_provider().and_then(|p| p.map_streaming(buffer, hal_direction(direction))) {
             Ok(m) => m.bus_addr as PhysAddr,
             Err(err) => {
@@ -263,8 +310,13 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         paddr: PhysAddr,
         buffer: NonNull<[u8]>,
         direction: BufferDirection,
-        _access_platform: bool,
+        access_platform: bool,
     ) {
+        #[cfg(target_arch = "x86_64")]
+        if !access_platform && try_identity_dma_address(buffer).is_some() {
+            return;
+        }
+
         let dir = hal_direction(direction);
         let Some(p) = try_dma_provider() else {
             return;
@@ -279,5 +331,30 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
             len: slice.len(),
             direction: dir,
         });
+    }
+}
+
+#[cfg(all(unittest, target_arch = "x86_64"))]
+mod tests {
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+
+    static TEST_BUFFER: [u8; 8] = [0; 8];
+
+    #[def_test]
+    fn test_share_without_access_platform_uses_physical_address() {
+        let buffer = NonNull::from(&TEST_BUFFER[..]);
+        let expected = try_identity_dma_address(buffer).unwrap();
+
+        // SAFETY: `TEST_BUFFER` is a live, non-empty kernel-image allocation
+        // and the test performs no concurrent access during this call.
+        let actual =
+            unsafe { VirtIoHalImpl::share(buffer, BufferDirection::DriverToDevice, false) };
+
+        assert_eq!(actual, expected);
+        // SAFETY: `actual` and `buffer` are the values from the matching
+        // `share` call above, and the test performs no concurrent access.
+        unsafe { VirtIoHalImpl::unshare(actual, buffer, BufferDirection::DriverToDevice, false) };
     }
 }

@@ -257,8 +257,9 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 
 1. 读取 PCI 配置空间，获取设备类型信息
 2. 通过 `virtio_device_type()` 判断是否为 VirtIO 设备，再通过 `as_device_kind()` 映射为 `DeviceKind`
-3. x86_64 架构：尝试 MSI-X 设置（当前回退到 legacy IRQ）
-   - 查找 MSI-X capability，分配 CPU 中断向量，配置 MSI-X 表项
+3. x86_64 架构：网络设备优先设置 MSI-X，其余设备继续使用 legacy IRQ
+   - 查找 MSI-X capability，分配 CPU 中断向量，把配置和队列表项接到同一个 IRQ
+   - MSI-X 投递期间 ISR 状态寄存器不参与中断确认，`PciTransport` 将该 IRQ 标记为配置或队列事件，交给上层检查设备状态
    - 若 MSI-X 不可用或向量耗尽，读取 Interrupt Line 寄存器获取 legacy IRQ
    - 通过 `kirq::try_map()` 将硬件 IRQ 映射为虚拟 IRQ
 4. 其他架构：通过设备树或固定映射获取 IRQ
@@ -374,6 +375,8 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 1. `register_virtio_net_irq(irq, inner)`：将 `VirtIoNetIrqHandle` 存入全局 `NET_IRQ_HANDLES`
 2. 若该 IRQ 首次注册（`REGISTERED_NET_IRQS` 去重），调用 `Irq::request(resource, Arc::new(handle_virtio_net_irq))` 注册中断，guard 存入 `NET_IRQ_GUARDS`
 3. 中断到来时 `handle_virtio_net_irq()` 遍历所有句柄，调用 `ack_interrupt()` 确认中断，返回包含来源位图的 `IrqEvent`，没有句柄确认中断时返回 `IrqEvent::NOT_HANDLED`
+   - legacy INTx 读取 ISR 状态寄存器，空状态表示共享线上的其他设备触发了中断
+   - x86_64 MSI-X 由消息向量完成来源确认，配置和队列表项共享一个 IRQ，因此 transport 返回两类候选状态并调度 RX 队列检查
 4. 已注册 IRQ 时，`ack_interrupt()` 仅由 IRQ handler 调用，避免 RX 任务清除运行期间新到达但尚未调度的设备事件；未注册 IRQ 时，由 `recv()` 在纯轮询路径中确认中断
 
 ### Vsock 连接管理

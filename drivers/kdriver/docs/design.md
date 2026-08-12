@@ -266,6 +266,7 @@ VirtIO 驱动在 PCI 和 MMIO 两条传输路径上共享同一激活入口：
   后续 IRQ core 能力扩展必须放在 `kirq`，驱动框架只通过该适配层向驱动暴露内核
   IRQ 能力。
 - **`devm_alloc_coherent`**：通过 `kdma::allocate_dma_memory` 分配一致性 DMA 缓冲区，release 时调用 `kdma::deallocate_dma_memory`。
+- **VirtIO 流式 DMA**：协商 `VIRTIO_F_ACCESS_PLATFORM` 后通过 `map_streaming` 和 `unmap_streaming` 建立平台 DMA 映射。x86_64 未协商该特性时，HAL 逐页确认缓冲区物理连续后直接生成物理地址；不连续缓冲区继续使用 provider 的 bounce 映射，并在对应路径执行 `unshare`。
 
 释放顺序与申请顺序相反（LIFO），避免资源依赖错乱。
 
@@ -385,6 +386,20 @@ VirtIO 驱动在 PCI 和 MMIO 两条传输路径上共享同一激活入口：
 
 **拒绝的方案**：预分配静态 `IrqSlot` 数组并生成 trampoline。该方案需要维护
 slot 身份映射和硬编码 IRQ 总数上限。
+
+### x86_64 VirtIO 无平台访问时优先使用物理地址
+
+**选择**：x86_64 VirtIO 设备未协商 `VIRTIO_F_ACCESS_PLATFORM` 时，`VirtIoHalImpl::share`
+逐页检查缓冲区的物理地址连续性。连续缓冲区转换为物理地址，`unshare` 保持空操作；
+不连续缓冲区继续使用 `map_streaming` 和 `unmap_streaming`。
+
+该路径遵循 VirtIO 对未协商平台访问特性的地址语义，并利用 x86 的 DMA 缓存一致性。
+协商该特性的设备继续经过 `device_res` 流式映射，其他架构也保留原有映射流程。
+网络池中的连续缓冲区由此移除 bounce buffer 分配、数据拷贝、映射表维护和回收成本，
+其他缓冲区保留原有回退路径。
+
+调用方需要保证缓冲区来自内核镜像或线性映射窗口；`v2p` 转换和逐页检查覆盖整个切片。
+物理不连续缓冲区不能形成单个描述符，由 provider 的 bounce 映射承接。
 
 ## Drop / 资源释放
 

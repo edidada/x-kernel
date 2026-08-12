@@ -141,6 +141,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl { ... }
 - `dma_alloc` / `dma_dealloc` 的 `(paddr, vaddr, pages)` 三元组配对一致。
 - `mmio_phys_to_virt` 仅在 `PAGE_SIZE_4K` 对齐的物理地址上调用。
 - `share` 和 `unshare` 成对调用，方向匹配。
+- x86_64 未协商 `VIRTIO_F_ACCESS_PLATFORM` 时，identity 路径要求 `buffer` 位于内核镜像或线性映射窗口，且切片覆盖的物理内存连续；不满足时由 provider 建立 bounce 映射。
 - `dma_alloc` 分配后用 `write_bytes(0)` 清零，设备不会读到内核残留数据。
 
 子项：
@@ -179,28 +180,40 @@ unsafe fn mmio_phys_to_virt(paddr: PhysAddr, size: usize) -> NonNull<u8> {
 位置：`src/driver_registry/virtio/glue.rs:190,195`
 
 ```rust
-unsafe fn share(buffer: NonNull<[u8]>, direction: BufferDirection, ...) -> PhysAddr {
-    unsafe { kdma::map_dma_buffer(buffer, dma_direction(direction)) }
-        .expect(...)
-        .bus_addr.as_u64() as PhysAddr
+unsafe fn share(
+    buffer: NonNull<[u8]>,
+    direction: BufferDirection,
+    access_platform: bool,
+) -> PhysAddr {
+    // x86_64 && !access_platform: v2p(buffer)
+    // other cases: provider.map_streaming(buffer, direction)
 }
 ```
 
 - `buffer` 来自 VirtIO 传输层分配的合法缓冲区（由 `dma_alloc` 或上层提供）。
 - `direction` 正确映射到 `kdma::DmaDirection`。
+- 协商 `VIRTIO_F_ACCESS_PLATFORM` 后，`map_streaming` 负责 bounce buffer、缓存维护和平台 DMA 地址转换。
+- x86_64 未协商该特性时，VirtIO 协议要求描述符携带物理地址；HAL 通过 `v2p` 逐页确认内核镜像或线性映射窗口中的切片物理连续，检查失败时保留 provider 的 bounce 路径。
 
 #### 3e. `unshare`
 
 位置：`src/driver_registry/virtio/glue.rs:203,209`
 
 ```rust
-unsafe fn unshare(paddr: PhysAddr, buffer: NonNull<[u8]>, direction: BufferDirection, ...) {
-    unsafe { kdma::unmap_dma_buffer(DmaBusAddress::new(paddr), buffer, dma_direction(direction)) };
+unsafe fn unshare(
+    paddr: PhysAddr,
+    buffer: NonNull<[u8]>,
+    direction: BufferDirection,
+    access_platform: bool,
+) {
+    // x86_64 && !access_platform: return
+    // other cases: provider.unmap_streaming(...)
 }
 ```
 
 - `paddr` 与 `buffer` 来自同一次 `share` 的返回值。
 - 调用配对由 `virtio` crate 的传输层保证。
+- x86_64 identity 路径依赖硬件 DMA 缓存一致性，释放描述符所有权后无需数据回拷和映射回收；bounce 路径仍按 provider 规则回拷和释放映射。
 
 调用者：
 
@@ -338,7 +351,7 @@ unsafe impl IxgbeHal for IxgbeHalImpl { ... }
    mask 整条 IRQ line。
 6. **IRQ dispatch 无堆分配**：共享 action fanout 由 `kirq` 使用固定长度栈上快照完成。
 7. **VirtIO DMA 清零**：`dma_alloc` 分配后用 `write_bytes(0)` 清零，防止设备读到内核残留数据。
-8. **VirtIO share/unshare 配对**：`share` 和 `unshare` 成对调用，方向一致，由 `virtio` crate 传输层保证。
+8. **VirtIO share/unshare 配对**：`share` 和 `unshare` 成对调用，方向和 `access_platform` 一致，由 `virtio` crate 传输层保证。x86_64 identity 路径还要求缓冲区处于内核镜像或线性映射窗口并具有连续物理后备页，检查失败时必须走 provider 映射。
 9. **PCI BAR 零地址拒绝**：枚举阶段分配后仍为 0 的 BAR 被跳过，不注册为有效资源。
 10. **firmware 物理地址校验**：所有 firmware 提供的 MMIO 地址经 `memspace::iomap_device` 校验窗口合法性后再映射。
 11. **设备身份白名单**：VirtIO PCI device ID 经 `pci_device_id_to_virtio_type` 白名单转换，未知 ID 的设备注册为通用 PCI 设备而不绑定 VirtIO 驱动。
@@ -355,7 +368,7 @@ unsafe impl IxgbeHal for IxgbeHalImpl { ... }
 | `PCI_BAR_ALLOCATOR` | `SpinNoPreempt<Option<PciRangeAllocator>>` 满足 Send + Sync | `SpinNoPreempt` 提供内部可变性 |
 | `PlatformBackend` | 字段 `LocalIdAlloc` 为 `Copy`，满足 Send | 不实现 Sync（通过 BusManager 锁串行访问） |
 | `PciBackend` | `Cam` 满足 Send | 不实现 Sync |
-| `VirtIoHalImpl` | 零大小类型 | 内部调用 `kdma` / `iomap_mmio`，各自保证线程安全 |
+| `VirtIoHalImpl` | 零大小类型 | 平台映射由 `kdma` / `iomap_mmio` 保证线程安全；x86_64 identity 路径只执行地址转换，队列所有权负责访问串行化 |
 
 ## 威胁分析
 
@@ -365,7 +378,7 @@ unsafe impl IxgbeHal for IxgbeHalImpl { ... }
 | T-02 | PCI BAR 分配后仍为零地址导致 page zero 映射 | 高 | BAR 分配器耗尽或分配范围未初始化，且 BAR 配置逻辑未拒绝零地址 | `configure_pci_device_if_needed` 分配失败返回 `NoMemory`；枚举 pass 3 跳过 `address == 0` 的 BAR |
 | T-03 | IRQ 注册与中断到达竞态，handler 在未就绪时被调用 | 高 | 中断在 action 装入前到达该 virq | `kirq::try_register_shared()` 在 IRQ core descriptor 内安装 action 后才按策略 enable line；复杂驱动可使用更精细的 core API 控制 enable 时机 |
 | T-04 | DMA double-free 导致内存破坏 | 高 | `free_coherent` 被多次调用或 layout 不匹配 | `DmaAllocation` 无 Clone，devres 独占所有权；`alloc`/`free` 使用相同 `DmaSpec` 重建 `Layout` |
-| T-05 | VirtIO 设备通过恶意 DMA 描述符访问非授权内核内存 | 高 | 恶意或故障 VirtIO 设备构造错误描述符链 | 当前无 IOMMU 隔离单个 VirtIO 设备；`dma_alloc` 清零防止信息泄露；`share`/`unshare` 通过 `kdma` 管理 |
+| T-05 | VirtIO 设备通过恶意 DMA 访问非授权内核内存 | 高 | 恶意或故障 VirtIO 设备越过驱动提供的描述符范围 | 当前无 IOMMU 隔离单个 VirtIO 设备；`dma_alloc` 清零防止信息泄露；协商平台访问时由 `kdma` 管理映射，x86_64 identity 路径仅暴露已确认连续的当前缓冲区物理地址 |
 | T-06 | firmware 伪造设备 compatible 导致错误驱动绑定 | 中 | DT 提供虚假 compatible string 且恰好命中已注册的 `FirmwareMatchSpec` | 驱动 probe 会因硬件无响应而失败，设备进入 unclaimed 列表 |
 | T-07 | PCI 设备伪造 vendor:device ID 触发错误 VirtIO 类型匹配 | 中 | 恶意 PCI 设备声明 Red Hat vendor ID 和已知 VirtIO device ID | `probe_pci_device` 在激活阶段二次验证传输层响应；不匹配时返回 `Unsupported` |
 | T-08 | 单条 IRQ 共享 handler 过多导致不可控遍历 | 中 | 超过 4 个 handler 注册到同一 IRQ | `request_irq` 返回 `ResError::Busy`，dispatch 使用固定长度栈上快照 |
@@ -399,6 +412,7 @@ unsafe impl IxgbeHal for IxgbeHalImpl { ... }
 | F-10 | rescan 产生重复设备描述符 | 后端未覆盖 `rescan` 钩子，重走完整 `enumerate` | `kdevice` 可能拒绝重复注册或产生冗余描述符 | 热插拔功能不完整 | 3 | 默认 `rescan` 重走 `enumerate`；后端可按需覆盖实现增量扫描 |
 | F-11 | VirtIO 传输层类型与驱动声明不匹配 | 设备上报的 `DeviceKind` 与匹配驱动的 `device_type` 不一致 | 驱动 probe 返回 `Unsupported` | 该设备进入 unclaimed | 4 | `activate_virtio_device` 在 PCI/MMIO 激活路径中做二次类型校验 |
 | F-12 | quiesce 未停止设备中断 | 总线后端 `quiesce` 未正确实现或硬件响应延迟 | 中断在 shutdown 期间继续到达 | IRQ handler 可能访问已释放的资源 | 2 | devres 在 remove 而非 quiesce 阶段释放；quiesce 仅屏蔽中断源 |
+| F-13 | x86_64 VirtIO identity DMA 收到非线性映射地址 | 新调用方把窗口外或物理不连续缓冲区传给 HAL | `v2p` 拒绝窗口外地址，物理不连续缓冲区无法形成单个描述符 | 设备操作失败或内核 panic | 2 | 当前 VirtIO 调用方只提交普通内核分配；新增调用方需要证明整个切片位于内核镜像或线性映射窗口并具有连续物理后备页 |
 
 严重度定义：
 
@@ -439,6 +453,7 @@ trace 日志会输出 firmware 遍历的 compatible string 和 VirtIO MMIO 探�
 - `fxmac` 在没有 firmware 描述时仅记录 warn 并跳过，无法从编译期配置获取 MMIO 基址。
 - firmware 枚举不处理 ACPI _DSD 或复杂设备属性，仅读取 compatible/HID/CID、MMIO 和 IRQ 资源。
 - PCI hot-plug 仅通过 `rescan` 全量重枚举支持，无原生的 hot-plug event 处理（无 PCIe AER / hot-plug controller 驱动）。
+- x86_64 未协商 `VIRTIO_F_ACCESS_PLATFORM` 的 identity DMA 依赖可信 VMM、逐页物理连续性检查和平台 DMA 缓存一致性，当前没有设备级 IOMMU 隔离；检查失败的缓冲区回退到 bounce 映射。
 
 ## 审计清单
 
@@ -456,3 +471,4 @@ trace 日志会输出 firmware 遍历的 compatible string 和 VirtIO MMIO 探�
 - 新增 firmware compatible 匹配规格在 `firmware_specs.rs` 中声明，并注册对应的 platform driver。
 - 新增 `DeviceDriver` 的 `probe_device` 在失败时返回 `DriverError` 而非 panic。
 - 新增 `VirtIoHal` 实现方法需保证 `share`/`unshare` 配对和 `dma_alloc`/`dma_dealloc` 配对。
+- 修改 x86_64 identity DMA 调用范围时，需验证缓冲区所在地址窗口、物理连续性、设备访问生命周期和缓存一致性。

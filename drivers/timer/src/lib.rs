@@ -4,10 +4,14 @@
 
 #![no_std]
 
+/// Provenance of a platform-provided timer frequency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimerSource {
+    /// Frequency supplied by the platform's static configuration.
     PlatformStatic,
+    /// Frequency read from the device tree.
     DeviceTree,
+    /// Frequency read from ACPI tables.
     Acpi,
 }
 
