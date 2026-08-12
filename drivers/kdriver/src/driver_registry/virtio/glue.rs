@@ -13,9 +13,7 @@ use device_res::{
 };
 use driver_base::{Device, DriverResult};
 #[cfg(target_arch = "x86_64")]
-use kaddr_layout::{KIMAGE_VADDR, KIMAGE_VSIZE, LINEAR_MAP_VADDR, LINEAR_MAP_VSIZE};
-#[cfg(target_arch = "x86_64")]
-use khal::mem::{VirtAddr, v2p};
+use khal::mem::VirtAddr;
 use virtio::{BufferDirection, PhysAddr, VirtIoHal};
 
 cfg_if! {
@@ -178,36 +176,74 @@ const fn hal_direction(direction: BufferDirection) -> DmaDirection {
 }
 
 #[cfg(target_arch = "x86_64")]
-fn try_identity_dma_address(buffer: NonNull<[u8]>) -> Option<PhysAddr> {
-    let address = buffer.as_ptr() as *mut u8 as usize;
-    let length = buffer.len();
+fn is_in_dma_window(address: usize, length: usize, start: usize, size: usize) -> bool {
     if length == 0 {
+        return false;
+    }
+    let Some(offset) = address.checked_sub(start) else {
+        return false;
+    };
+    offset < size && length <= size - offset
+}
+
+#[cfg(target_arch = "x86_64")]
+fn is_in_identity_dma_window(address: usize, length: usize) -> bool {
+    is_in_dma_window(
+        address,
+        length,
+        kaddr_layout::KIMAGE_VADDR,
+        kaddr_layout::KIMAGE_VSIZE,
+    ) || is_in_dma_window(
+        address,
+        length,
+        kaddr_layout::LINEAR_MAP_VADDR,
+        kaddr_layout::LINEAR_MAP_VSIZE,
+    )
+}
+
+#[cfg(target_arch = "x86_64")]
+fn try_identity_dma_address_with(
+    buffer: NonNull<[u8]>,
+    translate: impl Fn(usize) -> usize,
+) -> Option<PhysAddr> {
+    let address = buffer.cast::<u8>().as_ptr() as usize;
+    let length = buffer.len();
+    if !is_in_identity_dma_window(address, length) {
         return None;
     }
     let end = address.checked_add(length)?;
-    let is_in_window = |start: usize, size: usize| {
-        if address < start {
-            return Some(false);
-        }
-        let offset = address - start;
-        Some(offset <= size && length <= size - offset)
-    };
-    let is_in_kimage = is_in_window(KIMAGE_VADDR, KIMAGE_VSIZE)?;
-    let is_in_linear_map = is_in_window(LINEAR_MAP_VADDR, LINEAR_MAP_VSIZE)?;
-    if !is_in_kimage && !is_in_linear_map {
-        return None;
-    }
-    let physical = v2p(VirtAddr::from_usize(address)).as_usize();
+    let physical = translate(address);
     let mut next_page = address.checked_add(PAGE_SIZE_4K - (address & (PAGE_SIZE_4K - 1)))?;
     while next_page < end {
         let expected = physical.checked_add(next_page - address)?;
-        let actual = v2p(VirtAddr::from_usize(next_page)).as_usize();
+        let actual = translate(next_page);
         if actual != expected {
             return None;
         }
         next_page = next_page.checked_add(PAGE_SIZE_4K)?;
     }
     Some(physical as PhysAddr)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn try_identity_dma_address(buffer: NonNull<[u8]>) -> Option<PhysAddr> {
+    try_identity_dma_address_with(buffer, |address| {
+        khal::mem::v2p(VirtAddr::from_usize(address)).as_usize()
+    })
+}
+
+#[cfg(target_arch = "x86_64")]
+fn is_identity_dma_mapping(paddr: PhysAddr, buffer: NonNull<[u8]>) -> bool {
+    let address = buffer.cast::<u8>().as_ptr() as usize;
+    if !is_in_identity_dma_window(address, buffer.len()) {
+        return false;
+    }
+
+    // The HAL contract keeps the original buffer live until `unshare`.
+    // A provider-owned bounce allocation therefore cannot alias its first
+    // physical page, so this equality identifies the address returned by the
+    // direct path without repeating the full continuity scan.
+    paddr as usize == khal::mem::v2p(VirtAddr::from_usize(address)).as_usize()
 }
 
 // SAFETY: DMA and MMIO allocation lifetimes are delegated to the installed
@@ -313,7 +349,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         access_platform: bool,
     ) {
         #[cfg(target_arch = "x86_64")]
-        if !access_platform && try_identity_dma_address(buffer).is_some() {
+        if !access_platform && is_identity_dma_mapping(paddr, buffer) {
             return;
         }
 
@@ -336,11 +372,68 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
 
 #[cfg(all(unittest, target_arch = "x86_64"))]
 mod tests {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use device_res::{DmaOp, ResError, ResResult, set_dma_provider};
     use unittest::{assert_eq, def_test};
 
     use super::*;
 
+    const TEST_DMA_BUS_ADDRESS: u64 = 0xfeed_cafe;
     static TEST_BUFFER: [u8; 8] = [0; 8];
+    static TEST_MAP_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static TEST_UNMAP_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static TEST_PROVIDER: TestDmaProvider = TestDmaProvider;
+    static TEST_PROVIDER_SERIAL: kspin::SpinNoIrq<()> = kspin::SpinNoIrq::new(());
+
+    struct TestDmaProvider;
+
+    impl DmaOp for TestDmaProvider {
+        fn alloc_coherent(&self, _spec: DmaSpec) -> ResResult<DmaAllocation> {
+            Err(ResError::Unsupported)
+        }
+
+        fn free_coherent(&self, _alloc: DmaAllocation) {}
+
+        fn map_streaming(
+            &self,
+            buffer: NonNull<[u8]>,
+            direction: DmaDirection,
+        ) -> ResResult<DmaMapping> {
+            TEST_MAP_CALLS.fetch_add(1, Ordering::Relaxed);
+            Ok(DmaMapping {
+                cpu_addr: buffer.cast::<u8>().as_ptr() as usize,
+                bus_addr: TEST_DMA_BUS_ADDRESS,
+                len: buffer.len(),
+                direction,
+            })
+        }
+
+        fn unmap_streaming(&self, _mapping: DmaMapping) {
+            TEST_UNMAP_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    struct TestProviderGuard {
+        saved: &'static dyn DmaOp,
+    }
+
+    impl TestProviderGuard {
+        fn new() -> Self {
+            let saved =
+                try_dma_provider().expect("the host DMA provider must be installed before tests");
+            TEST_MAP_CALLS.store(0, Ordering::Relaxed);
+            TEST_UNMAP_CALLS.store(0, Ordering::Relaxed);
+            set_dma_provider(&TEST_PROVIDER);
+            Self { saved }
+        }
+    }
+
+    impl Drop for TestProviderGuard {
+        fn drop(&mut self) {
+            set_dma_provider(self.saved);
+        }
+    }
 
     #[def_test]
     fn test_share_without_access_platform_uses_physical_address() {
@@ -356,5 +449,47 @@ mod tests {
         // SAFETY: `actual` and `buffer` are the values from the matching
         // `share` call above, and the test performs no concurrent access.
         unsafe { VirtIoHalImpl::unshare(actual, buffer, BufferDirection::DriverToDevice, false) };
+    }
+
+    #[def_test]
+    fn test_access_platform_uses_streaming_mapping_pair() {
+        let _serial = TEST_PROVIDER_SERIAL.lock();
+        let _provider = TestProviderGuard::new();
+        let buffer = NonNull::from(&TEST_BUFFER[..]);
+
+        // SAFETY: `TEST_BUFFER` remains live and immutable until the matching
+        // `unshare`, and the mock provider records but does not access it.
+        let paddr = unsafe { VirtIoHalImpl::share(buffer, BufferDirection::DriverToDevice, true) };
+        assert_eq!(paddr, TEST_DMA_BUS_ADDRESS);
+        assert_eq!(TEST_MAP_CALLS.load(Ordering::Relaxed), 1);
+
+        // SAFETY: `paddr` and `buffer` are the values from the matching
+        // `share` call above.
+        unsafe { VirtIoHalImpl::unshare(paddr, buffer, BufferDirection::DriverToDevice, true) };
+        assert_eq!(TEST_UNMAP_CALLS.load(Ordering::Relaxed), 1);
+    }
+
+    #[def_test]
+    fn test_address_outside_identity_windows_is_rejected() {
+        let buffer = NonNull::slice_from_raw_parts(NonNull::dangling(), TEST_BUFFER.len());
+
+        assert_eq!(try_identity_dma_address(buffer), None);
+    }
+
+    #[def_test]
+    fn test_physically_discontinuous_buffer_is_rejected() {
+        let address = kaddr_layout::KIMAGE_VADDR + PAGE_SIZE_4K - 1;
+        let start = NonNull::new(address as *mut u8).unwrap();
+        let buffer = NonNull::slice_from_raw_parts(start, 2);
+
+        let actual =
+            try_identity_dma_address_with(
+                buffer,
+                |current| {
+                    if current == address { 0x1fff } else { 0x3000 }
+                },
+            );
+
+        assert_eq!(actual, None);
     }
 }

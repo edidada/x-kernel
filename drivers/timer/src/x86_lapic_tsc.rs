@@ -18,7 +18,6 @@ const MAX_TSC_FREQUENCY_HZ: u64 = 100_000_000_000;
 const PIT_FREQUENCY_HZ: u64 = 1_193_182;
 const PIT_CALIBRATION_TICKS: u16 = 59_659;
 const PIT_CALIBRATION_ROUNDS: usize = 3;
-const PIT_MAX_POLLS: usize = 1_000_000;
 static INIT_TICK: AtomicU64 = AtomicU64::new(0);
 static TSC_FREQUENCY_HZ: AtomicU64 = AtomicU64::new(0);
 static TSC_TICKS_TO_NANOS_RATIO: Once<Ratio> = Once::new();
@@ -120,7 +119,18 @@ pub fn early_init(config: TimerConfig) {
 }
 
 fn detect_tsc_frequency(config: TimerConfig) -> (u64, TscFrequencySource) {
-    if let Some(frequency_hz) = CpuId::new()
+    let cpuid = CpuId::new();
+    if !cpuid
+        .get_advanced_power_mgmt_info()
+        .is_some_and(|info| info.has_invariant_tsc())
+    {
+        warn!(
+            "CPU does not report invariant TSC; fixed-ratio monotonic time may drift across \
+             P/C-states"
+        );
+    }
+
+    if let Some(frequency_hz) = cpuid
         .get_tsc_info()
         .and_then(|info| info.tsc_frequency())
         .filter(|frequency_hz| is_valid_tsc_frequency(*frequency_hz))
@@ -143,10 +153,18 @@ fn detect_tsc_frequency(config: TimerConfig) -> (u64, TscFrequencySource) {
 }
 
 fn calibrate_tsc_with_pit(nominal_frequency_hz: u64) -> Option<u64> {
+    calibrate_tsc(|| measure_tsc_with_pit(nominal_frequency_hz))
+}
+
+fn calibrate_tsc(mut measure_delta: impl FnMut() -> Option<u64>) -> Option<u64> {
     let mut minimum_frequency_hz = None;
     for _ in 0..PIT_CALIBRATION_ROUNDS {
-        let delta_tsc = measure_tsc_with_pit(nominal_frequency_hz)?;
-        let frequency_hz = tsc_frequency_from_pit_delta(delta_tsc)?;
+        let Some(delta_tsc) = measure_delta() else {
+            continue;
+        };
+        let Some(frequency_hz) = tsc_frequency_from_pit_delta(delta_tsc) else {
+            continue;
+        };
         if !is_valid_tsc_frequency(frequency_hz) {
             warn!("PIT produced an invalid TSC frequency: {} Hz", frequency_hz);
             continue;
@@ -179,7 +197,7 @@ fn measure_tsc_with_pit(nominal_frequency_hz: u64) -> Option<u64> {
         let tsc_start = core::arch::x86_64::_rdtsc();
         control.write((saved_control & !0x02) | 0x01);
         let mut is_completed = false;
-        for _ in 0..PIT_MAX_POLLS {
+        loop {
             if control.read() & 0x20 != 0 {
                 is_completed = true;
                 break;
@@ -346,5 +364,17 @@ mod tests {
         assert!(is_valid_tsc_frequency(MIN_TSC_FREQUENCY_HZ));
         assert!(is_valid_tsc_frequency(MAX_TSC_FREQUENCY_HZ));
         assert!(!is_valid_tsc_frequency(MAX_TSC_FREQUENCY_HZ + 1));
+    }
+
+    #[def_test]
+    fn test_pit_calibration_skips_failed_rounds() {
+        let mut deltas = [None, Some(150_000_000), Some(149_000_000)].into_iter();
+
+        let frequency_hz = calibrate_tsc(|| deltas.next().flatten()).unwrap();
+
+        assert_eq!(
+            frequency_hz,
+            tsc_frequency_from_pit_delta(149_000_000).unwrap()
+        );
     }
 }

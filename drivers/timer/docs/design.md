@@ -46,7 +46,7 @@ platform early_driver_init
 - `early_init` 由 bootstrap CPU 在早期启动阶段调用一次，此时其他 CPU 尚未并发使用
   PIT channel 2。
 - 进入 PIT 后备路径后执行三轮约 50 ms 的忙等待，路径不能睡眠，也不依赖任务上下文。
-- 每轮 PIT 等待同时受 TSC tick 阈值和轮询次数限制，失效设备不会永久阻塞启动。
+- 每轮 PIT 等待受 TSC tick 阈值限制，失效设备不会永久阻塞启动。
 - `init_primary` 在 bootstrap CPU 的 LAPIC 初始化完成后调用。
 - `init_secondary` 在当前 secondary CPU 的 LAPIC 初始化完成后调用。
 - `now_ticks`、`freq`、时间换算和 `arm_timer` 只能在 `early_init` 成功完成后调用。
@@ -55,14 +55,17 @@ platform early_driver_init
 
 ### TSC 频率选择
 
-1. 读取 CPUID 叶 0x15，通过 crystal frequency、numerator 和 denominator 计算 TSC
+1. 检查 CPUID 叶 0x80000007 的 invariant TSC 能力。未报告该能力时记录警告，但仍
+   继续频率检测；改用另一个启动期静态频率无法修正运行期 P/C-state 导致的 TSC 变速。
+2. 读取 CPUID 叶 0x15，通过 crystal frequency、numerator 和 denominator 计算 TSC
    频率。频率落在 1 MHz 到 100 GHz 范围内时直接采用。
-2. CPUID 叶缺失或字段无效时，把 PIT channel 2 设置为 mode 0，并装入 59,659 个
+3. CPUID 叶缺失或字段无效时，把 PIT channel 2 设置为 mode 0，并装入 59,659 个
    PIT tick。该区间接近 50 ms。
-3. 在 PIT output 由低变高的区间读取 TSC 差值，按
+4. 在 PIT output 由低变高的区间读取 TSC 差值，按
    `delta_tsc * 1_193_182 / 59_659` 计算频率。
-4. 连续完成三轮测量，采用最小有效值，降低中断、VMM 调度和固件停顿造成的正向误差。
-5. PIT 超时或所有样本越界时使用 `TimerConfig` 中的平台频率，并记录警告。
+5. 尝试三轮测量，跳过超时或无效的单轮样本，并采用其余样本中的最小值，降低中断、
+   VMM 调度和固件停顿造成的正向误差。
+6. 所有 PIT 样本均失败或越界时使用 `TimerConfig` 中的平台频率，并记录警告。
 
 ### 时间换算
 
