@@ -15,7 +15,7 @@
 use alloc::sync::Arc;
 
 use crate::{
-    ResResult,
+    ResError, ResResult,
     provider::{clk_provider, try_clk_provider},
 };
 
@@ -123,6 +123,12 @@ impl ClkSpec {
 /// surface — gating, rate, parent, and rate-change notification — so a driver
 /// never needs to reach past the resource layer for clock control, matching how
 /// MMIO and IRQ expose their full capability here.
+///
+/// Only [`name`](Self::name) and [`get_rate`](Self::get_rate) are required; the
+/// rest have defaults that model a fixed, ungated, rate-transparent clock (the
+/// same semantics a real framework returns for a clock that cannot change rate
+/// or switch parents — `Err(Unsupported)` at runtime). A host implementation
+/// overrides only the methods its hardware actually supports.
 pub trait ClkConsumer: Send + Sync {
     /// Stable identifier of the underlying clock (for logging).
     fn name(&self) -> &str;
@@ -130,55 +136,94 @@ pub trait ClkConsumer: Send + Sync {
     /// Cached rate, in Hz.
     fn get_rate(&self) -> u64;
 
-    /// Prepare the slow path, propagating to the parent first.
-    fn prepare(&self) -> ResResult<()>;
+    /// Prepare the slow path, propagating to the parent first. Default: no-op.
+    fn prepare(&self) -> ResResult<()> {
+        Ok(())
+    }
 
-    /// Release one prepare reference, then propagate to the parent.
-    fn unprepare(&self);
+    /// Release one prepare reference, then propagate to the parent. Default: no-op.
+    fn unprepare(&self) {}
 
-    /// Enable the atomic fast path, propagating to the parent first.
-    fn enable(&self) -> ResResult<()>;
+    /// Enable the atomic fast path, propagating to the parent first. Default: no-op.
+    fn enable(&self) -> ResResult<()> {
+        Ok(())
+    }
 
-    /// Release one enable reference, then propagate to the parent.
-    fn disable(&self);
+    /// Release one enable reference, then propagate to the parent. Default: no-op.
+    fn disable(&self) {}
 
     /// Prepare then enable, in that order.
-    fn prepare_enable(&self) -> ResResult<()>;
+    ///
+    /// Rolls back `prepare` if `enable` fails, matching Linux `clk_prepare_enable`.
+    fn prepare_enable(&self) -> ResResult<()> {
+        self.prepare()?;
+        if let Err(e) = self.enable() {
+            self.unprepare();
+            return Err(e);
+        }
+        Ok(())
+    }
 
     /// Disable then unprepare, in that order.
-    fn disable_unprepare(&self);
+    fn disable_unprepare(&self) {
+        self.disable();
+        self.unprepare();
+    }
 
-    /// Whether the hardware reports the clock as enabled.
-    fn is_enabled(&self) -> ResResult<bool>;
+    /// Whether the hardware reports the clock as enabled. Default: `false`.
+    fn is_enabled(&self) -> ResResult<bool> {
+        Ok(false)
+    }
 
-    /// Whether the hardware reports the clock as prepared.
-    fn is_prepared(&self) -> ResResult<bool>;
+    /// Whether the hardware reports the clock as prepared. Default: `false`.
+    fn is_prepared(&self) -> ResResult<bool> {
+        Ok(false)
+    }
 
-    /// The currently selected parent clock, if any.
-    fn get_parent(&self) -> Option<Arc<dyn ClkConsumer>>;
+    /// The currently selected parent clock, if any. Default: `None` (a root).
+    fn get_parent(&self) -> Option<Arc<dyn ClkConsumer>> {
+        None
+    }
 
     /// Closest achievable rate for `rate` without changing state.
-    fn round_rate(&self, rate: u64) -> ResResult<u64>;
+    /// Default: the clock cannot change rate, so its current rate is the closest.
+    fn round_rate(&self, _rate: u64) -> ResResult<u64> {
+        Ok(self.get_rate())
+    }
 
-    /// Program a new rate; returns the rate now in effect.
-    fn set_rate(&self, rate: u64) -> ResResult<u64>;
+    /// Program a new rate; returns the rate now in effect. Default: unsupported.
+    fn set_rate(&self, _rate: u64) -> ResResult<u64> {
+        Err(ResError::Unsupported)
+    }
 
     /// Constrain this clock's rate to `[min, max]` for later `set_rate`/
-    /// `round_rate` calls.
-    fn set_rate_range(&self, min: u64, max: u64) -> ResResult<()>;
+    /// `round_rate` calls. Default: unsupported.
+    fn set_rate_range(&self, _min: u64, _max: u64) -> ResResult<()> {
+        Err(ResError::Unsupported)
+    }
 
-    /// The current `(min, max)` rate range.
-    fn get_rate_range(&self) -> (u64, u64);
+    /// The current `(min, max)` rate range. Default: unbounded.
+    fn get_rate_range(&self) -> (u64, u64) {
+        (0, u64::MAX)
+    }
 
-    /// Select parent `index` and refresh the cached rate.
-    fn set_parent(&self, index: u8) -> ResResult<()>;
+    /// Select parent `index` and refresh the cached rate. Default: unsupported.
+    fn set_parent(&self, _index: u8) -> ResResult<()> {
+        Err(ResError::Unsupported)
+    }
 
     /// Register a subscriber invoked around rate changes; returns an opaque
     /// token for [`unregister_notifier`](Self::unregister_notifier).
-    fn register_notifier(&self, cb: ClkNotifier) -> ResResult<u64>;
+    /// Default: unsupported.
+    fn register_notifier(&self, _cb: ClkNotifier) -> ResResult<u64> {
+        Err(ResError::Unsupported)
+    }
 
     /// Remove a subscriber registered via [`register_notifier`](Self::register_notifier).
-    fn unregister_notifier(&self, id: u64) -> ResResult<()>;
+    /// Default: no-op success (an unregistered id is harmless).
+    fn unregister_notifier(&self, _id: u64) -> ResResult<()> {
+        Ok(())
+    }
 }
 
 /// Clock capability: resolve a [`ClkSpec`] into a consumer handle.
