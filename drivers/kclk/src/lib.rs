@@ -41,6 +41,7 @@ mod ops;
 mod provider;
 mod rate;
 mod reg;
+mod table;
 
 #[cfg(unittest)]
 mod tests;
@@ -62,6 +63,7 @@ pub use provider::{
 };
 pub use rate::{ClkRateRequest, Rate, RoundResult};
 pub use reg::{ClkRegAccess, MmioClkReg};
+pub use table::{ClkBranch, ClkNodeDesc, DividerDesc, GateDesc, MuxDesc, register_table};
 
 /// Index into a provider's clock table.
 ///

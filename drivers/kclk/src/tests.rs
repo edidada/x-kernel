@@ -15,10 +15,10 @@ use kspin::SpinNoIrq;
 use unittest::{assert_eq, def_test};
 
 use crate::{
-    ClkBuilder, ClkError, ClkEvent, ClkFlags, ClkHandle, ClkHwOps, ClkRegAccess, ClkTable, Divider,
-    DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux, NotifierResult, basic::Composite,
-    clk_disable_unused, clk_get_by_index, clk_get_by_name, register_provider, reset_providers,
-    unregister_provider,
+    ClkBranch, ClkBuilder, ClkError, ClkEvent, ClkFlags, ClkHandle, ClkHwOps, ClkRegAccess,
+    ClkTable, Divider, DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux, NotifierResult,
+    basic::Composite, clk_disable_unused, clk_get_by_index, clk_get_by_name, register_provider,
+    register_table, reset_providers, unregister_provider,
 };
 
 /// Array-backed register accessor for testing field math.
@@ -814,4 +814,29 @@ fn orphan_is_adopted_when_parent_registers() {
 
     assert_eq!(child.get_parent().unwrap().get_rate(), 24_000_000);
     assert_eq!(child.get_rate(), 48_000_000);
+}
+
+#[def_test]
+fn register_table_builds_tree_by_name_in_any_order() {
+    let _serial = PROVIDER_SERIAL.lock();
+    static TABLE: ClkTable = ClkTable::new(0x50);
+    TABLE.clear();
+    reset_providers();
+
+    let reg: Arc<dyn ClkRegAccess> = Arc::new(MockReg::new());
+    // Children listed BEFORE parents — order-independent, parents by name.
+    let branches = [
+        ClkBranch::gate(2, "uart_clk", 0, 7, GateFlags::SET_TO_ENABLE, &["pll1200"]),
+        ClkBranch::fixed_factor(1, "pll1200", 50, 1, &["osc24m"]),
+        ClkBranch::fixed_rate(0, "osc24m", 24_000_000),
+    ];
+    register_table(&TABLE, reg, &branches).unwrap();
+    register_provider(&TABLE);
+
+    assert_eq!(clk_get_by_index(0x50, 0).unwrap().get_rate(), 24_000_000);
+    assert_eq!(clk_get_by_index(0x50, 1).unwrap().get_rate(), 1_200_000_000);
+    // The gate transparently passes the pll rate through.
+    assert_eq!(clk_get_by_index(0x50, 2).unwrap().get_rate(), 1_200_000_000);
+
+    reset_providers();
 }

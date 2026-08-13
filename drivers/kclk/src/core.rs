@@ -164,6 +164,29 @@ impl ClkCore {
         self.parent_node().map(|p| p.get_rate()).unwrap_or(0)
     }
 
+    /// Fill parent slot `index` without touching hardware.
+    ///
+    /// Used by the table-driven registrar to resolve a name-referenced parent
+    /// after all nodes exist. The caller holds `CLK_LOCK`.
+    pub(crate) fn set_parent_slot(&self, index: u8, parent: Arc<ClkCore>) {
+        let mut table = self.parents.lock();
+        if let Some(slot) = table.get_mut(index as usize) {
+            *slot = Some(parent);
+        }
+    }
+
+    /// Recompute and refresh the cached rate from the currently selected parent.
+    ///
+    /// No hardware write — only `recalc_rate`, matching the non-sleeping
+    /// contract. Used by the table-driven registrar for the top-down rate
+    /// refresh once parents are resolved. The caller holds `CLK_LOCK`.
+    pub(crate) fn refresh_rate(&self) {
+        let parent_rate = self.parent_rate();
+        if let Ok(rate) = self.ops.recalc_rate(parent_rate) {
+            self.state.lock().rate = rate;
+        }
+    }
+
     /// The currently selected parent node, as a cloned [`Arc`], or `None` for
     /// a root (or an orphan slot with no registered parent).
     pub fn get_parent(&self) -> Option<Arc<ClkCore>> {
@@ -731,6 +754,13 @@ fn adopt_orphans(name: &'static str, parent: Arc<ClkCore>) {
                 .unwrap_or(st.accuracy);
         }
     }
+}
+
+/// Run `f` under the global clock lock, exposing it to sibling helpers like
+/// the table-driven registrar. Public only within the crate.
+pub(crate) fn with_clk_lock<T>(f: impl FnOnce() -> T) -> T {
+    let _g = CLK_LOCK.lock();
+    f()
 }
 
 /// Gate off any clock that is enabled in hardware but holds no consumer
