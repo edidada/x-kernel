@@ -45,11 +45,11 @@ mod reg;
 #[cfg(unittest)]
 mod tests;
 
-pub use core::{ClkBuilder, ClkCore};
+pub use core::{ClkBuilder, ClkCore, clk_disable_unused};
 
 pub use basic::{Composite, Divider, DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux};
 pub use error::{ClkError, ClkResult};
-pub use event::{ClkEvent, ClkNotifier, NotifierResult};
+pub use event::{ClkEvent, ClkNotifier, ClkNotifierId, NotifierResult};
 pub use flags::ClkFlags;
 pub use handle::ClkHandle;
 pub use lookup::ClkTable;
@@ -60,7 +60,7 @@ pub use provider::{
     ClkLookup, ProviderId, clk_get_by_index, clk_get_by_name, provider_installed,
     register_provider, unregister_provider,
 };
-pub use rate::{Rate, RoundResult};
+pub use rate::{ClkRateRequest, Rate, RoundResult};
 pub use reg::{ClkRegAccess, MmioClkReg};
 
 /// Index into a provider's clock table.

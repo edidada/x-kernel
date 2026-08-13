@@ -6,7 +6,7 @@
 
 use alloc::sync::Arc;
 
-use crate::{ClkError, ClkHwOps, ClkRegAccess, ClkResult, Rate, RoundResult};
+use crate::{ClkError, ClkHwOps, ClkRateRequest, ClkRegAccess, ClkResult, Rate, RoundResult};
 
 /// A clock that picks one of `N` parents using a bit field in a register.
 ///
@@ -116,4 +116,28 @@ impl ClkHwOps for Mux {
             parent_target: Some(rate),
         })
     }
+
+    fn determine_rate(&self, req: &mut ClkRateRequest, parents: &[(u8, Rate)]) -> ClkResult<()> {
+        let requested = req.rate;
+        let Some(&best) = parents
+            .iter()
+            .min_by_key(|(_, prate)| diff(requested, *prate))
+        else {
+            return Ok(());
+        };
+        req.best_parent_index = Some(best.0);
+        req.best_parent_rate = best.1;
+        req.rate = best.1; // transparent: achievable rate is the parent's rate
+        // A single-parent mux cannot switch sources; to satisfy the request the
+        // framework must change that parent's rate (upward propagation). With
+        // multiple parents, switching to the closest source already satisfies
+        // the request, so no parent rate change is requested.
+        req.parent_target = (parents.len() == 1).then_some(requested);
+        Ok(())
+    }
+}
+
+/// Absolute difference between two rates.
+fn diff(a: Rate, b: Rate) -> Rate {
+    a.saturating_sub(b).max(b.saturating_sub(a))
 }

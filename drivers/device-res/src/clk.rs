@@ -130,6 +130,18 @@ pub trait ClkConsumer: Send + Sync {
     /// Cached rate, in Hz.
     fn get_rate(&self) -> u64;
 
+    /// Prepare the slow path, propagating to the parent first.
+    fn prepare(&self) -> ResResult<()>;
+
+    /// Release one prepare reference, then propagate to the parent.
+    fn unprepare(&self);
+
+    /// Enable the atomic fast path, propagating to the parent first.
+    fn enable(&self) -> ResResult<()>;
+
+    /// Release one enable reference, then propagate to the parent.
+    fn disable(&self);
+
     /// Prepare then enable, in that order.
     fn prepare_enable(&self) -> ResResult<()>;
 
@@ -139,18 +151,34 @@ pub trait ClkConsumer: Send + Sync {
     /// Whether the hardware reports the clock as enabled.
     fn is_enabled(&self) -> ResResult<bool>;
 
+    /// Whether the hardware reports the clock as prepared.
+    fn is_prepared(&self) -> ResResult<bool>;
+
+    /// The currently selected parent clock, if any.
+    fn get_parent(&self) -> Option<Arc<dyn ClkConsumer>>;
+
     /// Closest achievable rate for `rate` without changing state.
     fn round_rate(&self, rate: u64) -> ResResult<u64>;
 
     /// Program a new rate; returns the rate now in effect.
     fn set_rate(&self, rate: u64) -> ResResult<u64>;
 
+    /// Constrain this clock's rate to `[min, max]` for later `set_rate`/
+    /// `round_rate` calls.
+    fn set_rate_range(&self, min: u64, max: u64) -> ResResult<()>;
+
+    /// The current `(min, max)` rate range.
+    fn get_rate_range(&self) -> (u64, u64);
+
     /// Select parent `index` and refresh the cached rate.
     fn set_parent(&self, index: u8) -> ResResult<()>;
 
-    /// Register a subscriber invoked around rate changes. The callback is
-    /// owned by the provider and lives for the clock's lifetime.
-    fn register_notifier(&self, cb: ClkNotifier) -> ResResult<()>;
+    /// Register a subscriber invoked around rate changes; returns an opaque
+    /// token for [`unregister_notifier`](Self::unregister_notifier).
+    fn register_notifier(&self, cb: ClkNotifier) -> ResResult<u64>;
+
+    /// Remove a subscriber registered via [`register_notifier`](Self::register_notifier).
+    fn unregister_notifier(&self, id: u64) -> ResResult<()>;
 }
 
 /// Clock capability: resolve a [`ClkSpec`] into a consumer handle.
@@ -202,6 +230,26 @@ impl Clk {
         self.consumer.get_rate()
     }
 
+    /// Prepare the slow path, propagating to the parent first.
+    pub fn prepare(&self) -> ResResult<()> {
+        self.consumer.prepare()
+    }
+
+    /// Release one prepare reference, then propagate to the parent.
+    pub fn unprepare(&self) {
+        self.consumer.unprepare()
+    }
+
+    /// Enable the atomic fast path, propagating to the parent first.
+    pub fn enable(&self) -> ResResult<()> {
+        self.consumer.enable()
+    }
+
+    /// Release one enable reference, then propagate to the parent.
+    pub fn disable(&self) {
+        self.consumer.disable()
+    }
+
     /// Prepare then enable the clock.
     pub fn prepare_enable(&self) -> ResResult<()> {
         self.consumer.prepare_enable()
@@ -217,6 +265,16 @@ impl Clk {
         self.consumer.is_enabled()
     }
 
+    /// Whether the hardware reports the clock as prepared.
+    pub fn is_prepared(&self) -> ResResult<bool> {
+        self.consumer.is_prepared()
+    }
+
+    /// The currently selected parent clock, if any.
+    pub fn get_parent(&self) -> Option<Clk> {
+        self.consumer.get_parent().map(|consumer| Clk { consumer })
+    }
+
     /// Closest achievable rate for `rate` without changing state.
     pub fn round_rate(&self, rate: u64) -> ResResult<u64> {
         self.consumer.round_rate(rate)
@@ -227,13 +285,30 @@ impl Clk {
         self.consumer.set_rate(rate)
     }
 
+    /// Constrain this clock's rate to `[min, max]` for later `set_rate`/
+    /// `round_rate` calls.
+    pub fn set_rate_range(&self, min: u64, max: u64) -> ResResult<()> {
+        self.consumer.set_rate_range(min, max)
+    }
+
+    /// The current `(min, max)` rate range.
+    pub fn get_rate_range(&self) -> (u64, u64) {
+        self.consumer.get_rate_range()
+    }
+
     /// Select parent `index` and refresh the cached rate.
     pub fn set_parent(&self, index: u8) -> ResResult<()> {
         self.consumer.set_parent(index)
     }
 
-    /// Register a subscriber invoked around rate changes.
-    pub fn register_notifier(&self, cb: ClkNotifier) -> ResResult<()> {
+    /// Register a subscriber invoked around rate changes; returns an opaque
+    /// token for [`unregister_notifier`](Self::unregister_notifier).
+    pub fn register_notifier(&self, cb: ClkNotifier) -> ResResult<u64> {
         self.consumer.register_notifier(cb)
+    }
+
+    /// Remove a subscriber registered via [`register_notifier`](Self::register_notifier).
+    pub fn unregister_notifier(&self, id: u64) -> ResResult<()> {
+        self.consumer.unregister_notifier(id)
     }
 }

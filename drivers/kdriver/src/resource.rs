@@ -304,6 +304,22 @@ impl ClkConsumer for KclkConsumer {
         self.0.get_rate()
     }
 
+    fn prepare(&self) -> ResResult<()> {
+        self.0.prepare().map_err(map_clk_err)
+    }
+
+    fn unprepare(&self) {
+        self.0.unprepare()
+    }
+
+    fn enable(&self) -> ResResult<()> {
+        self.0.enable().map_err(map_clk_err)
+    }
+
+    fn disable(&self) {
+        self.0.disable()
+    }
+
     fn prepare_enable(&self) -> ResResult<()> {
         self.0.prepare_enable().map_err(map_clk_err)
     }
@@ -316,6 +332,16 @@ impl ClkConsumer for KclkConsumer {
         self.0.is_enabled().map_err(map_clk_err)
     }
 
+    fn is_prepared(&self) -> ResResult<bool> {
+        self.0.is_prepared().map_err(map_clk_err)
+    }
+
+    fn get_parent(&self) -> Option<Arc<dyn ClkConsumer>> {
+        self.0
+            .get_parent()
+            .map(|p| Arc::new(KclkConsumer(p)) as Arc<dyn ClkConsumer>)
+    }
+
     fn round_rate(&self, rate: u64) -> ResResult<u64> {
         self.0.round_rate(rate).map_err(map_clk_err)
     }
@@ -324,11 +350,19 @@ impl ClkConsumer for KclkConsumer {
         self.0.set_rate(rate).map_err(map_clk_err)
     }
 
+    fn set_rate_range(&self, min: u64, max: u64) -> ResResult<()> {
+        self.0.set_rate_range(min, max).map_err(map_clk_err)
+    }
+
+    fn get_rate_range(&self) -> (u64, u64) {
+        self.0.get_rate_range()
+    }
+
     fn set_parent(&self, index: u8) -> ResResult<()> {
         self.0.set_parent(index).map_err(map_clk_err)
     }
 
-    fn register_notifier(&self, cb: device_res::ClkNotifier) -> ResResult<()> {
+    fn register_notifier(&self, cb: device_res::ClkNotifier) -> ResResult<u64> {
         // Bridge the framework-agnostic callback to kclk's notifier, translating
         // the event types both ways.
         let kclk_cb: kclk::ClkNotifier = Arc::new(move |event| {
@@ -348,7 +382,11 @@ impl ClkConsumer for KclkConsumer {
                 device_res::NotifierVote::Stop => kclk::NotifierResult::Stop,
             }
         });
-        self.0.register_notifier(kclk_cb);
+        Ok(self.0.register_notifier(kclk_cb))
+    }
+
+    fn unregister_notifier(&self, id: u64) -> ResResult<()> {
+        self.0.unregister_notifier(id);
         Ok(())
     }
 }

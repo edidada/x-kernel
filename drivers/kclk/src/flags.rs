@@ -4,11 +4,8 @@
 
 //! Clock policy and topology flags.
 //!
-//! Several of these mirror the Linux `CLK_*` flags but are not yet honored by
-//! the framework core (see each variant). They are kept in the type so a driver
-//! can express its intent today and benefit once the core grows the matching
-//! behavior; setting an unimplemented flag is a documented no-op, never a
-//! silent functional guarantee.
+//! These mirror the Linux `CLK_*` flags. Each variant documents whether it is
+//! honored by the framework core.
 
 use bitflags::bitflags;
 
@@ -28,22 +25,18 @@ bitflags! {
         const SET_RATE_GATE = 1 << 1;
         /// Never gate this clock, even when it appears unused.
         ///
-        /// *Reserved — not yet honored.* Reserved for a future unused-clock
-        /// gate-down pass; today the framework never auto-disables a clock, so
-        /// the flag is a no-op. Do not rely on it for correctness.
+        /// **Implemented:** honored by [`crate::clk_disable_unused`], which
+        /// skips clocks carrying this flag.
         const IGNORE_UNUSED = 1 << 2;
         /// The clock is critical and must stay enabled at all times.
         ///
-        /// *Reserved — not yet honored.* Intended for a future runtime PM /
-        /// `clk_disable_unused` pass. Today the framework only disables a clock
-        /// when its `enable_count` reaches zero, so setting this is a no-op; do
-        /// not rely on it.
+        /// **Implemented:** honored by [`crate::clk_disable_unused`], which
+        /// skips clocks carrying this flag.
         const IS_CRITICAL = 1 << 3;
         /// Re-read the hardware rate on every query instead of trusting the cache.
         ///
-        /// *Reserved — not yet honored.* `get_rate` always reads the cached
-        /// value. Intended for clocks whose rate can change behind the
-        /// framework's back; do not rely on it yet.
+        /// **Implemented:** `get_rate` re-reads the hardware rate (and refreshes
+        /// the cache) instead of returning the cached value.
         const GET_RATE_NOCACHE = 1 << 6;
     }
 }

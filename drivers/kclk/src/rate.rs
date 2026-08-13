@@ -36,3 +36,33 @@ impl RoundResult {
         }
     }
 }
+
+/// A rate-determination request passed to
+/// [`ClkHwOps::determine_rate`](crate::ClkHwOps::determine_rate).
+///
+/// Mirrors Linux's `struct clk_rate_request`: the provider fills in the closest
+/// achievable `rate`, the parent it would select for that rate
+/// (`best_parent_index` / `best_parent_rate`), and — when it is
+/// rate-transparent — the rate the parent must output (`parent_target`) so the
+/// framework can propagate the change upward.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClkRateRequest {
+    /// Requested rate, already clamped by the core into
+    /// [`min_rate`](Self::min_rate)..=[`max_rate`](Self::max_rate).
+    pub rate: Rate,
+    /// Lower bound on the achievable rate.
+    pub min_rate: Rate,
+    /// Upper bound on the achievable rate.
+    pub max_rate: Rate,
+    /// The parent the provider selected for this request. The core seeds this
+    /// with the currently selected parent; a provider may override it to switch
+    /// parents (a mux picking the closest source).
+    pub best_parent_index: Option<u8>,
+    /// The rate of [`best_parent_index`](Self::best_parent_index).
+    pub best_parent_rate: Rate,
+    /// The rate the selected parent should be changed to so this node can
+    /// reach `rate`, or `None` when this node satisfies the request on its own
+    /// (or by switching parents). Honored only when the node carries
+    /// [`ClkFlags::SET_RATE_PARENT`](crate::ClkFlags::SET_RATE_PARENT).
+    pub parent_target: Option<Rate>,
+}

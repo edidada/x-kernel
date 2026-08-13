@@ -61,3 +61,6 @@ pub enum NotifierResult {
 /// Implemented as a trait object so subscribers can carry arbitrary captured
 /// state, stored behind an [`Arc`] so the registration can be shared.
 pub type ClkNotifier = Arc<dyn Fn(&ClkEvent) -> NotifierResult + Send + Sync>;
+
+/// Opaque token returned by notifier registration, used to unregister later.
+pub type ClkNotifierId = u64;

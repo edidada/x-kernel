@@ -44,13 +44,23 @@
 //!
 //! Touching the node's own registers is the expected work.
 
-use crate::{ClkError, ClkResult, Rate, RoundResult};
+use crate::{ClkError, ClkRateRequest, ClkResult, Rate, RoundResult};
 
 /// Provider-side hardware operations for one clock node.
 ///
 /// Every method receives only what the hardware needs; framework state such as
 /// reference counts and rate caches is owned by [`crate::ClkCore`].
 pub trait ClkHwOps: Send + Sync {
+    // ---- lifecycle ----
+
+    /// One-time post-registration hook (Linux `clk_ops.init`).
+    ///
+    /// Runs after the initial rate/accuracy have been cached but before the
+    /// clock is published; returning `Err` aborts registration. Default: no-op.
+    fn init(&self) -> ClkResult {
+        Ok(())
+    }
+
     // ---- gating: two-phase (prepare may sleep, enable is atomic) ----
 
     /// Slow, sleepable preparation step. Default: no-op.
@@ -113,6 +123,28 @@ pub trait ClkHwOps: Send + Sync {
     /// request a parent change.
     fn round_rate(&self, _rate: Rate, parent_rate: Rate) -> ClkResult<RoundResult> {
         Ok(RoundResult::passthrough(parent_rate))
+    }
+
+    /// Determine the closest achievable rate for a request, optionally
+    /// selecting a best parent.
+    ///
+    /// This is the multi-parent-capable analogue of [`round_rate`](Self::round_rate),
+    /// mirroring Linux's `clk_ops.determine_rate`. The core seeds `req` with the
+    /// clamped request rate and the currently selected parent, then calls this
+    /// once with the full candidate parent list (`(parent_index, parent_rate)`
+    /// for every registered, non-orphan parent). The provider fills in
+    /// `req.rate`, and may set `req.best_parent_index`/`req.best_parent_rate`
+    /// to switch parents and/or `req.parent_target` to ask the framework to
+    /// change the selected parent's rate.
+    ///
+    /// Default: delegates to [`round_rate`](Self::round_rate) against the
+    /// currently selected parent's rate, preserving the legacy
+    /// `parent_target` contract.
+    fn determine_rate(&self, req: &mut ClkRateRequest, _parents: &[(u8, Rate)]) -> ClkResult<()> {
+        let rounded = self.round_rate(req.rate, req.best_parent_rate)?;
+        req.rate = rounded.rate;
+        req.parent_target = rounded.parent_target;
+        Ok(())
     }
 
     /// Program a new rate and return the rate now in effect.
