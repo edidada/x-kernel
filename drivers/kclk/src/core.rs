@@ -241,17 +241,19 @@ impl ClkCore {
             None => false,
         };
 
-        let mut st = self.state.lock();
-        if st.prepare_count == 0
-            && let Err(err) = self.ops.prepare()
-        {
-            drop(st);
+        // Read the count under the lock, then drop it: the `prepare` callback
+        // is sleepable (it runs under `CLK_LOCK`), so it must not run with the
+        // per-node `SpinNoIrq` held — that would block with IRQs disabled.
+        // `CLK_LOCK` serializes this whole path, so no other task can touch
+        // `prepare_count` between the read and the increment.
+        let need_prepare = self.state.lock().prepare_count == 0;
+        if need_prepare && let Err(err) = self.ops.prepare() {
             if parent_done && let Some(parent) = self.parent_node() {
                 parent.unprepare_locked();
             }
             return Err(err);
         }
-        st.prepare_count += 1;
+        self.state.lock().prepare_count += 1;
         Ok(())
     }
 
@@ -262,18 +264,20 @@ impl ClkCore {
     }
 
     fn unprepare_locked(&self) {
-        let mut st = self.state.lock();
-        if st.prepare_count == 0 {
-            return;
-        }
-        st.prepare_count -= 1;
-        if st.prepare_count == 0 {
-            // The hardware op runs with the lock held, matching Linux: providers
-            // are expected to touch only their own registers and not re-enter
-            // the framework while unpreparing.
+        // Decrement under the lock, then drop it before the sleepable op —
+        // same rationale as `prepare_locked`: `unprepare` may sleep and must
+        // not run with `SpinNoIrq` held.
+        let need_unprepare = {
+            let mut st = self.state.lock();
+            if st.prepare_count == 0 {
+                return;
+            }
+            st.prepare_count -= 1;
+            st.prepare_count == 0
+        };
+        if need_unprepare {
             let _ = self.ops.unprepare();
         }
-        drop(st);
         if let Some(parent) = self.parent_node() {
             parent.unprepare_locked();
         }
@@ -688,7 +692,12 @@ impl ClkBuilder {
 /// clocks built against a stale (zero) orphan rate are *not* recursively
 /// refreshed; register children after their parents, or re-run `recalc` on the
 /// affected subtree, matching Linux's per-node orphan adoption.
+///
+/// Holds `CLK_LOCK` so the orphan's reparenting and cached-rate refresh are
+/// atomic with respect to concurrent `set_rate`/`set_parent`/`prepare`, which
+/// also mutate rate state under `CLK_LOCK`.
 fn adopt_orphans(name: &'static str, parent: Arc<ClkCore>) {
+    let _guard = CLK_LOCK.lock();
     let matched: Vec<OrphanEntry> = {
         let mut orphans = ORPHANS.lock();
         let mut matched = Vec::new();
