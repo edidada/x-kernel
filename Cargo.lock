@@ -2124,6 +2124,7 @@ version = "0.2.0-dev"
 dependencies = [
  "bitflags 2.13.1",
  "kspin 0.2.0-dev",
+ "ksync",
  "unittest",
 ]
 

@@ -58,6 +58,17 @@ impl ClkTable {
         self.by_name.lock().insert(name, clk);
     }
 
+    /// Remove a previously registered clock from both views.
+    ///
+    /// Removing a clock only drops the table's reference; a consumer still
+    /// holding its handle keeps the underlying node alive (reference counting).
+    pub fn unregister(&self, index: ClkIndex, name: &'static str) {
+        if let Some(slot) = self.by_index.lock().get_mut(index as usize) {
+            *slot = None;
+        }
+        self.by_name.lock().remove(name);
+    }
+
     /// Remove all entries. Only available under `--cfg unittest` so each test
     /// starts from a known-empty registry.
     #[cfg(unittest)]

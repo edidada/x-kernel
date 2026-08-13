@@ -17,7 +17,8 @@ use unittest::{assert_eq, def_test};
 use crate::{
     ClkBuilder, ClkError, ClkEvent, ClkFlags, ClkHandle, ClkHwOps, ClkRegAccess, ClkTable, Divider,
     DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux, NotifierResult, basic::Composite,
-    clk_get_by_index, clk_get_by_name, register_provider, reset_providers, unregister_provider,
+    clk_disable_unused, clk_get_by_index, clk_get_by_name, register_provider, reset_providers,
+    unregister_provider,
 };
 
 /// Array-backed register accessor for testing field math.
@@ -629,4 +630,188 @@ fn two_providers_index_zero_do_not_collide() {
     assert!(clk_get_by_index(0x11, 0).is_some());
 
     reset_providers();
+}
+
+// ---------------------------------------------------------------------------
+// Additive API surface: split two-phase, get_parent, rate range, notifier
+// unregister, init hook, and clk_disable_unused.
+// ---------------------------------------------------------------------------
+
+#[def_test]
+fn separate_prepare_enable_apis_work() {
+    let ops = Arc::new(CountingOps::new());
+    let clk = ClkHandle::new(ClkBuilder::new("c", ops.clone()).build().unwrap());
+
+    clk.prepare().unwrap();
+    clk.enable().unwrap();
+    let (prep, _, en, _) = ops.snapshot();
+    assert_eq!((prep, en), (1, 1));
+
+    // Unbalanced fast-path only: disable/enable without touching prepare.
+    clk.disable();
+    clk.enable().unwrap();
+    let (_, _, en, dis) = ops.snapshot();
+    assert_eq!((en, dis), (2, 1));
+
+    clk.disable();
+    clk.unprepare();
+    let (_, unprep, _, dis) = ops.snapshot();
+    assert_eq!((unprep, dis), (1, 2));
+}
+
+#[def_test]
+fn get_parent_returns_parent_node() {
+    let osc = ClkBuilder::new("osc", FixedRate::new(24_000_000).into_ops())
+        .build()
+        .unwrap();
+    let child = ClkBuilder::new("child", FixedFactor::new(2, 1).unwrap().into_ops())
+        .parent(osc.clone())
+        .build()
+        .unwrap();
+    let parent = child.get_parent().expect("child has a parent");
+    assert_eq!(parent.get_rate(), 24_000_000);
+    // A root has no parent.
+    assert!(osc.get_parent().is_none());
+}
+
+#[def_test]
+fn rate_range_clamps_set_and_round() {
+    let reg = Arc::new(MockReg::new());
+    let root = ClkBuilder::new("root", FixedRate::new(1_000_000_000).into_ops())
+        .build()
+        .unwrap();
+    let div = ClkBuilder::new(
+        "div",
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::ONE_BASED),
+    )
+    .parent(root)
+    .build()
+    .unwrap();
+
+    div.set_rate_range(200_000_000, 400_000_000).unwrap();
+    assert_eq!(div.get_rate_range(), (200_000_000, 400_000_000));
+
+    let actual = div.set_rate(100_000_000).unwrap();
+    assert!((200_000_000..=400_000_000).contains(&actual));
+    let rounded = div.round_rate(50_000_000).unwrap();
+    assert!((200_000_000..=400_000_000).contains(&rounded));
+
+    // An inverted range is rejected.
+    assert_eq!(
+        div.set_rate_range(400_000_000, 200_000_000),
+        Err(ClkError::InvalidRate)
+    );
+}
+
+#[def_test]
+fn notifier_unregister_stops_delivery() {
+    let reg = Arc::new(MockReg::new());
+    let root = ClkBuilder::new("root", FixedRate::new(1_000_000_000).into_ops())
+        .build()
+        .unwrap();
+    let div = ClkBuilder::new(
+        "div",
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::ONE_BASED),
+    )
+    .parent(root)
+    .build()
+    .unwrap();
+    let clk = ClkHandle::new(div);
+
+    let log: Arc<SpinNoIrq<Vec<ClkEvent>>> = Arc::new(SpinNoIrq::new(Vec::new()));
+    let log_cb = log.clone();
+    let id = clk.register_notifier(Arc::new(move |event| {
+        log_cb.lock().push(*event);
+        NotifierResult::Proceed
+    }));
+
+    clk.set_rate(500_000_000).unwrap();
+    assert_eq!(log.lock().len(), 2); // Pre + Post
+
+    clk.unregister_notifier(id);
+    clk.set_rate(400_000_000).unwrap();
+    assert_eq!(log.lock().len(), 2); // no further events
+}
+
+#[def_test]
+fn init_hook_runs_at_build() {
+    let flag: Arc<SpinNoIrq<bool>> = Arc::new(SpinNoIrq::new(false));
+
+    struct InitOps(Arc<SpinNoIrq<bool>>);
+    impl ClkHwOps for InitOps {
+        fn init(&self) -> crate::ClkResult<()> {
+            *self.0.lock() = true;
+            Ok(())
+        }
+    }
+
+    let _ = ClkBuilder::new("c", Arc::new(InitOps(flag.clone())) as Arc<dyn ClkHwOps>)
+        .build()
+        .unwrap();
+    assert!(*flag.lock());
+}
+
+#[def_test]
+fn clk_disable_unused_gates_idle_and_skips_critical() {
+    let reg = Arc::new(MockReg::new());
+    reg.mem.lock()[0] = 1; // bootloader left the gate on
+    let idle = ClkBuilder::new(
+        "idle",
+        Gate::into_ops(reg.clone(), 0, 0, GateFlags::SET_TO_ENABLE),
+    )
+    .build()
+    .unwrap();
+    assert!(idle.is_enabled().unwrap());
+
+    let reg2 = Arc::new(MockReg::new());
+    reg2.mem.lock()[0] = 1;
+    let _critical = ClkBuilder::new(
+        "crit",
+        Gate::into_ops(reg2.clone(), 0, 0, GateFlags::SET_TO_ENABLE),
+    )
+    .flags(ClkFlags::IS_CRITICAL)
+    .build()
+    .unwrap();
+
+    clk_disable_unused();
+    assert_eq!(reg.mem.lock()[0], 0);
+    assert_eq!(reg2.mem.lock()[0], 1);
+}
+
+#[def_test]
+fn mux_determine_rate_selects_closest_parent() {
+    let osc24 = ClkBuilder::new("osc24", FixedRate::new(24_000_000).into_ops())
+        .build()
+        .unwrap();
+    let osc32 = ClkBuilder::new("osc32", FixedRate::new(32_000_000).into_ops())
+        .build()
+        .unwrap();
+    let mux = Mux::into_ops(Arc::new(MockReg::new()), 0, 0, 0x1, None);
+    let clk = ClkBuilder::new("mux", mux)
+        .parent(osc24)
+        .parent(osc32)
+        .build()
+        .unwrap();
+
+    assert_eq!(clk.get_rate(), 24_000_000);
+    // 30 MHz is closer to the 32 MHz parent: the mux switches sources.
+    let actual = clk.set_rate(30_000_000).unwrap();
+    assert_eq!(actual, 32_000_000);
+    assert_eq!(clk.get_parent().unwrap().get_rate(), 32_000_000);
+}
+
+#[def_test]
+fn orphan_is_adopted_when_parent_registers() {
+    let child = ClkBuilder::new("child", FixedFactor::new(2, 1).unwrap().into_ops())
+        .parent_name("pll")
+        .build()
+        .unwrap();
+    assert_eq!(child.get_rate(), 0);
+
+    let _pll = ClkBuilder::new("pll", FixedRate::new(24_000_000).into_ops())
+        .build()
+        .unwrap();
+
+    assert_eq!(child.get_parent().unwrap().get_rate(), 24_000_000);
+    assert_eq!(child.get_rate(), 48_000_000);
 }

@@ -111,9 +111,15 @@ mod tests {
 
     use crate::{
         DeviceResource, DmaAllocation, DmaOp, DmaSpec, IrqEvent, IrqHandler, IrqHandlerToken,
+<<<<<<< HEAD:drivers/contracts/device-res/src/lib.rs
         IrqOp, IrqResource, IrqThreadHandler, IrqTrigger, MmioMapping, MmioOp, MmioRegion,
         ResError, ResResult, ResourceDesc, devm_alloc_coherent_with_provider,
         devm_iomap_with_provider, devm_request_irq_with_provider,
+=======
+        IrqOp, IrqResource, IrqTrigger, MmioMapping, MmioOp, MmioRegion, ResError, ResResult,
+        ResourceDesc,
+        clk::{ClkConsumer, ClkRateEvent, NotifierVote},
+>>>>>>> 347198fd (device-res: give ClkConsumer default implementations):drivers/device-res/src/lib.rs
     };
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -445,6 +451,44 @@ mod tests {
         device.run_cleanups();
 
         assert_eq!(&*ORDER.lock(), &[2, 0x101, 0x200]);
+
+        // A ClkConsumer mock that implements only the two required methods,
+    // exercising that the trait's default implementations give a fixed,
+    // ungated, rate-transparent clock sensible runtime behavior.
+    #[def_test]
+    fn clk_consumer_defaults_model_a_fixed_clock() {
+        struct FixedClk {
+            rate: u64,
+        }
+        impl ClkConsumer for FixedClk {
+            fn name(&self) -> &str {
+                "fixed"
+            }
+
+            fn get_rate(&self) -> u64 {
+                self.rate
+            }
+        }
+
+        let clk = FixedClk { rate: 24_000_000 };
+        assert_eq!(clk.name(), "fixed");
+        assert_eq!(clk.get_rate(), 24_000_000);
+        // Gating defaults to no-op success.
+        clk.prepare_enable().unwrap();
+        clk.disable_unprepare();
+        assert!(!clk.is_enabled().unwrap());
+        assert!(!clk.is_prepared().unwrap());
+        // Rate/parent/notification defaults: unsupported or transparent.
+        assert_eq!(clk.round_rate(99).unwrap(), 24_000_000);
+        assert_eq!(clk.set_rate(99).unwrap_err(), ResError::Unsupported);
+        assert_eq!(clk.set_rate_range(0, 0).unwrap_err(), ResError::Unsupported);
+        assert_eq!(clk.get_rate_range(), (0, u64::MAX));
+        assert!(clk.get_parent().is_none());
+        assert_eq!(clk.set_parent(0).unwrap_err(), ResError::Unsupported);
+        let id = clk.register_notifier(Arc::new(|_: &ClkRateEvent| NotifierVote::Proceed) as _);
+        assert_eq!(id.unwrap_err(), ResError::Unsupported);
+        // Unregistering an unknown id is a no-op success.
+        clk.unregister_notifier(0).unwrap();
     }
 
     #[def_test]

@@ -7,26 +7,50 @@
 
 use alloc::{sync::Arc, vec::Vec};
 
-use kspin::{SpinNoIrq, SpinRaw};
+use kspin::SpinNoIrq;
+use ksync::{Mutex, static_lock};
 
-use crate::{ClkError, ClkEvent, ClkFlags, ClkHwOps, ClkNotifier, ClkResult, NotifierResult, Rate};
+use crate::{
+    ClkError, ClkEvent, ClkFlags, ClkHwOps, ClkNotifier, ClkNotifierId, ClkRateRequest, ClkResult,
+    NotifierResult, Rate,
+};
 
-/// Global serialization lock for sleepable clock mutations.
-///
-/// All `prepare`/`unprepare`/`set_rate`/`set_parent`/`round_rate` operations
-/// take this lock, so a rate change (which may recurse up the parent tree and
-/// reprogram a PLL) is atomic with respect to other changes. The atomic gate
-/// (`enable`/`disable`) does *not* take this lock — it stays on the per-node
-/// spinlock so it remains usable from contexts that cannot block.
-///
-/// This mirrors Linux's single `clk_prepare_lock`. Clock operations are not a
-/// hot path (boot/probe/DVFS), so a single global lock is acceptable; the
-/// per-node spinlock still keeps `get_rate` reads lock-free w.r.t. this lock.
-///
-/// The lock is a plain spinlock, not a sleepable mutex: callbacks must not
-/// sleep while held. Current register-backed ops are non-sleeping; a future
-/// PLL whose `prepare` truly needs to sleep will require a sleepable mutex.
-static CLK_LOCK: SpinRaw<()> = SpinRaw::new(());
+// Global serialization lock for sleepable clock mutations.
+//
+// All `prepare`/`unprepare`/`set_rate`/`set_parent`/`round_rate` operations
+// take this lock, so a rate change (which may recurse up the parent tree and
+// reprogram a PLL) is atomic with respect to other changes. The atomic gate
+// (`enable`/`disable`) does *not* take this lock — it stays on the per-node
+// spinlock so it remains usable from contexts that cannot block.
+//
+// This mirrors Linux's single `clk_prepare_lock`. Clock operations are not a
+// hot path (boot/probe/DVFS), so one global lock is acceptable; the per-node
+// spinlock still keeps `get_rate` reads lock-free w.r.t. this lock.
+//
+// The lock is a sleepable mutex (`ksync::Mutex`), matching Linux's
+// `clk_prepare_lock`: providers may sleep in the `prepare`/`set_rate`/
+// `set_parent`/`round_rate` callbacks that run under it. It must therefore
+// never be taken from atomic or interrupt context, and it is not re-entrant —
+// re-entering the framework while holding it panics instead of deadlocking.
+static_lock! {
+    static CLK_LOCK: Mutex<()> = Mutex::new(());
+}
+
+/// Global list of every registered clock, used by the unused-clock gate-down
+/// pass and future PM walks. Strong references mirror Linux, which never frees
+/// a `clk_core` during normal operation.
+static CLOCKS: SpinNoIrq<Vec<Arc<ClkCore>>> = SpinNoIrq::new(Vec::new());
+
+/// A clock slot waiting for a parent (by name) that has not been registered
+/// yet. When a clock with `parent_name` is built, the framework adopts it.
+struct OrphanEntry {
+    child: Arc<ClkCore>,
+    parent_index: u8,
+    parent_name: &'static str,
+}
+
+/// Clocks waiting for a not-yet-registered parent.
+static ORPHANS: SpinNoIrq<Vec<OrphanEntry>> = SpinNoIrq::new(Vec::new());
 
 /// Mutable per-node state, guarded by a spin lock.
 struct ClkState {
@@ -35,6 +59,14 @@ struct ClkState {
     parent_index: u8,
     rate: Rate,
     accuracy: u32,
+    min_rate: Rate,
+    max_rate: Rate,
+}
+
+/// Registered rate-change subscribers, tagged with an id for unregistration.
+struct NotifierState {
+    next_id: ClkNotifierId,
+    entries: Vec<(ClkNotifierId, ClkNotifier)>,
 }
 
 /// A node in the clock tree.
@@ -50,9 +82,11 @@ pub struct ClkCore {
     name: &'static str,
     flags: ClkFlags,
     ops: Arc<dyn ClkHwOps>,
-    parents: Vec<Option<Arc<ClkCore>>>,
+    /// Parent table. Interior-mutable so an orphan slot (`None`) can be filled
+    /// later when its named parent is registered.
+    parents: SpinNoIrq<Vec<Option<Arc<ClkCore>>>>,
     state: SpinNoIrq<ClkState>,
-    notifiers: SpinNoIrq<Vec<ClkNotifier>>,
+    notifiers: SpinNoIrq<NotifierState>,
 }
 
 impl ClkCore {
@@ -67,13 +101,52 @@ impl ClkCore {
     }
 
     /// Cached rate, in Hz.
+    ///
+    /// When [`ClkFlags::GET_RATE_NOCACHE`] is set, the hardware rate is
+    /// re-read (and the cache refreshed) instead of trusting the cached value.
     pub fn get_rate(&self) -> Rate {
+        if self.flags.contains(ClkFlags::GET_RATE_NOCACHE) {
+            let parent_rate = self.parent_rate();
+            if let Ok(rate) = self.ops.recalc_rate(parent_rate) {
+                self.state.lock().rate = rate;
+                return rate;
+            }
+        }
         self.state.lock().rate
     }
 
     /// Cached accuracy, in parts per billion.
     pub fn get_accuracy(&self) -> u32 {
         self.state.lock().accuracy
+    }
+
+    /// Clamp `rate` into this clock's configured `[min, max]` range.
+    fn clamp_rate(&self, rate: Rate) -> Rate {
+        let st = self.state.lock();
+        rate.clamp(st.min_rate, st.max_rate.max(st.min_rate))
+    }
+
+    /// Constrain this clock's rate to `[min, max]`.
+    ///
+    /// Subsequent [`set_rate`](Self::set_rate) / [`round_rate`](Self::round_rate)
+    /// requests are clamped into this range. The current rate is *not*
+    /// retroactively changed. `min == 0` means no lower bound; `max ==
+    /// u64::MAX` means no upper bound.
+    pub fn set_rate_range(&self, min: Rate, max: Rate) -> ClkResult {
+        if min > max {
+            return Err(ClkError::InvalidRate);
+        }
+        let _guard = CLK_LOCK.lock();
+        let mut st = self.state.lock();
+        st.min_rate = min;
+        st.max_rate = max;
+        Ok(())
+    }
+
+    /// The current `(min, max)` rate range.
+    pub fn get_rate_range(&self) -> (Rate, Rate) {
+        let st = self.state.lock();
+        (st.min_rate, st.max_rate)
     }
 
     /// The currently selected parent node, as a cloned [`Arc`].
@@ -83,7 +156,7 @@ impl ClkCore {
     /// risk a lock-ordering deadlock during rate propagation.
     fn parent_node(&self) -> Option<Arc<ClkCore>> {
         let idx = self.state.lock().parent_index as usize;
-        self.parents.get(idx).and_then(Option::clone)
+        self.parents.lock().get(idx).and_then(Option::clone)
     }
 
     /// Rate of the selected parent, or `0` for a root.
@@ -91,19 +164,39 @@ impl ClkCore {
         self.parent_node().map(|p| p.get_rate()).unwrap_or(0)
     }
 
+    /// The currently selected parent node, as a cloned [`Arc`], or `None` for
+    /// a root (or an orphan slot with no registered parent).
+    pub fn get_parent(&self) -> Option<Arc<ClkCore>> {
+        self.parent_node()
+    }
+
     /// Register a rate-change subscriber on this clock.
     ///
-    /// Subscribers live for the lifetime of the node; there is no explicit
-    /// unregister. This matches the boot/probe-time configuration use case.
-    pub fn add_notifier(&self, cb: ClkNotifier) {
-        self.notifiers.lock().push(cb);
+    /// Returns an id that can be passed to [`remove_notifier`](Self::remove_notifier)
+    /// to unregister the subscriber.
+    pub fn add_notifier(&self, cb: ClkNotifier) -> ClkNotifierId {
+        let mut st = self.notifiers.lock();
+        let id = st.next_id;
+        st.next_id += 1;
+        st.entries.push((id, cb));
+        id
+    }
+
+    /// Remove a previously registered subscriber by id.
+    pub fn remove_notifier(&self, id: ClkNotifierId) {
+        self.notifiers.lock().entries.retain(|(nid, _)| *nid != id);
     }
 
     /// Snapshot the notifier list so callbacks can be invoked without holding
     /// the notifier lock (a callback that, say, queries `get_rate` would
     /// otherwise self-deadlock).
     fn snapshot_notifiers(&self) -> Vec<ClkNotifier> {
-        self.notifiers.lock().clone()
+        self.notifiers
+            .lock()
+            .entries
+            .iter()
+            .map(|(_, cb)| cb.clone())
+            .collect()
     }
 
     /// Deliver `PreRateChange`; returns `false` if any subscriber vetoed.
@@ -148,17 +241,19 @@ impl ClkCore {
             None => false,
         };
 
-        let mut st = self.state.lock();
-        if st.prepare_count == 0
-            && let Err(err) = self.ops.prepare()
-        {
-            drop(st);
+        // Read the count under the lock, then drop it: the `prepare` callback
+        // is sleepable (it runs under `CLK_LOCK`), so it must not run with the
+        // per-node `SpinNoIrq` held — that would block with IRQs disabled.
+        // `CLK_LOCK` serializes this whole path, so no other task can touch
+        // `prepare_count` between the read and the increment.
+        let need_prepare = self.state.lock().prepare_count == 0;
+        if need_prepare && let Err(err) = self.ops.prepare() {
             if parent_done && let Some(parent) = self.parent_node() {
                 parent.unprepare_locked();
             }
             return Err(err);
         }
-        st.prepare_count += 1;
+        self.state.lock().prepare_count += 1;
         Ok(())
     }
 
@@ -169,18 +264,20 @@ impl ClkCore {
     }
 
     fn unprepare_locked(&self) {
-        let mut st = self.state.lock();
-        if st.prepare_count == 0 {
-            return;
-        }
-        st.prepare_count -= 1;
-        if st.prepare_count == 0 {
-            // The hardware op runs with the lock held, matching Linux: providers
-            // are expected to touch only their own registers and not re-enter
-            // the framework while unpreparing.
+        // Decrement under the lock, then drop it before the sleepable op —
+        // same rationale as `prepare_locked`: `unprepare` may sleep and must
+        // not run with `SpinNoIrq` held.
+        let need_unprepare = {
+            let mut st = self.state.lock();
+            if st.prepare_count == 0 {
+                return;
+            }
+            st.prepare_count -= 1;
+            st.prepare_count == 0
+        };
+        if need_unprepare {
             let _ = self.ops.unprepare();
         }
-        drop(st);
         if let Some(parent) = self.parent_node() {
             parent.unprepare_locked();
         }
@@ -254,18 +351,56 @@ impl ClkCore {
         self.round_rate_locked(rate)
     }
 
+    /// Run the provider's `determine_rate` to produce a rate decision for `rate`.
+    ///
+    /// Seeds the request with the clamped request rate and the currently
+    /// selected parent, then hands it (with the candidate parent list) to the
+    /// provider. Serialized by [`CLK_LOCK`] like every sleepable mutation.
+    fn determine_rate_locked(&self, rate: Rate) -> ClkResult<ClkRateRequest> {
+        let rate = self.clamp_rate(rate);
+        let (min, max, current) = {
+            let st = self.state.lock();
+            (st.min_rate, st.max_rate.max(st.min_rate), st.parent_index)
+        };
+        let current_rate = self.parent_rate();
+
+        let parents: Vec<(u8, Rate)> = {
+            let table = self.parents.lock();
+            let entries: Vec<(u8, Arc<ClkCore>)> = table
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| p.as_ref().map(|pc| (i as u8, pc.clone())))
+                .collect();
+            entries
+                .into_iter()
+                .map(|(i, pc)| (i, pc.get_rate()))
+                .collect()
+        };
+
+        let mut req = ClkRateRequest {
+            rate,
+            min_rate: min,
+            max_rate: max,
+            best_parent_index: Some(current),
+            best_parent_rate: current_rate,
+            parent_target: None,
+        };
+        self.ops.determine_rate(&mut req, &parents)?;
+        req.rate = req.rate.clamp(min, max);
+        Ok(req)
+    }
+
     fn round_rate_locked(&self, rate: Rate) -> ClkResult<Rate> {
-        let parent_rate = self.parent_rate();
-        let rounded = self.ops.round_rate(rate, parent_rate)?;
-        if let Some(target) = rounded
+        let req = self.determine_rate_locked(rate)?;
+        if let Some(target) = req
             .parent_target
             .filter(|_| self.flags.contains(ClkFlags::SET_RATE_PARENT))
             && let Some(parent) = self.parent_node()
         {
             let new_parent = parent.round_rate_locked(target)?;
-            return self.ops.round_rate(rate, new_parent).map(|r| r.rate);
+            return self.ops.round_rate(req.rate, new_parent).map(|r| r.rate);
         }
-        Ok(rounded.rate)
+        Ok(req.rate)
     }
 
     /// Program a new rate and return the rate now in effect.
@@ -281,6 +416,7 @@ impl ClkCore {
     /// receive separate notifications.
     pub fn set_rate(&self, rate: Rate) -> ClkResult<Rate> {
         let _guard = CLK_LOCK.lock();
+        let rate = self.clamp_rate(rate);
         let old = self.get_rate();
 
         if !self.notify_pre(old, rate) {
@@ -301,8 +437,7 @@ impl ClkCore {
     }
 
     fn set_rate_locked(&self, rate: Rate) -> ClkResult<Rate> {
-        let parent_rate = self.parent_rate();
-        let rounded = self.ops.round_rate(rate, parent_rate)?;
+        let req = self.determine_rate_locked(rate)?;
 
         // Glitch avoidance (SET_RATE_GATE): gate across the reprogram and
         // restore afterwards, matching Linux. The re-enable is *not* silent: if
@@ -319,7 +454,7 @@ impl ClkCore {
             self.ops.disable();
         }
 
-        let result = self.program_rate(&rounded, parent_rate);
+        let result = self.program_rate_locked(&req);
 
         if gate_around && was_enabled && self.ops.enable().is_err() {
             // Rate/parent may have changed but the clock could not be
@@ -343,16 +478,30 @@ impl ClkCore {
     /// Per the `round_rate` contract, a node that returns `parent_target`
     /// declares its rate is determined by the parent; the framework therefore
     /// reports it with `recalc_rate`, never `set_rate`, on this branch.
-    fn program_rate(&self, rounded: &crate::RoundResult, parent_rate: Rate) -> ClkResult<Rate> {
-        if let Some(target) = rounded
+    fn program_rate_locked(&self, req: &ClkRateRequest) -> ClkResult<Rate> {
+        // Lateral: switch to the parent `determine_rate` selected, if different.
+        let current = self.state.lock().parent_index;
+        if let Some(idx) = req.best_parent_index.filter(|&i| i != current) {
+            self.switch_parent_locked(idx)?;
+        }
+        let parent_rate = self.parent_rate();
+
+        // Upward: the node asks its selected parent to change rate.
+        if let Some(target) = req
             .parent_target
             .filter(|_| self.flags.contains(ClkFlags::SET_RATE_PARENT))
         {
             let parent = self.parent_node().ok_or(ClkError::NotSupported)?;
             let actual_parent = parent.set_rate_locked(target)?;
-            self.ops.recalc_rate(actual_parent)
-        } else {
-            self.ops.set_rate(rounded.rate, parent_rate)
+            return self.ops.recalc_rate(actual_parent);
+        }
+
+        // Own rate field; a transparent node (no `set_rate`) just reports its
+        // (possibly just-switched) parent rate.
+        match self.ops.set_rate(req.rate, parent_rate) {
+            Ok(actual) => Ok(actual),
+            Err(ClkError::NotSupported) => self.ops.recalc_rate(parent_rate),
+            Err(err) => Err(err),
         }
     }
 
@@ -366,15 +515,6 @@ impl ClkCore {
     /// running hardware.
     pub fn set_parent(&self, index: u8) -> ClkResult {
         let _guard = CLK_LOCK.lock();
-        if index as usize >= self.parents.len() {
-            return Err(ClkError::InvalidParent);
-        }
-        // Reject switching to an orphan slot: recalculating against a missing
-        // parent would silently produce a zero rate.
-        let Some(parent) = self.parents[index as usize].clone() else {
-            return Err(ClkError::InvalidParent);
-        };
-
         // Glitch avoidance (SET_RATE_GATE) around the mux switch: same
         // re-enable contract as set_rate — a failed re-enable is surfaced, not
         // silently masked.
@@ -387,11 +527,31 @@ impl ClkCore {
         if gate_around && was_enabled {
             self.ops.disable();
         }
-        let switch = self.ops.set_parent(index);
+        let result = self.switch_parent_locked(index);
         if gate_around && was_enabled && self.ops.enable().is_err() {
             return Err(ClkError::BadState);
         }
-        switch?;
+        result
+    }
+
+    /// Raw parent switch plus cache refresh.
+    ///
+    /// The caller must hold [`CLK_LOCK`] and is responsible for any
+    /// `SET_RATE_GATE` glitch avoidance around the switch.
+    fn switch_parent_locked(&self, index: u8) -> ClkResult {
+        let parent = {
+            let table = self.parents.lock();
+            if index as usize >= table.len() {
+                return Err(ClkError::InvalidParent);
+            }
+            // Reject switching to an orphan slot: recalculating against a
+            // missing parent would silently produce a zero rate.
+            match table[index as usize].clone() {
+                Some(parent) => parent,
+                None => return Err(ClkError::InvalidParent),
+            }
+        };
+        self.ops.set_parent(index)?;
 
         let parent_rate = parent.get_rate();
         let parent_accuracy = parent.get_accuracy();
@@ -413,6 +573,8 @@ pub struct ClkBuilder {
     flags: ClkFlags,
     ops: Arc<dyn ClkHwOps>,
     parents: Vec<Option<Arc<ClkCore>>>,
+    /// `(parent-slot-index, parent-name)` pairs awaiting a deferred parent.
+    pending_parents: Vec<(u8, &'static str)>,
 }
 
 impl ClkBuilder {
@@ -423,6 +585,7 @@ impl ClkBuilder {
             flags: ClkFlags::empty(),
             ops,
             parents: Vec::new(),
+            pending_parents: Vec::new(),
         }
     }
 
@@ -435,6 +598,18 @@ impl ClkBuilder {
     /// Append a single selectable parent.
     pub fn parent(mut self, parent: Arc<ClkCore>) -> Self {
         self.parents.push(Some(parent));
+        self
+    }
+
+    /// Declare a selectable parent by name.
+    ///
+    /// The slot is left as an orphan (`None`); when a clock named `name` is
+    /// later registered, the framework fills the slot and refreshes this node's
+    /// cached rate. This supports probe-order-independent registration.
+    pub fn parent_name(mut self, name: &'static str) -> Self {
+        let index = self.parents.len() as u8;
+        self.parents.push(None);
+        self.pending_parents.push((index, name));
         self
     }
 
@@ -452,28 +627,135 @@ impl ClkBuilder {
     /// The initial rate and accuracy are computed by querying the hardware
     /// (`recalc_rate` / `recalc_accuracy`) against the selected parent.
     pub fn build(self) -> ClkResult<Arc<ClkCore>> {
-        let parent_index = self.ops.get_parent().unwrap_or(0);
-        let (parent_rate, parent_accuracy) = self
-            .parents
+        let Self {
+            name,
+            flags,
+            ops,
+            parents,
+            pending_parents,
+        } = self;
+        let parent_index = ops.get_parent().unwrap_or(0);
+        // Reject a parent index outside the table (except a root with no
+        // parents); an out-of-range index would otherwise be silently treated
+        // as a root and produce a zero rate.
+        if !parents.is_empty() && parent_index as usize >= parents.len() {
+            return Err(ClkError::InvalidParent);
+        }
+        let (parent_rate, parent_accuracy) = parents
             .get(parent_index as usize)
             .and_then(Option::clone)
             .map(|p| (p.get_rate(), p.get_accuracy()))
             .unwrap_or((0, 0));
-        let rate = self.ops.recalc_rate(parent_rate)?;
-        let accuracy = self.ops.recalc_accuracy(parent_accuracy)?;
-        Ok(Arc::new(ClkCore {
-            name: self.name,
-            flags: self.flags,
-            ops: self.ops,
-            parents: self.parents,
+        let rate = ops.recalc_rate(parent_rate)?;
+        let accuracy = ops.recalc_accuracy(parent_accuracy)?;
+        let core = Arc::new(ClkCore {
+            name,
+            flags,
+            ops,
+            parents: SpinNoIrq::new(parents),
             state: SpinNoIrq::new(ClkState {
                 enable_count: 0,
                 prepare_count: 0,
                 parent_index,
                 rate,
                 accuracy,
+                min_rate: 0,
+                max_rate: Rate::MAX,
             }),
-            notifiers: SpinNoIrq::new(Vec::new()),
-        }))
+            notifiers: SpinNoIrq::new(NotifierState {
+                next_id: 0,
+                entries: Vec::new(),
+            }),
+        });
+        // Post-registration hook (Linux `clk_ops.init`). Runs before the clock
+        // is published so a failing init aborts registration.
+        core.ops.init()?;
+        CLOCKS.lock().push(core.clone());
+        // Register this node's own deferred-parent slots, then adopt any orphan
+        // that was waiting for this node.
+        for (index, pname) in pending_parents {
+            ORPHANS.lock().push(OrphanEntry {
+                child: core.clone(),
+                parent_index: index,
+                parent_name: pname,
+            });
+        }
+        adopt_orphans(core.name(), core.clone());
+        Ok(core)
+    }
+}
+
+/// Fill every orphan slot that names `name` with `parent`, refreshing the
+/// orphan's cached rate if it currently selects that slot.
+///
+/// Called from [`ClkBuilder::build`] whenever a clock is registered. Descendant
+/// clocks built against a stale (zero) orphan rate are *not* recursively
+/// refreshed; register children after their parents, or re-run `recalc` on the
+/// affected subtree, matching Linux's per-node orphan adoption.
+///
+/// Holds `CLK_LOCK` so the orphan's reparenting and cached-rate refresh are
+/// atomic with respect to concurrent `set_rate`/`set_parent`/`prepare`, which
+/// also mutate rate state under `CLK_LOCK`.
+fn adopt_orphans(name: &'static str, parent: Arc<ClkCore>) {
+    let _guard = CLK_LOCK.lock();
+    let matched: Vec<OrphanEntry> = {
+        let mut orphans = ORPHANS.lock();
+        let mut matched = Vec::new();
+        let mut i = 0;
+        while i < orphans.len() {
+            if orphans[i].parent_name == name {
+                matched.push(orphans.remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        matched
+    };
+
+    for entry in matched {
+        {
+            let mut table = entry.child.parents.lock();
+            if let Some(slot) = table.get_mut(entry.parent_index as usize) {
+                *slot = Some(parent.clone());
+            }
+        }
+        if entry.child.state.lock().parent_index == entry.parent_index {
+            let parent_rate = parent.get_rate();
+            let parent_accuracy = parent.get_accuracy();
+            let mut st = entry.child.state.lock();
+            st.rate = entry.child.ops.recalc_rate(parent_rate).unwrap_or(st.rate);
+            st.accuracy = entry
+                .child
+                .ops
+                .recalc_accuracy(parent_accuracy)
+                .unwrap_or(st.accuracy);
+        }
+    }
+}
+
+/// Gate off any clock that is enabled in hardware but holds no consumer
+/// references, skipping clocks marked [`ClkFlags::IS_CRITICAL`] or
+/// [`ClkFlags::IGNORE_UNUSED`].
+///
+/// Intended for a late-init pass, mirroring Linux `clk_disable_unused`. Only
+/// the gate is turned off; `prepare` state is left alone, matching Linux.
+pub fn clk_disable_unused() {
+    let _guard = CLK_LOCK.lock();
+    let clocks: Vec<Arc<ClkCore>> = CLOCKS.lock().iter().cloned().collect();
+    for clk in &clocks {
+        // `intersects`, not `contains`: skip if *either* flag is set.
+        if clk
+            .flags
+            .intersects(ClkFlags::IS_CRITICAL | ClkFlags::IGNORE_UNUSED)
+        {
+            continue;
+        }
+        let unused = {
+            let st = clk.state.lock();
+            st.enable_count == 0
+        };
+        if unused && clk.is_enabled().unwrap_or(false) {
+            clk.ops.disable();
+        }
     }
 }
