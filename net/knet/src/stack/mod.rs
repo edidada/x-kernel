@@ -8,13 +8,10 @@ use smoltcp::wire::IpAddress as SmoltcpIpAddress;
 
 use crate::ip::IpAddress;
 
-pub(crate) mod fragment;
-pub(crate) mod icmpv6;
 pub(crate) mod ingress;
 pub(crate) mod ipv4;
 pub(crate) mod ipv6;
 pub(crate) mod listen_table;
-pub(crate) mod ndp;
 pub(crate) mod router;
 pub(crate) mod service;
 pub(crate) mod wrapper;

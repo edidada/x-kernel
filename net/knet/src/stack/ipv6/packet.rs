@@ -21,11 +21,11 @@ pub(crate) const PROTOCOL_UDP: u8 = 17;
 pub(crate) const IPV6_HEADER_LEN: usize = 40;
 pub(crate) const IPV6_DEFAULT_HOP_LIMIT: u8 = 64;
 
-const IPV6_EXT_HOP_BY_HOP: u8 = 0;
-const IPV6_EXT_ROUTING: u8 = 43;
-const IPV6_EXT_FRAGMENT: u8 = 44;
-const IPV6_EXT_DEST_OPTIONS: u8 = 60;
-const IPV6_EXT_AH: u8 = 51;
+pub(crate) const IPV6_EXT_HOP_BY_HOP: u8 = 0;
+pub(crate) const IPV6_EXT_ROUTING: u8 = 43;
+pub(crate) const IPV6_EXT_FRAGMENT: u8 = 44;
+pub(crate) const IPV6_EXT_DEST_OPTIONS: u8 = 60;
+pub(crate) const IPV6_EXT_AH: u8 = 51;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Ipv6Error {
@@ -44,6 +44,11 @@ pub(crate) struct Ipv6Header {
     /// Total length of the IPv6 packet including the base header.
     total_len: usize,
     traffic_class: u8,
+    /// Offset of the next-header field that named `next_header`.
+    ///
+    /// Points into the base header (offset 6) or into the extension header
+    /// that carried the value, so ICMPv6 Parameter Problem can locate it.
+    next_header_offset: usize,
 }
 
 impl Ipv6Header {
@@ -67,7 +72,7 @@ impl Ipv6Header {
         }
         let available = packet.len();
         let payload = &packet[IPV6_HEADER_LEN..];
-        let (next_header, transport_offset) =
+        let (next_header, transport_offset, next_header_offset) =
             skip_extension_headers(header_slice.next_header().0, payload, false)?;
 
         Ok(Self {
@@ -78,6 +83,7 @@ impl Ipv6Header {
             transport_offset: IPV6_HEADER_LEN + transport_offset,
             total_len: available,
             traffic_class: header_slice.traffic_class(),
+            next_header_offset,
         })
     }
 
@@ -122,6 +128,11 @@ impl Ipv6Header {
         self.transport_offset
     }
 
+    /// Offset of the next-header field that named [`Self::next_header`].
+    pub(crate) fn next_header_offset(self) -> usize {
+        self.next_header_offset
+    }
+
     pub(crate) fn total_len(self) -> usize {
         self.total_len
     }
@@ -145,7 +156,7 @@ impl Ipv6Header {
         }
 
         let payload = &packet[IPV6_HEADER_LEN..total_len];
-        let (next_header, transport_offset) =
+        let (next_header, transport_offset, next_header_offset) =
             skip_extension_headers(header_slice.next_header().0, payload, reject_fragment)?;
 
         Ok(Self {
@@ -156,6 +167,7 @@ impl Ipv6Header {
             transport_offset: IPV6_HEADER_LEN + transport_offset,
             total_len,
             traffic_class: header_slice.traffic_class(),
+            next_header_offset,
         })
     }
 
@@ -236,12 +248,16 @@ pub(crate) fn build_ipv6_packet(
     Some(packet)
 }
 
+/// Returns the resolved next header, the transport offset, and the offset of
+/// the next-header field that named it (6 for the base header, otherwise the
+/// extension header that carried the value).
 fn skip_extension_headers(
     mut next_header: u8,
     payload: &[u8],
     reject_fragment: bool,
-) -> Result<(u8, usize), Ipv6Error> {
+) -> Result<(u8, usize, usize), Ipv6Error> {
     let mut offset = 0usize;
+    let mut next_header_offset = 6usize;
     loop {
         match next_header {
             IPV6_EXT_HOP_BY_HOP | IPV6_EXT_ROUTING | IPV6_EXT_DEST_OPTIONS => {
@@ -254,6 +270,7 @@ fn skip_extension_headers(
                     return Err(Ipv6Error::Malformed);
                 }
                 next_header = hdr[0];
+                next_header_offset = IPV6_HEADER_LEN + offset;
                 offset = offset.checked_add(len).ok_or(Ipv6Error::Malformed)?;
             }
             IPV6_EXT_FRAGMENT => {
@@ -262,7 +279,7 @@ fn skip_extension_headers(
                 }
                 // Defer fragmented packets to smoltcp by reporting the
                 // Fragment header as the next protocol.
-                return Ok((IPV6_EXT_FRAGMENT, offset));
+                return Ok((IPV6_EXT_FRAGMENT, offset, next_header_offset));
             }
             IPV6_EXT_AH => {
                 let hdr = payload.get(offset..).ok_or(Ipv6Error::Malformed)?;
@@ -274,84 +291,10 @@ fn skip_extension_headers(
                     return Err(Ipv6Error::Malformed);
                 }
                 next_header = hdr[0];
+                next_header_offset = IPV6_HEADER_LEN + offset;
                 offset = offset.checked_add(len).ok_or(Ipv6Error::Malformed)?;
             }
-            _ => return Ok((next_header, offset)),
+            _ => return Ok((next_header, offset, next_header_offset)),
         }
-    }
-}
-
-#[cfg(unittest)]
-mod tests {
-    use alloc::vec;
-
-    use unittest::def_test;
-
-    use super::*;
-    use crate::buf::PacketOwner;
-
-    fn sample_addrs() -> (Ipv6Address, Ipv6Address) {
-        (
-            Ipv6Address::from_octets([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
-            Ipv6Address::from_octets([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]),
-        )
-    }
-
-    #[def_test]
-    fn test_validate_input_packet_accepts_plain_udp() {
-        let (src, dst) = sample_addrs();
-        let bytes = build_ipv6_packet(src, dst, PROTOCOL_UDP, 64, &[0; 8]).unwrap();
-        let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
-
-        let header = Ipv6Header::validate_input_packet(&mut packet).unwrap();
-
-        assert_eq!(header.next_header(), PROTOCOL_UDP);
-        assert_eq!(header.header_len(), IPV6_HEADER_LEN);
-        assert_eq!(header.total_len(), IPV6_HEADER_LEN + 8);
-        assert_eq!(packet.transport_offset(), Some(IPV6_HEADER_LEN));
-    }
-
-    #[def_test]
-    fn test_validate_input_packet_skips_hop_by_hop() {
-        let (src, dst) = sample_addrs();
-        let mut payload = vec![0u8; 8 + 8];
-        // Hop-by-Hop: next=UDP, len=0 (8 bytes)
-        payload[0] = PROTOCOL_UDP;
-        payload[1] = 0;
-        let bytes = build_ipv6_packet(src, dst, IPV6_EXT_HOP_BY_HOP, 64, &payload).unwrap();
-        // Fix payload_length already set by builder.
-        let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
-
-        let header = Ipv6Header::validate_input_packet(&mut packet).unwrap();
-        assert_eq!(header.next_header(), PROTOCOL_UDP);
-        assert_eq!(header.transport_offset(), IPV6_HEADER_LEN + 8);
-    }
-
-    #[def_test]
-    fn test_validate_input_packet_rejects_fragment() {
-        let (src, dst) = sample_addrs();
-        let mut payload = vec![0u8; 8];
-        payload[0] = PROTOCOL_UDP;
-        let bytes = build_ipv6_packet(src, dst, IPV6_EXT_FRAGMENT, 64, &payload).unwrap();
-        let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
-
-        assert_eq!(
-            Ipv6Header::validate_input_packet(&mut packet),
-            Err(Ipv6Error::Fragmented)
-        );
-    }
-
-    #[def_test]
-    fn test_prepare_output_packet_repairs_payload_len() {
-        let (src, dst) = sample_addrs();
-        let mut bytes = build_ipv6_packet(src, dst, PROTOCOL_ICMPV6, 64, &[1, 2, 3, 4]).unwrap();
-        bytes[4] = 0;
-        bytes[5] = 0;
-        let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceTx);
-
-        Ipv6Header::prepare_output_packet(&mut packet).unwrap();
-        let header = Ipv6Header::parse_input(packet.network_packet().unwrap()).unwrap();
-        assert_eq!(header.next_header(), PROTOCOL_ICMPV6);
-        assert_eq!(header.total_len(), IPV6_HEADER_LEN + 4);
     }
 }

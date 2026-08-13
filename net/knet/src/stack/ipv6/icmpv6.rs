@@ -6,21 +6,24 @@
 
 use alloc::{vec, vec::Vec};
 
-use etherparse::{Icmpv6Header, Icmpv6Slice, Icmpv6Type, icmpv6::DestUnreachableCode};
-
-use crate::{
-    buf::PacketType,
-    ip::Ipv6Address,
-    ipv6::{self, IPV6_DEFAULT_HOP_LIMIT, IPV6_HEADER_LEN, Ipv6Header, PROTOCOL_ICMPV6},
+use etherparse::{
+    Icmpv6Header, Icmpv6Slice, Icmpv6Type,
+    icmpv6::{DestUnreachableCode, ParameterProblemCode, ParameterProblemHeader},
 };
+
+use super::{self as ipv6, IPV6_DEFAULT_HOP_LIMIT, IPV6_HEADER_LEN, Ipv6Header, PROTOCOL_ICMPV6};
+use crate::{buf::PacketType, ip::Ipv6Address};
 
 const ICMPV6_ERROR_QUOTE_BYTES: usize = 1232;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Icmpv6Error {
     PortUnreachable,
-    #[expect(dead_code)]
-    ProtocolUnreachable,
+    /// RFC 4443 §3.4 Parameter Problem, Code 1 (unrecognized Next Header).
+    ///
+    /// The `pointer` is the octet offset of the offending next-header field
+    /// within the offending packet.
+    ParameterProblem(u32),
 }
 
 /// Builds an ICMPv6 echo reply for a validated echo request packet.
@@ -90,10 +93,11 @@ pub(crate) fn build_icmpv6_error_packet(
         Icmpv6Error::PortUnreachable => {
             Icmpv6Type::DestinationUnreachable(DestUnreachableCode::Port)
         }
-        Icmpv6Error::ProtocolUnreachable => {
-            // Parameter Problem for unrecognized next header is more precise,
-            // but Destination Unreachable is enough for socket error delivery.
-            Icmpv6Type::DestinationUnreachable(DestUnreachableCode::Address)
+        Icmpv6Error::ParameterProblem(pointer) => {
+            Icmpv6Type::ParameterProblem(ParameterProblemHeader {
+                code: ParameterProblemCode::UnrecognizedNextHeader,
+                pointer,
+            })
         }
     };
     let icmp_header = Icmpv6Header::with_checksum(
@@ -183,8 +187,10 @@ mod tests {
     use etherparse::IcmpEchoHeader;
     use unittest::def_test;
 
-    use super::*;
-    use crate::ipv6::{PROTOCOL_UDP, build_ipv6_packet};
+    use super::{
+        super::{PROTOCOL_UDP, build_ipv6_packet},
+        *,
+    };
 
     fn sample_addrs() -> (Ipv6Address, Ipv6Address) {
         (
@@ -296,5 +302,35 @@ mod tests {
         let icmp = ipv6::payload(&error, &error_header).unwrap();
         assert_eq!(icmp[0], etherparse::icmpv6::TYPE_DST_UNREACH);
         assert_eq!(icmp[1], etherparse::icmpv6::CODE_DST_UNREACH_PORT);
+    }
+
+    #[def_test]
+    fn test_build_parameter_problem() {
+        let (src, dst) = sample_addrs();
+        // Protocol 132 (SCTP) is not handled by this stack.
+        let offending = build_ipv6_packet(src, dst, 132, 64, &[0; 8]).unwrap();
+        let header = Ipv6Header::parse_input(&offending).unwrap();
+        assert_eq!(header.next_header_offset(), 6);
+
+        let error = build_icmpv6_error_packet(
+            Icmpv6Error::ParameterProblem(header.next_header_offset() as u32),
+            PacketType::Host,
+            header,
+            &offending,
+        )
+        .expect("ICMPv6 error");
+        let error_header = Ipv6Header::parse_input(&error).unwrap();
+        assert_eq!(error_header.src_addr(), dst);
+        assert_eq!(error_header.dst_addr(), src);
+        let icmp = ipv6::payload(&error, &error_header).unwrap();
+        assert_eq!(icmp[0], etherparse::icmpv6::TYPE_PARAMETER_PROBLEM);
+        assert_eq!(
+            icmp[1],
+            etherparse::icmpv6::CODE_PARAM_PROBLEM_UNRECOG_NEXT_HEADER
+        );
+        assert_eq!(
+            u32::from_be_bytes([icmp[4], icmp[5], icmp[6], icmp[7]]),
+            header.next_header_offset() as u32
+        );
     }
 }

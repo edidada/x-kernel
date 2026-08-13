@@ -35,13 +35,12 @@ use crate::{
     poller::{PollBudget, PollProgress},
     router::{DeviceRemoval, Router},
     stack::{
-        icmpv6,
-        ingress::{IngressProcessor, Ipv6Action},
-        ndp,
+        ingress::IngressProcessor,
+        ipv4,
+        ipv6::{self, Ipv6Action},
     },
 };
 
-const IPV4_HEADER_LEN: usize = 20;
 const RX_INGRESS_BATCH_PACKETS: usize = 64;
 const POLL_ROUND_TIME_LIMIT: TimeSpan = TimeSpan::from_millis(1);
 const POLL_TIME_CHECK_INTERVAL_WORK_ITEMS: usize = 32;
@@ -170,7 +169,7 @@ impl Service {
                     warn!("Dropping network control packet: {}", err);
                 }
             }
-            apply_ipv6_actions(&mut router, &mut ipv6_actions);
+            ipv6::apply_actions(&mut router, &mut ipv6_actions);
             if !drain.has_more || drain.work_done == 0 {
                 break;
             }
@@ -341,7 +340,7 @@ impl Service {
 
         let route_source = router.output_route_source(dst_addr)?;
         let source_addr = bound_src.unwrap_or(route_source);
-        let packet_count = output_ipv4_packet_count(&router, dst_addr, packet_len)?;
+        let packet_count = ipv4::output_packet_count(&router, dst_addr, packet_len)?;
         if !router.can_enqueue_tx_packets(packet_count) {
             return Err(KError::WouldBlock);
         }
@@ -736,79 +735,6 @@ fn earliest_poll_deadline(
         (Some(protocol), Some(close)) => Some(protocol.min(close)),
         (protocol, close) => protocol.or(close),
     }
-}
-
-fn apply_ipv6_actions(router: &mut Router, actions: &mut Vec<Ipv6Action>) {
-    for action in actions.drain(..) {
-        match action {
-            Ipv6Action::LearnNeighbor { ifindex, addr, mac } => {
-                if let Some(dev) = router.devices.get_mut(ifindex.saturating_sub(1) as usize) {
-                    dev.learn_neighbor(IpAddress::Ipv6(addr), mac);
-                }
-            }
-            Ipv6Action::ReplyAdvertisement {
-                ifindex,
-                target,
-                dst,
-                solicited,
-            } => {
-                let mac = router
-                    .devices
-                    .get(ifindex.saturating_sub(1) as usize)
-                    .and_then(|dev| dev.hardware_addr());
-                if let Some(mac) = mac
-                    && let Some(na) =
-                        ndp::build_neighbor_advertisement(target, dst, target, mac, solicited)
-                {
-                    let _ = router.queue_control_ip_packet(na);
-                }
-            }
-            Ipv6Action::EchoReply {
-                ifindex,
-                header,
-                packet,
-            } => {
-                let Some(reply_src) = router.echo_reply_source(header, ifindex) else {
-                    continue;
-                };
-                if let Some(reply) = icmpv6::build_echo_reply(header, &packet, reply_src)
-                    && let Err(err) = router.queue_control_ip_packet(reply)
-                {
-                    warn!("Failed to queue ICMPv6 echo reply: {}", err);
-                }
-            }
-        }
-    }
-}
-
-fn output_ipv4_packet_count(
-    router: &Router,
-    dst_addr: &IpAddress,
-    packet_len: usize,
-) -> KResult<usize> {
-    if packet_len > u16::MAX as usize {
-        return Err(LinuxError::EMSGSIZE.into());
-    }
-
-    let Some(mtu) = router.route_mtu(dst_addr) else {
-        return Ok(1);
-    };
-    if packet_len <= mtu {
-        return Ok(1);
-    }
-
-    let payload_len = packet_len
-        .checked_sub(IPV4_HEADER_LEN)
-        .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?;
-    let max_fragment_payload_len = mtu
-        .checked_sub(IPV4_HEADER_LEN)
-        .map(|len| len / 8 * 8)
-        .filter(|len| *len > 0)
-        .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?;
-    Ok(payload_len
-        .checked_add(max_fragment_payload_len - 1)
-        .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?
-        / max_fragment_payload_len)
 }
 
 #[cfg(unittest)]

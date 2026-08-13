@@ -128,9 +128,9 @@ core/kruntime
 | `link::wire` | 使用 `zerocopy` 校验和构造 Ethernet 与 Ethernet/IPv4 ARP 头部 |
 | `stack::ipv4` | 使用 `etherparse` 校验和构造 IPv4 与 ICMPv4 头部，并执行输出分片 |
 | `stack::ipv6` | 解析/构造 IPv6 固定头，跳过可识别扩展头，定位上层协议；Fragment 头暂不重组 |
-| `stack::icmpv6` | ICMPv6 echo 应答与 Destination Unreachable 差错生成 |
-| `stack::ndp` | Neighbor Solicitation/Advertisement 构造与解析 |
-| `stack::fragment` | 按源地址、目的地址、标识、协议和接口重组本地 IPv4 分片，并限制队列数量、内存和存活时间 |
+| `stack::ipv6::icmpv6` | ICMPv6 echo 应答与 Destination Unreachable/Parameter Problem 差错生成 |
+| `stack::ipv6::ndp` | Neighbor Solicitation/Advertisement 构造与解析 |
+| `stack::ipv4::fragment` | 按源地址、目的地址、标识、协议和接口重组本地 IPv4 分片，并限制队列数量、内存和存活时间 |
 | `transport::udp` | 维护 UDP PCB registry、接收队列、bind 与 connect 状态、校验和、socket option、异步错误和 IPv4/IPv6 收发 |
 | `SocketSetWrapper` | 串行化 smoltcp socket set 与 TCP deferred-close 元数据访问，并在新增 socket 时通知等待者 |
 | `ListenTable` | 管理 TCP listen backlog、SYN 队列、accept 队列和 accept waker |
@@ -325,8 +325,8 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 2. 普通 `notify` 在 `IDLE` 上发布 `SCHEDULED` 并唤醒后台任务；RX 任务发布后直接竞争执行权。执行期间的新工作进入 `RUNNING_PENDING`；RX 任务、后台任务和 assist 只有一个能够通过 `SCHEDULED` 到 `RUNNING` 的 CAS。
 3. `Router::drain_rx_budgeted_into` 按 RX budget 从设备轮转拉取 `PacketBuf`，`next_rx_device` 在设备间保持公平并随设备删除修正。
 4. `IngressProcessor` 在 Router 锁外校验 IPv4/IPv6 头、长度、校验和与本地目的地址，并完成 IPv4 分片重组；IPv6 跳过可识别扩展头，含 Fragment 头的报文暂交 smoltcp。
-5. 完整 UDP 数据报进入 crate 内 UDP PCB 分流（IPv4/IPv6），未命中 socket 的单播 UDP 触发 ICMPv4/ICMPv6 Port Unreachable。ICMPv6 NDP（NS/NA）解析为动作 batch，由 `Service` 在 Router 锁内更新设备邻居表或发送 NA；Echo Request 由 `stack::icmpv6` 应答。UDP PCB 按 FIFO 保留已入队数据报，`connect` 只影响后续入包的 peer 匹配。
-6. TCP、raw IP、ICMP 和其余 IPv6 packet 进入有界 smoltcp ingress queue。`Service` 先执行 `poll_maintenance`，再按 RX budget 逐个调用 `poll_ingress_single`，并按 TX budget 调用有界的 `poll_egress`。达到预算或时间边界后，剩余 ingress 保持 FIFO 顺序并进入后续轮次。
+5. 完整 UDP 数据报进入 crate 内 UDP PCB 分流（IPv4/IPv6），未命中 socket 的单播 UDP 触发 ICMPv4/ICMPv6 Port Unreachable；IPv6 未识别 next header（非 TCP/UDP/ICMPv6）的单播报文触发 ICMPv6 Parameter Problem Code 1（RFC 4443 §3.4），pointer 指向承载该值的 next-header 字段。ICMPv6 NDP（NS/NA）解析为动作 batch，由 `Service` 在 Router 锁内更新设备邻居表或发送 NA；Echo Request 由 `stack::ipv6::icmpv6` 应答。UDP PCB 按 FIFO 保留已入队数据报，`connect` 只影响后续入包的 peer 匹配。
+6. TCP、raw IP、ICMPv4 和其余 IPv6 packet 进入有界 smoltcp ingress queue。`Service` 先执行 `poll_maintenance`，再按 RX budget 逐个调用 `poll_ingress_single`，并按 TX budget 调用有界的 `poll_egress`。达到预算或时间边界后，剩余 ingress 保持 FIFO 顺序并进入后续轮次。
 7. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
 8. `Router::dispatch_budgeted` 先处理 control TX queue，再处理 data TX queue，单轮发送数量受 TX budget 限制。
 9. `Interface::poll_at` 与 orphan `FIN_WAIT_2` deadline 共同决定下一次网络 deadline，`Service` 将其写入原子 deadline；`register_timer_callback(TIMER_SAMPLE_PERIOD)` 周期采样该值，到期后通过 `notify(PollReason::Timer)` 发布工作。尚未到期的 deadline 不进入 `PollProgress::has_more`。

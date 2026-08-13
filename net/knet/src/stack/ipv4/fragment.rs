@@ -17,7 +17,7 @@ use alloc::{collections::BTreeMap, vec::Vec};
 
 use ktime_types::{MonotonicInstant, TimeSpan};
 
-use super::ipv4::{self, Ipv4Header};
+use super::{self as ipv4, Ipv4Header};
 use crate::buf::{PacketBuf, PacketOwner, PacketType};
 
 const IPV4_REASSEMBLY_TIMEOUT: TimeSpan = TimeSpan::from_secs(30);

@@ -348,6 +348,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - 新增 ring buffer 操作的 advance count 来自同一锁内同一批 slices。
 - Unix stream 的 write index 发布、方向关闭和空队列 EOF 判定保持同一个 per-direction 排序点，方向锁内不执行用户复制或 `PollSet` 唤醒，shutdown 在释放 `channel` mutex 后执行 waiter 唤醒。
 - 新增外部网络输入使用 checked parser（含 IPv6 扩展头跳过与 NDP/ICMPv6）。
+- IPv6 差错生成保持 RFC 4443 §2.4 限制：仅应答本地单播目的，不对组播/未指定源或组播目的应答，且不对 ICMPv6 差错与 Redirect 再回差错。
 - IPv6 Fragment 扩展头改动需明确降级策略（交 smoltcp 或丢弃），避免半处理状态。
 - IPv4 分片重组改动保持队列数量、内存和超时上限，并拒绝重叠 range。
 - UDP registry 改动保持 bind、connect、普通接收和 ICMP/ICMPv6 error lookup 使用同一 PCB 所有权来源。
