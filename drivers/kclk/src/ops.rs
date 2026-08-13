@@ -18,27 +18,26 @@
 //! - [`enable`](ClkHwOps::enable) / [`disable`](ClkHwOps::disable) toggle only
 //!   a gate bit and stay usable where blocking is impossible.
 //!
-//! **Both phases run with IRQs/preemption intact but cannot sleep.** All
-//! callbacks execute under the framework's global clock lock plus the node's
-//! spinlock (see `core.rs` and the crate design doc); a callback that blocks
-//! or sleeps will stall every other CPU that touches the clock tree. Slow work
-//! that genuinely needs to wait (a PLL lock) must be implemented as a
-//! **bounded busy-wait** that polls a status bit with a timeout, never a sleep.
+//! The two phases have different sleeping contracts, mirroring Linux:
 //!
-//! This is intentionally narrower than Linux's `may sleep` contract: the
-//! framework uses a spinlock, not a sleepable mutex, to avoid pulling the
-//! scheduler into the clock core. The two phases still earn their keep because
-//! `enable`/`disable` deliberately bypass the global lock (they may run from
-//! contexts that cannot take it), whereas `prepare`/`unprepare` are serialized
-//! by it.
+//! - [`prepare`](ClkHwOps::prepare) / [`unprepare`](ClkHwOps::unprepare) run
+//!   under the global clock lock, a **sleepable mutex** (`ksync::Mutex`), so
+//!   they **may sleep** (a PLL lock wait can block instead of busy-waiting).
+//! - [`enable`](ClkHwOps::enable) / [`disable`](ClkHwOps::disable) run under the
+//!   per-node **spinlock** and deliberately bypass the global lock, so they
+//!   **must not sleep** and stay usable from contexts that cannot block.
+//!
+//! The remaining callbacks (`recalc_rate`, `recalc_accuracy`, `is_enabled`,
+//! `is_prepared`, `get_parent`, `init`, `determine_rate`) may be invoked
+//! without the global lock (`get_rate` with `GET_RATE_NOCACHE`, `build`,
+//! `is_enabled`), so they **must not sleep** either.
 //!
 //! # Re-entrancy
 //!
-//! All callbacks run under the framework's global clock lock (for the
-//! prepare/rate/parent paths) plus the per-node spinlock. A callback must not:
-//! - sleep or block (no scheduler waits; use bounded busy-wait for PLL lock);
+//! A callback must not:
 //! - re-enter the clock framework (`clk_get_*`, `set_rate`, `set_parent`,
-//!   `prepare`, `enable`) — the lock deadlocks;
+//!   `prepare`, `enable`) — the global lock is **not re-entrant** and panics on
+//!   self-acquisition instead of deadlocking;
 //! - acquire any lock that could be held in reverse order during tree
 //!   propagation.
 //!

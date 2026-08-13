@@ -7,29 +7,34 @@
 
 use alloc::{sync::Arc, vec::Vec};
 
-use kspin::{SpinNoIrq, SpinRaw};
+use kspin::SpinNoIrq;
+use ksync::{Mutex, static_lock};
 
 use crate::{
     ClkError, ClkEvent, ClkFlags, ClkHwOps, ClkNotifier, ClkNotifierId, ClkRateRequest, ClkResult,
     NotifierResult, Rate,
 };
 
-/// Global serialization lock for sleepable clock mutations.
-///
-/// All `prepare`/`unprepare`/`set_rate`/`set_parent`/`round_rate` operations
-/// take this lock, so a rate change (which may recurse up the parent tree and
-/// reprogram a PLL) is atomic with respect to other changes. The atomic gate
-/// (`enable`/`disable`) does *not* take this lock — it stays on the per-node
-/// spinlock so it remains usable from contexts that cannot block.
-///
-/// This mirrors Linux's single `clk_prepare_lock`. Clock operations are not a
-/// hot path (boot/probe/DVFS), so a single global lock is acceptable; the
-/// per-node spinlock still keeps `get_rate` reads lock-free w.r.t. this lock.
-///
-/// The lock is a plain spinlock, not a sleepable mutex: callbacks must not
-/// sleep while held. Current register-backed ops are non-sleeping; a future
-/// PLL whose `prepare` truly needs to sleep will require a sleepable mutex.
-static CLK_LOCK: SpinRaw<()> = SpinRaw::new(());
+// Global serialization lock for sleepable clock mutations.
+//
+// All `prepare`/`unprepare`/`set_rate`/`set_parent`/`round_rate` operations
+// take this lock, so a rate change (which may recurse up the parent tree and
+// reprogram a PLL) is atomic with respect to other changes. The atomic gate
+// (`enable`/`disable`) does *not* take this lock — it stays on the per-node
+// spinlock so it remains usable from contexts that cannot block.
+//
+// This mirrors Linux's single `clk_prepare_lock`. Clock operations are not a
+// hot path (boot/probe/DVFS), so one global lock is acceptable; the per-node
+// spinlock still keeps `get_rate` reads lock-free w.r.t. this lock.
+//
+// The lock is a sleepable mutex (`ksync::Mutex`), matching Linux's
+// `clk_prepare_lock`: providers may sleep in the `prepare`/`set_rate`/
+// `set_parent`/`round_rate` callbacks that run under it. It must therefore
+// never be taken from atomic or interrupt context, and it is not re-entrant —
+// re-entering the framework while holding it panics instead of deadlocking.
+static_lock! {
+    static CLK_LOCK: Mutex<()> = Mutex::new(());
+}
 
 /// Global list of every registered clock, used by the unused-clock gate-down
 /// pass and future PM walks. Strong references mirror Linux, which never frees

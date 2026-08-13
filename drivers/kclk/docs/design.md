@@ -81,10 +81,11 @@ overrides the methods relevant to it.
 
 The gate is two-phase on purpose:
 
-- `prepare` / `unprepare` carry the slow, controller-global setup; like all
-  callbacks they run under a spinlock and **must not sleep** — a PLL lock wait is
-  a bounded busy-wait on a status bit, never a scheduler sleep;
-- `enable` / `disable` must be atomic (toggle a gate bit only).
+- `prepare` / `unprepare` carry the slow, controller-global setup and run under
+  the global **sleepable mutex**, so they **may sleep** (a PLL lock wait can
+  block);
+- `enable` / `disable` must be atomic (toggle a gate bit only) and run under the
+  per-node **spinlock**, so they **must not sleep**.
 
 `round_rate` returns a [`RoundResult`] carrying both the closest achievable
 rate *and* an optional `parent_target`: when a node cannot satisfy a request
@@ -94,11 +95,22 @@ carries [`ClkFlags::SET_RATE_PARENT`], then re-rounds the node against the new
 parent rate — so a divider behind a mux can be reached by switching the mux's
 upstream source.
 
+`determine_rate` is the multi-parent analogue of `round_rate` (mirroring Linux
+`clk_ops.determine_rate`): it receives a [`ClkRateRequest`] seeded with the
+clamped request and the current parent, plus the full candidate parent list, and
+may select a `best_parent_index` to switch sources (a mux choosing the closest
+input). The core honors a parent switch before programming the rate. The default
+implementation delegates to `round_rate`, so existing nodes keep the legacy
+upward-propagation contract unchanged.
+
 ### `ClkCore` / `ClkBuilder`
 
 A node caches its rate and accuracy and carries a parent table (entries may be
 `None` for an orphan not yet registered). `ClkBuilder` queries the hardware
-(`recalc_rate` / `recalc_accuracy`) at registration to seed the cache.
+(`recalc_rate` / `recalc_accuracy`) at registration to seed the cache. An
+orphan slot declared via `ClkBuilder::parent_name(name)` is filled later when a
+clock named `name` registers, at which point the orphan's cached rate is
+refreshed.
 
 Reference-counted gating propagates up the tree: `prepare`/`enable` act on the
 parent first, then on this node, and roll the parent back if this node's
@@ -111,6 +123,7 @@ atomic gate (`enable`/`disable`) is *not* — it stays on the per-node spinlock 
 it remains usable from contexts that cannot block.
 
 [`RoundResult`]: ../src/rate.rs
+[`ClkRateRequest`]: ../src/rate.rs
 [`ClkFlags::SET_RATE_PARENT`]: ../src/flags.rs
 
 ### `ClkLookup` / `ClkTable` / registry
@@ -130,16 +143,18 @@ either query.
 
 ### Global clock lock
 
-A single `SpinRaw` static (`CLK_LOCK` in `core.rs`) serializes every sleepable
-mutation. This mirrors Linux's single `clk_prepare_lock`: any rate change
-(which may recurse up the tree and reprogram a PLL) is atomic with respect to
-other changes, so a concurrent `get_rate` reader never observes a half-updated
-tree. Clock operations are not a hot path (boot/probe/DVFS), so one global lock
-is acceptable; `get_rate` reads the per-node cache and never touches this lock.
+A single sleepable mutex static (`CLK_LOCK` in `core.rs`, a `ksync::Mutex`)
+serializes every sleepable mutation. This mirrors Linux's single
+`clk_prepare_lock`: any rate change (which may recurse up the tree and
+reprogram a PLL) is atomic with respect to other changes, so a concurrent
+`get_rate` reader never observes a half-updated tree. Clock operations are not
+a hot path (boot/probe/DVFS), so one global lock is acceptable; `get_rate`
+reads the per-node cache and never touches this lock.
 
-The lock is a spinlock, not a sleepable mutex: callbacks must not sleep while
-held. Current register-backed ops are non-sleeping; a future PLL whose
-`prepare` truly needs to block will require migrating to a sleepable mutex.
+The lock is **sleepable** (unlike Linux's spinlock-based `clk_enable_lock`):
+providers may sleep in `prepare`/`set_rate`/`set_parent`/`round_rate` callbacks
+that run under it. It must never be taken from atomic or interrupt context, and
+it is not re-entrant — re-entering the framework while holding it panics.
 
 ### Rate-change notifiers
 
@@ -150,8 +165,29 @@ changes. `set_rate` delivers [`ClkEvent::PreRateChange`] before the change
 the node on which `set_rate` was called; intermediate parents changed during
 upward propagation do not receive separate notifications.
 
-Callbacks run while the global lock is held, so they must be quick, must not
-sleep, and must not re-enter the framework.
+Registration returns an id (`ClkNotifierId`) that can be passed to
+`unregister_notifier` to remove the subscriber.
+
+Notifier callbacks run while the global sleepable mutex is held; they may sleep
+but must be quick and must not re-enter the framework (re-entrancy panics).
+
+### Rate range and unused-clock gate-down
+
+A consumer can constrain a clock's rate via `set_rate_range(min, max)`; later
+`set_rate` / `round_rate` requests are clamped into that range (an inverted
+range is rejected with `InvalidRate`). The current rate is not retroactively
+changed.
+
+Every registered clock is kept in a global list; the late-init
+[`clk_disable_unused`] pass gates off any clock whose hardware reports enabled
+but which holds no consumer references, skipping clocks marked
+[`ClkFlags::IS_CRITICAL`] or [`ClkFlags::IGNORE_UNUSED`]. [`GET_RATE_NOCACHE`]
+makes `get_rate` re-read the hardware rate instead of the cache.
+
+[`clk_disable_unused`]: ../src/core.rs
+[`ClkFlags::IS_CRITICAL`]: ../src/flags.rs
+[`ClkFlags::IGNORE_UNUSED`]: ../src/flags.rs
+[`GET_RATE_NOCACHE`]: ../src/flags.rs
 
 [`ClkNotifier`]: ../src/event.rs
 [`ClkEvent::PreRateChange`]: ../src/event.rs
@@ -195,21 +231,24 @@ calling the hardware op once when the count reaches zero.
   probe/boot operations. They must not run in interrupt context.
 - `enable`/`disable` are the atomic fast path and may run with IRQs disabled,
   matching Linux. A provider's `enable`/`disable` must not sleep.
-- `prepare`/`unprepare` run serialized under the global `CLK_LOCK` (a spinlock),
-  **not** a sleepable mutex: a provider's `prepare` must not sleep either. Slow
-  work that needs to wait (a PLL lock) must be a **bounded busy-wait** polling a
-  status bit, never a scheduler sleep.
-- Hardware callbacks run *under* the global lock and the node's spinlock
-  together, not outside them. They must be quick, non-sleeping, and must not
-  re-enter the framework (see the `Re-entrancy` note on `ClkHwOps`).
+- `prepare`/`unprepare`/`set_rate`/`set_parent`/`round_rate` run serialized
+  under the global `CLK_LOCK`, a **sleepable mutex**: a provider's `prepare` may
+  sleep (e.g. block on a PLL lock). These paths must still not run in interrupt
+  context.
+- `enable`/`disable` run only under the per-node spinlock and must not sleep.
+- A provider's other callbacks (`recalc_rate`, `is_enabled`, `init`, ...) may be
+  invoked without the global lock and must not sleep. Callbacks must not
+  re-enter the framework — re-entrancy panics (see the `Re-entrancy` note on
+  `ClkHwOps`).
 
 ## Concurrency
 
 - Each node's mutable state is one `SpinNoIrq<ClkState>`; the notifier list is
-  a separate `SpinNoIrq<Vec<ClkNotifier>>`.
-- All sleepable mutations are serialized by the global `CLK_LOCK` (a `SpinRaw`),
-  so a rate change — including parent recursion and re-rounding — is atomic
-  w.r.t. other changes. `get_rate` reads the per-node cache without this lock.
+  a separate `SpinNoIrq<NotifierState>`.
+- All sleepable mutations are serialized by the global `CLK_LOCK` (a
+  `ksync::Mutex`), so a rate change — including parent recursion and
+  re-rounding — is atomic w.r.t. other changes. `get_rate` reads the per-node
+  cache without this lock.
 - The atomic gate (`enable`/`disable`) intentionally bypasses `CLK_LOCK`, using
   only the per-node spinlock, so it stays usable where blocking is impossible.
 - Parent recursion clones the parent `Arc` and releases the child state lock
@@ -228,11 +267,11 @@ calling the hardware op once when the count reaches zero.
   (gate/mux/divider) never depend on a host MMIO mechanism; `MmioClkReg` is one
   default impl, and tests inject an array-backed mock.
 - **`RATE` is `u64` Hz**, matching Linux's `unsigned long`.
-- **Per-node spinlocks plus a global `CLK_LOCK`.** Sleepable mutations take the
-  global lock (atomic w.r.t. other changes); `enable`/`disable` stay on the
-  per-node lock so they remain usable where blocking is impossible. Parent
-  recursion releases the child lock first to keep lock ordering
-  parent-before-child.
+- **Per-node spinlocks plus a global sleepable `CLK_LOCK`.** Sleepable
+  mutations take the global `ksync::Mutex` (atomic w.r.t. other changes and
+  allowing providers to sleep); `enable`/`disable` stay on the per-node
+  spinlock so they remain usable where blocking is impossible. Parent recursion
+  releases the child lock first to keep lock ordering parent-before-child.
 
 ## Adding a Clock Controller Driver
 
@@ -349,8 +388,10 @@ fn probe(uart: &DeviceObject) -> DriverResult {
     let clk: Clk = devm_clk_get(uart, ClkSpec::by_name("baudclk"))
         .map_err(map_res_err)?;
     clk.prepare_enable().map_err(map_res_err)?;
-    // Full consumer surface (round_rate/set_rate/set_parent/register_notifier)
-    // is available on Clk too, so drivers never bypass device-res for DVFS.
+    // The full consumer surface is available on Clk: prepare/unprepare,
+    // enable/disable (split, for a prepare-once/enable-many pattern),
+    // round_rate/set_rate/set_rate_range/get_parent/set_parent, and
+    // register_notifier/unregister_notifier. Drivers never bypass device-res.
     let rate = clk.get_rate();
     // ... program the UART divisor from `rate` ...
     Ok(())
@@ -377,8 +418,8 @@ pub struct MyPll { reg: Arc<dyn kclk::ClkRegAccess> }
 
 impl ClkHwOps for MyPll {
     fn prepare(&self) -> ClkResult {
-        // power up, then bounded busy-wait on the LOCK status bit
-        // (callbacks run under a spinlock; never scheduler-sleep)
+        // Power up, then wait for the LOCK status bit. `prepare` runs under the
+        // global sleepable mutex, so it may block (scheduler-sleep) here.
         Ok(())
     }
     fn unprepare(&self) -> ClkResult { Ok(()) }
@@ -404,16 +445,18 @@ Arc::new(MyPll { reg })).parent(..).build()`.
 
 ## Known Limitations
 
-- **Callbacks must not sleep.** The global lock is a spinlock, not a sleepable
-  mutex; a provider `prepare` that needs to wait must bounded-busy-wait a
-  status bit. (A sleepable mutex is future work if a PLL genuinely needs
-  scheduler sleep.)
+- **`enable`/`disable` and lock-free callbacks must not sleep.** The atomic gate
+  and the callbacks reachable without `CLK_LOCK` (`recalc_rate`, `is_enabled`,
+  `init`, ...) run on spinlocks or lock-free and must stay non-sleeping. Only
+  the `CLK_LOCK`-serialized paths (`prepare`/`set_rate`/`set_parent`/
+  `round_rate`) may sleep.
 - **Notifiers fire only on the entry node.** A `set_rate` that propagates up
   the tree delivers events only to the node on which it was called; intermediate
   parents reprogrammed during propagation do not receive separate notifications.
-- **No orphan re-parenting.** Parents must be registered before children
-  (`ClkBuilder::parent` takes an `Arc<ClkCore>`); there is no Linux-style
-  deferred-probe adoption of an orphan slot.
+- **Orphan adoption is per-node, not recursive.** A child that declared its
+  parent by name (`ClkBuilder::parent_name`) is re-parented and re-rated when
+  that parent registers, but descendants built against the stale (zero) orphan
+  rate are not recursively refreshed — register children after their parents.
 - **Register writes are not atomic across shared words.** The default
   `ClkRegAccess::reg_modify` is a non-atomic read-modify-write. The atomic
   `enable`/`disable` path bypasses `CLK_LOCK`, so gate and rate fields that
@@ -421,9 +464,9 @@ Arc::new(MyPll { reg })).parent(..).build()`.
   pair (override `reg_modify`), or live in separate words.
 - **No `clk_save_context` / `clk_restore_context`** for suspend/resume yet; the
   hooks would be straightforward but x-kernel has no PM framework to drive them.
-- **`IGNORE_UNUSED` / `IS_CRITICAL` / `GET_RATE_NOCACHE`** are reserved flags
-  (see `flags.rs`): accepted but not yet honored. `SET_RATE_GATE` *is* honored
-  (gate around `set_rate`/`set_parent`).
+- **No phase / duty-cycle ops** (`clk_set_phase`, `clk_set_duty_cycle`); those
+  are only needed by specific device classes (SDIO/audio/backlight) and can be
+  added as additive hooks when a driver requires them.
 
 ## Testing
 
@@ -437,12 +480,19 @@ Arc::new(MyPll { reg })).parent(..).build()`.
 - mux parent selection and field masking;
 - `ClkCore::set_parent` rate recomputation and out-of-range rejection;
 - two-phase gating propagation with reference counting and failure roll-back;
+- split `prepare`/`enable` consumer APIs;
+- `get_parent`, `set_rate_range` clamping, and `ClkTable::unregister`;
+- rate-change notifiers: `Pre`/`Post` delivery around `set_rate`, veto abort,
+  and unregister;
+- the `init` hook running at registration;
+- `determine_rate` multi-parent selection (a mux switching to the closest source);
+- orphan adoption via `parent_name` (a parent registered after its child);
+- `clk_disable_unused` gating idle hardware-on clocks and honoring
+  `IS_CRITICAL`/`IGNORE_UNUSED`;
 - `Composite` dispatch to sub-nodes;
 - provider name/index resolution and missing-clock handling;
 - **multi-provider disambiguation**: two controllers publishing index 0;
 - `SET_RATE_PARENT` pass-through propagation (mux → divider);
-- rate-change notifiers: `Pre`/`Post` delivery around `set_rate`;
-- notifier veto aborting a change with `ClkError::Aborted`;
 - divider-aware upward propagation: a `FixedFactor` reprogramming its divider
   parent via `SET_RATE_PARENT`.
 

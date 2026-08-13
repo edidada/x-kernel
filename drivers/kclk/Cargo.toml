@@ -16,5 +16,6 @@ default = []
 
 [dependencies]
 kspin = { workspace = true }
+ksync = { workspace = true }
 bitflags = { workspace = true }
 unittest = { workspace = true }
