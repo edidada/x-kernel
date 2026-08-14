@@ -359,16 +359,25 @@ fn test_semaphore_release_wakes_all_zero_count_waiters() {
 
     let sem = Arc::new(Semaphore::new(0));
     let acquired = Arc::new(AtomicUsize::new(0));
+    let ready = Arc::new(AtomicUsize::new(0));
     let mut waiters = Vec::new();
 
     for _ in 0..WAITER_COUNT {
         let sem = Arc::clone(&sem);
         let acquired = Arc::clone(&acquired);
+        let ready = Arc::clone(&ready);
         waiters.push(ktask::spawn(move || {
+            ready.fetch_add(1, Ordering::Release);
             sem.acquire();
             acquired.fetch_add(1, Ordering::SeqCst);
         }));
     }
+
+    while ready.load(Ordering::Acquire) != WAITER_COUNT {
+        ktask::yield_now();
+    }
+    // Let the last waiter register its event listener and block.
+    ktask::yield_now();
 
     for _ in 0..WAITER_COUNT {
         sem.release();

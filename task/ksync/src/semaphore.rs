@@ -85,17 +85,11 @@ impl Semaphore {
     ///
     /// Note: This method allows releasing more permits than the semaphore was
     /// initialized with. Callers are responsible for ensuring balanced acquire/release.
-    /// When the count transitions from zero, all current waiters are woken to
-    /// recheck the permit count.
     pub fn release(&self) {
-        let previous = self.count.fetch_add(1, Ordering::Release);
-        if previous == 0 {
-            // A permit becoming available is the only edge that can rescue
-            // waiters already asleep after observing zero.
-            self.event.notify(usize::MAX);
-        } else {
-            self.event.notify(1);
-        }
+        self.count.fetch_add(1, Ordering::Release);
+        // Each release makes one additional permit available, so wake one
+        // previously unnotified waiter even if another notification is pending.
+        self.event.notify_additional(1);
     }
 
     /// Returns the current number of available permits.
