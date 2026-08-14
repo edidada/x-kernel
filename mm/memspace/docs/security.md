@@ -80,10 +80,14 @@
 
 ## vmalloc（通用虚拟连续分配）
 
-- 分配持 `VMALLOC` + `KERNEL_ASPACE` 锁（均 `SpinNoIrq`），必须在任务
-  上下文调用；释放则额外允许 IRQ/NMI 上下文——异常上下文走无锁 deferred
-  队列（固定 64 节点池 + `system_wq` 排空），不分配、不取锁。
+- 分配持 `VMALLOC` + `KERNEL_ASPACE`（均 `SpinNoIrq`），必须在任务
+  上下文调用；释放则额外允许 hardirq/softirq 上下文——异常上下文走无锁
+  deferred 队列（固定 64 节点池 + `system_wq` 排空），不分配、不取锁。
+  NMI 上下文不支持（deferred 排空依赖 workerqueue，内部取锁）。
 - 锁序固定 `VMALLOC` → `KERNEL_ASPACE`；任何路径不得反向取锁。
+- 持锁期间**不执行**同步 TLB shootdown：页表提交用
+  `PageTableMut::finish_no_flush()`，flush 在锁释放后进行，避免 target
+  CPU 在等同一把锁（中断关）时无法应答 shootdown IPI 而互相死锁。
 - deferred 池耗尽视为不可恢复 bug（释放速率持续超过排空速率），panic。
 - guard 区域从不建立映射；调用方必须保证 `size > guard`。
 - 释放路径逐页 unmap 后归还页分配器；失败时记录 warn，不 panic。

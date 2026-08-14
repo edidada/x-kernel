@@ -3334,6 +3334,7 @@ dependencies = [
  "kcpu_id_map",
  "kerrno",
  "khal",
+ "kipi",
  "kirq",
  "kplat",
  "kspin 0.2.0-dev",

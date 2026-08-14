@@ -882,6 +882,16 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         self.flush = ToFlush::None;
         TlbFlushReceipt::new(had_pending)
     }
+
+    /// Commits the page-table mutations without flushing any TLB entries.
+    ///
+    /// Use only when the caller performs the required TLB flush after
+    /// releasing the page-table lock. Holding a `SpinNoIrq` lock while
+    /// `finish()` issues a synchronous TLB shootdown deadlocks whenever a
+    /// target CPU is spinning on the same lock with IRQs disabled.
+    pub fn finish_no_flush(&mut self) {
+        self.flush = ToFlush::None;
+    }
 }
 
 impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop

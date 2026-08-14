@@ -59,10 +59,14 @@ kernel memory），内核栈是其首个客户。结构与 Linux 对齐：
   上界收敛到 kimage 起点，避免与内核映像重叠）。
 - 页表更新在单次 `PageTableMut` 事务内完成，TLB flush 批量合并
   （对应 Linux `map_vm_area` + 一次 flush）。
-- `free` 可从 IRQ/NMI 上下文调用：异常上下文内的释放进入无锁侵入链表，
-  由 `system_wq` 在任务上下文真正拆除映射（对应 Linux `vfree_deferred`）。
+- `free` 可从 hardirq/softirq 上下文调用：异常上下文内的释放进入无锁
+  侵入链表，由 `system_wq` 在任务上下文真正拆除映射（对应 Linux
+  `vfree_deferred`）。NMI 上下文不支持。
 
 锁序固定为 `VMALLOC` → `KERNEL_ASPACE`（均 `SpinNoIrq`），无反向路径。
+持锁期间不发起同步 TLB shootdown：页表提交用 `finish_no_flush()`，flush
+统一在锁释放后进行，避免 target CPU 等锁（中断关）时无法应答 IPI 的
+互相死锁。deferred 释放走无锁链表，IRQ 上下文不会取 `VMALLOC` 锁。
 
 ## 架构
 

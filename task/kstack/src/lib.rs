@@ -100,16 +100,21 @@ impl StackCache {
     }
 
     fn take(&mut self) -> Option<KernelStackMapping> {
-        self.slots.iter_mut().find_map(|s| s.take())
+        self.slots.iter_mut().find_map(|s| s.take()).inspect(|m| {
+            // Scrub on allocation instead of on free: free can run from an IRQ
+            // handler, where a full-stack memset would stretch interrupt
+            // latency, while allocation normally runs in task context.
+            let start = m.usable_start().as_usize();
+            let len = m.usable_size();
+            // SAFETY: the usable range is mapped and owned by this stack, and
+            // it is exclusively handed to the caller after the scrub.
+            unsafe { core::ptr::write_bytes(start as *mut u8, 0, len) };
+        })
     }
 
     fn push(&mut self, m: KernelStackMapping) -> Option<KernelStackMapping> {
         for slot in &mut self.slots {
             if slot.is_none() {
-                let start = m.usable_start().as_usize();
-                let len = m.usable_size();
-                // SAFETY: the usable range is mapped and owned by this stack.
-                unsafe { core::ptr::write_bytes(start as *mut u8, 0, len) };
                 *slot = Some(m);
                 return None;
             }

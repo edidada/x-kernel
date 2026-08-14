@@ -11,15 +11,23 @@
 //!   from user/kernel address-space VMAs (Linux `vmap_area` tree).
 //! - Page-table updates run in a single `PageTableMut` transaction so TLB
 //!   flushes are deferred and coalesced (Linux `map_vm_area` + one flush).
-//! - `free` is callable from exception (IRQ/NMI) context: such frees are
+//! - `free` is callable from hardirq/softirq context: such frees are
 //!   queued on a lock-free intrusive list and drained by `system_wq`
 //!   (Linux `vfree_deferred`). Task-context frees are synchronous.
 //!
 //! # Locking
 //!
 //! Lock order is `VMALLOC` → kernel address-space lock ([`kernel_layout`]);
-//! no other code path takes them in reverse order. The deferred-free list is
-//! lock-free (Treiber stack) so it can be touched from IRQ/NMI context.
+//! no other code path takes them in reverse order. Both are `SpinNoIrq`, and
+//! the lock holders **never** run the synchronous TLB shootdown:
+//! page-table commits use [`page_table::PageTableMut::finish_no_flush`], and
+//! only `free` performs a remote flush ([`kipi::tlb::flush_all_cpus`]) after
+//! releasing the locks. This avoids deadlocking when a target CPU is spinning
+//! on one of these locks with IRQs disabled and thus cannot service the
+//! shootdown IPI. `alloc` needs no flush: a fresh VA has no stale TLB entries,
+//! and a reused VA was already flushed by the preceding `free`. The
+//! deferred-free list is lock-free (Treiber stack) so it can be touched from
+//! IRQ context.
 
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
@@ -136,15 +144,36 @@ pub fn alloc_with(opts: VmAllocOptions) -> KResult<(VmRegion, Vec<usize>)> {
     let nr_pages = usable / PAGE_SIZE_4K;
     let limit = vmalloc_range();
 
+    // Pre-allocate the physical pages outside the vmalloc and kernel
+    // address-space locks: `map_pages` then only touches page tables while
+    // holding the two `SpinNoIrq` locks, keeping IRQs-off time bounded.
+    let mut dm_vas = Vec::with_capacity(nr_pages);
+    for _ in 0..nr_pages {
+        match global_allocator().alloc_pages(1, PAGE_SIZE_4K, kalloc::UsageKind::VirtMem) {
+            Ok(v) => dm_vas.push(v),
+            Err(_) => {
+                for v in dm_vas.drain(..) {
+                    global_allocator().dealloc_pages(v, 1, kalloc::UsageKind::VirtMem);
+                }
+                return Err(KError::NoMemory);
+            }
+        }
+    }
+
     let mut vstate = VMALLOC.lock();
     let Some(va) = vstate.find_free_area(limit, opts.size, align) else {
+        drop(vstate);
+        for v in dm_vas {
+            global_allocator().dealloc_pages(v, 1, kalloc::UsageKind::VirtMem);
+        }
         return Err(KError::NoMemory);
     };
 
-    let mut dm_vas = Vec::with_capacity(nr_pages);
     let mut aspace = kernel_layout().lock();
-    let map_result = map_pages(&mut aspace, va, guard, nr_pages, opts.flags, &mut dm_vas);
+    let map_result = map_pages(&mut aspace, va, guard, opts.flags, &dm_vas);
     if let Err(e) = map_result {
+        drop(aspace);
+        drop(vstate);
         for dm_va in dm_vas {
             global_allocator().dealloc_pages(dm_va, 1, kalloc::UsageKind::VirtMem);
         }
@@ -153,6 +182,11 @@ pub fn alloc_with(opts: VmAllocOptions) -> KResult<(VmRegion, Vec<usize>)> {
     drop(aspace);
 
     vstate.areas.insert(va.as_usize(), opts.size);
+    drop(vstate);
+
+    // No TLB flush here: a freshly allocated VA has no stale TLB entries, and
+    // a reused VA was already flushed synchronously by `free_sync` before the
+    // region could be re-allocated.
     Ok((
         VmRegion {
             va,
@@ -178,35 +212,30 @@ pub fn free(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
 
 // ── Mapping helpers ───────────────────────────────────────────────────
 
-/// Maps `nr_pages` physical pages at `va + guard` in a single page-table
-/// transaction. On failure, previously mapped pages are unmapped inside the
-/// same transaction and `dm_vas` keeps only the still-valid handles.
+/// Maps the pre-allocated pages in `dm_vas` at `va + guard` in a single
+/// page-table transaction. On failure, the already-mapped prefix is unmapped
+/// inside the same transaction and every page stays in `dm_vas` so the caller
+/// can return them to the allocator.
 fn map_pages(
     aspace: &mut MmSpace,
     va: VirtAddr,
     guard: usize,
-    nr_pages: usize,
     flags: MappingFlags,
-    dm_vas: &mut Vec<usize>,
+    dm_vas: &[usize],
 ) -> KResult<()> {
     let mut modify = aspace.page_table_mut().modify();
-    for i in 0..nr_pages {
+    for (i, &dm_va) in dm_vas.iter().enumerate() {
         let page_va = va + guard + i * PAGE_SIZE_4K;
-        let dm_va = global_allocator()
-            .alloc_pages(1, PAGE_SIZE_4K, kalloc::UsageKind::VirtMem)
-            .map_err(|_| KError::NoMemory)?;
         let pa = v2p(VirtAddr::from_usize(dm_va));
         if modify.map(page_va, pa, PageSize::Size4K, flags).is_err() {
             warn!("vmalloc: map {page_va:?} failed; unwinding {i} pages");
-            if !dm_vas.is_empty() {
-                let _ = modify.unmap_region(va + guard, dm_vas.len() * PAGE_SIZE_4K);
+            if i > 0 {
+                let _ = modify.unmap_region(va + guard, i * PAGE_SIZE_4K);
             }
-            global_allocator().dealloc_pages(dm_va, 1, kalloc::UsageKind::VirtMem);
             return Err(KError::NoMemory);
         }
-        dm_vas.push(dm_va);
     }
-    modify.finish();
+    modify.finish_no_flush();
     Ok(())
 }
 
@@ -214,22 +243,41 @@ fn free_sync(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
     let guard = guard_pages * PAGE_SIZE_4K;
     let usable = region.size.saturating_sub(guard);
     let usable_start = region.va + guard;
-    {
-        let mut vstate = VMALLOC.lock();
-        vstate.areas.remove(&region.va.as_usize());
-    }
+
+    // Hold the VMALLOC lock across the unmap so a concurrent alloc can never
+    // first-fit into this VA between the areas removal and the PTE teardown.
+    let mut vstate = VMALLOC.lock();
+    let mut need_flush = false;
     if usable > 0 {
         let mut aspace = kernel_layout().lock();
         let mut modify = aspace.page_table_mut().modify();
         if let Err(e) = modify.unmap_region(usable_start, usable) {
-            warn!(
-                "vmalloc: unmap {:?} size {:#x} failed: {:?}",
+            // The page table no longer matches bookkeeping; keep the areas
+            // entry (preventing VA reuse) and refuse to free the pages.
+            panic!(
+                "vmalloc: unmap {:?} size {:#x} failed: {:?}; page-table state corrupt",
                 usable_start, usable, e
             );
         }
+        // Commit the PTE teardown now, but flush the TLB only after releasing
+        // the locks: a synchronous shootdown while holding `SpinNoIrq` locks
+        // deadlocks a CPU that is spinning on them with IRQs disabled.
+        modify.finish_no_flush();
         drop(modify);
         drop(aspace);
+        need_flush = true;
     }
+    vstate.areas.remove(&region.va.as_usize());
+    drop(vstate);
+
+    if need_flush {
+        // The kernel page table is shared by every CPU, so the unmap must be
+        // reflected in every CPU's TLB. Run the flush outside the `VMALLOC` /
+        // `KERNEL_ASPACE` locks: a synchronous shootdown while holding
+        // `SpinNoIrq` locks deadlocks a CPU spinning on them with IRQs off.
+        kipi::tlb::flush_all_cpus(None);
+    }
+
     for dm_va in pages {
         global_allocator().dealloc_pages(dm_va, 1, kalloc::UsageKind::VirtMem);
     }
@@ -238,7 +286,7 @@ fn free_sync(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
 // ── Deferred free (Linux vfree_deferred) ──────────────────────────────
 //
 // A fixed pool of nodes is linked into a lock-free intrusive list, so queueing
-// from IRQ/NMI context never allocates and never takes a spinlock. `system_wq`
+// from IRQ context never allocates and never takes a spinlock. `system_wq`
 // drains the list and returns the nodes to the pool.
 
 const DEFERRED_POOL_SIZE: usize = 64;
@@ -338,7 +386,8 @@ fn schedule_drain() {
     }
 }
 
-/// Queues a region for deferred teardown. Callable from IRQ/NMI context.
+/// Queues a region for deferred teardown. Callable from hardirq/softirq
+/// context; NMI is not supported (the workerqueue takes spinlocks).
 fn free_deferred(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
     let node = pop_free_node();
     // SAFETY: the node was just removed from the free pool and is exclusively
@@ -379,10 +428,7 @@ fn deferred_drain() {
     }
     // Retry a previously rejected drain attempt.
     if NEED_SCHEDULE.swap(false, Ordering::AcqRel) {
-        let work = DEFERRED_WORK
-            .get()
-            .expect("vmalloc: deferred work not initialized");
-        let _ = kirq::workerqueue::schedule_work(work);
+        schedule_drain();
     }
 }
 

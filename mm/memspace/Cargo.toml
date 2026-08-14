@@ -18,6 +18,7 @@ kcpu_id_map = { workspace = true }
 kerrno = { workspace = true }
 khal = { workspace = true }
 kcpu = { workspace = true }
+kipi = { workspace = true }
 kirq = { workspace = true }
 kplat = { workspace = true }
 kspin = { workspace = true }

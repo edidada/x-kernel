@@ -323,6 +323,15 @@ pub fn mark_all_cpus_started() {
     ALL_CPUS_STARTED.store(true, Ordering::Release);
 }
 
+/// Flushes the TLB of every online CPU for the shared kernel page table.
+///
+/// Safe to call without holding page-table locks; the global shootdown gate
+/// suppresses the IPIs during early boot while secondary CPUs are not yet
+/// able to service them.
+pub fn flush_all_cpus(vaddr: Option<VirtAddr>) {
+    TlbFlushIf::flush_all_cpus(vaddr);
+}
+
 #[kiface::provide]
 impl TlbFlushIf {
     fn flush_process_mask(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
