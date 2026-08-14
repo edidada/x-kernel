@@ -68,6 +68,25 @@
 - `InvalidateSink` spinlock only protects queue mutation; it must not cover
   runtime unmap, page-table mutation, or sleepable lock acquisition.
 - `PageTable::modify()` enforces one mutable page-table guard at a time.
+
+## Kernel stack backend
+
+- `kstack::register_ops` 只能注册一次；二次注册视为 boot 顺序错误并 panic。
+- `VMAP_STACK=y` 时，guard page 是未映射的 VA 空洞，不消耗物理页；对
+  guard 区域的写入由缺页异常捕获，不会静默破坏相邻内存。
+- `VMAP_STACK=n` 时栈来自全局堆，无 guard page——栈溢出仍可能静默破坏
+  相邻堆内存，这是该配置的已知取舍。
+- 栈大小只来自内核内部调用者（`ktask`），不受外部输入控制。
+
+## vmalloc（通用虚拟连续分配）
+
+- 分配持 `VMALLOC` + `KERNEL_ASPACE` 锁（均 `SpinNoIrq`），必须在任务
+  上下文调用；释放则额外允许 IRQ/NMI 上下文——异常上下文走无锁 deferred
+  队列（固定 64 节点池 + `system_wq` 排空），不分配、不取锁。
+- 锁序固定 `VMALLOC` → `KERNEL_ASPACE`；任何路径不得反向取锁。
+- deferred 池耗尽视为不可恢复 bug（释放速率持续超过排空速率），panic。
+- guard 区域从不建立映射；调用方必须保证 `size > guard`。
+- 释放路径逐页 unmap 后归还页分配器；失败时记录 warn，不 panic。
 - file/anon object locks must not be acquired while holding `InvalidateSink`'s
   spinlock.
 - `msync_range()` may block through file-backed runtime/provider sync and is

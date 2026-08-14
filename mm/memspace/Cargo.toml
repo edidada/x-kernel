@@ -17,9 +17,12 @@ kalloc = { workspace = true }
 kcpu_id_map = { workspace = true }
 kerrno = { workspace = true }
 khal = { workspace = true }
+kcpu = { workspace = true }
+kirq = { workspace = true }
 kplat = { workspace = true }
-ksync = { workspace = true }
 kspin = { workspace = true }
+kstack = { workspace = true }
+ksync = { workspace = true }
 lazyinit = { workspace = true }
 log = { workspace = true }
 memaddr = { workspace = true }

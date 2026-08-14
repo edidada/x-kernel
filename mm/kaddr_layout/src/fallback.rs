@@ -18,6 +18,7 @@ pub const LAYOUT: LayoutConsts = LayoutConsts {
     kimage_vaddr: 0xffff_8000_0000_0000,
     kimage_vsize: 0x0000_0000_2000_0000,
     vmalloc_base: 0xffff_8000_4000_0000,
+    vmalloc_end: 0xffff_ffff_ffff_f000,
 };
 
 pub const USER_LAYOUT: UserLayoutConsts = UserLayoutConsts {

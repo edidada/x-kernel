@@ -1,0 +1,20 @@
+[package]
+name = "kstack"
+description = "Kernel stack resource management: allocation, guard pages, and per-CPU caching."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+kbuild_config = { workspace = true }
+kerrno = { workspace = true }
+kspin = { workspace = true }
+lazyinit = { workspace = true }
+memaddr = { workspace = true }
+percpu = { workspace = true }

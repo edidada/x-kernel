@@ -67,6 +67,7 @@ kuaccess = { path = "core/kuaccess" }
 # Internal: task scheduling and synchronization
 kpoll = { path = "task/kpoll" }
 kspin = { path = "task/kspin" }
+kstack = { path = "task/kstack" }
 ksync = { path = "task/ksync" }
 ktask = { path = "task/ktask" }
 ksched = { path = "task/ksched" }

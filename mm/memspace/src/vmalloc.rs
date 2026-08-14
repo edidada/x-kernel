@@ -3,102 +3,362 @@
 // See LICENSES for license details.
 
 //! General-purpose virtually-contiguous kernel memory allocator.
+//!
+//! This is the X-Kernel counterpart of Linux `mm/vmalloc.c`:
+//!
+//! - Virtual-address bookkeeping lives in a dedicated interval table
+//!   ([`VmallocState::areas`]) over `[VMALLOC_BASE, VMALLOC_END)`, separate
+//!   from user/kernel address-space VMAs (Linux `vmap_area` tree).
+//! - Page-table updates run in a single `PageTableMut` transaction so TLB
+//!   flushes are deferred and coalesced (Linux `map_vm_area` + one flush).
+//! - `free` is callable from exception (IRQ/NMI) context: such frees are
+//!   queued on a lock-free intrusive list and drained by `system_wq`
+//!   (Linux `vfree_deferred`). Task-context frees are synchronous.
+//!
+//! # Locking
+//!
+//! Lock order is `VMALLOC` → kernel address-space lock ([`kernel_layout`]);
+//! no other code path takes them in reverse order. The deferred-free list is
+//! lock-free (Treiber stack) so it can be touched from IRQ/NMI context.
 
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
+use core::sync::atomic::{AtomicPtr, Ordering};
 
-use kaddr_layout::{KERNEL_ASPACE_BASE, KERNEL_ASPACE_SIZE, VMALLOC_BASE};
+use kaddr_layout::{VMALLOC_BASE, VMALLOC_END};
 use kalloc::global_allocator;
 use kerrno::{KError, KResult};
 use khal::{mem::v2p, paging::MappingFlags};
-use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
+use kspin::SpinNoIrq;
+use lazyinit::LazyInit;
+use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
+use page_table::PageSize;
 
-use crate::kernel_layout;
+use crate::{aspace::MmSpace, kernel_layout};
 
+/// An allocated virtual region. The caller owns it until it is passed back
+/// to [`free`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VmRegion {
+    /// Base of the whole region, including any guard region.
     pub va: VirtAddr,
+    /// Total size of the region, including any guard region.
     pub size: usize,
 }
 
+/// Allocation parameters for [`alloc_with`].
+#[derive(Debug, Clone, Copy)]
+pub struct VmAllocOptions {
+    /// Total size of the allocation, including the guard region. Must be a
+    /// multiple of 4 KiB.
+    pub size: usize,
+    /// VA alignment; must be a power of two of at least 4 KiB.
+    pub align: usize,
+    /// Mapping flags applied to every page.
+    pub flags: MappingFlags,
+    /// Number of unmapped guard pages at the base of the region.
+    pub guard_pages: usize,
+}
+
+// ── VA interval bookkeeping (Linux vmap_area) ─────────────────────────
+
+struct VmallocState {
+    /// Allocated intervals: start VA → size. Kept disjoint and sorted.
+    areas: BTreeMap<usize, usize>,
+}
+
+const fn empty_state() -> VmallocState {
+    VmallocState {
+        areas: BTreeMap::new(),
+    }
+}
+
+static VMALLOC: SpinNoIrq<VmallocState> = SpinNoIrq::new(empty_state());
+
 fn vmalloc_range() -> VirtAddrRange {
-    let start = VirtAddr::from(VMALLOC_BASE);
-    let end = VirtAddr::from(KERNEL_ASPACE_BASE) + KERNEL_ASPACE_SIZE;
+    let start = VirtAddr::from_usize(VMALLOC_BASE);
+    let end = VirtAddr::from_usize(VMALLOC_END);
     VirtAddrRange::from_start_size(start, end.as_usize().saturating_sub(VMALLOC_BASE))
 }
 
+impl VmallocState {
+    /// Finds a free interval of `size` bytes inside `limit`, aligned to
+    /// `align`, scanning the allocated intervals in ascending order.
+    fn find_free_area(&self, limit: VirtAddrRange, size: usize, align: usize) -> Option<VirtAddr> {
+        if size == 0 || !size.is_multiple_of(align) {
+            return None;
+        }
+        let mut last_end = limit.start.align_up(align);
+        for (&start, &area_size) in self.areas.range(last_end.as_usize()..) {
+            let start = VirtAddr::from_usize(start).max(last_end);
+            if start.as_usize().saturating_sub(last_end.as_usize()) >= size {
+                return Some(last_end);
+            }
+            last_end = VirtAddr::from_usize(start.as_usize() + area_size).align_up(align);
+        }
+        if limit.end.as_usize().saturating_sub(last_end.as_usize()) >= size {
+            Some(last_end)
+        } else {
+            None
+        }
+    }
+}
+
+// ── Public API ────────────────────────────────────────────────────────
+
+/// Allocates a virtually-contiguous region with default options: 4 KiB
+/// alignment, read-write pages, and `guard_pages` unmapped guard pages.
 pub fn alloc(size: usize, guard_pages: usize) -> KResult<(VmRegion, Vec<usize>)> {
-    let guard = guard_pages * PAGE_SIZE_4K;
-    if size <= guard {
+    alloc_with(VmAllocOptions {
+        size,
+        align: PAGE_SIZE_4K,
+        flags: MappingFlags::READ | MappingFlags::WRITE,
+        guard_pages,
+    })
+}
+
+/// Allocates a virtually-contiguous region according to [`VmAllocOptions`].
+///
+/// On success the caller receives the region handle and the physical-page
+/// handles (`dm_va`) backing the usable range, in order.
+pub fn alloc_with(opts: VmAllocOptions) -> KResult<(VmRegion, Vec<usize>)> {
+    let guard = opts.guard_pages * PAGE_SIZE_4K;
+    if opts.size <= guard {
         return Err(KError::NoMemory);
     }
-    let nr_pages = (size - guard) / PAGE_SIZE_4K;
-
-    let mut aspace = kernel_layout().lock();
+    let usable = opts.size - guard;
+    let align = opts.align.max(PAGE_SIZE_4K);
+    if !usable.is_multiple_of(PAGE_SIZE_4K) || !opts.size.is_multiple_of(PAGE_SIZE_4K) {
+        return Err(KError::NoMemory);
+    }
+    let nr_pages = usable / PAGE_SIZE_4K;
     let limit = vmalloc_range();
-    let va = aspace
-        .find_free_area(limit.start, size, limit, PAGE_SIZE_4K)
-        .ok_or(KError::NoMemory)?;
+
+    let mut vstate = VMALLOC.lock();
+    let Some(va) = vstate.find_free_area(limit, opts.size, align) else {
+        return Err(KError::NoMemory);
+    };
 
     let mut dm_vas = Vec::with_capacity(nr_pages);
+    let mut aspace = kernel_layout().lock();
+    let map_result = map_pages(&mut aspace, va, guard, nr_pages, opts.flags, &mut dm_vas);
+    if let Err(e) = map_result {
+        for dm_va in dm_vas {
+            global_allocator().dealloc_pages(dm_va, 1, kalloc::UsageKind::VirtMem);
+        }
+        return Err(e);
+    }
+    drop(aspace);
+
+    vstate.areas.insert(va.as_usize(), opts.size);
+    Ok((
+        VmRegion {
+            va,
+            size: opts.size,
+        },
+        dm_vas,
+    ))
+}
+
+/// Frees a region previously returned by [`alloc`]/[`alloc_with`].
+///
+/// Safe to call from hardirq/softirq/NMI context: the actual teardown is
+/// deferred to `system_wq` in that case.
+pub fn free(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
+    if kcpu::in_exception_context() {
+        free_deferred(region, guard_pages, pages);
+    } else {
+        free_sync(region, guard_pages, pages);
+    }
+}
+
+// ── Mapping helpers ───────────────────────────────────────────────────
+
+/// Maps `nr_pages` physical pages at `va + guard` in a single page-table
+/// transaction. On failure, previously mapped pages are unmapped inside the
+/// same transaction and `dm_vas` keeps only the still-valid handles.
+fn map_pages(
+    aspace: &mut MmSpace,
+    va: VirtAddr,
+    guard: usize,
+    nr_pages: usize,
+    flags: MappingFlags,
+    dm_vas: &mut Vec<usize>,
+) -> KResult<()> {
+    let mut modify = aspace.page_table_mut().modify();
     for i in 0..nr_pages {
         let page_va = va + guard + i * PAGE_SIZE_4K;
-        let dm_va =
-            match global_allocator().alloc_pages(1, PAGE_SIZE_4K, kalloc::UsageKind::VirtMem) {
-                Ok(v) => v,
-                Err(_) => {
-                    // Unwind: unmap + free already-mapped pages.
-                    if i > 0 {
-                        let _ = aspace.unmap(va + guard, i * PAGE_SIZE_4K);
-                    }
-                    for v in dm_vas {
-                        global_allocator().dealloc_pages(v, 1, kalloc::UsageKind::VirtMem);
-                    }
-                    return Err(KError::NoMemory);
-                }
-            };
-        let pa = v2p(VirtAddr::from(dm_va));
-        if aspace
-            .map_linear(
-                page_va,
-                pa,
-                PAGE_SIZE_4K,
-                MappingFlags::READ | MappingFlags::WRITE,
-            )
-            .is_err()
-        {
-            // `dm_va` not pushed to vec yet; free it + unwind prior pages.
+        let dm_va = global_allocator()
+            .alloc_pages(1, PAGE_SIZE_4K, kalloc::UsageKind::VirtMem)
+            .map_err(|_| KError::NoMemory)?;
+        let pa = v2p(VirtAddr::from_usize(dm_va));
+        if modify.map(page_va, pa, PageSize::Size4K, flags).is_err() {
+            warn!("vmalloc: map {page_va:?} failed; unwinding {i} pages");
+            if !dm_vas.is_empty() {
+                let _ = modify.unmap_region(va + guard, dm_vas.len() * PAGE_SIZE_4K);
+            }
             global_allocator().dealloc_pages(dm_va, 1, kalloc::UsageKind::VirtMem);
-            if i > 0 {
-                let _ = aspace.unmap(va + guard, i * PAGE_SIZE_4K);
-            }
-            for v in dm_vas {
-                global_allocator().dealloc_pages(v, 1, kalloc::UsageKind::VirtMem);
-            }
             return Err(KError::NoMemory);
         }
         dm_vas.push(dm_va);
     }
-
-    Ok((VmRegion { va, size }, dm_vas))
+    modify.finish();
+    Ok(())
 }
 
-pub fn free(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
+fn free_sync(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
     let guard = guard_pages * PAGE_SIZE_4K;
-    if region.size <= guard {
-        return;
-    }
-    let usable = region.size - guard;
+    let usable = region.size.saturating_sub(guard);
     let usable_start = region.va + guard;
-
-    let mut aspace = kernel_layout().lock();
-    if let Err(e) = aspace.unmap(usable_start, usable) {
-        warn!(
-            "vmalloc::free: unmap {:?} size {:#x} failed: {:?}",
-            usable_start, usable, e
-        );
+    {
+        let mut vstate = VMALLOC.lock();
+        vstate.areas.remove(&region.va.as_usize());
     }
-    drop(aspace);
-
+    if usable > 0 {
+        let mut aspace = kernel_layout().lock();
+        let mut modify = aspace.page_table_mut().modify();
+        if let Err(e) = modify.unmap_region(usable_start, usable) {
+            warn!(
+                "vmalloc: unmap {:?} size {:#x} failed: {:?}",
+                usable_start, usable, e
+            );
+        }
+        drop(modify);
+        drop(aspace);
+    }
     for dm_va in pages {
         global_allocator().dealloc_pages(dm_va, 1, kalloc::UsageKind::VirtMem);
+    }
+}
+
+// ── Deferred free (Linux vfree_deferred) ──────────────────────────────
+//
+// A fixed pool of nodes is linked into a lock-free intrusive list, so queueing
+// from IRQ/NMI context never allocates and never takes a spinlock. `system_wq`
+// drains the list and returns the nodes to the pool.
+
+const DEFERRED_POOL_SIZE: usize = 64;
+
+struct PendingFreeNode {
+    next: AtomicPtr<PendingFreeNode>,
+    region: VmRegion,
+    guard_pages: usize,
+    pages: Vec<usize>,
+}
+
+const fn empty_node() -> PendingFreeNode {
+    PendingFreeNode {
+        next: AtomicPtr::new(core::ptr::null_mut()),
+        region: VmRegion {
+            va: VirtAddr::from_usize(0),
+            size: 0,
+        },
+        guard_pages: 0,
+        pages: Vec::new(),
+    }
+}
+
+static NODES: [PendingFreeNode; DEFERRED_POOL_SIZE] = [const { empty_node() }; DEFERRED_POOL_SIZE];
+static FREE_HEAD: AtomicPtr<PendingFreeNode> = AtomicPtr::new(core::ptr::null_mut());
+static RELEASE_HEAD: AtomicPtr<PendingFreeNode> = AtomicPtr::new(core::ptr::null_mut());
+static DEFERRED_WORK: LazyInit<kirq::workerqueue::WorkItem> = LazyInit::new();
+
+/// Prepares the deferred-free pool and registers the drain work item.
+/// Called once at boot from task context.
+pub fn init() {
+    for node in &NODES {
+        // SAFETY: boot is single-threaded and the nodes are not yet on any
+        // list; each node is exclusively owned by the free pool afterwards.
+        llist_add(node as *const _ as *mut _, &FREE_HEAD);
+    }
+    DEFERRED_WORK.init_once(kirq::workerqueue::WorkItem::new(|_work| {
+        deferred_drain();
+    }));
+}
+
+/// Adds `node` to the head of `head`; returns true if the list was empty.
+fn llist_add(node: *mut PendingFreeNode, head: &AtomicPtr<PendingFreeNode>) -> bool {
+    let mut cur = head.load(Ordering::Relaxed);
+    loop {
+        // SAFETY: `node` is exclusively owned by the caller and not on any
+        // list; the `next` slot is not read concurrently while we write it.
+        unsafe { (*node).next.store(cur, Ordering::Relaxed) };
+        match head.compare_exchange_weak(cur, node, Ordering::Release, Ordering::Relaxed) {
+            Ok(_) => return cur.is_null(),
+            Err(actual) => cur = actual,
+        }
+    }
+}
+
+/// Detaches and returns the whole list.
+fn llist_pop_all(head: &AtomicPtr<PendingFreeNode>) -> *mut PendingFreeNode {
+    head.swap(core::ptr::null_mut(), Ordering::Acquire)
+}
+
+/// Takes one node from the free pool, or panics if the pool is exhausted.
+fn pop_free_node() -> *mut PendingFreeNode {
+    loop {
+        let head = FREE_HEAD.load(Ordering::Relaxed);
+        if head.is_null() {
+            panic!("vmalloc: deferred-free pool exhausted");
+        }
+        // SAFETY: `head` points to a node owned by the free pool.
+        let next = unsafe { (*head).next.load(Ordering::Relaxed) };
+        if FREE_HEAD
+            .compare_exchange_weak(head, next, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            return head;
+        }
+    }
+}
+
+/// Queues a region for deferred teardown. Callable from IRQ/NMI context.
+fn free_deferred(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
+    let node = pop_free_node();
+    // SAFETY: the node was just removed from the free pool and is exclusively
+    // owned here; its previous contents (empty `pages`) are dropped.
+    unsafe {
+        (*node).region = region;
+        (*node).guard_pages = guard_pages;
+        (*node).pages = pages;
+    }
+    if llist_add(node, &RELEASE_HEAD) {
+        let work = DEFERRED_WORK
+            .get()
+            .expect("vmalloc: deferred work not initialized");
+        let result = kirq::workerqueue::schedule_work(work);
+        if !matches!(result, kirq::workerqueue::QueueWorkResult::Queued) {
+            // `AlreadyQueued` is fine (a drain is in flight); anything else
+            // means the work may not run, which would leak the node.
+            if result != kirq::workerqueue::QueueWorkResult::AlreadyQueued {
+                warn!("vmalloc: deferred drain not queued: {result:?}");
+            }
+        }
+    }
+}
+
+/// Drains all queued frees. Runs on `system_wq` (task context).
+fn deferred_drain() {
+    loop {
+        let head = llist_pop_all(&RELEASE_HEAD);
+        if head.is_null() {
+            return;
+        }
+        let mut node = head;
+        while !node.is_null() {
+            // SAFETY: this worker is the only consumer of the detached list;
+            // nodes are exclusively owned while they are being drained.
+            let (next, region, guard_pages, pages) = unsafe {
+                let next = (*node).next.load(Ordering::Relaxed);
+                let region = (*node).region;
+                let guard_pages = (*node).guard_pages;
+                let pages = core::mem::take(&mut (*node).pages);
+                (next, region, guard_pages, pages)
+            };
+            free_sync(region, guard_pages, pages);
+            // SAFETY: the node is idle again and exclusively owned.
+            llist_add(node, &FREE_HEAD);
+            node = next;
+        }
     }
 }

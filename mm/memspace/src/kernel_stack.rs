@@ -12,17 +12,17 @@
 use alloc::vec::Vec;
 
 use kerrno::KResult;
-use khal::stack::KernelStackMapping;
+use kstack::KernelStackMapping;
 
 /// Register the strategy chosen by `CONFIG_VMAP_STACK`.
 pub fn register() {
     #[cfg(feature = "vmap_stack")]
     {
-        khal::stack::register_ops(alloc_vm, free_vm);
+        kstack::register_ops(alloc_vm, free_vm);
     }
     #[cfg(not(feature = "vmap_stack"))]
     {
-        khal::stack::register_ops(alloc_heap, free_heap);
+        kstack::register_ops(alloc_heap, free_heap);
     }
 }
 

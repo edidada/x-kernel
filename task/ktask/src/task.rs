@@ -1073,12 +1073,12 @@ impl Drop for TaskInner {
 }
 
 struct TaskStack {
-    mapping: Option<khal::stack::KernelStackMapping>,
+    mapping: Option<kstack::KernelStackMapping>,
 }
 
 impl TaskStack {
     pub fn alloc(size: usize) -> Self {
-        let mapping = khal::stack::alloc(size).expect("failed to allocate kernel stack");
+        let mapping = kstack::alloc(size).expect("failed to allocate kernel stack");
         Self {
             mapping: Some(mapping),
         }
@@ -1092,7 +1092,7 @@ impl TaskStack {
 impl Drop for TaskStack {
     fn drop(&mut self) {
         if let Some(m) = self.mapping.take() {
-            khal::stack::free(m);
+            kstack::free(m);
         }
     }
 }

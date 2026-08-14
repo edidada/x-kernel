@@ -45,7 +45,6 @@ pub mod console;
 pub mod firmware;
 pub mod mem;
 pub mod percpu;
-pub mod stack;
 pub mod time;
 
 #[cfg(feature = "tls")]

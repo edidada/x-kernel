@@ -24,6 +24,7 @@ pub const LAYOUT: LayoutConsts = LayoutConsts {
     kimage_vaddr: 0xffff_ff80_0000_0000,
     kimage_vsize: 0x0000_0080_0000_0000,
     vmalloc_base: 0xffff_ff00_2000_0000, // iomap end
+    vmalloc_end: 0xffff_ff80_0000_0000,  // kimage start
 };
 
 // x86_64 user VA layout (low canonical half):

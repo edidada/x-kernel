@@ -31,7 +31,6 @@ firmware_handoff = { workspace = true }
 kcpu = { workspace = true }
 kirq = { workspace = true }
 kplat.workspace = true
-kbuild_config.workspace = true
 kerrno.workspace = true
 kernel_boot.workspace = true
 cfg-if.workspace = true

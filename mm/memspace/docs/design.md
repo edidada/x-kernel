@@ -36,6 +36,33 @@ Linux 对应关系：
 - `src/fault.rs`
 - `src/backend/*`
 - `src/iomap.rs`
+- `src/vmalloc.rs`
+- `src/kernel_stack.rs`
+
+## 内核栈后端（vmalloc / kernel_stack）
+
+`src/kernel_stack.rs` 是 `kstack` 的 memspace 侧后端：boot 时通过
+`kstack::register_ops` 注入，`ktask` 只依赖 `kstack`，不依赖 memspace，
+避免 `memspace -> ksync -> ktask` 依赖环。
+
+- `VMAP_STACK=n`：后端为全局堆（`alloc`/`dealloc`），无 guard page。
+- `VMAP_STACK=y`：后端为 `src/vmalloc.rs`。它在内核地址空间 iomap 之后的
+  专用区间（`VMALLOC_BASE` 起）内找空闲 VA，逐页映射物理页，并在栈底留
+  一个 unmapped guard page；栈向下增长，越界写触发 page fault。
+
+`vmalloc` 的目标是 Linux `vmalloc` 的通用等价物（virtually-contiguous
+kernel memory），内核栈是其首个客户。结构与 Linux 对齐：
+
+- VA 分配由 `vmalloc.rs` 内部的独立区间表（`BTreeMap`，对应 Linux
+  `vmap_area` 树）管理，不进入地址空间 VMA 树；分配区间为
+  `[VMALLOC_BASE, VMALLOC_END)`，每架构显式定义（x86_64/loongarch64
+  上界收敛到 kimage 起点，避免与内核映像重叠）。
+- 页表更新在单次 `PageTableMut` 事务内完成，TLB flush 批量合并
+  （对应 Linux `map_vm_area` + 一次 flush）。
+- `free` 可从 IRQ/NMI 上下文调用：异常上下文内的释放进入无锁侵入链表，
+  由 `system_wq` 在任务上下文真正拆除映射（对应 Linux `vfree_deferred`）。
+
+锁序固定为 `VMALLOC` → `KERNEL_ASPACE`（均 `SpinNoIrq`），无反向路径。
 
 ## 架构
 

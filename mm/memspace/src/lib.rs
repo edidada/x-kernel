@@ -28,7 +28,7 @@ use khal::{
     mem::{MemFlags, MemoryRegion, memory_regions, p2v},
     paging::MappingFlags,
 };
-use kspin::SpinNoPreempt;
+use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 use memaddr::{MemoryAddr, PhysAddr, va};
 pub use vmobj::{ObjectInvalidateRequest, VmObjectId};
@@ -58,11 +58,10 @@ pub mod process_lifetime {
 
 /// Global kernel address space.
 ///
-/// Protected by `SpinNoPreempt` (not `SpinNoIrq`): this lock must **never**
-/// be acquired from IRQ or exception context.  Doing so would deadlock the
-/// current CPU if it already holds the lock.  All current callers are in
-/// task context — see `kernel_layout()` for the full list.
-static KERNEL_ASPACE: LazyInit<SpinNoPreempt<MmSpace>> = LazyInit::new();
+/// Protected by `SpinNoIrq`: while the lock is held the current CPU's IRQs
+/// are disabled, so IRQ-handler paths never re-enter the lock on the same
+/// CPU. `vmalloc` additionally orders `VMALLOC` before this lock.
+static KERNEL_ASPACE: LazyInit<SpinNoIrq<MmSpace>> = LazyInit::new();
 
 fn mem_to_mapping_flags(f: MemFlags) -> MappingFlags {
     let mut flags = MappingFlags::empty();
@@ -119,20 +118,11 @@ pub fn new_kernel_layout() -> LinuxResult<MmSpace> {
 ///
 /// # Locking contract
 ///
-/// The lock is `SpinNoPreempt` (IRQs enabled).  **Must never be acquired
-/// from IRQ or exception context** — if the current CPU already holds the
-/// lock, a nested acquisition will deadlock.
-///
-/// All current callers are in task context:
-///
-/// | Caller | Context |
-/// |--------|---------|
-/// | `vmalloc` alloc/free | task create / destroy / GC |
-/// | `iomap_device` / `iounmap` | device init / teardown |
-/// | `copy_mappings_from` | fork |
-/// | `DmaPageTableIf::protect` | DMA alloc / dealloc |
-/// | `write_kernel_text` | static-key patching |
-pub fn kernel_layout() -> &'static SpinNoPreempt<MmSpace> {
+/// The lock is `SpinNoIrq` (IRQs disabled while held). It is a low-level
+/// kernel-space lock: user address spaces have their own per-`MmSpace`
+/// locks. `vmalloc` holds `VMALLOC` before this lock; no path takes them in
+/// the opposite order.
+pub fn kernel_layout() -> &'static SpinNoIrq<MmSpace> {
     &KERNEL_ASPACE
 }
 
@@ -153,14 +143,16 @@ pub fn init_memory_management() {
     );
     let kernel_layout = new_kernel_layout().expect("failed to initialize kernel address space");
     debug!("kernel address space init OK: {:#x?}", kernel_layout);
-    KERNEL_ASPACE.init_once(SpinNoPreempt::new(kernel_layout));
+    KERNEL_ASPACE.init_once(SpinNoIrq::new(kernel_layout));
     // SAFETY: `kernel_page_table_root()` returns the initialized kernel root
     // page table that must become active before continuing boot.
     unsafe { karch::write_kernel_page_table(kernel_page_table_root().into()) };
     // flush all TLB
     karch::flush_tlb(None);
-    // Register kernel stack allocator so ktask can allocate stacks without
-    // depending on memspace directly (avoids circular dep with ksync/ktask).
+    // Register the kernel stack backend into `kstack`. `ktask` consumes
+    // stacks through `kstack` without depending on memspace directly,
+    // avoiding a circular dep with the task layer (memspace -> ksync -> ktask).
+    vmalloc::init();
     kernel_stack::register();
 }
 

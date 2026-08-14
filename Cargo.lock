@@ -2413,7 +2413,6 @@ dependencies = [
  "heapless",
  "kaddr_layout",
  "kalloc",
- "kbuild_config",
  "kcpu",
  "kernel-boot",
  "kerrno",
@@ -2877,6 +2876,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kstack"
+version = "0.2.0-dev"
+dependencies = [
+ "kbuild_config",
+ "kerrno",
+ "kspin 0.2.0-dev",
+ "lazyinit",
+ "memaddr",
+ "percpu",
+]
+
+[[package]]
 name = "ksync"
 version = "0.2.0-dev"
 dependencies = [
@@ -2957,6 +2968,7 @@ dependencies = [
  "kpoll",
  "ksched",
  "kspin 0.2.0-dev",
+ "kstack",
  "ktime",
  "ktime_types",
  "lazyinit",
@@ -3318,11 +3330,14 @@ dependencies = [
  "kalloc",
  "karch",
  "kbuild_config",
+ "kcpu",
  "kcpu_id_map",
  "kerrno",
  "khal",
+ "kirq",
  "kplat",
  "kspin 0.2.0-dev",
+ "kstack",
  "ksync",
  "lazyinit",
  "log",
