@@ -67,10 +67,7 @@ struct StackOps {
 static OPS: LazyInit<StackOps> = LazyInit::new();
 
 /// Registers the backing allocator. Called once at boot by `memspace`.
-pub fn register_ops(
-    alloc: fn(usize) -> KResult<KernelStackMapping>,
-    free: fn(KernelStackMapping),
-) {
+pub fn register_ops(alloc: fn(usize) -> KResult<KernelStackMapping>, free: fn(KernelStackMapping)) {
     OPS.init_once(StackOps { alloc, free });
 }
 
@@ -155,4 +152,3 @@ pub fn free(mapping: KernelStackMapping) {
         (ops().free)(m)
     }
 }
-
