@@ -22,7 +22,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use kerrno::KResult;
-use kspin::NoPreempt;
+use kspin::NoPreemptIrqSave;
 use lazyinit::LazyInit;
 use memaddr::VirtAddr;
 
@@ -119,7 +119,9 @@ impl StackCache {
 }
 
 fn with_cache<R>(f: impl FnOnce(&mut StackCache) -> R) -> R {
-    // SAFETY: `current_ref_mut_raw` accesses the calling CPU's own instance.
+    // SAFETY: every caller holds `NoPreemptIrqSave`, so the calling CPU's
+    // instance is not aliased by preemption or by an IRQ handler that
+    // re-enters `alloc`/`free` on the same CPU.
     f(unsafe { &mut *CACHE.current_ref_mut_raw() })
 }
 
@@ -132,7 +134,7 @@ fn cacheable(size: usize) -> bool {
 
 /// Allocates a kernel stack of the requested size.
 pub fn alloc(size: usize) -> KResult<KernelStackMapping> {
-    let _guard = NoPreempt::new();
+    let _guard = NoPreemptIrqSave::new();
     if cacheable(size)
         && let Some(m) = with_cache(|c| c.take())
     {
@@ -143,7 +145,7 @@ pub fn alloc(size: usize) -> KResult<KernelStackMapping> {
 
 /// Frees a kernel stack, caching standard-size stacks for reuse.
 pub fn free(mapping: KernelStackMapping) {
-    let _guard = NoPreempt::new();
+    let _guard = NoPreemptIrqSave::new();
     if !cacheable(mapping.usable_size()) {
         (ops().free)(mapping);
         return;

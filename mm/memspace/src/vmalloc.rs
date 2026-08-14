@@ -22,7 +22,7 @@
 //! lock-free (Treiber stack) so it can be touched from IRQ/NMI context.
 
 use alloc::{collections::BTreeMap, vec::Vec};
-use core::sync::atomic::{AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use kaddr_layout::{VMALLOC_BASE, VMALLOC_END};
 use kalloc::global_allocator;
@@ -122,13 +122,16 @@ pub fn alloc(size: usize, guard_pages: usize) -> KResult<(VmRegion, Vec<usize>)>
 /// handles (`dm_va`) backing the usable range, in order.
 pub fn alloc_with(opts: VmAllocOptions) -> KResult<(VmRegion, Vec<usize>)> {
     let guard = opts.guard_pages * PAGE_SIZE_4K;
+    if !opts.align.is_power_of_two() {
+        return Err(KError::InvalidInput);
+    }
+    let align = opts.align.max(PAGE_SIZE_4K);
     if opts.size <= guard {
-        return Err(KError::NoMemory);
+        return Err(KError::InvalidInput);
     }
     let usable = opts.size - guard;
-    let align = opts.align.max(PAGE_SIZE_4K);
     if !usable.is_multiple_of(PAGE_SIZE_4K) || !opts.size.is_multiple_of(PAGE_SIZE_4K) {
-        return Err(KError::NoMemory);
+        return Err(KError::InvalidInput);
     }
     let nr_pages = usable / PAGE_SIZE_4K;
     let limit = vmalloc_range();
@@ -161,8 +164,10 @@ pub fn alloc_with(opts: VmAllocOptions) -> KResult<(VmRegion, Vec<usize>)> {
 
 /// Frees a region previously returned by [`alloc`]/[`alloc_with`].
 ///
-/// Safe to call from hardirq/softirq/NMI context: the actual teardown is
-/// deferred to `system_wq` in that case.
+/// Safe to call from hardirq/softirq and task context: in exception context
+/// the teardown is queued on the lock-free deferred list and drained by
+/// `system_wq`. NMI context is not supported — the workerqueue does not
+/// promise NMI safety, so NMI handlers must not release kernel stacks.
 pub fn free(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
     if kcpu::in_exception_context() {
         free_deferred(region, guard_pages, pages);
@@ -262,6 +267,10 @@ static FREE_HEAD: AtomicPtr<PendingFreeNode> = AtomicPtr::new(core::ptr::null_mu
 static RELEASE_HEAD: AtomicPtr<PendingFreeNode> = AtomicPtr::new(core::ptr::null_mut());
 static DEFERRED_WORK: LazyInit<kirq::workerqueue::WorkItem> = LazyInit::new();
 
+/// Set when a drain attempt was rejected (e.g. `QueueFull`) so the next push
+/// or drain retries instead of leaving nodes parked on the list.
+static NEED_SCHEDULE: AtomicBool = AtomicBool::new(false);
+
 /// Prepares the deferred-free pool and registers the drain work item.
 /// Called once at boot from task context.
 pub fn init() {
@@ -312,6 +321,23 @@ fn pop_free_node() -> *mut PendingFreeNode {
     }
 }
 
+fn schedule_drain() {
+    let work = DEFERRED_WORK
+        .get()
+        .expect("vmalloc: deferred work not initialized");
+    let result = kirq::workerqueue::schedule_work(work);
+    match result {
+        kirq::workerqueue::QueueWorkResult::Queued
+        | kirq::workerqueue::QueueWorkResult::AlreadyQueued => {}
+        other => {
+            // The fixed queue is full or disabled; retry on the next push or
+            // at the end of the next drain instead of leaving nodes parked.
+            NEED_SCHEDULE.store(true, Ordering::Release);
+            warn!("vmalloc: deferred drain not queued ({other:?}); will retry");
+        }
+    }
+}
+
 /// Queues a region for deferred teardown. Callable from IRQ/NMI context.
 fn free_deferred(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
     let node = pop_free_node();
@@ -322,18 +348,8 @@ fn free_deferred(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
         (*node).guard_pages = guard_pages;
         (*node).pages = pages;
     }
-    if llist_add(node, &RELEASE_HEAD) {
-        let work = DEFERRED_WORK
-            .get()
-            .expect("vmalloc: deferred work not initialized");
-        let result = kirq::workerqueue::schedule_work(work);
-        if !matches!(result, kirq::workerqueue::QueueWorkResult::Queued) {
-            // `AlreadyQueued` is fine (a drain is in flight); anything else
-            // means the work may not run, which would leak the node.
-            if result != kirq::workerqueue::QueueWorkResult::AlreadyQueued {
-                warn!("vmalloc: deferred drain not queued: {result:?}");
-            }
-        }
+    if llist_add(node, &RELEASE_HEAD) || NEED_SCHEDULE.swap(false, Ordering::AcqRel) {
+        schedule_drain();
     }
 }
 
@@ -342,7 +358,7 @@ fn deferred_drain() {
     loop {
         let head = llist_pop_all(&RELEASE_HEAD);
         if head.is_null() {
-            return;
+            break;
         }
         let mut node = head;
         while !node.is_null() {
@@ -360,5 +376,38 @@ fn deferred_drain() {
             llist_add(node, &FREE_HEAD);
             node = next;
         }
+    }
+    // Retry a previously rejected drain attempt.
+    if NEED_SCHEDULE.swap(false, Ordering::AcqRel) {
+        let work = DEFERRED_WORK
+            .get()
+            .expect("vmalloc: deferred work not initialized");
+        let _ = kirq::workerqueue::schedule_work(work);
+    }
+}
+
+#[cfg(all(unittest, feature = "vmap_stack"))]
+mod tests_vmalloc {
+    use unittest::def_test;
+
+    use super::*;
+
+    #[def_test]
+    fn guard_hole_is_unmapped_usable_is_mapped() {
+        let (region, pages) = alloc(0x4000, 1).expect("vmalloc alloc");
+        let guard_start = region.va;
+        let usable_start = region.va + memaddr::PAGE_SIZE_4K;
+        {
+            let aspace = kernel_layout().lock();
+            assert!(
+                aspace.page_table().query(guard_start).is_err(),
+                "guard page must be an unmapped VA hole"
+            );
+            assert!(
+                aspace.page_table().query(usable_start).is_ok(),
+                "first usable page must be mapped"
+            );
+        }
+        free(region, 1, pages);
     }
 }

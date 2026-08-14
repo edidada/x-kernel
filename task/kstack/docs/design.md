@@ -29,8 +29,9 @@ stacks are scrubbed before reuse.
 
 ## Locking and context
 
-`alloc`/`free` run with preemption disabled (`NoPreempt`) so the per-CPU cache
-is only touched by the current CPU. Backend implementations (see `memspace`)
-must respect the calling context: stack free can happen at task-destruction
-time, so backends must not rely on interruptible context.
-
+`alloc`/`free` run with preemption and IRQs disabled
+(`NoPreemptIrqSave`) so the per-CPU cache is only touched by the current CPU
+and an IRQ handler can never re-enter the same cache on the same CPU.
+Backend implementations (see `memspace`) must respect the calling context:
+stack free can happen at task-destruction time or from an IRQ handler, so
+backends must not rely on interruptible context.
