@@ -24,10 +24,10 @@ pub const LAYOUT: LayoutConsts = LayoutConsts {
     page_offset: 0xffff_8000_0000_0000,
     iomap_vaddr: 0xffff_ff00_0020_0000,
     iomap_vsize: 0x0000_0000_2000_0000,
-    kimage_vaddr: 0xffff_ff80_0020_0000,
-    kimage_vsize: 0x0000_0000_2000_0000,
     vmalloc_base: 0xffff_ff00_0040_0000, // iomap end
     vmalloc_end: 0xffff_ff80_0020_0000,  // kimage start
+    kimage_vaddr: 0xffff_ff80_0020_0000,
+    kimage_vsize: 0x0000_0000_2000_0000,
 };
 
 // LoongArch64 user VA layout (low canonical half):

@@ -20,10 +20,10 @@ pub struct LayoutConsts {
     pub linear_map_vaddr: usize,
     pub linear_map_vsize: usize,
     pub page_offset: usize,
-    pub iomap_vaddr: usize,
-    pub iomap_vsize: usize,
     pub kimage_vaddr: usize,
     pub kimage_vsize: usize,
+    pub iomap_vaddr: usize,
+    pub iomap_vsize: usize,
     pub vmalloc_base: usize,
     pub vmalloc_end: usize,
 }
