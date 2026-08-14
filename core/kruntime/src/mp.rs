@@ -102,15 +102,23 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     #[cfg(feature = "ipi")]
     kipi::init();
 
+    // Secondary bring-up runs while the global TLB-shootdown gate is closed,
+    // so mappings created here (e.g. the vmalloc-backed idle-task stack)
+    // never received a remote flush. Do a full local TLB flush and enable
+    // the IPI vector before publishing `INITED_CPUS`: this makes every
+    // mapping visible on this CPU, and lets the primary CPU dispatch
+    // shootdowns as soon as the `is_init_ok()` barrier is passed (e.g. for
+    // vmalloc-backed kernel-stack allocation during PID 1 creation).
+    karch::flush_tlb(None);
+    #[cfg(feature = "ipi")]
+    kirq::enable(kbuild_config::IPI_IRQ, true);
+
     info!("Secondary CPU {:x} init OK.", logical_cpu_id.as_usize());
     super::INITED_CPUS.fetch_add(1, Ordering::Release);
 
     while !super::is_init_ok() {
         core::hint::spin_loop();
     }
-
-    #[cfg(feature = "ipi")]
-    kirq::enable(kbuild_config::IPI_IRQ, true);
 
     #[cfg(feature = "pmu")]
     kirq::enable(of::pmu_irq_or(kbuild_config::PMU_IRQ), true);
