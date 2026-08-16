@@ -43,6 +43,16 @@ impl ProcessTimerManager {
         }
     }
 
+    /// Returns whether user-return processing must sample process CPU time.
+    pub fn has_cpu_timers(&self) -> bool {
+        self.itimers[ITIMER_VIRTUAL_INDEX].deadline().is_some()
+            || self.itimers[ITIMER_PROF_INDEX].deadline().is_some()
+            || self
+                .posix_timers
+                .values()
+                .any(|timer| timer.is_process_cpu() && timer.is_armed())
+    }
+
     /// Returns the current interval timer state.
     pub fn get_itimer(
         &self,
@@ -298,7 +308,7 @@ impl ProcessTimerManager {
 mod tests {
     use ksignal::Signo;
     use ktime_types::TimeSpan;
-    use linux_raw_sys::general::CLOCK_PROCESS_CPUTIME_ID;
+    use linux_raw_sys::general::{CLOCK_MONOTONIC, CLOCK_PROCESS_CPUTIME_ID};
     use posix_types::ITimerType;
     use unittest::def_test;
 
@@ -307,6 +317,95 @@ mod tests {
         TimerDelivery, TimerSignal,
         posix_timer::{PosixTimerCreateNotify, PosixTimerSigValue},
     };
+
+    #[def_test]
+    fn test_has_cpu_timers_tracks_only_armed_cpu_timers() {
+        let mut manager = ProcessTimerManager::new(1);
+        assert!(!manager.has_cpu_timers());
+
+        manager.set_itimer(
+            ITimerType::Real,
+            TimeSpan::ZERO,
+            TimeSpan::from_nanos(1),
+            TimeSpan::ZERO,
+            TimeSpan::ZERO,
+        );
+        assert!(!manager.has_cpu_timers());
+
+        manager.set_itimer(
+            ITimerType::Virtual,
+            TimeSpan::ZERO,
+            TimeSpan::from_nanos(1),
+            TimeSpan::ZERO,
+            TimeSpan::ZERO,
+        );
+        assert!(manager.has_cpu_timers());
+        manager.set_itimer(
+            ITimerType::Virtual,
+            TimeSpan::ZERO,
+            TimeSpan::ZERO,
+            TimeSpan::ZERO,
+            TimeSpan::ZERO,
+        );
+
+        manager.set_itimer(
+            ITimerType::Prof,
+            TimeSpan::ZERO,
+            TimeSpan::from_nanos(1),
+            TimeSpan::ZERO,
+            TimeSpan::ZERO,
+        );
+        assert!(manager.has_cpu_timers());
+    }
+
+    #[def_test]
+    fn test_has_cpu_timers_tracks_armed_process_cpu_posix_timer() {
+        let mut manager = ProcessTimerManager::new(1);
+        let wall_timer = manager
+            .create_posix_timer(CLOCK_MONOTONIC as i32, PosixTimerCreateNotify::None)
+            .unwrap();
+        manager
+            .set_posix_timer(
+                wall_timer,
+                false,
+                TimeSpan::ZERO,
+                TimeSpan::from_nanos(1),
+                TimeSpan::ZERO,
+                TimeSpan::ZERO,
+            )
+            .unwrap();
+        assert!(!manager.has_cpu_timers());
+
+        let cpu_timer = manager
+            .create_posix_timer(
+                CLOCK_PROCESS_CPUTIME_ID as i32,
+                PosixTimerCreateNotify::None,
+            )
+            .unwrap();
+        assert!(!manager.has_cpu_timers());
+        manager
+            .set_posix_timer(
+                cpu_timer,
+                false,
+                TimeSpan::ZERO,
+                TimeSpan::from_nanos(1),
+                TimeSpan::ZERO,
+                TimeSpan::ZERO,
+            )
+            .unwrap();
+        assert!(manager.has_cpu_timers());
+        manager
+            .set_posix_timer(
+                cpu_timer,
+                false,
+                TimeSpan::ZERO,
+                TimeSpan::ZERO,
+                TimeSpan::ZERO,
+                TimeSpan::ZERO,
+            )
+            .unwrap();
+        assert!(!manager.has_cpu_timers());
+    }
 
     #[def_test]
     fn test_process_timer_manager_set_itimer_returns_previous_values() {

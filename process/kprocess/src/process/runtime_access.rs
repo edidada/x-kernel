@@ -352,12 +352,13 @@ impl Process {
 
     /// Polls CPU-driven timers while runtime remains attached.
     pub(crate) fn poll_cpu_timers(&self) -> KResult<Vec<TimerDelivery>> {
-        let (process_utime, process_stime) = self.process_cpu_times();
         self.runtime().map(|runtime| {
-            runtime
-                .timer_manager()
-                .lock()
-                .poll_cpu_timers(process_utime, process_stime)
+            let mut timers = runtime.timer_manager().lock();
+            if !timers.has_cpu_timers() {
+                return Vec::new();
+            }
+            let (process_utime, process_stime) = self.process_cpu_times();
+            timers.poll_cpu_timers(process_utime, process_stime)
         })
     }
 
