@@ -19,7 +19,10 @@ use kprocess::{
 use ksignal::{SignalInfo, SignalOSAction, SignalSet, Signo};
 use ktask::{TaskInner, current};
 use kuaccess::{atomic_cmpxchg_u32, atomic_load_u32};
-use linux_raw_sys::general::{FUTEX_OWNER_DIED, FUTEX_TID_MASK, FUTEX_WAITERS, ROBUST_LIST_LIMIT};
+use linux_raw_sys::general::{
+    BUS_ADRERR, FUTEX_OWNER_DIED, FUTEX_TID_MASK, FUTEX_WAITERS, ROBUST_LIST_LIMIT, SEGV_ACCERR,
+    SEGV_MAPERR,
+};
 use linux_sysno::Sysno;
 use memspace::PageFaultOutcome;
 use osvm::{VirtMutPtr, VirtPtr};
@@ -81,9 +84,10 @@ pub(crate) fn run_user_thread_loop(
                     ktask::check_preempt_pending();
                     continue;
                 } else if !outcome.is_resolved() {
-                    let signo = match outcome {
-                        PageFaultOutcome::BusError => Signo::SIGBUS,
-                        _ => Signo::SIGSEGV,
+                    let (signo, code) = match outcome {
+                        PageFaultOutcome::BusError => (Signo::SIGBUS, BUS_ADRERR),
+                        PageFaultOutcome::AccessDenied => (Signo::SIGSEGV, SEGV_ACCERR),
+                        _ => (Signo::SIGSEGV, SEGV_MAPERR),
                     };
                     let exe_path = thr.process().exe_path().unwrap_or_default();
                     warn!(
@@ -96,7 +100,7 @@ pub(crate) fn run_user_thread_loop(
                         outcome,
                         flags,
                     );
-                    raise_signal_fatal(SignalInfo::new_kernel(signo))
+                    raise_signal_fatal(SignalInfo::new_fault(signo, code as _, addr.as_usize()))
                         .expect("Failed to send fatal fault signal");
                 }
             }
@@ -374,9 +378,13 @@ pub fn raise_signal_fatal(sig: SignalInfo) -> KResult<()> {
     let signo = sig.signo();
     info!("Send fatal signal {signo:?} to the current process");
     let process = current_user_process();
-    if let Some(tid) = process.signal_manager()?.send_signal(sig)
-        && process_signals::interrupt_thread(tid).is_ok()
-    {
+    if let Some(tid) = process.signal_manager()?.send_signal(sig) {
+        // Synchronous exceptions commonly target the thread which is already
+        // running this trap path.  It will observe the pending signal before
+        // returning to EL0, so failure to interrupt it is not a delivery
+        // failure.  Treating that scheduler hint as mandatory prematurely
+        // killed applications which intentionally catch SIGSEGV/SIGTRAP.
+        let _ = process_signals::interrupt_thread(tid);
     } else {
         do_exit(signo as i32, true);
     }

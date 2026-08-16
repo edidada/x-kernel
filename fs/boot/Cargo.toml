@@ -18,6 +18,7 @@ smp = ["procfs/smp"]
 block.workspace = true
 bpffs = { workspace = true, optional = true }
 devfs.workspace = true
+drmdevice.workspace = true
 fs_block.workspace = true
 fs_context.workspace = true
 kclass = { workspace = true, optional = true }

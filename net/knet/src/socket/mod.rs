@@ -178,6 +178,7 @@ pub struct SocketErrorInfo {
 #[derive(Debug, Clone)]
 pub enum KernelAncillaryData {
     IpError(SocketErrorInfo),
+    UnixCredentials(options::UnixCredentials),
 }
 
 /// Options for sending data to a socket.

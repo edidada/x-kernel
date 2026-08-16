@@ -9,7 +9,10 @@ mod thread_membership;
 mod tree;
 
 use alloc::sync::{Arc, Weak};
-use core::fmt;
+use core::{
+    fmt,
+    sync::atomic::{AtomicU8, Ordering},
+};
 
 use exit::{AtomicProcessExitState, ProcessExitState};
 pub use exit::{
@@ -44,6 +47,7 @@ pub struct Process {
     thread_membership: SpinNoIrq<ThreadMembership>,
     group_exit: SpinNoIrq<ThreadGroupExitState>,
     lifecycle: ProcessLifecycleState,
+    dumpable: AtomicU8,
 
     // TODO: child subreaper9
     /// Current children linked under this process. Mutate only under
@@ -65,6 +69,16 @@ pub struct Process {
 }
 
 impl Process {
+    /// Returns the Linux process dumpability mode used by `prctl`.
+    pub fn dumpable(&self) -> u8 {
+        self.dumpable.load(Ordering::Acquire)
+    }
+
+    /// Updates the Linux process dumpability mode after syscall validation.
+    pub fn set_dumpable(&self, mode: u8) {
+        self.dumpable.store(mode, Ordering::Release);
+    }
+
     /// The [`Process`] ID.
     ///
     /// Returns the root/global PID number from the leader task-number handle.
@@ -194,6 +208,7 @@ impl Process {
         );
         let parent_relation = ParentRelation::prepare(pid, parent.as_ref(), exit_signal);
         let group_membership = GroupMembership::prepare(group.clone(), pid);
+        let dumpable = parent.as_ref().map_or(1, |process| process.dumpable());
 
         Arc::new(Process {
             leader_task_number,
@@ -201,6 +216,7 @@ impl Process {
             thread_membership: SpinNoIrq::new(ThreadMembership::default()),
             group_exit: SpinNoIrq::new(ThreadGroupExitState::default()),
             lifecycle: ProcessLifecycleState::new(),
+            dumpable: AtomicU8::new(dumpable),
             children: SpinNoIrq::new(List::new()),
             parent_relation,
             group_membership,

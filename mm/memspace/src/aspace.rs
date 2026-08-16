@@ -512,6 +512,17 @@ impl MmSpace {
             let mut modify = self.pgtbl.modify();
             for (protect_range, runtime) in &operations {
                 let pte_flags = runtime.on_protect(*protect_range, flags, &mut modify)?;
+                if flags.contains(MappingFlags::EXECUTE) {
+                    for vaddr in crate::backend::pages_in(*protect_range, PageSize::Size4K)? {
+                        if let Ok((paddr, ..)) = modify.query(vaddr) {
+                            // Userspace runtimes write generated code through a
+                            // writable mapping before making it executable.
+                            // AArch64 does not maintain I/D-cache coherency for
+                            // that transition automatically.
+                            karch::flush_icache_range(p2v(paddr), PageSize::Size4K.into());
+                        }
+                    }
+                }
                 modify
                     .protect_region(protect_range.start, protect_range.size(), pte_flags)
                     .map_err(crate::backend::map_paging_err)?;

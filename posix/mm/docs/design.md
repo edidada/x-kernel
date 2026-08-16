@@ -228,7 +228,8 @@ This preserves the ownership split between:
 - `memfd_create` 支持 `MFD_CLOEXEC` 和 `MFD_ALLOW_SEALING` 初始 seal
   policy；`F_ADD_SEALS` / `F_GET_SEALS` 由 `posix-fs` 处理，hugetlb 扩展未接入。
 - `memfd` 名字展示不保证完全等同 Linux `/proc/self/fd`。
-- `madvise` 支持 `MADV_DONTNEED`，其它 advice 返回 `InvalidInput`。
+- `madvise` 支持 `MADV_DONTNEED`；`MADV_DONTFORK` 当前作为兼容性提示接受但不改变
+  fork 继承策略，其它 advice 返回 `InvalidInput`。
 - `msync` 支持 shared file dirty folio writeback，但 `MS_INVALIDATE` 完整语义未实现。
 - file-backed writable `MAP_SHARED` 由 `filemap` runtime 通过 write-fault
   dirty tracking 支持；memfd/shmem seals 在 `filemap` 边界执行。

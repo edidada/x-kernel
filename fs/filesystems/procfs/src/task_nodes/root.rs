@@ -76,6 +76,11 @@ impl SimpleDirOps for ProcessTaskDir {
     fn supports_dentry_cache(&self) -> bool {
         false
     }
+
+    fn link_count(&self) -> Option<u64> {
+        let thread_count = self.process.upgrade()?.threads().len() as u64;
+        Some(2 + thread_count)
+    }
 }
 
 fn task_status(task: &KtaskRef) -> String {

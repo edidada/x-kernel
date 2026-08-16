@@ -54,6 +54,10 @@ impl From<Rusage> for rusage {
     }
 }
 
+pub(super) fn cpu_time_to_rusage(utime: TimeSpan, stime: TimeSpan) -> rusage {
+    Rusage { utime, stime }.into()
+}
+
 fn self_rusage() -> Rusage {
     let process = kprocess::current_user_process();
     let (utime, stime) = process.process_cpu_times();

@@ -50,7 +50,13 @@ pub const DRM_IOCTL_DROP_MASTER: u32 = io(DRM_TYPE, 0x1f);
 // ======== capability IDs ========
 
 pub const DRM_CAP_DUMB_BUFFER: u64 = 0x1;
+pub const DRM_CAP_PRIME: u64 = 0x5;
+/// `DRM_CAP_PRIME` value bits: import/export support flags.
+pub const DRM_PRIME_CAP_IMPORT: u64 = 0x1;
+pub const DRM_PRIME_CAP_EXPORT: u64 = 0x2;
 pub const DRM_CAP_TIMESTAMP_MONOTONIC: u64 = 0x6;
+pub const DRM_CAP_CURSOR_WIDTH: u64 = 0x8;
+pub const DRM_CAP_CURSOR_HEIGHT: u64 = 0x9;
 pub const DRM_CAP_CRTC_IN_VBLANK_EVENT: u64 = 0x12;
 pub const DRM_CAP_ADDFB2_MODIFIERS: u64 = 0x10;
 
@@ -129,6 +135,7 @@ pub const PROP_CRTC_ACTIVE: u32 = 0x200;
 pub const PROP_CRTC_MODE_ID: u32 = 0x201;
 
 pub const PROP_CONN_CRTC_ID: u32 = 0x300;
+pub const PROP_CONN_DPMS: u32 = 0x301;
 
 pub const PLANE_PROPS: &[u32] = &[
     PROP_PLANE_TYPE,
@@ -145,7 +152,7 @@ pub const PLANE_PROPS: &[u32] = &[
     PROP_PLANE_IN_FORMATS,
 ];
 pub const CRTC_PROPS: &[u32] = &[PROP_CRTC_ACTIVE, PROP_CRTC_MODE_ID];
-pub const CONN_PROPS: &[u32] = &[PROP_CONN_CRTC_ID];
+pub const CONN_PROPS: &[u32] = &[PROP_CONN_CRTC_ID, PROP_CONN_DPMS];
 
 // ======== buffer / blob limits ========
 

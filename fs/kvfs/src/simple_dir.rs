@@ -143,6 +143,11 @@ pub trait SimpleDirOps: Send + Sync + 'static {
         true
     }
 
+    /// Returns a dynamically computed directory link count, when required.
+    fn link_count(&self) -> Option<u64> {
+        None
+    }
+
     /// Installs a persistent child backed by an already allocated inode.
     fn create_inode_child(
         &self,
@@ -409,9 +414,14 @@ impl<O: SimpleDirOps> InodeOperations for SimpleDirInodeOperations<O> {
         request_mask: crate::GetattrRequestMask,
         query_flags: crate::GetattrQueryFlags,
     ) -> VfsResult<Metadata> {
-        self.dir
+        let mut metadata = self
+            .dir
             .node
-            .getattr(idmap, path, request_mask, query_flags)
+            .getattr(idmap, path, request_mask, query_flags)?;
+        if let Some(link_count) = self.dir.ops.link_count() {
+            metadata.nlink = link_count;
+        }
+        Ok(metadata)
     }
 
     fn setattr(

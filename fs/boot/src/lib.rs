@@ -29,7 +29,7 @@ use kdevice::{DeviceId, subscribe_device_removed};
 #[cfg(feature = "fs9p")]
 use ksync::{Mutex, static_lock};
 use kvfs::{
-    Filename, LookupFlags, LookupIntent, MntNamespace, MountFlags, NodePermission, Path,
+    Filename, LookupFlags, LookupIntent, MntNamespace, MountFlags, NodePermission, OpenFlags, Path,
     SuperBlock, SuperBlockFlags, path::PathBuf,
 };
 
@@ -208,6 +208,20 @@ impl BootVfs {
             .map(|_| ())
     }
 
+    fn write_file(&self, path: &str, contents: &str) -> kvfs::VfsResult<()> {
+        let cred = kcred::initial_cred();
+        let file = Filename::new(path).open_with_flags_at(
+            &self.root,
+            &self.root,
+            (OpenFlags::CREATE | OpenFlags::WRITE_ONLY).bits(),
+            NodePermission::from_bits_truncate(0o644),
+            NodePermission::empty(),
+            cred,
+        )?;
+        file.write(contents.as_bytes())?;
+        Ok(())
+    }
+
     fn ensure_directory_path(&self, path: &str) -> kvfs::VfsResult<()> {
         let mut current = PathBuf::new();
         for_each_lexical_component(path, |component| {
@@ -246,6 +260,65 @@ impl BootVfs {
             && err != kvfs::VfsError::AlreadyExists
         {
             return Err(err);
+        }
+
+        // DRM device topology for userspace enumeration. libdrm resolves an
+        // open /dev/dri/card0 fd back to its sysfs node by readlinking
+        // /sys/dev/char/<major>:<minor> and classifying the bus from the
+        // resolved /sys/devices/... path; wlroots fails backend creation when
+        // that hierarchy is missing. Model the display device as a platform
+        // device, the layout virtio-gpu-less kernels expose. Only publish
+        // the tree while a display device is actually registered (the same
+        // condition /dev/dri/card0 uses).
+        if drmdevice::available() {
+            self.ensure_directory_path("/sys/devices/platform/xk-display/drm/card0")?;
+            self.ensure_directory_path("/sys/bus/platform/devices")?;
+            self.ensure_directory_path("/sys/class/drm")?;
+            self.ensure_directory_path("/sys/dev/char")?;
+            for (path, target) in [
+                (
+                    "/sys/class/drm/card0",
+                    "../../devices/platform/xk-display/drm/card0",
+                ),
+                (
+                    "/sys/dev/char/226:0",
+                    "../../devices/platform/xk-display/drm/card0",
+                ),
+                ("/sys/devices/platform/xk-display/drm/card0/device", "../.."),
+                (
+                    "/sys/devices/platform/xk-display/subsystem",
+                    "../../../bus/platform",
+                ),
+                (
+                    "/sys/bus/platform/devices/xk-display",
+                    "../../../devices/platform/xk-display",
+                ),
+                (
+                    "/sys/bus/platform/devices/xk-display/drm",
+                    "../../../devices/platform/xk-display/drm",
+                ),
+                (
+                    "/sys/bus/platform/devices/xk-display/drm/card0",
+                    "../../../../devices/platform/xk-display/drm/card0",
+                ),
+            ] {
+                let result = Filename::new(path).symlink_at(&self.root, &self.root, target, &cred);
+                if let Err(err) = result
+                    && err != kvfs::VfsError::AlreadyExists
+                {
+                    return Err(err);
+                }
+            }
+            // libdrm's sysfs_uevent_get reads <device>/uevent and matches the
+            // DRIVER= key to identify the bound DRM driver.
+            self.write_file(
+                "/sys/devices/platform/xk-display/uevent",
+                "DRIVER=xk-display\nMODALIAS=platform:xk-display\n",
+            )?;
+            self.write_file(
+                "/sys/devices/platform/xk-display/drm/card0/uevent",
+                "DEVNAME=dri/card0\nMAJOR=226\nMINOR=0\n",
+            )?;
         }
         Ok(())
     }

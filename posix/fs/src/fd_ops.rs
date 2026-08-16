@@ -45,7 +45,6 @@ pub fn sys_close_range(first: i32, last: i32, flags: u32) -> KResult<isize> {
     }
     let flags = CloseRangeFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
     debug!("sys_close_range <= fds: [{first}, {last}], flags: {flags:?}");
-
     let resources = kprocess::current_user_process().resources()?;
     if flags.contains(CloseRangeFlags::UNSHARE) {
         resources.unshare_fd_table();

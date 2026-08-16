@@ -5,6 +5,7 @@
 use alloc::{format, string::String, sync::Arc};
 use core::fmt::Write;
 
+#[cfg(not(target_arch = "aarch64"))]
 use kbuild_config::ARCH;
 use kcpu_id_map::for_each_present_logical_cpu;
 use kvfs::{DirMapping, SimpleDir, SimpleFile, SimpleFs};
@@ -37,6 +38,16 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
         SimpleFile::new_regular(fs.clone(), || {
             let mut info = String::new();
             for_each_present_logical_cpu(|present_index, cpu_id, cpu_count| {
+                #[cfg(target_arch = "aarch64")]
+                writeln!(
+                    info,
+                    "processor\t: {}\nBogoMIPS\t: 100.00\nFeatures\t: fp asimd evtstrm aes pmull \
+                     sha1 sha2 crc32 atomics cpuid\nCPU implementer\t: 0x41\nCPU architecture: \
+                     8\nCPU variant\t: 0x0\nCPU part\t: 0xd0b\nCPU revision\t: 0",
+                    cpu_id.as_usize(),
+                )
+                .unwrap();
+                #[cfg(not(target_arch = "aarch64"))]
                 writeln!(
                     info,
                     "processor\t: {}\ncpu cores\t: {}\narchitecture\t: {}",
