@@ -10,7 +10,7 @@ use kvfs::{DirMapping, SimpleDir, SimpleFs};
 
 use crate::{DeviceFile, add_device_entry};
 
-/// Register `/dev/dri/card0` if a display device is available.
+/// Register DRM primary and render nodes if a display device is available.
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     if !drmdevice::available() {
         return;
@@ -22,6 +22,15 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
         DeviceFile::new_character(
             fs.clone(),
             kvfs::DeviceId::new(226, 0),
+            drmdevice::Card0::new(),
+        ),
+    );
+    add_device_entry(
+        &mut dri_dir,
+        "renderD128",
+        DeviceFile::new_character(
+            fs.clone(),
+            kvfs::DeviceId::new(226, 128),
             drmdevice::Card0::new(),
         ),
     );

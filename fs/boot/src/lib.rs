@@ -272,6 +272,7 @@ impl BootVfs {
         // condition /dev/dri/card0 uses).
         if drmdevice::available() {
             self.ensure_directory_path("/sys/devices/platform/xk-display/drm/card0")?;
+            self.ensure_directory_path("/sys/devices/platform/xk-display/drm/renderD128")?;
             self.ensure_directory_path("/sys/bus/platform/devices")?;
             self.ensure_directory_path("/sys/class/drm")?;
             self.ensure_directory_path("/sys/dev/char")?;
@@ -281,10 +282,22 @@ impl BootVfs {
                     "../../devices/platform/xk-display/drm/card0",
                 ),
                 (
+                    "/sys/class/drm/renderD128",
+                    "../../devices/platform/xk-display/drm/renderD128",
+                ),
+                (
                     "/sys/dev/char/226:0",
                     "../../devices/platform/xk-display/drm/card0",
                 ),
+                (
+                    "/sys/dev/char/226:128",
+                    "../../devices/platform/xk-display/drm/renderD128",
+                ),
                 ("/sys/devices/platform/xk-display/drm/card0/device", "../.."),
+                (
+                    "/sys/devices/platform/xk-display/drm/renderD128/device",
+                    "../..",
+                ),
                 (
                     "/sys/devices/platform/xk-display/subsystem",
                     "../../../bus/platform",
@@ -300,6 +313,10 @@ impl BootVfs {
                 (
                     "/sys/bus/platform/devices/xk-display/drm/card0",
                     "../../../../devices/platform/xk-display/drm/card0",
+                ),
+                (
+                    "/sys/bus/platform/devices/xk-display/drm/renderD128",
+                    "../../../../devices/platform/xk-display/drm/renderD128",
                 ),
             ] {
                 let result = Filename::new(path).symlink_at(&self.root, &self.root, target, &cred);
@@ -318,6 +335,10 @@ impl BootVfs {
             self.write_file(
                 "/sys/devices/platform/xk-display/drm/card0/uevent",
                 "DEVNAME=dri/card0\nMAJOR=226\nMINOR=0\n",
+            )?;
+            self.write_file(
+                "/sys/devices/platform/xk-display/drm/renderD128/uevent",
+                "DEVNAME=dri/renderD128\nMAJOR=226\nMINOR=128\n",
             )?;
         }
         Ok(())
