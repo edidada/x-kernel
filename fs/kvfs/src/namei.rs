@@ -327,8 +327,6 @@ impl<'a> Nameidata<'a> {
         component: WalkComponent,
         cred: &Cred,
     ) -> VfsResult<()> {
-        let qstr = self.hash_name(name);
-        let name = qstr.as_str();
         if !d_is_dir(self.path.dentry()) {
             return Err(VfsError::NotADirectory);
         }
@@ -444,12 +442,7 @@ impl<'a> Nameidata<'a> {
                 self.handle_dots(self.last_type);
             }
             LastType::Norm => {
-                let name = self
-                    .last
-                    .as_ref()
-                    .map(Qstr::as_str)
-                    .ok_or(VfsError::InvalidInput)?
-                    .to_owned();
+                let name = self.last.take().ok_or(VfsError::InvalidInput)?.name;
                 self.walk_component(&name, WalkComponent::Final, cred)?;
             }
         }
