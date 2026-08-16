@@ -28,6 +28,10 @@ use kspin::{IrqSave, SpinNoIrq};
 use memaddr::PAGE_SIZE_4K;
 use strum::{IntoStaticStr, VariantArray};
 const MIN_HEAP_SIZE: usize = 0x8000; // 32 K
+// Keep common large buffers in the byte heap. Sending allocations as small as
+// half a page to the physically-contiguous page allocator quickly fragments it
+// under browser workloads, even while the byte heap still has ample capacity.
+const LARGE_ALLOC_THRESHOLD: usize = 1024 * 1024;
 
 fn pages_to_bytes(num_pages: usize) -> usize {
     num_pages
@@ -210,12 +214,12 @@ impl GlobalAllocator {
     /// memory, it asks the page allocator for more memory and adds it to the
     /// byte allocator.
     ///
-    /// Large allocations (over `PAGE_SIZE_4K / 2`) bypass the byte allocator
+    /// Large allocations (over [`LARGE_ALLOC_THRESHOLD`]) bypass the byte allocator
     /// to avoid fragmenting the slab heap and are served directly from the
     /// page allocator.
     pub fn alloc(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
         // Large allocations: go directly to the page allocator.
-        if layout.size() > PAGE_SIZE_4K / 2 {
+        if layout.size() > LARGE_ALLOC_THRESHOLD {
             return self.large_alloc(layout);
         }
         let mut balloc = self.balloc.lock();
@@ -303,7 +307,7 @@ impl GlobalAllocator {
     /// [`alloc`]: GlobalAllocator::alloc
     pub fn dealloc(&self, ptr: NonNull<u8>, layout: Layout) {
         // Large allocations bypassed the byte allocator.
-        if layout.size() > PAGE_SIZE_4K / 2 {
+        if layout.size() > LARGE_ALLOC_THRESHOLD {
             let pages = layout.size().div_ceil(PAGE_SIZE_4K);
             // dealloc_pages handles usages tracking internally.
             self.dealloc_pages(ptr.as_ptr() as usize, pages, UsageKind::RustHeap);
