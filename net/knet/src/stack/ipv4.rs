@@ -7,8 +7,8 @@
 use alloc::{vec, vec::Vec};
 
 use etherparse::{
-    Icmpv4Header, Icmpv4Type, IpEcn, IpFragOffset, IpNumber, Ipv4Header as EtherIpv4Header,
-    Ipv4HeaderSlice,
+    Icmpv4Header, Icmpv4Slice, Icmpv4Type, IpEcn, IpFragOffset, IpNumber,
+    Ipv4Header as EtherIpv4Header, Ipv4HeaderSlice,
     icmpv4::{DestUnreachableHeader, TimeExceededCode},
 };
 
@@ -296,6 +296,41 @@ pub(crate) fn build_icmpv4_error_packet(
     Some(packet)
 }
 
+pub(crate) fn build_icmpv4_echo_reply(
+    request_header: Ipv4Header,
+    request_packet: &[u8],
+) -> Option<Vec<u8>> {
+    let request_payload = payload(request_packet, &request_header)?;
+    let icmp = Icmpv4Slice::from_slice(request_payload).ok()?;
+    let request_type = icmp.icmp_type();
+    if request_type.calc_checksum(icmp.payload()) != icmp.checksum() {
+        return None;
+    }
+    let Icmpv4Type::EchoRequest(echo) = request_type else {
+        return None;
+    };
+
+    let icmp_payload = icmp.payload();
+    let icmp_len = Icmpv4Header::MIN_LEN.checked_add(icmp_payload.len())?;
+    let total_len = IPV4_MIN_HEADER_LEN.checked_add(icmp_len)?;
+    let mut packet = vec![0u8; total_len];
+    write_ipv4_header(
+        &mut packet[..IPV4_MIN_HEADER_LEN],
+        request_header.dst_addr,
+        request_header.src_addr,
+        PROTOCOL_ICMP,
+        IPV4_DEFAULT_TTL,
+        icmp_len,
+        Ipv4HeaderFragment::NONE,
+    )?;
+
+    let icmp_header = Icmpv4Header::with_checksum(Icmpv4Type::EchoReply(echo), icmp_payload);
+    let reply_payload = &mut packet[IPV4_MIN_HEADER_LEN..];
+    reply_payload[..Icmpv4Header::MIN_LEN].copy_from_slice(&icmp_header.to_bytes());
+    reply_payload[Icmpv4Header::MIN_LEN..].copy_from_slice(icmp_payload);
+    Some(packet)
+}
+
 #[cfg(unittest)]
 pub(crate) fn build_ipv4_packet(
     src_addr: Ipv4Address,
@@ -543,6 +578,7 @@ pub(crate) fn rewrite_reassembled_header(
 mod tests {
     use alloc::vec;
 
+    use etherparse::IcmpEchoHeader;
     use unittest::def_test;
 
     use super::*;
@@ -685,6 +721,34 @@ mod tests {
         assert_eq!(
             error[IPV4_MIN_HEADER_LEN + 1],
             etherparse::icmpv4::CODE_DST_UNREACH_PROTOCOL
+        );
+    }
+
+    #[def_test]
+    fn test_build_icmpv4_echo_reply() {
+        let echo = IcmpEchoHeader {
+            id: 0x1234,
+            seq: 0x5678,
+        };
+        let data = [1, 2, 3, 4, 5];
+        let icmp_header = Icmpv4Header::with_checksum(Icmpv4Type::EchoRequest(echo), &data);
+        let mut icmp_packet = vec![0u8; Icmpv4Header::MIN_LEN + data.len()];
+        icmp_packet[..Icmpv4Header::MIN_LEN].copy_from_slice(&icmp_header.to_bytes());
+        icmp_packet[Icmpv4Header::MIN_LEN..].copy_from_slice(&data);
+
+        let request = ipv4_packet(PROTOCOL_ICMP, &icmp_packet);
+        let request_header = Ipv4Header::parse_input(&request).unwrap();
+        let reply = build_icmpv4_echo_reply(request_header, &request).unwrap();
+        let reply_header = Ipv4Header::parse_input(&reply).unwrap();
+        assert_eq!(reply_header.src_addr(), request_header.dst_addr());
+        assert_eq!(reply_header.dst_addr(), request_header.src_addr());
+
+        let reply_icmp = Icmpv4Slice::from_slice(payload(&reply, &reply_header).unwrap()).unwrap();
+        assert_eq!(reply_icmp.icmp_type(), Icmpv4Type::EchoReply(echo));
+        assert_eq!(reply_icmp.payload(), &data);
+        assert_eq!(
+            reply_icmp.icmp_type().calc_checksum(reply_icmp.payload()),
+            reply_icmp.checksum()
         );
     }
 }

@@ -20,7 +20,7 @@ use crate::{
     LISTEN_TABLE,
     buf::PacketBuf,
     ip::{Ipv4Address, Ipv4Cidr},
-    udp, udp_err,
+    raw, udp, udp_err,
 };
 
 pub(crate) struct IngressProcessor {
@@ -129,6 +129,16 @@ impl IngressProcessor {
             return;
         }
 
+        let raw_accepted = if let Some(ip_packet) = packet.network_packet() {
+            udp_err::inspect_icmpv4_error(ip_packet);
+            matches!(
+                raw::handle_ipv4_input(header, ip_packet),
+                raw::InputDisposition::Accepted
+            )
+        } else {
+            false
+        };
+
         if header.protocol() == ipv4::PROTOCOL_UDP {
             let packet_type = packet.packet_type();
             let (disposition, returned_packet) = udp::handle_ipv4_packet(header, packet);
@@ -154,7 +164,23 @@ impl IngressProcessor {
             }
         }
 
+        if header.protocol() == ipv4::PROTOCOL_ICMP {
+            if header.dst_addr().is_unicast()
+                && self
+                    .local_ipv4_addrs
+                    .iter()
+                    .any(|addr| addr.address() == header.dst_addr())
+                && let Some(ip_packet) = packet.network_packet()
+            {
+                queue_icmpv4_echo_reply(control_packets, header, ip_packet);
+            }
+            return;
+        }
+
         if should_emit_protocol_unreachable(header) {
+            if raw_accepted {
+                return;
+            }
             if let Some(ip_packet) = packet.network_packet() {
                 queue_icmpv4_error(
                     control_packets,
@@ -167,17 +193,16 @@ impl IngressProcessor {
             return;
         }
 
-        if let Some(ip_packet) = packet.network_packet() {
-            udp_err::inspect_icmpv4_error(ip_packet);
-            if let Some(payload) = ipv4::payload(ip_packet, &header) {
-                snoop_tcp_segment(
-                    header.protocol(),
-                    SmoltcpIpAddress::Ipv4(header.src_addr().into()),
-                    SmoltcpIpAddress::Ipv4(header.dst_addr().into()),
-                    payload,
-                    sockets,
-                );
-            }
+        if let Some(ip_packet) = packet.network_packet()
+            && let Some(payload) = ipv4::payload(ip_packet, &header)
+        {
+            snoop_tcp_segment(
+                header.protocol(),
+                SmoltcpIpAddress::Ipv4(header.src_addr().into()),
+                SmoltcpIpAddress::Ipv4(header.dst_addr().into()),
+                payload,
+                sockets,
+            );
         }
         accepted_packets.push(packet);
     }
@@ -202,6 +227,17 @@ fn queue_icmpv4_error(
     let Some(packet) =
         ipv4::build_icmpv4_error_packet(error, packet_type, offending_header, offending_packet)
     else {
+        return;
+    };
+    control_packets.push(packet);
+}
+
+fn queue_icmpv4_echo_reply(
+    control_packets: &mut Vec<Vec<u8>>,
+    request_header: Ipv4Header,
+    request_packet: &[u8],
+) {
+    let Some(packet) = ipv4::build_icmpv4_echo_reply(request_header, request_packet) else {
         return;
     };
     control_packets.push(packet);

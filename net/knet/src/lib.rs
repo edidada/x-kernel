@@ -124,6 +124,7 @@ pub fn init_network() {
     let service = Service::new(router);
     SERVICE.init_once(service);
 
+    raw::init_raw_registry();
     SOCKET_SET.init_once(SocketSetWrapper::new());
     LISTEN_TABLE.init_once(ListenTable::new());
     udp::init_udp_registry();

@@ -2,85 +2,158 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Raw IP socket implementation for ICMP-style traffic.
+//! Raw IPv4 socket implementation.
 
-use alloc::vec;
+use alloc::{
+    collections::VecDeque,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use core::{
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::atomic::{AtomicBool, Ordering},
 };
 
 use kerrno::{KError, KResult, LinuxError};
 use kio::prelude::*;
-use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
-use ksync::RwLock;
-pub use smoltcp::wire::{IpProtocol, IpVersion};
-use smoltcp::{
-    iface::SocketHandle,
-    socket::raw as smol,
-    storage::PacketMetadata,
-    wire::{IpAddress, IpListenEndpoint, Ipv4Packet, Ipv4Repr, Ipv6Packet, Ipv6Repr},
-};
+use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
+use ksync::{Mutex, RwLock};
+use lazyinit::LazyInit;
 
 use crate::{
-    RecvFlags, RecvOptions, SERVICE, SOCKET_SET, SendOptions, Shutdown, SocketAddrEx, SocketOps,
+    RecvFlags, RecvOptions, SERVICE, SendOptions, Shutdown, SocketAddrEx, SocketOps,
     consts::{RAW_RX_BUF_LEN, RAW_TX_BUF_LEN},
     general::GeneralOptions,
+    ip::{IpAddress, IpListenEndpoint, Ipv4Address},
+    ipv4::{self, Ipv4Header},
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     poll_interfaces,
     poller::{PollReason, network_poller},
 };
 
-pub(crate) fn new_raw_socket(
-    ip_version: IpVersion,
-    ip_protocol: IpProtocol,
-) -> smol::Socket<'static> {
-    smol::Socket::new(
-        Some(ip_version),
-        Some(ip_protocol),
-        smol::PacketBuffer::new(vec![PacketMetadata::EMPTY; 256], vec![0; RAW_RX_BUF_LEN]),
-        smol::PacketBuffer::new(vec![PacketMetadata::EMPTY; 256], vec![0; RAW_TX_BUF_LEN]),
-    )
+const RAW_RX_QUEUE_LIMIT: usize = 128;
+
+static RAW_SOCKET_REGISTRY: LazyInit<RawSocketRegistry> = LazyInit::new();
+
+struct RawSocketRegistry {
+    sockets: Mutex<Vec<Weak<RawSocketInner>>>,
 }
 
-/// A raw IP socket used for ICMP and ICMPv6 traffic.
-pub struct RawSocket {
-    dispatch_irq: SocketHandle,
+impl RawSocketRegistry {
+    fn new() -> Self {
+        Self {
+            sockets: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn register(&self, socket: &Arc<RawSocketInner>) {
+        let mut sockets = self.sockets.lock();
+        sockets.retain(|socket| socket.strong_count() > 0);
+        sockets.push(Arc::downgrade(socket));
+    }
+
+    fn active_sockets(&self) -> Vec<Arc<RawSocketInner>> {
+        let mut active_sockets = Vec::new();
+        let mut sockets = self.sockets.lock();
+        sockets.retain(|socket| {
+            let Some(socket) = socket.upgrade() else {
+                return false;
+            };
+            active_sockets.push(socket);
+            true
+        });
+        active_sockets
+    }
+}
+
+#[derive(Clone)]
+struct RawPacket {
+    from: SocketAddr,
+    data: Vec<u8>,
+}
+
+struct RawSocketInner {
     ip_version: IpVersion,
+    ip_protocol: IpProtocol,
     local_addr: RwLock<Option<IpAddress>>,
     peer_addr: RwLock<Option<IpAddress>>,
     ttl: RwLock<Option<u8>>,
-    rx_closed: AtomicBool,
+    rx_queue: Mutex<VecDeque<RawPacket>>,
+    poll_rx: PollSet,
+    rx_shutdown: AtomicBool,
     tx_closed: AtomicBool,
     general: GeneralOptions,
 }
 
-impl RawSocket {
-    pub fn new(ip_version: IpVersion, ip_protocol: IpProtocol) -> Self {
-        let dispatch_irq = SOCKET_SET.add(new_raw_socket(ip_version, ip_protocol));
-        let general = GeneralOptions::new();
-        general.set_device_mask(u32::MAX);
-        Self {
-            dispatch_irq,
-            ip_version,
-            local_addr: RwLock::new(None),
-            peer_addr: RwLock::new(None),
-            ttl: RwLock::new(None),
-            rx_closed: AtomicBool::new(false),
-            tx_closed: AtomicBool::new(false),
-            general,
+struct RawRecvMsg<'a> {
+    from: Option<&'a mut SocketAddrEx>,
+    flags: RecvFlags,
+    out_flags: Option<&'a mut RecvFlags>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// IP version supported by the native raw socket path.
+pub enum IpVersion {
+    Ipv4,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// IPv4 protocol selector used by a raw socket.
+pub enum IpProtocol {
+    Icmp,
+    Number(u8),
+}
+
+impl IpProtocol {
+    /// Creates a protocol selector from an IPv4 protocol number.
+    pub fn from_ipv4_number(protocol: u8) -> Self {
+        if protocol == ipv4::PROTOCOL_ICMP {
+            Self::Icmp
+        } else {
+            Self::Number(protocol)
         }
     }
 
-    fn with_smol_socket<R>(&self, f: impl FnOnce(&mut smol::Socket) -> R) -> R {
-        SOCKET_SET.with_socket_mut::<smol::Socket, _, _>(self.dispatch_irq, f)
+    fn ipv4_number(self) -> u8 {
+        match self {
+            Self::Icmp => ipv4::PROTOCOL_ICMP,
+            Self::Number(protocol) => protocol,
+        }
+    }
+}
+
+/// A raw IPv4 socket carrying packets for one IPv4 protocol number.
+pub struct RawSocket {
+    inner: Arc<RawSocketInner>,
+}
+
+impl RawSocket {
+    /// Creates a raw socket and registers it with the IPv4 input dispatcher.
+    pub fn new(ip_version: IpVersion, ip_protocol: IpProtocol) -> Self {
+        init_raw_registry();
+        let general = GeneralOptions::new();
+        general.set_device_mask(u32::MAX);
+        let socket = Self {
+            inner: Arc::new(RawSocketInner {
+                ip_version,
+                ip_protocol,
+                local_addr: RwLock::new(None),
+                peer_addr: RwLock::new(None),
+                ttl: RwLock::new(None),
+                rx_queue: Mutex::new(VecDeque::new()),
+                poll_rx: PollSet::new(),
+                rx_shutdown: AtomicBool::new(false),
+                tx_closed: AtomicBool::new(false),
+                general,
+            }),
+        };
+        RAW_SOCKET_REGISTRY.register(&socket.inner);
+        socket
     }
 
     fn check_ip_version(&self, addr: IpAddress) -> KResult<IpAddress> {
-        match (self.ip_version, addr) {
-            (IpVersion::Ipv4, IpAddress::Ipv4(_)) | (IpVersion::Ipv6, IpAddress::Ipv6(_)) => {
-                Ok(addr)
-            }
+        match (self.inner.ip_version, addr) {
+            (IpVersion::Ipv4, IpAddress::Ipv4(_)) => Ok(addr),
             _ => Err(KError::from(LinuxError::EAFNOSUPPORT)),
         }
     }
@@ -91,29 +164,55 @@ impl RawSocket {
                 let remote = addr.clone().into_ip()?;
                 self.check_ip_version(remote.ip().into())
             }
-            None => (*self.peer_addr.read()).ok_or(KError::NotConnected),
+            None => (*self.inner.peer_addr.read()).ok_or(KError::NotConnected),
         }
     }
 
     fn local_address_for(&self, remote: IpAddress) -> KResult<IpAddress> {
-        if let Some(local) = *self.local_addr.read() {
+        let service = &*SERVICE;
+        if let Some(local) = validate_explicit_bound_source(
+            *self.inner.local_addr.read(),
+            |address| service.has_ipv4_address(address),
+            |address| service.is_ipv4_broadcast(address),
+        )? {
             return Ok(local);
         }
-        SERVICE.get_smoltcp_source_address(&remote)
+        service.get_source_address(&remote)
     }
 
-    fn parse_ip_packet<'a>(&self, packet: &'a [u8]) -> KResult<(IpAddress, &'a [u8])> {
-        match self.ip_version {
-            IpVersion::Ipv4 => {
-                let packet = Ipv4Packet::new_checked(packet)
-                    .map_err(|_| KError::from(LinuxError::EINVAL))?;
-                Ok((IpAddress::Ipv4(packet.src_addr()), packet.into_inner()))
+    fn recv_packet(
+        &self,
+        dst: &mut (impl Write + IoBufMut),
+        msg: &mut RawRecvMsg<'_>,
+    ) -> KResult<usize> {
+        let packet = {
+            let mut rx_queue = self.inner.rx_queue.lock();
+            let packet = if msg.flags.contains(RecvFlags::PEEK) {
+                rx_queue.front().cloned()
+            } else {
+                rx_queue.pop_front()
+            };
+            match packet {
+                Some(packet) => packet,
+                None if self.inner.rx_shutdown.load(Ordering::Acquire) => return Ok(0),
+                None => return Err(KError::WouldBlock),
             }
-            IpVersion::Ipv6 => {
-                let packet = Ipv6Packet::new_checked(packet)
-                    .map_err(|_| KError::from(LinuxError::EINVAL))?;
-                Ok((IpAddress::Ipv6(packet.src_addr()), packet.into_inner()))
-            }
+        };
+
+        if let Some(from) = msg.from.as_deref_mut() {
+            *from = SocketAddrEx::Ip(packet.from);
+        }
+        let write_len = packet.data.len().min(dst.remaining_mut());
+        dst.write_all(&packet.data[..write_len])?;
+        if write_len < packet.data.len()
+            && let Some(out_flags) = msg.out_flags.as_deref_mut()
+        {
+            *out_flags |= RecvFlags::TRUNCATE;
+        }
+        if msg.flags.contains(RecvFlags::TRUNCATE) {
+            Ok(packet.data.len())
+        } else {
+            Ok(write_len)
         }
     }
 }
@@ -122,13 +221,13 @@ impl Configurable for RawSocket {
     fn get_option_inner(&self, option: &mut GetSocketOption) -> KResult<OptionHandled> {
         use GetSocketOption as O;
 
-        if self.general.get_option_inner(option)?.is_yes() {
+        if self.inner.general.get_option_inner(option)?.is_yes() {
             return Ok(OptionHandled::Yes);
         }
 
         match option {
             O::Ttl(ttl) => {
-                **ttl = (*self.ttl.read()).unwrap_or(64);
+                **ttl = (*self.inner.ttl.read()).unwrap_or(64);
             }
             O::SendBuffer(size) => {
                 **size = RAW_TX_BUF_LEN;
@@ -144,7 +243,7 @@ impl Configurable for RawSocket {
     fn set_option_inner(&self, option: SetSocketOption) -> KResult<OptionHandled> {
         use SetSocketOption as O;
 
-        if self.general.set_option_inner(option)?.is_yes() {
+        if self.inner.general.set_option_inner(option)?.is_yes() {
             return Ok(OptionHandled::Yes);
         }
 
@@ -153,7 +252,7 @@ impl Configurable for RawSocket {
                 if *ttl == 0 {
                     return Err(KError::InvalidInput);
                 }
-                *self.ttl.write() = Some(*ttl);
+                *self.inner.ttl.write() = Some(*ttl);
             }
             _ => return Ok(OptionHandled::No),
         }
@@ -165,28 +264,37 @@ impl SocketOps for RawSocket {
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         let local_addr = local_addr.into_ip()?;
         let local = self.check_ip_version(local_addr.ip().into())?;
-        *self.local_addr.write() = Some(local);
-        let device_mask = if local.is_unspecified() {
-            u32::MAX
-        } else {
-            SERVICE.smoltcp_device_mask_for(&IpListenEndpoint {
-                addr: Some(local),
-                port: 0,
-            })
-        };
-        self.general.set_device_mask(device_mask);
+        let service = &*SERVICE;
+        validate_raw_bind_address(
+            local,
+            |address| service.has_ipv4_address(address),
+            |address| service.is_ipv4_bindable_broadcast(address),
+        )?;
+        *self.inner.local_addr.write() = Some(local);
+        let device_mask =
+            if is_dynamic_bound_source(local, |address| service.is_ipv4_broadcast(address)) {
+                u32::MAX
+            } else {
+                service.device_mask_for(&IpListenEndpoint {
+                    addr: Some(local),
+                    port: 0,
+                })
+            };
+        self.inner.general.set_device_mask(device_mask);
         Ok(())
     }
 
     fn connect(&self, remote_addr: SocketAddrEx) -> KResult {
         let remote_addr = remote_addr.into_ip()?;
         let remote = self.check_ip_version(remote_addr.ip().into())?;
-        if self.local_addr.read().is_none() {
-            *self.local_addr.write() = Some(SERVICE.get_smoltcp_source_address(&remote)?);
+        let local = self.local_address_for(remote)?;
+        if self.inner.local_addr.read().is_none() {
+            *self.inner.local_addr.write() = Some(local);
         }
-        *self.peer_addr.write() = Some(remote);
-        self.general
-            .set_device_mask(SERVICE.smoltcp_device_mask_for(&IpListenEndpoint {
+        *self.inner.peer_addr.write() = Some(remote);
+        self.inner
+            .general
+            .set_device_mask(SERVICE.device_mask_for(&IpListenEndpoint {
                 addr: Some(remote),
                 port: 0,
             }));
@@ -194,176 +302,97 @@ impl SocketOps for RawSocket {
     }
 
     fn send(&self, mut src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
-        if self.tx_closed.load(Ordering::Acquire) {
+        if self.inner.tx_closed.load(Ordering::Acquire) {
             return Err(KError::BrokenPipe);
         }
 
         let remote = self.remote_address(&options)?;
-        let local = if let Some(local) = *self.local_addr.read() {
-            SERVICE.get_smoltcp_source_address(&remote)?;
-            local
-        } else {
-            self.local_address_for(remote)?
+        let local = self.local_address_for(remote)?;
+        let IpAddress::Ipv4(remote) = remote else {
+            return Err(KError::from(LinuxError::EAFNOSUPPORT));
+        };
+        let IpAddress::Ipv4(local) = local else {
+            return Err(KError::from(LinuxError::EAFNOSUPPORT));
         };
         let payload_len = src.remaining();
+        let mut payload = Some(alloc::vec![0u8; payload_len]);
+        src.read_exact(payload.as_mut().ok_or(KError::InvalidInput)?)?;
+        let packet_len = ipv4::IPV4_MIN_HEADER_LEN + payload_len;
+        let mut packet = Some(alloc::vec![0u8; packet_len]);
 
-        self.general
+        self.inner
+            .general
             .send_poller_with_nonblocking(self, options.flags.nonblocking(), || {
-                poll_interfaces();
-                let written = self.with_smol_socket(|socket| {
-                    if !socket.can_send() {
-                        return Err(KError::WouldBlock);
-                    }
-                    let next_header = socket.ip_protocol().expect("raw socket protocol");
-                    let hop_limit = (*self.ttl.read()).unwrap_or(64);
-
-                    let header_len = match self.ip_version {
-                        IpVersion::Ipv4 => Ipv4Repr {
-                            src_addr: match local {
-                                IpAddress::Ipv4(addr) => addr,
-                                _ => unreachable!(),
-                            },
-                            dst_addr: match remote {
-                                IpAddress::Ipv4(addr) => addr,
-                                _ => unreachable!(),
-                            },
-                            next_header,
-                            payload_len,
-                            hop_limit,
-                        }
-                        .buffer_len(),
-                        IpVersion::Ipv6 => Ipv6Repr {
-                            src_addr: match local {
-                                IpAddress::Ipv6(addr) => addr,
-                                _ => unreachable!(),
-                            },
-                            dst_addr: match remote {
-                                IpAddress::Ipv6(addr) => addr,
-                                _ => unreachable!(),
-                            },
-                            next_header,
-                            payload_len,
-                            hop_limit,
-                        }
-                        .buffer_len(),
-                    };
-
-                    let buf = socket
-                        .send(header_len + payload_len)
-                        .map_err(|_| KError::WouldBlock)?;
-                    match self.ip_version {
-                        IpVersion::Ipv4 => {
-                            let header = Ipv4Repr {
-                                src_addr: match local {
-                                    IpAddress::Ipv4(addr) => addr,
-                                    _ => unreachable!(),
-                                },
-                                dst_addr: match remote {
-                                    IpAddress::Ipv4(addr) => addr,
-                                    _ => unreachable!(),
-                                },
-                                next_header,
-                                payload_len,
-                                hop_limit,
-                            };
-                            header.emit(
-                                &mut Ipv4Packet::new_unchecked(&mut *buf),
-                                &smoltcp::phy::ChecksumCapabilities::ignored(),
-                            );
-                        }
-                        IpVersion::Ipv6 => {
-                            let header = Ipv6Repr {
-                                src_addr: match local {
-                                    IpAddress::Ipv6(addr) => addr,
-                                    _ => unreachable!(),
-                                },
-                                dst_addr: match remote {
-                                    IpAddress::Ipv6(addr) => addr,
-                                    _ => unreachable!(),
-                                },
-                                next_header,
-                                payload_len,
-                                hop_limit,
-                            };
-                            header.emit(&mut Ipv6Packet::new_unchecked(&mut *buf));
-                        }
-                    }
-
-                    let written = src.read(&mut buf[header_len..])?;
-                    Ok(written)
-                })?;
+                let remote_addr = IpAddress::Ipv4(remote);
+                let local_addr = IpAddress::Ipv4(local);
+                let service = &*SERVICE;
+                service.prepare_and_send_ipv4_packet(
+                    Some(local_addr),
+                    &remote_addr,
+                    &mut packet,
+                    |packet, source_addr, _route_mtu| {
+                        let IpAddress::Ipv4(source_addr) = source_addr else {
+                            return Err(KError::from(LinuxError::EAFNOSUPPORT));
+                        };
+                        ipv4::write_ipv4_packet_header(
+                            packet,
+                            source_addr,
+                            remote,
+                            self.inner.ip_protocol.ipv4_number(),
+                            (*self.inner.ttl.read()).unwrap_or(64),
+                            false,
+                        )
+                        .ok_or(KError::InvalidInput)?;
+                        packet[ipv4::IPV4_MIN_HEADER_LEN..]
+                            .copy_from_slice(payload.as_deref().ok_or(KError::InvalidInput)?);
+                        Ok(())
+                    },
+                )?;
                 network_poller().notify(PollReason::Tx);
                 poll_interfaces();
-                Ok(written)
+                Ok(payload_len)
             })
     }
 
     fn recv(&self, mut dst: impl Write + IoBufMut, options: RecvOptions<'_>) -> KResult<usize> {
-        if self.rx_closed.load(Ordering::Acquire) {
-            return Err(KError::NotConnected);
-        }
-        let mut options = options;
-
-        self.general
-            .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
+        let RecvOptions {
+            from,
+            flags,
+            ancillary: _,
+            out_flags,
+        } = options;
+        let mut msg = RawRecvMsg {
+            from,
+            flags,
+            out_flags,
+        };
+        self.inner
+            .general
+            .recv_poller_with_nonblocking(self, flags.nonblocking(), || {
                 poll_interfaces();
-                self.with_smol_socket(|socket| {
-                    loop {
-                        let packet = if options.flags.contains(RecvFlags::PEEK) {
-                            let packet = socket.peek().map_err(|_| KError::WouldBlock)?;
-                            let (source, _) = self.parse_ip_packet(packet)?;
-                            if let Some(peer) = *self.peer_addr.read()
-                                && source != peer
-                            {
-                                let _ = socket.recv().map_err(|_| KError::WouldBlock)?;
-                                continue;
-                            }
-                            packet
-                        } else {
-                            socket.recv().map_err(|_| KError::WouldBlock)?
-                        };
-                        let (source, packet) = self.parse_ip_packet(packet)?;
-
-                        if let Some(peer) = *self.peer_addr.read()
-                            && source != peer
-                        {
-                            continue;
-                        }
-
-                        if let Some(from) = options.from.as_deref_mut() {
-                            *from = SocketAddrEx::Ip(SocketAddr::new(source.into(), 0));
-                        }
-
-                        let written = dst.write(packet)?;
-                        return Ok(if options.flags.contains(RecvFlags::TRUNCATE) {
-                            packet.len()
-                        } else {
-                            written
-                        });
-                    }
-                })
+                self.recv_packet(&mut dst, &mut msg)
             })
     }
 
     fn local_addr(&self) -> KResult<SocketAddrEx> {
-        let local = (*self.local_addr.read()).unwrap_or(match self.ip_version {
-            IpVersion::Ipv4 => IpAddress::Ipv4(Ipv4Addr::UNSPECIFIED),
-            IpVersion::Ipv6 => IpAddress::Ipv6(Ipv6Addr::UNSPECIFIED),
+        let local = (*self.inner.local_addr.read()).unwrap_or(match self.inner.ip_version {
+            IpVersion::Ipv4 => IpAddress::Ipv4(Ipv4Address::from(Ipv4Addr::UNSPECIFIED)),
         });
         Ok(SocketAddrEx::Ip(SocketAddr::new(local.into(), 0)))
     }
 
     fn peer_addr(&self) -> KResult<SocketAddrEx> {
-        let peer = (*self.peer_addr.read()).ok_or(KError::NotConnected)?;
+        let peer = (*self.inner.peer_addr.read()).ok_or(KError::NotConnected)?;
         Ok(SocketAddrEx::Ip(SocketAddr::new(peer.into(), 0)))
     }
 
     fn shutdown(&self, how: Shutdown) -> KResult {
         if how.has_read() {
-            self.rx_closed.store(true, Ordering::Release);
+            self.inner.rx_shutdown.store(true, Ordering::Release);
+            self.inner.poll_rx.wake();
         }
         if how.has_write() {
-            self.tx_closed.store(true, Ordering::Release);
+            self.inner.tx_closed.store(true, Ordering::Release);
         }
         Ok(())
     }
@@ -373,16 +402,15 @@ impl Pollable for RawSocket {
     fn poll(&self) -> IoEvents {
         poll_interfaces();
         let mut events = IoEvents::empty();
-        self.with_smol_socket(|socket| {
-            events.set(
-                IoEvents::IN,
-                !self.rx_closed.load(Ordering::Acquire) && socket.can_recv(),
-            );
-            events.set(
-                IoEvents::OUT,
-                !self.tx_closed.load(Ordering::Acquire) && socket.can_send(),
-            );
-        });
+        events.set(
+            IoEvents::IN,
+            !self.inner.rx_queue.lock().is_empty()
+                || self.inner.rx_shutdown.load(Ordering::Acquire),
+        );
+        events.set(
+            IoEvents::OUT,
+            !self.inner.tx_closed.load(Ordering::Acquire) && SERVICE.can_send_ip_packet(),
+        );
         events
     }
 
@@ -391,20 +419,16 @@ impl Pollable for RawSocket {
         context: &mut PollContext<'_>,
         events: IoEvents,
     ) -> Result<(), PollRegisterError> {
-        if events.intersects(IoEvents::IN | IoEvents::OUT) {
-            let source_waker = if events.contains(IoEvents::OUT) {
-                self.general.register_tx_waker(context)?
-            } else {
-                self.general.register_rx_waker(context)?
-            };
-            self.with_smol_socket(|socket| {
-                if events.contains(IoEvents::IN) {
-                    socket.register_recv_waker(&source_waker);
-                }
-                if events.contains(IoEvents::OUT) {
-                    socket.register_send_waker(&source_waker);
-                }
-            });
+        if events.intersects(IoEvents::IN | IoEvents::RDNORM | IoEvents::RDBAND) {
+            self.inner.general.register_rx_waker(context)?;
+            if self.inner.rx_queue.lock().is_empty()
+                && !self.inner.rx_shutdown.load(Ordering::Acquire)
+            {
+                context.register(&self.inner.poll_rx)?;
+            }
+        }
+        if events.intersects(IoEvents::OUT | IoEvents::WRNORM | IoEvents::WRBAND) {
+            self.inner.general.register_tx_waker(context)?;
         }
         Ok(())
     }
@@ -413,8 +437,111 @@ impl Pollable for RawSocket {
 impl Drop for RawSocket {
     fn drop(&mut self) {
         let _ = self.shutdown(Shutdown::Both);
-        SOCKET_SET.remove(self.dispatch_irq);
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InputDisposition {
+    Accepted,
+    NoSocket,
+}
+
+pub(crate) fn init_raw_registry() {
+    RAW_SOCKET_REGISTRY.call_once(RawSocketRegistry::new);
+}
+
+pub(crate) fn handle_ipv4_input(header: Ipv4Header, ip_packet: &[u8]) -> InputDisposition {
+    if !RAW_SOCKET_REGISTRY.is_inited() {
+        return InputDisposition::NoSocket;
+    }
+    let mut delivered = false;
+    for socket in RAW_SOCKET_REGISTRY.active_sockets() {
+        if raw_socket_matches(&socket, header) {
+            delivered = true;
+            deliver_raw_packet(&socket, header, ip_packet);
+        }
+    }
+    if delivered {
+        InputDisposition::Accepted
+    } else {
+        InputDisposition::NoSocket
+    }
+}
+
+fn raw_socket_matches(socket: &RawSocketInner, header: Ipv4Header) -> bool {
+    if socket.ip_version != IpVersion::Ipv4 || socket.ip_protocol.ipv4_number() != header.protocol()
+    {
+        return false;
+    }
+    if let Some(IpAddress::Ipv4(local)) = *socket.local_addr.read()
+        && !local.is_unspecified()
+        && local != header.dst_addr()
+    {
+        return false;
+    }
+    if let Some(IpAddress::Ipv4(peer)) = *socket.peer_addr.read()
+        && peer != header.src_addr()
+    {
+        return false;
+    }
+    true
+}
+
+fn deliver_raw_packet(socket: &RawSocketInner, header: Ipv4Header, ip_packet: &[u8]) {
+    let from = SocketAddr::V4(SocketAddrV4::new(ipv4_to_core(header.src_addr()), 0));
+    let packet = RawPacket {
+        from,
+        data: Vec::from(ip_packet),
+    };
+    let mut rx_queue = socket.rx_queue.lock();
+    if rx_queue.len() >= RAW_RX_QUEUE_LIMIT {
+        debug!("raw socket receive queue is full, dropping packet");
+        return;
+    }
+    rx_queue.push_back(packet);
+    drop(rx_queue);
+    socket.poll_rx.wake();
+}
+
+fn ipv4_to_core(addr: Ipv4Address) -> Ipv4Addr {
+    let octets = addr.octets();
+    Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3])
+}
+
+fn validate_explicit_bound_source(
+    local: Option<IpAddress>,
+    is_local: impl FnOnce(IpAddress) -> bool,
+    is_broadcast: impl FnOnce(IpAddress) -> bool,
+) -> Result<Option<IpAddress>, LinuxError> {
+    let Some(address) = local.filter(|address| !is_dynamic_bound_source(*address, is_broadcast))
+    else {
+        return Ok(None);
+    };
+    if !is_local(address) {
+        return Err(LinuxError::ENETUNREACH);
+    }
+    Ok(Some(address))
+}
+
+fn validate_raw_bind_address(
+    address: IpAddress,
+    is_local: impl FnOnce(IpAddress) -> bool,
+    is_broadcast: impl FnOnce(IpAddress) -> bool,
+) -> Result<(), LinuxError> {
+    if !is_dynamic_bound_source(address, is_broadcast) && !is_local(address) {
+        return Err(LinuxError::EADDRNOTAVAIL);
+    }
+    Ok(())
+}
+
+fn is_dynamic_bound_source(
+    address: IpAddress,
+    is_broadcast: impl FnOnce(IpAddress) -> bool,
+) -> bool {
+    address.is_unspecified()
+        || address.is_multicast()
+        || matches!(address, IpAddress::Ipv4(address) if address.is_broadcast())
+        || is_broadcast(address)
 }
 
 #[cfg(unittest)]
@@ -423,41 +550,89 @@ mod tests {
     use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
     use kio::Cursor;
-    use smoltcp::wire::{Ipv4Packet, Ipv4Repr, Ipv6Packet, Ipv6Repr};
     use unittest::def_test;
 
     use super::*;
     use crate::options::{Configurable, GetSocketOption, SetSocketOption};
 
     fn ipv4_packet_bytes(src: Ipv4Addr, dst: Ipv4Addr, payload: &[u8]) -> Vec<u8> {
-        let repr = Ipv4Repr {
-            src_addr: src,
-            dst_addr: dst,
-            next_header: IpProtocol::Icmp,
-            payload_len: payload.len(),
-            hop_limit: 32,
-        };
-        let mut bytes = vec![0; repr.buffer_len() + payload.len()];
-        repr.emit(
-            &mut Ipv4Packet::new_unchecked(&mut bytes),
-            &smoltcp::phy::ChecksumCapabilities::ignored(),
-        );
-        bytes[repr.buffer_len()..].copy_from_slice(payload);
-        bytes
+        ipv4::build_ipv4_packet(
+            Ipv4Address::from(src),
+            Ipv4Address::from(dst),
+            IpProtocol::Icmp.ipv4_number(),
+            32,
+            payload,
+        )
+        .unwrap()
     }
 
-    fn ipv6_packet_bytes(src: Ipv6Addr, dst: Ipv6Addr, payload: &[u8]) -> Vec<u8> {
-        let repr = Ipv6Repr {
-            src_addr: src,
-            dst_addr: dst,
-            next_header: IpProtocol::Icmpv6,
-            payload_len: payload.len(),
-            hop_limit: 48,
-        };
-        let mut bytes = vec![0; repr.buffer_len() + payload.len()];
-        repr.emit(&mut Ipv6Packet::new_unchecked(&mut bytes));
-        bytes[repr.buffer_len()..].copy_from_slice(payload);
-        bytes
+    #[def_test]
+    fn raw_unspecified_bound_address_defers_source_selection() {
+        assert_eq!(
+            validate_explicit_bound_source(
+                Some(IpAddress::Ipv4(Ipv4Addr::UNSPECIFIED.into())),
+                |_| false,
+                |_| false,
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            validate_explicit_bound_source(
+                Some(IpAddress::Ipv4(Ipv4Addr::BROADCAST.into())),
+                |_| false,
+                |_| false,
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            validate_explicit_bound_source(
+                Some(IpAddress::Ipv4(Ipv4Addr::new(224, 0, 0, 1).into())),
+                |_| false,
+                |_| false,
+            ),
+            Ok(None)
+        );
+    }
+
+    #[def_test]
+    fn raw_bind_accepts_dynamic_source_addresses() {
+        assert_eq!(
+            validate_raw_bind_address(
+                IpAddress::Ipv4(Ipv4Addr::UNSPECIFIED.into()),
+                |_| false,
+                |_| false,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_raw_bind_address(
+                IpAddress::Ipv4(Ipv4Addr::BROADCAST.into()),
+                |_| false,
+                |_| false,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_raw_bind_address(
+                IpAddress::Ipv4(Ipv4Addr::new(224, 0, 0, 1).into()),
+                |_| false,
+                |_| false,
+            ),
+            Ok(())
+        );
+    }
+
+    #[def_test]
+    fn raw_explicit_source_must_remain_local() {
+        let source = IpAddress::Ipv4(Ipv4Addr::new(192, 0, 2, 2).into());
+        assert_eq!(
+            validate_explicit_bound_source(Some(source), |_| true, |_| false),
+            Ok(Some(source))
+        );
+        assert_eq!(
+            validate_explicit_bound_source(Some(source), |_| false, |_| false),
+            Err(LinuxError::ENETUNREACH)
+        );
     }
 
     #[def_test(serial)]
@@ -466,12 +641,12 @@ mod tests {
 
         assert_eq!(
             socket
-                .check_ip_version(IpAddress::Ipv4(Ipv4Addr::new(192, 0, 2, 10)))
+                .check_ip_version(IpAddress::Ipv4(Ipv4Addr::new(192, 0, 2, 10).into()))
                 .unwrap(),
-            IpAddress::Ipv4(Ipv4Addr::new(192, 0, 2, 10))
+            IpAddress::Ipv4(Ipv4Addr::new(192, 0, 2, 10).into())
         );
         assert_eq!(
-            socket.check_ip_version(IpAddress::Ipv6(Ipv6Addr::LOCALHOST)),
+            socket.check_ip_version(IpAddress::Ipv6(Ipv6Addr::LOCALHOST.into())),
             Err(KError::from(LinuxError::EAFNOSUPPORT))
         );
         assert_eq!(
@@ -485,30 +660,101 @@ mod tests {
     }
 
     #[def_test(serial)]
-    fn raw_socket_parses_ipv4_and_ipv6_packets() {
-        let ipv4 = RawSocket::new(IpVersion::Ipv4, IpProtocol::Icmp);
+    fn raw_socket_parses_ipv4_packets() {
         let ipv4_packet = ipv4_packet_bytes(
             Ipv4Addr::new(10, 0, 0, 1),
             Ipv4Addr::new(10, 0, 0, 2),
             &[1, 2, 3, 4],
         );
-        let (source, packet) = ipv4.parse_ip_packet(&ipv4_packet).unwrap();
-        assert_eq!(source, IpAddress::Ipv4(Ipv4Addr::new(10, 0, 0, 1)));
-        assert_eq!(packet, ipv4_packet.as_slice());
-
-        let ipv6 = RawSocket::new(IpVersion::Ipv6, IpProtocol::Icmpv6);
-        let ipv6_packet = ipv6_packet_bytes(
-            Ipv6Addr::LOCALHOST,
-            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2),
-            &[9, 8, 7],
-        );
-        let (source, packet) = ipv6.parse_ip_packet(&ipv6_packet).unwrap();
-        assert_eq!(source, IpAddress::Ipv6(Ipv6Addr::LOCALHOST));
-        assert_eq!(packet, ipv6_packet.as_slice());
+        let header = Ipv4Header::parse_input(&ipv4_packet).unwrap();
+        assert_eq!(header.src_addr(), Ipv4Addr::new(10, 0, 0, 1).into());
+        assert_eq!(header.protocol(), IpProtocol::Icmp.ipv4_number());
+        assert_eq!(ipv4::payload(&ipv4_packet, &header).unwrap(), &[1, 2, 3, 4]);
         assert_eq!(
-            ipv4.parse_ip_packet(&[1, 2, 3]),
-            Err(KError::from(LinuxError::EINVAL))
+            Ipv4Header::parse_input(&[1, 2, 3]),
+            Err(ipv4::Ipv4Error::Malformed)
         );
+    }
+
+    #[def_test(serial)]
+    fn raw_socket_matches_configured_protocol_number() {
+        let socket = RawSocket::new(IpVersion::Ipv4, IpProtocol::Number(ipv4::PROTOCOL_TCP));
+        assert_eq!(socket.inner.ip_protocol.ipv4_number(), ipv4::PROTOCOL_TCP);
+
+        let header = Ipv4Header::parse_input(
+            &ipv4::build_ipv4_packet(
+                Ipv4Address::from(Ipv4Addr::new(10, 0, 0, 1)),
+                Ipv4Address::from(Ipv4Addr::new(10, 0, 0, 2)),
+                ipv4::PROTOCOL_TCP,
+                32,
+                &[1, 2, 3, 4],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(raw_socket_matches(&socket.inner, header));
+    }
+
+    #[def_test(serial)]
+    fn raw_socket_read_shutdown_drains_received_packets() {
+        let socket = RawSocket::new(IpVersion::Ipv4, IpProtocol::Icmp);
+        let packet = ipv4_packet_bytes(
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(10, 0, 0, 2),
+            &[1, 2, 3, 4],
+        );
+        let header = Ipv4Header::parse_input(&packet).unwrap();
+
+        socket.shutdown(Shutdown::Read).unwrap();
+        assert!(raw_socket_matches(&socket.inner, header));
+        deliver_raw_packet(&socket.inner, header, &packet);
+
+        let mut recv_buf = vec![0u8; packet.len()];
+        let mut msg = RawRecvMsg {
+            from: None,
+            flags: RecvFlags::empty(),
+            out_flags: None,
+        };
+        assert_eq!(
+            socket.recv_packet(&mut Cursor::new(recv_buf.as_mut_slice()), &mut msg),
+            Ok(packet.len())
+        );
+        assert_eq!(
+            socket.recv_packet(&mut Cursor::new(recv_buf.as_mut_slice()), &mut msg),
+            Ok(0)
+        );
+    }
+
+    #[def_test(serial)]
+    fn raw_socket_receives_full_ipv4_packet() {
+        let socket = RawSocket::new(IpVersion::Ipv4, IpProtocol::Number(99));
+        let packet = ipv4::build_ipv4_packet(
+            Ipv4Address::from(Ipv4Addr::new(10, 0, 0, 1)),
+            Ipv4Address::from(Ipv4Addr::new(10, 0, 0, 2)),
+            99,
+            32,
+            &[5, 4, 3, 2, 1],
+        )
+        .unwrap();
+        let header = Ipv4Header::parse_input(&packet).unwrap();
+
+        assert_eq!(
+            handle_ipv4_input(header, &packet),
+            InputDisposition::Accepted
+        );
+
+        let mut output = [0u8; 64];
+        let mut dst = Cursor::new(output.as_mut_slice());
+        let mut msg = RawRecvMsg {
+            from: None,
+            flags: RecvFlags::empty(),
+            out_flags: None,
+        };
+        assert_eq!(
+            socket.recv_packet(&mut dst, &mut msg).unwrap(),
+            packet.len()
+        );
+        assert_eq!(&output[..packet.len()], packet.as_slice());
     }
 
     #[def_test(serial)]
@@ -537,18 +783,20 @@ mod tests {
             KError::InvalidInput
         );
 
-        *socket.peer_addr.write() = Some(IpAddress::Ipv4(Ipv4Addr::new(198, 51, 100, 9)));
+        *socket.inner.peer_addr.write() =
+            Some(IpAddress::Ipv4(Ipv4Addr::new(198, 51, 100, 9).into()));
         assert_eq!(
             socket.remote_address(&SendOptions::default()).unwrap(),
-            IpAddress::Ipv4(Ipv4Addr::new(198, 51, 100, 9))
+            IpAddress::Ipv4(Ipv4Addr::new(198, 51, 100, 9).into())
         );
 
-        *socket.local_addr.write() = Some(IpAddress::Ipv4(Ipv4Addr::new(192, 0, 2, 44)));
         assert_eq!(
-            socket
-                .local_address_for(IpAddress::Ipv4(Ipv4Addr::new(198, 51, 100, 9)))
-                .unwrap(),
-            IpAddress::Ipv4(Ipv4Addr::new(192, 0, 2, 44))
+            validate_explicit_bound_source(
+                Some(IpAddress::Ipv4(Ipv4Addr::new(192, 0, 2, 44).into())),
+                |_| true,
+                |_| false,
+            ),
+            Ok(Some(IpAddress::Ipv4(Ipv4Addr::new(192, 0, 2, 44).into())))
         );
     }
 
@@ -563,8 +811,8 @@ mod tests {
             )))
             .unwrap();
         assert_eq!(
-            *socket.local_addr.read(),
-            Some(IpAddress::Ipv4(Ipv4Addr::UNSPECIFIED))
+            *socket.inner.local_addr.read(),
+            Some(IpAddress::Ipv4(Ipv4Addr::UNSPECIFIED.into()))
         );
 
         assert_eq!(
@@ -580,7 +828,7 @@ mod tests {
         let mut recv_buf = [0u8; 8];
         assert_eq!(
             socket.recv(Cursor::new(recv_buf.as_mut_slice()), RecvOptions::default()),
-            Err(KError::NotConnected)
+            Ok(0)
         );
         assert_eq!(
             socket.send(Cursor::new(&[1u8, 2, 3][..]), SendOptions::default()),

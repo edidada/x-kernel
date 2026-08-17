@@ -126,6 +126,10 @@ impl IpAddress {
     pub(crate) fn is_broadcast(self) -> bool {
         matches!(self, Self::Ipv4(addr) if addr.is_broadcast())
     }
+
+    pub(crate) fn is_multicast(self) -> bool {
+        matches!(self, Self::Ipv4(addr) if addr.is_multicast())
+    }
 }
 
 impl From<Ipv4Address> for IpAddress {

@@ -289,6 +289,21 @@ impl Service {
         self.router.lock().output_route_source(dst_addr)
     }
 
+    pub fn has_ipv4_address(&self, addr: IpAddress) -> bool {
+        let IpAddress::Ipv4(addr) = addr else {
+            return false;
+        };
+        self.router.lock().has_ipv4_address(addr)
+    }
+
+    pub fn is_ipv4_broadcast(&self, addr: IpAddress) -> bool {
+        self.router.lock().is_ipv4_broadcast(addr)
+    }
+
+    pub fn is_ipv4_bindable_broadcast(&self, addr: IpAddress) -> bool {
+        self.router.lock().is_ipv4_bindable_broadcast(addr)
+    }
+
     #[cfg(unittest)]
     pub fn ipv4_route_mtu(&self, dst_addr: &IpAddress) -> Option<usize> {
         self.router.lock().route_mtu(dst_addr)

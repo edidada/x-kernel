@@ -497,6 +497,34 @@ impl Router {
             .any(|entry| entry.addr.address() == address)
     }
 
+    pub fn is_ipv4_broadcast(&self, addr: IpAddress) -> bool {
+        let IpAddress::Ipv4(addr) = addr else {
+            return false;
+        };
+        if addr.is_broadcast() || self.has_ipv4_address(addr) {
+            return addr.is_broadcast();
+        }
+        self.ipv4_addrs
+            .iter()
+            .any(|entry| entry.addr.is_directed_broadcast(addr))
+    }
+
+    pub fn is_ipv4_bindable_broadcast(&self, addr: IpAddress) -> bool {
+        let IpAddress::Ipv4(addr) = addr else {
+            return false;
+        };
+        if addr.is_broadcast() || self.has_ipv4_address(addr) {
+            return addr.is_broadcast();
+        }
+        self.ipv4_addrs.iter().any(|entry| {
+            entry.addr.is_directed_broadcast(addr)
+                && self
+                    .devices
+                    .get(entry.dev)
+                    .is_some_and(|device| device.is_link_up())
+        })
+    }
+
     pub fn route_snapshot(&self) -> Vec<Rule> {
         self.table.rules().to_vec()
     }
