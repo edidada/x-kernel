@@ -159,6 +159,14 @@ pub struct SlabCache<const PAGE_SIZE: usize> {
     backing_pages: usize,
 }
 
+// SAFETY: `SlabCache` owns only metadata and intrusive pointers into backing
+// spans supplied through `add_slab`; it never borrows stack-local state.
+// Moving exclusive ownership to another execution context does not invalidate
+// those spans.  Its API requires `&mut self` for every mutation, and callers
+// must keep every registered span mapped until it is detached, so sharing is
+// deliberately not asserted here.
+unsafe impl<const PAGE_SIZE: usize> Send for SlabCache<PAGE_SIZE> {}
+
 impl<const PAGE_SIZE: usize> SlabCache<PAGE_SIZE> {
     /// Create an empty cache for `size_class`.
     ///
@@ -170,8 +178,14 @@ impl<const PAGE_SIZE: usize> SlabCache<PAGE_SIZE> {
         assert!(PAGE_SIZE != 0);
         assert!(PAGE_SIZE.is_power_of_two());
         assert!(size_class.size() >= mem::align_of::<Option<NonNull<u8>>>());
-        assert!(size_class.slab_pages(PAGE_SIZE).is_power_of_two());
-        assert!(PAGE_SIZE <= usize::MAX / size_class.slab_pages(PAGE_SIZE));
+        let slab_pages = size_class.slab_pages(PAGE_SIZE);
+        assert!(slab_pages.is_power_of_two());
+        assert!(PAGE_SIZE <= usize::MAX / slab_pages);
+
+        let span_bytes = slab_pages * PAGE_SIZE;
+        let object_size = size_class.size();
+        let object_offset = (mem::size_of::<SlabPage>() + object_size - 1) & !(object_size - 1);
+        assert!(span_bytes >= object_offset + object_size);
 
         Self {
             size_class,
