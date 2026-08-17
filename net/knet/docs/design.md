@@ -295,7 +295,7 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 3. `Router::drain_rx_budgeted_into` 按 RX budget 从设备轮转拉取 `PacketBuf`，`next_rx_device` 在设备间保持公平并随设备删除修正。
 4. `IngressProcessor` 在 Router 锁外校验 IPv4 头、长度、校验和与本地目的地址，并完成 IPv4 分片重组。
 5. 完整 UDP 数据报进入 crate 内 UDP PCB 分流，未命中 socket 的单播 UDP 触发 ICMPv4 Port Unreachable。UDP PCB 按 FIFO 保留已入队数据报，`connect` 只影响后续入包的 peer 匹配。
-6. 完整 IPv4 报文先复制到匹配的 raw socket 接收队列，再按协议进入 UDP、ICMPv4 或 TCP 路径。UDP 由 crate 内 PCB registry 分流，ICMPv4 原生处理 echo request 并检查差错引用，TCP、IPv6 和 DNS 进入有界 smoltcp ingress queue。`Service` 先执行 `poll_maintenance`，再按 RX budget 逐个调用 `poll_ingress_single`，并按 TX budget 调用有界的 `poll_egress`。达到预算或时间边界后，剩余 ingress 保持 FIFO 顺序并进入后续轮次。
+6. 完整 IPv4 报文先复制到匹配的 raw socket 接收队列，再按协议进入 UDP、ICMPv4 或 TCP 路径。UDP 由 crate 内 PCB registry 分流，ICMPv4 仅对本机单播目的的 echo request 生成应答（不回复 broadcast / multicast，与 Linux 6.8 默认 `icmp_echo_ignore_broadcasts=1` 一致），并检查差错引用；TCP、IPv6 和 DNS 进入有界 smoltcp ingress queue。`Service` 先执行 `poll_maintenance`，再按 RX budget 逐个调用 `poll_ingress_single`，并按 TX budget 调用有界的 `poll_egress`。达到预算或时间边界后，剩余 ingress 保持 FIFO 顺序并进入后续轮次。
 7. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
 8. `Router::dispatch_budgeted` 先处理 control TX queue，再处理 data TX queue，单轮发送数量受 TX budget 限制。
 9. `Interface::poll_at` 与 orphan `FIN_WAIT_2` deadline 共同决定下一次网络 deadline，`Service` 将其写入原子 deadline；`register_timer_callback(TIMER_SAMPLE_PERIOD)` 周期采样该值，到期后通过 `notify(PollReason::Timer)` 发布工作。尚未到期的 deadline 不进入 `PollProgress::has_more`。
@@ -354,7 +354,7 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
    的 `NLMSG_ERROR`，response 入队后发送入口返回已消费的请求长度。
 5. `RTM_GETLINK` 从设备实时快照生成 multi-part response，`RTM_NEWLINK` 在整组名称、MTU 和 flags 校验通过后直接更新目标设备。
 6. `RTM_GETADDR` 从 Router 地址快照生成 multi-part response；`RTM_NEWADDR` 和 `RTM_DELADDR` 直接调用 Router 地址 mutation，失败时返回 netlink error。重复地址策略在 Router 锁内判定；最后一个同值地址删除后，`RTM_DELADDR` 同时清理 Router 中以该地址为 `prefsrc` 的配置路由。
-7. `RTM_GETROUTE` 和 route mutation 直接访问 Router；neighbor mutation 直接访问目标设备的 resolver，带 `NLM_F_ACK` 时返回 ack。
+7. `RTM_GETROUTE` 和 route mutation 直接访问 Router；未实现的 route attribute（例如 `RTA_PRIORITY`）按 Linux `NL_VALIDATE_LIBERAL` 忽略，不拒绝整条请求。neighbor mutation 直接访问目标设备的 resolver，带 `NLM_F_ACK` 时返回 ack。
 
 ## 并发模型
 
@@ -428,10 +428,11 @@ smoltcp `poll_at` 使用传入 timestamp 的同一 epoch 返回期限；兼容�
 
 Ethernet IRQ source 由 `EthernetDevice::register_rx_waker` 直接注册到调用方的
 `PollContext`，`knet-rx` 任务保持同一份 `PollRegistrations` 跨越 `Pending`。
-任务每次重新注册 IRQ 后读取 Router 提供的最早 `next_poll_at`，为邻居探测和
-pending TX deadline 保留一个最小睡眠时间。IRQ、deadline 和 poller 的注册复查
-共同覆盖 check/register 竞态，已到期的 deadline 使用 1 ms 最小等待，避免
-pending TX 保持 origin 时间点时形成空转。
+任务每次重新注册 IRQ 后先再执行一次 poller 批次，以关闭 IRQ/register 竞态，
+并让该批次产生的 ARP / pending TX deadline 进入随后读取的 `next_poll_at`；
+然后为邻居探测和 pending TX 保留一个最小睡眠时间。IRQ、deadline 和 poller
+的注册复查共同覆盖 check/register 竞态，已到期的 deadline 使用 1 ms 最小等待，
+避免 pending TX 保持 origin 时间点时形成空转。
 
 ### TCP listen 表独立于 smoltcp listener socket
 

@@ -26,7 +26,10 @@ pub(crate) enum NeighborState {
 /// A control-plane neighbor update targeted at one network device.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct NeighborUpdate {
+    /// Slot in the Router device array.
     pub(crate) dev: usize,
+    /// Interface index from the control-plane request.
+    pub(crate) ifindex: i32,
     pub(crate) dst: IpAddress,
     pub(crate) state: NeighborState,
 }

@@ -376,9 +376,9 @@ impl Service {
 
         for (index, device) in self.router.lock().devices.iter().enumerate() {
             if mask & (1 << index) != 0 {
-                // Ethernet devices that support interrupt-driven RX register
-                // on their NetRx softirq-backed poll source. Loopback and
-                // poll-only devices keep the timeout_poll-backed source waker.
+                // Ethernet devices register the waiter on the device IRQ
+                // source. Loopback and devices without an IRQ keep the
+                // timeout_poll-backed source waker.
                 device.register_rx_waker(&source_waker, context)?;
             }
         }

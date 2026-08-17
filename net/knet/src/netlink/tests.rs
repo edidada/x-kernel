@@ -756,6 +756,33 @@ fn test_add_and_delete_route() {
     );
 }
 
+#[def_test]
+fn test_parse_route_request_ignores_unknown_attributes() {
+    let dst = Ipv4Address::new(172, 16, 0, 0);
+    let gateway = Ipv4Address::new(192, 168, 1, 1);
+    let mut payload = Vec::new();
+    push_u8(&mut payload, wire_route::FAMILY_IPV4);
+    push_u8(&mut payload, 24);
+    push_u8(&mut payload, 0);
+    push_u8(&mut payload, 0);
+    push_u8(&mut payload, RT_TABLE_MAIN);
+    push_u8(&mut payload, wire_route::PROTOCOL_BOOT);
+    push_u8(&mut payload, wire_route::SCOPE_UNIVERSE);
+    push_u8(&mut payload, RTN_UNICAST);
+    push_u32_ne(&mut payload, 0);
+    payload.extend(attr(wire_route::attr::DST, &dst.octets()));
+    payload.extend(attr(wire_route::attr::OIF, &2u32.to_ne_bytes()));
+    payload.extend(attr(wire_route::attr::GATEWAY, &gateway.octets()));
+    payload.extend(attr(wire_route::attr::PRIORITY, &100u32.to_ne_bytes()));
+
+    let request = parse_route_request(&payload).unwrap();
+    assert_eq!(request.family, wire_route::FAMILY_IPV4);
+    assert_eq!(request.dst_len, 24);
+    assert_eq!(request.oif, 2);
+    assert_eq!(request.dst, Some(IpAddress::Ipv4(dst)));
+    assert_eq!(request.gateway, Some(IpAddress::Ipv4(gateway)));
+}
+
 #[def_test(serial)]
 fn test_add_and_replace_neighbour() {
     init_test_state();

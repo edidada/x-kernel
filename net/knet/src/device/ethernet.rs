@@ -112,41 +112,34 @@ impl EthernetDevice {
                         }
                         drop(context);
 
+                        // Recheck after IRQ register to close the check/register
+                        // race. This batch may enqueue ARP or pending-TX work;
+                        // read `next_poll_at` only afterwards so the armed sleep
+                        // matches any new, earlier deadline.
+                        crate::poller::network_poller().publish_and_poll_rx();
+
                         // Drive ARP / pending-TX deadlines here instead of via
                         // socket `timeout_poll` (see Service::schedule_next_poll).
                         // Never busy-spin on an already-due deadline: pending TX can
                         // remain at MonotonicInstant::ORIGIN across a poll, which would
                         // otherwise starve the rest of the stack under TCG.
-                        let mut now = monotonic_time();
-                        let mut device_deadline = crate::SERVICE.device_next_poll_at();
-                        if device_deadline.is_none() {
-                            // Recheck after register to close the IRQ/register race.
-                            // The recheck may enqueue ARP/pending-TX work that
-                            // introduces a deadline; arm `device_timer` below
-                            // instead of returning Pending with no timer wake.
-                            crate::poller::network_poller().publish_and_poll_rx();
-                            now = monotonic_time();
-                            device_deadline = crate::SERVICE.device_next_poll_at();
-                        }
-                        let delay = match device_deadline {
+                        let now = monotonic_time();
+                        let delay = match crate::SERVICE.device_next_poll_at() {
                             Some(deadline) if deadline > now => {
                                 deadline.saturating_duration_since(now)
                             }
                             Some(_) => TimeSpan::from_millis(1),
-                            // Still no deadline after the one-shot recheck: wait
-                            // for IRQ only. Do not `continue` — that would
-                            // livelock when the deadline stays None.
+                            // Still no deadline after the recheck: wait for IRQ
+                            // only. Do not `continue` — that would livelock when
+                            // the deadline stays None.
                             None => return Poll::<()>::Pending,
                         };
                         let mut fut = Box::pin(sleep(delay));
                         if fut.as_mut().poll(cx).is_ready() {
                             continue;
                         }
-                        device_timer = Some(fut);
-                        // Recheck after register to close the IRQ/register race.
-                        crate::poller::network_poller().publish_and_poll_rx();
                         // Keep `device_timer` alive across this `Pending` return.
-                        debug_assert!(device_timer.is_some());
+                        device_timer = Some(fut);
                         return Poll::<()>::Pending;
                     }
                 }));
@@ -628,7 +621,7 @@ impl NetDeviceOps for EthernetDevice {
         if !matches!(update.dst, IpAddress::Ipv4(_)) {
             return Err(LinuxError::EAFNOSUPPORT);
         }
-        let ifindex = update.dev as i32 + 1;
+        let ifindex = update.ifindex;
         let now = monotonic_time();
         let fallback_source_addr = self
             .assigned_ipv4_addrs

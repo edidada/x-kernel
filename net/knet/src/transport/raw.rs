@@ -11,7 +11,7 @@ use alloc::{
 };
 use core::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use kerrno::{KError, KResult, LinuxError};
@@ -37,19 +37,32 @@ static RAW_SOCKET_REGISTRY: LazyInit<RawSocketRegistry> = LazyInit::new();
 
 struct RawSocketRegistry {
     sockets: Mutex<Vec<Weak<RawSocketInner>>>,
+    // Acquire loads pair with Release updates in register/release so the RX
+    // fast path can skip the registry lock when no raw socket is alive.
+    active_count: AtomicUsize,
 }
 
 impl RawSocketRegistry {
     fn new() -> Self {
         Self {
             sockets: Mutex::new(Vec::new()),
+            active_count: AtomicUsize::new(0),
         }
     }
 
     fn register(&self, socket: &Arc<RawSocketInner>) {
+        self.active_count.fetch_add(1, Ordering::Release);
         let mut sockets = self.sockets.lock();
         sockets.retain(|socket| socket.strong_count() > 0);
         sockets.push(Arc::downgrade(socket));
+    }
+
+    fn release(&self) {
+        self.active_count.fetch_sub(1, Ordering::Release);
+    }
+
+    fn has_active_sockets(&self) -> bool {
+        self.active_count.load(Ordering::Acquire) != 0
     }
 
     fn active_sockets(&self) -> Vec<Arc<RawSocketInner>> {
@@ -91,34 +104,24 @@ struct RawRecvMsg<'a> {
     out_flags: Option<&'a mut RecvFlags>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// IP version supported by the native raw socket path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IpVersion {
     Ipv4,
 }
 
+/// IPv4 protocol number used by a raw socket.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// IPv4 protocol selector used by a raw socket.
-pub enum IpProtocol {
-    Icmp,
-    Number(u8),
-}
+pub struct IpProtocol(u8);
 
 impl IpProtocol {
     /// Creates a protocol selector from an IPv4 protocol number.
     pub fn from_ipv4_number(protocol: u8) -> Self {
-        if protocol == ipv4::PROTOCOL_ICMP {
-            Self::Icmp
-        } else {
-            Self::Number(protocol)
-        }
+        Self(protocol)
     }
 
     fn ipv4_number(self) -> u8 {
-        match self {
-            Self::Icmp => ipv4::PROTOCOL_ICMP,
-            Self::Number(protocol) => protocol,
-        }
+        self.0
     }
 }
 
@@ -315,10 +318,14 @@ impl SocketOps for RawSocket {
             return Err(KError::from(LinuxError::EAFNOSUPPORT));
         };
         let payload_len = src.remaining();
-        let mut payload = Some(alloc::vec![0u8; payload_len]);
-        src.read_exact(payload.as_mut().ok_or(KError::InvalidInput)?)?;
         let packet_len = ipv4::IPV4_MIN_HEADER_LEN + payload_len;
         let mut packet = Some(alloc::vec![0u8; packet_len]);
+        src.read_exact(
+            packet
+                .as_mut()
+                .and_then(|packet| packet.get_mut(ipv4::IPV4_MIN_HEADER_LEN..))
+                .ok_or(KError::InvalidInput)?,
+        )?;
 
         self.inner
             .general
@@ -343,8 +350,6 @@ impl SocketOps for RawSocket {
                             false,
                         )
                         .ok_or(KError::InvalidInput)?;
-                        packet[ipv4::IPV4_MIN_HEADER_LEN..]
-                            .copy_from_slice(payload.as_deref().ok_or(KError::InvalidInput)?);
                         Ok(())
                     },
                 )?;
@@ -437,6 +442,9 @@ impl Pollable for RawSocket {
 impl Drop for RawSocket {
     fn drop(&mut self) {
         let _ = self.shutdown(Shutdown::Both);
+        if RAW_SOCKET_REGISTRY.is_inited() {
+            RAW_SOCKET_REGISTRY.release();
+        }
     }
 }
 
@@ -451,7 +459,7 @@ pub(crate) fn init_raw_registry() {
 }
 
 pub(crate) fn handle_ipv4_input(header: Ipv4Header, ip_packet: &[u8]) -> InputDisposition {
-    if !RAW_SOCKET_REGISTRY.is_inited() {
+    if !RAW_SOCKET_REGISTRY.is_inited() || !RAW_SOCKET_REGISTRY.has_active_sockets() {
         return InputDisposition::NoSocket;
     }
     let mut delivered = false;
@@ -559,7 +567,7 @@ mod tests {
         ipv4::build_ipv4_packet(
             Ipv4Address::from(src),
             Ipv4Address::from(dst),
-            IpProtocol::Icmp.ipv4_number(),
+            ipv4::PROTOCOL_ICMP,
             32,
             payload,
         )
@@ -637,7 +645,10 @@ mod tests {
 
     #[def_test(serial)]
     fn raw_socket_ip_version_checks_and_defaults() {
-        let socket = RawSocket::new(IpVersion::Ipv4, IpProtocol::Icmp);
+        let socket = RawSocket::new(
+            IpVersion::Ipv4,
+            IpProtocol::from_ipv4_number(ipv4::PROTOCOL_ICMP),
+        );
 
         assert_eq!(
             socket
@@ -668,7 +679,7 @@ mod tests {
         );
         let header = Ipv4Header::parse_input(&ipv4_packet).unwrap();
         assert_eq!(header.src_addr(), Ipv4Addr::new(10, 0, 0, 1).into());
-        assert_eq!(header.protocol(), IpProtocol::Icmp.ipv4_number());
+        assert_eq!(header.protocol(), ipv4::PROTOCOL_ICMP);
         assert_eq!(ipv4::payload(&ipv4_packet, &header).unwrap(), &[1, 2, 3, 4]);
         assert_eq!(
             Ipv4Header::parse_input(&[1, 2, 3]),
@@ -678,7 +689,10 @@ mod tests {
 
     #[def_test(serial)]
     fn raw_socket_matches_configured_protocol_number() {
-        let socket = RawSocket::new(IpVersion::Ipv4, IpProtocol::Number(ipv4::PROTOCOL_TCP));
+        let socket = RawSocket::new(
+            IpVersion::Ipv4,
+            IpProtocol::from_ipv4_number(ipv4::PROTOCOL_TCP),
+        );
         assert_eq!(socket.inner.ip_protocol.ipv4_number(), ipv4::PROTOCOL_TCP);
 
         let header = Ipv4Header::parse_input(
@@ -697,7 +711,10 @@ mod tests {
 
     #[def_test(serial)]
     fn raw_socket_read_shutdown_drains_received_packets() {
-        let socket = RawSocket::new(IpVersion::Ipv4, IpProtocol::Icmp);
+        let socket = RawSocket::new(
+            IpVersion::Ipv4,
+            IpProtocol::from_ipv4_number(ipv4::PROTOCOL_ICMP),
+        );
         let packet = ipv4_packet_bytes(
             Ipv4Addr::new(10, 0, 0, 1),
             Ipv4Addr::new(10, 0, 0, 2),
@@ -727,7 +744,7 @@ mod tests {
 
     #[def_test(serial)]
     fn raw_socket_receives_full_ipv4_packet() {
-        let socket = RawSocket::new(IpVersion::Ipv4, IpProtocol::Number(99));
+        let socket = RawSocket::new(IpVersion::Ipv4, IpProtocol::from_ipv4_number(99));
         let packet = ipv4::build_ipv4_packet(
             Ipv4Address::from(Ipv4Addr::new(10, 0, 0, 1)),
             Ipv4Address::from(Ipv4Addr::new(10, 0, 0, 2)),
@@ -759,7 +776,10 @@ mod tests {
 
     #[def_test(serial)]
     fn raw_socket_ttl_remote_and_local_shortcuts() {
-        let socket = RawSocket::new(IpVersion::Ipv4, IpProtocol::Icmp);
+        let socket = RawSocket::new(
+            IpVersion::Ipv4,
+            IpProtocol::from_ipv4_number(ipv4::PROTOCOL_ICMP),
+        );
         let mut ttl = 0u8;
 
         socket
@@ -802,7 +822,10 @@ mod tests {
 
     #[def_test(serial)]
     fn raw_socket_bind_and_shutdown_gate_fast_paths() {
-        let socket = RawSocket::new(IpVersion::Ipv4, IpProtocol::Icmp);
+        let socket = RawSocket::new(
+            IpVersion::Ipv4,
+            IpProtocol::from_ipv4_number(ipv4::PROTOCOL_ICMP),
+        );
 
         socket
             .bind(SocketAddrEx::Ip(SocketAddr::new(
@@ -833,6 +856,26 @@ mod tests {
         assert_eq!(
             socket.send(Cursor::new(&[1u8, 2, 3][..]), SendOptions::default()),
             Err(KError::BrokenPipe)
+        );
+    }
+
+    #[def_test(serial)]
+    fn raw_ipv4_input_skips_dropped_sockets() {
+        {
+            let _socket = RawSocket::new(IpVersion::Ipv4, IpProtocol::from_ipv4_number(99));
+        }
+        let packet = ipv4::build_ipv4_packet(
+            Ipv4Address::from(Ipv4Addr::new(10, 0, 0, 1)),
+            Ipv4Address::from(Ipv4Addr::new(10, 0, 0, 2)),
+            99,
+            32,
+            &[1, 2, 3],
+        )
+        .unwrap();
+        let header = Ipv4Header::parse_input(&packet).unwrap();
+        assert_eq!(
+            handle_ipv4_input(header, &packet),
+            InputDisposition::NoSocket
         );
     }
 }

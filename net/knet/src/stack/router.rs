@@ -648,6 +648,7 @@ impl Router {
     }
 
     pub fn apply_neighbor_update(&mut self, update: NeighborUpdate) -> Result<(), LinuxError> {
+        debug_assert_eq!(Self::device_index(update.ifindex), Some(update.dev));
         self.devices
             .get_mut(update.dev)
             .ok_or(LinuxError::ENODEV)?

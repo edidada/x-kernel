@@ -463,9 +463,11 @@ fn neighbor_update_from_request(request: NeighRequest) -> Result<NeighborUpdate,
         },
         _ => return Err(LinuxError::EOPNOTSUPP),
     };
+    let ifindex = i32::try_from(request.ifindex).map_err(|_| LinuxError::ENODEV)?;
     let dev = request.ifindex.checked_sub(1).ok_or(LinuxError::ENODEV)? as usize;
     Ok(NeighborUpdate {
         dev,
+        ifindex,
         dst: to_kernel_ip(request.dst)?,
         state,
     })
@@ -633,7 +635,7 @@ fn parse_addr_request(payload: &[u8]) -> Result<AddrRequest, LinuxError> {
     })
 }
 
-fn parse_route_request(payload: &[u8]) -> Result<RouteRequest, LinuxError> {
+pub(super) fn parse_route_request(payload: &[u8]) -> Result<RouteRequest, LinuxError> {
     let info = RtMsg::read(payload)?;
     let attrs = parse_route_attrs(info.family, parse_attrs(&payload[RtMsg::SIZE..])?)?;
     Ok(RouteRequest {
@@ -718,7 +720,10 @@ fn parse_route_attrs(family: u8, attrs: Vec<NlAttr<'_>>) -> Result<RouteAttrs, L
                 let table = read_u32_payload(attr.payload)?;
                 parsed.table = Some(u8::try_from(table).map_err(|_| LinuxError::EOPNOTSUPP)?);
             }
-            _ => return Err(LinuxError::EOPNOTSUPP),
+            // Linux `rtm_to_fib_config` uses NL_VALIDATE_LIBERAL: attributes
+            // outside the implemented set, including `RTA_PRIORITY`, are
+            // ignored rather than rejected.
+            _ => {}
         }
     }
     Ok(parsed)

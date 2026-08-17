@@ -52,6 +52,7 @@ pub(crate) mod route {
         pub(crate) const SRC: u16 = 2;
         pub(crate) const OIF: u16 = 4;
         pub(crate) const GATEWAY: u16 = 5;
+        pub(crate) const PRIORITY: u16 = 6;
         pub(crate) const PREFSRC: u16 = 7;
         pub(crate) const TABLE: u16 = 15;
     }
