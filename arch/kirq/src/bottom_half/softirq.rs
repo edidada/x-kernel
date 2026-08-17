@@ -810,8 +810,12 @@ pub mod tests_softirq {
             drop(bh_guard);
             assert_eq!(HIGH_ORDER.load(Ordering::Relaxed), 0);
             assert_eq!(irq_context_diagnostics().bh_in_hardirq_warnings, 1);
-            assert_eq!(softirq_diagnostics().context_deferred_runs, 1);
-            assert_eq!(softirq_diagnostics().daemon_wake_suppressed_context, 1);
+            // A real device IRQ landing on this CPU while the hardirq-context
+            // guard is held also defers its IRQ-tail softirq run, so the
+            // per-CPU counter may exceed this test's own contribution on a
+            // live virtio target.
+            assert!(softirq_diagnostics().context_deferred_runs >= 1);
+            assert!(softirq_diagnostics().daemon_wake_suppressed_context >= 1);
         }
 
         assert_eq!(run_pending_softirqs(), SoftirqRunResult::Ran);
