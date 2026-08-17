@@ -153,6 +153,18 @@ mod tests_tlb_shootdown {
         kipi::tlb::mark_all_cpus_started();
     }
 
+    /// Flushes a kernel-page-table address on every CPU the way production
+    /// kernel-PT teardown does it: local flush on the initiator plus a remote
+    /// broadcast — always **after** releasing `kernel_layout()`, never while
+    /// holding it. The broadcast spin-waits for remote ACKs, so running it
+    /// inside the `SpinNoIrq` aspace lock (IRQs off) deadlocks against any
+    /// CPU that is itself spinning on that lock or waiting for this CPU's
+    /// own shootdown.
+    fn flush_kernel_vaddr_everywhere(vaddr: VirtAddr) {
+        karch::flush_tlb(Some(vaddr));
+        kipi::tlb::flush_all_cpus(Some(vaddr));
+    }
+
     /// Test C: Proves flush_all_cpus sends IPIs to all online CPUs and waits
     /// for remote completion.
     #[def_test(serial)]
@@ -286,7 +298,13 @@ mod tests_tlb_shootdown {
                         khal::paging::MappingFlags::READ | khal::paging::MappingFlags::WRITE,
                     )
                     .expect("map V→P1");
+                // Commit without flushing: `finish()` would run the
+                // synchronous shootdown while the `SpinNoIrq` aspace lock is
+                // still held (IRQs off), which can deadlock. Flush
+                // explicitly right after unlocking.
+                pt_mut.finish_no_flush();
             }
+            flush_kernel_vaddr_everywhere(test_vaddr);
 
             static REMOTE_READ: AtomicUsize = AtomicUsize::new(0);
 
@@ -318,7 +336,10 @@ mod tests_tlb_shootdown {
                         khal::paging::MappingFlags::READ | khal::paging::MappingFlags::WRITE,
                     )
                     .expect("map V→P2");
+                // See phase 1: no synchronous shootdown under the aspace lock.
+                pt_mut.finish_no_flush();
             }
+            flush_kernel_vaddr_everywhere(test_vaddr);
 
             // Remote CPU reads V → must see MAGIC_B (proves stale TLB was flushed).
             REMOTE_READ.store(0, Ordering::Relaxed);
@@ -334,12 +355,15 @@ mod tests_tlb_shootdown {
             }
             assert_eq!(REMOTE_READ.load(Ordering::Acquire), MAGIC_B as usize);
 
-            // Cleanup: unmap V, free pages.
+            // Cleanup: unmap V, flush every CPU (stale entries would
+            // reference the pages we are about to free), then free pages.
             {
                 let mut aspace = memspace::kernel_layout().lock();
                 let mut pt_mut = aspace.page_table_mut().modify();
                 let _ = pt_mut.unmap(test_vaddr);
+                pt_mut.finish_no_flush();
             }
+            flush_kernel_vaddr_everywhere(test_vaddr);
             kalloc::global_allocator().dealloc_pages(v1, 1, kalloc::UsageKind::PageTable);
             kalloc::global_allocator().dealloc_pages(v2, 1, kalloc::UsageKind::PageTable);
         }
@@ -412,7 +436,13 @@ mod tests_tlb_shootdown {
                         khal::paging::MappingFlags::READ | khal::paging::MappingFlags::WRITE,
                     )
                     .expect("map V→P1");
+                // Commit without flushing: `finish()` would run the
+                // synchronous shootdown while the `SpinNoIrq` aspace lock is
+                // still held (IRQs off), which can deadlock. Flush
+                // explicitly right after unlocking.
+                pt_mut.finish_no_flush();
             }
+            flush_kernel_vaddr_everywhere(test_vaddr);
 
             static REMOTE_READ_G: AtomicUsize = AtomicUsize::new(0);
 
@@ -433,10 +463,10 @@ mod tests_tlb_shootdown {
                 "Phase 1: remote CPU should read MAGIC_A from V→P1 mapping"
             );
 
-            // Phase 2: Remap V → P2 in the kernel page table.
-            // `kernel_layout()` creates a kernel page table (is_kernel=true), so
-            // `PageTableMut::finish()` calls `flush_all_cpus()`, which builds a
-            // mask of ALL online CPUs via `for_each_present_logical_cpu()`.
+            // Phase 2: Remap V → P2 in the kernel page table. The shootdown
+            // runs after releasing the aspace lock: a local flush plus
+            // `flush_all_cpus()`, which builds a mask of ALL online CPUs via
+            // `for_each_present_logical_cpu()`.
             // The remote CPU WILL receive a shootdown IPI.
             {
                 let mut aspace = memspace::kernel_layout().lock();
@@ -450,7 +480,10 @@ mod tests_tlb_shootdown {
                         khal::paging::MappingFlags::READ | khal::paging::MappingFlags::WRITE,
                     )
                     .expect("map V→P2");
+                // See phase 1: no synchronous shootdown under the aspace lock.
+                pt_mut.finish_no_flush();
             }
+            flush_kernel_vaddr_everywhere(test_vaddr);
 
             // ---- Assertion: TLB shootdown must reach ALL online CPUs ----
             //
@@ -486,12 +519,15 @@ mod tests_tlb_shootdown {
                  properly invalidated.",
             );
 
-            // Cleanup: unmap V, free pages.
+            // Cleanup: unmap V, flush every CPU (stale entries would
+            // reference the pages we are about to free), then free pages.
             {
                 let mut aspace = memspace::kernel_layout().lock();
                 let mut pt_mut = aspace.page_table_mut().modify();
                 let _ = pt_mut.unmap(test_vaddr);
+                pt_mut.finish_no_flush();
             }
+            flush_kernel_vaddr_everywhere(test_vaddr);
             kalloc::global_allocator().dealloc_pages(v1, 1, kalloc::UsageKind::PageTable);
             kalloc::global_allocator().dealloc_pages(v2, 1, kalloc::UsageKind::PageTable);
         }

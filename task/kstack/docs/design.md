@@ -29,9 +29,15 @@ stacks are scrubbed before reuse.
 
 ## Locking and context
 
-`alloc`/`free` run with preemption and IRQs disabled
-(`NoPreemptIrqSave`) so the per-CPU cache is only touched by the current CPU
-and an IRQ handler can never re-enter the same cache on the same CPU.
-Backend implementations (see `memspace`) must respect the calling context:
-stack free can happen at task-destruction time or from an IRQ handler, so
-backends must not rely on interruptible context.
+The `NoPreemptIrqSave` guard covers **only** the per-CPU cache access, so the
+cache is only touched by the current CPU and an IRQ handler can never re-enter
+the same cache on the same CPU. Backend `alloc`/`free` run **outside** the
+IRQ-off section, in the caller's own context.
+
+This split is load-bearing: the vmalloc backend's free path may run a
+synchronous TLB shootdown that spin-waits for remote CPUs to acknowledge an
+IPI. Entering that wait with IRQs disabled means the local CPU cannot service
+other CPUs' shootdown IPIs — two CPUs doing so concurrently deadlock
+(see `docs/issues/2026-08-17-tlb-shootdown-deadlock.md`). IRQ-context frees
+stay safe because the vmalloc backend detects exception context and defers
+teardown to `system_wq` instead of shooting down in-place.

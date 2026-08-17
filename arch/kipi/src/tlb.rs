@@ -325,9 +325,17 @@ pub fn mark_all_cpus_started() {
 
 /// Flushes the TLB of every online CPU for the shared kernel page table.
 ///
-/// Safe to call without holding page-table locks; the global shootdown gate
-/// suppresses the IPIs during early boot while secondary CPUs are not yet
-/// able to service them.
+/// # Contract
+///
+/// - This broadcasts to **remote** CPUs only; the caller must flush its own
+///   local TLB separately (e.g. `karch::flush_tlb`), or the freed VA range
+///   stays visible through stale local entries.
+/// - Waiting for remote acknowledgement is a synchronous spin loop, so the
+///   caller must have local IRQs **enabled**. Calling with IRQs disabled
+///   deadlocks whenever a target CPU is itself spinning on a lock this CPU
+///   holds, or is waiting for this CPU to answer its own shootdown.
+/// - The global shootdown gate suppresses the IPIs during early boot while
+///   secondary CPUs are not yet able to service them.
 pub fn flush_all_cpus(vaddr: Option<VirtAddr>) {
     TlbFlushIf::flush_all_cpus(vaddr);
 }
@@ -424,7 +432,7 @@ fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
             }
 
             let start = khal::time::monotonic_time();
-            let mut warned = false;
+            let mut last_warn_at = None;
             for target in targets.iter().flatten() {
                 while !active_slot.is_acked_by(target.as_usize(), request_seq) {
                     // Incoming shootdowns must be drained here. `flush_remote`
@@ -434,9 +442,18 @@ fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
                     // neither can ack. `handle_shootdown` reads published
                     // slots directly, so a missed IPI still completes.
                     handle_shootdown();
-                    let elapsed = khal::time::monotonic_time().saturating_duration_since(start);
-                    if !warned && elapsed >= SHOOTDOWN_WARN {
-                        warned = true;
+                    // Warn once per SHOOTDOWN_WARN interval: a missing ACK
+                    // means the target cannot service IPIs right now (e.g.
+                    // spinning on a lock with IRQs off). If it never recovers
+                    // the repeated warnings identify a hard deadlock instead
+                    // of a single silent hang.
+                    let now = khal::time::monotonic_time();
+                    let due = match last_warn_at {
+                        None => now.saturating_duration_since(start) >= SHOOTDOWN_WARN,
+                        Some(at) => now.saturating_duration_since(at) >= SHOOTDOWN_WARN,
+                    };
+                    if due {
+                        last_warn_at = Some(now);
                         warn!(
                             "tlb shootdown wait: initiator_cpu={} stuck_on_target_cpu={} \
                              flush_all={} vaddr={:?} request_seq={} targeted={:?} acked={:?}",

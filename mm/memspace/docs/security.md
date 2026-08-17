@@ -88,9 +88,13 @@
 - 持锁期间**不执行**同步 TLB shootdown：页表提交用
   `PageTableMut::finish_no_flush()`，flush 在锁释放后进行，避免 target
   CPU 在等同一把锁（中断关）时无法应答 shootdown IPI 而互相死锁。
+- 释放路径的 flush 必须覆盖本 CPU：远端广播（`flush_all_cpus`）不刷发起
+  者自身，本地 `karch::flush_tlb` 不可省略，否则 VA 复用后本 CPU 经陈旧
+  TLB 项访问到错误物理页（UAF）。
 - deferred 池耗尽视为不可恢复 bug（释放速率持续超过排空速率），panic。
 - guard 区域从不建立映射；调用方必须保证 `size > guard`。
-- 释放路径逐页 unmap 后归还页分配器；失败时记录 warn，不 panic。
+- 释放路径逐页 unmap 后归还页分配器；unmap 失败表示页表与区间记账不一致，
+  视为不可恢复 bug 并 panic。
 - file/anon object locks must not be acquired while holding `InvalidateSink`'s
   spinlock.
 - `msync_range()` may block through file-backed runtime/provider sync and is

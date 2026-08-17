@@ -21,13 +21,13 @@
 //! no other code path takes them in reverse order. Both are `SpinNoIrq`, and
 //! the lock holders **never** run the synchronous TLB shootdown:
 //! page-table commits use [`page_table::PageTableMut::finish_no_flush`], and
-//! only `free` performs a remote flush ([`kipi::tlb::flush_all_cpus`]) after
-//! releasing the locks. This avoids deadlocking when a target CPU is spinning
-//! on one of these locks with IRQs disabled and thus cannot service the
-//! shootdown IPI. `alloc` needs no flush: a fresh VA has no stale TLB entries,
-//! and a reused VA was already flushed by the preceding `free`. The
-//! deferred-free list is lock-free (Treiber stack) so it can be touched from
-//! IRQ context.
+//! only `free` flushes — locally via `karch::flush_tlb` and remotely via
+//! [`kipi::tlb::flush_all_cpus`] — after releasing the locks. This avoids
+//! deadlocking when a target CPU is spinning on one of these locks with IRQs
+//! disabled and thus cannot service the shootdown IPI. `alloc` needs no
+//! flush: a fresh VA has no stale TLB entries, and a reused VA was already
+//! flushed by the preceding `free`. The deferred-free list is lock-free
+//! (Treiber stack) so it can be touched from IRQ context.
 
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
@@ -138,7 +138,10 @@ pub fn alloc_with(opts: VmAllocOptions) -> KResult<(VmRegion, Vec<usize>)> {
         return Err(KError::InvalidInput);
     }
     let usable = opts.size - guard;
-    if !usable.is_multiple_of(PAGE_SIZE_4K) || !opts.size.is_multiple_of(PAGE_SIZE_4K) {
+    if !usable.is_multiple_of(PAGE_SIZE_4K)
+        || !opts.size.is_multiple_of(PAGE_SIZE_4K)
+        || !opts.size.is_multiple_of(align)
+    {
         return Err(KError::InvalidInput);
     }
     let nr_pages = usable / PAGE_SIZE_4K;
@@ -185,8 +188,11 @@ pub fn alloc_with(opts: VmAllocOptions) -> KResult<(VmRegion, Vec<usize>)> {
     drop(vstate);
 
     // No TLB flush here: a freshly allocated VA has no stale TLB entries, and
-    // a reused VA was already flushed synchronously by `free_sync` before the
-    // region could be re-allocated.
+    // a reused VA is covered by the preceding `free_sync`'s system-wide flush
+    // (local `karch::flush_tlb` + remote `flush_all_cpus`, a full kernel-TLB
+    // invalidation; like Linux's lazy vfree flush there is a tiny window
+    // between unmap and flush, but the full flush runs on every CPU and
+    // clears both the stale and the new mapping).
     Ok((
         VmRegion {
             va,
@@ -232,6 +238,11 @@ fn map_pages(
             if i > 0 {
                 let _ = modify.unmap_region(va + guard, i * PAGE_SIZE_4K);
             }
+            // Do not let the `PageTableMut` Drop run the synchronous TLB
+            // shootdown while the caller still holds the `SpinNoIrq` locks:
+            // the freshly mapped pages were never mapped before, so no flush
+            // is needed.
+            modify.finish_no_flush();
             return Err(KError::NoMemory);
         }
     }
@@ -252,8 +263,9 @@ fn free_sync(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
         let mut aspace = kernel_layout().lock();
         let mut modify = aspace.page_table_mut().modify();
         if let Err(e) = modify.unmap_region(usable_start, usable) {
-            // The page table no longer matches bookkeeping; keep the areas
-            // entry (preventing VA reuse) and refuse to free the pages.
+            // The page table no longer matches the interval bookkeeping — an
+            // unrecoverable vmalloc bug. Stop here instead of freeing the VA
+            // while stale mappings may still reference the pages.
             panic!(
                 "vmalloc: unmap {:?} size {:#x} failed: {:?}; page-table state corrupt",
                 usable_start, usable, e
@@ -272,9 +284,14 @@ fn free_sync(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
 
     if need_flush {
         // The kernel page table is shared by every CPU, so the unmap must be
-        // reflected in every CPU's TLB. Run the flush outside the `VMALLOC` /
-        // `KERNEL_ASPACE` locks: a synchronous shootdown while holding
-        // `SpinNoIrq` locks deadlocks a CPU spinning on them with IRQs off.
+        // reflected in every CPU's TLB — including this one. The remote
+        // broadcast skips the initiator, so flush locally first; the local
+        // flush is unconditional (not gated on `ALL_CPUS_STARTED`), which
+        // also covers early-boot frees. Both flushes run outside the
+        // `VMALLOC` / `KERNEL_ASPACE` locks: a synchronous shootdown while
+        // holding `SpinNoIrq` locks deadlocks a CPU spinning on them with
+        // IRQs off.
+        karch::flush_tlb(None);
         kipi::tlb::flush_all_cpus(None);
     }
 
@@ -352,6 +369,12 @@ fn llist_pop_all(head: &AtomicPtr<PendingFreeNode>) -> *mut PendingFreeNode {
 }
 
 /// Takes one node from the free pool, or panics if the pool is exhausted.
+///
+/// This is a Treiber-stack pop, which is in principle ABA-prone. It is safe
+/// here because the only producers of `FREE_HEAD` are one-time `init()` and
+/// the serialized `system_wq` drain worker: between a consumer's head load
+/// and its CAS, a popped node cannot complete the full
+/// release → drain → return round trip that an ABA retry would require.
 fn pop_free_node() -> *mut PendingFreeNode {
     loop {
         let head = FREE_HEAD.load(Ordering::Relaxed);

@@ -11,8 +11,11 @@ untrusted input reaches `alloc`/`free` directly.
   it exactly once.
 - The usable range handed to the task is fully mapped and writable; any guard
   region at the base is an unmapped VA hole provided by the backend.
-- The per-CPU cache is only accessed on the owning CPU with preemption
-  disabled; cache slots never mix stack sizes.
+- The per-CPU cache is only accessed on the owning CPU with preemption and
+  IRQs disabled; cache slots never mix stack sizes.
+- Backends are never invoked from inside the IRQ-off cache section. A
+  task-context backend free may therefore block on a TLB shootdown; an
+  IRQ-context free must be deferrable by the backend (vmalloc does this).
 
 ## Failure handling
 

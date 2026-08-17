@@ -100,16 +100,7 @@ impl StackCache {
     }
 
     fn take(&mut self) -> Option<KernelStackMapping> {
-        self.slots.iter_mut().find_map(|s| s.take()).inspect(|m| {
-            // Scrub on allocation instead of on free: free can run from an IRQ
-            // handler, where a full-stack memset would stretch interrupt
-            // latency, while allocation normally runs in task context.
-            let start = m.usable_start().as_usize();
-            let len = m.usable_size();
-            // SAFETY: the usable range is mapped and owned by this stack, and
-            // it is exclusively handed to the caller after the scrub.
-            unsafe { core::ptr::write_bytes(start as *mut u8, 0, len) };
-        })
+        self.slots.iter_mut().find_map(|s| s.take())
     }
 
     fn push(&mut self, m: KernelStackMapping) -> Option<KernelStackMapping> {
@@ -137,25 +128,60 @@ fn cacheable(size: usize) -> bool {
 
 // ── Public API ────────────────────────────────────────────────────────
 
+/// Zeroes the usable range of a stack taken from the per-CPU cache.
+///
+/// Scrubbing happens on allocation instead of on free: free can run from an
+/// IRQ handler, where a full-stack memset would stretch interrupt latency,
+/// while allocation normally runs in task context. It runs after the cache
+/// guard is dropped — the mapping is already exclusively owned — so the
+/// memset does not extend the IRQ-off section.
+fn scrub(m: &KernelStackMapping) {
+    let start = m.usable_start().as_usize();
+    let len = m.usable_size();
+    // SAFETY: the usable range is mapped and owned by this stack, and it is
+    // exclusively handed to the caller after the scrub.
+    unsafe { core::ptr::write_bytes(start as *mut u8, 0, len) };
+}
+
 /// Allocates a kernel stack of the requested size.
+///
+/// The `NoPreemptIrqSave` guard covers only the per-CPU cache access. The
+/// backend runs in the caller's context with IRQs as they arrived: the
+/// vmalloc backend takes page-table locks and, on free, may run a synchronous
+/// TLB shootdown that spin-waits for remote CPUs — that wait deadlocks if
+/// entered with IRQs disabled, so it must never run inside the IRQ-off
+/// cache section.
 pub fn alloc(size: usize) -> KResult<KernelStackMapping> {
-    let _guard = NoPreemptIrqSave::new();
-    if cacheable(size)
-        && let Some(m) = with_cache(|c| c.take())
-    {
-        return Ok(m);
+    if cacheable(size) {
+        let cached = {
+            let _guard = NoPreemptIrqSave::new();
+            with_cache(|c| c.take())
+        };
+        if let Some(m) = cached {
+            scrub(&m);
+            return Ok(m);
+        }
     }
     (ops().alloc)(size)
 }
 
 /// Frees a kernel stack, caching standard-size stacks for reuse.
+///
+/// See [`alloc`] for the locking contract: cache push/pop runs under
+/// `NoPreemptIrqSave`, the backend free does not. An IRQ-context caller
+/// reaches the backend directly (hardirq/softirq stay nested inside the
+/// outer IRQ-off state); the vmalloc backend detects exception context and
+/// defers the teardown instead of shooting down TLBs in-place.
 pub fn free(mapping: KernelStackMapping) {
-    let _guard = NoPreemptIrqSave::new();
-    if !cacheable(mapping.usable_size()) {
-        (ops().free)(mapping);
+    if cacheable(mapping.usable_size()) {
+        let overflow = {
+            let _guard = NoPreemptIrqSave::new();
+            with_cache(|c| c.push(mapping))
+        };
+        if let Some(m) = overflow {
+            (ops().free)(m);
+        }
         return;
     }
-    if let Some(m) = with_cache(|c| c.push(mapping)) {
-        (ops().free)(m)
-    }
+    (ops().free)(mapping);
 }
