@@ -108,6 +108,48 @@ impl SizeClass {
     }
 }
 
+#[cfg(unittest)]
+#[allow(missing_docs)]
+mod tests {
+    use core::alloc::Layout;
+
+    use unittest::def_test;
+
+    use super::{SLAB_MAX_SIZE, SizeClass};
+
+    #[def_test]
+    fn test_size_class_covers_layout_size_and_alignment() {
+        for size_class in SizeClass::ALL {
+            let class_size = size_class.size();
+            let exact_layout = Layout::from_size_align(class_size, class_size).unwrap();
+            assert_eq!(SizeClass::from_layout(exact_layout), Some(size_class));
+
+            let alignment_layout = Layout::from_size_align(1, class_size).unwrap();
+            assert_eq!(SizeClass::from_layout(alignment_layout), Some(size_class));
+        }
+    }
+
+    #[def_test]
+    fn test_size_class_rejects_oversized_layouts() {
+        let oversized_size = Layout::from_size_align(SLAB_MAX_SIZE + 1, 1).unwrap();
+        assert_eq!(SizeClass::from_layout(oversized_size), None);
+
+        let oversized_alignment = Layout::from_size_align(1, SLAB_MAX_SIZE * 2).unwrap();
+        assert_eq!(SizeClass::from_layout(oversized_alignment), None);
+    }
+
+    #[def_test]
+    fn test_size_class_slab_page_counts() {
+        const PAGE_SIZE: usize = 4096;
+
+        assert_eq!(SizeClass::Bytes8.slab_pages(PAGE_SIZE), 1);
+        assert_eq!(SizeClass::Bytes256.slab_pages(PAGE_SIZE), 1);
+        assert_eq!(SizeClass::Bytes512.slab_pages(PAGE_SIZE), 2);
+        assert_eq!(SizeClass::Bytes1024.slab_pages(PAGE_SIZE), 2);
+        assert_eq!(SizeClass::Bytes2048.slab_pages(PAGE_SIZE), 4);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Allocation / deallocation result enums
 // ---------------------------------------------------------------------------
