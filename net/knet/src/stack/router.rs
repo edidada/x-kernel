@@ -23,9 +23,8 @@ pub(crate) use crate::netlink::{
 use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
-    device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NetDevice},
+    device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice},
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
-    netlink::RtnetlinkState,
 };
 
 const CONTROL_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
@@ -169,11 +168,6 @@ pub struct Ipv4AddrEntry {
 pub(crate) struct Ipv4AddrSnapshot {
     pub entry: Ipv4AddrEntry,
     pub label: String,
-}
-
-#[derive(Debug)]
-pub(crate) struct DeviceRemoval {
-    pub(crate) ifindex: u32,
 }
 
 // TODO(mivik): optimize
@@ -366,15 +360,11 @@ impl Router {
         self.devices.len() - 1
     }
 
-    pub(crate) fn remove_device_by_model_id(
-        &mut self,
-        id: kdevice::DeviceId,
-    ) -> Option<DeviceRemoval> {
+    pub(crate) fn remove_device_by_model_id(&mut self, id: kdevice::DeviceId) -> Option<()> {
         let pos = self
             .devices
             .iter()
             .position(|device| device.device_id() == Some(id))?;
-        let ifindex = pos as u32 + 1;
         let removed_sources: Vec<_> = self
             .ipv4_addrs
             .iter()
@@ -403,7 +393,7 @@ impl Router {
         self.sync_device_ipv4_addrs();
         self.adjust_rx_device_cursor_after_remove(pos);
         self.recompute_effective_mtu();
-        Some(DeviceRemoval { ifindex })
+        Some(())
     }
 
     pub fn local_ipv4_addrs(&self) -> Vec<Ipv4Cidr> {
@@ -629,23 +619,24 @@ impl Router {
         (ifindex > 0).then_some((ifindex - 1) as usize)
     }
 
-    pub fn sync_netlink(&mut self, state: &RtnetlinkState) {
-        for (dev_index, device) in self.devices.iter_mut().enumerate() {
-            let ifindex = dev_index as i32 + 1;
-            let neighbors: Vec<_> = state
-                .neighs
-                .iter()
-                .filter(|neigh| neigh.ifindex == ifindex as u32)
-                .filter_map(|neigh| {
-                    let hardware_addr = neigh.lladdr?;
-                    Some((super::from_smoltcp_ip_address(neigh.dst), hardware_addr))
-                })
-                .collect();
-            device.sync_neighbors(&neighbors);
-        }
+    pub fn apply_neighbor_update(&mut self, update: NeighborUpdate) -> Result<(), LinuxError> {
+        self.devices
+            .get_mut(update.dev)
+            .ok_or(LinuxError::ENODEV)?
+            .apply_neighbor_update(update)
+    }
 
-        self.rebuild_ipv4_address_routes();
-        self.sync_device_ipv4_addrs();
+    pub fn has_neighbor(&self, dev: usize, dst: IpAddress) -> bool {
+        self.devices
+            .get(dev)
+            .is_some_and(|device| device.has_neighbor(dst))
+    }
+
+    pub fn next_poll_at(&self) -> Option<MonotonicInstant> {
+        self.devices
+            .iter()
+            .filter_map(|device| device.next_poll_at())
+            .min()
     }
 
     fn select_ipv4_source(

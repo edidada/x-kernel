@@ -18,8 +18,6 @@ use alloc::{
 use core::sync::atomic::AtomicU64;
 
 use ksync::{Mutex, RwLock, static_lock};
-use lazyinit::LazyInit;
-use smoltcp::wire::IpAddress;
 
 use crate::{SERVICE, general::GeneralOptions};
 
@@ -29,7 +27,7 @@ mod socket;
 mod tests;
 mod wire;
 
-pub(crate) use rtnetlink::{init_route_state, remove_device_state};
+pub(crate) use rtnetlink::remove_device_state;
 pub use socket::{NetlinkSocket, publish_kobject_uevent};
 pub(crate) use wire::route::{
     PROTOCOL_BOOT as RTPROT_BOOT, PROTOCOL_KERNEL as RTPROT_KERNEL, SCOPE_HOST as RT_SCOPE_HOST,
@@ -68,23 +66,6 @@ pub(super) const RTM_NEWNEIGH: u16 = 28;
 pub(super) const ARPHRD_LOOPBACK: u16 = 772;
 pub(super) const ARPHRD_ETHER: u16 = 1;
 
-#[derive(Clone, Copy, Debug)]
-#[expect(dead_code)]
-pub(crate) struct NeighState {
-    pub(crate) family: u8,
-    pub(crate) ifindex: u32,
-    pub(crate) state: u16,
-    pub(crate) flags: u8,
-    pub(crate) dst: IpAddress,
-    pub(crate) lladdr: Option<[u8; 6]>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct RtnetlinkState {
-    pub(crate) neighs: Vec<NeighState>,
-}
-
-pub(super) static ROUTE_STATE: LazyInit<RwLock<RtnetlinkState>> = LazyInit::new();
 static_lock! {
     pub(super) static RTNETLINK_MUTATION_LOCK: Mutex<()> = Mutex::new(());
 }

@@ -30,7 +30,7 @@ use crate::{
     device::{
         IF_OPER_DOWN, IF_OPER_UNKNOWN, IF_OPER_UP, LINK_FLAG_BROADCAST, LINK_FLAG_LOOPBACK,
         LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST, LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind,
-        LinkSendSnapshot, LinkSnapshot, NetDevice,
+        LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice,
     },
     router::{Ipv4AddrEntry, Router, Rule},
     service::Service,
@@ -40,6 +40,7 @@ use crate::{
 struct TestDevice {
     link: LinkSnapshot,
     device_id: Option<kdevice::DeviceId>,
+    neighbors: Vec<crate::ip::IpAddress>,
 }
 
 impl TestDevice {
@@ -47,6 +48,7 @@ impl TestDevice {
         Self {
             link,
             device_id: None,
+            neighbors: Vec::new(),
         }
     }
 
@@ -142,15 +144,20 @@ impl NetDevice for TestDevice {
             self.link.operstate = IF_OPER_DOWN;
         }
     }
+
+    fn apply_neighbor_update(&mut self, update: NeighborUpdate) -> Result<(), LinuxError> {
+        if !self.neighbors.contains(&update.dst) {
+            self.neighbors.push(update.dst);
+        }
+        Ok(())
+    }
+
+    fn has_neighbor(&self, dst: crate::ip::IpAddress) -> bool {
+        self.neighbors.contains(&dst)
+    }
 }
 
 fn init_test_state() {
-    if ROUTE_STATE.is_inited() {
-        *ROUTE_STATE.write() = Default::default();
-    } else {
-        init_route_state(Default::default());
-    }
-
     let mut router = Router::new();
     router.add_device(Box::new(TestDevice::new(LinkSnapshot {
         ifindex: 1,
@@ -505,8 +512,10 @@ fn test_device_removal_refreshes_views_and_control_state() {
         ))]
     );
     assert!(SERVICE.route_snapshot().iter().all(|route| route.dev != 1));
-    let state = route_state();
-    assert!(state.neighs.iter().all(|neigh| neigh.ifindex != 2));
+    assert!(!SERVICE.has_neighbor(
+        1,
+        crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(192, 168, 1, 10)),
+    ));
 }
 
 #[def_test(serial)]
@@ -760,24 +769,26 @@ fn test_add_and_replace_neighbour() {
     };
 
     add_neigh_state(req, NLM_F_CREATE | NLM_F_REPLACE).unwrap();
-    assert!(
-        route_state()
-            .neighs
-            .iter()
-            .any(|neigh| neigh.dst == req.dst && neigh.lladdr == req.lladdr)
-    );
+    assert!(SERVICE.has_neighbor(
+        1,
+        crate::ip::IpAddress::Ipv4(match req.dst {
+            IpAddress::Ipv4(address) => address.into(),
+            IpAddress::Ipv6(_) => panic!("IPv4 test neighbor"),
+        }),
+    ));
 
     let replaced = NeighRequest {
         lladdr: Some([1, 2, 3, 4, 5, 6]),
         ..req
     };
     add_neigh_state(replaced, NLM_F_REPLACE).unwrap();
-    assert!(
-        route_state()
-            .neighs
-            .iter()
-            .any(|neigh| neigh.dst == replaced.dst && neigh.lladdr == replaced.lladdr)
-    );
+    assert!(SERVICE.has_neighbor(
+        1,
+        crate::ip::IpAddress::Ipv4(match replaced.dst {
+            IpAddress::Ipv4(address) => address.into(),
+            IpAddress::Ipv6(_) => panic!("IPv4 test neighbor"),
+        }),
+    ));
 }
 
 #[def_test(serial)]

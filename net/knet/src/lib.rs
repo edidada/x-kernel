@@ -20,6 +20,7 @@ mod consts;
 mod device;
 mod ip;
 mod link;
+mod neighbor;
 pub mod netlink;
 mod poller;
 mod socket;
@@ -81,17 +82,16 @@ pub fn init_network() {
         })
         .expect("loopback IPv4 address must fit the interface");
 
-    let mut eth0_rx_poll = None;
-    let _eth0_ip = if let Some(handle) = net_devs.pop() {
+    let mut eth0_irq = None;
+    if let Some(handle) = net_devs.pop() {
         let device_id = handle.id();
         info!("  use NIC 0: {:?}", handle.name());
 
         let eth0_address = wire::MacAddress(handle.mac().0);
+        eth0_irq = handle.irq();
         let eth0_ip = Ipv4Cidr::new(IP.parse().expect("Invalid IPv4 address"), IP_PREFIX);
 
-        let eth0 = EthernetDevice::new("eth0".to_owned(), handle);
-        eth0_rx_poll = eth0.rx_poll_set();
-        let eth0_dev = router.add_device(Box::new(eth0));
+        let eth0_dev = router.add_device(Box::new(EthernetDevice::new("eth0".to_owned(), handle)));
 
         router
             .add_ipv4_addr(Ipv4AddrEntry {
@@ -113,12 +113,9 @@ pub fn init_network() {
         info!("  mac:  {}", eth0_address);
         info!("  ip:   {}", eth0_ip);
         subscribe_network_unregister(device_id);
-
-        Some(eth0_ip)
     } else {
         warn!("  No network device found!");
-        None
-    };
+    }
 
     for dev in &router.devices {
         info!("Device: {}", dev.name());
@@ -126,7 +123,6 @@ pub fn init_network() {
 
     let service = Service::new(router);
     SERVICE.init_once(service);
-    netlink::init_route_state(Default::default());
 
     SOCKET_SET.init_once(SocketSetWrapper::new());
     LISTEN_TABLE.init_once(ListenTable::new());
@@ -134,8 +130,8 @@ pub fn init_network() {
     poller::network_poller().start();
     ktask::register_timer_callback(TIMER_SAMPLE_PERIOD, |_| SERVICE.handle_timer_tick());
 
-    if let Some(rx_poll) = eth0_rx_poll {
-        EthernetDevice::spawn_rx_task(rx_poll);
+    if let Some(irq) = eth0_irq {
+        EthernetDevice::spawn_rx_task(irq);
     }
 }
 

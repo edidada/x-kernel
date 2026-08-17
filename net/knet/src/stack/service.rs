@@ -29,11 +29,10 @@ use smoltcp::{
 use crate::{
     LISTEN_TABLE, SOCKET_SET,
     buf::PacketBuf,
-    device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot},
+    device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborUpdate},
     ip::{IpAddress, IpListenEndpoint},
-    netlink::RtnetlinkState,
     poller::{PollBudget, PollProgress},
-    router::{DeviceRemoval, Router, Rule},
+    router::{Router, Rule},
     stack::ingress::IngressProcessor,
 };
 
@@ -414,13 +413,9 @@ impl Service {
         crate::poller::network_poller().notify(crate::poller::PollReason::Timer);
     }
 
-    pub fn sync_netlink(&self, state: &RtnetlinkState) {
-        // Keep the Router locked until all derived views are refreshed so a
-        // new RX batch cannot observe a partially synchronized configuration.
-        let mut router = self.router.lock();
-        router.sync_netlink(state);
-        let local_ipv4_addrs = router.local_ipv4_addrs();
-        self.replace_local_ipv4_views(&local_ipv4_addrs);
+    /// Returns the earliest device-maintenance deadline owned by Ethernet.
+    pub(crate) fn device_next_poll_at(&self) -> Option<MonotonicInstant> {
+        self.router.lock().next_poll_at()
     }
 
     fn sync_local_ipv4_views(&self) {
@@ -573,19 +568,28 @@ impl Service {
     }
 
     /// Removes a device and refreshes every address-derived data-plane view.
-    ///
-    /// Returns the removed interface and orphaned IPv4 sources when found.
-    pub(crate) fn remove_device_by_model_id(&self, id: kdevice::DeviceId) -> Option<DeviceRemoval> {
+    pub(crate) fn remove_device_by_model_id(&self, id: kdevice::DeviceId) -> Option<()> {
         let mut router = self.router.lock();
         let effective_mtu = router.effective_mtu();
-        let removal = router.remove_device_by_model_id(id)?;
+        router.remove_device_by_model_id(id)?;
         if router.effective_mtu() != effective_mtu {
             let mut iface = self.iface.lock();
             self.rebuild_interface(&mut router, &mut iface);
         }
         let local_ipv4_addrs = router.local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
-        Some(removal)
+        Some(())
+    }
+
+    pub(crate) fn apply_neighbor_update(&self, update: NeighborUpdate) -> Result<(), LinuxError> {
+        let mut router = self.router.lock();
+        router.apply_neighbor_update(update)?;
+        self.timeout_poll.wake();
+        Ok(())
+    }
+
+    pub(crate) fn has_neighbor(&self, dev: usize, dst: IpAddress) -> bool {
+        self.router.lock().has_neighbor(dev, dst)
     }
 
     pub fn send_link_frame(&self, ifindex: i32, frame: &[u8]) -> KResult<usize> {

@@ -20,6 +20,7 @@ pub use loopback::*;
 #[cfg(feature = "vsock")]
 pub use vsock::*;
 
+pub(crate) use crate::neighbor::{NeighborState, NeighborUpdate};
 use crate::{
     buf::PacketBuf,
     ip::{IpAddress, Ipv4Cidr},
@@ -174,6 +175,11 @@ pub trait NetDevice: Send + Sync {
         context: &mut PollContext<'_>,
     ) -> Result<(), PollRegisterError>;
 
+    /// Returns the earliest device-maintenance deadline.
+    fn next_poll_at(&self) -> Option<MonotonicInstant> {
+        None
+    }
+
     /// Updates the user-visible interface name for this device.
     fn set_name(&mut self, _name: String) {}
 
@@ -201,8 +207,15 @@ pub trait NetDevice: Send + Sync {
     /// Removes queued packets whose IPv4 source address is no longer local.
     fn remove_pending_ipv4_source(&mut self, _addr: crate::ip::Ipv4Address) {}
 
-    /// Synchronizes neighbor entries prepared by the control-plane adapter.
-    fn sync_neighbors(&mut self, _neighbors: &[(IpAddress, [u8; 6])]) {}
+    /// Applies one neighbor-table update to this device.
+    fn apply_neighbor_update(&mut self, _update: NeighborUpdate) -> Result<(), LinuxError> {
+        Err(LinuxError::EOPNOTSUPP)
+    }
+
+    /// Returns whether this device owns a neighbor entry for `dst`.
+    fn has_neighbor(&self, _dst: IpAddress) -> bool {
+        false
+    }
 }
 
 #[cfg(unittest)]

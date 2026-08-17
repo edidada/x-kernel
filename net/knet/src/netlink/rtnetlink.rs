@@ -20,7 +20,10 @@ use super::{
     *,
 };
 use crate::{
-    device::{LINK_FLAG_UP, LINK_FLAG_VOLATILE, LinkConfigUpdate, LinkKind, LinkSnapshot},
+    device::{
+        LINK_FLAG_UP, LINK_FLAG_VOLATILE, LinkConfigUpdate, LinkKind, LinkSnapshot, NeighborState,
+        NeighborUpdate,
+    },
     ip::{IpAddress as KernelIpAddress, IpCidr, Ipv4Cidr},
     router::{Ipv4AddrEntry, RouteAttrs as RouterRouteAttrs, Rule},
     service::ExistingIpv4AddrAction,
@@ -96,23 +99,6 @@ struct RouteAttrs {
 struct NeighAttrs {
     dst: Option<IpAddress>,
     lladdr: Option<[u8; 6]>,
-}
-
-impl From<NeighRequest> for NeighState {
-    fn from(value: NeighRequest) -> Self {
-        Self {
-            family: value.family,
-            ifindex: value.ifindex,
-            state: normalize_neigh_state(value.state),
-            flags: value.flags,
-            dst: value.dst,
-            lladdr: value.lladdr,
-        }
-    }
-}
-
-pub(crate) fn init_route_state(state: RtnetlinkState) {
-    ROUTE_STATE.init_once(RwLock::new(state));
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -386,24 +372,9 @@ pub(crate) fn remove_device_state(id: kdevice::DeviceId) -> bool {
         return false;
     }
     let _mutation_guard = RTNETLINK_MUTATION_LOCK.lock();
-    let Some(removal) = SERVICE.remove_device_by_model_id(id) else {
+    let Some(()) = SERVICE.remove_device_by_model_id(id) else {
         return false;
     };
-    if ROUTE_STATE.is_inited() {
-        let new_state = {
-            let mut state = ROUTE_STATE.write();
-            state
-                .neighs
-                .retain(|neigh| neigh.ifindex != removal.ifindex);
-            for neigh in &mut state.neighs {
-                if neigh.ifindex > removal.ifindex {
-                    neigh.ifindex -= 1;
-                }
-            }
-            state.clone()
-        };
-        SERVICE.sync_netlink(&new_state);
-    }
     true
 }
 
@@ -455,22 +426,20 @@ pub(super) fn del_route_state(request: RouteRequest) -> Result<(), LinuxError> {
 
 pub(super) fn add_neigh_state(request: NeighRequest, flags: u16) -> Result<(), LinuxError> {
     let _mutation_guard = RTNETLINK_MUTATION_LOCK.lock();
+    if request.family != wire_route::FAMILY_IPV4 {
+        return Err(LinuxError::EAFNOSUPPORT);
+    }
     ensure_link_exists(request.ifindex)?;
-    mutate_route_state(|state| {
-        let existing = state
-            .neighs
-            .iter()
-            .position(|neigh| neigh.ifindex == request.ifindex && neigh.dst == request.dst);
-        if let Some(pos) = existing {
-            if flags & NLM_F_REPLACE != 0 {
-                state.neighs[pos] = request.into();
-                return Ok(());
-            }
-            return Err(LinuxError::EEXIST);
-        }
-        state.neighs.push(request.into());
-        Ok(())
-    })
+    let update = neighbor_update_from_request(request)?;
+    let dev = update.dev;
+    let existing = SERVICE.has_neighbor(dev, update.dst);
+    if existing && (flags & NLM_F_EXCL != 0 || flags & NLM_F_REPLACE == 0) {
+        return Err(LinuxError::EEXIST);
+    }
+    if !existing && flags & NLM_F_CREATE == 0 {
+        return Err(LinuxError::ENOENT);
+    }
+    SERVICE.apply_neighbor_update(update)
 }
 
 fn ensure_link_exists(ifindex: u32) -> Result<(), LinuxError> {
@@ -481,6 +450,25 @@ fn ensure_link_exists(ifindex: u32) -> Result<(), LinuxError> {
         false
     };
     exists.then_some(()).ok_or(LinuxError::ENODEV)
+}
+
+fn neighbor_update_from_request(request: NeighRequest) -> Result<NeighborUpdate, LinuxError> {
+    if request.flags != 0 {
+        return Err(LinuxError::EOPNOTSUPP);
+    }
+    let state = match normalize_neigh_state(request.state) {
+        wire_neigh::STATE_INCOMPLETE => NeighborState::Incomplete,
+        wire_neigh::STATE_PERMANENT => NeighborState::Permanent {
+            hardware_addr: request.lladdr.ok_or(LinuxError::EINVAL)?,
+        },
+        _ => return Err(LinuxError::EOPNOTSUPP),
+    };
+    let dev = request.ifindex.checked_sub(1).ok_or(LinuxError::ENODEV)? as usize;
+    Ok(NeighborUpdate {
+        dev,
+        dst: to_kernel_ip(request.dst)?,
+        state,
+    })
 }
 
 fn ipv4_addr_entry_from_request(request: AddrRequest) -> Result<Ipv4AddrEntry, LinuxError> {
@@ -857,27 +845,4 @@ fn error_packets(request: &[u8], errno: LinuxError) -> Vec<NetlinkPacket> {
         from: NetlinkAddr { pid: 0, groups: 0 },
         data: build_error_response(request, errno),
     }]
-}
-
-pub(crate) fn route_state() -> RtnetlinkState {
-    if ROUTE_STATE.is_inited() {
-        (*ROUTE_STATE.read()).clone()
-    } else {
-        Default::default()
-    }
-}
-
-fn mutate_route_state<F>(f: F) -> Result<(), LinuxError>
-where
-    F: FnOnce(&mut RtnetlinkState) -> Result<(), LinuxError>,
-{
-    let new_state = {
-        let mut state = ROUTE_STATE.write();
-        f(&mut state)?;
-        state.clone()
-    };
-    if SERVICE.is_inited() {
-        SERVICE.sync_netlink(&new_state);
-    }
-    Ok(())
 }
