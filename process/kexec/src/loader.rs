@@ -438,8 +438,30 @@ impl ElfLoader {
         });
 
         let elf = map_elf(uspace, kaddr_layout::USER_SPACE_BASE, elf)?;
+        let image_end = elf
+            .headers()
+            .ph
+            .iter()
+            .filter(|ph| ph.get_type() == Ok(xmas_elf::program::Type::Load))
+            .filter_map(|ph| {
+                elf.base()
+                    .checked_add(ph.virtual_addr as usize)?
+                    .checked_add(ph.mem_size as usize)
+            })
+            .max()
+            .ok_or(KError::InvalidExecutable)?;
+        // A fixed low interpreter address overlaps large PIE executables (for
+        // example Chromium is larger than 64 MiB). Linux chooses load biases
+        // which keep the main image and its interpreter disjoint; retain the
+        // legacy minimum while moving the interpreter beyond the actual image.
+        const INTERP_ALIGNMENT: usize = 0x20_0000;
+        let interpreter_base = image_end
+            .checked_add(INTERP_ALIGNMENT - 1)
+            .ok_or(KError::NoMemory)?
+            & !(INTERP_ALIGNMENT - 1);
+        let interpreter_base = interpreter_base.max(kaddr_layout::USER_INTERP_BASE);
         let ldso = ldso
-            .map(|elf| map_elf(uspace, kaddr_layout::USER_INTERP_BASE, elf))
+            .map(|elf| map_elf(uspace, interpreter_base, elf))
             .transpose()?;
 
         let entry = VirtAddr::from_usize(

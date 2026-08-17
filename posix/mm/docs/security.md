@@ -105,7 +105,8 @@
   `F_ADD_SEALS` / `F_GET_SEALS` 由 `posix-fs` 处理，shared writable mmap
   seal enforcement 由 `mm/filemap` 处理，hugetlb 扩展未接入。
 - `memfd` 名字仅用于调试，不保证与 Linux `/proc/self/fd` 展示完全一致。
-- `madvise` 支持 `MADV_DONTNEED`；其它 advice 返回 `InvalidInput`。
+- `madvise` 支持 `MADV_DONTNEED`；`MADV_DONTFORK` 当前作为兼容性提示接受但不改变
+  fork 继承策略，其它 advice 返回 `InvalidInput`。
 - `mmap` 的 maximum permission 与 current permission 分离；shared file
   映射的 may-permission 受文件打开权限约束。
 - `msync` 支持 shared file dirty folio writeback；exact range fsync、

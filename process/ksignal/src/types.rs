@@ -454,6 +454,16 @@ impl SignalInfo {
         result
     }
 
+    /// Construct a synchronous memory-fault signal with Linux `siginfo_t`
+    /// address payload semantics.
+    pub fn new_fault(signo: Signo, code: i32, address: usize) -> Self {
+        let mut result = Self::empty();
+        result.set_signo(signo);
+        result.set_code(code);
+        result.sifields_mut()._sigfault._addr = address as *mut _;
+        result
+    }
+
     /// Construct a user-originated signal with a code and pid.
     pub fn new_user(signo: Signo, code: i32, pid: u32) -> Self {
         let mut result = Self::empty();

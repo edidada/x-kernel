@@ -329,7 +329,15 @@ pub unsafe fn init_mmu() {
     karch::flush_tlb(None);
 
     SCTLR_EL1.modify(SCTLR_EL1::M::Enable + SCTLR_EL1::C::Cacheable + SCTLR_EL1::I::Cacheable);
-    SCTLR_EL1.set(SCTLR_EL1.get() | (1 << 23));
+    // SPAN keeps PAN set across exceptions. Linux also exposes the architectural
+    // cache-maintenance interface used by language runtimes: DZE permits DC ZVA,
+    // UCT permits reading CTR_EL0, and UCI permits EL0 DC/IC maintenance. V8
+    // probes and uses these operations while installing generated code.
+    const SCTLR_EL1_DZE: u64 = 1 << 14;
+    const SCTLR_EL1_UCT: u64 = 1 << 15;
+    const SCTLR_EL1_SPAN: u64 = 1 << 23;
+    const SCTLR_EL1_UCI: u64 = 1 << 26;
+    SCTLR_EL1.set(SCTLR_EL1.get() | SCTLR_EL1_DZE | SCTLR_EL1_UCT | SCTLR_EL1_SPAN | SCTLR_EL1_UCI);
     barrier::isb(barrier::SY);
     super::serial::activate_boot_map();
 }

@@ -956,9 +956,45 @@ impl VmAreaSet {
         }
     }
 
-    /// Inserts a new VMA and panics if it overlaps existing areas.
+    /// Inserts a new VMA, replacing any existing mappings it overlaps.
+    ///
+    /// This mirrors Linux `mmap(MAP_FIXED)` semantics for every insertion:
+    /// ordinary callers never overlap because `find_free_area` skips populated
+    /// ranges, while fixed-address loaders (ELF images) legitimately replace
+    /// whatever occupied the range before. Splitting keeps the non-overlapping
+    /// fragments of partially covered neighbours.
     pub fn insert(&mut self, area: VmArea) {
-        assert!(self.try_insert(area).is_ok());
+        let range = area.range();
+        let area_start = area.start();
+        if self.try_insert_clone(&area).is_ok() {
+            return;
+        }
+        let overlapped = self.collect_overlapping(range);
+        let mut fragments = Vec::new();
+        for existing in &overlapped {
+            if existing.start() < range.start {
+                let size = range.start.as_usize() - existing.start().as_usize();
+                fragments.push(existing.relocated(existing.start(), size, existing.flags()));
+            }
+            if existing.end() > range.end {
+                let size = existing.end().as_usize() - range.end.as_usize();
+                fragments.push(existing.relocated(range.end, size, existing.flags()));
+            }
+        }
+        for existing in &overlapped {
+            self.areas.remove(&existing.start());
+        }
+        for fragment in fragments {
+            let previous = self.areas.insert(fragment.start(), fragment);
+            debug_assert!(previous.is_none());
+        }
+        let previous = self.areas.insert(area_start, area);
+        debug_assert!(previous.is_none());
+    }
+
+    /// Attempts to insert a clone of `area` (see [`Self::try_insert`]).
+    fn try_insert_clone(&mut self, area: &VmArea) -> KResult {
+        self.try_insert(area.clone())
     }
 
     /// Attempts to insert a new VMA while preserving the non-overlap invariant.

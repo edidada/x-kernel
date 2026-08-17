@@ -364,18 +364,18 @@ impl CloneRequest {
             return Err(KError::from(LinuxError::EINVAL));
         }
 
-        // Unimplemented namespace flags: return ENOSYS. NEWPID is included
+        // Unsupported namespace flags follow Linux and return EINVAL. NEWPID is included
         // here because, although the flag is parsed, full PID-namespace
         // support is not wired up yet.
         let unimplemented =
             CloneFlags::NEWNET | CloneFlags::NEWUSER | CloneFlags::NEWCGROUP | CloneFlags::NEWTIME;
         if ns.intersects(unimplemented) {
-            return Err(KError::from(LinuxError::ENOSYS));
+            return Err(KError::from(LinuxError::EINVAL));
         }
 
-        // CLONE_NEWPID is not yet fully supported
+        // CLONE_NEWPID is not yet fully supported. Linux reports EINVAL when the requested namespace feature is unavailable.
         if ns.contains(CloneFlags::NEWPID) {
-            return Err(KError::from(LinuxError::ENOSYS));
+            return Err(KError::from(LinuxError::EINVAL));
         }
 
         Ok(())
@@ -498,7 +498,7 @@ mod tests_clone {
     }
 
     #[def_test]
-    fn test_validate_rejects_unimplemented_namespaces_with_enosys() {
+    fn test_validate_rejects_unimplemented_namespaces_with_einval() {
         for flags in [
             CloneFlags::NEWNET,
             CloneFlags::NEWUSER,
@@ -507,24 +507,23 @@ mod tests_clone {
             let mut req = CloneRequest::new();
             req.set_flags(flags);
             let err = req.validate_namespace_flags().unwrap_err();
-            // ENOSYS is the expected errno for unimplemented namespaces.
             assert_eq!(
                 LinuxError::from(err),
-                LinuxError::ENOSYS,
-                "expected ENOSYS for {flags:?}"
+                LinuxError::EINVAL,
+                "expected EINVAL for {flags:?}"
             );
         }
     }
 
     #[def_test]
-    fn test_validate_rejects_newtime_with_enosys() {
+    fn test_validate_rejects_newtime_with_einval() {
         let mut req = CloneRequest::new();
         req.set_flags(CloneFlags::NEWTIME);
         let err = req.validate_namespace_flags().unwrap_err();
         assert_eq!(
             LinuxError::from(err),
-            LinuxError::ENOSYS,
-            "expected ENOSYS for NEWTIME"
+            LinuxError::EINVAL,
+            "expected EINVAL for NEWTIME"
         );
     }
 

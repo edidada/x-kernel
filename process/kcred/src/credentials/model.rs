@@ -416,6 +416,13 @@ impl Cred {
         self.securebits.remove(SecureBits::KEEP_CAPS);
     }
 
+    /// Applies executable set-ID ownership before the normal exec reset.
+    pub fn apply_exec_setid(&mut self, euid: Option<Uid>, egid: Option<Gid>) {
+        self.set_resuid_unchecked(None, euid, euid);
+        self.set_resgid_unchecked(None, egid, egid);
+        self.apply_exec();
+    }
+
     fn check_uid_change(&self, uid: Option<Uid>) -> KResult<()> {
         if let Some(uid) = uid
             && uid != self.ruid

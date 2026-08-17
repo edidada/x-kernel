@@ -20,9 +20,12 @@ use kpoll::PollRegistrations;
 use kprocess::{Pid, Process, wait_reap};
 use ktask::{current, future::block_on};
 use linux_raw_sys::general::{
-    __WALL, __WCLONE, __WNOTHREAD, WCONTINUED, WEXITED, WNOHANG, WNOWAIT, WUNTRACED,
+    __WALL, __WCLONE, __WNOTHREAD, WCONTINUED, WEXITED, WNOHANG, WNOWAIT, WUNTRACED, rusage,
 };
 use osvm::{VirtMutPtr, VirtPtr};
+use posix_types::UserPtr;
+
+use super::rusage::cpu_time_to_rusage;
 
 bitflags! {
     #[derive(Debug, Clone, Copy)]
@@ -127,6 +130,7 @@ fn scan_waitable_child(
     proc: &Arc<Process>,
     selector: WaitPid,
     exit_code: *mut i32,
+    usage: UserPtr<rusage>,
     options: WaitOptions,
 ) -> KResult<WaitScanResult> {
     match wait_reap::scan_waitable_child(
@@ -138,6 +142,10 @@ fn scan_waitable_child(
         wait_reap::WaitChildScan::Ready(waited) => {
             if let Some(exit_code) = exit_code.check_non_null() {
                 exit_code.write_vm(waited.exit_code())?;
+            }
+            if !usage.is_null() {
+                let (utime, stime) = waited.total_cpu_time();
+                usage.write_vm(cpu_time_to_rusage(utime, stime))?;
             }
             Ok(WaitScanResult::Ready(waited.pid() as _))
         }
@@ -189,11 +197,12 @@ fn wait_on_matching_children(
     proc: &Arc<Process>,
     selector: WaitPid,
     exit_code: *mut i32,
+    usage: UserPtr<rusage>,
     options: WaitOptions,
 ) -> KResult<isize> {
     let current = current();
 
-    let check_children = || match scan_waitable_child(proc, selector, exit_code, options)? {
+    let check_children = || match scan_waitable_child(proc, selector, exit_code, usage, options)? {
         WaitScanResult::Ready(pid) => Ok(Some(pid)),
         WaitScanResult::NoMatchingChild => Err(KError::from(LinuxError::ECHILD)),
         WaitScanResult::NoWaitableChild if options.contains(WaitOptions::WNOHANG) => Ok(Some(0)),
@@ -240,7 +249,12 @@ fn wait_on_matching_children(
     }))
 }
 
-pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResult<isize> {
+pub fn sys_wait4(
+    pid: i32,
+    exit_code: *mut i32,
+    options: u32,
+    usage: UserPtr<rusage>,
+) -> KResult<isize> {
     let options = WaitOptions::from_bits_truncate(options);
 
     let current_thread = kprocess::current_user_thread();
@@ -256,7 +270,7 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResult<isize
         WaitPid::Pgid(-pid as _)
     };
 
-    wait_on_matching_children(proc, selector, exit_code, options)
+    wait_on_matching_children(proc, selector, exit_code, usage, options)
 }
 
 #[cfg(unittest)]
@@ -406,6 +420,7 @@ mod tests_wait {
             &parent,
             WaitPid::Pid(child.pid()),
             core::ptr::null_mut(),
+            posix_types::UserPtr::default(),
             WaitOptions::empty(),
         )
         .expect("wait must reap an already exited child before returning ERESTARTSYS");
@@ -429,6 +444,7 @@ mod tests_wait {
             &parent,
             WaitPid::Pid(child.pid()),
             core::ptr::null_mut(),
+            posix_types::UserPtr::default(),
             WaitOptions::WNOWAIT,
         )
         .expect("WNOWAIT must report a waitable zombie");
@@ -445,6 +461,7 @@ mod tests_wait {
             &parent,
             WaitPid::Pid(child.pid()),
             core::ptr::null_mut(),
+            posix_types::UserPtr::default(),
             WaitOptions::empty(),
         )
         .expect("a later wait must still be able to reap the child");
@@ -466,6 +483,7 @@ mod tests_wait {
             &parent,
             WaitPid::Pid(child.pid()),
             core::ptr::null_mut(),
+            posix_types::UserPtr::default(),
             WaitOptions::empty(),
         )
         .expect_err("wait without a waitable child should still report interruption");
@@ -501,6 +519,7 @@ mod tests_wait {
                     &parent,
                     WaitPid::Pid(child_pid),
                     core::ptr::null_mut(),
+                    posix_types::UserPtr::default(),
                     WaitOptions::empty(),
                 )
                 .map_err(LinuxError::from)
@@ -596,6 +615,7 @@ mod tests_wait {
                     &parent,
                     WaitPid::Pid(child_pid),
                     core::ptr::null_mut(),
+                    posix_types::UserPtr::default(),
                     WaitOptions::empty(),
                 )
                 .map_err(LinuxError::from)
@@ -667,6 +687,7 @@ mod tests_wait {
             &parent,
             WaitPid::Pid(child_pid),
             core::ptr::null_mut(),
+            posix_types::UserPtr::default(),
             WaitOptions::WNOHANG,
         )
         .expect_err("autoreaped child must not remain waitable");

@@ -137,7 +137,6 @@ impl FilePrivateRuntime {
     ) -> KResult<(Option<u64>, Option<usize>)> {
         let file_page_offset = ctx.page_file_offset(addr).ok_or(KError::BadAddress)?;
         let page_data_offset = ctx.page_data_offset().ok_or(KError::BadAddress)?;
-
         // Loader-created PT_LOAD mappings use `file_end: Some(...)` to
         // describe a file-backed prefix followed by a valid anonymous
         // zero-fill tail (`memsz > filesz`). Those tail pages must remain

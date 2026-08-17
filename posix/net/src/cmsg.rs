@@ -135,6 +135,8 @@ pub(crate) fn push_ip_recverr_cmsg(
 pub(crate) enum CMsg {
     /// SCM_RIGHTS: file descriptor passing between processes
     Rights { fds: Vec<Arc<VfsFile>> },
+    /// SCM_CREDENTIALS attached by Unix-domain protocol code.
+    Credentials { pid: i32, uid: u32, gid: u32 },
 }
 impl CMsg {
     /// Parse a control message header and extract its data
@@ -164,6 +166,16 @@ impl CMsg {
                     fds.push(f);
                 }
                 Self::Rights { fds }
+            }
+            (SOL_SOCKET, 2) => {
+                if data.len() < 12 {
+                    return Err(KError::InvalidInput);
+                }
+                Self::Credentials {
+                    pid: i32::from_ne_bytes(data[0..4].try_into().unwrap()),
+                    uid: u32::from_ne_bytes(data[4..8].try_into().unwrap()),
+                    gid: u32::from_ne_bytes(data[8..12].try_into().unwrap()),
+                }
             }
             _ => {
                 return Err(KError::InvalidInput);
@@ -208,6 +220,13 @@ impl<'a> CMsgBuilder<'a> {
         let body_len = body(&mut data)?;
 
         let cmsg_len = size_of::<cmsghdr>() + body_len;
+        let aligned_len = cmsg_len
+            .checked_add(size_of::<usize>() - 1)
+            .ok_or(KError::InvalidInput)?
+            & !(size_of::<usize>() - 1);
+        if aligned_len > remaining {
+            return Ok(false);
+        }
         UserPtr::<u8>::from(self.hdr.as_ptr() as usize + size_of::<cmsghdr>())
             .write_vm_slice(&data[..body_len])?;
 
@@ -218,8 +237,12 @@ impl<'a> CMsgBuilder<'a> {
         };
         write_vm_mem(self.hdr.as_ptr().cast_mut(), core::slice::from_ref(&hdr))?;
 
-        self.hdr = UserPtr::from(self.hdr.as_ptr() as usize + cmsg_len);
-        *self.len += cmsg_len;
+        if aligned_len > cmsg_len {
+            UserPtr::<u8>::from(self.hdr.as_ptr() as usize + cmsg_len)
+                .write_vm_slice(&vec![0; aligned_len - cmsg_len])?;
+        }
+        self.hdr = UserPtr::from(self.hdr.as_ptr() as usize + aligned_len);
+        *self.len += aligned_len;
         Ok(true)
     }
 }

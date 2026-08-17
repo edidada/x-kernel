@@ -3,8 +3,11 @@
 // See LICENSES for license details.
 
 //! Unix stream socket transport.
-use alloc::{boxed::Box, sync::Arc};
-use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
+use core::{
+    mem,
+    sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering},
+};
 
 use async_trait::async_trait;
 use kerrno::{KError, KResult, LinuxError};
@@ -18,7 +21,7 @@ use ringbuf::{
 };
 
 use crate::{
-    RecvOptions, SendOptions, Shutdown,
+    AncillaryData, RecvOptions, SendOptions, Shutdown,
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption, UnixCredentials},
     unix::{UnixAddr, UnixTransport, UnixTransportOps},
@@ -87,6 +90,9 @@ struct StreamEndpoint {
     tx_closed: AtomicBool,
     is_listening: AtomicBool,
     socket_error: AtomicI32,
+    /// Control messages waiting for the next successful receive operation.
+    ancillary: SpinNoPreempt<VecDeque<Vec<AncillaryData>>>,
+    last_sender_pid: AtomicU32,
 }
 
 fn new_duplex_channel(
@@ -197,6 +203,7 @@ pub struct StreamTransport {
     bind_slot: Mutex<Option<Arc<Mutex<Option<Bind>>>>>,
     endpoint: Arc<StreamEndpoint>,
     options: GeneralOptions,
+    pass_credentials: AtomicBool,
     pid: u32,
 }
 impl StreamTransport {
@@ -215,6 +222,7 @@ impl StreamTransport {
             bind_slot: Mutex::new(None),
             endpoint,
             options: GeneralOptions::default(),
+            pass_credentials: AtomicBool::new(false),
             pid,
         }
     }
@@ -245,7 +253,9 @@ impl Configurable for StreamTransport {
             O::SendBuffer(size) => {
                 **size = STREAM_BUF_BYTES;
             }
-            O::PassCredentials(_) => {}
+            O::PassCredentials(enabled) => {
+                **enabled = self.pass_credentials.load(Ordering::Acquire);
+            }
             O::PeerCredentials(cred) => {
                 let peer_pid = self
                     .channel
@@ -267,7 +277,9 @@ impl Configurable for StreamTransport {
         }
 
         match opt {
-            O::PassCredentials(_) => {}
+            O::PassCredentials(enabled) => {
+                self.pass_credentials.store(*enabled, Ordering::Release);
+            }
             _ => return Ok(OptionHandled::No),
         }
         Ok(OptionHandled::Yes)
@@ -355,7 +367,7 @@ impl UnixTransportOps for StreamTransport {
         ))
     }
 
-    fn send(&self, mut src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
+    fn send(&self, mut src: impl Read + IoBuf, mut options: SendOptions) -> KResult<usize> {
         if options.to.is_some() {
             return Err(KError::InvalidInput);
         }
@@ -410,6 +422,15 @@ impl UnixTransportOps for StreamTransport {
                 }
                 total += count;
                 if count > 0 {
+                    chan.peer_endpoint
+                        .last_sender_pid
+                        .store(kprocess::current_user_thread().pid(), Ordering::Release);
+                    if !options.ancillary.is_empty() {
+                        chan.peer_endpoint
+                            .ancillary
+                            .lock()
+                            .push_back(mem::take(&mut options.ancillary));
+                    }
                     chan.peer_endpoint.polls.readable.wake();
                 }
 
@@ -421,7 +442,7 @@ impl UnixTransportOps for StreamTransport {
             })
     }
 
-    fn recv(&self, mut dst: impl Write, options: RecvOptions) -> KResult<usize> {
+    fn recv(&self, mut dst: impl Write, mut options: RecvOptions) -> KResult<usize> {
         self.options
             .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
                 let mut guard = self.channel.lock();
@@ -443,6 +464,19 @@ impl UnixTransportOps for StreamTransport {
                     count
                 };
                 if count > 0 {
+                    if let Some(pending) = self.endpoint.ancillary.lock().pop_front()
+                        && let Some(output) = options.ancillary.as_deref_mut()
+                    {
+                        output.extend(pending);
+                    }
+                    if self.pass_credentials.load(Ordering::Acquire)
+                        && let Some(output) = options.ancillary.as_deref_mut()
+                    {
+                        let peer_pid = self.endpoint.last_sender_pid.load(Ordering::Acquire);
+                        output.push(Box::new(crate::KernelAncillaryData::UnixCredentials(
+                            UnixCredentials::new(peer_pid),
+                        )));
+                    }
                     let occupied_after = occupied_before - count;
                     if !is_stream_writable(occupied_before) && is_stream_writable(occupied_after) {
                         chan.peer_endpoint.polls.writable.wake();

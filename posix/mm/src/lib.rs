@@ -203,6 +203,19 @@ mod tests {
     }
 
     #[def_test]
+    fn madvise_request_accepts_dontfork_as_compatibility_hint() {
+        assert!(
+            MadviseRequest::dontneed_from_raw(
+                0x1000,
+                PAGE_SIZE_4K,
+                linux_raw_sys::general::MADV_DONTFORK as i32,
+            )
+            .expect("MADV_DONTFORK should be accepted")
+            .is_none()
+        );
+    }
+
+    #[def_test]
     fn msync_request_rejects_unknown_flags() {
         let unknown_flag = 1_u32 << 31;
 

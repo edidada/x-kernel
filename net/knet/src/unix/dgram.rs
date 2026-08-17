@@ -4,6 +4,7 @@
 
 //! Unix datagram socket transport.
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use async_channel::TryRecvError;
 use async_trait::async_trait;
@@ -23,6 +24,7 @@ struct Datagram {
     data: Vec<u8>,
     ancillary: Vec<AncillaryData>,
     sender: UnixAddr,
+    sender_pid: u32,
 }
 
 struct Channel {
@@ -52,6 +54,7 @@ pub struct DgramTransport {
     poll_state: Arc<PollSet>,
     options: GeneralOptions,
     pid: u32,
+    pass_credentials: AtomicBool,
 }
 impl DgramTransport {
     pub fn new(pid: u32) -> Self {
@@ -63,6 +66,7 @@ impl DgramTransport {
             poll_state: Arc::default(),
             options: GeneralOptions::default(),
             pid,
+            pass_credentials: AtomicBool::new(false),
         }
     }
 
@@ -79,6 +83,7 @@ impl DgramTransport {
             poll_state: Arc::default(),
             options: GeneralOptions::default(),
             pid,
+            pass_credentials: AtomicBool::new(false),
         }
     }
 
@@ -116,7 +121,9 @@ impl Configurable for DgramTransport {
         }
 
         match opt {
-            O::PassCredentials(_) => {}
+            O::PassCredentials(enabled) => {
+                **enabled = self.pass_credentials.load(Ordering::Acquire);
+            }
             O::PeerCredentials(cred) => {
                 // Datagram sockets are stateless and do not have a peer, so we
                 // return the credentials of the process that created the
@@ -136,7 +143,9 @@ impl Configurable for DgramTransport {
         }
 
         match opt {
-            O::PassCredentials(_) => {}
+            O::PassCredentials(enabled) => {
+                self.pass_credentials.store(*enabled, Ordering::Release);
+            }
             _ => return Ok(OptionHandled::No),
         }
         Ok(OptionHandled::Yes)
@@ -196,6 +205,7 @@ impl UnixTransportOps for DgramTransport {
             data: message,
             ancillary: options.ancillary,
             sender: self.local_addr.read().clone(),
+            sender_pid: kprocess::current_user_thread().pid(),
         };
 
         let connected = self.peer.read();
@@ -231,6 +241,7 @@ impl UnixTransportOps for DgramTransport {
                 data,
                 ancillary,
                 sender,
+                sender_pid,
             } = match rx.try_recv() {
                 Ok(packet) => packet,
                 Err(TryRecvError::Empty) => {
@@ -250,6 +261,11 @@ impl UnixTransportOps for DgramTransport {
             }
             if let Some(dst) = options.ancillary.as_mut() {
                 dst.extend(ancillary);
+                if self.pass_credentials.load(Ordering::Acquire) {
+                    dst.push(Box::new(crate::KernelAncillaryData::UnixCredentials(
+                        UnixCredentials::new(sender_pid),
+                    )));
+                }
             }
 
             Ok(if options.flags.contains(RecvFlags::TRUNCATE) {

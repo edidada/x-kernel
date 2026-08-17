@@ -10,8 +10,44 @@ use kcred::Cred;
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 use kvfs::{AnonInodeFs, FMode, FileOperations, OpenFlags, VfsFile, VfsResult};
+use posix_types::{UserPtr, UserRead, UserWrite};
 
-use crate::{RecvFlags, RecvOptions, SendFlags, SendOptions, Socket, SocketOps};
+use crate::{
+    RecvFlags, RecvOptions, SERVICE, SendFlags, SendOptions, Socket, SocketOps,
+    device::LinkConfigUpdate,
+};
+
+const IFNAMSIZ: usize = 16;
+const SIOCGIFFLAGS: u32 = 0x8913;
+const SIOCSIFFLAGS: u32 = 0x8914;
+const IFF_UP: u16 = 1;
+
+/// Linux `struct ifreq` ABI carrier for commands whose union member is flags.
+#[repr(C)]
+#[derive(Clone, Copy, UserRead, UserWrite)]
+struct IfReq {
+    name: [u8; IFNAMSIZ],
+    union_data: [u8; 24],
+}
+
+impl IfReq {
+    fn interface_name(&self) -> KResult<&str> {
+        let name_len = self
+            .name
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(IFNAMSIZ);
+        core::str::from_utf8(&self.name[..name_len]).map_err(|_| KError::NoSuchDevice)
+    }
+
+    fn flags(&self) -> u16 {
+        u16::from_ne_bytes([self.union_data[0], self.union_data[1]])
+    }
+
+    fn set_flags(&mut self, flags: u16) {
+        self.union_data[..2].copy_from_slice(&flags.to_ne_bytes());
+    }
+}
 
 /// Wraps a socket in a VFS file and captures `cred` as its open credential.
 pub fn sock_alloc_file(socket: Socket, flags: u32, cred: Arc<Cred>) -> KResult<Arc<VfsFile>> {
@@ -37,6 +73,38 @@ struct SocketFileOps;
 impl SocketFileOps {
     fn socket(file: &VfsFile) -> VfsResult<Arc<Socket>> {
         sock_from_file(file)
+    }
+
+    fn ioctl_ifreq(cmd: u32, arg: usize) -> VfsResult<usize> {
+        let user_request = UserPtr::<IfReq>::from(arg);
+        let mut request = user_request.read_vm()?;
+        let interface_name = request.interface_name()?;
+        let link = SERVICE
+            .link_snapshots()
+            .into_iter()
+            .find(|link| link.name == interface_name)
+            .ok_or(KError::NoSuchDevice)?;
+
+        match cmd {
+            SIOCGIFFLAGS => {
+                request.set_flags(link.flags as u16);
+                user_request.write_vm(request)?;
+            }
+            SIOCSIFFLAGS => {
+                SERVICE
+                    .update_device_link(
+                        link.ifindex,
+                        LinkConfigUpdate {
+                            name: None,
+                            mtu: None,
+                            is_up: Some(request.flags() & IFF_UP != 0),
+                        },
+                    )
+                    .map_err(KError::from)?;
+            }
+            _ => return Err(KError::NotATty),
+        }
+        Ok(0)
     }
 }
 
@@ -73,6 +141,10 @@ impl FileOperations for SocketFileOps {
             }
             _ => socket.send(src, options),
         }
+    }
+
+    fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
+        Self::ioctl_ifreq(cmd, arg)
     }
 
     fn poll(&self, file: &VfsFile) -> IoEvents {
@@ -128,6 +200,8 @@ impl Pollable for Socket {
 
 #[cfg(unittest)]
 mod socket_tests {
+    use core::mem::{offset_of, size_of};
+
     use linux_raw_sys::general::S_IFSOCK;
     use unittest::def_test;
 
@@ -135,5 +209,11 @@ mod socket_tests {
     #[def_test]
     fn test_socket_mode_constant() {
         assert_eq!(S_IFSOCK, 0o140000);
+    }
+
+    #[def_test]
+    fn ifreq_abi_layout_matches_linux_uapi() {
+        assert_eq!(size_of::<super::IfReq>(), 40);
+        assert_eq!(offset_of!(super::IfReq, union_data), 16);
     }
 }

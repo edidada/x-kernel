@@ -88,6 +88,7 @@ fn parse_send_cmsgs(
 
 enum SocketAncillary {
     Rights { fds: Vec<Arc<VfsFile>> },
+    Credentials(knet::options::UnixCredentials),
     IpError(SocketErrorInfo),
 }
 
@@ -100,12 +101,20 @@ fn into_socket_ancillary(ancillary: AncillaryData) -> Option<SocketAncillary> {
         let ancillary = ancillary.downcast::<CMsg>().ok()?;
         return Some(match *ancillary {
             CMsg::Rights { fds } => SocketAncillary::Rights { fds },
+            CMsg::Credentials { pid, uid, gid } => {
+                SocketAncillary::Credentials(knet::options::UnixCredentials {
+                    pid: pid as u32,
+                    uid,
+                    gid,
+                })
+            }
         });
     }
     if type_id == TypeId::of::<KernelAncillaryData>() {
         let ancillary = ancillary.downcast::<KernelAncillaryData>().ok()?;
         return Some(match *ancillary {
             KernelAncillaryData::IpError(err) => SocketAncillary::IpError(err),
+            KernelAncillaryData::UnixCredentials(cred) => SocketAncillary::Credentials(cred),
         });
     }
 
@@ -137,6 +146,16 @@ fn push_socket_cmsg(
                 written += size_of::<i32>();
             }
             Ok(written)
+        }),
+        SocketAncillary::Credentials(cred) => builder.push(SOL_SOCKET, 2, |data| {
+            const UCRED_SIZE: usize = size_of::<i32>() + 2 * size_of::<u32>();
+            if data.len() < UCRED_SIZE {
+                return Err(KError::from(LinuxError::ENOBUFS));
+            }
+            data[..4].copy_from_slice(&(cred.pid as i32).to_ne_bytes());
+            data[4..8].copy_from_slice(&cred.uid.to_ne_bytes());
+            data[8..12].copy_from_slice(&cred.gid.to_ne_bytes());
+            Ok(UCRED_SIZE)
         }),
         SocketAncillary::IpError(err) => push_ip_recverr_cmsg(builder, err),
     }

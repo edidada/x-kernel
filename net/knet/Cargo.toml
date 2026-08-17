@@ -27,6 +27,7 @@ kprocess = { workspace = true }
 kcred = { workspace = true }
 kerrno = { workspace = true }
 kvfs = { workspace = true }
+posix-types = { workspace = true }
 kio = { workspace = true, features = ["alloc"] }
 kpoll = { workspace = true }
 tipc = { workspace = true, optional = true }

@@ -50,7 +50,6 @@ pub fn sys_execve(
     };
 
     debug!("sys_execve <= path: {path:?}, args: {args:?}, envs: {envs:?}");
-
     let curr = current();
     let thread = kprocess::current_user_thread();
     let process = thread.process().clone();
@@ -72,6 +71,14 @@ pub fn sys_execve(
         &cred,
     )?;
     drop(fs);
+    let metadata = loc.getattr()?;
+    let permissions = metadata.mode.permission();
+    let exec_euid = permissions
+        .contains(kvfs::NodePermission::SET_UID)
+        .then_some(metadata.uid);
+    let exec_egid = permissions
+        .contains(kvfs::NodePermission::SET_GID)
+        .then_some(metadata.gid);
     let absolute_path = loc
         .absolute_path()
         .map(|path| path.to_string())
@@ -114,7 +121,7 @@ pub fn sys_execve(
 
     process.apply_exec_update(exec_update)?;
     let mut exec_cred = thread.prepare_creds();
-    exec_cred.apply_exec();
+    exec_cred.apply_exec_setid(exec_euid, exec_egid);
     thread.commit_creds(exec_cred);
     thread.reset_after_exec();
 

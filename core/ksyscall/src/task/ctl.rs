@@ -139,10 +139,17 @@ pub fn sys_prctl(
             }
         }
         PR_MCE_KILL => {}
-        // We do not track the process dumpable flag; report the Linux default
-        // (`SUID_DUMP_USER` semantics observed by user space as dumpable=1).
-        PR_GET_DUMPABLE => return Ok(1),
-        PR_SET_DUMPABLE => {}
+        PR_GET_DUMPABLE => return Ok(kprocess::current_user_thread().process().dumpable() as isize),
+        PR_SET_DUMPABLE => {
+            // Linux accepts SUID_DUMP_DISABLE (0) and SUID_DUMP_USER (1)
+            // through prctl; SUID_DUMP_ROOT is configured through sysctl.
+            if arg2 > 1 {
+                return Err(KError::InvalidInput);
+            }
+            kprocess::current_user_thread()
+                .process()
+                .set_dumpable(arg2 as u8);
+        }
         // securebits are not tracked; nothing is set.
         PR_GET_SECUREBITS => return Ok(0),
         PR_SET_SECUREBITS => {}

@@ -12,6 +12,7 @@ documentation.workspace = true
 [dependencies]
 bytemuck.workspace = true
 display.workspace = true
+karch.workspace = true
 kalloc.workspace = true
 kclass.workspace = true
 kdevice.workspace = true

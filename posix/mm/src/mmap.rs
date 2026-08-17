@@ -391,6 +391,12 @@ impl MadviseRequest {
         length: usize,
         advice: i32,
     ) -> KResult<Option<Self>> {
+        // Runtimes such as V8 mark JIT reservations DONTFORK even when the
+        // process never forks. Accept the hint until VMA inheritance policy is
+        // modeled; rejecting it breaks otherwise unrelated runtime startup.
+        if advice == MADV_DONTFORK as i32 {
+            return Ok(None);
+        }
         if advice != MADV_DONTNEED as i32 {
             return Err(KError::InvalidInput);
         }

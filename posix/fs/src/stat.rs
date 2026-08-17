@@ -10,11 +10,11 @@ use kerrno::{KError, KResult};
 use kprocess::current_user_process;
 use kvfs::{
     Filename, LookupFlags, LookupIntent, MountFlags, NodeType, Path, Permission, StatFsFlags,
-    SuperBlockFlags,
+    SuperBlockFlags, pipe::PipeObject,
 };
 use linux_raw_sys::general::{
-    __kernel_fsid_t, AT_EACCESS, AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, R_OK, W_OK, X_OK, stat,
-    statfs, statx,
+    __kernel_fsid_t, AT_EACCESS, AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, R_OK, S_IFIFO, S_IFMT, W_OK,
+    X_OK, stat, statfs, statx,
 };
 use posix_types::{UserConstPtr, UserPtr};
 
@@ -30,7 +30,15 @@ pub fn sys_stat(path: UserConstPtr<c_char>, statbuf: UserPtr<stat>) -> KResult<i
 
 /// Get file metadata by `fd` and write into `statbuf`.
 pub fn sys_fstat(fd: i32, statbuf: UserPtr<stat>) -> KResult<isize> {
-    sys_fstatat(fd, UserConstPtr::default(), statbuf, AT_EMPTY_PATH)
+    let file = kprocess::current_resources().get_file(fd)?;
+    let mut stat = kfd::Kstat::from(file.path().getattr()?);
+    if PipeObject::from_file(&file).is_ok() {
+        // Anonymous pipes use anon_inodefs for their VFS path, but Linux
+        // exposes the open file description as a FIFO through fstat(2).
+        stat.mode = (stat.mode & !S_IFMT) | S_IFIFO;
+    }
+    statbuf.write_vm(stat.into())?;
+    Ok(0)
 }
 
 /// Get the metadata of the symbolic link and write into `buf`.
