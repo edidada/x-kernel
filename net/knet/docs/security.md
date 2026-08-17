@@ -233,7 +233,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-04 | 恶意 netlink 消息越界读取或构造非法状态 | 高 | 用户传入短 header、畸形 attr、非法 family、非法 ifindex | `NlMsgHeader::read`、`parse_attrs`、`parse_ip_by_family` 和 route index 检查拒绝非法输入 |
 | T-05 | ARP/NDP spoofing 污染 neighbor cache | 中 | 外部主机发送伪造 ARP reply、NS SLLA 或 NA | 当前校验 unicast MAC、广播和本机目标 IP；NUD 只检测可达性，不认证邻居；完整邻居安全策略仍依赖网络隔离 |
 | T-06 | listen backlog 被 SYN 洪泛占满 | 中 | 大量连接请求命中同一 listener | backlog 被 clamp 到 `LISTEN_QUEUE_SIZE`；超限丢弃并记录 warn |
-| T-07 | raw socket 被无权限调用者创建 | 中 | syscall 层没有实施权限门禁 | `knet` 层只封装 raw socket 行为；权限策略在 `posix/net::sys_socket`。`AF_PACKET` 与 `AF_INET6 SOCK_RAW`（仅 `IPPROTO_FRAGMENT`）检查特权；`AF_INET SOCK_RAW` ICMP 仍未门禁 |
+| T-07 | raw socket 被无权限调用者创建 | 中 | syscall 层没有实施权限门禁 | `knet` 层只封装 raw socket 行为；权限策略在 `posix/net::sys_socket`。`AF_PACKET` 与 `AF_INET6 SOCK_RAW`（`IPPROTO_FRAGMENT` / `IPPROTO_TCP`）检查特权；`AF_INET SOCK_RAW` ICMP 仍未门禁 |
 | T-08 | netlink RX queue 被 uevent 或 response 填满 | 中 | 订阅者不消费，publisher 持续写入 | `NETLINK_RX_QUEUE_LIMIT` 限制单 socket queue 字节数，超限丢弃 |
 | T-09 | 控制面与 data-plane 不一致 | 中 | link mutation 更新设备 owner 失败，跨 socket 地址 mutation 交错，设备移除后保留旧地址投影或控制面路由，删除地址后配置路由继续引用失效 `prefsrc`，或路由和邻居 mutation 只更新控制面 | 全局 mutation 锁串行化跨 socket 更新与设备移除；link query 与 mutation 直接访问 `NetDevice` owner；IPv4 地址 query 与 mutation 直接访问 Router；IPv6 地址、路由和邻居 mutation 在释放 `ROUTE_STATE` 写锁后调用 `SERVICE.sync_netlink`；地址与设备删除刷新自动路由、ingress、Interface 和设备投影 |
 | T-10 | 外部网络包触发 parser panic | 中 | malformed Ethernet、ARP、IP、UDP 或 TCP packet 进入 RX | Ethernet 和 ARP 使用 `zerocopy` checked view，IPv4/IPv6 与 UDP/ICMPv6/NDP 使用 crate 内 checked parser，TCP 与 raw IP 使用 smoltcp checked parser；错误包直接丢弃 |
@@ -331,7 +331,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - smoltcp maintenance 与单次 egress pass 提供有界执行，ingress 通过 `poll_ingress_single` 按 packet 推进；单个 packet 的协议处理和一次 egress pass 仍会形成有限的软上限超出。
 - UDP RX queue 排空后保留 64 个元数据槽位；长期非空队列保持已增长容量，直到队列再次排空。
 - 地址 dump 直接读取 Router IPv4 条目并合并 `ROUTE_STATE` 中的 IPv6 地址；路由 dump 仍来自 `ROUTE_STATE` 投影；link dump 读取设备实时快照；邻居 dump 合并 `ROUTE_STATE` 与设备 NUD 快照。
-- raw socket 创建权限由 syscall 层承担，`knet` 构造器自身没有进程凭据参数。`AF_INET6 SOCK_RAW` 目前只开放特权进程的 `IPPROTO_FRAGMENT`，把分片注入本机投递路径；未实现 `IPPROTO_RAW` / HDRINCL。
+- raw socket 创建权限由 syscall 层承担，`knet` 构造器自身没有进程凭据参数。`AF_INET6 SOCK_RAW` 目前只开放特权进程的 `IPPROTO_FRAGMENT`（注入分片）和 `IPPROTO_TCP`（观察重组后的 TCP）；未实现 `IPPROTO_RAW` / HDRINCL。
 - Ethernet 设备通过 ARP（IPv4）和 NDP（IPv6）解析邻居，并运行 Linux 风格 NUD 状态机；解析失败丢弃排队报文，尚未向源 socket 上报 ICMPv6 Destination Unreachable。尚未根据 TCP ACK / UDP 成功收发刷新 `confirmed`。
 - 非 Ethernet 链路和多队列 NIC 抽象仍待扩展。
 - IPv6 入向 Fragment 已按 RFC 8200 / RFC 5722 重组；IPv6 输出仍不分片，超出路径 MTU 返回 `EMSGSIZE`。尚未实现 IPv6 PMTUD cache。

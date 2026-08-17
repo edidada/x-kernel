@@ -84,20 +84,22 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             knet::Socket::Udp(Box::new(UdpSocket::new_v6()))
         }
         (AF_INET6, SOCK_RAW) => {
-            // Userspace cannot emit IPv6 Fragment headers through UDP/TCP.
-            // A privileged raw socket with next-header 44 lets tests inject
-            // fragments onto the local-delivery path so IngressProcessor
-            // can reassemble them. IPPROTO_RAW / HDRINCL is not implemented.
+            // Userspace UDP/TCP send cannot emit Fragment headers.
+            // IPPROTO_FRAGMENT injects fragments onto local delivery;
+            // IPPROTO_TCP observes reassembled TCP so tests can match
+            // smoltcp sequence numbers. IPPROTO_RAW / HDRINCL is not
+            // implemented.
             if !cred.is_privileged() {
                 return Err(KError::from(LinuxError::EPERM));
             }
-            if proto != IPPROTO_FRAGMENT {
+            let ip_protocol = if proto == IPPROTO_FRAGMENT {
+                IpProtocol::Ipv6Frag
+            } else if proto == IPPROTO_TCP as u32 {
+                IpProtocol::Tcp
+            } else {
                 return Err(KError::from(LinuxError::EPROTONOSUPPORT));
-            }
-            knet::Socket::Raw(Box::new(RawSocket::new(
-                IpVersion::Ipv6,
-                IpProtocol::Ipv6Frag,
-            )))
+            };
+            knet::Socket::Raw(Box::new(RawSocket::new(IpVersion::Ipv6, ip_protocol)))
         }
         (AF_INET6, _) => return Err(KError::from(LinuxError::ESOCKTNOSUPPORT)),
         (AF_UNIX, SOCK_STREAM) => {
