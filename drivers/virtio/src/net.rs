@@ -4,9 +4,9 @@
 
 //! VirtIO network driver adapter.
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use device_res::{Irq, IrqEvent, IrqEventSource, IrqResource, IrqTrigger};
+use device_res::{Irq, IrqEvent, IrqEventSource, IrqResource, IrqTrigger, irq_provider};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use driver_net::{
     MacAddress, NetBuf, NetBufBox, NetBufHandle, NetBufPool, NetDevice, NetRxScheduler,
@@ -20,16 +20,59 @@ const NET_BUF_LEN: usize = 1526;
 
 static NEXT_IRQ_HANDLE_ID: AtomicUsize = AtomicUsize::new(0);
 
+/// NAPI-style interrupt suppression state shared between the hardirq handler
+/// and the RX drain path.
+///
+/// The handler suppresses device notifications when it schedules the drain;
+/// the drain resumes them once the receive ring is empty. The line-mask flag
+/// keeps `device_res` line enable/disable calls balanced because the kirq
+/// core nests disable requests.
+struct NetNapiState {
+    resource: IrqResource,
+    is_line_masked: AtomicBool,
+}
+
+impl NetNapiState {
+    fn new(irq: usize) -> Self {
+        Self {
+            resource: IrqResource::new(irq, IrqTrigger::Unknown(0)),
+            is_line_masked: AtomicBool::new(false),
+        }
+    }
+
+    /// Masks the IRQ line, at most once per suppress/resume cycle.
+    fn mask_line(&self) {
+        if !self.is_line_masked.swap(true, Ordering::AcqRel)
+            && let Ok(provider) = irq_provider()
+        {
+            provider.set_irq_enabled(self.resource, false);
+        }
+    }
+
+    /// Unmasks the IRQ line if a previous mask is still outstanding.
+    fn unmask_line(&self) {
+        if self.is_line_masked.swap(false, Ordering::AcqRel)
+            && let Ok(provider) = irq_provider()
+        {
+            provider.set_irq_enabled(self.resource, true);
+        }
+    }
+}
+
 trait VirtIoNetIrqAck: Send + Sync {
     fn ack_interrupt(&self) -> bool;
     fn handle_id(&self) -> usize;
     fn irq(&self) -> usize;
     fn schedule_rx(&self);
+    /// Suppresses further device notifications while the RX drain runs
+    /// (NAPI-style), so a packet burst does not cost one hardirq per packet.
+    fn suppress_interrupts(&self);
 }
 
 struct VirtIoNetIrqHandle<H: Hal, T: Transport, const QS: usize> {
     inner: Arc<SpinNoIrq<InnerDev<H, T, QS>>>,
     rx_scheduler: Arc<SpinNoIrq<Option<Arc<dyn NetRxScheduler>>>>,
+    napi: Arc<NetNapiState>,
     id: usize,
     irq: usize,
 }
@@ -61,6 +104,17 @@ impl<H: Hal, T: Transport, const QS: usize> VirtIoNetIrqAck for VirtIoNetIrqHand
             scheduler.schedule_rx();
         }
     }
+
+    fn suppress_interrupts(&self) {
+        // Queue-level suppression covers devices that did not negotiate
+        // VIRTIO_F_RING_EVENT_IDX (the avail-ring NO_INTERRUPT flag); with
+        // EVENT_IDX negotiated this write is ignored by the device, so line
+        // masking below carries the suppression instead.
+        self.inner.lock().disable_interrupts();
+        // Line-level masking covers real IRQ lines (GIC/PLIC/IO-APIC). It is
+        // a no-op for x86 MSI-X vectors, which the APIC cannot mask.
+        self.napi.mask_line();
+    }
 }
 
 static NET_IRQ_HANDLES: SpinNoIrq<Vec<Arc<dyn VirtIoNetIrqAck>>> = SpinNoIrq::new(Vec::new());
@@ -89,6 +143,10 @@ fn handle_virtio_net_irq(irq: usize) -> IrqEvent {
             continue;
         }
         if irq_handle.ack_interrupt() {
+            // NAPI-style top half: acknowledge the ISR, stop further
+            // notifications from this device, and let the scheduled drain
+            // own all completion processing.
+            irq_handle.suppress_interrupts();
             irq_handle.schedule_rx();
             sources |= (1 << RX_SRC) | (1 << TX_SRC);
         }
@@ -104,13 +162,15 @@ fn register_virtio_net_irq<H: Hal + 'static, T: Transport + 'static, const QS: u
     irq: usize,
     inner: &Arc<SpinNoIrq<InnerDev<H, T, QS>>>,
     rx_scheduler: &Arc<SpinNoIrq<Option<Arc<dyn NetRxScheduler>>>>,
-) -> DriverResult<usize> {
+) -> DriverResult<(usize, Arc<NetNapiState>)> {
     let handle_id = NEXT_IRQ_HANDLE_ID.fetch_add(1, Ordering::Relaxed);
+    let napi = Arc::new(NetNapiState::new(irq));
     NET_IRQ_HANDLES
         .lock()
         .push(Arc::new(VirtIoNetIrqHandle::<H, T, QS> {
             inner: inner.clone(),
             rx_scheduler: rx_scheduler.clone(),
+            napi: napi.clone(),
             id: handle_id,
             irq,
         }));
@@ -127,7 +187,7 @@ fn register_virtio_net_irq<H: Hal + 'static, T: Transport + 'static, const QS: u
         }
     }
 
-    Ok(handle_id)
+    Ok((handle_id, napi))
 }
 
 fn unregister_virtio_net_irq(irq: usize, handle_id: usize) {
@@ -187,6 +247,8 @@ pub struct VirtIoNetDev<H: Hal, T: Transport, const QS: usize> {
     mac: MacAddress,
     irq: Option<usize>,
     irq_handle_id: Option<usize>,
+    /// NAPI suppression state shared with the hardirq handle.
+    napi: Option<Arc<NetNapiState>>,
     rx_scheduler: Arc<SpinNoIrq<Option<Arc<dyn NetRxScheduler>>>>,
 }
 
@@ -280,9 +342,12 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
         }
 
         let mut irq_handle_id = None;
+        let mut napi = None;
         let rx_scheduler = Arc::new(SpinNoIrq::new(None));
         if let Some(irq) = irq {
-            irq_handle_id = Some(register_virtio_net_irq(irq, &inner, &rx_scheduler)?);
+            let (handle_id, napi_state) = register_virtio_net_irq(irq, &inner, &rx_scheduler)?;
+            irq_handle_id = Some(handle_id);
+            napi = Some(napi_state);
         }
 
         // 3. Cache immutable device properties.
@@ -300,6 +365,7 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
             mac,
             irq,
             irq_handle_id,
+            napi,
             rx_scheduler,
         })
     }
@@ -428,11 +494,26 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
         }
         // For IRQ-backed devices, reading the ISR here could clear an event
         // that arrived after the handler scheduled RX.
-        let mut bufs = self.bufs.lock();
         let token = {
             let inner = self.inner.lock();
             inner.poll_receive()
         };
+        // NAPI drain end: the receive ring is empty, so resume device
+        // notifications and recheck once. A completion that raced the resume
+        // is either returned here or covered by the re-enabled interrupt
+        // scheduling another drain.
+        let token = match token {
+            Some(token) => Some(token),
+            None => {
+                let mut inner = self.inner.lock();
+                inner.enable_interrupts();
+                if let Some(napi) = &self.napi {
+                    napi.unmask_line();
+                }
+                inner.poll_receive()
+            }
+        };
+        let mut bufs = self.bufs.lock();
         if let Some(token) = token {
             let mut rx_buf = bufs.rx_buffers[token as usize]
                 .take()
@@ -494,6 +575,7 @@ mod tests {
         irq_num: usize,
         handled: bool,
         scheduler: Option<Arc<dyn NetRxScheduler>>,
+        suppress_count: AtomicUsize,
     }
 
     struct MockRxScheduler {
@@ -524,6 +606,10 @@ mod tests {
                 scheduler.schedule_rx();
             }
         }
+
+        fn suppress_interrupts(&self) {
+            self.suppress_count.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn reset_irq_state() {
@@ -537,6 +623,7 @@ mod tests {
             irq_num,
             handled: false,
             scheduler: None,
+            suppress_count: AtomicUsize::new(0),
         })
     }
 
@@ -550,6 +637,7 @@ mod tests {
             irq_num,
             handled: true,
             scheduler,
+            suppress_count: AtomicUsize::new(0),
         })
     }
 
@@ -684,19 +772,26 @@ mod tests {
         transport.device_type = virtio_drivers::transport::DeviceType::Network;
         let interrupt_ack_count = transport.interrupt_ack_count.clone();
         let mut dev = VirtIoNetDev::<MockHal, MockTransport, 32>::try_new(transport, None).unwrap();
-        let irq = 73;
+        // Use a reserved, never-mapped virq: the real handle's NAPI suppression
+        // reaches the IRQ provider, and touching a live virq here could mask a
+        // real device line for the rest of the test run.
+        const UNMAPPED_TEST_IRQ: usize = 0x6000_0000;
+        let irq = UNMAPPED_TEST_IRQ;
         let handle_id = 53;
+        let napi = Arc::new(NetNapiState::new(irq));
         NET_IRQ_HANDLES
             .lock()
             .push(Arc::new(VirtIoNetIrqHandle::<MockHal, MockTransport, 32> {
                 inner: dev.inner.clone(),
                 rx_scheduler: dev.rx_scheduler.clone(),
+                napi: napi.clone(),
                 id: handle_id,
                 irq,
             }));
         REGISTERED_NET_IRQS.lock().insert(irq);
         dev.irq = Some(irq);
         dev.irq_handle_id = Some(handle_id);
+        dev.napi = Some(napi);
 
         assert!(matches!(dev.recv(), Err(DriverError::WouldBlock)));
         assert_eq!(interrupt_ack_count.load(Ordering::Relaxed), 0);
@@ -732,6 +827,23 @@ mod tests {
     }
 
     #[def_test(serial)]
+    fn test_irq_handler_suppresses_interrupts_only_when_ack_claimed() {
+        reset_irq_state();
+
+        let claimed = handled_mock_handle(53, 73, None);
+        let missed = mock_handle(54, 73);
+        NET_IRQ_HANDLES.lock().push(claimed.clone());
+        NET_IRQ_HANDLES.lock().push(missed.clone());
+
+        let _ = handle_virtio_net_irq(73);
+
+        assert_eq!(claimed.suppress_count.load(Ordering::Relaxed), 1);
+        assert_eq!(missed.suppress_count.load(Ordering::Relaxed), 0);
+
+        reset_irq_state();
+    }
+
+    #[def_test(serial)]
     fn test_irq_handler_treats_matched_empty_ack_as_miss() {
         reset_irq_state();
 
@@ -743,6 +855,7 @@ mod tests {
             irq_num: 72,
             handled: false,
             scheduler: Some(scheduler.clone()),
+            suppress_count: AtomicUsize::new(0),
         }));
 
         let event = handle_virtio_net_irq(72);

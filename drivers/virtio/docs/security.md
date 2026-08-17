@@ -188,15 +188,54 @@ let (hdr_len, pkt_len) = unsafe {
 ```rust
 unsafe impl<H: Hal, T: Transport> Send for VirtIoBlkDev<H, T> {}
 unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
-// 同理: VirtIoGpuDev, VirtIoInputDev, VirtIoNetDev, VirtIoSocketDev, VirtIo9pDev
+// 同理: VirtIoGpuDev, VirtIoInputDev, VirtIoNetDev, VirtIoSocketDev, VirtIo9pDev,
+//       VirtIoRngDev, 以及 blk/rng 的 hardirq 设备对象
 ```
 
 **不变量**：设备类型可以安全地跨线程传递（Send）和共享引用（Sync）。
 
 **为何安全**：
-- blk / gpu / input / socket / virtio_9p：所有操作通过 `&mut self` 独占访问，
+- blk（IRQ 模式）/ rng / net：内部使用 `SpinNoIrq` 保护共享的 `InnerDev`，
+  hardirq 回调与正常 I/O 路径互斥。
+- gpu / input / socket / virtio_9p：所有操作通过 `&mut self` 或内部锁串行化，
   `Sync` 仅允许共享不可变引用，不会导致数据竞争。
-- net：内部使用 `SpinNoIrq` 保护共享状态，`Send`/`Sync` 安全。
+
+### 9. `VirtIoBlkDev` 非阻塞读写提交与完成（`blk.rs`）
+
+```rust
+let token = unsafe { inner.read_blocks_nb(block_id, &mut req, out_buf, &mut resp) }?;
+...
+unsafe { inner.complete_read_blocks(token, &req, out_buf, &mut resp) }?;
+```
+
+**不变量**：`req`、缓冲区、`resp` 在提交到 `complete_*` 确认 used ring 到达 token
+期间不被其他代码访问，且仍为同一批缓冲。
+
+**为何安全**：三者位于请求任务的栈上；任务在等待期间睡眠而非返回，
+不存在 unwinding 或重复借用；`complete_*` 仅在 `peek_used() == Some(token)`
+确认后调用，与提交严格配对。若调用方在不可睡眠上下文，退化为开中断轮询，
+hardirq handler 持续 ack 设备 ISR，不会 livelock。
+
+**调用者**：
+- `VirtIoBlkDev::read_block/write_block` — 同步接口的内部实现
+
+### 10. `RngInner` 熵请求提交与回收（`rng.rs`）
+
+```rust
+let token = unsafe { self.queue.add(&[], &mut [dma_buf.as_mut()]) }?;
+...
+let written = unsafe { self.queue.pop_used(token, &[], &mut outputs)? };
+```
+
+**不变量**：DMA 缓冲从提交到 `pop_used` 成功期间仅由设备访问；
+`pop_used` 仅在 `peek_used() == Some(token)` 确认后执行。
+
+**为何安全**：缓冲由 `PendingRequest` 拥有并记录在 `RngInner.pending`，
+超时后也留在 pending 槽中由下次读取回收，生命周期覆盖整个在途窗口；
+单请求槽（同一时刻至多一个在途请求）保证 token 与头部的对应关系。
+
+**调用者**：
+- `VirtIoRngDev::request_entropy` 两种模式共用同一状态机
 
 ## 内存安全不变量
 
@@ -216,12 +255,14 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 | `VirtIoGpuDev<H, T>` | `H: Hal, T: Transport`（手动 impl） | `H: Hal, T: Transport`（手动 impl） |
 | `VirtIoInputDev<H, T>` | `H: Hal, T: Transport`（手动 impl） | `H: Hal, T: Transport`（手动 impl） |
 | `VirtIoNetDev<H, T, QS>` | `H: Hal + 'static, T: Transport + 'static`（手动 impl） | `H: Hal + 'static, T: Transport + 'static`（手动 impl） |
+| `VirtIoRngDev<H, T>` | `H: Hal, T: Transport`（手动 impl） | `H: Hal, T: Transport`（手动 impl） |
 | `VirtIoSocketDev<H, T>` | `H: Hal, T: Transport`（手动 impl） | `H: Hal, T: Transport`（手动 impl） |
 | `VirtIo9pDev<H, T>` | `H: Hal, T: Transport`（手动 impl） | `H: Hal, T: Transport`（手动 impl） |
 
 **说明**：所有设备类型的手动 `Send`/`Sync` impl 依赖以下保证：
-- 非 net 设备通过 `&mut self` 独占访问，无内部可变性。
-- net 设备通过 `SpinNoIrq` 保护共享的 `InnerDev`，中断回调和正常路径互斥。
+- blk（IRQ 模式）/ rng / net 设备通过 `SpinNoIrq` 保护共享的 `InnerDev`，
+  hardirq 回调和正常路径互斥；blk/rng 请求任务不跨睡眠持锁。
+- 其余设备通过 `&mut self` 独占访问或内部锁串行化。
 
 ## 威胁分析
 
@@ -238,6 +279,9 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 | T-09 | 恶意 VMM 通过 VirtIO 设备返回超长 `pkt_len` | 高 | `receive_complete` 返回的 `pkt_len` 超过缓冲区容量 | `recv()` 在写回 `NetBuf` 元数据前显式检查 `hdr_len + pkt_len <= capacity`，超长长度直接返回 `DriverError::InvalidInput`；`NetBuf::set_payload_len` 的 `debug_assert` 作为开发期补充检查 |
 | T-10 | 恶意 VMM 返回伪造的 9p 响应 | 中 | `request()` 返回的数据不符合 9p 协议 | 上层 9p 文件系统应校验响应格式；本模块不解析内容 |
 | T-11 | 恶意 VMM 返回超长 `mount_tag` | 中 | `VirtIO9p::mount_tag()` 返回超长字符串 | `virtio-drivers` 内部从配置空间读取，长度由设备配置空间字段限制 |
+| T-12 | blk/rng IRQ 驱动路径丢失 softirq 唤醒，请求任务永久睡眠 | 中 | hardirq 未触发、softirq 向量被占用或唤醒 token 被错误消费 | 唤醒仅是重查 used ring 的提示，多次丢失仍会被后续 IRQ 的 token 唤醒；不可睡眠上下文直接轮询；轮询回退模式不依赖 IRQ |
+| T-13 | net NAPI 线屏蔽后 drain 末端未解除屏蔽，后续报文无中断 | 中 | 抑制/恢复标志跨 CPU 竞争或 drain 任务永不运行 | 屏蔽标志原子配对（`is_line_masked`）；每次 handler 抑制都伴随一次 RX 调度，drain 到达空队列即恢复并重查；轮询回退的 recv 也会解除残留屏蔽 |
+| T-14 | 恶意 VMM 对 blk/rng 不触发完成中断 | 中 | 设备不响应 virtqueue | blk 等待与改造前同步轮询同等活跃性（依赖设备存活）；rng 有 50ms 有界超时并回退 `WouldBlock`，entropy 层连续失败 3 次后禁用该源 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -253,6 +297,8 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 | F-08 | `probe_mmio_device` panic | 传入空指针 | 初始化中断 | 系统启动失败 | 1 | 调用者必须验证地址有效性 |
 | F-09 | 网络缓冲区 token 不匹配 | 内部状态不一致 | DMA 到错误地址 | 内存破坏 | 1 | `assert_eq!` 和 `is_some()` 检查；`BadState` 错误返回 |
 | F-10 | 网络 RX 事件丢失 | IRQ handler 和任务上下文都调用 `ack_interrupt()`，任务上下文清除新到事件 | virtio RX 队列停止推进并重复触发未处理 IRQ | TCP 接收窗口降为零，host→guest 传输超时 | 2 | 已注册 IRQ 时仅由 handler 调用 `ack_interrupt()`，`recv()` 仅消费已完成队列项；纯轮询模式由 `recv()` 确认中断 |
+| F-11 | blk 请求任务在 IRQ 模式下睡眠后未被唤醒 | softirq 动作未安装或唤醒丢失 | 单次请求延迟到下一个 IRQ 或永久等待 | 文件系统 I/O 停滞 | 2 | 每次 hardirq 都 raise softirq；Completion token 可累积，陈旧 token 只造成一次多余重查；不可睡眠上下文退化为轮询 |
+| F-12 | rng 在途请求超时遗留占用单请求槽 | 设备慢或 IRQ 丢失 | 后续读取返回 `WouldBlock` | entropy 重播种降级到其他源 | 4 | 单请求槽由 pending 状态机管理，下次读取在完成后自动回收；连续失败 3 次后 entropy 层禁用 virtio-rng |
 
 ## 故障管理
 
@@ -274,12 +320,18 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 
 ## 已知限制
 
-1. **MSI-X 未启用**：x86_64 上的 MSI-X 支持代码已编写但被注释掉（TODO），
-   当前所有架构使用 legacy IRQ，可能导致中断共享问题。
-2. **无超时机制**：9p 设备的 `request()` 同步等待响应，无超时保护，
-   恶意或故障设备可能导致调用者永久阻塞。
+1. **x86 MSI-X 仅限 virtio-net**：x86_64 上 virtio-net 已启用 MSI-X；
+   其他 virtio 设备仍使用共享 legacy INTx。且 x86 MSI-X 向量无法在 APIC 层屏蔽，
+   net 的 NAPI 线级抑制在 x86 MSI-X 下退化为逐包中断（与改造前一致）。
+2. **无超时机制**：9p 设备的 `request()` 同步等待响应，无超时保护；
+   blk 的 IRQ 驱动等待同样依赖设备最终完成（与改造前同步轮询同活跃性）。
+   rng 有 50ms（IRQ 模式）/ 10ms（轮询模式）有界等待。
 3. **input 设备硬编码路径**：`physical_location()` 返回固定字符串 `"virtio0/input0"`，
    不反映实际设备拓扑。
+4. **virtio-blk flush 保持同步轮询**：`virtio-drivers` 无非阻塞 flush 提交 API，
+   flush 频率低，维持同步路径。
+5. **NAPI 线屏蔽延迟同线设备**：virtio-net 排空期间屏蔽共享 INTx 线会延迟
+   同线其他设备的中断，上界为一个 drain 批次。
 
 ## 审计清单
 
@@ -288,5 +340,6 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 - [ ] 每个 `unsafe` 块均有 `SAFETY:` 注释
 - [ ] 新增状态转换符合 `design.md` 中的状态机
 - [ ] 新增原子操作的内存序不低于已有要求
-- [ ] Drop 实现正确处理所有状态（已实现 net 设备 Drop，其他设备无需自定义 Drop）
+- [ ] Drop 实现正确处理所有状态（net/blk/rng 设备 Drop 注销 IRQ；其他设备无需自定义 Drop）
 - [ ] 新增 panic 路径有对应的 PanicGuard 或等效保护
+- [ ] IRQ 抑制/恢复调用严格配对（`is_line_masked` 标志平衡）
