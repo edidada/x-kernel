@@ -5,26 +5,38 @@
 `kalloc` 是内核全局分配入口。它把全局页 buddy、页级 per-CPU cache（PCP）和
 选定的字节分配策略组合为 `GlobalAllocator`，同时提供 `GlobalPage` RAII 包装。
 
-当配置选择 `slab` 时，小对象不再经过一个泛化的 `ByteAllocator` 缓存层；
-`GlobalAllocator` 直接拥有 `KmemCacheSet`。每一个
+当配置选择 `slab` 时，小对象由 `GlobalAllocator` 持有的 `KmemCacheSet` 管理，
+不会经过位于 `GlobalAllocator` 与 `ByteAllocator` 之间的泛化缓存层。每一个
 `alloc_engine::SizeClass` 对应一个 `SlabCache`，因此对象 freelist、slab span
 header、partial/full/empty 状态和空 span 的回收权处于同一所有权层。
 
-当配置选择 `buddy` 或 `tlsf` 时，`GlobalAllocator` 保留原有的
-`ByteAllocator` 加页分配器的两层模型。它们不获得 slab 的 size-class 语义。
+当配置选择 `buddy` 或 `tlsf` 时，`GlobalAllocator` 使用各自的 `ByteAllocator`
+加页分配器的两层模型。它们不获得 slab 的 size-class 语义。
 
 ## 背景
 
-先前的 PCB（per-CPU byte cache）位于 `GlobalAllocator` 与任意
-`ByteAllocator` 之间。该层复制了 slab bucket 表，并假设所有 byte allocator
-都可安全地按相同 canonical layout 批量 refill/drain。这使 slab 的对象缓存
-策略泄漏到 Buddy 和 TLSF，也无法表达一个 slab span 是否仍有 live object。
+Slab 的固定 class、对象 freelist 与 backing span 生命周期必须由同一 ownership
+domain 管理。若在 `GlobalAllocator` 与任意 `ByteAllocator` 之间设置泛化的 per-CPU
+byte cache，该层就必须复制 `SizeClass`，并假设所有 byte allocator 都能按相同的
+canonical layout 批量 refill/drain。Buddy 和 TLSF 不具备这些 slab 语义，该层也无法
+判断一个 slab span 是否仍含有 live object。
 
-当前阶段在该 ownership 边界之上加入了 slab 专属的 task per-CPU 双 magazine 和
-hardirq reserve。它们只服务 `KmemCacheSet`，而不是成为任意 `ByteAllocator` 的
-中间层。`shrink()` 和 OOM retry 现在通过独立的无分配 IPI 协议冻结并 drain 已启动
-CPU 的 magazine；CPU offline、NUMA 和更高层 memory-pressure policy 仍需建立自己
-的生命周期协议，不能通过重新引入泛化 PCB 来替代。
+因此 task per-CPU 双 magazine 与 hardirq reserve 是 `KmemCacheSet` 的 slab 专属
+策略，而不是任意 `ByteAllocator` 的中间层。`shrink()` 和 OOM retry 通过独立的
+无分配 IPI 协议冻结并 drain 已启动 CPU 的 magazine。
+
+## 系统边界与待接入能力
+
+该协议只协调启动时已建立的 present-CPU 集合，不提供动态 CPU lifecycle。下列能力
+需要独立的 owner/lifecycle 基础设施后才能接入：
+
+- CPU lifecycle owner 应在 CPU offline 前与 slab flush 串行化、drain 并解绑该 CPU
+  的 task magazine；新 CPU online 时则应建立对应的 per-CPU storage。现有
+  present-CPU snapshot 不是可替代的 hotplug 协议。
+- NUMA 需要 node-local span ownership、reclaim policy 与 remote-free 语义，不能只在
+  全局 `KmemCacheSet` 上叠加 node 编号。
+- 系统级 memory-pressure/reclaim framework 应统一协调 slab、PCP 和其他可回收者；
+  OOM retry 只回收 slab 中已证明为 `Empty` 的 span。
 
 ## 范围
 
@@ -110,7 +122,7 @@ layout 直接走页分配器。span 的页数和对齐也从同一个 `SizeClass
   向每个 present CPU 发 IPI。被冻结 CPU 的 task/softirq allocation/free 直接走
   central cache，避免等待 flush 完成；hardirq 始终只使用 reserve。
 - 1–4 页的通用页接口仍使用 PCP，并在 PCP miss/full 时使用已有的 IRQ-off
-  refill/drain 行为；这与已移除的 byte PCB 是独立问题，当前提交不宣称消除它。
+  refill/drain 行为；该页级缓存独立于 slab 的对象缓存与 magazine。
 
 ## 状态机
 
@@ -170,13 +182,13 @@ publish，之后的 retry 从任一已发布的 span 获取对象。
 当一个新的 slab span 请求得到 `NoMemory` 时，分配器先执行上述 reclaim，再重新
 检查目标 cache 并重试页分配。这能回收其他 size class 已经完全空闲的 span；不会
 回收 partial/full span 或调用者仍持有的对象。若另一个 shrink session 已在运行，
-本次调用安全地退化为 central-only reclaim，而不等待或重入该 session。
+该调用安全地退化为 central-only reclaim，而不等待或重入该 session。
 
 ### 非 slab allocator
 
-Buddy 和 TLSF 的小对象直接进入各自 `ByteAllocator`。当其没有空间时，原有扩堆
+Buddy 和 TLSF 的小对象直接进入各自 `ByteAllocator`。当其没有空间时，扩堆
 逻辑从页分配器取得区域并交给 byte allocator。大尺寸或高对齐 layout 直接使用
-页分配器；本路径没有 slab cache 或 PCB 参与。
+页分配器；本路径不使用 `KmemCacheSet`、task magazine 或 hardirq reserve。
 
 ## 并发模型
 
@@ -190,7 +202,7 @@ Buddy 和 TLSF 的小对象直接进入各自 `ByteAllocator`。当其没有空�
   atomic delta：更新只触及当前 CPU，因此跨 CPU free 不会把对象所有权错误绑到释放
   CPU；`usages()` 才扫描所有 CPU 汇总诊断快照。
   slab fast path 在释放 class lock 后更新统计；refill/reclaim 在没有 class lock
-  时访问 `palloc`。因此新的 slab 路径不形成 KmemCache -> page allocator 的嵌套锁序。
+  时访问 `palloc`。因此 slab 路径不形成 KmemCache -> page allocator 的嵌套锁序。
 - `take_empty_slab()` 逐 class 短暂扫描。它只用于显式 shrink 或 OOM 失败路径，
   不属于对象 fast path。
 - task magazine hit 不获取 central class lock；refill、drain、reserve 补充和 span
@@ -210,15 +222,12 @@ Buddy 和 TLSF 的小对象直接进入各自 `ByteAllocator`。当其没有空�
    token 发布只覆盖 metadata 状态转换。
 3. **OOM 前只回收可证明为空的 span。** `Empty` 状态提供明确的回收安全条件，
    而不是基于全局 freelist 的猜测。
-4. **保留 non-slab 分支。** 这次重构改变 slab 结构，不把无关 allocator 的内部
-   模型一并重写。
+4. **保留 non-slab 分支。** slab 对象缓存不改变 Buddy 或 TLSF 的内部模型。
 5. **task 与 hardirq 分流。** task/softirq fast path 用 current-CPU magazine；
    hardirq 用有界 reserve 并有明确耗尽语义，因而不会在中断中执行 page work 或
    批量 refill。
 6. **flush 与 drain 分离。** IPI 只完成 access-state handshake；真正的 batch drain
    由发起 task 完成，因此不把多对象操作或 class-lock 循环放进 IRQ-off handler。
-7. **不提前宣称性能收益。** 后续需要使用真实 SMP workload 记录吞吐、lock wait、
-   p99 和最大 IRQ-off latency，才能评价 magazine 的收益。
 
 ## Drop / 资源释放
 
