@@ -102,8 +102,17 @@ impl SizeClass {
         } else if obj_size <= 1024 {
             2
         } else {
-            let v = 16 * page_size / (obj_size * 8);
-            if v < 4 { v } else { 4 }
+            // This is equivalent to the former `16 * page_size /
+            // (obj_size * 8)` formula, but cannot overflow for a large
+            // `page_size`.  The class sizes are all even.
+            let pages = page_size / (obj_size / 2);
+            if pages == 0 {
+                1
+            } else if pages < 4 {
+                pages
+            } else {
+                4
+            }
         }
     }
 }
@@ -147,6 +156,7 @@ mod tests {
         assert_eq!(SizeClass::Bytes512.slab_pages(PAGE_SIZE), 2);
         assert_eq!(SizeClass::Bytes1024.slab_pages(PAGE_SIZE), 2);
         assert_eq!(SizeClass::Bytes2048.slab_pages(PAGE_SIZE), 4);
+        assert_eq!(SizeClass::Bytes2048.slab_pages(512), 1);
     }
 }
 
