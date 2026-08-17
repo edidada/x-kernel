@@ -35,7 +35,10 @@ mm/alloc-engine/
 page allocator / owning heap
         │ acquire aligned slab span
         v
-SlabCache<SizeClass>
+prepare_slab()              (不接触 cache 状态)
+        │
+        v
+PreparedSlab ── publish_slab() ──> SlabCache<SizeClass>
  ├─ Empty list   : 所有对象均在 central freelist，可 detach
  ├─ Partial list : 同时有 live 和 central-free 对象
  └─ Full list    : 没有 central-free 对象
@@ -59,8 +62,9 @@ page ownership 之上，而不能把同一策略施加给任意 `ByteAllocator`�
 
 - `SlabCache` 不含锁，也不禁用 IRQ 或抢占。所有方法要求调用者串行化访问；将它
   放入何种锁、是否适合中断上下文，属于上层分配器的职责。
-- `add_slab` 的 backing span 必须由调用者独占、可写，并按 `slab_bytes()` 对齐；
-  span 注册后必须持续映射，直到 `take_empty_slab` 将其 detach。
+- `prepare_slab` 的 backing span 必须由调用者独占、可写，并按 `slab_bytes()`
+  对齐；prepared token 必须被 publish 或归还其页分配器。span 注册后必须持续映射，
+  直到 `take_empty_slab` 将其 detach。
 - `allocate` 只操作已注册的 metadata 和 freelist。cache 空时返回 `None`，调用者
   应在 cache mutation 之外取得页并再次调用 `add_slab`。
 - `take_empty_slab` 只返回没有 live object 的 span。页面归还也应在 cache mutation
@@ -86,11 +90,13 @@ page ownership 之上，而不能把同一策略施加给任意 `ByteAllocator`�
 ## 算法流程
 
 1. `SlabHeap` 根据 `SizeClass::from_layout` 路由小对象。
-2. `allocate` 优先从 `Partial` 的 freelist 弹出对象；没有 partial page 时将一个
+2. refill 在 cache 锁外取得 backing span 并调用 `prepare_slab` 初始化 page header
+   和 free-object links；之后在短临界区内以 `publish_slab` 挂入 `Empty` list。
+3. `allocate` 优先从 `Partial` 的 freelist 弹出对象；没有 partial page 时将一个
    `Empty` page 移至 `Partial` 后再弹出。最后一个 free object 被弹出时转为 `Full`。
-3. `deallocate` 通过对齐 span 掩码恢复 `SlabPage`，将对象压回该 page 的 freelist。
+4. `deallocate` 通过对齐 span 掩码恢复 `SlabPage`，将对象压回该 page 的 freelist。
    `Full` 首次释放转为 `Partial`；最后一个 live object 释放后转为 `Empty`。
-4. `SlabHeap::shrink` 循环调用 `take_empty_slab`，再把已 detach 的 spans 交给其
+5. `SlabHeap::shrink` 循环调用 `take_empty_slab`，再把已 detach 的 spans 交给其
    内部 buddy。上层可将它接入内存压力和 OOM 前回收策略。
 
 计数器只统计 cache 已经注册的 span；`add_slab` 在写入 span 前先验证所有可能
@@ -104,7 +110,8 @@ page ownership 之上，而不能把同一策略施加给任意 `ByteAllocator`�
 freelist 读写和空 span detach 都由同一串行化规则保护。
 
 该层有意不持有页分配器引用，因而也不会在 metadata 临界区内分配或释放 backing
-pages。这为上层实现短临界区、per-CPU magazine 和跨 CPU flush 提供了边界。
+pages。`PreparedSlab` 进一步把 free-list 初始化移到 publication 之前。这为上层
+实现短临界区、per-CPU magazine 和跨 CPU flush 提供了边界。
 
 ## 设计决策
 

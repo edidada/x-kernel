@@ -10,6 +10,7 @@
 //! slabs yielded by [`SlabCache::take_empty_slab`].
 
 use core::{
+    marker::PhantomData,
     mem,
     ptr::{self, NonNull},
 };
@@ -36,6 +37,34 @@ impl SlabBacking {
     /// Number of base pages in the detached backing span.
     pub const fn pages(self) -> usize {
         self.pages
+    }
+}
+
+/// A slab span whose page metadata and free-object links are initialized but
+/// which is not yet visible through a [`SlabCache`].
+///
+/// Obtain this token with [`SlabCache::prepare_slab`], then either publish it
+/// through [`SlabCache::publish_slab`] or return its backing pages to their
+/// allocator.  Preparing a span does not mutate any cache, so expensive page
+/// initialization can happen outside a cache lock.
+#[derive(Debug)]
+#[must_use = "a prepared slab must be published or returned to its page allocator"]
+pub struct PreparedSlab<const PAGE_SIZE: usize> {
+    backing: SlabBacking,
+    size_class: SizeClass,
+    capacity: usize,
+    marker: PhantomData<[u8; PAGE_SIZE]>,
+}
+
+impl<const PAGE_SIZE: usize> PreparedSlab<PAGE_SIZE> {
+    /// Backing pages that must be returned if this slab is not published.
+    pub const fn backing(&self) -> SlabBacking {
+        self.backing
+    }
+
+    /// Consume this token and return its backing pages to the caller.
+    pub const fn into_backing(self) -> SlabBacking {
+        self.backing
     }
 }
 
@@ -142,7 +171,8 @@ impl SlabList {
 ///
 /// The cache keeps separate `partial`, `full`, and `empty` page lists.  It
 /// never obtains or frees backing memory while mutating these lists: callers
-/// use [`add_slab`](Self::add_slab) to publish pages and
+/// prepare a span with [`prepare_slab`](Self::prepare_slab), publish it with
+/// [`publish_slab`](Self::publish_slab), and use
 /// [`take_empty_slab`](Self::take_empty_slab) to detach reclaimable pages.
 ///
 /// `PAGE_SIZE` must be a non-zero power of two.  A caller must serialize every
@@ -243,8 +273,8 @@ impl<const PAGE_SIZE: usize> SlabCache<PAGE_SIZE> {
     /// Allocate one object from this cache.
     ///
     /// Returns `None` when no registered page has a free object.  The caller
-    /// should acquire `slab_pages()` pages outside its cache lock, publish them
-    /// with [`add_slab`](Self::add_slab), and retry.
+    /// should acquire `slab_pages()` pages and prepare their free lists outside
+    /// its cache lock, publish the prepared span, and retry.
     pub fn allocate(&mut self) -> Option<NonNull<u8>> {
         let page = match self.partial.head {
             Some(page) => page,
@@ -268,7 +298,7 @@ impl<const PAGE_SIZE: usize> SlabCache<PAGE_SIZE> {
         Some(object)
     }
 
-    /// Publish one externally allocated slab page span to this cache.
+    /// Initialize a slab span without publishing it to a cache.
     ///
     /// # Errors
     ///
@@ -276,14 +306,104 @@ impl<const PAGE_SIZE: usize> SlabCache<PAGE_SIZE> {
     /// size of one slab span or when that span cannot hold both metadata and
     /// at least one object.
     ///
+    /// # Panics
+    ///
+    /// Panics under the same invalid `PAGE_SIZE` geometry conditions as
+    /// [`SlabCache::new`].
+    ///
     /// # Safety
     ///
     /// `base` must be the start of an exclusive, writable allocation spanning
-    /// exactly `self.slab_pages() * PAGE_SIZE` bytes.  It must remain mapped
-    /// and exclusively owned until this cache returns it from
-    /// [`take_empty_slab`](Self::take_empty_slab).  The allocation must not
-    /// overlap any page already registered with this cache.
+    /// exactly `size_class.slab_pages(PAGE_SIZE) * PAGE_SIZE` bytes.  It must
+    /// remain mapped and exclusively owned until a cache returns it from
+    /// [`take_empty_slab`](Self::take_empty_slab), or its backing pages are
+    /// returned directly.  It must not overlap a span registered with any
+    /// cache or another prepared slab.
+    pub unsafe fn prepare_slab(
+        size_class: SizeClass,
+        base: NonNull<u8>,
+    ) -> AllocResult<PreparedSlab<PAGE_SIZE>> {
+        let cache = Self::new(size_class);
+        // SAFETY: this public method forwards its exclusive backing-span
+        // contract to the helper that writes the page metadata and free links.
+        unsafe { cache.prepare_slab_inner(base) }
+    }
+
+    /// Publish a previously prepared slab span to this cache.
+    ///
+    /// Returns the original `slab` when it belongs to another size class or
+    /// when publishing would overflow this cache's accounting.  The caller can
+    /// then recover its backing pages with [`PreparedSlab::into_backing`].
+    pub fn publish_slab(
+        &mut self,
+        slab: PreparedSlab<PAGE_SIZE>,
+    ) -> Result<(), PreparedSlab<PAGE_SIZE>> {
+        if slab.size_class != self.size_class {
+            return Err(slab);
+        }
+
+        let Some(next_total_blocks) = self.total_blocks.checked_add(slab.capacity) else {
+            return Err(slab);
+        };
+        let Some(next_free_blocks) = self.free_blocks.checked_add(slab.capacity) else {
+            return Err(slab);
+        };
+        let Some(next_backing_pages) = self.backing_pages.checked_add(slab.backing.pages()) else {
+            return Err(slab);
+        };
+        let page = slab.backing.base().cast::<SlabPage>();
+
+        // SAFETY: `PreparedSlab` can only be created by `prepare_slab`, which
+        // initializes this header in the detached state.  Consuming the token
+        // ensures it is published at most once; `&mut self` serializes list
+        // and counter updates.
+        unsafe {
+            let page_ref = page.as_ref();
+            debug_assert_eq!(page_ref.size_class, self.size_class);
+            debug_assert_eq!(page_ref.state, SlabPageState::Empty);
+            debug_assert_eq!(page_ref.capacity, slab.capacity);
+            debug_assert_eq!(page_ref.free_count, slab.capacity);
+            debug_assert!(page_ref.previous.is_none());
+            debug_assert!(page_ref.next.is_none());
+            self.empty.push_front(page);
+        }
+
+        self.total_blocks = next_total_blocks;
+        self.free_blocks = next_free_blocks;
+        self.backing_pages = next_backing_pages;
+        Ok(())
+    }
+
+    /// Prepare and publish one externally allocated slab page span.
+    ///
+    /// This convenience method is suitable for callers that already hold the
+    /// cache lock.  Concurrent users should normally call
+    /// [`prepare_slab`](Self::prepare_slab) before taking that lock, then call
+    /// [`publish_slab`](Self::publish_slab) while holding it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError::InvalidInput`] when the backing span is invalid,
+    /// or when cache accounting cannot represent the span.  On error, `base`
+    /// remains owned by the caller and may be returned to its page allocator.
+    ///
+    /// # Safety
+    ///
+    /// `base` must satisfy the same backing-span and exclusive-ownership
+    /// requirements as [`prepare_slab`](Self::prepare_slab).
     pub unsafe fn add_slab(&mut self, base: NonNull<u8>) -> AllocResult {
+        // SAFETY: `add_slab` has the same backing-span contract as
+        // `prepare_slab` and immediately consumes the returned token.
+        let slab = unsafe { self.prepare_slab_inner(base) }?;
+        self.publish_slab(slab)
+            .map_err(|_| AllocError::InvalidInput)
+    }
+
+    /// # Safety
+    ///
+    /// `base` must satisfy the backing-span contract documented by
+    /// [`prepare_slab`](Self::prepare_slab).
+    unsafe fn prepare_slab_inner(&self, base: NonNull<u8>) -> AllocResult<PreparedSlab<PAGE_SIZE>> {
         let span_bytes = self.slab_bytes();
         let base_addr = base.as_ptr() as usize;
         if !base_addr.is_multiple_of(span_bytes) {
@@ -295,29 +415,18 @@ impl<const PAGE_SIZE: usize> SlabCache<PAGE_SIZE> {
         let first_object = base_addr
             .checked_add(object_offset)
             .ok_or(AllocError::InvalidInput)?;
-        let next_total_blocks = self
-            .total_blocks
-            .checked_add(capacity)
-            .ok_or(AllocError::InvalidInput)?;
-        let next_free_blocks = self
-            .free_blocks
-            .checked_add(capacity)
-            .ok_or(AllocError::InvalidInput)?;
-        let next_backing_pages = self
-            .backing_pages
-            .checked_add(self.slab_pages())
-            .ok_or(AllocError::InvalidInput)?;
         let mut page = base.cast::<SlabPage>();
 
         // SAFETY: the caller guarantees a valid, exclusive span at `base`.
         // `object_offset` leaves enough aligned space for `SlabPage`, and the
-        // cache initializes every free object before publishing the page.
+        // helper initializes every free object before exposing the prepared
+        // token to a cache.
         unsafe {
             page.as_ptr().write(SlabPage {
                 size_class: self.size_class,
                 state: SlabPageState::Empty,
                 capacity,
-                free_count: 0,
+                free_count: capacity,
                 free_head: None,
                 previous: None,
                 next: None,
@@ -335,18 +444,18 @@ impl<const PAGE_SIZE: usize> SlabCache<PAGE_SIZE> {
 
                 Self::write_next(object, page_ref.free_head);
                 page_ref.free_head = Some(object);
-                page_ref.free_count += 1;
             }
         }
 
-        self.total_blocks = next_total_blocks;
-        self.free_blocks = next_free_blocks;
-        self.backing_pages = next_backing_pages;
-
-        // SAFETY: `page` was initialized above and is not linked into any
-        // list.  `&mut self` serializes all list mutations.
-        unsafe { self.empty.push_front(page) };
-        Ok(())
+        Ok(PreparedSlab {
+            backing: SlabBacking {
+                base,
+                pages: self.slab_pages(),
+            },
+            size_class: self.size_class,
+            capacity,
+            marker: PhantomData,
+        })
     }
 
     /// Return an object previously allocated from this cache.
@@ -595,6 +704,26 @@ mod tests {
         assert_eq!(cache.allocate(), None);
         assert_eq!(cache.total_blocks(), 0);
         assert_eq!(cache.free_blocks(), 0);
+    }
+
+    #[def_test]
+    fn test_prepared_slab_is_invisible_until_published() {
+        let storage = slab_storage();
+        let base = core::ptr::NonNull::new(storage.0.as_ptr() as *mut u8).unwrap();
+        let mut cache = SlabCache::<PAGE_SIZE>::new(SizeClass::Bytes64);
+
+        // SAFETY: `storage` is uniquely owned, aligned for every test span,
+        // and remains mapped until after the cache is finished with it.
+        let prepared =
+            unsafe { SlabCache::<PAGE_SIZE>::prepare_slab(SizeClass::Bytes64, base) }.unwrap();
+        assert_eq!(cache.allocate(), None);
+
+        cache.publish_slab(prepared).unwrap();
+        let object = cache.allocate().unwrap();
+        // SAFETY: `object` was allocated from this cache and is no longer
+        // accessed after this deallocation.
+        unsafe { cache.deallocate(object) };
+        assert_eq!(cache.take_empty_slab().unwrap().base(), base);
     }
 
     #[def_test]

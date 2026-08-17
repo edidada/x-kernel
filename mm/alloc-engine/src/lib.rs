@@ -59,7 +59,7 @@ use core::{alloc::Layout, fmt, ptr::NonNull};
 pub use buddy_alloc::{BuddyAllocator, PageFlags, split_to_chunks};
 #[cfg(feature = "kerrno")]
 use kerrno::KError;
-pub use slab_cache::{SlabBacking, SlabCache};
+pub use slab_cache::{PreparedSlab, SlabBacking, SlabCache};
 pub use slab_heap::SlabHeap;
 pub use slab_trait::{
     SIZE_CLASS_COUNT, SLAB_MAX_SIZE, SizeClass, SlabAllocResult, SlabDeallocResult,

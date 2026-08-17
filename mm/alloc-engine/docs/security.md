@@ -30,7 +30,9 @@ kernel subsystem
 
 | 路径 | 依赖的不变量 | 保护方式 |
 |---|---|---|
-| `src/slab_cache.rs: SlabCache::add_slab` | `base` 指向独占、可写、完整且按 span 对齐的 backing allocation | unsafe contract、运行时对齐/容量/计数检查；调用者在 detach 前保持映射 |
+| `src/slab_cache.rs: SlabCache::prepare_slab` | `base` 指向独占、可写、完整且按 span 对齐的 backing allocation | unsafe contract、运行时对齐/容量检查；prepared token 在 publish 或页归还前保持独占 |
+| `src/slab_cache.rs: SlabCache::publish_slab` | token 只由对应 class 的 prepare 创建且只 publish 一次 | `PreparedSlab` 不可复制、字段私有；class/counter 不匹配时返还 token |
+| `src/slab_cache.rs: SlabCache::add_slab` | prepare 与 publish 之间没有并发释放或重复注册 | 便利 API 沿用两阶段实现；调用者在错误时仍拥有 backing span |
 | `src/slab_cache.rs: SlabCache::deallocate` | object 来自同一 cache，仍为 live object，且只释放一次 | unsafe contract；page header 的 class 和对象边界在 debug 构建校验 |
 | `src/slab_cache.rs: page_for_object` | span 的 size 为 power of two，base 按 span 对齐 | `SlabCache::new` 验证 geometry；`add_slab` 验证 base alignment |
 | `src/slab_cache.rs: read_next/write_next` | free object 的首个 machine word 可读写 intrusive link | 仅在 publish、allocate、deallocate 后的非 live 对象上调用；class 对齐覆盖 link 对齐 |
@@ -40,7 +42,8 @@ kernel subsystem
 
 ## 内存安全不变量
 
-1. 一个 registered slab span 只属于一个 `SlabCache` 和一个 `SizeClass`。
+1. 一个 prepared 或 registered slab span 只属于一个 `SizeClass`；publish 后只属于
+   一个 `SlabCache`。
 2. span 大小及其 base 均为 power-of-two span 对齐，因此由 object 地址掩码恢复的
    header 正确。
 3. 每个 `SlabPage` 恰好处于 `Partial`、`Full`、`Empty` 或 `Detached` 之一；只有
@@ -66,7 +69,7 @@ cache 的路径并发。
 
 | 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
 |---|---|---|---|---|
-| T-01 | 伪造或错误对齐的 backing span 破坏 page header | 高 | unsafe `add_slab` 违反 contract | 对齐与容量检查；调用者必须只传页分配器返回的独占 span；残余风险是恶意内核代码可绕过 unsafe contract |
+| T-01 | 伪造或错误对齐的 backing span 破坏 page header | 高 | unsafe `prepare_slab` / `add_slab` 违反 contract | 对齐与容量检查；调用者必须只传页分配器返回的独占 span；残余风险是恶意内核代码可绕过 unsafe contract |
 | T-02 | double free 或错误 cache/size class 释放覆写 live 数据 | 高 | unsafe `deallocate` 被误用 | API 明确要求原 cache 的 live object；debug 检查 class/范围；当前不提供 production double-free 检测 |
 | T-03 | 未串行化访问损坏 intrusive list | 高 | 多 CPU 同时访问相同 cache 而没有外部锁 | `SlabCache` 不声称并发安全；整合层必须限定锁/CPU-local protocol |
 | T-04 | 空 page 被错误归还导致 use-after-free | 高 | 释放仍含 live object 的 span | 仅 `Empty` 状态可 detach；partial/full page 永远不由 `take_empty_slab` 返回 |
