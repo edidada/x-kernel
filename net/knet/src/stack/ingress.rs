@@ -14,7 +14,7 @@ use smoltcp::{
 
 use super::{
     ipv4::{self, Icmpv4Error, Ipv4Header, fragment::Ipv4Reassembler},
-    ipv6::{self, Ipv6Action, Ipv6Header},
+    ipv6::{self, Ipv6Action, Ipv6Header, Ipv6Reassembler, icmpv6::Icmpv6Error},
 };
 use crate::{
     LISTEN_TABLE,
@@ -27,6 +27,7 @@ pub(crate) struct IngressProcessor {
     local_ipv4_addrs: Vec<Ipv4Cidr>,
     local_ipv6_addrs: Vec<Ipv6Cidr>,
     ipv4_reassembler: Ipv4Reassembler,
+    ipv6_reassembler: Ipv6Reassembler,
 }
 
 impl IngressProcessor {
@@ -35,6 +36,7 @@ impl IngressProcessor {
             local_ipv4_addrs: Vec::new(),
             local_ipv6_addrs: Vec::new(),
             ipv4_reassembler: Ipv4Reassembler::new(),
+            ipv6_reassembler: Ipv6Reassembler::new(),
         }
     }
 
@@ -62,6 +64,15 @@ impl IngressProcessor {
             ipv4::queue_icmpv4_error(
                 control_packets,
                 Icmpv4Error::FragmentReassemblyTimeout,
+                expired.packet_type,
+                expired.header,
+                &expired.packet,
+            );
+        }
+        for expired in self.ipv6_reassembler.remove_expired(timestamp) {
+            ipv6::queue_icmpv6_error(
+                control_packets,
+                Icmpv6Error::FragmentReassemblyTimeout,
                 expired.packet_type,
                 expired.header,
                 &expired.packet,
@@ -110,8 +121,10 @@ impl IngressProcessor {
             }
             Some(6) => {
                 let Some(packet) = ipv6::process_ipv6_input(
+                    timestamp,
                     packet,
                     &self.local_ipv6_addrs,
+                    &mut self.ipv6_reassembler,
                     control_packets,
                     ipv6_actions,
                 ) else {

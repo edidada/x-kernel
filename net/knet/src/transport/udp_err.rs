@@ -292,7 +292,7 @@ mod tests {
         icmpv6,
         ip::{IpAddress, IpEndpoint, Ipv6Address, Ipv6Cidr},
         ipv4::{Icmpv4Error, Ipv4Header},
-        ipv6::{self, Ipv6Header, process_ipv6_input},
+        ipv6::{self, Ipv6Header, Ipv6Reassembler, process_ipv6_input},
         udp::{UdpSocketState, register_udp_state_for_test},
     };
 
@@ -550,9 +550,21 @@ mod tests {
         let local_addrs = [Ipv6Cidr::new(local_addr, 128)];
         let mut control_packets = alloc::vec::Vec::new();
         let mut actions = alloc::vec::Vec::new();
+        let mut reassembler = Ipv6Reassembler::new();
+        let now = ktime_types::MonotonicInstant::from_span_since_origin(
+            ktime_types::TimeSpan::from_secs(1),
+        );
 
         assert!(
-            process_ipv6_input(packet, &local_addrs, &mut control_packets, &mut actions).is_none()
+            process_ipv6_input(
+                now,
+                packet,
+                &local_addrs,
+                &mut reassembler,
+                &mut control_packets,
+                &mut actions,
+            )
+            .is_none()
         );
         assert_eq!(
             connected.consume_socket_error(),

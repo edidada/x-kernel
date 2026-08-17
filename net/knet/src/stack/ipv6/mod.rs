@@ -2,8 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! IPv6 packet, input, output, ICMPv6, and NDP helpers.
+//! IPv6 packet, input, output, ICMPv6, NDP, and fragment reassembly.
 
+pub(crate) mod fragment;
 pub(crate) mod icmpv6;
 pub(crate) mod input;
 pub(crate) mod ndp;
@@ -12,7 +13,8 @@ pub(crate) mod packet;
 #[cfg(unittest)]
 mod tests;
 
-pub(crate) use input::process_ipv6_input;
+pub(crate) use fragment::Ipv6Reassembler;
+pub(crate) use input::{process_ipv6_input, queue_icmpv6_error};
 pub(crate) use output::{
     Ipv6Action, apply_actions, dispatch_ipv6_packet, echo_reply_source, queue_ipv6_packet,
 };

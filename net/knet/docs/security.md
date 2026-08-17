@@ -200,15 +200,16 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 14. IPv4 输入边界：本地交付前必须校验版本、头长、总长和头部校验和，并按 `total_len` 截断尾部数据。
 15. 网络类型边界：`RouteTable` 和 `NetDevice` 不暴露 smoltcp 地址或时间类型；控制面与协议兼容转换由 `Router`、`Service` 和初始化入口完成。
 16. IPv4 重组边界：分片按源地址、目的地址、标识、协议和接口隔离；被已有区间完全覆盖的分片按重复包丢弃，部分重叠或范围矛盾会删除整条队列；重组状态受 64 条队列、4 MiB 高水位、3 MiB 低水位和 30 秒超时限制。
-17. UDP 接收边界：UDP 长度、校验和和 payload range 通过 checked parser 验证，单个 PCB 的接收队列上限为 1024 个数据报。队列按需扩容，扩容失败时丢弃当前数据报，排空后最多保留 64 个槽位。
-18. IPv4 输出边界：栈内 UDP 的输出 MTU 来自匹配路由指向的设备；UDP 与 raw IPv4 在路由缺失或输出设备管理 down 时返回 `ENETUNREACH`，DF 包超过 MTU 时返回 `EMSGSIZE`，允许分片的包只按 8 字节对齐切分 payload。
-19. poller 完成条件：唯一执行者通过一次 CAS 从 `RUNNING` 或 `RUNNING_PENDING` 发布 `IDLE` 或 `SCHEDULED`；RX、ingress、TX 和已到期 timer 均无立即工作且执行期间没有通知时才能进入 `IDLE`。每轮 bulk work 受 1 ms 软时间上限约束，Ethernet RX 任务和后台任务执行相同的有界批次，每个批次最多推进四轮，达到上限且仍有立即工作时保留 `SCHEDULED` 并唤醒下一批。
-20. 协议 timer 条件：每轮 `poll_maintenance`、`poll_ingress_single` 和 `poll_egress` 完成后必须用 `poll_at` 刷新下一次 deadline；尚未到期的 timer 不进入 `PollProgress::has_more`，到期后必须通过 `notify(PollReason::Timer)` 发布工作。
-21. TX 与接收窗口交接条件：socket 或 Router 产生 TX 工作后必须通过 `notify(PollReason::Tx)` 发布；TCP 从余量低于最大窗口缩放量子的接收缓冲区消费数据后必须通过 `notify(PollReason::RxWindow)` 发布零窗口恢复工作；Router data TX queue 容量实际增加时必须设置 `tx_capacity_changed`，TX waiter 只依据该字段执行全局容量唤醒。
-22. TCP 关闭生命周期：用户文件对象释放后，含有待发送数据、FIN 或重传状态的 smoltcp handle 必须继续保留在 `SOCKET_SET`；接收队列存在未读数据时必须保留 abort handle 直到 RST 发出；协议进入 `Closed` 后才能删除。只有 orphan `FIN_WAIT_2` 状态受 60 秒回收期限约束。
-23. 网络 timer 条件：协议与 deferred-close deadline 只能通过原子值发布；周期采样回调到期处理不得获取 sleepable mutex、分配 future 或访问 timer wheel。
-24. link 配置所有权：接口名、MTU、管理 up 状态和 link snapshot 只由 `NetDevice` 持有；`RTM_NEWLINK` 必须先完成名称唯一性、名称格式、设备 MTU 范围和受支持 flags 的整组校验，再修改设备。`ifi_change` 中的派生状态位按 Linux `IFF_VOLATILE` 语义保留，实际改变的未支持可写位返回 `EOPNOTSUPP`。
-25. IPv4 地址生命周期：地址或所属设备移除后，Router 地址条目、自动路由、IngressProcessor、smoltcp Interface 和设备投影必须在同一 Router 锁作用域内刷新；最后一个同值地址消失时，`ROUTE_STATE` 中依赖该 `prefsrc` 的配置路由必须同步删除；设备消失时还必须删除其路由与邻居并重编号后续接口索引。
+17. IPv6 重组边界：分片按源地址、目的地址、32 位标识和接口隔离（非组播且非 link-local 目的的 `ifindex` 记为 0）；第一片的不可分片前缀原样保留，Fragment 头在完成后去掉；被已有区间完全覆盖的分片按重复包丢弃，部分重叠或范围矛盾会删除整条数据报（RFC 5722）；重组状态受 64 条队列、4 MiB 高水位、3 MiB 低水位和 60 秒超时限制。首片上层头不完整时发 ICMPv6 Parameter Problem code 3，非末片非 8 字节对齐时发 code 0（pointer 指向 `payload_len`）。
+18. UDP 接收边界：UDP 长度、校验和和 payload range 通过 checked parser 验证，单个 PCB 的接收队列上限为 1024 个数据报。队列按需扩容，扩容失败时丢弃当前数据报，排空后最多保留 64 个槽位。
+19. IPv4 输出边界：栈内 UDP 的输出 MTU 来自匹配路由指向的设备；UDP 与 raw IPv4 在路由缺失或输出设备管理 down 时返回 `ENETUNREACH`，DF 包超过 MTU 时返回 `EMSGSIZE`，允许分片的包只按 8 字节对齐切分 payload。
+20. poller 完成条件：唯一执行者通过一次 CAS 从 `RUNNING` 或 `RUNNING_PENDING` 发布 `IDLE` 或 `SCHEDULED`；RX、ingress、TX 和已到期 timer 均无立即工作且执行期间没有通知时才能进入 `IDLE`。每轮 bulk work 受 1 ms 软时间上限约束，Ethernet RX 任务和后台任务执行相同的有界批次，每个批次最多推进四轮，达到上限且仍有立即工作时保留 `SCHEDULED` 并唤醒下一批。
+21. 协议 timer 条件：每轮 `poll_maintenance`、`poll_ingress_single` 和 `poll_egress` 完成后必须用 `poll_at` 刷新下一次 deadline；尚未到期的 timer 不进入 `PollProgress::has_more`，到期后必须通过 `notify(PollReason::Timer)` 发布工作。
+22. TX 与接收窗口交接条件：socket 或 Router 产生 TX 工作后必须通过 `notify(PollReason::Tx)` 发布；TCP 从余量低于最大窗口缩放量子的接收缓冲区消费数据后必须通过 `notify(PollReason::RxWindow)` 发布零窗口恢复工作；Router data TX queue 容量实际增加时必须设置 `tx_capacity_changed`，TX waiter 只依据该字段执行全局容量唤醒。
+23. TCP 关闭生命周期：用户文件对象释放后，含有待发送数据、FIN 或重传状态的 smoltcp handle 必须继续保留在 `SOCKET_SET`；接收队列存在未读数据时必须保留 abort handle 直到 RST 发出；协议进入 `Closed` 后才能删除。只有 orphan `FIN_WAIT_2` 状态受 60 秒回收期限约束。
+24. 网络 timer 条件：协议与 deferred-close deadline 只能通过原子值发布；周期采样回调到期处理不得获取 sleepable mutex、分配 future 或访问 timer wheel。
+25. link 配置所有权：接口名、MTU、管理 up 状态和 link snapshot 只由 `NetDevice` 持有；`RTM_NEWLINK` 必须先完成名称唯一性、名称格式、设备 MTU 范围和受支持 flags 的整组校验，再修改设备。`ifi_change` 中的派生状态位按 Linux `IFF_VOLATILE` 语义保留，实际改变的未支持可写位返回 `EOPNOTSUPP`。
+26. IPv4 地址生命周期：地址或所属设备移除后，Router 地址条目、自动路由、IngressProcessor、smoltcp Interface 和设备投影必须在同一 Router 锁作用域内刷新；最后一个同值地址消失时，`ROUTE_STATE` 中依赖该 `prefsrc` 的配置路由必须同步删除；设备消失时还必须删除其路由与邻居并重编号后续接口索引。
 
 ## 线程安全
 
@@ -232,7 +233,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-04 | 恶意 netlink 消息越界读取或构造非法状态 | 高 | 用户传入短 header、畸形 attr、非法 family、非法 ifindex | `NlMsgHeader::read`、`parse_attrs`、`parse_ip_by_family` 和 route index 检查拒绝非法输入 |
 | T-05 | ARP/NDP spoofing 污染 neighbor cache | 中 | 外部主机发送伪造 ARP reply、NS SLLA 或 NA | 当前校验 unicast MAC、广播和本机目标 IP；NUD 只检测可达性，不认证邻居；完整邻居安全策略仍依赖网络隔离 |
 | T-06 | listen backlog 被 SYN 洪泛占满 | 中 | 大量连接请求命中同一 listener | backlog 被 clamp 到 `LISTEN_QUEUE_SIZE`；超限丢弃并记录 warn |
-| T-07 | raw socket 被无权限调用者创建 | 中 | syscall 层没有实施权限门禁 | `knet` 层只封装 raw socket 行为；权限策略应保留在 `posix/net::sys_socket` |
+| T-07 | raw socket 被无权限调用者创建 | 中 | syscall 层没有实施权限门禁 | `knet` 层只封装 raw socket 行为；权限策略在 `posix/net::sys_socket`。`AF_PACKET` 与 `AF_INET6 SOCK_RAW`（仅 `IPPROTO_FRAGMENT`）检查特权；`AF_INET SOCK_RAW` ICMP 仍未门禁 |
 | T-08 | netlink RX queue 被 uevent 或 response 填满 | 中 | 订阅者不消费，publisher 持续写入 | `NETLINK_RX_QUEUE_LIMIT` 限制单 socket queue 字节数，超限丢弃 |
 | T-09 | 控制面与 data-plane 不一致 | 中 | link mutation 更新设备 owner 失败，跨 socket 地址 mutation 交错，设备移除后保留旧地址投影或控制面路由，删除地址后配置路由继续引用失效 `prefsrc`，或路由和邻居 mutation 只更新控制面 | 全局 mutation 锁串行化跨 socket 更新与设备移除；link query 与 mutation 直接访问 `NetDevice` owner；IPv4 地址 query 与 mutation 直接访问 Router；IPv6 地址、路由和邻居 mutation 在释放 `ROUTE_STATE` 写锁后调用 `SERVICE.sync_netlink`；地址与设备删除刷新自动路由、ingress、Interface 和设备投影 |
 | T-10 | 外部网络包触发 parser panic | 中 | malformed Ethernet、ARP、IP、UDP 或 TCP packet 进入 RX | Ethernet 和 ARP 使用 `zerocopy` checked view，IPv4/IPv6 与 UDP/ICMPv6/NDP 使用 crate 内 checked parser，TCP 与 raw IP 使用 smoltcp checked parser；错误包直接丢弃 |
@@ -259,6 +260,8 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-31 | TCP 零窗口恢复缺少后台推进 | 中 | 应用在接收窗口仍编码为零时读取 TCP 接收缓冲区，却没有发布窗口恢复工作 | 接收缓冲区余量低于最大窗口缩放量子时，读取操作调用 `notify(PollReason::RxWindow)`；达到缩放量子后的窗口增长由 RX 和已登记的协议 timer 推进 |
 | T-32 | poller 执行期间丢失新事件 | 中 | RX、TX 或 timer 通知与完成 CAS 并发 | 普通通知与 RX 任务原地批次复用同一个 `AtomicU8`；执行期工作发布为 `RUNNING_PENDING`，完成 CAS 失败后按观察到的状态重试，并通过一次成功 CAS 同时释放执行权和发布下一轮 |
 | T-33 | link 复合更新发生部分提交 | 中 | 重命名成功后 MTU 或 flags 校验失败 | `Router::update_device_link` 在写入前校验目标设备、名称格式与唯一性和 MTU 范围；rtnetlink 入口忽略 `IFF_VOLATILE` 变更并拒绝实际改变的未支持可写位，设备 setter 只接收已验证值 |
+| T-34 | IPv6 分片耗尽内核内存 | 中 | 外部持续发送无法完成重组的不同 IPv6 分片流 | 重组器限制队列数量与总内存，超过高水位后淘汰最早队列到低水位，队列存活时间固定为 60 秒 |
+| T-35 | 重叠 IPv6 分片混淆上层解析 | 中 | 同一重组 key 提交相互覆盖的 payload range，或第一片缺少完整上层头 | RFC 5722 重叠丢弃整数据报；第一片上层头不完整则丢弃并发送 Parameter Problem code 3，不把半截 UDP/TCP 送进 socket |
 
 影响等级定义：
 
@@ -293,6 +296,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | F-21 | RX 或 TX backlog 长期占用推进任务 | 持续高包率超过单轮 budget | 单轮达到预算或 1 ms 软时间上限并留下 backlog | 其他任务调度延迟或网络吞吐下降 | 3 | 设备 RX、stack ingress、stack egress 和 Router TX 最多处理 32 个工作项后检查时间；每批最多连续执行四轮，达到上限后重新唤醒并归还执行权，剩余 backlog 进入下一批 |
 | F-22 | TCP peer 在本地文件关闭后不发送 FIN | peer 已确认本地 FIN，协议 handle 长期停留在 orphan `FIN_WAIT_2` | deferred-close registry 持续持有 socket buffer | 网络内存随失联连接增长 | 3 | 进入 `FIN_WAIT_2` 时设置 60 秒期限，期限进入统一 poll timer，到期后回收 handle |
 | F-23 | IPv4 输出设备管理 down | `RTM_NEWLINK` 清除匹配路由设备的 `IFF_UP` | 当前 UDP 或 raw IP 发送失败 | 应用收到 `ENETUNREACH` | 4 | UDP 和 raw IP 在提交发送缓冲前通过 `SERVICE` 校验输出路由和设备管理状态 |
+| F-24 | IPv6 分片重组超时 | 首片到达后 60 秒内缺少后续分片 | 当前数据报丢失 | UDP 接收超时 | 3 | 删除过期队列；仅当首片存在且允许回复时发送 ICMPv6 Time Exceeded code 1 |
 
 严重度定义：
 
@@ -327,10 +331,10 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - smoltcp maintenance 与单次 egress pass 提供有界执行，ingress 通过 `poll_ingress_single` 按 packet 推进；单个 packet 的协议处理和一次 egress pass 仍会形成有限的软上限超出。
 - UDP RX queue 排空后保留 64 个元数据槽位；长期非空队列保持已增长容量，直到队列再次排空。
 - 地址 dump 直接读取 Router IPv4 条目并合并 `ROUTE_STATE` 中的 IPv6 地址；路由 dump 仍来自 `ROUTE_STATE` 投影；link dump 读取设备实时快照；邻居 dump 合并 `ROUTE_STATE` 与设备 NUD 快照。
-- raw socket 创建权限由 syscall 层承担，`knet` 构造器自身没有进程凭据参数。
+- raw socket 创建权限由 syscall 层承担，`knet` 构造器自身没有进程凭据参数。`AF_INET6 SOCK_RAW` 目前只开放特权进程的 `IPPROTO_FRAGMENT`，把分片注入本机投递路径；未实现 `IPPROTO_RAW` / HDRINCL。
 - Ethernet 设备通过 ARP（IPv4）和 NDP（IPv6）解析邻居，并运行 Linux 风格 NUD 状态机；解析失败丢弃排队报文，尚未向源 socket 上报 ICMPv6 Destination Unreachable。尚未根据 TCP ACK / UDP 成功收发刷新 `confirmed`。
 - 非 Ethernet 链路和多队列 NIC 抽象仍待扩展。
-- IPv6 分片重组与 PMTUD 尚未实现；遇到 Fragment 扩展头时降级交给 smoltcp 或丢弃。
+- IPv6 入向 Fragment 已按 RFC 8200 / RFC 5722 重组；IPv6 输出仍不分片，超出路径 MTU 返回 `EMSGSIZE`。尚未实现 IPv6 PMTUD cache。
 - AF_INET6 UDP 默认 V6-only，不支持 v4-mapped 地址与 dual-stack socket。
 - 不做 SLAAC / RA / DHCPv6；地址配置依赖静态初始化与 netlink。
 - vsock-TIPC bridge v1 不转发 TIPC handles 或 memrefs，也不为 vsock send credit 建立持久重试队列。
@@ -350,7 +354,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - Unix stream 的 write index 发布、方向关闭和空队列 EOF 判定保持同一个 per-direction 排序点，方向锁内不执行用户复制或 `PollSet` 唤醒，shutdown 在释放 `channel` mutex 后执行 waiter 唤醒。
 - 新增外部网络输入使用 checked parser（含 IPv6 扩展头跳过与 NDP/ICMPv6）。
 - IPv6 差错生成保持 RFC 4443 §2.4 限制：仅应答本地单播目的，不对组播/未指定源或组播目的应答，且不对 ICMPv6 差错与 Redirect 再回差错。
-- IPv6 Fragment 扩展头改动需明确降级策略（交 smoltcp 或丢弃），避免半处理状态。
+- IPv6 入向重组改动保持队列数量、内存和 60 秒超时上限，拒绝重叠 range，并要求第一片带齐上层头；完成后不得把 Fragment 头交给 UDP/TCP。
 - IPv4 分片重组改动保持队列数量、内存和超时上限，并拒绝重叠 range。
 - UDP registry 改动保持 bind、connect、普通接收和 ICMP/ICMPv6 error lookup 使用同一 PCB 所有权来源；ICMPv6 差错 lookup 必须带上到达接口 scope，不能把 `sin6_scope_id` 写成 0。
 - 修改 poller 状态机或 `Service::poll_budgeted` 时验证四态转换、单执行者获取、一次 CAS 释放、分阶段 smoltcp 预算和 1 ms 软时间上限；`PollProgress::has_more` 只能包含立即工作，未来协议 deadline 必须等待 timer 到期后发布；TX waiter 只能由 `tx_capacity_changed` 触发全局容量唤醒。

@@ -8,7 +8,7 @@ use alloc::{vec, vec::Vec};
 
 use etherparse::{
     Icmpv6Header, Icmpv6Slice, Icmpv6Type,
-    icmpv6::{DestUnreachableCode, ParameterProblemCode, ParameterProblemHeader},
+    icmpv6::{DestUnreachableCode, ParameterProblemCode, ParameterProblemHeader, TimeExceededCode},
 };
 
 use super::{self as ipv6, IPV6_DEFAULT_HOP_LIMIT, IPV6_HEADER_LEN, Ipv6Header, PROTOCOL_ICMPV6};
@@ -19,11 +19,18 @@ const ICMPV6_ERROR_QUOTE_BYTES: usize = 1232;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Icmpv6Error {
     PortUnreachable,
-    /// RFC 4443 §3.4 Parameter Problem, Code 1 (unrecognized Next Header).
+    /// RFC 4443 §3.4 Parameter Problem.
     ///
-    /// The `pointer` is the octet offset of the offending next-header field
-    /// within the offending packet.
-    ParameterProblem(u32),
+    /// `pointer` is the octet offset of the offending field within the
+    /// original packet. Code 1 is unrecognized Next Header; code 0 is an
+    /// erroneous header field; code 3 is a truncated first-fragment header
+    /// chain (RFC 7112 / RFC 8200 §4.5).
+    ParameterProblem {
+        code: ParameterProblemCode,
+        pointer: u32,
+    },
+    /// RFC 4443 §3.3 Time Exceeded, code 1 (fragment reassembly timeout).
+    FragmentReassemblyTimeout,
 }
 
 /// Builds an ICMPv6 echo reply for a validated echo request packet.
@@ -93,11 +100,11 @@ pub(crate) fn build_icmpv6_error_packet(
         Icmpv6Error::PortUnreachable => {
             Icmpv6Type::DestinationUnreachable(DestUnreachableCode::Port)
         }
-        Icmpv6Error::ParameterProblem(pointer) => {
-            Icmpv6Type::ParameterProblem(ParameterProblemHeader {
-                code: ParameterProblemCode::UnrecognizedNextHeader,
-                pointer,
-            })
+        Icmpv6Error::ParameterProblem { code, pointer } => {
+            Icmpv6Type::ParameterProblem(ParameterProblemHeader { code, pointer })
+        }
+        Icmpv6Error::FragmentReassemblyTimeout => {
+            Icmpv6Type::TimeExceeded(TimeExceededCode::FragmentReassemblyTimeExceeded)
         }
     };
     let icmp_header = Icmpv6Header::with_checksum(
@@ -184,7 +191,7 @@ fn can_send_icmpv6_error(
 
 #[cfg(unittest)]
 mod tests {
-    use etherparse::IcmpEchoHeader;
+    use etherparse::{IcmpEchoHeader, icmpv6::ParameterProblemCode};
     use unittest::def_test;
 
     use super::{
@@ -313,7 +320,10 @@ mod tests {
         assert_eq!(header.next_header_offset(), 6);
 
         let error = build_icmpv6_error_packet(
-            Icmpv6Error::ParameterProblem(header.next_header_offset() as u32),
+            Icmpv6Error::ParameterProblem {
+                code: ParameterProblemCode::UnrecognizedNextHeader,
+                pointer: header.next_header_offset() as u32,
+            },
             PacketType::Host,
             header,
             &offending,
@@ -331,6 +341,54 @@ mod tests {
         assert_eq!(
             u32::from_be_bytes([icmp[4], icmp[5], icmp[6], icmp[7]]),
             header.next_header_offset() as u32
+        );
+    }
+
+    #[def_test]
+    fn test_build_first_fragment_incomplete_header_chain() {
+        let (src, dst) = sample_addrs();
+        let offending = build_ipv6_packet(src, dst, PROTOCOL_UDP, 64, &[0; 4]).unwrap();
+        let header = Ipv6Header::parse_input(&offending).unwrap();
+
+        let error = build_icmpv6_error_packet(
+            Icmpv6Error::ParameterProblem {
+                code: ParameterProblemCode::Ipv6FirstFragmentIncompleteHeaderChain,
+                pointer: 0,
+            },
+            PacketType::Host,
+            header,
+            &offending,
+        )
+        .expect("ICMPv6 error");
+        let error_header = Ipv6Header::parse_input(&error).unwrap();
+        let icmp = ipv6::payload(&error, &error_header).unwrap();
+        assert_eq!(icmp[0], etherparse::icmpv6::TYPE_PARAMETER_PROBLEM);
+        assert_eq!(
+            icmp[1],
+            etherparse::icmpv6::CODE_PARAM_PROBLEM_IPV6_FIRST_FRAG_INCOMP_HEADER_CHAIN
+        );
+        assert_eq!(u32::from_be_bytes([icmp[4], icmp[5], icmp[6], icmp[7]]), 0);
+    }
+
+    #[def_test]
+    fn test_build_fragment_reassembly_timeout() {
+        let (src, dst) = sample_addrs();
+        let offending = build_ipv6_packet(src, dst, PROTOCOL_UDP, 64, &[0; 8]).unwrap();
+        let header = Ipv6Header::parse_input(&offending).unwrap();
+
+        let error = build_icmpv6_error_packet(
+            Icmpv6Error::FragmentReassemblyTimeout,
+            PacketType::Host,
+            header,
+            &offending,
+        )
+        .expect("ICMPv6 error");
+        let error_header = Ipv6Header::parse_input(&error).unwrap();
+        let icmp = ipv6::payload(&error, &error_header).unwrap();
+        assert_eq!(icmp[0], etherparse::icmpv6::TYPE_TIME_EXCEEDED);
+        assert_eq!(
+            icmp[1],
+            etherparse::icmpv6::CODE_TIME_EXCEEDED_FRAGMENT_REASSEMBLY_TIME_EXCEEDED
         );
     }
 }

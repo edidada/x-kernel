@@ -28,9 +28,9 @@ use knet::{
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK, O_RDWR},
     net::{
-        AF_INET, AF_INET6, AF_NETLINK, AF_PACKET, AF_UNIX, AF_VSOCK, IPPROTO_ICMP, IPPROTO_TCP,
-        IPPROTO_UDP, SHUT_RD, SHUT_RDWR, SHUT_WR, SOCK_DGRAM, SOCK_RAW, SOCK_SEQPACKET,
-        SOCK_STREAM, sockaddr, socklen_t,
+        AF_INET, AF_INET6, AF_NETLINK, AF_PACKET, AF_UNIX, AF_VSOCK, IPPROTO_FRAGMENT,
+        IPPROTO_ICMP, IPPROTO_TCP, IPPROTO_UDP, SHUT_RD, SHUT_RDWR, SHUT_WR, SOCK_DGRAM, SOCK_RAW,
+        SOCK_SEQPACKET, SOCK_STREAM, sockaddr, socklen_t,
     },
 };
 use posix_types::{UserConstPtr, UserPtr};
@@ -82,6 +82,22 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
                 return Err(KError::from(LinuxError::EPROTONOSUPPORT));
             }
             knet::Socket::Udp(Box::new(UdpSocket::new_v6()))
+        }
+        (AF_INET6, SOCK_RAW) => {
+            // Userspace cannot emit IPv6 Fragment headers through UDP/TCP.
+            // A privileged raw socket with next-header 44 lets tests inject
+            // fragments onto the local-delivery path so IngressProcessor
+            // can reassemble them. IPPROTO_RAW / HDRINCL is not implemented.
+            if !cred.is_privileged() {
+                return Err(KError::from(LinuxError::EPERM));
+            }
+            if proto != IPPROTO_FRAGMENT {
+                return Err(KError::from(LinuxError::EPROTONOSUPPORT));
+            }
+            knet::Socket::Raw(Box::new(RawSocket::new(
+                IpVersion::Ipv6,
+                IpProtocol::Ipv6Frag,
+            )))
         }
         (AF_INET6, _) => return Err(KError::from(LinuxError::ESOCKTNOSUPPORT)),
         (AF_UNIX, SOCK_STREAM) => {

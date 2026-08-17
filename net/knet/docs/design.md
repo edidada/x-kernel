@@ -81,7 +81,7 @@ net/knet/
 ```
 
 测试辅助代码位于 `socket/test_options.rs`、`socket/test_state.rs`、`netlink/tests.rs`，
-IPv4、分片重组和 UDP 的回归测试与对应实现放在同一模块内。
+IPv4、IPv6 分片重组和 UDP 的回归测试与对应实现放在同一模块内。
 
 ## 架构
 
@@ -126,17 +126,18 @@ core/kruntime
 | `poller` | 使用单个 `AtomicU8` 四态状态机串行化执行者，按后台预算或 socket assist 预算推进 RX、smoltcp timer 和 TX |
 | `Service` | 持有加锁的 smoltcp `Interface`、`Router`、`IngressProcessor`、可复用 batch、IPv6 动作 batch、poll timeout 和 RX waker 注册入口 |
 | `Router` | 管理设备列表、RX 设备游标、带 MTU 的路由表、smoltcp ingress queue、control/data TX queue、IPv4 输出分片、IPv6 输出与 NDP/ICMPv6、next-hop 选择和 budget dispatch |
-| `IngressProcessor` | 在 Router 锁外校验和重组 IPv4 输入，解析 IPv6 输入，执行 crate 内 UDP 分流、ICMPv4 UDP error、ICMPv6 NDP/echo/差错分流与 TCP listen snoop，并生成 ICMPv4/ICMPv6 control packet 与 NDP 动作 |
+| `IngressProcessor` | 在 Router 锁外校验和重组 IPv4/IPv6 输入，执行 crate 内 UDP 分流、ICMPv4 UDP error、ICMPv6 NDP/echo/差错分流与 TCP listen snoop，并生成 ICMPv4/ICMPv6 control packet 与 NDP 动作 |
 | `NetDevice` | 抽象 loopback、Ethernet 和 feature gated vsock 设备后端，持有接口名、MTU、管理 up 状态、link snapshot 与 IPv6 地址/邻居状态，通过 `PacketBuf` 转移报文所有权，并使用 crate 内地址类型和 `MonotonicInstant` 表达设备边界 |
 | `PacketBuf` | 保存报文数据、协议偏移、接口索引、包类型、校验状态和当前所有者 |
 | `link::wire` | 使用 `zerocopy` 校验和构造 Ethernet 与 Ethernet/IPv4 ARP 头部 |
 | `stack::ipv4` | 使用 `etherparse` 校验和构造 IPv4 与 ICMPv4 头部，并执行输出分片 |
-| `stack::ipv6` | 解析/构造 IPv6 固定头，跳过可识别扩展头，定位上层协议；Fragment 头暂不重组 |
-| `stack::ipv6::icmpv6` | ICMPv6 echo 应答与 Destination Unreachable/Parameter Problem 差错生成 |
+| `stack::ipv6` | 解析/构造 IPv6 固定头，跳过可识别扩展头，定位上层协议，并重组入向 Fragment |
+| `stack::ipv6::icmpv6` | ICMPv6 echo 应答与 Destination Unreachable/Parameter Problem/Time Exceeded 差错生成 |
 | `stack::ipv6::ndp` | Neighbor Solicitation/Advertisement 构造与解析 |
 | `device::neighbor` | Ethernet 邻居缓存的 NUD 状态机、解析重试与 pending 队列 |
 | `device::net_rx` | Ethernet RX softirq poll source，与设备发送路径分离 |
 | `stack::ipv4::fragment` | 按源地址、目的地址、标识、协议和接口重组本地 IPv4 分片，并限制队列数量、内存和存活时间 |
+| `stack::ipv6::fragment` | 按源地址、目的地址、32 位标识和接口重组本地 IPv6 分片；保留第一片的不可分片前缀，重叠分片丢弃整数据报，超时 60 秒 |
 | `transport::udp` | 维护 UDP PCB registry、接收队列、bind 与 connect 状态、校验和、socket option、异步错误和 IPv4/IPv6 收发 |
 | `SocketSetWrapper` | 串行化 smoltcp socket set 与 TCP deferred-close 元数据访问，并在新增 socket 时通知等待者 |
 | `ListenTable` | 管理 TCP listen backlog、SYN 队列、accept 队列和 accept waker |
@@ -331,7 +332,7 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 1. Ethernet RX 任务注册下一次 IRQ waker 后调用 `NetworkPoller::publish_and_poll_rx`，在当前任务内发布 RX 并尝试执行有界批次；socket recv 和 readiness 路径通过 `poll_interfaces` 尝试执行一次已有工作；TCP、UDP 和 raw TX 生产路径通过 `notify(PollReason::Tx)` 发布工作。TCP 从可编码为零窗口的低余量接收缓冲区消费数据时通过 `notify(PollReason::RxWindow)` 主动重开对端窗口。
 2. 普通 `notify` 在 `IDLE` 上发布 `SCHEDULED` 并唤醒后台任务；RX 任务发布后直接竞争执行权。执行期间的新工作进入 `RUNNING_PENDING`；RX 任务、后台任务和 assist 只有一个能够通过 `SCHEDULED` 到 `RUNNING` 的 CAS。
 3. `Router::drain_rx_budgeted_into` 按 RX budget 从设备轮转拉取 `PacketBuf`，`next_rx_device` 在设备间保持公平并随设备删除修正。
-4. `IngressProcessor` 在 Router 锁外校验 IPv4/IPv6 头、长度、校验和与本地目的地址，并完成 IPv4 分片重组；IPv6 跳过可识别扩展头，含 Fragment 头的报文暂交 smoltcp。
+4. `IngressProcessor` 在 Router 锁外校验 IPv4/IPv6 头、长度、校验和与本地目的地址，并完成 IPv4/IPv6 分片重组。IPv6 跳过可识别扩展头；含 Fragment 头的报文按 `(src, dst, id, ifindex)` 重组，不可分片前缀来自第一片，完成后去掉 Fragment 头再走 UDP/NDP/echo 或把完整 TCP 交给 smoltcp。
 5. 完整 UDP 数据报进入 crate 内 UDP PCB 分流（IPv4/IPv6），未命中 socket 的单播 UDP 触发 ICMPv4/ICMPv6 Port Unreachable；IPv6 未识别 next header（非 TCP/UDP/ICMPv6）的单播报文触发 ICMPv6 Parameter Problem Code 1（RFC 4443 §3.4），pointer 指向承载该值的 next-header 字段。ICMPv6 NDP（NS/NA）解析为动作 batch，由 `Service` 在 Router 锁内更新设备邻居表或发送 NA；Echo Request 由 `stack::ipv6::icmpv6` 应答。其余入站 ICMPv6 差错在 `process_ipv6_input` 内交给 UDP error lookup，引用 4-tuple 的 link-local/multicast 地址使用到达接口作为 `sin6_scope_id`（对齐 Linux `__udp6_lib_err` 的 `inet6_iif`），随后丢弃、不进入 smoltcp。UDP PCB 按 FIFO 保留已入队数据报，`connect` 只影响后续入包的 peer 匹配。
 6. TCP、raw IP、ICMPv4 和其余 IPv6 packet 进入有界 smoltcp ingress queue。`Service` 先执行 `poll_maintenance`，再按 RX budget 逐个调用 `poll_ingress_single`，并按 TX budget 调用有界的 `poll_egress`。达到预算或时间边界后，剩余 ingress 保持 FIFO 顺序并进入后续轮次。
 7. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
@@ -344,13 +345,13 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 1. TCP connect、send 和 close，raw send 以及 UDP data queue 提交完成后发布真实 TX 通知；TCP recv 只在消费前的 smoltcp 接收缓冲区余量低于最大窗口缩放量子时发布 `RxWindow` 通知，覆盖未缩放零窗口和缩放后仍编码为零的窗口。达到缩放量子后的窗口增长随 RX 或已登记的协议 timer poll 推进，避免每次应用读取都创建后台工作。调用方可随后通过 `assist_once` 协助执行已调度的一轮。TCP 文件关闭不会立即删除仍处于协议关闭过程中的 handle。
 2. crate 内 UDP 在 Router mutex 内检查队列容量、选择源地址和路由 MTU，并确认输出设备处于管理 up 状态；路由缺失或输出设备管理 down 时返回 `ENETUNREACH`。写入 UDP 与 IPv4/IPv6 头后提交到 data TX queue。IPv6 输出不分片，超出路径 MTU 直接返回 `EMSGSIZE`。smoltcp 生成的 IP 包进入同一 data TX queue，`IngressProcessor` 生成的 ICMPv4/ICMPv6 错误与 NDP/ICMPv6 应答进入 control TX queue。
 3. `IP_MTU_DISCOVER` 决定 UDP IPv4 头部的 DF 标志。超出路由 MTU 且允许分片的包由 `fragment_output_packet` 拆分，DF 包返回 `EMSGSIZE`。
-4. `Router::dispatch_budgeted` 优先接管 control packet，再按 IP 版本解析源地址和目的地址；IPv4 输出先按实际长度更新 `total_len` 和头部校验和，并将已校验的源地址随报文传给 `NetDevice`。IPv6 输出更新 `payload_length`。
+4. `Router::dispatch_budgeted` 优先接管 control packet，再按 IP 版本解析源地址和目的地址；IPv4 输出先按实际长度更新 `total_len` 和头部校验和，并将已校验的源地址随报文传给 `NetDevice`。IPv6 输出更新 `payload_length`。IPv6 目的命中本机地址表时，报文改标 `DeviceRx` 进入 `local_rx_queue`，由后续 RX 轮次的 `IngressProcessor` 处理；输出解析在 Fragment 头处停下，因此本机投递的分片会进入入向重组器。
 5. 广播或组播包复制到所有设备；`0.0.0.0` 到 `255.255.255.255` 的受限广播允许在设备尚未分配 IPv4 地址时直接发送，用于 DHCP 初始化流量。IPv6 组播直接映射 Ethernet 组播 MAC（`33:33:xx:xx:xx:xx`）。
 6. 单播包通过 `RouteTable::lookup` 选择最长前缀路由；IPv6 link-local 目的直接 on-link。
 7. Ethernet 设备先查邻居 cache（IPv4 用 ARP，IPv6 用 NDP）。`REACHABLE` / `DELAY` / `PROBE` / `PERMANENT` 直接封装 Ethernet frame；`STALE` 先把条目转入 `DELAY` 再用缓存 MAC 发送。
 8. 无映射或 `FAILED` 时进入 `INCOMPLETE`：发送组播 NS / ARP request，并把 IP 包放入该邻居的 pending 队列。`RetransTimer`（1 s）到期后最多重试 3 次，仍无应答则标记 `FAILED` 并丢弃排队报文。请求 NA / ARP reply，以及 netlink 将同地址安装为 `PERMANENT`，会冲刷该邻居的 pending 队列后发出。NUD 在 `DELAY` 超时后发送单播探测。
 
-当前实现保留 smoltcp TCP（含 TCPv6）、raw socket 和 DNS 推进。UDP、IPv4 分片重组、输出分片、ICMPv4/ICMPv6 UDP 差错报告和 NDP 使用 crate 内实现。
+当前实现保留 smoltcp TCP（含 TCPv6）、raw socket 和 DNS 推进。UDP、IPv4/IPv6 入向分片重组、IPv4 输出分片、ICMPv4/ICMPv6 UDP 差错报告和 NDP 使用 crate 内实现。
 `PacketBuf`、`link::wire`、`stack::ipv4`、`stack::ipv6` 提供设备与 crate 内 IP/UDP 数据路径共用的报文表示和 parser/emitter。
 路由表和设备接口使用 `crate::ip` 地址类型（含 `Ipv6Cidr`），设备时间使用 `ktime::MonotonicInstant`。
 `Router`、`Service` 和初始化入口在 smoltcp 兼容边界完成地址与时间转换。
@@ -401,7 +402,7 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 - RX 设备拉取和 TX dispatch 位于 Router 锁内，IPv4 校验、过滤和 snoop 位于 Router 锁外。NUD timer 在取得 `SOCKET_SET` 之前单独持有 Router 锁，避免探测发包跨过 socket-set。smoltcp ingress queue 有固定容量，`poll_ingress_single` 每次消费一个 packet，预算或时间边界留下的 packet 在后续轮次继续推进。
 - 全局 `SOCKET_SET` 内部使用 `Mutex<SocketSetState>`，其中的 smoltcp socket set 与 TCP deferred-close 元数据共享同一所有权锁。关闭、登记、协议推进和回收不会跨两个 mutex 交接 handle。
 - `UDP_PCB_REGISTRY` 按端口分为 256 个 bucket，每个 bucket 独立加锁；每个 UDP PCB 的接收队列、endpoint、错误队列和 option 状态分别受锁或 atomic 保护。接收队列从零容量开始按需增长，上限为 1024 个数据报，队列排空后最多保留 64 个槽位。
-- `Ipv4Reassembler` 位于 `Router` 内，并由 `SERVICE` mutex 串行访问。
+- `Ipv4Reassembler` 与 `Ipv6Reassembler` 位于 `IngressProcessor` 内，并由 `SERVICE` 的 ingress mutex 串行访问。
 - `LISTEN_TABLE` 用 `Mutex<HashMap<...>>` 管理 listener；每个 entry 的 `accept_poll`
   放在 entry 级 `Mutex` 之外，backlog 队列仍由该 `Mutex` 保护。`register_accept_waker`
   先无锁注册到 `accept_poll`，再短持锁做 readiness recheck，避免在队列锁内做
@@ -422,10 +423,10 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 
 ### UDP 与 IP 数据路径迁出 smoltcp
 
-UDP PCB、bind 冲突检查、收发队列、IPv4/IPv6 校验、IPv4 分片重组、输出分片、ICMPv4/ICMPv6 差错和 NDP 均由 crate 内类型管理。
+UDP PCB、bind 冲突检查、收发队列、IPv4/IPv6 校验、IPv4/IPv6 入向分片重组、IPv4 输出分片、ICMPv4/ICMPv6 差错和 NDP 均由 crate 内类型管理。
 TCP（含 TCPv6）、raw IP 和 DNS 继续通过 smoltcp socket set 推进，协议推进依赖 Ethernet RX 任务的有界批次、后台 poller 调度和显式 `poll_interfaces` assist。
 AF_INET6 UDP/TCP socket 默认 `IPV6_V6ONLY=1`，不做 v4-mapped 双栈。
-IPv6 扩展头仅跳过定位上层协议；Fragment 头暂不重组。不实现 SLAAC/DHCPv6。
+IPv6 扩展头用于定位上层协议；入向 Fragment 按 RFC 8200 §4.5 / RFC 5722 重组。IPv6 输出不分片，超出路径 MTU 返回 `EMSGSIZE`。不实现 SLAAC/DHCPv6。
 该边界让 UDP 不再依赖 smoltcp socket handle，同时保留现有 TCP 和 raw socket 行为。
 
 IPv6 link-local 收发使用 `sin6_scope_id` 选择接口：接收路径写入报文到达的接口索引，

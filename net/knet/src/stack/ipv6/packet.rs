@@ -5,9 +5,12 @@
 //! IPv6 packet validation and output helpers.
 
 #[cfg(unittest)]
-use alloc::{vec, vec::Vec};
+use alloc::vec;
+use alloc::vec::Vec;
 
-use etherparse::{IpNumber, Ipv6Header as EtherIpv6Header, Ipv6HeaderSlice};
+use etherparse::{
+    IpNumber, Ipv6FragmentHeaderSlice, Ipv6Header as EtherIpv6Header, Ipv6HeaderSlice,
+};
 
 use crate::{
     buf::{ChecksumState, PacketBuf},
@@ -26,6 +29,10 @@ pub(crate) const IPV6_EXT_ROUTING: u8 = 43;
 pub(crate) const IPV6_EXT_FRAGMENT: u8 = 44;
 pub(crate) const IPV6_EXT_DEST_OPTIONS: u8 = 60;
 pub(crate) const IPV6_EXT_AH: u8 = 51;
+
+pub(crate) const IPV6_FRAGMENT_HEADER_LEN: usize = 8;
+/// RFC 8200 payload_length maximum; Linux `IPV6_MAXPLEN`.
+pub(crate) const IPV6_MAX_PAYLOAD_LEN: usize = 65535;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Ipv6Error {
@@ -56,6 +63,21 @@ impl Ipv6Header {
         Self::parse(packet, true)
     }
 
+    /// Parses an inbound packet, stopping at a Fragment header instead of
+    /// rejecting it.
+    ///
+    /// [`Self::next_header`] is [`IPV6_EXT_FRAGMENT`] and
+    /// [`Self::header_len`] points at the Fragment header so the reassembler
+    /// can copy the unfragmentable prefix.
+    pub(crate) fn parse_input_allowing_fragment(packet: &[u8]) -> Result<Self, Ipv6Error> {
+        Self::parse(packet, false)
+    }
+
+    /// Parses an outbound packet, stopping at a Fragment header.
+    ///
+    /// Local delivery re-enters [`super::process_ipv6_input`], so dispatch
+    /// must not drop fragments that a raw socket injected toward a local
+    /// address.
     pub(crate) fn parse_output(packet: &[u8]) -> Result<Self, Ipv6Error> {
         Self::parse(packet, false)
     }
@@ -87,8 +109,18 @@ impl Ipv6Header {
         })
     }
 
+    #[cfg(unittest)]
     pub(crate) fn validate_input_packet(packet: &mut PacketBuf) -> Result<Self, Ipv6Error> {
         let header = Self::parse_input(packet.network_packet().ok_or(Ipv6Error::Malformed)?)?;
+        header.apply_to_packet(packet)
+    }
+
+    pub(crate) fn validate_input_packet_allowing_fragment(
+        packet: &mut PacketBuf,
+    ) -> Result<Self, Ipv6Error> {
+        let header = Self::parse_input_allowing_fragment(
+            packet.network_packet().ok_or(Ipv6Error::Malformed)?,
+        )?;
         header.apply_to_packet(packet)
     }
 
@@ -121,6 +153,10 @@ impl Ipv6Header {
 
     pub(crate) fn hop_limit(self) -> u8 {
         self.hop_limit
+    }
+
+    pub(crate) fn ecn(self) -> u8 {
+        self.traffic_class & 0b11
     }
 
     #[cfg(unittest)]
@@ -277,8 +313,9 @@ fn skip_extension_headers(
                 if reject_fragment {
                     return Err(Ipv6Error::Fragmented);
                 }
-                // Defer fragmented packets to smoltcp by reporting the
-                // Fragment header as the next protocol.
+                // Stop at the Fragment header: RFC 8200 §4.5 places it last
+                // in the unfragmentable chain, and the reassembler needs its
+                // offset plus the next-header field that named it.
                 return Ok((IPV6_EXT_FRAGMENT, offset, next_header_offset));
             }
             IPV6_EXT_AH => {
@@ -297,4 +334,134 @@ fn skip_extension_headers(
             _ => return Ok((next_header, offset, next_header_offset)),
         }
     }
+}
+
+/// Parsed IPv6 Fragment header (RFC 8200 §4.5).
+///
+/// `offset` is a byte offset in the fragmentable payload (`frag_off & ~0x7`
+/// on the wire, matching Linux `ip6_frag_queue`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Ipv6Fragment {
+    pub(crate) next_header: u8,
+    pub(crate) offset: usize,
+    pub(crate) more_fragments: bool,
+    pub(crate) identification: u32,
+}
+
+impl Ipv6Fragment {
+    pub(crate) fn parse(packet: &[u8], header: &Ipv6Header) -> Result<Self, Ipv6Error> {
+        if header.next_header() != IPV6_EXT_FRAGMENT {
+            return Err(Ipv6Error::Malformed);
+        }
+        let start = header.header_len();
+        let bytes = packet.get(start..).ok_or(Ipv6Error::Malformed)?;
+        let frag = Ipv6FragmentHeaderSlice::from_slice(bytes).map_err(|_| Ipv6Error::Malformed)?;
+        let offset = usize::from(frag.fragment_offset().value())
+            .checked_mul(8)
+            .ok_or(Ipv6Error::Malformed)?;
+        Ok(Self {
+            next_header: frag.next_header().0,
+            offset,
+            more_fragments: frag.more_fragments(),
+            identification: frag.identification(),
+        })
+    }
+
+    pub(crate) fn is_atomic(self) -> bool {
+        self.offset == 0 && !self.more_fragments
+    }
+
+    pub(crate) fn payload<'a>(self, packet: &'a [u8], header: &Ipv6Header) -> Option<&'a [u8]> {
+        let start = header.header_len().checked_add(IPV6_FRAGMENT_HEADER_LEN)?;
+        packet.get(start..header.total_len())
+    }
+
+    pub(crate) fn frag_off_pointer(header: &Ipv6Header) -> u32 {
+        (header.header_len() + 2) as u32
+    }
+}
+
+/// RFC 8200 §4.5 / RFC 7112: the first fragment must carry a complete
+/// header chain through the upper-layer header.
+///
+/// Linux `ipv6frag_thdr_truncated` only fires when skip succeeds and the
+/// remaining bytes are shorter than TCP (20), UDP (8), ICMPv6 (8), or 1
+/// for any other next header. Skip failures are not reported as code 3.
+pub(crate) fn first_fragment_upper_header_is_truncated(
+    fragment_next_header: u8,
+    fragmentable: &[u8],
+) -> bool {
+    let Ok((upper, offset, _)) = skip_extension_headers(fragment_next_header, fragmentable, true)
+    else {
+        return false;
+    };
+    fragmentable
+        .len()
+        .checked_sub(offset)
+        .is_none_or(|available| available < min_upper_header_len(upper))
+}
+
+fn min_upper_header_len(next_header: u8) -> usize {
+    match next_header {
+        PROTOCOL_TCP => 20,
+        PROTOCOL_UDP | PROTOCOL_ICMPV6 => 8,
+        _ => 1,
+    }
+}
+
+/// Removes the 8-byte Fragment header and rewrites the next-header field
+/// that named it. Used for atomic fragments (offset=0 and M=0).
+pub(crate) fn strip_ipv6_fragment_header(
+    packet: &[u8],
+    header: &Ipv6Header,
+    fragment: Ipv6Fragment,
+) -> Result<Vec<u8>, Ipv6Error> {
+    let frag_start = header.header_len();
+    let frag_end = frag_start
+        .checked_add(IPV6_FRAGMENT_HEADER_LEN)
+        .ok_or(Ipv6Error::Malformed)?;
+    if packet.len() < header.total_len() || header.total_len() < frag_end {
+        return Err(Ipv6Error::Malformed);
+    }
+    let mut out = Vec::with_capacity(header.total_len() - IPV6_FRAGMENT_HEADER_LEN);
+    out.extend_from_slice(&packet[..frag_start]);
+    out.extend_from_slice(&packet[frag_end..header.total_len()]);
+    *out.get_mut(header.next_header_offset())
+        .ok_or(Ipv6Error::Malformed)? = fragment.next_header;
+    rewrite_ipv6_payload_len(&mut out)?;
+    Ok(out)
+}
+
+pub(crate) fn rewrite_reassembled_ipv6(
+    packet: &mut [u8],
+    payload_len: usize,
+    ecn: u8,
+    next_header_offset: usize,
+    next_header: u8,
+) -> Result<(), Ipv6Error> {
+    let header_slice = Ipv6HeaderSlice::from_slice(packet).map_err(|_| Ipv6Error::Malformed)?;
+    let mut header = header_slice.to_header();
+    header.payload_length = u16::try_from(payload_len).map_err(|_| Ipv6Error::Malformed)?;
+    header.traffic_class = (header.traffic_class & !0b11) | (ecn & 0b11);
+    packet
+        .get_mut(..IPV6_HEADER_LEN)
+        .ok_or(Ipv6Error::Malformed)?
+        .copy_from_slice(&header.to_bytes());
+    *packet
+        .get_mut(next_header_offset)
+        .ok_or(Ipv6Error::Malformed)? = next_header;
+    Ok(())
+}
+
+fn rewrite_ipv6_payload_len(packet: &mut [u8]) -> Result<(), Ipv6Error> {
+    let payload_len = packet
+        .len()
+        .checked_sub(IPV6_HEADER_LEN)
+        .ok_or(Ipv6Error::Malformed)?;
+    let payload_len = u16::try_from(payload_len).map_err(|_| Ipv6Error::Malformed)?;
+    packet
+        .get_mut(4..6)
+        .ok_or(Ipv6Error::Malformed)?
+        .copy_from_slice(&payload_len.to_be_bytes());
+    Ok(())
 }
