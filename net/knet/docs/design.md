@@ -122,7 +122,7 @@ core/kruntime
 | `poller` | 使用单个 `AtomicU8` 四态状态机串行化执行者，按后台预算或 socket assist 预算推进 RX、smoltcp timer 和 TX |
 | `Service` | 持有加锁的 smoltcp `Interface`、`Router`、`IngressProcessor`、可复用 batch、IPv6 动作 batch、poll timeout 和 RX waker 注册入口 |
 | `Router` | 管理设备列表、RX 设备游标、带 MTU 的路由表、smoltcp ingress queue、control/data TX queue、IPv4 输出分片、IPv6 输出与 NDP/ICMPv6、next-hop 选择和 budget dispatch |
-| `IngressProcessor` | 在 Router 锁外校验和重组 IPv4 输入，解析 IPv6 输入，执行 crate 内 UDP 分流、UDP error 与 TCP listen snoop，并生成 ICMPv4/ICMPv6 control packet 与 NDP 动作 |
+| `IngressProcessor` | 在 Router 锁外校验和重组 IPv4 输入，解析 IPv6 输入，执行 crate 内 UDP 分流、ICMPv4 UDP error、ICMPv6 NDP/echo/差错分流与 TCP listen snoop，并生成 ICMPv4/ICMPv6 control packet 与 NDP 动作 |
 | `NetDevice` | 抽象 loopback、Ethernet 和 feature gated vsock 设备后端，持有接口名、MTU、管理 up 状态、link snapshot 与 IPv6 地址/邻居状态，通过 `PacketBuf` 转移报文所有权，并使用 crate 内地址类型和 `MonotonicInstant` 表达设备边界 |
 | `PacketBuf` | 保存报文数据、协议偏移、接口索引、包类型、校验状态和当前所有者 |
 | `link::wire` | 使用 `zerocopy` 校验和构造 Ethernet 与 Ethernet/IPv4 ARP 头部 |
@@ -325,7 +325,7 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 2. 普通 `notify` 在 `IDLE` 上发布 `SCHEDULED` 并唤醒后台任务；RX 任务发布后直接竞争执行权。执行期间的新工作进入 `RUNNING_PENDING`；RX 任务、后台任务和 assist 只有一个能够通过 `SCHEDULED` 到 `RUNNING` 的 CAS。
 3. `Router::drain_rx_budgeted_into` 按 RX budget 从设备轮转拉取 `PacketBuf`，`next_rx_device` 在设备间保持公平并随设备删除修正。
 4. `IngressProcessor` 在 Router 锁外校验 IPv4/IPv6 头、长度、校验和与本地目的地址，并完成 IPv4 分片重组；IPv6 跳过可识别扩展头，含 Fragment 头的报文暂交 smoltcp。
-5. 完整 UDP 数据报进入 crate 内 UDP PCB 分流（IPv4/IPv6），未命中 socket 的单播 UDP 触发 ICMPv4/ICMPv6 Port Unreachable；IPv6 未识别 next header（非 TCP/UDP/ICMPv6）的单播报文触发 ICMPv6 Parameter Problem Code 1（RFC 4443 §3.4），pointer 指向承载该值的 next-header 字段。ICMPv6 NDP（NS/NA）解析为动作 batch，由 `Service` 在 Router 锁内更新设备邻居表或发送 NA；Echo Request 由 `stack::ipv6::icmpv6` 应答。UDP PCB 按 FIFO 保留已入队数据报，`connect` 只影响后续入包的 peer 匹配。
+5. 完整 UDP 数据报进入 crate 内 UDP PCB 分流（IPv4/IPv6），未命中 socket 的单播 UDP 触发 ICMPv4/ICMPv6 Port Unreachable；IPv6 未识别 next header（非 TCP/UDP/ICMPv6）的单播报文触发 ICMPv6 Parameter Problem Code 1（RFC 4443 §3.4），pointer 指向承载该值的 next-header 字段。ICMPv6 NDP（NS/NA）解析为动作 batch，由 `Service` 在 Router 锁内更新设备邻居表或发送 NA；Echo Request 由 `stack::ipv6::icmpv6` 应答。其余入站 ICMPv6 差错在 `process_ipv6_input` 内交给 UDP error lookup，引用 4-tuple 的 link-local/multicast 地址使用到达接口作为 `sin6_scope_id`（对齐 Linux `__udp6_lib_err` 的 `inet6_iif`），随后丢弃、不进入 smoltcp。UDP PCB 按 FIFO 保留已入队数据报，`connect` 只影响后续入包的 peer 匹配。
 6. TCP、raw IP、ICMPv4 和其余 IPv6 packet 进入有界 smoltcp ingress queue。`Service` 先执行 `poll_maintenance`，再按 RX budget 逐个调用 `poll_ingress_single`，并按 TX budget 调用有界的 `poll_egress`。达到预算或时间边界后，剩余 ingress 保持 FIFO 顺序并进入后续轮次。
 7. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
 8. `Router::dispatch_budgeted` 先处理 control TX queue，再处理 data TX queue，单轮发送数量受 TX budget 限制。
@@ -423,6 +423,7 @@ IPv6 扩展头仅跳过定位上层协议；Fragment 头暂不重组。不实现
 
 IPv6 link-local 收发使用 `sin6_scope_id` 选择接口：接收路径写入报文到达的接口索引，
 UDP bind registry、endpoint 匹配和设备 mask 保留该 scope，发送路径按 scope 选择路由和源地址。
+ICMPv6 差错查找同样用到达接口填 quoted 地址的 scope，使绑定或连接到 `fe80::%ethN` 的 socket 能收到 Port Unreachable / Packet Too Big。
 IPv6 endpoint 的文本格式遵循 `[address%scope]:port`，避免地址与端口之间的冒号歧义。
 当前不实现 `IPV6_FLOWINFO_SEND` 或 flow-label 路由；`sockaddr_in6.sin6_flowinfo`
 进入原生 endpoint 时会被有意归零，`getsockname`、`getpeername` 和接收地址也返回零。

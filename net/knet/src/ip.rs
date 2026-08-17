@@ -105,6 +105,18 @@ impl Ipv6Address {
         self.0[0] == 0xfe && (self.0[1] & 0xc0) == 0x80
     }
 
+    /// Interface scope reported for this address on `ifindex`.
+    ///
+    /// Link-local and multicast addresses need an interface; others report 0.
+    /// This matches Linux `ipv6_iface_scope_id`.
+    pub(crate) fn iface_scope_id(self, ifindex: i32) -> u32 {
+        if self.is_link_local() || self.is_multicast() {
+            ifindex.max(0) as u32
+        } else {
+            0
+        }
+    }
+
     /// Derives a link-local address from a 48-bit MAC via modified EUI-64.
     pub(crate) fn link_local_from_mac(mac: [u8; 6]) -> Self {
         let mut octets = [0u8; 16];
@@ -580,6 +592,8 @@ mod tests {
         assert!(Ipv6Address::LOCALHOST.is_loopback());
         assert!(Ipv6Address::ALL_NODES_LINK_LOCAL.is_multicast());
         assert!(link_local.is_link_local());
+        assert_eq!(link_local.iface_scope_id(2), 2);
+        assert_eq!(Ipv6Address::LOCALHOST.iface_scope_id(2), 0);
         assert!(cidr.contains_addr(&IpAddress::from(addr)));
         assert_eq!(IpCidr::from(cidr).prefix_len(), 64);
         assert_eq!(

@@ -274,7 +274,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | F-02 | 目的地址无路由 | `RouteTable::lookup` 未命中 | 当前发送失败 | 应用连接失败 | 3 | connect 或 send 路径返回 `ENETUNREACH`，dispatch 路径 warn 后丢弃 |
 | F-03 | Ethernet pending queue 满 | ARP 未解析且 `pending_tx` 达到上限 | 后续 IP 包丢弃 | 单目的或多目的通信丢包 | 3 | 记录 warn；后续需按 next-hop 拆分队列降低 head-of-line blocking |
 | F-04 | driver TX buffer 分配失败 | NIC driver 返回 `alloc_tx_buf` 错误 | 当前 frame 未发送 | 网络吞吐下降或连接超时 | 3 | 记录 warn 并返回；上层 poller 可继续重试 |
-| F-05 | UDP ICMP error queue 丢失 | PCB registry 未注册、ICMP 引用头无效或 socket 已关闭 | `SO_ERROR` 或 error queue 缺失 | 应用无法获得异步网络错误 | 4 | socket 创建时初始化 PCB registry，bind 时登记 PCB，Drop 时注销；ICMP 引用报文使用允许截断 payload 的 IPv4 头解析路径 |
+| F-05 | UDP ICMP error queue 丢失 | PCB registry 未注册、ICMP 引用头无效、IPv6 差错未进入 inspect，或 scoped link-local lookup 缺少到达接口 | `SO_ERROR` 或 error queue 缺失 | 应用无法获得异步网络错误 | 4 | socket 创建时初始化 PCB registry，bind 时登记 PCB，Drop 时注销；ICMP 引用报文使用允许截断 payload 的头解析路径；ICMPv6 差错在 `process_ipv6_input` 内 inspect，并用到达 `ifindex` 作为 link-local/multicast `sin6_scope_id` |
 | F-06 | TCP accepted child abort | 握手期间 peer reset 或 smoltcp child 关闭 | `accept` 返回 `ConnectionAborted` | 应用重试 accept | 4 | `ListenTable::accept` 清理 closed child 并继续扫描队列 |
 | F-07 | poll waker 或协议 timer 丢失 | device mask 错误、timeout 或 Ethernet RX poll source 未注册、注册所有者未跨 `Pending` 存活、缺少 register 后复查或 timer 到期后未通知 poller | socket 阻塞等待延迟，TCP 重传或 keep-alive 延后 | 应用 IO latency 上升或连接超时 | 3 | bind/connect 后更新 device mask；`Service::register_rx_waker` 使用同一个 `PollContext` 注册 timeout poll 和支持 interrupt-driven RX 的 Ethernet RX poll source；未 attach `NetRxScheduler` 的设备回退 timeout 聚合 waker；调用方持有 `PollRegistrations` 并在注册后复查 readiness；每次 Interface poll 后按 `poll_at` deadline 注册 timer，到期后调用 `notify(PollReason::Timer)` |
 | F-08 | malformed netlink request | header 或 attr 长度非法 | 返回 empty response 或 netlink error | 调用者请求失败 | 4 | checked reader 和 error response 处理 |
@@ -351,7 +351,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - IPv6 差错生成保持 RFC 4443 §2.4 限制：仅应答本地单播目的，不对组播/未指定源或组播目的应答，且不对 ICMPv6 差错与 Redirect 再回差错。
 - IPv6 Fragment 扩展头改动需明确降级策略（交 smoltcp 或丢弃），避免半处理状态。
 - IPv4 分片重组改动保持队列数量、内存和超时上限，并拒绝重叠 range。
-- UDP registry 改动保持 bind、connect、普通接收和 ICMP/ICMPv6 error lookup 使用同一 PCB 所有权来源。
+- UDP registry 改动保持 bind、connect、普通接收和 ICMP/ICMPv6 error lookup 使用同一 PCB 所有权来源；ICMPv6 差错 lookup 必须带上到达接口 scope，不能把 `sin6_scope_id` 写成 0。
 - 修改 poller 状态机或 `Service::poll_budgeted` 时验证四态转换、单执行者获取、一次 CAS 释放、分阶段 smoltcp 预算和 1 ms 软时间上限；`PollProgress::has_more` 只能包含立即工作，未来协议 deadline 必须等待 timer 到期后发布；TX waiter 只能由 `tx_capacity_changed` 触发全局容量唤醒。
 - 修改 UDP PCB 队列时验证零容量创建、扩容失败丢包、1024 数据报上限、FIFO 顺序和排空后 64 槽容量回收。
 - 修改 TCP Drop 或异步 TX 路径时验证已成功写入的 payload 在文件关闭后仍由协议对象持有，未读数据关闭发送 RST，deferred-close handle 在 `Closed` 后删除，状态期限只作用于 orphan `FIN_WAIT_2`。

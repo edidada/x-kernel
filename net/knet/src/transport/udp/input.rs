@@ -128,18 +128,17 @@ fn parse_udp_datagram_v6(
         return None;
     }
 
-    let scope_id = ifindex.max(0) as u32;
     let remote = SocketAddr::V6(SocketAddrV6::new(
         ipv6_to_core(header.src_addr()),
         udp_header.source_port(),
         0,
-        scope_id_for_addr(header.src_addr(), scope_id),
+        header.src_addr().iface_scope_id(ifindex),
     ));
     let local = SocketAddr::V6(SocketAddrV6::new(
         ipv6_to_core(header.dst_addr()),
         udp_header.destination_port(),
         0,
-        scope_id_for_addr(header.dst_addr(), scope_id),
+        header.dst_addr().iface_scope_id(ifindex),
     ));
 
     Some((
@@ -148,12 +147,4 @@ fn parse_udp_datagram_v6(
         header.header_len() + UDP_HEADER_LEN,
         udp_len - UDP_HEADER_LEN,
     ))
-}
-
-fn scope_id_for_addr(addr: crate::ip::Ipv6Address, scope_id: u32) -> u32 {
-    if addr.is_link_local() || addr.is_multicast() {
-        scope_id
-    } else {
-        0
-    }
 }

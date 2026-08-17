@@ -174,8 +174,9 @@ pub(crate) fn apply_actions(router: &mut Router, actions: &mut Vec<Ipv6Action>) 
                 if let Some(mac) = mac
                     && let Some(na) =
                         ndp::build_neighbor_advertisement(target, dst, target, mac, solicited)
+                    && let Err(err) = router.queue_control_ip_packet(na)
                 {
-                    let _ = router.queue_control_ip_packet(na);
+                    warn!("Failed to queue IPv6 neighbor advertisement: {}", err);
                 }
             }
             Ipv6Action::EchoReply {

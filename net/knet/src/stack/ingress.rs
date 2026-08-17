@@ -118,7 +118,6 @@ impl IngressProcessor {
                     return;
                 };
                 if let Some(ip_packet) = packet.network_packet() {
-                    udp_err::inspect_icmpv6_error(ip_packet);
                     snoop_tcp_packet(ip_packet, sockets);
                 }
                 accepted_packets.push(packet);

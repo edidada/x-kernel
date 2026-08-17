@@ -197,7 +197,11 @@ pub(crate) fn inspect_icmpv4_error(packet: &[u8]) {
 ///
 /// Mirrors the IPv4 path: parse outer IPv6 + ICMPv6, validate the checksum,
 /// then recover the quoted IPv6 + UDP headers that identify the socket.
-pub(crate) fn inspect_icmpv6_error(packet: &[u8]) {
+///
+/// `ifindex` is the interface the error arrived on. Link-local and multicast
+/// addresses in the quoted 4-tuple take that index as `sin6_scope_id`, matching
+/// Linux `__udp6_lib_err` passing `inet6_iif(skb)` into `__udp6_lib_lookup`.
+pub(crate) fn inspect_icmpv6_error(packet: &[u8], ifindex: i32) {
     let ip_packet = match Ipv6Header::parse_input(packet) {
         Ok(header) if header.next_header() == ipv6::PROTOCOL_ICMPV6 => header,
         _ => return,
@@ -241,15 +245,20 @@ pub(crate) fn inspect_icmpv6_error(packet: &[u8]) {
         original_ip.src_addr().into(),
         udp_header.source_port(),
         0,
-        0,
+        original_ip.src_addr().iface_scope_id(ifindex),
     );
     let remote = SocketAddrV6::new(
         original_ip.dst_addr().into(),
         udp_header.destination_port(),
         0,
-        0,
+        original_ip.dst_addr().iface_scope_id(ifindex),
     );
-    let offender = SocketAddr::V6(SocketAddrV6::new(ip_packet.src_addr().into(), 0, 0, 0));
+    let offender = SocketAddr::V6(SocketAddrV6::new(
+        ip_packet.src_addr().into(),
+        0,
+        0,
+        ip_packet.src_addr().iface_scope_id(ifindex),
+    ));
     let payload_start = udp_header.slice().len().min(original_udp.len());
     let error = QueuedUdpError {
         payload: original_udp[payload_start..].to_vec(),
@@ -273,15 +282,17 @@ mod tests {
 
     use alloc::vec;
 
-    use ::core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+    use ::core::net::{Ipv4Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
     use unittest::def_test;
 
     use super::*;
     use crate::{
         SocketErrorOrigin,
-        buf::PacketType,
-        ip::{IpAddress, IpEndpoint},
+        buf::{PacketBuf, PacketOwner, PacketType},
+        icmpv6,
+        ip::{IpAddress, IpEndpoint, Ipv6Address, Ipv6Cidr},
         ipv4::{Icmpv4Error, Ipv4Header},
+        ipv6::{self, Ipv6Header, process_ipv6_input},
         udp::{UdpSocketState, register_udp_state_for_test},
     };
 
@@ -487,5 +498,95 @@ mod tests {
             LinuxError::ECONNREFUSED.into_raw()
         );
         assert_eq!(state.consume_socket_error(), 0);
+    }
+
+    fn link_local(last: u8) -> Ipv6Address {
+        Ipv6Address::from_octets([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, last])
+    }
+
+    fn ipv6_endpoint(addr: Ipv6Address, port: u16, scope_id: u32) -> IpEndpoint {
+        SocketAddrV6::new(addr.into(), port, 0, scope_id).into()
+    }
+
+    fn icmpv6_port_unreachable(
+        local: Ipv6Address,
+        remote: Ipv6Address,
+        local_port: u16,
+        remote_port: u16,
+    ) -> alloc::vec::Vec<u8> {
+        let mut udp = [0u8; 8];
+        udp[0..2].copy_from_slice(&local_port.to_be_bytes());
+        udp[2..4].copy_from_slice(&remote_port.to_be_bytes());
+        udp[4..6].copy_from_slice(&8u16.to_be_bytes());
+        let original =
+            ipv6::build_ipv6_packet(local, remote, ipv6::PROTOCOL_UDP, 64, &udp).unwrap();
+        let original_header = Ipv6Header::parse_input(&original).unwrap();
+        icmpv6::build_icmpv6_error_packet(
+            icmpv6::Icmpv6Error::PortUnreachable,
+            PacketType::Host,
+            original_header,
+            &original,
+        )
+        .unwrap()
+    }
+
+    #[def_test(serial)]
+    fn test_icmpv6_error_input_delivers_to_scoped_link_local_socket() {
+        clear_registry();
+
+        let local_addr = link_local(1);
+        let remote_addr = link_local(2);
+        let ifindex = 2;
+        let connected = UdpSocketState::new();
+        connected.set_local_endpoint(Some(ipv6_endpoint(local_addr, 8080, ifindex as u32)));
+        connected.set_peer_endpoint(Some((
+            ipv6_endpoint(remote_addr, 5353, ifindex as u32),
+            IpAddress::Ipv6(local_addr),
+        )));
+        register_udp_state_for_test(connected.clone());
+
+        let error = icmpv6_port_unreachable(local_addr, remote_addr, 8080, 5353);
+        let packet = PacketBuf::from_ip_packet_vec(ifindex, error, PacketOwner::DeviceRx);
+        let local_addrs = [Ipv6Cidr::new(local_addr, 128)];
+        let mut control_packets = alloc::vec::Vec::new();
+        let mut actions = alloc::vec::Vec::new();
+
+        assert!(
+            process_ipv6_input(packet, &local_addrs, &mut control_packets, &mut actions).is_none()
+        );
+        assert_eq!(
+            connected.consume_socket_error(),
+            LinuxError::ECONNREFUSED.into_raw()
+        );
+
+        clear_registry();
+    }
+
+    #[def_test(serial)]
+    fn test_icmpv6_error_lookup_requires_arrival_scope() {
+        clear_registry();
+
+        let local_addr = link_local(1);
+        let remote_addr = link_local(2);
+        let bound_scope = 2;
+        let connected = UdpSocketState::new();
+        connected.set_local_endpoint(Some(ipv6_endpoint(local_addr, 8080, bound_scope)));
+        connected.set_peer_endpoint(Some((
+            ipv6_endpoint(remote_addr, 5353, bound_scope),
+            IpAddress::Ipv6(local_addr),
+        )));
+        register_udp_state_for_test(connected.clone());
+
+        let error = icmpv6_port_unreachable(local_addr, remote_addr, 8080, 5353);
+        inspect_icmpv6_error(&error, 3);
+        assert_eq!(connected.consume_socket_error(), 0);
+
+        inspect_icmpv6_error(&error, bound_scope as i32);
+        assert_eq!(
+            connected.consume_socket_error(),
+            LinuxError::ECONNREFUSED.into_raw()
+        );
+
+        clear_registry();
     }
 }

@@ -14,7 +14,7 @@ use super::{
 use crate::{
     buf::PacketBuf,
     ip::{Ipv6Address, Ipv6Cidr},
-    udp,
+    udp, udp_err,
 };
 
 pub(crate) fn is_local_ipv6_destination(dst_addr: Ipv6Address, local_addrs: &[Ipv6Cidr]) -> bool {
@@ -75,7 +75,14 @@ pub(crate) fn process_ipv6_input(
                 header,
                 packet: ip_packet.to_vec(),
             });
+            return None;
         }
+
+        // NDP and echo are consumed above. Remaining ICMPv6 messages are
+        // errors; deliver them to the matching UDP socket before dropping
+        // the packet so they never reach smoltcp. Linux does the same split
+        // in `icmpv6_rcv` (`ndisc_rcv` vs `icmpv6_notify`).
+        udp_err::inspect_icmpv6_error(ip_packet, ifindex);
         return None;
     }
 
