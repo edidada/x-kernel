@@ -82,7 +82,7 @@ pub fn init_network() {
         .expect("loopback IPv4 address must fit the interface");
 
     let mut eth0_rx_poll = None;
-    let eth0_ip = if let Some(handle) = net_devs.pop() {
+    let _eth0_ip = if let Some(handle) = net_devs.pop() {
         let device_id = handle.id();
         info!("  use NIC 0: {:?}", handle.name());
 
@@ -124,12 +124,9 @@ pub fn init_network() {
         info!("Device: {}", dev.name());
     }
 
-    let netlink_state =
-        netlink::build_initial_state(eth0_ip.map(to_smoltcp_ipv4_cidr), GATEWAY.parse().ok());
     let service = Service::new(router);
-    service.sync_netlink(&netlink_state);
     SERVICE.init_once(service);
-    netlink::init_route_state(netlink_state.clone());
+    netlink::init_route_state(Default::default());
 
     SOCKET_SET.init_once(SocketSetWrapper::new());
     LISTEN_TABLE.init_once(ListenTable::new());
@@ -140,13 +137,6 @@ pub fn init_network() {
     if let Some(rx_poll) = eth0_rx_poll {
         EthernetDevice::spawn_rx_task(rx_poll);
     }
-}
-
-fn to_smoltcp_ipv4_cidr(cidr: Ipv4Cidr) -> smoltcp::wire::IpCidr {
-    smoltcp::wire::IpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
-        cidr.address().into(),
-        cidr.prefix_len(),
-    ))
 }
 
 fn subscribe_network_unregister(id: kdevice::DeviceId) {

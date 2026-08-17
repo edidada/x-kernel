@@ -29,7 +29,7 @@ mod socket;
 mod tests;
 mod wire;
 
-pub(crate) use rtnetlink::{build_initial_state, init_route_state, remove_device_state};
+pub(crate) use rtnetlink::{init_route_state, remove_device_state};
 pub use socket::{NetlinkSocket, publish_kobject_uevent};
 pub(crate) use wire::route::{
     PROTOCOL_BOOT as RTPROT_BOOT, PROTOCOL_KERNEL as RTPROT_KERNEL, SCOPE_HOST as RT_SCOPE_HOST,
@@ -43,7 +43,6 @@ pub(super) const NLM_F_REQUEST: u16 = 0x0001;
 pub(super) const NLM_F_ACK: u16 = 0x0004;
 pub(super) const NLM_F_REPLACE: u16 = 0x0100;
 pub(super) const NLM_F_EXCL: u16 = 0x0200;
-#[cfg(unittest)]
 pub(super) const NLM_F_CREATE: u16 = 0x0400;
 pub(super) const NLM_F_MULTI: u16 = 0x0002;
 pub(super) const NLMSG_ERROR: u16 = 0x0002;
@@ -70,20 +69,6 @@ pub(super) const ARPHRD_LOOPBACK: u16 = 772;
 pub(super) const ARPHRD_ETHER: u16 = 1;
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct RouteState {
-    pub(crate) family: u8,
-    pub(crate) dst_len: u8,
-    pub(crate) table: u8,
-    pub(crate) protocol: u8,
-    pub(crate) scope: u8,
-    pub(crate) route_type: u8,
-    pub(crate) oif: u32,
-    pub(crate) dst: Option<IpAddress>,
-    pub(crate) gateway: Option<IpAddress>,
-    pub(crate) prefsrc: Option<IpAddress>,
-}
-
-#[derive(Clone, Copy, Debug)]
 #[expect(dead_code)]
 pub(crate) struct NeighState {
     pub(crate) family: u8,
@@ -96,7 +81,6 @@ pub(crate) struct NeighState {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RtnetlinkState {
-    pub(crate) routes: Vec<RouteState>,
     pub(crate) neighs: Vec<NeighState>,
 }
 

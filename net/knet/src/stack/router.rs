@@ -10,7 +10,7 @@ use ktime_types::MonotonicInstant;
 use smoltcp::{
     phy::{DeviceCapabilities, Medium},
     time::Instant,
-    wire::{IpAddress as SmoltcpIpAddress, Ipv6Packet},
+    wire::Ipv6Packet,
 };
 
 use super::ipv4::{self, Ipv4Error, Ipv4Header};
@@ -59,12 +59,9 @@ pub struct Rule {
     pub via: Option<IpAddress>,
     pub dev: usize,
     pub src: IpAddress,
-    #[expect(dead_code)]
     pub table: u8,
-    #[cfg_attr(not(unittest), expect(dead_code))]
     pub protocol: u8,
     pub scope: u8,
-    #[expect(dead_code)]
     pub route_type: u8,
     #[expect(dead_code)]
     pub prefsrc: Option<IpAddress>,
@@ -146,6 +143,10 @@ impl Rule {
             RuleSource::Fixed(source) => Some(source),
         }
     }
+
+    pub(crate) fn is_configured(self) -> bool {
+        matches!(self.origin, RuleOrigin::Configured)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -173,7 +174,6 @@ pub(crate) struct Ipv4AddrSnapshot {
 #[derive(Debug)]
 pub(crate) struct DeviceRemoval {
     pub(crate) ifindex: u32,
-    pub(crate) orphaned_ipv4_sources: Vec<Ipv4Address>,
 }
 
 // TODO(mivik): optimize
@@ -218,8 +218,14 @@ impl RouteTable {
             .find(|rule| rule.filter.contains_addr(dst))
     }
 
-    pub fn clear(&mut self) {
-        self.rules.clear();
+    pub fn rules(&self) -> &[Rule] {
+        &self.rules
+    }
+
+    pub fn remove_exact_rule(&mut self, route: Rule) {
+        self.rules.retain(|rule| {
+            !matches!(rule.origin, RuleOrigin::Configured) || !same_route_rule(*rule, route)
+        });
     }
 
     fn remove_ipv4_address_routes(&mut self) {
@@ -397,10 +403,7 @@ impl Router {
         self.sync_device_ipv4_addrs();
         self.adjust_rx_device_cursor_after_remove(pos);
         self.recompute_effective_mtu();
-        Some(DeviceRemoval {
-            ifindex,
-            orphaned_ipv4_sources,
-        })
+        Some(DeviceRemoval { ifindex })
     }
 
     pub fn local_ipv4_addrs(&self) -> Vec<Ipv4Cidr> {
@@ -504,6 +507,78 @@ impl Router {
             .any(|entry| entry.addr.address() == address)
     }
 
+    pub fn route_snapshot(&self) -> Vec<Rule> {
+        self.table.rules().to_vec()
+    }
+
+    pub fn has_ipv4_subnet_for_device(&self, dev: usize, address: IpAddress) -> bool {
+        self.ipv4_addrs
+            .iter()
+            .any(|entry| entry.dev == dev && entry.addr.contains_addr(&address))
+    }
+
+    pub fn is_ipv4_directed_broadcast_for_device(&self, dev: usize, address: Ipv4Address) -> bool {
+        self.ipv4_addrs
+            .iter()
+            .filter(|entry| entry.dev == dev)
+            .any(|entry| entry.addr.is_directed_broadcast(address))
+    }
+
+    pub fn add_route_rule(&mut self, rule: Rule) -> Result<(), LinuxError> {
+        self.validate_configured_route(rule)?;
+        self.table.add_rule(rule);
+        Ok(())
+    }
+
+    pub fn replace_route_rule(
+        &mut self,
+        existing: Rule,
+        replacement: Rule,
+    ) -> Result<(), LinuxError> {
+        self.validate_configured_route(replacement)?;
+        self.table.remove_exact_rule(existing);
+        self.table.add_rule(replacement);
+        Ok(())
+    }
+
+    pub fn remove_exact_route_rule(&mut self, route: Rule) {
+        self.table.remove_exact_rule(route);
+    }
+
+    fn validate_configured_route(&self, rule: Rule) -> Result<(), LinuxError> {
+        if !rule.is_configured() {
+            return Err(LinuxError::EINVAL);
+        }
+        if rule.table != ROUTE_TABLE_MAIN || rule.route_type != ROUTE_TYPE_UNICAST {
+            return Err(LinuxError::EOPNOTSUPP);
+        }
+        if !matches!(rule.filter, IpCidr::Ipv4(_)) {
+            return Err(LinuxError::EAFNOSUPPORT);
+        }
+        if rule.dev >= self.devices.len() {
+            return Err(LinuxError::ENODEV);
+        }
+        if let Some(prefsrc) = rule.preferred_source()
+            && !matches!(prefsrc, IpAddress::Ipv4(address) if self.has_ipv4_address(address))
+        {
+            return Err(LinuxError::EINVAL);
+        }
+        if let Some(gateway) = rule.via {
+            let IpAddress::Ipv4(gateway) = gateway else {
+                return Err(LinuxError::EAFNOSUPPORT);
+            };
+            if !gateway.is_unicast()
+                || self.is_ipv4_directed_broadcast_for_device(rule.dev, gateway)
+            {
+                return Err(LinuxError::EINVAL);
+            }
+            if !self.has_ipv4_subnet_for_device(rule.dev, gateway.into()) {
+                return Err(LinuxError::ENETUNREACH);
+            }
+        }
+        Ok(())
+    }
+
     /// Applies a validated link update.
     ///
     /// Returns `Ok(true)` when the effective device MTU changed and the
@@ -569,60 +644,8 @@ impl Router {
             device.sync_neighbors(&neighbors);
         }
 
-        self.table.clear();
-        for route in state.routes.iter().filter(|route| {
-            route.family == 2
-                && route.table == ROUTE_TABLE_MAIN
-                && route.route_type == ROUTE_TYPE_UNICAST
-        }) {
-            let dev = route.oif.saturating_sub(1) as usize;
-            if dev >= self.devices.len() {
-                continue;
-            }
-
-            let filter = match route.dst {
-                Some(SmoltcpIpAddress::Ipv4(addr)) => {
-                    IpCidr::Ipv4(Ipv4Cidr::new(addr.into(), route.dst_len))
-                }
-                None => IpCidr::Ipv4(Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, route.dst_len)),
-                Some(SmoltcpIpAddress::Ipv6(_)) => continue,
-            };
-            let src = route
-                .prefsrc
-                .or_else(|| {
-                    self.first_ipv4_addr_for_device(route.oif)
-                        .map(|addr| SmoltcpIpAddress::Ipv4(addr.address().into()))
-                })
-                .map(super::from_smoltcp_ip_address)
-                .unwrap_or(filter.address());
-            let rule = Rule::with_route_attrs(
-                filter,
-                route.gateway.map(super::from_smoltcp_ip_address),
-                dev,
-                src,
-                RouteAttrs {
-                    table: route.table,
-                    protocol: route.protocol,
-                    scope: route.scope,
-                    route_type: route.route_type,
-                    prefsrc: route.prefsrc.map(super::from_smoltcp_ip_address),
-                },
-            );
-            self.table.add_rule(rule);
-        }
         self.rebuild_ipv4_address_routes();
         self.sync_device_ipv4_addrs();
-    }
-
-    fn first_ipv4_addr_for_device(&self, ifindex: u32) -> Option<Ipv4Cidr> {
-        ifindex
-            .checked_sub(1)
-            .and_then(|dev| {
-                self.ipv4_addrs
-                    .iter()
-                    .find(|entry| entry.dev == dev as usize)
-            })
-            .map(|entry| entry.addr)
     }
 
     fn select_ipv4_source(
@@ -976,6 +999,17 @@ impl Router {
 fn next_device_index(dev_index: usize, device_count: usize) -> usize {
     debug_assert!(device_count > 0);
     (dev_index + 1) % device_count
+}
+
+fn same_route_rule(lhs: Rule, rhs: Rule) -> bool {
+    lhs.filter == rhs.filter
+        && lhs.via == rhs.via
+        && lhs.dev == rhs.dev
+        && lhs.table == rhs.table
+        && lhs.protocol == rhs.protocol
+        && lhs.scope == rhs.scope
+        && lhs.route_type == rhs.route_type
+        && lhs.preferred_source() == rhs.preferred_source()
 }
 
 fn tx_packet_buf(packet: Vec<u8>) -> PacketBuf {

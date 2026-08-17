@@ -32,7 +32,7 @@ use crate::{
         LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST, LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind,
         LinkSendSnapshot, LinkSnapshot, NetDevice,
     },
-    router::{Ipv4AddrEntry, Router},
+    router::{Ipv4AddrEntry, Router, Rule},
     service::Service,
     socket::SocketOps,
 };
@@ -145,17 +145,10 @@ impl NetDevice for TestDevice {
 }
 
 fn init_test_state() {
-    let state = build_initial_state(
-        Some(IpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
-            Ipv4Address::new(192, 168, 1, 2),
-            24,
-        ))),
-        Some(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 1))),
-    );
     if ROUTE_STATE.is_inited() {
-        *ROUTE_STATE.write() = state.clone();
+        *ROUTE_STATE.write() = Default::default();
     } else {
-        init_route_state(state.clone());
+        init_route_state(Default::default());
     }
 
     let mut router = Router::new();
@@ -193,6 +186,14 @@ fn init_test_state() {
             scope: wire_route::SCOPE_HOST,
         })
         .unwrap();
+    router.add_rule(Rule::new(
+        crate::ip::Ipv4Cidr::new(crate::ip::Ipv4Address::UNSPECIFIED, 0).into(),
+        Some(crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(
+            192, 168, 1, 1,
+        ))),
+        1,
+        crate::ip::Ipv4Address::new(192, 168, 1, 2).into(),
+    ));
     router
         .add_ipv4_addr(Ipv4AddrEntry {
             dev: 1,
@@ -205,7 +206,6 @@ fn init_test_state() {
     } else {
         SERVICE.init_once(Service::new(router));
     }
-    SERVICE.sync_netlink(&state);
 }
 
 fn nl_header(msg_type: u16, flags: u16, seq: u32) -> NlMsgHeader {
@@ -279,21 +279,15 @@ fn test_malformed_unsupported_protocol_request_does_not_queue_empty_response() {
 }
 
 #[def_test(serial)]
-fn test_build_initial_state_contains_configured_routes() {
-    let state = build_initial_state(
-        Some(IpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
-            Ipv4Address::new(10, 0, 2, 15),
-            24,
-        ))),
-        Some(IpAddress::Ipv4(Ipv4Address::new(10, 0, 2, 2))),
-    );
-
-    assert!(state.routes.iter().all(|route| route.dst_len == 0));
-    assert!(state.routes.iter().any(|route| {
-        route.dst.is_none()
-            && route.dst_len == 0
-            && route.scope == wire_route::SCOPE_UNIVERSE
-            && route.gateway == Some(IpAddress::Ipv4(Ipv4Address::new(10, 0, 2, 2)))
+fn test_router_owns_configured_routes() {
+    init_test_state();
+    assert!(SERVICE.route_snapshot().iter().any(|route| {
+        route.is_configured()
+            && route.filter.prefix_len() == 0
+            && route.via
+                == Some(crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(
+                    192, 168, 1, 1,
+                )))
     }));
 }
 
@@ -368,7 +362,12 @@ fn test_device_mtu_is_route_mtu_source() {
     .unwrap();
 
     assert_eq!(SERVICE.ipv4_route_mtu(&destination), Some(1400));
-    assert_eq!(route_state().routes.len(), 1);
+    assert!(
+        SERVICE
+            .route_snapshot()
+            .iter()
+            .any(|route| route.is_configured())
+    );
 }
 
 #[def_test(serial)]
@@ -505,10 +504,8 @@ fn test_device_removal_refreshes_views_and_control_state() {
             8,
         ))]
     );
+    assert!(SERVICE.route_snapshot().iter().all(|route| route.dev != 1));
     let state = route_state();
-    assert!(state.routes.iter().all(|route| {
-        route.oif != 2 && route.prefsrc != Some(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 2)))
-    }));
     assert!(state.neighs.iter().all(|neigh| neigh.ifindex != 2));
 }
 
@@ -690,12 +687,9 @@ fn test_deleting_last_address_owner_removes_configured_prefsrc_route() {
     })
     .unwrap();
 
-    assert!(
-        route_state()
-            .routes
-            .iter()
-            .all(|route| route.prefsrc != Some(IpAddress::Ipv4(address)))
-    );
+    assert!(SERVICE.route_snapshot().iter().all(|route| {
+        route.preferred_source() != Some(crate::ip::IpAddress::Ipv4(address.into()))
+    }));
 
     add_neigh_state(
         NeighRequest {
@@ -724,30 +718,32 @@ fn test_add_and_delete_route() {
     let req = RouteRequest {
         family: wire_route::FAMILY_IPV4,
         dst_len: 24,
+        src_len: 0,
         table: RT_TABLE_MAIN,
         protocol: wire_route::PROTOCOL_BOOT,
         scope: wire_route::SCOPE_UNIVERSE,
         route_type: RTN_UNICAST,
         oif: 2,
         dst: Some(IpAddress::Ipv4(Ipv4Address::new(172, 16, 0, 0))),
+        src: None,
         gateway: Some(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 1))),
         prefsrc: Some(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 2))),
     };
 
     add_route_state(req, NLM_F_CREATE | NLM_F_EXCL).unwrap();
     assert!(
-        route_state()
-            .routes
+        SERVICE
+            .route_snapshot()
             .iter()
-            .any(|route| route.dst == req.dst && route.gateway == req.gateway)
+            .any(|route| route.filter.prefix_len() == req.dst_len && route.via.is_some())
     );
 
     del_route_state(req).unwrap();
     assert!(
-        !route_state()
-            .routes
+        !SERVICE
+            .route_snapshot()
             .iter()
-            .any(|route| route.dst == req.dst && route.gateway == req.gateway)
+            .any(|route| route.filter.prefix_len() == req.dst_len && route.via.is_some())
     );
 }
 

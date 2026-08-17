@@ -33,7 +33,7 @@ use crate::{
     ip::{IpAddress, IpListenEndpoint},
     netlink::RtnetlinkState,
     poller::{PollBudget, PollProgress},
-    router::{DeviceRemoval, Router},
+    router::{DeviceRemoval, Router, Rule},
     stack::ingress::IngressProcessor,
 };
 
@@ -520,6 +520,26 @@ impl Service {
         let local_ipv4_addrs = router.local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
         Ok(is_last_owner)
+    }
+
+    pub(crate) fn route_snapshot(&self) -> Vec<Rule> {
+        self.router.lock().route_snapshot()
+    }
+
+    pub(crate) fn add_route_rule(&self, rule: Rule) -> Result<(), LinuxError> {
+        self.router.lock().add_route_rule(rule)
+    }
+
+    pub(crate) fn replace_route_rule(
+        &self,
+        existing: Rule,
+        replacement: Rule,
+    ) -> Result<(), LinuxError> {
+        self.router.lock().replace_route_rule(existing, replacement)
+    }
+
+    pub(crate) fn remove_route_rule(&self, route: Rule) {
+        self.router.lock().remove_exact_route_rule(route);
     }
 
     pub fn update_device_link(
