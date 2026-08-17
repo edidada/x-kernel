@@ -24,11 +24,25 @@ const NDP_TARGET_LEN: usize = 16;
 // 16-byte target plus the 8-byte LLA option (RFC 4861 §4.3/§4.4).
 const NDP_BASE_PAYLOAD_LEN: usize = NDP_TARGET_LEN + NDP_LLA_OPTION_LEN;
 
+/// IPv6 destination used for a Neighbor Solicitation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NsDestination {
+    /// Address resolution: solicited-node multicast (RFC 4861 §7.2.2).
+    SolicitedNode,
+    /// NUD probe: unicast to the cached neighbor (RFC 4861 §7.3.2).
+    Unicast,
+}
+
 /// Result of processing an inbound NDP message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NdpAction {
     /// Learn a neighbor mapping from an advertisement or solicitation.
-    LearnNeighbor { addr: Ipv6Address, mac: MacAddress },
+    LearnNeighbor {
+        addr: Ipv6Address,
+        mac: Option<MacAddress>,
+        is_solicited: bool,
+        is_override: bool,
+    },
     /// A solicited-node NS targeted one of our addresses; reply with NA.
     ReplyAdvertisement {
         target: Ipv6Address,
@@ -50,8 +64,12 @@ pub(crate) fn build_neighbor_solicitation(
     src_addr: Ipv6Address,
     target: Ipv6Address,
     src_mac: MacAddress,
+    dest: NsDestination,
 ) -> Option<Vec<u8>> {
-    let dst = target.solicited_node_multicast();
+    let dst = match dest {
+        NsDestination::SolicitedNode => target.solicited_node_multicast(),
+        NsDestination::Unicast => target,
+    };
     let mut icmp_payload = vec![0u8; NDP_BASE_PAYLOAD_LEN];
     icmp_payload[..NDP_TARGET_LEN].copy_from_slice(&target.octets());
     write_lla_option(
@@ -122,7 +140,9 @@ pub(crate) fn handle_ndp_input(
         Icmpv6Type::NeighborSolicitation => {
             parse_neighbor_solicitation(header, slice.payload(), local_addrs)
         }
-        Icmpv6Type::NeighborAdvertisement(_) => parse_neighbor_advertisement(slice.payload()),
+        Icmpv6Type::NeighborAdvertisement(header) => {
+            parse_neighbor_advertisement(header, slice.payload())
+        }
         _ => None,
     }
 }
@@ -160,15 +180,23 @@ fn parse_neighbor_solicitation(
     Some(NdpInput { learn, action })
 }
 
-fn parse_neighbor_advertisement(payload: &[u8]) -> Option<NdpInput> {
+fn parse_neighbor_advertisement(
+    header: NeighborAdvertisementHeader,
+    payload: &[u8],
+) -> Option<NdpInput> {
     if payload.len() < NDP_TARGET_LEN {
         return None;
     }
     let target = Ipv6Address::from_octets(payload[..NDP_TARGET_LEN].try_into().ok()?);
-    let mac = find_lla_option(&payload[NDP_TARGET_LEN..], NDP_OPTION_TARGET_LLA)?;
+    let mac = find_lla_option(&payload[NDP_TARGET_LEN..], NDP_OPTION_TARGET_LLA);
     Some(NdpInput {
         learn: None,
-        action: Some(NdpAction::LearnNeighbor { addr: target, mac }),
+        action: Some(NdpAction::LearnNeighbor {
+            addr: target,
+            mac,
+            is_solicited: header.solicited,
+            is_override: header.r#override,
+        }),
     })
 }
 
@@ -237,7 +265,8 @@ mod tests {
         let target = Ipv6Address::link_local_from_mac([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
         let mac = MacAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
 
-        let packet = build_neighbor_solicitation(src, target, mac).unwrap();
+        let packet =
+            build_neighbor_solicitation(src, target, mac, NsDestination::SolicitedNode).unwrap();
         let header = Ipv6Header::parse_input(&packet).unwrap();
         assert_eq!(header.dst_addr(), target.solicited_node_multicast());
         assert_eq!(header.hop_limit(), NDP_HOP_LIMIT);
@@ -265,7 +294,24 @@ mod tests {
         let input = handle_ndp_input(header, &packet, &[]).unwrap();
         assert_eq!(
             input.action,
-            Some(NdpAction::LearnNeighbor { addr: src, mac })
+            Some(NdpAction::LearnNeighbor {
+                addr: src,
+                mac: Some(mac),
+                is_solicited: true,
+                is_override: true,
+            })
         );
+    }
+
+    #[def_test]
+    fn test_unicast_neighbor_solicitation_targets_neighbor() {
+        let src = Ipv6Address::link_local_from_mac([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let target = Ipv6Address::link_local_from_mac([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
+        let mac = MacAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+
+        let packet = build_neighbor_solicitation(src, target, mac, NsDestination::Unicast).unwrap();
+        let header = Ipv6Header::parse_input(&packet).unwrap();
+        assert_eq!(header.dst_addr(), target);
+        assert_eq!(header.hop_limit(), NDP_HOP_LIMIT);
     }
 }

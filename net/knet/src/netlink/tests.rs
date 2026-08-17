@@ -18,7 +18,7 @@ use super::{
     rtnetlink::*,
     socket::publish_kobject_uevent,
     wire::{
-        IfAddrMsg, IfInfoMsg, NlMsgHeader, addr as wire_addr, build_nlmsg, link as wire_link,
+        IfAddrMsg, IfInfoMsg, NdMsg, NlMsgHeader, addr as wire_addr, build_nlmsg, link as wire_link,
         neigh as wire_neigh, parse_attrs, push_attr, push_i32_ne, push_u8, push_u16_ne,
         push_u32_ne, read_i32_ne, read_u16_ne, route as wire_route,
     },
@@ -256,7 +256,13 @@ fn test_rtnetlink_operation_classifies_supported_mutations() {
     ] {
         assert!(rtnetlink_request_requires_privilege(msg_type));
     }
-    for msg_type in [RTM_GETLINK, RTM_GETADDR, RTM_GETROUTE, u16::MAX] {
+    for msg_type in [
+        RTM_GETLINK,
+        RTM_GETADDR,
+        RTM_GETROUTE,
+        RTM_GETNEIGH,
+        u16::MAX,
+    ] {
         assert!(!rtnetlink_request_requires_privilege(msg_type));
     }
 }
@@ -782,6 +788,42 @@ fn test_add_and_replace_neighbour() {
             .iter()
             .any(|neigh| neigh.dst == replaced.dst && neigh.lladdr == replaced.lladdr)
     );
+}
+
+#[def_test(serial)]
+fn test_dump_neighbours_includes_control_plane_entry() {
+    init_test_state();
+    let req = NeighRequest {
+        family: wire_route::FAMILY_IPV6,
+        ifindex: 2,
+        state: wire_neigh::STATE_PERMANENT,
+        flags: 0,
+        dst: IpAddress::Ipv6(Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 2)),
+        lladdr: Some([0x02, 0, 0, 0, 0, 0x02]),
+    };
+    add_neigh_state(req, NLM_F_CREATE | NLM_F_REPLACE).unwrap();
+
+    let mut payload = Vec::new();
+    NdMsg {
+        family: wire_route::FAMILY_IPV6,
+        pad1: 0,
+        pad2: 0,
+        ifindex: 0,
+        state: 0,
+        flags: 0,
+        neigh_type: 0,
+    }
+    .write(&mut payload);
+    let packets = handle_rtnetlink_request(&build_nlmsg(RTM_GETNEIGH, 11, NLM_F_REQUEST, payload));
+    assert!(packets.len() >= 2);
+    assert_eq!(
+        read_u16_ne(&packets.last().unwrap().data, 4),
+        Some(NLMSG_DONE)
+    );
+    assert!(packets.iter().any(|packet| {
+        read_u16_ne(&packet.data, 4) == Some(RTM_NEWNEIGH)
+            && packet.data.len() > NLMSG_HDR_LEN + NdMsg::SIZE
+    }));
 }
 
 #[def_test(serial)]

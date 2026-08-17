@@ -270,6 +270,10 @@ impl UdpSocket {
                     source_addr,
                 )?;
                 SERVICE.send_ipv6_packet(packet.take().ok_or(KError::InvalidInput)?)?;
+                // `assist_once` only runs a batch that is already Scheduled.
+                // Publish Tx first so an Idle poller actually dispatches the
+                // queued packet and starts NUD, matching the IPv4 send path.
+                network_poller().notify(PollReason::Tx);
                 poll_interfaces();
                 Ok(payload_len)
             })

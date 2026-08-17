@@ -882,6 +882,27 @@ impl Router {
         dev.send_link_frame(ifindex, frame)
     }
 
+    pub fn maintain_neighbors(&mut self, timestamp: MonotonicInstant) {
+        for (dev_index, device) in self.devices.iter_mut().enumerate() {
+            device.maintain_neighbors(dev_index as i32 + 1, timestamp);
+        }
+    }
+
+    pub fn next_neighbor_deadline(&self) -> Option<MonotonicInstant> {
+        self.devices
+            .iter()
+            .filter_map(|device| device.next_neighbor_deadline())
+            .min()
+    }
+
+    pub fn neighbor_snapshots(&self) -> Vec<crate::device::NeighborSnapshot> {
+        self.devices
+            .iter()
+            .enumerate()
+            .flat_map(|(dev_index, device)| device.neighbor_snapshots(dev_index as i32 + 1))
+            .collect()
+    }
+
     pub fn dispatch_budgeted(
         &mut self,
         timestamp: MonotonicInstant,

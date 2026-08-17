@@ -3,33 +3,26 @@
 // See LICENSES for license details.
 
 //! Ethernet device adapter.
-use alloc::{
-    collections::VecDeque,
-    string::String,
-    sync::{Arc, Weak},
-    vec::Vec,
-};
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use alloc::{string::String, sync::Arc, vec::Vec};
 
-use hashbrown::HashMap;
 use kclass::{ClassDevice, prelude::*};
 use kerrno::{KError, KResult, LinuxError};
 use khal::time::monotonic_time;
 use kpoll::PollSet;
-use kspin::SpinNoIrq;
-use ktime_types::{MonotonicInstant, TimeSpan};
-#[cfg(not(unittest))]
-use lazyinit::LazyInit;
+use ktime_types::MonotonicInstant;
 
+use super::{
+    neighbor::{NeighborCache, NeighborLearn, NeighborSnapshot, ResolveResult, SolicitKind},
+    net_rx::{KnetRxScheduler, NetRxPollSource, register_net_rx_source, unregister_net_rx_source},
+};
 use crate::{
     buf::{PacketBuf, PacketOwner},
-    consts::ETHERNET_MAX_PENDING_PACKETS,
     device::{
         IF_OPER_DOWN, IF_OPER_UP, LINK_FLAG_BROADCAST, LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST,
         LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind, LinkSendSnapshot, LinkSnapshot,
         NetDevice as NetDeviceOps,
     },
-    ip::{IpAddress, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
+    ip::{IpAddress, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
     ndp, packet,
     wire::{
         ArpIpv4Packet, ArpOperation, ETHERNET_HEADER_LEN, EtherType, EthernetFrameRef, MacAddress,
@@ -37,238 +30,12 @@ use crate::{
     },
 };
 
-const NET_RX_SOFTIRQ_BATCH: usize = 8;
-
 fn is_ipv4_source_usable_for_egress(
     next_hop: IpAddress,
-    source_addr: crate::ip::Ipv4Address,
+    source_addr: Ipv4Address,
     assigned_ipv4_addrs: &[Ipv4Cidr],
 ) -> bool {
     next_hop.is_broadcast() || (!source_addr.is_unspecified() && !assigned_ipv4_addrs.is_empty())
-}
-
-static NEXT_NET_RX_SOURCE_ID: AtomicUsize = AtomicUsize::new(1);
-static NET_RX_SOURCES: SpinNoIrq<NetRxSources> = SpinNoIrq::new(NetRxSources::new());
-#[cfg(not(unittest))]
-static NET_RX_SOFTIRQ_INIT: LazyInit<()> = LazyInit::new();
-static NET_RX_SOFTIRQ_AVAILABLE: AtomicBool = AtomicBool::new(false);
-
-struct NetRxSources {
-    entries: Vec<Arc<NetRxPollSource>>,
-    scan_cursor: usize,
-}
-
-impl NetRxSources {
-    const fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-            scan_cursor: 0,
-        }
-    }
-
-    fn push(&mut self, source: Arc<NetRxPollSource>) {
-        self.entries.push(source);
-    }
-
-    fn remove(&mut self, id: usize) -> Option<Arc<NetRxPollSource>> {
-        let removed = self
-            .entries
-            .iter()
-            .position(|source| source.id == id)
-            .map(|index| self.entries.swap_remove(index));
-        self.normalize_cursor();
-        removed
-    }
-
-    fn collect_scheduled_fallback_batch(
-        &mut self,
-        wake_batch: &mut [Option<PollSet>; NET_RX_SOFTIRQ_BATCH],
-    ) -> (usize, bool) {
-        let source_count = self.entries.len();
-        if source_count == 0 {
-            self.scan_cursor = 0;
-            return (0, false);
-        }
-
-        self.scan_cursor %= source_count;
-        let start = self.scan_cursor;
-        let mut next_cursor = start;
-        let mut wake_count = 0;
-        let mut has_deferred_pending = false;
-
-        for offset in 0..source_count {
-            if wake_count == NET_RX_SOFTIRQ_BATCH {
-                has_deferred_pending = self.has_pending_from(start, offset);
-                break;
-            }
-
-            let index = (start + offset) % source_count;
-            let source = &self.entries[index];
-            if source.take_pending() {
-                wake_batch[wake_count] = Some(source.waiters_clone());
-                wake_count += 1;
-                next_cursor = (index + 1) % source_count;
-            }
-        }
-
-        self.scan_cursor = next_cursor;
-        (wake_count, has_deferred_pending)
-    }
-
-    fn has_pending_from(&self, start: usize, offset_start: usize) -> bool {
-        (offset_start..self.entries.len()).any(|offset| {
-            let index = (start + offset) % self.entries.len();
-            self.entries[index].has_pending()
-        })
-    }
-
-    fn normalize_cursor(&mut self) {
-        if self.entries.is_empty() {
-            self.scan_cursor = 0;
-        } else if self.scan_cursor >= self.entries.len() {
-            self.scan_cursor %= self.entries.len();
-        }
-    }
-}
-
-struct NetRxPollSource {
-    id: usize,
-    pending: AtomicBool,
-    waiters: PollSet,
-}
-
-impl NetRxPollSource {
-    fn new(id: usize) -> Self {
-        Self {
-            id,
-            pending: AtomicBool::new(false),
-            waiters: PollSet::new(),
-        }
-    }
-
-    fn waiters(&self) -> &PollSet {
-        &self.waiters
-    }
-
-    fn waiters_clone(&self) -> PollSet {
-        self.waiters.clone()
-    }
-
-    fn schedule(&self) {
-        self.pending.store(true, Ordering::Release);
-        kirq::softirq::raise_softirq(kirq::softirq::SoftirqVec::NetRx);
-    }
-
-    fn take_pending(&self) -> bool {
-        self.pending.swap(false, Ordering::AcqRel)
-    }
-
-    fn has_pending(&self) -> bool {
-        self.pending.load(Ordering::Acquire)
-    }
-}
-
-struct KnetRxScheduler {
-    source: Weak<NetRxPollSource>,
-}
-
-impl NetRxScheduler for KnetRxScheduler {
-    fn schedule_rx(&self) {
-        if let Some(source) = self.source.upgrade() {
-            source.schedule();
-        }
-    }
-}
-
-#[cfg(not(unittest))]
-fn ensure_net_rx_softirq_available() -> bool {
-    NET_RX_SOFTIRQ_INIT.call_once(|| {
-        if kirq::softirq::open_softirq(kirq::softirq::SoftirqVec::NetRx, run_net_rx_softirq) {
-            NET_RX_SOFTIRQ_AVAILABLE.store(true, Ordering::Release);
-        } else {
-            warn!("knet: NetRx softirq vector already registered");
-        }
-    });
-    NET_RX_SOFTIRQ_AVAILABLE.load(Ordering::Acquire)
-}
-
-#[cfg(unittest)]
-fn ensure_net_rx_softirq_available() -> bool {
-    let vec = kirq::softirq::SoftirqVec::NetRx;
-    if kirq::softirq::softirq_action_matches_for_tests(vec, run_net_rx_softirq) {
-        NET_RX_SOFTIRQ_AVAILABLE.store(true, Ordering::Release);
-        return true;
-    }
-    if kirq::softirq::is_softirq_open(vec) {
-        NET_RX_SOFTIRQ_AVAILABLE.store(false, Ordering::Release);
-        return false;
-    }
-
-    if kirq::softirq::open_softirq(vec, run_net_rx_softirq) {
-        NET_RX_SOFTIRQ_AVAILABLE.store(true, Ordering::Release);
-        true
-    } else {
-        let available = kirq::softirq::softirq_action_matches_for_tests(vec, run_net_rx_softirq);
-        NET_RX_SOFTIRQ_AVAILABLE.store(available, Ordering::Release);
-        available
-    }
-}
-
-fn register_net_rx_source() -> Option<Arc<NetRxPollSource>> {
-    if !ensure_net_rx_softirq_available() {
-        return None;
-    }
-    let id = NEXT_NET_RX_SOURCE_ID.fetch_add(1, Ordering::Relaxed);
-    let source = Arc::new(NetRxPollSource::new(id));
-    NET_RX_SOURCES.lock().push(source.clone());
-    Some(source)
-}
-
-fn unregister_net_rx_source(id: usize) {
-    let removed = {
-        let mut sources = NET_RX_SOURCES.lock();
-        sources.remove(id)
-    };
-    if let Some(source) = removed {
-        source.waiters.wake();
-    }
-}
-
-fn run_net_rx_softirq() {
-    let mut wake_batch: [Option<PollSet>; NET_RX_SOFTIRQ_BATCH] = core::array::from_fn(|_| None);
-    let (_, has_deferred_pending) = NET_RX_SOURCES
-        .lock()
-        .collect_scheduled_fallback_batch(&mut wake_batch);
-
-    for waiters in wake_batch.into_iter().flatten() {
-        waiters.wake();
-    }
-
-    if has_deferred_pending {
-        kirq::softirq::raise_softirq(kirq::softirq::SoftirqVec::NetRx);
-    }
-}
-
-/// Neighbor cache entry.
-enum NeighborEntry {
-    /// Resolved link-layer mapping with an expiry deadline.
-    Resolved(ArpNeighbor),
-    /// A request was sent and the mapping is still being resolved.
-    Pending(MonotonicInstant),
-}
-
-/// ARP table entry mapping an IP address to a MAC address.
-struct ArpNeighbor {
-    hardware_address: MacAddress,
-    /// When this entry expires (TTL = 300s).
-    expires_at: MonotonicInstant,
-}
-
-/// Queued IP packet awaiting ARP resolution.
-struct PendingTxPacket {
-    next_hop: IpAddress,
-    source_addr: crate::ip::Ipv4Address,
-    packet: PacketBuf,
 }
 
 /// Ethernet device backed by a driver-provided NIC.
@@ -278,18 +45,15 @@ pub struct EthernetDevice {
     mtu: usize,
     operstate: u8,
     inner: ClassDevice<NetDeviceImpl>,
-    neighbors: HashMap<IpAddress, NeighborEntry>,
+    neighbors: NeighborCache,
     assigned_ipv4_addrs: Vec<Ipv4Cidr>,
     local_ipv4_addrs: Vec<Ipv4Cidr>,
     ipv6_addrs: Vec<Ipv6Cidr>,
 
-    pending_tx: VecDeque<PendingTxPacket>,
     rx_source: Option<Arc<NetRxPollSource>>,
 }
 
 impl EthernetDevice {
-    const NEIGHBOR_TTL: TimeSpan = TimeSpan::from_secs(300);
-
     /// Create a new Ethernet device wrapper.
     pub fn new(name: String, inner: ClassDevice<NetDeviceImpl>) -> Self {
         let rx_source = if let Some(rx_source) = register_net_rx_source() {
@@ -300,12 +64,12 @@ impl EthernetDevice {
                 Ok(()) => Some(rx_source),
                 Err(DriverError::Unsupported) => {
                     warn!("Ethernet driver does not support interrupt-driven RX scheduling");
-                    unregister_net_rx_source(rx_source.id);
+                    unregister_net_rx_source(rx_source.id());
                     None
                 }
                 Err(err) => {
                     warn!("failed to attach Ethernet RX scheduler: {:?}", err);
-                    unregister_net_rx_source(rx_source.id);
+                    unregister_net_rx_source(rx_source.id());
                     None
                 }
             }
@@ -325,11 +89,10 @@ impl EthernetDevice {
             mtu: crate::consts::STANDARD_MTU,
             operstate: IF_OPER_UP,
             inner,
-            neighbors: HashMap::new(),
+            neighbors: NeighborCache::new(),
             assigned_ipv4_addrs: Vec::new(),
             local_ipv4_addrs: Vec::new(),
             ipv6_addrs: alloc::vec![link_local],
-            pending_tx: VecDeque::with_capacity(ETHERNET_MAX_PENDING_PACKETS),
             rx_source,
         }
     }
@@ -504,133 +267,80 @@ impl EthernetDevice {
         None
     }
 
-    fn send_arp_request(
-        &mut self,
-        ifindex: i32,
-        target_ip: IpAddress,
-        source_addr: crate::ip::Ipv4Address,
-        now: MonotonicInstant,
-    ) {
-        let IpAddress::Ipv4(target_ipv4) = target_ip else {
-            return;
-        };
-        if source_addr.is_unspecified() {
-            warn!("Cannot resolve ARP from an unspecified IPv4 source");
-            return;
+    fn send_solicit(&mut self, ifindex: i32, next_hop: IpAddress, kind: SolicitKind) {
+        match next_hop {
+            IpAddress::Ipv4(target_ipv4) => {
+                let Some(source_addr) = self.assigned_ipv4_addrs.first().map(|cidr| cidr.address())
+                else {
+                    warn!("Cannot resolve ARP without a local IPv4 source");
+                    return;
+                };
+                if source_addr.is_unspecified() {
+                    warn!("Cannot resolve ARP from an unspecified IPv4 source");
+                    return;
+                }
+                let dst_mac = match kind {
+                    SolicitKind::Multicast => MacAddress::BROADCAST,
+                    SolicitKind::Unicast(mac) => mac,
+                };
+                debug!("Requesting ARP for {}", target_ipv4);
+                let arp_packet = ArpIpv4Packet {
+                    operation: ArpOperation::Request,
+                    source_hardware_addr: self.mac_addr(),
+                    source_protocol_addr: source_addr,
+                    target_hardware_addr: dst_mac,
+                    target_protocol_addr: target_ipv4,
+                };
+                self.send_to(
+                    ifindex,
+                    dst_mac,
+                    ArpIpv4Packet::LEN,
+                    |buf| {
+                        let emit_result = arp_packet.emit(buf);
+                        debug_assert!(emit_result.is_some());
+                    },
+                    EtherType::Arp,
+                );
+            }
+            IpAddress::Ipv6(target) => {
+                let Some(src_addr) = self.ipv6_link_local() else {
+                    warn!("No IPv6 source address for NDP solicitation");
+                    return;
+                };
+                let (dst_mac, dest) = match kind {
+                    SolicitKind::Multicast => (
+                        MacAddress(target.solicited_node_multicast().multicast_mac()),
+                        ndp::NsDestination::SolicitedNode,
+                    ),
+                    SolicitKind::Unicast(mac) => (mac, ndp::NsDestination::Unicast),
+                };
+                debug!("Requesting NDP for {}", target);
+                let Some(ns_packet) =
+                    ndp::build_neighbor_solicitation(src_addr, target, self.mac_addr(), dest)
+                else {
+                    return;
+                };
+                self.send_to(
+                    ifindex,
+                    dst_mac,
+                    ns_packet.len(),
+                    |buf| buf.copy_from_slice(&ns_packet),
+                    EtherType::Ipv6,
+                );
+            }
         }
-        debug!("Requesting ARP for {}", target_ipv4);
-
-        let arp_packet = ArpIpv4Packet {
-            operation: ArpOperation::Request,
-            source_hardware_addr: self.mac_addr(),
-            source_protocol_addr: source_addr,
-            target_hardware_addr: MacAddress::BROADCAST,
-            target_protocol_addr: target_ipv4,
-        };
-
-        self.send_to(
-            ifindex,
-            MacAddress::BROADCAST,
-            ArpIpv4Packet::LEN,
-            |buf| {
-                let emit_result = arp_packet.emit(buf);
-                debug_assert!(emit_result.is_some());
-            },
-            EtherType::Arp,
-        );
-
-        self.neighbors
-            .insert(target_ip, NeighborEntry::Pending(now));
     }
 
-    fn send_neighbor_solicitation(
-        &mut self,
-        ifindex: i32,
-        target: Ipv6Address,
-        now: MonotonicInstant,
-    ) {
-        let Some(src_addr) = self.ipv6_link_local() else {
-            warn!("No IPv6 source address for NDP solicitation");
-            return;
-        };
-        debug!("Requesting NDP for {}", target);
-        let Some(ns_packet) = ndp::build_neighbor_solicitation(src_addr, target, self.mac_addr())
-        else {
-            return;
-        };
-        let dst_mac = MacAddress(target.solicited_node_multicast().multicast_mac());
-        self.send_to(
-            ifindex,
-            dst_mac,
-            ns_packet.len(),
-            |buf| buf.copy_from_slice(&ns_packet),
-            EtherType::Ipv6,
-        );
-        self.neighbors
-            .insert(IpAddress::Ipv6(target), NeighborEntry::Pending(now));
-    }
-
-    fn resolve_next_hop(
+    fn flush_learned(
         &mut self,
         ifindex: i32,
         next_hop: IpAddress,
-        ipv4_source: crate::ip::Ipv4Address,
-        now: MonotonicInstant,
+        mac: MacAddress,
+        packets: Vec<PacketBuf>,
     ) {
-        match next_hop {
-            IpAddress::Ipv4(_) => self.send_arp_request(ifindex, next_hop, ipv4_source, now),
-            IpAddress::Ipv6(addr) => self.send_neighbor_solicitation(ifindex, addr, now),
-        }
-    }
-
-    fn flush_pending(&mut self, ifindex: i32, now: MonotonicInstant) {
-        enum PendingAction {
-            Send(MacAddress),
-            Keep,
-            Refresh,
-        }
-
-        let mut kept_packets = Vec::with_capacity(ETHERNET_MAX_PENDING_PACKETS);
-        for _ in 0..ETHERNET_MAX_PENDING_PACKETS {
-            let Some(pending) = self.pending_tx.pop_front() else {
-                break;
-            };
-
-            let action = match self.neighbors.get(&pending.next_hop) {
-                Some(NeighborEntry::Resolved(neighbor)) if neighbor.expires_at > now => {
-                    PendingAction::Send(neighbor.hardware_address)
-                }
-                Some(NeighborEntry::Resolved(_)) => PendingAction::Refresh,
-                _ => PendingAction::Keep,
-            };
-
-            match action {
-                PendingAction::Send(hardware_address) => {
-                    let ethertype = Self::ethertype_for_next_hop(pending.next_hop);
-                    self.send_ip_packet_to(ifindex, hardware_address, &pending.packet, ethertype);
-                }
-                PendingAction::Keep => kept_packets.push(pending),
-                PendingAction::Refresh => {
-                    self.neighbors.remove(&pending.next_hop);
-                    self.resolve_next_hop(ifindex, pending.next_hop, pending.source_addr, now);
-                    kept_packets.push(pending);
-                }
-            }
-        }
-
-        self.neighbors.retain(|_, entry| match entry {
-            NeighborEntry::Resolved(neighbor) => neighbor.expires_at > now,
-            NeighborEntry::Pending(since) => {
-                now.saturating_duration_since(*since) < Self::NEIGHBOR_TTL
-            }
-        });
-
-        for pending in kept_packets {
-            if self.pending_tx.len() >= ETHERNET_MAX_PENDING_PACKETS {
-                warn!("Pending packets buffer is full, dropping packet");
-            } else {
-                self.pending_tx.push_back(pending);
-            }
+        let ethertype = Self::ethertype_for_next_hop(next_hop);
+        for packet in packets {
+            self.send_ip_packet_to(ifindex, mac, &packet, ethertype);
         }
     }
 
@@ -673,13 +383,19 @@ impl EthernetDevice {
         }
 
         debug!("ARP: {} -> {}", source_protocol_addr, source_hardware_addr);
-        self.neighbors.insert(
-            IpAddress::Ipv4(source_protocol_addr),
-            NeighborEntry::Resolved(ArpNeighbor {
-                hardware_address: source_hardware_addr,
-                expires_at: now + Self::NEIGHBOR_TTL,
-            }),
+        let addr = IpAddress::Ipv4(source_protocol_addr);
+        let pending = self.neighbors.learn(
+            addr,
+            if matches!(operation, ArpOperation::Reply) {
+                NeighborLearn::confirmed_override(source_hardware_addr)
+            } else {
+                NeighborLearn::unconfirmed_override(source_hardware_addr)
+            },
+            now,
         );
+        if let Some(mac) = self.neighbors.mac(addr) {
+            self.flush_learned(ifindex, addr, mac, pending);
+        }
 
         if let ArpOperation::Request = operation {
             let response = ArpIpv4Packet {
@@ -701,8 +417,6 @@ impl EthernetDevice {
                 EtherType::Arp,
             );
         }
-
-        self.flush_pending(ifindex, now);
     }
 }
 
@@ -798,7 +512,7 @@ impl NetDeviceOps for EthernetDevice {
             return false;
         }
 
-        let ipv4_source = match next_hop {
+        match next_hop {
             IpAddress::Ipv4(_) => {
                 let IpAddress::Ipv4(source_addr) = source_addr else {
                     warn!("Dropping packet with a non-IPv4 source on Ethernet device");
@@ -812,10 +526,9 @@ impl NetDeviceOps for EthernetDevice {
                     warn!("Dropping IPv4 packet without a local IPv4 source");
                     return false;
                 }
-                source_addr
             }
-            IpAddress::Ipv6(_) => crate::ip::Ipv4Address::UNSPECIFIED,
-        };
+            IpAddress::Ipv6(_) => {}
+        }
 
         match next_hop {
             IpAddress::Ipv4(_)
@@ -841,29 +554,19 @@ impl NetDeviceOps for EthernetDevice {
         }
 
         let ethertype = Self::ethertype_for_next_hop(next_hop);
-        let need_request = match self.neighbors.get(&next_hop) {
-            Some(NeighborEntry::Resolved(neighbor)) if neighbor.expires_at > timestamp => {
-                self.send_ip_packet_to(ifindex, neighbor.hardware_address, &packet, ethertype);
-                return false;
+        match self.neighbors.resolve(next_hop, packet, timestamp) {
+            ResolveResult::Transmit { mac, packet } => {
+                self.send_ip_packet_to(ifindex, mac, &packet, ethertype);
             }
-            Some(NeighborEntry::Resolved(_)) => true,
-            Some(NeighborEntry::Pending(since)) => {
-                timestamp.saturating_duration_since(*since) >= Self::NEIGHBOR_TTL
+            ResolveResult::Queued(solicit) => {
+                if let Some(kind) = solicit {
+                    self.send_solicit(ifindex, next_hop, kind);
+                }
             }
-            None => true,
-        };
-        if need_request {
-            self.resolve_next_hop(ifindex, next_hop, ipv4_source, timestamp);
+            ResolveResult::Dropped => {
+                warn!("Pending packets buffer is full, dropping packet");
+            }
         }
-        if self.pending_tx.len() >= ETHERNET_MAX_PENDING_PACKETS {
-            warn!("Pending packets buffer is full, dropping packet");
-            return false;
-        }
-        self.pending_tx.push_back(PendingTxPacket {
-            next_hop,
-            source_addr: ipv4_source,
-            packet,
-        });
         false
     }
 
@@ -919,24 +622,18 @@ impl NetDeviceOps for EthernetDevice {
     }
 
     fn remove_pending_ipv4_source(&mut self, addr: crate::ip::Ipv4Address) {
-        Self::remove_pending_packets_with_source(&mut self.pending_tx, addr);
+        self.neighbors.remove_pending_ipv4_source(addr);
     }
 
     fn sync_neighbors(&mut self, neighbors: &[(IpAddress, [u8; 6])]) {
-        self.neighbors.clear();
-        for (dst_addr, hardware_addr) in neighbors {
-            // Netlink-managed static neighbors stay until the control plane
-            // removes them, unlike dynamically learned entries with a TTL.
-            self.neighbors.insert(
-                *dst_addr,
-                NeighborEntry::Resolved(ArpNeighbor {
-                    hardware_address: MacAddress(*hardware_addr),
-                    expires_at: MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(
-                        u64::MAX / 2,
-                    )),
-                }),
-            );
-        }
+        let now = monotonic_time();
+        let permanent: Vec<_> = neighbors
+            .iter()
+            .map(|(dst_addr, hardware_addr)| (*dst_addr, MacAddress(*hardware_addr)))
+            .collect();
+        // Netlink-managed static neighbors stay until the control plane
+        // removes them and do not run NUD. Dynamic NUD entries are kept.
+        self.neighbors.sync_permanent(&permanent, now);
     }
 
     fn set_ipv6_addrs(&mut self, addrs: &[Ipv6Cidr]) {
@@ -945,20 +642,28 @@ impl NetDeviceOps for EthernetDevice {
         }
     }
 
-    fn learn_neighbor(&mut self, addr: IpAddress, mac: MacAddress) {
+    fn neighbor_snapshots(&self, ifindex: i32) -> Vec<NeighborSnapshot> {
+        self.neighbors.snapshots(ifindex)
+    }
+
+    fn learn_neighbor(&mut self, addr: IpAddress, learn: NeighborLearn) {
         let now = monotonic_time();
-        self.neighbors.insert(
-            addr,
-            NeighborEntry::Resolved(ArpNeighbor {
-                hardware_address: mac,
-                expires_at: now + Self::NEIGHBOR_TTL,
-            }),
-        );
-        // Flush packets waiting on this neighbor with the real current time;
-        // the newly learned entry is valid for NEIGHBOR_TTL from now.
-        if let Some(ifindex) = self.pending_tx.front().map(|p| p.packet.ifindex()) {
-            self.flush_pending(ifindex, now);
+        let pending = self.neighbors.learn(addr, learn, now);
+        let Some(mac) = self.neighbors.mac(addr) else {
+            return;
+        };
+        let ifindex = pending.first().map(|packet| packet.ifindex()).unwrap_or(0);
+        self.flush_learned(ifindex, addr, mac, pending);
+    }
+
+    fn maintain_neighbors(&mut self, ifindex: i32, now: MonotonicInstant) {
+        for work in self.neighbors.run_due_timers(now) {
+            self.send_solicit(ifindex, work.addr, work.solicit);
         }
+    }
+
+    fn next_neighbor_deadline(&self) -> Option<MonotonicInstant> {
+        self.neighbors.next_deadline()
     }
 
     fn ipv6_addrs(&self) -> &[Ipv6Cidr] {
@@ -970,22 +675,13 @@ impl NetDeviceOps for EthernetDevice {
     }
 }
 
-impl EthernetDevice {
-    fn remove_pending_packets_with_source(
-        pending_tx: &mut VecDeque<PendingTxPacket>,
-        addr: crate::ip::Ipv4Address,
-    ) {
-        pending_tx.retain(|pending| pending.source_addr != addr);
-    }
-}
-
 impl Drop for EthernetDevice {
     fn drop(&mut self) {
         if let Some(source) = &self.rx_source {
             if let Err(err) = self.inner.set_rx_scheduler(None) {
                 warn!("failed to detach Ethernet RX scheduler: {:?}", err);
             }
-            unregister_net_rx_source(source.id);
+            unregister_net_rx_source(source.id());
         }
     }
 }
@@ -1003,209 +699,42 @@ fn map_dev_err(err: DriverError) -> KError {
 
 #[cfg(unittest)]
 mod tests {
-    use alloc::{boxed::Box, vec, vec::Vec};
-    use core::{
-        sync::atomic::{AtomicUsize, Ordering},
-        task::{RawWaker, RawWakerVTable, Waker},
-    };
-
-    use unittest::{assert_eq, def_test};
+    use unittest::def_test;
 
     use super::*;
-
-    unsafe fn waker_clone(data: *const ()) -> RawWaker {
-        RawWaker::new(data, &WAKER_VTABLE)
-    }
-
-    unsafe fn waker_wake(data: *const ()) {
-        // SAFETY: test wakers install a leaked, aligned `AtomicUsize` pointer.
-        let counter = unsafe { &*(data as *const AtomicUsize) };
-        counter.fetch_add(1, Ordering::SeqCst);
-    }
-
-    unsafe fn waker_wake_by_ref(data: *const ()) {
-        // SAFETY: test wakers install a leaked, aligned `AtomicUsize` pointer.
-        let counter = unsafe { &*(data as *const AtomicUsize) };
-        counter.fetch_add(1, Ordering::SeqCst);
-    }
-
-    unsafe fn waker_drop(_data: *const ()) {}
-
-    static WAKER_VTABLE: RawWakerVTable =
-        RawWakerVTable::new(waker_clone, waker_wake, waker_wake_by_ref, waker_drop);
-
-    fn new_counter() -> &'static AtomicUsize {
-        Box::leak(Box::new(AtomicUsize::new(0)))
-    }
-
-    fn make_waker(counter: &'static AtomicUsize) -> Waker {
-        let raw = RawWaker::new(counter as *const _ as *const (), &WAKER_VTABLE);
-        // SAFETY: the raw waker data pointer is the leaked `AtomicUsize` above
-        // and the vtable only performs atomic increments on that allocation.
-        unsafe { Waker::from_raw(raw) }
-    }
-
-    fn pending_packet(source: crate::ip::Ipv4Address) -> PacketBuf {
-        let mut bytes = vec![0; 20];
-        bytes[0] = 0x45;
-        let packet_len = bytes.len() as u16;
-        bytes[2..4].copy_from_slice(&packet_len.to_be_bytes());
-        bytes[12..16].copy_from_slice(&source.octets());
-        bytes[16..20].copy_from_slice(&[198, 51, 100, 1]);
-        PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceTx)
-    }
-
-    #[def_test]
-    fn remove_pending_packets_with_deleted_source() {
-        let deleted = crate::ip::Ipv4Address::new(192, 0, 2, 7);
-        let retained = crate::ip::Ipv4Address::new(192, 0, 2, 8);
-        let mut pending = VecDeque::from([
-            PendingTxPacket {
-                next_hop: IpAddress::Ipv4(crate::ip::Ipv4Address::new(198, 51, 100, 1)),
-                source_addr: deleted,
-                packet: pending_packet(deleted),
-            },
-            PendingTxPacket {
-                next_hop: IpAddress::Ipv4(crate::ip::Ipv4Address::new(198, 51, 100, 2)),
-                source_addr: retained,
-                packet: pending_packet(retained),
-            },
-        ]);
-
-        EthernetDevice::remove_pending_packets_with_source(&mut pending, deleted);
-
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending.front().unwrap().source_addr, retained);
-    }
 
     #[def_test]
     fn limited_broadcast_accepts_unspecified_ipv4_source() {
         assert!(is_ipv4_source_usable_for_egress(
-            IpAddress::Ipv4(crate::ip::Ipv4Address::BROADCAST),
-            crate::ip::Ipv4Address::UNSPECIFIED,
+            IpAddress::Ipv4(Ipv4Address::BROADCAST),
+            Ipv4Address::UNSPECIFIED,
             &[],
         ));
         assert!(!is_ipv4_source_usable_for_egress(
-            IpAddress::Ipv4(crate::ip::Ipv4Address::new(192, 0, 2, 1)),
-            crate::ip::Ipv4Address::UNSPECIFIED,
+            IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1)),
+            Ipv4Address::UNSPECIFIED,
             &[],
         ));
     }
+}
 
-    fn test_source(sources: &mut NetRxSources, id: usize) -> Arc<NetRxPollSource> {
-        let source = Arc::new(NetRxPollSource::new(id));
-        sources.push(source.clone());
-        source
-    }
+#[cfg(unittest)]
+mod tests {
+    use unittest::{assert, assert_eq, def_test};
 
-    fn collect_and_wake_test_sources(sources: &mut NetRxSources) -> (usize, bool) {
-        let mut wake_batch: [Option<PollSet>; NET_RX_SOFTIRQ_BATCH] =
-            core::array::from_fn(|_| None);
-        let result = sources.collect_scheduled_fallback_batch(&mut wake_batch);
-        for waiters in wake_batch.into_iter().flatten() {
-            waiters.wake();
-        }
-        result
-    }
+    use super::*;
 
-    #[def_test(serial)]
-    fn test_net_rx_softirq_wakes_only_pending_sources() {
-        let mut sources = NetRxSources::new();
-        let pending_id = NEXT_NET_RX_SOURCE_ID.fetch_add(1, Ordering::Relaxed);
-        let idle_id = NEXT_NET_RX_SOURCE_ID.fetch_add(1, Ordering::Relaxed);
-        let pending_source = test_source(&mut sources, pending_id);
-        let idle_source = test_source(&mut sources, idle_id);
-        let pending_counter = new_counter();
-        let idle_counter = new_counter();
-        let pending_registration = pending_source
-            .waiters()
-            .register(&make_waker(pending_counter))
-            .unwrap();
-        let idle_registration = idle_source
-            .waiters()
-            .register(&make_waker(idle_counter))
-            .unwrap();
-
-        pending_source.pending.store(true, Ordering::Release);
-        assert_eq!(collect_and_wake_test_sources(&mut sources), (1, false));
-
-        assert_eq!(pending_counter.load(Ordering::SeqCst), 1);
-        assert_eq!(idle_counter.load(Ordering::SeqCst), 0);
-
-        drop(pending_registration);
-        drop(idle_registration);
-    }
-
-    #[def_test(serial)]
-    fn test_net_rx_softirq_round_robin_cursor_reaches_sources_after_batch() {
-        let mut local_sources = NetRxSources::new();
-        let mut sources = Vec::new();
-        let mut counters = Vec::new();
-        let mut registrations = Vec::new();
-        for _ in 0..(NET_RX_SOFTIRQ_BATCH + 2) {
-            let id = NEXT_NET_RX_SOURCE_ID.fetch_add(1, Ordering::Relaxed);
-            let source = test_source(&mut local_sources, id);
-            let counter = new_counter();
-            registrations.push(source.waiters().register(&make_waker(counter)).unwrap());
-            counters.push(counter);
-            sources.push(source);
-        }
-
-        for source in &sources {
-            source.pending.store(true, Ordering::Release);
-        }
-
-        assert_eq!(
-            collect_and_wake_test_sources(&mut local_sources),
-            (NET_RX_SOFTIRQ_BATCH, true)
-        );
-        assert_eq!(
-            collect_and_wake_test_sources(&mut local_sources),
-            (2, false)
-        );
-
-        for counter in &counters {
-            assert_eq!(counter.load(Ordering::SeqCst), 1);
-        }
-
-        drop(registrations);
-    }
-
-    #[def_test(serial)]
-    fn test_net_rx_softirq_full_batch_without_remaining_pending_does_not_defer() {
-        let mut local_sources = NetRxSources::new();
-        let mut sources = Vec::new();
-        let mut counters = Vec::new();
-        let mut registrations = Vec::new();
-        for _ in 0..(NET_RX_SOFTIRQ_BATCH + 2) {
-            let id = NEXT_NET_RX_SOURCE_ID.fetch_add(1, Ordering::Relaxed);
-            let source = test_source(&mut local_sources, id);
-            let counter = new_counter();
-            registrations.push(source.waiters().register(&make_waker(counter)).unwrap());
-            counters.push(counter);
-            sources.push(source);
-        }
-
-        for source in sources.iter().take(NET_RX_SOFTIRQ_BATCH) {
-            source.pending.store(true, Ordering::Release);
-        }
-
-        assert_eq!(
-            collect_and_wake_test_sources(&mut local_sources),
-            (NET_RX_SOFTIRQ_BATCH, false)
-        );
-        assert_eq!(
-            collect_and_wake_test_sources(&mut local_sources),
-            (0, false)
-        );
-
-        for counter in counters.iter().take(NET_RX_SOFTIRQ_BATCH) {
-            assert_eq!(counter.load(Ordering::SeqCst), 1);
-        }
-        for counter in counters.iter().skip(NET_RX_SOFTIRQ_BATCH) {
-            assert_eq!(counter.load(Ordering::SeqCst), 0);
-        }
-
-        drop(registrations);
+    #[def_test]
+    fn limited_broadcast_accepts_unspecified_ipv4_source() {
+        assert!(is_ipv4_source_usable_for_egress(
+            IpAddress::Ipv4(Ipv4Address::BROADCAST),
+            Ipv4Address::UNSPECIFIED,
+            &[],
+        ));
+        assert!(!is_ipv4_source_usable_for_egress(
+            IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1)),
+            Ipv4Address::UNSPECIFIED,
+            &[],
+        ));
     }
 }

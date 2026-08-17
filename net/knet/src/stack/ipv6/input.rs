@@ -13,6 +13,7 @@ use super::{
 };
 use crate::{
     buf::PacketBuf,
+    device::NeighborLearn,
     ip::{Ipv6Address, Ipv6Cidr},
     udp, udp_err,
 };
@@ -45,12 +46,25 @@ pub(crate) fn process_ipv6_input(
 
         if let Some(input) = ndp::handle_ndp_input(header, ip_packet, local_addrs) {
             if let Some((addr, mac)) = input.learn {
-                ipv6_actions.push(Ipv6Action::LearnNeighbor { ifindex, addr, mac });
+                ipv6_actions.push(Ipv6Action::LearnNeighbor {
+                    ifindex,
+                    addr,
+                    learn: NeighborLearn::unconfirmed_override(mac),
+                });
             }
             if let Some(action) = input.action {
                 match action {
-                    ndp::NdpAction::LearnNeighbor { addr, mac } => {
-                        ipv6_actions.push(Ipv6Action::LearnNeighbor { ifindex, addr, mac });
+                    ndp::NdpAction::LearnNeighbor {
+                        addr,
+                        mac,
+                        is_solicited,
+                        is_override,
+                    } => {
+                        ipv6_actions.push(Ipv6Action::LearnNeighbor {
+                            ifindex,
+                            addr,
+                            learn: NeighborLearn::from_na_flags(mac, is_solicited, is_override),
+                        });
                     }
                     ndp::NdpAction::ReplyAdvertisement {
                         target,

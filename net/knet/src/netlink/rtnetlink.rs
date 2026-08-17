@@ -145,6 +145,7 @@ enum RtnetlinkOperation {
     GetLink,
     GetAddr,
     GetRoute,
+    GetNeigh,
     NewLink,
     NewAddr,
     DelAddr,
@@ -160,6 +161,7 @@ impl RtnetlinkOperation {
             RTM_GETLINK => Self::GetLink,
             RTM_GETADDR => Self::GetAddr,
             RTM_GETROUTE => Self::GetRoute,
+            RTM_GETNEIGH => Self::GetNeigh,
             RTM_NEWLINK => Self::NewLink,
             RTM_NEWADDR => Self::NewAddr,
             RTM_DELADDR => Self::DelAddr,
@@ -172,7 +174,7 @@ impl RtnetlinkOperation {
 
     fn is_dump(self) -> bool {
         match self {
-            Self::GetLink | Self::GetAddr | Self::GetRoute => true,
+            Self::GetLink | Self::GetAddr | Self::GetRoute | Self::GetNeigh => true,
             Self::NewLink
             | Self::NewAddr
             | Self::DelAddr
@@ -191,7 +193,9 @@ impl RtnetlinkOperation {
             | Self::NewRoute
             | Self::DelRoute
             | Self::NewNeigh => true,
-            Self::GetLink | Self::GetAddr | Self::GetRoute | Self::Unsupported => false,
+            Self::GetLink | Self::GetAddr | Self::GetRoute | Self::GetNeigh | Self::Unsupported => {
+                false
+            }
         }
     }
 }
@@ -233,6 +237,7 @@ pub(super) fn handle_rtnetlink_request(request: &[u8]) -> Vec<NetlinkPacket> {
         RtnetlinkOperation::GetLink => dump_links(&header, payload),
         RtnetlinkOperation::GetAddr => dump_addrs(&header, payload),
         RtnetlinkOperation::GetRoute => dump_routes(&header, payload),
+        RtnetlinkOperation::GetNeigh => dump_neighs(&header, payload),
         RtnetlinkOperation::NewLink => apply_newlink(request, &header, payload),
         RtnetlinkOperation::NewAddr => apply_newaddr(request, &header, payload),
         RtnetlinkOperation::DelAddr => apply_deladdr(request, &header, payload),
@@ -321,6 +326,72 @@ fn dump_routes(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
             data: build_route_message(request, route),
         })
         .collect()
+}
+
+fn dump_neighs(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
+    let family = NdMsg::read(payload)
+        .ok()
+        .map(|msg| msg.family)
+        .filter(|family| *family != 0);
+    collect_neighbor_snapshots()
+        .into_iter()
+        .filter(|neigh| family.is_none() || family == Some(neigh_family(neigh.addr)))
+        .map(|neigh| NetlinkPacket {
+            from: NetlinkAddr { pid: 0, groups: 0 },
+            data: build_neigh_message(request, neigh),
+        })
+        .collect()
+}
+
+fn collect_neighbor_snapshots() -> Vec<crate::device::NeighborSnapshot> {
+    let mut snapshots: Vec<crate::device::NeighborSnapshot> = route_state()
+        .neighs
+        .into_iter()
+        .map(snapshot_from_control_neigh)
+        .collect();
+    if SERVICE.is_inited() {
+        for live in SERVICE.neighbor_snapshots() {
+            if let Some(existing) = snapshots
+                .iter_mut()
+                .find(|entry| entry.ifindex == live.ifindex && entry.addr == live.addr)
+            {
+                *existing = live;
+            } else {
+                snapshots.push(live);
+            }
+        }
+    }
+    snapshots
+}
+
+fn snapshot_from_control_neigh(neigh: NeighState) -> crate::device::NeighborSnapshot {
+    crate::device::NeighborSnapshot {
+        ifindex: neigh.ifindex as i32,
+        addr: from_smoltcp_ip(neigh.dst),
+        mac: neigh.lladdr.map(crate::wire::MacAddress),
+        nud_state: neigh.state,
+    }
+}
+
+fn from_smoltcp_ip(addr: IpAddress) -> crate::ip::IpAddress {
+    match addr {
+        IpAddress::Ipv4(addr) => crate::ip::IpAddress::Ipv4(addr.into()),
+        IpAddress::Ipv6(addr) => crate::ip::IpAddress::Ipv6(addr.into()),
+    }
+}
+
+fn neigh_family(addr: crate::ip::IpAddress) -> u8 {
+    match addr {
+        crate::ip::IpAddress::Ipv4(_) => wire_route::FAMILY_IPV4,
+        crate::ip::IpAddress::Ipv6(_) => wire_route::FAMILY_IPV6,
+    }
+}
+
+fn neigh_ip_bytes(addr: crate::ip::IpAddress) -> Vec<u8> {
+    match addr {
+        crate::ip::IpAddress::Ipv4(addr) => addr.octets().to_vec(),
+        crate::ip::IpAddress::Ipv6(addr) => addr.octets().to_vec(),
+    }
 }
 
 fn apply_newlink(request: &[u8], header: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
@@ -890,6 +961,29 @@ fn build_route_message(request: &NlMsgHeader, route: RouteState) -> Vec<u8> {
     }
 
     build_nlmsg(RTM_NEWROUTE, request.seq, NLM_F_MULTI, payload)
+}
+
+fn build_neigh_message(request: &NlMsgHeader, neigh: crate::device::NeighborSnapshot) -> Vec<u8> {
+    let mut payload = Vec::new();
+    NdMsg {
+        family: neigh_family(neigh.addr),
+        pad1: 0,
+        pad2: 0,
+        ifindex: neigh.ifindex,
+        state: neigh.nud_state,
+        flags: 0,
+        neigh_type: wire_neigh::TYPE_UNICAST,
+    }
+    .write(&mut payload);
+    push_attr(
+        &mut payload,
+        wire_neigh::attr::DST,
+        &neigh_ip_bytes(neigh.addr),
+    );
+    if let Some(mac) = neigh.mac {
+        push_attr(&mut payload, wire_neigh::attr::LLADDR, &mac.0);
+    }
+    build_nlmsg(RTM_NEWNEIGH, request.seq, NLM_F_MULTI, payload)
 }
 
 fn build_done_response(request: &NlMsgHeader) -> Vec<u8> {

@@ -230,7 +230,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-02 | smoltcp socket handle 已删除后继续访问 | 高 | listener 关闭、accepted child 清理与并发 socket 操作交错 | `SocketSet` 访问由 mutex 串行化；`ListenTable::unlisten` drain 后删除 handle；调用点需避免缓存 handle 后跨释放点使用 |
 | T-03 | ring buffer index 推进超过实际写入或读取长度 | 高 | `advance_write_index` 或 `advance_read_index` 的 count 与切片来源不一致 | count 由持有 channel mutex 时取得的同一批 slices 计算；unsafe 注释固定不变量 |
 | T-04 | 恶意 netlink 消息越界读取或构造非法状态 | 高 | 用户传入短 header、畸形 attr、非法 family、非法 ifindex | `NlMsgHeader::read`、`parse_attrs`、`parse_ip_by_family` 和 route index 检查拒绝非法输入 |
-| T-05 | ARP spoofing 污染 neighbor cache | 中 | 外部主机发送伪造 ARP reply 或 request | 当前校验 unicast MAC、广播和本机目标 IP；完整邻居安全策略仍依赖网络隔离 |
+| T-05 | ARP/NDP spoofing 污染 neighbor cache | 中 | 外部主机发送伪造 ARP reply、NS SLLA 或 NA | 当前校验 unicast MAC、广播和本机目标 IP；NUD 只检测可达性，不认证邻居；完整邻居安全策略仍依赖网络隔离 |
 | T-06 | listen backlog 被 SYN 洪泛占满 | 中 | 大量连接请求命中同一 listener | backlog 被 clamp 到 `LISTEN_QUEUE_SIZE`；超限丢弃并记录 warn |
 | T-07 | raw socket 被无权限调用者创建 | 中 | syscall 层没有实施权限门禁 | `knet` 层只封装 raw socket 行为；权限策略应保留在 `posix/net::sys_socket` |
 | T-08 | netlink RX queue 被 uevent 或 response 填满 | 中 | 订阅者不消费，publisher 持续写入 | `NETLINK_RX_QUEUE_LIMIT` 限制单 socket queue 字节数，超限丢弃 |
@@ -320,15 +320,16 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 
 ## 已知限制
 
-- `RTM_GETNEIGH` dump 尚未实现，neighbor 只通过 `RTM_NEWNEIGH` mutation 进入控制面。
+- `RTM_GETNEIGH` dump 合并控制面静态邻居与设备 NUD 快照；动态解析条目在 `INCOMPLETE` / `FAILED` 等状态对用户态可见。
 - IPv4 输出使用匹配路由指向设备的 MTU，ICMP Fragmentation Needed 中的 next-hop MTU 只进入 UDP error queue，尚未形成动态 PMTU cache。
 - IPv4 输出分片只支持无 options 的栈内生成报文，尚未实现 options copy 语义。
 - `ROUTE_STATE` dump 没有覆盖所有 live runtime 状态；地址 dump 直接读取 Router，路由 dump 仍只覆盖配置路由。
 - smoltcp maintenance 与单次 egress pass 提供有界执行，ingress 通过 `poll_ingress_single` 按 packet 推进；单个 packet 的协议处理和一次 egress pass 仍会形成有限的软上限超出。
 - UDP RX queue 排空后保留 64 个元数据槽位；长期非空队列保持已增长容量，直到队列再次排空。
-- 地址 dump 直接读取 Router 地址条目；路由和邻居 dump 仍来自 `ROUTE_STATE` 投影；link dump 已直接读取设备实时快照。
+- 地址 dump 直接读取 Router IPv4 条目并合并 `ROUTE_STATE` 中的 IPv6 地址；路由 dump 仍来自 `ROUTE_STATE` 投影；link dump 读取设备实时快照；邻居 dump 合并 `ROUTE_STATE` 与设备 NUD 快照。
 - raw socket 创建权限由 syscall 层承担，`knet` 构造器自身没有进程凭据参数。
-- Ethernet 设备通过 ARP（IPv4）和 NDP（IPv6）解析邻居；非 Ethernet 链路和多队列 NIC 抽象仍待扩展。
+- Ethernet 设备通过 ARP（IPv4）和 NDP（IPv6）解析邻居，并运行 Linux 风格 NUD 状态机；解析失败丢弃排队报文，尚未向源 socket 上报 ICMPv6 Destination Unreachable。尚未根据 TCP ACK / UDP 成功收发刷新 `confirmed`。
+- 非 Ethernet 链路和多队列 NIC 抽象仍待扩展。
 - IPv6 分片重组与 PMTUD 尚未实现；遇到 Fragment 扩展头时降级交给 smoltcp 或丢弃。
 - AF_INET6 UDP 默认 V6-only，不支持 v4-mapped 地址与 dual-stack socket。
 - 不做 SLAAC / RA / DHCPv6；地址配置依赖静态初始化与 netlink。

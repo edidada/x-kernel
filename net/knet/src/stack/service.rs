@@ -121,57 +121,66 @@ impl Service {
         let mut rx_packets = 0;
         let mut rx_remaining = budget.rx_packets;
         let mut rx_packets_since_time_check = 0;
-        let mut sockets = SOCKET_SET.inner.lock();
-        let mut control_packets = self.control_batch.lock();
-        let mut rx_batch = self.rx_batch.lock();
-        let mut accepted_packets = self.accepted_batch.lock();
-        let mut ipv6_actions = self.ipv6_action_batch.lock();
-        control_packets.clear();
-        ipv6_actions.clear();
 
-        while rx_remaining > 0 {
-            if rx_packets_since_time_check >= POLL_TIME_CHECK_INTERVAL_WORK_ITEMS {
-                rx_packets_since_time_check = 0;
-                if has_reached_poll_round_time_limit(round_started_at, monotonic_time()) {
-                    has_reached_time_limit = true;
+        // NUD probes transmit from the driver; do not hold SOCKET_SET across that I/O.
+        {
+            let mut router = self.router.lock();
+            router.maintain_neighbors(device_timestamp);
+        }
+
+        let mut sockets = SOCKET_SET.inner.lock();
+        {
+            let mut control_packets = self.control_batch.lock();
+            let mut rx_batch = self.rx_batch.lock();
+            let mut accepted_packets = self.accepted_batch.lock();
+            let mut ipv6_actions = self.ipv6_action_batch.lock();
+            control_packets.clear();
+            ipv6_actions.clear();
+
+            while rx_remaining > 0 {
+                if rx_packets_since_time_check >= POLL_TIME_CHECK_INTERVAL_WORK_ITEMS {
+                    rx_packets_since_time_check = 0;
+                    if has_reached_poll_round_time_limit(round_started_at, monotonic_time()) {
+                        has_reached_time_limit = true;
+                        break;
+                    }
+                }
+
+                let mut router = self.router.lock();
+                let batch_budget = rx_remaining
+                    .min(RX_INGRESS_BATCH_PACKETS)
+                    .min(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS)
+                    .min(router.ingress_capacity());
+                if batch_budget == 0 {
                     break;
                 }
-            }
+                let drain =
+                    router.drain_rx_budgeted_into(device_timestamp, batch_budget, &mut rx_batch);
+                drop(router);
+                rx_packets += drain.work_done;
+                rx_remaining = rx_remaining.saturating_sub(drain.work_done);
+                rx_packets_since_time_check =
+                    rx_packets_since_time_check.saturating_add(drain.work_done);
 
-            let mut router = self.router.lock();
-            let batch_budget = rx_remaining
-                .min(RX_INGRESS_BATCH_PACKETS)
-                .min(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS)
-                .min(router.ingress_capacity());
-            if batch_budget == 0 {
-                break;
-            }
-            let drain =
-                router.drain_rx_budgeted_into(device_timestamp, batch_budget, &mut rx_batch);
-            drop(router);
-            rx_packets += drain.work_done;
-            rx_remaining = rx_remaining.saturating_sub(drain.work_done);
-            rx_packets_since_time_check =
-                rx_packets_since_time_check.saturating_add(drain.work_done);
-
-            self.ingress.lock().handle_rx_packets(
-                device_timestamp,
-                &mut rx_batch,
-                &mut accepted_packets,
-                &mut control_packets,
-                &mut ipv6_actions,
-                &mut sockets,
-            );
-            let mut router = self.router.lock();
-            router.enqueue_ingress_packets(&mut accepted_packets);
-            for packet in control_packets.drain(..) {
-                if let Err(err) = router.queue_control_ip_packet(packet) {
-                    warn!("Dropping network control packet: {}", err);
+                self.ingress.lock().handle_rx_packets(
+                    device_timestamp,
+                    &mut rx_batch,
+                    &mut accepted_packets,
+                    &mut control_packets,
+                    &mut ipv6_actions,
+                    &mut sockets,
+                );
+                let mut router = self.router.lock();
+                router.enqueue_ingress_packets(&mut accepted_packets);
+                for packet in control_packets.drain(..) {
+                    if let Err(err) = router.queue_control_ip_packet(packet) {
+                        warn!("Dropping network control packet: {}", err);
+                    }
                 }
-            }
-            ipv6::apply_actions(&mut router, &mut ipv6_actions);
-            if !drain.has_more || drain.work_done == 0 {
-                break;
+                ipv6::apply_actions(&mut router, &mut ipv6_actions);
+                if !drain.has_more || drain.work_done == 0 {
+                    break;
+                }
             }
         }
 
@@ -228,11 +237,9 @@ impl Service {
         }
 
         let deferred_close_deadline = sockets.reap_deferred_tcp_closes(current);
-        let next_poll =
+        let protocol_deadline =
             earliest_poll_deadline(iface.poll_at(current, &sockets), deferred_close_deadline);
         drop(iface);
-        let timer_has_more = has_immediate_timer_work(current, next_poll);
-        self.update_poll_timeout(current, next_poll);
         LISTEN_TABLE.wake_touched_acceptors(&mut sockets);
         drop(sockets);
 
@@ -259,6 +266,11 @@ impl Service {
                 break;
             }
         }
+
+        let neighbor_deadline = router.next_neighbor_deadline().map(to_smoltcp_instant);
+        let next_poll = earliest_poll_deadline(protocol_deadline, neighbor_deadline);
+        let timer_has_more = has_immediate_timer_work(current, next_poll);
+        self.update_poll_timeout(current, next_poll);
         PollProgress {
             rx_packets,
             tx_packets,
@@ -438,19 +450,25 @@ impl Service {
 
         let current = now();
         let sockets = SOCKET_SET.inner.lock();
-        let next = earliest_poll_deadline(
-            self.iface.lock().poll_at(current, &sockets),
-            sockets.deferred_tcp_close_deadline(),
-        );
+        let protocol_deadline = self.iface.lock().poll_at(current, &sockets);
+        let deferred_close_deadline = sockets.deferred_tcp_close_deadline();
         drop(sockets);
-        self.update_poll_timeout(current, next);
+        {
+            let router = self.router.lock();
+            let neighbor_deadline = router.next_neighbor_deadline().map(to_smoltcp_instant);
+            let next = earliest_poll_deadline(
+                earliest_poll_deadline(protocol_deadline, deferred_close_deadline),
+                neighbor_deadline,
+            );
+            self.update_poll_timeout(current, next);
 
-        for (index, device) in self.router.lock().devices.iter().enumerate() {
-            if mask & (1 << index) != 0 {
-                // Ethernet devices that support interrupt-driven RX register
-                // on their NetRx softirq-backed poll source. Loopback and
-                // poll-only devices keep the timeout_poll-backed source waker.
-                device.register_rx_waker(&source_waker, context)?;
+            for (index, device) in router.devices.iter().enumerate() {
+                if mask & (1 << index) != 0 {
+                    // Ethernet devices that support interrupt-driven RX register
+                    // on their NetRx softirq-backed poll source. Loopback and
+                    // poll-only devices keep the timeout_poll-backed source waker.
+                    device.register_rx_waker(&source_waker, context)?;
+                }
             }
         }
         Ok(source_waker)
@@ -566,6 +584,10 @@ impl Service {
 
     pub fn link_snapshots(&self) -> Vec<LinkSnapshot> {
         self.router.lock().link_snapshots()
+    }
+
+    pub fn neighbor_snapshots(&self) -> Vec<crate::device::NeighborSnapshot> {
+        self.router.lock().neighbor_snapshots()
     }
 
     pub fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {

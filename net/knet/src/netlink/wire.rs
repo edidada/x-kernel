@@ -59,6 +59,7 @@ pub(crate) mod route {
 
 pub(crate) mod neigh {
     pub(crate) const STATE_PERMANENT: u16 = 0x80;
+    pub(crate) const TYPE_UNICAST: u8 = 1;
 
     pub(crate) mod attr {
         pub(crate) const DST: u16 = 1;
@@ -263,6 +264,16 @@ impl NdMsg {
             flags: payload[10],
             neigh_type: payload[11],
         })
+    }
+
+    pub(super) fn write(&self, buf: &mut Vec<u8>) {
+        push_u8(buf, self.family);
+        push_u8(buf, self.pad1);
+        push_u16_ne(buf, self.pad2);
+        push_i32_ne(buf, self.ifindex);
+        push_u16_ne(buf, self.state);
+        push_u8(buf, self.flags);
+        push_u8(buf, self.neigh_type);
     }
 }
 

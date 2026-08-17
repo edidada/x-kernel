@@ -15,9 +15,9 @@ use super::{
 };
 use crate::{
     buf::{PacketBuf, PacketOwner},
+    device::NeighborLearn,
     ip::{IpAddress, Ipv6Address, Ipv6Cidr},
     router::Router,
-    wire::MacAddress,
 };
 
 /// Router-side work derived from an inbound IPv6 packet.
@@ -25,7 +25,7 @@ pub(crate) enum Ipv6Action {
     LearnNeighbor {
         ifindex: i32,
         addr: Ipv6Address,
-        mac: MacAddress,
+        learn: NeighborLearn,
     },
     ReplyAdvertisement {
         ifindex: i32,
@@ -156,9 +156,13 @@ pub(crate) fn echo_reply_source(
 pub(crate) fn apply_actions(router: &mut Router, actions: &mut Vec<Ipv6Action>) {
     for action in actions.drain(..) {
         match action {
-            Ipv6Action::LearnNeighbor { ifindex, addr, mac } => {
+            Ipv6Action::LearnNeighbor {
+                ifindex,
+                addr,
+                learn,
+            } => {
                 if let Some(dev) = router.devices.get_mut(ifindex.saturating_sub(1) as usize) {
-                    dev.learn_neighbor(IpAddress::Ipv6(addr), mac);
+                    dev.learn_neighbor(IpAddress::Ipv6(addr), learn);
                 }
             }
             Ipv6Action::ReplyAdvertisement {

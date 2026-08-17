@@ -24,6 +24,10 @@ net/knet/
     ├── device/
     │   ├── mod.rs
     │   ├── ethernet.rs
+    │   ├── neighbor/
+    │   │   ├── mod.rs
+    │   │   └── cache.rs
+    │   ├── net_rx.rs
     │   ├── loopback.rs
     │   └── vsock.rs
     ├── link/
@@ -130,6 +134,8 @@ core/kruntime
 | `stack::ipv6` | 解析/构造 IPv6 固定头，跳过可识别扩展头，定位上层协议；Fragment 头暂不重组 |
 | `stack::ipv6::icmpv6` | ICMPv6 echo 应答与 Destination Unreachable/Parameter Problem 差错生成 |
 | `stack::ipv6::ndp` | Neighbor Solicitation/Advertisement 构造与解析 |
+| `device::neighbor` | Ethernet 邻居缓存的 NUD 状态机、解析重试与 pending 队列 |
+| `device::net_rx` | Ethernet RX softirq poll source，与设备发送路径分离 |
 | `stack::ipv4::fragment` | 按源地址、目的地址、标识、协议和接口重组本地 IPv4 分片，并限制队列数量、内存和存活时间 |
 | `transport::udp` | 维护 UDP PCB registry、接收队列、bind 与 connect 状态、校验和、socket option、异步错误和 IPv4/IPv6 收发 |
 | `SocketSetWrapper` | 串行化 smoltcp socket set 与 TCP deferred-close 元数据访问，并在新增 socket 时通知等待者 |
@@ -258,7 +264,7 @@ build_initial_state ──> ROUTE_STATE routes / neighbors
                     updated ROUTE_STATE
                              │
                              ├─sync_netlink──> Router / devices
-                             └─RTM_GETROUTE──> netlink dump
+                             └─RTM_GETADDR / RTM_GETROUTE / RTM_GETNEIGH──> netlink dump
 ```
 
 | 从 | 到 | 触发条件 |
@@ -269,10 +275,11 @@ build_initial_state ──> ROUTE_STATE routes / neighbors
 | IPv4 地址条目 | smoltcp、IngressProcessor 和设备地址投影 | 地址加入、删除或所属设备移除时由 `Service` 刷新所有派生视图 |
 | 最后一个 IPv4 地址持有者 | `ROUTE_STATE` 配置路由 | 地址删除时移除以该地址为 `prefsrc` 的配置路由，再同步 Router 转发表 |
 | 已移除设备 | `ROUTE_STATE` 配置路由与邻居 | 删除该接口的路由和邻居，并重编号后续接口索引，再同步 Router 转发表 |
-| `RTM_GETADDR` | Router 地址快照 | rtnetlink 直接读取 `Service::ipv4_addr_snapshots` |
+| `RTM_GETADDR` | Router IPv4 快照与 rtnetlink IPv6 地址 | IPv4 直接读取 `Service::ipv4_addr_snapshots`，IPv6 读取 `ROUTE_STATE.addrs` |
 | 初始路由和邻居 state | `ROUTE_STATE` | `init_network` 调用 `build_initial_state` 与 `init_route_state` |
-| `ROUTE_STATE` | 更新后的 `ROUTE_STATE` | `apply_newroute`、`apply_newneigh` |
-| 更新后的 `ROUTE_STATE` | data-plane 同步 | `mutate_route_state` 释放 `ROUTE_STATE` 写锁后调用 `SERVICE.sync_netlink` |
+| `ROUTE_STATE` | 更新后的 `ROUTE_STATE` | `apply_newroute`、`apply_newneigh` 以及 IPv6 `apply_newaddr` |
+| 更新后的 `ROUTE_STATE` | data-plane 同步 | `mutate_route_state` 释放 `ROUTE_STATE` 写锁后调用 `SERVICE.sync_netlink`；邻居同步只调和 `PERMANENT` 条目，不清空动态 NUD |
+| 设备邻居 cache | `RTM_NEWNEIGH` dump | `RTM_GETNEIGH` 合并 `ROUTE_STATE` 静态邻居与设备 NUD 快照，设备快照覆盖同键条目 |
 
 ### NAPI 风格推进状态
 
@@ -329,8 +336,8 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 6. TCP、raw IP、ICMPv4 和其余 IPv6 packet 进入有界 smoltcp ingress queue。`Service` 先执行 `poll_maintenance`，再按 RX budget 逐个调用 `poll_ingress_single`，并按 TX budget 调用有界的 `poll_egress`。达到预算或时间边界后，剩余 ingress 保持 FIFO 顺序并进入后续轮次。
 7. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
 8. `Router::dispatch_budgeted` 先处理 control TX queue，再处理 data TX queue，单轮发送数量受 TX budget 限制。
-9. `Interface::poll_at` 与 orphan `FIN_WAIT_2` deadline 共同决定下一次网络 deadline，`Service` 将其写入原子 deadline；`register_timer_callback(TIMER_SAMPLE_PERIOD)` 周期采样该值，到期后通过 `notify(PollReason::Timer)` 发布工作。尚未到期的 deadline 不进入 `PollProgress::has_more`。
-10. `PollProgress::has_more` 只汇报当前可立即处理的 RX、ingress、TX 或已到期 timer 工作。每轮 `Service::poll_budgeted` 使用 1 ms 软时间上限，并在设备 RX、stack ingress、stack egress 和 Router TX 每完成 32 个工作项后检查时间。协议 maintenance 和一次 smoltcp egress pass 始终执行，以维持 timer 与协议输出进度。RX 任务或后台 Future 获得批次执行权后最多连续推进四轮，达到轮数上限或清空立即工作后归还执行权，剩余 backlog 通过 `SCHEDULED` 状态进入下一批。
+9. `Interface::poll_at`、orphan `FIN_WAIT_2` deadline 与邻居 NUD timer 共同决定下一次网络 deadline，`Service` 将其写入原子 deadline；`register_timer_callback(TIMER_SAMPLE_PERIOD)` 周期采样该值，到期后通过 `notify(PollReason::Timer)` 发布工作。尚未到期的 deadline 不进入 `PollProgress::has_more`。
+10. `PollProgress::has_more` 只汇报当前可立即处理的 RX、ingress、TX 或已到期 timer 工作。每轮 `Service::poll_budgeted` 使用 1 ms 软时间上限，并在设备 RX、stack ingress、stack egress 和 Router TX 每完成 32 个工作项后检查时间。协议 maintenance、邻居 NUD timer 和一次 smoltcp egress pass 始终执行，以维持 timer 与协议输出进度。RX 任务或后台 Future 获得批次执行权后最多连续推进四轮，达到轮数上限或清空立即工作后归还执行权，剩余 backlog 通过 `SCHEDULED` 状态进入下一批。
 
 ### TX 路由
 
@@ -340,8 +347,8 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 4. `Router::dispatch_budgeted` 优先接管 control packet，再按 IP 版本解析源地址和目的地址；IPv4 输出先按实际长度更新 `total_len` 和头部校验和，并将已校验的源地址随报文传给 `NetDevice`。IPv6 输出更新 `payload_length`。
 5. 广播或组播包复制到所有设备；`0.0.0.0` 到 `255.255.255.255` 的受限广播允许在设备尚未分配 IPv4 地址时直接发送，用于 DHCP 初始化流量。IPv6 组播直接映射 Ethernet 组播 MAC（`33:33:xx:xx:xx:xx`）。
 6. 单播包通过 `RouteTable::lookup` 选择最长前缀路由；IPv6 link-local 目的直接 on-link。
-7. Ethernet 设备先查邻居 cache（IPv4 用 ARP，IPv6 用 NDP），命中后通过 `link::wire` 封装对应 EtherType 的 Ethernet frame。
-8. 未命中时发送 ARP request 或 NDP Neighbor Solicitation，并把 IP 包放入 `pending_tx` 等待邻居解析。
+7. Ethernet 设备先查邻居 cache（IPv4 用 ARP，IPv6 用 NDP）。`REACHABLE` / `DELAY` / `PROBE` / `PERMANENT` 直接封装 Ethernet frame；`STALE` 先把条目转入 `DELAY` 再用缓存 MAC 发送。
+8. 无映射或 `FAILED` 时进入 `INCOMPLETE`：发送组播 NS / ARP request，并把 IP 包放入该邻居的 pending 队列。`RetransTimer`（1 s）到期后最多重试 3 次，仍无应答则标记 `FAILED` 并丢弃排队报文。NUD 在 `DELAY` 超时后发送单播探测。
 
 当前实现保留 smoltcp TCP（含 TCPv6）、raw socket 和 DNS 推进。UDP、IPv4 分片重组、输出分片、ICMPv4/ICMPv6 UDP 差错报告和 NDP 使用 crate 内实现。
 `PacketBuf`、`link::wire`、`stack::ipv4`、`stack::ipv6` 提供设备与 crate 内 IP/UDP 数据路径共用的报文表示和 parser/emitter。
@@ -391,7 +398,7 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 
 - 全局 `SERVICE` 是 `LazyInit<Service>`。`Service` 内部分别使用 mutex 保护 smoltcp `Interface`、`Router`、`IngressProcessor` 和可复用 batch。网络 timer deadline 使用 `AtomicU64` 保存，周期采样回调只执行原子检查、waiter 唤醒和 poller 通知。
 - `NetworkPoller` 使用一个 `AtomicU8` 保存 `IDLE`、`SCHEDULED`、`RUNNING` 和 `RUNNING_PENDING`。RX 任务与后台任务的批次预算为 512 个 RX packet、256 个 TX packet 和 32 个 timer event，socket assist 预算为 16、16 和 8。每轮受 1 ms 软时间上限约束，每个批次最多连续执行四轮，每次 assist 最多执行一轮；达到批次上限后唤醒下一批并归还执行权。
-- RX 设备拉取和 TX dispatch 位于 Router 锁内，IPv4 校验、过滤和 snoop 位于 Router 锁外。smoltcp ingress queue 有固定容量，`poll_ingress_single` 每次消费一个 packet，预算或时间边界留下的 packet 在后续轮次继续推进。
+- RX 设备拉取和 TX dispatch 位于 Router 锁内，IPv4 校验、过滤和 snoop 位于 Router 锁外。NUD timer 在取得 `SOCKET_SET` 之前单独持有 Router 锁，避免探测发包跨过 socket-set。smoltcp ingress queue 有固定容量，`poll_ingress_single` 每次消费一个 packet，预算或时间边界留下的 packet 在后续轮次继续推进。
 - 全局 `SOCKET_SET` 内部使用 `Mutex<SocketSetState>`，其中的 smoltcp socket set 与 TCP deferred-close 元数据共享同一所有权锁。关闭、登记、协议推进和回收不会跨两个 mutex 交接 handle。
 - `UDP_PCB_REGISTRY` 按端口分为 256 个 bucket，每个 bucket 独立加锁；每个 UDP PCB 的接收队列、endpoint、错误队列和 option 状态分别受锁或 atomic 保护。接收队列从零容量开始按需增长，上限为 1024 个数据报，队列排空后最多保留 64 个槽位。
 - `Ipv4Reassembler` 位于 `Router` 内，并由 `SERVICE` mutex 串行访问。
@@ -427,7 +434,7 @@ ICMPv6 差错查找同样用到达接口填 quoted 地址的 scope，使绑定�
 IPv6 endpoint 的文本格式遵循 `[address%scope]:port`，避免地址与端口之间的冒号歧义。
 当前不实现 `IPV6_FLOWINFO_SEND` 或 flow-label 路由；`sockaddr_in6.sin6_flowinfo`
 进入原生 endpoint 时会被有意归零，`getsockname`、`getpeername` 和接收地址也返回零。
-邻居缓存中动态学习条目（ARP/NDP）使用 300 秒 TTL，未解析占位条目超时后清理；netlink 静态邻居保持到控制面移除。
+邻居缓存由 `device/neighbor` 的 NUD 状态机管理，对齐 Linux 6.8 `net/core/neighbour.c`：动态条目经历 `INCOMPLETE` / `REACHABLE` / `STALE` / `DELAY` / `PROBE` / `FAILED`；netlink 静态邻居为 `PERMANENT`，不做探测。ReachableTime 在 BaseReachableTime（30 s）的 0.5–1.5 倍之间取值；DelayFirstProbeTime 为 5 s；组播解析与单播 NUD 探测各最多 3 次、间隔 1 s。请求 NA / ARP reply 将条目标为 `REACHABLE`；NS SLLA / 非请求 NA / ARP request 标为 `STALE`。`RTM_GETNEIGH` 导出该表。尚未接入 TCP/UDP 的 upper-layer reachability hint，因此 `DELAY` 在 5 s 内收不到请求 NA 就会进入 `PROBE`。
 
 ### NAPI 风格预算推进
 

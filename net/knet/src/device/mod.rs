@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! Network device abstractions.
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
 
 use ::core::task::Waker;
 use kerrno::{KResult, LinuxError};
@@ -12,11 +12,14 @@ use ktime_types::MonotonicInstant;
 
 mod ethernet;
 mod loopback;
+mod neighbor;
+mod net_rx;
 #[cfg(feature = "vsock")]
 mod vsock;
 
 pub use ethernet::*;
 pub use loopback::*;
+pub(crate) use neighbor::{NeighborLearn, NeighborSnapshot};
 #[cfg(feature = "vsock")]
 pub use vsock::*;
 
@@ -235,7 +238,20 @@ pub trait NetDevice: Send + Sync {
     fn set_ipv6_addrs(&mut self, _addrs: &[Ipv6Cidr]) {}
 
     /// Learns or refreshes a neighbor link-layer mapping.
-    fn learn_neighbor(&mut self, _addr: IpAddress, _mac: MacAddress) {}
+    fn learn_neighbor(&mut self, _addr: IpAddress, _learn: NeighborLearn) {}
+
+    /// Advances due NUD timers and emits ARP/NS probes.
+    fn maintain_neighbors(&mut self, _ifindex: i32, _now: MonotonicInstant) {}
+
+    /// Earliest NUD timer deadline on this device, if any.
+    fn next_neighbor_deadline(&self) -> Option<MonotonicInstant> {
+        None
+    }
+
+    /// Live neighbor-cache snapshot for `RTM_GETNEIGH`.
+    fn neighbor_snapshots(&self, _ifindex: i32) -> Vec<NeighborSnapshot> {
+        Vec::new()
+    }
 
     /// Returns IPv6 addresses configured on this device.
     fn ipv6_addrs(&self) -> &[Ipv6Cidr] {

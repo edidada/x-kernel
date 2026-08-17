@@ -62,6 +62,7 @@ pub(super) const RTM_NEWROUTE: u16 = 24;
 pub(super) const RTM_DELROUTE: u16 = 25;
 pub(super) const RTM_GETROUTE: u16 = 26;
 pub(super) const RTM_NEWNEIGH: u16 = 28;
+pub(super) const RTM_GETNEIGH: u16 = 30;
 
 // pub(super) const RT_SCOPE_NOWHERE: u8 = 255;
 // pub(super) const RTM_NEWNEIGH_FAMILY: u8 = 0;
