@@ -633,7 +633,14 @@ impl NetDeviceOps for EthernetDevice {
             .collect();
         // Netlink-managed static neighbors stay until the control plane
         // removes them and do not run NUD. Dynamic NUD entries are kept.
-        self.neighbors.sync_permanent(&permanent, now);
+        // Becoming PERMANENT over INCOMPLETE must flush pending, like learn().
+        for (addr, packets) in self.neighbors.sync_permanent(&permanent, now) {
+            let Some(mac) = self.neighbors.mac(addr) else {
+                continue;
+            };
+            let ifindex = packets.first().map(|packet| packet.ifindex()).unwrap_or(0);
+            self.flush_learned(ifindex, addr, mac, packets);
+        }
     }
 
     fn set_ipv6_addrs(&mut self, addrs: &[Ipv6Cidr]) {

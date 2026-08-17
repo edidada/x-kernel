@@ -263,22 +263,31 @@ impl NeighborCache {
         }
     }
 
+    /// Installs a netlink `NUD_PERMANENT` mapping.
+    ///
+    /// Returns packets that were waiting on this next hop. Linux
+    /// `__neigh_update` dequeues `arp_queue` when `!(old & NUD_VALID)` and
+    /// `new & NUD_VALID`; `NUD_PERMANENT` is valid, `NUD_INCOMPLETE` is not.
     pub(crate) fn insert_permanent(
         &mut self,
         addr: IpAddress,
         mac: MacAddress,
         now: MonotonicInstant,
-    ) {
-        self.remove_pending_of(addr);
+    ) -> Vec<PacketBuf> {
+        let pending = self.take_pending(addr);
         self.entries.insert(addr, Neighbor::permanent(mac, now));
+        pending
     }
 
     /// Replaces netlink `NUD_PERMANENT` entries without wiping dynamic NUD state.
+    ///
+    /// Each `(addr, packets)` pair should be transmitted with the newly
+    /// installed MAC, matching `learn()` → `flush_learned`.
     pub(crate) fn sync_permanent(
         &mut self,
         neighbors: &[(IpAddress, MacAddress)],
         now: MonotonicInstant,
-    ) {
+    ) -> Vec<(IpAddress, Vec<PacketBuf>)> {
         let keep: HashSet<IpAddress> = neighbors.iter().map(|(addr, _)| *addr).collect();
         let stale: Vec<IpAddress> = self
             .entries
@@ -290,9 +299,14 @@ impl NeighborCache {
             self.remove_pending_of(addr);
             self.entries.remove(&addr);
         }
+        let mut flushed = Vec::new();
         for (addr, mac) in neighbors {
-            self.insert_permanent(*addr, *mac, now);
+            let pending = self.insert_permanent(*addr, *mac, now);
+            if !pending.is_empty() {
+                flushed.push((*addr, pending));
+            }
         }
+        flushed
     }
 
     pub(crate) fn snapshots(&self, ifindex: i32) -> Vec<NeighborSnapshot> {
@@ -689,7 +703,7 @@ mod tests {
         let mac = sample_mac();
         let other = MacAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x03]);
         let t0 = now_at(1);
-        cache.insert_permanent(addr, mac, t0);
+        let _ = cache.insert_permanent(addr, mac, t0);
         let flushed = cache.learn(addr, NeighborLearn::confirmed_override(other), t0);
         assert!(flushed.is_empty());
         assert_eq!(cache.entries[&addr].state, NudState::Permanent);
@@ -715,8 +729,27 @@ mod tests {
         let mac = sample_mac();
         let t0 = now_at(1);
         let _ = cache.learn(dynamic, NeighborLearn::confirmed_override(mac), t0);
-        cache.sync_permanent(&[(static_addr, mac)], t0);
+        let flushed = cache.sync_permanent(&[(static_addr, mac)], t0);
+        assert!(flushed.is_empty());
         assert_eq!(cache.entries[&dynamic].state, NudState::Reachable);
         assert_eq!(cache.entries[&static_addr].state, NudState::Permanent);
+    }
+
+    #[def_test]
+    fn permanent_install_flushes_incomplete_pending() {
+        let mut cache = NeighborCache::new();
+        let addr = sample_addr();
+        let mac = sample_mac();
+        let t0 = now_at(1);
+        let _ = cache.resolve(addr, packet(), t0);
+        assert_eq!(cache.entries[&addr].state, NudState::Incomplete);
+        assert_eq!(cache.pending_len, 1);
+
+        let flushed = cache.insert_permanent(addr, mac, t0);
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(cache.pending_len, 0);
+        assert_eq!(cache.entries[&addr].state, NudState::Permanent);
+        assert_eq!(cache.entries[&addr].hardware_address, Some(mac));
+        assert!(cache.entries[&addr].pending.is_empty());
     }
 }

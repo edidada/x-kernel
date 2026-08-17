@@ -348,7 +348,7 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 5. 广播或组播包复制到所有设备；`0.0.0.0` 到 `255.255.255.255` 的受限广播允许在设备尚未分配 IPv4 地址时直接发送，用于 DHCP 初始化流量。IPv6 组播直接映射 Ethernet 组播 MAC（`33:33:xx:xx:xx:xx`）。
 6. 单播包通过 `RouteTable::lookup` 选择最长前缀路由；IPv6 link-local 目的直接 on-link。
 7. Ethernet 设备先查邻居 cache（IPv4 用 ARP，IPv6 用 NDP）。`REACHABLE` / `DELAY` / `PROBE` / `PERMANENT` 直接封装 Ethernet frame；`STALE` 先把条目转入 `DELAY` 再用缓存 MAC 发送。
-8. 无映射或 `FAILED` 时进入 `INCOMPLETE`：发送组播 NS / ARP request，并把 IP 包放入该邻居的 pending 队列。`RetransTimer`（1 s）到期后最多重试 3 次，仍无应答则标记 `FAILED` 并丢弃排队报文。NUD 在 `DELAY` 超时后发送单播探测。
+8. 无映射或 `FAILED` 时进入 `INCOMPLETE`：发送组播 NS / ARP request，并把 IP 包放入该邻居的 pending 队列。`RetransTimer`（1 s）到期后最多重试 3 次，仍无应答则标记 `FAILED` 并丢弃排队报文。请求 NA / ARP reply，以及 netlink 将同地址安装为 `PERMANENT`，会冲刷该邻居的 pending 队列后发出。NUD 在 `DELAY` 超时后发送单播探测。
 
 当前实现保留 smoltcp TCP（含 TCPv6）、raw socket 和 DNS 推进。UDP、IPv4 分片重组、输出分片、ICMPv4/ICMPv6 UDP 差错报告和 NDP 使用 crate 内实现。
 `PacketBuf`、`link::wire`、`stack::ipv4`、`stack::ipv6` 提供设备与 crate 内 IP/UDP 数据路径共用的报文表示和 parser/emitter。
@@ -434,7 +434,7 @@ ICMPv6 差错查找同样用到达接口填 quoted 地址的 scope，使绑定�
 IPv6 endpoint 的文本格式遵循 `[address%scope]:port`，避免地址与端口之间的冒号歧义。
 当前不实现 `IPV6_FLOWINFO_SEND` 或 flow-label 路由；`sockaddr_in6.sin6_flowinfo`
 进入原生 endpoint 时会被有意归零，`getsockname`、`getpeername` 和接收地址也返回零。
-邻居缓存由 `device/neighbor` 的 NUD 状态机管理，对齐 Linux 6.8 `net/core/neighbour.c`：动态条目经历 `INCOMPLETE` / `REACHABLE` / `STALE` / `DELAY` / `PROBE` / `FAILED`；netlink 静态邻居为 `PERMANENT`，不做探测。ReachableTime 在 BaseReachableTime（30 s）的 0.5–1.5 倍之间取值；DelayFirstProbeTime 为 5 s；组播解析与单播 NUD 探测各最多 3 次、间隔 1 s。请求 NA / ARP reply 将条目标为 `REACHABLE`；NS SLLA / 非请求 NA / ARP request 标为 `STALE`。`RTM_GETNEIGH` 导出该表。尚未接入 TCP/UDP 的 upper-layer reachability hint，因此 `DELAY` 在 5 s 内收不到请求 NA 就会进入 `PROBE`。
+邻居缓存由 `device/neighbor` 的 NUD 状态机管理，对齐 Linux 6.8 `net/core/neighbour.c`：动态条目经历 `INCOMPLETE` / `REACHABLE` / `STALE` / `DELAY` / `PROBE` / `FAILED`；netlink 静态邻居为 `PERMANENT`，不做探测。ReachableTime 在 BaseReachableTime（30 s）的 0.5–1.5 倍之间取值；DelayFirstProbeTime 为 5 s；组播解析与单播 NUD 探测各最多 3 次、间隔 1 s。请求 NA / ARP reply 将条目标为 `REACHABLE` 并冲刷 pending；NS SLLA / 非请求 NA / ARP request 标为 `STALE`；netlink 安装 `PERMANENT` 覆盖尚未 `NUD_VALID` 的条目时同样冲刷 pending（Linux `__neigh_update` 对 `arp_queue` 的行为）。`RTM_GETNEIGH` 导出该表。尚未接入 TCP/UDP 的 upper-layer reachability hint，因此 `DELAY` 在 5 s 内收不到请求 NA 就会进入 `PROBE`。
 
 ### NAPI 风格预算推进
 
