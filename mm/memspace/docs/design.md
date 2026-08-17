@@ -206,6 +206,41 @@ This allows runtimes such as shared file mappings to keep writable VMAs backed
 by write-protected PTEs until the first write fault performs runtime-specific
 dirty tracking.
 
+When the requested protection includes `EXECUTE`, `MmSpace::protect()` makes
+the protected bytes executable-safe after the permission switch completes.
+Userspace runtimes write generated code through a writable mapping before
+raising it to `PROT_EXEC`, and cores without hardware I/D-cache coherency
+(architecturally: AArch64 with `CTR_EL0.IDC = 0`) require a
+clean-then-invalidate sequence for that transition:
+
+1. presently mapped pages in the range are walked through the page table, and
+   each page's dirty data-cache lines are cleaned to the point of unification
+   via the kernel direct map (`karch::clean_dcache_range_to_pou`);
+2. one global instruction-cache synchronization
+   (`karch::flush_icache_all`) covers the local core and broadcasts a kipi
+   IPI round so every other core executes its pipeline barrier.
+
+Pages that are not presently mapped carry no writes from this address space;
+they are synchronized by the backend mapping paths when they fault in. The
+data-side clean only reaches lines resident in the executing core's D-cache,
+which covers the POSIX model where the same thread performed the writes; a
+thread that wrote code on another core publishes through the architecture's
+user-mode cache-maintenance ABI (`__clear_cache`), matching the Linux arm64
+convention. RISC-V `fence.i`, LoongArch64 `ibar`, and x86_64 need no separate
+data-side clean, so the clean primitive is a no-op there.
+
+The global sync may run while the address-space sleepable lock is held. The
+remote interaction is one kipi multicast IPI whose callback executes a single
+barrier instruction and never blocks, which is the same convention as the TLB
+shootdown performed under the same lock. If IPI delivery fails, the initiator
+logs a warning and returns; the kernel treats the remote half as best-effort,
+as it does for TLB shootdown IPI failures. The extent of the resulting
+staleness is architecture-specific: on AArch64 the `ic iallu` broadcast
+itself reaches every PE in the inner-shareable domain, so a missed IPI only
+skips the remote `isb` pipeline flush; on RISC-V and LoongArch64 the remote
+core performs nothing until its next local icache sync (any subsequent
+`flush_icache_all` broadcast, or the `riscv_flush_icache` syscall).
+
 ### Fork
 
 1. 新建 child `MmSpace`。

@@ -26,3 +26,7 @@ pub fn flush_icache_all() {}
 /// Flushes the instruction cache for the given virtual address range (no-op on x86_64).
 #[inline]
 pub fn flush_icache_range(_start: VirtAddr, _size: usize) {}
+
+/// Cleans the data cache range to the Point of Unification (no-op on x86_64).
+#[inline]
+pub fn clean_dcache_range_to_pou(_start: VirtAddr, _size: usize) {}

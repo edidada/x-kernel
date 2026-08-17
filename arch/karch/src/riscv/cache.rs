@@ -45,3 +45,11 @@ pub fn flush_icache_all() {
 pub fn flush_icache_range(_start: VirtAddr, _size: usize) {
     flush_icache_all();
 }
+
+/// Cleans the data cache range to the Point of Unification (no-op on RISC-V).
+///
+/// `fence.i` on RISC-V orders prior stores with subsequent instruction
+/// fetches on the same hart, so no separate data-side clean is required
+/// before it.
+#[inline]
+pub fn clean_dcache_range_to_pou(_start: VirtAddr, _size: usize) {}

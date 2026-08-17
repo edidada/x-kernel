@@ -518,8 +518,38 @@ impl MmSpace {
             }
             modify.finish();
         }
+        if flags.contains(MappingFlags::EXECUTE) {
+            self.sync_icache_for_executable(start, size);
+        }
         self.vmas.protect(start, size, flags);
         Ok(())
+    }
+
+    /// Makes the bytes of `range` executable-safe after `protect_mapping_range`
+    /// raised them to `EXECUTE`.
+    ///
+    /// Userspace runtimes write generated code through a writable mapping
+    /// before raising it to `PROT_EXEC`. Cores without hardware I/D-cache
+    /// coherency need the dirty data-cache lines cleaned to the point of
+    /// unification (required when `CTR_EL0.IDC = 0`, harmless otherwise) plus
+    /// one instruction-cache synchronization for that transition. The clean
+    /// walks the presently mapped pages of the range through the kernel direct
+    /// map; pages that are not faulted in yet carry no writes from this
+    /// address space and are synchronized when they are mapped. The final
+    /// [`karch::flush_icache_all`] covers the local core and broadcasts one
+    /// kipi IPI round so every other core executes its pipeline barrier.
+    ///
+    /// Runs with the address-space sleepable lock held. The only remote
+    /// interaction is that IPI, whose callback executes a single barrier
+    /// instruction, matching the TLB-shootdown convention under the same lock.
+    fn sync_icache_for_executable(&self, start: VirtAddr, size: usize) {
+        let end = (start + size).align_up_4k();
+        for vaddr in PageIter4K::new(start, end).expect("Failed to create page iterator") {
+            if let Ok((paddr, ..)) = self.pgtbl.query(vaddr) {
+                karch::clean_dcache_range_to_pou(p2v(paddr), PAGE_SIZE_4K);
+            }
+        }
+        karch::flush_icache_all();
     }
 
     fn clear_all_mappings(&mut self) {
@@ -1243,6 +1273,17 @@ impl MmSpace {
     ///
     /// Returns an error if the address range is out of the address space or not
     /// aligned.
+    ///
+    /// When `flags` contains [`MappingFlags::EXECUTE`], this additionally
+    /// synchronizes the instruction cache for the range: presently mapped
+    /// pages have their dirty data-cache lines cleaned to the point of
+    /// unification, and one global instruction-cache sync is broadcast to all
+    /// cores via a kipi IPI round. Callers may hold the address-space
+    /// sleepable lock across this call; the remote IPI callback executes a
+    /// single barrier instruction and does not block, matching the
+    /// TLB-shootdown convention under the same lock. On cores where the IPI
+    /// could not be delivered the remote half of the sync is skipped; see
+    /// `docs/design.md` for the architecture-specific staleness bounds.
     pub fn protect(&mut self, start: VirtAddr, size: usize, flags: MappingFlags) -> KResult {
         self.drain_pending_invalidations();
         self.validate_region(start, size)?;

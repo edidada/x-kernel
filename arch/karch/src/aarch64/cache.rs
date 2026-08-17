@@ -73,6 +73,31 @@ pub fn flush_icache_range(start: VirtAddr, size: usize) {
     }
 }
 
+/// Cleans every data cache line covering `[start, start + size)` to the Point
+/// of Unification.
+///
+/// This is the required data-side half of the clean-then-invalidate sequence
+/// before freshly written bytes may be fetched as instructions on cores with
+/// `CTR_EL0.IDC = 0`: instruction fetches observe memory at the PoU, so dirty
+/// D-cache lines must be cleaned there first. The clean only reaches lines
+/// resident in the executing CPU's data cache; lines dirtied by another CPU
+/// are that CPU's responsibility. When `CTR_EL0.IDC = 1` this is redundant
+/// but harmless, so the clean is issued unconditionally.
+#[inline]
+pub fn clean_dcache_range_to_pou(start: VirtAddr, size: usize) {
+    let addr = start.as_usize() & !(CACHE_LINE - 1);
+    let end = (start.as_usize() + size + CACHE_LINE - 1) & !(CACHE_LINE - 1);
+    for va in (addr..end).step_by(CACHE_LINE) {
+        // SAFETY: `dc cvau` cleans the cache line containing `va` to the
+        // Point of Unification. The address is aligned down to a cache-line
+        // boundary, and the instruction is valid at all privilege levels.
+        unsafe { asm!("dc cvau, {0:x}", in(reg) va) };
+    }
+    // SAFETY: `dsb sy` waits until every preceding clean reaches the PoU
+    // before the caller proceeds to instruction-cache invalidation.
+    unsafe { asm!("dsb sy") };
+}
+
 /// Cleans the data cache line covering `vaddr` to the Point of Coherency.
 ///
 /// This is the correct primitive when the current CPU wrote shared boot or
