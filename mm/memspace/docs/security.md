@@ -88,6 +88,9 @@
 - 持锁期间**不执行**同步 TLB shootdown：页表提交用
   `PageTableMut::finish_no_flush()`，flush 在锁释放后进行，避免 target
   CPU 在等同一把锁（中断关）时无法应答 shootdown IPI 而互相死锁。
+- 已拆除 PTE 的 vmalloc 区间必须保留在 `VMALLOC` interval table，直到本地
+  与远端 TLB flush 都完成后才可重新分配；否则新映射可能命中旧 TLB 翻译并
+  写入已释放的物理页。
 - 释放路径的 flush 必须覆盖本 CPU：远端广播（`flush_all_cpus`）不刷发起
   者自身，本地 `karch::flush_tlb` 不可省略，否则 VA 复用后本 CPU 经陈旧
   TLB 项访问到错误物理页（UAF）。
@@ -123,8 +126,9 @@
 5. COW write fault 覆盖竞争 PTE。
    - 防护：COW path 同时比较 object slot 和 `PteSnapshot`，变化时返回 retry。
 
-6. TLB stale entry 访问已释放 frame。
-   - 防护：释放 detached frame 前显式完成 `PageTableMut::finish()`。
+6. TLB stale entry 访问已释放 frame 或复用 VA 的新映射。
+   - 防护：释放 detached frame 前显式完成 TLB flush，且在 flush 完成前保留
+     vmalloc interval table 条目，禁止该 VA 被重新分配。
 
 7. 调度切换时过早把当前 CPU 从旧 mm 的目标集合移除。
    - 防护：切入路径先把 CPU 发布到新 mm，待硬件页表切换完成后再从旧 mm 清除。

@@ -68,8 +68,10 @@ kernel memory），内核栈是其首个客户。结构与 Linux 对齐：
 统一在锁释放后进行（本地 `karch::flush_tlb` + 远端
 `kipi::tlb::flush_all_cpus`——后者只刷远端 CPU，本地必须由调用方补刷，
 且不受 `ALL_CPUS_STARTED` 门控，覆盖 early boot），避免 target CPU
-等锁（中断关）时无法应答 IPI 的互相死锁。deferred 释放走无锁链表，
-IRQ 上下文不会取 `VMALLOC` 锁。
+等锁（中断关）时无法应答 IPI 的互相死锁。释放已拆除 PTE 的区间在 flush
+完成前仍保留在 interval table，随后才重新获取 `VMALLOC` 锁将其释放；因此
+并发分配不会在任一 CPU 仍持有旧 TLB 翻译时复用该 VA。deferred 释放走无锁
+链表，IRQ 上下文不会取 `VMALLOC` 锁。
 死锁复盘见 `docs/issues/2026-08-17-tlb-shootdown-deadlock.md`。
 
 ## 架构

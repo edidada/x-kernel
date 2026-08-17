@@ -25,9 +25,11 @@
 //! [`kipi::tlb::flush_all_cpus`] — after releasing the locks. This avoids
 //! deadlocking when a target CPU is spinning on one of these locks with IRQs
 //! disabled and thus cannot service the shootdown IPI. `alloc` needs no
-//! flush: a fresh VA has no stale TLB entries, and a reused VA was already
-//! flushed by the preceding `free`. The deferred-free list is lock-free
-//! (Treiber stack) so it can be touched from IRQ context.
+//! flush: a fresh VA has no stale TLB entries, and a freed VA stays reserved
+//! in the interval table until the preceding `free`'s system-wide flush has
+//! completed, so a reused VA cannot have stale entries on any CPU. The
+//! deferred-free list is lock-free (Treiber stack) so it can be touched from
+//! IRQ context.
 
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
@@ -188,11 +190,10 @@ pub fn alloc_with(opts: VmAllocOptions) -> KResult<(VmRegion, Vec<usize>)> {
     drop(vstate);
 
     // No TLB flush here: a freshly allocated VA has no stale TLB entries, and
-    // a reused VA is covered by the preceding `free_sync`'s system-wide flush
-    // (local `karch::flush_tlb` + remote `flush_all_cpus`, a full kernel-TLB
-    // invalidation; like Linux's lazy vfree flush there is a tiny window
-    // between unmap and flush, but the full flush runs on every CPU and
-    // clears both the stale and the new mapping).
+    // a reused VA is published back to the interval table by `free_sync` only
+    // after its system-wide flush (local `karch::flush_tlb` + remote
+    // `flush_all_cpus`) has completed, so no CPU can still hold a stale entry
+    // for it.
     Ok((
         VmRegion {
             va,
@@ -255,9 +256,9 @@ fn free_sync(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
     let usable = region.size.saturating_sub(guard);
     let usable_start = region.va + guard;
 
-    // Hold the VMALLOC lock across the unmap so a concurrent alloc can never
-    // first-fit into this VA between the areas removal and the PTE teardown.
-    let mut vstate = VMALLOC.lock();
+    // Keep this VA reserved while tearing down its PTEs. The entry remains in
+    // the interval table until the subsequent TLB shootdown has completed.
+    let vstate = VMALLOC.lock();
     let mut need_flush = false;
     if usable > 0 {
         let mut aspace = kernel_layout().lock();
@@ -279,7 +280,6 @@ fn free_sync(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
         drop(aspace);
         need_flush = true;
     }
-    vstate.areas.remove(&region.va.as_usize());
     drop(vstate);
 
     if need_flush {
@@ -294,6 +294,12 @@ fn free_sync(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
         karch::flush_tlb(None);
         kipi::tlb::flush_all_cpus(None);
     }
+
+    // Do not make this VA available again until every CPU has discarded the
+    // previous mapping. Holding `VMALLOC` across the shootdown could deadlock
+    // a target CPU that is waiting on this lock with IRQs disabled, so release
+    // the interval only after the lock-free flush has completed.
+    VMALLOC.lock().areas.remove(&region.va.as_usize());
 
     for dm_va in pages {
         global_allocator().dealloc_pages(dm_va, 1, kalloc::UsageKind::VirtMem);
