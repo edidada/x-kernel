@@ -2,169 +2,46 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Slab-based byte allocator for kernel heap.
+//! Slab-based byte allocator backed by an internal buddy page allocator.
 //!
-//! Implements a size-class slab allocator backed by an internal buddy page
-//! allocator. Small allocations (≤ 2048 bytes) are served from fixed-size
-//! slabs; larger allocations fall through to the buddy allocator directly.
-//!
-//! References: Asterinas `heap-allocator/src/allocator.rs`,
-//!             `ax_slab_allocator/src/lib.rs`.
+//! Small allocations are served by one [`SlabCache`] per [`SizeClass`].  Each
+//! cache owns the metadata for every backing slab span, so completely empty
+//! spans can be detached and returned to the internal buddy allocator.
+//! Requests outside the slab size classes are allocated directly from buddy.
 
-use core::alloc::Layout;
+use core::{alloc::Layout, ptr::NonNull};
 
-use crate::{AllocError, buddy_alloc::BuddyAllocator, slab_trait::SizeClass};
+use crate::{AllocError, BuddyAllocator, SIZE_CLASS_COUNT, SizeClass, SlabCache};
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/// Internal page size used for expanding slabs.
+/// Internal base page size used by this byte allocator.
 const PAGE_SIZE: usize = 4096;
-
-/// Sentinel: freelist is empty.
-const LIST_EMPTY: usize = 0;
-
-// ---------------------------------------------------------------------------
-// Slab — one size class
-// ---------------------------------------------------------------------------
-
-/// One size-class slab.
-struct Slab<const BLK_SIZE: usize> {
-    /// Total number of blocks ever carved out for this slab (for stats).
-    total_blocks: usize,
-    /// Head of the intrusive freelist. `LIST_EMPTY` means empty.
-    free_head: usize,
-}
-
-impl<const BLK_SIZE: usize> Slab<BLK_SIZE> {
-    const fn new() -> Self {
-        Self {
-            total_blocks: 0,
-            free_head: LIST_EMPTY,
-        }
-    }
-
-    fn total_bytes(&self) -> usize {
-        self.total_blocks * BLK_SIZE
-    }
-
-    fn used_blocks(&self) -> usize {
-        let free = self.count_free();
-        self.total_blocks.saturating_sub(free)
-    }
-
-    fn used_bytes(&self) -> usize {
-        self.used_blocks() * BLK_SIZE
-    }
-
-    fn count_free(&self) -> usize {
-        let mut count = 0usize;
-        let mut cur = self.free_head;
-        while cur != LIST_EMPTY {
-            count += 1;
-            // SAFETY: cur is on the slab freelist; each free block
-            // stores its next pointer at offset 0.
-            cur = unsafe { Slab::<BLK_SIZE>::read_next(cur) };
-        }
-        count
-    }
-
-    /// Pop a block from the freelist. Returns `None` if empty.
-    fn pop(&mut self) -> Option<usize> {
-        if self.free_head == LIST_EMPTY {
-            return None;
-        }
-        let addr = self.free_head;
-        // SAFETY: addr was the head of the freelist; its first bytes
-        // store the next free block pointer.
-        self.free_head = unsafe { Self::read_next(addr) };
-        Some(addr)
-    }
-
-    /// Push a block back onto the freelist.
-    fn push(&mut self, addr: usize) {
-        // SAFETY: addr is the freed block; writing the next pointer
-        // into its first bytes is safe — the block is no longer in use.
-        unsafe { Self::write_next(addr, self.free_head) };
-        self.free_head = addr;
-    }
-
-    /// Expand the slab by carving `num_blocks` out of `base`.
-    fn expand_from(&mut self, base: usize, num_blocks: usize) {
-        for i in 0..num_blocks {
-            self.push(base + i * BLK_SIZE);
-        }
-        self.total_blocks += num_blocks;
-    }
-
-    // --- intrusive freelist helpers ---
-
-    unsafe fn read_next(addr: usize) -> usize {
-        // SAFETY: caller guarantees addr points to a free slab block whose
-        // first bytes store the next pointer.
-        unsafe { *(addr as *const usize) }
-    }
-
-    unsafe fn write_next(addr: usize, next: usize) {
-        // SAFETY: caller guarantees addr points to a free slab block;
-        // writing the next pointer there is safe.
-        unsafe { (addr as *mut usize).write(next) };
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SlabHeap
-// ---------------------------------------------------------------------------
 
 /// Size-class slab byte allocator.
 ///
-/// Manages a fixed memory region via an internal buddy page allocator.
-/// Allocations are served from the slab whose block size is the smallest
-/// that fits the request.
+/// `SlabHeap` manages a fixed memory region with an internal buddy allocator.
+/// It owns one [`SlabCache`] for each [`SizeClass`]; backing spans are allocated
+/// from and returned to that buddy allocator only at cache refill and shrink
+/// boundaries.
 pub struct SlabHeap {
-    slab_8: Slab<8>,
-    slab_16: Slab<16>,
-    slab_32: Slab<32>,
-    slab_64: Slab<64>,
-    slab_128: Slab<128>,
-    slab_256: Slab<256>,
-    slab_512: Slab<512>,
-    slab_1024: Slab<1024>,
-    slab_2048: Slab<2048>,
-    /// Internal buddy for managing the region and large allocations.
+    slabs: [SlabCache<PAGE_SIZE>; SIZE_CLASS_COUNT],
+    /// Internal buddy for heap regions and requests outside slab classes.
     buddy: BuddyAllocator<PAGE_SIZE>,
 }
 
 impl SlabHeap {
-    // ------------------------------------------------------------------
-    // Construction
-    // ------------------------------------------------------------------
-
     /// Creates a new heap backed by memory at `[start, start + size)`.
     ///
     /// # Safety
     ///
-    /// The caller must ensure the memory range is valid, not used for
-    /// anything else, and remains accessible for the lifetime of the heap.
+    /// The caller must ensure the memory range is valid, not used for anything
+    /// else, and remains accessible for the lifetime of this heap.
     pub unsafe fn new(start: usize, size: usize) -> Self {
         let mut heap = Self {
-            slab_8: Slab::new(),
-            slab_16: Slab::new(),
-            slab_32: Slab::new(),
-            slab_64: Slab::new(),
-            slab_128: Slab::new(),
-            slab_256: Slab::new(),
-            slab_512: Slab::new(),
-            slab_1024: Slab::new(),
-            slab_2048: Slab::new(),
+            slabs: Self::new_slab_caches(),
             buddy: BuddyAllocator::new(),
         };
-        heap.buddy.init_region(start, size).unwrap_or_else(|e| {
-            panic!(
-                "SlabHeap::new init_region({:#x}, {:#x}) failed: {:?}",
-                start, size, e
-            )
+        heap.buddy.init_region(start, size).unwrap_or_else(|error| {
+            panic!("SlabHeap::new init_region({start:#x}, {size:#x}) failed: {error:?}",)
         });
         heap
     }
@@ -173,122 +50,76 @@ impl SlabHeap {
     ///
     /// # Safety
     ///
-    /// The caller must ensure the memory range is valid and does not
-    /// overlap with existing managed memory.
+    /// The caller must ensure the memory range is valid, does not overlap an
+    /// existing managed range, and remains accessible for this heap's lifetime.
     pub unsafe fn add_memory(&mut self, start: usize, size: usize) {
-        self.buddy.add_region(start, size).unwrap_or_else(|e| {
-            panic!(
-                "SlabHeap::add_memory add_region({:#x}, {:#x}) failed: {:?}",
-                start, size, e
-            )
+        self.buddy.add_region(start, size).unwrap_or_else(|error| {
+            panic!("SlabHeap::add_memory add_region({start:#x}, {size:#x}) failed: {error:?}",)
         });
     }
 
-    // ------------------------------------------------------------------
-    // Allocation
-    // ------------------------------------------------------------------
-
-    /// Allocates memory with the given layout.
+    /// Allocates memory with `layout`.
     ///
-    /// Returns the address of the allocated block on success.
+    /// Small layouts use the smallest matching [`SizeClass`].  Other layouts
+    /// are allocated directly from the internal buddy allocator.
+    ///
+    /// # Errors
+    ///
+    /// Returns an allocation error when the backing buddy allocator cannot
+    /// satisfy a refill or direct allocation request.
     pub fn allocate(&mut self, layout: Layout) -> Result<usize, AllocError> {
-        let SlabHeap {
-            slab_8,
-            slab_16,
-            slab_32,
-            slab_64,
-            slab_128,
-            slab_256,
-            slab_512,
-            slab_1024,
-            slab_2048,
-            buddy,
-        } = self;
-
         match SizeClass::from_layout(layout) {
-            Some(SizeClass::Bytes8) => slab_alloc::<8>(buddy, slab_8),
-            Some(SizeClass::Bytes16) => slab_alloc::<16>(buddy, slab_16),
-            Some(SizeClass::Bytes32) => slab_alloc::<32>(buddy, slab_32),
-            Some(SizeClass::Bytes64) => slab_alloc::<64>(buddy, slab_64),
-            Some(SizeClass::Bytes128) => slab_alloc::<128>(buddy, slab_128),
-            Some(SizeClass::Bytes256) => slab_alloc::<256>(buddy, slab_256),
-            Some(SizeClass::Bytes512) => slab_alloc::<512>(buddy, slab_512),
-            Some(SizeClass::Bytes1024) => slab_alloc::<1024>(buddy, slab_1024),
-            Some(SizeClass::Bytes2048) => slab_alloc::<2048>(buddy, slab_2048),
+            Some(size_class) => self.allocate_slab(size_class),
             None => {
-                let pages = layout.size().div_ceil(PAGE_SIZE);
-                let align = layout.align().max(PAGE_SIZE);
-                buddy.allocate_pages(pages, align)
+                let page_count = layout.size().div_ceil(PAGE_SIZE);
+                let alignment = layout.align().max(PAGE_SIZE);
+                self.buddy.allocate_pages(page_count, alignment)
             }
         }
     }
-}
-
-/// Allocate from a slab, expanding from the buddy if empty.
-fn slab_alloc<const BLK_SIZE: usize>(
-    buddy: &mut BuddyAllocator<PAGE_SIZE>,
-    slab: &mut Slab<BLK_SIZE>,
-) -> Result<usize, AllocError> {
-    if let Some(addr) = slab.pop() {
-        return Ok(addr);
-    }
-
-    // Expand: allocate enough pages to cover at least one block.
-    let expand_bytes = PAGE_SIZE.max(BLK_SIZE);
-    let expand_pages = expand_bytes.div_ceil(PAGE_SIZE);
-    let base = buddy
-        .allocate_pages(expand_pages, PAGE_SIZE)
-        .map_err(|_| AllocError::NoMemory)?;
-    let num_blocks = (expand_pages * PAGE_SIZE) / BLK_SIZE;
-    slab.expand_from(base, num_blocks);
-    slab.pop().ok_or(AllocError::NoMemory)
-}
-
-impl SlabHeap {
-    // ------------------------------------------------------------------
-    // Deallocation
-    // ------------------------------------------------------------------
 
     /// Frees a block previously allocated by [`allocate`](Self::allocate).
     ///
     /// # Safety
     ///
-    /// `ptr` must have been returned by a previous call to `allocate`
-    /// with the same `layout`.
+    /// `ptr` must have been returned by a previous call to
+    /// [`allocate`](Self::allocate) with the same `layout`, must not have been
+    /// deallocated already, and must not be accessed after this call.
     pub unsafe fn deallocate(&mut self, ptr: usize, layout: Layout) {
-        let SlabHeap {
-            slab_8,
-            slab_16,
-            slab_32,
-            slab_64,
-            slab_128,
-            slab_256,
-            slab_512,
-            slab_1024,
-            slab_2048,
-            buddy,
-        } = self;
-
         match SizeClass::from_layout(layout) {
-            Some(SizeClass::Bytes8) => slab_8.push(ptr),
-            Some(SizeClass::Bytes16) => slab_16.push(ptr),
-            Some(SizeClass::Bytes32) => slab_32.push(ptr),
-            Some(SizeClass::Bytes64) => slab_64.push(ptr),
-            Some(SizeClass::Bytes128) => slab_128.push(ptr),
-            Some(SizeClass::Bytes256) => slab_256.push(ptr),
-            Some(SizeClass::Bytes512) => slab_512.push(ptr),
-            Some(SizeClass::Bytes1024) => slab_1024.push(ptr),
-            Some(SizeClass::Bytes2048) => slab_2048.push(ptr),
+            Some(size_class) => {
+                // SAFETY: the caller guarantees `ptr` came from this heap, so
+                // a slab allocation is necessarily non-null.
+                let object = unsafe { NonNull::new_unchecked(ptr as *mut u8) };
+                // SAFETY: the caller's allocation/one-time-free contract is
+                // exactly the `SlabCache::deallocate` contract for this class.
+                unsafe { self.slab_cache_mut(size_class).deallocate(object) };
+            }
             None => {
-                let pages = layout.size().div_ceil(PAGE_SIZE);
-                buddy.deallocate_pages(ptr, pages);
+                let page_count = layout.size().div_ceil(PAGE_SIZE);
+                self.buddy.deallocate_pages(ptr, page_count);
             }
         }
     }
 
-    // ------------------------------------------------------------------
-    // Statistics
-    // ------------------------------------------------------------------
+    /// Detach all completely free slab spans and return them to buddy.
+    ///
+    /// The return value is the number of base pages released.  Spans with one
+    /// or more live objects remain cached and are not returned.
+    #[must_use = "the released page count is useful to reclaim and memory-pressure callers"]
+    pub fn shrink(&mut self) -> usize {
+        let mut released_pages = 0usize;
+
+        for index in 0..SIZE_CLASS_COUNT {
+            while let Some(backing) = self.slabs[index].take_empty_slab() {
+                self.buddy
+                    .deallocate_pages(backing.base().as_ptr() as usize, backing.pages());
+                released_pages = released_pages.saturating_add(backing.pages());
+            }
+        }
+
+        released_pages
+    }
 
     /// Total managed heap size in bytes.
     pub fn total_bytes(&self) -> usize {
@@ -296,43 +127,88 @@ impl SlabHeap {
     }
 
     /// Currently allocated bytes.
+    ///
+    /// Small allocations are reported in their size-class granularity.  Large
+    /// allocations retain buddy's page granularity.
     pub fn used_bytes(&self) -> usize {
-        self.slab_8.used_bytes()
-            + self.slab_16.used_bytes()
-            + self.slab_32.used_bytes()
-            + self.slab_64.used_bytes()
-            + self.slab_128.used_bytes()
-            + self.slab_256.used_bytes()
-            + self.slab_512.used_bytes()
-            + self.slab_1024.used_bytes()
-            + self.slab_2048.used_bytes()
-            + self
-                .buddy
-                .allocated_bytes()
-                .saturating_sub(self.slab_total_bytes())
+        let direct_buddy_bytes = self
+            .buddy
+            .allocated_bytes()
+            .saturating_sub(self.slab_backing_bytes());
+        self.slab_used_bytes().saturating_add(direct_buddy_bytes)
     }
 
-    /// Available bytes.
+    /// Available bytes according to the heap's allocation accounting.
     pub fn available_bytes(&self) -> usize {
         self.total_bytes().saturating_sub(self.used_bytes())
     }
 
-    fn slab_total_bytes(&self) -> usize {
-        self.slab_8.total_bytes()
-            + self.slab_16.total_bytes()
-            + self.slab_32.total_bytes()
-            + self.slab_64.total_bytes()
-            + self.slab_128.total_bytes()
-            + self.slab_256.total_bytes()
-            + self.slab_512.total_bytes()
-            + self.slab_1024.total_bytes()
-            + self.slab_2048.total_bytes()
+    fn new_slab_caches() -> [SlabCache<PAGE_SIZE>; SIZE_CLASS_COUNT] {
+        [
+            SlabCache::new(SizeClass::Bytes8),
+            SlabCache::new(SizeClass::Bytes16),
+            SlabCache::new(SizeClass::Bytes32),
+            SlabCache::new(SizeClass::Bytes64),
+            SlabCache::new(SizeClass::Bytes128),
+            SlabCache::new(SizeClass::Bytes256),
+            SlabCache::new(SizeClass::Bytes512),
+            SlabCache::new(SizeClass::Bytes1024),
+            SlabCache::new(SizeClass::Bytes2048),
+        ]
+    }
+
+    fn allocate_slab(&mut self, size_class: SizeClass) -> Result<usize, AllocError> {
+        if let Some(object) = self.slab_cache_mut(size_class).allocate() {
+            return Ok(object.as_ptr() as usize);
+        }
+
+        let (page_count, span_alignment) = {
+            let cache = self.slab_cache(size_class);
+            (cache.slab_pages(), cache.slab_bytes())
+        };
+        let base = self.buddy.allocate_pages(page_count, span_alignment)?;
+        // SAFETY: a successful buddy allocation is a non-null, mapped span
+        // with exactly `page_count` base pages and `span_alignment` alignment.
+        let backing = unsafe { NonNull::new_unchecked(base as *mut u8) };
+
+        let publish_result = {
+            let cache = self.slab_cache_mut(size_class);
+            // SAFETY: `backing` was allocated above with the cache's page
+            // count and span alignment.  It is exclusively owned until a
+            // later `take_empty_slab` detaches it.
+            unsafe { cache.add_slab(backing) }
+        };
+        if let Err(error) = publish_result {
+            self.buddy.deallocate_pages(base, page_count);
+            return Err(error);
+        }
+
+        self.slab_cache_mut(size_class)
+            .allocate()
+            .map(|object| object.as_ptr() as usize)
+            .ok_or(AllocError::NoMemory)
+    }
+
+    fn slab_cache(&self, size_class: SizeClass) -> &SlabCache<PAGE_SIZE> {
+        &self.slabs[size_class.index()]
+    }
+
+    fn slab_cache_mut(&mut self, size_class: SizeClass) -> &mut SlabCache<PAGE_SIZE> {
+        &mut self.slabs[size_class.index()]
+    }
+
+    fn slab_backing_bytes(&self) -> usize {
+        self.slabs.iter().fold(0, |bytes, cache| {
+            bytes.saturating_add(cache.backing_bytes())
+        })
+    }
+
+    fn slab_used_bytes(&self) -> usize {
+        self.slabs
+            .iter()
+            .fold(0, |bytes, cache| bytes.saturating_add(cache.used_bytes()))
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(unittest)]
 #[allow(missing_docs)]
@@ -341,13 +217,13 @@ mod tests {
 
     use unittest::def_test;
 
-    use super::*;
+    use super::{PAGE_SIZE, SizeClass, SlabHeap};
 
     fn make_heap() -> SlabHeap {
-        let mem = alloc::vec![0u8; 128 * PAGE_SIZE];
-        let base = mem.as_ptr() as usize;
-        let size = mem.len();
-        core::mem::forget(mem);
+        let memory = alloc::vec![0u8; 128 * PAGE_SIZE];
+        let base = memory.as_ptr() as usize;
+        let size = memory.len();
+        core::mem::forget(memory);
         // SAFETY: the Vec's backing memory is leaked and remains valid.
         unsafe { SlabHeap::new(base, size) }
     }
@@ -356,77 +232,105 @@ mod tests {
     fn test_alloc_dealloc_small() {
         let mut heap = make_heap();
         let layout = Layout::from_size_align(64, 8).unwrap();
-        let a1 = heap.allocate(layout).unwrap();
-        let a2 = heap.allocate(layout).unwrap();
-        assert_ne!(a1, a2);
-        // SAFETY: a1 was allocated above with this layout.
-        unsafe { heap.deallocate(a1, layout) };
-        // SAFETY: a2 was allocated above with this layout.
-        unsafe { heap.deallocate(a2, layout) };
+        let first = heap.allocate(layout).unwrap();
+        let second = heap.allocate(layout).unwrap();
+        assert_ne!(first, second);
+        // SAFETY: `first` was allocated above with this layout.
+        unsafe { heap.deallocate(first, layout) };
+        // SAFETY: `second` was allocated above with this layout.
+        unsafe { heap.deallocate(second, layout) };
     }
 
     #[def_test]
     fn test_reuse_freed_block() {
         let mut heap = make_heap();
         let layout = Layout::from_size_align(128, 8).unwrap();
-        let a1 = heap.allocate(layout).unwrap();
-        // SAFETY: a1 was allocated above with this layout.
-        unsafe { heap.deallocate(a1, layout) };
-        let a2 = heap.allocate(layout).unwrap();
-        assert_eq!(a1, a2); // Should reuse the freed block.
+        let first = heap.allocate(layout).unwrap();
+        // SAFETY: `first` was allocated above with this layout.
+        unsafe { heap.deallocate(first, layout) };
+        let second = heap.allocate(layout).unwrap();
+        assert_eq!(first, second);
+        // SAFETY: `second` was allocated above with this layout.
+        unsafe { heap.deallocate(second, layout) };
     }
 
     #[def_test]
     fn test_large_alloc() {
         let mut heap = make_heap();
         let layout = Layout::from_size_align(8192, 8).unwrap();
-        let addr = heap.allocate(layout).unwrap();
-        assert!(addr.is_multiple_of(PAGE_SIZE));
-        // SAFETY: addr was allocated above with this layout.
-        unsafe { heap.deallocate(addr, layout) };
+        let address = heap.allocate(layout).unwrap();
+        assert!(address.is_multiple_of(PAGE_SIZE));
+        // SAFETY: `address` was allocated above with this layout.
+        unsafe { heap.deallocate(address, layout) };
     }
 
     #[def_test]
     fn test_many_allocs() {
         let mut heap = make_heap();
-        let mut addrs = alloc::vec::Vec::new();
+        let layout = Layout::from_size_align(64, 8).unwrap();
+        let mut addresses = alloc::vec::Vec::new();
         for _ in 0..100 {
-            let layout = Layout::from_size_align(64, 8).unwrap();
-            addrs.push(heap.allocate(layout).unwrap());
+            addresses.push(heap.allocate(layout).unwrap());
         }
-        for &addr in addrs.iter() {
-            let layout = Layout::from_size_align(64, 8).unwrap();
-            // SAFETY: each addr was allocated above with this layout.
-            unsafe { heap.deallocate(addr, layout) };
+        for address in addresses {
+            // SAFETY: every address was allocated above with this layout.
+            unsafe { heap.deallocate(address, layout) };
         }
     }
 
     #[def_test]
     fn test_mixed_sizes() {
         let mut heap = make_heap();
-        let l64 = Layout::from_size_align(64, 8).unwrap();
-        let l256 = Layout::from_size_align(256, 8).unwrap();
-        let l1024 = Layout::from_size_align(1024, 8).unwrap();
+        let layout_64 = Layout::from_size_align(64, 8).unwrap();
+        let layout_256 = Layout::from_size_align(256, 8).unwrap();
+        let layout_1024 = Layout::from_size_align(1024, 8).unwrap();
 
-        let a64 = heap.allocate(l64).unwrap();
-        let a256 = heap.allocate(l256).unwrap();
-        let a1024 = heap.allocate(l1024).unwrap();
+        let address_64 = heap.allocate(layout_64).unwrap();
+        let address_256 = heap.allocate(layout_256).unwrap();
+        let address_1024 = heap.allocate(layout_1024).unwrap();
 
-        // SAFETY: a256 was allocated above with l256.
-        unsafe { heap.deallocate(a256, l256) };
-        // SAFETY: a64 was allocated above with l64.
-        unsafe { heap.deallocate(a64, l64) };
-        // SAFETY: a1024 was allocated above with l1024.
-        unsafe { heap.deallocate(a1024, l1024) };
+        // SAFETY: every address was allocated above with its matching layout.
+        unsafe { heap.deallocate(address_256, layout_256) };
+        // SAFETY: every address was allocated above with its matching layout.
+        unsafe { heap.deallocate(address_64, layout_64) };
+        // SAFETY: every address was allocated above with its matching layout.
+        unsafe { heap.deallocate(address_1024, layout_1024) };
 
-        // Should be able to re-allocate.
-        let _ = heap.allocate(l1024).unwrap();
+        assert!(heap.allocate(layout_1024).is_ok());
+    }
+
+    #[def_test]
+    fn test_shrink_releases_only_empty_slab_pages() {
+        let mut heap = make_heap();
+        let layout = Layout::from_size_align(64, 8).unwrap();
+        let address = heap.allocate(layout).unwrap();
+
+        assert_eq!(heap.used_bytes(), SizeClass::Bytes64.size());
+        assert_eq!(heap.shrink(), 0);
+
+        // SAFETY: `address` is the only allocation from this heap.
+        unsafe { heap.deallocate(address, layout) };
+        assert_eq!(heap.shrink(), SizeClass::Bytes64.slab_pages(PAGE_SIZE),);
+        assert_eq!(heap.used_bytes(), 0);
+        assert_eq!(heap.available_bytes(), heap.total_bytes());
+    }
+
+    #[def_test]
+    fn test_large_slab_span_is_aligned_and_reclaimable() {
+        let mut heap = make_heap();
+        let layout = Layout::from_size_align(2048, 2048).unwrap();
+        let address = heap.allocate(layout).unwrap();
+        assert!(address.is_multiple_of(2048));
+
+        // SAFETY: `address` was allocated above with this layout.
+        unsafe { heap.deallocate(address, layout) };
+        assert_eq!(heap.shrink(), SizeClass::Bytes2048.slab_pages(PAGE_SIZE),);
     }
 
     #[def_test]
     fn test_stats() {
         let heap = make_heap();
         assert!(heap.total_bytes() > 0);
-        assert!(heap.available_bytes() > 0);
+        assert_eq!(heap.available_bytes(), heap.total_bytes());
     }
 }

@@ -43,13 +43,17 @@ SlabCache<SizeClass>
         └─ take_empty_slab() -> caller returns pages outside cache mutation
 ```
 
+`SlabHeap` 持有九个这样的 cache 及内部 `BuddyAllocator<4096>`：小对象进入
+对应 cache，cache miss 时从 buddy 获得一个正确对齐的 span，`SlabHeap::shrink`
+则先 detach 空 span 再归还 buddy。非 slab layout 仍走直接 buddy 路径。
+
 每个 backing span 的首部是 `SlabPage`。剩余空间按该 `SizeClass` 对齐并切分为
 对象；空闲对象的首个 machine word 作为 intrusive next link。因此对象被分配给
 调用者期间，其内容不会被 cache 访问或改写。
 
-现有 `SlabHeap` 在这一提交中仍维持自己的 global freelist 实现。`SlabCache`
-作为可复用的 ownership 层先独立落地，后续 heap 与内核 slab cache 会以它替换
-无 page 归属信息的实现。
+`SlabHeap` 已使用 `SlabCache` 替代原先只含跨 page global freelist 的 slab
+实现。更高层的内核 per-CPU cache 仍应建立在 `SlabCache` / `SlabHeap` 提供的
+page ownership 之上，而不能把同一策略施加给任意 `ByteAllocator`。
 
 ## 调用约束 / 执行上下文
 
@@ -81,22 +85,23 @@ SlabCache<SizeClass>
 
 ## 算法流程
 
-1. 上层根据 `SizeClass::from_layout` 路由小对象。
+1. `SlabHeap` 根据 `SizeClass::from_layout` 路由小对象。
 2. `allocate` 优先从 `Partial` 的 freelist 弹出对象；没有 partial page 时将一个
    `Empty` page 移至 `Partial` 后再弹出。最后一个 free object 被弹出时转为 `Full`。
 3. `deallocate` 通过对齐 span 掩码恢复 `SlabPage`，将对象压回该 page 的 freelist。
    `Full` 首次释放转为 `Partial`；最后一个 live object 释放后转为 `Empty`。
-4. shrink/reclaim 上层循环调用 `take_empty_slab`，再把已 detach 的 spans 交给其
-   原页分配器。
+4. `SlabHeap::shrink` 循环调用 `take_empty_slab`，再把已 detach 的 spans 交给其
+   内部 buddy。上层可将它接入内存压力和 OOM 前回收策略。
 
 计数器只统计 cache 已经注册的 span；`add_slab` 在写入 span 前先验证所有可能
 溢出的全局计数，避免错误返回后留下未被 cache 记录的半发布状态。
 
 ## 并发模型
 
-`SlabCache` 本身是非并发数据结构。`&mut self` 使普通 Rust 调用具有排他性，
-但内核上层若通过内部可变性或自旋锁共享它，必须确保每次状态转换、freelist
-读写和空 span detach 都由同一串行化规则保护。
+`SlabCache` 本身是非并发数据结构。它实现 `Send`，使一个拥有它的锁保护容器
+可以在执行上下文之间转移；它刻意不实现 `Sync`。`&mut self` 使普通 Rust 调用
+具有排他性，但内核上层若通过内部可变性或自旋锁共享它，必须确保每次状态转换、
+freelist 读写和空 span detach 都由同一串行化规则保护。
 
 该层有意不持有页分配器引用，因而也不会在 metadata 临界区内分配或释放 backing
 pages。这为上层实现短临界区、per-CPU magazine 和跨 CPU flush 提供了边界。
@@ -113,7 +118,7 @@ pages。这为上层实现短临界区、per-CPU magazine 和跨 CPU flush 提�
 
 ## Drop / 资源释放
 
-`SlabCache` 不拥有 backing memory，因此没有自动归还页的 `Drop` 实现。上层在
-销毁 cache 或回收内存前必须先保证没有 live object，再逐个 detach `Empty` span
-并归还其原页分配器。若 cache 仍含 `Partial` 或 `Full` span，调用者必须保留其
-映射和所有权。
+`SlabCache` 不拥有 backing memory，因此没有自动归还页的 `Drop` 实现。
+`SlabHeap::shrink` 显式归还空 span；销毁 heap 或回收其管理的内存前，调用者仍须
+保证不存在 live object。若 cache 仍含 `Partial` 或 `Full` span，调用者必须保留
+其映射和所有权。

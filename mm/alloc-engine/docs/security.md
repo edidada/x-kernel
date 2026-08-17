@@ -35,6 +35,7 @@ kernel subsystem
 | `src/slab_cache.rs: page_for_object` | span 的 size 为 power of two，base 按 span 对齐 | `SlabCache::new` 验证 geometry；`add_slab` 验证 base alignment |
 | `src/slab_cache.rs: read_next/write_next` | free object 的首个 machine word 可读写 intrusive link | 仅在 publish、allocate、deallocate 后的非 live 对象上调用；class 对齐覆盖 link 对齐 |
 | `src/slab_cache.rs: SlabList` | page 只在一个状态表中，所有 links 在同一串行化域内修改 | 私有 API、状态转换集中在 `move_page` / `take_empty_slab` |
+| `src/slab_cache.rs: unsafe impl Send for SlabCache` | cache 可移动，但注册 span 在 detach 前仍映射且不发生无锁共享 | 类型只保存 span 内 metadata 指针；所有 mutation 需要 `&mut self`；刻意不实现 `Sync` |
 | `src/slab_heap.rs` 与 buddy/TLSF 适配器 | 释放地址和 `Layout` 与原分配匹配 | 上层 `ByteAllocator` unsafe deallocation contract |
 
 ## 内存安全不变量
@@ -51,8 +52,9 @@ kernel subsystem
 
 ## 线程安全
 
-`SlabCache` 不提供内部同步，也不声明可在无锁并发访问下使用。内核上层把它放进
-共享容器时，必须用单一的外部串行化规则覆盖 list、header、counter 和 free-object
+`SlabCache` 不提供内部同步。它仅以受审计的 `unsafe impl Send` 支持锁保护容器
+转移其独占所有权，刻意不实现 `Sync` 或允许无锁共享访问。内核上层把它放进共享
+容器时，必须用单一的外部串行化规则覆盖 list、header、counter 和 free-object
 link 的全部访问。`take_empty_slab` 返回后，页的释放必须不与任何仍可能访问该
 cache 的路径并发。
 
@@ -76,7 +78,7 @@ cache 的路径并发。
 |---|---|---|---|---|---|---|
 | F-01 | cache 无可用对象 | 尚未注册 span 或全部 page 为 Full | `allocate` 返回 `None` | 上层需要 refill 或报告 OOM | 4 | 缓存层不扩页；上层在临界区外申请 backing span |
 | F-02 | span 不符合 geometry | base 未按 span 对齐、header 后无对象空间 | `add_slab` 返回 `InvalidInput` | 当前请求失败，不发布坏 metadata | 3 | 构造期验证 page geometry，发布期验证 span |
-| F-03 | 底层页分配失败 | 内存压力或 buddy 无连续 span | 无法 refill | allocation 返回 NoMemory 或触发上层 reclaim | 2 | 后续 owning allocator 应先 flush/shrink，再尝试扩页 |
+| F-03 | 底层页分配失败 | 内存压力或 buddy 无连续 span | 无法 refill | allocation 返回 NoMemory 或触发上层 reclaim | 2 | `SlabHeap::shrink` 可归还已空 span；更高层应在 OOM 前接入 flush/reclaim |
 | F-04 | live object 长期不释放 | 调用者泄漏或缓存策略保留对象 | page 不能变 Empty | 可用内存下降 | 3 | ownership 审计、统计与上层 shrink 机制 |
 
 ## 故障管理
@@ -85,8 +87,9 @@ geometry 或计数错误通过 `AllocError::InvalidInput` 返回；普通 cache 
 `allocate` 的 `None` 与页面分配失败区分。构造期不合法的 page geometry 会 panic，
 因为它是编译期/集成期配置错误而不是可恢复的 runtime input。
 
-本层不自行进行 OOM reclaim、全 CPU flush 或 page allocator 调用；这些机制必须
-由拥有 page allocator 和 execution-context policy 的上层实现。
+`SlabHeap::shrink` 可显式归还空 span，但本 crate 不自行触发 OOM reclaim 或全 CPU
+flush。将 shrink 接入全局 page allocator、并定义 per-CPU cache 的 flush protocol，
+仍是拥有 execution-context policy 的上层职责。
 
 ## 隐私分析
 
@@ -97,7 +100,8 @@ geometry 或计数错误通过 `AllocError::InvalidInput` 返回；普通 cache 
 
 - 不检测 production double free、错误 `Layout` 或跨 cache free。
 - 不含 per-CPU magazine、remote-free 队列、NUMA 策略或 CPU offline 生命周期。
-- 不自行 shrink 或在 OOM 前 reclaim；只提供安全 detach 空 span 的基础能力。
+- `SlabCache` 不自行 shrink；`SlabHeap` 只提供显式 shrink，尚未自动接入 OOM 前
+  reclaim。
 - 不提供内部锁；使用者必须建立并验证并发协议。
 
 ## 审计清单
