@@ -31,7 +31,8 @@ FFI、inline assembly、device tree、ACPI、bootloader 或 firmware 数据。
 | `src/lib.rs: GlobalAllocator::alloc_slab_class` | 页分配成功返回非空、正确对齐、独占且可写的 class span | `alloc_pages()` 使用 class 的页数与 span 对齐；紧邻的 `SAFETY:` 注释将该范围传给 `NonNull` 和 `prepare_slab` |
 | `src/lib.rs: GlobalAllocator::dealloc` | pointer 是同一 `SizeClass` 的 live object，layout 与 allocation 匹配，未重复释放 | `GlobalAlloc` contract；该 crate 只依据 canonical `SizeClass` 路由，底层 `SlabCache::deallocate` 仍保留 unsafe contract |
 | `src/kmem_cache.rs: KmemCacheSet::prepare_slab` | `base` 是正确大小、按 span 对齐、独占的 backing allocation | 将 `SlabCache::prepare_slab` 的 contract 原样转发；返回的不可复制 `PreparedSlab` 只能 publish 或交还页 allocator |
-| `src/kmem_cache.rs: KmemCacheSet::deallocate` | object 来自本 cache set 的 matching class 并保持 live | class lock 提供 metadata 排他访问；unsafe obligation 由本方法调用者承担 |
+| `src/kmem_cache.rs: KmemCacheSet::{deallocate,try_deallocate_to_irq_reserve,deallocate_irq}` | object 来自本 cache set 的 matching class 并保持 live | class lock 提供 central metadata/reserve 排他访问；unsafe obligation 由本方法调用者承担 |
+| `src/kmem_cache.rs: KmemCacheSet::{try_allocate_from_task_magazine,deallocate_to_task_magazine,install_task_refill}` | 调用方处于 normal task/softirq，object/batch 属于 matching class | `percpu::with_current` pin 当前 CPU；hardirq 被分流到同一 KmemCacheSet 的 reserve，NMI allocation 不受支持；batch 只在同一 class 的 central/local storage 间转移 |
 | `src/lib.rs: unsafe impl GlobalAlloc` | 调用方遵守 Rust `GlobalAlloc` allocation/deallocation 配对规则 | 统一路由到 `GlobalAllocator`；失败调用 `handle_alloc_error`，不返回伪造 pointer |
 | `src/page.rs: GlobalPage::{from_raw,fill,as_slice,as_slice_mut}` | owner 唯一、页范围有效且未提前归还 | `from_raw` 是 unsafe constructor；其余方法由 `GlobalPage` 的所有权和 `&mut self` 保证范围与排他性 |
 
@@ -53,22 +54,29 @@ FFI、inline assembly、device tree、ACPI、bootloader 或 firmware 数据。
    违反 allocator contract，可能破坏 free-object intrusive link。
 6. `Usages` 统计 requested bytes；slab cache 统计 class-rounded bytes。两者用途
    不同，不能将前者当作 span 可回收性的证据。
+7. task magazine 中的对象仍被所属 `SlabCache` 视为 checked out，因此不能在没有
+   全 CPU flush 确认的情况下当作 central free object 回收。hardirq reserve 同样
+   独立于 central freelist，且只能由 hardirq 或 normal task 的受控补充路径访问。
 
 ## 线程安全
 
-每个 central class cache 和页 buddy 由 `SpinNoIrq` 保护。requested-byte 统计是
-per-CPU atomic delta：更新时只 pin 当前 CPU，跨 CPU free 在当前 CPU 记负 delta，
-`usages()` 扫描所有 CPU 形成可并发变化的诊断快照。KmemCache 的对象操作和 list
-状态转换只在一个 class lock 内发生。
-页申请、span 初始化以及 detached page 的归还都在该 class lock 外进行。
+每个 central class cache、hardirq reserve 和页 buddy 由 `SpinNoIrq` 保护。
+requested-byte 统计是 per-CPU atomic delta：更新时只 pin 当前 CPU，跨 CPU free
+在当前 CPU 记负 delta，`usages()` 扫描所有 CPU 形成可并发变化的诊断快照。
+normal task/softirq 只在 `percpu::with_current` 所给的 current-CPU pin 下访问双
+magazine；normal hardirq 被 `is_in_hardirq_fast()` 分流到 reserve，从而不会并发
+触碰 task magazine。NMI allocation 不受支持。
+
+central refill、drain 与 reserve 补充每次仅转移一个对象，释放 class lock 后才处理
+下一个对象。页申请、span 初始化以及 detached page 的归还都在 class lock 外进行。
 
 slab 路径的锁顺序刻意避免 KmemCache 与 `palloc` 的嵌套：fast allocation/free
 完成 class lock 后才做 usage accounting；refill/reclaim 访问 page allocator 前
 没有持有 class lock。实现或审计 future magazine 时必须保持该属性。
 
-当前 `SpinNoIrq` 允许 IRQ-like 重入，但它不是“任意长度 IRQ-off 都可接受”的
-保证。PCP 仍有独立的批处理临界区；central slab 也尚未有 task-only
-`SpinNoPreempt` fast path、IRQ reserve、remote-free 队列或 CPU offline protocol。
+`SpinNoIrq` 不是“任意长度 IRQ-off 都可接受”的保证。slab task hit 现在无需获取
+central lock，但 reserve、refill/drain 与 span transition 仍有短 IRQ-off 临界区。
+PCP 仍有独立的批处理临界区；slab 尚无全 CPU flush、CPU offline 或 NUMA protocol。
 
 ## 威胁分析
 
@@ -77,9 +85,9 @@ slab 路径的锁顺序刻意避免 KmemCache 与 `palloc` 的嵌套：fast allo
 | T-01 | 错误 backing span 覆写 slab header 或对象链接 | 高 | 平台传入未映射、未对齐、大小不匹配或非独占页 | class geometry 从 `SizeClass` 派生，`prepare_slab` contract 和 runtime geometry 检查；残余风险是恶意/错误内核调用者违反 unsafe contract |
 | T-02 | double free 或跨 class free 使 live 数据进入 freelist | 高 | allocator caller 传错 pointer/layout 或重复释放 | `GlobalAlloc` 配对 contract、class 路由和 `SlabCache` debug 检查；当前没有 production double-free quarantine，残余风险保留 |
 | T-03 | 归还包含 live object 的 span 造成 use-after-free | 高 | 回收仅依据粗粒度全局 freelist 或错误页状态 | span header 维护 `Empty`/`Partial`/`Full`；只允许 `take_empty_slab()` detach |
-| T-04 | refill/drain 在 IRQ-off class lock 内扩大 IRQ latency | 中 | miss/full 时调用底层页 allocator 或批量初始化 | 两阶段 prepare/publish 与 detach-before-return；span 初始化和 page allocator 调用均在 KmemCache lock 外 |
-| T-05 | 空 span 留在其他 class 导致不必要 OOM | 中 | 目标 class miss、页 buddy 暂无可用 span | `NoMemory` 后遍历 central `Empty` spans，归还后重试；尚不能回收 CPU-local magazine 或 live spans |
-| T-06 | 多 CPU 竞争 central class lock 使延迟升高 | 低 | 高频小对象 workload | 当前每 class 分锁减少跨 class 干扰；per-CPU magazine、per-CPU statistics 和实际 lock/latency 测量仍待后续实现 |
+| T-04 | refill/drain 或 hardirq path 在 IRQ-off class lock 内扩大 IRQ latency | 中 | miss/full 时调用底层页 allocator、批量初始化或硬中断直接走 task cache | page work/初始化均在锁外；task batch 每次只转移一个对象；hardirq 只使用 bounded reserve，耗尽时返回 `NoMemory` |
+| T-05 | 空 span 或可用对象留在其他 CPU cache 导致不必要 OOM | 中 | 目标 class miss、页 buddy 暂无可用 span | `NoMemory` 后遍历 central `Empty` spans，归还后重试；全 CPU flush 前不能回收 CPU-local magazine、reserve 或 live spans |
+| T-06 | 多 CPU 竞争 central class lock 使延迟升高 | 低 | 高频小对象 workload 或 reserve refill | task magazine hit 不取 central lock；refill/drain/transition 仍可能竞争，需用实际 SMP lock/latency 数据评估 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -88,8 +96,9 @@ slab 路径的锁顺序刻意避免 KmemCache 与 `palloc` 的嵌套：fast allo
 | F-01 | central cache 无空对象 | 全部 span 为 Full 或尚未 refill | allocation miss | 请求页或返回 `NoMemory` | 3 | lock 外申请并 prepare span，发布后重试 |
 | F-02 | backing 页不足 | buddy 没有满足对齐/页数的 span | refill 失败 | allocation 可能 OOM | 2 | OOM 前 detach 全部 central Empty span，重新检查 cache 后重试页来源 |
 | F-03 | prepared span 无法发布 | class/token/counter 校验失败 | span 未可见 | allocation 返回 `InvalidInput` | 3 | 归还 token 的 backing pages，不留下半发布 cache 状态 |
-| F-04 | shrink 无法释放内存 | 对象仍 live，span 为 Partial/Full | 该 span 保留 | 内存压力持续 | 3 | 正确保留安全性；由调用者修复泄漏，后续引入 magazine flush/reclaim policy |
-| F-05 | central lock contention | 多 CPU 命中相同 class | 增加等待与 IRQ-off 时间 | 吞吐/p99 降低 | 4 | 当前锁只覆盖对象元数据；下一阶段用 per-CPU magazine，基准验证后再宣称改善 |
+| F-04 | shrink 无法释放内存 | 对象仍 live，span 为 Partial/Full，或 free object 在 local cache/reserve | 该 span 保留 | 内存压力持续 | 3 | 正确保留安全性；全 CPU magazine flush/reclaim policy 尚待实现 |
+| F-05 | central lock contention | 多 CPU refill/drain/transition 同一 class | 增加等待与 IRQ-off 时间 | 吞吐/p99 降低 | 4 | task hit 用 local magazine；central transfer 每次只处理一个对象；基准验证后再宣称改善 |
+| F-06 | hardirq reserve 耗尽 | hardirq burst 超过预留对象数，或任务尚未来得及补充 | allocation 返回 `NoMemory` | 调用方可能丢弃可选工作或走既有错误路径 | 3 | reserve 容量固定且有显式耗尽语义；normal task local miss/free 机会性补充，不在 hardirq 申请页 |
 
 ## 故障管理
 
@@ -98,8 +107,8 @@ slab 路径的锁顺序刻意避免 KmemCache 与 `palloc` 的嵌套：fast allo
 向上返回。`GlobalAlloc::alloc` 将最终错误记录后进入 `handle_alloc_error`。
 
 `shrink()` 返回已归还的 base page 数；在 Buddy/TLSF build 中返回零，因为没有
-central slab span。它不是全系统 memory-pressure policy：没有向其他 CPU 同步、
-没有 CPU offline 清理，也没有触及 PCP 或未来 magazine。
+central slab span。它不是全系统 memory-pressure policy：目前没有向其他 CPU
+flush magazine、没有 CPU offline 清理，也没有触及 PCP 或 hardirq reserve。
 
 ## 隐私分析
 
@@ -109,12 +118,13 @@ intrusive freelist link 覆盖；对象重新分配前是否清零属于调用�
 
 ## 已知限制
 
-- slab fast path 仍获取 central `SpinNoIrq`；requested-byte statistics 已按 CPU
-  分片，但尚无预期的 per-CPU 双 magazine。
-- 不提供 remote free、NUMA、memory cgroup、CPU offline、全 CPU cache flush 或
-  hard-IRQ reserve。
-- 仅回收 central `Empty` span；不能回收 live object、partial/full span、PCP 或
-  后续 CPU-local magazine 中的可用对象。
+- slab task magazine hit 使用 per-CPU 双 magazine，不获取 central `SpinNoIrq`；
+  reserve under-full 时只在 local miss 或 normal task free 上机会性补充。
+  refill/drain、reserve 补充和 span transition 仍会竞争 central lock。
+- 不提供全 CPU cache flush、NUMA、memory cgroup 或 CPU offline protocol。NMI
+  allocation 不受支持；hardirq reserve 耗尽时 allocation 返回 `NoMemory`。
+- 仅回收 central `Empty` span；不能回收 live object、partial/full span、PCP、task
+  magazine 或 hardirq reserve 中的可用对象。
 - PCP 的 refill/drain 仍可能在 IRQ-off page allocator 临界区执行，未被本次 slab
   ownership 重构改变。
 - 不提供 production double-free、错误 layout 或跨 cache free 检测。
@@ -129,7 +139,11 @@ intrusive freelist link 覆盖；对象重新分配前是否清零属于调用�
 - [ ] 对 `unsafe deallocate` 的调用点是否能证明 pointer、class、layout 和对象
   生命周期匹配？
 - [ ] 是否保持 KmemCache 与 `palloc` 不嵌套的锁序？
-- [ ] 新的 task/IRQ 路径是否明确其抢占、IRQ 和 remote-free 约束，而非复用
-  `SpinNoIrq` 作为默认答案？
+- [ ] task magazine 是否只在 current-CPU pin 下访问，hardirq 是否仅走独立 reserve，
+  且 NMI contract 是否明确？
+- [ ] refill/drain/reserve 补充是否没有在一次 IRQ-off 临界区内批量执行 page work
+  或初始化？
+- [ ] shrink/OOM 是否只回收经全 CPU 协议确认可回收的对象，而不把 local magazine
+  或 reserve 当成 central free object？
 - [ ] 性能结论是否包含 SMP 吞吐、lock wait、p99 和最大 IRQ-off latency，而不是
   只报告 cache hit rate？

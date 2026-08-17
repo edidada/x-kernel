@@ -28,6 +28,8 @@ use kaddr_layout::v2p;
 #[cfg(feature = "slab")]
 use kmem_cache::KmemCacheSet;
 use kspin::{IrqSave, SpinNoIrq};
+#[cfg(feature = "slab")]
+use magazine::{ObjectBatch, refill_count};
 use memaddr::PAGE_SIZE_4K;
 use strum::{IntoStaticStr, VariantArray};
 
@@ -46,6 +48,8 @@ fn kernel_virt_to_phys(vaddr: usize) -> usize {
 
 #[cfg(feature = "slab")]
 mod kmem_cache;
+#[cfg(feature = "slab")]
+mod magazine;
 mod page;
 mod pcp;
 pub use page::GlobalPage;
@@ -247,8 +251,13 @@ impl GlobalAllocator {
     }
 
     #[inline]
-    fn uses_per_cpu_usage_stats(&self) -> bool {
+    fn is_runtime_global_allocator(&self) -> bool {
         core::ptr::eq(self, &GLOBAL_ALLOCATOR)
+    }
+
+    #[inline]
+    fn uses_per_cpu_usage_stats(&self) -> bool {
+        self.is_runtime_global_allocator()
     }
 
     #[inline]
@@ -296,11 +305,21 @@ impl GlobalAllocator {
             .expect("failed to initialize heap memory");
     }
 
+    /// Initialize or extend only the allocator's backing page pool.
+    ///
+    /// Unlike [`init`](Self::init), this does not bootstrap a non-slab byte
+    /// allocator. `va..va + size` must designate mapped, writable memory that
+    /// has no other owner.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the region is invalid for the backing page allocator.
     pub fn init_page_allocator(&self, va: usize, size: usize) {
         self.init_or_extend_page_allocator(va, size)
             .expect("failed to initialize page allocator");
     }
 
+    /// Returns whether at least one backing page region has been registered.
     pub fn is_page_allocator_ready(&self) -> bool {
         self.page_ready.load(Ordering::Acquire)
     }
@@ -321,9 +340,12 @@ impl GlobalAllocator {
     /// Allocate arbitrary number of bytes. Returns the left bound of the
     /// allocated region.
     ///
-    /// Slab builds route layouts represented by [`SizeClass`] to their central
-    /// cache; other layouts are allocated directly from pages.  Other builds
-    /// retain the byte-allocator expansion path.
+    /// Slab builds route layouts represented by [`SizeClass`] to class-owned
+    /// caches; other layouts are allocated directly from pages. Normal task
+    /// and softirq paths use the current CPU magazine, while normal hardirq
+    /// paths use a finite class reserve and return [`AllocError::NoMemory`] if
+    /// it is empty. NMI allocation is unsupported. Other builds retain the
+    /// byte-allocator expansion path.
     pub fn alloc(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
         #[cfg(feature = "slab")]
         {
@@ -349,45 +371,117 @@ impl GlobalAllocator {
 
     #[cfg(feature = "slab")]
     fn alloc_slab_class(&self, size_class: SizeClass) -> AllocResult<NonNull<u8>> {
+        if !self.is_runtime_global_allocator() {
+            return self.alloc_slab_class_centrally(size_class);
+        }
+
+        if kirq::context::is_in_hardirq_fast() {
+            return self
+                .slab_caches
+                .try_allocate_irq(size_class)
+                .ok_or(AllocError::NoMemory);
+        }
+
+        self.alloc_slab_class_from_magazine(size_class)
+    }
+
+    /// Allocate one class object through the runtime task magazine.
+    ///
+    /// The hardirq route is selected before entering this method. Its local
+    /// accesses use only the `NoPreempt` guard supplied by `percpu`; refill and
+    /// drain run with IRQs enabled between one-object central transfers.
+    #[cfg(feature = "slab")]
+    fn alloc_slab_class_from_magazine(&self, size_class: SizeClass) -> AllocResult<NonNull<u8>> {
+        loop {
+            // SAFETY: the caller has already excluded normal hardirq context.
+            // NMI allocation is unsupported by the allocator contract, so no
+            // interrupt-like path can concurrently mutate the task magazine.
+            let local_object =
+                unsafe { self.slab_caches.try_allocate_from_task_magazine(size_class) };
+            if let Some(object) = local_object {
+                return Ok(object);
+            }
+
+            // A reserve refill is part of the local-miss slow path. Leaving an
+            // under-full reserve visible to task frees lets hot magazine hits
+            // stay local while still replenishing the reserve opportunistically.
+            self.slab_caches.replenish_irq_reserve(size_class);
+            let mut refill = ObjectBatch::new();
+            self.slab_caches
+                .take_task_batch(size_class, refill_count(size_class), &mut refill);
+            if let Some(object) = refill.pop() {
+                // SAFETY: `refill` contains only objects taken from this
+                // matching class. The execution-context invariant above also
+                // covers the short local install operation.
+                let uninstalled =
+                    unsafe { self.slab_caches.install_task_refill(size_class, refill) };
+                // SAFETY: an uninstalled batch still contains only live
+                // objects checked out from this matching central class.
+                unsafe { self.slab_caches.return_task_batch(size_class, uninstalled) };
+                return Ok(object);
+            }
+
+            self.populate_slab_class(size_class)?;
+        }
+    }
+
+    /// Allocate one class object directly from central slabs.
+    ///
+    /// Explicitly constructed `GlobalAllocator` values use this path so their
+    /// test-local state cannot alias the runtime singleton's per-CPU storage.
+    #[cfg(feature = "slab")]
+    fn alloc_slab_class_centrally(&self, size_class: SizeClass) -> AllocResult<NonNull<u8>> {
         loop {
             if let Some(object) = self.slab_caches.try_allocate(size_class) {
                 return Ok(object);
             }
+            self.populate_slab_class(size_class)?;
+        }
+    }
 
-            let page_count = KmemCacheSet::slab_pages(size_class);
-            let span_alignment = KmemCacheSet::slab_bytes(size_class);
-            let base = match self.alloc_pages(page_count, span_alignment, UsageKind::RustHeap) {
-                Ok(base) => base,
-                Err(AllocError::NoMemory) => {
+    /// Add a prepared span to one central slab cache.
+    ///
+    /// The retry after `NoMemory` first returns all central empty spans to the
+    /// page allocator. Task magazines and IRQ reserves require the later
+    /// cross-CPU flush protocol before they can participate in this reclaim.
+    #[cfg(feature = "slab")]
+    fn populate_slab_class(&self, size_class: SizeClass) -> AllocResult {
+        let page_count = KmemCacheSet::slab_pages(size_class);
+        let span_alignment = KmemCacheSet::slab_bytes(size_class);
+        let mut reclaimed_once = false;
+        let base = loop {
+            match self.alloc_pages(page_count, span_alignment, UsageKind::RustHeap) {
+                Ok(base) => break base,
+                Err(AllocError::NoMemory) if !reclaimed_once => {
+                    reclaimed_once = true;
                     self.reclaim_empty_slab_pages();
-                    if let Some(object) = self.slab_caches.try_allocate(size_class) {
-                        return Ok(object);
+                    if self.slab_caches.has_available_object(size_class) {
+                        return Ok(());
                     }
-                    self.alloc_pages(page_count, span_alignment, UsageKind::RustHeap)?
                 }
                 Err(error) => return Err(error),
-            };
-            // SAFETY: a successful page allocation is non-null, mapped,
-            // exclusive, and satisfies the class span's requested alignment
-            // and page count.
-            let backing = unsafe { NonNull::new_unchecked(base as *mut u8) };
-            // SAFETY: `backing` was just allocated with this class's exact
-            // span geometry and remains exclusively owned until it is detached
-            // again.
-            let prepared = match unsafe { KmemCacheSet::prepare_slab(size_class, backing) } {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    self.release_slab_pages(base, page_count);
-                    return Err(error);
-                }
-            };
-
-            if let Err(prepared) = self.slab_caches.publish_slab(size_class, prepared) {
-                let backing = prepared.into_backing();
-                self.release_slab_backing(backing);
-                return Err(AllocError::InvalidInput);
             }
+        };
+        // SAFETY: a successful page allocation is non-null, mapped,
+        // exclusive, and satisfies the class span's requested alignment and
+        // page count.
+        let backing = unsafe { NonNull::new_unchecked(base as *mut u8) };
+        // SAFETY: `backing` was just allocated with this class's exact span
+        // geometry and remains exclusively owned until it is detached again.
+        let prepared = match unsafe { KmemCacheSet::prepare_slab(size_class, backing) } {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.release_slab_pages(base, page_count);
+                return Err(error);
+            }
+        };
+
+        if let Err(prepared) = self.slab_caches.publish_slab(size_class, prepared) {
+            let backing = prepared.into_backing();
+            self.release_slab_backing(backing);
+            return Err(AllocError::InvalidInput);
         }
+        Ok(())
     }
 
     #[cfg(feature = "slab")]
@@ -504,14 +598,17 @@ impl GlobalAllocator {
     /// the same as the one used in [`alloc`]. Otherwise, the behavior is
     /// undefined.
     ///
+    /// In slab builds, normal task/softirq frees return to the current CPU
+    /// magazine or opportunistically replenish the hardirq reserve. Normal
+    /// hardirq frees use that reserve directly; NMI deallocation is
+    /// unsupported.
+    ///
     /// [`alloc`]: GlobalAllocator::alloc
     pub fn dealloc(&self, ptr: NonNull<u8>, layout: Layout) {
         #[cfg(feature = "slab")]
         if let Some(size_class) = SizeClass::from_layout(layout) {
             self.subtract_usage(UsageKind::RustHeap, layout.size());
-            // SAFETY: `dealloc` requires a live allocation from `alloc` with
-            // the same layout, which selects this same slab size class.
-            unsafe { self.slab_caches.deallocate(size_class, ptr) };
+            self.dealloc_slab_class(size_class, ptr);
             return;
         }
 
@@ -528,6 +625,49 @@ impl GlobalAllocator {
         } else {
             self.subtract_usage(UsageKind::RustHeap, layout.size());
             self.balloc.lock().deallocate(ptr, layout);
+        }
+    }
+
+    #[cfg(feature = "slab")]
+    fn dealloc_slab_class(&self, size_class: SizeClass, object: NonNull<u8>) {
+        if !self.is_runtime_global_allocator() {
+            // SAFETY: `dealloc` already established that `object` is live and
+            // the matching layout selected this size class.
+            unsafe { self.slab_caches.deallocate(size_class, object) };
+            return;
+        }
+
+        if kirq::context::is_in_hardirq_fast() {
+            // SAFETY: hardirq callers still satisfy the `GlobalAlloc`
+            // allocation/deallocation pairing contract. The reserve is the
+            // only slab path allowed to mutate in this execution context.
+            unsafe { self.slab_caches.deallocate_irq(size_class, object) };
+            return;
+        }
+
+        if self.slab_caches.irq_reserve_needs_refill(size_class) {
+            // SAFETY: this is an ordinary task-context free of a live object
+            // in the matching class. A reserve donation does not expose it to
+            // a task magazine concurrently.
+            if unsafe {
+                self.slab_caches
+                    .try_deallocate_to_irq_reserve(size_class, object)
+            } {
+                return;
+            }
+        }
+
+        // SAFETY: normal hardirq execution was routed away above. NMI
+        // allocation is unsupported, so this task/softirq operation cannot
+        // race an interrupt-like magazine mutation on the same CPU.
+        let drain = unsafe {
+            self.slab_caches
+                .deallocate_to_task_magazine(size_class, object)
+        };
+        if let Some(batch) = drain {
+            // SAFETY: the local magazine extracted only live objects from
+            // this matching size class.
+            unsafe { self.slab_caches.return_task_batch(size_class, batch) };
         }
     }
 
@@ -700,6 +840,10 @@ impl GlobalAllocator {
     }
 
     /// Returns bytes currently checked out from the small-object allocator.
+    ///
+    /// In slab builds this includes objects retained in task-local magazines,
+    /// but excludes hardirq reserve objects because they are allocatable by
+    /// that execution context.
     pub fn used_bytes(&self) -> usize {
         #[cfg(feature = "slab")]
         {
@@ -713,6 +857,10 @@ impl GlobalAllocator {
     }
 
     /// Returns centrally available small-object bytes.
+    ///
+    /// In slab builds this includes the hardirq reserve but excludes objects
+    /// held in task-local magazines, for which this diagnostic has no
+    /// synchronized cross-CPU view.
     pub fn available_bytes(&self) -> usize {
         #[cfg(feature = "slab")]
         {
@@ -728,7 +876,8 @@ impl GlobalAllocator {
     /// Reclaim all completely empty central slab spans.
     ///
     /// Returns the number of base pages returned to the page allocator.  In
-    /// non-slab builds no central slab spans exist, so this returns zero.
+    /// non-slab builds no central slab spans exist, so this returns zero. It
+    /// does not flush task-local magazines or hardirq reserves.
     pub fn shrink(&self) -> usize {
         #[cfg(feature = "slab")]
         {
@@ -896,6 +1045,7 @@ pub fn global_add_memory(va: usize, size: usize) -> AllocResult {
     GLOBAL_ALLOCATOR.add_memory(va, size)
 }
 
+/// Returns whether the global allocator has a registered backing page region.
 pub fn is_page_allocator_ready() -> bool {
     GLOBAL_ALLOCATOR.is_page_allocator_ready()
 }

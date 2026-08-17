@@ -21,6 +21,7 @@ cfg-if.workspace = true
 kaddr_layout.workspace = true
 kbuild_config.workspace = true
 kerrno.workspace = true
+kirq.workspace = true
 kspin.workspace = true
 log.workspace = true
 memaddr.workspace = true

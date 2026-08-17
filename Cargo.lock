@@ -2027,6 +2027,7 @@ dependencies = [
  "kaddr_layout",
  "kbuild_config",
  "kerrno",
+ "kirq",
  "kspin 0.2.0-dev",
  "log",
  "memaddr",

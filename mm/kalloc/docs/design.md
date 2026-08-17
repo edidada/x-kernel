@@ -20,8 +20,10 @@ header、partial/full/empty 状态和空 span 的回收权处于同一所有权�
 都可安全地按相同 canonical layout 批量 refill/drain。这使 slab 的对象缓存
 策略泄漏到 Buddy 和 TLSF，也无法表达一个 slab span 是否仍有 live object。
 
-当前阶段先建立可回收的 slab page ownership 边界。per-CPU magazine、remote
-free、CPU offline 和全 CPU flush 在该边界之上实现，而不是重新引入泛化 PCB。
+当前阶段在该 ownership 边界之上加入了 slab 专属的 task per-CPU 双 magazine 和
+hardirq reserve。它们只服务 `KmemCacheSet`，而不是成为任意 `ByteAllocator` 的
+中间层。全 CPU flush、shrink 协调、CPU offline 和 NUMA 仍需建立独立的跨 CPU
+协议，不能通过重新引入泛化 PCB 来替代。
 
 ## 范围
 
@@ -29,6 +31,7 @@ free、CPU offline 和全 CPU flush 在该边界之上实现，而不是重新�
 mm/kalloc/
 ├── src/lib.rs          # GlobalAllocator、页分配入口与统计
 ├── src/kmem_cache.rs   # slab 专属的 central KmemCacheSet
+├── src/magazine.rs     # slab 专属的 task per-CPU 双 magazine
 ├── src/pcp.rs          # 1–4 页的 per-CPU page cache
 ├── src/page.rs         # GlobalPage RAII 包装
 └── docs/               # 本文档与安全分析
@@ -46,18 +49,27 @@ GlobalAllocator
  ├─ per-CPU usages: requested-byte statistics
  ├─ slab build
  │   └─ KmemCacheSet
- │       └─ [SizeClass -> SpinNoIrq<SlabCache>]
- │            └─ Empty / Partial / Full slab spans
+ │       ├─ current CPU task/softirq magazine pairs
+ │       │    └─ [SizeClass -> active + spare magazine]
+ │       └─ [SizeClass -> SpinNoIrq<KmemCache>]
+ │            ├─ central SlabCache -> Empty / Partial / Full spans
+ │            └─ bounded hardirq-only reserve
  └─ buddy/tlsf build
      └─ ByteAllocator
 
-slab allocation miss
-  KmemCacheSet::try_allocate()
+task slab allocation miss
+  current CPU magazine pair
+       │ miss; preemption re-enabled
+       v
+  KmemCacheSet::take_task_batch()  (one object / short class lock)
        │ miss; no KmemCache lock held
        v
   page allocator -> prepare_slab() -> publish_slab()
        │                                │ short class lock
        └──────────── retry ─────────────┘
+
+hardirq slab allocation
+  KmemCacheSet::hardirq reserve -> object | NoMemory
 ```
 
 `SizeClass::from_layout()` 是唯一的 slab class 选择规则。不能由该规则表达的
@@ -70,12 +82,15 @@ layout 直接走页分配器。span 的页数和对齐也从同一个 `SizeClass
   接口使用前通过 `init`、`init_page_allocator` 或 `add_memory` 初始化。
 - 这些接口不依赖 current process、文件系统、MMIO、DMA、firmware 或 scheduler
   状态；传给初始化接口的虚拟地址范围必须已映射、可写且未被其他 owner 使用。
-- 当前 central slab metadata 操作由 `SpinNoIrq` 保护，因此保持现有全局 allocator
-  可从 IRQ-like 上下文重入的兼容性。它不 sleep，也不在 class lock 内调用页
-  allocator 或执行 span 初始化。
-- 这不等于普通任务 fast path 已经采用只禁抢占模型，也不等于硬中断已经有独立
-  reserve。后续 per-CPU magazine 阶段必须先定义 task/IRQ 的分流协议，不能把
-  任意 refill 直接放入硬中断路径。
+- normal task 和 softirq 只通过 `percpu::with_current` 访问当前 CPU 的 magazine；
+  该 helper 禁止抢占，但不关闭 IRQ。由于 hardirq 从不访问 magazine，硬中断打断
+  task/softirq 不会并发修改其中的 freelist。
+- normal hardirq 由 `kirq::context::is_in_hardirq_fast()` 分流到 class 的独立
+  reserve。该路径不分配页、不初始化 span、不批量 refill；reserve 为空时明确返回
+  `NoMemory`。NMI allocation 仍不受支持。
+- central slab metadata 仍由 `SpinNoIrq` 保护，但 task refill/drain 只在每次传输
+  一个对象时短暂持有它；页 allocator、span 初始化和 detached page 归还均不在
+  class lock 内。
 - 1–4 页的通用页接口仍使用 PCP，并在 PCP miss/full 时使用已有的 IRQ-off
   refill/drain 行为；这与已移除的 byte PCB 是独立问题，当前提交不宣称消除它。
 
@@ -101,11 +116,18 @@ Empty ----------------> Partial --------------------------------> Full
 ### slab 小对象分配
 
 1. `GlobalAllocator::alloc_slab()` 用 `SizeClass::from_layout()` 路由 layout。
-2. `KmemCacheSet::try_allocate()` 在目标 class 的短 metadata 临界区弹出一个
-   已注册对象。
-3. cache miss 时，调用者离开该锁后向页分配器请求一个 class 对齐的 span。
-4. `prepare_slab()` 在锁外写入 span header 和 free-object links。
-5. `publish_slab()` 只在目标 class 锁内挂入已准备的 span；随后重试第 2 步。
+2. normal hardirq 只从该 class 的 bounded reserve 获取对象；reserve 为空立即
+   返回 `NoMemory`，不会进入 task magazine 或页分配路径。
+3. task/softirq 先在当前 CPU 的 active/spare magazine pair 获取对象。这是不获取
+   central class lock 的 fast path；reserve 的 under-full 状态不会使 magazine hit
+   降级。
+4. local miss 时，normal task 可先从已有 central object 补充 hardirq reserve，
+   再以每对象一次短 class lock 的方式取得有界 refill batch。batch 的其余对象
+   在当前 CPU 重新 pin 后安装到一个空 magazine；迁移导致无法安装的对象立即回到
+   central cache。
+5. central cache 也没有对象时，调用者离开该锁后向页分配器请求一个 class 对齐的
+   span；`prepare_slab()` 在锁外写入 span header 和 free-object links，
+   `publish_slab()` 只在目标 class 锁内挂入已准备的 span，然后重试第 4 步。
 6. 成功后，`Usages` 记录调用者原始 `Layout` 的 requested bytes，而 central
    cache 的使用量按 class size 取整。
 
@@ -115,15 +137,19 @@ publish，之后的 retry 从任一已发布的 span 获取对象。
 ### slab 释放和 shrink
 
 1. `dealloc()` 以同一个 `SizeClass::from_layout()` 找回 class。
-2. 目标 cache 在短锁内把 live object 归还 span，并执行 full/partial/empty
-   转换。
-3. `shrink()` 或 slab refill 的 OOM 重试循环 detach 所有当前 `Empty` spans。
-4. 每一个 detached `SlabBacking` 在所有 KmemCache lock 外直接归还全局 page
+2. hardirq 释放回 reserve；reserve 满时才在一次短 metadata 临界区把对象归还
+   central slab。normal task 在 reserve 需要补充时优先捐赠一个对象，否则将对象
+   放入当前 CPU magazine。
+3. local pair 的两本 magazine 都满时，释放路径摘下一整本 spare magazine，并在
+   IRQ 开启状态下逐对象归还 central slab；每次归还只持有一次短 class lock。
+4. `shrink()` 或 slab refill 的 OOM 重试循环目前只 detach central `Empty` spans。
+   每一个 detached `SlabBacking` 在所有 KmemCache lock 外直接归还全局 page
    allocator。
 
 当一个新的 slab span 请求得到 `NoMemory` 时，分配器先执行上述 central reclaim，
 再重新检查目标 cache 并重试页分配。这能回收其他 size class 已经完全空闲的 span；
-不会回收 partial/full span 或尚未实现的 per-CPU magazine 内容。
+不会回收 partial/full span，且在全 CPU flush 到位前也不会回收 task magazine 或
+hardirq reserve 中的对象。
 
 ### 非 slab allocator
 
@@ -133,8 +159,12 @@ Buddy 和 TLSF 的小对象直接进入各自 `ByteAllocator`。当其没有空�
 
 ## 并发模型
 
-- 每个 slab `SizeClass` 有独立的 `SpinNoIrq<SlabCache>`。对象获取、释放、span
-  publish 和 detach 只锁一个 class，不会持锁进入页分配器。
+- 每个 slab `SizeClass` 有独立的 `SpinNoIrq<KmemCache>`。central object 获取、
+  释放、reserve 更新、span publish 和 detach 只锁一个 class，不会持锁进入页
+  分配器。
+- task/softirq magazine pair 是 current-CPU storage。其 hit path 仅 pin 当前 CPU，
+  不取得 central class lock；hardirq 永不触碰该 storage，而只操作对应 class 的
+  reserve。NMI allocator use 不受支持，不能假定这些保护覆盖 NMI。
 - `palloc` 由独立的 `SpinNoIrq` 保护。requested-byte accounting 使用 per-CPU
   atomic delta：更新只触及当前 CPU，因此跨 CPU free 不会把对象所有权错误绑到释放
   CPU；`usages()` 才扫描所有 CPU 汇总诊断快照。
@@ -142,11 +172,13 @@ Buddy 和 TLSF 的小对象直接进入各自 `ByteAllocator`。当其没有空�
   时访问 `palloc`。因此新的 slab 路径不形成 KmemCache -> page allocator 的嵌套锁序。
 - `take_empty_slab()` 逐 class 短暂扫描。它只用于显式 shrink 或 OOM 失败路径，
   不属于对象 fast path。
-- 此阶段每次 slab allocation/free 仍会获取 central class lock。usage accounting
-  已不再形成全局串行点，但对象 ownership 的 central lock 仍使它不是最终 SMP
-  扩展性方案。
-- 未来 magazine fast path 应仅依赖本 CPU 的状态并禁止抢占；其 refill/drain、
-  remote free、CPU offline 与全 CPU flush 需要一个独立、可确认的协议。
+- task magazine hit 不获取 central class lock；refill、drain、reserve 补充和 span
+  状态转换仍会竞争该 class lock。reserve under-full 时只在 local miss 或 normal
+  task free 上机会性补充。usage accounting 已不再形成全局串行点，但这还不是完整的
+  SMP memory-pressure 方案。
+- 全 CPU flush、shrink/OOM 对 magazine 的协调、CPU offline 和 NUMA 仍需要一个
+  无分配、可确认的 IPI/生命周期协议；在该协议落地前，reclaim 不会把 local cache
+  对象误当成可回收 central free object。
 
 ## 设计决策
 
@@ -158,7 +190,10 @@ Buddy 和 TLSF 的小对象直接进入各自 `ByteAllocator`。当其没有空�
    而不是基于全局 freelist 的猜测。
 4. **保留 non-slab 分支。** 这次重构改变 slab 结构，不把无关 allocator 的内部
    模型一并重写。
-5. **不提前宣称性能收益。** 后续需要使用真实 SMP workload 记录吞吐、lock wait、
+5. **task 与 hardirq 分流。** task/softirq fast path 用 current-CPU magazine；
+   hardirq 用有界 reserve 并有明确耗尽语义，因而不会在中断中执行 page work 或
+   批量 refill。
+6. **不提前宣称性能收益。** 后续需要使用真实 SMP workload 记录吞吐、lock wait、
    p99 和最大 IRQ-off latency，才能评价 magazine 的收益。
 
 ## Drop / 资源释放
