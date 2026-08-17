@@ -974,7 +974,7 @@ pub mod tests_irq {
     fn test_simulated_irq_tail_dispatches_regular_handler() {
         let _irq_guard = kspin::NoPreemptIrqSave::new();
         REGULAR_CALLS.store(0, Ordering::Relaxed);
-        crate::deferred::clear_deferred_executor();
+        let _deferred_slot = crate::deferred::test_support::ScopedDeferredExecutorSlot::new();
 
         {
             let mut state = IRQ_STATE.lock();
@@ -995,7 +995,7 @@ pub mod tests_irq {
             pending.complete();
         });
 
-        crate::deferred::clear_deferred_executor();
+        let _deferred_slot = crate::deferred::test_support::ScopedDeferredExecutorSlot::new();
         {
             let mut state = IRQ_STATE.lock();
             state.descs.remove(&IRQ_SIMULATED_TEST_VIRQ);
@@ -1192,7 +1192,7 @@ pub mod tests_irq {
         let _irq_guard = kspin::NoPreemptIrqSave::new();
 
         clear_irq_lifecycle_hooks();
-        crate::deferred::clear_deferred_executor();
+        let _deferred_slot = crate::deferred::test_support::ScopedDeferredExecutorSlot::new();
         let enter_before = IRQ_ENTER_CALLS.load(Ordering::Relaxed);
         let exit_before = IRQ_EXIT_CALLS.load(Ordering::Relaxed);
         {
@@ -1223,7 +1223,7 @@ pub mod tests_irq {
             drop(lifecycle_guard);
         }
 
-        crate::deferred::clear_deferred_executor();
+        let _deferred_slot = crate::deferred::test_support::ScopedDeferredExecutorSlot::new();
         clear_irq_lifecycle_hooks();
         {
             let mut state = IRQ_STATE.lock();
@@ -1265,7 +1265,7 @@ pub mod tests_irq {
         IRQ_TAIL_DEFERRED_IN_HARDIRQ.store(0, Ordering::Relaxed);
         IRQ_TAIL_TEST_ACTIVE.store(0, Ordering::Relaxed);
 
-        crate::deferred::clear_deferred_executor();
+        let _deferred_slot = crate::deferred::test_support::ScopedDeferredExecutorSlot::new();
         clear_irq_lifecycle_hooks();
         {
             let mut state = IRQ_STATE.lock();
@@ -1297,7 +1297,7 @@ pub mod tests_irq {
             drop(lifecycle_guard);
         }
 
-        crate::deferred::clear_deferred_executor();
+        let _deferred_slot = crate::deferred::test_support::ScopedDeferredExecutorSlot::new();
         clear_irq_lifecycle_hooks();
         IRQ_TAIL_TEST_ACTIVE.store(0, Ordering::Relaxed);
         {
@@ -1323,7 +1323,7 @@ pub mod tests_irq {
 
         IRQ_TAIL_COMPLETE_ORDER.store(0, Ordering::Relaxed);
         IRQ_TAIL_UNRESOLVED_DEFERRED.store(0, Ordering::Relaxed);
-        crate::deferred::clear_deferred_executor();
+        let _deferred_slot = crate::deferred::test_support::ScopedDeferredExecutorSlot::new();
 
         assert!(crate::deferred::register_deferred_executor(
             crate::deferred::DeferredExecutorHooks {
@@ -1343,7 +1343,7 @@ pub mod tests_irq {
             pending.complete();
         });
 
-        crate::deferred::clear_deferred_executor();
+        let _deferred_slot = crate::deferred::test_support::ScopedDeferredExecutorSlot::new();
         assert_ne!(IRQ_TAIL_COMPLETE_ORDER.load(Ordering::Relaxed), 0);
         assert_eq!(IRQ_TAIL_UNRESOLVED_DEFERRED.load(Ordering::Relaxed), 1);
     }
@@ -1360,7 +1360,7 @@ pub mod tests_irq {
         IRQ_TAIL_SOFTIRQ_IN_HARDIRQ.store(1, Ordering::Relaxed);
         IRQ_TAIL_SOFTIRQ_SERVING.store(0, Ordering::Relaxed);
 
-        crate::deferred::clear_deferred_executor();
+        let _deferred_slot = crate::deferred::test_support::ScopedDeferredExecutorSlot::new();
         clear_softirq_diagnostics();
         let _softirq_action =
             ScopedSoftirqAction::install(SoftirqVec::High, test_irq_tail_softirq_action);
@@ -1394,7 +1394,7 @@ pub mod tests_irq {
         let runs = softirq_diagnostics().runs;
         let drain_again = run_pending_softirqs();
 
-        crate::deferred::clear_deferred_executor();
+        let _deferred_slot = crate::deferred::test_support::ScopedDeferredExecutorSlot::new();
         {
             let mut state = IRQ_STATE.lock();
             state.descs.remove(&IRQ_TAIL_SOFTIRQ_VIRQ);

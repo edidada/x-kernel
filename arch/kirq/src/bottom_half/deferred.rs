@@ -142,6 +142,39 @@ pub fn run_hardirq_exit_deferred(ctx: DeferredRunContext) -> DeferredRunResult {
 }
 
 #[cfg(unittest)]
+pub(crate) mod test_support {
+    use super::clear_deferred_executor;
+
+    /// Unit-test guard that clears the deferred-executor slot for the
+    /// duration of a test and restores the kernel's softirq IRQ-tail runner
+    /// on drop.
+    ///
+    /// Tests that exercise the deferred executor or the claimed IRQ tail
+    /// must not leak an empty slot: the softirq runner installed at boot is
+    /// the only thing that drains softirqs raised from hardirq context, and
+    /// losing it wedges any driver that defers completion wakeups through a
+    /// softirq vector (virtio-blk/rng on the Block/Tasklet vectors).
+    pub(crate) struct ScopedDeferredExecutorSlot;
+
+    impl ScopedDeferredExecutorSlot {
+        pub(crate) fn new() -> Self {
+            clear_deferred_executor();
+            Self
+        }
+    }
+
+    impl Drop for ScopedDeferredExecutorSlot {
+        fn drop(&mut self) {
+            clear_deferred_executor();
+            // Re-install the boot-time softirq runner so the rest of the test
+            // run keeps its IRQ-tail softirq drain. A failure here only means
+            // another test left an executor behind; the slot stays as-is.
+            let _ = crate::softirq::init();
+        }
+    }
+}
+
+#[cfg(unittest)]
 #[allow(missing_docs)]
 pub mod tests_deferred {
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -151,6 +184,7 @@ pub mod tests_deferred {
     use super::{
         DeferredExecutorHooks, DeferredRunContext, DeferredRunResult, clear_deferred_executor,
         register_deferred_executor, run_hardirq_exit_deferred,
+        test_support::ScopedDeferredExecutorSlot,
     };
 
     static FIRST_HOOK_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -182,7 +216,7 @@ pub mod tests_deferred {
 
     #[def_test(serial)]
     fn test_deferred_executor_registration_and_run() {
-        clear_deferred_executor();
+        let _deferred_slot = ScopedDeferredExecutorSlot::new();
         FIRST_HOOK_CALLS.store(0, Ordering::Relaxed);
         TARGET_CONTEXT_CALLS.store(0, Ordering::Relaxed);
 
@@ -197,12 +231,11 @@ pub mod tests_deferred {
 
         assert!(FIRST_HOOK_CALLS.load(Ordering::Relaxed) >= 1);
         assert_eq!(TARGET_CONTEXT_CALLS.load(Ordering::Relaxed), 1);
-        clear_deferred_executor();
     }
 
     #[def_test(serial)]
     fn test_deferred_executor_rejects_duplicate_without_overwrite() {
-        clear_deferred_executor();
+        let _deferred_slot = ScopedDeferredExecutorSlot::new();
         FIRST_HOOK_CALLS.store(0, Ordering::Relaxed);
         SECOND_HOOK_CALLS.store(0, Ordering::Relaxed);
 
@@ -219,12 +252,11 @@ pub mod tests_deferred {
         );
         assert!(FIRST_HOOK_CALLS.load(Ordering::Relaxed) >= 1);
         assert_eq!(SECOND_HOOK_CALLS.load(Ordering::Relaxed), 0);
-        clear_deferred_executor();
     }
 
     #[def_test(serial)]
     fn test_deferred_executor_clear_allows_reregister() {
-        clear_deferred_executor();
+        let _deferred_slot = ScopedDeferredExecutorSlot::new();
         assert!(register_deferred_executor(DeferredExecutorHooks {
             on_hardirq_exit: Some(first_hook),
         }));
@@ -232,12 +264,11 @@ pub mod tests_deferred {
         assert!(register_deferred_executor(DeferredExecutorHooks {
             on_hardirq_exit: Some(second_hook),
         }));
-        clear_deferred_executor();
     }
 
     #[def_test(serial)]
     fn test_deferred_executor_noop_without_registration() {
-        clear_deferred_executor();
+        let _deferred_slot = ScopedDeferredExecutorSlot::new();
         assert_eq!(
             run_hardirq_exit_deferred(DeferredRunContext::new(3, Some(4))),
             DeferredRunResult::NoExecutor
@@ -246,7 +277,7 @@ pub mod tests_deferred {
 
     #[def_test(serial)]
     fn test_deferred_executor_runs_outside_registration_lock() {
-        clear_deferred_executor();
+        let _deferred_slot = ScopedDeferredExecutorSlot::new();
         CLEARING_HOOK_CALLS.store(0, Ordering::Relaxed);
 
         assert!(register_deferred_executor(DeferredExecutorHooks {
