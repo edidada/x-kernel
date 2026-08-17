@@ -22,8 +22,9 @@ header、partial/full/empty 状态和空 span 的回收权处于同一所有权�
 
 当前阶段在该 ownership 边界之上加入了 slab 专属的 task per-CPU 双 magazine 和
 hardirq reserve。它们只服务 `KmemCacheSet`，而不是成为任意 `ByteAllocator` 的
-中间层。全 CPU flush、shrink 协调、CPU offline 和 NUMA 仍需建立独立的跨 CPU
-协议，不能通过重新引入泛化 PCB 来替代。
+中间层。`shrink()` 和 OOM retry 现在通过独立的无分配 IPI 协议冻结并 drain 已启动
+CPU 的 magazine；CPU offline、NUMA 和更高层 memory-pressure policy 仍需建立自己
+的生命周期协议，不能通过重新引入泛化 PCB 来替代。
 
 ## 范围
 
@@ -39,7 +40,8 @@ mm/kalloc/
 
 `src/kmem_cache.rs` 仅在 `slab` feature 下编译。固定 class 的 page header 和
 状态机由 `mm/alloc-engine/src/slab_cache.rs` 实现；`kalloc` 负责全局页来源、并发
-策略和回收时机。
+策略和回收时机。SMP slab build 通过 `KmemCacheFlushIf` 由 `arch/kipi` 提供全 CPU
+协调；该依赖方向避免 `kalloc` 反向依赖 IPI 实现。
 
 ## 架构
 
@@ -70,6 +72,11 @@ task slab allocation miss
 
 hardirq slab allocation
   KmemCacheSet::hardirq reserve -> object | NoMemory
+
+global shrink / OOM reclaim
+  stage every CPU magazine state -> IPI completes idle targets
+       -> initiating task drains frozen magazines one object / short lock
+       -> drain reserves -> detach Empty spans -> unfreeze every target
 ```
 
 `SizeClass::from_layout()` 是唯一的 slab class 选择规则。不能由该规则表达的
@@ -88,9 +95,20 @@ layout 直接走页分配器。span 的页数和对齐也从同一个 `SizeClass
 - normal hardirq 由 `kirq::context::is_in_hardirq_fast()` 分流到 class 的独立
   reserve。该路径不分配页、不初始化 span、不批量 refill；reserve 为空时明确返回
   `NoMemory`。NMI allocation 仍不受支持。
+- `GlobalAllocator::shrink()` 和 OOM retry 的全 CPU flush 会等待其它 CPU 完成一个
+  很短的 magazine access，因此不得从 hardirq 或 NMI 调用；公开 `shrink()` 在
+  hardirq 直接 panic，避免把同步回收误用成中断路径。
 - central slab metadata 仍由 `SpinNoIrq` 保护，但 task refill/drain 只在每次传输
   一个对象时短暂持有它；页 allocator、span 初始化和 detached page 归还均不在
   class lock 内。
+- SMP reclaim 先以 generation 标记每个 CPU 的 magazine 为 pending。IPI handler
+  只把 *idle-origin* pending 状态推进为 frozen；若打断了一个 task magazine borrow，
+  该 task 在释放 `&mut` borrow 后才推进 frozen。发起 CPU 在确认 frozen 后、IRQ
+  开启状态下远程取出 batch 并逐对象归还 central cache；IPI handler 不拿 class lock、
+  不分配页、也不 drain batch。
+- 在所有 AP 启动前，协议只冻结当前 CPU；`kipi::tlb::mark_all_cpus_started()` 后才
+  向每个 present CPU 发 IPI。被冻结 CPU 的 task/softirq allocation/free 直接走
+  central cache，避免等待 flush 完成；hardirq 始终只使用 reserve。
 - 1–4 页的通用页接口仍使用 PCP，并在 PCP miss/full 时使用已有的 IRQ-off
   refill/drain 行为；这与已移除的 byte PCB 是独立问题，当前提交不宣称消除它。
 
@@ -142,14 +160,17 @@ publish，之后的 retry 从任一已发布的 span 获取对象。
    放入当前 CPU magazine。
 3. local pair 的两本 magazine 都满时，释放路径摘下一整本 spare magazine，并在
    IRQ 开启状态下逐对象归还 central slab；每次归还只持有一次短 class lock。
-4. `shrink()` 或 slab refill 的 OOM 重试循环目前只 detach central `Empty` spans。
-   每一个 detached `SlabBacking` 在所有 KmemCache lock 外直接归还全局 page
-   allocator。
+4. `shrink()` 或 slab refill 的 OOM retry 先启动 serialized magazine flush：所有
+   已启动 CPU 的 task magazine 被 frozen，发起 task 在 IRQ 开启状态下 drain 每本
+   magazine；随后 reserve 中对象也逐个返回 central slab。任一并发 hardirq 操作仍
+   由 class lock 串行，并可使对应 span 保持 non-empty。
+5. 然后只 detach `Empty` span。每一个 detached `SlabBacking` 在所有 KmemCache
+   lock 外直接归还全局 page allocator；最后解除所有 CPU 的 frozen 状态。
 
-当一个新的 slab span 请求得到 `NoMemory` 时，分配器先执行上述 central reclaim，
-再重新检查目标 cache 并重试页分配。这能回收其他 size class 已经完全空闲的 span；
-不会回收 partial/full span，且在全 CPU flush 到位前也不会回收 task magazine 或
-hardirq reserve 中的对象。
+当一个新的 slab span 请求得到 `NoMemory` 时，分配器先执行上述 reclaim，再重新
+检查目标 cache 并重试页分配。这能回收其他 size class 已经完全空闲的 span；不会
+回收 partial/full span 或调用者仍持有的对象。若另一个 shrink session 已在运行，
+本次调用安全地退化为 central-only reclaim，而不等待或重入该 session。
 
 ### 非 slab allocator
 
@@ -176,9 +197,10 @@ Buddy 和 TLSF 的小对象直接进入各自 `ByteAllocator`。当其没有空�
   状态转换仍会竞争该 class lock。reserve under-full 时只在 local miss 或 normal
   task free 上机会性补充。usage accounting 已不再形成全局串行点，但这还不是完整的
   SMP memory-pressure 方案。
-- 全 CPU flush、shrink/OOM 对 magazine 的协调、CPU offline 和 NUMA 仍需要一个
-  无分配、可确认的 IPI/生命周期协议；在该协议落地前，reclaim 不会把 local cache
-  对象误当成可回收 central free object。
+- full magazine flush 使用 static generation/state word，而不是 generic IPI queue：
+  queue callback 会分配对象且在 IRQ handler 执行，不适用于 allocator reclaim。
+  `Frozen` 是 remote mutable magazine borrow 的前置条件；unfreeze 后延迟 IPI 只能
+  观察 idle state，不能把 CPU 再次冻结。该协议目前不覆盖 CPU offline 或 NUMA。
 
 ## 设计决策
 
@@ -193,7 +215,9 @@ Buddy 和 TLSF 的小对象直接进入各自 `ByteAllocator`。当其没有空�
 5. **task 与 hardirq 分流。** task/softirq fast path 用 current-CPU magazine；
    hardirq 用有界 reserve 并有明确耗尽语义，因而不会在中断中执行 page work 或
    批量 refill。
-6. **不提前宣称性能收益。** 后续需要使用真实 SMP workload 记录吞吐、lock wait、
+6. **flush 与 drain 分离。** IPI 只完成 access-state handshake；真正的 batch drain
+   由发起 task 完成，因此不把多对象操作或 class-lock 循环放进 IRQ-off handler。
+7. **不提前宣称性能收益。** 后续需要使用真实 SMP workload 记录吞吐、lock wait、
    p99 和最大 IRQ-off latency，才能评价 magazine 的收益。
 
 ## Drop / 资源释放

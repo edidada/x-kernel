@@ -207,6 +207,15 @@ impl<const CAPACITY: usize> MagazinePair<CAPACITY> {
                 .expect("empty magazine must accept bounded refill");
         }
     }
+
+    /// Extract both magazines for a reclaim operation.
+    ///
+    /// The caller must make the pair inaccessible to its owning CPU before
+    /// calling this method.  Keeping the active and spare batches separate
+    /// preserves the fixed maximum size of [`ObjectBatch`].
+    fn take_all(&mut self) -> [ObjectBatch; 2] {
+        [self.active.take_all(), self.spare.take_all()]
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -295,6 +304,14 @@ impl PerCpuMagazineSet {
     pub(crate) fn install_refill(&mut self, size_class: SizeClass, batch: &mut ObjectBatch) {
         with_magazine_pair!(self, size_class, |pair| pair.install_refill(batch));
     }
+
+    /// Extract both magazines for one size class.
+    ///
+    /// This is used only by the synchronized reclaim path after the owning
+    /// CPU has frozen its local magazine access.
+    pub(crate) fn take_all(&mut self, size_class: SizeClass) -> [ObjectBatch; 2] {
+        with_magazine_pair!(self, size_class, |pair| pair.take_all())
+    }
 }
 
 #[cfg(unittest)]
@@ -352,5 +369,23 @@ mod tests {
         batch.push(object(0x5000));
         magazines.install_refill(&mut batch);
         assert_eq!(batch.pop(), Some(object(0x5000)));
+    }
+
+    #[def_test]
+    fn test_take_all_extracts_active_and_spare_magazines() {
+        let mut magazines = MagazinePair::<2>::new();
+        for address in [0x1000, 0x2000, 0x3000] {
+            assert!(magazines.deallocate(object(address)).is_none());
+        }
+
+        let [mut active, mut spare] = magazines.take_all();
+        // `take_all` drains a LIFO magazine into an ObjectBatch, whose own
+        // pop direction is intentionally reversed for central return.
+        assert_eq!(active.pop(), Some(object(0x1000)));
+        assert_eq!(active.pop(), Some(object(0x2000)));
+        assert!(active.is_empty());
+        assert_eq!(spare.pop(), Some(object(0x3000)));
+        assert!(spare.is_empty());
+        assert_eq!(magazines.try_allocate(), None);
     }
 }

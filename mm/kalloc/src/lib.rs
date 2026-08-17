@@ -12,6 +12,8 @@ extern crate alloc;
 #[cfg(any(feature = "dice", feature = "tee"))]
 mod ffi;
 
+#[cfg(all(feature = "slab", not(feature = "ipi")))]
+use core::sync::atomic::AtomicU64;
 use core::{
     alloc::{GlobalAlloc, Layout},
     fmt,
@@ -26,7 +28,11 @@ use alloc_engine::{AllocError, AllocResult, BaseAllocator, BuddyPageAllocator, P
 use alloc_engine::{SizeClass, SlabBacking};
 use kaddr_layout::v2p;
 #[cfg(feature = "slab")]
-use kmem_cache::KmemCacheSet;
+use kmem_cache::{
+    KMEM_CACHE_FLUSH_SEQUENCE_MAX, KmemCacheSet, TaskMagazineAccess, TaskMagazineRefill,
+};
+#[cfg(feature = "slab")]
+use kspin::NoPreempt;
 use kspin::{IrqSave, SpinNoIrq};
 #[cfg(feature = "slab")]
 use magazine::{ObjectBatch, refill_count};
@@ -58,6 +64,33 @@ pub use page::GlobalPage;
 mod tracking;
 #[cfg(feature = "tracking")]
 pub use tracking::*;
+
+/// Maximum nonzero generation accepted by the slab magazine flush protocol.
+///
+/// The IPI provider uses this bound when allocating a sequence for a global
+/// reclaim session.  The high bits encode that sequence alongside the local
+/// magazine access state, preventing delayed IPIs from re-freezing a CPU after
+/// a completed session has released it.
+#[cfg(feature = "slab")]
+pub const TASK_MAGAZINE_FLUSH_SEQUENCE_MAX: u64 = KMEM_CACHE_FLUSH_SEQUENCE_MAX;
+
+/// Cross-CPU slab magazine reclaim provider.
+///
+/// `kipi` provides this interface in SMP slab builds.  The provider freezes
+/// every present CPU with a no-allocation IPI handshake, drains the frozen
+/// magazines from the initiating task context, and later unfreezes them.  A
+/// return value of zero means that a session could not be started (for example
+/// because another shrink is already active), so callers retain the safe
+/// central-only reclaim fallback.
+#[cfg(all(feature = "slab", feature = "ipi"))]
+#[kiface::interface]
+pub trait KmemCacheFlushIf {
+    /// Begin one serialized global magazine flush and return its generation.
+    fn begin_global_magazine_flush() -> u64;
+
+    /// End a flush previously returned by [`begin_global_magazine_flush`].
+    fn end_global_magazine_flush(sequence: u64);
+}
 
 // Exactly one allocator feature must be selected. Kernel builds get it
 // through kfeat; host test builds pass it explicitly (e.g.
@@ -228,6 +261,98 @@ pub struct GlobalAllocator {
     usages: SpinNoIrq<Usages>,
 }
 
+/// Local sequence source for reclaim when no IPI provider is linked.
+#[cfg(all(feature = "slab", not(feature = "ipi")))]
+static NEXT_LOCAL_MAGAZINE_FLUSH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// A reclaim session that keeps runtime task magazines inaccessible while
+/// their objects are returned to central slab caches.
+///
+/// The initiator remains pinned for the session, but IRQs stay enabled.  This
+/// makes a concurrent local magazine operation finish on the same CPU and
+/// avoids a second task on the initiator CPU recursively waiting for the same
+/// serialized global flush.
+#[cfg(feature = "slab")]
+struct MagazineReclaimGuard {
+    sequence: u64,
+    _no_preempt: Option<NoPreempt>,
+}
+
+#[cfg(feature = "slab")]
+impl MagazineReclaimGuard {
+    fn begin(allocator: &GlobalAllocator) -> Self {
+        if !allocator.is_runtime_global_allocator() {
+            return Self {
+                sequence: 0,
+                _no_preempt: None,
+            };
+        }
+
+        let no_preempt = NoPreempt::new();
+        #[cfg(feature = "ipi")]
+        let sequence = KmemCacheFlushIf::begin_global_magazine_flush();
+        #[cfg(not(feature = "ipi"))]
+        let sequence = {
+            let sequence = next_local_magazine_flush_sequence();
+            if allocator
+                .slab_caches
+                .freeze_and_drain_current_task_magazines(sequence)
+            {
+                sequence
+            } else {
+                0
+            }
+        };
+
+        if sequence == 0 {
+            drop(no_preempt);
+            return Self {
+                sequence,
+                _no_preempt: None,
+            };
+        }
+
+        Self {
+            sequence,
+            _no_preempt: Some(no_preempt),
+        }
+    }
+}
+
+#[cfg(feature = "slab")]
+impl Drop for MagazineReclaimGuard {
+    fn drop(&mut self) {
+        if self.sequence == 0 {
+            return;
+        }
+
+        #[cfg(feature = "ipi")]
+        KmemCacheFlushIf::end_global_magazine_flush(self.sequence);
+        #[cfg(not(feature = "ipi"))]
+        GLOBAL_ALLOCATOR
+            .slab_caches
+            .unfreeze_current_task_magazines(self.sequence);
+    }
+}
+
+#[cfg(all(feature = "slab", not(feature = "ipi")))]
+fn next_local_magazine_flush_sequence() -> u64 {
+    loop {
+        let current = NEXT_LOCAL_MAGAZINE_FLUSH_SEQUENCE.load(Ordering::Relaxed);
+        let next = if current == TASK_MAGAZINE_FLUSH_SEQUENCE_MAX {
+            1
+        } else {
+            current + 1
+        };
+        if NEXT_LOCAL_MAGAZINE_FLUSH_SEQUENCE
+            .compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return next;
+        }
+    }
+}
+
 impl Default for GlobalAllocator {
     fn default() -> Self {
         Self::new()
@@ -396,10 +521,15 @@ impl GlobalAllocator {
             // SAFETY: the caller has already excluded normal hardirq context.
             // NMI allocation is unsupported by the allocator contract, so no
             // interrupt-like path can concurrently mutate the task magazine.
-            let local_object =
-                unsafe { self.slab_caches.try_allocate_from_task_magazine(size_class) };
-            if let Some(object) = local_object {
-                return Ok(object);
+            match unsafe { self.slab_caches.try_allocate_from_task_magazine(size_class) } {
+                TaskMagazineAccess::Ready(Some(object)) => return Ok(object),
+                TaskMagazineAccess::Frozen => {
+                    // A reclaim session owns this CPU's magazine contents.
+                    // Falling back centrally lets allocation make progress
+                    // without waiting for the shrink initiator.
+                    return self.alloc_slab_class_centrally(size_class);
+                }
+                TaskMagazineAccess::Ready(None) => {}
             }
 
             // A reserve refill is part of the local-miss slow path. Leaving an
@@ -414,7 +544,10 @@ impl GlobalAllocator {
                 // matching class. The execution-context invariant above also
                 // covers the short local install operation.
                 let uninstalled =
-                    unsafe { self.slab_caches.install_task_refill(size_class, refill) };
+                    match unsafe { self.slab_caches.install_task_refill(size_class, refill) } {
+                        TaskMagazineRefill::Installed(batch)
+                        | TaskMagazineRefill::Frozen(batch) => batch,
+                    };
                 // SAFETY: an uninstalled batch still contains only live
                 // objects checked out from this matching central class.
                 unsafe { self.slab_caches.return_task_batch(size_class, uninstalled) };
@@ -441,9 +574,9 @@ impl GlobalAllocator {
 
     /// Add a prepared span to one central slab cache.
     ///
-    /// The retry after `NoMemory` first returns all central empty spans to the
-    /// page allocator. Task magazines and IRQ reserves require the later
-    /// cross-CPU flush protocol before they can participate in this reclaim.
+    /// The retry after `NoMemory` first freezes and drains runtime task
+    /// magazines, returns hardirq-reserve objects to central caches, and then
+    /// gives every empty span back to the page allocator before retrying.
     #[cfg(feature = "slab")]
     fn populate_slab_class(&self, size_class: SizeClass) -> AllocResult {
         let page_count = KmemCacheSet::slab_pages(size_class);
@@ -486,6 +619,13 @@ impl GlobalAllocator {
 
     #[cfg(feature = "slab")]
     fn reclaim_empty_slab_pages(&self) -> usize {
+        assert!(
+            !kirq::context::is_in_hardirq_fast(),
+            "slab reclaim must not run from hardirq context"
+        );
+        let _magazine_flush = MagazineReclaimGuard::begin(self);
+        self.slab_caches.drain_irq_reserves();
+
         let mut released_pages = 0usize;
         while let Some(backing) = self.slab_caches.take_empty_slab() {
             released_pages = released_pages.saturating_add(backing.pages());
@@ -645,6 +785,14 @@ impl GlobalAllocator {
             return;
         }
 
+        if self.slab_caches.is_current_task_magazine_frozen() {
+            // SAFETY: reclaim has made task magazines unavailable on this
+            // CPU, so this ordinary task free returns directly to the
+            // matching central cache instead of retaining an object locally.
+            unsafe { self.slab_caches.deallocate(size_class, object) };
+            return;
+        }
+
         if self.slab_caches.irq_reserve_needs_refill(size_class) {
             // SAFETY: this is an ordinary task-context free of a live object
             // in the matching class. A reserve donation does not expose it to
@@ -664,10 +812,19 @@ impl GlobalAllocator {
             self.slab_caches
                 .deallocate_to_task_magazine(size_class, object)
         };
-        if let Some(batch) = drain {
-            // SAFETY: the local magazine extracted only live objects from
-            // this matching size class.
-            unsafe { self.slab_caches.return_task_batch(size_class, batch) };
+        match drain {
+            TaskMagazineAccess::Ready(Some(batch)) => {
+                // SAFETY: the local magazine extracted only live objects from
+                // this matching size class.
+                unsafe { self.slab_caches.return_task_batch(size_class, batch) };
+            }
+            TaskMagazineAccess::Ready(None) => {}
+            TaskMagazineAccess::Frozen => {
+                // SAFETY: the state machine left `object` out of the local
+                // magazine, so it remains a live object of this matching
+                // central cache.
+                unsafe { self.slab_caches.deallocate(size_class, object) };
+            }
         }
     }
 
@@ -875,9 +1032,13 @@ impl GlobalAllocator {
 
     /// Reclaim all completely empty central slab spans.
     ///
-    /// Returns the number of base pages returned to the page allocator.  In
-    /// non-slab builds no central slab spans exist, so this returns zero. It
-    /// does not flush task-local magazines or hardirq reserves.
+    /// In slab builds this first flushes runtime task magazines, drains
+    /// hardirq reserves, and then returns detached empty spans to the page
+    /// allocator. It must be called outside hardirq and NMI context; a slab
+    /// hardirq invocation panics rather than waiting for cross-CPU reclaim.
+    ///
+    /// Returns the number of base pages returned to the page allocator. In
+    /// non-slab builds no central slab spans exist, so this returns zero.
     pub fn shrink(&self) -> usize {
         #[cfg(feature = "slab")]
         {
@@ -1011,6 +1172,60 @@ static GLOBAL_ALLOCATOR: GlobalAllocator = GlobalAllocator::new();
 /// Returns the reference to the global allocator.
 pub fn global_allocator() -> &'static GlobalAllocator {
     &GLOBAL_ALLOCATOR
+}
+
+/// Stage a global-reclaim freeze request for one present logical CPU.
+///
+/// This is the `kipi` integration hook.  It only changes atomic access state;
+/// the matching IPI handler must call
+/// [`complete_current_task_magazine_flush`] on the destination CPU before the
+/// initiator drains that CPU's magazine storage.
+#[cfg(all(feature = "slab", feature = "ipi"))]
+pub fn request_task_magazine_flush_on_cpu(cpu: usize, sequence: u64) {
+    GLOBAL_ALLOCATOR
+        .slab_caches
+        .request_task_magazine_flush_on_cpu(cpu, sequence);
+}
+
+/// Advance the current CPU's staged task-magazine request from its IPI handler.
+///
+/// Returns `true` once the CPU is frozen for `sequence`.  `false` means an
+/// interrupted task still owns a local magazine borrow, or this was a delayed
+/// IPI for a finished sequence; the initiator must rely on the completion
+/// predicate rather than treating this result as an error.
+#[cfg(all(feature = "slab", feature = "ipi"))]
+pub fn complete_current_task_magazine_flush(sequence: u64) -> bool {
+    GLOBAL_ALLOCATOR
+        .slab_caches
+        .complete_current_task_magazine_flush(sequence)
+}
+
+/// Return whether `cpu` has safely frozen its task magazines for `sequence`.
+#[cfg(all(feature = "slab", feature = "ipi"))]
+pub fn is_task_magazine_flush_complete(cpu: usize, sequence: u64) -> bool {
+    GLOBAL_ALLOCATOR
+        .slab_caches
+        .is_task_magazine_flush_complete(cpu, sequence)
+}
+
+/// Drain all magazines on a CPU already frozen for `sequence`.
+///
+/// The caller must keep the corresponding global flush session active until
+/// it later calls [`unfreeze_task_magazines_on_cpu`].  This function performs
+/// no page allocation and no page release.
+#[cfg(all(feature = "slab", feature = "ipi"))]
+pub fn drain_frozen_task_magazines_on_cpu(cpu: usize, sequence: u64) -> bool {
+    GLOBAL_ALLOCATOR
+        .slab_caches
+        .drain_frozen_task_magazines_on_cpu(cpu, sequence)
+}
+
+/// Release one CPU from a completed global task-magazine flush.
+#[cfg(all(feature = "slab", feature = "ipi"))]
+pub fn unfreeze_task_magazines_on_cpu(cpu: usize, sequence: u64) {
+    GLOBAL_ALLOCATOR
+        .slab_caches
+        .unfreeze_task_magazines_on_cpu(cpu, sequence);
 }
 
 /// Initializes the global allocator with the given memory region.

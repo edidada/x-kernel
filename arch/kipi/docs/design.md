@@ -8,22 +8,28 @@
 - I-cache 跨核失效的实现绑定；
 - TLB shootdown 的跨核通知与确认协议；
 - 进入平台电源终点前的系统级 CPU 停机协议（`khal::power::SmpStopIf`
-  的 provider，`stop_other_cpus`）。
+  的 provider，`stop_other_cpus`）；
+- slab task magazine reclaim 的无分配冻结/确认协议（启用
+  `kmem-cache-flush` 时）。
 
 它位于 `kirq::notify_cpu()` 之上、调度器和页表实现之旁，为内核中
 “需要让别的 CPU 立刻执行一小段本地操作”的场景提供统一入口。
 
 ## 背景
 
-内核中有两类典型的跨核需求：
+内核中有四类典型的跨核需求：
 
 1. 让指定 CPU 或一组 CPU 在中断上下文中执行一个短回调，例如 I-cache flush。
 2. 在页表修改后通知其它 CPU 丢弃本地 TLB 项，并等待确认，避免旧映射继续生效。
+3. 在进入平台电源终点前停靠其它 CPU，阻止它们继续修改共享状态。
+4. 在内存回收期间冻结并排空 task slab magazine，避免 IRQ-safe reclaim 路径分配。
 
-这两类需求都依赖 IPI，但约束不同：
+这些需求都依赖 IPI，但约束不同：
 
 - 通用回调更关注投递、排队和广播语义；
 - TLB shootdown 更关注发布顺序、确认协议、并发安全和等待行为。
+- CPU 停机和 slab reclaim 不能依赖通用回调队列，分别使用静态停机状态和
+  generation 状态机。
 
 `kipi` 将它们放在同一 crate 中，复用同一 IPI 向量，但把协议状态分层管理。
 
@@ -39,7 +45,8 @@ arch/kipi/
 │   ├── queue.rs
 │   ├── icache.rs
 │   ├── stop.rs
-│   └── tlb.rs
+│   ├── tlb.rs
+│   └── kmem_cache.rs
 └── Cargo.toml
 ```
 
@@ -50,11 +57,13 @@ arch/kipi/
 - `queue.rs`：每 CPU FIFO 队列；
 - `icache.rs`：I-cache 跨核 flush 的 crate interface 实现；
 - `stop.rs`：系统级 CPU 停机协议（电源终点前停靠其它 CPU）；
-- `tlb.rs`：TLB shootdown 发布、IPI 发送、确认和等待协议。
+- `tlb.rs`：TLB shootdown 发布、IPI 发送、确认和等待协议；
+- `kmem_cache.rs`：slab magazine flush 的静态状态机与 `kalloc` interface provider。
 
 ## 架构
 
-`kipi` 把“通用事件投递”和“TLB shootdown 协议”叠加在同一个 IPI handler 中：
+`kipi` 把通用事件、TLB shootdown、CPU stop 和可选 slab reclaim protocol
+叠加在同一个 IPI handler 中：
 
 ```text
 发起 CPU
@@ -62,6 +71,10 @@ arch/kipi/
    ├─ run_on_cpu / run_on_each_cpu
    │      │
    │      ├─ 向目标 CPU 的 IPI_EVENT_QUEUE 入队回调
+   │      └─ kirq::notify_cpu(kbuild_config::IPI_IRQ, ...)
+   │
+   ├─ stop_other_cpus
+   │      ├─ 发布 STOP_STATE
    │      └─ kirq::notify_cpu(kbuild_config::IPI_IRQ, ...)
    │
    └─ tlb::flush_remote
@@ -73,18 +86,26 @@ arch/kipi/
                      v
 目标 CPU IPI handler
    │
+   ├─ stop::handle_stop_request()
+   │      └─ 非 orchestrator CPU ack 后永久停靠
+   │
    ├─ tlb::handle_shootdown()
    │      ├─ fast path: 检查 pending epoch
    │      └─ slow path: 扫描 request slots，flush 并 ack
    │
+   ├─ kmem_cache::handle_flush_request()  (可选、只推进原子状态)
+   │
    └─ 处理 IPI_EVENT_QUEUE 中的普通回调
 ```
 
-这里有两个核心状态面：
+这里有五个核心状态面：
 
 - **每 CPU 事件队列**：存放通用回调，FIFO 执行；
 - **每发起 CPU request slot**：存放 TLB shootdown 请求；
-- **每目标 CPU pending epoch**：为 TLB handler 提供 O(1) fast path gate。
+- **每目标 CPU pending epoch**：为 TLB handler 提供 O(1) fast path gate；
+- **CPU stop state**：用 `STOP_STATE` 和 per-CPU ack 表示停机请求及停靠进度；
+- **slab flush session**：一个 global generation、静态 target bitmap 和每目标 request
+  word；它不使用 callback queue。
 
 ## 调用约束 / 执行上下文
 
@@ -109,6 +130,18 @@ arch/kipi/
   另一个任务复用相同 slot。
 - 用户页表 shootdown 的目标集合由调度路径维护的 mm-owned residency 提供；
   `flush_remote()` 只消费快照，不在 flush 结束后重建或 reset residency。
+
+### slab magazine reclaim 约束
+
+- 该协议不使用 `run_on_each_cpu()` 或 `IPI_EVENT_QUEUE`：它们需要分配 callback
+  对象或在 IPI handler 执行任意回调，不适合 allocator OOM/shrink 路径。
+- `kalloc` 在进入 provider 前 pin 发起 CPU。provider 以 static generation 和
+  present-CPU snapshot stage 每个目标的 magazine state，再发送 IPI。
+- 目标 IPI handler 只能完成 idle-origin pending state；若 task 正持有 mutable
+  magazine borrow，则它在 borrow 释放后自行完成。发起 CPU 等到所有 target frozen
+  后，在普通 task 上下文 drain object batch，IPI handler 不拿 slab lock。
+- 与 TLB 相同，只有 `mark_all_cpus_started()` 之后才能向所有 present CPU 发 IPI；
+  早期启动阶段只 flush 当前 CPU。
 
 ## 状态机
 
@@ -143,6 +176,26 @@ inactive
 如果同一 CPU 在 slot active 期间再次进入 `flush_remote()`，不会立刻重入复用，
 而是设置 `needs_retry_full_flush`，由外层在本次请求结束后补发一次全局 retry。
 
+### slab magazine flush
+
+单次 slab reclaim session 的状态是全局串行的：
+
+```text
+inactive
+   -> stage target CPU states (idle -> pending-idle, active -> pending-active)
+   -> current CPU complete; remote CPUs receive IPI
+   -> every target Frozen(sequence)
+   -> initiator drains remote magazines in task context
+   -> kalloc reclaims Empty spans
+   -> clear IPI request words, unfreeze targets
+   -> inactive
+```
+
+`pending-active` 不能被 IPI handler 改写，因为对应 CPU 仍持有 `&mut` magazine；
+它只能由该 CPU 的 fast path 在借用结束后变为 `Frozen(sequence)`。generation 被
+编码在 kalloc 的 access-state word 中，因此一个结束后的 delayed IPI 只会看到 idle
+状态，不能把新 session 或普通 CPU 重新冻结。
+
 ## 算法流程
 
 ### `run_on_cpu`
@@ -162,10 +215,13 @@ inactive
 
 ### `ipi_handler`
 
-1. 先调用 `tlb::handle_shootdown()`。
-2. 再循环消费本 CPU 队列中的普通 IPI 回调。
+1. 先调用 `stop::handle_stop_request()`；非 orchestrator CPU 在此确认并永久停靠。
+2. 调用 `tlb::handle_shootdown()`。
+3. 启用 slab provider 时，检查静态 magazine flush request 并只推进本地原子状态。
+4. 再循环消费本 CPU 队列中的普通 IPI 回调。
 
-这个顺序是刻意设计的：TLB shootdown 属于页表一致性协议，优先级高于普通跨核回调。
+这个顺序是刻意设计的：CPU stop 必须阻止目标 CPU 继续处理其它工作；TLB
+shootdown 和 slab flush 属于状态一致性协议，优先级高于普通跨核回调。
 
 ### `tlb::flush_remote`
 
@@ -211,7 +267,7 @@ inactive
    `STOP_ACKED`——ack 是停靠 CPU 对共享状态的最后一次写，之后立即进入
    屏蔽本地异常的 `wfi/hlt` 永久停靠。orchestrator 观察到 ack 即可确定
    该 CPU 不会再执行任何共享状态路径。
-3. orchestrator 以 1s 有界超时轮询等待集中各 CPU 的 ack。等待集在发布时
+3. orchestrator 以 1s 有界超时轮询等待各 CPU 的 ack。等待集在发布时
    一次性快照：只包含 IPI 队列已初始化的 present CPU（见设计决策）。
    超时仍未 ack 的 CPU 不阻塞终点，逐个告警后继续，语义对齐 Linux
    `smp_send_stop()`。
@@ -223,6 +279,21 @@ orchestrator 全程持有 `NoPreempt` 守卫钉在本 CPU 上（见设计决策�
 看门狗）；若不停靠，停靠中的 CPU 会被看门狗 NMI 反复唤醒，并把“故意停机”
 误判为 hard lockup，panic 后走平台断电，从而破坏 `khal::power::halt()`
 的语义。
+
+### slab magazine flush
+
+1. `KmemCacheFlushIf::begin_global_magazine_flush()` 以 `FLUSH_ACTIVE` 尝试独占
+   session；竞争者返回零，使 kalloc 安全退化为 central-only reclaim。
+2. 选取 nonzero generation，保存 present CPU snapshot，并先调用 kalloc stage 所有
+   target 的 state。
+3. 发起 CPU 直接完成自己的 pending-idle；远程 target 写入 static request word 后
+   使用 `notify_cpu(IPI_IRQ, Specific)`。
+4. target handler 调用 kalloc completion helper。pending-active 返回未完成，等待被
+   中断 task 结束本次小的 magazine operation。
+5. 发起 CPU 等待每个 target 的 frozen acknowledgement，随后调用 kalloc remote drain
+   helper。drain 期间 session 保持 active。
+6. kalloc 完成 reserve/empty-span reclaim 后调用 end；provider 清 request word，
+   unfreeze target，并释放 `FLUSH_ACTIVE`。
 
 ## 并发模型
 
@@ -251,6 +322,17 @@ orchestrator 全程持有 `NoPreempt` 守卫钉在本 CPU 上（见设计决策�
 
 这里用单调计数而不是布尔 `pending`，是为了避免多个 initiator 并发发布时的
 丢事件窗口。
+
+### slab flush session
+
+- `FLUSH_ACTIVE` 串行化全局 session；竞争者不自旋等待，避免 OOM 路径相互阻塞。
+- 发起者先 stage kalloc per-CPU state，再 publish `PENDING_SEQUENCE_BY_CPU[target]`
+  并发 IPI。`notify_cpu()` 的 publish-before-notify 契约保证 target 不会先看见 IPI。
+- state word 带 generation：`pending-idle` 可由 IPI 变成 frozen，`pending-active` 只
+  能由本地 fast path 变成 frozen。发起者以 Acquire 观察 frozen 后才调用 kalloc 的
+  `remote_ref_mut_raw()` drain helper。
+- 结束时先清 IPI request word，再 unfreeze。即使 handler 已经读取旧 word，它也只能
+  尝试完成旧 pending state，不能把 idle state 再次转换为 frozen。
 
 ## 设计决策
 
@@ -352,11 +434,21 @@ orchestrator 而永不 park，而真正的 orchestrator 却在等它 ack，直�
 等待，不影响停机覆盖面，与 Linux `smp_send_stop()` 的 best-effort 语义
 一致。
 
+### 为什么 slab flush 不用通用 callback queue
+
+slab reclaim 的正确性依赖“target 已经不再拥有 mutable magazine borrow”这个时刻，
+而不是“target 已经执行某个任意 callback”。将 callback 入队还会涉及 allocation、
+队列锁和 callback 生命周期，恰好是 OOM 路径需要避开的依赖。静态 request word +
+generation state 可以把 IPI handler 缩为一个原子 transition，并把所有对象移动留在
+发起 task 的 IRQ 开启上下文。
+
 ## Drop / 资源释放
 
 - 通用回调的生命周期由 `Callback` / `MulticastCallback` 自然管理；
 - 广播回调通过 `Arc` 克隆，再在目标 CPU 上转换成一次性 `Callback`；
 - `IpiEventQueue` 中的事件在 `pop_one()` 后被消费；
 - `ActiveShootdownSlot` 通过 `Drop` 自动清除 active 状态，防止异常路径遗留 slot 占用；
+- slab flush 的 static state 不持有 callback 或 heap allocation；`end` 成对清除 request
+  word、解除 target frozen state，并释放 session gate；
 - `kipi` 本身不拥有跨 CPU 长生命周期的内存池或设备资源，主要资源都是
   per-CPU 队列和原子状态。

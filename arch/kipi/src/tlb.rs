@@ -339,6 +339,14 @@ pub fn mark_all_cpus_started() {
     ALL_CPUS_STARTED.store(true, Ordering::Release);
 }
 
+/// Return whether every present secondary CPU has entered the runtime.
+///
+/// Other IPI protocols use the same boot gate as TLB shootdown: before this
+/// becomes true, only the boot CPU is safe to target.
+pub(crate) fn all_cpus_started() -> bool {
+    ALL_CPUS_STARTED.load(Ordering::Acquire)
+}
+
 #[kiface::provide]
 impl TlbFlushIf {
     fn flush_process_mask(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {

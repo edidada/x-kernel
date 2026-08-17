@@ -2027,6 +2027,7 @@ dependencies = [
  "kaddr_layout",
  "kbuild_config",
  "kerrno",
+ "kiface",
  "kirq",
  "kspin 0.2.0-dev",
  "log",
@@ -2478,6 +2479,7 @@ dependencies = [
 name = "kipi"
 version = "0.2.0-dev"
 dependencies = [
+ "kalloc",
  "karch",
  "kbuild_config",
  "kcpu_id_map",

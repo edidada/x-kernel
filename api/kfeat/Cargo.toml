@@ -71,7 +71,12 @@ platform_kplat_loongarch64 = ["dep:kplat-loongarch64", "fp-simd", "dev_log"]
 # Memory
 alloc = ["dep:alloc-engine", "dep:kalloc"]
 alloc_tlsf = ["alloc", "alloc-engine/tlsf", "kalloc/tlsf"]
-alloc_slab = ["alloc", "alloc-engine/slab", "kalloc/slab"]
+alloc_slab = [
+    "alloc",
+    "alloc-engine/slab",
+    "kalloc/slab",
+    "kipi?/kmem-cache-flush",
+]
 alloc_buddy = ["alloc", "alloc-engine/buddy", "kalloc/buddy"]
 dma = []
 

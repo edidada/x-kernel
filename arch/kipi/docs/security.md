@@ -15,7 +15,7 @@
 ┌───────────────────────────────────────────┐
 │                   kipi                    │
 │  ┌──────────────┐   ┌──────────────────┐  │
-│  │ IPI 队列路径 │   │ TLB 协议状态路径 │  │
+│  │ IPI 队列路径 │   │ TLB / slab 协议状态路径 │  │
 │  └──────────────┘   └──────────────────┘  │
 └───────────────────────────────────────────┘
    │
@@ -50,7 +50,12 @@
    `ipi_handler()` 和 TLB shootdown handler 运行在不可睡眠上下文中，
    不能持有会阻塞的锁，也不能执行长路径。
 
-5. **回调边界**  
+5. **allocator reclaim 边界**
+   slab flush IPI 只推进 generation state；任何 remote mutable magazine borrow、
+   class lock、batch drain 和 page reclaim 都留在发起 task 上下文，不能复用 generic
+   callback queue。
+
+6. **回调边界**
    广播/单播回调由其他 CPU 提供并在目标 CPU 上执行。`kipi` 只保证投递，
    不验证回调逻辑本身是否适合在 IPI 上下文运行。
 
@@ -116,6 +121,29 @@
 - `IntrManagerIf::notify_cpu` 现在把该契约写成接口要求；
 - AArch64 / RISC-V 后端已在发送路径显式补 barrier。
 
+### 4. slab flush 的 static request / generation state
+
+位置：
+
+- `arch/kipi/src/kmem_cache.rs`
+- `mm/kalloc/src/kmem_cache.rs`
+
+不变量：
+
+- 发起者必须先 stage `pending-idle` 或 `pending-active`，再 publish per-target request
+  word 和发送 IPI；
+- handler 只能完成 matching `pending-idle`，不能把 pending-active 变为 frozen；
+- 发起者只能在所有 target 对同一 generation 进入 frozen 后请求 kalloc remote drain；
+- session end 只能在已 drain 的 frozen target 上执行，并需要先清 request word。
+
+防护：
+
+- `FLUSH_ACTIVE` 串行 session，竞争者返回 central-only reclaim 而非共享状态；
+- kalloc 的 state word 将 generation 和 tag 原子绑定，避免延迟 IPI 在 unfreeze 后
+  错把 idle CPU 重新冻结；
+- `remote_ref_mut_raw()` 的 unsafe access 位于 kalloc，并有 frozen state、CPU bound 和
+  active-session 的显式 `SAFETY:` 说明。
+
 ## 内存安全不变量
 
 以下不变量对 `kipi` 的健壮性和内存安全都关键：
@@ -135,6 +163,13 @@
 5. **pending epoch 只能作为 fast path gate，不能替代真实 ack 协议**  
    epoch 只决定“要不要扫描”，真正的完成条件仍是 `acked_seq_by_cpu`。
 
+6. **slab remote drain 必须等待 frozen generation**
+   pending-active 说明 target 仍可能持有 `&mut` magazine；只有 task local fast path
+   释放借用并发布 frozen 后，remote raw mutable access 才可用。
+
+7. **延迟 slab IPI 不能重新冻结已结束 session**
+   handler 不从 idle 创建 request，只完成已 stage 的 matching pending-idle state。
+
 ## 线程安全
 
 ### 通用 IPI 队列
@@ -150,6 +185,16 @@
 - `PENDING_EPOCH_BY_CPU` 只是降低无关 IPI 的扫描成本，不改变协议正确性；
 - `needs_retry_full_flush` 用于同 CPU 嵌套请求的兜底补发，避免直接重入复用 slot。
 
+### slab magazine flush
+
+- `FLUSH_ACTIVE` 提供单一 session owner；发起 CPU 在整个 reclaim window 保持 pin，
+  但不关闭 IRQ；
+- `FLUSH_TARGETS` 是 session 开始时的 present-CPU snapshot，target state 的 frozen
+  acknowledgement 才是 remote drain 的凭证；
+- IPI handler 仅执行 atomic state completion，不触碰 `SlabCache`、reserve 或
+  `PER_CPU_MAGAZINES` 内容；
+- 所有 magazine object 的实际 central return 都在发起 CPU 逐对象短 class lock 下完成。
+
 ## 威胁分析
 
 | 编号 | 威胁 | 触发条件 | 影响 | 缓解 |
@@ -164,6 +209,8 @@
 | T-07 | NMI 看门狗唤醒停靠 CPU 或误判故意停机为 lockup | 平台带 NMI/pseudo-NMI hard-lockup 看门狗，park 后 NMI 源仍开启 | 停靠 CPU 被反复唤醒；看门狗 panic 后走平台断电，`halt` 变成 `power_off` | park 前调用 `khal::quiesce_nmi()` 停靠本地 NMI 源（无 NMI 平台为 no-op） |
 | T-08 | 停机编排者任务在协议中途被迁移 | 从可抢占的 syscall 上下文进入终点，认领 id 与广播/等待基于过期的 CPU id | 被离开的 CPU 被当作 orchestrator 永不 park，协议必然吃满超时并留下运行中的 CPU | `stop_other_cpus` 全程持有 `NoPreempt` 守卫，把编排者钉在认领的 CPU 上 |
 | T-09 | 等待集包含 IPI 队列未初始化的 present CPU | AP 尚未执行 `kipi::init()` 即触发停机 | 该 CPU 永远无法 ack，每次停机固定白等 1s 超时并误报告警 | 发布时一次性快照等待集，只含队列已就绪的 CPU；广播仍覆盖全部其它 CPU |
+| T-10 | IPI handler 与 task mutable magazine borrow 并发 | target fast path 正在访问 magazine | remote drain data race / freelist 损坏 | `pending-active` 不能由 handler 完成；仅 task 在 borrow 结束后发布 frozen |
+| T-11 | delayed slab IPI 在 session end 后重冻 CPU | IPI delivery 晚于 end | task magazine 长期不可用或 remote borrow 错误 | handler 只完成预先 stage 的 matching pending-idle；idle state 不可被 handler 转换 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -174,6 +221,7 @@
 | F-03 | 目标 CPU 长时间不 ack TLB request | 发起 CPU 自旋等待 | 页表修改路径停顿，可能表现为系统卡住 | 超时后记录 warning；等待中轮询 `handle_shootdown` 避免 IRQ-off 互等 |
 | F-04 | pending epoch 未同步更新 | 目标 CPU fast path 直接返回，不扫描 slots | 单测或协议调用错误时出现假阴性 / 卡住 | 正式路径由 `flush_remote()` 封装；单测通过 helper 同步更新 |
 | F-05 | callback panic | 当前回调失败 | 其它已排队回调仍继续处理 | `ipi_handler()` 继续消费队列，不让单个回调中断整个队列 |
+| F-06 | slab target 长时间不 frozen | target IRQ 长时间关闭或 task 未完成本地 borrow | shrink/OOM reclaim 停顿 | 自旋等待并在一秒后记录 target CPU/generation；不在未 frozen 状态下 remote drain |
 
 ## 故障管理
 
@@ -182,6 +230,8 @@
   自旋等待 + 超时 warning 的诊断模型；
 - 同 CPU 嵌套 TLB 请求不直接 panic，而是设置 `needs_retry_full_flush` 并在当前请求结束后补发；
 - 对平台 IPI 顺序语义的要求被写入接口契约，避免隐式依赖散落在调用点。
+- slab flush session 已被占用时不会等待或进入通用 callback 队列，kalloc 改为安全的
+  central-only reclaim；target 未 frozen 时只等待并报警，不扩大 IPI handler 工作。
 
 ## 隐私分析
 
@@ -202,6 +252,8 @@
 - `kipi` 只保证跨 CPU 投递，不保证回调本身适合在 IPI 中断上下文运行；
 - `pending_epoch` 只是性能优化门槛，不是完整协议状态，因此测试若直接操作内部 slot，
   必须同步更新该 gate。
+- slab protocol 仅对 session 开始时的 present CPU 生效；CPU offline/online、NUMA
+  node-local reclaim 和 memory cgroup 生命周期尚未接入，不能把它当作这些机制的替代。
 
 ## 审计清单
 
@@ -211,3 +263,7 @@
 - 检查任何新测试若手工构造 request slot 状态，是否同步更新 `pending_epoch`。
 - 检查新的广播回调是否真的能在 IPI handler 上下文执行，而不会睡眠或长时间占用 CPU。
 - 检查新平台 IRQ backend 是否兑现 `IntrManagerIf::notify_cpu` 的顺序契约。
+- 检查 slab flush 是否先 stage state 再 publish request/notify，且 handler 不会把
+  pending-active 或 idle state 转为 frozen。
+- 检查所有 remote magazine mutable borrow 都发生在 matching frozen acknowledgement 后，
+  并在 end 前完成；检查 CPU lifecycle 变化不会绕过 present-CPU snapshot 假设。

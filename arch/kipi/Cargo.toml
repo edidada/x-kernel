@@ -10,6 +10,7 @@ repository.workspace = true
 
 [features]
 default = []
+kmem-cache-flush = ["dep:kalloc", "kalloc/ipi", "kalloc/slab"]
 
 [dependencies]
 kiface.workspace = true
@@ -28,3 +29,4 @@ page_table = { workspace = true, features = ["smp"] }
 percpu.workspace = true
 unittest.workspace = true
 kbuild_config.workspace = true
+kalloc = { workspace = true, optional = true }

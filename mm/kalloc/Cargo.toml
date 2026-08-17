@@ -11,6 +11,7 @@ dice = []
 default = []
 tlsf = ["alloc-engine/tlsf"]
 slab = ["alloc-engine/slab"]
+ipi = []
 buddy = ["alloc-engine/buddy"]
 tracking = ["dep:backtrace"]
 
@@ -22,6 +23,7 @@ kaddr_layout.workspace = true
 kbuild_config.workspace = true
 kerrno.workspace = true
 kirq.workspace = true
+kiface.workspace = true
 kspin.workspace = true
 log.workspace = true
 memaddr.workspace = true

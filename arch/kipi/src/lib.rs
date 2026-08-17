@@ -6,10 +6,12 @@
 //!
 //! This module provides a lightweight abstraction for CPU-to-CPU communication
 //! using Inter-Processor Interrupts (IPI). It maintains per-CPU callback queues,
-//! dispatches generic callbacks from the shared IPI handler, hosts the TLB
-//! shootdown protocol used by page-table updates, and the system-wide CPU
-//! stop protocol used before entering a platform power terminal
-//! ([`stop_other_cpus`]).
+//! dispatches generic callbacks from the shared IPI handler, and hosts the TLB
+//! shootdown protocol used by page-table updates. It also provides the
+//! system-wide CPU stop protocol used before entering a platform power
+//! terminal and, when enabled, an allocation-free slab magazine-reclaim
+//! handshake. These protocols share the IPI vector but deliberately bypass
+//! the generic callback queue.
 //!
 //! ## Safety
 //!
@@ -32,6 +34,8 @@ use lazyinit::LazyInit;
 
 mod event;
 mod icache;
+#[cfg(feature = "kmem-cache-flush")]
+mod kmem_cache;
 mod queue;
 mod stop;
 pub mod tlb;
@@ -275,6 +279,11 @@ pub fn ipi_handler() {
 
     // Process TLB shootdown requests before handling generic callbacks.
     tlb::handle_shootdown();
+
+    // The slab reclaim handshake is allocation-free and does not use the
+    // generic callback queue, so it can safely run before ordinary events.
+    #[cfg(feature = "kmem-cache-flush")]
+    kmem_cache::handle_flush_request();
 
     // SAFETY: the handler runs on the current CPU and only accesses that CPU's
     // already-initialized local IPI queue.
