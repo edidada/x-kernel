@@ -13,7 +13,8 @@
 //!   flushes are deferred and coalesced (Linux `map_vm_area` + one flush).
 //! - `free` is callable from hardirq/softirq context: such frees are
 //!   queued on a lock-free intrusive list and drained by `system_wq`
-//!   (Linux `vfree_deferred`). Task-context frees are synchronous.
+//!   (Linux `vfree_deferred`). Task-context frees are synchronous once remote
+//!   TLB shootdown is available; early-boot frees remain queued until then.
 //!
 //! # Locking
 //!
@@ -205,12 +206,13 @@ pub fn alloc_with(opts: VmAllocOptions) -> KResult<(VmRegion, Vec<usize>)> {
 
 /// Frees a region previously returned by [`alloc`]/[`alloc_with`].
 ///
-/// Safe to call from hardirq/softirq and task context: in exception context
-/// the teardown is queued on the lock-free deferred list and drained by
-/// `system_wq`. NMI context is not supported — the workerqueue does not
-/// promise NMI safety, so NMI handlers must not release kernel stacks.
+/// Safe to call from hardirq/softirq and task context: in exception context,
+/// or before remote TLB shootdown is available during early boot, the teardown
+/// is queued on the lock-free deferred list and drained by `system_wq`. NMI
+/// context is not supported — the workerqueue does not promise NMI safety, so
+/// NMI handlers must not release kernel stacks.
 pub fn free(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
-    if kcpu::in_exception_context() {
+    if kcpu::in_exception_context() || !kipi::tlb::is_shootdown_ready() {
         free_deferred(region, guard_pages, pages);
     } else {
         free_sync(region, guard_pages, pages);
@@ -252,6 +254,10 @@ fn map_pages(
 }
 
 fn free_sync(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
+    if !kipi::tlb::is_shootdown_ready() {
+        free_deferred(region, guard_pages, pages);
+        return;
+    }
     let guard = guard_pages * PAGE_SIZE_4K;
     let usable = region.size.saturating_sub(guard);
     let usable_start = region.va + guard;
@@ -285,9 +291,9 @@ fn free_sync(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
     if need_flush {
         // The kernel page table is shared by every CPU, so the unmap must be
         // reflected in every CPU's TLB — including this one. The remote
-        // broadcast skips the initiator, so flush locally first; the local
-        // flush is unconditional (not gated on `ALL_CPUS_STARTED`), which
-        // also covers early-boot frees. Both flushes run outside the
+        // broadcast skips the initiator, so flush locally first. Callers
+        // defer frees until the remote shootdown gate is open, so
+        // both flushes cover every CPU here. Both flushes run outside the
         // `VMALLOC` / `KERNEL_ASPACE` locks: a synchronous shootdown while
         // holding `SpinNoIrq` locks deadlocks a CPU spinning on them with
         // IRQs off.
@@ -415,8 +421,9 @@ fn schedule_drain() {
     }
 }
 
-/// Queues a region for deferred teardown. Callable from hardirq/softirq
-/// context; NMI is not supported (the workerqueue takes spinlocks).
+/// Queues a region for deferred teardown. This is used both for hardirq/softirq
+/// frees and for frees that happen before remote TLB shootdown is available.
+/// NMI is not supported (the workerqueue takes spinlocks).
 fn free_deferred(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
     let node = pop_free_node();
     // SAFETY: the node was just removed from the free pool and is exclusively
@@ -426,13 +433,28 @@ fn free_deferred(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
         (*node).guard_pages = guard_pages;
         (*node).pages = pages;
     }
-    if llist_add(node, &RELEASE_HEAD) || NEED_SCHEDULE.swap(false, Ordering::AcqRel) {
+    let was_empty = llist_add(node, &RELEASE_HEAD);
+    if kipi::tlb::is_shootdown_ready() && (was_empty || NEED_SCHEDULE.swap(false, Ordering::AcqRel))
+    {
+        schedule_drain();
+    }
+}
+
+/// Schedules deferred frees after the early-boot shootdown gate opens.
+pub fn drain_deferred_frees() {
+    if !kipi::tlb::is_shootdown_ready() {
+        return;
+    }
+    if !RELEASE_HEAD.load(Ordering::Acquire).is_null() {
         schedule_drain();
     }
 }
 
 /// Drains all queued frees. Runs on `system_wq` (task context).
 fn deferred_drain() {
+    if !kipi::tlb::is_shootdown_ready() {
+        return;
+    }
     loop {
         let head = llist_pop_all(&RELEASE_HEAD);
         if head.is_null() {

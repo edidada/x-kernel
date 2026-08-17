@@ -170,8 +170,9 @@ pub fn alloc(size: usize) -> KResult<KernelStackMapping> {
 /// See [`alloc`] for the locking contract: cache push/pop runs under
 /// `NoPreemptIrqSave`, the backend free does not. An IRQ-context caller
 /// reaches the backend directly (hardirq/softirq stay nested inside the
-/// outer IRQ-off state); the vmalloc backend detects exception context and
-/// defers the teardown instead of shooting down TLBs in-place.
+/// outer IRQ-off state); the vmalloc backend detects exception context or an
+/// early-boot shootdown gate and defers the teardown instead of shooting down
+/// TLBs in-place.
 pub fn free(mapping: KernelStackMapping) {
     if cacheable(mapping.usable_size()) {
         let overflow = {

@@ -88,6 +88,9 @@
 - 持锁期间**不执行**同步 TLB shootdown：页表提交用
   `PageTableMut::finish_no_flush()`，flush 在锁释放后进行，避免 target
   CPU 在等同一把锁（中断关）时无法应答 shootdown IPI 而互相死锁。
+- `ALL_CPUS_STARTED` 门控打开前不能完成 vmalloc free；释放请求只进入
+  deferred 队列，直到远端 IPI 可用后才拆除 PTE、执行全 CPU flush 并释放
+  VA 与物理页。
 - 已拆除 PTE 的 vmalloc 区间必须保留在 `VMALLOC` interval table，直到本地
   与远端 TLB flush 都完成后才可重新分配；否则新映射可能命中旧 TLB 翻译并
   写入已释放的物理页。

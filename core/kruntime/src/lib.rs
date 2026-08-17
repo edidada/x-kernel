@@ -210,7 +210,10 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     kipi::init();
 
     #[cfg(feature = "smp")]
-    kipi::tlb::mark_all_cpus_started();
+    {
+        kipi::tlb::mark_all_cpus_started();
+        memspace::complete_deferred_vmalloc_frees();
+    }
 
     #[cfg(feature = "watchdog")]
     watchdog::init_primary();

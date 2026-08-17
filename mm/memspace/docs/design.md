@@ -65,13 +65,14 @@ kernel memory），内核栈是其首个客户。结构与 Linux 对齐：
 
 锁序固定为 `VMALLOC` → `KERNEL_ASPACE`（均 `SpinNoIrq`），无反向路径。
 持锁期间不发起同步 TLB shootdown：页表提交用 `finish_no_flush()`，flush
-统一在锁释放后进行（本地 `karch::flush_tlb` + 远端
-`kipi::tlb::flush_all_cpus`——后者只刷远端 CPU，本地必须由调用方补刷，
-且不受 `ALL_CPUS_STARTED` 门控，覆盖 early boot），避免 target CPU
-等锁（中断关）时无法应答 IPI 的互相死锁。释放已拆除 PTE 的区间在 flush
-完成前仍保留在 interval table，随后才重新获取 `VMALLOC` 锁将其释放；因此
-并发分配不会在任一 CPU 仍持有旧 TLB 翻译时复用该 VA。deferred 释放走无锁
-链表，IRQ 上下文不会取 `VMALLOC` 锁。
+统一在锁释放后进行：本地调用 `karch::flush_tlb`，远端调用
+`kipi::tlb::flush_all_cpus`（只刷远端 CPU）。远端广播受
+`ALL_CPUS_STARTED` 门控；门控关闭期间的 free 不拆 PTE、不释放物理页，而是
+进入 deferred 队列，待门控打开后再执行完整的本地与远端 flush，避免 target
+CPU 等锁（中断关）时无法应答 IPI 的互相死锁。PTE 拆除后，释放的区间在
+flush 完成前仍保留在 interval table，随后才重新获取 `VMALLOC` 锁将其释放；
+因此并发分配不会在任一 CPU 仍持有旧 TLB 翻译时复用该 VA。deferred 释放走
+无锁链表，IRQ 上下文不会取 `VMALLOC` 锁。
 死锁复盘见 `docs/issues/2026-08-17-tlb-shootdown-deadlock.md`。
 
 ## 架构

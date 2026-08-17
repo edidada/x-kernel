@@ -323,6 +323,15 @@ pub fn mark_all_cpus_started() {
     ALL_CPUS_STARTED.store(true, Ordering::Release);
 }
 
+/// Returns whether a synchronous remote TLB shootdown can run now.
+///
+/// A single-CPU system has no remote target, so it is ready without an
+/// explicit boot-time mark. On SMP systems this remains false until
+/// [`mark_all_cpus_started`] opens the shootdown gate.
+pub fn is_shootdown_ready() -> bool {
+    kcpu_id_map::nr_cpus() <= 1 || ALL_CPUS_STARTED.load(Ordering::Acquire)
+}
+
 /// Flushes the TLB of every online CPU for the shared kernel page table.
 ///
 /// # Contract
@@ -343,14 +352,14 @@ pub fn flush_all_cpus(vaddr: Option<VirtAddr>) {
 #[kiface::provide]
 impl TlbFlushIf {
     fn flush_process_mask(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
-        if !ALL_CPUS_STARTED.load(Ordering::Acquire) {
+        if !is_shootdown_ready() {
             return;
         }
         flush_remote(vaddr, target_mask);
     }
 
     fn flush_all_cpus(vaddr: Option<VirtAddr>) {
-        if !ALL_CPUS_STARTED.load(Ordering::Acquire) {
+        if !is_shootdown_ready() {
             return;
         }
 

@@ -156,6 +156,15 @@ pub fn init_memory_management() {
     kernel_stack::register();
 }
 
+/// Schedules vmalloc frees that were held during early boot.
+///
+/// The caller must invoke this after `kipi::tlb::mark_all_cpus_started()` so
+/// the deferred teardown can complete a remote TLB shootdown before releasing
+/// the VA interval and its physical pages.
+pub fn complete_deferred_vmalloc_frees() {
+    vmalloc::drain_deferred_frees();
+}
+
 /// Initializes kernel paging for secondary CPUs.
 pub fn init_memory_management_secondary() {
     assert!(
