@@ -2,77 +2,142 @@
 
 ## 定位
 
-`alloc-engine` 提供 x-kernel 内存分配算法的无平台实现：页级 buddy、字节级
-buddy、TLSF 与 slab 适配器。它只维护已交给分配器的内存，不负责建立内核页表、
-选择物理内存区域或定义全局锁策略。
+`alloc-engine` 提供 X-Kernel 可复用的内存分配算法和统一的 allocator contract。它
+管理调用者交给它的内存区间，但不负责发现物理内存、建立页表、选择全局 allocator，
+也不定义锁、CPU-local storage、IRQ 或内存压力策略。
 
-本次引入的 `SlabCache<PAGE_SIZE>` 是固定 `SizeClass` 的 slab-page ownership
-核心。它让 slab 的对象、backing page 和可回收状态保持在同一所有权层，而不是
-只保留一个跨 page 的对象 freelist。
+crate 对外定义三类接口：
+
+- `ByteAllocator`：按 `Layout` 分配字节对象；
+- `PageAllocator`：按连续基页分配内存；
+- `IdAllocator`：供拥有者实现连续 ID 的分配语义。
+
+`BaseAllocator` 统一这些接口的 region 初始化与扩展契约。Buddy、TLSF 和 slab 是
+`ByteAllocator` 的不同实现；`BuddyPageAllocator` 是 `PageAllocator` 的实现。`IdAllocator`
+目前只定义公共 contract，不持有全局 ID 状态。
 
 ## 范围
 
 ```text
 mm/alloc-engine/
-├── src/buddy_alloc.rs    # 通用页 buddy 算法
-├── src/buddy*.rs         # buddy 适配器
-├── src/slab_trait.rs     # SizeClass 与兼容 trait
-├── src/slab_cache.rs     # 单 size class 的 page ownership 核心
-├── src/slab_heap.rs      # 现有 slab byte heap
-├── src/slab.rs           # SlabByteAllocator 适配器
-└── src/tlsf.rs           # TLSF 适配器
+├── src/lib.rs          # allocator trait、错误类型、可选 Allocator API 适配器
+├── src/buddy_alloc.rs  # 通用页 buddy 算法与 page flags
+├── src/buddy_page.rs   # BuddyAllocator 的 PageAllocator 适配器
+├── src/buddy.rs        # buddy_system_allocator 的 ByteAllocator 适配器
+├── src/tlsf.rs         # rlsf TLSF 的 ByteAllocator 适配器
+├── src/slab_trait.rs   # slab SizeClass 与对象/池接口
+├── src/slab_cache.rs   # 单一 SizeClass 的 span ownership 与对象 freelist
+├── src/slab_heap.rs    # 由内部 buddy 支撑的九个 SlabCache
+└── src/slab.rs         # SlabHeap 的 ByteAllocator 适配器
 ```
 
-`SizeClass` 是 slab 的唯一 class 定义。它根据 `Layout` 的 size 和 alignment
-选择最小可满足 class，并同时决定每个 slab span 使用的基页数。
+`buddy-page`、`buddy`、`tlsf`、`slab` 和 `allocator_api` 都是独立 feature。上层选择
+哪些实现参与构建；算法 crate 不替上层选择默认策略。
+
+## 公共契约与内存区间生命周期
+
+所有 allocator 都以调用者提供的、已映射、可写、独占且在 allocator 生命周期内持续
+有效的 region 为输入：
+
+1. `init_region()` 建立第一个 managed region；
+2. `add_region()` 仅接收与既有 region 不重叠且满足对应算法约束的扩展；
+3. allocation 返回的对象、页或 ID 在释放前仍由该 allocator 管理；
+4. deallocation 必须回到原 allocator，并使用原始 pointer/地址、大小与对齐语义。
+
+`AllocError` 区分无效输入、重复初始化、region overlap、未初始化、未找到的地址和
+`NoMemory`。具体 wrapper 对不满足初始化前置条件的行为由其 rustdoc 定义；调用者不应
+把 region 初始化错误当作可恢复的普通 allocation miss。
 
 ## 架构
 
-`SlabCache` 不向页分配器发出请求；它接收调用者取得的、对 span 大小对齐的内存，
-并在该 span 首部写入 metadata：
-
 ```text
-page allocator / owning heap
-        │ acquire aligned slab span
-        v
-prepare_slab()              (不接触 cache 状态)
-        │
-        v
-PreparedSlab ── publish_slab() ──> SlabCache<SizeClass>
- ├─ Empty list   : 所有对象均在 central freelist，可 detach
- ├─ Partial list : 同时有 live 和 central-free 对象
- └─ Full list    : 没有 central-free 对象
-        │
-        └─ take_empty_slab() -> caller returns pages outside cache mutation
+                         caller-owned mapped memory regions
+                                      │
+                                      v
+                              BaseAllocator contract
+                                      │
+          ┌───────────────────────────┼───────────────────────────┐
+          │                           │                           │
+          v                           v                           v
+   ByteAllocator                 PageAllocator                IdAllocator
+          │                           │                     (interface only)
+  ┌───────┼────────┐                  v
+  │       │        │          BuddyPageAllocator
+  v       v        v                  │
+Buddy    TLSF   SlabByteAllocator      v
+wrapper wrapper       │          BuddyAllocator<PAGE_SIZE>
+                       v
+                  SlabHeap
+                 ┌────┴────┐
+                 v         v
+       SlabCache[SizeClass] BuddyAllocator<4096>
 ```
 
-`SlabHeap` 持有九个这样的 cache 及内部 `BuddyAllocator<4096>`：小对象进入
-对应 cache，cache miss 时从 buddy 获得一个正确对齐的 span，`SlabHeap::shrink`
-则先 detach 空 span 再归还 buddy。非 slab layout 仍走直接 buddy 路径。
+`BuddyAllocator<PAGE_SIZE>` 是本 crate 的页粒度基础算法：它维护 region 中的 buddy
+chunks、分裂与合并。`BuddyPageAllocator` 直接把它适配为页接口；`SlabHeap` 则把它
+作为自身 backing span 与非 slab layout 的来源。
 
-每个 backing span 的首部是 `SlabPage`。剩余空间按该 `SizeClass` 对齐并切分为
-对象；空闲对象的首个 machine word 作为 intrusive next link。因此对象被分配给
-调用者期间，其内容不会被 cache 访问或改写。
+`BuddyByteAllocator` 和 `TlsfByteAllocator` 是各自算法实现的薄适配器，负责把
+`BaseAllocator` / `ByteAllocator` 的 region、`Layout` 和统计语义映射到其后端。
+它们不获得 slab 的 class、span 或对象缓存策略。
 
-`SlabHeap` 已使用 `SlabCache` 替代原先只含跨 page global freelist 的 slab
-实现。更高层的内核 per-CPU cache 仍应建立在 `SlabCache` / `SlabHeap` 提供的
-page ownership 之上，而不能把同一策略施加给任意 `ByteAllocator`。
+可选的 `AllocatorRc<A>` 用 `Rc<RefCell<A>>` 把单个 `ByteAllocator` 适配给 Rust
+`Allocator` API；它只提供该包装器范围内的可变借用串行化，并不是跨 CPU 同步原语。
 
-## 调用约束 / 执行上下文
+## 页与字节分配算法
 
-- `SlabCache` 不含锁，也不禁用 IRQ 或抢占。所有方法要求调用者串行化访问；将它
-  放入何种锁、是否适合中断上下文，属于上层分配器的职责。
-- `prepare_slab` 的 backing span 必须由调用者独占、可写，并按 `slab_bytes()`
-  对齐；prepared token 必须被 publish 或归还其页分配器。span 注册后必须持续映射，
-  直到 `take_empty_slab` 将其 detach。
-- `allocate` 只操作已注册的 metadata 和 freelist。cache 空时返回 `None`，调用者
-  应在 cache mutation 之外取得页并再次调用 `add_slab`。
-- `take_empty_slab` 只返回没有 live object 的 span。页面归还也应在 cache mutation
-  之外完成，避免把可能较慢的底层页分配操作混入临界区。
-- 本模块不依赖 current task、调度器、MMIO、DMA 或 firmware 初始化；但 backing
-  地址必须已在当前内核地址空间可访问。
+### Buddy 页分配
 
-## 状态机
+`BuddyAllocator` 接收页对齐 region，将可管理范围拆成合法的 power-of-two chunks。
+请求时它选择满足页数与对齐要求的 chunk，并按需分裂；归还时按 buddy 关系合并。非
+power-of-two 页数的 caller-facing 请求仍由该算法完成相应的 chunk 管理，调用者必须
+以原始页数和地址归还。
+
+`BuddyPageAllocator` 只暴露连续页语义。`allocate_pages_at()` 额外要求目标地址属于
+managed region 并满足指定对齐。`PageFlags` 是兼容性 hook；当前 `BuddyAllocator` 不保存
+逐页 flags，因此上层不能把它当作持久 page metadata。
+
+### Byte allocator 适配器
+
+- `BuddyByteAllocator` 将 `Layout` 直接交给 `buddy_system_allocator::Heap`；
+- `TlsfByteAllocator` 将 region 插入 `rlsf::Tlsf`，并以调用者的 `Layout` 完成
+  allocation/deallocation；
+- `SlabByteAllocator` 持有一个 `SlabHeap`。能由 `SizeClass` 表示的 layout 进入 slab，
+  其余 layout 直接从 `SlabHeap` 内部 buddy 获取连续页。
+
+这些实现的可用字节和已用字节均是 allocator accounting，不是跨 allocator 的全局
+内存压力判断。
+
+## Slab 数据模型
+
+`SizeClass` 是 slab 唯一的 class 定义：它按 `max(layout.size(), layout.align())`
+选择 8、16、32、64、128、256、512、1024 或 2048 字节中的最小可满足 class；超过
+`SLAB_MAX_SIZE` 的 layout 不属于 slab。class 同时给出一个 span 的基页数，避免上层
+复制 size-to-pages 几何规则。
+
+`SlabCache<PAGE_SIZE>` 管理一个固定 class。它不申请页，而是接收调用者独占取得且
+按 span 大小对齐的 backing span：
+
+```text
+owning heap / page allocator
+        │ obtain an aligned span
+        v
+prepare_slab() ──> PreparedSlab ──> publish_slab()
+                                      │
+                                      v
+                         SlabCache<SizeClass>
+                         ├─ Empty   : no live object
+                         ├─ Partial : live and free objects coexist
+                         └─ Full    : no central free object
+```
+
+`PreparedSlab` 是 publication 前的所有权 token：header 与 free-object links 在
+`prepare_slab()` 中写好，随后只由匹配 class 的 `publish_slab()` 接收。这样调用者可
+把较长的 span 初始化与其自身的同步临界区分开。
+
+每个 span 的首部是 `SlabPage`，记录 class、容量、free count 和状态表链接。空闲对象
+的首个 machine word 保存 intrusive next link；对象被调用者持有时不在 freelist 中，
+allocator 不读取或改写它。
 
 ```text
                        allocate
@@ -81,51 +146,47 @@ page ownership 之上，而不能把同一策略施加给任意 `ByteAllocator`�
     │ deallocate last live object      │ deallocate                            │ deallocate
     └──────────────────────────────────┴──────────────────────────────────────┘
     │
-    └── take_empty_slab() ──> Detached (不再属于 cache)
+    └── take_empty_slab() ──> Detached
 ```
 
-只有 `Empty` 状态的 span 可被 detach。`Partial` 与 `Full` 表示至少有一个对象
-仍被上层持有，因此不能在这两个状态归还 backing pages。
+只有 `Empty` span 可 detach。`Partial` 与 `Full` 均至少包含一个 live object，不能将
+其 backing pages 归还。
 
-## 算法流程
+`SlabHeap` 持有所有九个 `SlabCache<4096>` 和一个内部 buddy。cache miss 时它从该
+buddy 取得 class 对齐的 span，通过 `add_slab()` 完成 prepare/publish 后重试；`shrink()`
+detach 全部空 span 并把它们归还内部 buddy。它不自行决定何时触发 shrink。
 
-1. `SlabHeap` 根据 `SizeClass::from_layout` 路由小对象。
-2. refill 在 cache 锁外取得 backing span 并调用 `prepare_slab` 初始化 page header
-   和 free-object links；之后在短临界区内以 `publish_slab` 挂入 `Empty` list。
-3. `allocate` 优先从 `Partial` 的 freelist 弹出对象；没有 partial page 时将一个
-   `Empty` page 移至 `Partial` 后再弹出。最后一个 free object 被弹出时转为 `Full`。
-4. `deallocate` 通过对齐 span 掩码恢复 `SlabPage`，将对象压回该 page 的 freelist。
-   `Full` 首次释放转为 `Partial`；最后一个 live object 释放后转为 `Empty`。
-5. `SlabHeap::shrink` 循环调用 `take_empty_slab`，再把已 detach 的 spans 交给其
-   内部 buddy。上层可将它接入内存压力和 OOM 前回收策略。
+## 调用约束与并发模型
 
-计数器只统计 cache 已经注册的 span；`add_slab` 在写入 span 前先验证所有可能
-溢出的全局计数，避免错误返回后留下未被 cache 记录的半发布状态。
-
-## 并发模型
-
-`SlabCache` 本身是非并发数据结构。它实现 `Send`，使一个拥有它的锁保护容器
-可以在执行上下文之间转移；它刻意不实现 `Sync`。`&mut self` 使普通 Rust 调用
-具有排他性，但内核上层若通过内部可变性或自旋锁共享它，必须确保每次状态转换、
-freelist 读写和空 span detach 都由同一串行化规则保护。
-
-该层有意不持有页分配器引用，因而也不会在 metadata 临界区内分配或释放 backing
-pages。`PreparedSlab` 进一步把 free-list 初始化移到 publication 之前。这为上层
-实现短临界区、per-CPU magazine 和跨 CPU flush 提供了边界。
+- 算法层不依赖 current task、调度器、MMIO、DMA、firmware 或 CPU topology；但所有
+  backing 地址必须在当前内核地址空间可访问。
+- `BuddyAllocator`、各 `ByteAllocator` wrapper、`SlabHeap` 和 `SlabCache` 都通过
+  `&mut self` 暴露 mutation，不提供内部全局锁。跨线程或跨 CPU 使用时，owner 必须建立
+  覆盖整个算法状态的外部串行化规则。
+- `SlabCache` 可移动（`Send`），但刻意不提供无锁共享（不实现 `Sync`）。同一 cache
+  的 state list、counter、header 和 free-object link 必须由同一外部同步域保护。
+- `prepare_slab()` / `add_slab()` 的 unsafe caller 必须保证 span 独占；registered
+  span 在 `take_empty_slab()` 返回前持续映射。`deallocate()` 的 unsafe caller 必须
+  提供来自该 cache 的 live object，且只能释放一次。
+- 页申请、页归还、per-CPU cache、IRQ 约束、remote free、NUMA 与 OOM policy 都由
+  使用 `alloc-engine` 的上层 owner 定义，而不隐含在任一算法中。
 
 ## 设计决策
 
-- **page 属于具体 size class**：header 记录 `SizeClass`、容量、free count 和
-  list links，使回收能判断某个 span 是否真的没有 live object。
-- **partial/full/empty 分表**：避免 shrink 扫描所有对象或误回收仍被使用的 page。
-- **对象内 intrusive link**：不增加每对象的外部 metadata；代价是 free object
-  的首个 machine word 不能保留旧内容，这是 allocator 的正常语义。
-- **不在此层内置 per-CPU 或 IRQ 策略**：这些依赖内核 execution context，不能
-  隐式施加给 TLSF、buddy 或一般 `ByteAllocator`。
+1. **接口与策略分离。** trait 描述 region、字节、页和 ID 的 contract；全局 allocator
+   决定配置、锁、执行上下文与回收时机。
+2. **Slab class 与 span ownership 同属一个 cache。** `SizeClass`、对象 freelist 和
+   `Empty`/`Partial`/`Full` 状态在同一层，才能给出可验证的空 span 回收条件。
+3. **Slab 不成为通用 byte-cache 模型。** Buddy 与 TLSF 有自己的内存组织方式，不要求
+   它们采用 slab class、batch 或 span 生命周期。
+4. **初始化与 publication 分离。** `PreparedSlab` 把可能较长的 header/link 初始化
+   放在 cache publication 之前，允许上层维持短临界区。
+5. **算法 crate 不暗含 execution-context policy。** 是否可在 hardirq 使用、如何做
+   CPU-local caching 或 CPU offline cleanup，必须由具备该生命周期所有权的上层实现。
 
 ## Drop / 资源释放
 
-`SlabCache` 不拥有 backing memory，因此没有自动归还页的 `Drop` 实现。
-`SlabHeap::shrink` 显式归还空 span；销毁 heap 或回收其管理的内存前，调用者仍须
-保证不存在 live object。若 cache 仍含 `Partial` 或 `Full` span，调用者必须保留
-其映射和所有权。
+allocator 不拥有 caller 提供的虚拟映射，也不会在 `Drop` 中归还整个 region。各 allocation
+必须在 owner 释放或销毁 region 前先归还；`SlabHeap::shrink()` 只能归还已证明为空的
+span。若仍存在 `Partial` / `Full` span 或其他 live allocation，owner 必须保留其 backing
+region、映射和生命周期。

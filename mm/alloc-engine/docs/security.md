@@ -2,117 +2,126 @@
 
 ## 信任模型
 
-`alloc-engine` 位于内核内部的 allocator 边界。它信任调用者提供的管理内存、
-`Layout` 和释放配对；它不直接接收用户指针或设备输入。
+`alloc-engine` 位于内核内部的 allocator algorithm 边界。它信任 owner 提供的 managed
+region、`Layout`、页数、地址与释放配对；不信任这些前置条件被自动满足。违反 contract
+的内核调用者可破坏 free list、allocator metadata 或其他 live object。
 
-`SlabCache` 的边界尤其明确：safe `allocate` 信任已注册的 page metadata，
-而 `add_slab` 与 `deallocate` 是 unsafe API，调用者负责 span 所有权、对象来源
-和对象生命周期。
+各实现共享以下信任前提：
 
-```text
-owning heap / page allocator
-      │ validated, exclusive aligned span
-      v
-SlabCache metadata + free-object links
-      │ live object (caller-owned)
-      v
-kernel subsystem
-```
+- region 已映射、可写、独占，不与现有 managed region 重叠，并在 allocator 使用期间
+  持续有效；
+- allocation 只由原始 allocator 释放，pointer/地址、`Layout`、页数和对齐与原始请求
+  匹配；
+- 对同一 allocator 状态的 mutation 已由 owner 串行化；
+- owner 在释放整个 backing region 前已释放其中全部对象、页或 ID。
+
+`SlabCache` 还信任 prepare 的 span 具有匹配 `SizeClass` 的几何形状。safe `allocate`
+只访问已注册 metadata；`prepare_slab`、`add_slab` 和 `deallocate` 的 unsafe contract
+承担 backing span、对象来源与对象生命周期的证明责任。
 
 ## 外部边界 / 攻击面
 
-本 crate 不直接访问用户内存、MMIO/PIO、DMA buffer、FFI、内联汇编、bootloader
-或 firmware 数据，也不解析文件系统、网络、IPC 输入。其主要攻击面来自内核
-调用者违反 allocator contract：伪造 backing address、错误 `Layout`、重复释放、
-跨 cache 释放或在未串行化的情况下并发操作。
+本 crate 不直接解析用户内存、MMIO/PIO、DMA buffer、设备输入、文件系统、网络、IPC、
+bootloader 或 firmware 数据，也没有对外 C ABI。攻击面来自传入 allocator 的内核地址、
+region、`Layout` 和释放操作，以及 BuddyByteAllocator/TLSF 所封装的下层 allocator。
+
+`AllocatorRc` 是可选的 Rust `Allocator` API 适配器；它把 pool slice 交给内部
+`ByteAllocator`，仍继承同样的 region 与 deallocation contract。它不是线程安全容器，
+不得用作跨 CPU 共享 allocator 的同步边界。
 
 ## unsafe 代码清单
 
 | 路径 | 依赖的不变量 | 保护方式 |
 |---|---|---|
-| `src/slab_cache.rs: SlabCache::prepare_slab` | `base` 指向独占、可写、完整且按 span 对齐的 backing allocation | unsafe contract、运行时对齐/容量检查；prepared token 在 publish 或页归还前保持独占 |
-| `src/slab_cache.rs: SlabCache::publish_slab` | token 只由对应 class 的 prepare 创建且只 publish 一次 | `PreparedSlab` 不可复制、字段私有；class/counter 不匹配时返还 token |
-| `src/slab_cache.rs: SlabCache::add_slab` | prepare 与 publish 之间没有并发释放或重复注册 | 便利 API 沿用两阶段实现；调用者在错误时仍拥有 backing span |
-| `src/slab_cache.rs: SlabCache::deallocate` | object 来自同一 cache，仍为 live object，且只释放一次 | unsafe contract；page header 的 class 和对象边界在 debug 构建校验 |
-| `src/slab_cache.rs: page_for_object` | span 的 size 为 power of two，base 按 span 对齐 | `SlabCache::new` 验证 geometry；`add_slab` 验证 base alignment |
-| `src/slab_cache.rs: read_next/write_next` | free object 的首个 machine word 可读写 intrusive link | 仅在 publish、allocate、deallocate 后的非 live 对象上调用；class 对齐覆盖 link 对齐 |
-| `src/slab_cache.rs: SlabList` | page 只在一个状态表中，所有 links 在同一串行化域内修改 | 私有 API、状态转换集中在 `move_page` / `take_empty_slab` |
-| `src/slab_cache.rs: unsafe impl Send for SlabCache` | cache 可移动，但注册 span 在 detach 前仍映射且不发生无锁共享 | 类型只保存 span 内 metadata 指针；所有 mutation 需要 `&mut self`；刻意不实现 `Sync` |
-| `src/slab_heap.rs` 与 buddy/TLSF 适配器 | 释放地址和 `Layout` 与原分配匹配 | 上层 `ByteAllocator` unsafe deallocation contract |
+| `BuddyByteAllocator::{init_region,add_region}` | 传入范围可写、独占且在下层 heap 生命周期内有效 | `BaseAllocator` contract；unsafe 调用局限于 wrapper |
+| `TlsfByteAllocator::{init_region,add_region}` | pool slice 有效、可写、不与已插入 block 重叠 | `BaseAllocator` contract；`rlsf` 拒绝无效 free-block 插入 |
+| `SlabHeap::{new,add_memory}` | backing region 有效、独占、持续映射 | unsafe constructor/扩容 contract；内部 buddy 验证 region geometry |
+| `SlabCache::{prepare_slab,add_slab}` | span 大小、对齐和独占性匹配 class，并且不与其他 prepared/registered span 重叠 | unsafe contract、geometry 检查和不可复制 `PreparedSlab` token |
+| `SlabCache::deallocate` | object 来自同一 cache、仍为 live 且仅释放一次 | unsafe contract；debug 模式检查 class/状态/对象边界 |
+| `SlabCache` 的 raw header / intrusive-link helpers | 仅访问初始化的 span 或 free object；list state 一致 | 私有 helper、`&mut self` 和集中状态转换 |
+| `unsafe impl Send for SlabCache` | 移动 cache 不会使 registered span 提前失效，且没有无锁共享 mutation | cache 不实现 `Sync`；owner 必须建立外部串行化 |
+| `AllocatorRc` 的 `Allocator::deallocate` | Rust `Allocator` caller 保证 pointer/layout 配对 | `RefCell` 串行 wrapper 内部访问；继续转发原始 contract |
 
 ## 内存安全不变量
 
-1. 一个 prepared 或 registered slab span 只属于一个 `SizeClass`；publish 后只属于
-   一个 `SlabCache`。
-2. span 大小及其 base 均为 power-of-two span 对齐，因此由 object 地址掩码恢复的
-   header 正确。
-3. 每个 `SlabPage` 恰好处于 `Partial`、`Full`、`Empty` 或 `Detached` 之一；只有
-   `Empty` 可以 detach。
-4. `free_count` 与该 page freelist 中对象数一致；`total_blocks`、`free_blocks`
-   与所有 registered page 的计数一致。
-5. live object 不在 freelist 上；其首个 word 只有在释放后才能被 allocator 覆写。
-6. 被 detach 或仍含 live object 的 span 不得归还给页分配器。
+1. Buddy/TLSF/slab 管理的 region 在使用期间不重叠、不被外部释放或重映射。
+2. Buddy allocation 的地址与原始页数必须配对归还；在 chunk 分裂/合并期间，同一 free
+   chunk 只出现于一个 free list。
+3. Byte allocation 的 `Layout` 必须在 deallocation 时保持一致；错误 size 或 alignment
+   可能破坏下层 allocator metadata。
+4. 每个 prepared 或 registered slab span 只属于一个 `SizeClass` 和一个 `SlabCache`；
+   span base 与 span 大小满足 power-of-two geometry。
+5. `SlabPage` 恰好处于 `Empty`、`Partial`、`Full` 或 `Detached` 之一。只有 `Empty`
+   span 可 detach；live object 不在 freelist 上。
+6. `PreparedSlab` 要么被匹配 cache 消费，要么由 owner 用 `into_backing()` 取回并归还；
+   不得遗留半发布 span。
+7. allocator algorithm 本身不提供并发安全；所有 list、counter、region 和下层 heap
+   state 的读写必须处于 owner 的同一同步域。
 
 ## 线程安全
 
-`SlabCache` 不提供内部同步。它仅以受审计的 `unsafe impl Send` 支持锁保护容器
-转移其独占所有权，刻意不实现 `Sync` 或允许无锁共享访问。内核上层把它放进共享
-容器时，必须用单一的外部串行化规则覆盖 list、header、counter 和 free-object
-link 的全部访问。`take_empty_slab` 返回后，页的释放必须不与任何仍可能访问该
-cache 的路径并发。
+`BuddyAllocator`、BuddyByteAllocator、TlsfByteAllocator、SlabHeap 和 SlabCache 都不
+持有全局同步原语。它们的 mutable API 依赖 `&mut self`，但内核 owner 若将它们放入
+interior-mutability 容器或自旋锁，必须让同一规则覆盖 allocation、deallocation、region
+扩展与 shrink。
 
-该层没有原子、不会 sleep，也不会主动关闭 IRQ；这不表示上层可从硬中断或 NMI
-无条件调用 allocator。适用 execution context 由整合它的内核 allocator 明确
-规定和审计。
+`SlabCache` 仅以受审计的 `unsafe impl Send` 支持拥有者迁移独占状态，刻意不提供
+`Sync`。它不含原子、不会 sleep，也不会关闭 IRQ；这些事实不构成任意中断上下文可调用
+的保证。是否能在 hardirq/NMI 运行，以及如何处理 CPU-local 或 remote-free，对本 crate
+而言都是上层执行上下文策略。
 
 ## 威胁分析
 
 | 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
 |---|---|---|---|---|
-| T-01 | 伪造或错误对齐的 backing span 破坏 page header | 高 | unsafe `prepare_slab` / `add_slab` 违反 contract | 对齐与容量检查；调用者必须只传页分配器返回的独占 span；残余风险是恶意内核代码可绕过 unsafe contract |
-| T-02 | double free 或错误 cache/size class 释放覆写 live 数据 | 高 | unsafe `deallocate` 被误用 | API 明确要求原 cache 的 live object；debug 检查 class/范围；当前不提供 production double-free 检测 |
-| T-03 | 未串行化访问损坏 intrusive list | 高 | 多 CPU 同时访问相同 cache 而没有外部锁 | `SlabCache` 不声称并发安全；整合层必须限定锁/CPU-local protocol |
-| T-04 | 空 page 被错误归还导致 use-after-free | 高 | 释放仍含 live object 的 span | 仅 `Empty` 状态可 detach；partial/full page 永远不由 `take_empty_slab` 返回 |
-| T-05 | 计数溢出导致错误可用性或回收判定 | 中 | 极端数量的 registered objects/pages | `add_slab` 预先使用 checked arithmetic，失败返回 `InvalidInput` |
+| T-01 | 无效、重叠或提前失效的 managed region | 高 | owner 传入错误地址/长度，或外部重用该范围 | region contract；Buddy region overlap 检查；残余风险是违规内核调用者 |
+| T-02 | 错误 `Layout`、页数或 allocator 的释放 | 高 | double free、跨 allocator free、错误 alignment | API contract；slab debug 检查；下层 allocator 的 metadata 检查范围有限 |
+| T-03 | 无同步并发 mutation | 高 | 多 CPU 同时修改同一 heap/cache | 算法不声称 `Sync`；owner 必须使用单一串行化域 |
+| T-04 | 伪造或错误对齐的 slab span 覆写 header | 高 | unsafe prepare/add 违反 backing-span contract | `SizeClass` geometry、运行时对齐/容量检查和不可复制 prepared token |
+| T-05 | slab live object 被提前归还 | 高 | 仅根据粗粒度 freelist 回收或错误状态转换 | `Empty`/`Partial`/`Full` 状态机；只允许 `take_empty_slab` detach |
+| T-06 | free object 的首 word 被当作仍有效数据 | 中 | caller 在释放后继续读取/写入对象 | intrusive link 只写入 free object；caller contract 禁止 use-after-free |
+| T-07 | Buddy region 或计数溢出 | 中 | 极端 region 大小、地址或对象数量 | 输入与 geometry 检查、checked accounting；不可表示的请求返回错误 |
 
 ## 故障模式与影响分析（FMEA）
 
-| 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
-|---|---|---|---|---|---|---|
-| F-01 | cache 无可用对象 | 尚未注册 span 或全部 page 为 Full | `allocate` 返回 `None` | 上层需要 refill 或报告 OOM | 4 | 缓存层不扩页；上层在临界区外申请 backing span |
-| F-02 | span 不符合 geometry | base 未按 span 对齐、header 后无对象空间 | `add_slab` 返回 `InvalidInput` | 当前请求失败，不发布坏 metadata | 3 | 构造期验证 page geometry，发布期验证 span |
-| F-03 | 底层页分配失败 | 内存压力或 buddy 无连续 span | 无法 refill | allocation 返回 NoMemory 或触发上层 reclaim | 2 | `SlabHeap::shrink` 可归还已空 span；更高层应在 OOM 前接入 flush/reclaim |
-| F-04 | live object 长期不释放 | 调用者泄漏或缓存策略保留对象 | page 不能变 Empty | 可用内存下降 | 3 | ownership 审计、统计与上层 shrink 机制 |
+| 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 应对措施 |
+|---|---|---|---|---|---|
+| F-01 | 页或字节 allocation 无可用空间 | region 耗尽或碎片化 | 返回 `NoMemory` | 上层决定扩容、回收或失败处理 | `AllocError::NoMemory`；算法不自行执行全局 reclaim |
+| F-02 | region 不符合算法 geometry | 地址未对齐、长度不足或重叠 | 初始化/扩展失败 | allocator 不发布错误 region | `InvalidInput` / `MemoryOverlap`；owner 修正输入 |
+| F-03 | SlabCache 无空对象 | 所有 span 为 `Full` 或尚未注册 span | `allocate` 返回 `None` | 上层需要取得新 backing span | 在 cache mutation 外 refill，prepare/publish 后重试 |
+| F-04 | span 不能回收 | span 为 `Partial`/`Full` | backing pages 保留 | 内存压力持续 | `shrink` 只 detach `Empty`，由上层选择下一步策略 |
+| F-05 | prepared span 无法 publish | class 不匹配或计数无法表示 | span 不可见 | 当前 allocation 失败 | 返回 token，owner 归还 backing pages，不留下半发布状态 |
 
 ## 故障管理
 
-geometry 或计数错误通过 `AllocError::InvalidInput` 返回；普通 cache 耗尽通过
-`allocate` 的 `None` 与页面分配失败区分。构造期不合法的 page geometry 会 panic，
-因为它是编译期/集成期配置错误而不是可恢复的 runtime input。
+普通资源不足通过 `AllocError::NoMemory` 返回；无效 region/geometry 通过
+`InvalidInput`、`MemoryOverlap` 或其他明确错误返回。`BuddyAllocator::init_region()` 会
+重置其已有 region，因此 owner 不得把它当作无副作用的重复初始化接口。
 
-`SlabHeap::shrink` 可显式归还空 span，但本 crate 不自行触发 OOM reclaim 或全 CPU
-flush。将 shrink 接入全局 page allocator、并定义 per-CPU cache 的 flush protocol，
-仍是拥有 execution-context policy 的上层职责。
+`SlabHeap::shrink()` 仅归还空 span。本 crate 不触发 OOM reclaim、不遍历 CPU-local
+storage，也不代替上层决定何时扩容、回收或终止请求。
 
 ## 隐私分析
 
-本模块不处理用户数据、标识符或遥测数据。free object 中保留的旧内容不是本模块
-主动收集或导出的数据；对象复用的初始化/清零策略由上层分配器与调用者决定。
+本 crate 不处理、持久化或导出用户数据、身份标识或遥测。free object 的旧内容会被
+allocator metadata 或 intrusive link 覆写；对象复用前是否清零由上层和调用者定义，
+不能把 allocator freelist 当作数据隔离机制。
 
 ## 已知限制
 
-- 不检测 production double free、错误 `Layout` 或跨 cache free。
-- 不含 per-CPU magazine、remote-free 队列、NUMA 策略或 CPU offline 生命周期。
-- `SlabCache` 不自行 shrink；`SlabHeap` 只提供显式 shrink，尚未自动接入 OOM 前
-  reclaim。
-- 不提供内部锁；使用者必须建立并验证并发协议。
+- 不提供 production double-free、错误 `Layout` 或跨 allocator free 检测。
+- 不提供内部锁、per-CPU magazine、remote-free、NUMA、CPU lifecycle 或系统级
+  memory-pressure policy。
+- `SlabHeap` 只提供显式 `shrink()`；是否将它接入全局 reclaim 属于上层 owner。
+- `PageFlags` 是兼容性 hook，当前 BuddyAllocator 不保存逐页 flags。
+- `IdAllocator` 是公共 trait，具体 ID allocator 的生命周期和并发模型由实现者定义。
 
 ## 审计清单
 
-- 每个传给 `add_slab` 的 span 是否来自正确的页分配器、独占且按
-  `slab_bytes()` 对齐？
-- 所有 `deallocate` 调用是否使用原始 allocation 对应的 cache 和 `Layout`？
-- cache 的所有 list/counter/free-link 访问是否由同一同步协议保护？
-- 页归还前是否只 detach `Empty` span，并确保不存在 outstanding object？
-- refill 与 reclaim 是否在合适的 execution context 中进行，而非把慢速页操作
-  放在不允许的临界区或中断路径？
+- 每个 `init_region` / `add_region` 输入是否已映射、可写、独占且不重叠？
+- allocation 与 deallocation 是否保持同一 allocator、地址、页数和 `Layout`？
+- 同一算法实例的所有 mutation 是否由一个完整的同步协议保护？
+- slab span 是否只由 `SizeClass` 几何创建、只 publish 一次，并在空时才 detach？
+- 是否在页归还前排除了所有 live object、prepared token 和并发 cache access？
+- 上层是否在合适 execution context 处理 refill、shrink、CPU-local cache 与 OOM，
+  而没有把这些 policy 假设放进算法 crate？
