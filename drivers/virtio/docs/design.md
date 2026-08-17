@@ -80,7 +80,7 @@ Feature flags 控制编译哪些设备适配器：
 | `blk.rs` | 将 `VirtIOBlk` 封装为实现 `BlockDevice` 的 `VirtIoBlkDev`；IRQ 可用时经 Block softirq 完成请求（hardirq ack → softirq 唤醒 → 请求任务完成），否则回退同步轮询 |
 | `gpu.rs` | 将 `VirtIOGpu` 封装为实现 `DisplayDevice` 的 `VirtIoGpuDev` |
 | `input.rs` | 将 `VirtIOInput` 封装为实现 `InputDevice` 的 `VirtIoInputDev` |
-| `irq_completion.rs` | blk/rng 共享的 IRQ 完成桥接：hardirq 仅 ack 并标记 pending + raise softirq；softirq action 唤醒睡眠的请求任务；任务在每次唤醒后重查设备侧谓词 |
+| `irq_completion.rs` | blk/rng 共享的 IRQ 完成桥接：hardirq 仅 ack 并标记 pending + raise softirq；softirq action 广播唤醒所有等待任务（无 token 计量，一次中断可覆盖多个完成）；任务在每次唤醒后重查设备侧谓词 |
 | `net.rs` | 将 `VirtIONetRaw` 封装为实现 `NetDevice` 的 `VirtIoNetDev`，管理收发缓冲区、IRQ ack、NAPI 式中断抑制和网络 RX scheduler 调度 |
 | `rng.rs` | 将 `VirtIORng` 封装为实现 `CharDevice` 的 `VirtIoRngDev`；IRQ 可用时经 Tasklet softirq 唤醒有界睡眠等待，否则回退关中断有界自旋 |
 | `socket.rs` | 将 `VsockConnectionManager` 封装为实现 `VsockDevice` 的 `VirtIoSocketDev` |
@@ -355,10 +355,11 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 
 1. 先回收上一次超时遗留的请求（若已完成）；否则返回 `WouldBlock`（单请求槽）
 2. `submit_entropy()` 提交 DMA 缓冲并记录为唯一在途请求，释放设备锁
-3. 有界睡眠（`timeout_at` 包裹 Completion 注册，50ms 上限）；hardirq ack 后
-   Tasklet softirq 唤醒等待任务；无可睡眠上下文时退化为开中断有界自旋
-4. 唤醒后重查 used ring：完成则拷贝数据返回；超时则在途请求留在 `pending`，
-   返回 `WouldBlock`，下次读取时回收
+3. 有界睡眠（广播唤醒 + 谓词重查，`timeout_at` 包裹 50ms 上限）；hardirq ack 后
+   Tasklet softirq 广播唤醒等待任务；无可睡眠上下文时退化为开中断有界自旋
+4. 每次唤醒后重查 used ring：完成则拷贝数据返回；超时则在途请求留在 `pending`，
+   返回 `WouldBlock`，下次读取时回收。唤醒不携带 token，晚到的完成不会让
+   下一次读取提前返回
 
 **熵请求流程（轮询回退）**：
 
@@ -412,11 +413,11 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 **IRQ 处理流程（NAPI 式）**：
 
 1. `register_virtio_net_irq(irq, inner)`：将 `VirtIoNetIrqHandle` 存入全局 `NET_IRQ_HANDLES`，
-   同时创建与设备共享的 `NetNapiState`（记录 `IrqResource` 与线屏蔽平衡标志）
+   同时创建与设备共享的 `NetNapiState`（记录 `IrqResource` 与线屏蔽状态）
 2. 若该 IRQ 首次注册（`REGISTERED_NET_IRQS` 去重），调用 `Irq::request(resource, Arc::new(handle_virtio_net_irq))` 注册中断，guard 存入 `NET_IRQ_GUARDS`
 3. 中断到来时 `handle_virtio_net_irq()` 遍历所有句柄，调用 `ack_interrupt()` 确认中断：
    - 确认后执行中断抑制（queue 级 `disable_interrupts()` + 线级 `set_irq_enabled(false)`，
-     线屏蔽标志保证两者严格平衡）
+     线屏蔽标志与 provider 调用在同一把 `SpinNoIrq` 下原子执行）
    - 调用 `schedule_rx()` 经 NetRx softirq 唤醒上层 drain 任务
    - 返回包含来源位图的 `IrqEvent`；没有句柄确认中断时返回 `IrqEvent::NOT_HANDLED`
 4. drain 任务将接收队列排空后，`recv()` 在空队列分支恢复中断
@@ -487,8 +488,10 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 - **net**：`InnerDev` 被 `Arc<SpinNoIrq<...>>` 包裹，因为 IRQ 回调在中断上下文中
   访问设备（`ack_interrupt`），与正常收发路径并发。全局静态变量
   `NET_IRQ_HANDLES`、`NET_IRQ_GUARDS` 和 `REGISTERED_NET_IRQS` 也使用 `SpinNoIrq` 保护。
-  NAPI 线屏蔽经 `NetNapiState.is_line_masked` 原子标志与 kirq 线控制调用配对，
-  抑制（handler）与恢复（recv drain 末端）可在不同 CPU 上并发且保持平衡。
+  NAPI 线屏蔽的标志翻转与 kirq 线控制调用在 `NetNapiState.line_masked` 的
+  `SpinNoIrq` 下原子执行：抑制（hardirq）与恢复（recv drain 末端）可在不同
+  CPU 上并发，但任一时刻标志都与线物理状态一致，迟到的 mask 不会留下
+  "线屏蔽但标志为未屏蔽"的倒置状态。
 - **IRQ 注册**：`register_virtio_net_irq()` 在 `NET_IRQ_HANDLES` 中注册回调句柄，
   同一 IRQ 仅注册一次（通过 `REGISTERED_NET_IRQS` 去重）。`Irq::request()` 返回的
   guard 存入 `NET_IRQ_GUARDS`，设备 Drop 时自动注销。blk/rng 的 hub 采用同样的
@@ -522,9 +525,12 @@ blk/rng 的完成唤醒经 `kirq::softirq`（Block / Tasklet 向量）而非在 
 
 1. hardirq 只保留最短路径（ack ISR、标记 pending、raise softirq），
    中断尾/`ksoftirqd` 的下半部负责所有与等待者的交互；
-2. 唤醒原语选用 `kpoll::Completion`，其 wake 侧显式支持中断上下文，
-   而事件监听类原语（如 `event-listener`）的自旋锁在 IRQ 尾 softirq 上下文中
-   与被打断的持有者存在同 CPU 重入死锁风险；
+2. 唤醒原语选用 `kpoll::PollSet` 广播（`wake` 侧显式支持中断上下文，且
+   在 IRQ 尾 softirq 上下文无 `event-listener` 类自旋锁的同 CPU 重入风险），
+   并刻意不用 token 计量的 completion：一次设备中断可能覆盖多个完成、
+   pending 标志会把多次 hardirq 塌缩成一次 softirq，唤醒次数若与中断次数
+   耦合就会丢唤醒；广播 + 每次唤醒重查设备谓词（Linux wait_queue 语义）
+   与中断次数完全解耦；
 3. 睡眠侧复用 `kirq::IrqSyncWaitIf` 桥接（由 ktask 提供），无可睡眠上下文时
    返回错误，驱动据此退化为开中断轮询，避免引入驱动层对调度器的直接依赖。
 

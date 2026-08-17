@@ -13,24 +13,34 @@
 //!    It never processes completions or touches waiter state beyond the
 //!    pending flag.
 //! 2. **softirq action**: runs from the IRQ-tail or `ksoftirqd` drain path,
-//!    consumes the pending flags, and wakes the sleeping requester through
-//!    [`kpoll::Completion`], whose wake side is IRQ-safe.
-//! 3. **requester task**: submits the device request, then sleeps until the
-//!    softirq wake and rechecks its own device-side completion predicate
-//!    (the used-ring token) after every wake, because the completion is only
-//!    a wake source, not a result carrier.
+//!    consumes the pending flags, and broadcasts a wake on the entry's
+//!    [`PollSet`].
+//! 3. **requester task**: submits the device request, then sleeps until a
+//!    broadcast wake and rechecks its own device-side completion predicate
+//!    (the used-ring token) after every wake.
 //!
-//! When the current context cannot sleep (early boot, IRQ-context caller), the
-//! requester degrades to polling the device predicate with local IRQs
-//! enabled; the registered hardirq handler keeps acknowledging the device ISR,
-//! so a shared level-triggered line cannot livelock the CPU.
+//! The wake side is deliberately a broadcast [`PollSet`] rather than a
+//! token-counting completion: one interrupt may cover several completed
+//! requests (the virtio ISR is per-device and the pending flag collapses
+//! multiple hardirqs into one softirq run), so wake accounting must not be
+//! coupled to interrupt counts. Waiters are always responsible for rechecking
+//! their real predicate; a wake never carries a result.
+//!
+//! When the current context cannot sleep (early boot, IRQ-context caller),
+//! the wait helpers return `false` and the requester degrades to polling the
+//! device predicate with local IRQs enabled; the registered hardirq handler
+//! keeps acknowledging the device ISR, so a shared level-triggered line
+//! cannot livelock the CPU.
 
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    sync::atomic::{AtomicBool, Ordering},
+    task::Poll,
+};
 
 use device_res::{Irq, IrqEvent, IrqResource, IrqTrigger};
 use kirq::softirq::SoftirqVec;
-use kpoll::Completion;
+use kpoll::PollSet;
 use kspin::SpinNoIrq;
 
 /// Per-device completion state shared between the hardirq handler, the
@@ -38,12 +48,11 @@ use kspin::SpinNoIrq;
 pub(crate) struct IrqCompletionEntry {
     irq: usize,
     /// Set by the hardirq handler after it acknowledged a real device
-    /// interrupt; cleared by the softirq action when it wakes waiters.
+    /// interrupt; cleared by the softirq action when it broadcasts the wake.
     is_pending: AtomicBool,
-    /// Wake source for the sleeping requester. Tokens may be consumed out of
-    /// order with completions, so waiters must always recheck their real
-    /// device-side predicate after waking.
-    completion: Completion,
+    /// Broadcast wake source for sleeping requesters. Wakes carry no result;
+    /// every waiter rechecks its own device-side predicate after waking.
+    wake: PollSet,
 }
 
 impl IrqCompletionEntry {
@@ -52,7 +61,7 @@ impl IrqCompletionEntry {
         Self {
             irq,
             is_pending: AtomicBool::new(false),
-            completion: Completion::new(),
+            wake: PollSet::new(),
         }
     }
 
@@ -61,28 +70,33 @@ impl IrqCompletionEntry {
         self.irq
     }
 
-    /// The wake source waited on by the requester task.
-    pub(crate) fn completion(&self) -> &Completion {
-        &self.completion
+    /// The broadcast wake source for this entry.
+    pub(crate) fn wake_source(&self) -> &PollSet {
+        &self.wake
     }
 
-    /// Consumes one pending wake token, if any.
-    ///
-    /// Useful for callers that must poll the wake source without a sleepable
-    /// current task.
-    pub(crate) fn try_wait(&self) -> bool {
-        self.completion.try_wait()
-    }
-
-    /// Waits for one softirq wake in a sleepable task context.
+    /// Sleeps in the current task until `predicate` holds, waking on every
+    /// broadcast from the softirq action.
     ///
     /// Returns `false` when the current context cannot sleep (no current
-    /// task); callers must then fall back to polling their device-side
-    /// completion predicate. Returning `true` only means a wake was observed
-    /// or a stale token was consumed — the caller must recheck its real
-    /// predicate.
-    pub(crate) fn wait_wake(&self) -> bool {
-        kirq::IrqSyncWaitIf::wait_for_completion(&self.completion).is_ok()
+    /// task); callers must then poll the predicate themselves with local
+    /// IRQs enabled. Returning `true` only means the predicate held at some
+    /// poll — callers that re-check naturally after this call are already
+    /// correct.
+    pub(crate) fn wait_until(&self, predicate: impl FnMut() -> bool) -> bool {
+        wait_poll_set(&self.wake, predicate)
+    }
+
+    /// Like [`Self::wait_until`], bounded by `deadline`.
+    ///
+    /// Returns `false` when the current context cannot sleep; callers must
+    /// then poll the predicate themselves until the deadline.
+    pub(crate) fn wait_until_deadline(
+        &self,
+        deadline: ktime_types::MonotonicInstant,
+        predicate: impl FnMut() -> bool,
+    ) -> bool {
+        wait_poll_set_deadline(&self.wake, deadline, predicate)
     }
 
     fn mark_pending(&self) {
@@ -92,6 +106,66 @@ impl IrqCompletionEntry {
     fn take_pending(&self) -> bool {
         self.is_pending.swap(false, Ordering::AcqRel)
     }
+}
+
+/// Sleeps in the current task on a broadcast wake source until `predicate`
+/// holds.
+///
+/// This is the kernel wait_queue pattern: register, recheck, sleep; every
+/// broadcast wakes all waiters and each waiter rechecks its own predicate.
+/// Returns `false` when no sleepable current task exists.
+pub(crate) fn wait_poll_set(source: &PollSet, mut predicate: impl FnMut() -> bool) -> bool {
+    if ktask::current_may_uninit().is_none() {
+        return false;
+    }
+
+    let mut registrations = kpoll::PollRegistrations::new();
+    ktask::future::block_on(core::future::poll_fn(|cx| {
+        if predicate() {
+            return Poll::Ready(());
+        }
+        // The register/recheck pair closes the wake-vs-register race: a wake
+        // that fires between the first check and the registration either
+        // detaches the freshly registered waker (waking us) or is covered by
+        // the second check.
+        let mut context = registrations.context(cx);
+        let _ = context.register(source);
+        drop(context);
+        if predicate() {
+            return Poll::Ready(());
+        }
+        Poll::Pending
+    }));
+    true
+}
+
+/// Deadline-bounded variant of [`wait_poll_set`].
+pub(crate) fn wait_poll_set_deadline(
+    source: &PollSet,
+    deadline: ktime_types::MonotonicInstant,
+    mut predicate: impl FnMut() -> bool,
+) -> bool {
+    if ktask::current_may_uninit().is_none() {
+        return false;
+    }
+
+    let mut registrations = kpoll::PollRegistrations::new();
+    let _ = ktask::future::block_on(ktask::future::timeout_at(
+        Some(deadline),
+        core::future::poll_fn(|cx| {
+            if predicate() {
+                return Poll::Ready(());
+            }
+            let mut context = registrations.context(cx);
+            let _ = context.register(source);
+            drop(context);
+            if predicate() {
+                return Poll::Ready(());
+            }
+            Poll::Pending
+        }),
+    ));
+    true
 }
 
 /// A device whose hardirq acknowledgement defers waiter wakeups through a
@@ -142,9 +216,11 @@ impl IrqCompletionHub {
     /// `softirq_action` must forward to [`IrqCompletionHub::run_softirq`] on
     /// this hub; it is installed exactly once as the vector's action.
     ///
-    /// Returns `None` when the IRQ line cannot be requested; the hub is left
-    /// unchanged in that case so the caller keeps its synchronous polling
-    /// fallback.
+    /// Returns `None` when the softirq vector cannot be claimed or the IRQ
+    /// line cannot be requested; the hub is left unchanged in that case so
+    /// the caller keeps its synchronous polling fallback. A vector owned by
+    /// another subsystem would never run this hub's action, so its waiters
+    /// could never be woken.
     pub(crate) fn register(
         &'static self,
         softirq_action: fn(),
@@ -160,9 +236,11 @@ impl IrqCompletionHub {
                     *installed = true;
                 } else {
                     log::warn!(
-                        "virtio: softirq vector {} already registered; completions stay pending",
+                        "virtio: softirq vector {} is owned by another subsystem; device keeps \
+                         polling mode",
                         self.vec.as_usize()
                     );
+                    return None;
                 }
             }
         }
@@ -230,14 +308,18 @@ impl IrqCompletionHub {
         }
     }
 
-    /// softirq action: wake the requesters of every device the hardirq marked
+    /// softirq action: broadcast a wake for every device the hardirq marked
     /// pending.
+    ///
+    /// One broadcast serves any number of waiters: an interrupt may cover
+    /// several completed requests, and each waiter rechecks its own
+    /// device-side predicate after waking.
     pub(crate) fn run_softirq(&self) {
         let devices = self.devices.lock();
         for device in devices.iter() {
             let entry = device.entry();
             if entry.take_pending() {
-                entry.completion().complete();
+                entry.wake_source().wake();
             }
         }
     }
@@ -325,7 +407,7 @@ pub(crate) mod test_support {
 #[allow(missing_docs)]
 mod tests {
     use alloc::sync::Arc;
-    use core::sync::atomic::{AtomicBool, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use unittest::{assert, assert_eq, def_test};
 
@@ -376,7 +458,7 @@ mod tests {
     }
 
     #[def_test(serial)]
-    fn test_hub_softirq_wakes_pending_devices() {
+    fn test_hub_softirq_wakes_registered_waiters() {
         reset_test_hub();
 
         let device = FakeDevice::new(90);
@@ -384,14 +466,24 @@ mod tests {
         device.ack_raised.store(true, Ordering::Release);
         TEST_HUB.devices.lock().push(device);
 
+        // Two waiters registered on the broadcast source model two in-flight
+        // requesters; a single softirq run must wake both.
+        let first_wakes = Arc::new(AtomicUsize::new(0));
+        let second_wakes = Arc::new(AtomicUsize::new(0));
+        let first = register_counting_waker(entry.wake_source(), &first_wakes);
+        let second = register_counting_waker(entry.wake_source(), &second_wakes);
+
         let event = TEST_HUB.handle_irq(90);
         assert!(event.handled());
-        assert!(entry.is_pending.load(Ordering::Acquire));
+        assert!(entry_is_pending(&entry));
 
         TEST_HUB.run_softirq();
-        assert!(!entry.is_pending.load(Ordering::Acquire));
-        assert!(entry.completion().try_wait());
+        assert!(!entry_is_pending(&entry));
+        assert_eq!(first_wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(second_wakes.load(Ordering::SeqCst), 1);
 
+        drop(first);
+        drop(second);
         reset_test_hub();
     }
 
@@ -410,24 +502,27 @@ mod tests {
 
         assert!(!TEST_HUB.handle_irq(91).handled());
         assert!(!TEST_HUB.handle_irq(93).handled());
-        assert!(!raised.entry().is_pending.load(Ordering::Acquire));
-        assert!(!silent.entry().is_pending.load(Ordering::Acquire));
+        assert!(!entry_is_pending(raised.entry()));
+        assert!(!entry_is_pending(silent.entry()));
 
         reset_test_hub();
     }
 
     #[def_test(serial)]
-    fn test_run_softirq_without_pending_is_noop() {
+    fn test_run_softirq_without_pending_does_not_wake() {
         reset_test_hub();
 
         let device = FakeDevice::new(94);
         let entry = device.entry().clone();
         device.ack_raised.store(true, Ordering::Release);
         TEST_HUB.devices.lock().push(device);
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let registration = register_counting_waker(entry.wake_source(), &wakes);
 
         TEST_HUB.run_softirq();
-        assert!(!entry.completion().try_wait());
+        assert_eq!(wakes.load(Ordering::SeqCst), 0);
 
+        drop(registration);
         reset_test_hub();
     }
 
@@ -448,5 +543,63 @@ mod tests {
         assert_eq!(TEST_HUB.device_count(), 0);
 
         reset_test_hub();
+    }
+
+    #[def_test(serial)]
+    fn test_register_rolls_back_when_vector_is_owned_elsewhere() {
+        reset_test_hub();
+        let _failing_provider = ScopedFailingIrqProvider::new();
+
+        // Occupy the vector with a foreign action; the hub must refuse to
+        // register and leave the device unregistered so the caller keeps its
+        // polling fallback.
+        fn foreign_action() {}
+        let _foreign = kirq::softirq::test_support::ScopedSoftirqAction::install(
+            SoftirqVec::High,
+            foreign_action,
+        );
+        let device: Arc<dyn IrqCompletionDevice> = FakeDevice::new(96);
+        assert!(
+            TEST_HUB
+                .register(test_hub_softirq, device.clone())
+                .is_none()
+        );
+        assert_eq!(TEST_HUB.device_count(), 0);
+
+        TEST_HUB.unregister(&device);
+        reset_test_hub();
+    }
+
+    #[def_test]
+    fn test_wait_until_returns_immediately_for_true_predicate() {
+        let entry = IrqCompletionEntry::new(97);
+        // Kernel unit tests run in a task context, so the sleepable path is
+        // exercised; a true predicate must resolve without any wake.
+        assert!(entry.wait_until(|| true));
+    }
+
+    /// Registers a manually-counted waker on `source`.
+    fn register_counting_waker(
+        source: &PollSet,
+        counter: &Arc<AtomicUsize>,
+    ) -> kpoll::PollRegistration {
+        struct CountingWaker {
+            counter: Arc<AtomicUsize>,
+        }
+        impl alloc::task::Wake for CountingWaker {
+            fn wake(self: Arc<Self>) {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let waker = core::task::Waker::from(Arc::new(CountingWaker {
+            counter: counter.clone(),
+        }));
+        source
+            .register(&waker)
+            .expect("test waker registration must succeed")
+    }
+
+    fn entry_is_pending(entry: &IrqCompletionEntry) -> bool {
+        entry.is_pending.load(Ordering::Acquire)
     }
 }
