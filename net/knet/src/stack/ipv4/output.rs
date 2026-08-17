@@ -45,7 +45,7 @@ pub(crate) fn dispatch_ipv4_packet(
     let src_addr = IpAddress::Ipv4(header.src_addr());
     let dst_addr = IpAddress::Ipv4(header.dst_addr());
     if header.dst_addr().is_broadcast() {
-    if !is_valid_ipv4_broadcast_source(&router.local_ipv4_addrs(), header.src_addr()) {
+        if !is_valid_ipv4_broadcast_source(&router.local_ipv4_addrs(), header.src_addr()) {
             warn!("Dropping IPv4 broadcast packet with source {}", src_addr);
             return false;
         }
@@ -65,13 +65,8 @@ pub(crate) fn dispatch_ipv4_packet(
                 timestamp,
             );
         }
-        poll_next |= last_device.send_ip_packet(
-            device_count as i32,
-            dst_addr,
-            src_addr,
-            packet,
-            timestamp,
-        );
+        poll_next |=
+            last_device.send_ip_packet(device_count as i32, dst_addr, src_addr, packet, timestamp);
         return poll_next;
     }
 

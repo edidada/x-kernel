@@ -18,9 +18,9 @@ use super::{
     rtnetlink::*,
     socket::publish_kobject_uevent,
     wire::{
-        IfAddrMsg, IfInfoMsg, NdMsg, NlMsgHeader, addr as wire_addr, build_nlmsg, link as wire_link,
-        neigh as wire_neigh, parse_attrs, push_attr, push_i32_ne, push_u8, push_u16_ne,
-        push_u32_ne, read_i32_ne, read_u16_ne, route as wire_route,
+        IfAddrMsg, IfInfoMsg, NdMsg, NlMsgHeader, addr as wire_addr, build_nlmsg,
+        link as wire_link, neigh as wire_neigh, parse_attrs, push_attr, push_i32_ne, push_u8,
+        push_u16_ne, push_u32_ne, read_i32_ne, read_u16_ne, route as wire_route,
     },
     *,
 };

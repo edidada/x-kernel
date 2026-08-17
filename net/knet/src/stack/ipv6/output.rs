@@ -96,13 +96,8 @@ pub(crate) fn dispatch_ipv6_packet(
                 timestamp,
             );
         }
-        poll_next |= last_device.send_ip_packet(
-            device_count as i32,
-            dst_addr,
-            src_addr,
-            packet,
-            timestamp,
-        );
+        poll_next |=
+            last_device.send_ip_packet(device_count as i32, dst_addr, src_addr, packet, timestamp);
         return poll_next;
     }
 

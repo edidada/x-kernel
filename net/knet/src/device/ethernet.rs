@@ -706,28 +706,7 @@ fn map_dev_err(err: DriverError) -> KError {
 
 #[cfg(unittest)]
 mod tests {
-    use unittest::def_test;
-
-    use super::*;
-
-    #[def_test]
-    fn limited_broadcast_accepts_unspecified_ipv4_source() {
-        assert!(is_ipv4_source_usable_for_egress(
-            IpAddress::Ipv4(Ipv4Address::BROADCAST),
-            Ipv4Address::UNSPECIFIED,
-            &[],
-        ));
-        assert!(!is_ipv4_source_usable_for_egress(
-            IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1)),
-            Ipv4Address::UNSPECIFIED,
-            &[],
-        ));
-    }
-}
-
-#[cfg(unittest)]
-mod tests {
-    use unittest::{assert, assert_eq, def_test};
+    use unittest::{assert, def_test};
 
     use super::*;
 

@@ -495,10 +495,12 @@ impl NeighborCache {
     pub(crate) fn remove_pending_ipv4_source(&mut self, addr: crate::ip::Ipv4Address) {
         for entry in self.entries.values_mut() {
             let before = entry.pending.len();
-            entry.pending.retain(|packet| {
-                ipv4_packet_source(packet).is_none_or(|source| source != addr)
-            });
-            self.pending_len = self.pending_len.saturating_sub(before - entry.pending.len());
+            entry
+                .pending
+                .retain(|packet| ipv4_packet_source(packet).is_none_or(|source| source != addr));
+            self.pending_len = self
+                .pending_len
+                .saturating_sub(before - entry.pending.len());
         }
     }
 
@@ -554,14 +556,6 @@ fn addr_fingerprint(addr: IpAddress) -> u64 {
             u64::from_be_bytes(hi) ^ u64::from_be_bytes(lo)
         }
     }
-}
-
-fn ipv4_packet_source(packet: &PacketBuf) -> Option<Ipv4Address> {
-    let bytes = packet.network_packet()?;
-    if bytes.len() < 20 || bytes[0] >> 4 != 4 {
-        return None;
-    }
-    Some(Ipv4Address::from_octets(bytes[12..16].try_into().ok()?))
 }
 
 #[cfg(unittest)]

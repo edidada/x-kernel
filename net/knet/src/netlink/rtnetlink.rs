@@ -471,9 +471,7 @@ pub(super) fn update_link_state(request: LinkUpdateRequest) -> Result<(), LinuxE
 }
 
 pub(super) fn add_addr_state(request: AddrRequest, flags: u16) -> Result<(), LinuxError> {
-    if request.family == wire_route::FAMILY_IPV6
-        || matches!(request.address, IpAddress::Ipv6(_))
-    {
+    if request.family == wire_route::FAMILY_IPV6 || matches!(request.address, IpAddress::Ipv6(_)) {
         let _mutation_guard = RTNETLINK_MUTATION_LOCK.lock();
         ensure_link_exists(request.index)?;
         return mutate_route_state(|state| {
@@ -507,9 +505,7 @@ pub(super) fn add_addr_state(request: AddrRequest, flags: u16) -> Result<(), Lin
 }
 
 pub(super) fn del_addr_state(request: AddrRequest) -> Result<(), LinuxError> {
-    if request.family == wire_route::FAMILY_IPV6
-        || matches!(request.address, IpAddress::Ipv6(_))
-    {
+    if request.family == wire_route::FAMILY_IPV6 || matches!(request.address, IpAddress::Ipv6(_)) {
         let _mutation_guard = RTNETLINK_MUTATION_LOCK.lock();
         return mutate_route_state(|state| {
             let before = state.addrs.len();
