@@ -43,7 +43,7 @@ mm/kalloc/
 ```text
 GlobalAllocator
  ├─ palloc: BuddyPageAllocator
- ├─ usages: requested-byte statistics
+ ├─ per-CPU usages: requested-byte statistics
  ├─ slab build
  │   └─ KmemCacheSet
  │       └─ [SizeClass -> SpinNoIrq<SlabCache>]
@@ -135,13 +135,15 @@ Buddy 和 TLSF 的小对象直接进入各自 `ByteAllocator`。当其没有空�
 
 - 每个 slab `SizeClass` 有独立的 `SpinNoIrq<SlabCache>`。对象获取、释放、span
   publish 和 detach 只锁一个 class，不会持锁进入页分配器。
-- `palloc` 和 `usages` 各自有独立的 `SpinNoIrq`。slab fast path 在释放 class
-  lock 后才更新 `usages`；refill/reclaim 在没有 class lock 时访问 `palloc`。
-  因此新的 slab 路径不形成 KmemCache -> page allocator 的嵌套锁序。
+- `palloc` 由独立的 `SpinNoIrq` 保护。requested-byte accounting 使用 per-CPU
+  atomic delta：更新只触及当前 CPU，因此跨 CPU free 不会把对象所有权错误绑到释放
+  CPU；`usages()` 才扫描所有 CPU 汇总诊断快照。
+  slab fast path 在释放 class lock 后更新统计；refill/reclaim 在没有 class lock
+  时访问 `palloc`。因此新的 slab 路径不形成 KmemCache -> page allocator 的嵌套锁序。
 - `take_empty_slab()` 逐 class 短暂扫描。它只用于显式 shrink 或 OOM 失败路径，
   不属于对象 fast path。
-- 此阶段每次 slab allocation/free 仍会获取 central class lock，并且 usage
-  accounting 仍是全局锁。它修正所有权和 IRQ-off 临界区范围，但不是最终 SMP
+- 此阶段每次 slab allocation/free 仍会获取 central class lock。usage accounting
+  已不再形成全局串行点，但对象 ownership 的 central lock 仍使它不是最终 SMP
   扩展性方案。
 - 未来 magazine fast path 应仅依赖本 CPU 的状态并禁止抢占；其 refill/drain、
   remote free、CPU offline 与全 CPU flush 需要一个独立、可确认的协议。

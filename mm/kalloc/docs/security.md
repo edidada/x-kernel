@@ -56,9 +56,11 @@ FFI、inline assembly、device tree、ACPI、bootloader 或 firmware 数据。
 
 ## 线程安全
 
-每个 central class cache、页 buddy 和统计表各由 `SpinNoIrq` 保护。KmemCache 的
-对象操作和 list 状态转换只在一个 class lock 内发生。页申请、span 初始化以及
-detached page 的归还都在该 class lock 外进行。
+每个 central class cache 和页 buddy 由 `SpinNoIrq` 保护。requested-byte 统计是
+per-CPU atomic delta：更新时只 pin 当前 CPU，跨 CPU free 在当前 CPU 记负 delta，
+`usages()` 扫描所有 CPU 形成可并发变化的诊断快照。KmemCache 的对象操作和 list
+状态转换只在一个 class lock 内发生。
+页申请、span 初始化以及 detached page 的归还都在该 class lock 外进行。
 
 slab 路径的锁顺序刻意避免 KmemCache 与 `palloc` 的嵌套：fast allocation/free
 完成 class lock 后才做 usage accounting；refill/reclaim 访问 page allocator 前
@@ -107,8 +109,8 @@ intrusive freelist link 覆盖；对象重新分配前是否清零属于调用�
 
 ## 已知限制
 
-- slab fast path 仍获取 central `SpinNoIrq`，且 `Usages` 仍为全局锁；尚无预期的
-  per-CPU 双 magazine 与 per-CPU statistics。
+- slab fast path 仍获取 central `SpinNoIrq`；requested-byte statistics 已按 CPU
+  分片，但尚无预期的 per-CPU 双 magazine。
 - 不提供 remote free、NUMA、memory cgroup、CPU offline、全 CPU cache flush 或
   hard-IRQ reserve。
 - 仅回收 central `Empty` span；不能回收 live object、partial/full span、PCP 或

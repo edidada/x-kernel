@@ -19,6 +19,7 @@ alloc-engine = { workspace = true, features = ["buddy-page"] }
 backtrace = { workspace = true, optional = true }
 cfg-if.workspace = true
 kaddr_layout.workspace = true
+kbuild_config.workspace = true
 kerrno.workspace = true
 kspin.workspace = true
 log.workspace = true

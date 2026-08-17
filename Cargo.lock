@@ -2025,6 +2025,7 @@ dependencies = [
  "backtrace",
  "cfg-if",
  "kaddr_layout",
+ "kbuild_config",
  "kerrno",
  "kspin 0.2.0-dev",
  "log",

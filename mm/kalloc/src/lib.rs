@@ -16,7 +16,7 @@ use core::{
     alloc::{GlobalAlloc, Layout},
     fmt,
     ptr::NonNull,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicIsize, Ordering},
 };
 
 #[cfg(not(feature = "slab"))]
@@ -133,6 +133,74 @@ impl fmt::Debug for Usages {
     }
 }
 
+/// Per-CPU atomic deltas backing the [`Usages`] diagnostic snapshot.
+///
+/// Allocation and deallocation can race a hardirq on the same CPU, and an
+/// object may be released on a different CPU from the one that allocated it.
+/// Each CPU therefore records signed local deltas rather than an ownership
+/// balance. Their relaxed ordering is sufficient: users of
+/// [`GlobalAllocator::usages`] need a diagnostic aggregate, not a globally
+/// linearizable transaction history.
+struct PerCpuUsages([AtomicIsize; UsageKind::VARIANTS.len()]);
+
+impl PerCpuUsages {
+    const fn new() -> Self {
+        Self([const { AtomicIsize::new(0) }; UsageKind::VARIANTS.len()])
+    }
+
+    fn alloc(&self, kind: UsageKind, size: usize) {
+        self.0[kind as usize].fetch_add(usage_delta(size), Ordering::Relaxed);
+    }
+
+    fn dealloc(&self, kind: UsageKind, size: usize) {
+        self.0[kind as usize].fetch_sub(usage_delta(size), Ordering::Relaxed);
+    }
+
+    fn add_to(&self, totals: &mut [isize; UsageKind::VARIANTS.len()]) {
+        for &kind in UsageKind::VARIANTS {
+            let bytes = self.0[kind as usize].load(Ordering::Relaxed);
+            totals[kind as usize] = totals[kind as usize].saturating_add(bytes);
+        }
+    }
+}
+
+#[inline]
+fn usage_delta(size: usize) -> isize {
+    isize::try_from(size).expect("kalloc usage value exceeds isize")
+}
+
+#[percpu::def_percpu]
+static PER_CPU_USAGES: PerCpuUsages = PerCpuUsages::new();
+
+#[inline]
+fn add_usage(kind: UsageKind, size: usize) {
+    PER_CPU_USAGES.with_current(|usages| usages.alloc(kind, size));
+}
+
+#[inline]
+fn subtract_usage(kind: UsageKind, size: usize) {
+    PER_CPU_USAGES.with_current(|usages| usages.dealloc(kind, size));
+}
+
+fn usage_snapshot() -> Usages {
+    let mut totals = [0isize; UsageKind::VARIANTS.len()];
+    for cpu in 0..kbuild_config::NR_CPUS {
+        // SAFETY: `cpu` is bounded by the same compile-time limit used to
+        // create the per-CPU allocator storage. The counters are atomic, so
+        // concurrent task or hardirq updates are safe to observe.
+        unsafe { PER_CPU_USAGES.remote_ref_raw(cpu) }.add_to(&mut totals);
+    }
+
+    let mut usages = Usages::new();
+    for &kind in UsageKind::VARIANTS {
+        // A concurrent cross-CPU allocation/free pair can be observed in
+        // either order, so the aggregate is intentionally a best-effort
+        // diagnostic snapshot rather than a linearizable balance.
+        usages.0[kind as usize] = totals[kind as usize].max(0) as usize;
+    }
+    usages
+}
+
 /// The global allocator used by x-kernel.
 ///
 /// In slab builds, small allocations are served by class-owned central slab
@@ -149,6 +217,10 @@ pub struct GlobalAllocator {
     /// Whether the page allocator has at least one usable memory region.
     page_ready: AtomicBool,
     palloc: SpinNoIrq<BuddyPageAllocator<{ PAGE_SIZE_4K }>>,
+    /// Self-contained accounting for explicitly constructed test allocators.
+    ///
+    /// The runtime singleton uses [`PER_CPU_USAGES`] instead so its hot path
+    /// has no global statistics lock.
     usages: SpinNoIrq<Usages>,
 }
 
@@ -171,6 +243,29 @@ impl GlobalAllocator {
             page_ready: AtomicBool::new(false),
             palloc: SpinNoIrq::new(BuddyPageAllocator::new()),
             usages: SpinNoIrq::new(Usages::new()),
+        }
+    }
+
+    #[inline]
+    fn uses_per_cpu_usage_stats(&self) -> bool {
+        core::ptr::eq(self, &GLOBAL_ALLOCATOR)
+    }
+
+    #[inline]
+    fn add_usage(&self, kind: UsageKind, size: usize) {
+        if self.uses_per_cpu_usage_stats() {
+            add_usage(kind, size);
+        } else {
+            self.usages.lock().alloc(kind, size);
+        }
+    }
+
+    #[inline]
+    fn subtract_usage(&self, kind: UsageKind, size: usize) {
+        if self.uses_per_cpu_usage_stats() {
+            subtract_usage(kind, size);
+        } else {
+            self.usages.lock().dealloc(kind, size);
         }
     }
 
@@ -248,7 +343,7 @@ impl GlobalAllocator {
         };
 
         let object = self.alloc_slab_class(size_class)?;
-        self.usages.lock().alloc(UsageKind::RustHeap, layout.size());
+        self.add_usage(UsageKind::RustHeap, layout.size());
         Ok(object)
     }
 
@@ -327,7 +422,7 @@ impl GlobalAllocator {
             if heap_ready {
                 match balloc.allocate(layout) {
                     Ok(object) => {
-                        self.usages.lock().alloc(UsageKind::RustHeap, layout.size());
+                        self.add_usage(UsageKind::RustHeap, layout.size());
                         return Ok(object);
                     }
                     Err(AllocError::NoMemory) => {
@@ -398,9 +493,7 @@ impl GlobalAllocator {
                 );
             })?;
         // alloc_pages skips usages for RustHeap; track it here.
-        self.usages
-            .lock()
-            .alloc(UsageKind::RustHeap, pages_to_bytes(pages));
+        self.add_usage(UsageKind::RustHeap, pages_to_bytes(pages));
         // SAFETY: `addr` is non-null and properly aligned.
         Ok(unsafe { NonNull::new_unchecked(addr as *mut u8) })
     }
@@ -415,9 +508,7 @@ impl GlobalAllocator {
     pub fn dealloc(&self, ptr: NonNull<u8>, layout: Layout) {
         #[cfg(feature = "slab")]
         if let Some(size_class) = SizeClass::from_layout(layout) {
-            self.usages
-                .lock()
-                .dealloc(UsageKind::RustHeap, layout.size());
+            self.subtract_usage(UsageKind::RustHeap, layout.size());
             // SAFETY: `dealloc` requires a live allocation from `alloc` with
             // the same layout, which selects this same slab size class.
             unsafe { self.slab_caches.deallocate(size_class, ptr) };
@@ -435,9 +526,7 @@ impl GlobalAllocator {
             let pages = layout.size().div_ceil(PAGE_SIZE_4K);
             self.dealloc_pages(ptr.as_ptr() as usize, pages, UsageKind::RustHeap);
         } else {
-            self.usages
-                .lock()
-                .dealloc(UsageKind::RustHeap, layout.size());
+            self.subtract_usage(UsageKind::RustHeap, layout.size());
             self.balloc.lock().deallocate(ptr, layout);
         }
     }
@@ -468,7 +557,7 @@ impl GlobalAllocator {
             if let Some(addr) = pcp::try_alloc(num_pages) {
                 drop(_guard);
                 if !matches!(kind, UsageKind::RustHeap) {
-                    self.usages.lock().alloc(kind, pages_to_bytes(num_pages));
+                    self.add_usage(kind, pages_to_bytes(num_pages));
                 }
                 return Ok(addr);
             }
@@ -479,7 +568,7 @@ impl GlobalAllocator {
             let result = pcp::fill_cache(num_pages, &mut palloc);
             drop(palloc);
             if result.is_ok() && !matches!(kind, UsageKind::RustHeap) {
-                self.usages.lock().alloc(kind, pages_to_bytes(num_pages));
+                self.add_usage(kind, pages_to_bytes(num_pages));
             }
             return result;
         }
@@ -487,7 +576,7 @@ impl GlobalAllocator {
         // Slow path: multi-page or special alignment.
         let addr = self.palloc.lock().allocate_pages(num_pages, align_pow2)?;
         if !matches!(kind, UsageKind::RustHeap) {
-            self.usages.lock().alloc(kind, pages_to_bytes(num_pages));
+            self.add_usage(kind, pages_to_bytes(num_pages));
         }
         Ok(addr)
     }
@@ -519,7 +608,7 @@ impl GlobalAllocator {
         }
 
         if !matches!(kind, UsageKind::RustHeap) {
-            self.usages.lock().alloc(kind, size);
+            self.add_usage(kind, size);
         }
         Ok(addr)
     }
@@ -543,7 +632,7 @@ impl GlobalAllocator {
             .lock()
             .allocate_pages_at(va, num_pages, align_pow2)?;
         if kind != UsageKind::RustHeap {
-            self.usages.lock().alloc(kind, pages_to_bytes(num_pages));
+            self.add_usage(kind, pages_to_bytes(num_pages));
         }
         Ok(addr)
     }
@@ -559,7 +648,7 @@ impl GlobalAllocator {
     ///
     /// [`alloc_pages`]: GlobalAllocator::alloc_pages
     pub fn dealloc_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
-        self.usages.lock().dealloc(kind, pages_to_bytes(num_pages));
+        self.subtract_usage(kind, pages_to_bytes(num_pages));
 
         // Fast path: 1–4 pages -> try to cache them per-CPU.
         if (1..=pcp::PCP_MAX_PAGES).contains(&num_pages) {
@@ -581,7 +670,7 @@ impl GlobalAllocator {
 
     /// Gives back the allocated DMA pages starts from `va` to the DMA page allocator.
     pub fn dealloc_dma_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
-        self.usages.lock().dealloc(kind, pages_to_bytes(num_pages));
+        self.subtract_usage(kind, pages_to_bytes(num_pages));
         self.palloc.lock().deallocate_pages(va, num_pages);
     }
 
@@ -663,8 +752,16 @@ impl GlobalAllocator {
     }
 
     /// Returns the usage statistics of the allocator.
+    ///
+    /// The runtime global allocator returns a best-effort aggregate over its
+    /// per-CPU update deltas. Explicitly constructed allocator instances keep
+    /// a self-contained, locked usage table for test isolation.
     pub fn usages(&self) -> Usages {
-        *self.usages.lock()
+        if self.uses_per_cpu_usage_stats() {
+            usage_snapshot()
+        } else {
+            *self.usages.lock()
+        }
     }
 }
 
@@ -816,7 +913,7 @@ pub mod tests_kalloc {
 
     #[cfg(feature = "slab")]
     use super::{GlobalAllocator, PAGE_SIZE_4K};
-    use super::{UsageKind, Usages};
+    use super::{PerCpuUsages, UsageKind, Usages};
 
     #[cfg(feature = "slab")]
     const TEST_HEAP_PAGES: usize = 4;
@@ -846,6 +943,32 @@ pub mod tests_kalloc {
         usages.alloc(UsageKind::PageTable, 20);
         assert_eq!(usages.get(UsageKind::VirtMem), 10);
         assert_eq!(usages.get(UsageKind::PageTable), 20);
+    }
+
+    #[def_test]
+    fn test_per_cpu_usage_snapshot() {
+        let counters = PerCpuUsages::new();
+        counters.alloc(UsageKind::RustHeap, 64);
+        counters.alloc(UsageKind::PageCache, 128);
+        counters.dealloc(UsageKind::RustHeap, 16);
+
+        let mut totals = [0isize; UsageKind::VARIANTS.len()];
+        counters.add_to(&mut totals);
+        let mut usages = Usages::new();
+        for &kind in UsageKind::VARIANTS {
+            usages.0[kind as usize] = totals[kind as usize].max(0) as usize;
+        }
+        assert_eq!(usages.get(UsageKind::RustHeap), 48);
+        assert_eq!(usages.get(UsageKind::PageCache), 128);
+    }
+
+    #[def_test]
+    fn test_constructed_allocator_keeps_own_usage_snapshot() {
+        let allocator = GlobalAllocator::new();
+        allocator.add_usage(UsageKind::RustHeap, 64);
+        assert_eq!(allocator.usages().get(UsageKind::RustHeap), 64);
+        allocator.subtract_usage(UsageKind::RustHeap, 64);
+        assert_eq!(allocator.usages().get(UsageKind::RustHeap), 0);
     }
 
     #[cfg(feature = "slab")]
