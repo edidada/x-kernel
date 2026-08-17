@@ -3,19 +3,53 @@
 // See LICENSES for license details.
 
 //! VirtIO block driver adapter.
-use alloc::string::String;
+use alloc::{string::String, sync::Arc};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use block::BlockDeviceOperations;
 use driver_base::{Device, DeviceKind, DriverResult};
+use kirq::softirq::SoftirqVec;
 use kspin::SpinNoIrq;
 use virtio_drivers::{
     Hal,
-    device::blk::{SECTOR_SIZE, VirtIOBlk as InnerDev},
+    device::blk::{BlkReq, BlkResp, SECTOR_SIZE, VirtIOBlk as InnerDev},
     transport::Transport,
 };
 
-use crate::as_driver_error;
+use crate::{
+    as_driver_error,
+    irq_completion::{IrqCompletionDevice, IrqCompletionEntry, IrqCompletionHub},
+};
+
+/// Hub deferring virtio-blk completions through the Block softirq vector.
+static BLK_COMPLETION_HUB: IrqCompletionHub = IrqCompletionHub::new(SoftirqVec::Block);
+
+fn blk_completion_softirq() {
+    BLK_COMPLETION_HUB.run_softirq();
+}
+
+/// hardirq-facing view of one virtio-blk device.
+struct VirtIoBlkIrqDevice<H: Hal, T: Transport> {
+    inner: Arc<SpinNoIrq<InnerDev<H, T>>>,
+    entry: Arc<IrqCompletionEntry>,
+}
+
+// SAFETY: the inner device is only reached through its `SpinNoIrq` lock,
+// which provides the mutual exclusion required for cross-thread transfer.
+unsafe impl<H: Hal, T: Transport> Send for VirtIoBlkIrqDevice<H, T> {}
+// SAFETY: shared references only reach the device through the same
+// `SpinNoIrq` lock, so synchronization is preserved.
+unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkIrqDevice<H, T> {}
+
+impl<H: Hal, T: Transport> IrqCompletionDevice for VirtIoBlkIrqDevice<H, T> {
+    fn ack_interrupt(&self) -> bool {
+        !self.inner.lock().ack_interrupt().is_empty()
+    }
+
+    fn entry(&self) -> &Arc<IrqCompletionEntry> {
+        &self.entry
+    }
+}
 
 /// Number of minor bits reserved for partitions of one virtio disk.
 pub const PART_BITS: u32 = 4;
@@ -53,6 +87,22 @@ fn vd_name(index: u32) -> String {
 /// [`BlockDeviceOperations`] trait, providing sector-level read/write access to a
 /// virtual block device.
 ///
+/// # Interrupt model
+///
+/// When an IRQ number is available and registration succeeds, the driver uses
+/// the Linux-style top/bottom-half split:
+///
+/// - the hardirq handler acknowledges the device interrupt status, marks the
+///   device pending, and raises the Block softirq vector;
+/// - the Block softirq action wakes the sleeping requester through the shared
+///   [`kpoll::Completion`] entry;
+/// - the requester task, having submitted the request with the non-blocking
+///   virtqueue API, rechecks the used ring on every wake and completes the
+///   request itself once its token reaches the ring head.
+///
+/// Without an IRQ number (or when IRQ registration fails), requests keep the
+/// original synchronous busy-poll path under [`SpinNoIrq`].
+///
 /// # Type Parameters
 ///
 /// - `H` - VirtIO HAL implementation for DMA allocation.
@@ -61,51 +111,81 @@ fn vd_name(index: u32) -> String {
 /// # Example
 ///
 /// ```ignore
-/// let (kind, transport) = virtio::probe_pci_device::<HalImpl, _>(...).unwrap();
-/// let mut blk = VirtIoBlkDev::<HalImpl, _>::try_new(transport)?;
+/// let (kind, transport, irq) = virtio::probe_pci_device::<HalImpl, _>(...).unwrap();
+/// let mut blk = VirtIoBlkDev::<HalImpl, _>::try_new(transport, Some(irq))?;
 /// let mut buf = [0u8; 512];
 /// blk.read_block(0, &mut buf)?;
 /// ```
 pub struct VirtIoBlkDev<H: Hal, T: Transport> {
-    device: SpinNoIrq<InnerDev<H, T>>,
+    device: Arc<SpinNoIrq<InnerDev<H, T>>>,
     sector_size: usize,
     num_blocks: u64,
     name: String,
     index: u32,
+    /// Shared completion entry; `None` keeps the synchronous busy-poll path.
+    irq_completion: Option<Arc<IrqCompletionEntry>>,
+    /// Keeps the hardirq-facing device object registered until drop.
+    irq_device: Option<Arc<dyn IrqCompletionDevice>>,
 }
 
 // SAFETY: VirtIoBlkDev serializes all access to the inner VirtIOBlk through
 // its own `SpinNoIrq` lock. The inner VirtIOBlk is not auto Send due to
 // PhantomData, but it is safe to transfer across threads behind that lock.
-// The lock must mask interrupts for the duration of each device access,
-// because the synchronous request path busy-polls the used ring while holding
-// the lock. On targets without per-device MSI-X (e.g. x86, where virtio falls
-// back to a shared level-triggered INTx line that the block driver never
-// acks), leaving local interrupts enabled during the poll lets the shared line
-// re-assert continuously and livelock the CPU in an interrupt storm.
+// The IRQ-driven wait path runs with local interrupts enabled and the device
+// lock released: the registered hardirq handler acknowledges the device ISR,
+// so a shared level-triggered INTx line cannot livelock the CPU. The polling
+// fallback still spins while holding the lock, which masks local interrupts
+// for the duration of each request.
 unsafe impl<H: Hal, T: Transport> Send for VirtIoBlkDev<H, T> {}
 // SAFETY: shared access to the device is serialized by the IRQ-safe lock
 // described above, so immutable references may be shared across threads safely.
 unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 
-impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
+impl<H: Hal + 'static, T: Transport + 'static> VirtIoBlkDev<H, T> {
     /// Creates a new driver instance and initializes the device, or returns
     /// an error if any step fails.
+    ///
+    /// # Arguments
+    ///
+    /// - `transport` - The VirtIO transport (MMIO or PCI) for this device.
+    /// - `irq` - Optional IRQ number. When provided and registration
+    ///   succeeds, request completions are deferred through the Block softirq
+    ///   as described in the [interrupt model](#interrupt-model). When
+    ///   omitted, the driver keeps the synchronous busy-poll behavior.
     ///
     /// # Errors
     ///
     /// Returns `DriverError` if the device fails to initialize (e.g. feature
     /// negotiation failure, queue allocation failure, DMA error).
-    pub fn try_new(transport: T) -> DriverResult<Self> {
+    pub fn try_new(transport: T, irq: Option<usize>) -> DriverResult<Self> {
         let device = Self::init_device(transport)?;
         let num_blocks = device.capacity();
         let index = VD_INDEX.fetch_add(1, Ordering::Relaxed);
+
+        let device = Arc::new(SpinNoIrq::new(device));
+        let (irq_completion, irq_device) = match irq {
+            Some(irq) => {
+                let entry = Arc::new(IrqCompletionEntry::new(irq));
+                let irq_device: Arc<dyn IrqCompletionDevice> = Arc::new(VirtIoBlkIrqDevice {
+                    inner: device.clone(),
+                    entry: entry.clone(),
+                });
+                match BLK_COMPLETION_HUB.register(blk_completion_softirq, irq_device.clone()) {
+                    Some(_) => (Some(entry), Some(irq_device)),
+                    None => (None, None),
+                }
+            }
+            None => (None, None),
+        };
+
         Ok(Self {
-            device: SpinNoIrq::new(device),
+            device,
             sector_size: SECTOR_SIZE,
             num_blocks,
             name: alloc::format!("vd{}", vd_name(index)),
             index,
+            irq_completion,
+            irq_device,
         })
     }
 
@@ -132,9 +212,97 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
             .write_blocks(sector as usize, in_buf)
             .map_err(as_driver_error)
     }
+
+    /// Submits a read request and sleeps until the Block softirq wake, then
+    /// completes the request.
+    fn read_block_irq_driven(
+        &self,
+        entry: &Arc<IrqCompletionEntry>,
+        block_id: u64,
+        out_buf: &mut [u8],
+    ) -> DriverResult {
+        let mut req = BlkReq::default();
+        let mut resp = BlkResp::default();
+        let token = {
+            let mut inner = self.device.lock();
+            // SAFETY: `req`, `out_buf`, and `resp` stay on this task's stack
+            // and are not accessed between this submit and the matching
+            // `complete_read_blocks`; the task blocks in the wait loop below
+            // without returning or unwinding, so the borrows stay valid for
+            // the whole in-flight window.
+            unsafe { inner.read_blocks_nb(block_id as usize, &mut req, out_buf, &mut resp) }
+        }
+        .map_err(as_driver_error)?;
+
+        self.wait_until_request_completes(entry, token);
+
+        let mut inner = self.device.lock();
+        // SAFETY: the same buffers and token as the `read_blocks_nb` call
+        // above, and the used-ring head now reports `token`, so the device
+        // has finished the request.
+        unsafe { inner.complete_read_blocks(token, &req, out_buf, &mut resp) }
+            .map_err(as_driver_error)
+    }
+
+    /// Submits a write request and sleeps until the Block softirq wake, then
+    /// completes the request.
+    fn write_block_irq_driven(
+        &self,
+        entry: &Arc<IrqCompletionEntry>,
+        block_id: u64,
+        in_buf: &[u8],
+    ) -> DriverResult {
+        let mut req = BlkReq::default();
+        let mut resp = BlkResp::default();
+        let token = {
+            let mut inner = self.device.lock();
+            // SAFETY: same borrow contract as `read_block_irq_driven`; the
+            // buffers stay valid on this task's stack until completion.
+            unsafe { inner.write_blocks_nb(block_id as usize, &mut req, in_buf, &mut resp) }
+        }
+        .map_err(as_driver_error)?;
+
+        self.wait_until_request_completes(entry, token);
+
+        let mut inner = self.device.lock();
+        // SAFETY: the same buffers and token as the `write_blocks_nb` call
+        // above, and the used-ring head now reports `token`.
+        unsafe { inner.complete_write_blocks(token, &req, in_buf, &mut resp) }
+            .map_err(as_driver_error)
+    }
+
+    /// Sleeps until the used-ring head reports `token`.
+    ///
+    /// The shared completion is only a wake source, so the device state is
+    /// rechecked on every wake. When the current context cannot sleep (early
+    /// boot or an IRQ-context caller), the used ring is polled with local
+    /// interrupts enabled; the registered hardirq handler keeps acknowledging
+    /// the device ISR, so a shared level-triggered line cannot livelock the
+    /// CPU.
+    fn wait_until_request_completes(&self, entry: &Arc<IrqCompletionEntry>, token: u16) {
+        loop {
+            if self.device.lock().peek_used() == Some(token) {
+                return;
+            }
+            if !entry.wait_wake() {
+                while self.device.lock().peek_used() != Some(token) {
+                    core::hint::spin_loop();
+                }
+                return;
+            }
+        }
+    }
 }
 
-impl<H: Hal, T: Transport> Device for VirtIoBlkDev<H, T> {
+impl<H: Hal, T: Transport> Drop for VirtIoBlkDev<H, T> {
+    fn drop(&mut self) {
+        if let Some(irq_device) = self.irq_device.take() {
+            BLK_COMPLETION_HUB.unregister(&irq_device);
+        }
+    }
+}
+
+impl<H: Hal + 'static, T: Transport + 'static> Device for VirtIoBlkDev<H, T> {
     fn name(&self) -> &str {
         &self.name
     }
@@ -144,7 +312,7 @@ impl<H: Hal, T: Transport> Device for VirtIoBlkDev<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> BlockDeviceOperations for VirtIoBlkDev<H, T> {
+impl<H: Hal + 'static, T: Transport + 'static> BlockDeviceOperations for VirtIoBlkDev<H, T> {
     #[inline]
     fn num_blocks(&self) -> u64 {
         self.num_blocks
@@ -156,13 +324,22 @@ impl<H: Hal, T: Transport> BlockDeviceOperations for VirtIoBlkDev<H, T> {
     }
 
     fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
-        self.read_sector(block_id, buf)
+        match &self.irq_completion {
+            Some(entry) => self.read_block_irq_driven(entry, block_id, buf),
+            None => self.read_sector(block_id, buf),
+        }
     }
 
     fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
-        self.write_sector(block_id, buf)
+        match &self.irq_completion {
+            Some(entry) => self.write_block_irq_driven(entry, block_id, buf),
+            None => self.write_sector(block_id, buf),
+        }
     }
 
+    /// Flush keeps the synchronous path: `virtio-drivers` offers no
+    /// non-blocking flush submit, and flushes are rare enough that a brief
+    /// poll under the device lock does not justify new queue plumbing.
     fn flush(&self) -> DriverResult {
         self.device.lock().flush().map_err(as_driver_error)
     }
@@ -173,12 +350,15 @@ mod tests {
     use unittest::{assert, assert_eq, def_test};
 
     use super::*;
-    use crate::mock_virtio::{MockHal, MockTransport};
+    use crate::{
+        irq_completion::test_support::ScopedFailingIrqProvider,
+        mock_virtio::{MockHal, MockTransport},
+    };
 
     #[def_test]
     fn test_virtio_blk_init_failure_handling() {
         let transport = MockTransport::new();
-        let dev = VirtIoBlkDev::<MockHal, MockTransport>::try_new(transport);
+        let dev = VirtIoBlkDev::<MockHal, MockTransport>::try_new(transport, None);
 
         if let Ok(d) = dev {
             assert!(d.name().starts_with("vd"));
@@ -188,6 +368,19 @@ mod tests {
         } else {
             assert!(dev.is_err());
         }
+    }
+
+    #[def_test(serial)]
+    fn test_irq_registration_failure_falls_back_to_polling() {
+        // With a provider whose line requests always fail, IRQ registration
+        // must roll back and the device must keep the polling path.
+        let _failing_provider = ScopedFailingIrqProvider::new();
+        let transport = MockTransport::new();
+        let dev = VirtIoBlkDev::<MockHal, MockTransport>::try_new(transport, Some(77))
+            .expect("device init succeeds with a mock transport");
+
+        assert!(dev.irq_completion.is_none());
+        assert!(dev.irq_device.is_none());
     }
 
     #[def_test]

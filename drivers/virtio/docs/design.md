@@ -20,14 +20,16 @@ x-kernel 运行在裸机 `no_std` 环境中，需要通过 VirtIO 协议与虚�
 ```
 drivers/virtio/
 ├── src/
-│   ├── lib.rs          # 设备探测、错误转换、公共 re-export
-│   ├── blk.rs          # VirtIO Block 适配器
-│   ├── gpu.rs          # VirtIO GPU 适配器
-│   ├── input.rs        # VirtIO Input 适配器
-│   ├── net.rs          # VirtIO Net 适配器（含 IRQ 管理）
-│   ├── socket.rs       # VirtIO Vsock 适配器
-│   ├── virtio_9p.rs    # VirtIO 9p 适配器
-│   └── mock_virtio.rs  # 单元测试 Mock（Hal + Transport）
+│   ├── lib.rs              # 设备探测、错误转换、公共 re-export
+│   ├── blk.rs              # VirtIO Block 适配器（IRQ 驱动 + 轮询回退）
+│   ├── gpu.rs              # VirtIO GPU 适配器
+│   ├── input.rs            # VirtIO Input 适配器
+│   ├── irq_completion.rs   # hardirq → softirq → 睡眠等待的共享完成桥接
+│   ├── net.rs              # VirtIO Net 适配器（IRQ + NAPI 式中断抑制）
+│   ├── rng.rs              # VirtIO RNG 适配器（IRQ 驱动 + 轮询回退）
+│   ├── socket.rs           # VirtIO Vsock 适配器
+│   ├── virtio_9p.rs        # VirtIO 9p 适配器
+│   └── mock_virtio.rs      # 单元测试 Mock（Hal + Transport）
 └── Cargo.toml
 ```
 
@@ -39,6 +41,7 @@ Feature flags 控制编译哪些设备适配器：
 | `gpu`     | gpu       | `alloc`, `display` crate |
 | `input`   | input     | `alloc`, `input` crate |
 | `net`     | net       | `alloc`, `net` crate |
+| `rng`     | rng       | `alloc`, `char_driver` crate |
 | `socket`  | socket    | `alloc`, `vsock` crate |
 | `virtio-9p` | virtio_9p | `alloc` |
 
@@ -74,10 +77,12 @@ Feature flags 控制编译哪些设备适配器：
 | 组件 | 职责 |
 |------|------|
 | `lib.rs` | 设备探测（`probe_mmio_device` / `probe_pci_device`）、VirtIO 错误到 `DriverError` 的转换、公共类型 re-export |
-| `blk.rs` | 将 `VirtIOBlk` 封装为实现 `BlockDevice` 的 `VirtIoBlkDev` |
+| `blk.rs` | 将 `VirtIOBlk` 封装为实现 `BlockDevice` 的 `VirtIoBlkDev`；IRQ 可用时经 Block softirq 完成请求（hardirq ack → softirq 唤醒 → 请求任务完成），否则回退同步轮询 |
 | `gpu.rs` | 将 `VirtIOGpu` 封装为实现 `DisplayDevice` 的 `VirtIoGpuDev` |
 | `input.rs` | 将 `VirtIOInput` 封装为实现 `InputDevice` 的 `VirtIoInputDev` |
-| `net.rs` | 将 `VirtIONetRaw` 封装为实现 `NetDevice` 的 `VirtIoNetDev`，管理收发缓冲区、IRQ ack 和网络 RX scheduler 调度 |
+| `irq_completion.rs` | blk/rng 共享的 IRQ 完成桥接：hardirq 仅 ack 并标记 pending + raise softirq；softirq action 唤醒睡眠的请求任务；任务在每次唤醒后重查设备侧谓词 |
+| `net.rs` | 将 `VirtIONetRaw` 封装为实现 `NetDevice` 的 `VirtIoNetDev`，管理收发缓冲区、IRQ ack、NAPI 式中断抑制和网络 RX scheduler 调度 |
+| `rng.rs` | 将 `VirtIORng` 封装为实现 `CharDevice` 的 `VirtIoRngDev`；IRQ 可用时经 Tasklet softirq 唤醒有界睡眠等待，否则回退关中断有界自旋 |
 | `socket.rs` | 将 `VsockConnectionManager` 封装为实现 `VsockDevice` 的 `VirtIoSocketDev` |
 | `virtio_9p.rs` | 将 `VirtIO9p` 封装为实现 `Virtio9pDevice` 的 `VirtIo9pDev`，提供 `mount_tag()` 和 `request()` |
 | `mock_virtio.rs` | 提供 `MockHal` 和 `MockTransport`，用于单元测试 |
@@ -98,13 +103,23 @@ Feature flags 控制编译哪些设备适配器：
   块设备同步 I/O、9p 请求、GPU flush、
   网络缓冲区回收等路径可能持有锁或等待设备完成，
   不应假设适用于任意不可睡眠上下文。
+- **blk/rng 的 IRQ 驱动等待路径要求任务上下文**：
+  请求任务在提交后经 `kirq::IrqSyncWaitIf` 睡眠等待 softirq 唤醒；
+  无可睡眠上下文（早期启动或 IRQ 上下文调用）时自动退化为
+  开中断轮询 used ring，hardirq handler 持续 ack 设备 ISR，
+  共享电平触发中断线不会 livelock。
 - **网络设备的 IRQ 与正常路径并发访问
   依赖 `SpinNoIrq`**：
   调用者不应绕过现有封装直接并发访问 `InnerDev`。
 - **网络 IRQ handler 只做设备级快速处理**：
   virtio-net IRQ handler 按 resolved IRQ 过滤对应设备 handle，
-  ack 设备中断后只调用上层通过 `driver_net::NetRxScheduler`
-  attach 的 RX 调度能力，不直接运行协议栈或 socket 唤醒逻辑。
+  ack 设备中断后仅进行 NAPI 式中断抑制并调用上层通过
+  `driver_net::NetRxScheduler` attach 的 RX 调度能力，
+  不直接运行协议栈或 socket 唤醒逻辑。
+- **virtio-net 中断抑制的双重机制与平台差异**：
+  queue 级 `set_dev_notify` 仅在未协商 `VIRTIO_F_RING_EVENT_IDX` 时生效；
+  协商了 EVENT_IDX 的设备由 IRQ 线级屏蔽承载抑制，
+  而 x86 MSI-X 向量无法在 APIC 层屏蔽（退化为逐包中断，不回退）。
 - **设备对象的共享安全依赖 trait 约束和内部封装**：
   非 net 设备主要通过 `&mut self` 独占访问；
   net 设备依赖内部锁和 token-buffer 对应关系维持正确性。
@@ -142,10 +157,12 @@ Idle ──read_block/write_block──> Pending ──设备响应──> Compl
 | 从 | 到 | 触发条件 |
 |----|----|----------|
 | Idle | Pending | 调用 `read_block()`、`write_block()` 或 `flush()`，请求提交到 VirtIO 队列 |
-| Pending | Complete | 设备完成 I/O 操作，`virtio-drivers` 内部轮询获取结果 |
+| Pending | Complete | IRQ 模式：hardirq ack 后 Block softirq 唤醒请求任务，任务确认 used ring 到达 token；轮询模式：`virtio-drivers` 内部轮询获取结果 |
 | Complete | Idle | 返回 `DriverResult`，设备回到空闲状态 |
 
-> 块设备为同步模型：每次请求阻塞等待完成，无并发请求。
+> 块设备为同步接口：每次请求等待完成后才返回。IRQ 模式下等待为睡眠等待
+> （softirq 唤醒后重查 used ring），多个任务的在途请求按到达 used ring 头部
+> 的顺序完成；轮询模式下等待为关中断自旋。
 
 ### GPU 设备 scanout resource 状态
 
@@ -278,29 +295,30 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 
 **初始化流程**：
 
-1. `try_new(transport)` → `InnerDev::new(transport)`：协商 feature、分配 VirtIO 队列
+1. `try_new(transport, irq)` → `InnerDev::new(transport)`：协商 feature、分配 VirtIO 队列
 2. 记录 `SECTOR_SIZE`（512 字节）作为 `block_size`
+3. 若提供 `irq` 且注册成功：设备经 `BLK_COMPLETION_HUB` 注册到 Block softirq 向量；
+   注册失败时回退轮询模式
 
-**读取流程**：
+**读取流程（IRQ 模式）**：
 
-1. 调用 `read_block(block_id, buf)`
-2. 内部调用 `read_blocks(sector, out_buf)`，将读请求提交到 VirtIO 队列
-3. `virtio-drivers` 内部轮询等待设备响应
-4. 数据写入 `buf`，返回 `DriverResult`
+1. 调用 `read_block(block_id, buf)`，经 `read_blocks_nb()` 非阻塞提交读请求
+2. 释放设备锁后睡眠等待（`kirq::IrqSyncWaitIf`）；hardirq ack ISR 后标记 pending
+   并 raise `SoftirqVec::Block`，softirq action 唤醒等待任务
+3. 每次唤醒后重查 `peek_used() == Some(token)`，确认后 `complete_read_blocks()`
+   完成请求；无可睡眠上下文时退化为开中断轮询（handler 持续 ack，无 livelock）
 
-**写入流程**：
+**读取流程（轮询回退）**：
 
-1. 调用 `write_block(block_id, buf)`
-2. 内部调用 `write_blocks(sector, in_buf)`，将写请求提交到 VirtIO 队列
-3. `virtio-drivers` 内部轮询等待设备响应
-4. 返回 `DriverResult`
+1. 调用 `read_block(block_id, buf)`，内部调用 `read_blocks(sector, out_buf)`
+2. `virtio-drivers` 在 `SpinNoIrq` 下自旋等待设备响应
+
+**写入流程**：与读取对称（`write_blocks_nb` / `complete_write_blocks`）。
 
 **刷新流程**：
 
-1. 调用 `flush()`，将 flush 请求提交到 VirtIO 队列
-2. 等待设备确认，返回 `DriverResult`
-
-> 块设备为同步模型：每次请求阻塞等待完成，无并发 I/O。
+1. 调用 `flush()`，将 flush 请求提交到 VirtIO 队列，同步等待设备确认
+2. `virtio-drivers` 未提供非阻塞 flush，刷新频率低，保持同步轮询路径
 
 ### GPU 设备 scanout resource
 
@@ -324,6 +342,28 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 
 > resource ID 由 DRM 层分配并随 dumb buffer 生命周期释放；virtio-gpu 驱动负责把这些
 > resource 命令串行提交到 control virtqueue。
+
+### RNG 熵请求
+
+**初始化流程**：
+
+1. `try_new(transport, irq)` → `RngInner::try_new()`：协商 feature、分配 VirtIO 队列
+2. 若提供 `irq` 且注册成功：设备经 `RNG_COMPLETION_HUB` 注册到 Tasklet softirq 向量；
+   注册失败时回退轮询模式
+
+**熵请求流程（IRQ 模式）**：
+
+1. 先回收上一次超时遗留的请求（若已完成）；否则返回 `WouldBlock`（单请求槽）
+2. `submit_entropy()` 提交 DMA 缓冲并记录为唯一在途请求，释放设备锁
+3. 有界睡眠（`timeout_at` 包裹 Completion 注册，50ms 上限）；hardirq ack 后
+   Tasklet softirq 唤醒等待任务；无可睡眠上下文时退化为开中断有界自旋
+4. 唤醒后重查 used ring：完成则拷贝数据返回；超时则在途请求留在 `pending`，
+   返回 `WouldBlock`，下次读取时回收
+
+**熵请求流程（轮询回退）**：
+
+1. 与 IRQ 模式相同的单请求槽状态机，但在 `SpinNoIrq` 下有界自旋（10ms 上限）
+   等待完成，超时后同样返回 `WouldBlock`
 
 ### 输入设备事件读取
 
@@ -369,12 +409,22 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 3. 设置 `hdr_len` 和 `payload_len`，返回 `NetBufHandle`
 4. 上层处理完毕后调用 `recycle_rx()`：`receive_begin()` 重新提交缓冲区，存回 `rx_buffers[new_token]`
 
-**IRQ 处理流程**：
+**IRQ 处理流程（NAPI 式）**：
 
-1. `register_virtio_net_irq(irq, inner)`：将 `VirtIoNetIrqHandle` 存入全局 `NET_IRQ_HANDLES`
+1. `register_virtio_net_irq(irq, inner)`：将 `VirtIoNetIrqHandle` 存入全局 `NET_IRQ_HANDLES`，
+   同时创建与设备共享的 `NetNapiState`（记录 `IrqResource` 与线屏蔽平衡标志）
 2. 若该 IRQ 首次注册（`REGISTERED_NET_IRQS` 去重），调用 `Irq::request(resource, Arc::new(handle_virtio_net_irq))` 注册中断，guard 存入 `NET_IRQ_GUARDS`
-3. 中断到来时 `handle_virtio_net_irq()` 遍历所有句柄，调用 `ack_interrupt()` 确认中断，返回包含来源位图的 `IrqEvent`，没有句柄确认中断时返回 `IrqEvent::NOT_HANDLED`
-4. 已注册 IRQ 时，`ack_interrupt()` 仅由 IRQ handler 调用，避免 RX 任务清除运行期间新到达但尚未调度的设备事件；未注册 IRQ 时，由 `recv()` 在纯轮询路径中确认中断
+3. 中断到来时 `handle_virtio_net_irq()` 遍历所有句柄，调用 `ack_interrupt()` 确认中断：
+   - 确认后执行中断抑制（queue 级 `disable_interrupts()` + 线级 `set_irq_enabled(false)`，
+     线屏蔽标志保证两者严格平衡）
+   - 调用 `schedule_rx()` 经 NetRx softirq 唤醒上层 drain 任务
+   - 返回包含来源位图的 `IrqEvent`；没有句柄确认中断时返回 `IrqEvent::NOT_HANDLED`
+4. drain 任务将接收队列排空后，`recv()` 在空队列分支恢复中断
+   （`enable_interrupts()` + 解除线屏蔽）并重查一次接收队列：
+   与恢复竞争到达的报文要么由重查返回，要么由重新开启的中断再次调度 drain，
+   不丢失唤醒；排空期间不再产生逐包硬中断
+5. 已注册 IRQ 时，`ack_interrupt()` 仅由 IRQ handler 调用，避免 RX 任务清除运行期间
+   新到达但尚未调度的设备事件；未注册 IRQ 时，由 `recv()` 在纯轮询路径中确认中断
 
 ### Vsock 连接管理
 
@@ -427,14 +477,22 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 
 ## 并发模型
 
-- **blk / gpu / input / socket / virtio_9p**：所有操作通过 `&mut self` 独占访问，
-  调用者负责串行化，模块内部无锁。
+- **blk（IRQ 模式）/ rng**：`InnerDev` 被 `Arc<SpinNoIrq<...>>` 包裹，因为 hardirq
+  handler 在中断上下文访问设备（`ack_interrupt`）。请求任务在提交与完成两个短
+ 临界区之间睡眠，不跨睡眠持锁。blk/rng 共享 `irq_completion.rs` 中的 hub：
+  `devices`/`registered_irqs`/`guards` 均由 `SpinNoIrq` 保护，锁序为 hub → 设备锁，
+  不会反向嵌套。
+- **blk（轮询回退）/ gpu / input / socket / virtio_9p**：所有操作通过 `&mut self`
+  独占访问或经 `SpinNoIrq` 串行化，调用者负责上层串行化。
 - **net**：`InnerDev` 被 `Arc<SpinNoIrq<...>>` 包裹，因为 IRQ 回调在中断上下文中
   访问设备（`ack_interrupt`），与正常收发路径并发。全局静态变量
   `NET_IRQ_HANDLES`、`NET_IRQ_GUARDS` 和 `REGISTERED_NET_IRQS` 也使用 `SpinNoIrq` 保护。
+  NAPI 线屏蔽经 `NetNapiState.is_line_masked` 原子标志与 kirq 线控制调用配对，
+  抑制（handler）与恢复（recv drain 末端）可在不同 CPU 上并发且保持平衡。
 - **IRQ 注册**：`register_virtio_net_irq()` 在 `NET_IRQ_HANDLES` 中注册回调句柄，
   同一 IRQ 仅注册一次（通过 `REGISTERED_NET_IRQS` 去重）。`Irq::request()` 返回的
-  guard 存入 `NET_IRQ_GUARDS`，设备 Drop 时自动注销。
+  guard 存入 `NET_IRQ_GUARDS`，设备 Drop 时自动注销。blk/rng 的 hub 采用同样的
+  按线去重与 guard 保留策略。
 
 ## 设计决策
 
@@ -457,10 +515,39 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 中断到来时遍历所有句柄执行 `ack_interrupt()`。
 `NET_IRQ_GUARDS` 持有 `Irq` guard，确保设备 Drop 时自动注销中断。
 
+### 为什么用 softirq 桥接而不是 hardirq 直接唤醒
+
+blk/rng 的完成唤醒经 `kirq::softirq`（Block / Tasklet 向量）而非在 hardirq 里
+直接操作等待者：
+
+1. hardirq 只保留最短路径（ack ISR、标记 pending、raise softirq），
+   中断尾/`ksoftirqd` 的下半部负责所有与等待者的交互；
+2. 唤醒原语选用 `kpoll::Completion`，其 wake 侧显式支持中断上下文，
+   而事件监听类原语（如 `event-listener`）的自旋锁在 IRQ 尾 softirq 上下文中
+   与被打断的持有者存在同 CPU 重入死锁风险；
+3. 睡眠侧复用 `kirq::IrqSyncWaitIf` 桥接（由 ktask 提供），无可睡眠上下文时
+   返回错误，驱动据此退化为开中断轮询，避免引入驱动层对调度器的直接依赖。
+
+### 为什么 net 的中断抑制需要双重机制
+
+`kvirtiodrivers` 的 `set_dev_notify` 在协商了 `VIRTIO_F_RING_EVENT_IDX` 时是
+空操作（该 fork 未实现 used_event 抑制），而现代 QEMU virtio-net 默认协商
+EVENT_IDX。因此：
+
+1. queue 级 `disable_interrupts()` 覆盖未协商 EVENT_IDX 的设备；
+2. IRQ 线级屏蔽（`device_res::IrqOp::set_irq_enabled` → kirq
+   `disable_irq_nosync`/`enable_irq`）覆盖 GIC/PLIC/IO-APIC 等真实中断线，
+   在主验证平台（aarch64 QEMU）上承载实际抑制；
+3. x86 MSI-X 向量无法在 APIC 层屏蔽，两种机制均失效，退化为逐包中断
+   （与改造前行为一致，无回退）。线级抑制会延迟共享同一 INTx 线的其他设备，
+   延迟上界为一个 drain 批次，解除屏蔽后电平触发线会重新送达。
+
 ## Drop / 资源释放
 
 `VirtIoNetDev` 实现了自定义 `Drop`：在设备销毁时调用 `unregister_virtio_net_irq()`
-注销 IRQ 回调，释放 `NET_IRQ_GUARDS` 中对应的 guard。其他设备适配器未实现自定义
+注销 IRQ 回调，释放 `NET_IRQ_GUARDS` 中对应的 guard。`VirtIoBlkDev` 与
+`VirtIoRngDev` 同样在 Drop 时从各自的 hub 注销设备，同线最后一个设备移除后
+释放 hardirq handler。其他设备适配器未实现自定义
 `Drop`，设备资源（DMA 缓冲区、VirtIO 队列）的释放依赖 `virtio-drivers` 内部类型的
 `Drop` 实现。当设备结构体离开作用域时，`InnerDev` 的 `Drop` 会自动通知设备重置
 并释放 DMA 内存。

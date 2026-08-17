@@ -54,8 +54,11 @@ mod virtio_9p;
 #[cfg(feature = "virtio-9p")]
 pub use self::virtio_9p::{VirtIo9pDev, Virtio9pDevice};
 
+#[cfg(any(feature = "block", feature = "rng"))]
+mod irq_completion;
 #[cfg(unittest)]
 pub mod mock_virtio;
+
 #[cfg(feature = "socket")]
 mod socket;
 use driver_base::{DeviceKind, DriverError};

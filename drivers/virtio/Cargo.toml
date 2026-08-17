@@ -33,6 +33,9 @@ net = { workspace = true, optional = true }
 vsock = { workspace = true, optional = true }
 log = { workspace = true }
 khal = { workspace = true }
+kirq = { workspace = true }
+kpoll = { workspace = true }
+ktask = { workspace = true }
 kspin = { workspace = true }
 ktime_types = { workspace = true }
 virtio-drivers = { workspace = true }

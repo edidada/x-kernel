@@ -39,9 +39,10 @@ cfg_if! {
         impl VirtIoBlk {
             pub fn try_new<T: virtio::Transport + 'static>(
                 transport: T,
-                _irq: Option<usize>,
+                irq: Option<usize>,
             ) -> DriverResult<kclass::prelude::BlockDeviceImpl> {
-                let device = virtio::VirtIoBlkDev::<VirtIoHalImpl, T>::try_new(transport)?;
+                let device =
+                    virtio::VirtIoBlkDev::<VirtIoHalImpl, T>::try_new(transport, irq)?;
                 let name = device.name().into();
                 let first_minor = device.index() << virtio::VIRTIO_BLK_PART_BITS;
                 let disk = block::Gendisk::new(
@@ -132,10 +133,10 @@ cfg_if! {
         impl VirtIoRng {
             pub fn try_new<T: virtio::Transport + 'static>(
                 transport: T,
-                _irq: Option<usize>,
+                irq: Option<usize>,
             ) -> DriverResult<kclass::prelude::CharDeviceImpl> {
                 Ok(Box::new(virtio::VirtIoRngDev::<VirtIoHalImpl, T>::try_new(
-                    transport,
+                    transport, irq,
                 )?))
             }
         }
