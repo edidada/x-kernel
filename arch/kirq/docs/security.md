@@ -83,12 +83,18 @@ kirq
 
 - `IRQ_CONTEXT_STATE.current_ref_raw()` 用于复制当前 CPU 的 context snapshot；
 - `IRQ_CONTEXT_STATE.current_ref_mut_raw()` 用于更新当前 CPU 的 context depth。
+- `HARDIRQ_ACTIVE.current_ref_raw()` 用于读取或更新当前 CPU 的原子 hardirq nesting
+  counter；`is_in_hardirq_fast()` 只持有 `NoPreempt`，因此它只能读取这一 atomic
+  counter，不能读取非原子的完整 context state。
 
 这些访问由两类上下文保护：public 查询使用 `NoPreemptIrqSave`，当前 CPU 被 pin
 住且本地 IRQ 被屏蔽；hardirq guard 和 softirq IRQ-tail hot path 使用 crate-local
 `*_irqoff` helper，调用方必须已经建立 local-IRQ-masked + CPU-pinned 上下文。
 因此普通任务查询不会与本地 hardirq guard 并发读写同一个非原子 per-CPU slot，
 IRQ-tail hardirq/softirq 也不会重复保存/恢复 IRQ state。
+`HardIrqContextGuard` 在 handler body 前递增、在退出时递减 `HARDIRQ_ACTIVE`；原子
+counter 允许普通任务在不关闭 IRQ 的 hot path 里安全避开可能与 hardirq 并发的
+task-local state。
 
 `arch/kirq/src/bottom_half/softirq.rs` 使用 `SOFTIRQ_PENDING.current_ref_raw()` 访问当前 CPU 的
 per-CPU atomic pending mask。调用方在访问前 pin 当前 CPU；pending mask 自身是

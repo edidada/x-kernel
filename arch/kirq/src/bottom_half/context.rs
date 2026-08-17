@@ -14,9 +14,10 @@
 //! IRQ-thread execution will need its own sleepable context model instead of
 //! being represented by [`is_in_interrupt_context`].
 
-use core::marker::PhantomData;
-#[cfg(any(unittest, feature = "irq_stat"))]
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{
+    marker::PhantomData,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use kspin::{NoPreempt, NoPreemptIrqSave};
 
@@ -47,6 +48,14 @@ impl IrqContextState {
 
 #[percpu::def_percpu]
 static IRQ_CONTEXT_STATE: IrqContextState = IrqContextState::empty();
+
+// This mirrors only hardirq nesting in an atomic form. The full context stays
+// non-atomic because its snapshot APIs deliberately provide a coherent
+// three-counter view under local IRQ exclusion. Hot paths that only need to
+// avoid task-local state while hardirq is active can use this value without
+// extending their IRQ-off window.
+#[percpu::def_percpu]
+static HARDIRQ_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(any(unittest, feature = "irq_stat"))]
 static CONTEXT_UNDERFLOW_WARNINGS: AtomicUsize = AtomicUsize::new(0);
@@ -166,6 +175,24 @@ pub fn is_in_hardirq() -> bool {
     irq_context_snapshot().is_in_hardirq()
 }
 
+/// Returns whether the current CPU is inside a normal hardirq handler without
+/// masking local IRQs.
+///
+/// Unlike [`is_in_hardirq`], this is not a coherent IRQ-context snapshot: it
+/// observes only the hardirq nesting counter. It is intended for hot paths
+/// that need to select an IRQ-safe reserve before touching task-local state.
+/// The result is safe for that routing decision because a normal hardirq
+/// publishes its active state before it can run allocation code, and the
+/// counter itself is atomic.
+#[inline]
+pub fn is_in_hardirq_fast() -> bool {
+    let _no_preempt = NoPreempt::new();
+    // SAFETY: `NoPreempt` pins this execution to one CPU while reading its
+    // per-CPU atomic. Atomic access permits a hardirq on this CPU to update
+    // the counter concurrently.
+    unsafe { HARDIRQ_ACTIVE.current_ref_raw() }.load(Ordering::Relaxed) != 0
+}
+
 /// Returns whether the current CPU is running a softirq handler.
 #[inline]
 pub fn is_serving_softirq() -> bool {
@@ -224,6 +251,9 @@ impl HardIrqContextGuard {
     /// Enters hardirq context when the caller already masked local IRQs and
     /// pinned the current CPU.
     pub(crate) fn enter() -> Self {
+        // SAFETY: hardirq trap entry already pins the current CPU and masks
+        // local IRQs before constructing this guard.
+        unsafe { HARDIRQ_ACTIVE.current_ref_raw() }.fetch_add(1, Ordering::Relaxed);
         with_current_state_irqoff(|state| {
             state.hardirq_depth = state.hardirq_depth.saturating_add(1);
         });
@@ -233,13 +263,27 @@ impl HardIrqContextGuard {
 
 impl Drop for HardIrqContextGuard {
     fn drop(&mut self) {
-        with_current_state_irqoff(|state| {
+        let decremented = with_current_state_irqoff(|state| {
             if state.hardirq_depth == 0 {
                 warn_context_underflow("hardirq");
+                false
             } else {
                 state.hardirq_depth -= 1;
+                true
             }
         });
+        // SAFETY: hardirq trap exit keeps this CPU pinned and local IRQs
+        // masked through the guard's drop path.
+        let active = unsafe { HARDIRQ_ACTIVE.current_ref_raw() };
+        if decremented {
+            let previous = active.fetch_sub(1, Ordering::Relaxed);
+            debug_assert!(previous != 0, "hardirq active counter underflow");
+            if previous == 0 {
+                active.store(0, Ordering::Relaxed);
+            }
+        } else {
+            active.store(0, Ordering::Relaxed);
+        }
     }
 }
 
@@ -449,8 +493,8 @@ pub mod tests_context {
     use super::{
         HardIrqContextGuard, InterruptContextLevel, SoftIrqContextGuard,
         clear_irq_context_diagnostics, interrupt_context_level, irq_context_diagnostics,
-        irq_context_snapshot, is_bh_disabled, is_in_hardirq, is_in_interrupt_context,
-        is_serving_softirq, local_bh_disable,
+        irq_context_snapshot, is_bh_disabled, is_in_hardirq, is_in_hardirq_fast,
+        is_in_interrupt_context, is_serving_softirq, local_bh_disable,
     };
 
     #[def_test(serial)]
@@ -461,6 +505,7 @@ pub mod tests_context {
         assert_eq!(snapshot.softirq_depth(), 0);
         assert_eq!(snapshot.bh_disable_depth(), 0);
         assert_eq!(interrupt_context_level(), InterruptContextLevel::Task);
+        assert!(!is_in_hardirq_fast());
         assert!(!is_in_interrupt_context());
     }
 
@@ -471,11 +516,13 @@ pub mod tests_context {
         {
             let _guard = HardIrqContextGuard::enter();
             assert!(is_in_hardirq());
+            assert!(is_in_hardirq_fast());
             assert!(is_in_interrupt_context());
             assert_eq!(interrupt_context_level(), InterruptContextLevel::Hardirq);
             assert_eq!(irq_context_snapshot().hardirq_depth(), 1);
         }
         assert!(!is_in_hardirq());
+        assert!(!is_in_hardirq_fast());
         assert!(!is_in_interrupt_context());
         assert_eq!(irq_context_diagnostics().context_underflow_warnings, 0);
     }

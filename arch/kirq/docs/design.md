@@ -136,6 +136,9 @@ register_nmi()
   `*_irq` 入口处理 descriptor 冲突和 enable/disable nesting。
 - `handle_irq()` 运行在 hardirq trap adapter 调用路径中。调用者必须已经屏蔽本地
   IRQ、禁用抢占并 pin 当前 CPU，函数本身不能睡眠。
+- `context::is_in_hardirq_fast()` 只读取当前 CPU 的原子 hardirq nesting counter；它
+  只适合 hot path 在不屏蔽 IRQ 的前提下选择 IRQ-safe reserve，不能替代
+  `irq_context_snapshot()` 或用于判断 softirq / BH-disabled 状态。
 - `handle_nmi()` 运行在 pseudo-NMI adapter 调用路径中，不触碰 normal IRQ
   dispatch fanout，不调用 lifecycle hooks，也不获取 `IRQ_STATE`。
 - `translate_hwirq()` 从 domain 发布的 immutable reverse-map snapshot 做 lock-free
