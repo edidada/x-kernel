@@ -212,10 +212,12 @@ unsafe { inner.complete_read_blocks(token, &req, out_buf, &mut resp) }?;
 期间不被其他代码访问，且仍为同一批缓冲。
 
 **为何安全**：三者位于请求任务的栈上；任务在等待期间睡眠而非返回，
-不存在 unwinding 或重复借用；`complete_*` 仅在 `peek_used() == Some(token)`
-确认后调用，与提交严格配对；请求门保证单请求在途，used ring 头只能是本
-请求的 token，不会出现跨请求 `WrongToken`。若调用方在不可睡眠上下文，
-退化为开中断轮询，hardirq handler 持续 ack 设备 ISR，不会 livelock。
+不存在 unwinding 或重复借用；`complete_*` 仅在本请求的完成槽被 bottom half
+按 used ring 头 token 标记后调用，与提交严格配对；多请求在途下每个请求
+只弹出自己的 token（弹出只会暴露下一个头），跨请求 `WrongToken` 在结构上
+不可达；槽注销与弹出同临界区，token 不会在注销前被复用。若调用方在
+不可睡眠上下文，退化为开中断轮询，hardirq handler 持续 ack 设备 ISR，
+不会 livelock。
 
 **调用者**：
 - `VirtIoBlkDev::read_block/write_block` — 同步接口的内部实现
@@ -281,7 +283,7 @@ let written = unsafe { self.queue.pop_used(token, &[], &mut outputs)? };
 | T-10 | 恶意 VMM 返回伪造的 9p 响应 | 中 | `request()` 返回的数据不符合 9p 协议 | 上层 9p 文件系统应校验响应格式；本模块不解析内容 |
 | T-11 | 恶意 VMM 返回超长 `mount_tag` | 中 | `VirtIO9p::mount_tag()` 返回超长字符串 | `virtio-drivers` 内部从配置空间读取，长度由设备配置空间字段限制 |
 | T-12 | blk/rng IRQ 驱动路径丢失 softirq 唤醒，请求任务永久睡眠 | 中 | hardirq 未触发或 softirq 向量被其他子系统占用 | 唤醒是广播（无 token 可被无关等待者消费），等待者每次唤醒后重查 used ring；多次唤醒丢失仍会被后续 IRQ 广播覆盖；softirq 向量注册失败时回退轮询模式；不可睡眠上下文直接轮询 |
-| T-13 | net NAPI 线屏蔽后 drain 末端未解除屏蔽，后续报文无中断 | 中 | 抑制/恢复跨 CPU 竞争或 drain 任务永不运行 | 标志翻转与 provider 线控制调用在同一把 `SpinNoIrq` 下原子执行，标志与线物理状态不会倒置；每次 handler 抑制都伴随一次 RX 调度，drain 到达空队列即恢复并重查；轮询回退的 recv 也会解除残留屏蔽 |
+| T-13 | net NAPI 抑制后 drain 末端未恢复通知，后续报文无中断 | 低 | 恢复跨 CPU 竞争或 drain 任务永不运行 | 抑制不触碰 IRQ 线（与 Linux 一致）：NO_INTERRUPT 标志由 recv 空队列分支恢复并重查一次；EVENT_IDX 设备由最后一次弹出自然 re-arm（`used_event` 推进到设备追平位置），不存在线状态倒置类故障 |
 | T-14 | 恶意 VMM 对 blk/rng 不触发完成中断 | 中 | 设备不响应 virtqueue | blk 等待与改造前同步轮询同等活跃性（依赖设备存活）；rng 有 50ms 有界超时并回退 `WouldBlock`，entropy 层连续失败 3 次后禁用该源 |
 
 ## 故障模式与影响分析（FMEA）
@@ -298,7 +300,7 @@ let written = unsafe { self.queue.pop_used(token, &[], &mut outputs)? };
 | F-08 | `probe_mmio_device` panic | 传入空指针 | 初始化中断 | 系统启动失败 | 1 | 调用者必须验证地址有效性 |
 | F-09 | 网络缓冲区 token 不匹配 | 内部状态不一致 | DMA 到错误地址 | 内存破坏 | 1 | `assert_eq!` 和 `is_some()` 检查；`BadState` 错误返回 |
 | F-10 | 网络 RX 事件丢失 | IRQ handler 和任务上下文都调用 `ack_interrupt()`，任务上下文清除新到事件 | virtio RX 队列停止推进并重复触发未处理 IRQ | TCP 接收窗口降为零，host→guest 传输超时 | 2 | 已注册 IRQ 时仅由 handler 调用 `ack_interrupt()`，`recv()` 仅消费已完成队列项；纯轮询模式由 `recv()` 确认中断 |
-| F-11 | blk 请求任务在 IRQ 模式下睡眠后未被唤醒 | softirq 动作未安装或唤醒丢失 | 单次请求延迟到下一个 IRQ 或永久等待 | 文件系统 I/O 停滞 | 2 | 每次 hardirq 都 raise softirq；唤醒为广播且等待者每轮重查 used ring，多次丢失由后续 IRQ 广播覆盖；请求门保证单在途、used ring 头只能是本请求 token；不可睡眠上下文退化为轮询 |
+| F-11 | blk 请求任务在 IRQ 模式下睡眠后未被唤醒 | softirq 动作未安装或标记丢失 | 单次请求延迟到下一个 IRQ 或永久等待 | 文件系统 I/O 停滞 | 2 | 每次 hardirq 都 raise softirq；bottom half 按 token push 标记完成槽，被唤醒请求者弹出后级联派发下一个 token，多次唤醒丢失由后续 IRQ/级联覆盖；完成槽在弹出后即注销，token 与槽一一对应；不可睡眠上下文退化为轮询 |
 | F-12 | rng 在途请求超时遗留占用单请求槽 | 设备慢或 IRQ 丢失 | 后续读取返回 `WouldBlock` | entropy 重播种降级到其他源 | 4 | 单请求槽由 pending 状态机管理，下次读取在完成后自动回收；等待为广播+谓词重查（无 token 残留），新读取的 50ms 预算不会被陈旧唤醒浪费；连续失败 3 次后 entropy 层禁用 virtio-rng |
 
 ## 故障管理
@@ -331,8 +333,8 @@ let written = unsafe { self.queue.pop_used(token, &[], &mut outputs)? };
    不反映实际设备拓扑。
 4. **virtio-blk flush 保持同步轮询**：`virtio-drivers` 无非阻塞 flush 提交 API，
    flush 频率低，维持同步路径。
-5. **NAPI 线屏蔽延迟同线设备**：virtio-net 排空期间屏蔽共享 INTx 线会延迟
-   同线其他设备的中断，上界为一个 drain 批次。
+5. **blk flush 为同步独占**：flush 期间在途集合需排空（屏障两段式），
+   长时间密集读写下 flush 延迟上界为一个请求时长。
 
 ## 审计清单
 
@@ -343,4 +345,5 @@ let written = unsafe { self.queue.pop_used(token, &[], &mut outputs)? };
 - [ ] 新增原子操作的内存序不低于已有要求
 - [ ] Drop 实现正确处理所有状态（net/blk/rng 设备 Drop 注销 IRQ；其他设备无需自定义 Drop）
 - [ ] 新增 panic 路径有对应的 PanicGuard 或等效保护
-- [ ] IRQ 抑制/恢复调用严格配对（`is_line_masked` 标志平衡）
+- [ ] IRQ 抑制/恢复调用严格配对（NO_INTERRUPT 标志由 recv 恢复；
+      EVENT_IDX 设备依赖弹出推进 `used_event`）

@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! VirtIO block driver adapter.
-use alloc::{string::String, sync::Arc};
+use alloc::{string::String, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use block::BlockDeviceOperations;
@@ -29,9 +29,223 @@ fn blk_completion_softirq() {
     BLK_COMPLETION_HUB.run_softirq();
 }
 
+/// Per-request completion slot, indexed by the request's used-ring token.
+///
+/// The bottom half marks the slot owning the used-ring head, so each in-flight
+/// request is completed by its own token (Linux `virtqueue_get_buf` push
+/// semantics) instead of sharing one device-wide wake.
+struct BlkSlot {
+    is_done: AtomicBool,
+    wake: PollSet,
+}
+
+impl BlkSlot {
+    fn new() -> Self {
+        Self {
+            is_done: AtomicBool::new(false),
+            wake: PollSet::new(),
+        }
+    }
+
+    fn is_done(&self) -> bool {
+        self.is_done.load(Ordering::Acquire)
+    }
+
+    /// Marks completion once; returns whether this call was the first to do
+    /// so (only the first marker wakes).
+    fn mark_done(&self) -> bool {
+        !self.is_done.swap(true, Ordering::AcqRel)
+    }
+}
+
+/// Token-indexed registry of in-flight request slots for one device.
+struct BlkCompletionSlots {
+    slots: SpinNoIrq<Vec<Option<Arc<BlkSlot>>>>,
+}
+
+impl BlkCompletionSlots {
+    fn new(queue_size: u16) -> Self {
+        Self {
+            slots: SpinNoIrq::new(vec![None; queue_size as usize]),
+        }
+    }
+
+    fn register(&self, token: u16) -> Arc<BlkSlot> {
+        let slot = Arc::new(BlkSlot::new());
+        let mut slots = self.slots.lock();
+        let entry = &mut slots[token as usize];
+        debug_assert!(
+            entry.is_none(),
+            "virtio-blk completion slot {token} was still occupied"
+        );
+        *entry = Some(slot.clone());
+        slot
+    }
+
+    fn remove(&self, token: u16) {
+        self.slots.lock()[token as usize] = None;
+    }
+
+    /// Push-dispatches completions: marks the slot owning the used-ring head
+    /// and wakes it, repeating while the peeked head advances.
+    ///
+    /// `peek` is evaluated under the caller's device lock, so it cannot
+    /// observe a head that a concurrent completion is currently popping. With
+    /// the real device the head stays put until its owner pops it, so one
+    /// call marks at most one fresh completion and then stops; the woken
+    /// owner pops its entry and calls this again to advance the chain. A
+    /// scripted peek (unit tests) can model immediate pops and drain several
+    /// tokens in one call.
+    fn dispatch_with(&self, mut peek: impl FnMut() -> Option<u16>) {
+        while let Some(head) = peek() {
+            let slot = self.slots.lock()[head as usize].clone();
+            let Some(slot) = slot else {
+                // The head belongs to a request that has not registered its
+                // slot yet (submit-to-register race); its own post-register
+                // dispatch will catch the completion.
+                break;
+            };
+            if !slot.mark_done() {
+                // Already marked; its owner is on the way to pop it.
+                break;
+            }
+            slot.wake.wake();
+        }
+    }
+
+    fn dispatch_from_device<H: Hal, T: Transport>(&self, inner: &SpinNoIrq<InnerDev<H, T>>) {
+        self.dispatch_with(|| inner.lock().peek_used());
+    }
+}
+
+/// Exclusive-flush barrier over the set of in-flight requests.
+///
+/// Read/write requests may run concurrently (multi-request in flight); a flush
+/// first claims the `is_flushing` flag so no *new* request starts, then waits
+/// for the in-flight set to drain. This upholds the `virtio-drivers`
+/// synchronous flush helper's requirement that the device processes no other
+/// buffer, while bounding flush starvation to one request duration under a
+/// continuous request stream.
+struct RequestGate {
+    state: SpinNoIrq<RequestGateState>,
+    wake: PollSet,
+}
+
+#[derive(Clone, Copy)]
+struct RequestGateState {
+    in_flight: usize,
+    is_flushing: bool,
+}
+
+impl RequestGate {
+    fn new() -> Self {
+        Self {
+            state: SpinNoIrq::new(RequestGateState {
+                in_flight: 0,
+                is_flushing: false,
+            }),
+            wake: PollSet::new(),
+        }
+    }
+
+    /// Joins the in-flight set, waiting while a flush holds the gate.
+    fn acquire_request(&self) -> RequestGuard<'_> {
+        if !wait_poll_set(&self.wake, || {
+            let mut state = self.state.lock();
+            if state.is_flushing {
+                false
+            } else {
+                state.in_flight += 1;
+                true
+            }
+        }) {
+            // No sleepable context (early boot); a flush cannot be running
+            // concurrently in such a context, so a bounded spin suffices.
+            while {
+                let mut state = self.state.lock();
+                if state.is_flushing {
+                    true
+                } else {
+                    state.in_flight += 1;
+                    false
+                }
+            } {
+                core::hint::spin_loop();
+            }
+        }
+        RequestGuard(self)
+    }
+
+    fn release_request(&self) {
+        self.state.lock().in_flight -= 1;
+        self.wake.wake();
+    }
+
+    /// Claims the flush barrier: first the exclusive flag (holding off new
+    /// requests), then the drain of the in-flight set.
+    fn begin_flush(&self) -> FlushGuard<'_> {
+        if !wait_poll_set(&self.wake, || {
+            let mut state = self.state.lock();
+            if state.is_flushing {
+                false
+            } else {
+                state.is_flushing = true;
+                true
+            }
+        }) {
+            while {
+                let mut state = self.state.lock();
+                if state.is_flushing {
+                    true
+                } else {
+                    state.is_flushing = true;
+                    false
+                }
+            } {
+                core::hint::spin_loop();
+            }
+        }
+        if !wait_poll_set(&self.wake, || self.state.lock().in_flight == 0) {
+            while self.state.lock().in_flight != 0 {
+                core::hint::spin_loop();
+            }
+        }
+        FlushGuard(self)
+    }
+
+    fn end_flush(&self) {
+        self.state.lock().is_flushing = false;
+        self.wake.wake();
+    }
+
+    #[cfg(unittest)]
+    fn snapshot(&self) -> RequestGateState {
+        *self.state.lock()
+    }
+}
+
+/// RAII guard for one in-flight request.
+struct RequestGuard<'a>(&'a RequestGate);
+
+impl Drop for RequestGuard<'_> {
+    fn drop(&mut self) {
+        self.0.release_request();
+    }
+}
+
+/// RAII guard for a held flush barrier.
+struct FlushGuard<'a>(&'a RequestGate);
+
+impl Drop for FlushGuard<'_> {
+    fn drop(&mut self) {
+        self.0.end_flush();
+    }
+}
+
 /// hardirq-facing view of one virtio-blk device.
 struct VirtIoBlkIrqDevice<H: Hal, T: Transport> {
     inner: Arc<SpinNoIrq<InnerDev<H, T>>>,
+    slots: Arc<BlkCompletionSlots>,
     entry: Arc<IrqCompletionEntry>,
 }
 
@@ -47,70 +261,15 @@ impl<H: Hal, T: Transport> IrqCompletionDevice for VirtIoBlkIrqDevice<H, T> {
         !self.inner.lock().ack_interrupt().is_empty()
     }
 
+    fn run_bottom_half(&self) {
+        // Push completion: mark the slot owning the used-ring head so its
+        // waiter is woken by its own token; the woken owner pops its entry
+        // and re-dispatches to advance the chain.
+        self.slots.dispatch_from_device(&self.inner);
+    }
+
     fn entry(&self) -> &Arc<IrqCompletionEntry> {
         &self.entry
-    }
-}
-
-/// Serializes device requests: at most one request is in flight at a time.
-///
-/// This restores the request serialization the polling path always had (a
-/// whole request ran under the device lock), for two reasons:
-///
-/// - the `virtio-drivers` synchronous helpers (used by `flush`) require that
-///   the device is not processing any other buffer, and popping a used-ring
-///   entry whose head token differs from the caller's returns `WrongToken`
-///   *without recycling the descriptor chain*;
-/// - the completion wake is a broadcast without per-request accounting, and
-///   with a single in-flight request the used-ring head can only be the
-///   waiter's own token, so a wake can never be "consumed" by an unrelated
-///   requester.
-///
-/// Unlike the old serialization, the requester sleeps between submit and
-/// completion instead of busy-polling with local interrupts masked.
-struct IrqRequestGate {
-    busy: AtomicBool,
-    wake: PollSet,
-}
-
-impl IrqRequestGate {
-    fn new() -> Self {
-        Self {
-            busy: AtomicBool::new(false),
-            wake: PollSet::new(),
-        }
-    }
-
-    /// Acquires the gate, sleeping until the current holder releases it.
-    fn acquire(&self) -> BlkRequestGuard<'_> {
-        if !self.busy.swap(true, Ordering::AcqRel) {
-            return BlkRequestGuard(self);
-        }
-        // The predicate performs the acquisition swap itself; the swap is
-        // idempotent while the gate is already held, so repeated polls are
-        // safe and exactly one waiter can observe a false previous value.
-        if !wait_poll_set(&self.wake, || !self.busy.swap(true, Ordering::AcqRel)) {
-            // No sleepable context: spin until the swap succeeds. The holder
-            // completes through its own wait path, so the gate is released.
-            while self.busy.swap(true, Ordering::AcqRel) {
-                core::hint::spin_loop();
-            }
-        }
-        BlkRequestGuard(self)
-    }
-
-    fn release(&self) {
-        self.busy.store(false, Ordering::Release);
-        self.wake.wake();
-    }
-}
-
-/// RAII guard for one held [`IrqRequestGate`] acquisition.
-struct BlkRequestGuard<'a>(&'a IrqRequestGate);
-
-impl Drop for BlkRequestGuard<'_> {
-    fn drop(&mut self) {
-        self.0.release();
     }
 }
 
@@ -153,21 +312,25 @@ fn vd_name(index: u32) -> String {
 /// # Interrupt model
 ///
 /// When an IRQ number is available and registration succeeds, the driver uses
-/// the Linux-style top/bottom-half split:
+/// the Linux-style top/bottom-half split with **push completions**:
 ///
 /// - the hardirq handler acknowledges the device interrupt status, marks the
 ///   device pending, and raises the Block softirq vector;
-/// - the Block softirq action broadcasts a wake for sleeping requesters;
-/// - the requester task, having submitted the request with the non-blocking
-///   virtqueue API, rechecks the used ring on every wake and completes the
-///   request itself once its token reaches the ring head.
+/// - the Block softirq action dispatches completions per request: it marks
+///   the completion slot owning the used-ring head and wakes that request's
+///   waiter (each in-flight request owns a token-indexed slot — the
+///   equivalent of Linux's `virtqueue_get_buf` loop driving per-request
+///   endio completions);
+/// - the woken requester pops its own used-ring entry (recycling its
+///   descriptor chain and its caller-owned buffers), re-dispatches so the
+///   next completed token is marked, and returns.
 ///
-/// Requests are serialized by an internal gate (one in flight at a time),
-/// matching the request ordering the previous synchronous driver had, while
-/// the requester sleeps instead of busy-polling with interrupts masked.
-///
-/// Without an IRQ number (or when IRQ registration fails), requests keep the
-/// original synchronous busy-poll path under [`SpinNoIrq`].
+/// Multiple requests may be in flight concurrently. A flush claims an
+/// exclusive barrier that first holds off new requests and then waits for the
+/// in-flight set to drain, upholding the synchronous flush helper's
+/// single-buffer contract. Without an IRQ number (or when IRQ registration
+/// fails), requests keep the original synchronous busy-poll path under
+/// [`SpinNoIrq`].
 ///
 /// # Type Parameters
 ///
@@ -188,18 +351,19 @@ pub struct VirtIoBlkDev<H: Hal, T: Transport> {
     num_blocks: u64,
     name: String,
     index: u32,
-    /// Request gate; only meaningful in the IRQ-driven mode, where it
-    /// serializes submit/wait/complete and the sync flush against each other.
-    request_gate: IrqRequestGate,
+    /// Exclusive-flush barrier over the in-flight request set (IRQ mode).
+    request_gate: RequestGate,
+    /// Token-indexed completion slots (IRQ mode).
+    completion_slots: Arc<BlkCompletionSlots>,
     /// Shared completion entry; `None` keeps the synchronous busy-poll path.
     irq_completion: Option<Arc<IrqCompletionEntry>>,
     /// Keeps the hardirq-facing device object registered until drop.
     irq_device: Option<Arc<dyn IrqCompletionDevice>>,
 }
 
-// SAFETY: VirtIoBlkDev serializes all access to the inner VirtIOBlk through
-// its own `SpinNoIrq` lock (polling mode) or the request gate plus short
-// lock-held critical sections (IRQ mode). The inner VirtIOBlk is not auto
+// SAFETY: VirtIoBlkDev serializes device access through its `SpinNoIrq` lock
+// in polling mode, and through short lock-held critical sections (submit,
+// pop) around a sleeping wait in IRQ mode. The inner VirtIOBlk is not auto
 // Send due to PhantomData, but it is safe to transfer across threads behind
 // that synchronization. The IRQ-driven wait runs with the device lock
 // released and local interrupts enabled: the registered hardirq handler
@@ -219,9 +383,9 @@ impl<H: Hal + 'static, T: Transport + 'static> VirtIoBlkDev<H, T> {
     ///
     /// - `transport` - The VirtIO transport (MMIO or PCI) for this device.
     /// - `irq` - Optional IRQ number. When provided and registration
-    ///   succeeds, request completions are deferred through the Block softirq
-    ///   as described in the [interrupt model](#interrupt-model). When
-    ///   omitted, the driver keeps the synchronous busy-poll behavior.
+    ///   succeeds, request completions are dispatched through the Block
+    ///   softirq as described in the [interrupt model](#interrupt-model).
+    ///   When omitted, the driver keeps the synchronous busy-poll behavior.
     ///
     /// # Errors
     ///
@@ -233,11 +397,13 @@ impl<H: Hal + 'static, T: Transport + 'static> VirtIoBlkDev<H, T> {
         let index = VD_INDEX.fetch_add(1, Ordering::Relaxed);
 
         let device = Arc::new(SpinNoIrq::new(device));
+        let completion_slots = Arc::new(BlkCompletionSlots::new(device.lock().virt_queue_size()));
         let (irq_completion, irq_device) = match irq {
             Some(irq) => {
                 let entry = Arc::new(IrqCompletionEntry::new(irq));
                 let irq_device: Arc<dyn IrqCompletionDevice> = Arc::new(VirtIoBlkIrqDevice {
                     inner: device.clone(),
+                    slots: completion_slots.clone(),
                     entry: entry.clone(),
                 });
                 match BLK_COMPLETION_HUB.register(blk_completion_softirq, irq_device.clone()) {
@@ -254,7 +420,8 @@ impl<H: Hal + 'static, T: Transport + 'static> VirtIoBlkDev<H, T> {
             num_blocks,
             name: alloc::format!("vd{}", vd_name(index)),
             index,
-            request_gate: IrqRequestGate::new(),
+            request_gate: RequestGate::new(),
+            completion_slots,
             irq_completion,
             irq_device,
         })
@@ -284,47 +451,81 @@ impl<H: Hal + 'static, T: Transport + 'static> VirtIoBlkDev<H, T> {
             .map_err(as_driver_error)
     }
 
-    /// Submits a read request and sleeps until the Block softirq wake, then
-    /// completes the request.
-    fn read_block_irq_driven(
+    /// Sleeps until the bottom half marks this request's token done.
+    ///
+    /// When the current context cannot sleep (early boot or an IRQ-context
+    /// caller), polls the slot with local interrupts enabled; the registered
+    /// hardirq handler acknowledges the device ISR, so a shared
+    /// level-triggered line cannot livelock the CPU.
+    fn wait_for_slot(&self, slot: &Arc<BlkSlot>) {
+        if wait_poll_set(&slot.wake, || slot.is_done()) {
+            return;
+        }
+        while !slot.is_done() {
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Pops this request's entry after its slot was marked done: completes
+    /// the request, releases the slot, and re-dispatches so the next
+    /// completed token is marked.
+    ///
+    /// `complete` runs under the device lock and receives that lock's guard;
+    /// the slot is removed while the lock is still held so the token cannot
+    /// be recycled by a concurrent submit before the registry is cleaned.
+    fn finish_request(
         &self,
-        entry: &Arc<IrqCompletionEntry>,
-        block_id: u64,
-        out_buf: &mut [u8],
+        token: u16,
+        complete: impl FnOnce(&mut InnerDev<H, T>) -> DriverResult,
     ) -> DriverResult {
-        let _gate = self.request_gate.acquire();
+        let result = {
+            let mut inner = self.device.lock();
+            let result = complete(&mut inner);
+            self.completion_slots.remove(token);
+            result
+        };
+        // The pop advanced the used-ring head; dispatch the next completion.
+        self.completion_slots.dispatch_from_device(&self.device);
+        result
+    }
+
+    /// Submits a read request and sleeps until the Block softirq marks this
+    /// request's token, then completes the request.
+    fn read_block_irq_driven(&self, block_id: u64, out_buf: &mut [u8]) -> DriverResult {
+        let _request = self.request_gate.acquire_request();
         let mut req = BlkReq::default();
         let mut resp = BlkResp::default();
         let token = {
             let mut inner = self.device.lock();
             // SAFETY: `req`, `out_buf`, and `resp` stay on this task's stack
             // and are not accessed between this submit and the matching
-            // `complete_read_blocks`; the task blocks in the wait loop below
+            // `complete_read_blocks`; the task blocks in the wait below
             // without returning or unwinding, so the borrows stay valid for
             // the whole in-flight window.
             unsafe { inner.read_blocks_nb(block_id as usize, &mut req, out_buf, &mut resp) }
         }
         .map_err(as_driver_error)?;
 
-        self.wait_until_request_completes(entry, token);
+        let slot = self.completion_slots.register(token);
+        // Catch a completion that raced between submit and registration; the
+        // used-ring head cannot have moved past this token (only its owner
+        // pops it), so this dispatch observes it directly.
+        self.completion_slots.dispatch_from_device(&self.device);
+        self.wait_for_slot(&slot);
 
-        let mut inner = self.device.lock();
-        // SAFETY: the same buffers and token as the `read_blocks_nb` call
-        // above, and the used-ring head now reports `token`, so the device
-        // has finished the request.
-        unsafe { inner.complete_read_blocks(token, &req, out_buf, &mut resp) }
-            .map_err(as_driver_error)
+        self.finish_request(token, |inner| {
+            // SAFETY: the same buffers and token as the `read_blocks_nb`
+            // call above, and the used-ring head reported this token
+            // complete, so the device has finished the request.
+            unsafe { inner.complete_read_blocks(token, &req, out_buf, &mut resp) }
+                .map_err(as_driver_error)
+        })
     }
 
-    /// Submits a write request and sleeps until the Block softirq wake, then
-    /// completes the request.
-    fn write_block_irq_driven(
-        &self,
-        entry: &Arc<IrqCompletionEntry>,
-        block_id: u64,
-        in_buf: &[u8],
-    ) -> DriverResult {
-        let _gate = self.request_gate.acquire();
+    /// Submits a write request and sleeps until the Block softirq marks this
+    /// request's token, then completes the request.
+    fn write_block_irq_driven(&self, block_id: u64, in_buf: &[u8]) -> DriverResult {
+        let _request = self.request_gate.acquire_request();
         let mut req = BlkReq::default();
         let mut resp = BlkResp::default();
         let token = {
@@ -335,31 +536,17 @@ impl<H: Hal + 'static, T: Transport + 'static> VirtIoBlkDev<H, T> {
         }
         .map_err(as_driver_error)?;
 
-        self.wait_until_request_completes(entry, token);
+        let slot = self.completion_slots.register(token);
+        self.completion_slots.dispatch_from_device(&self.device);
+        self.wait_for_slot(&slot);
 
-        let mut inner = self.device.lock();
-        // SAFETY: the same buffers and token as the `write_blocks_nb` call
-        // above, and the used-ring head now reports `token`.
-        unsafe { inner.complete_write_blocks(token, &req, in_buf, &mut resp) }
-            .map_err(as_driver_error)
-    }
-
-    /// Sleeps until the used-ring head reports `token`.
-    ///
-    /// The softirq wake is a broadcast without per-request accounting, so the
-    /// device state is rechecked on every wake; with the request gate held,
-    /// the head can only be this requester's own token. When the current
-    /// context cannot sleep (early boot or an IRQ-context caller), the used
-    /// ring is polled with local interrupts enabled; the registered hardirq
-    /// handler keeps acknowledging the device ISR, so a shared
-    /// level-triggered line cannot livelock the CPU.
-    fn wait_until_request_completes(&self, entry: &Arc<IrqCompletionEntry>, token: u16) {
-        if entry.wait_until(|| self.device.lock().peek_used() == Some(token)) {
-            return;
-        }
-        while self.device.lock().peek_used() != Some(token) {
-            core::hint::spin_loop();
-        }
+        self.finish_request(token, |inner| {
+            // SAFETY: the same buffers and token as the `write_blocks_nb`
+            // call above, and the used-ring head reported this token
+            // complete.
+            unsafe { inner.complete_write_blocks(token, &req, in_buf, &mut resp) }
+                .map_err(as_driver_error)
+        })
     }
 }
 
@@ -371,7 +558,7 @@ impl<H: Hal, T: Transport> Drop for VirtIoBlkDev<H, T> {
     }
 }
 
-impl<H: Hal + 'static, T: Transport + 'static> Device for VirtIoBlkDev<H, T> {
+impl<H: Hal, T: Transport> Device for VirtIoBlkDev<H, T> {
     fn name(&self) -> &str {
         &self.name
     }
@@ -394,29 +581,29 @@ impl<H: Hal + 'static, T: Transport + 'static> BlockDeviceOperations for VirtIoB
 
     fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
         match &self.irq_completion {
-            Some(entry) => self.read_block_irq_driven(entry, block_id, buf),
+            Some(_) => self.read_block_irq_driven(block_id, buf),
             None => self.read_sector(block_id, buf),
         }
     }
 
     fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
         match &self.irq_completion {
-            Some(entry) => self.write_block_irq_driven(entry, block_id, buf),
+            Some(_) => self.write_block_irq_driven(block_id, buf),
             None => self.write_sector(block_id, buf),
         }
     }
 
-    /// Flush keeps the synchronous helper: `virtio-drivers` offers no
-    /// non-blocking flush submit. In IRQ mode the request gate is held for
-    /// the flush, so no other request is in flight and the helper's
-    /// single-buffer assumption holds; polling mode is already serialized by
-    /// the device lock.
+    /// Flush keeps the synchronous helper (`virtio-drivers` offers no
+    /// non-blocking flush submit): the flush barrier guarantees no other
+    /// request is in flight, so the helper's single-buffer assumption holds.
+    /// Polling mode is already serialized by the device lock.
     fn flush(&self) -> DriverResult {
-        let _gate = self
-            .irq_completion
-            .as_ref()
-            .map(|_| self.request_gate.acquire());
-        self.device.lock().flush().map_err(as_driver_error)
+        if self.irq_completion.is_some() {
+            let _flush = self.request_gate.begin_flush();
+            self.device.lock().flush().map_err(as_driver_error)
+        } else {
+            self.device.lock().flush().map_err(as_driver_error)
+        }
     }
 }
 
@@ -461,28 +648,96 @@ mod tests {
         assert!(dev.irq_device.is_none());
     }
 
-    #[def_test(serial)]
-    fn test_request_gate_release_wakes_waiter_and_reacquires() {
-        let gate = IrqRequestGate::new();
-        let guard = gate.acquire();
-        assert!(gate.busy.load(Ordering::Acquire));
+    #[def_test]
+    fn test_dispatch_marks_each_registered_token_once() {
+        let slots = BlkCompletionSlots::new(16);
+        let first = slots.register(3);
+        let second = slots.register(7);
+        let first_wakes = Arc::new(AtomicUsize::new(0));
+        let registration = register_slot_waker(&first, &first_wakes);
 
-        // A waiter registered on the gate's broadcast source must be woken
-        // by release, and the gate must become acquirable again.
-        let wakes = Arc::new(AtomicUsize::new(0));
-        let registration = register_gate_waker(&gate, &wakes);
-        drop(guard);
-        assert!(!gate.busy.load(Ordering::Acquire));
-        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        // Scripted peek models a device whose head advances immediately (as
+        // if each owner popped): one dispatch drains both tokens.
+        let script = [Some(3u16), Some(7), None, None];
+        let mut cursor = 0;
+        slots.dispatch_with(|| {
+            let token = script[cursor];
+            cursor += 1;
+            token
+        });
 
-        let _regained = gate.acquire();
+        assert!(first.is_done());
+        assert!(second.is_done());
+        assert_eq!(first_wakes.load(Ordering::SeqCst), 1);
+
         drop(registration);
     }
 
-    fn register_gate_waker(
-        gate: &IrqRequestGate,
-        counter: &Arc<AtomicUsize>,
-    ) -> kpoll::PollRegistration {
+    #[def_test]
+    fn test_dispatch_stops_at_unregistered_head() {
+        let slots = BlkCompletionSlots::new(16);
+        let slot = slots.register(7);
+
+        // Head 5 has no registered slot (submit-to-register race window);
+        // dispatch must stop without touching the later token.
+        let script = [Some(5u16), Some(7), None];
+        let mut cursor = 0;
+        slots.dispatch_with(|| {
+            let token = script[cursor];
+            cursor += 1;
+            token
+        });
+
+        assert!(!slot.is_done());
+    }
+
+    #[def_test]
+    fn test_dispatch_remarks_nothing_for_stationary_head() {
+        let slots = BlkCompletionSlots::new(16);
+        let slot = slots.register(3);
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let registration = register_slot_waker(&slot, &wakes);
+
+        // The real device keeps the head until its owner pops it: repeated
+        // dispatches see the same token and must not wake again.
+        slots.dispatch_with(|| Some(3));
+        slots.dispatch_with(|| Some(3));
+        slots.dispatch_with(|| Some(3));
+
+        assert!(slot.is_done());
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+
+        drop(registration);
+    }
+
+    #[def_test]
+    fn test_request_gate_flush_barrier() {
+        let gate = RequestGate::new();
+        let first = gate.acquire_request();
+        let second = gate.acquire_request();
+        assert_eq!(gate.snapshot().in_flight, 2);
+
+        drop(first);
+        drop(second);
+        assert_eq!(gate.snapshot().in_flight, 0);
+
+        let flush = gate.begin_flush();
+        let snapshot = gate.snapshot();
+        assert!(snapshot.is_flushing);
+        assert_eq!(snapshot.in_flight, 0);
+
+        // While a flush holds the gate, a fresh request claim (evaluated
+        // inline as the claim predicate would) must be rejected.
+        let state = gate.state.lock();
+        let can_start_request = !state.is_flushing;
+        drop(state);
+        assert!(!can_start_request);
+
+        drop(flush);
+        assert!(!gate.snapshot().is_flushing);
+    }
+
+    fn register_slot_waker(slot: &BlkSlot, counter: &Arc<AtomicUsize>) -> kpoll::PollRegistration {
         struct CountingWaker {
             counter: Arc<AtomicUsize>,
         }
@@ -494,7 +749,7 @@ mod tests {
         let waker = core::task::Waker::from(Arc::new(CountingWaker {
             counter: counter.clone(),
         }));
-        gate.wake
+        slot.wake
             .register(&waker)
             .expect("test waker registration must succeed")
     }

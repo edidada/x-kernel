@@ -175,6 +175,16 @@ pub(crate) trait IrqCompletionDevice: Send + Sync {
     /// device actually raised this IRQ.
     fn ack_interrupt(&self) -> bool;
 
+    /// Runs this device's bottom half from its softirq action.
+    ///
+    /// The hardirq has already acknowledged the ISR and marked the entry
+    /// pending; this is the Linux-style push step: harvest whatever the
+    /// device has completed and dispatch per-request completions. Waking a
+    /// single shared waiter and asking requesters to re-poll is *not* the
+    /// contract here — each in-flight request must be able to observe its
+    /// own completion from this call.
+    fn run_bottom_half(&self);
+
     /// The shared completion entry for this device.
     fn entry(&self) -> &Arc<IrqCompletionEntry>;
 
@@ -308,18 +318,16 @@ impl IrqCompletionHub {
         }
     }
 
-    /// softirq action: broadcast a wake for every device the hardirq marked
-    /// pending.
+    /// softirq action: run every pending device's bottom half.
     ///
-    /// One broadcast serves any number of waiters: an interrupt may cover
-    /// several completed requests, and each waiter rechecks its own
-    /// device-side predicate after waking.
+    /// One interrupt may cover several completed requests; each device's
+    /// bottom half harvests its own completions and dispatches per-request
+    /// wakes, so wake accounting never couples to interrupt counts.
     pub(crate) fn run_softirq(&self) {
         let devices = self.devices.lock();
         for device in devices.iter() {
-            let entry = device.entry();
-            if entry.take_pending() {
-                entry.wake_source().wake();
+            if device.entry().take_pending() {
+                device.run_bottom_half();
             }
         }
     }
@@ -442,6 +450,11 @@ mod tests {
     impl IrqCompletionDevice for FakeDevice {
         fn ack_interrupt(&self) -> bool {
             self.ack_raised.load(Ordering::Acquire)
+        }
+
+        fn run_bottom_half(&self) {
+            // Broadcast wake, mirroring the single-request RNG device.
+            self.entry.wake_source().wake();
         }
 
         fn entry(&self) -> &Arc<IrqCompletionEntry> {

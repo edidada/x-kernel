@@ -81,6 +81,12 @@ impl<H: Hal, T: Transport> IrqCompletionDevice for VirtIoRngIrqDevice<H, T> {
         self.inner.lock().ack_interrupt_raised()
     }
 
+    fn run_bottom_half(&self) {
+        // Single-request device: a broadcast wake plus a used-ring recheck
+        // by the requester is equivalent to a per-token dispatch.
+        self.entry.wake_source().wake();
+    }
+
     fn entry(&self) -> &Arc<IrqCompletionEntry> {
         &self.entry
     }
