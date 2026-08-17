@@ -8,23 +8,22 @@
 //!
 //! - **IRQ-driven** (an IRQ number is available and registration succeeds):
 //!   the hardirq handler acknowledges the device interrupt status and raises
-//!   the Tasklet softirq; the softirq action wakes the requester through its
-//!   shared completion entry, and the requester sleeps between submit and
-//!   completion instead of spinning with local interrupts masked.
+//!   the Tasklet softirq; the softirq action broadcasts a wake, and the
+//!   requester sleeps between submit and completion (rechecking the used
+//!   ring on every wake) instead of spinning with local interrupts masked.
 //! - **Polled fallback**: the legacy bounded busy-wait under [`SpinNoIrq`],
 //!   kept for platforms without a usable IRQ so a wedged host/device cannot
 //!   hang the caller indefinitely.
 
 use alloc::{boxed::Box, sync::Arc};
-use core::{future::poll_fn, hint::spin_loop, task::Poll};
+use core::hint::spin_loop;
 
 use char_driver::CharDevice;
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use khal::time::monotonic_time;
 use kirq::softirq::SoftirqVec;
-use kpoll::PollRegistrations;
 use kspin::SpinNoIrq;
-use ktime_types::{MonotonicInstant, TimeSpan};
+use ktime_types::TimeSpan;
 use virtio_drivers::{
     Hal, Result as VirtIoResult, device::common::Feature, queue::VirtQueue, transport::Transport,
 };
@@ -311,7 +310,9 @@ impl<H: Hal + 'static, T: Transport + 'static> VirtIoRngDev<H, T> {
     /// The device lock is only held for submit and completion, never across
     /// the sleep. A concurrent caller observes the single in-flight request
     /// and gets [`DriverError::WouldBlock`], matching the legacy timeout
-    /// contract for a busy device.
+    /// contract for a busy device. The wake is a broadcast without tokens,
+    /// so every wake rechecks the used ring; a late completion of a
+    /// previously timed-out request cannot make the next read return early.
     fn request_entropy_irq_driven(
         &self,
         entry: &Arc<IrqCompletionEntry>,
@@ -330,7 +331,16 @@ impl<H: Hal + 'static, T: Transport + 'static> VirtIoRngDev<H, T> {
         }
 
         let deadline = monotonic_time() + IRQ_REQUEST_TIMEOUT;
-        wait_completion_bounded(entry, deadline);
+        let is_complete = || self.device.lock().pending_is_complete();
+        if !entry.wait_until_deadline(deadline, is_complete) {
+            // No sleepable context (early boot or an IRQ-context caller):
+            // bounded spin with local interrupts enabled; the registered
+            // hardirq handler acknowledges the device ISR, so a shared
+            // level-triggered line cannot livelock the CPU.
+            while !is_complete() && monotonic_time() < deadline {
+                spin_loop();
+            }
+        }
 
         let mut inner = self.device.lock();
         if inner.pending_is_complete() {
@@ -349,44 +359,6 @@ impl<H: Hal, T: Transport> Drop for VirtIoRngDev<H, T> {
             RNG_COMPLETION_HUB.unregister(&irq_device);
         }
     }
-}
-
-/// Waits for one completion wake, bounded by `deadline`.
-///
-/// With a sleepable current task this registers on the completion wake
-/// source and parks until the softirq wake or the deadline. Without one
-/// (early boot or an IRQ-context caller), it degrades to a bounded spin with
-/// local interrupts enabled; the registered hardirq handler acknowledges the
-/// device ISR, so a shared level-triggered line cannot livelock the CPU.
-fn wait_completion_bounded(entry: &IrqCompletionEntry, deadline: MonotonicInstant) {
-    if ktask::current_may_uninit().is_none() {
-        while !entry.try_wait() && monotonic_time() < deadline {
-            spin_loop();
-        }
-        return;
-    }
-
-    let completion = entry.completion();
-    let mut registrations = PollRegistrations::new();
-    // The result is irrelevant: the caller rechecks the device-side
-    // predicate (`pending_is_complete`) after this returns either way.
-    let _ = ktask::future::block_on(ktask::future::timeout_at(
-        Some(deadline),
-        poll_fn(|cx| {
-            if completion.try_wait() {
-                return Poll::Ready(());
-            }
-            let mut context = registrations.context(cx);
-            if completion.register(&mut context).is_err() {
-                return Poll::Ready(());
-            }
-            drop(context);
-            if completion.try_wait() {
-                return Poll::Ready(());
-            }
-            Poll::Pending
-        }),
-    ));
 }
 
 impl<H: Hal + 'static, T: Transport + 'static> Device for VirtIoRngDev<H, T> {

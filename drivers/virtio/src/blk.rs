@@ -4,11 +4,12 @@
 
 //! VirtIO block driver adapter.
 use alloc::{string::String, sync::Arc};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use block::BlockDeviceOperations;
 use driver_base::{Device, DeviceKind, DriverResult};
 use kirq::softirq::SoftirqVec;
+use kpoll::PollSet;
 use kspin::SpinNoIrq;
 use virtio_drivers::{
     Hal,
@@ -18,7 +19,7 @@ use virtio_drivers::{
 
 use crate::{
     as_driver_error,
-    irq_completion::{IrqCompletionDevice, IrqCompletionEntry, IrqCompletionHub},
+    irq_completion::{IrqCompletionDevice, IrqCompletionEntry, IrqCompletionHub, wait_poll_set},
 };
 
 /// Hub deferring virtio-blk completions through the Block softirq vector.
@@ -48,6 +49,68 @@ impl<H: Hal, T: Transport> IrqCompletionDevice for VirtIoBlkIrqDevice<H, T> {
 
     fn entry(&self) -> &Arc<IrqCompletionEntry> {
         &self.entry
+    }
+}
+
+/// Serializes device requests: at most one request is in flight at a time.
+///
+/// This restores the request serialization the polling path always had (a
+/// whole request ran under the device lock), for two reasons:
+///
+/// - the `virtio-drivers` synchronous helpers (used by `flush`) require that
+///   the device is not processing any other buffer, and popping a used-ring
+///   entry whose head token differs from the caller's returns `WrongToken`
+///   *without recycling the descriptor chain*;
+/// - the completion wake is a broadcast without per-request accounting, and
+///   with a single in-flight request the used-ring head can only be the
+///   waiter's own token, so a wake can never be "consumed" by an unrelated
+///   requester.
+///
+/// Unlike the old serialization, the requester sleeps between submit and
+/// completion instead of busy-polling with local interrupts masked.
+struct IrqRequestGate {
+    busy: AtomicBool,
+    wake: PollSet,
+}
+
+impl IrqRequestGate {
+    fn new() -> Self {
+        Self {
+            busy: AtomicBool::new(false),
+            wake: PollSet::new(),
+        }
+    }
+
+    /// Acquires the gate, sleeping until the current holder releases it.
+    fn acquire(&self) -> BlkRequestGuard<'_> {
+        if !self.busy.swap(true, Ordering::AcqRel) {
+            return BlkRequestGuard(self);
+        }
+        // The predicate performs the acquisition swap itself; the swap is
+        // idempotent while the gate is already held, so repeated polls are
+        // safe and exactly one waiter can observe a false previous value.
+        if !wait_poll_set(&self.wake, || !self.busy.swap(true, Ordering::AcqRel)) {
+            // No sleepable context: spin until the swap succeeds. The holder
+            // completes through its own wait path, so the gate is released.
+            while self.busy.swap(true, Ordering::AcqRel) {
+                core::hint::spin_loop();
+            }
+        }
+        BlkRequestGuard(self)
+    }
+
+    fn release(&self) {
+        self.busy.store(false, Ordering::Release);
+        self.wake.wake();
+    }
+}
+
+/// RAII guard for one held [`IrqRequestGate`] acquisition.
+struct BlkRequestGuard<'a>(&'a IrqRequestGate);
+
+impl Drop for BlkRequestGuard<'_> {
+    fn drop(&mut self) {
+        self.0.release();
     }
 }
 
@@ -94,11 +157,14 @@ fn vd_name(index: u32) -> String {
 ///
 /// - the hardirq handler acknowledges the device interrupt status, marks the
 ///   device pending, and raises the Block softirq vector;
-/// - the Block softirq action wakes the sleeping requester through the shared
-///   [`kpoll::Completion`] entry;
+/// - the Block softirq action broadcasts a wake for sleeping requesters;
 /// - the requester task, having submitted the request with the non-blocking
 ///   virtqueue API, rechecks the used ring on every wake and completes the
 ///   request itself once its token reaches the ring head.
+///
+/// Requests are serialized by an internal gate (one in flight at a time),
+/// matching the request ordering the previous synchronous driver had, while
+/// the requester sleeps instead of busy-polling with interrupts masked.
 ///
 /// Without an IRQ number (or when IRQ registration fails), requests keep the
 /// original synchronous busy-poll path under [`SpinNoIrq`].
@@ -122,6 +188,9 @@ pub struct VirtIoBlkDev<H: Hal, T: Transport> {
     num_blocks: u64,
     name: String,
     index: u32,
+    /// Request gate; only meaningful in the IRQ-driven mode, where it
+    /// serializes submit/wait/complete and the sync flush against each other.
+    request_gate: IrqRequestGate,
     /// Shared completion entry; `None` keeps the synchronous busy-poll path.
     irq_completion: Option<Arc<IrqCompletionEntry>>,
     /// Keeps the hardirq-facing device object registered until drop.
@@ -129,16 +198,17 @@ pub struct VirtIoBlkDev<H: Hal, T: Transport> {
 }
 
 // SAFETY: VirtIoBlkDev serializes all access to the inner VirtIOBlk through
-// its own `SpinNoIrq` lock. The inner VirtIOBlk is not auto Send due to
-// PhantomData, but it is safe to transfer across threads behind that lock.
-// The IRQ-driven wait path runs with local interrupts enabled and the device
-// lock released: the registered hardirq handler acknowledges the device ISR,
-// so a shared level-triggered INTx line cannot livelock the CPU. The polling
-// fallback still spins while holding the lock, which masks local interrupts
-// for the duration of each request.
+// its own `SpinNoIrq` lock (polling mode) or the request gate plus short
+// lock-held critical sections (IRQ mode). The inner VirtIOBlk is not auto
+// Send due to PhantomData, but it is safe to transfer across threads behind
+// that synchronization. The IRQ-driven wait runs with the device lock
+// released and local interrupts enabled: the registered hardirq handler
+// acknowledges the device ISR, so a shared level-triggered INTx line cannot
+// livelock the CPU. The polling fallback still spins while holding the lock,
+// which masks local interrupts for the duration of each request.
 unsafe impl<H: Hal, T: Transport> Send for VirtIoBlkDev<H, T> {}
-// SAFETY: shared access to the device is serialized by the IRQ-safe lock
-// described above, so immutable references may be shared across threads safely.
+// SAFETY: shared access to the device is serialized as described above, so
+// immutable references may be shared across threads safely.
 unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 
 impl<H: Hal + 'static, T: Transport + 'static> VirtIoBlkDev<H, T> {
@@ -184,6 +254,7 @@ impl<H: Hal + 'static, T: Transport + 'static> VirtIoBlkDev<H, T> {
             num_blocks,
             name: alloc::format!("vd{}", vd_name(index)),
             index,
+            request_gate: IrqRequestGate::new(),
             irq_completion,
             irq_device,
         })
@@ -221,6 +292,7 @@ impl<H: Hal + 'static, T: Transport + 'static> VirtIoBlkDev<H, T> {
         block_id: u64,
         out_buf: &mut [u8],
     ) -> DriverResult {
+        let _gate = self.request_gate.acquire();
         let mut req = BlkReq::default();
         let mut resp = BlkResp::default();
         let token = {
@@ -252,6 +324,7 @@ impl<H: Hal + 'static, T: Transport + 'static> VirtIoBlkDev<H, T> {
         block_id: u64,
         in_buf: &[u8],
     ) -> DriverResult {
+        let _gate = self.request_gate.acquire();
         let mut req = BlkReq::default();
         let mut resp = BlkResp::default();
         let token = {
@@ -273,23 +346,19 @@ impl<H: Hal + 'static, T: Transport + 'static> VirtIoBlkDev<H, T> {
 
     /// Sleeps until the used-ring head reports `token`.
     ///
-    /// The shared completion is only a wake source, so the device state is
-    /// rechecked on every wake. When the current context cannot sleep (early
-    /// boot or an IRQ-context caller), the used ring is polled with local
-    /// interrupts enabled; the registered hardirq handler keeps acknowledging
-    /// the device ISR, so a shared level-triggered line cannot livelock the
-    /// CPU.
+    /// The softirq wake is a broadcast without per-request accounting, so the
+    /// device state is rechecked on every wake; with the request gate held,
+    /// the head can only be this requester's own token. When the current
+    /// context cannot sleep (early boot or an IRQ-context caller), the used
+    /// ring is polled with local interrupts enabled; the registered hardirq
+    /// handler keeps acknowledging the device ISR, so a shared
+    /// level-triggered line cannot livelock the CPU.
     fn wait_until_request_completes(&self, entry: &Arc<IrqCompletionEntry>, token: u16) {
-        loop {
-            if self.device.lock().peek_used() == Some(token) {
-                return;
-            }
-            if !entry.wait_wake() {
-                while self.device.lock().peek_used() != Some(token) {
-                    core::hint::spin_loop();
-                }
-                return;
-            }
+        if entry.wait_until(|| self.device.lock().peek_used() == Some(token)) {
+            return;
+        }
+        while self.device.lock().peek_used() != Some(token) {
+            core::hint::spin_loop();
         }
     }
 }
@@ -337,16 +406,25 @@ impl<H: Hal + 'static, T: Transport + 'static> BlockDeviceOperations for VirtIoB
         }
     }
 
-    /// Flush keeps the synchronous path: `virtio-drivers` offers no
-    /// non-blocking flush submit, and flushes are rare enough that a brief
-    /// poll under the device lock does not justify new queue plumbing.
+    /// Flush keeps the synchronous helper: `virtio-drivers` offers no
+    /// non-blocking flush submit. In IRQ mode the request gate is held for
+    /// the flush, so no other request is in flight and the helper's
+    /// single-buffer assumption holds; polling mode is already serialized by
+    /// the device lock.
     fn flush(&self) -> DriverResult {
+        let _gate = self
+            .irq_completion
+            .as_ref()
+            .map(|_| self.request_gate.acquire());
         self.device.lock().flush().map_err(as_driver_error)
     }
 }
 
 #[cfg(unittest)]
 mod tests {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
     use unittest::{assert, assert_eq, def_test};
 
     use super::*;
@@ -381,6 +459,44 @@ mod tests {
 
         assert!(dev.irq_completion.is_none());
         assert!(dev.irq_device.is_none());
+    }
+
+    #[def_test(serial)]
+    fn test_request_gate_release_wakes_waiter_and_reacquires() {
+        let gate = IrqRequestGate::new();
+        let guard = gate.acquire();
+        assert!(gate.busy.load(Ordering::Acquire));
+
+        // A waiter registered on the gate's broadcast source must be woken
+        // by release, and the gate must become acquirable again.
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let registration = register_gate_waker(&gate, &wakes);
+        drop(guard);
+        assert!(!gate.busy.load(Ordering::Acquire));
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+
+        let _regained = gate.acquire();
+        drop(registration);
+    }
+
+    fn register_gate_waker(
+        gate: &IrqRequestGate,
+        counter: &Arc<AtomicUsize>,
+    ) -> kpoll::PollRegistration {
+        struct CountingWaker {
+            counter: Arc<AtomicUsize>,
+        }
+        impl alloc::task::Wake for CountingWaker {
+            fn wake(self: Arc<Self>) {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let waker = core::task::Waker::from(Arc::new(CountingWaker {
+            counter: counter.clone(),
+        }));
+        gate.wake
+            .register(&waker)
+            .expect("test waker registration must succeed")
     }
 
     #[def_test]

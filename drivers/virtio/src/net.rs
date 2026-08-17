@@ -4,7 +4,7 @@
 
 //! VirtIO network driver adapter.
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use device_res::{Irq, IrqEvent, IrqEventSource, IrqResource, IrqTrigger, irq_provider};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
@@ -24,37 +24,40 @@ static NEXT_IRQ_HANDLE_ID: AtomicUsize = AtomicUsize::new(0);
 /// and the RX drain path.
 ///
 /// The handler suppresses device notifications when it schedules the drain;
-/// the drain resumes them once the receive ring is empty. The line-mask flag
-/// keeps `device_res` line enable/disable calls balanced because the kirq
-/// core nests disable requests.
+/// the drain resumes them once the receive ring is empty. The mask flag and
+/// its IRQ-line provider call are serialized under one lock because the two
+/// sides may run on different CPUs concurrently: without the lock, a
+/// late-landing mask could leave the line physically disabled while the
+/// flag says unmasked, and the drain's short-circuit would then never
+/// re-enable it.
 struct NetNapiState {
     resource: IrqResource,
-    is_line_masked: AtomicBool,
+    line_masked: SpinNoIrq<bool>,
 }
 
 impl NetNapiState {
     fn new(irq: usize) -> Self {
         Self {
             resource: IrqResource::new(irq, IrqTrigger::Unknown(0)),
-            is_line_masked: AtomicBool::new(false),
+            line_masked: SpinNoIrq::new(false),
         }
     }
 
     /// Masks the IRQ line, at most once per suppress/resume cycle.
     fn mask_line(&self) {
-        if !self.is_line_masked.swap(true, Ordering::AcqRel)
-            && let Ok(provider) = irq_provider()
-        {
+        let mut is_masked = self.line_masked.lock();
+        if !*is_masked && let Ok(provider) = irq_provider() {
             provider.set_irq_enabled(self.resource, false);
+            *is_masked = true;
         }
     }
 
     /// Unmasks the IRQ line if a previous mask is still outstanding.
     fn unmask_line(&self) {
-        if self.is_line_masked.swap(false, Ordering::AcqRel)
-            && let Ok(provider) = irq_provider()
-        {
+        let mut is_masked = self.line_masked.lock();
+        if *is_masked && let Ok(provider) = irq_provider() {
             provider.set_irq_enabled(self.resource, true);
+            *is_masked = false;
         }
     }
 }
@@ -884,6 +887,53 @@ mod tests {
         drop(handles);
 
         reset_irq_state();
+    }
+
+    #[def_test(serial)]
+    fn test_napi_mask_unmask_pairs_line_calls_exactly() {
+        use alloc::vec::Vec;
+
+        use device_res::{IrqHandler, IrqHandlerToken, IrqOp, IrqResource};
+
+        struct RecordingIrqOp;
+        static LINE_CALLS: SpinNoIrq<Vec<(usize, bool)>> = SpinNoIrq::new(Vec::new());
+        static RECORDING_OP: RecordingIrqOp = RecordingIrqOp;
+
+        impl IrqOp for RecordingIrqOp {
+            fn request_irq(
+                &self,
+                _irq: IrqResource,
+                _handler: Arc<dyn IrqHandler>,
+            ) -> device_res::ResResult<IrqHandlerToken> {
+                Err(device_res::ResError::Busy)
+            }
+
+            fn release_irq(&self, _irq: IrqResource, _token: IrqHandlerToken) {}
+
+            fn set_irq_enabled(&self, irq: IrqResource, enabled: bool) {
+                LINE_CALLS.lock().push((irq.number, enabled));
+            }
+        }
+
+        let saved = device_res::try_irq_provider();
+        device_res::set_irq_provider(&RECORDING_OP);
+
+        let napi = NetNapiState::new(31);
+        // Redundant masks/unmasks must not reach the line; every real
+        // transition must, and the flag must track the line state.
+        napi.mask_line();
+        napi.mask_line();
+        napi.unmask_line();
+        napi.unmask_line();
+        napi.unmask_line();
+        napi.mask_line();
+
+        let calls = LINE_CALLS.lock().clone();
+        assert_eq!(calls, alloc::vec![(31, false), (31, true), (31, false)]);
+
+        if let Some(provider) = saved {
+            device_res::set_irq_provider(provider);
+        }
     }
 
     #[def_test]
