@@ -101,6 +101,7 @@ kfd resources / kfs / kvfs / device and pipe implementations
 5. `mount` 不得静默忽略会改变语义的 unsupported operation flags。
 6. 创建文件和目录时应应用当前进程 `umask`。
 7. `chroot` 目标必须是目录。
+8. 绝对路径、`..`、绝对符号链接和 `dirfd` 都不得越过 `FsContext::root_dir()`。
 
 ## 线程安全
 
@@ -123,15 +124,16 @@ kfd resources / kfs / kvfs / device and pipe implementations
 | T-01 | 用户坏指针导致内核越界读写 | 用户路径/缓冲区/iovec | 高 | 直接解引用用户地址或忽略 copy 错误 | 统一使用 `UserPtr`、`UserConstPtr`、`VmBytes`、`IoVectorBuf` 并传播 `KResult` |
 | T-02 | `getdents64` 写出目录项时越过临时缓冲区 | 用户输出缓冲区 / ABI 布局 | 高 | 记录长度计算错误或未检查剩余空间 | `DirBuffer::write_entry` 先检查空间，记录长度按 ABI 对齐 |
 | T-03 | `statfs` 向用户泄露未初始化内核栈数据 | 用户输出缓冲区 / ABI 布局 | 高 | C ABI 结构 padding 未初始化 | `statfs` 使用 zeroed 初始化后逐项赋值 |
-| T-04 | `/proc/<pid>/fd/<fd>` 绕过普通路径解析访问不该访问的对象 | procfd 路径 | 高 | 未校验 pid/fd 语法、fd 生命周期或权限模型 | `classify_procfd_path` 拒绝无效 pid/fd；fd 表读取经 `get_process_state` 和 resources；后续权限仍依赖底层对象 |
+| T-04 | `/proc/<pid>/fd/<fd>` 绕过普通路径解析访问不该访问的对象 | procfd 路径 | 高 | 未校验 pid/fd 语法、fd 生命周期或调用者凭据 | `classify_procfd_path` 拒绝无效 pid/fd；直接解析和 procfs `ThreadFdDir` 均只允许目标自身、root 或 fsuid 匹配目标全部 UID 的调用者；fd 表读取持 read lock |
 | T-05 | `O_NOFOLLOW` 被忽略导致符号链接或 procfd 路径被跟随 | 路径 flags | 高 | open/at flags 没有传入解析层 | `resolve_open_path_source` 将 `O_NOFOLLOW` 转为 `AT_SYMLINK_NOFOLLOW`，并对 live procfd 返回 loop 错误 |
 | T-06 | `fallocate` offset/len 溢出破坏文件大小或范围操作 | scalar 参数 / VFS | 高 | 负数或 `offset + len` 溢出 | 校验非负并用 `checked_add` |
 | T-07 | `copy_file_range` 同文件重叠复制造成数据破坏 | fd-to-fd 复制 | 中 | 同文件重叠检查未实现 | 已在设计文档列为限制；非零 flags 在边界被拒绝；新增完整语义前不应宣称等价 Linux |
 | T-08 | 未实现的 mount/umount flags 被静默忽略 | mount flags | 高 | 用户态请求 bind、remount、detach 等语义 | 对未实现 operation flags 返回 `InvalidInput` |
 | T-09 | 文件锁占位返回成功导致应用误以为互斥成立 | fd_ops | 中 | `fcntl`/`flock` 锁语义未实现 | 文档列为限制；未来实现前审计所有锁相关返回路径 |
-| T-10 | 创建文件所有者固定为 root 导致 DAC 语义错误 | open/create | 高 | `current_effective_ids()` 固定 `(0, 0)` | 文档列为限制；接入 `kcred` 后应使用当前 fsuid/fsgid |
+| T-10 | 创建文件所有者固定为 root 导致 DAC 语义错误 | open/create | 高 | 创建路径未读取当前凭据 | `current_filesystem_ids()` 从当前 credential 读取 fsuid/fsgid 并传入 `OpenOptions::user` |
 | T-11 | `faccessat2` 权限检查与真实凭据不一致 | access | 中 | 仅检查 owner 权限位，不区分 UID/GID/补充组 | 文档列为限制；未来需接入 `kcred::AccessCredentials` |
 | T-12 | 设备 ioctl 参数被错误解释 | ioctl / 设备对象 | 中 | syscall 层错误处理设备私有命令 | `FIONBIO` 在本层处理，其它命令转交 `FileLike::ioctl`；常见 isatty 探测错误不刷 warning |
+| T-13 | `chroot` 后通过绝对路径、`..`、符号链接或旧目录 fd 越界 | 路径 root / dirfd | 高 | 解析器回到全局 VFS root，或接受 root 外 cwd | `PathResolver` 始终携带 context root；父目录在 root 停止；绝对路径和绝对符号链接锚定 root；`WorkingContext` 拒绝 root 外 cwd |
 
 影响等级定义：
 
@@ -188,12 +190,11 @@ kfd resources / kfs / kvfs / device and pipe implementations
 
 ## 已知限制
 
-1. `current_effective_ids()` 固定返回 root 身份，创建者 UID/GID 语义不完整。
-2. `faccessat2` 尚未完整接入真实凭据、补充组、capability 和 `AT_EACCESS` 语义。
-3. `fcntl` 文件锁和 `flock` 未实现真实锁。
-4. `copy_file_range` 对普通文件类型、同文件重叠和跨文件系统限制仍为 TODO。
-5. `mount` 只支持 `tmpfs`，不支持 bind、remount、move、propagation 和 lazy/force unmount。
-6. `preadv2` / `pwritev2` 当前只支持 `flags == 0`，
+1. `faccessat2` 尚未完整接入真实凭据、补充组、capability 和 `AT_EACCESS` 语义。
+2. `fcntl` 文件锁和 `flock` 未实现真实锁。
+3. `copy_file_range` 对普通文件类型、同文件重叠和跨文件系统限制仍为 TODO。
+4. `mount` 只支持 `tmpfs`，不支持 bind、remount、move、propagation 和 lazy/force unmount。
+5. `preadv2` / `pwritev2` 当前只支持 `flags == 0`，
    非零 flags 返回 `Unsupported`。
 
 ## 审计清单

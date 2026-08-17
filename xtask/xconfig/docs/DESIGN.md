@@ -62,12 +62,13 @@ pub struct Parser {
 ```
 
 When a source directive is encountered:
-1. Resolve path relative to source tree
-2. Check for circular dependencies
-3. Check if already parsed
-4. Push new file context onto stack
-5. Parse the file
-6. Pop file context
+1. Resolve and canonicalize the path relative to the canonical source tree
+2. Reject any canonical path outside the source tree
+3. Check for circular dependencies using canonical paths
+4. Check if already parsed
+5. Push new file context onto stack
+6. Parse the canonical file path
+7. Pop file context
 
 #### 3. AST (kconfig/ast.rs)
 
@@ -119,7 +120,10 @@ CONFIG_STRING="value"
 ```
 
 ##### Writer (config/writer.rs)
-Writes .config files with proper formatting.
+Writes .config files with proper formatting. Generated files are first written
+to a same-directory temporary file and atomically renamed over the destination,
+so an attacker-controlled final-component symlink is replaced rather than
+followed.
 
 ##### Generator (config/generator.rs)
 Generates:

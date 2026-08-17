@@ -4,14 +4,14 @@
 
 use std::{collections::HashMap, fs, path::Path};
 
-use crate::{error::Result, validate::validate_input_path};
+use crate::{error::Result, validate::validate_input_file};
 
 pub struct ConfigReader;
 
 impl ConfigReader {
     pub fn read(path: impl AsRef<Path>) -> Result<HashMap<String, String>> {
         let path = path.as_ref();
-        validate_input_path(path)?;
+        validate_input_file(path)?;
         let content = fs::read_to_string(path)?;
         let mut config = HashMap::new();
 

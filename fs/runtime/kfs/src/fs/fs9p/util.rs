@@ -16,10 +16,10 @@ use kvfs::{NodeType, VfsError};
 /// human-readable message.
 pub fn into_vfs_err(err: String) -> VfsError {
     // Try to parse "rlerror errno=N" format from RLERROR responses.
-    if let Some(rest) = err.strip_prefix("rlerror errno=") {
-        if let Ok(errno) = rest.trim().parse::<i32>() {
-            return VfsError::from(LinuxError::new(errno));
-        }
+    if let Some(rest) = err.strip_prefix("rlerror errno=")
+        && let Ok(errno) = rest.trim().parse::<i32>()
+    {
+        return VfsError::from(LinuxError::new(errno));
     }
 
     // Map well-known messages.

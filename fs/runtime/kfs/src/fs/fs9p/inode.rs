@@ -16,7 +16,7 @@ use kpoll::{IoEvents, Pollable};
 use kvfs::{
     DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, Metadata,
     MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult,
-    WeakDirEntry,
+    WeakDirEntry, path::verify_entry_name,
 };
 
 use super::{
@@ -80,7 +80,7 @@ impl Inode {
 
     /// Look up a child entry via the 9P session.
     fn lookup_locked(&self, name: &str) -> VfsResult<DirEntry> {
-        let child_path = join_child_path(&self.dir_path()?, name);
+        let child_path = join_child_path(&self.dir_path()?, name)?;
         let mut session = self.fs.lock();
         let attr = session.getattr(&child_path).map_err(into_vfs_err)?;
         Ok(self.create_entry_from_attr(name, &attr, &child_path))
@@ -118,7 +118,7 @@ impl Inode {
     /// This is called from `fs_operations.rs` for the special symlink path.
     pub fn create_symlink_entry(&self, name: &str, target: &str) -> VfsResult<DirEntry> {
         let dir_path = self.dir_path()?;
-        let link_path = join_child_path(&dir_path, name);
+        let link_path = join_child_path(&dir_path, name)?;
         let mut session = self.fs.lock();
         session.symlink(target, &link_path).map_err(into_vfs_err)?;
         drop(session);
@@ -184,7 +184,7 @@ impl NodeOps for Inode {
             gid: attr.gid,
             size: attr.size,
             block_size: 4096,
-            blocks: (attr.size + 511) / 512,
+            blocks: attr.size.div_ceil(512),
             rdev: DeviceId::default(),
             atime: core::time::Duration::from_secs(attr.atime_sec),
             mtime: core::time::Duration::from_secs(attr.mtime_sec),
@@ -381,7 +381,7 @@ impl DirNodeOps for Inode {
         _permission: NodePermission,
     ) -> VfsResult<DirEntry> {
         let dir_path = self.dir_path()?;
-        let child_path = join_child_path(&dir_path, name);
+        let child_path = join_child_path(&dir_path, name)?;
 
         let mut session = self.fs.lock();
         if node_type == NodeType::Directory {
@@ -421,7 +421,7 @@ impl DirNodeOps for Inode {
 
     fn link(&self, name: &str, node: &DirEntry) -> VfsResult<DirEntry> {
         let dir_path = self.dir_path()?;
-        let link_path = join_child_path(&dir_path, name);
+        let link_path = join_child_path(&dir_path, name)?;
         let target_path = node.absolute_path()?.to_string();
 
         let mut session = self.fs.lock();
@@ -435,15 +435,15 @@ impl DirNodeOps for Inode {
 
     fn unlink(&self, name: &str) -> VfsResult<()> {
         let dir_path = self.dir_path()?;
-        let child_path = join_child_path(&dir_path, name);
+        let child_path = join_child_path(&dir_path, name)?;
         let mut session = self.fs.lock();
         session.remove_path(&child_path).map_err(into_vfs_err)
     }
 
     fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
         let dst_dir: Arc<Self> = dst_dir.downcast().map_err(|_| VfsError::InvalidInput)?;
-        let src_path = join_child_path(&self.dir_path()?, src_name);
-        let dst_path = join_child_path(&dst_dir.dir_path()?, dst_name);
+        let src_path = join_child_path(&self.dir_path()?, src_name)?;
+        let dst_path = join_child_path(&dst_dir.dir_path()?, dst_name)?;
         let mut session = self.fs.lock();
         session
             .rename_path(&src_path, &dst_path)
@@ -455,10 +455,11 @@ impl DirNodeOps for Inode {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn join_child_path(parent: &str, name: &str) -> String {
-    if parent == "/" {
+fn join_child_path(parent: &str, name: &str) -> VfsResult<String> {
+    verify_entry_name(name)?;
+    Ok(if parent == "/" {
         format!("/{name}")
     } else {
         format!("{parent}/{name}")
-    }
+    })
 }

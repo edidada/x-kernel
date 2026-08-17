@@ -81,14 +81,18 @@ impl FsOperations {
     #[inline]
     pub fn resolve(&self, path: impl AsRef<Path>) -> VfsResult<Location> {
         self.resolver
-            .resolve(self.context.cwd(), path.as_ref(), true)
+            .resolve(self.context.root(), self.context.cwd(), path.as_ref(), true)
     }
 
     /// Resolves a path without following symlinks
     #[inline]
     pub fn resolve_no_follow(&self, path: impl AsRef<Path>) -> VfsResult<Location> {
-        self.resolver
-            .resolve(self.context.cwd(), path.as_ref(), false)
+        self.resolver.resolve(
+            self.context.root(),
+            self.context.cwd(),
+            path.as_ref(),
+            false,
+        )
     }
 
     // ========== File Operations ==========
@@ -152,6 +156,9 @@ impl FsOperations {
     /// Removes a file from the filesystem
     pub fn remove_file(&self, path: impl AsRef<Path>) -> VfsResult<()> {
         let entry = self.resolve_no_follow(path.as_ref())?;
+        if entry.ptr_eq(self.context.root()) {
+            return Err(kvfs::VfsError::IsADirectory);
+        }
         entry
             .parent()
             .ok_or(kvfs::VfsError::IsADirectory)?
@@ -161,6 +168,9 @@ impl FsOperations {
     /// Removes a directory from the filesystem
     pub fn remove_dir(&self, path: impl AsRef<Path>) -> VfsResult<()> {
         let entry = self.resolve_no_follow(path.as_ref())?;
+        if entry.ptr_eq(self.context.root()) {
+            return Err(kvfs::VfsError::ResourceBusy);
+        }
         entry
             .parent()
             .ok_or(kvfs::VfsError::ResourceBusy)?
@@ -169,20 +179,22 @@ impl FsOperations {
 
     /// Renames a file or directory to a new name
     pub fn rename(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> VfsResult<()> {
-        let (src_dir, src_name) = self
-            .resolver
-            .resolve_parent(self.context.cwd(), from.as_ref())?;
-        let (dst_dir, dst_name) = self
-            .resolver
-            .resolve_parent(self.context.cwd(), to.as_ref())?;
+        let (src_dir, src_name) =
+            self.resolver
+                .resolve_parent(self.context.root(), self.context.cwd(), from.as_ref())?;
+        let (dst_dir, dst_name) =
+            self.resolver
+                .resolve_parent(self.context.root(), self.context.cwd(), to.as_ref())?;
         src_dir.rename(&src_name, &dst_dir, &dst_name)
     }
 
     /// Creates a new, empty directory at the provided path
     pub fn create_dir(&self, path: impl AsRef<Path>, mode: NodePermission) -> VfsResult<Location> {
-        let (dir, name) = self
-            .resolver
-            .resolve_nonexistent(self.context.cwd(), path.as_ref())?;
+        let (dir, name) = self.resolver.resolve_nonexistent(
+            self.context.root(),
+            self.context.cwd(),
+            path.as_ref(),
+        )?;
         dir.create(name, NodeType::Directory, mode)
     }
 
@@ -193,9 +205,11 @@ impl FsOperations {
         new_path: impl AsRef<Path>,
     ) -> VfsResult<Location> {
         let old = self.resolve(old_path.as_ref())?;
-        let (new_dir, new_name) = self
-            .resolver
-            .resolve_nonexistent(self.context.cwd(), new_path.as_ref())?;
+        let (new_dir, new_name) = self.resolver.resolve_nonexistent(
+            self.context.root(),
+            self.context.cwd(),
+            new_path.as_ref(),
+        )?;
         new_dir.link(new_name, &old)
     }
 
@@ -205,9 +219,11 @@ impl FsOperations {
         target: impl AsRef<str>,
         link_path: impl AsRef<Path>,
     ) -> VfsResult<Location> {
-        let (dir, name) = self
-            .resolver
-            .resolve_nonexistent(self.context.cwd(), link_path.as_ref())?;
+        let (dir, name) = self.resolver.resolve_nonexistent(
+            self.context.root(),
+            self.context.cwd(),
+            link_path.as_ref(),
+        )?;
         if dir.lookup_no_follow(name).is_ok() {
             return Err(kvfs::VfsError::AlreadyExists);
         }

@@ -221,7 +221,11 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
     }
 
     let process = &thr.proc_state.proc;
-    if process.exit_thread(curr.id().as_u64() as Pid, exit_code) {
+    let is_last_thread = {
+        let _exec_transition_guard = thr.proc_state.lifecycle().lock_exec_transition();
+        process.exit_thread(curr.id().as_u64() as Pid, exit_code)
+    };
+    if is_last_thread {
         thr.proc_state.resources.close_all_fds();
 
         process.exit();

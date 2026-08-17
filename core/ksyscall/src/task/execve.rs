@@ -53,6 +53,7 @@ pub fn sys_execve(
     let curr = current();
     let current_thread = kthread::current_thread();
     let proc_state = current_thread.process_state();
+    let _exec_transition_guard = proc_state.lifecycle().lock_exec_transition();
 
     if proc_state.proc.threads().len() > 1 {
         // TODO: dispatch_irq multi-thread case

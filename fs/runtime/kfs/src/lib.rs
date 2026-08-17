@@ -137,8 +137,17 @@ fn subscribe_fs_backing_unregister(id: KDeviceId, label: &'static str) {
 fn ensure_mount_path(fs: &mut FsContext, mount_path: &str) -> kvfs::VfsResult<()> {
     const DIR_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o755);
 
+    let mount_path = Path::new(mount_path);
+    if !mount_path.is_absolute()
+        || mount_path
+            .components()
+            .any(|component| matches!(component, kvfs::path::Component::ParentDir))
+    {
+        return Err(kvfs::VfsError::InvalidInput);
+    }
+
     let mut path = PathBuf::new();
-    for comp in Path::new(mount_path).components() {
+    for comp in mount_path.components() {
         path.push(comp.as_str());
         if fs.resolve(&path).is_err() {
             fs.create_dir(&path, DIR_PERMISSION)?;

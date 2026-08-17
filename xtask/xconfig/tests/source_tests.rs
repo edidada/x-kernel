@@ -69,3 +69,22 @@ fn test_source_escaping_srctree_is_rejected() {
     let _ = std::fs::remove_file(&outside);
     assert!(result.is_err(), "source escaping srctree must be rejected");
 }
+
+#[cfg(unix)]
+#[test]
+fn test_source_symlink_escaping_srctree_is_rejected() {
+    use std::os::unix::fs::symlink;
+
+    let srctree = tempfile::TempDir::new().unwrap();
+    let outside = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(outside.path(), "config ESCAPE\n    bool\n").unwrap();
+    symlink(outside.path(), srctree.path().join("escape.conf")).unwrap();
+    let kconfig = srctree.path().join("Kconfig");
+    std::fs::write(&kconfig, "source \"escape.conf\"\n").unwrap();
+
+    let mut parser = Parser::new(&kconfig, srctree.path()).unwrap();
+    assert!(
+        parser.parse().is_err(),
+        "source symlink escaping srctree must be rejected"
+    );
+}

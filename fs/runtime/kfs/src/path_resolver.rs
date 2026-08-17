@@ -13,6 +13,8 @@ use kvfs::{
     path::{Component, Components, Path, PathBuf},
 };
 
+use crate::working_context::is_within_root;
+
 /// Default maximum symlink follow depth
 pub const DEFAULT_MAX_SYMLINKS: usize = 40;
 
@@ -45,6 +47,7 @@ impl PathResolver {
     /// Resolves a path starting from the given base location
     ///
     /// # Arguments
+    /// * `root` - The root boundary for absolute paths and parent traversal
     /// * `base` - The base directory to resolve from (typically root or cwd)
     /// * `path` - The path to resolve
     /// * `follow_symlinks` - Whether to follow symlinks
@@ -53,17 +56,19 @@ impl PathResolver {
     /// The resolved `Location`, or an error if the path doesn't exist or a loop is detected
     pub fn resolve(
         &self,
+        root: &Location,
         base: &Location,
         path: &Path,
         follow_symlinks: bool,
     ) -> VfsResult<Location> {
         let mut follow_count = 0;
-        self.resolve_with_count(base, path, follow_symlinks, &mut follow_count)
+        self.resolve_with_count(root, base, path, follow_symlinks, &mut follow_count)
     }
 
     /// Internal resolution with symlink counter
     fn resolve_with_count(
         &self,
+        root: &Location,
         base: &Location,
         path: &Path,
         follow_symlinks: bool,
@@ -77,13 +82,13 @@ impl PathResolver {
             components.next_back();
         }
 
-        let dir = self.resolve_components(base, components, follow_count)?;
+        let dir = self.resolve_components(root, base, components, follow_count)?;
         dir.check_is_dir()?;
 
         match entry_name {
             Some(name) => {
                 if follow_symlinks {
-                    self.lookup(&dir, name, follow_count)
+                    self.lookup(root, &dir, name, follow_count)
                 } else {
                     dir.lookup_no_follow(name)
                 }
@@ -96,10 +101,17 @@ impl PathResolver {
     ///
     /// # Returns
     /// `(parent_directory, entry_name)` tuple
-    pub fn resolve_parent(&self, base: &Location, path: &Path) -> VfsResult<(Location, String)> {
-        let (dir, name) = self.resolve_inner(base, path, &mut 0)?;
+    pub fn resolve_parent(
+        &self,
+        root: &Location,
+        base: &Location,
+        path: &Path,
+    ) -> VfsResult<(Location, String)> {
+        let (dir, name) = self.resolve_inner(root, base, path, &mut 0)?;
         if let Some(name) = name {
             Ok((dir, name.to_owned()))
+        } else if dir.ptr_eq(root) {
+            Err(VfsError::InvalidInput)
         } else if let Some(parent) = dir.parent() {
             Ok((parent, dir.name().to_owned()))
         } else {
@@ -112,10 +124,11 @@ impl PathResolver {
     /// Verifies that the parent directory exists but the entry doesn't
     pub fn resolve_nonexistent<'a>(
         &self,
+        root: &Location,
         base: &Location,
         path: &'a Path,
     ) -> VfsResult<(Location, &'a str)> {
-        let (dir, name) = self.resolve_inner(base, path, &mut 0)?;
+        let (dir, name) = self.resolve_inner(root, base, path, &mut 0)?;
         if let Some(name) = name {
             Ok((dir, name))
         } else {
@@ -126,6 +139,7 @@ impl PathResolver {
     /// Internal helper for resolve_parent and resolve_nonexistent
     fn resolve_inner<'a>(
         &self,
+        root: &Location,
         base: &Location,
         path: &'a Path,
         follow_count: &mut usize,
@@ -135,7 +149,7 @@ impl PathResolver {
         if entry_name.is_some() {
             components.next_back();
         }
-        let dir = self.resolve_components(base, components, follow_count)?;
+        let dir = self.resolve_components(root, base, components, follow_count)?;
         dir.check_is_dir()?;
         Ok((dir, entry_name))
     }
@@ -144,20 +158,25 @@ impl PathResolver {
     #[doc(hidden)]
     pub fn resolve_components_internal(
         &self,
+        root: &Location,
         base: &Location,
         components: Components,
         follow_count: &mut usize,
     ) -> VfsResult<Location> {
-        self.resolve_components(base, components, follow_count)
+        self.resolve_components(root, base, components, follow_count)
     }
 
     /// Resolves path components iteratively
     fn resolve_components(
         &self,
+        root: &Location,
         base: &Location,
         components: Components,
         follow_count: &mut usize,
     ) -> VfsResult<Location> {
+        if !is_within_root(root, base) {
+            return Err(VfsError::PermissionDenied);
+        }
         let mut current = base.clone();
 
         for comp in components {
@@ -166,18 +185,20 @@ impl PathResolver {
                     // `.` - stay in current directory
                 }
                 Component::ParentDir => {
-                    // `..` - go to parent
-                    if let Some(parent) = current.parent() {
+                    // `..` cannot cross the process filesystem root.
+                    if !current.ptr_eq(root)
+                        && let Some(parent) = current.parent()
+                    {
                         current = parent;
                     }
                 }
                 Component::RootDir => {
-                    // `/` - go to root
-                    current = self.find_root(&current);
+                    // `/` is relative to the process filesystem root.
+                    current = root.clone();
                 }
                 Component::Normal(name) => {
                     // Regular component - lookup and potentially follow symlink
-                    current = self.lookup(&current, name, follow_count)?;
+                    current = self.lookup(root, &current, name, follow_count)?;
                 }
             }
         }
@@ -186,14 +207,21 @@ impl PathResolver {
     }
 
     /// Looks up a name in a directory and follows symlinks if needed
-    fn lookup(&self, dir: &Location, name: &str, follow_count: &mut usize) -> VfsResult<Location> {
+    fn lookup(
+        &self,
+        root: &Location,
+        dir: &Location,
+        name: &str,
+        follow_count: &mut usize,
+    ) -> VfsResult<Location> {
         let loc = dir.lookup_no_follow(name)?;
-        self.try_resolve_symlink(dir, loc, follow_count)
+        self.try_resolve_symlink(root, dir, loc, follow_count)
     }
 
     /// Attempts to resolve a symlink
     fn try_resolve_symlink(
         &self,
+        root: &Location,
         base: &Location,
         loc: Location,
         follow_count: &mut usize,
@@ -213,16 +241,7 @@ impl PathResolver {
         }
 
         // Resolve the symlink target
-        self.resolve_components(base, PathBuf::from(target).components(), follow_count)
-    }
-
-    /// Finds the root of the filesystem
-    fn find_root(&self, loc: &Location) -> Location {
-        let mut current = loc.clone();
-        while let Some(parent) = current.parent() {
-            current = parent;
-        }
-        current
+        self.resolve_components(root, base, PathBuf::from(target).components(), follow_count)
     }
 }
 

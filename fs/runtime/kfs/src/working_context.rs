@@ -6,7 +6,21 @@
 //!
 //! Lightweight state management for root and current working directory.
 
-use kvfs::{Location, VfsResult};
+use kvfs::{Location, VfsError, VfsResult};
+
+/// Returns whether `location` is the root itself or one of its descendants.
+pub(crate) fn is_within_root(root: &Location, location: &Location) -> bool {
+    let mut current = location.clone();
+    loop {
+        if current.ptr_eq(root) {
+            return true;
+        }
+        let Some(parent) = current.parent() else {
+            return false;
+        };
+        current = parent;
+    }
+}
 
 /// Working context - manages root and current working directory
 ///
@@ -45,9 +59,13 @@ impl WorkingContext {
     /// Changes the current working directory
     ///
     /// # Errors
-    /// Returns `NotADirectory` if the target is not a directory
+    /// Returns `NotADirectory` if the target is not a directory, or
+    /// `PermissionDenied` if it is outside this context's root.
     pub fn chdir(&mut self, dir: Location) -> VfsResult<()> {
         dir.check_is_dir()?;
+        if !is_within_root(&self.root_dir, &dir) {
+            return Err(VfsError::PermissionDenied);
+        }
         self.current_dir = dir;
         Ok(())
     }
@@ -58,9 +76,13 @@ impl WorkingContext {
     /// instead of modifying the existing one.
     ///
     /// # Errors
-    /// Returns `NotADirectory` if the target is not a directory
+    /// Returns `NotADirectory` if the target is not a directory, or
+    /// `PermissionDenied` if it is outside this context's root.
     pub fn with_cwd(&self, dir: Location) -> VfsResult<Self> {
         dir.check_is_dir()?;
+        if !is_within_root(&self.root_dir, &dir) {
+            return Err(VfsError::PermissionDenied);
+        }
         Ok(Self {
             root_dir: self.root_dir.clone(),
             current_dir: dir,

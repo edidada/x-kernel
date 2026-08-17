@@ -16,8 +16,13 @@ pub const DOTDOT: &str = "..";
 /// Maximum filename length.
 pub const MAX_NAME_LEN: usize = 255;
 
-/// Validate a directory entry name.
-pub(crate) fn verify_entry_name(name: &str) -> VfsResult<()> {
+/// Validates one directory-entry name.
+///
+/// The name must be a single non-empty component: it cannot be `.` or `..`,
+/// contain a path separator or NUL byte, or exceed [`MAX_NAME_LEN`]. Filesystem
+/// backends should call this before converting a VFS entry name into a
+/// backend-specific path.
+pub fn verify_entry_name(name: &str) -> VfsResult<()> {
     if name.is_empty() || name == DOT || name == DOTDOT || name.contains('/') || name.contains('\0')
     {
         return Err(VfsError::InvalidInput);

@@ -63,6 +63,8 @@ impl SimpleDirOps for ProcessTaskDir {
     }
 
     fn supports_dentry_cache(&self) -> bool {
+        // Access depends on both the caller and the target's live credentials,
+        // so cached children must not bypass a later authorization check.
         false
     }
 }
@@ -304,20 +306,43 @@ struct ThreadFdDir {
     task: WeakKtaskRef,
 }
 
+fn with_accessible_thread_fds<R>(
+    task: &KtaskRef,
+    f: impl FnOnce(&kthread::ProcessState) -> R,
+) -> VfsResult<R> {
+    let target = &task.as_thread().proc_state;
+    if target.proc.pid() == kthread::current_thread().pid() {
+        return Ok(f(target));
+    }
+
+    let target_credentials = target.credentials.read();
+    let is_allowed = kthread::with_current_credentials(|credentials| {
+        credentials.can_access_process_files(&target_credentials, false)
+    });
+    if !is_allowed {
+        return Err(VfsError::PermissionDenied);
+    }
+
+    // Keep the credential read guard until the fd data has been copied.
+    Ok(f(target))
+}
+
 impl SimpleDirOps for ThreadFdDir {
     fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = Cow<'a, str>> + 'a> {
         let Some(task) = self.task.upgrade() else {
             return Box::new(iter::empty());
         };
-        let ids = task
-            .as_thread()
-            .proc_state
-            .resources
-            .fd_table()
-            .read()
-            .ids()
-            .map(|id| Cow::Owned(id.to_string()))
-            .collect::<Vec<_>>();
+        let Ok(ids) = with_accessible_thread_fds(&task, |target| {
+            target
+                .resources
+                .fd_table()
+                .read()
+                .ids()
+                .map(|id| Cow::Owned(id.to_string()))
+                .collect::<Vec<_>>()
+        }) else {
+            return Box::new(iter::empty());
+        };
         Box::new(ids.into_iter())
     }
 
@@ -325,17 +350,15 @@ impl SimpleDirOps for ThreadFdDir {
         let fs = self.fs.clone();
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
         let fd = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
-        let path = task
-            .as_thread()
-            .proc_state
-            .resources
-            .fd_table()
-            .read()
-            .get(fd as _)
-            .ok_or(VfsError::NotFound)?
-            .inner()
-            .path()
-            .into_owned();
+        let path = with_accessible_thread_fds(&task, |target| {
+            target
+                .resources
+                .fd_table()
+                .read()
+                .get(fd as _)
+                .map(|entry| entry.inner().path().into_owned())
+        })?
+        .ok_or(VfsError::NotFound)?;
         Ok(SimpleFile::new(fs, NodeType::Symlink, move || Ok(path.clone())).into())
     }
 

@@ -8,7 +8,7 @@ use std::{
     process::Command,
 };
 
-use crate::manifest::Uapp;
+use crate::manifest::{Uapp, validate_package_name};
 
 #[derive(Debug, Clone)]
 pub struct PrepareContext {
@@ -37,6 +37,7 @@ impl PrepareContext {
 
 pub fn run_prepare_commands(uapps: &[Uapp], context: &PrepareContext) -> Result<(), String> {
     for uapp in uapps {
+        validate_package_name(uapp.name())?;
         let uapp_build_dir = context.build_dir.join(uapp.name());
         let uapp_out_dir = uapp_build_dir.join("out");
         fs::create_dir_all(&uapp_out_dir).map_err(|err| {

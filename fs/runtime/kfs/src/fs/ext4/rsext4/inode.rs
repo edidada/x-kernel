@@ -15,6 +15,7 @@ use kpoll::{IoEvents, Pollable};
 use kvfs::{
     DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNodeOps, Metadata, MetadataUpdate,
     NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult, WeakDirEntry,
+    path::verify_entry_name,
 };
 use rsext4::{BLOCK_SIZE, Jbd2Dev};
 
@@ -58,7 +59,10 @@ impl Inode {
             self.this.as_ref().and_then(WeakDirEntry::upgrade),
             name.clone(),
         );
-        let path = self.dir_path().map(|dir| join_child_path(&dir, &name)).ok();
+        let path = self
+            .dir_path()
+            .and_then(|dir| join_child_path(&dir, &name))
+            .ok();
         if inode.is_dir() {
             DirEntry::new_dir(
                 |this| DirNode::new(Inode::new(self.fs.clone(), ino, Some(this), path.clone())),
@@ -79,7 +83,7 @@ impl Inode {
     }
 
     fn lookup_locked(&self, name: &str) -> VfsResult<DirEntry> {
-        let path = join_child_path(&self.dir_path()?, name);
+        let path = join_child_path(&self.dir_path()?, name)?;
         let mut state = self.fs.lock();
         let (fs, dev) = state.split();
         let (ino, inode) = rsext4::dir::get_inode_with_num(fs, dev, &path)
@@ -481,7 +485,7 @@ impl DirNodeOps for Inode {
         let Some(dir_path) = self.dir_path().ok() else {
             return Err(VfsError::InvalidInput);
         };
-        let path = join_child_path(&dir_path, name);
+        let path = join_child_path(&dir_path, name)?;
         let ino = {
             let mut state = self.fs.lock();
             let (fs, dev) = state.split();
@@ -526,7 +530,7 @@ impl DirNodeOps for Inode {
 
     fn link(&self, name: &str, node: &DirEntry) -> VfsResult<DirEntry> {
         let dir_path = self.dir_path()?;
-        let link_path = join_child_path(&dir_path, name);
+        let link_path = join_child_path(&dir_path, name)?;
         let target_path = node.absolute_path()?.to_string();
         {
             let mut state = self.fs.lock();
@@ -553,7 +557,7 @@ impl DirNodeOps for Inode {
 
     fn unlink(&self, name: &str) -> VfsResult<()> {
         let dir_path = self.dir_path()?;
-        let path = join_child_path(&dir_path, name);
+        let path = join_child_path(&dir_path, name)?;
         {
             let mut state = self.fs.lock();
             let (fs, dev) = state.split();
@@ -571,8 +575,8 @@ impl DirNodeOps for Inode {
 
     fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
         let dst_dir: Arc<Self> = dst_dir.downcast().map_err(|_| VfsError::InvalidInput)?;
-        let src_path = join_child_path(&self.dir_path()?, src_name);
-        let dst_path = join_child_path(&dst_dir.dir_path()?, dst_name);
+        let src_path = join_child_path(&self.dir_path()?, src_name)?;
+        let dst_path = join_child_path(&dst_dir.dir_path()?, dst_name)?;
         {
             let mut state = self.fs.lock();
             let (fs, dev) = state.split();
@@ -582,10 +586,11 @@ impl DirNodeOps for Inode {
     }
 }
 
-fn join_child_path(parent: &str, name: &str) -> String {
-    if parent == "/" {
+fn join_child_path(parent: &str, name: &str) -> VfsResult<String> {
+    verify_entry_name(name)?;
+    Ok(if parent == "/" {
         format!("/{name}")
     } else {
         format!("{parent}/{name}")
-    }
+    })
 }

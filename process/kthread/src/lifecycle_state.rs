@@ -8,11 +8,13 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kpoll::PollSet;
+use ksync::{Mutex, MutexGuard};
 
 /// Process lifecycle state shared by all threads in a process.
 pub struct ProcessLifecycleState {
     child_exit_event: Arc<PollSet>,
     exit_event: Arc<PollSet>,
+    exec_transition: Mutex<()>,
     /// Accumulated user-mode nanoseconds of reaped children.
     child_utime_ns: AtomicUsize,
     /// Accumulated kernel-mode nanoseconds of reaped children.
@@ -31,6 +33,7 @@ impl ProcessLifecycleState {
         Self {
             child_exit_event: Arc::default(),
             exit_event: Arc::default(),
+            exec_transition: Mutex::new(()),
             child_utime_ns: AtomicUsize::new(0),
             child_stime_ns: AtomicUsize::new(0),
         }
@@ -44,6 +47,16 @@ impl ProcessLifecycleState {
     /// Returns the process-exit event.
     pub fn exit_event(&self) -> &Arc<PollSet> {
         &self.exit_event
+    }
+
+    /// Serializes `execve` with thread-group membership changes.
+    ///
+    /// The guard may block and must only be acquired from task context. Callers
+    /// hold it across the thread-count check and the complete exec transition,
+    /// across `CLONE_THREAD` publication into the process thread group, or
+    /// across removal of an exiting thread from that group.
+    pub fn lock_exec_transition(&self) -> MutexGuard<'_, ()> {
+        self.exec_transition.lock()
     }
 
     /// Adds reaped-child CPU time to the accumulated counters.

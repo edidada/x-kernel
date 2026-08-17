@@ -130,7 +130,8 @@ impl FsContext {
     pub fn resolve_parent<'a>(&self, path: &'a Path) -> VfsResult<(Location, Cow<'a, str>)> {
         // Use inner resolver but convert String to Cow
         let resolver = PathResolver::new();
-        let (dir, name) = resolver.resolve_parent(self.inner.current_dir(), path)?;
+        let (dir, name) =
+            resolver.resolve_parent(self.inner.root_dir(), self.inner.current_dir(), path)?;
         Ok((dir, Cow::Owned(name)))
     }
 
@@ -144,8 +145,12 @@ impl FsContext {
         components.next_back();
 
         let resolver = PathResolver::new();
-        let dir =
-            resolver.resolve_components_internal(self.inner.current_dir(), components, &mut 0)?;
+        let dir = resolver.resolve_components_internal(
+            self.inner.root_dir(),
+            self.inner.current_dir(),
+            components,
+            &mut 0,
+        )?;
         dir.check_is_dir()?;
         Ok((dir, entry_name))
     }

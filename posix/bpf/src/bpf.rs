@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{string::String, sync::Arc};
 use core::{ffi::c_char, mem::size_of};
 
 use bpffs::BpfProgram;
@@ -22,6 +22,12 @@ const BPF_OBJ_GET: u32 = 7;
 /// Minimum `size` for `BPF_PROG_LOAD` covering fields through `prog_flags`
 /// (Linux `union bpf_attr` prog_load prefix).
 const BPF_PROG_LOAD_MIN_ATTR_SIZE: usize = size_of::<BpfProgLoadAttrPrefix>();
+/// Maximum instruction count accepted by the current unprivileged loader.
+///
+/// This follows Linux's classic `BPF_MAXINSNS` limit. X-Kernel does not yet
+/// have the verifier and capability split needed to safely expose Linux's
+/// larger privileged-program limit.
+const BPF_MAX_INSNS: u32 = 4096;
 
 #[repr(C)]
 #[derive(Clone, Copy, UserRead)]
@@ -54,6 +60,9 @@ struct BpfObjAttrPrefix {
 const _: () = assert!(size_of::<BpfObjAttrPrefix>() == 16);
 
 /// Linux `bpf(cmd, attr, size)` — see `man 2 bpf`.
+///
+/// Program loads are limited to [`BPF_MAX_INSNS`] instructions before any
+/// user-memory allocation or copy is attempted.
 pub fn sys_bpf(cmd: i32, attr_ptr: usize, size: u32) -> KResult<isize> {
     if cmd < 0 {
         return Err(KError::InvalidInput);
@@ -79,21 +88,24 @@ fn bpf_prog_load(attr_ptr: usize, size: u32) -> KResult<isize> {
     }
 
     let prefix = UserConstPtr::<BpfProgLoadAttrPrefix>::from(attr_ptr).read_vm()?;
+    let prog_bytes = checked_program_size(prefix.insn_cnt)?;
 
-    let prog_bytes = (prefix.insn_cnt as usize)
-        .checked_mul(8)
-        .ok_or(KError::InvalidInput)?;
-
-    let insns = if prog_bytes == 0 {
-        Vec::new()
-    } else {
-        UserConstPtr::<u8>::from(prefix.insns as usize).load_vm_vec(prog_bytes)?
-    };
+    let insns = UserConstPtr::<u8>::from(prefix.insns as usize).load_vm_vec(prog_bytes)?;
 
     let arc_insns: Arc<[u8]> = insns.into_boxed_slice().into();
     let fd =
         kthread::current_resources().add_file_like(Arc::new(BpfProgram::new(arc_insns)), true)?;
     Ok(fd as isize)
+}
+
+fn checked_program_size(insn_cnt: u32) -> KResult<usize> {
+    if insn_cnt == 0 || insn_cnt > BPF_MAX_INSNS {
+        return Err(KError::InvalidInput);
+    }
+
+    (insn_cnt as usize)
+        .checked_mul(size_of::<u64>())
+        .ok_or(KError::InvalidInput)
 }
 
 fn bpf_obj_pin(attr_ptr: usize, size: u32) -> KResult<isize> {
@@ -142,4 +154,22 @@ fn load_pathname(pathname: u64) -> KResult<String> {
         return Err(KError::InvalidInput);
     }
     vm_load_string(pathname as *const c_char)
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::{BPF_MAX_INSNS, checked_program_size};
+
+    #[def_test]
+    fn program_size_enforces_instruction_bounds() {
+        assert!(checked_program_size(0).is_err());
+        assert_eq!(checked_program_size(1).unwrap(), 8);
+        assert_eq!(
+            checked_program_size(BPF_MAX_INSNS).unwrap(),
+            BPF_MAX_INSNS as usize * 8
+        );
+        assert!(checked_program_size(BPF_MAX_INSNS + 1).is_err());
+    }
 }

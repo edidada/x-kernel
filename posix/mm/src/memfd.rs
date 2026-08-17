@@ -10,6 +10,7 @@ use core::ffi::c_char;
 use kerrno::{KError, KResult};
 use kfs::OpenOptions;
 use kthread::{current_process_fs_context, current_process_state};
+use kvfs::VfsError;
 use linux_raw_sys::general::{MFD_CLOEXEC, O_RDWR};
 use posix_types::UserConstPtr;
 
@@ -33,26 +34,38 @@ impl MemfdFlags {
 }
 
 /// Creates an anonymous in-memory file descriptor.
+///
+/// Candidate backing names are claimed with create-exclusive semantics, so
+/// concurrent callers cannot open or reuse a file selected by another caller.
+///
+/// # Errors
+///
+/// Returns [`KError::InvalidInput`] for unsupported flags, propagates backing
+/// filesystem and descriptor-table errors, and returns
+/// [`KError::TooManyOpenFiles`] when all candidate names are occupied.
 pub fn sys_memfd_create(_name: UserConstPtr<c_char>, flags: u32) -> KResult<isize> {
     let flags = MemfdFlags::from_raw(flags)?;
+    let fs = current_process_fs_context().lock().clone();
 
-    // This is cursed
     for id in 0..0xffff {
         let name = format!("/tmp/memfd-{id:04x}");
-        let fs = current_process_fs_context().lock().clone();
-        if fs.resolve(&name).is_err() {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open_flags(O_RDWR)
-                .open(&fs, &name)?;
-            let proc_state = current_process_state();
-            return proc_state
-                .resources
-                .add_file_like(Arc::new(file), flags.is_cloexec())
-                .map(|fd| fd as _);
-        }
+        let file = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .create_new(true)
+            .open_flags(O_RDWR)
+            .open(&fs, &name)
+        {
+            Ok(file) => file,
+            Err(VfsError::AlreadyExists) => continue,
+            Err(err) => return Err(err),
+        };
+        let proc_state = current_process_state();
+        return proc_state
+            .resources
+            .add_file_like(Arc::new(file), flags.is_cloexec())
+            .map(|fd| fd as _);
     }
     Err(KError::TooManyOpenFiles)
 }

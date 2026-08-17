@@ -57,11 +57,18 @@ struct FileContext {
 
 impl Parser {
     pub fn new(kconfig_path: impl AsRef<Path>, srctree: impl AsRef<Path>) -> Result<Self> {
-        let kconfig_path = kconfig_path.as_ref().to_path_buf();
-        let srctree = srctree.as_ref().to_path_buf();
+        let requested_kconfig_path = kconfig_path.as_ref().to_path_buf();
+        let srctree = fs::canonicalize(srctree.as_ref())?;
 
-        if !kconfig_path.exists() {
-            return Err(KconfigError::FileNotFound(kconfig_path));
+        if !requested_kconfig_path.exists() {
+            return Err(KconfigError::FileNotFound(requested_kconfig_path));
+        }
+        let kconfig_path = fs::canonicalize(&requested_kconfig_path)?;
+        if !kconfig_path.starts_with(&srctree) {
+            return Err(KconfigError::Config(format!(
+                "Kconfig path must stay within srctree: {}",
+                requested_kconfig_path.display()
+            )));
         }
 
         let content = fs::read_to_string(&kconfig_path)?;
@@ -120,23 +127,22 @@ impl Parser {
     // Handle source directive with recursion detection
     fn handle_source(&mut self, path_expr: String) -> Result<Vec<Entry>> {
         // Resolve the path relative to srctree
-        let source_path = self.srctree.join(&path_expr);
+        let requested_source_path = self.srctree.join(&path_expr);
 
         // Check if file exists
-        if !source_path.exists() {
-            return Err(KconfigError::FileNotFound(source_path));
+        if !requested_source_path.exists() {
+            return Err(KconfigError::FileNotFound(requested_source_path));
         }
 
         // Containment (CWE-22): a `source` directive must not escape the
         // source tree. An absolute `path_expr` or one containing `..` could
         // otherwise pull in arbitrary files. Compare canonicalized paths so
         // symlinks are resolved consistently.
-        let srctree_canon = fs::canonicalize(&self.srctree)?;
-        let source_canon = fs::canonicalize(&source_path)?;
-        if !source_canon.starts_with(&srctree_canon) {
+        let source_path = fs::canonicalize(&requested_source_path)?;
+        if !source_path.starts_with(&self.srctree) {
             return Err(KconfigError::Config(format!(
                 "source directive escapes srctree: {path_expr:?} resolves to {}",
-                source_canon.display()
+                source_path.display()
             )));
         }
 

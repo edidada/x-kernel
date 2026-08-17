@@ -11,7 +11,12 @@
 //! `..` (parent-directory) components so a configuration path cannot be made to
 //! escape its intended location.
 
-use std::path::{Component, Path};
+use std::{
+    fs::{self, File},
+    path::{Component, Path},
+};
+
+use tempfile::NamedTempFile;
 
 use crate::error::{KconfigError, Result};
 
@@ -48,11 +53,47 @@ pub fn validate_input_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Validates an existing regular input file without following a final symlink.
+pub fn validate_input_file(path: &Path) -> Result<()> {
+    validate_input_path(path)?;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(KconfigError::Config(format!(
+            "input must be a regular file and not a symlink: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Writes a generated file through a same-directory temporary file and then
+/// atomically replaces the destination.
+///
+/// Replacing the directory entry prevents a pre-existing final-component
+/// symlink from redirecting generated configuration into another file.
+pub(crate) fn write_file_atomically(
+    path: &Path,
+    write_fn: impl FnOnce(&mut File) -> std::io::Result<()>,
+) -> Result<()> {
+    validate_input_path(path)?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temporary = NamedTempFile::new_in(parent)?;
+    write_fn(temporary.as_file_mut())?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(path)
+        .map_err(|err| KconfigError::Io(err.error))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{io::Write, path::Path};
 
-    use super::validate_input_path;
+    use super::{validate_input_file, validate_input_path, write_file_atomically};
 
     #[test]
     fn accepts_clean_relative_and_absolute_paths() {
@@ -73,5 +114,29 @@ mod tests {
     #[test]
     fn rejects_empty_paths() {
         assert!(validate_input_path(Path::new("")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_output_replaces_symlink_without_overwriting_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("target");
+        let output = dir.path().join("output");
+        std::fs::write(&target, b"keep").unwrap();
+        symlink(&target, &output).unwrap();
+
+        assert!(validate_input_file(&output).is_err());
+        write_file_atomically(&output, |file| file.write_all(b"generated")).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+        assert_eq!(std::fs::read(&output).unwrap(), b"generated");
+        assert!(
+            !std::fs::symlink_metadata(&output)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 }

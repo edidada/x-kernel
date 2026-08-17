@@ -11,7 +11,7 @@ use alloc::{format, string::String};
 
 pub use fs::*;
 pub use inode::*;
-use kclass::{ClassDevice, Virtio9pDeviceImpl};
+use kclass::{ClassDevice, Virtio9pDevice as _, Virtio9pDeviceImpl};
 use ksync::Mutex;
 
 /// Virtio transport adapter bridging `kclass::Virtio9pDeviceImpl` to `fs9p::Transport`.
@@ -23,7 +23,7 @@ struct VirtioTransport(Mutex<ClassDevice<Virtio9pDeviceImpl>>);
 
 impl fs9p::Transport for VirtioTransport {
     fn request(&self, req: &[u8], resp: &mut [u8]) -> Result<usize, String> {
-        let mut dev = self.0.lock();
+        let dev = self.0.lock();
         dev.request(req, resp)
             .map_err(|e| format!("virtio-9p error: {:?}", e))
     }

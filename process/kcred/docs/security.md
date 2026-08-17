@@ -76,6 +76,8 @@ VFS / DAC permission checks
    `apply_exec` 必须在 setuid/setgid 可执行文件逻辑更新 effective ID 后调用。
 5. **当前特权模型只等价于 `euid == 0`**：
    新增 capability 支持时不得继续把所有 root 权限隐式折叠到该判断。
+6. **跨进程文件资源检查使用同一策略**：
+   目标自身、特权调用者或 `fsuid` 匹配目标全部 real/effective/saved UID 时才允许。
 
 ## 线程安全
 
@@ -100,6 +102,7 @@ VFS / DAC permission checks
 | T-06 | 内部 unchecked helper 被外部误用绕过权限策略 | 高 | helper 作为 `pub` API 暴露给上层 syscall 路径 | 已将 `set_resuid_unchecked` / `set_resgid_unchecked` 收窄为 `pub(crate)`；新增 syscall 入口应调用 checked API |
 | T-07 | `apply_exec` 调用顺序错误丢失 setuid/setgid 程序语义 | 中 | setuid executable 支持先重置 saved ID 后更新 effective ID | `design.md` 记录顺序要求；未来 exec loader 改动需联动审计 |
 | T-08 | root 简化模型与 capability 语义不一致 | 中 | 引入 capability 后仍只检查 `euid == 0` | 把 `is_privileged` 作为替换点；capability 支持应在策略层接入 |
+| T-09 | procfd 直接路径与 procfs 后端的跨进程策略不一致 | 高 | 两处各自比较 UID 并发生漂移 | 两个入口统一调用 `Credentials::can_access_process_files`，单元测试覆盖 self/root/UID 转换 |
 
 影响等级定义：
 

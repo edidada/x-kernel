@@ -19,8 +19,8 @@ use posix_types::UserConstPtr;
 
 use crate::path::{PathSource, resolve_open_path_source, with_fs};
 
-fn current_effective_ids() -> (u32, u32) {
-    (0, 0)
+fn current_filesystem_ids() -> (u32, u32) {
+    kthread::with_current_credentials(|credentials| (credentials.fsuid(), credentials.fsgid()))
 }
 
 /// Converts Linux open flags into internal `OpenOptions`.
@@ -120,7 +120,7 @@ pub fn sys_openat(
     let raw_flags = flags as u32;
 
     let mode = mode & !kthread::current_thread().process_state().umask();
-    let options = flags_to_options(flags, mode, current_effective_ids());
+    let options = flags_to_options(flags, mode, current_filesystem_ids());
 
     if let PathSource::Resolved(path) = resolve_open_path_source(dirfd, Some(&path), raw_flags)?
         && path.is_procfd()

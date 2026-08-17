@@ -77,6 +77,9 @@ VFS / DAC permission checks
 | `CredentialError` | 表示凭据转换被权限规则拒绝 |
 | `Uid` / `Gid` | Linux 用户和组 ID 的本地类型别名 |
 
+`Credentials::can_access_process_files` 集中实现跨进程文件资源检查的
+简化凭据规则，供 procfd 的直接解析和 procfs 后端共同使用，避免两个入口策略漂移。
+
 ## 状态机
 
 ### 用户 ID 转换

@@ -41,6 +41,7 @@ resource owners
 3. syscall adapter 负责 ABI 级错误码分支，不越权实现 owner 逻辑。
 4. adapter 目录结构应反映 owner 归属，而不是历史 API 分类。
 5. 涉及 current process/thread 的 helper 只能在明确上下文下调用。
+6. `execve` 的单线程检查和映像替换必须与 `CLONE_THREAD` 发布使用同一进程级串行化 guard。
 
 ## 主要风险
 
@@ -51,6 +52,7 @@ resource owners
 | T-03 | adapter 重复实现 owner 状态机，造成双重语义源 | 高 | 文档明确 `ksyscall` 不拥有长期状态；仅做 ABI 适配 |
 | T-04 | current-thread/process helper 在错误上下文调用 | 中 | 复用 `kthread` 现有约束，并在 syscall 入口保持 task-context 假设 |
 | T-05 | 不同 syscall 被历史目录误导，后续继续堆入错误模块 | 中 | crate-local design 文档固定 `vfs/ipc/time/task` 的 adapter 语义 |
+| T-06 | `execve` 检查线程数后并发 clone 发布新线程 | 高 | `execve` 与 `clone(CLONE_THREAD)` 都持有 `ProcessLifecycleState::exec_transition` |
 
 ## 审计清单
 
@@ -58,4 +60,5 @@ resource owners
 - [ ] 新增 adapter 是否放在贴近 owner 的目录，而不是历史 API 杂项目录？
 - [ ] 用户指针访问是否都通过现有封装类型？
 - [ ] current process/thread helper 的调用上下文是否明确？
+- [ ] 修改 exec/clone 时是否保持 `exec_transition` 覆盖线程数检查到状态提交的完整区间？
 - [ ] 如果修改了 owner 路由关系，是否同步更新本 crate 和 owner crate 文档？

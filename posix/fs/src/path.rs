@@ -310,6 +310,21 @@ pub(crate) fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> KResul
 
 fn procfd_entry(pid: u32, fd: c_int) -> KResult<Arc<dyn FileLike>> {
     let proc_state = get_process_state(pid)?;
+    let is_self = pid == current_thread().pid();
+    let target_credentials = (!is_self).then(|| proc_state.credentials.read());
+    let is_allowed = target_credentials
+        .as_ref()
+        .is_none_or(|target_credentials| {
+            kthread::with_current_credentials(|credentials| {
+                credentials.can_access_process_files(target_credentials, false)
+            })
+        });
+    if !is_allowed {
+        return Err(KError::PermissionDenied);
+    }
+
+    // Keep the target credentials stable through the fd-table lookup so a
+    // concurrent set-ID transition cannot invalidate the authorization check.
     proc_state
         .resources
         .fd_table()

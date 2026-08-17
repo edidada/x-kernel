@@ -144,6 +144,10 @@ raw path string or AT_EMPTY_PATH
 再读取目标进程 fd 表。
 `O_NOFOLLOW` 和 `AT_SYMLINK_NOFOLLOW` 会影响 procfd 和符号链接解析策略。
 
+`FsContext::root_dir()` 是路径解析的硬边界：绝对路径从该位置开始，`..`
+在该位置停止，绝对符号链接目标也重新锚定到该位置。基于 `dirfd` 构造临时
+context 时，若目录不在当前 root 下则拒绝，避免 `chroot` 后通过旧 fd 回到外部目录。
+
 ### 文件数据流
 
 ```text
@@ -249,8 +253,11 @@ VFS/文件 syscall 与 fd-backed object 之间的互操作接线。
 
 `/proc/<pid>/fd/<fd>` 不是普通 VFS 路径解析。
 当前实现直接读取目标进程 fd 表并把 `File`/`Directory` 转回 `Location`。
-这样能支持 live procfd 语义，
-但要求权限模型、进程生命周期和 fd 表并发由 `get_process_state` 与 resources 层保证。
+这样能支持 live procfd 语义。解析或枚举目标 fd 前，当前进程必须是目标自身、
+具备 root 特权，或当前 `fsuid` 与目标 real/effective/saved UID 全部一致；
+该规则同时用于直接 procfd 优化和 procfs 的 `ThreadFdDir` 后端，防止通过
+`readlink`、`O_PATH|O_NOFOLLOW` 或非规范等价路径绕过。目标进程生命周期和
+fd 表并发分别由 `get_process_state` 与 resources 层保证。
 
 ### 不支持的 mount 操作显式拒绝
 
@@ -267,11 +274,11 @@ VFS/文件 syscall 与 fd-backed object 之间的互操作接线。
 这有助于部分用户态程序继续运行，
 但不是完整的 POSIX/ Linux 文件锁语义。
 
-### 当前创建者 ID 简化
+### 文件创建者 ID
 
-`open.rs` 的 `current_effective_ids()` 当前返回 `(0, 0)`。
-因此通过 `OpenOptions::user(uid, gid)` 传入的创建者身份暂时固定为 root。
-未来接入 `kcred` 后应改为读取当前进程的有效或文件系统 UID/GID。
+`open.rs` 通过 `kthread::with_current_credentials` 读取当前进程的
+`fsuid` / `fsgid`，并通过 `OpenOptions::user(uid, gid)` 设置新建节点的所有者。
+这里使用 filesystem ID 而不是固定 root 或 real ID，以匹配 Linux 文件访问凭据语义。
 
 ### 复制类 syscall 使用中间缓冲区
 
@@ -293,9 +300,8 @@ VFS/文件 syscall 与 fd-backed object 之间的互操作接线。
 
 ## 已知限制
 
-1. `current_effective_ids()` 尚未接入真实 POSIX 凭据。
-2. `fcntl` 文件锁和 `flock` 目前是兼容占位，不提供真实互斥。
-3. `copy_file_range` 尚未检查普通文件类型、同文件重叠和跨文件系统条件。
-4. `mount` 当前只支持 `tmpfs` 新挂载，不支持 bind、remount、move 和 propagation。
-5. `faccessat2` 当前按 owner 权限位构造检查掩码，尚未完整接入 UID/GID、补充组和 capability。
-6. `sendfile` 对非空 offset 保留 32 位范围限制，反映旧接口兼容约束。
+1. `fcntl` 文件锁和 `flock` 目前是兼容占位，不提供真实互斥。
+2. `copy_file_range` 尚未检查普通文件类型、同文件重叠和跨文件系统条件。
+3. `mount` 当前只支持 `tmpfs` 新挂载，不支持 bind、remount、move 和 propagation。
+4. `faccessat2` 当前按 owner 权限位构造检查掩码，尚未完整接入 UID/GID、补充组和 capability。
+5. `sendfile` 对非空 offset 保留 32 位范围限制，反映旧接口兼容约束。

@@ -64,6 +64,7 @@ ktask / kprocess / memspace / kresources / ksignal / ktimer / kfutex
 7. **TEE 类型擦除**：TEE private runtime state 以 `Arc<dyn Any + Send + Sync>` 保存，取回时必须 downcast 到调用者期望类型。
 8. **PidFd 生命周期观察**：`PidFd` 只通过 `Weak<ProcessState>` 观察目标进程，upgrade 失败必须返回 `NoSuchProcess`。
 9. **credential helper 上下文**：当前进程 credential helper 只在用户线程上下文访问 `ProcessState::credentials`，不跨进程借出锁保护的内部引用。
+10. **exec/thread-group 原子性**：exec 的单线程检查、映像切换、`CLONE_THREAD` 的成员发布和线程退出移除由同一 `exec_transition` mutex 串行化。
 
 ## 线程安全
 
@@ -75,6 +76,7 @@ ktask / kprocess / memspace / kresources / ksignal / ktimer / kfutex
 | `Thread::exit` | `AtomicBool` | Release/Acquire 发布退出状态 |
 | `Thread::accessing_user_memory` | `AtomicBool` | fault 与 user-memory 访问路径观测 |
 | `ProcessRuntimeState::heap_top` | `AtomicUsize` | brk 路径发布和读取 heap top |
+| `ProcessLifecycleState::exec_transition` | `Mutex<()>` | exec 完整转换与 thread-group 成员增删互斥；仅 task context 使用 |
 | registry tables | `RwLock<WeakMap<...>>` | lookup 并发读，注册与 cleanup 独占写 |
 | TEE private state | `RwLock<Option<Arc<dyn Any + Send + Sync>>>` | 初始化、读取和清理串行化 |
 
@@ -94,6 +96,7 @@ ktask / kprocess / memspace / kresources / ksignal / ktimer / kfutex
 | T-10 | 上层漏校验用户 futex 地址导致错误等待目标 | 中 | syscall 层直接把未校验地址传给 `current_futex_key` | `kthread` 只构造 key，地址合法性和访问权限由 futex syscall 路径负责 |
 | T-11 | fd 或路径输入绕过权限控制 | 中 | 上层通过 `current_resources` 取到资源后漏做权限检查 | `kthread` 只返回当前进程资源表，权限和对象类型校验由 POSIX/fs/net 层执行 |
 | T-12 | pidfd 在目标进程退出后继续暴露有效 capability | 中 | `PidFd` 错误持有强引用或 poll/upgrade 判断不一致 | `PidFd` 仅保存 weak 引用；`process_state()` upgrade 失败返回 `NoSuchProcess` |
+| T-13 | exec 的线程数检查与 thread-group 成员变化竞态 | 高 | `execve` 检查单线程后，并发线程发布或退出 cleanup 与地址空间切换交错 | exec、`CLONE_THREAD` 发布和退出移除持有同一 `exec_transition` mutex，检查与状态提交处于一个临界区 |
 
 影响等级定义：
 
@@ -157,3 +160,4 @@ ktask / kprocess / memspace / kresources / ksignal / ktimer / kfutex
 - 新增 TEE 状态逻辑说明 type-erased slot 的具体类型约束。
 - 新增锁调用点标明执行上下文，避免 IRQ 路径调用可能阻塞或放大延迟的 helper。
 - 新增 pidfd 相关逻辑说明 `Weak<ProcessState>` 生命周期和 exit event 观察语义。
+- 修改 exec、`CLONE_THREAD` 发布或 thread-exit 移除路径时必须继续持有 `exec_transition`，并保持它位于 address-space 等内部锁之外。

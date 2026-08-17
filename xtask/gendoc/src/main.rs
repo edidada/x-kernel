@@ -37,9 +37,27 @@ fn read_features(path: &PathBuf) -> Result<Vec<String>, Box<dyn Error>> {
         .as_array()
         .ok_or("missing `features` array")?
         .iter()
-        .filter_map(|v| v.as_str().map(String::from))
-        .collect();
+        .map(|value| {
+            let feature = value
+                .as_str()
+                .ok_or("all `features` entries must be strings")?;
+            validate_feature_selector(feature)?;
+            Ok(feature.to_string())
+        })
+        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
     Ok(features)
+}
+
+fn validate_feature_selector(feature: &str) -> Result<(), Box<dyn Error>> {
+    if feature.is_empty()
+        || feature.starts_with('-')
+        || feature
+            .bytes()
+            .any(|byte| byte == b',' || byte.is_ascii_whitespace() || byte.is_ascii_control())
+    {
+        return Err(format!("invalid cargo feature selector: {feature:?}").into());
+    }
+    Ok(())
 }
 
 /// Validate a host-side input path (CWE-22): reject empty, NUL, non-UTF-8,
@@ -132,4 +150,17 @@ fn format_command(cmd: &Command) -> String {
         }
     }
     format!("{} {}", cmd.get_program().to_string_lossy(), s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_feature_selector;
+
+    #[test]
+    fn cargo_feature_selector_rejects_argument_and_list_injection() {
+        assert!(validate_feature_selector("kfeat/fs_ext4").is_ok());
+        for feature in ["", "--workspace", "a,b", "a b", "a\nb"] {
+            assert!(validate_feature_selector(feature).is_err());
+        }
+    }
 }

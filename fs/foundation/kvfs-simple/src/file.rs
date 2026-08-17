@@ -95,6 +95,22 @@ impl SimpleFile {
     pub fn new_regular(fs: Arc<SimpleFs>, ops: impl SimpleFileOps) -> Arc<Self> {
         Self::new(fs, NodeType::RegularFile, ops)
     }
+
+    /// Creates a regular simple file with explicit permission bits.
+    ///
+    /// This is intended for control files whose access policy must be narrower
+    /// than the `0o666` default used by ordinary synthetic files.
+    pub fn new_regular_with_permission(
+        fs: Arc<SimpleFs>,
+        permission: NodePermission,
+        ops: impl SimpleFileOps,
+    ) -> Arc<Self> {
+        let node = SimpleFsNode::new(fs, NodeType::RegularFile, permission);
+        Arc::new(Self {
+            node,
+            ops: Arc::new(ops),
+        })
+    }
 }
 
 #[inherit_methods(from = "self.node")]

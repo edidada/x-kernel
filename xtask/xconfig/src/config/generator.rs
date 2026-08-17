@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use std::{collections::HashMap, fs::File, io::Write, path::Path};
+use std::{collections::HashMap, io::Write, path::Path};
 
 use crate::{
     error::{KconfigError, Result},
@@ -10,6 +10,7 @@ use crate::{
         SymbolTable,
         ast::{RangeType, RustType, SymbolType},
     },
+    validate::write_file_atomically,
 };
 
 /// ConfigGenerator generates build system configuration files.
@@ -22,60 +23,60 @@ pub struct ConfigGenerator;
 
 impl ConfigGenerator {
     pub fn generate_auto_conf(path: impl AsRef<Path>, symbols: &SymbolTable) -> Result<()> {
-        let mut file = File::create(path)?;
+        write_file_atomically(path.as_ref(), |file| {
+            writeln!(file, "#")?;
+            writeln!(file, "# Automatically generated file; DO NOT EDIT.")?;
+            writeln!(file, "#")?;
 
-        writeln!(file, "#")?;
-        writeln!(file, "# Automatically generated file; DO NOT EDIT.")?;
-        writeln!(file, "#")?;
+            for (name, symbol) in symbols.all_symbols() {
+                // Strip CONFIG_ prefix if present
+                let clean_name = name.strip_prefix("CONFIG_").unwrap_or(name);
 
-        for (name, symbol) in symbols.all_symbols() {
-            // Strip CONFIG_ prefix if present
-            let clean_name = name.strip_prefix("CONFIG_").unwrap_or(name);
-
-            if let Some(value) = &symbol.value {
-                if value != "n" {
-                    writeln!(file, "{}={}", clean_name, value)?;
+                if let Some(value) = &symbol.value {
+                    if value != "n" {
+                        writeln!(file, "{}={}", clean_name, value)?;
+                    }
                 }
             }
-        }
 
-        Ok(())
+            Ok(())
+        })
     }
 
     pub fn generate_autoconf_h(path: impl AsRef<Path>, symbols: &SymbolTable) -> Result<()> {
-        let mut file = File::create(path)?;
+        write_file_atomically(path.as_ref(), |file| {
+            writeln!(file, "/*")?;
+            writeln!(file, " * Automatically generated file; DO NOT EDIT.")?;
+            writeln!(file, " */")?;
+            writeln!(file)?;
 
-        writeln!(file, "/*")?;
-        writeln!(file, " * Automatically generated file; DO NOT EDIT.")?;
-        writeln!(file, " */")?;
-        writeln!(file)?;
+            for (name, symbol) in symbols.all_symbols() {
+                // Strip CONFIG_ prefix if present
+                let clean_name = name.strip_prefix("CONFIG_").unwrap_or(name);
 
-        for (name, symbol) in symbols.all_symbols() {
-            // Strip CONFIG_ prefix if present
-            let clean_name = name.strip_prefix("CONFIG_").unwrap_or(name);
-
-            if let Some(value) = &symbol.value {
-                match value.as_str() {
-                    "y" => {
-                        writeln!(file, "#define {} 1", clean_name)?;
-                    }
-                    "m" => {
-                        // Treat modules as 'y' (no module support in rust-kbuild)
-                        // This is a simplification compared to Linux Kconfig which would
-                        // generate a separate _MODULE define
-                        writeln!(file, "#define {} 1", clean_name)?;
-                    }
-                    "n" => {
-                        // Don't define anything for disabled options
-                    }
-                    _ => {
-                        writeln!(file, "#define {} \"{}\"", clean_name, value)?;
+                if let Some(value) = &symbol.value {
+                    match value.as_str() {
+                        "y" => {
+                            writeln!(file, "#define {} 1", clean_name)?;
+                        }
+                        "m" => {
+                            // Treat modules as 'y' (no module support in rust-kbuild)
+                            // This is a simplification compared to Linux Kconfig which would
+                            // generate a separate _MODULE define
+                            writeln!(file, "#define {} 1", clean_name)?;
+                        }
+                        "n" => {
+                            // Don't define anything for disabled options
+                        }
+                        _ => {
+                            writeln!(file, "#define {} \"{}\"", clean_name, value)?;
+                        }
                     }
                 }
             }
-        }
 
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Generate `config.rs` with strictly typed Rust constants derived from a
@@ -124,7 +125,7 @@ impl ConfigGenerator {
             Self::emit_heuristic_const(&mut content, key, value)?;
         }
 
-        std::fs::write(&config_rs_path, content)?;
+        write_file_atomically(&config_rs_path, |file| file.write_all(content.as_bytes()))?;
 
         println!("📝 Generated config.rs at: {}", config_rs_path.display());
 

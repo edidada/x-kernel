@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -315,7 +316,8 @@ def run_cargo_metadata(args: list[str], cwd: Path, warn: bool = True) -> dict | 
         )
     except (OSError, subprocess.CalledProcessError) as exc:
         if warn:
-            print(f"Warning: failed to run cargo metadata {' '.join(args)}: {exc}", file=sys.stderr)
+            rendered_args = shlex.join(args)
+            print(f"Warning: failed to run cargo metadata {rendered_args}: {exc}", file=sys.stderr)
         return None
 
     return json.loads(proc.stdout)

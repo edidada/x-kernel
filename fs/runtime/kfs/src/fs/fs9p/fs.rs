@@ -25,7 +25,7 @@ pub struct Fs9pFilesystem {
 impl Fs9pFilesystem {
     /// Create a new 9P filesystem instance from a virtio-9p device.
     pub fn new(dev: ClassDevice<Virtio9pDeviceImpl>) -> VfsResult<Filesystem> {
-        let mount_tag = dev.mount_tag().into();
+        let mount_tag = dev.mount_tag();
         let transport = Box::new(VirtioTransport(Mutex::new(dev)));
         let mut session = Session::new(transport, mount_tag);
         session

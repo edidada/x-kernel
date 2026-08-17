@@ -193,3 +193,17 @@ fn test_supplementary_groups_are_sorted_and_preserve_duplicates() {
 
     assert_eq!(credentials.supplementary_groups(), &[1, 2, 3, 3]);
 }
+
+#[def_test]
+fn test_process_file_access_requires_self_privilege_or_matching_uids() {
+    let caller = Credentials::new(1000, 100);
+    let target = Credentials::new(2000, 200);
+    assert!(caller.can_access_process_files(&target, true));
+    assert!(!caller.can_access_process_files(&target, false));
+    assert!(Credentials::root().can_access_process_files(&target, false));
+
+    let mut transitioned_target = Credentials::new(1000, 200);
+    assert!(caller.can_access_process_files(&transitioned_target, false));
+    transitioned_target.set_resuid_unchecked(None, Some(2000), None);
+    assert!(!caller.can_access_process_files(&transitioned_target, false));
+}

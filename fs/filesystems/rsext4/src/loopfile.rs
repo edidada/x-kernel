@@ -11,8 +11,8 @@ use alloc::{collections::BTreeMap, vec::Vec};
 use log::{debug, error};
 
 use crate::{
-    blockdev::*, config::*, disknode::*, entries::*, error::*, ext4::*, extents_tree::*,
-    hashtree::*,
+    blockdev::*, config::*, dir::normalize_path, disknode::*, entries::*, error::*, ext4::*,
+    extents_tree::*, hashtree::*,
 };
 
 /// 支持extend数和多级索引(多级索引将来弃用)
@@ -141,20 +141,19 @@ pub fn get_file_inode<B: BlockDevice>(
     block_dev: &mut Jbd2Dev<B>,
     path: &str,
 ) -> BlockDevResult<Option<(u32, Ext4Inode)>> {
-    // 规范化路径：空串或"/" 视为根目录
+    // Normalize at this public boundary as well as at higher-level callers.
+    // This keeps direct users from bypassing root-escape and NUL checks.
     if path.is_empty() || path == "/" {
         let inode = fs.get_root(block_dev)?;
         return Ok(Some((fs.root_inode, inode)));
     }
+    let normalized_path = normalize_path(path)?;
 
-    // 按 '/' 分割，过滤掉空段
-    let components = path.split('/').filter(|s| !s.is_empty());
+    let components = normalized_path.split('/').filter(|s| !s.is_empty());
 
-    // 从根目录开始逐级解析，并维护一个路径栈以支持 ".." 回溯
+    // 从根目录开始逐级解析。
     let mut current_inode = fs.get_root(block_dev)?;
     let mut current_ino_num: u32 = fs.root_inode;
-    let mut path_vec: Vec<Ext4Inode> = Vec::new();
-    path_vec.push(current_inode);
 
     // 根目录所在的 inode 表起始块目前按 group0 处理
     let inode_table_start = match fs.group_descs.first() {
@@ -165,21 +164,6 @@ pub fn get_file_inode<B: BlockDevice>(
         if !current_inode.is_dir() {
             // 中间层不是目录，路径非法
             return Ok(None);
-        }
-
-        // 特殊处理当前目录和父目录
-        if name == "." {
-            continue;
-        }
-        if name == ".." {
-            // 回溯到父目录：栈中至少保留根目录一层
-            if path_vec.len() > 1 {
-                path_vec.pop();
-                if let Some(parent_inode) = path_vec.last() {
-                    current_inode = *parent_inode;
-                }
-            }
-            continue;
         }
 
         let target = name.as_bytes();
@@ -236,7 +220,6 @@ pub fn get_file_inode<B: BlockDevice>(
             .get_or_load(block_dev, inode_num, block_num, offset)?;
         current_inode = cached_inode.inode;
         current_ino_num = inode_num_u32;
-        path_vec.push(current_inode);
     }
 
     Ok(Some((current_ino_num, current_inode)))

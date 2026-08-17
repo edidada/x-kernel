@@ -215,6 +215,11 @@ impl CloneRequest {
         let curr = current();
         let current_thread = kthread::current_thread();
         let old_proc_data = current_thread.process_state();
+        let _exec_transition_guard = if self.flags.contains(CloneFlags::THREAD) {
+            Some(old_proc_data.lifecycle().lock_exec_transition())
+        } else {
+            None
+        };
 
         let mut new_task = new_user_task(
             &curr.name(),

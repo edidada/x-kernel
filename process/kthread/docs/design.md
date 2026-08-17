@@ -165,6 +165,30 @@ with_current_credentials_mut(_)
 credential 模型和视图转换规则仍由 `kcred` 维护，
 调用侧如果需要具体 snapshot，应基于这里的基础入口自行组合。
 
+### exec 与线程创建串行化
+
+```text
+execve
+  → lock_exec_transition()
+  → 检查 thread group 仅有当前线程
+  → 装载并提交新进程映像
+
+clone(CLONE_THREAD)
+  → lock_exec_transition()
+  → 构造线程并加入 thread group
+  → 发布新 task
+
+thread exit
+  → 完成 user-address cleanup
+  → lock_exec_transition()
+  → 从 thread group 移除当前线程
+```
+
+`ProcessLifecycleState::exec_transition` 是可阻塞 mutex，只能在 task context 获取。
+它把 exec 的线程数检查与完整映像切换放在同一临界区，防止并发
+`CLONE_THREAD` 在检查之后、地址空间替换期间发布新线程，也防止 exec 与
+尚未完成 user-address cleanup 的退出线程交错。
+
 ### registry 查询
 
 ```text
@@ -240,6 +264,7 @@ private/shared futex table 的实例管理、shared identity 路由和 stale tab
 - `Thread::time` 使用 `Mutex<CpuTimeStatistics>`，采样和状态切换在同一锁内更新。
 - `ProcessState::credentials`、TEE TA state 和 TEE private state 使用 `RwLock`。
 - `ProcessRuntimeState::heap_top` 使用 Acquire/Release atomic，地址空间、文件系统上下文和 timer manager 使用 `Arc<Mutex<...>>`。
+- `ProcessLifecycleState::exec_transition` 使用 sleepable `Mutex<()>`，串行化完整 exec 与 thread-group 成员增删；持锁路径允许文件读取和程序装载，因此不能使用 spinlock。
 - registry 表使用全局 `RwLock<WeakMap<...>>`，查询返回可升级强引用。
 - signal helper 在目标查找后调用 signal manager，并在有新 pending signal 时 interrupt 对应 task。
 

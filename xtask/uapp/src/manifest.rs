@@ -215,14 +215,8 @@ fn paths_match(selection: &Path, path: &Path) -> bool {
 }
 
 fn validate_manifest(dir: &Path, manifest_path: &Path, manifest: &Manifest) -> Result<(), String> {
-    validate_non_empty("package.name", &manifest.package.name, manifest_path)?;
-    if manifest.package.name.contains('/') {
-        return Err(format!(
-            "{}: package.name must not contain '/': {}",
-            manifest_path.display(),
-            manifest.package.name
-        ));
-    }
+    validate_package_name(&manifest.package.name)
+        .map_err(|err| format!("{}: {err}", manifest_path.display()))?;
     if let Some(dir_name) = dir.file_name().and_then(|name| name.to_str())
         && dir_name != manifest.package.name
     {
@@ -262,6 +256,23 @@ fn validate_manifest(dir: &Path, manifest_path: &Path, manifest: &Manifest) -> R
         }
     }
 
+    Ok(())
+}
+
+pub(crate) fn validate_package_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("package.name must not be empty".to_string());
+    }
+    if name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+    {
+        return Err(format!(
+            "package.name must be a single safe path component: {name:?}"
+        ));
+    }
     Ok(())
 }
 
@@ -322,4 +333,17 @@ fn validate_env_entry(env: &str, manifest_path: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_package_name;
+
+    #[test]
+    fn package_name_must_be_one_safe_path_component() {
+        assert!(validate_package_name("hello-uapp_1.0").is_ok());
+        for name in ["", ".", "..", "../escape", "a/b", "a\\b", "a\0b"] {
+            assert!(validate_package_name(name).is_err(), "accepted {name:?}");
+        }
+    }
 }
