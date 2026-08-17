@@ -24,7 +24,7 @@ drivers/virtio/
 │   ├── blk.rs              # VirtIO Block 适配器（IRQ 驱动 + 轮询回退）
 │   ├── gpu.rs              # VirtIO GPU 适配器
 │   ├── input.rs            # VirtIO Input 适配器
-│   ├── irq_completion.rs   # hardirq → softirq → 睡眠等待的共享完成桥接
+│   ├── irq_completion.rs   # hardirq → softirq → bottom half 的共享完成桥接
 │   ├── net.rs              # VirtIO Net 适配器（IRQ + NAPI 式中断抑制）
 │   ├── rng.rs              # VirtIO RNG 适配器（IRQ 驱动 + 轮询回退）
 │   ├── socket.rs           # VirtIO Vsock 适配器
@@ -77,10 +77,10 @@ Feature flags 控制编译哪些设备适配器：
 | 组件 | 职责 |
 |------|------|
 | `lib.rs` | 设备探测（`probe_mmio_device` / `probe_pci_device`）、VirtIO 错误到 `DriverError` 的转换、公共类型 re-export |
-| `blk.rs` | 将 `VirtIOBlk` 封装为实现 `BlockDevice` 的 `VirtIoBlkDev`；IRQ 可用时经 Block softirq 完成请求（hardirq ack → softirq 唤醒 → 请求任务完成），否则回退同步轮询 |
+| `blk.rs` | 将 `VirtIOBlk` 封装为实现 `BlockDevice` 的 `VirtIoBlkDev`；IRQ 可用时经 Block softirq push 式逐请求完成（hardirq ack → softirq 按 token 派发 → 请求者弹出并级联派发），多请求可在途，否则回退同步轮询 |
 | `gpu.rs` | 将 `VirtIOGpu` 封装为实现 `DisplayDevice` 的 `VirtIoGpuDev` |
 | `input.rs` | 将 `VirtIOInput` 封装为实现 `InputDevice` 的 `VirtIoInputDev` |
-| `irq_completion.rs` | blk/rng 共享的 IRQ 完成桥接：hardirq 仅 ack 并标记 pending + raise softirq；softirq action 广播唤醒所有等待任务（无 token 计量，一次中断可覆盖多个完成）；任务在每次唤醒后重查设备侧谓词 |
+| `irq_completion.rs` | blk/rng 共享的 IRQ 完成桥接：hardirq 仅 ack 并标记 pending + raise softirq；softirq action 逐设备执行 bottom half——blk 按 used ring 头 token 派发完成，rng 广播单请求唤醒 |
 | `net.rs` | 将 `VirtIONetRaw` 封装为实现 `NetDevice` 的 `VirtIoNetDev`，管理收发缓冲区、IRQ ack、NAPI 式中断抑制和网络 RX scheduler 调度 |
 | `rng.rs` | 将 `VirtIORng` 封装为实现 `CharDevice` 的 `VirtIoRngDev`；IRQ 可用时经 Tasklet softirq 唤醒有界睡眠等待，否则回退关中断有界自旋 |
 | `socket.rs` | 将 `VsockConnectionManager` 封装为实现 `VsockDevice` 的 `VirtIoSocketDev` |
@@ -104,9 +104,10 @@ Feature flags 控制编译哪些设备适配器：
   网络缓冲区回收等路径可能持有锁或等待设备完成，
   不应假设适用于任意不可睡眠上下文。
 - **blk/rng 的 IRQ 驱动等待路径要求任务上下文**：
-  请求任务在提交后经 `kirq::IrqSyncWaitIf` 睡眠等待 softirq 唤醒；
+  请求任务在提交后在本请求的完成槽上睡眠等待 bottom half 唤醒
+  （blk 按 token push；rng 广播+重查）；
   无可睡眠上下文（早期启动或 IRQ 上下文调用）时自动退化为
-  开中断轮询 used ring，hardirq handler 持续 ack 设备 ISR，
+  开中断轮询，hardirq handler 持续 ack 设备 ISR，
   共享电平触发中断线不会 livelock。
 - **网络设备的 IRQ 与正常路径并发访问
   依赖 `SpinNoIrq`**：
@@ -116,10 +117,9 @@ Feature flags 控制编译哪些设备适配器：
   ack 设备中断后仅进行 NAPI 式中断抑制并调用上层通过
   `driver_net::NetRxScheduler` attach 的 RX 调度能力，
   不直接运行协议栈或 socket 唤醒逻辑。
-- **virtio-net 中断抑制的双重机制与平台差异**：
-  queue 级 `set_dev_notify` 仅在未协商 `VIRTIO_F_RING_EVENT_IDX` 时生效；
-  协商了 EVENT_IDX 的设备由 IRQ 线级屏蔽承载抑制，
-  而 x86 MSI-X 向量无法在 APIC 层屏蔽（退化为逐包中断，不回退）。
+- **virtio-net 中断抑制与 Linux 一致、不触碰 IRQ 线**：
+  queue 级 NO_INTERRUPT 标志覆盖未协商 `VIRTIO_F_RING_EVENT_IDX` 的设备；
+  协商了 EVENT_IDX 的设备由弹出推进 `used_event` 的规范机制隐式抑制。
 - **设备对象的共享安全依赖 trait 约束和内部封装**：
   非 net 设备主要通过 `&mut self` 独占访问；
   net 设备依赖内部锁和 token-buffer 对应关系维持正确性。
@@ -157,12 +157,12 @@ Idle ──read_block/write_block──> Pending ──设备响应──> Compl
 | 从 | 到 | 触发条件 |
 |----|----|----------|
 | Idle | Pending | 调用 `read_block()`、`write_block()` 或 `flush()`，请求提交到 VirtIO 队列 |
-| Pending | Complete | IRQ 模式：hardirq ack 后 Block softirq 唤醒请求任务，任务确认 used ring 到达 token；轮询模式：`virtio-drivers` 内部轮询获取结果 |
+| Pending | Complete | IRQ 模式：bottom half 标记 used ring 头 token 的完成槽并唤醒对应请求者，请求者弹出该项并级联派发下一个 token；轮询模式：`virtio-drivers` 内部轮询获取结果 |
 | Complete | Idle | 返回 `DriverResult`，设备回到空闲状态 |
 
 > 块设备为同步接口：每次请求等待完成后才返回。IRQ 模式下等待为睡眠等待
-> （softirq 唤醒后重查 used ring），多个任务的在途请求按到达 used ring 头部
-> 的顺序完成；轮询模式下等待为关中断自旋。
+> （bottom half 按 token 唤醒本请求），多个请求可同时在途、按设备完成顺序
+> 逐个派发；轮询模式下等待为关中断自旋。
 
 ### GPU 设备 scanout resource 状态
 
@@ -300,13 +300,19 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 3. 若提供 `irq` 且注册成功：设备经 `BLK_COMPLETION_HUB` 注册到 Block softirq 向量；
    注册失败时回退轮询模式
 
-**读取流程（IRQ 模式）**：
+**读取流程（IRQ 模式，push 式完成）**：
 
-1. 调用 `read_block(block_id, buf)`，经 `read_blocks_nb()` 非阻塞提交读请求
-2. 释放设备锁后睡眠等待（`kirq::IrqSyncWaitIf`）；hardirq ack ISR 后标记 pending
-   并 raise `SoftirqVec::Block`，softirq action 唤醒等待任务
-3. 每次唤醒后重查 `peek_used() == Some(token)`，确认后 `complete_read_blocks()`
-   完成请求；无可睡眠上下文时退化为开中断轮询（handler 持续 ack，无 livelock）
+1. 调用 `read_block(block_id, buf)`，经 `read_blocks_nb()` 非阻塞提交读请求，
+   按 token 注册完成槽；提交与注册之间到达的完成由注册后的派发补收
+2. 在本请求完成槽上睡眠；hardirq ack ISR 后标记 pending 并 raise
+   `SoftirqVec::Block`，softirq action 标记 used ring 头 token 的完成槽并唤醒
+   该请求的等待者（一次中断覆盖多个完成时，其余完成由被唤醒请求者弹出后
+   的级联派发逐个标记）
+3. 被唤醒的请求者在设备锁内 `complete_read_blocks()` 弹出本请求（同时注销
+   完成槽，防止 token 在注销前被复用）、释放锁后再派发下一个头 token；
+   无可睡眠上下文时退化为开中断轮询（handler 持续 ack，无 livelock）
+4. flush 经两段式独占屏障：先 claim `is_flushing` 阻止新请求，再等待在途
+   集合清零后执行同步 flush（`virtio-drivers` 无非阻塞 flush 提交 API）
 
 **读取流程（轮询回退）**：
 
@@ -416,12 +422,18 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
    同时创建与设备共享的 `NetNapiState`（记录 `IrqResource` 与线屏蔽状态）
 2. 若该 IRQ 首次注册（`REGISTERED_NET_IRQS` 去重），调用 `Irq::request(resource, Arc::new(handle_virtio_net_irq))` 注册中断，guard 存入 `NET_IRQ_GUARDS`
 3. 中断到来时 `handle_virtio_net_irq()` 遍历所有句柄，调用 `ack_interrupt()` 确认中断：
-   - 确认后执行中断抑制（queue 级 `disable_interrupts()` + 线级 `set_irq_enabled(false)`，
-     线屏蔽标志与 provider 调用在同一把 `SpinNoIrq` 下原子执行）
+   - 确认后执行 queue 级中断抑制（`disable_interrupts()`，即 avail 环
+     NO_INTERRUPT 标志；对协商了 EVENT_IDX 的设备该写被设备忽略，
+     抑制由 EVENT_IDX 机制隐式承载，见下条）
    - 调用 `schedule_rx()` 经 NetRx softirq 唤醒上层 drain 任务
    - 返回包含来源位图的 `IrqEvent`；没有句柄确认中断时返回 `IrqEvent::NOT_HANDLED`
-4. drain 任务将接收队列排空后，`recv()` 在空队列分支恢复中断
-   （`enable_interrupts()` + 解除线屏蔽）并重查一次接收队列：
+4. 协商了 EVENT_IDX 的设备在积压期间天然抑制通知：每次 `receive_complete`
+   弹出都会把 `used_event` 推进到驱动已消费位置，符合规范的设备只在追平
+   该索引时才通知——drain 滞后于设备时后续完成不再产生中断，drain 排空后
+   下一个报文自然触发通知。这与 Linux 的 NAPI 一致：完全不触碰 IRQ 线
+5. drain 任务将接收队列排空后，`recv()` 在空队列分支恢复 queue 级通知
+   （`enable_interrupts()`，EVENT_IDX 设备由最后一次弹出自然 re-arm）
+   并重查一次接收队列：
    与恢复竞争到达的报文要么由重查返回，要么由重新开启的中断再次调度 drain，
    不丢失唤醒；排空期间不再产生逐包硬中断
 5. 已注册 IRQ 时，`ack_interrupt()` 仅由 IRQ handler 调用，避免 RX 任务清除运行期间
@@ -488,10 +500,10 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 - **net**：`InnerDev` 被 `Arc<SpinNoIrq<...>>` 包裹，因为 IRQ 回调在中断上下文中
   访问设备（`ack_interrupt`），与正常收发路径并发。全局静态变量
   `NET_IRQ_HANDLES`、`NET_IRQ_GUARDS` 和 `REGISTERED_NET_IRQS` 也使用 `SpinNoIrq` 保护。
-  NAPI 线屏蔽的标志翻转与 kirq 线控制调用在 `NetNapiState.line_masked` 的
-  `SpinNoIrq` 下原子执行：抑制（hardirq）与恢复（recv drain 末端）可在不同
-  CPU 上并发，但任一时刻标志都与线物理状态一致，迟到的 mask 不会留下
-  "线屏蔽但标志为未屏蔽"的倒置状态。
+  NAPI 抑制不触碰 IRQ 线（与 Linux 一致）：未协商 EVENT_IDX 的设备用
+  avail 环 NO_INTERRUPT 标志，协商了 EVENT_IDX 的设备由弹出推进
+  `used_event` 的机制隐式抑制，不存在跨 CPU mask/unmask 顺序问题，
+  也不影响共享同一中断线的其他设备。
 - **IRQ 注册**：`register_virtio_net_irq()` 在 `NET_IRQ_HANDLES` 中注册回调句柄，
   同一 IRQ 仅注册一次（通过 `REGISTERED_NET_IRQS` 去重）。`Irq::request()` 返回的
   guard 存入 `NET_IRQ_GUARDS`，设备 Drop 时自动注销。blk/rng 的 hub 采用同样的
@@ -525,28 +537,29 @@ blk/rng 的完成唤醒经 `kirq::softirq`（Block / Tasklet 向量）而非在 
 
 1. hardirq 只保留最短路径（ack ISR、标记 pending、raise softirq），
    中断尾/`ksoftirqd` 的下半部负责所有与等待者的交互；
-2. 唤醒原语选用 `kpoll::PollSet` 广播（`wake` 侧显式支持中断上下文，且
-   在 IRQ 尾 softirq 上下文无 `event-listener` 类自旋锁的同 CPU 重入风险），
-   并刻意不用 token 计量的 completion：一次设备中断可能覆盖多个完成、
-   pending 标志会把多次 hardirq 塌缩成一次 softirq，唤醒次数若与中断次数
-   耦合就会丢唤醒；广播 + 每次唤醒重查设备谓词（Linux wait_queue 语义）
-   与中断次数完全解耦；
+2. 唤醒原语选用 `kpoll::PollSet`（`wake` 侧显式支持中断上下文，且在
+   IRQ 尾 softirq 上下文无 `event-listener` 类自旋锁的同 CPU 重入风险）；
+   blk 的完成派发与 Linux 一致为 push 语义——bottom half 标记 used ring
+   头 token 对应的完成槽并唤醒该请求（等价 `virtqueue_get_buf` 循环 +
+   per-request endio），唤醒粒度是请求而非设备，与中断次数天然解耦；
+   被唤醒请求者弹出后级联派发下一个 token，因此一次中断覆盖多个完成时
+   无需额外的唤醒计数；
 3. 睡眠侧复用 `kirq::IrqSyncWaitIf` 桥接（由 ktask 提供），无可睡眠上下文时
    返回错误，驱动据此退化为开中断轮询，避免引入驱动层对调度器的直接依赖。
 
-### 为什么 net 的中断抑制需要双重机制
+### 为什么 net 的中断抑制不用 IRQ 线屏蔽
 
-`kvirtiodrivers` 的 `set_dev_notify` 在协商了 `VIRTIO_F_RING_EVENT_IDX` 时是
-空操作（该 fork 未实现 used_event 抑制），而现代 QEMU virtio-net 默认协商
-EVENT_IDX。因此：
+Linux 的 NAPI 从不屏蔽 IRQ 线，本驱动保持一致：
 
-1. queue 级 `disable_interrupts()` 覆盖未协商 EVENT_IDX 的设备；
-2. IRQ 线级屏蔽（`device_res::IrqOp::set_irq_enabled` → kirq
-   `disable_irq_nosync`/`enable_irq`）覆盖 GIC/PLIC/IO-APIC 等真实中断线，
-   在主验证平台（aarch64 QEMU）上承载实际抑制；
-3. x86 MSI-X 向量无法在 APIC 层屏蔽，两种机制均失效，退化为逐包中断
-   （与改造前行为一致，无回退）。线级抑制会延迟共享同一 INTx 线的其他设备，
-   延迟上界为一个 drain 批次，解除屏蔽后电平触发线会重新送达。
+1. 未协商 `VIRTIO_F_RING_EVENT_IDX` 的设备：queue 级 `disable_interrupts()`
+   设置 avail 环 NO_INTERRUPT 标志，drain 结束 `enable_interrupts()` 恢复；
+2. 协商了 EVENT_IDX 的设备：`set_dev_notify` 虽是空操作（fork 限制），但
+   每次 `receive_complete` 弹出会把 `used_event` 推进到驱动已消费位置，
+   符合 virtio 规范（vring_need_event 窗口语义）的设备只在追平该索引时
+   通知——积压期间隐式抑制、排空后自然 re-arm，效果等价于 Linux 的
+   `virtqueue_disable_cb`/`enable_cb` 事件机制；
+3. 线屏蔽会引入跨 CPU mask/unmask 顺序倒置风险（迟到的 mask 把线留在
+   屏蔽态且标志显示未屏蔽），并延迟共享同一 INTx 线的其他设备，故不采用。
 
 ## Drop / 资源释放
 

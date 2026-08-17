@@ -6,7 +6,7 @@
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use device_res::{Irq, IrqEvent, IrqEventSource, IrqResource, IrqTrigger, irq_provider};
+use device_res::{Irq, IrqEvent, IrqEventSource, IrqResource, IrqTrigger};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use driver_net::{
     MacAddress, NetBuf, NetBufBox, NetBufHandle, NetBufPool, NetDevice, NetRxScheduler,
@@ -19,48 +19,6 @@ use crate::as_driver_error;
 const NET_BUF_LEN: usize = 1526;
 
 static NEXT_IRQ_HANDLE_ID: AtomicUsize = AtomicUsize::new(0);
-
-/// NAPI-style interrupt suppression state shared between the hardirq handler
-/// and the RX drain path.
-///
-/// The handler suppresses device notifications when it schedules the drain;
-/// the drain resumes them once the receive ring is empty. The mask flag and
-/// its IRQ-line provider call are serialized under one lock because the two
-/// sides may run on different CPUs concurrently: without the lock, a
-/// late-landing mask could leave the line physically disabled while the
-/// flag says unmasked, and the drain's short-circuit would then never
-/// re-enable it.
-struct NetNapiState {
-    resource: IrqResource,
-    line_masked: SpinNoIrq<bool>,
-}
-
-impl NetNapiState {
-    fn new(irq: usize) -> Self {
-        Self {
-            resource: IrqResource::new(irq, IrqTrigger::Unknown(0)),
-            line_masked: SpinNoIrq::new(false),
-        }
-    }
-
-    /// Masks the IRQ line, at most once per suppress/resume cycle.
-    fn mask_line(&self) {
-        let mut is_masked = self.line_masked.lock();
-        if !*is_masked && let Ok(provider) = irq_provider() {
-            provider.set_irq_enabled(self.resource, false);
-            *is_masked = true;
-        }
-    }
-
-    /// Unmasks the IRQ line if a previous mask is still outstanding.
-    fn unmask_line(&self) {
-        let mut is_masked = self.line_masked.lock();
-        if *is_masked && let Ok(provider) = irq_provider() {
-            provider.set_irq_enabled(self.resource, true);
-            *is_masked = false;
-        }
-    }
-}
 
 trait VirtIoNetIrqAck: Send + Sync {
     fn ack_interrupt(&self) -> bool;
@@ -75,7 +33,6 @@ trait VirtIoNetIrqAck: Send + Sync {
 struct VirtIoNetIrqHandle<H: Hal, T: Transport, const QS: usize> {
     inner: Arc<SpinNoIrq<InnerDev<H, T, QS>>>,
     rx_scheduler: Arc<SpinNoIrq<Option<Arc<dyn NetRxScheduler>>>>,
-    napi: Arc<NetNapiState>,
     id: usize,
     irq: usize,
 }
@@ -109,14 +66,16 @@ impl<H: Hal, T: Transport, const QS: usize> VirtIoNetIrqAck for VirtIoNetIrqHand
     }
 
     fn suppress_interrupts(&self) {
-        // Queue-level suppression covers devices that did not negotiate
-        // VIRTIO_F_RING_EVENT_IDX (the avail-ring NO_INTERRUPT flag); with
-        // EVENT_IDX negotiated this write is ignored by the device, so line
-        // masking below carries the suppression instead.
+        // Queue-level suppression sets the avail-ring NO_INTERRUPT flag; it
+        // only takes effect when VIRTIO_F_RING_EVENT_IDX was not negotiated.
+        // With EVENT_IDX negotiated this write is ignored and suppression is
+        // implicit instead: each `receive_complete` pop advances `used_event`
+        // to the driver's consumed index, and a spec-conformant device only
+        // notifies when it *reaches* that event index — so while the drain
+        // lags behind the device (or until it catches up), further
+        // completions cost no interrupt. This mirrors Linux, which never
+        // masks the IRQ line for NAPI.
         self.inner.lock().disable_interrupts();
-        // Line-level masking covers real IRQ lines (GIC/PLIC/IO-APIC). It is
-        // a no-op for x86 MSI-X vectors, which the APIC cannot mask.
-        self.napi.mask_line();
     }
 }
 
@@ -165,15 +124,13 @@ fn register_virtio_net_irq<H: Hal + 'static, T: Transport + 'static, const QS: u
     irq: usize,
     inner: &Arc<SpinNoIrq<InnerDev<H, T, QS>>>,
     rx_scheduler: &Arc<SpinNoIrq<Option<Arc<dyn NetRxScheduler>>>>,
-) -> DriverResult<(usize, Arc<NetNapiState>)> {
+) -> DriverResult<usize> {
     let handle_id = NEXT_IRQ_HANDLE_ID.fetch_add(1, Ordering::Relaxed);
-    let napi = Arc::new(NetNapiState::new(irq));
     NET_IRQ_HANDLES
         .lock()
         .push(Arc::new(VirtIoNetIrqHandle::<H, T, QS> {
             inner: inner.clone(),
             rx_scheduler: rx_scheduler.clone(),
-            napi: napi.clone(),
             id: handle_id,
             irq,
         }));
@@ -190,7 +147,7 @@ fn register_virtio_net_irq<H: Hal + 'static, T: Transport + 'static, const QS: u
         }
     }
 
-    Ok((handle_id, napi))
+    Ok(handle_id)
 }
 
 fn unregister_virtio_net_irq(irq: usize, handle_id: usize) {
@@ -250,8 +207,6 @@ pub struct VirtIoNetDev<H: Hal, T: Transport, const QS: usize> {
     mac: MacAddress,
     irq: Option<usize>,
     irq_handle_id: Option<usize>,
-    /// NAPI suppression state shared with the hardirq handle.
-    napi: Option<Arc<NetNapiState>>,
     rx_scheduler: Arc<SpinNoIrq<Option<Arc<dyn NetRxScheduler>>>>,
 }
 
@@ -345,12 +300,9 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
         }
 
         let mut irq_handle_id = None;
-        let mut napi = None;
         let rx_scheduler = Arc::new(SpinNoIrq::new(None));
         if let Some(irq) = irq {
-            let (handle_id, napi_state) = register_virtio_net_irq(irq, &inner, &rx_scheduler)?;
-            irq_handle_id = Some(handle_id);
-            napi = Some(napi_state);
+            irq_handle_id = Some(register_virtio_net_irq(irq, &inner, &rx_scheduler)?);
         }
 
         // 3. Cache immutable device properties.
@@ -368,7 +320,6 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
             mac,
             irq,
             irq_handle_id,
-            napi,
             rx_scheduler,
         })
     }
@@ -501,18 +452,16 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
             let inner = self.inner.lock();
             inner.poll_receive()
         };
-        // NAPI drain end: the receive ring is empty, so resume device
+        // NAPI drain end: the receive ring is empty, so resume queue
         // notifications and recheck once. A completion that raced the resume
-        // is either returned here or covered by the re-enabled interrupt
+        // is either returned here or covered by the re-enabled notification
+        // (EVENT_IDX devices re-notify from the last popped `used_event`)
         // scheduling another drain.
         let token = match token {
             Some(token) => Some(token),
             None => {
                 let mut inner = self.inner.lock();
                 inner.enable_interrupts();
-                if let Some(napi) = &self.napi {
-                    napi.unmask_line();
-                }
                 inner.poll_receive()
             }
         };
@@ -781,20 +730,17 @@ mod tests {
         const UNMAPPED_TEST_IRQ: usize = 0x6000_0000;
         let irq = UNMAPPED_TEST_IRQ;
         let handle_id = 53;
-        let napi = Arc::new(NetNapiState::new(irq));
         NET_IRQ_HANDLES
             .lock()
             .push(Arc::new(VirtIoNetIrqHandle::<MockHal, MockTransport, 32> {
                 inner: dev.inner.clone(),
                 rx_scheduler: dev.rx_scheduler.clone(),
-                napi: napi.clone(),
                 id: handle_id,
                 irq,
             }));
         REGISTERED_NET_IRQS.lock().insert(irq);
         dev.irq = Some(irq);
         dev.irq_handle_id = Some(handle_id);
-        dev.napi = Some(napi);
 
         assert!(matches!(dev.recv(), Err(DriverError::WouldBlock)));
         assert_eq!(interrupt_ack_count.load(Ordering::Relaxed), 0);
@@ -887,53 +833,6 @@ mod tests {
         drop(handles);
 
         reset_irq_state();
-    }
-
-    #[def_test(serial)]
-    fn test_napi_mask_unmask_pairs_line_calls_exactly() {
-        use alloc::vec::Vec;
-
-        use device_res::{IrqHandler, IrqHandlerToken, IrqOp, IrqResource};
-
-        struct RecordingIrqOp;
-        static LINE_CALLS: SpinNoIrq<Vec<(usize, bool)>> = SpinNoIrq::new(Vec::new());
-        static RECORDING_OP: RecordingIrqOp = RecordingIrqOp;
-
-        impl IrqOp for RecordingIrqOp {
-            fn request_irq(
-                &self,
-                _irq: IrqResource,
-                _handler: Arc<dyn IrqHandler>,
-            ) -> device_res::ResResult<IrqHandlerToken> {
-                Err(device_res::ResError::Busy)
-            }
-
-            fn release_irq(&self, _irq: IrqResource, _token: IrqHandlerToken) {}
-
-            fn set_irq_enabled(&self, irq: IrqResource, enabled: bool) {
-                LINE_CALLS.lock().push((irq.number, enabled));
-            }
-        }
-
-        let saved = device_res::try_irq_provider();
-        device_res::set_irq_provider(&RECORDING_OP);
-
-        let napi = NetNapiState::new(31);
-        // Redundant masks/unmasks must not reach the line; every real
-        // transition must, and the flag must track the line state.
-        napi.mask_line();
-        napi.mask_line();
-        napi.unmask_line();
-        napi.unmask_line();
-        napi.unmask_line();
-        napi.mask_line();
-
-        let calls = LINE_CALLS.lock().clone();
-        assert_eq!(calls, alloc::vec![(31, false), (31, true), (31, false)]);
-
-        if let Some(provider) = saved {
-            device_res::set_irq_provider(provider);
-        }
     }
 
     #[def_test]
