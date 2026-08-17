@@ -140,9 +140,11 @@ core/kruntime
 
 驱动向上提供 NIC 能力时仍通过 `kclass` / `driver_net` 发布 `NetDevice`。
 `EthernetDevice` 从设备句柄取得 IRQ，`knet-rx` 任务直接在该 IRQ source
-上注册 waker。IRQ 只负责唤醒任务，任务在普通上下文发布 RX 工作并执行有界
+上注册 waker，并同时注册设备 deadline poll set。IRQ 只负责唤醒任务，任务在普通上下文发布 RX 工作并执行有界
 `NetworkPoller` 批次。设备拥有 ARP 与邻居 resolver，`next_poll_at` 提供
-ARP deadline，任务同时等待 IRQ 和该 deadline。
+ARP deadline。`knet-rx` 等待 IRQ、该 deadline 的睡眠以及跨任务 deadline 唤醒。
+poller 或 socket assist 在 `prepare_unicast` / ARP 重试路径产生未来 deadline 时，
+通过 `Service::note_device_deadline` 唤醒 `knet-rx`，并把该期限并入原子 deadline。
 Socket 等待路径通过调用方的 `PollContext` 注册设备 IRQ；loopback 等没有独立
 IRQ 的设备继续使用 `Service::timeout_poll`。`kirq` 只提供通用 IRQ waiter，
 设备、resolver 和 poller 的推进语义由 `knet` 持有。
@@ -298,19 +300,19 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 6. 完整 IPv4 报文先复制到匹配的 raw socket 接收队列，再按协议进入 UDP、ICMPv4 或 TCP 路径。UDP 由 crate 内 PCB registry 分流，ICMPv4 仅对本机单播目的的 echo request 生成应答（不回复 broadcast / multicast，与 Linux 6.8 默认 `icmp_echo_ignore_broadcasts=1` 一致），并检查差错引用；TCP、IPv6 和 DNS 进入有界 smoltcp ingress queue。`Service` 先执行 `poll_maintenance`，再按 RX budget 逐个调用 `poll_ingress_single`，并按 TX budget 调用有界的 `poll_egress`。达到预算或时间边界后，剩余 ingress 保持 FIFO 顺序并进入后续轮次。
 7. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
 8. `Router::dispatch_budgeted` 先处理 control TX queue，再处理 data TX queue，单轮发送数量受 TX budget 限制。
-9. `Interface::poll_at` 与 orphan `FIN_WAIT_2` deadline 共同决定下一次网络 deadline，`Service` 将其写入原子 deadline；`register_timer_callback(TIMER_SAMPLE_PERIOD)` 周期采样该值，到期后通过 `notify(PollReason::Timer)` 发布工作。尚未到期的 deadline 不进入 `PollProgress::has_more`。
+9. `Interface::poll_at`、orphan `FIN_WAIT_2` deadline 与尚未到期的设备维护 deadline 共同决定下一次网络 deadline，`Service` 在 TX dispatch 之后将其写入原子 deadline；`register_timer_callback(TIMER_SAMPLE_PERIOD)` 周期采样该值，到期后通过 `notify(PollReason::Timer)` 发布工作。已经到期的设备 deadline 不进入原子 deadline，也不进入 `PollProgress::has_more`，由 `knet-rx` 的 1 ms 最小等待节流。尚未到期的协议或设备 deadline 不进入 `PollProgress::has_more`。
 10. `PollProgress::has_more` 只汇报当前可立即处理的 RX、ingress、TX 或已到期 timer 工作。每轮 `Service::poll_budgeted` 使用 1 ms 软时间上限，并在设备 RX、stack ingress、stack egress 和 Router TX 每完成 32 个工作项后检查时间。协议 maintenance 和一次 smoltcp egress pass 始终执行，以维持 timer 与协议输出进度。RX 任务或后台 Future 获得批次执行权后最多连续推进四轮，达到轮数上限或清空立即工作后归还执行权，剩余 backlog 通过 `SCHEDULED` 状态进入下一批。
 
 ### TX 路由
 
 1. TCP connect、send 和 close，raw send 以及 UDP data queue 提交完成后发布真实 TX 通知；TCP recv 只在消费前的 smoltcp 接收缓冲区余量低于最大窗口缩放量子时发布 `RxWindow` 通知，覆盖未缩放零窗口和缩放后仍编码为零的窗口。达到缩放量子后的窗口增长随 RX 或已登记的协议 timer poll 推进，避免每次应用读取都创建后台工作。调用方可随后通过 `assist_once` 协助执行已调度的一轮。TCP 文件关闭不会立即删除仍处于协议关闭过程中的 handle。
 2. crate 内 UDP 在 Router mutex 内选择处于管理 up 状态的输出设备、源地址和路由 MTU；路由缺失或输出设备管理 down 时返回 `ENETUNREACH`。写入 UDP 与 IPv4 头后提交到 data TX queue。smoltcp 生成的 IP 包进入同一 data TX queue，`IngressProcessor` 生成的 ICMPv4 错误进入 control TX queue。
-3. `IP_MTU_DISCOVER` 决定 UDP IPv4 头部的 DF 标志。超出路由 MTU 且允许分片的包由 `fragment_output_packet` 拆分，DF 包返回 `EMSGSIZE`。
+3. `IP_MTU_DISCOVER` 决定 UDP IPv4 头部的 DF 标志。超出路由 MTU 且允许分片的包由 `fragment_output_packet` 拆分，DF 包返回 `EMSGSIZE`。raw IPv4 send 在分配 packet 缓冲前拒绝无法放入 16-bit `tot_len` 的 payload，同样返回 `EMSGSIZE`。
 4. `Router::dispatch_budgeted` 优先接管 control packet，再按 IP 版本解析源地址和目的地址；IPv4 输出先按实际长度更新 `total_len` 和头部校验和，并将已校验的源地址随报文传给 `NetDevice`。
 5. 广播或组播包复制到所有设备；`0.0.0.0` 到 `255.255.255.255` 的受限广播允许在设备尚未分配 IPv4 地址时直接发送，用于 DHCP 初始化流量。
 6. 单播包通过 `RouteTable::lookup` 选择最长前缀路由。
 7. Ethernet 设备先查 ARP neighbor cache，命中后通过 `link::wire` 封装 Ethernet frame。
-8. 未命中时发送 ARP request，并把 IP 包放入 `pending_tx` 等待 neighbor 解析。
+8. 未命中时发送 ARP request，并把 IP 包放入 `pending_tx` 等待 neighbor 解析。该路径调用 `note_device_deadline`，唤醒 `knet-rx` 并发布未来重试期限。
 
 当前实现保留 smoltcp TCP 和 IPv6 推进。UDP、raw IPv4、IPv4 分片重组、输出分片和 ICMPv4 echo 及 UDP 差错报告使用 crate 内实现。
 `PacketBuf`、`link::wire` 和 `stack::ipv4` 提供设备与 crate 内 IPv4、UDP、raw 数据路径共用的报文表示和 parser/emitter。
@@ -375,7 +377,7 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 - Unix stream 的用户数据复制和 `PollSet` 唤醒在 `tx_order` 外执行。send 先写入未发布的 vacant 区域，再在锁内复检关闭状态并推进 write index；recv 读取为空后在锁内复查 occupied 长度和关闭状态；shutdown 完成状态发布并复制 peer endpoint 引用后释放 `channel` mutex，再执行 waiter 唤醒。
 - Unix stream 每个 endpoint 分别持有 readable、writable 和 connection-state 三组 `PollSet`。写入只唤醒 peer readable waiter，读取跨过发送缓冲低水位时只唤醒 peer writable waiter，半关闭只唤醒受影响方向，完整关闭通过 connection-state waiter 通知双方。
 - Router 直接持有配置路由、地址派生路由和动态选源所需的运行时状态，设备直接持有邻居 resolver 与缓存；netlink 不维护 route 或 neighbor mirror。全局 `RTNETLINK_MUTATION_LOCK` 串行化不同 socket 的控制面 mutation 和设备移除；每个 socket 的发送事务、rx queue 和 subscriber 列表使用独立 `Mutex`。发送事务锁串行化同一 socket 的容量预检、mutation 执行和 response 入队。response 在 rx queue 锁外生成，只在容量检查和入队时持锁；锁顺序固定为发送事务锁、`RTNETLINK_MUTATION_LOCK`、Router、NetDevice、ingress、Interface、netlink rx queue，未涉及的锁按该序列跳过。
-- RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 使用调用方传入的同一个 `PollContext` 注册聚合 `timeout_poll` 和设备 RX waiter；Ethernet 设备直接将 waiter 注册到 IRQ source，loopback 继续使用 `timeout_poll`。registration 由跨越 `Pending` 的 `PollRegistrations` 统一管理。Ethernet 的 ARP deadline 只由 `knet-rx` 任务通过 `next_poll_at` 等待和推进，设备层不得保存调用方的裸 waker。
+- RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 使用调用方传入的同一个 `PollContext` 注册聚合 `timeout_poll` 和设备 RX waiter；Ethernet 设备直接将 waiter 注册到 IRQ source，loopback 继续使用 `timeout_poll`。registration 由跨越 `Pending` 的 `PollRegistrations` 统一管理。Ethernet 的 ARP deadline 由 `knet-rx` 通过 `next_poll_at` 等待和推进；非 `knet-rx` 上下文产生或提前该 deadline 时唤醒 `knet-rx` 的 deadline poll set，并把未来期限并入原子 deadline。设备层不得保存调用方的裸 waker。
 - 每次 `Interface::poll` 也会刷新独立的协议 timer，使 TCP 重传等 deadline 不依赖阻塞中的 socket waiter。
 
 ## 设计决策
@@ -390,7 +392,7 @@ TCP、IPv6 和 DNS 继续通过 smoltcp socket set 推进，协议推进依赖 E
 
 Ethernet RX 任务、socket TX 生产路径、协议 timer 和后台任务共享同一个 `NetworkPoller`。`notify` 与 `publish_and_poll_rx` 使用状态低位发布 pending 工作，`SCHEDULED` 到 `RUNNING` 的 CAS 提供单执行者约束，完成 CAS 同时归还执行权并发布下一状态。RX 任务在发布后直接竞争有界批次执行权，避免再经过一次任务唤醒。执行期间到达的通知把状态变为 `RUNNING_PENDING`，完成路径据此发布 `SCHEDULED` 并唤醒后台任务。assist 在 `IDLE`、`RUNNING` 和 `RUNNING_PENDING` 上直接返回，不创建事件，也不等待执行权。
 
-RX、TX 与 timer 使用独立预算。`Service` 使用 smoltcp 分阶段 API 约束 stack ingress 和 egress，并使用 1 ms 软时间上限控制单轮占用。control TX 优先于 data TX，避免 ICMP 错误和协议控制流量长期滞后。TCP send 可写快路径向 smoltcp socket buffer 写入数据并发布 TX 通知，连续发送由 poller owner 在有界批次内完成协议推进和 TX dispatch。TCP recv 在消费前接收缓冲区余量低于最大窗口缩放量子时发布 `RxWindow` 通知，释放 socket-set mutex 后由 poller 推进窗口更新；达到缩放量子后的接收窗口增长复用 RX 和已登记的 timer 推进。TCP socket 直接向 smoltcp 注册聚合 send waker，raw socket 通过 `GeneralOptions` 注册 TX waiter；Router data TX queue 的可用 packet slot 实际增加时，`PollProgress::tx_capacity_changed` 触发 poller TX waiter 唤醒。协议与 deferred-close deadline 写入原子值，周期采样回调到期后唤醒 socket waiter，并以 `PollReason::Timer` 通知 poller。
+RX、TX 与 timer 使用独立预算。`Service` 使用 smoltcp 分阶段 API 约束 stack ingress 和 egress，并使用 1 ms 软时间上限控制单轮占用。control TX 优先于 data TX，避免 ICMP 错误和协议控制流量长期滞后。TCP send 可写快路径向 smoltcp socket buffer 写入数据并发布 TX 通知，连续发送由 poller owner 在有界批次内完成协议推进和 TX dispatch。TCP recv 在消费前接收缓冲区余量低于最大窗口缩放量子时发布 `RxWindow` 通知，释放 socket-set mutex 后由 poller 推进窗口更新；达到缩放量子后的接收窗口增长复用 RX 和已登记的 timer 推进。TCP socket 直接向 smoltcp 注册聚合 send waker，raw socket 通过 `GeneralOptions` 注册 TX waiter；Router data TX queue 的可用 packet slot 实际增加时，`PollProgress::tx_capacity_changed` 触发 poller TX waiter 唤醒。协议与 deferred-close deadline 写入原子值，尚未到期的设备维护 deadline 在 TX dispatch 后并入同一原子值，周期采样回调到期后唤醒 socket waiter，并以 `PollReason::Timer` 通知 poller。已到期的设备 deadline 仍由 `knet-rx` 的 1 ms 最小等待推进，避免 pending TX 停留在 origin 时间点时形成空转。
 
 ### rtnetlink 状态所有权
 
@@ -428,10 +430,12 @@ smoltcp `poll_at` 使用传入 timestamp 的同一 epoch 返回期限；兼容�
 
 Ethernet IRQ source 由 `EthernetDevice::register_rx_waker` 直接注册到调用方的
 `PollContext`，`knet-rx` 任务保持同一份 `PollRegistrations` 跨越 `Pending`。
-任务每次重新注册 IRQ 后先再执行一次 poller 批次，以关闭 IRQ/register 竞态，
+任务每次重新注册 IRQ 和设备 deadline poll set 后先再执行一次 poller 批次，以关闭 IRQ/register 竞态，
 并让该批次产生的 ARP / pending TX deadline 进入随后读取的 `next_poll_at`；
-然后为邻居探测和 pending TX 保留一个最小睡眠时间。IRQ、deadline 和 poller
-的注册复查共同覆盖 check/register 竞态，已到期的 deadline 使用 1 ms 最小等待，
+然后为邻居探测和 pending TX 保留一个最小睡眠时间。poller 或用户发送路径在
+`knet-rx` 已经睡眠时若发出 ARP 或提前设备 deadline，会唤醒该 poll set，使任务
+重新 arm 睡眠；未来期限同时写入原子 deadline，作为 IRQ 空闲时的备份。IRQ、deadline
+和 poller 的注册复查共同覆盖 check/register 竞态，已到期的 deadline 使用 1 ms 最小等待，
 避免 pending TX 保持 origin 时间点时形成空转。
 
 ### TCP listen 表独立于 smoltcp listener socket

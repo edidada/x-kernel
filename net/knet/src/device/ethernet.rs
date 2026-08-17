@@ -74,9 +74,10 @@ impl EthernetDevice {
     /// Spawn the RX poll task for an initialized network stack.
     ///
     /// Register the task-owned [`PollContext`] directly with the Ethernet IRQ
-    /// source. Do not route `knet-rx` through [`crate::SERVICE::register_rx_waker`]:
-    /// that path also arms `timeout_poll`, and a zero-delay deadline wake would
-    /// busy-spin this task and starve socket progress (including loopback TCP).
+    /// source and the device-deadline poll set. Do not route `knet-rx` through
+    /// [`crate::SERVICE::register_rx_waker`]: that path also arms `timeout_poll`,
+    /// and a zero-delay deadline wake would busy-spin this task and starve
+    /// socket progress (including loopback TCP).
     pub(crate) fn spawn_rx_task(irq: usize) {
         let _ = ktask::spawn_with_name(
             move || {
@@ -110,12 +111,20 @@ impl EthernetDevice {
                             ktask::yield_now();
                             continue;
                         }
+                        if crate::SERVICE
+                            .register_device_deadline_waker(&mut context)
+                            .is_err()
+                        {
+                            drop(context);
+                            ktask::yield_now();
+                            continue;
+                        }
                         drop(context);
 
-                        // Recheck after IRQ register to close the check/register
-                        // race. This batch may enqueue ARP or pending-TX work;
-                        // read `next_poll_at` only afterwards so the armed sleep
-                        // matches any new, earlier deadline.
+                        // Recheck after IRQ and deadline-poll register to close
+                        // the check/register race. This batch may enqueue ARP
+                        // or pending-TX work; read `next_poll_at` only afterwards
+                        // so the armed sleep matches any new, earlier deadline.
                         crate::poller::network_poller().publish_and_poll_rx();
 
                         // Drive ARP / pending-TX deadlines here instead of via
@@ -130,8 +139,9 @@ impl EthernetDevice {
                             }
                             Some(_) => TimeSpan::from_millis(1),
                             // Still no deadline after the recheck: wait for IRQ
-                            // only. Do not `continue` — that would livelock when
-                            // the deadline stays None.
+                            // or a cross-task device-deadline wake. Do not
+                            // `continue` — that would livelock when the deadline
+                            // stays None.
                             None => return Poll::<()>::Pending,
                         };
                         let mut fut = Box::pin(sleep(delay));
@@ -269,20 +279,17 @@ impl EthernetDevice {
     fn send_arp_request(&mut self, ifindex: i32, request: NeighborRequest, now: MonotonicInstant) {
         let IpAddress::Ipv4(target_ipv4) = request.target else {
             warn!("IPv6 address ARP is not supported: {}", request.target);
-            self.neighbor_resolver
-                .record_request_attempt(request.target, now);
+            self.record_arp_request_attempt(request.target, now);
             return;
         };
         let IpAddress::Ipv4(source_addr) = request.source_addr else {
             warn!("Cannot resolve ARP from a non-IPv4 source");
-            self.neighbor_resolver
-                .record_request_attempt(request.target, now);
+            self.record_arp_request_attempt(request.target, now);
             return;
         };
         if source_addr.is_unspecified() {
             warn!("Cannot resolve ARP from an unspecified IPv4 source");
-            self.neighbor_resolver
-                .record_request_attempt(request.target, now);
+            self.record_arp_request_attempt(request.target, now);
             return;
         }
         debug!("Requesting ARP for {}", target_ipv4);
@@ -299,8 +306,7 @@ impl EthernetDevice {
             wire::EtherType::Arp,
         );
 
-        self.neighbor_resolver
-            .record_request_attempt(request.target, now);
+        self.record_arp_request_attempt(request.target, now);
     }
 
     fn send_arp_reply(
@@ -332,6 +338,7 @@ impl EthernetDevice {
             && err.should_retry()
         {
             self.neighbor_resolver.requeue(pending, now);
+            self.publish_neighbor_deadline();
         }
     }
 
@@ -414,6 +421,17 @@ impl EthernetDevice {
                     IpAddress::Ipv4(next_hop) if addr.is_directed_broadcast(next_hop)
                 )
             })
+    }
+
+    fn record_arp_request_attempt(&mut self, target: IpAddress, now: MonotonicInstant) {
+        self.neighbor_resolver.record_request_attempt(target, now);
+        self.publish_neighbor_deadline();
+    }
+
+    fn publish_neighbor_deadline(&self) {
+        if crate::SERVICE.is_inited() {
+            crate::SERVICE.note_device_deadline(self.neighbor_resolver.next_poll_at());
+        }
     }
 }
 

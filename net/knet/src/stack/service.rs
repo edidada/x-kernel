@@ -79,6 +79,9 @@ pub struct Service {
     control_batch: Mutex<Vec<Vec<u8>>>,
     timeout_deadline_micros: AtomicU64,
     timeout_poll: Arc<PollSet>,
+    // Wakes `knet-rx` when a non-RX context creates or advances a device
+    // maintenance deadline. Do not store caller wakers on the device.
+    device_deadline_poll: Arc<PollSet>,
     #[cfg(unittest)]
     rebuild_count: AtomicUsize,
 }
@@ -97,6 +100,7 @@ impl Service {
             control_batch: Mutex::new(Vec::new()),
             timeout_deadline_micros: AtomicU64::new(0),
             timeout_poll: Arc::new(PollSet::new()),
+            device_deadline_poll: Arc::new(PollSet::new()),
             #[cfg(unittest)]
             rebuild_count: AtomicUsize::new(0),
         };
@@ -222,7 +226,6 @@ impl Service {
             earliest_poll_deadline(iface.poll_at(current, &sockets), deferred_close_deadline);
         drop(iface);
         let timer_has_more = has_immediate_timer_work(current, next_poll);
-        self.update_poll_timeout(current, next_poll);
         LISTEN_TABLE.wake_touched_acceptors(&mut sockets);
         drop(sockets);
 
@@ -249,6 +252,12 @@ impl Service {
                 break;
             }
         }
+        // Publish after TX dispatch so ARP / pending-TX deadlines created in
+        // this round enter the sampled atomic deadline. Due device deadlines
+        // stay on the `knet-rx` 1 ms throttle and are not treated as immediate
+        // poller work.
+        let device_deadline = router.next_poll_at();
+        self.publish_protocol_and_device_timeout(now(), next_poll, device_deadline);
         PollProgress {
             rx_packets,
             tx_packets,
@@ -372,9 +381,10 @@ impl Service {
             sockets.deferred_tcp_close_deadline(),
         );
         drop(sockets);
-        self.update_poll_timeout(current, next);
 
-        for (index, device) in self.router.lock().devices.iter().enumerate() {
+        let router = self.router.lock();
+        let device_deadline = router.next_poll_at();
+        for (index, device) in router.devices.iter().enumerate() {
             if mask & (1 << index) != 0 {
                 // Ethernet devices register the waiter on the device IRQ
                 // source. Loopback and devices without an IRQ keep the
@@ -382,26 +392,73 @@ impl Service {
                 device.register_rx_waker(&source_waker, context)?;
             }
         }
+        drop(router);
+        self.publish_protocol_and_device_timeout(current, next, device_deadline);
         Ok(source_waker)
     }
 
-    fn update_poll_timeout(&self, current: SmoltcpInstant, next: Option<SmoltcpInstant>) {
-        let Some(next) = next else {
-            self.timeout_deadline_micros.store(0, Ordering::Release);
+    /// Registers `knet-rx` on the device-deadline poll set.
+    pub(crate) fn register_device_deadline_waker(
+        &self,
+        context: &mut PollContext<'_>,
+    ) -> Result<(), PollRegisterError> {
+        context.register(self.device_deadline_poll.as_ref())
+    }
+
+    /// Wakes `knet-rx` and publishes a future device deadline to the sampled atomic deadline.
+    ///
+    /// Callers may hold the Router lock: this path only touches atomics and the
+    /// deadline poll set. Already-due deadlines are not stored in the atomic
+    /// deadline, so pending TX at `MonotonicInstant::ORIGIN` cannot busy-spin
+    /// the sampler.
+    pub(crate) fn note_device_deadline(&self, deadline: Option<MonotonicInstant>) {
+        let Some(deadline) = deadline else {
             return;
         };
-
-        if next <= current {
-            self.timeout_deadline_micros.store(0, Ordering::Release);
-            self.publish_timer_expiration();
+        self.device_deadline_poll.wake();
+        let now = monotonic_time();
+        if deadline <= now {
             return;
         }
+        let micros = timeout_deadline_micros(to_smoltcp_instant(deadline));
+        loop {
+            let existing = self.timeout_deadline_micros.load(Ordering::Acquire);
+            let combined = if existing == 0 {
+                micros
+            } else {
+                existing.min(micros)
+            };
+            if combined == existing {
+                return;
+            }
+            if self
+                .timeout_deadline_micros
+                .compare_exchange_weak(existing, combined, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return;
+            }
+        }
+    }
 
-        let deadline = u64::try_from(next.total_micros())
-            .unwrap_or(u64::MAX)
-            .saturating_add(1);
-        self.timeout_deadline_micros
-            .store(deadline, Ordering::Release);
+    fn publish_protocol_and_device_timeout(
+        &self,
+        current: SmoltcpInstant,
+        protocol: Option<SmoltcpInstant>,
+        device: Option<MonotonicInstant>,
+    ) {
+        if protocol.is_some_and(|deadline| deadline <= current) {
+            self.publish_timer_expiration();
+        }
+        match future_protocol_and_device_deadline(current, protocol, device, monotonic_time()) {
+            Some(next) => {
+                self.timeout_deadline_micros
+                    .store(timeout_deadline_micros(next), Ordering::Release);
+            }
+            None => {
+                self.timeout_deadline_micros.store(0, Ordering::Release);
+            }
+        }
     }
 
     pub(crate) fn handle_timer_tick(&self) {
@@ -599,7 +656,10 @@ impl Service {
     pub(crate) fn apply_neighbor_update(&self, update: NeighborUpdate) -> Result<(), LinuxError> {
         let mut router = self.router.lock();
         router.apply_neighbor_update(update)?;
+        let device_deadline = router.next_poll_at();
+        drop(router);
         self.timeout_poll.wake();
+        self.note_device_deadline(device_deadline);
         Ok(())
     }
 
@@ -668,6 +728,25 @@ fn earliest_poll_deadline(
         (Some(protocol), Some(close)) => Some(protocol.min(close)),
         (protocol, close) => protocol.or(close),
     }
+}
+
+fn future_protocol_and_device_deadline(
+    current: SmoltcpInstant,
+    protocol: Option<SmoltcpInstant>,
+    device: Option<MonotonicInstant>,
+    now: MonotonicInstant,
+) -> Option<SmoltcpInstant> {
+    let future_protocol = protocol.filter(|deadline| *deadline > current);
+    let future_device = device
+        .filter(|deadline| *deadline > now)
+        .map(to_smoltcp_instant);
+    earliest_poll_deadline(future_protocol, future_device)
+}
+
+fn timeout_deadline_micros(deadline: SmoltcpInstant) -> u64 {
+    u64::try_from(deadline.total_micros())
+        .unwrap_or(u64::MAX)
+        .saturating_add(1)
 }
 
 fn output_ipv4_packet_count(
@@ -750,6 +829,36 @@ mod tests {
         let protocol = SmoltcpInstant::from_millis(20);
 
         assert!(earliest_poll_deadline(Some(protocol), Some(close)) == Some(close));
+    }
+
+    #[def_test]
+    fn future_device_deadline_is_published_with_protocol_timer() {
+        let current = SmoltcpInstant::from_millis(10);
+        let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_millis(10));
+        let protocol = SmoltcpInstant::from_millis(30);
+        let device = MonotonicInstant::from_span_since_origin(TimeSpan::from_millis(20));
+
+        assert_eq!(
+            future_protocol_and_device_deadline(current, Some(protocol), Some(device), now),
+            Some(to_smoltcp_instant(device))
+        );
+    }
+
+    #[def_test]
+    fn due_device_deadline_is_not_published_as_tick_work() {
+        let current = SmoltcpInstant::from_millis(10);
+        let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_millis(10));
+        let protocol = SmoltcpInstant::from_millis(30);
+        let device = MonotonicInstant::from_span_since_origin(TimeSpan::from_millis(10));
+
+        assert_eq!(
+            future_protocol_and_device_deadline(current, Some(protocol), Some(device), now),
+            Some(protocol)
+        );
+        assert_eq!(
+            future_protocol_and_device_deadline(current, None, Some(device), now),
+            None
+        );
     }
 
     #[def_test]

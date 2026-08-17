@@ -32,6 +32,7 @@ use crate::{
 };
 
 const RAW_RX_QUEUE_LIMIT: usize = 128;
+const RAW_MAX_PAYLOAD_LEN: usize = u16::MAX as usize - ipv4::IPV4_MIN_HEADER_LEN;
 
 static RAW_SOCKET_REGISTRY: LazyInit<RawSocketRegistry> = LazyInit::new();
 
@@ -309,6 +310,14 @@ impl SocketOps for RawSocket {
             return Err(KError::BrokenPipe);
         }
 
+        // Linux 6.8 `raw_sendmsg` rejects `len > 0xFFFF` before skb allocation.
+        // This path always prepends a 20-byte IPv4 header, so the payload must
+        // also fit `tot_len`.
+        let payload_len = src.remaining();
+        if payload_len > RAW_MAX_PAYLOAD_LEN {
+            return Err(LinuxError::EMSGSIZE.into());
+        }
+
         let remote = self.remote_address(&options)?;
         let local = self.local_address_for(remote)?;
         let IpAddress::Ipv4(remote) = remote else {
@@ -317,7 +326,6 @@ impl SocketOps for RawSocket {
         let IpAddress::Ipv4(local) = local else {
             return Err(KError::from(LinuxError::EAFNOSUPPORT));
         };
-        let payload_len = src.remaining();
         let packet_len = ipv4::IPV4_MIN_HEADER_LEN + payload_len;
         let mut packet = Some(alloc::vec![0u8; packet_len]);
         src.read_exact(
@@ -856,6 +864,19 @@ mod tests {
         assert_eq!(
             socket.send(Cursor::new(&[1u8, 2, 3][..]), SendOptions::default()),
             Err(KError::BrokenPipe)
+        );
+    }
+
+    #[def_test(serial)]
+    fn raw_send_rejects_payload_that_cannot_fit_ipv4_total_len() {
+        let socket = RawSocket::new(
+            IpVersion::Ipv4,
+            IpProtocol::from_ipv4_number(ipv4::PROTOCOL_ICMP),
+        );
+        let oversized = vec![0u8; RAW_MAX_PAYLOAD_LEN + 1];
+        assert_eq!(
+            socket.send(Cursor::new(oversized.as_slice()), SendOptions::default()),
+            Err(KError::from(LinuxError::EMSGSIZE))
         );
     }
 
