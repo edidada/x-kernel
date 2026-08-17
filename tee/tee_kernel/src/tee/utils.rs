@@ -4,9 +4,6 @@
 
 use alloc::{format, string::String};
 
-#[cfg(feature = "csv_huk_key")]
-use tee_crypto::rng::{DeterministicRng, Rng};
-
 #[inline]
 pub const fn bit32(nr: u32) -> u32 {
     1u32 << nr
@@ -63,11 +60,10 @@ pub fn slice_fmt(data: &[u8]) -> String {
         + if len > min_len { "..." } else { "" }
 }
 
+/// Fill `data` from the TEE software CSPRNG (seeded from `/dev/urandom`).
 #[cfg(feature = "csv_huk_key")]
 pub fn random_bytes(data: &mut [u8]) {
-    let seed = khal::time::now_ticks();
-    let mut rng = DeterministicRng::seed_from_u64(seed);
-    rng.fill_bytes(data);
+    crate::tee::rng_software::crypto_rng_read(data).expect("TEE RNG failure");
 }
 
 #[unittest::mod_test]
