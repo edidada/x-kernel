@@ -13,7 +13,7 @@
 
 use core::alloc::Layout;
 
-use crate::{AllocError, buddy_alloc::BuddyAllocator};
+use crate::{AllocError, buddy_alloc::BuddyAllocator, slab_trait::SizeClass};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -21,9 +21,6 @@ use crate::{AllocError, buddy_alloc::BuddyAllocator};
 
 /// Internal page size used for expanding slabs.
 const PAGE_SIZE: usize = 4096;
-
-/// Maximum size served by a slab. Larger allocations go to the buddy.
-const MAX_SLAB_SIZE: usize = 2048;
 
 /// Sentinel: freelist is empty.
 const LIST_EMPTY: usize = 0;
@@ -208,18 +205,17 @@ impl SlabHeap {
             buddy,
         } = self;
 
-        let class = size_class(layout);
-        match class {
-            SizeClass::Slab8 => slab_alloc::<8>(buddy, slab_8),
-            SizeClass::Slab16 => slab_alloc::<16>(buddy, slab_16),
-            SizeClass::Slab32 => slab_alloc::<32>(buddy, slab_32),
-            SizeClass::Slab64 => slab_alloc::<64>(buddy, slab_64),
-            SizeClass::Slab128 => slab_alloc::<128>(buddy, slab_128),
-            SizeClass::Slab256 => slab_alloc::<256>(buddy, slab_256),
-            SizeClass::Slab512 => slab_alloc::<512>(buddy, slab_512),
-            SizeClass::Slab1024 => slab_alloc::<1024>(buddy, slab_1024),
-            SizeClass::Slab2048 => slab_alloc::<2048>(buddy, slab_2048),
-            SizeClass::Large => {
+        match SizeClass::from_layout(layout) {
+            Some(SizeClass::Bytes8) => slab_alloc::<8>(buddy, slab_8),
+            Some(SizeClass::Bytes16) => slab_alloc::<16>(buddy, slab_16),
+            Some(SizeClass::Bytes32) => slab_alloc::<32>(buddy, slab_32),
+            Some(SizeClass::Bytes64) => slab_alloc::<64>(buddy, slab_64),
+            Some(SizeClass::Bytes128) => slab_alloc::<128>(buddy, slab_128),
+            Some(SizeClass::Bytes256) => slab_alloc::<256>(buddy, slab_256),
+            Some(SizeClass::Bytes512) => slab_alloc::<512>(buddy, slab_512),
+            Some(SizeClass::Bytes1024) => slab_alloc::<1024>(buddy, slab_1024),
+            Some(SizeClass::Bytes2048) => slab_alloc::<2048>(buddy, slab_2048),
+            None => {
                 let pages = layout.size().div_ceil(PAGE_SIZE);
                 let align = layout.align().max(PAGE_SIZE);
                 buddy.allocate_pages(pages, align)
@@ -273,18 +269,17 @@ impl SlabHeap {
             buddy,
         } = self;
 
-        let class = size_class(layout);
-        match class {
-            SizeClass::Slab8 => slab_8.push(ptr),
-            SizeClass::Slab16 => slab_16.push(ptr),
-            SizeClass::Slab32 => slab_32.push(ptr),
-            SizeClass::Slab64 => slab_64.push(ptr),
-            SizeClass::Slab128 => slab_128.push(ptr),
-            SizeClass::Slab256 => slab_256.push(ptr),
-            SizeClass::Slab512 => slab_512.push(ptr),
-            SizeClass::Slab1024 => slab_1024.push(ptr),
-            SizeClass::Slab2048 => slab_2048.push(ptr),
-            SizeClass::Large => {
+        match SizeClass::from_layout(layout) {
+            Some(SizeClass::Bytes8) => slab_8.push(ptr),
+            Some(SizeClass::Bytes16) => slab_16.push(ptr),
+            Some(SizeClass::Bytes32) => slab_32.push(ptr),
+            Some(SizeClass::Bytes64) => slab_64.push(ptr),
+            Some(SizeClass::Bytes128) => slab_128.push(ptr),
+            Some(SizeClass::Bytes256) => slab_256.push(ptr),
+            Some(SizeClass::Bytes512) => slab_512.push(ptr),
+            Some(SizeClass::Bytes1024) => slab_1024.push(ptr),
+            Some(SizeClass::Bytes2048) => slab_2048.push(ptr),
+            None => {
                 let pages = layout.size().div_ceil(PAGE_SIZE);
                 buddy.deallocate_pages(ptr, pages);
             }
@@ -332,55 +327,6 @@ impl SlabHeap {
             + self.slab_512.total_bytes()
             + self.slab_1024.total_bytes()
             + self.slab_2048.total_bytes()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Size-class routing
-// ---------------------------------------------------------------------------
-
-enum SizeClass {
-    Slab8,
-    Slab16,
-    Slab32,
-    Slab64,
-    Slab128,
-    Slab256,
-    Slab512,
-    Slab1024,
-    Slab2048,
-    Large,
-}
-
-/// Map a layout to the smallest slab that fits it.
-fn size_class(layout: Layout) -> SizeClass {
-    let size = layout.size();
-    let align = layout.align();
-
-    if size > MAX_SLAB_SIZE || align > MAX_SLAB_SIZE {
-        return SizeClass::Large;
-    }
-
-    if size <= 8 && align <= 8 {
-        SizeClass::Slab8
-    } else if size <= 16 && align <= 16 {
-        SizeClass::Slab16
-    } else if size <= 32 && align <= 32 {
-        SizeClass::Slab32
-    } else if size <= 64 && align <= 64 {
-        SizeClass::Slab64
-    } else if size <= 128 && align <= 128 {
-        SizeClass::Slab128
-    } else if size <= 256 && align <= 256 {
-        SizeClass::Slab256
-    } else if size <= 512 && align <= 512 {
-        SizeClass::Slab512
-    } else if size <= 1024 && align <= 1024 {
-        SizeClass::Slab1024
-    } else if size <= 2048 && align <= 2048 {
-        SizeClass::Slab2048
-    } else {
-        SizeClass::Large
     }
 }
 
