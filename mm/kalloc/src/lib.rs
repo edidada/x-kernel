@@ -19,14 +19,19 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-#[allow(unused_imports)]
-use alloc_engine::{
-    AllocError, AllocResult, BaseAllocator, BuddyPageAllocator, ByteAllocator, PageAllocator,
-};
+#[cfg(not(feature = "slab"))]
+use alloc_engine::ByteAllocator;
+use alloc_engine::{AllocError, AllocResult, BaseAllocator, BuddyPageAllocator, PageAllocator};
+#[cfg(feature = "slab")]
+use alloc_engine::{SizeClass, SlabBacking};
 use kaddr_layout::v2p;
+#[cfg(feature = "slab")]
+use kmem_cache::KmemCacheSet;
 use kspin::{IrqSave, SpinNoIrq};
 use memaddr::PAGE_SIZE_4K;
 use strum::{IntoStaticStr, VariantArray};
+
+#[cfg(not(feature = "slab"))]
 const MIN_HEAP_SIZE: usize = 0x8000; // 32 K
 
 fn pages_to_bytes(num_pages: usize) -> usize {
@@ -39,8 +44,9 @@ fn kernel_virt_to_phys(vaddr: usize) -> usize {
     v2p(vaddr)
 }
 
+#[cfg(feature = "slab")]
+mod kmem_cache;
 mod page;
-mod pcb;
 mod pcp;
 pub use page::GlobalPage;
 
@@ -55,11 +61,9 @@ pub use tracking::*;
 #[cfg(not(any(feature = "slab", feature = "buddy", feature = "tlsf")))]
 compile_error!("kalloc requires one of the allocator features: slab, buddy, or tlsf");
 
+#[cfg(not(feature = "slab"))]
 cfg_if::cfg_if! {
-    if #[cfg(feature = "slab")] {
-        /// The default byte allocator.
-        pub type DefaultByteAllocator = alloc_engine::SlabByteAllocator;
-    } else if #[cfg(feature = "buddy")] {
+    if #[cfg(feature = "buddy")] {
         /// The default byte allocator.
         pub type DefaultByteAllocator = alloc_engine::BuddyByteAllocator;
     } else if #[cfg(feature = "tlsf")] {
@@ -67,6 +71,13 @@ cfg_if::cfg_if! {
         pub type DefaultByteAllocator = alloc_engine::TlsfByteAllocator;
     }
 }
+
+/// Standalone slab byte allocator retained for API compatibility.
+///
+/// The slab build's [`GlobalAllocator`] does not use this wrapper: it owns
+/// class-specific central caches directly.
+#[cfg(feature = "slab")]
+pub type DefaultByteAllocator = alloc_engine::SlabByteAllocator;
 
 /// Kinds of memory usage for tracking.
 #[repr(u8)]
@@ -124,17 +135,15 @@ impl fmt::Debug for Usages {
 
 /// The global allocator used by x-kernel.
 ///
-/// It combines a [`ByteAllocator`] and a [`PageAllocator`] into a simple
-/// two-level allocator: firstly tries allocate from the byte allocator, if
-/// there is no memory, asks the page allocator for more memory and adds it to
-/// the byte allocator.
-///
-/// Currently, [`TlsfByteAllocator`] is used as the byte allocator, while
-/// [`BuddyPageAllocator`] is used as the page allocator.
-///
-/// [`TlsfByteAllocator`]: alloc_engine::TlsfByteAllocator
+/// In slab builds, small allocations are served by class-owned central slab
+/// caches backed directly by the page allocator.  Other allocator builds keep
+/// the existing byte-allocator-plus-page-allocator layering.
 pub struct GlobalAllocator {
+    #[cfg(feature = "slab")]
+    slab_caches: KmemCacheSet,
+    #[cfg(not(feature = "slab"))]
     balloc: SpinNoIrq<DefaultByteAllocator>,
+    #[cfg(not(feature = "slab"))]
     /// Whether the byte allocator already owns a bootstrap heap region.
     heap_ready: AtomicBool,
     /// Whether the page allocator has at least one usable memory region.
@@ -153,7 +162,11 @@ impl GlobalAllocator {
     /// Creates an empty [`GlobalAllocator`].
     pub const fn new() -> Self {
         Self {
+            #[cfg(feature = "slab")]
+            slab_caches: KmemCacheSet::new(),
+            #[cfg(not(feature = "slab"))]
             balloc: SpinNoIrq::new(DefaultByteAllocator::new()),
+            #[cfg(not(feature = "slab"))]
             heap_ready: AtomicBool::new(false),
             page_ready: AtomicBool::new(false),
             palloc: SpinNoIrq::new(BuddyPageAllocator::new()),
@@ -176,12 +189,14 @@ impl GlobalAllocator {
 
     /// Initializes the allocator with the given region.
     ///
-    /// This is the legacy "initialize both page allocator and byte allocator"
-    /// entry used by paths that already have a stable runtime memory region.
+    /// Slab builds make the region immediately available to their backing page
+    /// allocator.  Other builds also bootstrap their byte allocator.
     pub fn init(&self, va: usize, size: usize) {
+        #[cfg(not(feature = "slab"))]
         assert!(size > MIN_HEAP_SIZE);
         self.init_or_extend_page_allocator(va, size)
             .expect("failed to initialize page allocator");
+        #[cfg(not(feature = "slab"))]
         self.bootstrap_heap_if_needed()
             .expect("failed to initialize heap memory");
     }
@@ -201,6 +216,7 @@ impl GlobalAllocator {
     pub fn add_memory(&self, va: usize, size: usize) -> AllocResult {
         self.init_or_extend_page_allocator(va, size)?;
 
+        #[cfg(not(feature = "slab"))]
         if !self.heap_ready.load(Ordering::Acquire) {
             self.bootstrap_heap_if_needed()?;
         }
@@ -210,61 +226,114 @@ impl GlobalAllocator {
     /// Allocate arbitrary number of bytes. Returns the left bound of the
     /// allocated region.
     ///
-    /// It firstly tries to allocate from the byte allocator. If there is no
-    /// memory, it asks the page allocator for more memory and adds it to the
-    /// byte allocator.
-    ///
-    /// Large allocations (over `PAGE_SIZE_4K / 2`) bypass the byte allocator
-    /// to avoid fragmenting the slab heap and are served directly from the
-    /// page allocator.
+    /// Slab builds route layouts represented by [`SizeClass`] to their central
+    /// cache; other layouts are allocated directly from pages.  Other builds
+    /// retain the byte-allocator expansion path.
     pub fn alloc(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
-        // Large size or alignment: go directly to the page allocator.
-        // PCB buckets cover up to 2048 in both dimensions; anything beyond
-        // that would be rejected by every bucket and treated as NoMemory,
-        // causing spurious heap expansion.
+        #[cfg(feature = "slab")]
+        {
+            self.alloc_slab(layout)
+        }
+
+        #[cfg(not(feature = "slab"))]
+        {
+            self.alloc_byte(layout)
+        }
+    }
+
+    #[cfg(feature = "slab")]
+    fn alloc_slab(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
+        let Some(size_class) = SizeClass::from_layout(layout) else {
+            return self.large_alloc(layout);
+        };
+
+        let object = self.alloc_slab_class(size_class)?;
+        self.usages.lock().alloc(UsageKind::RustHeap, layout.size());
+        Ok(object)
+    }
+
+    #[cfg(feature = "slab")]
+    fn alloc_slab_class(&self, size_class: SizeClass) -> AllocResult<NonNull<u8>> {
+        loop {
+            if let Some(object) = self.slab_caches.try_allocate(size_class) {
+                return Ok(object);
+            }
+
+            let page_count = KmemCacheSet::slab_pages(size_class);
+            let span_alignment = KmemCacheSet::slab_bytes(size_class);
+            let base = match self.alloc_pages(page_count, span_alignment, UsageKind::RustHeap) {
+                Ok(base) => base,
+                Err(AllocError::NoMemory) => {
+                    self.reclaim_empty_slab_pages();
+                    if let Some(object) = self.slab_caches.try_allocate(size_class) {
+                        return Ok(object);
+                    }
+                    self.alloc_pages(page_count, span_alignment, UsageKind::RustHeap)?
+                }
+                Err(error) => return Err(error),
+            };
+            // SAFETY: a successful page allocation is non-null, mapped,
+            // exclusive, and satisfies the class span's requested alignment
+            // and page count.
+            let backing = unsafe { NonNull::new_unchecked(base as *mut u8) };
+            // SAFETY: `backing` was just allocated with this class's exact
+            // span geometry and remains exclusively owned until it is detached
+            // again.
+            let prepared = match unsafe { KmemCacheSet::prepare_slab(size_class, backing) } {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    self.release_slab_pages(base, page_count);
+                    return Err(error);
+                }
+            };
+
+            if let Err(prepared) = self.slab_caches.publish_slab(size_class, prepared) {
+                let backing = prepared.into_backing();
+                self.release_slab_backing(backing);
+                return Err(AllocError::InvalidInput);
+            }
+        }
+    }
+
+    #[cfg(feature = "slab")]
+    fn reclaim_empty_slab_pages(&self) -> usize {
+        let mut released_pages = 0usize;
+        while let Some(backing) = self.slab_caches.take_empty_slab() {
+            released_pages = released_pages.saturating_add(backing.pages());
+            self.release_slab_backing(backing);
+        }
+        released_pages
+    }
+
+    #[cfg(feature = "slab")]
+    fn release_slab_backing(&self, backing: SlabBacking) {
+        self.release_slab_pages(backing.base().as_ptr() as usize, backing.pages());
+    }
+
+    #[cfg(feature = "slab")]
+    fn release_slab_pages(&self, base: usize, page_count: usize) {
+        self.palloc.lock().deallocate_pages(base, page_count);
+    }
+
+    #[cfg(not(feature = "slab"))]
+    fn alloc_byte(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
         if layout.size() > PAGE_SIZE_4K / 2 || layout.align() > PAGE_SIZE_4K / 2 {
             return self.large_alloc(layout);
         }
 
-        // Fast path: try per-CPU cache first (lock-free).
-        {
-            let _guard = IrqSave::new();
-            // SAFETY: IRQs disabled by IrqSave above.
-            if let Some(addr) = unsafe { pcb::try_alloc(layout) } {
-                drop(_guard);
-                self.usages.lock().alloc(UsageKind::RustHeap, layout.size());
-                // SAFETY: addr came from a valid allocation.
-                return Ok(unsafe { core::ptr::NonNull::new_unchecked(addr as *mut u8) });
-            }
-        }
-
         let mut balloc = self.balloc.lock();
-
-        // Double-check: an interrupt may have freed objects to our cache
-        // between the fast-path miss and lock acquisition.
-        {
-            // SAFETY: IRQs already disabled by SpinNoIrq lock above.
-            if let Some(addr) = unsafe { pcb::try_alloc(layout) } {
-                self.usages.lock().alloc(UsageKind::RustHeap, layout.size());
-                // SAFETY: addr came from a valid allocation.
-                return Ok(unsafe { core::ptr::NonNull::new_unchecked(addr as *mut u8) });
-            }
-        }
-
         loop {
             let heap_ready = self.heap_ready.load(Ordering::Acquire);
             if heap_ready {
-                // SAFETY: IRQs disabled by SpinNoIrq lock.
-                match unsafe { pcb::fill_cache(layout, &mut *balloc) } {
-                    Ok(addr) => {
+                match balloc.allocate(layout) {
+                    Ok(object) => {
                         self.usages.lock().alloc(UsageKind::RustHeap, layout.size());
-                        // SAFETY: addr came from a valid allocation.
-                        return Ok(unsafe { core::ptr::NonNull::new_unchecked(addr as *mut u8) });
+                        return Ok(object);
                     }
                     Err(AllocError::NoMemory) => {
                         // Byte allocator exhausted; fall through to expansion.
                     }
-                    Err(e) => return Err(e),
+                    Err(error) => return Err(error),
                 }
             }
 
@@ -273,27 +342,27 @@ impl GlobalAllocator {
                 .max(layout.size())
                 .next_power_of_two()
                 .max(PAGE_SIZE_4K);
-
-            let mut req_size = exp_size;
+            let mut request_size = exp_size;
             let min_size = if heap_ready {
                 PAGE_SIZE_4K.max(layout.size())
             } else {
                 MIN_HEAP_SIZE.max(layout.size())
             };
+
             loop {
                 if !heap_ready {
-                    req_size = (req_size + MIN_HEAP_SIZE - 1) & !(MIN_HEAP_SIZE - 1);
+                    request_size = (request_size + MIN_HEAP_SIZE - 1) & !(MIN_HEAP_SIZE - 1);
                 }
                 let heap_addr = match self.alloc_pages(
-                    req_size / PAGE_SIZE_4K,
+                    request_size / PAGE_SIZE_4K,
                     PAGE_SIZE_4K,
                     UsageKind::RustHeap,
                 ) {
                     Ok(addr) => addr,
-                    Err(err) => {
-                        req_size /= 2;
-                        if req_size < min_size {
-                            return Err(err);
+                    Err(error) => {
+                        request_size /= 2;
+                        if request_size < min_size {
+                            return Err(error);
                         }
                         continue;
                     }
@@ -301,12 +370,12 @@ impl GlobalAllocator {
                 debug!(
                     "expand heap memory: [{:#x}, {:#x})",
                     heap_addr,
-                    heap_addr + req_size
+                    heap_addr + request_size
                 );
                 if heap_ready {
-                    balloc.add_region(heap_addr, req_size)?;
+                    balloc.add_region(heap_addr, request_size)?;
                 } else {
-                    balloc.init_region(heap_addr, req_size);
+                    balloc.init_region(heap_addr, request_size);
                     self.heap_ready.store(true, Ordering::Release);
                 }
                 break;
@@ -336,7 +405,7 @@ impl GlobalAllocator {
         Ok(unsafe { NonNull::new_unchecked(addr as *mut u8) })
     }
 
-    /// Gives back the allocated region to the byte allocator.
+    /// Gives back an allocated region.
     ///
     /// The region should be allocated by [`alloc`], and `align_pow2` should be
     /// the same as the one used in [`alloc`]. Otherwise, the behavior is
@@ -344,30 +413,32 @@ impl GlobalAllocator {
     ///
     /// [`alloc`]: GlobalAllocator::alloc
     pub fn dealloc(&self, ptr: NonNull<u8>, layout: Layout) {
-        // Large size or alignment: bypassed the byte allocator.
+        #[cfg(feature = "slab")]
+        if let Some(size_class) = SizeClass::from_layout(layout) {
+            self.usages
+                .lock()
+                .dealloc(UsageKind::RustHeap, layout.size());
+            // SAFETY: `dealloc` requires a live allocation from `alloc` with
+            // the same layout, which selects this same slab size class.
+            unsafe { self.slab_caches.deallocate(size_class, ptr) };
+            return;
+        }
+
+        #[cfg(feature = "slab")]
+        {
+            let pages = layout.size().div_ceil(PAGE_SIZE_4K);
+            self.dealloc_pages(ptr.as_ptr() as usize, pages, UsageKind::RustHeap);
+        }
+
+        #[cfg(not(feature = "slab"))]
         if layout.size() > PAGE_SIZE_4K / 2 || layout.align() > PAGE_SIZE_4K / 2 {
             let pages = layout.size().div_ceil(PAGE_SIZE_4K);
-            // dealloc_pages handles usages tracking internally.
             self.dealloc_pages(ptr.as_ptr() as usize, pages, UsageKind::RustHeap);
         } else {
             self.usages
                 .lock()
                 .dealloc(UsageKind::RustHeap, layout.size());
-
-            // Fast path: try to cache the freed object per-CPU.
-            {
-                let _guard = IrqSave::new();
-                // SAFETY: IRQs disabled by IrqSave above.
-                if unsafe { pcb::try_free(layout, ptr.as_ptr() as usize) } {
-                    return; // Cached; done.
-                }
-                drop(_guard);
-
-                // Cache full: lock and bulk-drain to global allocator.
-                let mut balloc = self.balloc.lock();
-                // SAFETY: IRQs disabled by SpinNoIrq lock.
-                unsafe { pcb::drain_cache(layout, &mut *balloc, ptr.as_ptr() as usize) };
-            }
+            self.balloc.lock().deallocate(ptr, layout);
         }
     }
 
@@ -524,6 +595,7 @@ impl GlobalAllocator {
         Ok(())
     }
 
+    #[cfg(not(feature = "slab"))]
     fn bootstrap_heap_if_needed(&self) -> AllocResult {
         if self.heap_ready.load(Ordering::Acquire) {
             return Ok(());
@@ -538,16 +610,46 @@ impl GlobalAllocator {
         Ok(())
     }
 
-    // Note: The following delegation pattern is a standard Rust idiom for
-    // thread-safe interior mutability, not a literal duplication.
-    /// Returns the number of allocated bytes in the byte allocator.
+    /// Returns bytes currently checked out from the small-object allocator.
     pub fn used_bytes(&self) -> usize {
-        self.balloc.lock().used_bytes()
+        #[cfg(feature = "slab")]
+        {
+            self.slab_caches.used_bytes()
+        }
+
+        #[cfg(not(feature = "slab"))]
+        {
+            self.balloc.lock().used_bytes()
+        }
     }
 
-    /// Returns the number of available bytes in the byte allocator.
+    /// Returns centrally available small-object bytes.
     pub fn available_bytes(&self) -> usize {
-        self.balloc.lock().available_bytes()
+        #[cfg(feature = "slab")]
+        {
+            self.slab_caches.available_bytes()
+        }
+
+        #[cfg(not(feature = "slab"))]
+        {
+            self.balloc.lock().available_bytes()
+        }
+    }
+
+    /// Reclaim all completely empty central slab spans.
+    ///
+    /// Returns the number of base pages returned to the page allocator.  In
+    /// non-slab builds no central slab spans exist, so this returns zero.
+    pub fn shrink(&self) -> usize {
+        #[cfg(feature = "slab")]
+        {
+            self.reclaim_empty_slab_pages()
+        }
+
+        #[cfg(not(feature = "slab"))]
+        {
+            0
+        }
     }
 
     /// Returns the number of allocated pages in the page allocator.
@@ -704,10 +806,24 @@ pub fn is_page_allocator_ready() -> bool {
 #[cfg(unittest)]
 #[allow(missing_docs)]
 pub mod tests_kalloc {
+    #[cfg(feature = "slab")]
+    use alloc::boxed::Box;
+    #[cfg(feature = "slab")]
+    use core::alloc::Layout;
+
     use strum::VariantArray;
     use unittest::def_test;
 
+    #[cfg(feature = "slab")]
+    use super::{GlobalAllocator, PAGE_SIZE_4K};
     use super::{UsageKind, Usages};
+
+    #[cfg(feature = "slab")]
+    const TEST_HEAP_PAGES: usize = 4;
+
+    #[cfg(feature = "slab")]
+    #[repr(align(16384))]
+    struct AlignedTestHeap([u8; TEST_HEAP_PAGES * PAGE_SIZE_4K]);
 
     #[def_test]
     fn test_usages_alloc_dealloc() {
@@ -730,5 +846,27 @@ pub mod tests_kalloc {
         usages.alloc(UsageKind::PageTable, 20);
         assert_eq!(usages.get(UsageKind::VirtMem), 10);
         assert_eq!(usages.get(UsageKind::PageTable), 20);
+    }
+
+    #[cfg(feature = "slab")]
+    #[def_test]
+    fn test_slab_oom_reclaims_empty_spans_before_retrying() {
+        let heap = Box::new(AlignedTestHeap([0; TEST_HEAP_PAGES * PAGE_SIZE_4K]));
+        let allocator = GlobalAllocator::new();
+        allocator.init_page_allocator(heap.0.as_ptr() as usize, heap.0.len());
+
+        let layout_2048 = Layout::from_size_align(2048, 2048).unwrap();
+        let first = allocator.alloc(layout_2048).unwrap();
+        allocator.dealloc(first, layout_2048);
+
+        // The 2 KiB class owns the only four pages as an empty span.  The
+        // 1 KiB class must reclaim that span before its two-page retry can
+        // succeed.
+        let layout_1024 = Layout::from_size_align(1024, 1024).unwrap();
+        let second = allocator.alloc(layout_1024).unwrap();
+        assert_eq!(allocator.used_bytes(), 1024);
+        allocator.dealloc(second, layout_1024);
+        assert_eq!(allocator.shrink(), 2);
+        assert_eq!(allocator.used_bytes(), 0);
     }
 }
