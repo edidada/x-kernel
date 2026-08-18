@@ -127,7 +127,7 @@ core/kruntime
 | `stack::ipv4` | 使用 `etherparse` 校验和构造 IPv4 与 ICMPv4 头部，并执行输出分片 |
 | `stack::fragment` | 按源地址、目的地址、标识、协议和接口重组本地 IPv4 分片，并限制队列数量、内存和存活时间 |
 | `transport::udp` | 维护 UDP PCB registry、接收队列、bind 与 connect 状态、校验和、socket option、异步错误和 IPv4 收发 |
-| `transport::raw` | 维护 IPv4 raw socket registry、协议与地址匹配、完整 IPv4 报文接收、原生 IPv4 头部发送和 readiness |
+| `transport::raw` | 按 IPv4 protocol 分桶维护 raw socket registry，匹配 local/peer 地址，按 `SO_RCVBUF` 字节上限接收完整 IPv4 报文，并在 `IPPROTO_RAW` 上使用 header-included 发送 |
 | `SocketSetWrapper` | 串行化 smoltcp socket set 与 TCP deferred-close 元数据访问，并在新增 socket 时通知等待者 |
 | `ListenTable` | 管理 TCP listen backlog、SYN 队列、accept 队列和 accept waker |
 | `GeneralOptions` | 统一管理 nonblock、reuseaddr、超时和设备 mask |
@@ -307,12 +307,12 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 
 1. TCP connect、send 和 close，raw send 以及 UDP data queue 提交完成后发布真实 TX 通知；TCP recv 只在消费前的 smoltcp 接收缓冲区余量低于最大窗口缩放量子时发布 `RxWindow` 通知，覆盖未缩放零窗口和缩放后仍编码为零的窗口。达到缩放量子后的窗口增长随 RX 或已登记的协议 timer poll 推进，避免每次应用读取都创建后台工作。调用方可随后通过 `assist_once` 协助执行已调度的一轮。TCP 文件关闭不会立即删除仍处于协议关闭过程中的 handle。
 2. crate 内 UDP 在 Router mutex 内选择处于管理 up 状态的输出设备、源地址和路由 MTU；路由缺失或输出设备管理 down 时返回 `ENETUNREACH`。写入 UDP 与 IPv4 头后提交到 data TX queue。smoltcp 生成的 IP 包进入同一 data TX queue，`IngressProcessor` 生成的 ICMPv4 错误进入 control TX queue。
-3. `IP_MTU_DISCOVER` 决定 UDP IPv4 头部的 DF 标志。超出路由 MTU 且允许分片的包由 `fragment_output_packet` 拆分，DF 包返回 `EMSGSIZE`。raw IPv4 send 在分配 packet 缓冲前拒绝无法放入 16-bit `tot_len` 的 payload，同样返回 `EMSGSIZE`。
+3. `IP_MTU_DISCOVER` 决定 UDP IPv4 头部的 DF 标志。超出路由 MTU 且允许分片的包由 `fragment_output_packet` 拆分，DF 包返回 `EMSGSIZE`。raw IPv4 send 在分配 packet 缓冲前拒绝无法放入 16-bit `tot_len` 的报文：普通 raw socket 限制 payload 为 `u16::MAX - 20`，`IPPROTO_RAW` / header-included 路径限制用户缓冲为 `u16::MAX`，均返回 `EMSGSIZE`。
 4. `Router::dispatch_budgeted` 优先接管 control packet，再按 IP 版本解析源地址和目的地址；IPv4 输出先按实际长度更新 `total_len` 和头部校验和，并将已校验的源地址随报文传给 `NetDevice`。
 5. 广播或组播包复制到所有设备；`0.0.0.0` 到 `255.255.255.255` 的受限广播允许在设备尚未分配 IPv4 地址时直接发送，用于 DHCP 初始化流量。
 6. 单播包通过 `RouteTable::lookup` 选择最长前缀路由。
-7. Ethernet 设备先查 ARP neighbor cache，命中后通过 `link::wire` 封装 Ethernet frame。
-8. 未命中时发送 ARP request，并把 IP 包放入 `pending_tx` 等待 neighbor 解析。该路径调用 `note_device_deadline`，唤醒 `knet-rx` 并发布未来重试期限。
+7. Ethernet 设备先查 ARP neighbor cache，命中后通过 `link::wire` 封装 Ethernet frame。Incomplete 邻居发送组播 ARP request；Probe 邻居对缓存 MAC 发送单播 ARP request。Reachable 的基准存活时间为 30 秒，并按邻居做 `[base/2, 3*base/2)` 抖动。
+8. 未命中时发送 ARP request，并把 IP 包放入该邻居条目的 pending 队列等待解析。设备级 `pending_tx` 只保留广播和已解析报文的 TX 重试。该路径调用 `note_device_deadline`，唤醒 `knet-rx` 并发布未来重试期限。源地址为 `0.0.0.0` 且目标为本机地址的 ARP request 按 RFC 2131 DAD 应答，不写入邻居缓存。
 
 当前实现保留 smoltcp TCP 和 IPv6 推进。UDP、raw IPv4、IPv4 分片重组、输出分片和 ICMPv4 echo 及 UDP 差错报告使用 crate 内实现。
 `PacketBuf`、`link::wire` 和 `stack::ipv4` 提供设备与 crate 内 IPv4、UDP、raw 数据路径共用的报文表示和 parser/emitter。
@@ -452,9 +452,9 @@ Unix stream 的双向 channel 为两端保存独立的 `StreamEndpoint`，endpoi
 
 ### Ethernet ARP pending queue
 
-Ethernet 设备为未解析 next-hop 保留 `pending_tx`。
-同一个 next-hop 的 ARP 回复到达后，设备按队头顺序发送等待中的 IP 包。
-当前队列存在 head-of-line blocking，长时间 unresolved 的 next-hop 会阻塞后续 pending 包。
+等待 ARP 解析的 IP 包挂在对应 `Incomplete` 邻居条目上，每条目最多 128 个报文，队列满时丢弃最旧报文。
+ARP 回复到达后只释放该邻居自己的 pending，不会被其他未解析 next-hop 占满设备级队列。
+设备级 `pending_tx` 只用于广播发送和已解析报文的 TX 重试。
 
 ### vsock-TIPC bridge
 

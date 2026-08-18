@@ -19,7 +19,7 @@ use knet::{
     AcceptOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
     netlink::NetlinkSocket,
     packet::{PacketSocket, PacketSocketKind},
-    raw::{IpProtocol, IpVersion, RawSocket},
+    raw::{IpProtocol, RawSocket},
     sock_alloc_file, sock_from_file,
     tcp::TcpSocket,
     udp::UdpSocket,
@@ -70,10 +70,9 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             if proto > u8::MAX as u32 {
                 return Err(KError::from(LinuxError::EPROTONOSUPPORT));
             }
-            knet::Socket::Raw(Box::new(RawSocket::new(
-                IpVersion::Ipv4,
-                IpProtocol::from_ipv4_number(proto as u8),
-            )))
+            knet::Socket::Raw(Box::new(RawSocket::new(IpProtocol::from_ipv4_number(
+                proto as u8,
+            ))))
         }
         // IPv6 is not exposed yet because the address family lacks full support.
         // The previous raw ICMPv6-only path was removed with this policy.

@@ -123,6 +123,10 @@ pub(crate) struct ArpReceiveEvent {
 }
 
 impl ArpReceiveEvent {
+    pub(crate) fn should_learn_source(self) -> bool {
+        !self.source_protocol_addr.is_unspecified()
+    }
+
     pub(crate) fn reply(self, local_hardware_addr: MacAddress) -> Option<ArpIpv4Packet> {
         (self.operation == ArpOperation::Request).then_some(ArpIpv4Packet {
             operation: ArpOperation::Reply,
@@ -155,10 +159,17 @@ pub(crate) fn parse_receive(
     if !packet.source_hardware_addr.is_unicast()
         || packet.source_protocol_addr.is_broadcast()
         || packet.source_protocol_addr.is_multicast()
-        || packet.source_protocol_addr.is_unspecified()
-        || !local_ipv4_addrs
-            .iter()
-            .any(|addr| addr.address() == packet.target_protocol_addr)
+    {
+        return None;
+    }
+    // Linux 6.8 `arp_process` answers RFC 2131 DAD probes (`sip == 0`) that
+    // target a local address, then skips neighbour learning.
+    if packet.source_protocol_addr.is_unspecified() && packet.operation != ArpOperation::Request {
+        return None;
+    }
+    if !local_ipv4_addrs
+        .iter()
+        .any(|addr| addr.address() == packet.target_protocol_addr)
     {
         return None;
     }
@@ -237,6 +248,38 @@ mod tests {
 
         let packet = build_request(REMOTE_MAC, REMOTE_IP, Ipv4Address::new(10, 0, 2, 99));
         packet.emit(&mut data).expect("ARP buffer is large enough");
+        assert!(parse_receive(LOCAL_MAC, LOCAL_MAC, &addrs, &data).is_none());
+    }
+
+    #[def_test]
+    fn receive_event_replies_to_dad_probe_without_learning_source() {
+        let packet = build_request(REMOTE_MAC, Ipv4Address::UNSPECIFIED, LOCAL_IP);
+        let mut data = [0u8; ArpIpv4Packet::LEN];
+        packet.emit(&mut data).expect("ARP buffer is large enough");
+        let addrs = [Ipv4Cidr::new(LOCAL_IP, 24)];
+
+        let event = parse_receive(LOCAL_MAC, LOCAL_MAC, &addrs, &data)
+            .expect("DAD request for a local IPv4 address is valid");
+        assert!(!event.should_learn_source());
+        assert_eq!(
+            event.reply(LOCAL_MAC),
+            Some(ArpIpv4Packet {
+                operation: ArpOperation::Reply,
+                source_hardware_addr: LOCAL_MAC,
+                source_protocol_addr: LOCAL_IP,
+                target_hardware_addr: REMOTE_MAC,
+                target_protocol_addr: Ipv4Address::UNSPECIFIED,
+            })
+        );
+
+        let reply = ArpIpv4Packet {
+            operation: ArpOperation::Reply,
+            source_hardware_addr: REMOTE_MAC,
+            source_protocol_addr: Ipv4Address::UNSPECIFIED,
+            target_hardware_addr: LOCAL_MAC,
+            target_protocol_addr: LOCAL_IP,
+        };
+        reply.emit(&mut data).expect("ARP buffer is large enough");
         assert!(parse_receive(LOCAL_MAC, LOCAL_MAC, &addrs, &data).is_none());
     }
 

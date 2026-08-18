@@ -80,6 +80,7 @@ impl PendingTxPacket {
 pub(crate) struct NeighborRequest {
     pub(crate) target: IpAddress,
     pub(crate) source_addr: IpAddress,
+    pub(crate) ethernet_dest: MacAddress,
 }
 
 pub(crate) enum NeighborAction {
@@ -100,11 +101,11 @@ pub(crate) enum NeighborSendDecision {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NeighborEntry {
     Incomplete {
         next_request_at: MonotonicInstant,
         probes_sent: u8,
+        pending: VecDeque<PendingTxPacket>,
     },
     Reachable {
         hardware_address: MacAddress,
@@ -136,12 +137,17 @@ enum NeighborEntry {
 }
 
 impl NeighborEntry {
+    fn incomplete(next_request_at: MonotonicInstant, probes_sent: u8) -> Self {
+        Self::Incomplete {
+            next_request_at,
+            probes_sent,
+            pending: VecDeque::new(),
+        }
+    }
+
     fn from_control_state(state: NeighborState) -> Self {
         match state {
-            NeighborState::Incomplete => Self::Incomplete {
-                next_request_at: MonotonicInstant::ORIGIN,
-                probes_sent: 0,
-            },
+            NeighborState::Incomplete => Self::incomplete(MonotonicInstant::ORIGIN, 0),
             NeighborState::Permanent { hardware_addr } => Self::Permanent {
                 hardware_address: MacAddress(hardware_addr),
             },
@@ -214,6 +220,7 @@ impl NeighborEntry {
             Self::Incomplete {
                 next_request_at,
                 probes_sent,
+                ..
             }
             | Self::Probe {
                 next_request_at,
@@ -250,24 +257,26 @@ impl NeighborEntry {
     }
 
     fn transmit_hardware_address(&mut self, now: MonotonicInstant) -> Option<MacAddress> {
-        match *self {
+        match self {
             Self::Permanent { hardware_address }
             | Self::Delay {
                 hardware_address, ..
             }
             | Self::Probe {
                 hardware_address, ..
-            } => Some(hardware_address),
+            } => Some(*hardware_address),
             Self::Reachable {
                 hardware_address,
                 expires_at,
                 ..
-            } if expires_at > now => Some(hardware_address),
+            } if *expires_at > now => Some(*hardware_address),
             Self::Reachable {
                 hardware_address,
                 updated_at,
                 ..
             } => {
+                let hardware_address = *hardware_address;
+                let updated_at = *updated_at;
                 *self = Self::Delay {
                     hardware_address,
                     probe_at: now + NeighborResolver::DELAY_PROBE_TIME,
@@ -279,7 +288,9 @@ impl NeighborEntry {
                 hardware_address,
                 stale_since,
                 updated_at,
-            } if now < stale_since + NeighborResolver::NEIGHBOR_GC_TIME => {
+            } if now < *stale_since + NeighborResolver::NEIGHBOR_GC_TIME => {
+                let hardware_address = *hardware_address;
+                let updated_at = *updated_at;
                 *self = Self::Delay {
                     hardware_address,
                     probe_at: now + NeighborResolver::DELAY_PROBE_TIME,
@@ -292,6 +303,18 @@ impl NeighborEntry {
                 None
             }
             Self::Incomplete { .. } | Self::Failed { .. } => None,
+        }
+    }
+
+    fn max_probes(&self) -> u8 {
+        match self {
+            Self::Incomplete { .. } => NeighborResolver::MCAST_PROBES,
+            Self::Probe { .. } => NeighborResolver::UCAST_PROBES,
+            Self::Reachable { .. }
+            | Self::Stale { .. }
+            | Self::Delay { .. }
+            | Self::Failed { .. }
+            | Self::Permanent { .. } => 0,
         }
     }
 
@@ -316,12 +339,13 @@ impl NeighborEntry {
             Self::Incomplete {
                 next_request_at,
                 probes_sent,
+                ..
             }
             | Self::Probe {
                 next_request_at,
                 probes_sent,
                 ..
-            } => *probes_sent >= NeighborResolver::MAX_PROBES && *next_request_at <= now,
+            } => *probes_sent >= self.max_probes() && *next_request_at <= now,
             Self::Reachable { .. }
             | Self::Stale { .. }
             | Self::Delay { .. }
@@ -336,10 +360,70 @@ impl NeighborEntry {
 
     fn restart_resolution(&mut self, now: MonotonicInstant) {
         if self.is_failed() {
-            *self = Self::Incomplete {
-                next_request_at: now,
-                probes_sent: 0,
-            };
+            *self = Self::incomplete(now, 0);
+        }
+    }
+
+    fn take_pending(&mut self) -> VecDeque<PendingTxPacket> {
+        match self {
+            Self::Incomplete { pending, .. } => core::mem::take(pending),
+            Self::Reachable { .. }
+            | Self::Stale { .. }
+            | Self::Delay { .. }
+            | Self::Probe { .. }
+            | Self::Failed { .. }
+            | Self::Permanent { .. } => VecDeque::new(),
+        }
+    }
+
+    fn enqueue_pending(&mut self, packet: PendingTxPacket) -> bool {
+        match self {
+            Self::Incomplete { pending, .. } => {
+                if pending.len() >= NEIGHBOR_MAX_PENDING_PACKETS {
+                    warn!("Neighbor pending queue is full, dropping oldest packet");
+                    pending.pop_front();
+                }
+                pending.push_back(packet);
+                true
+            }
+            Self::Reachable { .. }
+            | Self::Stale { .. }
+            | Self::Delay { .. }
+            | Self::Probe { .. }
+            | Self::Failed { .. }
+            | Self::Permanent { .. } => false,
+        }
+    }
+
+    fn pending_source_addr(&self) -> Option<IpAddress> {
+        match self {
+            Self::Incomplete { pending, .. } => pending.front().map(|packet| packet.source_addr),
+            Self::Reachable { .. }
+            | Self::Stale { .. }
+            | Self::Delay { .. }
+            | Self::Probe { .. }
+            | Self::Failed { .. }
+            | Self::Permanent { .. } => None,
+        }
+    }
+
+    fn retain_pending_source(&mut self, source_addr: IpAddress) {
+        if let Self::Incomplete { pending, .. } = self {
+            pending.retain(|packet| packet.source_addr != source_addr);
+        }
+    }
+
+    fn probe_ethernet_dest(&self) -> MacAddress {
+        match self {
+            Self::Probe {
+                hardware_address, ..
+            } => *hardware_address,
+            Self::Incomplete { .. }
+            | Self::Reachable { .. }
+            | Self::Stale { .. }
+            | Self::Delay { .. }
+            | Self::Failed { .. }
+            | Self::Permanent { .. } => MacAddress::BROADCAST,
         }
     }
 }
@@ -416,11 +500,41 @@ impl NeighborCache {
     fn record_request_attempt(&mut self, target: IpAddress, now: MonotonicInstant) {
         self.entries
             .entry(target)
-            .or_insert(NeighborEntry::Incomplete {
-                next_request_at: MonotonicInstant::ORIGIN,
-                probes_sent: 0,
-            })
+            .or_insert_with(|| NeighborEntry::incomplete(MonotonicInstant::ORIGIN, 0))
             .record_request_attempt(now);
+    }
+
+    fn take_incomplete_pending(&mut self, target: IpAddress) -> VecDeque<PendingTxPacket> {
+        self.entries
+            .get_mut(&target)
+            .map(NeighborEntry::take_pending)
+            .unwrap_or_default()
+    }
+
+    fn enqueue_resolution_pending(&mut self, pending: PendingTxPacket) {
+        self.entries
+            .entry(pending.next_hop)
+            .or_insert_with(|| NeighborEntry::incomplete(MonotonicInstant::ORIGIN, 0))
+            .enqueue_pending(pending);
+    }
+
+    fn resolution_pending_source(&self, target: IpAddress) -> Option<IpAddress> {
+        self.entries
+            .get(&target)
+            .and_then(NeighborEntry::pending_source_addr)
+    }
+
+    fn probe_ethernet_dest(&self, target: IpAddress) -> MacAddress {
+        self.entries
+            .get(&target)
+            .map(NeighborEntry::probe_ethernet_dest)
+            .unwrap_or(MacAddress::BROADCAST)
+    }
+
+    fn remove_pending_source(&mut self, source_addr: IpAddress) {
+        for entry in self.entries.values_mut() {
+            entry.retain_pending_source(source_addr);
+        }
     }
 
     fn maintain(&mut self, now: MonotonicInstant) -> Vec<NeighborMaintenance> {
@@ -510,11 +624,12 @@ pub(crate) struct NeighborResolver {
 impl NeighborResolver {
     const DELAY_PROBE_TIME: TimeSpan = TimeSpan::from_secs(5);
     const LOCK_TIME: TimeSpan = TimeSpan::from_secs(1);
-    const MAX_PROBES: u8 = 6;
+    const MCAST_PROBES: u8 = 3;
     const NEIGHBOR_GC_TIME: TimeSpan = TimeSpan::from_secs(60);
-    const NEIGHBOR_REACHABLE_TIME: TimeSpan = TimeSpan::from_secs(300);
+    const NEIGHBOR_REACHABLE_TIME: TimeSpan = TimeSpan::from_secs(30);
     const REQUEST_RETRY_INTERVAL: TimeSpan = TimeSpan::from_secs(1);
     const TX_RETRY_INTERVAL: TimeSpan = TimeSpan::from_secs(1);
+    const UCAST_PROBES: u8 = 3;
 
     pub(crate) fn new() -> Self {
         Self {
@@ -544,14 +659,17 @@ impl NeighborResolver {
         } else {
             self.cache.needs_request(next_hop, now) || !self.cache.contains(next_hop)
         };
-        let queued =
-            self.enqueue_pending(PendingTxPacket::new_unicast(next_hop, source_addr, packet));
+        self.cache
+            .enqueue_resolution_pending(PendingTxPacket::new_unicast(
+                next_hop,
+                source_addr,
+                packet,
+            ));
         NeighborSendDecision::Queued {
-            request: queued.then_some(should_request).and_then(|should_request| {
-                should_request.then_some(NeighborRequest {
-                    target: next_hop,
-                    source_addr,
-                })
+            request: should_request.then_some(NeighborRequest {
+                target: next_hop,
+                source_addr,
+                ethernet_dest: self.cache.probe_ethernet_dest(next_hop),
             }),
         }
     }
@@ -582,10 +700,16 @@ impl NeighborResolver {
         observation: NeighborObservation,
         fallback_source_addr: Option<IpAddress>,
     ) -> Vec<NeighborAction> {
+        let pending = self.cache.take_incomplete_pending(protocol_address);
         self.cache
             .observe(protocol_address, hardware_address, now, observation);
         self.mark_pending_due(protocol_address);
-        self.collect_actions(now, fallback_source_addr)
+        let mut actions = Self::send_resolved_pending(
+            pending,
+            self.cache.transmit_hardware_address(protocol_address, now),
+        );
+        actions.extend(self.collect_actions(now, fallback_source_addr));
+        actions
     }
 
     pub(crate) fn apply_control_update(
@@ -595,9 +719,20 @@ impl NeighborResolver {
         now: MonotonicInstant,
         fallback_source_addr: Option<IpAddress>,
     ) -> Vec<NeighborAction> {
+        let pending = self.cache.take_incomplete_pending(target);
         self.cache.apply_control_state(target, state);
         self.mark_pending_due(target);
-        self.collect_actions(now, fallback_source_addr)
+        let mut actions = match self.cache.transmit_hardware_address(target, now) {
+            Some(hardware_address) => Self::send_resolved_pending(pending, Some(hardware_address)),
+            None => {
+                for packet in pending {
+                    self.cache.enqueue_resolution_pending(packet);
+                }
+                Vec::new()
+            }
+        };
+        actions.extend(self.collect_actions(now, fallback_source_addr));
+        actions
     }
 
     pub(crate) fn poll(
@@ -619,6 +754,7 @@ impl NeighborResolver {
     pub(crate) fn remove_pending_source(&mut self, source_addr: IpAddress) {
         self.pending_tx
             .retain(|pending| pending.source_addr != source_addr);
+        self.cache.remove_pending_source(source_addr);
     }
 
     pub(crate) fn has_neighbor(&self, target: IpAddress) -> bool {
@@ -686,9 +822,26 @@ impl NeighborResolver {
             NeighborAction::Request(NeighborRequest {
                 target,
                 source_addr: self.source_addr_for(target, fallback_source_addr),
+                ethernet_dest: self.cache.probe_ethernet_dest(target),
             })
         }));
         actions
+    }
+
+    fn send_resolved_pending(
+        pending: VecDeque<PendingTxPacket>,
+        hardware_address: Option<MacAddress>,
+    ) -> Vec<NeighborAction> {
+        let Some(hardware_address) = hardware_address else {
+            return Vec::new();
+        };
+        pending
+            .into_iter()
+            .map(|packet| NeighborAction::Send {
+                packet,
+                hardware_address,
+            })
+            .collect()
     }
 
     fn push_request_target(request_targets: &mut Vec<IpAddress>, target: IpAddress) {
@@ -719,10 +872,14 @@ impl NeighborResolver {
         target: IpAddress,
         fallback_source_addr: Option<IpAddress>,
     ) -> IpAddress {
-        self.pending_tx
-            .iter()
-            .find(|pending| pending.next_hop == target)
-            .map(|pending| pending.source_addr)
+        self.cache
+            .resolution_pending_source(target)
+            .or_else(|| {
+                self.pending_tx
+                    .iter()
+                    .find(|pending| pending.next_hop == target)
+                    .map(|pending| pending.source_addr)
+            })
             .or(fallback_source_addr)
             .unwrap_or_else(|| Self::unspecified_address(target))
     }
@@ -845,17 +1002,17 @@ mod tests {
             NeighborEntry::Incomplete {
                 next_request_at: now,
                 probes_sent: 0,
+                pending: VecDeque::from([pending_packet(target, source_addr, now)]),
             },
         );
-        resolver.pending_tx = VecDeque::from([pending_packet(target, source_addr, now)]);
 
-        for attempt in 0..NeighborResolver::MAX_PROBES {
+        for attempt in 0..NeighborResolver::MCAST_PROBES {
             let attempt_at = now + TimeSpan::from_secs(u64::from(attempt));
             assert!(resolver.cache.needs_request(target, attempt_at));
             resolver.cache.record_request_attempt(target, attempt_at);
         }
 
-        let failed_at = now + TimeSpan::from_secs(u64::from(NeighborResolver::MAX_PROBES));
+        let failed_at = now + TimeSpan::from_secs(u64::from(NeighborResolver::MCAST_PROBES));
         // Drive the transition through maintain()/poll, not by hand-writing Failed.
         let actions = resolver.poll(failed_at, None);
         assert!(
@@ -989,6 +1146,7 @@ mod tests {
             NeighborEntry::Incomplete {
                 next_request_at: MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(20)),
                 probes_sent: 1,
+                pending: VecDeque::new(),
             },
         );
 
@@ -1078,11 +1236,111 @@ mod tests {
         let incomplete = NeighborEntry::Incomplete {
             next_request_at: incomplete_deadline,
             probes_sent: 1,
+            pending: VecDeque::new(),
         };
 
         assert_eq!(permanent.next_poll_at(), None);
         assert_eq!(dynamic.next_poll_at(), Some(dynamic_expiry));
         assert_eq!(incomplete.next_poll_at(), Some(incomplete_deadline));
+    }
+
+    #[def_test]
+    fn neighbor_pending_queue_does_not_starve_other_targets() {
+        let now = MonotonicInstant::ORIGIN;
+        let source_addr = Ipv4Address::new(192, 0, 2, 99);
+        let busy = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1));
+        let other = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 2));
+        let mut resolver = NeighborResolver::new();
+
+        for _ in 0..NEIGHBOR_MAX_PENDING_PACKETS {
+            assert!(matches!(
+                resolver.prepare_unicast(
+                    busy,
+                    IpAddress::Ipv4(source_addr),
+                    PacketBuf::from_ip_packet_vec(1, alloc::vec![0x45], PacketOwner::DeviceTx),
+                    now,
+                ),
+                NeighborSendDecision::Queued { .. }
+            ));
+        }
+
+        match resolver.prepare_unicast(
+            other,
+            IpAddress::Ipv4(source_addr),
+            PacketBuf::from_ip_packet_vec(1, alloc::vec![0x45], PacketOwner::DeviceTx),
+            now,
+        ) {
+            NeighborSendDecision::Queued {
+                request: Some(request),
+            } => {
+                assert_eq!(request.target, other);
+                assert_eq!(request.ethernet_dest, MacAddress::BROADCAST);
+            }
+            NeighborSendDecision::Queued { request: None } | NeighborSendDecision::Send { .. } => {
+                panic!("expected ARP request for the second neighbor")
+            }
+        }
+    }
+
+    #[def_test]
+    fn probe_neighbor_sends_unicast_arp() {
+        let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(10));
+        let target = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1));
+        let hardware_address = MacAddress([2, 0, 0, 0, 0, 2]);
+        let mut resolver = NeighborResolver::new();
+        resolver.cache.entries.insert(
+            target,
+            NeighborEntry::Probe {
+                hardware_address,
+                next_request_at: now,
+                probes_sent: 0,
+                updated_at: now,
+            },
+        );
+
+        let request = resolver
+            .poll(now, Some(IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 99))))
+            .into_iter()
+            .find_map(|action| match action {
+                NeighborAction::Request(request) => Some(request),
+                NeighborAction::Send { .. } => None,
+            })
+            .expect("probe must emit an ARP request");
+        assert_eq!(request.target, target);
+        assert_eq!(request.ethernet_dest, hardware_address);
+    }
+
+    #[def_test]
+    fn resolved_incomplete_releases_its_own_pending() {
+        let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(10));
+        let target = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1));
+        let source_addr = Ipv4Address::new(192, 0, 2, 99);
+        let hardware_address = MacAddress([2, 0, 0, 0, 0, 2]);
+        let mut resolver = NeighborResolver::new();
+        resolver.cache.entries.insert(
+            target,
+            NeighborEntry::Incomplete {
+                next_request_at: now,
+                probes_sent: 1,
+                pending: VecDeque::from([pending_packet(target, source_addr, now)]),
+            },
+        );
+
+        let actions = resolver.observe(
+            target,
+            hardware_address,
+            now,
+            NeighborObservation::Reachable,
+            None,
+        );
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            NeighborAction::Send {
+                hardware_address: resolved,
+                ..
+            } if *resolved == hardware_address
+        )));
+        assert!(resolver.pending_tx.is_empty());
     }
 
     fn pending_packet(

@@ -14,6 +14,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
+use hashbrown::HashMap;
 use kerrno::{KError, KResult, LinuxError};
 use kio::prelude::*;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
@@ -37,7 +38,7 @@ const RAW_MAX_PAYLOAD_LEN: usize = u16::MAX as usize - ipv4::IPV4_MIN_HEADER_LEN
 static RAW_SOCKET_REGISTRY: LazyInit<RawSocketRegistry> = LazyInit::new();
 
 struct RawSocketRegistry {
-    sockets: Mutex<Vec<Weak<RawSocketInner>>>,
+    sockets: Mutex<HashMap<u8, Vec<Weak<RawSocketInner>>>>,
     // Acquire loads pair with Release updates in register/release so the RX
     // fast path can skip the registry lock when no raw socket is alive.
     active_count: AtomicUsize,
@@ -46,7 +47,7 @@ struct RawSocketRegistry {
 impl RawSocketRegistry {
     fn new() -> Self {
         Self {
-            sockets: Mutex::new(Vec::new()),
+            sockets: Mutex::new(HashMap::new()),
             active_count: AtomicUsize::new(0),
         }
     }
@@ -54,8 +55,9 @@ impl RawSocketRegistry {
     fn register(&self, socket: &Arc<RawSocketInner>) {
         self.active_count.fetch_add(1, Ordering::Release);
         let mut sockets = self.sockets.lock();
-        sockets.retain(|socket| socket.strong_count() > 0);
-        sockets.push(Arc::downgrade(socket));
+        let bucket = sockets.entry(socket.ip_protocol.ipv4_number()).or_default();
+        bucket.retain(|socket| socket.strong_count() > 0);
+        bucket.push(Arc::downgrade(socket));
     }
 
     fn release(&self) {
@@ -66,16 +68,22 @@ impl RawSocketRegistry {
         self.active_count.load(Ordering::Acquire) != 0
     }
 
-    fn active_sockets(&self) -> Vec<Arc<RawSocketInner>> {
-        let mut active_sockets = Vec::new();
+    fn active_sockets(&self, protocol: u8) -> Vec<Arc<RawSocketInner>> {
         let mut sockets = self.sockets.lock();
-        sockets.retain(|socket| {
+        let Some(bucket) = sockets.get_mut(&protocol) else {
+            return Vec::new();
+        };
+        let mut active_sockets = Vec::new();
+        bucket.retain(|socket| {
             let Some(socket) = socket.upgrade() else {
                 return false;
             };
             active_sockets.push(socket);
             true
         });
+        if bucket.is_empty() {
+            sockets.remove(&protocol);
+        }
         active_sockets
     }
 }
@@ -86,13 +94,51 @@ struct RawPacket {
     data: Vec<u8>,
 }
 
+struct RawRxQueue {
+    packets: VecDeque<RawPacket>,
+    queued_bytes: usize,
+}
+
+impl RawRxQueue {
+    fn new() -> Self {
+        Self {
+            packets: VecDeque::new(),
+            queued_bytes: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.packets.is_empty()
+    }
+
+    fn can_enqueue(&self, packet_len: usize) -> bool {
+        self.packets.len() < RAW_RX_QUEUE_LIMIT
+            && self.queued_bytes.saturating_add(packet_len) <= RAW_RX_BUF_LEN
+    }
+
+    fn push(&mut self, packet: RawPacket) {
+        self.queued_bytes += packet.data.len();
+        self.packets.push_back(packet);
+    }
+
+    fn pop(&mut self) -> Option<RawPacket> {
+        let packet = self.packets.pop_front()?;
+        self.queued_bytes -= packet.data.len();
+        Some(packet)
+    }
+
+    fn front(&self) -> Option<&RawPacket> {
+        self.packets.front()
+    }
+}
+
 struct RawSocketInner {
-    ip_version: IpVersion,
     ip_protocol: IpProtocol,
+    header_included: bool,
     local_addr: RwLock<Option<IpAddress>>,
     peer_addr: RwLock<Option<IpAddress>>,
     ttl: RwLock<Option<u8>>,
-    rx_queue: Mutex<VecDeque<RawPacket>>,
+    rx_queue: Mutex<RawRxQueue>,
     poll_rx: PollSet,
     rx_shutdown: AtomicBool,
     tx_closed: AtomicBool,
@@ -105,24 +151,25 @@ struct RawRecvMsg<'a> {
     out_flags: Option<&'a mut RecvFlags>,
 }
 
-/// IP version supported by the native raw socket path.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum IpVersion {
-    Ipv4,
-}
-
 /// IPv4 protocol number used by a raw socket.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IpProtocol(u8);
 
 impl IpProtocol {
     /// Creates a protocol selector from an IPv4 protocol number.
+    ///
+    /// `255` (`IPPROTO_RAW`) selects header-included send, matching Linux
+    /// 6.8 `inet_create`.
     pub fn from_ipv4_number(protocol: u8) -> Self {
         Self(protocol)
     }
 
     fn ipv4_number(self) -> u8 {
         self.0
+    }
+
+    fn is_header_included(self) -> bool {
+        self.0 == ipv4::PROTOCOL_RAW
     }
 }
 
@@ -133,18 +180,18 @@ pub struct RawSocket {
 
 impl RawSocket {
     /// Creates a raw socket and registers it with the IPv4 input dispatcher.
-    pub fn new(ip_version: IpVersion, ip_protocol: IpProtocol) -> Self {
+    pub fn new(ip_protocol: IpProtocol) -> Self {
         init_raw_registry();
         let general = GeneralOptions::new();
         general.set_device_mask(u32::MAX);
         let socket = Self {
             inner: Arc::new(RawSocketInner {
-                ip_version,
                 ip_protocol,
+                header_included: ip_protocol.is_header_included(),
                 local_addr: RwLock::new(None),
                 peer_addr: RwLock::new(None),
                 ttl: RwLock::new(None),
-                rx_queue: Mutex::new(VecDeque::new()),
+                rx_queue: Mutex::new(RawRxQueue::new()),
                 poll_rx: PollSet::new(),
                 rx_shutdown: AtomicBool::new(false),
                 tx_closed: AtomicBool::new(false),
@@ -156,9 +203,9 @@ impl RawSocket {
     }
 
     fn check_ip_version(&self, addr: IpAddress) -> KResult<IpAddress> {
-        match (self.inner.ip_version, addr) {
-            (IpVersion::Ipv4, IpAddress::Ipv4(_)) => Ok(addr),
-            _ => Err(KError::from(LinuxError::EAFNOSUPPORT)),
+        match addr {
+            IpAddress::Ipv4(_) => Ok(addr),
+            IpAddress::Ipv6(_) => Err(KError::from(LinuxError::EAFNOSUPPORT)),
         }
     }
 
@@ -194,7 +241,7 @@ impl RawSocket {
             let packet = if msg.flags.contains(RecvFlags::PEEK) {
                 rx_queue.front().cloned()
             } else {
-                rx_queue.pop_front()
+                rx_queue.pop()
             };
             match packet {
                 Some(packet) => packet,
@@ -218,6 +265,114 @@ impl RawSocket {
         } else {
             Ok(write_len)
         }
+    }
+
+    fn send_with_generated_header(
+        &self,
+        mut src: impl Read + IoBuf,
+        options: SendOptions,
+    ) -> KResult<usize> {
+        // Linux 6.8 `raw_sendmsg` rejects `len > 0xFFFF` before skb allocation.
+        // This path prepends a 20-byte IPv4 header, so the payload must also
+        // fit `tot_len`.
+        let payload_len = src.remaining();
+        if payload_len > RAW_MAX_PAYLOAD_LEN {
+            return Err(LinuxError::EMSGSIZE.into());
+        }
+
+        let remote = self.remote_address(&options)?;
+        let local = self.local_address_for(remote)?;
+        let IpAddress::Ipv4(remote) = remote else {
+            return Err(KError::from(LinuxError::EAFNOSUPPORT));
+        };
+        let IpAddress::Ipv4(local) = local else {
+            return Err(KError::from(LinuxError::EAFNOSUPPORT));
+        };
+        let packet_len = ipv4::IPV4_MIN_HEADER_LEN + payload_len;
+        let mut packet = Some(alloc::vec![0u8; packet_len]);
+        src.read_exact(
+            packet
+                .as_mut()
+                .and_then(|packet| packet.get_mut(ipv4::IPV4_MIN_HEADER_LEN..))
+                .ok_or(KError::InvalidInput)?,
+        )?;
+
+        self.inner
+            .general
+            .send_poller_with_nonblocking(self, options.flags.nonblocking(), || {
+                let remote_addr = IpAddress::Ipv4(remote);
+                let local_addr = IpAddress::Ipv4(local);
+                let service = &*SERVICE;
+                service.prepare_and_send_ipv4_packet(
+                    Some(local_addr),
+                    &remote_addr,
+                    &mut packet,
+                    |packet, source_addr, _route_mtu| {
+                        let IpAddress::Ipv4(source_addr) = source_addr else {
+                            return Err(KError::from(LinuxError::EAFNOSUPPORT));
+                        };
+                        ipv4::write_ipv4_packet_header(
+                            packet,
+                            source_addr,
+                            remote,
+                            self.inner.ip_protocol.ipv4_number(),
+                            (*self.inner.ttl.read()).unwrap_or(64),
+                            false,
+                        )
+                        .ok_or(KError::InvalidInput)?;
+                        Ok(())
+                    },
+                )?;
+                network_poller().notify(PollReason::Tx);
+                poll_interfaces();
+                Ok(payload_len)
+            })
+    }
+
+    fn send_header_included(
+        &self,
+        mut src: impl Read + IoBuf,
+        options: SendOptions,
+    ) -> KResult<usize> {
+        let packet_len = src.remaining();
+        if packet_len > u16::MAX as usize {
+            return Err(LinuxError::EMSGSIZE.into());
+        }
+        if packet_len < ipv4::IPV4_MIN_HEADER_LEN {
+            return Err(LinuxError::EINVAL.into());
+        }
+
+        let remote = self.remote_address(&options)?;
+        let local = self.local_address_for(remote)?;
+        let mut packet = Some(alloc::vec![0u8; packet_len]);
+        src.read_exact(packet.as_mut().ok_or(KError::InvalidInput)?)?;
+
+        self.inner
+            .general
+            .send_poller_with_nonblocking(self, options.flags.nonblocking(), || {
+                let service = &*SERVICE;
+                service.prepare_and_send_ipv4_packet(
+                    Some(local),
+                    &remote,
+                    &mut packet,
+                    |packet, source_addr, route_mtu| {
+                        if let Some(route_mtu) = route_mtu
+                            && packet.len() > route_mtu
+                        {
+                            return Err(LinuxError::EMSGSIZE.into());
+                        }
+                        let IpAddress::Ipv4(source_addr) = source_addr else {
+                            return Err(KError::from(LinuxError::EAFNOSUPPORT));
+                        };
+                        ipv4::finalize_hdrincl_packet(packet, source_addr)
+                            .map_err(|_| KError::from(LinuxError::EINVAL))?;
+                        Ok(())
+                    },
+                )?;
+                network_poller().notify(PollReason::Tx);
+                poll_interfaces();
+                Ok(packet_len)
+            })
     }
 }
 
@@ -305,66 +460,15 @@ impl SocketOps for RawSocket {
         Ok(())
     }
 
-    fn send(&self, mut src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
+    fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
         if self.inner.tx_closed.load(Ordering::Acquire) {
             return Err(KError::BrokenPipe);
         }
-
-        // Linux 6.8 `raw_sendmsg` rejects `len > 0xFFFF` before skb allocation.
-        // This path always prepends a 20-byte IPv4 header, so the payload must
-        // also fit `tot_len`.
-        let payload_len = src.remaining();
-        if payload_len > RAW_MAX_PAYLOAD_LEN {
-            return Err(LinuxError::EMSGSIZE.into());
+        if self.inner.header_included {
+            self.send_header_included(src, options)
+        } else {
+            self.send_with_generated_header(src, options)
         }
-
-        let remote = self.remote_address(&options)?;
-        let local = self.local_address_for(remote)?;
-        let IpAddress::Ipv4(remote) = remote else {
-            return Err(KError::from(LinuxError::EAFNOSUPPORT));
-        };
-        let IpAddress::Ipv4(local) = local else {
-            return Err(KError::from(LinuxError::EAFNOSUPPORT));
-        };
-        let packet_len = ipv4::IPV4_MIN_HEADER_LEN + payload_len;
-        let mut packet = Some(alloc::vec![0u8; packet_len]);
-        src.read_exact(
-            packet
-                .as_mut()
-                .and_then(|packet| packet.get_mut(ipv4::IPV4_MIN_HEADER_LEN..))
-                .ok_or(KError::InvalidInput)?,
-        )?;
-
-        self.inner
-            .general
-            .send_poller_with_nonblocking(self, options.flags.nonblocking(), || {
-                let remote_addr = IpAddress::Ipv4(remote);
-                let local_addr = IpAddress::Ipv4(local);
-                let service = &*SERVICE;
-                service.prepare_and_send_ipv4_packet(
-                    Some(local_addr),
-                    &remote_addr,
-                    &mut packet,
-                    |packet, source_addr, _route_mtu| {
-                        let IpAddress::Ipv4(source_addr) = source_addr else {
-                            return Err(KError::from(LinuxError::EAFNOSUPPORT));
-                        };
-                        ipv4::write_ipv4_packet_header(
-                            packet,
-                            source_addr,
-                            remote,
-                            self.inner.ip_protocol.ipv4_number(),
-                            (*self.inner.ttl.read()).unwrap_or(64),
-                            false,
-                        )
-                        .ok_or(KError::InvalidInput)?;
-                        Ok(())
-                    },
-                )?;
-                network_poller().notify(PollReason::Tx);
-                poll_interfaces();
-                Ok(payload_len)
-            })
     }
 
     fn recv(&self, mut dst: impl Write + IoBufMut, options: RecvOptions<'_>) -> KResult<usize> {
@@ -388,9 +492,8 @@ impl SocketOps for RawSocket {
     }
 
     fn local_addr(&self) -> KResult<SocketAddrEx> {
-        let local = (*self.inner.local_addr.read()).unwrap_or(match self.inner.ip_version {
-            IpVersion::Ipv4 => IpAddress::Ipv4(Ipv4Address::from(Ipv4Addr::UNSPECIFIED)),
-        });
+        let local = (*self.inner.local_addr.read())
+            .unwrap_or(IpAddress::Ipv4(Ipv4Address::from(Ipv4Addr::UNSPECIFIED)));
         Ok(SocketAddrEx::Ip(SocketAddr::new(local.into(), 0)))
     }
 
@@ -471,7 +574,7 @@ pub(crate) fn handle_ipv4_input(header: Ipv4Header, ip_packet: &[u8]) -> InputDi
         return InputDisposition::NoSocket;
     }
     let mut delivered = false;
-    for socket in RAW_SOCKET_REGISTRY.active_sockets() {
+    for socket in RAW_SOCKET_REGISTRY.active_sockets(header.protocol()) {
         if raw_socket_matches(&socket, header) {
             delivered = true;
             deliver_raw_packet(&socket, header, ip_packet);
@@ -485,8 +588,7 @@ pub(crate) fn handle_ipv4_input(header: Ipv4Header, ip_packet: &[u8]) -> InputDi
 }
 
 fn raw_socket_matches(socket: &RawSocketInner, header: Ipv4Header) -> bool {
-    if socket.ip_version != IpVersion::Ipv4 || socket.ip_protocol.ipv4_number() != header.protocol()
-    {
+    if socket.ip_protocol.ipv4_number() != header.protocol() {
         return false;
     }
     if let Some(IpAddress::Ipv4(local)) = *socket.local_addr.read()
@@ -505,16 +607,15 @@ fn raw_socket_matches(socket: &RawSocketInner, header: Ipv4Header) -> bool {
 
 fn deliver_raw_packet(socket: &RawSocketInner, header: Ipv4Header, ip_packet: &[u8]) {
     let from = SocketAddr::V4(SocketAddrV4::new(ipv4_to_core(header.src_addr()), 0));
-    let packet = RawPacket {
-        from,
-        data: Vec::from(ip_packet),
-    };
     let mut rx_queue = socket.rx_queue.lock();
-    if rx_queue.len() >= RAW_RX_QUEUE_LIMIT {
+    if !rx_queue.can_enqueue(ip_packet.len()) {
         debug!("raw socket receive queue is full, dropping packet");
         return;
     }
-    rx_queue.push_back(packet);
+    rx_queue.push(RawPacket {
+        from,
+        data: Vec::from(ip_packet),
+    });
     drop(rx_queue);
     socket.poll_rx.wake();
 }
@@ -653,10 +754,7 @@ mod tests {
 
     #[def_test(serial)]
     fn raw_socket_ip_version_checks_and_defaults() {
-        let socket = RawSocket::new(
-            IpVersion::Ipv4,
-            IpProtocol::from_ipv4_number(ipv4::PROTOCOL_ICMP),
-        );
+        let socket = RawSocket::new(IpProtocol::from_ipv4_number(ipv4::PROTOCOL_ICMP));
 
         assert_eq!(
             socket
@@ -697,10 +795,7 @@ mod tests {
 
     #[def_test(serial)]
     fn raw_socket_matches_configured_protocol_number() {
-        let socket = RawSocket::new(
-            IpVersion::Ipv4,
-            IpProtocol::from_ipv4_number(ipv4::PROTOCOL_TCP),
-        );
+        let socket = RawSocket::new(IpProtocol::from_ipv4_number(ipv4::PROTOCOL_TCP));
         assert_eq!(socket.inner.ip_protocol.ipv4_number(), ipv4::PROTOCOL_TCP);
 
         let header = Ipv4Header::parse_input(
@@ -719,10 +814,7 @@ mod tests {
 
     #[def_test(serial)]
     fn raw_socket_read_shutdown_drains_received_packets() {
-        let socket = RawSocket::new(
-            IpVersion::Ipv4,
-            IpProtocol::from_ipv4_number(ipv4::PROTOCOL_ICMP),
-        );
+        let socket = RawSocket::new(IpProtocol::from_ipv4_number(ipv4::PROTOCOL_ICMP));
         let packet = ipv4_packet_bytes(
             Ipv4Addr::new(10, 0, 0, 1),
             Ipv4Addr::new(10, 0, 0, 2),
@@ -752,7 +844,7 @@ mod tests {
 
     #[def_test(serial)]
     fn raw_socket_receives_full_ipv4_packet() {
-        let socket = RawSocket::new(IpVersion::Ipv4, IpProtocol::from_ipv4_number(99));
+        let socket = RawSocket::new(IpProtocol::from_ipv4_number(99));
         let packet = ipv4::build_ipv4_packet(
             Ipv4Address::from(Ipv4Addr::new(10, 0, 0, 1)),
             Ipv4Address::from(Ipv4Addr::new(10, 0, 0, 2)),
@@ -784,10 +876,7 @@ mod tests {
 
     #[def_test(serial)]
     fn raw_socket_ttl_remote_and_local_shortcuts() {
-        let socket = RawSocket::new(
-            IpVersion::Ipv4,
-            IpProtocol::from_ipv4_number(ipv4::PROTOCOL_ICMP),
-        );
+        let socket = RawSocket::new(IpProtocol::from_ipv4_number(ipv4::PROTOCOL_ICMP));
         let mut ttl = 0u8;
 
         socket
@@ -830,10 +919,7 @@ mod tests {
 
     #[def_test(serial)]
     fn raw_socket_bind_and_shutdown_gate_fast_paths() {
-        let socket = RawSocket::new(
-            IpVersion::Ipv4,
-            IpProtocol::from_ipv4_number(ipv4::PROTOCOL_ICMP),
-        );
+        let socket = RawSocket::new(IpProtocol::from_ipv4_number(ipv4::PROTOCOL_ICMP));
 
         socket
             .bind(SocketAddrEx::Ip(SocketAddr::new(
@@ -869,10 +955,7 @@ mod tests {
 
     #[def_test(serial)]
     fn raw_send_rejects_payload_that_cannot_fit_ipv4_total_len() {
-        let socket = RawSocket::new(
-            IpVersion::Ipv4,
-            IpProtocol::from_ipv4_number(ipv4::PROTOCOL_ICMP),
-        );
+        let socket = RawSocket::new(IpProtocol::from_ipv4_number(ipv4::PROTOCOL_ICMP));
         let oversized = vec![0u8; RAW_MAX_PAYLOAD_LEN + 1];
         assert_eq!(
             socket.send(Cursor::new(oversized.as_slice()), SendOptions::default()),
@@ -883,7 +966,7 @@ mod tests {
     #[def_test(serial)]
     fn raw_ipv4_input_skips_dropped_sockets() {
         {
-            let _socket = RawSocket::new(IpVersion::Ipv4, IpProtocol::from_ipv4_number(99));
+            let _socket = RawSocket::new(IpProtocol::from_ipv4_number(99));
         }
         let packet = ipv4::build_ipv4_packet(
             Ipv4Address::from(Ipv4Addr::new(10, 0, 0, 1)),
@@ -898,5 +981,80 @@ mod tests {
             handle_ipv4_input(header, &packet),
             InputDisposition::NoSocket
         );
+    }
+
+    #[def_test(serial)]
+    fn ipproto_raw_selects_header_included_send() {
+        let socket = RawSocket::new(IpProtocol::from_ipv4_number(ipv4::PROTOCOL_RAW));
+        assert!(socket.inner.header_included);
+        assert_eq!(
+            socket.send(Cursor::new(&[0u8; 10][..]), SendOptions::default()),
+            Err(KError::from(LinuxError::EINVAL))
+        );
+        let oversized = vec![0u8; u16::MAX as usize + 1];
+        assert_eq!(
+            socket.send(Cursor::new(oversized.as_slice()), SendOptions::default()),
+            Err(KError::from(LinuxError::EMSGSIZE))
+        );
+    }
+
+    #[def_test(serial)]
+    fn raw_ipv4_input_only_walks_matching_protocol_bucket() {
+        let icmp = RawSocket::new(IpProtocol::from_ipv4_number(ipv4::PROTOCOL_ICMP));
+        let other = RawSocket::new(IpProtocol::from_ipv4_number(99));
+        let packet = ipv4_packet_bytes(
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(10, 0, 0, 2),
+            &[1, 2, 3, 4],
+        );
+        let header = Ipv4Header::parse_input(&packet).unwrap();
+
+        assert_eq!(
+            handle_ipv4_input(header, &packet),
+            InputDisposition::Accepted
+        );
+
+        let mut icmp_buf = vec![0u8; packet.len()];
+        let mut other_buf = vec![0u8; packet.len()];
+        let mut icmp_msg = RawRecvMsg {
+            from: None,
+            flags: RecvFlags::empty(),
+            out_flags: None,
+        };
+        let mut other_msg = RawRecvMsg {
+            from: None,
+            flags: RecvFlags::empty(),
+            out_flags: None,
+        };
+        assert_eq!(
+            icmp.recv_packet(&mut Cursor::new(icmp_buf.as_mut_slice()), &mut icmp_msg),
+            Ok(packet.len())
+        );
+        assert_eq!(
+            other.recv_packet(&mut Cursor::new(other_buf.as_mut_slice()), &mut other_msg),
+            Err(KError::WouldBlock)
+        );
+    }
+
+    #[def_test(serial)]
+    fn raw_receive_queue_admits_by_byte_limit_before_copy() {
+        let socket = RawSocket::new(IpProtocol::from_ipv4_number(99));
+        let packet = vec![0u8; RAW_RX_BUF_LEN / 2 + 1];
+        let header = Ipv4Header::parse_input(
+            &ipv4::build_ipv4_packet(
+                Ipv4Address::from(Ipv4Addr::new(10, 0, 0, 1)),
+                Ipv4Address::from(Ipv4Addr::new(10, 0, 0, 2)),
+                99,
+                32,
+                &[1],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        deliver_raw_packet(&socket.inner, header, &packet);
+        deliver_raw_packet(&socket.inner, header, &packet);
+        assert_eq!(socket.inner.rx_queue.lock().queued_bytes, packet.len());
+        assert_eq!(socket.inner.rx_queue.lock().packets.len(), 1);
     }
 }

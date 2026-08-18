@@ -297,7 +297,7 @@ impl EthernetDevice {
         let arp_packet = arp::build_request(self.mac_addr(), source_addr, target_ipv4);
         let _ = self.send_to(
             ifindex,
-            MacAddress::BROADCAST,
+            request.ethernet_dest,
             arp::ArpIpv4Packet::LEN,
             |buf| {
                 let emit_result = arp_packet.emit(buf);
@@ -383,25 +383,27 @@ impl EthernetDevice {
             "ARP: {} -> {}",
             event.source_protocol_addr, event.source_hardware_addr
         );
-        let fallback_source_addr = self
-            .assigned_ipv4_addrs
-            .first()
-            .map(|addr| IpAddress::Ipv4(addr.address()));
-        let actions = self.neighbor_resolver.observe(
-            IpAddress::Ipv4(event.source_protocol_addr),
-            event.source_hardware_addr,
-            now,
-            if event.is_host_directed_reply {
-                NeighborObservation::Reachable
-            } else {
-                NeighborObservation::Stale
-            },
-            fallback_source_addr,
-        );
+        if event.should_learn_source() {
+            let fallback_source_addr = self
+                .assigned_ipv4_addrs
+                .first()
+                .map(|addr| IpAddress::Ipv4(addr.address()));
+            let actions = self.neighbor_resolver.observe(
+                IpAddress::Ipv4(event.source_protocol_addr),
+                event.source_hardware_addr,
+                now,
+                if event.is_host_directed_reply {
+                    NeighborObservation::Reachable
+                } else {
+                    NeighborObservation::Stale
+                },
+                fallback_source_addr,
+            );
+            self.execute_neighbor_actions(ifindex, actions, now);
+        }
         if let Some(response) = event.reply(local_hardware_addr) {
             self.send_arp_reply(ifindex, event.source_hardware_addr, response);
         }
-        self.execute_neighbor_actions(ifindex, actions, now);
     }
 
     fn process_pending_packets(&mut self, ifindex: i32, now: MonotonicInstant) {

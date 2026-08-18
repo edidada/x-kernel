@@ -20,6 +20,7 @@ use crate::{
 pub(crate) const PROTOCOL_ICMP: u8 = 1;
 pub(crate) const PROTOCOL_TCP: u8 = 6;
 pub(crate) const PROTOCOL_UDP: u8 = 17;
+pub(crate) const PROTOCOL_RAW: u8 = 255;
 
 pub(crate) const IPV4_MIN_HEADER_LEN: usize = 20;
 const IPV4_DEFAULT_TTL: u8 = 64;
@@ -511,6 +512,41 @@ fn write_ipv4_header(
     Some(())
 }
 
+/// Completes a user-supplied IPv4 header for raw `IP_HDRINCL` send.
+///
+/// Linux 6.8 `raw_send_hdrinc` fills an unspecified source, overwrites
+/// `tot_len` with the buffer length, and recomputes the header checksum.
+pub(crate) fn finalize_hdrincl_packet(
+    packet: &mut [u8],
+    fallback_src: Ipv4Address,
+) -> Result<Ipv4Header, Ipv4Error> {
+    if packet.len() < IPV4_MIN_HEADER_LEN || packet.len() > u16::MAX as usize {
+        return Err(Ipv4Error::Malformed);
+    }
+    let header = Ipv4Header::parse_output(packet)?;
+    if header.header_len() > packet.len() {
+        return Err(Ipv4Error::Malformed);
+    }
+    if header.src_addr().is_unspecified() {
+        packet[12..16].copy_from_slice(&fallback_src.octets());
+    }
+    let total_len = u16::try_from(packet.len()).map_err(|_| Ipv4Error::Malformed)?;
+    packet[2..4].copy_from_slice(&total_len.to_be_bytes());
+    let header_data = packet
+        .get_mut(..header.header_len())
+        .ok_or(Ipv4Error::Malformed)?;
+    let mut ether_header = Ipv4HeaderSlice::from_slice(header_data)
+        .map_err(|_| Ipv4Error::Malformed)?
+        .to_header();
+    ether_header.header_checksum = ether_header.calc_header_checksum();
+    let serialized = ether_header.to_bytes();
+    if serialized.len() != header_data.len() {
+        return Err(Ipv4Error::Malformed);
+    }
+    header_data.copy_from_slice(&serialized);
+    Ipv4Header::parse_output(packet)
+}
+
 fn build_ipv4_fragment(
     packet: &[u8],
     header: &Ipv4Header,
@@ -665,6 +701,24 @@ mod tests {
 
         let header = Ipv4Header::parse_input(packet.network_packet().unwrap()).unwrap();
         assert_eq!(header.protocol(), PROTOCOL_ICMP);
+    }
+
+    #[def_test]
+    fn test_finalize_hdrincl_packet_fills_source_and_checksum() {
+        let mut packet = ipv4_packet(PROTOCOL_RAW, &[1, 2, 3, 4]);
+        packet[12..16].copy_from_slice(&[0, 0, 0, 0]);
+        packet[2] = 0;
+        packet[3] = 0;
+        packet[10] = 0;
+        packet[11] = 0;
+
+        let header = finalize_hdrincl_packet(&mut packet, Ipv4Address::new(192, 0, 2, 10)).unwrap();
+        assert_eq!(header.src_addr(), Ipv4Address::new(192, 0, 2, 10));
+        assert_eq!(header.total_len(), packet.len());
+        assert_eq!(
+            Ipv4Header::parse_input(&packet).unwrap().protocol(),
+            PROTOCOL_RAW
+        );
     }
 
     #[def_test]
