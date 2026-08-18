@@ -20,6 +20,22 @@
 # Cargo lock
 Cargo.lock
 
+# WFUZZ fuzz harness artifacts
+/fuzz/Cargo.lock
+/fuzz/entrypoints.json
+/fuzz/entrypoints_list.txt
+/fuzz/wfuzz-fuzz-targets/
+/fuzz/wfuzz-test-*/
+/fuzz/corpus/
+/fuzz/seeds/
+/fuzz/fuzz-export/
+/fuzz/platform-runs/
+/fuzz/artifacts/
+/fuzz/coverage/
+/fuzz/crash-*
+/fuzz/default_*.profraw
+/fuzz-results/
+
 # Python
 __pycache__
 venv

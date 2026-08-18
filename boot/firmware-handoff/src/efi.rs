@@ -330,11 +330,29 @@ pub struct LinuxEfiBootMemmapHeader {
 
 #[derive(Debug, Clone, Copy)]
 pub struct BootMemmapRef<'a> {
-    header: &'a LinuxEfiBootMemmapHeader,
+    header: LinuxEfiBootMemmapHeader,
     descriptors: &'a [u8],
 }
 
 impl<'a> BootMemmapRef<'a> {
+    /// Parse a boot memmap blob (header followed by descriptor bytes).
+    ///
+    /// The header is copied out with an unaligned read so callers can pass
+    /// arbitrary byte slices (including fuzz corpora) without alignment
+    /// requirements.
+    pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
+        let hdr_size = size_of::<LinuxEfiBootMemmapHeader>();
+        if bytes.len() < hdr_size {
+            return Err(ParseError::InvalidBootMemmap);
+        }
+        // SAFETY: `bytes` is at least `hdr_size` long; the header may be
+        // unaligned, so copy it out rather than forming a reference.
+        let header =
+            unsafe { ptr::read_unaligned(bytes.as_ptr().cast::<LinuxEfiBootMemmapHeader>()) };
+        let rest = &bytes[hdr_size..];
+        Self::from_header_and_descriptors(header, rest)
+    }
+
     /// # Safety
     ///
     /// `ptr` must point to a readable Linux EFI boot memmap header followed by
@@ -342,13 +360,7 @@ impl<'a> BootMemmapRef<'a> {
     pub unsafe fn from_ptr(ptr: *const LinuxEfiBootMemmapHeader) -> Result<Self, ParseError> {
         // SAFETY: The caller guarantees `ptr` points to a readable boot memmap
         // header for the lifetime of the returned view.
-        let header = unsafe { ptr.as_ref() }.ok_or(ParseError::NullPointer)?;
-        if header.desc_size < size_of::<MemoryDescriptor>()
-            || header.buff_size < header.map_size
-            || (header.desc_size != 0 && header.map_size % header.desc_size != 0)
-        {
-            return Err(ParseError::InvalidBootMemmap);
-        }
+        let header = *unsafe { ptr.as_ref() }.ok_or(ParseError::NullPointer)?;
 
         // SAFETY: `ptr` points to the boot memmap header, so advancing by the
         // header size reaches the first descriptor byte in the same blob.
@@ -361,15 +373,30 @@ impl<'a> BootMemmapRef<'a> {
             unsafe { slice::from_raw_parts(desc_ptr, header.map_size) }
         };
 
+        Self::from_header_and_descriptors(header, descriptors)
+    }
+
+    fn from_header_and_descriptors(
+        header: LinuxEfiBootMemmapHeader,
+        descriptors: &'a [u8],
+    ) -> Result<Self, ParseError> {
+        if header.desc_size < size_of::<MemoryDescriptor>()
+            || header.buff_size < header.map_size
+            || (header.desc_size != 0 && header.map_size % header.desc_size != 0)
+            || header.map_size > descriptors.len()
+        {
+            return Err(ParseError::InvalidBootMemmap);
+        }
+
         Ok(Self {
             header,
-            descriptors,
+            descriptors: &descriptors[..header.map_size],
         })
     }
 
     #[must_use]
-    pub const fn header(&self) -> &'a LinuxEfiBootMemmapHeader {
-        self.header
+    pub const fn header(&self) -> &LinuxEfiBootMemmapHeader {
+        &self.header
     }
 
     #[must_use]

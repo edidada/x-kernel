@@ -39,7 +39,7 @@ fn normalized_path_parts(path: &str) -> Result<Vec<&str>, String> {
 }
 
 /// Split a path into parent directory and leaf name.
-pub(crate) fn split_parent_name(path: &str) -> Result<(&str, &str), String> {
+pub fn split_parent_name(path: &str) -> Result<(&str, &str), String> {
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() || trimmed == "/" {
         return Err(String::from("invalid path"));
@@ -54,12 +54,12 @@ pub(crate) fn split_parent_name(path: &str) -> Result<(&str, &str), String> {
 }
 
 /// Split a path into normalized components.
-pub(crate) fn path_parts(path: &str) -> Result<Vec<&str>, String> {
+pub fn path_parts(path: &str) -> Result<Vec<&str>, String> {
     normalized_path_parts(path)
 }
 
 /// Parse 9P2000 stat-based directory entries.
-pub(crate) fn parse_dir_entries(data: &[u8], names: &mut Vec<String>) -> Result<(), String> {
+pub fn parse_dir_entries(data: &[u8], names: &mut Vec<String>) -> Result<(), String> {
     let mut offset = 0usize;
     while offset + 2 <= data.len() {
         let size = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
@@ -78,7 +78,7 @@ pub(crate) fn parse_dir_entries(data: &[u8], names: &mut Vec<String>) -> Result<
 }
 
 /// Parse 9P2000.L readdir entries and return the last offset.
-pub(crate) fn parse_dir_entries_l(data: &[u8]) -> Result<(Vec<String>, Option<u64>), String> {
+pub fn parse_dir_entries_l(data: &[u8]) -> Result<(Vec<String>, Option<u64>), String> {
     let mut offset = 0usize;
     let mut names = Vec::new();
     let mut last_offset = None;

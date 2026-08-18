@@ -7,6 +7,10 @@ members = [
     "boot/*",
     # filesystems under active standalone development
     "fs/filesystems/kext4",
+    "fs/filesystems/rsext4",
+    "fs/filesystems/fs9p",
+    # light crates exposed to the isolated WFUZZ workspace
+    "core/kbpf",
     # tee_crypto source tree (publish / local tests); kernel deps use crates.io via workspace.dependencies
     "tee/tee_crypto",
 ]

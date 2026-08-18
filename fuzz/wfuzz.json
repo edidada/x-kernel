@@ -1,0 +1,197 @@
+{
+    "project": "x_kernel",
+    "product": "code",
+    "language": "rust",
+    "build": {
+        "helper": "cargo-fuzz",
+        "config": {
+            "module_root": "."
+        },
+        "match": []
+    },
+    "fuzz": {
+        "entrypoints": [
+            {
+                "name": "fdt_parse",
+                "binary": "fdt_parse",
+                "isDefault": true,
+                "arguments": [
+                    {
+                        "typeid": "&[u8]",
+                        "generator": "<bytes>",
+                        "arguments": []
+                    }
+                ]
+            },
+            {
+                "name": "fdt_typed_helpers",
+                "binary": "fdt_typed_helpers",
+                "isDefault": true,
+                "arguments": [
+                    {
+                        "typeid": "&[u8]",
+                        "generator": "<bytes>",
+                        "arguments": []
+                    }
+                ]
+            },
+            {
+                "name": "kernel_elf_parse",
+                "binary": "kernel_elf_parse",
+                "isDefault": true,
+                "arguments": [
+                    {
+                        "typeid": "&[u8]",
+                        "generator": "<bytes>",
+                        "arguments": []
+                    }
+                ]
+            },
+            {
+                "name": "user_elf_parse",
+                "binary": "user_elf_parse",
+                "isDefault": true,
+                "arguments": [
+                    {
+                        "typeid": "&[u8]",
+                        "generator": "<bytes>",
+                        "arguments": []
+                    }
+                ]
+            },
+            {
+                "name": "kbpf_vm_run",
+                "binary": "kbpf_vm_run",
+                "isDefault": true,
+                "arguments": [
+                    {
+                        "typeid": "&[u8]",
+                        "generator": "<bytes>",
+                        "arguments": []
+                    }
+                ]
+            },
+            {
+                "name": "rsext4_extent_parse",
+                "binary": "rsext4_extent_parse",
+                "isDefault": true,
+                "arguments": [
+                    {
+                        "typeid": "&[u8]",
+                        "generator": "<bytes>",
+                        "arguments": []
+                    }
+                ]
+            },
+            {
+                "name": "rsext4_dirent_parse",
+                "binary": "rsext4_dirent_parse",
+                "isDefault": true,
+                "arguments": [
+                    {
+                        "typeid": "&[u8]",
+                        "generator": "<bytes>",
+                        "arguments": []
+                    }
+                ]
+            },
+            {
+                "name": "rsext4_gdt_walk",
+                "binary": "rsext4_gdt_walk",
+                "isDefault": true,
+                "arguments": [
+                    {
+                        "typeid": "&[u8]",
+                        "generator": "<bytes>",
+                        "arguments": []
+                    }
+                ]
+            },
+            {
+                "name": "rsext4_sb_decode",
+                "binary": "rsext4_sb_decode",
+                "isDefault": true,
+                "arguments": [
+                    {
+                        "typeid": "&[u8]",
+                        "generator": "<bytes>",
+                        "arguments": []
+                    }
+                ]
+            },
+            {
+                "name": "rsext4_inode_decode",
+                "binary": "rsext4_inode_decode",
+                "isDefault": true,
+                "arguments": [
+                    {
+                        "typeid": "&[u8]",
+                        "generator": "<bytes>",
+                        "arguments": []
+                    }
+                ]
+            },
+            {
+                "name": "firmware_handoff_memmap",
+                "binary": "firmware_handoff_memmap",
+                "isDefault": true,
+                "arguments": [
+                    {
+                        "typeid": "&[u8]",
+                        "generator": "<bytes>",
+                        "arguments": []
+                    }
+                ]
+            },
+            {
+                "name": "fs9p_dirent",
+                "binary": "fs9p_dirent",
+                "isDefault": true,
+                "arguments": [
+                    {
+                        "typeid": "&[u8]",
+                        "generator": "<bytes>",
+                        "arguments": []
+                    }
+                ]
+            },
+            {
+                "name": "fs9p_path",
+                "binary": "fs9p_path",
+                "isDefault": true,
+                "arguments": [
+                    {
+                        "typeid": "&[u8]",
+                        "generator": "<bytes>",
+                        "arguments": []
+                    }
+                ]
+            },
+            {
+                "name": "tee_sm2_sec1",
+                "binary": "tee_sm2_sec1",
+                "isDefault": true,
+                "arguments": [
+                    {
+                        "typeid": "&[u8]",
+                        "generator": "<bytes>",
+                        "arguments": []
+                    }
+                ]
+            },
+            {
+                "name": "tee_rsa_der",
+                "binary": "tee_rsa_der",
+                "isDefault": true,
+                "arguments": [
+                    {
+                        "typeid": "&[u8]",
+                        "generator": "<bytes>",
+                        "arguments": []
+                    }
+                ]
+            }
+        ]
+    }
+}
+

@@ -1,0 +1,130 @@
+[package]
+name = "x-kernel-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rs_fdtree = { path = "../drivers/rs-fdtree" }
+kernel-elf-loader = { path = "../boot/kernel-elf-loader" }
+kernel-elf-parser = { path = "../boot/kernel_elf_parser" }
+kbpf = { path = "../core/kbpf" }
+rsext4 = { path = "../fs/filesystems/rsext4", default-features = false }
+firmware-handoff = { path = "../boot/firmware-handoff" }
+fs9p = { path = "../fs/filesystems/fs9p", features = ["fuzz"] }
+tee_crypto = { path = "../tee/tee_crypto" }
+
+[[bin]]
+name = "fdt_parse"
+path = "fuzz_targets/fdt_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fdt_typed_helpers"
+path = "fuzz_targets/fdt_typed_helpers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kernel_elf_parse"
+path = "fuzz_targets/kernel_elf_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "user_elf_parse"
+path = "fuzz_targets/user_elf_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kbpf_vm_run"
+path = "fuzz_targets/kbpf_vm_run.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rsext4_extent_parse"
+path = "fuzz_targets/rsext4_extent_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rsext4_dirent_parse"
+path = "fuzz_targets/rsext4_dirent_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rsext4_gdt_walk"
+path = "fuzz_targets/rsext4_gdt_walk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rsext4_sb_decode"
+path = "fuzz_targets/rsext4_sb_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rsext4_inode_decode"
+path = "fuzz_targets/rsext4_inode_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "firmware_handoff_memmap"
+path = "fuzz_targets/firmware_handoff_memmap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fs9p_dirent"
+path = "fuzz_targets/fs9p_dirent.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fs9p_path"
+path = "fuzz_targets/fs9p_path.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tee_sm2_sec1"
+path = "fuzz_targets/tee_sm2_sec1.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tee_rsa_der"
+path = "fuzz_targets/tee_rsa_der.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+incremental = false
+codegen-units = 1

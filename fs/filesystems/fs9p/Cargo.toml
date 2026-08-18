@@ -8,5 +8,10 @@ repository = "https://github.com/x-kernel/fs9p"
 homepage = "https://github.com/x-kernel/fs9p"
 authors = ["Debin <luodeb@outlook.com>"]
 
+[features]
+default = []
+# Expose packet/dirent parsers for isolated WFUZZ harnesses.
+fuzz = []
+
 [dependencies]
 log = { version = "0.4", default-features = false }

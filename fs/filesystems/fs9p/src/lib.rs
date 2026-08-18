@@ -16,3 +16,9 @@ mod transport;
 
 pub use session::{FileAttr, P9DirEntry, P9Session as Session};
 pub use transport::Transport;
+
+#[cfg(feature = "fuzz")]
+pub mod fuzz {
+    //! Pure decode helpers for WFUZZ (not part of the normal client API).
+    pub use crate::parse::{parse_dir_entries, parse_dir_entries_l, path_parts, split_parent_name};
+}
