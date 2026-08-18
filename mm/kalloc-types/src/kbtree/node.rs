@@ -47,7 +47,7 @@ use core::{
     slice,
 };
 
-use crate::{AllocContext, AllocError, KBox};
+use crate::{AllocContext, AllocError, KBox, KVec};
 
 /// Allocate `value` on the heap via fallible `KBox`, returning an owned
 /// `NonNull` pointer or `AllocError`. The caller must eventually deallocate
@@ -219,6 +219,87 @@ impl<K, V> BoxedNode<K, V> {
     }
 }
 
+/// Nodes reserved before a B-tree insertion starts mutating the tree.
+///
+/// A split can cascade from the target leaf to the root. Allocating every
+/// potentially needed node before the first split makes `try_insert` failure
+/// atomic: an allocation error is returned while the tree is still unchanged.
+pub(crate) struct NodeReservation<K, V> {
+    leaf_nodes: KVec<KBox<LeafNode<K, V>>>,
+    internal_nodes: KVec<KBox<InternalNode<K, V>>>,
+}
+
+impl<K, V> NodeReservation<K, V> {
+    /// Reserves exactly the nodes needed if every full node on the insertion
+    /// path splits. The path is inspected immutably, so all fallible work
+    /// happens before the caller mutates the tree.
+    pub(crate) fn for_insert<'a>(
+        handle: &Handle<NodeRef<marker::Mut<'a>, K, V, marker::Leaf>, marker::Edge>,
+    ) -> Result<Self, AllocError> {
+        let mut leaf_count = 0usize;
+        let mut internal_count = 0usize;
+        let mut node = handle.reborrow().into_node().forget_type();
+
+        loop {
+            if node.len() != CAPACITY {
+                break;
+            }
+
+            if node.height() == 0 {
+                leaf_count = leaf_count.checked_add(1).ok_or(AllocError::NoMemory)?;
+            } else {
+                internal_count = internal_count.checked_add(1).ok_or(AllocError::NoMemory)?;
+            }
+
+            match node.ascend() {
+                Ok(parent) => node = parent.into_node().forget_type(),
+                Err(_) => {
+                    // A full root also needs a new internal root after it
+                    // splits, regardless of whether that root was a leaf.
+                    internal_count = internal_count.checked_add(1).ok_or(AllocError::NoMemory)?;
+                    break;
+                }
+            }
+        }
+
+        let mut leaf_nodes = KVec::try_with_capacity(leaf_count, AllocContext::Sleepable)?;
+        let mut internal_nodes = KVec::try_with_capacity(internal_count, AllocContext::Sleepable)?;
+
+        for _ in 0..leaf_count {
+            // SAFETY: `LeafNode` stores keys and values as `MaybeUninit`, so
+            // a freshly-created node has no initialized `K` or `V` to drop.
+            let node = KBox::try_new(unsafe { LeafNode::new() }, AllocContext::Sleepable)?;
+            leaf_nodes.try_push(node, AllocContext::Sleepable)?;
+        }
+
+        for _ in 0..internal_count {
+            // SAFETY: `InternalNode` stores keys, values, and edges as
+            // `MaybeUninit`; it is safe to own and drop an unused reservation.
+            let node = KBox::try_new(unsafe { InternalNode::new() }, AllocContext::Sleepable)?;
+            internal_nodes.try_push(node, AllocContext::Sleepable)?;
+        }
+
+        Ok(Self {
+            leaf_nodes,
+            internal_nodes,
+        })
+    }
+
+    fn take_leaf(&mut self) -> NonNull<LeafNode<K, V>> {
+        self.leaf_nodes
+            .pop()
+            .expect("B-tree insertion reservation must include a leaf node")
+            .into_raw()
+    }
+
+    fn take_internal(&mut self) -> NonNull<InternalNode<K, V>> {
+        self.internal_nodes
+            .pop()
+            .expect("B-tree insertion reservation must include an internal node")
+            .into_raw()
+    }
+}
+
 /// An owned tree. Note that despite being owned, this does not have a destructor,
 /// and must be cleaned up manually.
 pub struct Root<K, V> {
@@ -285,7 +366,25 @@ impl<K, V> Root<K, V> {
         &mut self,
     ) -> Result<NodeRef<marker::Mut<'_>, K, V, marker::Internal>, AllocError> {
         debug_assert!(!self.is_shared_root());
-        let mut new_node = try_alloc_node(unsafe { InternalNode::new() })?;
+        // SAFETY: the new node contains only `MaybeUninit` slots until this
+        // method installs the previous root as its first initialized edge.
+        let new_node = try_alloc_node(unsafe { InternalNode::new() })?;
+        Ok(self.push_level_with_node(new_node))
+    }
+
+    /// Raises the tree using a node reserved before an insertion mutation.
+    pub(crate) fn push_level_reserved(
+        &mut self,
+        reservation: &mut NodeReservation<K, V>,
+    ) -> NodeRef<marker::Mut<'_>, K, V, marker::Internal> {
+        debug_assert!(!self.is_shared_root());
+        self.push_level_with_node(reservation.take_internal())
+    }
+
+    fn push_level_with_node(
+        &mut self,
+        mut new_node: NonNull<InternalNode<K, V>>,
+    ) -> NodeRef<marker::Mut<'_>, K, V, marker::Internal> {
         // SAFETY: new_node was just allocated above; it is valid and exclusively owned.
         let new_node = unsafe { new_node.as_mut() };
         new_node.edges[0].write(unsafe { BoxedNode::from_ptr(self.node.as_ptr()) });
@@ -304,7 +403,7 @@ impl<K, V> Root<K, V> {
             ret.reborrow_mut().first_edge().correct_parent_link();
         }
 
-        Ok(ret)
+        ret
     }
 
     /// Removes the root node, using its first child as the new root. This cannot be called when
@@ -1020,24 +1119,26 @@ impl<'a, K, V> Handle<NodeRef<marker::Mut<'a>, K, V, marker::Leaf>, marker::Edge
         }
     }
 
-    /// Inserts a new key/value pair between the key/value pairs to the right and left of
-    /// this edge. This method splits the node if there isn't enough room.
-    ///
-    /// The returned pointer points to the inserted value.
-    pub fn insert(
+    /// Inserts with nodes reserved before the tree was mutated.
+    pub(crate) fn insert_reserved(
         mut self,
         key: K,
         val: V,
-    ) -> Result<(InsertResult<'a, K, V, marker::Leaf>, *mut V), AllocError> {
+        reservation: &mut NodeReservation<K, V>,
+    ) -> (InsertResult<'a, K, V, marker::Leaf>, *mut V) {
         if self.node.len() < CAPACITY {
             let ptr = self.insert_fit(key, val);
-            Ok((InsertResult::Fit(Handle::new_kv(self.node, self.idx)), ptr))
+            (InsertResult::Fit(Handle::new_kv(self.node, self.idx)), ptr)
         } else {
             let middle = Handle::new_kv(self.node, B);
-            let (mut left, k, v, mut right) = middle.split()?;
+            let (mut left, k, v, mut right) = middle.split_reserved(reservation);
             let ptr = if self.idx <= B {
+                // SAFETY: `left` is the live left half produced by splitting
+                // this handle, and `self.idx <= B` selects an in-bounds edge.
                 unsafe { Handle::new_edge(left.reborrow_mut(), self.idx).insert_fit(key, val) }
             } else {
+                // SAFETY: `right` is the live right leaf produced by the
+                // split, and the adjusted index is within that right half.
                 unsafe {
                     Handle::new_edge(
                         right.as_mut().cast_unchecked::<marker::Leaf>(),
@@ -1046,7 +1147,7 @@ impl<'a, K, V> Handle<NodeRef<marker::Mut<'a>, K, V, marker::Leaf>, marker::Edge
                     .insert_fit(key, val)
                 }
             };
-            Ok((InsertResult::Split(left, k, v, right), ptr))
+            (InsertResult::Split(left, k, v, right), ptr)
         }
     }
 }
@@ -1099,29 +1200,31 @@ impl<'a, K, V> Handle<NodeRef<marker::Mut<'a>, K, V, marker::Internal>, marker::
         }
     }
 
-    /// Inserts a new key/value pair and an edge that will go to the right of that new pair
-    /// between this edge and the key/value pair to the right of this edge. This method splits
-    /// the node if there isn't enough room.
-    pub fn insert(
+    /// Inserts with nodes reserved before the tree was mutated.
+    pub(crate) fn insert_reserved(
         mut self,
         key: K,
         val: V,
         edge: Root<K, V>,
-    ) -> Result<InsertResult<'a, K, V, marker::Internal>, AllocError> {
-        // Necessary for correctness, but this is an internal module
+        reservation: &mut NodeReservation<K, V>,
+    ) -> InsertResult<'a, K, V, marker::Internal> {
         debug_assert!(edge.height == self.node.height - 1);
 
         if self.node.len() < CAPACITY {
             self.insert_fit(key, val, edge);
-            Ok(InsertResult::Fit(Handle::new_kv(self.node, self.idx)))
+            InsertResult::Fit(Handle::new_kv(self.node, self.idx))
         } else {
             let middle = Handle::new_kv(self.node, B);
-            let (mut left, k, v, mut right) = middle.split()?;
+            let (mut left, k, v, mut right) = middle.split_reserved(reservation);
             if self.idx <= B {
+                // SAFETY: `left` is the live left half produced by splitting
+                // this handle, and `self.idx <= B` selects an in-bounds edge.
                 unsafe {
                     Handle::new_edge(left.reborrow_mut(), self.idx).insert_fit(key, val, edge);
                 }
             } else {
+                // SAFETY: `right` is the live right internal node produced by
+                // the split, and the adjusted index is within that right half.
                 unsafe {
                     Handle::new_edge(
                         right.as_mut().cast_unchecked::<marker::Internal>(),
@@ -1130,7 +1233,7 @@ impl<'a, K, V> Handle<NodeRef<marker::Mut<'a>, K, V, marker::Internal>, marker::
                     .insert_fit(key, val, edge);
                 }
             }
-            Ok(InsertResult::Split(left, k, v, right))
+            InsertResult::Split(left, k, v, right)
         }
     }
 }
@@ -1197,20 +1300,28 @@ impl<'a, K, V> Handle<NodeRef<marker::Mut<'a>, K, V, marker::Leaf>, marker::KV> 
     /// - The key and value pointed to by this handle and extracted.
     /// - All the key/value pairs to the right of this handle are put into a newly
     ///   allocated node.
-    pub fn split(
+    fn split_reserved(
+        self,
+        reservation: &mut NodeReservation<K, V>,
+    ) -> (
+        NodeRef<marker::Mut<'a>, K, V, marker::Leaf>,
+        K,
+        V,
+        Root<K, V>,
+    ) {
+        self.split_with_node(reservation.take_leaf())
+    }
+
+    fn split_with_node(
         mut self,
-    ) -> Result<
-        (
-            NodeRef<marker::Mut<'a>, K, V, marker::Leaf>,
-            K,
-            V,
-            Root<K, V>,
-        ),
-        AllocError,
-    > {
-        debug_assert!(!self.node.is_shared_root());
+        mut new_node: NonNull<LeafNode<K, V>>,
+    ) -> (
+        NodeRef<marker::Mut<'a>, K, V, marker::Leaf>,
+        K,
+        V,
+        Root<K, V>,
+    ) {
         unsafe {
-            let mut new_node = try_alloc_node(LeafNode::new())?;
             let new_node = new_node.as_mut();
 
             let k = ptr::read(self.node.keys().get_unchecked(self.idx));
@@ -1232,7 +1343,7 @@ impl<'a, K, V> Handle<NodeRef<marker::Mut<'a>, K, V, marker::Leaf>, marker::KV> 
             (*self.node.as_leaf_mut()).len = self.idx as u16;
             new_node.len = new_len as u16;
 
-            Ok((
+            (
                 self.node,
                 k,
                 v,
@@ -1240,7 +1351,7 @@ impl<'a, K, V> Handle<NodeRef<marker::Mut<'a>, K, V, marker::Leaf>, marker::KV> 
                     node: BoxedNode::from_leaf(NonNull::from(new_node)),
                     height: 0,
                 },
-            ))
+            )
         }
     }
 
@@ -1271,19 +1382,28 @@ impl<'a, K, V> Handle<NodeRef<marker::Mut<'a>, K, V, marker::Internal>, marker::
     /// - The key and value pointed to by this handle and extracted.
     /// - All the edges and key/value pairs to the right of this handle are put into
     ///   a newly allocated node.
-    pub fn split(
+    fn split_reserved(
+        self,
+        reservation: &mut NodeReservation<K, V>,
+    ) -> (
+        NodeRef<marker::Mut<'a>, K, V, marker::Internal>,
+        K,
+        V,
+        Root<K, V>,
+    ) {
+        self.split_with_node(reservation.take_internal())
+    }
+
+    fn split_with_node(
         mut self,
-    ) -> Result<
-        (
-            NodeRef<marker::Mut<'a>, K, V, marker::Internal>,
-            K,
-            V,
-            Root<K, V>,
-        ),
-        AllocError,
-    > {
+        mut new_node: NonNull<InternalNode<K, V>>,
+    ) -> (
+        NodeRef<marker::Mut<'a>, K, V, marker::Internal>,
+        K,
+        V,
+        Root<K, V>,
+    ) {
         unsafe {
-            let mut new_node = try_alloc_node(InternalNode::new())?;
             let new_node = new_node.as_mut();
 
             let k = ptr::read(self.node.keys().get_unchecked(self.idx));
@@ -1320,7 +1440,7 @@ impl<'a, K, V> Handle<NodeRef<marker::Mut<'a>, K, V, marker::Internal>, marker::
                 Handle::new_edge(new_root.as_mut().cast_unchecked(), i).correct_parent_link();
             }
 
-            Ok((self.node, k, v, new_root))
+            (self.node, k, v, new_root)
         }
     }
 

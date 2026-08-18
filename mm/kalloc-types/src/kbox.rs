@@ -5,7 +5,7 @@
 use core::{
     alloc::Layout,
     marker::PhantomData,
-    mem::{ManuallyDrop, MaybeUninit},
+    mem::{ManuallyDrop, MaybeUninit, size_of},
     ops::{Deref, DerefMut},
     ptr::{self, NonNull},
 };
@@ -14,6 +14,10 @@ use crate::{AllocContext, AllocError, context::require_supported_context};
 
 fn alloc_storage<T>(context: AllocContext) -> Result<NonNull<T>, AllocError> {
     require_supported_context(context)?;
+
+    if size_of::<T>() == 0 {
+        return Ok(NonNull::dangling());
+    }
 
     #[cfg(unittest)]
     crate::fault_injection::maybe_fail_allocation()?;
@@ -26,6 +30,10 @@ fn alloc_storage<T>(context: AllocContext) -> Result<NonNull<T>, AllocError> {
 }
 
 unsafe fn dealloc_storage<T>(ptr: NonNull<T>) {
+    if size_of::<T>() == 0 {
+        return;
+    }
+
     let layout = Layout::new::<T>();
     // SAFETY: caller guarantees ptr was allocated via alloc_storage<T>.
     kalloc::global_allocator().dealloc(ptr.cast(), layout);
@@ -233,6 +241,13 @@ mod tests {
         let _guard = fail_next_allocation();
         let err = KBox::try_new(13_u32, AllocContext::Sleepable).unwrap_err();
         assert_eq!(err, crate::AllocError::NoMemory);
+    }
+
+    #[def_test(serial)]
+    fn try_new_zst_needs_no_allocation() {
+        let _guard = fail_next_allocation();
+        let boxed = KBox::try_new((), AllocContext::Sleepable).unwrap();
+        assert_eq!(*boxed, ());
     }
 
     #[def_test]

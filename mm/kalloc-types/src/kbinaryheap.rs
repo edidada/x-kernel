@@ -21,7 +21,7 @@ pub struct KBinaryHeap<T> {
     inner: BinaryHeap<T>,
 }
 
-impl<T: Ord> KBinaryHeap<T> {
+impl<T> KBinaryHeap<T> {
     /// Creates an empty heap without allocating.
     pub fn new() -> Self {
         Self {
@@ -39,6 +39,12 @@ impl<T: Ord> KBinaryHeap<T> {
     /// satisfy the pre-allocation.
     pub fn try_with_capacity(capacity: usize, context: AllocContext) -> Result<Self, AllocError> {
         require_supported_context(context)?;
+
+        #[cfg(unittest)]
+        if capacity != 0 {
+            crate::fault_injection::maybe_fail_allocation()?;
+        }
+
         let mut inner = BinaryHeap::new();
         inner
             .try_reserve(capacity)
@@ -61,6 +67,38 @@ impl<T: Ord> KBinaryHeap<T> {
         self.inner.capacity()
     }
 
+    /// Reserves capacity for at least `additional` more elements.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError::NoMemory`] when the heap must grow and the
+    /// allocator cannot satisfy the request. Returns
+    /// [`AllocError::UnsupportedContext`] when `context` is not currently
+    /// supported.
+    pub fn try_reserve(
+        &mut self,
+        additional: usize,
+        context: AllocContext,
+    ) -> Result<(), AllocError> {
+        require_supported_context(context)?;
+
+        #[cfg(unittest)]
+        if additional > self.inner.capacity().saturating_sub(self.inner.len()) {
+            crate::fault_injection::maybe_fail_allocation()?;
+        }
+
+        self.inner
+            .try_reserve(additional)
+            .map_err(|_| AllocError::NoMemory)
+    }
+
+    /// Removes all elements, keeping the allocated buffer.
+    pub fn clear(&mut self) {
+        self.inner.clear();
+    }
+}
+
+impl<T: Ord> KBinaryHeap<T> {
     /// Pushes an item onto the heap.
     ///
     /// # Errors
@@ -68,10 +106,7 @@ impl<T: Ord> KBinaryHeap<T> {
     /// Returns [`AllocError::NoMemory`] when growth is required and the
     /// kernel allocator cannot satisfy it.
     pub fn try_push(&mut self, item: T, context: AllocContext) -> Result<(), AllocError> {
-        require_supported_context(context)?;
-        self.inner
-            .try_reserve(1)
-            .map_err(|_| AllocError::NoMemory)?;
+        self.try_reserve(1, context)?;
         self.inner.push(item);
         Ok(())
     }
@@ -82,23 +117,18 @@ impl<T: Ord> KBinaryHeap<T> {
     }
 
     /// Returns a reference to the greatest item, if any.
-    pub fn peek(&mut self) -> Option<&T> {
+    pub fn peek(&self) -> Option<&T> {
         self.inner.peek()
-    }
-
-    /// Removes all elements, keeping the allocated buffer.
-    pub fn clear(&mut self) {
-        self.inner.clear();
     }
 }
 
-impl<T: Ord> Default for KBinaryHeap<T> {
+impl<T> Default for KBinaryHeap<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T: Ord + fmt::Debug> fmt::Debug for KBinaryHeap<T> {
+impl<T: fmt::Debug> fmt::Debug for KBinaryHeap<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.inner.fmt(f)
     }
@@ -119,6 +149,7 @@ mod tests {
     use unittest::def_test;
 
     use super::*;
+    use crate::fault_injection::fail_next_allocation;
 
     #[def_test]
     fn new_is_empty() {
@@ -168,5 +199,17 @@ mod tests {
     fn try_with_capacity_preallocates() {
         let h = KBinaryHeap::<u32>::try_with_capacity(10, AllocContext::Sleepable).unwrap();
         assert!(h.capacity() >= 10);
+    }
+
+    #[def_test(serial)]
+    fn try_push_growth_failure_preserves_heap() {
+        let mut heap = KBinaryHeap::new();
+        let _guard = fail_next_allocation();
+
+        let err = heap.try_push(7_u32, AllocContext::Sleepable).unwrap_err();
+
+        assert_eq!(err, AllocError::NoMemory);
+        assert!(heap.is_empty());
+        assert_eq!(heap.peek(), None);
     }
 }

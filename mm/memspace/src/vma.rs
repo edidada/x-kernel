@@ -8,6 +8,7 @@ use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::fmt;
 
 use anon::{AnonLineageId, AnonSharedObject};
+use kalloc_types::KArc;
 use kerrno::{KError, KResult};
 use khal::{
     paging::{MappingFlags, PageSize, PageTableMut},
@@ -177,9 +178,14 @@ impl VmRuntimeRef {
         )?))
     }
 
+    /// Creates an anonymous-shared runtime from an existing page set and
+    /// object identity.
+    ///
+    /// `pages` must remain the unique owner of every physical frame recorded
+    /// in the set; its final [`KArc`] drop releases those frames.
     pub fn new_shared_pages(
         start: VirtAddr,
-        pages: Arc<SharedPages>,
+        pages: KArc<SharedPages>,
         object: Arc<AnonSharedObject>,
     ) -> Self {
         Self::AnonShared(SharedBackend::new(start, pages, object))

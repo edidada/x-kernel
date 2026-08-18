@@ -123,8 +123,21 @@ impl<T> KVecDeque<T> {
         (self.head + logical) % self.cap
     }
 
-    /// Ensure capacity for at least `additional` more elements.
-    fn try_reserve(&mut self, additional: usize, context: AllocContext) -> Result<(), AllocError> {
+    /// Reserves capacity for at least `additional` more elements.
+    ///
+    /// The deque keeps its current contents and order if allocation fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError::NoMemory`] when the buffer must grow and the
+    /// allocator cannot satisfy the request. Returns
+    /// [`AllocError::UnsupportedContext`] when `context` is not currently
+    /// supported.
+    pub fn try_reserve(
+        &mut self,
+        additional: usize,
+        context: AllocContext,
+    ) -> Result<(), AllocError> {
         let required = self
             .len
             .checked_add(additional)
@@ -585,6 +598,18 @@ mod tests {
         let err = d.try_push_back(99, AllocContext::Sleepable).unwrap_err();
         assert_eq!(err, AllocError::NoMemory);
         assert_eq!(d.len(), 1);
+        assert_eq!(d.pop_front(), Some(42));
+    }
+
+    #[def_test(serial)]
+    fn try_reserve_failure_preserves_order() {
+        let mut d = KVecDeque::<u32>::try_with_capacity(1, AllocContext::Sleepable).unwrap();
+        d.try_push_back(42, AllocContext::Sleepable).unwrap();
+        let _guard = fail_next_allocation();
+
+        let err = d.try_reserve(1, AllocContext::Sleepable).unwrap_err();
+
+        assert_eq!(err, AllocError::NoMemory);
         assert_eq!(d.pop_front(), Some(42));
     }
 

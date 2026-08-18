@@ -732,40 +732,6 @@ impl<T: Ord> BTreeSet<T> {
         Recover::take(&mut self.map, value)
     }
 
-    /// Moves all elements from `other` into `Self`, leaving `other` empty.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeSet;
-    ///
-    /// let mut a = BTreeSet::new();
-    /// a.insert(1);
-    /// a.insert(2);
-    /// a.insert(3);
-    ///
-    /// let mut b = BTreeSet::new();
-    /// b.insert(3);
-    /// b.insert(4);
-    /// b.insert(5);
-    ///
-    /// a.append(&mut b);
-    ///
-    /// assert_eq!(a.len(), 5);
-    /// assert_eq!(b.len(), 0);
-    ///
-    /// assert!(a.contains(&1));
-    /// assert!(a.contains(&2));
-    /// assert!(a.contains(&3));
-    /// assert!(a.contains(&4));
-    /// assert!(a.contains(&5));
-    /// ```
-
-    #[inline(always)]
-    pub fn try_append(&mut self, other: &mut Self) -> Result<(), AllocError> {
-        self.map.try_append(&mut other.map)
-    }
-
     /// Splits the collection into two at the given key. Returns everything after the given key,
     /// including the key.
     ///

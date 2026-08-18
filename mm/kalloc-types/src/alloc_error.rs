@@ -19,7 +19,11 @@ impl AllocError {
     /// Maps the allocation error into the canonical kernel error domain.
     pub const fn into_kerror(self) -> kerrno::KError {
         match self {
-            Self::NoMemory | Self::UnsupportedContext => kerrno::KError::NoMemory,
+            Self::NoMemory => kerrno::KError::NoMemory,
+            // A caller that cannot enter a sleepable allocation path did not
+            // exhaust memory. Preserve that distinction so an internal
+            // execution-context violation is not reported to users as ENOMEM.
+            Self::UnsupportedContext => kerrno::KError::WouldBlock,
         }
     }
 }
@@ -37,11 +41,11 @@ mod tests {
     use super::AllocError;
 
     #[def_test]
-    fn maps_all_phase1_variants_to_nomemory() {
+    fn maps_nomemory_and_context_errors_distinctly() {
         assert_eq!(AllocError::NoMemory.into_kerror(), kerrno::KError::NoMemory);
         assert_eq!(
             AllocError::UnsupportedContext.into_kerror(),
-            kerrno::KError::NoMemory
+            kerrno::KError::WouldBlock
         );
     }
 

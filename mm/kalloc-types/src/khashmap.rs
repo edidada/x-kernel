@@ -47,6 +47,12 @@ impl<K: Eq + Hash, V> KHashMap<K, V> {
     /// satisfy the pre-allocation.
     pub fn try_with_capacity(capacity: usize, context: AllocContext) -> Result<Self, AllocError> {
         require_supported_context(context)?;
+
+        #[cfg(unittest)]
+        if capacity != 0 {
+            crate::fault_injection::maybe_fail_allocation()?;
+        }
+
         let mut inner = HashMap::new();
         inner
             .try_reserve(capacity)
@@ -95,6 +101,12 @@ where
         context: AllocContext,
     ) -> Result<(), AllocError> {
         require_supported_context(context)?;
+
+        #[cfg(unittest)]
+        if additional > self.inner.capacity().saturating_sub(self.inner.len()) {
+            crate::fault_injection::maybe_fail_allocation()?;
+        }
+
         self.inner
             .try_reserve(additional)
             .map_err(|_| AllocError::NoMemory)
@@ -119,10 +131,15 @@ where
         context: AllocContext,
     ) -> Result<Option<V>, AllocError> {
         require_supported_context(context)?;
-        // try_reserve is cheap when the table already has room.
-        self.inner
-            .try_reserve(1)
-            .map_err(|_| AllocError::NoMemory)?;
+
+        // Replacing an existing value never grows the table. Checking first
+        // avoids reporting ENOMEM for an operation that only overwrites a
+        // value already stored in the map.
+        if self.inner.contains_key(&k) {
+            return Ok(self.inner.insert(k, v));
+        }
+
+        self.try_reserve(1, context)?;
         Ok(self.inner.insert(k, v))
     }
 
@@ -235,6 +252,7 @@ mod tests {
     use unittest::def_test;
 
     use super::*;
+    use crate::fault_injection::fail_next_allocation;
 
     #[def_test]
     fn new_is_empty() {
@@ -350,6 +368,35 @@ mod tests {
         let mut m = KHashMap::<u32, u32>::new();
         let err = m.try_insert(1, 2, AllocContext::Atomic).unwrap_err();
         assert_eq!(err, AllocError::UnsupportedContext);
+    }
+
+    #[def_test(serial)]
+    fn try_insert_growth_failure_preserves_existing_entries() {
+        let mut map = KHashMap::new();
+        let _guard = fail_next_allocation();
+
+        let err = map
+            .try_insert(7_u32, 9_u32, AllocContext::Sleepable)
+            .unwrap_err();
+
+        assert_eq!(err, AllocError::NoMemory);
+        assert!(map.is_empty());
+        assert_eq!(map.get(&7), None);
+    }
+
+    #[def_test(serial)]
+    fn replacing_existing_entry_does_not_need_growth() {
+        let mut map = KHashMap::new();
+        map.try_insert(7_u32, 9_u32, AllocContext::Sleepable)
+            .unwrap();
+
+        let _guard = fail_next_allocation();
+        assert_eq!(
+            map.try_insert(7_u32, 10_u32, AllocContext::Sleepable)
+                .unwrap(),
+            Some(9_u32)
+        );
+        assert_eq!(map.get(&7), Some(&10_u32));
     }
     #[def_test]
     fn try_reserve_rejects_unsupported_context() {

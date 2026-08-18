@@ -61,6 +61,8 @@
 - `MmUserHandle` 是唯一能保留用户映射生命周期的 capability；`MmPin` 和普通
   `Arc<Mutex<MmSpace>>` observer 只能保留对象可观察性，不能阻止最后一个 user
   释放时清空映射。
+- `SharedPages` 必须先成功预留 `KVec<PhysAddr>` 容量，之后才可取得物理 frame；
+  任何 owner allocation 失败都必须通过 `KArc` 参数 drop 释放该页集。
 
 ## 线程安全
 
@@ -119,6 +121,7 @@
 | Invalidate apply failure | runtime unmap 或 page-table path 失败 | request 回队，本轮 drain 停止 | stale PTE 延迟清除 |
 | COW conflict | object slot 或 PTE 变化 | 返回 retry-class outcome | fault retry |
 | OOM | frame 或页表分配失败 | 返回 `OutOfMemory` / `NoMemory` | syscall 或 fault 失败 |
+| SharedPages bookkeeping OOM | 匿名共享页集创建时 `KVec` 预留失败 | 返回 `NoMemory`，尚未取得 frame | 不泄漏部分页集 |
 | File EOF fault | file object 拒绝越界页 | `BusError` outcome | 上层映射为 SIGBUS-class 行为 |
 | `mremap` source teardown destroys moved private backing | 误把 relocation 当 ordinary unmap | metadata-only retirement | 避免 moved mapping 指向已释放对象页 |
 | Stale mm user acquire | 最后一个 user release 与新 user acquire 并发 | 单原子状态 CAS；torn-down 后 upgrade/acquire 失败 | 避免退出清理后重新使用已清空映射 |
@@ -130,6 +133,8 @@
 - Retry-class fault 包括 ordinary retry 和 COW conflict retry。
 - `BusError` 表示 backing object 级错误，例如 mapped-file EOF/range fault。
 - Invalidate drain 失败只影响当前 request；request 保留在队列中等待下一边界。
+- `SharedPages` 的 `KVec` 预留或 `KArc` owner 构造失败通过 `KResult` 返回
+  `NoMemory`；前者发生在 frame acquisition 前，后者通过 RAII 释放已取得 frame。
 
 ## 已知限制
 
@@ -153,3 +158,5 @@
 - [ ] Unsupported Linux semantics 是否显式返回错误而不是静默降级。
 - [ ] 新增地址空间 observer 是否只持有 `MmPin` 或普通 `Arc`，不误用
   `MmUserHandle` 延长用户映射生命周期。
+- [ ] 新的 frame collection 是否在取得第一个 frame 前完成所有可失败的容器
+  bookkeeping，且 owner allocation 的失败路径经过 RAII 回收。

@@ -36,11 +36,36 @@ use crate::{AllocContext, AllocError, context::require_supported_context};
 struct KArcInner<T> {
     /// Strong reference count. `data` is only alive while this is >= 1.
     strong: AtomicUsize,
-    /// Weak reference count (includes one implicit count for every `KArc`).
+    /// Weak reference count (includes one implicit count while a `KArc`
+    /// exists).
     /// When this reaches 0, the entire allocation is freed.
     weak: AtomicUsize,
     /// The owned data.
     data: T,
+}
+
+/// Releases the implicit weak reference reserved while `try_new_cyclic` is
+/// constructing its value if the initializer unwinds.
+struct CyclicInitGuard<T> {
+    ptr: NonNull<KArcInner<T>>,
+    owns_implicit_weak: bool,
+}
+
+impl<T> CyclicInitGuard<T> {
+    fn disarm(&mut self) {
+        self.owns_implicit_weak = false;
+    }
+}
+
+impl<T> Drop for CyclicInitGuard<T> {
+    fn drop(&mut self) {
+        if self.owns_implicit_weak {
+            // The guard owns the implicit weak count initialized by
+            // `try_new_cyclic`; materializing KWeak transfers that count to
+            // its Drop implementation without changing the refcount first.
+            drop(KWeak { ptr: self.ptr });
+        }
+    }
 }
 
 /// A fallible atomically reference-counted pointer, analogous to
@@ -145,16 +170,21 @@ impl<T> KArc<T> {
         let ptr = alloc_arc_inner::<T>(context)?;
 
         // SAFETY: We have exclusive ownership of a properly-sized allocation.
-        // Writing strong=0 and weak=1 initialises the ref-count header before
-        // the temporary KWeak is created.
+        // `weak = 2` reserves one count for the future KArc and one for the
+        // temporary KWeak passed to the initializer.
         unsafe {
             ptr::addr_of_mut!((*ptr.as_ptr()).strong).write(AtomicUsize::new(0));
-            ptr::addr_of_mut!((*ptr.as_ptr()).weak).write(AtomicUsize::new(1));
+            ptr::addr_of_mut!((*ptr.as_ptr()).weak).write(AtomicUsize::new(2));
         }
 
-        // Create a temporary KWeak. ManuallyDrop prevents its Drop from
-        // decrementing `weak` — the eventual KArc will own that slot.
-        let tmp_weak = ManuallyDrop::new(KWeak { ptr });
+        // Declare the guard before the temporary weak so unwinding drops the
+        // temporary first, then releases the not-yet-published implicit weak.
+        // Any weak clones that escaped the initializer remain valid.
+        let mut init_guard = CyclicInitGuard {
+            ptr,
+            owns_implicit_weak: true,
+        };
+        let tmp_weak = KWeak { ptr };
         let data = data_fn(&tmp_weak);
 
         // SAFETY: The data slot was previously uninitialised. Writing the
@@ -169,6 +199,7 @@ impl<T> KArc<T> {
         unsafe {
             (*ptr.as_ptr()).strong.store(1, Ordering::Release);
         }
+        init_guard.disarm();
 
         Ok(KArc {
             ptr,
@@ -186,12 +217,13 @@ impl<T> KArc<T> {
 
     /// Returns the number of weak references to this allocation.
     ///
-    /// This count includes the implicit weak reference held by every `KArc`,
-    /// so it is always >= the number of live `KArc` handles.
+    /// This excludes the single implicit weak reference retained while at
+    /// least one strong reference exists.
     pub fn weak_count(this: &Self) -> usize {
         // SAFETY: `this.ptr` points to a live KArcInner<T> (KArc still exists).
         let raw = unsafe { (*this.ptr.as_ptr()).weak.load(Ordering::Relaxed) };
-        // Subtract the implicit weak that every KArc holds. Saturate at 0.
+        // Subtract the allocation-wide implicit weak. Saturate at 0 for a
+        // defensive snapshot during teardown.
         raw.saturating_sub(1)
     }
 
@@ -266,6 +298,12 @@ impl<T> Deref for KArc<T> {
         // SAFETY: ptr points to a live KArcInner<T> whose data is initialised
         // (strong >= 1 guarantees this while any KArc exists).
         unsafe { &(*self.ptr.as_ptr()).data }
+    }
+}
+
+impl<T> AsRef<T> for KArc<T> {
+    fn as_ref(&self) -> &T {
+        self
     }
 }
 

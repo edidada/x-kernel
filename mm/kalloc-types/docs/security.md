@@ -5,15 +5,15 @@
 `kalloc-types` 信任：
 
 - `mm/kalloc` 作为底层分配后端的正确性；
-- Rust `Box<T>` 当前封装的内存安全语义；
+- `kalloc::global_allocator()` 对 allocation/deallocation layout 配对的正确性；
 - 调用者会根据后续公开 API 的文档处理 `AllocError`。
 
-本 crate 当前不直接信任外部输入数据内容，因为骨架阶段只定义类型边界，
-不解析用户数据、不访问设备、不操作页表。
+本 crate 不解析用户数据、不访问设备、不操作页表；它的攻击面是调用方可放大
+的 allocation 请求及容器元素的析构行为。
 
 ## 外部边界 / 攻击面
 
-当前骨架阶段的外部边界很窄：
+外部边界包括：
 
 - 公共类型 `AllocError`
 - 公共类型 `AllocContext`
@@ -33,8 +33,9 @@
 ## unsafe 代码清单
 
 - `src/kbox.rs`
-  - `Box::from_raw`：把 `kalloc::global_allocator()` 返回的所有权重新包装成
-    `Box<MaybeUninit<T>>` / `Box<T>`
+  - `ptr::write` / `ptr::read` / `ptr::drop_in_place`：初始化、取出和析构
+    `KBox` 独占的 raw storage
+  - `kalloc::global_allocator().dealloc()`：按原始 `Layout` 释放 storage
   - `KBox<MaybeUninit<T>>::assume_init`：在调用者证明初始化完成后完成类型收窄
 - `src/kvec.rs`
   - `slice::from_raw_parts` / `from_raw_parts_mut`：把当前已初始化前缀暴露为切片
@@ -47,13 +48,11 @@
   - `ptr::read`：在 `try_unwrap` 中读出 data
   - `kalloc::global_allocator().dealloc()`：在最后一个引用释放时
     回收 `KArcInner` 分配
-  - `ManuallyDrop`：在 `new_cyclic` 中防止临时 `KWeak` 的 Drop
-    不正确地递减 refcount
+  - `CyclicInitGuard`：在 `try_new_cyclic` initializer unwind 时释放尚未发布的
+    隐式 weak count，同时保留已经 clone 出去的 weak 引用
 - `src/kstring.rs`
   - `str::from_utf8_unchecked`：在 `as_str()` 中将内部字节缓冲区解释为
     UTF-8 `&str`
-  - `String::from_utf8_unchecked`：在 `into_string()` 中将内部字节转移
-    到标准 `String`
 - `src/kvecdeque.rs`
   - `ptr::write` / `ptr::read`：环形缓冲区元素的读写
   - `ptr::copy_nonoverlapping`：扩容时搬运元素到新缓冲区
@@ -66,7 +65,6 @@
   - `ptr::drop_in_place`：节点析构
   - `NonNull::new_unchecked`：将全局分配器返回的指针包装为 `NonNull`
   - `kalloc::global_allocator().dealloc()`：节点分裂/合并时回收旧节点
-  - `Box::from_raw`：将 raw 指针重装为 `Box` 以移交所有权
 - `src/kbtree/map.rs`（移植自 std B 树实现）
   - `ptr::read` / `ptr::write`：迭代器内部的状态搬运
   - `unreachable!()`：不可达分支标记
@@ -78,9 +76,9 @@
 
 ## 内存安全不变量
 
-- `KBox<T>` 必须始终独占一个有效的 `Box<T>`。
+- `KBox<T>` 必须始终独占一个由 `Layout::new::<T>()` 描述的有效 allocation。
 - `KBox<MaybeUninit<T>>` 在调用 `assume_init` 前，底层分配必须仍然属于同一
-  个 `Box`，且调用者必须保证对象已完全初始化。
+  个 `KBox`，且调用者必须保证对象已完全初始化。
 - `KVec<T>` 必须始终维护以下不变量：
   - `ptr` 要么指向与 `cap` 对应的 live allocation，要么在零容量 / ZST 情况下
     为悬空哨兵；
@@ -95,12 +93,15 @@
   - `strong` 和 `weak` 计数永远不会溢出（溢出时 abort，与 std 行为一致）。
   - `strong >= 1` 时 `data` 一定处于已初始化且存活状态；`strong == 0`
     时 `data` 已经被析构。
-  - `KArc::new_cyclic` 在构造期间保持 `strong = 0`，在 data 写入完成后
+  - `KArc::try_new_cyclic` 在构造期间保持 `strong = 0`，在 data 写入完成后
     才原子地设 `strong = 1`（Release），确保闭包内的 `KWeak::upgrade()`
     返回 `None`，不会观察到未初始化的 data。
+  - `try_new_cyclic` initializer unwind 时必须释放未发布的隐式 weak count；
+    已经 clone 并逃逸的 `KWeak` 仍可安全观察 `strong == 0`。
   - `KWeak::upgrade` 的 CAS 循环必须在观察到 `strong == 0` 后安全返回
     `None`，不得产生悬空指针。
-  - `weak` 计数始终 >= `strong` 计数（每个 `KArc` 持有一个隐式 weak）。
+  - `weak` 计数在至少一个 strong reference 存在时包含一个 allocation-wide
+    隐式 weak；强引用 clone 不重复增加该计数。
 - `KString` 必须维护以下不变量：
   - 内部字节缓冲区 `KVec<u8>` 始终包含合法 UTF-8 字节序列。
   - 所有修改内部缓冲区的变体方法（`try_push`、`try_push_str`、
@@ -114,15 +115,16 @@
   `try_reserve` 在 OOM 时通过 `Allocator` trait 返回错误（前提是全局分配器
   在 OOM 时返回 null 而非 panic）。
 - `KBTreeMap<K, V>` / `KBTreeSet<T>` 的 B 树节点分配全部通过 `KBox::try_new`
-  进行，OOM 时返回 `AllocError`。B 树的结构不变量（统一深度、节点容量）
-  由移植自标准库的代码维护。
+  进行。`try_insert` 在第一次 split 前预留满节点路径需要的 leaf/internal/root
+  节点，任何 OOM 都必须发生在 tree mutation 前。B 树的结构不变量（统一深度、
+  节点容量）由移植算法维护。
 - 公共 API 不暴露内部所有权表示，避免调用者绕过后续 fallible 语义边界。
 - `AllocError` 与 `AllocContext` 不携带悬垂引用或原始指针。
 
 ## 线程安全
 
-- 当前骨架不声明新的并发不变量。
-- `KBox<T>` / `KVec<T>` 的线程安全属性取决于内部元素类型和未来实现。
+- `KBox<T>`、`KVec<T>`、`KVecDeque<T>` 的 `Send` / `Sync` 由元素的对应 trait
+  bound 决定，raw storage 不会产生共享可变别名。
 - `KArc<T>` / `KWeak<T>` 通过 `AtomicUsize` 引用计数实现线程安全共享。
 - `KHashMap<K,V>`（包装 `hashbrown::HashMap`）和 `KBTreeMap` / `KBTreeSet`
   的线程安全取决于内部元素类型，本 crate 不引入额外的锁顺序问题。
@@ -151,15 +153,18 @@
 | `AllocContext` 语义被误解为已实现 | 调用者依赖 `NoWait`/`Atomic` | 语义假设错误 | 可能引入未来设计返工 | 文档明确仅 `Sleepable` 会在后续阶段支持 |
 | 包装类型暴露过多内部细节 | 公共字段或过宽 API | 难以保持未来不变量 | 后续扩展受阻 | 当前字段私有，API 极窄 |
 | B 树移植代码的 unsafe 块缺少 SAFETY 注释 | 对移植代码启用 `undocumented_unsafe_blocks` lint | clippy 报错 | 开发者可能手动添加不准确的注释 | 通过 `#![allow]` 屏蔽该 lint，未来由 B 树专家补充 |
-| B 树内部分配失败未被调用方处理 | `KBTreeMap::try_insert` 返回 `Err` 但调用方忽略 | 操作失败但调用方继续执行 | 可能访问未正确构造的树状态 | 所有公开 insert 方法返回 `Result`，调用方必须处理 |
+| B 树 split 预留失败 | 满节点插入时任一预留 allocation OOM | 插入返回 `Err` | map 保持原有结构、长度和元素 | mutation 前预留整条 split 链；回归测试遍历每个预留失败点 |
 
 ## 故障管理
 
-- 当前骨架阶段不引入 panic 路径。
+- 可失败构造和增长不把 OOM 交给 alloc error handler；引用计数溢出和内部不变量
+  破坏仍属于不可恢复内核错误。
 - `KBox::try_new` / `try_new_uninit` 在失败时返回 `AllocError`，不会把半初始化
   堆对象暴露给调用方。
 - `try_collect_vec` 在失败时丢弃局部构建中的向量，不暴露部分成功状态。
-- `AllocError::into_kerror` 统一映射到 `KError::NoMemory`，避免调用方各自散写。
+- `AllocError::NoMemory` 统一映射到 `KError::NoMemory`；
+  `UnsupportedContext` 映射为 `KError::WouldBlock`，避免把执行上下文错误伪装成
+  ENOMEM。
 - 后续真正的 fallible 构造/扩容 API 必须保持“失败时不暴露半初始化状态”。
 
 ## 隐私分析
@@ -179,6 +184,9 @@
 - `KHashMap<K,V>` / `KBTreeMap<K,V>` / `KBTreeSet<T>` / `KBinaryHeap<T>` /
   `KVecDeque<T>` 已提供，覆盖 `HashMap` / `BTreeMap` / `BTreeSet` /
   `BinaryHeap` / `VecDeque` 的可失败替代。
+- `KBTreeMap::try_insert` 已保证 OOM 失败原子性。`append` 不在当前 fallible
+  surface 中：原先的整树重建无法在 OOM 时保留两个输入树，必须等到引入预留/提交
+  或完整 rollback 后才可重新暴露。
 - `TryClone` trait 目前仅为原始类型和 `Option<T>` 提供 impl；对于自定义类型，
   需手动实现 `TryClone` 才能使用 `KBTreeMap::try_clone` 等操作。
 - 当前没有 no-wait / atomic / reserve-backed 真实行为。

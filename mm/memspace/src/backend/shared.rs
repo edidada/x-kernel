@@ -3,10 +3,11 @@
 // See LICENSES for license details.
 
 //! Shared mapping backend.
-use alloc::{sync::Arc, vec::Vec};
+use alloc::sync::Arc;
 use core::ops::Deref;
 
 use anon::{AnonSharedObject, AnonSharedViewGuard};
+use kalloc_types::{AllocContext, KArc, KVec};
 use kerrno::{KError, KResult};
 use khal::paging::{MappingFlags, PageSize, PageTableMut, PagingError};
 use ksync::Mutex;
@@ -27,19 +28,35 @@ use crate::{
 
 /// Shared physical pages backing a mapping.
 pub struct SharedPages {
-    pub phys_pages: Vec<PhysAddr>,
+    /// Physical frames owned by this page set, in mapping order.
+    pub phys_pages: KVec<PhysAddr>,
+    /// Granularity of every frame in [`Self::phys_pages`].
     pub size: PageSize,
 }
 impl SharedPages {
     /// Allocate a new set of shared pages.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoMemory`] when bookkeeping storage or a physical
+    /// frame cannot be allocated. Any frames acquired before a later failure
+    /// are released by `SharedPages::Drop`.
     pub fn new(size: usize, pgsize: PageSize) -> KResult<Self> {
         let num_pages = divide_page(size, pgsize);
         let mut result = Self {
-            phys_pages: Vec::with_capacity(num_pages),
+            // Reserve before acquiring any frames. This ensures an OOM in the
+            // bookkeeping container leaves no frame ownership to unwind.
+            phys_pages: KVec::try_with_capacity(num_pages, AllocContext::Sleepable)?,
             size: pgsize,
         };
         for _ in 0..num_pages {
-            result.phys_pages.push(alloc_frame(true, pgsize)?);
+            let frame = alloc_frame(true, pgsize)?;
+            if let Err(err) = result.phys_pages.try_push(frame, AllocContext::Sleepable) {
+                // The capacity was reserved above, but retain this cleanup if
+                // a future allocation-context policy makes push fallible here.
+                dealloc_frame(frame, pgsize);
+                return Err(err.into());
+            }
         }
         Ok(result)
     }
@@ -59,13 +76,13 @@ impl Deref for SharedPages {
     type Target = [PhysAddr];
 
     fn deref(&self) -> &Self::Target {
-        &self.phys_pages
+        self.phys_pages.as_slice()
     }
 }
 
 impl Drop for SharedPages {
     fn drop(&mut self) {
-        for frame in &self.phys_pages {
+        for frame in self.phys_pages.iter() {
             dealloc_frame(*frame, self.size);
         }
     }
@@ -75,12 +92,18 @@ impl Drop for SharedPages {
 #[derive(Clone)]
 pub struct SharedBackend {
     start: VirtAddr,
-    pages: Arc<SharedPages>,
+    pages: KArc<SharedPages>,
     object: Arc<AnonSharedObject>,
     object_view: Option<AnonSharedViewGuard>,
 }
 impl SharedBackend {
-    pub fn new(start: VirtAddr, pages: Arc<SharedPages>, object: Arc<AnonSharedObject>) -> Self {
+    /// Constructs a backend from a fallibly-owned page set and an existing
+    /// anonymous-shared object identity.
+    ///
+    /// This constructor only combines already-created owners and does not
+    /// allocate. Callers that create `pages` dynamically must use its fallible
+    /// constructors before calling this method.
+    pub fn new(start: VirtAddr, pages: KArc<SharedPages>, object: Arc<AnonSharedObject>) -> Self {
         Self {
             start,
             object,
@@ -89,8 +112,17 @@ impl SharedBackend {
         }
     }
 
+    /// Creates an anonymous shared backend with fallible page-list ownership.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoMemory`] when allocating the page list, its frames,
+    /// or the `KArc` page owner fails.
+    ///
+    /// The separate `AnonSharedObject` owner still uses its legacy `Arc`
+    /// construction and is outside this migration slice.
     pub fn new_anonymous(start: VirtAddr, size: usize, pgsize: PageSize) -> KResult<Self> {
-        let pages = Arc::new(SharedPages::new(size, pgsize)?);
+        let pages = KArc::try_new(SharedPages::new(size, pgsize)?, AllocContext::Sleepable)?;
         Ok(Self {
             start,
             object: AnonSharedObject::new(),
@@ -100,7 +132,7 @@ impl SharedBackend {
     }
 
     /// Access the shared page set.
-    pub fn pages(&self) -> &Arc<SharedPages> {
+    pub fn pages(&self) -> &KArc<SharedPages> {
         &self.pages
     }
 
@@ -322,9 +354,9 @@ impl VmRuntimeOps for SharedBackend {
 
 #[cfg(unittest)]
 mod tests {
-    use alloc::sync::Arc;
-
     use anon::AnonSharedObject;
+    use kalloc_types::{AllocContext, KArc, fault_injection::fail_allocations_after};
+    use kerrno::KError;
     use khal::paging::PageSize;
     use memaddr::va;
     use unittest::def_test;
@@ -335,8 +367,11 @@ mod tests {
     #[def_test]
     fn shared_backend_reuses_explicit_shared_owner_identity() {
         let object = AnonSharedObject::new();
-        let pages =
-            Arc::new(SharedPages::new(PageSize::Size4K as usize, PageSize::Size4K).unwrap());
+        let pages = KArc::try_new(
+            SharedPages::new(PageSize::Size4K as usize, PageSize::Size4K).unwrap(),
+            AllocContext::Sleepable,
+        )
+        .unwrap();
         let left = SharedBackend::new(va!(0x1000), pages.clone(), object.clone());
         let right = SharedBackend::new(va!(0x2000), pages, object.clone());
         let VmBackingKind::AnonymousShared { object: left_id } = left.backing_info().kind() else {
@@ -348,5 +383,31 @@ mod tests {
         };
         assert_eq!(left_id, object.id());
         assert_eq!(right_id, object.id());
+    }
+
+    #[def_test(serial)]
+    fn shared_pages_return_nomemory_before_acquiring_frames() {
+        let _guard = fail_allocations_after(0);
+
+        let err = SharedPages::new(PageSize::Size4K as usize, PageSize::Size4K)
+            .err()
+            .expect("injected KVec allocation must fail");
+
+        assert_eq!(err, KError::NoMemory);
+    }
+
+    #[def_test(serial)]
+    fn shared_backend_returns_nomemory_when_page_owner_allocation_fails() {
+        // The page-list buffer allocation succeeds first; failing the next
+        // custom allocation exercises KArc ownership construction after the
+        // page list has been built.
+        let _guard = fail_allocations_after(1);
+
+        let err =
+            SharedBackend::new_anonymous(va!(0x1000), PageSize::Size4K as usize, PageSize::Size4K)
+                .err()
+                .expect("injected KArc allocation must fail");
+
+        assert_eq!(err, KError::NoMemory);
     }
 }

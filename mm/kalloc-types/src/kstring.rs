@@ -103,6 +103,24 @@ impl KString {
         self.inner.capacity()
     }
 
+    /// Reserves capacity for at least `additional` more bytes.
+    ///
+    /// The current contents remain unchanged if allocation fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError::NoMemory`] when the buffer must grow and the
+    /// allocator cannot satisfy the request. Returns
+    /// [`AllocError::UnsupportedContext`] when `context` is not currently
+    /// supported.
+    pub fn try_reserve(
+        &mut self,
+        additional: usize,
+        context: AllocContext,
+    ) -> Result<(), AllocError> {
+        self.inner.try_reserve(additional, context)
+    }
+
     /// Returns the string as a `&str`.
     ///
     /// # Safety (internal)
@@ -356,6 +374,17 @@ mod tests {
         let s = KString::try_with_capacity(64, AllocContext::Sleepable).unwrap();
         assert!(s.is_empty());
         assert!(s.capacity() >= 64);
+    }
+
+    #[def_test(serial)]
+    fn try_reserve_failure_preserves_contents() {
+        let mut s = KString::try_from_str("a", AllocContext::Sleepable).unwrap();
+        let _guard = fail_next_allocation();
+
+        let err = s.try_reserve(1, AllocContext::Sleepable).unwrap_err();
+
+        assert_eq!(err, AllocError::NoMemory);
+        assert_eq!(s.as_str(), "a");
     }
 
     #[def_test]

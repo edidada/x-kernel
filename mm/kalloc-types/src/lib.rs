@@ -38,10 +38,36 @@ pub use kbtree::{map::BTreeMap as KBTreeMap, set::BTreeSet as KBTreeSet};
 pub use khashmap::KHashMap;
 pub use kstring::KString;
 pub use kvec::{KVec, KVecIntoIter};
+
+/// Fallible replacement for `alloc::sync::Arc`.
 pub type Arc<T> = KArc<T>;
+
+/// Fallible replacement for `alloc::sync::Weak`.
+pub type Weak<T> = KWeak<T>;
+
+/// Fallible replacement for `alloc::vec::Vec`.
 pub type Vec<T> = KVec<T>;
+
+/// Fallible replacement for `alloc::collections::VecDeque`.
+pub type VecDeque<T> = KVecDeque<T>;
+
+/// Fallible replacement for `alloc::string::String`.
 pub type String = KString;
+
+/// Fallible replacement for `alloc::boxed::Box`.
 pub type Box<T> = KBox<T>;
+
+/// Fallible replacement for `alloc::collections::BinaryHeap`.
+pub type BinaryHeap<T> = KBinaryHeap<T>;
+
+/// Fallible replacement for `hashbrown::HashMap`.
+pub type HashMap<K, V, S = hashbrown::DefaultHashBuilder> = KHashMap<K, V, S>;
+
+/// Fallible replacement for `alloc::collections::BTreeMap`.
+pub type BTreeMap<K, V> = KBTreeMap<K, V>;
+
+/// Fallible replacement for `alloc::collections::BTreeSet`.
+pub type BTreeSet<T> = KBTreeSet<T>;
 pub use kvecdeque::KVecDeque;
 pub use try_traits::{
     TryBitAnd, TryBitOr, TryBitXor, TryClone, TryCollect, TryExtend, TryFromIterator, TrySub,

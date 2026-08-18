@@ -152,8 +152,10 @@ impl<T> KVec<T> {
     ///
     /// # Safety
     ///
-    /// The caller must ensure all elements in `[old_len, new_len)` are initialized.
+    /// The caller must ensure that `new_len <= self.capacity()` and that all
+    /// elements in `[old_len, new_len)` are initialized.
     pub unsafe fn set_len(&mut self, new_len: usize) {
+        assert!(new_len <= self.cap, "KVec::set_len exceeds capacity");
         self.len = new_len;
     }
 

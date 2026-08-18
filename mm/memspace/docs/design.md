@@ -99,6 +99,19 @@ object owner
 4. `VmAreaSet::try_insert()` 拒绝重叠 VMA。
 5. runtime 注册 file/anon object view 时使用当前 `mm_id` 和 `InvalidateHandle`。
 
+### Anonymous shared page ownership
+
+`SharedPages::new()` 是本模块的可失败容器迁移验证点：先用
+`KVec<PhysAddr>::try_with_capacity()` 为全部 frame bookkeeping 预留空间，再逐页
+获取物理 frame。这样容器 OOM 发生在任何 frame 被取得之前；后续 `try_push` 在
+已预留容量内不再触发 allocation。`SharedBackend` 用 `KArc<SharedPages>` 保存该
+页集，若 shared-owner allocation 失败，移动中的 `SharedPages` 会 drop 并释放已取得
+的全部 frame。
+
+该切片验证 `KVec` 与 `KArc` 的资源顺序和 `KError::NoMemory` 传播；
+`AnonSharedObject` 的现有 `Arc` 构造仍是后续迁移边界，不能据此宣称整条匿名共享
+对象创建路径已完全 fallible。
+
 ### VMA 变形
 
 - `VmAreaSet::unmap()` 支持 exact removal、front/back trim 和 middle split。
@@ -262,9 +275,15 @@ dirty tracking.
    原因：ordinary private/file-private unmap may detach backing object pages;
    successful relocation only retires the old virtual role.
 
+8. SharedPages 在获取 frame 前预留容器容量，并由 KArc 共享页集。
+   原因：避免 bookkeeping OOM 发生在部分 frame 已取得之后；owner allocation
+   失败时依靠 `SharedPages::Drop` 回收完整页集。
+
 ## Drop / 资源释放
 
 - `MmSpace::clear()` 通过 runtime unmap 清理全部 VMA 的 present PTE。
 - `PageTableMut::finish()` 是释放 detached frames 前的 TLB finalization boundary。
 - `VmAreaSet` 清空后，VMA metadata 和 runtime references 一起释放。
 - File/anon object view guards 随 runtime/object 引用释放并注销 view。
+- `SharedPages` drop 时逐页释放 `KVec` 中记录的 frame；`KArc<SharedPages>` 的
+  最后一个 strong reference 触发该回收。

@@ -12,7 +12,7 @@ use core::{
     fmt,
     fmt::Debug,
     hash::{Hash, Hasher},
-    iter::{FusedIterator, Peekable},
+    iter::FusedIterator,
     marker::PhantomData,
     mem,
     ops::{
@@ -501,12 +501,6 @@ impl<K: Debug + Ord, V: Debug> Debug for OccupiedEntry<'_, K, V> {
     }
 }
 
-// An iterator for merging two sorted sequences into one
-struct MergeIter<K, V, I: Iterator<Item = (K, V)>> {
-    left: Peekable<I>,
-    right: Peekable<I>,
-}
-
 impl<K: Ord, V> BTreeMap<K, V> {
     /// Makes a new empty BTreeMap with a reasonable choice for B.
     ///
@@ -738,61 +732,6 @@ impl<K: Ord, V> BTreeMap<K, V> {
         }
     }
 
-    /// Moves all elements from `other` into `Self`, leaving `other` empty.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeMap;
-    ///
-    /// let mut a = BTreeMap::new();
-    /// a.insert(1, "a");
-    /// a.insert(2, "b");
-    /// a.insert(3, "c");
-    ///
-    /// let mut b = BTreeMap::new();
-    /// b.insert(3, "d");
-    /// b.insert(4, "e");
-    /// b.insert(5, "f");
-    ///
-    /// a.append(&mut b);
-    ///
-    /// assert_eq!(a.len(), 5);
-    /// assert_eq!(b.len(), 0);
-    ///
-    /// assert_eq!(a[&1], "a");
-    /// assert_eq!(a[&2], "b");
-    /// assert_eq!(a[&3], "d");
-    /// assert_eq!(a[&4], "e");
-    /// assert_eq!(a[&5], "f");
-    /// ```
-
-    pub fn try_append(&mut self, other: &mut Self) -> Result<(), AllocError> {
-        // Do we have to append anything at all?
-        if other.is_empty() {
-            return Ok(());
-        }
-
-        // We can just swap `self` and `other` if `self` is empty.
-        if self.is_empty() {
-            mem::swap(self, other);
-            return Ok(());
-        }
-
-        // First, we merge `self` and `other` into a sorted sequence in linear time.
-        let self_iter = mem::take(self).into_iter();
-        let other_iter = mem::take(other).into_iter();
-        let iter = MergeIter {
-            left: self_iter.peekable(),
-            right: other_iter.peekable(),
-        };
-
-        // Second, we build a tree from the sorted sequence in linear time.
-        self.build_from_sorted_iter(iter)?;
-        self.fix_right_edge();
-        Ok(())
-    }
-
     /// Constructs a double-ended iterator over a sub-range of elements in the map.
     /// The simplest way is to use the range syntax `min..max`, thus `range(min..max)` will
     /// yield elements from min (inclusive) to max (exclusive).
@@ -918,81 +857,6 @@ impl<K: Ord, V> BTreeMap<K, V> {
                 _marker: PhantomData,
             }),
         })
-    }
-
-    fn build_from_sorted_iter<I: Iterator<Item = (K, V)>>(
-        &mut self,
-        iter: I,
-    ) -> Result<(), AllocError> {
-        self.ensure_root_is_owned()?;
-        let mut cur_node = last_leaf_edge(self.root.as_mut()).into_node();
-        // Iterate through all key-value pairs, pushing them into nodes at the right level.
-        for (key, value) in iter {
-            // Try to push key-value pair into the current leaf node.
-            if cur_node.len() < node::CAPACITY {
-                cur_node.push(key, value);
-            } else {
-                // No space left, go up and push there.
-                let mut open_node;
-                let mut test_node = cur_node.forget_type();
-                loop {
-                    match test_node.ascend() {
-                        Ok(parent) => {
-                            let parent = parent.into_node();
-                            if parent.len() < node::CAPACITY {
-                                // Found a node with space left, push here.
-                                open_node = parent;
-                                break;
-                            } else {
-                                // Go up again.
-                                test_node = parent.forget_type();
-                            }
-                        }
-                        Err(node) => {
-                            // We are at the top, create a new root node and push there.
-                            open_node = node.into_root_mut().push_level()?;
-                            break;
-                        }
-                    }
-                }
-
-                // Push key-value pair and new right subtree.
-                let tree_height = open_node.height() - 1;
-                let mut right_tree = node::Root::new_leaf()?;
-                for _ in 0..tree_height {
-                    right_tree.push_level()?;
-                }
-                open_node.push(key, value, right_tree);
-
-                // Go down to the right-most leaf again.
-                cur_node = last_leaf_edge(open_node.forget_type()).into_node();
-            }
-
-            self.length += 1;
-        }
-        Ok(())
-    }
-
-    fn fix_right_edge(&mut self) {
-        // Handle underfull nodes, start from the top.
-        let mut cur_node = self.root.as_mut();
-        while let Internal(internal) = cur_node.force() {
-            // Check if right-most child is underfull.
-            let mut last_edge = internal.last_edge();
-            let right_child_len = last_edge.reborrow().descend().len();
-            if right_child_len < node::MIN_LEN {
-                // We need to steal.
-                let mut last_kv = match last_edge.left_kv() {
-                    Ok(left) => left,
-                    Err(_) => unreachable!(),
-                };
-                last_kv.bulk_steal_left(node::MIN_LEN - right_child_len);
-                last_edge = last_kv.right_edge();
-            }
-
-            // Go further down.
-            cur_node = last_edge.descend();
-        }
     }
 
     /// Splits the collection into two at the given key. Returns everything after the given key,
@@ -2295,6 +2159,10 @@ impl<'a, K: Ord, V> VacantEntry<'a, K, V> {
     /// ```
 
     pub fn try_insert(self, value: V) -> Result<&'a mut V, AllocError> {
+        // Reserve every node that can be needed by a split cascade before
+        // changing the tree. Once insertion starts, all node ownership comes
+        // from this reservation and no OOM edge remains after mutation.
+        let mut reservation = node::NodeReservation::for_insert(&self.handle)?;
         *self.length += 1;
 
         let out_ptr;
@@ -2303,7 +2171,10 @@ impl<'a, K: Ord, V> VacantEntry<'a, K, V> {
         let mut ins_v;
         let mut ins_edge;
 
-        let mut cur_parent = match self.handle.insert(self.key, value)? {
+        let mut cur_parent = match self
+            .handle
+            .insert_reserved(self.key, value, &mut reservation)
+        {
             (Fit(handle), _) => return Ok(handle.into_kv_mut().1),
             (Split(left, k, v, right), ptr) => {
                 ins_k = k;
@@ -2316,17 +2187,20 @@ impl<'a, K: Ord, V> VacantEntry<'a, K, V> {
 
         loop {
             match cur_parent {
-                Ok(parent) => match parent.insert(ins_k, ins_v, ins_edge)? {
-                    Fit(_) => return Ok(unsafe { &mut *out_ptr }),
-                    Split(left, k, v, right) => {
-                        ins_k = k;
-                        ins_v = v;
-                        ins_edge = right;
-                        cur_parent = left.ascend().map_err(|n| n.into_root_mut());
+                Ok(parent) => {
+                    match parent.insert_reserved(ins_k, ins_v, ins_edge, &mut reservation) {
+                        Fit(_) => return Ok(unsafe { &mut *out_ptr }),
+                        Split(left, k, v, right) => {
+                            ins_k = k;
+                            ins_v = v;
+                            ins_edge = right;
+                            cur_parent = left.ascend().map_err(|n| n.into_root_mut());
+                        }
                     }
-                },
+                }
                 Err(root) => {
-                    root.push_level()?.push(ins_k, ins_v, ins_edge);
+                    root.push_level_reserved(&mut reservation)
+                        .push(ins_k, ins_v, ins_edge);
                     return Ok(unsafe { &mut *out_ptr });
                 }
             }
@@ -2580,26 +2454,65 @@ fn handle_underfull_node<'a, K, V>(
     }
 }
 
-impl<K: Ord, V, I: Iterator<Item = (K, V)>> Iterator for MergeIter<K, V, I> {
-    type Item = (K, V);
+#[cfg(unittest)]
+mod tests {
+    use unittest::def_test;
 
-    fn next(&mut self) -> Option<(K, V)> {
-        let res = match (self.left.peek(), self.right.peek()) {
-            (Some((left_key, _)), Some((right_key, _))) => left_key.cmp(right_key),
-            (Some(_), None) => Ordering::Less,
-            (None, Some(_)) => Ordering::Greater,
-            (None, None) => return None,
-        };
+    use super::BTreeMap;
+    use crate::{AllocError, fault_injection::fail_allocations_after, kbtree::node};
 
-        // Check which elements comes first and only advance the corresponding iterator.
-        // If two keys are equal, take the value from `right`.
-        match res {
-            Ordering::Less => self.left.next(),
-            Ordering::Greater => self.right.next(),
-            Ordering::Equal => {
-                self.left.next();
-                self.right.next()
+    #[def_test(serial)]
+    fn try_insert_leaf_split_failure_keeps_map_unchanged() {
+        for failure_after in 0..4 {
+            let mut map = BTreeMap::new();
+            for key in 0..node::CAPACITY {
+                map.try_insert(key, key).unwrap();
             }
+
+            {
+                let _guard = fail_allocations_after(failure_after);
+                let err = map.try_insert(node::CAPACITY, node::CAPACITY).unwrap_err();
+                assert_eq!(err, AllocError::NoMemory);
+            }
+
+            assert_eq!(map.len(), node::CAPACITY);
+            assert_eq!(map.iter().count(), node::CAPACITY);
+            for key in 0..node::CAPACITY {
+                assert_eq!(map.get(&key), Some(&key));
+            }
+            assert_eq!(map.get(&node::CAPACITY), None);
+        }
+    }
+
+    #[def_test(serial)]
+    fn try_insert_root_split_failure_keeps_map_unchanged() {
+        let mut probe = BTreeMap::new();
+        let mut insertion_key = 0usize;
+        while probe.root.as_ref().height() < 2 {
+            probe.try_insert(insertion_key, insertion_key).unwrap();
+            insertion_key += 1;
+        }
+
+        for failure_after in 0..5 {
+            let mut map = BTreeMap::new();
+            for key in 0..insertion_key - 1 {
+                map.try_insert(key, key).unwrap();
+            }
+
+            {
+                let _guard = fail_allocations_after(failure_after);
+                let err = map
+                    .try_insert(insertion_key - 1, insertion_key - 1)
+                    .unwrap_err();
+                assert_eq!(err, AllocError::NoMemory);
+            }
+
+            assert_eq!(map.len(), insertion_key - 1);
+            assert_eq!(map.iter().count(), insertion_key - 1);
+            for key in 0..insertion_key - 1 {
+                assert_eq!(map.get(&key), Some(&key));
+            }
+            assert_eq!(map.get(&(insertion_key - 1)), None);
         }
     }
 }
