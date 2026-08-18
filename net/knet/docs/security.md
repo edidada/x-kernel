@@ -354,9 +354,11 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - Unix stream 的 write index 发布、方向关闭和空队列 EOF 判定保持同一个 per-direction 排序点，方向锁内不执行用户复制或 `PollSet` 唤醒，shutdown 在释放 `channel` mutex 后执行 waiter 唤醒。
 - 新增外部网络输入使用 checked parser（含 IPv6 扩展头跳过与 NDP/ICMPv6）。
 - IPv6 差错生成保持 RFC 4443 §2.4 限制：仅应答本地单播目的，不对组播/未指定源或组播目的应答，且不对 ICMPv6 差错与 Redirect 再回差错。
-- IPv6 入向重组改动保持队列数量、内存和 60 秒超时上限，拒绝重叠 range，并要求第一片带齐上层头；完成后不得把 Fragment 头交给 UDP/TCP。
+- IPv6 入向重组改动保持队列数量、内存和 60 秒超时上限，拒绝重叠 range，并要求第一片带齐上层头；完成后不得把 Fragment 头交给 UDP/TCP。重组或剥离后再入时拒绝第二个 Fragment 头（含 Routing 等可跳过头之后的内层 Fragment），对齐 Linux `IP6SKB_FRAGMENTED`。
+- UDP/raw IPv4 与 IPv6 发送路径先完成路由与 MTU 检查，再因 TX 队列满返回 `WouldBlock`，避免无路由目的地被报告为 `EWOULDBLOCK`。
 - IPv4 分片重组改动保持队列数量、内存和超时上限，并拒绝重叠 range。
 - UDP registry 改动保持 bind、connect、普通接收和 ICMP/ICMPv6 error lookup 使用同一 PCB 所有权来源；非零 bind `scope_id` 按到达 ifindex 匹配，不能用全局目的地址的 `sin6_scope_id==0` 代替到达接口。
+- TCP `ListenTable` 改动保持非零 bind scope 按 SYN 到达 ifindex 匹配；accepted child 用 listener ifindex 或 link-local 对端的 SYN 到达 ifindex 初始化 `bound_scope_id`，不能固定为 0。
 - 修改 poller 状态机或 `Service::poll_budgeted` 时验证四态转换、单执行者获取、一次 CAS 释放、分阶段 smoltcp 预算和 1 ms 软时间上限；`PollProgress::has_more` 只能包含立即工作，未来协议 deadline 必须等待 timer 到期后发布；TX waiter 只能由 `tx_capacity_changed` 触发全局容量唤醒。
 - 修改 UDP PCB 队列时验证零容量创建、扩容失败丢包、1024 数据报上限、FIFO 顺序和排空后 64 槽容量回收。
 - 修改 TCP Drop 或异步 TX 路径时验证已成功写入的 payload 在文件关闭后仍由协议对象持有，未读数据关闭发送 RST，deferred-close handle 在 `Closed` 后删除，状态期限只作用于 orphan `FIN_WAIT_2`。

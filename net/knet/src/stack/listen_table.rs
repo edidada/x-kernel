@@ -35,18 +35,20 @@ struct ListenTableEntry {
 struct ListenEntry {
     /// Shared with waiters via [`PollSet::clone`]; not behind `state`.
     accept_poll: PollSet,
+    /// Listener `sk_bound_dev_if`. Zero matches any arrival interface.
+    bound_scope_id: u32,
     state: Mutex<ListenTableEntry>,
 }
 
 /// The result of accepting a TCP connection from the listen table.
-///
-/// Contains the socket handle and the local/remote endpoints
-/// needed to construct an accepted [`TcpSocket`].
 #[derive(Clone, Copy)]
 pub(crate) struct AcceptedTcp {
     pub(crate) handle: SocketHandle,
     pub(crate) local_endpoint: IpEndpoint,
     pub(crate) remote_endpoint: IpEndpoint,
+    /// Interface the SYN arrived on. Used when the listener is unbound and
+    /// the peer is IPv6 link-local (Linux `tcp_v6_init_req`).
+    pub(crate) arrival_ifindex: u32,
 }
 
 struct PendingConn {
@@ -68,9 +70,10 @@ impl ListenTableEntry {
 }
 
 impl ListenEntry {
-    fn new(backlog: usize) -> Self {
+    fn new(backlog: usize, bound_scope_id: u32) -> Self {
         Self {
             accept_poll: PollSet::new(),
+            bound_scope_id,
             state: Mutex::new(ListenTableEntry::new(backlog)),
         }
     }
@@ -93,7 +96,13 @@ impl ListenTable {
         !Self::listen_conflicts(&entries, endpoint)
     }
 
-    pub fn listen(&self, listen_endpoint: IpListenEndpoint, backlog: usize) -> KResult {
+    /// Register a listener. `bound_scope_id` is the bind ifindex (`0` = any).
+    pub fn listen(
+        &self,
+        listen_endpoint: IpListenEndpoint,
+        backlog: usize,
+        bound_scope_id: u32,
+    ) -> KResult {
         let port = listen_endpoint.port;
         assert_ne!(port, 0);
 
@@ -103,7 +112,10 @@ impl ListenTable {
             return Err(KError::AddrInUse);
         }
 
-        entries.insert(listen_endpoint, Arc::new(ListenEntry::new(backlog)));
+        entries.insert(
+            listen_endpoint,
+            Arc::new(ListenEntry::new(backlog, bound_scope_id)),
+        );
         Ok(())
     }
 
@@ -232,11 +244,15 @@ impl ListenTable {
         &self,
         src: IpEndpoint,
         dst: IpEndpoint,
+        arrival_ifindex: u32,
         sockets: &mut SocketSet<'_>,
     ) {
         let Some((endpoint, entry)) = self.lookup_entry(dst) else {
             return;
         };
+        if !listen_scope_matches(entry.bound_scope_id, arrival_ifindex) {
+            return;
+        }
 
         let mut state = entry.state.lock();
         if state.closed {
@@ -276,8 +292,20 @@ impl ListenTable {
                 handle: dispatch_irq,
                 local_endpoint: dst,
                 remote_endpoint: src,
+                arrival_ifindex,
             },
         });
+    }
+
+    #[cfg(unittest)]
+    fn queued_arrival_ifindex(&self, endpoint: IpListenEndpoint) -> Option<u32> {
+        let entry = self.get_entry(&endpoint)?;
+        let state = entry.state.lock();
+        state
+            .syn_queue
+            .front()
+            .or(state.accept_queue.front())
+            .map(|conn| conn.accepted.arrival_ifindex)
     }
 
     fn get_entry(&self, endpoint: &IpListenEndpoint) -> Option<Arc<ListenEntry>> {
@@ -403,6 +431,12 @@ fn is_acceptable_socket(socket: &tcp::Socket<'_>) -> bool {
     }
 }
 
+/// Linux `inet_bound_dev_eq` without L3 master: an unbound listener matches
+/// every interface; a bound listener matches only the SYN arrival ifindex.
+fn listen_scope_matches(bound_scope_id: u32, arrival_ifindex: u32) -> bool {
+    bound_scope_id == 0 || bound_scope_id == arrival_ifindex
+}
+
 fn promote_ready_in_socket_set(
     syn_queue: &mut VecDeque<PendingConn>,
     accept_queue: &mut VecDeque<PendingConn>,
@@ -422,4 +456,76 @@ fn promote_ready_in_socket_set(
         }
     }
     moved
+}
+
+#[cfg(unittest)]
+mod tests {
+    use smoltcp::wire::{IpAddress, Ipv6Address};
+    use unittest::def_test;
+
+    use super::*;
+
+    fn wildcard(port: u16) -> IpListenEndpoint {
+        IpListenEndpoint { addr: None, port }
+    }
+
+    fn v6_endpoint(host: u16, port: u16) -> IpEndpoint {
+        IpEndpoint::new(
+            IpAddress::Ipv6(Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, host)),
+            port,
+        )
+    }
+
+    fn socket_count(sockets: &SocketSet<'_>) -> usize {
+        sockets.iter().count()
+    }
+
+    #[def_test]
+    fn listen_scope_matches_unbound_or_same_ifindex() {
+        assert!(listen_scope_matches(0, 2));
+        assert!(listen_scope_matches(2, 2));
+        assert!(!listen_scope_matches(2, 3));
+    }
+
+    #[def_test]
+    fn scoped_listen_ignores_syn_from_other_iface() {
+        let table = ListenTable::new();
+        let listen_ep = wildcard(18080);
+        table.listen(listen_ep, 1, 2).unwrap();
+        let mut sockets = SocketSet::new(vec![]);
+
+        table.incoming_tcp_packet(
+            v6_endpoint(1, 40000),
+            v6_endpoint(2, 18080),
+            3,
+            &mut sockets,
+        );
+        assert_eq!(socket_count(&sockets), 0);
+        assert!(table.queued_arrival_ifindex(listen_ep).is_none());
+
+        table.incoming_tcp_packet(
+            v6_endpoint(1, 40000),
+            v6_endpoint(2, 18080),
+            2,
+            &mut sockets,
+        );
+        assert_eq!(socket_count(&sockets), 1);
+        assert_eq!(table.queued_arrival_ifindex(listen_ep), Some(2));
+    }
+
+    #[def_test]
+    fn unbound_listen_records_syn_arrival_ifindex() {
+        let table = ListenTable::new();
+        let listen_ep = wildcard(18081);
+        table.listen(listen_ep, 1, 0).unwrap();
+        let mut sockets = SocketSet::new(vec![]);
+
+        table.incoming_tcp_packet(
+            v6_endpoint(1, 40001),
+            v6_endpoint(2, 18081),
+            4,
+            &mut sockets,
+        );
+        assert_eq!(table.queued_arrival_ifindex(listen_ep), Some(4));
+    }
 }

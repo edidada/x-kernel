@@ -332,7 +332,7 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 1. Ethernet RX 任务注册下一次 IRQ waker 后调用 `NetworkPoller::publish_and_poll_rx`，在当前任务内发布 RX 并尝试执行有界批次；socket recv 和 readiness 路径通过 `poll_interfaces` 尝试执行一次已有工作；TCP、UDP 和 raw TX 生产路径通过 `notify(PollReason::Tx)` 发布工作。TCP 从可编码为零窗口的低余量接收缓冲区消费数据时通过 `notify(PollReason::RxWindow)` 主动重开对端窗口。
 2. 普通 `notify` 在 `IDLE` 上发布 `SCHEDULED` 并唤醒后台任务；RX 任务发布后直接竞争执行权。执行期间的新工作进入 `RUNNING_PENDING`；RX 任务、后台任务和 assist 只有一个能够通过 `SCHEDULED` 到 `RUNNING` 的 CAS。
 3. `Router::drain_rx_budgeted_into` 按 RX budget 从设备轮转拉取 `PacketBuf`，`next_rx_device` 在设备间保持公平并随设备删除修正。
-4. `IngressProcessor` 在 Router 锁外校验 IPv4/IPv6 头、长度、校验和与本地目的地址，并完成 IPv4/IPv6 分片重组。IPv6 跳过可识别扩展头；含 Fragment 头的报文按 `(src, dst, id, ifindex)` 重组，不可分片前缀来自第一片，完成后去掉 Fragment 头再走 UDP/NDP/echo 或把完整 TCP 交给 smoltcp。
+4. `IngressProcessor` 在 Router 锁外校验 IPv4/IPv6 头、长度、校验和与本地目的地址，并完成 IPv4/IPv6 分片重组。IPv6 跳过可识别扩展头；含 Fragment 头的报文按 `(src, dst, id, ifindex)` 重组，不可分片前缀来自第一片，完成后去掉 Fragment 头再走 UDP/NDP/echo 或把完整 TCP 交给 smoltcp。重组或剥离后再入输入路径时带 `already_fragmented`（Linux `IP6SKB_FRAGMENTED`），第二次出现 Fragment 头直接丢弃，即使中间隔着 Routing 等可跳过扩展头。
 5. 完整 UDP 数据报进入 crate 内 UDP PCB 分流（IPv4/IPv6），未命中 socket 的单播 UDP 触发 ICMPv4/ICMPv6 Port Unreachable；IPv6 未识别 next header（非 TCP/UDP/ICMPv6）的单播报文触发 ICMPv6 Parameter Problem Code 1（RFC 4443 §3.4），pointer 指向承载该值的 next-header 字段。ICMPv6 NDP（NS/NA）解析为动作 batch，由 `Service` 在 Router 锁内更新设备邻居表或发送 NA；Echo Request 由 `stack::ipv6::icmpv6` 应答。其余入站 ICMPv6 差错在 `process_ipv6_input` 内交给 UDP error lookup，引用 4-tuple 的 link-local/multicast 地址使用到达接口作为 `sin6_scope_id`（对齐 Linux `__udp6_lib_err` 的 `inet6_iif`），随后丢弃、不进入 smoltcp。UDP PCB 按 FIFO 保留已入队数据报，`connect` 只影响后续入包的 peer 匹配。
 6. TCP、raw IP、ICMPv4 和其余 IPv6 packet 进入有界 smoltcp ingress queue。`Service` 先执行 `poll_maintenance`，再按 RX budget 逐个调用 `poll_ingress_single`，并按 TX budget 调用有界的 `poll_egress`。达到预算或时间边界后，剩余 ingress 保持 FIFO 顺序并进入后续轮次。
 7. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
@@ -343,7 +343,7 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 ### TX 路由
 
 1. TCP connect、send 和 close，raw send 以及 UDP data queue 提交完成后发布真实 TX 通知；TCP recv 只在消费前的 smoltcp 接收缓冲区余量低于最大窗口缩放量子时发布 `RxWindow` 通知，覆盖未缩放零窗口和缩放后仍编码为零的窗口。达到缩放量子后的窗口增长随 RX 或已登记的协议 timer poll 推进，避免每次应用读取都创建后台工作。调用方可随后通过 `assist_once` 协助执行已调度的一轮。TCP 文件关闭不会立即删除仍处于协议关闭过程中的 handle。
-2. crate 内 UDP 在 Router mutex 内检查队列容量、选择源地址和路由 MTU，并确认输出设备处于管理 up 状态；路由缺失或输出设备管理 down 时返回 `ENETUNREACH`。写入 UDP 与 IPv4/IPv6 头后提交到 data TX queue。IPv6 输出不分片，超出路径 MTU 直接返回 `EMSGSIZE`。smoltcp 生成的 IP 包进入同一 data TX queue，`IngressProcessor` 生成的 ICMPv4/ICMPv6 错误与 NDP/ICMPv6 应答进入 control TX queue。
+2. crate 内 UDP 在 Router mutex 内先解析输出路由和路径 MTU，再检查 TX 队列容量；路由缺失或输出设备管理 down 时返回 `ENETUNREACH`，超 MTU 返回 `EMSGSIZE`，队列满才返回 `WouldBlock`（Linux `udp_sendmsg` / `udp_v6_sendmsg` 先 `ip_route_output_flow` / `ip6_sk_dst_lookup_flow` 再分配发送 skb）。写入 UDP 与 IPv4/IPv6 头后提交到 data TX queue。IPv6 输出不分片，超出路径 MTU 直接返回 `EMSGSIZE`。smoltcp 生成的 IP 包进入同一 data TX queue，`IngressProcessor` 生成的 ICMPv4/ICMPv6 错误与 NDP/ICMPv6 应答进入 control TX queue。
 3. `IP_MTU_DISCOVER` 决定 UDP IPv4 头部的 DF 标志。超出路由 MTU 且允许分片的包由 `fragment_output_packet` 拆分，DF 包返回 `EMSGSIZE`。
 4. `Router::dispatch_budgeted` 优先接管 control packet，再按 IP 版本解析源地址和目的地址；IPv4 输出先按实际长度更新 `total_len` 和头部校验和，并将已校验的源地址随报文传给 `NetDevice`。IPv6 输出更新 `payload_length`。IPv6 目的命中本机地址表时，报文改标 `DeviceRx` 进入 `local_rx_queue`，由后续 RX 轮次的 `IngressProcessor` 处理；输出解析在 Fragment 头处停下，因此本机投递的分片会进入入向重组器。
 5. 广播或组播包复制到所有设备；`0.0.0.0` 到 `255.255.255.255` 的受限广播允许在设备尚未分配 IPv4 地址时直接发送，用于 DHCP 初始化流量。IPv6 组播直接映射 Ethernet 组播 MAC（`33:33:xx:xx:xx:xx`）。
@@ -358,11 +358,11 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 
 ### TCP listen 和 accept
 
-1. `TcpSocket::listen` 把本地 endpoint 注册到 `ListenTable`。
-2. `IngressProcessor` snoop 首个 SYN 包，并调用 `ListenTable::incoming_tcp_packet`。
-3. `ListenTable` 为新连接创建一个 smoltcp TCP socket，放入 SYN 队列。
+1. `TcpSocket::listen` 把本地 endpoint 和 bind 保存的 `bound_scope_id` 注册到 `ListenTable`，并复用 `set_bound_scope` 设置 RX 设备 mask，避免 smoltcp `IpListenEndpoint` 丢失 scope 后把 `[::%N]` 扩成全接口。
+2. `IngressProcessor` snoop 首个 SYN 包，并把到达 ifindex 传给 `ListenTable::incoming_tcp_packet`。
+3. `ListenTable` 对非零 `bound_scope_id` 按到达 ifindex 匹配（Linux `inet_bound_dev_eq`），再为新连接创建 smoltcp TCP socket，放入 SYN 队列。
 4. 后续 poll 观察到连接可接受后移动到 accept 队列。
-5. `TcpSocket::accept` 取出 `AcceptedTcp`，构造新的 connected `TcpSocket`。
+5. `TcpSocket::accept` 取出 `AcceptedTcp`，构造 connected `TcpSocket`：child 的 `bound_scope_id` 继承 listener 绑定 ifindex；listener 未绑定时，若对端为 IPv6 link-local 则使用 SYN 到达 ifindex（Linux `tcp_v6_init_req` / `tcp_v6_syn_recv_sock`）。
 6. POSIX 层通过 `AcceptOptions` 传入监听文件的 nonblocking 状态；accept 队列为空时，
    nonblocking 调用返回 `WouldBlock`，由用户态 poll/epoll 负责等待下一次可读事件。
 
@@ -433,8 +433,10 @@ IPv6 link-local 收发使用 `sin6_scope_id` 选择接口：接收路径写入�
 UDP/TCP bind 对需要 scope 的地址（Linux `__ipv6_addr_needs_scope_id`：link-local 单播以及 node-local / link-local 组播）拒绝 `scope_id == 0`（`EINVAL`）和无效 ifindex（`ENODEV`）。
 UDP/TCP connect 对同样需要接口的目的地址：若 socket 尚未绑定接口且 `sin6_scope_id == 0` 则返回 `EINVAL`；已绑定接口时须与 `sin6_scope_id` 一致（Linux `tcp_v6_connect` / `ip6_datagram_connect`）。
 UDP bind registry 的非零 `scope_id` 在 RX 与 ICMPv6 差错 lookup 中按到达 ifindex 匹配，对齐 Linux `sk_bound_dev_if` / `udp_sk_bound_dev_eq`，与目的地址是否为全局单播无关。
+TCP listen 同样把 bind 的非零 `sin6_scope_id`（含 `[::%N]`）保存在 `ListenTable` 与设备 mask 上，SYN 按到达 ifindex 匹配。
 UDP bind registry、endpoint 匹配和设备 mask 保留该 scope，发送路径按 scope 选择路由和源地址；已 bind 源地址的 `sendto` 仍做路由与设备 up 检查，无路由或管理 down 时返回 `ENETUNREACH`。
 `getsockname` / `getpeername` 对需要接口 scope 的地址返回绑定 ifindex（Linux `ipv6_iface_scope_id`），全局单播仍为 0。
+accepted TCP socket 继承 listener 的绑定 ifindex；listener 未绑定且对端为 link-local 时使用 SYN 到达 ifindex（Linux `newsk->sk_bound_dev_if = ireq->ir_iif`）。
 ICMPv6 差错查找同样用到达接口填 quoted 地址的 scope，使绑定或连接到 `fe80::%ethN` 的 socket 能收到 Port Unreachable / Packet Too Big。
 IPv6 endpoint 的文本格式遵循 `[address%scope]:port`，避免地址与端口之间的冒号歧义。
 当前不实现 `IPV6_FLOWINFO_SEND` 或 flow-label 路由；`sockaddr_in6.sin6_flowinfo`

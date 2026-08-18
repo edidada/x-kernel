@@ -33,11 +33,31 @@ pub(crate) fn is_local_ipv6_destination(dst_addr: Ipv6Address, local_addrs: &[Ip
 
 pub(crate) fn process_ipv6_input(
     timestamp: MonotonicInstant,
+    packet: PacketBuf,
+    local_addrs: &[Ipv6Cidr],
+    reassembler: &mut fragment::Ipv6Reassembler,
+    control_packets: &mut Vec<Vec<u8>>,
+    ipv6_actions: &mut Vec<Ipv6Action>,
+) -> Option<PacketBuf> {
+    process_ipv6_datagram(
+        timestamp,
+        packet,
+        local_addrs,
+        reassembler,
+        control_packets,
+        ipv6_actions,
+        false,
+    )
+}
+
+fn process_ipv6_datagram(
+    timestamp: MonotonicInstant,
     mut packet: PacketBuf,
     local_addrs: &[Ipv6Cidr],
     reassembler: &mut fragment::Ipv6Reassembler,
     control_packets: &mut Vec<Vec<u8>>,
     ipv6_actions: &mut Vec<Ipv6Action>,
+    already_fragmented: bool,
 ) -> Option<PacketBuf> {
     let header = match Ipv6Header::validate_input_packet_allowing_fragment(&mut packet) {
         Ok(header) => header,
@@ -49,6 +69,13 @@ pub(crate) fn process_ipv6_input(
     }
 
     if header.next_header() == IPV6_EXT_FRAGMENT {
+        // Linux `ipv6_frag_rcv` drops when `IP6SKB_FRAGMENTED` is already set.
+        // RFC 8200 §4.5 allows at most one Fragment header; a skippable
+        // header can sit between two Fragment headers, so the outer check on
+        // `fragment.next_header` is not enough.
+        if already_fragmented {
+            return None;
+        }
         return process_ipv6_fragment(
             timestamp,
             packet,
@@ -195,8 +222,9 @@ fn process_ipv6_fragment(
         }
     };
 
-    // A nested Fragment next-header would re-enter this path after strip or
-    // reassembly. Linux rejects that with `IP6SKB_FRAGMENTED` already set.
+    // Fast path for Fragment next-header = Fragment. A Routing/Dest Options
+    // header between two Fragment headers is caught on re-entry by
+    // `already_fragmented`.
     if fragment.next_header == IPV6_EXT_FRAGMENT {
         return None;
     }
@@ -210,13 +238,14 @@ fn process_ipv6_fragment(
             PacketOwner::Ipv6Stack,
             packet_type,
         );
-        return process_ipv6_input(
+        return process_ipv6_datagram(
             timestamp,
             packet,
             local_addrs,
             reassembler,
             control_packets,
             ipv6_actions,
+            true,
         );
     }
 
@@ -228,13 +257,14 @@ fn process_ipv6_fragment(
     }
 
     match reassembler.reassemble(packet, header, fragment, timestamp) {
-        fragment::Ipv6ReassemblyResult::Complete(packet) => process_ipv6_input(
+        fragment::Ipv6ReassemblyResult::Complete(packet) => process_ipv6_datagram(
             timestamp,
             packet,
             local_addrs,
             reassembler,
             control_packets,
             ipv6_actions,
+            true,
         ),
         fragment::Ipv6ReassemblyResult::Pending | fragment::Ipv6ReassemblyResult::Dropped => None,
     }

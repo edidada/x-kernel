@@ -12,8 +12,8 @@ use super::{
     Ipv6Reassembler,
     output::Ipv6Action,
     packet::{
-        IPV6_EXT_FRAGMENT, IPV6_EXT_HOP_BY_HOP, IPV6_HEADER_LEN, Ipv6Error, Ipv6Header,
-        PROTOCOL_ICMPV6, PROTOCOL_TCP, PROTOCOL_UDP, build_ipv6_packet,
+        IPV6_EXT_FRAGMENT, IPV6_EXT_HOP_BY_HOP, IPV6_EXT_ROUTING, IPV6_HEADER_LEN, Ipv6Error,
+        Ipv6Header, PROTOCOL_ICMPV6, PROTOCOL_TCP, PROTOCOL_UDP, build_ipv6_packet,
     },
     payload, process_ipv6_input,
 };
@@ -388,5 +388,94 @@ fn test_input_timeout_with_first_fragment_emits_time_exceeded() {
     assert_eq!(
         icmp[1],
         etherparse::icmpv6::CODE_TIME_EXCEEDED_FRAGMENT_REASSEMBLY_TIME_EXCEEDED
+    );
+}
+
+fn routing_header(next_header: u8) -> [u8; 8] {
+    let mut hdr = [0u8; 8];
+    hdr[0] = next_header;
+    hdr
+}
+
+fn nested_fragment_after_routing(upper: &[u8]) -> Vec<u8> {
+    let mut payload = routing_header(IPV6_EXT_FRAGMENT).to_vec();
+    payload.extend_from_slice(&frag_hdr(PROTOCOL_UDP, 0, false));
+    payload.extend_from_slice(upper);
+    payload
+}
+
+#[def_test]
+fn test_atomic_fragment_with_inner_fragment_after_routing_is_dropped() {
+    let (_, dst) = sample_addrs();
+    let local_addrs = [Ipv6Cidr::new(dst, 128)];
+    let packet = fragment_packet(
+        IPV6_EXT_ROUTING,
+        0,
+        false,
+        &nested_fragment_after_routing(&udp_datagram(b"nested")),
+    );
+    let (result, control_packets, actions) = process(packet, &local_addrs);
+    assert!(result.is_none());
+    assert!(actions.is_empty());
+    assert!(
+        control_packets.is_empty(),
+        "nested Fragment after Routing must not be delivered as UDP"
+    );
+}
+
+#[def_test]
+fn test_first_fragment_routing_then_fragment_is_not_parameter_problem() {
+    let (_, dst) = sample_addrs();
+    let local_addrs = [Ipv6Cidr::new(dst, 128)];
+    let mut fragmentable = routing_header(IPV6_EXT_FRAGMENT).to_vec();
+    fragmentable.extend_from_slice(&frag_hdr(PROTOCOL_UDP, 0, false));
+    let packet = fragment_packet(IPV6_EXT_ROUTING, 0, true, &fragmentable);
+    let (result, control_packets, _) = process(packet, &local_addrs);
+    assert!(result.is_none());
+    assert!(
+        control_packets.is_empty(),
+        "Linux ipv6frag_thdr_truncated does not send code 3 when skip hits Fragment"
+    );
+}
+
+#[def_test]
+fn test_reassembled_inner_fragment_after_routing_is_dropped() {
+    let (_, dst) = sample_addrs();
+    let local_addrs = [Ipv6Cidr::new(dst, 128)];
+    let mut reassembler = Ipv6Reassembler::new();
+    let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(1));
+    let mut control_packets = Vec::new();
+    let mut actions = Vec::new();
+
+    let mut first_payload = routing_header(IPV6_EXT_FRAGMENT).to_vec();
+    first_payload.extend_from_slice(&frag_hdr(PROTOCOL_UDP, 0, false));
+    let first = fragment_packet(IPV6_EXT_ROUTING, 0, true, &first_payload);
+    assert!(
+        process_ipv6_input(
+            now,
+            first,
+            &local_addrs,
+            &mut reassembler,
+            &mut control_packets,
+            &mut actions,
+        )
+        .is_none()
+    );
+
+    let udp = udp_datagram(b"inner");
+    let second = fragment_packet(IPV6_EXT_ROUTING, 16, false, &udp);
+    let result = process_ipv6_input(
+        now,
+        second,
+        &local_addrs,
+        &mut reassembler,
+        &mut control_packets,
+        &mut actions,
+    );
+    assert!(result.is_none());
+    assert!(actions.is_empty());
+    assert!(
+        control_packets.is_empty(),
+        "reassembled nested Fragment must be dropped, not delivered"
     );
 }

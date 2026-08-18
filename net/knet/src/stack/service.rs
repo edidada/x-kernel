@@ -348,10 +348,8 @@ impl Service {
     ) -> KResult {
         let mut router = self.router.lock();
         let packet_len = packet.as_ref().ok_or(KError::InvalidInput)?.len();
-        if !router.can_enqueue_tx_packet() {
-            return Err(KError::WouldBlock);
-        }
-
+        // Linux `udp_sendmsg` looks up the route before allocating a send skb.
+        // A missing route must beat TX backpressure (`ENETUNREACH` vs `EWOULDBLOCK`).
         let route_source = router.output_route_source(dst_addr)?;
         let source_addr = bound_src.unwrap_or(route_source);
         let packet_count = ipv4::output_packet_count(&router, dst_addr, packet_len)?;
@@ -385,16 +383,17 @@ impl Service {
     ) -> KResult {
         let mut router = self.router.lock();
         let packet_len = packet.as_ref().ok_or(KError::InvalidInput)?.len();
-        if !router.can_enqueue_tx_packet() {
-            return Err(KError::WouldBlock);
-        }
-
+        // Linux `udp_v6_sendmsg` calls `ip6_sk_dst_lookup_flow` before
+        // `ip6_make_skb`. Route and MTU errors must beat TX backpressure.
         let (route_source, route_mtu) = router.output_route(dst_addr, scope_id)?;
         let source_addr = bound_src.unwrap_or(route_source);
         if let Some(mtu) = route_mtu
             && packet_len > mtu
         {
             return Err(LinuxError::EMSGSIZE.into());
+        }
+        if !router.can_enqueue_tx_packet() {
+            return Err(KError::WouldBlock);
         }
         prepare(
             packet.as_deref_mut().ok_or(KError::InvalidInput)?,
@@ -869,5 +868,20 @@ mod tests {
 
         assert_eq!(progress.packets, 1);
         assert!(router.has_pending_ingress());
+    }
+
+    #[def_test]
+    fn ipv6_send_reports_enetunreach_before_tx_queue_full() {
+        let mut router = Router::new();
+        router.fill_data_tx_queue();
+        let service = Service::new(router);
+        let dst = IpAddress::Ipv6(Ipv6Address::from_octets([
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        ]));
+        let mut packet = Some(vec![0u8; ipv6::IPV6_HEADER_LEN + 8]);
+        let err = service
+            .prepare_and_send_ipv6_packet(None, &dst, &mut packet, 0, |_, _| Ok(()))
+            .unwrap_err();
+        assert_eq!(err, KError::from(LinuxError::ENETUNREACH));
     }
 }

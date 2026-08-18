@@ -385,6 +385,17 @@ impl Router {
         self.data_tx_queue.push_back(packet);
     }
 
+    #[cfg(unittest)]
+    pub(crate) fn fill_data_tx_queue(&mut self) {
+        while self.can_enqueue_tx_packet() {
+            self.push_data_tx_packet(PacketBuf::from_ip_packet_vec(
+                0,
+                Vec::new(),
+                PacketOwner::Ipv6Stack,
+            ));
+        }
+    }
+
     pub(crate) fn next_ipv4_identification(&mut self) -> u16 {
         let identification = self.next_ipv4_identification;
         self.next_ipv4_identification = self.next_ipv4_identification.wrapping_add(1).max(1);

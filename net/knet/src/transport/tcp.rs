@@ -104,6 +104,7 @@ impl TcpSocket {
         remote_endpoint: IpEndpoint,
         family: AddressFamily,
         ipv6_only: bool,
+        bound_scope_id: u32,
     ) -> Self {
         let result = Self {
             state: StateLock::new(State::Connected),
@@ -122,9 +123,12 @@ impl TcpSocket {
         };
         let bound_endpoint = endpoint_from_ip_endpoint(local_endpoint);
         *result.bound_endpoint.lock() = bound_endpoint;
-        result
-            .general
-            .set_device_mask(SERVICE.smoltcp_device_mask_for_addr(&remote_endpoint.addr));
+        result.set_bound_scope(bound_scope_id, &bound_endpoint);
+        if bound_scope_id == 0 {
+            result
+                .general
+                .set_device_mask(SERVICE.smoltcp_device_mask_for_addr(&remote_endpoint.addr));
+        }
         result
     }
 }
@@ -512,7 +516,11 @@ impl SocketOps for TcpSocket {
                 if should_register {
                     register_tcp_bound(bound_endpoint)?;
                 }
-                if let Err(err) = LISTEN_TABLE.listen(bound_endpoint, backlog) {
+                if let Err(err) = LISTEN_TABLE.listen(
+                    bound_endpoint,
+                    backlog,
+                    self.bound_scope_id.load(Ordering::Acquire),
+                ) {
                     if should_register {
                         unregister_tcp_bound(bound_endpoint);
                     }
@@ -522,8 +530,10 @@ impl SocketOps for TcpSocket {
                 if should_register {
                     self.bound_registered.store(true, Ordering::Release);
                 }
-                self.general
-                    .set_device_mask(SERVICE.smoltcp_device_mask_for(&bound_endpoint));
+                // Reuse bind's scoped mask. smoltcp `IpListenEndpoint` has no
+                // scope, so `smoltcp_device_mask_for` would widen `[::%N]` to
+                // every interface.
+                self.set_bound_scope(self.bound_scope_id.load(Ordering::Acquire), &bound_endpoint);
                 Ok(())
             })?;
         } else {
@@ -545,6 +555,11 @@ impl SocketOps for TcpSocket {
                     let mut sockets = SOCKET_SET.inner.lock();
                     LISTEN_TABLE.accept(bound_endpoint, &mut sockets)?
                 };
+                let bound_scope_id = accepted_tcp_bound_scope(
+                    self.bound_scope_id.load(Ordering::Acquire),
+                    accepted.remote_endpoint,
+                    accepted.arrival_ifindex,
+                );
                 Ok({
                     Socket::Tcp(Box::new(TcpSocket::new_connected(
                         accepted.handle,
@@ -552,6 +567,7 @@ impl SocketOps for TcpSocket {
                         accepted.remote_endpoint,
                         self.family,
                         self.ipv6_only.load(Ordering::Relaxed),
+                        bound_scope_id,
                     )))
                 })
             })
@@ -867,6 +883,19 @@ fn resolve_ipv6_connect_scope(remote_addr: SocketAddr, bound_scope: u32) -> KRes
 fn ipv6_socket_addr_with_bound_scope(addr: Ipv6Addr, port: u16, bound_scope_id: u32) -> SocketAddr {
     let scope = Ipv6Address::from(addr).iface_scope_id(i32::try_from(bound_scope_id).unwrap_or(0));
     SocketAddr::V6(SocketAddrV6::new(addr, port, 0, scope))
+}
+
+/// Linux `inet_request_bound_dev_if` then `tcp_v6_init_req`: inherit the
+/// listener ifindex; if the listener is unbound and the peer is link-local,
+/// use the SYN arrival ifindex so `inet6_getname` can report a scope.
+fn accepted_tcp_bound_scope(listener_scope: u32, remote: IpEndpoint, arrival_ifindex: u32) -> u32 {
+    if listener_scope != 0 {
+        return listener_scope;
+    }
+    match remote.addr {
+        IpAddress::Ipv6(addr) if Ipv6Address::from(addr).is_link_local() => arrival_ifindex,
+        _ => 0,
+    }
 }
 
 lazy_static! {
@@ -1206,5 +1235,27 @@ mod tests {
             ipv6_socket_addr_with_bound_scope(global, 8080, 3),
             SocketAddr::V6(SocketAddrV6::new(global, 8080, 0, 0))
         );
+    }
+
+    fn v6_ip_endpoint(addr: Ipv6Addr, port: u16) -> IpEndpoint {
+        IpEndpoint::new(IpAddress::Ipv6(addr), port)
+    }
+
+    #[def_test]
+    fn accepted_socket_inherits_listener_bound_ifindex() {
+        let remote = v6_ip_endpoint(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1), 1234);
+        assert_eq!(accepted_tcp_bound_scope(2, remote, 3), 2);
+    }
+
+    #[def_test]
+    fn accepted_socket_uses_syn_iif_for_unbound_link_local_peer() {
+        let remote = v6_ip_endpoint(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1), 1234);
+        assert_eq!(accepted_tcp_bound_scope(0, remote, 3), 3);
+    }
+
+    #[def_test]
+    fn accepted_socket_keeps_zero_scope_for_global_peer() {
+        let remote = v6_ip_endpoint(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 1234);
+        assert_eq!(accepted_tcp_bound_scope(0, remote, 3), 0);
     }
 }

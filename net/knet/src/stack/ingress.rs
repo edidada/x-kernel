@@ -115,7 +115,7 @@ impl IngressProcessor {
                 };
                 if let Some(ip_packet) = packet.network_packet() {
                     udp_err::inspect_icmpv4_error(ip_packet);
-                    snoop_tcp_packet(ip_packet, sockets);
+                    snoop_tcp_packet(ip_packet, packet.ifindex(), sockets);
                 }
                 accepted_packets.push(packet);
             }
@@ -131,7 +131,7 @@ impl IngressProcessor {
                     return;
                 };
                 if let Some(ip_packet) = packet.network_packet() {
-                    snoop_tcp_packet(ip_packet, sockets);
+                    snoop_tcp_packet(ip_packet, packet.ifindex(), sockets);
                 }
                 accepted_packets.push(packet);
             }
@@ -166,7 +166,7 @@ fn parse_ip_packet(buf: &[u8]) -> Option<(u8, SmoltcpIpAddress, SmoltcpIpAddress
     }
 }
 
-fn snoop_tcp_packet(buf: &[u8], sockets: &mut SocketSet<'_>) {
+fn snoop_tcp_packet(buf: &[u8], ifindex: i32, sockets: &mut SocketSet<'_>) {
     let Some((protocol, src_addr, dst_addr, payload)) = parse_ip_packet(buf) else {
         return;
     };
@@ -181,6 +181,7 @@ fn snoop_tcp_packet(buf: &[u8], sockets: &mut SocketSet<'_>) {
     let dst_addr = (dst_addr, tcp_packet.dst_port()).into();
     LISTEN_TABLE.note_tcp_packet(dst_addr);
     if tcp_packet.syn() && !tcp_packet.ack() {
-        LISTEN_TABLE.incoming_tcp_packet(src_addr, dst_addr, sockets);
+        let arrival_ifindex = u32::try_from(ifindex).unwrap_or(0);
+        LISTEN_TABLE.incoming_tcp_packet(src_addr, dst_addr, arrival_ifindex, sockets);
     }
 }
