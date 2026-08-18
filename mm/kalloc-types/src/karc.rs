@@ -29,7 +29,8 @@ use crate::{AllocContext, AllocError, context::require_supported_context};
 /// `#[repr(C)]` guarantees predictable field ordering:
 /// - `strong` at offset 0
 /// - `weak` at offset `size_of::<AtomicUsize>()`
-/// - `data` at offset `2 * size_of::<AtomicUsize>()`
+/// - `data` follows the reference-count header, with any padding required by
+///   `T`'s alignment
 ///
 /// This struct is never exposed outside this module.
 #[repr(C)]
@@ -63,7 +64,9 @@ impl<T> Drop for CyclicInitGuard<T> {
             // The guard owns the implicit weak count initialized by
             // `try_new_cyclic`; materializing KWeak transfers that count to
             // its Drop implementation without changing the refcount first.
-            drop(KWeak { ptr: self.ptr });
+            drop(KWeak {
+                ptr: Some(self.ptr),
+            });
         }
     }
 }
@@ -84,7 +87,9 @@ pub struct KArc<T> {
 /// `KWeak` does not keep the inner data alive — once all `KArc` handles are
 /// dropped, `upgrade()` returns `None`.
 pub struct KWeak<T> {
-    ptr: NonNull<KArcInner<T>>,
+    // `None` is the non-allocating empty weak pointer returned by `new()`.
+    // A live weak always owns one count in the pointed-to allocation.
+    ptr: Option<NonNull<KArcInner<T>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -184,7 +189,7 @@ impl<T> KArc<T> {
             ptr,
             owns_implicit_weak: true,
         };
-        let tmp_weak = KWeak { ptr };
+        let tmp_weak = KWeak { ptr: Some(ptr) };
         let data = data_fn(&tmp_weak);
 
         // SAFETY: The data slot was previously uninitialised. Writing the
@@ -241,7 +246,9 @@ impl<T> KArc<T> {
             abort_overflow();
         }
 
-        KWeak { ptr: this.ptr }
+        KWeak {
+            ptr: Some(this.ptr),
+        }
     }
 
     /// Attempt to unwrap this `KArc`, returning the inner value if this is the
@@ -290,6 +297,14 @@ impl<T: fmt::Debug> fmt::Debug for KArc<T> {
         fmt::Debug::fmt(&**self, f)
     }
 }
+
+impl<T: PartialEq> PartialEq for KArc<T> {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl<T: Eq> Eq for KArc<T> {}
 
 impl<T> Deref for KArc<T> {
     type Target = T;
@@ -371,33 +386,53 @@ unsafe impl<T: Sync> Sync for KArc<T> {}
 // ---------------------------------------------------------------------------
 
 impl<T> KWeak<T> {
+    /// Creates an empty weak pointer without allocating.
+    ///
+    /// This is the fallible type's counterpart to [`alloc::sync::Weak::new`].
+    /// It never upgrades and is useful for optional ownership links that must
+    /// not require an extra `Option` wrapper.
+    pub const fn new() -> Self {
+        Self { ptr: None }
+    }
+
     /// Attempt to upgrade this weak reference to a [`KArc<T>`].
     ///
     /// Returns `None` if all strong references have been dropped (i.e. the
     /// inner data has been deallocated).
     pub fn upgrade(&self) -> Option<KArc<T>> {
+        let ptr = self.ptr?;
         // SAFETY: ptr points to a live KArcInner allocation (KWeak holds a
         // weak reference, so the allocation has not been freed).
-        let mut strong = unsafe { (*self.ptr.as_ptr()).strong.load(Ordering::Relaxed) };
+        let mut strong = unsafe { (*ptr.as_ptr()).strong.load(Ordering::Relaxed) };
 
         loop {
             if strong == 0 {
                 return None;
             }
 
+            // Keep weak upgrades within the same reference-count bound as
+            // `KArc::clone`. Checking before the addition also avoids a
+            // wrapping `strong + 1` if a corrupted count is observed.
+            if strong > isize::MAX as usize {
+                abort_overflow();
+            }
+
             // SAFETY: ptr points to a live KArcInner. CAS tries to increment
-            // strong from the value we just read.
+            // strong from the value we just read. Acquire pairs with the
+            // Release that publishes the initialized payload in
+            // `try_new_cyclic` before an escaped weak reference can expose
+            // it to another CPU.
             match unsafe {
-                (*self.ptr.as_ptr()).strong.compare_exchange_weak(
+                (*ptr.as_ptr()).strong.compare_exchange_weak(
                     strong,
                     strong + 1,
-                    Ordering::Relaxed,
+                    Ordering::Acquire,
                     Ordering::Relaxed,
                 )
             } {
                 Ok(_) => {
                     return Some(KArc {
-                        ptr: self.ptr,
+                        ptr,
                         _phantom: PhantomData,
                     });
                 }
@@ -408,7 +443,7 @@ impl<T> KWeak<T> {
 
     /// Returns `true` if the two `KWeak`s point to the same allocation.
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
-        ptr::eq(this.ptr.as_ptr(), other.ptr.as_ptr())
+        this.ptr == other.ptr
     }
 }
 
@@ -420,21 +455,29 @@ impl<T: fmt::Debug> fmt::Debug for KWeak<T> {
 
 impl<T> Clone for KWeak<T> {
     fn clone(&self) -> Self {
+        let Some(ptr) = self.ptr else {
+            return Self::new();
+        };
+
         // SAFETY: ptr points to a live KArcInner allocation.
-        let old_weak = unsafe { (*self.ptr.as_ptr()).weak.fetch_add(1, Ordering::Relaxed) };
+        let old_weak = unsafe { (*ptr.as_ptr()).weak.fetch_add(1, Ordering::Relaxed) };
         if old_weak > isize::MAX as usize {
             abort_overflow();
         }
 
-        KWeak { ptr: self.ptr }
+        KWeak { ptr: Some(ptr) }
     }
 }
 
 impl<T> Drop for KWeak<T> {
     fn drop(&mut self) {
+        let Some(ptr) = self.ptr else {
+            return;
+        };
+
         // SAFETY: ptr points to a live KArcInner allocation (we hold a weak
         // reference). Release pairs with Acquire in deallocation path.
-        let old_weak = unsafe { (*self.ptr.as_ptr()).weak.fetch_sub(1, Ordering::Release) };
+        let old_weak = unsafe { (*ptr.as_ptr()).weak.fetch_sub(1, Ordering::Release) };
 
         if old_weak != 1 {
             return;
@@ -444,13 +487,13 @@ impl<T> Drop for KWeak<T> {
         atomic::fence(Ordering::Acquire);
 
         // SAFETY: ptr still points to a live KArcInner (we are the last weak).
-        let strong = unsafe { (*self.ptr.as_ptr()).strong.load(Ordering::Relaxed) };
+        let strong = unsafe { (*ptr.as_ptr()).strong.load(Ordering::Relaxed) };
 
         if strong == 0 {
             // SAFETY: Data already dropped by last KArc. We are the last
             // reference of any kind — deallocate the inner struct.
             unsafe {
-                dealloc_arc_inner(self.ptr);
+                dealloc_arc_inner(ptr);
             }
         }
     }
@@ -462,6 +505,12 @@ unsafe impl<T: Send + Sync> Send for KWeak<T> {}
 
 // SAFETY: KWeak<T> is Sync when T: Sync, same reasoning as KArc.
 unsafe impl<T: Sync> Sync for KWeak<T> {}
+
+impl<T> Default for KWeak<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Overflow abort
@@ -536,6 +585,15 @@ mod tests {
     }
 
     #[def_test]
+    fn equality_compares_owned_values() {
+        let left = KArc::try_new(1_u32, AllocContext::Sleepable).unwrap();
+        let right = KArc::try_new(1_u32, AllocContext::Sleepable).unwrap();
+
+        assert_eq!(left, right);
+        assert!(!KArc::ptr_eq(&left, &right));
+    }
+
+    #[def_test]
     fn strong_and_weak_count_reflect_references() {
         let a = KArc::try_new("hello", AllocContext::Sleepable).unwrap();
         assert_eq!(KArc::strong_count(&a), 1);
@@ -586,6 +644,20 @@ mod tests {
     }
 
     // -- Weak references -------------------------------------------------
+
+    #[def_test(serial)]
+    fn empty_weak_is_nonallocating_and_never_upgrades() {
+        let _guard = fail_next_allocation();
+        let empty = KWeak::<u32>::new();
+        let empty_default = KWeak::<u32>::default();
+
+        assert!(empty.upgrade().is_none());
+        assert!(KWeak::ptr_eq(&empty, &empty_default));
+        assert!(empty.clone().upgrade().is_none());
+
+        let err = KArc::try_new(1_u32, AllocContext::Sleepable).unwrap_err();
+        assert_eq!(err, AllocError::NoMemory);
+    }
 
     #[def_test]
     fn downgrade_and_upgrade_succeeds() {

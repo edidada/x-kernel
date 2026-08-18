@@ -74,6 +74,7 @@ mm/kalloc-types/
 - `KArc::try_new`
 - `KArc::try_new_cyclic`
 - `KArc::downgrade` (→ `KWeak<T>`)
+- `KWeak::new` / `Default` (non-allocating empty weak owner)
 - `KWeak::upgrade` (→ `Option<KArc<T>>`)
 - `KArc::try_unwrap`
 - `KArc::ptr_eq` / `KWeak::ptr_eq`
@@ -98,6 +99,35 @@ mm/kalloc-types/
 - `try_collect_vec`
 - test-only failure injection for deterministic OOM-path coverage
 
+## 公开 API 契约矩阵
+
+下面按**所有公开 API 的分配语义**归类；同一格中的多个方法共享同一个
+失败/上下文契约。这里的“任意上下文”仅表示该次调用能够证明不触发 allocator，
+并不放宽其调用者本身的锁、IRQ 或对象生命周期约束。
+
+| 类型 / helper | 可分配入口（返回 `Result`） | 明确无新分配入口 | 失败原子性与上下文 |
+|---|---|---|---|
+| `KBox<T>` | `try_new`、`try_new_uninit` | `into_inner`、`into_raw`、`leak`、`from_raw`、`assume_init`、`Deref` | 非 ZST 仅 `Sleepable`；构造失败不暴露半初始化对象。ZST 不分配，可在任意上下文构造。 |
+| `KArc<T>` / `KWeak<T>` | `KArc::try_new`、`try_new_cyclic` | `KWeak::new` / `Default`、`Clone`、`downgrade`、`upgrade`、`try_unwrap`、计数、`ptr_eq`、`Deref` | owner allocation 仅 `Sleepable`；强/弱引用复制不分配。空 weak 永不 upgrade。`try_new_cyclic` 在 data 初始化完成前不允许 weak upgrade。 |
+| `KVec<T>` | `try_with_capacity`、`try_reserve`、容量不足时的 `try_push`、`try_extend_from_slice`、`try_extend_cloned_from_slice` | `new`/`Default`、容量足够时上述写入、`pop`、`truncate`、`clear`、`swap_remove`、slice/iterator API | 扩容失败保持旧 buffer、长度和已有前缀；`try_extend_cloned_from_slice` 先 staging，因此元素 clone 失败也不发布部分追加。 |
+| `KVecDeque<T>` | `try_with_capacity`、`try_reserve`、容量不足时 `try_push_front` / `try_push_back` | `new`/`Default`、容量足够时 push、`pop_front` / `pop_back`、`clear`、`as_slices`、`iter` | 扩容失败保持 FIFO 顺序和原内容；预留后的环形队列写入可在任意上下文执行。 |
+| `KString` | `try_with_capacity`、`try_from_str`、`try_reserve`、容量不足时 `try_push` / `try_push_str` / `try_push_fmt` | `new`/`Default`、容量足够时 append、`from_utf8`、`clear`、`as_str` / `as_bytes` | 以 `KVec<u8>` 保存 UTF-8；增长失败保持原字符串，`TryClone` 也是 fallible。 |
+| `KHashMap<K, V>` | `try_with_capacity`、`try_reserve`、新 key 的 `try_insert` | `new`/`Default`、lookup/iteration/remove/clear、已有 key replacement、容量足够的新 key insertion | `try_reserve` 成功后才 insert；新 key OOM 保持既有 entries。已有 key replacement 不调用 allocator，可在任意上下文执行。 |
+| `KBTreeMap<K, V>` | `try_insert` / `try_insert_in`、`try_entry` / `try_entry_in`、`split_off` / `try_split_off_in`、`TryClone` / `TryExtend` / `TryFromIterator` | `new`、lookup/range/iteration/remove/clear、已有 key 的 `try_insert_in` replacement、returned `Entry` 的已预留 insert | 新 key insertion 在 mutation 前预留 root/split 链，OOM 时 tree 不变；`try_entry_in` 因可能返回 vacant entry 而保守要求 `Sleepable`。 |
+| `KBTreeSet<T>` | `try_insert` / `try_insert_in`、`replace` / `replace_in`、`try_split_off` / `try_split_off_in`、集合 `Try*` traits | `new`、lookup/range/iteration/remove/clear、duplicate `try_insert_in`、present-value `replace_in` | 复用 map 的 reservation；duplicate/replacement 不分配，新值 OOM 不发布。 |
+| `KBinaryHeap<T>` | `try_with_capacity`、`try_reserve`、容量不足时 `try_push` | `new`/`Default`、容量足够时 push、`peek`、`pop`、`clear` | storage 直接是 `KVec`，heap sift 不分配；增长失败保留原 heap。 |
+| `try_collect_vec`、`TryCollect`、`TryFromIterator`、`TryExtend`、`TryClone` | 所有结果构造可能分配 | 不含隐式 `collect` / `Clone` 回退 | trait convenience APIs 目前固定用 `Sleepable`；需要携带上下文的调用点应直接使用容器的 `_in` / `try_*(_, context)` API。 |
+| `kvec!` / `vec!`、`kformat!` / `format!` | 宏返回 `Result`；`kformat!` 接收显式 context | 空 `kvec![]` 不分配 | `kvec!` / 导入的 `vec!` 默认 `Sleepable`；用户可达路径优先使用带 context 的方法或 `kformat!`，不得回落到 alloc 宏。 |
+
+`KBTreeMap::try_entry_in()` 的返回 `Entry` 已完成可能需要的 root materialize；
+因此随后 `VacantEntry::try_insert()` 不会再遇到 OOM。相反，`try_insert_in()`
+先检查 existing key，所以调用方在 `Atomic` / `NoWait` 场景要更新已有值时不必因为
+保守的 entry API 被错误拒绝。
+
+`AllocError::NoMemory` 通过 `From<AllocError> for KError` 变成
+`KError::NoMemory`；`UnsupportedContext` 则保留为 `KError::WouldBlock`。子模块
+只返回 `KResult`，ABI/syscall 边界才把 `KError::NoMemory` 编码为 `-ENOMEM`。
+
 为降低迁移成本，crate 同时导出与 alloc 生态同名的类型别名：`Vec`、
 `VecDeque`、`String`、`Box`、`Arc`、`Weak`、`HashMap`、`BTreeMap`、
 `BTreeSet` 和 `BinaryHeap`。这些别名只提供显式 `try_*` 的增长/构造入口；
@@ -110,6 +140,9 @@ mm/kalloc-types/
 - reserve-backed no-fail 路径
 - `KBTreeMap` / `KBTreeSet` 的 `append`：在无 `Clone` 约束下，尚不能同时做到
   线性合并和 OOM 失败时完整保留两个输入树，因此不暴露看似可恢复的 API。
+- `KArc<dyn Trait>` / unsized owner：当前 `KArc` 的 allocation layout 只支持 sized
+  `T`，不能替代已有 `Arc<dyn MappingViewNotifier>` 等 trait-object owner；这类边界
+  必须显式保留为后续迁移项，不能被误标为 fallible。
 
 ## 架构
 
@@ -151,6 +184,37 @@ alloc-engine / page allocator
 后续真正的构造/扩容 API 在第一实现里只会保证 `Sleepable`；预留容量不是
 no-wait allocator 的替代，而是调用方在睡眠上下文中先完成资源准备后的显式
 使用模式。
+
+## MM 迁移与验证矩阵
+
+本阶段不以“把每一个 `alloc` 容器机械替换”为目标，而是把每个自定义类型放进
+一个能保持原有锁与提交顺序的 MM 场景。真实路径和组合式验证分别标明，避免把
+测试模型误说成完整内核迁移。
+
+| `kalloc-types` 能力 | MM 落点 | OOM/语义验证 |
+|---|---|---|
+| `KVec<PhysAddr>` | `memspace::SharedPages::phys_pages` | 先预留所有 bookkeeping，再取得物理 frame；容量或 append owner 失败时没有泄漏 frame。 |
+| `KArc<SharedPages>` | `SharedBackend::pages` | shared page-owner construction失败通过 `KResult` 回传，RAII 回收已取得 frame。 |
+| `KArc<InvalidateSink>` / `KWeak<InvalidateSink>` | `MmSpace::invalidate_sink` 与 `InvalidateHandle` | `MmSpace::new_empty_*()` 的 owner allocation 可返回 `KError::NoMemory`；clone/downgrade 不分配。 |
+| `KArc<Anon*ViewRegistration>` | shared/private anon view guard | guard 的 lifetime/unregister 语义不变，guard owner OOM 不会把 view 发布到对象。 |
+| `KHashMap<MappingViewId, RegisteredView>` | `AnonSharedObject::views` | `try_insert` 成功前不发布；hash table OOM 返回 `KError::NoMemory`。 |
+| `KBTreeMap<MappingViewId, RegisteredView>` 与内部 `KBox` node | `AnonPrivateObject::views` | `try_insert_in` 在 mutation 前完成 B-tree node reservation；OOM 后无 view。 |
+| `KString` + `KArc<KString>` | file-backed `FileMappingInfo.path`，并由 procfs `/proc/<pid>/maps` 读取 | pathname snapshot 的 string 或 shared owner OOM 都变成 `KError::NoMemory`；VMA clone/split 与 procfs snapshot 只 clone owner。 |
+| `KVecDeque` | MM mapping-plan 组合测试 | 真实 `InvalidateSink` 仍持有 `SpinNoIrq`，不能在锁内把可能 sleep 的扩容替换进去；测试验证预留后的 atomic FIFO 写入和 OOM 返回。 |
+| `KBinaryHeap` | MM mapping-plan 组合测试 | 当前 MM 没有一个已有的 priority queue；测试验证它只经 `KVec` 分配、sift 不分配。 |
+| `KBTreeSet` | MM mapping-plan 组合测试 | `pagecache::dirty_pages` 的现有 API 含无错误返回的 dirty reconciliation；在没有完整事务/`KResult` 传播前不强迁，测试验证 duplicate/new-value 语义。 |
+
+`mapping_plan_composes_every_fallible_heap_type` 与串行
+`mapping_plan_propagates_injected_oom_from_every_allocation_stage` 将上述所有 type
+放进一个 VMA-like metadata plan。后者从每一个 test-only allocation hook 位置注入
+失败，要求只得到 `AllocError::NoMemory` 或完整 plan，绝不返回部分 plan。各类型
+自身还保留 unit tests，覆盖 grow、replace、split、ZST、weak upgrade 与 failure
+atomicity。
+
+`KVecDeque`、`KBinaryHeap`、`KBTreeSet` 的“组合测试”不是迁移完成宣言：它只是
+验证 type surface 可以共同承载 MM metadata。把它们塞入不匹配的数据结构或持有
+spinlock 的路径会引入比原 OOM 问题更严重的 context/locking bug，因此这些真实
+迁移必须等待相应调用链获得 `KResult` 和 sleepable/reserved allocation contract。
 
 ## 并发模型
 

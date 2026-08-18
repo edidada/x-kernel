@@ -174,3 +174,117 @@ macro_rules! kvec_count {
     () => (0usize);
     ($head:expr $(, $rest:expr)*) => (1usize + $crate::kvec_count!($($rest),*));
 }
+
+#[cfg(unittest)]
+mod integration_tests {
+    use unittest::def_test;
+
+    use super::{
+        AllocContext, AllocError, KArc, KBTreeMap, KBTreeSet, KBinaryHeap, KBox, KHashMap, KString,
+        KVec, KVecDeque, KWeak,
+    };
+    use crate::fault_injection::fail_allocations_after;
+
+    /// A small composition of the allocation shapes MM needs while it builds
+    /// mapping metadata. This is intentionally local to the test module: it
+    /// validates the shared type contract without creating a second MM model.
+    struct MappingPlan {
+        label: KString,
+        page_frames: KVec<u64>,
+        deferred_invalidations: KVecDeque<u64>,
+        reclaim_priority: KBinaryHeap<u64>,
+        intervals: KBTreeMap<u64, KBox<u64>>,
+        resident_starts: KBTreeSet<u64>,
+        views: KHashMap<u64, KArc<u64>>,
+        owner: KArc<u64>,
+        owner_weak: KWeak<u64>,
+    }
+
+    fn try_build_mapping_plan() -> Result<MappingPlan, AllocError> {
+        let label = KString::try_from_str("anonymous-mapping", AllocContext::Sleepable)?;
+
+        let mut page_frames = KVec::try_with_capacity(2, AllocContext::Sleepable)?;
+        page_frames.try_push(0x1000, AllocContext::Atomic)?;
+        page_frames.try_push(0x2000, AllocContext::Atomic)?;
+
+        let mut deferred_invalidations = KVecDeque::try_with_capacity(2, AllocContext::Sleepable)?;
+        deferred_invalidations.try_push_back(0x3000, AllocContext::Atomic)?;
+        deferred_invalidations.try_push_front(0x1000, AllocContext::Atomic)?;
+
+        let mut reclaim_priority = KBinaryHeap::try_with_capacity(2, AllocContext::Sleepable)?;
+        reclaim_priority.try_push(4, AllocContext::Atomic)?;
+        reclaim_priority.try_push(9, AllocContext::Atomic)?;
+
+        let owner = KArc::try_new(0xfeed_u64, AllocContext::Sleepable)?;
+        let owner_weak = KArc::downgrade(&owner);
+
+        let mut intervals = KBTreeMap::new();
+        let interval = KBox::try_new(0x4000_u64, AllocContext::Sleepable)?;
+        intervals.try_insert_in(0x4000, interval, AllocContext::Sleepable)?;
+
+        let mut resident_starts = KBTreeSet::new();
+        resident_starts.try_insert_in(0x4000, AllocContext::Sleepable)?;
+
+        let mut views = KHashMap::try_with_capacity(1, AllocContext::Sleepable)?;
+        views.try_insert(7, owner.clone(), AllocContext::Atomic)?;
+
+        Ok(MappingPlan {
+            label,
+            page_frames,
+            deferred_invalidations,
+            reclaim_priority,
+            intervals,
+            resident_starts,
+            views,
+            owner,
+            owner_weak,
+        })
+    }
+
+    #[def_test]
+    fn mapping_plan_composes_every_fallible_heap_type() {
+        let mut plan = try_build_mapping_plan().unwrap();
+
+        assert_eq!(plan.label.as_str(), "anonymous-mapping");
+        assert_eq!(plan.page_frames.as_slice(), &[0x1000, 0x2000]);
+        assert_eq!(plan.deferred_invalidations.pop_front(), Some(0x1000));
+        assert_eq!(plan.deferred_invalidations.pop_back(), Some(0x3000));
+        assert_eq!(plan.reclaim_priority.pop(), Some(9));
+        assert_eq!(
+            plan.intervals.get(&0x4000).map(|value| **value),
+            Some(0x4000)
+        );
+        assert!(plan.resident_starts.contains(&0x4000));
+
+        let view_owner = plan.views.get(&7).expect("view must retain its owner");
+        assert!(KArc::ptr_eq(&plan.owner, view_owner));
+        let upgraded = plan.owner_weak.upgrade().expect("owner is still live");
+        assert!(KArc::ptr_eq(&plan.owner, &upgraded));
+    }
+
+    #[def_test(serial)]
+    fn mapping_plan_propagates_injected_oom_from_every_allocation_stage() {
+        let mut saw_oom = false;
+        let mut saw_success = false;
+
+        // Each custom container invokes the test-only hook before allocating.
+        // Try every possible failure point in this bounded plan, then one or
+        // more points after its final allocation. A failed build returns no
+        // partially published plan: all local components are dropped first.
+        for successful_allocations in 0..32 {
+            let guard = fail_allocations_after(successful_allocations);
+            match try_build_mapping_plan() {
+                Err(AllocError::NoMemory) => saw_oom = true,
+                Err(error) => panic!("unexpected allocation error: {error:?}"),
+                Ok(plan) => {
+                    saw_success = true;
+                    drop(plan);
+                }
+            }
+            drop(guard);
+        }
+
+        assert!(saw_oom, "injection must reach at least one allocation site");
+        assert!(saw_success, "the bounded plan must eventually build");
+    }
+}

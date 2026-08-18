@@ -29,7 +29,7 @@ use super::{
     node::{self, ForceResult::*, Handle, InsertResult::*, NodeRef, marker},
     search::{self, SearchResult::*},
 };
-use crate::AllocError;
+use crate::{AllocContext, AllocError, TryClone, TryExtend, context::require_supported_context};
 
 /// A map based on a B-Tree.
 ///
@@ -153,8 +153,6 @@ impl<K, V> Drop for BTreeMap<K, V> {
         }
     }
 }
-
-use crate::{TryClone, TryExtend};
 
 impl<K: TryClone, V: TryClone> TryClone for BTreeMap<K, V> {
     fn try_clone(&self) -> Result<BTreeMap<K, V>, AllocError> {
@@ -685,8 +683,36 @@ impl<K: Ord, V> BTreeMap<K, V> {
     /// assert_eq!(map[&37], "c");
     /// ```
 
+    /// This convenience form uses [`AllocContext::Sleepable`] for a new-key
+    /// insertion. Use [`Self::try_insert_in`] when the caller carries an
+    /// explicit allocation-context contract.
     pub fn try_insert(&mut self, key: K, value: V) -> Result<Option<V>, AllocError> {
-        match self.try_entry(key)? {
+        self.try_insert_in(key, value, AllocContext::Sleepable)
+    }
+
+    /// Inserts a key-value pair using an explicit allocation context.
+    ///
+    /// Replacing an existing value does not allocate and is valid in every
+    /// [`AllocContext`]. Inserting a new key may need to allocate an owned
+    /// root or reserve nodes for a split cascade, so phase 1 requires
+    /// [`AllocContext::Sleepable`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError::NoMemory`] before changing the map when required
+    /// node reservation fails. Returns [`AllocError::UnsupportedContext`] for
+    /// a new-key insertion that may allocate in an unsupported context.
+    pub fn try_insert_in(
+        &mut self,
+        key: K,
+        value: V,
+        context: AllocContext,
+    ) -> Result<Option<V>, AllocError> {
+        if let Some(existing) = self.get_mut(&key) {
+            return Ok(Some(mem::replace(existing, value)));
+        }
+
+        match self.try_entry_in(key, context)? {
             Occupied(mut entry) => Ok(Some(entry.insert(value))),
             Vacant(entry) => {
                 entry.try_insert(value)?;
@@ -841,8 +867,33 @@ impl<K: Ord, V> BTreeMap<K, V> {
     /// assert_eq!(count["a"], 3);
     /// ```
 
+    /// This convenience form uses [`AllocContext::Sleepable`] for a possibly
+    /// allocating entry operation. Use [`Self::try_entry_in`] when the caller
+    /// carries an explicit allocation-context contract.
     pub fn try_entry(&mut self, key: K) -> Result<Entry<'_, K, V>, AllocError> {
-        // FIXME(@porglezomp) Avoid allocating if we don't insert
+        self.try_entry_in(key, AllocContext::Sleepable)
+    }
+
+    /// Looks up `key` and returns an entry using an explicit allocation
+    /// context.
+    ///
+    /// This is conservatively treated as a potentially allocating operation:
+    /// a caller can turn a returned vacant entry into an insertion, and that
+    /// insertion may need to materialize an empty root or reserve split
+    /// nodes. Use [`Self::try_insert_in`] when an existing-key replacement in
+    /// an atomic context is required.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError::UnsupportedContext`] unless `context` is
+    /// [`AllocContext::Sleepable`] in phase 1, or [`AllocError::NoMemory`] if
+    /// an owned root cannot be materialized.
+    pub fn try_entry_in(
+        &mut self,
+        key: K,
+        context: AllocContext,
+    ) -> Result<Entry<'_, K, V>, AllocError> {
+        require_supported_context(context)?;
         self.ensure_root_is_owned()?;
         Ok(match search::search_tree(self.root.as_mut(), &key) {
             Found(handle) => Occupied(OccupiedEntry {
@@ -889,13 +940,40 @@ impl<K: Ord, V> BTreeMap<K, V> {
     /// assert_eq!(b[&41], "e");
     /// ```
 
+    /// This convenience form uses [`AllocContext::Sleepable`] for a nonempty
+    /// split. Use [`Self::try_split_off_in`] when the caller carries an
+    /// explicit allocation-context contract.
     pub fn split_off<Q: ?Sized + Ord>(&mut self, key: &Q) -> Result<Self, AllocError>
+    where
+        K: Borrow<Q>,
+    {
+        self.try_split_off_in(key, AllocContext::Sleepable)
+    }
+
+    /// Splits the collection using an explicit allocation context.
+    ///
+    /// Splitting an empty map is allocation-free and valid in every context.
+    /// A nonempty split pre-allocates a matching root hierarchy for the right
+    /// map, so phase 1 requires [`AllocContext::Sleepable`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError::NoMemory`] if the right-hand root hierarchy
+    /// cannot be allocated, or [`AllocError::UnsupportedContext`] when a
+    /// nonempty split is requested from an unsupported context.
+    pub fn try_split_off_in<Q: ?Sized + Ord>(
+        &mut self,
+        key: &Q,
+        context: AllocContext,
+    ) -> Result<Self, AllocError>
     where
         K: Borrow<Q>,
     {
         if self.is_empty() {
             return Ok(Self::new());
         }
+
+        require_supported_context(context)?;
 
         let total_num = self.len();
 
@@ -2459,7 +2537,66 @@ mod tests {
     use unittest::def_test;
 
     use super::BTreeMap;
-    use crate::{AllocError, fault_injection::fail_allocations_after, kbtree::node};
+    use crate::{
+        AllocContext, AllocError,
+        fault_injection::{fail_allocations_after, fail_next_allocation},
+        kbtree::node,
+    };
+
+    #[def_test(serial)]
+    fn existing_value_replacement_needs_no_allocation() {
+        let mut map = BTreeMap::new();
+        map.try_insert(7_u32, 11_u32).unwrap();
+
+        let _guard = fail_next_allocation();
+        assert_eq!(
+            map.try_insert_in(7, 13, AllocContext::Atomic).unwrap(),
+            Some(11)
+        );
+        assert_eq!(map.get(&7), Some(&13));
+    }
+
+    #[def_test]
+    fn new_value_rejects_unsupported_context() {
+        let mut map = BTreeMap::new();
+        let err = map
+            .try_insert_in(7_u32, 11_u32, AllocContext::Atomic)
+            .unwrap_err();
+
+        assert_eq!(err, AllocError::UnsupportedContext);
+        assert!(map.is_empty());
+    }
+
+    #[def_test]
+    fn entry_api_is_conservative_in_unsupported_context() {
+        let mut map = BTreeMap::new();
+        map.try_insert(7_u32, 11_u32).unwrap();
+
+        let err = map.try_entry_in(7, AllocContext::Atomic).unwrap_err();
+
+        assert_eq!(err, AllocError::UnsupportedContext);
+        assert_eq!(map.get(&7), Some(&11));
+    }
+
+    #[def_test]
+    fn empty_split_is_valid_in_atomic_context() {
+        let mut map = BTreeMap::<u32, u32>::new();
+        let right = map.try_split_off_in(&7, AllocContext::Atomic).unwrap();
+
+        assert!(map.is_empty());
+        assert!(right.is_empty());
+    }
+
+    #[def_test]
+    fn nonempty_split_rejects_unsupported_context_without_mutation() {
+        let mut map = BTreeMap::new();
+        map.try_insert(7_u32, 11_u32).unwrap();
+
+        let err = map.try_split_off_in(&7, AllocContext::Atomic).unwrap_err();
+
+        assert_eq!(err, AllocError::UnsupportedContext);
+        assert_eq!(map.get(&7), Some(&11));
+    }
 
     #[def_test(serial)]
     fn try_insert_leaf_split_failure_keeps_map_unchanged() {

@@ -20,7 +20,9 @@ use super::{
     Recover,
     map::{self, BTreeMap, Keys},
 };
-use crate::{AllocError, TryExtend, TryFromIterator};
+use crate::{
+    AllocContext, AllocError, TryExtend, TryFromIterator, context::require_supported_context,
+};
 
 // FIXME(conventions): implement bounded iterators
 
@@ -655,7 +657,23 @@ impl<T: Ord> BTreeSet<T> {
 
     #[inline]
     pub fn try_insert(&mut self, value: T) -> Result<bool, AllocError> {
-        Ok(self.map.try_insert(value, ())?.is_none())
+        self.try_insert_in(value, AllocContext::Sleepable)
+    }
+
+    /// Adds a value to the set using an explicit allocation context.
+    ///
+    /// A duplicate value leaves the set unchanged without allocating and is
+    /// valid in every [`AllocContext`]. A new value may allocate B-tree nodes,
+    /// so phase 1 requires [`AllocContext::Sleepable`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError::NoMemory`] before changing the set when required
+    /// node reservation fails. Returns [`AllocError::UnsupportedContext`] for
+    /// a new value requested from an unsupported context.
+    #[inline]
+    pub fn try_insert_in(&mut self, value: T, context: AllocContext) -> Result<bool, AllocError> {
+        Ok(self.map.try_insert_in(value, (), context)?.is_none())
     }
 
     /// Adds a value to the set, replacing the existing value, if any, that is equal to the given
@@ -676,6 +694,18 @@ impl<T: Ord> BTreeSet<T> {
 
     #[inline]
     pub fn replace(&mut self, value: T) -> Result<Option<T>, AllocError> {
+        self.replace_in(value, AllocContext::Sleepable)
+    }
+
+    /// Replaces a value using an explicit allocation context.
+    ///
+    /// Replacing a present value is allocation-free. Adding an absent value
+    /// may materialize a B-tree root or reserve split nodes, so phase 1
+    /// requires [`AllocContext::Sleepable`].
+    pub fn replace_in(&mut self, value: T, context: AllocContext) -> Result<Option<T>, AllocError> {
+        if !self.contains(&value) {
+            require_supported_context(context)?;
+        }
         Recover::replace(&mut self.map, value)
     }
 
@@ -767,8 +797,24 @@ impl<T: Ord> BTreeSet<T> {
     where
         T: Borrow<Q>,
     {
+        self.try_split_off_in(key, AllocContext::Sleepable)
+    }
+
+    /// Splits the set using an explicit allocation context.
+    ///
+    /// Splitting an empty set is allocation-free and valid in every context.
+    /// A nonempty split allocates the right-hand B-tree hierarchy, so phase 1
+    /// requires [`AllocContext::Sleepable`].
+    pub fn try_split_off_in<Q: ?Sized + Ord>(
+        &mut self,
+        key: &Q,
+        context: AllocContext,
+    ) -> Result<Self, AllocError>
+    where
+        T: Borrow<Q>,
+    {
         Ok(BTreeSet {
-            map: self.map.split_off(key)?,
+            map: self.map.try_split_off_in(key, context)?,
         })
     }
 }
@@ -1265,3 +1311,60 @@ impl<'a, T: Ord> Iterator for Union<'a, T> {
 }
 
 impl<T: Ord> FusedIterator for Union<'_, T> {}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::def_test;
+
+    use super::BTreeSet;
+    use crate::{AllocContext, AllocError, fault_injection::fail_next_allocation};
+
+    #[def_test(serial)]
+    fn duplicate_insert_needs_no_allocation() {
+        let mut set = BTreeSet::new();
+        assert!(set.try_insert(7_u32).unwrap());
+
+        let _guard = fail_next_allocation();
+        assert!(!set.try_insert_in(7, AllocContext::Atomic).unwrap());
+        assert!(set.contains(&7));
+    }
+
+    #[def_test]
+    fn new_value_rejects_unsupported_context() {
+        let mut set = BTreeSet::new();
+        let err = set.try_insert_in(7_u32, AllocContext::Atomic).unwrap_err();
+
+        assert_eq!(err, AllocError::UnsupportedContext);
+        assert!(set.is_empty());
+    }
+
+    #[def_test(serial)]
+    fn present_value_replace_needs_no_allocation() {
+        let mut set = BTreeSet::new();
+        assert!(set.try_insert(7_u32).unwrap());
+
+        let _guard = fail_next_allocation();
+        assert_eq!(set.replace_in(7, AllocContext::Atomic).unwrap(), Some(7));
+        assert!(set.contains(&7));
+    }
+
+    #[def_test]
+    fn empty_split_is_valid_in_atomic_context() {
+        let mut set = BTreeSet::<u32>::new();
+        let right = set.try_split_off_in(&7, AllocContext::Atomic).unwrap();
+
+        assert!(set.is_empty());
+        assert!(right.is_empty());
+    }
+
+    #[def_test]
+    fn nonempty_split_rejects_unsupported_context_without_mutation() {
+        let mut set = BTreeSet::new();
+        assert!(set.try_insert(7_u32).unwrap());
+
+        let err = set.try_split_off_in(&7, AllocContext::Atomic).unwrap_err();
+
+        assert_eq!(err, AllocError::UnsupportedContext);
+        assert!(set.contains(&7));
+    }
+}

@@ -167,6 +167,41 @@
   ENOMEM。
 - 后续真正的 fallible 构造/扩容 API 必须保持“失败时不暴露半初始化状态”。
 
+## MM 故障注入边界
+
+本阶段的 MM 迁移以“先完成所有 fallible metadata，再发布 VMA/page-table 状态”为
+提交规则：
+
+- `SharedPages` 先预留 `KVec<PhysAddr>`，之后才领取 frame；`KArc<SharedPages>`
+  owner 失败时通过 drop 回收已领取的 frame。
+- anonymous mapped-view registry 先创建 `KArc` guard、再执行 `KHashMap` /
+  `KBTreeMap` publication；任一步失败都返回 `KError::NoMemory`，注册 guard 在
+  map insertion 失败时于锁释放后 drop，因此不会遗留 view。
+- `MmSpace::install_runtime_mapping()` 在映射 PTE 前完成 anonymous object-view
+  registration；该 registry 的 custom-container OOM 不会留下“已有 PTE 但无 rmap”的
+  半提交状态。
+- `FileMappingInfo.path` 在 filemap boundary 用 `KString` 和 `KArc` 复制；string
+  buffer 或 owner allocation 失败都返回 `KError::NoMemory`，之后的 VMA/procfs clone
+  不会再次分配 pathname。
+
+`fault_injection` 只在 `cfg(unittest)` 下提供。串行测试会分别注入每一个 custom
+allocation stage，并验证 `AllocError::NoMemory -> KError::NoMemory`、旧容器内容或
+未发布 registry 保持不变；组合式 MM mapping-plan test 同时覆盖全部自定义类型。
+
+这不是完整内核 OOM containment 声明。以下仍是显式的 legacy boundary：
+
+- `vmobj::MappingViewNotifier` 的 trait-object ownership 仍是
+  `Arc<dyn MappingViewNotifier>`；当前 sized-only `KArc` 不能安全替代它，相关 notifier
+  的 `Arc::new` 仍可能在真正 allocator OOM 时 panic。
+- `Anon*Object` 本体、file runtime、`VmAreaSet`、pagecache 和 invalidate queue 内的
+  其它标准 `Arc` / `Vec` / B-tree 容器尚未迁移。
+- `InvalidateSink` 持有 `SpinNoIrq`，所以不能直接在其中使用可能 sleep 的
+  `KVecDeque` growth；必须先设计预留/NoWait queue 和明确的 queue-exhaustion error
+  propagation。
+
+任何新代码都不得因为本矩阵中的一个 fallible slice 而宣称相邻 legacy allocation
+同样受保护；review 应沿调用链逐项检查。
+
 ## 隐私分析
 
 本 crate 当前不处理用户数据、文件内容、网络载荷或设备隐私数据。
