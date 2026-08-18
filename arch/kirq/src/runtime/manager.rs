@@ -2102,6 +2102,9 @@ pub mod tests_irq {
 
     #[def_test]
     fn test_synchronize_irq_rejects_hardirq_context() {
+        // `HardIrqContextGuard` is only valid while trap entry has pinned the
+        // current CPU and masked local IRQs. Model both conditions here.
+        let _irq_guard = kspin::NoPreemptIrqSave::new();
         let _hardirq = crate::context::HardIrqContextGuard::enter();
 
         let err = try_synchronize_irq(0x3117).expect_err("context misuse must be an error");
@@ -2115,6 +2118,9 @@ pub mod tests_irq {
 
     #[def_test(serial)]
     fn test_free_irq_action_rejects_hardirq_context() {
+        // Keep the modeled hardirq state on the CPU whose per-CPU counters it
+        // updates until the guard is dropped.
+        let _irq_guard = kspin::NoPreemptIrqSave::new();
         let _hardirq = crate::context::HardIrqContextGuard::enter();
 
         let err = match try_free_irq_action(0x3118, crate::IrqActionToken::new(1)) {

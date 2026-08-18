@@ -256,7 +256,10 @@ mod tests {
         pool.freeze_wakes_for_tests();
         WORK_RUNS.store(0, Ordering::Relaxed);
 
+        // The guard represents trap context; do not let the test migrate
+        // while its per-CPU hardirq depth is active.
         let result = {
+            let _irq_guard = kspin::NoPreemptIrqSave::new();
             let _hardirq = HardIrqContextGuard::enter();
             let result = queue.queue_work(&work);
             assert_irq_safe_queue_result(result);
@@ -276,6 +279,9 @@ mod tests {
     fn test_waiting_work_apis_reject_hardirq_context() {
         let work = ScheduledWork::new(count_work);
 
+        // Keep the modeled hardirq state tied to one CPU until the guard is
+        // dropped, as real trap entry does.
+        let _irq_guard = kspin::NoPreemptIrqSave::new();
         let _hardirq = HardIrqContextGuard::enter();
         assert_eq!(work.flush(), Err(WorkqueueError::InvalidContext));
         assert_eq!(work.cancel_sync(), Err(WorkqueueError::InvalidContext));

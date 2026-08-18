@@ -801,6 +801,9 @@ pub mod tests_softirq {
         HIGH_ORDER.store(0, Ordering::Relaxed);
         let _high = ScopedSoftirqAction::install(SoftirqVec::High, high_action);
 
+        // `HardIrqContextGuard` models a trap-entry guard and therefore
+        // requires the test to keep the current CPU pinned for its lifetime.
+        let _irq_guard = kspin::NoPreemptIrqSave::new();
         {
             let _hardirq = HardIrqContextGuard::enter();
             let bh_guard = local_bh_disable();
