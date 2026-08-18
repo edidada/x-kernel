@@ -78,8 +78,8 @@ table。可选 tracking 用独立 `SpinNoIrq` state 与 per-CPU recursion guard�
 
 slab 每个 `SizeClass` 有独立 `SpinNoIrq<KmemCache>`。页申请、span 初始化和 detached
 page 归还不在 class lock 内；task/softirq magazine 只在 current-CPU pin 下访问，normal
-hardirq 只访问对应 reserve。全 CPU flush 的 IPI handler 只推进原子状态，发起 task 在
-冻结确认后处理对象 batch。
+hardirq 先访问对应 reserve，耗尽时最多从 central free list 取一个对象。全 CPU flush 的
+IPI handler 只推进原子状态，发起 task 在冻结确认后处理对象 batch。
 
 ## 威胁分析
 
@@ -103,7 +103,7 @@ hardirq 只访问对应 reserve。全 CPU flush 的 IPI handler 只推进原子�
 | F-01 | 页 buddy 无可用范围 | region 耗尽或碎片化 | page allocation 返回 `NoMemory` | 请求方处理失败或 global allocation 终止 | 返回 `AllocError::NoMemory`；slab 可先 reclaim 空 span |
 | F-02 | Buddy/TLSF heap 无空间 | byte heap 耗尽 | 小 layout allocation 失败 | byte allocation 无法继续 | 从页 buddy 扩展 heap 后重试；若页不足则返回错误 |
 | F-03 | slab central cache 无对象 | 所有 span 为 Full 或尚未 refill | class allocation miss | 请求 backing pages | class lock 外 prepare/publish 新 span；页不足时尝试 empty-span reclaim |
-| F-04 | hardirq reserve 耗尽 | hardirq burst 超过 class reserve | hardirq allocation 返回 `NoMemory` | 调用方执行既有失败路径 | 不在 hardirq 执行 page work 或 task magazine 操作 |
+| F-04 | hardirq reserve 耗尽 | hardirq burst 超过 class reserve | 先尝试 central 已有 free object；两者都空时返回 `NoMemory` | 调用方执行既有失败路径 | 不在 hardirq 执行 page work 或 task magazine 操作 |
 | F-05 | shrink 无法归还页 | object 仍 live，或 span 不是 `Empty` | span 保留 | 内存压力持续 | 只回收可证明为空的 span，避免 use-after-free |
 | F-06 | target CPU 长时间未 frozen | target IRQ 延迟或尚未结束 local magazine borrow | slab reclaim 停顿 | OOM reclaim 无法推进 | 等待 matching generation acknowledgement；不在未 frozen 状态 remote drain |
 | F-07 | tracking state 不可用或被禁用 | feature/运行时开关关闭 | 无 allocation records | 仅诊断能力缺失 | allocation 本身继续按正常路径执行 |
@@ -133,7 +133,8 @@ metadata；这些可包含内核地址信息。crate 不自行向用户空间或
 - slab flush 只覆盖启动时已建立的 present CPU；没有 CPU offline/online、NUMA、
   remote-free 或 memory cgroup lifecycle。
 - PCP 不参与 slab shrink，也没有全系统 memory-pressure flush protocol。
-- slab NMI allocation/deallocation 不受支持；hardirq reserve 耗尽时返回 `NoMemory`。
+- slab NMI allocation/deallocation 不受支持；hardirq reserve 与对应 central free list
+  都耗尽时返回 `NoMemory`。
 - 不提供 production double-free、错误 `Layout` 或跨 allocator free 检测。
 - usage accounting 是 best-effort snapshot；它不等价于页、span 或对象的线性化所有权。
 - C shims 仅在相应 feature 下构建，且不把 C caller 的 pointer/length contract 转化为
@@ -148,7 +149,8 @@ metadata；这些可包含内核地址信息。crate 不自行向用户空间或
 - Buddy/TLSF heap 扩展是否仍由页 buddy 提供有效 region，且没有泄漏其 ownership？
 - slab layout 是否只由 `SizeClass::from_layout()` 选择，span 是否只在 `Empty` 时 detach？
 - class lock 是否不包围页 allocation、span 初始化或 detached page 归还？
-- hardirq 是否只使用 reserve，NMI contract 是否在所有调用点保持明确？
+- hardirq 是否只使用 reserve 或 central 单对象兜底，且没有 page work、task magazine
+  操作？NMI contract 是否在所有调用点保持明确？
 - remote magazine access 是否只发生在 matching frozen generation 后，且 session end 前
   已完成 drain？
 - 新的 CPU lifecycle、NUMA 或 pressure mechanism 是否拥有独立 owner，而非把

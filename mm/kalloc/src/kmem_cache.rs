@@ -291,6 +291,17 @@ impl KmemCacheSet {
         object
     }
 
+    /// Allocate one object for hardirq execution.
+    ///
+    /// The independent reserve is always preferred. If it is empty, consume
+    /// one object already present on the matching central free list. This
+    /// bounded fallback never prepares a slab, allocates pages, or touches a
+    /// task magazine.
+    pub(crate) fn try_allocate_irq_or_central(&self, size_class: SizeClass) -> Option<NonNull<u8>> {
+        self.try_allocate_irq(size_class)
+            .or_else(|| self.try_allocate(size_class))
+    }
+
     /// Return an object from hardirq execution to the independent reserve.
     ///
     /// If the reserve is already full, the object returns to the matching
@@ -906,8 +917,16 @@ mod tests {
         assert!(!caches.irq_reserve_needs_refill(SizeClass::Bytes2048));
         let object = caches.try_allocate_irq(SizeClass::Bytes2048).unwrap();
         assert!(caches.irq_reserve_needs_refill(SizeClass::Bytes2048));
+        let central_object = caches
+            .try_allocate_irq_or_central(SizeClass::Bytes2048)
+            .unwrap();
         // SAFETY: `object` was allocated above from the matching class.
         unsafe { caches.deallocate_irq(SizeClass::Bytes2048, object) };
+        // SAFETY: `central_object` was allocated above from the matching
+        // class through the hardirq reserve/central fallback. The hardirq
+        // free path accepts either source and returns it to the reserve or
+        // central cache as appropriate.
+        unsafe { caches.deallocate_irq(SizeClass::Bytes2048, central_object) };
         assert!(!caches.irq_reserve_needs_refill(SizeClass::Bytes2048));
 
         let task_object = caches.try_allocate(SizeClass::Bytes2048).unwrap();

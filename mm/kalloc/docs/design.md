@@ -145,9 +145,10 @@ central state 之外拥有两类 execution-context-local storage：
 
 normal task/softirq 先访问 magazine。local magazine 无对象时，调用者在 IRQ 开启的
 上下文中从 central class 逐对象取得 refill batch；central 也无对象时，在 class lock
-外从页 buddy 获取 class 对齐 span、prepare 后再短暂 publish。normal hardirq 从 reserve
-取得对象；reserve 为空时返回 `NoMemory`，不会执行页 allocation、span 初始化或 batch
-操作。NMI allocation/deallocation 不受支持。
+外从页 buddy 获取 class 对齐 span、prepare 后再短暂 publish。normal hardirq 优先从
+reserve 取得对象；reserve 为空时最多从 central class 取一个已有 free object 作为
+有界兜底，不执行页 allocation、span 初始化或 task magazine 操作。reserve 和 central
+都没有对象时才返回 `NoMemory`。NMI allocation/deallocation 不受支持。
 
 释放使用相同 `SizeClass`：hardirq 回到 reserve；normal task/softirq 优先补充需要的
 reserve，否则放入当前 CPU magazine。两本 magazine 都无法容纳对象时，摘出的 batch 在
@@ -158,7 +159,7 @@ IRQ 开启状态逐对象返回 central class。对象从 magazine 或 reserve �
 SizeClass -> KmemCache
              ├─ central SlabCache: Empty / Partial / Full spans
              ├─ task/softirq: per-CPU active + spare magazines
-             └─ hardirq: bounded reserve
+             └─ hardirq: bounded reserve -> central one-object fallback
 ```
 
 ## Slab reclaim 与系统边界
@@ -207,7 +208,7 @@ backtrace 和 generation，供内核诊断使用。启用 `dice` 或 `tee` 时�
   的诊断快照并发变化。可选 tracking 使用独立 state 与 per-CPU recursion guard。
 - slab central metadata 每个 `SizeClass` 一把 `SpinNoIrq<KmemCache>`；页 allocation、
   span 初始化和 detached page 归还不在该 class lock 内。task magazine 只在 current-CPU
-  pin 下访问；hardirq 不触碰 magazine，只访问 reserve。
+  pin 下访问；hardirq 不触碰 magazine，先访问 reserve，必要时从 central 取一个对象。
 - slab `shrink()` 和 OOM reclaim 可能等待其它 CPU 完成短暂的 local magazine access，
   因此不得从 hardirq 或 NMI 调用。被冻结 CPU 的 task/softirq allocation/free 直接走
   central class，不等待 reclaim session。
@@ -220,8 +221,9 @@ backtrace 和 generation，供内核诊断使用。启用 `dice` 或 `tee` 时�
    的 slab object，二者具有不同的执行上下文和回收语义。
 3. **Slab policy 由 KmemCacheSet 持有。** `SizeClass`、span lifecycle、magazine 和
    hardirq reserve 不泄漏给 Buddy 或 TLSF。
-4. **硬中断不执行 page work。** hardirq reserve 有明确的耗尽语义，避免将 task magazine
-   或 span refill 当作中断路径。
+4. **硬中断不执行 page work。** hardirq 先使用独立 reserve；reserve 耗尽时只允许从
+   central class 取一个已有对象作为有界兜底，绝不把 task magazine 或 span refill 带入
+   中断路径。
 5. **仅回收可证明为空的 span。** `Empty` 是 backing page 可归还的唯一 slab 状态；
    所有 CPU magazine 与 reserve 必须先回到 central state。
 6. **系统 lifecycle 不由 allocator 臆造。** CPU hotplug、NUMA 和系统级 reclaim 必须

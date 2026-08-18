@@ -468,9 +468,10 @@ impl GlobalAllocator {
     /// Slab builds route layouts represented by [`SizeClass`] to class-owned
     /// caches; other layouts are allocated directly from pages. Normal task
     /// and softirq paths use the current CPU magazine, while normal hardirq
-    /// paths use a finite class reserve and return [`AllocError::NoMemory`] if
-    /// it is empty. NMI allocation is unsupported. Other builds retain the
-    /// byte-allocator expansion path.
+    /// paths use a finite class reserve, with a one-object central-cache
+    /// fallback when that reserve is empty; [`AllocError::NoMemory`] is
+    /// returned only when both sources are empty. NMI allocation is
+    /// unsupported. Other builds retain the byte-allocator expansion path.
     pub fn alloc(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
         #[cfg(feature = "slab")]
         {
@@ -503,7 +504,7 @@ impl GlobalAllocator {
         if kirq::context::is_in_hardirq_fast() {
             return self
                 .slab_caches
-                .try_allocate_irq(size_class)
+                .try_allocate_irq_or_central(size_class)
                 .ok_or(AllocError::NoMemory);
         }
 
