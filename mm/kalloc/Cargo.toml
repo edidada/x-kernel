@@ -10,8 +10,8 @@ tee = []
 dice = []
 default = []
 tlsf = ["alloc-engine/tlsf"]
-slab = ["alloc-engine/slab"]
-ipi = []
+slab = ["alloc-engine/slab", "dep:kirq"]
+ipi = ["dep:kiface"]
 buddy = ["alloc-engine/buddy"]
 tracking = ["dep:backtrace"]
 
@@ -22,8 +22,8 @@ cfg-if.workspace = true
 kaddr_layout.workspace = true
 kbuild_config.workspace = true
 kerrno.workspace = true
-kirq.workspace = true
-kiface.workspace = true
+kirq = { workspace = true, optional = true }
+kiface = { workspace = true, optional = true }
 kspin.workspace = true
 log.workspace = true
 memaddr.workspace = true
