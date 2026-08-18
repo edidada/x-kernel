@@ -138,10 +138,12 @@ layout 使用与 allocation 对应的 byte 或 page 路径。
 
 每个 `SizeClass` 对应一个 central `SlabCache`，其 span header、对象 freelist 和
 `Empty` / `Partial` / `Full` 状态由 `alloc-engine` 保持。`KmemCacheSet` 在这个
-central state 之外拥有两类 execution-context-local storage：
+central state 之外拥有两类 execution-context-specific storage：
 
 - task/softirq：当前 CPU 的 active + spare 双 magazine；
-- normal hardirq：每个 class 的有界 reserve。
+- normal hardirq：每个 class 的有界 shared reserve。reserve 的基础预算按 class
+  设定，再乘以编译期 `NR_CPUS`，覆盖每个配置 CPU 各有一个基础 burst 的情况；它仍由
+  class lock 保护，不是 task magazine。
 
 normal task/softirq 先访问 magazine。local magazine 无对象时，调用者在 IRQ 开启的
 上下文中从 central class 逐对象取得 refill batch；central 也无对象时，在 class lock
@@ -159,7 +161,7 @@ IRQ 开启状态逐对象返回 central class。对象从 magazine 或 reserve �
 SizeClass -> KmemCache
              ├─ central SlabCache: Empty / Partial / Full spans
              ├─ task/softirq: per-CPU active + spare magazines
-             └─ hardirq: bounded reserve -> central one-object fallback
+             └─ hardirq: shared NR_CPUS-scaled reserve -> central one-object fallback
 ```
 
 ## Slab reclaim 与系统边界

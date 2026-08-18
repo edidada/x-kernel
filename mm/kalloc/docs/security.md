@@ -43,7 +43,7 @@ alignment、虚拟地址和初始化 region。
 | `GlobalPage::{from_raw,fill,as_slice,as_slice_mut}` | `GlobalPage` 是唯一 owner，页范围仍有效 | unsafe constructor 的 ownership contract；其余方法由 `self` / `&mut self` 约束 |
 | non-slab byte allocator deallocation | object 属于对应 Buddy/TLSF heap，`Layout` 与 allocation 匹配 | `GlobalAllocator` 以同一 layout 选择 route；下层 `ByteAllocator` contract |
 | slab span prepare/publish 与 central deallocation | backing span 几何、class、对象来源和 live 生命周期正确 | `SizeClass` 路由、`PreparedSlab` token、class lock 与 `SlabCache` unsafe contract |
-| task magazine / hardirq reserve transfer | object/batch 只在匹配 class 的 central/local storage 间移动 | task magazine current-CPU pin；hardirq 独立 reserve；NMI 不支持 |
+| task magazine / hardirq reserve transfer | object/batch 只在匹配 class 的 central/local storage 间移动 | task magazine current-CPU pin；hardirq 使用按 `NR_CPUS` 放大的 class reserve；NMI 不支持 |
 | frozen magazine remote drain | target 对同一 generation 已发布 frozen，session 尚未 end | pending-active 只能由目标 task 完成；IPI 只完成 pending-idle；raw access 的 `SAFETY:` 约束 |
 | `ffi.rs` C shims（启用时） | C pointer、长度、allocation provenance 和 overlap 满足 ABI contract | null/长度检查与 metadata header；其余范围/所有权由 C caller 保证 |
 
@@ -59,7 +59,8 @@ alignment、虚拟地址和初始化 region。
    owner。
 5. slab span 只属于一个 `SizeClass` 的 central `SlabCache`。`Partial` / `Full` span
    含 live object，只有 `Empty` span 可 detach 并归还 backing pages。
-6. task magazine 与 hardirq reserve 中的 object 仍属于对应 central class。remote drain
+6. task magazine 与 hardirq reserve 中的 object 仍属于对应 central class。hardirq reserve
+   是按 class 保护、按 `NR_CPUS` 基础 burst 预算放大的 shared pool。remote drain
    只能在同一 generation 的 frozen acknowledgement 后访问 task magazine。
 7. usage accounting 是诊断性 bytes snapshot，不表示实际 object/page ownership，也不
    能作为 free、reclaim 或 allocator correctness 的依据。
@@ -103,7 +104,7 @@ IPI handler 只推进原子状态，发起 task 在冻结确认后处理对象 b
 | F-01 | 页 buddy 无可用范围 | region 耗尽或碎片化 | page allocation 返回 `NoMemory` | 请求方处理失败或 global allocation 终止 | 返回 `AllocError::NoMemory`；slab 可先 reclaim 空 span |
 | F-02 | Buddy/TLSF heap 无空间 | byte heap 耗尽 | 小 layout allocation 失败 | byte allocation 无法继续 | 从页 buddy 扩展 heap 后重试；若页不足则返回错误 |
 | F-03 | slab central cache 无对象 | 所有 span 为 Full 或尚未 refill | class allocation miss | 请求 backing pages | class lock 外 prepare/publish 新 span；页不足时尝试 empty-span reclaim |
-| F-04 | hardirq reserve 耗尽 | hardirq burst 超过 class reserve | 先尝试 central 已有 free object；两者都空时返回 `NoMemory` | 调用方执行既有失败路径 | 不在 hardirq 执行 page work 或 task magazine 操作 |
+| F-04 | hardirq reserve 耗尽 | hardirq burst 超过按 `NR_CPUS` 放大的 class reserve | 先尝试 central 已有 free object；两者都空时返回 `NoMemory` | 调用方执行既有失败路径 | reserve 覆盖每个配置 CPU 一个基础 burst；仍不在 hardirq 执行 page work 或 task magazine 操作 |
 | F-05 | shrink 无法归还页 | object 仍 live，或 span 不是 `Empty` | span 保留 | 内存压力持续 | 只回收可证明为空的 span，避免 use-after-free |
 | F-06 | target CPU 长时间未 frozen | target IRQ 延迟或尚未结束 local magazine borrow | slab reclaim 停顿 | OOM reclaim 无法推进 | 等待 matching generation acknowledgement；不在未 frozen 状态 remote drain |
 | F-07 | tracking state 不可用或被禁用 | feature/运行时开关关闭 | 无 allocation records | 仅诊断能力缺失 | allocation 本身继续按正常路径执行 |

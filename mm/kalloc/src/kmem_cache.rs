@@ -84,23 +84,67 @@ const fn magazine_state_with_sequence(tag: u64, sequence: u64) -> u64 {
 /// Per-class central state protected by the class's IRQ-safe lock.
 struct KmemCache {
     slab: SlabCache<PAGE_SIZE_4K>,
-    irq_reserve: ObjectBatch,
+    irq_reserve: IrqReserve,
 }
 
 impl KmemCache {
     const fn new(size_class: SizeClass) -> Self {
         Self {
             slab: SlabCache::new(size_class),
-            irq_reserve: ObjectBatch::new(),
+            irq_reserve: IrqReserve::new(),
         }
+    }
+}
+
+/// A class-owned pool reserved for hardirq allocations.
+///
+/// The reserve is shared by all CPUs for one class and protected by the
+/// class lock. Its storage is larger than a task transfer batch because the
+/// capacity is budgeted for one bounded burst per compile-time CPU.
+struct IrqReserve {
+    objects: [usize; MAX_IRQ_RESERVE_CAPACITY],
+    len: usize,
+}
+
+impl IrqReserve {
+    const fn new() -> Self {
+        Self {
+            objects: [0; MAX_IRQ_RESERVE_CAPACITY],
+            len: 0,
+        }
+    }
+
+    const fn len(&self) -> usize {
+        self.len
+    }
+
+    fn push(&mut self, object: NonNull<u8>) {
+        assert!(
+            self.len < MAX_IRQ_RESERVE_CAPACITY,
+            "hardirq reserve capacity exceeded"
+        );
+        self.objects[self.len] = object.as_ptr() as usize;
+        self.len += 1;
+    }
+
+    fn pop(&mut self) -> Option<NonNull<u8>> {
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        let object = self.objects[self.len] as *mut u8;
+        // SAFETY: objects enter the reserve only through `push`, whose
+        // `NonNull` input proves this stored address is non-null.
+        Some(unsafe { NonNull::new_unchecked(object) })
     }
 }
 
 /// Central kernel caches, one for each slab size class.
 ///
 /// The locks protect only class metadata transitions, one-object freelist
-/// operations, and the small hardirq reserve. Callers must prepare backing
-/// spans and return detached pages outside these locks.
+/// operations, and the bounded hardirq reserve. Each class reserve is shared
+/// by the configured CPUs and sized for one base burst budget per CPU. Callers
+/// must prepare backing spans and return detached pages outside these locks.
 pub(crate) struct KmemCacheSet {
     caches: [SpinNoIrq<KmemCache>; SIZE_CLASS_COUNT],
     irq_reserve_needs_refill: [AtomicBool; SIZE_CLASS_COUNT],
@@ -848,8 +892,13 @@ impl Default for KmemCacheSet {
 }
 
 /// Number of objects retained for hardirq-only allocation in one class.
+///
+/// The base budget covers one short hardirq burst on one CPU. The reserve is
+/// shared by all CPUs, so scale it by the compile-time CPU bound to prevent a
+/// simultaneous burst on every configured CPU from exhausting the pool while
+/// the backing page allocator still has free memory.
 const fn irq_reserve_capacity(size_class: SizeClass) -> usize {
-    match size_class {
+    let per_cpu = match size_class {
         SizeClass::Bytes8 | SizeClass::Bytes16 => 8,
         SizeClass::Bytes32 => 6,
         SizeClass::Bytes64 => 4,
@@ -857,8 +906,15 @@ const fn irq_reserve_capacity(size_class: SizeClass) -> usize {
         SizeClass::Bytes256 => 2,
         SizeClass::Bytes512 => 2,
         SizeClass::Bytes1024 | SizeClass::Bytes2048 => 1,
-    }
+    };
+    per_cpu * NR_CPUS
 }
+
+/// Maximum reserve storage needed by any class.
+const MAX_IRQ_RESERVE_CAPACITY: usize = 8 * NR_CPUS;
+
+// Keep the storage bound coupled to the capacity table above.
+const _: () = assert!(irq_reserve_capacity(SizeClass::Bytes8) <= MAX_IRQ_RESERVE_CAPACITY);
 
 #[cfg(unittest)]
 #[allow(missing_docs)]
@@ -870,8 +926,9 @@ mod tests {
 
     use super::{
         KMEM_CACHE_FLUSH_SEQUENCE_MAX, KmemCacheSet, MAGAZINE_STATE_ACTIVE, MAGAZINE_STATE_FROZEN,
-        MAGAZINE_STATE_IDLE, SizeClass, complete_task_magazine_flush, finish_task_magazine_access,
-        magazine_state_with_sequence, request_task_magazine_flush, try_freeze_idle_task_magazines,
+        MAGAZINE_STATE_IDLE, MAX_IRQ_RESERVE_CAPACITY, SizeClass, complete_task_magazine_flush,
+        finish_task_magazine_access, irq_reserve_capacity, magazine_state_with_sequence,
+        request_task_magazine_flush, try_freeze_idle_task_magazines,
     };
 
     const PAGE_SIZE: usize = 4096;
@@ -886,6 +943,15 @@ mod tests {
         // aligned, and remains mapped until the test has detached its span.
         let slab = unsafe { KmemCacheSet::prepare_slab(SizeClass::Bytes2048, base) }.unwrap();
         caches.publish_slab(SizeClass::Bytes2048, slab).unwrap();
+    }
+
+    #[def_test]
+    fn test_irq_reserve_capacity_scales_with_cpu_bound() {
+        assert_eq!(
+            irq_reserve_capacity(SizeClass::Bytes512),
+            2 * kbuild_config::NR_CPUS
+        );
+        assert!(irq_reserve_capacity(SizeClass::Bytes8) <= MAX_IRQ_RESERVE_CAPACITY);
     }
 
     #[def_test]
