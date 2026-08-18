@@ -221,7 +221,7 @@
 | F-03 | 目标 CPU 长时间不 ack TLB request | 发起 CPU 自旋等待 | 页表修改路径停顿，可能表现为系统卡住 | 超时后记录 warning；等待中轮询 `handle_shootdown` 避免 IRQ-off 互等 |
 | F-04 | pending epoch 未同步更新 | 目标 CPU fast path 直接返回，不扫描 slots | 单测或协议调用错误时出现假阴性 / 卡住 | 正式路径由 `flush_remote()` 封装；单测通过 helper 同步更新 |
 | F-05 | callback panic | 当前回调失败 | 其它已排队回调仍继续处理 | `ipi_handler()` 继续消费队列，不让单个回调中断整个队列 |
-| F-06 | slab target 长时间不 frozen | target IRQ 长时间关闭或 task 未完成本地 borrow | shrink/OOM reclaim 停顿 | 自旋等待并在一秒后记录 target CPU/generation；不在未 frozen 状态下 remote drain |
+| F-06 | slab target 长时间不 frozen | target IRQ 长时间关闭或 task 未完成本地 borrow | shrink/OOM reclaim 停顿 | 全目标轮询并按 target 独立计时；每个 target 超过一秒分别记录 CPU/generation；不在未 frozen 状态下 remote drain |
 
 ## 故障管理
 
@@ -231,7 +231,8 @@
 - 同 CPU 嵌套 TLB 请求不直接 panic，而是设置 `needs_retry_full_flush` 并在当前请求结束后补发；
 - 对平台 IPI 顺序语义的要求被写入接口契约，避免隐式依赖散落在调用点。
 - slab flush session 已被占用时不会等待或进入通用 callback 队列，kalloc 改为安全的
-  central-only reclaim；target 未 frozen 时只等待并报警，不扩大 IPI handler 工作。
+  central-only reclaim；target 未 frozen 时通过全目标轮询独立等待并报警，不扩大 IPI
+  handler 工作。
 
 ## 隐私分析
 

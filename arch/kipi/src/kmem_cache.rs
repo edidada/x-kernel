@@ -19,7 +19,7 @@ use kcpu_id_map::for_each_present_logical_cpu;
 use khal::percpu::this_cpu_id;
 use kirq::TargetCpu;
 use kspin::NoPreempt;
-use ktime_types::TimeSpan;
+use ktime_types::{MonotonicInstant, TimeSpan};
 
 use crate::tlb;
 
@@ -85,17 +85,19 @@ impl KmemCacheFlushIf {
             "initiator task magazine access unexpectedly remained active"
         );
 
+        let mut target_wait_started_at = [khal::time::monotonic_time(); NR_CPUS];
         for_each_target_cpu(|cpu| {
             if cpu == current_cpu {
                 return;
             }
+            target_wait_started_at[cpu] = khal::time::monotonic_time();
             PENDING_SEQUENCE_BY_CPU[cpu].store(sequence, Ordering::Release);
             // `notify_cpu()` provides the publish-before-notify ordering
             // required for the target handler to observe this request.
             kirq::notify_cpu(IPI_IRQ, TargetCpu::Specific(cpu));
         });
 
-        wait_for_targets(sequence);
+        wait_for_targets(sequence, &target_wait_started_at);
         for_each_target_cpu(|cpu| {
             assert!(
                 kalloc::drain_frozen_task_magazines_on_cpu(cpu, sequence),
@@ -174,20 +176,33 @@ fn for_each_target_cpu(mut f: impl FnMut(usize)) {
     }
 }
 
-fn wait_for_targets(sequence: u64) {
-    let start = khal::time::monotonic_time();
-    let mut warned = false;
-    for_each_target_cpu(|cpu| {
-        while !kalloc::is_task_magazine_flush_complete(cpu, sequence) {
-            let elapsed = khal::time::monotonic_time().saturating_duration_since(start);
-            if !warned && elapsed >= FLUSH_WARN {
-                warned = true;
+fn wait_for_targets(sequence: u64, target_wait_started_at: &[MonotonicInstant; NR_CPUS]) {
+    let mut warned = [false; NR_CPUS];
+
+    // Sweep every target on each pass.  A target that never acknowledges must
+    // not prevent the remaining CPUs from reaching their own warning point.
+    loop {
+        let now = khal::time::monotonic_time();
+        let mut pending = false;
+        for_each_target_cpu(|cpu| {
+            if kalloc::is_task_magazine_flush_complete(cpu, sequence) {
+                return;
+            }
+            pending = true;
+
+            let elapsed = now.saturating_duration_since(target_wait_started_at[cpu]);
+            if !warned[cpu] && elapsed >= FLUSH_WARN {
+                warned[cpu] = true;
                 warn!(
                     "slab magazine flush wait: sequence={} stuck_on_target_cpu={}",
                     sequence, cpu
                 );
             }
-            core::hint::spin_loop();
+        });
+
+        if !pending {
+            return;
         }
-    });
+        core::hint::spin_loop();
+    }
 }

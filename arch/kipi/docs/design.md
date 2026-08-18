@@ -138,8 +138,10 @@ arch/kipi/
 - `kalloc` 在进入 provider 前 pin 发起 CPU。provider 以 static generation 和
   present-CPU snapshot stage 每个目标的 magazine state，再发送 IPI。
 - 目标 IPI handler 只能完成 idle-origin pending state；若 task 正持有 mutable
-  magazine borrow，则它在 borrow 释放后自行完成。发起 CPU 等到所有 target frozen
-  后，在普通 task 上下文 drain object batch，IPI handler 不拿 slab lock。
+  magazine borrow，则它在 borrow 释放后自行完成。发起 CPU 轮询所有 target 的
+  frozen acknowledgement，而不是等待一个 target 完成后再检查下一个；每个 target
+  记录独立的等待起点和告警状态，因此同时卡住的 CPU 都能被定位。全部 target
+  frozen 后，发起 CPU 在普通 task 上下文 drain object batch，IPI handler 不拿 slab lock。
 - 与 TLB 相同，只有 `mark_all_cpus_started()` 之后才能向所有 present CPU 发 IPI；
   早期启动阶段只 flush 当前 CPU。
 
@@ -290,8 +292,9 @@ orchestrator 全程持有 `NoPreempt` 守卫钉在本 CPU 上（见设计决策�
    使用 `notify_cpu(IPI_IRQ, Specific)`。
 4. target handler 调用 kalloc completion helper。pending-active 返回未完成，等待被
    中断 task 结束本次小的 magazine operation。
-5. 发起 CPU 等待每个 target 的 frozen acknowledgement，随后调用 kalloc remote drain
-   helper。drain 期间 session 保持 active。
+5. 发起 CPU 轮询每个 target 的 frozen acknowledgement，并按 target 独立记录等待
+   起点和一次性超时告警；一个 target 长时间不响应不会阻止其它 target 被观察。
+   全部 target frozen 后，调用 kalloc remote drain helper。drain 期间 session 保持 active。
 6. kalloc 完成 reserve/empty-span reclaim 后调用 end；provider 清 request word，
    unfreeze target，并释放 `FLUSH_ACTIVE`。
 
@@ -331,6 +334,8 @@ orchestrator 全程持有 `NoPreempt` 守卫钉在本 CPU 上（见设计决策�
 - state word 带 generation：`pending-idle` 可由 IPI 变成 frozen，`pending-active` 只
   能由本地 fast path 变成 frozen。发起者以 Acquire 观察 frozen 后才调用 kalloc 的
   `remote_ref_mut_raw()` drain helper。
+- flush wait 以一次全目标轮询实现；每个 target 的超时计时和 warned 状态独立保存，
+  因此一个 stuck CPU 不会隐藏同一 session 中其它 stuck CPU 的诊断日志。
 - 结束时先清 IPI request word，再 unfreeze。即使 handler 已经读取旧 word，它也只能
   尝试完成旧 pending state，不能把 idle state 再次转换为 frozen。
 
