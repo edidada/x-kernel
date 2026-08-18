@@ -52,6 +52,8 @@ tmpfs 每次 mount 创建独立实例；sysfs 在当前无 network namespace 分
 active 引用：当前 memfs sysfs 没有独立于 superblock 的 kernfs root，因此可见 mount 全部
 卸载时不能 teardown 内核仍在维护的 `/sys` 树。这一现有 `Mount` 对象承担 Linux kernfs
 root 长生命周期的对应职责，不增加第二套目录树或 lifecycle 字段。
+sysfs superblock 的 `statfs.f_type` 使用 Linux `SYSFS_MAGIC`，使 libudev 等用户态
+能够验证设备路径确实位于 sysfs，而不是把它误判为普通 ramfs。
 
 ## 调用约束 / 执行上下文
 

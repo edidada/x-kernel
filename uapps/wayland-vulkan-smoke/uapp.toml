@@ -1,0 +1,10 @@
+[package]
+name = "wayland-vulkan-smoke"
+description = "Headless Wayland and Vulkan WSI smoke test"
+enabled = true
+order = 95
+
+[[install]]
+src = "xk-wayland-vulkan-smoke"
+dest = "/usr/local/bin/xk-wayland-vulkan-smoke"
+mode = "0755"

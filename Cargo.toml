@@ -156,7 +156,7 @@ timer_driver = { path = "drivers/timer", package = "timer-driver" }
 x86_apic = { path = "drivers/x86-apic", package = "x86-apic" }
 
 # Internal: platform variants
-kplat-aarch64 = { path = "platforms/kplat-aarch64", default-features = false }
+kplat-aarch64 = { path = "platforms/kplat-aarch64", default-features = false, features = ["fp-simd"] }
 kplat-loongarch64 = { path = "platforms/kplat-loongarch64" }
 kplat-riscv64 = { path = "platforms/kplat-riscv64" }
 kplat-x86_64 = { path = "platforms/kplat-x86_64" }

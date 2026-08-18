@@ -6,6 +6,10 @@
 
 #![no_std]
 
+extern crate alloc;
+
+use alloc::sync::Arc;
+
 #[doc(no_inline)]
 pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use strum::FromRepr;
@@ -138,6 +142,11 @@ impl AbsInfo {
 
 /// Operations that require an input device driver to implement.
 pub trait InputDevice: Device {
+    /// Installs a callback invoked when newly queued input may be read.
+    ///
+    /// Drivers without interrupt notification may ignore the callback.
+    fn set_event_callback(&self, _callback: Arc<dyn Fn() + Send + Sync>) {}
+
     /// Returns the device ID of the input device.
     fn device_id(&self) -> InputDeviceId;
 

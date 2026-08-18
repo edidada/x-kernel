@@ -64,7 +64,7 @@ impl Inner {
 pub struct EventDev {
     inner: Mutex<Inner>,
     ev_bits: Bitmap<{ EventType::COUNT as usize }>,
-    poll_set: PollSet,
+    poll_set: Arc<PollSet>,
 }
 
 impl EventDev {
@@ -82,6 +82,12 @@ impl EventDev {
             }
         }
 
+        let poll_set = Arc::new(PollSet::new());
+        let callback_poll_set = poll_set.clone();
+        device.set_event_callback(Arc::new(move || {
+            callback_poll_set.wake();
+        }));
+
         Self {
             inner: Mutex::new(Inner {
                 device: Some(device),
@@ -89,7 +95,7 @@ impl EventDev {
                 key_state: Bitmap::new(),
             }),
             ev_bits,
-            poll_set: PollSet::new(),
+            poll_set,
         }
     }
 
@@ -373,10 +379,10 @@ impl Pollable for EventDev {
 
 pub fn input_devices(fs: Arc<SimpleFs>) -> DirMapping {
     let mut inputs = DirMapping::new();
-    let mut input_id = 0;
     let input_devices = inputdev::input_drain_devices();
     let mut keys = [0; 0x300usize.div_ceil(8)];
     for (i, device) in input_devices.into_iter().enumerate() {
+        keys.fill(0);
         assert!(device.get_event_bits(EventType::Key, &mut keys).unwrap());
 
         let event_dev = Arc::new(EventDev::new(device));
@@ -386,12 +392,11 @@ pub fn input_devices(fs: Arc<SimpleFs>) -> DirMapping {
 
         const BTN_MOUSE: usize = 0x110;
         if keys[BTN_MOUSE / 8] & (1 << (BTN_MOUSE % 8)) != 0 {
-            // Mouse
-            add_device_entry(&mut inputs, "mice", dev);
-        } else {
-            add_device_entry(&mut inputs, format!("event{input_id}"), dev);
-            input_id += 1;
+            // Retain the legacy aggregate name while also publishing the
+            // per-device evdev node expected by libinput and udev.
+            add_device_entry(&mut inputs, "mice", dev.clone());
         }
+        add_device_entry(&mut inputs, format!("event{i}"), dev);
     }
     inputs
 }

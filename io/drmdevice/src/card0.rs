@@ -506,7 +506,7 @@ impl DeviceFileOps for Card0 {
     }
 
     fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
-        match cmd {
+        let result = match cmd {
             DRM_IOCTL_SET_MASTER | DRM_IOCTL_DROP_MASTER => Ok(0),
             <DrmVersion as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmVersion>::from(arg);
@@ -629,7 +629,11 @@ impl DeviceFileOps for Card0 {
                 <DrmModeFbCmd2 as DrmIoctl>::handle_raw(self, user_ptr)
             }
             _ => Err(kvfs::VfsError::OperationNotSupported),
+        };
+        if let Err(err) = &result {
+            log::warn!("drm: ioctl {cmd:#x} failed: {err:?}");
         }
+        result
     }
 
     fn mmap(&self, _file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {

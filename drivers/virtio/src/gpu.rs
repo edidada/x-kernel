@@ -226,6 +226,10 @@ impl<H: Hal, T: Transport> VirtIoGpu2d<H, T> {
             &mut [&mut self.queue_buf_recv],
             &mut self.transport,
         )?;
+        // Commands are completed synchronously, so no IRQ-driven completion
+        // path is needed. Clear the transport status before another PCI
+        // function sharing the legacy INTx line registers its handler.
+        let _ = self.transport.ack_interrupt();
         Rsp::read_from_prefix(&self.queue_buf_recv)
             .map(|(rsp, _)| rsp)
             .map_err(|_| virtio_drivers::Error::IoError)

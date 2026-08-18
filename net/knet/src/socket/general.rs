@@ -24,6 +24,8 @@ pub(crate) struct GeneralOptions {
     nonblock: AtomicBool,
     /// Whether the socket should reuse the address.
     reuse_address: AtomicBool,
+    /// Whether received messages should carry sender credentials.
+    pass_credentials: AtomicBool,
 
     send_timeout_nanos: AtomicU64,
     recv_timeout_nanos: AtomicU64,
@@ -41,6 +43,7 @@ impl GeneralOptions {
         Self {
             nonblock: AtomicBool::new(false),
             reuse_address: AtomicBool::new(false),
+            pass_credentials: AtomicBool::new(false),
 
             send_timeout_nanos: AtomicU64::new(0),
             recv_timeout_nanos: AtomicU64::new(0),
@@ -164,6 +167,9 @@ impl Configurable for GeneralOptions {
             O::ReuseAddress(reuse) => {
                 **reuse = self.reuse_address();
             }
+            O::PassCredentials(enabled) => {
+                **enabled = self.pass_credentials.load(Ordering::Relaxed);
+            }
             O::SendTimeout(timeout) => {
                 **timeout = TimeSpan::from_nanos(self.send_timeout_nanos.load(Ordering::Relaxed));
             }
@@ -184,6 +190,9 @@ impl Configurable for GeneralOptions {
             }
             O::ReuseAddress(reuse) => {
                 self.reuse_address.store(*reuse, Ordering::Relaxed);
+            }
+            O::PassCredentials(enabled) => {
+                self.pass_credentials.store(*enabled, Ordering::Relaxed);
             }
             O::SendTimeout(timeout) => {
                 self.send_timeout_nanos

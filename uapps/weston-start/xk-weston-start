@@ -11,17 +11,26 @@ has_cmd() {
 
 install_deps() {
     has_cmd weston && has_cmd seatd && has_cmd weston-simple-shm && has_cmd xterm && has_cmd xclock && return 0
-    has_cmd apk || {
-        echo "[weston-start] apk is not available; cannot install Weston"
+    if ! has_cmd apt-get; then
+        echo "[weston-start] apt-get is required by the Debian rootfs"
         return 1
-    }
-
-    echo "[weston-start] updating apk indexes"
-    apk update || return 1
+    fi
+    # Reusing apt list files across X-Kernel boots currently leaves clearsigned
+    # InRelease files that apt cannot split; fetch a clean set for this run.
+    if ! find /var/lib/apt/lists -maxdepth 1 -name '*Packages*' -print -quit 2>/dev/null | grep -q .; then
+        echo "[weston-start] updating apt indexes"
+        apt-get update || return 1
+    else
+        echo "[weston-start] using existing apt indexes"
+    fi
     echo "[weston-start] installing Weston packages"
-    apk add --no-cache weston weston-backend-drm weston-shell-desktop weston-clients \
-        weston-xwayland xwayland xterm xclock seatd ||
-        apk add --no-cache weston seatd
+    # Do not let Debian package maintscripts start daemons in the guest boot
+    # session; Weston is started explicitly below.
+    printf '#!/bin/sh\nexit 101\n' >/usr/sbin/policy-rc.d
+    chmod 0755 /usr/sbin/policy-rc.d
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        --no-install-recommends weston xwayland xterm x11-apps seatd || return 1
+    rm -f /usr/sbin/policy-rc.d
 
     has_cmd weston && has_cmd seatd && has_cmd weston-simple-shm && has_cmd xterm && has_cmd xclock && return 0
     echo "[weston-start] missing command after install:"
@@ -43,16 +52,61 @@ if [ -z "$WP" ]; then
     rm -f "$WL" /tmp/weston-watch.log /tmp/xterm.log /tmp/xclock.log
 fi
 mkdir -p /run/udev/data
-cat >/run/udev/data/c13:1 <<'EOF'
+if [ -e /dev/dri/card0 ]; then
+    # Weston resolves an explicitly selected DRM node through libudev before
+    # opening it. X-Kernel's sysfs is currently a writable compatibility tree,
+    # so publish the minimal class metadata paired with devtmpfs card0.
+    DRM_SYSDEV=/sys/devices/virtual/drm/card0
+    mkdir -p "$DRM_SYSDEV" /sys/class/drm /sys/dev/char
+    rm -rf /sys/class/drm/card0 /sys/dev/char/226:0
+    printf '226:0\n' >"$DRM_SYSDEV/dev"
+    cat >"$DRM_SYSDEV/uevent" <<'EOF'
+DEVPATH=/devices/virtual/drm/card0
+DEVNAME=dri/card0
+MAJOR=226
+MINOR=0
+SUBSYSTEM=drm
+DEVTYPE=drm_minor
+EOF
+    ln -s ../../../../class/drm "$DRM_SYSDEV/subsystem"
+    ln -s ../../devices/virtual/drm/card0 /sys/class/drm/card0
+    ln -s ../../devices/virtual/drm/card0 /sys/dev/char/226:0
+fi
+input_minor=1
+for event_node in /dev/input/event*; do
+    [ -e "$event_node" ] || continue
+    event_name=${event_node##*/}
+    input_name=input$((input_minor - 1))
+    input_sysdev=/sys/devices/virtual/input/$input_name
+    event_sysdev=$input_sysdev/$event_name
+    mkdir -p "$event_sysdev" /sys/class/input /sys/dev/char
+    rm -rf "/sys/class/input/$event_name" "/sys/dev/char/13:$input_minor"
+    printf '13:%s\n' "$input_minor" >"$event_sysdev/dev"
+    cat >"$event_sysdev/uevent" <<EOF
+DEVPATH=/devices/virtual/input/$input_name/$event_name
+DEVNAME=input/$event_name
+MAJOR=13
+MINOR=$input_minor
+SUBSYSTEM=input
+EOF
+    printf 'X-Kernel virtio input\n' >"$input_sysdev/name"
+    ln -sf ../../../../class/input "$input_sysdev/subsystem"
+    ln -sf ../../../../../class/input "$event_sysdev/subsystem"
+    ln -sf "../../devices/virtual/input/$input_name/$event_name" \
+        "/sys/class/input/$event_name"
+    ln -sf "../../devices/virtual/input/$input_name/$event_name" \
+        "/sys/dev/char/13:$input_minor"
+    # libinput verifies the actual evdev capabilities after using these udev
+    # tags to select candidate devices. Publishing both candidate classes
+    # keeps this compatibility metadata independent of virtio device order.
+    cat >"/run/udev/data/c13:$input_minor" <<'EOF'
 E:ID_INPUT=1
+E:ID_INPUT_KEYBOARD=1
 E:ID_INPUT_MOUSE=1
 E:ID_SEAT=seat0
 EOF
-cat >/run/udev/data/c13:2 <<'EOF'
-E:ID_INPUT=1
-E:ID_INPUT_KEYBOARD=1
-E:ID_SEAT=seat0
-EOF
+    input_minor=$((input_minor + 1))
+done
 
 pgrep seatd >/dev/null 2>&1 || {
     echo "[weston-start] starting seatd"
@@ -62,9 +116,19 @@ pgrep seatd >/dev/null 2>&1 || {
 
 if [ -z "$WP" ]; then
     echo "[weston-start] starting weston"
-    env XDG_RUNTIME_DIR="$RD" WESTON_DISABLE_ATOMIC=1 weston \
-        --backend=drm-backend.so --renderer=pixman --drm-device=card0 \
-        --seat=seat0 --continue-without-input --idle-time=0 --xwayland --log="$WL" &
+    if [ -e /dev/dri/card0 ]; then
+        BACKEND_ARGS="--backend=drm-backend.so --drm-device=card0 --seat=seat0"
+        EXTRA_ARGS="--continue-without-input"
+        SHELL_ARGS="--shell=desktop-shell.so"
+    else
+        BACKEND_ARGS="--backend=headless-backend.so"
+        EXTRA_ARGS=""
+        SHELL_ARGS="--shell=desktop-shell.so"
+    fi
+    env XDG_RUNTIME_DIR="$RD" WESTON_DISABLE_ATOMIC=1 \
+        LIBSEAT_BACKEND="${LIBSEAT_BACKEND:-noop}" weston \
+        $BACKEND_ARGS --renderer=pixman \
+        $EXTRA_ARGS $SHELL_ARGS --idle-time=0 --log="$WL" &
     WP=$!
     (
         while kill -0 "$WP" >/dev/null 2>&1; do
@@ -93,6 +157,9 @@ done
 
 [ -n "$WD" ] || exit 1
 CLIENT=${XK_WESTON_CLIENT:-xterm,xclock}
+if [ ! -e /dev/dri/card0 ] && [ -z "${XK_WESTON_CLIENT:-}" ]; then
+    CLIENT=none
+fi
 if [ "$CLIENT" = "none" ]; then
     echo "[weston-start] client startup disabled"
     [ "${XK_WESTON_WAIT:-0}" = "1" ] && while kill -0 "$WP" >/dev/null 2>&1; do sleep 60; done

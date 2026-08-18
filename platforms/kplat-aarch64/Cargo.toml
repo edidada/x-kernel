@@ -13,7 +13,9 @@ ignored = ["kcpu"]
 ignored-paths = ["src/peripherals/nmi/nmi_sdei.rs"]
 
 [features]
-default = []
+# Userspace graphics stacks (Mesa/LLVM) use AArch64 FP/SIMD instructions.
+# Keep the register state preserved across task switches on this platform.
+default = ["fp-simd"]
 fp-simd = ["kcpu/fp-simd", "kernel_boot/fp-simd"]
 rtc = ["rtc_driver/pl031"]
 smp = ["kplat/smp"]

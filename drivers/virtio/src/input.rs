@@ -3,11 +3,13 @@
 // See LICENSES for license details.
 
 //! VirtIO input driver adapter.
-use alloc::string::String;
+use alloc::{collections::BTreeSet, string::String, sync::Arc, vec::Vec};
 
+use device_res::{Irq, IrqEvent, IrqResource, IrqTrigger};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use input::{Event, EventType, InputDevice, InputDeviceId};
 use kspin::SpinNoIrq;
+use log::info;
 use virtio_drivers::{
     Hal,
     device::input::{InputConfigSelect, VirtIOInput as InnerDev},
@@ -15,6 +17,9 @@ use virtio_drivers::{
 };
 
 use crate::as_driver_error;
+
+type EventCallback = Arc<dyn Fn() + Send + Sync>;
+type EventCallbackSlot = Arc<SpinNoIrq<Option<EventCallback>>>;
 
 /// The VirtIO Input device driver.
 ///
@@ -35,9 +40,87 @@ use crate::as_driver_error;
 /// let event = input.read_event()?;
 /// ```
 pub struct VirtIoInputDev<H: Hal, T: Transport> {
-    inner: SpinNoIrq<InnerDev<H, T>>,
+    inner: Arc<SpinNoIrq<InnerDev<H, T>>>,
+    event_callback: EventCallbackSlot,
     device_id: InputDeviceId,
     name: String,
+}
+
+trait InputIrqHandle: Send + Sync {
+    fn irq(&self) -> usize;
+    fn ack(&self) -> bool;
+}
+
+struct InputIrqHandleImpl<H: Hal, T: Transport> {
+    irq: usize,
+    inner: Arc<SpinNoIrq<InnerDev<H, T>>>,
+    event_callback: EventCallbackSlot,
+}
+
+// SAFETY: InnerDev is accessed only through SpinNoIrq and the handle is kept
+// alive for as long as the corresponding IRQ registration is active.
+unsafe impl<H: Hal, T: Transport> Send for InputIrqHandleImpl<H, T> {}
+// SAFETY: all shared device access is serialized by SpinNoIrq.
+unsafe impl<H: Hal, T: Transport> Sync for InputIrqHandleImpl<H, T> {}
+
+impl<H: Hal, T: Transport> InputIrqHandle for InputIrqHandleImpl<H, T> {
+    fn irq(&self) -> usize {
+        self.irq
+    }
+
+    fn ack(&self) -> bool {
+        let handled = !self.inner.lock().ack_interrupt().is_empty();
+        if handled && let Some(callback) = self.event_callback.lock().clone() {
+            callback();
+        }
+        handled
+    }
+}
+
+static INPUT_IRQ_HANDLES: SpinNoIrq<Vec<Arc<dyn InputIrqHandle>>> = SpinNoIrq::new(Vec::new());
+static INPUT_IRQS: SpinNoIrq<BTreeSet<usize>> = SpinNoIrq::new(BTreeSet::new());
+static INPUT_IRQ_GUARDS: SpinNoIrq<Vec<Irq>> = SpinNoIrq::new(Vec::new());
+
+fn handle_input_irq(irq: usize) -> IrqEvent {
+    // PCI INTx can be shared by multiple virtio-input functions. Do not use
+    // Iterator::any here: its short-circuiting would leave later devices'
+    // interrupt status asserted and cause an interrupt storm.
+    let mut handled = false;
+    for handle in INPUT_IRQ_HANDLES
+        .lock()
+        .iter()
+        .filter(|handle| handle.irq() == irq)
+    {
+        handled |= handle.ack();
+    }
+    if handled {
+        IrqEvent::from_sources(1)
+    } else {
+        IrqEvent::NOT_HANDLED
+    }
+}
+
+fn register_input_irq<H: Hal + 'static, T: Transport + 'static>(
+    irq: usize,
+    inner: &Arc<SpinNoIrq<InnerDev<H, T>>>,
+    event_callback: &EventCallbackSlot,
+) -> DriverResult<()> {
+    INPUT_IRQ_HANDLES
+        .lock()
+        .push(Arc::new(InputIrqHandleImpl::<H, T> {
+            irq,
+            inner: inner.clone(),
+            event_callback: event_callback.clone(),
+        }));
+    if INPUT_IRQS.lock().insert(irq) {
+        let guard = Irq::request(
+            IrqResource::new(irq, IrqTrigger::Unknown(0)),
+            Arc::new(handle_input_irq),
+        )
+        .map_err(|_| DriverError::ResourceBusy)?;
+        INPUT_IRQ_GUARDS.lock().push(guard);
+    }
+    Ok(())
 }
 
 // SAFETY: VirtIoInputDev serializes access to the inner VirtIOInput through its
@@ -49,7 +132,7 @@ unsafe impl<H: Hal, T: Transport> Send for VirtIoInputDev<H, T> {}
 // through the same `SpinNoIrq` lock, preserving synchronized access.
 unsafe impl<H: Hal, T: Transport> Sync for VirtIoInputDev<H, T> {}
 
-impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
+impl<H: Hal + 'static, T: Transport + 'static> VirtIoInputDev<H, T> {
     /// Creates a new driver instance, reads the device name and IDs, and
     /// initializes the VirtIO input device.
     ///
@@ -57,12 +140,45 @@ impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
     ///
     /// Returns `DriverError` if device initialization or ID query fails.
     pub fn try_new(transport: T) -> DriverResult<Self> {
+        Self::try_new_with_irq(transport, None)
+    }
+
+    /// Creates an input device while keeping its shared legacy interrupt
+    /// masked until the virtqueue and its real handler are both ready.
+    pub fn try_new_with_irq(transport: T, irq: Option<usize>) -> DriverResult<Self> {
+        info!("virtio-input: starting initialization on IRQ {irq:?}");
+        let has_registered_irq = irq.is_some_and(|irq| INPUT_IRQS.lock().contains(&irq));
+        if has_registered_irq {
+            let irq = irq.expect("has_registered_irq requires an IRQ");
+            for guard in INPUT_IRQ_GUARDS
+                .lock()
+                .iter()
+                .filter(|guard| guard.number() == irq)
+            {
+                guard.set_enabled(false);
+            }
+        }
+        let irq_mask = if let Some(irq) = irq.filter(|_| !has_registered_irq) {
+            let guard = Irq::request(
+                IrqResource::new(irq, IrqTrigger::Unknown(0)),
+                Arc::new(|_| IrqEvent::from_sources(1)),
+            )
+            .map_err(|_| DriverError::ResourceBusy)?;
+            guard.set_enabled(false);
+            Some(guard)
+        } else {
+            None
+        };
+        info!("virtio-input: IRQ masked for initialization on IRQ {irq:?}");
         let mut device = InnerDev::new(transport).map_err(as_driver_error)?;
+        info!("virtio-input: virtqueues initialized on IRQ {irq:?}");
         let name = device.name().unwrap_or_else(|_| String::from("<unknown>"));
         let ids = device.ids().map_err(as_driver_error)?;
 
-        Ok(Self {
-            inner: SpinNoIrq::new(device),
+        let inner = Arc::new(SpinNoIrq::new(device));
+        let input = Self {
+            inner,
+            event_callback: Arc::new(SpinNoIrq::new(None)),
             device_id: InputDeviceId {
                 bus_type: ids.bustype,
                 vendor: ids.vendor,
@@ -70,7 +186,35 @@ impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
                 version: ids.version,
             },
             name,
-        })
+        };
+        // Release the temporary masking registration before installing the
+        // persistent handler. Some IRQ providers tear down the line state
+        // when a registration is released, so dropping it afterwards would
+        // also make the newly installed handler unreachable.
+        drop(irq_mask);
+        input.register_irq(irq)?;
+        info!("virtio-input: handler registered on IRQ {irq:?}");
+        if let Some(irq) = irq {
+            for guard in INPUT_IRQ_GUARDS
+                .lock()
+                .iter()
+                .filter(|guard| guard.number() == irq)
+            {
+                guard.set_enabled(true);
+            }
+        }
+        info!("virtio-input: initialization complete on IRQ {irq:?}");
+        Ok(input)
+    }
+
+    /// Register the transport interrupt after construction when a PCI route
+    /// is available. Input devices otherwise leave the virtqueue interrupt
+    /// asserted with no handler, causing an interrupt storm.
+    pub fn register_irq(&self, irq: Option<usize>) -> DriverResult<()> {
+        if let Some(irq) = irq {
+            register_input_irq(irq, &self.inner, &self.event_callback)?;
+        }
+        Ok(())
     }
 
     fn load_event_bits(&self, event_type: EventType, out: &mut [u8]) -> DriverResult<bool> {
@@ -93,7 +237,11 @@ impl<H: Hal, T: Transport> Device for VirtIoInputDev<H, T> {
     }
 }
 
-impl<H: Hal, T: Transport> InputDevice for VirtIoInputDev<H, T> {
+impl<H: Hal + 'static, T: Transport + 'static> InputDevice for VirtIoInputDev<H, T> {
+    fn set_event_callback(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        *self.event_callback.lock() = Some(callback);
+    }
+
     fn device_id(&self) -> InputDeviceId {
         self.device_id
     }

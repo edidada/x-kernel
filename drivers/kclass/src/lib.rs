@@ -359,6 +359,10 @@ impl DisplayDevice for ClassDevice<DisplayDeviceImpl> {
 
 #[cfg(feature = "input")]
 impl InputDevice for ClassDevice<InputDeviceImpl> {
+    fn set_event_callback(&self, callback: alloc::sync::Arc<dyn Fn() + Send + Sync>) {
+        self.with(|device| device.set_event_callback(callback))
+    }
+
     fn device_id(&self) -> InputDeviceId {
         self.with(|device| device.device_id())
     }

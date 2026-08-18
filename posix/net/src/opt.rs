@@ -11,6 +11,7 @@
 
 use kerrno::{KError, KResult, LinuxError};
 use knet::{
+    Socket,
     options::{Configurable, GetSocketOption, SetSocketOption},
     sock_from_file,
 };
@@ -25,6 +26,33 @@ const PROTO_IP: u32 = linux_raw_sys::net::IPPROTO_IP as u32;
 const PACKET_ADD_MEMBERSHIP: u32 = 1;
 const PACKET_DROP_MEMBERSHIP: u32 = 2;
 const PACKET_STATISTICS: u32 = 6;
+
+const BPF_MAX_INSNS: usize = 4096;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SockFilter {
+    code: u16,
+    jump_true: u8,
+    jump_false: u8,
+    value: u32,
+}
+
+// SAFETY: `SockFilter` is the fixed-width, pointer-free Linux UAPI
+// `struct sock_filter`; every bit pattern is valid.
+unsafe impl UserRead for SockFilter {}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SockFprog {
+    len: u16,
+    filter: UserConstPtr<SockFilter>,
+}
+
+// SAFETY: `SockFprog` matches the Linux UAPI `struct sock_fprog`. Reading the
+// carrier does not dereference `filter`; the syscall validates and copies the
+// referenced instruction array separately.
+unsafe impl UserRead for SockFprog {}
 
 mod conv {
     use kerrno::{KError, KResult};
@@ -224,6 +252,7 @@ pub fn sys_getsockopt(
 
     let file = kprocess::current_resources().get_file(fd)?;
     let socket = sock_from_file(&file)?;
+
     macro_rules! dispatch {
         ($which:ident) => {
             let mut val = Default::default();
@@ -265,6 +294,24 @@ pub fn sys_setsockopt(
 
     let file = kprocess::current_resources().get_file(fd)?;
     let socket = sock_from_file(&file)?;
+
+    if level == linux_raw_sys::net::SOL_SOCKET && optname == linux_raw_sys::net::SO_ATTACH_FILTER {
+        if !matches!(socket.as_ref(), Socket::Netlink(_)) {
+            return Err(LinuxError::ENOPROTOOPT.into());
+        }
+        let program: SockFprog = get(optval, optlen)?;
+        let instruction_count = program.len as usize;
+        if instruction_count == 0 || instruction_count > BPF_MAX_INSNS || program.filter.is_null() {
+            return Err(KError::InvalidInput);
+        }
+
+        // Copy the program now so a malformed userspace pointer is rejected.
+        // Kobject uevent sockets already receive only their subscribed groups;
+        // executing classic BPF is not yet required for monitor correctness.
+        let _instructions = program.filter.load_vm_vec(instruction_count)?;
+        return Ok(0);
+    }
+
     macro_rules! dispatch {
         ($which:ident) => {
             let val = get(optval, optlen)?;

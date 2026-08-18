@@ -303,3 +303,7 @@ resource，再按需通过 `fb_present` 推到 scanout（无后台刷新任务�
 - 当最后一个 `ClassDevice` 和 `DeviceObject` 引用都释放后，
   `DeviceObject` 的 devres（MMIO 映射、IRQ、DMA buffer）按 LIFO 顺序清理。
 - runtime trait object 的 drop 由 `Box<T>` 负责，在 `ClassDeviceInner` drop 时执行。
+
+输入类设备还透传 `InputDevice::set_event_callback`，让 devfs evdev 节点可以把
+底层 IRQ 产生的事件通知到自身的 poll 集合；该回调不改变 `ClassDevice` 的所有权
+或移除语义。

@@ -464,3 +464,11 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 `Drop`，设备资源（DMA 缓冲区、VirtIO 队列）的释放依赖 `virtio-drivers` 内部类型的
 `Drop` 实现。当设备结构体离开作用域时，`InnerDev` 的 `Drop` 会自动通知设备重置
 并释放 DMA 内存。
+
+### VirtIO input IRQ 与事件唤醒
+
+VirtIO input 设备的 PCI 中断可能与其他 virtio function 共享。输入 IRQ handler
+会遍历同一 IRQ 上的全部 input 句柄并逐一确认状态，避免短路导致中断风暴。
+设备初始化期间先屏蔽线路，完成 virtqueue 初始化后再注册持久 handler。evdev
+通过 `InputDevice::set_event_callback` 注册唤醒回调，使新事件能够唤醒 libinput
+的 poll，而不是依赖用户态主动轮询。

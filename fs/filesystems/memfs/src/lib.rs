@@ -33,6 +33,7 @@ use slab::Slab;
 
 pub(crate) const RAMFS_MAGIC: u32 = 0x8584_58f6;
 pub(crate) const TMPFS_MAGIC: u32 = 0x0102_1994;
+pub(crate) const SYSFS_MAGIC: u32 = 0x6265_6572;
 static SYSFS: Once<(Arc<SuperBlock>, Arc<Mount>)> = Once::new();
 
 fn tmpfs_get_tree(
@@ -64,8 +65,12 @@ pub const SYSFS_TYPE: FileSystemType = FileSystemType::nodev("sysfs", sysfs_get_
 /// mounts therefore cannot tear down the shared kernel-populated tree.
 pub fn new_sysfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
     let (super_block, _internal_mount) = SYSFS.call_once(|| {
-        let super_block =
-            ramfs::new_ramfs_with_name_and_superblock_flags("sysfs", superblock_flags);
+        let super_block = MemoryFs::new_with_name_superblock_flags_and_root_mode(
+            "sysfs",
+            SYSFS_MAGIC,
+            superblock_flags,
+            NodePermission::from_bits_truncate(0o755),
+        );
         let internal_mount = Mount::new_root(&super_block);
         (super_block, internal_mount)
     });

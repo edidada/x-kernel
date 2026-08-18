@@ -81,11 +81,12 @@ cfg_if! {
         impl VirtIoInput {
             pub fn try_new<T: virtio::Transport + 'static>(
                 transport: T,
-                _irq: Option<usize>,
+                irq: Option<usize>,
             ) -> DriverResult<kclass::prelude::InputDeviceImpl> {
-                Ok(Box::new(virtio::VirtIoInputDev::<VirtIoHalImpl, T>::try_new(
-                    transport,
-                )?))
+                let input = virtio::VirtIoInputDev::<VirtIoHalImpl, T>::try_new_with_irq(
+                    transport, irq,
+                )?;
+                Ok(Box::new(input))
             }
         }
     }

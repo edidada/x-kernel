@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+fail=0
+need() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo "[wayland-vulkan-smoke] missing: $1" >&2
+        fail=1
+    fi
+}
+
+echo "[wayland-vulkan-smoke] starting"
+need weston-simple-shm
+[ "$fail" -eq 0 ] || exit 77
+
+: "${XDG_RUNTIME_DIR:=/run/user/0}"
+export XDG_RUNTIME_DIR
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+
+socket=$(find "$XDG_RUNTIME_DIR" -maxdepth 1 -type s -name 'wayland-*' 2>/dev/null | head -n 1 || true)
+if [ -z "$socket" ]; then
+    echo "[wayland-vulkan-smoke] no Wayland socket found" >&2
+    exit 1
+fi
+export WAYLAND_DISPLAY=${socket##*/}
+
+echo "[wayland-vulkan-smoke] Wayland SHM client"
+weston-simple-shm >/tmp/xk-wayland-simple-shm.log 2>&1 &
+client_pid=$!
+sleep 3
+kill "$client_pid" 2>/dev/null || true
+wait "$client_pid" 2>/dev/null || true
+
+if command -v vulkaninfo >/dev/null 2>&1 && command -v vkcube >/dev/null 2>&1; then
+    vulkaninfo --summary
+    vkcube --wsi wayland --frames 120
+else
+    echo "[wayland-vulkan-smoke] Vulkan tools unavailable; Wayland-only PASS"
+fi
+echo "[wayland-vulkan-smoke] PASS"

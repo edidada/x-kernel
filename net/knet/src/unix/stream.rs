@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! Unix stream socket transport.
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use async_trait::async_trait;
@@ -96,6 +96,8 @@ fn new_duplex_channel(
 ) -> (Channel, Channel) {
     let (client_tx, server_rx) = new_ring_pair();
     let (server_tx, client_rx) = new_ring_pair();
+    let client_ancillary = Arc::new(Mutex::new(VecDeque::new()));
+    let server_ancillary = Arc::new(Mutex::new(VecDeque::new()));
     (
         Channel {
             tx: client_tx,
@@ -103,6 +105,8 @@ fn new_duplex_channel(
             endpoint: client_endpoint.clone(),
             peer_endpoint: server_endpoint.clone(),
             peer_pid: pid,
+            ancillary_tx: client_ancillary.clone(),
+            ancillary_rx: server_ancillary.clone(),
         },
         Channel {
             tx: server_tx,
@@ -110,6 +114,8 @@ fn new_duplex_channel(
             endpoint: server_endpoint,
             peer_endpoint: client_endpoint,
             peer_pid: pid,
+            ancillary_tx: server_ancillary,
+            ancillary_rx: client_ancillary,
         },
     )
 }
@@ -120,6 +126,8 @@ struct Channel {
     endpoint: Arc<StreamEndpoint>,
     peer_endpoint: Arc<StreamEndpoint>,
     peer_pid: u32,
+    ancillary_tx: Arc<Mutex<VecDeque<Vec<crate::AncillaryData>>>>,
+    ancillary_rx: Arc<Mutex<VecDeque<Vec<crate::AncillaryData>>>>,
 }
 
 impl Drop for Channel {
@@ -360,6 +368,15 @@ impl UnixTransportOps for StreamTransport {
             return Err(KError::InvalidInput);
         }
         let size = src.remaining();
+        if !options.ancillary.is_empty() {
+            self.channel
+                .lock()
+                .as_mut()
+                .ok_or(KError::NotConnected)?
+                .ancillary_tx
+                .lock()
+                .push_back(options.ancillary);
+        }
         let mut total = 0;
         let non_blocking = self.options.nonblocking() || options.flags.nonblocking();
         self.options
@@ -421,7 +438,7 @@ impl UnixTransportOps for StreamTransport {
             })
     }
 
-    fn recv(&self, mut dst: impl Write, options: RecvOptions) -> KResult<usize> {
+    fn recv(&self, mut dst: impl Write, mut options: RecvOptions) -> KResult<usize> {
         self.options
             .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
                 let mut guard = self.channel.lock();
@@ -443,6 +460,11 @@ impl UnixTransportOps for StreamTransport {
                     count
                 };
                 if count > 0 {
+                    if let Some(ancillary) = options.ancillary.as_deref_mut()
+                        && let Some(mut queued) = chan.ancillary_rx.lock().pop_front()
+                    {
+                        ancillary.append(&mut queued);
+                    }
                     let occupied_after = occupied_before - count;
                     if !is_stream_writable(occupied_before) && is_stream_writable(occupied_after) {
                         chan.peer_endpoint.polls.writable.wake();

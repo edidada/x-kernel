@@ -74,6 +74,8 @@ VFS file / directory / socket / pipe / epoll / timerfd / eventfd / pidfd
 | `IoSrc` / `IoDst` | syscall I/O 路径使用的 buffer trait object 类型 |
 | `Kstat` | 内核元数据结构，负责转换为 Linux `stat` / `statx` ABI |
 
+`Kstat -> statx` 转换会在 `stx_mask` 中声明 `STATX_BASIC_STATS`；用户态可据此安全使用
+inode、类型、设备号和时间字段，并在需要时回退查询未声明的扩展字段。
 
 ## 状态机
 
