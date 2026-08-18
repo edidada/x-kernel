@@ -334,7 +334,7 @@ fn test_parse_link_update_rejects_unsupported_attributes() {
 }
 
 #[def_test(serial)]
-fn test_update_link_state_rename_and_down() {
+fn test_apply_link_update_rename_and_down() {
     init_test_state();
     let request = LinkUpdateRequest {
         index: 2,
@@ -343,7 +343,7 @@ fn test_update_link_state_rename_and_down() {
         name: Some(String::from("ens3")),
         mtu: Some(1400),
     };
-    update_link_state(request).unwrap();
+    apply_link_update(request).unwrap();
 
     let link = SERVICE
         .link_snapshot_for_ifindex(2)
@@ -359,7 +359,7 @@ fn test_device_mtu_is_route_mtu_source() {
     let destination = crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(8, 8, 8, 8));
     assert_eq!(SERVICE.ipv4_route_mtu(&destination), Some(1500));
 
-    update_link_state(LinkUpdateRequest {
+    apply_link_update(LinkUpdateRequest {
         index: 2,
         flags: 0,
         change: 0,
@@ -382,7 +382,7 @@ fn test_unchanged_mtu_does_not_rebuild_interface() {
     init_test_state();
     let rebuild_count = SERVICE.rebuild_count_for_tests();
 
-    update_link_state(LinkUpdateRequest {
+    apply_link_update(LinkUpdateRequest {
         index: 2,
         flags: 0,
         change: 0,
@@ -399,7 +399,7 @@ fn test_down_device_keeps_route_mtu_for_output_checks() {
     init_test_state();
     let destination = crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(8, 8, 8, 8));
 
-    update_link_state(LinkUpdateRequest {
+    apply_link_update(LinkUpdateRequest {
         index: 2,
         flags: 0,
         change: LINK_FLAG_UP,
@@ -420,7 +420,7 @@ fn test_non_effective_mtu_change_does_not_rebuild_interface() {
     init_test_state();
     let rebuild_count = SERVICE.rebuild_count_for_tests();
 
-    update_link_state(LinkUpdateRequest {
+    apply_link_update(LinkUpdateRequest {
         index: 1,
         flags: 0,
         change: 0,
@@ -442,7 +442,7 @@ fn test_non_effective_mtu_change_does_not_rebuild_interface() {
 fn test_link_change_mask_ignores_volatile_flags() {
     init_test_state();
 
-    update_link_state(LinkUpdateRequest {
+    apply_link_update(LinkUpdateRequest {
         index: 2,
         flags: 0,
         change: LINK_FLAG_RUNNING,
@@ -456,7 +456,7 @@ fn test_link_change_mask_ignores_volatile_flags() {
         .flags;
     assert_ne!(current_flags & LINK_FLAG_RUNNING, 0);
 
-    update_link_state(LinkUpdateRequest {
+    apply_link_update(LinkUpdateRequest {
         index: 2,
         flags: current_flags & !LINK_FLAG_UP,
         change: u32::MAX,
@@ -472,7 +472,7 @@ fn test_link_change_mask_ignores_volatile_flags() {
     assert_ne!(down_flags & LINK_FLAG_MULTICAST, 0);
 
     assert_eq!(
-        update_link_state(LinkUpdateRequest {
+        apply_link_update(LinkUpdateRequest {
             index: 2,
             flags: down_flags & !LINK_FLAG_MULTICAST,
             change: LINK_FLAG_MULTICAST,
@@ -484,11 +484,11 @@ fn test_link_change_mask_ignores_volatile_flags() {
 }
 
 #[def_test(serial)]
-fn test_device_removal_refreshes_views_and_control_state() {
+fn test_device_removal_refreshes_views() {
     init_test_state();
     let service = &SERVICE;
     let rebuild_count = service.rebuild_count_for_tests();
-    add_neigh_state(
+    add_neigh(
         NeighRequest {
             family: wire_route::FAMILY_IPV4,
             ifindex: 2,
@@ -501,7 +501,7 @@ fn test_device_removal_refreshes_views_and_control_state() {
     )
     .unwrap();
 
-    assert!(remove_device_state(kdevice::DeviceId::new(2)));
+    assert!(crate::unregister_netdev(kdevice::DeviceId::new(2)));
     assert_eq!(service.rebuild_count_for_tests(), rebuild_count + 1);
     assert_eq!(service.link_snapshots().len(), 1);
     assert_eq!(
@@ -533,7 +533,7 @@ fn test_reject_invalid_link_name_and_mtu_without_partial_update() {
         "1234567890123456",
     ] {
         assert_eq!(
-            update_link_state(LinkUpdateRequest {
+            apply_link_update(LinkUpdateRequest {
                 index: 2,
                 flags: 0,
                 change: 0,
@@ -544,7 +544,7 @@ fn test_reject_invalid_link_name_and_mtu_without_partial_update() {
         );
     }
     assert_eq!(
-        update_link_state(LinkUpdateRequest {
+        apply_link_update(LinkUpdateRequest {
             index: 2,
             flags: 0,
             change: 0,
@@ -562,7 +562,7 @@ fn test_reject_invalid_link_name_and_mtu_without_partial_update() {
     assert_ne!(link.flags & LINK_FLAG_UP, 0);
 
     assert_eq!(
-        update_link_state(LinkUpdateRequest {
+        apply_link_update(LinkUpdateRequest {
             index: 2,
             flags: 0,
             change: 0,
@@ -645,7 +645,7 @@ fn test_add_replace_and_delete_address() {
         address: IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 99)),
     };
 
-    add_addr_state(req, NLM_F_CREATE | NLM_F_EXCL).unwrap();
+    add_addr(req, NLM_F_CREATE | NLM_F_EXCL).unwrap();
     assert!(
         SERVICE
             .ipv4_addr_entries()
@@ -660,7 +660,7 @@ fn test_add_replace_and_delete_address() {
         scope: wire_route::SCOPE_HOST,
         ..req
     };
-    add_addr_state(replaced, NLM_F_REPLACE).unwrap();
+    add_addr(replaced, NLM_F_REPLACE).unwrap();
     assert!(
         SERVICE
             .ipv4_addr_entries()
@@ -671,7 +671,7 @@ fn test_add_replace_and_delete_address() {
             )
     );
 
-    del_addr_state(replaced).unwrap();
+    del_addr(replaced).unwrap();
     assert!(
         !SERVICE
             .ipv4_addr_entries()
@@ -687,7 +687,7 @@ fn test_add_replace_and_delete_address() {
 fn test_deleting_last_address_owner_removes_configured_prefsrc_route() {
     init_test_state();
     let address = Ipv4Address::new(192, 168, 1, 2);
-    del_addr_state(AddrRequest {
+    del_addr(AddrRequest {
         index: 2,
         family: wire_route::FAMILY_IPV4,
         prefix_len: 24,
@@ -700,7 +700,7 @@ fn test_deleting_last_address_owner_removes_configured_prefsrc_route() {
         route.preferred_source() != Some(crate::ip::IpAddress::Ipv4(address.into()))
     }));
 
-    add_neigh_state(
+    add_neigh(
         NeighRequest {
             family: wire_route::FAMILY_IPV4,
             ifindex: 2,
@@ -739,7 +739,7 @@ fn test_add_and_delete_route() {
         prefsrc: Some(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 2))),
     };
 
-    add_route_state(req, NLM_F_CREATE | NLM_F_EXCL).unwrap();
+    add_route(req, NLM_F_CREATE | NLM_F_EXCL).unwrap();
     assert!(
         SERVICE
             .route_snapshot()
@@ -747,7 +747,7 @@ fn test_add_and_delete_route() {
             .any(|route| route.filter.prefix_len() == req.dst_len && route.via.is_some())
     );
 
-    del_route_state(req).unwrap();
+    del_route(req).unwrap();
     assert!(
         !SERVICE
             .route_snapshot()
@@ -795,7 +795,7 @@ fn test_add_and_replace_neighbour() {
         lladdr: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
     };
 
-    add_neigh_state(req, NLM_F_CREATE | NLM_F_REPLACE).unwrap();
+    add_neigh(req, NLM_F_CREATE | NLM_F_REPLACE).unwrap();
     assert!(SERVICE.has_neighbor(
         1,
         crate::ip::IpAddress::Ipv4(match req.dst {
@@ -808,7 +808,7 @@ fn test_add_and_replace_neighbour() {
         lladdr: Some([1, 2, 3, 4, 5, 6]),
         ..req
     };
-    add_neigh_state(replaced, NLM_F_REPLACE).unwrap();
+    add_neigh(replaced, NLM_F_REPLACE).unwrap();
     assert!(SERVICE.has_neighbor(
         1,
         crate::ip::IpAddress::Ipv4(match replaced.dst {

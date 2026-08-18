@@ -212,7 +212,7 @@ Busy ──operation error────────────> previous state
 | `Connected` | `Closed` | shutdown 或底层状态进入关闭路径 |
 | `Busy` | 原状态 | `StateGuard::transit` 内部操作返回错误 |
 
-### rtnetlink 控制面状态
+### rtnetlink 控制面
 
 ```text
 RTM_NEWLINK ──> Service ──> Router ──> NetDevice link owner
@@ -225,7 +225,7 @@ RTM_NEWADDR / DELADDR ┘                    ├─> smoltcp Interface / Ingress
                        │                    └─> NetDevice address projections
 RTM_GETADDR <──────── Router address snapshots
 DELADDR 最后持有者 ────────────────────────> Router 删除失效 prefsrc 路由
-设备移除 ─────────────────────────────────> Router 与设备删除路由、邻居
+设备移除 ── rtnl_lock ────────────> Service ──> Router 删除设备、地址、路由、邻居
 
 init_network / RTM_NEWROUTE ──> Router routes
 RTM_NEWNEIGH ─────────────────> NetDevice neighbor resolver
@@ -240,7 +240,7 @@ RTM_GETNEIGH ────────────────> not implemented
 | 初始 IPv4 地址条目 | `Router::ipv4_addrs` | `init_network` 通过 `Router::add_ipv4_addr` 注册，Router 同时生成 local 和 connected 路由 |
 | IPv4 地址条目 | smoltcp、IngressProcessor 和设备地址投影 | 地址加入、删除或所属设备移除时由 `Service` 刷新所有派生视图 |
 | 最后一个 IPv4 地址持有者 | `Router` 配置路由 | 地址删除时移除以该地址为 `prefsrc` 的配置路由 |
-| 已移除设备 | `Router` 路由与设备邻居 | 删除该接口的路由和邻居，并重编号后续接口索引 |
+| 已移除设备 | `Router` 路由与设备邻居 | `unregister_netdev` 持 `rtnl_lock` 后由 Router 删除该接口的路由和邻居，并重编号后续接口索引 |
 | `RTM_GETADDR` | Router 地址快照 | rtnetlink 直接读取 `Service::ipv4_addr_snapshots` |
 | 初始路由 | `Router` | `init_network` 直接调用 `Router::add_rule` |
 | `RTM_NEWROUTE` / `RTM_DELROUTE` | `Router` | rtnetlink 在 Router owner 内完成校验和 mutation |
@@ -376,7 +376,7 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 - Unix stream 每个 endpoint 的 `tx_order: SpinNoPreempt<()>` 是对应发送方向的共享排序点。本端 write shutdown、对端 read shutdown、write index 发布和对端空队列 EOF 判定都经过该锁。固定锁序为 `channel` mutex 后取得单个 `tx_order`，两个方向的顺序锁不会同时持有。
 - Unix stream 的用户数据复制和 `PollSet` 唤醒在 `tx_order` 外执行。send 先写入未发布的 vacant 区域，再在锁内复检关闭状态并推进 write index；recv 读取为空后在锁内复查 occupied 长度和关闭状态；shutdown 完成状态发布并复制 peer endpoint 引用后释放 `channel` mutex，再执行 waiter 唤醒。
 - Unix stream 每个 endpoint 分别持有 readable、writable 和 connection-state 三组 `PollSet`。写入只唤醒 peer readable waiter，读取跨过发送缓冲低水位时只唤醒 peer writable waiter，半关闭只唤醒受影响方向，完整关闭通过 connection-state waiter 通知双方。
-- Router 直接持有配置路由、地址派生路由和动态选源所需的运行时状态，设备直接持有邻居 resolver 与缓存；netlink 不维护 route 或 neighbor mirror。全局 `RTNETLINK_MUTATION_LOCK` 串行化不同 socket 的控制面 mutation 和设备移除；每个 socket 的发送事务、rx queue 和 subscriber 列表使用独立 `Mutex`。发送事务锁串行化同一 socket 的容量预检、mutation 执行和 response 入队。response 在 rx queue 锁外生成，只在容量检查和入队时持锁；锁顺序固定为发送事务锁、`RTNETLINK_MUTATION_LOCK`、Router、NetDevice、ingress、Interface、netlink rx queue，未涉及的锁按该序列跳过。
+- Router 直接持有配置路由、地址派生路由和动态选源所需的运行时状态，设备直接持有邻居 resolver 与缓存；netlink 不维护 link、address、route 或 neighbor mirror。全局 `RTNETLINK_MUTATION_LOCK`（`rtnl_lock`）串行化不同 socket 的控制面 mutation 和设备移除，对应 Linux `rtnl_mutex`。设备注销走 `unregister_netdev`：先取该锁，再由 `Service` 删除 Router 中的设备及相关地址、路由和邻居，不经过 rtnetlink 状态表。每个 socket 的发送事务、rx queue 和 subscriber 列表使用独立 `Mutex`。发送事务锁串行化同一 socket 的容量预检、mutation 执行和 response 入队。response 在 rx queue 锁外生成，只在容量检查和入队时持锁；锁顺序固定为发送事务锁、`RTNETLINK_MUTATION_LOCK`、Router、NetDevice、ingress、Interface、netlink rx queue，未涉及的锁按该序列跳过。
 - RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 使用调用方传入的同一个 `PollContext` 注册聚合 `timeout_poll` 和设备 RX waiter；Ethernet 设备直接将 waiter 注册到 IRQ source，loopback 继续使用 `timeout_poll`。registration 由跨越 `Pending` 的 `PollRegistrations` 统一管理。Ethernet 的 ARP deadline 由 `knet-rx` 通过 `next_poll_at` 等待和推进；非 `knet-rx` 上下文产生或提前该 deadline 时唤醒 `knet-rx` 的 deadline poll set，并把未来期限并入原子 deadline。设备层不得保存调用方的裸 waker。
 - 每次 `Interface::poll` 也会刷新独立的协议 timer，使 TCP 重传等 deadline 不依赖阻塞中的 socket waiter。
 
@@ -394,11 +394,11 @@ Ethernet RX 任务、socket TX 生产路径、协议 timer 和后台任务共享
 
 RX、TX 与 timer 使用独立预算。`Service` 使用 smoltcp 分阶段 API 约束 stack ingress 和 egress，并使用 1 ms 软时间上限控制单轮占用。control TX 优先于 data TX，避免 ICMP 错误和协议控制流量长期滞后。TCP send 可写快路径向 smoltcp socket buffer 写入数据并发布 TX 通知，连续发送由 poller owner 在有界批次内完成协议推进和 TX dispatch。TCP recv 在消费前接收缓冲区余量低于最大窗口缩放量子时发布 `RxWindow` 通知，释放 socket-set mutex 后由 poller 推进窗口更新；达到缩放量子后的接收窗口增长复用 RX 和已登记的 timer 推进。TCP socket 直接向 smoltcp 注册聚合 send waker，raw socket 通过 `GeneralOptions` 注册 TX waiter；Router data TX queue 的可用 packet slot 实际增加时，`PollProgress::tx_capacity_changed` 触发 poller TX waiter 唤醒。协议与 deferred-close deadline 写入原子值，尚未到期的设备维护 deadline 在 TX dispatch 后并入同一原子值，周期采样回调到期后唤醒 socket waiter，并以 `PollReason::Timer` 通知 poller。已到期的设备 deadline 仍由 `knet-rx` 的 1 ms 最小等待推进，避免 pending TX 停留在 origin 时间点时形成空转。
 
-### rtnetlink 状态所有权
+### 控制面状态所有权
 
 link 配置属于设备：接口名、MTU、管理 up 状态、operstate 和硬件地址通过 `NetDevice::link_snapshot` 统一导出，`RTM_GETLINK` 和 `RTM_NEWLINK` 直接访问该来源。AF_PACKET 热路径在单个 `SERVICE` 锁临界区内通过无分配的 `LinkSendSnapshot` 校验 up 状态、MTU 和硬件地址并发送，设备存在性检查使用 `has_device`，路由 MTU 查询直接读取匹配设备。设备配置或移除改变有效 MTU 时重建 smoltcp `Interface`，使缓存的 `DeviceCapabilities` 与设备集合一致；未改变有效 MTU 的配置更新保留当前 `Interface` 及其运行时缓存。
 
-IPv4 地址条目由 `Router` 保存。每个条目包含设备索引、IPv4 CIDR 和 scope，加入条目时检查设备、单播地址和 smoltcp 地址容量。Router 为每个条目生成 `/32` local 路由，并按地址网络生成 connected 路由；地址删除同时移除派生路由、失效首选源路由和设备 pending TX。`Service` 将 Router 地址投影到 smoltcp `Interface`、`IngressProcessor` 和设备，Ethernet 根据设备地址处理 ARP、定向广播和待解析报文。Router 直接保存配置路由及运行时选择信息，Ethernet 设备直接保存邻居 resolver；路由和邻居的查询与 mutation 均访问各自 owner。设备移除由 Router 统一清理路由、地址和设备邻居，并重编号后续接口索引。
+IPv4 地址条目由 `Router` 保存。每个条目包含设备索引、IPv4 CIDR 和 scope，加入条目时检查设备、单播地址和 smoltcp 地址容量。Router 为每个条目生成 `/32` local 路由，并按地址网络生成 connected 路由；地址删除同时移除派生路由、失效首选源路由和设备 pending TX。`Service` 将 Router 地址投影到 smoltcp `Interface`、`IngressProcessor` 和设备，Ethernet 根据设备地址处理 ARP、定向广播和待解析报文。Router 直接保存配置路由及运行时选择信息，Ethernet 设备直接保存邻居 resolver；路由和邻居的查询与 mutation 均访问各自 owner。设备移除由 `unregister_netdev` 在 `rtnl_lock` 下交给 Router，统一清理路由、地址和设备邻居，并重编号后续接口索引。
 
 ### pathname Unix socket 显式传递凭据
 

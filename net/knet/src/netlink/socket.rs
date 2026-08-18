@@ -110,8 +110,8 @@ impl NetlinkSocket {
 
             // send_lock keeps the preflight valid through response enqueue.
             // Preflight capacity under rx_queue only, then drop that lock before
-            // handle_request takes control-plane state locks. The ordering is
-            // send_lock, control-plane state, then rx_queue.
+            // handle_request takes `rtnl_lock` and owner locks. The ordering is
+            // send_lock, rtnl_lock, then rx_queue.
             if has_mutation {
                 let queue = self.inner.rx_queue.lock();
                 let reserved_bytes = requests.iter().try_fold(0usize, |total, request| {

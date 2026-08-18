@@ -2,13 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Minimal netlink socket support for in-kernel consumers.
+//! AF_NETLINK sockets, kobject uevent delivery, and a limited rtnetlink
+//! protocol front end.
 //!
-//! This provides a small AF_NETLINK socket that is sufficient to grow a
-//! rtnetlink implementation for Kata. The current dispatcher intentionally keeps
-//! the protocol surface small and returns netlink errors for unsupported
-//! requests, so later work can extend request handling without changing the
-//! socket plumbing.
+//! Link, address, route, and neighbor objects are owned by devices and the
+//! Router. This module parses requests, serializes mutations with
+//! [`rtnl_lock`], and dumps live snapshots.
 
 use alloc::{
     collections::VecDeque,
@@ -17,17 +16,15 @@ use alloc::{
 };
 use core::sync::atomic::AtomicU64;
 
-use ksync::{Mutex, RwLock, static_lock};
+use ksync::{Mutex, MutexGuard, RwLock, static_lock};
 
-use crate::{SERVICE, general::GeneralOptions};
+use crate::general::GeneralOptions;
 
 mod rtnetlink;
 mod socket;
 #[cfg(unittest)]
 mod tests;
 mod wire;
-
-pub(crate) use rtnetlink::remove_device_state;
 pub use socket::{NetlinkSocket, publish_kobject_uevent};
 pub(crate) use wire::route::{
     PROTOCOL_BOOT as RTPROT_BOOT, PROTOCOL_KERNEL as RTPROT_KERNEL, SCOPE_HOST as RT_SCOPE_HOST,
@@ -69,6 +66,16 @@ pub(super) const ARPHRD_ETHER: u16 = 1;
 static_lock! {
     pub(super) static RTNETLINK_MUTATION_LOCK: Mutex<()> = Mutex::new(());
 }
+
+/// Serializes rtnetlink mutations with device unregister.
+///
+/// Linux keeps this semaphore in `net/core/rtnetlink.c` (`rtnl_mutex`) and
+/// exports `rtnl_lock()`. Device teardown in `net/core/dev.c` takes the same
+/// lock via `unregister_netdev()`; it does not live in an rtnetlink state table.
+pub(crate) fn rtnl_lock() -> MutexGuard<'static, ()> {
+    RTNETLINK_MUTATION_LOCK.lock()
+}
+
 static_lock! {
     pub(super) static UEVENT_SUBSCRIBERS: Mutex<Vec<Weak<NetlinkSocketInner>>> = Mutex::new(Vec::new());
 }

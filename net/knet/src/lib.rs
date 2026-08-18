@@ -138,13 +138,25 @@ pub fn init_network() {
 
 fn subscribe_network_unregister(id: kdevice::DeviceId) {
     subscribe_device_removed(Arc::new(move |removed_id| {
-        if removed_id != id || !SERVICE.is_inited() {
+        if removed_id != id {
             return;
         }
-        if netlink::remove_device_state(id) {
+        if unregister_netdev(id) {
             warn!("network: detached removed device {:?}", id);
         }
     }));
+}
+
+/// Removes a NIC from the network stack.
+///
+/// Takes [`netlink::rtnl_lock`] so teardown is serialized with rtnetlink
+/// mutations, matching Linux `unregister_netdev()` in `net/core/dev.c`.
+pub(crate) fn unregister_netdev(id: kdevice::DeviceId) -> bool {
+    if !SERVICE.is_inited() {
+        return false;
+    }
+    let _rtnl = netlink::rtnl_lock();
+    SERVICE.remove_device_by_model_id(id).is_some()
 }
 
 /// Init vsock subsystem by vsock devices.

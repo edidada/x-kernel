@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! rtnetlink request parsing and control-plane state updates.
+//! rtnetlink request parsing and control-plane mutations.
 
 use alloc::{string::String, vec, vec::Vec};
 
@@ -20,6 +20,7 @@ use super::{
     *,
 };
 use crate::{
+    SERVICE,
     device::{
         LINK_FLAG_UP, LINK_FLAG_VOLATILE, LinkConfigUpdate, LinkKind, LinkSnapshot, NeighborState,
         NeighborUpdate,
@@ -268,62 +269,62 @@ fn dump_routes(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
 }
 
 fn apply_newlink(request: &[u8], header: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
-    match parse_link_update(payload).and_then(update_link_state) {
+    match parse_link_update(payload).and_then(apply_link_update) {
         Ok(()) => ack_packets(request, header),
         Err(errno) => error_packets(request, errno),
     }
 }
 
 fn apply_newaddr(request: &[u8], header: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
-    match parse_addr_request(payload).and_then(|req| add_addr_state(req, header.flags)) {
+    match parse_addr_request(payload).and_then(|req| add_addr(req, header.flags)) {
         Ok(()) => ack_packets(request, header),
         Err(errno) => error_packets(request, errno),
     }
 }
 
 fn apply_deladdr(request: &[u8], header: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
-    match parse_addr_request(payload).and_then(del_addr_state) {
+    match parse_addr_request(payload).and_then(del_addr) {
         Ok(()) => ack_packets(request, header),
         Err(errno) => error_packets(request, errno),
     }
 }
 
 fn apply_newroute(request: &[u8], header: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
-    match parse_route_request(payload).and_then(|req| add_route_state(req, header.flags)) {
+    match parse_route_request(payload).and_then(|req| add_route(req, header.flags)) {
         Ok(()) => ack_packets(request, header),
         Err(errno) => error_packets(request, errno),
     }
 }
 
 fn apply_delroute(request: &[u8], header: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
-    match parse_route_request(payload).and_then(del_route_state) {
+    match parse_route_request(payload).and_then(del_route) {
         Ok(()) => ack_packets(request, header),
         Err(errno) => error_packets(request, errno),
     }
 }
 
 fn apply_newneigh(request: &[u8], header: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
-    match parse_neigh_request(payload).and_then(|req| add_neigh_state(req, header.flags)) {
+    match parse_neigh_request(payload).and_then(|req| add_neigh(req, header.flags)) {
         Ok(()) => ack_packets(request, header),
         Err(errno) => error_packets(request, errno),
     }
 }
 
-pub(super) fn update_link_state(request: LinkUpdateRequest) -> Result<(), LinuxError> {
+pub(super) fn apply_link_update(request: LinkUpdateRequest) -> Result<(), LinuxError> {
     if request.index <= 0 {
         return Err(LinuxError::ENODEV);
     }
     if !SERVICE.is_inited() {
         return Err(LinuxError::ENODEV);
     }
-    let _mutation_guard = RTNETLINK_MUTATION_LOCK.lock();
+    let _rtnl = rtnl_lock();
 
     let current_flags = SERVICE
         .link_snapshot_for_ifindex(request.index)
         .ok_or(LinuxError::ENODEV)?
         .flags;
-    // Linux treats a zero change mask with nonzero flags as an all-bits mask
-    // for backward compatibility. Device-owned volatile flags are preserved.
+    // Linux `rtnl_dev_combine_flags` treats `ifi_change == 0` as `~0`.
+    // `__dev_change_flags` then preserves `IFF_VOLATILE` on the net_device.
     let change = if request.change == 0 && request.flags != 0 {
         u32::MAX
     } else {
@@ -343,12 +344,12 @@ pub(super) fn update_link_state(request: LinkUpdateRequest) -> Result<(), LinuxE
     )
 }
 
-pub(super) fn add_addr_state(request: AddrRequest, flags: u16) -> Result<(), LinuxError> {
+pub(super) fn add_addr(request: AddrRequest, flags: u16) -> Result<(), LinuxError> {
     let entry = ipv4_addr_entry_from_request(request)?;
     if !SERVICE.is_inited() {
         return Err(LinuxError::ENODEV);
     }
-    let _mutation_guard = RTNETLINK_MUTATION_LOCK.lock();
+    let _rtnl = rtnl_lock();
     let existing_action = if flags & NLM_F_REPLACE != 0 && flags & NLM_F_EXCL == 0 {
         ExistingIpv4AddrAction::Keep
     } else {
@@ -357,29 +358,18 @@ pub(super) fn add_addr_state(request: AddrRequest, flags: u16) -> Result<(), Lin
     SERVICE.add_ipv4_addr(entry, existing_action)
 }
 
-pub(super) fn del_addr_state(request: AddrRequest) -> Result<(), LinuxError> {
+pub(super) fn del_addr(request: AddrRequest) -> Result<(), LinuxError> {
     let entry = ipv4_addr_entry_from_request(request)?;
     if !SERVICE.is_inited() {
         return Err(LinuxError::ENODEV);
     }
-    let _mutation_guard = RTNETLINK_MUTATION_LOCK.lock();
+    let _rtnl = rtnl_lock();
     SERVICE.remove_ipv4_addr(entry)?;
     Ok(())
 }
 
-pub(crate) fn remove_device_state(id: kdevice::DeviceId) -> bool {
-    if !SERVICE.is_inited() {
-        return false;
-    }
-    let _mutation_guard = RTNETLINK_MUTATION_LOCK.lock();
-    let Some(()) = SERVICE.remove_device_by_model_id(id) else {
-        return false;
-    };
-    true
-}
-
-pub(super) fn add_route_state(request: RouteRequest, flags: u16) -> Result<(), LinuxError> {
-    let _mutation_guard = RTNETLINK_MUTATION_LOCK.lock();
+pub(super) fn add_route(request: RouteRequest, flags: u16) -> Result<(), LinuxError> {
+    let _rtnl = rtnl_lock();
     if !SERVICE.is_inited() {
         return Err(LinuxError::ENODEV);
     }
@@ -401,8 +391,8 @@ pub(super) fn add_route_state(request: RouteRequest, flags: u16) -> Result<(), L
     Ok(())
 }
 
-pub(super) fn del_route_state(request: RouteRequest) -> Result<(), LinuxError> {
-    let _mutation_guard = RTNETLINK_MUTATION_LOCK.lock();
+pub(super) fn del_route(request: RouteRequest) -> Result<(), LinuxError> {
+    let _rtnl = rtnl_lock();
     validate_route_request(request)?;
     if normalize_route_table(request.table) != RT_TABLE_MAIN
         || normalize_route_type(request.route_type) != RTN_UNICAST
@@ -424,8 +414,8 @@ pub(super) fn del_route_state(request: RouteRequest) -> Result<(), LinuxError> {
     Ok(())
 }
 
-pub(super) fn add_neigh_state(request: NeighRequest, flags: u16) -> Result<(), LinuxError> {
-    let _mutation_guard = RTNETLINK_MUTATION_LOCK.lock();
+pub(super) fn add_neigh(request: NeighRequest, flags: u16) -> Result<(), LinuxError> {
+    let _rtnl = rtnl_lock();
     if request.family != wire_route::FAMILY_IPV4 {
         return Err(LinuxError::EAFNOSUPPORT);
     }

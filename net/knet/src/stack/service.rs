@@ -640,6 +640,9 @@ impl Service {
     }
 
     /// Removes a device and refreshes every address-derived data-plane view.
+    ///
+    /// Callers must hold [`crate::netlink::rtnl_lock`], matching Linux
+    /// `unregister_netdevice()` which requires `ASSERT_RTNL()`.
     pub(crate) fn remove_device_by_model_id(&self, id: kdevice::DeviceId) -> Option<()> {
         let mut router = self.router.lock();
         let effective_mtu = router.effective_mtu();
