@@ -43,7 +43,7 @@ const ICMPV4_CODE_FRAG_EXPIRED: u8 = 1;
 pub(crate) type QueuedUdpError = UdpSocketQueuedError;
 
 fn queue_ipv4_error(local: SocketAddrV4, remote: SocketAddrV4, error: QueuedUdpError) {
-    if let Some(state) = udp::lookup_udp_error_state(local.into(), remote.into()) {
+    if let Some(state) = udp::lookup_udp_error_state(local.into(), remote.into(), 0) {
         if state.peer_endpoint().is_some() {
             state.record_socket_error(error.ancillary.errno);
         }
@@ -51,8 +51,13 @@ fn queue_ipv4_error(local: SocketAddrV4, remote: SocketAddrV4, error: QueuedUdpE
     }
 }
 
-fn queue_ipv6_error(local: SocketAddrV6, remote: SocketAddrV6, error: QueuedUdpError) {
-    if let Some(state) = udp::lookup_udp_error_state(local.into(), remote.into()) {
+fn queue_ipv6_error(
+    local: SocketAddrV6,
+    remote: SocketAddrV6,
+    error: QueuedUdpError,
+    arrival_ifindex: u32,
+) {
+    if let Some(state) = udp::lookup_udp_error_state(local.into(), remote.into(), arrival_ifindex) {
         if state.peer_endpoint().is_some() {
             state.record_socket_error(error.ancillary.errno);
         }
@@ -273,7 +278,7 @@ pub(crate) fn inspect_icmpv6_error(packet: &[u8], ifindex: i32) {
             offender: Some(offender),
         },
     };
-    queue_ipv6_error(local, remote, error);
+    queue_ipv6_error(local, remote, error, udp::arrival_ifindex(ifindex));
 }
 
 #[cfg(unittest)]

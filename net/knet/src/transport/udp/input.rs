@@ -33,7 +33,7 @@ pub(crate) fn handle_ipv4_packet(
         return (InputDisposition::Malformed, Some(packet));
     };
 
-    let Some(pcb) = registry::lookup_udp_pcb(local, remote) else {
+    let Some(pcb) = registry::lookup_udp_pcb(local, remote, 0) else {
         return (InputDisposition::NoSocket, Some(packet));
     };
 
@@ -62,7 +62,8 @@ pub(crate) fn handle_ipv6_packet(
         return (InputDisposition::Malformed, Some(packet));
     };
 
-    let Some(pcb) = registry::lookup_udp_pcb(local, remote) else {
+    let Some(pcb) = registry::lookup_udp_pcb(local, remote, registry::arrival_ifindex(ifindex))
+    else {
         return (InputDisposition::NoSocket, Some(packet));
     };
 

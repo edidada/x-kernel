@@ -356,7 +356,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - IPv6 差错生成保持 RFC 4443 §2.4 限制：仅应答本地单播目的，不对组播/未指定源或组播目的应答，且不对 ICMPv6 差错与 Redirect 再回差错。
 - IPv6 入向重组改动保持队列数量、内存和 60 秒超时上限，拒绝重叠 range，并要求第一片带齐上层头；完成后不得把 Fragment 头交给 UDP/TCP。
 - IPv4 分片重组改动保持队列数量、内存和超时上限，并拒绝重叠 range。
-- UDP registry 改动保持 bind、connect、普通接收和 ICMP/ICMPv6 error lookup 使用同一 PCB 所有权来源；ICMPv6 差错 lookup 必须带上到达接口 scope，不能把 `sin6_scope_id` 写成 0。
+- UDP registry 改动保持 bind、connect、普通接收和 ICMP/ICMPv6 error lookup 使用同一 PCB 所有权来源；非零 bind `scope_id` 按到达 ifindex 匹配，不能用全局目的地址的 `sin6_scope_id==0` 代替到达接口。
 - 修改 poller 状态机或 `Service::poll_budgeted` 时验证四态转换、单执行者获取、一次 CAS 释放、分阶段 smoltcp 预算和 1 ms 软时间上限；`PollProgress::has_more` 只能包含立即工作，未来协议 deadline 必须等待 timer 到期后发布；TX waiter 只能由 `tx_capacity_changed` 触发全局容量唤醒。
 - 修改 UDP PCB 队列时验证零容量创建、扩容失败丢包、1024 数据报上限、FIFO 顺序和排空后 64 槽容量回收。
 - 修改 TCP Drop 或异步 TX 路径时验证已成功写入的 payload 在文件关闭后仍由协议对象持有，未读数据关闭发送 RST，deferred-close handle 在 `Closed` 后删除，状态期限只作用于 orphan `FIN_WAIT_2`。

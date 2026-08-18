@@ -88,23 +88,35 @@ impl UdpPcbRegistry {
         &self,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
+        arrival_ifindex: u32,
         map_pcb_fn: impl Fn(&Arc<UdpPcb>) -> T,
     ) -> Option<T> {
-        self.bucket(local_addr.port())
-            .lock()
-            .lookup_in_bucket(local_addr, remote_addr, map_pcb_fn)
+        self.bucket(local_addr.port()).lock().lookup_in_bucket(
+            local_addr,
+            remote_addr,
+            arrival_ifindex,
+            map_pcb_fn,
+        )
     }
 
-    fn lookup(&self, local_addr: SocketAddr, remote_addr: SocketAddr) -> Option<Arc<UdpPcb>> {
-        self.lookup_map(local_addr, remote_addr, |pcb| pcb.clone())
+    fn lookup(
+        &self,
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        arrival_ifindex: u32,
+    ) -> Option<Arc<UdpPcb>> {
+        self.lookup_map(local_addr, remote_addr, arrival_ifindex, |pcb| pcb.clone())
     }
 
     fn lookup_state(
         &self,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
+        arrival_ifindex: u32,
     ) -> Option<Arc<UdpSocketState>> {
-        self.lookup_map(local_addr, remote_addr, |pcb| pcb.state.clone())
+        self.lookup_map(local_addr, remote_addr, arrival_ifindex, |pcb| {
+            pcb.state.clone()
+        })
     }
 
     fn bind(
@@ -261,6 +273,7 @@ impl UdpPcbBucket {
         &self,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
+        arrival_ifindex: u32,
         map_pcb_fn: impl Fn(&Arc<UdpPcb>) -> T,
     ) -> Option<T> {
         let records = self.by_port.get(&local_addr.port())?;
@@ -269,11 +282,16 @@ impl UdpPcbBucket {
         let mut selected_score = 0;
         for record in records {
             let local_endpoint = record.local_endpoint;
-            if !local_endpoint_matches(local_endpoint, local_addr) {
+            if !local_endpoint_matches(local_endpoint, local_addr, arrival_ifindex) {
                 continue;
             }
 
-            let Some(score) = delivery_score(&record.pcb.state, local_endpoint, remote_addr) else {
+            let Some(score) = delivery_score(
+                &record.pcb.state,
+                local_endpoint,
+                remote_addr,
+                arrival_ifindex,
+            ) else {
                 continue;
             };
             if score > selected_score {
@@ -426,20 +444,27 @@ pub(crate) fn register_udp_state_for_test(state: Arc<UdpSocketState>) {
     register_udp_pcb(UdpPcb::new(state));
 }
 
+pub(crate) fn arrival_ifindex(ifindex: i32) -> u32 {
+    // Negative ifindex is not a valid interface and must not match a scoped bind.
+    u32::try_from(ifindex).unwrap_or(0)
+}
+
 pub(super) fn lookup_udp_pcb(
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
+    arrival_ifindex: u32,
 ) -> Option<Arc<UdpPcb>> {
     init_udp_registry();
-    UDP_PCB_REGISTRY.lookup(local_addr, remote_addr)
+    UDP_PCB_REGISTRY.lookup(local_addr, remote_addr, arrival_ifindex)
 }
 
 pub(crate) fn lookup_udp_error_state(
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
+    arrival_ifindex: u32,
 ) -> Option<Arc<UdpSocketState>> {
     init_udp_registry();
-    UDP_PCB_REGISTRY.lookup_state(local_addr, remote_addr)
+    UDP_PCB_REGISTRY.lookup_state(local_addr, remote_addr, arrival_ifindex)
 }
 
 fn bucket_index_for_port(port: u16) -> usize {
@@ -451,10 +476,11 @@ fn delivery_score(
     state: &UdpSocketState,
     local_endpoint: IpEndpoint,
     remote_addr: SocketAddr,
+    arrival_ifindex: u32,
 ) -> Option<u8> {
     let is_specific_local = !local_endpoint.addr.is_unspecified();
     match state.peer_endpoint() {
-        Some((peer, _)) if endpoint_matches_addr(peer, remote_addr) => {
+        Some((peer, _)) if endpoint_matches_addr(peer, remote_addr, arrival_ifindex) => {
             Some(if is_specific_local { 4 } else { 3 })
         }
         Some(_) => None,
@@ -462,17 +488,17 @@ fn delivery_score(
     }
 }
 
-fn local_endpoint_matches(endpoint: IpEndpoint, addr: SocketAddr) -> bool {
+fn local_endpoint_matches(endpoint: IpEndpoint, addr: SocketAddr, arrival_ifindex: u32) -> bool {
     endpoint.port == addr.port()
         && address_family_matches(endpoint.addr, addr.ip())
         && (endpoint.addr.is_unspecified() || endpoint_addr_matches(endpoint.addr, addr.ip()))
-        && endpoint_scope_matches(endpoint, addr)
+        && endpoint_scope_matches(endpoint, arrival_ifindex)
 }
 
-pub(super) fn endpoint_matches_addr(endpoint: IpEndpoint, addr: SocketAddr) -> bool {
+fn endpoint_matches_addr(endpoint: IpEndpoint, addr: SocketAddr, arrival_ifindex: u32) -> bool {
     endpoint.port == addr.port()
         && endpoint_addr_matches(endpoint.addr, addr.ip())
-        && endpoint_scope_matches(endpoint, addr)
+        && endpoint_scope_matches(endpoint, arrival_ifindex)
 }
 
 fn address_family_matches(endpoint_addr: IpAddress, addr: IpAddr) -> bool {
@@ -490,14 +516,10 @@ fn endpoint_addr_matches(endpoint_addr: IpAddress, addr: IpAddr) -> bool {
     }
 }
 
-fn endpoint_scope_matches(endpoint: IpEndpoint, addr: SocketAddr) -> bool {
-    if endpoint.scope_id == 0 {
-        return true;
-    }
-    match addr {
-        SocketAddr::V6(addr) => endpoint.scope_id == addr.scope_id(),
-        SocketAddr::V4(_) => true,
-    }
+fn endpoint_scope_matches(endpoint: IpEndpoint, arrival_ifindex: u32) -> bool {
+    // Linux `udp_sk_bound_dev_eq` compares `sk_bound_dev_if` with the packet's
+    // arrival ifindex, independent of whether the destination is global.
+    endpoint.scope_id == 0 || endpoint.scope_id == arrival_ifindex
 }
 
 pub(super) fn listen_endpoint(endpoint: IpEndpoint) -> IpListenEndpoint {
@@ -699,12 +721,12 @@ mod tests {
         assert_eq!(listen_endpoint(local_scope_2).scope_id, 2);
         assert_eq!(listen_endpoint(local_scope_3).scope_id, 3);
         assert!(Arc::ptr_eq(
-            &lookup_udp_pcb(ipv6_socket_addr(link_local, 8086, 2), remote)
+            &lookup_udp_pcb(ipv6_socket_addr(link_local, 8086, 2), remote, 2)
                 .expect("scope 2 bind should receive packets from interface 2"),
             &pcb_scope_2
         ));
         assert!(Arc::ptr_eq(
-            &lookup_udp_pcb(ipv6_socket_addr(link_local, 8086, 3), remote)
+            &lookup_udp_pcb(ipv6_socket_addr(link_local, 8086, 3), remote, 3)
                 .expect("scope 3 bind should receive packets from interface 3"),
             &pcb_scope_3
         ));
@@ -749,6 +771,7 @@ mod tests {
         let selected = lookup_udp_pcb(
             socket_addr(Ipv4Address::new(10, 0, 0, 2), 8080),
             socket_addr(Ipv4Address::new(192, 0, 2, 1), 5353),
+            0,
         )
         .expect("connected PCB should match");
 
@@ -773,6 +796,7 @@ mod tests {
         let selected = lookup_udp_pcb(
             socket_addr(Ipv4Address::new(10, 0, 0, 2), 5353),
             socket_addr(Ipv4Address::new(192, 0, 2, 1), 49152),
+            0,
         )
         .expect("same-port UDP PCB should match");
 
@@ -802,6 +826,7 @@ mod tests {
         let selected = lookup_udp_pcb(
             socket_addr(Ipv4Address::new(10, 0, 0, 2), 8083),
             socket_addr(Ipv4Address::new(192, 0, 2, 1), 5353),
+            0,
         )
         .expect("wildcard connected PCB should match");
 
@@ -826,7 +851,7 @@ mod tests {
             socket_addr(Ipv4Address::new(198, 51, 100, 9), 49152),
         );
         assert!(
-            lookup_udp_pcb(v4_packet.0, v4_packet.1).is_none(),
+            lookup_udp_pcb(v4_packet.0, v4_packet.1, 0).is_none(),
             "IPv6 wildcard bind must not receive IPv4 datagrams"
         );
 
@@ -846,7 +871,7 @@ mod tests {
                 0,
             ),
         );
-        assert!(lookup_udp_pcb(v6_packet.0, v6_packet.1).is_some());
+        assert!(lookup_udp_pcb(v6_packet.0, v6_packet.1, 0).is_some());
 
         clear_registry();
     }
@@ -864,25 +889,23 @@ mod tests {
         let remote = ipv6_socket_addr(
             Ipv6Address::from_octets([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
             49152,
-            2,
+            0,
         );
-        let on_if2 = ipv6_socket_addr(
+        // Production RX writes dest scope only for link-local/multicast.
+        // Global unicast destinations report scope 0; lookup uses ifindex.
+        let global_dest = ipv6_socket_addr(
             Ipv6Address::from_octets([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9]),
             5353,
-            2,
-        );
-        let on_if3 = ipv6_socket_addr(
-            Ipv6Address::from_octets([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9]),
-            5353,
-            3,
+            0,
         );
 
         assert!(Arc::ptr_eq(
-            &lookup_udp_pcb(on_if2, remote).expect("scope 2 wildcard should match ifindex 2"),
+            &lookup_udp_pcb(global_dest, remote, 2)
+                .expect("scope 2 wildcard should match ifindex 2"),
             &pcb
         ));
         assert!(
-            lookup_udp_pcb(on_if3, remote).is_none(),
+            lookup_udp_pcb(global_dest, remote, 3).is_none(),
             "scope 2 wildcard must not receive datagrams from ifindex 3"
         );
 
@@ -901,7 +924,8 @@ mod tests {
         assert!(
             lookup_udp_pcb(
                 socket_addr(Ipv4Address::new(10, 0, 0, 2), 8084),
-                socket_addr(Ipv4Address::new(192, 0, 2, 1), 49152)
+                socket_addr(Ipv4Address::new(192, 0, 2, 1), 49152),
+                0,
             )
             .is_none()
         );

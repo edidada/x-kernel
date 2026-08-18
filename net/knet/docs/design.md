@@ -431,7 +431,10 @@ IPv6 扩展头用于定位上层协议；入向 Fragment 按 RFC 8200 §4.5 / RF
 
 IPv6 link-local 收发使用 `sin6_scope_id` 选择接口：接收路径写入报文到达的接口索引，
 UDP/TCP bind 对需要 scope 的地址（Linux `__ipv6_addr_needs_scope_id`：link-local 单播以及 node-local / link-local 组播）拒绝 `scope_id == 0`（`EINVAL`）和无效 ifindex（`ENODEV`）。
+UDP/TCP connect 对同样需要接口的目的地址：若 socket 尚未绑定接口且 `sin6_scope_id == 0` 则返回 `EINVAL`；已绑定接口时须与 `sin6_scope_id` 一致（Linux `tcp_v6_connect` / `ip6_datagram_connect`）。
+UDP bind registry 的非零 `scope_id` 在 RX 与 ICMPv6 差错 lookup 中按到达 ifindex 匹配，对齐 Linux `sk_bound_dev_if` / `udp_sk_bound_dev_eq`，与目的地址是否为全局单播无关。
 UDP bind registry、endpoint 匹配和设备 mask 保留该 scope，发送路径按 scope 选择路由和源地址；已 bind 源地址的 `sendto` 仍做路由与设备 up 检查，无路由或管理 down 时返回 `ENETUNREACH`。
+`getsockname` / `getpeername` 对需要接口 scope 的地址返回绑定 ifindex（Linux `ipv6_iface_scope_id`），全局单播仍为 0。
 ICMPv6 差错查找同样用到达接口填 quoted 地址的 scope，使绑定或连接到 `fe80::%ethN` 的 socket 能收到 Port Unreachable / Packet Too Big。
 IPv6 endpoint 的文本格式遵循 `[address%scope]:port`，避免地址与端口之间的冒号歧义。
 当前不实现 `IPV6_FLOWINFO_SEND` 或 flow-label 路由；`sockaddr_in6.sin6_flowinfo`

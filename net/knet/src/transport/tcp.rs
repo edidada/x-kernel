@@ -5,8 +5,8 @@
 //! TCP socket implementation.
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::{
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::atomic::{AtomicBool, Ordering},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
 use hashbrown::HashMap;
@@ -27,7 +27,7 @@ use crate::{
     Shutdown, Socket, SocketAddrEx, SocketOps,
     consts::{TCP_RX_BUF_LEN, TCP_TX_BUF_LEN},
     general::GeneralOptions,
-    ip::Ipv6Address,
+    ip::{IpAddress as NativeIpAddress, Ipv6Address},
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     poll_interfaces,
     poller::{PollReason, network_poller},
@@ -54,6 +54,7 @@ pub struct TcpSocket {
     state: StateLock,
     dispatch_irq: SocketHandle,
     bound_endpoint: Mutex<IpListenEndpoint>,
+    bound_scope_id: AtomicU32,
     accepted_remote_endpoint: Option<IpEndpoint>,
     bound_registered: AtomicBool,
     family: AddressFamily,
@@ -82,6 +83,7 @@ impl TcpSocket {
             state: StateLock::new(State::Idle),
             dispatch_irq,
             bound_endpoint: Mutex::new(empty_endpoint()),
+            bound_scope_id: AtomicU32::new(0),
             accepted_remote_endpoint: None,
             bound_registered: AtomicBool::new(false),
             family,
@@ -107,6 +109,7 @@ impl TcpSocket {
             state: StateLock::new(State::Connected),
             dispatch_irq,
             bound_endpoint: Mutex::new(empty_endpoint()),
+            bound_scope_id: AtomicU32::new(0),
             accepted_remote_endpoint: Some(remote_endpoint),
             bound_registered: AtomicBool::new(false),
             family,
@@ -368,6 +371,10 @@ impl SocketOps for TcpSocket {
         if let SocketAddr::V6(addr) = local_addr {
             validate_ipv6_bind_scope(Ipv6Address::from(*addr.ip()), addr.scope_id())?;
         }
+        let bind_scope_id = match local_addr {
+            SocketAddr::V6(addr) => addr.scope_id(),
+            SocketAddr::V4(_) => 0,
+        };
         self.state
             .lock(State::Idle)
             .map_err(|_| k_err_type!(InvalidInput, "already bound"))?
@@ -393,8 +400,7 @@ impl SocketOps for TcpSocket {
                 }
                 self.register_bound_endpoint(endpoint)?;
                 *self.bound_endpoint.lock() = endpoint;
-                self.general
-                    .set_device_mask(SERVICE.smoltcp_device_mask_for(&endpoint));
+                self.set_bound_scope(bind_scope_id, &endpoint);
                 Ok(())
             })
     }
@@ -404,6 +410,7 @@ impl SocketOps for TcpSocket {
         if !self.addr_matches_family(&remote_addr) {
             return Err(KError::from(LinuxError::EAFNOSUPPORT));
         }
+        let connect_scope = self.ipv6_connect_scope(remote_addr)?;
         self.state
             .lock(State::Idle)
             .map_err(|state| {
@@ -421,7 +428,10 @@ impl SocketOps for TcpSocket {
                 let mut bound_endpoint = *self.bound_endpoint.lock();
                 if bound_endpoint.addr.is_none() {
                     bound_endpoint.addr =
-                        Some(SERVICE.get_smoltcp_source_address(&remote_endpoint.addr)?);
+                        Some(SERVICE.get_smoltcp_source_address_scoped(
+                            &remote_endpoint.addr,
+                            connect_scope,
+                        )?);
                 }
                 if bound_endpoint.port == 0 {
                     let local_addr = bound_endpoint
@@ -457,11 +467,15 @@ impl SocketOps for TcpSocket {
                 }
 
                 *self.bound_endpoint.lock() = bound_endpoint;
+                self.set_bound_scope(connect_scope, &bound_endpoint);
                 if should_register {
                     self.bound_registered.store(true, Ordering::Release);
                 }
-                self.general
-                    .set_device_mask(SERVICE.smoltcp_device_mask_for_addr(&remote_endpoint.addr));
+                if connect_scope == 0 {
+                    self.general.set_device_mask(
+                        SERVICE.smoltcp_device_mask_for_addr(&remote_endpoint.addr),
+                    );
+                }
                 Ok(())
             })?;
 
@@ -639,27 +653,16 @@ impl SocketOps for TcpSocket {
         let endpoint = self
             .with_smol_socket(|socket| socket.local_endpoint().map(endpoint_from_ip_endpoint))
             .unwrap_or_else(|| *self.bound_endpoint.lock());
-        Ok(SocketAddrEx::Ip(SocketAddr::new(
-            endpoint.addr.map_or_else(
-                || match self.family {
-                    AddressFamily::Ipv4 => Ipv4Addr::UNSPECIFIED.into(),
-                    AddressFamily::Ipv6 => Ipv6Addr::UNSPECIFIED.into(),
-                },
-                Into::into,
-            ),
-            endpoint.port,
-        )))
+        Ok(SocketAddrEx::Ip(self.socket_addr_from_listen(endpoint)))
     }
 
     fn peer_addr(&self) -> KResult<SocketAddrEx> {
         self.with_smol_socket(|socket| {
-            Ok(SocketAddrEx::Ip(
-                socket
-                    .remote_endpoint()
-                    .or(self.accepted_remote_endpoint)
-                    .ok_or(KError::NotConnected)?
-                    .into(),
-            ))
+            let endpoint = socket
+                .remote_endpoint()
+                .or(self.accepted_remote_endpoint)
+                .ok_or(KError::NotConnected)?;
+            Ok(SocketAddrEx::Ip(self.socket_addr_from_endpoint(endpoint)))
         })
     }
 
@@ -783,6 +786,87 @@ impl TcpSocket {
             unregister_tcp_bound(*self.bound_endpoint.lock());
         }
     }
+
+    fn ipv6_connect_scope(&self, remote_addr: SocketAddr) -> KResult<u32> {
+        resolve_ipv6_connect_scope(remote_addr, self.bound_scope_id.load(Ordering::Acquire))
+    }
+
+    fn set_bound_scope(&self, scope_id: u32, endpoint: &IpListenEndpoint) {
+        if scope_id == 0 {
+            self.general
+                .set_device_mask(SERVICE.smoltcp_device_mask_for(endpoint));
+            return;
+        }
+        self.bound_scope_id.store(scope_id, Ordering::Release);
+        self.general
+            .set_device_mask(SERVICE.device_mask_for_scoped_addr(
+                &NativeIpAddress::Ipv6(Ipv6Address::UNSPECIFIED),
+                scope_id,
+            ));
+    }
+
+    fn socket_addr_from_listen(&self, endpoint: IpListenEndpoint) -> SocketAddr {
+        match self.family {
+            AddressFamily::Ipv4 => SocketAddr::new(
+                endpoint
+                    .addr
+                    .map_or(Ipv4Addr::UNSPECIFIED.into(), Into::into),
+                endpoint.port,
+            ),
+            AddressFamily::Ipv6 => {
+                let addr = match endpoint.addr {
+                    Some(IpAddress::Ipv6(addr)) => addr,
+                    _ => Ipv6Addr::UNSPECIFIED,
+                };
+                ipv6_socket_addr_with_bound_scope(
+                    addr,
+                    endpoint.port,
+                    self.bound_scope_id.load(Ordering::Acquire),
+                )
+            }
+        }
+    }
+
+    fn socket_addr_from_endpoint(&self, endpoint: IpEndpoint) -> SocketAddr {
+        match endpoint.addr {
+            IpAddress::Ipv4(addr) => SocketAddr::new(addr.into(), endpoint.port),
+            IpAddress::Ipv6(addr) => ipv6_socket_addr_with_bound_scope(
+                addr,
+                endpoint.port,
+                self.bound_scope_id.load(Ordering::Acquire),
+            ),
+        }
+    }
+}
+
+/// Resolves the interface scope for a TCPv6 connect, matching Linux `tcp_v6_connect`.
+///
+/// Link-local destinations require a non-zero ifindex from `sin6_scope_id` or a
+/// previous bind. Conflicting bind and connect interfaces return `EINVAL`.
+fn resolve_ipv6_connect_scope(remote_addr: SocketAddr, bound_scope: u32) -> KResult<u32> {
+    let SocketAddr::V6(addr) = remote_addr else {
+        return Ok(0);
+    };
+    let ipv6 = Ipv6Address::from(*addr.ip());
+    if !ipv6.needs_iface_scope() {
+        return Ok(bound_scope);
+    }
+    let remote_scope = addr.scope_id();
+    if remote_scope != 0 && bound_scope != 0 && remote_scope != bound_scope {
+        return Err(LinuxError::EINVAL.into());
+    }
+    let scope = if remote_scope != 0 {
+        remote_scope
+    } else {
+        bound_scope
+    };
+    validate_ipv6_bind_scope(ipv6, scope)?;
+    Ok(scope)
+}
+
+fn ipv6_socket_addr_with_bound_scope(addr: Ipv6Addr, port: u16, bound_scope_id: u32) -> SocketAddr {
+    let scope = Ipv6Address::from(addr).iface_scope_id(i32::try_from(bound_scope_id).unwrap_or(0));
+    SocketAddr::V6(SocketAddrV6::new(addr, port, 0, scope))
 }
 
 lazy_static! {
@@ -872,7 +956,7 @@ fn get_ephemeral_port(local_addr: smoltcp::wire::IpAddress) -> KResult<u16> {
 #[cfg(unittest)]
 mod tests {
     use alloc::vec;
-    use core::net::Ipv4Addr;
+    use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
     use smoltcp::{time::Instant, wire::Ipv4Address};
     use unittest::def_test;
@@ -1094,5 +1178,33 @@ mod tests {
         let second = get_ephemeral_port(local_addr).unwrap();
         assert!((PORT_START..=PORT_END).contains(&second));
         assert_ne!(second, blocked.port);
+    }
+
+    #[def_test]
+    fn ipv6_connect_without_scope_returns_einval() {
+        let remote = SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+            80,
+            0,
+            0,
+        ));
+        assert_eq!(
+            resolve_ipv6_connect_scope(remote, 0).unwrap_err(),
+            KError::from(LinuxError::EINVAL)
+        );
+    }
+
+    #[def_test]
+    fn ipv6_getsockname_reports_iface_scope_id() {
+        let link_local = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+        assert_eq!(
+            ipv6_socket_addr_with_bound_scope(link_local, 8080, 3),
+            SocketAddr::V6(SocketAddrV6::new(link_local, 8080, 0, 3))
+        );
+        let global = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        assert_eq!(
+            ipv6_socket_addr_with_bound_scope(global, 8080, 3),
+            SocketAddr::V6(SocketAddrV6::new(global, 8080, 0, 0))
+        );
     }
 }

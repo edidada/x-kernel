@@ -284,11 +284,19 @@ impl Service {
         &self,
         dst_addr: &SmoltcpIpAddress,
     ) -> KResult<SmoltcpIpAddress> {
+        self.get_smoltcp_source_address_scoped(dst_addr, 0)
+    }
+
+    pub fn get_smoltcp_source_address_scoped(
+        &self,
+        dst_addr: &SmoltcpIpAddress,
+        scope_id: u32,
+    ) -> KResult<SmoltcpIpAddress> {
         let dst_addr = super::from_smoltcp_ip_address(*dst_addr);
         self.router
             .lock()
-            .output_route_source(&dst_addr)
-            .map(super::to_smoltcp_ip_address)
+            .output_route(&dst_addr, scope_id)
+            .map(|(source, _)| super::to_smoltcp_ip_address(source))
     }
 
     pub fn smoltcp_device_mask_for(&self, endpoint: &SmoltcpIpListenEndpoint) -> u32 {

@@ -15,7 +15,7 @@ mod wait;
 pub use self::socket::UdpSocket;
 pub(crate) use self::{
     input::{InputDisposition, handle_ipv4_packet, handle_ipv6_packet},
-    registry::{init_udp_registry, lookup_udp_error_state},
+    registry::{arrival_ifindex, init_udp_registry, lookup_udp_error_state},
     state::UdpSocketQueuedError,
 };
 #[cfg(unittest)]
@@ -126,7 +126,8 @@ mod tests {
         assert!(
             lookup_udp_pcb(
                 socket_addr(Ipv4Address::new(10, 0, 0, 2), 49152),
-                socket_addr(Ipv4Address::new(192, 0, 2, 1), 5353)
+                socket_addr(Ipv4Address::new(192, 0, 2, 1), 5353),
+                0,
             )
             .is_none()
         );
@@ -151,6 +152,7 @@ mod tests {
         let selected = lookup_udp_pcb(
             socket_addr(Ipv4Address::new(10, 0, 0, 2), 49152),
             socket_addr(Ipv4Address::new(192, 0, 2, 2), 5353),
+            0,
         )
         .expect("disconnected UDP PCB should keep receiving on its local port");
         assert!(Arc::ptr_eq(&selected, &socket.pcb));
