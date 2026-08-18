@@ -491,13 +491,12 @@ fn endpoint_addr_matches(endpoint_addr: IpAddress, addr: IpAddr) -> bool {
 }
 
 fn endpoint_scope_matches(endpoint: IpEndpoint, addr: SocketAddr) -> bool {
-    match (endpoint.addr, addr) {
-        (IpAddress::Ipv6(endpoint_addr), SocketAddr::V6(addr))
-            if endpoint_addr.is_link_local() || endpoint_addr.is_multicast() =>
-        {
-            endpoint.scope_id == 0 || endpoint.scope_id == addr.scope_id()
-        }
-        _ => true,
+    if endpoint.scope_id == 0 {
+        return true;
+    }
+    match addr {
+        SocketAddr::V6(addr) => endpoint.scope_id == addr.scope_id(),
+        SocketAddr::V4(_) => true,
     }
 }
 
@@ -848,6 +847,44 @@ mod tests {
             ),
         );
         assert!(lookup_udp_pcb(v6_packet.0, v6_packet.1).is_some());
+
+        clear_registry();
+    }
+
+    #[def_test(serial)]
+    fn wildcard_scoped_bind_matches_arrival_interface() {
+        clear_registry();
+
+        let local = IpEndpoint {
+            addr: IpAddress::Ipv6(Ipv6Address::UNSPECIFIED),
+            port: 5353,
+            scope_id: 2,
+        };
+        let pcb = bind_test_pcb(local, false);
+        let remote = ipv6_socket_addr(
+            Ipv6Address::from_octets([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+            49152,
+            2,
+        );
+        let on_if2 = ipv6_socket_addr(
+            Ipv6Address::from_octets([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9]),
+            5353,
+            2,
+        );
+        let on_if3 = ipv6_socket_addr(
+            Ipv6Address::from_octets([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9]),
+            5353,
+            3,
+        );
+
+        assert!(Arc::ptr_eq(
+            &lookup_udp_pcb(on_if2, remote).expect("scope 2 wildcard should match ifindex 2"),
+            &pcb
+        ));
+        assert!(
+            lookup_udp_pcb(on_if3, remote).is_none(),
+            "scope 2 wildcard must not receive datagrams from ifindex 3"
+        );
 
         clear_registry();
     }

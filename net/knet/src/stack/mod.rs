@@ -8,6 +8,11 @@ use smoltcp::wire::IpAddress as SmoltcpIpAddress;
 
 use crate::ip::IpAddress;
 
+/// IANA/Linux `IPPROTO_TCP`. Shared by IPv4 and IPv6 headers.
+pub(crate) const PROTOCOL_TCP: u8 = 6;
+/// IANA/Linux `IPPROTO_UDP`. Shared by IPv4 and IPv6 headers.
+pub(crate) const PROTOCOL_UDP: u8 = 17;
+
 pub(crate) mod ingress;
 pub(crate) mod ipv4;
 pub(crate) mod ipv6;

@@ -32,6 +32,8 @@ const GC_STALE_TIME: TimeSpan = TimeSpan::from_secs(60);
 const MCAST_PROBES: u8 = 3;
 /// Linux `ucast_solicit` / `NEIGH_VAR_UCAST_PROBES`.
 const UCAST_PROBES: u8 = 3;
+/// Linux `nd_tbl.gc_thresh3` / `arp_tbl.gc_thresh3`.
+const GC_THRESH3: usize = 1024;
 
 /// NUD states from Linux `include/uapi/linux/neighbour.h`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -396,6 +398,9 @@ impl NeighborCache {
             ReachabilityHint::Confirmed => entry.enter_reachable(now),
             ReachabilityHint::Unconfirmed => entry.enter_stale(),
         }
+        if !self.prepare_dynamic_insert() {
+            return Vec::new();
+        }
         self.entries.insert(addr, entry);
         Vec::new()
     }
@@ -443,6 +448,9 @@ impl NeighborCache {
     ) -> ResolveResult {
         self.remove_pending_of(addr);
         if self.pending_len >= ETHERNET_MAX_PENDING_PACKETS {
+            return ResolveResult::Dropped;
+        }
+        if !self.entries.contains_key(&addr) && !self.prepare_dynamic_insert() {
             return ResolveResult::Dropped;
         }
 
@@ -523,6 +531,30 @@ impl NeighborCache {
             }
             now.saturating_duration_since(entry.used_at) < GC_STALE_TIME
         });
+    }
+
+    fn prepare_dynamic_insert(&mut self) -> bool {
+        while self.entries.len() >= GC_THRESH3 {
+            if !self.evict_oldest_stale_or_failed() {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn evict_oldest_stale_or_failed(&mut self) -> bool {
+        let victim = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| matches!(entry.state, NudState::Failed | NudState::Stale))
+            .min_by_key(|(_, entry)| entry.used_at)
+            .map(|(addr, _)| *addr);
+        let Some(addr) = victim else {
+            return false;
+        };
+        self.remove_pending_of(addr);
+        self.entries.remove(&addr);
+        true
     }
 }
 
@@ -745,5 +777,23 @@ mod tests {
         assert_eq!(cache.entries[&addr].state, NudState::Permanent);
         assert_eq!(cache.entries[&addr].hardware_address, Some(mac));
         assert!(cache.entries[&addr].pending.is_empty());
+    }
+
+    #[def_test]
+    fn overflow_evicts_oldest_stale_before_accepting_a_new_entry() {
+        let mut cache = NeighborCache::new();
+        let older = IpAddress::Ipv6(Ipv6Address::from_octets([
+            0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        ]));
+        let newer = IpAddress::Ipv6(Ipv6Address::from_octets([
+            0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+        ]));
+        let mac = sample_mac();
+        let _ = cache.learn(older, NeighborLearn::unconfirmed_override(mac), now_at(1));
+        let _ = cache.learn(newer, NeighborLearn::unconfirmed_override(mac), now_at(2));
+
+        assert!(cache.evict_oldest_stale_or_failed());
+        assert!(!cache.entries.contains_key(&older));
+        assert!(cache.entries.contains_key(&newer));
     }
 }

@@ -295,7 +295,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | F-20 | 混合或畸形 netlink 批次 | 单次发送混合 query 与 mutation，或后续 message 的长度和对齐非法 | 整批未执行并返回 syscall 错误 | 调用者需修正或拆分批次 | 4 | 批次分类和 framing 校验在状态更新及 response 生成前完成 |
 | F-21 | RX 或 TX backlog 长期占用推进任务 | 持续高包率超过单轮 budget | 单轮达到预算或 1 ms 软时间上限并留下 backlog | 其他任务调度延迟或网络吞吐下降 | 3 | 设备 RX、stack ingress、stack egress 和 Router TX 最多处理 32 个工作项后检查时间；每批最多连续执行四轮，达到上限后重新唤醒并归还执行权，剩余 backlog 进入下一批 |
 | F-22 | TCP peer 在本地文件关闭后不发送 FIN | peer 已确认本地 FIN，协议 handle 长期停留在 orphan `FIN_WAIT_2` | deferred-close registry 持续持有 socket buffer | 网络内存随失联连接增长 | 3 | 进入 `FIN_WAIT_2` 时设置 60 秒期限，期限进入统一 poll timer，到期后回收 handle |
-| F-23 | IPv4 输出设备管理 down | `RTM_NEWLINK` 清除匹配路由设备的 `IFF_UP` | 当前 UDP 或 raw IP 发送失败 | 应用收到 `ENETUNREACH` | 4 | UDP 和 raw IP 在提交发送缓冲前通过 `SERVICE` 校验输出路由和设备管理状态 |
+| F-23 | IPv4/IPv6 输出设备管理 down | `RTM_NEWLINK` 清除匹配路由设备的 `IFF_UP` | 当前 UDP 或 raw IP 发送失败 | 应用收到 `ENETUNREACH` | 4 | UDP 和 raw IP 在提交发送缓冲前通过 `SERVICE` 校验输出路由和设备管理状态；IPv6 无论是否绑定源地址都走同一检查 |
 | F-24 | IPv6 分片重组超时 | 首片到达后 60 秒内缺少后续分片 | 当前数据报丢失 | UDP 接收超时 | 3 | 删除过期队列；仅当首片存在且允许回复时发送 ICMPv6 Time Exceeded code 1 |
 
 严重度定义：
@@ -324,7 +324,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 
 ## 已知限制
 
-- `RTM_GETNEIGH` dump 合并控制面静态邻居与设备 NUD 快照；动态解析条目在 `INCOMPLETE` / `FAILED` 等状态对用户态可见。
+- `RTM_GETNEIGH` dump 合并控制面静态邻居与设备 NUD 快照；动态解析条目在 `INCOMPLETE` / `FAILED` 等状态对用户态可见。请求中的 `ndm_ifindex` 或 `NDA_IFINDEX` 非 0 时按接口过滤。
 - IPv4 输出使用匹配路由指向设备的 MTU，ICMP Fragmentation Needed 中的 next-hop MTU 只进入 UDP error queue，尚未形成动态 PMTU cache。
 - IPv4 输出分片只支持无 options 的栈内生成报文，尚未实现 options copy 语义。
 - `ROUTE_STATE` dump 没有覆盖所有 live runtime 状态；地址 dump 直接读取 Router，路由 dump 仍只覆盖配置路由。

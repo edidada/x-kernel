@@ -263,7 +263,12 @@ pub trait NetDevice: Send + Sync {
         None
     }
 
-    /// Selects a suitable IPv6 source address for NDP on this device.
+    /// Selects an IPv6 source address for NDP on this device.
+    ///
+    /// Prefers a configured link-local address. If none is present, falls back
+    /// to the first configured IPv6 address so solicitation still has a unicast
+    /// source. Callers that require a true link-local address must check
+    /// [`Ipv6Address::is_link_local`].
     fn ipv6_link_local(&self) -> Option<Ipv6Address> {
         self.ipv6_addrs()
             .iter()

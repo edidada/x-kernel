@@ -105,6 +105,15 @@ impl Ipv6Address {
         self.0[0] == 0xfe && (self.0[1] & 0xc0) == 0x80
     }
 
+    /// Linux `__ipv6_addr_needs_scope_id`: link-local unicast, plus node-local
+    /// and link-local multicast.
+    pub(crate) fn needs_iface_scope(self) -> bool {
+        if self.is_link_local() {
+            return true;
+        }
+        self.is_multicast() && matches!(self.0[1] & 0x0f, 0x01 | 0x02)
+    }
+
     /// Interface scope reported for this address on `ifindex`.
     ///
     /// Link-local and multicast addresses need an interface; others report 0.
@@ -592,6 +601,14 @@ mod tests {
         assert!(Ipv6Address::LOCALHOST.is_loopback());
         assert!(Ipv6Address::ALL_NODES_LINK_LOCAL.is_multicast());
         assert!(link_local.is_link_local());
+        assert!(link_local.needs_iface_scope());
+        assert!(Ipv6Address::ALL_NODES_LINK_LOCAL.needs_iface_scope());
+        assert!(!Ipv6Address::LOCALHOST.needs_iface_scope());
+        assert!(!Ipv6Address::UNSPECIFIED.needs_iface_scope());
+        assert!(
+            !Ipv6Address::from_octets([0xff, 0x0e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+                .needs_iface_scope()
+        );
         assert_eq!(link_local.iface_scope_id(2), 2);
         assert_eq!(Ipv6Address::LOCALHOST.iface_scope_id(2), 0);
         assert!(cidr.contains_addr(&IpAddress::from(addr)));

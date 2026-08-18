@@ -18,8 +18,7 @@ use crate::{
 };
 
 pub(crate) const PROTOCOL_ICMP: u8 = 1;
-pub(crate) const PROTOCOL_TCP: u8 = 6;
-pub(crate) const PROTOCOL_UDP: u8 = 17;
+pub(crate) use super::super::{PROTOCOL_TCP, PROTOCOL_UDP};
 
 pub(crate) const IPV4_MIN_HEADER_LEN: usize = 20;
 const IPV4_DEFAULT_TTL: u8 = 64;

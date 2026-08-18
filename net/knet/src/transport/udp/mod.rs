@@ -26,8 +26,7 @@ pub(crate) use self::{
 
 const IPV4_HEADER_LEN: usize = 20;
 const IPV6_HEADER_LEN: usize = 40;
-const IPV6_DEFAULT_HOP_LIMIT: u8 = 64;
-const IPV4_DEFAULT_TTL: u8 = IPV6_DEFAULT_HOP_LIMIT;
+const IPV4_DEFAULT_TTL: u8 = 64;
 const UDP_HEADER_LEN: usize = 8;
 const UDP_RX_QUEUE_CAPACITY: usize = 1024;
 const UDP_RX_QUEUE_RETAINED_CAPACITY: usize = 64;

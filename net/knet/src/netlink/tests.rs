@@ -827,6 +827,87 @@ fn test_dump_neighbours_includes_control_plane_entry() {
 }
 
 #[def_test(serial)]
+fn test_dump_neighbours_filters_by_ifindex() {
+    init_test_state();
+    add_neigh_state(
+        NeighRequest {
+            family: wire_route::FAMILY_IPV4,
+            ifindex: 1,
+            state: wire_neigh::STATE_PERMANENT,
+            flags: 0,
+            dst: IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 2)),
+            lladdr: Some([0; 6]),
+        },
+        NLM_F_CREATE | NLM_F_REPLACE,
+    )
+    .unwrap();
+    add_neigh_state(
+        NeighRequest {
+            family: wire_route::FAMILY_IPV4,
+            ifindex: 2,
+            state: wire_neigh::STATE_PERMANENT,
+            flags: 0,
+            dst: IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 10)),
+            lladdr: Some([0x02, 0, 0, 0, 0, 0x02]),
+        },
+        NLM_F_CREATE | NLM_F_REPLACE,
+    )
+    .unwrap();
+
+    let mut payload = Vec::new();
+    NdMsg {
+        family: 0,
+        pad1: 0,
+        pad2: 0,
+        ifindex: 2,
+        state: 0,
+        flags: 0,
+        neigh_type: 0,
+    }
+    .write(&mut payload);
+    let packets = handle_rtnetlink_request(&build_nlmsg(RTM_GETNEIGH, 12, NLM_F_REQUEST, payload));
+    let dumped: Vec<_> = packets
+        .iter()
+        .filter(|packet| read_u16_ne(&packet.data, 4) == Some(RTM_NEWNEIGH))
+        .collect();
+    assert!(!dumped.is_empty());
+    for packet in dumped {
+        assert_eq!(
+            read_i32_ne(&packet.data, NLMSG_HDR_LEN + 4),
+            Some(2),
+            "RTM_GETNEIGH with ndm_ifindex must not mix other interfaces"
+        );
+    }
+
+    let mut attr_payload = Vec::new();
+    NdMsg {
+        family: 0,
+        pad1: 0,
+        pad2: 0,
+        ifindex: 0,
+        state: 0,
+        flags: 0,
+        neigh_type: 0,
+    }
+    .write(&mut attr_payload);
+    push_attr(
+        &mut attr_payload,
+        wire_neigh::attr::IFINDEX,
+        &2u32.to_ne_bytes(),
+    );
+    let packets =
+        handle_rtnetlink_request(&build_nlmsg(RTM_GETNEIGH, 13, NLM_F_REQUEST, attr_payload));
+    let dumped: Vec<_> = packets
+        .iter()
+        .filter(|packet| read_u16_ne(&packet.data, 4) == Some(RTM_NEWNEIGH))
+        .collect();
+    assert!(!dumped.is_empty());
+    for packet in dumped {
+        assert_eq!(read_i32_ne(&packet.data, NLMSG_HDR_LEN + 4), Some(2));
+    }
+}
+
+#[def_test(serial)]
 fn test_dump_routes_returns_done_message() {
     init_test_state();
     let header = nl_header(RTM_GETROUTE, NLM_F_REQUEST, 7);

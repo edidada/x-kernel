@@ -329,13 +329,22 @@ fn dump_routes(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
 }
 
 fn dump_neighs(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
-    let family = NdMsg::read(payload)
-        .ok()
-        .map(|msg| msg.family)
-        .filter(|family| *family != 0);
+    let msg = NdMsg::read(payload).ok();
+    let family = msg.map(|msg| msg.family).filter(|family| *family != 0);
+    let mut ifindex = msg.map(|msg| msg.ifindex).unwrap_or(0);
+    if let Ok(attrs) = parse_attrs(payload.get(NdMsg::SIZE..).unwrap_or(&[]))
+        && let Some(attr) = attrs
+            .iter()
+            .find(|attr| attr.kind == wire_neigh::attr::IFINDEX)
+        && let Ok(index) = read_u32_payload(attr.payload)
+        && let Ok(index) = i32::try_from(index)
+    {
+        ifindex = index;
+    }
     collect_neighbor_snapshots()
         .into_iter()
         .filter(|neigh| family.is_none() || family == Some(neigh_family(neigh.addr)))
+        .filter(|neigh| ifindex == 0 || neigh.ifindex == ifindex)
         .map(|neigh| NetlinkPacket {
             from: NetlinkAddr { pid: 0, groups: 0 },
             data: build_neigh_message(request, neigh),
@@ -485,6 +494,9 @@ pub(super) fn add_addr_state(request: AddrRequest, flags: u16) -> Result<(), Lin
                     return Ok(());
                 }
                 return Err(LinuxError::EEXIST);
+            }
+            if crate::SERVICE.is_inited() && !crate::SERVICE.has_iface_addr_capacity() {
+                return Err(LinuxError::ENOBUFS);
             }
             state.addrs.push(request.into());
             Ok(())

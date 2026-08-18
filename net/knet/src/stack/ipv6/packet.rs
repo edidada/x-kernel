@@ -18,8 +18,7 @@ use crate::{
 };
 
 pub(crate) const PROTOCOL_ICMPV6: u8 = 58;
-pub(crate) const PROTOCOL_TCP: u8 = 6;
-pub(crate) const PROTOCOL_UDP: u8 = 17;
+pub(crate) use super::super::{PROTOCOL_TCP, PROTOCOL_UDP};
 
 pub(crate) const IPV6_HEADER_LEN: usize = 40;
 pub(crate) const IPV6_DEFAULT_HOP_LIMIT: u8 = 64;

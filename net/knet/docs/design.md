@@ -430,12 +430,13 @@ IPv6 扩展头用于定位上层协议；入向 Fragment 按 RFC 8200 §4.5 / RF
 该边界让 UDP 不再依赖 smoltcp socket handle，同时保留现有 TCP 和 raw socket 行为。
 
 IPv6 link-local 收发使用 `sin6_scope_id` 选择接口：接收路径写入报文到达的接口索引，
-UDP bind registry、endpoint 匹配和设备 mask 保留该 scope，发送路径按 scope 选择路由和源地址。
+UDP/TCP bind 对需要 scope 的地址（Linux `__ipv6_addr_needs_scope_id`：link-local 单播以及 node-local / link-local 组播）拒绝 `scope_id == 0`（`EINVAL`）和无效 ifindex（`ENODEV`）。
+UDP bind registry、endpoint 匹配和设备 mask 保留该 scope，发送路径按 scope 选择路由和源地址；已 bind 源地址的 `sendto` 仍做路由与设备 up 检查，无路由或管理 down 时返回 `ENETUNREACH`。
 ICMPv6 差错查找同样用到达接口填 quoted 地址的 scope，使绑定或连接到 `fe80::%ethN` 的 socket 能收到 Port Unreachable / Packet Too Big。
 IPv6 endpoint 的文本格式遵循 `[address%scope]:port`，避免地址与端口之间的冒号歧义。
 当前不实现 `IPV6_FLOWINFO_SEND` 或 flow-label 路由；`sockaddr_in6.sin6_flowinfo`
 进入原生 endpoint 时会被有意归零，`getsockname`、`getpeername` 和接收地址也返回零。
-邻居缓存由 `device/neighbor` 的 NUD 状态机管理，对齐 Linux 6.8 `net/core/neighbour.c`：动态条目经历 `INCOMPLETE` / `REACHABLE` / `STALE` / `DELAY` / `PROBE` / `FAILED`；netlink 静态邻居为 `PERMANENT`，不做探测。ReachableTime 在 BaseReachableTime（30 s）的 0.5–1.5 倍之间取值；DelayFirstProbeTime 为 5 s；组播解析与单播 NUD 探测各最多 3 次、间隔 1 s。请求 NA / ARP reply 将条目标为 `REACHABLE` 并冲刷 pending；NS SLLA / 非请求 NA / ARP request 标为 `STALE`；netlink 安装 `PERMANENT` 覆盖尚未 `NUD_VALID` 的条目时同样冲刷 pending（Linux `__neigh_update` 对 `arp_queue` 的行为）。`RTM_GETNEIGH` 导出该表。尚未接入 TCP/UDP 的 upper-layer reachability hint，因此 `DELAY` 在 5 s 内收不到请求 NA 就会进入 `PROBE`。
+邻居缓存由 `device/neighbor` 的 NUD 状态机管理，对齐 Linux 6.8 `net/core/neighbour.c`：动态条目经历 `INCOMPLETE` / `REACHABLE` / `STALE` / `DELAY` / `PROBE` / `FAILED`；netlink 静态邻居为 `PERMANENT`，不做探测。ReachableTime 在 BaseReachableTime（30 s）的 0.5–1.5 倍之间取值；DelayFirstProbeTime 为 5 s；组播解析与单播 NUD 探测各最多 3 次、间隔 1 s。动态条目数量受 Linux `gc_thresh3`（1024）约束，超限时淘汰最旧的 `STALE` / `FAILED` 条目。请求 NA / ARP reply 将条目标为 `REACHABLE` 并冲刷 pending；NS SLLA / 非请求 NA / ARP request 标为 `STALE`；netlink 安装 `PERMANENT` 覆盖尚未 `NUD_VALID` 的条目时同样冲刷 pending（Linux `__neigh_update` 对 `arp_queue` 的行为）。`RTM_GETNEIGH` 导出该表，并按请求中的 `ndm_ifindex` 或 `NDA_IFINDEX` 过滤接口。尚未接入 TCP/UDP 的 upper-layer reachability hint，因此 `DELAY` 在 5 s 内收不到请求 NA 就会进入 `PROBE`。
 
 ### NAPI 风格预算推进
 
@@ -448,7 +449,7 @@ RX、TX 与 timer 使用独立预算。`Service` 使用 smoltcp 分阶段 API �
 
 link 配置属于设备：接口名、MTU、管理 up 状态、operstate 和硬件地址通过 `NetDevice::link_snapshot` 统一导出，`RTM_GETLINK` 和 `RTM_NEWLINK` 直接访问该来源。AF_PACKET 热路径在单个 `SERVICE` 锁临界区内通过无分配的 `LinkSendSnapshot` 校验 up 状态、MTU 和硬件地址并发送，设备存在性检查使用 `has_device`，路由 MTU 查询直接读取匹配设备。设备配置或移除改变有效 MTU 时重建 smoltcp `Interface`，使缓存的 `DeviceCapabilities` 与设备集合一致；未改变有效 MTU 的配置更新保留当前 `Interface` 及其运行时缓存。
 
-IPv4 地址条目由 `Router` 保存。每个条目包含设备索引、IPv4 CIDR 和 scope，加入条目时检查设备、单播地址和 smoltcp 地址容量。Router 为每个条目生成 `/32` local 路由，并按地址网络生成 connected 路由；地址删除同时移除派生路由、失效首选源路由和设备 pending TX。`Service` 将 Router 地址投影到 smoltcp `Interface`、`IngressProcessor` 和设备，Ethernet 根据设备地址处理 ARP、定向广播和待解析报文。`RtnetlinkState` 仅保存配置路由和邻居，地址 dump 与 mutation 直接访问 Router。设备移除由 rtnetlink 控制面适配层协调 Router 与 `ROUTE_STATE`，清理已移除接口和孤立首选源并重编号后续接口索引。
+IPv4 地址条目由 `Router` 保存。每个条目包含设备索引、IPv4 CIDR 和 scope，加入条目时检查设备、单播地址和 smoltcp 地址容量（IPv4 与 IPv6 共享 `IFACE_MAX_ADDR_COUNT`）。Router 为每个条目生成 `/32` local 路由，并按地址网络生成 connected 路由；地址删除同时移除派生路由、失效首选源路由和设备 pending TX。`Service` 将 Router 地址投影到 smoltcp `Interface`、`IngressProcessor` 和设备，Ethernet 根据设备地址处理 ARP、定向广播和待解析报文。`RtnetlinkState` 仅保存配置路由和邻居，地址 dump 与 mutation 直接访问 Router。IPv6 地址仍经 netlink `ROUTE_STATE` 同步；某接口地址删空后也会调用 `set_ipv6_addrs(&[])` 清空设备层。设备移除由 rtnetlink 控制面适配层协调 Router 与 `ROUTE_STATE`，清理已移除接口和孤立首选源并重编号后续接口索引。
 
 ### pathname Unix socket 显式传递凭据
 

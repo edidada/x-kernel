@@ -30,7 +30,7 @@ use crate::{
     LISTEN_TABLE, SOCKET_SET,
     buf::PacketBuf,
     device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot},
-    ip::{IpAddress, IpListenEndpoint},
+    ip::{IpAddress, IpListenEndpoint, Ipv6Address},
     netlink::RtnetlinkState,
     poller::{PollBudget, PollProgress},
     router::{DeviceRemoval, Router},
@@ -308,7 +308,7 @@ impl Service {
     }
 
     pub fn get_source_address(&self, dst_addr: &IpAddress) -> KResult<IpAddress> {
-        self.router.lock().output_route_source(dst_addr)
+        self.get_source_address_scoped(dst_addr, 0)
     }
 
     #[cfg(unittest)]
@@ -321,16 +321,10 @@ impl Service {
         dst_addr: &IpAddress,
         scope_id: u32,
     ) -> KResult<IpAddress> {
-        if scope_id == 0 {
-            return self.get_source_address(dst_addr);
-        }
-        let dev = scope_id.saturating_sub(1) as usize;
         self.router
             .lock()
-            .table
-            .lookup_on_device(dst_addr, dev)
-            .map(|rule| rule.src)
-            .ok_or(KError::from(LinuxError::ENETUNREACH))
+            .output_route(dst_addr, scope_id)
+            .map(|(source, _)| source)
     }
 
     pub fn can_send_ip_packet(&self) -> bool {
@@ -366,46 +360,43 @@ impl Service {
         router.queue_ipv4_packet(packet.take().ok_or(KError::InvalidInput)?)
     }
 
-    /// Resolves the IPv6 source address and rejects oversized packets.
+    /// Resolves the IPv6 source address, checks the output device, and queues
+    /// the packet under one Router lock.
     ///
-    /// IPv6 is not fragmented by the local stack, so a packet larger than the
-    /// route MTU fails with `EMSGSIZE`.
-    pub fn prepare_ipv6_packet_send(
+    /// Bound sockets still require a route to `dst_addr`. A down device or
+    /// missing route returns `ENETUNREACH`. IPv6 is not fragmented by the
+    /// local stack, so a packet larger than the route MTU fails with
+    /// `EMSGSIZE`.
+    pub fn prepare_and_send_ipv6_packet(
         &self,
         bound_src: Option<IpAddress>,
         dst_addr: &IpAddress,
-        packet_len: usize,
+        packet: &mut Option<Vec<u8>>,
         scope_id: u32,
-    ) -> KResult<IpAddress> {
-        let router = self.router.lock();
+        prepare: impl FnOnce(&mut [u8], IpAddress) -> KResult,
+    ) -> KResult {
+        let mut router = self.router.lock();
+        let packet_len = packet.as_ref().ok_or(KError::InvalidInput)?.len();
         if !router.can_enqueue_tx_packet() {
             return Err(KError::WouldBlock);
         }
 
-        let source_addr = match bound_src {
-            Some(addr) => addr,
-            None => {
-                let rule = if scope_id == 0 {
-                    router.table.lookup(dst_addr)
-                } else {
-                    let dev = scope_id.saturating_sub(1) as usize;
-                    router.table.lookup_on_device(dst_addr, dev)
-                };
-                rule.map(|rule| rule.src)
-                    .ok_or(KError::from(LinuxError::ENETUNREACH))?
-            }
-        };
-        if let Some(mtu) = router.route_mtu(dst_addr)
+        let (route_source, route_mtu) = router.output_route(dst_addr, scope_id)?;
+        let source_addr = bound_src.unwrap_or(route_source);
+        if let Some(mtu) = route_mtu
             && packet_len > mtu
         {
             return Err(LinuxError::EMSGSIZE.into());
         }
-
-        Ok(source_addr)
+        prepare(
+            packet.as_deref_mut().ok_or(KError::InvalidInput)?,
+            source_addr,
+        )?;
+        router.queue_ipv6_packet(packet.take().ok_or(KError::InvalidInput)?)
     }
 
-    pub fn send_ipv6_packet(&self, packet: alloc::vec::Vec<u8>) -> KResult {
-        self.router.lock().queue_ipv6_packet(packet)
+    pub fn has_iface_addr_capacity(&self) -> bool {
+        self.router.lock().has_iface_addr_capacity()
     }
 
     pub fn device_mask_for(&self, endpoint: &IpListenEndpoint) -> u32 {
@@ -556,10 +547,19 @@ impl Service {
                     .expect("Router validates the smoltcp address capacity");
             }
             for addr in ipv6_addrs {
-                let _ = ip_addrs.push(SmoltcpIpCidr::Ipv6(smoltcp::wire::Ipv6Cidr::new(
-                    addr.address().into(),
-                    addr.prefix_len(),
-                )));
+                if ip_addrs
+                    .push(SmoltcpIpCidr::Ipv6(smoltcp::wire::Ipv6Cidr::new(
+                        addr.address().into(),
+                        addr.prefix_len(),
+                    )))
+                    .is_err()
+                {
+                    warn!(
+                        "dropping IPv6 address {} because the smoltcp iface address table is full",
+                        addr.address()
+                    );
+                    break;
+                }
             }
         });
     }
@@ -699,6 +699,22 @@ impl Service {
     pub fn send_link_frame(&self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
         self.router.lock().send_link_frame(ifindex, frame)
     }
+}
+
+/// Linux `inet6_bind_sk`: scoped addresses require a non-zero ifindex
+/// (`EINVAL`) that names an existing device (`ENODEV`).
+pub fn validate_ipv6_bind_scope(addr: Ipv6Address, scope_id: u32) -> KResult {
+    if !addr.needs_iface_scope() {
+        return Ok(());
+    }
+    if scope_id == 0 {
+        return Err(LinuxError::EINVAL.into());
+    }
+    let ifindex = i32::try_from(scope_id).map_err(|_| LinuxError::ENODEV)?;
+    if !crate::SERVICE.is_inited() || !crate::SERVICE.has_device(ifindex) {
+        return Err(LinuxError::ENODEV.into());
+    }
+    Ok(())
 }
 
 fn poll_smoltcp_ingress_budgeted(

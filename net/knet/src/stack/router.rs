@@ -28,7 +28,7 @@ use crate::{
     consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
     device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NetDevice},
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
-    netlink::RtnetlinkState,
+    netlink::{RtnetlinkState, wire::route as wire_route},
 };
 
 const CONTROL_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
@@ -317,10 +317,33 @@ impl Router {
     /// Returns `ENETUNREACH` when the route or its device is absent, or when
     /// the selected device is administratively down.
     pub fn output_route_source(&self, dst: &IpAddress) -> KResult<IpAddress> {
-        let rule = self
-            .table
-            .lookup(dst)
-            .ok_or(KError::from(LinuxError::ENETUNREACH))?;
+        self.output_route(dst, 0).map(|(source, _)| source)
+    }
+
+    /// Resolves source address and path MTU for `dst`, honoring `scope_id`.
+    ///
+    /// A non-zero `scope_id` is an ifindex and restricts lookup to that
+    /// device, matching Linux `flowi6_oif`. The selected device must be
+    /// administratively up.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ENETUNREACH` when the route or device is missing, `scope_id`
+    /// does not name a device, or the device is down.
+    pub fn output_route(
+        &self,
+        dst: &IpAddress,
+        scope_id: u32,
+    ) -> KResult<(IpAddress, Option<usize>)> {
+        let rule = if scope_id == 0 {
+            self.table.lookup(dst)
+        } else {
+            i32::try_from(scope_id)
+                .ok()
+                .and_then(Self::device_index)
+                .and_then(|dev| self.table.lookup_on_device(dst, dev))
+        }
+        .ok_or(KError::from(LinuxError::ENETUNREACH))?;
         let device = self
             .devices
             .get(rule.dev)
@@ -328,13 +351,15 @@ impl Router {
         if !device.is_link_up() {
             return Err(LinuxError::ENETUNREACH.into());
         }
-        match rule.source {
-            RuleSource::Fixed(source) => Ok(source),
-            RuleSource::DevicePrimary => self
+        let source = match rule.source {
+            RuleSource::Fixed(source) => source,
+            RuleSource::DevicePrimary if matches!(dst, IpAddress::Ipv4(_)) => self
                 .select_ipv4_source(rule.dev, &rule.via.unwrap_or(*dst), rule.scope)
                 .map(IpAddress::Ipv4)
-                .ok_or(KError::from(LinuxError::ENETUNREACH)),
-        }
+                .ok_or(KError::from(LinuxError::ENETUNREACH))?,
+            RuleSource::DevicePrimary => rule.src,
+        };
+        Ok((source, Some(device.mtu().min(u16::MAX as usize))))
     }
 
     pub fn can_enqueue_tx_packet(&self) -> bool {
@@ -487,6 +512,10 @@ impl Router {
         &self.ipv4_addrs
     }
 
+    pub fn has_iface_addr_capacity(&self) -> bool {
+        self.ipv4_addrs.len() + self.local_ipv6_addrs.len() < smoltcp::config::IFACE_MAX_ADDR_COUNT
+    }
+
     pub fn ipv4_addr_snapshots(&self) -> Vec<Ipv4AddrSnapshot> {
         self.ipv4_addrs
             .iter()
@@ -513,7 +542,9 @@ impl Router {
         {
             return Ok(());
         }
-        if self.ipv4_addrs.len() >= smoltcp::config::IFACE_MAX_ADDR_COUNT {
+        if self.ipv4_addrs.len() + self.local_ipv6_addrs.len()
+            >= smoltcp::config::IFACE_MAX_ADDR_COUNT
+        {
             return Err(LinuxError::ENOBUFS);
         }
 
@@ -605,7 +636,9 @@ impl Router {
             let ipv6_addrs: Vec<_> = state
                 .addrs
                 .iter()
-                .filter(|addr| addr.index == ifindex as u32 && addr.family == 10)
+                .filter(|addr| {
+                    addr.index == ifindex as u32 && addr.family == wire_route::FAMILY_IPV6
+                })
                 .filter_map(|addr_state| match addr_state.address {
                     SmoltcpIpAddress::Ipv6(addr) => {
                         Some(Ipv6Cidr::new(addr.into(), addr_state.prefix_len))
@@ -623,9 +656,7 @@ impl Router {
                 })
                 .collect();
             device.sync_neighbors(&neighbors);
-            if !ipv6_addrs.is_empty() {
-                device.set_ipv6_addrs(&ipv6_addrs);
-            }
+            device.set_ipv6_addrs(&ipv6_addrs);
         }
 
         self.table.clear();
@@ -645,7 +676,7 @@ impl Router {
             }
         }
         for route in state.routes.iter().filter(|route| {
-            (route.family == 2 || route.family == 10)
+            (route.family == wire_route::FAMILY_IPV4 || route.family == wire_route::FAMILY_IPV6)
                 && route.table == ROUTE_TABLE_MAIN
                 && route.route_type == ROUTE_TYPE_UNICAST
         }) {
@@ -655,20 +686,24 @@ impl Router {
             }
 
             let filter = match (route.family, route.dst) {
-                (2, Some(SmoltcpIpAddress::Ipv4(addr))) => {
+                (wire_route::FAMILY_IPV4, Some(SmoltcpIpAddress::Ipv4(addr))) => {
                     IpCidr::Ipv4(Ipv4Cidr::new(addr.into(), route.dst_len))
                 }
-                (2, None) => IpCidr::Ipv4(Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, route.dst_len)),
-                (10, Some(SmoltcpIpAddress::Ipv6(addr))) => {
+                (wire_route::FAMILY_IPV4, None) => {
+                    IpCidr::Ipv4(Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, route.dst_len))
+                }
+                (wire_route::FAMILY_IPV6, Some(SmoltcpIpAddress::Ipv6(addr))) => {
                     IpCidr::Ipv6(Ipv6Cidr::new(addr.into(), route.dst_len))
                 }
-                (10, None) => IpCidr::Ipv6(Ipv6Cidr::new(Ipv6Address::UNSPECIFIED, route.dst_len)),
+                (wire_route::FAMILY_IPV6, None) => {
+                    IpCidr::Ipv6(Ipv6Cidr::new(Ipv6Address::UNSPECIFIED, route.dst_len))
+                }
                 _ => continue,
             };
             let src = route
                 .prefsrc
                 .or_else(|| {
-                    if route.family == 2 {
+                    if route.family == wire_route::FAMILY_IPV4 {
                         self.first_ipv4_addr_for_device(route.oif)
                             .map(|addr| SmoltcpIpAddress::Ipv4(addr.address().into()))
                     } else {

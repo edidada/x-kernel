@@ -27,9 +27,11 @@ use crate::{
     Shutdown, Socket, SocketAddrEx, SocketOps,
     consts::{TCP_RX_BUF_LEN, TCP_TX_BUF_LEN},
     general::GeneralOptions,
+    ip::Ipv6Address,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     poll_interfaces,
     poller::{PollReason, network_poller},
+    service::validate_ipv6_bind_scope,
     state::*,
 };
 
@@ -362,6 +364,9 @@ impl SocketOps for TcpSocket {
         let mut local_addr = local_addr.into_ip()?;
         if !self.addr_matches_family(&local_addr) {
             return Err(KError::from(LinuxError::EAFNOSUPPORT));
+        }
+        if let SocketAddr::V6(addr) = local_addr {
+            validate_ipv6_bind_scope(Ipv6Address::from(*addr.ip()), addr.scope_id())?;
         }
         self.state
             .lock(State::Idle)

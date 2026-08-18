@@ -201,7 +201,7 @@ impl EthernetDevice {
         };
         if ip_packet.len() > self.mtu {
             warn!(
-                "Dropping IPv4 packet of {} bytes exceeding device MTU {}",
+                "Dropping IP packet of {} bytes exceeding device MTU {}",
                 ip_packet.len(),
                 self.mtu
             );
@@ -644,9 +644,7 @@ impl NetDeviceOps for EthernetDevice {
     }
 
     fn set_ipv6_addrs(&mut self, addrs: &[Ipv6Cidr]) {
-        if !addrs.is_empty() {
-            self.ipv6_addrs = addrs.to_vec();
-        }
+        self.ipv6_addrs = addrs.to_vec();
     }
 
     fn neighbor_snapshots(&self, ifindex: i32) -> Vec<NeighborSnapshot> {

@@ -170,7 +170,7 @@ fn snoop_tcp_packet(buf: &[u8], sockets: &mut SocketSet<'_>) {
     let Some((protocol, src_addr, dst_addr, payload)) = parse_ip_packet(buf) else {
         return;
     };
-    if protocol != ipv4::PROTOCOL_TCP && protocol != ipv6::PROTOCOL_TCP {
+    if protocol != ipv4::PROTOCOL_TCP {
         return;
     }
 

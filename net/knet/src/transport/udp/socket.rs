@@ -26,6 +26,7 @@ use crate::{
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     poll_interfaces,
     poller::{PollReason, network_poller},
+    service::validate_ipv6_bind_scope,
     udp_err::QueuedUdpError,
 };
 
@@ -258,18 +259,15 @@ impl UdpSocket {
                     .state()
                     .local_endpoint()
                     .and_then(|local| (!local.addr.is_unspecified()).then_some(local.addr));
-                let source_addr = SERVICE.prepare_ipv6_packet_send(
+                SERVICE.prepare_and_send_ipv6_packet(
                     bound_source_addr,
                     &remote_endpoint.addr,
-                    packet_len,
+                    &mut packet,
                     remote_endpoint.scope_id,
+                    |packet, source_addr| {
+                        self.write_datagram_v6(packet, remote_endpoint, source_addr)
+                    },
                 )?;
-                self.write_datagram_v6(
-                    packet.as_mut().ok_or(KError::InvalidInput)?,
-                    remote_endpoint,
-                    source_addr,
-                )?;
-                SERVICE.send_ipv6_packet(packet.take().ok_or(KError::InvalidInput)?)?;
                 // `assist_once` only runs a batch that is already Scheduled.
                 // Publish Tx first so an Idle poller actually dispatches the
                 // queued packet and starts NUD, matching the IPv4 send path.
@@ -360,6 +358,12 @@ impl UdpSocket {
         }
         if endpoint.port == 0 || endpoint.addr.is_unspecified() {
             k_bail!(InvalidInput, "invalid address");
+        }
+        if let IpAddress::Ipv6(addr) = endpoint.addr
+            && addr.needs_iface_scope()
+            && endpoint.scope_id == 0
+        {
+            return Err(LinuxError::EINVAL.into());
         }
         Ok(())
     }
@@ -512,6 +516,9 @@ impl SocketOps for UdpSocket {
         let local_addr = local_addr.into_ip()?;
         if !self.addr_matches_family(local_addr) {
             return Err(KError::from(LinuxError::EAFNOSUPPORT));
+        }
+        if let SocketAddr::V6(addr) = local_addr {
+            validate_ipv6_bind_scope((*addr.ip()).into(), addr.scope_id())?;
         }
 
         if local_addr.port() == 0 {

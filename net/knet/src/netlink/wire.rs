@@ -64,6 +64,7 @@ pub(crate) mod neigh {
     pub(crate) mod attr {
         pub(crate) const DST: u16 = 1;
         pub(crate) const LLADDR: u16 = 2;
+        pub(crate) const IFINDEX: u16 = 8;
     }
 }
 
