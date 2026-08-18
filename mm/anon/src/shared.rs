@@ -2,9 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::fmt;
 
+use kalloc_types::{AllocContext, KArc, KHashMap};
+use kerrno::KResult;
 use ksync::Mutex;
 use vmobj::{
     AnonObjectId, MappingView, MappingViewId, MappingViewNotifier, MappingViewRange,
@@ -26,7 +28,7 @@ struct AnonSharedViewRegistration {
 /// Lifetime guard for one registered anonymous-shared view.
 #[derive(Clone)]
 pub struct AnonSharedViewGuard {
-    inner: Arc<AnonSharedViewRegistration>,
+    inner: KArc<AnonSharedViewRegistration>,
 }
 
 impl AnonSharedViewGuard {
@@ -45,7 +47,7 @@ impl Drop for AnonSharedViewRegistration {
 /// Shared anonymous object owner.
 pub struct AnonSharedObject {
     id: AnonObjectId,
-    views: Mutex<BTreeMap<MappingViewId, RegisteredView>>,
+    views: Mutex<KHashMap<MappingViewId, RegisteredView>>,
 }
 
 impl fmt::Debug for AnonSharedObject {
@@ -63,7 +65,7 @@ impl AnonSharedObject {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             id: next_anon_object_id(),
-            views: Mutex::new(BTreeMap::new()),
+            views: Mutex::new(KHashMap::new()),
         })
     }
 
@@ -78,31 +80,38 @@ impl AnonSharedObject {
     }
 
     /// Registers one shared-anonymous VMA view against this object.
-    pub fn register_view(self: &Arc<Self>, spec: MappingViewSpec) -> AnonSharedViewGuard {
+    pub fn register_view(self: &Arc<Self>, spec: MappingViewSpec) -> KResult<AnonSharedViewGuard> {
         let id = next_mapping_view_id();
-        self.views.lock().insert(
-            id,
-            RegisteredView {
-                view: MappingView::new(
-                    id,
-                    spec.mm_id,
-                    MappingViewRange {
-                        vma_start: spec.vma_start,
-                        vma_len: spec.vma_len,
-                        object_start: spec.object_start,
-                        object_len: spec.object_len,
-                    },
-                    spec.kind,
-                ),
-                notifier: spec.notifier,
-            },
-        );
-        AnonSharedViewGuard {
-            inner: Arc::new(AnonSharedViewRegistration {
+        let inner = KArc::try_new(
+            AnonSharedViewRegistration {
                 object: self.clone(),
                 id,
-            }),
+            },
+            AllocContext::Sleepable,
+        )?;
+        {
+            let mut views = self.views.lock();
+            let previous = views.try_insert(
+                id,
+                RegisteredView {
+                    view: MappingView::new(
+                        id,
+                        spec.mm_id,
+                        MappingViewRange {
+                            vma_start: spec.vma_start,
+                            vma_len: spec.vma_len,
+                            object_start: spec.object_start,
+                            object_len: spec.object_len,
+                        },
+                        spec.kind,
+                    ),
+                    notifier: spec.notifier,
+                },
+                AllocContext::Sleepable,
+            )?;
+            debug_assert!(previous.is_none(), "mapping view ids must be unique");
         }
+        Ok(AnonSharedViewGuard { inner })
     }
 
     /// Emits object-side invalidation work for one anonymous shared byte range.
@@ -145,6 +154,8 @@ impl AnonSharedObject {
 
 #[cfg(unittest)]
 mod tests {
+    use kalloc_types::fault_injection::{fail_allocations_after, fail_next_allocation};
+    use kerrno::KError;
     use unittest::def_test;
     use vmobj::{MappingViewKind, MappingViewSpec, VmObjectId};
 
@@ -164,15 +175,17 @@ mod tests {
     #[def_test]
     fn anon_shared_registers_views_and_emits_object_hits() {
         let object = AnonSharedObject::new();
-        let _view = object.register_view(MappingViewSpec {
-            mm_id: 7,
-            vma_start: 0x4000,
-            vma_len: 0x3000,
-            object_start: 0x0,
-            object_len: 0x3000,
-            kind: MappingViewKind::Shared,
-            notifier: None,
-        });
+        let _view = object
+            .register_view(MappingViewSpec {
+                mm_id: 7,
+                vma_start: 0x4000,
+                vma_len: 0x3000,
+                object_start: 0x0,
+                object_len: 0x3000,
+                kind: MappingViewKind::Shared,
+                notifier: None,
+            })
+            .unwrap();
 
         let work = object
             .invalidate_range(0x1000, 0x1000)
@@ -183,5 +196,51 @@ mod tests {
         assert_eq!(hit.vma_start(), 0x5000);
         assert_eq!(hit.object_start(), 0x1000);
         assert_eq!(hit.object_len(), 0x1000);
+    }
+
+    #[def_test(serial)]
+    fn anon_shared_view_registration_returns_nomemory_before_publish() {
+        let object = AnonSharedObject::new();
+        let _guard = fail_next_allocation();
+
+        let result = object.register_view(MappingViewSpec {
+            mm_id: 7,
+            vma_start: 0x4000,
+            vma_len: 0x1000,
+            object_start: 0,
+            object_len: 0x1000,
+            kind: MappingViewKind::Shared,
+            notifier: None,
+        });
+        let err = match result {
+            Ok(_) => panic!("injected guard allocation must fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err, KError::NoMemory);
+        assert!(object.invalidate_range(0, 0x1000).is_none());
+    }
+
+    #[def_test(serial)]
+    fn anon_shared_hash_registration_returns_nomemory_before_publish() {
+        let object = AnonSharedObject::new();
+        let _guard = fail_allocations_after(1);
+
+        let result = object.register_view(MappingViewSpec {
+            mm_id: 7,
+            vma_start: 0x4000,
+            vma_len: 0x1000,
+            object_start: 0,
+            object_len: 0x1000,
+            kind: MappingViewKind::Shared,
+            notifier: None,
+        });
+        let err = match result {
+            Ok(_) => panic!("injected hash-table allocation must fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err, KError::NoMemory);
+        assert!(object.invalidate_range(0, 0x1000).is_none());
     }
 }

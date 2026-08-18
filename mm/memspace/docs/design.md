@@ -57,7 +57,8 @@ MmSpace
 
 object owner
   -> vmobj::ObjectInvalidateRequest
-  -> MmSpace invalidate sink
+  -> KWeak<InvalidateSink>
+  -> MmSpace KArc invalidate sink
   -> VMA lookup and runtime unmap
 ```
 
@@ -95,9 +96,16 @@ object owner
 
 1. 调用方构造 `VmArea` 和对应 `VmRuntimeRef`。
 2. `MmSpace::map_runtime_vma()` 校验 VMA 范围和 runtime backing 一致性。
-3. runtime 执行 eager map 或注册 lazy fault 入口。
-4. `VmAreaSet::try_insert()` 拒绝重叠 VMA。
-5. runtime 注册 file/anon object view 时使用当前 `mm_id` 和 `InvalidateHandle`。
+3. `install_runtime_mapping()` 先执行 anonymous runtime 的 object-view registration；
+   `KArc` guard、`KHashMap` / `KBTreeMap` publication 的失败通过 `KResult` 返回。
+4. registration 成功后 runtime 才执行 eager map 或注册 lazy fault 入口，并把 runtime
+   绑定到 `VmArea`。
+5. `VmAreaSet::insert()` 写入现有 VMA tree。
+
+第 3 步只保证本轮 custom registry allocation 的失败不会留下 PTE 或 VMA metadata。
+`VmAreaSet` 自身仍使用 legacy `BTreeMap`，所以第 5 步尚不是完整 fallible commit；
+在它改为可失败、可回滚的 VMA transaction 前，不能把整条 `mmap` 路径宣称为
+OOM-safe。
 
 ### Anonymous shared page ownership
 
@@ -111,6 +119,22 @@ object owner
 该切片验证 `KVec` 与 `KArc` 的资源顺序和 `KError::NoMemory` 传播；
 `AnonSharedObject` 的现有 `Arc` 构造仍是后续迁移边界，不能据此宣称整条匿名共享
 对象创建路径已完全 fallible。
+
+### Fallible metadata 验证切片
+
+本模块还把 `MmSpace::invalidate_sink` 改为 `KArc<InvalidateSink>`，并让
+`InvalidateHandle` 用 `KWeak` 观察它。空地址空间创建时 owner allocation 失败会
+直接返回 `KError::NoMemory`；后续 handle clone/downgrade/upgrade 不分配。
+
+anonymous runtime 的 mapped-view guard 及 registry 在 `mm/anon` 中分别使用
+`KArc`、`KHashMap`（shared）和 `KBTreeMap`（private）。`install_runtime_mapping()`
+将该 registry 的 fallible portion 放在 PTE map 之前，避免该 portion OOM 后出现
+“已映射、未登记”的状态。Notifier trait object 的 `Arc` allocation 和 VMA tree 的
+legacy allocation 不属于此切片，保留为后续边界。
+
+file-backed VMA 的 `FileMappingInfo.path` 由 filemap 在创建时用
+`KArc<KString>` 生成不可变 snapshot；VMA split、clone 和 procfs `maps` 读取只复制
+owner，不再为同一路径扩容字符串。
 
 ### VMA 变形
 
@@ -239,7 +263,8 @@ dirty tracking.
   的 TLB 状态”。调度切换路径在切入新 mm 前先 set CPU，硬件切换完成后再从旧 mm
   clear CPU，保证 shootdown 最多过度命中、不会漏掉目标 CPU。
 - `InvalidateSink` 使用 `SpinNoIrq` 保护短队列操作，不在该锁内执行 runtime
-  unmap 或获取 `MmSpace` 主锁。
+  unmap 或获取 `MmSpace` 主锁。其内部 queue 仍是 legacy container：没有预留/NoWait
+  设计前，不能在 spinlock 内把可能 sleep 的 `KVecDeque` growth 直接替换进去。
 - `PageTable::modify()` 提供页表独占修改 guard。
 - `VmAreaSet` 不暴露独立可变共享访问。
 - file/anon object 的内部并发由对应 object crate 自己维护。
@@ -279,6 +304,10 @@ dirty tracking.
    原因：避免 bookkeeping OOM 发生在部分 frame 已取得之后；owner allocation
    失败时依靠 `SharedPages::Drop` 回收完整页集。
 
+9. object-view registry 在 PTE map 前完成 custom fallible publication。
+   原因：`KArc` guard 或 registry node/table OOM 时，错误能沿 `KResult` 回到 mmap
+   caller，而不会由这一 portion 留下缺少 reverse-map metadata 的 PTE。
+
 ## Drop / 资源释放
 
 - `MmSpace::clear()` 通过 runtime unmap 清理全部 VMA 的 present PTE。
@@ -287,3 +316,5 @@ dirty tracking.
 - File/anon object view guards 随 runtime/object 引用释放并注销 view。
 - `SharedPages` drop 时逐页释放 `KVec` 中记录的 frame；`KArc<SharedPages>` 的
   最后一个 strong reference 触发该回收。
+- `KArc<InvalidateSink>` 的最后一个 strong reference 释放 queue owner；已经失效的
+  `KWeak` handle 只会让 enqueue/submit 返回“sink 已不存在”，不会延长 `MmSpace`。

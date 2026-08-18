@@ -36,6 +36,12 @@ Runtime role:
 - anonymous private mappings register views so fork/COW descendants and
   file-private anonymous result pages live in one private-anon object/rmap
   world.
+- shared view registry uses `KHashMap<MappingViewId, RegisteredView>`;
+  private view registry uses `KBTreeMap<MappingViewId, RegisteredView>`.
+  Both view guards are owned by `KArc` rather than `alloc::Arc`.
+- `register_view()` returns `KResult<...>`: it first creates the guard owner,
+  then publishes into the registry with a fallible insert. This allows the
+  caller to preserve `KError::NoMemory` through the MM mapping boundary.
 - file-private mappings expose their private anonymous result object and
   lineage through `VmArea.backing()`.
 - private-anon objects produce object-side invalidation work for operations
@@ -83,3 +89,33 @@ COW replacement contract:
   fault instead of overwriting the competing slot.
 - the runtime-provided commit closure performs the page-table compare/replace
   step; object publication happens only after that closure succeeds.
+
+## Fallible view-registration contract
+
+The two object kinds intentionally exercise different container classes:
+
+```text
+AnonSharedObject
+  -> KArc<AnonSharedViewRegistration>
+  -> KHashMap<MappingViewId, RegisteredView>
+
+AnonPrivateObject
+  -> KArc<AnonPrivateViewRegistration>
+  -> KBTreeMap<MappingViewId, RegisteredView>
+  -> KBox-backed B-tree nodes
+```
+
+For both paths, the guard is local until the table/tree insert succeeds. If
+the guard allocation or registry allocation returns `NoMemory`, its drop runs
+after the registry lock is released and no `MappingView` is observable. The
+private B-tree reserves every potentially required split node before mutation,
+so its failure path is likewise publication-free.
+
+`memspace::MmSpace::install_runtime_mapping()` invokes this custom registry
+before PTE map. It is therefore a fallible metadata precondition, not a
+best-effort post-map notification.
+
+The `MappingViewSpec.notifier` itself currently remains an
+`Arc<dyn MappingViewNotifier>` supplied by the caller. Its trait-object owner
+allocation is outside this slice because the current `KArc` supports sized
+owners only; callers must not claim full notifier construction is OOM-safe.

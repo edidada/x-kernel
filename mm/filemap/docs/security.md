@@ -18,6 +18,9 @@ to `posix/mm`.
 - File content is owned by `kvfs::AddressSpace`, not by filemap runtimes.
 - Private file post-write pages are owned by `AnonPrivateObject`.
 - Runtime backing identity must match `VmArea.backing()`.
+- When a file path is available, `FileMappingInfo.path` must be an immutable
+  `KArc<KString>` snapshot constructed through `try_snapshot_path()` before
+  VMA publication; VMA/procfs consumers must only clone or read that owner.
 - File-backed object ids must come from the inode-owned
   `kvfs::AddressSpace::object_id()`.
 - Object invalidation requests must be derived from registered mapping views,
@@ -51,6 +54,9 @@ to `posix/mm`.
   silently dropped.
 - Shmem seal policy failures are returned as permission errors before the VMA
   permission or PTE state is upgraded.
+- Path snapshot buffer/owner OOM is returned as `KError::NoMemory`; tests
+  inject failure into both allocation stages and into `new_file_private_vma()`
+  to verify the error crosses the filemap boundary.
 
 ## Lifetime Rules
 
@@ -87,3 +93,7 @@ to `posix/mm`.
   accounting and filemap runtime registration.
 - Advanced Linux behavior such as DAX, THP, readahead, reclaim, swap, memcg,
   and NUMA is out of scope.
+- `absolute_path()` source construction, `Arc<VfsFile>`, runtime trait-object
+  owners, and file-object view notifier allocation are still legacy alloc
+  boundaries. The fallible pathname snapshot must not be read as a full
+  file-backed mmap OOM guarantee.

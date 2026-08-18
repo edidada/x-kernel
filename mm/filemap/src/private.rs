@@ -245,10 +245,15 @@ impl FilePrivateRuntime {
         observer: Option<&MmObserver>,
         start: VirtAddr,
         len: usize,
-    ) -> Option<AnonPrivateViewGuard> {
-        let observer = observer?;
-        Some(anon.register_view(MappingViewSpec {
-            mm_id: mm_id?,
+    ) -> KResult<Option<AnonPrivateViewGuard>> {
+        let Some(observer) = observer else {
+            return Ok(None);
+        };
+        let Some(mm_id) = mm_id else {
+            return Ok(None);
+        };
+        Ok(Some(anon.register_view(MappingViewSpec {
+            mm_id,
             vma_start: start.as_usize() as u64,
             vma_len: len,
             object_start: 0,
@@ -257,7 +262,7 @@ impl FilePrivateRuntime {
             notifier: Some(private_anon_invalidate_notifier(
                 invalidate.unwrap_or_else(|| observer.invalidate_handle()),
             )),
-        }))
+        })?))
     }
 
     fn rebuilt_runtime(
@@ -267,7 +272,7 @@ impl FilePrivateRuntime {
         new_observer: Option<&MmObserver>,
         invalidate: Option<InvalidateHandle>,
         fork_child: bool,
-    ) -> Arc<Self> {
+    ) -> KResult<Arc<Self>> {
         let invalidate = invalidate.or_else(|| new_observer.map(MmObserver::invalidate_handle));
         let anon = if fork_child {
             self.anon.fork_child()
@@ -284,7 +289,15 @@ impl FilePrivateRuntime {
                         .clone()
                         .unwrap_or_else(|| observer.invalidate_handle()),
                 });
-        Arc::new(Self {
+        let anon_view = Self::register_anon_view(
+            &anon,
+            new_mm_id,
+            invalidate,
+            new_observer,
+            new_start,
+            self.len,
+        )?;
+        Ok(Arc::new(Self {
             start: new_start,
             len: self.len,
             size: self.size,
@@ -300,15 +313,8 @@ impl FilePrivateRuntime {
                 new_start,
                 self.len,
             ),
-            anon_view: Self::register_anon_view(
-                &anon,
-                new_mm_id,
-                invalidate,
-                new_observer,
-                new_start,
-                self.len,
-            ),
-        })
+            anon_view,
+        }))
     }
 }
 
@@ -431,7 +437,7 @@ impl VmRuntimeOps for FilePrivateRuntime {
             Some(&observer),
             invalidate,
             false,
-        ))
+        )?)
     }
 
     fn clone_for_fork(
@@ -491,7 +497,7 @@ impl VmRuntimeOps for FilePrivateRuntime {
                 Some(&observer),
                 self.start,
                 self.len,
-            ),
+            )?,
         }))
     }
 }
@@ -525,7 +531,7 @@ pub(crate) fn new_private_runtime(
             ),
             anon_view: FilePrivateRuntime::register_anon_view(
                 &anon, mm_id, invalidate, observer, start, len,
-            ),
+            )?,
             file,
             file_start,
             file_end,
@@ -582,7 +588,9 @@ mod tests {
         };
 
         let parent_kind = parent.backing_info_impl().kind();
-        let child = parent.rebuilt_runtime(VirtAddr::from_usize(0x8000), None, None, None, true);
+        let child = parent
+            .rebuilt_runtime(VirtAddr::from_usize(0x8000), None, None, None, true)
+            .expect("rebuild private runtime");
         let child_kind = child.backing_info_impl().kind();
 
         let (
@@ -649,7 +657,9 @@ mod tests {
         }
 
         let parent_kind = parent.backing_info_impl().kind();
-        let child = parent.rebuilt_runtime(start, None, None, None, true);
+        let child = parent
+            .rebuilt_runtime(start, None, None, None, true)
+            .expect("rebuild private runtime");
         let child_kind = child.backing_info_impl().kind();
         let (
             super::VmBackingKind::FilePrivate {

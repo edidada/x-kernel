@@ -5,6 +5,7 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::fmt;
 
+use kalloc_types::{AllocContext, KArc, KBTreeMap};
 use kerrno::{KError, KResult};
 use khal::{mem::PhysAddr, paging::PageSize};
 use kspin::SpinNoIrq;
@@ -248,7 +249,7 @@ struct AnonPrivateViewRegistration {
 /// Lifetime guard for one registered anonymous-private view.
 #[derive(Clone)]
 pub struct AnonPrivateViewGuard {
-    inner: Arc<AnonPrivateViewRegistration>,
+    inner: KArc<AnonPrivateViewRegistration>,
 }
 
 impl AnonPrivateViewGuard {
@@ -268,7 +269,7 @@ impl Drop for AnonPrivateViewRegistration {
 pub struct AnonPrivateObject {
     id: AnonObjectId,
     lineage: AnonLineageId,
-    views: Mutex<BTreeMap<MappingViewId, RegisteredView>>,
+    views: Mutex<KBTreeMap<MappingViewId, RegisteredView>>,
     pages: Mutex<BTreeMap<u64, AnonPrivatePageHandle>>,
 }
 
@@ -289,7 +290,7 @@ impl AnonPrivateObject {
         Arc::new(Self {
             id: next_anon_object_id(),
             lineage: next_anon_lineage_id(),
-            views: Mutex::new(BTreeMap::new()),
+            views: Mutex::new(KBTreeMap::new()),
             pages: Mutex::new(BTreeMap::new()),
         })
     }
@@ -303,7 +304,7 @@ impl AnonPrivateObject {
         Arc::new(Self {
             id: next_anon_object_id(),
             lineage: self.lineage,
-            views: Mutex::new(BTreeMap::new()),
+            views: Mutex::new(KBTreeMap::new()),
             pages: Mutex::new(BTreeMap::new()),
         })
     }
@@ -330,31 +331,38 @@ impl AnonPrivateObject {
     }
 
     /// Registers one private-anonymous VMA view against this object.
-    pub fn register_view(self: &Arc<Self>, spec: MappingViewSpec) -> AnonPrivateViewGuard {
+    pub fn register_view(self: &Arc<Self>, spec: MappingViewSpec) -> KResult<AnonPrivateViewGuard> {
         let id = next_mapping_view_id();
-        self.views.lock().insert(
-            id,
-            RegisteredView {
-                view: MappingView::new(
-                    id,
-                    spec.mm_id,
-                    MappingViewRange {
-                        vma_start: spec.vma_start,
-                        vma_len: spec.vma_len,
-                        object_start: spec.object_start,
-                        object_len: spec.object_len,
-                    },
-                    spec.kind,
-                ),
-                notifier: spec.notifier,
-            },
-        );
-        AnonPrivateViewGuard {
-            inner: Arc::new(AnonPrivateViewRegistration {
+        let inner = KArc::try_new(
+            AnonPrivateViewRegistration {
                 object: self.clone(),
                 id,
-            }),
+            },
+            AllocContext::Sleepable,
+        )?;
+        {
+            let mut views = self.views.lock();
+            let previous = views.try_insert_in(
+                id,
+                RegisteredView {
+                    view: MappingView::new(
+                        id,
+                        spec.mm_id,
+                        MappingViewRange {
+                            vma_start: spec.vma_start,
+                            vma_len: spec.vma_len,
+                            object_start: spec.object_start,
+                            object_len: spec.object_len,
+                        },
+                        spec.kind,
+                    ),
+                    notifier: spec.notifier,
+                },
+                AllocContext::Sleepable,
+            )?;
+            debug_assert!(previous.is_none(), "mapping view ids must be unique");
         }
+        Ok(AnonPrivateViewGuard { inner })
     }
 
     /// Emits object-side invalidation work for one private-anonymous range.
@@ -571,6 +579,8 @@ impl AnonPrivateObject {
 
 #[cfg(unittest)]
 mod tests {
+    use kalloc_types::fault_injection::{fail_allocations_after, fail_next_allocation};
+    use kerrno::KError;
     use unittest::def_test;
     use vmobj::{MappingViewKind, MappingViewSpec};
 
@@ -589,15 +599,17 @@ mod tests {
     #[def_test]
     fn anon_private_registers_views_and_emits_object_hits() {
         let object = AnonPrivateObject::new_root();
-        let _view = object.register_view(MappingViewSpec {
-            mm_id: 9,
-            vma_start: 0x9000,
-            vma_len: 0x3000,
-            object_start: 0x0,
-            object_len: 0x3000,
-            kind: MappingViewKind::Private,
-            notifier: None,
-        });
+        let _view = object
+            .register_view(MappingViewSpec {
+                mm_id: 9,
+                vma_start: 0x9000,
+                vma_len: 0x3000,
+                object_start: 0x0,
+                object_len: 0x3000,
+                kind: MappingViewKind::Private,
+                notifier: None,
+            })
+            .unwrap();
 
         let work = object
             .invalidate_range(0x1000, 0x1000)
@@ -608,6 +620,52 @@ mod tests {
         assert_eq!(hit.vma_start(), 0xa000);
         assert_eq!(hit.object_start(), 0x1000);
         assert_eq!(hit.object_len(), 0x1000);
+    }
+
+    #[def_test(serial)]
+    fn anon_private_view_registration_returns_nomemory_before_publish() {
+        let object = AnonPrivateObject::new_root();
+        let _guard = fail_next_allocation();
+
+        let result = object.register_view(MappingViewSpec {
+            mm_id: 9,
+            vma_start: 0x9000,
+            vma_len: 0x1000,
+            object_start: 0,
+            object_len: 0x1000,
+            kind: MappingViewKind::Private,
+            notifier: None,
+        });
+        let err = match result {
+            Ok(_) => panic!("injected guard allocation must fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err, KError::NoMemory);
+        assert!(object.invalidate_range(0, 0x1000).is_none());
+    }
+
+    #[def_test(serial)]
+    fn anon_private_tree_registration_returns_nomemory_before_publish() {
+        let object = AnonPrivateObject::new_root();
+        let _guard = fail_allocations_after(1);
+
+        let result = object.register_view(MappingViewSpec {
+            mm_id: 9,
+            vma_start: 0x9000,
+            vma_len: 0x1000,
+            object_start: 0,
+            object_len: 0x1000,
+            kind: MappingViewKind::Private,
+            notifier: None,
+        });
+        let err = match result {
+            Ok(_) => panic!("injected B-tree allocation must fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err, KError::NoMemory);
+        assert!(object.invalidate_range(0, 0x1000).is_none());
     }
 
     #[def_test]

@@ -4,6 +4,7 @@
 
 use alloc::sync::Arc;
 
+use kalloc_types::{AllocContext, KArc, KString};
 use kerrno::KResult;
 use khal::paging::{MappingFlags, PageSize};
 use kvfs::{AddressSpace, AddressSpaceViewGuard, VfsFile};
@@ -28,7 +29,16 @@ pub(crate) struct FileVmaSpec {
     pub max_flags: MappingFlags,
     pub offset: u64,
     pub inode: u64,
-    pub path: Option<alloc::string::String>,
+    pub path: Option<KArc<KString>>,
+}
+
+/// Copies a display path into VMA metadata through fallible allocation.
+///
+/// The returned handle is immutable and cheaply cloneable, so VMA splitting
+/// and snapshots do not need to reallocate the pathname.
+pub(crate) fn try_snapshot_path(path: &str) -> KResult<KArc<KString>> {
+    let path = KString::try_from_str(path, AllocContext::Sleepable)?;
+    Ok(KArc::try_new(path, AllocContext::Sleepable)?)
 }
 
 pub(crate) struct FileRuntimeContext<'a> {
@@ -205,8 +215,7 @@ pub fn new_file_private_vma(
     file_end: Option<u64>,
     flags: MappingFlags,
 ) -> KResult<(VmArea, VmRuntimeRef)> {
-    let runtime = new_private_runtime(start, len, page_size, file.clone(), offset, file_end, None)
-        .expect("cached private file source must build runtime");
+    let runtime = new_private_runtime(start, len, page_size, file.clone(), offset, file_end, None)?;
     let vma = build_file_vma(
         FileVmaSpec {
             start,
@@ -216,11 +225,10 @@ pub fn new_file_private_vma(
             max_flags: flags,
             offset,
             inode: file.inode().inode(),
-            path: file
-                .path()
-                .absolute_path()
-                .ok()
-                .map(|it| it.as_str().into()),
+            path: match file.path().absolute_path() {
+                Ok(path) => Some(try_snapshot_path(path.as_str())?),
+                Err(_) => None,
+            },
         },
         runtime.backing_info(),
     );
@@ -231,15 +239,65 @@ pub fn new_file_private_vma(
 mod tests {
     use alloc::sync::Arc;
 
+    use kalloc_types::fault_injection::{fail_allocations_after, fail_next_allocation};
+    use kerrno::KError;
     use khal::paging::MappingFlags;
     use memaddr::{PAGE_SIZE_4K, VirtAddr};
     use memspace::{MmObserver, VmBackingKind};
     use unittest::def_test;
 
-    use super::{FileRuntimeContext, FileVmaSpec, build_file_runtime, build_file_vma};
+    use super::{
+        FileRuntimeContext, FileVmaSpec, build_file_runtime, build_file_vma, new_file_private_vma,
+        try_snapshot_path,
+    };
     use crate::test_support::{anonymous_location, open_test_file};
 
     const O_RDWR: u32 = 2;
+
+    #[def_test]
+    fn snapshot_path_uses_fallible_string_and_shared_owner() {
+        let path = try_snapshot_path("/tmp/mapped-file").unwrap();
+        assert_eq!(path.as_str(), "/tmp/mapped-file");
+        assert_eq!(path.clone(), path);
+    }
+
+    #[def_test(serial)]
+    fn snapshot_path_reports_nomemory_for_string_or_owner() {
+        let _guard = fail_next_allocation();
+        let err = match try_snapshot_path("/tmp/mapped-file") {
+            Ok(_) => panic!("injected string allocation must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err, KError::NoMemory);
+        drop(_guard);
+
+        let _guard = fail_allocations_after(1);
+        let err = match try_snapshot_path("/tmp/mapped-file") {
+            Ok(_) => panic!("injected shared-owner allocation must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err, KError::NoMemory);
+    }
+
+    #[def_test(serial)]
+    fn private_file_vma_propagates_path_snapshot_oom() {
+        let file = open_test_file(anonymous_location("fallible-vma-path"), O_RDWR);
+        let _guard = fail_next_allocation();
+        let err = match new_file_private_vma(
+            VirtAddr::from_usize(0x20000),
+            PAGE_SIZE_4K,
+            khal::paging::PageSize::Size4K,
+            file,
+            0,
+            None,
+            MappingFlags::READ,
+        ) {
+            Ok(_) => panic!("injected VMA pathname allocation must fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err, KError::NoMemory);
+    }
 
     #[def_test]
     fn cached_file_sources_share_inode_owned_object_identity() {

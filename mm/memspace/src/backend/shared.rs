@@ -157,22 +157,23 @@ impl SharedBackend {
         mm_id: u64,
         invalidate: InvalidateHandle,
         vma: &VmArea,
-    ) -> Self {
+    ) -> KResult<Self> {
         let object_start = vma.page_offset() * memaddr::PAGE_SIZE_4K as u64;
-        Self {
+        let object_view = self.object.register_view(MappingViewSpec {
+            mm_id,
+            vma_start: vma.start().as_usize() as u64,
+            vma_len: vma.size(),
+            object_start,
+            object_len: vma.size(),
+            kind: MappingViewKind::Shared,
+            notifier: Some(SharedAnonInvalidate::new(invalidate)),
+        })?;
+        Ok(Self {
             start: self.start,
             pages: self.pages.clone(),
             object: self.object.clone(),
-            object_view: Some(self.object.register_view(MappingViewSpec {
-                mm_id,
-                vma_start: vma.start().as_usize() as u64,
-                vma_len: vma.size(),
-                object_start,
-                object_len: vma.size(),
-                kind: MappingViewKind::Shared,
-                notifier: Some(SharedAnonInvalidate::new(invalidate)),
-            })),
-        }
+            object_view: Some(object_view),
+        })
     }
 
     pub fn clone_for_fork_runtime(

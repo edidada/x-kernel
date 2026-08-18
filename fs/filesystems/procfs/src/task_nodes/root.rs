@@ -18,6 +18,7 @@ use core::{
 };
 
 use kaddr_layout::{SIGNAL_TRAMPOLINE, USER_HEAP_BASE, USER_STACK_SIZE, USER_STACK_TOP};
+use kalloc_types::{KArc, KString};
 use khal::paging::MappingFlags;
 use kprocess::{AsThread, LiveAddressSpace, Process, TaskStat, procfs};
 use ktask::{KtaskRef, WeakKtaskRef, current};
@@ -179,11 +180,11 @@ struct MapsEntry {
     flags: MappingFlags,
     offset: u64,
     inode: u64,
-    path: Option<String>,
+    path: Option<KArc<KString>>,
     name: Option<&'static str>,
 }
 
-fn backend_file_mapping(vma: &memspace::VmArea) -> Option<(u64, u64, Option<String>)> {
+fn backend_file_mapping(vma: &memspace::VmArea) -> Option<(u64, u64, Option<KArc<KString>>)> {
     let info = vma.file_mapping()?;
     Some((
         vma.file_offset_for(vma.start())?,
@@ -224,7 +225,7 @@ fn render_maps_line(item: &MapsEntry) -> String {
         } else {
             line.push(' ');
         }
-        line.push_str(path);
+        line.push_str(path.as_str());
     }
 
     line.push('\n');
@@ -855,6 +856,7 @@ impl SimpleDirOps for ProcFsHandler {
 
 #[cfg(unittest)]
 mod tests {
+    use kalloc_types::{AllocContext, KArc, KString};
     use khal::paging::MappingFlags;
     use unittest::{assert_eq, def_test};
 
@@ -946,7 +948,13 @@ mod tests {
             flags: MappingFlags::READ | MappingFlags::WRITE,
             offset: 0,
             inode: 42,
-            path: Some("/bin/test".into()),
+            path: Some(
+                KArc::try_new(
+                    KString::try_from_str("/bin/test", AllocContext::Sleepable).unwrap(),
+                    AllocContext::Sleepable,
+                )
+                .unwrap(),
+            ),
             name: None,
         });
 

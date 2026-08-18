@@ -63,12 +63,22 @@
   释放时清空映射。
 - `SharedPages` 必须先成功预留 `KVec<PhysAddr>` 容量，之后才可取得物理 frame；
   任何 owner allocation 失败都必须通过 `KArc` 参数 drop 释放该页集。
+- `MmSpace::invalidate_sink` 的 owner 必须在空地址空间构造时通过 `KArc::try_new`
+  成功；失败必须返回 `KError::NoMemory`，不得创建半初始化的 `MmSpace`。
+- anonymous object-view 的 custom fallible registration 必须发生在对应 runtime map
+  之前；`KArc` guard 或 registry node/table 失败时，不得由这一 failure point 留下 PTE
+  或已发布 view。
+- `FileMappingInfo.path` 若存在，必须是 filemap boundary 创建的
+  `KArc<KString>` immutable snapshot；VMA clone/split/procfs 读取不能重新分配或修改它。
 
 ## 线程安全
 
 - `MmSpace` mutable operations require external exclusive access.
 - `InvalidateSink` spinlock only protects queue mutation; it must not cover
   runtime unmap, page-table mutation, or sleepable lock acquisition.
+- `InvalidateSink` 的内部 queue 尚未迁移为可增长 `KVecDeque`：在 `SpinNoIrq` 下不得
+  触发 `Sleepable` allocation，除非 future reserve/NoWait contract 已实现并由 API
+  显式表达。
 - `PageTable::modify()` enforces one mutable page-table guard at a time.
 - file/anon object locks must not be acquired while holding `InvalidateSink`'s
   spinlock.
@@ -122,6 +132,9 @@
 | COW conflict | object slot 或 PTE 变化 | 返回 retry-class outcome | fault retry |
 | OOM | frame 或页表分配失败 | 返回 `OutOfMemory` / `NoMemory` | syscall 或 fault 失败 |
 | SharedPages bookkeeping OOM | 匿名共享页集创建时 `KVec` 预留失败 | 返回 `NoMemory`，尚未取得 frame | 不泄漏部分页集 |
+| Invalidate sink owner OOM | 新建 `MmSpace` 时 `KArc<InvalidateSink>` allocation 失败 | 返回 `NoMemory`，不发布 `MmSpace` | 用户创建地址空间可得到 ENOMEM |
+| Anon view registry OOM | `KArc` guard、hash table 或 B-tree node reservation 失败 | 在 PTE map 前返回 `NoMemory`，无已发布 view | 此 custom registry slice 不留下半状态 |
+| File VMA pathname OOM | `KString` buffer 或 `KArc<KString>` owner 失败 | filemap 返回 `NoMemory`，不发布该 VMA metadata | mmap/image mapping 可得到 ENOMEM |
 | File EOF fault | file object 拒绝越界页 | `BusError` outcome | 上层映射为 SIGBUS-class 行为 |
 | `mremap` source teardown destroys moved private backing | 误把 relocation 当 ordinary unmap | metadata-only retirement | 避免 moved mapping 指向已释放对象页 |
 | Stale mm user acquire | 最后一个 user release 与新 user acquire 并发 | 单原子状态 CAS；torn-down 后 upgrade/acquire 失败 | 避免退出清理后重新使用已清空映射 |
@@ -135,6 +148,8 @@
 - Invalidate drain 失败只影响当前 request；request 保留在队列中等待下一边界。
 - `SharedPages` 的 `KVec` 预留或 `KArc` owner 构造失败通过 `KResult` 返回
   `NoMemory`；前者发生在 frame acquisition 前，后者通过 RAII 释放已取得 frame。
+- 新增 custom container 的 OOM 只在其第一个能够返回 `KResult` 的 module boundary
+  转换一次；中间层不得吞掉、记录后继续，或改写为不相关 errno。
 
 ## 已知限制
 
@@ -145,6 +160,10 @@
 - `MS_INVALIDATE`、locked-page `EBUSY` 和释放 `MmSpace` 锁后再执行慢速
   provider sync 未实现。
 - Invalidate sink 是 queue/drain 模型，不提供 Linux 同步 rmap 树的强同步语义。
+- `VmAreaSet`、trait-object notifier owner 和 invalidate queue 内部仍使用 legacy
+  alloc containers；当前 fallible metadata slice 不等于整个 mmap/invalidate path 已
+  OOM-safe。特别是 `Arc<dyn MappingViewNotifier>` 不能由当前 sized-only `KArc`
+  直接替换。
 
 ## 审计清单
 
@@ -160,3 +179,7 @@
   `MmUserHandle` 延长用户映射生命周期。
 - [ ] 新的 frame collection 是否在取得第一个 frame 前完成所有可失败的容器
   bookkeeping，且 owner allocation 的失败路径经过 RAII 回收。
+- [ ] 新的 user-triggerable metadata allocation 是否使用 `kalloc-types`，并把
+  `KError::NoMemory` 保留到 syscall ABI boundary。
+- [ ] 若触及 spinlock/IRQ path，是否只使用已预留的 allocation-free operation，而
+  没有把 `Sleepable` growth 偷放进临界区。

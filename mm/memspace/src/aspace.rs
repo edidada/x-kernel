@@ -26,6 +26,7 @@ pub enum AddrPolicy {
     FixedNoReplace,
 }
 
+use kalloc_types::{AllocContext, KArc, KWeak};
 use kerrno::{KError, KErrorKind, KResult, k_bail};
 use khal::{
     mem::p2v,
@@ -151,7 +152,7 @@ impl InvalidateSink {
 
 #[derive(Clone)]
 pub struct InvalidateHandle {
-    sink: Weak<InvalidateSink>,
+    sink: KWeak<InvalidateSink>,
     aspace: Weak<Mutex<MmSpace>>,
 }
 
@@ -231,7 +232,7 @@ pub struct MmSpace {
     cpu_residency: MmCpuResidencyRef,
     #[cfg(target_arch = "aarch64")]
     user_asid_context: Option<Arc<Aarch64UserAsidContext>>,
-    invalidate_sink: Arc<InvalidateSink>,
+    invalidate_sink: KArc<InvalidateSink>,
 }
 
 /// Compatibility alias retained while external crates migrate off the legacy name.
@@ -240,14 +241,14 @@ pub type AddrSpace = MmSpace;
 impl MmSpace {
     pub fn invalidate_handle(&self, aspace: &Arc<Mutex<MmSpace>>) -> InvalidateHandle {
         InvalidateHandle {
-            sink: Arc::downgrade(&self.invalidate_sink),
+            sink: KArc::downgrade(&self.invalidate_sink),
             aspace: Arc::downgrade(aspace),
         }
     }
 
     pub(crate) fn deferred_invalidate_handle(&self) -> InvalidateHandle {
         InvalidateHandle {
-            sink: Arc::downgrade(&self.invalidate_sink),
+            sink: KArc::downgrade(&self.invalidate_sink),
             aspace: Weak::new(),
         }
     }
@@ -434,12 +435,13 @@ impl MmSpace {
     }
 
     fn install_runtime_mapping(&mut self, mut vma: VmArea, runtime: VmRuntimeRef) -> KResult {
+        // Registration owns the fallible rmap allocation. Complete it before
+        // exposing page-table state so an OOM leaves no mapped range that
+        // lacks matching object-side metadata.
+        let runtime =
+            runtime.register_object_views(self.mm_id, self.deferred_invalidate_handle(), &vma)?;
         runtime.map(vma.range(), vma.flags(), &mut self.pgtbl.modify())?;
-        vma.set_runtime(runtime.register_object_views(
-            self.mm_id,
-            self.deferred_invalidate_handle(),
-            &vma,
-        ));
+        vma.set_runtime(runtime);
         self.vmas.insert(vma);
         Ok(())
     }
@@ -660,6 +662,7 @@ impl MmSpace {
     /// Set `is_kernel` to `true` for the global kernel address space so that
     /// page table modifications flush TLB entries on **all** online CPUs.
     fn new_empty_inner(base: VirtAddr, size: usize, is_kernel: bool) -> KResult<Self> {
+        let invalidate_sink = KArc::try_new(InvalidateSink::default(), AllocContext::Sleepable)?;
         let cpu_residency = Arc::new(MmCpuResidency::new());
         #[cfg(target_arch = "aarch64")]
         let pgtbl = {
@@ -707,7 +710,7 @@ impl MmSpace {
             cpu_residency,
             #[cfg(target_arch = "aarch64")]
             user_asid_context,
-            invalidate_sink: Arc::new(InvalidateSink::default()),
+            invalidate_sink,
         })
     }
 
@@ -1664,6 +1667,8 @@ impl Drop for MmSpace {
 mod tests {
     use alloc::sync::Arc;
 
+    use kalloc_types::fault_injection::fail_next_allocation;
+    use kerrno::KError;
     use khal::{
         paging::{MappingFlags, PageSize, PagingError},
         trap::PageFaultFlags,
@@ -1715,6 +1720,17 @@ mod tests {
             VmObjectId::File(FileObjectId::from_raw(11)),
             ObjectViewHit::new(view, 0, PAGE_SIZE_4K),
         )
+    }
+
+    #[def_test(serial)]
+    fn empty_aspace_propagates_invalidate_sink_oom() {
+        let _guard = fail_next_allocation();
+        let err = match MmSpace::new_empty_user(VirtAddr::from_usize(0x4000), PAGE_SIZE_4K) {
+            Ok(_) => panic!("injected invalidate-sink allocation must fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err, KError::NoMemory);
     }
 
     #[def_test]

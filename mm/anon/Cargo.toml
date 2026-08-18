@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 kerrno = { workspace = true }
+kalloc_types = { workspace = true }
 khal = { workspace = true }
 kspin = { workspace = true }
 ksync = { workspace = true }

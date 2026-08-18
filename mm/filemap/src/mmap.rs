@@ -14,7 +14,9 @@ use memspace::{InvalidateHandle, MmObserver, VmArea, VmRuntimeRef};
 
 use crate::{
     FileMappingMode,
-    runtime::{FileRuntimeContext, FileVmaSpec, build_file_runtime, build_file_vma},
+    runtime::{
+        FileRuntimeContext, FileVmaSpec, build_file_runtime, build_file_vma, try_snapshot_path,
+    },
 };
 
 struct FileMapper {
@@ -97,11 +99,10 @@ impl MmapMapper for FileMapper {
 fn mmap_file(req: FileMmapRequest, mode: FileMappingMode) -> KResult<(VmArea, VmRuntimeRef)> {
     let file = req.file.clone();
     let inode = file.inode().inode();
-    let path = file
-        .path()
-        .absolute_path()
-        .ok()
-        .map(|it| it.as_str().into());
+    let path = match file.path().absolute_path() {
+        Ok(path) => Some(try_snapshot_path(path.as_str())?),
+        Err(_) => None,
+    };
     let mut mapper = FileMapper {
         req,
         mode,

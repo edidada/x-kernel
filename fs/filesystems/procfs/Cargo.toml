@@ -23,6 +23,7 @@ kvfs.workspace = true
 macros.workspace = true
 kaddr_layout.workspace = true
 kalloc.workspace = true
+kalloc_types.workspace = true
 kcpu_id_map.workspace = true
 kdevice.workspace = true
 khal.workspace = true

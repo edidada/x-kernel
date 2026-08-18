@@ -4,11 +4,11 @@
 
 //! Linux-aligned VMA/backing descriptors.
 
-use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::fmt;
 
 use anon::{AnonLineageId, AnonSharedObject};
-use kalloc_types::KArc;
+use kalloc_types::{KArc, KString};
 use kerrno::{KError, KResult};
 use khal::{
     paging::{MappingFlags, PageSize, PageTableMut},
@@ -242,16 +242,16 @@ impl VmRuntimeRef {
         mm_id: u64,
         invalidate: InvalidateHandle,
         vma: &VmArea,
-    ) -> Self {
-        match self {
+    ) -> KResult<Self> {
+        Ok(match self {
             Self::AnonShared(inner) => {
-                Self::AnonShared(inner.register_object_view(mm_id, invalidate, vma))
+                Self::AnonShared(inner.register_object_view(mm_id, invalidate, vma)?)
             }
             Self::AnonPrivate(inner) => {
-                Self::AnonPrivate(inner.register_object_view(mm_id, invalidate, vma))
+                Self::AnonPrivate(inner.register_object_view(mm_id, invalidate, vma)?)
             }
             _ => self.clone(),
-        }
+        })
     }
 
     pub(crate) fn map(
@@ -567,7 +567,12 @@ pub struct FileMappingInfo {
     /// Inode number of the mapped file object.
     pub inode: u64,
     /// Resolved absolute path, if available.
-    pub path: Option<String>,
+    /// Immutable path snapshot owned through fallible string storage.
+    ///
+    /// Sharing it through `KArc` keeps normal VMA splits and snapshots
+    /// allocation-free; construction is performed by the file-mapping
+    /// boundary before this metadata is published.
+    pub path: Option<KArc<KString>>,
 }
 
 /// Process-facing VMA metadata with explicit backing semantics.

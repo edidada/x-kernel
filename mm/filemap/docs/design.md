@@ -21,6 +21,9 @@ underlying cache container as a second owner.
 - Keep Linux `MAP_SHARED` and `MAP_PRIVATE` file mapping modes explicit.
 - Call the VFS `File::mmap()` callback through an internal `MmapMapper`.
 - Build file-backed VMA metadata, including file offset, inode id, and path.
+- Snapshot a resolved display path through `KString` + `KArc` before VMA
+  metadata publication, so pathname OOM becomes `KError::NoMemory` rather
+  than an infallible `String` growth panic.
 - Implement shared file runtime fault handling.
 - Implement shared file runtime `msync` dispatch into the inode-owned
   `kvfs::AddressSpace`.
@@ -133,6 +136,25 @@ sys_mmap
   -> VmArea with FileMappingInfo
   -> MmSpace::map_runtime_vma()
 ```
+
+### Fallible pathname metadata
+
+`mmap_file()` and `new_file_private_vma()` call `try_snapshot_path()` after
+resolving a display path and before constructing `FileMappingInfo`:
+
+```text
+&str returned by VFS path resolution
+  -> KString::try_from_str(Sleepable)
+  -> KArc::try_new(KString, Sleepable)
+  -> FileMappingInfo.path
+  -> VMA split / clone / procfs maps: clone KArc only
+```
+
+Either allocation maps through `KResult` to `KError::NoMemory`. The immutable
+`KArc<KString>` form avoids a second pathname allocation while VMA metadata is
+copied or rendered by procfs. The source `absolute_path()` implementation and
+other file-runtime `Arc` owners remain legacy allocation boundaries; this is
+only the persistent VMA pathname slice.
 
 ### Shared file fault
 
