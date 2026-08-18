@@ -12,6 +12,7 @@ use core::{
 
 use kcpu::userspace::{UserContext, UserRestorableContext};
 use kerrno::{KResult, LinuxError};
+use kpoll::PollSet;
 use kspin::SpinNoIrq;
 use osvm::VirtMutPtr;
 
@@ -45,6 +46,7 @@ pub struct ThreadSignalManager {
     stack: SpinNoIrq<SignalStack>,
 
     possibly_has_signal: AtomicBool,
+    pending_poll: PollSet,
 }
 
 impl ThreadSignalManager {
@@ -59,6 +61,7 @@ impl ThreadSignalManager {
             stack: SpinNoIrq::new(SignalStack::default()),
 
             possibly_has_signal: AtomicBool::new(false),
+            pending_poll: PollSet::new(),
         });
         proc.children.lock().push((tid, Arc::downgrade(&this)));
         this
@@ -85,6 +88,11 @@ impl ThreadSignalManager {
     /// Returns the owning process signal manager.
     pub fn process(&self) -> &Arc<ProcessSignalManager> {
         &self.proc
+    }
+
+    /// Returns the wake source for newly queued thread signals.
+    pub fn pending_poll(&self) -> &PollSet {
+        &self.pending_poll
     }
 
     /// Returns the configured alternate stack with flags computed for `sp`.
@@ -266,6 +274,7 @@ impl ThreadSignalManager {
 
         if self.pending.lock().put_signal(sig) {
             self.possibly_has_signal.store(true, Ordering::Release);
+            self.pending_poll.wake();
         }
         !is_blocked
     }

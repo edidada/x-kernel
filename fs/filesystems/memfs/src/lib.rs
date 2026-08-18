@@ -181,7 +181,15 @@ impl SuperBlockOperations for MemoryFs {
     }
 
     fn statfs(&self) -> VfsResult<StatFs> {
-        Ok(simple_statfs(self.fs_type))
+        let mut stat = simple_statfs(self.fs_type);
+        // tmpfs users such as Chromium reject a filesystem that reports only
+        // the tiny generic libfs placeholder capacity. MemoryFs currently has
+        // no quota accounting, so advertise a stable 512 MiB capacity rather
+        // than an artificial 400 KiB limit.
+        stat.blocks = 128 * 1024;
+        stat.blocks_free = stat.blocks;
+        stat.blocks_available = stat.blocks;
+        Ok(stat)
     }
 }
 

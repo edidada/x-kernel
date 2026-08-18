@@ -553,6 +553,13 @@ impl DeviceFileOps for Card0 {
         if written == 0 {
             Err(VfsError::WouldBlock)
         } else {
+            let delivered = written / evsz;
+            let sequence = self.sequence.load(Ordering::Relaxed);
+            if sequence <= 10 || sequence.is_multiple_of(60) {
+                log::warn!(
+                    "drm diagnostic: delivered {delivered} flip events through sequence {sequence}"
+                );
+            }
             Ok(written)
         }
     }
@@ -912,6 +919,15 @@ impl DrmIoctl for DrmModeCrtcPageFlip {
     fn handle(dev: &Card0, f: &mut Self) -> VfsResult<usize> {
         if f.crtc_id != CRTC_ID || !dev.fbs.lock().contains_key(&f.fb_id) {
             return Err(VfsError::InvalidInput);
+        }
+        let next_sequence = dev.sequence.load(Ordering::Relaxed).wrapping_add(1);
+        if next_sequence <= 10 || next_sequence.is_multiple_of(60) {
+            log::warn!(
+                "drm diagnostic: PAGE_FLIP fb={} flags={:#x} user_data={:#x}",
+                f.fb_id,
+                f.flags,
+                f.user_data
+            );
         }
         dev.present_fb(f.fb_id);
         if f.flags & DRM_MODE_PAGE_FLIP_EVENT != 0 {
@@ -1461,6 +1477,9 @@ impl Card0 {
             .sequence
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1);
+        if seq <= 10 || seq.is_multiple_of(60) {
+            log::warn!("drm diagnostic: queued flip event sequence={seq}");
+        }
         let now = khal::time::monotonic_time();
         let now = now.span_since_origin();
         let ev = DrmEventVblank {

@@ -6,7 +6,7 @@
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
 use core::{
     mem,
-    sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering},
 };
 
 use async_trait::async_trait;
@@ -90,8 +90,10 @@ struct StreamEndpoint {
     tx_closed: AtomicBool,
     is_listening: AtomicBool,
     socket_error: AtomicI32,
-    /// Control messages waiting for the next successful receive operation.
-    ancillary: SpinNoPreempt<VecDeque<Vec<AncillaryData>>>,
+    /// Control messages keyed by the first byte of their associated send.
+    ancillary: SpinNoPreempt<VecDeque<(u64, Vec<AncillaryData>)>>,
+    published_bytes: AtomicU64,
+    consumed_bytes: AtomicU64,
     last_sender_pid: AtomicU32,
 }
 
@@ -415,24 +417,28 @@ impl UnixTransportOps for StreamTransport {
                     {
                         return finish_send_on_error(total, KError::BrokenPipe);
                     }
+                    let stream_offset = chan
+                        .peer_endpoint
+                        .published_bytes
+                        .fetch_add(count as u64, Ordering::AcqRel);
+                    if count > 0 && !options.ancillary.is_empty() {
+                        chan.peer_endpoint
+                            .ancillary
+                            .lock()
+                            .push_back((stream_offset, mem::take(&mut options.ancillary)));
+                    }
                     // SAFETY: `count` is the sum of bytes written into the vacant
                     // slices above, so it never exceeds the producer capacity that
                     // was exposed while the channel lock excluded other producers.
                     unsafe { chan.tx.advance_write_index(count) };
                 }
-                total += count;
                 if count > 0 {
                     chan.peer_endpoint
                         .last_sender_pid
                         .store(kprocess::current_user_thread().pid(), Ordering::Release);
-                    if !options.ancillary.is_empty() {
-                        chan.peer_endpoint
-                            .ancillary
-                            .lock()
-                            .push_back(mem::take(&mut options.ancillary));
-                    }
                     chan.peer_endpoint.polls.readable.wake();
                 }
+                total += count;
 
                 if total == size || (non_blocking && total > 0) {
                     Ok(total)
@@ -451,11 +457,30 @@ impl UnixTransportOps for StreamTransport {
                 };
 
                 let occupied_before = chan.rx.occupied_len();
+                let consumed_start = self.endpoint.consumed_bytes.load(Ordering::Acquire);
+                // A control message is a record boundary in a Unix stream.
+                // Linux never lets one recvmsg consume ordinary bytes on both
+                // sides of a pending SCM_RIGHTS record, which lets userspace
+                // associate received descriptors with the correct protocol
+                // frame.
+                let bytes_before_next_control = self
+                    .endpoint
+                    .ancillary
+                    .lock()
+                    .iter()
+                    .find_map(|(offset, _)| {
+                        (*offset > consumed_start).then_some(*offset - consumed_start)
+                    })
+                    .unwrap_or(u64::MAX) as usize;
                 let count = {
                     let (left, right) = chan.rx.as_slices();
-                    let mut count = dst.write(left)?;
-                    if count >= left.len() {
-                        count += dst.write(right)?;
+                    let left_len = left.len().min(bytes_before_next_control);
+                    let mut count = dst.write(&left[..left_len])?;
+                    if count >= left_len && count < bytes_before_next_control {
+                        let right_len = right
+                            .len()
+                            .min(bytes_before_next_control.saturating_sub(count));
+                        count += dst.write(&right[..right_len])?;
                     }
                     // SAFETY: `count` is the sum of bytes copied out of the
                     // occupied slices returned by `as_slices`, so advancing by this
@@ -464,10 +489,20 @@ impl UnixTransportOps for StreamTransport {
                     count
                 };
                 if count > 0 {
-                    if let Some(pending) = self.endpoint.ancillary.lock().pop_front()
-                        && let Some(output) = options.ancillary.as_deref_mut()
+                    let consumed_end = self
+                        .endpoint
+                        .consumed_bytes
+                        .fetch_add(count as u64, Ordering::AcqRel)
+                        + count as u64;
+                    let mut ancillary = self.endpoint.ancillary.lock();
+                    while ancillary
+                        .front()
+                        .is_some_and(|(offset, _)| *offset < consumed_end)
                     {
-                        output.extend(pending);
+                        let (_, pending) = ancillary.pop_front().unwrap();
+                        if let Some(output) = options.ancillary.as_deref_mut() {
+                            output.extend(pending);
+                        }
                     }
                     if self.pass_credentials.load(Ordering::Acquire)
                         && let Some(output) = options.ancillary.as_deref_mut()

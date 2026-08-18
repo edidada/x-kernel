@@ -569,6 +569,11 @@ impl SocketOps for TcpSocket {
                 })?;
         if should_poll_rx_window {
             network_poller().notify(PollReason::RxWindow);
+            // Loopback has no device IRQ to turn the notification into
+            // immediate protocol progress.  Run one stack poll after the
+            // socket operation has released its locks so ACK/window updates
+            // wake blocked localhost writers without waiting for a timer.
+            poll_interfaces();
         }
         Ok(received)
     }
@@ -603,20 +608,16 @@ impl SocketOps for TcpSocket {
 }
 
 fn should_poll_receive_window(
-    receive_capacity_bytes: usize,
-    available_before_bytes: usize,
+    _receive_capacity_bytes: usize,
+    _available_before_bytes: usize,
     received_bytes: usize,
 ) -> bool {
-    // Keep this calculation aligned with smoltcp Socket::new so dependency
-    // upgrades cannot silently narrow the zero-window range covered here.
-    let capacity_bit_len = usize::BITS as usize - receive_capacity_bytes.leading_zeros() as usize;
-    let max_window_scale_shift = capacity_bit_len.saturating_sub(16);
-    let max_window_scale_quantum_bytes = 1usize << max_window_scale_shift;
-
-    // A peer without window scaling needs the first notification after a full
-    // buffer is consumed. A scaled peer can still see a zero window until one
-    // complete scale quantum is free, so each read in that range must poll.
-    received_bytes > 0 && available_before_bytes < max_window_scale_quantum_bytes
+    // Consuming receive data can require an immediate ACK even when the
+    // advertised window was not previously zero.  This is essential for the
+    // loopback device, which has no hardware interrupt to provide a later
+    // progress edge; deferring the poll stalls bulk localhost transfers until
+    // a timer happens to run.
+    received_bytes > 0
 }
 
 impl Pollable for TcpSocket {

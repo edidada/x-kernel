@@ -507,7 +507,11 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
             return Err(PtError::AlreadyMapped);
         }
         *entry = PageTableEntry::new_page(paddr.align_down(page_size), flags, page_size.is_huge());
-        self.flush(vaddr);
+        // Installing a translation into an unused entry cannot leave a stale
+        // positive translation behind.  Any earlier unmap of the same entry
+        // records its own invalidation before making the entry unused.  Avoid
+        // an otherwise unnecessary cross-CPU TLB shootdown on every demand
+        // fault; remap/protect/unmap still invalidate normally.
         Ok(())
     }
 

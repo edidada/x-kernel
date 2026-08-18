@@ -38,6 +38,14 @@ pub trait VmRuntimeOps: Send + Sync {
     fn backing_info(&self) -> VmBackingInfo;
     fn map(&self, range: VirtAddrRange, flags: MappingFlags, pgtbl: &mut PageTableMut) -> KResult;
     fn unmap(&self, range: VirtAddrRange, pgtbl: &mut PageTableMut) -> KResult;
+    /// Releases backing ownership during final address-space teardown.
+    ///
+    /// The page table is about to be dropped wholesale, so implementations
+    /// must not walk PTEs here. Ordinary `unmap()` remains responsible for
+    /// live `munmap()` operations.
+    fn release_for_exit(&self, _range: VirtAddrRange) -> KResult {
+        Ok(())
+    }
     fn on_protect(
         &self,
         range: VirtAddrRange,
@@ -270,6 +278,16 @@ impl VmRuntimeRef {
             Self::AnonPrivate(inner) => VmRuntimeOps::unmap(inner, range, pgtbl),
             Self::FileShared(inner) => inner.unmap(range, pgtbl),
             Self::FilePrivate(inner) => inner.unmap(range, pgtbl),
+        }
+    }
+
+    pub(crate) fn release_for_exit(&self, range: VirtAddrRange) -> KResult {
+        match self {
+            Self::Linear(inner) => inner.release_for_exit(range),
+            Self::AnonShared(inner) => inner.release_for_exit(range),
+            Self::AnonPrivate(inner) => inner.release_for_exit(range),
+            Self::FileShared(inner) => inner.release_for_exit(range),
+            Self::FilePrivate(inner) => inner.release_for_exit(range),
         }
     }
 

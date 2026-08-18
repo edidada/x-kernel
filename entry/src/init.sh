@@ -22,6 +22,7 @@ if [ -x /sbin/init ]; then
     # Run one kiosk session under libseat's noop backend instead.
     cat > /etc/inittab <<'ITTAB'
 ::sysinit:/etc/init.d/kiosk-boot
+::respawn:/bin/sh -c 'exec su -s /bin/sh -c "cd /home/kiosk && HOME=/home/kiosk exec node --expose-internals /usr/bin/dsh web" kiosk'
 ::respawn:/bin/sh -c 'exec su -s /bin/sh -c "HOME=/home/kiosk exec /usr/local/bin/kiosk-session" kiosk'
 ::ctrlaltdel:/sbin/reboot
 ::shutdown:/etc/init.d/kiosk-shutdown

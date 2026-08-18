@@ -42,7 +42,7 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
                 writeln!(
                     info,
                     "processor\t: {}\nBogoMIPS\t: 100.00\nFeatures\t: fp asimd evtstrm aes pmull \
-                     sha1 sha2 crc32 atomics cpuid\nCPU implementer\t: 0x41\nCPU architecture: \
+                     sha1 sha2 crc32 atomics cpuid\nCPU implementer\t: 0x41\nCPU architecture\t: \
                      8\nCPU variant\t: 0x0\nCPU part\t: 0xd0b\nCPU revision\t: 0",
                     cpu_id.as_usize(),
                 )

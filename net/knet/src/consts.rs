@@ -18,8 +18,11 @@ pub const IP_PREFIX: u8 = 24;
 
 pub const STANDARD_MTU: usize = 1500;
 
-pub const TCP_RX_BUF_LEN: usize = 64 * 1024;
-pub const TCP_TX_BUF_LEN: usize = 64 * 1024;
+// Keep enough flight space for Chromium's concurrent module and texture
+// requests; the 64-KiB window makes large renderer resources repeatedly
+// stall on X-Kernel's loopback path.
+pub const TCP_RX_BUF_LEN: usize = 1024 * 1024;
+pub const TCP_TX_BUF_LEN: usize = 1024 * 1024;
 pub const UDP_RX_BUF_LEN: usize = 64 * 1024;
 pub const UDP_TX_BUF_LEN: usize = 64 * 1024;
 pub const RAW_RX_BUF_LEN: usize = 64 * 1024;

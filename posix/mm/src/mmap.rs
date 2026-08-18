@@ -747,6 +747,12 @@ pub fn sys_mremap(
             return Err(KError::NoMemory);
         }
 
+        // Relocation currently consumes a complete VMA snapshot. Moving a
+        // subrange requires splitting the VMA and its runtime metadata first.
+        if addr != source.start() {
+            return Err(KError::NoMemory);
+        }
+
         let target_addr = mapping
             .aspace_mut()
             .find_relocation_target(addr, new_size, page_size)?;

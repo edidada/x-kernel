@@ -2,7 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, btree_map::Entry},
+    sync::Arc,
+    vec::Vec,
+};
 use core::fmt;
 
 use kerrno::{KError, KResult};
@@ -111,6 +115,16 @@ impl DetachedAnonPrivatePages {
     /// Returns `true` when no private page slots were detached.
     pub fn is_empty(&self) -> bool {
         self.slots.is_empty()
+    }
+
+    /// Returns the object offsets of the detached resident page slots.
+    ///
+    /// Sparse anonymous mappings may cover a very large virtual range while
+    /// owning only a handful of physical pages. Teardown uses these offsets to
+    /// remove only PTEs which can actually exist instead of walking every
+    /// virtual page in the mapping.
+    pub fn resident_offsets(&self) -> impl Iterator<Item = u64> + '_ {
+        self.slots.iter().map(|(offset, _)| *offset)
     }
 
     /// Finalizes the detached slots and returns frames whose last object
@@ -222,12 +236,14 @@ impl PreparedAnonPrivatePage {
     /// release the frame itself.
     pub fn commit(self, pa: PhysAddr, size: PageSize) -> KResult<AnonPrivatePageHandle> {
         let mut pages = self.object.pages.lock();
-        if pages.contains_key(&self.object_start) {
-            return Err(KError::AlreadyExists);
+        match pages.entry(self.object_start) {
+            Entry::Vacant(slot) => {
+                let handle = AnonPrivatePageHandle::new(pa, size);
+                slot.insert(handle.clone());
+                Ok(handle)
+            }
+            Entry::Occupied(_) => Err(KError::AlreadyExists),
         }
-        let handle = AnonPrivatePageHandle::new(pa, size);
-        pages.insert(self.object_start, handle.clone());
-        Ok(handle)
     }
 }
 
@@ -408,9 +424,10 @@ impl AnonPrivateObject {
         self: &Arc<Self>,
         object_start: u64,
     ) -> KResult<PreparedAnonPrivatePage> {
-        if self.pages.lock().contains_key(&object_start) {
-            return Err(KError::AlreadyExists);
-        }
+        // Do not look up the slot here and then repeat the same lookup while
+        // committing. Page-fault callers already established that no page was
+        // visible, while commit remains the synchronization point that must
+        // revalidate the slot against a concurrent fault.
         Ok(PreparedAnonPrivatePage {
             object: self.clone(),
             object_start,

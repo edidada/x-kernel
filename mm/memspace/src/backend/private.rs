@@ -22,7 +22,7 @@ use vmobj::{
     ObjectViewHit,
 };
 
-use super::{alloc_frame, dealloc_frame, map_paging_err, pages_in};
+use super::{alloc_frame, dealloc_frame, map_paging_err};
 use crate::{
     FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, VmArea, VmBackingInfo, VmBackingKind,
     backend::{BackendOps, FaultCompletion, FaultCompletionResult},
@@ -277,6 +277,14 @@ impl VmRuntimeOps for PrivateBackend {
         BackendOps::unmap(self, range, pgtbl)
     }
 
+    fn release_for_exit(&self, range: VirtAddrRange) -> KResult {
+        let detached = self
+            .object
+            .detach_range(self.object_offset_for(range.start)?, range.size());
+        release_private_object_pages(detached.finalize_release());
+        Ok(())
+    }
+
     fn on_protect(
         &self,
         range: VirtAddrRange,
@@ -521,7 +529,9 @@ pub fn unmap_private_object_range(
     pgtbl: &mut PageTableMut,
 ) -> KResult {
     let detached = object.detach_range(object_start, range.size());
-    for addr in pages_in(range, size)? {
+    for offset in detached.resident_offsets() {
+        let relative = offset.checked_sub(object_start).ok_or(KError::BadAddress)? as usize;
+        let addr = range.start + relative;
         if let Ok((_frame, _flags, page_size)) = pgtbl.unmap(addr) {
             assert_eq!(page_size, size);
         }
@@ -665,7 +675,7 @@ mod tests {
 
     use super::{
         BackendOps, PrivateBackend, PrivateForkMaterialize, clone_private_object_pages_for_fork,
-        cow_private_object_page, map_existing_private_object_page,
+        cow_private_object_page, map_existing_private_object_page, unmap_private_object_range,
     };
     use crate::{FaultContext, VmArea, vma::VmRuntimeOps};
 
@@ -801,6 +811,52 @@ mod tests {
         assert!(
             backend.object.page_at(0).is_none(),
             "parent object should stay discarded after child refault"
+        );
+    }
+
+    #[def_test]
+    fn sparse_private_unmap_visits_resident_pages_across_large_range() {
+        let start = VirtAddr::from_usize(0x1_0000_0000);
+        let sparse_size = 64 * 1024 * 1024 * 1024usize;
+        let far = start + sparse_size - PAGE_SIZE_4K;
+        let flags = MappingFlags::READ | MappingFlags::WRITE;
+        let backend = PrivateBackend::new(start, PageSize::Size4K);
+        let mut page_table = PageTable::try_new().expect("allocate sparse page table");
+
+        {
+            let mut pgtbl = page_table.modify();
+            for address in [start, far] {
+                BackendOps::handle_fault(
+                    &backend,
+                    FaultContext::new(address, PageFaultFlags::WRITE),
+                    flags,
+                    &mut pgtbl,
+                )
+                .expect("materialize sparse resident page");
+            }
+        }
+
+        {
+            let mut pgtbl = page_table.modify();
+            unmap_private_object_range(
+                &backend.object,
+                0,
+                VirtAddrRange::from_start_size(start, sparse_size),
+                PageSize::Size4K,
+                &mut pgtbl,
+            )
+            .expect("unmap sparse private range");
+        }
+
+        let pgtbl = page_table.modify();
+        assert!(pgtbl.query(start).is_err());
+        assert!(pgtbl.query(far).is_err());
+        assert!(backend.object.page_at(0).is_none());
+        assert!(
+            backend
+                .object
+                .page_at((sparse_size - PAGE_SIZE_4K) as u64)
+                .is_none()
         );
     }
 

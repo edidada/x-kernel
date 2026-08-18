@@ -11,9 +11,9 @@ use kfutex::{FutexKey, FutexWakeOp, global_table};
 use kprocess::{AsThread, current_user_mm_id, current_user_process_address_space};
 use ktime_types::TimeSpan;
 use linux_raw_sys::general::{
-    FUTEX_CLOCK_REALTIME, FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_PRIVATE_FLAG, FUTEX_REQUEUE,
-    FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET, FUTEX_WAKE_OP, robust_list_head,
-    timespec,
+    FUTEX_CLOCK_REALTIME, FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_LOCK_PI, FUTEX_PRIVATE_FLAG,
+    FUTEX_REQUEUE, FUTEX_TRYLOCK_PI, FUTEX_UNLOCK_PI, FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE,
+    FUTEX_WAKE_BITSET, FUTEX_WAKE_OP, robust_list_head, timespec,
 };
 use osvm::VirtPtr;
 use posix_types::{TimeSpanLike, UserConstPtr, UserPtr};
@@ -132,6 +132,44 @@ pub fn sys_futex(
 
     let uaddr_usize = uaddr.as_ptr() as usize;
     match command {
+        FUTEX_LOCK_PI | FUTEX_TRYLOCK_PI => {
+            let tid = kprocess::current_user_tid();
+            let key = resolve_key(uaddr_usize, is_private)?;
+            loop {
+                let (acquired, owner) = kuaccess::atomic_cmpxchg_u32(uaddr_usize, 0, tid)?;
+                if acquired {
+                    return Ok(0);
+                }
+                if owner & 0x3fff_ffff == tid {
+                    return Err(KError::from(LinuxError::EDEADLK));
+                }
+                if command == FUTEX_TRYLOCK_PI {
+                    return Err(KError::WouldBlock);
+                }
+                match global_table().wait(key, uaddr_usize, owner, u32::MAX, None) {
+                    Ok(false) => continue,
+                    Ok(true) => {}
+                    Err(err) if LinuxError::from(err) == LinuxError::EINTR => {
+                        return Err(KError::from(LinuxError::ERESTARTSYS));
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+        FUTEX_UNLOCK_PI => {
+            let tid = kprocess::current_user_tid();
+            let owner = kuaccess::atomic_load_u32(uaddr_usize)?;
+            if owner & 0x3fff_ffff != tid {
+                return Err(KError::from(LinuxError::EPERM));
+            }
+            let (released, _) = kuaccess::atomic_cmpxchg_u32(uaddr_usize, owner, 0)?;
+            if !released {
+                return Err(KError::WouldBlock);
+            }
+            let key = resolve_key(uaddr_usize, is_private)?;
+            global_table().wake(key, 1, u32::MAX);
+            Ok(0)
+        }
         FUTEX_WAIT | FUTEX_WAIT_BITSET => {
             let bitset = if command == FUTEX_WAIT_BITSET {
                 if value3 == 0 {

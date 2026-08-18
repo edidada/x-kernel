@@ -183,6 +183,8 @@ impl Pollable for SignalfdAccess {
     ) -> Result<(), PollRegisterError> {
         if events.contains(IoEvents::IN) {
             context.register(&self.signalfd.poll_rx)?;
+            context.register(self.signal.pending_poll())?;
+            context.register(self.signal.process().pending_poll())?;
         }
         Ok(())
     }

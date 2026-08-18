@@ -541,6 +541,12 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
             uctx.arg2() as _,
             uctx.arg3().into(),
         ),
+        Sysno::waitid => sys_waitid(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2().into(),
+            uctx.arg3() as _,
+        ),
         Sysno::getsid => sys_getsid(uctx.arg0() as i32),
         Sysno::setsid => sys_setsid(),
         Sysno::getpgid => sys_getpgid(uctx.arg0() as i32),
@@ -805,6 +811,11 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
 
         // sync_file_range: return success (no-op, same as fsync for directories)
         Sysno::sync_file_range => Ok(0),
+
+        // Crashpad and Chromium periodically probe ptrace. Linux returns
+        // EPERM for an unprivileged trace request; returning ENOSYS makes
+        // crash handlers retry indefinitely and delays browser startup.
+        Sysno::ptrace => Err(kerrno::KError::from(LinuxError::EPERM)),
 
         // Known benign unimplemented syscalls (glibc handles ENOSYS gracefully)
         Sysno::rseq => {

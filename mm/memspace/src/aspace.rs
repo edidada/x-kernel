@@ -201,6 +201,11 @@ pub struct MremapSource {
 }
 
 impl MremapSource {
+    /// Returns the start address of the source VMA.
+    pub fn start(&self) -> VirtAddr {
+        self.vma.start()
+    }
+
     /// Returns the source mapping's page size.
     pub fn page_size(&self) -> PageSize {
         self.vma.backing().page_size()
@@ -515,10 +520,10 @@ impl MmSpace {
                 if flags.contains(MappingFlags::EXECUTE) {
                     for vaddr in crate::backend::pages_in(*protect_range, PageSize::Size4K)? {
                         if let Ok((paddr, ..)) = modify.query(vaddr) {
-                            // Userspace runtimes write generated code through a
-                            // writable mapping before making it executable.
-                            // AArch64 does not maintain I/D-cache coherency for
-                            // that transition automatically.
+                            // JIT-generated instructions may still reside only in
+                            // the data cache. Clean them to PoU before invalidating
+                            // the instruction cache; an I-cache-only flush can
+                            // execute stale instructions on AArch64.
                             karch::flush_icache_range(p2v(paddr), PageSize::Size4K.into());
                         }
                     }
@@ -546,9 +551,23 @@ impl MmSpace {
         {
             let mut modify = self.pgtbl.modify();
             for (range, runtime) in &operations {
+                let start_ns = khal::time::monotonic_time().as_nanos_u64_saturating();
                 runtime
                     .unmap(*range, &mut modify)
                     .expect("backend clear must succeed");
+                let elapsed_ms = khal::time::monotonic_time()
+                    .as_nanos_u64_saturating()
+                    .saturating_sub(start_ns)
+                    / 1_000_000;
+                if elapsed_ms >= 100 {
+                    warn!(
+                        "mm-exit diagnostic: mm={} range={:?} backing={:?} elapsed={}ms",
+                        self.mm_id,
+                        range,
+                        runtime.backing_info(),
+                        elapsed_ms
+                    );
+                }
             }
             modify.finish();
         }
@@ -917,14 +936,13 @@ impl MmSpace {
 
     /// Resolves and validates the source mapping for an `mremap()` request.
     ///
-    /// The returned snapshot is anchored at the source VMA start and guarantees
-    /// that `old_size` fits within the VMA and respects the backing page size.
+    /// The returned snapshot guarantees that the requested range fits within a
+    /// single VMA and respects the backing page size. Linux permits an
+    /// `mremap()` source to begin inside a VMA; callers that relocate such a
+    /// range must split the source metadata first.
     pub fn resolve_mremap_source(&self, addr: VirtAddr, old_size: usize) -> KResult<MremapSource> {
         let vma = self.find_vma(addr).ok_or(KError::BadAddress)?;
         let vma = self.clone_vma_for_runtime(vma).ok_or(KError::BadAddress)?;
-        if addr != vma.start() {
-            return Err(KError::InvalidInput);
-        }
         if addr.as_usize() + old_size > vma.end().as_usize() {
             return Err(KError::BadAddress);
         }
@@ -1392,6 +1410,20 @@ impl MmSpace {
         self.clear_all_mappings();
     }
 
+    /// Releases an exiting address space without walking every user PTE.
+    pub fn clear_for_exit(&mut self) {
+        self.drain_pending_invalidations();
+        let vmas = self.vmas.iter().cloned().collect::<Vec<_>>();
+        for vma in vmas {
+            if let Some(runtime) = vma.runtime() {
+                runtime
+                    .release_for_exit(vma.range())
+                    .expect("backend exit release must succeed");
+            }
+        }
+        self.vmas.clear();
+    }
+
     /// Checks whether an access to the specified memory region is valid.
     ///
     /// Returns `true` if the memory region given by `range` is all mapped and
@@ -1540,7 +1572,48 @@ impl MmSpace {
         vma: VmArea,
         ctx: FaultContext,
     ) -> PageFaultOutcome {
-        self.materialize_anonymous_fault_for_vma(vma, ctx)
+        const ANON_FAULT_AROUND_PAGES: usize = 16;
+
+        let vaddr = ctx.address();
+        let Some((vma, runtime)) = self.fault_vma_runtime(&vma, vaddr) else {
+            warn!("Backend fault path could not find area for {:?}", vaddr);
+            return PageFaultOutcome::Unmapped;
+        };
+
+        let result = {
+            let mut pgtbl = self.pgtbl.modify();
+            let result = runtime.handle_fault(ctx, vma.flags(), &mut pgtbl);
+            let can_fault_around = result.as_ref().is_ok_and(|completion| {
+                completion.populated() != 0 && !completion.is_cow_conflict_retry()
+            }) && ctx.access_flags().contains(PageFaultFlags::WRITE)
+                && !vma.flags().contains(MappingFlags::EXECUTE)
+                && vma.backing().page_size() == PageSize::Size4K;
+
+            if can_fault_around {
+                let fault_page = vaddr.align_down(PageSize::Size4K);
+                for page_delta in 1..ANON_FAULT_AROUND_PAGES {
+                    let Some(next) = fault_page.checked_add(page_delta * PAGE_SIZE_4K) else {
+                        break;
+                    };
+                    if next >= vma.end() {
+                        break;
+                    }
+                    let speculative = FaultContext::new(next, ctx.access_flags()).with_backing(
+                        Some(vma.page_index_for(next)),
+                        None,
+                        Some(0),
+                    );
+                    match runtime.handle_fault(speculative, vma.flags(), &mut pgtbl) {
+                        Ok(completion)
+                            if completion.populated() != 0
+                                && !completion.is_cow_conflict_retry() => {}
+                        _ => break,
+                    }
+                }
+            }
+            result
+        };
+        self.finish_backend_fault(vaddr, vma.flags(), result)
     }
 
     pub(crate) fn handle_file_shared_fault(
@@ -1833,6 +1906,103 @@ mod tests {
         ));
         assert!(!MmSpace::page_fault_outcome_is_handled(
             PageFaultOutcome::AccessDenied
+        ));
+    }
+
+    #[def_test]
+    fn private_write_fault_populates_bounded_fault_around_window() {
+        let start = VirtAddr::from_usize(0x4000);
+        let mut aspace =
+            MmSpace::new_empty_user(start, PAGE_SIZE_4K * 32).expect("allocate test address space");
+        aspace
+            .map(
+                start,
+                PAGE_SIZE_4K * 32,
+                MappingFlags::READ | MappingFlags::WRITE,
+                false,
+                VmRuntimeRef::new_anon_private(start, PageSize::Size4K),
+            )
+            .expect("map private range");
+
+        assert!(
+            aspace
+                .handle_page_fault(start, PageFaultFlags::WRITE)
+                .is_resolved()
+        );
+        for page in 0..16 {
+            assert!(
+                aspace
+                    .pgtbl
+                    .modify()
+                    .query(start + page * PAGE_SIZE_4K)
+                    .is_ok(),
+                "fault-around page {page} should be resident"
+            );
+        }
+        assert!(matches!(
+            aspace.pgtbl.modify().query(start + 16 * PAGE_SIZE_4K),
+            Err(PagingError::NotMapped)
+        ));
+    }
+
+    #[def_test]
+    fn private_fault_around_stops_at_vma_end() {
+        let start = VirtAddr::from_usize(0x4000);
+        let mut aspace =
+            MmSpace::new_empty_user(start, PAGE_SIZE_4K * 8).expect("allocate test address space");
+        aspace
+            .map(
+                start,
+                PAGE_SIZE_4K * 4,
+                MappingFlags::READ | MappingFlags::WRITE,
+                false,
+                VmRuntimeRef::new_anon_private(start, PageSize::Size4K),
+            )
+            .expect("map private range");
+
+        assert!(
+            aspace
+                .handle_page_fault(start, PageFaultFlags::WRITE)
+                .is_resolved()
+        );
+        for page in 0..4 {
+            assert!(
+                aspace
+                    .pgtbl
+                    .modify()
+                    .query(start + page * PAGE_SIZE_4K)
+                    .is_ok()
+            );
+        }
+        assert!(matches!(
+            aspace.pgtbl.modify().query(start + 4 * PAGE_SIZE_4K),
+            Err(PagingError::NotMapped)
+        ));
+    }
+
+    #[def_test]
+    fn private_read_fault_does_not_speculatively_allocate() {
+        let start = VirtAddr::from_usize(0x4000);
+        let mut aspace =
+            MmSpace::new_empty_user(start, PAGE_SIZE_4K * 4).expect("allocate test address space");
+        aspace
+            .map(
+                start,
+                PAGE_SIZE_4K * 4,
+                MappingFlags::READ | MappingFlags::WRITE,
+                false,
+                VmRuntimeRef::new_anon_private(start, PageSize::Size4K),
+            )
+            .expect("map private range");
+
+        assert!(
+            aspace
+                .handle_page_fault(start, PageFaultFlags::READ)
+                .is_resolved()
+        );
+        assert!(matches!(
+            aspace.pgtbl.modify().query(start + PAGE_SIZE_4K),
+            Err(PagingError::NotMapped)
         ));
     }
 

@@ -18,12 +18,51 @@ use bitflags::bitflags;
 use kerrno::{KError, KResult, LinuxError};
 use kpoll::PollRegistrations;
 use kprocess::{Pid, Process, wait_reap};
+use ksignal::Signo;
 use ktask::{current, future::block_on};
 use linux_raw_sys::general::{
     __WALL, __WCLONE, __WNOTHREAD, WCONTINUED, WEXITED, WNOHANG, WNOWAIT, WUNTRACED, rusage,
 };
 use osvm::{VirtMutPtr, VirtPtr};
-use posix_types::UserPtr;
+use posix_types::{UserPtr, UserWrite};
+
+const P_PID: i32 = 1;
+const P_PIDFD: i32 = 3;
+
+#[repr(C)]
+#[derive(Clone, Copy, UserWrite)]
+pub(crate) struct WaitidSiginfo {
+    signo: i32,
+    errno: i32,
+    code: i32,
+    _pad0: i32,
+    pid: i32,
+    uid: u32,
+    status: i32,
+    _pad1: i32,
+    utime: i64,
+    stime: i64,
+    _pad: [u8; 80],
+}
+
+impl Default for WaitidSiginfo {
+    fn default() -> Self {
+        // A zeroed siginfo is the Linux WNOHANG "no child ready" result.
+        Self {
+            signo: 0,
+            errno: 0,
+            code: 0,
+            _pad0: 0,
+            pid: 0,
+            uid: 0,
+            status: 0,
+            _pad1: 0,
+            utime: 0,
+            stime: 0,
+            _pad: [0; 80],
+        }
+    }
+}
 
 use super::rusage::cpu_time_to_rusage;
 
@@ -271,6 +310,60 @@ pub fn sys_wait4(
     };
 
     wait_on_matching_children(proc, selector, exit_code, usage, options)
+}
+
+pub fn sys_waitid(
+    idtype: i32,
+    id: i32,
+    info: UserPtr<WaitidSiginfo>,
+    options: u32,
+) -> KResult<isize> {
+    let options = WaitOptions::from_bits(options).ok_or(KError::InvalidInput)?;
+    if !options.contains(WaitOptions::WEXITED) || info.is_null() {
+        return Err(KError::InvalidInput);
+    }
+    let pid = match idtype {
+        P_PID if id > 0 => id as Pid,
+        P_PIDFD if id >= 0 => {
+            let file = kprocess::current_resources().get_file(id)?;
+            kprocess::PidFd::from_file(&file)?.process().pid()
+        }
+        _ => return Err(KError::InvalidInput),
+    };
+    let proc = kprocess::current_user_process();
+    let mode = wait_reap_mode(options);
+    match wait_reap::scan_waitable_child(
+        &proc,
+        wait_reap::WaitChildSelector::Pid(pid),
+        wait_child_kind(options),
+        mode,
+    ) {
+        wait_reap::WaitChildScan::Ready(waited) => {
+            let raw = waited.exit_code();
+            let (code, status) = if raw & 0x7f == 0 {
+                (1, (raw >> 8) & 0xff)
+            } else {
+                (2, raw & 0x7f)
+            };
+            let (utime, stime) = waited.total_cpu_time();
+            info.write_vm(WaitidSiginfo {
+                signo: Signo::SIGCHLD as i32,
+                code,
+                pid: waited.pid() as i32,
+                status,
+                utime: (utime.as_nanos_u64_saturating() / 10_000_000) as i64,
+                stime: (stime.as_nanos_u64_saturating() / 10_000_000) as i64,
+                ..Default::default()
+            })?;
+            Ok(0)
+        }
+        wait_reap::WaitChildScan::NoMatchingChild => Err(KError::from(LinuxError::ECHILD)),
+        wait_reap::WaitChildScan::NoWaitableChild if options.contains(WaitOptions::WNOHANG) => {
+            info.write_vm(WaitidSiginfo::default())?;
+            Ok(0)
+        }
+        wait_reap::WaitChildScan::NoWaitableChild => Err(KError::WouldBlock),
+    }
 }
 
 #[cfg(unittest)]

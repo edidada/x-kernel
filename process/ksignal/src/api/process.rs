@@ -13,6 +13,7 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+use kpoll::PollSet;
 use kspin::SpinNoIrq;
 
 use crate::{
@@ -67,6 +68,7 @@ pub struct ProcessSignalManager {
 
     /// Fast path indicator for pending signals
     pub(crate) has_pending: AtomicBool,
+    pending_poll: PollSet,
 }
 
 /// Prepared Linux-style `SIGCHLD` child-exit notification.
@@ -110,7 +112,13 @@ impl ProcessSignalManager {
             default_restorer,
             children: SpinNoIrq::new(Vec::new()),
             has_pending: AtomicBool::new(false),
+            pending_poll: PollSet::new(),
         }
+    }
+
+    /// Returns the wake source for newly queued process signals.
+    pub fn pending_poll(&self) -> &PollSet {
+        &self.pending_poll
     }
 
     /// Dequeues the next pending signal that matches the given mask.
@@ -298,6 +306,7 @@ impl ProcessSignalManager {
     fn put_pending_signal(&self, sig: SignalInfo) {
         if self.pending.lock().put_signal(sig) {
             self.has_pending.store(true, Ordering::Release);
+            self.pending_poll.wake();
         }
     }
 

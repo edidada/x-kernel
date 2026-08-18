@@ -150,6 +150,21 @@ impl MmUserHandle {
         self.address_space.lock().clear();
         true
     }
+
+    /// Releases the final process-owned mm reference using exit-fast teardown.
+    pub fn release_and_clear_for_exit_if_last(mut self) -> bool {
+        let Some(lifetime) = self.lifetime.take() else {
+            return false;
+        };
+        if !lifetime.release_user() {
+            return false;
+        }
+        self.address_space.assert_not_owned_by_current(
+            "MmUserHandle final exit release would relock the current task's MmSpace mutex",
+        );
+        self.address_space.lock().clear_for_exit();
+        true
+    }
 }
 
 impl Drop for MmUserHandle {

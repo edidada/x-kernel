@@ -12,6 +12,7 @@ repository.workspace = true
 kaddr_layout.workspace = true
 kcpu.workspace = true
 kerrno.workspace = true
+kpoll.workspace = true
 khal.workspace = true
 ktime_types.workspace = true
 kiface.workspace = true

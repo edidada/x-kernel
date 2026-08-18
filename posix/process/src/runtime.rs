@@ -338,14 +338,18 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
     process_exit::record_exited_thread_cpu_time(process, thread_utime, thread_stime);
 
     if is_last_thread {
+        let exit_start_ns = khal::time::monotonic_time().as_nanos_u64_saturating();
+        let mut phase_start_ns = exit_start_ns;
         if let Err(err) = process.close_all_fds() {
             error!("close_all_fds on process exit failed: {err:?}");
         }
+        log_slow_exit_phase(process.pid(), "close_all_fds", &mut phase_start_ns);
 
         // Detach shared memory before waking the parent, so that
         // waitpid() returns only after segments marked IPC_RMID
         // have been destroyed.
         SHM_MANAGER.lock().clear_proc_shm(process.pid());
+        log_slow_exit_phase(process.pid(), "clear_proc_shm", &mut phase_start_ns);
         #[cfg(feature = "tee")]
         if let Err(err) = process.clear_tee_runtime_private() {
             error!("clear_tee_runtime_private on process exit failed: {err:?}");
@@ -354,8 +358,18 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         if let Err(err) = process.clear_exclusive_address_space() {
             error!("clear address space on process exit failed: {err:?}");
         }
+        log_slow_exit_phase(process.pid(), "clear_address_space", &mut phase_start_ns);
 
         process_exit::complete_process_exit(process);
+        log_slow_exit_phase(process.pid(), "complete_process_exit", &mut phase_start_ns);
+        let total_ms = phase_start_ns.saturating_sub(exit_start_ns) / 1_000_000;
+        if total_ms >= 100 {
+            warn!(
+                "process-exit diagnostic: pid={} total={}ms",
+                process.pid(),
+                total_ms
+            );
+        }
     }
 
     if group_exit && !process.is_group_exited() {
@@ -371,6 +385,15 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
     }
 
     thr.set_exit();
+}
+
+fn log_slow_exit_phase(pid: Pid, phase: &str, phase_start_ns: &mut u64) {
+    let now_ns = khal::time::monotonic_time().as_nanos_u64_saturating();
+    let elapsed_ms = now_ns.saturating_sub(*phase_start_ns) / 1_000_000;
+    if elapsed_ms >= 100 {
+        warn!("process-exit diagnostic: pid={pid} phase={phase} elapsed={elapsed_ms}ms");
+    }
+    *phase_start_ns = now_ns;
 }
 
 /// Send a fatal signal to the current process.

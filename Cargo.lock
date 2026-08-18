@@ -2848,6 +2848,7 @@ dependencies = [
  "kerrno",
  "khal",
  "kiface",
+ "kpoll",
  "kspin 0.2.0-dev",
  "ktime_types",
  "linux-raw-sys",
