@@ -23,11 +23,11 @@ const MIN_NON_ZERO_CAPACITY: usize = 4;
 
 /// Allocate a raw buffer for `capacity` elements of type `T`.
 fn alloc_buffer<T>(capacity: usize, context: AllocContext) -> Result<NonNull<T>, AllocError> {
-    require_supported_context(context)?;
-
     if capacity == 0 || size_of::<T>() == 0 {
         return Ok(NonNull::dangling());
     }
+
+    require_supported_context(context)?;
 
     #[cfg(unittest)]
     crate::fault_injection::maybe_fail_allocation()?;
@@ -78,7 +78,8 @@ impl<T> KVecDeque<T> {
 
     /// Constructs an empty deque with capacity for at least `capacity` elements.
     ///
-    /// Only [`AllocContext::Sleepable`] is supported in phase 1.
+    /// Growth is supported only from [`AllocContext::Sleepable`] in phase 1.
+    /// A zero-capacity deque does not allocate and is valid in every context.
     ///
     /// # Errors
     ///
@@ -131,8 +132,8 @@ impl<T> KVecDeque<T> {
     ///
     /// Returns [`AllocError::NoMemory`] when the buffer must grow and the
     /// allocator cannot satisfy the request. Returns
-    /// [`AllocError::UnsupportedContext`] when `context` is not currently
-    /// supported.
+    /// [`AllocError::UnsupportedContext`] only when growth is requested from
+    /// a context not currently supported by the allocator.
     pub fn try_reserve(
         &mut self,
         additional: usize,
@@ -143,8 +144,6 @@ impl<T> KVecDeque<T> {
             .checked_add(additional)
             .ok_or(AllocError::NoMemory)?;
         if required <= self.cap {
-            // Enough room already.
-            require_supported_context(context)?;
             return Ok(());
         }
 
@@ -209,13 +208,12 @@ impl<T> KVecDeque<T> {
     /// Returns [`AllocError::NoMemory`] when growth is required and the kernel
     /// allocator cannot satisfy it.
     ///
-    /// Returns [`AllocError::UnsupportedContext`] when the caller requests an
-    /// allocation context reserved for a later phase.
+    /// Returns [`AllocError::UnsupportedContext`] only when the push needs
+    /// growth from a context reserved for a later phase. A push into already
+    /// reserved capacity is allocation-free and valid in every context.
     pub fn try_push_back(&mut self, value: T, context: AllocContext) -> Result<(), AllocError> {
         if self.len == self.cap {
             self.try_reserve(1, context)?;
-        } else {
-            require_supported_context(context)?;
         }
 
         let dst = self.physical_index(self.len);
@@ -240,13 +238,12 @@ impl<T> KVecDeque<T> {
     ///
     /// Returns [`AllocError::NoMemory`] when growth is required.
     ///
-    /// Returns [`AllocError::UnsupportedContext`] when the caller requests an
-    /// allocation context reserved for a later phase.
+    /// Returns [`AllocError::UnsupportedContext`] only when the push needs
+    /// growth from a context reserved for a later phase. A push into already
+    /// reserved capacity is allocation-free and valid in every context.
     pub fn try_push_front(&mut self, value: T, context: AllocContext) -> Result<(), AllocError> {
         if self.len == self.cap {
             self.try_reserve(1, context)?;
-        } else {
-            require_supported_context(context)?;
         }
 
         self.head = if self.head == 0 {
@@ -466,6 +463,16 @@ mod tests {
         let d = KVecDeque::<u32>::try_with_capacity(8, AllocContext::Sleepable).unwrap();
         assert!(d.is_empty());
         assert!(d.capacity() >= 8);
+    }
+
+    #[def_test]
+    fn preallocated_pushes_are_valid_in_atomic_context() {
+        let mut deque = KVecDeque::try_with_capacity(2, AllocContext::Sleepable).unwrap();
+        deque.try_push_back(1_u32, AllocContext::Atomic).unwrap();
+        deque.try_push_front(0_u32, AllocContext::Atomic).unwrap();
+
+        assert_eq!(deque.pop_front(), Some(0));
+        assert_eq!(deque.pop_front(), Some(1));
     }
 
     #[def_test]

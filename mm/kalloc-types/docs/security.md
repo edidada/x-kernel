@@ -72,7 +72,7 @@
 - `src/khashmap.rs`
   - 无直接 unsafe 代码；所有不安全操作由 `hashbrown::HashMap` 负责
 - `src/kbinaryheap.rs`
-  - 无直接 unsafe 代码；所有不安全操作由 `BinaryHeap` 负责
+  - 无直接 unsafe 代码；堆重排只通过 `KVec` 已初始化元素的安全 `swap` 完成
 
 ## 内存安全不变量
 
@@ -150,7 +150,7 @@
 | 故障模式 | 触发条件 | 局部影响 | 系统影响 | 当前缓解 |
 |---|---|---|---|---|
 | 调用者未采用新类型层 | 继续直接使用 `Vec`/`Box` infallible API | 该路径仍可能 panic-on-OOM | 迁移范围外行为不变 | 后续任务按路径迁移 |
-| `AllocContext` 语义被误解为已实现 | 调用者依赖 `NoWait`/`Atomic` | 语义假设错误 | 可能引入未来设计返工 | 文档明确仅 `Sleepable` 会在后续阶段支持 |
+| `AllocContext` 语义被误解为已实现 | 调用者依赖 `NoWait`/`Atomic` 发起新 allocation | 语义假设错误 | 可能引入未来设计返工 | 文档明确仅 `Sleepable` 可发起 allocation；已预留容量内的纯写入可安全执行 |
 | 包装类型暴露过多内部细节 | 公共字段或过宽 API | 难以保持未来不变量 | 后续扩展受阻 | 当前字段私有，API 极窄 |
 | B 树移植代码的 unsafe 块缺少 SAFETY 注释 | 对移植代码启用 `undocumented_unsafe_blocks` lint | clippy 报错 | 开发者可能手动添加不准确的注释 | 通过 `#![allow]` 屏蔽该 lint，未来由 B 树专家补充 |
 | B 树 split 预留失败 | 满节点插入时任一预留 allocation OOM | 插入返回 `Err` | map 保持原有结构、长度和元素 | mutation 前预留整条 split 链；回归测试遍历每个预留失败点 |
@@ -189,7 +189,8 @@
   或完整 rollback 后才可重新暴露。
 - `TryClone` trait 目前仅为原始类型和 `Option<T>` 提供 impl；对于自定义类型，
   需手动实现 `TryClone` 才能使用 `KBTreeMap::try_clone` 等操作。
-- 当前没有 no-wait / atomic / reserve-backed 真实行为。
+- 当前没有 no-wait / atomic / reserve-backed 的**新 allocation**行为；已预留容量
+  内的写入和不增长的替换操作不调用 allocator，可在这些上下文中使用。
 
 ## 审计清单
 

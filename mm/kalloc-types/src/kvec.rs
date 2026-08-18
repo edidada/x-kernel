@@ -17,11 +17,11 @@ use crate::{AllocContext, AllocError, TryExtend, context::require_supported_cont
 const MIN_NON_ZERO_CAPACITY: usize = 4;
 
 fn alloc_vec_buffer<T>(capacity: usize, context: AllocContext) -> Result<NonNull<T>, AllocError> {
-    require_supported_context(context)?;
-
     if capacity == 0 || size_of::<T>() == 0 {
         return Ok(NonNull::dangling());
     }
+
+    require_supported_context(context)?;
 
     #[cfg(unittest)]
     crate::fault_injection::maybe_fail_allocation()?;
@@ -93,7 +93,9 @@ impl<T> KVec<T> {
     /// Constructs an empty vector with capacity for at least `capacity`
     /// elements.
     ///
-    /// Only [`AllocContext::Sleepable`] is supported in phase 1.
+    /// Capacity growth is supported only from [`AllocContext::Sleepable`] in
+    /// phase 1. A request for zero capacity does not allocate and is valid in
+    /// every context.
     ///
     /// # Errors
     ///
@@ -207,7 +209,9 @@ impl<T> KVec<T> {
     ///
     /// On failure the vector keeps its previous contents and length.
     ///
-    /// Only [`AllocContext::Sleepable`] is supported in phase 1.
+    /// Growth is supported only from [`AllocContext::Sleepable`] in phase 1.
+    /// If the existing capacity is sufficient, this operation is
+    /// allocation-free and valid in every context.
     ///
     /// # Errors
     ///
@@ -221,8 +225,6 @@ impl<T> KVec<T> {
         additional: usize,
         context: AllocContext,
     ) -> Result<(), AllocError> {
-        require_supported_context(context)?;
-
         let required = self
             .len
             .checked_add(additional)
@@ -258,7 +260,9 @@ impl<T> KVec<T> {
     /// unsupported context) because this phase-1 API returns only
     /// [`AllocError`] rather than an ownership-carrying error.
     ///
-    /// Only [`AllocContext::Sleepable`] is supported in phase 1.
+    /// Growth is supported only from [`AllocContext::Sleepable`] in phase 1.
+    /// A push into already-reserved capacity is allocation-free and valid in
+    /// every context.
     ///
     /// # Errors
     ///
@@ -270,8 +274,6 @@ impl<T> KVec<T> {
     pub fn try_push(&mut self, value: T, context: AllocContext) -> Result<(), AllocError> {
         if self.len == self.cap {
             self.try_reserve(1, context)?;
-        } else {
-            require_supported_context(context)?;
         }
 
         // SAFETY: `self.try_reserve` above ensured spare capacity for at least
@@ -352,7 +354,9 @@ impl<T: Copy> KVec<T> {
     ///
     /// On failure the vector keeps its previous contents and length.
     ///
-    /// Only [`AllocContext::Sleepable`] is supported in phase 1.
+    /// Growth is supported only from [`AllocContext::Sleepable`] in phase 1.
+    /// Extending within existing capacity is allocation-free and valid in
+    /// every context.
     ///
     /// # Errors
     ///
@@ -368,8 +372,6 @@ impl<T: Copy> KVec<T> {
     ) -> Result<(), AllocError> {
         if values.len() > self.cap - self.len {
             self.try_reserve(values.len(), context)?;
-        } else {
-            require_supported_context(context)?;
         }
 
         if values.is_empty() {
@@ -393,13 +395,14 @@ impl<T: Copy> KVec<T> {
     }
 }
 
-impl<T: Clone> KVec<T> {
+impl<T: crate::TryClone> KVec<T> {
     /// Appends elements cloned from `values`, growing the vector if needed.
     ///
-    /// Each element is individually cloned via `T::clone`. On failure the
-    /// vector keeps its previous contents and length.
+    /// Each element is individually cloned through [`crate::TryClone`]. On
+    /// failure the vector keeps its previous contents and length.
     ///
-    /// Only [`AllocContext::Sleepable`] is supported in phase 1.
+    /// Any staging or destination growth is supported only from
+    /// [`AllocContext::Sleepable`] in phase 1.
     ///
     /// # Errors
     ///
@@ -411,82 +414,29 @@ impl<T: Clone> KVec<T> {
     ///
     /// # Panics
     ///
-    /// If a `T::clone` call panics, already-cloned elements are dropped before
-    /// the panic propagates, and the vector remains in its previous state.
+    /// If a `T::try_clone` implementation panics, the staging buffer drops
+    /// already-cloned elements before the panic propagates, and the vector
+    /// remains in its previous state.
     pub fn try_extend_cloned_from_slice(
         &mut self,
         values: &[T],
         context: AllocContext,
     ) -> Result<(), AllocError> {
-        if values.len() > self.cap - self.len {
-            self.try_reserve(values.len(), context)?;
-        } else {
-            require_supported_context(context)?;
-        }
-
         if values.is_empty() {
             return Ok(());
         }
 
-        // Guard: on panic during cloning, drop the elements we've already
-        // written and restore the old length.
-        struct CloneGuard<'a, T> {
-            vec: &'a mut KVec<T>,
-            start: usize,
-            cloned: usize,
-        }
-
-        impl<T> Drop for CloneGuard<'_, T> {
-            fn drop(&mut self) {
-                // SAFETY: The range [start, start+cloned) contains
-                // initialized elements that were written by the clone loop.
-                // Dropping them and resetting len preserves the KVec
-                // invariant (only elements in [0, len) are initialized).
-                unsafe {
-                    core::ptr::drop_in_place(core::ptr::slice_from_raw_parts_mut(
-                        self.vec.ptr.as_ptr().add(self.start),
-                        self.cloned,
-                    ));
-                }
-                // The caller's panic will prevent reaching the post-loop
-                // len update; restoring old len means the vector looks
-                // exactly like it did before try_extend_cloned_from_slice.
-            }
-        }
-
-        let start = self.len;
-        let mut guard = CloneGuard {
-            vec: self,
-            start,
-            cloned: 0,
-        };
-
+        // Clone into private staging first. This avoids exposing a partially
+        // appended prefix when an element's fallible clone reports OOM.
+        let mut staged = KVec::try_with_capacity(values.len(), context)?;
         for value in values {
-            // SAFETY: try_reserve above ensured capacity for at least
-            // `values.len()` more elements. The slot at start+cloned is
-            // within the allocation and currently uninitialized.
-            unsafe {
-                guard
-                    .vec
-                    .ptr
-                    .as_ptr()
-                    .add(start + guard.cloned)
-                    .write(value.clone());
-            }
-            guard.cloned += 1;
+            staged.try_push(crate::TryClone::try_clone(value)?, context)?;
         }
 
-        // All clones succeeded. Disarm the guard.
-        let cloned_count = guard.cloned;
-        core::mem::forget(guard);
-
-        // SAFETY: The cloned_count elements written above are now fully
-        // owned by the vector. Advancing len brings them into the
-        // initialized prefix, satisfying the KVec invariant.
-        unsafe {
-            // Reborrow self to get past the guard borrow.
-            let this: &mut KVec<T> = &mut *(self as *mut KVec<T>);
-            this.len += cloned_count;
+        self.try_reserve(staged.len(), context)?;
+        for value in staged {
+            // The reserve above guarantees this append remains allocation-free.
+            self.try_push(value, context)?;
         }
 
         Ok(())
@@ -497,7 +447,7 @@ impl<T: crate::TryClone> crate::TryClone for KVec<T> {
     fn try_clone(&self) -> Result<Self, AllocError> {
         let mut new = Self::try_with_capacity(self.len, AllocContext::Sleepable)?;
         for item in self.iter() {
-            new.try_push(item.try_clone()?, AllocContext::Sleepable)?;
+            new.try_push(crate::TryClone::try_clone(item)?, AllocContext::Sleepable)?;
         }
         Ok(new)
     }
@@ -694,7 +644,10 @@ mod tests {
     use unittest::def_test;
 
     use super::{AllocContext, AllocError, KVec};
-    use crate::fault_injection::{fail_allocations_after, fail_next_allocation};
+    use crate::{
+        KString,
+        fault_injection::{fail_allocations_after, fail_next_allocation},
+    };
 
     #[derive(Debug)]
     struct DropTracker<'a> {
@@ -716,6 +669,30 @@ mod tests {
         assert!(vec.is_empty());
         assert_eq!(vec.len(), 0);
         assert_eq!(vec.as_slice(), &[]);
+    }
+
+    #[def_test]
+    fn preallocated_mutation_is_valid_in_atomic_context() {
+        let mut vec = KVec::try_with_capacity(3, AllocContext::Sleepable).unwrap();
+        vec.try_push(1_u32, AllocContext::Atomic).unwrap();
+        vec.try_extend_from_slice(&[2, 3], AllocContext::Atomic)
+            .unwrap();
+
+        assert_eq!(vec.as_slice(), &[1, 2, 3]);
+    }
+
+    #[def_test(serial)]
+    fn fallible_element_clone_keeps_destination_unchanged() {
+        let source = KString::try_from_str("fallible", AllocContext::Sleepable).unwrap();
+        let mut destination = KVec::new();
+        let _guard = fail_allocations_after(1);
+
+        let err = destination
+            .try_extend_cloned_from_slice(&[source], AllocContext::Sleepable)
+            .unwrap_err();
+
+        assert_eq!(err, AllocError::NoMemory);
+        assert!(destination.is_empty());
     }
 
     #[def_test]
@@ -1026,6 +1003,12 @@ mod tests {
                 drops: self.drops,
                 sum: self.sum,
             }
+        }
+    }
+
+    impl crate::TryClone for CloneTracker<'_> {
+        fn try_clone(&self) -> Result<Self, AllocError> {
+            Ok(self.clone())
         }
     }
 

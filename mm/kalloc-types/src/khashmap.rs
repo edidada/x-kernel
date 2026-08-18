@@ -39,13 +39,19 @@ impl<K, V> KHashMap<K, V> {
 impl<K: Eq + Hash, V> KHashMap<K, V> {
     /// Creates an empty map with at least the given capacity.
     ///
-    /// Only [`AllocContext::Sleepable`] is supported in phase 1.
+    /// Nonzero pre-allocation is supported only from
+    /// [`AllocContext::Sleepable`] in phase 1. A zero-capacity map does not
+    /// allocate and is valid in every context.
     ///
     /// # Errors
     ///
     /// Returns [`AllocError::NoMemory`] when the kernel allocator cannot
     /// satisfy the pre-allocation.
     pub fn try_with_capacity(capacity: usize, context: AllocContext) -> Result<Self, AllocError> {
+        if capacity == 0 {
+            return Ok(Self::new());
+        }
+
         require_supported_context(context)?;
 
         #[cfg(unittest)]
@@ -89,7 +95,9 @@ where
 {
     /// Reserves capacity for at least `additional` more elements.
     ///
-    /// Only [`AllocContext::Sleepable`] is supported in phase 1.
+    /// Growth is supported only from [`AllocContext::Sleepable`] in phase 1.
+    /// A reserve request already covered by current capacity is valid in every
+    /// context.
     ///
     /// # Errors
     ///
@@ -100,6 +108,10 @@ where
         additional: usize,
         context: AllocContext,
     ) -> Result<(), AllocError> {
+        if additional <= self.inner.capacity().saturating_sub(self.inner.len()) {
+            return Ok(());
+        }
+
         require_supported_context(context)?;
 
         #[cfg(unittest)]
@@ -118,7 +130,9 @@ where
     /// map did have this key, the value is updated and the old value is
     /// returned.
     ///
-    /// Only [`AllocContext::Sleepable`] is supported in phase 1.
+    /// Inserting a new key may grow the table and is therefore supported only
+    /// from [`AllocContext::Sleepable`] in phase 1. Replacing an existing key
+    /// is allocation-free and valid in every context.
     ///
     /// # Errors
     ///
@@ -130,8 +144,6 @@ where
         v: V,
         context: AllocContext,
     ) -> Result<Option<V>, AllocError> {
-        require_supported_context(context)?;
-
         // Replacing an existing value never grows the table. Checking first
         // avoids reporting ENOMEM for an operation that only overwrites a
         // value already stored in the map.
@@ -370,6 +382,17 @@ mod tests {
         assert_eq!(err, AllocError::UnsupportedContext);
     }
 
+    #[def_test]
+    fn preallocated_insert_and_replacement_are_valid_in_atomic_context() {
+        let mut map = KHashMap::try_with_capacity(2, AllocContext::Sleepable).unwrap();
+        map.try_insert(1_u32, 10_u32, AllocContext::Atomic).unwrap();
+        assert_eq!(
+            map.try_insert(1_u32, 11_u32, AllocContext::Atomic).unwrap(),
+            Some(10_u32)
+        );
+        assert_eq!(map.get(&1), Some(&11_u32));
+    }
+
     #[def_test(serial)]
     fn try_insert_growth_failure_preserves_existing_entries() {
         let mut map = KHashMap::new();
@@ -392,8 +415,7 @@ mod tests {
 
         let _guard = fail_next_allocation();
         assert_eq!(
-            map.try_insert(7_u32, 10_u32, AllocContext::Sleepable)
-                .unwrap(),
+            map.try_insert(7_u32, 10_u32, AllocContext::Atomic).unwrap(),
             Some(9_u32)
         );
         assert_eq!(map.get(&7), Some(&10_u32));

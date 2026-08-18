@@ -37,13 +37,16 @@ impl KString {
 
     /// Constructs an empty string with at least the given capacity.
     ///
-    /// Only [`AllocContext::Sleepable`] is supported in phase 1.
+    /// Nonzero capacity growth is supported only from
+    /// [`AllocContext::Sleepable`] in phase 1. A zero-capacity string does
+    /// not allocate and is valid in every context.
     ///
     /// # Errors
     ///
     /// Returns [`AllocError::NoMemory`] when the kernel allocator cannot
     /// satisfy the pre-allocation, or [`AllocError::UnsupportedContext`] when
-    /// the caller requests a context reserved for a later phase.
+    /// a nonzero allocation is requested from a context reserved for a later
+    /// phase.
     pub fn try_with_capacity(capacity: usize, context: AllocContext) -> Result<Self, AllocError> {
         let inner = KVec::try_with_capacity(capacity, context)?;
         Ok(Self { inner })
@@ -51,7 +54,9 @@ impl KString {
 
     /// Creates a `KString` by copying the bytes of `s`.
     ///
-    /// Only [`AllocContext::Sleepable`] is supported in phase 1.
+    /// Copying nonempty input is supported only from
+    /// [`AllocContext::Sleepable`] in phase 1. Copying an empty string does
+    /// not allocate and is valid in every context.
     ///
     /// # Errors
     ///
@@ -111,8 +116,8 @@ impl KString {
     ///
     /// Returns [`AllocError::NoMemory`] when the buffer must grow and the
     /// allocator cannot satisfy the request. Returns
-    /// [`AllocError::UnsupportedContext`] when `context` is not currently
-    /// supported.
+    /// [`AllocError::UnsupportedContext`] only when growth is requested from
+    /// a context not currently supported by the allocator.
     pub fn try_reserve(
         &mut self,
         additional: usize,
@@ -141,7 +146,9 @@ impl KString {
 
     /// Appends a single `char` to the string.
     ///
-    /// Only [`AllocContext::Sleepable`] is supported in phase 1.
+    /// Growth is supported only from [`AllocContext::Sleepable`] in phase 1.
+    /// Appending into already-reserved capacity is allocation-free and valid
+    /// in every context.
     ///
     /// # Errors
     ///
@@ -156,7 +163,9 @@ impl KString {
 
     /// Appends a string slice to this `KString`.
     ///
-    /// Only [`AllocContext::Sleepable`] is supported in phase 1.
+    /// Growth is supported only from [`AllocContext::Sleepable`] in phase 1.
+    /// Appending into already-reserved capacity is allocation-free and valid
+    /// in every context.
     ///
     /// # Errors
     ///
@@ -172,7 +181,9 @@ impl KString {
     /// This is the preferred way to replace `format!(...)` in fallible
     /// contexts, because it provides an explicit `AllocContext`.
     ///
-    /// Only [`AllocContext::Sleepable`] is supported in phase 1.
+    /// Growth is supported only from [`AllocContext::Sleepable`] in phase 1.
+    /// Formatting that fits in already-reserved capacity is allocation-free
+    /// and valid in every context.
     ///
     /// # Errors
     ///
@@ -374,6 +385,17 @@ mod tests {
         let s = KString::try_with_capacity(64, AllocContext::Sleepable).unwrap();
         assert!(s.is_empty());
         assert!(s.capacity() >= 64);
+    }
+
+    #[def_test]
+    fn preallocated_mutation_is_valid_in_atomic_context() {
+        let mut s = KString::try_with_capacity(16, AllocContext::Sleepable).unwrap();
+        s.try_push_str("value", AllocContext::Atomic).unwrap();
+        s.try_push('=', AllocContext::Atomic).unwrap();
+        s.try_push_fmt(format_args!("{}", 42), AllocContext::Atomic)
+            .unwrap();
+
+        assert_eq!(s.as_str(), "value=42");
     }
 
     #[def_test(serial)]

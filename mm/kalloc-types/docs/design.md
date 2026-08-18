@@ -136,7 +136,10 @@ alloc-engine / page allocator
 ## 调用约束 / 执行上下文
 
 所有公开容器的构造、预留和增长入口都使用真实的 fallible 分配。上下文约束
-也是运行时契约：当前实现仅接受 `Sleepable`，其他上下文显式返回
+也是运行时契约：当前仅**真正发起新分配**的路径接受 `Sleepable`；零容量构造、
+已经预留容量内的 `push`/`extend`、以及不改变表容量的 map value replacement
+不发起分配，因此可在所有 `AllocContext` 中执行。需要新 allocation 的
+`NoWait`、`Atomic` 和 `ReservedCritical` 请求会显式返回
 `UnsupportedContext`，并在转换到 `KError` 时保留为 `WouldBlock`，不会伪装成
 内存耗尽。`AllocContext` 仍保留了未来上下文维度：
 
@@ -145,7 +148,9 @@ alloc-engine / page allocator
 - `Atomic`
 - `ReservedCritical`
 
-后续真正的构造/扩容 API 在第一实现里只会保证 `Sleepable`。
+后续真正的构造/扩容 API 在第一实现里只会保证 `Sleepable`；预留容量不是
+no-wait allocator 的替代，而是调用方在睡眠上下文中先完成资源准备后的显式
+使用模式。
 
 ## 并发模型
 

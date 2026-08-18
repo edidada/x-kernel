@@ -4,10 +4,12 @@
 
 /// Allocation-context contract carried by fallible heap APIs.
 ///
-/// Only [`AllocContext::Sleepable`] is supported in the first implementation
-/// milestone. The remaining variants reserve API shape for later phases so
-/// call sites do not need a semantic rewrite when no-wait or reserve-backed
-/// allocation policies are added.
+/// Only [`AllocContext::Sleepable`] is supported for **new allocations** in
+/// the first implementation milestone. Operations that can prove they do not
+/// allocate, such as pushing into an already-reserved buffer, are valid in
+/// every context. The remaining variants reserve API shape for later phases
+/// so call sites do not need a semantic rewrite when no-wait or
+/// reserve-backed allocation policies are added.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum AllocContext {
     /// The caller is allowed to run an allocation path that may sleep.

@@ -13,11 +13,11 @@ use core::{
 use crate::{AllocContext, AllocError, context::require_supported_context};
 
 fn alloc_storage<T>(context: AllocContext) -> Result<NonNull<T>, AllocError> {
-    require_supported_context(context)?;
-
     if size_of::<T>() == 0 {
         return Ok(NonNull::dangling());
     }
+
+    require_supported_context(context)?;
 
     #[cfg(unittest)]
     crate::fault_injection::maybe_fail_allocation()?;
@@ -52,7 +52,9 @@ pub struct KBox<T> {
 impl<T> KBox<T> {
     /// Allocates storage for `value` and returns an owned heap object.
     ///
-    /// Only [`AllocContext::Sleepable`] is supported in phase 1.
+    /// Non-zero-sized allocation is supported only from
+    /// [`AllocContext::Sleepable`] in phase 1. Zero-sized values need no heap
+    /// storage and are valid in every context.
     ///
     /// # Errors
     ///
@@ -72,7 +74,9 @@ impl<T> KBox<T> {
 
     /// Allocates uninitialized storage for a `T`.
     ///
-    /// Only [`AllocContext::Sleepable`] is supported in phase 1.
+    /// Non-zero-sized allocation is supported only from
+    /// [`AllocContext::Sleepable`] in phase 1. Zero-sized values need no heap
+    /// storage and are valid in every context.
     ///
     /// # Errors
     ///
@@ -247,6 +251,12 @@ mod tests {
     fn try_new_zst_needs_no_allocation() {
         let _guard = fail_next_allocation();
         let boxed = KBox::try_new((), AllocContext::Sleepable).unwrap();
+        assert_eq!(*boxed, ());
+    }
+
+    #[def_test]
+    fn zst_is_valid_in_atomic_context() {
+        let boxed = KBox::try_new((), AllocContext::Atomic).unwrap();
         assert_eq!(*boxed, ());
     }
 
