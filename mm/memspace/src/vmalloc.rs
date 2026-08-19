@@ -6,9 +6,9 @@
 //!
 //! This is the X-Kernel counterpart of Linux `mm/vmalloc.c`:
 //!
-//! - Virtual-address bookkeeping lives in a dedicated interval table
-//!   ([`VmallocState::areas`]) over `[VMALLOC_BASE, VMALLOC_END)`, separate
-//!   from user/kernel address-space VMAs (Linux `vmap_area` tree).
+//! - Virtual-address bookkeeping uses the shared dynamic kernel VA allocator
+//!   over `[VMALLOC_BASE, VMALLOC_END)`, separate from user/kernel address-space
+//!   VMAs (Linux `vmap_area` tree).
 //! - Page-table updates run in a single `PageTableMut` transaction so TLB
 //!   flushes are deferred and coalesced (Linux `map_vm_area` + one flush).
 //! - `free` is callable from hardirq/softirq context: such frees are
@@ -18,33 +18,35 @@
 //!
 //! # Locking
 //!
-//! Lock order is `VMALLOC` → kernel address-space lock ([`kernel_layout`]);
-//! no other code path takes them in reverse order. Both are `SpinNoIrq`, and
-//! the lock holders **never** run the synchronous TLB shootdown:
+//! Dynamic VA reservation precedes the kernel address-space lock
+//! ([`kernel_layout`]); no path takes these locks in reverse order. The lock
+//! holders **never** run the synchronous TLB shootdown:
 //! page-table commits use [`page_table::PageTableMut::finish_no_flush`], and
 //! only `free` flushes — locally via `karch::flush_tlb` and remotely via
 //! [`kipi::tlb::flush_all_cpus`] — after releasing the locks. This avoids
 //! deadlocking when a target CPU is spinning on one of these locks with IRQs
 //! disabled and thus cannot service the shootdown IPI. `alloc` needs no
 //! flush: a fresh VA has no stale TLB entries, and a freed VA stays reserved
-//! in the interval table until the preceding `free`'s system-wide flush has
+//! in the shared interval allocator until the preceding `free`'s system-wide flush has
 //! completed, so a reused VA cannot have stale entries on any CPU. The
 //! deferred-free list is lock-free (Treiber stack) so it can be touched from
 //! IRQ context.
 
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
-use kaddr_layout::{VMALLOC_BASE, VMALLOC_END};
 use kalloc::global_allocator;
 use kerrno::{KError, KResult};
 use khal::{mem::v2p, paging::MappingFlags};
-use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
-use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
+use memaddr::{PAGE_SIZE_4K, VirtAddr};
 use page_table::PageSize;
 
-use crate::{kernel_aspace::KernelAddressSpace, kernel_layout};
+use crate::{
+    kernel_aspace::KernelAddressSpace,
+    kernel_layout,
+    kernel_va::{KERNEL_VA_ALLOCATOR, vmalloc_window},
+};
 
 /// An allocated virtual region. The caller owns it until it is passed back
 /// to [`free`].
@@ -70,50 +72,6 @@ pub struct VmAllocOptions {
     pub guard_pages: usize,
 }
 
-// ── VA interval bookkeeping (Linux vmap_area) ─────────────────────────
-
-struct VmallocState {
-    /// Allocated intervals: start VA → size. Kept disjoint and sorted.
-    areas: BTreeMap<usize, usize>,
-}
-
-const fn empty_state() -> VmallocState {
-    VmallocState {
-        areas: BTreeMap::new(),
-    }
-}
-
-static VMALLOC: SpinNoIrq<VmallocState> = SpinNoIrq::new(empty_state());
-
-fn vmalloc_range() -> VirtAddrRange {
-    let start = VirtAddr::from_usize(VMALLOC_BASE);
-    let end = VirtAddr::from_usize(VMALLOC_END);
-    VirtAddrRange::from_start_size(start, end.as_usize().saturating_sub(VMALLOC_BASE))
-}
-
-impl VmallocState {
-    /// Finds a free interval of `size` bytes inside `limit`, aligned to
-    /// `align`, scanning the allocated intervals in ascending order.
-    fn find_free_area(&self, limit: VirtAddrRange, size: usize, align: usize) -> Option<VirtAddr> {
-        if size == 0 || !size.is_multiple_of(align) {
-            return None;
-        }
-        let mut last_end = limit.start.align_up(align);
-        for (&start, &area_size) in self.areas.range(last_end.as_usize()..) {
-            let start = VirtAddr::from_usize(start).max(last_end);
-            if start.as_usize().saturating_sub(last_end.as_usize()) >= size {
-                return Some(last_end);
-            }
-            last_end = VirtAddr::from_usize(start.as_usize() + area_size).align_up(align);
-        }
-        if limit.end.as_usize().saturating_sub(last_end.as_usize()) >= size {
-            Some(last_end)
-        } else {
-            None
-        }
-    }
-}
-
 // ── Public API ────────────────────────────────────────────────────────
 
 /// Allocates a virtually-contiguous region with default options: 4 KiB
@@ -136,6 +94,9 @@ pub fn alloc_with(opts: VmAllocOptions) -> KResult<(VmRegion, Vec<usize>)> {
     if !opts.align.is_power_of_two() {
         return Err(KError::InvalidInput);
     }
+    if opts.flags.contains(MappingFlags::USER) {
+        return Err(KError::PermissionDenied);
+    }
     let align = opts.align.max(PAGE_SIZE_4K);
     if opts.size <= guard {
         return Err(KError::InvalidInput);
@@ -148,7 +109,7 @@ pub fn alloc_with(opts: VmAllocOptions) -> KResult<(VmRegion, Vec<usize>)> {
         return Err(KError::InvalidInput);
     }
     let nr_pages = usable / PAGE_SIZE_4K;
-    let limit = vmalloc_range();
+    let limit = vmalloc_window();
 
     // Pre-allocate the physical pages outside the vmalloc and kernel
     // address-space locks: `map_pages` then only touches page tables while
@@ -166,32 +127,36 @@ pub fn alloc_with(opts: VmAllocOptions) -> KResult<(VmRegion, Vec<usize>)> {
         }
     }
 
-    let mut vstate = VMALLOC.lock();
-    let Some(va) = vstate.find_free_area(limit, opts.size, align) else {
-        drop(vstate);
-        for v in dm_vas {
-            global_allocator().dealloc_pages(v, 1, kalloc::UsageKind::VirtMem);
+    let reservation = match KERNEL_VA_ALLOCATOR
+        .lock()
+        .reserve_in(limit, opts.size, align)
+    {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            for v in dm_vas {
+                global_allocator().dealloc_pages(v, 1, kalloc::UsageKind::VirtMem);
+            }
+            return Err(error);
         }
-        return Err(KError::NoMemory);
     };
+    let va = reservation.start();
 
     let mut aspace = kernel_layout().lock();
     let map_result = map_pages(&mut aspace, va, guard, opts.flags, &dm_vas);
+    drop(aspace);
     if let Err(e) = map_result {
-        drop(aspace);
-        drop(vstate);
-        for dm_va in dm_vas {
-            global_allocator().dealloc_pages(dm_va, 1, kalloc::UsageKind::VirtMem);
+        KERNEL_VA_ALLOCATOR
+            .lock()
+            .release(reservation)
+            .expect("vmalloc reservation must be released after map failure");
+        for v in dm_vas {
+            global_allocator().dealloc_pages(v, 1, kalloc::UsageKind::VirtMem);
         }
         return Err(e);
     }
-    drop(aspace);
-
-    vstate.areas.insert(va.as_usize(), opts.size);
-    drop(vstate);
 
     // No TLB flush here: a freshly allocated VA has no stale TLB entries, and
-    // a reused VA is published back to the interval table by `free_sync` only
+    // a reused VA is released back to the interval allocator by `free_sync` only
     // after its system-wide flush (local `karch::flush_tlb` + remote
     // `flush_all_cpus`) has completed, so no CPU can still hold a stale entry
     // for it.
@@ -263,8 +228,8 @@ fn free_sync(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
     let usable_start = region.va + guard;
 
     // Keep this VA reserved while tearing down its PTEs. The entry remains in
-    // the interval table until the subsequent TLB shootdown has completed.
-    let vstate = VMALLOC.lock();
+    // the shared interval allocator until the subsequent TLB shootdown has
+    // completed.
     let mut need_flush = false;
     if usable > 0 {
         let mut aspace = kernel_layout().lock();
@@ -286,15 +251,13 @@ fn free_sync(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
         drop(aspace);
         need_flush = true;
     }
-    drop(vstate);
-
     if need_flush {
         // The kernel page table is shared by every CPU, so the unmap must be
         // reflected in every CPU's TLB — including this one. The remote
         // broadcast skips the initiator, so flush locally first. Callers
         // defer frees until the remote shootdown gate is open, so
         // both flushes cover every CPU here. Both flushes run outside the
-        // `VMALLOC` / `KERNEL_ASPACE` locks: a synchronous shootdown while
+        // shared VA allocator / `KERNEL_ASPACE` locks: a synchronous shootdown while
         // holding `SpinNoIrq` locks deadlocks a CPU spinning on them with
         // IRQs off.
         karch::flush_tlb(None);
@@ -302,10 +265,12 @@ fn free_sync(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
     }
 
     // Do not make this VA available again until every CPU has discarded the
-    // previous mapping. Holding `VMALLOC` across the shootdown could deadlock
-    // a target CPU that is waiting on this lock with IRQs disabled, so release
-    // the interval only after the lock-free flush has completed.
-    VMALLOC.lock().areas.remove(&region.va.as_usize());
+    // previous mapping. Release the interval only after the lock-free flush
+    // has completed.
+    KERNEL_VA_ALLOCATOR
+        .lock()
+        .release_range(region.va, region.size)
+        .expect("vmalloc reservation must be released exactly once");
 
     for dm_va in pages {
         global_allocator().dealloc_pages(dm_va, 1, kalloc::UsageKind::VirtMem);

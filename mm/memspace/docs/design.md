@@ -7,8 +7,9 @@ dispatch；`KernelAddressSpace` 维护全局内核页表和轻量的
 `KernelMappingSet`（仅记录内核 VA 区间及当前 PTE flags）。
 
 `MmSpace` / `AddrSpace` 仍是 `UserMmSpace` 的兼容别名。内核映射不再伪装成
-`VmArea`：`iomap` 使用 `KernelMappingSet`，`vmalloc` 使用自己的区间表，
-对应 Linux 的 `vmap_area` 角色。
+`VmArea`：动态 IOMAP 和 VMALLOC 区间由共享的
+`kernel_va::KernelVaAllocator` 分配，`KernelMappingSet` 只记录页表映射
+metadata，两个区域管理器各自保留物理 backing 和生命周期描述符。
 
 它不拥有 file-backed cached content，也不拥有 anonymous page content。
 内容对象分别由 `kvfs::AddressSpace` 和 `mm/anon` 管理；`memspace` 只保存
@@ -44,6 +45,7 @@ Linux 对应关系：
 - `src/fault.rs`
 - `src/backend/*`
 - `src/iomap.rs`
+- `src/kernel_va.rs`
 - `src/paging.rs`
 - `src/vmalloc.rs`
 - `src/kernel_stack.rs`
@@ -62,33 +64,36 @@ Linux 对应关系：
 `vmalloc` 的目标是 Linux `vmalloc` 的通用等价物（virtually-contiguous
 kernel memory），内核栈是其首个客户。结构与 Linux 对齐：
 
-- VA 分配由 `vmalloc.rs` 内部的独立区间表（`BTreeMap`，对应 Linux
-  `vmap_area` 树）管理，不进入地址空间 VMA 树；分配区间为
-  `[VMALLOC_BASE, VMALLOC_END)`，每架构显式定义（x86_64/loongarch64
-  上界收敛到 kimage 起点，避免与内核映像重叠）。
+- VA 分配由 `kernel_va::KernelVaAllocator` 的共享区间表（对应 Linux
+  `vmap_area` 树）管理，不进入地址空间 VMA 树；VMALLOC 使用
+  `[VMALLOC_BASE, VMALLOC_END)` 窗口，IOMAP 使用独立的 IOMAP 窗口。每个
+  窗口由架构显式定义（x86_64/loongarch64 上界收敛到 kimage 起点，避免与
+  内核映像重叠），因此两个区域不会各自维护一套可能失配的 VA allocator。
 - 页表更新在单次 `PageTableMut` 事务内完成，TLB flush 批量合并
   （对应 Linux `map_vm_area` + 一次 flush）。
 - `free` 可从 hardirq/softirq 上下文调用：异常上下文内的释放进入无锁
   侵入链表，由 `system_wq` 在任务上下文真正拆除映射（对应 Linux
   `vfree_deferred`）。NMI 上下文不支持。
 
-锁序固定为 `VMALLOC` → `KERNEL_ASPACE`（均 `SpinNoIrq`），无反向路径。
-持锁期间不发起同步 TLB shootdown：页表提交用 `finish_no_flush()`，flush
-统一在锁释放后进行：本地调用 `karch::flush_tlb`，远端调用
+动态 VA reservation 先于 `KERNEL_ASPACE`（均 `SpinNoIrq`）完成；安装路径
+没有反向取锁。持锁期间不发起同步 TLB shootdown：页表提交用
+`finish_no_flush()`，flush 统一在锁释放后进行：本地调用 `karch::flush_tlb`，远端调用
 `kipi::tlb::flush_all_cpus`（只刷远端 CPU）。远端广播受
 `ALL_CPUS_STARTED` 门控；门控关闭期间的 free 不拆 PTE、不释放物理页，而是
 进入 deferred 队列，待门控打开后再执行完整的本地与远端 flush，避免 target
 CPU 等锁（中断关）时无法应答 IPI 的互相死锁。PTE 拆除后，释放的区间在
-flush 完成前仍保留在 interval table，随后才重新获取 `VMALLOC` 锁将其释放；
-因此并发分配不会在任一 CPU 仍持有旧 TLB 翻译时复用该 VA。deferred 释放走
-无锁链表，IRQ 上下文不会取 `VMALLOC` 锁。
+flush 完成前仍保留在共享 allocator，随后才释放 reservation；因此并发分配
+不会在任一 CPU 仍持有旧 TLB 翻译时复用该 VA。deferred 释放走无锁链表，IRQ
+上下文不会取共享 allocator 锁。
 死锁复盘见 `docs/issues/2026-08-17-tlb-shootdown-deadlock.md`。
 
 `iomap` 的 `DEVICE_REGISTRY` 只保护设备物理区间到 VA 的复用和引用计数。
-映射安装采用 `KERNEL_ASPACE` → `DEVICE_REGISTRY` 的短锁序；最后一次
+映射安装先取得共享 VA reservation，再按 `KERNEL_ASPACE` →
+`DEVICE_REGISTRY` 的短锁序发布页表和 registry metadata；最后一次
 `iounmap` 先发布 `Removing` 状态并释放 registry 锁，再拆 PTE、执行全局
-TLB flush，最后重新获取两侧锁完成 metadata 回收，避免在 shootdown 期间让
-IPI 目标 CPU 等待 registry 锁。
+TLB flush，最后释放 `KernelMappingSet` 和共享 VA reservation，重新获取
+registry 锁删除 metadata，避免在 shootdown 期间让 IPI 目标 CPU 等待 registry
+锁。
 
 ## 架构
 
@@ -116,9 +121,10 @@ object owner
 KernelAddressSpace
   -> kernel PageTable
   -> paging error/transaction helpers
-  -> KernelMappingSet (static linear mappings + iomap)
+  -> KernelMappingSet (static linear mappings + iomap metadata)
+  -> kernel_va::KernelVaAllocator (shared IOMAP + VMALLOC intervals)
   -> iomap::DEVICE_REGISTRY (physical-device identity and refcounts)
-  -> vmalloc::VmallocState (separate vmap_area-like allocator)
+  -> vmalloc::VmRegion (physical backing and lifetime)
 ```
 
 ## 调用约束 / 执行上下文

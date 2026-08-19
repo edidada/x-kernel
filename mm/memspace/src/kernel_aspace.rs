@@ -92,32 +92,6 @@ impl KernelMappingSet {
         true
     }
 
-    fn find_free_area(
-        &self,
-        hint: VirtAddr,
-        size: usize,
-        limit: VirtAddrRange,
-        align: usize,
-    ) -> Option<VirtAddr> {
-        if size == 0 || align == 0 || !size.is_multiple_of(align) {
-            return None;
-        }
-        let mut last_end = hint.max(limit.start).align_up(align);
-        if let Some((_, mapping)) = self.areas.range(..last_end).last() {
-            last_end = last_end.max(mapping.end()).align_up(align);
-        }
-        for (&addr, mapping) in self.areas.range(last_end..) {
-            if last_end.checked_add(size).is_some_and(|end| end <= addr) {
-                return Some(last_end);
-            }
-            last_end = mapping.end().align_up(align);
-        }
-        last_end
-            .checked_add(size)
-            .is_some_and(|end| end <= limit.end)
-            .then_some(last_end)
-    }
-
     fn insert(&mut self, start: VirtAddr, size: usize, flags: MappingFlags) -> KResult {
         let range = VirtAddrRange::try_from_start_size(start, size).ok_or(KError::InvalidInput)?;
         if self.overlaps(range) {
@@ -216,9 +190,9 @@ impl KernelMappingSet {
 ///
 /// Unlike [`UserMmSpace`], this type has no userspace VMA tree or process
 /// lifetime state.  Its interval set records mappings managed through this
-/// API (static linear mappings and `iomap`).  `vmalloc` owns a separate
-/// interval table for its disjoint VA window rather than pretending that its
-/// allocations are VMAs.
+/// API (static linear mappings and `iomap`).  Dynamic VA ownership is tracked
+/// separately by the shared `kernel_va::KernelVaAllocator`; `vmalloc` does not
+/// pretend that its allocations are VMAs.
 pub struct KernelAddressSpace {
     range: VirtAddrRange,
     pgtbl: PageTable,
@@ -278,25 +252,6 @@ impl KernelAddressSpace {
     /// Returns the page-table root physical address.
     pub const fn page_table_root(&self) -> PhysAddr {
         self.pgtbl.root_paddr()
-    }
-
-    /// Finds a free kernel VA interval.
-    pub fn find_free_area(
-        &self,
-        hint: VirtAddr,
-        size: usize,
-        limit: VirtAddrRange,
-        align: usize,
-    ) -> Option<VirtAddr> {
-        if size == 0
-            || !is_aligned_4k(size)
-            || align < PAGE_SIZE_4K
-            || !align.is_power_of_two()
-            || !self.range.contains_range(limit)
-        {
-            return None;
-        }
-        self.mappings.find_free_area(hint, size, limit, align)
     }
 
     /// Finds an explicitly recorded kernel mapping containing `vaddr`.
@@ -455,15 +410,6 @@ mod tests {
             .expect("first kernel mapping should fit");
         assert!(mappings.find(base + PAGE_SIZE_4K).is_some());
         assert!(mappings.covers(VirtAddrRange::from_start_size(base, PAGE_SIZE_4K * 3)));
-        assert_eq!(
-            mappings.find_free_area(
-                base,
-                PAGE_SIZE_4K,
-                VirtAddrRange::from_start_size(base, PAGE_SIZE_4K * 8),
-                PAGE_SIZE_4K,
-            ),
-            Some(base + PAGE_SIZE_4K * 3)
-        );
 
         mappings.protect(base + PAGE_SIZE_4K, PAGE_SIZE_4K, MappingFlags::READ);
         assert_eq!(

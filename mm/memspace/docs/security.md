@@ -19,8 +19,10 @@
 - object-side invalidate request 的复核和 PTE zap。
 - `MmUserHandle` / `MmPin` 生命周期 capability，区分 active user mappings
   与对象 pin。
-- 内核线性/iomap 区间由 `KernelMappingSet` 记录，`vmalloc` 区间由独立的
-  `VmallocState` 记录；两者不进入用户 `VmAreaSet`。
+- 内核线性/iomap 的页表映射 metadata 由 `KernelMappingSet` 记录；IOMAP 和
+  VMALLOC 的动态 VA ownership 由共享的 `KernelVaAllocator` 记录，两个区域
+  的 backing/lifetime descriptor 各自管理；这些记录都不进入用户
+  `VmAreaSet`。
 
 ## 外部边界 / 攻击面
 
@@ -91,25 +93,28 @@
 
 ## vmalloc（通用虚拟连续分配）
 
-- 分配持 `VMALLOC` + `KERNEL_ASPACE`（均 `SpinNoIrq`），必须在任务
-  上下文调用；释放则额外允许 hardirq/softirq 上下文——异常上下文走无锁
-  deferred 队列（固定 64 节点池 + `system_wq` 排空），不分配、不取锁。
-  NMI 上下文不支持（deferred 排空依赖 workerqueue，内部取锁）。
-- 锁序固定 `VMALLOC` → `KERNEL_ASPACE`；任何路径不得反向取锁。
+- 分配先取得 `KernelVaAllocator` reservation，再取得
+  `KERNEL_ASPACE`（均 `SpinNoIrq`），必须在任务上下文调用；释放则额外允许
+  hardirq/softirq 上下文——异常上下文走无锁 deferred 队列（固定 64 节点池
+  + `system_wq` 排空），不分配、不取锁。NMI 上下文不支持（deferred 排空
+  依赖 workerqueue，内部取锁）。
+- 动态 VA reservation → `KERNEL_ASPACE` 是固定锁序；任何路径不得反向取锁。
 - 持锁期间**不执行**同步 TLB shootdown：页表提交用
   `PageTableMut::finish_no_flush()`，flush 在锁释放后进行，避免 target
   CPU 在等同一把锁（中断关）时无法应答 shootdown IPI 而互相死锁。
 - `ALL_CPUS_STARTED` 门控打开前不能完成 vmalloc free；释放请求只进入
   deferred 队列，直到远端 IPI 可用后才拆除 PTE、执行全 CPU flush 并释放
   VA 与物理页。
-- 已拆除 PTE 的 vmalloc 区间必须保留在 `VMALLOC` interval table，直到本地
+- 已拆除 PTE 的 VMALLOC/IOMAP 区间必须保留在共享 VA allocator，直到本地
   与远端 TLB flush 都完成后才可重新分配；否则新映射可能命中旧 TLB 翻译并
   写入已释放的物理页。
 - `iomap_device()` 的最后一个引用释放时，设备注册表先把条目标为
-  `Removing`；完成 PTE 拆除和全局 TLB flush 后才释放 `KernelMappingSet` 区间并
-  删除注册表项。并发 `iomap_device()` 不能在拆除期间复用旧 VA。
+  `Removing`；完成 PTE 拆除和全局 TLB flush 后才释放 `KernelMappingSet` 区间
+  和共享 VA reservation，再删除注册表项。并发 `iomap_device()` 不能在拆除
+  期间复用旧 VA。
 - `DEVICE_REGISTRY` 不得跨越同步 TLB shootdown 持有；安装路径的
-  `KERNEL_ASPACE` → registry 锁序与拆除路径的 `Removing` 两阶段协议必须保持。
+  reservation → `KERNEL_ASPACE` → registry 锁序与拆除路径的 `Removing` 两阶段
+  协议必须保持。
 - 释放路径的 flush 必须覆盖本 CPU：远端广播（`flush_all_cpus`）不刷发起
   者自身，本地 `karch::flush_tlb` 不可省略，否则 VA 复用后本 CPU 经陈旧
   TLB 项访问到错误物理页（UAF）。
@@ -147,7 +152,7 @@
 
 6. TLB stale entry 访问已释放 frame 或复用 VA 的新映射。
    - 防护：释放 detached frame 前显式完成 TLB flush，且在 flush 完成前保留
-     vmalloc interval table 条目，禁止该 VA 被重新分配。
+     共享 VA allocator reservation，禁止该 VA 被重新分配。
 
 7. 调度切换时过早把当前 CPU 从旧 mm 的目标集合移除。
    - 防护：切入路径先把 CPU 发布到新 mm，待硬件页表切换完成后再从旧 mm 清除。

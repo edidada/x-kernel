@@ -19,6 +19,7 @@ mod fault;
 mod iomap;
 mod kernel_aspace;
 mod kernel_stack;
+mod kernel_va;
 mod lifetime;
 mod paging;
 mod vma;
@@ -37,6 +38,7 @@ pub use vmobj::{ObjectInvalidateRequest, VmObjectId};
 
 #[cfg(target_arch = "aarch64")]
 pub use self::aarch64_asid::Aarch64UserAsidContext;
+use self::kernel_va::{KERNEL_VA_ALLOCATOR, iomap_window, vmalloc_window};
 pub use self::{
     aspace::{
         AddrPolicy, AddrSpace, FutexBacking, InvalidateHandle, MmSpace, MremapSource, UserMmSpace,
@@ -65,7 +67,7 @@ pub mod process_lifetime {
 ///
 /// Protected by `SpinNoIrq`: while the lock is held the current CPU's IRQs
 /// are disabled, so IRQ-handler paths never re-enter the lock on the same
-/// CPU. `vmalloc` additionally orders `VMALLOC` before this lock.
+/// CPU. Dynamic VA reservations use `KERNEL_VA_ALLOCATOR` before this lock.
 static KERNEL_ASPACE: LazyInit<SpinNoIrq<KernelAddressSpace>> = LazyInit::new();
 
 fn mem_to_mapping_flags(f: MemFlags) -> MappingFlags {
@@ -95,13 +97,54 @@ fn map_memory_region(vmspace: &mut KernelAddressSpace, region: MemoryRegion) -> 
         Some(v) => v.align_down_4k(),
         None => p2v(start),
     };
-    vmspace.map_linear(
+    let mapped_size = end - start;
+    let reservation = reserve_fixed_dynamic_mapping(target_va, mapped_size)?;
+    if let Err(error) = vmspace.map_linear(
         target_va,
         start,
-        end - start,
+        mapped_size,
         mem_to_mapping_flags(region.flags),
-    )?;
+    ) {
+        release_dynamic_mapping(reservation);
+        return Err(error.into());
+    }
     Ok(())
+}
+
+fn reserve_fixed_dynamic_mapping(
+    start: memaddr::VirtAddr,
+    size: usize,
+) -> LinuxResult<Option<kernel_va::KernelVaReservation>> {
+    let range = memaddr::VirtAddrRange::try_from_start_size(start, size)
+        .ok_or(kerrno::KError::InvalidInput)?;
+    let iomap = iomap_window();
+    let vmalloc = vmalloc_window();
+    let window = if iomap.contains_range(range) {
+        Some(iomap)
+    } else if vmalloc.contains_range(range) {
+        Some(vmalloc)
+    } else if range.overlaps(iomap) || range.overlaps(vmalloc) {
+        return Err(kerrno::KError::InvalidInput.into());
+    } else {
+        None
+    };
+    let Some(window) = window else {
+        return Ok(None);
+    };
+    Ok(Some(
+        KERNEL_VA_ALLOCATOR
+            .lock()
+            .reserve_fixed_in(window, start, size)?,
+    ))
+}
+
+fn release_dynamic_mapping(reservation: Option<kernel_va::KernelVaReservation>) {
+    if let Some(reservation) = reservation {
+        KERNEL_VA_ALLOCATOR
+            .lock()
+            .release(reservation)
+            .expect("fixed kernel VA reservation must be released exactly once");
+    }
 }
 
 /// Creates a new address space for kernel itself.
@@ -127,8 +170,8 @@ pub fn new_kernel_layout() -> LinuxResult<KernelAddressSpace> {
 ///
 /// The lock is `SpinNoIrq` (IRQs disabled while held). It is a low-level
 /// kernel-space lock: user address spaces have their own per-`UserMmSpace`
-/// locks. `vmalloc` holds `VMALLOC` before this lock; no path takes them in
-/// the opposite order.
+/// locks. Dynamic VA allocators reserve an interval before taking this lock;
+/// no path acquires `KERNEL_ASPACE` before the shared VA allocator.
 pub fn kernel_layout() -> &'static SpinNoIrq<KernelAddressSpace> {
     &KERNEL_ASPACE
 }

@@ -8,12 +8,14 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use kaddr_layout::{IOMAP_VADDR, IOMAP_VSIZE};
 use khal::paging::MappingFlags;
 use kspin::SpinNoIrq;
-use memaddr::{MemoryAddr, PhysAddr, VirtAddr, VirtAddrRange, va};
+use memaddr::{MemoryAddr, PhysAddr, VirtAddr, VirtAddrRange};
 
-use crate::kernel_layout;
+use crate::{
+    kernel_layout,
+    kernel_va::{KERNEL_VA_ALLOCATOR, KernelVaReservation, iomap_window},
+};
 
 /// Error returned by runtime device IO mapping helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,15 +55,12 @@ enum RegionRefs {
 struct RegionEntry {
     region: DeviceRegion,
     refs: RegionRefs,
+    /// Dynamic mappings retain the VA reservation through PTE teardown and
+    /// the subsequent TLB shootdown. Pinned boot mappings have no teardown.
+    reservation: Option<KernelVaReservation>,
 }
 
 static DEVICE_REGISTRY: SpinNoIrq<Vec<RegionEntry>> = SpinNoIrq::new(Vec::new());
-
-// Boot/runtime layout ownership lives in kaddr_layout. memspace only consumes
-// the dedicated I/O VA window and allocates device mappings from that range.
-fn iomap_window() -> VirtAddrRange {
-    VirtAddrRange::from_start_size(va!(IOMAP_VADDR), IOMAP_VSIZE)
-}
 
 /// Register a named device MMIO region for diagnostics and memory-region views.
 pub fn register_device_region(
@@ -84,6 +83,20 @@ pub fn register_fixed_device_region(
     name: &'static str,
     vaddr: VirtAddr,
 ) -> Result<(), IoMapError> {
+    if vaddr.align_offset_4k() != paddr.align_offset_4k() {
+        return Err(IoMapError::InvalidRange);
+    }
+    let start = paddr.align_down_4k();
+    let end = paddr
+        .checked_add(size)
+        .ok_or(IoMapError::InvalidRange)?
+        .align_up_4k();
+    let span = end.sub_addr(start);
+    let va_range = VirtAddrRange::try_from_start_size(vaddr.align_down_4k(), span)
+        .ok_or(IoMapError::InvalidRange)?;
+    if !iomap_window().contains_range(va_range) {
+        return Err(IoMapError::InvalidRange);
+    }
     register_region(DeviceRegion {
         paddr,
         size,
@@ -133,34 +146,57 @@ pub fn iomap_device(
 
     kplat::mmio::prepare(start.as_usize(), span).map_err(|_| IoMapError::MappingFailed)?;
 
+    let reservation = KERNEL_VA_ALLOCATOR
+        .lock()
+        .reserve_in(iomap_window(), span, memaddr::PAGE_SIZE_4K)
+        .map_err(|_| IoMapError::NoMemory)?;
+
     let mut kernel_aspace = kernel_layout().lock();
     let mut regions = DEVICE_REGISTRY.lock();
 
     if let Some(vaddr) =
         acquire_mapping_locked(&mut regions, start, span).map_err(|_| IoMapError::MappingFailed)?
     {
+        drop(regions);
+        drop(kernel_aspace);
+        KERNEL_VA_ALLOCATOR
+            .lock()
+            .release(reservation)
+            .map_err(|_| IoMapError::MappingFailed)?;
         return Ok(vaddr + paddr.align_offset_4k());
     }
-
-    let limit = iomap_window();
-    let hint = limit.start;
-    let mapped_start = kernel_aspace
-        .find_free_area(hint, span, limit, memaddr::PAGE_SIZE_4K)
-        .ok_or(IoMapError::NoMemory)?;
 
     // Reserve the registry slot before changing the page table.  This keeps
     // the failure path transactional: an allocation failure here cannot leave
     // a live PTE with no corresponding registry entry.
-    regions.try_reserve(1).map_err(|_| IoMapError::NoMemory)?;
+    if regions.try_reserve(1).is_err() {
+        drop(regions);
+        drop(kernel_aspace);
+        KERNEL_VA_ALLOCATOR
+            .lock()
+            .release(reservation)
+            .map_err(|_| IoMapError::MappingFailed)?;
+        return Err(IoMapError::NoMemory);
+    }
 
-    kernel_aspace
+    let mapped_start = reservation.start();
+    if kernel_aspace
         .map_linear(
             mapped_start,
             start,
             span,
             MappingFlags::READ | MappingFlags::WRITE | MappingFlags::DEVICE,
         )
-        .map_err(|_| IoMapError::MappingFailed)?;
+        .is_err()
+    {
+        drop(regions);
+        drop(kernel_aspace);
+        KERNEL_VA_ALLOCATOR
+            .lock()
+            .release(reservation)
+            .map_err(|_| IoMapError::MappingFailed)?;
+        return Err(IoMapError::MappingFailed);
+    }
     // A newly allocated interval has no stale TLB entry.  `map_linear`
     // commits with `finish_no_flush()` so this lock can never be held across
     // a synchronous shootdown.
@@ -174,6 +210,7 @@ pub fn iomap_device(
     regions.push(RegionEntry {
         region,
         refs: RegionRefs::Counted(1),
+        reservation: Some(reservation),
     });
     Ok(mapped_start + paddr.align_offset_4k())
 }
@@ -209,6 +246,9 @@ pub fn iounmap(vaddr: VirtAddr) -> Result<(), IoMapError> {
     let Some(base) = entry.region.vaddr else {
         return Ok(());
     };
+    let reservation = entry
+        .reservation
+        .expect("counted iomap entry must own a VA reservation");
     regions[index].refs = RegionRefs::Removing;
     drop(regions);
 
@@ -230,14 +270,18 @@ pub fn iounmap(vaddr: VirtAddr) -> Result<(), IoMapError> {
         return Err(IoMapError::MappingFailed);
     }
 
-    // The interval remains reserved in `KernelAddressSpace` until every CPU
-    // has discarded the old translation.  This mirrors vmalloc's release
+    // The mapping metadata and shared VA reservation remain owned until every
+    // CPU has discarded the old translation. This mirrors vmalloc's release
     // ordering and prevents a racing iomap from reusing a stale VA.
     crate::flush_kernel_tlb(None);
     kernel_layout()
         .lock()
         .release_mapping(base, entry.region.size)
-        .map_err(|_| IoMapError::MappingFailed)?;
+        .expect("iomap mapping metadata must match the removed PTEs");
+    KERNEL_VA_ALLOCATOR
+        .lock()
+        .release(reservation)
+        .expect("iomap VA reservation must be released exactly once");
     let mut regions = DEVICE_REGISTRY.lock();
     if let Some(index) = regions.iter().position(|candidate| {
         candidate.region == entry.region && matches!(candidate.refs, RegionRefs::Removing)
@@ -261,6 +305,7 @@ fn register_region(region: DeviceRegion) -> Result<(), IoMapError> {
     regions.push(RegionEntry {
         region,
         refs: RegionRefs::Pinned,
+        reservation: None,
     });
     Ok(())
 }
