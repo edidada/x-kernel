@@ -18,7 +18,8 @@ use vmobj::{
 
 use super::{alloc_frame, dealloc_frame};
 use crate::{
-    FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, VmArea, VmBackingInfo, VmBackingKind,
+    FaultContext, ForkCloneTarget, InvalidateHandle, UserMmSpace, VmArea, VmBackingInfo,
+    VmBackingKind,
     backend::{
         BackendOps, FaultCompletion, FaultCompletionResult, divide_page, map_paging_err, pages_in,
     },
@@ -149,7 +150,7 @@ impl SharedBackend {
         _flags: MappingFlags,
         _old_pgtbl: &mut PageTableMut,
         _new_pgtbl: &mut PageTableMut,
-        _new_aspace: &Arc<Mutex<MmSpace>>,
+        _new_aspace: &Arc<Mutex<UserMmSpace>>,
         _invalidate: Option<InvalidateHandle>,
     ) -> KResult<Self> {
         Ok(Self {
@@ -302,7 +303,7 @@ impl VmRuntimeOps for SharedBackend {
         &self,
         new_start: VirtAddr,
         _new_mm_id: u64,
-        _aspace: &Arc<Mutex<MmSpace>>,
+        _aspace: &Arc<Mutex<UserMmSpace>>,
         _invalidate: Option<InvalidateHandle>,
     ) -> KResult<Arc<dyn VmRuntimeOps>> {
         Ok(Arc::new(self.relocated(new_start)))

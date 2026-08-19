@@ -54,7 +54,7 @@ fn registered_init_test_thread(thread: &Thread) {
 /// Runs a test in a newly constructed user task.
 fn run_in_user_task(test: &TestDescriptor, init_thread: InitTestThreadHook) -> TestResult {
     let pid = NEXT_TEST_PROCESS_ID.fetch_add(1, Ordering::Relaxed) as Pid;
-    let mut aspace = memspace::MmSpace::new_user_empty().expect("user test address space");
+    let mut aspace = memspace::UserMmSpace::new_user_empty().expect("user test address space");
     ksignal::map_signal_trampoline(&mut aspace).expect("user test signal trampoline");
     // On x86_64 the scheduler switches page tables purely from the `cr3` saved
     // in each task's context; unlike aarch64 there is no per-switch runtime hook

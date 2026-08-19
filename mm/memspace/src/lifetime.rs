@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use ksync::Mutex;
 
-use crate::{InvalidateHandle, MmSpace};
+use crate::{InvalidateHandle, UserMmSpace};
 
 pub(crate) struct MmUserLifetime {
     state: AtomicUsize,
@@ -65,22 +65,22 @@ impl MmUserLifetime {
 ///
 /// This is the X-Kernel counterpart of Linux `mm_users`: process runtimes that
 /// actively use the user mappings hold an `MmUserHandle`. Ordinary
-/// `Arc<Mutex<MmSpace>>` observers do not keep mappings alive.
+/// `Arc<Mutex<UserMmSpace>>` observers do not keep mappings alive.
 ///
 /// Dropping the last handle synchronously clears the address space's user
 /// mappings. Callers must only release this capability from sleepable task
 /// context, without holding spinlocks or running with IRQs/preemption disabled.
 /// Releasing or dropping the last user must also not happen while the current
-/// task already holds this handle's `MmSpace` mutex, because final release
+/// task already holds this handle's `UserMmSpace` mutex, because final release
 /// synchronously locks the same mutex to tear mappings down.
 #[doc(hidden)]
 pub struct MmUserHandle {
-    address_space: Arc<Mutex<MmSpace>>,
+    address_space: Arc<Mutex<UserMmSpace>>,
     lifetime: Option<Arc<MmUserLifetime>>,
 }
 
 impl MmUserHandle {
-    pub(crate) fn acquire(address_space: Arc<Mutex<MmSpace>>) -> Option<Self> {
+    pub(crate) fn acquire(address_space: Arc<Mutex<UserMmSpace>>) -> Option<Self> {
         let lifetime = address_space.lock().user_lifetime().clone();
         if !lifetime.acquire_user() {
             return None;
@@ -93,7 +93,7 @@ impl MmUserHandle {
     }
 
     /// Returns the virtual address space guarded by this active user.
-    pub fn address_space(&self) -> &Arc<Mutex<MmSpace>> {
+    pub fn address_space(&self) -> &Arc<Mutex<UserMmSpace>> {
         &self.address_space
     }
 
@@ -132,10 +132,10 @@ impl MmUserHandle {
 
     /// Releases this user and clears mappings if it was the last active user.
     ///
-    /// This may take the `MmSpace` mutex and run VMA/backend teardown. It must
+    /// This may take the `UserMmSpace` mutex and run VMA/backend teardown. It must
     /// not be called while holding a spinlock or from IRQ/preempt-disabled
     /// context, or while the current task already holds this handle's
-    /// `MmSpace` mutex.
+    /// `UserMmSpace` mutex.
     pub fn release_and_clear_if_last(mut self) -> bool {
         let Some(lifetime) = self.lifetime.take() else {
             return false;
@@ -145,7 +145,7 @@ impl MmUserHandle {
         }
 
         self.address_space.assert_not_owned_by_current(
-            "MmUserHandle final release would relock the current task's MmSpace mutex",
+            "MmUserHandle final release would relock the current task's UserMmSpace mutex",
         );
         self.address_space.lock().clear();
         true
@@ -159,7 +159,7 @@ impl Drop for MmUserHandle {
         };
         if lifetime.release_user() {
             self.address_space.assert_not_owned_by_current(
-                "MmUserHandle drop would relock the current task's MmSpace mutex",
+                "MmUserHandle drop would relock the current task's UserMmSpace mutex",
             );
             self.address_space.lock().clear();
         }
@@ -172,7 +172,7 @@ impl Drop for MmUserHandle {
 /// identity without extending the lifetime of user mappings.
 #[doc(hidden)]
 pub struct MmPin {
-    address_space: Arc<Mutex<MmSpace>>,
+    address_space: Arc<Mutex<UserMmSpace>>,
     lifetime: Arc<MmUserLifetime>,
 }
 
@@ -195,23 +195,23 @@ impl MmPin {
     }
 
     /// Returns the pinned address-space object.
-    pub fn address_space(&self) -> &Arc<Mutex<MmSpace>> {
+    pub fn address_space(&self) -> &Arc<Mutex<UserMmSpace>> {
         &self.address_space
     }
 }
 
 /// Observer capability for an address-space object.
 ///
-/// This keeps the `MmSpace` object observable for mapping invalidation and
+/// This keeps the `UserMmSpace` object observable for mapping invalidation and
 /// runtime callbacks, but it does not keep user mappings alive.
 #[derive(Clone)]
 pub struct MmObserver {
-    address_space: Arc<Mutex<MmSpace>>,
+    address_space: Arc<Mutex<UserMmSpace>>,
 }
 
 impl MmObserver {
     /// Creates an observer from a known live or pinned address-space owner.
-    pub fn new(address_space: &Arc<Mutex<MmSpace>>) -> Self {
+    pub fn new(address_space: &Arc<Mutex<UserMmSpace>>) -> Self {
         Self {
             address_space: address_space.clone(),
         }
@@ -219,7 +219,7 @@ impl MmObserver {
 
     /// Creates an invalidation handle for this observer.
     ///
-    /// This takes the observed `MmSpace` mutex. Callers must not invoke it
+    /// This takes the observed `UserMmSpace` mutex. Callers must not invoke it
     /// while already holding that same lock; paths that already hold the
     /// address-space lock should create the handle from the locked owner
     /// instead.

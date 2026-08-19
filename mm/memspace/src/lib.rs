@@ -17,8 +17,10 @@ pub mod backend;
 mod cpu_residency;
 mod fault;
 mod iomap;
+mod kernel_aspace;
 mod kernel_stack;
 mod lifetime;
+mod paging;
 mod vma;
 mod vmalloc;
 
@@ -36,13 +38,16 @@ pub use vmobj::{ObjectInvalidateRequest, VmObjectId};
 #[cfg(target_arch = "aarch64")]
 pub use self::aarch64_asid::Aarch64UserAsidContext;
 pub use self::{
-    aspace::{AddrPolicy, AddrSpace, FutexBacking, InvalidateHandle, MmSpace, MremapSource},
+    aspace::{
+        AddrPolicy, AddrSpace, FutexBacking, InvalidateHandle, MmSpace, MremapSource, UserMmSpace,
+    },
     cpu_residency::{MmCpuResidency, MmCpuResidencyRef},
     fault::{FaultContext, FaultInput, FaultOutcome, PageFaultOutcome},
     iomap::{
         DeviceRegion, DeviceRegionIter, IoMapError, device_regions, iomap_device, iounmap,
         register_device_region, register_fixed_device_region,
     },
+    kernel_aspace::{KernelAddressSpace, KernelMapping},
     lifetime::MmObserver,
     vma::{
         FileMappingInfo, ForkCloneTarget, MsyncPolicy, MsyncRuntimeResult, VmArea, VmAreaSet,
@@ -61,7 +66,7 @@ pub mod process_lifetime {
 /// Protected by `SpinNoIrq`: while the lock is held the current CPU's IRQs
 /// are disabled, so IRQ-handler paths never re-enter the lock on the same
 /// CPU. `vmalloc` additionally orders `VMALLOC` before this lock.
-static KERNEL_ASPACE: LazyInit<SpinNoIrq<MmSpace>> = LazyInit::new();
+static KERNEL_ASPACE: LazyInit<SpinNoIrq<KernelAddressSpace>> = LazyInit::new();
 
 fn mem_to_mapping_flags(f: MemFlags) -> MappingFlags {
     let mut flags = MappingFlags::empty();
@@ -83,7 +88,7 @@ fn mem_to_mapping_flags(f: MemFlags) -> MappingFlags {
     flags
 }
 
-fn map_memory_region(vmspace: &mut MmSpace, region: MemoryRegion) -> LinuxResult<()> {
+fn map_memory_region(vmspace: &mut KernelAddressSpace, region: MemoryRegion) -> LinuxResult<()> {
     let start = region.paddr.align_down_4k();
     let end = (region.paddr + region.size).align_up_4k();
     let target_va = match region.vaddr {
@@ -100,9 +105,11 @@ fn map_memory_region(vmspace: &mut MmSpace, region: MemoryRegion) -> LinuxResult
 }
 
 /// Creates a new address space for kernel itself.
-pub fn new_kernel_layout() -> LinuxResult<MmSpace> {
-    let mut vmspace =
-        MmSpace::new_empty_kernel(va!(KERNEL_ASPACE_BASE as _), KERNEL_ASPACE_SIZE as _)?;
+pub fn new_kernel_layout() -> LinuxResult<KernelAddressSpace> {
+    let mut vmspace = KernelAddressSpace::new_empty_kernel(
+        va!(KERNEL_ASPACE_BASE as _),
+        KERNEL_ASPACE_SIZE as _,
+    )?;
     for region in memory_regions() {
         map_memory_region(&mut vmspace, region)?;
     }
@@ -119,16 +126,27 @@ pub fn new_kernel_layout() -> LinuxResult<MmSpace> {
 /// # Locking contract
 ///
 /// The lock is `SpinNoIrq` (IRQs disabled while held). It is a low-level
-/// kernel-space lock: user address spaces have their own per-`MmSpace`
+/// kernel-space lock: user address spaces have their own per-`UserMmSpace`
 /// locks. `vmalloc` holds `VMALLOC` before this lock; no path takes them in
 /// the opposite order.
-pub fn kernel_layout() -> &'static SpinNoIrq<MmSpace> {
+pub fn kernel_layout() -> &'static SpinNoIrq<KernelAddressSpace> {
     &KERNEL_ASPACE
 }
 
 /// Returns the root physical address of the kernel page table.
 pub fn kernel_page_table_root() -> PhysAddr {
     KERNEL_ASPACE.lock().page_table_root()
+}
+
+/// Flushes a translation from every CPU using the shared kernel page table.
+///
+/// Kernel address-space mutation methods commit with `finish_no_flush()` so
+/// callers can release `KERNEL_ASPACE` before issuing the synchronous remote
+/// shootdown.  The local flush is always performed; the IPI backend suppresses
+/// remote delivery until secondary CPUs are ready during early boot.
+pub fn flush_kernel_tlb(vaddr: Option<memaddr::VirtAddr>) {
+    karch::flush_tlb(vaddr);
+    kipi::tlb::flush_all_cpus(vaddr);
 }
 
 /// Initializes virtual memory management.

@@ -189,7 +189,7 @@ impl ProcessRuntime {
         process: Arc<Process>,
         exe_path: String,
         cmdline: Arc<Vec<String>>,
-        address_space: Arc<Mutex<memspace::MmSpace>>,
+        address_space: Arc<Mutex<memspace::UserMmSpace>>,
         fs_context: Arc<Mutex<FsStruct>>,
         signal_actions: Arc<SpinNoIrq<SignalActions>>,
         config: ProcessRuntimeConfig,
@@ -213,13 +213,13 @@ impl ProcessRuntime {
         process: Arc<Process>,
         exe_path: String,
         cmdline: Arc<Vec<String>>,
-        address_space: Arc<Mutex<memspace::MmSpace>>,
+        address_space: Arc<Mutex<memspace::UserMmSpace>>,
         fs_context: Arc<Mutex<FsStruct>>,
         signal_actions: Arc<SpinNoIrq<SignalActions>>,
         config: ProcessRuntimeConfig,
         nsproxy: Arc<NsProxy>,
     ) -> Arc<Self> {
-        let mm_user = memspace::MmSpace::acquire_user(address_space)
+        let mm_user = memspace::UserMmSpace::acquire_user(address_space)
             .expect("new process runtime requires a live user address space");
         Self::new_with_nsproxy_and_mm_user(
             process,
@@ -346,7 +346,7 @@ impl ProcessRuntime {
     #[cfg(unittest)]
     pub(crate) fn pinned_address_space_for_teardown_observation(
         &self,
-    ) -> &Arc<Mutex<memspace::MmSpace>> {
+    ) -> &Arc<Mutex<memspace::UserMmSpace>> {
         self.runtime_state.pinned_address_space()
     }
 
@@ -518,7 +518,7 @@ fn prepare_fork_address_space(
     } else {
         let mut aspace = parent_mm_user.address_space().lock();
         let address_space = aspace.try_clone()?;
-        memspace::MmSpace::acquire_user(address_space).ok_or(KError::NoSuchProcess)?
+        memspace::UserMmSpace::acquire_user(address_space).ok_or(KError::NoSuchProcess)?
     };
 
     Ok(ForkAddressSpaceState { mm_user })

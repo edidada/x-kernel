@@ -262,7 +262,7 @@ fn build_prepared_test_user_task() -> (Arc<Process>, TaskInner) {
     let pid = task_number.root_nr();
     let process = parent.fork_with_task_number(task_number.clone(), Some(ksignal::Signo::SIGCHLD));
 
-    let mut aspace = memspace::MmSpace::new_user_empty().expect("user mmspace should allocate");
+    let mut aspace = memspace::UserMmSpace::new_user_empty().expect("user mmspace should allocate");
     ksignal::map_signal_trampoline(&mut aspace).expect("signal trampoline should map");
     let address_space = Arc::new(ksync::Mutex::new(aspace));
     let fs_context = fs_context::copy_init_fs_struct();
@@ -288,7 +288,7 @@ fn build_prepared_test_user_task() -> (Arc<Process>, TaskInner) {
 
 fn publish_test_thread(process: &Arc<Process>, tid: crate::Tid) -> ktask::KtaskRef {
     let task_number = kidentity::PidHandle::fixed_root(tid);
-    let mut aspace = memspace::MmSpace::new_user_empty().expect("user mmspace should allocate");
+    let mut aspace = memspace::UserMmSpace::new_user_empty().expect("user mmspace should allocate");
     ksignal::map_signal_trampoline(&mut aspace).expect("signal trampoline should map");
     let address_space = Arc::new(ksync::Mutex::new(aspace));
     let fs_context = fs_context::copy_init_fs_struct();
@@ -314,9 +314,9 @@ fn publish_test_thread(process: &Arc<Process>, tid: crate::Tid) -> ktask::KtaskR
     task
 }
 
-fn mapped_test_address_space() -> Arc<ksync::Mutex<memspace::MmSpace>> {
+fn mapped_test_address_space() -> Arc<ksync::Mutex<memspace::UserMmSpace>> {
     let start = VirtAddr::from_usize(0x4000);
-    let mut aspace = memspace::MmSpace::new_empty_user(start, PAGE_SIZE_4K * 4)
+    let mut aspace = memspace::UserMmSpace::new_empty_user(start, PAGE_SIZE_4K * 4)
         .expect("user mmspace should allocate");
     aspace
         .map(
@@ -332,7 +332,7 @@ fn mapped_test_address_space() -> Arc<ksync::Mutex<memspace::MmSpace>> {
 
 fn process_with_address_space(
     pid: crate::Pid,
-    address_space: Arc<ksync::Mutex<memspace::MmSpace>>,
+    address_space: Arc<ksync::Mutex<memspace::UserMmSpace>>,
 ) -> (Arc<Process>, TaskInner) {
     let parent = ensure_init();
     let task_number = kidentity::PidHandle::fixed_root(pid);
@@ -1740,7 +1740,7 @@ fn test_prepare_user_task_rejects_mismatched_task_and_thread_identity() {
     let mismatched_number =
         kidentity::allocate_root_pid_handle().expect("mismatched identity should allocate");
     let process = Process::new_init_with_task_number(task_number.clone());
-    let mut aspace = memspace::MmSpace::new_user_empty().expect("user mmspace should allocate");
+    let mut aspace = memspace::UserMmSpace::new_user_empty().expect("user mmspace should allocate");
     ksignal::map_signal_trampoline(&mut aspace).expect("signal trampoline should map");
 
     let thread = build_process_thread(

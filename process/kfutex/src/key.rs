@@ -6,7 +6,7 @@ use core::mem::size_of;
 
 use kerrno::{KError, KResult};
 use kuaccess::check_access;
-use memspace::{FutexBacking, MmSpace, VmObjectId};
+use memspace::{FutexBacking, UserMmSpace, VmObjectId};
 
 /// Stable identity of one Linux futex word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -46,7 +46,7 @@ impl FutexKey {
     ///
     /// Prefer [`Self::resolve_private`] on the private path when the caller
     /// already has `mm_id` and does not hold the address-space lock.
-    pub fn resolve(aspace: &MmSpace, address: usize, is_private: bool) -> KResult<Self> {
+    pub fn resolve(aspace: &UserMmSpace, address: usize, is_private: bool) -> KResult<Self> {
         if is_private {
             return Self::resolve_private(aspace.mm_id(), address);
         }

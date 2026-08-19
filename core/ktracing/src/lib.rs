@@ -239,10 +239,10 @@ impl KernelTraceOps for Kops {
         let start_va = VirtAddr::from(start);
         let old_flags = {
             let layout = memspace::kernel_layout().lock();
-            let Some(vma) = layout.find_vma(start_va) else {
+            let Some(mapping) = layout.find_mapping(start_va) else {
                 return;
             };
-            vma.flags()
+            mapping.flags()
         };
 
         // static-keys patches instructions in kernel text, which is normally RX.
@@ -256,6 +256,7 @@ impl KernelTraceOps for Kops {
                 return;
             }
         }
+        memspace::flush_kernel_tlb(None);
 
         // SAFETY: the destination range is the kernel text range selected by
         // the static-key patching caller. The page range has been temporarily
@@ -267,6 +268,7 @@ impl KernelTraceOps for Kops {
             let mut layout = memspace::kernel_layout().lock();
             let _ = layout.protect(start_va, span, old_flags);
         }
+        memspace::flush_kernel_tlb(None);
 
         karch::flush_icache_range(VirtAddr::from(addr), data.len());
     }

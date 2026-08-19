@@ -44,7 +44,7 @@ use lazyinit::LazyInit;
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 use page_table::PageSize;
 
-use crate::{aspace::MmSpace, kernel_layout};
+use crate::{kernel_aspace::KernelAddressSpace, kernel_layout};
 
 /// An allocated virtual region. The caller owns it until it is passed back
 /// to [`free`].
@@ -226,7 +226,7 @@ pub fn free(region: VmRegion, guard_pages: usize, pages: Vec<usize>) {
 /// inside the same transaction and every page stays in `dm_vas` so the caller
 /// can return them to the allocator.
 fn map_pages(
-    aspace: &mut MmSpace,
+    aspace: &mut KernelAddressSpace,
     va: VirtAddr,
     guard: usize,
     flags: MappingFlags,

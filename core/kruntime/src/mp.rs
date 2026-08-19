@@ -372,8 +372,8 @@ mod tests_tlb_shootdown {
     /// Test G: Proves that kernel page table TLB shootdown reaches ALL
     /// online CPUs, regardless of the current task's CPU residency mask.
     ///
-    /// Kernel page table modifications (is_kernel=true) go through
-    /// `flush_all_cpus()`, which builds a full CPU mask via
+    /// Mutations of the global `KernelAddressSpace` go through the explicit
+    /// full shootdown below, which builds a CPU mask via
     /// `for_each_present_logical_cpu()`. Every online CPU receives a
     /// shootdown IPI regardless of user-mm residency targeting.
     ///
@@ -491,11 +491,10 @@ mod tests_tlb_shootdown {
             // must see the new mapping.  We assert the CORRECT behavior:
             // the remote CPU should read MAGIC_B (P2's content).
             //
-            // Kernel page table modifications (is_kernel=true) go through
-            // `flush_all_cpus()`, which builds a full CPU mask via
-            // `for_each_present_logical_cpu()`.  Every online CPU — including
-            // the remote CPU — receives a shootdown IPI, so this assertion
-            // PASSES on all architectures.
+            // Global kernel-page-table modifications use `flush_all_cpus()`,
+            // which builds a full CPU mask via `for_each_present_logical_cpu()`.
+            // Every online CPU — including the remote CPU — receives a
+            // shootdown IPI, so this assertion PASSES on all architectures.
             REMOTE_READ_G.store(0, Ordering::Relaxed);
             kipi::run_on_cpu(remote_cpu, move || {
                 // SAFETY: test_vaddr is remapped read/write to p2 in the kernel page table

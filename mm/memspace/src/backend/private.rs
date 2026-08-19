@@ -24,7 +24,8 @@ use vmobj::{
 
 use super::{alloc_frame, dealloc_frame, map_paging_err, pages_in};
 use crate::{
-    FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, VmArea, VmBackingInfo, VmBackingKind,
+    FaultContext, ForkCloneTarget, InvalidateHandle, UserMmSpace, VmArea, VmBackingInfo,
+    VmBackingKind,
     backend::{BackendOps, FaultCompletion, FaultCompletionResult},
     vma::VmRuntimeOps,
 };
@@ -118,7 +119,7 @@ impl PrivateBackend {
         flags: MappingFlags,
         old_pgtbl: &mut PageTableMut,
         new_pgtbl: &mut PageTableMut,
-        _new_aspace: &Arc<Mutex<MmSpace>>,
+        _new_aspace: &Arc<Mutex<UserMmSpace>>,
         _invalidate: Option<InvalidateHandle>,
     ) -> KResult<Self> {
         let child = self.object.fork_child();
@@ -312,7 +313,7 @@ impl VmRuntimeOps for PrivateBackend {
         &self,
         new_start: VirtAddr,
         _new_mm_id: u64,
-        _aspace: &Arc<Mutex<MmSpace>>,
+        _aspace: &Arc<Mutex<UserMmSpace>>,
         _invalidate: Option<InvalidateHandle>,
     ) -> KResult<Arc<dyn VmRuntimeOps>> {
         Ok(Arc::new(self.relocated(new_start)))

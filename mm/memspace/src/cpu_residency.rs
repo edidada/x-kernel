@@ -11,7 +11,7 @@ use kspin::SpinNoPreempt;
 
 /// CPUs that may still hold valid TLB state for one address space.
 ///
-/// This mask is owned by `MmSpace` rather than individual tasks. Non-AArch64
+/// This mask is owned by `UserMmSpace` rather than individual tasks. Non-AArch64
 /// user-page-table shootdown uses it as a conservative target set: extra CPUs
 /// are acceptable, but missing a CPU that may still retain stale translations
 /// is not.

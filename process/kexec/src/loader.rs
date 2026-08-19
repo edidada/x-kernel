@@ -15,7 +15,7 @@ use khal::paging::{MappingFlags, PageSize};
 use ksync::{Mutex, static_lock};
 use kvfs::{Filename, LookupFlags, LookupIntent, Path, Permission, VfsFile, dentry_open};
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
-use memspace::{MmSpace, VmRuntimeRef};
+use memspace::{UserMmSpace, VmRuntimeRef};
 use ouroboros::self_referencing;
 
 use super::lru_cache::LruCache;
@@ -224,7 +224,7 @@ struct PreparedExecImage {
 }
 
 fn map_elf<'a>(
-    uspace: &mut MmSpace,
+    uspace: &mut UserMmSpace,
     base: usize,
     entry: &'a ElfCacheEntry,
 ) -> KResult<ELFParser<'a>> {
@@ -421,7 +421,7 @@ impl ElfLoader {
 
     fn commit_prepared_binprm(
         &mut self,
-        uspace: &mut MmSpace,
+        uspace: &mut UserMmSpace,
         prepared: &PreparedExecImage,
     ) -> KResult<(VirtAddr, Vec<AuxEntry>)> {
         // Point of no return: from here on the old user image is discarded and
@@ -472,7 +472,7 @@ pub fn clear_elf_cache() {
 /// This is the exec-facing entry point when the caller has already resolved
 /// the executable location, for example through a procfs magic link.
 pub fn load_user_app_request(
-    uspace: &mut MmSpace,
+    uspace: &mut UserMmSpace,
     request: ExecRequest,
 ) -> KResult<(VirtAddr, VirtAddr)> {
     load_user_app_request_inner(uspace, request, 0)
@@ -488,7 +488,7 @@ fn script_interpreter_args(line: &str, script_path: &str, original_args: &[Strin
 }
 
 fn load_user_app_request_inner(
-    uspace: &mut MmSpace,
+    uspace: &mut UserMmSpace,
     request: ExecRequest,
     mut script_depth: usize,
 ) -> KResult<(VirtAddr, VirtAddr)> {

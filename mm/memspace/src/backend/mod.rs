@@ -19,7 +19,7 @@ pub mod shared;
 pub use private::{PrivateBackend, private_anon_invalidate_notifier};
 pub use shared::SharedPages;
 
-use crate::{FaultContext, MmSpace, vma::VmBackingInfo};
+use crate::{FaultContext, UserMmSpace, vma::VmBackingInfo};
 
 #[doc(hidden)]
 pub fn divide_page(size: usize, pgsize: PageSize) -> usize {
@@ -59,12 +59,13 @@ pub fn pages_in(range: VirtAddrRange, align: PageSize) -> KResult<DynPageIter<Vi
     DynPageIter::new(range.start, range.end, align as usize).ok_or(KError::InvalidInput)
 }
 
+/// Converts page-table errors for backend users outside `memspace`.
+///
+/// Keep this compatibility entry point in the backend module while the
+/// implementation itself lives in the neutral [`crate::paging`] helper.
 #[doc(hidden)]
 pub fn map_paging_err(err: PagingError) -> KError {
-    match err {
-        PagingError::NoMemory => KError::NoMemory,
-        _ => KError::InvalidInput,
-    }
+    crate::paging::map_paging_err(err)
 }
 
 pub trait BackendOps {
@@ -124,7 +125,7 @@ pub trait BackendOps {
     }
 }
 
-type PopulateHook = Box<dyn FnOnce(&mut MmSpace)>;
+type PopulateHook = Box<dyn FnOnce(&mut UserMmSpace)>;
 pub(crate) type PopulateResult = KResult<(usize, Option<PopulateHook>)>;
 
 /// Fault-completion payload returned by backends.

@@ -18,7 +18,7 @@ use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, VirtAddrRange, is_aligned_4k};
 use vmobj::VmObjectId;
 
 use crate::{
-    FaultContext, InvalidateHandle, MmSpace, PageFaultOutcome,
+    FaultContext, InvalidateHandle, PageFaultOutcome, UserMmSpace,
     backend::{
         FaultCompletionResult,
         linear::LinearBackend,
@@ -70,7 +70,7 @@ pub trait VmRuntimeOps: Send + Sync {
         &self,
         new_start: VirtAddr,
         new_mm_id: u64,
-        aspace: &Arc<Mutex<MmSpace>>,
+        aspace: &Arc<Mutex<UserMmSpace>>,
         invalidate: Option<InvalidateHandle>,
     ) -> KResult<Arc<dyn VmRuntimeOps>>;
     fn clone_for_fork(
@@ -85,7 +85,7 @@ pub trait VmRuntimeOps: Send + Sync {
 
 pub struct ForkCloneTarget<'a> {
     pub new_mm_id: u64,
-    pub new_aspace: &'a Arc<Mutex<MmSpace>>,
+    pub new_aspace: &'a Arc<Mutex<UserMmSpace>>,
     pub invalidate: Option<InvalidateHandle>,
 }
 
@@ -145,7 +145,7 @@ pub enum MsyncRuntimeResult {
 /// Lightweight runtime execution reference attached to a VMA instance.
 ///
 /// This is not an object-identity handle like `VmObjectId`; it only carries
-/// the VMA-side execution helper used by `MmSpace` for map, protect, unmap,
+/// the VMA-side execution helper used by `UserMmSpace` for map, protect, unmap,
 /// fault, fork clone, and mremap relocation.
 #[derive(Clone)]
 pub enum VmRuntimeRef {
@@ -337,7 +337,7 @@ impl VmRuntimeRef {
         &self,
         new_start: VirtAddr,
         new_mm_id: u64,
-        aspace: &Arc<Mutex<MmSpace>>,
+        aspace: &Arc<Mutex<UserMmSpace>>,
         invalidate: Option<InvalidateHandle>,
     ) -> KResult<Self> {
         match self {
@@ -793,7 +793,7 @@ impl VmArea {
     /// This mirrors Linux's `vm_area_struct` role: the VMA selects the high-
     /// level fault policy before the backing-specific implementation
     /// materializes pages.
-    pub fn handle_fault(&self, aspace: &mut MmSpace, ctx: FaultContext) -> PageFaultOutcome {
+    pub fn handle_fault(&self, aspace: &mut UserMmSpace, ctx: FaultContext) -> PageFaultOutcome {
         let page_base = ctx.address().align_down(self.backing.page_size());
         let ctx = ctx.with_backing(
             Some(self.page_index_for(ctx.address())),

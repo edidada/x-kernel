@@ -11,7 +11,7 @@ use kvfs::{FMode, VfsFile};
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 use memfs::shmem;
 use memspace::{
-    FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, MsyncPolicy, MsyncRuntimeResult,
+    FaultContext, ForkCloneTarget, InvalidateHandle, MsyncPolicy, MsyncRuntimeResult, UserMmSpace,
     VmArea, VmBackingInfo, VmBackingKind, VmRuntimeOps, VmRuntimeRef,
     backend::{FaultCompletion, FaultCompletionResult, map_paging_err, pages_in},
 };
@@ -188,7 +188,7 @@ impl FileSharedRuntime {
         &self,
         new_start: VirtAddr,
         new_mm_id: u64,
-        new_aspace: &Arc<Mutex<MmSpace>>,
+        new_aspace: &Arc<Mutex<UserMmSpace>>,
         invalidate: Option<InvalidateHandle>,
     ) -> Arc<Self> {
         let invalidate =
@@ -395,7 +395,7 @@ impl VmRuntimeOps for FileSharedRuntime {
         &self,
         new_start: VirtAddr,
         new_mm_id: u64,
-        aspace: &Arc<Mutex<MmSpace>>,
+        aspace: &Arc<Mutex<UserMmSpace>>,
         invalidate: Option<InvalidateHandle>,
     ) -> KResult<Arc<dyn VmRuntimeOps>> {
         Ok(self.cloned_runtime(new_start, new_mm_id, aspace, invalidate))

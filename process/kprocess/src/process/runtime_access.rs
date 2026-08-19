@@ -19,7 +19,7 @@ use ktime_types::TimeSpan;
 use ktimer::{PosixTimerCreateNotify, TimerDelivery};
 use memaddr::VirtAddr;
 use memspace::{
-    InvalidateHandle, MmObserver, MmSpace, MremapSource, process_lifetime::MmUserHandle,
+    InvalidateHandle, MmObserver, MremapSource, UserMmSpace, process_lifetime::MmUserHandle,
 };
 use posix_types::ITimerType;
 
@@ -29,7 +29,7 @@ use crate::{AsThread, ProcessRuntime};
 /// Live address-space capability.
 ///
 /// Holding this value keeps the process mm user alive, so the returned
-/// `MmSpace` cannot be torn down by process exit until the capability is
+/// `UserMmSpace` cannot be torn down by process exit until the capability is
 /// dropped.
 pub struct LiveAddressSpace {
     mm_user: MmUserHandle,
@@ -41,7 +41,7 @@ impl LiveAddressSpace {
     }
 
     /// Locks the live address space.
-    pub fn lock(&self) -> MutexGuard<'_, MmSpace> {
+    pub fn lock(&self) -> MutexGuard<'_, UserMmSpace> {
         self.mm_user.address_space().lock()
     }
 
@@ -58,18 +58,18 @@ impl LiveAddressSpace {
 
 /// Mapping guard available only while a live address-space capability is held.
 pub struct LiveAddressSpaceMappingGuard<'a> {
-    owner: &'a Arc<Mutex<MmSpace>>,
-    guard: MutexGuard<'a, MmSpace>,
+    owner: &'a Arc<Mutex<UserMmSpace>>,
+    guard: MutexGuard<'a, UserMmSpace>,
 }
 
 impl LiveAddressSpaceMappingGuard<'_> {
     /// Returns the guarded address space.
-    pub fn aspace(&self) -> &MmSpace {
+    pub fn aspace(&self) -> &UserMmSpace {
         &self.guard
     }
 
     /// Returns the guarded address space for mutation.
-    pub fn aspace_mut(&mut self) -> &mut MmSpace {
+    pub fn aspace_mut(&mut self) -> &mut UserMmSpace {
         &mut self.guard
     }
 
@@ -188,7 +188,7 @@ impl Process {
     #[cfg(unittest)]
     pub(crate) fn pinned_address_space_for_teardown_observation(
         &self,
-    ) -> KResult<Arc<Mutex<MmSpace>>> {
+    ) -> KResult<Arc<Mutex<UserMmSpace>>> {
         self.runtime().map(|runtime| {
             runtime
                 .pinned_address_space_for_teardown_observation()

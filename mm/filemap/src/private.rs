@@ -15,8 +15,8 @@ use ksync::Mutex;
 use kvfs::{AddressSpaceViewGuard, VfsFile};
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr, VirtAddrRange};
 use memspace::{
-    FaultContext, ForkCloneTarget, InvalidateHandle, MmObserver, MmSpace, VmArea, VmBackingInfo,
-    VmBackingKind, VmRuntimeOps, VmRuntimeRef,
+    FaultContext, ForkCloneTarget, InvalidateHandle, MmObserver, UserMmSpace, VmArea,
+    VmBackingInfo, VmBackingKind, VmRuntimeOps, VmRuntimeRef,
     backend::{
         FaultCompletion, FaultCompletionResult, alloc_frame, dealloc_frame,
         private::{
@@ -421,7 +421,7 @@ impl VmRuntimeOps for FilePrivateRuntime {
         &self,
         new_start: VirtAddr,
         new_mm_id: u64,
-        aspace: &Arc<Mutex<MmSpace>>,
+        aspace: &Arc<Mutex<UserMmSpace>>,
         invalidate: Option<InvalidateHandle>,
     ) -> KResult<Arc<dyn VmRuntimeOps>> {
         let observer = MmObserver::new(aspace);

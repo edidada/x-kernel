@@ -42,6 +42,10 @@ enum RegionRefs {
     Pinned,
     /// Runtime `iomap_device` mapping with an active reference count.
     Counted(usize),
+    /// Last reference is being torn down.  Keep the registry entry visible so
+    /// concurrent callers cannot acquire a mapping whose PTEs are being
+    /// removed or publish a duplicate entry for the same physical interval.
+    Removing,
 }
 
 /// Internal registry entry pairing a region with its lifetime policy.
@@ -121,7 +125,9 @@ pub fn iomap_device(
         .align_up_4k();
     let span = end.sub_addr(start);
 
-    if let Some(vaddr) = acquire_mapping_locked(&mut DEVICE_REGISTRY.lock(), start, span) {
+    if let Some(vaddr) = acquire_mapping_locked(&mut DEVICE_REGISTRY.lock(), start, span)
+        .map_err(|_| IoMapError::MappingFailed)?
+    {
         return Ok(vaddr + paddr.align_offset_4k());
     }
 
@@ -130,7 +136,9 @@ pub fn iomap_device(
     let mut kernel_aspace = kernel_layout().lock();
     let mut regions = DEVICE_REGISTRY.lock();
 
-    if let Some(vaddr) = acquire_mapping_locked(&mut regions, start, span) {
+    if let Some(vaddr) =
+        acquire_mapping_locked(&mut regions, start, span).map_err(|_| IoMapError::MappingFailed)?
+    {
         return Ok(vaddr + paddr.align_offset_4k());
     }
 
@@ -140,6 +148,11 @@ pub fn iomap_device(
         .find_free_area(hint, span, limit, memaddr::PAGE_SIZE_4K)
         .ok_or(IoMapError::NoMemory)?;
 
+    // Reserve the registry slot before changing the page table.  This keeps
+    // the failure path transactional: an allocation failure here cannot leave
+    // a live PTE with no corresponding registry entry.
+    regions.try_reserve(1).map_err(|_| IoMapError::NoMemory)?;
+
     kernel_aspace
         .map_linear(
             mapped_start,
@@ -148,11 +161,9 @@ pub fn iomap_device(
             MappingFlags::READ | MappingFlags::WRITE | MappingFlags::DEVICE,
         )
         .map_err(|_| IoMapError::MappingFailed)?;
-    // TLB shootdown is already handled by `PageTableMut::finish()`:
-    // `map_linear` → `Backend::map` → `pgtbl.modify()` creates a
-    // `PageTableMut`, whose `Drop` calls `finish()` →
-    // `flush_tlb_all_cpus()` (kernel page table), which does a local
-    // flush + IPI broadcast to all online CPUs.
+    // A newly allocated interval has no stale TLB entry.  `map_linear`
+    // commits with `finish_no_flush()` so this lock can never be held across
+    // a synchronous shootdown.
 
     let region = DeviceRegion {
         paddr: start,
@@ -160,7 +171,6 @@ pub fn iomap_device(
         name,
         vaddr: Some(mapped_start),
     };
-    regions.try_reserve(1).map_err(|_| IoMapError::NoMemory)?;
     regions.push(RegionEntry {
         region,
         refs: RegionRefs::Counted(1),
@@ -195,18 +205,45 @@ pub fn iounmap(vaddr: VirtAddr) -> Result<(), IoMapError> {
         return Ok(());
     }
 
-    let entry = regions.swap_remove(index);
+    let entry = regions[index];
     let Some(base) = entry.region.vaddr else {
         return Ok(());
     };
+    regions[index].refs = RegionRefs::Removing;
     drop(regions);
 
+    let unmap_result = {
+        let mut layout = kernel_layout().lock();
+        layout.unmap_no_release(base, entry.region.size)
+    };
+    if unmap_result.is_err() {
+        // Restore the reference on a failed page-table teardown.  The
+        // mapping remains live, so dropping the registry entry would lose
+        // ownership of its VA and make a later retry impossible.
+        if let Some(current) = DEVICE_REGISTRY
+            .lock()
+            .iter_mut()
+            .find(|candidate| candidate.region == entry.region)
+        {
+            current.refs = RegionRefs::Counted(1);
+        }
+        return Err(IoMapError::MappingFailed);
+    }
+
+    // The interval remains reserved in `KernelAddressSpace` until every CPU
+    // has discarded the old translation.  This mirrors vmalloc's release
+    // ordering and prevents a racing iomap from reusing a stale VA.
+    crate::flush_kernel_tlb(None);
     kernel_layout()
         .lock()
-        .unmap(base, entry.region.size)
+        .release_mapping(base, entry.region.size)
         .map_err(|_| IoMapError::MappingFailed)?;
-    // TLB shootdown already handled by `PageTableMut::finish()` via
-    // `MmSpace::unmap` → `Backend::unmap` → `pgtbl.modify()` → `Drop`.
+    let mut regions = DEVICE_REGISTRY.lock();
+    if let Some(index) = regions.iter().position(|candidate| {
+        candidate.region == entry.region && matches!(candidate.refs, RegionRefs::Removing)
+    }) {
+        regions.swap_remove(index);
+    }
     Ok(())
 }
 
@@ -229,24 +266,38 @@ fn register_region(region: DeviceRegion) -> Result<(), IoMapError> {
 }
 
 /// Find a registered mapping that covers `[paddr, paddr + size)` and, when it is
-/// a runtime reference-counted mapping, take an additional reference.
+/// a runtime reference-counted mapping, take an additional reference. `Err(())`
+/// means that the matching entry is in the `Removing` state; callers must not
+/// publish a second mapping until that teardown completes.
 fn acquire_mapping_locked(
     regions: &mut [RegionEntry],
     paddr: PhysAddr,
     size: usize,
-) -> Option<VirtAddr> {
-    let req_end = paddr.checked_add(size)?;
+) -> Result<Option<VirtAddr>, ()> {
+    let Some(req_end) = paddr.checked_add(size) else {
+        return Ok(None);
+    };
     let index = regions.iter().position(|entry| {
         let Some(region_end) = entry.region.paddr.checked_add(entry.region.size) else {
             return false;
         };
         entry.region.vaddr.is_some() && entry.region.paddr <= paddr && region_end >= req_end
-    })?;
+    });
+    let Some(index) = index else {
+        return Ok(None);
+    };
 
     let entry = &mut regions[index];
-    let mapped_start = entry.region.vaddr?;
-    if let RegionRefs::Counted(count) = entry.refs {
-        entry.refs = RegionRefs::Counted(count + 1);
+    let Some(mapped_start) = entry.region.vaddr else {
+        return Ok(None);
+    };
+    match entry.refs {
+        RegionRefs::Counted(count) => entry.refs = RegionRefs::Counted(count + 1),
+        RegionRefs::Pinned => {}
+        // Do not create a second mapping for the same physical interval while
+        // the last reference is being torn down.  The caller can retry after
+        // the removal completes.
+        RegionRefs::Removing => return Err(()),
     }
-    Some(mapped_start + paddr.sub_addr(entry.region.paddr))
+    Ok(Some(mapped_start + paddr.sub_addr(entry.region.paddr)))
 }

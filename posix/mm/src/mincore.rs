@@ -38,7 +38,7 @@ impl ResidencyQuery {
     }
 }
 
-fn ensure_user_accessible_area(aspace: &memspace::MmSpace, addr: VirtAddr) -> KResult<()> {
+fn ensure_user_accessible_area(aspace: &memspace::UserMmSpace, addr: VirtAddr) -> KResult<()> {
     let vma = aspace.find_vma(addr).ok_or(KError::NoMemory)?;
     if !vma.flags().contains(MappingFlags::USER) {
         return Err(KError::NoMemory);

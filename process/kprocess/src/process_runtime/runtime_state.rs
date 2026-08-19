@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use ksync::Mutex;
 use ktimer::ProcessTimerManager;
 #[cfg(unittest)]
-use memspace::MmSpace;
+use memspace::UserMmSpace;
 use memspace::{
     MmCpuResidencyRef,
     process_lifetime::{MmPin, MmUserHandle},
@@ -77,7 +77,7 @@ impl ProcessRuntimeState {
 
     /// Returns the pinned address-space object for stable observation.
     #[cfg(unittest)]
-    pub(super) fn pinned_address_space(&self) -> &Arc<Mutex<MmSpace>> {
+    pub(super) fn pinned_address_space(&self) -> &Arc<Mutex<UserMmSpace>> {
         self._mm_pin.address_space()
     }
 

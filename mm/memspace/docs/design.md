@@ -1,8 +1,14 @@
 # memspace — 设计文档
 ## 定位
 
-`memspace` 是 X-Kernel 的地址空间 owner。它维护 `MmSpace`、`VmAreaSet`、
-`VmArea`、页表根和 VMA-side runtime dispatch。
+`memspace` 是 X-Kernel 的地址空间 owner。它把用户和内核地址空间分成两个
+明确的 owner：`UserMmSpace` 维护 `VmAreaSet`、用户页表和 VMA-side runtime
+dispatch；`KernelAddressSpace` 维护全局内核页表和轻量的
+`KernelMappingSet`（仅记录内核 VA 区间及当前 PTE flags）。
+
+`MmSpace` / `AddrSpace` 仍是 `UserMmSpace` 的兼容别名。内核映射不再伪装成
+`VmArea`：`iomap` 使用 `KernelMappingSet`，`vmalloc` 使用自己的区间表，
+对应 Linux 的 `vmap_area` 角色。
 
 它不拥有 file-backed cached content，也不拥有 anonymous page content。
 内容对象分别由 `kvfs::AddressSpace` 和 `mm/anon` 管理；`memspace` 只保存
@@ -19,15 +25,17 @@ VMA metadata、运行时执行引用和页表状态。
   执行入口，角色接近 Linux `vm_operations_struct`。
 - `MmUserHandle` / `MmPin`：地址空间生命周期 capability。`MmUserHandle`
   对应 Linux `mm_users`，表示仍有 runtime 或临时路径 active 使用用户映射；
-  `MmPin` 预留 Linux `mm_count` 风格对象 pin，只保证 `MmSpace` 对象和稳定
+  `MmPin` 预留 Linux `mm_count` 风格对象 pin，只保证 `UserMmSpace` 对象和稳定
   identity 可观察，不延长用户映射生命周期。
 
 Linux 对应关系：
 
-- `MmSpace` 对应 `mm_struct`。
+- `UserMmSpace`（旧名 `MmSpace`）对应 `mm_struct`。
 - `VmArea` 对应 `vm_area_struct`。
 - `VmRuntimeOps` 对应 VMA 侧 `vm_operations_struct`。
 - `VmBackingInfo` 描述 VMA 指向的 file/anon/linear backing object。
+- `KernelAddressSpace` 没有直接的一一对应结构体；它组合了 Linux 的全局
+  kernel page-table 状态和各动态区间分配器。
 
 ## 范围
 
@@ -36,6 +44,7 @@ Linux 对应关系：
 - `src/fault.rs`
 - `src/backend/*`
 - `src/iomap.rs`
+- `src/paging.rs`
 - `src/vmalloc.rs`
 - `src/kernel_stack.rs`
 
@@ -75,10 +84,16 @@ flush 完成前仍保留在 interval table，随后才重新获取 `VMALLOC` 锁
 无锁链表，IRQ 上下文不会取 `VMALLOC` 锁。
 死锁复盘见 `docs/issues/2026-08-17-tlb-shootdown-deadlock.md`。
 
+`iomap` 的 `DEVICE_REGISTRY` 只保护设备物理区间到 VA 的复用和引用计数。
+映射安装采用 `KERNEL_ASPACE` → `DEVICE_REGISTRY` 的短锁序；最后一次
+`iounmap` 先发布 `Removing` 状态并释放 registry 锁，再拆 PTE、执行全局
+TLB flush，最后重新获取两侧锁完成 metadata 回收，避免在 shootdown 期间让
+IPI 目标 CPU 等待 registry 锁。
+
 ## 架构
 
 ```text
-MmSpace
+UserMmSpace
   -> MmUserLifetime
   -> PageTable
   -> MmCpuResidency
@@ -95,13 +110,21 @@ MmSpace
 
 object owner
   -> vmobj::ObjectInvalidateRequest
-  -> MmSpace invalidate sink
+  -> UserMmSpace invalidate sink
   -> VMA lookup and runtime unmap
+
+KernelAddressSpace
+  -> kernel PageTable
+  -> paging error/transaction helpers
+  -> KernelMappingSet (static linear mappings + iomap)
+  -> iomap::DEVICE_REGISTRY (physical-device identity and refcounts)
+  -> vmalloc::VmallocState (separate vmap_area-like allocator)
 ```
 
 ## 调用约束 / 执行上下文
 
-- `MmSpace` 由外层 `Mutex` 或等价独占访问保护。
+- `UserMmSpace` 由外层 `Mutex` 或等价独占访问保护；全局
+  `KernelAddressSpace` 由 `SpinNoIrq` 保护。
 - map/unmap/protect/fault/fork/mremap 路径可能分配内存，运行于可睡眠上下文。
 - 不适用于中断上下文。
 - 调用者必须在 syscall、loader 或内核 VM 边界完成用户输入校验。
@@ -110,7 +133,7 @@ object owner
 
 ### VMA 查询
 
-1. `MmSpace::find_vma()` 在 `VmAreaSet` 中定位 VMA。
+1. `UserMmSpace::find_vma()` 在 `VmAreaSet` 中定位 VMA。
 2. `VmArea::backing()` 返回 `VmBackingInfo`。
 3. `VmArea::page_offset()` 表示 Linux `vm_pgoff` 风格的 backing page offset。
 4. `VmArea::file_mapping()` 返回 file-backed introspection metadata。
@@ -118,7 +141,7 @@ object owner
 
 ### Futex backing 解析
 
-`MmSpace::resolve_futex_backing()` 是 non-private futex key 的 MM 边界：
+`UserMmSpace::resolve_futex_backing()` 是 non-private futex key 的 MM 边界：
 
 - private VMA 返回 `(mm_id, virtual_address)`；
 - shared anon/file VMA 返回
@@ -132,7 +155,7 @@ object owner
 ### VMA 插入
 
 1. 调用方构造 `VmArea` 和对应 `VmRuntimeRef`。
-2. `MmSpace::map_runtime_vma()` 校验 VMA 范围和 runtime backing 一致性。
+2. `UserMmSpace::map_runtime_vma()` 校验 VMA 范围和 runtime backing 一致性。
 3. runtime 执行 eager map 或注册 lazy fault 入口。
 4. `VmAreaSet::try_insert()` 拒绝重叠 VMA。
 5. runtime 注册 file/anon object view 时使用当前 `mm_id` 和 `InvalidateHandle`。
@@ -169,7 +192,7 @@ Relocation may change the first two layers without destroying the third.
 
 ```text
 FaultInput
-  -> MmSpace::handle_fault_input()
+  -> UserMmSpace::handle_fault_input()
   -> VMA lookup
   -> permission check
   -> FaultContext with VMA-derived offsets
@@ -193,13 +216,13 @@ FaultInput
 kvfs::AddressSpace / anon object
   -> vmobj::ObjectInvalidateRequest
   -> InvalidateHandle
-  -> MmSpace invalidate sink
+  -> UserMmSpace invalidate sink
   -> drain_pending_invalidations()
   -> apply_invalidate_request()
   -> runtime.unmap()
 ```
 
-`MmSpace` 收到 object-side invalidate 后，重新按当前 VMA metadata 检查：
+`UserMmSpace` 收到 object-side invalidate 后，重新按当前 VMA metadata 检查：
 
 - object id 是否匹配；
 - shared/private view kind 是否匹配；
@@ -208,7 +231,7 @@ kvfs::AddressSpace / anon object
 
 匹配后只 zap present PTE，保留 VMA metadata。下一次 fault 重新按当前 object 状态裁决。
 
-若单个 request 应用失败，`MmSpace` 将其放回队列尾部并结束本轮 drain，避免同一边界无限重试。
+若单个 request 应用失败，`UserMmSpace` 将其放回队列尾部并结束本轮 drain，避免同一边界无限重试。
 
 ### Private anonymous discard / COW
 
@@ -222,7 +245,7 @@ kvfs::AddressSpace / anon object
 
 ### `msync`
 
-`MmSpace::msync_range()` owns Linux-style VMA range traversal for `msync`.
+`UserMmSpace::msync_range()` owns Linux-style VMA range traversal for `msync`.
 It records unmapped holes as `NoMemory` while still dispatching later mapped
 VMAs in the range.
 
@@ -235,7 +258,7 @@ and invalidate semantics are not represented yet.
 
 ### Protection Changes
 
-`MmSpace::protect_mapping_range()` separates VMA permission state from present
+`UserMmSpace::protect_mapping_range()` separates VMA permission state from present
 PTE flags. The requested flags are recorded in `VmAreaSet::protect()`, while
 `VmRuntimeOps::on_protect()` returns the effective PTE flags to install for
 already-present mappings.
@@ -246,7 +269,7 @@ dirty tracking.
 
 ### Fork
 
-1. 新建 child `MmSpace`。
+1. 新建 child `UserMmSpace`。
 2. 复制每个 `VmArea` metadata。
 3. shared runtime 共享 object identity。
 4. private runtime 通过 `AnonPrivateObject` lineage 和页表写保护形成 COW。
@@ -254,17 +277,17 @@ dirty tracking.
 
 ## 并发模型
 
-- `MmSpace` 由外层锁串行化。
-- `MmUserHandle` 的 user-count 状态转换不依赖 `MmSpace` 主锁；从裸
-  `Arc<Mutex<MmSpace>>` mint handle 时会短暂读取 mm-owned lifetime，最后一个
-  user 释放时会获取 `MmSpace` 主锁并执行 `clear()`。
+- `UserMmSpace` 由外层锁串行化。
+- `MmUserHandle` 的 user-count 状态转换不依赖 `UserMmSpace` 主锁；从裸
+  `Arc<Mutex<UserMmSpace>>` mint handle 时会短暂读取 mm-owned lifetime，最后一个
+  user 释放时会获取 `UserMmSpace` 主锁并执行 `clear()`。
 - `MmUserHandle::clone_user_unless_zero()` 与最后一个 user release 通过同一个原子
   状态转换互斥；一旦进入 torn-down 状态，后续 `MmPin` 不能再升级为 active user。
-- `MmCpuResidency` 由 `MmSpace` 拥有，用于记录“哪些 CPU 可能还保留该地址空间
+- `MmCpuResidency` 由 `UserMmSpace` 拥有，用于记录“哪些 CPU 可能还保留该地址空间
   的 TLB 状态”。调度切换路径在切入新 mm 前先 set CPU，硬件切换完成后再从旧 mm
   clear CPU，保证 shootdown 最多过度命中、不会漏掉目标 CPU。
 - `InvalidateSink` 使用 `SpinNoIrq` 保护短队列操作，不在该锁内执行 runtime
-  unmap 或获取 `MmSpace` 主锁。
+  unmap 或获取 `UserMmSpace` 主锁。
 - `PageTable::modify()` 提供页表独占修改 guard。
 - `VmAreaSet` 不暴露独立可变共享访问。
 - file/anon object 的内部并发由对应 object crate 自己维护。
@@ -292,7 +315,7 @@ dirty tracking.
    原因：file-backed 和 anonymous object 都需要同一套 object -> VMA view 语言。
 
 6. `msync` 使用 runtime hook 而不是 syscall 反查 pagecache。
-   原因：`MmSpace` owns VMA traversal, while `filemap` owns file-backed runtime
+   原因：`UserMmSpace` owns VMA traversal, while `filemap` owns file-backed runtime
    source state. This keeps syscall ABI, VMA dispatch, and content-object
    writeback in separate owner crates.
 
@@ -302,7 +325,7 @@ dirty tracking.
 
 ## Drop / 资源释放
 
-- `MmSpace::clear()` 通过 runtime unmap 清理全部 VMA 的 present PTE。
+- `UserMmSpace::clear()` 通过 runtime unmap 清理全部 VMA 的 present PTE。
 - `PageTableMut::finish()` 是释放 detached frames 前的 TLB finalization boundary。
 - `VmAreaSet` 清空后，VMA metadata 和 runtime references 一起释放。
 - File/anon object view guards 随 runtime/object 引用释放并注销 view。

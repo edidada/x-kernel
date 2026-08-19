@@ -2,7 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Address space implementation backed by VMA metadata and page tables.
+//! User address-space implementation backed by process VMAs and a page table.
+//!
+//! The global kernel page table lives in the sibling [`crate::kernel_aspace`]
+//! module; keeping that implementation separate prevents kernel mappings from
+//! acquiring userspace VMA semantics.
 use alloc::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Weak},
@@ -46,6 +50,7 @@ use crate::{
     VmBackingKind,
     backend::{FaultCompletionResult, map_paging_err, pages_in},
     cpu_residency::{MmCpuResidency, MmCpuResidencyRef},
+    kernel_aspace::KernelAddressSpace,
     lifetime::{MmUserHandle, MmUserLifetime},
     vma::VmRuntimeRef,
 };
@@ -53,7 +58,7 @@ use crate::{
 #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
 unsafe fn page_table_user_cpu_mask(ctx: NonNull<()>) -> kcpu_id_map::KCpuMask {
     // SAFETY: `ctx` is installed from `Arc::as_ref(&cpu_residency)` in
-    // `new_empty_inner()`. The `MmSpace` owns both the page table and the
+    // `new_empty_inner()`. The `UserMmSpace` owns both the page table and the
     // `Arc<MmCpuResidency>`, and the page table is dropped before the
     // residency field, so the pointee remains valid for the provider's
     // lifetime.
@@ -152,7 +157,7 @@ impl InvalidateSink {
 #[derive(Clone)]
 pub struct InvalidateHandle {
     sink: Weak<InvalidateSink>,
-    aspace: Weak<Mutex<MmSpace>>,
+    aspace: Weak<Mutex<UserMmSpace>>,
 }
 
 impl InvalidateHandle {
@@ -221,8 +226,13 @@ impl MremapSource {
         self.vma.end()
     }
 }
-/// The virtual memory address space.
-pub struct MmSpace {
+/// A userspace virtual memory address space.
+///
+/// This type owns the process-facing VMA tree, object lifetime protocol and
+/// user TLB-residency state.  The global kernel page table is represented by
+/// [`KernelAddressSpace`] instead; keeping the two types distinct prevents
+/// kernel-only mappings from accidentally acquiring userspace VMA semantics.
+pub struct UserMmSpace {
     mm_id: u64,
     user_lifetime: Arc<MmUserLifetime>,
     range: VirtAddrRange,
@@ -235,10 +245,13 @@ pub struct MmSpace {
 }
 
 /// Compatibility alias retained while external crates migrate off the legacy name.
-pub type AddrSpace = MmSpace;
+pub type MmSpace = UserMmSpace;
 
-impl MmSpace {
-    pub fn invalidate_handle(&self, aspace: &Arc<Mutex<MmSpace>>) -> InvalidateHandle {
+/// Compatibility alias for the older generic address-space spelling.
+pub type AddrSpace = UserMmSpace;
+
+impl UserMmSpace {
+    pub fn invalidate_handle(&self, aspace: &Arc<Mutex<UserMmSpace>>) -> InvalidateHandle {
         InvalidateHandle {
             sink: Arc::downgrade(&self.invalidate_sink),
             aspace: Arc::downgrade(aspace),
@@ -644,57 +657,29 @@ impl MmSpace {
     /// page table modifications are scoped to this address space's CPU
     /// residency mask.
     pub fn new_empty_user(base: VirtAddr, size: usize) -> KResult<Self> {
-        Self::new_empty_inner(base, size, false)
-    }
-
-    /// Creates a new empty kernel address space.
-    ///
-    /// The returned address space uses a kernel page table; TLB shootdowns for
-    /// page table modifications are broadcast to **all** online CPUs.
-    pub fn new_empty_kernel(base: VirtAddr, size: usize) -> KResult<Self> {
-        Self::new_empty_inner(base, size, true)
+        Self::new_empty_inner(base, size)
     }
 
     /// Internal helper: creates a new empty address space.
-    ///
-    /// Set `is_kernel` to `true` for the global kernel address space so that
-    /// page table modifications flush TLB entries on **all** online CPUs.
-    fn new_empty_inner(base: VirtAddr, size: usize, is_kernel: bool) -> KResult<Self> {
+    fn new_empty_inner(base: VirtAddr, size: usize) -> KResult<Self> {
         let cpu_residency = Arc::new(MmCpuResidency::new());
+        let pgtbl = PageTable::try_new().map_err(|_| KError::NoMemory)?;
         #[cfg(target_arch = "aarch64")]
-        let pgtbl = {
-            if is_kernel {
-                PageTable::try_new_kernel().map_err(|_| KError::NoMemory)?
-            } else {
-                PageTable::try_new().map_err(|_| KError::NoMemory)?
-            }
-        };
-        #[cfg(not(target_arch = "aarch64"))]
-        let pgtbl = if is_kernel {
-            PageTable::try_new_kernel().map_err(|_| KError::NoMemory)?
-        } else {
-            PageTable::try_new().map_err(|_| KError::NoMemory)?
-        };
-        #[cfg(target_arch = "aarch64")]
-        let (pgtbl, user_asid_context) = if is_kernel {
-            (pgtbl, None)
-        } else {
+        let (pgtbl, user_asid_context) = {
             let mut pgtbl = pgtbl;
             let ctx = Arc::new(Aarch64UserAsidContext::new(pgtbl.root_paddr()));
             ctx.install_page_table_asid_provider(&mut pgtbl);
             (pgtbl, Some(ctx))
         };
         #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
-        let pgtbl = if is_kernel {
-            pgtbl
-        } else {
+        let pgtbl = {
             let mut pgtbl = pgtbl;
             let ctx = NonNull::from(Arc::as_ref(&cpu_residency)).cast();
             // SAFETY: the provider snapshots the `MmCpuResidency` owned by
-            // this `MmSpace`. That residency allocation stays alive for the
-            // full lifetime of the page table because both are fields of the
-            // same `MmSpace`, and `MmSpace` drops the page table before the
-            // residency handle.
+            // this `UserMmSpace`. That residency allocation stays alive for
+            // the full lifetime of the page table because both are fields of
+            // the same `UserMmSpace`, and the page table is dropped before
+            // the residency handle.
             unsafe { pgtbl.set_user_cpu_mask_provider(ctx, page_table_user_cpu_mask) };
             pgtbl
         };
@@ -751,17 +736,21 @@ impl MmSpace {
         Ok(aspace)
     }
 
-    /// Copies page table mappings from another address space.
+    /// Copies page table mappings from the global kernel address space.
     ///
-    /// It copies the page table entries only rather than the memory regions,
-    /// usually used to copy a portion of the kernel space mapping to the
-    /// user space.
+    /// It copies the page table entries only rather than the memory regions.
+    /// This is used on architectures whose user page tables share the kernel
+    /// half through copied top-level entries.
     ///
     /// Returns an error if the two address spaces overlap.
-    pub fn copy_mappings_from(&mut self, other: &MmSpace) -> KResult {
+    pub fn copy_mappings_from(&mut self, other: &KernelAddressSpace) -> KResult {
+        let other_range = VirtAddrRange::from_start_size(other.base(), other.size());
+        if self.range.overlaps(other_range) {
+            return Err(KError::AlreadyExists);
+        }
         self.pgtbl
             .modify()
-            .copy_from(&other.pgtbl, other.base(), other.size());
+            .copy_from(other.page_table(), other.base(), other.size());
         Ok(())
     }
 
@@ -894,7 +883,7 @@ impl MmSpace {
         new_start: VirtAddr,
         new_size: usize,
         new_flags: MappingFlags,
-        aspace: &Arc<Mutex<MmSpace>>,
+        aspace: &Arc<Mutex<UserMmSpace>>,
     ) -> KResult<(VmArea, VmRuntimeRef)> {
         let runtime = self.runtime_for_vma(vma).ok_or(KError::BadAddress)?;
         let invalidate = Some(self.invalidate_handle(aspace));
@@ -1039,7 +1028,7 @@ impl MmSpace {
             VmBackingKind::FileShared { .. } | VmBackingKind::FilePrivate { .. }
         ) {
             warn!(
-                "file-backed mappings must use MmSpace::map_runtime_vma with explicit VmArea \
+                "file-backed mappings must use UserMmSpace::map_runtime_vma with explicit VmArea \
                  metadata"
             );
             return Err(KError::InvalidInput);
@@ -1078,7 +1067,7 @@ impl MmSpace {
 
     /// Installs a relocated copy of an existing mapping snapshot.
     ///
-    /// This keeps `mremap`-style relocation on the `MmSpace -> VmArea`
+    /// This keeps `mremap`-style relocation on the `UserMmSpace -> VmArea`
     /// construction path instead of open-coding `relocated VMA + relocated
     /// backend` assembly in upper layers.
     pub fn map_relocated_snapshot(
@@ -1087,7 +1076,7 @@ impl MmSpace {
         new_start: VirtAddr,
         new_size: usize,
         new_flags: MappingFlags,
-        owner: &Arc<Mutex<MmSpace>>,
+        owner: &Arc<Mutex<UserMmSpace>>,
     ) -> KResult {
         self.drain_pending_invalidations();
         let (vma, runtime) = self.relocated_mapping_from_snapshot(
@@ -1644,9 +1633,9 @@ impl MmSpace {
     }
 }
 
-impl fmt::Debug for MmSpace {
+impl fmt::Debug for UserMmSpace {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("MmSpace")
+        f.debug_struct("UserMmSpace")
             .field("va_range", &self.range)
             .field("page_table_root", &self.pgtbl.root_paddr())
             .field("vmas", &self.vmas.iter().count())
@@ -1654,7 +1643,7 @@ impl fmt::Debug for MmSpace {
     }
 }
 
-impl Drop for MmSpace {
+impl Drop for UserMmSpace {
     fn drop(&mut self) {
         self.clear();
     }
@@ -1680,7 +1669,7 @@ mod tests {
     use crate::{PageFaultOutcome, vma::VmRuntimeRef};
 
     fn new_test_aspace() -> AddrSpace {
-        AddrSpace::new_empty_kernel(VirtAddr::from(0x1000usize), PAGE_SIZE_4K * 64)
+        AddrSpace::new_empty_user(VirtAddr::from(0x1000usize), PAGE_SIZE_4K * 64)
             .expect("test address space should be constructible")
     }
 
@@ -1721,8 +1710,8 @@ mod tests {
     fn futex_backing_uses_mm_identity_for_private_mappings() {
         let start = VirtAddr::from_usize(0x4000);
         let flags = MappingFlags::READ | MappingFlags::WRITE;
-        let mut first =
-            MmSpace::new_empty_user(start, PAGE_SIZE_4K * 2).expect("allocate first address space");
+        let mut first = UserMmSpace::new_empty_user(start, PAGE_SIZE_4K * 2)
+            .expect("allocate first address space");
         first
             .map(
                 start,
@@ -1732,7 +1721,7 @@ mod tests {
                 VmRuntimeRef::new_anon_private(start, PageSize::Size4K),
             )
             .expect("map private futex page");
-        let second = MmSpace::new_empty_user(start, PAGE_SIZE_4K * 2)
+        let second = UserMmSpace::new_empty_user(start, PAGE_SIZE_4K * 2)
             .expect("allocate second address space");
 
         assert_eq!(
@@ -1811,16 +1800,16 @@ mod tests {
 
     #[def_test]
     fn fault_adapter_treats_retry_outcomes_as_handled() {
-        assert!(MmSpace::page_fault_outcome_is_handled(
+        assert!(UserMmSpace::page_fault_outcome_is_handled(
             PageFaultOutcome::Resolved
         ));
-        assert!(MmSpace::page_fault_outcome_is_handled(
+        assert!(UserMmSpace::page_fault_outcome_is_handled(
             PageFaultOutcome::Retry
         ));
-        assert!(MmSpace::page_fault_outcome_is_handled(
+        assert!(UserMmSpace::page_fault_outcome_is_handled(
             PageFaultOutcome::CowConflictRetry
         ));
-        assert!(!MmSpace::page_fault_outcome_is_handled(
+        assert!(!UserMmSpace::page_fault_outcome_is_handled(
             PageFaultOutcome::AccessDenied
         ));
     }
@@ -1829,8 +1818,8 @@ mod tests {
     fn madvise_dontneed_requires_fully_mapped_range() {
         let start = VirtAddr::from_usize(0x4000);
         let flags = MappingFlags::READ | MappingFlags::WRITE;
-        let mut aspace =
-            MmSpace::new_empty_user(start, PAGE_SIZE_4K * 4).expect("allocate test address space");
+        let mut aspace = UserMmSpace::new_empty_user(start, PAGE_SIZE_4K * 4)
+            .expect("allocate test address space");
         aspace
             .map(
                 start,
@@ -2001,8 +1990,8 @@ mod tests {
         let current = MappingFlags::USER;
         let max = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
         let raised = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
-        let mut aspace =
-            MmSpace::new_empty_user(start, PAGE_SIZE_4K * 2).expect("allocate test address space");
+        let mut aspace = UserMmSpace::new_empty_user(start, PAGE_SIZE_4K * 2)
+            .expect("allocate test address space");
 
         aspace
             .map_with_max_flags(
@@ -2028,7 +2017,7 @@ mod tests {
         let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
         let len = PAGE_SIZE_4K * 2;
         let aspace = Arc::new(Mutex::new(
-            MmSpace::new_empty_user(start, PAGE_SIZE_4K * 32)
+            UserMmSpace::new_empty_user(start, PAGE_SIZE_4K * 32)
                 .expect("allocate relocation test address space"),
         ));
 
@@ -2072,9 +2061,10 @@ mod tests {
     fn mm_pin_does_not_keep_user_mappings_alive_after_last_user_release() {
         let start = VirtAddr::from_usize(0x4000);
         let aspace = Arc::new(Mutex::new(
-            MmSpace::new_empty_user(start, PAGE_SIZE_4K * 2).expect("allocate test address space"),
+            UserMmSpace::new_empty_user(start, PAGE_SIZE_4K * 2)
+                .expect("allocate test address space"),
         ));
-        let user = MmSpace::acquire_user(aspace.clone()).expect("new mm should accept user");
+        let user = UserMmSpace::acquire_user(aspace.clone()).expect("new mm should accept user");
         let pin = user.pin();
 
         assert!(pin.is_user_alive());
@@ -2100,8 +2090,8 @@ mod tests {
         let flags = MappingFlags::READ | MappingFlags::EXECUTE | MappingFlags::USER;
         let frame =
             crate::backend::alloc_frame(true, PageSize::Size4K).expect("allocate linear frame");
-        let mut aspace =
-            MmSpace::new_empty_user(start, PAGE_SIZE_4K * 2).expect("allocate test address space");
+        let mut aspace = UserMmSpace::new_empty_user(start, PAGE_SIZE_4K * 2)
+            .expect("allocate test address space");
 
         aspace
             .map_linear(start, frame, PAGE_SIZE_4K, flags)

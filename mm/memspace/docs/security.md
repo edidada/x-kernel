@@ -7,7 +7,8 @@
 - `page_table` 正确执行 PTE 修改和 TLB finalization；
 - KVFS file address-space、anon 与 vmobj crate 正确维护各自 object lifetime；
   `pagecache` 只维护其私有 folio storage；
-- 调用方通过外层锁保证同一 `MmSpace` 的独占可变访问。
+- 调用方通过外层锁保证同一 `UserMmSpace`（兼容名 `MmSpace`）的独占可变访问；
+  全局 `KernelAddressSpace` 由 `kernel_layout()` 返回的 `SpinNoIrq` 保护。
 
 `memspace` 负责：
 
@@ -18,6 +19,8 @@
 - object-side invalidate request 的复核和 PTE zap。
 - `MmUserHandle` / `MmPin` 生命周期 capability，区分 active user mappings
   与对象 pin。
+- 内核线性/iomap 区间由 `KernelMappingSet` 记录，`vmalloc` 区间由独立的
+  `VmallocState` 记录；两者不进入用户 `VmAreaSet`。
 
 ## 外部边界 / 攻击面
 
@@ -39,7 +42,7 @@
 
 ## 内存安全不变量
 
-- 每个 VMA 范围必须完全落在 `MmSpace` 地址空间边界内。
+- 每个 VMA 范围必须完全落在 `UserMmSpace` 地址空间边界内。
 - `VmAreaSet::try_insert()` 必须拒绝重叠 VMA。
 - `VmAreaSet::unmap()` / `protect()` 必须在 split/trim 后保持 VMA 非重叠、有序。
 - `page_offset()` 与 `FileMappingInfo.offset` 必须随 VMA split/trim 同步调整。
@@ -59,12 +62,20 @@
 - `resolve_futex_backing()` 对 shared VMA 必须返回 object-relative offset；
   不能把 VMA-relative address 当作跨进程 key。
 - `MmUserHandle` 是唯一能保留用户映射生命周期的 capability；`MmPin` 和普通
-  `Arc<Mutex<MmSpace>>` observer 只能保留对象可观察性，不能阻止最后一个 user
+  `Arc<Mutex<UserMmSpace>>` observer 只能保留对象可观察性，不能阻止最后一个 user
   释放时清空映射。
 
 ## 线程安全
 
-- `MmSpace` mutable operations require external exclusive access.
+- `UserMmSpace` mutable operations require external exclusive access.
+- `KernelAddressSpace::map_linear` / `unmap_no_release` / `protect` 使用
+  `finish_no_flush()`；调用方必须释放 `kernel_layout()` 锁后调用全局内核
+  TLB shootdown，再释放可复用的 VA 区间。
+- 全局内核映射拒绝 `MappingFlags::USER`；需要用户可访问权限的映射必须
+  进入 `UserMmSpace` 的 VMA/page-table 路径。
+- `KernelAddressSpace::page_table_mut()` 是受限 escape hatch；只有拥有自己
+  VA 区间表的区域管理器（当前为 `vmalloc`）才能使用，且不得与
+  `KernelMappingSet` 记录的区间重叠。
 - `InvalidateSink` spinlock only protects queue mutation; it must not cover
   runtime unmap, page-table mutation, or sleepable lock acquisition.
 - `PageTable::modify()` enforces one mutable page-table guard at a time.
@@ -94,6 +105,11 @@
 - 已拆除 PTE 的 vmalloc 区间必须保留在 `VMALLOC` interval table，直到本地
   与远端 TLB flush 都完成后才可重新分配；否则新映射可能命中旧 TLB 翻译并
   写入已释放的物理页。
+- `iomap_device()` 的最后一个引用释放时，设备注册表先把条目标为
+  `Removing`；完成 PTE 拆除和全局 TLB flush 后才释放 `KernelMappingSet` 区间并
+  删除注册表项。并发 `iomap_device()` 不能在拆除期间复用旧 VA。
+- `DEVICE_REGISTRY` 不得跨越同步 TLB shootdown 持有；安装路径的
+  `KERNEL_ASPACE` → registry 锁序与拆除路径的 `Removing` 两阶段协议必须保持。
 - 释放路径的 flush 必须覆盖本 CPU：远端广播（`flush_all_cpus`）不刷发起
   者自身，本地 `karch::flush_tlb` 不可省略，否则 VA 复用后本 CPU 经陈旧
   TLB 项访问到错误物理页（UAF）。
@@ -167,11 +183,11 @@
 
 ## 已知限制
 
-- `AddrSpace` 仍作为 `MmSpace` 的兼容别名存在。
+- `AddrSpace` 仍作为 `UserMmSpace` 的兼容别名存在。
 - `BackendOps` 仍用于 anonymous/linear runtime 的共享执行 helper。
 - Writable regular-file `MAP_SHARED`、reclaim/swap/memcg/NUMA/THP 不由
   `memspace` 当前路径实现。
-- `MS_INVALIDATE`、locked-page `EBUSY` 和释放 `MmSpace` 锁后再执行慢速
+- `MS_INVALIDATE`、locked-page `EBUSY` 和释放 `UserMmSpace` 锁后再执行慢速
   provider sync 未实现。
 - Invalidate sink 是 queue/drain 模型，不提供 Linux 同步 rmap 树的强同步语义。
 
@@ -182,7 +198,7 @@
 - [ ] Fault path 是否先做 VMA permission check，再调用 runtime。
 - [ ] File-private path 是否同时保留 file object 和 anon object identity。
 - [ ] Private-anon frame release 是否发生在 TLB finalization 之后。
-- [ ] Invalidate request 是否通过 `vmobj` object/view language 进入 `MmSpace`。
+- [ ] Invalidate request 是否通过 `vmobj` object/view language 进入 `UserMmSpace`。
 - [ ] `InvalidateSink` spinlock 内是否只做队列操作。
 - [ ] Unsupported Linux semantics 是否显式返回错误而不是静默降级。
 - [ ] 新增地址空间 observer 是否只持有 `MmPin` 或普通 `Arc`，不误用

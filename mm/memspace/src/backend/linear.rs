@@ -11,7 +11,7 @@ use ksync::Mutex;
 use memaddr::{MemoryAddr, PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange};
 
 use crate::{
-    FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, VmBackingInfo, VmBackingKind,
+    FaultContext, ForkCloneTarget, InvalidateHandle, UserMmSpace, VmBackingInfo, VmBackingKind,
     backend::{BackendOps, FaultCompletion, FaultCompletionResult, map_paging_err, pages_in},
     vma::VmRuntimeOps,
 };
@@ -37,7 +37,7 @@ impl LinearBackend {
         _flags: MappingFlags,
         _old_pgtbl: &mut PageTableMut,
         _new_pgtbl: &mut PageTableMut,
-        _new_aspace: &Arc<Mutex<MmSpace>>,
+        _new_aspace: &Arc<Mutex<UserMmSpace>>,
         _invalidate: Option<InvalidateHandle>,
     ) -> KResult<Self> {
         Ok(self.clone())
@@ -145,7 +145,7 @@ impl VmRuntimeOps for LinearBackend {
         &self,
         _new_start: VirtAddr,
         _new_mm_id: u64,
-        _aspace: &Arc<Mutex<MmSpace>>,
+        _aspace: &Arc<Mutex<UserMmSpace>>,
         _invalidate: Option<InvalidateHandle>,
     ) -> KResult<Arc<dyn VmRuntimeOps>> {
         Err(KError::OperationNotSupported)

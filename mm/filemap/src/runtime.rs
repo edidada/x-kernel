@@ -255,7 +255,7 @@ mod tests {
         let location = anonymous_location("reopened-private-runtime");
         let file = open_test_file(location.clone(), O_RDWR);
         let aspace = Arc::new(ksync::Mutex::new(
-            memspace::MmSpace::new_user_empty().expect("mm"),
+            memspace::UserMmSpace::new_user_empty().expect("mm"),
         ));
         let observer = MmObserver::new(&aspace);
         let invalidate = observer.invalidate_handle();

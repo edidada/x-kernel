@@ -7,10 +7,10 @@
 use kerrno::KResult;
 use khal::{mem::v2p, paging::MappingFlags};
 use memaddr::PAGE_SIZE_4K;
-use memspace::MmSpace;
+use memspace::UserMmSpace;
 
 /// Map the signal trampoline to the user address space.
-pub fn map_signal_trampoline(aspace: &mut MmSpace) -> KResult {
+pub fn map_signal_trampoline(aspace: &mut UserMmSpace) -> KResult {
     let signal_trampoline_paddr = v2p(crate::arch::signal_trampoline_address().into());
     aspace.map_linear(
         kaddr_layout::SIGNAL_TRAMPOLINE.into(),

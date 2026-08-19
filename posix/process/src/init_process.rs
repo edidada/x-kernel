@@ -57,7 +57,7 @@ pub fn spawn_init_process(
     assert_eq!(pid_handle.root_nr(), 1, "init must be the first root PID");
 
     let mut uspace =
-        memspace::MmSpace::new_user_empty().expect("Failed to create user address space");
+        memspace::UserMmSpace::new_user_empty().expect("Failed to create user address space");
 
     let cred = initial_cred();
     // Resolve the executable through the shared `ExecRequest` path so that the
