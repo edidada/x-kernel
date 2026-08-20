@@ -40,12 +40,12 @@ pub(crate) enum Ipv6Action {
     },
 }
 
-pub(crate) fn queue_ipv6_packet(router: &mut Router, packet: Vec<u8>) -> KResult {
+pub(crate) fn queue_ipv6_packet(router: &mut Router, packet: Vec<u8>, ifindex: i32) -> KResult {
     if !router.can_enqueue_tx_packet() {
         return Err(KError::WouldBlock);
     }
     router.push_data_tx_packet(PacketBuf::from_ip_packet_vec(
-        0,
+        ifindex,
         packet,
         PacketOwner::Ipv6Stack,
     ));
@@ -65,7 +65,7 @@ pub(crate) fn dispatch_ipv6_packet(
     let src_addr = IpAddress::Ipv6(header.src_addr());
     let dst_addr = IpAddress::Ipv6(header.dst_addr());
     if !is_local_ipv6_source(&router.local_ipv6_addrs(), header.src_addr())
-        && !header.src_addr().is_multicast()
+        || header.src_addr().is_multicast()
     {
         warn!("Dropping IPv6 packet with non-local source {}", src_addr);
         return false;
@@ -81,6 +81,10 @@ pub(crate) fn dispatch_ipv6_packet(
     }
 
     if dst_addr.is_multicast() {
+        if let Some(dev_index) = output_device_index(packet.ifindex(), router.devices.len()) {
+            let dev = &mut router.devices[dev_index];
+            return dev.send_ip_packet(dev_index as i32 + 1, dst_addr, src_addr, packet, timestamp);
+        }
         let device_count = router.devices.len();
         let Some((last_device, preceding_devices)) = router.devices.split_last_mut() else {
             return false;
@@ -102,11 +106,7 @@ pub(crate) fn dispatch_ipv6_packet(
     }
 
     if header.dst_addr().is_link_local() {
-        let Some(dev_index) = router
-            .devices
-            .iter()
-            .position(|dev| dev.ipv6_link_local().is_some())
-        else {
+        let Some(dev_index) = link_local_output_device(router, packet.ifindex()) else {
             warn!("No link-local capable device for destination: {}", dst_addr);
             return false;
         };
@@ -169,8 +169,9 @@ pub(crate) fn apply_actions(router: &mut Router, actions: &mut Vec<Ipv6Action>) 
                 if let Some(mac) = mac
                     && let Some(na) =
                         ndp::build_neighbor_advertisement(target, dst, target, mac, solicited)
+                    && let Err(err) = router.queue_control_ip_packet(na)
                 {
-                    let _ = router.queue_control_ip_packet(na);
+                    warn!("Failed to queue IPv6 neighbor advertisement: {}", err);
                 }
             }
             Ipv6Action::EchoReply {
@@ -193,4 +194,23 @@ pub(crate) fn apply_actions(router: &mut Router, actions: &mut Vec<Ipv6Action>) 
 
 fn is_local_ipv6_source(local_addrs: &[Ipv6Cidr], src_addr: Ipv6Address) -> bool {
     local_addrs.iter().any(|addr| addr.address() == src_addr)
+}
+
+fn output_device_index(ifindex: i32, device_count: usize) -> Option<usize> {
+    (ifindex > 0)
+        .then_some(ifindex.saturating_sub(1) as usize)
+        .filter(|&dev| dev < device_count)
+}
+
+fn link_local_output_device(router: &Router, ifindex: i32) -> Option<usize> {
+    if let Some(dev) = output_device_index(ifindex, router.devices.len()) {
+        return router.devices[dev]
+            .ipv6_link_local()
+            .is_some()
+            .then_some(dev);
+    }
+    router
+        .devices
+        .iter()
+        .position(|dev| dev.ipv6_link_local().is_some())
 }

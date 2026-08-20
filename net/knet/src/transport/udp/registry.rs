@@ -465,8 +465,13 @@ fn delivery_score(
 fn local_endpoint_matches(endpoint: IpEndpoint, addr: SocketAddr) -> bool {
     endpoint.port == addr.port()
         && address_family_matches(endpoint.addr, addr.ip())
+        && !is_unspecified_ipv6_bind_to_multicast(endpoint, addr)
         && (endpoint.addr.is_unspecified() || endpoint_addr_matches(endpoint.addr, addr.ip()))
         && endpoint_scope_matches(endpoint, addr)
+}
+
+fn is_unspecified_ipv6_bind_to_multicast(endpoint: IpEndpoint, addr: SocketAddr) -> bool {
+    endpoint.addr.is_unspecified() && matches!(addr, SocketAddr::V6(v6) if v6.ip().is_multicast())
 }
 
 pub(super) fn endpoint_matches_addr(endpoint: IpEndpoint, addr: SocketAddr) -> bool {
@@ -848,6 +853,31 @@ mod tests {
             ),
         );
         assert!(lookup_udp_pcb(v6_packet.0, v6_packet.1).is_some());
+
+        clear_registry();
+    }
+
+    #[def_test(serial)]
+    fn ipv6_wildcard_bind_does_not_receive_multicast() {
+        clear_registry();
+
+        let v6_wildcard = IpEndpoint {
+            addr: IpAddress::Ipv6(Ipv6Address::UNSPECIFIED),
+            port: 5353,
+            scope_id: 0,
+        };
+        bind_udp_pcb(UdpPcb::new(UdpSocketState::new()), v6_wildcard, false).unwrap();
+
+        let multicast = ipv6_socket_addr(Ipv6Address::ALL_NODES_LINK_LOCAL, 5353, 2);
+        let remote = ipv6_socket_addr(
+            Ipv6Address::from_octets([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+            49152,
+            2,
+        );
+        assert!(
+            lookup_udp_pcb(multicast, remote).is_none(),
+            "IPv6 wildcard bind must not receive multicast without group membership"
+        );
 
         clear_registry();
     }

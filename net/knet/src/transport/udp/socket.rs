@@ -258,18 +258,15 @@ impl UdpSocket {
                     .state()
                     .local_endpoint()
                     .and_then(|local| (!local.addr.is_unspecified()).then_some(local.addr));
-                let source_addr = SERVICE.prepare_ipv6_packet_send(
+                SERVICE.prepare_and_send_ipv6_packet(
                     bound_source_addr,
                     &remote_endpoint.addr,
-                    packet_len,
+                    &mut packet,
                     remote_endpoint.scope_id,
+                    |packet, source_addr| {
+                        self.write_datagram_v6(packet, remote_endpoint, source_addr)
+                    },
                 )?;
-                self.write_datagram_v6(
-                    packet.as_mut().ok_or(KError::InvalidInput)?,
-                    remote_endpoint,
-                    source_addr,
-                )?;
-                SERVICE.send_ipv6_packet(packet.take().ok_or(KError::InvalidInput)?)?;
                 network_poller().notify(PollReason::Tx);
                 poll_interfaces();
                 Ok(payload_len)

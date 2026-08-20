@@ -231,7 +231,10 @@ pub trait NetDevice: Send + Sync {
     /// Synchronizes neighbor entries prepared by the control-plane adapter.
     fn sync_neighbors(&mut self, _neighbors: &[(IpAddress, [u8; 6])]) {}
 
-    /// Replaces the IPv6 addresses prepared by the control-plane adapter.
+    /// Replaces the IPv6 addresses prepared by the Router owner.
+    ///
+    /// An empty slice clears the device projection so NDP and link-local
+    /// selection cannot keep using removed addresses.
     fn set_ipv6_addrs(&mut self, _addrs: &[Ipv6Cidr]) {}
 
     /// Learns or refreshes a neighbor link-layer mapping.
@@ -247,13 +250,12 @@ pub trait NetDevice: Send + Sync {
         None
     }
 
-    /// Selects a suitable IPv6 source address for NDP on this device.
+    /// Returns the link-local IPv6 address on this device, if any.
     fn ipv6_link_local(&self) -> Option<Ipv6Address> {
         self.ipv6_addrs()
             .iter()
             .map(|cidr| cidr.address())
             .find(|addr| addr.is_link_local())
-            .or_else(|| self.ipv6_addrs().first().map(|cidr| cidr.address()))
     }
 
     /// Selects a unicast source address for replies to multicast ICMPv6.

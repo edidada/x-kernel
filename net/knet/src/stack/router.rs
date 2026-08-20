@@ -479,6 +479,118 @@ impl Router {
         }
     }
 
+    /// Resolves the IPv6 source address and output interface for a datagram.
+    ///
+    /// Unicast destinations still require a matching route, including when the
+    /// socket already bound a source. Multicast destinations do not consult the
+    /// unicast table; Linux installs `ff00::/8` via `addrconf_add_mroute`, while
+    /// knet selects the scoped device and a unicast source on that device.
+    pub fn ipv6_output_source(
+        &self,
+        dst: &IpAddress,
+        bound_src: Option<IpAddress>,
+        scope_id: u32,
+    ) -> KResult<(IpAddress, i32)> {
+        let IpAddress::Ipv6(dst_v6) = *dst else {
+            return Err(LinuxError::EAFNOSUPPORT.into());
+        };
+        if dst_v6.is_multicast() {
+            return self.ipv6_multicast_output_source(bound_src, scope_id);
+        }
+
+        let rule = if scope_id == 0 {
+            self.table.lookup(dst)
+        } else {
+            self.table
+                .lookup_on_device(dst, scope_id.saturating_sub(1) as usize)
+        }
+        .ok_or(KError::from(LinuxError::ENETUNREACH))?;
+        self.require_output_device_up(rule.dev)?;
+        let source = self.ipv6_bound_or_route_source(bound_src, rule.src)?;
+        Ok((source, rule.ifindex() as i32))
+    }
+
+    fn ipv6_multicast_output_source(
+        &self,
+        bound_src: Option<IpAddress>,
+        scope_id: u32,
+    ) -> KResult<(IpAddress, i32)> {
+        let dev = if scope_id != 0 {
+            let dev = scope_id.saturating_sub(1) as usize;
+            self.require_output_device_up(dev)?;
+            dev
+        } else if let Some(IpAddress::Ipv6(src)) = bound_src {
+            let dev = self
+                .ipv6_addrs
+                .iter()
+                .find(|entry| entry.addr.address() == src)
+                .map(|entry| entry.dev)
+                .ok_or(KError::from(LinuxError::ENETUNREACH))?;
+            self.require_output_device_up(dev)?;
+            dev
+        } else {
+            // Link-local multicast needs an output interface, matching Linux
+            // `ip6_dst_lookup` when `flowi6_oif` is unset.
+            return Err(LinuxError::ENETUNREACH.into());
+        };
+        let route_source = self
+            .ipv6_unicast_source_on_device(dev)
+            .ok_or(KError::from(LinuxError::ENETUNREACH))?;
+        let source = self.ipv6_bound_or_route_source(bound_src, route_source)?;
+        Ok((source, dev as i32 + 1))
+    }
+
+    fn ipv6_bound_or_route_source(
+        &self,
+        bound_src: Option<IpAddress>,
+        route_source: IpAddress,
+    ) -> KResult<IpAddress> {
+        match bound_src {
+            Some(addr) if addr.is_unspecified() || addr.is_multicast() => {
+                Err(LinuxError::EADDRNOTAVAIL.into())
+            }
+            Some(addr) => Ok(addr),
+            None => Ok(route_source),
+        }
+    }
+
+    fn ipv6_unicast_source_on_device(&self, dev: usize) -> Option<IpAddress> {
+        let mut fallback = None;
+        for entry in &self.ipv6_addrs {
+            if entry.dev != dev {
+                continue;
+            }
+            let addr = entry.addr.address();
+            if !addr.is_unicast() {
+                continue;
+            }
+            if addr.is_link_local() {
+                return Some(IpAddress::Ipv6(addr));
+            }
+            fallback.get_or_insert(IpAddress::Ipv6(addr));
+        }
+        fallback
+    }
+
+    fn require_output_device_up(&self, dev: usize) -> KResult {
+        let device = self
+            .devices
+            .get(dev)
+            .ok_or(KError::from(LinuxError::ENETUNREACH))?;
+        if !device.is_link_up() {
+            return Err(LinuxError::ENETUNREACH.into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ipv6_output_mtu(&self, dst: &IpAddress, ifindex: i32) -> Option<usize> {
+        self.route_mtu(dst).or_else(|| {
+            Self::device_index(ifindex)
+                .and_then(|dev| self.devices.get(dev))
+                .map(|device| device.mtu().min(u16::MAX as usize))
+        })
+    }
+
     pub fn can_enqueue_tx_packet(&self) -> bool {
         self.data_tx_queue.len() < DATA_TX_QUEUE_SIZE
     }
@@ -528,8 +640,8 @@ impl Router {
         true
     }
 
-    pub fn queue_ipv6_packet(&mut self, packet: Vec<u8>) -> KResult {
-        ipv6::queue_ipv6_packet(self, packet)
+    pub fn queue_ipv6_packet_on_device(&mut self, packet: Vec<u8>, ifindex: i32) -> KResult {
+        ipv6::queue_ipv6_packet(self, packet, ifindex)
     }
 
     pub fn add_rule(&mut self, rule: Rule) {
@@ -1554,6 +1666,31 @@ mod tests {
                 .any(|cidr| cidr.address() == Ipv6Address::LOCALHOST)
         );
         assert_eq!(router.local_ipv6_addrs().len(), 1);
+    }
+
+    #[def_test]
+    fn ipv6_multicast_source_uses_scoped_device() {
+        let mut router = Router::new();
+        let lo = router.add_device(Box::new(LoopbackDevice::new()));
+        router
+            .add_ipv6_addr(Ipv6AddrEntry {
+                dev: lo,
+                addr: Ipv6Cidr::new(Ipv6Address::LOCALHOST, 128),
+                scope: ROUTE_SCOPE_HOST,
+            })
+            .unwrap();
+
+        let dst = IpAddress::Ipv6(Ipv6Address::ALL_NODES_LINK_LOCAL);
+        assert_eq!(
+            router.ipv6_output_source(&dst, None, 0),
+            Err(LinuxError::ENETUNREACH.into())
+        );
+
+        let (source, ifindex) = router
+            .ipv6_output_source(&dst, None, lo as u32 + 1)
+            .unwrap();
+        assert_eq!(source, IpAddress::Ipv6(Ipv6Address::LOCALHOST));
+        assert_eq!(ifindex, lo as i32 + 1);
     }
 }
 

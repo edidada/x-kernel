@@ -940,9 +940,7 @@ impl NetDeviceOps for EthernetDevice {
     }
 
     fn set_ipv6_addrs(&mut self, addrs: &[Ipv6Cidr]) {
-        if !addrs.is_empty() {
-            self.ipv6_addrs = addrs.to_vec();
-        }
+        self.ipv6_addrs = addrs.to_vec();
     }
 
     fn learn_neighbor(&mut self, addr: IpAddress, mac: MacAddress) {

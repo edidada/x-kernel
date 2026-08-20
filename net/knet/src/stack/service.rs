@@ -311,16 +311,25 @@ impl Service {
         dst_addr: &IpAddress,
         scope_id: u32,
     ) -> KResult<IpAddress> {
-        if scope_id == 0 {
-            return self.get_source_address(dst_addr);
+        match dst_addr {
+            IpAddress::Ipv6(_) => self
+                .router
+                .lock()
+                .ipv6_output_source(dst_addr, None, scope_id)
+                .map(|(source, _)| source),
+            IpAddress::Ipv4(_) => {
+                if scope_id == 0 {
+                    return self.get_source_address(dst_addr);
+                }
+                let dev = scope_id.saturating_sub(1) as usize;
+                self.router
+                    .lock()
+                    .table
+                    .lookup_on_device(dst_addr, dev)
+                    .map(|rule| rule.src)
+                    .ok_or(KError::from(LinuxError::ENETUNREACH))
+            }
         }
-        let dev = scope_id.saturating_sub(1) as usize;
-        self.router
-            .lock()
-            .table
-            .lookup_on_device(dst_addr, dev)
-            .map(|rule| rule.src)
-            .ok_or(KError::from(LinuxError::ENETUNREACH))
     }
 
     pub fn can_send_ip_packet(&self) -> bool {
@@ -356,46 +365,34 @@ impl Service {
         router.queue_ipv4_packet(packet.take().ok_or(KError::InvalidInput)?)
     }
 
-    /// Resolves the IPv6 source address and rejects oversized packets.
-    ///
-    /// IPv6 is not fragmented by the local stack, so a packet larger than the
-    /// route MTU fails with `EMSGSIZE`.
-    pub fn prepare_ipv6_packet_send(
+    /// Resolves the IPv6 source address, rejects oversized packets, and enqueues
+    /// the datagram under a single Router lock.
+    pub fn prepare_and_send_ipv6_packet(
         &self,
         bound_src: Option<IpAddress>,
         dst_addr: &IpAddress,
-        packet_len: usize,
+        packet: &mut Option<Vec<u8>>,
         scope_id: u32,
-    ) -> KResult<IpAddress> {
-        let router = self.router.lock();
+        prepare: impl FnOnce(&mut [u8], IpAddress) -> KResult,
+    ) -> KResult {
+        let mut router = self.router.lock();
+        let packet_len = packet.as_ref().ok_or(KError::InvalidInput)?.len();
         if !router.can_enqueue_tx_packet() {
             return Err(KError::WouldBlock);
         }
 
-        let source_addr = match bound_src {
-            Some(addr) => addr,
-            None => {
-                let rule = if scope_id == 0 {
-                    router.table.lookup(dst_addr)
-                } else {
-                    let dev = scope_id.saturating_sub(1) as usize;
-                    router.table.lookup_on_device(dst_addr, dev)
-                };
-                rule.map(|rule| rule.src)
-                    .ok_or(KError::from(LinuxError::ENETUNREACH))?
-            }
-        };
-        if let Some(mtu) = router.route_mtu(dst_addr)
+        let (source_addr, ifindex) = router.ipv6_output_source(dst_addr, bound_src, scope_id)?;
+        if let Some(mtu) = router.ipv6_output_mtu(dst_addr, ifindex)
             && packet_len > mtu
         {
             return Err(LinuxError::EMSGSIZE.into());
         }
 
-        Ok(source_addr)
-    }
-
-    pub fn send_ipv6_packet(&self, packet: alloc::vec::Vec<u8>) -> KResult {
-        self.router.lock().queue_ipv6_packet(packet)
+        prepare(
+            packet.as_deref_mut().ok_or(KError::InvalidInput)?,
+            source_addr,
+        )?;
+        router.queue_ipv6_packet_on_device(packet.take().ok_or(KError::InvalidInput)?, ifindex)
     }
 
     pub fn device_mask_for(&self, endpoint: &IpListenEndpoint) -> u32 {

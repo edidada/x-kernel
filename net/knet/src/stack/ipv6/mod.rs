@@ -17,6 +17,6 @@ pub(crate) use output::{Ipv6Action, apply_actions, dispatch_ipv6_packet, queue_i
 #[cfg(unittest)]
 pub(crate) use packet::build_ipv6_packet;
 pub(crate) use packet::{
-    IPV6_DEFAULT_HOP_LIMIT, IPV6_HEADER_LEN, Ipv6Header, PROTOCOL_ICMPV6, PROTOCOL_TCP,
-    PROTOCOL_UDP, payload, write_ipv6_packet_header,
+    IPV6_DEFAULT_HOP_LIMIT, IPV6_HEADER_LEN, Ipv6Header, PROTOCOL_ICMPV6, PROTOCOL_UDP, payload,
+    write_ipv6_packet_header,
 };

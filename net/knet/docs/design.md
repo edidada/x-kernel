@@ -426,8 +426,10 @@ IPv6 扩展头仅跳过定位上层协议；Fragment 头直接丢弃，不重组
 该边界让 UDP 不再依赖 smoltcp socket handle，同时保留现有 TCP 和 raw socket 行为。
 
 IPv6 link-local 收发使用 `sin6_scope_id` 选择接口：`sockaddr_in6` 可传入 scope，
-link-local 发送按 scope 选择接口，`recvfrom` 对 link-local 源返回到达接口。
+link-local 与组播发送把 scope 写入 TX `PacketBuf` 的 ifindex，dispatch 按该接口发出；
+`recvfrom` 对 link-local 源返回到达接口。
 当前不实现 scoped listen/accept 继承、全局地址 scoped bind，以及 ICMPv6 差错的 scoped lookup。
+当前不实现 `IPV6_ADD_MEMBERSHIP`：组播 UDP 只投递给绑定到该组播地址的 socket，通配 `[::]:port` 不会收到组播。
 IPv6 endpoint 的文本格式遵循 `[address%scope]:port`，避免地址与端口之间的冒号歧义。
 当前不实现 `IPV6_FLOWINFO_SEND` 或 flow-label 路由；`sockaddr_in6.sin6_flowinfo`
 进入原生 endpoint 时会被有意归零，`getsockname`、`getpeername` 和接收地址也返回零。
