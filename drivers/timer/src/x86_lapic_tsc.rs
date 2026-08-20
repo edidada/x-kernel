@@ -120,36 +120,79 @@ pub fn early_init(config: TimerConfig) {
 
 fn detect_tsc_frequency(config: TimerConfig) -> (u64, TscFrequencySource) {
     let cpuid = CpuId::new();
-    if !cpuid
+    let has_invariant_tsc = cpuid
         .get_advanced_power_mgmt_info()
-        .is_some_and(|info| info.has_invariant_tsc())
-    {
+        .is_some_and(|info| info.has_invariant_tsc());
+    if !has_invariant_tsc {
+        // TCG qemu64 and similar guests omit invariant TSC. Calibrating that
+        // variable counter against CPUID 0x15 or PIT still installs a
+        // fixed-ratio clock, and the measured rate is often far from the
+        // historical platform fallback. Userspace CLOCK_MONOTONIC waits then
+        // expire early. Stay on the platform estimate instead of treating a
+        // non-constant TSC as a calibrated monotonic source.
         warn!(
-            "CPU does not report invariant TSC; fixed-ratio monotonic time may drift across \
-             P/C-states"
+            "CPU does not report invariant TSC; using platform frequency {} Hz ({:?})",
+            config.nominal_frequency_hz, config.source
+        );
+        return select_tsc_frequency(false, None, None, config);
+    }
+
+    let leaf15_hz = cpuid
+        .get_tsc_info()
+        .and_then(|info| info.tsc_frequency())
+        .filter(|frequency_hz| is_valid_tsc_frequency(*frequency_hz));
+    let pit_hz = calibrate_tsc_with_pit(config.nominal_frequency_hz);
+    select_tsc_frequency(true, leaf15_hz, pit_hz, config)
+}
+
+fn select_tsc_frequency(
+    has_invariant_tsc: bool,
+    leaf15_hz: Option<u64>,
+    pit_hz: Option<u64>,
+    config: TimerConfig,
+) -> (u64, TscFrequencySource) {
+    if !has_invariant_tsc {
+        return (
+            config.nominal_frequency_hz,
+            TscFrequencySource::Platform(config.source),
         );
     }
 
-    if let Some(frequency_hz) = cpuid
-        .get_tsc_info()
-        .and_then(|info| info.tsc_frequency())
-        .filter(|frequency_hz| is_valid_tsc_frequency(*frequency_hz))
-    {
-        return (frequency_hz, TscFrequencySource::CpuidLeaf15);
+    match (leaf15_hz, pit_hz) {
+        (Some(cpuid_hz), Some(measured_hz)) if tsc_frequencies_agree(cpuid_hz, measured_hz) => {
+            (cpuid_hz, TscFrequencySource::CpuidLeaf15)
+        }
+        (Some(cpuid_hz), Some(measured_hz)) => {
+            warn!(
+                "CPUID 0x15 TSC frequency {} Hz disagrees with PIT {} Hz; using PIT",
+                cpuid_hz, measured_hz
+            );
+            (measured_hz, TscFrequencySource::PitChannel2)
+        }
+        (Some(cpuid_hz), None) => (cpuid_hz, TscFrequencySource::CpuidLeaf15),
+        (None, Some(measured_hz)) => (measured_hz, TscFrequencySource::PitChannel2),
+        (None, None) => {
+            warn!(
+                "TSC calibration unavailable; using platform frequency {} Hz ({:?})",
+                config.nominal_frequency_hz, config.source
+            );
+            (
+                config.nominal_frequency_hz,
+                TscFrequencySource::Platform(config.source),
+            )
+        }
     }
+}
 
-    if let Some(frequency_hz) = calibrate_tsc_with_pit(config.nominal_frequency_hz) {
-        return (frequency_hz, TscFrequencySource::PitChannel2);
+fn tsc_frequencies_agree(left_hz: u64, right_hz: u64) -> bool {
+    let larger_hz = u128::from(left_hz.max(right_hz));
+    let smaller_hz = u128::from(left_hz.min(right_hz));
+    if larger_hz == 0 {
+        return false;
     }
-
-    warn!(
-        "TSC calibration unavailable; using platform frequency {} Hz ({:?})",
-        config.nominal_frequency_hz, config.source
-    );
-    (
-        config.nominal_frequency_hz,
-        TscFrequencySource::Platform(config.source),
-    )
+    // 10% of the larger value. PIT jitter is typically well below this; a
+    // lying or scaled CPUID 0x15 leaf is typically well above it.
+    10 * (larger_hz - smaller_hz) <= larger_hz
 }
 
 fn calibrate_tsc_with_pit(nominal_frequency_hz: u64) -> Option<u64> {
@@ -376,5 +419,60 @@ mod tests {
             frequency_hz,
             tsc_frequency_from_pit_delta(149_000_000).unwrap()
         );
+    }
+
+    #[def_test]
+    fn test_missing_invariant_tsc_uses_platform_frequency() {
+        let config = TimerConfig::platform_static(4_000_000_000);
+
+        assert_eq!(
+            select_tsc_frequency(false, Some(2_000_000_000), Some(2_000_000_000), config),
+            (4_000_000_000, TscFrequencySource::Platform(config.source))
+        );
+    }
+
+    #[def_test]
+    fn test_cpuid_and_pit_agreement_prefers_cpuid() {
+        let config = TimerConfig::platform_static(4_000_000_000);
+
+        assert_eq!(
+            select_tsc_frequency(true, Some(3_000_000_000), Some(3_100_000_000), config),
+            (3_000_000_000, TscFrequencySource::CpuidLeaf15)
+        );
+    }
+
+    #[def_test]
+    fn test_cpuid_and_pit_disagreement_uses_pit() {
+        let config = TimerConfig::platform_static(4_000_000_000);
+
+        assert_eq!(
+            select_tsc_frequency(true, Some(4_000_000_000), Some(2_000_000_000), config),
+            (2_000_000_000, TscFrequencySource::PitChannel2)
+        );
+    }
+
+    #[def_test]
+    fn test_single_calibration_source_is_used() {
+        let config = TimerConfig::platform_static(4_000_000_000);
+
+        assert_eq!(
+            select_tsc_frequency(true, Some(3_000_000_000), None, config),
+            (3_000_000_000, TscFrequencySource::CpuidLeaf15)
+        );
+        assert_eq!(
+            select_tsc_frequency(true, None, Some(2_500_000_000), config),
+            (2_500_000_000, TscFrequencySource::PitChannel2)
+        );
+        assert_eq!(
+            select_tsc_frequency(true, None, None, config),
+            (4_000_000_000, TscFrequencySource::Platform(config.source))
+        );
+    }
+
+    #[def_test]
+    fn test_tsc_frequencies_agree_within_ten_percent() {
+        assert!(tsc_frequencies_agree(4_000_000_000, 4_400_000_000));
+        assert!(!tsc_frequencies_agree(4_000_000_000, 4_500_000_000));
+        assert!(!tsc_frequencies_agree(0, 1_000_000));
     }
 }

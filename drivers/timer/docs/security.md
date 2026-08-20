@@ -55,26 +55,28 @@ helper 持有本地 LAPIC 锁并限制可变访问范围。
 
 | 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
 |------|----------|----------|----------|----------|
-| T-01 | VMM 提供错误但处于范围内的 CPUID TSC 频率 | 高 | CPUID 叶 0x15 内容与实际 TSC 速率不一致 | 记录来源和频率；运行环境需要保证虚拟 CPU 架构契约 |
+| T-01 | VMM 提供错误但处于范围内的 CPUID TSC 频率 | 高 | CPUID 叶 0x15 内容与实际 TSC 速率不一致 | invariant TSC 存在时用 PIT 交叉校验，相对误差超过 10% 则采用 PIT；仍无法识别 PIT 同样被缩放的情况 |
 | T-02 | PIT 永久不置 output 位 | 高 | VMM 缺失 PIT 或设备状态损坏 | TSC tick 阈值终止等待，随后使用平台值 |
 | T-03 | PIT 测量受到 VMM 调度停顿 | 中 | vCPU 在测量区间被抢占 | 尝试三轮、丢弃失败样本并采用最小有效频率，降低正向误差 |
 | T-04 | 多 vCPU TSC 不同步 | 高 | VMM 未提供同步 TSC，任务跨 CPU 迁移 | 当前依赖平台同步 TSC 契约；部署环境需要保证 invariant TSC 和 vCPU 同步 |
 | T-05 | PIT channel 2 被并发使用 | 中 | 后续调用方绕过早期启动约束 | API 保持私有，平台只在 bootstrap CPU 早期调用一次 |
-| T-06 | TSC 速率随 P/C-state 改变 | 高 | CPU/VMM 未报告 invariant TSC | 启动时记录警告；部署环境需提供 invariant TSC，当前没有动态频率补偿 |
+| T-06 | TSC 速率随 P/C-state 改变 | 高 | CPU/VMM 未报告 invariant TSC | 跳过 0x15 / PIT，使用平台静态频率并记录警告；当前没有动态频率补偿或替代时钟源 |
 
 ## 故障模式与影响分析
 
 | 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
 |------|----------|----------|----------|----------|--------|----------|
-| F-01 | CPUID 叶 0x15 缺失 | CPU 或 VMM 未实现该叶 | 无架构频率值 | 进入 PIT 校准 | 4 | 自动切换到 PIT |
+| F-01 | CPUID 叶 0x15 缺失 | CPU 或 VMM 未实现该叶 | 无架构频率值 | invariant TSC 存在时进入 PIT 校准 | 4 | 自动切换到 PIT |
 | F-02 | PIT 校准超时 | PIT 缺失、output 不变或 port I/O 故障 | 当前样本无实测频率 | 其余轮次继续测量；全部失败时使用平台静态值 | 2 | 有界等待并记录警告 |
 | F-03 | PIT 样本频率越界 | 设备异常或测量区间失真 | 当前样本丢弃 | 所有样本失效时使用平台值 | 3 | 只接受 1 MHz 到 100 GHz |
-| F-04 | 平台静态频率错误 | Kconfig 配置与运行环境不一致 | tick 换算比例错误 | 超时、调度和协议计时整体漂移 | 2 | 优先使用 CPUID 或 PIT，fallback 日志暴露来源 |
+| F-04 | 平台静态频率错误 | Kconfig 配置与运行环境不一致 | tick 换算比例错误 | 超时、调度和协议计时整体漂移 | 2 | 有 invariant TSC 时优先使用 CPUID 或 PIT；无该能力时本路径是主动选择 |
 | F-05 | LAPIC timer 编程早于初始化 | 平台启动顺序错误 | 无效寄存器访问 | 启动失败或定时器中断缺失 | 1 | BootHandler 在 LAPIC 初始化后调用对应入口 |
+| F-06 | 未报告 invariant TSC | TCG qemu64 或未声明恒定 TSC 的 CPU | 跳过 0x15 / PIT | 使用平台静态频率，时间尺度与历史回退一致 | 3 | 启动警告；有 invariant TSC 的 KVM / host CPU 仍走校准 |
 
 ## 故障管理
 
-- CPUID 字段缺失和 PIT 失效均进入后备路径。
+- 未报告 invariant TSC 时直接使用平台频率。有该能力时，CPUID 与 PIT 交叉校验，
+  两侧都失效才进入平台后备。
 - PIT 超时和平台 fallback 记录 warning，最终频率以 info 日志输出。
 - 平台 fallback 超出 1 MHz 到 100 GHz 范围或换算比例超出表示范围时触发启动期断言。
 - LAPIC 编程错误属于平台初始化不变量破坏，当前没有运行期恢复路径。
@@ -86,10 +88,12 @@ helper 持有本地 LAPIC 锁并限制可变访问范围。
 ## 已知限制
 
 - x86_64 后端尚未使用 KVM pvclock 或 Hyper-V reference TSC page。
-- 当前依赖所有 vCPU 的 TSC 同步和恒定速率；缺少 invariant TSC 时仅告警，尚未提供
-  替代时钟源、动态频率补偿或跨 CPU 偏移校验。
-- 合法范围只能过滤明显错误的 CPUID 频率，无法识别处于范围内的恶意频率。
-- PIT 校准增加约 150 ms 的 x86_64 启动时间，仅在 CPUID 叶 0x15 无法给出频率时发生。
+- 当前依赖所有 vCPU 的 TSC 同步和恒定速率；缺少 invariant TSC 时改用平台静态
+  频率，尚未提供替代时钟源、动态频率补偿或跨 CPU 偏移校验。
+- 合法范围只能过滤明显错误的 CPUID 频率。PIT 交叉校验能拒绝与实测相差超过 10%
+  的 0x15 值，无法识别 PIT 与 CPUID 被同步缩放的情况。
+- 报告 invariant TSC 时 PIT 交叉校验增加约 150 ms 的 x86_64 启动时间。未报告该
+  能力时不再进入 PIT。
 
 ## 审计清单
 
