@@ -49,7 +49,7 @@ pub use self::{
         DeviceRegion, DeviceRegionIter, IoMapError, device_regions, iomap_device, iounmap,
         register_device_region, register_fixed_device_region,
     },
-    kernel_aspace::{KernelAddressSpace, KernelMapping},
+    kernel_aspace::KernelAddressSpace,
     lifetime::MmObserver,
     vma::{
         FileMappingInfo, ForkCloneTarget, MsyncPolicy, MsyncRuntimeResult, VmArea, VmAreaSet,

@@ -3,13 +3,15 @@
 
 `memspace` 是 X-Kernel 的地址空间 owner。它把用户和内核地址空间分成两个
 明确的 owner：`UserMmSpace` 维护 `VmAreaSet`、用户页表和 VMA-side runtime
-dispatch；`KernelAddressSpace` 维护全局内核页表和轻量的
-`KernelMappingSet`（仅记录内核 VA 区间及当前 PTE flags）。
+dispatch；`KernelAddressSpace` 维护全局内核页表，页表是内核映射状态的唯一
+source of truth。
 
 `MmSpace` / `AddrSpace` 仍是 `UserMmSpace` 的兼容别名。内核映射不再伪装成
 `VmArea`：动态 IOMAP 和 VMALLOC 区间由共享的
-`kernel_va::KernelVaAllocator` 分配，`KernelMappingSet` 只记录页表映射
-metadata，两个区域管理器各自保留物理 backing 和生命周期描述符。
+`kernel_va::KernelVaAllocator` 分配，VA 区间所有权（占用/空闲）由 allocator
+独占维护；映射 flags 只存于 PTE，需要时通过 `PageTable::query` 读回，对齐
+Linux 线性映射与 `set_memory_*` 的做法。两个区域管理器各自保留物理 backing
+和生命周期描述符。
 
 它不拥有 file-backed cached content，也不拥有 anonymous page content。
 内容对象分别由 `kvfs::AddressSpace` 和 `mm/anon` 管理；`memspace` 只保存
@@ -91,9 +93,8 @@ flush 完成前仍保留在共享 allocator，随后才释放 reservation；因�
 映射安装先取得共享 VA reservation，再按 `KERNEL_ASPACE` →
 `DEVICE_REGISTRY` 的短锁序发布页表和 registry metadata；最后一次
 `iounmap` 先发布 `Removing` 状态并释放 registry 锁，再拆 PTE、执行全局
-TLB flush，最后释放 `KernelMappingSet` 和共享 VA reservation，重新获取
-registry 锁删除 metadata，避免在 shootdown 期间让 IPI 目标 CPU 等待 registry
-锁。
+TLB flush，最后释放共享 VA reservation，重新获取 registry 锁删除 metadata，
+避免在 shootdown 期间让 IPI 目标 CPU 等待 registry 锁。
 
 ## 架构
 
@@ -119,9 +120,8 @@ object owner
   -> VMA lookup and runtime unmap
 
 KernelAddressSpace
-  -> kernel PageTable
+  -> kernel PageTable (source of truth for linear/kimage/iomap mappings)
   -> paging error/transaction helpers
-  -> KernelMappingSet (static linear mappings + iomap metadata)
   -> kernel_va::KernelVaAllocator (shared IOMAP + VMALLOC intervals)
   -> iomap::DEVICE_REGISTRY (physical-device identity and refcounts)
   -> vmalloc::VmRegion (physical backing and lifetime)

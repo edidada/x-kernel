@@ -19,10 +19,10 @@
 - object-side invalidate request 的复核和 PTE zap。
 - `MmUserHandle` / `MmPin` 生命周期 capability，区分 active user mappings
   与对象 pin。
-- 内核线性/iomap 的页表映射 metadata 由 `KernelMappingSet` 记录；IOMAP 和
-  VMALLOC 的动态 VA ownership 由共享的 `KernelVaAllocator` 记录，两个区域
-  的 backing/lifetime descriptor 各自管理；这些记录都不进入用户
-  `VmAreaSet`。
+- 内核线性/iomap 的页表映射 metadata 由页表本身记录（PTE 是 source of
+  truth）；IOMAP 和 VMALLOC 的动态 VA ownership 由共享的
+  `KernelVaAllocator` 记录，两个区域的 backing/lifetime descriptor 各自
+  管理；这些记录都不进入用户 `VmAreaSet`。
 
 ## 外部边界 / 攻击面
 
@@ -70,14 +70,13 @@
 ## 线程安全
 
 - `UserMmSpace` mutable operations require external exclusive access.
-- `KernelAddressSpace::map_linear` / `unmap_no_release` / `protect` 使用
+- `KernelAddressSpace::map_linear` / `unmap_kernel_range` / `protect` 使用
   `finish_no_flush()`；调用方必须释放 `kernel_layout()` 锁后调用全局内核
   TLB shootdown，再释放可复用的 VA 区间。
 - 全局内核映射拒绝 `MappingFlags::USER`；需要用户可访问权限的映射必须
   进入 `UserMmSpace` 的 VMA/page-table 路径。
 - `KernelAddressSpace::page_table_mut()` 是受限 escape hatch；只有拥有自己
-  VA 区间表的区域管理器（当前为 `vmalloc`）才能使用，且不得与
-  `KernelMappingSet` 记录的区间重叠。
+  VA 区间表的区域管理器（当前为 `vmalloc`）才能使用。
 - `InvalidateSink` spinlock only protects queue mutation; it must not cover
   runtime unmap, page-table mutation, or sleepable lock acquisition.
 - `PageTable::modify()` enforces one mutable page-table guard at a time.
@@ -109,9 +108,8 @@
   与远端 TLB flush 都完成后才可重新分配；否则新映射可能命中旧 TLB 翻译并
   写入已释放的物理页。
 - `iomap_device()` 的最后一个引用释放时，设备注册表先把条目标为
-  `Removing`；完成 PTE 拆除和全局 TLB flush 后才释放 `KernelMappingSet` 区间
-  和共享 VA reservation，再删除注册表项。并发 `iomap_device()` 不能在拆除
-  期间复用旧 VA。
+  `Removing`；完成 PTE 拆除和全局 TLB flush 后才释放共享 VA reservation，
+  再删除注册表项。并发 `iomap_device()` 不能在拆除期间复用旧 VA。
 - `DEVICE_REGISTRY` 不得跨越同步 TLB shootdown 持有；安装路径的
   reservation → `KERNEL_ASPACE` → registry 锁序与拆除路径的 `Removing` 两阶段
   协议必须保持。

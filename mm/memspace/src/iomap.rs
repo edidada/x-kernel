@@ -254,7 +254,7 @@ pub fn iounmap(vaddr: VirtAddr) -> Result<(), IoMapError> {
 
     let unmap_result = {
         let mut layout = kernel_layout().lock();
-        layout.unmap_no_release(base, entry.region.size)
+        layout.unmap_kernel_range(base, entry.region.size)
     };
     if unmap_result.is_err() {
         // Restore the reference on a failed page-table teardown.  The
@@ -270,14 +270,10 @@ pub fn iounmap(vaddr: VirtAddr) -> Result<(), IoMapError> {
         return Err(IoMapError::MappingFailed);
     }
 
-    // The mapping metadata and shared VA reservation remain owned until every
-    // CPU has discarded the old translation. This mirrors vmalloc's release
-    // ordering and prevents a racing iomap from reusing a stale VA.
+    // The shared VA reservation remains owned until every CPU has discarded
+    // the old translation. This mirrors vmalloc's release ordering and
+    // prevents a racing iomap from reusing a stale VA.
     crate::flush_kernel_tlb(None);
-    kernel_layout()
-        .lock()
-        .release_mapping(base, entry.region.size)
-        .expect("iomap mapping metadata must match the removed PTEs");
     KERNEL_VA_ALLOCATOR
         .lock()
         .release(reservation)
