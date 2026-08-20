@@ -237,13 +237,35 @@ impl KernelTraceOps for Kops {
         }
 
         let start_va = VirtAddr::from(start);
+        // Read the current PTE flags from the first touched page.  Kernel
+        // text is mapped RX with one flags value per segment, so the rest
+        // of the touched range shares the same flags; the debug assert below
+        // catches any future divergence.
         let old_flags = {
             let layout = memspace::kernel_layout().lock();
-            let Some(mapping) = layout.find_mapping(start_va) else {
-                return;
-            };
-            mapping.flags()
+            match layout.page_table().query(start_va) {
+                Ok((_, flags, _)) => flags,
+                Err(_) => return,
+            }
         };
+        // Verify every page in the touched range shares `old_flags`.  This
+        // keeps `protect(start_va, span, ...)` semantically equivalent to the
+        // old single-mapping metadata lookup.
+        if span > PAGE_SIZE_4K {
+            let layout = memspace::kernel_layout().lock();
+            let mut cursor = start_va + PAGE_SIZE_4K;
+            let end_va = start_va + span;
+            while cursor < end_va {
+                match layout.page_table().query(cursor) {
+                    Ok((_, flags, _)) => debug_assert_eq!(
+                        flags, old_flags,
+                        "kernel text flags must be uniform across the patched range"
+                    ),
+                    Err(_) => return,
+                }
+                cursor += PAGE_SIZE_4K;
+            }
+        }
 
         // static-keys patches instructions in kernel text, which is normally RX.
         // Temporarily add WRITE permission for the touched page range.
