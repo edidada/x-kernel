@@ -485,6 +485,11 @@ impl Router {
     /// socket already bound a source. Multicast destinations do not consult the
     /// unicast table; Linux installs `ff00::/8` via `addrconf_add_mroute`, while
     /// knet selects the scoped device and a unicast source on that device.
+    ///
+    /// A bound link-local source must live on the chosen output device
+    /// (`EINVAL` if it does not). A bound global unicast may come from another
+    /// interface. Unspecified, multicast, or unknown bound sources return
+    /// `EADDRNOTAVAIL`.
     pub fn ipv6_output_source(
         &self,
         dst: &IpAddress,
@@ -506,7 +511,7 @@ impl Router {
         }
         .ok_or(KError::from(LinuxError::ENETUNREACH))?;
         self.require_output_device_up(rule.dev)?;
-        let source = self.ipv6_bound_or_route_source(bound_src, rule.src)?;
+        let source = self.ipv6_bound_or_route_source(bound_src, rule.src, rule.dev)?;
         Ok((source, rule.ifindex() as i32))
     }
 
@@ -536,7 +541,7 @@ impl Router {
         let route_source = self
             .ipv6_unicast_source_on_device(dev)
             .ok_or(KError::from(LinuxError::ENETUNREACH))?;
-        let source = self.ipv6_bound_or_route_source(bound_src, route_source)?;
+        let source = self.ipv6_bound_or_route_source(bound_src, route_source, dev)?;
         Ok((source, dev as i32 + 1))
     }
 
@@ -544,14 +549,31 @@ impl Router {
         &self,
         bound_src: Option<IpAddress>,
         route_source: IpAddress,
+        output_dev: usize,
     ) -> KResult<IpAddress> {
-        match bound_src {
-            Some(addr) if addr.is_unspecified() || addr.is_multicast() => {
-                Err(LinuxError::EADDRNOTAVAIL.into())
-            }
-            Some(addr) => Ok(addr),
-            None => Ok(route_source),
+        let Some(addr) = bound_src else {
+            return Ok(route_source);
+        };
+        let IpAddress::Ipv6(v6) = addr else {
+            return Err(LinuxError::EAFNOSUPPORT.into());
+        };
+        if v6.is_unspecified() || v6.is_multicast() {
+            return Err(LinuxError::EADDRNOTAVAIL.into());
         }
+        // Linux `ipv6_chk_addr_and_flags` (datagram.c IPV6_PKTINFO): link-local
+        // sources must live on the output device; global unicast may come from
+        // another interface in the same L3 domain.
+        let Some(entry) = self
+            .ipv6_addrs
+            .iter()
+            .find(|entry| entry.addr.address() == v6)
+        else {
+            return Err(LinuxError::EADDRNOTAVAIL.into());
+        };
+        if v6.is_link_local() && entry.dev != output_dev {
+            return Err(LinuxError::EINVAL.into());
+        }
+        Ok(addr)
     }
 
     fn ipv6_unicast_source_on_device(&self, dev: usize) -> Option<IpAddress> {
@@ -1691,6 +1713,82 @@ mod tests {
             .unwrap();
         assert_eq!(source, IpAddress::Ipv6(Ipv6Address::LOCALHOST));
         assert_eq!(ifindex, lo as i32 + 1);
+    }
+
+    fn link_local(octet: u8) -> Ipv6Address {
+        Ipv6Address::from_octets([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, octet])
+    }
+
+    fn global_unicast(octet: u8) -> Ipv6Address {
+        Ipv6Address::from_octets([
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, octet,
+        ])
+    }
+
+    fn router_with_two_link_local_loopbacks() -> (Router, usize, usize) {
+        let mut router = Router::new();
+        let lo0 = router.add_device(Box::new(LoopbackDevice::new()));
+        let lo1 = router.add_device(Box::new(LoopbackDevice::new()));
+        router
+            .add_ipv6_addr(Ipv6AddrEntry {
+                dev: lo0,
+                addr: Ipv6Cidr::new(link_local(1), 64),
+                scope: ROUTE_SCOPE_LINK,
+            })
+            .unwrap();
+        router
+            .add_ipv6_addr(Ipv6AddrEntry {
+                dev: lo1,
+                addr: Ipv6Cidr::new(link_local(2), 64),
+                scope: ROUTE_SCOPE_LINK,
+            })
+            .unwrap();
+        (router, lo0, lo1)
+    }
+
+    #[def_test]
+    fn ipv6_bound_link_local_source_must_match_output_device() {
+        let (router, lo0, lo1) = router_with_two_link_local_loopbacks();
+        let dst = IpAddress::Ipv6(link_local(2));
+        let bound_on_lo0 = Some(IpAddress::Ipv6(link_local(1)));
+        let bound_on_lo1 = Some(IpAddress::Ipv6(link_local(2)));
+
+        assert_eq!(
+            router.ipv6_output_source(&dst, bound_on_lo0, lo1 as u32 + 1),
+            Err(LinuxError::EINVAL.into())
+        );
+        let (source, ifindex) = router
+            .ipv6_output_source(&dst, bound_on_lo1, lo1 as u32 + 1)
+            .unwrap();
+        assert_eq!(source, IpAddress::Ipv6(link_local(2)));
+        assert_eq!(ifindex, lo1 as i32 + 1);
+
+        let dst_on_lo0 = IpAddress::Ipv6(link_local(1));
+        let (source, ifindex) = router
+            .ipv6_output_source(&dst_on_lo0, bound_on_lo0, lo0 as u32 + 1)
+            .unwrap();
+        assert_eq!(source, IpAddress::Ipv6(link_local(1)));
+        assert_eq!(ifindex, lo0 as i32 + 1);
+    }
+
+    #[def_test]
+    fn ipv6_bound_global_source_may_leave_its_device() {
+        let (mut router, lo0, lo1) = router_with_two_link_local_loopbacks();
+        let gua = global_unicast(1);
+        router
+            .add_ipv6_addr(Ipv6AddrEntry {
+                dev: lo0,
+                addr: Ipv6Cidr::new(gua, 64),
+                scope: ROUTE_SCOPE_UNIVERSE,
+            })
+            .unwrap();
+
+        let dst = IpAddress::Ipv6(link_local(2));
+        let (source, ifindex) = router
+            .ipv6_output_source(&dst, Some(IpAddress::Ipv6(gua)), lo1 as u32 + 1)
+            .unwrap();
+        assert_eq!(source, IpAddress::Ipv6(gua));
+        assert_eq!(ifindex, lo1 as i32 + 1);
     }
 }
 

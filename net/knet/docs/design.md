@@ -431,6 +431,13 @@ IPv6 扩展头仅跳过定位上层协议；Fragment 头直接丢弃，不重组
 IPv6 link-local 收发使用 `sin6_scope_id` 选择接口：`sockaddr_in6` 可传入 scope，
 link-local 与组播发送把 scope 写入 TX `PacketBuf` 的 ifindex，dispatch 按该接口发出；
 `recvfrom` 对 link-local 源返回到达接口。
+绑定的链路本地源地址必须属于所选输出接口，否则 `ipv6_output_source` 返回 `EINVAL`；
+全局单播源可以来自同一 L3 域的其他接口。Linux `udpv6_sendmsg` 本身不在 sendto 时
+复核绑定源与 `sin6_scope_id`，但 `connect`、`IPV6_PKTINFO` 与 `ipv6_chk_addr` 对
+链路本地要求设备匹配；knet 在发送路径按该契约拒绝跨接口链路本地源。
+组播 ICMPv6 Echo Reply 使用接收接口上的单播源（loopback 为 `::1`，Ethernet 为
+link-local），不采用单播路由表的 `prefsrc`。这对应 RFC 4443 §4.2 与 Linux
+`icmpv6_echo_reply` 在组播请求上清空 `saddr`、按 `icmp6_iif` 做源地址选择。
 当前不实现 scoped listen/accept 继承、全局地址 scoped bind，以及 ICMPv6 差错的 scoped lookup。
 当前不实现 `IPV6_ADD_MEMBERSHIP`：组播 UDP 只投递给绑定到该组播地址的 socket，通配 `[::]:port` 不会收到组播。
 IPv6 endpoint 的文本格式遵循 `[address%scope]:port`，避免地址与端口之间的冒号歧义。

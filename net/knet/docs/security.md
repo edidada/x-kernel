@@ -334,7 +334,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - AF_INET6 仅支持 `SOCK_STREAM` 与 `SOCK_DGRAM`；IPv6 raw socket 尚未实现。
 - AF_INET6 UDP 默认 V6-only，不支持 v4-mapped 地址与 dual-stack socket。
 - 不做 SLAAC / RA / DHCPv6；IPv6 地址依赖启动时经 Router 安装的 `::1` 与 link-local，`RTM_NEWADDR`/`RTM_DELADDR` 对 IPv6 返回 `EOPNOTSUPP`。
-- IPv6 scope 仅覆盖 link-local/组播发送指定接口与 `recvfrom` 返回到达接口；不实现 scoped listen/accept 继承或全局地址 scoped bind。
+- IPv6 scope 仅覆盖 link-local/组播发送指定接口与 `recvfrom` 返回到达接口；绑定链路本地源必须属于输出接口；组播 Echo Reply 使用接收接口单播源；不实现 scoped listen/accept 继承或全局地址 scoped bind。
 - 不实现 `IPV6_ADD_MEMBERSHIP`；组播 UDP 不投递给通配绑定，仅投递给绑定到该组播地址的 socket。
 - vsock-TIPC bridge v1 不转发 TIPC handles 或 memrefs，也不为 vsock send credit 建立持久重试队列。
 

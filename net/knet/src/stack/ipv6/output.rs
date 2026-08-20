@@ -134,15 +134,9 @@ pub(crate) fn echo_reply_source(
     if !request_dst.is_multicast() {
         return Some(request_dst);
     }
-    if let Some(IpAddress::Ipv6(addr)) = router
-        .table
-        .lookup(&IpAddress::Ipv6(request_header.src_addr()))
-        .map(|rule| rule.src)
-        && !addr.is_unspecified()
-        && !addr.is_multicast()
-    {
-        return Some(addr);
-    }
+    // RFC 4443 §4.2: a multicast Echo Reply uses a unicast address of the
+    // receiving interface. Linux `icmpv6_echo_reply` clears saddr so
+    // `ipv6_dev_get_saddr` runs against `icmp6_iif`, not a unicast prefsrc.
     let dev = router.devices.get(ifindex.saturating_sub(1) as usize)?;
     let addr = dev.ipv6_echo_source()?;
     (!addr.is_unspecified() && !addr.is_multicast()).then_some(addr)
@@ -213,4 +207,68 @@ fn link_local_output_device(router: &Router, ifindex: i32) -> Option<usize> {
         .devices
         .iter()
         .position(|dev| dev.ipv6_link_local().is_some())
+}
+
+#[cfg(unittest)]
+mod tests {
+    use alloc::boxed::Box;
+
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+    use crate::{
+        device::LoopbackDevice,
+        ipv6::{PROTOCOL_ICMPV6, build_ipv6_packet},
+        router::{Ipv6AddrEntry, ROUTE_SCOPE_HOST, ROUTE_SCOPE_UNIVERSE},
+    };
+
+    fn global_unicast(octet: u8) -> Ipv6Address {
+        Ipv6Address::from_octets([
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, octet,
+        ])
+    }
+
+    #[def_test]
+    fn multicast_echo_reply_uses_receiving_interface_source() {
+        let mut router = Router::new();
+        let lo = router.add_device(Box::new(LoopbackDevice::new()));
+        let gua = global_unicast(1);
+        let pinger = global_unicast(2);
+        router
+            .add_ipv6_addr(Ipv6AddrEntry {
+                dev: lo,
+                addr: Ipv6Cidr::new(gua, 64),
+                scope: ROUTE_SCOPE_UNIVERSE,
+            })
+            .unwrap();
+        router
+            .add_ipv6_addr(Ipv6AddrEntry {
+                dev: lo,
+                addr: Ipv6Cidr::new(Ipv6Address::LOCALHOST, 128),
+                scope: ROUTE_SCOPE_HOST,
+            })
+            .unwrap();
+
+        assert_eq!(
+            router
+                .table
+                .lookup(&IpAddress::Ipv6(pinger))
+                .map(|rule| rule.src),
+            Some(IpAddress::Ipv6(gua))
+        );
+
+        let packet = build_ipv6_packet(
+            pinger,
+            Ipv6Address::ALL_NODES_LINK_LOCAL,
+            PROTOCOL_ICMPV6,
+            64,
+            &[],
+        )
+        .unwrap();
+        let header = Ipv6Header::parse_input(&packet).unwrap();
+        assert_eq!(
+            echo_reply_source(&router, header, lo as i32 + 1),
+            Some(Ipv6Address::LOCALHOST)
+        );
+    }
 }
