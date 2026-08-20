@@ -51,10 +51,12 @@ pub use transport::{raw, tcp, udp};
 use crate::{
     consts::{GATEWAY, IP, IP_PREFIX, TIMER_SAMPLE_PERIOD},
     device::{EthernetDevice, LoopbackDevice},
-    ip::{IpAddress, Ipv4Address, Ipv4Cidr, Ipv6Address},
+    ip::{IpAddress, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
     listen_table::ListenTable,
-    netlink::{AddrState, RouteState, wire::route as wire_route},
-    router::{Ipv4AddrEntry, ROUTE_SCOPE_HOST, ROUTE_SCOPE_UNIVERSE, Router, Rule},
+    router::{
+        Ipv4AddrEntry, Ipv6AddrEntry, ROUTE_SCOPE_HOST, ROUTE_SCOPE_LINK, ROUTE_SCOPE_UNIVERSE,
+        Router, Rule,
+    },
     service::Service,
     wrapper::SocketSetWrapper,
 };
@@ -81,15 +83,20 @@ pub fn init_network() {
             scope: ROUTE_SCOPE_HOST,
         })
         .expect("loopback IPv4 address must fit the interface");
+    router
+        .add_ipv6_addr(Ipv6AddrEntry {
+            dev: lo_dev,
+            addr: Ipv6Cidr::new(Ipv6Address::LOCALHOST, 128),
+            scope: ROUTE_SCOPE_HOST,
+        })
+        .expect("loopback IPv6 address must fit the interface");
 
-    let mut eth0_mac = None;
     let mut eth0_rx_poll = None;
     let eth0_ip = if let Some(handle) = net_devs.pop() {
         let device_id = handle.id();
         info!("  use NIC 0: {:?}", handle.name());
 
         let eth0_address = wire::MacAddress(handle.mac().0);
-        eth0_mac = Some(handle.mac().0);
         let eth0_ip = Ipv4Cidr::new(IP.parse().expect("Invalid IPv4 address"), IP_PREFIX);
 
         let eth0 = EthernetDevice::new("eth0".to_owned(), handle);
@@ -112,9 +119,19 @@ pub fn init_network() {
             eth0_ip.address().into(),
         ));
 
+        let link_local = Ipv6Address::link_local_from_mac(eth0_address.0);
+        router
+            .add_ipv6_addr(Ipv6AddrEntry {
+                dev: eth0_dev,
+                addr: Ipv6Cidr::new(link_local, 64),
+                scope: ROUTE_SCOPE_LINK,
+            })
+            .expect("Ethernet IPv6 link-local address must fit the interface");
+
         info!("eth0:");
         info!("  mac:  {}", eth0_address);
         info!("  ip:   {}", eth0_ip);
+        info!("  ipv6 link-local: {}", link_local);
         subscribe_network_unregister(device_id);
 
         Some(eth0_ip)
@@ -127,59 +144,10 @@ pub fn init_network() {
         info!("Device: {}", dev.name());
     }
 
-    let mut netlink_state =
+    // IPv4 and IPv6 addresses are owned by Router. ROUTE_STATE only keeps
+    // configured routes (such as the IPv4 default gateway) and neighbors.
+    let netlink_state =
         netlink::build_initial_state(eth0_ip.map(to_smoltcp_ipv4_cidr), GATEWAY.parse().ok());
-
-    // IPv4 addresses stay owned by Router. IPv6 bootstrap addresses still live
-    // in rtnetlink state and are projected into the data plane by sync_netlink.
-    let lo_v6 = smoltcp::wire::IpAddress::Ipv6(Ipv6Address::LOCALHOST.into());
-    netlink_state.addrs.push(AddrState {
-        index: 1,
-        family: wire_route::FAMILY_IPV6,
-        prefix_len: 128,
-        scope: wire_route::SCOPE_HOST,
-        address: lo_v6,
-    });
-    netlink_state.routes.push(RouteState {
-        family: wire_route::FAMILY_IPV6,
-        dst_len: 128,
-        table: wire_route::TABLE_MAIN,
-        protocol: wire_route::PROTOCOL_BOOT,
-        scope: wire_route::SCOPE_HOST,
-        route_type: wire_route::TYPE_UNICAST,
-        oif: 1,
-        dst: Some(lo_v6),
-        gateway: None,
-        prefsrc: Some(lo_v6),
-    });
-
-    if let Some(mac) = eth0_mac {
-        let link_local = Ipv6Address::link_local_from_mac(mac);
-        let ll_addr = smoltcp::wire::IpAddress::Ipv6(link_local.into());
-        let fe80_prefix = smoltcp::wire::IpAddress::Ipv6(
-            Ipv6Address::from_octets([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).into(),
-        );
-        netlink_state.addrs.push(AddrState {
-            index: 2,
-            family: wire_route::FAMILY_IPV6,
-            prefix_len: 64,
-            scope: wire_route::SCOPE_LINK,
-            address: ll_addr,
-        });
-        netlink_state.routes.push(RouteState {
-            family: wire_route::FAMILY_IPV6,
-            dst_len: 64,
-            table: wire_route::TABLE_MAIN,
-            protocol: wire_route::PROTOCOL_BOOT,
-            scope: wire_route::SCOPE_LINK,
-            route_type: wire_route::TYPE_UNICAST,
-            oif: 2,
-            dst: Some(fe80_prefix),
-            gateway: None,
-            prefsrc: Some(ll_addr),
-        });
-        info!("  ipv6 link-local: {}", link_local);
-    }
 
     let service = Service::new(router);
     service.sync_netlink(&netlink_state);

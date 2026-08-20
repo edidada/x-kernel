@@ -21,7 +21,8 @@ use super::{
 };
 use crate::{
     device::{LINK_FLAG_UP, LINK_FLAG_VOLATILE, LinkConfigUpdate, LinkKind, LinkSnapshot},
-    router::Ipv4AddrEntry,
+    ip::{IpAddress as KernelIpAddress, IpCidr as KernelIpCidr},
+    router::{Ipv4AddrEntry, Rule},
     service::ExistingIpv4AddrAction,
 };
 
@@ -92,18 +93,6 @@ struct RouteAttrs {
 struct NeighAttrs {
     dst: Option<IpAddress>,
     lladdr: Option<[u8; 6]>,
-}
-
-impl From<AddrRequest> for AddrState {
-    fn from(value: AddrRequest) -> Self {
-        Self {
-            index: value.index,
-            family: value.family,
-            prefix_len: value.prefix_len,
-            scope: value.scope,
-            address: value.address,
-        }
-    }
 }
 
 impl From<RouteRequest> for RouteState {
@@ -268,42 +257,46 @@ fn dump_links(request: &NlMsgHeader, _payload: &[u8]) -> Vec<NetlinkPacket> {
 }
 
 fn dump_addrs(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
-    let family = payload.first().copied().filter(|family| *family != 0);
-    let dump_ipv4 = family.is_none() || family == Some(wire_route::FAMILY_IPV4);
-    let dump_ipv6 = family.is_none() || family == Some(wire_route::FAMILY_IPV6);
-    let links = if SERVICE.is_inited() {
-        SERVICE.link_snapshots()
-    } else {
-        Vec::new()
-    };
+    let (dump_ipv4, dump_ipv6) = requested_families(payload);
+    if !SERVICE.is_inited() {
+        return Vec::new();
+    }
     let mut packets = Vec::new();
-    if dump_ipv4 && SERVICE.is_inited() {
+    if dump_ipv4 {
         packets.extend(
             SERVICE
                 .ipv4_addr_snapshots()
                 .into_iter()
                 .map(|snapshot| NetlinkPacket {
                     from: NetlinkAddr { pid: 0, groups: 0 },
-                    data: build_ipv4_addr_message(request, snapshot.entry, &snapshot.label),
+                    data: build_addr_message(
+                        request,
+                        wire_route::FAMILY_IPV4,
+                        snapshot.entry.addr.prefix_len(),
+                        snapshot.entry.scope,
+                        snapshot.entry.ifindex(),
+                        IpAddress::Ipv4(snapshot.entry.addr.address().into()),
+                        &snapshot.label,
+                    ),
                 }),
         );
     }
     if dump_ipv6 {
         packets.extend(
-            route_state()
-                .addrs
+            SERVICE
+                .ipv6_addr_snapshots()
                 .into_iter()
-                .filter(|addr| addr.family == wire_route::FAMILY_IPV6)
-                .map(|addr| {
-                    let label = links
-                        .iter()
-                        .find(|link| link.ifindex as u32 == addr.index)
-                        .map(|link| link.name.as_str())
-                        .unwrap_or("");
-                    NetlinkPacket {
-                        from: NetlinkAddr { pid: 0, groups: 0 },
-                        data: build_ipv6_addr_message(request, addr, label),
-                    }
+                .map(|snapshot| NetlinkPacket {
+                    from: NetlinkAddr { pid: 0, groups: 0 },
+                    data: build_addr_message(
+                        request,
+                        wire_route::FAMILY_IPV6,
+                        snapshot.entry.addr.prefix_len(),
+                        snapshot.entry.scope,
+                        snapshot.entry.ifindex(),
+                        IpAddress::Ipv6(snapshot.entry.addr.address().into()),
+                        &snapshot.label,
+                    ),
                 }),
         );
     }
@@ -311,16 +304,39 @@ fn dump_addrs(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
 }
 
 fn dump_routes(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
-    let family = payload.first().copied().filter(|family| *family != 0);
-    route_state()
+    let (dump_ipv4, dump_ipv6) = requested_families(payload);
+    let mut packets: Vec<_> = route_state()
         .routes
         .into_iter()
-        .filter(|route| family.is_none() || family == Some(route.family))
+        .filter(|route| {
+            (dump_ipv4 && route.family == wire_route::FAMILY_IPV4)
+                || (dump_ipv6 && route.family == wire_route::FAMILY_IPV6)
+        })
         .map(|route| NetlinkPacket {
             from: NetlinkAddr { pid: 0, groups: 0 },
             data: build_route_message(request, route),
         })
-        .collect()
+        .collect();
+    if dump_ipv6 && SERVICE.is_inited() {
+        packets.extend(
+            SERVICE
+                .ipv6_address_route_snapshots()
+                .into_iter()
+                .map(|rule| NetlinkPacket {
+                    from: NetlinkAddr { pid: 0, groups: 0 },
+                    data: build_route_message(request, RouteState::from(rule)),
+                }),
+        );
+    }
+    packets
+}
+
+fn requested_families(payload: &[u8]) -> (bool, bool) {
+    let family = payload.first().copied().filter(|family| *family != 0);
+    (
+        family.is_none() || family == Some(wire_route::FAMILY_IPV4),
+        family.is_none() || family == Some(wire_route::FAMILY_IPV6),
+    )
 }
 
 fn apply_newlink(request: &[u8], header: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
@@ -473,12 +489,6 @@ pub(crate) fn remove_device_state(id: kdevice::DeviceId) -> bool {
         for neigh in &mut state.neighs {
             if neigh.ifindex > removal.ifindex {
                 neigh.ifindex -= 1;
-            }
-        }
-        state.addrs.retain(|addr| addr.index != removal.ifindex);
-        for addr in &mut state.addrs {
-            if addr.index > removal.ifindex {
-                addr.index -= 1;
             }
         }
         state.clone()
@@ -780,18 +790,26 @@ fn build_link_message(request: &NlMsgHeader, link: LinkSnapshot) -> Vec<u8> {
     build_nlmsg(RTM_NEWLINK, request.seq, NLM_F_MULTI, payload)
 }
 
-fn build_ipv4_addr_message(request: &NlMsgHeader, addr: Ipv4AddrEntry, label: &str) -> Vec<u8> {
+fn build_addr_message(
+    request: &NlMsgHeader,
+    family: u8,
+    prefix_len: u8,
+    scope: u8,
+    ifindex: u32,
+    address: IpAddress,
+    label: &str,
+) -> Vec<u8> {
     let mut payload = Vec::new();
     IfAddrMsg {
-        family: wire_route::FAMILY_IPV4,
-        prefix_len: addr.addr.prefix_len(),
+        family,
+        prefix_len,
         flags: 0,
-        scope: addr.scope,
-        index: addr.dev as u32 + 1,
+        scope,
+        index: ifindex,
     }
     .write(&mut payload);
 
-    let ip_bytes = ip_addr_bytes(IpAddress::Ipv4(addr.addr.address().into()));
+    let ip_bytes = ip_addr_bytes(address);
     push_attr(&mut payload, wire_addr::attr::ADDRESS, &ip_bytes);
     push_attr(&mut payload, wire_addr::attr::LOCAL, &ip_bytes);
     push_attr_str(&mut payload, wire_addr::attr::LABEL, label);
@@ -799,23 +817,37 @@ fn build_ipv4_addr_message(request: &NlMsgHeader, addr: Ipv4AddrEntry, label: &s
     build_nlmsg(RTM_NEWADDR, request.seq, NLM_F_MULTI, payload)
 }
 
-fn build_ipv6_addr_message(request: &NlMsgHeader, addr: AddrState, label: &str) -> Vec<u8> {
-    let mut payload = Vec::new();
-    IfAddrMsg {
-        family: addr.family,
-        prefix_len: addr.prefix_len,
-        flags: 0,
-        scope: addr.scope,
-        index: addr.index,
+impl From<Rule> for RouteState {
+    fn from(rule: Rule) -> Self {
+        let family = match rule.filter {
+            KernelIpCidr::Ipv4(_) => wire_route::FAMILY_IPV4,
+            KernelIpCidr::Ipv6(_) => wire_route::FAMILY_IPV6,
+        };
+        let dst = if rule.filter.address().is_unspecified() && rule.filter.prefix_len() == 0 {
+            None
+        } else {
+            Some(kernel_ip_to_smoltcp(rule.filter.address()))
+        };
+        Self {
+            family,
+            dst_len: rule.filter.prefix_len(),
+            table: rule.table,
+            protocol: rule.protocol,
+            scope: rule.scope,
+            route_type: rule.route_type,
+            oif: rule.ifindex(),
+            dst,
+            gateway: rule.via.map(kernel_ip_to_smoltcp),
+            prefsrc: rule.prefsrc.map(kernel_ip_to_smoltcp),
+        }
     }
-    .write(&mut payload);
+}
 
-    let ip_bytes = ip_addr_bytes(addr.address);
-    push_attr(&mut payload, wire_addr::attr::ADDRESS, &ip_bytes);
-    push_attr(&mut payload, wire_addr::attr::LOCAL, &ip_bytes);
-    push_attr_str(&mut payload, wire_addr::attr::LABEL, label);
-
-    build_nlmsg(RTM_NEWADDR, request.seq, NLM_F_MULTI, payload)
+fn kernel_ip_to_smoltcp(addr: KernelIpAddress) -> IpAddress {
+    match addr {
+        KernelIpAddress::Ipv4(address) => IpAddress::Ipv4(address.into()),
+        KernelIpAddress::Ipv6(address) => IpAddress::Ipv6(address.into()),
+    }
 }
 
 fn build_route_message(request: &NlMsgHeader, route: RouteState) -> Vec<u8> {

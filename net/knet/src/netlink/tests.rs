@@ -11,7 +11,7 @@ use kcred::Cred;
 use kerrno::LinuxError;
 use kio::Cursor;
 use ktime_types::MonotonicInstant;
-use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address, Ipv6Address};
+use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address};
 use unittest::def_test;
 
 use super::{
@@ -32,7 +32,7 @@ use crate::{
         LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST, LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind,
         LinkSendSnapshot, LinkSnapshot, NetDevice,
     },
-    router::{Ipv4AddrEntry, Router},
+    router::{Ipv4AddrEntry, Ipv6AddrEntry, Router},
     service::Service,
     socket::SocketOps,
 };
@@ -805,13 +805,13 @@ fn test_dump_routes_returns_done_message() {
 #[def_test(serial)]
 fn test_dump_addrs_with_unspecified_family_returns_ipv6() {
     init_test_state();
-    ROUTE_STATE.write().addrs.push(AddrState {
-        index: 2,
-        family: wire_route::FAMILY_IPV6,
-        prefix_len: 64,
-        scope: wire_route::SCOPE_LINK,
-        address: IpAddress::Ipv6(Ipv6Address::LOCALHOST),
-    });
+    SERVICE
+        .add_ipv6_addr(Ipv6AddrEntry {
+            dev: 0,
+            addr: crate::ip::Ipv6Cidr::new(crate::ip::Ipv6Address::LOCALHOST, 128),
+            scope: wire_route::SCOPE_HOST,
+        })
+        .unwrap();
 
     let packets =
         handle_rtnetlink_request(&build_nlmsg(RTM_GETADDR, 8, NLM_F_REQUEST, vec![0; 12]));
@@ -829,30 +829,36 @@ fn test_dump_addrs_with_unspecified_family_returns_ipv6() {
 #[def_test(serial)]
 fn test_dump_routes_with_unspecified_family_returns_ipv6() {
     init_test_state();
-    ROUTE_STATE.write().routes.push(RouteState {
-        family: wire_route::FAMILY_IPV6,
-        dst_len: 128,
-        table: wire_route::TABLE_MAIN,
-        protocol: wire_route::PROTOCOL_BOOT,
-        scope: wire_route::SCOPE_HOST,
-        route_type: wire_route::TYPE_UNICAST,
-        oif: 1,
-        dst: Some(IpAddress::Ipv6(Ipv6Address::LOCALHOST)),
-        gateway: None,
-        prefsrc: Some(IpAddress::Ipv6(Ipv6Address::LOCALHOST)),
-    });
+    SERVICE
+        .add_ipv6_addr(Ipv6AddrEntry {
+            dev: 0,
+            addr: crate::ip::Ipv6Cidr::new(crate::ip::Ipv6Address::LOCALHOST, 128),
+            scope: wire_route::SCOPE_HOST,
+        })
+        .unwrap();
 
     let packets =
         handle_rtnetlink_request(&build_nlmsg(RTM_GETROUTE, 9, NLM_F_REQUEST, vec![0; 12]));
 
-    assert!(
-        packets[..packets.len() - 1]
-            .iter()
-            .any(|packet| packet.data.get(NLMSG_HDR_LEN).copied() == Some(wire_route::FAMILY_IPV6))
-    );
+    let ipv6_local = packets[..packets.len() - 1].iter().find(|packet| {
+        packet.data.get(NLMSG_HDR_LEN).copied() == Some(wire_route::FAMILY_IPV6)
+            && packet.data.get(NLMSG_HDR_LEN + 1).copied() == Some(128)
+    });
+    let payload = &ipv6_local.expect("missing ::1/128 host route").data[NLMSG_HDR_LEN..];
+    assert_eq!(payload.get(4).copied(), Some(wire_route::TABLE_LOCAL));
+    assert_eq!(payload.get(6).copied(), Some(wire_route::SCOPE_UNIVERSE));
+    assert_eq!(payload.get(7).copied(), Some(wire_route::TYPE_LOCAL));
     assert_eq!(
         read_u16_ne(&packets[packets.len() - 1].data, 4),
         Some(NLMSG_DONE)
+    );
+    assert_eq!(
+        SERVICE.add_ipv6_addr(Ipv6AddrEntry {
+            dev: 1,
+            addr: crate::ip::Ipv6Cidr::new(crate::ip::Ipv6Address::LOCALHOST, 128),
+            scope: wire_route::SCOPE_HOST,
+        }),
+        Err(LinuxError::EADDRNOTAVAIL)
     );
 }
 

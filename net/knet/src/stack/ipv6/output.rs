@@ -64,7 +64,7 @@ pub(crate) fn dispatch_ipv6_packet(
 
     let src_addr = IpAddress::Ipv6(header.src_addr());
     let dst_addr = IpAddress::Ipv6(header.dst_addr());
-    if !is_local_ipv6_source(router.local_ipv6_addrs(), header.src_addr())
+    if !is_local_ipv6_source(&router.local_ipv6_addrs(), header.src_addr())
         && !header.src_addr().is_multicast()
     {
         warn!("Dropping IPv6 packet with non-local source {}", src_addr);

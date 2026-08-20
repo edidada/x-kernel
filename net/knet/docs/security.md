@@ -234,7 +234,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-06 | listen backlog 被 SYN 洪泛占满 | 中 | 大量连接请求命中同一 listener | backlog 被 clamp 到 `LISTEN_QUEUE_SIZE`；超限丢弃并记录 warn |
 | T-07 | raw socket 被无权限调用者创建 | 中 | syscall 层没有实施权限门禁 | `knet` 层只封装 raw socket 行为；权限策略应保留在 `posix/net::sys_socket` |
 | T-08 | netlink RX queue 被 uevent 或 response 填满 | 中 | 订阅者不消费，publisher 持续写入 | `NETLINK_RX_QUEUE_LIMIT` 限制单 socket queue 字节数，超限丢弃 |
-| T-09 | 控制面与 data-plane 不一致 | 中 | link mutation 更新设备 owner 失败，跨 socket 地址 mutation 交错，设备移除后保留旧地址投影或控制面路由，删除地址后配置路由继续引用失效 `prefsrc`，或路由和邻居 mutation 只更新控制面 | 全局 mutation 锁串行化跨 socket 更新与设备移除；link query 与 mutation 直接访问 `NetDevice` owner；IPv4 地址 query 与 mutation 直接访问 Router；IPv6 地址仅静态引导并 dump，`RTM_NEWADDR`/`RTM_DELADDR` 对 IPv6 返回 `EOPNOTSUPP`；路由和邻居 mutation 在释放 `ROUTE_STATE` 写锁后调用 `SERVICE.sync_netlink`；地址与设备删除刷新自动路由、ingress、Interface 和设备投影 |
+| T-09 | 控制面与 data-plane 不一致 | 中 | link mutation 更新设备 owner 失败，跨 socket 地址 mutation 交错，设备移除后保留旧地址投影或控制面路由，删除地址后配置路由继续引用失效 `prefsrc`，或路由和邻居 mutation 只更新控制面 | 全局 mutation 锁串行化跨 socket 更新与设备移除；link query 与 mutation 直接访问 `NetDevice` owner；IPv4/IPv6 地址 query 直接访问 Router；IPv6 地址由 `init_network` 经 Router 安装，`RTM_NEWADDR`/`RTM_DELADDR` 对 IPv6 返回 `EOPNOTSUPP`；路由和邻居 mutation 在释放 `ROUTE_STATE` 写锁后调用 `SERVICE.sync_netlink`（清表后 rebuild 地址派生路由）；地址与设备删除刷新自动路由、ingress、Interface 和设备投影 |
 | T-10 | 外部网络包触发 parser panic | 中 | malformed Ethernet、ARP、IP、UDP 或 TCP packet 进入 RX | Ethernet 和 ARP 使用 `zerocopy` checked view，IPv4/IPv6 与 UDP/ICMPv6/NDP 使用 crate 内 checked parser，TCP 与 raw IP 使用 smoltcp checked parser；错误包直接丢弃 |
 | T-11 | 中断上下文误用导致锁竞争或延迟放大 | 中 | IRQ waker 回调中直接推进 `SERVICE`、`SOCKET_SET` 或执行阻塞 socket 操作 | VirtIO IRQ handler 只确认中断并唤醒；Ethernet RX 任务在普通任务上下文发布 RX，并执行最多四轮的有界批次 |
 | T-12 | driver buffer 或 DMA 输入破坏 packet 边界 | 高 | 驱动返回长度异常、数据在 recycle 后继续被访问、TX/RX buffer 生命周期使用错误 | RX 数据只在 `NetBufHandle` recycle 前解析和复制；外部帧使用 checked parser；TX buffer 由 driver handle 管理 |
@@ -323,16 +323,17 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - `RTM_GETNEIGH` dump 尚未实现，neighbor 只通过 `RTM_NEWNEIGH` mutation 进入控制面。
 - IPv4 输出使用匹配路由指向设备的 MTU，ICMP Fragmentation Needed 中的 next-hop MTU 只进入 UDP error queue，尚未形成动态 PMTU cache。
 - IPv4 输出分片只支持无 options 的栈内生成报文，尚未实现 options copy 语义。
-- `ROUTE_STATE` dump 没有覆盖所有 live runtime 状态；地址 dump 直接读取 Router，路由 dump 仍只覆盖配置路由。
+- `ROUTE_STATE` dump 没有覆盖所有 live runtime 状态；地址 dump 直接读取 Router，IPv6 地址派生路由从 Router 转发表 dump（含 table local 的 `/128` host 路由），其余配置路由与邻居仍来自 `ROUTE_STATE`。
 - smoltcp maintenance 与单次 egress pass 提供有界执行，ingress 通过 `poll_ingress_single` 按 packet 推进；单个 packet 的协议处理和一次 egress pass 仍会形成有限的软上限超出。
 - UDP RX queue 排空后保留 64 个元数据槽位；长期非空队列保持已增长容量，直到队列再次排空。
-- 地址 dump 直接读取 Router 地址条目；路由和邻居 dump 仍来自 `ROUTE_STATE` 投影；link dump 已直接读取设备实时快照。
+- 地址 dump 直接读取 Router 地址条目；IPv6 派生路由 dump 读取 Router，配置路由和邻居 dump 仍来自 `ROUTE_STATE`；link dump 已直接读取设备实时快照。
+- IPv4 地址派生的 `/32` local 路由仍按现有 knet 模型经 loopback 安装，尚未对齐 Linux `fib_magic` 的 `RTN_LOCAL`/`RT_TABLE_LOCAL`/原接口 oif。
 - raw socket 创建权限由 syscall 层承担，`knet` 构造器自身没有进程凭据参数。
 - Ethernet 设备通过 ARP（IPv4）和 NDP（IPv6）解析邻居；非 Ethernet 链路和多队列 NIC 抽象仍待扩展。
 - IPv6 分片重组与 PMTUD 尚未实现；遇到 Fragment 扩展头时丢弃报文。
 - AF_INET6 仅支持 `SOCK_STREAM` 与 `SOCK_DGRAM`；IPv6 raw socket 尚未实现。
 - AF_INET6 UDP 默认 V6-only，不支持 v4-mapped 地址与 dual-stack socket。
-- 不做 SLAAC / RA / DHCPv6；IPv6 地址依赖启动时静态 `::1` 与 link-local，`RTM_NEWADDR`/`RTM_DELADDR` 对 IPv6 返回 `EOPNOTSUPP`。
+- 不做 SLAAC / RA / DHCPv6；IPv6 地址依赖启动时经 Router 安装的 `::1` 与 link-local，`RTM_NEWADDR`/`RTM_DELADDR` 对 IPv6 返回 `EOPNOTSUPP`。
 - IPv6 scope 仅覆盖 link-local 发送指定接口与 `recvfrom` 返回到达接口；不实现 scoped listen/accept 继承或全局地址 scoped bind。
 - vsock-TIPC bridge v1 不转发 TIPC handles 或 memrefs，也不为 vsock send credit 建立持久重试队列。
 

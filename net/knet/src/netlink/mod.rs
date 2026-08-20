@@ -33,7 +33,8 @@ pub(crate) use rtnetlink::{build_initial_state, init_route_state, remove_device_
 pub use socket::{NetlinkSocket, publish_kobject_uevent};
 pub(crate) use wire::route::{
     PROTOCOL_BOOT as RTPROT_BOOT, PROTOCOL_KERNEL as RTPROT_KERNEL, SCOPE_HOST as RT_SCOPE_HOST,
-    SCOPE_LINK as RT_SCOPE_LINK, SCOPE_UNIVERSE as RT_SCOPE_UNIVERSE, TABLE_MAIN as RT_TABLE_MAIN,
+    SCOPE_LINK as RT_SCOPE_LINK, SCOPE_UNIVERSE as RT_SCOPE_UNIVERSE,
+    TABLE_LOCAL as RT_TABLE_LOCAL, TABLE_MAIN as RT_TABLE_MAIN, TYPE_LOCAL as RTN_LOCAL,
     TYPE_UNICAST as RTN_UNICAST,
 };
 
@@ -70,15 +71,6 @@ pub(super) const ARPHRD_LOOPBACK: u16 = 772;
 pub(super) const ARPHRD_ETHER: u16 = 1;
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct AddrState {
-    pub(crate) index: u32,
-    pub(crate) family: u8,
-    pub(crate) prefix_len: u8,
-    pub(crate) scope: u8,
-    pub(crate) address: IpAddress,
-}
-
-#[derive(Clone, Copy, Debug)]
 pub(crate) struct RouteState {
     pub(crate) family: u8,
     pub(crate) dst_len: u8,
@@ -105,7 +97,6 @@ pub(crate) struct NeighState {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RtnetlinkState {
-    pub(crate) addrs: Vec<AddrState>,
     pub(crate) routes: Vec<RouteState>,
     pub(crate) neighs: Vec<NeighState>,
 }

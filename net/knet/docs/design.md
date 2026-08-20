@@ -246,11 +246,11 @@ RTM_NEWLINK ──> Service ──> Router ──> NetDevice link owner
                                              │
 RTM_GETLINK <──────────── live LinkSnapshot ─┘
 
-init_network ──> Router.ipv4_addrs ──> local / connected routes
-                       │                    │
-RTM_NEWADDR / DELADDR ┘                    ├─> smoltcp Interface / IngressProcessor
-                       │                    └─> NetDevice address projections
-RTM_GETADDR <──────── Router address snapshots
+init_network ──> Router.ipv4_addrs / ipv6_addrs ──> local / connected routes
+                       │                                 │
+RTM_NEWADDR / DELADDR ┘                                 ├─> smoltcp Interface / IngressProcessor
+  (IPv4 only; IPv6 EOPNOTSUPP)                          └─> NetDevice address projections
+RTM_GETADDR <──────── Router address snapshots (v4 + v6)
 DELADDR 最后持有者 ────────────────────────> ROUTE_STATE 删除失效 prefsrc 路由
 设备移除 ─────────────────────────────────> ROUTE_STATE 删除并重编号路由与邻居
 
@@ -259,19 +259,21 @@ build_initial_state ──> ROUTE_STATE routes / neighbors
                              v
                     updated ROUTE_STATE
                              │
-                             ├─sync_netlink──> Router / devices
-                             └─RTM_GETROUTE──> netlink dump
+                             ├─sync_netlink──> Router 配置路由 / neighbors，
+                             │                 再 rebuild 地址派生路由并投影设备
+                             └─RTM_GETROUTE──> 配置路由 + IPv6 地址派生路由 dump
 ```
 
 | 从 | 到 | 触发条件 |
 |----|----|----------|
 | 设备 link 配置 | 更新后的设备 link 配置 | `RTM_NEWLINK` 经 `Service::update_device_link` 更新目标 `NetDevice` |
 | 设备 link 配置 | `RTM_NEWLINK` dump | `RTM_GETLINK` 在 `SERVICE` 内读取每个设备的 `LinkSnapshot` |
-| 初始 IPv4 地址条目 | `Router::ipv4_addrs` | `init_network` 通过 `Router::add_ipv4_addr` 注册，Router 同时生成 local 和 connected 路由 |
-| IPv4 地址条目 | smoltcp、IngressProcessor 和设备地址投影 | 地址加入、删除或所属设备移除时由 `Service` 刷新所有派生视图 |
+| 初始 IPv4/IPv6 地址条目 | `Router::ipv4_addrs` / `ipv6_addrs` | `init_network` 通过 `Router::add_ipv4_addr` / `add_ipv6_addr` 注册。IPv6 `/128` 在所属设备上生成 `RTN_LOCAL` host 路由；更短前缀再生成同设备 on-link 路由 |
+| IPv4/IPv6 地址条目 | smoltcp、IngressProcessor 和设备地址投影 | 地址加入、删除或所属设备移除时由 `Service` 刷新所有派生视图 |
 | 最后一个 IPv4 地址持有者 | `ROUTE_STATE` 配置路由 | 地址删除时移除以该地址为 `prefsrc` 的配置路由，再同步 Router 转发表 |
 | 已移除设备 | `ROUTE_STATE` 配置路由与邻居 | 删除该接口的路由和邻居，并重编号后续接口索引，再同步 Router 转发表 |
-| `RTM_GETADDR` | Router 地址快照 | rtnetlink 直接读取 `Service::ipv4_addr_snapshots` |
+| `RTM_GETADDR` | Router 地址快照 | rtnetlink 直接读取 `Service::ipv4_addr_snapshots` / `ipv6_addr_snapshots` |
+| `RTM_GETROUTE` IPv6 派生路由 | Router 转发表 | dump `RuleOrigin::Ipv6Address`：`/128` host（`RTN_LOCAL`、local table、oif 为地址所属设备）与 on-link 前缀（`RTN_UNICAST`、main）；配置路由仍来自 `ROUTE_STATE` |
 | 初始路由和邻居 state | `ROUTE_STATE` | `init_network` 调用 `build_initial_state` 与 `init_route_state` |
 | `ROUTE_STATE` | 更新后的 `ROUTE_STATE` | `apply_newroute`、`apply_newneigh` |
 | 更新后的 `ROUTE_STATE` | data-plane 同步 | `mutate_route_state` 释放 `ROUTE_STATE` 写锁后调用 `SERVICE.sync_netlink` |
@@ -312,10 +314,10 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 ### 网络初始化
 
 1. `init_network` 创建 `Router`。
-2. 添加 `LoopbackDevice`，由 `Router` 注册 `127.0.0.1/8` 地址并生成 local、connected 路由。
-3. 从 `DeviceContainer<NetDevice>` 取首个 NIC，包装成 `EthernetDevice`，自动派生 EUI-64 link-local，注册默认 IPv4 路由。
-4. 创建 `Service`，初始化内部 `Interface`、`Router`、`IngressProcessor` 和可复用 batch。
-5. 初始化 rtnetlink 路由和邻居状态，追加 `::1/128` 与 eth0 `fe80::/64` on-link 路由，并同步到 `Service`、`Router`、`Interface`、`IngressProcessor` 和设备；IPv4 地址投影由 Router 地址条目生成，IPv6 地址由 rtnetlink 状态同步，link 初始状态由设备构造器建立。
+2. 添加 `LoopbackDevice`，由 `Router` 注册 `127.0.0.1/8` 与 `::1/128` 地址并生成 local、connected 路由。
+3. 从 `DeviceContainer<NetDevice>` 取首个 NIC，包装成 `EthernetDevice`，由 `Router` 注册默认 IPv4 地址/网关，并按 MAC 派生 EUI-64 link-local（`fe80::/64`）。
+4. 创建 `Service`，初始化内部 `Interface`、`Router`、`IngressProcessor` 和可复用 batch；`Service::new` 同步刷新 IPv4/IPv6 本地地址视图。
+5. 初始化 rtnetlink 的配置路由和邻居状态（例如 IPv4 默认网关），再 `sync_netlink` 装入配置路由后由 Router rebuild 地址派生路由并投影到设备；IPv4/IPv6 地址真相源均为 Router，link 初始状态由设备构造器建立。
    构建时通过 `SMOLTCP_IFACE_MAX_ADDR_COUNT=8`（`KFEAT_NET` 启用时由 xconfig 注入）保证 smoltcp `Interface` 能容纳双栈地址；默认容量 2 会静默丢弃 IPv6 并导致 TCPv6 失败。
 6. 初始化全局 `SOCKET_SET`、`LISTEN_TABLE` 和 UDP PCB 及异步错误 registry。
 7. 启动常驻 `knet-poller` 后台任务，并注册协议 timer 回调。
@@ -386,7 +388,7 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 4. 每条 mutation 使用本次发送携带的凭据检查权限。跨 socket mutation 与设备移除通过全局 `RTNETLINK_MUTATION_LOCK` 串行化，地址存在性判断、地址更新和依赖的 `ROUTE_STATE` 清理处于同一事务作用域。无权限请求生成带 `EPERM`
    的 `NLMSG_ERROR`，response 入队后发送入口返回已消费的请求长度。
 5. `RTM_GETLINK` 从设备实时快照生成 multi-part response，`RTM_NEWLINK` 在整组名称、MTU 和 flags 校验通过后直接更新目标设备。
-6. `RTM_GETADDR` 从 Router 地址快照生成 multi-part response；`RTM_NEWADDR` 和 `RTM_DELADDR` 直接调用 Router 地址 mutation，失败时返回 netlink error。重复地址策略在 Router 锁内判定；最后一个同值地址删除后，`RTM_DELADDR` 同时清理 `ROUTE_STATE` 中以该地址为 `prefsrc` 的配置路由并同步转发表。
+6. `RTM_GETADDR` 从 Router 的 IPv4/IPv6 地址快照生成 multi-part response；`RTM_NEWADDR` 和 `RTM_DELADDR` 对 IPv4 直接调用 Router 地址 mutation，对 IPv6 返回 `EOPNOTSUPP`。重复地址策略在 Router 锁内判定；最后一个同值 IPv4 地址删除后，`RTM_DELADDR` 同时清理 `ROUTE_STATE` 中以该地址为 `prefsrc` 的配置路由并同步转发表。`RTM_GETROUTE` 合并 `ROUTE_STATE` 配置路由与 Router 上的 IPv6 地址派生路由。
 7. 路由和邻居更新成功后同步到 `Service`，带 `NLM_F_ACK` 时返回 ack。
 
 ## 并发模型
@@ -407,7 +409,7 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 - Unix stream 每个 endpoint 的 `tx_order: SpinNoPreempt<()>` 是对应发送方向的共享排序点。本端 write shutdown、对端 read shutdown、write index 发布和对端空队列 EOF 判定都经过该锁。固定锁序为 `channel` mutex 后取得单个 `tx_order`，两个方向的顺序锁不会同时持有。
 - Unix stream 的用户数据复制和 `PollSet` 唤醒在 `tx_order` 外执行。send 先写入未发布的 vacant 区域，再在锁内复检关闭状态并推进 write index；recv 读取为空后在锁内复查 occupied 长度和关闭状态；shutdown 完成状态发布并复制 peer endpoint 引用后释放 `channel` mutex，再执行 waiter 唤醒。
 - Unix stream 每个 endpoint 分别持有 readable、writable 和 connection-state 三组 `PollSet`。写入只唤醒 peer readable waiter，读取跨过发送缓冲低水位时只唤醒 peer writable waiter，半关闭只唤醒受影响方向，完整关闭通过 connection-state waiter 通知双方。
-- netlink `ROUTE_STATE` 只保存路由和邻居控制面状态并使用 `RwLock`；IPv4 地址条目、自动路由和地址派生投影由 `SERVICE` mutex 下的 `Router` 持有，link 配置由设备持有。全局 `RTNETLINK_MUTATION_LOCK` 串行化不同 socket 的控制面 mutation 和设备移除；每个 socket 的发送事务、rx queue 和 subscriber
+- netlink `ROUTE_STATE` 只保存路由和邻居控制面状态并使用 `RwLock`；IPv4/IPv6 地址条目、自动路由和地址派生投影由 `SERVICE` mutex 下的 `Router` 持有，link 配置由设备持有。全局 `RTNETLINK_MUTATION_LOCK` 串行化不同 socket 的控制面 mutation 和设备移除；每个 socket 的发送事务、rx queue 和 subscriber
   列表使用独立 `Mutex`。发送事务锁串行化同一 socket 的容量预检、mutation 执行和
   response 入队。response 在 rx queue 锁外生成，只在容量检查和入队时持锁；删除地址或设备时先取得 `ROUTE_STATE` 写锁，再修改 Router 地址 owner，释放 state 锁后同步 Router 转发表。锁顺序固定为发送事务锁、`RTNETLINK_MUTATION_LOCK`、`ROUTE_STATE`、Router、ingress、Interface、netlink rx queue，未涉及的锁按该序列跳过。
 - RX waker 由 `GeneralOptions::device_mask` 指向相关设备。`Service::register_rx_waker` 使用调用方传入的同一个 `PollContext` 注册聚合 `timeout_poll` 和支持 interrupt-driven RX 的 Ethernet RX poll source；当前该 poll source 由 `NetRx` softirq 在设备 pending 后唤醒，`knet-rx` fallback worker 和普通 socket polling waiter 都可能是消费者。registration 由跨越 `Pending` 的 `PollRegistrations` 统一管理。loopback 和未 attach `NetRxScheduler` 的 Ethernet 设备仍使用 `timeout_poll` 的聚合 waker，多任务广播由 `timeout_poll` 完成；设备层不得保存调用方的裸 waker或绕过 `Service` 注册互不等价的 task waker。
@@ -430,7 +432,7 @@ IPv6 endpoint 的文本格式遵循 `[address%scope]:port`，避免地址与端�
 当前不实现 `IPV6_FLOWINFO_SEND` 或 flow-label 路由；`sockaddr_in6.sin6_flowinfo`
 进入原生 endpoint 时会被有意归零，`getsockname`、`getpeername` 和接收地址也返回零。
 邻居缓存中动态学习条目（ARP/NDP）使用 Resolved/Pending 两态和 300 秒 TTL，未解析占位条目超时后清理；netlink 静态邻居保持到控制面移除。
-IPv6 地址由启动时静态写入 `::1/128` 与 eth0 `fe80::/64`，`RTM_GETADDR`/`RTM_GETROUTE` 可 dump；`RTM_NEWADDR`/`RTM_DELADDR` 对 IPv6 返回 `EOPNOTSUPP`。
+IPv6 地址由启动时经 `Router::add_ipv6_addr` 安装 `::1/128` 与 eth0 `fe80::/64`，并投影到设备和 smoltcp；`RTM_GETADDR`/`RTM_GETROUTE` 从 Router 快照 dump；`RTM_NEWADDR`/`RTM_DELADDR` 对 IPv6 返回 `EOPNOTSUPP`。
 
 ### NAPI 风格预算推进
 
@@ -443,7 +445,7 @@ RX、TX 与 timer 使用独立预算。`Service` 使用 smoltcp 分阶段 API �
 
 link 配置属于设备：接口名、MTU、管理 up 状态、operstate 和硬件地址通过 `NetDevice::link_snapshot` 统一导出，`RTM_GETLINK` 和 `RTM_NEWLINK` 直接访问该来源。AF_PACKET 热路径在单个 `SERVICE` 锁临界区内通过无分配的 `LinkSendSnapshot` 校验 up 状态、MTU 和硬件地址并发送，设备存在性检查使用 `has_device`，路由 MTU 查询直接读取匹配设备。设备配置或移除改变有效 MTU 时重建 smoltcp `Interface`，使缓存的 `DeviceCapabilities` 与设备集合一致；未改变有效 MTU 的配置更新保留当前 `Interface` 及其运行时缓存。
 
-IPv4 地址条目由 `Router` 保存。每个条目包含设备索引、IPv4 CIDR 和 scope，加入条目时检查设备、单播地址和 smoltcp 地址容量。Router 为每个条目生成 `/32` local 路由，并按地址网络生成 connected 路由；地址删除同时移除派生路由、失效首选源路由和设备 pending TX。`Service` 将 Router 地址投影到 smoltcp `Interface`、`IngressProcessor` 和设备，Ethernet 根据设备地址处理 ARP、定向广播和待解析报文。`RtnetlinkState` 仅保存配置路由和邻居，地址 dump 与 mutation 直接访问 Router。设备移除由 rtnetlink 控制面适配层协调 Router 与 `ROUTE_STATE`，清理已移除接口和孤立首选源并重编号后续接口索引。
+IPv4 与 IPv6 地址条目均由 `Router` 保存。每个条目包含设备索引、CIDR 和 scope，加入条目时检查设备、地址类型和 smoltcp 地址容量。IPv6 拒绝 `::`、组播以及非 loopback 设备上的 `::1`（`EADDRNOTAVAIL`）。Router 为 IPv4 生成 `/32` local 路由；为 IPv6 在地址所属设备上生成 `/128` host 路由（`RTN_LOCAL`、`RT_TABLE_LOCAL`），并按前缀在同一设备上生成 on-link 路由（`RTN_UNICAST`、`RT_TABLE_MAIN`）。`RTM_GETROUTE` 对 IPv6 派生路由报告 `RT_SCOPE_UNIVERSE`。地址删除同时移除派生路由、失效首选源路由和设备 pending TX。`Service` 将 Router 地址投影到 smoltcp `Interface`、`IngressProcessor` 和设备，Ethernet 根据设备地址处理 ARP/NDP、定向广播和待解析报文。`RtnetlinkState` 仅保存配置路由和邻居；地址 dump 直接访问 Router，IPv6 地址派生路由也从 Router 转发表 dump。设备移除由 rtnetlink 控制面适配层协调 Router 与 `ROUTE_STATE`，清理已移除接口和孤立首选源并重编号后续接口索引。
 
 ### pathname Unix socket 显式传递凭据
 

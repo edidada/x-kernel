@@ -314,8 +314,7 @@ impl EthernetDevice {
             warn!("knet: NetRx softirq unavailable; Ethernet RX uses timeout polling fallback");
             None
         };
-        let mac = MacAddress(inner.mac().0);
-        let link_local = Ipv6Cidr::new(Ipv6Address::link_local_from_mac(mac.bytes()), 64);
+
         Self {
             name,
             flags: LINK_FLAG_UP
@@ -329,7 +328,7 @@ impl EthernetDevice {
             neighbors: HashMap::new(),
             assigned_ipv4_addrs: Vec::new(),
             local_ipv4_addrs: Vec::new(),
-            ipv6_addrs: alloc::vec![link_local],
+            ipv6_addrs: Vec::new(),
             pending_tx: VecDeque::with_capacity(ETHERNET_MAX_PENDING_PACKETS),
             rx_source,
         }

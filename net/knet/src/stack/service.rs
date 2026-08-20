@@ -104,7 +104,7 @@ impl Service {
             #[cfg(unittest)]
             rebuild_count: AtomicUsize::new(0),
         };
-        service.sync_local_ipv4_views();
+        service.sync_local_ip_views();
         service
     }
 
@@ -506,17 +506,16 @@ impl Service {
         // new RX batch cannot observe a partially synchronized configuration.
         let mut router = self.router.lock();
         router.sync_netlink(state);
-        let local_ipv4_addrs = router.local_ipv4_addrs();
-        let local_ipv6_addrs = router.local_ipv6_addrs().to_vec();
-        self.replace_local_ip_views(&local_ipv4_addrs, &local_ipv6_addrs);
+        self.refresh_local_ip_views(&router);
     }
 
-    fn sync_local_ipv4_views(&self) {
+    fn sync_local_ip_views(&self) {
         let router = self.router.lock();
-        let local_ipv4_addrs = router.local_ipv4_addrs();
-        let local_ipv6_addrs = router.local_ipv6_addrs().to_vec();
-        drop(router);
-        self.replace_local_ip_views(&local_ipv4_addrs, &local_ipv6_addrs);
+        self.refresh_local_ip_views(&router);
+    }
+
+    fn refresh_local_ip_views(&self, router: &Router) {
+        self.replace_local_ip_views(&router.local_ipv4_addrs(), &router.local_ipv6_addrs());
     }
 
     fn replace_local_ip_views(
@@ -540,10 +539,12 @@ impl Service {
                     .expect("Router validates the smoltcp address capacity");
             }
             for addr in ipv6_addrs {
-                let _ = ip_addrs.push(SmoltcpIpCidr::Ipv6(smoltcp::wire::Ipv6Cidr::new(
-                    addr.address().into(),
-                    addr.prefix_len(),
-                )));
+                ip_addrs
+                    .push(SmoltcpIpCidr::Ipv6(smoltcp::wire::Ipv6Cidr::new(
+                        addr.address().into(),
+                        addr.prefix_len(),
+                    )))
+                    .expect("Router validates the smoltcp address capacity");
             }
         });
     }
@@ -608,9 +609,7 @@ impl Service {
             };
         }
         router.add_ipv4_addr(entry)?;
-        let local_ipv4_addrs = router.local_ipv4_addrs();
-        let local_ipv6_addrs = router.local_ipv6_addrs().to_vec();
-        self.replace_local_ip_views(&local_ipv4_addrs, &local_ipv6_addrs);
+        self.refresh_local_ip_views(&router);
         Ok(())
     }
 
@@ -623,10 +622,26 @@ impl Service {
             return Err(LinuxError::EADDRNOTAVAIL);
         }
         let is_last_owner = !router.has_ipv4_address(entry.addr.address());
-        let local_ipv4_addrs = router.local_ipv4_addrs();
-        let local_ipv6_addrs = router.local_ipv6_addrs().to_vec();
-        self.replace_local_ip_views(&local_ipv4_addrs, &local_ipv6_addrs);
+        self.refresh_local_ip_views(&router);
         Ok(is_last_owner)
+    }
+
+    pub(crate) fn ipv6_addr_snapshots(&self) -> Vec<crate::router::Ipv6AddrSnapshot> {
+        self.router.lock().ipv6_addr_snapshots()
+    }
+
+    pub(crate) fn ipv6_address_route_snapshots(&self) -> Vec<crate::router::Rule> {
+        self.router.lock().ipv6_address_route_snapshots()
+    }
+
+    pub(crate) fn add_ipv6_addr(
+        &self,
+        entry: crate::router::Ipv6AddrEntry,
+    ) -> Result<(), LinuxError> {
+        let mut router = self.router.lock();
+        router.add_ipv6_addr(entry)?;
+        self.refresh_local_ip_views(&router);
+        Ok(())
     }
 
     pub fn update_device_link(
@@ -649,7 +664,7 @@ impl Service {
         let iface = Interface::new(config, &mut router, to_smoltcp_instant(monotonic_time()));
         *self.router.lock() = router;
         *self.iface.lock() = iface;
-        self.sync_local_ipv4_views();
+        self.sync_local_ip_views();
         self.timeout_deadline_micros.store(0, Ordering::Release);
         self.timeout_poll.wake();
     }
@@ -670,9 +685,7 @@ impl Service {
             let mut iface = self.iface.lock();
             self.rebuild_interface(&mut router, &mut iface);
         }
-        let local_ipv4_addrs = router.local_ipv4_addrs();
-        let local_ipv6_addrs = router.local_ipv6_addrs().to_vec();
-        self.replace_local_ip_views(&local_ipv4_addrs, &local_ipv6_addrs);
+        self.refresh_local_ip_views(&router);
         Some(removal)
     }
 

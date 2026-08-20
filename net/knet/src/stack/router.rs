@@ -19,23 +19,27 @@ use super::{
 };
 pub(crate) use crate::netlink::{
     RT_SCOPE_HOST as ROUTE_SCOPE_HOST, RT_SCOPE_LINK as ROUTE_SCOPE_LINK,
-    RT_SCOPE_UNIVERSE as ROUTE_SCOPE_UNIVERSE, RT_TABLE_MAIN as ROUTE_TABLE_MAIN,
+    RT_SCOPE_UNIVERSE as ROUTE_SCOPE_UNIVERSE, RT_TABLE_LOCAL as ROUTE_TABLE_LOCAL,
+    RT_TABLE_MAIN as ROUTE_TABLE_MAIN, RTN_LOCAL as ROUTE_TYPE_LOCAL,
     RTN_UNICAST as ROUTE_TYPE_UNICAST, RTPROT_BOOT as ROUTE_PROTOCOL_BOOT,
     RTPROT_KERNEL as ROUTE_PROTOCOL_KERNEL,
 };
 use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
-    device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NetDevice},
+    device::{LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NetDevice},
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
-    netlink::RtnetlinkState,
+    netlink::{
+        RtnetlinkState,
+        wire::route::{FAMILY_IPV4, FAMILY_IPV6},
+    },
 };
 
 const CONTROL_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
 const DATA_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Ipv4AddressRouteKind {
+enum AddressRouteKind {
     Local,
     Connected,
 }
@@ -52,8 +56,56 @@ enum RuleOrigin {
     Ipv4Address {
         owner_dev: usize,
         addr: Ipv4Cidr,
-        kind: Ipv4AddressRouteKind,
+        kind: AddressRouteKind,
     },
+    Ipv6Address {
+        owner_dev: usize,
+        addr: Ipv6Cidr,
+        kind: AddressRouteKind,
+    },
+}
+
+impl RuleOrigin {
+    fn is_local(self) -> bool {
+        matches!(
+            self,
+            Self::Ipv4Address {
+                kind: AddressRouteKind::Local,
+                ..
+            } | Self::Ipv6Address {
+                kind: AddressRouteKind::Local,
+                ..
+            }
+        )
+    }
+
+    fn is_ipv4_address(self) -> bool {
+        matches!(self, Self::Ipv4Address { .. })
+    }
+
+    fn is_ipv6_address(self) -> bool {
+        matches!(self, Self::Ipv6Address { .. })
+    }
+
+    fn is_owned_by_device(self, dev: usize) -> bool {
+        match self {
+            Self::Ipv4Address { owner_dev, .. } | Self::Ipv6Address { owner_dev, .. } => {
+                owner_dev == dev
+            }
+            Self::Configured => false,
+        }
+    }
+
+    fn renumber_after_device_removal(&mut self, removed: usize) {
+        match self {
+            Self::Ipv4Address { owner_dev, .. } | Self::Ipv6Address { owner_dev, .. }
+                if *owner_dev > removed =>
+            {
+                *owner_dev -= 1;
+            }
+            _ => {}
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -62,14 +114,10 @@ pub struct Rule {
     pub via: Option<IpAddress>,
     pub dev: usize,
     pub src: IpAddress,
-    #[expect(dead_code)]
     pub table: u8,
-    #[cfg_attr(not(unittest), expect(dead_code))]
     pub protocol: u8,
     pub scope: u8,
-    #[expect(dead_code)]
     pub route_type: u8,
-    #[expect(dead_code)]
     pub prefsrc: Option<IpAddress>,
     source: RuleSource,
     origin: RuleOrigin,
@@ -116,31 +164,76 @@ impl Rule {
         }
     }
 
+    fn for_address_route(
+        filter: IpCidr,
+        dev: usize,
+        source: IpAddress,
+        origin: RuleOrigin,
+        scope: u8,
+        table: u8,
+        route_type: u8,
+    ) -> Self {
+        Self {
+            filter,
+            via: None,
+            dev,
+            src: source,
+            table,
+            protocol: ROUTE_PROTOCOL_KERNEL,
+            scope,
+            route_type,
+            prefsrc: Some(source),
+            source: RuleSource::Fixed(source),
+            origin,
+        }
+    }
+
     fn for_ipv4_address(
         filter: Ipv4Cidr,
         dev: usize,
         owner: Ipv4AddrEntry,
-        kind: Ipv4AddressRouteKind,
+        kind: AddressRouteKind,
         scope: u8,
     ) -> Self {
-        let source = IpAddress::Ipv4(owner.addr.address());
-        Self {
-            filter: filter.into(),
-            via: None,
+        Self::for_address_route(
+            filter.into(),
             dev,
-            src: source,
-            table: ROUTE_TABLE_MAIN,
-            protocol: ROUTE_PROTOCOL_KERNEL,
-            scope,
-            route_type: ROUTE_TYPE_UNICAST,
-            prefsrc: Some(source),
-            source: RuleSource::Fixed(source),
-            origin: RuleOrigin::Ipv4Address {
+            IpAddress::Ipv4(owner.addr.address()),
+            RuleOrigin::Ipv4Address {
                 owner_dev: owner.dev,
                 addr: owner.addr,
                 kind,
             },
-        }
+            scope,
+            ROUTE_TABLE_MAIN,
+            ROUTE_TYPE_UNICAST,
+        )
+    }
+
+    fn for_ipv6_address(
+        filter: Ipv6Cidr,
+        dev: usize,
+        owner: Ipv6AddrEntry,
+        kind: AddressRouteKind,
+        scope: u8,
+    ) -> Self {
+        let (table, route_type) = match kind {
+            AddressRouteKind::Local => (ROUTE_TABLE_LOCAL, ROUTE_TYPE_LOCAL),
+            AddressRouteKind::Connected => (ROUTE_TABLE_MAIN, ROUTE_TYPE_UNICAST),
+        };
+        Self::for_address_route(
+            filter.into(),
+            dev,
+            IpAddress::Ipv6(owner.addr.address()),
+            RuleOrigin::Ipv6Address {
+                owner_dev: owner.dev,
+                addr: owner.addr,
+                kind,
+            },
+            scope,
+            table,
+            route_type,
+        )
     }
 
     pub(crate) fn preferred_source(self) -> Option<IpAddress> {
@@ -148,6 +241,14 @@ impl Rule {
             RuleSource::DevicePrimary => None,
             RuleSource::Fixed(source) => Some(source),
         }
+    }
+
+    pub(crate) fn is_ipv6_address_derived(&self) -> bool {
+        self.origin.is_ipv6_address()
+    }
+
+    pub(crate) fn ifindex(self) -> u32 {
+        self.dev as u32 + 1
     }
 }
 
@@ -167,16 +268,77 @@ pub struct Ipv4AddrEntry {
     pub scope: u8,
 }
 
+impl Ipv4AddrEntry {
+    pub(crate) fn ifindex(self) -> u32 {
+        self.dev as u32 + 1
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Ipv6AddrEntry {
+    pub dev: usize,
+    pub addr: Ipv6Cidr,
+    pub scope: u8,
+}
+
+impl Ipv6AddrEntry {
+    pub(crate) fn ifindex(self) -> u32 {
+        self.dev as u32 + 1
+    }
+}
+
 #[derive(Clone, Debug)]
-pub(crate) struct Ipv4AddrSnapshot {
-    pub entry: Ipv4AddrEntry,
+pub(crate) struct AddrSnapshot<E> {
+    pub entry: E,
     pub label: String,
 }
+
+pub(crate) type Ipv4AddrSnapshot = AddrSnapshot<Ipv4AddrEntry>;
+pub(crate) type Ipv6AddrSnapshot = AddrSnapshot<Ipv6AddrEntry>;
 
 #[derive(Debug)]
 pub(crate) struct DeviceRemoval {
     pub(crate) ifindex: u32,
     pub(crate) orphaned_ipv4_sources: Vec<Ipv4Address>,
+}
+
+trait DeviceBound {
+    fn device(&self) -> usize;
+    fn set_device(&mut self, device: usize);
+}
+
+impl DeviceBound for Ipv4AddrEntry {
+    fn device(&self) -> usize {
+        self.dev
+    }
+
+    fn set_device(&mut self, device: usize) {
+        self.dev = device;
+    }
+}
+
+impl DeviceBound for Ipv6AddrEntry {
+    fn device(&self) -> usize {
+        self.dev
+    }
+
+    fn set_device(&mut self, device: usize) {
+        self.dev = device;
+    }
+}
+
+fn retain_and_renumber_devices<T: DeviceBound>(entries: &mut Vec<T>, removed: usize) {
+    entries.retain(|entry| entry.device() != removed);
+    for entry in entries {
+        if entry.device() > removed {
+            entry.set_device(entry.device() - 1);
+        }
+    }
+}
+
+fn first_entry_for_ifindex<T: DeviceBound>(entries: &[T], ifindex: u32) -> Option<&T> {
+    let dev = ifindex.checked_sub(1)? as usize;
+    entries.iter().find(|entry| entry.device() == dev)
 }
 
 // TODO(mivik): optimize
@@ -189,26 +351,11 @@ impl RouteTable {
     }
 
     pub fn add_rule(&mut self, rule: Rule) {
-        let rank = (
-            rule.filter.prefix_len(),
-            matches!(
-                rule.origin,
-                RuleOrigin::Ipv4Address {
-                    kind: Ipv4AddressRouteKind::Local,
-                    ..
-                }
-            ) as u8,
-        );
+        let rank = (rule.filter.prefix_len(), rule.origin.is_local() as u8);
         let idx = self.rules.partition_point(|existing| {
             let existing_rank = (
                 existing.filter.prefix_len(),
-                matches!(
-                    existing.origin,
-                    RuleOrigin::Ipv4Address {
-                        kind: Ipv4AddressRouteKind::Local,
-                        ..
-                    }
-                ) as u8,
+                existing.origin.is_local() as u8,
             );
             existing_rank >= rank
         });
@@ -232,8 +379,11 @@ impl RouteTable {
     }
 
     fn remove_ipv4_address_routes(&mut self) {
-        self.rules
-            .retain(|rule| matches!(rule.origin, RuleOrigin::Configured));
+        self.rules.retain(|rule| !rule.origin.is_ipv4_address());
+    }
+
+    fn remove_ipv6_address_routes(&mut self) {
+        self.rules.retain(|rule| !rule.origin.is_ipv6_address());
     }
 
     fn remove_configured_routes_with_source(&mut self, source: IpAddress) {
@@ -244,23 +394,18 @@ impl RouteTable {
     }
 
     pub fn remove_device(&mut self, dev: usize) {
-        self.rules.retain(|rule| {
-            rule.dev != dev
-                && !matches!(
-                    rule.origin,
-                    RuleOrigin::Ipv4Address { owner_dev, .. } if owner_dev == dev
-                )
-        });
+        self.rules
+            .retain(|rule| rule.dev != dev && !rule.origin.is_owned_by_device(dev));
         for rule in &mut self.rules {
             if rule.dev > dev {
                 rule.dev -= 1;
             }
-            if let RuleOrigin::Ipv4Address { owner_dev, .. } = &mut rule.origin
-                && *owner_dev > dev
-            {
-                *owner_dev -= 1;
-            }
+            rule.origin.renumber_after_device_removal(dev);
         }
+    }
+
+    pub(crate) fn rules(&self) -> &[Rule] {
+        &self.rules
     }
 }
 
@@ -270,11 +415,9 @@ pub struct Router {
     data_tx_queue: VecDeque<PacketBuf>,
     next_rx_device: usize,
     ipv4_addrs: Vec<Ipv4AddrEntry>,
-    local_ipv6_addrs: Vec<Ipv6Cidr>,
+    ipv6_addrs: Vec<Ipv6AddrEntry>,
     // Local delivery keeps the ingress interface so scoped IPv6 sockets match it.
     local_rx_queue: VecDeque<PacketBuf>,
-    // Link-local packets addressed to this host must bypass Ethernet/NDP.
-    local_ipv6_devices: Vec<(Ipv6Address, usize)>,
     next_ipv4_identification: u16,
     pub(crate) devices: Vec<Box<dyn NetDevice>>,
     pub(crate) table: RouteTable,
@@ -293,9 +436,8 @@ impl Router {
             data_tx_queue: VecDeque::with_capacity(DATA_TX_QUEUE_SIZE),
             next_rx_device: 0,
             ipv4_addrs: Vec::new(),
-            local_ipv6_addrs: Vec::new(),
+            ipv6_addrs: Vec::new(),
             local_rx_queue: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
-            local_ipv6_devices: Vec::new(),
             next_ipv4_identification: 1,
             devices: Vec::new(),
             table: RouteTable::new(),
@@ -371,10 +513,10 @@ impl Router {
     }
 
     pub(crate) fn local_ipv6_device_index(&self, dst_addr: Ipv6Address) -> Option<usize> {
-        self.local_ipv6_devices
+        self.ipv6_addrs
             .iter()
-            .find(|(addr, _)| *addr == dst_addr)
-            .map(|(_, dev)| *dev)
+            .find(|entry| entry.addr.address() == dst_addr)
+            .map(|entry| entry.dev)
     }
 
     pub(crate) fn try_enqueue_local_ipv6_packet(&mut self, packet: PacketBuf) -> bool {
@@ -397,6 +539,7 @@ impl Router {
     pub fn add_device(&mut self, device: Box<dyn NetDevice>) -> usize {
         self.devices.push(device);
         self.sync_device_ipv4_addrs();
+        self.sync_device_ipv6_addrs();
         self.recompute_effective_mtu();
         self.devices.len() - 1
     }
@@ -417,12 +560,8 @@ impl Router {
             .collect();
         self.devices.remove(pos);
         self.table.remove_device(pos);
-        self.ipv4_addrs.retain(|entry| entry.dev != pos);
-        for entry in &mut self.ipv4_addrs {
-            if entry.dev > pos {
-                entry.dev -= 1;
-            }
-        }
+        retain_and_renumber_devices(&mut self.ipv4_addrs, pos);
+        retain_and_renumber_devices(&mut self.ipv6_addrs, pos);
         let mut orphaned_ipv4_sources = Vec::new();
         for source in removed_sources {
             if !self.has_ipv4_address(source) && !orphaned_ipv4_sources.contains(&source) {
@@ -435,7 +574,9 @@ impl Router {
             }
         }
         self.rebuild_ipv4_address_routes();
+        self.rebuild_ipv6_address_routes();
         self.sync_device_ipv4_addrs();
+        self.sync_device_ipv6_addrs();
         self.adjust_rx_device_cursor_after_remove(pos);
         self.recompute_effective_mtu();
         Some(DeviceRemoval {
@@ -448,8 +589,8 @@ impl Router {
         self.ipv4_addrs.iter().map(|entry| entry.addr).collect()
     }
 
-    pub fn local_ipv6_addrs(&self) -> &[Ipv6Cidr] {
-        &self.local_ipv6_addrs
+    pub fn local_ipv6_addrs(&self) -> Vec<Ipv6Cidr> {
+        self.ipv6_addrs.iter().map(|entry| entry.addr).collect()
     }
 
     /// Returns the MTU advertised through the smoltcp device capabilities.
@@ -488,24 +629,11 @@ impl Router {
     }
 
     pub fn ipv4_addr_snapshots(&self) -> Vec<Ipv4AddrSnapshot> {
-        self.ipv4_addrs
-            .iter()
-            .filter_map(|entry| {
-                self.devices.get(entry.dev).map(|device| Ipv4AddrSnapshot {
-                    entry: *entry,
-                    label: String::from(device.name()),
-                })
-            })
-            .collect()
+        self.labeled_addr_snapshots(&self.ipv4_addrs)
     }
 
     pub fn add_ipv4_addr(&mut self, entry: Ipv4AddrEntry) -> Result<(), LinuxError> {
-        if entry.dev >= self.devices.len() {
-            return Err(LinuxError::ENODEV);
-        }
-        if entry.addr.prefix_len() > 32 || !entry.addr.address().is_unicast() {
-            return Err(LinuxError::EINVAL);
-        }
+        self.validate_new_unicast_addr(entry.dev, entry.addr.address().is_unicast())?;
         if self
             .ipv4_addrs
             .iter()
@@ -513,7 +641,7 @@ impl Router {
         {
             return Ok(());
         }
-        if self.ipv4_addrs.len() >= smoltcp::config::IFACE_MAX_ADDR_COUNT {
+        if !self.has_iface_addr_capacity() {
             return Err(LinuxError::ENOBUFS);
         }
 
@@ -547,6 +675,47 @@ impl Router {
         self.ipv4_addrs
             .iter()
             .any(|entry| entry.addr.address() == address)
+    }
+
+    pub fn ipv6_addr_snapshots(&self) -> Vec<Ipv6AddrSnapshot> {
+        self.labeled_addr_snapshots(&self.ipv6_addrs)
+    }
+
+    pub fn ipv6_address_route_snapshots(&self) -> Vec<Rule> {
+        self.table
+            .rules()
+            .iter()
+            .copied()
+            .filter(Rule::is_ipv6_address_derived)
+            .collect()
+    }
+
+    pub fn add_ipv6_addr(&mut self, entry: Ipv6AddrEntry) -> Result<(), LinuxError> {
+        if entry.dev >= self.devices.len() {
+            return Err(LinuxError::ENODEV);
+        }
+        let address = entry.addr.address();
+        if !address.is_unicast() {
+            return Err(LinuxError::EADDRNOTAVAIL);
+        }
+        if address.is_loopback() && self.devices[entry.dev].link_kind() != LinkKind::Loopback {
+            return Err(LinuxError::EADDRNOTAVAIL);
+        }
+        if self
+            .ipv6_addrs
+            .iter()
+            .any(|existing| existing.dev == entry.dev && existing.addr == entry.addr)
+        {
+            return Ok(());
+        }
+        if !self.has_iface_addr_capacity() {
+            return Err(LinuxError::ENOBUFS);
+        }
+
+        self.ipv6_addrs.push(entry);
+        self.rebuild_ipv6_address_routes();
+        self.sync_device_ipv6_addrs();
+        Ok(())
     }
 
     /// Applies a validated link update.
@@ -600,114 +769,99 @@ impl Router {
     }
 
     pub fn sync_netlink(&mut self, state: &RtnetlinkState) {
+        self.sync_neighbors_from_netlink(state);
+        self.replace_configured_routes(state);
+        self.rebuild_ipv4_address_routes();
+        self.rebuild_ipv6_address_routes();
+        self.sync_device_ipv4_addrs();
+        self.sync_device_ipv6_addrs();
+    }
+
+    fn sync_neighbors_from_netlink(&mut self, state: &RtnetlinkState) {
         for (dev_index, device) in self.devices.iter_mut().enumerate() {
-            let ifindex = dev_index as i32 + 1;
-            let ipv6_addrs: Vec<_> = state
-                .addrs
-                .iter()
-                .filter(|addr| addr.index == ifindex as u32 && addr.family == 10)
-                .filter_map(|addr_state| match addr_state.address {
-                    SmoltcpIpAddress::Ipv6(addr) => {
-                        Some(Ipv6Cidr::new(addr.into(), addr_state.prefix_len))
-                    }
-                    SmoltcpIpAddress::Ipv4(_) => None,
-                })
-                .collect();
+            let ifindex = (dev_index as u32).saturating_add(1);
             let neighbors: Vec<_> = state
                 .neighs
                 .iter()
-                .filter(|neigh| neigh.ifindex == ifindex as u32)
+                .filter(|neigh| neigh.ifindex == ifindex)
                 .filter_map(|neigh| {
                     let hardware_addr = neigh.lladdr?;
                     Some((super::from_smoltcp_ip_address(neigh.dst), hardware_addr))
                 })
                 .collect();
             device.sync_neighbors(&neighbors);
-            if !ipv6_addrs.is_empty() {
-                device.set_ipv6_addrs(&ipv6_addrs);
-            }
         }
+    }
 
+    fn replace_configured_routes(&mut self, state: &RtnetlinkState) {
         self.table.clear();
-        self.local_ipv6_addrs.clear();
-        self.local_ipv6_devices.clear();
-        for addr in &state.addrs {
-            let SmoltcpIpAddress::Ipv6(ipv6) = addr.address else {
-                continue;
-            };
-            self.local_ipv6_addrs
-                .push(Ipv6Cidr::new(ipv6.into(), addr.prefix_len));
-            let Some(dev) = addr.index.checked_sub(1).map(|index| index as usize) else {
-                continue;
-            };
-            if dev < self.devices.len() {
-                self.local_ipv6_devices.push((ipv6.into(), dev));
-            }
-        }
         for route in state.routes.iter().filter(|route| {
-            (route.family == 2 || route.family == 10)
+            (route.family == FAMILY_IPV4 || route.family == FAMILY_IPV6)
                 && route.table == ROUTE_TABLE_MAIN
                 && route.route_type == ROUTE_TYPE_UNICAST
         }) {
-            let dev = route.oif.saturating_sub(1) as usize;
-            if dev >= self.devices.len() {
+            let Some(rule) = self.configured_rule_from_netlink(route) else {
                 continue;
-            }
-
-            let filter = match (route.family, route.dst) {
-                (2, Some(SmoltcpIpAddress::Ipv4(addr))) => {
-                    IpCidr::Ipv4(Ipv4Cidr::new(addr.into(), route.dst_len))
-                }
-                (2, None) => IpCidr::Ipv4(Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, route.dst_len)),
-                (10, Some(SmoltcpIpAddress::Ipv6(addr))) => {
-                    IpCidr::Ipv6(Ipv6Cidr::new(addr.into(), route.dst_len))
-                }
-                (10, None) => IpCidr::Ipv6(Ipv6Cidr::new(Ipv6Address::UNSPECIFIED, route.dst_len)),
-                _ => continue,
             };
-            let src = route
-                .prefsrc
-                .or_else(|| {
-                    if route.family == 2 {
-                        self.first_ipv4_addr_for_device(route.oif)
-                            .map(|addr| SmoltcpIpAddress::Ipv4(addr.address().into()))
-                    } else {
-                        state.addrs.iter().find_map(|addr| {
-                            (addr.index == route.oif && addr.family == route.family)
-                                .then_some(addr.address)
-                        })
-                    }
-                })
-                .map(super::from_smoltcp_ip_address)
-                .unwrap_or(filter.address());
-            let rule = Rule::with_route_attrs(
-                filter,
-                route.gateway.map(super::from_smoltcp_ip_address),
-                dev,
-                src,
-                RouteAttrs {
-                    table: route.table,
-                    protocol: route.protocol,
-                    scope: route.scope,
-                    route_type: route.route_type,
-                    prefsrc: route.prefsrc.map(super::from_smoltcp_ip_address),
-                },
-            );
             self.table.add_rule(rule);
         }
-        self.rebuild_ipv4_address_routes();
-        self.sync_device_ipv4_addrs();
+    }
+
+    fn configured_rule_from_netlink(&self, route: &crate::netlink::RouteState) -> Option<Rule> {
+        let dev = route.oif.saturating_sub(1) as usize;
+        if dev >= self.devices.len() {
+            return None;
+        }
+
+        let filter = match (route.family, route.dst) {
+            (FAMILY_IPV4, Some(SmoltcpIpAddress::Ipv4(addr))) => {
+                IpCidr::Ipv4(Ipv4Cidr::new(addr.into(), route.dst_len))
+            }
+            (FAMILY_IPV4, None) => {
+                IpCidr::Ipv4(Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, route.dst_len))
+            }
+            (FAMILY_IPV6, Some(SmoltcpIpAddress::Ipv6(addr))) => {
+                IpCidr::Ipv6(Ipv6Cidr::new(addr.into(), route.dst_len))
+            }
+            (FAMILY_IPV6, None) => {
+                IpCidr::Ipv6(Ipv6Cidr::new(Ipv6Address::UNSPECIFIED, route.dst_len))
+            }
+            _ => return None,
+        };
+        let src = route
+            .prefsrc
+            .or_else(|| {
+                if route.family == FAMILY_IPV4 {
+                    self.first_ipv4_addr_for_device(route.oif)
+                        .map(|addr| SmoltcpIpAddress::Ipv4(addr.address().into()))
+                } else {
+                    self.first_ipv6_addr_for_device(route.oif)
+                        .map(|addr| SmoltcpIpAddress::Ipv6(addr.address().into()))
+                }
+            })
+            .map(super::from_smoltcp_ip_address)
+            .unwrap_or(filter.address());
+        Some(Rule::with_route_attrs(
+            filter,
+            route.gateway.map(super::from_smoltcp_ip_address),
+            dev,
+            src,
+            RouteAttrs {
+                table: route.table,
+                protocol: route.protocol,
+                scope: route.scope,
+                route_type: route.route_type,
+                prefsrc: route.prefsrc.map(super::from_smoltcp_ip_address),
+            },
+        ))
     }
 
     fn first_ipv4_addr_for_device(&self, ifindex: u32) -> Option<Ipv4Cidr> {
-        ifindex
-            .checked_sub(1)
-            .and_then(|dev| {
-                self.ipv4_addrs
-                    .iter()
-                    .find(|entry| entry.dev == dev as usize)
-            })
-            .map(|entry| entry.addr)
+        first_entry_for_ifindex(&self.ipv4_addrs, ifindex).map(|entry| entry.addr)
+    }
+
+    fn first_ipv6_addr_for_device(&self, ifindex: u32) -> Option<Ipv6Cidr> {
+        first_entry_for_ifindex(&self.ipv6_addrs, ifindex).map(|entry| entry.addr)
     }
 
     fn select_ipv4_source(
@@ -746,21 +900,47 @@ impl Router {
         }
     }
 
+    fn sync_device_ipv6_addrs(&mut self) {
+        let assigned_addrs: Vec<Vec<_>> = (0..self.devices.len())
+            .map(|dev| {
+                self.ipv6_addrs
+                    .iter()
+                    .filter_map(|entry| (entry.dev == dev).then_some(entry.addr))
+                    .collect()
+            })
+            .collect();
+        for (device, assigned_addrs) in self.devices.iter_mut().zip(assigned_addrs) {
+            device.set_ipv6_addrs(&assigned_addrs);
+        }
+    }
+
     fn rebuild_ipv4_address_routes(&mut self) {
+        let rules = self.ipv4_address_derived_rules();
         self.table.remove_ipv4_address_routes();
-        let loopback_dev = self
-            .devices
-            .iter()
-            .position(|device| device.link_kind() == crate::device::LinkKind::Loopback);
-        let entries = self.ipv4_addrs.clone();
+        for rule in rules {
+            self.table.add_rule(rule);
+        }
+    }
+
+    fn rebuild_ipv6_address_routes(&mut self) {
+        let rules = self.ipv6_address_derived_rules();
+        self.table.remove_ipv6_address_routes();
+        for rule in rules {
+            self.table.add_rule(rule);
+        }
+    }
+
+    fn ipv4_address_derived_rules(&self) -> Vec<Rule> {
+        let loopback_dev = self.loopback_device_index();
         let mut connected = Vec::new();
-        for entry in entries {
+        let mut rules = Vec::new();
+        for &entry in &self.ipv4_addrs {
             if let Some(loopback_dev) = loopback_dev {
-                self.table.add_rule(Rule::for_ipv4_address(
+                rules.push(Rule::for_ipv4_address(
                     Ipv4Cidr::new(entry.addr.address(), 32),
                     loopback_dev,
                     entry,
-                    Ipv4AddressRouteKind::Local,
+                    AddressRouteKind::Local,
                     ROUTE_SCOPE_HOST,
                 ));
             }
@@ -773,20 +953,89 @@ impl Router {
                 continue;
             }
             connected.push((entry.dev, network));
-            let scope = if self.devices[entry.dev].link_kind() == crate::device::LinkKind::Loopback
-            {
-                ROUTE_SCOPE_HOST
-            } else {
-                ROUTE_SCOPE_LINK
-            };
-            self.table.add_rule(Rule::for_ipv4_address(
+            rules.push(Rule::for_ipv4_address(
                 network,
                 entry.dev,
                 entry,
-                Ipv4AddressRouteKind::Connected,
-                scope,
+                AddressRouteKind::Connected,
+                self.connected_route_scope(entry.dev),
             ));
         }
+        rules
+    }
+
+    fn ipv6_address_derived_rules(&self) -> Vec<Rule> {
+        let mut connected = Vec::new();
+        let mut rules = Vec::new();
+        for &entry in &self.ipv6_addrs {
+            // Linux addrconf_f6i_alloc installs the /128 host route on the
+            // address's own device in table local with RTN_LOCAL, not via lo.
+            rules.push(Rule::for_ipv6_address(
+                Ipv6Cidr::new(entry.addr.address(), 128),
+                entry.dev,
+                entry,
+                AddressRouteKind::Local,
+                ROUTE_SCOPE_UNIVERSE,
+            ));
+
+            let network = entry.addr.network();
+            if entry.addr.prefix_len() == 128
+                || network.address().is_unspecified()
+                || connected.contains(&(entry.dev, network))
+            {
+                continue;
+            }
+            connected.push((entry.dev, network));
+            // Linux addrconf_prefix_route puts on-link prefixes in table main.
+            rules.push(Rule::for_ipv6_address(
+                network,
+                entry.dev,
+                entry,
+                AddressRouteKind::Connected,
+                ROUTE_SCOPE_UNIVERSE,
+            ));
+        }
+        rules
+    }
+
+    fn loopback_device_index(&self) -> Option<usize> {
+        self.devices
+            .iter()
+            .position(|device| device.link_kind() == LinkKind::Loopback)
+    }
+
+    fn connected_route_scope(&self, dev: usize) -> u8 {
+        if self.devices[dev].link_kind() == LinkKind::Loopback {
+            ROUTE_SCOPE_HOST
+        } else {
+            ROUTE_SCOPE_LINK
+        }
+    }
+
+    fn validate_new_unicast_addr(&self, dev: usize, is_unicast: bool) -> Result<(), LinuxError> {
+        if dev >= self.devices.len() {
+            return Err(LinuxError::ENODEV);
+        }
+        if !is_unicast {
+            return Err(LinuxError::EINVAL);
+        }
+        Ok(())
+    }
+
+    fn has_iface_addr_capacity(&self) -> bool {
+        self.ipv4_addrs.len() + self.ipv6_addrs.len() < smoltcp::config::IFACE_MAX_ADDR_COUNT
+    }
+
+    fn labeled_addr_snapshots<E: Copy + DeviceBound>(&self, entries: &[E]) -> Vec<AddrSnapshot<E>> {
+        entries
+            .iter()
+            .filter_map(|entry| {
+                self.devices.get(entry.device()).map(|device| AddrSnapshot {
+                    entry: *entry,
+                    label: String::from(device.name()),
+                })
+            })
+            .collect()
     }
 
     fn recompute_effective_mtu(&mut self) {
@@ -1208,6 +1457,103 @@ mod tests {
                 .lookup(&IpAddress::Ipv4(Ipv4Address::new(198, 51, 100, 7)))
                 .is_none()
         );
+    }
+
+    #[def_test]
+    fn ipv6_address_installs_local_and_connected_routes() {
+        let mut router = Router::new();
+        let lo = router.add_device(Box::new(LoopbackDevice::new()));
+        let link_local = Ipv6Address::link_local_from_mac([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+
+        router
+            .add_ipv6_addr(Ipv6AddrEntry {
+                dev: lo,
+                addr: Ipv6Cidr::new(Ipv6Address::LOCALHOST, 128),
+                scope: ROUTE_SCOPE_HOST,
+            })
+            .unwrap();
+        router
+            .add_ipv6_addr(Ipv6AddrEntry {
+                dev: lo,
+                addr: Ipv6Cidr::new(link_local, 64),
+                scope: ROUTE_SCOPE_LINK,
+            })
+            .unwrap();
+
+        let local = router
+            .table
+            .lookup(&IpAddress::Ipv6(Ipv6Address::LOCALHOST))
+            .unwrap();
+        assert_eq!(local.filter.prefix_len(), 128);
+        assert_eq!(local.dev, lo);
+        assert_eq!(local.table, ROUTE_TABLE_LOCAL);
+        assert_eq!(local.route_type, ROUTE_TYPE_LOCAL);
+        assert_eq!(local.scope, ROUTE_SCOPE_UNIVERSE);
+        assert_eq!(local.protocol, ROUTE_PROTOCOL_KERNEL);
+        assert!(local.is_ipv6_address_derived());
+
+        let connected = router
+            .table
+            .lookup(&IpAddress::Ipv6(Ipv6Address::from_octets([
+                0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+            ])))
+            .unwrap();
+        assert_eq!(connected.filter.prefix_len(), 64);
+        assert_eq!(connected.dev, lo);
+        assert_eq!(connected.table, ROUTE_TABLE_MAIN);
+        assert_eq!(connected.route_type, ROUTE_TYPE_UNICAST);
+        assert_eq!(connected.scope, ROUTE_SCOPE_UNIVERSE);
+        assert!(connected.is_ipv6_address_derived());
+
+        assert_eq!(
+            router.add_ipv6_addr(Ipv6AddrEntry {
+                dev: lo,
+                addr: Ipv6Cidr::new(Ipv6Address::UNSPECIFIED, 128),
+                scope: ROUTE_SCOPE_HOST,
+            }),
+            Err(LinuxError::EADDRNOTAVAIL)
+        );
+        assert_eq!(
+            router.add_ipv6_addr(Ipv6AddrEntry {
+                dev: lo,
+                addr: Ipv6Cidr::new(Ipv6Address::ALL_NODES_LINK_LOCAL, 128),
+                scope: ROUTE_SCOPE_LINK,
+            }),
+            Err(LinuxError::EADDRNOTAVAIL)
+        );
+    }
+
+    #[def_test]
+    fn sync_netlink_rebuilds_ipv6_address_routes() {
+        let mut router = Router::new();
+        let lo = router.add_device(Box::new(LoopbackDevice::new()));
+        router
+            .add_ipv6_addr(Ipv6AddrEntry {
+                dev: lo,
+                addr: Ipv6Cidr::new(Ipv6Address::LOCALHOST, 128),
+                scope: ROUTE_SCOPE_HOST,
+            })
+            .unwrap();
+
+        router.sync_netlink(&crate::netlink::RtnetlinkState::default());
+
+        let local = router
+            .table
+            .lookup(&IpAddress::Ipv6(Ipv6Address::LOCALHOST))
+            .unwrap();
+        assert_eq!(local.filter.prefix_len(), 128);
+        assert_eq!(local.dev, lo);
+        assert_eq!(local.table, ROUTE_TABLE_LOCAL);
+        assert_eq!(local.route_type, ROUTE_TYPE_LOCAL);
+        assert_eq!(local.scope, ROUTE_SCOPE_UNIVERSE);
+        assert!(local.is_ipv6_address_derived());
+        assert!(
+            router
+                .local_ipv6_addrs()
+                .iter()
+                .any(|cidr| cidr.address() == Ipv6Address::LOCALHOST)
+        );
+        assert_eq!(router.local_ipv6_addrs().len(), 1);
     }
 }
 

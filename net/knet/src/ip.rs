@@ -105,6 +105,10 @@ impl Ipv6Address {
         self.0[0] == 0xfe && (self.0[1] & 0xc0) == 0x80
     }
 
+    pub(crate) fn is_unicast(self) -> bool {
+        !(self.is_unspecified() || self.is_multicast())
+    }
+
     /// Derives a link-local address from a 48-bit MAC via modified EUI-64.
     pub(crate) fn link_local_from_mac(mac: [u8; 6]) -> Self {
         let mut octets = [0u8; 16];
@@ -337,6 +341,23 @@ impl Ipv6Cidr {
 
     pub(crate) const fn prefix_len(self) -> u8 {
         self.prefix_len
+    }
+
+    pub(crate) fn network(self) -> Self {
+        let mut octets = self.address.octets();
+        let full_bytes = (self.prefix_len / 8) as usize;
+        let rem_bits = self.prefix_len % 8;
+        if rem_bits != 0 {
+            let mask = 0xffu8 << (8 - rem_bits);
+            octets[full_bytes] &= mask;
+        }
+        for byte in octets
+            .iter_mut()
+            .skip(full_bytes + usize::from(rem_bits != 0))
+        {
+            *byte = 0;
+        }
+        Self::new(Ipv6Address::from_octets(octets), self.prefix_len)
     }
 
     pub(crate) fn contains_addr(self, addr: &IpAddress) -> bool {
