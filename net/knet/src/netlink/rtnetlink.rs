@@ -400,26 +400,8 @@ pub(super) fn update_link_state(request: LinkUpdateRequest) -> Result<(), LinuxE
 }
 
 pub(super) fn add_addr_state(request: AddrRequest, flags: u16) -> Result<(), LinuxError> {
-    if request.family == wire_route::FAMILY_IPV6
-        || matches!(request.address, IpAddress::Ipv6(_))
-    {
-        let _mutation_guard = RTNETLINK_MUTATION_LOCK.lock();
-        ensure_link_exists(request.index)?;
-        return mutate_route_state(|state| {
-            let existing = state
-                .addrs
-                .iter()
-                .position(|addr| same_ipv6_addr(addr, &request));
-            if let Some(pos) = existing {
-                if flags & NLM_F_REPLACE != 0 {
-                    state.addrs[pos] = request.into();
-                    return Ok(());
-                }
-                return Err(LinuxError::EEXIST);
-            }
-            state.addrs.push(request.into());
-            Ok(())
-        });
+    if request.family == wire_route::FAMILY_IPV6 || matches!(request.address, IpAddress::Ipv6(_)) {
+        return Err(LinuxError::EOPNOTSUPP);
     }
 
     let entry = ipv4_addr_entry_from_request(request)?;
@@ -436,21 +418,8 @@ pub(super) fn add_addr_state(request: AddrRequest, flags: u16) -> Result<(), Lin
 }
 
 pub(super) fn del_addr_state(request: AddrRequest) -> Result<(), LinuxError> {
-    if request.family == wire_route::FAMILY_IPV6
-        || matches!(request.address, IpAddress::Ipv6(_))
-    {
-        let _mutation_guard = RTNETLINK_MUTATION_LOCK.lock();
-        return mutate_route_state(|state| {
-            let before = state.addrs.len();
-            state.addrs.retain(|addr| !same_ipv6_addr(addr, &request));
-            if state.addrs.len() == before {
-                return Err(LinuxError::EADDRNOTAVAIL);
-            }
-            state
-                .routes
-                .retain(|route| route.prefsrc != Some(request.address));
-            Ok(())
-        });
+    if request.family == wire_route::FAMILY_IPV6 || matches!(request.address, IpAddress::Ipv6(_)) {
+        return Err(LinuxError::EOPNOTSUPP);
     }
 
     let entry = ipv4_addr_entry_from_request(request)?;
@@ -580,13 +549,6 @@ fn ensure_link_exists(ifindex: u32) -> Result<(), LinuxError> {
         false
     };
     exists.then_some(()).ok_or(LinuxError::ENODEV)
-}
-
-fn same_ipv6_addr(addr: &AddrState, request: &AddrRequest) -> bool {
-    addr.index == request.index
-        && addr.family == request.family
-        && addr.prefix_len == request.prefix_len
-        && addr.address == request.address
 }
 
 fn ipv4_addr_entry_from_request(request: AddrRequest) -> Result<Ipv4AddrEntry, LinuxError> {

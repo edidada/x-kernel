@@ -30,7 +30,8 @@ use crate::{
         NetDevice as NetDeviceOps,
     },
     ip::{IpAddress, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
-    ndp, packet,
+    ipv6::ndp,
+    packet,
     wire::{
         ArpIpv4Packet, ArpOperation, ETHERNET_HEADER_LEN, EtherType, EthernetFrameRef, MacAddress,
         emit_ethernet_header,

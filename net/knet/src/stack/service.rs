@@ -31,14 +31,11 @@ use crate::{
     buf::PacketBuf,
     device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot},
     ip::{IpAddress, IpListenEndpoint},
+    ipv6::{self, Ipv6Action},
     netlink::RtnetlinkState,
     poller::{PollBudget, PollProgress},
     router::{DeviceRemoval, Router},
-    stack::{
-        icmpv6,
-        ingress::{IngressProcessor, Ipv6Action},
-        ndp,
-    },
+    stack::ingress::IngressProcessor,
 };
 
 const IPV4_HEADER_LEN: usize = 20;
@@ -170,7 +167,7 @@ impl Service {
                     warn!("Dropping network control packet: {}", err);
                 }
             }
-            apply_ipv6_actions(&mut router, &mut ipv6_actions);
+            ipv6::apply_actions(&mut router, &mut ipv6_actions);
             if !drain.has_more || drain.work_done == 0 {
                 break;
             }
@@ -735,49 +732,6 @@ fn earliest_poll_deadline(
     match (protocol, deferred_close) {
         (Some(protocol), Some(close)) => Some(protocol.min(close)),
         (protocol, close) => protocol.or(close),
-    }
-}
-
-fn apply_ipv6_actions(router: &mut Router, actions: &mut Vec<Ipv6Action>) {
-    for action in actions.drain(..) {
-        match action {
-            Ipv6Action::LearnNeighbor { ifindex, addr, mac } => {
-                if let Some(dev) = router.devices.get_mut(ifindex.saturating_sub(1) as usize) {
-                    dev.learn_neighbor(IpAddress::Ipv6(addr), mac);
-                }
-            }
-            Ipv6Action::ReplyAdvertisement {
-                ifindex,
-                target,
-                dst,
-                solicited,
-            } => {
-                let mac = router
-                    .devices
-                    .get(ifindex.saturating_sub(1) as usize)
-                    .and_then(|dev| dev.hardware_addr());
-                if let Some(mac) = mac
-                    && let Some(na) =
-                        ndp::build_neighbor_advertisement(target, dst, target, mac, solicited)
-                {
-                    let _ = router.queue_control_ip_packet(na);
-                }
-            }
-            Ipv6Action::EchoReply {
-                ifindex,
-                header,
-                packet,
-            } => {
-                let Some(reply_src) = router.echo_reply_source(header, ifindex) else {
-                    continue;
-                };
-                if let Some(reply) = icmpv6::build_echo_reply(header, &packet, reply_src)
-                    && let Err(err) = router.queue_control_ip_packet(reply)
-                {
-                    warn!("Failed to queue ICMPv6 echo reply: {}", err);
-                }
-            }
-        }
     }
 }
 

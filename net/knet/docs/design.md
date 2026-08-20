@@ -46,9 +46,13 @@ net/knet/
     │   ├── fragment.rs
     │   ├── ingress.rs
     │   ├── ipv4.rs
-    │   ├── ipv6.rs
-    │   ├── icmpv6.rs
-    │   ├── ndp.rs
+    │   ├── ipv6/
+    │   │   ├── packet.rs
+    │   │   ├── input.rs
+    │   │   ├── output.rs
+    │   │   ├── icmpv6.rs
+    │   │   ├── ndp.rs
+    │   │   └── tests.rs
     │   ├── mod.rs
     │   ├── service.rs
     │   ├── router.rs
@@ -77,7 +81,7 @@ net/knet/
 ```
 
 测试辅助代码位于 `socket/test_options.rs`、`socket/test_state.rs`、`netlink/tests.rs`，
-IPv4、分片重组和 UDP 的回归测试与对应实现放在同一模块内。
+IPv4、IPv6 和 UDP 的回归测试与对应实现放在同一模块内。
 
 ## 架构
 
@@ -127,16 +131,14 @@ core/kruntime
 | `PacketBuf` | 保存报文数据、协议偏移、接口索引、包类型、校验状态和当前所有者 |
 | `link::wire` | 使用 `zerocopy` 校验和构造 Ethernet 与 Ethernet/IPv4 ARP 头部 |
 | `stack::ipv4` | 使用 `etherparse` 校验和构造 IPv4 与 ICMPv4 头部，并执行输出分片 |
-| `stack::ipv6` | 解析/构造 IPv6 固定头，跳过可识别扩展头，定位上层协议；Fragment 头暂不重组 |
-| `stack::icmpv6` | ICMPv6 echo 应答与 Destination Unreachable 差错生成 |
-| `stack::ndp` | Neighbor Solicitation/Advertisement 构造与解析 |
+| `stack::ipv6` | 解析/构造 IPv6 固定头，跳过可识别扩展头，定位上层协议；Fragment 头丢弃。含 ICMPv6 echo / Port Unreachable 与最小 NDP |
 | `stack::fragment` | 按源地址、目的地址、标识、协议和接口重组本地 IPv4 分片，并限制队列数量、内存和存活时间 |
 | `transport::udp` | 维护 UDP PCB registry、接收队列、bind 与 connect 状态、校验和、socket option、异步错误和 IPv4/IPv6 收发 |
 | `SocketSetWrapper` | 串行化 smoltcp socket set 与 TCP deferred-close 元数据访问，并在新增 socket 时通知等待者 |
 | `ListenTable` | 管理 TCP listen backlog、SYN 队列、accept 队列和 accept waker |
 | `GeneralOptions` | 统一管理 nonblock、reuseaddr、超时和设备 mask |
 | `SocketOps` | 上层 socket syscall 使用的统一操作接口 |
-| `netlink` | 提供 AF_NETLINK socket、kobject uevent 和有限 rtnetlink 控制面（含 IPv4/IPv6 地址与路由） |
+| `netlink` | 提供 AF_NETLINK socket、kobject uevent 和有限 rtnetlink 控制面（IPv4 地址 mutation，IPv4/IPv6 地址与路由 dump） |
 | `unix` | 提供 Unix domain stream 与 datagram transport；pathname 地址通过 kvfs 查找或创建 socket inode |
 | `vsock` | 在 `vsock` feature 下提供 virtio-vsock stream 支持 |
 
@@ -324,8 +326,8 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 1. Ethernet RX 任务注册下一次 IRQ waker 后调用 `NetworkPoller::publish_and_poll_rx`，在当前任务内发布 RX 并尝试执行有界批次；socket recv 和 readiness 路径通过 `poll_interfaces` 尝试执行一次已有工作；TCP、UDP 和 raw TX 生产路径通过 `notify(PollReason::Tx)` 发布工作。TCP 从可编码为零窗口的低余量接收缓冲区消费数据时通过 `notify(PollReason::RxWindow)` 主动重开对端窗口。
 2. 普通 `notify` 在 `IDLE` 上发布 `SCHEDULED` 并唤醒后台任务；RX 任务发布后直接竞争执行权。执行期间的新工作进入 `RUNNING_PENDING`；RX 任务、后台任务和 assist 只有一个能够通过 `SCHEDULED` 到 `RUNNING` 的 CAS。
 3. `Router::drain_rx_budgeted_into` 按 RX budget 从设备轮转拉取 `PacketBuf`，`next_rx_device` 在设备间保持公平并随设备删除修正。
-4. `IngressProcessor` 在 Router 锁外校验 IPv4/IPv6 头、长度、校验和与本地目的地址，并完成 IPv4 分片重组；IPv6 跳过可识别扩展头，含 Fragment 头的报文暂交 smoltcp。
-5. 完整 UDP 数据报进入 crate 内 UDP PCB 分流（IPv4/IPv6），未命中 socket 的单播 UDP 触发 ICMPv4/ICMPv6 Port Unreachable。ICMPv6 NDP（NS/NA）解析为动作 batch，由 `Service` 在 Router 锁内更新设备邻居表或发送 NA；Echo Request 由 `stack::icmpv6` 应答。UDP PCB 按 FIFO 保留已入队数据报，`connect` 只影响后续入包的 peer 匹配。
+4. `IngressProcessor` 在 Router 锁外校验 IPv4/IPv6 头、长度、校验和与本地目的地址，并完成 IPv4 分片重组；IPv6 跳过可识别扩展头，含 Fragment 头的报文丢弃。
+5. 完整 UDP 数据报进入 crate 内 UDP PCB 分流（IPv4/IPv6），未命中 socket 的单播 UDP 触发 ICMPv4/ICMPv6 Port Unreachable。ICMPv6 NDP（NS/NA）解析为动作 batch，由 `Service` 在 Router 锁内更新设备邻居表或发送 NA；Echo Request 由 `stack::ipv6::icmpv6` 应答。UDP PCB 按 FIFO 保留已入队数据报，`connect` 只影响后续入包的 peer 匹配。
 6. TCP、raw IP、ICMP 和其余 IPv6 packet 进入有界 smoltcp ingress queue。`Service` 先执行 `poll_maintenance`，再按 RX budget 逐个调用 `poll_ingress_single`，并按 TX budget 调用有界的 `poll_egress`。达到预算或时间边界后，剩余 ingress 保持 FIFO 顺序并进入后续轮次。
 7. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
 8. `Router::dispatch_budgeted` 先处理 control TX queue，再处理 data TX queue，单轮发送数量受 TX budget 限制。
@@ -418,15 +420,17 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 UDP PCB、bind 冲突检查、收发队列、IPv4/IPv6 校验、IPv4 分片重组、输出分片、ICMPv4/ICMPv6 差错和 NDP 均由 crate 内类型管理。
 TCP（含 TCPv6）、raw IP 和 DNS 继续通过 smoltcp socket set 推进，协议推进依赖 Ethernet RX 任务的有界批次、后台 poller 调度和显式 `poll_interfaces` assist。
 AF_INET6 UDP/TCP socket 默认 `IPV6_V6ONLY=1`，不做 v4-mapped 双栈。
-IPv6 扩展头仅跳过定位上层协议；Fragment 头暂不重组。不实现 SLAAC/DHCPv6。
+IPv6 扩展头仅跳过定位上层协议；Fragment 头直接丢弃，不重组。不实现 SLAAC/DHCPv6。
 该边界让 UDP 不再依赖 smoltcp socket handle，同时保留现有 TCP 和 raw socket 行为。
 
-IPv6 link-local 收发使用 `sin6_scope_id` 选择接口：接收路径写入报文到达的接口索引，
-UDP bind registry、endpoint 匹配和设备 mask 保留该 scope，发送路径按 scope 选择路由和源地址。
+IPv6 link-local 收发使用 `sin6_scope_id` 选择接口：`sockaddr_in6` 可传入 scope，
+link-local 发送按 scope 选择接口，`recvfrom` 对 link-local 源返回到达接口。
+当前不实现 scoped listen/accept 继承、全局地址 scoped bind，以及 ICMPv6 差错的 scoped lookup。
 IPv6 endpoint 的文本格式遵循 `[address%scope]:port`，避免地址与端口之间的冒号歧义。
 当前不实现 `IPV6_FLOWINFO_SEND` 或 flow-label 路由；`sockaddr_in6.sin6_flowinfo`
 进入原生 endpoint 时会被有意归零，`getsockname`、`getpeername` 和接收地址也返回零。
-邻居缓存中动态学习条目（ARP/NDP）使用 300 秒 TTL，未解析占位条目超时后清理；netlink 静态邻居保持到控制面移除。
+邻居缓存中动态学习条目（ARP/NDP）使用 Resolved/Pending 两态和 300 秒 TTL，未解析占位条目超时后清理；netlink 静态邻居保持到控制面移除。
+IPv6 地址由启动时静态写入 `::1/128` 与 eth0 `fe80::/64`，`RTM_GETADDR`/`RTM_GETROUTE` 可 dump；`RTM_NEWADDR`/`RTM_DELADDR` 对 IPv6 返回 `EOPNOTSUPP`。
 
 ### NAPI 风格预算推进
 

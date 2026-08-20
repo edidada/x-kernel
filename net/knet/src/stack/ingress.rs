@@ -14,38 +14,15 @@ use smoltcp::{
 
 use super::{
     fragment::{Ipv4Reassembler, Ipv4ReassemblyResult},
-    icmpv6::{self, Icmpv6Error},
     ipv4::{self, Icmpv4Error, Ipv4Error, Ipv4Header},
-    ipv6::{self, Ipv6Error, Ipv6Header},
-    ndp::{self, NdpAction},
+    ipv6::{self, Ipv6Action, Ipv6Header},
 };
 use crate::{
     LISTEN_TABLE,
     buf::PacketBuf,
-    ip::{Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
+    ip::{Ipv4Address, Ipv4Cidr, Ipv6Cidr},
     udp, udp_err,
-    wire::MacAddress,
 };
-
-/// Router-side work derived from an inbound IPv6 packet.
-pub(crate) enum Ipv6Action {
-    LearnNeighbor {
-        ifindex: i32,
-        addr: Ipv6Address,
-        mac: MacAddress,
-    },
-    ReplyAdvertisement {
-        ifindex: i32,
-        target: Ipv6Address,
-        dst: Ipv6Address,
-        solicited: bool,
-    },
-    EchoReply {
-        ifindex: i32,
-        header: Ipv6Header,
-        packet: Vec<u8>,
-    },
-}
 
 pub(crate) struct IngressProcessor {
     local_ipv4_addrs: Vec<Ipv4Cidr>,
@@ -123,13 +100,20 @@ impl IngressProcessor {
                 control_packets,
                 sockets,
             ),
-            Some(6) => self.handle_ipv6_input(
-                packet,
-                accepted_packets,
-                control_packets,
-                ipv6_actions,
-                sockets,
-            ),
+            Some(6) => {
+                let Some(packet) = ipv6::process_ipv6_input(
+                    packet,
+                    &self.local_ipv6_addrs,
+                    control_packets,
+                    ipv6_actions,
+                ) else {
+                    return;
+                };
+                if let Some(ip_packet) = packet.network_packet() {
+                    snoop_tcp_packet(ip_packet, sockets);
+                }
+                accepted_packets.push(packet);
+            }
             _ => debug!("Dropping packet with invalid IP version"),
         }
     }
@@ -210,105 +194,6 @@ impl IngressProcessor {
         accepted_packets.push(packet);
     }
 
-    fn handle_ipv6_input(
-        &mut self,
-        mut packet: PacketBuf,
-        accepted_packets: &mut Vec<PacketBuf>,
-        control_packets: &mut Vec<Vec<u8>>,
-        ipv6_actions: &mut Vec<Ipv6Action>,
-        sockets: &mut SocketSet<'_>,
-    ) {
-        let header = match Ipv6Header::validate_input_packet(&mut packet) {
-            Ok(header) => header,
-            Err(Ipv6Error::Fragmented) => {
-                if let Some(ip_packet) = packet.network_packet() {
-                    udp_err::inspect_icmpv6_error(ip_packet);
-                    snoop_tcp_packet(ip_packet, sockets);
-                }
-                accepted_packets.push(packet);
-                return;
-            }
-            Err(Ipv6Error::Malformed) => return,
-        };
-
-        if !self.is_local_ipv6_destination(header.dst_addr()) {
-            return;
-        }
-
-        if header.next_header() == ipv6::PROTOCOL_ICMPV6 {
-            let ifindex = packet.ifindex();
-            let Some(ip_packet) = packet.network_packet() else {
-                return;
-            };
-
-            if let Some(input) = ndp::handle_ndp_input(header, ip_packet, &self.local_ipv6_addrs) {
-                if let Some((addr, mac)) = input.learn {
-                    ipv6_actions.push(Ipv6Action::LearnNeighbor { ifindex, addr, mac });
-                }
-                if let Some(action) = input.action {
-                    match action {
-                        NdpAction::LearnNeighbor { addr, mac } => {
-                            ipv6_actions.push(Ipv6Action::LearnNeighbor { ifindex, addr, mac });
-                        }
-                        NdpAction::ReplyAdvertisement {
-                            target,
-                            dst,
-                            solicited,
-                        } => {
-                            ipv6_actions.push(Ipv6Action::ReplyAdvertisement {
-                                ifindex,
-                                target,
-                                dst,
-                                solicited,
-                            });
-                        }
-                    }
-                }
-                return;
-            }
-
-            if icmpv6::is_echo_request(header, ip_packet) {
-                ipv6_actions.push(Ipv6Action::EchoReply {
-                    ifindex,
-                    header,
-                    packet: ip_packet.to_vec(),
-                });
-            }
-            return;
-        }
-
-        if header.next_header() == ipv6::PROTOCOL_UDP {
-            let packet_type = packet.packet_type();
-            let (disposition, returned_packet) = udp::handle_ipv6_packet(header, packet);
-            match disposition {
-                udp::InputDisposition::Accepted | udp::InputDisposition::Malformed => return,
-                udp::InputDisposition::NoSocket if !header.is_multicast() => {
-                    let Some(packet) = returned_packet else {
-                        return;
-                    };
-                    let Some(ip_packet) = packet.network_packet() else {
-                        return;
-                    };
-                    queue_icmpv6_error(
-                        control_packets,
-                        Icmpv6Error::PortUnreachable,
-                        packet_type,
-                        header,
-                        ip_packet,
-                    );
-                    return;
-                }
-                udp::InputDisposition::NoSocket => return,
-            }
-        }
-
-        if let Some(ip_packet) = packet.network_packet() {
-            udp_err::inspect_icmpv6_error(ip_packet);
-            snoop_tcp_packet(ip_packet, sockets);
-        }
-        accepted_packets.push(packet);
-    }
-
     fn is_local_ipv4_destination(&self, dst_addr: Ipv4Address) -> bool {
         dst_addr.is_broadcast()
             || dst_addr.is_multicast()
@@ -316,15 +201,6 @@ impl IngressProcessor {
                 .local_ipv4_addrs
                 .iter()
                 .any(|addr| addr.address() == dst_addr || addr.broadcast() == Some(dst_addr))
-    }
-
-    fn is_local_ipv6_destination(&self, dst_addr: Ipv6Address) -> bool {
-        dst_addr.is_multicast()
-            || dst_addr.is_loopback()
-            || self
-                .local_ipv6_addrs
-                .iter()
-                .any(|addr| addr.address() == dst_addr)
     }
 }
 
@@ -337,21 +213,6 @@ fn queue_icmpv4_error(
 ) {
     let Some(packet) =
         ipv4::build_icmpv4_error_packet(error, packet_type, offending_header, offending_packet)
-    else {
-        return;
-    };
-    control_packets.push(packet);
-}
-
-fn queue_icmpv6_error(
-    control_packets: &mut Vec<Vec<u8>>,
-    error: Icmpv6Error,
-    packet_type: crate::buf::PacketType,
-    offending_header: Ipv6Header,
-    offending_packet: &[u8],
-) {
-    let Some(packet) =
-        icmpv6::build_icmpv6_error_packet(error, packet_type, offending_header, offending_packet)
     else {
         return;
     };

@@ -44,7 +44,7 @@ pub use socket::{
     options, *,
 };
 pub(crate) use socket::{general, state};
-pub(crate) use stack::{icmpv6, ipv4, ipv6, listen_table, ndp, router, service, wrapper};
+pub(crate) use stack::{ipv4, ipv6, listen_table, router, service, wrapper};
 pub(crate) use transport::udp_err;
 pub use transport::{raw, tcp, udp};
 

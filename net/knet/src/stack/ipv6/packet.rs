@@ -21,9 +21,9 @@ pub(crate) const PROTOCOL_UDP: u8 = 17;
 pub(crate) const IPV6_HEADER_LEN: usize = 40;
 pub(crate) const IPV6_DEFAULT_HOP_LIMIT: u8 = 64;
 
-const IPV6_EXT_HOP_BY_HOP: u8 = 0;
+pub(crate) const IPV6_EXT_HOP_BY_HOP: u8 = 0;
 const IPV6_EXT_ROUTING: u8 = 43;
-const IPV6_EXT_FRAGMENT: u8 = 44;
+pub(crate) const IPV6_EXT_FRAGMENT: u8 = 44;
 const IPV6_EXT_DEST_OPTIONS: u8 = 60;
 const IPV6_EXT_AH: u8 = 51;
 
@@ -260,8 +260,8 @@ fn skip_extension_headers(
                 if reject_fragment {
                     return Err(Ipv6Error::Fragmented);
                 }
-                // Defer fragmented packets to smoltcp by reporting the
-                // Fragment header as the next protocol.
+                // Quoted ICMPv6 payloads may include a Fragment header. Input
+                // parsing rejects fragments instead of reassembling them.
                 return Ok((IPV6_EXT_FRAGMENT, offset));
             }
             IPV6_EXT_AH => {
@@ -278,80 +278,5 @@ fn skip_extension_headers(
             }
             _ => return Ok((next_header, offset)),
         }
-    }
-}
-
-#[cfg(unittest)]
-mod tests {
-    use alloc::vec;
-
-    use unittest::def_test;
-
-    use super::*;
-    use crate::buf::PacketOwner;
-
-    fn sample_addrs() -> (Ipv6Address, Ipv6Address) {
-        (
-            Ipv6Address::from_octets([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
-            Ipv6Address::from_octets([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]),
-        )
-    }
-
-    #[def_test]
-    fn test_validate_input_packet_accepts_plain_udp() {
-        let (src, dst) = sample_addrs();
-        let bytes = build_ipv6_packet(src, dst, PROTOCOL_UDP, 64, &[0; 8]).unwrap();
-        let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
-
-        let header = Ipv6Header::validate_input_packet(&mut packet).unwrap();
-
-        assert_eq!(header.next_header(), PROTOCOL_UDP);
-        assert_eq!(header.header_len(), IPV6_HEADER_LEN);
-        assert_eq!(header.total_len(), IPV6_HEADER_LEN + 8);
-        assert_eq!(packet.transport_offset(), Some(IPV6_HEADER_LEN));
-    }
-
-    #[def_test]
-    fn test_validate_input_packet_skips_hop_by_hop() {
-        let (src, dst) = sample_addrs();
-        let mut payload = vec![0u8; 8 + 8];
-        // Hop-by-Hop: next=UDP, len=0 (8 bytes)
-        payload[0] = PROTOCOL_UDP;
-        payload[1] = 0;
-        let bytes = build_ipv6_packet(src, dst, IPV6_EXT_HOP_BY_HOP, 64, &payload).unwrap();
-        // Fix payload_length already set by builder.
-        let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
-
-        let header = Ipv6Header::validate_input_packet(&mut packet).unwrap();
-        assert_eq!(header.next_header(), PROTOCOL_UDP);
-        assert_eq!(header.transport_offset(), IPV6_HEADER_LEN + 8);
-    }
-
-    #[def_test]
-    fn test_validate_input_packet_rejects_fragment() {
-        let (src, dst) = sample_addrs();
-        let mut payload = vec![0u8; 8];
-        payload[0] = PROTOCOL_UDP;
-        let bytes = build_ipv6_packet(src, dst, IPV6_EXT_FRAGMENT, 64, &payload).unwrap();
-        let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
-
-        assert_eq!(
-            Ipv6Header::validate_input_packet(&mut packet),
-            Err(Ipv6Error::Fragmented)
-        );
-    }
-
-    #[def_test]
-    fn test_prepare_output_packet_repairs_payload_len() {
-        let (src, dst) = sample_addrs();
-        let mut bytes = build_ipv6_packet(src, dst, PROTOCOL_ICMPV6, 64, &[1, 2, 3, 4]).unwrap();
-        bytes[4] = 0;
-        bytes[5] = 0;
-        let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceTx);
-
-        Ipv6Header::prepare_output_packet(&mut packet).unwrap();
-        let header = Ipv6Header::parse_input(packet.network_packet().unwrap()).unwrap();
-        assert_eq!(header.next_header(), PROTOCOL_ICMPV6);
-        assert_eq!(header.total_len(), IPV6_HEADER_LEN + 4);
     }
 }

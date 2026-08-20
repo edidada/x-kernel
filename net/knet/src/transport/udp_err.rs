@@ -12,9 +12,9 @@ use kerrno::LinuxError;
 
 use super::udp::{self, UdpSocketQueuedError};
 use crate::{
-    SocketErrorInfo, SocketErrorOrigin, icmpv6,
+    SocketErrorInfo, SocketErrorOrigin,
     ipv4::{self, Ipv4Header},
-    ipv6::{self, Ipv6Header},
+    ipv6::{self, Ipv6Header, icmpv6},
 };
 
 const ICMPV4_DST_UNREACHABLE: u8 = 3;

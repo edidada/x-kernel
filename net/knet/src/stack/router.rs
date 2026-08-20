@@ -15,7 +15,7 @@ use smoltcp::{
 
 use super::{
     ipv4::{self, Ipv4Error, Ipv4Header},
-    ipv6::{Ipv6Error, Ipv6Header},
+    ipv6,
 };
 pub(crate) use crate::netlink::{
     RT_SCOPE_HOST as ROUTE_SCOPE_HOST, RT_SCOPE_LINK as ROUTE_SCOPE_LINK,
@@ -366,16 +366,28 @@ impl Router {
         Ok(())
     }
 
-    pub fn queue_ipv6_packet(&mut self, packet: Vec<u8>) -> KResult {
-        if !self.can_enqueue_tx_packet() {
-            return Err(KError::WouldBlock);
+    pub(crate) fn push_data_tx_packet(&mut self, packet: PacketBuf) {
+        self.data_tx_queue.push_back(packet);
+    }
+
+    pub(crate) fn local_ipv6_device_index(&self, dst_addr: Ipv6Address) -> Option<usize> {
+        self.local_ipv6_devices
+            .iter()
+            .find(|(addr, _)| *addr == dst_addr)
+            .map(|(_, dev)| *dev)
+    }
+
+    pub(crate) fn try_enqueue_local_ipv6_packet(&mut self, packet: PacketBuf) -> bool {
+        if self.local_rx_queue.len() >= SOCKET_BUFFER_SIZE {
+            warn!("Local IPv6 receive queue is full, dropping packet");
+            return false;
         }
-        self.data_tx_queue.push_back(PacketBuf::from_ip_packet_vec(
-            0,
-            packet,
-            PacketOwner::Ipv6Stack,
-        ));
-        Ok(())
+        self.local_rx_queue.push_back(packet);
+        true
+    }
+
+    pub fn queue_ipv6_packet(&mut self, packet: Vec<u8>) -> KResult {
+        ipv6::queue_ipv6_packet(self, packet)
     }
 
     pub fn add_rule(&mut self, rule: Rule) {
@@ -895,7 +907,7 @@ impl Router {
                     poll_next |= self.dispatch_ipv4_packet(packet, timestamp);
                 }
                 Some(6) => {
-                    poll_next |= self.dispatch_ipv6_packet(packet, timestamp);
+                    poll_next |= ipv6::dispatch_ipv6_packet(self, packet, timestamp);
                 }
                 _ => debug!("Dropping packet with invalid IP version"),
             }
@@ -959,85 +971,6 @@ impl Router {
         dev.send_ip_packet(rule.dev as i32 + 1, next_hop, src_addr, packet, timestamp)
     }
 
-    fn dispatch_ipv6_packet(&mut self, mut packet: PacketBuf, timestamp: MonotonicInstant) -> bool {
-        let header = match Ipv6Header::prepare_output_packet(&mut packet) {
-            Ok(header) => header,
-            Err(Ipv6Error::Malformed | Ipv6Error::Fragmented) => return false,
-        };
-
-        let src_addr = IpAddress::Ipv6(header.src_addr());
-        let dst_addr = IpAddress::Ipv6(header.dst_addr());
-        if !self.is_local_ipv6_source(header.src_addr()) && !header.src_addr().is_multicast() {
-            warn!("Dropping IPv6 packet with non-local source {}", src_addr);
-            return false;
-        }
-
-        if let Some((_, dev_index)) = self
-            .local_ipv6_devices
-            .iter()
-            .find(|(addr, _)| *addr == header.dst_addr())
-            .copied()
-        {
-            if self.local_rx_queue.len() >= SOCKET_BUFFER_SIZE {
-                warn!("Local IPv6 receive queue is full, dropping packet");
-                return false;
-            }
-            packet.set_ifindex(dev_index as i32 + 1);
-            packet.set_owner(PacketOwner::DeviceRx);
-            self.local_rx_queue.push_back(packet);
-            return true;
-        }
-
-        if dst_addr.is_multicast() {
-            let device_count = self.devices.len();
-            let Some((last_device, preceding_devices)) = self.devices.split_last_mut() else {
-                return false;
-            };
-
-            let mut poll_next = false;
-            for (dev_index, dev) in preceding_devices.iter_mut().enumerate() {
-                poll_next |= dev.send_ip_packet(
-                    dev_index as i32 + 1,
-                    dst_addr,
-                    src_addr,
-                    packet.clone(),
-                    timestamp,
-                );
-            }
-            poll_next |= last_device.send_ip_packet(
-                device_count as i32,
-                dst_addr,
-                src_addr,
-                packet,
-                timestamp,
-            );
-            return poll_next;
-        }
-
-        if header.dst_addr().is_link_local() {
-            let Some(dev_index) = self
-                .devices
-                .iter()
-                .position(|dev| dev.ipv6_link_local().is_some())
-            else {
-                warn!("No link-local capable device for destination: {}", dst_addr);
-                return false;
-            };
-            let next_hop = dst_addr;
-            let dev = &mut self.devices[dev_index];
-            return dev.send_ip_packet(dev_index as i32 + 1, next_hop, src_addr, packet, timestamp);
-        }
-
-        let Some(rule) = self.table.lookup(&dst_addr) else {
-            warn!("No route found for destination: {}", dst_addr);
-            return false;
-        };
-
-        let next_hop = rule.via.unwrap_or(dst_addr);
-        let dev = &mut self.devices[rule.dev];
-        dev.send_ip_packet(rule.dev as i32 + 1, next_hop, src_addr, packet, timestamp)
-    }
-
     fn fragment_ipv4_packet_for_output(&mut self, packet: Vec<u8>) -> KResult<Vec<Vec<u8>>> {
         let header = Ipv4Header::parse_output(&packet).map_err(|_| KError::InvalidInput)?;
         let dst_addr = IpAddress::Ipv4(header.dst_addr());
@@ -1062,35 +995,6 @@ impl Router {
         self.ipv4_addrs
             .iter()
             .any(|entry| entry.addr.address() == src_addr)
-    }
-
-    fn is_local_ipv6_source(&self, src_addr: Ipv6Address) -> bool {
-        self.local_ipv6_addrs
-            .iter()
-            .any(|addr| addr.address() == src_addr)
-    }
-
-    pub(crate) fn echo_reply_source(
-        &self,
-        request_header: Ipv6Header,
-        ifindex: i32,
-    ) -> Option<Ipv6Address> {
-        let request_dst = request_header.dst_addr();
-        if !request_dst.is_multicast() {
-            return Some(request_dst);
-        }
-        if let Some(IpAddress::Ipv6(addr)) = self
-            .table
-            .lookup(&IpAddress::Ipv6(request_header.src_addr()))
-            .map(|rule| rule.src)
-            && !addr.is_unspecified()
-            && !addr.is_multicast()
-        {
-            return Some(addr);
-        }
-        let dev = self.devices.get(ifindex.saturating_sub(1) as usize)?;
-        let addr = dev.ipv6_echo_source()?;
-        (!addr.is_unspecified() && !addr.is_multicast()).then_some(addr)
     }
 
     fn is_valid_ipv4_broadcast_source(&self, src_addr: crate::ip::Ipv4Address) -> bool {

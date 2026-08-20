@@ -8,11 +8,8 @@ use alloc::{vec, vec::Vec};
 
 use etherparse::{Icmpv6Header, Icmpv6Slice, Icmpv6Type, icmpv6::DestUnreachableCode};
 
-use crate::{
-    buf::PacketType,
-    ip::Ipv6Address,
-    ipv6::{self, IPV6_DEFAULT_HOP_LIMIT, IPV6_HEADER_LEN, Ipv6Header, PROTOCOL_ICMPV6},
-};
+use super::{self as ipv6, IPV6_DEFAULT_HOP_LIMIT, IPV6_HEADER_LEN, Ipv6Header, PROTOCOL_ICMPV6};
+use crate::{buf::PacketType, ip::Ipv6Address};
 
 const ICMPV6_ERROR_QUOTE_BYTES: usize = 1232;
 

@@ -8,9 +8,9 @@ use alloc::{vec, vec::Vec};
 
 use etherparse::{Icmpv6Header, Icmpv6Slice, Icmpv6Type, icmpv6::NeighborAdvertisementHeader};
 
+use super::{self as ipv6, IPV6_HEADER_LEN, Ipv6Header, PROTOCOL_ICMPV6};
 use crate::{
     ip::{Ipv6Address, Ipv6Cidr},
-    ipv6::{self, IPV6_HEADER_LEN, Ipv6Header, PROTOCOL_ICMPV6},
     wire::MacAddress,
 };
 
