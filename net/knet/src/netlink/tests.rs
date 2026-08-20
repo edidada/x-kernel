@@ -888,6 +888,35 @@ fn test_unbound_send_auto_binds_netlink_socket() {
 }
 
 #[def_test(serial)]
+fn test_unbound_send_with_cred_auto_binds_netlink_socket() {
+    init_test_state();
+    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let request = build_nlmsg(RTM_GETADDR, 10, NLM_F_REQUEST, vec![0; 12]);
+
+    assert_eq!(
+        socket
+            .send_with_cred(
+                Cursor::new(request.as_slice()),
+                SendOptions::default(),
+                &Cred::root(),
+            )
+            .unwrap(),
+        request.len()
+    );
+    let SocketAddrEx::Netlink(local_addr) = socket.local_addr().unwrap() else {
+        panic!("netlink socket returned a non-netlink local address");
+    };
+    assert_eq!(local_addr, NetlinkAddr::default());
+
+    let mut response = vec![0; 1024];
+    let received = socket
+        .recv(Cursor::new(response.as_mut_slice()), RecvOptions::default())
+        .unwrap();
+    assert!(received >= NLMSG_HDR_LEN);
+    assert_eq!(read_u16_ne(&response, 4), Some(RTM_NEWADDR));
+}
+
+#[def_test(serial)]
 fn test_ack_response_for_newaddr() {
     init_test_state();
     let mut payload = Vec::new();

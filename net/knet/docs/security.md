@@ -329,7 +329,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - 地址 dump 直接读取 Router 地址条目；IPv6 派生路由 dump 读取 Router，配置路由和邻居 dump 仍来自 `ROUTE_STATE`；link dump 已直接读取设备实时快照。
 - IPv4 地址派生的 `/32` local 路由仍按现有 knet 模型经 loopback 安装，尚未对齐 Linux `fib_magic` 的 `RTN_LOCAL`/`RT_TABLE_LOCAL`/原接口 oif。
 - raw socket 创建权限由 syscall 层承担，`knet` 构造器自身没有进程凭据参数。
-- Ethernet 设备通过 ARP（IPv4）和 NDP（IPv6）解析邻居；非 Ethernet 链路和多队列 NIC 抽象仍待扩展。
+- Ethernet 设备通过 ARP（IPv4）和 NDP（IPv6）解析邻居；Pending 条目 1 秒重传、最多 3 次探测，没有独立 NUD 定时器。非 Ethernet 链路和多队列 NIC 抽象仍待扩展。
 - IPv6 分片重组与 PMTUD 尚未实现；遇到 Fragment 扩展头时丢弃报文。
 - AF_INET6 仅支持 `SOCK_STREAM` 与 `SOCK_DGRAM`；IPv6 raw socket 尚未实现。
 - AF_INET6 UDP 默认 V6-only，不支持 v4-mapped 地址与 dual-stack socket。

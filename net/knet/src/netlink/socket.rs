@@ -85,6 +85,10 @@ impl NetlinkSocket {
         options: SendOptions,
         is_privileged: bool,
     ) -> KResult<usize> {
+        // Linux `netlink_sendmsg` calls `netlink_autobind` when the socket is
+        // unbound. POSIX send uses `send_with_cred`, so auto-bind belongs here
+        // rather than only on the credential-free `send` path.
+        self.ensure_local_addr();
         self.local_addr_inner()?;
         let mut request = Vec::with_capacity(src.remaining());
         src.read_to_end(&mut request)?;
@@ -238,7 +242,6 @@ impl SocketOps for NetlinkSocket {
     fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
         // Credential-free callers cannot establish authority. Kernel callers
         // performing rtnetlink mutations must use send_with_cred explicitly.
-        self.ensure_local_addr();
         self.send_inner(src, options, false)
     }
 

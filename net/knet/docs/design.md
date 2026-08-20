@@ -380,6 +380,9 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 
 1. POSIX send 路径和 socket file write 路径先区分协议，仅在 netlink 分支取得当前
    调用者的 `Cred` 快照，通过 `Socket::send_with_cred` 传给 `NetlinkSocket`。
+   未 bind 的 socket 在 `send_inner` 中自动绑定（POSIX `send`/`sendto` 与无凭据
+   `send` 共用该路径）。Linux `netlink_sendmsg` 在 `!nlk->bound` 时调用
+   `netlink_autobind`；knet 绑定 `NetlinkAddr` 默认值（pid 0）。
 2. `NlMsgHeader::read` 校验每条 netlink message 的 header 长度，批次拆分再校验
    message 对齐边界。framing 错误在处理任何 message 前返回 syscall `EINVAL`。
 3. 仅含查询的批次逐条生成 response；仅含 mutation 的批次在检查完整批次的
@@ -433,7 +436,7 @@ link-local 与组播发送把 scope 写入 TX `PacketBuf` 的 ifindex，dispatch
 IPv6 endpoint 的文本格式遵循 `[address%scope]:port`，避免地址与端口之间的冒号歧义。
 当前不实现 `IPV6_FLOWINFO_SEND` 或 flow-label 路由；`sockaddr_in6.sin6_flowinfo`
 进入原生 endpoint 时会被有意归零，`getsockname`、`getpeername` 和接收地址也返回零。
-邻居缓存中动态学习条目（ARP/NDP）使用 Resolved/Pending 两态和 300 秒 TTL，未解析占位条目超时后清理；netlink 静态邻居保持到控制面移除。
+邻居缓存中动态学习条目（ARP/NDP）使用 Resolved/Pending 两态。Resolved 条目 300 秒 TTL；Pending 按 Linux 6.8 `NEIGH_VAR_RETRANS_TIME`（1 秒）和 `MCAST_PROBES`（3 次）重传，探测耗尽后丢弃该 next-hop 的 pending TX。knet 没有独立 NUD 定时器，重传发生在后续发往同一 next-hop 的报文上，或设备 RX poll 调用 `flush_pending` 时。未解析占位条目超过 300 秒后清理；netlink 静态邻居保持到控制面移除。
 IPv6 地址由启动时经 `Router::add_ipv6_addr` 安装 `::1/128` 与 eth0 `fe80::/64`，并投影到设备和 smoltcp；`RTM_GETADDR`/`RTM_GETROUTE` 从 Router 快照 dump；`RTM_NEWADDR`/`RTM_DELADDR` 对 IPv6 返回 `EOPNOTSUPP`。
 
 ### NAPI 风格预算推进

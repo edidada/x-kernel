@@ -255,7 +255,65 @@ enum NeighborEntry {
     /// Resolved link-layer mapping with an expiry deadline.
     Resolved(ArpNeighbor),
     /// A request was sent and the mapping is still being resolved.
-    Pending(MonotonicInstant),
+    Pending {
+        started_at: MonotonicInstant,
+        last_request_at: MonotonicInstant,
+        probes: u8,
+    },
+}
+
+impl NeighborEntry {
+    fn pending(now: MonotonicInstant) -> Self {
+        Self::Pending {
+            started_at: now,
+            last_request_at: now,
+            probes: 1,
+        }
+    }
+
+    fn record_probe(&mut self, now: MonotonicInstant) {
+        match self {
+            Self::Pending {
+                last_request_at,
+                probes,
+                ..
+            } => {
+                *last_request_at = now;
+                *probes = probes.saturating_add(1);
+            }
+            Self::Resolved(_) => *self = Self::pending(now),
+        }
+    }
+
+    fn is_retransmit_due(&self, now: MonotonicInstant) -> bool {
+        match self {
+            Self::Pending {
+                last_request_at,
+                probes,
+                ..
+            } => {
+                *probes < EthernetDevice::NEIGHBOR_MAX_PROBES
+                    && now.saturating_duration_since(*last_request_at)
+                        >= EthernetDevice::NEIGHBOR_RETRANS
+            }
+            Self::Resolved(_) => false,
+        }
+    }
+
+    fn has_resolution_failed(&self, now: MonotonicInstant) -> bool {
+        match self {
+            Self::Pending {
+                last_request_at,
+                probes,
+                ..
+            } => {
+                *probes >= EthernetDevice::NEIGHBOR_MAX_PROBES
+                    && now.saturating_duration_since(*last_request_at)
+                        >= EthernetDevice::NEIGHBOR_RETRANS
+            }
+            Self::Resolved(_) => false,
+        }
+    }
 }
 
 /// ARP table entry mapping an IP address to a MAC address.
@@ -289,6 +347,10 @@ pub struct EthernetDevice {
 }
 
 impl EthernetDevice {
+    /// Linux 6.8 ARP/ND `NEIGH_VAR_MCAST_PROBES` default is 3.
+    const NEIGHBOR_MAX_PROBES: u8 = 3;
+    /// Linux 6.8 `NEIGH_VAR_RETRANS_TIME` / `ND_RETRANS_TIMER` is `HZ`.
+    const NEIGHBOR_RETRANS: TimeSpan = TimeSpan::from_secs(1);
     const NEIGHBOR_TTL: TimeSpan = TimeSpan::from_secs(300);
 
     /// Create a new Ethernet device wrapper.
@@ -539,8 +601,7 @@ impl EthernetDevice {
             EtherType::Arp,
         );
 
-        self.neighbors
-            .insert(target_ip, NeighborEntry::Pending(now));
+        self.mark_neighbor_requested(target_ip, now);
     }
 
     fn send_neighbor_solicitation(
@@ -566,8 +627,7 @@ impl EthernetDevice {
             |buf| buf.copy_from_slice(&ns_packet),
             EtherType::Ipv6,
         );
-        self.neighbors
-            .insert(IpAddress::Ipv6(target), NeighborEntry::Pending(now));
+        self.mark_neighbor_requested(IpAddress::Ipv6(target), now);
     }
 
     fn resolve_next_hop(
@@ -583,54 +643,85 @@ impl EthernetDevice {
         }
     }
 
+    fn mark_neighbor_requested(&mut self, target: IpAddress, now: MonotonicInstant) {
+        match self.neighbors.get_mut(&target) {
+            Some(entry) => entry.record_probe(now),
+            None => {
+                self.neighbors.insert(target, NeighborEntry::pending(now));
+            }
+        }
+    }
+
     fn flush_pending(&mut self, ifindex: i32, now: MonotonicInstant) {
         enum PendingAction {
             Send(MacAddress),
             Keep,
-            Refresh,
+            Retransmit,
+            Restart,
+            Fail,
         }
 
         let mut kept_packets = Vec::with_capacity(ETHERNET_MAX_PENDING_PACKETS);
+        let mut failed_next_hops = Vec::new();
         for _ in 0..ETHERNET_MAX_PENDING_PACKETS {
             let Some(pending) = self.pending_tx.pop_front() else {
                 break;
             };
+            let next_hop = pending.next_hop;
 
-            let action = match self.neighbors.get(&pending.next_hop) {
-                Some(NeighborEntry::Resolved(neighbor)) if neighbor.expires_at > now => {
-                    PendingAction::Send(neighbor.hardware_address)
+            let action = if failed_next_hops.contains(&next_hop) {
+                PendingAction::Fail
+            } else {
+                match self.neighbors.get(&next_hop) {
+                    Some(NeighborEntry::Resolved(neighbor)) if neighbor.expires_at > now => {
+                        PendingAction::Send(neighbor.hardware_address)
+                    }
+                    Some(NeighborEntry::Resolved(_)) => PendingAction::Restart,
+                    Some(entry) if entry.has_resolution_failed(now) => PendingAction::Fail,
+                    Some(entry) if entry.is_retransmit_due(now) => PendingAction::Retransmit,
+                    Some(_) => PendingAction::Keep,
+                    None => PendingAction::Restart,
                 }
-                Some(NeighborEntry::Resolved(_)) => PendingAction::Refresh,
-                _ => PendingAction::Keep,
             };
 
             match action {
                 PendingAction::Send(hardware_address) => {
-                    let ethertype = Self::ethertype_for_next_hop(pending.next_hop);
+                    let ethertype = Self::ethertype_for_next_hop(next_hop);
                     self.send_ip_packet_to(ifindex, hardware_address, &pending.packet, ethertype);
                 }
                 PendingAction::Keep => kept_packets.push(pending),
-                PendingAction::Refresh => {
-                    self.neighbors.remove(&pending.next_hop);
-                    self.resolve_next_hop(ifindex, pending.next_hop, pending.source_addr, now);
+                PendingAction::Retransmit => {
+                    self.resolve_next_hop(ifindex, next_hop, pending.source_addr, now);
                     kept_packets.push(pending);
+                }
+                PendingAction::Restart => {
+                    self.neighbors.remove(&next_hop);
+                    self.resolve_next_hop(ifindex, next_hop, pending.source_addr, now);
+                    kept_packets.push(pending);
+                }
+                PendingAction::Fail => {
+                    failed_next_hops.push(next_hop);
+                    self.neighbors.remove(&next_hop);
                 }
             }
         }
 
         self.neighbors.retain(|_, entry| match entry {
             NeighborEntry::Resolved(neighbor) => neighbor.expires_at > now,
-            NeighborEntry::Pending(since) => {
-                now.saturating_duration_since(*since) < Self::NEIGHBOR_TTL
+            NeighborEntry::Pending { started_at, .. } => {
+                now.saturating_duration_since(*started_at) < Self::NEIGHBOR_TTL
             }
         });
 
         for pending in kept_packets {
+            if failed_next_hops.contains(&pending.next_hop) {
+                continue;
+            }
             if self.pending_tx.len() >= ETHERNET_MAX_PENDING_PACKETS {
                 warn!("Pending packets buffer is full, dropping packet");
-            } else {
-                self.pending_tx.push_back(pending);
+                continue;
             }
+            self.pending_tx.push_back(pending);
         }
     }
 
@@ -752,6 +843,11 @@ impl NetDeviceOps for EthernetDevice {
         if !self.is_link_up() {
             return None;
         }
+        if !self.pending_tx.is_empty() {
+            // knet has no NUD timer; RX poll is the chance to retransmit due
+            // Pending entries while the stack is already scanning the device.
+            self.flush_pending(ifindex, timestamp);
+        }
         loop {
             let rx_buf: NetBufHandle = match self.inner.recv() {
                 Ok(buf) => buf,
@@ -840,20 +936,43 @@ impl NetDeviceOps for EthernetDevice {
             _ => {}
         }
 
-        let ethertype = Self::ethertype_for_next_hop(next_hop);
-        let need_request = match self.neighbors.get(&next_hop) {
+        enum NeighborSendAction {
+            Send(MacAddress),
+            Request,
+            Queue,
+            RestartFailed,
+        }
+        let action = match self.neighbors.get(&next_hop) {
             Some(NeighborEntry::Resolved(neighbor)) if neighbor.expires_at > timestamp => {
-                self.send_ip_packet_to(ifindex, neighbor.hardware_address, &packet, ethertype);
+                NeighborSendAction::Send(neighbor.hardware_address)
+            }
+            Some(NeighborEntry::Resolved(_)) | None => NeighborSendAction::Request,
+            Some(entry) if entry.has_resolution_failed(timestamp) => {
+                NeighborSendAction::RestartFailed
+            }
+            Some(entry) if entry.is_retransmit_due(timestamp) => NeighborSendAction::Request,
+            Some(_) => NeighborSendAction::Queue,
+        };
+        match action {
+            NeighborSendAction::Send(hardware_address) => {
+                self.send_ip_packet_to(
+                    ifindex,
+                    hardware_address,
+                    &packet,
+                    Self::ethertype_for_next_hop(next_hop),
+                );
                 return false;
             }
-            Some(NeighborEntry::Resolved(_)) => true,
-            Some(NeighborEntry::Pending(since)) => {
-                timestamp.saturating_duration_since(*since) >= Self::NEIGHBOR_TTL
+            NeighborSendAction::RestartFailed => {
+                self.neighbors.remove(&next_hop);
+                self.pending_tx
+                    .retain(|pending| pending.next_hop != next_hop);
+                self.resolve_next_hop(ifindex, next_hop, ipv4_source, timestamp);
             }
-            None => true,
-        };
-        if need_request {
-            self.resolve_next_hop(ifindex, next_hop, ipv4_source, timestamp);
+            NeighborSendAction::Request => {
+                self.resolve_next_hop(ifindex, next_hop, ipv4_source, timestamp);
+            }
+            NeighborSendAction::Queue => {}
         }
         if self.pending_tx.len() >= ETHERNET_MAX_PENDING_PACKETS {
             warn!("Pending packets buffer is full, dropping packet");
@@ -1007,7 +1126,7 @@ mod tests {
         task::{RawWaker, RawWakerVTable, Waker},
     };
 
-    use unittest::{assert_eq, def_test};
+    use unittest::{assert, assert_eq, def_test};
 
     use super::*;
 
@@ -1074,6 +1193,29 @@ mod tests {
 
         assert_eq!(pending.len(), 1);
         assert_eq!(pending.front().unwrap().source_addr, retained);
+    }
+
+    fn instant_secs(secs: u64) -> MonotonicInstant {
+        MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(secs))
+    }
+
+    #[def_test]
+    fn pending_neighbor_retransmits_after_one_second_until_three_probes() {
+        let start = instant_secs(10);
+        let entry = NeighborEntry::pending(start);
+        assert!(!entry.is_retransmit_due(start));
+        assert!(!entry.has_resolution_failed(start));
+        assert!(!entry.is_retransmit_due(instant_secs(10)));
+        assert!(entry.is_retransmit_due(instant_secs(11)));
+        assert!(!entry.has_resolution_failed(instant_secs(11)));
+
+        let mut entry = NeighborEntry::pending(start);
+        entry.record_probe(instant_secs(11));
+        entry.record_probe(instant_secs(12));
+        assert!(!entry.is_retransmit_due(instant_secs(12)));
+        assert!(!entry.has_resolution_failed(instant_secs(12)));
+        assert!(!entry.is_retransmit_due(instant_secs(13)));
+        assert!(entry.has_resolution_failed(instant_secs(13)));
     }
 
     #[def_test]
