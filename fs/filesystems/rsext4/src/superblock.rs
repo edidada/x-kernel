@@ -271,8 +271,10 @@ impl Ext4Superblock {
     }
 
     /// 获取块大小（字节）
+    ///
+    /// 非法的 `s_log_block_size` 返回 `0`，而不是在移位时 panic。
     pub fn block_size(&self) -> u64 {
-        1024 << self.s_log_block_size
+        1024u64.checked_shl(self.s_log_block_size).unwrap_or(0)
     }
 
     /// 获取块总数（64位）
@@ -333,14 +335,17 @@ impl Ext4Superblock {
 
     /// 每个块组的 inode 表占用多少个块
     pub fn inode_table_blocks(&self) -> u32 {
-        let block_size = self.block_size() as u32;
-        let inode_size = self.s_inode_size as u32;
-        let inodes_per_group = self.s_inodes_per_group;
+        let block_size = self.block_size();
+        let inode_size = u64::from(self.s_inode_size);
+        let inodes_per_group = u64::from(self.s_inodes_per_group);
         if block_size == 0 {
-            0
-        } else {
-            (inodes_per_group * inode_size).div_ceil(block_size)
+            return 0;
         }
+        inodes_per_group
+            .checked_mul(inode_size)
+            .map(|bytes| bytes.div_ceil(block_size))
+            .and_then(|blocks| u32::try_from(blocks).ok())
+            .unwrap_or(0)
     }
 
     /// 判断兼容特性是否启用
@@ -1038,6 +1043,26 @@ mod tests {
         let sb = Ext4Superblock::default();
         // s_blocks_per_group defaults to 0 — no division by zero
         assert_eq!(sb.block_groups_count(), 0);
+    }
+
+    #[test]
+    fn block_size_returns_zero_for_overflowing_shift() {
+        let mut sb = Ext4Superblock::default();
+        sb.s_magic = Ext4Superblock::EXT4_SUPER_MAGIC;
+        sb.s_log_block_size = 64;
+        assert!(sb.is_valid());
+        assert_eq!(sb.block_size(), 0);
+    }
+
+    #[test]
+    fn inode_table_blocks_does_not_panic_on_overflowing_fields() {
+        let mut sb = Ext4Superblock::default();
+        sb.s_magic = Ext4Superblock::EXT4_SUPER_MAGIC;
+        sb.s_log_block_size = 2;
+        sb.s_inode_size = u16::MAX;
+        sb.s_inodes_per_group = u32::MAX;
+        assert!(sb.is_valid());
+        let _ = sb.inode_table_blocks();
     }
 
     #[test]

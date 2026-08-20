@@ -44,15 +44,19 @@ impl<'a> LinuxFdt<'a> {
     ///
     /// Note: this function does ***not*** require that the data be 4-byte
     /// aligned
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FdtError`] when the header magic, total size, or block
+    /// offsets are invalid for `data`.
     pub fn new(data: &'a [u8]) -> Result<Self, FdtError> {
         let mut stream = FdtData::new(data);
         let header = FdtHeader::from_bytes(&mut stream).ok_or(FdtError::BufferTooSmall)?;
 
         if !header.valid_magic() {
             return Err(FdtError::BadMagic);
-        } else if data.len() < header.totalsize.get() as usize {
-            return Err(FdtError::BufferTooSmall);
         }
+        header.validate_block_bounds(data.len())?;
 
         Ok(Self { data, header })
     }
@@ -74,7 +78,7 @@ impl<'a> LinuxFdt<'a> {
             unsafe { core::slice::from_raw_parts(ptr, core::mem::size_of::<FdtHeader>()) };
 
         let real_size = FdtHeader::from_bytes(&mut FdtData::new(tmp_header))
-            .unwrap()
+            .ok_or(FdtError::BufferTooSmall)?
             .totalsize
             .get() as usize;
 
@@ -178,11 +182,12 @@ impl<'a> LinuxFdt<'a> {
     }
 
     fn structs_block(&self) -> &'a [u8] {
-        &self.data[self.header.struct_range()]
+        self.data.get(self.header.struct_range()).unwrap_or(&[])
     }
 
     fn mem_rsvmap_block(&self) -> &'a [u8] {
-        &self.data[self.header.mem_rsvmap_range()]
+        let start = self.header.mem_rsvmap_range().start;
+        self.data.get(start..self.total_size()).unwrap_or(&[])
     }
 
     pub(crate) fn string_at_offset(&self, offset: usize) -> Option<&'a str> {
@@ -190,7 +195,7 @@ impl<'a> LinuxFdt<'a> {
     }
 
     fn strings_block(&self) -> &'a [u8] {
-        &self.data[self.header.strings_range()]
+        self.data.get(self.header.strings_range()).unwrap_or(&[])
     }
 }
 

@@ -1,5 +1,5 @@
 {
-    "project": "x_kernel",
+    "project": "x-kernel",
     "product": "code",
     "language": "rust",
     "build": {

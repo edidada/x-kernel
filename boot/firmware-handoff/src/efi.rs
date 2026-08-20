@@ -454,14 +454,26 @@ impl MemoryDescriptorView {
         self.descriptor.phys_start as usize
     }
 
+    /// Exclusive end of this descriptor, if `phys_start + size` does not overflow.
     #[must_use]
-    pub const fn phys_end(&self) -> usize {
-        self.phys_start() + self.size()
+    pub const fn phys_end(&self) -> Option<usize> {
+        let Some(size) = self.size() else {
+            return None;
+        };
+        self.phys_start().checked_add(size)
     }
 
+    /// Byte length of this descriptor, if `page_count * 4096` does not overflow.
     #[must_use]
-    pub const fn size(&self) -> usize {
-        self.descriptor.page_count as usize * EFI_PAGE_SIZE
+    pub const fn size(&self) -> Option<usize> {
+        let Some(bytes) = self.descriptor.page_count.checked_mul(EFI_PAGE_SIZE as u64) else {
+            return None;
+        };
+        if bytes > usize::MAX as u64 {
+            None
+        } else {
+            Some(bytes as usize)
+        }
     }
 
     #[must_use]
@@ -476,12 +488,16 @@ impl MemoryDescriptorView {
 
     #[must_use]
     pub const fn is_linear_mapping_candidate(&self) -> bool {
-        self.kind().is_linear_mapping_candidate() && self.size() != 0
+        self.kind().is_linear_mapping_candidate()
+            && matches!(self.size(), Some(size) if size != 0)
+            && self.phys_end().is_some()
     }
 
     #[must_use]
     pub const fn is_usable_ram(&self) -> bool {
-        matches!(self.kind(), MemoryRegionKind::Ram) && self.size() != 0
+        matches!(self.kind(), MemoryRegionKind::Ram)
+            && matches!(self.size(), Some(size) if size != 0)
+            && self.phys_end().is_some()
     }
 }
 
@@ -613,10 +629,10 @@ mod tests {
         let second = entries.next().unwrap();
         assert!(entries.next().is_none());
         assert_eq!(first.phys_start(), 0x1000);
-        assert_eq!(first.size(), 0x2000);
+        assert_eq!(first.size(), Some(0x2000));
         assert_eq!(first.kind(), MemoryRegionKind::Ram);
         assert_eq!(second.phys_start(), 0x8000);
-        assert_eq!(second.size(), 0x3000);
+        assert_eq!(second.size(), Some(0x3000));
         assert_eq!(second.kind(), MemoryRegionKind::Acpi);
     }
 
@@ -632,5 +648,37 @@ mod tests {
         let view = MemoryDescriptorView { descriptor };
         assert!(!view.is_linear_mapping_candidate());
         assert_eq!(view.type_name(), "mmio");
+    }
+
+    #[test]
+    fn overflowing_page_count_is_skipped() {
+        let descriptor = MemoryDescriptor {
+            ty: MemoryType::CONVENTIONAL,
+            phys_start: 0x1000,
+            virt_start: 0,
+            page_count: u64::MAX,
+            att: 0,
+        };
+        let view = MemoryDescriptorView { descriptor };
+        assert_eq!(view.size(), None);
+        assert_eq!(view.phys_end(), None);
+        assert!(!view.is_linear_mapping_candidate());
+        assert!(!view.is_usable_ram());
+    }
+
+    #[test]
+    fn overflowing_phys_end_is_skipped() {
+        let descriptor = MemoryDescriptor {
+            ty: MemoryType::CONVENTIONAL,
+            phys_start: u64::MAX - 0x1000,
+            virt_start: 0,
+            page_count: 3,
+            att: 0,
+        };
+        let view = MemoryDescriptorView { descriptor };
+        assert_eq!(view.size(), Some(0x3000));
+        assert_eq!(view.phys_end(), None);
+        assert!(!view.is_linear_mapping_candidate());
+        assert!(!view.is_usable_ram());
     }
 }

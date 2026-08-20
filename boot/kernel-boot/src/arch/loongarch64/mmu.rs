@@ -520,9 +520,12 @@ unsafe fn map_linear_firmware_memory(systemtable_paddr: usize) {
             if !entry.is_linear_mapping_candidate() {
                 continue;
             }
+            let Some(size) = entry.size() else {
+                continue;
+            };
 
             // SAFETY: firmware marked this region as a linear-mapping candidate.
-            unsafe { map_linear_region(entry.phys_start(), entry.size(), flags) };
+            unsafe { map_linear_region(entry.phys_start(), size, flags) };
         }
         return;
     }

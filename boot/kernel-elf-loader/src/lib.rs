@@ -280,26 +280,47 @@ impl Elf64Header {
     }
 
     fn phdr(&self, image: &[u8], idx: u16) -> Option<Elf64Phdr> {
-        let off = self.e_phoff as usize + idx as usize * self.e_phentsize as usize;
-        let end = off + mem::size_of::<Elf64Phdr>();
-        if end > image.len() {
-            return None;
-        }
-        // SAFETY: The bounds check above guarantees `image[off..end]`
-        // contains one full readable program header.
-        Some(unsafe { read_unaligned_from_bytes::<Elf64Phdr>(&image[off..end]) })
+        let bytes = table_entry_bytes(
+            image,
+            self.e_phoff,
+            idx,
+            self.e_phentsize,
+            mem::size_of::<Elf64Phdr>(),
+        )?;
+        // SAFETY: `table_entry_bytes` returns a slice of exactly
+        // `size_of::<Elf64Phdr>()` readable bytes.
+        Some(unsafe { read_unaligned_from_bytes::<Elf64Phdr>(bytes) })
     }
 
     fn shdr(&self, image: &[u8], idx: u16) -> Option<Elf64Shdr> {
-        let off = self.e_shoff as usize + idx as usize * self.e_shentsize as usize;
-        let end = off + mem::size_of::<Elf64Shdr>();
-        if end > image.len() {
-            return None;
-        }
-        // SAFETY: The bounds check above guarantees `image[off..end]`
-        // contains one full readable section header.
-        Some(unsafe { read_unaligned_from_bytes::<Elf64Shdr>(&image[off..end]) })
+        let bytes = table_entry_bytes(
+            image,
+            self.e_shoff,
+            idx,
+            self.e_shentsize,
+            mem::size_of::<Elf64Shdr>(),
+        )?;
+        // SAFETY: `table_entry_bytes` returns a slice of exactly
+        // `size_of::<Elf64Shdr>()` readable bytes.
+        Some(unsafe { read_unaligned_from_bytes::<Elf64Shdr>(bytes) })
     }
+}
+
+fn table_entry_bytes(
+    image: &[u8],
+    table_off: u64,
+    idx: u16,
+    entsize: u16,
+    entry_size: usize,
+) -> Option<&[u8]> {
+    let stride = usize::from(entsize);
+    if stride < entry_size {
+        return None;
+    }
+    let table_off = usize::try_from(table_off).ok()?;
+    let off = table_off.checked_add(usize::from(idx).checked_mul(stride)?)?;
+    let end = off.checked_add(entry_size)?;
+    image.get(off..end)
 }
 
 #[repr(C)]
@@ -339,4 +360,37 @@ struct Elf64Sym {
     st_shndx: u16,
     st_value: u64,
     st_size: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_elf64(phoff: u64, phentsize: u16, phnum: u16) -> [u8; 64] {
+        let mut hdr = [0u8; 64];
+        hdr[0..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+        hdr[4] = 2;
+        hdr[5] = 1;
+        hdr[6] = 1;
+        hdr[16..18].copy_from_slice(&2u16.to_le_bytes());
+        hdr[18..20].copy_from_slice(&0x3eu16.to_le_bytes());
+        hdr[20..24].copy_from_slice(&1u32.to_le_bytes());
+        hdr[32..40].copy_from_slice(&phoff.to_le_bytes());
+        hdr[52..54].copy_from_slice(&64u16.to_le_bytes());
+        hdr[54..56].copy_from_slice(&phentsize.to_le_bytes());
+        hdr[56..58].copy_from_slice(&phnum.to_le_bytes());
+        hdr
+    }
+
+    #[test]
+    fn parse_rejects_overflowing_phdr_offset() {
+        let image = minimal_elf64(u64::MAX, mem::size_of::<Elf64Phdr>() as u16, 1);
+        assert!(KernelElf::parse(&image).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_zero_phentsize() {
+        let image = minimal_elf64(64, 0, 1);
+        assert!(KernelElf::parse(&image).is_err());
+    }
 }

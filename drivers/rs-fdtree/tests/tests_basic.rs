@@ -421,3 +421,81 @@ fn crosvm_dtb_exposes_both_dice_nodes() {
         region.starting_address as usize == 0x7fe2_3000 && region.size == 0x1000
     }));
 }
+
+#[test]
+fn rejects_struct_block_outside_blob() {
+    let mut dtb = vec![0u8; 64];
+    dtb[0..4].copy_from_slice(&0xd00dfeedu32.to_be_bytes());
+    dtb[4..8].copy_from_slice(&64u32.to_be_bytes());
+    dtb[8..12].copy_from_slice(&0xfffffff0u32.to_be_bytes());
+    dtb[32..36].copy_from_slice(&16u32.to_be_bytes());
+    dtb[36..40].copy_from_slice(&32u32.to_be_bytes());
+
+    assert_eq!(
+        LinuxFdt::new(&dtb).unwrap_err(),
+        rs_fdtree::FdtError::BadOffset
+    );
+}
+
+#[test]
+fn rejects_mem_rsvmap_outside_blob() {
+    let mut dtb = vec![0u8; 64];
+    dtb[0..4].copy_from_slice(&0xd00dfeedu32.to_be_bytes());
+    dtb[4..8].copy_from_slice(&64u32.to_be_bytes());
+    dtb[8..12].copy_from_slice(&40u32.to_be_bytes());
+    dtb[12..16].copy_from_slice(&48u32.to_be_bytes());
+    dtb[16..20].copy_from_slice(&1000u32.to_be_bytes());
+    dtb[32..36].copy_from_slice(&8u32.to_be_bytes());
+    dtb[36..40].copy_from_slice(&8u32.to_be_bytes());
+
+    assert_eq!(
+        LinuxFdt::new(&dtb).unwrap_err(),
+        rs_fdtree::FdtError::BadOffset
+    );
+}
+
+#[test]
+fn malformed_node_skip_does_not_panic() {
+    const FDT_MAGIC: u32 = 0xd00dfeed;
+    const FDT_BEGIN_NODE: u32 = 1;
+    const FDT_PROP: u32 = 3;
+    const FDT_END: u32 = 5;
+
+    fn push_be32(buf: &mut Vec<u8>, value: u32) {
+        buf.extend_from_slice(&value.to_be_bytes());
+    }
+
+    let mut structs = Vec::new();
+    push_be32(&mut structs, FDT_BEGIN_NODE);
+    structs.extend_from_slice(b"bad\0");
+    push_be32(&mut structs, FDT_PROP);
+    push_be32(&mut structs, 0xffff_ffff); // property length overflows remaining bytes
+    push_be32(&mut structs, 0);
+    push_be32(&mut structs, FDT_END);
+
+    let strings = b"\0";
+    let off_dt_struct = 40u32;
+    let off_dt_strings = off_dt_struct + structs.len() as u32;
+    let totalsize = off_dt_strings + strings.len() as u32;
+
+    let mut dtb = Vec::new();
+    push_be32(&mut dtb, FDT_MAGIC);
+    push_be32(&mut dtb, totalsize);
+    push_be32(&mut dtb, off_dt_struct);
+    push_be32(&mut dtb, off_dt_strings);
+    push_be32(&mut dtb, totalsize);
+    push_be32(&mut dtb, 17);
+    push_be32(&mut dtb, 16);
+    push_be32(&mut dtb, 0);
+    push_be32(&mut dtb, strings.len() as u32);
+    push_be32(&mut dtb, structs.len() as u32);
+    dtb.extend_from_slice(&[0; 16]);
+    dtb.extend_from_slice(&structs);
+    dtb.extend_from_slice(strings);
+
+    let fdt = LinuxFdt::new(&dtb).unwrap();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = fdt.all_nodes().count();
+        let _ = fdt.find_node("/missing");
+    }));
+}

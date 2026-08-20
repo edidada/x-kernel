@@ -106,7 +106,7 @@ impl ElfCacheEntry {
         data.truncate(read);
         match ElfCacheEntry::try_new_or_recover::<KError>(cache.clone(), data, |data| {
             let builder = ELFHeadersBuilder::new(data).map_err(map_elf_error)?;
-            let range = builder.ph_range();
+            let range = builder.ph_range().map_err(map_elf_error)?;
             if range.end as usize <= data.len() {
                 builder.build(&data[range.start as usize..range.end as usize])
             } else {
@@ -208,12 +208,14 @@ impl ElfLoader {
             .map(|elf| map_elf(uspace, kaddr_layout::USER_INTERP_BASE, elf))
             .transpose()?;
 
-        let entry = VirtAddr::from_usize(
-            ldso.as_ref()
-                .map_or_else(|| elf.entry(), |ldso| ldso.entry()),
-        );
+        let entry_va = ldso
+            .as_ref()
+            .map_or_else(|| elf.entry(), |ldso| ldso.entry())
+            .map_err(|_| KError::InvalidData)?;
+        let entry = VirtAddr::from_usize(entry_va);
         let auxv = elf
             .aux_vector(PAGE_SIZE_4K, ldso.map(|elf| elf.base()))
+            .map_err(|_| KError::InvalidData)?
             .collect::<Vec<_>>();
 
         Ok(Ok((entry, auxv)))

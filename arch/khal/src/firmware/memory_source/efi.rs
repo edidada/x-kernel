@@ -39,8 +39,10 @@ fn collect_uefi_memory(
         .expect("invalid Linux EFI boot memmap");
 
     for entry in memmap.entries() {
-        let size = entry.size();
-        if size == 0 {
+        let Some(size) = entry.size() else {
+            continue;
+        };
+        if size == 0 || entry.phys_end().is_none() {
             continue;
         }
 

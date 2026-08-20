@@ -37,22 +37,41 @@ impl FdtHeader {
         self.magic.get() == 0xd00dfeed
     }
 
-    pub(crate) fn struct_range(&self) -> core::ops::Range<usize> {
-        let start = self.off_dt_struct.get() as usize;
-        let end = start + self.size_dt_struct.get() as usize;
+    /// Ensures structure, strings, and mem-reserve blocks lie inside `limit`.
+    pub(crate) fn validate_block_bounds(&self, limit: usize) -> Result<(), crate::FdtError> {
+        let totalsize = self.totalsize.get() as usize;
+        if totalsize > limit {
+            return Err(crate::FdtError::BufferTooSmall);
+        }
 
-        start..end
+        self.struct_range_within(totalsize)
+            .ok_or(crate::FdtError::BadOffset)?;
+        self.strings_range_within(totalsize)
+            .ok_or(crate::FdtError::BadOffset)?;
+        if (self.off_mem_rsvmap.get() as usize) > totalsize {
+            return Err(crate::FdtError::BadOffset);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn struct_range(&self) -> core::ops::Range<usize> {
+        self.struct_range_within(usize::MAX).unwrap_or(0..0)
     }
 
     pub(crate) fn strings_range(&self) -> core::ops::Range<usize> {
-        let start = self.off_dt_strings.get() as usize;
-        let end = start + self.size_dt_strings.get() as usize;
-
-        start..end
+        self.strings_range_within(usize::MAX).unwrap_or(0..0)
     }
 
     pub(crate) fn mem_rsvmap_range(&self) -> core::ops::RangeFrom<usize> {
         (self.off_mem_rsvmap.get() as usize)..
+    }
+
+    fn struct_range_within(&self, limit: usize) -> Option<core::ops::Range<usize>> {
+        checked_block_range(self.off_dt_struct.get(), self.size_dt_struct.get(), limit)
+    }
+
+    fn strings_range_within(&self, limit: usize) -> Option<core::ops::Range<usize>> {
+        checked_block_range(self.off_dt_strings.get(), self.size_dt_strings.get(), limit)
     }
 
     pub(crate) fn from_bytes(bytes: &mut FdtData<'_>) -> Option<Self> {
@@ -69,4 +88,10 @@ impl FdtHeader {
             size_dt_struct: bytes.u32()?,
         })
     }
+}
+
+fn checked_block_range(offset: u32, size: u32, limit: usize) -> Option<core::ops::Range<usize>> {
+    let start = offset as usize;
+    let end = start.checked_add(size as usize)?;
+    (end <= limit).then_some(start..end)
 }

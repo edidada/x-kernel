@@ -55,7 +55,7 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
                 return None;
             }
 
-            Some(NodeProperty::parse(&mut stream, self.header))
+            NodeProperty::parse(&mut stream, self.header)
         })
     }
 
@@ -92,7 +92,7 @@ impl<'b, 'a: 'b> FdtNode<'b, 'a> {
                 return None;
             }
 
-            Some(NodeProperty::parse(&mut stream, self.header))
+            NodeProperty::parse(&mut stream, self.header)
         })
         .find(|prop| prop.name == name)
     }
@@ -171,7 +171,9 @@ pub(crate) fn all_nodes<'b, 'a: 'b>(
 
         stream.skip_nops();
         while stream.peek_u32()?.get() == FDT_PROP {
-            let _ = NodeProperty::parse(&mut stream, header);
+            if !skip_property(&mut stream) {
+                return None;
+            }
             stream.skip_nops();
         }
 
@@ -195,21 +197,23 @@ pub struct NodeProperty<'a> {
 }
 
 impl<'a> NodeProperty<'a> {
-    fn parse(stream: &mut FdtData<'a>, header: &LinuxFdt<'a>) -> Self {
-        let tag = stream.u32().expect("FDT property tag").get();
-        assert_eq!(tag, FDT_PROP, "bad prop, tag: {}", tag);
+    fn parse(stream: &mut FdtData<'a>, header: &LinuxFdt<'a>) -> Option<Self> {
+        if stream.u32()?.get() != FDT_PROP {
+            return None;
+        }
 
-        let prop = FdtProperty::from_bytes(stream).expect("FDT property");
+        let prop = FdtProperty::from_bytes(stream)?;
         let data_len = prop.len.get() as usize;
+        if stream.remaining().len() < data_len {
+            return None;
+        }
         let data = &stream.remaining()[..data_len];
         skip_4_aligned(stream, data_len);
 
-        NodeProperty {
-            name: header
-                .string_at_offset(prop.name_offset.get() as usize)
-                .expect("invalid FDT string offset"),
+        Some(NodeProperty {
+            name: header.string_at_offset(prop.name_offset.get() as usize)?,
             value: data,
-        }
+        })
     }
 }
 
@@ -345,7 +349,7 @@ pub(crate) fn find_node<'b, 'a: 'b>(
 
     if (looking_contains_addr && !addr_name_same) || (!looking_contains_addr && !base_name_same) {
         *stream = FdtData::new(curr_data);
-        skip_current_node(stream, header);
+        let _ = skip_current_node(stream, header);
         return None;
     }
 
@@ -365,7 +369,9 @@ pub(crate) fn find_node<'b, 'a: 'b>(
     let parent_props = Some(stream.remaining());
 
     while stream.peek_u32()?.get() == FDT_PROP {
-        let _ = NodeProperty::parse(stream, header);
+        if !skip_property(stream) {
+            return None;
+        }
         stream.skip_nops();
     }
 
@@ -428,32 +434,65 @@ pub(crate) fn memory_regions<'b, 'a: 'b>(
         .flat_map(|node| node.reg().into_iter().flatten())
 }
 
-pub(crate) fn skip_current_node<'a>(stream: &mut FdtData<'a>, header: &LinuxFdt<'a>) {
-    assert_eq!(stream.u32().unwrap().get(), FDT_BEGIN_NODE, "bad node");
+pub(crate) fn skip_current_node<'a>(stream: &mut FdtData<'a>, header: &LinuxFdt<'a>) -> bool {
+    let Some(tag) = stream.u32() else {
+        return false;
+    };
+    if tag.get() != FDT_BEGIN_NODE {
+        return false;
+    }
 
-    let unit_name = CStr::new(stream.remaining())
-        .expect("unit_name C str")
-        .as_str()
-        .unwrap();
-    let full_name_len = unit_name.len() + 1;
+    let remaining = stream.remaining();
+    let Some(null) = remaining.iter().position(|&b| b == 0) else {
+        return false;
+    };
+    let full_name_len = null + 1;
+    if remaining.len() < full_name_len {
+        return false;
+    }
     skip_4_aligned(stream, full_name_len);
 
     stream.skip_nops();
-    while stream.peek_u32().unwrap().get() == FDT_PROP {
-        NodeProperty::parse(stream, header);
+    while stream.peek_u32().is_some_and(|n| n.get() == FDT_PROP) {
+        if !skip_property(stream) {
+            return false;
+        }
         stream.skip_nops();
     }
 
     loop {
         stream.skip_nops();
-        if stream.peek_u32().unwrap().get() != FDT_BEGIN_NODE {
+        if !stream.peek_u32().is_some_and(|n| n.get() == FDT_BEGIN_NODE) {
             break;
         }
-        skip_current_node(stream, header);
+        if !skip_current_node(stream, header) {
+            return false;
+        }
     }
 
     stream.skip_nops();
-    assert_eq!(stream.u32().unwrap().get(), FDT_END_NODE, "bad node");
+    stream.u32().is_some_and(|n| n.get() == FDT_END_NODE)
+}
+
+fn skip_property(stream: &mut FdtData<'_>) -> bool {
+    let Some(tag) = stream.u32() else {
+        return false;
+    };
+    if tag.get() != FDT_PROP {
+        return false;
+    }
+
+    let Some(len) = stream.u32().map(|n| n.get() as usize) else {
+        return false;
+    };
+    if stream.u32().is_none() {
+        return false;
+    }
+    if stream.remaining().len() < len {
+        return false;
+    }
+    skip_4_aligned(stream, len);
+    true
 }
 
 fn skip_4_aligned(stream: &mut FdtData<'_>, len: usize) {
