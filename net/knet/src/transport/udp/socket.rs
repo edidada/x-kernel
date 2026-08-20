@@ -270,6 +270,7 @@ impl UdpSocket {
                     source_addr,
                 )?;
                 SERVICE.send_ipv6_packet(packet.take().ok_or(KError::InvalidInput)?)?;
+                network_poller().notify(PollReason::Tx);
                 poll_interfaces();
                 Ok(payload_len)
             })

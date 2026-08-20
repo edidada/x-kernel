@@ -252,7 +252,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-24 | 混合 netlink 批次发生部分 mutation | 高 | 同一发送同时包含 query 和 mutation，framing 错误位于已处理消息之后，或 response queue 在批次中途耗尽 | 发送事务锁串行化同一 socket 的 mutation 批次；完整批次先校验 framing 和类别；混合批次返回 syscall `EOPNOTSUPP`；同类 mutation 执行前检查完整 response 空间 |
 | T-25 | poller 执行期间丢失新事件 | 中 | RX、TX 或 timer 通知与完成 CAS 并发 | 单个 `AtomicU8` 将执行期通知发布为 `RUNNING_PENDING`；完成 CAS 失败后按观察到的状态重试，并通过一次成功 CAS 同时释放执行权和发布下一轮 |
 | T-26 | smoltcp 协议 timer 缺少推进事件 | 中 | TCP 重传或 keep-alive deadline 到期时没有设备 IRQ 或 socket 调用 | 每次 Interface poll 后通过 `poll_at` 注册 timer；到期后调用 `notify(PollReason::Timer)` 并唤醒 socket waiter；未来 deadline 不触发立即重轮询 |
-| T-27 | socket TX 工作缺少后台推进 | 中 | connect、send、receive window update 或 close 只更新 socket 状态 | 真实 TX 生产路径调用 `notify(PollReason::Tx)`；TCP 与 raw 注册 smoltcp send waker；Router data TX queue 容量增加后唤醒全局 TX waiter |
+| T-27 | socket TX 工作缺少后台推进 | 中 | connect、send、receive window update 或 close 只更新 socket 状态 | 真实 TX 生产路径调用 `notify(PollReason::Tx)`，IPv6 UDP 与 IPv4 UDP 相同；TCP 与 raw 注册 smoltcp send waker；Router data TX queue 容量增加后唤醒全局 TX waiter；IPv6 本机交付后的 `local_rx_queue` 计入 `has_more` |
 | T-28 | TCP 文件关闭丢失已经接受的发送数据 | 中 | `write` 把数据写入 smoltcp buffer 后异步发布 TX，文件 Drop 在 poller 处理前删除 handle | Drop 将未完成协议关闭的 handle 转移到 deferred-close registry；poller 完成 payload、FIN 和重传后回收；60 秒期限只限制 orphan `FIN_WAIT_2` 占用资源 |
 | T-29 | 并发 socket 等待阻塞网络 timer 更新 | 中 | socket 注册等待时在 timeout mutex 内手工 poll 异步 sleep，timer-wheel 锁等待阻塞 poller | deadline 使用原子值发布；周期采样回调到期后直接唤醒 waiter 并通知 poller，不持有 timeout mutex，不创建或 poll timer future |
 | T-30 | TCP close 将未读数据错误转换为 FIN | 中 | 文件对象释放前未检查接收队列，协议 close 直接进入 FIN_WAIT1 | 对端收到 FIN 后继续按有序关闭处理，Linux 预期的 RST 语义丢失 | Drop 检查 smoltcp 接收队列；存在未读数据时调用 abort，并保留 handle 直到 RST dispatch 完成 |

@@ -332,7 +332,7 @@ Ethernet RX 任务使用 `publish_and_poll_rx` 发布相同状态，并在当前
 7. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
 8. `Router::dispatch_budgeted` 先处理 control TX queue，再处理 data TX queue，单轮发送数量受 TX budget 限制。
 9. `Interface::poll_at` 与 orphan `FIN_WAIT_2` deadline 共同决定下一次网络 deadline，`Service` 将其写入原子 deadline；`register_timer_callback(TIMER_SAMPLE_PERIOD)` 周期采样该值，到期后通过 `notify(PollReason::Timer)` 发布工作。尚未到期的 deadline 不进入 `PollProgress::has_more`。
-10. `PollProgress::has_more` 只汇报当前可立即处理的 RX、ingress、TX 或已到期 timer 工作。每轮 `Service::poll_budgeted` 使用 1 ms 软时间上限，并在设备 RX、stack ingress、stack egress 和 Router TX 每完成 32 个工作项后检查时间。协议 maintenance 和一次 smoltcp egress pass 始终执行，以维持 timer 与协议输出进度。RX 任务或后台 Future 获得批次执行权后最多连续推进四轮，达到轮数上限或清空立即工作后归还执行权，剩余 backlog 通过 `SCHEDULED` 状态进入下一批。
+10. `PollProgress::has_more` 只汇报当前可立即处理的 RX、ingress、TX 或已到期 timer 工作。IPv6 本机交付在 TX dispatch 末尾写入 `local_rx_queue`，因此 TX 完成后会再次采样 `has_immediate_rx_work()`，避免 loopback / scoped UDP 停在本地队列里等待下一次无关的 poll。每轮 `Service::poll_budgeted` 使用 1 ms 软时间上限，并在设备 RX、stack ingress、stack egress 和 Router TX 每完成 32 个工作项后检查时间。协议 maintenance 和一次 smoltcp egress pass 始终执行，以维持 timer 与协议输出进度。RX 任务或后台 Future 获得批次执行权后最多连续推进四轮，达到轮数上限或清空立即工作后归还执行权，剩余 backlog 通过 `SCHEDULED` 状态进入下一批。
 
 ### TX 路由
 

@@ -235,7 +235,7 @@ impl Service {
         drop(sockets);
 
         let ingress_has_more = router.has_pending_ingress();
-        let rx_has_more = router.has_immediate_rx_work();
+        let mut rx_has_more = router.has_immediate_rx_work();
         let tx_capacity_before = router.available_tx_packet_slots();
         let (_, mut tx_has_more) = router.dispatch_budgeted(device_timestamp, 0);
         let mut tx_packets = 0;
@@ -257,6 +257,10 @@ impl Service {
                 break;
             }
         }
+        // IPv6 local delivery lands in `local_rx_queue` during TX dispatch,
+        // after the earlier RX snapshot. Count it as immediate work so the
+        // next poll round delivers loopback and scoped UDP.
+        rx_has_more = rx_has_more || router.has_immediate_rx_work();
         PollProgress {
             rx_packets,
             tx_packets,
