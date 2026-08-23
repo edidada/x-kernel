@@ -14,6 +14,8 @@
 //!   `preempt` features if it is enabled.
 //! - `sched-cfs`: Use the Completely Fair Scheduler. It also enables the
 //!   `preempt` features if it is enabled.
+//! - `sleep_context_debug`: Check that blocking task paths are only entered from
+//!   sleepable contexts.
 
 #![cfg_attr(not(test), no_std)]
 

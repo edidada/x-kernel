@@ -24,6 +24,7 @@ sched_rr = ["preempt"]
 sched_cfs = ["preempt"]
 sched_eevdf = ["preempt"]
 sched_stat = []
+sleep_context_debug = []
 arm-timer-resume-fixup = []
 
 test = ["percpu/sp-naive"]

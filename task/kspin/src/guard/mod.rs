@@ -15,6 +15,12 @@ pub trait KernelGuardIf {
 
     /// Disable kernel preemption.
     fn disable_preempt();
+
+    /// Records entry into a non-sleepable guard context for diagnostics.
+    fn enter_atomic_context();
+
+    /// Records exit from a non-sleepable guard context for diagnostics.
+    fn exit_atomic_context();
 }
 
 /// Base trait for all guard types.

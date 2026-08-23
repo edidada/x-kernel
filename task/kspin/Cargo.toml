@@ -18,6 +18,7 @@ preempt = []
 smp = []
 pmr = ["karch/pmr"]
 stats = ["dep:klockstat", "dep:linkme", "klockstat/stats"]
+atomic_context_debug = []
 default = []
 
 [dependencies]

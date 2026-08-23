@@ -53,18 +53,34 @@ cfg_select! {
     }
 }
 
-#[cfg(feature = "preempt")]
+#[cfg(any(feature = "preempt", unittest, feature = "sleep_context_debug"))]
 #[kiface::provide]
 impl kspin::KernelGuardIf {
     fn disable_preempt() {
+        #[cfg(feature = "preempt")]
         if let Some(curr) = current_may_uninit() {
             curr.disable_preempt();
         }
     }
 
     fn enable_preempt() {
+        #[cfg(feature = "preempt")]
         if let Some(curr) = current_may_uninit() {
             curr.enable_preempt(true);
+        }
+    }
+
+    fn enter_atomic_context() {
+        #[cfg(any(unittest, feature = "sleep_context_debug"))]
+        if let Some(curr) = current_may_uninit() {
+            curr.enter_atomic_context();
+        }
+    }
+
+    fn exit_atomic_context() {
+        #[cfg(any(unittest, feature = "sleep_context_debug"))]
+        if let Some(curr) = current_may_uninit() {
+            curr.exit_atomic_context();
         }
     }
 }
@@ -563,7 +579,7 @@ pub fn interruptible_sleep_until(deadline: ktime_types::MonotonicInstant) {
     }
 }
 
-fn assert_sleepable_context(operation: &'static str) {
+pub(crate) fn assert_sleepable_context(operation: &'static str) {
     assert!(
         can_sleep_current_context(),
         "{operation} called from non-sleepable interrupt-like context"
@@ -575,7 +591,14 @@ fn sleep_until_unchecked(deadline: ktime_types::MonotonicInstant) {
 }
 
 fn can_sleep_current_context() -> bool {
-    !kirq::context::is_in_interrupt_context()
+    let is_in_interrupt_context = kirq::context::is_in_interrupt_context();
+    #[cfg(any(unittest, feature = "sleep_context_debug"))]
+    let is_in_atomic_context =
+        current_may_uninit().is_some_and(|current| current.is_in_atomic_context());
+    #[cfg(not(any(unittest, feature = "sleep_context_debug")))]
+    let is_in_atomic_context = false;
+
+    !is_in_interrupt_context && !is_in_atomic_context
 }
 
 #[cfg(unittest)]
@@ -636,6 +659,7 @@ mod tests_api {
         context::local_bh_disable,
         softirq::{SoftirqVec, raise_softirq, test_support::ScopedSoftirqAction},
     };
+    use kspin::NoPreemptIrqSave;
     use unittest::{assert, assert_eq, def_test};
 
     use super::{
@@ -755,6 +779,15 @@ mod tests_api {
     fn sleep_context_gate_rejects_bh_disabled_context() {
         let _bh = local_bh_disable();
         assert!(!can_sleep_current_context_for_tests());
+    }
+
+    #[def_test(serial)]
+    fn sleep_context_gate_rejects_kspin_atomic_context() {
+        {
+            let _guard = NoPreemptIrqSave::new();
+            assert!(!can_sleep_current_context_for_tests());
+        }
+        assert!(can_sleep_current_context_for_tests());
     }
 }
 

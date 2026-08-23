@@ -35,6 +35,7 @@
 //!
 //! - `smp`: Enable for multi-core systems (adds atomic lock state)
 //! - `preempt`: Enable preemption control (requires implementing [`KernelGuardIf`])
+//! - `atomic_context_debug`: Track guard-held atomic context for sleep diagnostics
 //!
 //! # Usage Patterns
 //!

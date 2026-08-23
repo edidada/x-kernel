@@ -33,6 +33,16 @@ config KFEAT_SCHED_STAT
       prints them when reporting a soft lockup. Debug builds enable this by
       default, while release builds keep it opt-in.
 
+config KFEAT_SLEEP_CONTEXT_DEBUG
+    bool "Sleep context debug checks"
+    default y if BUILD_TYPE_DEBUG
+    help
+      Check that blocking task paths are not entered from hardirq, softirq, or
+      BH-disabled context. This catches direct `block_on` use and blocking
+      synchronization primitives that eventually sleep through the task
+      scheduler. Debug builds enable this by default; release builds keep it
+      opt-in to avoid adding checks on every blocking boundary.
+
 config KFEAT_PMU
     bool "PMU support"
     help

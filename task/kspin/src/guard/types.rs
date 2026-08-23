@@ -57,12 +57,18 @@ mod kernel {
 
         #[inline]
         fn acquire() -> Self::State {
+            #[cfg(any(unittest, feature = "atomic_context_debug"))]
+            crate::guard::KernelGuardIf::enter_atomic_context();
+
             crate::guard::arch::save_disable()
         }
 
         #[inline]
         fn release(state: Self::State) {
-            crate::guard::arch::restore(state)
+            crate::guard::arch::restore(state);
+
+            #[cfg(any(unittest, feature = "atomic_context_debug"))]
+            crate::guard::KernelGuardIf::exit_atomic_context();
         }
     }
 
@@ -94,12 +100,18 @@ mod kernel {
 
         #[inline]
         fn acquire() -> Self::State {
+            #[cfg(any(unittest, feature = "atomic_context_debug"))]
+            crate::guard::KernelGuardIf::enter_atomic_context();
+
             #[cfg(feature = "preempt")]
             crate::guard::KernelGuardIf::disable_preempt();
         }
 
         #[inline]
         fn release(_state: Self::State) {
+            #[cfg(any(unittest, feature = "atomic_context_debug"))]
+            crate::guard::KernelGuardIf::exit_atomic_context();
+
             #[cfg(feature = "preempt")]
             crate::guard::KernelGuardIf::enable_preempt();
         }
@@ -134,6 +146,9 @@ mod kernel {
 
         #[inline]
         fn acquire() -> Self::State {
+            #[cfg(any(unittest, feature = "atomic_context_debug"))]
+            crate::guard::KernelGuardIf::enter_atomic_context();
+
             // Order: disable preemption first, then IRQs
             #[cfg(feature = "preempt")]
             crate::guard::KernelGuardIf::disable_preempt();
@@ -145,6 +160,9 @@ mod kernel {
         fn release(state: Self::State) {
             // Order: restore IRQs first, then enable preemption
             crate::guard::arch::restore(state);
+
+            #[cfg(any(unittest, feature = "atomic_context_debug"))]
+            crate::guard::KernelGuardIf::exit_atomic_context();
 
             #[cfg(feature = "preempt")]
             crate::guard::KernelGuardIf::enable_preempt();

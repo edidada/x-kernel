@@ -252,6 +252,8 @@ pub struct TaskInner {
     need_resched: AtomicBool,
     #[cfg(feature = "preempt")]
     preempt_disable_count: AtomicUsize,
+    #[cfg(any(unittest, feature = "sleep_context_debug"))]
+    atomic_context_depth: AtomicUsize,
 
     /// Nesting depth for Linux-style `WF_SYNC` wake scopes ([`crate::with_wake_sync`]).
     /// When non-zero, wakees may sync-preempt an eligible next-buddy on the
@@ -776,6 +778,8 @@ impl TaskInner {
             need_resched: AtomicBool::new(false),
             #[cfg(feature = "preempt")]
             preempt_disable_count: AtomicUsize::new(0),
+            #[cfg(any(unittest, feature = "sleep_context_debug"))]
+            atomic_context_depth: AtomicUsize::new(0),
             wake_sync_depth: AtomicUsize::new(0),
             interrupted: AtomicBool::new(false),
             interrupt_waker: PollSet::new(),
@@ -906,6 +910,28 @@ impl TaskInner {
     #[cfg(feature = "preempt")]
     pub(crate) fn can_preempt(&self, current_disable_count: usize) -> bool {
         self.preempt_disable_count.load(Ordering::Acquire) == current_disable_count
+    }
+
+    #[inline]
+    #[cfg(any(unittest, feature = "sleep_context_debug"))]
+    pub(crate) fn is_in_atomic_context(&self) -> bool {
+        self.atomic_context_depth.load(Ordering::Acquire) != 0
+    }
+
+    #[inline]
+    #[cfg(any(unittest, feature = "sleep_context_debug"))]
+    pub(crate) fn enter_atomic_context(&self) {
+        self.atomic_context_depth.fetch_add(1, Ordering::Release);
+    }
+
+    #[inline]
+    #[cfg(any(unittest, feature = "sleep_context_debug"))]
+    pub(crate) fn exit_atomic_context(&self) {
+        let _ =
+            self.atomic_context_depth
+                .fetch_update(Ordering::Release, Ordering::Relaxed, |depth| {
+                    Some(depth.saturating_sub(1))
+                });
     }
 
     #[inline]

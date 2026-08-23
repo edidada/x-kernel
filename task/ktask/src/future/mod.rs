@@ -59,6 +59,9 @@ impl Wake for KWaker {
 /// Note that this doesn't dispatch_irq interruption and is not recommended for direct
 /// use in most cases.
 pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
+    #[cfg(any(unittest, feature = "sleep_context_debug"))]
+    crate::api::assert_sleepable_context("block_on");
+
     let mut fut = pin!(f.into_future());
 
     let curr = current();
