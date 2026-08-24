@@ -227,6 +227,7 @@ impl IrqThreadState {
             !state.pending
         };
         if complete_idle {
+            super::manager::finalize_oneshot_thread(self.virq);
             self.idle.complete_all();
         }
     }

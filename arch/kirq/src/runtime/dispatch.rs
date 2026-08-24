@@ -16,30 +16,27 @@ use crate::{IrqEvent, action::IrqActionReturn, platform::PendingIrq, state::IRQ_
 /// deferred hooks can identify the claimed line.
 pub(super) fn dispatch_actions(pending: &PendingIrq) -> Option<crate::Virq> {
     let (virq, snapshot, dispatch_guard, remove_waiters) = {
-        let mut state = IRQ_STATE.lock();
+        let state = IRQ_STATE.lock();
         let Some(virq) = pending.resolve() else {
             warn!("Unhandled IRQ {:?}", pending.source());
             return None;
         };
-        let Some(entry) = state.descs.get_mut(&virq) else {
+        let Some(entry) = state.descs.get(&virq).cloned() else {
             warn!("Unhandled IRQ {virq}");
             // The source resolved, but no descriptor is currently registered.
             // Return immediately after the single unhandled warning; the caller
             // still completes the platform claim and runs IRQ-tail deferred work.
             return Some(virq);
         };
-        let snapshot = entry.snapshot_actions();
+        drop(state);
+        let snapshot = entry.snapshot_actions_and_begin_dispatch();
         let (dispatch_guard, remove_waiters) = if snapshot.has_primary_actions() {
-            // The snapshot and in-flight mark must be committed under the same
-            // `IRQ_STATE` lock. Once an action is copied out, `free_irq*()` may
-            // remove it from the control plane but must still wait for this
-            // guard before releasing driver-owned state.
-            entry.begin_dispatch();
             (Some(IrqDispatchGuard::new(virq)), false)
         } else {
             // Without a dispatch guard there is no escaped handler snapshot;
             // this is the only hot-path case where cleanup can succeed here.
-            let remove_waiters = state.remove_if_unused(virq).is_some();
+            drop(entry);
+            let remove_waiters = IRQ_STATE.lock().remove_if_unused(virq).is_some();
             (None, remove_waiters)
         };
         (virq, snapshot, dispatch_guard, remove_waiters)
@@ -59,6 +56,9 @@ pub(super) fn dispatch_actions(pending: &PendingIrq) -> Option<crate::Virq> {
             IrqActionReturn::WakeThread { sources } => {
                 merged_event.merge(IrqEvent::from_sources(sources));
                 if let Some(thread) = action.thread_slot() {
+                    if action.is_oneshot() {
+                        super::manager::begin_oneshot_thread(virq);
+                    }
                     thread.wake(sources);
                 } else {
                     warn!("IRQ {virq} action requested a thread without a thread slot");
@@ -93,7 +93,7 @@ impl Drop for IrqDispatchGuard {
             let mut state = IRQ_STATE.lock();
             let wait_set = state
                 .descs
-                .get_mut(&self.virq)
+                .get(&self.virq)
                 .and_then(|entry| entry.finish_dispatch());
             // This is the matching cleanup point for the last in-flight snapshot:
             // once the guard drops, a descriptor left empty by `free_irq*()` may now

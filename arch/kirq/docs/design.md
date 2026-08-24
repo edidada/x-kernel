@@ -95,10 +95,18 @@ CPU trap entry
 
 ```text
 try_map/try_register/try_enable/unregister
-    └── IRQ_CONTROL_LOCK
     └── IRQ_STATE
-            ├── virq -> IrqStateDesc
+            ├── virq -> Arc<IrqStateDesc>
             └── (domain, hwirq) -> virq
+    └── IrqStateDesc::control
+            └── action/runtime state + platform configure/enable plan
+
+threaded ONESHOT mask/unmask
+    └── IRQ_STATE
+            └── virq -> Arc<IrqStateDesc>
+    └── IrqStateDesc::control
+            └── oneshot_mask_pending / disable_depth / is_enabled
+    └── IntrManagerIf::enable()
 
 domain::Published<ReverseMap>
     └── lock-free data-plane (domain, hwirq) -> virq snapshot
@@ -120,9 +128,10 @@ register_nmi()
 
 - `try_map()`、`try_enable()`、`try_register()`、`try_register_disabled()`、
   `try_enable_irq()`、`try_disable_irq_nosync()` 和 `unregister()` / `free_irq()`
-  API 可以从内核普通上下文调用，内部用 `SpinNoIrq` 保护全局 IRQ state。会触发平台
-  configure/enable/disable 的控制路径先获取 `IRQ_CONTROL_LOCK`，再获取
-  `IRQ_STATE`，形成状态变更和平台操作的固定顺序。
+  API 可以从内核普通上下文调用。`IRQ_STATE` 只保护 virq/domain namespace 和
+  descriptor handle 生命周期；会触发平台 configure/enable/disable 的控制路径在
+  descriptor-local `IrqStateDesc::control` 下完成状态变更和平台操作提交，避免不同
+  IRQ line 共用一把全局控制锁。
 - `disable_irq()`、`synchronize_irq()` 和 `free_irq()` 会等待当前 software hardirq
   dispatch 的 `in_flight` 计数归零，不能从 hardirq、softirq 或 BH-disabled context
   调用。`disable_irq_nosync()` / `try_disable_irq_nosync()` 只对已经存在的
@@ -257,8 +266,9 @@ auto-enable 路径，不暴露 disabled shared registration API。后续 shared 
 状态的前提下重新下发 stale platform configure。
 handler 的 normal IRQ 调用参数是已经解析出的 OS-visible `virq`；shared IRQ handler
 依赖这个参数识别当前 line，而不应从设备或平台私有状态反推。`register_threaded()`
-会安装一个 regular action，primary 仍在 hardirq context 运行；primary 返回 handled
-后唤醒 action-owned IRQ thread，thread handler 在普通 task context 中运行。
+会安装一个 regular action，primary 仍在 hardirq context 运行；primary 返回
+`IrqEvent::WAKE_THREAD` 后唤醒 action-owned IRQ thread，thread handler 在普通 task
+context 中运行。
 当前 threaded IRQ 只覆盖非 shared regular action，shared threaded IRQ 和完整
 oneshot mask 聚合仍是后续扩展。
 
@@ -309,11 +319,14 @@ synchronize / free 等 generic IRQ 语义成组闭合。
 - 保留现有 `register()` / `register_shared()` hardirq-only 兼容 API。
 - `register_threaded()` / `try_register_threaded()` 安装 primary handler、thread
   handler 和 optional name，默认 auto-enable，且只接受空 line 上的非 shared action。
-- 当前 `IrqEvent` 还没有独立的 `IRQ_WAKE_THREAD` 等价位。对 threaded action，
-  primary 返回 handled 即表示“本 action 认领中断并唤醒 thread”；对普通 action，
-  handled 仍只表示 hardirq 已处理。
-- `handler == None && thread_fn != None`、shared threaded IRQ、driver-facing
-  action flags 和完整 oneshot-safe 检查仍未暴露。
+- `IrqEvent::WAKE_THREAD` 和 `IrqEvent::wake_thread_from_sources()` 是
+  `IRQ_WAKE_THREAD` 的 public 等价语义。对 threaded action，只有显式 wake-thread
+  event 会唤醒 thread；普通 `HANDLED` 仍只表示 hardirq 已处理。
+- `register_threaded_default()` / `try_register_threaded_default()` /
+  `try_register_threaded_default_with_options()` 提供
+  `handler == None && thread_fn != None` 的默认 primary 等价调用面。这组 helper
+  总是安装 generic ONESHOT action。
+- shared threaded IRQ、driver-facing action flags 和完整 oneshot-safe 检查仍未暴露。
 
 当前运行时结构：
 
@@ -336,7 +349,8 @@ synchronize / free 等 generic IRQ 语义成组闭合。
 ```text
 hardirq trap
   -> dispatch_actions()
-       -> clone action snapshot under IRQ_STATE
+       -> lookup descriptor handle under IRQ_STATE
+       -> clone action snapshot and mark in-flight under descriptor-local state lock
        -> run primary handlers outside IRQ_STATE
        -> on WakeThread:
             mark action run bit
@@ -375,14 +389,12 @@ irq thread
 当前实现先固定 regular threaded IRQ 的最小闭环。以下能力已确认需要后续单独实现，
 不应混入当前 foundation patch：
 
-- public `IrqEvent` 或新的 handler return 类型需要显式表达 `WakeThread`，不能长期用
-  threaded action 的 handled result 隐式表示 wake。
-- `handler == None && thread_fn != None` 的便利 API，需要安装默认 primary wake
-  handler，并检查 oneshot-safe 约束。
+- controller / irqchip `oneshot-safe` 标记仍未接入；当前默认 primary helper 统一走
+  generic ONESHOT，不尝试根据 controller 能力跳过 mask/unmask。
 - shared threaded IRQ registration，需要把 `IrqActionToken`、action-local thread
   runtime 和 shared fanout 结果聚合统一到 descriptor runtime。
-- `IRQF_ONESHOT` 完整 mask/unmask protocol，包括 shared line 的 per-action active
-  mask bit、descriptor-level 聚合和 disable/teardown 交互。
+- shared `IRQF_ONESHOT` 完整 mask/unmask protocol，包括 per-action active mask bit
+  和 descriptor-level 聚合。
 - IRQ thread affinity、priority 和命名策略，需要通过 scheduler-facing provider 或
   注册 options 暴露，不能让 `kirq` 直接依赖具体 scheduler 类型。
 - per-action/per-line threaded IRQ statistics，用于后续 watchdog/healthcheck 诊断。
@@ -427,20 +439,37 @@ threaded IRQ 仍然有独立价值：它是“设备 IRQ action 生命周期的�
 - `teardown_depth`：等待式 teardown 正在进行的深度。该值非 `0` 时拒绝同一 line
   的新 action 注册，并阻止 unused descriptor 被 dispatch guard 提前删除；
 - `is_msi`：从 descriptor flags 派生的 MSI lifetime marker；
-- `oneshot_mask_pending`：后续完整 threaded/oneshot 语义预留；当前 regular threaded
-  IRQ 尚不驱动硬件 mask 聚合。
+- `oneshot_mask_pending`：non-shared threaded ONESHOT action 的 line-level pending
+  mask 状态。primary 返回 wake 后置位并 mask line；thread idle 时清位，并且仅在
+  `disable_depth == 0` 且 line 仍有 action 时 unmask。
 
 这些字段是 crate-private 运行态，不构成 public ABI。后续 shared IRQ、oneshot mask
 和 threaded IRQ 只能在这个 owner 内扩展，不能绕过 `IrqStateDesc` 在 dispatch、
 MSI free 或 unregister 路径上另建并行状态。
+
+`IRQ_STATE.descs` 保存 `Arc<IrqStateDesc>`。从全局 namespace 中 clone 出来的
+descriptor handle 是短期 lifecycle pin：`remove_if_unused()` 只有在 action /
+teardown / in-flight 状态为空且 map entry 是唯一 strong reference 时才删除
+descriptor。这样 register、dispatch 或 teardown 在释放 `IRQ_STATE` 后继续操作
+descriptor-local state 时，不会把 action 安装到已经脱离 virq namespace 的对象上。
 
 primary handler 的 public return 仍是 `IrqEvent`。dispatch 内部把它分类为：
 
 - `NOT_HANDLED` -> `Unhandled`；
 - 普通 action 的 `HANDLED` -> `Handled { sources: 0 }`；
 - 普通 action 的 `from_sources(bits)` -> `Handled { sources: bits }`；
-- threaded action 的 handled result -> `WakeThread { sources }`，dispatch 只唤醒
-  action-owned IRQ thread，不同步运行 thread handler。
+- 普通 action 的 `WAKE_THREAD` / `wake_thread_from_sources(bits)` ->
+  `WakeThread { sources }` 并记录缺少 action-owned thread slot 的诊断，不会同步运行
+  thread handler；
+- threaded action 的 `WAKE_THREAD` / `wake_thread_from_sources(bits)` ->
+  `WakeThread { sources }`，dispatch 只唤醒 action-owned IRQ thread，不同步运行
+  thread handler；
+- threaded action 的普通 `HANDLED` 仍只表示 hardirq-side handled，不唤醒 thread。
+- ONESHOT threaded action 在 wake thread 前提交 line mask plan；thread handler
+  完成且没有 pending rerun 后，descriptor runtime 根据 disable depth 决定是否 unmask。
+  这两个状态转换都走 descriptor-local `IrqStateDesc::control`，并在同一临界区内提交
+  platform op，避免和 `disable_irq()`、`free_irq()` 等同 line 控制路径的
+  enable/disable plan 乱序。
 
 ### virq 映射
 
@@ -845,24 +874,24 @@ path 从 atomic function-pointer slot 读取当前 hook，未安装 executor 时
 ### `free_irq(desc)`
 
 1. 拒绝 hardirq、softirq 和 BH-disabled context 中的等待式 teardown。
-2. 在 `IRQ_CONTROL_LOCK -> IRQ_STATE` 顺序下解析 `virq`。
-3. 移除 regular action。
-4. 如果 descriptor 已经没有 action 使用者，先 mask 平台 line，并把
+2. 在 `IRQ_STATE` 下解析 `virq` 并取得 descriptor handle。
+3. 在 descriptor-local `IrqStateDesc::control` 下移除 regular action。
+4. 如果 descriptor 已经没有 action 使用者，在同一 control 临界区内先 mask 平台 line，并把
    `disable_depth` 固定到至少 `1`。
-5. 释放锁后等待该 `virq` 的 `in_flight` dispatch 计数归零。
-6. 重新进入控制面锁并删除 unused non-MSI descriptor。MSI descriptor 仍由
+5. 释放 descriptor control 后等待该 `virq` 的 `in_flight` dispatch 计数归零。
+6. 重新进入 `IRQ_STATE` 并删除 unused non-MSI descriptor。MSI descriptor 仍由
    `free_msix()` 作为资源 owner 做最终释放。
 
 ### `free_irq_action(desc, token)`
 
 1. 拒绝 hardirq、softirq 和 BH-disabled context 中的等待式 teardown。
-2. 在 `IRQ_CONTROL_LOCK -> IRQ_STATE` 顺序下解析 `virq`。
-3. 只移除 token 对应的 shared action；若 line 还有其它 action，保留平台 enable
-   状态和 descriptor。
-4. 若移除的是最后一个 action，则 mask 平台 line。
-5. 释放锁后等待该 `virq` 的 `in_flight` dispatch 计数归零，保证旧 snapshot 不再
-   持有被移除 action。
-6. 最后一个 action 被移除时，重新进入控制面锁并删除 unused non-MSI descriptor。
+2. 在 `IRQ_STATE` 下解析 `virq` 并取得 descriptor handle。
+3. 在 descriptor-local `IrqStateDesc::control` 下只移除 token 对应的 shared action；
+   若 line 还有其它 action，保留平台 enable 状态和 descriptor。
+4. 若移除的是最后一个 action，则在同一 control 临界区内 mask 平台 line。
+5. 释放 descriptor control 后等待该 `virq` 的 `in_flight` dispatch 计数归零，保证旧
+   snapshot 不再持有被移除 action。
+6. 最后一个 action 被移除时，重新进入 `IRQ_STATE` 并删除 unused non-MSI descriptor。
 
 ### `synchronize_irq(desc)`
 
@@ -931,17 +960,19 @@ NMI path 不触发 lifecycle hooks，避免 hardirq 扩展点被用于更严格�
 
 ## 并发模型
 
-- `IRQ_STATE` 使用 `SpinNoIrq`，因为 descriptor 状态会被普通 IRQ 路径读取和修改。
+- `IRQ_STATE` 使用 `SpinNoIrq` 保护 virq/domain namespace 和 descriptor handle
+  生命周期。descriptor runtime/action 状态由 `IrqStateDesc` 内部的 descriptor-local
+  `SpinNoIrq` 保护。
 - domain reverse-map snapshot 由控制面在 `IRQ_STATE` 锁内发布；IRQ 数据面只做
   atomic load 和 immutable snapshot lookup。普通 IRQ unregister 不删除 domain
   mapping；MSI resource final free 删除 mapping 后会发布替换 snapshot。
-- normal dispatch 从 `IRQ_STATE` 中复制 action list 后释放锁，避免
-  在执行驱动 handler 时持有全局 IRQ state。resolve 和 descriptor lookup 保持在同一
-  临界区内，避免并发 unregister 造成“已解析但 descriptor 已删除”的中间态。
+- normal dispatch 从 `IRQ_STATE` 中取得 descriptor handle 后释放锁，再在
+  descriptor-local state lock 下复制 action list 并同步增加 `in_flight`，避免
+  在执行驱动 handler 时持有全局 IRQ state。
 - `in_flight` 是 descriptor-local 计数，由 dispatch snapshot guard 维护；对应的
   `in_flight_zero` completion 只负责唤醒等待者，不参与 cleanup 判定。最后一个
-  guard drop 时在 `IRQ_STATE` 锁内发布 completion done state，锁外执行 wake，保证
-  completion state 和 `in_flight == 0` 的观察顺序一致。
+  guard drop 时在 descriptor-local state lock 内发布 completion done state，锁外执行
+  wake，保证 completion state 和 `in_flight == 0` 的观察顺序一致。
   `free_irq()` 先移除 action，action list 为空时就 mask 平台 line；随后在锁外等待
   `in_flight` 归零，最后只在 `action_count == 0 && in_flight == 0 && teardown_depth == 0`
   时清理 descriptor。平台 mask 与 descriptor cleanup 使用不同判定：并发 shared

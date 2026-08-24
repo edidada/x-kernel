@@ -4,11 +4,13 @@
 
 //! IRQ manager public API and dispatch-entry orchestration.
 
+use alloc::sync::Arc;
+
 use kspin::SpinNoIrq;
 
 use super::{sync_wait::IrqSyncWaitIf, thread::IrqThreadSlot};
 use crate::{
-    Hwirq, IrqDesc, IrqDescError, IrqDomainId, IrqSpec, Virq,
+    Hwirq, IrqDesc, IrqDescError, IrqDomainId, IrqEvent, IrqSpec, Virq,
     action::IrqAction,
     context::HardIrqContextGuard,
     dispatch::dispatch_actions,
@@ -18,7 +20,7 @@ use crate::{
         configure_platform_irq, platform_dispatch_irq, platform_dispatch_nmi,
         set_platform_irq_enabled,
     },
-    state::{IRQ_STATE, IrqPlatformPlan, IrqState, IrqStateDesc, try_resolve_and_publish},
+    state::{IRQ_STATE, IrqPlatformUpdate, IrqState, IrqStateDesc, try_resolve_and_publish},
 };
 pub use crate::{
     action::IrqActionToken,
@@ -38,28 +40,49 @@ pub use crate::{
     state::DYNAMIC_VIRQ_BASE,
 };
 
-static IRQ_CONTROL_LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
-
 /// Options for installing a regular IRQ handler.
+///
+/// `with_oneshot()` applies to threaded registrations. Hardirq-only
+/// registrations keep their existing behavior and ignore the bit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IrqRegisterOptions {
     auto_enable: bool,
+    oneshot: bool,
 }
 
 impl IrqRegisterOptions {
     /// Register and enable the IRQ line after successful handler installation.
     pub const fn auto_enable() -> Self {
-        Self { auto_enable: true }
+        Self {
+            auto_enable: true,
+            oneshot: false,
+        }
     }
 
     /// Register the handler but leave delivery disabled until explicit enable.
     pub const fn disabled() -> Self {
-        Self { auto_enable: false }
+        Self {
+            auto_enable: false,
+            oneshot: false,
+        }
+    }
+
+    /// Marks a threaded IRQ action as generic ONESHOT.
+    pub const fn with_oneshot(self) -> Self {
+        Self {
+            oneshot: true,
+            ..self
+        }
     }
 
     /// Returns whether successful registration should enable the line.
     pub const fn should_auto_enable(self) -> bool {
         self.auto_enable
+    }
+
+    /// Returns whether a threaded IRQ should keep the line masked until its thread is idle.
+    pub const fn is_oneshot(self) -> bool {
+        self.oneshot
     }
 }
 
@@ -69,14 +92,37 @@ impl Default for IrqRegisterOptions {
     }
 }
 
-fn apply_platform_plan(plan: IrqPlatformPlan) {
-    if plan.configure {
-        configure_platform_irq(plan.desc);
+fn apply_platform_update(update: IrqPlatformUpdate) {
+    if update.configure {
+        configure_platform_irq(update.desc);
     }
-    if let Some(on) = plan.enable {
-        set_platform_irq_enabled(plan.desc, on);
+    if let Some(on) = update.enable {
+        set_platform_irq_enabled(update.desc, on);
     }
 }
+
+pub(super) fn begin_oneshot_thread(virq: Virq) {
+    let entry = {
+        let state = IRQ_STATE.lock();
+        let Some(entry) = state.descs.get(&virq).cloned() else {
+            return;
+        };
+        entry
+    };
+    entry.with_control(|| apply_platform_update(entry.prepare_oneshot_mask()));
+}
+
+pub(super) fn finalize_oneshot_thread(virq: Virq) {
+    let entry = {
+        let state = IRQ_STATE.lock();
+        let Some(entry) = state.descs.get(&virq).cloned() else {
+            return;
+        };
+        entry
+    };
+    entry.with_control(|| apply_platform_update(entry.prepare_oneshot_unmask()));
+}
+
 /// Try to map a hardware IRQ resource into the OS-visible logical IRQ namespace.
 pub fn try_map(desc: IrqDesc) -> Result<Virq, IrqDescError> {
     let mut state = IRQ_STATE.lock();
@@ -135,8 +181,7 @@ pub fn try_enable_irq(spec: impl Into<IrqSpec>) -> Result<(), IrqDescError> {
 }
 
 fn try_enable_irq_inner(spec: IrqSpec, force_platform_enable: bool) -> Result<(), IrqDescError> {
-    let _control_guard = IRQ_CONTROL_LOCK.lock();
-    let plan = {
+    let (virq, entry) = {
         let mut state = IRQ_STATE.lock();
         if force_platform_enable {
             if let Some(virq) = state.lookup_virq(spec) {
@@ -151,22 +196,29 @@ fn try_enable_irq_inner(spec: IrqSpec, force_platform_enable: bool) -> Result<()
             let virq = desc.logical_irq().unwrap();
             let entry = state
                 .descs
-                .get_mut(&virq)
+                .get(&virq)
                 .expect("descriptor state must exist after try_resolve_desc");
-            entry.prepare_legacy_enable()
+            (virq, entry.clone())
         } else {
             let virq = state.lookup_virq(spec).ok_or(IrqDescError::UnknownIrq)?;
-            let entry = state.descs.get_mut(&virq).ok_or(IrqDescError::UnknownIrq)?;
-            let _ = reject_teardown(Some(entry), virq, "enable IRQ", TeardownReject::Error)?;
-            if !entry.has_actions() {
-                warn!("enable IRQ {virq} failed because no IRQ action is registered");
-                return Err(IrqDescError::NoIrqAction { virq });
-            }
-            entry.prepare_enable_irq()
+            let entry = state.descs.get(&virq).ok_or(IrqDescError::UnknownIrq)?;
+            (virq, entry.clone())
         }
     };
-    apply_platform_plan(plan);
-    Ok(())
+    entry.with_control(|| {
+        let _ = reject_teardown(Some(&entry), virq, "enable IRQ", TeardownReject::Error)?;
+        if !force_platform_enable && !entry.has_actions() {
+            warn!("enable IRQ {virq} failed because no IRQ action is registered");
+            return Err(IrqDescError::NoIrqAction { virq });
+        }
+        let update = if force_platform_enable {
+            entry.prepare_legacy_enable()
+        } else {
+            entry.prepare_enable_irq()
+        };
+        apply_platform_update(update);
+        Ok(())
+    })
 }
 
 /// Disable an IRQ line without waiting for an in-flight handler to finish.
@@ -183,14 +235,16 @@ pub fn disable_irq_nosync(spec: impl Into<IrqSpec>) {
 /// [`IrqDescError::UnknownIrq`].
 pub fn try_disable_irq_nosync(spec: impl Into<IrqSpec>) -> Result<(), IrqDescError> {
     let spec = spec.into();
-    let _control_guard = IRQ_CONTROL_LOCK.lock();
-    let plan = {
-        let mut state = IRQ_STATE.lock();
+    let entry = {
+        let state = IRQ_STATE.lock();
         let virq = state.lookup_virq(spec).ok_or(IrqDescError::UnknownIrq)?;
-        let entry = state.descs.get_mut(&virq).ok_or(IrqDescError::UnknownIrq)?;
-        entry.prepare_disable_irq_nosync()
+        state
+            .descs
+            .get(&virq)
+            .ok_or(IrqDescError::UnknownIrq)?
+            .clone()
     };
-    apply_platform_plan(plan);
+    entry.with_control(|| apply_platform_update(entry.prepare_disable_irq_nosync()));
     Ok(())
 }
 
@@ -385,39 +439,44 @@ pub fn try_register_with_options(
     options: IrqRegisterOptions,
 ) -> Result<bool, IrqDescError> {
     let spec = spec.into();
-    let _control_guard = IRQ_CONTROL_LOCK.lock();
-    let mut state = IRQ_STATE.lock();
-    let Some((_desc, virq, entry)) =
-        resolve_action_install_entry(&mut state, spec, "register handler")?
-    else {
-        return Ok(false);
+    let (virq, entry) = {
+        let mut state = IRQ_STATE.lock();
+        let Some((_desc, virq, entry)) =
+            resolve_action_install_entry(&mut state, spec, "register handler")?
+        else {
+            return Ok(false);
+        };
+        (virq, entry)
     };
-    if entry.has_actions() {
-        warn!("register handler for IRQ {virq} failed");
-        return Ok(false);
-    }
-    let installed = entry.install_regular_action(IrqAction::regular(handler));
-    debug_assert!(installed, "duplicate regular action was checked above");
-    let plan = if options.should_auto_enable() {
-        entry.prepare_auto_enable()
-    } else {
-        entry.prepare_register_disabled()
-    };
-    drop(state);
-    apply_platform_plan(plan);
-    Ok(true)
+    entry.with_control(|| {
+        if entry.has_actions() || entry.is_teardown_in_progress() {
+            warn!("register handler for IRQ {virq} failed");
+            return Ok(false);
+        }
+        let installed = entry.install_regular_action(IrqAction::regular(handler));
+        debug_assert!(installed, "duplicate regular action was checked above");
+        let update = if options.should_auto_enable() {
+            entry.prepare_auto_enable()
+        } else {
+            entry.prepare_register_disabled()
+        };
+        apply_platform_update(update);
+        Ok(true)
+    })
 }
 
 /// Register an IRQ with a hardirq primary handler and a dedicated threaded handler.
 ///
 /// The primary handler still runs in hardirq context and must not sleep. If it
-/// claims the interrupt by returning [`IrqEvent::HANDLED`] or
-/// [`IrqEvent::from_sources`], `kirq` wakes the dedicated IRQ thread. The
-/// threaded handler runs in task context and may use sleepable primitives.
+/// claims the interrupt and returns [`IrqEvent::WAKE_THREAD`] or
+/// [`IrqEvent::wake_thread_from_sources`], `kirq` wakes the dedicated IRQ
+/// thread. Returning [`IrqEvent::HANDLED`] only reports hardirq-side handling.
+/// The threaded handler runs in task context and may use sleepable primitives.
 ///
-/// This first threaded-IRQ API installs a non-shared regular action. Shared
-/// threaded IRQs and explicit oneshot mask/unmask policy are left to a later
-/// extension.
+/// This threaded-IRQ API installs a non-shared regular action. Shared threaded
+/// IRQs are left to a later extension. Use [`IrqRegisterOptions::with_oneshot`]
+/// with [`try_register_threaded_with_options`] when the line must stay masked
+/// until the threaded handler becomes idle.
 pub fn register_threaded(
     spec: impl Into<IrqSpec>,
     primary: Handler,
@@ -431,6 +490,54 @@ pub fn register_threaded(
             false
         }
     }
+}
+
+/// Register a threaded IRQ using the default primary wake handler.
+///
+/// The default primary handler only reports [`IrqEvent::WAKE_THREAD`]. Because
+/// no driver primary handler masks or acknowledges the device before waking the
+/// thread, this helper always installs the action as generic ONESHOT.
+pub fn register_threaded_default(
+    spec: impl Into<IrqSpec>,
+    thread: Handler,
+    name: Option<&'static str>,
+) -> bool {
+    match try_register_threaded_default(spec, thread, name) {
+        Ok(registered) => registered,
+        Err(err) => {
+            warn!("register default threaded IRQ handler failed: {err:?}");
+            false
+        }
+    }
+}
+
+/// Try to register a threaded IRQ using the default primary wake handler.
+pub fn try_register_threaded_default(
+    spec: impl Into<IrqSpec>,
+    thread: Handler,
+    name: Option<&'static str>,
+) -> Result<bool, IrqDescError> {
+    try_register_threaded_default_with_options(
+        spec,
+        thread,
+        name,
+        IrqRegisterOptions::auto_enable(),
+    )
+}
+
+/// Try to register a default-primary threaded IRQ with explicit lifecycle options.
+///
+/// The supplied options keep their auto-enable setting but are always upgraded
+/// to generic ONESHOT, matching Linux's safety rule for default primary
+/// handlers on non-oneshot-safe irqchips.
+pub fn try_register_threaded_default_with_options(
+    spec: impl Into<IrqSpec>,
+    thread: Handler,
+    name: Option<&'static str>,
+    options: IrqRegisterOptions,
+) -> Result<bool, IrqDescError> {
+    let primary: Handler = Arc::new(default_threaded_primary_handler);
+    try_register_threaded_with_options(spec, primary, thread, name, options.with_oneshot())
 }
 
 /// Try to register a regular threaded IRQ action with default auto-enable behavior.
@@ -458,55 +565,59 @@ pub fn try_register_threaded_with_options(
     options: IrqRegisterOptions,
 ) -> Result<bool, IrqDescError> {
     let spec = spec.into();
-    let virq = {
-        let _control_guard = IRQ_CONTROL_LOCK.lock();
+    let (virq, entry) = {
         let mut state = IRQ_STATE.lock();
         let Some((_desc, virq, entry)) =
             resolve_action_install_entry(&mut state, spec, "register threaded handler")?
         else {
             return Ok(false);
         };
-        if entry.has_actions() {
+        if entry.with_control(|| entry.has_actions() || entry.is_teardown_in_progress()) {
             warn!("register threaded handler for IRQ {virq} failed");
             return Ok(false);
         }
-        virq
+        (virq, entry)
     };
     let Some(thread_slot) = IrqThreadSlot::spawn(virq, thread, name) else {
         return Err(IrqDescError::ThreadUnavailable { virq });
     };
     let mut unpublished_thread = Some(thread_slot);
-    let plan = {
-        let _control_guard = IRQ_CONTROL_LOCK.lock();
-        let mut state = IRQ_STATE.lock();
-        let entry = state
-            .descs
-            .get_mut(&virq)
-            .expect("descriptor state must exist after threaded IRQ resolution");
-        if entry.has_actions() || entry.is_teardown_in_progress() {
-            None
-        } else {
-            let thread_slot = unpublished_thread
-                .take()
-                .expect("thread slot must be unpublished before action install");
-            let installed =
-                entry.install_regular_action(IrqAction::threaded(primary, thread_slot, name));
-            debug_assert!(installed, "threaded action install was prevalidated");
-            Some(if options.should_auto_enable() {
-                entry.prepare_auto_enable()
+    let registered = {
+        entry.with_control(|| {
+            if entry.has_actions() || entry.is_teardown_in_progress() {
+                false
             } else {
-                entry.prepare_register_disabled()
-            })
-        }
+                let thread_slot = unpublished_thread
+                    .take()
+                    .expect("thread slot must be unpublished before action install");
+                let installed = entry.install_regular_action(IrqAction::threaded(
+                    primary,
+                    thread_slot,
+                    name,
+                    options.is_oneshot(),
+                ));
+                debug_assert!(installed, "threaded action install was prevalidated");
+                let update = if options.should_auto_enable() {
+                    entry.prepare_auto_enable()
+                } else {
+                    entry.prepare_register_disabled()
+                };
+                apply_platform_update(update);
+                true
+            }
+        })
     };
-    let Some(plan) = plan else {
+    if !registered {
         if let Some(thread) = unpublished_thread.as_ref() {
             stop_unpublished_thread(thread);
         }
         return Ok(false);
     };
-    apply_platform_plan(plan);
     Ok(true)
+}
+
+fn default_threaded_primary_handler(_irq: Virq) -> IrqEvent {
+    IrqEvent::WAKE_THREAD
 }
 
 fn stop_unpublished_thread(thread: &IrqThreadSlot) {
@@ -538,33 +649,36 @@ pub fn try_register_shared(
     handler: Handler,
 ) -> Result<Option<IrqActionToken>, IrqDescError> {
     let spec = spec.into();
-    let _control_guard = IRQ_CONTROL_LOCK.lock();
-    let mut state = IRQ_STATE.lock();
-    let Some((_desc, virq, entry)) =
-        resolve_action_install_entry(&mut state, spec, "register shared handler")?
-    else {
-        return Ok(None);
+    let (virq, entry) = {
+        let mut state = IRQ_STATE.lock();
+        let Some((_desc, virq, entry)) =
+            resolve_action_install_entry(&mut state, spec, "register shared handler")?
+        else {
+            return Ok(None);
+        };
+        (virq, entry)
     };
-    let was_first_action = !entry.has_actions();
-    let Some(token) = entry.install_shared_action(handler) else {
-        warn!("register shared handler for IRQ {virq} failed");
-        return Ok(None);
-    };
-    let plan = if was_first_action {
-        entry.prepare_auto_enable()
-    } else {
-        entry.prepare_reconfigure_if_stale()
-    };
-    drop(state);
-    apply_platform_plan(plan);
-    Ok(Some(token))
+    entry.with_control(|| {
+        let was_first_action = !entry.has_actions();
+        let Some(token) = entry.install_shared_action(handler) else {
+            warn!("register shared handler for IRQ {virq} failed");
+            return Ok(None);
+        };
+        let update = if was_first_action {
+            entry.prepare_auto_enable()
+        } else {
+            entry.prepare_reconfigure_if_stale()
+        };
+        apply_platform_update(update);
+        Ok(Some(token))
+    })
 }
 
-fn resolve_action_install_entry<'a>(
-    state: &'a mut IrqState,
+fn resolve_action_install_entry(
+    state: &mut IrqState,
     spec: IrqSpec,
     operation: &'static str,
-) -> Result<Option<(IrqDesc, Virq, &'a mut IrqStateDesc)>, IrqDescError> {
+) -> Result<Option<(IrqDesc, Virq, Arc<IrqStateDesc>)>, IrqDescError> {
     if let Some(virq) = state.lookup_virq(spec)
         && reject_teardown(
             state.descs.get(&virq),
@@ -579,9 +693,9 @@ fn resolve_action_install_entry<'a>(
     let virq = desc.logical_irq().unwrap();
     let entry = state
         .descs
-        .get_mut(&virq)
+        .get(&virq)
         .expect("descriptor state must exist after try_resolve_desc");
-    Ok(Some((desc, virq, entry)))
+    Ok(Some((desc, virq, entry.clone())))
 }
 
 enum TeardownReject {
@@ -590,12 +704,12 @@ enum TeardownReject {
 }
 
 fn reject_teardown(
-    entry: Option<&IrqStateDesc>,
+    entry: Option<&Arc<IrqStateDesc>>,
     virq: Virq,
     operation: &'static str,
     reject: TeardownReject,
 ) -> Result<bool, IrqDescError> {
-    if entry.is_some_and(IrqStateDesc::is_teardown_in_progress) {
+    if entry.is_some_and(|entry| entry.is_teardown_in_progress()) {
         warn!("{operation} for IRQ {virq} failed while teardown is in progress");
         if matches!(reject, TeardownReject::Error) {
             return Err(IrqDescError::TeardownInProgress { virq });
@@ -704,42 +818,43 @@ fn try_free_irq_inner(
 ) -> Result<Option<Handler>, IrqDescError> {
     can_wait_for_irq_sync("free_irq")?;
     let (virq, removed_action) = {
-        let _control_guard = IRQ_CONTROL_LOCK.lock();
-        let mut state = IRQ_STATE.lock();
+        let state = IRQ_STATE.lock();
         let Some(virq) = state.lookup_virq(spec) else {
             return Ok(None);
         };
-        let Some(entry) = state.descs.get_mut(&virq) else {
+        let Some(entry) = state.descs.get(&virq).cloned() else {
             return Ok(None);
         };
-        let removed_action = if let Some(token) = token {
-            entry.take_action(token)
-        } else {
-            if entry.action_count() > 1 {
-                warn!("free_irq for IRQ {virq} requires an action token");
-                return Ok(None);
-            }
-            let removed_action = entry.take_regular_action();
-            if removed_action.is_none() && entry.action_count() == 1 {
-                warn!(
-                    "free_irq for IRQ {virq} rejected: the only action is shared; use \
-                     free_irq_action with its token"
-                );
-            }
-            removed_action
-        };
-        // Removing the action first prevents new dispatch snapshots from seeing
-        // it. If this was the last action, mask the platform line before waiting
-        // for snapshots that already escaped under an `IrqDispatchGuard`.
-        let disable_plan = entry.prepare_disable_if_no_actions();
-        if removed_action.is_some() {
-            entry.begin_teardown();
-        }
         drop(state);
-        if let Some(plan) = disable_plan {
-            apply_platform_plan(plan);
-        }
-        (virq, removed_action)
+        entry.with_control(|| {
+            let removed_action = if let Some(token) = token {
+                entry.take_action(token)
+            } else {
+                if entry.action_count() > 1 {
+                    warn!("free_irq for IRQ {virq} requires an action token");
+                    return (virq, None);
+                }
+                let removed_action = entry.take_regular_action();
+                if removed_action.is_none() && entry.action_count() == 1 {
+                    warn!(
+                        "free_irq for IRQ {virq} rejected: the only action is shared; use \
+                         free_irq_action with its token"
+                    );
+                }
+                removed_action
+            };
+            // Removing the action first prevents new dispatch snapshots from seeing
+            // it. If this was the last action, mask the platform line before waiting
+            // for snapshots that already escaped under an `IrqDispatchGuard`.
+            let disable_plan = entry.prepare_disable_if_no_actions();
+            if removed_action.is_some() {
+                entry.begin_teardown();
+            }
+            if let Some(update) = disable_plan {
+                apply_platform_update(update);
+            }
+            (virq, removed_action)
+        })
     };
 
     if removed_action.is_none() {
@@ -762,11 +877,13 @@ fn try_free_irq_inner(
 
 fn finish_irq_teardown(virq: Virq) {
     let removed_desc = {
-        let _control_guard = IRQ_CONTROL_LOCK.lock();
-        let mut state = IRQ_STATE.lock();
-        if let Some(entry) = state.descs.get_mut(&virq) {
-            entry.finish_teardown();
+        let state = IRQ_STATE.lock();
+        let entry = state.descs.get(&virq).cloned();
+        drop(state);
+        if let Some(entry) = entry {
+            entry.with_control(|| entry.finish_teardown());
         }
+        let mut state = IRQ_STATE.lock();
         state.remove_if_unused_with_desc(virq)
     };
     if removed_desc.is_some() {
@@ -872,7 +989,7 @@ pub mod tests_irq {
         task::{Context, RawWaker, RawWakerVTable, Waker},
     };
 
-    use kpoll::PollRegistrations;
+    use kpoll::{Completion, PollRegistrations};
     use unittest::def_test;
 
     use super::{
@@ -880,13 +997,14 @@ pub mod tests_irq {
         WAIT_FOR_IN_FLIGHT_HOOK, dispatch_actions, run_claimed_irq_tail, try_disable_irq,
         try_disable_irq_nosync, try_enable, try_enable_irq, try_free_irq, try_free_irq_action,
         try_map, try_register, try_register_disabled, try_register_shared, try_register_threaded,
-        try_synchronize_irq, unregister,
+        try_register_threaded_default, try_synchronize_irq, unregister,
     };
     use crate::{
         GIC_ROOT_DOMAIN, IrqController, IrqEvent, IrqFlags, IrqLifecycleHooks, IrqRef, IrqSource,
-        IrqTrigger, MSI_DOMAIN, PendingIrq,
+        IrqSyncWaitIf, IrqTrigger, MSI_DOMAIN, PendingIrq,
         action::IrqAction,
         clear_irq_lifecycle_hooks,
+        context::test_support::ScopedHardIrqContext,
         lifecycle::IrqLifecycleGuard,
         register_irq_lifecycle_hooks, register_irq_source_waker, register_irq_waker,
         runtime::notify,
@@ -924,6 +1042,8 @@ pub mod tests_irq {
     static IRQ_THREAD_CALLS: AtomicUsize = AtomicUsize::new(0);
     static IRQ_THREAD_OBSERVED_IRQ: AtomicUsize = AtomicUsize::new(0);
     static IRQ_THREAD_IN_HARDIRQ: AtomicUsize = AtomicUsize::new(0);
+    static IRQ_THREAD_TEST_GATE: kspin::SpinNoIrq<Option<Arc<Completion>>> =
+        kspin::SpinNoIrq::new(None);
 
     const IRQ_TAIL_TEST_VECTOR: usize = 0xdead;
     const IRQ_TAIL_TEST_VIRQ: usize = 0x2f02;
@@ -947,6 +1067,11 @@ pub mod tests_irq {
         IrqEvent::NOT_HANDLED
     }
 
+    fn test_regular_wake_thread_handler(_irq: usize) -> IrqEvent {
+        REGULAR_CALLS.fetch_add(1, Ordering::Relaxed);
+        IrqEvent::WAKE_THREAD
+    }
+
     fn test_shared_a_handler(_irq: usize) -> IrqEvent {
         SHARED_A_CALLS.fetch_add(1, Ordering::Relaxed);
         IrqEvent::from_sources(0b0000_0001)
@@ -967,12 +1092,17 @@ pub mod tests_irq {
             .lock()
             .descs
             .get(&IRQ_IN_FLIGHT_TEST_VIRQ)
-            .map_or(0, IrqStateDesc::in_flight_for_tests);
+            .map_or(0, |entry| entry.in_flight_for_tests());
         IRQ_IN_FLIGHT_OBSERVED.store(in_flight, Ordering::Relaxed);
         IrqEvent::HANDLED
     }
 
     fn test_threaded_primary_handler(_irq: usize) -> IrqEvent {
+        IRQ_THREAD_PRIMARY_CALLS.fetch_add(1, Ordering::Relaxed);
+        IrqEvent::WAKE_THREAD
+    }
+
+    fn test_threaded_primary_handled_only_handler(_irq: usize) -> IrqEvent {
         IRQ_THREAD_PRIMARY_CALLS.fetch_add(1, Ordering::Relaxed);
         IrqEvent::HANDLED
     }
@@ -984,6 +1114,16 @@ pub mod tests_irq {
             usize::from(crate::context::is_in_hardirq()),
             Ordering::Relaxed,
         );
+        IrqEvent::HANDLED
+    }
+
+    fn test_threaded_gated_handler(irq: usize) -> IrqEvent {
+        let gate = IRQ_THREAD_TEST_GATE.lock().as_ref().cloned();
+        IRQ_THREAD_CALLS.fetch_add(1, Ordering::Relaxed);
+        IRQ_THREAD_OBSERVED_IRQ.store(irq, Ordering::Relaxed);
+        if let Some(gate) = gate {
+            let _ = IrqSyncWaitIf::wait_for_completion(&gate);
+        }
         IrqEvent::HANDLED
     }
 
@@ -1027,8 +1167,8 @@ pub mod tests_irq {
             let wait_set = IRQ_STATE
                 .lock()
                 .descs
-                .get_mut(&virq)
-                .and_then(IrqStateDesc::finish_dispatch);
+                .get(&virq)
+                .and_then(|entry| entry.finish_dispatch());
             if let Some(wait_set) = wait_set {
                 wait_set.wake();
             }
@@ -1138,7 +1278,8 @@ pub mod tests_irq {
                 IrqStateDesc::test_with_runtime(
                     IrqDesc::from_virq(IRQ_SIMULATED_TEST_VIRQ),
                     Some(IrqAction::regular(Arc::new(test_handler))),
-                ),
+                )
+                .into(),
             );
         }
 
@@ -1197,7 +1338,8 @@ pub mod tests_irq {
             let mut state = IRQ_STATE.lock();
             state.descs.insert(
                 virq,
-                IrqStateDesc::new(IrqDesc::new(0x2f23, IrqTrigger::EdgeRising).with_virq(virq)),
+                IrqStateDesc::new(IrqDesc::new(0x2f23, IrqTrigger::EdgeRising).with_virq(virq))
+                    .into(),
             );
         }
 
@@ -1287,7 +1429,7 @@ pub mod tests_irq {
     #[def_test]
     fn test_descriptor_update_bumps_generation_on_metadata_change() {
         let desc = IrqDesc::from_virq(0x2f2c);
-        let mut state_desc = IrqStateDesc::new(desc);
+        let state_desc = IrqStateDesc::new(desc);
         let initial_generation = state_desc.generation_for_tests();
 
         state_desc.update_desc(desc);
@@ -1300,7 +1442,7 @@ pub mod tests_irq {
     #[def_test]
     fn test_teardown_gate_blocks_new_actions_until_finished() {
         let desc = IrqDesc::from_virq(0x2f2e);
-        let mut state_desc = IrqStateDesc::new(desc);
+        let state_desc = IrqStateDesc::new(desc);
 
         state_desc.begin_teardown();
         assert_eq!(state_desc.teardown_depth_for_tests(), 1);
@@ -1319,7 +1461,7 @@ pub mod tests_irq {
     #[def_test]
     fn test_teardown_disable_plan_ignores_existing_teardown_waiter() {
         let desc = IrqDesc::from_virq(0x2f2f);
-        let mut state_desc = IrqStateDesc::new(desc);
+        let state_desc = IrqStateDesc::new(desc);
         let token_a = state_desc
             .install_shared_action(Arc::new(test_shared_a_handler))
             .expect("first shared action");
@@ -1333,10 +1475,10 @@ pub mod tests_irq {
         state_desc.begin_teardown();
         assert!(state_desc.take_action(token_b).is_some());
 
-        let plan = state_desc
+        let update = state_desc
             .prepare_disable_if_no_actions()
             .expect("last action should mask line even during teardown wait");
-        assert_eq!(plan.enable, Some(false));
+        assert_eq!(update.enable, Some(false));
         assert!(!state_desc.is_enabled_for_tests());
         assert_eq!(state_desc.teardown_depth_for_tests(), 1);
     }
@@ -1357,7 +1499,8 @@ pub mod tests_irq {
                 IrqStateDesc::test_with_runtime(
                     IrqDesc::from_virq(IRQ_LIFECYCLE_TEST_VIRQ),
                     Some(IrqAction::regular(Arc::new(test_handler))),
-                ),
+                )
+                .into(),
             );
         }
 
@@ -1429,7 +1572,8 @@ pub mod tests_irq {
                 IrqStateDesc::test_with_runtime(
                     IrqDesc::from_virq(IRQ_TAIL_TEST_VIRQ),
                     Some(IrqAction::regular(Arc::new(test_irq_tail_handler))),
-                ),
+                )
+                .into(),
             );
         }
         assert!(crate::deferred::register_deferred_executor(
@@ -1528,7 +1672,8 @@ pub mod tests_irq {
                     Some(IrqAction::regular(Arc::new(
                         test_irq_tail_raise_softirq_handler,
                     ))),
-                ),
+                )
+                .into(),
             );
         }
 
@@ -1791,7 +1936,9 @@ pub mod tests_irq {
 
         {
             let mut state = IRQ_STATE.lock();
-            state.descs.insert(virq, IrqStateDesc::new(initial_desc));
+            state
+                .descs
+                .insert(virq, IrqStateDesc::new(initial_desc).into());
             state
                 .descs
                 .get_mut(&virq)
@@ -1807,7 +1954,7 @@ pub mod tests_irq {
         {
             let state = IRQ_STATE.lock();
             let entry = state.descs.get(&virq).expect("descriptor must remain");
-            assert_eq!(entry.desc, initial_desc);
+            assert_eq!(entry.desc(), initial_desc);
             assert_eq!(state.translated_hwirq(GIC_ROOT_DOMAIN, hwirq), None);
         }
 
@@ -1831,7 +1978,9 @@ pub mod tests_irq {
 
         {
             let mut state = IRQ_STATE.lock();
-            state.descs.insert(virq, IrqStateDesc::new(initial_desc));
+            state
+                .descs
+                .insert(virq, IrqStateDesc::new(initial_desc).into());
             state
                 .descs
                 .get_mut(&virq)
@@ -1848,7 +1997,7 @@ pub mod tests_irq {
         {
             let state = IRQ_STATE.lock();
             let entry = state.descs.get(&virq).expect("descriptor must remain");
-            assert_eq!(entry.desc, initial_desc);
+            assert_eq!(entry.desc(), initial_desc);
             assert_eq!(entry.action_count(), 0);
             assert_eq!(state.translated_hwirq(GIC_ROOT_DOMAIN, hwirq), None);
         }
@@ -1928,13 +2077,13 @@ pub mod tests_irq {
         let desc = IrqDesc::from_virq(virq);
         {
             let mut state = IRQ_STATE.lock();
-            let mut entry = IrqStateDesc::new(desc);
+            let entry = IrqStateDesc::new(desc);
             assert!(entry.install_regular_action(IrqAction::regular(Arc::new(test_handler))));
             let _ = entry.prepare_auto_enable();
             assert!(entry.take_regular_action().is_some());
             let _ = entry.prepare_disable_if_no_actions();
             entry.begin_teardown();
-            state.descs.insert(virq, entry);
+            state.descs.insert(virq, entry.into());
         }
 
         let err = try_enable_irq(virq).expect_err("teardown enable must fail");
@@ -1969,9 +2118,9 @@ pub mod tests_irq {
 
         {
             let mut state = IRQ_STATE.lock();
-            let mut entry = IrqStateDesc::new(initial_desc);
+            let entry = IrqStateDesc::new(initial_desc);
             entry.begin_teardown();
-            state.descs.insert(virq, entry);
+            state.descs.insert(virq, entry.into());
         }
 
         let err = try_enable(richer_desc, true).expect_err("teardown legacy enable must fail");
@@ -1982,7 +2131,7 @@ pub mod tests_irq {
         {
             let state = IRQ_STATE.lock();
             let entry = state.descs.get(&virq).expect("descriptor must remain");
-            assert_eq!(entry.desc, initial_desc);
+            assert_eq!(entry.desc(), initial_desc);
             assert_eq!(state.translated_hwirq(GIC_ROOT_DOMAIN, hwirq), None);
         }
 
@@ -2001,7 +2150,7 @@ pub mod tests_irq {
             let mut state = IRQ_STATE.lock();
             state
                 .descs
-                .insert(virq, IrqStateDesc::new(IrqDesc::from_virq(virq)));
+                .insert(virq, IrqStateDesc::new(IrqDesc::from_virq(virq)).into());
         }
 
         let err = try_enable_irq(virq).expect_err("action-less enable must fail");
@@ -2083,7 +2232,8 @@ pub mod tests_irq {
                 IrqStateDesc::test_with_runtime(
                     IrqDesc::from_virq(IRQ_IN_FLIGHT_TEST_VIRQ),
                     Some(IrqAction::regular(Arc::new(test_in_flight_handler))),
-                ),
+                )
+                .into(),
             );
         }
 
@@ -2106,7 +2256,7 @@ pub mod tests_irq {
     #[def_test(serial)]
     fn test_in_flight_completion_reinitializes_between_dispatches() {
         let virq = 0x3140;
-        let mut entry = IrqStateDesc::test_with_runtime(
+        let entry = IrqStateDesc::test_with_runtime(
             IrqDesc::from_virq(virq),
             Some(IrqAction::regular(Arc::new(test_handler))),
         );
@@ -2133,7 +2283,7 @@ pub mod tests_irq {
     #[def_test(serial)]
     fn test_in_flight_completion_old_wake_does_not_complete_next_dispatch() {
         let virq = 0x3143;
-        let mut entry = IrqStateDesc::test_with_runtime(
+        let entry = IrqStateDesc::test_with_runtime(
             IrqDesc::from_virq(virq),
             Some(IrqAction::regular(Arc::new(test_handler))),
         );
@@ -2170,7 +2320,7 @@ pub mod tests_irq {
         let second_cx = Context::from_waker(&second_waker);
         let mut first_registrations = PollRegistrations::new();
         let mut second_registrations = PollRegistrations::new();
-        let mut entry = IrqStateDesc::test_with_runtime(
+        let entry = IrqStateDesc::test_with_runtime(
             IrqDesc::from_virq(virq),
             Some(IrqAction::regular(Arc::new(test_handler))),
         );
@@ -2221,8 +2371,8 @@ pub mod tests_irq {
 
         assert!(try_register(virq, Arc::new(test_handler)).expect("register should work"));
         {
-            let mut state = IRQ_STATE.lock();
-            let entry = state.descs.get_mut(&virq).expect("descriptor must exist");
+            let state = IRQ_STATE.lock();
+            let entry = state.descs.get(&virq).expect("descriptor must exist");
             entry.begin_dispatch();
         }
 
@@ -2257,7 +2407,7 @@ pub mod tests_irq {
 
     #[def_test]
     fn test_synchronize_irq_rejects_hardirq_context() {
-        let _hardirq = crate::context::HardIrqContextGuard::enter();
+        let _hardirq = ScopedHardIrqContext::enter();
 
         let err = try_synchronize_irq(0x3117).expect_err("context misuse must be an error");
         assert!(matches!(
@@ -2270,7 +2420,7 @@ pub mod tests_irq {
 
     #[def_test(serial)]
     fn test_free_irq_action_rejects_hardirq_context() {
-        let _hardirq = crate::context::HardIrqContextGuard::enter();
+        let _hardirq = ScopedHardIrqContext::enter();
 
         let err = match try_free_irq_action(0x3118, crate::IrqActionToken::new(1)) {
             Err(err) => err,
@@ -2296,8 +2446,8 @@ pub mod tests_irq {
 
         assert!(try_register(virq, Arc::new(test_handler)).expect("register should work"));
         {
-            let mut state = IRQ_STATE.lock();
-            let entry = state.descs.get_mut(&virq).expect("descriptor must exist");
+            let state = IRQ_STATE.lock();
+            let entry = state.descs.get(&virq).expect("descriptor must exist");
             entry.begin_dispatch();
         }
 
@@ -2318,7 +2468,7 @@ pub mod tests_irq {
     #[def_test]
     fn test_legacy_enable_forces_platform_enable_when_already_enabled() {
         let virq = 0x3114;
-        let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+        let entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
 
         let first = entry.prepare_auto_enable();
         assert_eq!(first.enable, Some(true));
@@ -2334,7 +2484,7 @@ pub mod tests_irq {
     #[def_test]
     fn test_reconfigure_if_stale_does_not_toggle_enabled_state() {
         let virq = 0x3142;
-        let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+        let entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
 
         let first = entry.prepare_auto_enable();
         assert!(first.configure);
@@ -2367,7 +2517,8 @@ pub mod tests_irq {
                 IrqStateDesc::test_with_runtime(
                     IrqDesc::from_virq(virq),
                     Some(IrqAction::regular(Arc::new(test_not_handled_handler))),
-                ),
+                )
+                .into(),
             );
         }
 
@@ -2388,6 +2539,21 @@ pub mod tests_irq {
         dispatch_actions(&pending);
 
         assert_eq!(HANDLER_OBSERVED_IRQ.load(Ordering::Relaxed), virq);
+        assert!(unregister(virq).is_some());
+    }
+
+    #[def_test(serial)]
+    fn test_regular_irq_wake_thread_return_does_not_spawn_thread() {
+        let virq = 0x3106;
+        REGULAR_CALLS.store(0, Ordering::Relaxed);
+        IRQ_THREAD_CALLS.store(0, Ordering::Relaxed);
+
+        assert!(try_register(virq, Arc::new(test_regular_wake_thread_handler)).unwrap());
+        let pending = PendingIrq::new(IrqRef::Virq(virq), virq);
+        dispatch_actions(&pending);
+
+        assert_eq!(REGULAR_CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(IRQ_THREAD_CALLS.load(Ordering::Relaxed), 0);
         assert!(unregister(virq).is_some());
     }
 
@@ -2417,6 +2583,125 @@ pub mod tests_irq {
         assert_eq!(IRQ_THREAD_CALLS.load(Ordering::Relaxed), 1);
         assert_eq!(IRQ_THREAD_OBSERVED_IRQ.load(Ordering::Relaxed), virq);
         assert_eq!(IRQ_THREAD_IN_HARDIRQ.load(Ordering::Relaxed), 0);
+        assert!(unregister(virq).is_some());
+    }
+
+    #[def_test(serial)]
+    fn test_threaded_irq_handled_primary_does_not_wake_thread() {
+        let virq = 0x3105;
+        IRQ_THREAD_PRIMARY_CALLS.store(0, Ordering::Relaxed);
+        IRQ_THREAD_CALLS.store(0, Ordering::Relaxed);
+        IRQ_THREAD_OBSERVED_IRQ.store(0, Ordering::Relaxed);
+
+        assert!(
+            try_register_threaded(
+                virq,
+                Arc::new(test_threaded_primary_handled_only_handler),
+                Arc::new(test_threaded_handler),
+                Some("irq-test-thread-handled-only")
+            )
+            .unwrap()
+        );
+
+        let pending = PendingIrq::new(IrqRef::Virq(virq), virq);
+        dispatch_actions(&pending);
+        assert!(try_synchronize_irq(virq).unwrap());
+
+        assert_eq!(IRQ_THREAD_PRIMARY_CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(IRQ_THREAD_CALLS.load(Ordering::Relaxed), 0);
+        assert_eq!(IRQ_THREAD_OBSERVED_IRQ.load(Ordering::Relaxed), 0);
+        assert!(unregister(virq).is_some());
+    }
+
+    #[def_test(serial)]
+    fn test_default_threaded_irq_uses_oneshot_until_thread_finishes() {
+        let virq = 0x3107;
+        let gate = Arc::new(Completion::new());
+        IRQ_THREAD_CALLS.store(0, Ordering::Relaxed);
+        IRQ_THREAD_OBSERVED_IRQ.store(0, Ordering::Relaxed);
+        *IRQ_THREAD_TEST_GATE.lock() = Some(gate.clone());
+
+        assert!(
+            try_register_threaded_default(
+                virq,
+                Arc::new(test_threaded_gated_handler),
+                Some("irq-test-thread-default")
+            )
+            .unwrap()
+        );
+
+        let pending = PendingIrq::new(IrqRef::Virq(virq), virq);
+        dispatch_actions(&pending);
+        {
+            let state = IRQ_STATE.lock();
+            let entry = state.descs.get(&virq).expect("descriptor must exist");
+            assert!(entry.oneshot_mask_pending_for_tests());
+            assert!(!entry.is_enabled_for_tests());
+        }
+
+        gate.complete_all();
+        assert!(try_synchronize_irq(virq).unwrap());
+        {
+            let state = IRQ_STATE.lock();
+            let entry = state.descs.get(&virq).expect("descriptor must exist");
+            assert!(!entry.oneshot_mask_pending_for_tests());
+            assert!(entry.is_enabled_for_tests());
+        }
+        assert_eq!(IRQ_THREAD_CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(IRQ_THREAD_OBSERVED_IRQ.load(Ordering::Relaxed), virq);
+
+        *IRQ_THREAD_TEST_GATE.lock() = None;
+        assert!(unregister(virq).is_some());
+    }
+
+    #[def_test(serial)]
+    fn test_oneshot_thread_finish_does_not_reenable_disabled_irq() {
+        let virq = 0x3108;
+        let gate = Arc::new(Completion::new());
+        IRQ_THREAD_CALLS.store(0, Ordering::Relaxed);
+        IRQ_THREAD_OBSERVED_IRQ.store(0, Ordering::Relaxed);
+        *IRQ_THREAD_TEST_GATE.lock() = Some(gate.clone());
+
+        assert!(
+            try_register_threaded_default(
+                virq,
+                Arc::new(test_threaded_gated_handler),
+                Some("irq-test-thread-disable-race")
+            )
+            .unwrap()
+        );
+
+        let pending = PendingIrq::new(IrqRef::Virq(virq), virq);
+        dispatch_actions(&pending);
+        {
+            let state = IRQ_STATE.lock();
+            let entry = state.descs.get(&virq).expect("descriptor must exist");
+            assert!(entry.oneshot_mask_pending_for_tests());
+            assert!(!entry.is_enabled_for_tests());
+        }
+
+        assert!(try_disable_irq_nosync(virq).is_ok());
+        {
+            let state = IRQ_STATE.lock();
+            let entry = state.descs.get(&virq).expect("descriptor must exist");
+            assert_eq!(entry.disable_depth_for_tests(), 1);
+            assert!(!entry.is_enabled_for_tests());
+        }
+
+        gate.complete_all();
+        assert!(try_synchronize_irq(virq).unwrap());
+        {
+            let state = IRQ_STATE.lock();
+            let entry = state.descs.get(&virq).expect("descriptor must exist");
+            assert!(!entry.oneshot_mask_pending_for_tests());
+            assert_eq!(entry.disable_depth_for_tests(), 1);
+            assert!(!entry.is_enabled_for_tests());
+        }
+        assert_eq!(IRQ_THREAD_CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(IRQ_THREAD_OBSERVED_IRQ.load(Ordering::Relaxed), virq);
+
+        *IRQ_THREAD_TEST_GATE.lock() = None;
+        assert!(try_enable_irq(virq).is_ok());
         assert!(unregister(virq).is_some());
     }
 

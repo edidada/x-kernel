@@ -245,18 +245,27 @@ impl Drop for HardIrqContextGuard {
 
 #[cfg(unittest)]
 pub mod test_support {
+    use kspin::NoPreemptIrqSave;
+
     use super::HardIrqContextGuard;
 
     /// Test-only guard that enters hardirq context until dropped.
+    ///
+    /// Real hardirq entry already masks local IRQs and pins the current CPU
+    /// before entering [`HardIrqContextGuard`]. Cross-crate tests use this guard
+    /// directly, so it must establish the same scheduling boundary itself.
     pub struct ScopedHardIrqContext {
         _guard: HardIrqContextGuard,
+        _irq_guard: NoPreemptIrqSave,
     }
 
     impl ScopedHardIrqContext {
         /// Enters a synthetic hardirq context for cross-crate unit tests.
         pub fn enter() -> Self {
+            let irq_guard = NoPreemptIrqSave::new();
             Self {
                 _guard: HardIrqContextGuard::enter(),
+                _irq_guard: irq_guard,
             }
         }
     }

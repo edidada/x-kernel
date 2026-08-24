@@ -157,10 +157,11 @@ per-CPU atomic pending mask。调用方在访问前 pin 当前 CPU；pending mas
 
 ### normal IRQ state
 
-`IRQ_STATE` 使用 `SpinNoIrq` 保护 descriptor 和 action list。
-dispatch path 在持锁期间解析 `PendingIrq`、查找 descriptor，并复制 action
-snapshot，然后释放锁再调用 handler。这样保留 resolve 与 descriptor lookup 的原子性，
-同时避免回调重入 IRQ API 时自锁。
+`IRQ_STATE` 使用 `SpinNoIrq` 保护 virq/domain namespace 和 descriptor handle
+lifetime。dispatch path 在持锁期间解析 `PendingIrq` 并取得 descriptor handle，
+然后释放全局锁，在 descriptor-local state lock 下复制 action snapshot 并同步标记
+`in_flight`。这样避免回调重入 IRQ API 时自锁，也避免不同 IRQ line 在 action runtime
+状态上共用全局锁。
 
 Domain `hwirq -> virq` reverse maps are published as immutable snapshots.
 Dispatch resolves a `PendingIrq` through the snapshot rather than querying the
@@ -289,10 +290,10 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | T-21g | worker callback 等待同 pool 中不可推进的 work | W1 callback 中 `flush_work(W2)`，且 W2 pending/running 属于同一 bounded execution pool | bounded worker pool 可能被等待关系耗尽，W2 无法完成，形成永久死锁 | `kwork` 在 `WorkState` 中记录 pending/running pool key，在 task-local context 中记录当前 pool key；同 pool pending/running wait 返回 `SelfWait`，等待循环也重查该谓词 |
 | T-22 | oneshot runtime 字段被误当成已实现行为 | 后续代码只改 flag，没有安装 mask protocol | oneshot IRQ 无法屏蔽重入或误解除 mask | review 要求 oneshot mask 和 thread identity 在 `IrqDescRuntimeState` owner 内成组实现 |
 | T-23 | threaded slot 提前保存 task/worker 指针 | 未建立线程生命周期、取消、CPU 亲和和退出同步 | handler return 后唤醒已释放对象，或在 hardirq 中触发 sleepable 路径 | 当前 `IrqThreadSlot` 不携带目标，带 slot 的 action 不会被当前 dispatch 路径同步执行；后续 milestone 必须先定义所有权和 teardown ordering |
-| T-24 | action snapshot 与 cleanup 分离不完整 | dispatch 多次取锁并依赖跨锁状态 | unregister/free 与 dispatch 交错后调用 stale callback 或保留 stale mapping | `IrqActionSnapshot` 在一个 `IRQ_STATE` 临界区内形成完整快照，回调只使用快照 |
-| T-25 | stale 平台 enable/disable 操作乱序 | register/enable/disable/unregister 在不同 CPU 上交错，平台操作在 `IRQ_STATE` 锁外执行 | 已释放或已 disable 的 line 被迟到 enable 重新打开 | 控制路径通过 `IRQ_CONTROL_LOCK -> IRQ_STATE -> platform op` 串行化；hardirq dispatch 不获取控制锁 |
+| T-24 | action snapshot 与 cleanup 分离不完整 | dispatch 多次取锁并依赖跨锁状态 | unregister/free 与 dispatch 交错后调用 stale callback 或保留 stale mapping | `IrqActionSnapshot` 和 `in_flight` 标记在同一个 descriptor-local state lock 临界区内完成，回调只使用快照 |
+| T-25 | stale 平台 enable/disable 操作乱序 | register/enable/disable/unregister 或 threaded ONESHOT finalize 在不同 CPU 上交错，平台操作在 state 锁外执行 | 已释放或已 disable 的 line 被迟到 enable 重新打开 | 同一 line 的控制路径和 threaded ONESHOT mask/unmask 都通过 descriptor-local `IrqStateDesc::control -> state -> platform op` 串行化，不同 line 不共享全局控制锁 |
 | T-26 | 驱动需要清 pending 后再开 IRQ，但 request 立即 enable | 复杂设备 request handler 后尚未初始化 DMA ring/MMIO 状态 | 中断 handler 观察未初始化设备状态 | `try_register_disabled()` 以 disable depth `1` 安装 handler，驱动完成初始化后显式 `try_enable_irq()` |
-| T-27 | handler teardown 后仍在运行 | free/unregister 只移除 `Arc`，不等待已经复制的 dispatch snapshot | 驱动释放 MMIO/DMA 后旧 handler 访问已释放状态 | dispatch guard 维护 `in_flight`，`free_irq()` 先 mask unused line，再通过 descriptor-local completion 等待计数归零；completion done state 在 `IRQ_STATE` 锁内发布、wake 在锁外执行 |
+| T-27 | handler teardown 后仍在运行 | free/unregister 只移除 `Arc`，不等待已经复制的 dispatch snapshot | 驱动释放 MMIO/DMA 后旧 handler 访问已释放状态 | dispatch guard 维护 `in_flight`，`free_irq()` 先 mask unused line，再通过 descriptor-local completion 等待计数归零；completion done state 在 descriptor-local state lock 内发布、wake 在锁外执行 |
 | T-28 | 等待式 IRQ API 在 interrupt-like context 调用 | hardirq/softirq/BH-disabled 中调用 `disable_irq()`、`synchronize_irq()` 或 `free_irq()` | 当前 CPU 等待自己退出，导致死锁或长时间自旋 | `try_*` API 使用 `is_in_interrupt_context()` gating 并返回 `InvalidContext`；兼容 wrapper 记录 warning 后返回失败值 |
 | T-28b | IRQ sync wait provider 无 current task | scheduler 尚未初始化或非 task context 绕过上层 gate 调用等待 provider | provider 内部 `block_on()` panic，或等待 API 伪成功 | `ktask` provider 在阻塞前检查 current task，失败时返回 `PollRegisterError::InvalidState`，KIRQ 映射为 `SyncWaitFailed`；`free_irq*()` 在 action 已摘除后同步失败会 fail-stop，避免释放未同步设备状态 |
 | T-29 | shared IRQ token 释放错误 action | devres adapter 保存的 token 与 kirq action identity 不一致，或 token 在旧 action 同步前复用 | 释放错误 handler、旧 handler 继续访问已释放设备状态 | token 是 line-local `IrqActionToken`，free-by-token 先摘除 action 再等待 `in_flight`，token 单调递增且不回收 |
@@ -421,11 +422,15 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
   自动 delayed retry、完整 Linux concurrent-flusher 接力、CPU hotplug drain 或 rescuer 语义。
 - `IrqThreadSlot` 已绑定 scheduler task、thread wake、`synchronize_irq()` idle wait
   和 `free_irq()` stop/exited wait，但当前只支持 non-shared regular threaded IRQ。
-  完整 oneshot mask protocol、CPU affinity 和 per-action statistics 仍未实现。
-- threaded IRQ 当前没有 public `IRQ_WAKE_THREAD` 等价返回位、默认 primary wake
-  handler、shared threaded registration、shared oneshot active-mask 聚合、IRQ thread
-  affinity/priority policy 或 threaded IRQ 统计。这些属于后续 backlog，不能假设已由
-  当前 foundation 覆盖。
+  non-shared ONESHOT line mask/unmask 已由 descriptor runtime 管理，并复用
+  descriptor-local `IrqStateDesc::control` 防止 thread finalize 与 disable/free
+  控制操作乱序；shared
+  active-mask 聚合、CPU affinity 和 per-action statistics 仍未实现。
+- threaded IRQ 当前已有 public `IRQ_WAKE_THREAD` 等价返回位
+  (`IrqEvent::WAKE_THREAD` / `wake_thread_from_sources`) 和默认 primary wake handler
+  (`register_threaded_default()`)。shared threaded registration、shared oneshot
+  active-mask 聚合、IRQ thread affinity/priority policy 或 threaded IRQ 统计仍属于
+  后续 backlog，不能假设已由当前 foundation 覆盖。
 
 ## 审计清单
 

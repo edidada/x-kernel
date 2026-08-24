@@ -12,7 +12,7 @@ use crate::{
     Hwirq, IrqDesc, IrqFlags, IrqSpec,
     action::IrqAction,
     platform::{Handler, configure_platform_irq, set_platform_irq_enabled},
-    state::{IRQ_STATE, IrqStateDesc, try_resolve_and_publish},
+    state::{IRQ_STATE, try_resolve_and_publish},
 };
 
 /// NMI handler table, keyed by hwirq.
@@ -71,7 +71,7 @@ pub fn register_nmi(desc: IrqDesc, handler: Handler) -> bool {
         && state
             .descs
             .get(&virq)
-            .is_some_and(IrqStateDesc::has_actions)
+            .is_some_and(|entry| entry.has_actions())
     {
         warn!("register_nmi: handler already registered for irq {virq}");
         return false;

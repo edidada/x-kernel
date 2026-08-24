@@ -616,8 +616,8 @@ pub mod tests_softirq {
         test_support::{ScopedSoftirqAction, begin_softirq_test},
     };
     use crate::context::{
-        HardIrqContextGuard, SoftIrqContextGuard, clear_irq_context_diagnostics,
-        irq_context_diagnostics, irq_context_snapshot, local_bh_disable,
+        SoftIrqContextGuard, clear_irq_context_diagnostics, irq_context_diagnostics,
+        irq_context_snapshot, local_bh_disable, test_support::ScopedHardIrqContext,
     };
 
     static ORDER_SEQ: AtomicUsize = AtomicUsize::new(1);
@@ -802,7 +802,7 @@ pub mod tests_softirq {
         let _high = ScopedSoftirqAction::install(SoftirqVec::High, high_action);
 
         {
-            let _hardirq = HardIrqContextGuard::enter();
+            let _hardirq = ScopedHardIrqContext::enter();
             let bh_guard = local_bh_disable();
             raise_softirq(SoftirqVec::High);
 

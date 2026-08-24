@@ -118,13 +118,13 @@ impl IrqActionSnapshot {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct IrqPlatformPlan {
+pub(super) struct IrqPlatformUpdate {
     pub(super) desc: IrqDesc,
     pub(super) configure: bool,
     pub(super) enable: Option<bool>,
 }
 
-impl IrqPlatformPlan {
+impl IrqPlatformUpdate {
     pub(super) const fn none(desc: IrqDesc) -> Self {
         Self {
             desc,
@@ -177,27 +177,27 @@ impl IrqDescRuntimeState {
         self.generation = self.generation.wrapping_add(1);
     }
 
-    fn prepare_auto_enable(&mut self, desc: IrqDesc) -> IrqPlatformPlan {
+    fn prepare_auto_enable(&mut self, desc: IrqDesc) -> IrqPlatformUpdate {
         self.disable_depth = 0;
         self.prepare_enable_at_depth_zero(desc, false)
     }
 
-    fn prepare_register_disabled(&mut self, desc: IrqDesc) -> IrqPlatformPlan {
+    fn prepare_register_disabled(&mut self, desc: IrqDesc) -> IrqPlatformUpdate {
         if self.disable_depth == 0 {
             self.disable_depth = 1;
         }
-        IrqPlatformPlan::none(desc)
+        IrqPlatformUpdate::none(desc)
     }
 
     fn prepare_enable_irq(
         &mut self,
         desc: IrqDesc,
         force_platform_enable: bool,
-    ) -> IrqPlatformPlan {
+    ) -> IrqPlatformUpdate {
         if self.disable_depth > 0 {
             self.disable_depth -= 1;
             if self.disable_depth > 0 {
-                return IrqPlatformPlan::none(desc);
+                return IrqPlatformUpdate::none(desc);
             }
         }
         self.prepare_enable_at_depth_zero(desc, force_platform_enable)
@@ -207,7 +207,7 @@ impl IrqDescRuntimeState {
         &mut self,
         desc: IrqDesc,
         force_platform_enable: bool,
-    ) -> IrqPlatformPlan {
+    ) -> IrqPlatformUpdate {
         let configure = self.configured_generation != Some(self.generation);
         let enable = (force_platform_enable || !self.is_enabled).then_some(true);
         if configure {
@@ -216,40 +216,40 @@ impl IrqDescRuntimeState {
         if enable.is_some() {
             self.is_enabled = true;
         }
-        IrqPlatformPlan {
+        IrqPlatformUpdate {
             desc,
             configure,
             enable,
         }
     }
 
-    fn prepare_reconfigure_if_stale(&mut self, desc: IrqDesc) -> IrqPlatformPlan {
+    fn prepare_reconfigure_if_stale(&mut self, desc: IrqDesc) -> IrqPlatformUpdate {
         let configure = self.configured_generation != Some(self.generation);
         if configure {
             self.configured_generation = Some(self.generation);
         }
-        IrqPlatformPlan {
+        IrqPlatformUpdate {
             desc,
             configure,
             enable: None,
         }
     }
 
-    fn prepare_disable_irq_nosync(&mut self, desc: IrqDesc) -> IrqPlatformPlan {
+    fn prepare_disable_irq_nosync(&mut self, desc: IrqDesc) -> IrqPlatformUpdate {
         let was_enabled_depth = self.disable_depth == 0;
         self.disable_depth = self.disable_depth.saturating_add(1);
         let enable = (was_enabled_depth && self.is_enabled).then_some(false);
         if enable.is_some() {
             self.is_enabled = false;
         }
-        IrqPlatformPlan {
+        IrqPlatformUpdate {
             desc,
             configure: false,
             enable,
         }
     }
 
-    fn prepare_disable_if_no_actions(&mut self, desc: IrqDesc) -> Option<IrqPlatformPlan> {
+    fn prepare_disable_if_no_actions(&mut self, desc: IrqDesc) -> Option<IrqPlatformUpdate> {
         // Platform masking is based only on action ownership. Existing teardown
         // waiters or old in-flight snapshots must not keep an action-less line
         // enabled; they only delay descriptor cleanup.
@@ -261,11 +261,44 @@ impl IrqDescRuntimeState {
         if enable.is_some() {
             self.is_enabled = false;
         }
-        Some(IrqPlatformPlan {
+        Some(IrqPlatformUpdate {
             desc,
             configure: false,
             enable,
         })
+    }
+
+    fn prepare_oneshot_mask(&mut self, desc: IrqDesc) -> IrqPlatformUpdate {
+        if self.oneshot_mask_pending {
+            return IrqPlatformUpdate::none(desc);
+        }
+        self.oneshot_mask_pending = true;
+        let enable = self.is_enabled.then_some(false);
+        if enable.is_some() {
+            self.is_enabled = false;
+        }
+        IrqPlatformUpdate {
+            desc,
+            configure: false,
+            enable,
+        }
+    }
+
+    fn prepare_oneshot_unmask(&mut self, desc: IrqDesc) -> IrqPlatformUpdate {
+        if !self.oneshot_mask_pending {
+            return IrqPlatformUpdate::none(desc);
+        }
+        self.oneshot_mask_pending = false;
+        let enable =
+            (self.disable_depth == 0 && self.action_count != 0 && !self.is_enabled).then_some(true);
+        if enable.is_some() {
+            self.is_enabled = true;
+        }
+        IrqPlatformUpdate {
+            desc,
+            configure: false,
+            enable,
+        }
     }
 
     fn install_regular_action(&mut self, action: IrqAction) -> bool {
@@ -408,141 +441,191 @@ impl IrqDescRuntimeState {
     }
 }
 
-pub(super) struct IrqStateDesc {
-    pub(super) desc: IrqDesc,
+pub(super) struct IrqStateDescInner {
+    desc: IrqDesc,
     runtime: IrqDescRuntimeState,
+}
+
+pub(super) struct IrqStateDesc {
+    control: SpinNoIrq<()>,
+    inner: SpinNoIrq<IrqStateDescInner>,
 }
 
 impl IrqStateDesc {
     pub(super) fn new(desc: IrqDesc) -> Self {
         Self {
-            desc,
-            runtime: IrqDescRuntimeState::new(desc),
+            control: SpinNoIrq::new(()),
+            inner: SpinNoIrq::new(IrqStateDescInner {
+                desc,
+                runtime: IrqDescRuntimeState::new(desc),
+            }),
         }
     }
 
-    pub(super) fn update_desc(&mut self, desc: IrqDesc) {
-        if self.desc != desc {
-            self.runtime.bump_generation();
-        }
-        self.desc = desc;
-        self.runtime.remember_desc(desc);
+    pub(super) fn with_control<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _control_guard = self.control.lock();
+        f()
     }
 
-    pub(super) fn remove_flags(&mut self, flags: IrqFlags) {
+    pub(super) fn desc(&self) -> IrqDesc {
+        self.inner.lock().desc
+    }
+
+    pub(super) fn update_desc(&self, desc: IrqDesc) {
+        let mut inner = self.inner.lock();
+        if inner.desc != desc {
+            inner.runtime.bump_generation();
+        }
+        inner.desc = desc;
+        inner.runtime.remember_desc(desc);
+    }
+
+    pub(super) fn remove_flags(&self, flags: IrqFlags) {
+        let desc = self.desc();
         self.update_desc(IrqDesc {
-            flags: self.desc.flags - flags,
-            ..self.desc
+            flags: desc.flags - flags,
+            ..desc
         });
     }
 
-    pub(super) fn install_regular_action(&mut self, action: IrqAction) -> bool {
-        self.runtime.install_regular_action(action)
+    pub(super) fn install_regular_action(&self, action: IrqAction) -> bool {
+        self.inner.lock().runtime.install_regular_action(action)
     }
 
-    pub(super) fn take_regular_action(&mut self) -> Option<IrqAction> {
-        self.runtime.take_regular_action()
+    pub(super) fn take_regular_action(&self) -> Option<IrqAction> {
+        self.inner.lock().runtime.take_regular_action()
     }
 
     pub(super) fn install_shared_action(
-        &mut self,
+        &self,
         handler: crate::platform::Handler,
     ) -> Option<IrqActionToken> {
-        self.runtime.install_shared_action(handler)
+        self.inner.lock().runtime.install_shared_action(handler)
     }
 
-    pub(super) fn take_action(&mut self, token: IrqActionToken) -> Option<IrqAction> {
-        self.runtime.take_action(token)
+    pub(super) fn take_action(&self, token: IrqActionToken) -> Option<IrqAction> {
+        self.inner.lock().runtime.take_action(token)
     }
 
     pub(super) fn has_actions(&self) -> bool {
-        self.runtime.has_actions()
+        self.inner.lock().runtime.has_actions()
     }
 
     pub(super) fn action_count(&self) -> usize {
-        self.runtime.action_count()
+        self.inner.lock().runtime.action_count()
     }
 
-    pub(super) fn snapshot_actions(&mut self) -> IrqActionSnapshot {
-        let actions = self.runtime.actions.clone();
+    pub(super) fn snapshot_actions_and_begin_dispatch(&self) -> IrqActionSnapshot {
+        let mut inner = self.inner.lock();
+        let actions = inner.runtime.actions.clone();
+        let action_count = inner.runtime.action_count;
+        if action_count != 0 {
+            inner.runtime.begin_dispatch();
+        }
         IrqActionSnapshot {
             actions,
-            action_count: self.runtime.action_count,
+            action_count,
         }
     }
 
-    pub(super) fn prepare_auto_enable(&mut self) -> IrqPlatformPlan {
-        self.runtime.prepare_auto_enable(self.desc)
+    pub(super) fn prepare_auto_enable(&self) -> IrqPlatformUpdate {
+        let mut inner = self.inner.lock();
+        let desc = inner.desc;
+        inner.runtime.prepare_auto_enable(desc)
     }
 
-    pub(super) fn prepare_register_disabled(&mut self) -> IrqPlatformPlan {
-        self.runtime.prepare_register_disabled(self.desc)
+    pub(super) fn prepare_register_disabled(&self) -> IrqPlatformUpdate {
+        let mut inner = self.inner.lock();
+        let desc = inner.desc;
+        inner.runtime.prepare_register_disabled(desc)
     }
 
-    pub(super) fn prepare_enable_irq(&mut self) -> IrqPlatformPlan {
-        self.runtime.prepare_enable_irq(self.desc, false)
+    pub(super) fn prepare_enable_irq(&self) -> IrqPlatformUpdate {
+        let mut inner = self.inner.lock();
+        let desc = inner.desc;
+        inner.runtime.prepare_enable_irq(desc, false)
     }
 
-    pub(super) fn prepare_legacy_enable(&mut self) -> IrqPlatformPlan {
-        self.runtime.prepare_enable_irq(self.desc, true)
+    pub(super) fn prepare_legacy_enable(&self) -> IrqPlatformUpdate {
+        let mut inner = self.inner.lock();
+        let desc = inner.desc;
+        inner.runtime.prepare_enable_irq(desc, true)
     }
 
-    pub(super) fn prepare_reconfigure_if_stale(&mut self) -> IrqPlatformPlan {
-        self.runtime.prepare_reconfigure_if_stale(self.desc)
+    pub(super) fn prepare_reconfigure_if_stale(&self) -> IrqPlatformUpdate {
+        let mut inner = self.inner.lock();
+        let desc = inner.desc;
+        inner.runtime.prepare_reconfigure_if_stale(desc)
     }
 
-    pub(super) fn prepare_disable_irq_nosync(&mut self) -> IrqPlatformPlan {
-        self.runtime.prepare_disable_irq_nosync(self.desc)
+    pub(super) fn prepare_disable_irq_nosync(&self) -> IrqPlatformUpdate {
+        let mut inner = self.inner.lock();
+        let desc = inner.desc;
+        inner.runtime.prepare_disable_irq_nosync(desc)
     }
 
-    pub(super) fn prepare_disable_if_no_actions(&mut self) -> Option<IrqPlatformPlan> {
-        self.runtime.prepare_disable_if_no_actions(self.desc)
+    pub(super) fn prepare_disable_if_no_actions(&self) -> Option<IrqPlatformUpdate> {
+        let mut inner = self.inner.lock();
+        let desc = inner.desc;
+        inner.runtime.prepare_disable_if_no_actions(desc)
     }
 
-    pub(super) fn begin_dispatch(&mut self) {
-        self.runtime.begin_dispatch();
+    pub(super) fn prepare_oneshot_mask(&self) -> IrqPlatformUpdate {
+        let mut inner = self.inner.lock();
+        let desc = inner.desc;
+        inner.runtime.prepare_oneshot_mask(desc)
     }
 
-    pub(super) fn finish_dispatch(&mut self) -> Option<PollSet> {
-        self.runtime.finish_dispatch()
+    pub(super) fn prepare_oneshot_unmask(&self) -> IrqPlatformUpdate {
+        let mut inner = self.inner.lock();
+        let desc = inner.desc;
+        inner.runtime.prepare_oneshot_unmask(desc)
+    }
+
+    pub(super) fn begin_dispatch(&self) {
+        self.inner.lock().runtime.begin_dispatch();
+    }
+
+    pub(super) fn finish_dispatch(&self) -> Option<PollSet> {
+        self.inner.lock().runtime.finish_dispatch()
     }
 
     pub(super) fn in_flight(&self) -> usize {
-        self.runtime.in_flight()
+        self.inner.lock().runtime.in_flight()
     }
 
     pub(super) fn in_flight_zero_completion(&self) -> Arc<Completion> {
-        self.runtime.in_flight_zero_completion()
+        self.inner.lock().runtime.in_flight_zero_completion()
     }
 
     pub(super) fn thread_slots(&self) -> [Option<IrqThreadSlot>; MAX_IRQ_ACTIONS] {
-        self.runtime.thread_slots()
+        self.inner.lock().runtime.thread_slots()
     }
 
-    pub(super) fn begin_teardown(&mut self) {
-        self.runtime.begin_teardown();
+    pub(super) fn begin_teardown(&self) {
+        self.inner.lock().runtime.begin_teardown();
     }
 
-    pub(super) fn finish_teardown(&mut self) {
-        self.runtime.finish_teardown();
+    pub(super) fn finish_teardown(&self) {
+        self.inner.lock().runtime.finish_teardown();
     }
 
     pub(super) fn is_teardown_in_progress(&self) -> bool {
-        self.runtime.is_teardown_in_progress()
+        self.inner.lock().runtime.is_teardown_in_progress()
     }
 
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     pub(super) fn is_msi(&self) -> bool {
-        self.runtime.is_msi()
+        self.inner.lock().runtime.is_msi()
     }
 
     pub(super) fn is_unused(&self) -> bool {
-        self.runtime.is_unused()
+        self.inner.lock().runtime.is_unused()
     }
 
     #[cfg(unittest)]
     pub(super) fn test_with_runtime(desc: IrqDesc, regular_action: Option<IrqAction>) -> Self {
-        let mut state = Self::new(desc);
+        let state = Self::new(desc);
         if let Some(action) = regular_action {
             assert!(state.install_regular_action(action));
         }
@@ -550,33 +633,38 @@ impl IrqStateDesc {
     }
 
     #[cfg(unittest)]
-    pub(super) const fn generation_for_tests(&self) -> u64 {
-        self.runtime.generation
+    pub(super) fn generation_for_tests(&self) -> u64 {
+        self.inner.lock().runtime.generation
     }
 
     #[cfg(unittest)]
-    pub(super) const fn configured_generation_for_tests(&self) -> Option<u64> {
-        self.runtime.configured_generation
+    pub(super) fn configured_generation_for_tests(&self) -> Option<u64> {
+        self.inner.lock().runtime.configured_generation
     }
 
     #[cfg(unittest)]
-    pub(super) const fn is_enabled_for_tests(&self) -> bool {
-        self.runtime.is_enabled
+    pub(super) fn is_enabled_for_tests(&self) -> bool {
+        self.inner.lock().runtime.is_enabled
     }
 
     #[cfg(unittest)]
-    pub(super) const fn disable_depth_for_tests(&self) -> usize {
-        self.runtime.disable_depth
+    pub(super) fn disable_depth_for_tests(&self) -> usize {
+        self.inner.lock().runtime.disable_depth
     }
 
     #[cfg(unittest)]
-    pub(super) const fn in_flight_for_tests(&self) -> usize {
-        self.runtime.in_flight
+    pub(super) fn oneshot_mask_pending_for_tests(&self) -> bool {
+        self.inner.lock().runtime.oneshot_mask_pending
     }
 
     #[cfg(unittest)]
-    pub(super) const fn teardown_depth_for_tests(&self) -> usize {
-        self.runtime.teardown_depth
+    pub(super) fn in_flight_for_tests(&self) -> usize {
+        self.inner.lock().runtime.in_flight
+    }
+
+    #[cfg(unittest)]
+    pub(super) fn teardown_depth_for_tests(&self) -> usize {
+        self.inner.lock().runtime.teardown_depth
     }
 }
 
@@ -585,7 +673,7 @@ pub(super) struct IrqState {
     ///
     /// `virq` is the stable key used by registration, unregister, descriptor
     /// queries, and normal subscriber dispatch.
-    pub(super) descs: BTreeMap<Virq, IrqStateDesc>,
+    pub(super) descs: BTreeMap<Virq, Arc<IrqStateDesc>>,
     /// Per-domain control-plane state.
     ///
     /// Each domain owns its mutable `hwirq -> virq` build table. This is not
@@ -636,7 +724,7 @@ impl IrqState {
     ) -> Result<ResolvedIrqDesc, IrqDescError> {
         let (virq, mapping_to_insert) = if let Some(virq) = desc.logical_irq() {
             if let Some(existing) = self.descs.get(&virq) {
-                existing.desc.try_merge(desc)?;
+                existing.desc().try_merge(desc)?;
             }
             if let Some(domain) = desc.domain {
                 let existing_virq = self.domain_virq(domain, desc.hwirq);
@@ -671,7 +759,7 @@ impl IrqState {
         };
         desc = desc.with_virq(virq);
         let stored_desc = if let Some(existing) = self.descs.get(&virq) {
-            existing.desc.try_merge(desc)?
+            existing.desc().try_merge(desc)?
         } else {
             desc
         };
@@ -697,7 +785,7 @@ impl IrqState {
         self.descs
             .entry(virq)
             .and_modify(|state| state.update_desc(stored_desc))
-            .or_insert_with(|| IrqStateDesc::new(stored_desc));
+            .or_insert_with(|| Arc::new(IrqStateDesc::new(stored_desc)));
         Ok(ResolvedIrqDesc::new(
             stored_desc,
             snapshot_domain_to_publish,
@@ -742,7 +830,7 @@ impl IrqState {
     }
 
     pub(super) fn stored_desc(&self, virq: Virq) -> Option<IrqDesc> {
-        self.descs.get(&virq).map(|state| state.desc)
+        self.descs.get(&virq).map(|state| state.desc())
     }
 
     fn resolve_plain_virq(&mut self, virq: Virq) -> IrqDesc {
@@ -752,7 +840,7 @@ impl IrqState {
         let desc = IrqDesc::from_virq(virq);
         self.descs
             .entry(virq)
-            .or_insert_with(|| IrqStateDesc::new(desc));
+            .or_insert_with(|| Arc::new(IrqStateDesc::new(desc)));
         desc
     }
 
@@ -788,13 +876,16 @@ impl IrqState {
 
     fn remove_if_unused_inner(&mut self, virq: Virq, remove_msi: bool) -> Option<IrqDesc> {
         let entry = self.descs.get(&virq)?;
-        if entry.desc.flags.contains(IrqFlags::MSI) && !remove_msi {
+        let desc = entry.desc();
+        if desc.flags.contains(IrqFlags::MSI) && !remove_msi {
             return None;
         }
         if !entry.is_unused() {
             return None;
         }
-        let desc = entry.desc;
+        if Arc::strong_count(entry) != 1 {
+            return None;
+        }
         if remove_msi
             && let Some(domain) = desc.domain
             && let Some(domain_state) = self.domain_states.get_mut(&domain)
@@ -817,10 +908,11 @@ impl IrqState {
     #[cfg(any(target_arch = "x86_64", unittest))]
     pub(super) fn remove_msi_if_unused(&mut self, virq: Virq) -> Option<Hwirq> {
         let entry = self.descs.get(&virq)?;
-        if !entry.desc.flags.contains(IrqFlags::MSI) {
+        let desc = entry.desc();
+        if !desc.flags.contains(IrqFlags::MSI) {
             return None;
         }
-        let domain = entry.desc.domain;
+        let domain = desc.domain;
         let desc = self.remove_if_unused_inner(virq, true)?;
         if let Some(domain) = domain {
             let published =
@@ -837,12 +929,14 @@ impl IrqState {
 
     #[cfg(target_arch = "x86_64")]
     pub(super) fn is_unused(&self, virq: Virq) -> bool {
-        self.descs.get(&virq).is_some_and(IrqStateDesc::is_unused)
+        self.descs
+            .get(&virq)
+            .is_some_and(|entry| entry.is_unused() && Arc::strong_count(entry) == 1)
     }
 
     #[cfg(target_arch = "x86_64")]
     pub(super) fn is_msi(&self, virq: Virq) -> bool {
-        self.descs.get(&virq).is_some_and(IrqStateDesc::is_msi)
+        self.descs.get(&virq).is_some_and(|entry| entry.is_msi())
     }
 }
 

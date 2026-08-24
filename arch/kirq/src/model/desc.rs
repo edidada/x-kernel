@@ -48,12 +48,14 @@ impl IrqDomainId {
 /// Outcome reported by an IRQ handler.
 ///
 /// The source bitmap is interpreted by higher layers such as the devres-backed
-/// driver framework. `kirq` only uses `handled()` to distinguish claimed work
-/// from a shared-line miss.
+/// driver framework. `kirq` uses `handled()` to distinguish claimed work from
+/// a shared-line miss, and `wake_thread()` to decide whether a threaded action
+/// should wake its action-owned IRQ thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IrqEvent {
     handled: bool,
     sources: u8,
+    wake_thread: bool,
 }
 
 /// A small opaque identifier for a logical interrupt event source.
@@ -70,11 +72,19 @@ impl IrqEvent {
     pub const HANDLED: Self = Self {
         handled: true,
         sources: 0,
+        wake_thread: false,
     };
     /// The handler did not claim the interrupt.
     pub const NOT_HANDLED: Self = Self {
         handled: false,
         sources: 0,
+        wake_thread: false,
+    };
+    /// The handler claimed the interrupt and requests the threaded IRQ handler.
+    pub const WAKE_THREAD: Self = Self {
+        handled: true,
+        sources: 0,
+        wake_thread: true,
     };
 
     /// Claim the interrupt with a caller-defined source bitmap.
@@ -82,6 +92,16 @@ impl IrqEvent {
         Self {
             handled: true,
             sources,
+            wake_thread: false,
+        }
+    }
+
+    /// Claim the interrupt with source bits and request the threaded handler.
+    pub const fn wake_thread_from_sources(sources: u8) -> Self {
+        Self {
+            handled: true,
+            sources,
+            wake_thread: true,
         }
     }
 
@@ -95,10 +115,16 @@ impl IrqEvent {
         self.sources
     }
 
+    /// Returns whether this handler requested its threaded IRQ handler.
+    pub const fn wake_thread(&self) -> bool {
+        self.wake_thread
+    }
+
     /// Combines another IRQ event into this one.
     pub fn merge(&mut self, other: IrqEvent) {
         self.handled |= other.handled;
         self.sources |= other.sources;
+        self.wake_thread |= other.wake_thread;
     }
 }
 

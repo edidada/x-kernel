@@ -122,7 +122,7 @@ mod tests {
     use unittest::{assert_eq, def_test};
 
     use crate::{
-        context::{HardIrqContextGuard, local_bh_disable},
+        context::{local_bh_disable, test_support::ScopedHardIrqContext},
         softirq::{
             SoftirqRunResult, SoftirqVec, raise_softirq, softirq_diagnostics,
             test_support::ScopedSoftirqAction,
@@ -257,7 +257,7 @@ mod tests {
         WORK_RUNS.store(0, Ordering::Relaxed);
 
         let result = {
-            let _hardirq = HardIrqContextGuard::enter();
+            let _hardirq = ScopedHardIrqContext::enter();
             let result = queue.queue_work(&work);
             assert_irq_safe_queue_result(result);
             assert_eq!(WORK_RUNS.load(Ordering::Relaxed), 0);
@@ -276,7 +276,7 @@ mod tests {
     fn test_waiting_work_apis_reject_hardirq_context() {
         let work = ScheduledWork::new(count_work);
 
-        let _hardirq = HardIrqContextGuard::enter();
+        let _hardirq = ScopedHardIrqContext::enter();
         assert_eq!(work.flush(), Err(WorkqueueError::InvalidContext));
         assert_eq!(work.cancel_sync(), Err(WorkqueueError::InvalidContext));
     }
@@ -286,7 +286,7 @@ mod tests {
         let queue = Box::leak(Box::new(WorkQueue::new("test")));
         let delayed = DelayedScheduledWork::new(count_work);
 
-        let _hardirq = HardIrqContextGuard::enter();
+        let _hardirq = ScopedHardIrqContext::enter();
         assert_eq!(
             queue.queue_delayed_work(&delayed, TimeSpan::from_secs(1)),
             QueueDelayedWorkResult::InvalidContext
@@ -310,7 +310,7 @@ mod tests {
         WORK_RUNS.store(0, Ordering::Relaxed);
 
         {
-            let _hardirq = HardIrqContextGuard::enter();
+            let _hardirq = ScopedHardIrqContext::enter();
             assert_eq!(
                 queue.queue_delayed_work(&delayed, TimeSpan::ZERO),
                 QueueDelayedWorkResult::Queued
@@ -328,7 +328,7 @@ mod tests {
     fn test_start_workqueue_rejects_hardirq_context() {
         let queue = Box::leak(Box::new(WorkQueue::new("test")));
 
-        let _hardirq = HardIrqContextGuard::enter();
+        let _hardirq = ScopedHardIrqContext::enter();
         assert_eq!(
             queue.start(WorkQueueAttrs::new()),
             Err(WorkQueueStartError::InvalidContext)
