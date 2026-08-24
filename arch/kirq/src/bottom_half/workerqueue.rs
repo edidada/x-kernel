@@ -372,6 +372,7 @@ mod tests {
 
     #[def_test(serial)]
     fn test_queue_work_is_allowed_from_softirq_action() {
+        let _softirq = crate::softirq::test_support::begin_softirq_test();
         let queue = Box::leak(Box::new(WorkQueue::new("test")));
         let _queue = ScopedTestQueue::install(&SOFTIRQ_TEST_QUEUE, queue);
         let _action = ScopedSoftirqAction::install(SoftirqVec::Block, queue_from_softirq_action);
