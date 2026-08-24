@@ -72,14 +72,14 @@ impl kspin::KernelGuardIf {
 
     fn enter_atomic_context() {
         #[cfg(any(unittest, feature = "sleep_context_debug"))]
-        if let Some(curr) = current_may_uninit() {
+        if let Some(curr) = CurrentTask::try_get_from_guard_context() {
             curr.enter_atomic_context();
         }
     }
 
     fn exit_atomic_context() {
         #[cfg(any(unittest, feature = "sleep_context_debug"))]
-        if let Some(curr) = current_may_uninit() {
+        if let Some(curr) = CurrentTask::try_get_from_guard_context() {
             curr.exit_atomic_context();
         }
     }

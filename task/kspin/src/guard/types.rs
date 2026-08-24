@@ -57,18 +57,20 @@ mod kernel {
 
         #[inline]
         fn acquire() -> Self::State {
+            let state = crate::guard::arch::save_disable();
+
             #[cfg(any(unittest, feature = "atomic_context_debug"))]
             crate::guard::KernelGuardIf::enter_atomic_context();
 
-            crate::guard::arch::save_disable()
+            state
         }
 
         #[inline]
         fn release(state: Self::State) {
-            crate::guard::arch::restore(state);
-
             #[cfg(any(unittest, feature = "atomic_context_debug"))]
             crate::guard::KernelGuardIf::exit_atomic_context();
+
+            crate::guard::arch::restore(state);
         }
     }
 
@@ -100,11 +102,11 @@ mod kernel {
 
         #[inline]
         fn acquire() -> Self::State {
-            #[cfg(any(unittest, feature = "atomic_context_debug"))]
-            crate::guard::KernelGuardIf::enter_atomic_context();
-
             #[cfg(feature = "preempt")]
             crate::guard::KernelGuardIf::disable_preempt();
+
+            #[cfg(any(unittest, feature = "atomic_context_debug"))]
+            crate::guard::KernelGuardIf::enter_atomic_context();
         }
 
         #[inline]
@@ -146,23 +148,25 @@ mod kernel {
 
         #[inline]
         fn acquire() -> Self::State {
-            #[cfg(any(unittest, feature = "atomic_context_debug"))]
-            crate::guard::KernelGuardIf::enter_atomic_context();
-
             // Order: disable preemption first, then IRQs
             #[cfg(feature = "preempt")]
             crate::guard::KernelGuardIf::disable_preempt();
 
-            crate::guard::arch::save_disable()
+            let state = crate::guard::arch::save_disable();
+
+            #[cfg(any(unittest, feature = "atomic_context_debug"))]
+            crate::guard::KernelGuardIf::enter_atomic_context();
+
+            state
         }
 
         #[inline]
         fn release(state: Self::State) {
-            // Order: restore IRQs first, then enable preemption
-            crate::guard::arch::restore(state);
-
             #[cfg(any(unittest, feature = "atomic_context_debug"))]
             crate::guard::KernelGuardIf::exit_atomic_context();
+
+            // Order: restore IRQs first, then enable preemption
+            crate::guard::arch::restore(state);
 
             #[cfg(feature = "preempt")]
             crate::guard::KernelGuardIf::enable_preempt();

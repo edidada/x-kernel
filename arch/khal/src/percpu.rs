@@ -9,6 +9,19 @@ pub use kplat::cpu::*;
 #[percpu::def_percpu]
 static CURRENT_TASK_PTR: usize = 0;
 
+/// Gets the pointer to the current task without taking a guard.
+///
+/// This is only for very low-level guard/provider paths that cannot call
+/// [`current_task_ptr`] because that function may itself create a guard on
+/// architectures whose per-CPU read sequence is multi-instruction.
+#[inline]
+pub fn current_task_ptr_raw<T>() -> *const T {
+    // SAFETY: callers only receive the raw pointer value. Validity and
+    // preemption/IRQ stability are enforced by the higher-level API that
+    // decides whether it is safe to dereference or wrap the pointer.
+    unsafe { CURRENT_TASK_PTR.read_current_raw() as *const T }
+}
+
 /// Gets the pointer to the current task with preemption-safety.
 ///
 /// Preemption may be enabled when calling this function. This function will

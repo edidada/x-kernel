@@ -1197,6 +1197,16 @@ pub struct CurrentTask(ManuallyDrop<KtaskRef>);
 impl CurrentTask {
     pub(crate) fn try_get() -> Option<Self> {
         let ptr: *const super::KTask = khal::percpu::current_task_ptr();
+        Self::from_raw_current_ptr(ptr)
+    }
+
+    #[cfg(any(unittest, feature = "sleep_context_debug"))]
+    pub(crate) fn try_get_from_guard_context() -> Option<Self> {
+        let ptr: *const super::KTask = khal::percpu::current_task_ptr_raw();
+        Self::from_raw_current_ptr(ptr)
+    }
+
+    fn from_raw_current_ptr(ptr: *const super::KTask) -> Option<Self> {
         if !ptr.is_null() {
             // SAFETY: the percpu current-task pointer is installed from
             // `Arc::into_raw` in `init_current`/`set_current` and stays valid
