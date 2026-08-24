@@ -234,6 +234,8 @@ pub enum IrqDescError {
     TeardownInProgress { virq: Virq },
     /// The operation requires at least one registered IRQ action on the line.
     NoIrqAction { virq: Virq },
+    /// The scheduler could not create a threaded IRQ handler task.
+    ThreadUnavailable { virq: Virq },
     /// The operation cannot run from hardirq, softirq, or BH-disabled context.
     InvalidContext { operation: &'static str },
     /// The scheduler wait provider could not register or block for IRQ sync.

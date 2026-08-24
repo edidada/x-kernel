@@ -51,6 +51,10 @@ impl SoftirqDaemonWakeSources {
 /// The daemon is pinned to the current CPU because KIRQ softirq pending state is
 /// per-CPU. Call this after scheduler bring-up and before enabling local IRQs
 /// on each CPU.
+///
+/// This task is only a scheduler-backed runner for KIRQ softirq actions. It
+/// does not make softirq callbacks sleepable: callbacks still run under the
+/// non-sleepable softirq/BH execution contract owned by `kirq`.
 pub fn init_current_cpu() {
     let cpu_id = khal::percpu::this_cpu_id();
     let wake_source = PollSet::new();

@@ -13,6 +13,7 @@ use core::array;
 use kpoll::{Completion, PollSet};
 use kspin::SpinNoIrq;
 
+use super::thread::IrqThreadSlot;
 use crate::{
     Hwirq, IrqDesc, IrqDescError, IrqDomainId, IrqFlags, IrqSpec, Virq,
     action::{IrqAction, IrqActionToken},
@@ -371,6 +372,12 @@ impl IrqDescRuntimeState {
         self.in_flight_zero.clone()
     }
 
+    fn thread_slots(&self) -> [Option<IrqThreadSlot>; MAX_IRQ_ACTIONS] {
+        self.actions
+            .each_ref()
+            .map(|action| action.as_ref().and_then(IrqAction::thread_slot).cloned())
+    }
+
     fn begin_teardown(&mut self) {
         self.teardown_depth = self.teardown_depth.saturating_add(1);
     }
@@ -506,6 +513,10 @@ impl IrqStateDesc {
 
     pub(super) fn in_flight_zero_completion(&self) -> Arc<Completion> {
         self.runtime.in_flight_zero_completion()
+    }
+
+    pub(super) fn thread_slots(&self) -> [Option<IrqThreadSlot>; MAX_IRQ_ACTIONS] {
+        self.runtime.thread_slots()
     }
 
     pub(super) fn begin_teardown(&mut self) {

@@ -42,6 +42,7 @@ arch/kirq/src/
 │   ├── dispatch.rs     # normal IRQ action fanout
 │   ├── notify.rs       # IRQ line/source waiter registration and wake dispatch
 │   ├── nmi.rs          # pseudo-NMI registration and lock-minimal dispatch table
+│   ├── thread.rs       # action-owned threaded IRQ runtime and task bridge
 │   └── manager.rs      # public API and dispatch-entry orchestration
 ├── domain/
 │   └── mod.rs          # per-domain lock-free reverse-map snapshots
@@ -255,9 +256,159 @@ auto-enable 路径，不暴露 disabled shared registration API。后续 shared 
 注册如果补齐了更具体的 descriptor metadata，`kirq` 会在不改变当前 enable/depth
 状态的前提下重新下发 stale platform configure。
 handler 的 normal IRQ 调用参数是已经解析出的 OS-visible `virq`；shared IRQ handler
-依赖这个参数识别当前 line，而不应从设备或平台私有状态反推。action 内部仍预留
-future threaded slot 和 optional name，但本阶段 threaded slot 始终
-不产生调度、唤醒、softirq 或 workerqueue 行为。
+依赖这个参数识别当前 line，而不应从设备或平台私有状态反推。`register_threaded()`
+会安装一个 regular action，primary 仍在 hardirq context 运行；primary 返回 handled
+后唤醒 action-owned IRQ thread，thread handler 在普通 task context 中运行。
+当前 threaded IRQ 只覆盖非 shared regular action，shared threaded IRQ 和完整
+oneshot mask 聚合仍是后续扩展。
+
+### Linux threaded IRQ reference
+
+Linux 的 threaded IRQ 是 generic IRQ action 的扩展语义，而不是 softirq 或
+workqueue 的别名。`request_irq()` 本身也通过 `request_threaded_irq()` 的
+`thread_fn = NULL` 分支实现；带线程的 action 在同一个 `irq_desc` / `irqaction`
+模型下额外保存 primary handler、thread handler、IRQ thread task、thread flags 和
+oneshot mask。
+
+Linux driver-facing model:
+
+- `handler` 是 hardirq primary handler，仍在硬中断上下文运行。它必须快速判断
+  中断是否来自本设备，完成必要 ack/mask，并返回 `IRQ_NONE`、`IRQ_HANDLED` 或
+  `IRQ_WAKE_THREAD`。
+- `thread_fn` 是 sleepable IRQ thread handler。primary 返回 `IRQ_WAKE_THREAD`
+  时，generic IRQ core 设置 action-local run bit 并唤醒该 action 的 IRQ thread。
+- `handler == NULL && thread_fn != NULL` 时，Linux 安装默认 primary handler；该
+  handler 只返回 `IRQ_WAKE_THREAD`。这种用法要求 `IRQF_ONESHOT`，除非底层 irqchip
+  明确标记自身 oneshot-safe。
+- shared IRQ 仍需要 primary 阶段。每个 action 先判断自己是否认领本次中断；只有
+  认领者才唤醒自己的 thread。
+- `IRQF_ONESHOT` 表示 thread handler 完成前 IRQ line 保持 masked。shared
+  oneshot line 上每个 action 有自己的 `thread_mask` bit，descriptor 聚合所有仍在
+  运行的 threaded action；只有所有被唤醒 thread 都完成，且 line 没有被显式
+  disabled，generic IRQ core 才 unmask。
+- `synchronize_irq()` 和 `free_irq()` 等待的不只是 hardirq primary dispatch，还要
+  等待该 line 上 active threaded handlers 归零。调用者不能在 interrupt-like
+  context 或持有 thread handler 需要获取的锁时等待。
+
+Linux 使用 threaded IRQ 的典型场景是中断响应必须与慢路径组合：I2C/SPI/GPIO
+expander、触摸屏、IIO sensor triggered buffer、PHY/link/PTP 控制中断、MMC/SDHCI
+恢复路径等。它们的共同特征是 hardirq 只能做最小判断和屏蔽，真正处理需要睡眠、
+访问慢速总线、等待锁或执行比 hardirq 预算更长的设备状态机。高吞吐网络 RX/TX
+数据面通常不直接用 threaded IRQ 替代 NAPI/softirq/poller；threaded IRQ 更多用于
+控制面、管理中断或慢速设备。
+
+### X-Kernel threaded IRQ implementation
+
+X-Kernel threaded IRQ 继续落在 `kirq::runtime` 的 action/state/dispatch
+边界内，不能作为 driver 私有线程、softirq action 或 kwork item 实现。原因是 IRQ
+thread 必须和 IRQ action 生命周期、shared removal token、oneshot mask、disable /
+synchronize / free 等 generic IRQ 语义成组闭合。
+
+当前 API 语义：
+
+- 保留现有 `register()` / `register_shared()` hardirq-only 兼容 API。
+- `register_threaded()` / `try_register_threaded()` 安装 primary handler、thread
+  handler 和 optional name，默认 auto-enable，且只接受空 line 上的非 shared action。
+- 当前 `IrqEvent` 还没有独立的 `IRQ_WAKE_THREAD` 等价位。对 threaded action，
+  primary 返回 handled 即表示“本 action 认领中断并唤醒 thread”；对普通 action，
+  handled 仍只表示 hardirq 已处理。
+- `handler == None && thread_fn != None`、shared threaded IRQ、driver-facing
+  action flags 和完整 oneshot-safe 检查仍未暴露。
+
+当前运行时结构：
+
+- `IrqAction` 保存 primary handler、optional thread handler、action flags、name、
+  removal token 和 action-local thread runtime。
+- `IrqThreadSlot` 是 action-owned runtime，保存 pending/running/stopping state、
+  wake completion、idle completion 和 thread handler。hardirq 路径只设置 pending
+  并唤醒线程，不分配内存、不执行 thread handler。
+- `IrqDescRuntimeState` 保存 descriptor-local hardirq `in_flight`、disable depth 和
+  teardown state，并能为同步路径快照当前 action 的 thread slot。shared oneshot mask
+  的分配与清理仍是后续工作，必须由 descriptor runtime owner 统一完成。
+- IRQ thread 是 action-bound sleepable task，不是 kwork shared worker。它等待
+  action-local pending bit，被唤醒后执行 `thread_fn`，结束时完成 idle completion。
+- thread creation 通过 `IrqThreadTaskIf` scheduler-facing provider 接入，避免 `kirq`
+  直接依赖 `ktask`。这和当前
+  `IrqSyncWaitIf` 的边界一致。
+
+目标 dispatch 顺序：
+
+```text
+hardirq trap
+  -> dispatch_actions()
+       -> clone action snapshot under IRQ_STATE
+       -> run primary handlers outside IRQ_STATE
+       -> on WakeThread:
+            mark action run bit
+            wake action IRQ thread
+  -> controller completion / IRQ-tail deferred handling
+
+irq thread
+  -> wait action run bit
+  -> run thread_fn in sleepable task context
+  -> clear action active state
+  -> complete idle waiters when no pending thread work remains
+```
+
+验收标准：
+
+- hardirq-only registration 行为保持兼容。
+- primary 返回 `WakeThread` 后，thread handler 必须异步在线程上下文运行；hardirq
+  路径不能直接执行 thread handler。
+- 没有 thread handler 的 action 返回 `WakeThread` 必须被诊断并且不能造成悬空唤醒。
+- `disable_irq()`、`synchronize_irq()`、`free_irq()` 必须等待 hardirq snapshot 和
+  threaded handler 都退出；`disable_irq_nosync()` 只 mask，不等待。
+- IRQ thread 不能被 `is_in_interrupt_context()` 识别成 hardirq、softirq 或
+  BH-disabled；它是 sleepable task context，但仍属于 IRQ action lifecycle。
+- ksoftirqd、BH workerqueue 和 kwork 都不能作为 threaded IRQ 的生命周期 owner。
+
+后续验收项：
+
+- 显式 `WakeThread` return 位，区分 hardirq-only handled 与 threaded wake。
+- `IRQF_ONESHOT` line mask/unmask 聚合；shared line 必须等所有被唤醒 action thread
+  完成。
+- `free_irq_action()` 删除 shared threaded action 后，旧 hardirq snapshot 或旧 IRQ
+  thread 不能再访问已释放 driver state。
+
+### Threaded IRQ follow-up backlog
+
+当前实现先固定 regular threaded IRQ 的最小闭环。以下能力已确认需要后续单独实现，
+不应混入当前 foundation patch：
+
+- public `IrqEvent` 或新的 handler return 类型需要显式表达 `WakeThread`，不能长期用
+  threaded action 的 handled result 隐式表示 wake。
+- `handler == None && thread_fn != None` 的便利 API，需要安装默认 primary wake
+  handler，并检查 oneshot-safe 约束。
+- shared threaded IRQ registration，需要把 `IrqActionToken`、action-local thread
+  runtime 和 shared fanout 结果聚合统一到 descriptor runtime。
+- `IRQF_ONESHOT` 完整 mask/unmask protocol，包括 shared line 的 per-action active
+  mask bit、descriptor-level 聚合和 disable/teardown 交互。
+- IRQ thread affinity、priority 和命名策略，需要通过 scheduler-facing provider 或
+  注册 options 暴露，不能让 `kirq` 直接依赖具体 scheduler 类型。
+- per-action/per-line threaded IRQ statistics，用于后续 watchdog/healthcheck 诊断。
+
+### Softirq, ksoftirqd, workqueue, and threaded IRQ boundaries
+
+Linux 和 X-Kernel 都有多个 deferred execution 层次，它们解决的问题不同：
+
+- hardirq：最小化的设备中断入口，不能睡眠，负责 ack/mask、采样状态、发布后续 work。
+- softirq：固定类别的 per-CPU bottom-half runner，适合高频、短、不可睡眠的批处理。
+  Linux `ksoftirqd/N` 是 kthread，但它执行的是 softirq action；进入 runner 前仍建立
+  BH/softirq 执行语义，所以 softirq handler 不能因为跑在 `ksoftirqd` 里就睡眠或
+  阻塞。`ksoftirqd` 的主要目的只是把过量 softirq 从 hardirq tail 挪到可调度线程，
+  避免长时间占用中断返回路径。
+- workqueue / kwork：通用 sleepable deferred work。它适合子系统后台任务、清理、
+  retry、budgeted poller 和需要 cancel/flush 的短任务，但 work item 与 IRQ action
+  没有天然的一对一生命周期关系，也不负责 IRQ line mask/unmask。
+- threaded IRQ：IRQ action 自身的 sleepable bottom half。它保留 primary hardirq
+  判断能力，又把设备慢路径放到 action-bound thread 中执行，并由 generic IRQ core
+  负责 oneshot、shared action、disable/synchronize/free 的闭环。
+
+因此，即使 softirq 可以唤醒 `ksoftirqd`，workqueue 也能运行 sleepable task，
+threaded IRQ 仍然有独立价值：它是“设备 IRQ action 生命周期的一部分”，不是普通后台
+任务。需要和 IRQ line mask、shared dev-id/token、free_irq teardown、synchronize_irq
+等待语义绑定的慢路径，应使用 threaded IRQ；只是想从 IRQ 发布一个子系统级后台处理，
+且不需要 action-bound line masking / teardown 语义的，才使用 softirq 或 kwork。
 
 `IrqDescRuntimeState` 是 descriptor/action 运行态的唯一 owner。它当前保存：
 
@@ -276,7 +427,8 @@ future threaded slot 和 optional name，但本阶段 threaded slot 始终
 - `teardown_depth`：等待式 teardown 正在进行的深度。该值非 `0` 时拒绝同一 line
   的新 action 注册，并阻止 unused descriptor 被 dispatch guard 提前删除；
 - `is_msi`：从 descriptor flags 派生的 MSI lifetime marker；
-- `oneshot_mask_pending`：后续 threaded/oneshot 语义预留，本阶段不驱动硬件 mask。
+- `oneshot_mask_pending`：后续完整 threaded/oneshot 语义预留；当前 regular threaded
+  IRQ 尚不驱动硬件 mask 聚合。
 
 这些字段是 crate-private 运行态，不构成 public ABI。后续 shared IRQ、oneshot mask
 和 threaded IRQ 只能在这个 owner 内扩展，不能绕过 `IrqStateDesc` 在 dispatch、
@@ -285,14 +437,10 @@ MSI free 或 unregister 路径上另建并行状态。
 primary handler 的 public return 仍是 `IrqEvent`。dispatch 内部把它分类为：
 
 - `NOT_HANDLED` -> `Unhandled`；
-- `HANDLED` -> `Handled { sources: 0 }`；
-- `from_sources(bits)` -> `Handled { sources: bits }`。
-
-内部还保留 future-only `WakeThread { sources }` 分类。当前 public handler 无法返回
-该分类；即使内部测试构造该值，它也只表示未来 threaded IRQ 语义，不会触发 IRQ
-thread wake、softirq 或 workerqueue work。带
-future-only thread slot 的 action 在当前非线程化 core 中不可 dispatch：它不会同步
-运行 primary handler。
+- 普通 action 的 `HANDLED` -> `Handled { sources: 0 }`；
+- 普通 action 的 `from_sources(bits)` -> `Handled { sources: bits }`；
+- threaded action 的 handled result -> `WakeThread { sources }`，dispatch 只唤醒
+  action-owned IRQ thread，不同步运行 thread handler。
 
 ### virq 映射
 

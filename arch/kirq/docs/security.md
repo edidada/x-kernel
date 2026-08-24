@@ -37,6 +37,10 @@ kirq
 - `kirq::notify` 是当前 poll/future IRQ wake 的 owner；原 `irq_notify`
   forwarding crate 已移除。该路径不能被扩展成 threaded IRQ、softirq 或 workerqueue
   的所有权边界。
+- threaded IRQ 属于 `kirq` action lifecycle。IRQ thread 可以睡眠，但它不是
+  softirq、ksoftirqd 或 kwork worker；它必须由 IRQ action 的注册、disable、
+  synchronize 和 free 协议共同约束。当前实现支持非 shared regular threaded IRQ；
+  shared oneshot mask 聚合是后续扩展。
 
 ## 外部边界 / 攻击面
 
@@ -110,8 +114,15 @@ per-CPU atomic pending mask。调用方在访问前 pin 当前 CPU；pending mas
 - dispatch snapshot 若包含 regular/shared action，会增加 descriptor-local
   `in_flight` 计数。`free_irq()` 返回前必须等待该计数归零，避免驱动释放 MMIO/DMA
   后仍有旧 handler snapshot 运行。
-- 内部 `WakeThread` return 分类在当前里程碑是 inert future state，不能调度 task、
-  raise softirq 或创建 workerqueue work。
+- 内部 `WakeThread` return 分类只能唤醒 action-owned IRQ thread，不能被映射到
+  softirq pending bit、poll/future waiter 或 kwork item。否则会丢失 action removal
+  token、thread active state 和后续 oneshot mask 语义。
+- threaded IRQ 的 sleepable handler 必须持有能覆盖回调执行期的 driver state
+  引用。`free_irq()` / `free_irq_action()` 返回前必须等待 hardirq snapshot 和
+  active IRQ thread 都退出。
+- 后续补齐 `IRQF_ONESHOT` 时，mask 状态必须由 descriptor runtime 统一管理。shared
+  line 上每个 threaded action 需要独立 mask bit；只有所有 active action bit 清零且
+  line 未被显式 disabled 时才允许 unmask。
 - `PendingIrq` / `DispatchedIrq` 不能跨线程/跨 CPU 发送，completion 必须在 claim
   它的 CPU 上完成。
 - `IntrManagerIf::complete_irq(cookie)` 必须只消费本次 dispatch 返回的 completion
@@ -200,6 +211,26 @@ diagnostics 把 BH-disabled 误报成可睡眠上下文。未来 IRQ thread 是 
 必须另建执行上下文边界，不能复用 `is_in_interrupt_context()` 作为 thread-state 标记。
 异常 context 诊断使用原子计数并限流 warning，避免 hot path 中的错误状态造成日志风暴。
 
+### Threaded IRQ state
+
+Threaded IRQ 不能复用 softirq 或 kwork 的状态机：
+
+- `ksoftirqd/N` 是 task，但它运行的是 softirq action。Linux 在进入 ksoftirqd runner
+  前仍建立 BH/softirq 执行语义；softirq handler 不能睡眠，也不能承担
+  `free_irq()` 的 action-bound teardown 等待。
+- kwork 是通用 sleepable workerqueue。它能表达 deferred work 的 cancel/flush，
+  但 work item 不天然绑定 IRQ action token、shared line 认领、oneshot mask 和
+  descriptor disable depth。
+- threaded IRQ 是 IRQ action 的 sleepable bottom half。primary hardirq 与
+  thread_fn 必须共享同一个 action lifecycle；descriptor runtime 必须同时跟踪
+  hardirq `in_flight`、thread idle state 和 teardown state。后续 shared oneshot
+  支持还需要 descriptor-owned active mask。
+
+因此，threaded IRQ provider 如果需要 scheduler 支持，只能提供“创建 action-owned
+IRQ thread”的窄接口；唤醒、停止和等待由 `kirq` 的 action runtime 自己完成。不能把
+`kirq` 的 action runtime 泄漏给 `ktask`，也不能让 driver 自己 spawn 私有线程来绕过
+`kirq` teardown。
+
 ### Deferred executor
 
 `DEFERRED_EXECUTOR_HOOKS` 只保存一个 hardirq-exit 函数指针，并用 `SpinNoIrq`
@@ -274,6 +305,10 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | T-36 | teardown wait 窗口重新 enable action-less line | 最后一个 action 已摘除并 mask 后，另一 CPU 调用 `enable_irq()` / legacy force-enable | descriptor 被删除后平台 line 又 unmasked，后续 unhandled IRQ 或 storm；或失败路径留下 merged metadata/domain mapping | `try_enable_irq()` lookup-only 解析已存在 descriptor，并拒绝 `teardown_depth != 0` 或 `action_count == 0` 的普通 enable；legacy force-enable 在 resolve/publish 前先检查已有 teardown descriptor |
 | T-37 | 等待式 teardown 持有 handler 需要的锁 | task context 持 driver lock 调用 `free_irq()` / `synchronize_irq()`，旧 handler snapshot 在另一 CPU 等同一把锁 | teardown 等 handler，handler 等 teardown caller，形成死锁 | public rustdoc 和设计文档明确等待时不能持有 handler 可能获取的锁或阻止 handler 退出的资源锁 |
 | T-38 | IRQ waiter 表拖慢所有 handled IRQ | fanout-complete path 对每个 IRQ 扫描全局 waiter 表，或已注销 IRQ 的 waiter entry 永久保留 | timer/IPI/设备 IRQ 在全局锁上竞争，运行时间越长 hot path 成本越高 | waiter table 按 `virq` 排序并用二分查找，空表通过 atomic entry-count hint 跳过锁；descriptor cleanup 在释放 `IRQ_STATE` 后移除对应 waiter entry 并唤醒遗留 waiter |
+| T-39 | ksoftirqd 被误用为 sleepable threaded IRQ | 认为 ksoftirqd 是 kthread，所以 softirq action 可以阻塞 | softirq runner 卡住，BH-disabled/softirq 语义被破坏，网络/timer 等其它 softirq 延迟 | 文档明确 ksoftirqd 只调度 softirq action；需要睡眠且绑定 IRQ action 生命周期的路径必须用 threaded IRQ |
+| T-40 | kwork 被误用为 IRQ thread | primary 返回 WakeThread 后 queue work item | `free_irq()` 无法精确等待 action thread，oneshot mask 无法按 shared action 收敛，workqueue 拥堵会阻塞 IRQ teardown | threaded IRQ 必须由 `kirq` action runtime 管理；kwork 只适合普通 deferred work |
+| T-41 | shared oneshot 只用 line-level bool | 多个 shared action 同时唤醒 thread，其中一个先完成 | 过早 unmask 导致同一 level IRQ 重入或 interrupt storm | descriptor runtime 为每个 threaded action 分配 mask bit，聚合 active mask 后统一 unmask |
+| T-42 | IRQ thread 被标记为 interrupt context | thread_fn 复用 hardirq/softirq context guard | 合法 sleep/mutex 被错误拒绝，或同步等待判断反向失效 | IRQ thread 建立独立 task-local identity；`is_in_interrupt_context()` 仍只表示 hardirq/softirq/BH-disabled |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -296,7 +331,7 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | F-13 | controller completion cookie 错配 | complete 错误 active IRQ 或 no-op | 中断丢失、重复触发或 priority/deactivate 状态泄漏 | `PendingIrq`/`DispatchedIrq` 持有 opaque cookie，generic IRQ core 只把原 cookie 交还 backend |
 | F-14 | spurious vector 运行 IRQ tail | 没有 claim 到真实 IRQ 却运行 handler/deferred | 错误 handler 调用或 pending work 时序混乱 | `dispatch_irq()` 返回 `None` 时 `handle_irq()` 不运行 fanout 和 deferred executor |
 | F-15 | IRQ waiter table owner 漂移 | fanout 已处理事件但没有通知 async waiter，或其它 crate 重新实现 wake bridge | poll/future 等待者可能延迟到下一次事件，或 shared fanout 顺序被破坏 | waiter table 和 fanout-complete dispatch 由 `kirq::notify` 持有；`kdriver` 和 devres 不参与 wake bridge |
-| F-16 | future `WakeThread` 被同步执行 | `WakeThread` return 被当成 handled primary work | future thread 未实现时错误唤醒或执行 sleepable work | 当前 `WakeThread` 分类保持 inert，threaded IRQ milestone 必须显式实现 thread ownership |
+| F-16 | `WakeThread` 被同步执行 | `WakeThread` return 被当成 handled primary work | hardirq 路径直接执行 sleepable work，破坏上下文约束 | `WakeThread` 只唤醒 action-owned IRQ thread，thread handler 由 scheduler task 执行 |
 | F-17 | action runtime 字段漂移 | `generation`、MSI marker、action list 或 oneshot pending 与 descriptor 不一致 | MSI free 判断、shared/threaded 诊断或 cleanup 决策错误 | descriptor merge/update 统一经过 `IrqStateDesc` 方法，后续新增字段必须同步在该 owner 内维护 |
 | F-18 | disable nesting 不配对 | 多次 disable 后只 enable 一次，或 legacy boolean API 语义不清 | IRQ line 长期 masked 或过早 unmask | `disable_depth` 在 `IrqDescRuntimeState` 中显式维护，`enable(spec,false)` 映射 nosync disable，`enable(spec,true)` 映射 depth-aware enable |
 | F-19 | free_irq 与 dispatch 并发 | teardown 移除 action 时另一个 CPU 已复制 handler snapshot | descriptor 被删除但旧 handler 仍执行 | `in_flight` 阻止 unused descriptor 删除，`free_irq()` 等待 snapshot guard drop 后再完成 cleanup |
@@ -378,16 +413,19 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
 - poll/future IRQ waiter notification 不是最终 waitqueue、softirq、workerqueue 或
   threaded IRQ 模型；IRQ waiter table 当前由 `kirq::notify` 持有。
 - `synchronize_irq()` 通过 descriptor-local completion 和 `IrqSyncWaitIf` provider
-  等待 `in_flight` 归零；completion 只是 wake source，等待返回后仍必须重查
-  descriptor predicate。后续 IRQ thread / workerqueue 引入后可以复用同一等待边界，
-  但上下文禁止规则保持不变。
+  等待 hardirq `in_flight` 归零，再等待当前 action-owned IRQ thread idle。
+  completion 只是 wake source，等待返回后仍必须重查 descriptor/thread predicate。
+  上下文禁止规则保持不变。
 - `flush_work()` / `cancel_work_sync()` 覆盖普通 work item；delayed work 由
   `kwork::DelayedScheduledWork` 提供 timer 到期后投递普通 work 的核心语义。当前仍不提供
   自动 delayed retry、完整 Linux concurrent-flusher 接力、CPU hotplug drain 或 rescuer 语义。
-- `WakeThread`、`IrqThreadSlot` 和 oneshot pending 只是 foundation state。它们尚未绑定
-  scheduler task、workerqueue、mask protocol、thread teardown、CPU affinity 或
-  per-action statistics；带 future-only thread slot 的 action 在当前 core 中不可
-  dispatch，不能降级为 hardirq 同步 primary。
+- `IrqThreadSlot` 已绑定 scheduler task、thread wake、`synchronize_irq()` idle wait
+  和 `free_irq()` stop/exited wait，但当前只支持 non-shared regular threaded IRQ。
+  完整 oneshot mask protocol、CPU affinity 和 per-action statistics 仍未实现。
+- threaded IRQ 当前没有 public `IRQ_WAKE_THREAD` 等价返回位、默认 primary wake
+  handler、shared threaded registration、shared oneshot active-mask 聚合、IRQ thread
+  affinity/priority policy 或 threaded IRQ 统计。这些属于后续 backlog，不能假设已由
+  当前 foundation 覆盖。
 
 ## 审计清单
 

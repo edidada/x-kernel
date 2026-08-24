@@ -6,6 +6,7 @@
 
 use bitflags::bitflags;
 
+use super::thread::IrqThreadSlot;
 use crate::{IrqEvent, Virq, platform::Handler};
 
 /// Public identity for one registered IRQ action on a line.
@@ -42,14 +43,6 @@ impl IrqActionId {
         self.0
     }
 }
-
-/// Future threaded-handler slot.
-///
-/// This milestone only reserves the shape. It deliberately carries no task,
-/// waitqueue, workerqueue, or softirq target.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(super) struct IrqThreadSlot;
 
 bitflags! {
     /// Flags owned by an IRQ action, distinct from resource-level `IrqFlags`.
@@ -98,6 +91,21 @@ impl IrqAction {
         }
     }
 
+    /// Builds one regular IRQ action with a dedicated threaded handler.
+    pub(super) fn threaded(
+        primary: Handler,
+        thread: IrqThreadSlot,
+        name: Option<&'static str>,
+    ) -> Self {
+        Self {
+            id: IrqActionId::REGULAR,
+            primary,
+            thread: Some(thread),
+            flags: IrqActionFlags::ONESHOT,
+            name,
+        }
+    }
+
     /// Returns this action's line-local removal token.
     pub(super) fn token(&self) -> IrqActionToken {
         self.id.token()
@@ -118,30 +126,32 @@ impl IrqAction {
         self.primary
     }
 
+    /// Returns the threaded handler slot, if this action has one.
+    pub(super) fn thread_slot(&self) -> Option<&IrqThreadSlot> {
+        self.thread.as_ref()
+    }
+
     /// Runs the primary handler and classifies its return value.
     pub(super) fn run_primary(&self, irq: Virq) -> IrqActionReturn {
-        IrqActionReturn::from_event(self.primary().handle(irq))
+        IrqActionReturn::from_event(self.primary().handle(irq), self.thread.is_some())
     }
 
-    /// Returns whether this action is valid for the current non-threaded IRQ core.
-    pub(super) fn is_currently_dispatchable(&self) -> bool {
-        self.thread.is_none()
-    }
-
-    #[cfg(unittest)]
-    pub(super) fn test_new(
-        primary: Handler,
-        thread: Option<IrqThreadSlot>,
-        flags: IrqActionFlags,
-        name: Option<&'static str>,
-    ) -> Self {
-        Self {
-            id: IrqActionId::REGULAR,
-            primary,
-            thread,
-            flags,
-            name,
+    /// Stops the threaded handler, if present.
+    pub(super) fn stop_thread(&self) {
+        if let Some(thread) = &self.thread {
+            thread.stop();
         }
+    }
+
+    /// Waits for the threaded handler task to exit, if present.
+    pub(super) fn wait_thread_stopped(
+        &self,
+        operation: &'static str,
+    ) -> Result<(), kpoll::PollRegisterError> {
+        if let Some(thread) = &self.thread {
+            thread.wait_stopped(operation)?;
+        }
+        Ok(())
     }
 
     #[cfg(unittest)]
@@ -167,20 +177,22 @@ pub(super) enum IrqActionReturn {
     Unhandled,
     /// The primary handler claimed the interrupt.
     Handled { sources: u8 },
-    /// Future request to wake a threaded IRQ handler.
-    ///
-    /// This variant is inert until a later threaded-IRQ milestone creates a
-    /// real thread slot and scheduler handoff.
-    #[allow(dead_code)]
+    /// The primary handler claimed the interrupt and requested thread wakeup.
     WakeThread { sources: u8 },
 }
 
 impl IrqActionReturn {
     /// Classifies the current public handler return value.
-    pub(super) const fn from_event(event: IrqEvent) -> Self {
+    pub(super) const fn from_event(event: IrqEvent, has_thread: bool) -> Self {
         if event.handled() {
-            Self::Handled {
-                sources: event.sources(),
+            if has_thread {
+                Self::WakeThread {
+                    sources: event.sources(),
+                }
+            } else {
+                Self::Handled {
+                    sources: event.sources(),
+                }
             }
         } else {
             Self::Unhandled
@@ -195,11 +207,6 @@ impl IrqActionReturn {
             Self::Handled { sources } | Self::WakeThread { sources } => sources,
         }
     }
-
-    /// Returns whether this outcome claimed the interrupt.
-    pub(super) const fn handled(self) -> bool {
-        !matches!(self, Self::Unhandled)
-    }
 }
 
 #[cfg(unittest)]
@@ -210,7 +217,7 @@ mod tests {
     use unittest::def_test;
 
     use super::{IrqAction, IrqActionFlags, IrqActionId, IrqActionReturn, IrqActionToken};
-    use crate::{IrqEvent, Virq};
+    use crate::{IrqEvent, Virq, runtime::thread::IrqThreadSlot};
 
     fn handled_handler(_irq: Virq) -> IrqEvent {
         IrqEvent::HANDLED
@@ -224,7 +231,7 @@ mod tests {
         assert_eq!(action.token(), IrqActionToken::new(0));
         assert_eq!(action.flags(), IrqActionFlags::empty());
         assert_eq!(action.name(), None);
-        assert!(action.is_currently_dispatchable());
+        assert!(action.thread_slot().is_none());
     }
 
     #[def_test]
@@ -235,45 +242,41 @@ mod tests {
         assert_eq!(action.token(), token);
         assert_eq!(action.flags(), IrqActionFlags::SHARED);
         assert!(action.is_shared());
-        assert!(action.is_currently_dispatchable());
+        assert!(action.thread_slot().is_none());
     }
 
     #[def_test]
-    fn test_irq_action_thread_slot_is_future_only() {
-        let action = IrqAction::test_new(
-            Arc::new(handled_handler),
-            Some(super::IrqThreadSlot),
-            IrqActionFlags::NO_THREAD,
-            Some("future"),
-        );
+    fn test_irq_action_threaded_construction_has_thread_slot() {
+        let thread = IrqThreadSlot::test_new(0x55, Arc::new(handled_handler));
+        let action = IrqAction::threaded(Arc::new(handled_handler), thread, Some("future"));
 
         assert_eq!(action.id(), IrqActionId::REGULAR);
-        assert_eq!(action.flags(), IrqActionFlags::NO_THREAD);
+        assert_eq!(action.flags(), IrqActionFlags::ONESHOT);
         assert_eq!(action.name(), Some("future"));
-        assert!(!action.is_currently_dispatchable());
+        assert!(action.thread_slot().is_some());
     }
 
     #[def_test]
     fn test_irq_action_return_maps_public_events() {
         assert_eq!(
-            IrqActionReturn::from_event(IrqEvent::HANDLED),
+            IrqActionReturn::from_event(IrqEvent::HANDLED, false),
             IrqActionReturn::Handled { sources: 0 }
         );
         assert_eq!(
-            IrqActionReturn::from_event(IrqEvent::from_sources(0b1010_0001)),
+            IrqActionReturn::from_event(IrqEvent::from_sources(0b1010_0001), false),
             IrqActionReturn::Handled {
                 sources: 0b1010_0001
             }
         );
         assert_eq!(
-            IrqActionReturn::from_event(IrqEvent::NOT_HANDLED),
+            IrqActionReturn::from_event(IrqEvent::NOT_HANDLED, false),
             IrqActionReturn::Unhandled
         );
     }
 
     #[def_test]
     fn test_not_handled_is_not_wake_thread() {
-        let action_return = IrqActionReturn::from_event(IrqEvent::NOT_HANDLED);
+        let action_return = IrqActionReturn::from_event(IrqEvent::NOT_HANDLED, true);
 
         assert!(!matches!(action_return, IrqActionReturn::WakeThread { .. }));
     }

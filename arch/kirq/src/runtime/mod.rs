@@ -11,3 +11,4 @@ pub(crate) mod nmi;
 pub(crate) mod notify;
 pub(crate) mod state;
 pub(crate) mod sync_wait;
+pub(crate) mod thread;

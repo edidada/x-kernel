@@ -6,7 +6,7 @@
 
 use kpoll::PollSet;
 
-use crate::{IrqEvent, platform::PendingIrq, state::IRQ_STATE};
+use crate::{IrqEvent, action::IrqActionReturn, platform::PendingIrq, state::IRQ_STATE};
 
 /// Dispatches regular IRQ actions and returns the resolved logical IRQ.
 ///
@@ -50,13 +50,20 @@ pub(super) fn dispatch_actions(pending: &PendingIrq) -> Option<crate::Virq> {
 
     let mut merged_event = IrqEvent::NOT_HANDLED;
     for action in snapshot.actions.into_iter().flatten() {
-        if action.is_currently_dispatchable() {
-            let action_return = action.run_primary(virq);
-            if action_return.handled() {
-                merged_event.merge(IrqEvent::from_sources(action_return.sources()));
+        let action_return = action.run_primary(virq);
+        match action_return {
+            IrqActionReturn::Unhandled => {}
+            IrqActionReturn::Handled { sources } => {
+                merged_event.merge(IrqEvent::from_sources(sources));
             }
-        } else {
-            warn!("IRQ {virq} action has unsupported threaded state");
+            IrqActionReturn::WakeThread { sources } => {
+                merged_event.merge(IrqEvent::from_sources(sources));
+                if let Some(thread) = action.thread_slot() {
+                    thread.wake(sources);
+                } else {
+                    warn!("IRQ {virq} action requested a thread without a thread slot");
+                }
+            }
         }
     }
     if merged_event.handled() {

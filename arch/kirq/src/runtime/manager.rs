@@ -6,7 +6,7 @@
 
 use kspin::SpinNoIrq;
 
-use super::sync_wait::IrqSyncWaitIf;
+use super::{sync_wait::IrqSyncWaitIf, thread::IrqThreadSlot};
 use crate::{
     Hwirq, IrqDesc, IrqDescError, IrqDomainId, IrqSpec, Virq,
     action::IrqAction,
@@ -34,6 +34,7 @@ pub use crate::{
     platform::{
         DispatchedIrq, Handler, IntrManagerIf, PendingIrq, TargetCpu, notify_cpu, set_prio,
     },
+    runtime::thread::IrqThreadTaskIf,
     state::DYNAMIC_VIRQ_BASE,
 };
 
@@ -256,7 +257,7 @@ pub fn try_synchronize_irq(spec: impl Into<IrqSpec>) -> Result<bool, IrqDescErro
         state.lookup_virq(spec.into())
     };
     if let Some(virq) = virq {
-        wait_for_virq_in_flight(virq, "synchronize_irq")?;
+        wait_for_virq_idle(virq, "synchronize_irq")?;
         return Ok(true);
     }
     Ok(false)
@@ -287,6 +288,27 @@ fn wait_for_virq_in_flight(virq: Virq, operation: &'static str) -> Result<(), Ir
         IrqSyncWaitIf::wait_for_completion(&completion)
             .map_err(|error| IrqDescError::SyncWaitFailed { operation, error })?;
     }
+}
+
+fn wait_for_virq_threads(virq: Virq, operation: &'static str) -> Result<(), IrqDescError> {
+    let thread_slots = {
+        let state = IRQ_STATE.lock();
+        let Some(entry) = state.descs.get(&virq) else {
+            return Ok(());
+        };
+        entry.thread_slots()
+    };
+    for thread in thread_slots.into_iter().flatten() {
+        thread
+            .wait_idle(operation)
+            .map_err(|error| IrqDescError::SyncWaitFailed { operation, error })?;
+    }
+    Ok(())
+}
+
+fn wait_for_virq_idle(virq: Virq, operation: &'static str) -> Result<(), IrqDescError> {
+    wait_for_virq_in_flight(virq, operation)?;
+    wait_for_virq_threads(virq, operation)
 }
 
 #[cfg(unittest)]
@@ -384,6 +406,114 @@ pub fn try_register_with_options(
     drop(state);
     apply_platform_plan(plan);
     Ok(true)
+}
+
+/// Register an IRQ with a hardirq primary handler and a dedicated threaded handler.
+///
+/// The primary handler still runs in hardirq context and must not sleep. If it
+/// claims the interrupt by returning [`IrqEvent::HANDLED`] or
+/// [`IrqEvent::from_sources`], `kirq` wakes the dedicated IRQ thread. The
+/// threaded handler runs in task context and may use sleepable primitives.
+///
+/// This first threaded-IRQ API installs a non-shared regular action. Shared
+/// threaded IRQs and explicit oneshot mask/unmask policy are left to a later
+/// extension.
+pub fn register_threaded(
+    spec: impl Into<IrqSpec>,
+    primary: Handler,
+    thread: Handler,
+    name: Option<&'static str>,
+) -> bool {
+    match try_register_threaded(spec, primary, thread, name) {
+        Ok(registered) => registered,
+        Err(err) => {
+            warn!("register threaded IRQ handler failed: {err:?}");
+            false
+        }
+    }
+}
+
+/// Try to register a regular threaded IRQ action with default auto-enable behavior.
+pub fn try_register_threaded(
+    spec: impl Into<IrqSpec>,
+    primary: Handler,
+    thread: Handler,
+    name: Option<&'static str>,
+) -> Result<bool, IrqDescError> {
+    try_register_threaded_with_options(
+        spec,
+        primary,
+        thread,
+        name,
+        IrqRegisterOptions::auto_enable(),
+    )
+}
+
+/// Try to register a regular threaded IRQ action with explicit lifecycle options.
+pub fn try_register_threaded_with_options(
+    spec: impl Into<IrqSpec>,
+    primary: Handler,
+    thread: Handler,
+    name: Option<&'static str>,
+    options: IrqRegisterOptions,
+) -> Result<bool, IrqDescError> {
+    let spec = spec.into();
+    let virq = {
+        let _control_guard = IRQ_CONTROL_LOCK.lock();
+        let mut state = IRQ_STATE.lock();
+        let Some((_desc, virq, entry)) =
+            resolve_action_install_entry(&mut state, spec, "register threaded handler")?
+        else {
+            return Ok(false);
+        };
+        if entry.has_actions() {
+            warn!("register threaded handler for IRQ {virq} failed");
+            return Ok(false);
+        }
+        virq
+    };
+    let Some(thread_slot) = IrqThreadSlot::spawn(virq, thread, name) else {
+        return Err(IrqDescError::ThreadUnavailable { virq });
+    };
+    let mut unpublished_thread = Some(thread_slot);
+    let plan = {
+        let _control_guard = IRQ_CONTROL_LOCK.lock();
+        let mut state = IRQ_STATE.lock();
+        let entry = state
+            .descs
+            .get_mut(&virq)
+            .expect("descriptor state must exist after threaded IRQ resolution");
+        if entry.has_actions() || entry.is_teardown_in_progress() {
+            None
+        } else {
+            let thread_slot = unpublished_thread
+                .take()
+                .expect("thread slot must be unpublished before action install");
+            let installed =
+                entry.install_regular_action(IrqAction::threaded(primary, thread_slot, name));
+            debug_assert!(installed, "threaded action install was prevalidated");
+            Some(if options.should_auto_enable() {
+                entry.prepare_auto_enable()
+            } else {
+                entry.prepare_register_disabled()
+            })
+        }
+    };
+    let Some(plan) = plan else {
+        if let Some(thread) = unpublished_thread.as_ref() {
+            stop_unpublished_thread(thread);
+        }
+        return Ok(false);
+    };
+    apply_platform_plan(plan);
+    Ok(true)
+}
+
+fn stop_unpublished_thread(thread: &IrqThreadSlot) {
+    thread.stop();
+    if let Err(error) = thread.wait_stopped("register_threaded") {
+        warn!("threaded IRQ registration cleanup could not wait for task exit: {error:?}");
+    }
 }
 
 /// Register one shared IRQ action and return its removal token.
@@ -619,6 +749,12 @@ fn try_free_irq_inner(
     if let Err(err) = wait_for_virq_in_flight(virq, "free_irq") {
         panic!("free_irq for IRQ {virq} failed to synchronize after action removal: {err:?}");
     }
+    if let Some(action) = &removed_action {
+        action.stop_thread();
+        if let Err(err) = action.wait_thread_stopped("free_irq") {
+            panic!("free_irq for IRQ {virq} failed to stop threaded handler: {err:?}");
+        }
+    }
     finish_irq_teardown(virq);
 
     Ok(removed_action.map(IrqAction::into_primary))
@@ -743,13 +879,13 @@ pub mod tests_irq {
         DYNAMIC_VIRQ_BASE, IRQ_STATE, IrqDesc, IrqDescError, IrqDomainId, IrqStateDesc,
         WAIT_FOR_IN_FLIGHT_HOOK, dispatch_actions, run_claimed_irq_tail, try_disable_irq,
         try_disable_irq_nosync, try_enable, try_enable_irq, try_free_irq, try_free_irq_action,
-        try_map, try_register, try_register_disabled, try_register_shared, try_synchronize_irq,
-        unregister,
+        try_map, try_register, try_register_disabled, try_register_shared, try_register_threaded,
+        try_synchronize_irq, unregister,
     };
     use crate::{
         GIC_ROOT_DOMAIN, IrqController, IrqEvent, IrqFlags, IrqLifecycleHooks, IrqRef, IrqSource,
         IrqTrigger, MSI_DOMAIN, PendingIrq,
-        action::{IrqAction, IrqActionFlags, IrqThreadSlot},
+        action::IrqAction,
         clear_irq_lifecycle_hooks,
         lifecycle::IrqLifecycleGuard,
         register_irq_lifecycle_hooks, register_irq_source_waker, register_irq_waker,
@@ -784,6 +920,10 @@ pub mod tests_irq {
     static IRQ_WAIT_TEST_TARGET: AtomicUsize = AtomicUsize::new(0);
     static IRQ_WAIT_TEST_OBSERVED: AtomicUsize = AtomicUsize::new(0);
     static IRQ_WAIT_TEST_RELEASES: AtomicUsize = AtomicUsize::new(0);
+    static IRQ_THREAD_PRIMARY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static IRQ_THREAD_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static IRQ_THREAD_OBSERVED_IRQ: AtomicUsize = AtomicUsize::new(0);
+    static IRQ_THREAD_IN_HARDIRQ: AtomicUsize = AtomicUsize::new(0);
 
     const IRQ_TAIL_TEST_VECTOR: usize = 0xdead;
     const IRQ_TAIL_TEST_VIRQ: usize = 0x2f02;
@@ -829,6 +969,21 @@ pub mod tests_irq {
             .get(&IRQ_IN_FLIGHT_TEST_VIRQ)
             .map_or(0, IrqStateDesc::in_flight_for_tests);
         IRQ_IN_FLIGHT_OBSERVED.store(in_flight, Ordering::Relaxed);
+        IrqEvent::HANDLED
+    }
+
+    fn test_threaded_primary_handler(_irq: usize) -> IrqEvent {
+        IRQ_THREAD_PRIMARY_CALLS.fetch_add(1, Ordering::Relaxed);
+        IrqEvent::HANDLED
+    }
+
+    fn test_threaded_handler(irq: usize) -> IrqEvent {
+        IRQ_THREAD_CALLS.fetch_add(1, Ordering::Relaxed);
+        IRQ_THREAD_OBSERVED_IRQ.store(irq, Ordering::Relaxed);
+        IRQ_THREAD_IN_HARDIRQ.store(
+            usize::from(crate::context::is_in_hardirq()),
+            Ordering::Relaxed,
+        );
         IrqEvent::HANDLED
     }
 
@@ -2237,38 +2392,31 @@ pub mod tests_irq {
     }
 
     #[def_test(serial)]
-    fn test_unsupported_threaded_action_does_not_run_primary() {
+    fn test_threaded_irq_wakes_thread_and_synchronize_waits() {
         let virq = 0x3103;
-        REGULAR_CALLS.store(0, Ordering::Relaxed);
+        IRQ_THREAD_PRIMARY_CALLS.store(0, Ordering::Relaxed);
+        IRQ_THREAD_CALLS.store(0, Ordering::Relaxed);
+        IRQ_THREAD_OBSERVED_IRQ.store(0, Ordering::Relaxed);
+        IRQ_THREAD_IN_HARDIRQ.store(1, Ordering::Relaxed);
 
-        {
-            let mut state = IRQ_STATE.lock();
-            state.descs.insert(
+        assert!(
+            try_register_threaded(
                 virq,
-                IrqStateDesc::test_with_runtime(
-                    IrqDesc::from_virq(virq),
-                    Some(IrqAction::test_new(
-                        Arc::new(test_handler),
-                        Some(IrqThreadSlot),
-                        IrqActionFlags::NO_THREAD,
-                        Some("future-threaded"),
-                    )),
-                ),
-            );
-        }
+                Arc::new(test_threaded_primary_handler),
+                Arc::new(test_threaded_handler),
+                Some("irq-test-thread")
+            )
+            .unwrap()
+        );
 
         let pending = PendingIrq::new(IrqRef::Virq(virq), virq);
         dispatch_actions(&pending);
+        assert!(try_synchronize_irq(virq).unwrap());
 
-        assert_eq!(REGULAR_CALLS.load(Ordering::Relaxed), 0);
-        assert!(
-            IRQ_STATE
-                .lock()
-                .descs
-                .get(&virq)
-                .expect("descriptor must remain")
-                .has_actions()
-        );
+        assert_eq!(IRQ_THREAD_PRIMARY_CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(IRQ_THREAD_CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(IRQ_THREAD_OBSERVED_IRQ.load(Ordering::Relaxed), virq);
+        assert_eq!(IRQ_THREAD_IN_HARDIRQ.load(Ordering::Relaxed), 0);
         assert!(unregister(virq).is_some());
     }
 
