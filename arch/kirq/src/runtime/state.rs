@@ -582,6 +582,7 @@ impl IrqStateDesc {
         inner.runtime.prepare_oneshot_unmask(desc)
     }
 
+    #[cfg(unittest)]
     pub(super) fn begin_dispatch(&self) {
         self.inner.lock().runtime.begin_dispatch();
     }

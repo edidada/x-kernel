@@ -15,7 +15,7 @@
 
 不同内核对同一类硬件资源（映射 MMIO、注册中断、分配 DMA）的操作接口各异。
 驱动代码如果直接调用内核 API，移植时需要逐函数修改。本模块将资源的发现与使用
-分离：驱动只描述"需要什么"，由 host kernel 通过 [`ResourceProvider`] trait
+分离：驱动只描述"需要什么"，由 host kernel 通过 MMIO / IRQ / DMA provider traits
 提供"怎么给"，从而实现驱动在不同内核间的可移植性。
 
 ## 范围
@@ -37,8 +37,8 @@ drivers/device-res/
 ```
                     ┌─────────────────────────────────────────────┐
                     │             Host Kernel                      │
-                    │  implements ResourceProvider trait           │
-                    │  calls set_provider() during early init     │
+                    │  implements provider traits                  │
+                    │  calls set_*_provider() during early init   │
                     └───────────────┬─────────────────────────────┘
                                     │
             ┌───────────────────────┼───────────────────────┐
@@ -54,7 +54,7 @@ drivers/device-res/
             │                       │                       │
      ┌─────────────────────────────────────────────────────────────┐
      │              devm_* helpers (device-managed)                │
-     │  devm_iomap / devm_request_irq / devm_alloc_coherent       │
+     │  devm_iomap / devm_request_irq* / devm_alloc_coherent      │
      │  register cleanup via DeviceResource trait                 │
      └─────────────────────────────────────────────────────────────┘
                         ^
@@ -72,7 +72,7 @@ drivers/device-res/
 | 组件 | 职责 |
 |------|------|
 | `ResourceDesc` / `ResourceSet` | 描述单个设备的硬件资源（MMIO、I/O 端口、中断、DMA） |
-| `ResourceProvider` trait | host kernel 实现的资源操作后端（map/unmap、request/release IRQ、alloc/free DMA、alloc/free MSI-X） |
+| `MmioOp` / `IrqOp` / `DmaOp` traits | host kernel 实现的资源操作后端（map/unmap、request/release IRQ、alloc/free DMA、alloc/free MSI-X） |
 | `Io` | MMIO 映射的 RAII handle，提供带 acquire/release fence 的寄存器读写方法 |
 | `Irq` | 中断注册的 RAII handle，drop 时自动释放 |
 | `DmaCoherent` | 一致性 DMA 缓冲区的 RAII handle，drop 时自动释放 |
@@ -81,15 +81,16 @@ drivers/device-res/
 
 ### 全局状态
 
-提供者通过 `SpinNoIrq<Option<&'static dyn ResourceProvider>>` 静态存储，
-在内核早期初始化时通过 `set_provider()` 安装一次。所有资源获取操作
-通过 `provider()` / `try_provider()` 访问该全局实例。
+提供者通过按能力拆分的 `SpinNoIrq<Option<&'static dyn ...>>` 静态存储，
+在内核早期初始化时通过 `set_*_provider()` 安装一次。所有资源获取操作
+通过 `mmio_provider()` / `dma_provider()` / `irq_provider()` 及对应的
+`try_*_provider()` 访问这些全局实例。
 
 ## 调用约束 / 执行上下文
 
 - **可在早期启动阶段调用**：模块不依赖调度器或进程线程上下文，
   仅使用自旋锁保护全局提供者。
-- **不可在中断上下文中调用**：`ResourceProvider` 方法文档声明运行在
+- **不可在中断上下文中调用**：provider trait 方法文档声明运行在
   正常（非中断）上下文。MMIO 读写方法本身可以在任意上下文调用，
   但资源获取/释放（`map`、`request`、`alloc` 及对应的 drop）不应
   在中断上下文中执行。
@@ -105,7 +106,7 @@ drivers/device-res/
 ```
 Io::map(region, name)
   │
-  ├─ provider()
+  ├─ mmio_provider()
   │    └─ lock(PROVIDER) → ok_or(NoProvider)
   │
   ├─ provider.map_mmio(region, name)?
@@ -120,14 +121,14 @@ Io::map(region, name)
 Io::drop()
   │
   ├─ mapping.take()
-  ├─ try_provider()
+  ├─ try_mmio_provider()
   │    └─ lock(PROVIDER) → Option
   │
   └─ if both Some:
        provider.unmap_mmio(mapping)
 ```
 
-在 drop 中使用 `try_provider()` 而非 `provider()`：如果提供者已被卸载
+在 drop 中使用对应的 `try_*_provider()` 而非强制获取 provider：如果提供者已被卸载
 或系统正在关闭，静默跳过释放而非 panic。
 
 ### 设备托管资源（以 `devm_iomap` 为例）
@@ -158,12 +159,12 @@ devm_iomap(device, region, name)
 
 ### 为什么用 trait 对象而非泛型
 
-`ResourceProvider` 以 `&'static dyn ResourceProvider` 全局存储，
+provider 以 `&'static dyn MmioOp` / `IrqOp` / `DmaOp` 全局存储，
 而非泛型参数。原因：
 
 - 全局静态存储只能存储具体类型，使用 `dyn` 避免为每个调用者传递泛型参数。
 - 系统中只有一个提供者实例，泛型参数化没有收益。
-- `SpinNoIrq<Option<&'static dyn ResourceProvider>>` 是已知模式，
+- `SpinNoIrq<Option<&'static dyn ...>>` 是已知模式，
   运行时开销可接受。
 
 ### 为什么 `devm_*` 返回裸指针而非 RAII handle
@@ -185,8 +186,8 @@ volatile 访问，但不提供 CPU 侧的内存序保证。额外的 `fence(Acqu
 
 ### 为什么 drop 用 `try_provider` 而非 `provider`
 
-如果系统关闭顺序导致提供者先于 RAII handle 被卸载，`provider()` 会
-返回 `Err(NoProvider)` 并在 `drop` 中 panic。`try_provider()` 返回
+如果系统关闭顺序导致提供者先于 RAII handle 被卸载，强制获取 provider 会
+返回 `Err(NoProvider)` 并在 `drop` 中 panic。`try_*_provider()` 返回
 `Option`，允许 drop 静默跳过——这在关闭路径中更安全。
 
 ## Drop / 资源释放
@@ -197,7 +198,7 @@ volatile 访问，但不提供 CPU 侧的内存序保证。额外的 `fence(Acqu
 | `Irq` | 如果 `armed` 且 provider 为 `Some`，调用 `provider.release_irq(resource, token)` |
 | `DmaCoherent` | 如果 allocation 和 provider 均为 `Some`，调用 `provider.free_coherent(allocation)` |
 
-所有 drop 路径使用 `try_provider()` 避免在系统关闭时 panic。
+所有 drop 路径使用对应的 `try_*_provider()` 避免在系统关闭时 panic。
 `Irq` 使用 `armed` 标志防止 `request_irq` 失败后 drop 时误调用 `release_irq`，
 并保存 provider 返回的 token，使共享 IRQ 释放时只移除当前注册的 handler。
 
@@ -215,5 +216,5 @@ volatile 访问，但不提供 CPU 侧的内存序保证。额外的 `fence(Acqu
 
 `device-res` 不暴露 APIC id、CPU vector 或 irqchip-private allocation cookie。
 这些属于 host IRQ core 和具体 backend 的内部状态。x-kernel 中该 provider 由
-`kdriver::resource` 实现，内部转到 `kirq::alloc_msix()`；`device-res` 本身仍保持
+`device-res-xkernel` 实现，内部转到 `kirq::alloc_msix()`；`device-res` 本身仍保持
 OS-neutral，不依赖 `kirq`。

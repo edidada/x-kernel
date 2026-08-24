@@ -42,15 +42,19 @@ pub use pci::set_pci_config_space;
 /// These re-exports constitute the stable interface for:
 /// - bus management ([`BusManager`], [`default_bus_manager`])
 /// - device lifecycle ([`DeviceManager`], [`device_manager`], [`discover_unified`])
-/// - resource management ([`devm_iomap`], [`devm_request_irq`], [`devm_alloc_coherent`],
-///   [`install_resource_provider`])
+/// - resource management ([`devm_iomap`], [`devm_request_irq`],
+///   [`devm_request_threaded_irq`], [`devm_request_threaded_irq_default`],
+///   [`devm_alloc_coherent`], [`install_resource_provider`])
 /// - ownership introspection ([`OwnershipSummary`], [`BusOwnershipSummary`],
 ///   [`DriverOwnershipSummary`])
 pub use self::{
     bus::manager::{BusManager, default_bus_manager},
     driver_registry::{BusOwnershipSummary, DriverOwnershipSummary, OwnershipSummary},
     manager::{DeviceManager, device_manager, discover_unified},
-    resource::{devm_alloc_coherent, devm_iomap, devm_request_irq, install_resource_provider},
+    resource::{
+        devm_alloc_coherent, devm_iomap, devm_request_irq, devm_request_threaded_irq,
+        devm_request_threaded_irq_default, install_resource_provider,
+    },
 };
 
 #[cfg(feature = "virtio")]

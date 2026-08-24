@@ -6,6 +6,7 @@
 
 use alloc::sync::Arc;
 
+#[cfg(unittest)]
 use kspin::SpinNoIrq;
 
 use super::{sync_wait::IrqSyncWaitIf, thread::IrqThreadSlot};

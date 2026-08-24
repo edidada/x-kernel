@@ -31,7 +31,7 @@ kirq
 - lifecycle hook 和 deferred executor 都只由一个明确 owner 安装；当前 deferred
   executor owner 是 softirq。
 - `device_res` / devres 是驱动框架适配层，不能成为 `kirq` 的依赖。驱动资源到
-  kernel IRQ core 的转换由 `kdriver::resource` 负责。
+  kernel IRQ core 的转换由 `device-res-xkernel` 负责。
 - `IrqAction`、`IrqDescRuntimeState` 和 `IrqActionSnapshot` 是 `kirq` 内部状态
   边界。驱动、devres 和 irqchip backend 不能直接复用或修改这些结构。
 - `kirq::notify` 是当前 poll/future IRQ wake 的 owner；原 `irq_notify`

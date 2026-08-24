@@ -425,7 +425,7 @@ teardown 窗口。
 | Forced threading | 未实现 | 不支持 RT-style 把 hardirq-only action 强制线程化 |
 | Nested threaded IRQ | 未实现 | 不支持 nested irq thread 模型 |
 | Spurious accounting with thread results | 未实现 | threaded handler 返回值目前被忽略，不参与诊断 |
-| Devres threaded wrapper | 未实现 | `kdriver` 当前只适配 hardirq/shared action，不暴露 threaded IRQ 给 driver |
+| Devres threaded wrapper | 已有 | `device_res` / `kdriver` 暴露 non-shared threaded IRQ 和 default-primary threaded IRQ devres helper |
 | `IRQ_WAKE_THREAD` without thread diagnostic | 已有 | 没有 thread slot 的 action 返回 `WAKE_THREAD` 会进入诊断路径，但不会唤醒线程 |
 
 ### 当前实现需要重点复核的点
@@ -491,7 +491,9 @@ teardown 窗口。
   `register_threaded_default()` 已覆盖 non-shared line，并强制 generic ONESHOT。
 - 后续补齐 irqchip/controller `oneshot-safe` 标记后，可在安全 line 上跳过 generic
   mask/unmask。
-- 在 `kdriver::resource` / devres 适配层暴露 threaded IRQ registration。
+- 在 `device_res` / `device-res-xkernel` / devres 适配层暴露 threaded IRQ registration。
+  当前 `devm_request_threaded_irq()` 对接 `kirq::try_register_threaded()`，
+  `devm_request_threaded_irq_default()` 对接 `kirq::try_register_threaded_default()`。
 
 ### Milestone 3：完整 ONESHOT
 

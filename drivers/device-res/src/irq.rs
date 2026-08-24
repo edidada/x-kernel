@@ -158,16 +158,18 @@ pub type IrqEventSource = u8;
 pub const IRQ_EVENT_SOURCES: usize = 8;
 
 /// Outcome reported by an interrupt handler, augmented with which logical
-/// event sources fired.
+/// event sources fired and whether a threaded handler should run.
 ///
-/// Carries (a) whether the handler claimed the interrupt and (b) a small
-/// bitmap of which logical sources triggered. The interpretation of each bit
-/// is left to the driver. Uses a plain `u8` so the type is `Copy` and
-/// allocation-free — safe to construct and return from interrupt context.
+/// Carries whether the handler claimed the interrupt, a small bitmap of which
+/// logical sources triggered, and a wake-thread bit for threaded IRQ primary
+/// handlers. The interpretation of each source bit is left to the driver. The
+/// value is `Copy` and allocation-free, so it is safe to construct and return
+/// from interrupt context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IrqEvent {
     handled: bool,
     sources: u8,
+    wake_thread: bool,
 }
 
 impl IrqEvent {
@@ -175,11 +177,19 @@ impl IrqEvent {
     pub const HANDLED: Self = Self {
         handled: true,
         sources: 0,
+        wake_thread: false,
     };
     /// The handler did not claim the interrupt (shared-line fallback).
     pub const NOT_HANDLED: Self = Self {
         handled: false,
         sources: 0,
+        wake_thread: false,
+    };
+    /// The handler claimed the interrupt and requests its threaded handler.
+    pub const WAKE_THREAD: Self = Self {
+        handled: true,
+        sources: 0,
+        wake_thread: true,
     };
 
     /// Claim the interrupt with the given source bitmask (bit `i` set ⇒ source
@@ -188,6 +198,16 @@ impl IrqEvent {
         Self {
             handled: true,
             sources,
+            wake_thread: false,
+        }
+    }
+
+    /// Claim the interrupt with source bits and request the threaded handler.
+    pub const fn wake_thread_from_sources(sources: u8) -> Self {
+        Self {
+            handled: true,
+            sources,
+            wake_thread: true,
         }
     }
 
@@ -201,6 +221,11 @@ impl IrqEvent {
         self.sources
     }
 
+    /// Whether this handler requests its threaded IRQ handler.
+    pub const fn wake_thread(&self) -> bool {
+        self.wake_thread
+    }
+
     /// Whether source `src` is reported as fired.
     pub fn has_source(&self, src: IrqEventSource) -> bool {
         src < IRQ_EVENT_SOURCES as u8 && (self.sources & (1 << src)) != 0
@@ -211,6 +236,7 @@ impl IrqEvent {
     pub fn merge(&mut self, other: IrqEvent) {
         self.handled |= other.handled;
         self.sources |= other.sources;
+        self.wake_thread |= other.wake_thread;
     }
 }
 
@@ -240,19 +266,49 @@ where
     }
 }
 
+/// A sleepable device threaded IRQ handler.
+///
+/// Thread handlers run in task context after the primary IRQ handler returns
+/// [`IrqEvent::WAKE_THREAD`] or [`IrqEvent::wake_thread_from_sources`]. They may
+/// use sleepable primitives, but must still obey the owning driver's teardown
+/// protocol because devres release waits for the IRQ thread before freeing the
+/// action.
+pub trait IrqThreadHandler: Send + Sync {
+    /// Service deferred interrupt work in task context.
+    fn handle(&self, irq: usize) -> IrqEvent;
+}
+
+impl<F> IrqThreadHandler for F
+where
+    F: Fn(usize) -> IrqEvent + Send + Sync,
+{
+    fn handle(&self, irq: usize) -> IrqEvent {
+        self(irq)
+    }
+}
+
 /// Provider-owned identity for one registered interrupt handler.
+///
+/// Shared hardirq registrations are released by the provider-local action id.
+/// Non-shared regular registrations, including current threaded IRQ requests,
+/// own the whole IRQ action and are released without a per-action id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IrqHandlerToken(usize);
+pub enum IrqHandlerToken {
+    /// One handler within a shared IRQ action list.
+    SharedAction(usize),
+    /// The sole regular action installed on an IRQ line.
+    RegularAction,
+}
 
 impl IrqHandlerToken {
-    /// Create a token from a provider-local numeric id.
-    pub const fn new(id: usize) -> Self {
-        Self(id)
+    /// Create a token for one shared IRQ action.
+    pub const fn shared_action(id: usize) -> Self {
+        Self::SharedAction(id)
     }
 
-    /// Return the provider-local numeric id.
-    pub const fn id(self) -> usize {
-        self.0
+    /// Create a token for a non-shared regular IRQ action.
+    pub const fn regular_action() -> Self {
+        Self::RegularAction
     }
 }
 
@@ -270,6 +326,39 @@ pub trait IrqOp: Sync {
         irq: IrqResource,
         handler: Arc<dyn IrqHandler>,
     ) -> ResResult<IrqHandlerToken>;
+
+    /// Register a primary interrupt handler and a sleepable threaded handler.
+    ///
+    /// The primary handler still runs in interrupt context and should return
+    /// [`IrqEvent::WAKE_THREAD`] or [`IrqEvent::wake_thread_from_sources`] when
+    /// the threaded handler should run. Providers that do not support threaded
+    /// IRQs return [`ResError::Unsupported`].
+    fn request_threaded_irq(
+        &self,
+        irq: IrqResource,
+        primary: Arc<dyn IrqHandler>,
+        thread: Arc<dyn IrqThreadHandler>,
+        name: Option<&'static str>,
+    ) -> ResResult<IrqHandlerToken> {
+        let _ = (irq, primary, thread, name);
+        Err(ResError::Unsupported)
+    }
+
+    /// Register a sleepable threaded handler with the provider's default
+    /// primary wake handler.
+    ///
+    /// This is the common level-triggered device path: the provider is expected
+    /// to apply its safe oneshot policy so the line remains masked until the
+    /// threaded handler reaches idle.
+    fn request_threaded_irq_default(
+        &self,
+        irq: IrqResource,
+        thread: Arc<dyn IrqThreadHandler>,
+        name: Option<&'static str>,
+    ) -> ResResult<IrqHandlerToken> {
+        let _ = (irq, thread, name);
+        Err(ResError::Unsupported)
+    }
 
     /// Release an interrupt handler previously registered for `irq`.
     fn release_irq(&self, irq: IrqResource, token: IrqHandlerToken);
@@ -316,6 +405,36 @@ impl Irq {
     /// Register `handler` for the interrupt described by `resource`.
     pub fn request(resource: IrqResource, handler: Arc<dyn IrqHandler>) -> ResResult<Self> {
         let token = irq_provider()?.request_irq(resource, handler)?;
+        Ok(Self {
+            resource,
+            token,
+            armed: true,
+        })
+    }
+
+    /// Register primary and threaded handlers for the interrupt resource.
+    pub fn request_threaded(
+        resource: IrqResource,
+        primary: Arc<dyn IrqHandler>,
+        thread: Arc<dyn IrqThreadHandler>,
+        name: Option<&'static str>,
+    ) -> ResResult<Self> {
+        let token = irq_provider()?.request_threaded_irq(resource, primary, thread, name)?;
+        Ok(Self {
+            resource,
+            token,
+            armed: true,
+        })
+    }
+
+    /// Register a threaded handler with the provider's default primary wake
+    /// handler.
+    pub fn request_threaded_default(
+        resource: IrqResource,
+        thread: Arc<dyn IrqThreadHandler>,
+        name: Option<&'static str>,
+    ) -> ResResult<Self> {
+        let token = irq_provider()?.request_threaded_irq_default(resource, thread, name)?;
         Ok(Self {
             resource,
             token,
