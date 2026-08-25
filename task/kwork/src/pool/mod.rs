@@ -2,13 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-mod worker;
+mod running;
 mod worker_pool;
 
-pub(crate) use kworkerpool::WorkerState;
-pub use kworkerpool::{WorkerExecutionToken, WorkerId};
-pub use worker::WorkerWakePlan;
-pub(crate) use worker::{RunningWorkSlot, Worker, WorkerSleepTransition};
+pub use kworkerpool::{WorkerExecutionToken, WorkerId, WorkerWakePlan};
+pub(crate) use kworkerpool::{WorkerRecord as Worker, WorkerSleepTransition, WorkerState};
+pub(crate) use running::RunningWorkSlot;
 pub use worker_pool::{
     WORKER_CREATE_RETRY_DELAY, WorkerPoolAttrs, WorkerPoolCpuAffinity, WorkerPoolExecution,
     WorkerPoolSchedulingPolicy,

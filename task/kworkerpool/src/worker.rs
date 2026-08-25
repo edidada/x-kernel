@@ -2,7 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use ktime_types::MonotonicInstant;
+use ktime_types::{MonotonicInstant, TimeSpan};
+
+use crate::WorkerId;
 
 /// Lifecycle state of one worker slot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,6 +87,84 @@ impl CurrentExecution {
     pub(crate) const fn accounting(self) -> ExecutionAccounting {
         self.accounting
     }
+}
+
+/// Compatibility worker execution record for runtimes that keep queue and
+/// provider sidecars outside [`crate::WorkerPool`].
+///
+/// This is a scheduling/accounting record only. It intentionally stores no
+/// workqueue identity, flush barrier, or provider-task handle.
+pub struct WorkerRecord {
+    /// Lifecycle state of the worker slot.
+    pub state: WorkerState,
+    /// Current execution generation.
+    pub generation: WorkerExecutionToken,
+    /// Whether the current execution stopped counting toward concurrency.
+    pub cpu_intensive: bool,
+    /// Monotonic time when the current execution started.
+    pub current_run_started: Option<MonotonicInstant>,
+}
+
+impl WorkerRecord {
+    /// Creates an empty worker record.
+    pub const fn new() -> Self {
+        Self {
+            state: WorkerState::Empty,
+            generation: WorkerExecutionToken::first(),
+            cpu_intensive: false,
+            current_run_started: None,
+        }
+    }
+
+    /// Advances and returns this slot's next execution token.
+    pub fn next_execution_token(&mut self) -> WorkerExecutionToken {
+        self.generation = self.generation.next_generation();
+        self.generation
+    }
+
+    /// Clears per-execution accounting state.
+    pub fn clear_current_execution(&mut self) {
+        self.cpu_intensive = false;
+        self.current_run_started = None;
+    }
+
+    /// Starts per-execution accounting state.
+    pub fn start_current_execution(&mut self, run_started: MonotonicInstant) {
+        self.cpu_intensive = false;
+        self.current_run_started = Some(run_started);
+    }
+
+    /// Returns whether the current execution ran for at least `threshold`.
+    pub fn run_exceeds(&self, threshold: TimeSpan, now: MonotonicInstant) -> bool {
+        self.current_run_started
+            .is_some_and(|started| now.saturating_duration_since(started) >= threshold)
+    }
+}
+
+impl Default for WorkerRecord {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Pool-side accounting result of one worker block notification.
+pub struct WorkerSleepTransition {
+    /// Whether the worker really transitioned Running -> Sleeping.
+    pub did_sleep: bool,
+    /// Wake targets chosen by kick evaluation; empty unless `did_sleep`.
+    pub wake_plan: WorkerWakePlan,
+}
+
+/// Wake targets chosen by worker-pool concurrency accounting.
+///
+/// The plan is computed under the pool lock during kick evaluation but must
+/// only be executed after the pool lock is released.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WorkerWakePlan {
+    /// Idle worker selected to take over queued work, if any.
+    pub worker_to_wake: Option<WorkerId>,
+    /// Whether the pool manager task should be woken to create a worker.
+    pub should_wake_manager: bool,
 }
 
 /// One worker slot owned by a worker pool.

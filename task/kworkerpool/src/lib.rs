@@ -29,4 +29,7 @@ pub use pool::{
     WorkerPoolError,
 };
 pub use queue::{PoolEntry, PoolRunQueue, QueueRemoveResult};
-pub use worker::{ExecutionAccounting, WorkerExecutionToken, WorkerState};
+pub use worker::{
+    ExecutionAccounting, WorkerExecutionToken, WorkerRecord, WorkerSleepTransition, WorkerState,
+    WorkerWakePlan,
+};
