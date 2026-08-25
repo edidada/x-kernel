@@ -8,6 +8,11 @@ This document records implemented controls and current residual risk. It is
 not a generic security overview and `MUST NOT` turn recommendations into
 claims about existing protection.
 
+This is a code-level threat, safety, and reliability analysis, not a complete
+NIST SP 800-30 risk assessment. It does not estimate likelihood or derive an
+organizational risk rating unless the task explicitly requires a defined
+method and sufficient evidence.
+
 ## Evidence to Derive Before Writing
 
 Inspect enough code and callers to identify:
@@ -193,7 +198,8 @@ Use a table when there are multiple threats:
 | ID | Asset or Boundary | Threat and Trigger | Severity | Implemented Control and Evidence | Residual Risk | Recommended Hardening |
 |----|-------------------|--------------------|----------|----------------------------------|---------------|-----------------------|
 
-Use severity consistently:
+Use the following X-Kernel-local impact-severity scale consistently. It
+describes impact only and is not a NIST likelihood-and-impact risk rating:
 
 - `High`: may violate memory safety or isolation, gain privilege, corrupt
   persistent or kernel-wide state, or cause an unrecoverable system failure;
@@ -201,9 +207,9 @@ Use severity consistently:
   information exposure, or incorrect behavior with limited scope;
 - `Low`: has minor, recoverable, or tightly contained effects.
 
-Severity describes impact, not implementation effort. If likelihood is
-materially uncertain, state that uncertainty in residual risk instead of
-inventing a probability.
+Severity does not describe implementation effort. If likelihood is materially
+uncertain, state that uncertainty in residual risk instead of inventing a
+probability.
 
 An implemented control `MUST` name the actual validation, type, lock, bounds
 check, authorization decision, or isolation boundary and its code evidence.
@@ -232,10 +238,11 @@ Use this representation:
 | ID | Failure Mode | Cause | Local Effect | System Effect | Detection | Handling | Severity |
 |----|--------------|-------|--------------|---------------|-----------|----------|----------|
 
-Use severity `1` for fatal or unrecoverable system effects, `2` for serious
-service or integrity effects, `3` for moderate and recoverable effects, and
-`4` for minor effects. Do not calculate a risk-priority number unless the
-project defines occurrence and detection scales with evidence.
+Use the X-Kernel-local FMEA severity scale: `1` for fatal or unrecoverable
+system effects, `2` for serious service or integrity effects, `3` for moderate
+and recoverable effects, and `4` for minor effects. Do not calculate a
+risk-priority number unless the project defines occurrence and detection
+scales with evidence.
 
 ## Failure Handling
 
@@ -302,7 +309,7 @@ Reference symbols or the design document instead of copying their prose.
 ## Reference Basis
 
 - [NIST SP 800-30 Rev. 1](https://csrc.nist.gov/pubs/sp/800/30/r1/final)
-  provides the threat, impact, control, and residual-risk model.
+  informs threat-source, impact, control, and residual-risk terminology.
 - [CWE](https://cwe.mitre.org/) provides shared weakness terminology; use it
   only when a precise mapping improves the analysis.
 - [IEC 60812:2018](https://webstore.iec.ch/en/publication/26359) provides the

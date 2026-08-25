@@ -38,8 +38,9 @@ the task result.
 This standard covers:
 
 - crate-level and module-level rustdoc;
-- rustdoc for publicly reachable modules, types, traits, functions, methods,
-  constants, statics, and macros;
+- rustdoc for every publicly reachable API item, including but not limited to
+  modules, types, traits, functions, methods, associated items, public fields,
+  enum variants, type aliases, constants, statics, macros, and re-exports;
 - crate-local `docs/design.md`;
 - crate-local `docs/security.md`, including threat and failure analysis.
 
@@ -56,8 +57,9 @@ crate- or repository-wide rewrite.
 A crate-level remediation `MUST` cover:
 
 - crate-level rustdoc;
-- the complete hand-written module tree, including relevant configuration-
-  gated modules;
+- the complete hand-written module tree, including modules disabled by the
+  active configuration. Any intentionally excluded architecture or feature
+  variant `MUST` be reported in the task result;
 - every publicly reachable API in the crate;
 - non-obvious internal contracts, unsafe assumptions, and cross-module
   invariants;
@@ -329,7 +331,9 @@ controls, caller-dependent assumptions, proposed hardening, and known gaps
 1. Define the target crates or modules and keep unrelated documentation debt
    outside that boundary.
 2. For a crate-level remediation, recursively enumerate the complete
-   hand-written module tree, including relevant configuration-gated modules.
+   hand-written module tree, including modules disabled by the active
+   configuration, and record any intentionally excluded architecture or
+   feature variant.
 3. Inventory publicly reachable APIs and identify non-obvious internal
    contracts, owned state, invariants, unsafe paths, and cross-crate boundaries
    that affect the target documentation.
@@ -360,6 +364,12 @@ Before declaring the writing task complete:
 - keep future hardening distinct from implemented controls;
 - report material exceptions to `SHOULD` and every exception to `MUST` in the
   task result.
+
+The task result `SHOULD` briefly name the declared target, state whether the
+complete module tree and public API surface were inventoried, list the rustdoc,
+design, and security documentation changed, explain any omitted applicable
+document, and note remaining out-of-scope debt or policy exceptions. Keep this
+summary concise.
 
 This self-check applies only to documentation within the declared target.
 
