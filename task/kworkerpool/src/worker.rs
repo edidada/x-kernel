@@ -41,7 +41,13 @@ pub struct WorkerExecutionToken(usize);
 impl WorkerExecutionToken {
     const FIRST: Self = Self(1);
 
-    fn next(self) -> Self {
+    /// First valid execution token for one worker slot.
+    pub const fn first() -> Self {
+        Self::FIRST
+    }
+
+    /// Returns the next token generation for the same worker slot.
+    pub fn next_generation(self) -> Self {
         Self(self.0.wrapping_add(1).max(1))
     }
 
@@ -101,7 +107,7 @@ impl Worker {
     }
 
     pub(crate) fn next_execution(&mut self, started_at: MonotonicInstant) -> CurrentExecution {
-        self.generation = self.generation.next();
+        self.generation = self.generation.next_generation();
         let current = CurrentExecution::new(self.generation, started_at);
         self.current = Some(current);
         self.idle_since = None;

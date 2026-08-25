@@ -3,52 +3,9 @@
 // See LICENSES for license details.
 
 use ktime_types::{MonotonicInstant, TimeSpan};
+use kworkerpool::{WorkerExecutionToken, WorkerId};
 
 use crate::{BarrierAttachResult, WorkBarrier, WorkBarrierQueue, WorkInstanceId};
-
-/// Opaque worker identity inside one execution pool.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WorkerId(usize);
-
-impl WorkerId {
-    /// Creates a bounded worker identity.
-    pub const fn new(id: usize) -> Self {
-        Self(id)
-    }
-
-    /// Returns the numeric worker id.
-    pub const fn as_usize(self) -> usize {
-        self.0
-    }
-}
-
-/// Pool-local identity of one worker-slot execution.
-///
-/// Linux keeps the currently executing work in `worker->current_work` and uses
-/// worker flags under `pool->lock` to make scheduler callbacks operate on the
-/// live execution. X-Kernel additionally carries this generation through
-/// task-local scheduler context so a stale finish/tick/sleep notification from
-/// an older use of the same worker slot cannot update a later execution.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WorkerExecutionToken(usize);
-
-impl WorkerExecutionToken {
-    const FIRST: Self = Self(1);
-
-    fn next(self) -> Self {
-        Self(self.0.wrapping_add(1).max(1))
-    }
-
-    /// Creates a worker execution token from provider-owned task-local state.
-    pub const fn from_usize(token: usize) -> Self {
-        Self(token)
-    }
-
-    /// Returns the numeric token stored by the task provider.
-    pub const fn as_usize(self) -> usize {
-        self.0
-    }
-}
 
 /// Lifecycle state of one worker record inside a [`super::WorkerPool`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -102,7 +59,7 @@ impl Worker {
     pub(crate) const fn new() -> Self {
         Self {
             state: WorkerState::Empty,
-            generation: WorkerExecutionToken::FIRST,
+            generation: WorkerExecutionToken::first(),
             current_work_key: 0,
             current_instance_id: None,
             cpu_intensive: false,
@@ -125,7 +82,7 @@ impl Worker {
     }
 
     pub(crate) fn next_execution_token(&mut self) -> WorkerExecutionToken {
-        self.generation = self.generation.next();
+        self.generation = self.generation.next_generation();
         self.generation
     }
 
