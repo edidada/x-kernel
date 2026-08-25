@@ -24,11 +24,13 @@ sched_rr = ["preempt"]
 sched_cfs = ["preempt"]
 sched_eevdf = ["preempt"]
 sched_stat = []
+lctrace = ["dep:lctrace"]
 arm-timer-resume-fixup = []
 
 test = ["percpu/sp-naive"]
 
 [dependencies]
+lctrace = { workspace = true, optional = true }
 kerrno.workspace = true
 kidentity.workspace = true
 khal.workspace = true

@@ -20,8 +20,10 @@ tee = [
 ]
 tee_ta_sign = ["tee_task_iface?/tee_ta_sign"]
 ebpf = ["dep:posix-bpf", "posix-bpf/ebpf"]
+lctrace = ["dep:lctrace", "posix-process/lctrace"]
 
 [dependencies]
+lctrace = { workspace = true, optional = true }
 kalloc.workspace = true
 kaddr_layout.workspace = true
 kfd_objects.workspace = true

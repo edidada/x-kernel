@@ -40,6 +40,7 @@ use crate::{
         rearm_local_timer,
     },
     future::{block_on, earliest_deadline},
+    lctrace_points,
     task::{CurrentTask, TaskState},
     tracing_hooks::{fire_context_switch, fire_task_wakeup},
 };
@@ -979,6 +980,7 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
 
             // Fire the task wakeup tracepoint.
             fire_task_wakeup(task_id);
+            lctrace_points::sched_wakeup(task_id, cpu_id.as_usize());
 
             #[cfg(feature = "preempt")]
             if resched && wake_enqueue == WakeEnqueue::Enqueued {
@@ -1816,6 +1818,11 @@ impl RunQueue {
         #[cfg(feature = "sched_stat")]
         sched_stat_inc(&sched_stat_cpu(cpu_id).switch);
         fire_context_switch(prev_task.trace_id(), next_task.trace_id());
+        lctrace_points::sched_switch(
+            prev_task.trace_id(),
+            next_task.trace_id(),
+            prev_task.state() as u8,
+        );
 
         // Claim the task as running, we do this before switching to it
         // such that any running task will have this set.

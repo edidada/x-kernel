@@ -61,6 +61,7 @@ pub(crate) fn run_user_thread_loop(
 
     while !thr.is_exiting() {
         let reason = uctx.run();
+        crate::lctrace_points::user_return(uctx.ip(), uctx.sp(), &reason);
         let mut runtime_action = UserThreadRuntimeAction::Continue;
 
         thr.set_cpu_state(CpuTimeState::Kernel);
@@ -71,6 +72,11 @@ pub(crate) fn run_user_thread_loop(
                 runtime_action = dispatch_syscall(&mut uctx);
             }
             ReturnReason::PageFault(addr, flags) => {
+                crate::lctrace_points::user_page_fault(
+                    addr.as_usize(),
+                    flags.bits() as u64,
+                    uctx.ip(),
+                );
                 let address_space = thr
                     .process()
                     .address_space()
@@ -105,6 +111,7 @@ pub(crate) fn run_user_thread_loop(
             }
             #[allow(unused_labels)]
             ReturnReason::Exception(exc_info) => 'exc: {
+                crate::lctrace_points::user_exception(exc_info.kind() as u64, uctx.ip());
                 let signo = match exc_info.kind() {
                     ExceptionKind::Misaligned => {
                         #[cfg(target_arch = "loongarch64")]
@@ -409,7 +416,12 @@ pub fn check_signals(
         SignalOSAction::Terminate => do_exit(signo as i32, true),
         SignalOSAction::CoreDump => do_exit(128 + signo as i32, true),
         SignalOSAction::Stop => do_exit(1, true),
-        SignalOSAction::Continue | SignalOSAction::Handler => {}
+        SignalOSAction::Continue => {}
+        // The signal manager has already redirected the user context at the
+        // handler, so the current instruction pointer is the handler entry.
+        SignalOSAction::Handler => {
+            crate::lctrace_points::signal_deliver(signo as u32, uctx.ip());
+        }
     }
     true
 }

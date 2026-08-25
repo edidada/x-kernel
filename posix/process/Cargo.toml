@@ -12,8 +12,10 @@ documentation.workspace = true
 [features]
 tee = ["kprocess/tee", "dep:tee_kernel"]
 tipc = ["kprocess/tipc"]
+lctrace = ["dep:lctrace"]
 
 [dependencies]
+lctrace = { workspace = true, optional = true }
 bytemuck = { workspace = true, features = ["derive"] }
 kcred.workspace = true
 kerrno.workspace = true

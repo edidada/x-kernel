@@ -27,8 +27,10 @@ pub fn nmi_handler(vector: usize) -> bool {
 /// not be used as a sleepable task-context entry point.
 #[register_trap_handler(IRQ)]
 pub fn irq_handler(vector: usize) -> bool {
+    super::lctrace_points::irq_entry(vector);
     let guard = kspin::NoPreempt::new();
     let handled = kirq::handle_irq(vector);
+    super::lctrace_points::irq_exit(vector, handled);
 
     // The architecture's EL1 exception guard is still active here. Dropping
     // `NoPreempt` with that marker installed makes ktask reject a pending

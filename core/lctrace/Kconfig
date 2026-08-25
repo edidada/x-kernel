@@ -1,0 +1,37 @@
+menu "LCTrace kernel tracing"
+
+config KFEAT_LCTRACE
+    bool "LCTrace low-overhead kernel tracing"
+    default n
+    help
+      Record kernel events into a fixed-size, lock-free, per-CPU ring buffer
+      so that the recent past can be recovered after a crash. Emitting a
+      record costs one uncontended atomic increment, one counter read and a
+      few relaxed stores; nothing allocates and nothing is formatted until a
+      snapshot is read.
+
+      Snapshots are rendered by reading /proc/lctrace, and the panic handler
+      dumps every ring to the console after the backtrace.
+
+      This is a debug facility and is unrelated to the ftrace-compatible
+      tracepoint subsystem selected by KFEAT_TRACEPOINT. Leave it disabled
+      unless a specific investigation needs it: the probes sit on the
+      scheduler, IRQ and syscall paths, and the rings consume
+      NR_CPUS * LCTRACE_ENTRIES_PER_CPU * 64 bytes of .bss.
+
+config LCTRACE_ENTRIES_PER_CPU
+    usize "LCTrace records retained per CPU"
+    depends on KFEAT_LCTRACE
+    range 64 8192
+    default 512
+    help
+      Number of records each CPU retains before overwriting the oldest.
+
+      Must be a power of two; the kernel fails to build otherwise, because
+      the ring index is computed with a mask rather than a division.
+
+      Each record occupies one 64-byte cache line, so the default of 512
+      costs 32 KiB of .bss per CPU. The buffer lives in .bss and therefore
+      does not enlarge the kernel image on disk.
+
+endmenu

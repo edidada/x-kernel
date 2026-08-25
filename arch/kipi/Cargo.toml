@@ -10,8 +10,10 @@ repository.workspace = true
 
 [features]
 default = []
+lctrace = ["dep:lctrace"]
 
 [dependencies]
+lctrace = { workspace = true, optional = true }
 kiface.workspace = true
 karch = { workspace = true, features = ["smp"] }
 khal = { workspace = true }

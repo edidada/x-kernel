@@ -64,6 +64,10 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
     };
 
     trace!("Syscall {sysno:?}");
+    // Captured before dispatch: `rt_sigreturn` and `execve` replace the whole
+    // user context, so the syscall number register cannot be re-read on exit.
+    let raw_sysno = uctx.sysno();
+    crate::lctrace_points::syscall_entry(raw_sysno, uctx.arg0(), uctx.arg1(), uctx.arg2());
 
     let result = match sysno {
         // fs ctl
@@ -827,7 +831,9 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
 
     debug!("Syscall {sysno} return {result:?}");
 
-    uctx.set_retval(result.unwrap_or_else(|err| -LinuxError::from(err).into_raw() as _) as _);
+    let retval = result.unwrap_or_else(|err| -LinuxError::from(err).into_raw() as _);
+    uctx.set_retval(retval as _);
+    crate::lctrace_points::syscall_exit(raw_sysno, retval);
 
     // rt_sigreturn restores the saved context from before the signal handler ran.
     // If we allow the normal post-syscall signal check to run, it may immediately

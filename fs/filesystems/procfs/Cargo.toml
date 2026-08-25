@@ -16,8 +16,10 @@ lock_stat = ["dep:klockstat", "klockstat/stats"]
 sched_stat = ["ktask/sched_stat"]
 smp = ["ktracing/smp"]
 vmm = ["dep:kvmm"]
+lctrace = ["dep:lctrace"]
 
 [dependencies]
+lctrace = { workspace = true, optional = true }
 kbuild_config.workspace = true
 kvfs.workspace = true
 macros.workspace = true

@@ -88,6 +88,8 @@ pub fn start_secondary_cpus(primary_cpu_id: LogicalCpuId) -> KResult {
 /// It is called from the bootstrapping code in the specific platform crate.
 pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     khal::percpu::init_secondary(logical_cpu_id);
+    #[cfg(feature = "lctrace")]
+    lctrace::init_this_cpu(logical_cpu_id.as_usize());
     kcpu::init_trap();
 
     ENTERED_CPUS.fetch_add(1, Ordering::Release);

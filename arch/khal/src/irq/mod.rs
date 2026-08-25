@@ -8,6 +8,7 @@
 //! contracts live in `kirq`. This module owns only architecture trap-entry
 //! registration.
 
+mod lctrace_points;
 mod manager;
 
 pub use manager::*;

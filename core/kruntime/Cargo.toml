@@ -14,6 +14,7 @@ default = []
 
 smp = ["khal/smp", "ktask/smp", "memspace/smp", "fs_boot?/smp", "ipi"]
 ipi = ["dep:kipi"]
+lctrace = ["dep:lctrace", "ktask/lctrace", "khal/lctrace", "kipi?/lctrace"]
 
 char = ["kdriver/char", "dep:ktty"]
 display = ["kdriver/display", "dep:fbdevice"]
@@ -39,6 +40,7 @@ watchdog_hardlockup = ["watchdog/nmi"]
 pmu = ["khal/pmu", "dep:of"]
 
 [dependencies]
+lctrace = { workspace = true, optional = true }
 kalloc.workspace = true
 ktty = { workspace = true, optional = true }
 backtrace.workspace = true

@@ -297,6 +297,10 @@ pub fn rust_main(arg: usize) -> ! {
     );
     khal::firmware::init(boot_info);
     khal::percpu::init_primary(cpu_id);
+    // Bind this CPU to its trace ring as soon as the per-CPU areas
+    // exist, so probes are live for the rest of boot.
+    #[cfg(feature = "lctrace")]
+    lctrace::init_this_cpu(cpu_id.as_usize());
     kcpu::init_trap();
     khal::mem::init(boot_info);
     kernel_boot::bootln!("kruntime memory regions ready");

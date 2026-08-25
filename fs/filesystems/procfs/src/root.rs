@@ -8,6 +8,19 @@ use kvfs::{DirMaker, DirMapping, NodeType, SimpleDir, SimpleDirOps, SimpleFile, 
 
 use crate::{basic_nodes, device_nodes, irq_nodes, mem_nodes, task_nodes, trace_nodes};
 
+/// Renders an LCTrace snapshot for `/proc/lctrace`.
+///
+/// The counter frequency is supplied here rather than inside `lctrace`, which
+/// deliberately keeps no dependency on the timer subsystem.
+#[cfg(feature = "lctrace")]
+fn lctrace_text() -> kvfs::VfsResult<alloc::string::String> {
+    let mut text = alloc::string::String::new();
+    // Writing into a `String` only fails if the formatter itself fails, which
+    // `lctrace` never does; a partial render is still worth returning.
+    let _ = lctrace::write_snapshot(&mut text, khal::time::freq());
+    Ok(text)
+}
+
 pub fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     let mut root = DirMapping::new();
 
@@ -30,6 +43,8 @@ pub fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         "sched_stat",
         SimpleFile::new_regular(fs.clone(), || Ok(ktask::sched_stats_text())),
     );
+    #[cfg(feature = "lctrace")]
+    root.add("lctrace", SimpleFile::new_regular(fs.clone(), lctrace_text));
     #[cfg(feature = "vmm")]
     root.add(
         "kvmm",

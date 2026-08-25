@@ -34,6 +34,7 @@ extern crate alloc;
 mod run_queue;
 mod api;
 mod irq_wait;
+mod lctrace_points;
 #[cfg(feature = "snapshot")]
 pub mod snapshot;
 mod softirqd;

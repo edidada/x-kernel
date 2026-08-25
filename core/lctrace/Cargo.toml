@@ -1,0 +1,19 @@
+[package]
+name = "lctrace"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+description = "LCTrace low-overhead kernel tracing"
+
+[features]
+default = []
+
+[dependencies]
+kbuild_config.workspace = true
+klogger.workspace = true
+linux_sysno.workspace = true
+percpu.workspace = true

@@ -12,6 +12,7 @@ extern crate alloc;
 extern crate klogger;
 
 mod init_process;
+mod lctrace_points;
 mod runtime;
 pub use init_process::spawn_init_process;
 pub use runtime::{check_signals, do_exit, new_user_task, raise_signal_fatal};

@@ -181,6 +181,14 @@ vsock_tipc_bridge = ["knet/vsock_tipc_bridge", "kruntime/vsock_tipc_bridge"]
 # Pmu
 pmu = ["kruntime/pmu"]
 
+# LCTrace kernel tracing
+lctrace = [
+    "kruntime/lctrace",
+    "ksyscall/lctrace",
+    "dep:procfs",
+    "procfs/lctrace",
+]
+
 # Tracepoint
 tracepoint = ["ktracing/tracepoint"]
 

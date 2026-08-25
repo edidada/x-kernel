@@ -19,6 +19,7 @@ mod arch;
 mod dispatch;
 mod io_mpx;
 mod ipc;
+mod lctrace_points;
 mod sync;
 mod sys;
 mod task;

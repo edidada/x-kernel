@@ -23,8 +23,10 @@ pmu = ["kplat/pmu"]
 tls = ["kcpu/tls"]
 
 irq = []
+lctrace = ["dep:lctrace"]
 
 [dependencies]
+lctrace = { workspace = true, optional = true }
 kalloc = { workspace = true }
 boot_info = { workspace = true }
 firmware_handoff = { workspace = true }

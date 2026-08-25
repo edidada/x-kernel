@@ -30,6 +30,7 @@ use lazyinit::LazyInit;
 
 mod event;
 mod icache;
+mod lctrace_points;
 mod queue;
 pub mod tlb;
 
@@ -145,6 +146,7 @@ pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: LogicalCpuId, callback: T) -> Res
         unsafe { IPI_EVENT_QUEUE.remote_ref_raw(dest_cpu_index) }
             .lock()
             .push(this_cpu_id(), callback.into());
+        lctrace_points::ipi_send(dest_cpu_index, this_cpu_id().as_usize());
         kirq::notify_cpu(IPI_IRQ, IpiTarget::Specific(dest_cpu_index));
     }
 
@@ -203,6 +205,7 @@ pub fn run_on_each_cpu_via_ipi<T: Into<MulticastCallback>>(callback: T) -> Resul
     unsafe { IPI_EVENT_QUEUE.current_ref_mut_raw() }
         .lock()
         .push(current_cpu_id, callback.clone().into_unicast());
+    lctrace_points::ipi_send(current_cpu_id.as_usize(), current_cpu_id.as_usize());
 
     enqueue_broadcast_to_others(current_cpu_id, &callback);
 
@@ -255,6 +258,7 @@ fn enqueue_broadcast_to_others(current_cpu_id: LogicalCpuId, callback: &Multicas
             unsafe { IPI_EVENT_QUEUE.remote_ref_raw(cpu_id.as_usize()) }
                 .lock()
                 .push(current_cpu_id, callback.clone().into_unicast());
+            lctrace_points::ipi_send(cpu_id.as_usize(), current_cpu_id.as_usize());
         }
     });
 }
@@ -277,6 +281,7 @@ pub fn ipi_handler() {
         .pop_one()
     {
         debug!("Received IPI event from CPU {}", src_cpu_id.as_usize());
+        lctrace_points::ipi_handle(src_cpu_id.as_usize());
 
         // use logging instead of silent failure
         callback.call();

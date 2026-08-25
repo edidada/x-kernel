@@ -272,6 +272,7 @@ config KFEAT_DWARF
 
 source "arch/kirq/Kconfig"
 source "task/ktask/Kconfig.diagnostics"
+source "core/lctrace/Kconfig"
 
 endmenu
 

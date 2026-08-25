@@ -2421,6 +2421,7 @@ dependencies = [
  "kspin 0.2.0-dev",
  "ktime_types",
  "lazyinit",
+ "lctrace",
  "linkme",
  "log",
  "memaddr",
@@ -2475,6 +2476,7 @@ dependencies = [
  "kspin 0.2.0-dev",
  "ktime_types",
  "lazyinit",
+ "lctrace",
  "log",
  "memaddr",
  "page_table",
@@ -2813,6 +2815,7 @@ dependencies = [
  "ktime",
  "ktime_types",
  "ktty",
+ "lctrace",
  "memaddr",
  "memspace",
  "of",
@@ -2918,6 +2921,7 @@ dependencies = [
  "ktty",
  "kuaccess",
  "kvfs",
+ "lctrace",
  "linux-raw-sys",
  "linux_sysno",
  "num_enum",
@@ -2958,6 +2962,7 @@ dependencies = [
  "ktime",
  "ktime_types",
  "lazyinit",
+ "lctrace",
  "log",
  "memaddr",
  "percpu",
@@ -3149,6 +3154,16 @@ name = "lazyinit"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "17f03abfebdaaf0fad16790237a0348baf84886d3ade460db13bae59e614a180"
+
+[[package]]
+name = "lctrace"
+version = "0.2.0-dev"
+dependencies = [
+ "kbuild_config",
+ "klogger",
+ "linux_sysno",
+ "percpu",
+]
 
 [[package]]
 name = "libc"
@@ -3876,6 +3891,7 @@ dependencies = [
  "ksync",
  "ktask",
  "kuaccess",
+ "lctrace",
  "linux-raw-sys",
  "linux_sysno",
  "memspace",
@@ -4003,6 +4019,7 @@ dependencies = [
  "ktracing",
  "kvfs",
  "kvmm",
+ "lctrace",
  "macros",
  "memaddr",
  "memspace",

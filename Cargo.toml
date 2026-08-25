@@ -61,6 +61,7 @@ entropy = { path = "util/entropy" }
 
 # Internal: tracing and debugging
 ktracing = { path = "core/ktracing" }
+lctrace = { path = "core/lctrace" }
 kbpf = { path = "core/kbpf" }
 kuaccess = { path = "core/kuaccess" }
 
