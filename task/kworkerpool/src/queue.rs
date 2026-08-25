@@ -45,15 +45,16 @@ impl<O, K, T> PoolEntry<O, K, T> {
 pub enum QueueRemoveResult {
     /// The entry came from the runnable FIFO.
     Runnable,
-    /// The entry came from a deferred owner lane.
+    /// The entry came from the deferred FIFO.
     Deferred,
 }
 
 /// Bounded runnable/deferred queue storage for one worker-pool instance.
 ///
-/// Runnable entries are globally FIFO. Deferred entries are grouped by opaque
-/// owner key and can be mechanically promoted into the runnable FIFO by owner.
-/// Runnable and deferred lanes share one total entry capacity.
+/// Runnable and deferred entries are each stored in a single FIFO, and both
+/// lanes share one total entry capacity. Owner keys are opaque grouping keys
+/// used for mechanical promotion/removal scans; they do not create per-owner
+/// storage.
 pub struct PoolRunQueue<O, K, T, const ENTRY_CAP: usize> {
     runnable: EntryQueue<PoolEntry<O, K, T>, ENTRY_CAP>,
     deferred: EntryQueue<PoolEntry<O, K, T>, ENTRY_CAP>,
@@ -109,7 +110,7 @@ where
         Ok(())
     }
 
-    /// Pushes an entry into its owner's deferred FIFO.
+    /// Pushes an entry into the deferred FIFO.
     pub fn push_deferred(&mut self, entry: PoolEntry<O, K, T>) -> Result<(), PoolEntry<O, K, T>> {
         if self.len == ENTRY_CAP {
             return Err(entry);
@@ -119,7 +120,7 @@ where
         Ok(())
     }
 
-    /// Promotes up to `budget` entries from one owner deferred FIFO.
+    /// Promotes up to `budget` deferred entries for one owner.
     pub fn promote_deferred(&mut self, owner: &O, budget: usize) -> usize {
         let mut promoted = 0;
         while promoted < budget && self.runnable.len() < ENTRY_CAP {
@@ -134,7 +135,7 @@ where
         promoted
     }
 
-    /// Moves all runnable entries for `owner` into that owner's deferred FIFO.
+    /// Moves all runnable entries for `owner` into the deferred FIFO.
     ///
     /// This is a mechanical lane move; caller-owned policy decides when it is
     /// necessary.

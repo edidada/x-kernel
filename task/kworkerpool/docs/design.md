@@ -21,7 +21,7 @@ Each pool instance owns:
 
 - worker lifecycle state and counters,
 - one runnable FIFO queue,
-- deferred queues partitioned by caller-provided owner keys,
+- one deferred FIFO queue with owner-key based promotion/removal scans,
 - pool policy and management request state.
 
 `kworkerpool` does not interpret owner keys. A user such as `kwork` may use an
@@ -41,9 +41,9 @@ Runnable entries are eligible for immediate worker execution and are stored in a
 single FIFO per pool instance.
 
 Deferred entries are submitted to the pool but are not eligible for execution.
-They are grouped by owner. The pool provides bounded storage and mechanical
-promotion from one owner's deferred FIFO into the runnable FIFO. It does not
-know why an entry is deferred or when it should become runnable.
+They are stored in a single FIFO. The pool provides bounded storage and
+mechanical promotion of entries matching one owner into the runnable FIFO. It
+does not know why an entry is deferred or when it should become runnable.
 
 ## Actions
 
