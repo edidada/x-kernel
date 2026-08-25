@@ -5,12 +5,22 @@
 //! Threaded IRQ handler state.
 
 use alloc::{boxed::Box, string::String, sync::Arc};
+#[cfg(unittest)]
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use kpoll::Completion;
 use kspin::SpinNoIrq;
 
 use super::sync_wait::IrqSyncWaitIf;
 use crate::{Virq, platform::Handler};
+
+#[cfg(unittest)]
+static FAIL_NEXT_THREAD_SPAWN: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unittest)]
+pub(super) fn fail_next_spawn_for_tests() {
+    FAIL_NEXT_THREAD_SPAWN.store(true, Ordering::Release);
+}
 
 /// Scheduler bridge used to spawn IRQ handler threads.
 ///
@@ -36,6 +46,7 @@ struct IrqThreadState {
     virq: Virq,
     handler: Handler,
     state: SpinNoIrq<IrqThreadData>,
+    ready: Completion,
     wake: Completion,
     idle: Completion,
     exited: Completion,
@@ -67,6 +78,11 @@ enum IrqThreadNext {
 
 impl IrqThreadSlot {
     pub(super) fn spawn(virq: Virq, handler: Handler, name: Option<&'static str>) -> Option<Self> {
+        #[cfg(unittest)]
+        if FAIL_NEXT_THREAD_SPAWN.swap(false, Ordering::AcqRel) {
+            return None;
+        }
+
         let slot = Self {
             inner: Arc::new(IrqThreadState::new(virq, handler)),
         };
@@ -80,6 +96,11 @@ impl IrqThreadSlot {
                 thread_slot.run_loop();
             }),
         ) {
+            return None;
+        }
+        if slot.wait_ready().is_err() {
+            slot.stop();
+            let _ = slot.wait_stopped("spawn_irq_thread_ready");
             return None;
         }
         Some(slot)
@@ -107,6 +128,10 @@ impl IrqThreadSlot {
         self.inner.stop();
     }
 
+    fn wait_ready(&self) -> Result<(), kpoll::PollRegisterError> {
+        self.inner.wait_ready()
+    }
+
     fn run_loop(&self) {
         self.inner.run_loop();
     }
@@ -127,6 +152,7 @@ impl IrqThreadState {
             virq,
             handler,
             state: SpinNoIrq::new(IrqThreadData::new()),
+            ready: Completion::new(),
             wake: Completion::new(),
             idle,
             exited: Completion::new(),
@@ -183,7 +209,17 @@ impl IrqThreadState {
         })
     }
 
+    fn wait_ready(&self) -> Result<(), kpoll::PollRegisterError> {
+        IrqSyncWaitIf::wait_for_completion(&self.ready).inspect_err(|error| {
+            warn!(
+                "threaded IRQ {} readiness wait failed: {error:?}",
+                self.virq
+            );
+        })
+    }
+
     fn run_loop(&self) {
+        self.ready.complete_all();
         loop {
             match self.next_work() {
                 IrqThreadNext::Run { sources } => {
@@ -230,5 +266,35 @@ impl IrqThreadState {
             super::manager::finalize_oneshot_thread(self.virq);
             self.idle.complete_all();
         }
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+    use crate::IrqEvent;
+
+    static THREAD_SLOT_TEST_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_slot_handler(_irq: Virq) -> IrqEvent {
+        THREAD_SLOT_TEST_CALLS.fetch_add(1, Ordering::Relaxed);
+        IrqEvent::HANDLED
+    }
+
+    #[def_test]
+    fn test_thread_slot_keeps_wake_queued_before_run_loop_is_ready() {
+        THREAD_SLOT_TEST_CALLS.store(0, Ordering::Relaxed);
+        let slot = IrqThreadSlot::test_new(0x5a5a, Arc::new(test_slot_handler));
+
+        slot.wake(0b1010);
+        slot.stop();
+        slot.run_loop();
+
+        assert_eq!(THREAD_SLOT_TEST_CALLS.load(Ordering::Relaxed), 1);
     }
 }

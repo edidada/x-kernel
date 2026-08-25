@@ -289,7 +289,7 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | T-21f | 设备生命周期 work 被强行 leak、提前释放或 wrong-queue cancel | workerqueue API 要求 `&'static Work`，队列只保存裸指针，或 cancel API 依赖调用方传入 owner queue | 多设备/热插拔驱动无法释放 work，或 queued/running callback 访问已释放设备状态 | M4C 使用 refcounted `ScheduledWork`；M4G 使用 dynamic `WorkQueueHandle` 表达 custom queue 生命周期；M4H 为 delayed work 增加 generation gate；pending/running callback 持有 handle clone，enqueue 不分配；pending owner queue 记录在 `ScheduledWork` 状态中，teardown 通过 `cancel_work_sync(work)` / `cancel_delayed_work_sync(work)`、`flush_work(work)` / `flush_delayed_work(work)` 或 `destroy_workqueue(queue)` 收敛生命周期 |
 | T-21g | worker callback 等待同 pool 中不可推进的 work | W1 callback 中 `flush_work(W2)`，且 W2 pending/running 属于同一 bounded execution pool | bounded worker pool 可能被等待关系耗尽，W2 无法完成，形成永久死锁 | `kwork` 在 `WorkState` 中记录 pending/running pool key，在 task-local context 中记录当前 pool key；同 pool pending/running wait 返回 `SelfWait`，等待循环也重查该谓词 |
 | T-22 | oneshot runtime 字段被误当成已实现行为 | 后续代码只改 flag，没有安装 mask protocol | oneshot IRQ 无法屏蔽重入或误解除 mask | review 要求 oneshot mask 和 thread identity 在 `IrqDescRuntimeState` owner 内成组实现 |
-| T-23 | threaded slot 提前保存 task/worker 指针 | 未建立线程生命周期、取消、CPU 亲和和退出同步 | handler return 后唤醒已释放对象，或在 hardirq 中触发 sleepable 路径 | 当前 `IrqThreadSlot` 不携带目标，带 slot 的 action 不会被当前 dispatch 路径同步执行；后续 milestone 必须先定义所有权和 teardown ordering |
+| T-23 | threaded slot 生命周期与 action 发布脱节 | action 发布前 IRQ thread 尚未 ready，或 request 失败后遗留本次创建的 descriptor/mapping | 早期 wake 丢失、handler return 后唤醒未就绪对象，或失败 request 污染 IRQ namespace | `IrqThreadSlot::spawn()` 等待 ready completion 后才允许 action 发布；spawn/unpublished install 失败只回滚本次 request 创建的 descriptor/domain mapping，已有资源保持不变；CPU affinity/priority 仍是后续策略 |
 | T-24 | action snapshot 与 cleanup 分离不完整 | dispatch 多次取锁并依赖跨锁状态 | unregister/free 与 dispatch 交错后调用 stale callback 或保留 stale mapping | `IrqActionSnapshot` 和 `in_flight` 标记在同一个 descriptor-local state lock 临界区内完成，回调只使用快照 |
 | T-25 | stale 平台 enable/disable 操作乱序 | register/enable/disable/unregister 或 threaded ONESHOT finalize 在不同 CPU 上交错，平台操作在 state 锁外执行 | 已释放或已 disable 的 line 被迟到 enable 重新打开 | 同一 line 的控制路径和 threaded ONESHOT mask/unmask 都通过 descriptor-local `IrqStateDesc::control -> state -> platform op` 串行化，不同 line 不共享全局控制锁 |
 | T-26 | 驱动需要清 pending 后再开 IRQ，但 request 立即 enable | 复杂设备 request handler 后尚未初始化 DMA ring/MMIO 状态 | 中断 handler 观察未初始化设备状态 | `try_register_disabled()` 以 disable depth `1` 安装 handler，驱动完成初始化后显式 `try_enable_irq()` |
@@ -422,6 +422,8 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
   自动 delayed retry、完整 Linux concurrent-flusher 接力、CPU hotplug drain 或 rescuer 语义。
 - `IrqThreadSlot` 已绑定 scheduler task、thread wake、`synchronize_irq()` idle wait
   和 `free_irq()` stop/exited wait，但当前只支持 non-shared regular threaded IRQ。
+  action 安装前会等待 thread ready；action 发布前的 spawn 或 install 失败会撤销本次
+  request 新建的 descriptor/domain mapping，预先存在的 IRQ 资源不被删除。
   non-shared ONESHOT line mask/unmask 已由 descriptor runtime 管理，并复用
   descriptor-local `IrqStateDesc::control` 防止 thread finalize 与 disable/free
   控制操作乱序；shared

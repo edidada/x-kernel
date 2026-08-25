@@ -40,23 +40,57 @@ pub(super) const MAX_IRQ_ACTIONS: usize = 4;
 /// snapshot.
 pub(super) struct ResolvedIrqDesc {
     desc: IrqDesc,
+    rollback: IrqResolutionRollback,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct IrqResolutionRollback {
     snapshot_domain_to_publish: Option<IrqDomainId>,
+    inserted_desc: bool,
+    previous_desc: Option<IrqDesc>,
 }
 
 impl ResolvedIrqDesc {
-    const fn new(desc: IrqDesc, snapshot_domain_to_publish: Option<IrqDomainId>) -> Self {
+    const fn new(
+        desc: IrqDesc,
+        snapshot_domain_to_publish: Option<IrqDomainId>,
+        inserted_desc: bool,
+        previous_desc: Option<IrqDesc>,
+    ) -> Self {
         Self {
             desc,
-            snapshot_domain_to_publish,
+            rollback: IrqResolutionRollback {
+                snapshot_domain_to_publish,
+                inserted_desc,
+                previous_desc,
+            },
         }
     }
 
-    const fn snapshot_domain_to_publish(&self) -> Option<IrqDomainId> {
-        self.snapshot_domain_to_publish
+    pub(super) const fn rollback(&self) -> IrqResolutionRollback {
+        self.rollback
+    }
+
+    pub(super) const fn snapshot_domain_to_publish(&self) -> Option<IrqDomainId> {
+        self.rollback.snapshot_domain_to_publish
     }
 
     pub(super) const fn into_desc(self) -> IrqDesc {
         self.desc
+    }
+}
+
+impl IrqResolutionRollback {
+    const fn snapshot_domain_to_publish(self) -> Option<IrqDomainId> {
+        self.snapshot_domain_to_publish
+    }
+
+    const fn inserted_desc(self) -> bool {
+        self.inserted_desc
+    }
+
+    const fn previous_desc(self) -> Option<IrqDesc> {
+        self.previous_desc
     }
 }
 
@@ -759,8 +793,10 @@ impl IrqState {
             (desc.hwirq, None)
         };
         desc = desc.with_virq(virq);
-        let stored_desc = if let Some(existing) = self.descs.get(&virq) {
-            existing.desc().try_merge(desc)?
+        let previous_desc = self.descs.get(&virq).map(|existing| existing.desc());
+        let inserted_desc = previous_desc.is_none();
+        let stored_desc = if let Some(previous_desc) = previous_desc {
+            previous_desc.try_merge(desc)?
         } else {
             desc
         };
@@ -790,6 +826,8 @@ impl IrqState {
         Ok(ResolvedIrqDesc::new(
             stored_desc,
             snapshot_domain_to_publish,
+            inserted_desc,
+            previous_desc,
         ))
     }
 
@@ -799,7 +837,13 @@ impl IrqState {
     ) -> Result<ResolvedIrqDesc, IrqDescError> {
         match spec {
             IrqSpec::PlainVirq(virq) => {
-                Ok(ResolvedIrqDesc::new(self.resolve_plain_virq(virq), None))
+                let previous_desc = self.stored_desc(virq);
+                Ok(ResolvedIrqDesc::new(
+                    self.resolve_plain_virq(virq),
+                    None,
+                    previous_desc.is_none(),
+                    previous_desc,
+                ))
             }
             IrqSpec::Desc(desc) => self.try_resolve_desc(desc),
         }
@@ -875,6 +919,47 @@ impl IrqState {
         self.remove_if_unused_inner(virq, false)
     }
 
+    pub(super) fn remove_unpublished_resolution(
+        &mut self,
+        virq: Virq,
+        rollback: IrqResolutionRollback,
+    ) -> Option<IrqDesc> {
+        let entry = self.descs.get(&virq)?;
+        let desc = entry.desc();
+        if !entry.is_unused() || Arc::strong_count(entry) != 1 {
+            return None;
+        }
+        let mut removed_mapping_domain = None;
+        if let Some(domain) = rollback.snapshot_domain_to_publish()
+            && Some(domain) == desc.domain
+            && !desc.flags.contains(IrqFlags::MSI)
+            && let Some(domain_state) = self.domain_states.get_mut(&domain)
+        {
+            if domain_state.remove_mapping(desc.hwirq) {
+                self.virq_to_mapping.remove(&virq);
+                removed_mapping_domain = Some(domain);
+            }
+            if domain_state.is_empty() {
+                self.domain_states.remove(&domain);
+            }
+        }
+        if let Some(domain) = removed_mapping_domain {
+            let published =
+                crate::domain::publish_snapshot(domain, self.domain_mapping_entries(domain));
+            debug_assert!(published);
+        }
+        if rollback.inserted_desc() {
+            self.descs.remove(&virq);
+            return Some(desc);
+        }
+        if let Some(previous_desc) = rollback.previous_desc()
+            && let Some(entry) = self.descs.get(&virq)
+        {
+            entry.update_desc(previous_desc);
+        }
+        None
+    }
+
     fn remove_if_unused_inner(&mut self, virq: Virq, remove_msi: bool) -> Option<IrqDesc> {
         let entry = self.descs.get(&virq)?;
         let desc = entry.desc();
@@ -945,6 +1030,13 @@ pub(super) fn try_resolve_and_publish(
     state: &mut IrqState,
     spec: IrqSpec,
 ) -> Result<IrqDesc, IrqDescError> {
+    Ok(try_resolve_and_publish_resolved(state, spec)?.into_desc())
+}
+
+pub(super) fn try_resolve_and_publish_resolved(
+    state: &mut IrqState,
+    spec: IrqSpec,
+) -> Result<ResolvedIrqDesc, IrqDescError> {
     let domain_id = match spec {
         IrqSpec::PlainVirq(_) => None,
         IrqSpec::Desc(desc) => desc.domain,
@@ -960,7 +1052,7 @@ pub(super) fn try_resolve_and_publish(
             crate::domain::publish_snapshot(domain_id, state.domain_mapping_entries(domain_id));
         debug_assert!(published);
     }
-    Ok(resolved.into_desc())
+    Ok(resolved)
 }
 
 #[cfg(target_arch = "x86_64")]

@@ -333,11 +333,15 @@ synchronize / free 等 generic IRQ 语义成组闭合。
 - `IrqAction` 保存 primary handler、optional thread handler、action flags、name、
   removal token 和 action-local thread runtime。
 - `IrqThreadSlot` 是 action-owned runtime，保存 pending/running/stopping state、
-  wake completion、idle completion 和 thread handler。hardirq 路径只设置 pending
-  并唤醒线程，不分配内存、不执行 thread handler。
+  ready completion、wake completion、idle completion 和 thread handler。
+  `spawn()` 等待 IRQ thread 发布 ready 后才允许 manager 安装 action，因此 action
+  发布后发生的 wake 不会落到尚未进入线程循环的 task 上。hardirq 路径只设置
+  pending 并唤醒线程，不分配内存、不执行 thread handler。
 - `IrqDescRuntimeState` 保存 descriptor-local hardirq `in_flight`、disable depth 和
   teardown state，并能为同步路径快照当前 action 的 thread slot。shared oneshot mask
   的分配与清理仍是后续工作，必须由 descriptor runtime owner 统一完成。
+- threaded registration 在 action 发布前失败时会按解析结果 rollback：本次新建的
+  descriptor 和新增 domain mapping 被撤销，预先存在的 descriptor/mapping 保持不变。
 - IRQ thread 是 action-bound sleepable task，不是 kwork shared worker。它等待
   action-local pending bit，被唤醒后执行 `thread_fn`，结束时完成 idle completion。
 - thread creation 通过 `IrqThreadTaskIf` scheduler-facing provider 接入，避免 `kirq`
@@ -367,9 +371,13 @@ irq thread
 验收标准：
 
 - hardirq-only registration 行为保持兼容。
+- explicit `WakeThread` return 位已经区分 hardirq-only handled 与 threaded wake；
+  普通 `HANDLED` 不唤醒 IRQ thread。
 - primary 返回 `WakeThread` 后，thread handler 必须异步在线程上下文运行；hardirq
   路径不能直接执行 thread handler。
 - 没有 thread handler 的 action 返回 `WakeThread` 必须被诊断并且不能造成悬空唤醒。
+- threaded action 发布前，IRQ thread 必须已经进入 ready 状态；spawn 或 unpublished
+  install 失败不能留下本次 request 创建的 descriptor/domain mapping。
 - `disable_irq()`、`synchronize_irq()`、`free_irq()` 必须等待 hardirq snapshot 和
   threaded handler 都退出；`disable_irq_nosync()` 只 mask，不等待。
 - IRQ thread 不能被 `is_in_interrupt_context()` 识别成 hardirq、softirq 或
@@ -378,7 +386,6 @@ irq thread
 
 后续验收项：
 
-- 显式 `WakeThread` return 位，区分 hardirq-only handled 与 threaded wake。
 - `IRQF_ONESHOT` line mask/unmask 聚合；shared line 必须等所有被唤醒 action thread
   完成。
 - `free_irq_action()` 删除 shared threaded action 后，旧 hardirq snapshot 或旧 IRQ

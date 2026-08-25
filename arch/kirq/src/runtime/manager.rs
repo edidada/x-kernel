@@ -21,7 +21,10 @@ use crate::{
         configure_platform_irq, platform_dispatch_irq, platform_dispatch_nmi,
         set_platform_irq_enabled,
     },
-    state::{IRQ_STATE, IrqPlatformUpdate, IrqState, IrqStateDesc, try_resolve_and_publish},
+    state::{
+        IRQ_STATE, IrqPlatformUpdate, IrqResolutionRollback, IrqState, IrqStateDesc,
+        try_resolve_and_publish, try_resolve_and_publish_resolved,
+    },
 };
 pub use crate::{
     action::IrqActionToken,
@@ -442,12 +445,11 @@ pub fn try_register_with_options(
     let spec = spec.into();
     let (virq, entry) = {
         let mut state = IRQ_STATE.lock();
-        let Some((_desc, virq, entry)) =
-            resolve_action_install_entry(&mut state, spec, "register handler")?
+        let Some(resolved) = resolve_action_install_entry(&mut state, spec, "register handler")?
         else {
             return Ok(false);
         };
-        (virq, entry)
+        (resolved.virq, resolved.entry)
     };
     entry.with_control(|| {
         if entry.has_actions() || entry.is_teardown_in_progress() {
@@ -566,20 +568,23 @@ pub fn try_register_threaded_with_options(
     options: IrqRegisterOptions,
 ) -> Result<bool, IrqDescError> {
     let spec = spec.into();
-    let (virq, entry) = {
+    let (virq, entry, rollback) = {
         let mut state = IRQ_STATE.lock();
-        let Some((_desc, virq, entry)) =
+        let Some(resolved) =
             resolve_action_install_entry(&mut state, spec, "register threaded handler")?
         else {
             return Ok(false);
         };
+        let virq = resolved.virq;
+        let entry = resolved.entry;
         if entry.with_control(|| entry.has_actions() || entry.is_teardown_in_progress()) {
             warn!("register threaded handler for IRQ {virq} failed");
             return Ok(false);
         }
-        (virq, entry)
+        (virq, entry, resolved.rollback)
     };
     let Some(thread_slot) = IrqThreadSlot::spawn(virq, thread, name) else {
+        rollback_unpublished_threaded_registration(virq, entry, rollback);
         return Err(IrqDescError::ThreadUnavailable { virq });
     };
     let mut unpublished_thread = Some(thread_slot);
@@ -612,6 +617,7 @@ pub fn try_register_threaded_with_options(
         if let Some(thread) = unpublished_thread.as_ref() {
             stop_unpublished_thread(thread);
         }
+        rollback_unpublished_threaded_registration(virq, entry, rollback);
         return Ok(false);
     };
     Ok(true)
@@ -626,6 +632,27 @@ fn stop_unpublished_thread(thread: &IrqThreadSlot) {
     if let Err(error) = thread.wait_stopped("register_threaded") {
         warn!("threaded IRQ registration cleanup could not wait for task exit: {error:?}");
     }
+}
+
+fn rollback_unpublished_threaded_registration(
+    virq: Virq,
+    entry: Arc<IrqStateDesc>,
+    rollback: IrqResolutionRollback,
+) {
+    drop(entry);
+    let removed = IRQ_STATE
+        .lock()
+        .remove_unpublished_resolution(virq, rollback)
+        .is_some();
+    if removed {
+        super::notify::remove_irq_waiters(virq);
+    }
+}
+
+struct ResolvedActionInstallEntry {
+    virq: Virq,
+    entry: Arc<IrqStateDesc>,
+    rollback: IrqResolutionRollback,
 }
 
 /// Register one shared IRQ action and return its removal token.
@@ -652,12 +679,12 @@ pub fn try_register_shared(
     let spec = spec.into();
     let (virq, entry) = {
         let mut state = IRQ_STATE.lock();
-        let Some((_desc, virq, entry)) =
+        let Some(resolved) =
             resolve_action_install_entry(&mut state, spec, "register shared handler")?
         else {
             return Ok(None);
         };
-        (virq, entry)
+        (resolved.virq, resolved.entry)
     };
     entry.with_control(|| {
         let was_first_action = !entry.has_actions();
@@ -679,7 +706,7 @@ fn resolve_action_install_entry(
     state: &mut IrqState,
     spec: IrqSpec,
     operation: &'static str,
-) -> Result<Option<(IrqDesc, Virq, Arc<IrqStateDesc>)>, IrqDescError> {
+) -> Result<Option<ResolvedActionInstallEntry>, IrqDescError> {
     if let Some(virq) = state.lookup_virq(spec)
         && reject_teardown(
             state.descs.get(&virq),
@@ -690,13 +717,19 @@ fn resolve_action_install_entry(
     {
         return Ok(None);
     }
-    let desc = try_resolve_and_publish(state, spec)?;
+    let resolved = try_resolve_and_publish_resolved(state, spec)?;
+    let rollback = resolved.rollback();
+    let desc = resolved.into_desc();
     let virq = desc.logical_irq().unwrap();
     let entry = state
         .descs
         .get(&virq)
         .expect("descriptor state must exist after try_resolve_desc");
-    Ok(Some((desc, virq, entry.clone())))
+    Ok(Some(ResolvedActionInstallEntry {
+        virq,
+        entry: entry.clone(),
+        rollback,
+    }))
 }
 
 enum TeardownReject {
@@ -1008,7 +1041,7 @@ pub mod tests_irq {
         context::test_support::ScopedHardIrqContext,
         lifecycle::IrqLifecycleGuard,
         register_irq_lifecycle_hooks, register_irq_source_waker, register_irq_waker,
-        runtime::notify,
+        runtime::{notify, thread::fail_next_spawn_for_tests},
         softirq::{
             SoftirqRunResult, SoftirqVec, clear_softirq_diagnostics, local_softirq_pending,
             raise_softirq, run_pending_softirqs, softirq_diagnostics,
@@ -2612,6 +2645,57 @@ pub mod tests_irq {
         assert_eq!(IRQ_THREAD_CALLS.load(Ordering::Relaxed), 0);
         assert_eq!(IRQ_THREAD_OBSERVED_IRQ.load(Ordering::Relaxed), 0);
         assert!(unregister(virq).is_some());
+    }
+
+    #[def_test(serial)]
+    fn test_threaded_register_spawn_failure_rolls_back_descriptor_mapping() {
+        let virq = 0x3106;
+        let hwirq = 0x4306;
+        let desc = IrqDesc::new(hwirq, IrqTrigger::LevelHigh)
+            .with_domain(GIC_ROOT_DOMAIN)
+            .with_virq(virq);
+
+        fail_next_spawn_for_tests();
+        let err = try_register_threaded(
+            desc,
+            Arc::new(test_threaded_primary_handler),
+            Arc::new(test_threaded_handler),
+            Some("irq-test-thread-spawn-fail"),
+        )
+        .expect_err("forced thread spawn failure must propagate");
+
+        assert_eq!(err, IrqDescError::ThreadUnavailable { virq });
+        let state = IRQ_STATE.lock();
+        assert!(!state.descs.contains_key(&virq));
+        assert_eq!(state.translated_hwirq(GIC_ROOT_DOMAIN, hwirq), None);
+    }
+
+    #[def_test(serial)]
+    fn test_threaded_register_spawn_failure_preserves_preexisting_mapping() {
+        let virq = 0x3109;
+        let hwirq = 0x4309;
+        let desc = IrqDesc::new(hwirq, IrqTrigger::LevelHigh)
+            .with_domain(GIC_ROOT_DOMAIN)
+            .with_virq(virq);
+
+        assert_eq!(
+            try_map(desc).expect("initial IRQ mapping should succeed"),
+            virq
+        );
+
+        fail_next_spawn_for_tests();
+        let err = try_register_threaded(
+            desc,
+            Arc::new(test_threaded_primary_handler),
+            Arc::new(test_threaded_handler),
+            Some("irq-test-thread-spawn-fail-existing"),
+        )
+        .expect_err("forced thread spawn failure must propagate");
+
+        assert_eq!(err, IrqDescError::ThreadUnavailable { virq });
+        let state = IRQ_STATE.lock();
+        assert_eq!(state.stored_desc(virq), Some(desc));
+        assert_eq!(state.translated_hwirq(GIC_ROOT_DOMAIN, hwirq), Some(virq));
     }
 
     #[def_test(serial)]
