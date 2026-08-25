@@ -108,7 +108,7 @@ impl Drop for SameQueueWaitTargetGuard {
 
 fn ensure_test_worker(binding: SystemPoolBinding, worker_id: WorkerId) {
     let mut pool_state = binding.pool().state.lock();
-    if pool_state.workers[worker_id.as_usize()].state == WorkerState::Empty {
+    if pool_state.worker_state(worker_id.as_usize()) == Some(WorkerState::Empty) {
         core::assert!(pool_state.install_worker(worker_id.as_usize()));
     }
 }
@@ -121,6 +121,32 @@ fn drain_one_test_work_for_kind(kind: SystemWorkQueueKind, worker_id: WorkerId) 
     let binding = test_pool_binding_for_kind(kind);
     ensure_test_worker(binding, worker_id);
     binding.run_one_work(worker_id)
+}
+
+fn enqueue_pool_test_work(
+    pool: &'static WorkerPool,
+    pool_state: &mut crate::pool::WorkerPoolState,
+    name: &'static str,
+) -> ScheduledWork {
+    let queue = Box::leak(Box::new(WorkQueue::new(name)));
+    let work = test_work(count_work);
+    let owner = QueueOwner::Static(queue);
+    let binding = WorkQueuePoolBinding::for_test_pool(owner.clone(), pool);
+    let instance_id = {
+        let mut work_state = work.inner().state.lock();
+        let instance_id = work_state.allocate_instance_id();
+        work_state.set_pending(instance_id, binding, WorkColor::DEFAULT);
+        instance_id
+    };
+    pool_state
+        .push_runnable_entry(WorkEntry::new(
+            work.clone(),
+            owner,
+            WorkColor::DEFAULT,
+            instance_id,
+        ))
+        .expect("test pool should have capacity");
+    work
 }
 
 fn test_pwq(queue: &WorkQueue) -> &SpinNoIrq<WorkQueuePoolState> {
@@ -1397,8 +1423,7 @@ fn test_system_queue_color_flush_completion_is_generation_event() {
         let instance_id = work_state.allocate_instance_id();
         let was_idle = binding_state.is_idle();
         pool_state
-            .pending
-            .push(&work, work_binding.owner(), color)
+            .enqueue_test_work(&work, work_binding.owner(), color)
             .expect("test system pool should accept pending work");
         work.inner().done.reinit();
         work_state.set_pending(instance_id, work_binding.clone(), color);
@@ -2215,20 +2240,22 @@ fn test_system_pool_runnable_query_ignores_running_work() {
 
     {
         let mut pool_state = pool.state.lock();
-        pool_state.workers[worker_id.as_usize()].state = WorkerState::Idle;
-        assert_eq!(pool_state.pending.len(), 0);
-        assert_eq!(pool_state.runnable_count, 0);
+        assert!(pool_state.install_worker(worker_id.as_usize()));
+        assert_eq!(pool_state.runnable_count(), 0);
         assert_eq!(
-            pool_state.workers[worker_id.as_usize()].state,
-            WorkerState::Idle
+            pool_state.worker_state(worker_id.as_usize()),
+            Some(WorkerState::Idle)
         );
         let owner = QueueOwner::Static(queue);
         let binding = WorkQueuePoolBinding::for_test_pool(owner.clone(), pool);
         pool_state
-            .pending
-            .push(&work, owner, WorkColor::DEFAULT)
+            .push_runnable_entry(WorkEntry::new(
+                work.clone(),
+                owner,
+                WorkColor::DEFAULT,
+                WorkInstanceId::for_tests(1),
+            ))
             .expect("test system pool should have capacity");
-        pool_state.runnable_count += 1;
         let mut work_state = work.inner().state.lock();
         let seq = work_state.allocate_instance_id();
         work_state.set_pending(seq, binding, WorkColor::DEFAULT);
@@ -2281,14 +2308,21 @@ fn test_stale_pool_entry_does_not_decrement_running_count() {
     let mut pool_state = pool.state.lock();
     assert!(pool_state.install_worker(worker_id.as_usize()));
     pool_state
-        .pending
-        .push(&stale_work, owner.clone(), WorkColor::DEFAULT)
+        .push_runnable_entry(WorkEntry::new(
+            stale_work.clone(),
+            owner.clone(),
+            WorkColor::DEFAULT,
+            WorkInstanceId::for_tests(1),
+        ))
         .expect("test pool should have capacity");
     pool_state
-        .pending
-        .push(&valid_work, owner.clone(), WorkColor::DEFAULT)
+        .push_runnable_entry(WorkEntry::new(
+            valid_work.clone(),
+            owner.clone(),
+            WorkColor::DEFAULT,
+            WorkInstanceId::for_tests(1),
+        ))
         .expect("test pool should have capacity");
-    pool_state.runnable_count = 2;
     let work_binding = WorkQueuePoolBinding::for_test_pool(owner, pool);
     mark_pending_for_tests(&valid_work, work_binding);
 
@@ -2302,7 +2336,7 @@ fn test_stale_pool_entry_does_not_decrement_running_count() {
 
     assert!(binding.has_running());
     assert_eq!(binding.active_count_for_tests(), 2);
-    assert_eq!(pool_state.runnable_count, 0);
+    assert_eq!(pool_state.runnable_count(), 0);
 
     let instance_id = valid_work
         .inner()
@@ -2330,15 +2364,13 @@ fn test_pool_entry_claim_rejects_stale_instance() {
     let mut pool_state = pool.state.lock();
     assert!(pool_state.install_worker(worker_id.as_usize()));
     pool_state
-        .pending
-        .push_runnable(WorkEntry::new(
+        .push_runnable_entry(WorkEntry::new(
             work.clone(),
             owner.clone(),
             WorkColor::DEFAULT,
             WorkInstanceId::for_tests(0xBADC0DE),
         ))
         .expect("test pool should have capacity");
-    pool_state.runnable_count = 1;
     let work_binding = WorkQueuePoolBinding::for_test_pool(owner, pool);
     mark_pending_for_tests(&work, work_binding);
 
@@ -2346,81 +2378,89 @@ fn test_pool_entry_claim_rejects_stale_instance() {
 
     assert!(outcome.work.is_none());
     assert_eq!(outcome.stale_entries.len(), 1);
-    assert_eq!(pool_state.runnable_count, 0);
+    assert_eq!(pool_state.runnable_count(), 0);
     assert_eq!(work.inner().state.lock().status(), WorkStatus::Pending);
 }
 
 #[def_test(serial)]
 fn test_system_pool_selects_one_preparing_worker() {
-    let pool = WorkerPool::new();
+    let pool = Box::leak(Box::new(WorkerPool::new()));
 
     {
         let mut pool_state = pool.state.lock();
         assert!(pool_state.install_worker(0));
         assert!(pool_state.install_worker(1));
-        pool_state.runnable_count = 1;
+        let _queued = enqueue_pool_test_work(pool, &mut pool_state, "select-preparing");
 
         let plan = pool_state.select_worker_to_kick();
         assert_eq!(plan.worker_to_wake, Some(WorkerId::new(0)));
         assert!(!plan.should_wake_manager);
-        assert_eq!(pool_state.workers[0].state, WorkerState::Preparing);
+        assert_eq!(pool_state.worker_state(0), Some(WorkerState::Preparing));
         let plan = pool_state.select_worker_to_kick();
         assert_eq!(plan.worker_to_wake, None);
         assert!(!plan.should_wake_manager);
-        assert_eq!(pool_state.workers[1].state, WorkerState::Idle);
-        assert_eq!(pool_state.nr_running, 0);
-        assert!(!pool_state.manager_needed);
+        assert_eq!(pool_state.worker_state(1), Some(WorkerState::Idle));
+        assert_eq!(pool_state.nr_running(), 0);
     }
 }
 
 #[def_test(serial)]
 fn test_system_pool_sleeping_worker_kicks_idle_worker() {
-    let pool = WorkerPool::new();
+    let pool = Box::leak(Box::new(WorkerPool::new()));
 
     {
         let mut pool_state = pool.state.lock();
         assert!(pool_state.install_worker(0));
         assert!(pool_state.install_worker(1));
-        pool_state.start_running_work(0, 0x51, WorkInstanceId::for_tests(0x51), Vec::new());
-        pool_state.runnable_count = 1;
+        let worker_token =
+            pool_state.start_running_work(0, 0x51, WorkInstanceId::for_tests(0x51), Vec::new());
+        let _queued = enqueue_pool_test_work(pool, &mut pool_state, "sleep-kick");
 
-        let transition = pool_state.mark_worker_sleeping(0);
+        let transition = pool_state.mark_worker_sleeping(0, worker_token);
         assert!(transition.did_sleep);
         assert_eq!(transition.wake_plan.worker_to_wake, Some(WorkerId::new(1)));
         assert!(!transition.wake_plan.should_wake_manager);
-        assert_eq!(pool_state.workers[0].state, WorkerState::Sleeping);
+        assert_eq!(pool_state.worker_state(0), Some(WorkerState::Sleeping));
         assert_eq!(pool_state.running_work_key_for_tests(0), 0x51);
-        assert_eq!(pool_state.workers[1].state, WorkerState::Preparing);
-        assert_eq!(pool_state.nr_running, 0);
+        assert_eq!(pool_state.worker_state(1), Some(WorkerState::Preparing));
+        assert_eq!(pool_state.nr_running(), 0);
     }
 }
 
 #[def_test(serial)]
 fn test_system_pool_prepare_wait_clears_stale_preparing_worker() {
-    let pool = WorkerPool::new();
+    let pool = Box::leak(Box::new(WorkerPool::new()));
 
     {
         let mut pool_state = pool.state.lock();
         assert!(pool_state.install_worker(0));
         assert!(pool_state.install_worker(1));
-        pool_state.start_running_work(0, 0x84, WorkInstanceId::for_tests(0x84), Vec::new());
-        pool_state.runnable_count = 1;
+        let worker_token =
+            pool_state.start_running_work(0, 0x84, WorkInstanceId::for_tests(0x84), Vec::new());
+        let queued = enqueue_pool_test_work(pool, &mut pool_state, "prepare-wait");
 
-        let transition = pool_state.mark_worker_sleeping(0);
+        let transition = pool_state.mark_worker_sleeping(0, worker_token);
         assert!(transition.did_sleep);
         assert_eq!(transition.wake_plan.worker_to_wake, Some(WorkerId::new(1)));
         assert!(!transition.wake_plan.should_wake_manager);
-        assert_eq!(pool_state.workers[1].state, WorkerState::Preparing);
+        assert_eq!(pool_state.worker_state(1), Some(WorkerState::Preparing));
 
-        pool_state.runnable_count = 0;
+        let queued_binding_key = queued
+            .inner()
+            .state
+            .lock()
+            .pending_binding_cloned()
+            .expect("queued test work should have a binding")
+            .binding_key();
+        let _ = pool_state.remove_pending_work(&queued, queued_binding_key);
         assert!(!pool_state.prepare_worker_to_wait(1));
-        assert_eq!(pool_state.workers[1].state, WorkerState::Idle);
+        assert_eq!(pool_state.worker_state(1), Some(WorkerState::Idle));
 
-        pool_state.runnable_count = 1;
+        let _queued = enqueue_pool_test_work(pool, &mut pool_state, "prepare-wait-2");
         let plan = pool_state.select_worker_to_kick();
         assert_eq!(plan.worker_to_wake, Some(WorkerId::new(1)));
         assert!(!plan.should_wake_manager);
-        assert_eq!(pool_state.workers[1].state, WorkerState::Preparing);
+        assert_eq!(pool_state.worker_state(1), Some(WorkerState::Preparing));
     }
 }
 
@@ -2431,28 +2471,28 @@ fn test_system_pool_sleep_resume_restores_running_count() {
     {
         let mut pool_state = pool.state.lock();
         assert!(pool_state.install_worker(0));
-        pool_state.start_running_work(0, 0x62, WorkInstanceId::for_tests(0x62), Vec::new());
-        assert_eq!(pool_state.nr_running, 1);
+        let worker_token =
+            pool_state.start_running_work(0, 0x62, WorkInstanceId::for_tests(0x62), Vec::new());
+        assert_eq!(pool_state.nr_running(), 1);
 
-        let transition = pool_state.mark_worker_sleeping(0);
+        let transition = pool_state.mark_worker_sleeping(0, worker_token);
         assert!(transition.did_sleep);
         assert_eq!(transition.wake_plan.worker_to_wake, None);
         assert!(!transition.wake_plan.should_wake_manager);
-        assert!(!pool_state.manager_needed);
-        assert_eq!(pool_state.workers[0].state, WorkerState::Sleeping);
-        assert_eq!(pool_state.nr_running, 0);
+        assert_eq!(pool_state.worker_state(0), Some(WorkerState::Sleeping));
+        assert_eq!(pool_state.nr_running(), 0);
 
-        let transition = pool_state.mark_worker_sleeping(0);
+        let transition = pool_state.mark_worker_sleeping(0, worker_token);
         assert!(!transition.did_sleep);
         assert_eq!(transition.wake_plan.worker_to_wake, None);
         assert!(!transition.wake_plan.should_wake_manager);
-        assert_eq!(pool_state.workers[0].state, WorkerState::Sleeping);
-        assert_eq!(pool_state.nr_running, 0);
+        assert_eq!(pool_state.worker_state(0), Some(WorkerState::Sleeping));
+        assert_eq!(pool_state.nr_running(), 0);
 
-        pool_state.mark_worker_running(0);
-        assert_eq!(pool_state.workers[0].state, WorkerState::Running);
+        pool_state.mark_worker_running(0, worker_token);
+        assert_eq!(pool_state.worker_state(0), Some(WorkerState::Running));
         assert_eq!(pool_state.running_work_key_for_tests(0), 0x62);
-        assert_eq!(pool_state.nr_running, 1);
+        assert_eq!(pool_state.nr_running(), 1);
     }
 }
 
@@ -2465,59 +2505,58 @@ fn test_system_pool_finish_sleeping_worker_does_not_double_decrement() {
         assert!(pool_state.install_worker(0));
         let worker_token =
             pool_state.start_running_work(0, 0x73, WorkInstanceId::for_tests(0x73), Vec::new());
-        let transition = pool_state.mark_worker_sleeping(0);
+        let transition = pool_state.mark_worker_sleeping(0, worker_token);
         assert!(transition.did_sleep);
         assert_eq!(transition.wake_plan.worker_to_wake, None);
 
         let _ =
             pool_state.finish_running_work(0, 0x73, WorkInstanceId::for_tests(0x73), worker_token);
-        assert_eq!(pool_state.workers[0].state, WorkerState::Idle);
+        assert_eq!(pool_state.worker_state(0), Some(WorkerState::Idle));
         assert_eq!(pool_state.running_work_key_for_tests(0), 0);
-        assert_eq!(pool_state.nr_running, 0);
+        assert_eq!(pool_state.nr_running(), 0);
     }
 }
 
 #[def_test(serial)]
 fn test_system_pool_manager_reserves_empty_worker_slot() {
-    let pool = WorkerPool::new();
+    let pool = Box::leak(Box::new(WorkerPool::new()));
 
     let mut pool_state = pool.state.lock();
     assert!(pool_state.install_worker(0));
-    pool_state.start_running_work(0, 0x90, WorkInstanceId::for_tests(0x90), Vec::new());
-    pool_state.runnable_count = 1;
+    let worker_token =
+        pool_state.start_running_work(0, 0x90, WorkInstanceId::for_tests(0x90), Vec::new());
+    let _queued = enqueue_pool_test_work(pool, &mut pool_state, "manager-reserve");
 
-    let transition = pool_state.mark_worker_sleeping(0);
+    let transition = pool_state.mark_worker_sleeping(0, worker_token);
     assert!(transition.wake_plan.should_wake_manager);
     assert_eq!(pool_state.reserve_worker_creation(), Some(1));
-    assert_eq!(pool_state.workers[1].state, WorkerState::Creating);
+    assert_eq!(pool_state.worker_state(1), Some(WorkerState::Creating));
     assert!(pool_state.reserve_worker_creation().is_none());
 
-    assert!(pool_state.install_worker(1));
     let plan = pool_state.finish_worker_creation(1, true);
-    assert_eq!(pool_state.workers[1].state, WorkerState::Preparing);
+    assert_eq!(pool_state.worker_state(1), Some(WorkerState::Preparing));
     assert_eq!(plan.worker_to_wake, Some(WorkerId::new(1)));
     assert!(!plan.should_wake_manager);
 }
 
 #[def_test(serial)]
 fn test_system_pool_manager_failure_enters_retry_cooldown() {
-    let pool = WorkerPool::new();
+    let pool = Box::leak(Box::new(WorkerPool::new()));
 
     let mut pool_state = pool.state.lock();
     assert!(pool_state.install_worker(0));
-    pool_state.start_running_work(0, 0x91, WorkInstanceId::for_tests(0x91), Vec::new());
-    pool_state.runnable_count = 1;
+    let worker_token =
+        pool_state.start_running_work(0, 0x91, WorkInstanceId::for_tests(0x91), Vec::new());
+    let _queued = enqueue_pool_test_work(pool, &mut pool_state, "manager-failure");
 
-    let transition = pool_state.mark_worker_sleeping(0);
+    let transition = pool_state.mark_worker_sleeping(0, worker_token);
     assert!(transition.wake_plan.should_wake_manager);
     assert_eq!(pool_state.reserve_worker_creation(), Some(1));
 
     let plan = pool_state.finish_worker_creation(1, false);
-    assert_eq!(pool_state.workers[1].state, WorkerState::Empty);
-    assert!(pool_state.manager_needed);
+    assert_eq!(pool_state.worker_state(1), Some(WorkerState::Empty));
     assert_eq!(plan, WorkerWakePlan::default());
     assert_eq!(pool_state.reserve_worker_creation(), None);
-    assert!(!pool_state.worker_creation_retry_ready());
 
     pool_state.set_worker_create_retry_delay_for_tests(TimeSpan::ZERO);
     let plan = pool_state.select_worker_to_kick();
@@ -2527,21 +2566,27 @@ fn test_system_pool_manager_failure_enters_retry_cooldown() {
 
 #[def_test(serial)]
 fn test_system_pool_manager_rechecks_need_before_reserving() {
-    let pool = WorkerPool::new();
+    let pool = Box::leak(Box::new(WorkerPool::new()));
 
     let mut pool_state = pool.state.lock();
     assert!(pool_state.install_worker(0));
-    pool_state.start_running_work(0, 0x92, WorkInstanceId::for_tests(0x92), Vec::new());
-    pool_state.runnable_count = 1;
+    let worker_token =
+        pool_state.start_running_work(0, 0x92, WorkInstanceId::for_tests(0x92), Vec::new());
+    let queued = enqueue_pool_test_work(pool, &mut pool_state, "manager-recheck");
 
-    let transition = pool_state.mark_worker_sleeping(0);
+    let transition = pool_state.mark_worker_sleeping(0, worker_token);
     assert!(transition.wake_plan.should_wake_manager);
-    assert!(pool_state.manager_needed);
 
-    pool_state.runnable_count = 0;
+    let queued_binding_key = queued
+        .inner()
+        .state
+        .lock()
+        .pending_binding_cloned()
+        .expect("queued test work should have a binding")
+        .binding_key();
+    let _ = pool_state.remove_pending_work(&queued, queued_binding_key);
     assert_eq!(pool_state.reserve_worker_creation(), None);
-    assert!(!pool_state.manager_needed);
-    assert_eq!(pool_state.workers[1].state, WorkerState::Empty);
+    assert_eq!(pool_state.worker_state(1), Some(WorkerState::Empty));
 }
 
 #[def_test(serial)]
@@ -2565,9 +2610,11 @@ fn test_system_worker_slot_must_be_idle_to_drain() {
     let pool = Box::leak(Box::new(WorkerPool::new()));
     let worker_id = WorkerId::new(0);
     let work = test_work(count_work);
+    let blocker_token: WorkerExecutionToken;
 
     {
         let mut pool_state = pool.state.lock();
+        assert!(pool_state.install_worker(worker_id.as_usize()));
         let owner = QueueOwner::Static(queue);
         let binding = WorkQueuePoolBinding::for_test_pool(owner.clone(), pool);
         {
@@ -2576,11 +2623,19 @@ fn test_system_worker_slot_must_be_idle_to_drain() {
             work_state.set_pending(seq, binding.clone(), WorkColor::DEFAULT);
         }
         pool_state
-            .pending
-            .push(&work, owner, WorkColor::DEFAULT)
+            .push_runnable_entry(WorkEntry::new(
+                work.clone(),
+                owner,
+                WorkColor::DEFAULT,
+                WorkInstanceId::for_tests(1),
+            ))
             .expect("test pool has capacity");
-        pool_state.runnable_count = 1;
-        pool_state.workers[worker_id.as_usize()].state = WorkerState::Running;
+        blocker_token = pool_state.start_running_work(
+            worker_id.as_usize(),
+            0x591,
+            WorkInstanceId::for_tests(0x591),
+            Vec::new(),
+        );
     }
 
     assert!(
@@ -2590,10 +2645,15 @@ fn test_system_worker_slot_must_be_idle_to_drain() {
             .work
             .is_none()
     );
-    assert_eq!(pool.state.lock().runnable_count, 1);
+    assert_eq!(pool.state.lock().runnable_count(), 1);
     assert_eq!(work.inner().state.lock().status(), WorkStatus::Pending);
 
-    pool.state.lock().workers[worker_id.as_usize()].state = WorkerState::Idle;
+    let _ = pool.state.lock().finish_running_work(
+        worker_id.as_usize(),
+        0x591,
+        WorkInstanceId::for_tests(0x591),
+        blocker_token,
+    );
     let outcome = pool
         .state
         .lock()
@@ -2661,44 +2721,45 @@ fn test_system_bh_wq_is_global_with_per_cpu_pools() {
 
 #[def_test(serial)]
 fn test_pool_cpu_intensive_mark_releases_concurrency() {
-    let pool = WorkerPool::new();
+    let pool = Box::leak(Box::new(WorkerPool::new()));
 
     let mut pool_state = pool.state.lock();
     assert!(pool_state.install_worker(0));
     assert!(pool_state.install_worker(1));
     pool_state.set_cpu_intensive_threshold_for_tests(TimeSpan::ZERO);
     pool_state.start_running_work(0, 0xA1, WorkInstanceId::for_tests(0xA1), Vec::new());
-    assert_eq!(pool_state.nr_running, 1);
-    pool_state.runnable_count = 1;
+    assert_eq!(pool_state.nr_running(), 1);
+    let _queued = enqueue_pool_test_work(pool, &mut pool_state, "cpu-mark");
 
     // The long-running worker already exceeds the zero threshold and leaves
     // nr_running, so the queued work wakes the idle worker.
     let plan = pool_state.select_worker_to_kick();
-    assert!(pool_state.workers[0].cpu_intensive);
-    assert_eq!(pool_state.nr_running, 0);
+    assert!(pool_state.worker_is_cpu_intensive(0));
+    assert_eq!(pool_state.nr_running(), 0);
     assert_eq!(plan.worker_to_wake, Some(WorkerId::new(1)));
     assert!(!plan.should_wake_manager);
-    assert_eq!(pool_state.workers[1].state, WorkerState::Preparing);
+    assert_eq!(pool_state.worker_state(1), Some(WorkerState::Preparing));
 }
 
 #[def_test(serial)]
 fn test_pool_cpu_intensive_tick_releases_concurrency() {
-    let pool = WorkerPool::new();
+    let pool = Box::leak(Box::new(WorkerPool::new()));
 
     let mut pool_state = pool.state.lock();
     assert!(pool_state.install_worker(0));
     assert!(pool_state.install_worker(1));
-    pool_state.set_cpu_intensive_threshold_for_tests(TimeSpan::ZERO);
+    pool_state.set_cpu_intensive_threshold_for_tests(TimeSpan::from_secs(60));
     let worker_token =
         pool_state.start_running_work(0, 0xA7, WorkInstanceId::for_tests(0xA7), Vec::new());
-    pool_state.runnable_count = 1;
+    let _queued = enqueue_pool_test_work(pool, &mut pool_state, "cpu-tick");
+    pool_state.set_cpu_intensive_threshold_for_tests(TimeSpan::ZERO);
 
     let plan = pool_state.tick_running_worker(0, worker_token);
-    assert!(pool_state.workers[0].cpu_intensive);
-    assert_eq!(pool_state.nr_running, 0);
+    assert!(pool_state.worker_is_cpu_intensive(0));
+    assert_eq!(pool_state.nr_running(), 0);
     assert_eq!(plan.worker_to_wake, Some(WorkerId::new(1)));
     assert!(!plan.should_wake_manager);
-    assert_eq!(pool_state.workers[1].state, WorkerState::Preparing);
+    assert_eq!(pool_state.worker_state(1), Some(WorkerState::Preparing));
 }
 
 #[def_test(serial)]
@@ -2727,18 +2788,19 @@ fn test_pool_worker_tick_deadline_tracks_current_execution() {
 
 #[def_test(serial)]
 fn test_worker_execution_token_rejects_stale_finish_and_tick() {
-    let pool = WorkerPool::new();
+    let pool = Box::leak(Box::new(WorkerPool::new()));
 
     let mut pool_state = pool.state.lock();
     assert!(pool_state.install_worker(0));
     assert!(pool_state.install_worker(1));
-    pool_state.set_cpu_intensive_threshold_for_tests(TimeSpan::ZERO);
+    pool_state.set_cpu_intensive_threshold_for_tests(TimeSpan::from_secs(60));
 
     let stale_token =
         pool_state.start_running_work(0, 0xA8, WorkInstanceId::for_tests(0xA8), Vec::new());
     let current_token =
         pool_state.start_running_work(0, 0xA9, WorkInstanceId::for_tests(0xA9), Vec::new());
-    pool_state.runnable_count = 1;
+    let _queued = enqueue_pool_test_work(pool, &mut pool_state, "stale-token");
+    pool_state.set_cpu_intensive_threshold_for_tests(TimeSpan::ZERO);
 
     assert!(
         pool_state
@@ -2746,121 +2808,137 @@ fn test_worker_execution_token_rejects_stale_finish_and_tick() {
             .is_empty()
     );
     assert_eq!(pool_state.running_work_key_for_tests(0), 0xA9);
-    assert_eq!(pool_state.nr_running, 1);
+    assert_eq!(pool_state.nr_running(), 1);
 
     let stale_plan = pool_state.tick_running_worker(0, stale_token);
     assert_eq!(stale_plan, WorkerWakePlan::default());
-    assert!(!pool_state.workers[0].cpu_intensive);
-    assert_eq!(pool_state.nr_running, 1);
+    assert!(!pool_state.worker_is_cpu_intensive(0));
+    assert_eq!(pool_state.nr_running(), 1);
 
     let current_plan = pool_state.tick_running_worker(0, current_token);
-    assert!(pool_state.workers[0].cpu_intensive);
-    assert_eq!(pool_state.nr_running, 0);
+    assert!(pool_state.worker_is_cpu_intensive(0));
+    assert_eq!(pool_state.nr_running(), 0);
     assert_eq!(current_plan.worker_to_wake, Some(WorkerId::new(1)));
 }
 
 #[def_test(serial)]
 fn test_pool_cpu_intensive_mark_is_cleared_per_execution() {
-    let pool = WorkerPool::new();
+    let pool = Box::leak(Box::new(WorkerPool::new()));
 
     let mut pool_state = pool.state.lock();
     assert!(pool_state.install_worker(0));
     pool_state.set_cpu_intensive_threshold_for_tests(TimeSpan::ZERO);
     let first_worker_token =
         pool_state.start_running_work(0, 0xA2, WorkInstanceId::for_tests(0xA2), Vec::new());
-    pool_state.runnable_count = 1;
+    let queued = enqueue_pool_test_work(pool, &mut pool_state, "cpu-clear");
     let _ = pool_state.select_worker_to_kick();
-    assert!(pool_state.workers[0].cpu_intensive);
-    assert_eq!(pool_state.nr_running, 0);
+    assert!(pool_state.worker_is_cpu_intensive(0));
+    assert_eq!(pool_state.nr_running(), 0);
 
     // Finishing a marked work must not decrement nr_running a second time.
-    pool_state.runnable_count = 0;
+    let queued_binding_key = queued
+        .inner()
+        .state
+        .lock()
+        .pending_binding_cloned()
+        .expect("queued test work should have a binding")
+        .binding_key();
+    let _ = pool_state.remove_pending_work(&queued, queued_binding_key);
     let _ = pool_state.finish_running_work(
         0,
         0xA2,
         WorkInstanceId::for_tests(0xA2),
         first_worker_token,
     );
-    assert_eq!(pool_state.nr_running, 0);
-    assert!(!pool_state.workers[0].cpu_intensive);
-    assert_eq!(pool_state.workers[0].state, WorkerState::Idle);
+    assert_eq!(pool_state.nr_running(), 0);
+    assert!(!pool_state.worker_is_cpu_intensive(0));
+    assert_eq!(pool_state.worker_state(0), Some(WorkerState::Idle));
 
     // The next execution starts with ordinary accounting again.
     let second_worker_token =
         pool_state.start_running_work(0, 0xA3, WorkInstanceId::for_tests(0xA3), Vec::new());
-    assert_eq!(pool_state.nr_running, 1);
-    assert!(!pool_state.workers[0].cpu_intensive);
+    assert_eq!(pool_state.nr_running(), 1);
+    assert!(!pool_state.worker_is_cpu_intensive(0));
     let _ = pool_state.finish_running_work(
         0,
         0xA3,
         WorkInstanceId::for_tests(0xA3),
         second_worker_token,
     );
-    assert_eq!(pool_state.nr_running, 0);
+    assert_eq!(pool_state.nr_running(), 0);
 }
 
 #[def_test(serial)]
 fn test_pool_cpu_intensive_sleep_resume_stays_excluded() {
-    let pool = WorkerPool::new();
+    let pool = Box::leak(Box::new(WorkerPool::new()));
 
     let mut pool_state = pool.state.lock();
     assert!(pool_state.install_worker(0));
     assert!(pool_state.install_worker(1));
     pool_state.set_cpu_intensive_threshold_for_tests(TimeSpan::ZERO);
-    pool_state.start_running_work(0, 0xA4, WorkInstanceId::for_tests(0xA4), Vec::new());
-    pool_state.runnable_count = 1;
+    let worker_token =
+        pool_state.start_running_work(0, 0xA4, WorkInstanceId::for_tests(0xA4), Vec::new());
+    let queued = enqueue_pool_test_work(pool, &mut pool_state, "cpu-sleep");
     let plan = pool_state.select_worker_to_kick();
-    assert!(pool_state.workers[0].cpu_intensive);
-    assert_eq!(pool_state.nr_running, 0);
+    assert!(pool_state.worker_is_cpu_intensive(0));
+    assert_eq!(pool_state.nr_running(), 0);
     assert_eq!(plan.worker_to_wake, Some(WorkerId::new(1)));
 
     // Return the kicked worker to idle so the sleep accounting is observable.
-    pool_state.runnable_count = 0;
+    let queued_binding_key = queued
+        .inner()
+        .state
+        .lock()
+        .pending_binding_cloned()
+        .expect("queued test work should have a binding")
+        .binding_key();
+    let _ = pool_state.remove_pending_work(&queued, queued_binding_key);
     assert!(!pool_state.prepare_worker_to_wait(1));
-    assert_eq!(pool_state.workers[1].state, WorkerState::Idle);
+    assert_eq!(pool_state.worker_state(1), Some(WorkerState::Idle));
 
     // Blocking and resuming must not touch nr_running for a marked worker.
-    pool_state.runnable_count = 1;
-    let transition = pool_state.mark_worker_sleeping(0);
+    let _queued = enqueue_pool_test_work(pool, &mut pool_state, "cpu-sleep-2");
+    let transition = pool_state.mark_worker_sleeping(0, worker_token);
     assert!(transition.did_sleep);
-    assert_eq!(pool_state.nr_running, 0);
-    assert_eq!(transition.wake_plan.worker_to_wake, Some(WorkerId::new(1)));
+    assert_eq!(pool_state.nr_running(), 0);
+    assert_eq!(transition.wake_plan.worker_to_wake, None);
+    assert_eq!(pool_state.worker_state(1), Some(WorkerState::Preparing));
 
-    pool_state.mark_worker_running(0);
-    assert_eq!(pool_state.workers[0].state, WorkerState::Running);
-    assert!(pool_state.workers[0].cpu_intensive);
-    assert_eq!(pool_state.nr_running, 0);
+    pool_state.mark_worker_running(0, worker_token);
+    assert_eq!(pool_state.worker_state(0), Some(WorkerState::Running));
+    assert!(pool_state.worker_is_cpu_intensive(0));
+    assert_eq!(pool_state.nr_running(), 0);
 }
 
 #[def_test(serial)]
 fn test_pool_cpu_intensive_threshold_not_reached_keeps_count() {
-    let pool = WorkerPool::new();
+    let pool = Box::leak(Box::new(WorkerPool::new()));
 
     let mut pool_state = pool.state.lock();
     assert!(pool_state.install_worker(0));
     assert!(pool_state.install_worker(1));
     pool_state.set_cpu_intensive_threshold_for_tests(TimeSpan::from_secs(60));
     pool_state.start_running_work(0, 0xA5, WorkInstanceId::for_tests(0xA5), Vec::new());
-    pool_state.runnable_count = 1;
+    let _queued = enqueue_pool_test_work(pool, &mut pool_state, "cpu-threshold");
 
     // A fresh execution under a large threshold stays in nr_running, so no
     // additional worker is kicked and no marking happens.
     let plan = pool_state.select_worker_to_kick();
-    assert!(!pool_state.workers[0].cpu_intensive);
-    assert_eq!(pool_state.nr_running, 1);
+    assert!(!pool_state.worker_is_cpu_intensive(0));
+    assert_eq!(pool_state.nr_running(), 1);
     assert_eq!(plan.worker_to_wake, None);
     assert!(!plan.should_wake_manager);
 }
 
 #[def_test(serial)]
 fn test_pool_cpu_intensive_marking_allows_manager_creation() {
-    let pool = WorkerPool::new();
+    let pool = Box::leak(Box::new(WorkerPool::new()));
 
     let mut pool_state = pool.state.lock();
     assert!(pool_state.install_worker(0));
     pool_state.set_cpu_intensive_threshold_for_tests(TimeSpan::ZERO);
     pool_state.start_running_work(0, 0xA6, WorkInstanceId::for_tests(0xA6), Vec::new());
-    pool_state.runnable_count = 1;
+    let _queued = enqueue_pool_test_work(pool, &mut pool_state, "cpu-manager");
 
     // The only installed worker is marked, so the pool asks the manager for a
     // new worker instead of waiting behind the CPU-bound callback.
@@ -2868,7 +2946,7 @@ fn test_pool_cpu_intensive_marking_allows_manager_creation() {
     assert_eq!(plan.worker_to_wake, None);
     assert!(plan.should_wake_manager);
     assert_eq!(pool_state.reserve_worker_creation(), Some(1));
-    assert_eq!(pool_state.workers[1].state, WorkerState::Creating);
+    assert_eq!(pool_state.worker_state(1), Some(WorkerState::Creating));
 }
 
 #[def_test(serial)]

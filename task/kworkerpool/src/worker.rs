@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use ktime_types::{MonotonicInstant, TimeSpan};
+use ktime_types::MonotonicInstant;
 
 use crate::WorkerId;
 
@@ -89,64 +89,6 @@ impl CurrentExecution {
     }
 }
 
-/// Compatibility worker execution record for runtimes that keep queue and
-/// provider sidecars outside [`crate::WorkerPool`].
-///
-/// This is a scheduling/accounting record only. It intentionally stores no
-/// workqueue identity, flush barrier, or provider-task handle.
-pub struct WorkerRecord {
-    /// Lifecycle state of the worker slot.
-    pub state: WorkerState,
-    /// Current execution generation.
-    pub generation: WorkerExecutionToken,
-    /// Whether the current execution stopped counting toward concurrency.
-    pub cpu_intensive: bool,
-    /// Monotonic time when the current execution started.
-    pub current_run_started: Option<MonotonicInstant>,
-}
-
-impl WorkerRecord {
-    /// Creates an empty worker record.
-    pub const fn new() -> Self {
-        Self {
-            state: WorkerState::Empty,
-            generation: WorkerExecutionToken::first(),
-            cpu_intensive: false,
-            current_run_started: None,
-        }
-    }
-
-    /// Advances and returns this slot's next execution token.
-    pub fn next_execution_token(&mut self) -> WorkerExecutionToken {
-        self.generation = self.generation.next_generation();
-        self.generation
-    }
-
-    /// Clears per-execution accounting state.
-    pub fn clear_current_execution(&mut self) {
-        self.cpu_intensive = false;
-        self.current_run_started = None;
-    }
-
-    /// Starts per-execution accounting state.
-    pub fn start_current_execution(&mut self, run_started: MonotonicInstant) {
-        self.cpu_intensive = false;
-        self.current_run_started = Some(run_started);
-    }
-
-    /// Returns whether the current execution ran for at least `threshold`.
-    pub fn run_exceeds(&self, threshold: TimeSpan, now: MonotonicInstant) -> bool {
-        self.current_run_started
-            .is_some_and(|started| now.saturating_duration_since(started) >= threshold)
-    }
-}
-
-impl Default for WorkerRecord {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Pool-side accounting result of one worker block notification.
 pub struct WorkerSleepTransition {
     /// Whether the worker really transitioned Running -> Sleeping.
@@ -192,6 +134,25 @@ impl Worker {
         self.current = Some(current);
         self.idle_since = None;
         current
+    }
+
+    pub(crate) fn reserve_execution_token(&mut self) -> WorkerExecutionToken {
+        self.generation = self.generation.next_generation();
+        self.generation
+    }
+
+    pub(crate) fn start_reserved_execution(
+        &mut self,
+        token: WorkerExecutionToken,
+        started_at: MonotonicInstant,
+    ) -> Option<CurrentExecution> {
+        if self.generation != token {
+            return None;
+        }
+        let current = CurrentExecution::new(token, started_at);
+        self.current = Some(current);
+        self.idle_since = None;
+        Some(current)
     }
 
     pub(crate) fn current_matches(&self, token: WorkerExecutionToken) -> bool {

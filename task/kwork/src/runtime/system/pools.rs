@@ -361,7 +361,11 @@ impl SystemPoolBinding {
     /// caller owns plan execution: scheduler-context callers enqueue the plan
     /// targets under their own run-queue lock, while the wrapper path uses
     /// [`Self::mark_worker_sleeping`].
-    pub(crate) fn account_worker_sleeping(self, worker_id: WorkerId) -> WorkerSleepTransition {
+    pub(crate) fn account_worker_sleeping(
+        self,
+        worker_id: WorkerId,
+        worker_token: WorkerExecutionToken,
+    ) -> WorkerSleepTransition {
         let worker_index = worker_id.as_usize();
         if worker_index >= MAX_SYSTEM_WORKERS_PER_CPU {
             return WorkerSleepTransition {
@@ -369,7 +373,10 @@ impl SystemPoolBinding {
                 wake_plan: WorkerWakePlan::default(),
             };
         }
-        self.pool().state.lock().mark_worker_sleeping(worker_index)
+        self.pool()
+            .state
+            .lock()
+            .mark_worker_sleeping(worker_index, worker_token)
     }
 
     /// Marks this pool's worker as blocked for worker-pool concurrency
@@ -381,8 +388,12 @@ impl SystemPoolBinding {
     /// [`crate::WorkqueueTaskContext::worker_did_resume`] with a `true` result;
     /// nested sleepable waits may observe an already-sleeping worker and must
     /// not mark it running early.
-    pub(crate) fn mark_worker_sleeping(self, worker_id: WorkerId) -> bool {
-        let transition = self.account_worker_sleeping(worker_id);
+    pub(crate) fn mark_worker_sleeping(
+        self,
+        worker_id: WorkerId,
+        worker_token: WorkerExecutionToken,
+    ) -> bool {
+        let transition = self.account_worker_sleeping(worker_id, worker_token);
         super::wake_system_pool_plan(self.pool_kind(), self.cpu_id(), transition.wake_plan);
         transition.did_sleep
     }
@@ -390,12 +401,19 @@ impl SystemPoolBinding {
     /// Marks a previously blocked system worker as runnable again.
     ///
     /// This is the X-Kernel counterpart of Linux `wq_worker_running()`.
-    pub(crate) fn mark_worker_running(self, worker_id: WorkerId) {
+    pub(crate) fn mark_worker_running(
+        self,
+        worker_id: WorkerId,
+        worker_token: WorkerExecutionToken,
+    ) {
         let worker_index = worker_id.as_usize();
         if worker_index >= MAX_SYSTEM_WORKERS_PER_CPU {
             return;
         }
-        self.pool().state.lock().mark_worker_running(worker_index);
+        self.pool()
+            .state
+            .lock()
+            .mark_worker_running(worker_index, worker_token);
     }
 
     /// Accounts a scheduler tick for one running worker without waking anyone.

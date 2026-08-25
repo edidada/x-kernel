@@ -265,6 +265,44 @@ fn spawn_failure_retry_blocks_immediate_recreate() {
 }
 
 #[def_test]
+fn spawn_complete_accepts_provider_installed_worker() {
+    let mut pool = pool();
+    pool.install_worker(WorkerId::new(0)).unwrap();
+    pool.enqueue_runnable(entry(1, 1, 10), now(1)).unwrap();
+    let _ = pool.pop_runnable(WorkerId::new(0)).unwrap();
+    let (token, _) = pool.worker_started(WorkerId::new(0), now(1)).unwrap();
+    pool.enqueue_runnable(entry(1, 2, 11), now(2)).unwrap();
+    let _ = pool
+        .worker_blocked(WorkerId::new(0), token, now(2))
+        .unwrap();
+
+    assert_eq!(
+        pool.next_management_action(now(2)),
+        Some(ManagementAction::SpawnWorker {
+            pool: PoolId::new(BuiltinPoolKind::Normal, LogicalCpuId::new(0)),
+            worker: WorkerId::new(1),
+        })
+    );
+    pool.install_worker(WorkerId::new(1)).unwrap();
+
+    let actions = pool
+        .spawn_complete(WorkerId::new(1), ManagementComplete::Spawned, now(3))
+        .unwrap();
+
+    assert_eq!(
+        pool.worker_state(WorkerId::new(1)),
+        Some(WorkerState::Preparing)
+    );
+    assert!(actions.immediate().any(|action| matches!(
+        action,
+        ImmediateAction::WakeWorker {
+            worker,
+            ..
+        } if worker == WorkerId::new(1)
+    )));
+}
+
+#[def_test]
 fn bh_pool_never_requests_manager_spawn() {
     let mut pool = bh_pool();
     pool.install_worker(WorkerId::new(0)).unwrap();

@@ -211,9 +211,9 @@ impl WorkQueuePoolBinding {
         match work.queue_new_pending_with(self.clone(), accounting.color(), |instance_id| {
             let entry = WorkEntry::new(work.clone(), self.owner(), accounting.color(), instance_id);
             let pending_result = if is_active {
-                pool_state.pending.push_runnable(entry)
+                pool_state.push_runnable_entry(entry)
             } else {
-                pool_state.pending.push_inactive(entry)
+                pool_state.push_inactive_entry(entry)
             };
             pending_result.map_err(|_| QueueWorkResult::QueueFull)
         }) {
@@ -224,7 +224,6 @@ impl WorkQueuePoolBinding {
         };
         if is_active {
             binding_state.add_active();
-            pool_state.runnable_count += 1;
         }
         if accounting.commit(&mut binding_state) {
             queue.reinit_idle_waiters_if_initialized();
@@ -316,9 +315,9 @@ impl WorkQueuePoolBinding {
                 let entry =
                     WorkEntry::new(work.clone(), self.owner(), accounting.color(), instance_id);
                 let pending_result = if is_active {
-                    pool_state.pending.push_runnable(entry)
+                    pool_state.push_runnable_entry(entry)
                 } else {
-                    pool_state.pending.push_inactive(entry)
+                    pool_state.push_inactive_entry(entry)
                 };
                 pending_result.map_err(|_| QueueWorkResult::QueueFull)
             },
@@ -328,7 +327,6 @@ impl WorkQueuePoolBinding {
         };
         if is_active {
             binding_state.add_active();
-            pool_state.runnable_count += 1;
         }
         if accounting.commit(&mut binding_state) {
             queue.reinit_idle_waiters_if_initialized();

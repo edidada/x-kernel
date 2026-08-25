@@ -30,6 +30,5 @@ pub use pool::{
 };
 pub use queue::{PoolEntry, PoolRunQueue, QueueRemoveResult};
 pub use worker::{
-    ExecutionAccounting, WorkerExecutionToken, WorkerRecord, WorkerSleepTransition, WorkerState,
-    WorkerWakePlan,
+    ExecutionAccounting, WorkerExecutionToken, WorkerSleepTransition, WorkerState, WorkerWakePlan,
 };

@@ -219,8 +219,8 @@ pub(crate) use wq_pool::{
 
 pub(crate) use crate::{
     queue::{
-        BarrierAttachResult, PendingBarrierAttach, PendingWorkEntry, PendingWorkStore,
-        QueueInstanceCompletion, QueueOwner, QueueWake, WorkEntry,
+        BarrierAttachResult, PendingBarrierAttach, QueueInstanceCompletion, QueueOwner, QueueWake,
+        WorkEntry,
     },
     work::{
         RunQueueEntryClaim, WorkBarrier, WorkBarrierQueue, WorkColor, WorkInstanceId, WorkState,

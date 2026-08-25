@@ -98,10 +98,20 @@ impl WorkerPoolPolicy {
         self.create_retry_delay
     }
 
+    #[cfg(unittest)]
+    pub(crate) fn set_create_retry_delay_for_tests(&mut self, delay: TimeSpan) {
+        self.create_retry_delay = delay;
+    }
+
     /// Runtime after which a current execution stops counting toward pool
     /// concurrency.
     pub const fn cpu_intensive_threshold(self) -> TimeSpan {
         self.cpu_intensive_threshold
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn set_cpu_intensive_threshold_for_tests(&mut self, threshold: TimeSpan) {
+        self.cpu_intensive_threshold = threshold;
     }
 
     /// Returns whether this pool may dynamically create provider workers.

@@ -99,6 +99,21 @@ where
         self.id
     }
 
+    /// Configures the identity and policy before provider workers are
+    /// installed.
+    ///
+    /// Runtime static pool tables often need `const` construction before their
+    /// CPU-local identity is known. Reconfiguration is accepted only while the
+    /// pool is completely empty.
+    pub fn configure_empty(&mut self, id: PoolId, policy: WorkerPoolPolicy) -> bool {
+        if self.counts != WorkerCounts::new() || !self.queue.is_empty() {
+            return false;
+        }
+        self.id = id;
+        self.policy = policy;
+        true
+    }
+
     /// Returns a worker's lifecycle state.
     pub fn worker_state(&self, worker: WorkerId) -> Option<WorkerState> {
         self.workers.get(worker.as_usize()).map(|w| w.state)
@@ -109,9 +124,29 @@ where
         self.queue.runnable_len()
     }
 
+    /// Returns total queued entries across runnable and deferred lanes.
+    pub fn queued_len(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// Returns runnable entries for one owner.
+    pub fn runnable_len_for_owner(&self, owner: &O) -> usize {
+        self.queue.runnable_len_for_owner(owner)
+    }
+
+    /// Returns queued entries for one owner across runnable and deferred lanes.
+    pub fn queued_len_for_owner(&self, owner: &O) -> usize {
+        self.queue.runnable_len_for_owner(owner) + self.queue.deferred_len_for_owner(owner)
+    }
+
     /// Returns the number of installed provider workers.
     pub fn installed_workers(&self) -> usize {
         self.counts.installed_workers
+    }
+
+    /// Returns the number of workers currently counted for concurrency.
+    pub fn nr_concurrency(&self) -> usize {
+        self.counts.nr_concurrency
     }
 
     /// Installs a provider worker slot.
@@ -165,6 +200,11 @@ where
         (promoted, actions)
     }
 
+    /// Moves all runnable entries for `owner` into that owner's deferred lane.
+    pub fn defer_runnable_for_owner(&mut self, owner: &O) -> usize {
+        self.queue.defer_runnable_for_owner(owner)
+    }
+
     /// Removes an entry from runnable or deferred queues.
     pub fn remove_entry(
         &mut self,
@@ -172,6 +212,11 @@ where
         key: &K,
     ) -> Option<(PoolEntry<O, K, T>, QueueRemoveResult)> {
         self.queue.remove(owner, key)
+    }
+
+    /// Returns a mutable payload reference by owner and key.
+    pub fn get_payload_mut(&mut self, owner: &O, key: &K) -> Option<&mut T> {
+        self.queue.get_mut(owner, key)
     }
 
     /// Pops a runnable entry for a prepared worker.
@@ -232,6 +277,49 @@ where
         Ok((current.token(), actions))
     }
 
+    /// Reserves an execution token for a prepared worker before external
+    /// claim state is updated.
+    pub fn reserve_execution_token(
+        &mut self,
+        worker: WorkerId,
+    ) -> Result<WorkerExecutionToken, WorkerPoolError<O, K, T>> {
+        let index = self.checked_worker(worker)?;
+        if self.workers[index].state != WorkerState::Preparing {
+            return Err(WorkerPoolError::InvalidWorkerState);
+        }
+        Ok(self.workers[index].reserve_execution_token())
+    }
+
+    /// Marks a prepared worker as running with a previously reserved token.
+    pub fn worker_started_with_token(
+        &mut self,
+        worker: WorkerId,
+        token: WorkerExecutionToken,
+        now: MonotonicInstant,
+    ) -> Result<ActionBatch, WorkerPoolError<O, K, T>> {
+        let index = self.checked_worker(worker)?;
+        if self.workers[index].state != WorkerState::Preparing {
+            return Err(WorkerPoolError::InvalidWorkerState);
+        }
+        self.transition(index, WorkerState::Running);
+        if self.workers[index]
+            .start_reserved_execution(token, now)
+            .is_none()
+        {
+            self.transition(index, WorkerState::Preparing);
+            return Err(WorkerPoolError::InvalidWorkerState);
+        }
+        self.counts.nr_concurrency += 1;
+        let mut actions = ActionBatch::new();
+        if let Some(deadline) = now.checked_add(self.policy.cpu_intensive_threshold()) {
+            actions.push_immediate(ImmediateAction::ArmWorkerTimer {
+                pool: self.id,
+                deadline,
+            });
+        }
+        Ok(actions)
+    }
+
     /// Finishes a worker execution and prepares the worker for more runnable
     /// work when possible.
     pub fn worker_finished(
@@ -257,7 +345,12 @@ where
         self.workers[index].clear_execution();
         if self.queue.runnable_len() != 0 {
             self.transition(index, WorkerState::Preparing);
-            Ok(ActionBatch::new())
+            let mut actions = ActionBatch::new();
+            actions.push_immediate(ImmediateAction::WakeWorker {
+                pool: self.id,
+                worker,
+            });
+            Ok(actions)
         } else {
             self.mark_idle_for_wait(index, now);
             Ok(self.arm_retire_timer_if_needed(index, now))
@@ -331,6 +424,25 @@ where
         self.workers[index].mark_cpu_intensive();
         self.counts.nr_concurrency = self.counts.nr_concurrency.saturating_sub(1);
         Ok(self.evaluate_dispatch(now))
+    }
+
+    /// Returns the CPU-intensive accounting deadline for a running execution.
+    pub fn worker_tick_deadline(
+        &self,
+        worker: WorkerId,
+        token: WorkerExecutionToken,
+    ) -> Option<MonotonicInstant> {
+        let index = self.checked_worker(worker).ok()?;
+        let current = self.workers[index].current?;
+        if self.workers[index].state != WorkerState::Running
+            || current.token() != token
+            || current.accounting() == ExecutionAccounting::CpuIntensive
+        {
+            return None;
+        }
+        current
+            .started_at
+            .checked_add(self.policy.cpu_intensive_threshold())
     }
 
     /// Returns what a worker at the wait boundary should do.
@@ -417,20 +529,107 @@ where
         now: MonotonicInstant,
     ) -> Result<ActionBatch, WorkerPoolError<O, K, T>> {
         let index = self.checked_worker(worker)?;
-        if self.workers[index].state != WorkerState::Creating {
-            return Err(WorkerPoolError::InvalidWorkerState);
-        }
         match result {
             ManagementComplete::Spawned => {
+                match self.workers[index].state {
+                    WorkerState::Creating => self.transition(index, WorkerState::Idle),
+                    WorkerState::Idle => {}
+                    _ => return Err(WorkerPoolError::InvalidWorkerState),
+                }
                 self.create_retry_after = None;
-                self.transition(index, WorkerState::Idle);
             }
             ManagementComplete::SpawnFailed => {
+                if self.workers[index].state != WorkerState::Creating {
+                    return Err(WorkerPoolError::InvalidWorkerState);
+                }
                 self.transition(index, WorkerState::Empty);
                 self.create_retry_after = now.checked_add(self.policy.create_retry_delay());
             }
         }
         Ok(self.evaluate_dispatch(now))
+    }
+
+    /// Re-evaluates dispatch after external queue policy made entries runnable.
+    pub fn reevaluate_dispatch(&mut self, now: MonotonicInstant) -> ActionBatch {
+        self.evaluate_dispatch(now)
+    }
+
+    /// Returns whether a manager slow path should run now.
+    pub fn manager_should_run(&self, now: MonotonicInstant) -> bool {
+        self.management_pending
+            && (self.can_spawn_worker(now)
+                || (self.policy.idle_retire() && self.find_retirable_idle(now).is_some()))
+    }
+
+    /// Returns whether the current execution has CPU-intensive accounting.
+    pub fn worker_is_cpu_intensive(&self, worker: WorkerId) -> bool {
+        self.checked_worker(worker)
+            .ok()
+            .and_then(|index| self.workers[index].current)
+            .is_some_and(|current| current.accounting() == ExecutionAccounting::CpuIntensive)
+    }
+
+    #[cfg(unittest)]
+    pub fn set_cpu_intensive_threshold_for_tests(&mut self, threshold: ktime_types::TimeSpan) {
+        self.policy.set_cpu_intensive_threshold_for_tests(threshold);
+    }
+
+    #[cfg(unittest)]
+    pub fn set_create_retry_delay_for_tests(
+        &mut self,
+        delay: ktime_types::TimeSpan,
+        now: MonotonicInstant,
+    ) {
+        self.policy.set_create_retry_delay_for_tests(delay);
+        if self.create_retry_after.is_some() {
+            self.create_retry_after = now.checked_add(delay);
+        }
+    }
+
+    #[cfg(unittest)]
+    pub fn cancel_preparing_for_tests(&mut self) {
+        for index in 0..MAX_WORKERS {
+            if self.workers[index].state == WorkerState::Preparing {
+                self.transition(index, WorkerState::Idle);
+                self.workers[index].clear_execution();
+            }
+        }
+    }
+
+    #[cfg(unittest)]
+    pub fn prepare_worker_for_tests(
+        &mut self,
+        worker: WorkerId,
+    ) -> Result<(), WorkerPoolError<O, K, T>> {
+        let index = self.checked_worker(worker)?;
+        self.cancel_preparing_for_tests();
+        if self.workers[index].state != WorkerState::Idle {
+            return Err(WorkerPoolError::InvalidWorkerState);
+        }
+        self.transition(index, WorkerState::Preparing);
+        Ok(())
+    }
+
+    #[cfg(unittest)]
+    pub fn start_worker_for_tests(
+        &mut self,
+        worker: WorkerId,
+        now: MonotonicInstant,
+    ) -> Result<WorkerExecutionToken, WorkerPoolError<O, K, T>> {
+        let index = self.checked_worker(worker)?;
+        match self.workers[index].state {
+            WorkerState::Idle => self.transition(index, WorkerState::Preparing),
+            WorkerState::Preparing => {}
+            WorkerState::Running => {
+                let token = self.workers[index].reserve_execution_token();
+                let _ = self.workers[index].start_reserved_execution(token, now);
+                return Ok(token);
+            }
+            _ => return Err(WorkerPoolError::InvalidWorkerState),
+        }
+        let token = self.workers[index].reserve_execution_token();
+        self.worker_started_with_token(worker, token, now)?;
+        Ok(token)
     }
 
     fn checked_worker(&self, worker: WorkerId) -> Result<usize, WorkerPoolError<O, K, T>> {
@@ -444,6 +643,7 @@ where
 
     fn evaluate_dispatch(&mut self, now: MonotonicInstant) -> ActionBatch {
         let mut actions = ActionBatch::new();
+        self.mark_cpu_intensive_workers(now);
         if self.queue.runnable_len() == 0
             || self.counts.nr_concurrency != 0
             || self.counts.nr_preparing != 0
@@ -472,6 +672,28 @@ where
             actions.push_immediate(ImmediateAction::WakeManager { pool: self.id });
         }
         actions
+    }
+
+    fn mark_cpu_intensive_workers(&mut self, now: MonotonicInstant) {
+        if self.queue.runnable_len() == 0 || self.counts.nr_concurrency == 0 {
+            return;
+        }
+        for index in 0..MAX_WORKERS {
+            if self.workers[index].state != WorkerState::Running {
+                continue;
+            }
+            let Some(current) = self.workers[index].current else {
+                continue;
+            };
+            if current.accounting() == ExecutionAccounting::CpuIntensive
+                || now.saturating_duration_since(current.started_at)
+                    < self.policy.cpu_intensive_threshold()
+            {
+                continue;
+            }
+            self.workers[index].mark_cpu_intensive();
+            self.counts.nr_concurrency = self.counts.nr_concurrency.saturating_sub(1);
+        }
     }
 
     fn can_spawn_worker(&self, now: MonotonicInstant) -> bool {

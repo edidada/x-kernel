@@ -28,6 +28,10 @@ impl RunningWorkSlot {
         self.current_work_key == work_key && self.current_instance_id == Some(instance_id)
     }
 
+    pub(crate) fn has_current_work(&self) -> bool {
+        self.current_instance_id.is_some()
+    }
+
     pub(crate) fn set_current_work(
         &mut self,
         work_key: usize,

@@ -6,10 +6,10 @@ mod running;
 mod worker_pool;
 
 pub use kworkerpool::{WorkerExecutionToken, WorkerId, WorkerWakePlan};
-pub(crate) use kworkerpool::{WorkerRecord as Worker, WorkerSleepTransition, WorkerState};
+pub(crate) use kworkerpool::{WorkerSleepTransition, WorkerState};
 pub(crate) use running::RunningWorkSlot;
 pub use worker_pool::{
     WORKER_CREATE_RETRY_DELAY, WorkerPoolAttrs, WorkerPoolCpuAffinity, WorkerPoolExecution,
     WorkerPoolSchedulingPolicy,
 };
-pub(crate) use worker_pool::{WorkerPool, WorkerPoolStatsSnapshot};
+pub(crate) use worker_pool::{WorkerPool, WorkerPoolState, WorkerPoolStatsSnapshot};

@@ -25,7 +25,7 @@ pub(crate) use attrs::validate_workqueue_attrs;
 pub use attrs::{DEFAULT_WORKQUEUE_MAX_ACTIVE, WorkQueueAttrs, WorkQueueFlags, WorkQueueMaxActive};
 pub(super) use entry::{BarrierAttachResult, WorkEntry};
 pub use entry_queue::MAX_WORKQUEUE_PENDING;
-pub(super) use entry_queue::{PendingBarrierAttach, PendingWorkEntry, PendingWorkStore};
+pub(super) use entry_queue::PendingBarrierAttach;
 pub use error::{
     QueueDelayedWorkResult, QueueWorkResult, WorkQueueAllocError, WorkQueueStartError,
 };

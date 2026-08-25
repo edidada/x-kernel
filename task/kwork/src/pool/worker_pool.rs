@@ -7,25 +7,21 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use kcpu_id_map::LogicalCpuId;
 use kspin::SpinNoIrq;
 use ktime_types::{MonotonicInstant, TimeSpan};
+use kworkerpool::{
+    ActionBatch, BuiltinPoolKind, ClaimFailedResult, DispatchResult, ImmediateAction,
+    ManagementAction, ManagementComplete, ParkDecision, PoolEntry, PoolId,
+    QueueRemoveResult as PoolQueueRemoveResult, WorkerPool as CoreWorkerPool, WorkerPoolPolicy,
+};
 
 use super::{
-    RunningWorkSlot, Worker, WorkerExecutionToken, WorkerId, WorkerSleepTransition, WorkerState,
+    RunningWorkSlot, WorkerExecutionToken, WorkerId, WorkerSleepTransition, WorkerState,
     WorkerWakePlan,
 };
 use crate::{
-    BarrierAttachResult, MAX_SYSTEM_WORKERS_PER_CPU, PendingBarrierAttach, PendingWorkEntry,
-    PendingWorkStore, QueueOwner, RunQueueEntryClaim, ScheduledWork, WorkBarrier, WorkColor,
-    WorkEntry, WorkInstanceId, WorkQueuePoolBinding, WorkQueuePoolState, WorkStatus,
-    WorkqueueTimerIf,
+    BarrierAttachResult, MAX_SYSTEM_WORKERS_PER_CPU, MAX_WORKQUEUE_PENDING, PendingBarrierAttach,
+    QueueOwner, RunQueueEntryClaim, ScheduledWork, WorkBarrier, WorkColor, WorkEntry,
+    WorkInstanceId, WorkQueuePoolBinding, WorkQueuePoolState, WorkStatus, WorkqueueTimerIf,
 };
-
-/// Default CPU-intensive threshold for one worker pool.
-///
-/// A worker whose current callback runs for at least this long stops counting
-/// toward the pool's `nr_running` concurrency accounting, so queued work can
-/// wake another worker. This mirrors the Linux default of
-/// `wq_cpu_intensive_thresh_init` (10 ms on normal hardware).
-pub(crate) const DEFAULT_CPU_INTENSIVE_THRESHOLD: TimeSpan = TimeSpan::from_millis(10);
 
 /// Default backoff after provider-side dynamic worker creation fails.
 ///
@@ -33,6 +29,11 @@ pub(crate) const DEFAULT_CPU_INTENSIVE_THRESHOLD: TimeSpan = TimeSpan::from_mill
 /// creation in a tight loop. X-Kernel keeps the same pressure-control
 /// property while the task provider owns actual worker task creation.
 pub const WORKER_CREATE_RETRY_DELAY: TimeSpan = TimeSpan::from_millis(10);
+
+type WorkerPoolCore =
+    CoreWorkerPool<usize, usize, WorkEntry, MAX_SYSTEM_WORKERS_PER_CPU, MAX_WORKQUEUE_PENDING>;
+
+const DEFAULT_CORE_POOL_ID: PoolId = PoolId::new(BuiltinPoolKind::Normal, LogicalCpuId::new(0));
 
 /// Execution domain backed by a worker pool.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,26 +99,25 @@ impl WorkerPoolAttrs {
 }
 
 pub(crate) struct WorkerPoolPendingRemoval {
-    entry: Option<PendingWorkEntry>,
+    entry: Option<WorkEntry>,
+    was_runnable: bool,
 }
 
 impl WorkerPoolPendingRemoval {
     pub(crate) fn entry(&self) -> Option<&WorkEntry> {
-        self.entry.as_ref().map(PendingWorkEntry::entry)
+        self.entry.as_ref()
     }
 
     pub(crate) fn entry_mut(&mut self) -> Option<&mut WorkEntry> {
-        self.entry.as_mut().map(PendingWorkEntry::entry_mut)
+        self.entry.as_mut()
     }
 
     pub(crate) fn is_runnable(&self) -> bool {
-        self.entry
-            .as_ref()
-            .is_some_and(PendingWorkEntry::is_runnable)
+        self.entry.is_some() && self.was_runnable
     }
 
     pub(crate) fn into_work(self) -> Option<ScheduledWork> {
-        self.entry.map(PendingWorkEntry::into_work)
+        self.entry.map(WorkEntry::into_work)
     }
 }
 
@@ -182,7 +182,10 @@ impl WorkerPool {
                 warn!("worker pool attribute mismatch: existing={existing:?}, requested={attrs:?}");
             }
             Some(_) => {}
-            None => *current = Some(attrs),
+            None => {
+                *current = Some(attrs);
+                self.state.lock().configure_core(attrs);
+            }
         }
     }
 
@@ -200,7 +203,7 @@ impl WorkerPool {
 
     pub(crate) fn update_runnable_stats(&self, state: &WorkerPoolState) {
         self.stats
-            .update_runnable(state.runnable_count, WorkqueueTimerIf::monotonic_time());
+            .update_runnable(state.runnable_count(), WorkqueueTimerIf::monotonic_time());
     }
 
     pub(crate) fn stats_snapshot(&self) -> WorkerPoolStatsSnapshot {
@@ -277,32 +280,12 @@ fn decode_instant_ns(nanos: u64) -> Option<MonotonicInstant> {
 pub(crate) struct PoolTestFreeze {
     /// Wake plans buffered while frozen.
     deferred: WorkerWakePlan,
-    /// `manager_needed` as observed at freeze time, restored on a discard
-    /// unfreeze so buffered kick evaluations leave no stale manager request.
-    saved_manager_needed: bool,
 }
 
 pub(crate) struct WorkerPoolState {
-    pub(crate) pending: PendingWorkStore,
-    pub(crate) runnable_count: usize,
-    pub(crate) nr_running: usize,
-    pub(crate) manager_needed: bool,
-    pub(crate) manager_active: bool,
-    pub(crate) installed_workers: usize,
-    pub(crate) workers: [Worker; MAX_SYSTEM_WORKERS_PER_CPU],
+    core: WorkerPoolCore,
+    pending_actions: ActionBatch,
     running: [RunningWorkSlot; MAX_SYSTEM_WORKERS_PER_CPU],
-    /// How long a callback may run before its worker stops counting toward
-    /// `nr_running`.
-    ///
-    /// This is the X-Kernel counterpart of Linux `pool->cpu_intensive_thresh`.
-    cpu_intensive_threshold: TimeSpan,
-    /// Earliest time a failed dynamic worker creation may be retried.
-    ///
-    /// This is a pool-level throttle for provider resource pressure. It does
-    /// not change workqueue policy flags and does not implement MEM_RECLAIM
-    /// rescuer semantics.
-    worker_create_retry_after: Option<MonotonicInstant>,
-    worker_create_retry_delay: TimeSpan,
     /// Active test wake freeze, if any.
     #[cfg(unittest)]
     test_freeze: Option<PoolTestFreeze>,
@@ -311,37 +294,108 @@ pub(crate) struct WorkerPoolState {
 impl WorkerPoolState {
     const fn new() -> Self {
         Self {
-            pending: PendingWorkStore::new(),
-            runnable_count: 0,
-            nr_running: 0,
-            manager_needed: false,
-            manager_active: false,
-            installed_workers: 0,
-            workers: [const { Worker::new() }; MAX_SYSTEM_WORKERS_PER_CPU],
+            core: WorkerPoolCore::new(
+                DEFAULT_CORE_POOL_ID,
+                WorkerPoolPolicy::for_kind(BuiltinPoolKind::Normal),
+            ),
+            pending_actions: ActionBatch::new(),
             running: [const { RunningWorkSlot::new() }; MAX_SYSTEM_WORKERS_PER_CPU],
-            cpu_intensive_threshold: DEFAULT_CPU_INTENSIVE_THRESHOLD,
-            worker_create_retry_after: None,
-            worker_create_retry_delay: WORKER_CREATE_RETRY_DELAY,
             #[cfg(unittest)]
             test_freeze: None,
         }
     }
 
+    fn configure_core(&mut self, attrs: WorkerPoolAttrs) {
+        let WorkerPoolCpuAffinity::Pinned(cpu_id) = attrs.cpu_affinity();
+        let kind = match attrs.execution() {
+            WorkerPoolExecution::Task => BuiltinPoolKind::Normal,
+            WorkerPoolExecution::BottomHalf => BuiltinPoolKind::Bh,
+        };
+        let _ = self
+            .core
+            .configure_empty(PoolId::new(kind, cpu_id), WorkerPoolPolicy::for_kind(kind));
+    }
+
+    fn now() -> MonotonicInstant {
+        WorkqueueTimerIf::monotonic_time()
+    }
+
+    fn wake_plan_from_actions(actions: ActionBatch) -> WorkerWakePlan {
+        let mut plan = WorkerWakePlan::default();
+        for action in actions.immediate() {
+            match action {
+                ImmediateAction::WakeWorker { worker, .. } => {
+                    if plan.worker_to_wake.is_none() {
+                        plan.worker_to_wake = Some(worker);
+                    }
+                }
+                ImmediateAction::WakeManager { .. } => {
+                    plan.should_wake_manager = true;
+                }
+                ImmediateAction::RaiseBottomHalf { .. }
+                | ImmediateAction::ArmWorkerTimer { .. } => {}
+            }
+        }
+        for action in actions.management() {
+            match action {
+                ManagementAction::SpawnWorker { .. } | ManagementAction::RetireWorker { .. } => {
+                    plan.should_wake_manager = true;
+                }
+            }
+        }
+        plan
+    }
+
+    fn evaluate_wake_plan(&mut self) -> WorkerWakePlan {
+        let mut actions = core::mem::take(&mut self.pending_actions);
+        actions.append(self.core.reevaluate_dispatch(Self::now()));
+        Self::wake_plan_from_actions(actions)
+    }
+
+    fn defer_actions(&mut self, actions: ActionBatch) {
+        self.pending_actions.append(actions);
+    }
+
+    pub(crate) fn runnable_count(&self) -> usize {
+        self.core.runnable_len()
+    }
+
+    pub(crate) fn nr_running(&self) -> usize {
+        self.core.nr_concurrency()
+    }
+
+    pub(crate) fn worker_state(&self, worker_id: usize) -> Option<WorkerState> {
+        self.core.worker_state(WorkerId::new(worker_id))
+    }
+
+    pub(crate) fn worker_is_cpu_intensive(&self, worker_id: usize) -> bool {
+        self.core.worker_is_cpu_intensive(WorkerId::new(worker_id))
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn enqueue_test_work(
+        &mut self,
+        work: &ScheduledWork,
+        owner: QueueOwner,
+        color: WorkColor,
+    ) -> Result<(), ()> {
+        self.push_runnable_entry(WorkEntry::new(
+            work.clone(),
+            owner,
+            color,
+            WorkInstanceId::for_tests(1),
+        ))
+    }
+
     #[cfg(unittest)]
     pub(crate) fn set_cpu_intensive_threshold_for_tests(&mut self, threshold: TimeSpan) {
-        self.cpu_intensive_threshold = threshold;
+        self.core.set_cpu_intensive_threshold_for_tests(threshold);
     }
 
     #[cfg(unittest)]
     pub(crate) fn set_worker_create_retry_delay_for_tests(&mut self, delay: TimeSpan) {
-        self.worker_create_retry_delay = delay;
-        if self.worker_create_retry_after.is_some() {
-            self.worker_create_retry_after = Some(
-                WorkqueueTimerIf::monotonic_time()
-                    .checked_add(delay)
-                    .unwrap_or(MonotonicInstant::from_span_since_origin(TimeSpan::MAX)),
-            );
-        }
+        self.core
+            .set_create_retry_delay_for_tests(delay, WorkqueueTimerIf::monotonic_time());
     }
 
     /// Test-only: starts a wake freeze for exclusive pool control.
@@ -355,7 +409,6 @@ impl WorkerPoolState {
         }
         self.test_freeze = Some(PoolTestFreeze {
             deferred: WorkerWakePlan::default(),
-            saved_manager_needed: self.manager_needed,
         });
     }
 
@@ -399,29 +452,25 @@ impl WorkerPoolState {
         if !discard_deferred {
             return freeze.deferred;
         }
-        self.manager_needed = freeze.saved_manager_needed;
-        for (worker_id, worker) in self.workers.iter_mut().enumerate() {
-            if worker.state == WorkerState::Preparing {
-                worker.state = WorkerState::Idle;
-                worker.clear_current_execution();
-                let _ = self.running[worker_id].clear_current_work();
-            }
+        self.core.cancel_preparing_for_tests();
+        for worker_id in 0..MAX_SYSTEM_WORKERS_PER_CPU {
+            let _ = self.running[worker_id].clear_current_work();
         }
         WorkerWakePlan::default()
     }
 
     pub(crate) fn has_runnable_work(&self) -> bool {
-        self.runnable_count != 0
+        self.core.runnable_len() != 0
     }
 
     #[cfg(unittest)]
     pub(crate) fn pending_len_for_binding(&self, binding_key: usize) -> usize {
-        self.pending.pending_len_for_binding(binding_key)
+        self.core.queued_len_for_owner(&binding_key)
     }
 
     #[cfg(unittest)]
     pub(crate) fn runnable_len_for_binding(&self, binding_key: usize) -> usize {
-        self.pending.runnable_len_for_binding(binding_key)
+        self.core.runnable_len_for_owner(&binding_key)
     }
 
     #[cfg(unittest)]
@@ -439,99 +488,48 @@ impl WorkerPoolState {
     ) {
         binding.configure_max_active(max_active);
         let mut runnable_budget = binding.reset_active_to_running();
-        let deactivated = self.pending.deactivate_runnable_for_binding(binding_key);
-        self.runnable_count = self.runnable_count.saturating_sub(deactivated);
+        let _deactivated = self.core.defer_runnable_for_owner(&binding_key);
 
-        while runnable_budget != 0
-            && self
-                .pending
-                .activate_first_inactive_for_binding(binding_key)
-        {
+        while runnable_budget != 0 {
+            let (promoted, actions) = self.core.promote_deferred(&binding_key, 1, Self::now());
+            self.defer_actions(actions);
+            if promoted == 0 {
+                break;
+            }
             binding.add_active();
-            self.runnable_count += 1;
             runnable_budget -= 1;
         }
     }
 
-    pub(crate) fn need_more_worker(&self) -> bool {
-        self.runnable_count != 0
-            && self.nr_running == 0
-            && !self
-                .workers
-                .iter()
-                .any(|worker| worker.state == WorkerState::Preparing)
-    }
-
-    pub(crate) fn worker_creation_retry_ready(&self) -> bool {
-        self.worker_create_retry_after
-            .is_none_or(|deadline| WorkqueueTimerIf::monotonic_time() >= deadline)
-    }
-
     pub(crate) fn manager_should_run(&self) -> bool {
-        self.manager_needed && !self.manager_active && self.worker_creation_retry_ready()
+        self.core.manager_should_run(Self::now())
     }
 
     pub(crate) fn installed_worker_count(&self) -> usize {
-        self.installed_workers
-    }
-
-    fn first_idle_worker(&self) -> Option<usize> {
-        self.workers
-            .iter()
-            .position(|worker| worker.state == WorkerState::Idle)
+        self.core.installed_workers()
     }
 
     pub(crate) fn select_worker_to_kick(&mut self) -> WorkerWakePlan {
-        self.auto_mark_cpu_intensive();
-        if !self.need_more_worker() {
-            return WorkerWakePlan {
-                worker_to_wake: None,
-                should_wake_manager: false,
-            };
-        }
-        if let Some(worker_id) = self.first_idle_worker() {
-            self.workers[worker_id].state = WorkerState::Preparing;
-            return WorkerWakePlan {
-                worker_to_wake: Some(WorkerId::new(worker_id)),
-                should_wake_manager: false,
-            };
-        }
-
-        let should_wake_manager = !self.manager_active && self.worker_creation_retry_ready();
-        if !self.manager_active {
-            self.manager_needed = true;
-        }
-        WorkerWakePlan {
-            worker_to_wake: None,
-            should_wake_manager,
-        }
+        self.evaluate_wake_plan()
     }
 
-    /// Marks running workers that exceeded the CPU-intensive threshold.
-    ///
-    /// Demand-driven fallback for Linux `wq_worker_tick` marking.
-    ///
-    /// The scheduler tick marks long-running workers while they execute. This
-    /// fallback keeps enqueue/block/finish kick evaluation sufficient when a
-    /// runnable work arrives after a worker has already crossed the threshold.
-    /// Marked workers leave `nr_running`, which lets [`Self::need_more_worker`]
-    /// wake another worker for queued work. The timestamp comes from the timer
-    /// provider, which is a lock-free counter read and therefore safe under the
-    /// pool lock in IRQ-safe enqueue paths.
-    fn auto_mark_cpu_intensive(&mut self) {
-        if self.runnable_count == 0 || self.nr_running == 0 {
-            return;
-        }
-        let now = WorkqueueTimerIf::monotonic_time();
-        for worker in self.workers.iter_mut() {
-            if worker.state != WorkerState::Running || worker.cpu_intensive {
-                continue;
-            }
-            if worker.run_exceeds(self.cpu_intensive_threshold, now) {
-                worker.cpu_intensive = true;
-                self.nr_running = self.nr_running.saturating_sub(1);
-            }
-        }
+    pub(crate) fn push_runnable_entry(&mut self, entry: WorkEntry) -> Result<(), ()> {
+        let owner = entry.binding_key();
+        let key = entry.work().key();
+        let actions = self
+            .core
+            .enqueue_runnable(PoolEntry::new(owner, key, entry), Self::now())
+            .map_err(|_| ())?;
+        self.defer_actions(actions);
+        Ok(())
+    }
+
+    pub(crate) fn push_inactive_entry(&mut self, entry: WorkEntry) -> Result<(), ()> {
+        let owner = entry.binding_key();
+        let key = entry.work().key();
+        self.core
+            .enqueue_deferred(PoolEntry::new(owner, key, entry))
+            .map_err(|_| ())
     }
 
     pub(crate) fn remove_pending_work(
@@ -539,11 +537,14 @@ impl WorkerPoolState {
         work: &ScheduledWork,
         binding_key: usize,
     ) -> WorkerPoolPendingRemoval {
-        let removed = self.pending.remove_work_for_key(work, binding_key);
-        if removed.as_ref().is_some_and(PendingWorkEntry::is_runnable) {
-            self.runnable_count = self.runnable_count.saturating_sub(1);
+        let removed = self.core.remove_entry(&binding_key, &work.key());
+        let was_runnable = removed
+            .as_ref()
+            .is_some_and(|(_, lane)| *lane == PoolQueueRemoveResult::Runnable);
+        WorkerPoolPendingRemoval {
+            entry: removed.map(|(entry, _)| entry.into_payload()),
+            was_runnable,
         }
-        WorkerPoolPendingRemoval { entry: removed }
     }
 
     pub(crate) fn remove_active_entry_locked(
@@ -588,12 +589,10 @@ impl WorkerPoolState {
             return false;
         }
 
-        if self
-            .pending
-            .activate_first_inactive_for_binding(binding_key)
-        {
+        let (promoted, actions) = self.core.promote_deferred(&binding_key, 1, Self::now());
+        self.defer_actions(actions);
+        if promoted != 0 {
             binding.add_active();
-            self.runnable_count += 1;
             return true;
         }
         false
@@ -605,8 +604,13 @@ impl WorkerPoolState {
         binding_key: usize,
         barrier: WorkBarrier,
     ) -> PendingBarrierAttach {
-        self.pending
-            .attach_barrier_to_work_for_key(work, binding_key, barrier)
+        let Some(entry) = self.core.get_payload_mut(&binding_key, &work.key()) else {
+            return PendingBarrierAttach::Missing;
+        };
+        match entry.attach_barrier(barrier) {
+            BarrierAttachResult::Attached => PendingBarrierAttach::Attached,
+            BarrierAttachResult::Full => PendingBarrierAttach::Full,
+        }
     }
 
     pub(crate) fn take_any_runnable_work(
@@ -615,24 +619,42 @@ impl WorkerPoolState {
         worker_id: WorkerId,
     ) -> WorkerPoolRunnableTake {
         let worker_index = worker_id.as_usize();
-        let Some(slot) = self.workers.get_mut(worker_index) else {
-            return WorkerPoolRunnableTake::none();
-        };
-        if !matches!(slot.state, WorkerState::Idle | WorkerState::Preparing) {
+        if worker_index >= MAX_SYSTEM_WORKERS_PER_CPU {
             return WorkerPoolRunnableTake::none();
         }
-        if self.runnable_count == 0 {
+        if self.running[worker_index].has_current_work() {
+            return WorkerPoolRunnableTake::none();
+        }
+        if self.core.runnable_len() == 0 {
             self.clear_worker_current_work(worker_index);
             return WorkerPoolRunnableTake::none();
         }
+        #[cfg(unittest)]
+        if self.test_freeze.is_some() {
+            let _ = self.core.prepare_worker_for_tests(worker_id);
+        }
+        if self.core.worker_state(worker_id) == Some(WorkerState::Idle) {
+            let actions = self.core.reevaluate_dispatch(Self::now());
+            self.defer_actions(actions);
+        }
 
         let mut outcome = WorkerPoolRunnableTake::none();
-        while let Some(mut entry) = self.pending.pop_runnable_candidate() {
+        loop {
+            let mut entry = match self.core.pop_runnable(worker_id) {
+                Ok(DispatchResult::Entry(entry)) => entry.into_payload(),
+                Ok(DispatchResult::Empty) => {
+                    self.clear_worker_current_work(worker_index);
+                    return outcome;
+                }
+                Err(_) => return outcome,
+            };
             let binding_key = entry.binding_key();
             let instance_id = entry.instance_id();
             let entry_owner = entry.owner().clone();
             let work = entry.work().clone();
-            let worker_token = slot.next_execution_token();
+            let Ok(worker_token) = self.core.reserve_execution_token(worker_id) else {
+                return outcome;
+            };
 
             let decision = work.claim_pool_entry_for_run(
                 pool_key,
@@ -647,12 +669,18 @@ impl WorkerPoolState {
                     instance_id,
                 } => {
                     let linked_barriers = entry.take_barriers();
-                    self.runnable_count = self.runnable_count.saturating_sub(1);
-                    self.start_running_work_with_token(
-                        worker_index,
+                    let actions = if let Ok(actions) =
+                        self.core
+                            .worker_started_with_token(worker_id, worker_token, Self::now())
+                    {
+                        actions
+                    } else {
+                        return outcome;
+                    };
+                    self.defer_actions(actions);
+                    self.running[worker_index].set_current_work(
                         work.key(),
                         instance_id,
-                        worker_token,
                         linked_barriers,
                     );
                     return outcome.with_work(work, binding, worker_token);
@@ -660,7 +688,6 @@ impl WorkerPoolState {
                 RunQueueEntryClaim::Stale(status) => {
                     let color = entry.color();
                     let barrier_count = entry.barrier_count();
-                    self.runnable_count = self.runnable_count.saturating_sub(1);
                     outcome
                         .completed_barriers
                         .append(&mut entry.take_barriers());
@@ -670,24 +697,21 @@ impl WorkerPoolState {
                         color,
                         barrier_count,
                     });
+                    match self.core.worker_claim_failed(worker_id, Self::now()) {
+                        Ok((ClaimFailedResult::Retry, actions)) => self.defer_actions(actions),
+                        Ok((ClaimFailedResult::Parked, actions)) => {
+                            self.defer_actions(actions);
+                            return outcome;
+                        }
+                        Err(_) => return outcome,
+                    }
                 }
             }
         }
-
-        self.clear_worker_current_work(worker_index);
-        outcome
     }
 
     pub(crate) fn install_worker(&mut self, worker_id: usize) -> bool {
-        let Some(slot) = self.workers.get_mut(worker_id) else {
-            return false;
-        };
-        if !matches!(slot.state, WorkerState::Empty | WorkerState::Creating) {
-            return false;
-        }
-        slot.state = WorkerState::Idle;
-        self.installed_workers += 1;
-        true
+        self.core.install_worker(WorkerId::new(worker_id)).is_ok()
     }
 
     #[cfg(unittest)]
@@ -698,36 +722,12 @@ impl WorkerPoolState {
         instance_id: WorkInstanceId,
         barriers: alloc::vec::Vec<WorkBarrier>,
     ) -> WorkerExecutionToken {
-        let worker_token = self.workers[worker_id].next_execution_token();
-        self.start_running_work_with_token(
-            worker_id,
-            work_key,
-            instance_id,
-            worker_token,
-            barriers,
-        );
-        worker_token
-    }
-
-    fn start_running_work_with_token(
-        &mut self,
-        worker_id: usize,
-        work_key: usize,
-        instance_id: WorkInstanceId,
-        worker_token: WorkerExecutionToken,
-        barriers: alloc::vec::Vec<WorkBarrier>,
-    ) {
-        let slot = &mut self.workers[worker_id];
-        debug_assert_eq!(slot.generation, worker_token);
-        if slot.state != WorkerState::Running {
-            self.nr_running += 1;
-        }
-        slot.state = WorkerState::Running;
-        // The CPU-intensive flag is per-execution and was cleared when the
-        // previous work finished, so the fresh increment above stays balanced.
-        slot.start_current_execution(WorkqueueTimerIf::monotonic_time());
+        let worker_token = self
+            .core
+            .start_worker_for_tests(WorkerId::new(worker_id), Self::now())
+            .unwrap_or_else(|_| WorkerExecutionToken::first());
         self.running[worker_id].set_current_work(work_key, instance_id, barriers);
-        self.manager_needed = false;
+        worker_token
     }
 
     pub(crate) fn finish_running_work(
@@ -737,31 +737,23 @@ impl WorkerPoolState {
         instance_id: WorkInstanceId,
         worker_token: WorkerExecutionToken,
     ) -> alloc::vec::Vec<WorkBarrier> {
-        let Some(slot) = self.workers.get_mut(worker_id) else {
+        if worker_id >= MAX_SYSTEM_WORKERS_PER_CPU {
             return alloc::vec::Vec::new();
         };
-        if slot.generation != worker_token
-            || !self.running[worker_id].is_running_instance(work_key, instance_id)
-        {
+        if !self.running[worker_id].is_running_instance(work_key, instance_id) {
             warn!("workerqueue worker {worker_id} finished an unexpected work instance");
             return alloc::vec::Vec::new();
         }
-        match slot.state {
-            // CPU-intensive workers already left `nr_running` when marked.
-            WorkerState::Running if !slot.cpu_intensive => {
-                self.nr_running = self.nr_running.saturating_sub(1);
-            }
-            WorkerState::Running | WorkerState::Sleeping => {}
-            WorkerState::Creating
-            | WorkerState::Preparing
-            | WorkerState::Idle
-            | WorkerState::Empty
-            | WorkerState::RetireRequested
-            | WorkerState::Exiting => {}
-        }
-        slot.state = WorkerState::Idle;
-        // Also clears the CPU-intensive flag: marking is per-execution.
-        slot.clear_current_execution();
+        let actions = if let Ok(actions) =
+            self.core
+                .worker_finished(WorkerId::new(worker_id), worker_token, Self::now())
+        {
+            actions
+        } else {
+            warn!("workerqueue worker {worker_id} finished an unexpected work instance");
+            return alloc::vec::Vec::new();
+        };
+        self.defer_actions(actions);
         self.running[worker_id].clear_current_work()
     }
 
@@ -770,23 +762,11 @@ impl WorkerPoolState {
         worker_id: usize,
         worker_token: WorkerExecutionToken,
     ) -> WorkerWakePlan {
-        let Some(slot) = self.workers.get_mut(worker_id) else {
-            return WorkerWakePlan::default();
-        };
-        if slot.state != WorkerState::Running
-            || slot.generation != worker_token
-            || slot.cpu_intensive
-            || !slot.run_exceeds(
-                self.cpu_intensive_threshold,
-                WorkqueueTimerIf::monotonic_time(),
-            )
-        {
-            return WorkerWakePlan::default();
-        }
-
-        slot.cpu_intensive = true;
-        self.nr_running = self.nr_running.saturating_sub(1);
-        self.select_worker_to_kick()
+        Self::wake_plan_from_actions(
+            self.core
+                .worker_tick(WorkerId::new(worker_id), worker_token, Self::now())
+                .unwrap_or_default(),
+        )
     }
 
     pub(crate) fn worker_tick_deadline(
@@ -794,21 +774,12 @@ impl WorkerPoolState {
         worker_id: usize,
         worker_token: WorkerExecutionToken,
     ) -> Option<MonotonicInstant> {
-        let slot = self.workers.get(worker_id)?;
-        if slot.state != WorkerState::Running
-            || slot.generation != worker_token
-            || slot.cpu_intensive
-        {
-            return None;
-        }
-        slot.current_run_started?
-            .checked_add(self.cpu_intensive_threshold)
+        self.core
+            .worker_tick_deadline(WorkerId::new(worker_id), worker_token)
     }
 
     fn clear_worker_current_work(&mut self, worker_id: usize) {
-        if let Some(worker) = self.workers.get_mut(worker_id) {
-            worker.state = WorkerState::Idle;
-            worker.clear_current_execution();
+        if worker_id < MAX_SYSTEM_WORKERS_PER_CPU {
             let _ = self.running[worker_id].clear_current_work();
         }
     }
@@ -820,57 +791,47 @@ impl WorkerPoolState {
         instance_id: WorkInstanceId,
         barrier: WorkBarrier,
     ) -> PendingBarrierAttach {
-        let Some(slot) = self.workers.get_mut(worker_id.as_usize()) else {
+        let worker_index = worker_id.as_usize();
+        if worker_index >= MAX_SYSTEM_WORKERS_PER_CPU {
             return PendingBarrierAttach::Missing;
         };
-        if !matches!(slot.state, WorkerState::Running | WorkerState::Sleeping)
-            || !self.running[worker_id.as_usize()].is_running_instance(work_key, instance_id)
-        {
+        if !self.running[worker_index].is_running_instance(work_key, instance_id) {
             return PendingBarrierAttach::Missing;
         }
-        match self.running[worker_id.as_usize()].push_running_barrier(barrier) {
+        match self.running[worker_index].push_running_barrier(barrier) {
             BarrierAttachResult::Attached => PendingBarrierAttach::Attached,
             BarrierAttachResult::Full => PendingBarrierAttach::Full,
         }
     }
 
-    pub(crate) fn mark_worker_sleeping(&mut self, worker_id: usize) -> WorkerSleepTransition {
-        let mut did_sleep = false;
-        if let Some(slot) = self.workers.get_mut(worker_id)
-            && slot.state == WorkerState::Running
+    pub(crate) fn mark_worker_sleeping(
+        &mut self,
+        worker_id: usize,
+        worker_token: WorkerExecutionToken,
+    ) -> WorkerSleepTransition {
+        match self
+            .core
+            .worker_blocked(WorkerId::new(worker_id), worker_token, Self::now())
         {
-            slot.state = WorkerState::Sleeping;
-            // Marked workers already left `nr_running`; blocking does not
-            // change their accounting.
-            if !slot.cpu_intensive {
-                self.nr_running = self.nr_running.saturating_sub(1);
-            }
-            did_sleep = true;
-        }
-        let wake_plan = if did_sleep {
-            self.select_worker_to_kick()
-        } else {
-            WorkerWakePlan::default()
-        };
-        WorkerSleepTransition {
-            did_sleep,
-            wake_plan,
+            Ok(actions) => WorkerSleepTransition {
+                did_sleep: true,
+                wake_plan: Self::wake_plan_from_actions(actions),
+            },
+            Err(_) => WorkerSleepTransition {
+                did_sleep: false,
+                wake_plan: WorkerWakePlan::default(),
+            },
         }
     }
 
-    pub(crate) fn mark_worker_running(&mut self, worker_id: usize) {
-        let Some(slot) = self.workers.get_mut(worker_id) else {
-            return;
-        };
-        if slot.state == WorkerState::Sleeping {
-            slot.state = WorkerState::Running;
-            // Symmetric with `mark_worker_sleeping`: marked workers stay out of
-            // `nr_running` across sleep/resume.
-            if !slot.cpu_intensive {
-                self.nr_running += 1;
-            }
-            self.manager_needed = false;
-        }
+    pub(crate) fn mark_worker_running(
+        &mut self,
+        worker_id: usize,
+        worker_token: WorkerExecutionToken,
+    ) {
+        let _ = self
+            .core
+            .worker_resumed(WorkerId::new(worker_id), worker_token);
     }
 
     pub(crate) fn prepare_worker_to_wait(&mut self, worker_id: usize) -> bool {
@@ -880,39 +841,23 @@ impl WorkerPoolState {
         if self.test_freeze.is_some() {
             return false;
         }
-        if self.runnable_count == 0
-            && let Some(slot) = self.workers.get_mut(worker_id)
-            && slot.state == WorkerState::Preparing
-        {
-            self.clear_worker_current_work(worker_id);
+        if worker_id >= MAX_SYSTEM_WORKERS_PER_CPU {
+            return false;
         }
-        self.has_runnable_work()
+        match self
+            .core
+            .worker_ready_to_park(WorkerId::new(worker_id), Self::now())
+        {
+            Ok((ParkDecision::Run, _)) => true,
+            Ok((ParkDecision::Wait | ParkDecision::Exit, _)) | Err(_) => false,
+        }
     }
 
     pub(crate) fn reserve_worker_creation(&mut self) -> Option<usize> {
-        if self.manager_active {
-            return None;
+        match self.core.next_management_action(Self::now()) {
+            Some(ManagementAction::SpawnWorker { worker, .. }) => Some(worker.as_usize()),
+            Some(ManagementAction::RetireWorker { .. }) | None => None,
         }
-        if !self.worker_creation_retry_ready() {
-            return None;
-        }
-        if !self.need_more_worker() {
-            self.manager_needed = false;
-            return None;
-        }
-        let Some(worker_id) = self
-            .workers
-            .iter()
-            .position(|worker| worker.state == WorkerState::Empty)
-        else {
-            self.manager_needed = false;
-            self.manager_active = false;
-            return None;
-        };
-        self.manager_needed = false;
-        self.manager_active = true;
-        self.workers[worker_id].state = WorkerState::Creating;
-        Some(worker_id)
     }
 
     pub(crate) fn finish_worker_creation(
@@ -920,28 +865,18 @@ impl WorkerPoolState {
         worker_id: usize,
         success: bool,
     ) -> WorkerWakePlan {
-        if let Some(slot) = self.workers.get_mut(worker_id)
-            && slot.state == WorkerState::Creating
-        {
-            if success {
-                self.worker_create_retry_after = None;
-            } else {
-                slot.state = WorkerState::Empty;
-                slot.clear_current_execution();
-                let _ = self.running[worker_id].clear_current_work();
-                self.worker_create_retry_after = Some(
-                    WorkqueueTimerIf::monotonic_time()
-                        .checked_add(self.worker_create_retry_delay)
-                        .unwrap_or(MonotonicInstant::from_span_since_origin(TimeSpan::MAX)),
-                );
-            }
+        let result = if success {
+            ManagementComplete::Spawned
+        } else {
+            ManagementComplete::SpawnFailed
+        };
+        let actions = self
+            .core
+            .spawn_complete(WorkerId::new(worker_id), result, Self::now())
+            .unwrap_or_default();
+        if !success && worker_id < MAX_SYSTEM_WORKERS_PER_CPU {
+            let _ = self.running[worker_id].clear_current_work();
         }
-        self.manager_active = false;
-
-        if !success && self.need_more_worker() {
-            self.manager_needed = true;
-            return WorkerWakePlan::default();
-        }
-        self.select_worker_to_kick()
+        Self::wake_plan_from_actions(actions)
     }
 }

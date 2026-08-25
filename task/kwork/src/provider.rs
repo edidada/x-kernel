@@ -153,7 +153,7 @@ impl WorkqueueTaskContext {
     /// worker and must not mark it running early.
     pub fn worker_will_block(self) -> bool {
         SystemPoolBinding::for_pool_key(self.pool_key)
-            .is_some_and(|pool| pool.mark_worker_sleeping(self.worker_id))
+            .is_some_and(|pool| pool.mark_worker_sleeping(self.worker_id, self.worker_token))
     }
 
     /// Marks this worker as blocked for worker-pool concurrency accounting
@@ -173,7 +173,7 @@ impl WorkqueueTaskContext {
     pub fn worker_will_block_in_scheduler(self) -> (bool, WorkerWakePlan) {
         match SystemPoolBinding::for_pool_key(self.pool_key) {
             Some(pool) => {
-                let transition = pool.account_worker_sleeping(self.worker_id);
+                let transition = pool.account_worker_sleeping(self.worker_id, self.worker_token);
                 (transition.did_sleep, transition.wake_plan)
             }
             None => (false, WorkerWakePlan::default()),
@@ -198,7 +198,7 @@ impl WorkqueueTaskContext {
     /// issues wakes, so no scheduler-specific variant is needed.
     pub fn worker_did_resume(self) {
         if let Some(pool) = SystemPoolBinding::for_pool_key(self.pool_key) {
-            pool.mark_worker_running(self.worker_id);
+            pool.mark_worker_running(self.worker_id, self.worker_token);
         }
     }
 
