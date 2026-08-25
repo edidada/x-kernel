@@ -32,8 +32,6 @@ pub(crate) enum WorkerState {
 pub(crate) struct Worker {
     pub(crate) state: WorkerState,
     pub(crate) generation: WorkerExecutionToken,
-    pub(crate) current_work_key: usize,
-    pub(crate) current_instance_id: Option<WorkInstanceId>,
     /// Marks the current execution as CPU-intensive for concurrency accounting.
     ///
     /// This is the X-Kernel counterpart of Linux `WORKER_CPU_INTENSIVE`. A
@@ -47,12 +45,6 @@ pub(crate) struct Worker {
     /// The pool compares this against its CPU-intensive threshold to decide
     /// when a running worker stops counting toward concurrency.
     pub(crate) current_run_started: Option<MonotonicInstant>,
-    /// Barriers scheduled behind the current running work.
-    ///
-    /// This is the X-Kernel counterpart of Linux `worker->scheduled` for
-    /// `wq_barrier` linked to a running work. It is bounded so
-    /// `flush_work()` cannot grow storage while holding pool state.
-    running_barriers: WorkBarrierQueue,
 }
 
 impl Worker {
@@ -60,10 +52,49 @@ impl Worker {
         Self {
             state: WorkerState::Empty,
             generation: WorkerExecutionToken::first(),
-            current_work_key: 0,
-            current_instance_id: None,
             cpu_intensive: false,
             current_run_started: None,
+        }
+    }
+
+    pub(crate) fn next_execution_token(&mut self) -> WorkerExecutionToken {
+        self.generation = self.generation.next_generation();
+        self.generation
+    }
+
+    pub(crate) fn clear_current_execution(&mut self) {
+        self.cpu_intensive = false;
+        self.current_run_started = None;
+    }
+
+    pub(crate) fn start_current_execution(&mut self, run_started: MonotonicInstant) {
+        self.cpu_intensive = false;
+        self.current_run_started = Some(run_started);
+    }
+
+    /// Returns whether the current execution ran for at least `threshold`.
+    pub(crate) fn run_exceeds(&self, threshold: TimeSpan, now: MonotonicInstant) -> bool {
+        self.current_run_started
+            .is_some_and(|started| now.saturating_duration_since(started) >= threshold)
+    }
+}
+
+/// Workqueue-owned metadata for one currently running worker slot.
+///
+/// Worker-pool scheduling only needs lifecycle, token, and accounting state.
+/// `kwork` keeps the current work identity and flush barriers in this sidecar
+/// so they do not leak into the generic worker-pool model.
+pub(crate) struct RunningWorkSlot {
+    current_work_key: usize,
+    current_instance_id: Option<WorkInstanceId>,
+    running_barriers: WorkBarrierQueue,
+}
+
+impl RunningWorkSlot {
+    pub(crate) const fn new() -> Self {
+        Self {
+            current_work_key: 0,
+            current_instance_id: None,
             running_barriers: WorkBarrierQueue::new(),
         }
     }
@@ -72,49 +103,24 @@ impl Worker {
         self.current_work_key == work_key && self.current_instance_id == Some(instance_id)
     }
 
-    pub(crate) fn is_current_execution(
-        &self,
-        work_key: usize,
-        instance_id: WorkInstanceId,
-        token: WorkerExecutionToken,
-    ) -> bool {
-        self.generation == token && self.is_running_instance(work_key, instance_id)
-    }
-
-    pub(crate) fn next_execution_token(&mut self) -> WorkerExecutionToken {
-        self.generation = self.generation.next_generation();
-        self.generation
-    }
-
-    pub(crate) fn clear_current_work(&mut self) -> alloc::vec::Vec<WorkBarrier> {
-        self.current_work_key = 0;
-        self.current_instance_id = None;
-        self.cpu_intensive = false;
-        self.current_run_started = None;
-        self.running_barriers.take_all()
-    }
-
     pub(crate) fn set_current_work(
         &mut self,
         work_key: usize,
         instance_id: WorkInstanceId,
         barriers: alloc::vec::Vec<WorkBarrier>,
-        run_started: MonotonicInstant,
     ) {
         self.current_work_key = work_key;
         self.current_instance_id = Some(instance_id);
-        self.cpu_intensive = false;
-        self.current_run_started = Some(run_started);
         let stale = self.running_barriers.take_all();
         debug_assert!(stale.is_empty());
         let appended = self.running_barriers.append_from_vec(barriers);
         debug_assert!(appended);
     }
 
-    /// Returns whether the current execution ran for at least `threshold`.
-    pub(crate) fn run_exceeds(&self, threshold: TimeSpan, now: MonotonicInstant) -> bool {
-        self.current_run_started
-            .is_some_and(|started| now.saturating_duration_since(started) >= threshold)
+    pub(crate) fn clear_current_work(&mut self) -> alloc::vec::Vec<WorkBarrier> {
+        self.current_work_key = 0;
+        self.current_instance_id = None;
+        self.running_barriers.take_all()
     }
 
     pub(crate) fn push_running_barrier(&mut self, barrier: WorkBarrier) -> BarrierAttachResult {
@@ -123,6 +129,11 @@ impl Worker {
         } else {
             BarrierAttachResult::Full
         }
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn current_work_key_for_tests(&self) -> usize {
+        self.current_work_key
     }
 }
 

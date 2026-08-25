@@ -152,8 +152,11 @@ fn observe_pool_worker_slot_work(work: &ScheduledWork) {
         POOL_SLOT_OBSERVED.store(usize::MAX, Ordering::Release);
         return;
     };
-    let observed = test_pool_binding().pool().state.lock().workers[context.worker_id().as_usize()]
-        .current_work_key;
+    let observed = test_pool_binding()
+        .pool()
+        .state
+        .lock()
+        .running_work_key_for_tests(context.worker_id().as_usize());
     POOL_SLOT_OBSERVED.store(usize::from(observed == work.key()), Ordering::Release);
 }
 
@@ -675,7 +678,11 @@ fn test_pool_worker_slot_tracks_current_work() {
     assert!(drain_one_test_work(worker_id));
     assert_eq!(POOL_SLOT_OBSERVED.load(Ordering::Acquire), 1);
     assert_eq!(
-        test_pool_binding().pool().state.lock().workers[worker_id.as_usize()].current_work_key,
+        test_pool_binding()
+            .pool()
+            .state
+            .lock()
+            .running_work_key_for_tests(worker_id.as_usize()),
         0
     );
 }
@@ -2209,7 +2216,6 @@ fn test_system_pool_runnable_query_ignores_running_work() {
     {
         let mut pool_state = pool.state.lock();
         pool_state.workers[worker_id.as_usize()].state = WorkerState::Idle;
-        pool_state.workers[worker_id.as_usize()].current_work_key = 0;
         assert_eq!(pool_state.pending.len(), 0);
         assert_eq!(pool_state.runnable_count, 0);
         assert_eq!(
@@ -2383,7 +2389,7 @@ fn test_system_pool_sleeping_worker_kicks_idle_worker() {
         assert_eq!(transition.wake_plan.worker_to_wake, Some(WorkerId::new(1)));
         assert!(!transition.wake_plan.should_wake_manager);
         assert_eq!(pool_state.workers[0].state, WorkerState::Sleeping);
-        assert_eq!(pool_state.workers[0].current_work_key, 0x51);
+        assert_eq!(pool_state.running_work_key_for_tests(0), 0x51);
         assert_eq!(pool_state.workers[1].state, WorkerState::Preparing);
         assert_eq!(pool_state.nr_running, 0);
     }
@@ -2445,7 +2451,7 @@ fn test_system_pool_sleep_resume_restores_running_count() {
 
         pool_state.mark_worker_running(0);
         assert_eq!(pool_state.workers[0].state, WorkerState::Running);
-        assert_eq!(pool_state.workers[0].current_work_key, 0x62);
+        assert_eq!(pool_state.running_work_key_for_tests(0), 0x62);
         assert_eq!(pool_state.nr_running, 1);
     }
 }
@@ -2466,7 +2472,7 @@ fn test_system_pool_finish_sleeping_worker_does_not_double_decrement() {
         let _ =
             pool_state.finish_running_work(0, 0x73, WorkInstanceId::for_tests(0x73), worker_token);
         assert_eq!(pool_state.workers[0].state, WorkerState::Idle);
-        assert_eq!(pool_state.workers[0].current_work_key, 0);
+        assert_eq!(pool_state.running_work_key_for_tests(0), 0);
         assert_eq!(pool_state.nr_running, 0);
     }
 }
@@ -2739,7 +2745,7 @@ fn test_worker_execution_token_rejects_stale_finish_and_tick() {
             .finish_running_work(0, 0xA8, WorkInstanceId::for_tests(0xA8), stale_token)
             .is_empty()
     );
-    assert_eq!(pool_state.workers[0].current_work_key, 0xA9);
+    assert_eq!(pool_state.running_work_key_for_tests(0), 0xA9);
     assert_eq!(pool_state.nr_running, 1);
 
     let stale_plan = pool_state.tick_running_worker(0, stale_token);

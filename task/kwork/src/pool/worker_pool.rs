@@ -9,7 +9,8 @@ use kspin::SpinNoIrq;
 use ktime_types::{MonotonicInstant, TimeSpan};
 
 use super::{
-    Worker, WorkerExecutionToken, WorkerId, WorkerSleepTransition, WorkerState, WorkerWakePlan,
+    RunningWorkSlot, Worker, WorkerExecutionToken, WorkerId, WorkerSleepTransition, WorkerState,
+    WorkerWakePlan,
 };
 use crate::{
     BarrierAttachResult, MAX_SYSTEM_WORKERS_PER_CPU, PendingBarrierAttach, PendingWorkEntry,
@@ -289,6 +290,7 @@ pub(crate) struct WorkerPoolState {
     pub(crate) manager_active: bool,
     pub(crate) installed_workers: usize,
     pub(crate) workers: [Worker; MAX_SYSTEM_WORKERS_PER_CPU],
+    running: [RunningWorkSlot; MAX_SYSTEM_WORKERS_PER_CPU],
     /// How long a callback may run before its worker stops counting toward
     /// `nr_running`.
     ///
@@ -316,6 +318,7 @@ impl WorkerPoolState {
             manager_active: false,
             installed_workers: 0,
             workers: [const { Worker::new() }; MAX_SYSTEM_WORKERS_PER_CPU],
+            running: [const { RunningWorkSlot::new() }; MAX_SYSTEM_WORKERS_PER_CPU],
             cpu_intensive_threshold: DEFAULT_CPU_INTENSIVE_THRESHOLD,
             worker_create_retry_after: None,
             worker_create_retry_delay: WORKER_CREATE_RETRY_DELAY,
@@ -397,10 +400,11 @@ impl WorkerPoolState {
             return freeze.deferred;
         }
         self.manager_needed = freeze.saved_manager_needed;
-        for worker in self.workers.iter_mut() {
+        for (worker_id, worker) in self.workers.iter_mut().enumerate() {
             if worker.state == WorkerState::Preparing {
                 worker.state = WorkerState::Idle;
-                let _ = worker.clear_current_work();
+                worker.clear_current_execution();
+                let _ = self.running[worker_id].clear_current_work();
             }
         }
         WorkerWakePlan::default()
@@ -418,6 +422,13 @@ impl WorkerPoolState {
     #[cfg(unittest)]
     pub(crate) fn runnable_len_for_binding(&self, binding_key: usize) -> usize {
         self.pending.runnable_len_for_binding(binding_key)
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn running_work_key_for_tests(&self, worker_id: usize) -> usize {
+        self.running
+            .get(worker_id)
+            .map_or(0, RunningWorkSlot::current_work_key_for_tests)
     }
 
     pub(crate) fn configure_binding_max_active(
@@ -714,12 +725,8 @@ impl WorkerPoolState {
         slot.state = WorkerState::Running;
         // The CPU-intensive flag is per-execution and was cleared when the
         // previous work finished, so the fresh increment above stays balanced.
-        slot.set_current_work(
-            work_key,
-            instance_id,
-            barriers,
-            WorkqueueTimerIf::monotonic_time(),
-        );
+        slot.start_current_execution(WorkqueueTimerIf::monotonic_time());
+        self.running[worker_id].set_current_work(work_key, instance_id, barriers);
         self.manager_needed = false;
     }
 
@@ -733,7 +740,9 @@ impl WorkerPoolState {
         let Some(slot) = self.workers.get_mut(worker_id) else {
             return alloc::vec::Vec::new();
         };
-        if !slot.is_current_execution(work_key, instance_id, worker_token) {
+        if slot.generation != worker_token
+            || !self.running[worker_id].is_running_instance(work_key, instance_id)
+        {
             warn!("workerqueue worker {worker_id} finished an unexpected work instance");
             return alloc::vec::Vec::new();
         }
@@ -750,7 +759,8 @@ impl WorkerPoolState {
         }
         slot.state = WorkerState::Idle;
         // Also clears the CPU-intensive flag: marking is per-execution.
-        slot.clear_current_work()
+        slot.clear_current_execution();
+        self.running[worker_id].clear_current_work()
     }
 
     pub(crate) fn tick_running_worker(
@@ -796,7 +806,8 @@ impl WorkerPoolState {
     fn clear_worker_current_work(&mut self, worker_id: usize) {
         if let Some(worker) = self.workers.get_mut(worker_id) {
             worker.state = WorkerState::Idle;
-            let _ = worker.clear_current_work();
+            worker.clear_current_execution();
+            let _ = self.running[worker_id].clear_current_work();
         }
     }
 
@@ -810,10 +821,12 @@ impl WorkerPoolState {
         let Some(slot) = self.workers.get_mut(worker_id.as_usize()) else {
             return PendingBarrierAttach::Missing;
         };
-        if !slot.is_running_instance(work_key, instance_id) {
+        if !matches!(slot.state, WorkerState::Running | WorkerState::Sleeping)
+            || !self.running[worker_id.as_usize()].is_running_instance(work_key, instance_id)
+        {
             return PendingBarrierAttach::Missing;
         }
-        match slot.push_running_barrier(barrier) {
+        match self.running[worker_id.as_usize()].push_running_barrier(barrier) {
             BarrierAttachResult::Attached => PendingBarrierAttach::Attached,
             BarrierAttachResult::Full => PendingBarrierAttach::Full,
         }
@@ -869,8 +882,7 @@ impl WorkerPoolState {
             && let Some(slot) = self.workers.get_mut(worker_id)
             && slot.state == WorkerState::Preparing
         {
-            slot.state = WorkerState::Idle;
-            let _ = slot.clear_current_work();
+            self.clear_worker_current_work(worker_id);
         }
         self.has_runnable_work()
     }
@@ -913,7 +925,8 @@ impl WorkerPoolState {
                 self.worker_create_retry_after = None;
             } else {
                 slot.state = WorkerState::Empty;
-                let _ = slot.clear_current_work();
+                slot.clear_current_execution();
+                let _ = self.running[worker_id].clear_current_work();
                 self.worker_create_retry_after = Some(
                     WorkqueueTimerIf::monotonic_time()
                         .checked_add(self.worker_create_retry_delay)
