@@ -19,53 +19,57 @@ pub struct WorkerPoolPolicy {
     idle_retire: bool,
 }
 
+/// Explicit inputs used to create one worker-pool policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkerPoolPolicyConfig {
+    pub min_workers: usize,
+    pub initial_workers: usize,
+    pub max_workers: usize,
+    pub idle_retire_after: Option<TimeSpan>,
+    pub create_retry_delay: TimeSpan,
+    pub cpu_intensive_threshold: TimeSpan,
+    pub dynamic_create: bool,
+    pub idle_retire: bool,
+}
+
 impl WorkerPoolPolicy {
     /// Creates a policy with explicit fields.
-    pub const fn new(
-        min_workers: usize,
-        initial_workers: usize,
-        max_workers: usize,
-        idle_retire_after: Option<TimeSpan>,
-        create_retry_delay: TimeSpan,
-        cpu_intensive_threshold: TimeSpan,
-        dynamic_create: bool,
-        idle_retire: bool,
-    ) -> Self {
+    pub const fn new(config: WorkerPoolPolicyConfig) -> Self {
         Self {
-            min_workers,
-            initial_workers,
-            max_workers,
-            idle_retire_after,
-            create_retry_delay,
-            cpu_intensive_threshold,
-            dynamic_create,
-            idle_retire,
+            min_workers: config.min_workers,
+            initial_workers: config.initial_workers,
+            max_workers: config.max_workers,
+            idle_retire_after: config.idle_retire_after,
+            create_retry_delay: config.create_retry_delay,
+            cpu_intensive_threshold: config.cpu_intensive_threshold,
+            dynamic_create: config.dynamic_create,
+            idle_retire: config.idle_retire,
         }
     }
 
     /// Default policy template for a built-in pool kind.
     pub const fn for_kind(kind: BuiltinPoolKind) -> Self {
         match kind {
-            BuiltinPoolKind::Normal => Self::new(
-                1,
-                1,
-                4,
-                Some(TimeSpan::from_secs(30)),
-                TimeSpan::from_millis(10),
-                TimeSpan::from_millis(10),
-                true,
-                true,
-            ),
-            BuiltinPoolKind::Bh => Self::new(
-                1,
-                1,
-                1,
-                None,
-                TimeSpan::from_millis(0),
-                TimeSpan::from_millis(10),
-                false,
-                false,
-            ),
+            BuiltinPoolKind::Normal => Self::new(WorkerPoolPolicyConfig {
+                min_workers: 1,
+                initial_workers: 1,
+                max_workers: 4,
+                idle_retire_after: Some(TimeSpan::from_secs(30)),
+                create_retry_delay: TimeSpan::from_millis(10),
+                cpu_intensive_threshold: TimeSpan::from_millis(10),
+                dynamic_create: true,
+                idle_retire: true,
+            }),
+            BuiltinPoolKind::Bh => Self::new(WorkerPoolPolicyConfig {
+                min_workers: 1,
+                initial_workers: 1,
+                max_workers: 1,
+                idle_retire_after: None,
+                create_retry_delay: TimeSpan::from_millis(0),
+                cpu_intensive_threshold: TimeSpan::from_millis(10),
+                dynamic_create: false,
+                idle_retire: false,
+            }),
         }
     }
 

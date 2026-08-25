@@ -65,33 +65,18 @@ pub enum ManagementComplete {
 /// This type is a pure state container. The eventual runtime integration must
 /// protect it with the pool-instance lock and execute returned actions only
 /// after dropping that lock.
-pub struct WorkerPool<
-    O,
-    K,
-    T,
-    const MAX_WORKERS: usize,
-    const RUNNABLE_CAP: usize,
-    const OWNER_CAP: usize,
-    const DEFERRED_CAP: usize,
-> {
+pub struct WorkerPool<O, K, T, const MAX_WORKERS: usize, const ENTRY_CAP: usize> {
     id: PoolId,
     policy: WorkerPoolPolicy,
     workers: [Worker; MAX_WORKERS],
     counts: WorkerCounts,
-    queue: PoolRunQueue<O, K, T, RUNNABLE_CAP, OWNER_CAP, DEFERRED_CAP>,
+    queue: PoolRunQueue<O, K, T, ENTRY_CAP>,
     management_pending: bool,
     create_retry_after: Option<MonotonicInstant>,
 }
 
-impl<
-    O,
-    K,
-    T,
-    const MAX_WORKERS: usize,
-    const RUNNABLE_CAP: usize,
-    const OWNER_CAP: usize,
-    const DEFERRED_CAP: usize,
-> WorkerPool<O, K, T, MAX_WORKERS, RUNNABLE_CAP, OWNER_CAP, DEFERRED_CAP>
+impl<O, K, T, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
+    WorkerPool<O, K, T, MAX_WORKERS, ENTRY_CAP>
 where
     O: Clone + Eq,
     K: Eq,

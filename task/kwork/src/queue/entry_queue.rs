@@ -2,6 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use kworkerpool::{PoolEntry, PoolRunQueue, QueueRemoveResult};
+
 use super::WorkEntry;
 use crate::{BarrierAttachResult, ScheduledWork, WorkBarrier};
 #[cfg(unittest)]
@@ -14,26 +16,13 @@ pub(crate) enum PendingBarrierAttach {
     Full,
 }
 
-/// Maximum number of pending work entries one worker pool's ring holds.
+/// Maximum number of pending work entries one worker pool's storage holds.
 ///
-/// The ring stays bounded and preallocated so enqueue remains IRQ-safe without
-/// allocating in `queue_work()`. The capacity is the build-time
-/// `WORKQUEUE_PENDING_CAP` configuration symbol; all logical workqueues
-/// attached to one pool share this ring, so the effective per-queue capacity
-/// depends on how many queues attach to the pool.
+/// Runnable and inactive entries share this bounded capacity so enqueue remains
+/// IRQ-safe and never allocates. Logical workqueue policy decides whether a new
+/// entry is immediately runnable or deferred; the storage only performs
+/// mechanical lane moves.
 pub const MAX_WORKQUEUE_PENDING: usize = kbuild_config::WORKQUEUE_PENDING_CAP;
-
-/// Fixed-capacity queue-entry ring.
-///
-/// This is the shared storage primitive for queue-owned pending entries and
-/// the pool/binding bookkeeping that needs a bounded, IRQ-safe container. Logical
-/// workqueue accounting, active throttling, and flush colors belong to
-/// `WorkQueuePoolState`, not to this ring.
-pub(crate) struct WorkEntryQueue {
-    entries: [Option<WorkEntry>; MAX_WORKQUEUE_PENDING],
-    head: usize,
-    len: usize,
-}
 
 /// Pending lane from which an entry was removed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,145 +41,11 @@ pub(crate) struct PendingWorkEntry {
 
 /// Linux-like pending storage for one worker pool.
 ///
-/// `runnable` is the X-Kernel counterpart of Linux `worker_pool::worklist`.
-/// `inactive` is the counterpart of `pool_workqueue::inactive_works`; entries
-/// in it are pending but do not consume or provide runnable work until a binding
-/// active slot becomes available. Both rings are fixed-capacity and the store
-/// enforces one shared total capacity so IRQ-safe enqueue keeps the previous
-/// bounded-allocation property.
+/// The concrete bounded queue substrate is owned by `kworkerpool`; `kwork`
+/// supplies the owner key (`binding_key`) and entry key (`ScheduledWork::key`),
+/// while keeping workqueue policy, barriers, and flush semantics here.
 pub(crate) struct PendingWorkStore {
-    runnable: WorkEntryQueue,
-    inactive: WorkEntryQueue,
-}
-
-impl WorkEntryQueue {
-    pub(crate) const fn new() -> Self {
-        Self {
-            entries: [const { None }; MAX_WORKQUEUE_PENDING],
-            head: 0,
-            len: 0,
-        }
-    }
-
-    fn physical_index(&self, logical_index: usize) -> usize {
-        (self.head + logical_index) % MAX_WORKQUEUE_PENDING
-    }
-
-    fn push_entry(&mut self, entry: WorkEntry) -> Result<(), ()> {
-        if self.len == MAX_WORKQUEUE_PENDING {
-            return Err(());
-        }
-        let tail = self.physical_index(self.len);
-        self.entries[tail] = Some(entry);
-        self.len += 1;
-        Ok(())
-    }
-
-    fn remove_logical_entry(&mut self, logical_index: usize) -> Option<WorkEntry> {
-        let physical_index = self.physical_index(logical_index);
-        let removed = self.entries[physical_index].take();
-
-        for logical in logical_index..(self.len - 1) {
-            let current = self.physical_index(logical);
-            let next = self.physical_index(logical + 1);
-            self.entries[current] = self.entries[next].take();
-        }
-        let tail = self.physical_index(self.len - 1);
-        self.entries[tail] = None;
-        self.len -= 1;
-        if self.len == 0 {
-            self.head = 0;
-        }
-        removed
-    }
-
-    fn pop_front_entry(&mut self) -> Option<WorkEntry> {
-        if self.len == 0 {
-            return None;
-        }
-        let physical_index = self.head;
-        let entry = self.entries[physical_index].take();
-        self.len -= 1;
-        if self.len == 0 {
-            self.head = 0;
-        } else {
-            self.head = self.physical_index(1);
-        }
-        entry
-    }
-
-    fn remove_work_for_key(
-        &mut self,
-        work: &ScheduledWork,
-        binding_key: usize,
-    ) -> Option<WorkEntry> {
-        let logical_index = (0..self.len).find(|index| {
-            self.entries[self.physical_index(*index)]
-                .as_ref()
-                .is_some_and(|queued| {
-                    queued.work().same_work(work) && queued.binding_key() == binding_key
-                })
-        })?;
-        self.remove_logical_entry(logical_index)
-    }
-
-    fn attach_barrier_to_work_for_key(
-        &mut self,
-        work: &ScheduledWork,
-        binding_key: usize,
-        barrier: WorkBarrier,
-    ) -> PendingBarrierAttach {
-        let Some(logical_index) = (0..self.len).find(|index| {
-            self.entries[self.physical_index(*index)]
-                .as_ref()
-                .is_some_and(|entry| {
-                    entry.work().same_work(work) && entry.binding_key() == binding_key
-                })
-        }) else {
-            return PendingBarrierAttach::Missing;
-        };
-        let physical = self.physical_index(logical_index);
-        let entry = self.entries[physical]
-            .as_mut()
-            .expect("found queued work entry should still exist");
-        match entry.attach_barrier(barrier) {
-            BarrierAttachResult::Attached => PendingBarrierAttach::Attached,
-            BarrierAttachResult::Full => PendingBarrierAttach::Full,
-        }
-    }
-
-    fn remove_first_for_binding(&mut self, binding_key: usize) -> Option<WorkEntry> {
-        let logical_index = (0..self.len).find(|index| {
-            self.entries[self.physical_index(*index)]
-                .as_ref()
-                .is_some_and(|entry| entry.binding_key() == binding_key)
-        })?;
-        self.remove_logical_entry(logical_index)
-    }
-
-    fn pop_front_matching(&mut self, binding_key: usize) -> Option<WorkEntry> {
-        let logical_index = (0..self.len).find(|index| {
-            self.entries[self.physical_index(*index)]
-                .as_ref()
-                .is_some_and(|entry| entry.binding_key() == binding_key)
-        })?;
-        self.remove_logical_entry(logical_index)
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.len
-    }
-
-    #[cfg(unittest)]
-    fn count_for_binding(&self, binding_key: usize) -> usize {
-        (0..self.len)
-            .filter(|index| {
-                self.entries[self.physical_index(*index)]
-                    .as_ref()
-                    .is_some_and(|entry| entry.binding_key() == binding_key)
-            })
-            .count()
-    }
+    entries: PoolRunQueue<usize, usize, WorkEntry, MAX_WORKQUEUE_PENDING>,
 }
 
 impl PendingWorkEntry {
@@ -218,23 +73,23 @@ impl PendingWorkEntry {
 impl PendingWorkStore {
     pub(crate) const fn new() -> Self {
         Self {
-            runnable: WorkEntryQueue::new(),
-            inactive: WorkEntryQueue::new(),
+            entries: PoolRunQueue::new(),
         }
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.runnable.len() + self.inactive.len()
+        self.entries.len()
     }
 
     fn push_entry(&mut self, entry: WorkEntry, lane: WorkEntryLane) -> Result<(), ()> {
-        if self.len() == MAX_WORKQUEUE_PENDING {
-            return Err(());
-        }
+        let owner = entry.binding_key();
+        let key = entry.work().key();
+        let entry = PoolEntry::new(owner, key, entry);
         match lane {
-            WorkEntryLane::Runnable => self.runnable.push_entry(entry),
-            WorkEntryLane::Inactive => self.inactive.push_entry(entry),
+            WorkEntryLane::Runnable => self.entries.push_runnable(entry),
+            WorkEntryLane::Inactive => self.entries.push_deferred(entry),
         }
+        .map_err(|_| ())
     }
 
     pub(crate) fn push_runnable(&mut self, entry: WorkEntry) -> Result<(), ()> {
@@ -262,33 +117,21 @@ impl PendingWorkStore {
 
     #[cfg(unittest)]
     pub(crate) fn pending_len_for_binding(&self, binding_key: usize) -> usize {
-        self.runnable.count_for_binding(binding_key) + self.inactive.count_for_binding(binding_key)
+        self.entries.runnable_len_for_owner(&binding_key)
+            + self.entries.deferred_len_for_owner(&binding_key)
     }
 
     #[cfg(unittest)]
     pub(crate) fn runnable_len_for_binding(&self, binding_key: usize) -> usize {
-        self.runnable.count_for_binding(binding_key)
+        self.entries.runnable_len_for_owner(&binding_key)
     }
 
     pub(crate) fn deactivate_runnable_for_binding(&mut self, binding_key: usize) -> usize {
-        let mut moved = 0usize;
-        while let Some(entry) = self.runnable.pop_front_matching(binding_key) {
-            self.inactive
-                .push_entry(entry)
-                .expect("moving within pending store should keep total capacity");
-            moved += 1;
-        }
-        moved
+        self.entries.defer_runnable_for_owner(&binding_key)
     }
 
     pub(crate) fn activate_first_inactive_for_binding(&mut self, binding_key: usize) -> bool {
-        let Some(entry) = self.inactive.remove_first_for_binding(binding_key) else {
-            return false;
-        };
-        self.runnable
-            .push_entry(entry)
-            .expect("moving within pending store should keep total capacity");
-        true
+        self.entries.promote_deferred(&binding_key, 1) != 0
     }
 
     pub(crate) fn remove_work_for_key(
@@ -296,12 +139,17 @@ impl PendingWorkStore {
         work: &ScheduledWork,
         binding_key: usize,
     ) -> Option<PendingWorkEntry> {
-        if let Some(entry) = self.runnable.remove_work_for_key(work, binding_key) {
-            return Some(PendingWorkEntry::new(entry, WorkEntryLane::Runnable));
-        }
-        self.inactive
-            .remove_work_for_key(work, binding_key)
-            .map(|entry| PendingWorkEntry::new(entry, WorkEntryLane::Inactive))
+        self.entries
+            .remove(&binding_key, &work.key())
+            .map(|(entry, lane)| {
+                PendingWorkEntry::new(
+                    entry.into_payload(),
+                    match lane {
+                        QueueRemoveResult::Runnable => WorkEntryLane::Runnable,
+                        QueueRemoveResult::Deferred => WorkEntryLane::Inactive,
+                    },
+                )
+            })
     }
 
     pub(crate) fn attach_barrier_to_work_for_key(
@@ -310,20 +158,16 @@ impl PendingWorkStore {
         binding_key: usize,
         barrier: WorkBarrier,
     ) -> PendingBarrierAttach {
-        match self
-            .runnable
-            .attach_barrier_to_work_for_key(work, binding_key, barrier.clone())
-        {
-            PendingBarrierAttach::Attached => PendingBarrierAttach::Attached,
-            PendingBarrierAttach::Full => PendingBarrierAttach::Full,
-            PendingBarrierAttach::Missing => {
-                self.inactive
-                    .attach_barrier_to_work_for_key(work, binding_key, barrier)
-            }
+        let Some(entry) = self.entries.get_mut(&binding_key, &work.key()) else {
+            return PendingBarrierAttach::Missing;
+        };
+        match entry.attach_barrier(barrier) {
+            BarrierAttachResult::Attached => PendingBarrierAttach::Attached,
+            BarrierAttachResult::Full => PendingBarrierAttach::Full,
         }
     }
 
     pub(crate) fn pop_runnable_candidate(&mut self) -> Option<WorkEntry> {
-        self.runnable.pop_front_entry()
+        self.entries.pop_runnable().map(PoolEntry::into_payload)
     }
 }

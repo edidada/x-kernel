@@ -23,10 +23,10 @@ mod worker;
 pub use action::{ActionBatch, ImmediateAction, ManagementAction};
 pub use id::{BuiltinPoolKind, PoolId, WorkerId};
 pub use manager::MANAGER_ACTION_BUDGET_PER_POOL_PASS;
-pub use policy::WorkerPoolPolicy;
+pub use policy::{WorkerPoolPolicy, WorkerPoolPolicyConfig};
 pub use pool::{
     ClaimFailedResult, DispatchResult, ManagementComplete, ParkDecision, WorkerPool,
     WorkerPoolError,
 };
-pub use queue::{PoolEntry, QueueRemoveResult};
+pub use queue::{PoolEntry, PoolRunQueue, QueueRemoveResult};
 pub use worker::{ExecutionAccounting, WorkerExecutionToken, WorkerState};

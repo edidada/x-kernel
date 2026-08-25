@@ -10,7 +10,7 @@ use unittest::{assert, assert_eq, def_test};
 
 use super::*;
 
-type TestPool = WorkerPool<u8, u8, u8, 4, 8, 4, 8>;
+type TestPool = WorkerPool<u8, u8, u8, 4, 8>;
 
 fn now(ns: u64) -> MonotonicInstant {
     MonotonicInstant::from_span_since_origin(TimeSpan::from_nanos(ns))
@@ -19,16 +19,16 @@ fn now(ns: u64) -> MonotonicInstant {
 fn pool() -> TestPool {
     TestPool::new(
         PoolId::new(BuiltinPoolKind::Normal, LogicalCpuId::new(0)),
-        WorkerPoolPolicy::new(
-            1,
-            1,
-            4,
-            Some(TimeSpan::from_nanos(10)),
-            TimeSpan::from_nanos(10),
-            TimeSpan::from_nanos(10),
-            true,
-            true,
-        ),
+        WorkerPoolPolicy::new(WorkerPoolPolicyConfig {
+            min_workers: 1,
+            initial_workers: 1,
+            max_workers: 4,
+            idle_retire_after: Some(TimeSpan::from_nanos(10)),
+            create_retry_delay: TimeSpan::from_nanos(10),
+            cpu_intensive_threshold: TimeSpan::from_nanos(10),
+            dynamic_create: true,
+            idle_retire: true,
+        }),
     )
 }
 
@@ -279,4 +279,19 @@ fn bh_pool_never_requests_manager_spawn() {
 
     assert!(actions.is_empty());
     assert_eq!(pool.next_management_action(now(2)), None);
+}
+
+#[def_test]
+fn runnable_and_deferred_share_total_capacity() {
+    let mut pool = pool();
+    pool.install_worker(WorkerId::new(0)).unwrap();
+    for key in 0..7 {
+        pool.enqueue_deferred(entry(1, key, key)).unwrap();
+    }
+    pool.enqueue_runnable(entry(1, 7, 7), now(1)).unwrap();
+
+    assert!(matches!(
+        pool.enqueue_deferred(entry(1, 8, 8)),
+        Err(WorkerPoolError::QueueFull(_))
+    ));
 }

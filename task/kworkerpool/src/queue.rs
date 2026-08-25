@@ -49,53 +49,81 @@ pub enum QueueRemoveResult {
     Deferred,
 }
 
-pub(crate) struct PoolRunQueue<
-    O,
-    K,
-    T,
-    const RUNNABLE_CAP: usize,
-    const OWNER_CAP: usize,
-    const DEFERRED_CAP: usize,
-> {
-    runnable: EntryQueue<PoolEntry<O, K, T>, RUNNABLE_CAP>,
-    deferred: DeferredQueues<O, K, T, OWNER_CAP, DEFERRED_CAP>,
+/// Bounded runnable/deferred queue storage for one worker-pool instance.
+///
+/// Runnable entries are globally FIFO. Deferred entries are grouped by opaque
+/// owner key and can be mechanically promoted into the runnable FIFO by owner.
+/// Runnable and deferred lanes share one total entry capacity.
+pub struct PoolRunQueue<O, K, T, const ENTRY_CAP: usize> {
+    runnable: EntryQueue<PoolEntry<O, K, T>, ENTRY_CAP>,
+    deferred: EntryQueue<PoolEntry<O, K, T>, ENTRY_CAP>,
+    len: usize,
 }
 
-impl<O, K, T, const RUNNABLE_CAP: usize, const OWNER_CAP: usize, const DEFERRED_CAP: usize>
-    PoolRunQueue<O, K, T, RUNNABLE_CAP, OWNER_CAP, DEFERRED_CAP>
+impl<O, K, T, const ENTRY_CAP: usize> PoolRunQueue<O, K, T, ENTRY_CAP>
 where
     O: Clone + Eq,
     K: Eq,
 {
-    pub(crate) const fn new() -> Self {
+    /// Creates an empty pool run queue.
+    pub const fn new() -> Self {
         Self {
             runnable: EntryQueue::new(),
-            deferred: DeferredQueues::new(),
+            deferred: EntryQueue::new(),
+            len: 0,
         }
     }
 
-    pub(crate) fn runnable_len(&self) -> usize {
+    /// Returns total entries across runnable and deferred lanes.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns whether no entries are queued.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Returns current runnable FIFO length.
+    pub fn runnable_len(&self) -> usize {
         self.runnable.len()
     }
 
-    pub(crate) fn push_runnable(
-        &mut self,
-        entry: PoolEntry<O, K, T>,
-    ) -> Result<(), PoolEntry<O, K, T>> {
-        self.runnable.push(entry)
+    /// Returns runnable entries for one owner.
+    pub fn runnable_len_for_owner(&self, owner: &O) -> usize {
+        self.runnable.count_matching(|entry| entry.owner() == owner)
     }
 
-    pub(crate) fn push_deferred(
-        &mut self,
-        entry: PoolEntry<O, K, T>,
-    ) -> Result<(), PoolEntry<O, K, T>> {
-        self.deferred.push(entry)
+    /// Returns deferred entries for one owner.
+    pub fn deferred_len_for_owner(&self, owner: &O) -> usize {
+        self.deferred.count_matching(|entry| entry.owner() == owner)
     }
 
-    pub(crate) fn promote_deferred(&mut self, owner: &O, budget: usize) -> usize {
+    /// Pushes an entry directly into runnable FIFO.
+    pub fn push_runnable(&mut self, entry: PoolEntry<O, K, T>) -> Result<(), PoolEntry<O, K, T>> {
+        if self.len == ENTRY_CAP {
+            return Err(entry);
+        }
+        self.runnable.push(entry)?;
+        self.len += 1;
+        Ok(())
+    }
+
+    /// Pushes an entry into its owner's deferred FIFO.
+    pub fn push_deferred(&mut self, entry: PoolEntry<O, K, T>) -> Result<(), PoolEntry<O, K, T>> {
+        if self.len == ENTRY_CAP {
+            return Err(entry);
+        }
+        self.deferred.push(entry)?;
+        self.len += 1;
+        Ok(())
+    }
+
+    /// Promotes up to `budget` entries from one owner deferred FIFO.
+    pub fn promote_deferred(&mut self, owner: &O, budget: usize) -> usize {
         let mut promoted = 0;
-        while promoted < budget && self.runnable.len() < RUNNABLE_CAP {
-            let Some(entry) = self.deferred.pop_owner_front(owner) else {
+        while promoted < budget && self.runnable.len() < ENTRY_CAP {
+            let Some(entry) = self.deferred.remove_first(|entry| entry.owner() == owner) else {
                 break;
             };
             if self.runnable.push(entry).is_err() {
@@ -106,11 +134,31 @@ where
         promoted
     }
 
-    pub(crate) fn pop_runnable(&mut self) -> Option<PoolEntry<O, K, T>> {
-        self.runnable.pop_front()
+    /// Moves all runnable entries for `owner` into that owner's deferred FIFO.
+    ///
+    /// This is a mechanical lane move; caller-owned policy decides when it is
+    /// necessary.
+    pub fn defer_runnable_for_owner(&mut self, owner: &O) -> usize {
+        let mut moved = 0usize;
+        while let Some(entry) = self.runnable.remove_first(|entry| entry.owner() == owner) {
+            self.deferred
+                .push(entry)
+                .ok()
+                .expect("moving within shared pool capacity should not fail");
+            moved += 1;
+        }
+        moved
     }
 
-    pub(crate) fn remove(
+    /// Pops the oldest runnable entry.
+    pub fn pop_runnable(&mut self) -> Option<PoolEntry<O, K, T>> {
+        let entry = self.runnable.pop_front()?;
+        self.len = self.len.saturating_sub(1);
+        Some(entry)
+    }
+
+    /// Removes an entry by owner and key from runnable or deferred lanes.
+    pub fn remove(
         &mut self,
         owner: &O,
         key: &K,
@@ -119,96 +167,38 @@ where
             .runnable
             .remove_first(|entry| entry.owner() == owner && entry.key() == key)
         {
+            self.len = self.len.saturating_sub(1);
             return Some((entry, QueueRemoveResult::Runnable));
         }
         self.deferred
-            .remove(owner, key)
-            .map(|entry| (entry, QueueRemoveResult::Deferred))
+            .remove_first(|entry| entry.owner() == owner && entry.key() == key)
+            .map(|entry| {
+                self.len = self.len.saturating_sub(1);
+                (entry, QueueRemoveResult::Deferred)
+            })
+    }
+
+    /// Returns a mutable payload reference by owner and key.
+    pub fn get_mut(&mut self, owner: &O, key: &K) -> Option<&mut T> {
+        self.runnable
+            .get_mut(|entry| entry.owner() == owner && entry.key() == key)
+            .map(|entry| &mut entry.payload)
+            .or_else(|| {
+                self.deferred
+                    .get_mut(|entry| entry.owner() == owner && entry.key() == key)
+                    .map(|entry| &mut entry.payload)
+            })
     }
 }
 
-struct DeferredQueues<O, K, T, const OWNER_CAP: usize, const DEFERRED_CAP: usize> {
-    lanes: [Option<DeferredLane<O, K, T, DEFERRED_CAP>>; OWNER_CAP],
-}
-
-impl<O, K, T, const OWNER_CAP: usize, const DEFERRED_CAP: usize>
-    DeferredQueues<O, K, T, OWNER_CAP, DEFERRED_CAP>
+impl<O, K, T, const ENTRY_CAP: usize> Default for PoolRunQueue<O, K, T, ENTRY_CAP>
 where
     O: Clone + Eq,
     K: Eq,
 {
-    const fn new() -> Self {
-        Self {
-            lanes: [const { None }; OWNER_CAP],
-        }
+    fn default() -> Self {
+        Self::new()
     }
-
-    fn push(&mut self, entry: PoolEntry<O, K, T>) -> Result<(), PoolEntry<O, K, T>> {
-        if let Some(index) = self.find_lane(entry.owner()) {
-            return self.lanes[index]
-                .as_mut()
-                .expect("found deferred lane should exist")
-                .queue
-                .push(entry);
-        }
-        let Some(index) = self.lanes.iter().position(Option::is_none) else {
-            return Err(entry);
-        };
-        let owner = entry.owner;
-        let key = entry.key;
-        let payload = entry.payload;
-        self.lanes[index] = Some(DeferredLane {
-            owner,
-            queue: EntryQueue::new(),
-        });
-        let lane = self.lanes[index]
-            .as_mut()
-            .expect("new deferred lane should exist");
-        lane.queue
-            .push(PoolEntry::new(lane.owner.clone(), key, payload))
-    }
-
-    fn pop_owner_front(&mut self, owner: &O) -> Option<PoolEntry<O, K, T>> {
-        let index = self.find_lane(owner)?;
-        let entry = self.lanes[index]
-            .as_mut()
-            .expect("found deferred lane should exist")
-            .queue
-            .pop_front();
-        self.clear_empty_lane(index);
-        entry
-    }
-
-    fn remove(&mut self, owner: &O, key: &K) -> Option<PoolEntry<O, K, T>> {
-        let index = self.find_lane(owner)?;
-        let removed = self.lanes[index]
-            .as_mut()
-            .expect("found deferred lane should exist")
-            .queue
-            .remove_first(|entry| entry.key() == key);
-        self.clear_empty_lane(index);
-        removed
-    }
-
-    fn find_lane(&self, owner: &O) -> Option<usize> {
-        self.lanes
-            .iter()
-            .position(|lane| lane.as_ref().is_some_and(|lane| &lane.owner == owner))
-    }
-
-    fn clear_empty_lane(&mut self, index: usize) {
-        if self.lanes[index]
-            .as_ref()
-            .is_some_and(|lane| lane.queue.is_empty())
-        {
-            self.lanes[index] = None;
-        }
-    }
-}
-
-struct DeferredLane<O, K, T, const CAP: usize> {
-    owner: O,
-    queue: EntryQueue<PoolEntry<O, K, T>, CAP>,
 }
 
 struct EntryQueue<T, const CAP: usize> {
@@ -228,10 +218,6 @@ impl<T, const CAP: usize> EntryQueue<T, CAP> {
 
     fn len(&self) -> usize {
         self.len
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len == 0
     }
 
     fn physical_index(&self, logical_index: usize) -> usize {
@@ -267,9 +253,29 @@ impl<T, const CAP: usize> EntryQueue<T, CAP> {
         let logical = (0..self.len).find(|index| {
             self.entries[self.physical_index(*index)]
                 .as_ref()
-                .is_some_and(|entry| pred(entry))
+                .is_some_and(&pred)
         })?;
         self.remove_logical(logical)
+    }
+
+    fn get_mut(&mut self, pred: impl Fn(&T) -> bool) -> Option<&mut T> {
+        let logical = (0..self.len).find(|index| {
+            self.entries[self.physical_index(*index)]
+                .as_ref()
+                .is_some_and(&pred)
+        })?;
+        let physical = self.physical_index(logical);
+        self.entries[physical].as_mut()
+    }
+
+    fn count_matching(&self, pred: impl Fn(&T) -> bool) -> usize {
+        (0..self.len)
+            .filter(|index| {
+                self.entries[self.physical_index(*index)]
+                    .as_ref()
+                    .is_some_and(&pred)
+            })
+            .count()
     }
 
     fn remove_logical(&mut self, logical_index: usize) -> Option<T> {

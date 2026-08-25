@@ -21,5 +21,6 @@ klazy = { workspace = true }
 kpoll = { workspace = true }
 kspin = { workspace = true }
 ktime_types = { workspace = true }
+kworkerpool = { workspace = true }
 log = { workspace = true }
 unittest = { workspace = true }
