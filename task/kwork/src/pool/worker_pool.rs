@@ -755,7 +755,9 @@ impl WorkerPoolState {
             WorkerState::Creating
             | WorkerState::Preparing
             | WorkerState::Idle
-            | WorkerState::Empty => {}
+            | WorkerState::Empty
+            | WorkerState::RetireRequested
+            | WorkerState::Exiting => {}
         }
         slot.state = WorkerState::Idle;
         // Also clears the CPU-intensive flag: marking is per-execution.

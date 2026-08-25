@@ -3,26 +3,9 @@
 // See LICENSES for license details.
 
 use ktime_types::{MonotonicInstant, TimeSpan};
-use kworkerpool::{WorkerExecutionToken, WorkerId};
+use kworkerpool::{WorkerExecutionToken, WorkerId, WorkerState};
 
 use crate::{BarrierAttachResult, WorkBarrier, WorkBarrierQueue, WorkInstanceId};
-
-/// Lifecycle state of one worker record inside a [`super::WorkerPool`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum WorkerState {
-    /// No provider task is associated with this worker record.
-    Empty,
-    /// A manager has reserved this record while creating the provider task.
-    Creating,
-    /// The provider task exists and is waiting for work.
-    Idle,
-    /// The worker has been selected for wakeup but has not taken work yet.
-    Preparing,
-    /// The worker is executing a work callback and participates in concurrency accounting.
-    Running,
-    /// The worker is executing a callback but is blocked in a sleepable wait.
-    Sleeping,
-}
 
 /// Worker execution record owned by a worker pool.
 ///

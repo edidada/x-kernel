@@ -5,9 +5,10 @@
 mod worker;
 mod worker_pool;
 
+pub(crate) use kworkerpool::WorkerState;
 pub use kworkerpool::{WorkerExecutionToken, WorkerId};
 pub use worker::WorkerWakePlan;
-pub(crate) use worker::{RunningWorkSlot, Worker, WorkerSleepTransition, WorkerState};
+pub(crate) use worker::{RunningWorkSlot, Worker, WorkerSleepTransition};
 pub use worker_pool::{
     WORKER_CREATE_RETRY_DELAY, WorkerPoolAttrs, WorkerPoolCpuAffinity, WorkerPoolExecution,
     WorkerPoolSchedulingPolicy,
