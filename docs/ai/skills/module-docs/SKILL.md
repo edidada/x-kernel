@@ -1,415 +1,410 @@
-# Module Docs
+---
+name: module-docs
+description: Create or remediate English design, security, and Rust API
+  documentation for X-Kernel crates and modules.
+---
 
-Use this skill when an AI agent needs to create,
-update, or review module documentation for an X-Kernel crate.
+# Module Documentation
 
-This skill is the canonical workflow for generating module docs.
-It covers the crate-local Markdown documents
-and the rustdoc content that must stay in sync with code.
+Use this skill to create or remediate documentation for an X-Kernel crate or
+module. It defines what to write, how to derive the content from code, and how
+to organize crate docs, module docs, public API rustdoc, design documents, and
+security documents.
 
 ## Goal
 
 Produce documentation that is:
 
-- colocated with the crate being documented;
-- derived from the current code and APIs,
-  not from generic template filler;
-- aligned with the shared module-doc skill and existing module-doc style;
-- reviewable together with the code change that introduced the behavior.
+- written in English;
+- colocated with the crate or API it documents;
+- derived from current code instead of generic template text;
+- clear about purpose, ownership, usage, constraints, and safety;
+- updated together with behavior or contract changes.
+
+## Requirement Keywords
+
+The keywords `MUST`, `MUST NOT`, `SHOULD`, `SHOULD NOT`, and `MAY` are to be
+interpreted as described by RFC 2119 and RFC 8174:
+
+- `MUST` and `MUST NOT` are mandatory writing requirements.
+- `SHOULD` and `SHOULD NOT` may be overridden only for a stated reason.
+- `MAY` marks an optional practice.
+
+Do not silently weaken a `MUST` requirement. State any justified exception in
+the task result.
+
+## Scope
+
+This standard covers:
+
+- crate-level and module-level rustdoc;
+- rustdoc for publicly reachable modules, types, traits, functions, methods,
+  constants, statics, and macros;
+- crate-local `docs/design.md`;
+- crate-local `docs/security.md`, including threat and failure analysis.
+
+Apply these requirements to first-party X-Kernel crates. Exclude vendored
+dependencies, generated code, build output, and imported third-party source
+unless X-Kernel explicitly owns and maintains that source.
+
+## Task Boundary
+
+Before editing, define the target crates or modules from the user's request
+and repository context. Do not silently expand a module-level task into a
+crate- or repository-wide rewrite.
+
+A crate-level remediation `MUST` cover:
+
+- crate-level rustdoc;
+- the complete hand-written module tree, including relevant configuration-
+  gated modules;
+- every publicly reachable API in the crate;
+- non-obvious internal contracts, unsafe assumptions, and cross-module
+  invariants;
+- the applicability and current content of crate-local `docs/design.md` and
+  `docs/security.md`.
+
+For a narrower module-level task, inspect surrounding declarations and callers
+only as far as needed to document the target accurately. Documentation debt
+outside the declared target is not part of that task and `SHOULD` be reported
+separately rather than edited without authorization.
+
+## Documentation Standard
+
+### MUST
+
+- All new or remediated explanatory prose `MUST` be written in English.
+- Every first-party crate `MUST` have crate-level rustdoc, normally written
+  with `//!` in `src/lib.rs` or `src/main.rs`.
+- Every hand-written source module `MUST` have module-level rustdoc. Document
+  either the `mod` item with `///` or the module body with `//!`; do not
+  duplicate both.
+- Crate and module documentation `MUST` explain what the component does, what
+  it owns, and how callers or sibling components use it.
+- Every publicly reachable API item `MUST` have rustdoc that states its purpose
+  and public behavior.
+- Public API rustdoc `MUST` describe caller obligations, invariants, side
+  effects, and execution-context constraints when applicable.
+- A public API returning `Result` `MUST` document meaningful failure
+  conditions under `# Errors`.
+- A public API that may panic under supported use `MUST` document the trigger
+  conditions under `# Panics`.
+- Every `unsafe fn` and `unsafe trait` `MUST` have a `# Safety` section that
+  states the complete contract callers or implementers must uphold.
+- Documentation `MUST` match the current code and verified specifications.
+- A crate `MUST` maintain `docs/design.md` when its behavior cannot be fully
+  explained by crate-level rustdoc alone, including when it has multiple
+  cooperating components, owned state or lifecycle, concurrency, non-trivial
+  algorithms, or execution-context constraints.
+- A crate `MUST` maintain `docs/security.md` when it has unsafe behavior,
+  security or thread-safety invariants, external or partially trusted input,
+  privileged operations, or failure modes that can materially affect the
+  kernel or another subsystem.
+- All template placeholders `MUST` be removed before completion.
+
+### SHOULD
+
+- Crate and module docs `SHOULD` point readers to the main public types and
+  entry points instead of listing every item mechanically.
+- Each rustdoc item `SHOULD` begin with a concise one-sentence summary.
+- Core public APIs `SHOULD` include a practical `# Examples` section. Examples
+  `SHOULD` be doctests when the X-Kernel build environment permits it.
+- `# Arguments` and `# Returns` `SHOULD` be added only when the signature and
+  main description do not already make the contract clear.
+- Documentation `SHOULD` explain why important designs exist and record
+  significant tradeoffs.
+- The first meaningful mention of a main public type or entry point `SHOULD`
+  use an intra-doc link when the link materially improves navigation. Later
+  mentions normally use plain code formatting.
+- English prose `SHOULD` be concise, grammatical, and consistent with code
+  terminology.
+
+### SHOULD NOT
+
+- Documentation `SHOULD NOT` repeat signatures or restate code line by line.
+- The same API contract `SHOULD NOT` be duplicated in rustdoc, `design.md`, and
+  `security.md`.
+- Writers `SHOULD NOT` add empty sections or generic claims merely to satisfy
+  a template.
+- Obvious private helpers `SHOULD NOT` receive mechanical, low-value rustdoc.
+- Examples `SHOULD NOT` demonstrate syntax without explaining realistic use.
+- Crate and module introductions `SHOULD NOT` link every identifier, repeat a
+  link for the same item, or substitute a mechanical API link list for an
+  explanation of purpose and usage.
+
+### MUST NOT
+
+- Documentation `MUST NOT` invent behavior, architecture, threats,
+  mitigations, or safety guarantees.
+- Documentation `MUST NOT` leave stale names, paths, line references, or
+  template placeholders.
+- Proposed hardening `MUST NOT` be presented as already implemented.
+- Known caller obligations or unsafe preconditions `MUST NOT` be hidden behind
+  vague wording.
+- Formal X-Kernel documentation `MUST NOT` contain untranslated Chinese prose;
+  identifiers, proper names, specification terms, paths, and necessary
+  quotations may retain their original spelling.
+
+Non-obvious `pub(crate)` and `pub(super)` contracts `MUST` be documented at the
+narrowest useful location. Private helpers `MAY` omit rustdoc when their
+behavior is obvious, and test-only modules `MAY` use one brief purpose
+sentence. Non-obvious private invariants, unsafe assumptions, and design
+decisions still `MUST` be documented at the narrowest useful location.
 
 ## Output Layout
 
-Each documented crate should keep its docs under the crate directory:
+Keep crate-level design and security documentation under the crate directory:
 
 ```text
 <crate>/
-├── src/
-├── Cargo.toml
-└── docs/
-    ├── design.md
-    └── security.md
+|-- src/
+|-- Cargo.toml
+`-- docs/
+    |-- design.md
+    `-- security.md
 ```
 
-Example:
-
-```text
-util/klazy/
-├── src/
-├── Cargo.toml
-└── docs/
-    ├── design.md
-    └── security.md
-```
+A trivial re-export or declaration-only crate `MAY` omit an inapplicable
+`design.md` or `security.md`. State the reason in the task result instead of
+creating an empty document.
 
 ## Source Material
 
-When generating module docs,
-use these sources in priority order:
+Use these sources in priority order:
 
-1. the current crate source code;
-2. existing crate docs under `<crate>/docs/`;
-3. repository-local examples such as `util/klazy/docs/`;
-4. this shared skill as the canonical structure and review workflow.
+1. the current crate source and its actual callers;
+2. existing crate-local documentation;
+3. repository-local examples such as `util/klazy/docs/`, for structure only;
+4. this skill and the normative local references below.
 
-Do not write module docs by copying generic structure verbatim
-without first extracting the actual design from the code.
+Current code is the source of truth. Existing documentation and examples
+`MUST NOT` override actual behavior.
 
-## Document Split
+## Documentation Update Triggers
+
+Review the owning document when a code change affects its subject:
+
+| Code Change | Documentation to Review |
+|-------------|--------------------------|
+| Public behavior, errors, panic conditions, safety obligations, side effects, or caller constraints | The affected API rustdoc |
+| Crate or module addition, removal, ownership, responsibility, entry points, or usage path | Crate-level or module-level rustdoc |
+| Architecture, component roles, critical flows, state, concurrency, lifecycle, or cleanup | `docs/design.md` |
+| Trust boundaries, unsafe paths, security invariants, threats, failure handling, or residual risk | `docs/security.md` |
+
+An internal mechanical refactor that changes none of these documented
+contracts normally does not require rewriting unaffected documentation.
+
+## Document Responsibilities
+
+### Rustdoc in `src/`
+
+Keep API-level documentation in rustdoc:
+
+- crate and module purpose, scope, ownership, and usage;
+- public API semantics and caller obligations;
+- parameters and return contracts when non-trivial;
+- errors, panics, and side effects;
+- unsafe contracts and invariants;
+- practical examples for core APIs when feasible.
+
+Before creating or updating rustdoc, read
+[Rustdoc Writing Style](references/rustdoc-style.md). It turns the writing
+patterns used by Rust `std` and `core` into concrete X-Kernel rules for crate
+and module introductions, each kind of public item, contract sections,
+examples, and intra-doc links.
+
+Do not duplicate line-level API contracts in crate-local Markdown.
+
+#### Crate and module documentation
+
+Write crate and module docs as a reader-oriented introduction, following the
+organization and level of precision used by Rust `std` and `core`. Do not copy
+their wording or force every module into the same headings.
+
+Crate-level docs `MUST` cover the following information when applicable. They
+`SHOULD` normally present it in this order, but `MAY` use another order when it
+materially improves clarity:
+
+1. an opening paragraph that identifies the crate's role in X-Kernel;
+2. its responsibilities, owned state or resources, and explicit boundaries;
+3. the main public types, traits, or entry points and how they relate;
+4. the normal usage path, including the order in which callers use those entry
+   points;
+5. important execution-context, lifecycle, concurrency, or safety constraints.
+
+Module-level docs `MUST` explain:
+
+- the module's responsibility within its parent crate;
+- the state, resources, or abstraction it owns;
+- how its parent, sibling modules, or external callers use it;
+- its main entry points and non-obvious constraints.
+
+"How to use it" does not always require compilable example code. For internal
+kernel modules, concrete prose that names the entry points, expected call
+sequence, required initialization, and relevant context is sufficient. Use a
+`# Examples` section when code can demonstrate the real contract without
+inventing unavailable setup.
+
+Use this as an adaptable shape, not as text to copy mechanically:
+
+```rust
+//! Provides <specific capability> for <X-Kernel subsystem or callers>.
+//!
+//! This crate owns <state/resources> and does not own <important boundary>.
+//! Callers normally start with [`MainType`], call `entry_function`, then
+//! <describe the real call sequence and result>.
+//!
+//! <State initialization, execution-context, blocking, concurrency, or safety
+//! constraints when they affect correct use.>
+```
+
+Use intra-doc links selectively. Link the first meaningful occurrence of a
+main public type or entry point, then use code spans for repeated mentions.
+Private implementation details normally use code spans. Describe component
+relationships in prose instead of emitting a linked inventory of modules and
+items.
+
+#### Public API documentation
+
+For each publicly reachable item:
+
+1. `SHOULD` begin with a one-sentence summary of its observable purpose;
+2. `MUST` explain behavior that is not evident from the name and signature;
+3. `MUST` state preconditions, side effects, ownership or lifetime effects, and
+   execution-context constraints when applicable;
+4. `MUST` describe the meaning of the return value when it is non-obvious;
+5. `MUST` or `SHOULD` add `# Errors`, `# Panics`, `# Safety`, and `# Examples`
+   according to the requirement level defined above.
+
+Document each meaningful `Result` failure by condition rather than merely
+listing error variants. In `# Panics`, name the supported-use condition that
+causes the panic. In `# Safety`, state every obligation required for soundness,
+including pointer validity, aliasing, lifetime, initialization, alignment,
+concurrency, and execution-context obligations when relevant.
 
 ### `docs/design.md`
 
 Use `design.md` for:
 
-- module purpose and scope;
+- purpose, scope, and ownership;
 - architecture and component relationships;
-- execution-context and calling constraints;
-- state machines;
-- algorithms and critical flows;
-- concurrency model;
+- execution context and calling constraints;
+- state machines, algorithms, and critical flows;
+- concurrency and synchronization model;
 - design decisions and tradeoffs;
-- resource lifecycle and drop behavior.
+- resource lifecycle and cleanup behavior.
+
+Before creating or updating this document, read
+[Design Document Writing Style](references/design-doc-style.md). It defines
+how to derive and write each section, describe components and flows, record
+execution and concurrency constraints, and separate design decisions from
+implementation inventories.
+
+Delete inapplicable sections instead of filling them with `None` or generic
+text. Keep API-level contracts in rustdoc and security-specific analysis in
+`security.md`.
 
 ### `docs/security.md`
 
 Use `security.md` for:
 
-- trust boundaries;
-- external attack surfaces and input boundaries;
-- unsafe code inventory;
-- memory-safety invariants;
+- trust boundaries and external attack surfaces;
+- unsafe code and memory-safety invariants;
 - thread-safety conditions;
-- threat analysis;
-- FMEA;
-- failure handling;
-- privacy analysis;
-- known limitations;
-- audit checklist.
-
-### rustdoc in `src/`
-
-Keep API-level documentation in rustdoc instead of duplicating it
-in `docs/design.md` or `docs/security.md`.
-
-Rustdoc should carry:
-
-- public API semantics;
-- parameter and return-value explanation;
-- error behavior;
-- panic behavior;
-- `# Safety` requirements for unsafe APIs;
-- examples for core public APIs where practical.
-
-## Required Rustdoc Coverage
-
-The following items should be documented in code comments
-rather than repeated in crate-local Markdown:
-
-- crate-level public API overview;
-- public functions and methods;
-- public types, traits, and modules;
-- unsafe usage contracts;
-- panic and error behavior.
-
-For important public APIs,
-rustdoc is expected to include:
-
-- a one-line purpose statement;
-- `# Arguments` when arguments need explanation;
-- `# Returns` when the return contract is non-trivial;
-- `# Errors` when returning `Result`;
-- `# Safety` for unsafe functions;
-- `# Panics` when panic is possible;
-- `# Example` for core APIs when practical.
-
-## `design.md` Structure
-
-Use this structure unless a section is truly inapplicable:
-
-```text
-# <module> — 设计文档
-## 定位
-## 背景
-## 范围
-## 架构
-## 调用约束 / 执行上下文
-## 状态机
-## 算法流程
-## 并发模型
-## 设计决策
-## Drop / 资源释放
-```
-
-Section guidance:
-
-- `定位`:
-  state the module's role in X-Kernel
-  and which subsystems depend on it.
-- `背景`:
-  explain why the module exists
-  and what environment or constraint it addresses.
-- `范围`:
-  list the relevant source files for the documented design.
-- `架构`:
-  include an ASCII diagram when it helps.
-- `调用约束 / 执行上下文`:
-  state where the module may run
-  and what execution assumptions callers must satisfy.
-- `状态机`:
-  keep only when the module truly has state transitions.
-- `算法流程`:
-  describe core flows step by step.
-- `并发模型`:
-  explain locks, atomics, reentrancy, and hot-path tradeoffs.
-- `设计决策`:
-  record important choices and rejected alternatives.
-- `Drop / 资源释放`:
-  explain resource lifetime and cleanup behavior
-  when it is not obvious from the types alone.
-
-If a section does not apply,
-delete it instead of filling it with empty text.
-
-For kernel crates,
-the `调用约束 / 执行上下文` section should explicitly consider:
-
-- whether the API may run in interrupt context;
-- whether it is valid during early boot;
-- whether it requires a current process thread
-  or only an execution path;
-- whether it may sleep or block;
-- whether it is reentrant;
-- whether it depends on CPU-local state,
-  platform initialization,
-  memory mappings,
-  or scheduler availability.
-
-## `security.md` Structure
-
-Use this structure unless a section is truly inapplicable:
-
-```text
-# <module> — 安全与可靠性分析
-## 信任模型
-## 外部边界 / 攻击面
-## unsafe 代码清单
-## 内存安全不变量
-## 线程安全
-## 威胁分析
-## 故障模式与影响分析（FMEA）
-## 故障管理
-## 隐私分析
-## 已知限制
-## 审计清单
-```
-
-Section guidance:
-
-- `信任模型`:
-  show the boundary between callers and the module.
-- `外部边界 / 攻击面`:
-  identify what untrusted or partially trusted inputs
-  can reach the module.
-- `unsafe 代码清单`:
-  enumerate unsafe functions or blocks with real invariants,
-  safety reasoning, and guarded call paths.
-- `内存安全不变量`:
-  state the conditions that must always hold for soundness.
-- `线程安全`:
-  describe `Send`/`Sync` conditions and concurrency assumptions.
-- `故障管理`:
-  explain `Result`, panic, poisoning, retry, or recovery behavior.
-- `隐私分析`:
-  explicitly say when the module does not process user data.
-- `已知限制`:
-  list real technical constraints,
-  not aspirational future ideas.
-- `审计清单`:
-  convert module-specific pitfalls into reviewer checks.
-
-If the module has no unsafe code,
-remove or greatly shorten the unsafe-specific sections
-instead of fabricating content.
-
-For kernel crates,
-the `外部边界 / 攻击面` section should explicitly check
-whether the module interacts with:
-
-- user memory or user-provided pointers;
-- MMIO or PIO registers;
-- DMA buffers or device-owned memory;
-- FFI, inline assembly, or architecture-specific raw interfaces;
-- bootloader, firmware, device tree, ACPI, or other boot-time metadata;
-- device input, interrupts, or hardware status;
-- file-system, network, IPC, or other externally sourced data.
-
-If a boundary is relevant,
-record it here as a boundary definition.
-Do not rely on this section alone as the full threat analysis.
-
-Section split:
-
-- `外部边界 / 攻击面`:
-  define the risk sources and trust boundaries.
-- `威胁分析`:
-  enumerate concrete threats derived from those boundaries,
-  including trigger conditions, impact, and mitigations.
-- `故障模式与影响分析（FMEA）`:
-  analyze operational failure modes and their local/system effects.
-
-`威胁分析` should reference the identified boundaries directly
-instead of discussing only Rust-level `unsafe`.
-
-For the `应对措施` field in threat analysis:
-
-- first describe the controls already implemented in the code or design;
-- if current controls are incomplete, add the recommended hardening measures;
-- when a risk is intentionally accepted or only partially mitigated,
-  state the residual risk explicitly;
-- avoid vague phrases such as "加强校验" without naming the real control.
-
-## Unsafe Traceability
-
-Unsafe documentation must be traceable back to code.
-
-For each important unsafe path,
-record at least:
-
-- function or method name;
-- source file path;
-- line number when practical;
-- invariant being relied on;
-- why the code is safe under that invariant;
-- which safe entry points or guards enforce the invariant.
-
-If multiple unsafe blocks participate in one safety story,
-group them only when the shared invariant is explicit.
-
-## Table Formats
-
-Threat analysis table:
-
-```markdown
-| 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
-|------|----------|----------|----------|----------|
-| T-01 | ...      | 高/中/低 | ...      | ...      |
-```
-
-Severity guide:
-
-- `高`: UB, memory corruption, privilege escalation
-- `中`: panic, service unavailability, inconsistent state
-- `低`: performance degradation, lost logs, degraded functionality
-
-FMEA table:
-
-```markdown
-| 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
-|------|----------|----------|----------|----------|--------|----------|
-| F-01 | ...      | ...      | ...      | ...      | 1-4    | ...      |
-```
-
-Severity guide:
-
-- `1`: fatal
-- `2`: serious
-- `3`: moderate
-- `4`: minor
-
-## Generation Workflow
-
-When generating module docs for an existing crate:
-
-1. Read the crate entry points in `src/lib.rs` or `src/mod.rs`.
-2. Identify the key exported types, state, and cross-file structure.
-3. Inspect the main implementation files,
-   especially unsafe, concurrent, or stateful paths.
-4. Extract execution-context constraints from the code paths and callers.
-5. Draft `docs/design.md` from the actual architecture.
-6. Identify external boundaries, unsafe paths,
-   invariants, and failure modes.
-7. Draft `docs/security.md`
-   from those real boundaries and constraints.
-8. Update rustdoc for the public APIs touched by the documented behavior.
-9. Re-read the docs against the code
-   to remove any unsupported claims or template leftovers.
-
-When generating docs for a new crate:
-
-1. Create `<crate>/docs/` if missing.
-2. Add `design.md` first.
-3. Add `security.md` once safety boundaries and failure behavior are clear.
-4. Keep rustdoc in lockstep with the initial public API.
-
-## Doc Update Triggers
-
-When a code change touches an already documented crate,
-explicitly check whether the docs need to change.
-
-Documentation updates are usually required when the patch changes:
-
-- public API behavior, contracts, or error semantics;
-- crate architecture, file layout, or the role of major types;
-- execution-context or caller obligations;
-- state machines, lifecycle, cleanup, or drop behavior;
-- `unsafe` paths, safety invariants, or thread-safety conditions;
-- external input boundaries, trust assumptions, or threat analysis;
-- failure modes, recovery behavior, or known limitations.
-
-Update targets:
-
-- `docs/design.md` for architecture, execution context,
-  state, flow, concurrency, and lifecycle changes;
-- `docs/security.md` for trust boundaries, unsafe inventory,
-  invariants, threats, FMEA, or failure-management changes;
-- rustdoc for public API contract changes.
-
-## Writing Rules
-
-- Write from code facts, not from guessed architecture.
-- Prefer concrete names from the module over generic placeholders.
-- Replace every template placeholder before finishing.
-- Use ASCII diagrams when they materially improve comprehension.
-- Explain why a design exists, not just what files exist.
-- State caller obligations and execution assumptions explicitly.
-- Treat hardware, firmware, user memory,
-  and external input as first-class documentation inputs.
-- Keep the Markdown focused on module-level design;
-  do not duplicate line-by-line API docs from rustdoc.
-- If a section does not apply, delete it.
-- If a template statement is no longer true for the code, rewrite it.
-
-## Review Checklist
-
-Before considering the docs complete, verify:
-
-- `docs/design.md` matches the current file layout and major types.
-- execution-context constraints match the actual callers and runtime model.
-- `docs/security.md` matches the current unsafe and failure behavior.
-- external boundaries and input sources are identified where relevant.
-- rustdoc covers the public APIs introduced or changed by the module.
-- no placeholder text such as `[模块名]` remains.
-- diagrams, tables, and section names use the crate's real terminology.
-- design claims are consistent with current code,
-  atomics, locks, state transitions, and drop behavior.
-- important unsafe paths are traceable from the doc back to code locations.
-
-## When To Say "无"
-
-For sections that are genuinely not applicable:
-
-- use brief explicit statements such as `无`
-  only when the section is required for review context;
-- otherwise delete the section entirely.
-
-Examples:
-
-- no state machine;
-- no user-data handling;
-- no redundant design;
-- no overload-control design;
-- no human-factor design.
-
-## Related Repository Files
-
-- `util/klazy/docs/design.md`
-- `util/klazy/docs/security.md`
+- concrete threats, mitigations, and residual risks;
+- failure modes and effects analysis (FMEA);
+- failure handling, privacy considerations, and known limitations.
+
+Before creating or updating this document, read
+[Security Document Writing Style](references/security-doc-style.md). It
+defines how to derive trust boundaries, unsafe invariants, threats, controls,
+residual risks, and operational failure modes from code evidence.
+
+Delete genuinely inapplicable sections instead of inventing risks. Existing
+controls, caller-dependent assumptions, proposed hardening, and known gaps
+`MUST` be clearly distinguished.
+
+## Workflow
+
+1. Define the target crates or modules and keep unrelated documentation debt
+   outside that boundary.
+2. For a crate-level remediation, recursively enumerate the complete
+   hand-written module tree, including relevant configuration-gated modules.
+3. Inventory publicly reachable APIs and identify non-obvious internal
+   contracts, owned state, invariants, unsafe paths, and cross-crate boundaries
+   that affect the target documentation.
+4. Inspect important implementation paths, especially unsafe, concurrent,
+   stateful, hardware-facing, and externally reachable code.
+5. Inspect representative callers to verify usage and execution context.
+6. Identify which target documents or API items require creation or correction
+   before writing prose.
+7. Read `references/rustdoc-style.md`, then create or update crate-level,
+   module-level, and public API rustdoc using its item-specific rules.
+8. When `docs/design.md` applies, read `references/design-doc-style.md` and
+   create or update the design document.
+9. When `docs/security.md` applies, read `references/security-doc-style.md` and
+   create or update the security and reliability analysis.
+10. Perform the author self-check below.
+
+## Author Self-Check
+
+Before declaring the writing task complete:
+
+- confirm that all required documentation within the declared target has
+  meaningful content and that any omitted design or security document has a
+  stated reason;
+- re-check names, paths, entry points, behavior, caller descriptions, and
+  contract sections against current code and verified callers;
+- remove unsupported claims, stale references, untranslated prose, empty
+  sections, duplication, mechanical filler, and template residue;
+- keep future hardening distinct from implemented controls;
+- report material exceptions to `SHOULD` and every exception to `MUST` in the
+  task result.
+
+This self-check applies only to documentation within the declared target.
+
+## Normative X-Kernel Requirements
+
+The requirements in this `SKILL.md`, the following local writing references,
+and applicable repository architecture and coding policies define the
+X-Kernel documentation standard:
+
+- [X-Kernel Rustdoc Writing Style](references/rustdoc-style.md) is the local,
+  operational rustdoc standard.
+- [X-Kernel Design Document Writing Style](references/design-doc-style.md) is
+  the local standard for architecture and design descriptions.
+- [X-Kernel Security Document Writing Style](references/security-doc-style.md)
+  is the local standard for threat, safety, and reliability analysis.
+
+## Informative External References
+
+The following sources guide organization, terminology, and writing style. They
+do not directly define X-Kernel-specific coverage requirements:
+
+- [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) and
+  [RFC 8174](https://www.rfc-editor.org/rfc/rfc8174) for requirement keywords.
+- [The Rustdoc Book](https://doc.rust-lang.org/rustdoc/how-to-write-documentation.html)
+  for crate, module, item, summary, example, and panic documentation
+  conventions.
+- [The Rust API Guidelines documentation checklist](https://rust-lang.github.io/api-guidelines/documentation.html)
+  for crate-level docs, examples, failure conditions, safety requirements,
+  and intra-doc links.
+- Rust `std` and `core` documentation, especially
+  [`std::path`](https://doc.rust-lang.org/std/path/index.html),
+  [`core::ptr`](https://doc.rust-lang.org/core/ptr/index.html), and
+  [`core::mem::MaybeUninit`](https://doc.rust-lang.org/core/mem/union.MaybeUninit.html),
+  as style references rather than templates.
+- [ISO/IEC/IEEE 42010:2022](https://www.iso.org/standard/74393.html) for
+  architecture-description concerns, boundaries, viewpoints, and rationale.
+- [The Rustonomicon](https://doc.rust-lang.org/nomicon/) for unsafe boundaries
+  and soundness reasoning.
+- [NIST SP 800-30 Rev. 1](https://csrc.nist.gov/pubs/sp/800/30/r1/final) for
+  threat, impact, mitigation, and residual-risk analysis.
+- [CWE](https://cwe.mitre.org/) for established software and hardware weakness
+  terminology when a precise mapping is useful.
+- [IEC 60812:2018](https://webstore.iec.ch/en/publication/26359) for systematic
+  failure-mode and effects analysis.
+
+Do not copy external documentation mechanically or claim conformance that the
+project has not established. Apply relevant principles to the actual X-Kernel
+code and normative local policy.
