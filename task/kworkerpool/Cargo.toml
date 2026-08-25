@@ -1,0 +1,21 @@
+[package]
+name = "kworkerpool"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+description = "Kernel worker-pool scheduling core"
+
+[features]
+default = []
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ["cfg(unittest)"] }
+
+[dependencies]
+kcpu_id_map = { workspace = true }
+ktime_types = { workspace = true }
+unittest = { workspace = true }

@@ -1368,6 +1368,7 @@ dependencies = [
  "ktask",
  "kuaccess",
  "kvfs",
+ "kworkerpool",
  "linux-raw-sys",
  "posix-process",
  "tee_kernel",
@@ -3179,6 +3180,15 @@ dependencies = [
  "kspin 0.2.0-dev",
  "ktime_types",
  "log",
+ "unittest",
+]
+
+[[package]]
+name = "kworkerpool"
+version = "0.2.0-dev"
+dependencies = [
+ "kcpu_id_map",
+ "ktime_types",
  "unittest",
 ]
 

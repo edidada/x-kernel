@@ -8,7 +8,7 @@ license.workspace = true
 homepage.workspace = true
 
 [features]
-unittest = ["dep:unittest", "dep:unittest_support"]
+unittest = ["dep:kworkerpool", "dep:unittest", "dep:unittest_support"]
 dma-trace = ["kfeat/dma-trace"]
 
 [dependencies]
@@ -30,6 +30,7 @@ kernel-image-metadata = { workspace = true, features = ["kernel"] }
 kcpu_id_map.workspace = true
 linux-raw-sys.workspace = true
 posix-process.workspace = true
+kworkerpool = { workspace = true, optional = true }
 unittest = { workspace = true, optional = true }
 unittest_support = { workspace = true, optional = true }
 

@@ -69,6 +69,7 @@ kuaccess = { path = "core/kuaccess" }
 kpoll = { path = "task/kpoll" }
 kspin = { path = "task/kspin" }
 ksync = { path = "task/ksync" }
+kworkerpool = { path = "task/kworkerpool" }
 kwork = { path = "task/kwork" }
 ktask = { path = "task/ktask" }
 ksched = { path = "task/ksched" }

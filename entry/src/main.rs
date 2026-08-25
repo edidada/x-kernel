@@ -13,6 +13,8 @@ extern crate alloc;
 extern crate kfeat;
 extern crate kruntime;
 extern crate kuaccess;
+#[cfg(feature = "unittest")]
+extern crate kworkerpool;
 
 mod image_metadata;
 mod runtime;
