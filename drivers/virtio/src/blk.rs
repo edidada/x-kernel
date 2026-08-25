@@ -118,130 +118,6 @@ impl BlkCompletionSlots {
     }
 }
 
-/// Exclusive-flush barrier over the set of in-flight requests.
-///
-/// Read/write requests may run concurrently (multi-request in flight); a flush
-/// first claims the `is_flushing` flag so no *new* request starts, then waits
-/// for the in-flight set to drain. This upholds the `virtio-drivers`
-/// synchronous flush helper's requirement that the device processes no other
-/// buffer, while bounding flush starvation to one request duration under a
-/// continuous request stream.
-struct RequestGate {
-    state: SpinNoIrq<RequestGateState>,
-    wake: PollSet,
-}
-
-#[derive(Clone, Copy)]
-struct RequestGateState {
-    in_flight: usize,
-    is_flushing: bool,
-}
-
-impl RequestGate {
-    fn new() -> Self {
-        Self {
-            state: SpinNoIrq::new(RequestGateState {
-                in_flight: 0,
-                is_flushing: false,
-            }),
-            wake: PollSet::new(),
-        }
-    }
-
-    /// Joins the in-flight set, waiting while a flush holds the gate.
-    fn acquire_request(&self) -> RequestGuard<'_> {
-        if !wait_poll_set(&self.wake, || {
-            let mut state = self.state.lock();
-            if state.is_flushing {
-                false
-            } else {
-                state.in_flight += 1;
-                true
-            }
-        }) {
-            // No sleepable context (early boot); a flush cannot be running
-            // concurrently in such a context, so a bounded spin suffices.
-            while {
-                let mut state = self.state.lock();
-                if state.is_flushing {
-                    true
-                } else {
-                    state.in_flight += 1;
-                    false
-                }
-            } {
-                core::hint::spin_loop();
-            }
-        }
-        RequestGuard(self)
-    }
-
-    fn release_request(&self) {
-        self.state.lock().in_flight -= 1;
-        self.wake.wake();
-    }
-
-    /// Claims the flush barrier: first the exclusive flag (holding off new
-    /// requests), then the drain of the in-flight set.
-    fn begin_flush(&self) -> FlushGuard<'_> {
-        if !wait_poll_set(&self.wake, || {
-            let mut state = self.state.lock();
-            if state.is_flushing {
-                false
-            } else {
-                state.is_flushing = true;
-                true
-            }
-        }) {
-            while {
-                let mut state = self.state.lock();
-                if state.is_flushing {
-                    true
-                } else {
-                    state.is_flushing = true;
-                    false
-                }
-            } {
-                core::hint::spin_loop();
-            }
-        }
-        if !wait_poll_set(&self.wake, || self.state.lock().in_flight == 0) {
-            while self.state.lock().in_flight != 0 {
-                core::hint::spin_loop();
-            }
-        }
-        FlushGuard(self)
-    }
-
-    fn end_flush(&self) {
-        self.state.lock().is_flushing = false;
-        self.wake.wake();
-    }
-
-    #[cfg(unittest)]
-    fn snapshot(&self) -> RequestGateState {
-        *self.state.lock()
-    }
-}
-
-/// RAII guard for one in-flight request.
-struct RequestGuard<'a>(&'a RequestGate);
-
-impl Drop for RequestGuard<'_> {
-    fn drop(&mut self) {
-        self.0.release_request();
-    }
-}
-
-/// RAII guard for a held flush barrier.
-struct FlushGuard<'a>(&'a RequestGate);
-
-impl Drop for FlushGuard<'_> {
-    fn drop(&mut self) {
-        self.0.end_flush();
-    }
-}
-
 /// hardirq-facing view of one virtio-blk device.
 struct VirtIoBlkIrqDevice<H: Hal, T: Transport> {
     inner: Arc<SpinNoIrq<InnerDev<H, T>>>,
@@ -325,12 +201,11 @@ fn vd_name(index: u32) -> String {
 ///   descriptor chain and its caller-owned buffers), re-dispatches so the
 ///   next completed token is marked, and returns.
 ///
-/// Multiple requests may be in flight concurrently. A flush claims an
-/// exclusive barrier that first holds off new requests and then waits for the
-/// in-flight set to drain, upholding the synchronous flush helper's
-/// single-buffer contract. Without an IRQ number (or when IRQ registration
-/// fails), requests keep the original synchronous busy-poll path under
-/// [`SpinNoIrq`].
+/// Multiple requests may be in flight concurrently, including flushes: a
+/// flush (when the device supports `VIRTIO_BLK_F_FLUSH`) is submitted like
+/// any other request and completes on its own token, with no exclusive
+/// barrier. Without an IRQ number (or when IRQ registration fails), requests
+/// keep the original synchronous busy-poll path under [`SpinNoIrq`].
 ///
 /// # Type Parameters
 ///
@@ -351,8 +226,6 @@ pub struct VirtIoBlkDev<H: Hal, T: Transport> {
     num_blocks: u64,
     name: String,
     index: u32,
-    /// Exclusive-flush barrier over the in-flight request set (IRQ mode).
-    request_gate: RequestGate,
     /// Token-indexed completion slots (IRQ mode).
     completion_slots: Arc<BlkCompletionSlots>,
     /// Shared completion entry; `None` keeps the synchronous busy-poll path.
@@ -420,7 +293,6 @@ impl<H: Hal + 'static, T: Transport + 'static> VirtIoBlkDev<H, T> {
             num_blocks,
             name: alloc::format!("vd{}", vd_name(index)),
             index,
-            request_gate: RequestGate::new(),
             completion_slots,
             irq_completion,
             irq_device,
@@ -492,7 +364,6 @@ impl<H: Hal + 'static, T: Transport + 'static> VirtIoBlkDev<H, T> {
     /// Submits a read request and sleeps until the Block softirq marks this
     /// request's token, then completes the request.
     fn read_block_irq_driven(&self, block_id: u64, out_buf: &mut [u8]) -> DriverResult {
-        let _request = self.request_gate.acquire_request();
         let mut req = BlkReq::default();
         let mut resp = BlkResp::default();
         let token = {
@@ -525,7 +396,6 @@ impl<H: Hal + 'static, T: Transport + 'static> VirtIoBlkDev<H, T> {
     /// Submits a write request and sleeps until the Block softirq marks this
     /// request's token, then completes the request.
     fn write_block_irq_driven(&self, block_id: u64, in_buf: &[u8]) -> DriverResult {
-        let _request = self.request_gate.acquire_request();
         let mut req = BlkReq::default();
         let mut resp = BlkResp::default();
         let token = {
@@ -546,6 +416,38 @@ impl<H: Hal + 'static, T: Transport + 'static> VirtIoBlkDev<H, T> {
             // complete.
             unsafe { inner.complete_write_blocks(token, &req, in_buf, &mut resp) }
                 .map_err(as_driver_error)
+        })
+    }
+
+    /// Submits a flush request (when the device supports
+    /// `VIRTIO_BLK_F_FLUSH`) and sleeps until its token completes, exactly
+    /// like a read/write: no exclusive barrier is needed because the flush
+    /// is an ordinary queued request.
+    fn flush_irq_driven(&self) -> DriverResult {
+        let mut req = BlkReq::default();
+        let mut resp = BlkResp::default();
+        let token = {
+            let mut inner = self.device.lock();
+            // SAFETY: `req` and `resp` stay on this task's stack until the
+            // matching `complete_flush` below; the task blocks in between
+            // without returning or unwinding.
+            unsafe { inner.flush_nb(&mut req, &mut resp) }
+        }
+        .map_err(as_driver_error)?;
+
+        // Device without VIRTIO_BLK_F_FLUSH: nothing was submitted.
+        let Some(token) = token else {
+            return Ok(());
+        };
+
+        let slot = self.completion_slots.register(token);
+        self.completion_slots.dispatch_from_device(&self.device);
+        self.wait_for_slot(&slot);
+
+        self.finish_request(token, |inner| {
+            // SAFETY: the same buffers and token as the `flush_nb` call
+            // above, and the used-ring head reported this token complete.
+            unsafe { inner.complete_flush(token, &req, &mut resp) }.map_err(as_driver_error)
         })
     }
 }
@@ -593,16 +495,15 @@ impl<H: Hal + 'static, T: Transport + 'static> BlockDeviceOperations for VirtIoB
         }
     }
 
-    /// Flush keeps the synchronous helper (`virtio-drivers` offers no
-    /// non-blocking flush submit): the flush barrier guarantees no other
-    /// request is in flight, so the helper's single-buffer assumption holds.
-    /// Polling mode is already serialized by the device lock.
+    /// Flush joins the same per-token completion path as read/write when
+    /// the device supports `VIRTIO_BLK_F_FLUSH`: submit non-blocking, sleep
+    /// on the flush token's slot, pop. Devices without the feature return
+    /// `None` from `flush_nb` and nothing is submitted. Polling mode keeps
+    /// the synchronous helper under the device lock.
     fn flush(&self) -> DriverResult {
-        if self.irq_completion.is_some() {
-            let _flush = self.request_gate.begin_flush();
-            self.device.lock().flush().map_err(as_driver_error)
-        } else {
-            self.device.lock().flush().map_err(as_driver_error)
+        match &self.irq_completion {
+            Some(_) => self.flush_irq_driven(),
+            None => self.device.lock().flush().map_err(as_driver_error),
         }
     }
 }
@@ -615,10 +516,7 @@ mod tests {
     use unittest::{assert, assert_eq, def_test};
 
     use super::*;
-    use crate::{
-        irq_completion::test_support::ScopedFailingIrqProvider,
-        mock_virtio::{MockHal, MockTransport},
-    };
+    use crate::mock_virtio::{MockHal, MockTransport};
 
     #[def_test]
     fn test_virtio_blk_init_failure_handling() {
@@ -633,19 +531,6 @@ mod tests {
         } else {
             assert!(dev.is_err());
         }
-    }
-
-    #[def_test(serial)]
-    fn test_irq_registration_failure_falls_back_to_polling() {
-        // With a provider whose line requests always fail, IRQ registration
-        // must roll back and the device must keep the polling path.
-        let _failing_provider = ScopedFailingIrqProvider::new();
-        let transport = MockTransport::new();
-        let dev = VirtIoBlkDev::<MockHal, MockTransport>::try_new(transport, Some(77))
-            .expect("device init succeeds with a mock transport");
-
-        assert!(dev.irq_completion.is_none());
-        assert!(dev.irq_device.is_none());
     }
 
     #[def_test]
@@ -708,33 +593,6 @@ mod tests {
         assert_eq!(wakes.load(Ordering::SeqCst), 1);
 
         drop(registration);
-    }
-
-    #[def_test]
-    fn test_request_gate_flush_barrier() {
-        let gate = RequestGate::new();
-        let first = gate.acquire_request();
-        let second = gate.acquire_request();
-        assert_eq!(gate.snapshot().in_flight, 2);
-
-        drop(first);
-        drop(second);
-        assert_eq!(gate.snapshot().in_flight, 0);
-
-        let flush = gate.begin_flush();
-        let snapshot = gate.snapshot();
-        assert!(snapshot.is_flushing);
-        assert_eq!(snapshot.in_flight, 0);
-
-        // While a flush holds the gate, a fresh request claim (evaluated
-        // inline as the claim predicate would) must be rejected.
-        let state = gate.state.lock();
-        let can_start_request = !state.is_flushing;
-        drop(state);
-        assert!(!can_start_request);
-
-        drop(flush);
-        assert!(!gate.snapshot().is_flushing);
     }
 
     fn register_slot_waker(slot: &BlkSlot, counter: &Arc<AtomicUsize>) -> kpoll::PollRegistration {

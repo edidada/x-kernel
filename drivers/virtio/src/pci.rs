@@ -242,10 +242,12 @@ pub fn probe_pci_device<H: VirtIoHal, C: ConfigurationAccess>(
 
     #[cfg(target_arch = "x86_64")]
     let (irq, msix) = {
-        // MSI-X setup is limited to network devices for this x86 virtio-net
-        // latency fix. Other virtio device kinds keep legacy IRQs until their
-        // interrupt behavior is audited with the shared queue-vector setup.
-        if dev_kind == DeviceKind::Net {
+        // MSI-X is set up for device kinds whose interrupt-driven completion
+        // path is wired up: virtio-net (rx task) and virtio-blk (async
+        // read/write/flush through the Block softirq). Other virtio device
+        // kinds keep legacy IRQs until their interrupt behavior is audited
+        // with the shared queue-vector setup.
+        if dev_kind == DeviceKind::Net || dev_kind == DeviceKind::Block {
             setup_msix::<H, C>(root, bdf, config)
                 .map(|(irq, msix)| (irq, Some(msix)))
                 .or_else(|| legacy_irq_for_bdf(config, bdf).map(|irq| (irq, None)))?

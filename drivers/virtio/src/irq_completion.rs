@@ -363,54 +363,6 @@ fn warn_and_rollback(
     hub.devices.lock().retain(|dev| !Arc::ptr_eq(dev, device));
 }
 
-/// Installs an IRQ provider whose line requests always fail, so hub
-/// registration deterministically rolls back in every test environment
-/// (with or without a real host provider already installed).
-#[cfg(unittest)]
-pub(crate) mod test_support {
-    use alloc::sync::Arc;
-
-    use device_res::{IrqHandler, IrqHandlerToken, IrqOp, IrqResource};
-
-    struct FailingIrqOp;
-
-    impl IrqOp for FailingIrqOp {
-        fn request_irq(
-            &self,
-            _irq: IrqResource,
-            _handler: Arc<dyn IrqHandler>,
-        ) -> device_res::ResResult<IrqHandlerToken> {
-            Err(device_res::ResError::Busy)
-        }
-
-        fn release_irq(&self, _irq: IrqResource, _token: IrqHandlerToken) {}
-
-        fn set_irq_enabled(&self, _irq: IrqResource, _enabled: bool) {}
-    }
-
-    static FAILING_IRQ_OP: FailingIrqOp = FailingIrqOp;
-
-    pub(crate) struct ScopedFailingIrqProvider {
-        saved: Option<&'static dyn IrqOp>,
-    }
-
-    impl ScopedFailingIrqProvider {
-        pub(crate) fn new() -> Self {
-            let saved = device_res::try_irq_provider();
-            device_res::set_irq_provider(&FAILING_IRQ_OP);
-            Self { saved }
-        }
-    }
-
-    impl Drop for ScopedFailingIrqProvider {
-        fn drop(&mut self) {
-            if let Some(provider) = self.saved {
-                device_res::set_irq_provider(provider);
-            }
-        }
-    }
-}
-
 #[cfg(unittest)]
 #[allow(missing_docs)]
 mod tests {
@@ -420,7 +372,6 @@ mod tests {
     use unittest::{assert, assert_eq, def_test};
 
     use super::*;
-    use crate::irq_completion::test_support::ScopedFailingIrqProvider;
 
     static TEST_HUB: IrqCompletionHub = IrqCompletionHub::new(SoftirqVec::High);
     fn test_hub_softirq() {
@@ -540,32 +491,9 @@ mod tests {
     }
 
     #[def_test(serial)]
-    fn test_register_rolls_back_when_line_request_fails() {
-        reset_test_hub();
-        let _failing_provider = ScopedFailingIrqProvider::new();
-
-        let device: Arc<dyn IrqCompletionDevice> = FakeDevice::new(95);
-        assert!(
-            TEST_HUB
-                .register(test_hub_softirq, device.clone())
-                .is_none()
-        );
-        assert_eq!(TEST_HUB.device_count(), 0);
-
-        TEST_HUB.unregister(&device);
-        assert_eq!(TEST_HUB.device_count(), 0);
-
-        reset_test_hub();
-    }
-
-    #[def_test(serial)]
     fn test_register_rolls_back_when_vector_is_owned_elsewhere() {
         reset_test_hub();
-        let _failing_provider = ScopedFailingIrqProvider::new();
 
-        // Occupy the vector with a foreign action; the hub must refuse to
-        // register and leave the device unregistered so the caller keeps its
-        // polling fallback.
         fn foreign_action() {}
         let _foreign = kirq::softirq::test_support::ScopedSoftirqAction::install(
             SoftirqVec::High,

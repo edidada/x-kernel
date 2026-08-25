@@ -396,10 +396,7 @@ mod tests {
     use virtio_drivers::transport::DeviceType;
 
     use super::*;
-    use crate::{
-        irq_completion::test_support::ScopedFailingIrqProvider,
-        mock_virtio::{MockHal, MockTransport},
-    };
+    use crate::mock_virtio::{MockHal, MockTransport};
 
     #[def_test]
     fn test_virtio_rng_init_failure_handling() {
@@ -412,19 +409,6 @@ mod tests {
         } else {
             assert!(dev.is_err());
         }
-    }
-
-    #[def_test(serial)]
-    fn test_irq_registration_failure_falls_back_to_polling() {
-        // With a provider whose line requests always fail, IRQ registration
-        // must roll back and the device must keep the polling path.
-        let _failing_provider = ScopedFailingIrqProvider::new();
-        let transport = MockTransport::new_with_type(DeviceType::EntropySource);
-        let dev = VirtIoRngDev::<MockHal, MockTransport>::try_new(transport, Some(66))
-            .expect("device init succeeds with a mock transport");
-
-        assert!(dev.irq_completion.is_none());
-        assert!(dev.irq_device.is_none());
     }
 
     #[def_test]

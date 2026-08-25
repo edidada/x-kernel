@@ -274,7 +274,8 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 
 1. 读取 PCI 配置空间，获取设备类型信息
 2. 通过 `virtio_device_type()` 判断是否为 VirtIO 设备，再通过 `as_device_kind()` 映射为 `DeviceKind`
-3. x86_64 架构：尝试 MSI-X 设置（当前回退到 legacy IRQ）
+3. x86_64 架构：对 virtio-net 与 virtio-blk 尝试 MSI-X 设置（两者的中断驱动
+   完成路径已接入；其余设备暂用 legacy），失败回退 legacy IRQ
    - 查找 MSI-X capability，分配 CPU 中断向量，配置 MSI-X 表项
    - 若 MSI-X 不可用或向量耗尽，读取 Interrupt Line 寄存器获取 legacy IRQ
    - 通过 `kirq::try_map()` 将硬件 IRQ 映射为虚拟 IRQ
@@ -311,8 +312,9 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 3. 被唤醒的请求者在设备锁内 `complete_read_blocks()` 弹出本请求（同时注销
    完成槽，防止 token 在注销前被复用）、释放锁后再派发下一个头 token；
    无可睡眠上下文时退化为开中断轮询（handler 持续 ack，无 livelock）
-4. flush 经两段式独占屏障：先 claim `is_flushing` 阻止新请求，再等待在途
-   集合清零后执行同步 flush（`virtio-drivers` 无非阻塞 flush 提交 API）
+4. flush（设备支持 `VIRTIO_BLK_F_FLUSH` 时）经 `flush_nb()` 非阻塞提交，
+   与读写完全相同的 token 完成路径，无独占屏障；不支持该特性的设备
+   `flush_nb` 返回 `None`，直接返回成功
 
 **读取流程（轮询回退）**：
 

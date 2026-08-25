@@ -222,7 +222,24 @@ unsafe { inner.complete_read_blocks(token, &req, out_buf, &mut resp) }?;
 **调用者**：
 - `VirtIoBlkDev::read_block/write_block` — 同步接口的内部实现
 
-### 10. `RngInner` 熵请求提交与回收（`rng.rs`）
+### 10. `VirtIoBlkDev` 非阻塞 flush 提交与完成（`blk.rs`）
+
+```rust
+let token = unsafe { inner.flush_nb(&mut req, &mut resp) }?;
+...
+unsafe { inner.complete_flush(token, &req, &mut resp) }?;
+```
+
+**不变量**：`req`/`resp` 从提交到 `complete_flush` 期间不被访问；
+`complete_flush` 仅在本 token 的完成槽被 bottom half 标记后调用。
+
+**为何安全**：与读写相同的栈缓冲借用合同（任务在等待期间阻塞不返回）；
+flush 是普通排队请求，token 完成槽与读写共用同一派发/注销机制。
+
+**调用者**：
+- `VirtIoBlkDev::flush_irq_driven`
+
+### 11. `RngInner` 熵请求提交与回收（`rng.rs`）
 
 ```rust
 let token = unsafe { self.queue.add(&[], &mut [dma_buf.as_mut()]) }?;
@@ -333,8 +350,8 @@ let written = unsafe { self.queue.pop_used(token, &[], &mut outputs)? };
    不反映实际设备拓扑。
 4. **virtio-blk flush 保持同步轮询**：`virtio-drivers` 无非阻塞 flush 提交 API，
    flush 频率低，维持同步路径。
-5. **blk flush 为同步独占**：flush 期间在途集合需排空（屏障两段式），
-   长时间密集读写下 flush 延迟上界为一个请求时长。
+5. **blk flush 依赖 fork ≥0.13.3**：`flush_nb`/`complete_flush` 为 fork
+   扩展 API，升级 fork 时需确认语义不变。
 
 ## 审计清单
 
