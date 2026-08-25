@@ -2,11 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Non-concurrent slab-page ownership and free-list management.
+//! Non-concurrent slab-span ownership and free-list management.
 //!
-//! [`SlabCache`] owns one [`SizeClass`] and records every backing slab page
+//! [`SlabCache`] owns one [`SizeClass`] and records every backing slab span
 //! separately.  It does not allocate backing pages or provide synchronization:
-//! its caller supplies page-aligned memory, serializes access, and returns
+//! its caller supplies span-aligned memory, serializes access, and returns
 //! slabs yielded by [`SlabCache::take_empty_slab`].
 
 use core::{
@@ -20,7 +20,7 @@ use crate::{AllocError, AllocResult, SizeClass};
 ///
 /// The caller owns these pages after receiving this value and must return
 /// them to the page allocator that originally supplied them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 #[must_use = "detached slab pages must be returned to their page allocator"]
 pub struct SlabBacking {
     base: NonNull<u8>,
@@ -28,102 +28,102 @@ pub struct SlabBacking {
 }
 
 impl SlabBacking {
-    /// First byte of the detached page-aligned backing span.
-    pub const fn base(self) -> NonNull<u8> {
+    /// First byte of the detached span-aligned backing span.
+    pub const fn base(&self) -> NonNull<u8> {
         self.base
     }
 
     /// Number of base pages in the detached backing span.
-    pub const fn pages(self) -> usize {
+    pub const fn pages(&self) -> usize {
         self.pages
     }
 }
 
-/// List membership of a slab page.
+/// List membership of a slab span.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-enum SlabPageState {
-    /// The page has at least one central free object and at least one object
+enum SlabSpanState {
+    /// The span has at least one central free object and at least one object
     /// checked out to callers.
     Partial,
     /// The central free list is empty.
     Full,
-    /// All objects are on the central free list and the page is reclaimable.
+    /// All objects are on the central free list and the span is reclaimable.
     Empty,
-    /// The page is detached and may no longer be accessed through the cache.
+    /// The span is detached and may no longer be accessed through the cache.
     Detached,
 }
 
-/// Metadata stored at the first byte of every backing slab page span.
+/// Metadata stored at the first byte of every backing slab span.
 ///
 /// All fields are protected by the owning [`SlabCache`]'s external
 /// synchronization.  Free objects store their intrusive next pointer in the
 /// first machine word of their payload.
 #[derive(Debug)]
 #[repr(C)]
-struct SlabPage {
+struct SlabSpan {
     size_class: SizeClass,
-    state: SlabPageState,
+    state: SlabSpanState,
     capacity: usize,
     free_count: usize,
     free_head: Option<NonNull<u8>>,
-    previous: Option<NonNull<SlabPage>>,
-    next: Option<NonNull<SlabPage>>,
+    previous: Option<NonNull<SlabSpan>>,
+    next: Option<NonNull<SlabSpan>>,
 }
 
-/// Intrusive list of [`SlabPage`] values in one state.
+/// Intrusive list of [`SlabSpan`] values in one state.
 #[derive(Debug)]
-struct SlabList {
-    head: Option<NonNull<SlabPage>>,
+struct SlabSpanList {
+    head: Option<NonNull<SlabSpan>>,
 }
 
-impl SlabList {
+impl SlabSpanList {
     const fn new() -> Self {
         Self { head: None }
     }
 
-    /// Insert `page` at the front of this list.
+    /// Insert `span` at the front of this list.
     ///
     /// # Safety
     ///
-    /// `page` must be initialized, detached from every list, and remain valid
+    /// `span` must be initialized, detached from every list, and remain valid
     /// while this list retains it.  The caller must serialize all accesses to
-    /// the page and this list.
-    unsafe fn push_front(&mut self, mut page: NonNull<SlabPage>) {
-        // SAFETY: the caller guarantees that `page` is initialized, detached,
+    /// the span and this list.
+    unsafe fn push_front(&mut self, mut span: NonNull<SlabSpan>) {
+        // SAFETY: the caller guarantees that `span` is initialized, detached,
         // and exclusively accessible while its list links are updated.
         unsafe {
-            let page_ref = page.as_mut();
-            debug_assert!(page_ref.previous.is_none());
-            debug_assert!(page_ref.next.is_none());
+            let span_ref = span.as_mut();
+            debug_assert!(span_ref.previous.is_none());
+            debug_assert!(span_ref.next.is_none());
 
-            page_ref.next = self.head;
+            span_ref.next = self.head;
             if let Some(mut old_head) = self.head {
-                old_head.as_mut().previous = Some(page);
+                old_head.as_mut().previous = Some(span);
             }
-            self.head = Some(page);
+            self.head = Some(span);
         }
     }
 
-    /// Remove `page` from this list.
+    /// Remove `span` from this list.
     ///
     /// # Safety
     ///
-    /// `page` must be initialized and currently linked into this exact list.
-    /// The caller must serialize all accesses to the page and this list.
-    unsafe fn remove(&mut self, mut page: NonNull<SlabPage>) {
-        // SAFETY: the caller guarantees that `page` belongs to this list and
+    /// `span` must be initialized and currently linked into this exact list.
+    /// The caller must serialize all accesses to the span and this list.
+    unsafe fn remove(&mut self, mut span: NonNull<SlabSpan>) {
+        // SAFETY: the caller guarantees that `span` belongs to this list and
         // that its links cannot change concurrently.
         unsafe {
             let (previous, next) = {
-                let page_ref = page.as_ref();
-                (page_ref.previous, page_ref.next)
+                let span_ref = span.as_ref();
+                (span_ref.previous, span_ref.next)
             };
 
             if let Some(mut previous) = previous {
                 previous.as_mut().next = next;
             } else {
-                debug_assert_eq!(self.head, Some(page));
+                debug_assert_eq!(self.head, Some(span));
                 self.head = next;
             }
 
@@ -131,19 +131,19 @@ impl SlabList {
                 next.as_mut().previous = previous;
             }
 
-            let page_ref = page.as_mut();
-            page_ref.previous = None;
-            page_ref.next = None;
+            let span_ref = span.as_mut();
+            span_ref.previous = None;
+            span_ref.next = None;
         }
     }
 }
 
 /// Non-concurrent cache for one fixed slab [`SizeClass`].
 ///
-/// The cache keeps separate `partial`, `full`, and `empty` page lists.  It
+/// The cache keeps separate `partial`, `full`, and `empty` span lists.  It
 /// never obtains or frees backing memory while mutating these lists: callers
-/// use [`add_slab`](Self::add_slab) to publish pages and
-/// [`take_empty_slab`](Self::take_empty_slab) to detach reclaimable pages.
+/// use [`add_slab`](Self::add_slab) to publish spans and
+/// [`take_empty_slab`](Self::take_empty_slab) to detach reclaimable spans.
 ///
 /// `PAGE_SIZE` must be a non-zero power of two.  A caller must serialize every
 /// method call; this type deliberately has no locking policy so it can serve
@@ -151,9 +151,9 @@ impl SlabList {
 #[derive(Debug)]
 pub struct SlabCache<const PAGE_SIZE: usize> {
     size_class: SizeClass,
-    partial: SlabList,
-    full: SlabList,
-    empty: SlabList,
+    partial: SlabSpanList,
+    full: SlabSpanList,
+    empty: SlabSpanList,
     total_blocks: usize,
     free_blocks: usize,
     backing_pages: usize,
@@ -184,49 +184,28 @@ impl<const PAGE_SIZE: usize> SlabCache<PAGE_SIZE> {
 
         let span_bytes = slab_pages * PAGE_SIZE;
         let object_size = size_class.size();
-        let object_offset = (mem::size_of::<SlabPage>() + object_size - 1) & !(object_size - 1);
+        let object_offset = (mem::size_of::<SlabSpan>() + object_size - 1) & !(object_size - 1);
         assert!(span_bytes >= object_offset + object_size);
 
         Self {
             size_class,
-            partial: SlabList::new(),
-            full: SlabList::new(),
-            empty: SlabList::new(),
+            partial: SlabSpanList::new(),
+            full: SlabSpanList::new(),
+            empty: SlabSpanList::new(),
             total_blocks: 0,
             free_blocks: 0,
             backing_pages: 0,
         }
     }
 
-    /// Fixed object size class served by this cache.
-    pub const fn size_class(&self) -> SizeClass {
-        self.size_class
-    }
-
-    /// Number of base pages required for one backing slab page span.
+    /// Number of base pages required for one backing slab span.
     pub const fn slab_pages(&self) -> usize {
         self.size_class.slab_pages(PAGE_SIZE)
     }
 
-    /// Number of bytes in one backing slab page span.
+    /// Number of bytes in one backing slab span.
     pub const fn slab_bytes(&self) -> usize {
         self.slab_pages() * PAGE_SIZE
-    }
-
-    /// Number of objects managed by the cache, including currently allocated
-    /// and centrally free objects.
-    pub const fn total_blocks(&self) -> usize {
-        self.total_blocks
-    }
-
-    /// Number of objects currently available on the central free lists.
-    pub const fn free_blocks(&self) -> usize {
-        self.free_blocks
-    }
-
-    /// Number of backing base pages retained by the cache.
-    pub const fn backing_pages(&self) -> usize {
-        self.backing_pages
     }
 
     /// Number of bytes represented by all backing slab spans.
@@ -242,33 +221,33 @@ impl<const PAGE_SIZE: usize> SlabCache<PAGE_SIZE> {
 
     /// Allocate one object from this cache.
     ///
-    /// Returns `None` when no registered page has a free object.  The caller
+    /// Returns `None` when no registered span has a free object.  The caller
     /// should acquire `slab_pages()` pages outside its cache lock, publish them
     /// with [`add_slab`](Self::add_slab), and retry.
     pub fn allocate(&mut self) -> Option<NonNull<u8>> {
-        let page = match self.partial.head {
-            Some(page) => page,
+        let span = match self.partial.head {
+            Some(span) => span,
             None => {
-                let page = self.empty.head?;
-                self.move_page(page, SlabPageState::Empty, SlabPageState::Partial);
-                page
+                let span = self.empty.head?;
+                self.move_span(span, SlabSpanState::Empty, SlabSpanState::Partial);
+                span
             }
         };
 
-        // SAFETY: `page` belongs to the partial list, so it is initialized,
+        // SAFETY: `span` belongs to the partial list, so it is initialized,
         // exclusively accessible through `&mut self`, and has a free object.
-        let object = unsafe { self.pop_free_object(page) };
+        let object = unsafe { self.pop_free_object(span) };
 
-        // SAFETY: `page` is initialized and still exclusively owned by this
+        // SAFETY: `span` is initialized and still exclusively owned by this
         // cache.  `pop_free_object` updated its free count.
-        let is_full = unsafe { page.as_ref().free_count == 0 };
+        let is_full = unsafe { span.as_ref().free_count == 0 };
         if is_full {
-            self.move_page(page, SlabPageState::Partial, SlabPageState::Full);
+            self.move_span(span, SlabSpanState::Partial, SlabSpanState::Full);
         }
         Some(object)
     }
 
-    /// Publish one externally allocated slab page span to this cache.
+    /// Publish one externally allocated slab span to this cache.
     ///
     /// # Errors
     ///
@@ -282,7 +261,7 @@ impl<const PAGE_SIZE: usize> SlabCache<PAGE_SIZE> {
     /// exactly `self.slab_pages() * PAGE_SIZE` bytes.  It must remain mapped
     /// and exclusively owned until this cache returns it from
     /// [`take_empty_slab`](Self::take_empty_slab).  The allocation must not
-    /// overlap any page already registered with this cache.
+    /// overlap any span already registered with this cache.
     pub unsafe fn add_slab(&mut self, base: NonNull<u8>) -> AllocResult {
         let span_bytes = self.slab_bytes();
         let base_addr = base.as_ptr() as usize;
@@ -307,15 +286,15 @@ impl<const PAGE_SIZE: usize> SlabCache<PAGE_SIZE> {
             .backing_pages
             .checked_add(self.slab_pages())
             .ok_or(AllocError::InvalidInput)?;
-        let mut page = base.cast::<SlabPage>();
+        let mut span = base.cast::<SlabSpan>();
 
         // SAFETY: the caller guarantees a valid, exclusive span at `base`.
-        // `object_offset` leaves enough aligned space for `SlabPage`, and the
-        // cache initializes every free object before publishing the page.
+        // `object_offset` leaves enough aligned space for `SlabSpan`, and the
+        // cache initializes every free object before publishing the span.
         unsafe {
-            page.as_ptr().write(SlabPage {
+            span.as_ptr().write(SlabSpan {
                 size_class: self.size_class,
-                state: SlabPageState::Empty,
+                state: SlabSpanState::Empty,
                 capacity,
                 free_count: 0,
                 free_head: None,
@@ -323,7 +302,7 @@ impl<const PAGE_SIZE: usize> SlabCache<PAGE_SIZE> {
                 next: None,
             });
 
-            let page_ref = page.as_mut();
+            let span_ref = span.as_mut();
             for index in 0..capacity {
                 let object_offset = index
                     .checked_mul(self.size_class.size())
@@ -333,9 +312,9 @@ impl<const PAGE_SIZE: usize> SlabCache<PAGE_SIZE> {
                     .expect("slab object address overflow");
                 let object = NonNull::new_unchecked(object_addr as *mut u8);
 
-                Self::write_next(object, page_ref.free_head);
-                page_ref.free_head = Some(object);
-                page_ref.free_count += 1;
+                Self::write_next(object, span_ref.free_head);
+                span_ref.free_head = Some(object);
+                span_ref.free_count += 1;
             }
         }
 
@@ -343,9 +322,9 @@ impl<const PAGE_SIZE: usize> SlabCache<PAGE_SIZE> {
         self.free_blocks = next_free_blocks;
         self.backing_pages = next_backing_pages;
 
-        // SAFETY: `page` was initialized above and is not linked into any
+        // SAFETY: `span` was initialized above and is not linked into any
         // list.  `&mut self` serializes all list mutations.
-        unsafe { self.empty.push_front(page) };
+        unsafe { self.empty.push_front(span) };
         Ok(())
     }
 
@@ -359,76 +338,75 @@ impl<const PAGE_SIZE: usize> SlabCache<PAGE_SIZE> {
     pub unsafe fn deallocate(&mut self, object: NonNull<u8>) {
         // SAFETY: the caller guarantees that `object` belongs to a live object
         // in this cache, so its size-class-derived slab base contains a valid
-        // initialized `SlabPage` header.
-        let page = unsafe { self.page_for_object(object) };
+        // initialized `SlabSpan` header.
+        let span = unsafe { self.span_for_object(object) };
 
-        // SAFETY: `page` is valid according to the caller's object ownership
+        // SAFETY: `span` is valid according to the caller's object ownership
         // contract and all metadata access is serialized by `&mut self`.
-        let state = unsafe { page.as_ref().state };
-        debug_assert_ne!(state, SlabPageState::Empty);
-        debug_assert_ne!(state, SlabPageState::Detached);
+        let state = unsafe { span.as_ref().state };
+        debug_assert_ne!(state, SlabSpanState::Empty);
+        debug_assert_ne!(state, SlabSpanState::Detached);
 
-        if state == SlabPageState::Full {
-            self.move_page(page, SlabPageState::Full, SlabPageState::Partial);
+        if state == SlabSpanState::Full {
+            self.move_span(span, SlabSpanState::Full, SlabSpanState::Partial);
         }
 
-        // SAFETY: `object` is a live object from `page` and is no longer
-        // accessible to its caller.  The page metadata is exclusively owned
+        // SAFETY: `object` is a live object from `span` and is no longer
+        // accessible to its caller.  The span metadata is exclusively owned
         // through `&mut self`.
-        unsafe { self.push_free_object(page, object) };
+        unsafe { self.push_free_object(span, object) };
 
-        // SAFETY: `page` remains initialized and exclusively accessible; the
+        // SAFETY: `span` remains initialized and exclusively accessible; the
         // free count was updated by `push_free_object`.
         let is_empty = unsafe {
-            let page_ref = page.as_ref();
-            page_ref.free_count == page_ref.capacity
+            let span_ref = span.as_ref();
+            span_ref.free_count == span_ref.capacity
         };
         if is_empty {
-            self.move_page(page, SlabPageState::Partial, SlabPageState::Empty);
+            self.move_span(span, SlabSpanState::Partial, SlabSpanState::Empty);
         }
     }
 
-    /// Detach one completely free slab page span for return to its page
-    /// allocator.
+    /// Detach one completely free slab span for return to its page allocator.
     ///
     /// The caller must release the returned pages outside the cache lock.
     pub fn take_empty_slab(&mut self) -> Option<SlabBacking> {
-        let mut page = self.empty.head?;
+        let mut span = self.empty.head?;
 
-        // SAFETY: `page` is the initialized head of the empty list and `&mut
+        // SAFETY: `span` is the initialized head of the empty list and `&mut
         // self` serializes its list links and counters.
         unsafe {
-            let page_ref = page.as_ref();
-            debug_assert_eq!(page_ref.state, SlabPageState::Empty);
-            debug_assert_eq!(page_ref.free_count, page_ref.capacity);
+            let span_ref = span.as_ref();
+            debug_assert_eq!(span_ref.state, SlabSpanState::Empty);
+            debug_assert_eq!(span_ref.free_count, span_ref.capacity);
 
-            self.empty.remove(page);
+            self.empty.remove(span);
 
-            let page_ref = page.as_mut();
-            page_ref.state = SlabPageState::Detached;
+            let span_ref = span.as_mut();
+            span_ref.state = SlabSpanState::Detached;
             self.total_blocks = self
                 .total_blocks
-                .checked_sub(page_ref.capacity)
+                .checked_sub(span_ref.capacity)
                 .expect("slab total block underflow");
             self.free_blocks = self
                 .free_blocks
-                .checked_sub(page_ref.capacity)
+                .checked_sub(span_ref.capacity)
                 .expect("slab free block underflow");
             self.backing_pages = self
                 .backing_pages
                 .checked_sub(self.slab_pages())
-                .expect("slab backing page underflow");
+                .expect("slab backing page count underflow");
         }
 
         Some(SlabBacking {
-            base: page.cast(),
+            base: span.cast(),
             pages: self.slab_pages(),
         })
     }
 
     fn object_offset(&self) -> AllocResult<usize> {
         let object_size = self.size_class.size();
-        let with_alignment_slack = mem::size_of::<SlabPage>()
+        let with_alignment_slack = mem::size_of::<SlabSpan>()
             .checked_add(object_size - 1)
             .ok_or(AllocError::InvalidInput)?;
         Ok(with_alignment_slack & !(object_size - 1))
@@ -446,46 +424,46 @@ impl<const PAGE_SIZE: usize> SlabCache<PAGE_SIZE> {
         Ok(capacity)
     }
 
-    fn move_page(&mut self, mut page: NonNull<SlabPage>, from: SlabPageState, to: SlabPageState) {
-        // SAFETY: callers only move initialized pages currently linked in the
+    fn move_span(&mut self, mut span: NonNull<SlabSpan>, from: SlabSpanState, to: SlabSpanState) {
+        // SAFETY: callers only move initialized spans currently linked in the
         // `from` list.  `&mut self` serializes all list and state changes.
         unsafe {
-            debug_assert_eq!(page.as_ref().state, from);
-            self.list_mut(from).remove(page);
-            page.as_mut().state = to;
-            self.list_mut(to).push_front(page);
+            debug_assert_eq!(span.as_ref().state, from);
+            self.list_mut(from).remove(span);
+            span.as_mut().state = to;
+            self.list_mut(to).push_front(span);
         }
     }
 
-    fn list_mut(&mut self, state: SlabPageState) -> &mut SlabList {
+    fn list_mut(&mut self, state: SlabSpanState) -> &mut SlabSpanList {
         match state {
-            SlabPageState::Partial => &mut self.partial,
-            SlabPageState::Full => &mut self.full,
-            SlabPageState::Empty => &mut self.empty,
-            SlabPageState::Detached => unreachable!("detached slab pages are not list members"),
+            SlabSpanState::Partial => &mut self.partial,
+            SlabSpanState::Full => &mut self.full,
+            SlabSpanState::Empty => &mut self.empty,
+            SlabSpanState::Detached => unreachable!("detached slab spans are not list members"),
         }
     }
 
     /// # Safety
     ///
-    /// `page` must be an initialized page in the partial list with at least
+    /// `span` must be an initialized span in the partial list with at least
     /// one free object.  The caller must serialize access through this cache.
-    unsafe fn pop_free_object(&mut self, mut page: NonNull<SlabPage>) -> NonNull<u8> {
+    unsafe fn pop_free_object(&mut self, mut span: NonNull<SlabSpan>) -> NonNull<u8> {
         // SAFETY: the caller guarantees exclusive access to an initialized
-        // partial page.  Its free-list head was initialized when the page was
+        // partial span.  Its free-list head was initialized when the span was
         // published and is non-null while `free_count` is non-zero.
         unsafe {
-            let page_ref = page.as_mut();
-            debug_assert_eq!(page_ref.state, SlabPageState::Partial);
-            let object = page_ref
+            let span_ref = span.as_mut();
+            debug_assert_eq!(span_ref.state, SlabSpanState::Partial);
+            let object = span_ref
                 .free_head
                 .take()
-                .expect("partial slab page has no free object");
-            page_ref.free_head = Self::read_next(object);
-            page_ref.free_count = page_ref
+                .expect("partial slab span has no free object");
+            span_ref.free_head = Self::read_next(object);
+            span_ref.free_count = span_ref
                 .free_count
                 .checked_sub(1)
-                .expect("slab page free count underflow");
+                .expect("slab span free count underflow");
             self.free_blocks = self
                 .free_blocks
                 .checked_sub(1)
@@ -496,22 +474,22 @@ impl<const PAGE_SIZE: usize> SlabCache<PAGE_SIZE> {
 
     /// # Safety
     ///
-    /// `page` must be an initialized partial page and `object` must be a live
+    /// `span` must be an initialized partial span and `object` must be a live
     /// object belonging to it.  The caller must serialize access through this
     /// cache and stop all use of `object` before this call.
-    unsafe fn push_free_object(&mut self, mut page: NonNull<SlabPage>, object: NonNull<u8>) {
-        // SAFETY: the caller guarantees exclusive page access and that the
+    unsafe fn push_free_object(&mut self, mut span: NonNull<SlabSpan>, object: NonNull<u8>) {
+        // SAFETY: the caller guarantees exclusive span access and that the
         // object is no longer live.  Its class alignment is at least one
         // machine word, so storing the intrusive next pointer is aligned.
         unsafe {
-            let page_ref = page.as_mut();
-            debug_assert_eq!(page_ref.state, SlabPageState::Partial);
-            Self::write_next(object, page_ref.free_head);
-            page_ref.free_head = Some(object);
-            page_ref.free_count = page_ref
+            let span_ref = span.as_mut();
+            debug_assert_eq!(span_ref.state, SlabSpanState::Partial);
+            Self::write_next(object, span_ref.free_head);
+            span_ref.free_head = Some(object);
+            span_ref.free_count = span_ref
                 .free_count
                 .checked_add(1)
-                .expect("slab page free count overflow");
+                .expect("slab span free count overflow");
             self.free_blocks = self
                 .free_blocks
                 .checked_add(1)
@@ -522,8 +500,8 @@ impl<const PAGE_SIZE: usize> SlabCache<PAGE_SIZE> {
     /// # Safety
     ///
     /// `object` must be an object belonging to this cache's size class and to
-    /// a currently registered slab page span.
-    unsafe fn page_for_object(&self, object: NonNull<u8>) -> NonNull<SlabPage> {
+    /// a currently registered slab span.
+    unsafe fn span_for_object(&self, object: NonNull<u8>) -> NonNull<SlabSpan> {
         let span_bytes = self.slab_bytes();
         debug_assert!(span_bytes.is_power_of_two());
         let object_addr = object.as_ptr() as usize;
@@ -531,20 +509,20 @@ impl<const PAGE_SIZE: usize> SlabCache<PAGE_SIZE> {
 
         // SAFETY: `object` is non-null and the caller guarantees it belongs to
         // a registered span aligned to `span_bytes`, so masking recovers the
-        // non-null address of that span's initialized `SlabPage` header.
-        let page = unsafe { NonNull::new_unchecked(base_addr as *mut SlabPage) };
+        // non-null address of that span's initialized `SlabSpan` header.
+        let span = unsafe { NonNull::new_unchecked(base_addr as *mut SlabSpan) };
 
         // SAFETY: the caller guarantees that the recovered header belongs to
         // this cache and remains valid while this method reads its metadata.
         unsafe {
-            let page_ref = page.as_ref();
-            debug_assert_eq!(page_ref.size_class, self.size_class);
+            let span_ref = span.as_ref();
+            debug_assert_eq!(span_ref.size_class, self.size_class);
             let first_object = base_addr + self.object_offset().expect("valid slab geometry");
             let span_end = base_addr + span_bytes;
             debug_assert!(object_addr >= first_object && object_addr < span_end);
             debug_assert_eq!((object_addr - first_object) % self.size_class.size(), 0);
         }
-        page
+        span
     }
 
     /// # Safety
@@ -593,8 +571,8 @@ mod tests {
     fn test_cache_needs_a_published_slab() {
         let mut cache = SlabCache::<PAGE_SIZE>::new(SizeClass::Bytes64);
         assert_eq!(cache.allocate(), None);
-        assert_eq!(cache.total_blocks(), 0);
-        assert_eq!(cache.free_blocks(), 0);
+        assert_eq!(cache.total_blocks, 0);
+        assert_eq!(cache.free_blocks, 0);
     }
 
     #[def_test]
@@ -634,8 +612,8 @@ mod tests {
         let backing = cache.take_empty_slab().unwrap();
         assert_eq!(backing.base(), base);
         assert_eq!(backing.pages(), SizeClass::Bytes512.slab_pages(PAGE_SIZE));
-        assert_eq!(cache.total_blocks(), 0);
-        assert_eq!(cache.free_blocks(), 0);
+        assert_eq!(cache.total_blocks, 0);
+        assert_eq!(cache.free_blocks, 0);
     }
 
     #[def_test]

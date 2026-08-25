@@ -1,124 +1,193 @@
-# alloc-engine — 设计文档
+# alloc-engine slab cache v1 — 设计文档
 
 ## 定位
 
-`alloc-engine` 提供 x-kernel 内存分配算法的无平台实现：页级 buddy、字节级
-buddy、TLSF 与 slab 适配器。它只维护已交给分配器的内存，不负责建立内核页表、
-选择物理内存区域或定义全局锁策略。
+`alloc-engine` 提供 X-Kernel 的无平台内存分配算法。本次 v1 只重构
+`SlabHeap` 的小对象管理：每个固定 `SizeClass` 拥有一个 central
+`SlabCache`，每个 cache 明确记录其 backing span 及其中的 live/free 对象。
 
-本次引入的 `SlabCache<PAGE_SIZE>` 是固定 `SizeClass` 的 slab-page ownership
-核心。它让 slab 的对象、backing page 和可回收状态保持在同一所有权层，而不是
-只保留一个跨 page 的对象 freelist。
+这版参考 Asterinas 的：
+
+- `osdk/deps/heap-allocator/src/slab_cache.rs`：`Empty / Partial / Full`
+  三类 slab；
+- `osdk/deps/heap-allocator/src/allocator.rs`：固定 size class 路由。
+
+v1 **不引入** Asterinas 的 CPU-local `ObjectCache`，也不引入 X-Kernel
+实验分支中的 magazine、IRQ reserve、IPI flush、GFP 风格参数或独立
+`KmemCacheSet`。目标是先得到一个边界小、能独立 review 和回归的 central
+slab cache。
 
 ## 范围
 
 ```text
 mm/alloc-engine/
-├── src/buddy_alloc.rs    # 通用页 buddy 算法
-├── src/buddy*.rs         # buddy 适配器
-├── src/slab_trait.rs     # SizeClass 与兼容 trait
-├── src/slab_cache.rs     # 单 size class 的 page ownership 核心
-├── src/slab_heap.rs      # 现有 slab byte heap
-├── src/slab.rs           # SlabByteAllocator 适配器
-└── src/tlsf.rs           # TLSF 适配器
+├── src/slab_trait.rs     # 唯一的 SizeClass 定义与 layout 路由
+├── src/slab_cache.rs     # 单个 size class 的 span 状态机
+├── src/slab_heap.rs      # 九个 cache 与内部 buddy 的组合
+├── src/slab.rs           # ByteAllocator 适配器
+└── docs/                 # 本设计与安全分析
 ```
 
-`SizeClass` 是 slab 的唯一 class 定义。它根据 `Layout` 的 size 和 alignment
-选择最小可满足 class，并同时决定每个 slab span 使用的基页数。
+本 PR 不修改 `kalloc`、`kirq`、`kipi`、页级 PCP 或任何调用方 API。
 
 ## 架构
 
-`SlabCache` 不向页分配器发出请求；它接收调用者取得的、对 span 大小对齐的内存，
-并在该 span 首部写入 metadata：
+在 slab 配置下，现有集成关系为：
 
 ```text
-page allocator / owning heap
-        │ acquire aligned slab span
-        v
-SlabCache<SizeClass>
- ├─ Empty list   : 所有对象均在 central freelist，可 detach
- ├─ Partial list : 同时有 live 和 central-free 对象
- └─ Full list    : 没有 central-free 对象
-        │
-        └─ take_empty_slab() -> caller returns pages outside cache mutation
+kalloc::GlobalAllocator
+└─ balloc: SpinNoIrq<SlabByteAllocator>       现有全局锁
+   └─ SlabHeap
+      ├─ SlabCache<8>
+      ├─ SlabCache<16>
+      ├─ ...
+      ├─ SlabCache<2048>
+      └─ internal BuddyAllocator<4096>
+
+kalloc global page buddy
+  └─ 在 byte heap 扩容时把新 region 交给 SlabHeap
+     （v1 没有从 SlabHeap 反向退页的通道）
 ```
 
-`SlabHeap` 持有九个这样的 cache 及内部 `BuddyAllocator<4096>`：小对象进入
-对应 cache，cache miss 时从 buddy 获得一个正确对齐的 span，`SlabHeap::shrink`
-则先 detach 空 span 再归还 buddy。非 slab layout 仍走直接 buddy 路径。
+`SlabCache` 不主动申请内存。`SlabHeap` 从自己的内部 buddy 取得一个按完整
+span 大小对齐的 backing allocation，再交给目标 cache 初始化。span 首部保存
+`SlabSpan` metadata，剩余空间按 class size 切成对象；free object 的第一个
+machine word 保存 intrusive next link。
 
-每个 backing span 的首部是 `SlabPage`。剩余空间按该 `SizeClass` 对齐并切分为
-对象；空闲对象的首个 machine word 作为 intrusive next link。因此对象被分配给
-调用者期间，其内容不会被 cache 访问或改写。
+每个 cache 维护三条 intrusive list：
 
-`SlabHeap` 已使用 `SlabCache` 替代原先只含跨 page global freelist 的 slab
-实现。更高层的内核 per-CPU cache 仍应建立在 `SlabCache` / `SlabHeap` 提供的
-page ownership 之上，而不能把同一策略施加给任意 `ByteAllocator`。
+```text
+Empty   所有对象均空闲，可 detach
+Partial 同时存在 live object 和 free object，优先用于分配
+Full    没有 free object，只能等待对象归还
+```
+
+`SlabBacking` 是 detach 后的唯一移交 token。它不是 `Copy`/`Clone`，避免安全
+代码无意复制一次回收权。
 
 ## 调用约束 / 执行上下文
 
-- `SlabCache` 不含锁，也不禁用 IRQ 或抢占。所有方法要求调用者串行化访问；将它
-  放入何种锁、是否适合中断上下文，属于上层分配器的职责。
-- `add_slab` 的 backing span 必须由调用者独占、可写，并按 `slab_bytes()` 对齐；
-  span 注册后必须持续映射，直到 `take_empty_slab` 将其 detach。
-- `allocate` 只操作已注册的 metadata 和 freelist。cache 空时返回 `None`，调用者
-  应在 cache mutation 之外取得页并再次调用 `add_slab`。
-- `take_empty_slab` 只返回没有 live object 的 span。页面归还也应在 cache mutation
-  之外完成，避免把可能较慢的底层页分配操作混入临界区。
-- 本模块不依赖 current task、调度器、MMIO、DMA 或 firmware 初始化；但 backing
-  地址必须已在当前内核地址空间可访问。
+### alloc-engine 层
+
+- `SlabCache` 不含锁、不会关闭 IRQ、不会关闭抢占，也不会 sleep；所有 mutation
+  都要求调用者持有唯一的 `&mut SlabCache`。
+- `add_slab` 的 backing span 必须独占、可写、按 `slab_bytes()` 对齐，并持续映射
+  到 `take_empty_slab` 将其 detach 为止。
+- `deallocate` 要求 object 来自同一 cache、仍为 live object 且只释放一次。
+- 本层不依赖 current task、调度器、MMIO、DMA、firmware 或进程上下文。
+
+### 当前 kalloc 集成
+
+`kalloc` 仍以一个 `SpinNoIrq<SlabByteAllocator>` 串行化整个 byte heap。
+`SpinNoIrq` 同时关闭本 CPU IRQ 和内核抢占，因此普通 task、softirq 与 hardirq
+不会在同一 CPU 上重入该状态；不同 CPU 通过同一自旋锁互斥。NMI 不在该保证内。
+
+这只说明现有路径在锁与内存安全上保持一致，**不代表 v1 提供了合格的 hardirq
+allocation latency 或 atomic allocation 语义**。cache miss、span 初始化、内部
+buddy reclaim，以及 `kalloc` 外层可能发生的 byte-heap 扩容，都可能在该全局
+IRQ-off 临界区中执行。v1 也没有依据 task/softirq/hardirq 选择不同策略。
 
 ## 状态机
 
 ```text
-                       allocate
-  Empty ─────────────────────────> Partial ── allocate last free object ─> Full
-    ^                                  │                                      │
-    │ deallocate last live object      │ deallocate                            │ deallocate
-    └──────────────────────────────────┴──────────────────────────────────────┘
-    │
-    └── take_empty_slab() ──> Detached (不再属于 cache)
+                         allocate
+  Empty ───────────────────────────> Partial
+    ^                                    │
+    │ deallocate last live object        │ allocate last free object
+    │                                    v
+    └────────────────────────────────── Full
+                     deallocate
+
+  Empty ── take_empty_slab() ──> Detached ──> internal buddy
 ```
 
-只有 `Empty` 状态的 span 可被 detach。`Partial` 与 `Full` 表示至少有一个对象
-仍被上层持有，因此不能在这两个状态归还 backing pages。
+状态不变量：
+
+- `Empty`: `free_count == capacity`；
+- `Partial`: `0 < free_count < capacity`；
+- `Full`: `free_count == 0`；
+- `Detached`: 已不属于任何 list，cache 不得再访问其 metadata。
+
+只有 `Empty` span 可以 detach。`Partial` 和 `Full` 至少仍有一个上层持有的对象，
+不得归还 backing pages。
 
 ## 算法流程
 
-1. `SlabHeap` 根据 `SizeClass::from_layout` 路由小对象。
-2. `allocate` 优先从 `Partial` 的 freelist 弹出对象；没有 partial page 时将一个
-   `Empty` page 移至 `Partial` 后再弹出。最后一个 free object 被弹出时转为 `Full`。
-3. `deallocate` 通过对齐 span 掩码恢复 `SlabPage`，将对象压回该 page 的 freelist。
-   `Full` 首次释放转为 `Partial`；最后一个 live object 释放后转为 `Empty`。
-4. `SlabHeap::shrink` 循环调用 `take_empty_slab`，再把已 detach 的 spans 交给其
-   内部 buddy。上层可将它接入内存压力和 OOM 前回收策略。
+### 小对象分配
 
-计数器只统计 cache 已经注册的 span；`add_slab` 在写入 span 前先验证所有可能
-溢出的全局计数，避免错误返回后留下未被 cache 记录的半发布状态。
+1. `SizeClass::from_layout()` 同时考虑 size 与 alignment，选择最小可满足 class。
+2. cache 优先从 `Partial` span 弹出一个 free object。
+3. 没有 `Partial` 时，取一个 `Empty` span 转为 `Partial` 后分配。
+4. cache 完全没有 free object 时，`SlabHeap` 从内部 buddy 申请一个新 span。
+5. 如果内部 buddy 返回 `NoMemory`，`SlabHeap` detach 所有 `Empty` span、归还给
+   内部 buddy，然后只重试一次。
+6. 新 span 初始化并进入 `Empty` list，随后重试对象分配。
+
+v1 一次 miss 只新建一个 span，不像 Asterinas 当前实现那样顺带预建一批 empty
+slab；这减少了首次 miss 的工作量和短期内存占用。
+
+### 释放与回收
+
+1. `deallocate` 由 object 地址按 span 对齐掩码恢复 `SlabSpan` header。
+2. `Full` 首次收到 free object 时转为 `Partial`。
+3. 最后一个 live object 归还时，span 转为 `Empty`。
+4. 正常 free 只保留 `Empty` span，不立即做 buddy 操作。
+5. `SlabHeap::shrink()` 或内部 buddy 的首次 `NoMemory` 会回收所有 `Empty` span。
+
+因此 v1 在内部 buddy 压力下不会因为空 slab 占着页而直接失败，但 normal path
+仍保留 warm empty span，避免 alloc/free 立即反复拆建 slab。
+
+### 非 slab layout
+
+不能由 size class 表达的 layout 直接走 `SlabHeap` 内部 buddy；该路径同样在首次
+`NoMemory` 时回收 empty slab span 后重试一次。`kalloc` 仍保留自己的大对象直达
+全局页分配器规则，本 PR 不改变该边界。
 
 ## 并发模型
 
-`SlabCache` 本身是非并发数据结构。它实现 `Send`，使一个拥有它的锁保护容器
-可以在执行上下文之间转移；它刻意不实现 `Sync`。`&mut self` 使普通 Rust 调用
-具有排他性，但内核上层若通过内部可变性或自旋锁共享它，必须确保每次状态转换、
-freelist 读写和空 span detach 都由同一串行化规则保护。
+- `SlabCache` 是非并发数据结构；list、header、counter 和 object freelist 必须由
+  同一个外部串行化域保护。
+- v1 的实际串行化域是 `kalloc::GlobalAllocator::balloc` 的单个 `SpinNoIrq`。
+  九个 class 之间也会互相竞争。
+- cache 与内部 buddy 同属 `SlabHeap`，所以 refill、压力回收和 span 初始化都在
+  该外层锁内完成。v1 没有新的锁顺序，但扩大操作仍继承现有全局锁的延迟问题。
+- `SlabCache` 只实现 `Send`，不实现 `Sync`；共享访问必须经过上层锁。
 
-该层有意不持有页分配器引用，因而也不会在 metadata 临界区内分配或释放 backing
-pages。这为上层实现短临界区、per-CPU magazine 和跨 CPU flush 提供了边界。
+## v1 的已知设计缺陷与未来工作
+
+这些是本次有意接受的边界，不应在 PR 描述中宣称已经解决：
+
+| v1 缺陷 | 当前影响 | 后续方向 |
+|---|---|---|
+| 单个全局 `SpinNoIrq` | 所有 CPU、所有 class 串行；IRQ-off 临界区可能较长 | 在 execution-context 契约明确后增加 per-CPU magazine，并缩短 central lock 范围 |
+| 没有 GFP/atomic 风格输入 | task、softirq、hardirq 使用相同策略，调用者无法禁止 page work 或 reclaim | 先实现 X-Kernel 所需的最小 flag 子集，再逐步扩展，不照搬完整 Linux GFP |
+| hardirq 没有独立成功保证 | miss 时可能做 span 初始化、buddy 操作或最终失败；没有 reserve | 定义 atomic allocation contract；再决定 IRQ reserve、预留页或其他有界兜底 |
+| byte heap 与全局 page buddy 两级所有权 | 空 span 只能回到 `SlabHeap` 内部 buddy；已交给 byte heap 的 region 不能退回全局 page buddy | 将 central cache 直接接到全局页 allocator，或增加可验证的 region shrink/transfer 协议 |
+| empty span 只在压力或显式 shrink 时回收 | byte heap 内可能保留较多 warm span | 增加经过 workload 验证的 high/low watermark，而非本次拍脑袋设常数 |
+| 没有 per-CPU 生命周期协议 | 无 remote free、CPU offline drain、全 CPU flush、NUMA policy | 与 magazine 一起设计 owner、迁移、hotplug 和 reclaim 协议 |
+| release 构建不检测 invalid free | 错 layout、跨 cache free、double free 仍依赖 unsafe caller contract | 增加可选 debug/hardening metadata，不能把昂贵检查默认放进 fast path |
+| 无内存清零/poison | free object 保留旧内容 | 由安全策略决定是否提供 debug poison、敏感对象清零或专用 cache |
+
+建议演进顺序：先合入本 v1 并建立正确性/回归基线；随后解决全局页回收与 allocation
+context；再引入 per-CPU fast path；最后根据 IRQ 延迟和真实 workload 决定 reserve、
+批量参数与更复杂 reclaim。当前大重构分支可以继续承载这些后续方案，但不应把它们
+塞回本 PR。
 
 ## 设计决策
 
-- **page 属于具体 size class**：header 记录 `SizeClass`、容量、free count 和
-  list links，使回收能判断某个 span 是否真的没有 live object。
-- **partial/full/empty 分表**：避免 shrink 扫描所有对象或误回收仍被使用的 page。
-- **对象内 intrusive link**：不增加每对象的外部 metadata；代价是 free object
-  的首个 machine word 不能保留旧内容，这是 allocator 的正常语义。
-- **不在此层内置 per-CPU 或 IRQ 策略**：这些依赖内核 execution context，不能
-  隐式施加给 TLSF、buddy 或一般 `ByteAllocator`。
+1. **先建立 span ownership，再优化 fast path。** 没有 per-span live-object 计数，
+   无法安全回收 backing pages，也无法可靠实现后续 magazine flush。
+2. **只保留一套 `SizeClass`。** layout 路由、span 页数和 object 对齐从同一来源
+   派生，避免 `kalloc`、cache 和 per-CPU 层复制 bucket 表。
+3. **metadata 与 link 均为 intrusive。** 不依赖 heap 分配 metadata，避免 allocator
+   自递归；代价是 span 首部占用空间，free object 的首个 word 会被覆写。
+4. **压力回收只重试一次。** 这能回收本 heap 已持有的确定空闲内存，同时避免无
+   退出条件的 reclaim loop。
+5. **不在 v1 引入新的公共 cache API。** `SlabCache` 是 `alloc-engine` 的私有实现
+   细节；外部仍通过现有 `SlabHeap` / `ByteAllocator` 契约使用它。
 
 ## Drop / 资源释放
 
-`SlabCache` 不拥有 backing memory，因此没有自动归还页的 `Drop` 实现。
-`SlabHeap::shrink` 显式归还空 span；销毁 heap 或回收其管理的内存前，调用者仍须
-保证不存在 live object。若 cache 仍含 `Partial` 或 `Full` span，调用者必须保留
-其映射和所有权。
+`SlabHeap` 所管理的 region 由上层长期持有，通常与全局 allocator 同生命周期。
+`SlabCache` 不在 `Drop` 中自行归还 backing pages。运行期只有 `Empty` span 能通过
+`shrink` 或压力回收回到内部 buddy；含 live object 的 span 必须持续映射。

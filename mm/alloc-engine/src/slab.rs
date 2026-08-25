@@ -4,7 +4,7 @@
 
 //! Slab-based memory allocation.
 //!
-//! This module wraps `slab_allocator::Heap` for byte-granularity allocation.
+//! This module adapts [`SlabHeap`](crate::SlabHeap) to [`ByteAllocator`].
 
 use core::{alloc::Layout, ptr::NonNull};
 

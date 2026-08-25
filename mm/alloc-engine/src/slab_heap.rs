@@ -11,7 +11,7 @@
 
 use core::{alloc::Layout, ptr::NonNull};
 
-use crate::{AllocError, BuddyAllocator, SIZE_CLASS_COUNT, SizeClass, SlabCache};
+use crate::{AllocError, BuddyAllocator, SIZE_CLASS_COUNT, SizeClass, slab_cache::SlabCache};
 
 /// Internal base page size used by this byte allocator.
 const PAGE_SIZE: usize = 4096;
@@ -73,7 +73,7 @@ impl SlabHeap {
             None => {
                 let page_count = layout.size().div_ceil(PAGE_SIZE);
                 let alignment = layout.align().max(PAGE_SIZE);
-                self.buddy.allocate_pages(page_count, alignment)
+                self.allocate_pages_with_reclaim(page_count, alignment)
             }
         }
     }
@@ -166,7 +166,7 @@ impl SlabHeap {
             let cache = self.slab_cache(size_class);
             (cache.slab_pages(), cache.slab_bytes())
         };
-        let base = self.buddy.allocate_pages(page_count, span_alignment)?;
+        let base = self.allocate_pages_with_reclaim(page_count, span_alignment)?;
         // SAFETY: a successful buddy allocation is a non-null, mapped span
         // with exactly `page_count` base pages and `span_alignment` alignment.
         let backing = unsafe { NonNull::new_unchecked(base as *mut u8) };
@@ -195,6 +195,25 @@ impl SlabHeap {
 
     fn slab_cache_mut(&mut self, size_class: SizeClass) -> &mut SlabCache<PAGE_SIZE> {
         &mut self.slabs[size_class.index()]
+    }
+
+    /// Allocate pages after making one bounded attempt to release empty slabs.
+    ///
+    /// Empty spans are useful as a warm cache, so the normal allocation and
+    /// deallocation paths retain them.  Once the internal buddy cannot satisfy
+    /// a request, retaining those spans would report a false OOM even though
+    /// the heap still owns fully free memory.
+    fn allocate_pages_with_reclaim(
+        &mut self,
+        page_count: usize,
+        alignment: usize,
+    ) -> Result<usize, AllocError> {
+        match self.buddy.allocate_pages(page_count, alignment) {
+            Err(AllocError::NoMemory) if self.shrink() != 0 => {
+                self.buddy.allocate_pages(page_count, alignment)
+            }
+            result => result,
+        }
     }
 
     fn slab_backing_bytes(&self) -> usize {
@@ -325,6 +344,29 @@ mod tests {
         // SAFETY: `address` was allocated above with this layout.
         unsafe { heap.deallocate(address, layout) };
         assert_eq!(heap.shrink(), SizeClass::Bytes2048.slab_pages(PAGE_SIZE),);
+    }
+
+    #[def_test]
+    fn test_page_pressure_reclaims_empty_slab_spans() {
+        let mut heap = make_heap();
+        let layout = Layout::from_size_align(64, 8).unwrap();
+        let address = heap.allocate(layout).unwrap();
+
+        // SAFETY: `address` is the only live allocation from this heap.
+        unsafe { heap.deallocate(address, layout) };
+
+        let mut allocated_pages = alloc::vec::Vec::new();
+        while let Ok(address) = heap.buddy.allocate_pages(1, PAGE_SIZE) {
+            allocated_pages.push(address);
+        }
+
+        let reclaimed_page = heap.allocate_pages_with_reclaim(1, PAGE_SIZE).unwrap();
+        assert_eq!(heap.shrink(), 0);
+
+        heap.buddy.deallocate_pages(reclaimed_page, 1);
+        for address in allocated_pages {
+            heap.buddy.deallocate_pages(address, 1);
+        }
     }
 
     #[def_test]
