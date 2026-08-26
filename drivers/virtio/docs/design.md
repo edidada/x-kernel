@@ -82,7 +82,7 @@ Feature flags 控制编译哪些设备适配器：
 | `input.rs` | 将 `VirtIOInput` 封装为实现 `InputDevice` 的 `VirtIoInputDev` |
 | `irq_completion.rs` | blk/rng 共享的 IRQ 完成桥接：hardirq 仅 ack 并标记 pending + raise softirq；softirq action 逐设备执行 bottom half——blk 按 used ring 头 token 派发完成，rng 广播单请求唤醒 |
 | `net.rs` | 将 `VirtIONetRaw` 封装为实现 `NetDevice` 的 `VirtIoNetDev`，管理收发缓冲区、IRQ ack、NAPI 式中断抑制和网络 RX scheduler 调度 |
-| `rng.rs` | 将 `VirtIORng` 封装为实现 `CharDevice` 的 `VirtIoRngDev`；IRQ 可用时经 Tasklet softirq 唤醒有界睡眠等待，否则回退关中断有界自旋 |
+| `rng.rs` | 将 `VirtIORng` 封装为实现 `CharDevice` 的 `VirtIoRngDev`；IRQ 可用时经 Hrtimer softirq 向量广播唤醒有界睡眠等待（该向量无其他生产占用者；`Tasklet` 被 bottom-half workerqueue 占用），否则回退关中断有界自旋 |
 | `socket.rs` | 将 `VsockConnectionManager` 封装为实现 `VsockDevice` 的 `VirtIoSocketDev` |
 | `virtio_9p.rs` | 将 `VirtIO9p` 封装为实现 `Virtio9pDevice` 的 `VirtIo9pDev`，提供 `mount_tag()` 和 `request()` |
 | `mock_virtio.rs` | 提供 `MockHal` 和 `MockTransport`，用于单元测试 |
@@ -356,7 +356,9 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 **初始化流程**：
 
 1. `try_new(transport, irq)` → `RngInner::try_new()`：协商 feature、分配 VirtIO 队列
-2. 若提供 `irq` 且注册成功：设备经 `RNG_COMPLETION_HUB` 注册到 Tasklet softirq 向量；
+2. 若提供 `irq` 且注册成功：设备经 `RNG_COMPLETION_HUB` 注册到 Hrtimer softirq 向量
+   （`Tasklet`/`High` 已被启动期安装的 bottom-half workerqueue 占用，`Hrtimer` 在本内核
+   无生产占用者——hrtimer 走 ktask oneshot 定时器——故 rng 独占该槽位）；
    注册失败时回退轮询模式
 
 **熵请求流程（IRQ 模式）**：
@@ -364,7 +366,7 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 1. 先回收上一次超时遗留的请求（若已完成）；否则返回 `WouldBlock`（单请求槽）
 2. `submit_entropy()` 提交 DMA 缓冲并记录为唯一在途请求，释放设备锁
 3. 有界睡眠（广播唤醒 + 谓词重查，`timeout_at` 包裹 50ms 上限）；hardirq ack 后
-   Tasklet softirq 广播唤醒等待任务；无可睡眠上下文时退化为开中断有界自旋
+   Hrtimer 向量的 softirq 广播唤醒等待任务；无可睡眠上下文时退化为开中断有界自旋
 4. 每次唤醒后重查 used ring：完成则拷贝数据返回；超时则在途请求留在 `pending`，
    返回 `WouldBlock`，下次读取时回收。唤醒不携带 token，晚到的完成不会让
    下一次读取提前返回
@@ -534,7 +536,7 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 
 ### 为什么用 softirq 桥接而不是 hardirq 直接唤醒
 
-blk/rng 的完成唤醒经 `kirq::softirq`（Block / Tasklet 向量）而非在 hardirq 里
+blk/rng 的完成唤醒经 `kirq::softirq`（Block / Hrtimer 向量；`Hrtimer` 槽位是为 rng 保留的空闲向量）而非在 hardirq 里
 直接操作等待者：
 
 1. hardirq 只保留最短路径（ack ISR、标记 pending、raise softirq），

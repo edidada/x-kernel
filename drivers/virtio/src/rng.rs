@@ -56,8 +56,14 @@ const IRQ_REQUEST_TIMEOUT: TimeSpan = TimeSpan::from_millis(50);
 /// Cap per request so the owned DMA scratch buffer stays modest.
 const MAX_REQUEST_BYTES: usize = 256;
 
-/// Hub deferring virtio-rng completions through the Tasklet softirq vector.
-static RNG_COMPLETION_HUB: IrqCompletionHub = IrqCompletionHub::new(SoftirqVec::Tasklet);
+/// Hub deferring virtio-rng completions through the Hrtimer softirq vector.
+///
+/// This slot is chosen over the semantically-nearer `Tasklet` because the
+/// kernel's bottom-half workerqueue (`kirq::init_workerqueue`, installed at
+/// boot before device probing) owns `Tasklet` and `High`; `Hrtimer` has no
+/// production owner in this tree (hrtimers run off ktask oneshot timers),
+/// so the RNG completion action cannot be displaced.
+static RNG_COMPLETION_HUB: IrqCompletionHub = IrqCompletionHub::new(SoftirqVec::Hrtimer);
 
 fn rng_completion_softirq() {
     RNG_COMPLETION_HUB.run_softirq();

@@ -75,18 +75,6 @@ impl IrqCompletionEntry {
         &self.wake
     }
 
-    /// Sleeps in the current task until `predicate` holds, waking on every
-    /// broadcast from the softirq action.
-    ///
-    /// Returns `false` when the current context cannot sleep (no current
-    /// task); callers must then poll the predicate themselves with local
-    /// IRQs enabled. Returning `true` only means the predicate held at some
-    /// poll — callers that re-check naturally after this call are already
-    /// correct.
-    pub(crate) fn wait_until(&self, predicate: impl FnMut() -> bool) -> bool {
-        wait_poll_set(&self.wake, predicate)
-    }
-
     /// Like [`Self::wait_until`], bounded by `deadline`.
     ///
     /// Returns `false` when the current context cannot sleep; callers must
@@ -512,11 +500,11 @@ mod tests {
     }
 
     #[def_test]
-    fn test_wait_until_returns_immediately_for_true_predicate() {
+    fn test_wait_poll_set_resolves_immediately_for_true_predicate() {
         let entry = IrqCompletionEntry::new(97);
         // Kernel unit tests run in a task context, so the sleepable path is
         // exercised; a true predicate must resolve without any wake.
-        assert!(entry.wait_until(|| true));
+        assert!(wait_poll_set(entry.wake_source(), || true));
     }
 
     /// Registers a manually-counted waker on `source`.

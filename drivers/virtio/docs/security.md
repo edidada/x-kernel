@@ -299,7 +299,7 @@ let written = unsafe { self.queue.pop_used(token, &[], &mut outputs)? };
 | T-09 | 恶意 VMM 通过 VirtIO 设备返回超长 `pkt_len` | 高 | `receive_complete` 返回的 `pkt_len` 超过缓冲区容量 | `recv()` 在写回 `NetBuf` 元数据前显式检查 `hdr_len + pkt_len <= capacity`，超长长度直接返回 `DriverError::InvalidInput`；`NetBuf::set_payload_len` 的 `debug_assert` 作为开发期补充检查 |
 | T-10 | 恶意 VMM 返回伪造的 9p 响应 | 中 | `request()` 返回的数据不符合 9p 协议 | 上层 9p 文件系统应校验响应格式；本模块不解析内容 |
 | T-11 | 恶意 VMM 返回超长 `mount_tag` | 中 | `VirtIO9p::mount_tag()` 返回超长字符串 | `virtio-drivers` 内部从配置空间读取，长度由设备配置空间字段限制 |
-| T-12 | blk/rng IRQ 驱动路径丢失 softirq 唤醒，请求任务永久睡眠 | 中 | hardirq 未触发或 softirq 向量被其他子系统占用 | 唤醒是广播（无 token 可被无关等待者消费），等待者每次唤醒后重查 used ring；多次唤醒丢失仍会被后续 IRQ 广播覆盖；softirq 向量注册失败时回退轮询模式；不可睡眠上下文直接轮询 |
+| T-12 | blk/rng IRQ 驱动路径丢失 softirq 唤醒，请求任务永久睡眠 | 中 | hardirq 未触发或 softirq 向量被其他子系统占用 | 唤醒是广播（无 token 可被无关等待者消费），等待者每次唤醒后重查 used ring；多次唤醒丢失仍会被后续 IRQ 广播覆盖；softirq 向量注册失败时回退轮询模式（含向量被其他子系统占用的情况）；不可睡眠上下文直接轮询 |
 | T-13 | net NAPI 抑制后 drain 末端未恢复通知，后续报文无中断 | 低 | 恢复跨 CPU 竞争或 drain 任务永不运行 | 抑制不触碰 IRQ 线（与 Linux 一致）：NO_INTERRUPT 标志由 recv 空队列分支恢复并重查一次；EVENT_IDX 设备由最后一次弹出自然 re-arm（`used_event` 推进到设备追平位置），不存在线状态倒置类故障 |
 | T-14 | 恶意 VMM 对 blk/rng 不触发完成中断 | 中 | 设备不响应 virtqueue | blk 等待与改造前同步轮询同等活跃性（依赖设备存活）；rng 有 50ms 有界超时并回退 `WouldBlock`，entropy 层连续失败 3 次后禁用该源 |
 
