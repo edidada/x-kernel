@@ -182,13 +182,16 @@ pub(crate) trait IrqCompletionDevice: Send + Sync {
     }
 }
 
-/// Registry binding one softirq vector to the VirtIO devices using it.
+/// Registry routing one device class's hardirq completions either through
+/// a softirq vector (vector mode, Linux `X_SOFTIRQ` + bottom-half style) or
+/// directly in the hardirq handler (direct mode, Linux virtio-rng style:
+/// the vq callback calls `complete()` itself).
 ///
-/// Each device kind (block, RNG) owns one hub as a crate-level static and
-/// passes its own softirq action `fn()` to [`IrqCompletionHub::register`],
-/// because softirq actions are plain function pointers.
+/// Direct mode is for single-request devices whose entire bottom half is an
+/// IRQ-safe wake broadcast; routing them through a softirq vector would
+/// claim a slot whose name belongs to another subsystem.
 pub(crate) struct IrqCompletionHub {
-    vec: SoftirqVec,
+    vec: Option<SoftirqVec>,
     devices: SpinNoIrq<Vec<Arc<dyn IrqCompletionDevice>>>,
     registered_irqs: SpinNoIrq<BTreeSet<usize>>,
     /// Keeps the `device_res::Irq` guards alive for the kernel lifetime;
@@ -198,10 +201,25 @@ pub(crate) struct IrqCompletionHub {
 }
 
 impl IrqCompletionHub {
-    /// Creates a hub serving the given softirq vector.
+    /// Creates a vector-backed hub; `softirq_action` is installed as that
+    /// vector's action and the hardirq defers bottom halves to it.
     pub(crate) const fn new(vec: SoftirqVec) -> Self {
         Self {
-            vec,
+            vec: Some(vec),
+            devices: SpinNoIrq::new(Vec::new()),
+            registered_irqs: SpinNoIrq::new(BTreeSet::new()),
+            guards: SpinNoIrq::new(Vec::new()),
+            is_softirq_open: SpinNoIrq::new(false),
+        }
+    }
+
+    /// Creates a direct-mode hub: the hardirq handler runs each device's
+    /// bottom half inline after acking, with no softirq hop and no vector
+    /// claim. Bottom halves must therefore be hardirq-safe (an IRQ-safe
+    /// wake broadcast qualifies; see the rng adapter).
+    pub(crate) const fn direct() -> Self {
+        Self {
+            vec: None,
             devices: SpinNoIrq::new(Vec::new()),
             registered_irqs: SpinNoIrq::new(BTreeSet::new()),
             guards: SpinNoIrq::new(Vec::new()),
@@ -227,16 +245,16 @@ impl IrqCompletionHub {
         let entry = device.entry().clone();
         let irq = device.irq();
 
-        {
+        if let Some(vec) = self.vec {
             let mut installed = self.is_softirq_open.lock();
             if !*installed {
-                if kirq::softirq::open_softirq(self.vec, softirq_action) {
+                if kirq::softirq::open_softirq(vec, softirq_action) {
                     *installed = true;
                 } else {
                     log::warn!(
                         "virtio: softirq vector {} is owned by another subsystem; device keeps \
                          polling mode",
-                        self.vec.as_usize()
+                        vec.as_usize()
                     );
                     return None;
                 }
@@ -283,9 +301,14 @@ impl IrqCompletionHub {
         }
     }
 
-    /// hardirq entry: acknowledge matching devices and defer wakeups.
+    /// hardirq entry: acknowledge matching devices and route their bottom
+    /// halves — deferred to the softirq vector in vector mode, run inline in
+    /// direct mode (the Linux virtio-rng `vq callback → complete()` shape,
+    /// valid because the bottom halves of direct-mode devices are IRQ-safe
+    /// wake broadcasts).
     fn handle_irq(&self, irq: usize) -> IrqEvent {
         let mut handled = false;
+        let direct = self.vec.is_none();
         {
             let devices = self.devices.lock();
             for device in devices.iter() {
@@ -293,13 +316,23 @@ impl IrqCompletionHub {
                     continue;
                 }
                 if device.ack_interrupt() {
-                    device.entry().mark_pending();
+                    if direct {
+                        // Inline bottom half under the registry lock (the same
+                        // nesting `run_softirq` uses); direct-mode bottom
+                        // halves are IRQ-safe wake broadcasts that never
+                        // allocate.
+                        device.run_bottom_half();
+                    } else {
+                        device.entry().mark_pending();
+                    }
                     handled = true;
                 }
             }
         }
         if handled {
-            kirq::softirq::raise_softirq(self.vec);
+            if let Some(vec) = self.vec {
+                kirq::softirq::raise_softirq(vec);
+            }
             IrqEvent::HANDLED
         } else {
             IrqEvent::NOT_HANDLED
@@ -362,6 +395,7 @@ mod tests {
     use super::*;
 
     static TEST_HUB: IrqCompletionHub = IrqCompletionHub::new(SoftirqVec::High);
+    static DIRECT_TEST_HUB: IrqCompletionHub = IrqCompletionHub::direct();
     fn test_hub_softirq() {
         TEST_HUB.run_softirq();
     }
@@ -497,6 +531,34 @@ mod tests {
 
         TEST_HUB.unregister(&device);
         reset_test_hub();
+    }
+
+    #[def_test(serial)]
+    fn test_direct_hub_runs_bottom_half_inline_from_hardirq() {
+        // Direct mode must not raise any softirq pending state; the bottom
+        // half (wake broadcast) runs inside handle_irq itself.
+        let device = FakeDevice::new(98);
+        let entry = device.entry().clone();
+        device.ack_raised.store(true, Ordering::Release);
+        DIRECT_TEST_HUB.devices.lock().push(device);
+        kirq::softirq::clear_softirq_pending_for_tests(SoftirqVec::High);
+
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let registration = register_counting_waker(entry.wake_source(), &wakes);
+
+        let event = DIRECT_TEST_HUB.handle_irq(98);
+
+        assert!(event.handled());
+        // The wake already happened inline — no softirq drain is required or
+        // able to contribute more.
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        DIRECT_TEST_HUB.run_softirq();
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        // No pending bit was ever set for a vector to consume.
+        assert_eq!(kirq::softirq::local_softirq_pending(), 0);
+
+        drop(registration);
+        DIRECT_TEST_HUB.devices.lock().clear();
     }
 
     #[def_test]

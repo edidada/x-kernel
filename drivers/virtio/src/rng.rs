@@ -21,7 +21,6 @@ use core::hint::spin_loop;
 use char_driver::CharDevice;
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use khal::time::monotonic_time;
-use kirq::softirq::SoftirqVec;
 use kspin::SpinNoIrq;
 use ktime_types::TimeSpan;
 use virtio_drivers::{
@@ -56,18 +55,20 @@ const IRQ_REQUEST_TIMEOUT: TimeSpan = TimeSpan::from_millis(50);
 /// Cap per request so the owned DMA scratch buffer stays modest.
 const MAX_REQUEST_BYTES: usize = 256;
 
-/// Hub deferring virtio-rng completions through the Hrtimer softirq vector.
+/// Direct-mode completion hub for virtio-rng.
 ///
-/// This slot is chosen over the semantically-nearer `Tasklet` because the
-/// kernel's bottom-half workerqueue (`kirq::init_workerqueue`, installed at
-/// boot before device probing) owns `Tasklet` and `High`; `Hrtimer` has no
-/// production owner in this tree (hrtimers run off ktask oneshot timers),
-/// so the RNG completion action cannot be displaced.
-static RNG_COMPLETION_HUB: IrqCompletionHub = IrqCompletionHub::new(SoftirqVec::Hrtimer);
+/// Linux's virtio-rng uses no softirq vector at all: the vq callback runs in
+/// hardirq context and calls `complete()` on the request's completion. This
+/// hub mirrors that — the hardirq handler acks the ISR and runs the device's
+/// bottom half (an IRQ-safe wake broadcast) inline, with no vector claim.
+/// That also keeps the driver off every named softirq slot (`Tasklet` and
+/// `High` are owned by the boot-time bottom-half workerqueue, `Hrtimer`
+/// belongs to the hrtimer subsystem even though it is unused today).
+static RNG_COMPLETION_HUB: IrqCompletionHub = IrqCompletionHub::direct();
 
-fn rng_completion_softirq() {
-    RNG_COMPLETION_HUB.run_softirq();
-}
+/// Placeholder for the vector-mode `register` signature; never invoked
+/// because the direct-mode hub claims no softirq vector.
+fn noop_softirq_action() {}
 
 /// hardirq-facing view of one virtio-rng device.
 struct VirtIoRngIrqDevice<H: Hal, T: Transport> {
@@ -89,7 +90,11 @@ impl<H: Hal, T: Transport> IrqCompletionDevice for VirtIoRngIrqDevice<H, T> {
 
     fn run_bottom_half(&self) {
         // Single-request device: a broadcast wake plus a used-ring recheck
-        // by the requester is equivalent to a per-token dispatch.
+        // by the requester is equivalent to a per-token dispatch. Runs
+        // inline in hardirq context in direct mode: `PollSet::wake` is
+        // documented IRQ-safe and the kirq core already wakes irq-event
+        // waiters this way from its hardirq dispatch, so the broadcast is
+        // neither allocating nor lock-order-novel.
         self.entry.wake_source().wake();
     }
 
@@ -294,7 +299,7 @@ impl<H: Hal + 'static, T: Transport + 'static> VirtIoRngDev<H, T> {
                     inner: inner.clone(),
                     entry: entry.clone(),
                 });
-                match RNG_COMPLETION_HUB.register(rng_completion_softirq, irq_device.clone()) {
+                match RNG_COMPLETION_HUB.register(noop_softirq_action, irq_device.clone()) {
                     Some(_) => (Some(entry), Some(irq_device)),
                     None => (None, None),
                 }
