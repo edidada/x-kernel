@@ -49,6 +49,22 @@ Keep introductory prose before contract sections. Keep related contract
 sections together. Do not add empty headings, and do not force a fixed heading
 order when another order reads more clearly.
 
+## Choose the Comment Kind Before Writing
+
+Choose the comment according to its reader and subject:
+
+| Comment | Subject and reader | Placement |
+|---------|--------------------|-----------|
+| `//!` | Crate or file-backed module introduction | At the top of the crate or module body, after the license header and before ordinary items |
+| `///` | Public API or a documented module declaration | Immediately before the item; put the doc comment before the item's attributes |
+| `//` | Implementation rationale, algorithm steps, state transitions, lock ordering, and local invariants | At the narrowest statement, block, field, or helper affected by the explanation |
+| `// SAFETY:` | Why one `unsafe` block satisfies its required invariants | Immediately before the corresponding `unsafe` block |
+
+Document a module either in its body with `//!` or on its declaration with
+`///`, never both. Do not use item rustdoc as a replacement for an
+implementation comment: callers need contracts, while maintainers need the
+reasoning next to the code that depends on it.
+
 ## Crate-Level Documentation
 
 Crate documentation `MUST` let a new caller answer all of these questions:
@@ -73,22 +89,63 @@ does not support.
 
 ## Module-Level Documentation
 
-Every hand-written module `MUST` have module documentation and `MUST` explain:
+Every hand-written module `MUST` have module documentation that states its
+specific responsibility within the parent crate. Documentation depth then
+depends on the module's role.
 
-- its responsibility within the parent crate;
-- the state, resource, policy, or abstraction it owns;
-- how its parent, sibling modules, or external callers interact with it;
-- its main public entry point or type;
-- any non-obvious initialization, lifecycle, execution-context, concurrency,
-  or safety constraint.
+### Public modules
 
-Describe the module's relationship to its parent instead of repeating the
-crate introduction. For a small declaration-only module, one or two precise
-paragraphs may be sufficient. For a stateful module, include the normal
-operation sequence and relevant constraints.
+A public module is a reader-facing API boundary. Its documentation `MUST`
+explain its abstraction, main public items, normal usage, and applicable
+caller constraints. Describe its relationship to the crate instead of listing
+all exported items or repeating the crate introduction.
+
+### Non-trivial internal modules
+
+A private module `MUST` receive additional explanation when it owns state or
+resources, defines a cross-module boundary, manages lifecycle or concurrency,
+or implements a non-trivial algorithm. Include only the applicable parts:
+
+- owned state, resource, policy, or abstraction;
+- interactions with parent or sibling modules;
+- the main entry point or operation sequence;
+- non-obvious initialization, lifecycle, execution-context, concurrency,
+  algorithmic, or safety constraints.
+
+### Small private modules
+
+A narrow declaration, codec, adapter, or pure-helper module normally needs one
+precise sentence, for example:
+
+```rust
+//! Bounds-checked little-endian codecs for ext4 disk structures.
+```
+
+Do not force such a module to discuss ownership, callers, entry points,
+lifecycle, or concurrency when none of those facts improves understanding. Do
+not add a second paragraph that merely says which sibling calls the helpers or
+which state the module does not own.
 
 Document either the `mod` declaration with `///` or the module body with `//!`.
 Do not document both locations with duplicate content.
+
+## Normal Implementation Comments
+
+Use ordinary comments for facts that maintainers need at a particular
+implementation point but callers do not need as an API contract. Good subjects
+include:
+
+- why validation must precede publication or I/O;
+- why a particular ordering, retry, barrier, or rollback rule exists;
+- a representation or arithmetic invariant not encoded by the types;
+- lock ordering, callback restrictions, or state transitions;
+- an algorithm choice whose tradeoff affects maintenance.
+
+Place the comment beside the code whose correctness depends on it. Prefer a
+short explanation of the reason and consequence over a narration of the next
+statement. Do not move all implementation reasoning into the module header,
+and do not convert obvious private helpers into rustdoc solely to increase
+coverage.
 
 ## Public Item Rules
 
@@ -145,6 +202,12 @@ The documentation `MUST`, when applicable, explain:
 Do not create a parameter list that only repeats parameter names and types.
 Use `# Arguments` or `# Returns` only when integrated prose cannot state the
 contract clearly.
+
+For a simple getter or field-like accessor, a one-sentence summary is usually
+enough. Add units, range, sentinel meaning, snapshot semantics, or locking
+behavior only when a caller cannot infer them safely from the type and name.
+Do not add a mechanical example or multi-section contract merely because the
+item is public.
 
 ### Constants, Statics, and Type Aliases
 
@@ -283,8 +346,35 @@ Use these standard-library patterns as writing references:
 | [`alloc::string::String::new`](https://doc.rust-lang.org/alloc/string/struct.String.html#method.new) | For a constructor, state what it creates, add important allocation or state detail, and show the minimal normal use. |
 | [`alloc::string::String::push_str`](https://doc.rust-lang.org/alloc/string/struct.String.html#method.push_str) | For a method, state the effect, document applicable panic conditions, and demonstrate the changed value. |
 | [`core::ptr`](https://doc.rust-lang.org/core/ptr/) and [`core::mem::MaybeUninit`](https://doc.rust-lang.org/core/mem/union.MaybeUninit.html) | Make unsafe invariants, invalid operations, and the boundary between caller and implementation responsibilities explicit. |
+| [`core::slice::index` source](https://github.com/rust-lang/rust/blob/main/library/core/src/slice/index.rs) | A narrow internal module can use one precise module-summary sentence. |
+| [`alloc::collections::btree::node` source](https://github.com/rust-lang/rust/blob/main/library/alloc/src/collections/btree/node.rs) | Keep detailed representation and algorithm invariants in ordinary comments near the internal implementation. |
 
 Match the level of precision and reader orientation, not the exact length or
 section layout. A two-line wrapper may need only a precise summary and error
 condition; a foundational unsafe abstraction may require extensive safety and
 usage guidance.
+
+The standard library does not give every private implementation module full
+reader-facing rustdoc. X-Kernel's requirement that every hand-written module
+has at least module docs is an additional local coverage rule. Apply the
+standard library's proportionality: use a short summary for a simple private
+module, rich documentation for a public or foundational abstraction, and
+ordinary comments for local implementation reasoning.
+
+## Reference Basis
+
+- [The Rustdoc Book: How to write documentation](https://doc.rust-lang.org/rustdoc/how-to-write-documentation.html)
+  defines crate/module and item documentation conventions and recommends
+  documenting public APIs.
+- [The Rust Reference: Comments](https://doc.rust-lang.org/reference/comments.html)
+  defines ordinary comments, outer item docs, and inner crate/module docs.
+- [The Rust Style Guide](https://doc.rust-lang.org/style-guide/)
+  prefers outer docs for items, reserves inner docs for crates/modules, and
+  places doc comments before attributes.
+- [The Rust API Guidelines documentation checklist](https://rust-lang.github.io/api-guidelines/documentation.html)
+  motivates crate docs, useful examples, failure sections, safety contracts,
+  and hiding unhelpful implementation detail. Apply its recommendations within
+  reason, as the guideline itself requires.
+- [The `missing_docs` lint](https://doc.rust-lang.org/rustc/lints/listing/allowed-by-default.html#missing-docs)
+  checks public-item coverage; it does not establish a requirement to document
+  every private helper.

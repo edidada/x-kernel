@@ -81,8 +81,11 @@ separately rather than edited without authorization.
 - Every hand-written source module `MUST` have module-level rustdoc. Document
   either the `mod` item with `///` or the module body with `//!`; do not
   duplicate both.
-- Crate and module documentation `MUST` explain what the component does, what
-  it owns, and how callers or sibling components use it.
+- Every module introduction `MUST` state its specific responsibility. Public,
+  stateful, boundary, lifecycle, concurrency, or algorithmically complex
+  modules `MUST` additionally describe applicable ownership, interactions,
+  entry points, and constraints. A small private helper module `MUST NOT` be
+  padded with inapplicable ownership or caller language.
 - Every publicly reachable API item `MUST` have rustdoc that states its purpose
   and public behavior.
 - Public API rustdoc `MUST` describe caller obligations, invariants, side
@@ -108,6 +111,9 @@ separately rather than edited without authorization.
 
 - Crate and module docs `SHOULD` point readers to the main public types and
   entry points instead of listing every item mechanically.
+- A small, single-purpose private module `SHOULD` normally use one precise
+  summary sentence. Add further paragraphs only when they communicate a real
+  contract, invariant, usage sequence, or design boundary.
 - Each rustdoc item `SHOULD` begin with a concise one-sentence summary.
 - Core public APIs `SHOULD` include a practical `# Examples` section. Examples
   `SHOULD` be doctests when the X-Kernel build environment permits it.
@@ -128,6 +134,8 @@ separately rather than edited without authorization.
   `security.md`.
 - Writers `SHOULD NOT` add empty sections or generic claims merely to satisfy
   a template.
+- Writers `SHOULD NOT` turn every source file into the same multi-paragraph
+  introduction or force pure helper modules to claim that they own state.
 - Obvious private helpers `SHOULD NOT` receive mechanical, low-value rustdoc.
 - Examples `SHOULD NOT` demonstrate syntax without explaining realistic use.
 - Crate and module introductions `SHOULD NOT` link every identifier, repeat a
@@ -152,6 +160,42 @@ narrowest useful location. Private helpers `MAY` omit rustdoc when their
 behavior is obvious, and test-only modules `MAY` use one brief purpose
 sentence. Non-obvious private invariants, unsafe assumptions, and design
 decisions still `MUST` be documented at the narrowest useful location.
+
+## Rust Comment Coverage and Placement
+
+Classify a target before writing. The project requirement that every
+hand-written module has module docs is intentionally stronger than Rust's
+`missing_docs` lint, which checks publicly exposed items. It does not require
+the same documentation depth for every module.
+
+| Target | Required treatment |
+|--------|--------------------|
+| Crate root | Use `//!` in `src/lib.rs` or `src/main.rs`; explain purpose, boundary, main integration path, and applicable constraints. |
+| Public module | Use reader-oriented module docs that explain its public abstraction and how callers use it. |
+| Private stateful, boundary, lifecycle, concurrency, or complex algorithm module | Use module docs that explain the responsibility and the non-obvious state, interaction, sequence, or invariant that justifies the module boundary. |
+| Small private helper module | Use one precise module-summary sentence unless more information is genuinely needed. |
+| Publicly reachable API item | Use `///` on the item and document its observable contract. |
+| Non-obvious `pub(crate)` or `pub(super)` item | Document the cross-module contract at the item or narrowest shared abstraction. |
+| Obvious private helper | Omit rustdoc; use a normal `//` comment only when the implementation needs a reason or invariant explained. |
+| Test-only module | One brief purpose sentence is sufficient. Generated, vendored, and imported third-party code remains excluded. |
+
+Place comments according to the reader and subject:
+
+- use inner `//!` comments at the top of a file-backed crate or module;
+- use outer `///` comments on an inline module declaration or `mod` item when
+  documenting at the declaration is clearer;
+- document a module at only one of those locations;
+- use outer `///` comments immediately before the API item they describe;
+- use ordinary `//` comments next to implementation decisions, algorithms,
+  lock ordering, state transitions, and invariants that do not form a caller
+  contract;
+- place the local `SAFETY:` justification immediately before its `unsafe`
+  block; this is distinct from the `# Safety` contract on an `unsafe fn` or
+  `unsafe trait`.
+
+Do not move an implementation explanation into a module introduction merely
+to make the file header longer. Keep information at the narrowest location
+where its intended reader can act on it.
 
 ## Output Layout
 
@@ -202,7 +246,7 @@ contracts normally does not require rewriting unaffected documentation.
 
 Keep API-level documentation in rustdoc:
 
-- crate and module purpose, scope, ownership, and usage;
+- crate and module purpose plus applicable scope, ownership, and usage;
 - public API semantics and caller obligations;
 - parameters and return contracts when non-trivial;
 - errors, panics, and side effects;
@@ -236,10 +280,26 @@ materially improves clarity:
 
 Module-level docs `MUST` explain:
 
-- the module's responsibility within its parent crate;
-- the state, resources, or abstraction it owns;
-- how its parent, sibling modules, or external callers use it;
-- its main entry points and non-obvious constraints.
+- the module's specific responsibility within its parent crate.
+
+For public or non-trivial internal modules, add the following information only
+when it applies:
+
+- state, resources, policy, or abstraction owned by the module;
+- interaction with its parent, sibling modules, or external callers;
+- main entry points or operation sequence;
+- non-obvious initialization, lifecycle, execution-context, concurrency,
+  algorithmic, or safety constraints.
+
+A small private helper module may satisfy the project module-doc requirement
+with one precise sentence, for example:
+
+```rust
+//! Bounds-checked little-endian codecs for ext4 disk structures.
+```
+
+Do not add paragraphs merely to state that a pure helper owns no state, repeat
+its filename, inventory its functions, or name obvious callers.
 
 "How to use it" does not always require compilable example code. For internal
 kernel modules, concrete prose that names the entry points, expected call
@@ -277,6 +337,11 @@ For each publicly reachable item:
 4. `MUST` describe the meaning of the return value when it is non-obvious;
 5. `MUST` or `SHOULD` add `# Errors`, `# Panics`, `# Safety`, and `# Examples`
    according to the requirement level defined above.
+
+A simple getter, field-like accessor, or obvious constant normally needs only
+a precise summary plus units, range, or sentinel meaning when those are not
+obvious. It does not need a mechanical example, arguments list, return-value
+section, ownership discussion, or implementation narrative.
 
 Document each meaningful `Result` failure by condition rather than merely
 listing error variants. In `# Panics`, name the supported-use condition that
@@ -334,16 +399,19 @@ controls, caller-dependent assumptions, proposed hardening, and known gaps
    hand-written module tree, including modules disabled by the active
    configuration, and record any intentionally excluded architecture or
    feature variant.
-3. Inventory publicly reachable APIs and identify non-obvious internal
-   contracts, owned state, invariants, unsafe paths, and cross-crate boundaries
-   that affect the target documentation.
+3. Classify each module as public, non-trivial internal, small private helper,
+   test-only, generated, vendored, or imported third-party code. Inventory
+   publicly reachable APIs and identify non-obvious internal contracts, owned
+   state, invariants, unsafe paths, and cross-crate boundaries that affect the
+   target documentation.
 4. Inspect important implementation paths, especially unsafe, concurrent,
    stateful, hardware-facing, and externally reachable code.
 5. Inspect representative callers to verify usage and execution context.
 6. Identify which target documents or API items require creation or correction
    before writing prose.
 7. Read `references/rustdoc-style.md`, then create or update crate-level,
-   module-level, and public API rustdoc using its item-specific rules.
+   module-level, public API, and implementation comments with documentation
+   depth proportional to the classification from step 3.
 8. When `docs/design.md` applies, read `references/design-doc-style.md` and
    create or update the design document.
 9. When `docs/security.md` applies, read `references/security-doc-style.md` and
@@ -361,6 +429,8 @@ Before declaring the writing task complete:
   contract sections against current code and verified callers;
 - remove unsupported claims, stale references, untranslated prose, empty
   sections, duplication, mechanical filler, and template residue;
+- confirm that small private modules were not padded into multi-paragraph
+  templates and that implementation rationale remains near the relevant code;
 - keep future hardening distinct from implemented controls;
 - report material exceptions to `SHOULD` and every exception to `MUST` in the
   task result.
@@ -396,6 +466,12 @@ do not directly define X-Kernel-specific coverage requirements:
 - [The Rustdoc Book](https://doc.rust-lang.org/rustdoc/how-to-write-documentation.html)
   for crate, module, item, summary, example, and panic documentation
   conventions.
+- [The Rust Reference comment chapter](https://doc.rust-lang.org/reference/comments.html)
+  for the distinction between ordinary comments, outer item docs, and inner
+  crate/module docs.
+- [The `missing_docs` lint](https://doc.rust-lang.org/rustc/lints/listing/allowed-by-default.html#missing-docs)
+  for compiler-enforced public-item coverage. X-Kernel's all-module coverage is
+  an additional local requirement.
 - [The Rust API Guidelines documentation checklist](https://rust-lang.github.io/api-guidelines/documentation.html)
   for crate-level docs, examples, failure conditions, safety requirements,
   and intra-doc links.
