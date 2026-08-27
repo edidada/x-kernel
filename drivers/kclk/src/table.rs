@@ -330,15 +330,25 @@ pub fn register_table(
     reg: Arc<dyn ClkRegAccess>,
     branches: &[ClkBranch],
 ) -> ClkResult {
+    // Pre-flight: reject duplicate names and duplicate DT indices up front, so
+    // a bad table fails before any node is built and published.
+    let mut seen_names: BTreeSet<&'static str> = BTreeSet::new();
+    let mut seen_indices: BTreeSet<ClkIndex> = BTreeSet::new();
+    for b in branches {
+        if !seen_names.insert(b.name) {
+            return Err(ClkError::BadState); // duplicate name in the table
+        }
+        if !seen_indices.insert(b.index) {
+            return Err(ClkError::BadState); // duplicate DT index
+        }
+    }
+
     // Pass 1 — build every node with empty parent slots. `build()` seeds the
     // initial parent index and (zero) rate from the hardware; rates are fixed
     // in pass 3. Not under CLK_LOCK: build() internally takes it via
     // adopt_orphans, and re-entrancy would panic.
     let mut nodes: BTreeMap<&'static str, Arc<ClkCore>> = BTreeMap::new();
     for b in branches {
-        if nodes.contains_key(b.name) {
-            return Err(ClkError::BadState); // duplicate name in the table
-        }
         let ops = build_ops(&b.node, &reg)?;
         let parents: Vec<Option<Arc<ClkCore>>> = (0..b.parents.len()).map(|_| None).collect();
         let core = ClkBuilder::new(b.name, ops)
@@ -353,23 +363,29 @@ pub fn register_table(
     // zero parent rate pick up the right value now that parents are linked.
     let dep_map: BTreeMap<&'static str, &'static [&'static str]> =
         branches.iter().map(|b| (b.name, b.parents)).collect();
-    with_clk_lock(|| {
+    with_clk_lock(|| -> ClkResult<()> {
         for b in branches {
             let node = &nodes[b.name];
             for (i, pname) in b.parents.iter().enumerate() {
                 if let Some(parent) = nodes.get(*pname) {
                     node.set_parent_slot(i as u8, parent.clone());
                 }
-                // else: parent unresolved (registered elsewhere later, or a
-                // misconfiguration) — leave the orphan slot; the orphan-
-                // adoption mechanism fills it if that parent ever registers.
+                // A parent not in this table stays an empty slot. Note: this
+                // does NOT register an orphan for later adoption — only
+                // `ClkBuilder::parent_name` does that. A cross-controller
+                // parent must be resolved by the caller (e.g. pre-built and
+                // seeded) or the slot remains None and the rate reads 0.
             }
         }
+        // Detect parent cycles before the recursive rate refresh: a cyclic
+        // table would otherwise recurse forever at prepare/enable time.
+        let mut visiting: BTreeSet<&'static str> = BTreeSet::new();
         let mut visited: BTreeSet<&'static str> = BTreeSet::new();
         for b in branches {
-            refresh_subtree(b.name, &nodes, &dep_map, &mut visited);
+            refresh_subtree(b.name, &nodes, &dep_map, &mut visiting, &mut visited)?;
         }
-    });
+        Ok(())
+    })?;
 
     // Pass 4 — publish each output in the provider table.
     for b in branches {
@@ -418,23 +434,32 @@ fn build_ops(node: &ClkNodeDesc, reg: &Arc<dyn ClkRegAccess>) -> ClkResult<Arc<d
 
 /// Depth-first rate refresh: ensure each parent is refreshed before this node,
 /// then recompute this node's cached rate from its (now-current) parent rate.
+///
+/// `visiting` tracks the current DFS stack to reject parent cycles (a cyclic
+/// table is a configuration error); `visited` skips already-refreshed nodes.
 fn refresh_subtree(
     name: &'static str,
     nodes: &BTreeMap<&'static str, Arc<ClkCore>>,
     dep_map: &BTreeMap<&'static str, &'static [&'static str]>,
+    visiting: &mut BTreeSet<&'static str>,
     visited: &mut BTreeSet<&'static str>,
-) {
+) -> ClkResult {
     if !visited.insert(name) {
-        return; // already refreshed
+        return Ok(()); // already refreshed
+    }
+    if !visiting.insert(name) {
+        return Err(ClkError::BadState); // cycle: `name` is on its own DFS stack
     }
     if let Some(&parents) = dep_map.get(name) {
         for &pname in parents {
             // Only recurse into parents that live in this table; an external
             // (unresolved) parent keeps its own rate and is read as-is.
             if nodes.contains_key(pname) {
-                refresh_subtree(pname, nodes, dep_map, visited);
+                refresh_subtree(pname, nodes, dep_map, visiting, visited)?;
             }
         }
     }
+    visiting.remove(name);
     nodes[name].refresh_rate();
+    Ok(())
 }

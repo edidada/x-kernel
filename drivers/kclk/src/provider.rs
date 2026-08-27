@@ -19,7 +19,7 @@ use alloc::{collections::BTreeMap, sync::Arc};
 
 use kspin::SpinNoIrq;
 
-use crate::{ClkCore, ClkHandle, ClkIndex};
+use crate::{ClkCore, ClkError, ClkHandle, ClkIndex, ClkResult};
 
 /// Identifier of a registered provider.
 ///
@@ -41,11 +41,14 @@ pub trait ClkLookup: Send + Sync {
     /// Resolve a clock by the provider-relative index from a DT phandle spec.
     fn get_by_index(&self, index: ClkIndex) -> Option<Arc<ClkCore>>;
 
-    /// Resolve a clock by firmware name (a DT `clock-names` entry).
+    /// Resolve a clock by its **SoC name** — the provider output name registered
+    /// via [`ClkTable::register`](crate::ClkTable::register) (e.g. `"uart0_clk"`).
     ///
-    /// Name lookup is global across the SoC; names must therefore be unique
-    /// across all providers that publish them. Returning `None` lets the
-    /// registry try the next provider.
+    /// This is not a DT `clock-names` connection name (those are consumer-local
+    /// and resolved by the platform to `get_by_index`); SoC clock names are
+    /// globally unique across the SoC. The registry scans providers in order;
+    /// the first that claims the name wins. Returning `None` lets it try the
+    /// next provider.
     fn get_by_name(&self, name: &str) -> Option<Arc<ClkCore>> {
         let _ = name;
         None
@@ -72,13 +75,27 @@ impl Registry {
         self.providers.remove(&id);
     }
 
-    fn by_index(&self, id: ProviderId, index: ClkIndex) -> Option<Arc<ClkCore>> {
-        self.providers.get(&id)?.get_by_index(index)
+    fn by_index(&self, id: ProviderId, index: ClkIndex) -> ClkResult<Arc<ClkCore>> {
+        match self.providers.get(&id) {
+            Some(p) => p.get_by_index(index).ok_or(ClkError::NotFound),
+            // The provider is not registered yet — distinct from "registered
+            // but missing" so a consumer probing before its controller can
+            // defer instead of failing permanently.
+            None => Err(ClkError::NoProvider),
+        }
     }
 
-    fn by_name(&self, name: &str) -> Option<Arc<ClkCore>> {
-        // Names are globally unique; the first provider that claims it wins.
-        self.providers.values().find_map(|p| p.get_by_name(name))
+    fn by_name(&self, name: &str) -> ClkResult<Arc<ClkCore>> {
+        // SoC clock names are globally unique; the first provider that claims
+        // the name wins. (This is a lookup by the clock's own name, not a
+        // consumer connection name — see ClkLookup::get_by_name.)
+        if self.providers.is_empty() {
+            return Err(ClkError::NoProvider);
+        }
+        self.providers
+            .values()
+            .find_map(|p| p.get_by_name(name))
+            .ok_or(ClkError::NotFound)
     }
 }
 
@@ -111,14 +128,25 @@ pub fn reset_providers() {
 }
 
 /// Resolve a clock by `(provider_id, index)` into a consumer handle.
-pub fn clk_get_by_index(provider_id: ProviderId, index: ClkIndex) -> Option<ClkHandle> {
+///
+/// Returns [`ClkError::NoProvider`] when `provider_id` is not yet registered
+/// (a consumer probing before its controller should defer/retry) and
+/// [`ClkError::NotFound`] when the provider exists but the index is invalid
+/// (a permanent misconfiguration).
+pub fn clk_get_by_index(provider_id: ProviderId, index: ClkIndex) -> ClkResult<ClkHandle> {
     REGISTRY
         .lock()
         .by_index(provider_id, index)
         .map(ClkHandle::new)
 }
 
-/// Resolve a clock by globally-unique name into a consumer handle.
-pub fn clk_get_by_name(name: &str) -> Option<ClkHandle> {
+/// Resolve a clock by its globally-unique SoC name into a consumer handle.
+///
+/// `name` is the clock's provider output name (e.g. `"uart0_clk"`), **not** a
+/// DT `clock-names` connection name; the platform resolves connection names to
+/// `(provider, index)` and uses [`clk_get_by_index`] instead. Returns
+/// [`ClkError::NoProvider`] when no provider is registered at all (defer) and
+/// [`ClkError::NotFound`] when providers exist but the name is unknown.
+pub fn clk_get_by_name(name: &str) -> ClkResult<ClkHandle> {
     REGISTRY.lock().by_name(name).map(ClkHandle::new)
 }

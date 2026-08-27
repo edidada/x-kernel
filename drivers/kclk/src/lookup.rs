@@ -6,10 +6,11 @@
 //!
 //! A clock controller publishes its outputs at fixed DT binding indices
 //! (`clocks = <&ccu 5>` → index 5 within *this* controller) and, for consumer
-//! convenience, by name (a `clock-names` entry). [`ClkTable`] stores both views
-//! behind a single spin lock and answers either query; a controller driver
-//! fills it during probe, assigns it a [`ProviderId`] (its DT phandle), and
-//! registers it via [`crate::register_provider`].
+//! convenience, by the clock's SoC name (its provider output name, e.g.
+//! `"uart0_clk"` — not a DT `clock-names` connection name). [`ClkTable`]
+//! stores both views behind a single spin lock and answers either query; a
+//! controller driver fills it during probe, assigns it a [`ProviderId`] (its
+//! DT phandle), and registers it via [`crate::register_provider`].
 
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 
@@ -43,7 +44,9 @@ impl ClkTable {
         }
     }
 
-    /// Register `clk` under DT binding `index` and consumer `name`.
+    /// Register `clk` under DT binding `index` and SoC `name` (the clock's
+    /// provider output name, e.g. `"uart0_clk"`; not a DT `clock-names`
+    /// connection name).
     ///
     /// Re-registering an existing index/name replaces the previous node, which
     /// is the expected behavior when a controller is re-probed.

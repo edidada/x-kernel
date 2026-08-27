@@ -6,7 +6,7 @@
 
 use alloc::sync::Arc;
 
-use crate::{ClkHwOps, ClkResult, Rate, RoundResult};
+use crate::{ClkHwOps, ClkRateRequest, ClkResult, Rate, RoundResult};
 
 /// A clock composed of up to three independent sub-nodes: a [`Mux`](super::Mux)
 /// that selects the parent, a [`Divider`](super::Divider) that sets the rate,
@@ -87,6 +87,24 @@ impl ClkHwOps for Composite {
                 parent_target: Some(rate),
             }),
         }
+    }
+
+    fn determine_rate(&self, req: &mut ClkRateRequest, parents: &[(u8, Rate)]) -> ClkResult<()> {
+        // Let the mux pick the best parent (if any), then let the divider
+        // compute the achievable rate on that chosen parent. Without this the
+        // default determine_rate delegates to round_rate against the *current*
+        // parent, so a mux+divider composite would never switch sources.
+        if let Some(mux) = &self.mux {
+            mux.determine_rate(req, parents)?;
+        }
+        if let Some(div) = &self.div {
+            let rr = div.round_rate(req.rate, req.best_parent_rate)?;
+            req.rate = rr.rate;
+            // The divider satisfies the request on the chosen parent; it does
+            // not ask the framework to change that parent's rate.
+            req.parent_target = rr.parent_target;
+        }
+        Ok(())
     }
 
     fn set_rate(&self, rate: Rate, parent_rate: Rate) -> ClkResult<Rate> {

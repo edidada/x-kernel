@@ -408,10 +408,12 @@ fn provider_resolves_by_name_and_index() {
     assert_eq!(by_index.name(), "osc24m");
 
     // Missing clocks yield None without panic.
-    assert!(clk_get_by_name("nope").is_none());
-    assert!(clk_get_by_index(0x10, 99).is_none());
-    // Wrong provider id yields None too.
-    assert!(clk_get_by_index(0x99, 0).is_none());
+    // Missing clock name (provider registered) -> NotFound.
+    assert_eq!(clk_get_by_name("nope").unwrap_err(), ClkError::NotFound);
+    // Missing index in a registered provider -> NotFound.
+    assert_eq!(clk_get_by_index(0x10, 99).unwrap_err(), ClkError::NotFound);
+    // Provider not registered -> NoProvider (defer, not permanent failure).
+    assert_eq!(clk_get_by_index(0x99, 0).unwrap_err(), ClkError::NoProvider);
 
     reset_providers();
 }
@@ -626,8 +628,9 @@ fn two_providers_index_zero_do_not_collide() {
 
     // Unregistering one provider removes only its clocks.
     unregister_provider(0x10);
-    assert!(clk_get_by_index(0x10, 0).is_none());
-    assert!(clk_get_by_index(0x11, 0).is_some());
+    // After unregistering provider 0x10, its index 0 -> NoProvider.
+    assert_eq!(clk_get_by_index(0x10, 0).unwrap_err(), ClkError::NoProvider);
+    assert!(clk_get_by_index(0x11, 0).is_ok());
 
     reset_providers();
 }

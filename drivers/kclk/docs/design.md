@@ -132,10 +132,14 @@ A SoC has several clock controllers (CCU, PMUCRU, video CCU, ...). Each
 registers its own `ClkLookup` under a `ProviderId` (its DT phandle) via
 `register_provider`; the registry keeps a *list* of providers, not a single
 one. Consumers resolve a clock by `(provider_id, index)` — the two cells of a
-DT `clocks = <&ccu 5>` specifier — through `clk_get_by_index`, or by a
-globally-unique name through `clk_get_by_name`. Two controllers may both
-publish index 0 without colliding, because the registry keys on the provider id
-first. This mirrors Linux's `of_clk_providers` list.
+DT `clocks = <&ccu 5>` specifier — through `clk_get_by_index`. This is the
+canonical DT path: a consumer's `clock-names` connection name (consumer-local,
+not unique) is resolved by the platform into that `(phandle, index)` pair before
+reaching kclk. `clk_get_by_name` is a separate convenience that looks a clock up
+by its SoC name (the provider output name, globally unique), not by a
+`clock-names` entry. Two controllers may both publish index 0 without
+colliding, because the registry keys on the provider id first. This mirrors
+Linux's `of_clk_providers` list.
 
 `ClkTable` is the recommended helper: it stores both a name map and an index
 vector behind a spin lock, is `const`-constructible for a `static`, and answers
@@ -207,12 +211,24 @@ controller driver
 
 ### Resolution (consumer side, driver probe)
 
+A consumer never resolves a DT `clock-names` connection name through kclk —
+that name is consumer-local (many devices can have one named `"bus"`). The
+platform/firmware layer resolves it: it finds the matching `clocks` specifier
+on the consumer node, reads the two cells `<&phandle index>`, and hands the
+result to device-res as `ClkSpec::by_phandle_index(phandle, index)`. kclk then
+resolves `(provider, index)`:
+
 ```text
-driver calls device_res::devm_clk_get(device, ClkSpec::by_name("uart"))
-   -> kdriver::resource: ClkOp::get_clock -> kclk::clk_get_by_name
-   -> ClkLookup::get_by_name -> Arc<ClkCore>
+driver: devm_clk_get(device, ClkSpec::by_phandle_index(ccu_phandle, 5))
+   -> kdriver::resource: ClkOp::get_clock -> kclk::clk_get_by_index
+   -> ClkLookup::get_by_index -> Arc<ClkCore>
    -> wrapped as ClkConsumer, returned as device_res::Clk
 ```
+
+`ClkSpec::by_name` is a separate convenience that looks a clock up by its SoC
+name (the provider output name registered via `ClkTable::register`, e.g.
+`"uart0_clk"`); it is not a DT `clock-names` path and the name must be globally
+unique across the SoC.
 
 ### Two-phase gating
 
@@ -383,10 +399,17 @@ use device_res::{Clk, ClkSpec, devm_clk_get};
 use kdriver::devm_clk_get;
 
 fn probe(uart: &DeviceObject) -> DriverResult {
-    // by_name (a DT clock-names entry) or by the two cells:
-    //   ClkSpec::by_phandle_index(phandle_of_ccu, 5)
-    let clk: Clk = devm_clk_get(uart, ClkSpec::by_name("baudclk"))
-        .map_err(map_res_err)?;
+    // Canonical DT path: the platform resolved the `clock-names` connection
+    // name to this (phandle, specifier) pair from the consumer's `clocks`.
+    //   ClkSpec::by_phandle_index(ccu_phandle, 5)
+    let clk: Clk = devm_clk_get(
+        uart,
+        ClkSpec::by_phandle_index(ccu_phandle, 5),
+    )
+    .map_err(map_res_err)?;
+    // `by_name("uart0_clk")` is also available as a convenience that looks up
+    // the clock by its SoC name (provider output name), NOT by a DT
+    // `clock-names` connection name.
     clk.prepare_enable().map_err(map_res_err)?;
     // The full consumer surface is available on Clk: prepare/unprepare,
     // enable/disable (split, for a prepare-once/enable-many pattern),

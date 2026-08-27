@@ -19,6 +19,16 @@ pub struct ClkHandle {
     core: Arc<ClkCore>,
 }
 
+impl core::fmt::Debug for ClkHandle {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Print the clock name only — the underlying node carries locks and
+        // register state that are neither Debug-safe nor useful in logs.
+        f.debug_struct("ClkHandle")
+            .field("name", &self.name())
+            .finish()
+    }
+}
+
 impl ClkHandle {
     /// Wrap an existing clock node. Provider lookups call this internally.
     pub fn new(core: Arc<ClkCore>) -> Self {

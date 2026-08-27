@@ -11,8 +11,9 @@
 //! change by returning [`NotifierResult::Stop`].
 //!
 //! The notification scheme mirrors the Linux `clk_notifier` chain. Callbacks
-//! run while the global clock lock is held (see the crate design doc), so they
-//! must be quick, must not sleep, and must not re-enter the clock framework.
+//! run while the global clock lock (a sleepable mutex) is held, so they may
+//! sleep but must be quick and must not re-enter the clock framework —
+//! re-entrancy panics (see the crate design doc).
 
 use alloc::sync::Arc;
 
