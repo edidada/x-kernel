@@ -172,6 +172,14 @@ kvfs::AddressSpace / anon object
 
 若单个 request 应用失败，`MmSpace` 将其放回队列尾部并结束本轮 drain，避免同一边界无限重试。
 
+普通 object event 仍使用上述 queue/drain 快路径。需要完成确认的 object state transition
+通过持有真实 `MmSpace` weak reference 的 `InvalidateHandle::apply_sync()` 直接取得目标锁并调用
+同一个 `apply_invalidate_request()`；返回成功表示 matching PTE 已撤销且 page-table mutation 的
+TLB finalization 已执行。deferred handle 没有可等待的 `MmSpace` identity，因此同步调用明确返回
+`EOPNOTSUPP`。调用者不得在等待时持有 fault path 还会获取的 object invalidate write lock；
+file-backed immutable transition 通过先发布 retry barrier、释放该锁，再等待 `MmSpace` 来保持
+`MmSpace -> object invalidate lock` 锁序。
+
 ### Private anonymous discard / COW
 
 - `AnonymousPrivate` 和 `FilePrivate` 的 post-write private pages 由

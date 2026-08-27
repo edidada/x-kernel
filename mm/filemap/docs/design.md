@@ -136,22 +136,26 @@ sys_mmap
 
 ### Shared file fault
 
-1. `MmSpace` finds the `VmArea` and dispatches to its runtime.
-2. `FileSharedRuntime` checks file permissions.
-3. The runtime resolves the faulting page's file offset.
-4. If the faulting page starts at or beyond current file length, the runtime
+1. Before creating a shared file mapping, `mmap_shared_file()` rejects an
+   append-only inode opened with write mode, even if the requested initial
+   protection is read-only. This preserves Linux's `FMODE_WRITE` check and
+   prevents a later `mprotect(PROT_WRITE)` upgrade.
+2. `MmSpace` finds the `VmArea` and dispatches to its runtime.
+3. `FileSharedRuntime` checks file permissions.
+4. The runtime resolves the faulting page's file offset.
+5. If the faulting page starts at or beyond current file length, the runtime
    returns object-level bad-address so `MmSpace` can report a bus-error class
    fault.
-5. Otherwise the runtime materializes a folio through inode-owned
+6. Otherwise the runtime materializes a folio through inode-owned
    `kvfs::AddressSpace` and maps the folio into the page table.
-6. Shared writable mappings initially install the PTE without write permission.
+7. Shared writable mappings initially install the PTE without write permission.
    The first write fault enters `kvfs::AddressSpace::page_mkwrite()`, which
    takes the address-space invalidate lock shared, locks the target folio,
    rechecks EOF, invokes the filesystem preparation callback, marks the folio
    dirty, and only then remaps the PTE writable.
-7. `mprotect(PROT_WRITE)` updates VMA permissions but keeps existing shared
+8. `mprotect(PROT_WRITE)` updates VMA permissions but keeps existing shared
    file PTEs write-protected, so write-fault dirty tracking is preserved.
-8. For shmem/memfd files, `F_SEAL_WRITE` and `F_SEAL_FUTURE_WRITE` reject new
+9. For shmem/memfd files, `F_SEAL_WRITE` and `F_SEAL_FUTURE_WRITE` reject new
    writable shared mappings and `mprotect(PROT_WRITE)` upgrades. `F_SEAL_WRITE`
    also rejects later shared write faults.
 
@@ -182,6 +186,21 @@ sys_mmap
 5. `MmSpace` drains the request and asks the matching runtime to unmap present
    PTEs while preserving VMA metadata.
 
+Ordinary truncate/cache invalidation keeps this non-blocking queue/drain path.
+An inode transition that must not become visible while a stale writable PTE
+exists uses the stronger `MappingViewNotifier::invalidate_sync()` path instead:
+
+1. `kvfs::AddressSpace` publishes a write-fault barrier, then snapshots shared
+   views without holding the invalidate write lock.
+2. `MmSpaceInvalidate` derives the same typed request and calls
+   `InvalidateHandle::apply_sync()`; the call returns only after the target
+   `MmSpace` has removed matching PTEs and finalized the TLB update.
+3. View registration participates in the address-space invalidate lock. KVFS
+   repeats the snapshot and, under the final write lock, verifies that mmap,
+   fork, or mremap did not introduce an unrevoked shared view.
+4. Only then may the inode owner write back data and publish immutable state;
+   any synchronous notifier failure aborts that transition.
+
 ### `msync`
 
 1. `posix/mm` validates raw `MS_*` flags and calls `MmSpace::msync_range()`.
@@ -208,6 +227,7 @@ Supported now:
 - EOF page-start bus-error behavior;
 - final file page zero-tail behavior;
 - object-driven truncate invalidation for registered views.
+- completion-confirmed shared-view invalidation for inode behavior transitions.
 
 Not supported by the current filemap runtime:
 

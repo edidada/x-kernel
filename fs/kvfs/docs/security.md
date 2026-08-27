@@ -23,6 +23,8 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
 - 可选 `InodeOperations::fiemap_operations()` 可输出后端块映射，但只能通过借用的
   `FiemapExtentInfo` 和安全 writer 传递经过检查的字段，不能保留 writer 或接触用户指针；
   回调运行在 inode shared lock 内。
+- 可选 `InodeOperations::file_flags_operations()` 接收从用户内存复制后的 flags 和显式
+  `&Cred`；后端必须校验可见位、可修改位、owner/capability policy，并只返回 VFS 行为位。
 - 所有 pathname 与 namespace mutation API 的 `&Cred` 是权限边界；省略或替换它会改变
   当前操作的授权主体。
 - `VfsFile::cred()` 暴露 open 时捕获的不可变 credential，供需要 Linux `f_cred` 语义
@@ -60,7 +62,16 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
 - filesystem callback 不能直接修改 VFS cache internals。
 - 每个 raw flags 家族必须在边界转换为对应 bitflags 类型。
 - 未知 open/rename 位不得进入内部 namespace 或 open 算法。
-- `AtomicU32` 中的 `f_flags` 只通过 `OpenFlags` API 读写。
+- `AtomicU32` 中的 `f_flags` 只通过 `OpenFlags` API 读写；外部 status-flags mutation 必须经过
+  `VfsFile::set_status_flags()`，不能绕过 append-only inode 的 `O_APPEND` 转换检查。
+- resident inode 的 atomic behavior flags 更新只能替换 `IMMUTABLE/APPEND_ONLY`，不能清除
+  `NON_CACHEABLE` 等无关 VFS 状态；后端持久化失败时不得发布新行为。
+- file-flags 的通用授权、文件系统规范化、持久化和 resident behavior publication 必须位于
+  同一个 inode namespace/data exclusive transaction；后端不得在锁外做一轮预检后再重复一套
+  可能漂移的锁内策略。
+- 进入 immutable 的普通文件必须先完成所有已注册 shared view 的 PTE/TLB 同步撤销；转换屏障
+  期间共享写 fault 只能返回 retry，最终提交必须在排除新 view registration 后进行。任一同步
+  notifier 失败都必须取消转换且不得持久化或发布 immutable。
 - 不同 flags 类型不得通过 `.bits()` 在 VFS 内互相转换。
 - `FiemapExtentInfo::fill_next_extent()` 必须拒绝零长度及 logical/physical 末端溢出；
   delayed、encrypted 和 inline/tail 状态必须补齐 Linux FIEMAP 规定的隐含 flags。
@@ -185,6 +196,11 @@ regular-file inode 的 data lock 覆盖 generic buffered write 和整个 set-len
 address-space invalidate lock 的 shared 侧保护 `page_mkwrite`，exclusive 侧保护 truncate、
 mapped-view invalidation 与 page-cache truncate；目标 folio lock 串行化 fault preparation、
 dirty 与 PTE publish。具体文件系统的 mapping/reservation lock 在这些边界内获取。
+file-flags set 在 inode namespace、data exclusive locks 下完成后端持久化和 resident flags
+发布；普通文件同时撤销已有 mapping 并持有 invalidate exclusive
+lock。已有 writable fd 在 data lock、shared write fault 在 invalidate shared lock 内重新检查
+immutable，防止 check-then-set 竞争。append-only 只约束新的 write open、shared mmap 和
+`F_SETFL(O_APPEND)` 转换，不追溯撤销或拒绝设置标志前已建立的 fd/mapping。
 
 所有 namespace lock 都是 sleepable lock。mount tree 操作先取 mount-namespace registry
 mutex；其后全局顺序为 superblock topology、父目录、子目录、非目录 inode，最后才是
@@ -261,6 +277,9 @@ lower filesystem lock；在推广此类嵌套前还需要明确的跨文件系�
 | T-41 | 同一 block device 出现两个 mutable superblock，或 mount 到正在 teardown 的实例 | 高 | filesystem 每次 mount 自行分配 state，或 `get_tree` 与 active acquisition 间无状态校验 | KVFS 按 canonical `(s_type, BlockDevice)` 建立 nascent reservation 和独占 claim；同 identity 等待/复用，RO/RW 不一致或跨类型冲突返回 `EBUSY`；`mount_new` 在 dying/dead activation race 后重试 |
 | T-42 | filesystem 在 transaction 完成后继续使用失效的 mount data borrow | 高 | filesystem 把 `FsContext::data()` byte-slice 引用直接存入 superblock state | opaque data 只作为同步 context 输入；filesystem 必须解析并保存 owned/typed state，generic fill closure 为 `FnOnce` |
 | T-43 | resident inode 暴露磁盘格式无法保存的时间精度，或字段联动关系与磁盘不一致 | 中 | VFS 在 filesystem callback 后重新发布原请求，掩盖后端的范围钳制、字段专有粒度或忽略行为 | `TimestampLimits` 只处理 superblock 级公共能力；callback 复用 `MetadataUpdate` 返回实际生效字段，KVFS 只发布返回值；FAT 日期级 atime、2 秒 mtime/ctime 联动及 KVFS callback 回传测试约束该合同 |
+| T-44 | `FS_IOC_SETFLAGS` 只改磁盘或只改 resident flags，导致重挂载丢失或运行态绕过，或非 owner 的非法 flags 请求泄露后端 policy errno | 高 | 后端 mutation、VFS publish、通用 owner authorization 和 write/namespace policy 分离 | typed capability 在同一个 inode exclusive transaction 中执行 owner/immutable capability 检查、文件系统规范化、持久化和 behavior publication；失败不更新 VFS 行为状态；写、truncate、mmap、metadata、xattr 与 namespace 路径统一检查行为位 |
+| T-45 | immutable 已持久化后旧 shared writable PTE 仍能修改文件 | 高 | notifier 在 `MmSpace` 忙时只排队，或 rmap 快照后 mmap/fork/mremap 注册新 view，setter 未等待完成便提交 flags | 转换 barrier 先令共享写 fault 返回 retry；每个 shared view 通过同步 notifier 等待页表/TLB 撤销；`register_view()` 参与 invalidate lock，最终 write-side 复核关闭快照竞争；任一错误阻止 immutable 持久化和发布 |
+| T-46 | append-only inode 的旧 fd 通过 `F_SETFL` 改变 `O_APPEND` 绕过写入策略 | 高 | POSIX 层直接替换原子 `f_flags` | 所有 status-flags mutation 进入 `VfsFile::set_status_flags()`，在 inode data lock 下拒绝 append-only 状态上的 `O_APPEND` 变化；非阻塞位可独立修改 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -358,6 +377,15 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 - cache commit 是否只在 backend success 后执行。
 - FIEMAP 后端是否只调用 `fill_next_extent()`，并在返回 `false` 后立即停止。
 - FIEMAP 后端是否在 VFS 持有的 inode data read lock 内完成请求的 `SYNC` 写回，再开始遍历。
+- file-flags 后端是否在锁内 prepare/apply 合同中区分 visible、modifiable 和 inode-type mask，
+  拒绝未知/未实现的实际变更、保留只读及未变的 filesystem flags，并在成功后只发布
+  `IMMUTABLE/APPEND_ONLY`；immutable 是否在已有 fd、fault、truncate、metadata、xattr 和
+  namespace mutation 上重检，append-only 是否只在新 open/mmap/F_SETFL 与结构变更入口执行。
+- 进入 immutable 是否只对 shared view 走带完成确认和错误传播的同步撤销；转换 barrier 是否使
+  writable fault 返回 retry；最终 invalidate write section 是否重新检查 mmap/fork/mremap 注册，
+  并保持到 writeback、持久化和 resident flags 发布结束？
+- open-file status flags 的所有外部修改是否经过 `set_status_flags()`；append-only inode 上
+  `O_APPEND` 的置位和清位是否都返回 `EPERM`，且不影响 `O_NONBLOCK` 等其它位？
 - shared-file write fault 是否在 address-space invalidate shared lock 和 folio lock 内完成
   filesystem `page_mkwrite` prepare、folio dirty 和 writable PTE publish，且不取得 inode
   exclusive data lock。

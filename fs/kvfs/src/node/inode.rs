@@ -13,7 +13,7 @@ use core::{
     any::Any,
     fmt,
     hash::{Hash, Hasher},
-    sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 
 use bitflags::bitflags;
@@ -23,6 +23,7 @@ use kerrno::LinuxError;
 use klazy::{Lazy, Once};
 use ktask::WaitQueue;
 use ktime_types::SystemTime;
+use linux_raw_sys::general::{FS_APPEND_FL, FS_IMMUTABLE_FL};
 
 use super::{
     DeviceFileOps,
@@ -32,8 +33,8 @@ use super::{
 use crate::{
     AddressSpace, AddressSpaceOperations, DelayedCall, Dentry, DeviceId, FiemapExtentInfo,
     FileOperations, LockedDentry, Metadata, MetadataUpdate, MountIdmap, Mutex, NodePermission,
-    NodeType, Path, Permission, RwLock, RwLockReadGuard, RwLockWriteGuard, SuperBlock, Umode,
-    VfsError, VfsFileBuilder, VfsResult, XattrName, XattrNameSink, XattrSetFlags,
+    NodeType, OpenFlags, Path, Permission, RwLock, RwLockReadGuard, RwLockWriteGuard, SuperBlock,
+    Umode, VfsError, VfsFileBuilder, VfsResult, XattrName, XattrNameSink, XattrSetFlags,
     address_space::{default_address_space_operations, empty_address_space_operations},
     generic_permission,
     pipe::{PipeObject, fifo_file_operations},
@@ -289,6 +290,125 @@ pub trait InodeFiemapOperations: Send + Sync {
     ) -> VfsResult<()>;
 }
 
+/// Filesystem-normalized state for one Linux inode file-flags update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileFlagsUpdate {
+    flags: u32,
+}
+
+impl FileFlagsUpdate {
+    /// Creates a validated filesystem file-flags update.
+    pub const fn new(flags: u32) -> Self {
+        Self { flags }
+    }
+
+    /// Returns the normalized flags to persist.
+    pub const fn flags(self) -> u32 {
+        self.flags
+    }
+}
+
+/// Filesystem operations backing the Linux inode file-flags ABI.
+///
+/// Implementations receive kernel-owned flag values. User-memory access,
+/// mount write checks, generic ownership, and immutable-capability checks stay
+/// outside the filesystem bridge.
+pub trait InodeFileFlagsOperations: Send + Sync {
+    /// Returns the filesystem's user-visible inode flags.
+    fn get_file_flags(&self, inode: &VfsInode) -> VfsResult<u32>;
+
+    /// Validates and normalizes one file-flags update without changing state.
+    ///
+    /// KVFS calls this while holding the inode namespace and data locks after
+    /// generic authorization. Read-only visible bits may be discarded here,
+    /// while unsupported changes to modifiable bits must be rejected.
+    fn prepare_file_flags(&self, inode: &VfsInode, flags: u32) -> VfsResult<FileFlagsUpdate>;
+
+    /// Persists a previously prepared file-flags update.
+    ///
+    /// The same inode locks remain held from [`Self::prepare_file_flags`]
+    /// through this call. When the update enters immutable state on a regular
+    /// file, all shared PTE revocations have completed and writable faults stay
+    /// blocked until persistence and resident behavior publication finish.
+    fn set_file_flags(&self, inode: &VfsInode, update: FileFlagsUpdate) -> VfsResult<()>;
+}
+
+/// Optional Linux inode file-flags capability borrowed from a VFS inode.
+pub struct FileFlagsCapability<'a> {
+    inode: &'a VfsInode,
+    operations: &'a dyn InodeFileFlagsOperations,
+}
+
+impl FileFlagsCapability<'_> {
+    /// Returns the filesystem's user-visible flags.
+    pub fn get(&self) -> VfsResult<u32> {
+        self.operations.get_file_flags(self.inode)
+    }
+
+    fn check_owner_or_privileged(&self, cred: &Cred) -> VfsResult<()> {
+        if cred.fsuid() != self.inode.metadata().uid && !cred.is_privileged() {
+            Err(VfsError::OperationNotPermitted)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn behavior_flags(flags: u32) -> NodeFlags {
+        let mut behavior = NodeFlags::empty();
+        behavior.set(NodeFlags::IMMUTABLE, flags & FS_IMMUTABLE_FL != 0);
+        behavior.set(NodeFlags::APPEND_ONLY, flags & FS_APPEND_FL != 0);
+        behavior
+    }
+
+    fn prepare_locked(&self, flags: u32, cred: &Cred) -> VfsResult<FileFlagsUpdate> {
+        self.check_owner_or_privileged(cred)?;
+        let old_behavior = self.inode.flags() & (NodeFlags::IMMUTABLE | NodeFlags::APPEND_ONLY);
+        let requested_behavior = Self::behavior_flags(flags);
+        if old_behavior.bits() != requested_behavior.bits() && !cred.is_privileged() {
+            return Err(VfsError::OperationNotPermitted);
+        }
+        let update = self.operations.prepare_file_flags(self.inode, flags)?;
+        if Self::behavior_flags(update.flags()).bits() != requested_behavior.bits() {
+            return Err(VfsError::InvalidData);
+        }
+        Ok(update)
+    }
+
+    fn persist_and_publish(&self, update: FileFlagsUpdate) -> VfsResult<()> {
+        self.operations.set_file_flags(self.inode, update)?;
+        self.inode
+            .publish_behavior_flags_after_backing_change(Self::behavior_flags(update.flags()))
+    }
+
+    /// Persists flags and publishes the resulting inode behavior atomically
+    /// with respect to regular-file data or directory namespace mutations.
+    pub fn set(&self, flags: u32, cred: &Cred) -> VfsResult<()> {
+        match self.inode.node_type() {
+            NodeType::RegularFile => {
+                let _namespace_guard = self.inode.namespace_lock.write();
+                let _data_guard = self.inode.data_lock.write();
+                let update = self.prepare_locked(flags, cred)?;
+                let is_entering_immutable = !self.inode.flags().contains(NodeFlags::IMMUTABLE)
+                    && Self::behavior_flags(update.flags()).contains(NodeFlags::IMMUTABLE);
+                if is_entering_immutable {
+                    self.inode
+                        .mapping
+                        .with_writable_shared_mappings_revoked(|| self.persist_and_publish(update))
+                } else {
+                    self.persist_and_publish(update)
+                }
+            }
+            NodeType::Directory => {
+                let _namespace_guard = self.inode.namespace_lock.write();
+                let _data_guard = self.inode.data_lock.write();
+                let update = self.prepare_locked(flags, cred)?;
+                self.persist_and_publish(update)
+            }
+            _ => Err(VfsError::OperationNotSupported),
+        }
+    }
+}
+
 /// Optional FIEMAP capability borrowed from a VFS inode.
 pub struct FiemapCapability<'a> {
     inode: &'a VfsInode,
@@ -337,6 +457,12 @@ pub trait InodeOperations: Send + Sync + 'static {
 
     /// Returns FIEMAP operations when this inode exposes extent mappings.
     fn fiemap_operations(&self) -> Option<&dyn InodeFiemapOperations> {
+        None
+    }
+
+    /// Returns inode file-flags operations when this filesystem supports the
+    /// Linux `FS_IOC_GETFLAGS`/`FS_IOC_SETFLAGS` ABI.
+    fn file_flags_operations(&self) -> Option<&dyn InodeFileFlagsOperations> {
         None
     }
 
@@ -905,7 +1031,7 @@ impl InodeAttributeOperations for OwnedInodeAttributes {
 struct InodeAttributes {
     operations: Arc<dyn InodeAttributeOperations>,
     operation_flags: AtomicU16,
-    flags: NodeFlags,
+    flags: AtomicU32,
     block_bits: u8,
 }
 
@@ -926,7 +1052,7 @@ impl InodeAttributes {
         Self {
             operations,
             operation_flags: AtomicU16::new(0),
-            flags,
+            flags: AtomicU32::new(flags.bits()),
             block_bits,
         }
     }
@@ -945,7 +1071,21 @@ impl InodeAttributes {
     }
 
     fn flags(&self) -> NodeFlags {
-        self.flags
+        NodeFlags::from_bits_retain(self.flags.load(Ordering::Acquire))
+    }
+
+    fn replace_behavior_flags(&self, flags: NodeFlags) -> VfsResult<()> {
+        const BEHAVIOR_FLAGS: NodeFlags = NodeFlags::IMMUTABLE.union(NodeFlags::APPEND_ONLY);
+        if flags.bits() & !BEHAVIOR_FLAGS.bits() != 0 {
+            return Err(VfsError::InvalidInput);
+        }
+        let mask = BEHAVIOR_FLAGS.bits();
+        let _ = self
+            .flags
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+                Some((old & !mask) | flags.bits())
+            });
+        Ok(())
     }
 
     fn operation_flags(&self) -> u16 {
@@ -1786,6 +1926,7 @@ impl VfsInode {
 
     pub(crate) fn set_len(&self, len: u64) -> VfsResult<()> {
         let _data_guard = self.data_lock.write();
+        self.check_mutable()?;
         self.mapping.set_len(len)?;
         if self.size() == len {
             Ok(())
@@ -1845,6 +1986,12 @@ impl VfsInode {
 
     /// Checks access through this inode's permission operation.
     pub fn permission(&self, permission: Permission, cred: &Cred) -> VfsResult<()> {
+        // Immutable write denial is generic VFS policy. Keep it ahead of the
+        // filesystem callback and DAC so all MAY_WRITE callers see the same
+        // Linux-compatible EPERM priority.
+        if permission.contains(Permission::MAY_WRITE) {
+            self.check_not_immutable()?;
+        }
         self.inode_operations
             .permission(&MountIdmap, self, permission, cred)
     }
@@ -1866,6 +2013,16 @@ impl VfsInode {
         self.inode_operations
             .fiemap_operations()
             .map(|operations| FiemapCapability {
+                inode: self,
+                operations,
+            })
+    }
+
+    /// Returns this inode's optional Linux file-flags capability.
+    pub fn file_flags_capability(&self) -> Option<FileFlagsCapability<'_>> {
+        self.inode_operations
+            .file_flags_operations()
+            .map(|operations| FileFlagsCapability {
                 inode: self,
                 operations,
             })
@@ -1906,6 +2063,50 @@ impl VfsInode {
     /// Returns the flags of the node.
     pub fn flags(&self) -> NodeFlags {
         self.attributes.flags()
+    }
+
+    /// Publishes filesystem behavior flags after the backing mutation has
+    /// committed successfully.
+    pub(crate) fn publish_behavior_flags_after_backing_change(
+        &self,
+        flags: NodeFlags,
+    ) -> VfsResult<()> {
+        self.attributes.replace_behavior_flags(flags)
+    }
+
+    /// Publishes behavior flags directly for cross-crate fault-path tests.
+    #[cfg(unittest)]
+    #[doc(hidden)]
+    pub fn publish_behavior_flags_for_test(&self, flags: NodeFlags) -> VfsResult<()> {
+        self.attributes.replace_behavior_flags(flags)
+    }
+
+    pub(crate) fn check_not_immutable(&self) -> VfsResult<()> {
+        if self.flags().contains(NodeFlags::IMMUTABLE) {
+            Err(VfsError::OperationNotPermitted)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn check_mutable(&self) -> VfsResult<()> {
+        if self
+            .flags()
+            .intersects(NodeFlags::IMMUTABLE | NodeFlags::APPEND_ONLY)
+        {
+            Err(VfsError::OperationNotPermitted)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn check_append_only_open(&self, open_flags: OpenFlags) -> VfsResult<()> {
+        if self.flags().contains(NodeFlags::APPEND_ONLY) && !open_flags.contains(OpenFlags::APPEND)
+        {
+            Err(VfsError::OperationNotPermitted)
+        } else {
+            Ok(())
+        }
     }
 
     /// Returns operation flags cached on this inode.
@@ -2602,6 +2803,7 @@ mod tests {
     use alloc::{string::String, sync::Arc};
 
     use ktime_types::{NANOS_PER_SEC, SystemTime};
+    use linux_raw_sys::general::{FS_IMMUTABLE_FL, FS_NODUMP_FL};
     use unittest::{assert_eq, def_test};
 
     use super::*;
@@ -2609,6 +2811,125 @@ mod tests {
         GetattrQueryFlags, GetattrRequestMask, NodePermission, StatFs, SuperBlockFlags,
         SuperBlockOperations, TimestampLimits,
     };
+
+    #[def_test]
+    fn behavior_flag_refresh_preserves_unrelated_vfs_flags() {
+        let attributes = InodeAttributes::new(
+            VfsInodeInit::new(
+                1,
+                0,
+                Umode::new(NodeType::RegularFile, NodePermission::default()),
+            ),
+            NodeFlags::NON_CACHEABLE,
+        );
+
+        attributes
+            .replace_behavior_flags(NodeFlags::IMMUTABLE | NodeFlags::APPEND_ONLY)
+            .unwrap();
+        assert!(attributes.flags().contains(NodeFlags::NON_CACHEABLE));
+        assert!(attributes.flags().contains(NodeFlags::IMMUTABLE));
+        assert!(attributes.flags().contains(NodeFlags::APPEND_ONLY));
+
+        attributes
+            .replace_behavior_flags(NodeFlags::empty())
+            .unwrap();
+        assert!(attributes.flags().contains(NodeFlags::NON_CACHEABLE));
+        assert!(!attributes.flags().contains(NodeFlags::IMMUTABLE));
+        assert!(!attributes.flags().contains(NodeFlags::APPEND_ONLY));
+    }
+
+    struct TestFileFlagsInode {
+        preparation_calls: AtomicUsize,
+    }
+
+    impl InodeOperations for TestFileFlagsInode {
+        fn file_flags_operations(&self) -> Option<&dyn InodeFileFlagsOperations> {
+            Some(self)
+        }
+    }
+
+    impl FileOperations for TestFileFlagsInode {}
+
+    impl InodeFileFlagsOperations for TestFileFlagsInode {
+        fn get_file_flags(&self, _inode: &VfsInode) -> VfsResult<u32> {
+            Ok(0)
+        }
+
+        fn prepare_file_flags(&self, _inode: &VfsInode, _flags: u32) -> VfsResult<FileFlagsUpdate> {
+            self.preparation_calls.fetch_add(1, Ordering::Relaxed);
+            Err(VfsError::OperationNotSupported)
+        }
+
+        fn set_file_flags(&self, _inode: &VfsInode, _update: FileFlagsUpdate) -> VfsResult<()> {
+            unreachable!("generic authorization must reject the request before persistence")
+        }
+    }
+
+    #[def_test]
+    fn file_flags_authorization_precedes_filesystem_validation() {
+        let node = Arc::new(TestFileFlagsInode {
+            preparation_calls: AtomicUsize::new(0),
+        });
+        let inode = VfsInode::new_file(
+            node.clone(),
+            VfsInodeInit::new(
+                1,
+                0,
+                Umode::new(
+                    NodeType::RegularFile,
+                    NodePermission::from_bits_truncate(0o600),
+                ),
+            )
+            .with_owner_links_and_rdev(1000, 1000, 1, DeviceId::default()),
+        );
+
+        let result = inode
+            .file_flags_capability()
+            .unwrap()
+            .set(FS_IMMUTABLE_FL | FS_NODUMP_FL, &Cred::new(1000, 1000));
+
+        assert!(matches!(result, Err(VfsError::OperationNotPermitted)));
+        assert_eq!(node.preparation_calls.load(Ordering::Relaxed), 0);
+
+        let result = inode
+            .file_flags_capability()
+            .unwrap()
+            .set(u32::MAX, &Cred::new(2000, 2000));
+
+        assert!(matches!(result, Err(VfsError::OperationNotPermitted)));
+        assert_eq!(node.preparation_calls.load(Ordering::Relaxed), 0);
+
+        let result = inode
+            .file_flags_capability()
+            .unwrap()
+            .set(u32::MAX, &Cred::root());
+        assert!(matches!(result, Err(VfsError::OperationNotSupported)));
+        assert_eq!(node.preparation_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[def_test]
+    fn file_flags_capability_rejects_non_file_and_non_directory_inodes() {
+        let node = Arc::new(TestFileFlagsInode {
+            preparation_calls: AtomicUsize::new(0),
+        });
+        let inode = VfsInode::new_special(
+            node.clone(),
+            NodeFlags::NON_CACHEABLE,
+            VfsInodeInit::new(
+                2,
+                0,
+                Umode::new(
+                    NodeType::CharacterDevice,
+                    NodePermission::from_bits_truncate(0o600),
+                ),
+            ),
+        );
+
+        let result = inode.file_flags_capability().unwrap().set(0, &Cred::root());
+
+        assert!(matches!(result, Err(VfsError::OperationNotSupported)));
+        assert_eq!(node.preparation_calls.load(Ordering::Relaxed), 0);
+    }
 
     struct TestChrdevInode {
         metadata: Mutex<Metadata>,

@@ -71,7 +71,10 @@
 //! `user.*`, `trusted.*`, and `security.*` through KVFS xattr operations,
 //! including atomic create/replace policy and ctime synchronization. Opaque ACL
 //! bytes remain a core-only foundation until KVFS has ACL permission and
-//! inheritance semantics. This is still not a complete
+//! inheritance semantics. The core also journals immutable/append-only inode
+//! flag changes while preserving all unrelated `i_flags`; the live bridge
+//! exposes GETFLAGS and restricts SETFLAGS to those two behavior flags. This is
+//! still not a complete
 //! Linux ext4 write mount: mmap/direct I/O coherence, freeze/unmount lifecycle
 //! hooks, a background checkpoint worker, oversized xattr, EA-inode, inline-data
 //! write contracts, and Linux-style errseq/forced-readonly reporting remain

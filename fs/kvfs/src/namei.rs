@@ -581,7 +581,8 @@ impl<'a> Nameidata<'a> {
             return Err(VfsError::NotADirectory);
         }
 
-        let node_type = d_inode(path.dentry()).node_type();
+        let inode = d_inode(path.dentry());
+        let node_type = inode.node_type();
         let truncate =
             open_flags.contains(OpenFlags::TRUNCATE) && node_type == NodeType::RegularFile;
         if d_is_dir(path.dentry())
@@ -604,6 +605,12 @@ impl<'a> Nameidata<'a> {
             path.check_writable_mount()?;
         }
         path.permission(crate::Permission::MAY_OPEN | acc_mode.permission(), cred)?;
+        if truncate {
+            inode.check_mutable()?;
+        }
+        if acc_mode.requires_write() {
+            inode.check_append_only_open(open_flags)?;
+        }
         Ok(MayOpenResult { truncate })
     }
 
@@ -2392,5 +2399,226 @@ mod tests {
         assert_eq!(inode.write_count(), 0);
         let release_write_counts = file_ops.release_write_counts.lock();
         assert_eq!(release_write_counts.as_slice(), &[2, 1]);
+    }
+
+    #[def_test]
+    fn immutable_flag_blocks_existing_and_new_writers_and_truncate() {
+        let tree = test_tree();
+        let writer = Filename::new("/target")
+            .open_with_flags_at(
+                &tree.root,
+                &tree.base,
+                linux_raw_sys::general::O_WRONLY,
+                NodePermission::empty(),
+                NodePermission::empty(),
+                kcred::initial_cred(),
+            )
+            .unwrap();
+        tree.target
+            .inode()
+            .publish_behavior_flags_after_backing_change(crate::NodeFlags::IMMUTABLE)
+            .unwrap();
+
+        assert_eq!(
+            writer.write(b"blocked"),
+            Err(VfsError::OperationNotPermitted)
+        );
+        assert!(matches!(
+            Filename::new("/target").open_with_flags_at(
+                &tree.root,
+                &tree.base,
+                linux_raw_sys::general::O_WRONLY,
+                NodePermission::empty(),
+                NodePermission::empty(),
+                kcred::initial_cred(),
+            ),
+            Err(VfsError::OperationNotPermitted)
+        ));
+        assert_eq!(
+            tree.target.truncate(0, &kcred::initial_cred()),
+            Err(VfsError::OperationNotPermitted)
+        );
+    }
+
+    #[def_test]
+    fn readonly_mount_error_precedes_immutable_open_error() {
+        let tree = test_tree();
+        tree.target
+            .inode()
+            .publish_behavior_flags_after_backing_change(crate::NodeFlags::IMMUTABLE)
+            .unwrap();
+        let readonly_mount = Mount::new_root_with_flags(&tree.fs, crate::MountFlags::RDONLY);
+        let readonly_root = readonly_mount.root_path();
+
+        let result = Filename::new("/target").open_with_flags_at(
+            &readonly_root,
+            &readonly_root,
+            linux_raw_sys::general::O_WRONLY,
+            NodePermission::empty(),
+            NodePermission::empty(),
+            kcred::initial_cred(),
+        );
+
+        assert!(matches!(result, Err(VfsError::ReadOnlyFilesystem)));
+    }
+
+    #[def_test]
+    fn immutable_write_denial_precedes_dac_error() {
+        let tree = test_tree();
+        tree.root
+            .dentry()
+            .update_metadata(MetadataUpdate {
+                mode: Some(NodePermission::from_bits_truncate(0o755)),
+                ..Default::default()
+            })
+            .unwrap();
+        tree.target
+            .dentry()
+            .update_metadata(MetadataUpdate {
+                mode: Some(NodePermission::from_bits_truncate(0o600)),
+                owner: Some((1000, 1000)),
+                ..Default::default()
+            })
+            .unwrap();
+        tree.target
+            .inode()
+            .publish_behavior_flags_after_backing_change(crate::NodeFlags::IMMUTABLE)
+            .unwrap();
+
+        let result = Filename::new("/target").open_with_flags_at(
+            &tree.root,
+            &tree.base,
+            linux_raw_sys::general::O_WRONLY,
+            NodePermission::empty(),
+            NodePermission::empty(),
+            Arc::new(kcred::Cred::new(2000, 2000)),
+        );
+
+        assert!(matches!(result, Err(VfsError::OperationNotPermitted)));
+    }
+
+    #[def_test]
+    fn append_only_flag_requires_append_open_and_extends_eof() {
+        let tree = test_tree();
+        tree.target
+            .inode()
+            .publish_behavior_flags_after_backing_change(crate::NodeFlags::APPEND_ONLY)
+            .unwrap();
+
+        assert!(matches!(
+            Filename::new("/target").open_with_flags_at(
+                &tree.root,
+                &tree.base,
+                linux_raw_sys::general::O_WRONLY,
+                NodePermission::empty(),
+                NodePermission::empty(),
+                kcred::initial_cred(),
+            ),
+            Err(VfsError::OperationNotPermitted)
+        ));
+        let writer = Filename::new("/target")
+            .open_with_flags_at(
+                &tree.root,
+                &tree.base,
+                linux_raw_sys::general::O_WRONLY | linux_raw_sys::general::O_APPEND,
+                NodePermission::empty(),
+                NodePermission::empty(),
+                kcred::initial_cred(),
+            )
+            .unwrap();
+        let reader = Filename::new("/target")
+            .open_with_flags_at(
+                &tree.root,
+                &tree.base,
+                linux_raw_sys::general::O_RDONLY,
+                NodePermission::empty(),
+                NodePermission::empty(),
+                kcred::initial_cred(),
+            )
+            .unwrap();
+        assert_eq!(
+            writer.check_shared_mapping_allowed(),
+            Err(VfsError::PermissionDenied)
+        );
+        assert_eq!(reader.check_shared_mapping_allowed(), Ok(()));
+        assert_eq!(writer.write(b"!"), Ok(1));
+        let file = tree.target.inode().downcast::<TestFile>().unwrap();
+        let data = file.data.lock();
+        assert_eq!(data.as_slice(), b"target!");
+        assert_eq!(
+            tree.target.truncate(0, &kcred::initial_cred()),
+            Err(VfsError::OperationNotPermitted)
+        );
+    }
+
+    #[def_test]
+    fn dac_error_precedes_append_only_open_error() {
+        let tree = test_tree();
+        tree.root
+            .dentry()
+            .update_metadata(MetadataUpdate {
+                mode: Some(NodePermission::from_bits_truncate(0o755)),
+                ..Default::default()
+            })
+            .unwrap();
+        tree.target
+            .dentry()
+            .update_metadata(MetadataUpdate {
+                mode: Some(NodePermission::from_bits_truncate(0o600)),
+                owner: Some((1000, 1000)),
+                ..Default::default()
+            })
+            .unwrap();
+        tree.target
+            .inode()
+            .publish_behavior_flags_after_backing_change(crate::NodeFlags::APPEND_ONLY)
+            .unwrap();
+
+        let result = Filename::new("/target").open_with_flags_at(
+            &tree.root,
+            &tree.base,
+            linux_raw_sys::general::O_WRONLY,
+            NodePermission::empty(),
+            NodePermission::empty(),
+            Arc::new(kcred::Cred::new(2000, 2000)),
+        );
+
+        assert!(matches!(result, Err(VfsError::PermissionDenied)));
+    }
+
+    #[def_test]
+    fn append_only_flag_prevents_f_setfl_from_changing_append_status() {
+        let tree = test_tree();
+        let writer = Filename::new("/target")
+            .open_with_flags_at(
+                &tree.root,
+                &tree.base,
+                linux_raw_sys::general::O_WRONLY,
+                NodePermission::empty(),
+                NodePermission::empty(),
+                kcred::initial_cred(),
+            )
+            .unwrap();
+        tree.target
+            .inode()
+            .publish_behavior_flags_after_backing_change(crate::NodeFlags::APPEND_ONLY)
+            .unwrap();
+
+        assert_eq!(writer.write(b"!"), Ok(1));
+        let file = tree.target.inode().downcast::<TestFile>().unwrap();
+        let data = file.data.lock();
+        assert_eq!(data.as_slice(), b"!arget");
+        drop(data);
+
+        assert_eq!(
+            writer.set_status_flags(OpenFlags::APPEND, OpenFlags::APPEND),
+            Err(VfsError::OperationNotPermitted)
+        );
+        assert!(!writer.flags().contains(OpenFlags::APPEND));
+        assert_eq!(
+            writer.set_status_flags(OpenFlags::NONBLOCK, OpenFlags::NONBLOCK),
+            Ok(())
+        );
+        assert!(writer.flags().contains(OpenFlags::NONBLOCK));
     }
 }

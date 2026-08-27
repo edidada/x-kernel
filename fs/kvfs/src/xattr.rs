@@ -245,8 +245,8 @@ impl Path {
     ) -> VfsResult<()> {
         self.check_writable_mount()?;
         let inode = self.inode();
-        check_xattr_permission(&inode, name, XattrAccess::Write, cred)?;
         let _data_guard = inode.lock_data();
+        check_xattr_permission(&inode, name, XattrAccess::Write, cred)?;
         inode.set_xattr(self.dentry(), name, value, flags)
     }
 
@@ -257,8 +257,8 @@ impl Path {
     pub fn remove_xattr(&self, name: &XattrName, cred: &Cred) -> VfsResult<()> {
         self.check_writable_mount()?;
         let inode = self.inode();
-        check_xattr_permission(&inode, name, XattrAccess::Write, cred)?;
         let _data_guard = inode.lock_data();
+        check_xattr_permission(&inode, name, XattrAccess::Write, cred)?;
         inode.remove_xattr(self.dentry(), name)
     }
 }

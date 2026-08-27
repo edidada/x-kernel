@@ -876,7 +876,14 @@ impl Path {
         }
 
         self.check_writable_mount()?;
-        let metadata = self.metadata();
+        let inode = self.inode();
+        let _mutation_guard = if inode.is_dir() {
+            inode.lock_namespace_exclusive()
+        } else {
+            inode.lock_data()
+        };
+        inode.check_mutable()?;
+        let metadata = inode.metadata();
         let is_owner = cred.fsuid() == metadata.uid;
         let is_privileged = cred.is_privileged();
 
@@ -904,7 +911,14 @@ impl Path {
     /// Changes this inode's permission bits after applying Linux chmod authorization.
     pub fn chmod(&self, mut mode: NodePermission, cred: &Cred) -> VfsResult<()> {
         self.check_writable_mount()?;
-        let metadata = self.metadata();
+        let inode = self.inode();
+        let _mutation_guard = if inode.is_dir() {
+            inode.lock_namespace_exclusive()
+        } else {
+            inode.lock_data()
+        };
+        inode.check_mutable()?;
+        let metadata = inode.metadata();
         if cred.fsuid() != metadata.uid && !cred.is_privileged() {
             return Err(VfsError::OperationNotPermitted);
         }
@@ -932,12 +946,23 @@ impl Path {
         }
 
         self.check_writable_mount()?;
-        let metadata = self.metadata();
-        let is_owner = cred.fsuid() == metadata.uid;
+        let inode = self.inode();
+        let _mutation_guard = if inode.is_dir() {
+            inode.lock_namespace_exclusive()
+        } else {
+            inode.lock_data()
+        };
         let is_touch = matches!(
             (atime, mtime),
             (Some(SetattrTime::Current(_)), Some(SetattrTime::Current(_)))
         );
+        if is_touch {
+            inode.check_not_immutable()?;
+        } else {
+            inode.check_mutable()?;
+        }
+        let metadata = inode.metadata();
+        let is_owner = cred.fsuid() == metadata.uid;
         if !is_touch {
             if !is_owner && !cred.is_privileged() {
                 return Err(VfsError::OperationNotPermitted);
@@ -995,6 +1020,7 @@ impl Path {
         cred: &Cred,
     ) -> VfsResult<()> {
         self.check_writable_mount()?;
+        self.inode().check_not_immutable()?;
         self.may_modify_directory(cred)?;
         let dir_inode = self.inode();
         let mode = dir_inode.prepare_create_mode(
@@ -1016,6 +1042,7 @@ impl Path {
         cred: &Cred,
     ) -> VfsResult<()> {
         self.check_writable_mount()?;
+        self.inode().check_not_immutable()?;
         self.may_modify_directory(cred)?;
         let node_type = mode.node_type();
         if matches!(node_type, NodeType::CharacterDevice | NodeType::BlockDevice)
@@ -1036,6 +1063,7 @@ impl Path {
         cred: &Cred,
     ) -> VfsResult<()> {
         self.check_writable_mount()?;
+        self.inode().check_not_immutable()?;
         self.may_modify_directory(cred)?;
         let dir_inode = self.inode();
         let allowed_permission =
@@ -1057,6 +1085,7 @@ impl Path {
         cred: &Cred,
     ) -> VfsResult<()> {
         self.check_writable_mount()?;
+        self.inode().check_not_immutable()?;
         self.may_modify_directory(cred)?;
         let dir_inode = self.inode();
         dir_inode.symlink(candidate, target, cred)
@@ -1067,12 +1096,14 @@ impl Path {
             return Err(VfsError::CrossesDevices);
         }
         self.check_writable_mount()?;
+        self.inode().check_not_immutable()?;
         self.may_modify_directory(cred)?;
         if source.is_dir() {
             return Err(VfsError::OperationNotPermitted);
         }
         let source_inode = source.inode();
         let _source_guard = source_inode.lock_namespace_exclusive();
+        source_inode.check_mutable()?;
         self.inode().link(candidate, &source.dentry)
     }
 
@@ -1174,15 +1205,20 @@ impl Path {
             flags,
             |source, target| {
                 self.may_modify_directory(cred)?;
+                self.inode().check_mutable()?;
                 if !self.ptr_eq(new_dir) {
                     new_dir.may_modify_directory(cred)?;
+                    new_dir.inode().check_not_immutable()?;
                 }
 
                 let old_path = self.with_dentry(source.clone());
+                old_path.inode().check_mutable()?;
                 self.check_sticky(&old_path, cred)?;
                 old_path.check_not_mountpoint()?;
                 if target.is_really_positive() {
                     let new_path = new_dir.with_dentry(target.clone());
+                    new_dir.inode().check_mutable()?;
+                    new_path.inode().check_mutable()?;
                     new_dir.check_sticky(&new_path, cred)?;
                     new_path.check_not_mountpoint()?;
                 }
@@ -1208,7 +1244,9 @@ impl Path {
                 return Err(VfsError::NotADirectory);
             }
             self.may_modify_directory(cred)?;
+            self.inode().check_mutable()?;
             let victim_path = self.with_dentry(victim.clone());
+            victim_path.inode().check_mutable()?;
             self.check_sticky(&victim_path, cred)?;
             victim_path.check_not_mountpoint()
         })
@@ -1219,7 +1257,9 @@ impl Path {
         self.check_writable_mount()?;
         self.dentry.as_dir()?.rmdir_with(name, |victim| {
             self.may_modify_directory(cred)?;
+            self.inode().check_mutable()?;
             let victim_path = self.with_dentry(victim.clone());
+            victim_path.inode().check_mutable()?;
             self.check_sticky(&victim_path, cred)?;
             victim_path.check_not_mountpoint()
         })
@@ -1355,6 +1395,7 @@ impl Path {
         }
 
         let inode = self.inode();
+        inode.check_mutable()?;
         if len > self.max_file_size() {
             return Err(VfsError::FileTooLarge);
         }
@@ -2235,6 +2276,153 @@ mod tests {
     }
 
     #[def_test]
+    fn immutable_and_append_only_directories_enforce_namespace_policy() {
+        let fs = mock_filesystem(StatFsFlags::empty());
+        let root = Mount::new_root(&fs).root_path();
+        root.inode()
+            .publish_behavior_flags_after_backing_change(NodeFlags::IMMUTABLE)
+            .unwrap();
+
+        assert!(matches!(
+            root.create("blocked", NodePermission::default(), &kcred::initial_cred()),
+            Err(VfsError::OperationNotPermitted)
+        ));
+        assert_eq!(
+            root.chmod(NodePermission::default(), &kcred::initial_cred()),
+            Err(VfsError::OperationNotPermitted)
+        );
+
+        root.inode()
+            .publish_behavior_flags_after_backing_change(NodeFlags::APPEND_ONLY)
+            .unwrap();
+        assert!(matches!(
+            root.create(
+                "allowed-to-reach-fs",
+                NodePermission::default(),
+                &kcred::initial_cred()
+            ),
+            Err(VfsError::OperationNotSupported)
+        ));
+        assert_eq!(
+            root.rmdir("mnt", &kcred::initial_cred()),
+            Err(VfsError::OperationNotPermitted)
+        );
+    }
+
+    #[cfg(target_os = "none")]
+    mod concurrent_file_flags {
+        use ksync::Semaphore;
+        use ktask::spawn;
+        use unittest::assert_eq;
+
+        use super::*;
+
+        struct LinkRaceDirOps {
+            ready_for_source_lock: Arc<Semaphore>,
+        }
+
+        impl InodeOperations for LinkRaceDirOps {
+            fn permission(
+                &self,
+                _idmap: &crate::MountIdmap,
+                _inode: &VfsInode,
+                _permission: crate::Permission,
+                _cred: &Cred,
+            ) -> VfsResult<()> {
+                self.ready_for_source_lock.release();
+                Ok(())
+            }
+
+            fn directory_operations(&self) -> Option<&dyn InodeDirOperations> {
+                Some(self)
+            }
+        }
+
+        impl InodeDirOperations for LinkRaceDirOps {
+            fn lookup(
+                &self,
+                _dir: &VfsInode,
+                _dentry: &LockedDentry<'_>,
+                _flags: crate::InodeLookupFlags,
+            ) -> VfsResult<Option<Dentry>> {
+                Ok(None)
+            }
+
+            fn link(
+                &self,
+                _old_dentry: &Dentry,
+                _dir: &VfsInode,
+                _new_dentry: &LockedDentry<'_>,
+            ) -> VfsResult<()> {
+                Err(VfsError::OperationNotSupported)
+            }
+        }
+
+        struct LinkRaceFileOps;
+
+        impl InodeOperations for LinkRaceFileOps {}
+        impl FileOperations for LinkRaceFileOps {}
+
+        #[def_test]
+        fn link_rechecks_source_flags_after_namespace_lock_wait() {
+            let ready_for_source_lock = Arc::new(Semaphore::new(0));
+            let root_inode = VfsInode::new_dir(
+                Arc::new(LinkRaceDirOps {
+                    ready_for_source_lock: ready_for_source_lock.clone(),
+                }),
+                inode_init(1),
+            );
+            let root_dentry = Dentry::new_dir_from_inode(root_inode, None, String::new());
+            let fs = SuperBlock::new_with_flags(
+                &MOCK_FILE_SYSTEM_TYPE,
+                &MOCK_SUPER_OPERATIONS,
+                SuperBlockFlags::empty(),
+                move |_| root_dentry,
+            );
+            let root = Mount::new_root(&fs).root_path();
+
+            let source_inode = VfsInode::new_file(
+                Arc::new(LinkRaceFileOps),
+                VfsInodeInit::new(
+                    2,
+                    0,
+                    crate::Umode::new(NodeType::RegularFile, NodePermission::default()),
+                ),
+            );
+            let source_dentry = Dentry::new_file_from_inode(
+                source_inode.clone(),
+                Some(root.dentry().clone()),
+                "source".into(),
+            );
+            let source = root.with_dentry(source_dentry);
+            let source_guard = source_inode.lock_namespace_exclusive();
+            let result = Arc::new(crate::Mutex::new(None));
+            let worker_result = result.clone();
+            let worker = spawn(move || {
+                let link_result = root
+                    .link("new-link", &source, &kcred::initial_cred())
+                    .map(|_| ());
+                *worker_result.lock() = Some(link_result);
+            });
+
+            // The permission hook runs immediately before the worker waits for
+            // the source namespace lock. Publish the flag while holding that
+            // lock to reproduce SETFLAGS winning the serialization race.
+            ready_for_source_lock.acquire();
+            source_inode
+                .publish_behavior_flags_after_backing_change(NodeFlags::IMMUTABLE)
+                .unwrap();
+            drop(source_guard);
+            worker.join();
+
+            assert_eq!(
+                result.lock().take(),
+                Some(Err(VfsError::OperationNotPermitted))
+            );
+        }
+    }
+
+    #[def_test]
     fn test_mkdir_strips_requested_setid_bits_before_owner_initialization() {
         let fs = mock_filesystem(StatFsFlags::empty());
         let root = Mount::new_root(&fs).root_path();
@@ -2377,6 +2565,45 @@ mod tests {
                 Some(SetattrTime::Current(SystemTime::from_unix_seconds(30))),
                 None,
                 &other,
+            ),
+            Err(VfsError::OperationNotPermitted)
+        );
+    }
+
+    #[def_test]
+    fn append_only_allows_touch_but_rejects_explicit_timestamp_updates() {
+        let fs = mock_filesystem(StatFsFlags::empty());
+        let root = Mount::new_root(&fs).root_path();
+        let cred = kcred::initial_cred();
+        root.inode()
+            .publish_behavior_flags_after_backing_change(NodeFlags::APPEND_ONLY)
+            .unwrap();
+
+        assert_eq!(
+            root.set_times(
+                Some(SetattrTime::Current(SystemTime::from_unix_seconds(10))),
+                Some(SetattrTime::Current(SystemTime::from_unix_seconds(11))),
+                &cred,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            root.set_times(
+                Some(SetattrTime::Current(SystemTime::from_unix_seconds(20))),
+                None,
+                &cred,
+            ),
+            Err(VfsError::OperationNotPermitted)
+        );
+
+        root.inode()
+            .publish_behavior_flags_after_backing_change(NodeFlags::IMMUTABLE)
+            .unwrap();
+        assert_eq!(
+            root.set_times(
+                Some(SetattrTime::Current(SystemTime::from_unix_seconds(30))),
+                Some(SetattrTime::Current(SystemTime::from_unix_seconds(31))),
+                &cred,
             ),
             Err(VfsError::OperationNotPermitted)
         );

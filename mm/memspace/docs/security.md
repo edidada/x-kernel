@@ -139,7 +139,8 @@
   `memspace` 当前路径实现。
 - `MS_INVALIDATE`、locked-page `EBUSY` 和释放 `MmSpace` 锁后再执行慢速
   provider sync 未实现。
-- Invalidate sink 是 queue/drain 模型，不提供 Linux 同步 rmap 树的强同步语义。
+- 普通 invalidate sink 仍是 queue/drain 模型；只有携带真实 `MmSpace` identity 的
+  `InvalidateHandle::apply_sync()` 提供逐目标的强完成语义，deferred handle 不支持同步等待。
 
 ## 审计清单
 
@@ -150,6 +151,8 @@
 - [ ] Private-anon frame release 是否发生在 TLB finalization 之后。
 - [ ] Invalidate request 是否通过 `vmobj` object/view language 进入 `MmSpace`。
 - [ ] `InvalidateSink` spinlock 内是否只做队列操作。
+- [ ] 同步 invalidation 调用者是否未持有 fault path 需要的 object invalidate write lock，且
+  是否把 `apply_sync()` 错误传播到依赖 PTE 撤销的状态提交者。
 - [ ] Unsupported Linux semantics 是否显式返回错误而不是静默降级。
 - [ ] 新增地址空间 observer 是否只持有 `MmPin` 或普通 `Arc`，不误用
   `MmUserHandle` 延长用户映射生命周期。

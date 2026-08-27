@@ -152,7 +152,7 @@ impl InvalidateSink {
 #[derive(Clone)]
 pub struct InvalidateHandle {
     sink: Weak<InvalidateSink>,
-    aspace: Weak<Mutex<MmSpace>>,
+    aspace: Option<Weak<Mutex<MmSpace>>>,
 }
 
 impl InvalidateHandle {
@@ -165,7 +165,7 @@ impl InvalidateHandle {
     }
 
     pub fn try_apply(&self, request: &ObjectInvalidateRequest) -> KResult<bool> {
-        let Some(aspace) = self.aspace.upgrade() else {
+        let Some(aspace) = self.aspace.as_ref().and_then(Weak::upgrade) else {
             return Ok(false);
         };
         let Some(mut aspace) = aspace.try_lock() else {
@@ -188,6 +188,28 @@ impl InvalidateHandle {
             Ok(false) => Ok(false),
             Err(err) => Err(err),
         }
+    }
+
+    /// Applies one invalidation and waits for its page-table update to finish.
+    ///
+    /// The caller must not hold the target `MmSpace` lock. If the object-side
+    /// invalidate lock is also used by page faults, the caller must release
+    /// that lock before waiting here and independently prevent new writable
+    /// faults. This avoids the `MmSpace -> object invalidate lock` fault order
+    /// being inverted by synchronous invalidation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EOPNOTSUPP` for a deferred handle without a target `MmSpace`,
+    /// or propagates the page-table invalidation failure.
+    pub fn apply_sync(&self, request: &ObjectInvalidateRequest) -> KResult<()> {
+        let Some(aspace) = self.aspace.as_ref() else {
+            return Err(KError::OperationNotSupported);
+        };
+        let Some(aspace) = aspace.upgrade() else {
+            return Ok(());
+        };
+        aspace.lock().apply_invalidate_request(request)
     }
 }
 
@@ -241,14 +263,14 @@ impl MmSpace {
     pub fn invalidate_handle(&self, aspace: &Arc<Mutex<MmSpace>>) -> InvalidateHandle {
         InvalidateHandle {
             sink: Arc::downgrade(&self.invalidate_sink),
-            aspace: Arc::downgrade(aspace),
+            aspace: Some(Arc::downgrade(aspace)),
         }
     }
 
     pub(crate) fn deferred_invalidate_handle(&self) -> InvalidateHandle {
         InvalidateHandle {
             sink: Arc::downgrade(&self.invalidate_sink),
-            aspace: Weak::new(),
+            aspace: None,
         }
     }
 
@@ -1449,12 +1471,14 @@ impl MmSpace {
         match result {
             Ok(completion) => self.finish_backend_fault(vaddr, flags, Ok(completion)),
             Err(err) => match KErrorKind::try_from(err.canonicalize()) {
+                Ok(KErrorKind::ResourceBusy) => PageFaultOutcome::Retry,
                 Ok(KErrorKind::NoMemory) => PageFaultOutcome::OutOfMemory,
                 Ok(
                     KErrorKind::BadAddress
                     | KErrorKind::InvalidData
                     | KErrorKind::InvalidInput
                     | KErrorKind::Io
+                    | KErrorKind::OperationNotPermitted
                     | KErrorKind::UnexpectedEof,
                 ) => PageFaultOutcome::BusError,
                 _ => {
@@ -1677,7 +1701,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::{PageFaultOutcome, vma::VmRuntimeRef};
+    use crate::{PageFaultOutcome, VmBackingKind, vma::VmRuntimeRef};
 
     fn new_test_aspace() -> AddrSpace {
         AddrSpace::new_empty_kernel(VirtAddr::from(0x1000usize), PAGE_SIZE_4K * 64)
@@ -1810,6 +1834,52 @@ mod tests {
     }
 
     #[def_test]
+    fn synchronous_invalidate_handle_returns_after_pte_removal() {
+        let start = VirtAddr::from_usize(0x4000);
+        let aspace = Arc::new(Mutex::new(new_test_aspace()));
+        let (handle, request) = {
+            let mut guard = aspace.lock();
+            let runtime = map_shared(
+                &mut guard,
+                start.as_usize(),
+                PAGE_SIZE_4K,
+                MappingFlags::READ | MappingFlags::WRITE,
+            );
+            assert!(
+                guard
+                    .handle_page_fault(start, PageFaultFlags::WRITE)
+                    .is_resolved()
+            );
+            assert!(guard.pgtbl.modify().query(start).is_ok());
+            let VmBackingKind::AnonymousShared { object } = runtime.backing_info().kind() else {
+                panic!("test runtime must be anonymous shared");
+            };
+            let view = MappingView::new(
+                MappingViewId::from_raw(2),
+                guard.mm_id(),
+                MappingViewRange {
+                    vma_start: start.as_usize() as u64,
+                    vma_len: PAGE_SIZE_4K,
+                    object_start: 0,
+                    object_len: PAGE_SIZE_4K,
+                },
+                MappingViewKind::Shared,
+            );
+            let request =
+                ObjectInvalidateRequest::new(object, ObjectViewHit::new(view, 0, PAGE_SIZE_4K));
+            (guard.invalidate_handle(&aspace), request)
+        };
+
+        handle
+            .apply_sync(&request)
+            .expect("synchronous invalidation succeeds");
+        assert!(matches!(
+            aspace.lock().pgtbl.modify().query(start),
+            Err(PagingError::NotMapped)
+        ));
+    }
+
+    #[def_test]
     fn fault_adapter_treats_retry_outcomes_as_handled() {
         assert!(MmSpace::page_fault_outcome_is_handled(
             PageFaultOutcome::Resolved
@@ -1823,6 +1893,32 @@ mod tests {
         assert!(!MmSpace::page_fault_outcome_is_handled(
             PageFaultOutcome::AccessDenied
         ));
+    }
+
+    #[def_test]
+    fn file_fault_treats_inode_transition_barrier_as_retryable() {
+        let mut aspace = new_test_aspace();
+        assert_eq!(
+            aspace.finish_file_backend_fault(
+                VirtAddr::from_usize(0x4000),
+                MappingFlags::WRITE,
+                Err(KError::ResourceBusy),
+            ),
+            PageFaultOutcome::Retry
+        );
+    }
+
+    #[def_test]
+    fn file_fault_maps_inode_write_policy_rejection_to_bus_error() {
+        let mut aspace = new_test_aspace();
+        assert_eq!(
+            aspace.finish_file_backend_fault(
+                VirtAddr::from_usize(0x4000),
+                MappingFlags::WRITE,
+                Err(KError::OperationNotPermitted),
+            ),
+            PageFaultOutcome::BusError
+        );
     }
 
     #[def_test]

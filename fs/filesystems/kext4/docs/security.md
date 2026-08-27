@@ -149,6 +149,9 @@ KExt4 的 KVFS operation 实现信任 KVFS 已经提供内核拥有的 path name
   之间的空闲空间竞争返回 `NoSpace` 时记录 resident `no_expand` 并继续普通更新，不能扩大为假
   `ENOSPC`；删除 xattr 清除该状态，journal 的暂时性 credit/忙碌失败不应永久禁止重试。设备 I/O、
   checksum 和 corruption 错误仍必须传播并触发既有 journal 失败策略，不能以 best-effort 为由吞掉。
+- inode behavior-flag mutation 只能替换 immutable/append-only 位，必须保留所有其它 `i_flags`；
+  flags 和 ctime 必须由同一个 journal handle 更新，相同值请求也必须刷新 ctime，失败时不能
+  发布新的 private state。
 - 运行态 inode allocation 必须使用 kext4 callback 已通过 `inode_init_owner()` 导出的显式
   UID/GID；KExt4 core 不得把新 inode owner 默认为 root。
 - Filesystem 级 timestamp range 必须按 inode size 判断完整 `i_[acm]time_extra` 容量；128-byte
@@ -217,6 +220,9 @@ exclusive data lock 下先把 hole reservation 发布到同一个 delayed set，
 | T-18 | 128-byte inode 对外暴露不存在的纳秒精度，或新建 inode 丢失纳秒/扩展 epoch 并在 2038 年后回绕 | 中 | 只在 inode-table encode 时截断、VFS 比较原始高精度时间，或初始化结构只保存 base `u32` 秒 | KExt4 按 inode size 返回共享的 `TimestampLimits`，由唯一 KVFS `SuperBlock` 持有；`VfsInode::current_time()` 在比较、callback 和 publication 前只截断一次；新建 inode 保存完整 `Ext4Timestamp` 并通过 base/extra encoder 写盘，128-byte 格式在边界钳制，256-byte 格式保留纳秒和 epoch；回归测试覆盖两种 inode size 的能力选择、初始化编码和 resident publication |
 | T-19 | 合法 SIPHASH HTree 被误报损坏 | 中 | root `hash_version=6` 进入目录写路径 | 共享 HTree root decoder 只接受磁盘版本 `0/1/2/6`，HTree signedness 来自 mount state；SIPHASH 在需要密钥的 hash 边界返回 `Unsupported`，相关事务不能提交 metadata mutation |
 | T-20 | 未标 signedness 的旧 HTree 镜像跨 Linux 挂载后名称不可见，或 Orlov 目录放置漂移 | 高 | 磁盘两种 signedness flag 都为空时按 signed 计算，或 Orlov 复用 HTree default/unsigned policy | mount state 按 Linux unsigned-char 语义生成 `hash_unsigned`，RW 持久化 unsigned flag、RO 保持磁盘不变；HTree 只经 mount policy hash，Orlov 独立固定 signed HALF_MD4 + seed；高位字节名称回归测试区分 signed/unsigned |
+| T-21 | 修改 immutable/append-only 时清除 extents/index 等无关 inode flags，或相同值请求漏掉 ctime 更新 | 高 | 用用户请求直接覆盖磁盘 `i_flags`，或在进入 journal 前按 flags 相等早退 | core 从当前 flags 中只替换两个 behavior bits；相同值仍更新 ctime；Linux-image 回归测试验证其它 flags、mtime 保持及多轮持久化状态 |
+| T-22 | indexed/encrypted/verity 等可见只读位被误当作用户可修改位 | 中 | SETFLAGS 对完整 user-visible flags 做 XOR，用户未回填只读位便被当成非法变化 | bridge 先拒绝 visible mask 外的位，再按 `EXT4_FL_USER_MODIFIABLE` 丢弃 visible-but-read-only 位，并仅比较规范化后的 modifiable state；core 更新始终保留磁盘其它位 |
+| T-23 | immutable 已落盘但旧 shared writable PTE 仍能改写数据 | 高 | bridge 把异步 invalidation enqueue 当成同步完成，或对 no-op/append-only 切换无条件撤销映射 | 只有 regular non-immutable -> immutable 转换进入 KVFS 同步 rmap barrier；所有 shared PTE/TLB 完成撤销后 KExt4 才 writeback 并 journal flags，任一撤销或 writeback 错误阻止持久化 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -270,7 +276,11 @@ KExt4 会存储并返回 filesystem data 和 metadata，其中 xattr value 可�
   KVFS 检查，缺少完整 LSM/capability 时 `security.*` set/remove 要求 privileged
   credential，create/replace 的四种标志组合由 KExt4 core 在同一写锁的 mutation plan
   中检查。磁盘 immutable/append-only flags 在 iget 时映射到 KVFS 并阻止 xattr mutation；
-  当前尚未实现 `FS_IOC_SETFLAGS`，因此不存在需要运行时刷新这些 flags 的修改入口。
+  运行态 `FS_IOC_GETFLAGS` 可读取 ext4 user-visible flags，并对普通文件隐藏目录专用的
+  `FS_PROJINHERIT_FL`；`FS_IOC_SETFLAGS` 当前只允许切换 immutable/append-only，其它可见
+  只读 flags 在 SET 时静默忽略并保留，未实现 modifiable flags 的实际修改返回
+  `EOPNOTSUPP`。普通文件进入 immutable 前由 KVFS 同步撤销 shared writable PTE，KExt4 只在
+  该转换上执行 writeback，再持久化行为位。
 - POSIX ACL 当前只是 core 内的 opaque xattr bytes，不实现 ACL permission enforcement、
   mode 同步或 inheritance，因此 kext4 KVFS 层不把 `system.posix_acl_*` 作为普通 xattr 暴露；
   mount parser 接受 `acl` 只用于兼容 Linux 默认开启选项的正向拼写，不得改变上述权限边界。
@@ -301,6 +311,11 @@ KExt4 会存储并返回 filesystem data 和 metadata，其中 xattr value 可�
   全部属性，普通 set/remove 是否保持当前 extra-isize，统一 ordinary inode-dirty 入口是否覆盖
   目录和非写入元数据更新，extra-isize 扩展失败是否安全回退且只缓存已经完成布局/资源判定的
   失败，而不把 journal 暂时繁忙记成永久状态？
+- behavior-flag prepare 是否依次应用 user-visible、user-modifiable 和 inode-type mask，只把
+  尚未实现的 modifiable 实际变化作为 `EOPNOTSUPP`；mutation 是否只替换
+  immutable/append-only、保留其它 `i_flags`，并在相同值请求上仍更新 ctime 而不改变 mtime？
+- regular inode 是否仅在进入 immutable 时执行 writeback，且此时 KVFS 已确认所有 shared
+  PTE/TLB 同步撤销并保持 writable-fault barrier 到 journal 与 resident publication 完成？
 - 每个 mutation 是否为所有可能 dirty 或 revoke 的 metadata block 预留了足够 journal credits？
 - 线性目录转 HTree 后立即 split 时，extent 预检是否把两次独立 block allocation 视为两个
   最坏情况下不合并的 mapping，并在 `EXT4_INDEX_FL` 发布前预留 HTree credits？

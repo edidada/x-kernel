@@ -1155,6 +1155,93 @@ fn journals_inline_xattr_set_and_remove() {
 }
 
 #[test]
+fn journals_inode_behavior_flags_and_preserves_other_flags() {
+    let mke2fs = require_e2fsprogs("mke2fs");
+    let debugfs = require_e2fsprogs("debugfs");
+    let image = temporary_image_path("inode-behavior-flags");
+    let payload = temporary_image_path("inode-behavior-flags-payload");
+    create_image_with_layout(&mke2fs, &image, 64 * 1024 * 1024, 4096, true, None);
+    fs::write(&payload, b"inode flags").expect("write inode flags payload");
+    run_debugfs(
+        &debugfs,
+        &image,
+        &format!("write {} /file", payload.display()),
+    );
+
+    let device = Arc::new(WritableImageDevice::new(
+        fs::read(&image).expect("read inode flags image"),
+    ));
+    let (inode_number, original_other_flags, original_mtime) = {
+        let filesystem = Ext4SbInfo::mount(device.clone()).expect("mount inode flags image");
+        let root = filesystem.root_inode().expect("read root inode");
+        let entry = filesystem
+            .lookup(&root, "file")
+            .expect("lookup inode flags file")
+            .expect("inode flags file exists");
+        let inode = filesystem
+            .load_inode_private(entry.inode())
+            .expect("read inode flags inode");
+        let original_other_flags =
+            inode.flags() & !(Ext4Inode::IMMUTABLE_FLAG | Ext4Inode::APPEND_FLAG);
+        let original_mtime = inode.mtime();
+        (inode.number(), original_other_flags, original_mtime)
+    };
+
+    for (step, (is_immutable, is_append_only)) in [
+        (true, false),
+        (false, true),
+        (true, true),
+        (false, false),
+        // Same-value SETFLAGS still journals a fresh ctime.
+        (false, false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let timestamp = Ext4Timestamp::new(1_720_100_000 + step as i64, 123 + step as u32);
+        {
+            let mut filesystem =
+                Ext4SbInfo::mount(device.clone()).expect("mount inode flags image for update");
+            let inode = filesystem
+                .load_inode_private(inode_number)
+                .expect("read inode flags before update");
+
+            filesystem
+                .set_inode_behavior_flags(&inode, is_immutable, is_append_only, timestamp)
+                .expect("set inode behavior flags");
+            assert_eq!(inode.is_immutable(), is_immutable);
+            assert_eq!(inode.is_append_only(), is_append_only);
+            assert_eq!(
+                inode.flags() & !(Ext4Inode::IMMUTABLE_FLAG | Ext4Inode::APPEND_FLAG),
+                original_other_flags
+            );
+            assert_eq!(inode.ctime(), timestamp);
+            assert_eq!(inode.mtime(), original_mtime);
+            filesystem
+                .sync_filesystem()
+                .expect("persist inode behavior flags");
+        }
+
+        let filesystem =
+            Ext4SbInfo::mount(device.clone()).expect("remount persisted inode flags image");
+        let inode = filesystem
+            .load_inode_private(inode_number)
+            .expect("read persisted inode flags");
+        assert_eq!(inode.is_immutable(), is_immutable);
+        assert_eq!(inode.is_append_only(), is_append_only);
+        assert_eq!(
+            inode.flags() & !(Ext4Inode::IMMUTABLE_FLAG | Ext4Inode::APPEND_FLAG),
+            original_other_flags
+        );
+        assert_eq!(inode.ctime(), timestamp);
+        assert_eq!(inode.mtime(), original_mtime);
+    }
+
+    fs::remove_file(payload).expect("remove inode flags payload");
+    fs::remove_file(image).expect("remove inode flags image");
+}
+
+#[test]
 fn journals_external_xattr_block_and_acl_round_trips() {
     let mke2fs = require_e2fsprogs("mke2fs");
     let debugfs = require_e2fsprogs("debugfs");

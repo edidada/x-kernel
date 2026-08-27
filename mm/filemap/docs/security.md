@@ -22,12 +22,20 @@ to `posix/mm`.
   `kvfs::AddressSpace::object_id()`.
 - Object invalidation requests must be derived from registered mapping views,
   not from ad-hoc runtime-local object ids.
+- Backing-state transitions that depend on writable PTE removal must use the
+  synchronous notifier contract. Queueing an ordinary invalidate request is
+  not completion evidence; success requires the target `MmSpace` to finish
+  matching PTE removal and TLB finalization.
 - Writable regular-file `MAP_SHARED` must use write-fault dirty tracking:
   initial shared file PTEs are installed without write permission, and the
   first write fault must hold the address-space invalidate lock shared and the
   target folio lock while completing filesystem `page_mkwrite` preparation,
   marking the inode-owned folio dirty, and making the PTE writable. Truncate
   and cache invalidation take the invalidate lock exclusively.
+- An append-only inode opened with write mode must reject `MAP_SHARED` before
+  the VMA is created with `EACCES`, including initially read-only mappings that
+  could otherwise be upgraded through `mprotect(PROT_WRITE)`. The write-fault
+  recheck remains necessary for mappings created before the flag transition.
 - `mprotect()` must not upgrade existing shared file PTEs directly to writable;
   VMA permissions may become writable, but the PTE remains write-protected
   until a write fault marks the folio dirty.
@@ -49,6 +57,8 @@ to `posix/mm`.
   state.
 - Object invalidation apply failures are requeued by `MmSpace` rather than
   silently dropped.
+- Synchronous invalidation failures are propagated to the object owner and
+  must prevent publication of the protected backing-state transition.
 - Shmem seal policy failures are returned as permission errors before the VMA
   permission or PTE state is upgraded.
 
@@ -69,6 +79,11 @@ to `posix/mm`.
 
 - Address-space shape and page-table operations are serialized by the `MmSpace`
   lock and page-table mutation guards.
+- Synchronous object invalidation must never wait for `MmSpace` while holding
+  the address-space invalidate write lock. The object first publishes a
+  retryable write-fault barrier, waits for each `MmSpace` with that lock
+  released, then uses the final write section to exclude new registrations and
+  commit the backing-state transition.
 - `VfsInode` owns the only visible file size and serializes write/truncate with
   its data lock. Shared write faults hold that same lock across EOF recheck,
   filesystem mapping preparation, dirtying, and PTE publication.

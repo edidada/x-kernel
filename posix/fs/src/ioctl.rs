@@ -8,10 +8,12 @@ use core::{ffi::c_int, mem::size_of};
 
 use kerrno::{KError, KResult};
 use kvfs::{
-    FiemapExtentFlags, FiemapExtentInfo, FiemapExtentWriter, FiemapFlags, OpenFlags, VfsError,
-    VfsFile, VfsResult,
+    FiemapExtentFlags, FiemapExtentInfo, FiemapExtentWriter, FiemapFlags, FileFlagsCapability,
+    VfsError, VfsFile, VfsResult,
 };
-use linux_raw_sys::ioctl::{FIONBIO, FS_IOC_FIEMAP, TCGETS, TIOCGWINSZ};
+use linux_raw_sys::ioctl::{
+    FIONBIO, FS_IOC_FIEMAP, FS_IOC_GETFLAGS, FS_IOC_SETFLAGS, TCGETS, TIOCGWINSZ,
+};
 use posix_types::{UserConstPtr, UserPtr, UserRead, UserWrite};
 
 #[repr(C)]
@@ -115,6 +117,42 @@ fn ioctl_fiemap(file: &VfsFile, ioctl_arg: usize) -> KResult<isize> {
     Ok(0)
 }
 
+fn ioctl_getflags(capability: FileFlagsCapability<'_>, ioctl_arg: usize) -> KResult<isize> {
+    UserPtr::<u32>::from(ioctl_arg).write_vm(capability.get()?)?;
+    Ok(0)
+}
+
+fn ioctl_setflags(
+    file: &VfsFile,
+    capability: FileFlagsCapability<'_>,
+    flags: u32,
+) -> KResult<isize> {
+    file.path().check_writable_mount()?;
+    capability.set(flags, &kprocess::current_cred())?;
+    Ok(0)
+}
+
+fn try_file_flags_ioctl(file: &VfsFile, cmd: u32, ioctl_arg: usize) -> Option<KResult<isize>> {
+    match cmd {
+        FS_IOC_GETFLAGS => file
+            .inode()
+            .file_flags_capability()
+            .map(|capability| ioctl_getflags(capability, ioctl_arg)),
+        FS_IOC_SETFLAGS => {
+            // Match Linux fs/file_attr.c::ioctl_setflags(): copy the scalar
+            // before checking fileattr_set, so an invalid pointer wins over ENOTTY.
+            let flags = match UserConstPtr::<u32>::from(ioctl_arg).read_vm() {
+                Ok(flags) => flags,
+                Err(error) => return Some(Err(error.into())),
+            };
+            file.inode()
+                .file_flags_capability()
+                .map(|capability| ioctl_setflags(file, capability, flags))
+        }
+        _ => None,
+    }
+}
+
 /// The `ioctl()` syscall manipulates the underlying device parameters
 /// of special files.
 pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> KResult<isize> {
@@ -123,17 +161,15 @@ pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> KResult<isize> {
     if cmd == FS_IOC_FIEMAP {
         return ioctl_fiemap(&f, arg);
     }
+    if let Some(result) = try_file_flags_ioctl(&f, cmd, arg) {
+        return result;
+    }
     if cmd == FIONBIO {
         let val = UserConstPtr::<c_int>::from(arg).read_vm()?;
         if val != 0 && val != 1 {
             return Err(KError::InvalidInput);
         }
-        let flags = if val != 0 {
-            OpenFlags::NONBLOCK
-        } else {
-            OpenFlags::empty()
-        };
-        f.replace_flags(OpenFlags::NONBLOCK, flags);
+        f.set_nonblocking(val != 0);
         return Ok(0);
     }
     f.ioctl(cmd, arg)
@@ -158,14 +194,41 @@ pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> KResult<isize> {
 mod tests {
     use core::mem::size_of;
 
+    use kerrno::KError;
+    use kvfs::{NodePermission, VfsError};
+    use memfs::shmem;
     use unittest::def_test;
 
-    use super::{FIEMAP_MAX_EXTENTS, FiemapExtent, FiemapHeader};
+    use super::{
+        FIEMAP_MAX_EXTENTS, FS_IOC_GETFLAGS, FS_IOC_SETFLAGS, FiemapExtent, FiemapHeader,
+        try_file_flags_ioctl,
+    };
 
     #[def_test]
     fn fiemap_abi_layout_matches_linux_uapi() {
         assert_eq!(size_of::<FiemapHeader>(), 32);
         assert_eq!(size_of::<FiemapExtent>(), 56);
         assert_eq!(FIEMAP_MAX_EXTENTS, u32::MAX / 56);
+    }
+
+    #[def_test]
+    fn unsupported_file_flags_ioctls_follow_linux_pointer_order() {
+        let file = shmem::create_kernel_file(
+            "unsupported-file-flags",
+            NodePermission::from_bits_truncate(0o600),
+            kcred::initial_cred(),
+        )
+        .and_then(|file| file.into_file(kcred::initial_cred()))
+        .unwrap();
+
+        assert!(try_file_flags_ioctl(&file, FS_IOC_GETFLAGS, usize::MAX).is_none());
+        assert!(matches!(
+            try_file_flags_ioctl(&file, FS_IOC_SETFLAGS, usize::MAX),
+            Some(Err(KError::BadAddress))
+        ));
+        assert_eq!(
+            file.ioctl(FS_IOC_GETFLAGS, usize::MAX),
+            Err(VfsError::NotATty)
+        );
     }
 }

@@ -448,16 +448,21 @@ pub(crate) fn new_shared_runtime(spec: FileSharedRuntimeSpec) -> VmRuntimeRef {
 
 #[cfg(unittest)]
 mod tests {
-    use alloc::{vec, vec::Vec};
+    use alloc::{sync::Arc, vec, vec::Vec};
 
-    use khal::paging::{MappingFlags, PageSize};
+    use kerrno::KError;
+    use khal::{
+        paging::{MappingFlags, PageSize, PageTable},
+        trap::PageFaultFlags,
+    };
     use ksync::Mutex;
+    use kvfs::NodeFlags;
     use memaddr::{PAGE_SIZE_4K, VirtAddr};
-    use memspace::VmBackingKind;
+    use memspace::{FaultContext, VmBackingKind, VmRuntimeOps};
     use unittest::def_test;
     use vmobj::VmObjectId;
 
-    use super::FileSharedRuntimeInner;
+    use super::{FileSharedRuntime, FileSharedRuntimeInner};
     use crate::{
         new_file_private_vma, runtime::SharedFileSourceAdapter, test_support::page_cache_file,
     };
@@ -504,6 +509,73 @@ mod tests {
 
         assert_eq!(read, out.len());
         assert_eq!(&out, b"mapping-owned");
+    }
+
+    #[def_test]
+    fn shared_write_fault_after_immutable_transition_is_rejected() {
+        let file = page_cache_file("shared-write-fault-after-immutable");
+        let payload = vec![0x5au8; PAGE_SIZE_4K];
+        let mut pos = 0;
+        assert_eq!(
+            file.write_from(&payload[..], &mut pos)
+                .expect("seed cached file"),
+            PAGE_SIZE_4K
+        );
+
+        let start = VirtAddr::from_usize(0x10_000);
+        let range = memaddr::VirtAddrRange::from_start_size(start, PAGE_SIZE_4K);
+        let flags = MappingFlags::READ | MappingFlags::WRITE;
+        let runtime = FileSharedRuntime(Arc::new(FileSharedRuntimeInner {
+            source: SharedFileSourceAdapter::new_without_view(
+                file.clone(),
+                1,
+                start,
+                PAGE_SIZE_4K,
+                0,
+            ),
+            shared_ranges: Mutex::new(Vec::new()),
+            writable_shared_ranges: Mutex::new(Vec::new()),
+        }));
+        let mut page_table = PageTable::try_new().expect("allocate page table");
+
+        {
+            let mut pgtbl = page_table.modify();
+            runtime
+                .map_impl(range, flags, &mut pgtbl)
+                .expect("establish writable shared mapping");
+            let read_fault = FaultContext::new(start, PageFaultFlags::READ).with_backing(
+                Some(0),
+                Some(0),
+                Some(0),
+            );
+            let completion = VmRuntimeOps::handle_fault(&runtime, read_fault, flags, &mut pgtbl)
+                .expect("populate read-only shared PTE");
+            assert_eq!(completion.populated(), 1);
+            let (_, pte_flags, _) = pgtbl.query(start).expect("query populated PTE");
+            assert!(!pte_flags.contains(MappingFlags::WRITE));
+        }
+
+        file.inode()
+            .publish_behavior_flags_for_test(NodeFlags::IMMUTABLE)
+            .expect("publish immutable state after mmap");
+
+        {
+            let mut pgtbl = page_table.modify();
+            let write_fault = FaultContext::new(start, PageFaultFlags::WRITE).with_backing(
+                Some(0),
+                Some(0),
+                Some(0),
+            );
+            assert!(matches!(
+                VmRuntimeOps::handle_fault(&runtime, write_fault, flags, &mut pgtbl),
+                Err(KError::OperationNotPermitted)
+            ));
+            let (_, pte_flags, _) = pgtbl.query(start).expect("query rejected write PTE");
+            assert!(!pte_flags.contains(MappingFlags::WRITE));
+            runtime
+                .unmap_impl(range, &mut pgtbl)
+                .expect("release shared mapping accounting");
+        }
     }
 
     #[def_test]

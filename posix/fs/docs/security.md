@@ -55,6 +55,7 @@ kfd resources / kvfs / device and pipe implementations
 | VFS magic link | `/proc/self/fd/<fd>`、`/proc/<pid>/fd/<fd>` | 跨进程 fd 访问、目标进程退出、fd 表并发变化、no-follow 策略 |
 | VFS/设备对象 | `open`、`ioctl`、`mount`、`syncfs` | 设备特定 ioctl、终端对象、mount flags、文件系统实现差异 |
 | FIEMAP 可变长输出 | `ioctl(FS_IOC_FIEMAP)` | 用户声明的 extent 数量、header 后数组地址、后端返回的块映射 |
+| inode flags 指针 | `ioctl(FS_IOC_GETFLAGS/FS_IOC_SETFLAGS)` | 无效用户地址、只读 mount、未授权或后端未实现的 flag 变化 |
 | fd-to-fd 复制 | `sendfile`、`copy_file_range`、`splice` | 源目标类型错误、offset 指针 TOCTOU、同文件重叠、阻塞语义 |
 
 本 crate 不直接访问 MMIO、PIO、DMA、固件表或架构内联汇编。
@@ -103,6 +104,9 @@ kfd resources / kvfs / device and pipe implementations
    syscall 入口复制一个 4 KiB base-page 大小的 opaque buffer 并强制清零末字节，不施加 UTF-8
    或提前 NUL 约束；`FsContext` 不保存用户指针，filesystem 若要在 `get_tree()` 返回后保留
    选项，必须只复制已解析状态。
+9. **inode flags 只复制一个完整标量**：GET/SET 只通过 `UserPtr<u32>`/
+   `UserConstPtr<u32>` 访问用户内存；具体 flags mask 和授权由 inode capability 校验，SET 在进入
+   capability 前检查 writable mount。
 
 ## 权限与语义不变量
 
@@ -110,22 +114,26 @@ kfd resources / kvfs / device and pipe implementations
    不应改变底层 `FileLike` 对象。
 2. `O_NONBLOCK` 和 `F_SETFL(O_NONBLOCK)` 必须修改 open file description 的
    `VfsFile::f_flags`，`nonblocking()` 只能从该字段派生。
-3. `AT_EMPTY_PATH` 是空路径按 fd 解析的必要条件。
-4. 非空绝对 `*at` pathname 必须忽略 `dirfd`；只有相对 pathname 才允许
+3. `F_SETFL` 不得直接替换 `f_flags`；append-only inode 上 `O_APPEND` 的任何状态变化必须在
+   `VfsFile::set_status_flags()` 中返回 `EPERM`，且不能阻止不相关的 `O_NONBLOCK` 更新。
+4. `AT_EMPTY_PATH` 是空路径按 fd 解析的必要条件。
+5. 非空绝对 `*at` pathname 必须忽略 `dirfd`；只有相对 pathname 才允许
    `dirfd` 查找失败影响结果。
-5. `AT_SYMLINK_NOFOLLOW` / `O_NOFOLLOW` 必须影响符号链接和 VFS magic-link follow。
-6. `mount` 不得静默忽略会改变语义的 unsupported operation flags。
-7. 普通新挂载只能精确查找已注册的 filesystem type；syscall 层不得维护与
+6. `AT_SYMLINK_NOFOLLOW` / `O_NOFOLLOW` 必须影响符号链接和 VFS magic-link follow。
+7. `mount` 不得静默忽略会改变语义的 unsupported operation flags。
+8. 普通新挂载只能精确查找已注册的 filesystem type；syscall 层不得维护与
    `/proc/filesystems` 分离的构造分支。
-8. 创建文件和目录时应应用 `FsStruct` 中的当前 umask；写入 umask 必须截断为
+9. 创建文件和目录时应应用 `FsStruct` 中的当前 umask；写入 umask 必须截断为
    `0777`，`CLONE_FS` 必须与 root/pwd 一起共享它。
-9. `chroot` 目标必须是目录，且当前 capability 模型下调用者必须满足 `euid == 0`。
-10. `chown/chmod/utimensat` 必须把同一个 credential snapshot 传给 VFS metadata
+10. `chroot` 目标必须是目录，且当前 capability 模型下调用者必须满足 `euid == 0`。
+11. `chown/chmod/utimensat` 必须把同一个 credential snapshot 传给 VFS metadata
    授权，不能直接调用后端 `setattr`。
-11. `F_ADD_SEALS` 只能单调添加 memfd seals，且必须尊重 `F_SEAL_SEAL`。
-12. Xattr 输入 name/value 必须先复制到有上限的内核缓冲区；list name sink 的累计长度不得
+12. `F_ADD_SEALS` 只能单调添加 memfd seals，且必须尊重 `F_SEAL_SEAL`。
+13. Xattr 输入 name/value 必须先复制到有上限的内核缓冲区；list name sink 的累计长度不得
     超过 `XATTR_LIST_MAX`。`size == 0` 查询不得访问输出指针或物化名称序列，非零短缓冲区
     必须返回 `ERANGE`，raw set flags 不得进入 KVFS。
+14. `fallocate` 必须拒绝 immutable inode；在原生 space-allocation 后端实现前，当前写入模拟
+    也拒绝 append-only inode，避免 `O_APPEND` 重定位使 syscall 错误返回成功长度。
 
 ## 线程安全
 
@@ -173,6 +181,9 @@ kfd resources / kvfs / device and pipe implementations
 | T-26 | FIEMAP 数量或地址计算溢出导致越界写或内核数据泄漏 | ioctl / 用户输出 | 高 | 信任 `fm_extent_count`、用未检查指针运算或复制未初始化 reserved 字段 | 限制最大数量，所有地址运算使用 checked arithmetic，输出结构显式初始化全部字段；用户地址只通过 `UserPtr` 写入 |
 | T-27 | `listxattr` 的名称聚合溢出或 size query 产生无界中间分配 | xattr / 用户输出 | 中 | 先收集属性和值，再构造多个完整名称副本，或累计长度未检查 | KVFS borrowed-name sink 直接写入单个 `XattrListWriter`；逐项 checked_add 并限制 `XATTR_LIST_MAX`，`size == 0` 只计数 |
 | T-28 | mount data 导致无界用户内存读取、错误拒绝 binary data 或把瞬时用户指针带入文件系统 | mount data / filesystem type | 高 | 通用层把 `void *` 当路径字符串解析，或直接向后端保留用户指针 | syscall 边界复制一个零填充的 4 KiB opaque byte page，并强制清零末字节；`FsContext` 只借用内核 slice，后端只保存解析后的 mount state |
+| T-29 | `FS_IOC_SETFLAGS` 在只读 mount、无权限或后端未实现时仍返回成功，或无效指针被错误的 `ENOTTY` 遮蔽 | ioctl / inode metadata | 高 | syscall 层静默忽略命令、先检查 capability 或吞掉后端差异 | SET 在 capability 判断前复制标量，再检查 writable mount，并由 typed inode capability 执行 credential 和 supported-bit policy；任何错误原样传播 |
+| T-30 | append-only inode 的旧 fd 通过 `F_SETFL` 切换 `O_APPEND` | fcntl / open file description | 高 | syscall 直接修改原子 `f_flags`，绕过 inode behavior | `F_SETFL` 调用 `VfsFile::set_status_flags()`；该入口在 inode data lock 下拒绝 append-only 状态上的 `O_APPEND` 置位和清位变化，并保留不相关 status bits |
+| T-31 | append-only inode 的 `fallocate(mode=0)` 通过定位写模拟后错误返回成功 | fallocate / write emulation | 中 | `O_APPEND` 忽略目标位置，只在当前 EOF 写入一个字节 | 原生 allocation 未实现前对 append-only inode 返回 `EPERM`；不在本 PR 扩展 KExt4 空间分配接口 |
 
 影响等级定义：
 
@@ -260,6 +271,8 @@ kfd resources / kvfs / device and pipe implementations
 - [ ] fd 表修改失败时不会留下半创建对象或错误 descriptor flags。
 - [ ] 涉及 offset/len 的路径检查负数、溢出和 0 长度语义。
 - [ ] FIEMAP flag 在 ABI 边界显式支持或按 `EBADR` 规则拒绝，输出 reserved 字段全部初始化。
+- [ ] GETFLAGS/SETFLAGS 的用户指针只在 syscall 层访问，SET 检查 writable mount 并传递当前
+  credential，未执行的变化不返回成功。
 - [ ] 跨 fd 复制路径检查源目标类型、阻塞语义和用户 offset 写回。
 - [ ] 元数据和 access 改动与 `kcred` 凭据模型保持同步。
 - [ ] 每个多步 pathname 操作只取得一次 credential snapshot，并传递给完整解析过程。

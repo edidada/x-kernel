@@ -53,10 +53,11 @@ pub use mount::{MntNamespace, Mount, MountFlags, MountIdmap, NamespaceClone, Pat
 pub use namei::{DelayedCall, LastType, ParentLookup, dentry_open, may_mknod};
 pub use node::{
     Dentry, DentryOperations, DeviceFileOps, DirContext, DirEntrySink, FiemapCapability,
-    GetattrQueryFlags, GetattrRequestMask, InodeAttributeOperations, InodeDirOperations,
-    InodeFiemapOperations, InodeLookupFlags, InodeOperations, InodeSymlinkOperations,
-    InodeUpdateTime, LockedDentry, MmapMapper, NodeFlags, RenameFlags, VfsInode, VfsInodeInit,
-    WeakVfsInode, cdev_add, cdev_del, empty_inode_operations, get_next_ino, inode_init_owner,
+    FileFlagsCapability, FileFlagsUpdate, GetattrQueryFlags, GetattrRequestMask,
+    InodeAttributeOperations, InodeDirOperations, InodeFiemapOperations, InodeFileFlagsOperations,
+    InodeLookupFlags, InodeOperations, InodeSymlinkOperations, InodeUpdateTime, LockedDentry,
+    MmapMapper, NodeFlags, RenameFlags, VfsInode, VfsInodeInit, WeakVfsInode, cdev_add, cdev_del,
+    empty_inode_operations, get_next_ino, inode_init_owner,
 };
 pub(crate) use node::{
     DentryKey, d_inode, d_is_dir, d_is_negative, d_is_symlink, d_really_is_positive,

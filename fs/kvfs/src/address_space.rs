@@ -9,8 +9,9 @@
 //! attachment point.
 
 use alloc::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Weak},
+    vec,
     vec::Vec,
 };
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -22,8 +23,8 @@ use pagecache::{
     Folio, PageCache, PageCacheKind, PageIndex, WritebackRangeOutcome, WritebackStats,
 };
 use vmobj::{
-    FileObjectId, MappingView, MappingViewId, MappingViewNotifier, MappingViewRange,
-    MappingViewSpec, ObjectInvalidateWork, VmObjectId, next_mapping_view_id,
+    FileObjectId, MappingView, MappingViewId, MappingViewKind, MappingViewNotifier,
+    MappingViewRange, MappingViewSpec, ObjectInvalidateWork, VmObjectId, next_mapping_view_id,
 };
 
 use crate::{Kiocb, Mutex, NodeFlags, NodeType, RwLock, VfsError, VfsResult, WeakVfsInode};
@@ -60,6 +61,11 @@ impl Drop for AddressSpaceViewRegistration {
 struct RegisteredView {
     view: MappingView,
     notifier: Option<Arc<dyn MappingViewNotifier>>,
+}
+
+#[derive(Default)]
+struct InvalidateState {
+    are_write_faults_blocked: bool,
 }
 
 /// Writeback range and mode for `AddressSpaceOperations::writepages`.
@@ -415,7 +421,7 @@ pub struct AddressSpace {
     /// Shared operation table corresponding to Linux `address_space::a_ops`.
     ops: &'static dyn AddressSpaceOperations,
     object_id: VmObjectId,
-    invalidate_lock: RwLock<()>,
+    invalidate_lock: RwLock<InvalidateState>,
     views: Mutex<BTreeMap<MappingViewId, RegisteredView>>,
     page_cache: Arc<PageCache>,
 }
@@ -433,7 +439,7 @@ impl AddressSpace {
             object_id: VmObjectId::File(FileObjectId::from_raw(
                 NEXT_ADDRESS_SPACE_ID.fetch_add(1, Ordering::Relaxed),
             )),
-            invalidate_lock: RwLock::new(()),
+            invalidate_lock: RwLock::new(InvalidateState::default()),
             views: Mutex::new(BTreeMap::new()),
             page_cache: PageCache::new(kind),
         })
@@ -465,6 +471,11 @@ impl AddressSpace {
 
     /// Registers a VMA view of this inode address space.
     pub fn register_view(self: &Arc<Self>, spec: MappingViewSpec) -> AddressSpaceViewGuard {
+        // The immutable transition's final write-side critical section must
+        // exclude new registrations after its last rmap snapshot. Callers may
+        // already hold an MmSpace lock here, so this follows the established
+        // MmSpace -> invalidate-lock order used by file faults.
+        let _invalidate_guard = self.invalidate_lock.read();
         let id = next_mapping_view_id();
         self.views.lock().insert(
             id,
@@ -533,10 +544,16 @@ impl AddressSpace {
         f: impl FnOnce(&mut Folio) -> VfsResult<R>,
     ) -> VfsResult<R> {
         let inode = self.inode().ok_or(VfsError::InvalidInput)?;
+        let invalidate_guard = self.invalidate_lock.read();
+        if invalidate_guard.are_write_faults_blocked {
+            return Err(VfsError::ResourceBusy);
+        }
+        if inode.flags().contains(NodeFlags::IMMUTABLE) {
+            return Err(VfsError::OperationNotPermitted);
+        }
         let pos = index
             .checked_mul(PAGE_SIZE_4K as u64)
             .ok_or(VfsError::InvalidInput)?;
-        let _invalidate_guard = self.invalidate_lock.read();
         self.with_folio(index, |folio| {
             let folio = folio.ok_or(VfsError::InvalidData)?;
             let file_len = inode.size();
@@ -668,6 +685,12 @@ impl AddressSpace {
     ) -> VfsResult<usize> {
         let inode = self.inode().ok_or(VfsError::InvalidInput)?;
         let _data_guard = inode.lock_data();
+        // Append-only is checked when a writable file or mapping is admitted;
+        // Linux does not retroactively reject I/O through an existing fd.
+        inode.check_not_immutable()?;
+        if iocb.file().flags().contains(crate::OpenFlags::APPEND) {
+            iocb.set_ki_pos(inode.size());
+        }
         let mut count = iter.count();
         self.generic_write_check_limits(iocb, &mut count)?;
         if count != 0 {
@@ -874,6 +897,87 @@ impl AddressSpace {
         }
     }
 
+    fn revoke_shared_mappings_sync(&self, revoked: &mut BTreeSet<MappingViewId>) -> VfsResult<()> {
+        let invalidations = {
+            let views = self.views.lock();
+            let mut invalidations = Vec::new();
+            for registered in views.values() {
+                if registered.view.kind() != MappingViewKind::Shared
+                    || revoked.contains(&registered.view.id())
+                {
+                    continue;
+                }
+                let hit = registered
+                    .view
+                    .page_hit(registered.view.object_start(), registered.view.object_len())
+                    .ok_or(VfsError::InvalidData)?;
+                let notifier = registered.notifier.clone().ok_or(VfsError::InvalidData)?;
+                let work = ObjectInvalidateWork::new(
+                    self.object_id,
+                    hit.object_start(),
+                    hit.object_len(),
+                    vec![hit.clone()],
+                );
+                invalidations.push((registered.view.id(), work, hit, notifier));
+            }
+            invalidations
+        };
+
+        for (id, work, hit, notifier) in invalidations {
+            notifier.invalidate_sync(&work, &hit)?;
+            revoked.insert(id);
+        }
+        Ok(())
+    }
+
+    fn has_unrevoked_shared_mapping(&self, revoked: &BTreeSet<MappingViewId>) -> bool {
+        self.views.lock().values().any(|registered| {
+            registered.view.kind() == MappingViewKind::Shared
+                && !revoked.contains(&registered.view.id())
+        })
+    }
+
+    /// Synchronizes shared writable mappings before changing inode behavior.
+    ///
+    /// The transition flag is published under the invalidate lock before the
+    /// lock is released for blocking `MmSpace` acquisition. Faults that already
+    /// own an `MmSpace` can then observe the flag and retry instead of waiting
+    /// for this writer, preserving the fault-side `MmSpace -> invalidate lock`
+    /// order. A final write-lock acquisition excludes those retries while `f`
+    /// writes back data, persists the new state, and publishes behavior flags.
+    pub(crate) fn with_writable_shared_mappings_revoked<R>(
+        &self,
+        f: impl FnOnce() -> VfsResult<R>,
+    ) -> VfsResult<R> {
+        {
+            let mut state = self.invalidate_lock.write();
+            if state.are_write_faults_blocked {
+                return Err(VfsError::ResourceBusy);
+            }
+            state.are_write_faults_blocked = true;
+        }
+
+        let mut revoked = BTreeSet::new();
+        loop {
+            if let Err(err) = self.revoke_shared_mappings_sync(&mut revoked) {
+                self.invalidate_lock.write().are_write_faults_blocked = false;
+                return Err(err);
+            }
+
+            // register_view() takes the read side of this lock. Rechecking the
+            // rmap set while holding the write side closes the snapshot-to-
+            // commit race with mmap, fork, and mremap registrations.
+            let mut state = self.invalidate_lock.write();
+            if self.has_unrevoked_shared_mapping(&revoked) {
+                drop(state);
+                continue;
+            }
+            let result = f();
+            state.are_write_faults_blocked = false;
+            return result;
+        }
+    }
+
     /// Drops cached pages during final inode teardown.
     ///
     /// Ordinary invalidation still requires dirty data to be written back
@@ -1062,6 +1166,7 @@ mod tests {
         vec,
         vec::Vec,
     };
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
     use ksync::Mutex;
     use pagecache::{Folio, PageCacheKind, PageIndex};
@@ -1097,6 +1202,67 @@ mod tests {
     struct RecordingNotifier {
         address_space: Weak<AddressSpace>,
         observed_sizes: Mutex<Vec<u64>>,
+    }
+
+    struct SyncRecordingNotifier {
+        address_space: Weak<AddressSpace>,
+        async_calls: AtomicUsize,
+        sync_calls: AtomicUsize,
+        spawned_sync_calls: Arc<AtomicUsize>,
+        spawned_view: Mutex<Option<AddressSpaceViewGuard>>,
+    }
+
+    struct SyncCounterNotifier {
+        sync_calls: Arc<AtomicUsize>,
+    }
+
+    impl MappingViewNotifier for SyncCounterNotifier {
+        fn invalidate(&self, _work: &ObjectInvalidateWork, _hit: &ObjectViewHit) {}
+
+        fn invalidate_sync(
+            &self,
+            _work: &ObjectInvalidateWork,
+            _hit: &ObjectViewHit,
+        ) -> KResult<()> {
+            self.sync_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    impl MappingViewNotifier for SyncRecordingNotifier {
+        fn invalidate(&self, _work: &ObjectInvalidateWork, _hit: &ObjectViewHit) {
+            self.async_calls.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn invalidate_sync(
+            &self,
+            _work: &ObjectInvalidateWork,
+            _hit: &ObjectViewHit,
+        ) -> KResult<()> {
+            let address_space = self
+                .address_space
+                .upgrade()
+                .expect("test address space remains live");
+            assert!(matches!(
+                address_space.page_mkwrite(0, |_| Ok(())),
+                Err(VfsError::ResourceBusy)
+            ));
+            if self.sync_calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                let spawned_view = address_space.register_view(MappingViewSpec {
+                    mm_id: 2,
+                    vma_start: 0xc000,
+                    vma_len: PAGE_SIZE_4K,
+                    object_start: 0,
+                    object_len: PAGE_SIZE_4K,
+                    kind: MappingViewKind::Shared,
+                    notifier: Some(Arc::new(SyncCounterNotifier {
+                        sync_calls: self.spawned_sync_calls.clone(),
+                    })),
+                });
+                *self.spawned_view.lock() = Some(spawned_view);
+            }
+            Ok(())
+        }
     }
 
     impl MappingViewNotifier for RecordingNotifier {
@@ -1200,6 +1366,88 @@ mod tests {
         );
 
         assert_ne!(first.object_id(), second.object_id());
+    }
+
+    #[def_test]
+    fn page_mkwrite_rechecks_immutable_but_not_retroactive_append_only() {
+        let inode = VfsInode::new_file_with_address_space_and_flags(
+            Arc::new(TruncateOps),
+            NodeFlags::ALWAYS_CACHE,
+            &TRUNCATE_OPERATIONS,
+            VfsInodeInit::new(
+                3,
+                PAGE_SIZE_4K as u64,
+                Umode::new(NodeType::RegularFile, NodePermission::default()),
+            ),
+        );
+        let mapping = inode.address_space();
+        mapping.with_folio_or_create(0, |_| Ok(())).unwrap();
+
+        inode
+            .publish_behavior_flags_after_backing_change(NodeFlags::APPEND_ONLY)
+            .unwrap();
+        assert_eq!(mapping.page_mkwrite(0, |_| Ok(())), Ok(()));
+
+        inode
+            .publish_behavior_flags_after_backing_change(NodeFlags::IMMUTABLE)
+            .unwrap();
+        assert_eq!(
+            mapping.page_mkwrite(0, |_| Ok(())),
+            Err(VfsError::OperationNotPermitted)
+        );
+    }
+
+    #[def_test]
+    fn immutable_transition_synchronously_revokes_only_shared_views_before_commit() {
+        let inode = VfsInode::new_file_with_address_space_and_flags(
+            Arc::new(TruncateOps),
+            NodeFlags::ALWAYS_CACHE,
+            &TRUNCATE_OPERATIONS,
+            VfsInodeInit::new(
+                4,
+                PAGE_SIZE_4K as u64,
+                Umode::new(NodeType::RegularFile, NodePermission::default()),
+            ),
+        );
+        let address_space = inode.address_space();
+        let notifier = Arc::new(SyncRecordingNotifier {
+            address_space: Arc::downgrade(&address_space),
+            async_calls: AtomicUsize::new(0),
+            sync_calls: AtomicUsize::new(0),
+            spawned_sync_calls: Arc::new(AtomicUsize::new(0)),
+            spawned_view: Mutex::new(None),
+        });
+        let shared_view = address_space.register_view(MappingViewSpec {
+            mm_id: 1,
+            vma_start: 0x4000,
+            vma_len: PAGE_SIZE_4K,
+            object_start: 0,
+            object_len: PAGE_SIZE_4K,
+            kind: MappingViewKind::Shared,
+            notifier: Some(notifier.clone()),
+        });
+        let private_view = address_space.register_view(MappingViewSpec {
+            mm_id: 1,
+            vma_start: 0x8000,
+            vma_len: PAGE_SIZE_4K,
+            object_start: 0,
+            object_len: PAGE_SIZE_4K,
+            kind: MappingViewKind::Private,
+            notifier: Some(notifier.clone()),
+        });
+
+        address_space
+            .with_writable_shared_mappings_revoked(|| {
+                assert_eq!(notifier.sync_calls.load(Ordering::Relaxed), 1);
+                assert_eq!(notifier.spawned_sync_calls.load(Ordering::Relaxed), 1);
+                assert_eq!(notifier.async_calls.load(Ordering::Relaxed), 0);
+                Ok(())
+            })
+            .expect("synchronous shared revocation succeeds");
+
+        assert_eq!(notifier.sync_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(notifier.spawned_sync_calls.load(Ordering::Relaxed), 1);
+        drop((shared_view, private_view));
     }
 
     /// Verifies that final address-space teardown discards cached folios

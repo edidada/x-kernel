@@ -5430,6 +5430,7 @@ dependencies = [
 name = "vmobj"
 version = "0.2.0-dev"
 dependencies = [
+ "kerrno",
  "memaddr",
  "unittest",
 ]

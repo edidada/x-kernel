@@ -17,7 +17,8 @@ credential snapshot，`kvfs` 接收显式 `&Cred` 并完成路径遍历和通用
 - `src/open_flags.rs`：原始 `O_*` 参数的规范化与 open intent。
 - `src/namei.rs`：路径遍历和 open 流程。
 - `src/permission.rs`：owner/group/other DAC 与 open access 映射。
-- `src/node/`：dentry、inode、inode identity 状态机及文件系统 operation traits。
+- `src/node/`：dentry、inode、VFS-wide inode identity 状态机、运行时 inode behavior flags 及
+  文件系统 operation traits。
 - `src/address_space.rs`：inode-owned `AddressSpace`、其私有 `PageCache` 实现，以及
   writeback 与 truncate/invalidation 边界。
 - `src/fiemap.rs`：与用户 ABI 解耦的 inode FIEMAP 请求状态、标志和安全输出接口。
@@ -93,6 +94,16 @@ FIEMAP 的原始 C 布局和用户指针留在 POSIX 层。KVFS 以可选
 `InodeOperations::fiemap_operations()` 表达 inode capability，并把类型化 flags、容量、
 计数器和借用的安全 writer 收敛到 `FiemapExtentInfo`。文件系统后端只调用
 `fill_next_extent()`，不接触或保存用户地址。
+
+`FS_IOC_GETFLAGS/FS_IOC_SETFLAGS` 的用户指针和 ioctl 编号同样留在 POSIX 层。
+KVFS 通过可选 `InodeOperations::file_flags_operations()` 表达能力；在 namespace、data
+exclusive lock 组成的同一个事务中，KVFS 先执行 owner-or-privileged 与通用
+immutable-capability 检查，再调用文件系统 `prepare_file_flags()` 规范化 kernel-owned
+`u32`，最后调用 `set_file_flags()` 持久化并发布 resident inode 的
+`IMMUTABLE/APPEND_ONLY` 行为标志。文件系统 callback 不接收 credential，也不需要锁外预检或
+锁内重复校验。只有普通文件从非 immutable 进入 immutable 时，KVFS 才建立 address-space
+转换屏障并同步撤销 shared mappings；no-op、清除 immutable 和 append-only 切换不触发全映射
+撤销。
 
 `OpenParams` 对应 Linux namei 中规范化后的完整 open 参数。其字段保持私有，创建
 意图、exclusive-create、lookup 行为和 mount 写入需求只能通过窄接口读取。
@@ -411,6 +422,25 @@ regular file、directory 和 socket，并对 sticky directory 写入执行 owner
 拒绝 set/remove 并返回 `EPERM`，读取不受影响。Set/remove 在 inode data lock 内调用后端，
 具体文件系统必须在自己的事务或锁内原子完成四种 `CREATE`/`REPLACE` 组合的存在性判断。
 
+### Inode file flags
+
+`NodeFlags::IMMUTABLE/APPEND_ONLY` 是运行时行为状态，不只是 iget 时的只读快照。
+`FileFlagsCapability::set()` 在文件系统成功持久化后，以原子更新替换这两个位并保留
+`NON_CACHEABLE` 等其它 VFS flags。通用 VFS 在进入后端前执行以下策略：immutable inode
+拒绝 write open、已有 fd 写入、truncate、显式 metadata 修改、xattr 和 namespace mutation；
+append-only 普通文件的新 write open 必须带 `O_APPEND`，并禁止通过可写 file description
+建立新的 shared mmap、truncate 以及显式 metadata/xattr 修改；设置标志前已经建立的 fd 和
+mapping 不追溯应用 append-only，实际 write/page fault 只重新检查 immutable。append-only 目录
+允许增加新名称，但禁止删除、替换和改名移出。`times == NULL` 或两项均为 `UTIME_NOW` 的 touch
+更新只受 immutable 限制；单边 `UTIME_NOW` 仍按显式时间更新处理。
+`VfsFile::set_status_flags()` 是修改 open-file status flags 的统一入口；append-only inode 上
+任何 `O_APPEND` 状态变化都返回 `EPERM`，而 `O_NONBLOCK` 等不相关状态仍可修改。
+普通文件仅在进入 immutable 时发布 address-space transition barrier：已经取得 `MmSpace` 的
+共享写 fault 在读取 invalidate state 后返回 retry，setter 在不持有 invalidate write lock 时
+逐个等待目标 `MmSpace` 完成 shared PTE/TLB 撤销。最终重新取得 invalidate write lock、确认
+没有 mmap/fork/mremap 新注册的未撤销 shared view 后，才允许后端 writeback、flags 持久化和
+resident behavior publication；整个提交阶段继续阻止新 writable fault 和 view registration。
+
 ### 新 inode 所有者
 
 创建回调接收同一个 `&Cred`。后端通过 `inode_init_owner()` 得到初始 mode、UID 和 GID：
@@ -571,6 +601,10 @@ FIEMAP writer 只在一次同步调用中借用，不由 VFS 或文件系统保�
 对应 inode 的 shared lock 覆盖整个回调，避免 `SYNC` 写回后、extent 遍历前插入 mapping
 修改；buffered write、shared write fault 和 truncate 都从 exclusive 侧更新 mapping 状态，
 同时不扩大成文件系统挂载级写阻塞。
+inode behavior flags 存在 `AtomicU32` 中；file-flags set 的后端 mutation 与 flags 发布由 inode
+namespace、data exclusive locks 共同覆盖；普通文件还同时持有 address-space invalidate exclusive lock
+并撤销现有映射。普通 buffered write 在 data lock 内、shared write fault 在 invalidate shared
+lock 内再次读取 flags，因此与 set 形成确定顺序；目录 mutation 已由 namespace lock 串行化。
 
 superblock 默认 dentry operations 使用静态引用，对应 Linux `s_d_op`；dentry 只保存继承的
 table identity，不把 operation object 变成 dentry-private runtime state。
@@ -629,6 +663,8 @@ child cache 仍使用 mutex。RCU、seqcount lookup 和 lock-free dcache travers
 - ABI carrier 与内核语义类型分离，转换尽量靠近边界。
 - FIEMAP 使用 `FiemapExtentInfo` 和安全 writer 连接 ABI 与 inode operation，避免把用户
   指针下传，也避免按用户声明容量在 VFS 中分配临时 extent 数组。
+- inode file-flags capability 只传递 kernel-owned flags 和显式 credential；ABI 指针、
+  filesystem-specific flags mask 与持久化分别归 POSIX、bridge 和后端所有。
 - 不提供通用 raw-flags getter；只有写入 ABI 或底层存储时调用 `bits()`。
 - 不同 flags 家族不共享整数别名，使错误组合在编译期失败。
 - current task 定位只存在于 `kprocess`；`kvfs` 对所有安全相关操作显式接收 `&Cred`。

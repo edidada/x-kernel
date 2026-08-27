@@ -4,10 +4,11 @@
 
 use alloc::sync::Arc;
 
+use kerrno::{KError, KResult};
 use khal::paging::PageSize;
 use memaddr::VirtAddr;
 use memspace::InvalidateHandle;
-use vmobj::{MappingViewNotifier, ObjectInvalidateWork, ObjectViewHit};
+use vmobj::{MappingViewNotifier, ObjectInvalidateRequest, ObjectInvalidateWork, ObjectViewHit};
 
 /// Reverse-mapping notifier for one file-backed VMA view.
 pub struct MmSpaceInvalidate {
@@ -18,23 +19,35 @@ impl MmSpaceInvalidate {
     pub fn new(handle: InvalidateHandle) -> Arc<Self> {
         Arc::new(Self { handle })
     }
+
+    fn request(
+        work: &ObjectInvalidateWork,
+        hit: &ObjectViewHit,
+    ) -> KResult<Option<ObjectInvalidateRequest>> {
+        let Some(aligned_hit) = hit.aligned_object_suffix(PageSize::Size4K as u64) else {
+            return Ok(None);
+        };
+        work.request_for_subhit(hit, &aligned_hit)
+            .map(Some)
+            .ok_or(KError::InvalidData)
+    }
 }
 
 impl MappingViewNotifier for MmSpaceInvalidate {
     fn invalidate(&self, work: &ObjectInvalidateWork, hit: &ObjectViewHit) {
-        let Some(aligned_hit) = hit.aligned_object_suffix(PageSize::Size4K as u64) else {
-            return;
+        let request = match Self::request(work, hit) {
+            Ok(Some(request)) => request,
+            Ok(None) => return,
+            Err(err) => {
+                warn!(
+                    "Ignored file-backed hit {} not carried by its invalidate work: {err}",
+                    hit.view().id().raw()
+                );
+                return;
+            }
         };
-
-        let unmap_start = VirtAddr::from_usize(aligned_hit.vma_start() as usize);
-        let unmap_len = aligned_hit.vma_len();
-        let Some(request) = work.request_for_subhit(hit, &aligned_hit) else {
-            warn!(
-                "Ignored file-backed hit {} not carried by its invalidate work",
-                hit.view().id().raw()
-            );
-            return;
-        };
+        let unmap_start = VirtAddr::from_usize(request.hit().vma_start() as usize);
+        let unmap_len = request.hit().vma_len();
         match self.handle.submit(request) {
             Ok(_) => {}
             Err(err) => {
@@ -46,5 +59,12 @@ impl MappingViewNotifier for MmSpaceInvalidate {
                 );
             }
         }
+    }
+
+    fn invalidate_sync(&self, work: &ObjectInvalidateWork, hit: &ObjectViewHit) -> KResult<()> {
+        let Some(request) = Self::request(work, hit)? else {
+            return Ok(());
+        };
+        self.handle.apply_sync(&request)
     }
 }

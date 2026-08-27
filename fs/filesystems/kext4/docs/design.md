@@ -424,6 +424,23 @@ inode 字段保留 32 字节；仅当文件系统声明 `RO_COMPAT_EXTRA_ISIZE` 
 仍可在当前布局内完成的更新不会被误报为 `ENOSPC`。
 `Ext4Inode` 从磁盘 `i_flags` 暴露 immutable 和 append-only 状态；kext4 KVFS 层在 iget 时把它们映射
 为 KVFS `NodeFlags`，使通用 xattr 权限层在进入 namespace 或 KExt4 mutation 前返回 `EPERM`。
+运行时切换这两个行为位由 `set_inode_behavior_flags()` 完成：它从当前 `i_flags` 只替换
+`EXT4_IMMUTABLE_FL/EXT4_APPEND_FL`，保留 extents、index 等其它位，并在一个事务内日志化 inode
+table block 的 flags 与 ctime。该 metadata-only 修改不改变 mtime；成功 publish 后同一
+`Ext4Inode` component 立即反映新 flags，bridge 不重新按 inode number 加载。
+与 Linux ext4 一致，相同值的 SETFLAGS 仍进入 metadata transaction 并刷新 ctime，但不会触发
+immutable mapping 撤销或额外 writeback。
+GETFLAGS 先应用 ext4 user-visible mask；普通文件再隐藏只对目录有意义的
+`FS_PROJINHERIT_FL`，与 Linux `ext4_fileattr_get()` 的 inode-type policy 保持一致。
+SETFLAGS 保持 Linux `ext4_fileattr_set()` 的三层筛选：先拒绝 user-visible mask 外的位，再静默
+丢弃 visible-but-read-only 位，最后按 inode type 检查 modifiable flags。KExt4 当前只实现
+immutable/append-only 的实际切换；其它通过上述筛选后且相对磁盘旧状态发生变化的 modifiable
+位返回 `EOPNOTSUPP`，未变化的 extents、index、encrypt、verity、inline-data 等磁盘状态由
+`set_inode_behavior_flags()` 原样保留。bridge 的 prepare/apply callback 位于 KVFS 已持有的同一个
+inode transaction 中，不再接收 credential 或重复执行锁外/锁内 policy。普通文件仅在
+non-immutable -> immutable 转换时执行 writeback；进入 KExt4 前，KVFS 已同步撤销所有 shared
+writable PTE 并保持 fault/register barrier，直到 journal 持久化和 resident behavior publication
+结束。
 
 除 xattr 自身更新和 zero-link eviction 外，所有普通 inode dirty 入口都会先尝试把现有 inode
 的 `i_extra_isize` 扩到 superblock 的运行时 effective `want_extra_isize`；这覆盖 regular-file

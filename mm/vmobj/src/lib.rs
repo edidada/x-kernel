@@ -22,6 +22,7 @@ extern crate alloc;
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use kerrno::{KError, KResult};
 use memaddr::PAGE_SIZE_4K;
 
 /// Stable identity for one file-backed VM object family.
@@ -539,6 +540,16 @@ impl ObjectInvalidateRequest {
 pub trait MappingViewNotifier: Send + Sync {
     /// Applies object-driven invalidate work to the registered VMA view.
     fn invalidate(&self, work: &ObjectInvalidateWork, hit: &ObjectViewHit);
+
+    /// Applies invalidation synchronously to the registered VMA view.
+    ///
+    /// Implementations must return only after the target page-table entries
+    /// and associated TLB state have been revoked. Object owners use this
+    /// stronger contract before publishing backing-state transitions that
+    /// would otherwise be bypassed by a stale writable mapping.
+    fn invalidate_sync(&self, _work: &ObjectInvalidateWork, _hit: &ObjectViewHit) -> KResult<()> {
+        Err(KError::OperationNotSupported)
+    }
 }
 
 #[cfg(unittest)]

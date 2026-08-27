@@ -26,6 +26,8 @@
    `ObjectInvalidateWork`，不能各自定义第二套 invalidate 坐标语言。
 8. `ObjectInvalidateWork.object()` 是 request 派生的唯一 object identity 来源；
    notifier 不得保存另一份 object id 后与 hit 重新组合。
+9. `invalidate_sync()` 只有在对应 request 的页表修改和 TLB finalization 完成后才能成功；
+   不允许把异步 enqueue 或 try-lock 失败伪装成同步完成。
 
 ## 审计清单
 
@@ -33,6 +35,7 @@
 - object event 转换成 VMA hit 时是否使用 `MappingView::page_hit()` 或
   `ObjectViewHit::try_new()`。
 - notifier 是否只投递 `ObjectInvalidateRequest`，而不是携带自定义 range。
+- 同步 notifier 是否复用 work 派生 request、传播错误，并只在 PTE/TLB 撤销完成后返回成功。
 - 手工构造 `ObjectViewHit::new()` 的调用点是否已经证明 hit 完全落在 view 内。
 - object-driven invalidate 是否只通过 `ObjectInvalidateRequest` 进入
   `MmSpace`，而不是保留 file/page-index 风格的旁路入口。

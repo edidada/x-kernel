@@ -602,6 +602,17 @@ pub struct Ext4Inode {
 }
 
 impl Ext4Inode {
+    /// Linux/ext4 append-only inode flag.
+    pub const APPEND_FLAG: u32 = disk_inode::EXT4_APPEND_FL;
+    /// Linux/ext4 immutable inode flag.
+    pub const IMMUTABLE_FLAG: u32 = disk_inode::EXT4_IMMUTABLE_FL;
+    /// Linux/ext4 project-inherit inode flag.
+    pub(crate) const PROJECT_INHERIT_FLAG: u32 = disk_inode::EXT4_PROJINHERIT_FL;
+    /// Ext4 inode flags accepted for modification through Linux `FS_IOC_SETFLAGS`.
+    pub const USER_MODIFIABLE_FLAGS: u32 = disk_inode::EXT4_USER_MODIFIABLE_FL;
+    /// Ext4 inode flags exposed through Linux `FS_IOC_GETFLAGS`.
+    pub const USER_VISIBLE_FLAGS: u32 = disk_inode::EXT4_USER_VISIBLE_FL;
+
     fn new(number: InodeNumber, metadata: Ext4InodeMetadata) -> Self {
         let visible_size = metadata.disk_size;
         Self {
@@ -848,6 +859,14 @@ impl Ext4Inode {
     /// Returns the raw ext4 inode flags.
     pub fn flags(&self) -> u32 {
         self.with_metadata(|metadata| metadata.flags)
+    }
+
+    /// Returns the raw inode flags selected by ext4's user-visible mask.
+    ///
+    /// The KVFS bridge applies inode-type policy before exposing these flags
+    /// through `FS_IOC_GETFLAGS`.
+    pub fn user_visible_flags(&self) -> u32 {
+        self.flags() & Self::USER_VISIBLE_FLAGS
     }
 
     /// Returns whether the inode carries the ext4 immutable flag.
@@ -1758,6 +1777,36 @@ impl Ext4SbInfo {
         self.complete_metadata_mutation(handle, result)
     }
 
+    /// Updates the immutable and append-only inode behavior flags.
+    ///
+    /// Other on-disk inode flags are preserved. Callers must perform the
+    /// Linux file-attribute authorization and supported-bit checks before
+    /// entering this storage mutation.
+    pub fn set_inode_behavior_flags(
+        &mut self,
+        inode: &Ext4Inode,
+        is_immutable: bool,
+        is_append_only: bool,
+        timestamp: Ext4Timestamp,
+    ) -> Ext4Result<()> {
+        let old_flags = inode.flags();
+        let mut flags = old_flags & !disk_inode::EXT4_BEHAVIOR_FL;
+        if is_immutable {
+            flags |= disk_inode::EXT4_IMMUTABLE_FL;
+        }
+        if is_append_only {
+            flags |= disk_inode::EXT4_APPEND_FL;
+        }
+        let credits = JournalCredits::new(2);
+        let journal = self.metadata_journal_for_mutation(
+            credits,
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )?;
+        let mut handle = journal.begin(credits)?;
+        let result = self.update_inode_flags_ctime_metadata(inode, flags, timestamp, &mut handle);
+        self.complete_metadata_mutation(handle, result)
+    }
+
     fn update_inode_metadata_in_transaction(
         &mut self,
         inode: &Ext4Inode,
@@ -1814,6 +1863,31 @@ impl Ext4SbInfo {
             put_u32(inode_bytes, 0x20, flags)?;
             update_inode_ctime_mtime_bytes(inode_bytes, timestamp)
         })
+    }
+
+    fn update_inode_flags_ctime_metadata(
+        &self,
+        inode: &Ext4Inode,
+        flags: u32,
+        timestamp: Ext4Timestamp,
+        handle: &mut JournalHandle<'_>,
+    ) -> Ext4Result<()> {
+        let inode_table_block = self.inode_table_entry_block(inode.number())?;
+        let mut inode_table_bytes = self
+            .read_metadata_block(inode_table_block)?
+            .as_ref()
+            .to_vec();
+        let updated_inode = self.update_referenced_inode_table_entry(
+            &mut inode_table_bytes,
+            inode,
+            |inode_bytes| {
+                put_u32(inode_bytes, 0x20, flags)?;
+                update_inode_ctime_bytes(inode_bytes, timestamp)
+            },
+        )?;
+        let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
+        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
+        self.publish_inode_metadata(inode, updated_inode)
     }
 
     pub(crate) fn update_inode_links_count_metadata(

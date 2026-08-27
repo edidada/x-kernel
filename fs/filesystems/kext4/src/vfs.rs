@@ -11,13 +11,14 @@ use kerrno::LinuxError;
 use ktime_types::SystemTime;
 use kvfs::{
     AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FMode, FiemapExtentFlags,
-    FiemapExtentInfo, FiemapFlags, FileDirOperations, FileOperations, InodeAttributeOperations,
-    InodeDirOperations, InodeFiemapOperations, InodeOperations, InodeSymlinkOperations, Kiocb,
-    LockedDentry, Metadata, MetadataUpdate, NodePermission, NodeType, PageMkwriteRequest,
-    ReadaheadControl, RenameFlags, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations,
-    Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult, WriteBeginRequest,
-    WriteEndRequest, WritebackControl, WritebackRangeOutcome, XattrName, XattrNameRef,
-    XattrNameSink, XattrSetFlags, default_evict_inode, inode_init_owner,
+    FiemapExtentInfo, FiemapFlags, FileDirOperations, FileFlagsUpdate, FileOperations,
+    InodeAttributeOperations, InodeDirOperations, InodeFiemapOperations, InodeFileFlagsOperations,
+    InodeOperations, InodeSymlinkOperations, Kiocb, LockedDentry, Metadata, MetadataUpdate,
+    NodePermission, NodeType, PageMkwriteRequest, ReadaheadControl, RenameFlags, StatFs,
+    SuperBlock, SuperBlockFlags, SuperBlockOperations, Umode, VfsError, VfsFile, VfsInode,
+    VfsInodeInit, VfsResult, WriteBeginRequest, WriteEndRequest, WritebackControl,
+    WritebackRangeOutcome, XattrName, XattrNameRef, XattrNameSink, XattrSetFlags,
+    default_evict_inode, inode_init_owner,
 };
 
 use crate::{
@@ -38,6 +39,46 @@ const MAX_WRITEBACK_BYTES: usize = 128 * 1024;
 const XATTR_USER_PREFIX: &[u8] = b"user.";
 const XATTR_TRUSTED_PREFIX: &[u8] = b"trusted.";
 const XATTR_SECURITY_PREFIX: &[u8] = b"security.";
+const SUPPORTED_FILE_FLAGS: u32 = Ext4Inode::IMMUTABLE_FLAG | Ext4Inode::APPEND_FLAG;
+/// Modifiable ext4 flags that Linux rejects on regular files.
+const REGULAR_FILE_DISALLOWED_FLAGS: u32 =
+    0x0001_0000 | 0x0002_0000 | Ext4Inode::PROJECT_INHERIT_FLAG | 0x4000_0000;
+
+fn mask_file_flags_for_inode_kind(kind: InodeKind, flags: u32) -> u32 {
+    let mut flags = flags & Ext4Inode::USER_VISIBLE_FLAGS;
+    // Match Linux ext4_fileattr_get(): project inheritance is meaningful only
+    // for directories and must not leak through regular-file GETFLAGS.
+    if kind == InodeKind::RegularFile {
+        flags &= !Ext4Inode::PROJECT_INHERIT_FLAG;
+    }
+    flags
+}
+
+fn user_visible_file_flags(inode: &Ext4Inode) -> u32 {
+    mask_file_flags_for_inode_kind(inode.kind(), inode.user_visible_flags())
+}
+
+fn prepare_file_flags_update(kind: InodeKind, old_flags: u32, flags: u32) -> VfsResult<u32> {
+    if flags & !Ext4Inode::USER_VISIBLE_FLAGS != 0 {
+        return Err(VfsError::OperationNotSupported);
+    }
+    // Linux ext4 silently discards visible read-only state supplied through
+    // SETFLAGS, then applies the inode-type mask to modifiable bits.
+    let flags = flags & Ext4Inode::USER_MODIFIABLE_FLAGS;
+    let type_masked_flags = match kind {
+        InodeKind::RegularFile => flags & !REGULAR_FILE_DISALLOWED_FLAGS,
+        InodeKind::Directory => flags,
+        _ => return Err(VfsError::OperationNotSupported),
+    };
+    if type_masked_flags != flags {
+        return Err(VfsError::OperationNotSupported);
+    }
+    let changed_flags = flags ^ (old_flags & Ext4Inode::USER_MODIFIABLE_FLAGS);
+    if changed_flags & !SUPPORTED_FILE_FLAGS != 0 {
+        return Err(VfsError::OperationNotSupported);
+    }
+    Ok(flags)
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Ext4MountOptions {
@@ -925,6 +966,10 @@ impl InodeOperations for Ext4Inode {
         matches!(self.kind(), InodeKind::RegularFile | InodeKind::Directory).then_some(self)
     }
 
+    fn file_flags_operations(&self) -> Option<&dyn InodeFileFlagsOperations> {
+        matches!(self.kind(), InodeKind::RegularFile | InodeKind::Directory).then_some(self)
+    }
+
     fn getattr(
         &self,
         _idmap: &kvfs::MountIdmap,
@@ -1037,6 +1082,41 @@ impl InodeOperations for Ext4Inode {
         sync::write_lock(ext4)
             .remove_xattr(self, namespace, suffix, current_ext4_timestamp(inode))
             .map_err(into_xattr_vfs_err)
+    }
+}
+
+impl InodeFileFlagsOperations for Ext4Inode {
+    fn get_file_flags(&self, _inode: &VfsInode) -> VfsResult<u32> {
+        Ok(user_visible_file_flags(self))
+    }
+
+    fn prepare_file_flags(&self, _inode: &VfsInode, flags: u32) -> VfsResult<FileFlagsUpdate> {
+        prepare_file_flags_update(self.kind(), user_visible_file_flags(self), flags)
+            .map(FileFlagsUpdate::new)
+    }
+
+    fn set_file_flags(&self, inode: &VfsInode, update: FileFlagsUpdate) -> VfsResult<()> {
+        let flags = update.flags();
+        let old_flags = user_visible_file_flags(self) & Ext4Inode::USER_MODIFIABLE_FLAGS;
+        let changed_flags = flags ^ old_flags;
+        debug_assert_eq!(changed_flags & !SUPPORTED_FILE_FLAGS, 0);
+        let is_immutable = flags & Ext4Inode::IMMUTABLE_FLAG != 0;
+        let is_append_only = flags & Ext4Inode::APPEND_FLAG != 0;
+        if self.kind() == InodeKind::RegularFile && is_immutable && !self.is_immutable() {
+            inode.sync(false)?;
+        }
+
+        let super_block = ext4_super_block(inode)?;
+        let ext4 = ext4_private(&super_block)?;
+        sync::write_lock(ext4)
+            .set_inode_behavior_flags(
+                self,
+                is_immutable,
+                is_append_only,
+                current_ext4_timestamp(inode),
+            )
+            .map_err(into_vfs_err)?;
+        Ok(())
     }
 }
 
@@ -1641,12 +1721,13 @@ mod tests {
     use unittest::def_test;
 
     use super::{
-        Ext4MountOptions, ExtentWalkQuery, applied_metadata_update, parse_xattr_name,
-        supports_rename_flags, walk_file_extents, xattr_set_mode,
+        Ext4MountOptions, ExtentWalkQuery, applied_metadata_update, mask_file_flags_for_inode_kind,
+        parse_xattr_name, prepare_file_flags_update, supports_rename_flags, walk_file_extents,
+        xattr_set_mode,
     };
     use crate::{
-        BlockCount, BlockMapping, BlockMappingFlags, Ext4InodeStat, Ext4Timestamp,
-        Ext4XattrNamespace, Ext4XattrSetMode, PhysicalBlock, superblock::Ext4StatFsMode,
+        BlockCount, BlockMapping, BlockMappingFlags, Ext4Inode, Ext4InodeStat, Ext4Timestamp,
+        Ext4XattrNamespace, Ext4XattrSetMode, InodeKind, PhysicalBlock, superblock::Ext4StatFsMode,
     };
 
     #[def_test]
@@ -1683,6 +1764,53 @@ mod tests {
         assert_eq!(applied.atime, Some(applied_system_time));
         assert_eq!(applied.mtime, Some(applied_system_time));
         assert_eq!(applied.ctime, Some(applied_system_time));
+    }
+
+    #[def_test]
+    fn file_flag_updates_ignore_read_only_visible_bits_and_preserve_unchanged_modifiable_bits() {
+        const EXT4_EXTENTS_FL: u32 = 0x0008_0000;
+        const EXT4_INDEX_FL: u32 = 0x0000_1000;
+        let old_flags = EXT4_EXTENTS_FL | EXT4_INDEX_FL;
+        let requested_flags = EXT4_EXTENTS_FL | crate::Ext4Inode::IMMUTABLE_FLAG;
+
+        assert_eq!(
+            prepare_file_flags_update(InodeKind::Directory, old_flags, requested_flags),
+            Ok(requested_flags)
+        );
+        assert!(matches!(
+            prepare_file_flags_update(InodeKind::Directory, old_flags, 0),
+            Err(err) if LinuxError::from(err) == LinuxError::EOPNOTSUPP
+        ));
+        assert!(matches!(
+            prepare_file_flags_update(InodeKind::Directory, old_flags, u32::MAX),
+            Err(err) if LinuxError::from(err) == LinuxError::EOPNOTSUPP
+        ));
+    }
+
+    #[def_test]
+    fn regular_file_flag_updates_reject_directory_only_modifiable_bits() {
+        assert!(matches!(
+            prepare_file_flags_update(
+                InodeKind::RegularFile,
+                0,
+                Ext4Inode::PROJECT_INHERIT_FLAG,
+            ),
+            Err(err) if LinuxError::from(err) == LinuxError::EOPNOTSUPP
+        ));
+    }
+
+    #[def_test]
+    fn regular_file_flags_hide_project_inherit() {
+        let flags = Ext4Inode::PROJECT_INHERIT_FLAG | Ext4Inode::IMMUTABLE_FLAG;
+
+        assert_eq!(
+            mask_file_flags_for_inode_kind(InodeKind::RegularFile, flags),
+            Ext4Inode::IMMUTABLE_FLAG
+        );
+        assert_eq!(
+            mask_file_flags_for_inode_kind(InodeKind::Directory, flags),
+            flags
+        );
     }
 
     #[def_test]

@@ -31,12 +31,18 @@ pub(crate) const S_IFSOCK: u16 = 0xc000;
 
 pub(crate) const EXT4_IMMUTABLE_FL: u32 = 0x0000_0010;
 pub(crate) const EXT4_APPEND_FL: u32 = 0x0000_0020;
+pub(crate) const EXT4_BEHAVIOR_FL: u32 = EXT4_IMMUTABLE_FL | EXT4_APPEND_FL;
 pub(crate) const EXT4_ENCRYPT_FL: u32 = 0x0000_0800;
 pub(crate) const EXT4_INDEX_FL: u32 = 0x0000_1000;
 pub(crate) const EXT4_HUGE_FILE_FL: u32 = 0x0004_0000;
 pub(crate) const EXT4_EXTENTS_FL: u32 = 0x0008_0000;
 pub(crate) const EXT4_INLINE_DATA_FL: u32 = 0x1000_0000;
+pub(crate) const EXT4_PROJINHERIT_FL: u32 = 0x2000_0000;
 pub(crate) const EXT4_CASEFOLD_FL: u32 = 0x4000_0000;
+/// Flags accepted from userspace by Linux ext4 SETFLAGS before inode-type masking.
+pub(crate) const EXT4_USER_MODIFIABLE_FL: u32 = 0x624b_c0ff;
+/// Flags exposed by Linux ext4 through `FS_IOC_GETFLAGS`.
+pub(crate) const EXT4_USER_VISIBLE_FL: u32 = 0x725b_dfff;
 #[cfg(test)]
 pub(crate) const EXT4_EA_INODE_FL: u32 = 0x0020_0000;
 

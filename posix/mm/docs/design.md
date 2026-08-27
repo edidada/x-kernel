@@ -100,7 +100,9 @@ sys_mmap(file-backed)
 
 这样 syscall adapter 只表达 Linux ABI，file-backed first-fault policy、
 EOF 处理、private file COW source 和 shared mapping 约束留在
-`mm/filemap`。
+`mm/filemap`。共享文件映射在创建 VMA 前检查 append-only policy：只要 fd 的
+file mode 可写就返回 `EACCES`，即使当前 protection 只读，避免之后通过
+`mprotect(PROT_WRITE)` 绕过限制。
 
 ### memfd_create
 

@@ -18,7 +18,9 @@ use iov_iter::{IovSink, IovSource, iov_iter_dest, iov_iter_source};
 use kerrno::{KError, KResult, LinuxError};
 use kio::prelude::*;
 use kpoll::IoEvents;
-use kvfs::{FMode, Filename, LookupFlags, LookupIntent, OpenFlags, VfsFile, pipe::PipeObject};
+use kvfs::{
+    FMode, Filename, LookupFlags, LookupIntent, NodeFlags, OpenFlags, VfsFile, pipe::PipeObject,
+};
 use linux_raw_sys::general::__kernel_off_t;
 use linux_sysno::Sysno;
 use osvm::{VirtPtr, VmBytes, VmBytesMut};
@@ -284,6 +286,13 @@ pub fn sys_fallocate(
 
     let f = kprocess::current_resources().get_file(fd)?;
     f.verify_mode(FMode::WRITE)?;
+    let inode_flags = f.inode().flags();
+    // The current syscall implementation emulates allocation with writes.
+    // Reject append-only files instead of reporting success with the wrong
+    // length; native append-only preallocation is a separate filesystem feature.
+    if inode_flags.intersects(NodeFlags::IMMUTABLE | NodeFlags::APPEND_ONLY) {
+        return Err(KError::OperationNotPermitted);
+    }
 
     let start = offset as u64;
     let len_u = len as u64;

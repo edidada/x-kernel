@@ -45,7 +45,7 @@ posix/fs/
 │   ├── xattr.rs        # set/get/list/remove xattr syscall families
 │   ├── mount.rs        # mount/umount2
 │   ├── stat.rs         # stat/fstatat/statx/access/statfs
-│   ├── ioctl.rs        # ioctl dispatch、FIONBIO 与 FIEMAP ABI handling
+│   ├── ioctl.rs        # ioctl dispatch、FIONBIO、FIEMAP 与 inode flags ABI handling
 │   └── sync.rs         # sync/syncfs
 └── docs/
     ├── design.md
@@ -92,7 +92,7 @@ core/ksyscall
 | `xattr` | 实现 pathname、no-follow 和 fd 三种目标形式的 set/get/list/remove xattr，复制有界输入名称和值，并用单个有界 writer 处理 list size query/`ERANGE` |
 | `mount` | 把 Linux mount flags 映射到 `kvfs::MountFlags`，按注册的 `FileSystemType` 查找实现，并处理非递归 bind 与 remount |
 | `stat` | 转换 VFS metadata、access 检查和 statfs 信息 |
-| `ioctl` | 处理 `FIONBIO`、inode FIEMAP，并把其它命令转交 `FileLike::ioctl`；未识别命令返回 `ENOTTY`，仅 `debug!` 记录 |
+| `ioctl` | 处理 `FIONBIO`、inode FIEMAP、GETFLAGS/SETFLAGS，并把其它命令转交 `FileLike::ioctl`；未识别命令返回 `ENOTTY`，仅 `debug!` 记录 |
 | `sync` | 将同步请求转发到文件系统或打开对象所在文件系统 |
 
 ## 调用约束 / 执行上下文
@@ -279,9 +279,11 @@ final lookup。syscall 复制并校验 ABI 参数后调用对应的
 
 1. 校验 `offset`、`len` 非负并检查 `offset + len` 溢出。
 2. 只接受当前实现支持的模式组合。
-3. 普通预分配和 `UNSHARE_RANGE` 通过必要时写入最后一个零字节推进 EOF。
-4. `PUNCH_HOLE` 和 `ZERO_RANGE` 用分块写零模拟。
-5. `COLLAPSE_RANGE`、`INSERT_RANGE` 委托 `File` 的范围操作。
+3. 当前实现仍用数据写入模拟 allocation/range 操作，因此对 append-only inode 保守返回
+   `EPERM`，不伪装成 Linux 的原生 space-preallocation 成功；原生预分配留给独立功能实现。
+4. 普通预分配和 `UNSHARE_RANGE` 通过必要时写入最后一个零字节推进 EOF。
+5. `PUNCH_HOLE` 和 `ZERO_RANGE` 用分块写零模拟。
+6. `COLLAPSE_RANGE`、`INSERT_RANGE` 委托 `File` 的范围操作。
 
 ### `FS_IOC_FIEMAP`
 
@@ -294,6 +296,17 @@ final lookup。syscall 复制并校验 ABI 参数后调用对应的
 4. writer 逐项构造 56 字节 `fiemap_extent`，显式清零全部 reserved 字段并通过 `UserPtr`
    写回；容量为零时由 `FiemapExtentInfo` 只统计数量。
 5. 无论后端成功还是失败，都先写回当前 `fm_flags` 和 `fm_mapped_extents`，再传播结果。
+
+### `FS_IOC_GETFLAGS/FS_IOC_SETFLAGS`
+
+1. fd 暴露 inode file-flags capability 时走通用 GET/SET 路径；GET 在未暴露 capability 时不访问
+   输出指针并回落到 file-specific ioctl。SET 按 Linux 顺序先复制输入标量，再判断 capability，
+   因此无效指针优先返回 `EFAULT`；有效输入在未暴露 capability 时仍回落，普通文件返回 `ENOTTY`。
+2. GET 从 capability 取得 kernel-owned `u32`，再通过 `UserPtr<u32>` 写回用户空间。
+3. SET 通过 `UserConstPtr<u32>` 复制请求，检查所在 mount 可写，并把当前 credential snapshot
+   与 flags 交给 KVFS capability；POSIX 层不解释 ext4 私有位或复制用户指针到后端。
+4. 后端成功返回 0；owner、privileged、unsupported flag 和 I/O/journal 错误按 KVFS/文件系统
+   给出的 errno 原样传播，不能把未执行的 flag 变化伪装为成功。
 
 ### `mount`
 
@@ -417,6 +430,15 @@ sys_fcntl(F_GET_SEALS/F_ADD_SEALS)
 这些命令只对 shmem-backed VFS files 有效。非 VFS file 或没有
 `ShmemObjectState` 的普通文件返回错误。`F_ADD_SEALS` 只允许单调添加 seal；
 已有 `F_SEAL_SEAL` 时拒绝继续添加。
+
+### Open-file status flags
+
+`F_SETFL` 只在 syscall 层完成 raw mask 转换，实际 mutation 统一进入
+`VfsFile::set_status_flags()`。该入口在 inode data lock 下检查 append-only behavior：只要
+`O_APPEND` 相对当前 open file description 发生置位或清位变化就返回 `EPERM`，因此不能用
+设置 append-only 之前打开的 fd 绕过 Linux `setfl()` 语义。`O_NONBLOCK` 等与 inode behavior
+无关的位仍以原子 read-modify-write 更新并保留其它 status bits；`FIONBIO` 只走窄化的
+nonblocking helper。
 
 ### 当前凭据与 VFS 授权
 

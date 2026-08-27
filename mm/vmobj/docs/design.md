@@ -48,7 +48,9 @@ kvfs::AddressSpace / anon objects
    原因：truncate、evict、hole-punch、collapse-range 都应走统一的 view-hit invalidation 主线，而不是各自发裸 range。
 
 4. `MappingViewNotifier` 只消费 `ObjectInvalidateWork`
-   原因：notifier 是 view 的消费器，不是 view 的定义核心。
+   原因：notifier 是 view 的消费器，不是 view 的定义核心。普通 `invalidate()` 用于可延迟的
+   queue/drain 路径；`invalidate_sync()` 使用相同 work/hit 语言，但只有在 page-table/TLB
+   撤销完成后才能返回成功，并把失败传播给依赖该完成点的 object owner。
 
 5. `MappingViewId` 由 `mm/vmobj` 统一分配
    原因：file-backed `kvfs::AddressSpace` 和 anonymous objects 都要登记到同一套
@@ -72,6 +74,8 @@ kvfs::AddressSpace / anon objects
 - `ObjectInvalidateRequest` 是投递给一个 `MmSpace` consumer 的单-view request。
 - `MappingViewNotifier` 只能消费 `ObjectInvalidateWork` 和对应 `ObjectViewHit`；
   notifier 不应自定义新的 file/anon range 结构。
+- `MappingViewNotifier::invalidate_sync()` 的成功是 page-table/TLB 撤销完成证据，而不是请求已
+  入队；不能提供该保证的 notifier 必须返回 `EOPNOTSUPP`。
 - `ObjectInvalidateWork` 携带 `VmObjectId`，notifier 必须通过
   `ObjectInvalidateWork::request_for_hit()` 派生 `ObjectInvalidateRequest`；
   notifier 不应再单独保存 object id 后手工拼 request。

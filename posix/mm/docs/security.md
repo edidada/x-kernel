@@ -108,6 +108,8 @@
 - `madvise` 支持 `MADV_DONTNEED`；其它 advice 返回 `InvalidInput`。
 - `mmap` 的 maximum permission 与 current permission 分离；shared file
   映射的 may-permission 受文件打开权限约束。
+- append-only inode 通过可写 file description 发起的 shared file mmap
+  在 VMA 创建前返回 `EACCES`；已有映射仍在 write fault 时重新检查行为位。
 - `msync` 支持 shared file dirty folio writeback；exact range fsync、
   `MS_INVALIDATE` 和 locked-page `EBUSY` 语义未实现。
 - file-backed writable `MAP_SHARED` 由 `filemap` runtime 通过 write-fault

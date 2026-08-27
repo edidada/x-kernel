@@ -733,7 +733,11 @@ impl VfsFile {
         if self.node_type().is_special() {
             Ok(())
         } else {
-            self.path().check_writable_mount()
+            self.path().check_writable_mount()?;
+            // Append-only is an open/F_SETFL admission policy. Existing file
+            // descriptions only recheck immutable at the write operation.
+            self.inode().check_not_immutable()?;
+            Ok(())
         }
     }
 
@@ -901,8 +905,7 @@ impl VfsFile {
         OpenFlags::from_bits_retain(self.flags.load(Ordering::Acquire))
     }
 
-    /// Replaces selected open-file status flags.
-    pub fn replace_flags(&self, mask: OpenFlags, flags: OpenFlags) {
+    fn replace_flags(&self, mask: OpenFlags, flags: OpenFlags) {
         let mask = mask.bits();
         let flags = flags.bits();
         let _ = self
@@ -910,6 +913,29 @@ impl VfsFile {
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 Some((flags & mask) | (current & !mask))
             });
+    }
+
+    /// Replaces selected open-file status flags after inode policy checks.
+    ///
+    /// Linux forbids changing `O_APPEND` once the inode is append-only. The
+    /// inode data lock serializes this check with file-flags transitions, while
+    /// the atomic update preserves unrelated status bits changed concurrently.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::OperationNotPermitted`] when `mask` would change
+    /// `O_APPEND` on an append-only inode.
+    pub fn set_status_flags(&self, mask: OpenFlags, flags: OpenFlags) -> VfsResult<()> {
+        let _data_guard = self.inode().lock_data();
+        let current = self.flags();
+        let requested = (flags & mask) | (current & !mask);
+        if self.inode().flags().contains(NodeFlags::APPEND_ONLY)
+            && (current ^ requested).contains(OpenFlags::APPEND)
+        {
+            return Err(VfsError::OperationNotPermitted);
+        }
+        self.replace_flags(mask, flags);
+        Ok(())
     }
 
     /// Attaches typed filesystem or kernel-object state to this open file.
@@ -959,6 +985,20 @@ impl VfsFile {
     /// Creates a mapping for this open file.
     pub fn mmap(&self, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
         self.operations().mmap(self, mapper)
+    }
+
+    /// Checks whether Linux shared-file mapping policy permits this open file.
+    ///
+    /// An append-only inode cannot be shared-mapped through a writable file
+    /// description, even when the mapping's initial protection is read-only.
+    pub fn check_shared_mapping_allowed(&self) -> VfsResult<()> {
+        if self.inode().flags().contains(NodeFlags::APPEND_ONLY)
+            && self.mode().contains(FMode::WRITE)
+        {
+            Err(VfsError::PermissionDenied)
+        } else {
+            Ok(())
+        }
     }
 
     /// Applies filesystem-specific space allocation or range-shift operations.
