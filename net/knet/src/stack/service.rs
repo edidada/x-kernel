@@ -124,7 +124,9 @@ impl Service {
         let mut rx_batch = self.rx_batch.lock();
         let mut accepted_packets = self.accepted_batch.lock();
 
-        if !self.try_flush_ingress_batches(&mut accepted_packets, &mut control_packets) {
+        if !self.try_expire_ipv4_fragments(device_timestamp, &mut control_packets)
+            || !self.try_flush_ingress_batches(&mut accepted_packets, &mut control_packets)
+        {
             return deferred_poll_progress(0, 0, 0, false);
         }
 
@@ -216,11 +218,8 @@ impl Service {
         }
 
         let deferred_close_deadline = sockets.reap_deferred_tcp_closes(current);
-        let next_poll =
-            earliest_poll_deadline(iface.poll_at(current, &sockets), deferred_close_deadline);
+        let protocol_deadline = iface.poll_at(current, &sockets);
         drop(iface);
-        let timer_has_more = has_immediate_timer_work(current, next_poll);
-        self.update_poll_timeout(current, next_poll);
         LISTEN_TABLE.wake_touched_acceptors(&mut sockets);
         drop(sockets);
 
@@ -259,6 +258,25 @@ impl Service {
                 );
             }
         }
+
+        let Some(ingress) = self.ingress.try_lock() else {
+            return deferred_poll_progress(
+                rx_packets,
+                tx_packets,
+                usize::from(budget.timer_events > 0 && has_socket_state_change),
+                tx_capacity_changed,
+            );
+        };
+        let ipv4_reassembly_deadline = ingress.ipv4_reassembly_deadline().map(to_smoltcp_instant);
+        drop(ingress);
+        let timer_current = now();
+        let next_poll = earliest_poll_deadline(
+            protocol_deadline,
+            deferred_close_deadline,
+            ipv4_reassembly_deadline,
+        );
+        let timer_has_more = has_immediate_timer_work(timer_current, next_poll);
+        self.update_poll_timeout(timer_current, next_poll);
 
         let Some(mut router) = self.router.try_lock() else {
             return deferred_poll_progress(
@@ -350,6 +368,18 @@ impl Service {
             progress.has_reached_time_limit = true;
         }
         progress
+    }
+
+    fn try_expire_ipv4_fragments(
+        &self,
+        timestamp: MonotonicInstant,
+        control_packets: &mut Vec<Vec<u8>>,
+    ) -> bool {
+        let Some(mut ingress) = self.ingress.try_lock() else {
+            return false;
+        };
+        ingress.expire_ipv4_fragments(timestamp, control_packets);
+        true
     }
 
     fn try_process_rx_batch(
@@ -512,10 +542,16 @@ impl Service {
         let source_waker = Waker::from(self.timeout_poll.clone());
 
         let current = now();
+        let ipv4_reassembly_deadline = self
+            .ingress
+            .lock()
+            .ipv4_reassembly_deadline()
+            .map(to_smoltcp_instant);
         let sockets = SOCKET_SET.inner.lock();
         let next = earliest_poll_deadline(
             self.iface.lock().poll_at(current, &sockets),
             sockets.deferred_tcp_close_deadline(),
+            ipv4_reassembly_deadline,
         );
         drop(sockets);
         self.update_poll_timeout(current, next);
@@ -853,11 +889,12 @@ fn has_immediate_timer_work(current: SmoltcpInstant, next_poll: Option<SmoltcpIn
 fn earliest_poll_deadline(
     protocol: Option<SmoltcpInstant>,
     deferred_close: Option<SmoltcpInstant>,
+    ipv4_reassembly: Option<SmoltcpInstant>,
 ) -> Option<SmoltcpInstant> {
-    match (protocol, deferred_close) {
-        (Some(protocol), Some(close)) => Some(protocol.min(close)),
-        (protocol, close) => protocol.or(close),
-    }
+    [protocol, deferred_close, ipv4_reassembly]
+        .into_iter()
+        .flatten()
+        .min()
 }
 
 fn output_ipv4_packet_count(
@@ -951,7 +988,19 @@ mod tests {
         let close = SmoltcpInstant::from_millis(10);
         let protocol = SmoltcpInstant::from_millis(20);
 
-        assert!(earliest_poll_deadline(Some(protocol), Some(close)) == Some(close));
+        assert!(earliest_poll_deadline(Some(protocol), Some(close), None) == Some(close));
+    }
+
+    #[def_test]
+    fn ipv4_reassembly_deadline_can_precede_other_network_deadlines() {
+        let reassembly = SmoltcpInstant::from_millis(10);
+        let deferred_close = SmoltcpInstant::from_millis(20);
+        let protocol = SmoltcpInstant::from_millis(30);
+
+        assert!(
+            earliest_poll_deadline(Some(protocol), Some(deferred_close), Some(reassembly))
+                == Some(reassembly)
+        );
     }
 
     #[def_test]

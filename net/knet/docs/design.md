@@ -304,7 +304,7 @@ IDLE ──notify──────────────> SCHEDULED
 并发布 `IDLE` 或 `SCHEDULED`，通知与完成并发时由同一原子修改序列保留事件。
 `SCHEDULED` 状态由 `knet-poller` dynamic kwork 或 socket assist 竞争批次执行权。
 Loopback UDP 独立于 poller 执行权，发送路径在 BH 窗口内完成 xmit 与 `NetRx` 交付。
-`Interface::poll_at` 返回的下一次协议 deadline 由 `Service` 注册为 timer，
+`Interface::poll_at`、TCP deferred close 和 IPv4 重组队列的最早 deadline 由 `Service` 注册为 timer，
 到期后调度 poller 并唤醒正在等待 socket readiness 的任务。
 
 ## 算法流程
@@ -331,7 +331,7 @@ Loopback UDP 独立于 poller 执行权，发送路径在 BH 窗口内完成 xmi
 7. `Service` 执行 `poll_maintenance`，按 RX budget 逐个调用 `poll_ingress_single`，并调用有界的 `poll_egress`。达到预算或时间边界后，剩余 ingress 保持 FIFO 顺序并进入后续轮次；`ListenTable::wake_touched_acceptors` 随后唤醒 accept 等待者。
 8. `Router::dispatch_budgeted` 使用本轮剩余 TX budget 发送协议阶段新增的 packet，随后使用剩余 RX budget 再拉取一次设备队列。该尾部 RX 阶段让 loopback TCP/ICMP 完成 TX 与 smoltcp 交接，同时维持 assist 的单轮边界。
 9. Router、IngressProcessor、smoltcp socket-set 或 Interface 的共享 mutex 发生竞争时，poller 通过 `try_lock` 直接退让。`Service` 返回带 `has_more` 的进度，唯一执行者按原状态机归还执行权并安排后续轮次。
-10. `Interface::poll_at` 与 orphan `FIN_WAIT_2` deadline 共同决定下一次网络 deadline，`Service` 将其写入原子 deadline；`register_timer_callback(TIMER_SAMPLE_PERIOD)` 周期采样该值，到期后通过 `notify(PollReason::Timer)` 发布工作。尚未到期的 deadline 不进入 `PollProgress::has_more`。
+10. `Interface::poll_at`、orphan `FIN_WAIT_2` 和 IPv4 重组队列的最早 deadline 共同决定下一次网络 deadline，`Service` 将其写入原子 deadline；`register_timer_callback(TIMER_SAMPLE_PERIOD)` 周期采样该值，到期后通过 `notify(PollReason::Timer)` 发布工作。尚未到期的 deadline 不进入 `PollProgress::has_more`。
 11. `PollProgress::has_more` 只汇报当前可立即处理的 RX、ingress、TX、锁竞争重试或已到期 timer 工作。每轮 `Service::poll_budgeted` 使用 1 ms 软时间上限，并在设备 RX、stack ingress、stack egress 和 Router TX 每完成 32 个工作项后检查时间。协议 maintenance 和一次 smoltcp egress pass 始终执行，以维持 timer 与协议输出进度。kwork callback 或 assist 获得批次执行权后最多连续推进四轮，达到轮数上限或清空立即工作后归还执行权，剩余 backlog 通过 `SCHEDULED` 状态进入下一批。
 
 ### TX 路由

@@ -13,7 +13,10 @@
 //! Queue count, retained bytes, and lifetime are bounded. Expired queues retain
 //! enough of the first fragment to build an ICMPv4 reassembly-timeout response.
 
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, btree_map::Entry},
+    vec::Vec,
+};
 
 use ktime_types::{MonotonicInstant, TimeSpan};
 
@@ -64,6 +67,7 @@ pub(crate) enum Ipv4ReassemblyResult {
 pub(crate) struct Ipv4Reassembler {
     queues: BTreeMap<Ipv4FragKey, Ipv4ReassemblyQueue>,
     memory_bytes: usize,
+    next_expiration: Option<MonotonicInstant>,
 }
 
 enum InsertResult {
@@ -78,7 +82,12 @@ impl Ipv4Reassembler {
         Self {
             queues: BTreeMap::new(),
             memory_bytes: 0,
+            next_expiration: None,
         }
+    }
+
+    pub(crate) fn next_expiration(&self) -> Option<MonotonicInstant> {
+        self.next_expiration
     }
 
     pub(crate) fn reassemble(
@@ -116,20 +125,27 @@ impl Ipv4Reassembler {
             }
         };
         let fragment_payload = payload[..payload_len].to_vec();
-        let queue = self
-            .queues
-            .entry(key)
-            .or_insert_with(|| Ipv4ReassemblyQueue {
-                packet_type: packet.packet_type(),
-                first_header: None,
-                first_ecn: None,
-                fragments: BTreeMap::new(),
-                received_len: 0,
-                total_payload_len: None,
-                ecn_mask: 0,
-                expires_at: now + IPV4_REASSEMBLY_TIMEOUT,
-                memory_bytes: 0,
-            });
+        let queue = match self.queues.entry(key) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let expires_at = now + IPV4_REASSEMBLY_TIMEOUT;
+                self.next_expiration = Some(
+                    self.next_expiration
+                        .map_or(expires_at, |current| current.min(expires_at)),
+                );
+                entry.insert(Ipv4ReassemblyQueue {
+                    packet_type: packet.packet_type(),
+                    first_header: None,
+                    first_ecn: None,
+                    fragments: BTreeMap::new(),
+                    received_len: 0,
+                    total_payload_len: None,
+                    ecn_mask: 0,
+                    expires_at,
+                    memory_bytes: 0,
+                })
+            }
+        };
 
         if !header.more_fragments() {
             if queue
@@ -181,6 +197,13 @@ impl Ipv4Reassembler {
     }
 
     pub(crate) fn remove_expired(&mut self, now: MonotonicInstant) -> Vec<ExpiredIpv4Fragment> {
+        if self
+            .next_expiration
+            .is_none_or(|expires_at| now < expires_at)
+        {
+            return Vec::new();
+        }
+
         let keys: Vec<_> = self
             .queues
             .iter()
@@ -229,6 +252,9 @@ impl Ipv4Reassembler {
     fn remove_queue(&mut self, key: &Ipv4FragKey) -> Option<Ipv4ReassemblyQueue> {
         let queue = self.queues.remove(key)?;
         self.memory_bytes = self.memory_bytes.saturating_sub(queue.memory_bytes);
+        if self.next_expiration == Some(queue.expires_at) {
+            self.next_expiration = self.queues.values().map(|queue| queue.expires_at).min();
+        }
         Some(queue)
     }
 }
@@ -446,6 +472,27 @@ mod tests {
             reassembler.reassemble(packet, header, now),
             Ipv4ReassemblyResult::Complete(_)
         ));
+        assert_eq!(reassembler.next_expiration(), None);
+    }
+
+    #[def_test]
+    fn test_ipv4_reassembly_deadline_is_fixed_at_queue_creation() {
+        let mut reassembler = Ipv4Reassembler::new();
+        let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(1));
+        let (packet, header) = fragment(0, true, b"abcdefgh");
+        assert!(matches!(
+            reassembler.reassemble(packet, header, now),
+            Ipv4ReassemblyResult::Pending
+        ));
+        let expires_at = now + IPV4_REASSEMBLY_TIMEOUT;
+        assert_eq!(reassembler.next_expiration(), Some(expires_at));
+
+        let (packet, header) = fragment(0, true, b"abcdefgh");
+        assert!(matches!(
+            reassembler.reassemble(packet, header, now + TimeSpan::from_secs(1)),
+            Ipv4ReassemblyResult::Pending
+        ));
+        assert_eq!(reassembler.next_expiration(), Some(expires_at));
     }
 
     #[def_test]
@@ -461,6 +508,7 @@ mod tests {
         let expired = reassembler.remove_expired(now + IPV4_REASSEMBLY_TIMEOUT);
 
         assert_eq!(expired.len(), 1);
+        assert_eq!(reassembler.next_expiration(), None);
         assert_eq!(expired[0].header.fragment_offset(), 0);
         assert_eq!(
             ipv4::payload(&expired[0].packet, &expired[0].header).unwrap(),
