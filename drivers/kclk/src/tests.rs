@@ -965,3 +965,62 @@ fn hiword_mask_gate_writes_atomic_single_word() {
     // is_enabled reads back the low word as before.
     assert!(!gate.is_enabled().unwrap());
 }
+
+#[def_test(serial)]
+fn rate_range_aggregates_per_consumer_and_relaxes_on_drop() {
+    let reg = Arc::new(MockReg::new());
+    let root = ClkBuilder::new("root", FixedRate::new(1_000_000_000).into_ops())
+        .build()
+        .unwrap();
+    let div = ClkBuilder::new(
+        "div",
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::ONE_BASED),
+    )
+    .parent(root)
+    .build()
+    .unwrap();
+
+    let h1 = ClkHandle::new(div.clone());
+    let h2 = ClkHandle::new(div.clone());
+    h1.set_rate_range(100_000_000, 400_000_000).unwrap();
+    assert_eq!(div.get_rate_range(), (100_000_000, 400_000_000));
+    // h2 narrows the effective range to the tightest intersection.
+    h2.set_rate_range(200_000_000, 300_000_000).unwrap();
+    assert_eq!(div.get_rate_range(), (200_000_000, 300_000_000));
+    // Dropping h2 removes its vote; the range relaxes back to h1's.
+    drop(h2);
+    assert_eq!(div.get_rate_range(), (100_000_000, 400_000_000));
+    // h1 still holds its vote; dropping it removes the last constraint.
+    drop(h1);
+    assert_eq!(div.get_rate_range(), (0, u64::MAX));
+}
+
+#[def_test(serial)]
+fn notifier_is_unregistered_when_handle_drops() {
+    let reg = Arc::new(MockReg::new());
+    let root = ClkBuilder::new("root", FixedRate::new(1_000_000_000).into_ops())
+        .build()
+        .unwrap();
+    let div = ClkBuilder::new(
+        "div",
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::ONE_BASED),
+    )
+    .parent(root)
+    .build()
+    .unwrap();
+
+    let fired: Arc<SpinNoIrq<u32>> = Arc::new(SpinNoIrq::new(0));
+    {
+        let h = ClkHandle::new(div.clone());
+        let cb = fired.clone();
+        h.register_notifier(Arc::new(move |_| {
+            *cb.lock() += 1;
+            NotifierResult::Proceed
+        }));
+        div.set_rate(500_000_000).unwrap();
+        assert_eq!(*fired.lock(), 2); // Pre + Post delivered
+        // Dropping the handle unregisters its notifier.
+    }
+    div.set_rate(250_000_000).unwrap();
+    assert_eq!(*fired.lock(), 2); // no further events after drop
+}

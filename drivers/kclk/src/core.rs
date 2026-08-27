@@ -62,8 +62,12 @@ struct ClkState {
     parent_index: u8,
     rate: Rate,
     accuracy: u32,
-    min_rate: Rate,
-    max_rate: Rate,
+    /// Per-consumer rate-range votes: `(vote_id, min, max)`. The effective
+    /// range is the tightest intersection across all votes (Linux aggregates
+    /// per-`struct clk`). Id `0` is the legacy slot used by direct
+    /// `ClkCore::set_rate_range` callers (last-wins for that id).
+    votes: Vec<(u64, Rate, Rate)>,
+    next_vote_id: u64,
 }
 
 /// Registered rate-change subscribers, tagged with an id for unregistration.
@@ -130,33 +134,75 @@ impl ClkCore {
         self.state.lock().accuracy
     }
 
-    /// Clamp `rate` into this clock's configured `[min, max]` range.
+    /// Clamp `rate` into this clock's effective `[min, max]` range — the
+    /// tightest intersection of all consumer rate-range votes.
     fn clamp_rate(&self, rate: Rate) -> Rate {
-        let st = self.state.lock();
-        rate.clamp(st.min_rate, st.max_rate.max(st.min_rate))
+        let (min, max) = self.effective_range();
+        rate.clamp(min, max)
     }
 
-    /// Constrain this clock's rate to `[min, max]`.
-    ///
-    /// Subsequent [`set_rate`](Self::set_rate) / [`round_rate`](Self::round_rate)
-    /// requests are clamped into this range. The current rate is *not*
-    /// retroactively changed. `min == 0` means no lower bound; `max ==
-    /// u64::MAX` means no upper bound.
+    /// The tightest intersection of all consumer rate-range votes, or
+    /// `(0, u64::MAX)` if none. Id `0` is the legacy slot used by direct
+    /// `set_rate_range` callers.
+    fn effective_range(&self) -> (Rate, Rate) {
+        let st = self.state.lock();
+        if st.votes.is_empty() {
+            return (0, Rate::MAX);
+        }
+        let min = st.votes.iter().map(|(_, lo, _)| *lo).max().unwrap_or(0);
+        let max = st
+            .votes
+            .iter()
+            .map(|(_, _, hi)| *hi)
+            .min()
+            .unwrap_or(Rate::MAX);
+        (min, max.max(min))
+    }
+
+    /// Insert or update the vote `id` to `(min, max)`. The caller validates
+    /// `min <= max` and holds `CLK_LOCK`.
+    pub(crate) fn set_rate_vote(&self, id: u64, min: Rate, max: Rate) {
+        let mut st = self.state.lock();
+        if let Some(v) = st.votes.iter_mut().find(|(vid, ..)| *vid == id) {
+            v.1 = min;
+            v.2 = max;
+        } else {
+            st.votes.push((id, min, max));
+        }
+    }
+
+    /// Remove the vote `id` (a consumer going away).
+    pub(crate) fn remove_rate_vote(&self, id: u64) {
+        let _guard = CLK_LOCK.lock();
+        self.state.lock().votes.retain(|(vid, ..)| *vid != id);
+    }
+
+    /// Allocate a fresh per-consumer vote id (>= 1).
+    pub(crate) fn allocate_vote_id(&self) -> u64 {
+        let mut st = self.state.lock();
+        let id = st.next_vote_id.max(1);
+        st.next_vote_id = id + 1;
+        id
+    }
+
+    /// Constrain this clock's rate to `[min, max]`. Legacy/direct-core entry:
+    /// uses the reserved id 0, so a direct caller's last write wins for that
+    /// slot. Per-consumer aggregation (multiple consumers' ranges intersect)
+    /// is via [`ClkHandle::set_rate_range`](crate::ClkHandle::set_rate_range).
     pub fn set_rate_range(&self, min: Rate, max: Rate) -> ClkResult {
         if min > max {
             return Err(ClkError::InvalidRate);
         }
         let _guard = CLK_LOCK.lock();
-        let mut st = self.state.lock();
-        st.min_rate = min;
-        st.max_rate = max;
+        self.set_rate_vote(0, min, max);
         Ok(())
     }
 
     /// The current `(min, max)` rate range.
+    /// The current effective `(min, max)` rate range (tightest intersection of
+    /// all consumer votes + the legacy slot).
     pub fn get_rate_range(&self) -> (Rate, Rate) {
-        let st = self.state.lock();
-        (st.min_rate, st.max_rate)
+        self.effective_range()
     }
 
     /// The currently selected parent node, as a cloned [`Arc`].
@@ -479,7 +525,21 @@ impl ClkCore {
         let rate = self.clamp_rate(rate);
         let (min, max, current) = {
             let st = self.state.lock();
-            (st.min_rate, st.max_rate.max(st.min_rate), st.parent_index)
+            // Effective range = tightest intersection of all votes (inline to
+            // avoid re-entering the state lock via effective_range()).
+            let (min, max) = if st.votes.is_empty() {
+                (0, Rate::MAX)
+            } else {
+                let lo = st.votes.iter().map(|(_, lo, _)| *lo).max().unwrap_or(0);
+                let hi = st
+                    .votes
+                    .iter()
+                    .map(|(_, _, hi)| *hi)
+                    .min()
+                    .unwrap_or(Rate::MAX);
+                (lo, hi.max(lo))
+            };
+            (min, max, st.parent_index)
         };
         let current_rate = self.parent_rate();
 
@@ -850,11 +910,13 @@ impl ClkBuilder {
                 parent_index,
                 rate,
                 accuracy,
-                min_rate: 0,
-                max_rate: Rate::MAX,
+                votes: Vec::new(),
+                next_vote_id: 1,
             }),
             notifiers: SpinNoIrq::new(NotifierState {
-                next_id: 0,
+                // Ids start at 1; 0 is the reserved "no notifier" sentinel used
+                // by ClkHandle's automatic unregister tracking.
+                next_id: 1,
                 entries: Vec::new(),
             }),
         });

@@ -15,7 +15,7 @@
 //! provider, then the index is interpreted within that provider's local
 //! namespace.
 
-use alloc::{collections::BTreeMap, sync::Arc};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 
 use kspin::SpinNoIrq;
 
@@ -75,27 +75,17 @@ impl Registry {
         self.providers.remove(&id);
     }
 
-    fn by_index(&self, id: ProviderId, index: ClkIndex) -> ClkResult<Arc<ClkCore>> {
-        match self.providers.get(&id) {
-            Some(p) => p.get_by_index(index).ok_or(ClkError::NotFound),
-            // The provider is not registered yet — distinct from "registered
-            // but missing" so a consumer probing before its controller can
-            // defer instead of failing permanently.
-            None => Err(ClkError::NoProvider),
-        }
+    /// The provider registered under `id`, if any. Returns the `&'static`
+    /// reference (which outlives the lock guard) so the caller can drop the
+    /// registry lock before calling the open `ClkLookup` adapter.
+    fn get_provider(&self, id: ProviderId) -> Option<&'static dyn ClkLookup> {
+        self.providers.get(&id).copied()
     }
 
-    fn by_name(&self, name: &str) -> ClkResult<Arc<ClkCore>> {
-        // SoC clock names are globally unique; the first provider that claims
-        // the name wins. (This is a lookup by the clock's own name, not a
-        // consumer connection name — see ClkLookup::get_by_name.)
-        if self.providers.is_empty() {
-            return Err(ClkError::NoProvider);
-        }
-        self.providers
-            .values()
-            .find_map(|p| p.get_by_name(name))
-            .ok_or(ClkError::NotFound)
+    /// Snapshot all providers as `&'static` references, for the same
+    /// lock-then-release pattern.
+    fn provider_snapshot(&self) -> Vec<&'static dyn ClkLookup> {
+        self.providers.values().copied().collect()
     }
 }
 
@@ -105,13 +95,17 @@ static REGISTRY: SpinNoIrq<Registry> = SpinNoIrq::new(Registry::new());
 ///
 /// Called during platform/controller init. A re-registration of an existing id
 /// replaces the previous provider, which is the expected behavior when a
-/// controller is re-probed.
+/// controller is re-probed. Clocks themselves are never freed (boot-static,
+/// matching Linux); [`unregister_provider`] only removes a controller from
+/// lookup (mainly for `--cfg unittest` / re-probe).
 pub fn register_provider(provider: &'static dyn ClkLookup) {
     REGISTRY.lock().register(provider);
 }
 
-/// Remove a previously-registered provider. Mainly for `--cfg unittest` and for
-/// controller removal.
+/// Remove a previously-registered provider from the lookup table. Mainly for
+/// `--cfg unittest` and controller re-probe; it does not free the clocks the
+/// provider published (the global clock list holds them for the kernel's
+/// lifetime, matching Linux's boot-static clock model).
 pub fn unregister_provider(id: ProviderId) {
     REGISTRY.lock().unregister(id);
 }
@@ -134,10 +128,17 @@ pub fn reset_providers() {
 /// [`ClkError::NotFound`] when the provider exists but the index is invalid
 /// (a permanent misconfiguration).
 pub fn clk_get_by_index(provider_id: ProviderId, index: ClkIndex) -> ClkResult<ClkHandle> {
-    REGISTRY
-        .lock()
-        .by_index(provider_id, index)
-        .map(ClkHandle::new)
+    // Snapshot the provider ref under the lock, then release before calling
+    // the open ClkLookup adapter — the adapter may be slow or (one day) sleep,
+    // and holding the IRQ-disabled registry lock across it is wrong.
+    let provider = REGISTRY.lock().get_provider(provider_id);
+    match provider {
+        Some(p) => p
+            .get_by_index(index)
+            .map(ClkHandle::new)
+            .ok_or(ClkError::NotFound),
+        None => Err(ClkError::NoProvider),
+    }
 }
 
 /// Resolve a clock by its globally-unique SoC name into a consumer handle.
@@ -148,5 +149,15 @@ pub fn clk_get_by_index(provider_id: ProviderId, index: ClkIndex) -> ClkResult<C
 /// [`ClkError::NoProvider`] when no provider is registered at all (defer) and
 /// [`ClkError::NotFound`] when providers exist but the name is unknown.
 pub fn clk_get_by_name(name: &str) -> ClkResult<ClkHandle> {
-    REGISTRY.lock().by_name(name).map(ClkHandle::new)
+    // Snapshot providers under the lock, release, then scan — same rationale
+    // as clk_get_by_index.
+    let providers = REGISTRY.lock().provider_snapshot();
+    if providers.is_empty() {
+        return Err(ClkError::NoProvider);
+    }
+    providers
+        .iter()
+        .find_map(|p| p.get_by_name(name))
+        .map(ClkHandle::new)
+        .ok_or(ClkError::NotFound)
 }
