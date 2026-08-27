@@ -117,6 +117,8 @@ impl Service {
     /// transport and device handlers may acquire sleepable mutexes. Shared
     /// progression locks are acquired with `try_lock`; contention leaves the
     /// pending batches intact and reports immediate work for a later round.
+    /// IPv4 reassembly expiry contention is reported as immediate work but does
+    /// not abort TX or protocol progress in the current round.
     pub fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
         let round_started_at = monotonic_time();
         let device_timestamp = round_started_at;
@@ -124,9 +126,13 @@ impl Service {
         let mut rx_batch = self.rx_batch.lock();
         let mut accepted_packets = self.accepted_batch.lock();
 
-        if !self.try_expire_ipv4_fragments(device_timestamp, &mut control_packets)
-            || !self.try_flush_ingress_batches(&mut accepted_packets, &mut control_packets)
-        {
+        // Expire contention must not skip TX or protocol progress. Aborting
+        // the round here would leave `has_more` true while the data plane
+        // never advances, which livelocks knet-poller when ingress stays
+        // contended.
+        let has_ipv4_expire_contention =
+            !self.try_expire_ipv4_fragments(device_timestamp, &mut control_packets);
+        if !self.try_flush_ingress_batches(&mut accepted_packets, &mut control_packets) {
             return deferred_poll_progress(0, 0, 0, false);
         }
 
@@ -260,6 +266,8 @@ impl Service {
         }
 
         let Some(ingress) = self.ingress.try_lock() else {
+            // Keep the armed timer. Publishing a protocol-only deadline here
+            // would clobber a still-future IPv4 reassembly expiry.
             return deferred_poll_progress(
                 rx_packets,
                 tx_packets,
@@ -269,14 +277,16 @@ impl Service {
         };
         let ipv4_reassembly_deadline = ingress.ipv4_reassembly_deadline().map(to_smoltcp_instant);
         drop(ingress);
-        let timer_current = now();
+        // Compare against the same instant used for `poll_at`. A later `now()`
+        // would treat still-future TCP delayed-ACK deadlines as immediate work
+        // and keep knet-poller scheduled on slow TCG.
         let next_poll = earliest_poll_deadline(
             protocol_deadline,
             deferred_close_deadline,
             ipv4_reassembly_deadline,
         );
-        let timer_has_more = has_immediate_timer_work(timer_current, next_poll);
-        self.update_poll_timeout(timer_current, next_poll);
+        let timer_has_more = has_immediate_timer_work(current, next_poll);
+        self.update_poll_timeout(current, next_poll);
 
         let Some(mut router) = self.router.try_lock() else {
             return deferred_poll_progress(
@@ -294,7 +304,11 @@ impl Service {
             tx_packets,
             timer_events: usize::from(budget.timer_events > 0 && has_socket_state_change),
             tx_capacity_changed,
-            has_more: rx_has_more || ingress_has_more || tx_has_more || timer_has_more,
+            has_more: rx_has_more
+                || ingress_has_more
+                || tx_has_more
+                || timer_has_more
+                || has_ipv4_expire_contention,
         }
     }
 
@@ -542,6 +556,9 @@ impl Service {
         let source_waker = Waker::from(self.timeout_poll.clone());
 
         let current = now();
+        // Include the reassembly deadline so this path cannot overwrite an
+        // armed fragment timer with a later protocol-only deadline. The lock
+        // is released before SOCKET_SET and iface.
         let ipv4_reassembly_deadline = self
             .ingress
             .lock()
@@ -972,8 +989,13 @@ mod tests {
     fn future_timer_is_not_immediate_work() {
         let current = SmoltcpInstant::from_millis(10);
         let future = SmoltcpInstant::from_millis(11);
+        let later = SmoltcpInstant::from_millis(12);
 
         assert!(!has_immediate_timer_work(current, Some(future)));
+        // Comparing against a later timestamp, as if the round itself took
+        // longer than the delay, would treat this still-future deadline as
+        // immediate work.
+        assert!(has_immediate_timer_work(later, Some(future)));
     }
 
     #[def_test]
@@ -1049,6 +1071,31 @@ mod tests {
 
         assert_eq!(progress.rx_packets, 0);
         assert_eq!(progress.tx_packets, 0);
+        assert!(progress.has_more);
+    }
+
+    #[def_test(serial)]
+    fn poll_round_dispatches_tx_when_ipv4_expire_lock_is_contended() {
+        let loopback_addr = Ipv4Address::new(127, 0, 0, 1);
+        let mut router = Router::new();
+        let loopback = router.add_device(Box::new(LoopbackDevice::new()));
+        router
+            .add_ipv4_addr(Ipv4AddrEntry {
+                dev: loopback,
+                addr: Ipv4Cidr::new(loopback_addr, 8),
+                scope: ROUTE_SCOPE_HOST,
+            })
+            .unwrap();
+        let packet =
+            ipv4::build_ipv4_packet(loopback_addr, loopback_addr, ipv4::PROTOCOL_ICMP, 64, &[])
+                .unwrap();
+        router.queue_ipv4_packet(packet).unwrap();
+        let service = Service::new(router);
+        let _ingress = service.ingress.lock();
+
+        let progress = service.poll_budgeted(TEST_POLL_BUDGET);
+
+        assert_eq!(progress.tx_packets, 1);
         assert!(progress.has_more);
     }
 

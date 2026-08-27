@@ -209,7 +209,8 @@ impl Ipv4Reassembler {
             .iter()
             .filter_map(|(key, queue)| (now >= queue.expires_at).then_some(*key))
             .collect();
-        keys.into_iter()
+        let expired = keys
+            .into_iter()
             .filter_map(|key| {
                 let queue = self.remove_queue(&key)?;
                 let first_packet = queue.first_fragment_packet()?;
@@ -220,7 +221,11 @@ impl Ipv4Reassembler {
                     packet: first_packet,
                 })
             })
-            .collect()
+            .collect();
+        // Repair a stale cache when the stored time is due but no remaining
+        // queue matches it. Otherwise `has_more` would stay true forever.
+        self.refresh_next_expiration();
+        expired
     }
 
     fn enforce_limits(&mut self) {
@@ -253,9 +258,13 @@ impl Ipv4Reassembler {
         let queue = self.queues.remove(key)?;
         self.memory_bytes = self.memory_bytes.saturating_sub(queue.memory_bytes);
         if self.next_expiration == Some(queue.expires_at) {
-            self.next_expiration = self.queues.values().map(|queue| queue.expires_at).min();
+            self.refresh_next_expiration();
         }
         Some(queue)
+    }
+
+    fn refresh_next_expiration(&mut self) {
+        self.next_expiration = self.queues.values().map(|queue| queue.expires_at).min();
     }
 }
 
@@ -388,6 +397,15 @@ mod tests {
     use crate::{buf::PacketOwner, ipv4};
 
     fn fragment(offset: usize, more_fragments: bool, payload: &[u8]) -> (PacketBuf, Ipv4Header) {
+        fragment_with_id(0x1234, offset, more_fragments, payload)
+    }
+
+    fn fragment_with_id(
+        identification: u16,
+        offset: usize,
+        more_fragments: bool,
+        payload: &[u8],
+    ) -> (PacketBuf, Ipv4Header) {
         let offset_units = u16::try_from(offset / 8).unwrap();
         let mut header = EtherIpv4Header::new(
             payload.len() as u16,
@@ -397,7 +415,7 @@ mod tests {
             [192, 0, 2, 2],
         )
         .unwrap();
-        header.identification = 0x1234;
+        header.identification = identification;
         header.dont_fragment = false;
         header.more_fragments = more_fragments;
         header.fragment_offset = IpFragOffset::try_new(offset_units).unwrap();
@@ -514,5 +532,49 @@ mod tests {
             ipv4::payload(&expired[0].packet, &expired[0].header).unwrap(),
             b"abcdefgh"
         );
+    }
+
+    #[def_test]
+    fn test_ipv4_reassembly_expire_advances_to_the_next_queue_deadline() {
+        let mut reassembler = Ipv4Reassembler::new();
+        let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(1));
+        let (packet, header) = fragment_with_id(0x1234, 0, true, b"abcdefgh");
+        assert!(matches!(
+            reassembler.reassemble(packet, header, now),
+            Ipv4ReassemblyResult::Pending
+        ));
+        let later = now + TimeSpan::from_secs(5);
+        let (packet, header) = fragment_with_id(0x1235, 0, true, b"ijklmnop");
+        assert!(matches!(
+            reassembler.reassemble(packet, header, later),
+            Ipv4ReassemblyResult::Pending
+        ));
+
+        let expired = reassembler.remove_expired(now + IPV4_REASSEMBLY_TIMEOUT);
+
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].header.identification(), 0x1234);
+        assert_eq!(
+            reassembler.next_expiration(),
+            Some(later + IPV4_REASSEMBLY_TIMEOUT)
+        );
+    }
+
+    #[def_test]
+    fn test_ipv4_reassembly_repairs_stale_expiration_cache() {
+        let mut reassembler = Ipv4Reassembler::new();
+        let now = MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(1));
+        let (packet, header) = fragment(0, true, b"abcdefgh");
+        assert!(matches!(
+            reassembler.reassemble(packet, header, now),
+            Ipv4ReassemblyResult::Pending
+        ));
+        let expires_at = now + IPV4_REASSEMBLY_TIMEOUT;
+        reassembler.next_expiration = Some(now);
+
+        let expired = reassembler.remove_expired(now);
+
+        assert!(expired.is_empty());
+        assert_eq!(reassembler.next_expiration(), Some(expires_at));
     }
 }
