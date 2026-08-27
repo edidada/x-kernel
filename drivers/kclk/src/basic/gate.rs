@@ -17,6 +17,13 @@ bitflags! {
         /// Writing a 1 to the bit enables the clock; otherwise writing a 0
         /// enables it (hardware inversion, e.g. an "is_disabled" bit).
         const SET_TO_ENABLE = 1 << 0;
+        /// Write the gate bit atomically via the hiword-mask convention
+        /// (Linux `CLK_GATE_HIWORD_MASK`): the upper 16 bits are a write mask,
+        /// the lower 16 the value. This is a single `reg_write`, not a
+        /// read-modify-write, so a gate bit sharing a register word with a
+        /// divider/mux field cannot lose an update to the fast-path enable.
+        /// Requires `bit_idx < 16`.
+        const HIWORD_MASK = 1 << 1;
     }
 }
 
@@ -65,18 +72,36 @@ impl Gate {
         let bit_should_be_set = enabled == self.flags.contains(GateFlags::SET_TO_ENABLE);
         if bit_should_be_set { self.mask() } else { 0 }
     }
+
+    /// Whether to use the hiword-mask atomic write (single `reg_write`) instead
+    /// of a read-modify-write, so a shared-word gate bit does not race a
+    /// divider/mux RMW under the same word.
+    fn hiword(&self) -> bool {
+        // The hiword-mask convention needs the gate bit in the low 16 bits so
+        // the write mask (bit<<16) stays within the upper half.
+        self.flags.contains(GateFlags::HIWORD_MASK) && self.bit_idx < 16
+    }
+
+    /// Write the gate bit. Atomic (single write) when `hiword`, else RMW.
+    fn write_gate(&self, enabled: bool) {
+        if self.hiword() {
+            let value = (self.mask() << 16) | self.enable_value(enabled);
+            self.reg.reg_write(self.offset, value);
+        } else {
+            self.reg
+                .reg_modify(self.offset, self.mask(), self.enable_value(enabled));
+        }
+    }
 }
 
 impl ClkHwOps for Gate {
     fn enable(&self) -> ClkResult {
-        self.reg
-            .reg_modify(self.offset, self.mask(), self.enable_value(true));
+        self.write_gate(true);
         Ok(())
     }
 
     fn disable(&self) {
-        self.reg
-            .reg_modify(self.offset, self.mask(), self.enable_value(false));
+        self.write_gate(false);
     }
 
     fn is_enabled(&self) -> ClkResult<bool> {

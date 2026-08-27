@@ -11,21 +11,18 @@
 //!
 //! # The two-phase gate
 //!
-//! Clock enabling is split into two phases:
+//! Clock enabling is split into two phases, mirroring Linux:
 //!
 //! - [`prepare`](ClkHwOps::prepare) / [`unprepare`](ClkHwOps::unprepare) carry
-//!   the slow, controller-global setup;
+//!   the slow, controller-global setup; they run under the global clock lock
+//!   (a **sleepable mutex**) and **may sleep** (a PLL lock wait can block).
 //! - [`enable`](ClkHwOps::enable) / [`disable`](ClkHwOps::disable) toggle only
-//!   a gate bit and stay usable where blocking is impossible.
-//!
-//! The two phases have different sleeping contracts, mirroring Linux:
-//!
-//! - [`prepare`](ClkHwOps::prepare) / [`unprepare`](ClkHwOps::unprepare) run
-//!   under the global clock lock, a **sleepable mutex** (`ksync::Mutex`), so
-//!   they **may sleep** (a PLL lock wait can block instead of busy-waiting).
-//! - [`enable`](ClkHwOps::enable) / [`disable`](ClkHwOps::disable) run under the
-//!   per-node **spinlock** and deliberately bypass the global lock, so they
-//!   **must not sleep** and stay usable from contexts that cannot block.
+//!   a gate bit. They are also serialized by the global clock lock (so a
+//!   concurrent `set_parent` cannot migrate the parent's enable ref across two
+//!   parents mid-enable); the lock is sleepable, so `enable` may block too and
+//!   must not run in interrupt context. The provider `enable`/`disable`
+//!   callback itself must still be quick and non-sleeping (it only flips a
+//!   gate bit).
 //!
 //! The remaining callbacks (`recalc_rate`, `recalc_accuracy`, `is_enabled`,
 //! `is_prepared`, `get_parent`, `init`, `determine_rate`) may be invoked

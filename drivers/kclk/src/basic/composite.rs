@@ -94,11 +94,16 @@ impl ClkHwOps for Composite {
         // compute the achievable rate on that chosen parent. Without this the
         // default determine_rate delegates to round_rate against the *current*
         // parent, so a mux+divider composite would never switch sources.
+        //
+        // Capture the requested rate first: the mux is transparent and sets
+        // req.rate to the chosen parent's rate, so the divider must be queried
+        // with the *original* request, not the clobbered req.rate.
+        let requested = req.rate;
         if let Some(mux) = &self.mux {
             mux.determine_rate(req, parents)?;
         }
         if let Some(div) = &self.div {
-            let rr = div.round_rate(req.rate, req.best_parent_rate)?;
+            let rr = div.round_rate(requested, req.best_parent_rate)?;
             req.rate = rr.rate;
             // The divider satisfies the request on the chosen parent; it does
             // not ask the framework to change that parent's rate.

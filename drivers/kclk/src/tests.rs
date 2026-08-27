@@ -103,7 +103,7 @@ static PROVIDER_SERIAL: SpinNoIrq<()> = SpinNoIrq::new(());
 // Fixed-rate and fixed-factor nodes
 // ---------------------------------------------------------------------------
 
-#[def_test]
+#[def_test(serial)]
 fn fixed_rate_reports_immutable_rate() {
     let osc = ClkBuilder::new("osc24m", FixedRate::new(24_000_000).into_ops())
         .build()
@@ -117,7 +117,7 @@ fn fixed_rate_reports_immutable_rate() {
     assert_eq!(osc.round_rate(99_999_999).unwrap(), 24_000_000);
 }
 
-#[def_test]
+#[def_test(serial)]
 fn fixed_factor_scales_parent_rate() {
     let osc = ClkBuilder::new("osc", FixedRate::new(24_000_000).into_ops())
         .build()
@@ -145,7 +145,7 @@ fn fixed_factor_scales_parent_rate() {
 // Tree rate caching across three levels
 // ---------------------------------------------------------------------------
 
-#[def_test]
+#[def_test(serial)]
 fn three_level_tree_caches_rates_from_leaf_to_root() {
     let osc = ClkBuilder::new("osc24m", FixedRate::new(24_000_000).into_ops())
         .build()
@@ -173,7 +173,7 @@ fn three_level_tree_caches_rates_from_leaf_to_root() {
 // Divider set_rate programs the register and recalculates the rate
 // ---------------------------------------------------------------------------
 
-#[def_test]
+#[def_test(serial)]
 fn divider_set_rate_writes_field_and_updates_rate() {
     let parent = ClkBuilder::new("p", FixedRate::new(1_200_000_000).into_ops())
         .build()
@@ -206,7 +206,7 @@ fn divider_set_rate_writes_field_and_updates_rate() {
 // Gate enable/disable toggles the register bit
 // ---------------------------------------------------------------------------
 
-#[def_test]
+#[def_test(serial)]
 fn gate_enable_writes_bit_and_reports_state() {
     let reg = Arc::new(MockReg::new());
     let gate = Gate::new(reg.clone(), 0, 5, GateFlags::SET_TO_ENABLE);
@@ -221,7 +221,7 @@ fn gate_enable_writes_bit_and_reports_state() {
     assert_eq!(gate.is_enabled().unwrap(), false);
 }
 
-#[def_test]
+#[def_test(serial)]
 fn gate_inverted_polarity_clears_bit_to_enable() {
     let reg = Arc::new(MockReg::new());
     // set_to_enable=false: the bit is an "is_disabled" flag, so enabling clears it.
@@ -238,7 +238,7 @@ fn gate_inverted_polarity_clears_bit_to_enable() {
 // Mux parent selection
 // ---------------------------------------------------------------------------
 
-#[def_test]
+#[def_test(serial)]
 fn mux_selects_parent_and_reports_index() {
     let reg = Arc::new(MockReg::new());
     let mux = Mux::new(reg.clone(), 0, 0, 0x3, None);
@@ -260,7 +260,7 @@ fn mux_selects_parent_and_reports_index() {
 // set_parent on a ClkCore refreshes the cached rate from the new parent
 // ---------------------------------------------------------------------------
 
-#[def_test]
+#[def_test(serial)]
 fn core_set_parent_recomputes_rate_from_new_parent() {
     let osc24 = ClkBuilder::new("osc24", FixedRate::new(24_000_000).into_ops())
         .build()
@@ -292,7 +292,7 @@ fn core_set_parent_recomputes_rate_from_new_parent() {
 // Two-phase gating propagates with reference counting
 // ---------------------------------------------------------------------------
 
-#[def_test]
+#[def_test(serial)]
 fn prepare_enable_propagates_to_parent_once_per_refcount() {
     let parent_ops = Arc::new(CountingOps::new());
     let parent = ClkBuilder::new("parent", parent_ops.clone())
@@ -322,7 +322,7 @@ fn prepare_enable_propagates_to_parent_once_per_refcount() {
     assert_eq!((unprep, dis), (1, 1));
 }
 
-#[def_test]
+#[def_test(serial)]
 fn prepare_failure_rolls_back_parent() {
     // A parent that succeeds, with a child whose prepare always fails.
     let parent_ops = Arc::new(CountingOps::new());
@@ -354,7 +354,7 @@ fn prepare_failure_rolls_back_parent() {
 // Composite node combines mux + divider + gate
 // ---------------------------------------------------------------------------
 
-#[def_test]
+#[def_test(serial)]
 fn composite_dispatches_rate_and_gate_to_sub_nodes() {
     let reg = Arc::new(MockReg::new());
     let parent = ClkBuilder::new("p", FixedRate::new(1_000_000_000).into_ops())
@@ -387,7 +387,7 @@ fn composite_dispatches_rate_and_gate_to_sub_nodes() {
 // Provider registry: name and index lookup
 // ---------------------------------------------------------------------------
 
-#[def_test]
+#[def_test(serial)]
 fn provider_resolves_by_name_and_index() {
     let _serial = PROVIDER_SERIAL.lock();
     static TABLE: ClkTable = ClkTable::new(0x10);
@@ -418,7 +418,7 @@ fn provider_resolves_by_name_and_index() {
     reset_providers();
 }
 
-#[def_test]
+#[def_test(serial)]
 fn consumer_handle_prepare_enable_through_provider() {
     let _serial = PROVIDER_SERIAL.lock();
     static TABLE: ClkTable = ClkTable::new(0x20);
@@ -454,7 +454,7 @@ fn consumer_handle_prepare_enable_through_provider() {
 // SET_RATE_PARENT propagation through a pass-through chain
 // ---------------------------------------------------------------------------
 
-#[def_test]
+#[def_test(serial)]
 fn set_rate_propagates_to_parent_when_flag_set() {
     let reg = Arc::new(MockReg::new());
     // A parent divider that can change its own rate.
@@ -488,7 +488,7 @@ fn set_rate_propagates_to_parent_when_flag_set() {
 // Rate-change notifiers
 // ---------------------------------------------------------------------------
 
-#[def_test]
+#[def_test(serial)]
 fn notifier_fires_pre_and_post_on_set_rate() {
     let reg = Arc::new(MockReg::new());
     let parent = ClkBuilder::new("p", FixedRate::new(1_000_000_000).into_ops())
@@ -530,7 +530,7 @@ fn notifier_fires_pre_and_post_on_set_rate() {
     }
 }
 
-#[def_test]
+#[def_test(serial)]
 fn notifier_veto_aborts_set_rate() {
     let reg = Arc::new(MockReg::new());
     let parent = ClkBuilder::new("p", FixedRate::new(1_000_000_000).into_ops())
@@ -565,7 +565,7 @@ fn notifier_veto_aborts_set_rate() {
 // reprogram so it can reach the requested rate.
 // ---------------------------------------------------------------------------
 
-#[def_test]
+#[def_test(serial)]
 fn fixed_factor_propagates_rate_to_parent_via_flag() {
     let reg = Arc::new(MockReg::new());
     let root = ClkBuilder::new("root", FixedRate::new(1_000_000_000).into_ops())
@@ -597,7 +597,7 @@ fn fixed_factor_propagates_rate_to_parent_via_flag() {
 // Validates the multi-provider fix — the DT phandle disambiguates providers.
 // ---------------------------------------------------------------------------
 
-#[def_test]
+#[def_test(serial)]
 fn two_providers_index_zero_do_not_collide() {
     let _serial = PROVIDER_SERIAL.lock();
     static CCU: ClkTable = ClkTable::new(0x10);
@@ -640,7 +640,7 @@ fn two_providers_index_zero_do_not_collide() {
 // unregister, init hook, and clk_disable_unused.
 // ---------------------------------------------------------------------------
 
-#[def_test]
+#[def_test(serial)]
 fn separate_prepare_enable_apis_work() {
     let ops = Arc::new(CountingOps::new());
     let clk = ClkHandle::new(ClkBuilder::new("c", ops.clone()).build().unwrap());
@@ -662,7 +662,7 @@ fn separate_prepare_enable_apis_work() {
     assert_eq!((unprep, dis), (1, 2));
 }
 
-#[def_test]
+#[def_test(serial)]
 fn get_parent_returns_parent_node() {
     let osc = ClkBuilder::new("osc", FixedRate::new(24_000_000).into_ops())
         .build()
@@ -677,7 +677,7 @@ fn get_parent_returns_parent_node() {
     assert!(osc.get_parent().is_none());
 }
 
-#[def_test]
+#[def_test(serial)]
 fn rate_range_clamps_set_and_round() {
     let reg = Arc::new(MockReg::new());
     let root = ClkBuilder::new("root", FixedRate::new(1_000_000_000).into_ops())
@@ -706,7 +706,7 @@ fn rate_range_clamps_set_and_round() {
     );
 }
 
-#[def_test]
+#[def_test(serial)]
 fn notifier_unregister_stops_delivery() {
     let reg = Arc::new(MockReg::new());
     let root = ClkBuilder::new("root", FixedRate::new(1_000_000_000).into_ops())
@@ -736,7 +736,7 @@ fn notifier_unregister_stops_delivery() {
     assert_eq!(log.lock().len(), 2); // no further events
 }
 
-#[def_test]
+#[def_test(serial)]
 fn init_hook_runs_at_build() {
     let flag: Arc<SpinNoIrq<bool>> = Arc::new(SpinNoIrq::new(false));
 
@@ -754,7 +754,7 @@ fn init_hook_runs_at_build() {
     assert!(*flag.lock());
 }
 
-#[def_test]
+#[def_test(serial)]
 fn clk_disable_unused_gates_idle_and_skips_critical() {
     let reg = Arc::new(MockReg::new());
     reg.mem.lock()[0] = 1; // bootloader left the gate on
@@ -781,7 +781,7 @@ fn clk_disable_unused_gates_idle_and_skips_critical() {
     assert_eq!(reg2.mem.lock()[0], 1);
 }
 
-#[def_test]
+#[def_test(serial)]
 fn mux_determine_rate_selects_closest_parent() {
     let osc24 = ClkBuilder::new("osc24", FixedRate::new(24_000_000).into_ops())
         .build()
@@ -803,7 +803,7 @@ fn mux_determine_rate_selects_closest_parent() {
     assert_eq!(clk.get_parent().unwrap().get_rate(), 32_000_000);
 }
 
-#[def_test]
+#[def_test(serial)]
 fn orphan_is_adopted_when_parent_registers() {
     let child = ClkBuilder::new("child", FixedFactor::new(2, 1).unwrap().into_ops())
         .parent_name("pll")
@@ -819,7 +819,7 @@ fn orphan_is_adopted_when_parent_registers() {
     assert_eq!(child.get_rate(), 48_000_000);
 }
 
-#[def_test]
+#[def_test(serial)]
 fn register_table_builds_tree_by_name_in_any_order() {
     let _serial = PROVIDER_SERIAL.lock();
     static TABLE: ClkTable = ClkTable::new(0x50);
@@ -842,4 +842,126 @@ fn register_table_builds_tree_by_name_in_any_order() {
     assert_eq!(clk_get_by_index(0x50, 2).unwrap().get_rate(), 1_200_000_000);
 
     reset_providers();
+}
+
+#[def_test(serial)]
+fn children_back_edge_tracks_selected_parent() {
+    let osc = ClkBuilder::new("osc", FixedRate::new(24_000_000).into_ops())
+        .build()
+        .unwrap();
+    let alt = ClkBuilder::new("alt", FixedRate::new(32_000).into_ops())
+        .build()
+        .unwrap();
+    // A two-parent mux: child selects osc initially.
+    let reg = Arc::new(MockReg::new());
+    let mux = Mux::into_ops(reg, 0, 0, 0x1, None);
+    let child = ClkBuilder::new("child", mux)
+        .parent(osc.clone())
+        .parent(alt.clone())
+        .build()
+        .unwrap();
+    // The currently selected parent (osc) sees one live child.
+    assert_eq!(osc.children_count(), 1);
+    assert_eq!(alt.children_count(), 0);
+    // Switch the mux: the back-edge moves from osc to alt.
+    child.set_parent(1).unwrap();
+    assert_eq!(osc.children_count(), 0);
+    assert_eq!(alt.children_count(), 1);
+    // Switch back.
+    child.set_parent(0).unwrap();
+    assert_eq!(osc.children_count(), 1);
+    assert_eq!(alt.children_count(), 0);
+}
+
+#[def_test(serial)]
+fn parent_rate_change_cascades_to_descendant_cache() {
+    // osc(1GHz fixed) -> div(programmable divider) -> child(÷2 fixed factor).
+    // Reprogramming div changes its rate; the grandchild child must pick up the
+    // new value without an explicit set_rate on it.
+    let reg = Arc::new(MockReg::new());
+    let osc = ClkBuilder::new("osc", FixedRate::new(1_000_000_000).into_ops())
+        .build()
+        .unwrap();
+    let div = ClkBuilder::new(
+        "div",
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::ONE_BASED),
+    )
+    .parent(osc)
+    .build()
+    .unwrap();
+    let child = ClkBuilder::new("child", FixedFactor::new(1, 2).unwrap().into_ops())
+        .parent(div.clone())
+        .build()
+        .unwrap();
+    assert_eq!(div.get_rate(), 1_000_000_000); // div field 0 -> div1
+    assert_eq!(child.get_rate(), 500_000_000); // ÷2 of 1 GHz
+
+    // Reprogram div; child is a descendant and must cascade-refresh.
+    div.set_rate(200_000_000).unwrap(); // div5 -> 200 MHz
+    assert_eq!(div.get_rate(), 200_000_000);
+    assert_eq!(child.get_rate(), 100_000_000); // ÷2 of 200 MHz, cascaded
+}
+
+#[def_test(serial)]
+fn set_parent_migrates_prepare_enable_refs() {
+    // Two counting parents; an active mux switches from osc to alt. The
+    // prepare/enable refs this node holds must move from osc to alt (new up
+    // before the switch, old down after), not leak on either side.
+    let osc_ops = Arc::new(CountingOps::new());
+    let alt_ops = Arc::new(CountingOps::new());
+    let osc = ClkBuilder::new("osc", osc_ops.clone() as Arc<dyn ClkHwOps>)
+        .build()
+        .unwrap();
+    let alt = ClkBuilder::new("alt", alt_ops.clone() as Arc<dyn ClkHwOps>)
+        .build()
+        .unwrap();
+    let reg = Arc::new(MockReg::new());
+    let mux = Mux::into_ops(reg, 0, 0, 0x1, None);
+    let child = ClkBuilder::new("child", mux)
+        .parent(osc.clone())
+        .parent(alt.clone())
+        .build()
+        .unwrap();
+    let handle = ClkHandle::new(child);
+
+    handle.prepare_enable().unwrap(); // osc prepared+enabled once
+    assert_eq!(osc_ops.snapshot(), (1, 0, 1, 0));
+
+    // Switch the active mux to alt: refs migrate.
+    handle.set_parent(1).unwrap();
+    // osc is torn down (unprepare+disable), alt is brought up (prepare+enable).
+    assert_eq!(osc_ops.snapshot(), (1, 1, 1, 1));
+    assert_eq!(alt_ops.snapshot(), (1, 0, 1, 0));
+
+    // Switch back: refs migrate the other way.
+    handle.set_parent(0).unwrap();
+    assert_eq!(osc_ops.snapshot(), (2, 1, 2, 1)); // prepared again
+    assert_eq!(alt_ops.snapshot(), (1, 1, 1, 1)); // torn down
+
+    handle.disable_unprepare();
+    // The last ref on osc is released.
+    assert_eq!(osc_ops.snapshot(), (2, 2, 2, 2));
+}
+
+#[def_test(serial)]
+fn hiword_mask_gate_writes_atomic_single_word() {
+    // bit 5, SET_TO_ENABLE, hiword-mask: a single reg_write of (mask<<16)|value.
+    let reg = Arc::new(MockReg::new());
+    let gate = Gate::new(
+        reg.clone(),
+        0,
+        5,
+        GateFlags::SET_TO_ENABLE | GateFlags::HIWORD_MASK,
+    );
+
+    gate.enable().unwrap();
+    // mask = 1<<5 = 0x20; value = 0x20; written = 0x20<<16 | 0x20 = 0x200020.
+    assert_eq!(reg.word(0), 0x0020_0020);
+
+    gate.disable();
+    // value = 0; written = 0x20<<16 | 0 = 0x200000.
+    assert_eq!(reg.word(0), 0x0020_0000);
+
+    // is_enabled reads back the low word as before.
+    assert!(!gate.is_enabled().unwrap());
 }
