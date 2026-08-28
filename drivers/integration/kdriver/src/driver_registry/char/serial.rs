@@ -26,7 +26,9 @@ use kdevice::{BusTypeId, DeviceDriver, DeviceMatcher, DeviceObject, FirmwareMatc
 #[cfg(any(feature = "serial-pl011", feature = "serial-ns16550-mmio"))]
 use khal::mem::{PhysAddr, VirtAddr};
 
-use crate::{DeviceResourceExt as _, driver_registry::BoxedDriver};
+#[cfg(any(feature = "serial-pl011", feature = "serial-ns16550-mmio"))]
+use crate::DeviceResourceExt as _;
+use crate::driver_registry::BoxedDriver;
 
 /// Character-device wrapper around one per-instance UART port.
 struct SerialCharDev(Arc<SerialPort>);
