@@ -35,6 +35,7 @@ int_ratio = { workspace = true }
 int_ratio = { workspace = true }
 raw-cpuid = "11.5"
 x2apic = "0.5"
+x86_64 = { workspace = true }
 x86_apic = { workspace = true }
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
