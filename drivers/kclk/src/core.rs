@@ -1088,3 +1088,29 @@ pub fn clk_disable_unused() {
         }
     }
 }
+
+/// A one-line summary of one clock (see [`clk_summary`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClkSummaryEntry {
+    /// Clock name.
+    pub name: &'static str,
+    /// Cached rate, Hz.
+    pub rate: Rate,
+    /// `(prepare_count, enable_count)`.
+    pub counts: (i32, i32),
+}
+
+/// Snapshot every registered clock as `(name, rate, counts)` — the kernel
+/// analogue of Linux debugfs `clk_summary`, for bring-up debugging and
+/// diagnostics. Order follows registration.
+pub fn clk_summary() -> Vec<ClkSummaryEntry> {
+    let clocks: Vec<Arc<ClkCore>> = CLOCKS.lock().iter().cloned().collect();
+    clocks
+        .iter()
+        .map(|c| ClkSummaryEntry {
+            name: c.name(),
+            rate: c.get_rate(),
+            counts: c.counts(),
+        })
+        .collect()
+}

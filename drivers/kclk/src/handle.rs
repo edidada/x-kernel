@@ -74,6 +74,18 @@ impl ClkHandle {
         }
     }
 
+    /// Consume the handle, yielding the underlying node. Used by the
+    /// table-driven registrar to adopt an external provider's clock as a
+    /// parent slot (the handle drops its consumer state without releasing
+    /// any vote or notifier — the node itself is not a consumer).
+    pub(crate) fn into_core(self) -> Arc<ClkCore> {
+        let me = core::mem::ManuallyDrop::new(self);
+        // SAFETY: `me` is never used again after this read; the move out of
+        // `core` is fine because `Drop` will not run on `me` (ManuallyDrop),
+        // so the node reference simply transfers to the caller.
+        unsafe { core::ptr::read(&me.core) }
+    }
+
     /// Human-readable name of the underlying clock.
     pub fn name(&self) -> &'static str {
         self.core.name()

@@ -49,7 +49,7 @@ mod invariants;
 #[cfg(unittest)]
 mod tests;
 
-pub use core::{ClkBuilder, ClkCore, clk_disable_unused, clocks_len};
+pub use core::{ClkBuilder, ClkCore, ClkSummaryEntry, clk_disable_unused, clk_summary, clocks_len};
 
 pub use basic::{Composite, Divider, DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux};
 pub use error::{ClkError, ClkResult};
@@ -67,7 +67,9 @@ pub use provider::{
 };
 pub use rate::{ClkRateRequest, Rate, RoundResult};
 pub use reg::{ClkRegAccess, MmioClkReg};
-pub use table::{ClkBranch, ClkNodeDesc, DividerDesc, GateDesc, MuxDesc, register_table};
+pub use table::{
+    ClkBranch, ClkNodeDesc, DividerDesc, GateDesc, MuxDesc, ParentRef, register_table,
+};
 
 /// Index into a provider's clock table.
 ///

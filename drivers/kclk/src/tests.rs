@@ -17,8 +17,8 @@ use unittest::{assert_eq, def_test};
 use crate::{
     ClkBranch, ClkBuilder, ClkError, ClkEvent, ClkFlags, ClkHandle, ClkHwOps, ClkRegAccess,
     ClkTable, Divider, DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux, NotifierResult,
-    basic::Composite, clk_disable_unused, clk_get_by_index, clk_get_by_name, register_provider,
-    register_table, reset_providers, unregister_provider,
+    ParentRef, basic::Composite, clk_disable_unused, clk_get_by_index, clk_get_by_name,
+    register_provider, register_table, reset_providers, table::ClkNodeDesc, unregister_provider,
 };
 
 /// Array-backed register accessor for testing field math.
@@ -1169,4 +1169,96 @@ fn register_table_failure_rolls_back_global_list() {
     // The global list is back to its pre-registration size.
     assert_eq!(crate::clocks_len(), before);
     reset_providers();
+}
+
+#[def_test(serial)]
+fn register_table_resolves_external_parent_refs() {
+    let _serial = PROVIDER_SERIAL.lock();
+    static MAIN: ClkTable = ClkTable::new(0x90);
+    static PMU: ClkTable = ClkTable::new(0x91);
+    MAIN.clear();
+    PMU.clear();
+    reset_providers();
+
+    // Provider A: a main CCU publishing a 1 GHz output.
+    let reg: Arc<dyn ClkRegAccess> = Arc::new(MockReg::new());
+    let main_branches = [ClkBranch::fixed_rate(0, "main_pll", 1_000_000_000)];
+    register_table(&MAIN, reg.clone(), &main_branches).unwrap();
+    register_provider(&MAIN);
+
+    // Provider B: a PMU clock whose parent is the main CCU's output, by
+    // (provider id, DT index) — the cross-controller dependency.
+    let pmu_branches = [ClkBranch::new_refs(
+        0,
+        "pmu_gate",
+        &[ParentRef::External(0x90, 0)],
+        ClkFlags::empty(),
+        ClkNodeDesc::Gate {
+            offset: 0,
+            bit: 3,
+            flags: GateFlags::SET_TO_ENABLE,
+        },
+    )];
+    register_table(&PMU, reg, &pmu_branches).unwrap();
+    register_provider(&PMU);
+
+    // The PMU gate resolves through the main provider and inherits its rate.
+    let h = clk_get_by_index(0x91, 0).unwrap();
+    assert_eq!(h.get_rate(), 1_000_000_000);
+    assert_eq!(h.get_parent().unwrap().name(), "main_pll");
+
+    // An unresolved external (unknown provider) fails the whole batch and
+    // rolls back, leaving nothing published.
+    static BAD: ClkTable = ClkTable::new(0x92);
+    BAD.clear();
+    let before = crate::clocks_len();
+    let bad_branches = [ClkBranch::new_refs(
+        0,
+        "bad_gate",
+        &[ParentRef::External(0xDEAD, 0)],
+        ClkFlags::empty(),
+        ClkNodeDesc::Gate {
+            offset: 0,
+            bit: 0,
+            flags: GateFlags::SET_TO_ENABLE,
+        },
+    )];
+    assert!(register_table(&BAD, Arc::new(MockReg::new()), &bad_branches).is_err());
+    assert_eq!(crate::clocks_len(), before);
+    assert!(clk_get_by_index(0x92, 0).is_err());
+
+    reset_providers();
+}
+
+#[def_test(serial)]
+fn clk_summary_lists_registered_clocks() {
+    let osc = ClkBuilder::new("sum_osc", FixedRate::new(24_000_000).into_ops())
+        .build()
+        .unwrap();
+    let child = ClkBuilder::new("sum_child", FixedFactor::new(2, 1).unwrap().into_ops())
+        .parent(osc.clone())
+        .build()
+        .unwrap();
+    let h = ClkHandle::new(child.clone());
+    h.prepare_enable().unwrap();
+
+    let summary = crate::clk_summary();
+    let osc_entry = summary.iter().find(|e| e.name == "sum_osc").unwrap();
+    let child_entry = summary.iter().find(|e| e.name == "sum_child").unwrap();
+    assert_eq!(osc_entry.rate, 24_000_000);
+    assert_eq!(child_entry.rate, 48_000_000);
+    // Active consumer reference visible on both.
+    assert_eq!(osc_entry.counts, (1, 1));
+    assert_eq!(child_entry.counts, (1, 1));
+
+    h.disable_unprepare();
+    let summary = crate::clk_summary();
+    assert_eq!(
+        summary
+            .iter()
+            .find(|e| e.name == "sum_child")
+            .unwrap()
+            .counts,
+        (0, 0)
+    );
 }

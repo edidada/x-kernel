@@ -45,6 +45,39 @@ use crate::{
     core::with_clk_lock,
 };
 
+/// A reference to one selectable parent of a [`ClkBranch`].
+///
+/// [`Local`] names a clock in the same `register_table` call — resolved after
+/// every node exists, so the table may list children before their parents.
+/// [`External`] names a clock published by another (already-registered)
+/// provider, by `(provider id, DT index)` — the same pair a DT
+/// `clocks = <&phandle N>` specifier carries. This lets a controller describe
+/// cross-controller dependencies (e.g. a PMU clock derived from a main-CCU
+/// output) declaratively instead of pre-building `Arc<ClkCore>` handles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentRef {
+    /// A clock registered by this same table, by name.
+    Local(&'static str),
+    /// A clock of another registered provider, by `(provider id, DT index)`.
+    External(crate::ProviderId, ClkIndex),
+}
+
+impl From<&'static str> for ParentRef {
+    fn from(name: &'static str) -> Self {
+        ParentRef::Local(name)
+    }
+}
+
+impl ParentRef {
+    /// The local name, if this is a [`ParentRef::Local`].
+    pub const fn local_name(&self) -> Option<&'static str> {
+        match self {
+            ParentRef::Local(n) => Some(n),
+            ParentRef::External(..) => None,
+        }
+    }
+}
+
 /// One declarative clock entry.
 ///
 /// `parents` are referenced by name and resolved by [`register_table`] after
@@ -54,8 +87,15 @@ pub struct ClkBranch {
     pub index: ClkIndex,
     /// Globally-unique clock name.
     pub name: &'static str,
-    /// Selectable parents, by name. Empty for a root.
+    /// Selectable parents. Empty for a root.
+    ///
+    /// Prefer [`refs`](Self::refs) / the `*_refs` constructors, which can
+    /// express cross-provider parents; this string form is kept for the common
+    /// single-controller case and upgrades each name to a [`ParentRef::Local`].
     pub parents: &'static [&'static str],
+    /// Structured parent references; when non-empty it takes precedence over
+    /// [`parents`](Self::parents). Built by the `*_refs` constructors.
+    pub refs: &'static [ParentRef],
     /// Policy flags.
     pub flags: ClkFlags,
     /// Hardware description (gate / mux / divider / ...).
@@ -74,8 +114,47 @@ impl ClkBranch {
             index,
             name,
             parents,
+            refs: &[],
             flags,
             node,
+        }
+    }
+
+    /// Build an entry from structured [`ParentRef`]s (locals by name plus
+    /// cross-provider externals). `refs` takes precedence over the plain
+    /// string form at registration time.
+    pub const fn new_refs(
+        index: ClkIndex,
+        name: &'static str,
+        refs: &'static [ParentRef],
+        flags: ClkFlags,
+        node: ClkNodeDesc,
+    ) -> Self {
+        Self {
+            index,
+            name,
+            parents: &[],
+            refs,
+            flags,
+            node,
+        }
+    }
+
+    /// Resolve this entry's parents as [`ParentRef`]s: the structured form if
+    /// present, else each plain name upgraded to [`ParentRef::Local`].
+    fn parent_refs(&self) -> Vec<ParentRef> {
+        if !self.refs.is_empty() {
+            return self.refs.to_vec();
+        }
+        self.parents.iter().map(|n| ParentRef::Local(n)).collect()
+    }
+
+    /// Number of selectable parents (either form).
+    fn parent_count(&self) -> usize {
+        if !self.refs.is_empty() {
+            self.refs.len()
+        } else {
+            self.parents.len()
         }
     }
 
@@ -375,7 +454,8 @@ pub fn register_table(
     let clocks_mark = with_clk_lock(crate::core::clocks_len);
     let mut nodes: BTreeMap<&'static str, Arc<ClkCore>> = BTreeMap::new();
     for (b, ops) in branches.iter().zip(ops_list) {
-        let parents: Vec<Option<Arc<ClkCore>>> = (0..b.parents.len()).map(|_| None).collect();
+        let n = b.parent_count();
+        let parents: Vec<Option<Arc<ClkCore>>> = (0..n).map(|_| None).collect();
         let core = match ClkBuilder::new(b.name, ops)
             .flags(b.flags)
             .parents(parents)
@@ -390,29 +470,48 @@ pub fn register_table(
         nodes.insert(b.name, core);
     }
 
-    // Pass 2+3 — under CLK_LOCK: resolve name-referenced parents into slots,
-    // then refresh cached rates top-down so deep subtrees seeded against a
-    // zero parent rate pick up the right value now that parents are linked.
-    // A failure here (cycle, refresh error) rolls the batch back out of the
-    // global clock list.
-    let dep_map: BTreeMap<&'static str, &'static [&'static str]> =
-        branches.iter().map(|b| (b.name, b.parents)).collect();
+    // Pass 2+3 — under CLK_LOCK: resolve parent references into slots, then
+    // refresh cached rates top-down so deep subtrees seeded against a zero
+    // parent rate pick up the right value now that parents are linked. A
+    // failure here (cycle, refresh error, unresolved external) rolls the
+    // batch back out of the global clock list.
+    //
+    // `Local` resolves within this batch (order-independent); `External`
+    // resolves through the provider registry (the referenced controller must
+    // already be registered) — the same `(phandle, index)` pair a DT clocks
+    // specifier carries. An unresolved reference of either kind is an error:
+    // a half-linked tree reads rate 0 at the gap and misleads consumers.
+    let dep_map: BTreeMap<&'static str, Vec<&'static str>> = branches
+        .iter()
+        .map(|b| {
+            (
+                b.name,
+                b.parent_refs()
+                    .iter()
+                    .filter_map(|r| r.local_name())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
     let resolve_result = with_clk_lock(|| -> ClkResult<()> {
         for b in branches {
             let node = &nodes[b.name];
-            for (i, pname) in b.parents.iter().enumerate() {
-                if let Some(parent) = nodes.get(*pname) {
-                    node.set_parent_slot(i as u8, parent.clone());
-                }
-                // A parent not in this table stays an empty slot. Note: this
-                // does NOT register an orphan for later adoption — only
-                // `ClkBuilder::parent_name` does that. A cross-controller
-                // parent must be resolved by the caller (e.g. pre-built and
-                // seeded) or the slot remains None and the rate reads 0.
+            for (i, pref) in b.parent_refs().iter().enumerate() {
+                let parent = match pref {
+                    ParentRef::Local(pname) => {
+                        nodes.get(pname).ok_or(ClkError::InvalidParent)?.clone()
+                    }
+                    ParentRef::External(pid, idx) => crate::provider::clk_get_by_index(*pid, *idx)
+                        .map_err(|_| ClkError::InvalidParent)?
+                        .into_core(),
+                };
+                node.set_parent_slot(i as u8, parent);
             }
         }
         // Detect parent cycles before the recursive rate refresh: a cyclic
         // table would otherwise recurse forever at prepare/enable time.
+        // (Externals cannot participate in a cycle — they are already-built
+        // nodes in other providers.)
         let mut visiting: BTreeSet<&'static str> = BTreeSet::new();
         let mut visited: BTreeSet<&'static str> = BTreeSet::new();
         for b in branches {
@@ -485,7 +584,7 @@ fn build_ops(node: &ClkNodeDesc, reg: &Arc<dyn ClkRegAccess>) -> ClkResult<Arc<d
 fn refresh_subtree(
     name: &'static str,
     nodes: &BTreeMap<&'static str, Arc<ClkCore>>,
-    dep_map: &BTreeMap<&'static str, &'static [&'static str]>,
+    dep_map: &BTreeMap<&'static str, Vec<&'static str>>,
     visiting: &mut BTreeSet<&'static str>,
     visited: &mut BTreeSet<&'static str>,
 ) -> ClkResult {
@@ -497,8 +596,8 @@ fn refresh_subtree(
     if !visiting.insert(name) {
         return Err(ClkError::BadState); // cycle: `name` is on its own DFS stack
     }
-    if let Some(&parents) = dep_map.get(name) {
-        for &pname in parents {
+    if let Some(parents) = dep_map.get(name) {
+        for &pname in parents.iter() {
             // Only recurse into parents that live in this table; an external
             // (unresolved) parent keeps its own rate and is read as-is.
             if nodes.contains_key(pname) {
