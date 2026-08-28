@@ -657,7 +657,7 @@ fn separate_prepare_enable_apis_work() {
     assert_eq!((en, dis), (2, 1));
 
     clk.disable();
-    clk.unprepare();
+    let _ = clk.unprepare();
     let (_, unprep, _, dis) = ops.snapshot();
     assert_eq!((unprep, dis), (1, 2));
 }
@@ -1023,4 +1023,115 @@ fn notifier_is_unregistered_when_handle_drops() {
     }
     div.set_rate(250_000_000).unwrap();
     assert_eq!(*fired.lock(), 2); // no further events after drop
+}
+
+#[def_test(serial)]
+fn register_table_rejects_parent_cycle() {
+    let _serial = PROVIDER_SERIAL.lock();
+    static TABLE: ClkTable = ClkTable::new(0x60);
+    TABLE.clear();
+    reset_providers();
+    let reg: Arc<dyn ClkRegAccess> = Arc::new(MockReg::new());
+    // a -> b -> a: a genuine cycle must be rejected, not silently accepted.
+    let branches = [
+        ClkBranch::gate(0, "a", 0, 0, GateFlags::SET_TO_ENABLE, &["b"]),
+        ClkBranch::gate(1, "b", 0, 1, GateFlags::SET_TO_ENABLE, &["a"]),
+    ];
+    assert!(register_table(&TABLE, reg, &branches).is_err());
+    reset_providers();
+}
+
+#[def_test(serial)]
+fn rate_range_rejects_empty_intersection() {
+    let reg = Arc::new(MockReg::new());
+    let root = ClkBuilder::new("root", FixedRate::new(1_000_000_000).into_ops())
+        .build()
+        .unwrap();
+    let div = ClkBuilder::new(
+        "div",
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::ONE_BASED),
+    )
+    .parent(root)
+    .build()
+    .unwrap();
+    let h1 = ClkHandle::new(div.clone());
+    let h2 = ClkHandle::new(div.clone());
+    h1.set_rate_range(100_000_000, 200_000_000).unwrap();
+    // [300,400] does not intersect [100,200]: rejected, previous vote intact.
+    assert_eq!(
+        h2.set_rate_range(300_000_000, 400_000_000).unwrap_err(),
+        ClkError::InvalidRate
+    );
+    assert_eq!(div.get_rate_range(), (100_000_000, 200_000_000));
+    // A valid second vote still aggregates.
+    h2.set_rate_range(150_000_000, 250_000_000).unwrap();
+    assert_eq!(div.get_rate_range(), (150_000_000, 200_000_000));
+}
+
+#[def_test(serial)]
+fn set_rate_gate_rejects_while_enabled() {
+    let reg = Arc::new(MockReg::new());
+    let root = ClkBuilder::new("root", FixedRate::new(1_000_000_000).into_ops())
+        .build()
+        .unwrap();
+    let div = ClkBuilder::new(
+        "div",
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::ONE_BASED),
+    )
+    .parent(root)
+    .flags(ClkFlags::SET_RATE_GATE)
+    .build()
+    .unwrap();
+    let h = ClkHandle::new(div.clone());
+    // Disabled: reprogramming is allowed.
+    div.set_rate(500_000_000).unwrap();
+    // Enabled: rejected with Busy (Linux CLK_SET_RATE_GATE), not gated around.
+    h.prepare_enable().unwrap();
+    assert_eq!(div.set_rate(200_000_000).unwrap_err(), ClkError::Busy);
+}
+
+#[def_test(serial)]
+fn active_orphan_adoption_migrates_refs_to_new_parent() {
+    // An orphan that was prepare_enable()d BEFORE its parent existed must have
+    // its prepare/enable references migrated onto the parent when it registers.
+    let pll_ops = Arc::new(CountingOps::new());
+    let child = ClkBuilder::new("a_child", FixedFactor::new(1, 1).unwrap().into_ops())
+        .parent_name("a_pll")
+        .build()
+        .unwrap();
+    let h = ClkHandle::new(child);
+    // Enable while the parent is still missing: counts sit on the child only.
+    h.prepare_enable().unwrap();
+
+    // Register the parent -> adoption must migrate the references.
+    let _pll = ClkBuilder::new("a_pll", pll_ops.clone() as Arc<dyn ClkHwOps>)
+        .build()
+        .unwrap();
+    // The parent now holds one prepare+enable from the adopted child.
+    assert_eq!(pll_ops.snapshot(), (1, 0, 1, 0));
+
+    // Tearing the child down releases the migrated references.
+    h.disable_unprepare();
+    assert_eq!(pll_ops.snapshot(), (1, 1, 1, 1));
+}
+
+#[def_test(serial)]
+fn register_table_failure_rolls_back_global_list() {
+    let _serial = PROVIDER_SERIAL.lock();
+    static TABLE: ClkTable = ClkTable::new(0x70);
+    TABLE.clear();
+    reset_providers();
+    let before = crate::clocks_len();
+
+    let reg: Arc<dyn ClkRegAccess> = Arc::new(MockReg::new());
+    // A cycle in the table makes the resolve pass fail after nodes were built;
+    // the batch must be rolled back out of the global clock list.
+    let branches = [
+        ClkBranch::gate(0, "rb_a", 0, 0, GateFlags::SET_TO_ENABLE, &["rb_b"]),
+        ClkBranch::gate(1, "rb_b", 0, 1, GateFlags::SET_TO_ENABLE, &["rb_a"]),
+    ];
+    assert!(register_table(&TABLE, reg, &branches).is_err());
+    // The global list is back to its pre-registration size.
+    assert_eq!(crate::clocks_len(), before);
+    reset_providers();
 }

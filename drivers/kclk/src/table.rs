@@ -325,6 +325,18 @@ pub struct GateDesc {
 /// A controller with no custom PLLs can pass a `&'static [ClkBranch]`; a
 /// controller with PLLs builds the array at runtime (the `Custom` `Arc` is not
 /// `const`).
+///
+/// # Failure atomicity
+///
+/// Duplicate names/indices and bad descriptors (invalid fixed-factor, divider
+/// width) are rejected before any global state is touched. If a node's
+/// `build()` (init/recalc) or the resolve/refresh pass fails partway, the
+/// batch is rolled back out of the global clock list before returning the
+/// error, so no unreachable-but-listed nodes are left for
+/// `clk_disable_unused` or a later same-name registration to trip over. The
+/// provider table (`ClkTable`) is only written after everything succeeded, so
+/// consumers never observe a partial tree. Treat a failed `register_table`
+/// as a fatal controller-probe error regardless.
 pub fn register_table(
     table: &ClkTable,
     reg: Arc<dyn ClkRegAccess>,
@@ -342,28 +354,50 @@ pub fn register_table(
             return Err(ClkError::BadState); // duplicate DT index
         }
     }
+    // Pre-build every descriptor's ops before touching any global state, so a
+    // bad descriptor (e.g. a zero fixed-factor) fails before nodes enter the
+    // global clock list. (build() and the refresh below can still fail late —
+    // registration is not fully transactional; see the doc on this function.)
+    let mut ops_list = Vec::with_capacity(branches.len());
+    for b in branches {
+        ops_list.push(build_ops(&b.node, &reg)?);
+    }
 
     // Pass 1 — build every node with empty parent slots. `build()` seeds the
     // initial parent index and (zero) rate from the hardware; rates are fixed
     // in pass 3. Not under CLK_LOCK: build() internally takes it via
     // adopt_orphans, and re-entrancy would panic.
+    //
+    // Rollback: record how many entries this batch pushed into the global
+    // CLOCKS list; on any later failure, truncate back to that mark so a
+    // failed registration does not leave unreachable-but-listed nodes for
+    // clk_disable_unused / future same-name adopters to trip over.
+    let clocks_mark = with_clk_lock(crate::core::clocks_len);
     let mut nodes: BTreeMap<&'static str, Arc<ClkCore>> = BTreeMap::new();
-    for b in branches {
-        let ops = build_ops(&b.node, &reg)?;
+    for (b, ops) in branches.iter().zip(ops_list) {
         let parents: Vec<Option<Arc<ClkCore>>> = (0..b.parents.len()).map(|_| None).collect();
-        let core = ClkBuilder::new(b.name, ops)
+        let core = match ClkBuilder::new(b.name, ops)
             .flags(b.flags)
             .parents(parents)
-            .build()?;
+            .build()
+        {
+            Ok(core) => core,
+            Err(e) => {
+                rollback_clocks(clocks_mark);
+                return Err(e);
+            }
+        };
         nodes.insert(b.name, core);
     }
 
     // Pass 2+3 — under CLK_LOCK: resolve name-referenced parents into slots,
     // then refresh cached rates top-down so deep subtrees seeded against a
     // zero parent rate pick up the right value now that parents are linked.
+    // A failure here (cycle, refresh error) rolls the batch back out of the
+    // global clock list.
     let dep_map: BTreeMap<&'static str, &'static [&'static str]> =
         branches.iter().map(|b| (b.name, b.parents)).collect();
-    with_clk_lock(|| -> ClkResult<()> {
+    let resolve_result = with_clk_lock(|| -> ClkResult<()> {
         for b in branches {
             let node = &nodes[b.name];
             for (i, pname) in b.parents.iter().enumerate() {
@@ -385,13 +419,24 @@ pub fn register_table(
             refresh_subtree(b.name, &nodes, &dep_map, &mut visiting, &mut visited)?;
         }
         Ok(())
-    })?;
+    });
+    if let Err(e) = resolve_result {
+        rollback_clocks(clocks_mark);
+        return Err(e);
+    }
 
     // Pass 4 — publish each output in the provider table.
     for b in branches {
         table.register(b.index, b.name, nodes[b.name].clone());
     }
     Ok(())
+}
+
+/// Truncate the global clock list back to `mark` entries — the rollback half
+/// of [`register_table`]'s batch registration. Callers that did not record a
+/// mark must not call this.
+fn rollback_clocks(mark: usize) {
+    with_clk_lock(|| crate::core::truncate_clocks(mark));
 }
 
 /// Construct the hardware ops for a descriptor, sharing the controller's
@@ -444,8 +489,10 @@ fn refresh_subtree(
     visiting: &mut BTreeSet<&'static str>,
     visited: &mut BTreeSet<&'static str>,
 ) -> ClkResult {
-    if !visited.insert(name) {
-        return Ok(()); // already refreshed
+    // Black (fully refreshed) → short-circuit BEFORE the gray check, otherwise
+    // a diamond A→B→C, A→C would misfire; gray (on the DFS stack) → cycle.
+    if visited.contains(name) {
+        return Ok(());
     }
     if !visiting.insert(name) {
         return Err(ClkError::BadState); // cycle: `name` is on its own DFS stack
@@ -460,6 +507,7 @@ fn refresh_subtree(
         }
     }
     visiting.remove(name);
+    visited.insert(name);
     nodes[name].refresh_rate();
     Ok(())
 }

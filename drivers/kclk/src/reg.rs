@@ -54,11 +54,15 @@ unsafe impl Sync for MmioClkReg {}
 impl MmioClkReg {
     /// Wrap a mapped MMIO virtual base.
     ///
-    /// # Safety contract for the caller
+    /// # Safety
     ///
-    /// `base` must point to a valid, word-aligned, mapped register window that
-    /// remains live for the lifetime of every clock node that shares it.
-    pub fn new(base: usize) -> Self {
+    /// `base` must be a non-zero, word-aligned, mapped, live-for-the-node's-
+    /// lifetime MMIO virtual address — the caller (typically the controller
+    /// driver, from `memspace::iomap_device`/`devm_iomap`) owns that guarantee.
+    /// An invalid base makes every subsequent `reg_read`/`reg_write` undefined
+    /// behavior, so the constructor is `unsafe` to make the contract explicit
+    /// at every call site.
+    pub unsafe fn new(base: usize) -> Self {
         Self {
             base: base as *mut u8,
         }

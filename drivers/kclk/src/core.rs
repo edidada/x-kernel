@@ -161,14 +161,42 @@ impl ClkCore {
 
     /// Insert or update the vote `id` to `(min, max)`. The caller validates
     /// `min <= max` and holds `CLK_LOCK`.
-    pub(crate) fn set_rate_vote(&self, id: u64, min: Rate, max: Rate) {
+    ///
+    /// Rejects a vote whose intersection with the other votes would be empty
+    /// (e.g. [100,200] vs [300,400]) instead of clamping the effective range
+    /// into a bogus single point — an unsatisfiable constraint must surface as
+    /// an error, leaving the previous votes untouched.
+    pub(crate) fn set_rate_vote(&self, id: u64, min: Rate, max: Rate) -> ClkResult {
         let mut st = self.state.lock();
+        // Preview the effective range with this vote applied: fold over the
+        // *other* votes (this id's old value, if any, is replaced) plus the
+        // new one.
+        let lo = st
+            .votes
+            .iter()
+            .filter(|(vid, ..)| *vid != id)
+            .map(|(_, vlo, _)| *vlo)
+            .chain(core::iter::once(min))
+            .max()
+            .unwrap_or(0);
+        let hi = st
+            .votes
+            .iter()
+            .filter(|(vid, ..)| *vid != id)
+            .map(|(_, _, vhi)| *vhi)
+            .chain(core::iter::once(max))
+            .min()
+            .unwrap_or(Rate::MAX);
+        if lo > hi {
+            return Err(ClkError::InvalidRate);
+        }
         if let Some(v) = st.votes.iter_mut().find(|(vid, ..)| *vid == id) {
             v.1 = min;
             v.2 = max;
         } else {
             st.votes.push((id, min, max));
         }
+        Ok(())
     }
 
     /// Remove the vote `id` (a consumer going away).
@@ -194,8 +222,7 @@ impl ClkCore {
             return Err(ClkError::InvalidRate);
         }
         let _guard = CLK_LOCK.lock();
-        self.set_rate_vote(0, min, max);
-        Ok(())
+        self.set_rate_vote(0, min, max)
     }
 
     /// The current `(min, max)` rate range.
@@ -393,7 +420,7 @@ impl ClkCore {
         let need_prepare = self.state.lock().prepare_count == 0;
         if need_prepare && let Err(err) = self.ops.prepare() {
             if parent_done && let Some(parent) = self.parent_node() {
-                parent.unprepare_locked();
+                let _ = parent.unprepare_locked();
             }
             return Err(err);
         }
@@ -402,29 +429,42 @@ impl ClkCore {
     }
 
     /// Release one prepare reference, then propagate to the parent.
-    pub fn unprepare(&self) {
+    /// Release one prepare reference, then propagate to the parent.
+    ///
+    /// Returns the hardware `unprepare` error, if any: the software count is
+    /// already decremented (reflecting the consumer's release), so a caller
+    /// receiving an error knows the hardware may still be prepared while the
+    /// framework considers it unprepared — the mismatch is surfaced rather than
+    /// silently dropped (Linux `clk_unprepare` reports it the same way).
+    pub fn unprepare(&self) -> ClkResult {
         let _guard = CLK_LOCK.lock();
-        self.unprepare_locked();
+        self.unprepare_locked()
     }
 
-    fn unprepare_locked(&self) {
+    /// Returns the last hardware `unprepare` error encountered while unwinding
+    /// this node's chain (parent errors are included), or `Ok(())`.
+    fn unprepare_locked(&self) -> ClkResult {
         // Decrement under the lock, then drop it before the sleepable op —
         // same rationale as `prepare_locked`: `unprepare` may sleep and must
         // not run with `SpinNoIrq` held.
         let need_unprepare = {
             let mut st = self.state.lock();
             if st.prepare_count == 0 {
-                return;
+                return Ok(());
             }
             st.prepare_count -= 1;
             st.prepare_count == 0
         };
+        let mut own_err = Ok(());
         if need_unprepare {
-            let _ = self.ops.unprepare();
+            own_err = self.ops.unprepare();
         }
-        if let Some(parent) = self.parent_node() {
-            parent.unprepare_locked();
-        }
+        let parent_err = if let Some(parent) = self.parent_node() {
+            parent.unprepare_locked()
+        } else {
+            Ok(())
+        };
+        own_err.and(parent_err)
     }
 
     /// Enable the fast path, propagating to the parent first.
@@ -616,32 +656,16 @@ impl ClkCore {
     }
 
     fn set_rate_locked(&self, rate: Rate) -> ClkResult<Rate> {
+        // SET_RATE_GATE (Linux CLK_SET_RATE_GATE): the clock must not be
+        // reprogrammed while enabled — reject with Busy instead of the
+        // glitch-prone disable/change/re-enable dance, whose re-enable failure
+        // would leave enable_count > 0 on gated hardware (permanently off).
+        if self.flags.contains(ClkFlags::SET_RATE_GATE) && self.state.lock().enable_count > 0 {
+            return Err(ClkError::Busy);
+        }
+
         let req = self.determine_rate_locked(rate)?;
-
-        // Glitch avoidance (SET_RATE_GATE): gate across the reprogram and
-        // restore afterwards, matching Linux. The re-enable is *not* silent: if
-        // it fails the clock is left gated while its rate changed, an
-        // inconsistent state we surface as BadState rather than reporting
-        // success.
-        let gate_around = self.flags.contains(ClkFlags::SET_RATE_GATE);
-        let was_enabled = if gate_around {
-            self.is_enabled().unwrap_or(false)
-        } else {
-            false
-        };
-        if gate_around && was_enabled {
-            self.ops.disable();
-        }
-
-        let result = self.program_rate_locked(&req);
-
-        if gate_around && was_enabled && self.ops.enable().is_err() {
-            // Rate/parent may have changed but the clock could not be
-            // re-enabled — surface the inconsistency instead of masking it.
-            return Err(ClkError::BadState);
-        }
-
-        let actual = result?;
+        let actual = self.program_rate_locked(&req)?;
         self.state.lock().rate = actual;
         // This node's rate changed — refresh descendants that derive from it.
         self.refresh_descendants();
@@ -695,34 +719,24 @@ impl ClkCore {
     /// Select parent `index` and refresh the cached rate and accuracy.
     ///
     /// Serialized by [`CLK_LOCK`]. The new parent must already be registered at
-    /// `index`. When [`ClkFlags::SET_RATE_GATE`] is set, the clock is gated
-    /// across the mux switch and restored afterwards, to avoid glitches on
-    /// running hardware.
+    /// `index`. When [`ClkFlags::SET_RATE_GATE`] is set and the clock is
+    /// enabled, the switch is rejected with [`Busy`](crate::ClkError::Busy)
+    /// (Linux `CLK_SET_RATE_GATE` semantics).
     pub fn set_parent(&self, index: u8) -> ClkResult {
         let _guard = CLK_LOCK.lock();
-        // Glitch avoidance (SET_RATE_GATE) around the mux switch: same
-        // re-enable contract as set_rate — a failed re-enable is surfaced, not
-        // silently masked.
-        let gate_around = self.flags.contains(ClkFlags::SET_RATE_GATE);
-        let was_enabled = if gate_around {
-            self.is_enabled().unwrap_or(false)
-        } else {
-            false
-        };
-        if gate_around && was_enabled {
-            self.ops.disable();
+        // SET_RATE_GATE (Linux CLK_SET_RATE_GATE): reject the mux switch while
+        // the clock is enabled, instead of a disable/switch/re-enable dance
+        // (whose re-enable failure would strand enabled-count on gated HW).
+        if self.flags.contains(ClkFlags::SET_RATE_GATE) && self.state.lock().enable_count > 0 {
+            return Err(ClkError::Busy);
         }
-        let result = self.switch_parent_locked(index);
-        if gate_around && was_enabled && self.ops.enable().is_err() {
-            return Err(ClkError::BadState);
-        }
-        result
+        self.switch_parent_locked(index)
     }
 
     /// Raw parent switch plus cache refresh.
     ///
-    /// The caller must hold [`CLK_LOCK`] and is responsible for any
-    /// `SET_RATE_GATE` glitch avoidance around the switch.
+    /// The caller must hold [`CLK_LOCK`] and has already enforced the
+    /// `SET_RATE_GATE`-while-enabled rejection.
     fn switch_parent_locked(&self, index: u8) -> ClkResult {
         // Resolve the new parent and capture the previously selected parent
         // (to move the parent→child back-edge + prepare/enable refs after the
@@ -758,7 +772,7 @@ impl ClkCore {
             && let Err(e) = new_parent.enable_locked()
         {
             if prep > 0 {
-                new_parent.unprepare_locked();
+                let _ = new_parent.unprepare_locked();
             }
             return Err(e);
         }
@@ -775,7 +789,7 @@ impl ClkCore {
                     new_parent.disable_locked();
                 }
                 if prep > 0 {
-                    new_parent.unprepare_locked();
+                    let _ = new_parent.unprepare_locked();
                 }
                 return Err(e);
             }
@@ -786,7 +800,7 @@ impl ClkCore {
                 new_parent.disable_locked();
             }
             if prep > 0 {
-                new_parent.unprepare_locked();
+                let _ = new_parent.unprepare_locked();
             }
             return Err(e);
         }
@@ -796,7 +810,7 @@ impl ClkCore {
                 old.disable_locked();
             }
             if prep > 0 {
-                old.unprepare_locked();
+                let _ = old.unprepare_locked();
             }
         }
         // 5. Commit cache, move the back-edge, refresh descendants.
@@ -976,6 +990,26 @@ fn adopt_orphans(name: &'static str, parent: Arc<ClkCore>) {
             .child
             .set_parent_slot(entry.parent_index, parent.clone());
         if entry.child.state.lock().parent_index == entry.parent_index {
+            // Migrate the child's prepare/enable references to the new parent:
+            // an orphan that was already prepare_enable()d while its parent was
+            // missing must not leave the parent un-enabled (its later disable
+            // would decrement a reference the parent never held). Same
+            // new-parent-up semantics as switch_parent_locked; there is no old
+            // parent to tear down (the slot was empty).
+            let (prep, en) = {
+                let st = entry.child.state.lock();
+                (st.prepare_count, st.enable_count)
+            };
+            if prep > 0 {
+                // A failure here leaves the child software-prepared on a
+                // hardware-unprepared parent; surface it rather than silently
+                // diverging. (un).prepare is best-effort at this point — the
+                // adoption itself has already committed.
+                let _ = parent.prepare_locked();
+            }
+            if en > 0 {
+                parent.enable_locked().ok();
+            }
             let parent_rate = parent.get_rate();
             let parent_accuracy = parent.get_accuracy();
             let mut st = entry.child.state.lock();
@@ -994,6 +1028,19 @@ fn adopt_orphans(name: &'static str, parent: Arc<ClkCore>) {
 pub(crate) fn with_clk_lock<T>(f: impl FnOnce() -> T) -> T {
     let _g = CLK_LOCK.lock();
     f()
+}
+
+/// Current length of the global clock list. Useful for diagnostics and for
+/// callers implementing their own rollback bookkeeping.
+pub fn clocks_len() -> usize {
+    CLOCKS.lock().len()
+}
+
+/// Truncate the global clock list back to `mark` entries (rollback of a
+/// partially-failed batch registration; caller holds `CLK_LOCK`).
+pub(crate) fn truncate_clocks(mark: usize) {
+    let mut list = CLOCKS.lock();
+    list.truncate(mark);
 }
 
 /// Gate off any clock that is enabled in hardware but holds no consumer

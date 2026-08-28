@@ -46,7 +46,7 @@ mod table;
 #[cfg(unittest)]
 mod tests;
 
-pub use core::{ClkBuilder, ClkCore, clk_disable_unused};
+pub use core::{ClkBuilder, ClkCore, clk_disable_unused, clocks_len};
 
 pub use basic::{Composite, Divider, DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux};
 pub use error::{ClkError, ClkResult};
@@ -57,9 +57,10 @@ pub use lookup::ClkTable;
 pub use ops::ClkHwOps;
 #[cfg(unittest)]
 pub use provider::reset_providers;
+#[cfg(unittest)]
+pub use provider::unregister_provider;
 pub use provider::{
-    ClkLookup, ProviderId, clk_get_by_index, clk_get_by_name, provider_installed,
-    register_provider, unregister_provider,
+    ClkLookup, ProviderId, clk_get_by_index, clk_get_by_name, provider_installed, register_provider,
 };
 pub use rate::{ClkRateRequest, Rate, RoundResult};
 pub use reg::{ClkRegAccess, MmioClkReg};

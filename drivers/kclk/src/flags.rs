@@ -17,11 +17,12 @@ bitflags! {
         ///
         /// **Implemented:** honored by `ClkCore::round_rate` / `set_rate`.
         const SET_RATE_PARENT = 1 << 0;
-        /// Gate the clock while its rate or parent is being changed, to avoid
-        /// glitches on running hardware.
-        ///
-        /// **Implemented:** `set_rate` / `set_parent` save the gate state,
-        /// disable the clock across the change, and restore it afterwards.
+        /// The clock's rate or parent may only be changed while it is disabled
+        /// (Linux `CLK_SET_RATE_GATE`). An enabled clock's `set_rate` /
+        /// `set_parent` is rejected with [`Busy`](crate::ClkError::Busy) —
+        /// reprogramming running hardware is glitch-prone, and the
+        /// disable/change/re-enable alternative strands the enable count on
+        /// gated hardware if the re-enable fails.
         const SET_RATE_GATE = 1 << 1;
         /// Never gate this clock, even when it appears unused.
         ///

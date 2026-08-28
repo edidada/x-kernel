@@ -96,16 +96,22 @@ static REGISTRY: SpinNoIrq<Registry> = SpinNoIrq::new(Registry::new());
 /// Called during platform/controller init. A re-registration of an existing id
 /// replaces the previous provider, which is the expected behavior when a
 /// controller is re-probed. Clocks themselves are never freed (boot-static,
-/// matching Linux); [`unregister_provider`] only removes a controller from
-/// lookup (mainly for `--cfg unittest` / re-probe).
+/// matching Linux). Providers cannot be unregistered at runtime (boot-static);
+/// only `--cfg unittest` builds may remove them.
 pub fn register_provider(provider: &'static dyn ClkLookup) {
     REGISTRY.lock().register(provider);
 }
 
-/// Remove a previously-registered provider from the lookup table. Mainly for
-/// `--cfg unittest` and controller re-probe; it does not free the clocks the
-/// provider published (the global clock list holds them for the kernel's
-/// lifetime, matching Linux's boot-static clock model).
+/// Remove a previously-registered provider from the lookup table.
+///
+/// **Only available under `--cfg unittest`.** Clock controllers are boot-static:
+/// `CLOCKS` permanently holds every registered clock, consumers may already hold
+/// handles into the tree, and an unregistered provider's MMIO mapping may still
+/// be live in those nodes — there is no coherent runtime-removal semantics
+/// (revocation, dependency tracking, mapping lifetime). Rather than keep a
+/// seemingly-usable but incomplete API, dynamic remove is not offered in
+/// production builds, matching the "clocks live forever" boot-static model.
+#[cfg(unittest)]
 pub fn unregister_provider(id: ProviderId) {
     REGISTRY.lock().unregister(id);
 }

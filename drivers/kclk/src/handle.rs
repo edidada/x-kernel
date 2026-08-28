@@ -95,7 +95,11 @@ impl ClkHandle {
     }
 
     /// Release one prepare reference, then propagate to the parent.
-    pub fn unprepare(&self) {
+    ///
+    /// Returns the hardware `unprepare` error, if any — the software count is
+    /// already decremented, so an error means the hardware may still be
+    /// prepared while the framework considers it unprepared.
+    pub fn unprepare(&self) -> ClkResult {
         self.core.unprepare()
     }
 
@@ -116,16 +120,18 @@ impl ClkHandle {
     pub fn prepare_enable(&self) -> ClkResult {
         self.core.prepare()?;
         if let Err(err) = self.core.enable() {
-            self.core.unprepare();
+            let _ = self.core.unprepare();
             return Err(err);
         }
         Ok(())
     }
 
-    /// Disable then unprepare, in that order.
+    /// Disable then unprepare, in that order. Discards the hardware
+    /// `unprepare` error (the release itself is already committed); use
+    /// [`unprepare`](Self::unprepare) directly to observe it.
     pub fn disable_unprepare(&self) {
         self.core.disable();
-        self.core.unprepare();
+        let _ = self.core.unprepare();
     }
 
     /// Whether the hardware reports the clock as enabled.
@@ -165,7 +171,7 @@ impl ClkHandle {
         if min > max {
             return Err(ClkError::InvalidRate);
         }
-        crate::core::with_clk_lock(|| {
+        crate::core::with_clk_lock(|| -> ClkResult<()> {
             let id = self.vote_id.load(Ordering::Acquire);
             let id = if id != 0 {
                 id
@@ -174,9 +180,8 @@ impl ClkHandle {
                 self.vote_id.store(new, Ordering::Release);
                 new
             };
-            self.core.set_rate_vote(id, min, max);
-        });
-        Ok(())
+            self.core.set_rate_vote(id, min, max)
+        })
     }
 
     /// The current `(min, max)` rate range.

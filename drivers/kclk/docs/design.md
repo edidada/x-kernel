@@ -327,7 +327,8 @@ use alloc::sync::Arc;
 use kclk::{ClkRegAccess, MmioClkReg};
 
 // `base` is the virtual address returned by memspace::iomap_device / devm_iomap.
-let reg: Arc<dyn ClkRegAccess> = Arc::new(MmioClkReg::new(ccu_vaddr));
+// SAFETY: `ccu_vaddr` is a live, word-aligned mapping from memspace::iomap_device.
+let reg: Arc<dyn ClkRegAccess> = Arc::new(unsafe { MmioClkReg::new(ccu_vaddr) });
 ```
 
 ### Step 3 — build the tree bottom-up with `ClkBuilder`
@@ -341,7 +342,8 @@ use kclk::{ClkBuilder, ClkFlags, ClkTable, Divider, DividerFlags, FixedRate, Gat
 static CCU: ClkTable = ClkTable::new();
 
 pub fn init_ccu(ccu_vaddr: usize) {
-    let reg: Arc<dyn kclk::ClkRegAccess> = Arc::new(MmioClkReg::new(ccu_vaddr));
+    // SAFETY: `ccu_vaddr` is a live, word-aligned mapping from memspace::iomap_device.
+    let reg: Arc<dyn kclk::ClkRegAccess> = Arc::new(unsafe { MmioClkReg::new(ccu_vaddr) });
 
     // Root oscillator.
     let osc24m = ClkBuilder::new("osc24m", FixedRate::new(24_000_000).into_ops())
