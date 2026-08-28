@@ -44,6 +44,9 @@ mod reg;
 mod table;
 
 #[cfg(unittest)]
+mod invariants;
+
+#[cfg(unittest)]
 mod tests;
 
 pub use core::{ClkBuilder, ClkCore, clk_disable_unused, clocks_len};

@@ -542,6 +542,25 @@ impl ClkCore {
         self.ops.is_prepared()
     }
 
+    /// `(prepare_count, enable_count)` — for tests and diagnostics.
+    pub(crate) fn counts(&self) -> (i32, i32) {
+        let st = self.state.lock();
+        (st.prepare_count, st.enable_count)
+    }
+
+    /// Invariant check: does the cached rate still equal what `recalc_rate`
+    /// would derive from the (current) parent rate? Roots are trivially
+    /// coherent. For tests/diagnostics.
+    pub(crate) fn cache_coherent(&self) -> bool {
+        let Some(p) = self.parent_node() else {
+            return true;
+        };
+        match self.ops.recalc_rate(p.get_rate()) {
+            Ok(expected) => expected == self.state.lock().rate,
+            Err(_) => true,
+        }
+    }
+
     // ---- rate ----
 
     /// Compute the closest achievable rate for `rate` without changing state.

@@ -99,6 +99,41 @@ impl crate::ClkHwOps for CountingOps {
 // Serializes tests that touch the global provider registry.
 static PROVIDER_SERIAL: SpinNoIrq<()> = SpinNoIrq::new(());
 
+/// Shared helpers for the invariants module (cross-module test utilities).
+pub(crate) fn provider_serial_lock() -> kspin::SpinNoIrqGuard<'static, ()> {
+    PROVIDER_SERIAL.lock()
+}
+
+/// A throwaway provider table for a single test (distinct ProviderId each call
+/// site by constant).
+pub(crate) fn scratch_table(id: crate::ProviderId) -> &'static crate::ClkTable {
+    match id {
+        0x88 => &SCRATCH_88,
+        0x89 => &SCRATCH_89,
+        _ => unreachable!("register a new scratch table for this id"),
+    }
+}
+static SCRATCH_88: crate::ClkTable = crate::ClkTable::new(0x88);
+static SCRATCH_89: crate::ClkTable = crate::ClkTable::new(0x89);
+
+/// A `MockReg` that is `Sync`-shareable across module boundaries (the invariants
+/// module needs `Arc<dyn ClkRegAccess>` too).
+pub(crate) struct MockRegShared(MockReg);
+impl MockRegShared {
+    pub(crate) fn new() -> Self {
+        Self(MockReg::new())
+    }
+}
+impl crate::ClkRegAccess for MockRegShared {
+    fn reg_read(&self, offset: usize) -> u32 {
+        self.0.reg_read(offset)
+    }
+
+    fn reg_write(&self, offset: usize, value: u32) {
+        self.0.reg_write(offset, value)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Fixed-rate and fixed-factor nodes
 // ---------------------------------------------------------------------------
