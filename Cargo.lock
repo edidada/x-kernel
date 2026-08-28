@@ -651,7 +651,6 @@ name = "console-driver"
 version = "0.2.0-dev"
 dependencies = [
  "arm_pl011",
- "device-res",
  "driver_base",
  "kclass",
  "kdevice",
@@ -1176,8 +1175,8 @@ dependencies = [
 name = "device-res"
 version = "0.2.0-dev"
 dependencies = [
- "klazy",
  "kspin 0.2.0-dev",
+ "ktime_types",
  "smallvec",
  "unittest",
 ]
@@ -1188,7 +1187,9 @@ version = "0.2.0-dev"
 dependencies = [
  "device-res",
  "kdma",
+ "khal",
  "kirq",
+ "ktime_types",
  "log",
  "memaddr",
  "memspace",
@@ -2166,7 +2167,6 @@ version = "0.2.0-dev"
 dependencies = [
  "device-res",
  "driver_base",
- "khal",
  "kspin 0.2.0-dev",
  "lazyinit",
  "log",
@@ -5467,7 +5467,6 @@ dependencies = [
  "display",
  "driver_base",
  "input",
- "khal",
  "kspin 0.2.0-dev",
  "ktime_types",
  "kvirtiodrivers",
