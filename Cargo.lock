@@ -1183,6 +1183,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "device-res-xkernel"
+version = "0.2.0-dev"
+dependencies = [
+ "device-res",
+ "kdma",
+ "kirq",
+ "log",
+ "memaddr",
+ "memspace",
+ "unittest",
+]
+
+[[package]]
 name = "dice-driver"
 version = "0.2.0-dev"
 dependencies = [
@@ -2186,6 +2199,7 @@ dependencies = [
  "console-driver",
  "crate_interface 0.3.0",
  "device-res",
+ "device-res-xkernel",
  "display",
  "driver_base",
  "input",
@@ -2196,7 +2210,6 @@ dependencies = [
  "kdevice",
  "kdma",
  "khal",
- "kirq",
  "kspin 0.2.0-dev",
  "ktime_types",
  "lazyinit",

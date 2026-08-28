@@ -102,8 +102,8 @@ mod tests {
 
     use crate::{
         DeviceResource, DmaAllocation, DmaOp, DmaSpec, IrqEvent, IrqHandler, IrqHandlerToken,
-        IrqOp, IrqResource, IrqTrigger, MmioMapping, MmioOp, MmioRegion, ResError, ResResult,
-        ResourceDesc,
+        IrqOp, IrqResource, IrqThreadHandler, IrqTrigger, MmioMapping, MmioOp, MmioRegion,
+        ResError, ResResult, ResourceDesc,
     };
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,6 +111,8 @@ mod tests {
         MapMmio(MmioRegion),
         UnmapMmio(MmioRegion),
         RequestIrq(IrqResource),
+        RequestThreadedIrq(IrqResource),
+        RequestThreadedIrqDefault(IrqResource),
         ReleaseIrq(IrqResource),
         SetIrqEnabled(IrqResource, bool),
         AllocCoherent(DmaSpec),
@@ -234,7 +236,36 @@ mod tests {
             if let Some(error) = state.irq_error.take() {
                 return Err(error);
             }
-            Ok(IrqHandlerToken::new(1))
+            Ok(IrqHandlerToken::shared_action(1))
+        }
+
+        fn request_threaded_irq(
+            &self,
+            irq: IrqResource,
+            _primary: Arc<dyn IrqHandler>,
+            _thread: Arc<dyn IrqThreadHandler>,
+            _name: Option<&'static str>,
+        ) -> ResResult<IrqHandlerToken> {
+            let mut state = self.state.lock();
+            state.events.push(Event::RequestThreadedIrq(irq));
+            if let Some(error) = state.irq_error.take() {
+                return Err(error);
+            }
+            Ok(IrqHandlerToken::regular_action())
+        }
+
+        fn request_threaded_irq_default(
+            &self,
+            irq: IrqResource,
+            _thread: Arc<dyn IrqThreadHandler>,
+            _name: Option<&'static str>,
+        ) -> ResResult<IrqHandlerToken> {
+            let mut state = self.state.lock();
+            state.events.push(Event::RequestThreadedIrqDefault(irq));
+            if let Some(error) = state.irq_error.take() {
+                return Err(error);
+            }
+            Ok(IrqHandlerToken::regular_action())
         }
 
         fn release_irq(&self, irq: IrqResource, _token: IrqHandlerToken) {
@@ -300,6 +331,19 @@ mod tests {
             .unwrap();
         provider.set_irq_enabled(irq, false);
         provider.release_irq(irq, token);
+        let threaded_token = provider
+            .request_threaded_irq(
+                irq,
+                Arc::new(|_| IrqEvent::WAKE_THREAD),
+                Arc::new(|_| IrqEvent::HANDLED),
+                Some("threaded"),
+            )
+            .unwrap();
+        provider.release_irq(irq, threaded_token);
+        let default_threaded_token = provider
+            .request_threaded_irq_default(irq, Arc::new(|_| IrqEvent::HANDLED), Some("default"))
+            .unwrap();
+        provider.release_irq(irq, default_threaded_token);
 
         let dma = provider.alloc_coherent(spec).unwrap();
         assert_eq!(dma.bus_addr, 0xfeed_cafe);
@@ -315,6 +359,10 @@ mod tests {
                 Event::UnmapMmio(region),
                 Event::RequestIrq(irq),
                 Event::SetIrqEnabled(irq, false),
+                Event::ReleaseIrq(irq),
+                Event::RequestThreadedIrq(irq),
+                Event::ReleaseIrq(irq),
+                Event::RequestThreadedIrqDefault(irq),
                 Event::ReleaseIrq(irq),
                 Event::AllocCoherent(spec),
                 Event::FreeCoherent(spec),
@@ -345,6 +393,19 @@ mod tests {
                 )
                 .unwrap_err(),
             ResError::Busy
+        );
+
+        provider.reset();
+        provider.set_irq_error(ResError::Unsupported);
+        assert_eq!(
+            provider
+                .request_threaded_irq_default(
+                    IrqResource::new(10, IrqTrigger::LevelLow),
+                    Arc::new(|_| IrqEvent::HANDLED),
+                    Some("unsupported"),
+                )
+                .unwrap_err(),
+            ResError::Unsupported
         );
 
         provider.reset();

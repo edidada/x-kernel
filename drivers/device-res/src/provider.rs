@@ -18,7 +18,7 @@ use klazy::Once;
 use crate::{
     DeviceResource, ResError, ResResult,
     dma::{DmaCoherent, DmaOp, DmaSpec},
-    irq::{Irq, IrqHandler, IrqOp, IrqResource},
+    irq::{Irq, IrqHandler, IrqOp, IrqResource, IrqThreadHandler},
     mmio::{Io, MmioOp, MmioRegion},
 };
 
@@ -158,6 +158,41 @@ pub fn devm_request_irq(
     handler: Arc<dyn IrqHandler>,
 ) -> ResResult<()> {
     let guard = Irq::request(irq, handler)?;
+    device.register_cleanup(Box::new(move || drop(guard)));
+    Ok(())
+}
+
+/// Register primary and threaded interrupt handlers and tie their lifetime to
+/// `device`.
+///
+/// # Errors
+///
+/// See [`Irq::request_threaded`].
+pub fn devm_request_threaded_irq(
+    device: &dyn DeviceResource,
+    irq: IrqResource,
+    primary: Arc<dyn IrqHandler>,
+    thread: Arc<dyn IrqThreadHandler>,
+    name: Option<&'static str>,
+) -> ResResult<()> {
+    let guard = Irq::request_threaded(irq, primary, thread, name)?;
+    device.register_cleanup(Box::new(move || drop(guard)));
+    Ok(())
+}
+
+/// Register a default-primary threaded interrupt handler and tie its lifetime
+/// to `device`.
+///
+/// # Errors
+///
+/// See [`Irq::request_threaded_default`].
+pub fn devm_request_threaded_irq_default(
+    device: &dyn DeviceResource,
+    irq: IrqResource,
+    thread: Arc<dyn IrqThreadHandler>,
+    name: Option<&'static str>,
+) -> ResResult<()> {
+    let guard = Irq::request_threaded_default(irq, thread, name)?;
     device.register_cleanup(Box::new(move || drop(guard)));
     Ok(())
 }

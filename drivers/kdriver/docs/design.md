@@ -35,7 +35,7 @@ drivers/kdriver/
     ├── lib.rs                   # crate 入口，init_drivers、ownership summary API
     ├── manager.rs               # DeviceManager 与统一发现流水线
     ├── enumeration.rs           # EnumerationContext，总线后端写入的描述符缓冲
-    ├── resource.rs              # x-kernel 资源提供者(MMIO/IRQ/DMA)，devm_* helpers
+    ├── resource.rs              # device_res provider install and DriverResult wrappers
     ├── bus/
     │   ├── mod.rs               # 总线模块 root
     │   ├── backend.rs           # BusBackend trait
@@ -103,7 +103,7 @@ drivers/kdriver/
 | `DriverRegistrar` | 驱动注册门面：把 `DeviceDriver` 实现注册到 `kdevice` 驱动核心 |
 | `PlatformBackend` | 统一平台总线：firmware 描述的(device-tree / ACPI) + 编译期已知的静态设备 |
 | `PciBackend` | PCI 总线：ECAM/MmioCam 枚举，BAR 分配，host bridge / PCI-to-PCI bridge adoption |
-| `HostResourceProvider` | x-kernel 资源提供者实现；对接 `memspace`(iomap)、`kirq`(irq)、`kdma`(dma) |
+| `device-res-xkernel` | x-kernel 资源提供者实现；对接 `memspace`(iomap)、`kirq`(irq)、`kdma`(dma) |
 | VirtIO 驱动族 | 每条 VirtIO 设备类型生成 PCI/MMIO 两个 `DeviceDriver` 描述符，共享同一激活路径 |
 | Platform 驱动族 | ramdisk、AHCI、bcm2835-sdhci、sdmmc、fxmac 等平台设备驱动 |
 
@@ -255,12 +255,20 @@ VirtIO 驱动在 PCI 和 MMIO 两条传输路径上共享同一激活入口：
 
 ### 资源管理 (devres)
 
-`resource.rs` 提供 device-managed 资源分配，绑定到 `DeviceObject` 的 devres 清理链表：
+`device-res-xkernel` 提供 X-Kernel 对 `device-res` provider contract 的实现类型；
+driver-facing `devm_*` API 由 `device_res` 持有。`kdriver::resource` 持有静态
+`XKernelResourceProvider`，在 driver init 早期安装到 `device_res` provider registry，
+并保留 `DriverResult` 兼容 wrapper，直接调用 `device_res::devm_*` 并绑定到
+`DeviceObject` 的 devres 清理链表：
 
 - **`devm_iomap`**：通过 `memspace::iomap_device` 映射 MMIO，probe 失败或设备 remove 时自动 `iounmap`。
 - **`devm_request_irq`**：把 devres IRQ handler 适配成 `kirq` shared action，并注册到
   `kirq` 的 IRQ core action list。
-  `resource.rs` 是 devres IRQ resource 与 kernel IRQ core 的适配层，负责把
+- **`devm_request_threaded_irq` / `devm_request_threaded_irq_default`**：把
+  devres primary/thread handler 绑定到 provider contract。当前基于 main 的
+  `device-res-xkernel` provider 尚未覆盖 threaded IRQ 方法，因此返回
+  `DriverError::Unsupported`；后续 kirq threadirq 分支会补齐 xkernel 实现。
+  `device-res-xkernel` 是 devres IRQ resource 与 kernel IRQ core 的适配层，负责把
   `device_res` 的 trigger/controller/event/handler 转换到 `kirq` 自有类型；`kirq`
   不反向依赖 devres。
   后续 IRQ core 能力扩展必须放在 `kirq`，驱动框架只通过该适配层向驱动暴露内核
@@ -271,22 +279,23 @@ VirtIO 驱动在 PCI 和 MMIO 两条传输路径上共享同一激活入口：
 
 ### IRQ 分发机制
 
-`HostResourceProvider` 不维护本地共享 IRQ line state。它把
+`device-res-xkernel::XKernelResourceProvider` 不维护本地 IRQ line state。它把
 `device_res::IrqResource` 转换为 `kirq::IrqSpec`，把 `device_res::IrqHandler`
-包装为 `kirq::IrqHandler`，并通过 `kirq::try_register_shared()` 注册到 IRQ core：
+包装为 `kirq::IrqHandler`，再按 API 选择注册到 IRQ core：
 
 1. `request_irq` 调用 `kirq::try_register_shared()`，由 `kirq` 分配 line-local
-   `IrqActionToken` 并保存 action identity；provider 只把该 token 包装成
-   `device_res::IrqHandlerToken` 返回给 devres。
-2. 中断到达时，`kirq` 从 `IrqDescRuntimeState` 复制 shared action snapshot，按顺序
+   `IrqActionToken` 并保存 action identity；provider 返回
+   `device_res::IrqHandlerToken::SharedAction(id)` 给 devres。
+2. `request_threaded_irq` / `request_threaded_irq_default` 当前沿用 `device_res::IrqOp`
+   默认实现，返回 `Unsupported`，等待 kirq threadirq provider override。
+3. 中断到达时，`kirq` 从 `IrqDescRuntimeState` 复制 action snapshot，按顺序
    调用每个 handler，并把 resolved `virq` 作为 handler 参数传入。每个 wrapper 再把
    devres handler 返回的 `device_res::IrqEvent` 转换为 `kirq::IrqEvent`。
-3. `kirq` 在整条 shared line fanout 完成后合并 source bitmap，并由 `kirq::notify`
+4. `kirq` 在整条 line fanout 完成后合并 source bitmap，并由 `kirq::notify`
    直接唤醒 line/source waiter。`kdriver` 不再安装 dispatch hook，也不参与 async
    wake bridge。
-4. `release_irq` 使用保存的 token 调用 `kirq::free_irq_action()`，只移除当前 devres
-   handler 对应的 action；最后一个 action 离开时由 `kirq` mask line、等待
-   `in_flight` 归零并清理 descriptor。
+5. `release_irq` 对 shared hardirq token 调用 `kirq::free_irq_action()`，只移除当前
+   devres handler 对应的 action。
 
 注册和释放路径允许分配，IRQ dispatch 路径不分配堆内存。
 
@@ -294,8 +303,9 @@ VirtIO 驱动在 PCI 和 MMIO 两条传输路径上共享同一激活入口：
 
 - `DeviceManager::bus_mgr` 使用 `SpinNoPreempt`：总线枚举、重扫描、quiesce、remove 操作在 process context 中执行，互斥访问。
 - `EnumerationContext` 自身没有 interior locking：它是总线后端和 probe 之间的单线程桥梁，仅在 `bus_mgr` 锁内被填充。
-- IRQ shared action fanout、token teardown 和 `in_flight` 同步由 `kirq` 拥有；
-  `kdriver` 只保存 devres token 和 `kirq::IrqActionToken` 的适配关系。
+- IRQ action fanout、threaded wake/ONESHOT、token teardown 和 `in_flight` 同步由
+  `kirq` 拥有；`device-res-xkernel` 只保存 devres token 与 `kirq` release 入口的
+  适配关系，`kdriver` 不维护 IRQ core 状态。
 - `PCI_BAR_ALLOCATOR` 使用 `SpinNoPreempt`：BAR 分配仅在 process context（枚举或 probe）中发生。
 - `kdevice` 共享核心的内部锁由 `kdevice` crate 自行管理，`kdriver` 不直接持有其锁。
 
@@ -367,9 +377,10 @@ VirtIO 驱动在 PCI 和 MMIO 两条传输路径上共享同一激活入口：
 该方案减少了描述符数量，但要求匹配器同时比较 bus type 和 VirtIO type，
 且 `probe_device` 入口需要分支处理 PCI 和 MMIO 两种传输初始化逻辑。
 
-### IRQ handler 通过 kirq shared action 注册
+### IRQ handler 通过 device-res-xkernel 接入 kirq
 
-**选择**：`kirq` 保存同一 IRQ line 上的 shared action list，provider 通过 token
+**选择**：`device-res-xkernel` 作为 `device_res` provider，把驱动的 devres IRQ
+请求适配到 `kirq`；`kirq` 保存同一 IRQ line 上的 shared action list，并通过 token
 管理 devres handler 的生命周期。
 
 **Trade-off**：共享 IRQ fanout 从 `kdriver` 下沉到 `kirq`，使 IRQ core action state
