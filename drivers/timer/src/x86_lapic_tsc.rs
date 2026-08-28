@@ -22,6 +22,7 @@ const PIT_TICK_RATE_HZ: u64 = 1_193_182;
 const PIT_CALIBRATION_TICKS: u16 = (PIT_TICK_RATE_HZ / 100) as u16;
 const PIT_CALIBRATION_SAMPLES: usize = 3;
 const PIT_MIN_POLL_ITERATIONS: usize = 1_000;
+const PIT_TCG_MIN_POLL_ITERATIONS: usize = 1;
 const PIT_MAX_POLL_ITERATIONS: usize = 1_000_000;
 const PIT_MAX_POLL_DELTA_RATIO: u64 = 10;
 const MIN_TSC_FREQUENCY_HZ: u64 = 1_000_000;
@@ -250,7 +251,7 @@ fn discover_tsc_frequency(platform_frequency_hz: u64) -> (u64, TscFrequencySourc
     let needs_pit_calibration =
         is_qemu_tcg || (hypervisor_frequency_hz.is_none() && cpuid_frequency_hz.is_none());
     let pit_frequency_hz = needs_pit_calibration
-        .then(|| calibrate_tsc_with_pit(platform_frequency_hz))
+        .then(|| calibrate_tsc_with_pit(platform_frequency_hz, is_qemu_tcg))
         .flatten();
 
     select_tsc_frequency(TscFrequencyCandidates {
@@ -312,11 +313,11 @@ fn tsc_frequency_from_processor_base(
     u64::try_from(tsc_frequency_khz * 1_000).ok()
 }
 
-fn calibrate_tsc_with_pit(nominal_frequency_hz: u64) -> Option<u64> {
+fn calibrate_tsc_with_pit(nominal_frequency_hz: u64, is_qemu_tcg: bool) -> Option<u64> {
     let mut minimum_frequency_hz: Option<u64> = None;
     for _ in 0..PIT_CALIBRATION_SAMPLES {
         let sample = x86_64::instructions::interrupts::without_interrupts(|| {
-            measure_tsc_with_pit(nominal_frequency_hz)
+            measure_tsc_with_pit(nominal_frequency_hz, is_qemu_tcg)
         });
         if let Some(frequency_hz) = valid_tsc_frequency(sample) {
             minimum_frequency_hz = Some(
@@ -327,7 +328,7 @@ fn calibrate_tsc_with_pit(nominal_frequency_hz: u64) -> Option<u64> {
     minimum_frequency_hz
 }
 
-fn measure_tsc_with_pit(nominal_frequency_hz: u64) -> Option<u64> {
+fn measure_tsc_with_pit(nominal_frequency_hz: u64, is_qemu_tcg: bool) -> Option<u64> {
     let mut pit = PitChannel2::acquire();
     pit.start_one_shot(PIT_CALIBRATION_TICKS);
     let start_tsc = read_tsc_raw();
@@ -338,7 +339,12 @@ fn measure_tsc_with_pit(nominal_frequency_hz: u64) -> Option<u64> {
 
     for nr_poll_iterations in 0..PIT_MAX_POLL_ITERATIONS {
         if pit.has_elapsed() {
-            if !is_pit_sample_stable(nr_poll_iterations, minimum_poll_delta, maximum_poll_delta) {
+            if !is_pit_sample_usable(
+                is_qemu_tcg,
+                nr_poll_iterations,
+                minimum_poll_delta,
+                maximum_poll_delta,
+            ) {
                 return None;
             }
             let elapsed_tsc_ticks = previous_tsc.wrapping_sub(start_tsc);
@@ -358,13 +364,21 @@ fn measure_tsc_with_pit(nominal_frequency_hz: u64) -> Option<u64> {
     None
 }
 
-fn is_pit_sample_stable(
+fn is_pit_sample_usable(
+    is_qemu_tcg: bool,
     nr_poll_iterations: usize,
     minimum_poll_delta: u64,
     maximum_poll_delta: u64,
 ) -> bool {
-    nr_poll_iterations >= PIT_MIN_POLL_ITERATIONS
-        && minimum_poll_delta != 0
+    if is_qemu_tcg {
+        // TCG exits to its device model for every PIT read. Host scheduling can
+        // reduce the number of reads and make adjacent RDTSC deltas arbitrarily
+        // uneven even when the full PIT interval yields a usable measurement.
+        return nr_poll_iterations >= PIT_TCG_MIN_POLL_ITERATIONS && minimum_poll_delta != 0;
+    }
+    let has_enough_progress =
+        nr_poll_iterations >= PIT_MIN_POLL_ITERATIONS && minimum_poll_delta != 0;
+    has_enough_progress
         && maximum_poll_delta <= minimum_poll_delta.saturating_mul(PIT_MAX_POLL_DELTA_RATIO)
 }
 
@@ -523,9 +537,10 @@ mod tests {
     use unittest::def_test;
 
     use super::{
-        PIT_MIN_POLL_ITERATIONS, PIT_TICK_RATE_HZ, TscFrequencyCandidates, TscFrequencySource,
-        calculate_tsc_frequency_hz, hypervisor_has_tsc_frequency_leaf, is_pit_sample_stable,
-        select_tsc_frequency, tsc_frequency_from_processor_base,
+        PIT_MIN_POLL_ITERATIONS, PIT_TCG_MIN_POLL_ITERATIONS, PIT_TICK_RATE_HZ,
+        TscFrequencyCandidates, TscFrequencySource, calculate_tsc_frequency_hz,
+        hypervisor_has_tsc_frequency_leaf, is_pit_sample_usable, select_tsc_frequency,
+        tsc_frequency_from_processor_base,
     };
 
     #[def_test]
@@ -581,11 +596,48 @@ mod tests {
     }
 
     #[def_test]
-    fn pit_sample_rejects_short_or_disturbed_polling() {
-        assert!(is_pit_sample_stable(PIT_MIN_POLL_ITERATIONS, 10, 100));
-        assert!(!is_pit_sample_stable(PIT_MIN_POLL_ITERATIONS - 1, 10, 10));
-        assert!(!is_pit_sample_stable(PIT_MIN_POLL_ITERATIONS, 10, 101));
-        assert!(!is_pit_sample_stable(PIT_MIN_POLL_ITERATIONS, 0, 0));
+    fn hardware_pit_sample_rejects_short_or_disturbed_polling() {
+        assert!(is_pit_sample_usable(
+            false,
+            PIT_MIN_POLL_ITERATIONS,
+            10,
+            100
+        ));
+        assert!(!is_pit_sample_usable(
+            false,
+            PIT_MIN_POLL_ITERATIONS - 1,
+            10,
+            10
+        ));
+        assert!(!is_pit_sample_usable(
+            false,
+            PIT_MIN_POLL_ITERATIONS,
+            10,
+            101
+        ));
+        assert!(!is_pit_sample_usable(false, PIT_MIN_POLL_ITERATIONS, 0, 0));
+    }
+
+    #[def_test]
+    fn qemu_tcg_pit_sample_accepts_host_scheduler_jitter() {
+        assert!(is_pit_sample_usable(
+            true,
+            PIT_TCG_MIN_POLL_ITERATIONS,
+            10,
+            1_000_000
+        ));
+        assert!(!is_pit_sample_usable(
+            true,
+            PIT_TCG_MIN_POLL_ITERATIONS - 1,
+            10,
+            1_000_000
+        ));
+        assert!(!is_pit_sample_usable(
+            true,
+            PIT_TCG_MIN_POLL_ITERATIONS,
+            0,
+            1_000_000
+        ));
     }
 
     #[def_test]
