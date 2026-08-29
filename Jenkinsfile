@@ -1640,68 +1640,76 @@ def autodebugNotifiableStages(List failedStages) {
  * the build failed; never fails the build itself.
  */
 def autodebugNotifyFailure(Map ciResults, Map failedStageLogs = [:]) {
+    // Best-effort only: this runs inside post{} and must NEVER block, hang, or
+    // fail the build. If the worker/receiver is offline, connect quickly and
+    // give up silently after a few seconds.
     if (!autodebugEnabled()) {
-        echo "autodebug: disabled (AUTODEBUG_ENABLE=false)"
         return
     }
     if (currentBuild.currentResult == 'SUCCESS') {
         return
     }
-    def failedStages = ciStageOrder().findAll { ciResults[it]?.status == 'failed' }
-    if (failedStages.isEmpty()) {
-        return
-    }
-
-    // Low-value failures (fmt/clippy/env/rebase) rarely need an agent. Only
-    // notify when at least one failed stage is worth debugging.
-    def notifiable = autodebugNotifiableStages(failedStages)
-    if (notifiable.isEmpty()) {
-        echo "autodebug: no high-value failed stages among: ${failedStages.join(', ')}; skip"
-        return
-    }
-    echo "autodebug: notifying for failed stages ${notifiable.join(', ')}"
-    failedStages = notifiable
-
-    def endpoint = autodebugServiceUrl()
-    def manifest = [
-        repo_url: sourceRepoUrl() ?: env.PROJECT_REPO,
-        branch: env.giteeSourceBranch?.trim() ?: (env.DEFAULT_BRANCH ?: 'master'),
-        commit: resolveHeadSha() ?: (env.GIT_COMMIT?.trim() ?: ''),
-        ci_system: 'jenkins',
-        job_name: env.JOB_NAME,
-        job_url: env.BUILD_URL,
-        build_number: "${env.BUILD_NUMBER}",
-        test_command: autodebugReproCommand(failedStages),
-        notes: "failed stages: ${failedStages.join(', ')}",
-    ]
-    echo "autodebug manifest=${JsonOutput.toJson(manifest)}"
-
-    // Stage logs are already on disk under ciStageLogRoot(); forward as-is.
-    def logFiles = failedStages.collect { stageName ->
-        def f = stageLogFile(stageName)
-        fileExists(f) ? f : null
-    }.findAll { it != null }
-
-    writeFile file: 'autodebug-manifest.json', text: JsonOutput.prettyPrint(JsonOutput.toJson(manifest))
-    def curlArgs = []
-    logFiles.each { f -> curlArgs << "-F 'logs=@${f}'" }
-    curlArgs << "-F 'manifest=@autodebug-manifest.json'"
-
+    def failedStages
+    def manifest
     try {
+        failedStages = ciStageOrder().findAll { ciResults[it]?.status == 'failed' }
+        if (failedStages.isEmpty()) {
+            return
+        }
+
+        // Low-value failures (fmt/clippy/env/rebase) rarely need an agent.
+        def notifiable = autodebugNotifiableStages(failedStages)
+        if (notifiable.isEmpty()) {
+            echo "autodebug: no high-value failed stages among: ${failedStages.join(', ')}; skip"
+            return
+        }
+        echo "autodebug: notifying for failed stages ${notifiable.join(', ')}"
+        failedStages = notifiable
+
+        def endpoint = autodebugServiceUrl()
+        manifest = [
+            repo_url: sourceRepoUrl() ?: env.PROJECT_REPO,
+            branch: env.giteeSourceBranch?.trim() ?: (env.DEFAULT_BRANCH ?: 'master'),
+            commit: resolveHeadSha() ?: (env.GIT_COMMIT?.trim() ?: ''),
+            ci_system: 'jenkins',
+            job_name: env.JOB_NAME,
+            job_url: env.BUILD_URL,
+            build_number: "${env.BUILD_NUMBER}",
+            test_command: autodebugReproCommand(failedStages),
+            notes: "failed stages: ${failedStages.join(', ')}",
+        ]
+        echo "autodebug manifest=${JsonOutput.toJson(manifest)}"
+
+        // Forward stage logs as-is. Cap the number of log files so a huge
+        // multi-stage failure cannot bloat the upload.
+        def logFiles = failedStages.collect { stageName ->
+            def f = stageLogFile(stageName)
+            fileExists(f) ? f : null
+        }.findAll { it != null }.take(3)
+
+        writeFile file: 'autodebug-manifest.json', text: JsonOutput.prettyPrint(JsonOutput.toJson(manifest))
+        def curlArgs = []
+        logFiles.each { f -> curlArgs << "-F 'logs=@${f}'" }
+        curlArgs << "-F 'manifest=@autodebug-manifest.json'"
+
+        // Short, bounded curl: fail fast if the receiver is unreachable and
+        // never hang the pipeline for more than ~15s total.
         withEnv(["_AD_ENDPOINT=${endpoint}"]) {
             sh label: 'Notify autodebug receiver', script: """
-                curl -sS --max-time 120 -o autodebug-response.json \
-                    -w 'autodebug HTTP %{http_code}\\n' \
-                    ${curlArgs.join(' ')} \
-                    "\${_AD_ENDPOINT}/v1/tasks"
+                curl -sS --connect-timeout 5 --max-time 15 \\
+                    -o autodebug-response.json \\
+                    -w 'autodebug HTTP %{http_code}\\n' \\
+                    ${curlArgs.join(' ')} \\
+                    "\${_AD_ENDPOINT}/v1/tasks" \\
+                    || true
             """
         }
         if (fileExists('autodebug-response.json')) {
             echo "autodebug response: ${readFile('autodebug-response.json')}"
         }
     } catch (e) {
-        // Notification must never fail the build.
-        echo "autodebug notification failed (ignored): ${e.message}"
+        // Any failure here (curl missing, file IO, endpoint down) is absorbed.
+        echo "autodebug notification failed (ignored, does not affect build): ${e.message}"
     } finally {
         sh label: 'Clean autodebug temp files', script: '''
             rm -f autodebug-manifest.json autodebug-response.json || true
