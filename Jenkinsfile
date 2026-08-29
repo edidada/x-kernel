@@ -1,6 +1,7 @@
 #!/usr/bin/env groovy
 
 import groovy.transform.Field
+import groovy.json.JsonOutput
 
 @Field Map ciResults = [:]
 @Field Map teeResults = [:]
@@ -285,6 +286,8 @@ def finalizeCiBuild() {
     } else {
         giteeTestReset()
     }
+
+    autodebugNotifyFailure(ciResults, failedStageLogs)
 
 }
 
@@ -1587,4 +1590,112 @@ ${rows}
         body = table + "\n\n<details>\n<summary>查看构建详情</summary>\n\n" + details + "\n</details>"
     }
     return [body: body, allPassed: allPassed]
+}
+
+// ---- autodebug integration (plan-B: no local repack) ----
+
+def autodebugServiceUrl() {
+    return env.AUTODEBUG_URL?.trim() ?: 'http://10.44.74.212:56103'
+}
+
+def autodebugEnabled() {
+    return env.AUTODEBUG_ENABLE?.toString()?.trim()?.toBoolean() ?: true
+}
+
+/**
+ * Notify the autodebug receiver about a failed build. Plan-B: we forward the
+ * already-archived stage logs directly (no zip, no repack). Only runs when
+ * the build failed; never fails the build itself.
+ */
+def autodebugNotifyFailure(Map ciResults, Map failedStageLogs = [:]) {
+    if (!autodebugEnabled()) {
+        echo "autodebug: disabled (AUTODEBUG_ENABLE=false)"
+        return
+    }
+    if (currentBuild.currentResult == 'SUCCESS') {
+        return
+    }
+    def failedStages = ciStageOrder().findAll { ciResults[it]?.status == 'failed' }
+    if (failedStages.isEmpty()) {
+        return
+    }
+    echo "autodebug: notifying for failed stages ${failedStages.join(', ')}"
+
+    def endpoint = autodebugServiceUrl()
+    def manifest = [
+        repo_url: sourceRepoUrl() ?: env.PROJECT_REPO,
+        branch: env.giteeSourceBranch?.trim() ?: (env.DEFAULT_BRANCH ?: 'master'),
+        commit: resolveHeadSha() ?: (env.GIT_COMMIT?.trim() ?: ''),
+        ci_system: 'jenkins',
+        job_name: env.JOB_NAME,
+        job_url: env.BUILD_URL,
+        build_number: "${env.BUILD_NUMBER}",
+        test_command: autodebugReproCommand(failedStages),
+        notes: "failed stages: ${failedStages.join(', ')}",
+    ]
+    echo "autodebug manifest=${JsonOutput.toJson(manifest)}"
+
+    // Stage logs are already on disk under ciStageLogRoot(); forward as-is.
+    def logFiles = failedStages.collect { stageName ->
+        def f = stageLogFile(stageName)
+        fileExists(f) ? f : null
+    }.findAll { it != null }
+
+    writeFile file: 'autodebug-manifest.json', text: JsonOutput.prettyPrint(JsonOutput.toJson(manifest))
+    def curlArgs = []
+    logFiles.each { f -> curlArgs << "-F 'logs=@${f}'" }
+    curlArgs << "-F 'manifest=@autodebug-manifest.json'"
+
+    try {
+        withEnv(["_AD_ENDPOINT=${endpoint}"]) {
+            sh label: 'Notify autodebug receiver', script: """
+                curl -sS --max-time 120 -o autodebug-response.json \
+                    -w 'autodebug HTTP %{http_code}\\n' \
+                    ${curlArgs.join(' ')} \
+                    "\${_AD_ENDPOINT}/v1/tasks"
+            """
+        }
+        if (fileExists('autodebug-response.json')) {
+            echo "autodebug response: ${readFile('autodebug-response.json')}"
+        }
+    } catch (e) {
+        // Notification must never fail the build.
+        echo "autodebug notification failed (ignored): ${e.message}"
+    } finally {
+        sh label: 'Clean autodebug temp files', script: '''
+            rm -f autodebug-manifest.json autodebug-response.json || true
+        '''
+    }
+}
+
+/**
+ * Derive an executable repro command from the failed stage names, so the
+ * autodebug worker can actually re-run the failing check instead of receiving
+ * raw log text. Falls back to an empty string when no mapping applies.
+ */
+def autodebugReproCommand(List failedStages) {
+    def unittestArch = failedStages.findResult { name -> parseUnittestStageArch(name) }
+    if (unittestArch) {
+        return "scripts/ci/run_unit_tests.sh ${unittestArch}"
+    }
+    if (failedStages.any { it.startsWith('Runtime Test: kplat-') }) {
+        return "make run"
+    }
+    if (failedStages.any { it.startsWith('Build Check:') || it.startsWith('Build Artifact:') }) {
+        return "make build"
+    }
+    if (failedStages.any { it.startsWith('Check: Rustfmt') }) {
+        return "cargo +\"${AUX_RUST_TOOLCHAIN}\" fmt --all --check"
+    }
+    return ''
+}
+
+/** Extract arch from a "Unit Tests: kplat-<arch>" stage name, or null. */
+def parseUnittestStageArch(String stageName) {
+    def prefix = 'Unit Tests: kplat-'
+    if (stageName?.startsWith(prefix)) {
+        def arch = stageName.substring(prefix.length())
+        return runtimeTestArchitectures().contains(arch) ? arch : null
+    }
+    return null
 }
