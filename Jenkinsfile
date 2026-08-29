@@ -1603,6 +1603,38 @@ def autodebugEnabled() {
 }
 
 /**
+ * Filter failed stages down to the ones worth handing to an agent.
+ * Low-value failures (fmt, clippy, env/setup, branch divergence) are skipped
+ * by default so the agent does not burn tokens on trivially fixable problems.
+ * Tune with AUTODEBUG_IGNORE_STAGES (comma-separated, case-insensitive
+ * `prefix:` matching wins over plain substring).
+ */
+def autodebugNotifiableStages(List failedStages) {
+    def ignoreSpec = env.AUTODEBUG_IGNORE_STAGES?.trim()
+    def ignores = (ignoreSpec ?: [])
+    if (ignoreSpec) {
+        ignores = ignoreSpec.split(',')*.trim().findAll { it }
+    } else {
+        ignores = [
+            'Source: Checkout',      // branch divergence / rebase needed
+            'Setup: Toolchains',     // environment / toolchain install
+            'Check: Rustfmt',        // cargo fmt --check
+            'prefix:Build Check',    // clippy or compile-lint
+            'prefix:Build Artifact', // clippy or compile
+        ]
+    }
+    return failedStages.findAll { name ->
+        !ignores.any { spec ->
+            if (spec.startsWith('prefix:')) {
+                name.startsWith(spec.substring('prefix:'.length()))
+            } else {
+                name.contains(spec)
+            }
+        }
+    }
+}
+
+/**
  * Notify the autodebug receiver about a failed build. Plan-B: we forward the
  * already-archived stage logs directly (no zip, no repack). Only runs when
  * the build failed; never fails the build itself.
@@ -1619,7 +1651,16 @@ def autodebugNotifyFailure(Map ciResults, Map failedStageLogs = [:]) {
     if (failedStages.isEmpty()) {
         return
     }
-    echo "autodebug: notifying for failed stages ${failedStages.join(', ')}"
+
+    // Low-value failures (fmt/clippy/env/rebase) rarely need an agent. Only
+    // notify when at least one failed stage is worth debugging.
+    def notifiable = autodebugNotifiableStages(failedStages)
+    if (notifiable.isEmpty()) {
+        echo "autodebug: no high-value failed stages among: ${failedStages.join(', ')}; skip"
+        return
+    }
+    echo "autodebug: notifying for failed stages ${notifiable.join(', ')}"
+    failedStages = notifiable
 
     def endpoint = autodebugServiceUrl()
     def manifest = [
