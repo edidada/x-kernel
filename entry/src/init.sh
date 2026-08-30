@@ -14,11 +14,12 @@ echo
 
 cd ~
 
-# Hand off to a real init only when an init system is actually installed.
-# /sbin/init (e.g. openrc) assumes a full console subsystem: the reboot
-# syscall, VT ioctls, and /dev/tty1-N for getty. On a minimal rootfs without
-# those, execing /sbin/init just spews errors, so keep an interactive shell.
-if [ -x /sbin/init ] && command -v openrc >/dev/null 2>&1; then
+# Hand off to a real init only when an init system is actually installed
+# and the guest has a Linux-style VT node for getty. /sbin/init (e.g. openrc)
+# assumes the reboot syscall, VT ioctls, and /dev/tty1-N. X-Kernel currently
+# exposes a single /dev/console, so OpenRC getty would fail and starve the
+# interactive shell used by framebuffer apps such as Links2.
+if [ -x /sbin/init ] && command -v openrc >/dev/null 2>&1 && [ -e /dev/tty1 ]; then
     exec /sbin/init
 fi
 

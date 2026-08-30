@@ -17,6 +17,7 @@ use crate::terminal::{
     Terminal, WindowSize,
     ldisc::{LineDiscipline, ProcessMode, TtyConfig, TtyRead, TtyWrite},
     termios::{Termios, Termios2},
+    vt::{VtMode, VtStat, VtState},
 };
 
 mod ntty;
@@ -341,6 +342,31 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
                 } else {
                     warn!("Failed to unset terminal");
                 }
+            }
+            KDSETMODE => {
+                self.terminal.vt_state.lock().set_kd_mode(arg)?;
+            }
+            KDGETMODE => {
+                (arg as *mut u32).write_vm(self.terminal.vt_state.lock().kd_mode())?;
+            }
+            VT_GETMODE => {
+                (arg as *mut VtMode).write_vm(self.terminal.vt_state.lock().mode())?;
+            }
+            VT_SETMODE => {
+                let mode = (arg as *const VtMode).read_vm()?;
+                self.terminal.vt_state.lock().set_mode(mode)?;
+            }
+            VT_GETSTATE => {
+                (arg as *mut VtStat).write_vm(VtState::global_stat())?;
+            }
+            VT_WAITACTIVE => {
+                VtState::wait_active(arg)?;
+            }
+            VT_ACTIVATE => {
+                VtState::activate(arg)?;
+            }
+            VT_RELDISP => {
+                self.terminal.vt_state.lock().release_display(arg)?;
             }
             _ => return Err(KError::NotATty),
         }

@@ -27,5 +27,7 @@ pub(crate) mod kvmm_vm;
 pub(crate) mod log;
 #[cfg(feature = "memtrack")]
 pub(crate) mod memtrack;
+#[cfg(feature = "input")]
+pub(crate) mod mice;
 #[cfg(feature = "serial")]
 pub(crate) mod serial;

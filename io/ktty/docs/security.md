@@ -54,6 +54,9 @@ termios、窗口大小、session 和 foreground 状态分别由自旋锁保护�
 `TIOCSCTTY` 尚不支持 Linux 的特权 `arg == 1` 跨 session 强制夺取；该请求返回
 `EPERM`，其他非零参数返回 `EINVAL`。
 
+VT compatibility 只模拟控制台 1。`VT_WAITACTIVE`/`VT_ACTIVATE` 对其他编号返回
+`ENODEV`，不会睡眠等待一次永远不会发生的切换。不发送 `relsig`/`acqsig`。
+
 ## 审计清单
 
 - 新增 ioctl 是否在边界完成用户指针复制与数值校验。

@@ -147,6 +147,10 @@ impl FileOperations for ChrdevFileOperations {
         self.ops.release(inode, file)
     }
 
+    fn fsync(&self, file: &VfsFile, data_only: bool) -> VfsResult<()> {
+        self.ops.fsync(file, data_only)
+    }
+
     fn poll(&self, file: &VfsFile) -> IoEvents {
         self.ops.poll(file)
     }
@@ -487,6 +491,11 @@ pub trait DeviceFileOps: Send + Sync {
         _context: &mut PollContext<'_>,
         _events: IoEvents,
     ) -> Result<(), PollRegisterError> {
+        Ok(())
+    }
+
+    /// Synchronizes device-backed data. Character devices default to a no-op.
+    fn fsync(&self, _file: &VfsFile, _data_only: bool) -> VfsResult<()> {
         Ok(())
     }
 

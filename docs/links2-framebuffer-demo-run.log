@@ -1,0 +1,60 @@
+Use apt to install packages.
+
+[autostart] x-kernel uapp startup hook triggered
+Sat Aug 29 14:50:44 UTC 2026
+[autostart] starting hello
+hello from x-kernel rust uapp-hello
+[autostart] starting links2-demo
+=== input devices ===
+total 0
+crw-rw-rw-    1 root     root       13,   1 Jan  1  1970 event0
+crw-rw-rw-    1 root     root       13,  63 Jan  1  1970 mice
+=== mousedev-ps2 ===
+mousedev-ps2: IMPS id=3 EXPS id=4 short-read ok
+=== fb-mmap-refresh ===
+fb-mmap-refresh: mmap write visible in offset readback (1280x800)
+=== links -dump http://example.com ===
+                                 Example Domain
+
+   This domain is for use in documentation examples without needing
+   permission. Avoid use in operations.
+
+   Learn more
+http dump ok
+=== kbd-probe ===
+kbd-probe: waiting
+kbd-probe: got 2 bytes: 67 6f
+=== links-fb-verify (two graphic starts) ===
+[10000B[10000C[?25llinks-fb-verify first: 1280x800 pixels=1024000 black=2686 magenta=0 light=1016056 dark=1362 other=3896 painted=1021314
+[10000B[10000C[?25llinks-fb-verify second: 1280x800 pixels=1024000 black=2686 magenta=0 light=1016056 dark=1362 other=3896 painted=1021314
+links-fb-verify: two framebuffer starts painted ok
+=== links -g http://example.com ===
+[10000B[10000C[?25l
+# host QMP e2e (same boot)
+qmp-e2e: keyboard qdev_id=None
+qmp-e2e: kbd-probe: got
+qmp-e2e page: {'width': 1280, 'height': 800, 'black': 1199, 'magenta': 0, 'light': 1022493, 'other': 308, 'painted': 1022801}
+qmp-e2e mouse_diff_bytes=2214 key_diff_bytes=4179
+qmp-e2e: screendump + input-send-event ok
+
+# HTTPS + CJK (2026-08-29 15:28 UTC)
+=== links -dump https://example.com ===
+                                 Example Domain
+
+   This domain is for use in documentation examples without needing
+   permission. Avoid use in operations.
+
+   Learn more
+https dump ok
+=== links -dump CJK file ===
+                                     你好，世界
+
+   这是 Links framebuffer 的中文与 UTF-8 测试页。
+
+   English mixed with 汉字 should both render.
+cjk dump ok
+=== links -g CJK file ===
+# QMP screendump: 标题「你好，世界」为汉字而非 *
+qmp-e2e page: {'width': 1280, 'height': 800, 'black': 828, 'magenta': 0, 'light': 1018598, 'other': 4574, 'painted': 1023172}
+qmp-e2e mouse_diff_bytes=2214
+

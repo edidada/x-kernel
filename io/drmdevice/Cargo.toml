@@ -17,6 +17,7 @@ kclass.workspace = true
 kdevice.workspace = true
 khal.workspace = true
 ktime_types.workspace = true
+fbdevice.workspace = true
 kpoll.workspace = true
 ksync.workspace = true
 ktask.workspace = true

@@ -3,13 +3,12 @@
 // See LICENSES for license details.
 
 use alloc::sync::Arc;
-use core::slice;
 
 use kerrno::KError;
 use khal::mem::v2p;
 use kvfs::{
     DeviceFileOps, DeviceId, DirMapping, MmapMapper, NodeFlags, SimpleFs, VfsError, VfsFile,
-    VfsResult,
+    VfsFileBuilder, VfsInode, VfsResult,
 };
 use memaddr::{PhysAddrRange, VirtAddr};
 use osvm::VirtMutPtr;
@@ -87,14 +86,12 @@ struct FixScreenInfo {
 /// Framebuffer device for graphics output, backed by fbdev emulation's shadow
 /// buffer (see [`fbdevice`]).
 ///
-/// This node only exposes the shadow buffer for userspace read/write/mmap; it
-/// deliberately does **not** run a background refresh task pushing the shadow
-/// to the scanout. A continuous `present_scanout_resource` would race a DRM
-/// compositor (e.g. Weston) for the single physical scanout and cause
-/// flickering. Instead the shadow is pushed to the scanout on explicit
-/// demand: `write()` to `/dev/fb0` and the `FBIOPAN_DISPLAY` ioctl both
-/// trigger [`fbdevice::fb_present`], so writes to the node stay visible while
-/// an active DRM master keeps the scanout to itself.
+/// Userspace may `read`/`write`/`mmap` the shadow. The shadow is presented to
+/// virtio-gpu on `write`, `FBIOPAN_DISPLAY`, `fsync`, and by the fbdev mmap
+/// refresh task while this node is open and DRM does not own the scanout.
+///
+/// Access uses raw pointers rather than `&mut [u8]`: mmap clients, `read`, and
+/// `write` share the same bytes and cannot satisfy Rust exclusive-borrow rules.
 pub struct FrameBuffer {
     base: VirtAddr,
     size: usize,
@@ -108,15 +105,21 @@ impl FrameBuffer {
         Self { base, size }
     }
 
-    #[allow(clippy::mut_from_ref)]
-    fn as_mut_slice(&self) -> &mut [u8] {
-        // SAFETY: `base..base+size` is the fbdev emulation shadow buffer,
-        // which stays mapped for the kernel lifetime; concurrent userspace
-        // writes to a mapped page race here, matching legacy fbdev semantics.
-        unsafe { slice::from_raw_parts_mut(self.base.as_mut_ptr(), self.size) }
+    fn shadow_ptr(&self) -> *mut u8 {
+        self.base.as_mut_ptr()
     }
 }
 impl DeviceFileOps for FrameBuffer {
+    fn open(&self, _inode: &VfsInode, _file: &mut VfsFileBuilder) -> VfsResult<()> {
+        fbdevice::fb_client_open();
+        Ok(())
+    }
+
+    fn release(&self, _inode: &VfsInode, _file: &VfsFile) -> VfsResult<()> {
+        fbdevice::fb_client_release();
+        Ok(())
+    }
+
     fn supports_read(&self) -> bool {
         true
     }
@@ -126,26 +129,32 @@ impl DeviceFileOps for FrameBuffer {
     }
 
     fn read(&self, _file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
-        let slice = self.as_mut_slice();
-        let len = buf
-            .len()
-            .min((slice.len() as u64).saturating_sub(offset) as usize);
-        buf[..len].copy_from_slice(&slice[..len]);
-        Ok(len)
+        // SAFETY: `base..base+size` is the fbdev shadow, mapped for kernel
+        // lifetime by `fb_init`. Offset is clamped inside `copy_from_shadow`.
+        // Concurrent mmap writers may race the copy, matching legacy fbdev.
+        let copied =
+            unsafe { fbdevice::copy_from_shadow(self.shadow_ptr(), self.size, buf, offset) };
+        Ok(copied)
     }
 
     fn write(&self, _file: &VfsFile, buf: &[u8], offset: u64) -> VfsResult<usize> {
-        let slice = self.as_mut_slice();
-        if offset >= slice.len() as u64 {
+        // SAFETY: same shadow lifetime as `read`. mmap clients may write the
+        // same bytes concurrently.
+        let Some(len) =
+            (unsafe { fbdevice::copy_to_shadow(self.shadow_ptr(), self.size, buf, offset) })
+        else {
             return Err(VfsError::StorageFull);
-        }
-        let len = buf.len().min(slice.len() - offset as usize);
-        slice[..len].copy_from_slice(&buf[..len]);
-        // Make the written pixels visible: write() is the fbdev "explicit
-        // demand" trigger (see module docs). Failure is not fatal for the
-        // write itself; the host may be busy presenting another resource.
+        };
+        // Make the written pixels visible: write() is an explicit fbdev
+        // present trigger. Failure is not fatal for the write itself.
         fbdevice::fb_present();
         Ok(len)
+    }
+
+    fn fsync(&self, _file: &VfsFile, _data_only: bool) -> VfsResult<()> {
+        // Links2 calls fsync after mmap drawing and mouse cursor updates.
+        fbdevice::fb_present();
+        Ok(())
     }
 
     fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {

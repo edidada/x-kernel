@@ -16,7 +16,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use bytemuck::bytes_of;
 use display::{DisplayDevice, ScanoutFormat, ScanoutRect, ScanoutResource};
@@ -370,6 +370,7 @@ pub struct Card0 {
     in_formats_blob: AtomicU32,
     system_blobs_init: Mutex<()>,
     retained_pages: Mutex<BTreeMap<u64, Arc<GlobalPage>>>,
+    open_files: AtomicUsize,
 }
 
 impl Card0 {
@@ -394,6 +395,7 @@ impl Card0 {
             in_formats_blob: AtomicU32::new(0),
             system_blobs_init: Mutex::new(()),
             retained_pages: Mutex::new(BTreeMap::new()),
+            open_files: AtomicUsize::new(0),
         })
     }
 
@@ -477,6 +479,24 @@ fn current_mode() -> DrmModeModeInfo {
 }
 
 impl DeviceFileOps for Card0 {
+    fn open(&self, _inode: &kvfs::VfsInode, _file: &mut kvfs::VfsFileBuilder) -> VfsResult<()> {
+        self.open_files.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn release(&self, _inode: &kvfs::VfsInode, _file: &VfsFile) -> VfsResult<()> {
+        let prev = self
+            .open_files
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                Some(n.saturating_sub(1))
+            })
+            .unwrap_or(1);
+        if prev <= 1 {
+            fbdevice::drm_release_scanout();
+        }
+        Ok(())
+    }
+
     fn supports_read(&self) -> bool {
         true
     }
@@ -507,7 +527,14 @@ impl DeviceFileOps for Card0 {
 
     fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
         match cmd {
-            DRM_IOCTL_SET_MASTER | DRM_IOCTL_DROP_MASTER => Ok(0),
+            DRM_IOCTL_SET_MASTER => {
+                fbdevice::drm_claim_scanout();
+                Ok(0)
+            }
+            DRM_IOCTL_DROP_MASTER => {
+                fbdevice::drm_release_scanout();
+                Ok(0)
+            }
             <DrmVersion as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmVersion>::from(arg);
                 <DrmVersion as DrmIoctl>::handle_raw(self, user_ptr)
@@ -1218,6 +1245,8 @@ impl Card0 {
                 resource_id,
                 err
             );
+        } else {
+            fbdevice::drm_claim_scanout();
         }
     }
 

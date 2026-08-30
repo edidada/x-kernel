@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{format, string::ToString, sync::Arc, vec};
+use alloc::{format, string::ToString, sync::Arc, vec, vec::Vec};
 
 use bitmaps::Bitmap;
 use kclass::ClassDevice;
@@ -374,25 +374,36 @@ impl Pollable for EventDev {
 pub fn input_devices(fs: Arc<SimpleFs>) -> DirMapping {
     let mut inputs = DirMapping::new();
     let mut input_id = 0;
-    let input_devices = inputdev::input_drain_devices();
+    let input_devices = inputdev::input_snapshot_devices();
     let mut keys = [0; 0x300usize.div_ceil(8)];
+    let mut mouse_devices = Vec::new();
     for (i, device) in input_devices.into_iter().enumerate() {
+        keys.fill(0);
         assert!(device.get_event_bits(EventType::Key, &mut keys).unwrap());
-
-        let event_dev = Arc::new(EventDev::new(device));
-        event_dev.subscribe_removed();
-
-        let dev = DeviceFile::new_character(fs.clone(), DeviceId::new(13, (i + 1) as _), event_dev);
 
         const BTN_MOUSE: usize = 0x110;
         if keys[BTN_MOUSE / 8] & (1 << (BTN_MOUSE % 8)) != 0 {
-            // Mouse
-            add_device_entry(&mut inputs, "mice", dev);
-        } else {
-            add_device_entry(&mut inputs, format!("event{input_id}"), dev);
-            input_id += 1;
+            mouse_devices.push(device);
+            continue;
         }
+
+        let event_dev = Arc::new(EventDev::new(device));
+        event_dev.subscribe_removed();
+        let dev = DeviceFile::new_character(fs.clone(), DeviceId::new(13, (i + 1) as _), event_dev);
+        add_device_entry(&mut inputs, format!("event{input_id}"), dev);
+        input_id += 1;
     }
+
+    // Always expose the Linux mousedev mix node. Links2 opens this path by
+    // name and probes IMPS/EXPS even when no mouse is present yet.
+    let mice = crate::nodes::mice::MouseDev::new(mouse_devices);
+    crate::nodes::mice::attach_feeder(&mice);
+    let mice_dev = DeviceFile::new_character(
+        fs.clone(),
+        DeviceId::new(13, crate::nodes::mice::MOUSEDEV_MIX_MINOR),
+        mice,
+    );
+    add_device_entry(&mut inputs, "mice", mice_dev);
     inputs
 }
 

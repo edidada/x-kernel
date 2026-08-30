@@ -50,6 +50,10 @@ pub(crate) fn run(bundle: &Bundle, args: &RunArgs) -> Result<()> {
     add_devices(&mut command, bundle, args, qemu_program)?;
     if !args.graphic {
         command.arg("-nographic");
+    } else if !qemu_args_sets_display(&args.qemu_args) {
+        // 1:1 guest pixels look tiny on HiDPI/WSLg; scale the framebuffer
+        // when the user resizes the window. Override with QEMU_ARGS -display.
+        command.arg("-display").arg("gtk,zoom-to-fit=on");
     }
     command.args(args.qemu_args.iter());
 
@@ -434,8 +438,8 @@ fn resolve_vsock_cid(args: &RunArgs) -> Result<u32> {
         Ok(fd) => fd,
         Err(error) => {
             log::warn!(
-                "cannot open /dev/vhost-vsock to probe CID availability ({error}); \
-                 using the preferred CID {preferred}"
+                "cannot open /dev/vhost-vsock to probe CID availability ({error}); using the \
+                 preferred CID {preferred}"
             );
             return Ok(preferred);
         }
@@ -460,15 +464,16 @@ fn resolve_vsock_cid(args: &RunArgs) -> Result<u32> {
             }
             _ => {
                 log::warn!(
-                    "cannot probe vsock CID availability ({error}); using the preferred CID {preferred}"
+                    "cannot probe vsock CID availability ({error}); using the preferred CID \
+                     {preferred}"
                 );
                 return Ok(preferred);
             }
         }
     }
     Err(Error::Message(format!(
-        "no free vsock guest CID in {preferred}..={last}; \
-         release one of them or pick another with --vsock-cid"
+        "no free vsock guest CID in {preferred}..={last}; release one of them or pick another \
+         with --vsock-cid"
     )))
 }
 
@@ -534,10 +539,10 @@ fn add_devices(
     }
 
     if needs_graphic {
-        command
-            .arg("-device")
-            .arg(format!("virtio-gpu-{suffix}"))
-            .args(["-vga", "none", "-serial", "mon:stdio"]);
+        for device in graphic_virtio_devices(suffix) {
+            command.arg("-device").arg(device);
+        }
+        command.args(["-vga", "none", "-serial", "mon:stdio"]);
     }
 
     if wants_vsock {
@@ -557,9 +562,9 @@ fn add_devices(
                     vsock_cid
                 );
             }
-            command.arg("-device").arg(format!(
-                "{device},id=virtiosocket0,guest-cid={vsock_cid}"
-            ));
+            command
+                .arg("-device")
+                .arg(format!("{device},id=virtiosocket0,guest-cid={vsock_cid}"));
         }
     }
 
@@ -580,9 +585,7 @@ fn qemu_supports_device(qemu_program: &str, device: &str) -> bool {
     {
         Ok(output) => output,
         Err(error) => {
-            log::warn!(
-                "cannot probe {qemu_program} for {device} support: {error}; skipping vsock"
-            );
+            log::warn!("cannot probe {qemu_program} for {device} support: {error}; skipping vsock");
             return false;
         }
     };
@@ -597,9 +600,7 @@ fn qemu_supports_device(qemu_program: &str, device: &str) -> bool {
     let is_supported = output_contains_device(&output.stdout, device)
         || output_contains_device(&output.stderr, device);
     if !is_supported {
-        log::warn!(
-            "{qemu_program} does not support {device}; continuing without a vsock device"
-        );
+        log::warn!("{qemu_program} does not support {device}; continuing without a vsock device");
     }
     is_supported
 }
@@ -620,13 +621,52 @@ fn virtio_device_suffix(bus: Option<VirtioBus>) -> Result<&'static str> {
     }
 }
 
+fn graphic_virtio_devices(suffix: &str) -> [String; 3] {
+    [
+        format!("virtio-gpu-{suffix},xres=1920,yres=1080"),
+        format!("virtio-keyboard-{suffix}"),
+        format!("virtio-mouse-{suffix}"),
+    ]
+}
+
+fn qemu_args_sets_display(qemu_args: &[String]) -> bool {
+    qemu_args
+        .iter()
+        .any(|arg| arg == "-display" || arg == "-nographic" || arg.starts_with("-display="))
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{TcpListener, UdpSocket};
 
     use xconfig::build_config::KernelArch;
 
-    use super::{is_host_port_free, output_contains_device, selected_accel};
+    use super::{
+        graphic_virtio_devices, is_host_port_free, output_contains_device, qemu_args_sets_display,
+        selected_accel,
+    };
+
+    #[test]
+    fn graphic_mode_adds_keyboard_and_mouse() {
+        let devices = graphic_virtio_devices("pci");
+        assert_eq!(
+            devices,
+            [
+                "virtio-gpu-pci,xres=1920,yres=1080".to_string(),
+                "virtio-keyboard-pci".to_string(),
+                "virtio-mouse-pci".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn qemu_args_display_none_skips_default_gtk() {
+        assert!(qemu_args_sets_display(&[
+            "-display".to_string(),
+            "none".to_string()
+        ]));
+        assert!(!qemu_args_sets_display(&["-qmp".to_string()]));
+    }
 
     #[test]
     fn device_probe_matches_qemu_device_listing() {

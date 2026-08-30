@@ -10,7 +10,8 @@
 
 - `src/terminal/job.rs`：控制终端关联的 session、前台进程组和前台变化通知。
 - `src/terminal/ldisc.rs`：输入处理、规范模式和信号字符处理。
-- `src/tty/mod.rs`：TTY 文件操作与 `TC*`/`TIOC*` ioctl 边界。
+- `src/tty/mod.rs`：TTY 文件操作与 `TC*`/`TIOC*`/`VT*`/`KD*` ioctl 边界。
+- `src/terminal/vt.rs`：单控制台 Linux VT compatibility layer（Links2 framebuffer）。
 - `src/tty/ntty.rs`、`src/tty/pty.rs`：console TTY 与 PTY 后端。
 
 ## 控制终端状态
@@ -41,6 +42,9 @@ session leader 且尚无 controlling TTY 时，打开的终端会通过同一 `b
 控制终端并初始化 foreground。PTY master 不参与隐式或显式控制终端绑定，只有 slave
 端可成为 controlling TTY。内核线程发起的 open 没有用户 session，因此不会触发该
 状态转换；启动脚本的 fallback shell 会在用户态重新打开 `/dev/console`。
+
+console TTY 的 `tty-reader` 同时等待 UART IRQ 和 `inputdev` 的键盘 poll set。
+virtio-keyboard 不走串口中断；16ms 周期唤醒让 raw TTY 能收到图形窗口按键。
 
 ## 调用约束
 

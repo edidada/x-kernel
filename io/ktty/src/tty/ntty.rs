@@ -109,10 +109,16 @@ fn write_to_runtime_console(buf: &[u8]) -> bool {
 
 impl TtyRead for Console {
     fn read(&mut self, buf: &mut [u8]) -> usize {
-        if let Some(n) = read_from_runtime_console(buf) {
+        if let Some(n) = read_from_runtime_console(buf)
+            && n > 0
+        {
             return n;
         }
-        khal::console::read_data(buf)
+        let n = khal::console::read_data(buf);
+        if n > 0 {
+            return n;
+        }
+        inputdev::read_keyboard_bytes(buf)
     }
 }
 impl TtyWrite for Console {
@@ -137,7 +143,8 @@ fn new_n_tty() -> Arc<NTtyDriver> {
             writer: Console,
             process_mode: if let Some(irq) = khal::console::interrupt_id() {
                 ProcessMode::External(Box::new(move |context: &mut kpoll::PollContext<'_>| {
-                    register_irq_waker(irq, context)
+                    register_irq_waker(irq, context)?;
+                    inputdev::register_keyboard_wait(context)
                 }))
             } else {
                 ProcessMode::Manual

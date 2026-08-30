@@ -1,0 +1,15 @@
+[package]
+name = "fb-mmap-refresh"
+description = "Regression: mmap /dev/fb0, write pixels, read back by offset"
+enabled = true
+order = 40
+
+[prepare]
+commands = [
+  "sh -c 'mkdir -p out && \"${CROSS_COMPILE}gcc\" -O2 -static -o out/fb-mmap-refresh fb-mmap-refresh.c'",
+]
+
+[[install]]
+src = "out/fb-mmap-refresh"
+dest = "/usr/local/bin/fb-mmap-refresh"
+mode = "0755"

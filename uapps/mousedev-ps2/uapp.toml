@@ -1,0 +1,15 @@
+[package]
+name = "mousedev-ps2"
+description = "Regression: Links2 IMPS/EXPS probe against /dev/input/mice"
+enabled = true
+order = 41
+
+[prepare]
+commands = [
+  "sh -c 'mkdir -p out && \"${CROSS_COMPILE}gcc\" -O2 -static -o out/mousedev-ps2 mousedev-ps2.c'",
+]
+
+[[install]]
+src = "out/mousedev-ps2"
+dest = "/usr/local/bin/mousedev-ps2"
+mode = "0755"

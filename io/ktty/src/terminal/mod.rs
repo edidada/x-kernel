@@ -14,6 +14,7 @@ use ksync::Mutex;
 pub mod job;
 pub mod ldisc;
 pub mod termios;
+pub mod vt;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, AnyBitPattern)]
@@ -29,6 +30,7 @@ pub struct Terminal {
     pub job_control: job::JobControl,
     pub window_size: SpinNoPreempt<WindowSize>,
     pub termios: SpinNoPreempt<Arc<termios::Termios2>>,
+    pub vt_state: SpinNoPreempt<vt::VtState>,
     pub pty_number: AtomicU32,
 }
 impl Default for Terminal {
@@ -43,6 +45,7 @@ impl Default for Terminal {
                 ws_ypixel: 0,
             }),
             termios: SpinNoPreempt::new(Arc::new(termios::Termios2::default())),
+            vt_state: SpinNoPreempt::new(vt::VtState::default()),
             pty_number: AtomicU32::new(0),
         }
     }

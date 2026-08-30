@@ -1,0 +1,15 @@
+[package]
+name = "kbd-probe"
+description = "Regression: wait for virtio-keyboard bytes on the console TTY"
+enabled = true
+order = 42
+
+[prepare]
+commands = [
+  "sh -c 'mkdir -p out && \"${CROSS_COMPILE}gcc\" -O2 -static -o out/kbd-probe kbd-probe.c'",
+]
+
+[[install]]
+src = "out/kbd-probe"
+dest = "/usr/local/bin/kbd-probe"
+mode = "0755"

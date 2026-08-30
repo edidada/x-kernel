@@ -1,0 +1,61 @@
+[package]
+name = "links2"
+description = "Links 2.30 framebuffer graphics browser"
+enabled = true
+order = 50
+
+[prepare]
+commands = [
+  "sh build.sh",
+]
+
+[[install]]
+src = "out/links"
+dest = "/usr/local/bin/links"
+mode = "0755"
+
+[[install]]
+src = "out/links-fb"
+dest = "/usr/local/bin/xklinks"
+mode = "0755"
+
+[[install]]
+src = "links-demo.sh"
+dest = "/usr/local/bin/links-demo"
+mode = "0755"
+
+[[install]]
+src = "links-e2e.sh"
+dest = "/usr/local/bin/links-e2e"
+mode = "0755"
+
+[[install]]
+src = "out/links-fb-verify"
+dest = "/usr/local/bin/links-fb-verify"
+mode = "0755"
+
+[[install]]
+src = "out/wqy-microhei.ttc"
+dest = "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"
+mode = "0644"
+
+[[install]]
+src = "fonts.conf"
+dest = "/etc/fonts/fonts.conf"
+mode = "0644"
+
+[[install]]
+src = "fontconfig-cache.keep"
+dest = "/var/cache/fontconfig/.keep"
+mode = "0644"
+
+[[install]]
+src = "cjk.html"
+dest = "/usr/share/links-demo/cjk.html"
+mode = "0644"
+
+[[autostart]]
+name = "links2-demo"
+command = "/usr/local/bin/links-demo"
+background = false
+exit = false

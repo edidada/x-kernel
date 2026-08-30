@@ -1247,6 +1247,7 @@ version = "0.2.0-dev"
 dependencies = [
  "bytemuck",
  "display",
+ "fbdevice",
  "kalloc",
  "kclass",
  "kdevice",
@@ -1488,9 +1489,12 @@ dependencies = [
  "kclass",
  "khal",
  "kspin 0.2.0-dev",
+ "ktask",
+ "ktime_types",
  "lazyinit",
  "log",
  "memaddr",
+ "unittest",
 ]
 
 [[package]]
@@ -1944,7 +1948,10 @@ version = "0.2.0-dev"
 dependencies = [
  "kclass",
  "kdevice",
+ "kpoll",
  "ksync",
+ "ktask",
+ "ktime_types",
  "lazyinit",
  "log",
 ]
@@ -3076,6 +3083,7 @@ version = "0.2.0-dev"
 dependencies = [
  "bytemuck",
  "console-driver",
+ "inputdev",
  "kerrno",
  "khal",
  "klazy",
