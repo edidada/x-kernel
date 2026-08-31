@@ -6,6 +6,7 @@
 
 use klazy::lazy_static;
 use kpoll::{PollContext, PollRegisterError, PollSet};
+use ktime_types::TimeSpan;
 
 use crate::SERVICE;
 
@@ -21,12 +22,22 @@ const DEFAULT_ASSIST_BUDGET: PollBudget = PollBudget {
     timer_events: 8,
 };
 
+const DEFAULT_LEASE_BUDGET: PollBudget = PollBudget {
+    rx_packets: 64,
+    tx_packets: 64,
+    timer_events: 8,
+};
+
+const LEASE_TIMEOUT: TimeSpan = TimeSpan::from_micros(500);
+
 const BACKGROUND_MAX_ROUNDS: usize = 4;
 
 lazy_static! {
     static ref NETWORK_POLLER: NetworkPoller = NetworkPoller::new(NetworkPollerConfig {
         background_budget: DEFAULT_BACKGROUND_BUDGET,
+        lease_budget: DEFAULT_LEASE_BUDGET,
         assist_budget: DEFAULT_ASSIST_BUDGET,
+        lease_timeout: LEASE_TIMEOUT,
     });
 }
 
@@ -60,22 +71,35 @@ pub(crate) struct PollProgress {
 
 pub(crate) struct NetworkPollerConfig {
     background_budget: PollBudget,
+    lease_budget: PollBudget,
     assist_budget: PollBudget,
+    lease_timeout: TimeSpan,
 }
+
+type NetworkBudgetedPoller =
+    kwork::BudgetedPoller<PollBudget, fn(PollBudget) -> kwork::BudgetedPollProgress>;
+type NetworkPollLease = kwork::PollLease<PollBudget, fn(PollBudget) -> kwork::BudgetedPollProgress>;
 
 pub(crate) struct NetworkPoller {
     tx_waiters: PollSet,
-    poller: kwork::BudgetedPoller<PollBudget, fn(PollBudget) -> kwork::BudgetedPollProgress>,
+    poller: NetworkBudgetedPoller,
+}
+
+/// Task-context ownership for advancing the network poller.
+pub(crate) struct NetAdvanceLease {
+    inner: NetworkPollLease,
 }
 
 impl NetworkPoller {
     fn new(config: NetworkPollerConfig) -> Self {
         Self {
             tx_waiters: PollSet::new(),
-            poller: kwork::BudgetedPoller::new(
+            poller: kwork::BudgetedPoller::new_with_lease(
                 "knet-poller",
                 config.background_budget,
+                config.lease_budget,
                 config.assist_budget,
+                config.lease_timeout,
                 BACKGROUND_MAX_ROUNDS,
                 poll_network_once,
             ),
@@ -110,6 +134,18 @@ impl NetworkPoller {
         self.poller.assist_once();
     }
 
+    /// Attempts to transfer foreground progress responsibility to the caller.
+    pub(crate) fn try_advance_lease(&self) -> Option<NetAdvanceLease> {
+        self.poller
+            .try_lease()
+            .map(|inner| NetAdvanceLease { inner })
+    }
+
+    /// Restores background progress for an expired foreground lease.
+    pub(crate) fn kick_if_stale(&self) {
+        self.poller.kick_if_stale();
+    }
+
     fn run_once(&self, budget: PollBudget) -> PollProgress {
         if !SERVICE.is_inited() {
             return PollProgress::default();
@@ -126,6 +162,14 @@ impl NetworkPoller {
     }
 }
 
+impl NetAdvanceLease {
+    /// Publishes network work and advances one lease-budgeted round.
+    pub(crate) fn advance(&self, reason: PollReason) {
+        network_poller().notify(reason);
+        self.inner.poll_once();
+    }
+}
+
 pub(crate) fn network_poller() -> &'static NetworkPoller {
     &NETWORK_POLLER
 }
@@ -135,6 +179,20 @@ pub(crate) fn network_poller() -> &'static NetworkPoller {
 /// The call does not publish new work or wait for another executor.
 pub(crate) fn assist_once() {
     network_poller().assist_once();
+}
+
+/// Attempts to acquire task-context ownership of network advancement.
+pub(crate) fn try_advance_lease() -> Option<NetAdvanceLease> {
+    network_poller().try_advance_lease()
+}
+
+/// Advances with a held lease or assists one existing scheduled round.
+pub(crate) fn advance_or_assist(lease: Option<&NetAdvanceLease>, reason: PollReason) {
+    if let Some(lease) = lease {
+        lease.advance(reason);
+    } else {
+        assist_once();
+    }
 }
 
 fn poll_network_once(budget: PollBudget) -> kwork::BudgetedPollProgress {

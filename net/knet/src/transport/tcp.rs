@@ -28,7 +28,7 @@ use crate::{
     consts::{TCP_RX_BUF_LEN, TCP_TX_BUF_LEN},
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
-    poller::{PollReason, assist_once, network_poller},
+    poller::{PollReason, advance_or_assist, assist_once, network_poller, try_advance_lease},
     state::*,
 };
 
@@ -411,10 +411,11 @@ impl SocketOps for TcpSocket {
 
         // Here our state must be `CONNECTING`, and only one thread can run here.
         let is_nonblocking = self.general.nonblocking() || options.nonblocking;
+        let lease = try_advance_lease();
         let result = self
             .general
             .send_poller_with_nonblocking(self, is_nonblocking, || {
-                assist_once();
+                advance_or_assist(lease.as_ref(), PollReason::Tx);
                 let events = self.poll_connect();
                 if !events.contains(IoEvents::OUT) {
                     Err(KError::WouldBlock)
@@ -476,9 +477,10 @@ impl SocketOps for TcpSocket {
         }
 
         let bound_endpoint = self.bound_endpoint()?;
+        let lease = try_advance_lease();
         self.general
             .recv_poller_with_nonblocking(self, options.nonblocking, || {
-                assist_once();
+                advance_or_assist(lease.as_ref(), PollReason::Rx);
                 let accepted = {
                     let mut sockets = SOCKET_SET.inner.lock();
                     LISTEN_TABLE.accept(bound_endpoint, &mut sockets)?
@@ -496,6 +498,7 @@ impl SocketOps for TcpSocket {
     fn send(&self, mut src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
         let mut total_sent = 0;
         let nonblocking = options.flags.nonblocking();
+        let lease = try_advance_lease();
 
         while src.remaining() > 0 {
             let result = self
@@ -524,7 +527,11 @@ impl SocketOps for TcpSocket {
             match result {
                 Ok(0) => break,
                 Ok(len) => {
-                    network_poller().notify(PollReason::Tx);
+                    if let Some(lease) = lease.as_ref() {
+                        lease.advance(PollReason::Tx);
+                    } else {
+                        network_poller().notify(PollReason::Tx);
+                    }
                     total_sent += len;
                 }
                 Err(_) if total_sent > 0 => return Ok(total_sent),
@@ -540,10 +547,11 @@ impl SocketOps for TcpSocket {
             return Err(KError::NotConnected);
         }
         let mut should_poll_rx_window = false;
+        let lease = try_advance_lease();
         let received =
             self.general
                 .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
-                    assist_once();
+                    advance_or_assist(lease.as_ref(), PollReason::Rx);
                     self.with_smol_socket(|socket| {
                         if socket.can_recv() {
                             if options.flags.contains(RecvFlags::PEEK) {
@@ -580,7 +588,11 @@ impl SocketOps for TcpSocket {
                     })
                 })?;
         if should_poll_rx_window {
-            network_poller().notify(PollReason::RxWindow);
+            if let Some(lease) = lease.as_ref() {
+                lease.advance(PollReason::RxWindow);
+            } else {
+                network_poller().notify(PollReason::RxWindow);
+            }
         }
         Ok(received)
     }

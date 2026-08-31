@@ -556,6 +556,8 @@ impl Service {
     }
 
     pub(crate) fn handle_timer_tick(&self) {
+        crate::poller::network_poller().kick_if_stale();
+
         let deadline = self.timeout_deadline_micros.load(Ordering::Acquire);
         if deadline == 0
             || u64::try_from(now().total_micros())
