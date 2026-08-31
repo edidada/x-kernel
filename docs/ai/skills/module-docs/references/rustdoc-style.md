@@ -361,6 +361,94 @@ standard library's proportionality: use a short summary for a simple private
 module, rich documentation for a public or foundational abstraction, and
 ordinary comments for local implementation reasoning.
 
+## Good and Bad Comparisons
+
+These comparisons calibrate documentation depth and specificity. The symbols
+are illustrative. Reuse the pattern only after verifying equivalent facts in
+the target code and its callers.
+
+### Module introduction
+
+Bad: this repeats the filename and replaces an explanation with a symbol list.
+
+```rust
+//! Buffer module.
+//!
+//! Contains [`Cache`], [`Slot`], [`read`], and [`write`].
+```
+
+Good for a non-trivial module: this states responsibility, ownership, the
+normal entry path, and a caller-visible constraint.
+
+```rust
+//! Coordinates cached metadata blocks with block-device I/O.
+//!
+//! [`Cache`] owns shared cache entries but not the backing device. Callers
+//! obtain a pinned slot through `Cache::get` before accessing block contents.
+//! A cache miss may wait for I/O, so that path requires sleepable task context.
+```
+
+The longer form would be bad for a small pure helper. Use proportional depth:
+
+```rust
+//! Encodes and decodes little-endian on-disk block identifiers.
+```
+
+### Public API failure contract
+
+Bad: neither the error trigger nor the failure effect is actionable.
+
+```rust
+/// Opens a child entry.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
+pub fn open_child(name: &str) -> VfsResult<File>;
+```
+
+Good: the summary defines the operation, and `# Errors` describes observable
+conditions and state effects.
+
+```rust
+/// Opens the existing child named `name` relative to this directory.
+///
+/// The lookup does not follow a symbolic link in the final component.
+///
+/// # Errors
+///
+/// Returns `VfsError::InvalidInput` if `name` is not one path component, or
+/// `VfsError::NotFound` if the directory has no matching child. Neither
+/// failure modifies the directory.
+pub fn open_child(name: &str) -> VfsResult<File>;
+```
+
+### Unsafe API contract
+
+Bad: this leaves the meaning of safe entirely undefined.
+
+```rust
+/// # Safety
+///
+/// The caller must ensure this is safe.
+pub unsafe fn header_from_ptr(ptr: *const Header) -> &'static Header;
+```
+
+Good: this names the validity, lifetime, aliasing, and concurrent-access
+obligations that make the operation sound.
+
+```rust
+/// Returns the header stored at `ptr`.
+///
+/// # Safety
+///
+/// `ptr` must be non-null, aligned for `Header`, and have valid provenance for
+/// reading `size_of::<Header>()` fully initialized bytes. Those bytes must
+/// remain mapped and allocated for the returned lifetime. No CPU or device may
+/// mutate, unmap, or reuse them while the returned reference is live.
+pub unsafe fn header_from_ptr(ptr: *const Header) -> &'static Header;
+```
+
 ## Reference Basis
 
 - [The Rustdoc Book: How to write documentation](https://doc.rust-lang.org/rustdoc/how-to-write-documentation.html)

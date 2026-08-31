@@ -569,6 +569,9 @@ documentation.
    Read `references/rustdoc-style.md` for rustdoc,
    `references/design-doc-style.md` when `docs/design.md` applies, and
    `references/security-doc-style.md` when `docs/security.md` applies.
+   Use the paired good/bad comparisons in each applicable reference to
+   calibrate specificity and documentation depth. Treat their symbols and
+   claims as illustrative; do not copy them into repository documentation.
 
    Required output: the applicable reference files read.
    Stop when: a required reference cannot be read.

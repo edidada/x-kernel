@@ -218,6 +218,87 @@ State who owns each resource at each stage. Identify leaks, deferred cleanup,
 intentional retention, and caller-owned cleanup as implemented behavior or
 known limitations rather than silently assuming successful release.
 
+## Good and Bad Comparisons
+
+These comparisons show the expected evidence and level of precision. Their
+component names are illustrative and must not be copied as repository facts.
+
+### Scope and architecture
+
+Bad: a file inventory does not define ownership, delegation, or control flow.
+
+```markdown
+## Scope
+
+This document covers `cache.rs`, `slot.rs`, and `io.rs`.
+
+## Architecture
+
+- `cache.rs` implements the cache.
+- `slot.rs` implements slots.
+- `io.rs` performs I/O.
+```
+
+Good: the scope defines responsibility boundaries, and the architecture names
+owned state and interaction.
+
+```markdown
+## Scope
+
+The crate owns the in-memory metadata cache, slot pin counts, and dirty-state
+transitions. It delegates block submission and completion to `BlockDevice`.
+VFS pathname lookup and permission checks are outside this crate.
+
+## Architecture
+
+| Component | Responsibility | Owned State or Resource | Called By | Delegates To |
+|---|---|---|---|---|
+| `Cache` | Resolves block identifiers to pinned slots | Entry map and eviction state | Filesystem metadata paths | `Slot`, `BlockDevice` |
+| `Slot` | Serializes access to one cached block | Buffer, pin count, dirty flag | `Cache` clients | `BlockDevice` on fill or writeback |
+
+`Cache::get` resolves or creates a `Slot`. A miss submits one block read; the
+returned guard keeps the slot pinned until the caller drops it.
+```
+
+### Execution and concurrency constraints
+
+Bad: the statements are global, unsupported, and cannot guide a caller.
+
+```markdown
+The crate is thread-safe and may block. Locks protect shared state.
+```
+
+Good: this ties context and synchronization claims to operations and protected
+state.
+
+```markdown
+`Cache::get` may sleep while waiting for block I/O and therefore must run in
+task context. The function does not check interrupt context; its caller
+enforces that condition. The cache map lock serializes lookup and publication
+of entries, but it is released before waiting for I/O so unrelated hits can
+continue.
+```
+
+### Design decision
+
+Bad: this asserts benefits without recording the constraint or accepted cost.
+
+```markdown
+We use one lock because it is simpler and faster.
+```
+
+Good: this separates context, implemented choice, rationale, alternative, and
+tradeoff.
+
+```markdown
+- **Context:** Concurrent misses must not publish duplicate entries for one block.
+- **Decision:** Serialize lookup and insertion with the cache map lock.
+- **Rationale:** Publication becomes atomic with respect to competing misses.
+- **Alternative:** Per-bucket locks reduce unrelated contention but complicate
+  resize and lock ordering.
+- **Tradeoff:** Misses for unrelated blocks can currently contend on one lock.
+```
+
 ## Cross-Document Boundaries
 
 Keep the design document at architecture level:

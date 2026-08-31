@@ -297,6 +297,69 @@ Use wording that shows the status of a claim:
 If code evidence is inconclusive, narrow the claim or state the uncertainty.
 Do not guess that a control exists.
 
+## Good and Bad Comparisons
+
+These comparisons show how to make security and reliability claims auditable.
+All symbols and boundaries are illustrative; verify equivalent code evidence
+before adapting the pattern.
+
+### Unsafe traceability
+
+Bad: the invariant, enforcement point, and consequence cannot be reviewed.
+
+```markdown
+| Symbol and Path | Unsafe Operation | Required Invariant | Enforcing Guard or Caller | Violation Effect |
+|---|---|---|---|---|
+| `read_header` | Reads a pointer | Pointer must be safe | Caller checks it | Memory error |
+```
+
+Good: every statement identifies evidence a reviewer can inspect.
+
+```markdown
+| Symbol and Path | Unsafe Operation | Required Invariant | Enforcing Guard or Caller | Violation Effect |
+|---|---|---|---|---|
+| `read_header` in `src/codec.rs` | Creates `&DiskHeader` from a byte-buffer pointer | The buffer is aligned, contains a fully initialized `DiskHeader`, and remains immutably borrowed for the reference lifetime | `decode_header` checks length and alignment before retaining the input borrow | Out-of-bounds access, invalid-value UB, or aliased mutation |
+```
+
+### Threat and control status
+
+Bad: the trigger and evidence are vague, residual risk is unsupported, and the
+recommendation is indistinguishable from an implemented control.
+
+```markdown
+| ID | Asset or Boundary | Threat and Trigger | Severity | Implemented Control and Evidence | Residual Risk | Recommended Hardening |
+|---|---|---|---|---|---|---|
+| T-01 | User input | Malicious input attacks the kernel | High | Input is validated | Low | Add more validation |
+```
+
+Good: the row connects a concrete boundary to a reachable operation and keeps
+implemented validation separate from remaining exposure and future work.
+
+```markdown
+| ID | Asset or Boundary | Threat and Trigger | Severity | Implemented Control and Evidence | Residual Risk | Recommended Hardening |
+|---|---|---|---|---|---|---|
+| T-01 | User-supplied record length | `header_size + header.len` wraps before `decode_record` constructs an unsafe payload slice, allowing a short buffer to pass the bounds comparison | High | `decode_record` rejects an end offset larger than `input.len()` before calling `from_raw_parts` | The end offset currently uses unchecked addition, so overflow can bypass the comparison | Compute the end offset with `checked_add` and reject overflow |
+```
+
+### Failure mode
+
+Bad: this does not identify a reachable cause, effect, detection, or current
+handling.
+
+```markdown
+| ID | Failure Mode | Cause | Local Effect | System Effect | Detection | Handling | Severity |
+|---|---|---|---|---|---|---|---|
+| F-01 | I/O fails | Hardware issue | Error | System problem | Log | Retry | 2 |
+```
+
+Good: the failure path and its containment are explicit.
+
+```markdown
+| ID | Failure Mode | Cause | Local Effect | System Effect | Detection | Handling | Severity |
+|---|---|---|---|---|---|---|---|
+| F-01 | Metadata-cache fill fails | `BlockDevice::read` returns an I/O error | The new slot remains unpublished and has no valid contents | The initiating filesystem operation fails; existing cache entries remain usable | `Cache::get` receives the device error | Drop the provisional slot and return the error without retry | 3 |
+```
+
 ## Cross-Document Boundaries
 
 Keep detailed public API conditions in rustdoc. Keep component architecture,
