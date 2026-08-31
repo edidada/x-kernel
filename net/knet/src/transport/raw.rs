@@ -28,7 +28,7 @@ use crate::{
     consts::{RAW_RX_BUF_LEN, RAW_TX_BUF_LEN},
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
-    poller::{PollReason, assist_once, network_poller},
+    poller::{PollReason, advance_or_assist, assist_once, network_poller, try_advance_lease},
 };
 
 pub(crate) fn new_raw_socket(
@@ -206,10 +206,11 @@ impl SocketOps for RawSocket {
             self.local_address_for(remote)?
         };
         let payload_len = src.remaining();
+        let lease = try_advance_lease();
 
         self.general
             .send_poller_with_nonblocking(self, options.flags.nonblocking(), || {
-                assist_once();
+                advance_or_assist(lease.as_ref(), PollReason::Tx);
                 let written = self.with_smol_socket(|socket| {
                     if !socket.can_send() {
                         return Err(KError::WouldBlock);
@@ -292,8 +293,12 @@ impl SocketOps for RawSocket {
                     let written = src.read(&mut buf[header_len..])?;
                     Ok(written)
                 })?;
-                network_poller().notify(PollReason::Tx);
-                assist_once();
+                if let Some(lease) = lease.as_ref() {
+                    lease.advance(PollReason::Tx);
+                } else {
+                    network_poller().notify(PollReason::Tx);
+                    assist_once();
+                }
                 Ok(written)
             })
     }
@@ -303,10 +308,11 @@ impl SocketOps for RawSocket {
             return Err(KError::NotConnected);
         }
         let mut options = options;
+        let lease = try_advance_lease();
 
         self.general
             .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
-                assist_once();
+                advance_or_assist(lease.as_ref(), PollReason::Rx);
                 self.with_smol_socket(|socket| {
                     loop {
                         let packet = if options.flags.contains(RecvFlags::PEEK) {

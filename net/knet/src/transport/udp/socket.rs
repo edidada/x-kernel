@@ -23,7 +23,7 @@ use crate::{
     ip::{IpAddress, IpEndpoint, Ipv4Address},
     ipv4,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
-    poller::{PollReason, assist_once, network_poller},
+    poller::{PollReason, advance_or_assist, assist_once, network_poller, try_advance_lease},
     udp_err::QueuedUdpError,
 };
 
@@ -191,6 +191,7 @@ impl UdpSocket {
                 .and_then(|packet| packet.get_mut(IPV4_HEADER_LEN + UDP_HEADER_LEN..))
                 .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?,
         )?;
+        let lease = try_advance_lease();
         self.state()
             .send_poller_with_nonblocking(self, flags.nonblocking(), || {
                 let bound_source_addr = self
@@ -210,8 +211,12 @@ impl UdpSocket {
                         self.write_datagram(packet, remote_endpoint, source_addr, dont_fragment)
                     },
                 )?;
-                network_poller().notify(PollReason::Tx);
-                assist_once();
+                if let Some(lease) = lease.as_ref() {
+                    lease.advance(PollReason::Tx);
+                } else {
+                    network_poller().notify(PollReason::Tx);
+                    assist_once();
+                }
                 Ok(payload_len)
             })
     }
@@ -275,13 +280,7 @@ impl UdpSocket {
         }
 
         let mode = recv_mode_from_flags(flags);
-        let datagram = match self.try_recv_datagram(mode) {
-            Some(datagram) => datagram,
-            None => {
-                assist_once();
-                self.try_recv_datagram(mode).ok_or(KError::WouldBlock)?
-            }
-        };
+        let datagram = self.try_recv_datagram(mode).ok_or(KError::WouldBlock)?;
 
         if let Some(remote_addr) = from {
             *remote_addr = SocketAddrEx::Ip(datagram.remote_addr);
@@ -295,7 +294,6 @@ impl UdpSocket {
     }
 
     fn recv_error_msg(&self, msg: &mut RecvErrorMsg<'_>) -> KResult<usize> {
-        assist_once();
         let error = if msg.flags.contains(RecvFlags::PEEK) {
             self.state().peek_error()
         } else {
@@ -452,10 +450,12 @@ impl SocketOps for UdpSocket {
             ancillary,
             mut out_flags,
         } = options;
+        let lease = try_advance_lease();
         if !flags.contains(RecvFlags::ERROR_QUEUE) {
             return self
                 .state()
                 .recv_poller_with_nonblocking(self, flags.nonblocking(), || {
+                    advance_or_assist(lease.as_ref(), PollReason::Rx);
                     self.recv_payload(
                         &mut dst,
                         from.as_deref_mut(),
@@ -475,6 +475,7 @@ impl SocketOps for UdpSocket {
         };
         self.state()
             .recv_poller_with_nonblocking(self, flags.nonblocking(), || {
+                advance_or_assist(lease.as_ref(), PollReason::Rx);
                 let recv = self.recv_error_msg(&mut error_msg)?;
                 let write_len = recv.min(error_msg.data.len());
                 dst.write_all(&error_msg.data[..write_len])?;

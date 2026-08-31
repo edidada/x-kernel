@@ -214,7 +214,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 28. `NET_RX_QUEUE` 容量与所有权边界：`pending_udp` 与 `deferred` 必须在设备创建时按 `SOCKET_BUFFER_SIZE` 预分配，`enqueue` 以两条队列长度与 in-flight 合计为上限拒绝超额报文，因此 `push_back` 不得在 `SpinNoIrq` 或 `NetRx` softirq 内触发扩容。`process_pending` 取出的盖戳 UDP 必须计入 in-flight 预留，批次大小不超过 `NET_RX_BUDGET`，在锁外交付；未命中 PCB 的报文必须仍唯一持有句柄，清除元数据后放入 `deferred`。队列满时 `enqueue` 必须把报文交还调用方，由发送路径在释放 `NET_RX_QUEUE` 与 BH guard 之后再 drop；`discard_ifindex` 必须先把匹配报文移出到局部容器，解锁后再释放，避免在 `SpinNoIrq` 内堆释放。发送路径的 task fallback 只处理进入时已有的 `pending_udp`，并按 `NET_RX_BUDGET` 拆成固定轮次。队列按 `ifindex` 区分报文所有者，`LoopbackDevice::drop` 必须调用 `discard_ifindex`；该清理对 `process_pending` 释放锁期间的在途报文是 best-effort，完整的设备身份语义需要等价于 Linux `skb->dev` 与 `NETREG_UNREGISTERING` 的注册状态。
 29. TCP listener 推进条件：收到 TCP 报文或 SYN 队列仍有 child 时，下一次实际网络 poll 必须刷新对应 listener。child 进入 accept 队列后才唤醒 `accept_poll`，唤醒发生在 entry 锁外。SYN 队列非空不会设置 `PollProgress::has_more`，未到期的协议 timer 继续等待 deadline 通知，避免半连接造成 poller 空转。
 30. Unix listener 资源边界：pending request 与容量预留之和不得超过 `LISTEN_QUEUE_SIZE`。每个连接的两个 64 KiB ring 只能在容量预留成功后分配；预留失败、中断或源 socket 状态拒绝连接时必须通过 RAII 归还名额。
-31. 推进租约边界：任务上下文只能通过不可复制的 `NetAdvanceLease` 持有推进租约。每轮推进必须先发布工作原因，再通过 `SCHEDULED` 到 `RUNNING` 的 CAS 竞争唯一执行者。租约析构必须原子释放计数，并为已积累的 `SCHEDULED` 工作恢复后台排队；500 微秒有效期、过期通知和 10 ms 周期 `kick_if_stale` 共同限制挂起时间。租约过期只恢复后台排队，不撤销仍存活的持有者，因此长时间持有者会阻止其他任务取得租约，但不会阻止后台推进。
+31. 推进租约边界：任务上下文只能通过不可复制的 `NetAdvanceLease` 持有推进租约。TCP、UDP 和 raw socket 的租约轮次必须先发布工作原因，再通过 `SCHEDULED` 到 `RUNNING` 的 CAS 竞争唯一执行者。租约析构必须原子释放计数，并为已积累的 `SCHEDULED` 工作恢复后台排队；500 微秒有效期、过期通知和 10 ms 周期 `kick_if_stale` 共同限制挂起时间。租约过期只恢复后台排队，不撤销仍存活的持有者，因此长时间持有者会阻止其他任务取得租约，但不会阻止后台推进。
 
 ## 线程安全
 
@@ -258,7 +258,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-24 | 混合 netlink 批次发生部分 mutation | 高 | 同一发送同时包含 query 和 mutation，framing 错误位于已处理消息之后，或 response queue 在批次中途耗尽 | 发送事务锁串行化同一 socket 的 mutation 批次；完整批次先校验 framing 和类别；混合批次返回 syscall `EOPNOTSUPP`；同类 mutation 执行前检查完整 response 空间 |
 | T-25 | poller 执行期间丢失新事件 | 中 | RX、TX 或 timer 通知与完成 CAS 并发 | `kwork::BudgetedPoller` 将执行期通知发布为 `RUNNING_PENDING`；完成 CAS 失败后按观察到的状态重试，并通过一次成功 CAS 同时释放执行权和发布下一轮 |
 | T-26 | smoltcp 协议 timer 缺少推进事件 | 中 | TCP 重传或 keep-alive deadline 到期时没有设备 IRQ 或 socket 调用 | 每次 Interface poll 后通过 `poll_at` 注册 timer；到期后调用 `notify(PollReason::Timer)` 并唤醒 socket waiter；未来 deadline 不触发立即重轮询 |
-| T-27 | socket TX 工作缺少后台推进 | 中 | connect、send、receive window update 或 close 只更新 socket 状态 | 真实 TX 生产路径调用 `notify(PollReason::Tx)`；TCP 与 raw 注册 smoltcp send waker；Router data TX queue 容量增加后唤醒全局 TX waiter |
+| T-27 | socket TX 工作缺少后台推进 | 中 | connect、send、receive window update 或 close 只更新 socket 状态 | TCP、UDP 和 raw send 的租约轮次先发布 `PollReason::Tx`，未取得租约时保留后台通知；TCP 与 raw 注册 smoltcp send waker；Router data TX queue 容量增加后唤醒全局 TX waiter |
 | T-28 | TCP 文件关闭丢失已经接受的发送数据 | 中 | `write` 把数据写入 smoltcp buffer 后异步发布 TX，文件 Drop 在 poller 处理前删除 handle | Drop 将未完成协议关闭的 handle 转移到 deferred-close registry；poller 完成 payload、FIN 和重传后回收；60 秒期限只限制 orphan `FIN_WAIT_2` 占用资源 |
 | T-29 | 并发 socket 等待阻塞网络 timer 更新 | 中 | socket 注册等待时在 timeout mutex 内手工 poll 异步 sleep，timer-wheel 锁等待阻塞 poller | deadline 使用原子值发布；周期采样回调到期后直接唤醒 waiter 并通知 poller，不持有 timeout mutex，不创建或 poll timer future |
 | T-30 | TCP close 将未读数据错误转换为 FIN | 中 | 文件对象释放前未检查接收队列，协议 close 直接进入 FIN_WAIT1 | 对端收到 FIN 后继续按有序关闭处理，Linux 预期的 RST 语义丢失 | Drop 检查 smoltcp 接收队列；存在未读数据时调用 abort，并保留 handle 直到 RST dispatch 完成 |
@@ -373,7 +373,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - 修改 poller 状态机或 `Service::poll_budgeted` 时验证低 2 位执行状态、6 位租约计数、发布代数、单执行者获取、一次 CAS 释放、分阶段 smoltcp 预算和 1 ms 软时间上限；`PollProgress::has_more` 只能包含立即工作，未来协议 deadline 必须等待 timer 到期后发布；TX waiter 只能由 `tx_capacity_changed` 触发全局容量唤醒。
 - 修改 `Service::poll_budgeted` 的锁路径时验证共享推进锁保持 `try_lock` 语义，竞争时设置 `has_more`，raw、accepted 和 control batch 在重试前保持所有权，TCP listener preparation 只在 accepted batch 能立即转入 Router 时执行。
 - 修改 TCP listener 推进时验证 SYN 队列非空的 entry 在实际网络 poll 后得到刷新，child 移入 accept 队列后才在 entry 锁外唤醒 waiter，并保持 SYN 队列不进入 `PollProgress::has_more`。
-- 修改 poller 执行边界时验证后台、租约和 assist 的 512/256/32、64/64/8、16/16/8 三档预算，租约推进先发布原因再执行一轮，租约析构恢复排队，500 微秒过期通知恢复排队，10 ms timer callback 执行 `kick_if_stale`，assist 保持一次机会式 CAS 和单轮预算；loopback UDP 必须在发送路径的 BH/`NetRx` 窗口内进入 PCB，不依赖 poller 所有权。
+- 修改 poller 执行边界时验证后台、租约和 assist 的 512/256/32、64/64/8、16/16/8 三档预算，TCP、UDP 和 raw socket 的租约推进先发布原因再执行一轮，raw send 保持发送前后推进机会，租约析构恢复排队，500 微秒过期通知恢复排队，10 ms timer callback 执行 `kick_if_stale`，assist 保持一次机会式 CAS 和单轮预算；loopback UDP 必须在发送路径的 BH/`NetRx` 窗口内进入 PCB，不依赖 poller 所有权。
 - 修改 `NET_RX_QUEUE` 时验证 `pending_udp` 与 `deferred` 在设备创建时完成预分配、`enqueue` 上限为两条队列长度与 in-flight 合计、`SpinNoIrq` 内不发生扩容、堆释放或 UDP PCB 交付，队列满与 `discard_ifindex` 都在锁外 drop `PacketBuf`，`process_pending` 批次不超过 `NET_RX_BUDGET`，以及发送路径 fallback 只执行固定轮次；共享该队列的单元测试必须声明 `serial`。
 - 修改 UDP PCB 队列时验证 PCB 创建时预留 1024 个指针大小的槽位、`PacketBuf` 在进入网络栈时建立引用计数生命周期、loopback 在关闭 BH 前写入已校验 UDP 元数据、softirq 与 `SpinNoIrq` 入队路径不分配或扩容、满队列报文在锁外释放、FIFO 顺序，以及 `MSG_PEEK` 的 payload 复制位于锁外。
 - 修改 TCP Drop 或异步 TX 路径时验证已成功写入的 payload 在文件关闭后仍由协议对象持有，未读数据关闭发送 RST，deferred-close handle 在 `Closed` 后删除，状态期限只作用于 orphan `FIN_WAIT_2`。
