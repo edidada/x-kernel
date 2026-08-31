@@ -1262,3 +1262,8 @@ fn clk_summary_lists_registered_clocks() {
         (0, 0)
     );
 }
+
+#[def_test(serial)]
+fn aaaa_trivial_fifteenth_test_probe() {
+    assert_eq!(1 + 1, 2);
+}

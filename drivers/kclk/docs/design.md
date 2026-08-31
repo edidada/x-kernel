@@ -250,9 +250,11 @@ calling the hardware op once when the count reaches zero.
   under the global `CLK_LOCK`, a **sleepable mutex**: a provider's `prepare` may
   sleep (e.g. block on a PLL lock). These paths must still not run in interrupt
   context.
-- `enable`/`disable` are also serialized by `CLK_LOCK` (a sleepable mutex) so
-  they cannot race a concurrent `set_parent` migrating the parent's enable
-  reference; they may block and must not run in interrupt context.
+- `enable`/`disable` are serialized by a separate `CLK_ENABLE_LOCK` — an
+  IRQ-saving spinlock (Linux's `clk_enable_lock`) — so they stay usable from
+  interrupt context while remaining mutually exclusive with `set_parent`'s
+  reference migration. The provider `enable`/`disable` callback runs with IRQs
+  disabled and must be quick and non-sleeping.
 - A provider's other callbacks (`recalc_rate`, `is_enabled`, `init`, ...) may be
   invoked without the global lock and must not sleep. Callbacks must not
   re-enter the framework — re-entrancy panics (see the `Re-entrancy` note on
@@ -266,10 +268,11 @@ calling the hardware op once when the count reaches zero.
   `ksync::Mutex`), so a rate change — including parent recursion and
   re-rounding — is atomic w.r.t. other changes. `get_rate` reads the per-node
   cache without this lock.
-- The atomic gate (`enable`/`disable`) takes `CLK_LOCK` alongside the other
-  mutations, so it no longer races a concurrent `set_parent`. The lock is
-  sleepable, so `enable` may block (no IRQ-context enable callers exist
-  in-tree).
+- The atomic gate (`enable`/`disable`) takes a separate IRQ-saving
+  `CLK_ENABLE_LOCK` (Linux's two-lock model), so it neither races a concurrent
+  `set_parent` migration nor loses interrupt-context usability. Lock order is
+  `CLK_LOCK` → `CLK_ENABLE_LOCK`; the reparent migration nests them in exactly
+  that order.
 - Parent recursion clones the parent `Arc` and releases the child state lock
   first, so propagation acquires locks strictly parent-before-child — no
   lock-ordering deadlock across the tree.
@@ -286,11 +289,17 @@ calling the hardware op once when the count reaches zero.
   (gate/mux/divider) never depend on a host MMIO mechanism; `MmioClkReg` is one
   default impl, and tests inject an array-backed mock.
 - **`RATE` is `u64` Hz**, matching Linux's `unsigned long`.
-- **Per-node spinlocks plus a global sleepable `CLK_LOCK`.** Sleepable
-  mutations take the global `ksync::Mutex` (atomic w.r.t. other changes and
-  allowing providers to sleep); `enable`/`disable` stay on the per-node
-  spinlock so they remain usable where blocking is impossible. Parent recursion
-  releases the child lock first to keep lock ordering parent-before-child.
+- **Two global locks, mirroring Linux.** `CLK_LOCK` (a sleepable
+  `ksync::Mutex`) serializes the slow mutations — `prepare`/`unprepare`/
+  `set_rate`/`set_parent`/`round_rate` — so rate changes are atomic w.r.t.
+  each other and providers may sleep in those callbacks.
+  `CLK_ENABLE_LOCK` (an IRQ-saving spinlock) serializes `enable`/`disable`
+  propagation, keeping the atomic fast path usable from interrupt context
+  (console/polling drivers). Lock order is `CLK_LOCK` → `CLK_ENABLE_LOCK`
+  (the reparent ref-migration takes both); the reverse never happens.
+  Per-node spinlocks protect individual fields beneath the globals, and parent
+  recursion releases the child lock first to keep lock ordering
+  parent-before-child.
 
 ## Adding a Clock Controller Driver
 
@@ -473,12 +482,12 @@ Arc::new(MyPll { reg })).parent(..).build()`.
 
 ## Known Limitations
 
-- **`enable`/`disable` and lock-free callbacks must not sleep.** `enable`/
-  `disable` now take the sleepable `CLK_LOCK` (so they may block, but not run
-  in IRQ context); the provider `enable`/`disable` callback and the lock-free
-  callbacks (`recalc_rate`, `is_enabled`, `init`, ...) must still stay
-  non-sleeping. Only the `CLK_LOCK`-held paths (`prepare`/`set_rate`/
-  `set_parent`/`round_rate`) may sleep.
+- **The provider `enable`/`disable` callback must not sleep.** It runs under
+  the IRQ-saving `CLK_ENABLE_LOCK` spinlock (framework `enable`/`disable` are
+  interrupt-context usable). The lock-free callbacks (`recalc_rate`,
+  `is_enabled`, `init`, ...) must also stay non-sleeping. Only the `CLK_LOCK`-
+  held paths (`prepare`/`unprepare`/`set_rate`/`set_parent`/`round_rate`) may
+  sleep.
 - **Notifiers fire only on the entry node.** A `set_rate` that propagates up
   the tree delivers events only to the node on which it was called; intermediate
   parents reprogrammed during propagation do not receive separate notifications.

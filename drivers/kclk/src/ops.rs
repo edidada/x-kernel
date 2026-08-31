@@ -11,18 +11,19 @@
 //!
 //! # The two-phase gate
 //!
-//! Clock enabling is split into two phases, mirroring Linux:
+//! Clock enabling is split into two phases, mirroring Linux's
+//! `prepare_lock` + `enable_lock` two-lock model:
 //!
 //! - [`prepare`](ClkHwOps::prepare) / [`unprepare`](ClkHwOps::unprepare) carry
-//!   the slow, controller-global setup; they run under the global clock lock
-//!   (a **sleepable mutex**) and **may sleep** (a PLL lock wait can block).
+//!   the slow, controller-global setup; they run under the sleepable
+//!   `CLK_LOCK` mutex and **may sleep** (a PLL lock wait can block).
 //! - [`enable`](ClkHwOps::enable) / [`disable`](ClkHwOps::disable) toggle only
-//!   a gate bit. They are also serialized by the global clock lock (so a
-//!   concurrent `set_parent` cannot migrate the parent's enable ref across two
-//!   parents mid-enable); the lock is sleepable, so `enable` may block too and
-//!   must not run in interrupt context. The provider `enable`/`disable`
-//!   callback itself must still be quick and non-sleeping (it only flips a
-//!   gate bit).
+//!   a gate bit. They run under a separate IRQ-saving **spinlock**
+//!   (`CLK_ENABLE_LOCK`), so `enable` stays usable from interrupt context
+//!   (console/polling drivers) while remaining mutually exclusive with
+//!   `set_parent`'s reference migration. The provider `enable`/`disable`
+//!   callback runs with IRQs disabled and must be quick and non-sleeping —
+//!   it only flips a gate bit (use `HIWORD_MASK` on a shared register word).
 //!
 //! The remaining callbacks (`recalc_rate`, `recalc_accuracy`, `is_enabled`,
 //! `is_prepared`, `get_parent`, `init`, `determine_rate`) may be invoked

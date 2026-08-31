@@ -87,9 +87,17 @@ impl ClkHwOps for Mux {
             Some(table) => table.len(),
             None => (self.mask + 1) as usize,
         };
-        // The framework's parent index is a `u8`; a field that can encode 256
-        // values cannot be represented. Cap defensively rather than wrap to 0.
-        count.min(u8::MAX as usize) as u8
+        // The framework's parent index is a `u8`; a field that can encode
+        // more than 255 parents cannot be represented. This is a driver
+        // configuration error, so fail loudly at construction-time query
+        // (matching Divider's width assert) rather than silently truncating —
+        // a truncated count would make high parents unreachable with no
+        // diagnostic.
+        assert!(
+            count <= u8::MAX as usize,
+            "mux encodes {count} parents; the framework address limit is 255"
+        );
+        count as u8
     }
 
     fn get_parent(&self) -> ClkResult<u8> {

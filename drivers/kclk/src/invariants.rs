@@ -19,6 +19,7 @@
 //! the framework's rollback paths instead of only the happy path.
 
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use kspin::SpinNoIrq;
 use unittest::{TestResult, assert_eq, def_test, ktest_println};
@@ -717,4 +718,239 @@ fn register_table_cycle_rollback_keeps_global_list_clean() {
     assert_eq!(crate::clocks_len(), before);
     assert!(crate::clk_get_by_index(0x89, 0).is_err());
     crate::reset_providers();
+}
+
+// ---------------------------------------------------------------------------
+// P1: runtime concurrency validation. The serial tests above prove the logic;
+// these spawn contending kernel tasks and prove the two-lock model live:
+// no deadlock, INV-1/INV-2 hold under real contention, counts balance.
+// ---------------------------------------------------------------------------
+
+#[def_test(serial)]
+fn concurrent_gate_storm_balances() {
+    const TASKS: u32 = 4;
+    const ITERS: u32 = 64;
+
+    let root_ops = FailOps::new(1_000_000_000);
+    let root = ClkBuilder::new("cc_root", root_ops.clone().into_ops())
+        .build()
+        .unwrap();
+    let mid_ops = FailOps::new(500_000_000);
+    let mid = ClkBuilder::new("cc_mid", mid_ops.clone().into_ops())
+        .parent(root.clone())
+        .build()
+        .unwrap();
+    let leaf_ops = FailOps::new(125_000_000);
+    let leaf = ClkBuilder::new("cc_leaf", leaf_ops.clone().into_ops())
+        .parent(mid.clone())
+        .build()
+        .unwrap();
+
+    let done = Arc::new(AtomicU32::new(0));
+    let failures = Arc::new(AtomicU32::new(0));
+
+    for _worker in 0..TASKS {
+        let done = done.clone();
+        let failures = failures.clone();
+        let leaf = leaf.clone();
+        ktask::spawn(move || {
+            let handle = ClkHandle::new(leaf);
+            let mut bad = 0u32;
+            for _ in 0..ITERS {
+                if handle.prepare_enable().is_err() {
+                    bad += 1;
+                }
+                ktask::yield_now();
+                handle.disable_unprepare();
+                ktask::yield_now();
+            }
+            if bad > 0 {
+                failures.fetch_add(bad, Ordering::Relaxed);
+            }
+            done.fetch_add(1, Ordering::Release);
+        });
+    }
+
+    let mut spins = 0u32;
+    while done.load(Ordering::Acquire) < TASKS {
+        ktask::yield_now();
+        spins += 1;
+        if spins > 4_000_000 {
+            ktest_println!("CONC-DEADLOCK: gate workers did not finish");
+            return TestResult::Failed;
+        }
+    }
+    if failures.load(Ordering::Acquire) > 0 {
+        ktest_println!("CONC: gate iterations failed");
+        return TestResult::Failed;
+    }
+    let nodes = [
+        (&*root, &*root_ops),
+        (&*mid, &*mid_ops),
+        (&*leaf, &*leaf_ops),
+    ];
+    if assert_fully_released(&nodes) != TestResult::Ok {
+        return TestResult::Failed;
+    }
+    let tree = [&*root, &*mid, &*leaf];
+    if assert_cache_coherent(&tree) != TestResult::Ok {
+        return TestResult::Failed;
+    }
+}
+
+#[def_test(serial)]
+fn concurrent_rate_vs_gate_keeps_invariants() {
+    const TASKS: u32 = 4;
+    const ITERS: u32 = 48;
+
+    let root_ops = FailOps::new(1_000_000_000);
+    let root = ClkBuilder::new("cr_root", root_ops.clone().into_ops())
+        .build()
+        .unwrap();
+    let leaf_ops = FailOps::new(500_000_000);
+    let leaf = ClkBuilder::new("cr_leaf", leaf_ops.clone().into_ops())
+        .parent(root.clone())
+        .build()
+        .unwrap();
+
+    let done = Arc::new(AtomicU32::new(0));
+    let failures = Arc::new(AtomicU32::new(0));
+
+    for worker in 0..TASKS {
+        let done = done.clone();
+        let failures = failures.clone();
+        let leaf = leaf.clone();
+        ktask::spawn(move || {
+            let handle = ClkHandle::new(leaf);
+            // Half the workers hammer set_rate/round_rate under CLK_LOCK; the
+            // other half hammer the gate under CLK_ENABLE_LOCK — exactly the
+            // two-lock interleaving the design must survive.
+            let rate_worker = worker % 2 == 0;
+            for i in 0..ITERS {
+                if rate_worker {
+                    let want = 100_000_000 + u64::from(i % 8) * 50_000_000;
+                    if handle.set_rate(want).is_err() {
+                        failures.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let _ = handle.round_rate(123_456_789);
+                } else {
+                    if handle.prepare_enable().is_err() {
+                        failures.fetch_add(1, Ordering::Relaxed);
+                    }
+                    handle.disable_unprepare();
+                }
+                ktask::yield_now();
+            }
+            done.fetch_add(1, Ordering::Release);
+        });
+    }
+
+    let mut spins = 0u32;
+    while done.load(Ordering::Acquire) < TASKS {
+        ktask::yield_now();
+        spins += 1;
+        if spins > 4_000_000 {
+            ktest_println!("CONC-DEADLOCK: mixed workers did not finish");
+            return TestResult::Failed;
+        }
+    }
+    if failures.load(Ordering::Acquire) > 0 {
+        ktest_println!("CONC: operations failed under contention");
+        return TestResult::Failed;
+    }
+    if leaf.get_rate() < 100_000_000 || leaf.get_rate() > 500_000_000 {
+        ktest_println!("CONC: leaf rate {} out of band", leaf.get_rate());
+        return TestResult::Failed;
+    }
+    let tree = [&*root, &*leaf];
+    if assert_cache_coherent(&tree) != TestResult::Ok {
+        return TestResult::Failed;
+    }
+}
+
+#[def_test(serial)]
+fn concurrent_reparent_migration_keeps_refcounts() {
+    const TASKS: u32 = 4;
+    const ITERS: u32 = 48;
+
+    let osc_ops = FailOps::new(24_000_000);
+    let osc = ClkBuilder::new("cp_osc", osc_ops.clone().into_ops())
+        .build()
+        .unwrap();
+    let alt_ops = FailOps::new(32_000_000);
+    let alt = ClkBuilder::new("cp_alt", alt_ops.clone().into_ops())
+        .build()
+        .unwrap();
+    let mux = SoftMuxOps::new();
+    let leaf = ClkBuilder::new("cp_leaf", mux.clone().into_ops())
+        .parent(osc.clone())
+        .parent(alt.clone())
+        .build()
+        .unwrap();
+
+    let done = Arc::new(AtomicU32::new(0));
+    let failures = Arc::new(AtomicU32::new(0));
+
+    for worker in 0..TASKS {
+        let done = done.clone();
+        let failures = failures.clone();
+        let leaf = leaf.clone();
+        ktask::spawn(move || {
+            let handle = ClkHandle::new(leaf);
+            for i in 0..ITERS {
+                if worker % 2 == 0 {
+                    // Switcher: flips the mux under CLK_LOCK (with the ref
+                    // migration nesting CLK_ENABLE_LOCK inside it).
+                    if handle.set_parent((i % 2) as u8).is_err() {
+                        failures.fetch_add(1, Ordering::Relaxed);
+                    }
+                } else {
+                    // Gater: enable/disable under CLK_ENABLE_LOCK, racing the
+                    // migration across both parents.
+                    if handle.prepare_enable().is_err() {
+                        failures.fetch_add(1, Ordering::Relaxed);
+                    }
+                    handle.disable_unprepare();
+                }
+                ktask::yield_now();
+            }
+            done.fetch_add(1, Ordering::Release);
+        });
+    }
+
+    let mut spins = 0u32;
+    while done.load(Ordering::Acquire) < TASKS {
+        ktask::yield_now();
+        spins += 1;
+        if spins > 4_000_000 {
+            ktest_println!("CONC-DEADLOCK: reparent workers did not finish");
+            return TestResult::Failed;
+        }
+    }
+    if failures.load(Ordering::Acquire) > 0 {
+        ktest_println!("CONC: reparent/gating failed under contention");
+        return TestResult::Failed;
+    }
+    // INV-1: both parents' hardware counters balance — the migration never
+    // leaked a count on either side.
+    let (op, oup, oe, od, _) = osc_ops.counters();
+    if op != oup || oe != od {
+        ktest_println!("CONC: osc unbalanced ({op}/{oup} prep, {oe}/{od} en)");
+        return TestResult::Failed;
+    }
+    let (ap, aup, ae, ad, _) = alt_ops.counters();
+    if ap != aup || ae != ad {
+        ktest_println!("CONC: alt unbalanced ({ap}/{aup} prep, {ae}/{ad} en)");
+        return TestResult::Failed;
+    }
+    let (lp, le) = leaf.counts();
+    if lp != 0 || le != 0 {
+        ktest_println!("CONC: leaf holds refs ({lp},{le}) after storm");
+        return TestResult::Failed;
+    }
+    // INV-2: whichever parent is selected, the leaf cache matches it.
+    let tree = [&*osc, &*alt, &*leaf];
+    if assert_cache_coherent(&tree) != TestResult::Ok {
+        return TestResult::Failed;
+    }
 }

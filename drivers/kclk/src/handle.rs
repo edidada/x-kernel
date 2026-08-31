@@ -127,23 +127,46 @@ impl ClkHandle {
 
     /// Prepare then enable, in that order.
     ///
-    /// On enable failure the prepare reference is rolled back, matching Linux
-    /// `clk_prepare_enable`.
+    /// Atomic w.r.t. `set_parent`: the whole prepare+enable pair runs under one
+    /// `CLK_LOCK` acquisition, so a concurrent reparent cannot observe the
+    /// prepare half propagating to one parent and the enable half to another
+    /// (the halves independently re-resolve "current parent" otherwise,
+    /// leaking a reference on the pre-switch parent — a race the concurrency
+    /// stress test caught live). On enable failure the prepare reference is
+    /// rolled back, matching Linux `clk_prepare_enable`.
     pub fn prepare_enable(&self) -> ClkResult {
-        self.core.prepare()?;
-        if let Err(err) = self.core.enable() {
-            let _ = self.core.unprepare();
-            return Err(err);
-        }
-        Ok(())
+        crate::core::with_clk_lock(|| -> ClkResult<()> {
+            self.core.prepare_locked()?;
+            // The enable half must also hold CLK_ENABLE_LOCK (CLK_LOCK →
+            // CLK_ENABLE_LOCK order, same as the set_parent migration): the
+            // 0→1 transition check inside enable_locked is check-then-act on
+            // the per-node count, and two unsynchronized callers can both see
+            // 0, both fire ops.enable, and double-increment — the hardware-op
+            // counters then unbalance (caught by the concurrency stress test).
+            let _el = crate::core::enable_lock();
+            if let Err(err) = self.core.enable_locked() {
+                drop(_el);
+                let _ = self.core.unprepare_locked();
+                return Err(err);
+            }
+            Ok(())
+        })
     }
 
-    /// Disable then unprepare, in that order. Discards the hardware
-    /// `unprepare` error (the release itself is already committed); use
+    /// Disable then unprepare, in that order.
+    ///
+    /// Same atomicity rationale as [`prepare_enable`](Self::prepare_enable):
+    /// one `CLK_LOCK` acquisition across both halves so the disable half and
+    /// the unprepare half resolve the same parent. Discards the hardware
+    /// `unprepare` error (the release is already committed); use
     /// [`unprepare`](Self::unprepare) directly to observe it.
     pub fn disable_unprepare(&self) {
-        self.core.disable();
-        let _ = self.core.unprepare();
+        crate::core::with_clk_lock(|| {
+            let _el = crate::core::enable_lock();
+            self.core.disable_locked();
+            drop(_el);
+            let _ = self.core.unprepare_locked();
+        });
     }
 
     /// Whether the hardware reports the clock as enabled.

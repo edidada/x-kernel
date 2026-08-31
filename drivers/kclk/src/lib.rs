@@ -15,9 +15,15 @@
 //! - [`ClkLookup`] / [`register_provider`] / [`ClkTable`], the global provider
 //!   registry that consumers query via [`clk_get_by_name`] /
 //!   [`clk_get_by_index`] (by `(provider_id, index)`).
-//! - [`ClkHandle`], the consumer-side reference returned to drivers.
+//! - [`ClkHandle`], the consumer-side reference returned to drivers, owning
+//!   its per-consumer rate-range vote and notifier registration.
 //! - Basic composable types in [`basic`]: [`FixedRate`], [`FixedFactor`],
 //!   [`Gate`], [`Mux`], [`Divider`], [`Composite`].
+//! - [`register_table`] with [`ClkBranch`]/[`ParentRef`]: declarative,
+//!   order-independent batch registration for a whole controller, including
+//!   cross-provider parents ([`ParentRef::External`]).
+//! - [`clk_summary`] for bring-up diagnostics and [`clk_disable_unused`] for
+//!   the late-init gate-down pass.
 //!
 //! Concrete clock-controller drivers (SoC PLL/mux/divider chips) register their
 //! outputs here, mirroring how the [`device_res`] capability providers are

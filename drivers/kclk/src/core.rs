@@ -10,7 +10,7 @@ use alloc::{
     vec::Vec,
 };
 
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, SpinRaw};
 use ksync::{Mutex, static_lock};
 
 use crate::{
@@ -18,26 +18,39 @@ use crate::{
     NotifierResult, Rate,
 };
 
-// Global serialization lock for sleepable clock mutations.
+// Two global locks, mirroring Linux's prepare_lock + enable_lock split.
 //
-// All `prepare`/`unprepare`/`set_rate`/`set_parent`/`round_rate` operations
-// take this lock, so a rate change (which may recurse up the parent tree and
-// reprogram a PLL) is atomic with respect to other changes. The atomic gate
-// (`enable`/`disable`) does *not* take this lock — it stays on the per-node
-// spinlock so it remains usable from contexts that cannot block.
+// CLK_LOCK (sleepable `ksync::Mutex`) serializes the slow mutations —
+// `prepare`/`unprepare`/`set_rate`/`set_parent`/`round_rate` — so a rate
+// change (which may recurse up the parent tree and reprogram a PLL) is atomic
+// with respect to other changes, and providers may sleep in those callbacks.
+// Never taken from atomic/interrupt context; not re-entrant (re-entering the
+// framework while holding it panics instead of deadlocking).
 //
-// This mirrors Linux's single `clk_prepare_lock`. Clock operations are not a
-// hot path (boot/probe/DVFS), so one global lock is acceptable; the per-node
-// spinlock still keeps `get_rate` reads lock-free w.r.t. this lock.
+// CLK_ENABLE_LOCK (IRQ-saving spinlock) serializes `enable`/`disable`
+// propagation, keeping the gate fast path usable from interrupt context
+// (console/polling drivers call `clk_enable` from IRQ handlers on real
+// hardware). Provider `enable`/`disable` callbacks run under it and must stay
+// quick and non-sleeping — they only flip a gate bit.
 //
-// The lock is a sleepable mutex (`ksync::Mutex`), matching Linux's
-// `clk_prepare_lock`: providers may sleep in the `prepare`/`set_rate`/
-// `set_parent`/`round_rate` callbacks that run under it. It must therefore
-// never be taken from atomic or interrupt context, and it is not re-entrant —
-// re-entering the framework while holding it panics instead of deadlocking.
+// Lock order: CLK_LOCK → CLK_ENABLE_LOCK (the reparent reference-migration
+// takes both, in that order). The reverse order never occurs, so no circular
+// wait is possible. The theoretical interleaving window between a concurrent
+// `enable` and `set_parent`'s migration (both serialize on CLK_ENABLE_LOCK for
+// their count mutations, but the parent-index update sits between them) is the
+// same one Linux's clk_core_set_parent has tolerated for a decade: counts
+// balance because every mutation of them holds CLK_ENABLE_LOCK, and the
+// migration brings the new parent up before tearing the old one down, so the
+// clock never goes dark.
 static_lock! {
     static CLK_LOCK: Mutex<()> = Mutex::new(());
 }
+
+/// Serializes `enable`/`disable` propagation across the whole tree (Linux's
+/// `clk_enable_lock`). An IRQ-saving spinlock: usable from interrupt context,
+/// and holding it makes the per-CPU IRQ-off guarantee deadlock-free against
+/// same-CPU handlers. Never sleep while holding it.
+static CLK_ENABLE_LOCK: SpinRaw<()> = SpinRaw::new(());
 
 /// Global list of every registered clock, used by the unused-clock gate-down
 /// pass and future PM walks. Strong references mirror Linux, which never frees
@@ -213,11 +226,14 @@ impl ClkCore {
         id
     }
 
-    /// Constrain this clock's rate to `[min, max]`. Legacy/direct-core entry:
-    /// uses the reserved id 0, so a direct caller's last write wins for that
-    /// slot. Per-consumer aggregation (multiple consumers' ranges intersect)
-    /// is via [`ClkHandle::set_rate_range`](crate::ClkHandle::set_rate_range).
-    pub fn set_rate_range(&self, min: Rate, max: Rate) -> ClkResult {
+    /// Constrain this clock's rate to `[min, max]` — internal/test entry on
+    /// the reserved id-0 slot. Production consumers use
+    /// [`ClkHandle::set_rate_range`](crate::ClkHandle::set_rate_range), whose
+    /// per-consumer votes aggregate (intersect) instead of overwriting this
+    /// single slot. Exposed `pub(crate)` only so tests can exercise clamping
+    /// without a handle; there is deliberately no public core-level path.
+    #[cfg(unittest)]
+    pub(crate) fn set_rate_range(&self, min: Rate, max: Rate) -> ClkResult {
         if min > max {
             return Err(ClkError::InvalidRate);
         }
@@ -403,7 +419,8 @@ impl ClkCore {
         self.prepare_locked()
     }
 
-    fn prepare_locked(&self) -> ClkResult {
+    pub(crate) fn prepare_locked(&self) -> ClkResult {
+        debug_assert_clk_lock_held();
         let parent_done = match self.parent_node() {
             Some(parent) => {
                 parent.prepare_locked()?;
@@ -443,7 +460,8 @@ impl ClkCore {
 
     /// Returns the last hardware `unprepare` error encountered while unwinding
     /// this node's chain (parent errors are included), or `Ok(())`.
-    fn unprepare_locked(&self) -> ClkResult {
+    pub(crate) fn unprepare_locked(&self) -> ClkResult {
+        debug_assert_clk_lock_held();
         // Decrement under the lock, then drop it before the sleepable op —
         // same rationale as `prepare_locked`: `unprepare` may sleep and must
         // not run with `SpinNoIrq` held.
@@ -469,24 +487,19 @@ impl ClkCore {
 
     /// Enable the fast path, propagating to the parent first.
     ///
-    /// Atomic; the caller must hold no spin locks that the `enable` op might
-    /// also take. Not serialized by [`CLK_LOCK`] so it stays usable where
-    /// sleeping is impossible.
-    /// Enable the fast path, propagating to the parent first.
-    ///
-    /// Serialized by [`CLK_LOCK`] (a sleepable mutex) so it cannot race a
-    /// concurrent `set_parent` count migration across two different parents.
-    /// This means `enable` may no longer run with IRQs disabled — there are no
-    /// in-tree IRQ-context enable callers; if one appears it must be reworked
-    /// onto a separate atomic enable lock (Linux's `clk_enable_lock` model).
+    /// Serialized by [`CLK_ENABLE_LOCK`] — an IRQ-saving spinlock, mirroring
+    /// Linux's `clk_enable_lock` — so it stays usable from interrupt context
+    /// (console/polling drivers) while still being mutually exclusive with
+    /// `set_parent`'s count migration. The provider `enable` callback runs
+    /// under it and must be quick and non-sleeping (it only flips a gate bit).
     pub fn enable(&self) -> ClkResult {
-        let _guard = CLK_LOCK.lock();
+        let _guard = CLK_ENABLE_LOCK.lock();
         self.enable_locked()
     }
 
-    /// Internal enable; the caller holds [`CLK_LOCK`]. Propagates to the parent
-    /// first and rolls it back on a hardware failure.
-    fn enable_locked(&self) -> ClkResult {
+    /// Internal enable; the caller holds [`CLK_ENABLE_LOCK`]. Propagates to
+    /// the parent first and rolls it back on a hardware failure.
+    pub(crate) fn enable_locked(&self) -> ClkResult {
         let parent_done = match self.parent_node() {
             Some(parent) => {
                 parent.enable_locked()?;
@@ -508,14 +521,14 @@ impl ClkCore {
 
     /// Release one enable reference, then propagate to the parent.
     ///
-    /// Serialized by [`CLK_LOCK`]; see [`enable`](Self::enable).
+    /// Serialized by [`CLK_ENABLE_LOCK`]; see [`enable`](Self::enable).
     pub fn disable(&self) {
-        let _guard = CLK_LOCK.lock();
+        let _guard = CLK_ENABLE_LOCK.lock();
         self.disable_locked();
     }
 
-    /// Internal disable; the caller holds [`CLK_LOCK`].
-    fn disable_locked(&self) {
+    /// Internal disable; the caller holds [`CLK_ENABLE_LOCK`].
+    pub(crate) fn disable_locked(&self) {
         let need_disable = {
             let mut st = self.state.lock();
             if st.enable_count == 0 {
@@ -629,6 +642,7 @@ impl ClkCore {
     }
 
     fn round_rate_locked(&self, rate: Rate) -> ClkResult<Rate> {
+        debug_assert_clk_lock_held();
         let req = self.determine_rate_locked(rate)?;
         if let Some(target) = req
             .parent_target
@@ -675,6 +689,7 @@ impl ClkCore {
     }
 
     fn set_rate_locked(&self, rate: Rate) -> ClkResult<Rate> {
+        debug_assert_clk_lock_held();
         // SET_RATE_GATE (Linux CLK_SET_RATE_GATE): the clock must not be
         // reprogrammed while enabled — reject with Busy instead of the
         // glitch-prone disable/change/re-enable dance, whose re-enable failure
@@ -703,6 +718,7 @@ impl ClkCore {
     /// declares its rate is determined by the parent; the framework therefore
     /// reports it with `recalc_rate`, never `set_rate`, on this branch.
     fn program_rate_locked(&self, req: &ClkRateRequest) -> ClkResult<Rate> {
+        debug_assert_clk_lock_held();
         // Lateral: switch to the parent `determine_rate` selected, if different.
         let current = self.state.lock().parent_index;
         let mut reparented = false;
@@ -757,6 +773,7 @@ impl ClkCore {
     /// The caller must hold [`CLK_LOCK`] and has already enforced the
     /// `SET_RATE_GATE`-while-enabled rejection.
     fn switch_parent_locked(&self, index: u8) -> ClkResult {
+        debug_assert_clk_lock_held();
         // Resolve the new parent and capture the previously selected parent
         // (to move the parent→child back-edge + prepare/enable refs after the
         // switch).
@@ -784,16 +801,35 @@ impl ClkCore {
         // 1. Bring the new parent up BEFORE the switch (new first, then old
         //    down) so the clock does not go dark. Each step rolls back the
         //    earlier ones on failure, leaving state unchanged.
-        if prep > 0 {
+        //
+        // The migration moves ALL `prep`/`en` references this node holds — a
+        // node with two prepared consumers propagates two references to its
+        // parent; moving only one leaves a leaked reference on the old parent
+        // and an under-counted new one (caught by the concurrency stress
+        // test: two gate workers + one switcher unbalanced the counters).
+        for _ in 0..prep {
             new_parent.prepare_locked()?; // may sleep; on failure nothing changed
         }
-        if en > 0
-            && let Err(e) = new_parent.enable_locked()
-        {
-            if prep > 0 {
-                let _ = new_parent.unprepare_locked();
+        let mut brought_up_en = 0u32;
+        if en > 0 {
+            // CLK_LOCK → CLK_ENABLE_LOCK nesting (documented order); the
+            // enable callback is non-sleeping, so IRQs-off under the spinlock
+            // is safe.
+            let _el = CLK_ENABLE_LOCK.lock();
+            for _ in 0..en {
+                if let Err(e) = new_parent.enable_locked() {
+                    drop(_el);
+                    // Roll back everything brought up so far.
+                    for _ in 0..brought_up_en {
+                        new_parent.disable_locked();
+                    }
+                    for _ in 0..prep {
+                        let _ = new_parent.unprepare_locked();
+                    }
+                    return Err(e);
+                }
+                brought_up_en += 1;
             }
-            return Err(e);
         }
         // 2. Compute the new rate/accuracy BEFORE writing the hardware mux, so a
         //    recalc failure does not leave the hardware switched while the
@@ -805,9 +841,12 @@ impl ClkCore {
             (Ok(r), Ok(a)) => (r, a),
             (Err(e), _) | (_, Err(e)) => {
                 if en > 0 {
-                    new_parent.disable_locked();
+                    let _el = CLK_ENABLE_LOCK.lock();
+                    for _ in 0..en {
+                        new_parent.disable_locked();
+                    }
                 }
-                if prep > 0 {
+                for _ in 0..prep {
                     let _ = new_parent.unprepare_locked();
                 }
                 return Err(e);
@@ -816,19 +855,26 @@ impl ClkCore {
         // 3. Switch the hardware mux; roll back on failure.
         if let Err(e) = self.ops.set_parent(index) {
             if en > 0 {
-                new_parent.disable_locked();
+                let _el = CLK_ENABLE_LOCK.lock();
+                for _ in 0..en {
+                    new_parent.disable_locked();
+                }
             }
-            if prep > 0 {
+            for _ in 0..prep {
                 let _ = new_parent.unprepare_locked();
             }
             return Err(e);
         }
-        // 4. Tear the old parent down AFTER the successful switch.
+        // 4. Tear the old parent down AFTER the successful switch — all
+        //    `en`/`prep` references that were migrated up in step 1.
         if let Some(old) = prev.clone() {
             if en > 0 {
-                old.disable_locked();
+                let _el = CLK_ENABLE_LOCK.lock();
+                for _ in 0..en {
+                    old.disable_locked();
+                }
             }
-            if prep > 0 {
+            for _ in 0..prep {
                 let _ = old.unprepare_locked();
             }
         }
@@ -1048,6 +1094,30 @@ pub(crate) fn with_clk_lock<T>(f: impl FnOnce() -> T) -> T {
     let _g = CLK_LOCK.lock();
     f()
 }
+
+/// Acquire the enable-path lock (for callers already holding `CLK_LOCK`; the
+/// CLK_LOCK → CLK_ENABLE_LOCK order is the only legal nesting).
+pub(crate) fn enable_lock() -> kspin::SpinRawGuard<'static, ()> {
+    CLK_ENABLE_LOCK.lock()
+}
+
+/// Debug-build assertion that the current task holds [`CLK_LOCK`].
+///
+/// The `*_locked` methods document "caller holds CLK_LOCK" as a comment-only
+/// contract; a mis-ordered call would silently race instead of failing loudly.
+/// This turns that contract into a runtime check in debug builds (release
+/// builds compile it away). Call it at the top of every `*_locked` entry that
+/// assumes the lock — the cost is one atomic load of the mutex owner id.
+#[cfg(debug_assertions)]
+pub(crate) fn debug_assert_clk_lock_held() {
+    debug_assert!(
+        CLK_LOCK.is_owned_by_current(),
+        "CLK_LOCK not held: a *_locked method was called without it (lock-order bug)"
+    );
+}
+
+#[cfg(not(debug_assertions))]
+pub(crate) fn debug_assert_clk_lock_held() {}
 
 /// Current length of the global clock list. Useful for diagnostics and for
 /// callers implementing their own rollback bookkeeping.
