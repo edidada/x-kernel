@@ -15,7 +15,7 @@ security documents.
 
 Produce documentation that is:
 
-- written in English;
+- written in English for the skill-owned outputs defined below;
 - colocated with the crate or API it documents;
 - derived from current code instead of generic template text;
 - clear about purpose, ownership, usage, constraints, and safety;
@@ -48,6 +48,14 @@ Apply these requirements to first-party X-Kernel crates. Exclude vendored
 dependencies, generated code, build output, and imported third-party source
 unless X-Kernel explicitly owns and maintains that source.
 
+The English-language requirement applies only to crate and module rustdoc,
+public API rustdoc, and crate-local `docs/design.md` and `docs/security.md`
+created or remediated by this skill. It does not apply to explicitly localized
+artifacts, such as `README_CN.md`, files or directories marked `-cn`, `_CN`, or
+`zh-CN`, or to other files whose governing repository instructions require a
+different language. Do not rewrite, reject, or treat those files as
+non-compliant merely because they contain Chinese prose.
+
 ## Task Boundary
 
 Before editing, define the target crates or modules from the user's request
@@ -57,9 +65,10 @@ crate- or repository-wide rewrite.
 A crate-level remediation `MUST` cover:
 
 - crate-level rustdoc;
-- the complete hand-written module tree, including modules disabled by the
-  active configuration. Any intentionally excluded architecture or feature
-  variant `MUST` be reported in the task result;
+- the complete first-party, hand-written module tree determined by the
+  coverage procedure below, including modules not selected by the active
+  configuration. Any intentional exclusion `MUST` be reported in the task
+  result;
 - every publicly reachable API in the crate;
 - non-obvious internal contracts, unsafe assumptions, and cross-module
   invariants;
@@ -71,11 +80,49 @@ only as far as needed to document the target accurately. Documentation debt
 outside the declared target is not part of that task and `SHOULD` be reported
 separately rather than edited without authorization.
 
+## How to Determine Coverage
+
+Determine coverage from the declared task boundary and source ownership, not
+only from the crates and modules compiled by the current Kconfig, Cargo feature
+set, host architecture, or target architecture.
+
+For a crate-level task:
+
+1. Start from the target package manifest and the library or binary source
+   roots declared by Cargo, normally `src/lib.rs` and `src/main.rs`.
+2. Recursively follow file-backed and inline `mod` declarations. Resolve
+   explicit `#[path = "..."]` attributes and hand-written files brought into
+   the module tree by `include!` when their path can be determined.
+3. Traverse declarations behind every `#[cfg(...)]` and `#[cfg_attr(...)]`
+   branch without filtering them through the active configuration. This
+   includes architecture-, platform-, feature-, test-, and unittest-gated
+   modules.
+4. Inspect the package's Cargo features, target declarations, and repository
+   configuration only to discover additional maintained source roots and
+   conditional branches; do not treat the currently resolved Cargo dependency
+   graph as the complete source inventory.
+
+For a subsystem- or repository-level task, first enumerate first-party package
+manifests within the declared directory boundary, including packages not
+selected by the current Kconfig or build graph, and then apply the crate-level
+procedure to each package. Workspace membership and `cargo metadata` are useful
+discovery evidence but are not sufficient reasons to exclude a repository-
+maintained package under that boundary.
+
+Include a source file when it is a maintained Cargo target root or is reachable
+from one under any conditional branch. Do not automatically classify every
+`.rs` file below the package as a module: report an unreferenced file as a
+possible stale, orphaned, generated, or separately owned source file instead of
+silently documenting or deleting it. Exclude generated, vendored, imported
+third-party, and build-output files. If macro expansion or an unresolved path
+prevents a reliable decision, report the ambiguity and the chosen treatment.
+
 ## Documentation Standard
 
 ### MUST
 
-- All documentation prose created or remediated under this skill `MUST` be
+- Explanatory prose added to or remediated in the skill-owned rustdoc,
+  `docs/design.md`, and `docs/security.md` outputs defined in Scope `MUST` be
   written in English.
 - Every first-party crate `MUST` have crate-level rustdoc, normally written
   with `//!` in `src/lib.rs` or `src/main.rs`.
@@ -152,10 +199,11 @@ separately rather than edited without authorization.
 - Proposed hardening `MUST NOT` be presented as already implemented.
 - Known caller obligations or unsafe preconditions `MUST NOT` be hidden behind
   vague wording.
-- English module documentation produced under this skill `MUST NOT` contain
-  untranslated Chinese prose; identifiers, proper names, specification terms,
-  paths, necessary quotations, and explicitly localized documents may retain
-  their original spelling.
+- The English-output artifacts defined in Scope `MUST NOT` contain untranslated
+  Chinese prose; identifiers, proper names, specification terms, paths, and
+  necessary quotations may retain their original spelling. This rule `MUST
+  NOT` be applied to explicitly localized or separately governed files outside
+  those outputs.
 
 Non-obvious `pub(crate)` and `pub(super)` contracts `MUST` be documented at the
 narrowest useful location. Private helpers `MAY` omit rustdoc when their
@@ -443,12 +491,10 @@ controls, caller-dependent assumptions, proposed hardening, and known gaps
      code, callers, or a verified project specification.
    Record only facts needed to decide documentation content and scope; do not
    turn this step into a broad design summary.
-4. For a new crate or crate-level remediation, recursively enumerate the
-   complete hand-written module tree, including modules disabled by the active
-   configuration, and record any intentionally excluded architecture or feature
-   variant. Discover those modules from `mod` declarations, `#[path]`
-   attributes, `cfg` attributes, Kconfig-controlled source paths, and repository
-   file layout rather than only from the active build graph.
+4. Apply How to Determine Coverage. For a new crate or crate-level remediation,
+   enumerate every maintained source root and its complete hand-written module
+   tree across conditional branches, and record intentional exclusions or
+   unresolved ownership.
 5. Classify each in-scope module as public, non-trivial internal, small private
    helper, test-only, generated, vendored, or imported third-party code.
    Inventory publicly reachable APIs and identify non-obvious internal
@@ -478,8 +524,9 @@ Before declaring the writing task complete:
   stated reason;
 - re-check names, paths, entry points, behavior, caller descriptions, and
   contract sections against current code and verified callers;
-- remove unsupported claims, stale references, untranslated prose, empty
-  sections, duplication, mechanical filler, and template residue;
+- remove unsupported claims, stale references, untranslated prose from the
+  English-output artifacts, empty sections, duplication, mechanical filler,
+  and template residue;
 - confirm that small private modules were not padded into multi-paragraph
   templates and that implementation rationale remains near the relevant code;
 - keep future hardening distinct from implemented controls;
