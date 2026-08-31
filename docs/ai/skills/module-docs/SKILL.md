@@ -444,15 +444,26 @@ controls, caller-dependent assumptions, proposed hardening, and known gaps
 
 ## Workflow
 
-1. Confirm the documentation scenario before editing. Classify the task as one
-   of:
+For each step, produce the listed output before moving to the next step. Keep
+outputs concise and tied to repository evidence. If a stop condition is met,
+ask for clarification or report the blocker instead of writing unsupported
+documentation.
+
+1. Confirm the documentation scenario before editing.
+
+   Classify the task as one of:
    - documenting a new crate or module;
    - remediating documentation for an existing crate or module;
    - updating documentation after a behavior, contract, or architecture change;
    - reviewing documentation for correctness.
-   Clarify ambiguous scope with the requester when the scenario or target is
-   not clear.
-2. Define the target scope from the scenario and evidence. Identify:
+
+   Required output: one sentence naming the scenario and the requested target.
+   Stop when: the scenario or target cannot be inferred from the request,
+   changed diff, or repository context.
+
+2. Define the target scope from the scenario and evidence.
+
+   Identify:
    - the primary target: the crate, module, API item, or document the task is
      actually about;
    - the trigger: new code, behavior change, API contract change, architecture
@@ -480,7 +491,13 @@ controls, caller-dependent assumptions, proposed hardening, and known gaps
      invariants, trust boundaries, failure handling, or residual risk;
    - documentation-only tasks should not expand beyond the declared target
      unless a verified stale or false claim requires a wider correction.
-3. Establish and record implementation facts before writing:
+
+   Required output: primary target, trigger, required documentation surfaces,
+   evidence boundary, and exclusion boundary.
+   Stop when: the necessary scope would exceed the requester-approved boundary.
+
+3. Establish and record implementation facts before writing.
+
    - for new code, inspect the new crate or module entry points, public API,
      owned state, integration path, and intended callers;
    - for existing code, inspect the current implementation, existing callers,
@@ -489,30 +506,79 @@ controls, caller-dependent assumptions, proposed hardening, and known gaps
      identify what changed;
    - for documentation-only changes, verify each material claim against source
      code, callers, or a verified project specification.
+
    Record only facts needed to decide documentation content and scope; do not
    turn this step into a broad design summary.
-4. Apply How to Determine Coverage. For a new crate or crate-level remediation,
-   enumerate every maintained source root and its complete hand-written module
-   tree across conditional branches, and record intentional exclusions or
-   unresolved ownership.
-5. Classify each in-scope module as public, non-trivial internal, small private
+
+   Required output: a short fact list tied to source paths, symbols, callers,
+   diffs, or verified project specifications.
+   Stop when: a material documentation claim cannot be verified.
+
+4. Apply How to Determine Coverage.
+
+   For a new crate or crate-level remediation, enumerate every maintained
+   source root and its complete hand-written module tree across conditional
+   branches, and record intentional exclusions or unresolved ownership.
+
+   Required output: source roots, in-scope module tree, conditional branches
+   considered, existing docs, and unresolved coverage or ownership decisions.
+   Stop when: macro expansion, unresolved paths, or unclear ownership prevent a
+   reliable coverage decision.
+
+5. Classify the in-scope documentation subjects.
+
+   Classify each in-scope module as public, non-trivial internal, small private
    helper, test-only, generated, vendored, or imported third-party code.
    Inventory publicly reachable APIs and identify non-obvious internal
    contracts, owned state, invariants, unsafe paths, and cross-crate boundaries
    that affect the target documentation.
-6. Inspect in-scope implementation paths, especially unsafe, concurrent,
+
+   Required output: module classification, public API inventory, and non-obvious
+   internal contracts or invariants that affect documentation depth.
+   Stop when: public reachability or module ownership cannot be determined.
+
+6. Inspect in-scope implementation paths.
+
+   Inspect especially unsafe, concurrent,
    stateful, hardware-facing, and externally reachable code.
-7. Inspect representative callers when they exist or can be inferred to verify
-   usage and execution context.
-8. Identify which target documents or API items require creation or correction
-   before writing prose.
-9. Read every applicable reference before writing: `references/rustdoc-style.md`
-   for rustdoc, `references/design-doc-style.md` when `docs/design.md` applies,
-   and `references/security-doc-style.md` when `docs/security.md` applies.
+
+   Required output: implementation paths inspected and the relevant ownership,
+   lifecycle, unsafe, concurrency, external-input, and failure-handling facts.
+   Stop when: a required implementation path cannot be inspected.
+
+7. Inspect representative callers when they exist or can be inferred.
+
+   Verify usage and execution context.
+
+   Required output: callers inspected, inferred integration points, execution
+   context, and any caller-dependent assumptions.
+   Stop when: caller behavior is required for an accurate claim but cannot be
+   verified or reasonably inferred.
+
+8. Decide the documentation changes before writing prose.
+
+   Identify which target documents or API items require creation, correction,
+   or no change.
+
+   Required output: a write plan listing each documentation surface to update,
+   leave unchanged, or report as out-of-scope debt.
+   Stop when: the write plan would change documents outside the approved scope.
+
+9. Read every applicable reference before writing.
+
+   Read `references/rustdoc-style.md` for rustdoc,
+   `references/design-doc-style.md` when `docs/design.md` applies, and
+   `references/security-doc-style.md` when `docs/security.md` applies.
+
+   Required output: the applicable reference files read.
+   Stop when: a required reference cannot be read.
+
 10. Create or update crate-level, module-level, public API, and implementation
    comments with documentation depth proportional to the classification from
    step 5.
+
 11. Create or update the applicable design and security documents.
+
 12. Perform the author self-check below.
 
 ## Author Self-Check
