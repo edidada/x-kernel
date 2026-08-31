@@ -75,7 +75,8 @@ separately rather than edited without authorization.
 
 ### MUST
 
-- All new or remediated explanatory prose `MUST` be written in English.
+- All documentation prose created or remediated under this skill `MUST` be
+  written in English.
 - Every first-party crate `MUST` have crate-level rustdoc, normally written
   with `//!` in `src/lib.rs` or `src/main.rs`.
 - Every hand-written source module `MUST` have module-level rustdoc. Document
@@ -85,7 +86,7 @@ separately rather than edited without authorization.
   stateful, boundary, lifecycle, concurrency, or algorithmically complex
   modules `MUST` additionally describe applicable ownership, interactions,
   entry points, and constraints. A small private helper module `MUST NOT` be
-  padded with inapplicable ownership or caller language.
+  padded with inapplicable ownership, lifecycle, or caller-obligation text.
 - Every publicly reachable API item `MUST` have rustdoc that states its purpose
   and public behavior.
 - Public API rustdoc `MUST` describe caller obligations, invariants, side
@@ -97,10 +98,10 @@ separately rather than edited without authorization.
 - Every `unsafe fn` and `unsafe trait` `MUST` have a `# Safety` section that
   states the complete contract callers or implementers must uphold.
 - Documentation `MUST` match the current code and verified specifications.
-- A crate `MUST` maintain `docs/design.md` when its behavior cannot be fully
-  explained by crate-level rustdoc alone, including when it has multiple
-  cooperating components, owned state or lifecycle, concurrency, non-trivial
-  algorithms, or execution-context constraints.
+- A non-trivial crate `MUST` maintain `docs/design.md` when its behavior cannot
+  be fully explained by crate-level rustdoc alone, including when it has
+  multiple cooperating components, owned state or lifecycle, concurrency,
+  non-trivial algorithms, or execution-context constraints.
 - A crate `MUST` maintain `docs/security.md` when it has unsafe behavior,
   security or thread-safety invariants, external or partially trusted input,
   privileged operations, or failure modes that can materially affect the
@@ -151,9 +152,10 @@ separately rather than edited without authorization.
 - Proposed hardening `MUST NOT` be presented as already implemented.
 - Known caller obligations or unsafe preconditions `MUST NOT` be hidden behind
   vague wording.
-- Formal X-Kernel documentation `MUST NOT` contain untranslated Chinese prose;
-  identifiers, proper names, specification terms, paths, and necessary
-  quotations may retain their original spelling.
+- English module documentation produced under this skill `MUST NOT` contain
+  untranslated Chinese prose; identifiers, proper names, specification terms,
+  paths, necessary quotations, and explicitly localized documents may retain
+  their original spelling.
 
 Non-obvious `pub(crate)` and `pub(super)` contracts `MUST` be documented at the
 narrowest useful location. Private helpers `MAY` omit rustdoc when their
@@ -163,10 +165,10 @@ decisions still `MUST` be documented at the narrowest useful location.
 
 ## Rust Comment Coverage and Placement
 
-Classify a target before writing. The project requirement that every
-hand-written module has module docs is intentionally stronger than Rust's
-`missing_docs` lint, which checks publicly exposed items. It does not require
-the same documentation depth for every module.
+Classify each crate, module, or API item before writing. The project
+requirement that every hand-written module has module docs is intentionally
+stronger than Rust's `missing_docs` lint, which checks publicly exposed items.
+It does not require the same documentation depth for every module.
 
 | Target | Required treatment |
 |--------|--------------------|
@@ -176,7 +178,7 @@ the same documentation depth for every module.
 | Small private helper module | Use one precise module-summary sentence unless more information is genuinely needed. |
 | Publicly reachable API item | Use `///` on the item and document its observable contract. |
 | Non-obvious `pub(crate)` or `pub(super)` item | Document the cross-module contract at the item or narrowest shared abstraction. |
-| Obvious private helper | Omit rustdoc; use a normal `//` comment only when the implementation needs a reason or invariant explained. |
+| Obvious private helper item | Omit rustdoc; use a normal `//` comment only when the implementation needs a reason or invariant explained. |
 | Test-only module | One brief purpose sentence is sufficient. Generated, vendored, and imported third-party code remains excluded. |
 
 Place comments according to the reader and subject:
@@ -228,7 +230,7 @@ Current code is the source of truth. Existing documentation and examples
 
 ## Documentation Update Triggers
 
-Review the owning document when a code change affects its subject:
+Review the document that owns the changed contract or design concern:
 
 | Code Change | Documentation to Review |
 |-------------|--------------------------|
@@ -259,7 +261,7 @@ patterns used by Rust `std` and `core` into concrete X-Kernel rules for crate
 and module introductions, each kind of public item, contract sections,
 examples, and intra-doc links.
 
-Do not duplicate line-level API contracts in crate-local Markdown.
+Do not duplicate item-level API contracts in crate-local Markdown.
 
 #### Crate and module documentation
 
@@ -307,7 +309,8 @@ sequence, required initialization, and relevant context is sufficient. Use a
 `# Examples` section when code can demonstrate the real contract without
 inventing unavailable setup.
 
-Use this as an adaptable shape, not as text to copy mechanically:
+Use this as an adaptable example shape for generated documentation, not as
+text to copy mechanically:
 
 ```rust
 //! Provides <specific capability> for <X-Kernel subsystem or callers>.
@@ -335,8 +338,8 @@ For each publicly reachable item:
 3. `MUST` state preconditions, side effects, ownership or lifetime effects, and
    execution-context constraints when applicable;
 4. `MUST` describe the meaning of the return value when it is non-obvious;
-5. `MUST` or `SHOULD` add `# Errors`, `# Panics`, `# Safety`, and `# Examples`
-   according to the requirement level defined above.
+5. add `# Errors`, `# Panics`, `# Safety`, and `# Examples` when required or
+   recommended above.
 
 A simple getter, field-like accessor, or obvious constant normally needs only
 a precise summary plus units, range, or sentinel meaning when those are not
@@ -378,7 +381,7 @@ Use `security.md` for:
 - trust boundaries and external attack surfaces;
 - unsafe code and memory-safety invariants;
 - thread-safety conditions;
-- concrete threats, mitigations, and residual risks;
+- concrete threats, implemented controls, and residual risks;
 - failure modes and effects analysis (FMEA);
 - failure handling, privacy considerations, and known limitations.
 
@@ -393,30 +396,78 @@ controls, caller-dependent assumptions, proposed hardening, and known gaps
 
 ## Workflow
 
-1. Define the target crates or modules and keep unrelated documentation debt
-   outside that boundary.
-2. For a crate-level remediation, recursively enumerate the complete
-   hand-written module tree, including modules disabled by the active
-   configuration, and record any intentionally excluded architecture or
-   feature variant.
-3. Classify each module as public, non-trivial internal, small private helper,
-   test-only, generated, vendored, or imported third-party code. Inventory
-   publicly reachable APIs and identify non-obvious internal contracts, owned
-   state, invariants, unsafe paths, and cross-crate boundaries that affect the
-   target documentation.
-4. Inspect important implementation paths, especially unsafe, concurrent,
+1. Confirm the documentation scenario before editing. Classify the task as one
+   of:
+   - documenting a new crate or module;
+   - remediating documentation for an existing crate or module;
+   - updating documentation after a behavior, contract, or architecture change;
+   - reviewing documentation for correctness.
+   Clarify ambiguous scope with the requester when the scenario or target is
+   not clear.
+2. Define the target scope from the scenario and evidence. Identify:
+   - the primary target: the crate, module, API item, or document the task is
+     actually about;
+   - the trigger: new code, behavior change, API contract change, architecture
+     change, safety or security change, documentation remediation, or review;
+   - the required documentation surfaces: crate rustdoc, module rustdoc, public
+     API rustdoc, implementation comments, `docs/design.md`, and/or
+     `docs/security.md`;
+   - the evidence boundary: source files, changed diff, callers, configuration
+     variants, and existing docs that must be inspected to make the
+     documentation accurate;
+   - the exclusion boundary: related documentation debt that is outside the
+     request and should be reported rather than edited.
+
+   Scale the scope to the trigger:
+   - new crates usually require crate rustdoc, module rustdoc for the initial
+     module tree, public API rustdoc, and applicable design or security
+     documents;
+   - new modules require module rustdoc, rustdoc for introduced public APIs, and
+     updates to crate-level design or security docs only when ownership,
+     architecture, trust boundaries, unsafe behavior, or lifecycle changes;
+   - API-only changes usually require the changed API rustdoc, plus design or
+     security updates only when the documented contract changes at that level;
+   - internal behavior changes require design or security updates only when they
+     affect documented architecture, state, lifecycle, concurrency, unsafe
+     invariants, trust boundaries, failure handling, or residual risk;
+   - documentation-only tasks should not expand beyond the declared target
+     unless a verified stale or false claim requires a wider correction.
+3. Establish and record implementation facts before writing:
+   - for new code, inspect the new crate or module entry points, public API,
+     owned state, integration path, and intended callers;
+   - for existing code, inspect the current implementation, existing callers,
+     and existing docs;
+   - for behavior changes, compare the pre-change and post-change contracts and
+     identify what changed;
+   - for documentation-only changes, verify each material claim against source
+     code, callers, or a verified project specification.
+   Record only facts needed to decide documentation content and scope; do not
+   turn this step into a broad design summary.
+4. For a new crate or crate-level remediation, recursively enumerate the
+   complete hand-written module tree, including modules disabled by the active
+   configuration, and record any intentionally excluded architecture or feature
+   variant. Discover those modules from `mod` declarations, `#[path]`
+   attributes, `cfg` attributes, Kconfig-controlled source paths, and repository
+   file layout rather than only from the active build graph.
+5. Classify each in-scope module as public, non-trivial internal, small private
+   helper, test-only, generated, vendored, or imported third-party code.
+   Inventory publicly reachable APIs and identify non-obvious internal
+   contracts, owned state, invariants, unsafe paths, and cross-crate boundaries
+   that affect the target documentation.
+6. Inspect in-scope implementation paths, especially unsafe, concurrent,
    stateful, hardware-facing, and externally reachable code.
-5. Inspect representative callers to verify usage and execution context.
-6. Identify which target documents or API items require creation or correction
+7. Inspect representative callers when they exist or can be inferred to verify
+   usage and execution context.
+8. Identify which target documents or API items require creation or correction
    before writing prose.
-7. Read `references/rustdoc-style.md`, then create or update crate-level,
-   module-level, public API, and implementation comments with documentation
-   depth proportional to the classification from step 3.
-8. When `docs/design.md` applies, read `references/design-doc-style.md` and
-   create or update the design document.
-9. When `docs/security.md` applies, read `references/security-doc-style.md` and
-   create or update the security and reliability analysis.
-10. Perform the author self-check below.
+9. Read every applicable reference before writing: `references/rustdoc-style.md`
+   for rustdoc, `references/design-doc-style.md` when `docs/design.md` applies,
+   and `references/security-doc-style.md` when `docs/security.md` applies.
+10. Create or update crate-level, module-level, public API, and implementation
+   comments with documentation depth proportional to the classification from
+   step 5.
+11. Create or update the applicable design and security documents.
+12. Perform the author self-check below.
 
 ## Author Self-Check
 
