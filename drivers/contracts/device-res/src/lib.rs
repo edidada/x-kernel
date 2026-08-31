@@ -111,15 +111,11 @@ mod tests {
 
     use crate::{
         DeviceResource, DmaAllocation, DmaOp, DmaSpec, IrqEvent, IrqHandler, IrqHandlerToken,
-<<<<<<< HEAD:drivers/contracts/device-res/src/lib.rs
         IrqOp, IrqResource, IrqThreadHandler, IrqTrigger, MmioMapping, MmioOp, MmioRegion,
-        ResError, ResResult, ResourceDesc, devm_alloc_coherent_with_provider,
-        devm_iomap_with_provider, devm_request_irq_with_provider,
-=======
-        IrqOp, IrqResource, IrqTrigger, MmioMapping, MmioOp, MmioRegion, ResError, ResResult,
-        ResourceDesc,
+        ResError, ResResult, ResourceDesc,
         clk::{ClkConsumer, ClkRateEvent, NotifierVote},
->>>>>>> 347198fd (device-res: give ClkConsumer default implementations):drivers/device-res/src/lib.rs
+        devm_alloc_coherent_with_provider, devm_iomap_with_provider,
+        devm_request_irq_with_provider,
     };
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -451,8 +447,9 @@ mod tests {
         device.run_cleanups();
 
         assert_eq!(&*ORDER.lock(), &[2, 0x101, 0x200]);
+    }
 
-        // A ClkConsumer mock that implements only the two required methods,
+    // A ClkConsumer mock that implements only the two required methods,
     // exercising that the trait's default implementations give a fixed,
     // ungated, rate-transparent clock sensible runtime behavior.
     #[def_test]

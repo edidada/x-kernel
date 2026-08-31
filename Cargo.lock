@@ -2120,10 +2120,10 @@ dependencies = [
 
 [[package]]
 name = "kclk"
-version = "0.2.0-dev"
+version = "0.2.0-rc1"
 dependencies = [
  "bitflags 2.13.1",
- "kspin 0.2.0-dev",
+ "kspin 0.2.0-rc1",
  "ksync",
  "ktask",
  "unittest",
