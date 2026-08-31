@@ -6,13 +6,15 @@
 //!
 //! This module provides the NAPI-like executor shape used by subsystems which
 //! need missed-wake coalescing, bounded poll rounds, and optional foreground
-//! assist. A budgeted poller is a long-lived execution object backed by normal
-//! work items; it is not an async task executor.
+//! assist or lease-based advancement. A budgeted poller is a long-lived
+//! execution object backed by normal work items; it is not an async task
+//! executor.
 
 use alloc::sync::{Arc, Weak};
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use kspin::SpinNoIrq;
+use ktime_types::TimeSpan;
 
 use crate::{
     QueueWorkResult, ScheduledWork, WorkQueueAllocError, WorkQueueAttrs, WorkQueueHandle,
@@ -56,11 +58,13 @@ enum BudgetedPollerState {
 }
 
 impl BudgetedPollerState {
-    const MASK: usize = 0b11;
-    const PUBLISH_GENERATION_STEP: usize = 0b100;
+    const EXECUTOR_STATE_MASK: usize = 0b11;
+    const LEASE_MASK: usize = 0b11_1111 << Self::LEASE_SHIFT;
+    const LEASE_SHIFT: u32 = 2;
+    const PUBLISH_GENERATION_STEP: usize = 1 << 8;
 
     fn from_raw(value: usize) -> Self {
-        match value & Self::MASK {
+        match value & Self::EXECUTOR_STATE_MASK {
             0b00 => Self::Idle,
             0b01 => Self::Scheduled,
             0b10 => Self::Running,
@@ -82,9 +86,14 @@ where
     works: [ScheduledWork; 2],
     state: AtomicUsize,
     background_budget: B,
+    lease_budget: Option<B>,
     assist_budget: B,
+    lease_timeout_micros: u64,
+    lease_fresh_until_micros: AtomicU64,
     max_background_rounds: usize,
     poll_once: F,
+    #[cfg(unittest)]
+    background_queue_attempts: AtomicUsize,
 }
 
 impl<B, F> BudgetedPollerInner<B, F>
@@ -124,12 +133,22 @@ where
     }
 
     fn notify_irq_safe(&self) -> bool {
+        self.notify_irq_safe_at(None)
+    }
+
+    fn notify_irq_safe_at(&self, now_micros: Option<u64>) -> bool {
         if self.is_destroying.load(Ordering::Acquire) {
             return false;
         }
 
         let previous = self.publish_work();
+        let is_suspended = matches!(
+            BudgetedPollerState::from_raw(previous),
+            BudgetedPollerState::Idle | BudgetedPollerState::Scheduled
+        ) && Self::lease_count(previous) > 0
+            && self.is_lease_fresh_at(previous, now_micros.unwrap_or_else(monotonic_now_micros));
         match BudgetedPollerState::from_raw(previous) {
+            BudgetedPollerState::Idle | BudgetedPollerState::Scheduled if is_suspended => true,
             BudgetedPollerState::Idle => {
                 let published = Self::published_raw(previous);
                 if self.queue_background_work(0) {
@@ -147,10 +166,11 @@ where
     }
 
     fn publish_work(&self) -> usize {
-        // The low bit means pending work in both execution modes. The high
-        // bits are a publish generation used to avoid clearing `Scheduled`
-        // after a failed queue attempt when a concurrent producer also
-        // published work.
+        // The low state bits encode pending work in both execution modes. The
+        // publish generation prevents a failed queue attempt from clearing
+        // `Scheduled` after a concurrent producer publishes work. The lease
+        // count shares this word so notification and lease release cannot both
+        // delegate queueing to the other side.
         self.state
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |raw| {
                 Some(Self::published_raw(raw))
@@ -168,12 +188,71 @@ where
             }
         };
         (raw.wrapping_add(BudgetedPollerState::PUBLISH_GENERATION_STEP)
-            & !BudgetedPollerState::MASK)
+            & !BudgetedPollerState::EXECUTOR_STATE_MASK)
             | state as usize
     }
 
     fn raw_with_state(raw: usize, state: BudgetedPollerState) -> usize {
-        (raw & !BudgetedPollerState::MASK) | state as usize
+        (raw & !BudgetedPollerState::EXECUTOR_STATE_MASK) | state as usize
+    }
+
+    fn lease_count(raw: usize) -> usize {
+        (raw & BudgetedPollerState::LEASE_MASK) >> BudgetedPollerState::LEASE_SHIFT
+    }
+
+    fn raw_with_lease_count(raw: usize, lease_count: usize) -> usize {
+        (raw & !BudgetedPollerState::LEASE_MASK) | (lease_count << BudgetedPollerState::LEASE_SHIFT)
+    }
+
+    fn try_acquire_lease_at(&self, now_micros: u64) -> bool {
+        if self.lease_budget.is_none() || self.lease_timeout_micros == 0 {
+            return false;
+        }
+
+        let acquired = self
+            .state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |raw| {
+                (Self::lease_count(raw) == 0).then(|| Self::raw_with_lease_count(raw, 1))
+            })
+            .is_ok();
+        if acquired {
+            self.refresh_lease_at(now_micros);
+        }
+        acquired
+    }
+
+    fn release_lease(&self) {
+        let Ok(previous) = self
+            .state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |raw| {
+                let lease_count = Self::lease_count(raw);
+                (lease_count > 0).then(|| Self::raw_with_lease_count(raw, lease_count - 1))
+            })
+        else {
+            // `destroy` clears the compound state after stopping the queue.
+            return;
+        };
+
+        if Self::lease_count(previous) == 1
+            && BudgetedPollerState::from_raw(previous) == BudgetedPollerState::Scheduled
+        {
+            let _ = self.queue_background_work(0);
+        }
+    }
+
+    fn refresh_lease_at(&self, now_micros: u64) {
+        self.lease_fresh_until_micros.store(
+            now_micros.saturating_add(self.lease_timeout_micros),
+            Ordering::Release,
+        );
+    }
+
+    fn is_lease_fresh_at(&self, raw: usize, now_micros: u64) -> bool {
+        if Self::lease_count(raw) == 0 {
+            return false;
+        }
+        let fresh_until_micros = self.lease_fresh_until_micros.load(Ordering::Acquire);
+        fresh_until_micros != 0 && now_micros <= fresh_until_micros
     }
 
     fn clear_scheduled_if_unchanged(&self, expected: usize) {
@@ -187,6 +266,23 @@ where
 
     fn assist_once(&self) {
         self.poll_scheduled_once(self.assist_budget);
+    }
+
+    fn poll_leased_once(&self) {
+        self.poll_leased_once_with_completion_time(monotonic_now_micros);
+    }
+
+    fn poll_leased_once_with_completion_time(&self, completion_time: impl FnOnce() -> u64) {
+        let Some(lease_budget) = self.lease_budget else {
+            return;
+        };
+        if !self.try_start_run() {
+            return;
+        }
+
+        let progress = (self.poll_once)(lease_budget);
+        self.refresh_lease_at(completion_time());
+        self.finish_run(progress.has_more, 0);
     }
 
     fn poll_background_batch(&self, next_work: usize) {
@@ -253,15 +349,23 @@ where
             }
         };
 
-        if next_state == BudgetedPollerState::Scheduled
-            && !self.queue_background_work(next_work)
-            && self.started.load(Ordering::Acquire)
-        {
-            self.clear_scheduled_if_unchanged(next_raw);
+        if next_state == BudgetedPollerState::Scheduled {
+            if Self::lease_count(next_raw) > 0
+                && self.is_lease_fresh_at(next_raw, monotonic_now_micros())
+            {
+                return;
+            }
+            if !self.queue_background_work(next_work) && self.started.load(Ordering::Acquire) {
+                self.clear_scheduled_if_unchanged(next_raw);
+            }
         }
     }
 
     fn queue_background_work(&self, work_index: usize) -> bool {
+        #[cfg(unittest)]
+        self.background_queue_attempts
+            .fetch_add(1, Ordering::AcqRel);
+
         let queue = self.queue.lock().clone();
         let Some(queue) = queue else {
             return false;
@@ -302,9 +406,67 @@ where
         BudgetedPollerState::from_raw(self.state.load(Ordering::Acquire))
     }
 
+    fn kick_if_stale(&self) {
+        self.kick_if_stale_at(monotonic_now_micros());
+    }
+
+    fn kick_if_stale_at(&self, now_micros: u64) {
+        let raw = self.state.load(Ordering::Acquire);
+        if BudgetedPollerState::from_raw(raw) == BudgetedPollerState::Scheduled
+            && Self::lease_count(raw) > 0
+            && !self.is_lease_fresh_at(raw, now_micros)
+        {
+            let _ = self.queue_background_work(0);
+        }
+    }
+
     #[cfg(unittest)]
     fn force_state_for_tests(&self, state: BudgetedPollerState) {
-        self.state.store(state as usize, Ordering::Release);
+        let _ = self
+            .state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |raw| {
+                Some(Self::raw_with_state(raw, state))
+            });
+    }
+}
+
+/// A foreground lease for advancing a [`BudgetedPoller`].
+///
+/// While the lease is fresh, published work remains scheduled without queuing
+/// another background batch. The holder must call [`Self::poll_once`] from
+/// sleepable task context. Dropping the lease re-arms background polling for
+/// work accumulated during the lease.
+#[must_use = "dropping the lease re-arms background polling"]
+pub struct PollLease<B, F>
+where
+    B: Copy + Send + Sync + 'static,
+    F: Fn(B) -> BudgetedPollProgress + Send + Sync + 'static,
+{
+    inner: Arc<BudgetedPollerInner<B, F>>,
+}
+
+impl<B, F> PollLease<B, F>
+where
+    B: Copy + Send + Sync + 'static,
+    F: Fn(B) -> BudgetedPollProgress + Send + Sync + 'static,
+{
+    /// Advances one scheduled round with the lease budget.
+    ///
+    /// The method returns without invoking the callback when another executor
+    /// owns the poller or no work is scheduled. A successful round refreshes
+    /// the lease deadline before deciding whether background work is needed.
+    pub fn poll_once(&self) {
+        self.inner.poll_leased_once();
+    }
+}
+
+impl<B, F> Drop for PollLease<B, F>
+where
+    B: Copy + Send + Sync + 'static,
+    F: Fn(B) -> BudgetedPollProgress + Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        self.inner.release_lease();
     }
 }
 
@@ -338,6 +500,53 @@ where
         max_background_rounds: usize,
         poll_once: F,
     ) -> Self {
+        Self::new_inner(
+            name,
+            background_budget,
+            None,
+            assist_budget,
+            TimeSpan::ZERO,
+            max_background_rounds,
+            poll_once,
+        )
+    }
+
+    /// Creates an unstarted poller with foreground lease support.
+    ///
+    /// `lease_timeout` controls how long notifications may leave scheduled
+    /// work to the lease holder. A zero or sub-microsecond timeout disables
+    /// lease acquisition. [`Self::new`] remains available for pollers that use
+    /// only background and assist execution.
+    pub fn new_with_lease(
+        name: &'static str,
+        background_budget: B,
+        lease_budget: B,
+        assist_budget: B,
+        lease_timeout: TimeSpan,
+        max_background_rounds: usize,
+        poll_once: F,
+    ) -> Self {
+        Self::new_inner(
+            name,
+            background_budget,
+            Some(lease_budget),
+            assist_budget,
+            lease_timeout,
+            max_background_rounds,
+            poll_once,
+        )
+    }
+
+    fn new_inner(
+        name: &'static str,
+        background_budget: B,
+        lease_budget: Option<B>,
+        assist_budget: B,
+        lease_timeout: TimeSpan,
+        max_background_rounds: usize,
+        poll_once: F,
+    ) -> Self {
+        let lease_timeout_micros = u64::try_from(lease_timeout.as_micros()).unwrap_or(u64::MAX);
         let inner = Arc::new_cyclic(|weak| BudgetedPollerInner {
             name,
             started: AtomicBool::new(false),
@@ -346,9 +555,14 @@ where
             works: [work_for(weak.clone(), 1), work_for(weak.clone(), 0)],
             state: AtomicUsize::new(BudgetedPollerState::Idle as usize),
             background_budget,
+            lease_budget,
             assist_budget,
+            lease_timeout_micros,
+            lease_fresh_until_micros: AtomicU64::new(0),
             max_background_rounds,
             poll_once,
+            #[cfg(unittest)]
+            background_queue_attempts: AtomicUsize::new(0),
         });
         Self { inner }
     }
@@ -371,7 +585,50 @@ where
         self.inner.assist_once();
     }
 
+    /// Attempts to acquire the foreground advance lease.
+    ///
+    /// Acquisition succeeds only after the backing queue has started and while
+    /// no other lease exists. The method returns `None` from interrupt-like
+    /// contexts or after destruction has begun. Callers must stop and drop all
+    /// leases before calling [`Self::destroy`].
+    pub fn try_lease(&self) -> Option<PollLease<B, F>> {
+        if kirq::context::is_in_interrupt_context()
+            || self.inner.is_destroying.load(Ordering::Acquire)
+            || !self.inner.started.load(Ordering::Acquire)
+            || self.inner.queue.lock().is_none()
+        {
+            return None;
+        }
+
+        if !self.inner.try_acquire_lease_at(monotonic_now_micros()) {
+            return None;
+        }
+        if self.inner.is_destroying.load(Ordering::Acquire)
+            || !self.inner.started.load(Ordering::Acquire)
+            || self.inner.queue.lock().is_none()
+        {
+            self.inner.release_lease();
+            return None;
+        }
+
+        Some(PollLease {
+            inner: self.inner.clone(),
+        })
+    }
+
+    /// Requeues scheduled work when a held lease has expired.
+    ///
+    /// This non-blocking check may run from a periodic task or timer callback.
+    /// Queueing races are harmless because the scheduled-to-running transition
+    /// still admits only one executor.
+    pub fn kick_if_stale(&self) {
+        self.inner.kick_if_stale();
+    }
+
     /// Gates new backing work permanently and waits for queued/running poll callbacks.
+    ///
+    /// Callers must stop foreground assists and drop all leases before invoking
+    /// this method.
     pub fn destroy(&self) -> Result<(), WorkqueueError> {
         self.inner.destroy()
     }
@@ -412,6 +669,44 @@ where
     pub(crate) fn is_running_pending_for_tests(&self) -> bool {
         self.inner.load_state() == BudgetedPollerState::RunningPending
     }
+
+    #[cfg(unittest)]
+    fn acquire_lease_at_for_tests(&self, now_micros: u64) -> Option<PollLease<B, F>> {
+        self.inner
+            .try_acquire_lease_at(now_micros)
+            .then(|| PollLease {
+                inner: self.inner.clone(),
+            })
+    }
+
+    #[cfg(unittest)]
+    fn notify_irq_safe_at_for_tests(&self, now_micros: u64) -> bool {
+        self.inner.notify_irq_safe_at(Some(now_micros))
+    }
+
+    #[cfg(unittest)]
+    fn kick_if_stale_at_for_tests(&self, now_micros: u64) {
+        self.inner.kick_if_stale_at(now_micros);
+    }
+
+    #[cfg(unittest)]
+    fn lease_count_for_tests(&self) -> usize {
+        BudgetedPollerInner::<B, F>::lease_count(self.inner.state.load(Ordering::Acquire))
+    }
+
+    #[cfg(unittest)]
+    fn lease_fresh_until_for_tests(&self) -> u64 {
+        self.inner.lease_fresh_until_micros.load(Ordering::Acquire)
+    }
+
+    #[cfg(unittest)]
+    fn background_queue_attempts_for_tests(&self) -> usize {
+        self.inner.background_queue_attempts.load(Ordering::Acquire)
+    }
+}
+
+fn monotonic_now_micros() -> u64 {
+    u64::try_from(ktask::monotonic_time().span_since_origin().as_micros()).unwrap_or(u64::MAX)
 }
 
 fn work_for<B, F>(inner: Weak<BudgetedPollerInner<B, F>>, next_work: usize) -> ScheduledWork
@@ -428,19 +723,37 @@ where
 
 #[cfg(unittest)]
 mod tests {
-    use core::sync::atomic::{AtomicUsize, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use unittest::{assert, assert_eq, def_test};
 
     use super::*;
 
     static POLL_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static POLL_HAS_MORE: AtomicBool = AtomicBool::new(false);
 
     fn poller() -> BudgetedPoller<usize, impl Fn(usize) -> BudgetedPollProgress> {
         BudgetedPoller::new("budgeted_poller_test", 8, 1, 2, |budget| {
             POLL_CALLS.fetch_add(budget, Ordering::AcqRel);
             BudgetedPollProgress { has_more: false }
         })
+    }
+
+    fn lease_poller() -> BudgetedPoller<usize, impl Fn(usize) -> BudgetedPollProgress> {
+        BudgetedPoller::new_with_lease(
+            "budgeted_lease_test",
+            8,
+            4,
+            1,
+            TimeSpan::from_micros(500),
+            2,
+            |budget| {
+                POLL_CALLS.fetch_add(budget, Ordering::AcqRel);
+                BudgetedPollProgress {
+                    has_more: POLL_HAS_MORE.load(Ordering::Acquire),
+                }
+            },
+        )
     }
 
     #[def_test(serial)]
@@ -477,5 +790,122 @@ mod tests {
 
         assert!(poller.is_scheduled_for_tests());
         assert_eq!(POLL_CALLS.load(Ordering::Acquire), 0);
+    }
+
+    #[def_test(serial)]
+    fn lease_requires_a_started_configured_poller() {
+        let poller = poller();
+        assert!(poller.acquire_lease_at_for_tests(100).is_none());
+        assert!(poller.try_lease().is_none());
+
+        let poller = lease_poller();
+        assert!(poller.try_lease().is_none());
+    }
+
+    #[def_test(serial)]
+    fn lease_acquisition_is_exclusive_and_initially_fresh() {
+        let poller = lease_poller();
+        let lease = poller.acquire_lease_at_for_tests(100).unwrap();
+
+        assert_eq!(poller.lease_count_for_tests(), 1);
+        assert_eq!(poller.lease_fresh_until_for_tests(), 600);
+        assert!(poller.acquire_lease_at_for_tests(200).is_none());
+
+        drop(lease);
+        assert_eq!(poller.lease_count_for_tests(), 0);
+        assert_eq!(poller.background_queue_attempts_for_tests(), 0);
+    }
+
+    #[def_test(serial)]
+    fn fresh_lease_suspends_notify_until_drop() {
+        let poller = lease_poller();
+        let lease = poller.acquire_lease_at_for_tests(100).unwrap();
+
+        assert!(poller.notify_irq_safe_at_for_tests(200));
+        assert!(poller.is_scheduled_for_tests());
+        assert_eq!(poller.background_queue_attempts_for_tests(), 0);
+
+        drop(lease);
+        assert_eq!(poller.lease_count_for_tests(), 0);
+        assert_eq!(poller.background_queue_attempts_for_tests(), 1);
+    }
+
+    #[def_test(serial)]
+    fn leased_poll_uses_lease_budget_and_suspends_more_work() {
+        POLL_CALLS.store(0, Ordering::Release);
+        POLL_HAS_MORE.store(true, Ordering::Release);
+        let poller = lease_poller();
+        let lease = poller.acquire_lease_at_for_tests(100).unwrap();
+        assert!(poller.notify_irq_safe_at_for_tests(200));
+
+        lease
+            .inner
+            .poll_leased_once_with_completion_time(|| u64::MAX);
+
+        assert_eq!(POLL_CALLS.load(Ordering::Acquire), 4);
+        assert!(poller.is_scheduled_for_tests());
+        assert_eq!(poller.background_queue_attempts_for_tests(), 0);
+
+        POLL_HAS_MORE.store(false, Ordering::Release);
+        drop(lease);
+        assert_eq!(poller.background_queue_attempts_for_tests(), 1);
+    }
+
+    #[def_test(serial)]
+    fn idle_leased_poll_does_not_refresh_deadline() {
+        let poller = lease_poller();
+        let lease = poller.acquire_lease_at_for_tests(100).unwrap();
+
+        lease.inner.poll_leased_once_with_completion_time(|| 900);
+
+        assert_eq!(poller.lease_fresh_until_for_tests(), 600);
+        drop(lease);
+    }
+
+    #[def_test(serial)]
+    fn expired_lease_notify_restores_background_queueing() {
+        let poller = lease_poller();
+        let lease = poller.acquire_lease_at_for_tests(100).unwrap();
+
+        assert!(!poller.notify_irq_safe_at_for_tests(601));
+        assert_eq!(poller.background_queue_attempts_for_tests(), 1);
+
+        drop(lease);
+    }
+
+    #[def_test(serial)]
+    fn stale_kick_queues_only_after_expiration() {
+        let poller = lease_poller();
+        let lease = poller.acquire_lease_at_for_tests(100).unwrap();
+        poller.force_scheduled_for_tests();
+
+        poller.kick_if_stale_at_for_tests(600);
+        assert_eq!(poller.background_queue_attempts_for_tests(), 0);
+        poller.kick_if_stale_at_for_tests(601);
+        assert_eq!(poller.background_queue_attempts_for_tests(), 1);
+
+        drop(lease);
+    }
+
+    #[def_test(serial)]
+    fn releasing_before_notify_leaves_queueing_to_notify() {
+        let poller = lease_poller();
+        let lease = poller.acquire_lease_at_for_tests(100).unwrap();
+        drop(lease);
+
+        assert_eq!(poller.background_queue_attempts_for_tests(), 0);
+        assert!(!poller.notify_irq_safe_at_for_tests(200));
+        assert_eq!(poller.background_queue_attempts_for_tests(), 1);
+    }
+
+    #[def_test(serial)]
+    fn scheduled_state_admits_only_one_executor() {
+        let poller = lease_poller();
+        poller.force_scheduled_for_tests();
+
+        assert!(poller.inner.try_start_run());
+        assert!(!poller.inner.try_start_run());
+        poller.inner.finish_run(false, 0);
+        assert!(poller.is_idle_for_tests());
     }
 }

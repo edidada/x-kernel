@@ -51,6 +51,14 @@ they are not converted back into references.
   and work state.
 - IRQ-like producers must pre-create work objects and use only immediate
   enqueue paths.
+- `BudgetedPoller` executor state and lease count must change through the same
+  atomic word so notification and final lease release cannot both omit
+  background queueing.
+- A fresh lease may suppress queueing but may not erase `Scheduled` work.
+- Background, assist, and lease executors must all acquire the same
+  `Scheduled` to `Running` transition.
+- Callers must stop lease holders and foreground assists before destroying a
+  budgeted poller.
 
 ## Threats
 
@@ -68,6 +76,11 @@ they are not converted back into references.
 | T-10 | Worker creation fails repeatedly | Manager busy-loop | Retry deadline throttles create attempts |
 | T-11 | Bottom-half callback sleeps | Softirq context corruption | Sleep and wait APIs fail from interrupt-like context |
 | T-12 | Budgeted poller loses notify while running | Device or network backlog stalls | `RunningPending` records missed wake and schedules another round |
+| T-13 | Lease holder exits without restoring background polling | Scheduled work stalls | `PollLease` is non-cloneable and its `Drop` implementation atomically releases the lease and queues accumulated work |
+| T-14 | Lease holder is delayed after taking progress responsibility | Scheduled work stalls | Freshness timeout restores queueing on later notifications; periodic callers use `kick_if_stale()` when no producer arrives |
+| T-15 | Lease and notification concurrently delegate queueing | Scheduled work stalls | Executor state and lease count share one atomic modification order; release or notification observes responsibility at its own linearization point |
+| T-16 | Lease polling runs from interrupt context | Sleepable poll callback runs in a non-sleepable context | `try_lease()` rejects interrupt-like contexts and rustdoc requires task-context use |
+| T-17 | Poller destruction races a live foreground holder | State reset races callback completion | The public lifecycle contract requires callers to stop and drop leases and assists before `destroy()` |
 
 ## Failure Handling
 
@@ -88,3 +101,7 @@ can expose the underlying race.
 - Ordered, unbound, and NUMA-aware policies are not implemented.
 - Dynamic bottom-half queues are not exposed.
 - Full Linux flusher queue overflow chaining is not implemented.
+- Lease cleanup depends on ordinary Rust unwinding and scope exit. Fatal abort
+  paths proceed to system reset without running `Drop`.
+- The lease timeout does not revoke the `PollLease` object. Other callers use
+  assist or background execution until the holder releases it.

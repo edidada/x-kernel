@@ -76,7 +76,9 @@ mod runtime;
 mod stress;
 mod work;
 
-pub use budgeted_poller::{BudgetedPollProgress, BudgetedPoller, BudgetedPollerStartError};
+pub use budgeted_poller::{
+    BudgetedPollProgress, BudgetedPoller, BudgetedPollerStartError, PollLease,
+};
 pub use builtinwq::{system_bh_highpri_wq, system_bh_wq, system_percpu_wq, system_wq};
 #[cfg(feature = "stress_test")]
 pub use stress::{StressError, StressSummary, run_stress_command, stress_status_text};

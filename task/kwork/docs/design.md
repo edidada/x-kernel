@@ -29,6 +29,8 @@ The crate root intentionally exposes only product-level APIs:
 - `system_wq()`, `system_percpu_wq()`, `system_bh_wq()`, and
   `system_bh_highpri_wq()` return built-in queue objects.
 - `BudgetedPoller` provides a NAPI-like coalesced polling helper.
+- `PollLease` grants one task-context holder temporary responsibility for
+  advancing a configured `BudgetedPoller`.
 - `kwork::raw` is hidden glue for boot-time initialization and watchdog checks.
 
 Built-in pool handles, pool kinds, runtime workers, bottom-half drain bindings,
@@ -137,6 +139,11 @@ Non-zero delayed work scheduling creates a timer handle and therefore requires
 a context where allocation and ktask timer setup are valid. A zero delay is
 converted to immediate enqueue.
 
+`BudgetedPoller::notify_irq_safe()` remains valid in IRQ-adjacent contexts.
+Lease acquisition and `PollLease::poll_once()` require task context because the
+poll callback may take sleepable subsystem locks. A caller must stop and drop
+all leases and foreground assists before destroying the poller.
+
 ## Progress Model
 
 Enqueue commits queue state first, then submits an executor operation to the
@@ -152,6 +159,46 @@ pool/worker/token identity. `kworkerpool` marks long-running task-context
 workers CPU-intensive after the policy threshold, removes them from bounded
 concurrency accounting, and asks the manager to create another worker when
 queued work needs progress.
+
+## Budgeted Poller Leases
+
+`BudgetedPoller` stores executor state, a six-bit lease count, and the publish
+generation in one `AtomicUsize`:
+
+```text
+bits 0..2    Idle / Scheduled / Running / RunningPending
+bits 2..8    lease count
+bits 8..     publish generation
+```
+
+Version one admits one lease. Keeping six bits in the representation reserves
+space for later per-CPU or per-device ownership without changing the state-word
+layout.
+
+`new_with_lease()` adds a foreground budget and freshness timeout while
+`new()` preserves the background-plus-assist configuration. A successful
+`try_lease()` sets the lease count and establishes the first freshness
+deadline. `PollLease::poll_once()` competes for the same `Scheduled` to
+`Running` transition as background and assist executors. After a successful
+round it refreshes the deadline before completion decides whether to queue
+another background batch.
+
+Notifications always publish state. A fresh lease changes only the queueing
+decision: `Scheduled` remains visible for the holder, and neither notification
+nor run completion queues another worker. The state-word update returned by
+notification and lease release gives each queueing decision one linearization
+point. A concurrent redundant queue attempt remains safe because only one
+executor can acquire `Running`.
+
+Dropping the final lease queues accumulated `Scheduled` work. An expired lease
+also stops suppressing later notifications, and `kick_if_stale()` lets a
+periodic caller recover scheduled work when no new producer arrives. The
+freshness deadline is a separate `AtomicU64`; a race around deadline refresh
+can only cause a redundant background queue attempt.
+
+The ownership cleanup guarantee covers ordinary Rust control flow, including
+early returns and propagated errors. A fatal abort does not execute `Drop`;
+system reset owns recovery from that terminal state.
 
 ## Stress and Diagnostics
 
