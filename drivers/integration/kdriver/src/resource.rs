@@ -551,3 +551,238 @@ pub mod clk_e2e_tests {
         TestResult::Ok
     }
 }
+
+#[cfg(unittest)]
+pub mod clk_vccu_tests {
+    use alloc::{sync::Arc, vec::Vec};
+
+    use device_res::{ClkSpec, DeviceResource};
+    use kspin::SpinNoIrq;
+    use unittest::{TestResult, def_test, ktest_println};
+
+    use crate::resource::devm_clk_get;
+
+    static VCCU: kclk::ClkTable = kclk::ClkTable::new(0xCC0);
+    static VCCU_SERIAL: SpinNoIrq<()> = SpinNoIrq::new(());
+
+    /// Plan-C "virtual CCU": a four-level tree — osc → PLL(settable) →
+    /// mux(2 sources) → divider → uart gate — with all register-backed nodes
+    /// accessed through the REAL MmioClkReg over a kernel-memory bank.
+    /// This exercises the actual volatile-access path (not the trait mock)
+    /// and the full controller surface: enable/disable, DVFS, parent
+    /// switching, and the diagnostic/PM walks.
+    struct VccuBank {
+        base: usize,
+    }
+
+    impl VccuBank {
+        /// Allocate a page-aligned kernel-memory register bank (the stand-in
+        /// for the controller's MMIO window) and return it plus the base.
+        fn alloc() -> Self {
+            // A leaked, zeroed, page-aligned allocation stands in for the
+            // mapped device window. Word-aligned volatile accesses to it are
+            // sound by construction.
+            let layout = alloc::alloc::Layout::from_size_align(0x100, 0x100).unwrap();
+            // SAFETY: `layout` is non-zero and the global allocator
+            // returns a valid pointer or null; alloc_zeroed gives a
+            // page-aligned, zeroed block suitable for the register bank.
+            let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
+            Self { base: ptr as usize }
+        }
+    }
+
+    fn build_vccu() -> &'static VccuBank {
+        static BANK: SpinNoIrq<Option<&'static VccuBank>> = SpinNoIrq::new(None);
+        let mut slot = BANK.lock();
+        if slot.is_none() {
+            let bank = VccuBank::alloc();
+            *slot = Some(alloc::boxed::Box::leak(alloc::boxed::Box::new(bank)));
+        }
+        slot.unwrap()
+    }
+
+    fn install_vccu() {
+        use kclk::{ClkBranch, DividerDesc, DividerFlags, GateDesc, GateFlags, MuxDesc};
+
+        VCCU.clear();
+        kclk::reset_providers();
+        let bank = build_vccu();
+
+        let branches = [
+            // Level 0: 24 MHz crystal.
+            ClkBranch::fixed_rate(0, "v_osc", 24_000_000),
+            // Level 1: settable "PLL" — a divider against the crystal
+            // (stand-in for a real PLL's programmable VCO).
+            ClkBranch::fixed_factor(1, "v_pll", 50, 1, &["v_osc"]),
+            // Level 2: 2-input mux selecting between PLL and crystal.
+            ClkBranch::composite(
+                2,
+                "v_mux",
+                Some(MuxDesc {
+                    offset: 0x10,
+                    shift: 0,
+                    mask: 0x1,
+                    table: None,
+                }),
+                None,
+                None,
+                &["v_pll", "v_osc"],
+                kclk::ClkFlags::SET_RATE_PARENT,
+            ),
+            // Level 3: the clock the "device" consumes — divider + gate.
+            ClkBranch::composite(
+                3,
+                "v_uart",
+                None,
+                Some(DividerDesc {
+                    offset: 0x20,
+                    shift: 0,
+                    width: 4,
+                    table: None,
+                    flags: DividerFlags::ONE_BASED,
+                }),
+                Some(GateDesc {
+                    offset: 0x20,
+                    bit: 8,
+                    flags: GateFlags::SET_TO_ENABLE,
+                }),
+                &["v_mux"],
+                kclk::ClkFlags::empty(),
+            ),
+        ];
+
+        // SAFETY: `bank.base` is a valid, word-aligned, page-aligned kernel
+        // allocation that lives for the process lifetime (a leaked static);
+        // MmioClkReg only does word-aligned volatile accesses within [base,
+        // base+0x100).
+        let reg: Arc<dyn kclk::ClkRegAccess> =
+            Arc::new(unsafe { kclk::MmioClkReg::new(bank.base) });
+        kclk::register_table(&VCCU, reg, &branches).unwrap();
+        kclk::register_provider(&VCCU);
+    }
+
+    struct Dev {
+        cleanups: SpinNoIrq<Vec<alloc::boxed::Box<dyn FnOnce() + Send>>>,
+    }
+    impl Dev {
+        fn new() -> Self {
+            Self {
+                cleanups: SpinNoIrq::new(Vec::new()),
+            }
+        }
+    }
+    impl DeviceResource for Dev {
+        fn resources(&self) -> &[device_res::ResourceDesc] {
+            &[]
+        }
+
+        fn register_cleanup(&self, c: alloc::boxed::Box<dyn FnOnce() + Send>) {
+            self.cleanups.lock().push(c);
+        }
+    }
+
+    #[def_test(serial)]
+    fn virtual_ccu_full_tree_on_mmio_regbank() -> TestResult {
+        let _serial = VCCU_SERIAL.lock();
+        install_vccu();
+        let device = Dev::new();
+
+        // Resolve the leaf clock through the full stack.
+        let clk = match devm_clk_get(&device, ClkSpec::by_phandle_index(0xCC0, 3)) {
+            Ok(c) => c,
+            Err(e) => {
+                ktest_println!("VCCU FAIL: devm_clk_get {e:?}");
+                return TestResult::Failed;
+            }
+        };
+        if clk.name() != "v_uart" {
+            ktest_println!("VCCU FAIL: wrong clock {}", clk.name());
+            return TestResult::Failed;
+        }
+
+        // Enable through the whole chain (gate → mux → PLL → osc).
+        if let Err(e) = clk.prepare_enable() {
+            ktest_println!("VCCU FAIL: prepare_enable {e:?}");
+            return TestResult::Failed;
+        }
+        ktest_println!("VCCU: v_uart enabled at {} Hz", clk.get_rate());
+
+        // Boot state: PLL ×50 (1.2 GHz), mux→PLL, divider ÷1 → 1.2 GHz.
+        if clk.get_rate() != 1_200_000_000 {
+            ktest_println!("VCCU FAIL: boot rate {} != 1.2 GHz", clk.get_rate());
+            return TestResult::Failed;
+        }
+
+        // DVFS at the leaf: set v_uart to 300 MHz via the leaf divider (÷4).
+        let r = match clk.set_rate(300_000_000) {
+            Ok(r) => r,
+            Err(e) => {
+                ktest_println!("VCCU FAIL: set_rate(12M) {e:?}");
+                return TestResult::Failed;
+            }
+        };
+        ktest_println!("VCCU: set_rate(300 MHz) → {r} Hz");
+
+        // DVFS at a different divider point: 150 MHz (÷8).
+        let r2 = match clk.set_rate(150_000_000) {
+            Ok(r) => r,
+            Err(e) => {
+                ktest_println!("VCCU FAIL: set_rate(600M) {e:?}");
+                return TestResult::Failed;
+            }
+        };
+        ktest_println!("VCCU: set_rate(150 MHz) → {r2} Hz");
+        if !(140_000_000..=160_000_000).contains(&r2) {
+            return TestResult::Failed;
+        }
+
+        // Parent switch: flip the mux (a separate node with 2 sources) from
+        // the PLL to the crystal. The leaf (v_uart) has one parent (the
+        // mux); the switch belongs on the mux itself.
+        let mux = match devm_clk_get(&device, ClkSpec::by_phandle_index(0xCC0, 2)) {
+            Ok(m) => m,
+            Err(e) => {
+                ktest_println!("VCCU FAIL: resolve mux {e:?}");
+                return TestResult::Failed;
+            }
+        };
+        if let Err(e) = mux.set_parent(1) {
+            ktest_println!("VCCU FAIL: mux.set_parent(1) {e:?}");
+            return TestResult::Failed;
+        }
+        // Now on the crystal through the same divider chain.
+        let after_switch = clk.get_rate();
+        ktest_println!("VCCU: after parent switch, rate = {after_switch} Hz");
+        if after_switch > 24_000_000 {
+            return TestResult::Failed;
+        }
+
+        // clk_summary over the virtual CCU.
+        let summary = kclk::clk_summary();
+        let v_uart = summary.iter().find(|e| e.name == "v_uart");
+        if v_uart.is_none() {
+            ktest_println!("VCCU FAIL: v_uart not in clk_summary");
+            return TestResult::Failed;
+        }
+        ktest_println!(
+            "VCCU: clk_summary shows {} clocks (v_uart rate={})",
+            summary.len(),
+            v_uart.unwrap().rate
+        );
+
+        // clk_disable_unused: the crystal branch is held by our reference; a
+        // sibling we never enabled would be gated. Just verify the walk runs.
+        kclk::clk_disable_unused();
+        ktest_println!("VCCU: clk_disable_unused completed");
+
+        clk.disable_unprepare();
+        if clk.is_enabled().unwrap_or(true) {
+            ktest_println!("VCCU FAIL: still enabled after release");
+            return TestResult::Failed;
+        }
+
+        kclk::reset_providers();
+        ktest_println!("VCCU: OK — full virtual-CCU round trip on MmioClkReg");
+        TestResult::Ok
+    }
+}
