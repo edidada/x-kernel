@@ -91,8 +91,15 @@ fn resolve_port(device: &DeviceObject, kind: SerialKind) -> DriverResult<Arc<Ser
         // rate, and program IBRD/FBRD for 115200.
         #[cfg(feature = "serial-pl011")]
         if matches!(kind, SerialKind::Pl011) {
-            log::debug!("serial: resolving uart-ref clock");
-            match crate::devm_clk_get(device, device_res::ClkSpec::by_name("uart-ref")) {
+            log::debug!("serial: resolving clock from device resources");
+            // Resolve the clock from the device's firmware-described resource
+            // list first (DT clocks = <&phandle N>); fall back to the
+            // platform's named fixed clock for DTs that only carry a
+            // clock-frequency property (QEMU virt).
+            let spec = device
+                .first_clk()
+                .unwrap_or(device_res::ClkSpec::by_name("uart-ref"));
+            match crate::devm_clk_get(device, spec) {
                 Ok(clk) => {
                     log::debug!("serial: uart-ref resolved");
                     let _ = clk.prepare_enable();

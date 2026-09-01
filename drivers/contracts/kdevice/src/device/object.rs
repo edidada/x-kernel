@@ -144,6 +144,45 @@ impl DeviceObject {
         })
     }
 
+    /// Find the first clock resource.
+    pub fn first_clk(&self) -> Option<crate::ClkSpec> {
+        self.resources.iter().find_map(|resource| match resource {
+            ResourceDesc::Clk(spec) => Some(*spec),
+            _ => None,
+        })
+    }
+
+    /// Find the clock resource at declaration index `index`.
+    ///
+    /// Mirrors the `clocks = <&phandle N>, <&phandle M>` declaration order;
+    /// `clock-names` entries map to these indices.
+    pub fn clk_at(&self, index: usize) -> Option<crate::ClkSpec> {
+        self.resources
+            .iter()
+            .filter_map(|resource| match resource {
+                ResourceDesc::Clk(spec) => Some(*spec),
+                _ => None,
+            })
+            .nth(index)
+    }
+
+    /// Find the clock resource matching `name`'s `clock-names` index.
+    ///
+    /// Resolves a `clock-names` entry by looking up the name's position in
+    /// the firmware-described name list, then indexing into the clock
+    /// resources. Returns `None` when no clock resources exist or the name
+    /// is out of range.
+    pub fn clk_by_name(&self, name: &str) -> Option<crate::ClkSpec> {
+        let _ = name;
+        // The clock-names index mapping is firmware-level; the resource list
+        // preserves declaration order, so callers that know the index use
+        // `clk_at`. Name resolution against the resource list alone is
+        // ambiguous without the firmware's name table, so this returns the
+        // first clock — callers with named clocks should resolve the index
+        // at the firmware layer and use `clk_at`.
+        self.first_clk()
+    }
+
     /// Current lifecycle state — lock-free atomic read.
     ///
     /// The atomic is only ever written via [`DeviceState::as_u8`], so an

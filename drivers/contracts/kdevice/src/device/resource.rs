@@ -8,5 +8,5 @@
 //! This module re-exports them for the shared device model.
 
 pub use device_res::{
-    DmaSpec, IoPortRange, IrqResource, IrqTrigger, MmioRegion, ResourceDesc, ResourceSet,
+    ClkSpec, DmaSpec, IoPortRange, IrqResource, IrqTrigger, MmioRegion, ResourceDesc, ResourceSet,
 };
