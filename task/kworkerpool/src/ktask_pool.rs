@@ -13,9 +13,14 @@ use kspin::{SpinNoIrq, SpinNoIrqGuard};
 use ktime_types::MonotonicInstant;
 
 use crate::{
-    ActionBatch, ImmediateAction, ManagementAction, ManagementComplete, ManagerRuntime,
-    ManagerTarget, ManagerTask, PoolId, WorkerId, WorkerPool, WorkerPoolPolicy, WorkerRuntime,
-    WorkerTask, WorkerThreadRef, decode_task_context, prepare_bound_kthread, worker_name,
+    ActionBatch, ImmediateAction, PoolId, WorkerId, WorkerPool, WorkerPoolPolicy, WorkerRuntime,
+    WorkerThreadRef,
+    action::ManagementAction,
+    decode_task_context,
+    manager::{ManagerRuntime, ManagerTarget, ManagerTask},
+    pool::ManagementComplete,
+    task_loop::WorkerTask,
+    thread::{prepare_bound_kthread, worker_name},
 };
 
 /// Builds the runtime object used by one ktask-backed worker.
@@ -85,7 +90,7 @@ impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> KtaskWorkerPool<MAX_WORKE
     }
 
     /// Installs the manager task used to drive slow-path lifecycle actions.
-    pub fn install_manager_thread(&self, thread_ref: WorkerThreadRef) -> bool {
+    pub(crate) fn install_manager_thread(&self, thread_ref: WorkerThreadRef) -> bool {
         let mut slot = self.manager_thread.lock();
         if slot.is_some() {
             return false;
@@ -95,7 +100,7 @@ impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> KtaskWorkerPool<MAX_WORKE
     }
 
     /// Returns one worker thread reference.
-    pub fn worker_thread_ref(&self, worker: WorkerId) -> Option<WorkerThreadRef> {
+    pub(crate) fn worker_thread_ref(&self, worker: WorkerId) -> Option<WorkerThreadRef> {
         self.inner.lock().worker_thread_ref(worker).cloned()
     }
 
@@ -120,16 +125,6 @@ impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> KtaskWorkerPool<MAX_WORKE
         };
         thread_ref.wake();
         true
-    }
-
-    /// Returns one ktask-backed worker task.
-    pub fn worker_task(&self, worker: WorkerId) -> Option<ktask::KtaskRef> {
-        self.worker_thread_ref(worker)?.task()
-    }
-
-    /// Returns this pool's manager task.
-    pub fn manager_task(&self) -> Option<ktask::KtaskRef> {
-        self.manager_thread_ref()?.task()
     }
 
     /// Accounts a ktask execution tick if `context` belongs to this pool.

@@ -15,7 +15,6 @@
 //! - [`WorkerPoolPolicy`] configures concurrency, dynamic creation, retirement,
 //!   and CPU-intensive accounting.
 //! - [`KtaskWorkerPool`] adds ktask-backed worker and manager threads.
-//! - [`WorkerTask`] and [`ManagerTask`] are the task-loop bodies.
 //! - [`WorkerRuntime`] and [`RunnableClaimer`] let a product layer validate
 //!   entries and run callbacks without exposing product state to the pool.
 //!
@@ -75,25 +74,19 @@ mod tests;
 mod thread;
 mod worker;
 
-pub use action::{ActionBatch, ImmediateAction, ManagementAction};
+pub use action::{ActionBatch, ImmediateAction};
 pub use entry::{EntryKey, EntryOwner, EntryPayload, EntrySource};
-pub use execution::{WorkerPoolExecutionContext, decode_task_context, encode_task_context};
+pub use execution::{WorkerPoolExecutionContext, decode_task_context};
 pub use id::{PoolId, PoolKind, WorkerId};
 pub use ktask_pool::{
     ExecutionTickResult, KtaskWorkerPool, PoolNameResolver, WorkerRuntimeFactory,
     start_manager_task,
 };
-pub use manager::{
-    ManagerRuntime, ManagerTarget, ManagerTask, run_worker_pool_manager_pass,
-    run_worker_pool_manager_set_pass,
-};
 pub use policy::{WorkerPoolPolicy, WorkerPoolPolicyConfig};
 pub use pool::{
-    ManagementComplete, ParkDecision, RunnableCandidate, RunnableCandidateDiscard,
-    RunnableCandidateResult, RunnableClaim, RunnableClaimer, WorkerPool, WorkerPoolError,
-    WorkerPoolSnapshot,
+    ParkDecision, RunnableCandidate, RunnableCandidateDiscard, RunnableCandidateResult,
+    RunnableClaim, RunnableClaimer, WorkerPool, WorkerPoolError, WorkerPoolSnapshot,
 };
 pub use queue::{PoolEntry, QueueRemoveResult};
-pub use task_loop::{CurrentWorkerPoolExecutionGuard, WorkerTask};
-pub use thread::{WorkerThreadRef, manager_name, prepare_bound_kthread, worker_name};
-pub use worker::{ExecutionAccounting, WorkerExecutionToken, WorkerRuntime, WorkerState};
+pub use thread::{WorkerThreadRef, manager_name};
+pub use worker::{WorkerExecutionToken, WorkerRuntime, WorkerState};

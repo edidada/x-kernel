@@ -88,11 +88,6 @@ impl<const ENTRY_CAP: usize> PoolRunQueue<ENTRY_CAP> {
         }
     }
 
-    /// Returns total entries across runnable and deferred lanes.
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
     /// Returns whether no entries are queued.
     pub fn is_empty(&self) -> bool {
         self.len == 0
@@ -109,11 +104,13 @@ impl<const ENTRY_CAP: usize> PoolRunQueue<ENTRY_CAP> {
     }
 
     /// Returns runnable entries for one owner.
+    #[cfg(unittest)]
     pub fn runnable_len_for_owner(&self, owner: EntryOwner) -> usize {
         self.runnable.count_matching(|entry| entry.owner() == owner)
     }
 
     /// Returns deferred entries for one owner.
+    #[cfg(unittest)]
     pub fn deferred_len_for_owner(&self, owner: EntryOwner) -> usize {
         self.deferred.count_matching(|entry| entry.owner() == owner)
     }
@@ -139,6 +136,7 @@ impl<const ENTRY_CAP: usize> PoolRunQueue<ENTRY_CAP> {
     }
 
     /// Promotes up to `budget` deferred entries for one owner.
+    #[cfg(unittest)]
     pub fn promote_deferred(&mut self, owner: EntryOwner, budget: usize) -> usize {
         let mut promoted = 0;
         while promoted < budget && self.runnable.len() < ENTRY_CAP {
@@ -160,21 +158,6 @@ impl<const ENTRY_CAP: usize> PoolRunQueue<ENTRY_CAP> {
             .push(entry)
             .expect("moving within shared pool capacity should not fail");
         Some(entry)
-    }
-
-    /// Moves all runnable entries for `owner` into the deferred FIFO.
-    ///
-    /// This is a mechanical lane move; caller-owned policy decides when it is
-    /// necessary.
-    pub fn defer_runnable_for_owner(&mut self, owner: EntryOwner) -> usize {
-        let mut moved = 0usize;
-        while let Some(entry) = self.runnable.remove_first(|entry| entry.owner() == owner) {
-            self.deferred
-                .push(entry)
-                .expect("moving within shared pool capacity should not fail");
-            moved += 1;
-        }
-        moved
     }
 
     /// Pops the oldest runnable entry.
@@ -291,6 +274,7 @@ impl<T, const CAP: usize> EntryQueue<T, CAP> {
         self.entries[physical].as_mut()
     }
 
+    #[cfg(unittest)]
     fn count_matching(&self, pred: impl Fn(&T) -> bool) -> usize {
         (0..self.len)
             .filter(|index| {

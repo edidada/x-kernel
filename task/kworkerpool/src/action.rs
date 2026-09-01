@@ -27,7 +27,7 @@ pub enum ImmediateAction {
 
 /// Slow-path lifecycle action owned by the per-CPU manager.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ManagementAction {
+pub(crate) enum ManagementAction {
     /// Spawn a runtime worker for a reserved slot.
     SpawnWorker { pool: PoolId, worker: WorkerId },
     /// Wake a retiring worker so it can exit in its own context.
@@ -57,7 +57,7 @@ impl ActionBatch {
     }
 
     /// Appends actions from another batch until this fixed batch is full.
-    pub fn append(&mut self, other: Self) {
+    pub(crate) fn append(&mut self, other: Self) {
         for action in other.immediate.into_iter().flatten() {
             self.push_immediate(action);
         }
@@ -66,11 +66,6 @@ impl ActionBatch {
     /// Iterates over immediate actions.
     pub fn immediate(&self) -> impl Iterator<Item = ImmediateAction> + '_ {
         self.immediate.iter().copied().flatten()
-    }
-
-    /// Returns whether the batch has no action.
-    pub fn is_empty(&self) -> bool {
-        self.immediate().next().is_none()
     }
 }
 

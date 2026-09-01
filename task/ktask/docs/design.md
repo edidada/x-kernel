@@ -174,7 +174,7 @@ shared pools 中属于该 queue 的 pending/running instance 清零；pool worke
 供 scheduler tick 调用 `TaskExecutionAccountingIf` 做 CPU-intensive 采样。这个状态跟随
 任务迁移，不依赖 per-CPU slot。work key 和 queue owner 仍由 `kworkqueue` / `kwork`
 持有；`ktask` 不拥有 work 生命周期，也不保存 work handle。pool drain 入口在
-`kworkerpool::WorkerTask` 循环内，不存在供 callback 调用的 queue-level drain API。
+`kworkerpool` worker loop 内，不存在供 callback 调用的 queue-level drain API。
 workerqueue sleepable wait 直接复用 ktask 的 yield/wait 能力；`kwork` 在阻塞前完成
 interrupt-context gate，并在唤醒后重查自身 lifecycle predicate。
 

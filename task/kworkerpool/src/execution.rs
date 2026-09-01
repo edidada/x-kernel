@@ -22,7 +22,7 @@ pub struct WorkerPoolExecutionContext {
 }
 
 /// Encodes worker-pool execution identity into ktask's opaque task context.
-pub fn encode_task_context(
+pub(crate) fn encode_task_context(
     pool_id: PoolId,
     worker: WorkerId,
     token: WorkerExecutionToken,

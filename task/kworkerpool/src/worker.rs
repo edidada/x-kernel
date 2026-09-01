@@ -37,7 +37,7 @@ pub enum WorkerState {
 
 /// Current-execution concurrency accounting.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExecutionAccounting {
+pub(crate) enum ExecutionAccounting {
     /// A running worker counts toward pool concurrency.
     Normal,
     /// A long-running callback no longer counts toward pool concurrency.
@@ -51,18 +51,13 @@ pub struct WorkerExecutionToken(usize);
 impl WorkerExecutionToken {
     const FIRST: Self = Self(1);
 
-    /// First valid execution token for one worker slot.
-    pub const fn first() -> Self {
-        Self::FIRST
-    }
-
     /// Returns the next token generation for the same worker slot.
-    pub fn next_generation(self) -> Self {
+    pub(crate) fn next_generation(self) -> Self {
         Self(self.0.wrapping_add(1).max(1))
     }
 
     /// Creates a token from a runtime-owned task-local value.
-    pub const fn from_usize(token: usize) -> Self {
+    pub(crate) const fn from_usize(token: usize) -> Self {
         Self(token)
     }
 
@@ -168,14 +163,6 @@ impl<ThreadRef> Worker<ThreadRef> {
 
     pub(crate) fn clear_thread_ref(&mut self) -> Option<ThreadRef> {
         self.thread_ref.take()
-    }
-
-    pub(crate) fn next_execution(&mut self, started_at: MonotonicInstant) -> CurrentExecution {
-        self.generation = self.generation.next_generation();
-        let current = CurrentExecution::new(self.generation, started_at);
-        self.current = Some(current);
-        self.idle_since = None;
-        current
     }
 
     pub(crate) fn reserve_execution_token(&mut self) -> WorkerExecutionToken {

@@ -9,14 +9,14 @@ use ktime_types::MonotonicInstant;
 use crate::{ActionBatch, WorkerId, action::ManagementAction};
 
 /// Maximum lifecycle actions a manager performs for one pool in one pass.
-pub const MANAGEMENT_ACTION_BUDGET_PER_PASS: usize = 2;
+pub(crate) const MANAGEMENT_ACTION_BUDGET_PER_PASS: usize = 2;
 
 /// Pool target operations required by the worker-pool manager runtime.
 ///
 /// The pool state and queue policy stay behind the pool implementation. The
 /// manager only asks whether slow-path lifecycle work is ready, reserves one
 /// action, and completes runtime-side spawn attempts.
-pub trait ManagerTarget {
+pub(crate) trait ManagerTarget {
     /// Returns whether the manager should run now.
     fn manager_should_run(&self, now: MonotonicInstant) -> bool;
 
@@ -42,7 +42,7 @@ pub trait ManagerTarget {
 /// The runtime owns concrete execution resources: kernel tasks, wait sources,
 /// CPU masks, and sleep/backoff primitives. It does not choose worker-pool
 /// policy; that remains in [`ManagerTarget::next_management_action`].
-pub trait ManagerRuntime<P>
+pub(crate) trait ManagerRuntime<P>
 where
     P: ManagerTarget,
 {
@@ -69,7 +69,7 @@ where
 ///
 /// This object owns the manager-side pool set and the runtime hooks used by
 /// the loop.
-pub struct ManagerTask<P, R, const N: usize>
+pub(crate) struct ManagerTask<P, R, const N: usize>
 where
     P: ManagerTarget,
     R: ManagerRuntime<P>,
@@ -84,12 +84,12 @@ where
     R: ManagerRuntime<P>,
 {
     /// Creates a manager task body for one CPU-local pool set.
-    pub const fn new(pools: [P; N], runtime: R) -> Self {
+    pub(crate) const fn new(pools: [P; N], runtime: R) -> Self {
         Self { pools, runtime }
     }
 
     /// Runs the manager task forever.
-    pub fn run(mut self) -> ! {
+    pub(crate) fn run(mut self) -> ! {
         loop {
             self.runtime.wait_for_manager_work(&self.pools);
             run_worker_pool_manager_set_pass(&self.pools, &mut self.runtime);
@@ -98,7 +98,8 @@ where
 }
 
 /// Processes one bounded manager pass for `pool`.
-pub fn run_worker_pool_manager_pass<P, R>(pool: &P, runtime: &mut R)
+#[cfg(unittest)]
+pub(crate) fn run_worker_pool_manager_pass<P, R>(pool: &P, runtime: &mut R)
 where
     P: ManagerTarget,
     R: ManagerRuntime<P>,
@@ -107,8 +108,10 @@ where
 }
 
 /// Processes one bounded per-CPU manager pass across `pools`.
-pub fn run_worker_pool_manager_set_pass<P, R, const N: usize>(pools: &[P; N], runtime: &mut R)
-where
+pub(crate) fn run_worker_pool_manager_set_pass<P, R, const N: usize>(
+    pools: &[P; N],
+    runtime: &mut R,
+) where
     P: ManagerTarget,
     R: ManagerRuntime<P>,
 {

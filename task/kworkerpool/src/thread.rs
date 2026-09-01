@@ -61,7 +61,7 @@ impl Default for WorkerThreadRef {
 }
 
 /// Prepares a CPU-bound pidless kernel thread without activating it.
-pub fn prepare_bound_kthread<F>(cpu_id: LogicalCpuId, name: String, f: F) -> ktask::KtaskRef
+pub(crate) fn prepare_bound_kthread<F>(cpu_id: LogicalCpuId, name: String, f: F) -> ktask::KtaskRef
 where
     F: FnOnce() + Send + 'static,
 {
@@ -75,7 +75,7 @@ where
 }
 
 /// Runtime-visible worker thread name.
-pub fn worker_name(pool_id: PoolId, worker_id: WorkerId, pool_name: &str) -> String {
+pub(crate) fn worker_name(pool_id: PoolId, worker_id: WorkerId, pool_name: &str) -> String {
     format!(
         "kworkerpool/{}/{}:{}",
         pool_name,

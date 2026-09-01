@@ -101,11 +101,6 @@ impl WorkerPoolPolicy {
         self.create_retry_delay
     }
 
-    #[cfg(unittest)]
-    pub(crate) fn set_create_retry_delay_for_tests(&mut self, delay: TimeSpan) {
-        self.create_retry_delay = delay;
-    }
-
     /// Runtime after which a current execution stops counting toward pool
     /// concurrency.
     pub const fn cpu_intensive_threshold(self) -> TimeSpan {
@@ -115,11 +110,6 @@ impl WorkerPoolPolicy {
     /// Returns whether a runtime manager handles slow-path lifecycle actions.
     pub const fn manager_managed(self) -> bool {
         self.manager_managed
-    }
-
-    #[cfg(unittest)]
-    pub(crate) fn set_cpu_intensive_threshold_for_tests(&mut self, threshold: TimeSpan) {
-        self.cpu_intensive_threshold = threshold;
     }
 
     /// Returns whether this pool may dynamically create runtime workers.

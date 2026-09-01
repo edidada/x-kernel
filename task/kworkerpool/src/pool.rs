@@ -105,7 +105,7 @@ pub trait RunnableClaimer {
 
 /// Completion result for management slow paths.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ManagementComplete {
+pub(crate) enum ManagementComplete {
     /// A runtime worker was created.
     Spawned,
     /// Runtime worker creation failed.
@@ -172,7 +172,7 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
     /// Runtime static pool tables often need `const` construction before their
     /// CPU-local identity is known. Reconfiguration is accepted only while the
     /// pool is completely empty.
-    pub fn configure_empty(&mut self, id: PoolId, policy: WorkerPoolPolicy) -> bool {
+    pub(crate) fn configure_empty(&mut self, id: PoolId, policy: WorkerPoolPolicy) -> bool {
         if self.counts != WorkerCounts::new() || !self.queue.is_empty() {
             return false;
         }
@@ -182,7 +182,8 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
     }
 
     /// Returns a worker's lifecycle state.
-    pub fn worker_state(&self, worker: WorkerId) -> Option<WorkerState> {
+    #[cfg(unittest)]
+    pub(crate) fn worker_state(&self, worker: WorkerId) -> Option<WorkerState> {
         self.workers.get(worker.as_usize()).map(|w| w.state)
     }
 
@@ -216,18 +217,15 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
         }
     }
 
-    /// Returns total queued entries across runnable and deferred lanes.
-    pub fn queued_len(&self) -> usize {
-        self.queue.len()
-    }
-
     /// Returns runnable entries for one owner.
-    pub fn runnable_len_for_owner(&self, owner: EntryOwner) -> usize {
+    #[cfg(unittest)]
+    pub(crate) fn runnable_len_for_owner(&self, owner: EntryOwner) -> usize {
         self.queue.runnable_len_for_owner(owner)
     }
 
     /// Returns queued entries for one owner across runnable and deferred lanes.
-    pub fn queued_len_for_owner(&self, owner: EntryOwner) -> usize {
+    #[cfg(unittest)]
+    pub(crate) fn queued_len_for_owner(&self, owner: EntryOwner) -> usize {
         self.queue.runnable_len_for_owner(owner) + self.queue.deferred_len_for_owner(owner)
     }
 
@@ -237,12 +235,13 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
     }
 
     /// Returns the number of workers currently counted for concurrency.
-    pub fn nr_concurrency(&self) -> usize {
+    #[cfg(unittest)]
+    pub(crate) fn nr_concurrency(&self) -> usize {
         self.counts.nr_concurrency
     }
 
     /// Installs a runtime worker slot.
-    pub fn install_worker(
+    pub(crate) fn install_worker(
         &mut self,
         worker: WorkerId,
         thread_ref: ThreadRef,
@@ -260,7 +259,7 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
     }
 
     /// Returns the thread reference attached to one installed worker.
-    pub fn worker_thread_ref(&self, worker: WorkerId) -> Option<&ThreadRef> {
+    pub(crate) fn worker_thread_ref(&self, worker: WorkerId) -> Option<&ThreadRef> {
         let index = self.checked_worker(worker).ok()?;
         self.workers[index].thread_ref.as_ref()
     }
@@ -285,7 +284,8 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
     }
 
     /// Promotes up to `budget` deferred entries for `owner` into runnable FIFO.
-    pub fn promote_deferred(
+    #[cfg(unittest)]
+    pub(crate) fn promote_deferred(
         &mut self,
         owner: EntryOwner,
         budget: usize,
@@ -308,11 +308,6 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
     ) -> Option<(PoolEntry, ActionBatch)> {
         let entry = self.queue.promote_one_deferred(owner)?;
         Some((entry, self.evaluate_dispatch(now)))
-    }
-
-    /// Moves all runnable entries for `owner` into that owner's deferred lane.
-    pub fn defer_runnable_for_owner(&mut self, owner: EntryOwner) -> usize {
-        self.queue.defer_runnable_for_owner(owner)
     }
 
     /// Removes an entry from runnable or deferred queues.
@@ -440,29 +435,6 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
         })
     }
 
-    /// Marks a prepared worker as running after external claim succeeded.
-    pub fn worker_started(
-        &mut self,
-        worker: WorkerId,
-        now: MonotonicInstant,
-    ) -> Result<(WorkerExecutionToken, ActionBatch), WorkerPoolError> {
-        let index = self.checked_worker(worker)?;
-        if self.workers[index].state != WorkerState::Preparing {
-            return Err(WorkerPoolError::InvalidWorkerState);
-        }
-        self.transition(index, WorkerState::Running);
-        let current = self.workers[index].next_execution(now);
-        self.counts.nr_concurrency += 1;
-        let mut actions = ActionBatch::new();
-        if let Some(deadline) = now.checked_add(self.policy.cpu_intensive_threshold()) {
-            actions.push_immediate(ImmediateAction::ArmCpuIntensiveTimer {
-                pool: self.id,
-                deadline,
-            });
-        }
-        Ok((current.token(), actions))
-    }
-
     /// Finishes a worker execution and prepares the worker for more runnable
     /// work when possible.
     pub fn worker_finished(
@@ -499,7 +471,7 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
     }
 
     /// Reports that a running worker blocked in a sleepable wait.
-    pub fn worker_blocked(
+    pub(crate) fn worker_blocked(
         &mut self,
         worker: WorkerId,
         token: WorkerExecutionToken,
@@ -522,7 +494,7 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
     }
 
     /// Reports that a sleeping worker resumed.
-    pub fn worker_resumed(
+    pub(crate) fn worker_resumed(
         &mut self,
         worker: WorkerId,
         token: WorkerExecutionToken,
@@ -544,7 +516,7 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
     }
 
     /// Accounts a worker tick and marks CPU-intensive executions.
-    pub fn worker_tick(
+    pub(crate) fn worker_tick(
         &mut self,
         worker: WorkerId,
         token: WorkerExecutionToken,
@@ -568,7 +540,7 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
     }
 
     /// Returns the CPU-intensive accounting deadline for a running execution.
-    pub fn worker_tick_deadline(
+    pub(crate) fn worker_tick_deadline(
         &self,
         worker: WorkerId,
         token: WorkerExecutionToken,
@@ -629,7 +601,7 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
     }
 
     /// Completes worker exit after runtime-side task cleanup.
-    pub fn worker_exit_complete(&mut self, worker: WorkerId) -> Result<(), WorkerPoolError> {
+    pub(crate) fn worker_exit_complete(&mut self, worker: WorkerId) -> Result<(), WorkerPoolError> {
         let index = self.checked_worker(worker)?;
         if self.workers[index].state != WorkerState::Exiting {
             return Err(WorkerPoolError::InvalidWorkerState);
@@ -641,7 +613,10 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
     }
 
     /// Returns the next slow-path lifecycle action for the per-CPU manager.
-    pub fn next_management_action(&mut self, now: MonotonicInstant) -> Option<ManagementAction> {
+    pub(crate) fn next_management_action(
+        &mut self,
+        now: MonotonicInstant,
+    ) -> Option<ManagementAction> {
         self.management_pending = false;
         if self.can_spawn_worker(now)
             && let Some(index) = self.find_state(WorkerState::Empty)
@@ -665,7 +640,7 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
     }
 
     /// Completes a spawn action.
-    pub fn spawn_complete(
+    pub(crate) fn spawn_complete(
         &mut self,
         worker: WorkerId,
         result: ManagementComplete,
@@ -690,13 +665,8 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
         Ok(self.evaluate_dispatch(now))
     }
 
-    /// Re-evaluates dispatch after external queue policy made entries runnable.
-    pub fn reevaluate_dispatch(&mut self, now: MonotonicInstant) -> ActionBatch {
-        self.evaluate_dispatch(now)
-    }
-
     /// Returns whether a manager slow path should run now.
-    pub fn manager_should_run(&self, now: MonotonicInstant) -> bool {
+    pub(crate) fn manager_should_run(&self, now: MonotonicInstant) -> bool {
         self.management_pending
             || self.can_spawn_worker(now)
             || (self.policy.idle_retire() && self.find_retirable_idle(now).is_some())
@@ -704,7 +674,10 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
 
     /// Returns the next time a manager slow path may become runnable without an
     /// external wake event.
-    pub fn next_management_deadline(&self, now: MonotonicInstant) -> Option<MonotonicInstant> {
+    pub(crate) fn next_management_deadline(
+        &self,
+        now: MonotonicInstant,
+    ) -> Option<MonotonicInstant> {
         let mut next = None;
 
         if self.can_spawn_worker_after_retry()
@@ -737,82 +710,12 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
     }
 
     /// Returns whether the current execution has CPU-intensive accounting.
-    pub fn worker_is_cpu_intensive(&self, worker: WorkerId) -> bool {
+    #[cfg(unittest)]
+    pub(crate) fn worker_is_cpu_intensive(&self, worker: WorkerId) -> bool {
         self.checked_worker(worker)
             .ok()
             .and_then(|index| self.workers[index].current)
             .is_some_and(|current| current.accounting() == ExecutionAccounting::CpuIntensive)
-    }
-
-    #[cfg(unittest)]
-    pub fn set_cpu_intensive_threshold_for_tests(&mut self, threshold: ktime_types::TimeSpan) {
-        self.policy.set_cpu_intensive_threshold_for_tests(threshold);
-    }
-
-    #[cfg(unittest)]
-    pub fn set_create_retry_delay_for_tests(
-        &mut self,
-        delay: ktime_types::TimeSpan,
-        now: MonotonicInstant,
-    ) {
-        self.policy.set_create_retry_delay_for_tests(delay);
-        if self.create_retry_after.is_some() {
-            self.create_retry_after = now.checked_add(delay);
-        }
-    }
-
-    #[cfg(unittest)]
-    pub fn cancel_preparing_for_tests(&mut self) {
-        for index in 0..MAX_WORKERS {
-            if matches!(
-                self.workers[index].state,
-                WorkerState::Preparing | WorkerState::Claiming
-            ) {
-                self.transition(index, WorkerState::Idle);
-                self.workers[index].clear_execution();
-            }
-        }
-    }
-
-    #[cfg(unittest)]
-    pub fn prepare_worker_for_tests(&mut self, worker: WorkerId) -> Result<(), WorkerPoolError> {
-        let index = self.checked_worker(worker)?;
-        self.cancel_preparing_for_tests();
-        if self.workers[index].state != WorkerState::Idle {
-            return Err(WorkerPoolError::InvalidWorkerState);
-        }
-        self.transition(index, WorkerState::Preparing);
-        Ok(())
-    }
-
-    #[cfg(unittest)]
-    pub fn start_worker_for_tests(
-        &mut self,
-        worker: WorkerId,
-        now: MonotonicInstant,
-    ) -> Result<WorkerExecutionToken, WorkerPoolError> {
-        let index = self.checked_worker(worker)?;
-        match self.workers[index].state {
-            WorkerState::Idle => self.transition(index, WorkerState::Preparing),
-            WorkerState::Preparing => {}
-            WorkerState::Running => {
-                let token = self.workers[index].reserve_execution_token();
-                let _ = self.workers[index].start_reserved_execution(token, now);
-                return Ok(token);
-            }
-            _ => return Err(WorkerPoolError::InvalidWorkerState),
-        }
-        let token = self.workers[index].reserve_execution_token();
-        self.transition(index, WorkerState::Running);
-        if self.workers[index]
-            .start_reserved_execution(token, now)
-            .is_none()
-        {
-            self.transition(index, WorkerState::Preparing);
-            return Err(WorkerPoolError::InvalidWorkerState);
-        }
-        self.counts.nr_concurrency += 1;
-        Ok(token)
     }
 
     fn checked_worker(&self, worker: WorkerId) -> Result<usize, WorkerPoolError> {
