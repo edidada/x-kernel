@@ -115,6 +115,17 @@ fn iomap_first_mmio(
 pub fn init_drivers() {
     info!("Initialize device drivers...");
 
+    // Register the platform's fixed clocks before any driver probes, so
+    // `devm_clk_get` resolves from the start. Runs here (the late-init
+    // thread) rather than platform `early_driver_init` because kclk's global
+    // lock is a sleepable mutex whose owner tracking requires a current task.
+    #[cfg(target_arch = "aarch64")]
+    {
+        log::info!("registering platform fixed clocks");
+        let published = kplat_aarch64::init_platform_clocks();
+        log::info!("platform fixed clocks registered: {published}");
+    }
+
     // Initialize global object/metadata stores before any device is activated.
     kdevice::init_device_registry();
 

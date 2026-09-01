@@ -83,3 +83,19 @@ impl ClkRegAccess for MmioClkReg {
         unsafe { ptr::write_volatile(self.base.add(offset) as *mut u32, value) }
     }
 }
+
+/// A register accessor that touches no hardware: reads return 0, writes drop.
+///
+/// For clock trees whose nodes are purely computational (`FixedRate`,
+/// `FixedFactor`) — `register_table` requires an accessor, but these types
+/// never dereference it. Using this avoids inventing a fake MMIO address for
+/// board-level fixed clocks described directly in firmware.
+pub struct NullClkReg;
+
+impl ClkRegAccess for NullClkReg {
+    fn reg_read(&self, _offset: usize) -> u32 {
+        0
+    }
+
+    fn reg_write(&self, _offset: usize, _value: u32) {}
+}

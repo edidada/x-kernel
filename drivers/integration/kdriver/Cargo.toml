@@ -80,6 +80,7 @@ driver_base = { workspace = true }
 karch = { workspace = true }
 kclass = { workspace = true }
 kdevice = { workspace = true }
+kplat-aarch64 = { workspace = true }
 kclk = { workspace = true }
 block = { workspace = true, optional = true }
 char_driver = { workspace = true, optional = true }

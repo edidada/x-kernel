@@ -131,6 +131,11 @@ pub struct SerialPort {
     inner: SpinNoIrq<Backend>,
     ident: SerialIdent,
     role: SerialRole,
+    /// Mapped PL011 register base (a raw vaddr), kept so `set_baud_pl011`
+    /// can program IBRD/FBRD — the `arm_pl011` crate does not expose them.
+    /// `None` for non-PL011 backends.
+    #[cfg(feature = "pl011")]
+    pl011_base: Option<usize>,
 }
 
 impl SerialPort {
@@ -147,10 +152,11 @@ impl SerialPort {
     ) -> Self {
         let mut uart = Pl011Uart::new(uart_base.as_mut_ptr());
         uart.init();
-        Self::new(
+        Self::_new(
             Backend::Pl011(uart),
             SerialIdent::Mmio { paddr, size },
             role,
+            Some(uart_base.as_usize()),
         )
     }
 
@@ -209,11 +215,55 @@ impl SerialPort {
         )
     }
 
+    #[allow(dead_code)]
     fn new(backend: Backend, ident: SerialIdent, role: SerialRole) -> Self {
+        Self::_new(backend, ident, role, None)
+    }
+
+    fn _new(
+        backend: Backend,
+        ident: SerialIdent,
+        role: SerialRole,
+        #[cfg(feature = "pl011")] pl011_base: Option<usize>,
+    ) -> Self {
         Self {
             inner: SpinNoIrq::new(backend),
             ident,
             role,
+            #[cfg(feature = "pl011")]
+            pl011_base,
+        }
+    }
+
+    /// Program the PL011 baud divisor from a reference clock rate.
+    ///
+    /// Computes IBRD/FBRD for `baud` given `ref_clk_hz` and writes them with
+    /// the UART briefly disabled (the documented PL011 divisor-change
+    /// sequence). No-op for non-PL011 backends and for `None` (the caller
+    /// keeps the firmware-programmed divisor — the `earlycon` fallback).
+    #[cfg(feature = "pl011")]
+    pub fn set_baud_pl011(&self, ref_clk_hz: Option<u64>, baud: u32) {
+        let Some(hz) = ref_clk_hz else { return };
+        let Some(base) = self.pl011_base else { return };
+        let denom = 16u64 * u64::from(baud);
+        let ibrd = (hz / denom).min(0xffff) as u32;
+        let rem = hz % denom;
+        let fbrd = ((rem * 64 + denom / 2) / denom).min(0x3f) as u32;
+
+        let base = base as *mut u8;
+        // Hold the port lock so printk cannot interleave a character mid-
+        // divisor-change. Do NOT log from inside this critical section: the
+        // console prints through this same port and would self-deadlock on
+        // the non-reentrant spinlock.
+        let _backend = self.inner.lock();
+        // SAFETY: `base` is the exclusively-mapped PL011 register window this
+        // port was constructed from; the offsets are architecturally fixed
+        // (IBRD=0x24, FBRD=0x28). Programming the divisors with the UART
+        // live is safe per the TRM (a running UART latches the new divisor
+        // on the next frame); disabling CR first can wedge QEMU's model.
+        unsafe {
+            core::ptr::write_volatile(base.add(0x24) as *mut u32, ibrd);
+            core::ptr::write_volatile(base.add(0x28) as *mut u32, fbrd);
         }
     }
 
