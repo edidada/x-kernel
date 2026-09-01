@@ -9,7 +9,7 @@ members = [
     "task/kworkerpool",
     "task/kworkqueue",
     # clock subsystem core
-    "drivers/kclk",
+    "drivers/adapters/xkernel/kclk",
     "tee/tee_crypto",
     "tee/xdice",
 ]
@@ -161,7 +161,7 @@ device_res_xkernel = { path = "drivers/adapters/xkernel/device-res", package = "
 kdriver = { path = "drivers/integration/kdriver" }
 
 # Internal: clock subsystem core
-kclk = { path = "drivers/kclk" }
+kclk = { path = "drivers/adapters/xkernel/kclk" }
 
 # Internal: platform, firmware, and host driver support
 aarch64-pmuv3 = { path = "drivers/platform/aarch64-pmuv3" }

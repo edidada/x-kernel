@@ -6,14 +6,15 @@
 //!
 //! The OS-agnostic resource model in [`device_res`] describes *what* a driver
 //! needs; this crate binds those operations to X-Kernel's MMIO mapping, IRQ
-//! manager, coherent DMA allocator, and monotonic clock. For IRQs, this crate is the adapter
-//! between `device_res` vocabulary and `kirq`; the IRQ core does not depend on
-//! devres.
+//! manager, coherent DMA allocator, monotonic clock, and clock framework.
+//! For IRQs and clocks, this crate is the adapter between `device_res`
+//! vocabulary and `kirq`/`kclk`; neither core depends on devres.
 
 #![no_std]
 
 extern crate alloc;
 
+mod clk;
 mod dma;
 mod irq;
 mod mmio;
@@ -25,6 +26,9 @@ mod time;
 /// long-lived instance and passes it explicitly to `device_res`.
 #[derive(Debug, Default)]
 pub struct XKernelResourceProvider;
+
+/// Re-exported for the driver framework's static provider instance.
+pub use clk::XKernelClkOp;
 
 impl XKernelResourceProvider {
     /// Create a stateless X-Kernel resource provider.
