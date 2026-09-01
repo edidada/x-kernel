@@ -28,7 +28,10 @@ use crate::{
     consts::{RAW_RX_BUF_LEN, RAW_TX_BUF_LEN},
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
-    poller::{PollReason, advance_or_assist, assist_once, network_poller, try_advance_lease},
+    poller::{
+        PollReason, advance_or_assist, assist_once, network_poller, release_lease_on_block,
+        try_advance_lease,
+    },
 };
 
 pub(crate) fn new_raw_socket(
@@ -206,12 +209,12 @@ impl SocketOps for RawSocket {
             self.local_address_for(remote)?
         };
         let payload_len = src.remaining();
-        let lease = try_advance_lease();
+        let mut lease = try_advance_lease();
 
         self.general
             .send_poller_with_nonblocking(self, options.flags.nonblocking(), || {
                 advance_or_assist(lease.as_ref(), PollReason::Tx);
-                let written = self.with_smol_socket(|socket| {
+                let result = self.with_smol_socket(|socket| {
                     if !socket.can_send() {
                         return Err(KError::WouldBlock);
                     }
@@ -292,7 +295,8 @@ impl SocketOps for RawSocket {
 
                     let written = src.read(&mut buf[header_len..])?;
                     Ok(written)
-                })?;
+                });
+                let written = release_lease_on_block(&mut lease, result)?;
                 if let Some(lease) = lease.as_ref() {
                     lease.advance(PollReason::Tx);
                 } else {
@@ -308,12 +312,12 @@ impl SocketOps for RawSocket {
             return Err(KError::NotConnected);
         }
         let mut options = options;
-        let lease = try_advance_lease();
+        let mut lease = try_advance_lease();
 
         self.general
             .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
                 advance_or_assist(lease.as_ref(), PollReason::Rx);
-                self.with_smol_socket(|socket| {
+                let result = self.with_smol_socket(|socket| {
                     loop {
                         let packet = if options.flags.contains(RecvFlags::PEEK) {
                             let packet = socket.peek().map_err(|_| KError::WouldBlock)?;
@@ -347,7 +351,8 @@ impl SocketOps for RawSocket {
                             written
                         });
                     }
-                })
+                });
+                release_lease_on_block(&mut lease, result)
             })
     }
 

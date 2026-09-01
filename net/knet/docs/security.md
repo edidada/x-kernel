@@ -214,7 +214,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 28. `NET_RX_QUEUE` 容量与所有权边界：`pending_udp` 与 `deferred` 必须在设备创建时按 `SOCKET_BUFFER_SIZE` 预分配，`enqueue` 以两条队列长度与 in-flight 合计为上限拒绝超额报文，因此 `push_back` 不得在 `SpinNoIrq` 或 `NetRx` softirq 内触发扩容。`process_pending` 取出的盖戳 UDP 必须计入 in-flight 预留，批次大小不超过 `NET_RX_BUDGET`，在锁外交付；未命中 PCB 的报文必须仍唯一持有句柄，清除元数据后放入 `deferred`。队列满时 `enqueue` 必须把报文交还调用方，由发送路径在释放 `NET_RX_QUEUE` 与 BH guard 之后再 drop；`discard_ifindex` 必须先把匹配报文移出到局部容器，解锁后再释放，避免在 `SpinNoIrq` 内堆释放。发送路径的 task fallback 只处理进入时已有的 `pending_udp`，并按 `NET_RX_BUDGET` 拆成固定轮次。队列按 `ifindex` 区分报文所有者，`LoopbackDevice::drop` 必须调用 `discard_ifindex`；该清理对 `process_pending` 释放锁期间的在途报文是 best-effort，完整的设备身份语义需要等价于 Linux `skb->dev` 与 `NETREG_UNREGISTERING` 的注册状态。
 29. TCP listener 推进条件：收到 TCP 报文或 SYN 队列仍有 child 时，下一次实际网络 poll 必须刷新对应 listener。child 进入 accept 队列后才唤醒 `accept_poll`，唤醒发生在 entry 锁外。SYN 队列非空不会设置 `PollProgress::has_more`，未到期的协议 timer 继续等待 deadline 通知，避免半连接造成 poller 空转。
 30. Unix listener 资源边界：pending request 与容量预留之和不得超过 `LISTEN_QUEUE_SIZE`。每个连接的两个 64 KiB ring 只能在容量预留成功后分配；预留失败、中断或源 socket 状态拒绝连接时必须通过 RAII 归还名额。
-31. 推进租约边界：任务上下文只能通过不可复制的 `NetAdvanceLease` 持有推进租约。TCP、UDP 和 raw socket 的租约轮次必须先发布工作原因，再通过 `SCHEDULED` 到 `RUNNING` 的 CAS 竞争唯一执行者。租约析构必须原子释放计数，并为已积累的 `SCHEDULED` 工作恢复后台排队；500 微秒有效期、过期通知和 10 ms 周期 `kick_if_stale` 共同限制挂起时间。租约过期只恢复后台排队，不撤销仍存活的持有者，因此长时间持有者会阻止其他任务取得租约，但不会阻止后台推进。
+31. 推进租约边界：任务上下文只能通过不可复制的 `NetAdvanceLease` 持有推进租约。TCP、UDP 和 raw socket 的租约轮次必须先发布工作原因，再通过 `SCHEDULED` 到 `RUNNING` 的 CAS 竞争唯一执行者。I/O 尝试返回 `WouldBlock` 时必须在注册 waker 和进入等待前释放租约；租约析构必须原子释放计数，并为错误返回、提前退出和正常完成路径中已积累的 `SCHEDULED` 工作恢复后台排队。500 微秒有效期、过期通知和 10 ms 周期 `kick_if_stale` 处理任务在一次 I/O 尝试内部停顿且尚未返回 `WouldBlock` 的场景。租约过期只恢复后台排队，不撤销仍存活的持有者，因此长时间持有者会阻止其他任务取得租约，但不会阻止后台推进。
 
 ## 线程安全
 
@@ -269,7 +269,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-35 | loopback UDP 依赖 poller 所有权才能完成投递 | 中 | `sendto` 只把报文排进 TX queue，短 `SO_RCVTIMEO` 在 poller 被占用时到期 | loopback xmit 在关闭 BH 前盖戳并入 `NET_RX_QUEUE`，raise `NetRx`；BH 恢复时把完整 IPv4 UDP 写入 PCB；TCP/ICMP 与未命中 socket 的 UDP 仍走 poller |
 | T-36 | Unix stream listener 待处理连接耗尽内核内存 | 中 | 攻击者持续连接且服务端不执行 `accept` | backlog 按 Linux 计数规则转换并限制到 `LISTEN_QUEUE_SIZE`；容量预留先于 ring 分配；非阻塞连接返回 `EAGAIN`，阻塞连接按 `SO_SNDTIMEO` 等待容量，超时后返回 `EAGAIN`；shutdown 与 Drop 唤醒等待者 |
 | T-37 | UDP socket 接收跨设备 ICMP 错误 | 中 | ICMP 错误查找丢失入接口索引，将未知设备视为通配符 | ingress 将 `PacketBuf::ifindex` 传入 UDP PCB lookup；绑定设备的 PCB 只匹配相同接口索引 |
-| T-38 | 推进租约挂起后台工作后未恢复 | 中 | 租约持有者阻塞、提前退出或遗漏显式推进 | `NetAdvanceLease` 的 RAII 析构恢复已积累工作；500 微秒后到达的新通知直接 queue 后台任务；复用 10 ms 协议 timer callback 调用 `kick_if_stale`，没有新事件时最长停滞 10 ms |
+| T-38 | 推进租约挂起后台工作后未恢复 | 中 | 租约持有者进入 socket 阻塞等待、提前退出或在单次 I/O 尝试内部停顿 | I/O 尝试首次返回 `WouldBlock` 时释放租约并恢复已积累工作，注册 waker 后的复查不再抑制后台排队；具有前置推进语义的路径回退到 assist；RAII 析构覆盖错误返回、提前退出和正常完成；500 微秒后的通知与 10 ms 周期 `kick_if_stale` 处理尚未到达 `WouldBlock` 的停顿 |
 | T-39 | 租约推进与后台 callback 并发执行 | 中 | 租约持有者绕过 poller 执行状态直接调用协议推进 | 租约、assist 和 kwork callback 均通过同一状态字上的 `SCHEDULED` 到 `RUNNING` CAS 获取执行权，租约只控制后台排队，不授予独立执行权 |
 | T-40 | 中断上下文持有推进租约 | 中 | IRQ 或 softirq 路径调用 `try_advance_lease` 后进入可睡眠网络推进 | `BudgetedPoller::try_lease` 在中断上下文返回 `None`；NetRx 路径保持通知与已有无睡眠 UDP 交付边界 |
 
@@ -310,7 +310,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | F-25 | 短超时 loopback UDP 在 poller 忙碌时丢包 | `sendto` 只通知 poller，`recvfrom` 的 1 jiffy 超时先到期 | 并发 libc-test `socket.exe` 间歇 `ETIMEDOUT` | 用户可见功能回归 | 3 | loopback UDP 在发送路径的 BH 窗口内由 `NetRx` 交付 PCB；poller 不再承担该交付；压力测试覆盖 SMP=1 与 SMP=4 的四并发短超时场景 |
 | F-26 | TCP child 永久滞留 SYN 队列 | packet mark 在 child 进入可接受状态前被消费，后续 ingress 或 timer poll 没有刷新 listener | accept 队列保持为空 | 服务端连接建立后仍阻塞于 `accept` | 2 | SYN 队列非空的 listener 在每次实际网络 poll 后刷新；仅在 child 移入 accept 队列后唤醒 waiter；SYN 队列不请求连续 poll |
 | F-27 | Unix listener shutdown 后连接或 accept 永久等待 | listener 状态改变时没有通知容量和请求事件 | 阻塞 `connect` 或 `accept` 无法返回 | 应用线程长期休眠 | 2 | `shutdown(SHUT_RD)` 和 Drop 同时通知 `capacity_available` 与 `request_available`；已排队请求先交付，空队列上的阻塞 `accept` 返回 `EINVAL`；设置了 `SO_SNDTIMEO` 的阻塞 `connect` 在容量等待超时后返回 `EAGAIN` |
-| F-28 | 过期租约持有者长期存活 | socket 调用阻塞或任务长时间停顿，RAII 析构尚未发生 | 其他 socket 调用无法取得租约，退回 assist 或后台推进 | 前台推进机会减少，网络仍由后台任务继续运行 | 4 | 500 微秒后新通知恢复后台排队，10 ms timer callback 在无事件时调用 `kick_if_stale`；租约计数保持独占，避免多个长寿命持有者持续挂起后台工作 |
+| F-28 | 过期租约持有者长期存活 | 任务在一次 I/O 尝试内部停顿，尚未返回 `WouldBlock` 或离开 socket 操作 | 其他 socket 调用无法取得租约，退回 assist 或后台推进 | 前台推进机会减少，网络仍由后台任务继续运行 | 4 | `WouldBlock` 路径主动释放租约；500 微秒后新通知恢复后台排队，10 ms timer callback 在无事件时调用 `kick_if_stale`；租约计数保持独占，避免多个长寿命持有者持续挂起后台工作 |
 
 严重度定义：
 
@@ -373,7 +373,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 - 修改 poller 状态机或 `Service::poll_budgeted` 时验证低 2 位执行状态、6 位租约计数、发布代数、单执行者获取、一次 CAS 释放、分阶段 smoltcp 预算和 1 ms 软时间上限；`PollProgress::has_more` 只能包含立即工作，未来协议 deadline 必须等待 timer 到期后发布；TX waiter 只能由 `tx_capacity_changed` 触发全局容量唤醒。
 - 修改 `Service::poll_budgeted` 的锁路径时验证共享推进锁保持 `try_lock` 语义，竞争时设置 `has_more`，raw、accepted 和 control batch 在重试前保持所有权，TCP listener preparation 只在 accepted batch 能立即转入 Router 时执行。
 - 修改 TCP listener 推进时验证 SYN 队列非空的 entry 在实际网络 poll 后得到刷新，child 移入 accept 队列后才在 entry 锁外唤醒 waiter，并保持 SYN 队列不进入 `PollProgress::has_more`。
-- 修改 poller 执行边界时验证后台、租约和 assist 的 512/256/32、64/64/8、16/16/8 三档预算，TCP、UDP 和 raw socket 的租约推进先发布原因再执行一轮，raw send 保持发送前后推进机会，租约析构恢复排队，500 微秒过期通知恢复排队，10 ms timer callback 执行 `kick_if_stale`，assist 保持一次机会式 CAS 和单轮预算；loopback UDP 必须在发送路径的 BH/`NetRx` 窗口内进入 PCB，不依赖 poller 所有权。
+- 修改 poller 执行边界时验证后台、租约和 assist 的 512/256/32、64/64/8、16/16/8 三档预算，TCP、UDP 和 raw socket 的租约推进先发布原因再执行一轮，raw send 保持发送前后推进机会，I/O 首次返回 `WouldBlock` 时在注册 waker 前释放租约，注册后复查不再持约，租约析构覆盖其他退出路径，500 微秒过期通知恢复排队，10 ms timer callback 执行 `kick_if_stale`，assist 保持一次机会式 CAS 和单轮预算；UDP 普通接收和错误队列接收必须先检查就绪队列，未命中后再推进并复查；loopback UDP 必须在发送路径的 BH/`NetRx` 窗口内进入 PCB，不依赖 poller 所有权。
 - 修改 `NET_RX_QUEUE` 时验证 `pending_udp` 与 `deferred` 在设备创建时完成预分配、`enqueue` 上限为两条队列长度与 in-flight 合计、`SpinNoIrq` 内不发生扩容、堆释放或 UDP PCB 交付，队列满与 `discard_ifindex` 都在锁外 drop `PacketBuf`，`process_pending` 批次不超过 `NET_RX_BUDGET`，以及发送路径 fallback 只执行固定轮次；共享该队列的单元测试必须声明 `serial`。
 - 修改 UDP PCB 队列时验证 PCB 创建时预留 1024 个指针大小的槽位、`PacketBuf` 在进入网络栈时建立引用计数生命周期、loopback 在关闭 BH 前写入已校验 UDP 元数据、softirq 与 `SpinNoIrq` 入队路径不分配或扩容、满队列报文在锁外释放、FIFO 顺序，以及 `MSG_PEEK` 的 payload 复制位于锁外。
 - 修改 TCP Drop 或异步 TX 路径时验证已成功写入的 payload 在文件关闭后仍由协议对象持有，未读数据关闭发送 RST，deferred-close handle 在 `Closed` 后删除，状态期限只作用于 orphan `FIN_WAIT_2`。

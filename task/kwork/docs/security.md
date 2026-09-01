@@ -57,6 +57,8 @@ they are not converted back into references.
 - A fresh lease may suppress queueing but may not erase `Scheduled` work.
 - Background, assist, and lease executors must all acquire the same
   `Scheduled` to `Running` transition.
+- Lease acquisition must observe the queue-ready flag published after dynamic
+  queue installation and cleared before queue destruction.
 - Callers must stop lease holders and foreground assists before destroying a
   budgeted poller.
 
@@ -80,7 +82,7 @@ they are not converted back into references.
 | T-14 | Lease holder is delayed after taking progress responsibility | Scheduled work stalls | Freshness timeout restores queueing on later notifications; periodic callers use `kick_if_stale()` when no producer arrives |
 | T-15 | Lease and notification concurrently delegate queueing | Scheduled work stalls | Executor state and lease count share one atomic modification order; release or notification observes responsibility at its own linearization point |
 | T-16 | Lease polling runs from interrupt context | Sleepable poll callback runs in a non-sleepable context | `try_lease()` rejects interrupt-like contexts and rustdoc requires task-context use |
-| T-17 | Poller destruction races a live foreground holder | State reset races callback completion | The public lifecycle contract requires callers to stop and drop leases and assists before `destroy()` |
+| T-17 | Poller startup or destruction races lease acquisition | A lease observes an absent backing queue or state reset races callback completion | Queue readiness is published after installation and cleared before destruction; `try_lease()` checks readiness and the destruction gate before and after acquiring the state word; callers stop and drop leases and assists before `destroy()` |
 
 ## Failure Handling
 

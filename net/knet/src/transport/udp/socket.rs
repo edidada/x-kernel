@@ -23,7 +23,10 @@ use crate::{
     ip::{IpAddress, IpEndpoint, Ipv4Address},
     ipv4,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
-    poller::{PollReason, advance_or_assist, assist_once, network_poller, try_advance_lease},
+    poller::{
+        PollReason, assist_once, network_poller, release_lease_on_block, try_advance_lease,
+        try_io_or_advance,
+    },
     udp_err::QueuedUdpError,
 };
 
@@ -191,14 +194,14 @@ impl UdpSocket {
                 .and_then(|packet| packet.get_mut(IPV4_HEADER_LEN + UDP_HEADER_LEN..))
                 .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?,
         )?;
-        let lease = try_advance_lease();
+        let mut lease = try_advance_lease();
         self.state()
             .send_poller_with_nonblocking(self, flags.nonblocking(), || {
                 let bound_source_addr = self
                     .state()
                     .local_endpoint()
                     .and_then(|local| (!local.addr.is_unspecified()).then_some(local.addr));
-                SERVICE.prepare_and_send_ipv4_packet(
+                let result = SERVICE.prepare_and_send_ipv4_packet(
                     bound_source_addr,
                     &remote_endpoint.addr,
                     self.state().bound_dev_if(),
@@ -210,7 +213,8 @@ impl UdpSocket {
                             should_set_dont_fragment(mtu_discovery, packet_len, route_mtu);
                         self.write_datagram(packet, remote_endpoint, source_addr, dont_fragment)
                     },
-                )?;
+                );
+                release_lease_on_block(&mut lease, result)?;
                 if let Some(lease) = lease.as_ref() {
                     lease.advance(PollReason::Tx);
                 } else {
@@ -450,18 +454,19 @@ impl SocketOps for UdpSocket {
             ancillary,
             mut out_flags,
         } = options;
-        let lease = try_advance_lease();
+        let mut lease = try_advance_lease();
         if !flags.contains(RecvFlags::ERROR_QUEUE) {
             return self
                 .state()
                 .recv_poller_with_nonblocking(self, flags.nonblocking(), || {
-                    advance_or_assist(lease.as_ref(), PollReason::Rx);
-                    self.recv_payload(
-                        &mut dst,
-                        from.as_deref_mut(),
-                        flags,
-                        out_flags.as_deref_mut(),
-                    )
+                    try_io_or_advance(&mut lease, PollReason::Rx, || {
+                        self.recv_payload(
+                            &mut dst,
+                            from.as_deref_mut(),
+                            flags,
+                            out_flags.as_deref_mut(),
+                        )
+                    })
                 });
         }
 
@@ -475,11 +480,12 @@ impl SocketOps for UdpSocket {
         };
         self.state()
             .recv_poller_with_nonblocking(self, flags.nonblocking(), || {
-                advance_or_assist(lease.as_ref(), PollReason::Rx);
-                let recv = self.recv_error_msg(&mut error_msg)?;
-                let write_len = recv.min(error_msg.data.len());
-                dst.write_all(&error_msg.data[..write_len])?;
-                Ok(recv)
+                try_io_or_advance(&mut lease, PollReason::Rx, || {
+                    let recv = self.recv_error_msg(&mut error_msg)?;
+                    let write_len = recv.min(error_msg.data.len());
+                    dst.write_all(&error_msg.data[..write_len])?;
+                    Ok(recv)
+                })
             })
     }
 

@@ -178,7 +178,9 @@ layout.
 `new_with_lease()` adds a foreground budget and freshness timeout while
 `new()` preserves the background-plus-assist configuration. A successful
 `try_lease()` sets the lease count and establishes the first freshness
-deadline. `PollLease::poll_once()` competes for the same `Scheduled` to
+deadline. Queue installation publishes a separate atomic ready flag, so
+`try_lease()` rejects the allocation window and destruction without taking the
+queue spin lock. `PollLease::poll_once()` competes for the same `Scheduled` to
 `Running` transition as background and assist executors. After a successful
 round it refreshes the deadline before completion decides whether to queue
 another background batch.

@@ -81,6 +81,7 @@ where
 {
     name: &'static str,
     started: AtomicBool,
+    is_queue_ready: AtomicBool,
     is_destroying: AtomicBool,
     queue: SpinNoIrq<Option<WorkQueueHandle>>,
     works: [ScheduledWork; 2],
@@ -119,6 +120,12 @@ where
                     return Err(BudgetedPollerStartError::Destroyed);
                 }
                 *queue_slot = Some(queue);
+                self.is_queue_ready.store(true, Ordering::Release);
+                if self.is_destroying.load(Ordering::Acquire) {
+                    self.is_queue_ready.store(false, Ordering::Release);
+                    self.started.store(false, Ordering::Release);
+                    return Err(BudgetedPollerStartError::Destroyed);
+                }
                 drop(queue_slot);
                 if self.load_state() != BudgetedPollerState::Idle {
                     let _ = self.queue_background_work(0);
@@ -154,7 +161,7 @@ where
                 if self.queue_background_work(0) {
                     true
                 } else {
-                    if self.started.load(Ordering::Acquire) {
+                    if self.is_queue_ready.load(Ordering::Acquire) {
                         self.clear_scheduled_if_unchanged(published);
                     }
                     false
@@ -355,7 +362,8 @@ where
             {
                 return;
             }
-            if !self.queue_background_work(next_work) && self.started.load(Ordering::Acquire) {
+            if !self.queue_background_work(next_work) && self.is_queue_ready.load(Ordering::Acquire)
+            {
                 self.clear_scheduled_if_unchanged(next_raw);
             }
         }
@@ -392,6 +400,7 @@ where
 
     fn destroy(&self) -> Result<(), WorkqueueError> {
         self.is_destroying.store(true, Ordering::Release);
+        self.is_queue_ready.store(false, Ordering::Release);
         let queue = self.queue.lock().take();
         if let Some(queue) = queue {
             queue.destroy()?;
@@ -550,6 +559,7 @@ where
         let inner = Arc::new_cyclic(|weak| BudgetedPollerInner {
             name,
             started: AtomicBool::new(false),
+            is_queue_ready: AtomicBool::new(false),
             is_destroying: AtomicBool::new(false),
             queue: SpinNoIrq::new(None),
             works: [work_for(weak.clone(), 1), work_for(weak.clone(), 0)],
@@ -594,8 +604,7 @@ where
     pub fn try_lease(&self) -> Option<PollLease<B, F>> {
         if kirq::context::is_in_interrupt_context()
             || self.inner.is_destroying.load(Ordering::Acquire)
-            || !self.inner.started.load(Ordering::Acquire)
-            || self.inner.queue.lock().is_none()
+            || !self.inner.is_queue_ready.load(Ordering::Acquire)
         {
             return None;
         }
@@ -604,8 +613,7 @@ where
             return None;
         }
         if self.inner.is_destroying.load(Ordering::Acquire)
-            || !self.inner.started.load(Ordering::Acquire)
-            || self.inner.queue.lock().is_none()
+            || !self.inner.is_queue_ready.load(Ordering::Acquire)
         {
             self.inner.release_lease();
             return None;
@@ -671,7 +679,7 @@ where
     }
 
     #[cfg(unittest)]
-    fn acquire_lease_at_for_tests(&self, now_micros: u64) -> Option<PollLease<B, F>> {
+    pub fn acquire_lease_at_for_tests(&self, now_micros: u64) -> Option<PollLease<B, F>> {
         self.inner
             .try_acquire_lease_at(now_micros)
             .then(|| PollLease {
@@ -700,7 +708,7 @@ where
     }
 
     #[cfg(unittest)]
-    fn background_queue_attempts_for_tests(&self) -> usize {
+    pub fn background_queue_attempts_for_tests(&self) -> usize {
         self.inner.background_queue_attempts.load(Ordering::Acquire)
     }
 }
