@@ -321,6 +321,7 @@ fn validate_bitmap_capacity(bitmap: &[u8], range: BlockGroupRange) -> Ext4Result
     Ok(())
 }
 
+/// Covers block-group range validation and bitmap allocation or release choices.
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -22,15 +22,24 @@ pub(crate) const DX_HASH_HALF_MD4: u8 = 1;
 pub(crate) const DX_HASH_TEA: u8 = 2;
 pub(crate) const DX_HASH_SIPHASH: u8 = 6;
 
+/// Meaning of the `file_type` byte stored in an ext4 directory entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DirectoryFileType {
+    /// The byte is zero or does not encode a recognized ext4 file type.
     Unknown,
+    /// The directory entry declares its target to be a regular file.
     RegularFile,
+    /// The directory entry declares its target to be a directory.
     Directory,
+    /// The directory entry declares its target to be a character device node.
     CharacterDevice,
+    /// The directory entry declares its target to be a block device node.
     BlockDevice,
+    /// The directory entry declares its target to be a named pipe.
     Fifo,
+    /// The directory entry declares its target to be a socket.
     Socket,
+    /// The directory entry declares its target to be a symbolic link.
     Symlink,
 }
 
@@ -255,6 +264,7 @@ impl HTreeEntry {
     }
 }
 
+/// Covers ext4 directory record-length and HTree field decoding.
 #[cfg(unittest)]
 mod unittests {
     use unittest::{assert_eq, def_test};

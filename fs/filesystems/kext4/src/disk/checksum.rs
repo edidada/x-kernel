@@ -35,6 +35,7 @@ pub(crate) fn bitmap_checksum(bitmap: &[u8], checksum_seed: u32) -> u32 {
     crc32c(checksum_seed, bitmap)
 }
 
+/// Covers CRC32C and ext4 metadata checksum vectors.
 #[cfg(test)]
 mod tests {
     use super::{bitmap_checksum, crc32c};

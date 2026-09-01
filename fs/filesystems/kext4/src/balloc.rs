@@ -2,7 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Block allocator entry points for the mounted ext4 filesystem.
+//! Allocates and releases filesystem blocks for a mounted ext4 filesystem.
+//!
+//! `Ext4SbInfo` selects and validates a block group, then delegates bitmap
+//! changes to `bitmap_allocator`. The operation journals the bitmap, group
+//! descriptor, and superblock counters together; callers must supply a handle
+//! with sufficient credits and must not allocate protected system zones.
 
 use alloc::vec;
 

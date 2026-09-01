@@ -2,7 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Inode allocator entry points for the mounted ext4 filesystem.
+//! Allocates, initializes, and releases inode-table entries for a mounted ext4 filesystem.
+//!
+//! Group selection uses the mount allocator state, while bitmap changes and
+//! group/superblock counters are committed through the caller's journal
+//! handle. New inodes are initialized before publication, and reserved inode
+//! numbers or inconsistent bitmap metadata are rejected.
 
 use alloc::vec;
 

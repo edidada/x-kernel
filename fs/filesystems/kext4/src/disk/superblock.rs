@@ -611,6 +611,7 @@ fn effective_want_extra_isize(
         .max(disk_want_extra_isize)
 }
 
+/// Covers superblock decoding, feature fields, counters, and checksum updates.
 #[cfg(test)]
 mod tests {
     use super::{

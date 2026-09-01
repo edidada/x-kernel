@@ -88,7 +88,7 @@ pub(crate) trait JournalBlockWriter {
         Ok(())
     }
 
-    /// Flushes journal writes through the device barrier used by this stage.
+    /// Flushes journal writes through the device barrier used for commit durability.
     fn flush_journal(&self) -> Ext4Result<()>;
 }
 
@@ -345,8 +345,8 @@ pub(crate) fn finish_journal_checkpoint(
 ///
 /// The caller is responsible for selecting a free log range. This function
 /// validates that the supplied metadata images exactly match the frozen
-/// transaction record, writes a JBD2 transaction that current recovery code can
-/// scan, and flushes the journal device after the commit block is written.
+/// transaction record, writes a JBD2 transaction accepted by KExt4 recovery,
+/// and flushes the journal device after the commit block is written.
 pub(crate) fn write_journal_commit(
     superblock: &JournalSuperblock,
     writer: &impl JournalBlockWriter,
@@ -920,6 +920,7 @@ fn checked_offset(offset: usize, len: usize) -> Ext4Result<usize> {
     offset.checked_add(len).ok_or(Ext4Error::Overflow)
 }
 
+/// Covers descriptor, revoke, commit, checkpoint, and journal wrap encoding.
 #[cfg(test)]
 mod tests {
     use std::{cell::RefCell, collections::BTreeMap};

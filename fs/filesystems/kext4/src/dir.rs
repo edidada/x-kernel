@@ -121,6 +121,12 @@ pub trait Ext4DirSink {
     /// `next_pos` is the byte position for the next record. Returning `false`
     /// stops before consuming this entry without treating the directory as
     /// corrupt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the consumer cannot accept the entry. Directory
+    /// streaming forwards the error and does not recall entries emitted by
+    /// earlier calls.
     fn emit(&mut self, entry: Ext4DirEntryRef<'_>, next_pos: Ext4DirPos) -> Ext4Result<bool>;
 }
 
@@ -135,6 +141,12 @@ struct ScannedDirectoryEntry<'a> {
 
 impl Ext4SbInfo {
     /// Reads all supported directory entries from a directory inode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `inode` is not a directory, a mapping or directory
+    /// record is invalid, a metadata checksum fails, or block I/O fails. No
+    /// partially collected vector is returned.
     pub fn read_dir(&self, inode: &Ext4Inode) -> Ext4Result<Vec<DirectoryEntry>> {
         let mut entries = Vec::new();
         self.scan_directory_from(inode, Ext4DirPos::new(0), |entry| {
@@ -145,6 +157,12 @@ impl Ext4SbInfo {
     }
 
     /// Streams supported directory entries starting at an ext4 directory byte position.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `pos` is not a valid record boundary, the inode or
+    /// directory metadata is invalid, block I/O fails, or `sink` rejects an
+    /// entry. Entries accepted before the failure remain consumed by `sink`.
     pub fn read_dir_from(
         &self,
         inode: &Ext4Inode,
@@ -170,11 +188,21 @@ impl Ext4SbInfo {
     }
 
     /// Finds one UTF-8 entry name in a supported directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the inode is not a directory, its mapping or
+    /// records are invalid, checksum verification fails, or block I/O fails.
     pub fn lookup(&self, directory: &Ext4Inode, name: &str) -> Ext4Result<Option<DirectoryEntry>> {
         self.lookup_bytes(directory, name.as_bytes())
     }
 
     /// Finds one raw byte entry name in a supported directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the inode is not a directory, its mapping or
+    /// records are invalid, checksum verification fails, or block I/O fails.
     pub fn lookup_bytes(
         &self,
         directory: &Ext4Inode,
@@ -759,6 +787,7 @@ fn scan_directory_block(
     Ok(true)
 }
 
+/// Covers directory record decoding, lookup, streaming, and checksum validation.
 #[cfg(test)]
 mod tests {
     use super::*;

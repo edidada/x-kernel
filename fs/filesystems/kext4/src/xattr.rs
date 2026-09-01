@@ -50,7 +50,7 @@ pub enum Ext4XattrNamespace {
     Encryption,
     /// Hurd-private namespace.
     Hurd,
-    /// A namespace not interpreted by this stage.
+    /// An on-disk namespace index, carried by the variant, that KExt4 does not interpret.
     Unknown(u8),
 }
 
@@ -153,7 +153,8 @@ impl<'a> Ext4XattrNameRef<'a> {
 /// Receives borrowed xattr names while KExt4 walks inode metadata.
 ///
 /// Implementations must consume each borrowed name before `emit` returns.
-/// Disk-format and I/O failures are reported by [`Ext4SbInfo::list_xattrs`].
+/// The listing operation forwards sink failures unchanged and may already have
+/// emitted earlier names when a later sink call fails.
 pub trait Ext4XattrNameSink {
     /// Consumes one xattr name without taking ownership of its bytes.
     ///
@@ -255,6 +256,12 @@ struct ExtraIsizeLayoutCandidate {
 
 impl Ext4SbInfo {
     /// Reads all supported extended attributes stored on an inode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the inline or external xattr layout is malformed,
+    /// an external value uses an unsupported EA inode, an external block fails
+    /// bounds or checksum validation, or its device read fails.
     pub fn read_xattrs(&self, inode: &Ext4Inode) -> Ext4Result<Vec<Ext4Xattr>> {
         let mut xattrs = Vec::new();
         self.read_inline_xattrs(inode, &mut xattrs)?;
@@ -266,6 +273,12 @@ impl Ext4SbInfo {
     ///
     /// Names borrow from validated inode snapshots or external-block metadata
     /// and remain valid only for the duration of each sink call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed or unsupported xattr metadata, an
+    /// invalid or unreadable external block, or an error returned by `sink`.
+    /// Names emitted before a sink or external-block failure are not recalled.
     pub fn list_xattrs(
         &self,
         inode: &Ext4Inode,
@@ -277,6 +290,14 @@ impl Ext4SbInfo {
     }
 
     /// Reads one extended attribute by namespace and raw name suffix.
+    ///
+    /// Returns `Ok(None)` when the validated attribute set contains no matching
+    /// namespace and name.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same metadata-validation, unsupported-layout, checksum, or
+    /// device errors as `read_xattrs`.
     pub fn get_xattr(
         &self,
         inode: &Ext4Inode,
@@ -292,10 +313,16 @@ impl Ext4SbInfo {
 
     /// Sets or replaces an extended attribute.
     ///
-    /// This R9 baseline supports the common `user`, `trusted`, and `security`
-    /// namespaces, plus opaque POSIX ACL xattr storage. The updated xattr set
-    /// may be split between the inode body and one external xattr block, with
+    /// This operation supports the `user`, `trusted`, and `security`
+    /// namespaces plus opaque POSIX ACL xattr storage. The updated xattr set may
+    /// be split between the inode body and one external xattr block, with
     /// refcount and checksum maintenance for the external part.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the name or namespace is invalid, existing xattr
+    /// metadata cannot be decoded, the new layout has no supported placement,
+    /// or journal, allocation, checksum, or device I/O fails.
     #[cfg(test)]
     pub fn set_xattr(
         &mut self,
@@ -316,6 +343,16 @@ impl Ext4SbInfo {
     }
 
     /// Sets an extended attribute with an atomic existence requirement.
+    ///
+    /// `Create` rejects an existing attribute and `Replace` rejects a missing
+    /// attribute. `CreateAndReplace` therefore rejects both states.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Ext4Error::InvalidName` for an unsupported namespace or name,
+    /// `Ext4Error::AlreadyExists` or `Ext4Error::NotFound` when `mode` is not
+    /// satisfied, and a typed validation, capacity, journal, or device error
+    /// when the existing or planned storage cannot be committed.
     pub fn set_xattr_with_mode(
         &mut self,
         inode: &Ext4Inode,
@@ -350,6 +387,13 @@ impl Ext4SbInfo {
     }
 
     /// Removes an extended attribute.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Ext4Error::InvalidName` for an unsupported namespace or name,
+    /// `Ext4Error::NotFound` when the attribute is absent, and a typed
+    /// validation, journal, checksum, or device error when the update cannot be
+    /// committed.
     pub fn remove_xattr(
         &mut self,
         inode: &Ext4Inode,
@@ -1941,6 +1985,7 @@ fn validate_non_overlapping_value_ranges(ranges: &mut [(usize, usize)]) -> Ext4R
     Ok(())
 }
 
+/// Covers xattr decoding, listing, layout, checksums, and journaled mutation.
 #[cfg(test)]
 mod tests {
     use alloc::{format, vec, vec::Vec};

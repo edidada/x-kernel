@@ -398,6 +398,7 @@ fn put_be_u32(output: &mut [u8], offset: usize, value: u32) -> Ext4Result<()> {
     Ok(())
 }
 
+/// Covers JBD2 superblock decoding, feature negotiation, and state updates.
 #[cfg(test)]
 mod tests {
     use super::*;

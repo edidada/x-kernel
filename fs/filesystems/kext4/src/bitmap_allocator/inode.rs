@@ -181,6 +181,7 @@ fn validate_inode_bitmap_capacity(bitmap: &[u8], range: InodeGroupRange) -> Ext4
     Ok(())
 }
 
+/// Covers inode bitmap bounds, reserved-inode handling, allocation, and release.
 #[cfg(test)]
 mod tests {
     use super::*;

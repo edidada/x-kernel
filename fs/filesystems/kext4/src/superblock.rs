@@ -302,9 +302,17 @@ pub enum JournalLocation {
     /// The filesystem has no journal.
     None,
     /// The journal is stored in a reserved inode.
-    Internal { inode: InodeNumber },
+    Internal {
+        /// Reserved inode containing the journal's block mapping.
+        inode: InodeNumber,
+    },
     /// The journal is stored on another block device.
-    External { dev: NonZeroU32, uuid: [u8; 16] },
+    External {
+        /// Encoded device number from the ext4 superblock.
+        dev: NonZeroU32,
+        /// UUID identifying the external journal device.
+        uuid: [u8; 16],
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -883,6 +891,11 @@ impl Ext4SbInfo {
     ///
     /// This is a diagnostic/mount test helper that avoids exposing JBD2 block
     /// address types as public KExt4 API.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the internal journal mapping is incomplete or
+    /// contains an out-of-range block.
     #[cfg(test)]
     pub fn journal_superblock_block(&self) -> Ext4Result<Option<FilesystemBlock>> {
         match self.journal.as_ref() {
@@ -892,6 +905,11 @@ impl Ext4SbInfo {
     }
 
     /// Returns the physical block for one internal journal block.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no mapping covers `block`, arithmetic overflows,
+    /// or the mapped filesystem block is out of range.
     pub fn map_journal_block(&self, block: JournalBlock) -> Ext4Result<FilesystemBlock> {
         JournalBlockMapper::map_journal_block(self, block)
     }
@@ -968,6 +986,12 @@ impl Ext4SbInfo {
     }
 
     /// Reads complete filesystem blocks without exposing metadata mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `output` is not exactly `block_count` filesystem
+    /// blocks long, the requested range exceeds the filesystem, arithmetic
+    /// overflows, or the block driver rejects the read.
     pub fn read_blocks(
         &self,
         start: FilesystemBlock,
@@ -1993,6 +2017,7 @@ fn is_inode_physical_block_valid(
     true
 }
 
+/// Covers mount hash policy in the in-kernel unit-test environment.
 #[cfg(unittest)]
 mod unittests {
     use unittest::{assert_eq, def_test};
@@ -2060,6 +2085,7 @@ mod unittests {
     }
 }
 
+/// Covers mount validation, layout, allocation, journal, recovery, and statistics.
 #[cfg(test)]
 mod tests {
     use std::{

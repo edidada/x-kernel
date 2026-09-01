@@ -2,7 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Regular-file truncate and orphan cleanup.
+//! Coordinates regular-file size changes with extent and orphan cleanup.
+//!
+//! Shrink preparation commits the durable size and orphan state before KVFS
+//! changes page-cache visibility; completion then removes delayed allocations
+//! and disk mappings in journaled steps. Growth preserves sparse zero semantics
+//! and clears a mapped partial old-EOF block when required.
 
 use alloc::vec;
 

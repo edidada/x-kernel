@@ -4,8 +4,10 @@
 
 mod commit;
 mod log;
+/// Defines typed journal and target block numbers plus journal block mapping.
 mod mapper;
 mod replay;
+/// Decodes and updates the JBD2 journal superblock.
 mod superblock;
 mod transaction;
 

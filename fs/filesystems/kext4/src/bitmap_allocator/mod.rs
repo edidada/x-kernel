@@ -9,6 +9,7 @@
 //! primitives deliberately do not update group descriptors, superblock
 //! counters, extent trees, or directory metadata.
 
+/// Provides bounds-checked bitmap bit tests and updates.
 mod bitmap;
 mod block;
 mod inode;

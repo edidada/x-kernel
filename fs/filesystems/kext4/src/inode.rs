@@ -223,12 +223,21 @@ pub struct Ext4DeviceId {
 }
 
 impl Ext4DeviceId {
-    /// Creates a Linux device identifier from major and minor numbers.
+    /// Creates a Linux device identifier without checking ext4's encoded ranges.
+    ///
+    /// Use `new_checked` before persisting caller-provided numbers. A value
+    /// outside the ext4 ranges can still be inspected but later encoding will
+    /// return `Ext4Error::Unsupported`.
     pub const fn new(major: u32, minor: u32) -> Self {
         Self { major, minor }
     }
 
     /// Creates a device identifier that ext4 can encode on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Ext4Error::Unsupported` when either number exceeds the bit
+    /// ranges representable by ext4's encoded device format.
     pub fn new_checked(major: u32, minor: u32) -> Ext4Result<Self> {
         let device = Self { major, minor };
         ensure_ext4_device_id_representable(device)?;
@@ -1233,6 +1242,11 @@ fn ensure_ext4_device_id_representable(device: Ext4DeviceId) -> Ext4Result<()> {
 
 impl Ext4SbInfo {
     /// Returns an inline fast-symlink target, or `None` for a block-mapped target.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the inode's kind, size, flags, or inline target
+    /// bytes do not form a valid supported symlink representation.
     pub fn fast_symlink_target(&self, inode: &Ext4Inode) -> Ext4Result<Option<Vec<u8>>> {
         inode.fast_symlink_target(
             self.layout().block_size(),
@@ -1744,6 +1758,12 @@ impl Ext4SbInfo {
     }
 
     /// Applies a journaled inode metadata update.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a timestamp cannot be represented, inode metadata
+    /// fails validation, or the journal or metadata device cannot commit the
+    /// update. An empty update succeeds without starting a transaction.
     pub fn update_inode_metadata(
         &mut self,
         inode: &Ext4Inode,
@@ -2341,6 +2361,7 @@ fn inode_checksum(
     }
 }
 
+/// Covers inode encoding, timestamps, device identifiers, and private-state updates.
 #[cfg(test)]
 mod tests {
     use super::{

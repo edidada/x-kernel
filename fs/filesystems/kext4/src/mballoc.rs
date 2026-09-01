@@ -619,6 +619,7 @@ impl Ext4SbInfo {
     }
 }
 
+/// Covers free-extent caching, goal selection, and partial multiblock allocation.
 #[cfg(test)]
 mod tests {
     use super::*;

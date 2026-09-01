@@ -29,8 +29,8 @@ const EXT4_BG_BLOCK_UNINIT: u16 = 0x0002;
 ///
 /// This is the ext4 `struct ext4_group_desc` analogue: it only decodes and
 /// exposes the disk fields and is not held in mount state. The resident
-/// management representations are derived from it — [`GroupGeometry`] for the
-/// frozen addresses and [`GroupMutableState`] for the allocator-mutable
+/// management representations are derived from it — `GroupGeometry` for the
+/// frozen addresses and `GroupMutableState` for the allocator-mutable
 /// counters and flags.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlockGroupDescriptor {
@@ -629,6 +629,7 @@ fn put_u16_at(input: &mut [u8], offset: usize, value: u16) -> Ext4Result<()> {
     Ok(())
 }
 
+/// Covers group-descriptor decoding, counters, bitmap metadata, and checksums.
 #[cfg(test)]
 mod tests {
     use super::{

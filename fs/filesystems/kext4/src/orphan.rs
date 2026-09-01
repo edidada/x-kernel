@@ -2,7 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Legacy ext4 regular-file orphan-list helpers.
+//! Maintains and recovers the legacy ext4 orphan list.
+//!
+//! The helpers journal superblock and inode orphan pointers around truncate
+//! and final eviction. Recovery walks only validated, allocated inode numbers
+//! and preserves recovery evidence until each pending cleanup is durable.
 
 use crate::{
     CorruptKind, Ext4Error, Ext4Inode, Ext4Result, Ext4SbInfo, InodeKind, InodeNumber,

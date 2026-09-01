@@ -151,8 +151,8 @@ impl JournalReplayApplied {
 /// Only committed transactions contribute updates. Revoke records from
 /// committed transactions suppress updates in the same or earlier transaction,
 /// while later transactions for the same filesystem block still replay. This
-/// mirrors Linux JBD2 recovery's revoke test without requiring a writable block
-/// device at this stage.
+/// mirrors Linux JBD2 recovery's revoke test while keeping replay planning
+/// independent of a writable block device.
 #[cfg(test)]
 fn plan_journal_replay(scan: &JournalLogScan) -> JournalReplayPlan {
     let latest_revokes = collect_latest_revokes(scan);
@@ -314,6 +314,7 @@ fn committed_transactions(
         .filter(|transaction| transaction.state() == JournalTransactionState::Committed)
 }
 
+/// Covers replay selection, revoke filtering, escaped blocks, and failure handling.
 #[cfg(test)]
 mod tests {
     use std::{cell::RefCell, collections::BTreeMap};

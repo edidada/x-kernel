@@ -264,6 +264,7 @@ fn round3(target: &mut u32, b: u32, c: u32, d: u32, word: u32, shift: u32) {
         .rotate_left(shift);
 }
 
+/// Covers supported directory hash variants and unsupported encrypted-name hashing.
 #[cfg(unittest)]
 mod unittests {
     use unittest::{assert_eq, assert_ne, def_test};

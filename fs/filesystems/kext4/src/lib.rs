@@ -2,97 +2,45 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Checked ext4 filesystem objects and storage algorithms.
+//! Ext4 filesystem support for X-Kernel's KVFS.
 //!
-//! The crate owns ext4-private algorithms and their direct KVFS operation
-//! objects. The current implementation provides disk decoding, filesystem block I/O,
-//! feature negotiation, explicit journal recovery, metadata-buffer/JBD2
-//! mutation, extent tree updates, bitmap allocation, a PageCache-facing
-//! ordered-data regular-file writeback baseline, and a regular-file
-//! truncate/orphan recovery baseline. Mount negotiation requires the ext4
-//! extents feature because legacy direct/indirect block maps currently have a
-//! checked read path but no complete mutation contract. Buffered writeback can
-//! overwrite initialized extents, allocate blocks for holes, convert unwritten
-//! extents after data flush, and grow the on-disk size through journaled inode
-//! metadata. A live writeback cursor reads the current extent before each
-//! mapping or allocation run, charges journal credits for the actual work, and
-//! restarts the transaction at a durable filesystem-block boundary when the
-//! current handle cannot be extended. If a later transaction fails, the core
-//! reports its completed byte prefix through KVFS so PageCache can clean only
-//! complete prefix folios and retain the boundary and suffix for retry.
-//! `Ext4Inode::disk_size()` is the core equivalent of Linux ext4
-//! `i_disksize`; KVFS keeps the VFS-visible size separately while writeback or
-//! prepared truncate work is pending. Truncate uses a prepare/finish token so
-//! VFS can run generic PageCache resize between Linux-style `i_disksize`
-//! commit and ext4 extent/orphan completion. Grow zeros any mapped old EOF tail
-//! before committing the larger disk size; sparse ranges continue to read as
-//! zeroes. Shrink uses the legacy ext4 orphan list, zeros the partial EOF block,
-//! removes tail extents, releases blocks, updates extent-backed `i_blocks`, and
-//! lets explicit recovery finish both `nlink > 0` regular-file truncation and
-//! `nlink == 0` final eviction from the legacy orphan list, including when the
-//! journal itself is already clean. Filesystems carrying the `huge_file`
-//! feature can mutate ordinary inodes that retain 512-byte-sector `i_blocks`
-//! accounting; inodes using `EXT4_HUGE_FILE_FL` block-unit accounting and the
-//! ext4 orphan-file format remain unsupported.
+//! The crate registers the device-backed `ext4` filesystem during kernel
+//! initialization. It owns validation and interpretation of ext4 metadata,
+//! extent and bitmap allocation, JBD2 recovery and metadata transactions,
+//! namespace and extended-attribute updates, truncate/orphan cleanup, and
+//! ordered-data writeback. KVFS remains responsible for pathname traversal,
+//! resident inode identity, page-cache state, and open-file lifetimes; the
+//! block layer owns device discovery and request execution.
 //!
-//! The first R7 namespace baseline can create regular files and directories in
-//! linear directories: it allocates the inode, inserts or
-//! extends a dirent block, initializes mkdir `.`/`..` data, updates parent
-//! metadata, journals the metadata, and rolls back the whole transaction on
-//! failure. R7.3-R7.7 add unlink/rmdir, hard link, rename, symlink,
-//! special-file creation, HTree hash insertion, leaf split, dx checksum update,
-//! and one-block linear-to-indexed conversion, including dirent removal,
-//! link-count updates, deferred extent-backed zero-link eviction, directory `..`
-//! updates, bitmap/counter updates, and e2fsck-checked journal commits.
-//! The live KVFS adapter exposes regular-file buffered writeback and
-//! two-phase `set_len` through the inode `AddressSpace`, and exposes the R7
-//! namespace mutation baseline through KVFS inode operations. Namespace remove
-//! persists nlink/orphan state without releasing an inode that still has a live
-//! VFS identity; final `SuperBlockOperations::evict_inode` releases xattrs,
-//! extents, and the inode bitmap after the last reference is gone. Core mutation
-//! results update the inode component composed into the sole resident KVFS
-//! inode; KVFS generic attribute operations read and update that same state,
-//! so there is no second cached inode snapshot to refresh. KVFS owns
-//! `I_NEW`/`I_FREEING`-equivalent lookup and eviction; KExt4 owns no resident
-//! inode cache or lifecycle. Namespace mutation receives the already resident
-//! child/moved/replaced private state instead of reloading it by number.
-//! Recovery runs before VFS identity publication and uses temporary private
-//! state with the normal truncate/eviction algorithms. The R8 write strategy adds
-//! per-group order-bucket free extent caches, interval-based delayed-allocation
-//! reservation with core-owned inode/mount accounting, writeback-time physical allocation,
-//! normalized unwritten preallocation, EOF preallocation discard after the
-//! last writer has no delayed reservations, and
-//! Linux-style Orlov inode group selection with flex group, threshold,
-//! quadratic-probe, and fallback stages. Folio invalidate/reclaim reservation
-//! release and dirty throttling remain KVFS/PageCache accounting extensions.
-//! The R9 xattr baseline adds journaled inode-body and single external
-//! block set/remove for `user.*`, `trusted.*`, `security.*`, and opaque POSIX
-//! ACL xattrs. The direct KVFS operation implementation exposes
-//! `user.*`, `trusted.*`, and `security.*` through KVFS xattr operations,
-//! including atomic create/replace policy and ctime synchronization. Opaque ACL
-//! bytes remain a core-only foundation until KVFS has ACL permission and
-//! inheritance semantics. This is still not a complete
-//! Linux ext4 write mount: mmap/direct I/O coherence, freeze/unmount lifecycle
-//! hooks, a background checkpoint worker, oversized xattr, EA-inode, inline-data
-//! write contracts, and Linux-style errseq/forced-readonly reporting remain
-//! later stages. The core R10 sync baseline can flush checkpointed metadata and
-//! device state. One mount-lifetime journal identity owns the internal mapping,
-//! transaction engine, and FIFO checkpoint queue. Pending work shares the
-//! committed transaction instead of cloning it or retaining a second journal
-//! owner. Expected mutation failures are validated before the first metadata
-//! access; a normal error after metadata publication is treated as an invariant
-//! violation and aborts the journal without rewinding metadata already published
-//! by this or earlier successful operations. Handles retain only credits and
-//! buffer/revoke membership and return accounting failures through explicit
-//! stop. Durable commit is separate from home-block checkpoint,
-//! while queue progress remains synchronously driven until N2 introduces
-//! background execution. Precise per-inode sync tids still require KVFS
-//! runtime-inode storage, so the current sync path conservatively commits the
-//! running transaction. The KVFS integration wires filesystem drain through
-//! `SuperBlockOperations::sync_fs`.
-//! Crate-internal tests keep a raw allocated-data overwrite helper for
-//! validating storage plumbing; it is not exported as an ext4 API.
-
+//! # Integration
+//!
+//! Enable `KFEAT_FS_EXT4` to link the crate and register the filesystem type.
+//! Mounts then use the ordinary KVFS device-backed mount path. Mount setup
+//! validates the superblock, feature set, group geometry, checksums, journal,
+//! and root inode before publishing the filesystem. If recovery is required,
+//! the mount path replays committed journal updates and cleans the legacy
+//! orphan list before retrying initialization.
+//!
+//! Most kernel callers use the filesystem through KVFS operations rather than
+//! constructing storage objects directly. Exported types such as
+//! [`Ext4Inode`], [`BlockMapping`], and [`Ext4Error`] describe the checked
+//! inode state, mapping results, and failures used at that integration
+//! boundary.
+//!
+//! Mount, recovery, namespace mutation, writeback, and synchronization may
+//! allocate and issue blocking device I/O, so they require sleepable task
+//! context. The entire crate forbids unsafe Rust; raw device access and
+//! user-memory handling stay outside this crate.
+//!
+//! # Format boundary
+//!
+//! Mounts require extent-based block mapping. Mount validation rejects unknown
+//! incompatible ext4 features, `BIGALLOC`, and unsupported JBD2 features;
+//! operation-specific checks reject other known layouts that KExt4 cannot
+//! preserve. Malformed ranges, metadata, and checksums produce corruption or
+//! bounds errors rather than unchecked access. See `docs/design.md` for the
+//! component and lifecycle model and `docs/security.md` for trust boundaries,
+//! implemented controls, and known limitations.
 #![no_std]
 #![forbid(unsafe_code)]
 
@@ -106,28 +54,89 @@ extern crate std;
 
 mod balloc;
 mod bitmap_allocator;
+/// Coordinates the journal-aware metadata cache and checkpoint writeback.
+///
+/// One cache slot owns the loaded bytes and transaction/checkpoint state for a
+/// physical metadata block. Storage algorithms enter through `Ext4MetadataIo`;
+/// cache misses and checkpoint writes may wait for device I/O, and mutable
+/// access requires ownership by the active journal transaction.
 mod buffer;
+/// Decodes, validates, streams, and looks up ext4 directory entries.
+///
+/// Directory operations walk inode mappings through `Ext4SbInfo`, validate
+/// record boundaries and checksums, and either emit borrowed entries or return
+/// owned lookup results. Reading an uncached directory block may block on I/O.
 mod dir;
+/// Implements ext4 HTree and Orlov directory-name hashing policy.
+///
+/// Hash inputs are raw name bytes plus the seed and signedness policy frozen in
+/// the mounted superblock; the module owns no persistent state.
 mod dirhash;
+/// Defines checked codecs and representations for ext4 on-disk structures.
+///
+/// These modules translate untrusted byte slices into checked values and
+/// encode validated updates. They perform no device I/O and do not own mount
+/// state; higher layers supply complete buffers and enforce operation policy.
 mod disk;
+/// Defines the error taxonomy returned by the checked storage core.
 mod error;
+/// Maps and mutates extent trees and legacy read-only block maps.
+///
+/// Lookup validates each traversed node before returning a `BlockMapping`.
+/// Mutation is limited to extent-format inodes and updates inode or external
+/// tree blocks only through a journal handle with sufficient metadata credits.
 mod extent;
+/// Implements regular-file reads, ordered writeback, and inode synchronization.
+///
+/// Ordered writeback writes file data before committing mappings and inode
+/// metadata that expose it. A request may span transactions and reports a
+/// completed byte prefix when a later transaction fails.
 mod file;
 mod ialloc;
+/// Owns decoded inode state, delayed-allocation reservations, and inode-table updates.
+///
+/// `Ext4Inode` is the ext4-private component of a KVFS resident inode, not a
+/// second identity cache. Its locks protect decoded and transient metadata;
+/// cross-structure updates also maintain mount-wide allocation accounting.
 mod inode;
+/// Adapts block devices to ext4 filesystem-block addressing.
+///
+/// `FilesystemDevice` validates geometry and complete-range bounds before
+/// translating filesystem blocks into driver requests. Reads, writes, and
+/// flushes may block and propagate block-driver failures.
 mod io;
+/// Implements JBD2 log parsing, transaction state, commit encoding, and replay.
+///
+/// The module keeps journal block numbering and transaction phases separate
+/// from ext4 mount policy. Callers provide a checked journal mapping and drive
+/// commit, replay, and checkpoint I/O through explicit reader/writer traits.
 mod jbd2;
 mod journal;
+/// Exercises KExt4 against filesystem images built and checked by e2fsprogs.
 #[cfg(test)]
 mod linux_image_tests;
 mod mballoc;
 mod namei;
 mod orphan;
+/// Builds and owns validated per-mount ext4 state and filesystem geometry.
+///
+/// `Ext4SbInfo::open` validates the superblock, group layout, system zones, and
+/// journal before the mount is published. The resulting object owns the
+/// device, metadata cache, allocator state, delayed-allocation accounting, and
+/// optional mounted journal for the KVFS superblock lifetime.
 mod superblock;
+/// Selects the kernel or host synchronization primitives used by the crate.
 mod sync;
 mod truncate;
+/// Provides unit-bearing newtypes for ext4 block, group, and inode identifiers.
 mod types;
 mod vfs;
+/// Reads, lists, updates, and removes ext4 inline and external extended attributes.
+///
+/// Reads validate inode-body and external-block layouts before exposing names
+/// or values. Mutations plan the complete new layout first, then journal inode
+/// and external-block changes while preserving checksum and reference-count
+/// rules.
 mod xattr;
 
 pub use dir::{DirectoryEntry, Ext4DirEntryRef, Ext4DirPos, Ext4DirSink};

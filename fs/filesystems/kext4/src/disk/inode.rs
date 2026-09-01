@@ -237,6 +237,7 @@ fn extra_field_fits(extra_isize: u16, offset: usize, size: usize) -> Ext4Result<
     Ok(end <= available)
 }
 
+/// Covers inode field decoding, timestamp layouts, and checksum updates.
 #[cfg(test)]
 mod tests {
     use super::{

@@ -2,7 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! KVFS integration for ext4 mount and inode-private objects.
+//! Adapts KVFS mount, inode, file, and address-space operations to KExt4.
+//!
+//! The adapter owns no second inode or page-cache identity. It stores one
+//! `Ext4SbInfo` in the KVFS superblock, attaches one `Ext4Inode` component to
+//! each resident KVFS inode, translates errors at the boundary, and preserves
+//! KVFS ordering around lookup publication, writeback, truncate, and eviction.
 
 use alloc::{string::String, sync::Arc, vec, vec::Vec};
 
@@ -1628,6 +1633,7 @@ impl Ext4DirSink for KvfsDirSink<'_, '_> {
     }
 }
 
+/// Covers KVFS mapping, metadata, FIEMAP, xattr, and namespace adaptation.
 #[cfg(unittest)]
 mod tests {
     use alloc::vec::Vec;

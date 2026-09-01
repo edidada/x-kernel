@@ -204,6 +204,7 @@ impl FeatureSet {
     }
 }
 
+/// Covers feature negotiation in the in-kernel unit-test environment.
 #[cfg(unittest)]
 mod unittests {
     use unittest::{assert_eq, def_test};
@@ -222,6 +223,7 @@ mod unittests {
     }
 }
 
+/// Covers feature-class separation and unsupported mount formats on the host.
 #[cfg(test)]
 mod tests {
     use super::{CompatFeatures, FeatureSet, IncompatFeatures};

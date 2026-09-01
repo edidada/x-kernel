@@ -15,6 +15,7 @@ use crate::{
     mballoc::{Ext4AllocationFlags, Ext4AllocationRequest},
 };
 
+/// Covers raw allocated-block overwrite behavior used by host-side tests.
 #[cfg(test)]
 mod raw_overwrite_tests;
 
@@ -256,6 +257,11 @@ impl Ext4SbInfo {
     /// belong to the runtime inode rather than the mount-wide journal. The VFS
     /// inode will own targeted cursors once mutation completion reports tids;
     /// committing the shared transaction is conservative and correct meanwhile.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if transaction commit or the fallback device flush
+    /// fails. A journal failure records the mount-wide abort state.
     pub fn sync_inode(&mut self, _inode: &Ext4Inode, _intent: Ext4SyncIntent) -> Ext4Result<()> {
         let result = match self.commit_running_metadata_transaction() {
             Ok(true) => Ok(()),
@@ -270,6 +276,12 @@ impl Ext4SbInfo {
     }
 
     /// Reads bytes from a regular file inode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `inode` is not a regular file, its block mapping is
+    /// malformed or out of bounds, or device I/O fails. The method may have
+    /// copied an earlier prefix into `output` before a later block fails.
     pub fn read_at(&self, inode: &Ext4Inode, offset: u64, output: &mut [u8]) -> Ext4Result<usize> {
         if inode.kind() != InodeKind::RegularFile {
             return Err(Ext4Error::Unsupported(UnsupportedKind::InodeKind));
@@ -278,6 +290,11 @@ impl Ext4SbInfo {
     }
 
     /// Reads bytes from a symbolic link inode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the inode or symlink representation is invalid, a
+    /// mapped target block is malformed, or metadata I/O fails.
     pub fn read_link_at(
         &self,
         inode: &Ext4Inode,
@@ -519,6 +536,13 @@ impl Ext4SbInfo {
     /// remaining suffix.
     /// Device or journal failures may abort the mounted journal, in which case
     /// recovery is required before the data can be submitted again.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Ext4WritebackError` when the inode or requested size is not
+    /// supported, mapping or allocation fails, journal credits or state are
+    /// unavailable, or data, metadata, or flush I/O fails. The error's
+    /// completed prefix is the only part callers may finish as successful.
     pub fn writeback_ordered_at(
         &mut self,
         inode: &Ext4Inode,
@@ -548,6 +572,12 @@ impl Ext4SbInfo {
     /// remaining suffix.
     /// Device or journal failures may abort the mounted journal, in which case
     /// recovery is required before the data can be submitted again.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures and partial-progress contract as
+    /// `writeback_ordered_at`. `max_extra_prealloc_blocks` limits only optional
+    /// allocation beyond the submitted dirty range.
     #[allow(clippy::too_many_arguments)]
     pub fn writeback_ordered_at_with_prealloc_budget(
         &mut self,
@@ -1236,6 +1266,7 @@ fn block_count_for_byte_span(
     u32::try_from(block_count).map_err(|_| Ext4Error::Overflow)
 }
 
+/// Covers write-allocation normalization for sequential and random requests.
 #[cfg(test)]
 mod tests {
     use super::normalize_write_allocation_len;
@@ -1260,6 +1291,7 @@ mod tests {
     }
 }
 
+/// Covers ordered-writeback mapping, credit, and partial-progress behavior.
 #[cfg(unittest)]
 mod unittests {
     use unittest::{assert_eq, def_test};

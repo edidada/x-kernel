@@ -23,19 +23,34 @@ pub enum FeatureClass {
 pub enum ChecksumTarget {
     /// The primary ext4 superblock.
     Superblock,
-    /// A block group descriptor.
+    /// The descriptor for the block group whose number is carried by the variant.
     BlockGroup(u32),
-    /// An inode table entry.
+    /// The inode-table entry for the inode number carried by the variant.
     Inode(u32),
     /// An extent tree block.
-    ExtentBlock { inode: u32, block: u64 },
+    ExtentBlock {
+        /// Inode whose extent tree contains the block.
+        inode: u32,
+        /// Physical filesystem block containing the extent node.
+        block: u64,
+    },
     /// A directory data block.
-    DirectoryBlock { inode: u32, block: u64 },
+    DirectoryBlock {
+        /// Inode that owns the directory block.
+        inode: u32,
+        /// Physical filesystem block containing directory records.
+        block: u64,
+    },
     /// An extended-attribute block.
-    XattrBlock { inode: u32, block: u64 },
+    XattrBlock {
+        /// Inode that references the extended-attribute block.
+        inode: u32,
+        /// Physical filesystem block containing the attributes.
+        block: u64,
+    },
     /// A JBD2 journal superblock.
     JournalSuperblock,
-    /// A block in the JBD2 circular log.
+    /// The logical JBD2 journal block whose number is carried by the variant.
     JournalBlock(u32),
 }
 
@@ -58,23 +73,23 @@ pub enum UnsupportedKind {
     ExternalJournal,
     /// The filesystem uses ext4 orphan-file semantics, not the legacy orphan list.
     OrphanFile,
-    /// The directory uses an HTree shape this stage does not scan.
+    /// The requested directory operation cannot handle the on-disk HTree shape.
     IndexedDirectory,
     /// The directory needs the ext4 large_dir HTree depth extension.
     LargeDir,
     /// The xattr value is stored in a dedicated EA inode.
     ExternalXattrInode,
-    /// The extent tree is deeper than this stage supports.
+    /// The requested extent mutation would exceed the supported tree shape or depth.
     ExtentDepth,
     /// The requested extent change needs split, conversion, or tree growth.
     ExtentMutation,
     /// The inode uses huge-file block accounting semantics.
     HugeFile,
-    /// The inode owns an external xattr block that this mutation path cannot free yet.
+    /// The external xattr block cannot be represented or updated by the supported layout.
     ExternalXattrBlock,
     /// The inode link count has reached the supported ext4 hard-link limit.
     LinkCountLimit,
-    /// The symbolic link target does not fit in supported symlink storage yet.
+    /// The symbolic link target does not fit the storage form required by the operation.
     BlockMappedSymlink,
     /// The device number cannot be represented in ext4's on-disk `i_block`.
     DeviceId,
@@ -82,13 +97,13 @@ pub enum UnsupportedKind {
     UnlinkedOrphanCleanup,
     /// The write path would need block allocation or unwritten extent conversion.
     UnallocatedWrite,
-    /// The current writeback foundation does not support shrinking file size.
+    /// Ordered writeback was asked to shrink the durable file size instead of using truncate.
     FileSizeShrink,
     /// The requested write path requires an internal JBD2 journal.
     JournaledWrite,
     /// The journal is larger than this recovery implementation will materialize.
     JournalTooLarge,
-    /// A JBD2 descriptor uses the deleted-update tag flag, which is not replayed yet.
+    /// A JBD2 descriptor uses the unsupported deleted-update tag flag.
     DeletedJournalUpdate,
     /// A metadata buffer is already owned by another running transaction.
     ConcurrentMetadataTransaction,
@@ -96,7 +111,7 @@ pub enum UnsupportedKind {
     MetadataBufferState,
     /// A timestamp cannot be represented by the available inode fields.
     TimestampRange,
-    /// The inode kind is outside this stage's read-only data path.
+    /// The requested operation does not support this inode kind.
     InodeKind,
     /// A byte string cannot be represented by the caller's name encoding.
     NameEncoding,
@@ -146,11 +161,11 @@ pub enum CorruptKind {
     InvalidXattr,
     /// The Ext4 journal location or JBD2 geometry is invalid.
     InvalidJournal,
-    /// A file type or mode cannot be interpreted by this stage.
+    /// The on-disk mode contains an unrecognized file type.
     InvalidFileType,
 }
 
-/// Errors returned while decoding or mounting an ext4 filesystem.
+/// Failure reported by KExt4 parsing, I/O, allocation, journal, or filesystem operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Ext4Error {
     /// The block driver rejected an I/O operation.
@@ -180,33 +195,49 @@ pub enum Ext4Error {
     /// An offset or length calculation overflowed.
     Overflow,
     /// A caller-provided buffer has the wrong length.
-    InvalidBufferLength { expected: usize, actual: usize },
-    /// The underlying device block geometry is unusable.
+    InvalidBufferLength {
+        /// Required buffer length in bytes.
+        expected: usize,
+        /// Supplied buffer length in bytes.
+        actual: usize,
+    },
+    /// The underlying device reports the unusable block size carried by the variant.
     InvalidDeviceBlockSize(usize),
     /// An I/O range exceeds the device or filesystem.
     OutOfBounds,
     /// A directory stream position is not a valid ext4 record boundary.
     InvalidDirectoryPosition,
-    /// The superblock magic is not `0xEF53`.
+    /// The superblock contains the non-ext4 magic value carried by the variant.
     InvalidMagic(u16),
-    /// The filesystem revision is not supported.
+    /// The filesystem uses the unsupported revision carried by the variant.
     UnsupportedRevision(u32),
-    /// A feature changes a layout that this stage cannot interpret.
-    UnsupportedFeature { class: FeatureClass, bits: u32 },
+    /// A feature bit requires an ext4 layout or semantic that KExt4 does not support.
+    UnsupportedFeature {
+        /// Feature bitmap containing the unsupported bits.
+        class: FeatureClass,
+        /// Unsupported bits retained from the on-disk bitmap.
+        bits: u32,
+    },
     /// The JBD2 journal uses unsupported feature bits.
     UnsupportedJournalFeature {
+        /// Unsupported compatible feature bits.
         compat: u32,
+        /// Unsupported incompatible feature bits.
         incompat: u32,
+        /// Unsupported read-only-compatible feature bits.
         read_only_compat: u32,
     },
-    /// The filesystem uses semantics outside this stage's scope.
+    /// The requested operation requires ext4 semantics that KExt4 does not implement.
     Unsupported(UnsupportedKind),
     /// The filesystem requires journal recovery before it can be exposed.
     NeedsRecovery,
     /// A protected metadata structure failed checksum verification.
     ChecksumMismatch {
+        /// Metadata object whose checksum failed.
         target: ChecksumTarget,
+        /// Checksum computed from the protected bytes.
         expected: u32,
+        /// Checksum stored in the metadata object.
         actual: u32,
     },
     /// On-disk metadata violates a structural invariant.

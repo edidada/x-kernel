@@ -15,6 +15,11 @@ use crate::{
 
 impl Ext4SbInfo {
     /// Returns the Linux-compatible maximum byte size for this inode format.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when filesystem geometry or the selected mapping
+    /// format cannot be represented in the size calculation.
     #[cfg(test)]
     pub fn max_file_size(&self, inode: &Ext4Inode) -> Ext4Result<u64> {
         if inode.has_extents() {
@@ -24,6 +29,11 @@ impl Ext4SbInfo {
     }
 
     /// Returns the superblock-wide maximum size used by extent-format inodes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the filesystem block size cannot be represented
+    /// in the extent-format limit calculation.
     pub fn extent_max_file_size(&self) -> Ext4Result<u64> {
         extent_max_file_size(
             self.layout().block_size(),
@@ -32,6 +42,11 @@ impl Ext4SbInfo {
     }
 
     /// Returns the superblock-wide maximum size for legacy block-map inodes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when filesystem geometry overflows the direct and
+    /// indirect block-map limit calculation.
     pub fn legacy_max_file_size(&self) -> Ext4Result<u64> {
         legacy_max_file_size(
             self.layout().block_size(),
@@ -40,6 +55,12 @@ impl Ext4SbInfo {
     }
 
     /// Maps a logical inode block without allocating or modifying metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the inode's mapping format is inconsistent with
+    /// mounted features, an extent or indirect block is malformed or out of
+    /// bounds, checksum verification fails, or metadata I/O fails.
     pub fn map_blocks(&self, inode: &Ext4Inode, logical: LogicalBlock) -> Ext4Result<BlockMapping> {
         let (inode_flags, block_root) = inode.block_mapping_root();
         if inode_flags & crate::disk::inode::EXT4_EXTENTS_FL != 0 {
@@ -56,6 +77,11 @@ impl Ext4SbInfo {
     ///
     /// Delayed-allocation extents take precedence over on-disk holes, matching
     /// `ext4_map_blocks()` with `EXT4_MAP_DELAYED` in Linux report paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the logical block cannot be represented or when
+    /// the underlying on-disk mapping fails validation or I/O.
     pub fn report_mapping(
         &self,
         inode: &Ext4Inode,

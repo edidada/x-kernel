@@ -2,7 +2,16 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Filesystem-level JBD2 commit, checkpoint, and recovery glue.
+//! Coordinates filesystem-level JBD2 transactions, checkpointing, and recovery.
+//!
+//! `MountedJournal` owns one mount's journal mapping, transaction coordinator,
+//! persistent superblock state, and checkpoint policy. `Ext4SbInfo` uses it to
+//! acquire mutation handles, persist commits, copy committed metadata to home
+//! blocks, and preserve recovery evidence when an operation fails.
+//!
+//! Commit and checkpoint are separate durability phases. Checkpoint work is
+//! driven synchronously by mutation, synchronization, recovery, or log-space
+//! pressure; this module does not start a background worker.
 
 use alloc::{collections::BTreeMap, sync::Arc, vec};
 #[cfg(not(target_os = "none"))]
@@ -203,6 +212,12 @@ impl Ext4SbInfo {
     /// Until a kernel background worker is wired in, `syncfs`, KVFS unmount
     /// writeback, and journal-space pressure drive the queue. Freeze should
     /// call the same drain path once that lifecycle hook exists in KVFS.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when commit, checkpoint, metadata writeback, or the
+    /// final device flush fails. Journal failures are recorded as a mount-wide
+    /// abort and later metadata mutations remain rejected until recovery.
     pub fn sync_filesystem(&mut self) -> Ext4Result<()> {
         let result = (|| {
             self.commit_running_metadata_transaction()?;

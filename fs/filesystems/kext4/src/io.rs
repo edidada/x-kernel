@@ -218,6 +218,7 @@ impl JournalReplayBlockWriter for FilesystemDevice {
     }
 }
 
+/// Covers filesystem-block translation, range checks, reads, writes, and flushes.
 #[cfg(test)]
 mod tests {
     use alloc::vec::Vec;

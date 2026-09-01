@@ -2,11 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Minimal JBD2 transaction handle and credits state.
+//! Tracks JBD2 transaction handles, credits, and commit/checkpoint phases.
 //!
-//! This is not yet the descriptor/commit writer. It establishes the core
-//! contract that metadata mutation must pass through a transaction handle with
-//! credits and abort checks before touching a metadata buffer.
+//! Metadata mutation must reserve a handle and consume credits before touching
+//! a metadata buffer. The coordinator waits for active handles before commit,
+//! retains committed transactions until checkpoint completion, and rejects new
+//! mutation after an abort. Descriptor and commit-block encoding remains in
+//! the sibling `commit` module.
 
 use alloc::{
     collections::{BTreeSet, VecDeque},
@@ -1048,6 +1050,7 @@ impl Drop for JournalHandle<'_> {
     }
 }
 
+/// Covers handle credits and the running, committing, and checkpoint phases.
 #[cfg(test)]
 mod tests {
     #[cfg(not(target_os = "none"))]

@@ -2,7 +2,14 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Linux-style namespace mutation helpers for ext4 directories.
+//! Implements journaled ext4 namespace mutation behind the KVFS adapter.
+//!
+//! Create, link, unlink, rename, symlink, and special-file operations validate
+//! directory state and calculate credits before modifying metadata. Each path
+//! coordinates directory entries, inode link counts, allocation state, and
+//! orphan state through one journal transaction. A failure after metadata
+//! publication aborts that transaction instead of pretending to roll the
+//! in-memory state back.
 
 use alloc::{sync::Arc, vec, vec::Vec};
 

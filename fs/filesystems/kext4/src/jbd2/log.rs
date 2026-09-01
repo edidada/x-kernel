@@ -637,6 +637,7 @@ fn checked_offset(offset: usize, len: usize) -> Ext4Result<usize> {
     offset.checked_add(len).ok_or(Ext4Error::Overflow)
 }
 
+/// Covers bounded JBD2 log scanning, checksums, revoke records, and wraparound.
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
