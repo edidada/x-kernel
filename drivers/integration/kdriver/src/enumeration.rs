@@ -85,30 +85,48 @@ impl EnumerationContext {
 
     /// Probe every descriptor registered during this enumeration pass.
     pub fn probe_pending(&mut self) -> usize {
-        let pending = core::mem::take(&mut self.pending);
+        let mut pending = core::mem::take(&mut self.pending);
         let mut activated = 0usize;
 
-        for desc in pending {
-            match kdevice::probe_device_desc(desc.id()) {
-                Ok(ProbeOutcome::Activated) => activated += 1,
-                Ok(ProbeOutcome::Skipped) => {}
-                // Deferred (retryable dependency) degrades to unclaimed here;
-                // the deferred-probe retry loop arrives with the clock
-                // integration that produces it.
-                Ok(ProbeOutcome::Requeue | ProbeOutcome::Deferred | ProbeOutcome::Unclaimed) => {
-                    self.add_unclaimed(desc);
-                }
-                Err(err) => {
-                    log::warn!(
-                        "failed to probe descriptor {:?} ({:?} at {:?}): {:?}",
-                        desc.id(),
-                        desc.identity(),
-                        desc.location(),
-                        err
-                    );
-                    self.add_unclaimed(desc);
+        loop {
+            let mut deferred = Vec::new();
+            let mut made_progress = false;
+            for desc in pending {
+                match kdevice::probe_device_desc(desc.id()) {
+                    Ok(ProbeOutcome::Activated) => {
+                        activated += 1;
+                        made_progress = true;
+                    }
+                    Ok(ProbeOutcome::Skipped) => {}
+                    Ok(ProbeOutcome::Deferred) => deferred.push(desc),
+                    Ok(ProbeOutcome::Requeue | ProbeOutcome::Unclaimed) => self.add_unclaimed(desc),
+                    Err(err) => {
+                        log::warn!(
+                            "failed to probe descriptor {:?} ({:?} at {:?}): {:?}",
+                            desc.id(),
+                            desc.identity(),
+                            desc.location(),
+                            err
+                        );
+                        self.add_unclaimed(desc);
+                    }
                 }
             }
+
+            if deferred.is_empty() {
+                break;
+            }
+            if !made_progress {
+                for desc in deferred {
+                    self.add_unclaimed(desc);
+                }
+                break;
+            }
+            // A provider or another dependency became active in this round.
+            // Retry only deferred descriptors; every further round must
+            // activate at least one device, which bounds the loop by the
+            // number of descriptors and avoids spinning on a missing provider.
+            pending = deferred;
         }
 
         activated
@@ -138,7 +156,11 @@ impl Default for EnumerationContext {
 
 #[cfg(unittest)]
 mod tests {
-    use kdevice::PlatformIdentity;
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use driver_base::{DeviceKind, DriverError, DriverResult};
+    use kdevice::{BusTypeId, DeviceDriver, DeviceMatcher, DeviceObject, PlatformIdentity};
     use unittest::{assert_eq, def_test};
 
     use super::*;
@@ -147,6 +169,67 @@ mod tests {
         let (_bus_type, bus) =
             kdevice::reset_and_setup_platform_bus_for_tests("enumeration-test-bus");
         bus
+    }
+
+    struct DeferredDriver;
+
+    static DEPENDENCY_READY: AtomicBool = AtomicBool::new(false);
+    static CONSUMER_PROBES: AtomicUsize = AtomicUsize::new(0);
+
+    impl DeviceDriver for DeferredDriver {
+        fn name(&self) -> &'static str {
+            "deferred-test"
+        }
+
+        fn device_kind(&self) -> DeviceKind {
+            DeviceKind::Bus
+        }
+
+        fn bus_types(&self) -> &'static [BusTypeId] {
+            &[BusTypeId::PLATFORM]
+        }
+
+        fn matcher(&self) -> &dyn DeviceMatcher {
+            static MATCHER: kdevice::CompatibleAliasMatcher =
+                kdevice::CompatibleAliasMatcher("deferred-device");
+            &MATCHER
+        }
+
+        fn probe_device(&self, _device: Arc<DeviceObject>) -> DriverResult<()> {
+            CONSUMER_PROBES.fetch_add(1, Ordering::Relaxed);
+            if DEPENDENCY_READY.load(Ordering::Acquire) {
+                Ok(())
+            } else {
+                Err(DriverError::WouldBlock)
+            }
+        }
+    }
+
+    struct DependencyDriver;
+
+    impl DeviceDriver for DependencyDriver {
+        fn name(&self) -> &'static str {
+            "dependency-test"
+        }
+
+        fn device_kind(&self) -> DeviceKind {
+            DeviceKind::Bus
+        }
+
+        fn bus_types(&self) -> &'static [BusTypeId] {
+            &[BusTypeId::PLATFORM]
+        }
+
+        fn matcher(&self) -> &dyn DeviceMatcher {
+            static MATCHER: kdevice::CompatibleAliasMatcher =
+                kdevice::CompatibleAliasMatcher("dependency-device");
+            &MATCHER
+        }
+
+        fn probe_device(&self, _device: Arc<DeviceObject>) -> DriverResult<()> {
+            DEPENDENCY_READY.store(true, Ordering::Release);
+            Ok(())
+        }
     }
 
     #[def_test(serial)]
@@ -204,5 +287,66 @@ mod tests {
                 firmware_id: None,
             })
         );
+    }
+
+    #[def_test(serial)]
+    fn retryable_probe_keeps_same_driver_eligible() {
+        let bus = reset_model();
+        DEPENDENCY_READY.store(false, Ordering::Release);
+        CONSUMER_PROBES.store(0, Ordering::Relaxed);
+        kdevice::register_driver_object(Arc::new(DeferredDriver));
+
+        let desc = kdevice::device_desc_add(
+            bus.id(),
+            DeviceLocation::PlatformStatic { id: 3 },
+            DiscoveryOrigin::PlatformStatic,
+            DeviceIdentity::Platform(PlatformIdentity {
+                alias: Some("deferred-device"),
+                firmware_id: None,
+            }),
+            None,
+            ResourceSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            kdevice::probe_device_desc(desc.id()).unwrap(),
+            ProbeOutcome::Deferred
+        );
+        assert_eq!(
+            kdevice::probe_device_desc(desc.id()).unwrap(),
+            ProbeOutcome::Deferred
+        );
+        assert_eq!(CONSUMER_PROBES.load(Ordering::Relaxed), 2);
+    }
+
+    #[def_test(serial)]
+    fn probe_pending_retries_deferred_after_dependency_progress() {
+        let bus = reset_model();
+        DEPENDENCY_READY.store(false, Ordering::Release);
+        CONSUMER_PROBES.store(0, Ordering::Relaxed);
+        kdevice::register_driver_object(Arc::new(DeferredDriver));
+        kdevice::register_driver_object(Arc::new(DependencyDriver));
+
+        let mut context = EnumerationContext::new();
+        for (id, alias) in [(4, "deferred-device"), (5, "dependency-device")] {
+            context
+                .register_device(
+                    bus.id(),
+                    DeviceLocation::PlatformStatic { id },
+                    DiscoveryOrigin::PlatformStatic,
+                    DeviceIdentity::Platform(PlatformIdentity {
+                        alias: Some(alias),
+                        firmware_id: None,
+                    }),
+                    None,
+                    ResourceSet::new(),
+                )
+                .unwrap();
+        }
+
+        assert_eq!(context.probe_pending(), 2);
+        assert_eq!(context.unclaimed_count(), 0);
+        assert_eq!(CONSUMER_PROBES.load(Ordering::Relaxed), 2);
     }
 }
