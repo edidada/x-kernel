@@ -2235,6 +2235,7 @@ dependencies = [
  "karch",
  "kbuild_config",
  "kclass",
+ "kclk",
  "kdevice",
  "kdma",
  "khal",
