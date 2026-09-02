@@ -85,6 +85,30 @@ fn resolve_port(device: &DeviceObject, kind: SerialKind) -> DriverResult<Arc<Ser
     // The early stdout instance shares printk's hardware, so adopt it verbatim;
     // it already carries `SerialRole::Stdout` from early-boot construction.
     if let Some(early) = take_early_port(&ident) {
+        // The early port kept its firmware-programmed divisor (earlycon
+        // semantics). Re-derive it from the platform clock now that the
+        // framework is up: resolve "uart-ref" via devm_clk_get, read the
+        // rate, and program IBRD/FBRD for 115200.
+        #[cfg(feature = "serial-pl011")]
+        if matches!(kind, SerialKind::Pl011) {
+            log::debug!("serial: resolving clock from device resources");
+            // Resolve the clock from the device's firmware-described resource
+            // list first (DT clocks = <&phandle N>); fall back to the
+            // platform's named fixed clock for DTs that only carry a
+            // clock-frequency property (QEMU virt).
+            let spec = device
+                .first_clk()
+                .unwrap_or(device_res::ClkSpec::by_name("uart-ref"));
+            match crate::devm_clk_get(device, spec) {
+                Ok(clk) => {
+                    let _ = clk.prepare_enable();
+                    let rate = clk.get_rate();
+                    log::warn!("serial: programming baud from {rate} Hz clock");
+                    early.set_baud_pl011(Some(rate), 115_200);
+                }
+                Err(e) => log::warn!("serial: no clock ({e:?}), keeping firmware baud"),
+            }
+        }
         return Ok(early);
     }
 
