@@ -9,7 +9,7 @@ use alloc::{format, string::String, sync::Arc};
 use kcpu_id_map::{KCpuMask, KCpuMaskExt, LogicalCpuId};
 use kpoll::PollEvent;
 
-use crate::{PoolId, WorkerId};
+use crate::{WorkerId, WorkerPoolPlacement};
 
 /// ktask-backed thread reference attached to one worker-pool slot.
 #[derive(Clone)]
@@ -75,20 +75,24 @@ where
 }
 
 /// Runtime-visible worker thread name.
-pub(crate) fn worker_name(pool_id: PoolId, worker_id: WorkerId, pool_name: &str) -> String {
+pub(crate) fn worker_name(
+    placement: WorkerPoolPlacement,
+    worker_id: WorkerId,
+    pool_name: &str,
+) -> String {
     format!(
         "kworkerpool/{}/{}:{}",
         pool_name,
-        pool_id.cpu().as_usize(),
+        placement.cpu_id().as_usize(),
         worker_id.as_usize()
     )
 }
 
 /// Runtime-visible manager thread name.
-pub fn manager_name(pool_id: PoolId, pool_name: &str) -> String {
+pub fn manager_name(placement: WorkerPoolPlacement, pool_name: &str) -> String {
     format!(
         "kworkerpool/{}/{}/manager",
         pool_name,
-        pool_id.cpu().as_usize()
+        placement.cpu_id().as_usize()
     )
 }

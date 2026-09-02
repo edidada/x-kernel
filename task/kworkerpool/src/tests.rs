@@ -8,9 +8,10 @@ use ktime_types::{MonotonicInstant, TimeSpan};
 use unittest::{assert, assert_eq, def_test};
 
 use crate::{
-    ActionBatch, EntryKey, EntryOwner, EntryPayload, EntrySource, ImmediateAction, PoolEntry,
-    PoolId, PoolKind, RunnableCandidateResult, WorkerId, WorkerPool, WorkerPoolPolicy,
-    WorkerPoolPolicyConfig, WorkerState,
+    ActionBatch, DEFAULT_CPU_INTENSIVE_THRESHOLD, DEFAULT_CREATE_RETRY_DELAY,
+    DEFAULT_IDLE_RETIRE_AFTER, EntryKey, EntryOwner, EntryPayload, EntrySource, ImmediateAction,
+    PoolEntry, PoolId, PoolKind, RunnableCandidateResult, WorkerId, WorkerPool,
+    WorkerPoolDispatchTarget, WorkerPoolPolicy, WorkerPoolPolicyConfig, WorkerState,
     action::ManagementAction,
     manager::{ManagerRuntime, ManagerTarget, run_worker_pool_manager_pass},
     pool::ManagementComplete,
@@ -23,7 +24,7 @@ fn now(ns: u64) -> MonotonicInstant {
     MonotonicInstant::from_span_since_origin(TimeSpan::from_nanos(ns))
 }
 
-const fn policy(manager_managed: bool) -> WorkerPoolPolicy {
+const fn policy(dispatch_target: WorkerPoolDispatchTarget, scalable: bool) -> WorkerPoolPolicy {
     WorkerPoolPolicy::new(WorkerPoolPolicyConfig {
         min_workers: 1,
         initial_workers: 1,
@@ -31,10 +32,18 @@ const fn policy(manager_managed: bool) -> WorkerPoolPolicy {
         idle_retire_after: Some(TimeSpan::from_millis(10)),
         create_retry_delay: TimeSpan::from_millis(1),
         cpu_intensive_threshold: TimeSpan::from_millis(10),
-        manager_managed,
-        dynamic_create: true,
+        dispatch_target,
+        scalable,
         idle_retire: true,
     })
+}
+
+const fn threaded_policy() -> WorkerPoolPolicy {
+    policy(WorkerPoolDispatchTarget::WorkerThread, true)
+}
+
+const fn bottom_half_policy() -> WorkerPoolPolicy {
+    policy(WorkerPoolDispatchTarget::BottomHalf, false)
 }
 
 const fn pool_id() -> PoolId {
@@ -51,8 +60,97 @@ fn entry(key: usize) -> PoolEntry {
 }
 
 #[def_test]
+fn fixed_policy_uses_direct_worker_wake_without_growth_or_retire() {
+    let fixed = WorkerPoolPolicy::fixed_threaded(2);
+    assert_eq!(fixed.min_workers(), 2);
+    assert_eq!(fixed.initial_workers(), 2);
+    assert_eq!(fixed.max_workers(), 2);
+    assert_eq!(fixed.idle_retire_after(), None);
+    assert_eq!(
+        fixed.cpu_intensive_threshold(),
+        DEFAULT_CPU_INTENSIVE_THRESHOLD
+    );
+    assert_eq!(
+        fixed.dispatch_target(),
+        WorkerPoolDispatchTarget::WorkerThread
+    );
+    assert!(fixed.wakes_worker_threads());
+    assert!(!fixed.scalable());
+    assert!(!fixed.idle_retire());
+
+    let mut pool: WorkerPool<TestThreadRef, 2, 4> = WorkerPool::new(pool_id(), fixed);
+    assert!(
+        pool.install_worker(WorkerId::new(0), TestThreadRef(0))
+            .is_ok()
+    );
+
+    let actions = pool.enqueue_runnable(entry(1), now(1)).unwrap();
+    assert!(actions.immediate().any(|action| {
+        matches!(
+            action,
+            ImmediateAction::WakeWorker {
+                worker,
+                ..
+            } if worker == WorkerId::new(0)
+        )
+    }));
+}
+
+#[def_test]
+fn scalable_policy_uses_default_lifecycle_tuning() {
+    let scalable = WorkerPoolPolicy::scalable_threaded(1, 4);
+    assert_eq!(scalable.min_workers(), 1);
+    assert_eq!(scalable.initial_workers(), 1);
+    assert_eq!(scalable.max_workers(), 4);
+    assert_eq!(
+        scalable.idle_retire_after(),
+        Some(DEFAULT_IDLE_RETIRE_AFTER)
+    );
+    assert_eq!(scalable.create_retry_delay(), DEFAULT_CREATE_RETRY_DELAY);
+    assert_eq!(
+        scalable.cpu_intensive_threshold(),
+        DEFAULT_CPU_INTENSIVE_THRESHOLD
+    );
+    assert_eq!(
+        scalable.dispatch_target(),
+        WorkerPoolDispatchTarget::WorkerThread
+    );
+    assert!(scalable.wakes_worker_threads());
+    assert!(scalable.scalable());
+    assert!(scalable.idle_retire());
+}
+
+#[def_test]
+fn bottom_half_policy_raises_bottom_half_without_manager() {
+    let bottom_half = WorkerPoolPolicy::bottom_half(1);
+    assert_eq!(bottom_half.min_workers(), 1);
+    assert_eq!(bottom_half.initial_workers(), 1);
+    assert_eq!(bottom_half.max_workers(), 1);
+    assert_eq!(
+        bottom_half.dispatch_target(),
+        WorkerPoolDispatchTarget::BottomHalf
+    );
+    assert!(!bottom_half.wakes_worker_threads());
+    assert!(!bottom_half.scalable());
+    assert!(!bottom_half.idle_retire());
+
+    let mut pool: WorkerPool<TestThreadRef, 1, 4> = WorkerPool::new(pool_id(), bottom_half);
+    assert!(
+        pool.install_worker(WorkerId::new(0), TestThreadRef(0))
+            .is_ok()
+    );
+
+    let actions = pool.enqueue_runnable(entry(1), now(1)).unwrap();
+    assert!(
+        actions
+            .immediate()
+            .any(|action| matches!(action, ImmediateAction::RaiseBottomHalf { .. }))
+    );
+}
+
+#[def_test]
 fn runnable_enqueue_wakes_idle_worker() {
-    let mut pool: WorkerPool<TestThreadRef, 4, 8> = WorkerPool::new(pool_id(), policy(true));
+    let mut pool: WorkerPool<TestThreadRef, 4, 8> = WorkerPool::new(pool_id(), threaded_policy());
     assert!(
         pool.install_worker(WorkerId::new(0), TestThreadRef(0))
             .is_ok()
@@ -76,7 +174,7 @@ fn runnable_enqueue_wakes_idle_worker() {
 
 #[def_test]
 fn preparing_worker_remains_wait_ready_and_can_be_rewoken() {
-    let mut pool: WorkerPool<TestThreadRef, 4, 8> = WorkerPool::new(pool_id(), policy(true));
+    let mut pool: WorkerPool<TestThreadRef, 4, 8> = WorkerPool::new(pool_id(), threaded_policy());
     assert!(
         pool.install_worker(WorkerId::new(0), TestThreadRef(0))
             .is_ok()
@@ -102,8 +200,9 @@ fn preparing_worker_remains_wait_ready_and_can_be_rewoken() {
 }
 
 #[def_test]
-fn unmanaged_pool_raises_bottom_half_instead_of_worker_wake() {
-    let mut pool: WorkerPool<TestThreadRef, 1, 4> = WorkerPool::new(pool_id(), policy(false));
+fn bottom_half_dispatch_raises_bottom_half_instead_of_worker_wake() {
+    let mut pool: WorkerPool<TestThreadRef, 1, 4> =
+        WorkerPool::new(pool_id(), bottom_half_policy());
     assert!(
         pool.install_worker(WorkerId::new(0), TestThreadRef(0))
             .is_ok()
@@ -119,7 +218,7 @@ fn unmanaged_pool_raises_bottom_half_instead_of_worker_wake() {
 
 #[def_test]
 fn deferred_entries_promote_by_owner_fifo() {
-    let mut pool: WorkerPool<TestThreadRef, 2, 8> = WorkerPool::new(pool_id(), policy(true));
+    let mut pool: WorkerPool<TestThreadRef, 2, 8> = WorkerPool::new(pool_id(), threaded_policy());
     let owner = EntryOwner::new(11);
     let other = EntryOwner::new(12);
     assert!(
@@ -158,7 +257,7 @@ fn deferred_entries_promote_by_owner_fifo() {
 
 #[def_test]
 fn prepare_commit_finish_tracks_concurrency() {
-    let mut pool: WorkerPool<TestThreadRef, 2, 8> = WorkerPool::new(pool_id(), policy(true));
+    let mut pool: WorkerPool<TestThreadRef, 2, 8> = WorkerPool::new(pool_id(), threaded_policy());
     assert!(
         pool.install_worker(WorkerId::new(0), TestThreadRef(0))
             .is_ok()
@@ -190,7 +289,7 @@ fn prepare_commit_finish_tracks_concurrency() {
 
 #[def_test]
 fn blocked_worker_releases_concurrency_and_wakes_another_worker() {
-    let mut pool: WorkerPool<TestThreadRef, 2, 8> = WorkerPool::new(pool_id(), policy(true));
+    let mut pool: WorkerPool<TestThreadRef, 2, 8> = WorkerPool::new(pool_id(), threaded_policy());
     assert!(
         pool.install_worker(WorkerId::new(0), TestThreadRef(0))
             .is_ok()
@@ -241,7 +340,7 @@ fn blocked_worker_releases_concurrency_and_wakes_another_worker() {
 
 #[def_test]
 fn cpu_intensive_worker_releases_concurrency_and_wakes_another_worker() {
-    let mut pool: WorkerPool<TestThreadRef, 2, 8> = WorkerPool::new(pool_id(), policy(true));
+    let mut pool: WorkerPool<TestThreadRef, 2, 8> = WorkerPool::new(pool_id(), threaded_policy());
     assert!(
         pool.install_worker(WorkerId::new(0), TestThreadRef(0))
             .is_ok()
@@ -288,7 +387,7 @@ fn cpu_intensive_worker_releases_concurrency_and_wakes_another_worker() {
 
 #[def_test]
 fn retire_requested_worker_is_reused_before_exit() {
-    let mut pool: WorkerPool<TestThreadRef, 2, 8> = WorkerPool::new(pool_id(), policy(true));
+    let mut pool: WorkerPool<TestThreadRef, 2, 8> = WorkerPool::new(pool_id(), threaded_policy());
     assert!(
         pool.install_worker(WorkerId::new(0), TestThreadRef(0))
             .is_ok()
@@ -329,7 +428,7 @@ fn retire_requested_worker_is_reused_before_exit() {
 
 #[def_test]
 fn failed_spawn_uses_retry_deadline_before_next_spawn() {
-    let mut pool: WorkerPool<TestThreadRef, 2, 8> = WorkerPool::new(pool_id(), policy(true));
+    let mut pool: WorkerPool<TestThreadRef, 2, 8> = WorkerPool::new(pool_id(), threaded_policy());
     assert!(pool.enqueue_runnable(entry(1), now(1)).is_ok());
 
     assert!(matches!(
@@ -414,7 +513,7 @@ impl ManagerRuntime<TestManagerPool> for ManagerTestRuntime {
 #[def_test]
 fn manager_pass_spawns_reserved_worker() {
     static POOL: SpinNoIrq<WorkerPool<TestThreadRef, 2, 8>> =
-        SpinNoIrq::new(WorkerPool::new(pool_id(), policy(true)));
+        SpinNoIrq::new(WorkerPool::new(pool_id(), threaded_policy()));
     {
         let mut pool = POOL.lock();
         assert!(pool.enqueue_runnable(entry(1), now(1)).is_ok());

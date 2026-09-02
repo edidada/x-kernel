@@ -8,7 +8,7 @@ use kcpu_id_map::LogicalCpuId;
 use kspin::SpinNoIrqGuard;
 use kworkerpool::{
     ActionBatch, EntryOwner as PoolEntryOwner, ImmediateAction, KtaskWorkerPool, PoolId, WorkerId,
-    WorkerPool, WorkerPoolError, WorkerThreadRef,
+    WorkerPool, WorkerPoolError, WorkerPoolPlacement, WorkerThreadRef,
 };
 
 use super::{
@@ -34,6 +34,7 @@ impl BuiltinSystemWorkerPool {
         Self {
             runtime: KtaskWorkerPool::new(
                 PoolId::new(kind.pool_kind(), cpu_id),
+                WorkerPoolPlacement::bound_to(cpu_id),
                 builtin_policy(kind),
             ),
         }
@@ -47,7 +48,7 @@ impl BuiltinSystemWorkerPool {
 
     /// Returns this pool CPU.
     pub(crate) fn cpu_id(&self) -> LogicalCpuId {
-        self.runtime.id().cpu()
+        self.runtime.placement().cpu_id()
     }
 
     /// Returns this pool identity.
@@ -57,7 +58,7 @@ impl BuiltinSystemWorkerPool {
 
     /// Returns whether this built-in pool has a runnable backend installed.
     pub(crate) fn is_ready(&self) -> bool {
-        if self.kind().is_manager_managed() {
+        if self.kind().has_manager() {
             return self.runtime.manager_thread_ref().is_some();
         }
         self.runtime.lock().installed_workers() != 0
@@ -65,8 +66,11 @@ impl BuiltinSystemWorkerPool {
 
     /// Configures an empty const-initialized pool before workers are installed.
     pub(crate) fn configure_empty(&self, kind: SystemPoolKind, cpu_id: LogicalCpuId) -> bool {
-        self.runtime
-            .configure_empty(PoolId::new(kind.pool_kind(), cpu_id), builtin_policy(kind))
+        self.runtime.configure_empty(
+            PoolId::new(kind.pool_kind(), cpu_id),
+            WorkerPoolPlacement::bound_to(cpu_id),
+            builtin_policy(kind),
+        )
     }
 
     /// Returns the ktask-backed runtime pool.
@@ -148,7 +152,7 @@ impl SystemPoolBinding {
                 return Err(BuiltinPoolEnqueueError::InvalidTransition);
             }
         };
-        handle_actions(actions);
+        handle_actions(self.cpu_id(), actions);
         Ok(())
     }
 
@@ -179,17 +183,17 @@ impl SystemPoolBinding {
     }
 }
 
-pub(crate) fn handle_actions(actions: ActionBatch) {
+pub(crate) fn handle_actions(cpu_id: LogicalCpuId, actions: ActionBatch) {
     for action in actions.immediate() {
         match action {
             ImmediateAction::WakeWorker { pool, worker } => {
                 if let Some(kind) = SystemPoolKind::from_usize(pool.kind().as_usize()) {
-                    let _ = super::system::wake_system_worker(kind, pool.cpu(), worker);
+                    let _ = super::system::wake_system_worker(kind, cpu_id, worker);
                 }
             }
             ImmediateAction::WakeManager { pool } => {
                 if let Some(kind) = SystemPoolKind::from_usize(pool.kind().as_usize()) {
-                    let _ = super::system::wake_system_manager(kind, pool.cpu());
+                    let _ = super::system::wake_system_manager(kind, cpu_id);
                 }
             }
             ImmediateAction::RaiseBottomHalf { .. } => {

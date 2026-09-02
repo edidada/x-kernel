@@ -33,6 +33,24 @@ pub type WorkerRuntimeFactory<R> = fn(PoolId, WorkerId, Arc<PollEvent>) -> R;
 /// Converts a pool identity into a runtime-visible name component.
 pub type PoolNameResolver = fn(PoolId) -> &'static str;
 
+/// Runtime placement for ktask-backed worker-pool tasks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkerPoolPlacement {
+    cpu_id: LogicalCpuId,
+}
+
+impl WorkerPoolPlacement {
+    /// Creates a placement that binds worker and manager tasks to `cpu_id`.
+    pub const fn bound_to(cpu_id: LogicalCpuId) -> Self {
+        Self { cpu_id }
+    }
+
+    /// Returns the CPU where ktask-backed pool tasks should run.
+    pub const fn cpu_id(self) -> LogicalCpuId {
+        self.cpu_id
+    }
+}
+
 /// Result of accounting one ktask execution tick for a worker-pool context.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionTickResult {
@@ -50,14 +68,16 @@ pub struct ExecutionTickResult {
 /// manager task wake source.
 pub struct KtaskWorkerPool<const MAX_WORKERS: usize, const ENTRY_CAP: usize> {
     inner: SpinNoIrq<WorkerPool<WorkerThreadRef, MAX_WORKERS, ENTRY_CAP>>,
+    placement: SpinNoIrq<WorkerPoolPlacement>,
     manager_thread: SpinNoIrq<Option<WorkerThreadRef>>,
 }
 
 impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> KtaskWorkerPool<MAX_WORKERS, ENTRY_CAP> {
     /// Creates one ktask-backed pool instance.
-    pub const fn new(id: PoolId, policy: WorkerPoolPolicy) -> Self {
+    pub const fn new(id: PoolId, placement: WorkerPoolPlacement, policy: WorkerPoolPolicy) -> Self {
         Self {
             inner: SpinNoIrq::new(WorkerPool::new(id, policy)),
+            placement: SpinNoIrq::new(placement),
             manager_thread: SpinNoIrq::new(None),
         }
     }
@@ -79,9 +99,27 @@ impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> KtaskWorkerPool<MAX_WORKE
         self.inner.lock().id()
     }
 
+    /// Returns where this ktask-backed pool creates worker and manager tasks.
+    pub fn placement(&self) -> WorkerPoolPlacement {
+        *self.placement.lock()
+    }
+
     /// Reconfigures an empty const-initialized pool.
-    pub fn configure_empty(&self, id: PoolId, policy: WorkerPoolPolicy) -> bool {
-        self.inner.lock().configure_empty(id, policy)
+    pub fn configure_empty(
+        &self,
+        id: PoolId,
+        placement: WorkerPoolPlacement,
+        policy: WorkerPoolPolicy,
+    ) -> bool {
+        if self.manager_thread.lock().is_some() {
+            return false;
+        }
+        let configured = self.inner.lock().configure_empty(id, policy);
+        if !configured {
+            return false;
+        }
+        *self.placement.lock() = placement;
+        true
     }
 
     /// Installs one already-created worker task into a pool slot.
@@ -201,18 +239,23 @@ impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> KtaskWorkerPool<MAX_WORKE
         R: WorkerRuntime<&'static Self> + 'static,
     {
         let pool_id = self.id();
+        let placement = self.placement();
         let wake_source = Arc::new(PollEvent::new());
         let thread_wake_source = wake_source.clone();
-        let task = prepare_bound_kthread(pool_id.cpu(), worker_name(pool_id, worker, pool_name), {
-            move || {
-                // The pool may clear its WorkerThreadRef when this worker begins
-                // retirement. Hold a task ref cloned from ktask's current-task
-                // slot until the entry closure returns into ktask's exit path.
-                let _entry_task_ref = ktask::current().clone();
-                let runtime = runtime_factory(pool_id, worker, wake_source);
-                WorkerTask::new(self, worker, runtime).run();
-            }
-        });
+        let task = prepare_bound_kthread(
+            placement.cpu_id(),
+            worker_name(placement, worker, pool_name),
+            {
+                move || {
+                    // The pool may clear its WorkerThreadRef when this worker begins
+                    // retirement. Hold a task ref cloned from ktask's current-task
+                    // slot until the entry closure returns into ktask's exit path.
+                    let _entry_task_ref = ktask::current().clone();
+                    let runtime = runtime_factory(pool_id, worker, wake_source);
+                    WorkerTask::new(self, worker, runtime).run();
+                }
+            },
+        );
 
         if !self.install_worker(
             worker,
@@ -222,7 +265,7 @@ impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> KtaskWorkerPool<MAX_WORKE
                 "failed to install workerpool worker {} for pool kind {} CPU {}",
                 worker.as_usize(),
                 pool_id.kind().as_usize(),
-                pool_id.cpu().as_usize()
+                placement.cpu_id().as_usize()
             );
             return false;
         }
@@ -335,11 +378,11 @@ where
 
 /// Creates and activates one per-CPU manager task for a homogeneous pool set.
 ///
-/// The same manager wake source is installed into every managed pool in
-/// `pools`, so any pool can request slow-path lifecycle work without owning its
-/// own manager task.
+/// The same manager wake source is installed into every pool in `pools`, so any
+/// scalable pool can request slow-path lifecycle work without owning its own
+/// manager task.
 pub fn start_manager_task<R, const MAX_WORKERS: usize, const ENTRY_CAP: usize, const N: usize>(
-    cpu_id: LogicalCpuId,
+    placement: WorkerPoolPlacement,
     name: String,
     pools: [&'static KtaskWorkerPool<MAX_WORKERS, ENTRY_CAP>; N],
     pool_name: PoolNameResolver,
@@ -355,7 +398,7 @@ where
         wake_source: manager_wake_source.clone(),
     };
     let task = ManagerTask::new(pools, runtime);
-    let manager_task = prepare_bound_kthread(cpu_id, name, move || task.run());
+    let manager_task = prepare_bound_kthread(placement.cpu_id(), name, move || task.run());
     let thread_ref = WorkerThreadRef::new(manager_task.clone(), manager_wake_source);
 
     let mut installed = true;

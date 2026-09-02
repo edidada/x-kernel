@@ -6,6 +6,25 @@
 
 use ktime_types::TimeSpan;
 
+/// Default delay before retrying worker creation after a creation failure.
+pub const DEFAULT_CREATE_RETRY_DELAY: TimeSpan = TimeSpan::from_millis(10);
+
+/// Default runtime after which a running execution stops consuming pool
+/// concurrency.
+pub const DEFAULT_CPU_INTENSIVE_THRESHOLD: TimeSpan = TimeSpan::from_millis(10);
+
+/// Default idle time after which an extra worker may retire.
+pub const DEFAULT_IDLE_RETIRE_AFTER: TimeSpan = TimeSpan::from_secs(30);
+
+/// Runtime target used when the pool decides runnable work should execute.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkerPoolDispatchTarget {
+    /// Wake a task-backed worker thread.
+    WorkerThread,
+    /// Raise a bottom-half style execution context.
+    BottomHalf,
+}
+
 /// Per-instance worker-pool lifecycle and accounting policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkerPoolPolicy {
@@ -15,26 +34,94 @@ pub struct WorkerPoolPolicy {
     idle_retire_after: Option<TimeSpan>,
     create_retry_delay: TimeSpan,
     cpu_intensive_threshold: TimeSpan,
-    manager_managed: bool,
-    dynamic_create: bool,
+    dispatch_target: WorkerPoolDispatchTarget,
+    scalable: bool,
     idle_retire: bool,
 }
 
 /// Explicit inputs used to create one worker-pool policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkerPoolPolicyConfig {
+    /// Minimum number of installed workers retained by the pool.
     pub min_workers: usize,
+    /// Number of workers expected during initial runtime bring-up.
     pub initial_workers: usize,
+    /// Maximum number of runtime worker slots.
     pub max_workers: usize,
+    /// Idle time after which extra idle workers may retire.
     pub idle_retire_after: Option<TimeSpan>,
+    /// Backoff before retrying runtime worker creation after a failure.
     pub create_retry_delay: TimeSpan,
+    /// Runtime after which an execution stops consuming bounded concurrency.
     pub cpu_intensive_threshold: TimeSpan,
-    pub manager_managed: bool,
-    pub dynamic_create: bool,
+    /// Runtime target used for dispatch actions.
+    pub dispatch_target: WorkerPoolDispatchTarget,
+    /// Whether the pool may grow beyond its initial worker count.
+    pub scalable: bool,
+    /// Whether the pool may retire idle workers above `min_workers`.
     pub idle_retire: bool,
 }
 
 impl WorkerPoolPolicy {
+    /// Creates a fixed-size pool policy.
+    ///
+    /// A fixed-size pool installs `workers` runtime workers, wakes those
+    /// workers directly, never requests creation of more workers, and never
+    /// retires idle workers. This is the simplest policy for runtimes that
+    /// already know their worker count.
+    pub const fn fixed_threaded(workers: usize) -> Self {
+        Self::new(WorkerPoolPolicyConfig {
+            min_workers: workers,
+            initial_workers: workers,
+            max_workers: workers,
+            idle_retire_after: None,
+            create_retry_delay: TimeSpan::from_millis(0),
+            cpu_intensive_threshold: DEFAULT_CPU_INTENSIVE_THRESHOLD,
+            dispatch_target: WorkerPoolDispatchTarget::WorkerThread,
+            scalable: false,
+            idle_retire: false,
+        })
+    }
+
+    /// Creates a scalable task-backed pool policy.
+    ///
+    /// The pool starts with `min_workers`, may grow up to `max_workers` while
+    /// runnable work is not making progress, and may retire extra idle workers
+    /// back down to `min_workers`. Creation retry, CPU-intensive accounting, and
+    /// idle-retire timing use this crate's default values.
+    pub const fn scalable_threaded(min_workers: usize, max_workers: usize) -> Self {
+        Self::new(WorkerPoolPolicyConfig {
+            min_workers,
+            initial_workers: min_workers,
+            max_workers,
+            idle_retire_after: Some(DEFAULT_IDLE_RETIRE_AFTER),
+            create_retry_delay: DEFAULT_CREATE_RETRY_DELAY,
+            cpu_intensive_threshold: DEFAULT_CPU_INTENSIVE_THRESHOLD,
+            dispatch_target: WorkerPoolDispatchTarget::WorkerThread,
+            scalable: true,
+            idle_retire: true,
+        })
+    }
+
+    /// Creates a fixed-size bottom-half pool policy.
+    ///
+    /// A bottom-half pool does not wake task-backed workers. Dispatch returns a
+    /// bottom-half style action and the product layer drives execution from
+    /// that context.
+    pub const fn bottom_half(workers: usize) -> Self {
+        Self::new(WorkerPoolPolicyConfig {
+            min_workers: workers,
+            initial_workers: workers,
+            max_workers: workers,
+            idle_retire_after: None,
+            create_retry_delay: TimeSpan::from_millis(0),
+            cpu_intensive_threshold: DEFAULT_CPU_INTENSIVE_THRESHOLD,
+            dispatch_target: WorkerPoolDispatchTarget::BottomHalf,
+            scalable: false,
+            idle_retire: false,
+        })
+    }
+
     /// Creates a policy with explicit fields.
     ///
     /// Worker counts are normalized into `min <= initial <= max`. Growth and
@@ -54,9 +141,11 @@ impl WorkerPoolPolicy {
         } else {
             config.initial_workers
         };
-        let dynamic_create = config.dynamic_create && min_workers < max_workers;
-        let idle_retire =
-            config.idle_retire && min_workers < max_workers && config.idle_retire_after.is_some();
+        let scalable = config.scalable && min_workers < max_workers;
+        let idle_retire = scalable
+            && config.idle_retire
+            && min_workers < max_workers
+            && config.idle_retire_after.is_some();
         let idle_retire_after = if idle_retire {
             config.idle_retire_after
         } else {
@@ -70,8 +159,8 @@ impl WorkerPoolPolicy {
             idle_retire_after,
             create_retry_delay: config.create_retry_delay,
             cpu_intensive_threshold: config.cpu_intensive_threshold,
-            manager_managed: config.manager_managed,
-            dynamic_create,
+            dispatch_target: config.dispatch_target,
+            scalable,
             idle_retire,
         }
     }
@@ -107,14 +196,19 @@ impl WorkerPoolPolicy {
         self.cpu_intensive_threshold
     }
 
-    /// Returns whether a runtime manager handles slow-path lifecycle actions.
-    pub const fn manager_managed(self) -> bool {
-        self.manager_managed
+    /// Returns the runtime target for dispatch actions.
+    pub const fn dispatch_target(self) -> WorkerPoolDispatchTarget {
+        self.dispatch_target
     }
 
-    /// Returns whether this pool may dynamically create runtime workers.
-    pub const fn dynamic_create(self) -> bool {
-        self.dynamic_create
+    /// Returns whether dispatch wakes task-backed worker threads.
+    pub const fn wakes_worker_threads(self) -> bool {
+        matches!(self.dispatch_target, WorkerPoolDispatchTarget::WorkerThread)
+    }
+
+    /// Returns whether this pool may grow beyond its initial worker count.
+    pub const fn scalable(self) -> bool {
+        self.scalable
     }
 
     /// Returns whether idle workers may retire.

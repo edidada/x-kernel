@@ -785,8 +785,7 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
     }
 
     fn can_spawn_worker_after_retry(&self) -> bool {
-        self.policy.dynamic_create()
-            && self.policy.manager_managed()
+        self.policy.scalable()
             && self.queue.runnable_len() != 0
             && self.counts.nr_concurrency == 0
             && self.counts.nr_preparing == 0
@@ -839,7 +838,7 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
 
     fn dispatch_worker_action(&self, worker: WorkerId) -> ActionBatch {
         let mut actions = ActionBatch::new();
-        if self.policy.manager_managed() {
+        if self.policy.wakes_worker_threads() {
             actions.push_immediate(ImmediateAction::WakeWorker {
                 pool: self.id,
                 worker,

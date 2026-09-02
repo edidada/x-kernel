@@ -198,7 +198,7 @@ impl WorkerRuntime<&'static BuiltinPoolRuntime> for BuiltinWorkerRuntime {
     }
 
     fn handle_worker_actions(&mut self, _pool: &'static BuiltinPoolRuntime, actions: ActionBatch) {
-        crate::builtinpool::handle_actions(actions);
+        crate::builtinpool::handle_actions(self.cpu_id, actions);
     }
 
     fn run_claimed_work(
@@ -434,7 +434,7 @@ fn run_one_bottom_half_pool_work(kind: BottomHalfWorkQueueKind, pool: SystemPool
     let Ok((decision, actions)) = pool.pool().lock().worker_ready_to_park(worker, now) else {
         return false;
     };
-    crate::builtinpool::handle_actions(actions);
+    crate::builtinpool::handle_actions(pool.cpu_id(), actions);
     if decision != kworkerpool::ParkDecision::Run {
         return false;
     }
@@ -446,7 +446,7 @@ fn run_one_bottom_half_pool_work(kind: BottomHalfWorkQueueKind, pool: SystemPool
     let Ok(kworkerpool::RunnableCandidateResult::Candidate(candidate)) = candidate else {
         return false;
     };
-    crate::builtinpool::handle_actions(candidate.actions);
+    crate::builtinpool::handle_actions(pool.cpu_id(), candidate.actions);
 
     match claim_builtin_pool_entry(
         SystemPoolKind::Bh,
@@ -464,7 +464,7 @@ fn run_one_bottom_half_pool_work(kind: BottomHalfWorkQueueKind, pool: SystemPool
                 warn!("bottom-half workqueue claim commit failed");
                 return false;
             };
-            crate::builtinpool::handle_actions(actions);
+            crate::builtinpool::handle_actions(pool.cpu_id(), actions);
             let _ = kind;
             run_claimed_builtin_work(SystemPoolKind::Bh, pool.cpu_id(), claimed);
             if let Ok(actions) =
@@ -472,7 +472,7 @@ fn run_one_bottom_half_pool_work(kind: BottomHalfWorkQueueKind, pool: SystemPool
                     .lock()
                     .worker_finished(worker, candidate.token, ktask::monotonic_time())
             {
-                crate::builtinpool::handle_actions(actions);
+                crate::builtinpool::handle_actions(pool.cpu_id(), actions);
             }
             true
         }
@@ -483,7 +483,7 @@ fn run_one_bottom_half_pool_work(kind: BottomHalfWorkQueueKind, pool: SystemPool
                 candidate.token,
                 ktask::monotonic_time(),
             ) {
-                crate::builtinpool::handle_actions(discarded.actions);
+                crate::builtinpool::handle_actions(pool.cpu_id(), discarded.actions);
             }
             false
         }

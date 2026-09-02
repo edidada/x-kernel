@@ -1307,12 +1307,12 @@ pub(crate) fn apply_promote_inactive(
             && let Some(work) = scheduled_work_by_key(work_key)
             && binding.commit_promoted(entry, work.core())
         {
-            crate::builtinpool::handle_actions(actions);
+            crate::builtinpool::handle_actions(cpu_id, actions);
         } else {
             // The pool entry became stale between queue accounting and backend
             // promotion. Leave it runnable; the normal claim path will discard
             // it without charging queue active accounting.
-            crate::builtinpool::handle_actions(actions);
+            crate::builtinpool::handle_actions(cpu_id, actions);
         }
     }
     Ok(())

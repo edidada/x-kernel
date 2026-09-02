@@ -5,7 +5,7 @@
 `kworkerpool` owns worker-pool scheduling. It manages worker slots,
 runnable/deferred entry queues, concurrency accounting, CPU-intensive marking,
 dynamic worker creation, idle retirement, manager actions, ktask-backed worker
-threads, and ktask-backed manager threads.
+threads, ktask-backed manager threads, and ktask task placement.
 
 The crate does not know what a workqueue is. Entries are opaque
 source/owner/key/payload values. Product layers decide what those values mean
@@ -21,9 +21,9 @@ and validate them during claim.
   deferred promotion.
 - `WorkerRuntime` is the callback interface used by a worker task.
 - `RunnableClaimer` validates a popped entry outside the pool lock.
-- `WorkerTask` is the ktask-backed worker loop.
-- `ManagerTask` is the ktask-backed manager loop.
 - `WorkerPoolPolicy` configures per-instance lifecycle behavior.
+- `WorkerPoolPlacement` describes where ktask-backed worker and manager tasks
+  are bound.
 
 ## Basic Usage
 
@@ -32,23 +32,12 @@ provide a runtime that executes returned actions and validates claimed entries.
 
 ```rust
 use kcpu_id_map::LogicalCpuId;
-use ktime_types::TimeSpan;
 use kworkerpool::{
     EntryKey, EntryOwner, EntryPayload, EntrySource, PoolEntry, PoolId, PoolKind,
-    WorkerId, WorkerPool, WorkerPoolPolicy, WorkerPoolPolicyConfig,
+    WorkerId, WorkerPool, WorkerPoolPolicy,
 };
 
-let policy = WorkerPoolPolicy::new(WorkerPoolPolicyConfig {
-    min_workers: 1,
-    initial_workers: 1,
-    max_workers: 4,
-    idle_retire_after: Some(TimeSpan::from_secs(30)),
-    create_retry_delay: TimeSpan::from_millis(10),
-    cpu_intensive_threshold: TimeSpan::from_millis(10),
-    manager_managed: true,
-    dynamic_create: true,
-    idle_retire: true,
-});
+let policy = WorkerPoolPolicy::scalable_threaded(1, 4);
 
 let pool_id = PoolId::new(PoolKind::new(0), LogicalCpuId::new(0));
 let mut pool: WorkerPool<(), 4, 128> = WorkerPool::new(pool_id, policy);
@@ -105,8 +94,8 @@ Fast paths return `ImmediateAction` values for wakeups and bottom-half raises.
 Slow lifecycle decisions are represented as `ManagementAction` values and are
 processed by a manager task.
 
-The manager is responsible for creating workers after the pool reserves a
-`Creating` slot and for requesting idle retirement. Worker exit happens in the
+Scalable pools use the manager to create workers after the pool reserves a
+`Creating` slot and to request idle retirement. Worker exit happens in the
 worker's own context. A pending retire request can be canceled before the worker
 enters `Exiting`; once `Exiting` is reached, the slot is released only by
 `worker_exit_complete()`.

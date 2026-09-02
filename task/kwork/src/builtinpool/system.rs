@@ -94,7 +94,7 @@ impl BuiltinSystemWorkerPools {
 
     /// Wakes the manager thread for a built-in task-context pool.
     pub(crate) fn wake_manager(&'static self, kind: SystemPoolKind, cpu_id: LogicalCpuId) -> bool {
-        if !kind.is_manager_managed() {
+        if !kind.has_manager() {
             return false;
         }
         self.pool(kind, cpu_id)
@@ -161,7 +161,7 @@ pub(crate) fn account_system_execution_tick(
     let kind = SystemPoolKind::from_usize(decoded.pool_id.kind().as_usize())?;
     let pool = system_pools().pool(kind, decoded.pool_id.cpu())?;
     let result = pool.runtime().account_execution_tick(context, now)?;
-    super::pool::handle_actions(result.actions);
+    super::pool::handle_actions(pool.cpu_id(), result.actions);
     result.deadline
 }
 
@@ -180,7 +180,7 @@ pub(crate) fn account_system_execution_blocked(
         return;
     };
     if let Some(actions) = pool.runtime().account_worker_blocked(context, now) {
-        super::pool::handle_actions(actions);
+        super::pool::handle_actions(pool.cpu_id(), actions);
     }
 }
 

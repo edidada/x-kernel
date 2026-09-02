@@ -4,8 +4,7 @@
 
 //! Built-in worker-pool kinds and policy constants.
 
-use ktime_types::TimeSpan;
-use kworkerpool::{PoolKind, WorkerPoolPolicy, WorkerPoolPolicyConfig};
+use kworkerpool::{PoolKind, WorkerPoolPolicy};
 
 /// Maximum worker slots in one built-in system pool.
 pub(crate) const BUILTIN_WORKERS_PER_POOL: usize = kbuild_config::WORKQUEUE_WORKERS_PER_POOL;
@@ -52,8 +51,8 @@ impl SystemPoolKind {
         PoolKind::new(self.as_usize())
     }
 
-    /// Returns whether a per-CPU manager should process lifecycle actions.
-    pub(crate) const fn is_manager_managed(self) -> bool {
+    /// Returns whether this built-in pool has a per-CPU manager task.
+    pub(crate) const fn has_manager(self) -> bool {
         match self {
             Self::Normal => true,
             Self::Bh => false,
@@ -71,27 +70,7 @@ impl SystemPoolKind {
 
 pub(crate) const fn builtin_policy(kind: SystemPoolKind) -> WorkerPoolPolicy {
     match kind {
-        SystemPoolKind::Normal => WorkerPoolPolicy::new(WorkerPoolPolicyConfig {
-            min_workers: 1,
-            initial_workers: 1,
-            max_workers: BUILTIN_WORKERS_PER_POOL,
-            idle_retire_after: Some(TimeSpan::from_secs(30)),
-            create_retry_delay: TimeSpan::from_millis(10),
-            cpu_intensive_threshold: TimeSpan::from_millis(10),
-            manager_managed: true,
-            dynamic_create: true,
-            idle_retire: true,
-        }),
-        SystemPoolKind::Bh => WorkerPoolPolicy::new(WorkerPoolPolicyConfig {
-            min_workers: 1,
-            initial_workers: 1,
-            max_workers: 1,
-            idle_retire_after: None,
-            create_retry_delay: TimeSpan::from_millis(0),
-            cpu_intensive_threshold: TimeSpan::from_millis(10),
-            manager_managed: false,
-            dynamic_create: false,
-            idle_retire: false,
-        }),
+        SystemPoolKind::Normal => WorkerPoolPolicy::scalable_threaded(1, BUILTIN_WORKERS_PER_POOL),
+        SystemPoolKind::Bh => WorkerPoolPolicy::bottom_half(1),
     }
 }

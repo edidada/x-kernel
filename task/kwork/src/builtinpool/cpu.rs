@@ -8,8 +8,8 @@ use alloc::string::String;
 
 use kcpu_id_map::LogicalCpuId;
 use kworkerpool::{
-    PoolId, PoolNameResolver, WorkerId, WorkerRuntime, WorkerRuntimeFactory, manager_name,
-    start_manager_task,
+    PoolId, PoolNameResolver, WorkerId, WorkerPoolPlacement, WorkerRuntime, WorkerRuntimeFactory,
+    manager_name, start_manager_task,
 };
 
 use super::{
@@ -116,7 +116,7 @@ impl BuiltinCpuWorkerPools {
         }
 
         result.manager_started = start_manager_task(
-            cpu_id,
+            WorkerPoolPlacement::bound_to(cpu_id),
             manager_task_name(SystemPoolKind::Normal, cpu_id),
             [pool],
             pool_name,
@@ -147,7 +147,7 @@ const fn pool_name(pool_id: PoolId) -> &'static str {
 }
 
 fn manager_task_name(kind: SystemPoolKind, cpu_id: LogicalCpuId) -> String {
-    manager_name(PoolId::new(kind.pool_kind(), cpu_id), kind.pool_name())
+    manager_name(WorkerPoolPlacement::bound_to(cpu_id), kind.pool_name())
 }
 
 #[allow(dead_code)]
