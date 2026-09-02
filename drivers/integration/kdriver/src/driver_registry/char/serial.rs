@@ -101,14 +101,12 @@ fn resolve_port(device: &DeviceObject, kind: SerialKind) -> DriverResult<Arc<Ser
                 .unwrap_or(device_res::ClkSpec::by_name("uart-ref"));
             match crate::devm_clk_get(device, spec) {
                 Ok(clk) => {
-                    log::debug!("serial: uart-ref resolved");
                     let _ = clk.prepare_enable();
                     let rate = clk.get_rate();
-                    log::debug!("serial: programming baud from {rate} Hz");
+                    log::warn!("serial: programming baud from {rate} Hz clock");
                     early.set_baud_pl011(Some(rate), 115_200);
-                    log::debug!("serial: baud programmed");
                 }
-                Err(e) => log::warn!("serial: no uart-ref clock ({e:?}), keeping firmware baud"),
+                Err(e) => log::warn!("serial: no clock ({e:?}), keeping firmware baud"),
             }
         }
         return Ok(early);

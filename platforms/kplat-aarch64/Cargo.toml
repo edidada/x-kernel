@@ -33,7 +33,6 @@ console_driver = { workspace = true }
 irq_driver = { workspace = true }
 kirq = { workspace = true, optional = true }
 of = { workspace = true }
-kclk = { workspace = true }
 khal = { workspace = true }
 ktime = { workspace = true }
 kcpu = { workspace = true }

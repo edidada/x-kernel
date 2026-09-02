@@ -7,15 +7,20 @@
 //! A clock controller is a platform device like any other: its DT node
 //! (`compatible = "fixed-clock"`) is enumerated by the platform bus backend,
 //! matched to this driver, and probed. The probe registers the clock with
-//! the kclk provider registry.
+//! the kclk provider registry under the node's DT phandle, so consumers
+//! resolve it via `clocks = <&phandle>` references (`ClkSpec::by_phandle_index`)
+//! exactly like MMIO and IRQ resources.
 //!
-//! This establishes the device-model path for clock controllers, replacing
-//! the manual `init_platform_clocks()` platform-init call. SoC-specific
-//! controllers (PLL/mux/divider/gate trees) have their own compatible
-//! strings and register via [`kclk::register_table`] in their own probe,
-//! following the same pattern.
+//! The platform backend registers clock providers (nodes with
+//! `#clock-cells`) before their consumers, so one probe pass satisfies the
+//! dependency order — the same guarantee Linux's `of_clk_init` +
+//! `EPROBE_DEFER` combo provides.
+//!
+//! SoC-specific controllers (PLL/mux/divider/gate trees) have their own
+//! compatible strings and carry an MMIO register window; their drivers
+//! follow the same pattern in their own `probe_device`.
 
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc};
 
 use driver_base::{DeviceKind, DriverResult};
 use kdevice::{
@@ -51,9 +56,6 @@ impl DeviceMatcher for FixedClockMatcher {
 
 static MATCHER: FixedClockMatcher = FixedClockMatcher;
 
-/// The fixed-clock table. Re-registration replaces; one active provider.
-static TABLE: kclk::ClkTable = kclk::ClkTable::new(0xF1C0);
-
 /// Generic fixed-clock platform driver.
 pub struct FixedClockDriver;
 
@@ -83,37 +85,66 @@ impl DeviceDriver for FixedClockDriver {
             return Ok(());
         }
 
-        // Read the clock-frequency from the DT (walked via the of crate).
-        let Some(rate) = first_fixed_clock_hz() else {
-            log::warn!("clk-fixed-clock: no clock-frequency found");
+        // Discover this node's (phandle, frequency) from the DT. The DT
+        // order and the probe order agree because the platform backend
+        // registers clock providers first; for multi-clock trees the node
+        // identity routing is done by the SoC controller driver instead.
+        let Some((phandle, rate)) = first_fixed_clock_node() else {
+            log::warn!("clk-fixed-clock: no clock-frequency in DT");
             return Ok(());
         };
 
-        let name = "uart-ref";
-        let branches = [kclk::ClkBranch::fixed_rate(0, name, u64::from(rate))];
+        // Register under the DT phandle so `clocks = <&phandle>` references
+        // resolve. The table is leaked: the provider registry holds a
+        // 'static reference for the lifetime of the boot.
+        let table: &'static kclk::ClkTable = Box::leak(Box::new(kclk::ClkTable::new(phandle)));
+        let output_name = fixed_clock_output_name().unwrap_or("fixed-clock");
+        let branches = [kclk::ClkBranch::fixed_rate(0, output_name, u64::from(rate))];
 
         // NullClkReg: a fixed clock is purely computational.
         let reg: Arc<dyn kclk::ClkRegAccess> = Arc::new(kclk::NullClkReg);
-        match kclk::register_table(&TABLE, reg, &branches) {
+        match kclk::register_table(table, reg, &branches) {
             Ok(()) => {
-                kclk::register_provider(&TABLE);
-                log::info!("clk-fixed-clock: registered {name} ({rate} Hz)");
+                kclk::register_provider(table);
+                log::warn!(
+                    "clk-fixed-clock: registered {output_name} ({rate} Hz, phandle 0x{phandle:x})"
+                );
             }
-            Err(e) => log::warn!("clk-fixed-clock: failed to register {name}: {e:?}"),
+            Err(e) => log::warn!("clk-fixed-clock: failed to register {output_name}: {e:?}"),
         }
 
         Ok(())
     }
 }
 
-/// Walk the DT for the first `fixed-clock` node's `clock-frequency`.
-fn first_fixed_clock_hz() -> Option<u32> {
+/// Walk the DT for the first `fixed-clock` node's phandle + frequency.
+fn first_fixed_clock_node() -> Option<(u32, u32)> {
     let fdt = of::fdt()?;
     for node in fdt.all_nodes() {
         if node.compatibles().any(|c| c == "fixed-clock")
             && let Some(freq) = node.property_u32("clock-frequency")
         {
-            return Some(freq);
+            // QEMU-virt style nodes carry `phandle`; fall back to
+            // `linux,phandle` for older DT generators.
+            let phandle = node
+                .property_u32("phandle")
+                .or_else(|| node.property_u32("linux,phandle"))?;
+            return Some((phandle, freq));
+        }
+    }
+    None
+}
+
+/// The fixed-clock node's `clock-output-names` (preferred) or node name.
+fn fixed_clock_output_name() -> Option<&'static str> {
+    let fdt = of::fdt()?;
+    for node in fdt.all_nodes() {
+        if node.compatibles().any(|c| c == "fixed-clock") {
+            // clock-output-names is a NUL-separated string list; take the
+            // first entry.
+            let prop = node.property("clock-output-names")?;
+            let name = prop.value.split(|&b| b == 0).next()?;
+            return core::str::from_utf8(name).ok();
         }
     }
     None

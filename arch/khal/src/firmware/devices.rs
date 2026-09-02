@@ -23,10 +23,13 @@
 //! Common interrupt / PCI host description types live in `of` today and are
 //! re-exported here so callers depend only on `khal::firmware::devices::*`.
 
+use alloc::vec::Vec;
+
 #[cfg(target_arch = "x86_64")]
 use lazyinit::LazyInit;
 pub use of::{
-    InterruptControllerKind, InterruptInfo, InterruptTrigger, PciHostCam, PciHostInfo, PciRangeInfo,
+    ClockSpec, InterruptControllerKind, InterruptInfo, InterruptTrigger, PciHostCam, PciHostInfo,
+    PciRangeInfo,
 };
 
 /// Cached IO-APIC physical address from ACPI MADT.
@@ -55,7 +58,7 @@ pub enum FirmwareSource {
 /// against per-driver firmware ID tables. Resources are optional because not
 /// every firmware node carries them. `source` records which firmware table the
 /// description came from so consumers do not have to hard-code an origin.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct FirmwareDevice {
     pub firmware_id: &'static str,
     pub source: FirmwareSource,
@@ -67,6 +70,15 @@ pub struct FirmwareDevice {
     pub clock_frequency: Option<u32>,
     /// The DT `phandle` property, used as the clock ProviderId.
     pub phandle: Option<u32>,
+    /// The `#clock-cells` property: `Some(_)` marks this node as a clock
+    /// provider. Used by the platform backend to probe clock controllers
+    /// before their consumers (Linux `of_clk_init` ordering).
+    pub clock_cells: Option<u32>,
+    /// For consumer nodes: the parsed `clocks` property, each entry a
+    /// (provider phandle, controller-local index) pair. Converted to
+    /// `ResourceDesc::Clk` by the DT-to-device builder so drivers resolve
+    /// clocks through `first_clk()` like MMIO and IRQ.
+    pub clock_specs: Vec<of::ClockSpec>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -224,6 +236,8 @@ pub fn for_each_compatible(
             irq,
             clock_frequency: node.property_u32("clock-frequency"),
             phandle: node.property_u32("phandle"),
+            clock_cells: node.property_u32("#clock-cells"),
+            clock_specs: of::device_clock_specs(node),
         });
     }
 }

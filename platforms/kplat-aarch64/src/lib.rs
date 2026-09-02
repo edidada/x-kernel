@@ -23,8 +23,6 @@ extern crate kernel_boot;
 
 pub mod peripherals;
 
-pub use clk::init_platform_clocks;
-mod clk;
 mod dma;
 mod init;
 mod mmio;

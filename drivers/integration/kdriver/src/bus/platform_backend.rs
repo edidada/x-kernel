@@ -12,6 +12,9 @@
 //! `khal::firmware::devices` abstraction, so this backend stays
 //! firmware-agnostic.
 
+use alloc::vec::Vec;
+
+use device_res::ClkSpec;
 use driver_base::DriverResult;
 use kdevice::{
     BusId, BusTypeId, DeviceIdentity, DeviceLocation, DiscoveryOrigin, IrqResource, MmioRegion,
@@ -73,6 +76,14 @@ impl PlatformBackend {
              enumeration"
         );
 
+        // Clock providers (nodes with #clock-cells) must be registered — and
+        // therefore probed — before their consumers: a consumer's probe
+        // resolves `clocks` references through the provider registry (Linux
+        // solves the same ordering with of_clk_init + EPROBE_DEFER; here
+        // provider-first registration makes one probe pass sufficient).
+        let mut clock_providers: Vec<fw::FirmwareDevice> = Vec::new();
+        let mut other_devices: Vec<fw::FirmwareDevice> = Vec::new();
+
         fw::for_each_compatible(
             |compatible| {
                 if compatible == VIRTIO_MMIO_DT_COMPATIBLE {
@@ -84,6 +95,16 @@ impl PlatformBackend {
                 }
             },
             |dev| {
+                if dev.clock_cells.is_some() {
+                    clock_providers.push(dev);
+                } else {
+                    other_devices.push(dev);
+                }
+            },
+        );
+
+        for dev in clock_providers.into_iter().chain(other_devices) {
+            {
                 let mut resources: ResourceSet = smallvec![];
                 if let Some(mmio) = dev.mmio {
                     resources.push(ResourceDesc::Mmio(MmioRegion {
@@ -126,8 +147,18 @@ impl PlatformBackend {
                 };
 
                 let Some((location, identity, transport)) = registration else {
-                    return;
+                    continue;
                 };
+
+                // Consumer `clocks` references become Clk resources, so
+                // drivers resolve them through first_clk()/clk_at() exactly
+                // like MMIO and IRQ.
+                for spec in &dev.clock_specs {
+                    resources.push(ResourceDesc::Clk(ClkSpec::by_phandle_index(
+                        spec.provider,
+                        spec.index,
+                    )));
+                }
 
                 if let Err(err) = context.register_device(
                     bus_id,
@@ -145,8 +176,8 @@ impl PlatformBackend {
                     );
                     first_error.get_or_insert(err);
                 }
-            },
-        );
+            }
+        }
 
         match first_error {
             Some(err) => Err(err),
