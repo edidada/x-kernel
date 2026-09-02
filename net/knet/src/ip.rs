@@ -14,6 +14,7 @@ use core::{
 pub(crate) struct Ipv4Address([u8; 4]);
 
 impl Ipv4Address {
+    // Predefined IPv4 address constants associated with the Ipv4Address type.
     pub(crate) const BROADCAST: Self = Self([255, 255, 255, 255]);
     pub(crate) const UNSPECIFIED: Self = Self([0, 0, 0, 0]);
 
@@ -37,6 +38,7 @@ impl Ipv4Address {
         self == Self::BROADCAST
     }
 
+    /// Checks if the IPv4 address is a multicast address (ipv4: 224.0.0.0 ～ 239.255.255.255)
     pub(crate) fn is_multicast(self) -> bool {
         (224..=239).contains(&self.0[0])
     }
@@ -218,7 +220,7 @@ impl Ipv4Cidr {
     }
 
     pub(crate) fn is_directed_broadcast(self, addr: Ipv4Address) -> bool {
-        self.prefix_len < 31 && self.broadcast() == Some(addr)
+        self.broadcast() == Some(addr)
     }
 
     pub(crate) fn contains_addr(self, addr: &IpAddress) -> bool {
@@ -269,6 +271,7 @@ impl IpCidr {
     }
 }
 
+// Transport-layer communication endpoint that combines an IP address with a port.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct IpEndpoint {
     pub(crate) addr: IpAddress,

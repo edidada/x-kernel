@@ -24,13 +24,11 @@ static_lock! {
     static NETWORK_CONFIG_MUTATION_LOCK: Mutex<()> = Mutex::new(());
 }
 
-/// Serializes network configuration mutations across control-plane front ends
-/// and device teardown.
+/// Protects network configuration changes and device removal.
 ///
-/// This lock may sleep and must only be acquired from task context. Callers
-/// hold it while resolving mutation targets and updating their owning network
-/// objects so legacy socket ioctls, rtnetlink requests, and device removal do
-/// not interleave.
+/// This lock may sleep and can only be used in task context.
+/// Hold it while updating network objects to avoid conflicts between
+/// socket ioctls, rtnetlink requests, and device removal.
 pub(crate) fn network_config_lock() -> MutexGuard<'static, ()> {
     NETWORK_CONFIG_MUTATION_LOCK.lock()
 }
@@ -92,7 +90,7 @@ pub fn interface_ipv4_addr(name: &str) -> Result<Ipv4Addr, LinuxError> {
 pub fn set_interface_ipv4_addr(
     name: &str,
     addr: Ipv4Addr,
-    prefix_len: u8,
+    prefix_len: u8, // Helps routing determine which addresses are on the same subnet.
 ) -> Result<(), LinuxError> {
     let _network_config_guard = network_config_lock();
     let dev = device_index_by_name(name)?;
@@ -149,17 +147,15 @@ pub fn set_interface_flags(name: &str, flags: u16) -> Result<(), LinuxError> {
     )
 }
 
-/// Adds an IPv4 route owned by `Router`.
+/// Adds an IPv4 route to `Router`.
 ///
-/// Linux `SIOCADDRT` sets `NLM_F_CREATE` without `NLM_F_EXCL`, so a second
-/// route to the same destination is rejected only when the nexthop also
-/// matches (`oif` and gateway). A different gateway is a distinct route.
+/// Routes with the same destination are allowed if they use a different
+/// gateway or output interface.
 ///
 /// # Errors
 ///
-/// Returns `ENODEV` when `oif_name` is unknown, `EINVAL` when the prefix or
-/// gateway is illegal, `ENETUNREACH` when no output interface is supplied or
-/// the gateway is outside its subnet, or `EEXIST` for a duplicate route.
+/// Returns `ENODEV` for an unknown interface, `EINVAL` for invalid values,
+/// `ENETUNREACH` when the gateway cannot be reached, or `EEXIST` for a duplicate route.
 pub fn add_ipv4_route(
     dst: Option<Ipv4Addr>,
     dst_len: u8,
@@ -179,16 +175,14 @@ pub fn add_ipv4_route(
     SERVICE.add_route_rule(rule)
 }
 
-/// Deletes an IPv4 route owned by `Router`. Missing entries return `ESRCH`.
+/// Deletes an IPv4 route from `Router`.
 ///
-/// A missing output interface and gateway are wildcards, matching Linux
-/// `SIOCDELRT` / `fib_nh_match` when `rt_dev` or `RTF_GATEWAY` is omitted.
-/// `route del default` therefore removes the first matching default route.
+/// If the gateway or output interface is not given, any value can match.
 ///
 /// # Errors
 ///
-/// Returns `ENODEV` when `oif_name` is unknown, `EINVAL` when the prefix is
-/// illegal, or `ESRCH` when no matching configured route exists.
+/// Returns `ENODEV` for an unknown interface, `EINVAL` for an invalid prefix,
+/// or `ESRCH` when no matching route is found.
 pub fn del_ipv4_route(
     dst: Option<Ipv4Addr>,
     dst_len: u8,
@@ -216,6 +210,8 @@ pub fn del_ipv4_route(
     Ok(())
 }
 
+/// Converts the destination IP and prefix length into a CIDR network,
+/// e.g. `192.168.1.123/24` becomes `192.168.1.0/24`.
 fn ipv4_route_filter(dst: Option<Ipv4Addr>, dst_len: u8) -> Result<IpCidr, LinuxError> {
     let dst_addr = dst
         .map(|addr| Ipv4Address::from_octets(addr.octets()))
@@ -226,6 +222,13 @@ fn ipv4_route_filter(dst: Option<Ipv4Addr>, dst_len: u8) -> Result<IpCidr, Linux
         .into())
 }
 
+/// Creates a `Rule` for a configured IPv4 route.
+// For example, the following route rule:
+// filter = 192.168.2.0/24   // destination IP -> CIDR network
+// via    = 192.168.1.1      // gateway IP
+// dev    = eth0             // output interface
+// source = 192.168.1.10     // source IP (first address of the output interface)
+//                           // falling back to the route destination address
 fn ipv4_configured_route_rule(
     dst: Option<Ipv4Addr>,
     dst_len: u8,
@@ -265,6 +268,16 @@ fn device_index_by_name(name: &str) -> Result<usize, LinuxError> {
     SERVICE.device_index_by_name(name).ok_or(LinuxError::ENODEV)
 }
 
+/// Returns all IPv4 addresses assigned to the given device.
+// Get all IPv4 address snapshots
+//        ↓
+// Convert them into an iterator
+//        ↓
+// Filter addresses belonging to the specified device
+//        ↓
+// Extract the entry from each snapshot
+//        ↓
+// Collect them into a Vec<Ipv4AddrEntry>
 fn ipv4_entries_for_device(dev: usize) -> Vec<Ipv4AddrEntry> {
     SERVICE
         .ipv4_addr_snapshots()

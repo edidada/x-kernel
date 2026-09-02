@@ -3,6 +3,9 @@
 // See LICENSES for license details.
 
 //! Network stack constants and configuration defaults.
+
+// Defines the `env_or_default!` macro to retrieve a value from an environment variable,
+// returning the default value `""` if it does not exist.
 macro_rules! env_or_default {
     ($key:literal) => {
         match option_env!($key) {
@@ -11,9 +14,11 @@ macro_rules! env_or_default {
         }
     };
 }
-
+// Specifies the default IP address and gateway (Generally, it is the IP address of the router's LAN interface.)
+// through compile-time environment variables.
 pub const IP: &str = env_or_default!("K_IP");
 pub const GATEWAY: &str = env_or_default!("K_GW");
+// CIDR prefix length of the guest IP, QEMU defaults to 24 (255.255.255.0).
 pub const IP_PREFIX: u8 = 24;
 
 pub const STANDARD_MTU: usize = 1500;
@@ -34,4 +39,5 @@ pub const ETHERNET_MAX_PENDING_PACKETS: usize = 128;
 /// This is independent of the dynamic schedule timer. 10 ms matches the
 /// historical 100 Hz tick sampling interval so TCP/orphan timers are not
 /// delayed by coarser polling.
+// TODO: Use the new one-shot timer to wake up knet at the required deadline instead of checking it every 10 ms.
 pub const TIMER_SAMPLE_PERIOD: core::time::Duration = core::time::Duration::from_millis(10);
