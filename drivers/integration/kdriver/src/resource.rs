@@ -32,6 +32,10 @@ fn map_res_err(err: ResError) -> DriverError {
         ResError::NoMemory => DriverError::NoMemory,
         ResError::Busy => DriverError::ResourceBusy,
         ResError::Unsupported => DriverError::Unsupported,
+        // NoProvider is retryable (a provider has not probed yet — defer);
+        // NotFound means the resource list has no such entry.
+        ResError::NoProvider => DriverError::WouldBlock,
+        ResError::NotFound => DriverError::InvalidInput,
     }
 }
 

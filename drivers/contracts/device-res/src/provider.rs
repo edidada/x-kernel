@@ -13,6 +13,7 @@ use core::ptr::NonNull;
 
 use crate::{
     DeviceResource, ResResult,
+    clk::ClkOp,
     dma::{DmaCoherent, DmaOp, DmaSpec},
     irq::{Irq, IrqHandler, IrqOp, IrqResource, IrqThreadHandler},
     mmio::{Io, MmioOp, MmioRegion},
@@ -23,10 +24,15 @@ use crate::{
 ///
 /// Host kernels may pass a concrete type implementing this trait into a driver
 /// framework. The individual operation traits remain split so framework code
-/// can require only the capability it is about to use.
-pub trait ResourceProvider: MmioOp + DmaOp + IrqOp + TimeOp {}
+/// can require only the capability it is about to use. Clock support is part
+/// of the bundle, not an optional axis: the clock subsystem is always-present
+/// host infrastructure (Linux CCF is built-in the same way) — a machine
+/// without a clock tree still implements [`ClkOp`] and reports absent
+/// providers, exactly like a device without an MMIO window still uses
+/// [`MmioOp`]. The capability is the API, not the resource inventory.
+pub trait ResourceProvider: MmioOp + DmaOp + IrqOp + TimeOp + ClkOp {}
 
-impl<T: ?Sized> ResourceProvider for T where T: MmioOp + DmaOp + IrqOp + TimeOp {}
+impl<T: ?Sized> ResourceProvider for T where T: MmioOp + DmaOp + IrqOp + TimeOp + ClkOp {}
 
 /// Map an MMIO region with an explicit provider and tie its lifetime to
 /// `device`.

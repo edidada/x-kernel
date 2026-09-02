@@ -21,6 +21,7 @@
 
 extern crate alloc;
 
+mod clk;
 mod dma;
 mod irq;
 mod mmio;
@@ -40,6 +41,10 @@ pub enum ResourceDesc {
     Irq(crate::irq::IrqResource),
     /// Coherent DMA buffer request.
     Dma(crate::dma::DmaSpec),
+    /// Clock consumer connection, including its optional consumer-local name.
+    Clk(crate::clk::ClkResource),
+    /// Metadata carried by a clock-provider device.
+    ClkProvider(crate::clk::ClkProviderDesc),
 }
 
 /// A collection of resources for a single device.
@@ -58,6 +63,10 @@ pub enum ResError {
     Busy,
     /// The host does not support this kind of resource.
     Unsupported,
+    /// No resource provider has been installed yet.
+    NoProvider,
+    /// The named or indexed resource does not exist.
+    NotFound,
 }
 
 /// Result type for resource operations.
@@ -81,6 +90,7 @@ pub trait DeviceResource {
     fn register_cleanup(&self, cleanup: Box<dyn FnOnce() + Send>);
 }
 
+pub use clk::*;
 pub use dma::*;
 pub use irq::*;
 pub use mmio::*;
@@ -102,11 +112,29 @@ mod tests {
     use unittest::def_test;
 
     use crate::{
-        DeviceResource, DmaAllocation, DmaOp, DmaSpec, IrqEvent, IrqHandler, IrqHandlerToken,
-        IrqOp, IrqResource, IrqThreadHandler, IrqTrigger, MmioMapping, MmioOp, MmioRegion,
-        ResError, ResResult, ResourceDesc, devm_alloc_coherent_with_provider,
-        devm_iomap_with_provider, devm_request_irq_with_provider,
+        ClkProviderDesc, ClkResource, ClkSpec, DeviceResource, DmaAllocation, DmaOp, DmaSpec,
+        IrqEvent, IrqHandler, IrqHandlerToken, IrqOp, IrqResource, IrqThreadHandler, IrqTrigger,
+        MmioMapping, MmioOp, MmioRegion, ResError, ResResult, ResourceDesc,
+        clk::{ClkConsumer, ClkRateEvent, NotifierVote},
+        devm_alloc_coherent_with_provider, devm_iomap_with_provider,
+        devm_request_irq_with_provider,
     };
+
+    #[def_test]
+    fn clock_resource_preserves_connection_and_provider_metadata() {
+        let spec = ClkSpec::by_phandle_index(0x42, 7);
+        let connection = ClkResource::named("baudclk", spec);
+        assert_eq!(connection.connection_name(), Some("baudclk"));
+        assert_eq!(connection.spec(), spec);
+
+        let provider = ClkProviderDesc::new(0x42, 24_000_000).with_output_name("osc24m");
+        assert_eq!(provider.provider_id(), 0x42);
+        assert_eq!(provider.fixed_rate_hz(), 24_000_000);
+        assert_eq!(provider.output_name(), Some("osc24m"));
+        // Mutually exclusive forms: a by-name spec carries no phandle pair.
+        assert_eq!(ClkSpec::by_name("osc24m").provider(), None);
+        assert_eq!(ClkSpec::by_name("osc24m").name(), Some("osc24m"));
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Event {
@@ -437,6 +465,45 @@ mod tests {
         device.run_cleanups();
 
         assert_eq!(&*ORDER.lock(), &[2, 0x101, 0x200]);
+    }
+
+    // A ClkConsumer mock that implements only the two required methods,
+    // exercising that the trait's default implementations give a fixed,
+    // ungated, rate-transparent clock sensible runtime behavior.
+    #[def_test]
+    fn clk_consumer_defaults_model_a_fixed_clock() {
+        struct FixedClk {
+            rate: u64,
+        }
+        impl ClkConsumer for FixedClk {
+            fn name(&self) -> &str {
+                "fixed"
+            }
+
+            fn get_rate(&self) -> u64 {
+                self.rate
+            }
+        }
+
+        let clk = FixedClk { rate: 24_000_000 };
+        assert_eq!(clk.name(), "fixed");
+        assert_eq!(clk.get_rate(), 24_000_000);
+        // Gating defaults to no-op success.
+        clk.prepare_enable().unwrap();
+        clk.disable_unprepare();
+        assert!(!clk.is_enabled().unwrap());
+        assert!(!clk.is_prepared().unwrap());
+        // Rate/parent/notification defaults: unsupported or transparent.
+        assert_eq!(clk.round_rate(99).unwrap(), 24_000_000);
+        assert_eq!(clk.set_rate(99).unwrap_err(), ResError::Unsupported);
+        assert_eq!(clk.set_rate_range(0, 0).unwrap_err(), ResError::Unsupported);
+        assert_eq!(clk.get_rate_range(), (0, u64::MAX));
+        assert!(clk.get_parent().is_none());
+        assert_eq!(clk.set_parent(0).unwrap_err(), ResError::Unsupported);
+        let id = clk.register_notifier(Arc::new(|_: &ClkRateEvent| NotifierVote::Proceed) as _);
+        assert_eq!(id.unwrap_err(), ResError::Unsupported);
+        // Unregistering an unknown id is a no-op success.
+        clk.unregister_notifier(0).unwrap();
     }
 
     #[def_test]
