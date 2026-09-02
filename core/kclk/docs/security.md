@@ -32,14 +32,17 @@ safety contract is documented on `MmioClkReg::new`:
 
 - the caller guarantees `base` is a valid, word-aligned, mapped MMIO window;
 - the window remains live for the lifetime of every clock node sharing it;
-- `Send`/`sync` are implemented because MMIO windows are process-global and
+- `Send`/`Sync` are implemented because MMIO windows are process-global and
   never move. The framework serializes the *sleepable* write paths
-  (`set_rate`/`set_parent`/`prepare`/`enable`) under the global `CLK_LOCK`; the
-  atomic `enable`/`disable` callbacks themselves only flip a gate bit. See the
-  *Known Limitations* note on register-word sharing (use `HIWORD_MASK`).
+  (`set_rate`/`set_parent`/`prepare`) under `CLK_LOCK`; atomic
+  `enable`/`disable` callbacks run under `CLK_ENABLE_LOCK` and only flip a gate
+  bit. Topology migration nests the locks in that order. See the *Known
+  Limitations* note on register-word sharing (use `HIWORD_MASK`).
 
-No other `unsafe` exists in the crate. `Gate`/`Mux`/`Divider` field math is safe
-over `ClkRegAccess`; `ClkCore` parent recursion uses only safe `Arc` clones.
+`ClkHandle::into_core` also uses a documented `unsafe` cast to recover the
+concrete `ClkCore` behind its private consumer trait object; construction is
+sealed to the crate, so every such object was created from `Arc<ClkCore>`.
+`Gate`/`Mux`/`Divider` field math and parent recursion otherwise use safe code.
 
 ## Invariants
 
@@ -54,9 +57,11 @@ over `ClkRegAccess`; `ClkCore` parent recursion uses only safe `Arc` clones.
   pass-through, and `raw_to_div` clamps a decoded zero to 1.
 - Cached rate is refreshed under the node lock after every successful
   `set_rate` / `set_parent`.
-- All sleepable mutations are serialized by the global `CLK_LOCK` (a sleepable
-  `ksync::Mutex`), so a rate change is atomic with respect to other changes and
-  `get_rate` never observes a half-updated tree.
+- All sleepable mutations are serialized by `CLK_LOCK`; `enable`/`disable` and
+  topology commits are serialized by `CLK_ENABLE_LOCK`, with the sole nesting
+  order `CLK_LOCK` → `CLK_ENABLE_LOCK`. Lockless `get_rate` may observe the old
+  or new per-node cache during a multi-node transition, but never an invalid
+  memory state.
 - Notifier callbacks run under `CLK_LOCK`; they may sleep but must not re-enter
   the framework (no `clk_get_*` / `set_rate` / `enable`) — re-entrancy panics.
 - `set_rate_range` rejects an inverted range (`min > max`) with `InvalidRate`;
@@ -69,8 +74,15 @@ over `ClkRegAccess`; `ClkCore` parent recursion uses only safe `Arc` clones.
 - `determine_rate` may select a `best_parent_index`; the core validates it in
   `switch_parent_locked` (rejecting out-of-range or orphan slots) before any
   register write.
-- Orphan adoption (`parent_name`) fills only the declared slot and only when a
-  matching-name clock is registered; an unmatched orphan stays at rate 0.
+- Orphan adoption (`parent_name`) fills only the declared slot when a
+  matching-name clock is registered, migrates all active references, and
+  refreshes descendant caches. Failure restores the orphan entry and releases
+  partially migrated references. Failed table registration similarly restores
+  pre-existing adoptees before removing exactly its batch nodes.
+- A failed `set_rate` restores any parent selection made by `determine_rate`;
+  if upward propagation programmed the parent but the child cannot recalculate,
+  the parent is restored to its previous rate. A failed rollback is surfaced as
+  `BadState` rather than reported as an ordinary rejected request.
 - `ClkTable::unregister` drops both the index and name entries for a clock;
   consumer-held handles keep the node alive by reference counting.
 
@@ -82,7 +94,7 @@ over `ClkRegAccess`; `ClkCore` parent recursion uses only safe `Arc` clones.
 | T-02 | Out-of-range parent index | Medium | Firmware or driver requests parent `N` beyond the table | `ClkCore::set_parent` returns `InvalidParent` without touching hardware. |
 | T-03 | Zero or huge decoded divider | Medium | Register field decodes to 0, or a divider that would overflow | `rate_for` passes through on 0; `closest_div`/`div_to_raw` clamp to the field width; `FixedFactor::scale` rejects overflow with `InvalidRate`. |
 | T-04 | Concurrent rate change on a sibling | Low | Two probes reprogram overlapping subtrees | Serialized by the global `CLK_LOCK`; only one sleepable mutation runs at a time across the whole tree. |
-| T-05 | Provider lookup before install | Low | Driver resolves a clock before `set_clk_provider` | Returns `None` / `NoProvider`; no panic. |
+| T-05 | Provider lookup before install | Low | Driver resolves a clock before controller probe completes | Returns `NoProvider`; the integration layer maps this to deferred probe instead of permanent failure. |
 | T-06 | Subscriber re-enters the framework in a notifier | High | A `ClkNotifier` callback calls `set_rate`/`get_rate` re-entrantly | Documented constraint: callbacks run under `CLK_LOCK` and must be non-re-entrant (re-entrancy panics). Audit checklist enforces it. |
 | T-07 | `set_rate` reprograms a clock a consumer depends on without notice | Medium | DVFS changes a shared PLL underneath a display | Rate-change notifiers deliver `Pre`/`Post` events; a `Pre` veto aborts with `Aborted`. |
 
@@ -93,7 +105,7 @@ over `ClkRegAccess`; `ClkCore` parent recursion uses only safe `Arc` clones.
 | F-01 | A hardware `prepare`/`enable` fails mid-chain | Parent already enabled | Clock left disabled | 3 | Roll-back: the parent's count is decremented and its hardware op reversed before returning the error. |
 | F-02 | `set_rate` unsupported on a node without `SET_RATE_PARENT` | Rate unchanged | Driver sees `NotSupported` | 3 | Propagated as `ClkError::NotSupported` → `ResError::Unsupported`. |
 | F-03 | `set_parent` to an orphan slot | Parent unchanged | Driver sees `InvalidParent` | 3 | Rejected before any register write. |
-| F-04 | Provider not installed at lookup time | `None` returned | Consumer driver decides fallback | 3 | `try_clk_provider` / `try_get` let the caller distinguish "absent" from "error". |
+| F-04 | Provider not installed at lookup time | `NoProvider` returned | Consumer probe is retried | 3 | `device-res-xkernel` preserves `NoProvider`; `kdriver` maps it to `WouldBlock` / `ProbeOutcome::Deferred` and keeps the same driver eligible. |
 | F-05 | Divider field width >= 32 | Configuration error | Probe-time panic | 2 | `1u32 << width` is undefined behavior at width >= 32; `Divider::new` asserts `width` is in `1..32` (hard `assert!`, not debug-only, so release builds fail loudly too). |
 
 ## Known Limitations
@@ -102,9 +114,9 @@ over `ClkRegAccess`; `ClkCore` parent recursion uses only safe `Arc` clones.
   tree produces wrong but representable rates.
 - Notifiers fire only on the node where `set_rate` was called; intermediate
   parents changed during upward propagation receive no separate notification.
-- The global lock is a sleepable mutex, so `prepare`/`set_rate` may block; but
-  `enable`/`disable` and the lock-free callbacks (`recalc_rate`, `is_enabled`,
-  `init`, ...) must not sleep.
+- The slow-operation lock is a sleepable mutex, so `prepare`/`unprepare` and
+  `set_rate` provider callbacks may block. `enable`/`disable`, `set_parent`,
+  reparent-time recalculation, and otherwise lock-free callbacks must not sleep.
 - `MmioClkReg` correctness depends on the caller's mapping; the crate cannot
   verify it.
 

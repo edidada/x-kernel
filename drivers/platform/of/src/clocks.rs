@@ -41,6 +41,8 @@ pub struct ClockSpec {
     pub provider: u32,
     /// The controller-local clock index.
     pub index: u32,
+    /// Consumer-local name at the same position in `clock-names`.
+    pub connection_name: Option<&'static str>,
 }
 
 /// Extract the clock specifiers from a device node's `clocks` property.
@@ -66,7 +68,9 @@ pub fn device_clock_specs(node: FdtNode<'static, 'static>) -> Vec<ClockSpec> {
         .map(|c| u32::from_be_bytes(c.try_into().unwrap_or([0; 4])))
         .collect();
 
+    let names = device_clock_names(node);
     let mut idx = 0usize;
+    let mut spec_index = 0usize;
     while idx < cells.len() {
         let phandle = cells[idx];
         idx += 1;
@@ -80,13 +84,17 @@ pub fn device_clock_specs(node: FdtNode<'static, 'static>) -> Vec<ClockSpec> {
             specs.push(ClockSpec {
                 provider: phandle,
                 index: 0,
+                connection_name: names.get(spec_index).copied(),
             });
+            spec_index += 1;
         } else if idx + ncells <= cells.len() && ncells == 1 {
             specs.push(ClockSpec {
                 provider: phandle,
                 index: cells[idx],
+                connection_name: names.get(spec_index).copied(),
             });
             idx += 1;
+            spec_index += 1;
         } else {
             // Unsupported cell count or truncated entry: skip the rest
             // rather than emitting a wrong spec.
@@ -101,14 +109,28 @@ pub fn device_clock_specs(node: FdtNode<'static, 'static>) -> Vec<ClockSpec> {
 ///
 /// Returns `None` when the node has no `clock-names`, or `name` is not in it.
 pub fn device_clock_index_by_name(node: FdtNode<'static, 'static>, name: &str) -> Option<usize> {
-    let prop = node.property("clock-names")?;
-    let raw = prop.value;
-    let names: Vec<&str> = core::str::from_utf8(raw)
+    let names = device_clock_names(node);
+    names.iter().position(|n| *n == name)
+}
+
+/// Parse the consumer-local `clock-names` list in declaration order.
+pub fn device_clock_names(node: FdtNode<'static, 'static>) -> Vec<&'static str> {
+    let Some(prop) = node.property("clock-names") else {
+        return Vec::new();
+    };
+    let Ok(raw) = core::str::from_utf8(prop.value) else {
+        return Vec::new();
+    };
+    raw.split('\0').filter(|name| !name.is_empty()).collect()
+}
+
+/// Read the first provider output name from `clock-output-names`.
+pub fn clock_output_name(node: FdtNode<'static, 'static>) -> Option<&'static str> {
+    let prop = node.property("clock-output-names")?;
+    core::str::from_utf8(prop.value)
         .ok()?
         .split('\0')
-        .filter(|s| !s.is_empty())
-        .collect();
-    names.iter().position(|n| *n == name)
+        .find(|name| !name.is_empty())
 }
 
 /// Resolve a `clock-names` entry to its [`ClockSpec`].

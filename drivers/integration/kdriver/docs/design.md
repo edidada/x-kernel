@@ -147,7 +147,7 @@ drivers/integration/kdriver/
 `EPROBE_DEFER` 的保证；DT 中 `/pl011@9000000` 排在 `/apb-pclk` 前面的
 顺序问题由此解决）。
 
-固件层（`khal::firmware::devices`）在枚举时从 DT 节点提取四类时钟信息，
+固件层（`khal::firmware::devices`）在枚举时从 DT 节点提取时钟信息，
 全部通过 `FirmwareDevice` 传递：
 
 | 字段 | 来源属性 | 用途 |
@@ -155,12 +155,19 @@ drivers/integration/kdriver/
 | `clock_frequency` | `clock-frequency` | fixed-clock 节点的频率 |
 | `phandle` | `phandle` | 作为 kclk ProviderId，`clocks = <&phandle>` 引用据此解析 |
 | `clock_cells` | `#clock-cells` | 标记节点是时钟提供者（分流依据） |
-| `clock_specs` | `clocks` | 消费者节点的 (provider, index) 对，转成 `ResourceDesc::Clk` |
+| `clock_output_name` | `clock-output-names` | 当前 provider 输出名，fixed-clock 注册时使用 |
+| `clock_specs` | `clocks` + `clock-names` | 消费者的 (provider, index) 及本地连接名 |
 
-消费者侧：`clock_specs` 在注册 DeviceDesc 时自动转成
-`ResourceDesc::Clk(ClkSpec::by_phandle_index(provider, index))`，驱动用
-`first_clk()` / `clk_at(i)` 取用，与 MMIO/IRQ 完全对称——无需
-`by_name` 硬编码。
+provider 侧：`PlatformBackend` 把当前节点的 provider id、`#clock-cells`、
+固定频率和输出名归一为 `ResourceDesc::ClkProvider(ClkProviderDesc)`；
+`FixedClockDriver` 只读取正在 probe 的 `DeviceObject`，不会按 compatible
+重新扫描整棵 DT，因此多个 fixed-clock provider 不会串用元数据。
+
+消费者侧：每个 `clock_specs` 转成携带 `ClkSpec` 与可选 consumer-local
+connection name 的 `ResourceDesc::Clk(ClkResource)`。驱动可用
+`first_clk()` / `clk_at(i)`，也可用 `clk_by_name("baudclk")` 按
+`clock-names` 精确选择；最终仍以 `(provider, index)` 进入 kclk，不把局部
+连接名误当作全局 SoC 输出名。
 
 注册在描述符优先路径中自然完成——调度器已启动，满足 kclk 全局锁
 （可休眠 mutex）需要当前任务的要求，无需额外的手动 init 调用。
@@ -168,6 +175,14 @@ drivers/integration/kdriver/
 SoC 专用控制器（PLL/mux/divider/gate 树）遵循同一模式：注册自己的
 compatible、携带 MMIO 窗口、在 probe 中 `register_table`。通用
 `fixed-clock` 驱动自动跳过带 MMIO 的节点，让专用驱动认领。
+
+provider-first 是常见路径的优化，不是正确性的唯一前提。消费者若在对应
+provider 注册前请求时钟，错误链保持为 `ClkError::NoProvider` →
+`ResError::NoProvider` → `DriverError::WouldBlock`，probe 结果记为
+`ProbeOutcome::Deferred`；该驱动不会加入永久 attempted 集合，后续
+`probe_pending()` 可以用同一驱动重试。枚举上下文会在某一轮至少激活了
+一个依赖时，仅重试该轮 deferred 的描述符；若整轮无进展则停止并保留为
+unclaimed。因此依赖链可在一次发现流程内收敛，永久缺失依赖也不会忙等。
 
 ## 状态机
 

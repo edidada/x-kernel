@@ -74,6 +74,8 @@ pub struct FirmwareDevice {
     /// provider. Used by the platform backend to probe clock controllers
     /// before their consumers (Linux `of_clk_init` ordering).
     pub clock_cells: Option<u32>,
+    /// First `clock-output-names` entry for provider nodes.
+    pub clock_output_name: Option<&'static str>,
     /// For consumer nodes: the parsed `clocks` property, each entry a
     /// (provider phandle, controller-local index) pair. Converted to
     /// `ResourceDesc::Clk` by the DT-to-device builder so drivers resolve
@@ -237,6 +239,7 @@ pub fn for_each_compatible(
             clock_frequency: node.property_u32("clock-frequency"),
             phandle: node.property_u32("phandle"),
             clock_cells: node.property_u32("#clock-cells"),
+            clock_output_name: of::clock_output_name(node),
             clock_specs: of::device_clock_specs(node),
         });
     }

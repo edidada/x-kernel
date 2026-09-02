@@ -14,7 +14,7 @@
 
 use alloc::vec::Vec;
 
-use device_res::ClkSpec;
+use device_res::{ClkProviderDesc, ClkResource, ClkSpec};
 use driver_base::DriverResult;
 use kdevice::{
     BusId, BusTypeId, DeviceIdentity, DeviceLocation, DiscoveryOrigin, IrqResource, MmioRegion,
@@ -118,6 +118,16 @@ impl PlatformBackend {
                         super::irq_trigger_from_firmware(irq.trigger),
                     )));
                 }
+                if let (Some(provider_id), Some(clock_cells)) = (dev.phandle, dev.clock_cells) {
+                    let mut provider = ClkProviderDesc::new(provider_id, clock_cells);
+                    if let Some(rate_hz) = dev.clock_frequency {
+                        provider = provider.with_fixed_rate(u64::from(rate_hz));
+                    }
+                    if let Some(name) = dev.clock_output_name {
+                        provider = provider.with_output_name(name);
+                    }
+                    resources.push(ResourceDesc::ClkProvider(provider));
+                }
 
                 let registration = if dev.firmware_id == VIRTIO_MMIO_DT_COMPATIBLE {
                     match dev.mmio {
@@ -154,10 +164,12 @@ impl PlatformBackend {
                 // drivers resolve them through first_clk()/clk_at() exactly
                 // like MMIO and IRQ.
                 for spec in &dev.clock_specs {
-                    resources.push(ResourceDesc::Clk(ClkSpec::by_phandle_index(
-                        spec.provider,
-                        spec.index,
-                    )));
+                    let clk_spec = ClkSpec::by_phandle_index(spec.provider, spec.index);
+                    let resource = match spec.connection_name {
+                        Some(name) => ClkResource::named(name, clk_spec),
+                        None => ClkResource::unnamed(clk_spec),
+                    };
+                    resources.push(ResourceDesc::Clk(resource));
                 }
 
                 if let Err(err) = context.register_device(

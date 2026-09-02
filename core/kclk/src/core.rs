@@ -23,7 +23,9 @@ use crate::{
 // CLK_LOCK (sleepable `ksync::Mutex`) serializes the slow mutations —
 // `prepare`/`unprepare`/`set_rate`/`set_parent`/`round_rate` — so a rate
 // change (which may recurse up the parent tree and reprogram a PLL) is atomic
-// with respect to other changes, and providers may sleep in those callbacks.
+// with respect to other changes. prepare/unprepare/set_rate may sleep;
+// set_parent and reparent-time recalculation also run under CLK_ENABLE_LOCK and
+// therefore must not sleep.
 // Never taken from atomic/interrupt context; not re-entrant (re-entering the
 // framework while holding it panics instead of deadlocking).
 //
@@ -40,8 +42,10 @@ use crate::{
 // their count mutations, but the parent-index update sits between them) is the
 // same one Linux's clk_core_set_parent has tolerated for a decade: counts
 // balance because every mutation of them holds CLK_ENABLE_LOCK, and the
-// migration brings the new parent up before tearing the old one down, so the
-// clock never goes dark.
+// migration brings the new parent up before tearing the old one down, then
+// commits the parent index/back-edge before releasing CLK_ENABLE_LOCK, so an
+// IRQ-side gate operation observes either the complete old topology or the
+// complete new topology.
 static_lock! {
     static CLK_LOCK: Mutex<()> = Mutex::new(());
 }
@@ -59,6 +63,7 @@ static CLOCKS: SpinNoIrq<Vec<Arc<ClkCore>>> = SpinNoIrq::new(Vec::new());
 
 /// A clock slot waiting for a parent (by name) that has not been registered
 /// yet. When a clock with `parent_name` is built, the framework adopts it.
+#[derive(Clone)]
 struct OrphanEntry {
     child: Arc<ClkCore>,
     parent_index: u8,
@@ -269,7 +274,7 @@ impl ClkCore {
     /// after all nodes exist. If the slot is the currently selected parent,
     /// the parent→child back-edge is moved to the new parent. The caller holds
     /// `CLK_LOCK`.
-    pub(crate) fn set_parent_slot(&self, index: u8, parent: Arc<ClkCore>) {
+    fn set_parent_slot(&self, index: u8, parent: Arc<ClkCore>) {
         let selected = self.state.lock().parent_index == index;
         let prev = {
             let mut table = self.parents.lock();
@@ -286,6 +291,64 @@ impl ClkCore {
         if selected {
             self.relink_selected(prev);
         }
+    }
+
+    /// Resolve an empty parent slot and migrate this node's active references
+    /// when that slot is currently selected.
+    ///
+    /// Table registration creates all nodes before connecting their parent
+    /// slots. A node may nevertheless already be active when it was adopted
+    /// as the parent of a pre-existing orphan. Merely filling its selected
+    /// slot would then leave its prepare/enable references stranded at the
+    /// node instead of propagating them into the newly attached ancestor.
+    /// The caller holds [`CLK_LOCK`].
+    pub(crate) fn resolve_parent_slot_locked(&self, index: u8, parent: Arc<ClkCore>) -> ClkResult {
+        debug_assert_clk_lock_held();
+        let is_selected = self.state.lock().parent_index == index;
+        if !is_selected {
+            self.set_parent_slot(index, parent);
+            return Ok(());
+        }
+
+        let parent_rate = parent.get_rate();
+        let parent_accuracy = parent.get_accuracy();
+        let rate = self.ops.recalc_rate(parent_rate)?;
+        let accuracy = self.ops.recalc_accuracy(parent_accuracy)?;
+        let prepare_refs = self.state.lock().prepare_count;
+        let mut prepared = 0;
+        for _ in 0..prepare_refs {
+            if let Err(error) = parent.prepare_locked() {
+                for _ in 0..prepared {
+                    let _ = parent.unprepare_locked();
+                }
+                return Err(error);
+            }
+            prepared += 1;
+        }
+
+        let enable_guard = CLK_ENABLE_LOCK.lock();
+        let enable_refs = self.state.lock().enable_count;
+        for enabled in 0..enable_refs {
+            if let Err(error) = parent.enable_locked() {
+                for _ in 0..enabled {
+                    parent.disable_locked();
+                }
+                drop(enable_guard);
+                for _ in 0..prepared {
+                    let _ = parent.unprepare_locked();
+                }
+                return Err(error);
+            }
+        }
+
+        self.set_parent_slot(index, parent);
+        {
+            let mut state = self.state.lock();
+            state.rate = rate;
+            state.accuracy = accuracy;
+        }
+        drop(enable_guard);
+        Ok(())
     }
 
     /// Move this node's parent→child back-edge from `prev` (the previously
@@ -445,7 +508,6 @@ impl ClkCore {
         Ok(())
     }
 
-    /// Release one prepare reference, then propagate to the parent.
     /// Release one prepare reference, then propagate to the parent.
     ///
     /// Returns the hardware `unprepare` error, if any: the software count is
@@ -739,25 +801,45 @@ impl ClkCore {
         }
         let parent_rate = self.parent_rate();
 
-        // Upward: the node asks its selected parent to change rate.
-        if let Some(target) = req
+        let result = if let Some(target) = req
             .parent_target
             .filter(|_| self.flags.contains(ClkFlags::SET_RATE_PARENT))
         {
+            // Upward: the node asks its selected parent to change rate.
             let parent = self.parent_node().ok_or(ClkError::NotSupported)?;
-            let actual_parent = parent.set_rate_locked(target)?;
-            return self.ops.recalc_rate(actual_parent);
-        }
+            let old_parent_rate = parent.get_rate();
+            match parent.set_rate_locked(target) {
+                Ok(actual_parent) => match self.ops.recalc_rate(actual_parent) {
+                    Ok(rate) => Ok(rate),
+                    Err(error) => {
+                        // The child could not accept the newly programmed
+                        // parent rate. Restore the upstream transaction before
+                        // reporting an aborted change to this node's consumer.
+                        match parent.set_rate_locked(old_parent_rate) {
+                            Ok(restored) if restored == old_parent_rate => Err(error),
+                            Ok(_) | Err(_) => Err(ClkError::BadState),
+                        }
+                    }
+                },
+                Err(error) => Err(error),
+            }
+        } else {
+            // Own rate field. A transparent node (no `set_rate`) only
+            // succeeds by reporting its parent's rate after a source switch.
+            match self.ops.set_rate(req.rate, parent_rate) {
+                Ok(actual) => Ok(actual),
+                Err(ClkError::NotSupported) if reparented => self.ops.recalc_rate(parent_rate),
+                Err(error) => Err(error),
+            }
+        };
 
-        // Own rate field. A transparent node (no `set_rate`) only "succeeds"
-        // by reporting its parent's rate when it actually switched sources;
-        // otherwise the request is genuinely unsupported (e.g. a fixed clock
-        // cannot change rate) and must surface `NotSupported`.
-        match self.ops.set_rate(req.rate, parent_rate) {
-            Ok(actual) => Ok(actual),
-            Err(ClkError::NotSupported) if reparented => self.ops.recalc_rate(parent_rate),
-            Err(err) => Err(err),
+        if result.is_err() && reparented && self.switch_parent_locked(current).is_err() {
+            // The primary operation and its topology rollback both failed;
+            // report the stronger invariant failure rather than pretending
+            // the requested rate was the only failed effect.
+            return Err(ClkError::BadState);
         }
+        result
     }
 
     // ---- parent selection ----
@@ -782,8 +864,8 @@ impl ClkCore {
 
     /// Raw parent switch plus cache refresh.
     ///
-    /// The caller must hold [`CLK_LOCK`] and has already enforced the
-    /// `SET_RATE_GATE`-while-enabled rejection.
+    /// The caller must hold [`CLK_LOCK`] and has already enforced any relevant
+    /// rate/parent gating policy.
     fn switch_parent_locked(&self, index: u8) -> ClkResult {
         debug_assert_clk_lock_held();
         // Resolve the new parent and capture the previously selected parent
@@ -803,13 +885,11 @@ impl ClkCore {
             let prev = table.get(old_idx).and_then(Option::clone);
             (parent, prev)
         };
-        // How many consumer refs this node holds on its (old) parent: they must
-        // migrate to the new parent so an active clock keeps running and the old
-        // parent's counts don't leak. CLK_LOCK is held, so counts are stable.
-        let (prep, en) = {
-            let st = self.state.lock();
-            (st.prepare_count, st.enable_count)
-        };
+        // Prepare references are serialized by CLK_LOCK and can be migrated
+        // before entering the atomic part of the transition. Enable references
+        // are sampled only after CLK_ENABLE_LOCK is held; otherwise an IRQ-side
+        // enable could race the sample and remain attached to the old parent.
+        let prep = self.state.lock().prepare_count;
         // 1. Bring the new parent up BEFORE the switch (new first, then old
         //    down) so the clock does not go dark. Each step rolls back the
         //    earlier ones on failure, leaving state unchanged.
@@ -819,23 +899,31 @@ impl ClkCore {
         // parent; moving only one leaves a leaked reference on the old parent
         // and an under-counted new one (caught by the concurrency stress
         // test: two gate workers + one switcher unbalanced the counters).
+        let mut brought_up_prep = 0;
         for _ in 0..prep {
-            new_parent.prepare_locked()?; // may sleep; on failure nothing changed
+            if let Err(error) = new_parent.prepare_locked() {
+                for _ in 0..brought_up_prep {
+                    let _ = new_parent.unprepare_locked();
+                }
+                return Err(error);
+            }
+            brought_up_prep += 1;
         }
-        let mut brought_up_en = 0u32;
+        // From this point through the hardware mux write and parent-index
+        // commit, enable/disable cannot observe a half-transitioned topology.
+        // `ClkHwOps::set_parent`, recalc callbacks, and enable callbacks are
+        // atomic-context operations and must not sleep.
+        let enable_guard = CLK_ENABLE_LOCK.lock();
+        let en = self.state.lock().enable_count;
+        let mut brought_up_en = 0;
         if en > 0 {
-            // CLK_LOCK → CLK_ENABLE_LOCK nesting (documented order); the
-            // enable callback is non-sleeping, so IRQs-off under the spinlock
-            // is safe.
-            let _el = CLK_ENABLE_LOCK.lock();
             for _ in 0..en {
                 if let Err(e) = new_parent.enable_locked() {
-                    drop(_el);
-                    // Roll back everything brought up so far.
                     for _ in 0..brought_up_en {
                         new_parent.disable_locked();
                     }
-                    for _ in 0..prep {
+                    drop(enable_guard);
+                    for _ in 0..brought_up_prep {
                         let _ = new_parent.unprepare_locked();
                     }
                     return Err(e);
@@ -852,13 +940,11 @@ impl ClkCore {
         let (new_rate, new_accuracy) = match (new_rate, new_accuracy) {
             (Ok(r), Ok(a)) => (r, a),
             (Err(e), _) | (_, Err(e)) => {
-                if en > 0 {
-                    let _el = CLK_ENABLE_LOCK.lock();
-                    for _ in 0..en {
-                        new_parent.disable_locked();
-                    }
+                for _ in 0..brought_up_en {
+                    new_parent.disable_locked();
                 }
-                for _ in 0..prep {
+                drop(enable_guard);
+                for _ in 0..brought_up_prep {
                     let _ = new_parent.unprepare_locked();
                 }
                 return Err(e);
@@ -866,13 +952,11 @@ impl ClkCore {
         };
         // 3. Switch the hardware mux; roll back on failure.
         if let Err(e) = self.ops.set_parent(index) {
-            if en > 0 {
-                let _el = CLK_ENABLE_LOCK.lock();
-                for _ in 0..en {
-                    new_parent.disable_locked();
-                }
+            for _ in 0..brought_up_en {
+                new_parent.disable_locked();
             }
-            for _ in 0..prep {
+            drop(enable_guard);
+            for _ in 0..brought_up_prep {
                 let _ = new_parent.unprepare_locked();
             }
             return Err(e);
@@ -880,24 +964,26 @@ impl ClkCore {
         // 4. Tear the old parent down AFTER the successful switch — all
         //    `en`/`prep` references that were migrated up in step 1.
         if let Some(old) = prev.clone() {
-            if en > 0 {
-                let _el = CLK_ENABLE_LOCK.lock();
-                for _ in 0..en {
-                    old.disable_locked();
-                }
-            }
-            for _ in 0..prep {
-                let _ = old.unprepare_locked();
+            for _ in 0..en {
+                old.disable_locked();
             }
         }
-        // 5. Commit cache, move the back-edge, refresh descendants.
+        // 5. Commit the topology while enable/disable is still excluded.
         {
             let mut st = self.state.lock();
             st.parent_index = index;
             st.rate = new_rate;
             st.accuracy = new_accuracy;
         }
-        self.relink_selected(prev);
+        self.relink_selected(prev.clone());
+        drop(enable_guard);
+        // Slow unprepare callbacks run outside the spinlock. CLK_LOCK still
+        // prevents another topology or prepare transition from interleaving.
+        if let Some(old) = prev {
+            for _ in 0..prep {
+                let _ = old.unprepare_locked();
+            }
+        }
         self.refresh_descendants();
         Ok(())
     }
@@ -1017,9 +1103,13 @@ impl ClkBuilder {
         // Post-registration hook (Linux `clk_ops.init`). Runs before the clock
         // is published so a failing init aborts registration.
         core.ops.init()?;
-        CLOCKS.lock().push(core.clone());
-        // Register this node's own deferred-parent slots, then adopt any orphan
-        // that was waiting for this node.
+        // Adopt existing children before publishing this node. Adoption is a
+        // transaction: if their active references cannot be migrated, build
+        // fails and the children remain retryable orphans.
+        adopt_orphans(core.name(), core.clone())?;
+        // Register this node's own deferred-parent slots only after adoption
+        // succeeds, so a failed build cannot strand entries referencing an
+        // unpublished node.
         for (index, pname) in pending_parents {
             ORPHANS.lock().push(OrphanEntry {
                 child: core.clone(),
@@ -1027,7 +1117,7 @@ impl ClkBuilder {
                 parent_name: pname,
             });
         }
-        adopt_orphans(core.name(), core.clone());
+        CLOCKS.lock().push(core.clone());
         Ok(core)
     }
 }
@@ -1043,7 +1133,7 @@ impl ClkBuilder {
 /// Holds `CLK_LOCK` so the orphan's reparenting and cached-rate refresh are
 /// atomic with respect to concurrent `set_rate`/`set_parent`/`prepare`, which
 /// also mutate rate state under `CLK_LOCK`.
-fn adopt_orphans(name: &'static str, parent: Arc<ClkCore>) {
+fn adopt_orphans(name: &'static str, parent: Arc<ClkCore>) -> ClkResult {
     let _guard = CLK_LOCK.lock();
     let matched: Vec<OrphanEntry> = {
         let mut orphans = ORPHANS.lock();
@@ -1059,45 +1149,95 @@ fn adopt_orphans(name: &'static str, parent: Arc<ClkCore>) {
         matched
     };
 
-    for entry in matched {
-        // Fill the slot (and maintain the parent→child back-edge if it is the
-        // selected parent) via set_parent_slot, which runs under CLK_LOCK like
-        // this whole helper.
+    struct AdoptionState {
+        entry_index: usize,
+        enable_refs: i32,
+        rate: Rate,
+        accuracy: u32,
+    }
+
+    let mut states = Vec::new();
+    let mut prepared_refs = 0;
+    for (entry_index, entry) in matched.iter().enumerate() {
+        if entry.child.state.lock().parent_index != entry.parent_index {
+            continue;
+        }
+        let prepare_refs = entry.child.state.lock().prepare_count;
+        for _ in 0..prepare_refs {
+            if let Err(error) = parent.prepare_locked() {
+                for _ in 0..prepared_refs {
+                    let _ = parent.unprepare_locked();
+                }
+                ORPHANS.lock().extend(matched.iter().cloned());
+                return Err(error);
+            }
+            prepared_refs += 1;
+        }
+        let rate = match entry.child.ops.recalc_rate(parent.get_rate()) {
+            Ok(rate) => rate,
+            Err(error) => {
+                for _ in 0..prepared_refs {
+                    let _ = parent.unprepare_locked();
+                }
+                ORPHANS.lock().extend(matched.iter().cloned());
+                return Err(error);
+            }
+        };
+        let accuracy = match entry.child.ops.recalc_accuracy(parent.get_accuracy()) {
+            Ok(accuracy) => accuracy,
+            Err(error) => {
+                for _ in 0..prepared_refs {
+                    let _ = parent.unprepare_locked();
+                }
+                ORPHANS.lock().extend(matched.iter().cloned());
+                return Err(error);
+            }
+        };
+        states.push(AdoptionState {
+            entry_index,
+            enable_refs: 0,
+            rate,
+            accuracy,
+        });
+    }
+
+    // Exclude IRQ-side enable/disable from the reference snapshot through the
+    // slot/cache commit, exactly like an ordinary parent transition.
+    let enable_guard = CLK_ENABLE_LOCK.lock();
+    let mut enabled_refs = 0;
+    for state in &mut states {
+        state.enable_refs = matched[state.entry_index].child.state.lock().enable_count;
+        for _ in 0..state.enable_refs {
+            if let Err(error) = parent.enable_locked() {
+                for _ in 0..enabled_refs {
+                    parent.disable_locked();
+                }
+                drop(enable_guard);
+                for _ in 0..prepared_refs {
+                    let _ = parent.unprepare_locked();
+                }
+                ORPHANS.lock().extend(matched.iter().cloned());
+                return Err(error);
+            }
+            enabled_refs += 1;
+        }
+    }
+
+    for (entry_index, entry) in matched.iter().enumerate() {
         entry
             .child
             .set_parent_slot(entry.parent_index, parent.clone());
-        if entry.child.state.lock().parent_index == entry.parent_index {
-            // Migrate the child's prepare/enable references to the new parent:
-            // an orphan that was already prepare_enable()d while its parent was
-            // missing must not leave the parent un-enabled (its later disable
-            // would decrement a reference the parent never held). Same
-            // new-parent-up semantics as switch_parent_locked; there is no old
-            // parent to tear down (the slot was empty).
-            let (prep, en) = {
-                let st = entry.child.state.lock();
-                (st.prepare_count, st.enable_count)
-            };
-            if prep > 0 {
-                // A failure here leaves the child software-prepared on a
-                // hardware-unprepared parent; surface it rather than silently
-                // diverging. (un).prepare is best-effort at this point — the
-                // adoption itself has already committed.
-                let _ = parent.prepare_locked();
-            }
-            if en > 0 {
-                parent.enable_locked().ok();
-            }
-            let parent_rate = parent.get_rate();
-            let parent_accuracy = parent.get_accuracy();
-            let mut st = entry.child.state.lock();
-            st.rate = entry.child.ops.recalc_rate(parent_rate).unwrap_or(st.rate);
-            st.accuracy = entry
-                .child
-                .ops
-                .recalc_accuracy(parent_accuracy)
-                .unwrap_or(st.accuracy);
+        if let Some(state) = states.iter().find(|state| state.entry_index == entry_index) {
+            let mut child_state = entry.child.state.lock();
+            child_state.rate = state.rate;
+            child_state.accuracy = state.accuracy;
         }
     }
+    drop(enable_guard);
+    for state in &states {
+        matched[state.entry_index].child.refresh_descendants();
+    }
+    Ok(())
 }
 
 /// Run `f` under the global clock lock, exposing it to sibling helpers like
@@ -1131,17 +1271,111 @@ pub(crate) fn debug_assert_clk_lock_held() {
 #[cfg(not(debug_assertions))]
 pub(crate) fn debug_assert_clk_lock_held() {}
 
-/// Current length of the global clock list. Useful for diagnostics and for
-/// callers implementing their own rollback bookkeeping.
+/// Current length of the global clock list. Useful for diagnostics and tests.
 pub fn clocks_len() -> usize {
     CLOCKS.lock().len()
 }
 
-/// Truncate the global clock list back to `mark` entries (rollback of a
-/// partially-failed batch registration; caller holds `CLK_LOCK`).
-pub(crate) fn truncate_clocks(mark: usize) {
-    let mut list = CLOCKS.lock();
-    list.truncate(mark);
+/// Remove an unpublished registration batch and restore pre-existing orphans.
+pub(crate) fn rollback_nodes(nodes: &[Arc<ClkCore>]) {
+    let _guard = CLK_LOCK.lock();
+    let is_batch_node =
+        |candidate: &Arc<ClkCore>| nodes.iter().any(|node| Arc::ptr_eq(node, candidate));
+
+    // Scan every pre-existing clock's complete parent table. A non-selected
+    // orphan slot has no parent->child back-edge, so walking only the batch
+    // nodes' `children` lists would fail to restore it.
+    let clocks: Vec<Arc<ClkCore>> = CLOCKS.lock().iter().cloned().collect();
+    let mut restored = Vec::new();
+    for child in clocks.iter().filter(|child| !is_batch_node(child)) {
+        let selected_index = child.state.lock().parent_index;
+        for (index, slot) in child.parents.lock().iter().enumerate() {
+            let Some(parent) = slot else { continue };
+            if !is_batch_node(parent) {
+                continue;
+            }
+            let parent_index = index as u8;
+            let prepare_refs = if selected_index == parent_index {
+                child.state.lock().prepare_count
+            } else {
+                0
+            };
+            restored.push((child.clone(), parent.clone(), parent_index, prepare_refs));
+        }
+    }
+
+    // Sample enable references, release them, and detach the slots in one
+    // atomic topology transaction. Otherwise an IRQ-side enable could land on
+    // the failed parent after the sample but immediately before slot removal.
+    let enable_guard = CLK_ENABLE_LOCK.lock();
+    for (child, parent, parent_index, _) in &restored {
+        if child.state.lock().parent_index == *parent_index {
+            let enable_refs = child.state.lock().enable_count;
+            for _ in 0..enable_refs {
+                parent.disable_locked();
+            }
+        }
+    }
+    let mut selected_children = Vec::new();
+    for (child, parent, parent_index, _) in &restored {
+        if let Some(slot) = child.parents.lock().get_mut(*parent_index as usize) {
+            *slot = None;
+        }
+        parent
+            .children
+            .lock()
+            .retain(|entry| entry.as_ptr() != Arc::as_ptr(child));
+        if child.state.lock().parent_index == *parent_index {
+            let rate = child.ops.recalc_rate(0);
+            let accuracy = child.ops.recalc_accuracy(0);
+            let mut state = child.state.lock();
+            if let Ok(rate) = rate {
+                state.rate = rate;
+            }
+            if let Ok(accuracy) = accuracy {
+                state.accuracy = accuracy;
+            }
+            selected_children.push(child.clone());
+        }
+    }
+    drop(enable_guard);
+
+    // Prepare counts cannot change while CLK_LOCK is held. The slow callbacks
+    // deliberately run after IRQs are restored and after the topology commit.
+    for (_, parent, _, prepare_refs) in &restored {
+        for _ in 0..*prepare_refs {
+            let _ = parent.unprepare_locked();
+        }
+    }
+    for (child, parent, parent_index, _) in restored {
+        ORPHANS.lock().push(OrphanEntry {
+            child,
+            parent_index,
+            parent_name: parent.name,
+        });
+    }
+    for child in selected_children {
+        child.refresh_descendants();
+    }
+
+    ORPHANS
+        .lock()
+        .retain(|entry| !nodes.iter().any(|node| Arc::ptr_eq(node, &entry.child)));
+    for node in nodes {
+        if let Some(parent) = node.parent_node() {
+            parent
+                .children
+                .lock()
+                .retain(|child| child.as_ptr() != Arc::as_ptr(node));
+        }
+        // Parent slots are strong Arcs. Clear the entire failed graph so a
+        // cycle rejected during table validation does not keep every batch
+        // node alive after it is removed from CLOCKS.
+        node.parents.lock().iter_mut().for_each(|slot| *slot = None);
+    }
+    CLOCKS
+        .lock()
+        .retain(|clock| !nodes.iter().any(|node| Arc::ptr_eq(node, clock)));
 }
 
 /// Gate off any clock that is enabled in hardware but holds no consumer

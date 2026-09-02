@@ -79,6 +79,103 @@ pub struct ClkSpec {
     index: u32,
 }
 
+/// One clock connection attached to a device.
+///
+/// `connection_name` is the consumer-local firmware name (for example
+/// `"baudclk"` from `clock-names`); [`spec`](Self::spec) is the normalized
+/// provider lookup key. Keeping both values together prevents the name/index
+/// association from being lost when firmware data becomes a device resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClkResource {
+    connection_name: Option<&'static str>,
+    spec: ClkSpec,
+}
+
+impl ClkResource {
+    /// Construct an unnamed clock connection.
+    pub const fn unnamed(spec: ClkSpec) -> Self {
+        Self {
+            connection_name: None,
+            spec,
+        }
+    }
+
+    /// Construct a consumer-local named clock connection.
+    pub const fn named(connection_name: &'static str, spec: ClkSpec) -> Self {
+        Self {
+            connection_name: Some(connection_name),
+            spec,
+        }
+    }
+
+    /// Consumer-local connection name, if firmware supplied one.
+    pub const fn connection_name(self) -> Option<&'static str> {
+        self.connection_name
+    }
+
+    /// Normalized provider lookup key for this connection.
+    pub const fn spec(self) -> ClkSpec {
+        self.spec
+    }
+}
+
+/// Firmware-normalized description of a clock provider device.
+///
+/// This is device metadata rather than a host-kernel handle: it carries only
+/// stable provider identity and fixed-clock properties, so it remains usable
+/// by OS-neutral driver frameworks and by firmware sources other than DT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClkProviderDesc {
+    provider_id: u32,
+    clock_cells: u32,
+    fixed_rate_hz: Option<u64>,
+    output_name: Option<&'static str>,
+}
+
+impl ClkProviderDesc {
+    /// Construct a provider description.
+    pub const fn new(provider_id: u32, clock_cells: u32) -> Self {
+        Self {
+            provider_id,
+            clock_cells,
+            fixed_rate_hz: None,
+            output_name: None,
+        }
+    }
+
+    /// Attach a fixed output rate in hertz.
+    pub const fn with_fixed_rate(mut self, rate_hz: u64) -> Self {
+        self.fixed_rate_hz = Some(rate_hz);
+        self
+    }
+
+    /// Attach the provider's first output name.
+    pub const fn with_output_name(mut self, name: &'static str) -> Self {
+        self.output_name = Some(name);
+        self
+    }
+
+    /// Stable provider identifier, normally a firmware phandle.
+    pub const fn provider_id(self) -> u32 {
+        self.provider_id
+    }
+
+    /// Number of provider-specific cells in one consumer specifier.
+    pub const fn clock_cells(self) -> u32 {
+        self.clock_cells
+    }
+
+    /// Fixed output rate in hertz, when this is a fixed-clock provider.
+    pub const fn fixed_rate_hz(self) -> Option<u64> {
+        self.fixed_rate_hz
+    }
+
+    /// Provider output name, when firmware supplied one.
+    pub const fn output_name(self) -> Option<&'static str> {
+        self.output_name
+    }
+}
+
 impl ClkSpec {
     /// Resolve by the clock's **SoC name** — the provider output name registered
     /// via [`ClkTable::register`](kclk::ClkTable::register) (e.g. `"uart0_clk"`,

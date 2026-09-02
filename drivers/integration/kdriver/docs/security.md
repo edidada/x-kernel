@@ -49,8 +49,14 @@ firmware (DT / ACPI) / PCI config space
 - `kdriver` 信任 `virtio` crate 的 `probe_mmio_device` 在访问 MMIO 寄存器前已完成必要的 volatile read 安全检查。
 - `kdriver` 信任各 driver crate（`block::ahci`、`block::sdmmc`、`net::ixgbe`）对其 `new(vaddr)` 入口参数的 safety precondition 定义正确。
 - 外部调用者（`kruntime` 启动路径）信任 `init_drivers` 在 platform `early_driver_init` 之后调用。
-- `kdriver` 信任固件层（`khal::firmware::devices`）正确提取 DT 的 `clock-frequency` 与 `phandle`；时钟控制器 probe 消费这些值前不再重遍 DT，错误的值会直接进入时钟注册表。
-- `kdriver` 信任 `kclk` 的 `register_table` / `register_provider` 校验时钟拓扑（父引用、环检测、索引唯一性）；probe 只透传固件层数据。
+- `kdriver` 信任固件层（`khal::firmware::devices`）正确提取 DT 的
+  `clock-frequency`、`phandle`、`#clock-cells`、`clock-output-names`、
+  `clocks` 与 `clock-names`；平台后端把 provider 元数据和 consumer-local
+  连接名绑定到对应 `DeviceObject`，时钟控制器 probe 不再重遍 DT。
+- `kdriver` 信任 `kclk` 的 `register_table` / `register_provider` 校验时钟
+  拓扑并在晚期失败时回滚批次、orphan 收养和活动引用。缺失 provider 保持
+  为 `NoProvider`，经 `WouldBlock` 进入 deferred probe，而不是记录为永久失败；
+  probe 重试只在上一轮激活了新依赖时继续，避免无界自旋。
 
 ## 外部边界 / 攻击面
 

@@ -447,11 +447,6 @@ pub fn register_table(
     // in pass 3. Not under CLK_LOCK: build() internally takes it via
     // adopt_orphans, and re-entrancy would panic.
     //
-    // Rollback: record how many entries this batch pushed into the global
-    // CLOCKS list; on any later failure, truncate back to that mark so a
-    // failed registration does not leave unreachable-but-listed nodes for
-    // clk_disable_unused / future same-name adopters to trip over.
-    let clocks_mark = with_clk_lock(crate::core::clocks_len);
     let mut nodes: BTreeMap<&'static str, Arc<ClkCore>> = BTreeMap::new();
     for (b, ops) in branches.iter().zip(ops_list) {
         let n = b.parent_count();
@@ -463,7 +458,7 @@ pub fn register_table(
         {
             Ok(core) => core,
             Err(e) => {
-                rollback_clocks(clocks_mark);
+                rollback_nodes(&nodes);
                 return Err(e);
             }
         };
@@ -505,7 +500,7 @@ pub fn register_table(
                         .map_err(|_| ClkError::InvalidParent)?
                         .into_core(),
                 };
-                node.set_parent_slot(i as u8, parent);
+                node.resolve_parent_slot_locked(i as u8, parent)?;
             }
         }
         // Detect parent cycles before the recursive rate refresh: a cyclic
@@ -520,7 +515,7 @@ pub fn register_table(
         Ok(())
     });
     if let Err(e) = resolve_result {
-        rollback_clocks(clocks_mark);
+        rollback_nodes(&nodes);
         return Err(e);
     }
 
@@ -531,11 +526,9 @@ pub fn register_table(
     Ok(())
 }
 
-/// Truncate the global clock list back to `mark` entries — the rollback half
-/// of [`register_table`]'s batch registration. Callers that did not record a
-/// mark must not call this.
-fn rollback_clocks(mark: usize) {
-    with_clk_lock(|| crate::core::truncate_clocks(mark));
+fn rollback_nodes(nodes: &BTreeMap<&'static str, Arc<ClkCore>>) {
+    let nodes: Vec<Arc<ClkCore>> = nodes.values().cloned().collect();
+    crate::core::rollback_nodes(&nodes);
 }
 
 /// Construct the hardware ops for a descriptor, sharing the controller's

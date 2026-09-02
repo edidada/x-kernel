@@ -132,12 +132,30 @@ impl ClkConsumer for KclkConsumer {
 /// Translate a kclk error into the device-res resource error vocabulary.
 fn map_clk_err(err: kclk::ClkError) -> ResError {
     match err {
-        kclk::ClkError::NoProvider | kclk::ClkError::NotFound => ResError::NotFound,
+        kclk::ClkError::NoProvider => ResError::NoProvider,
+        kclk::ClkError::NotFound => ResError::NotFound,
         kclk::ClkError::NotSupported => ResError::Unsupported,
         kclk::ClkError::InvalidRate | kclk::ClkError::InvalidParent => ResError::InvalidResource,
         kclk::ClkError::Busy | kclk::ClkError::Aborted => ResError::Busy,
         kclk::ClkError::Io | kclk::ClkError::ParentError | kclk::ClkError::BadState => {
             ResError::InvalidResource
         }
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use device_res::{ClkOp, ClkSpec, ResError};
+    use unittest::def_test;
+
+    use super::XKernelClkOp;
+
+    #[def_test(serial)]
+    fn absent_clock_provider_remains_retryable() {
+        kclk::reset_providers();
+        assert!(matches!(
+            XKernelClkOp.get_clock(ClkSpec::by_phandle_index(0xfeed, 0)),
+            Err(ResError::NoProvider)
+        ));
     }
 }

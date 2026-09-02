@@ -22,7 +22,7 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
-use driver_base::{DeviceKind, DriverResult};
+use driver_base::{DeviceKind, DriverError, DriverResult};
 use kdevice::{
     BusTypeId, DeviceDriver, DeviceMatcher, DeviceObject, FirmwareMatchSpec, MatchResult, priority,
 };
@@ -85,69 +85,41 @@ impl DeviceDriver for FixedClockDriver {
             return Ok(());
         }
 
-        // Discover this node's (phandle, frequency) from the DT. The DT
-        // order and the probe order agree because the platform backend
-        // registers clock providers first; for multi-clock trees the node
-        // identity routing is done by the SoC controller driver instead.
-        let Some((phandle, rate)) = first_fixed_clock_node() else {
-            log::warn!("clk-fixed-clock: no clock-frequency in DT");
-            return Ok(());
-        };
+        // The platform backend attaches metadata from this exact firmware
+        // node. Never re-walk the global DT here: several fixed-clock nodes
+        // may share the same compatible string but have distinct providers.
+        let provider = device.clk_provider().ok_or(DriverError::InvalidInput)?;
+        let rate = provider.fixed_rate_hz().ok_or(DriverError::InvalidInput)?;
+        let phandle = provider.provider_id();
 
         // Register under the DT phandle so `clocks = <&phandle>` references
         // resolve. The table is leaked: the provider registry holds a
         // 'static reference for the lifetime of the boot.
         let table: &'static kclk::ClkTable = Box::leak(Box::new(kclk::ClkTable::new(phandle)));
-        let output_name = fixed_clock_output_name().unwrap_or("fixed-clock");
-        let branches = [kclk::ClkBranch::fixed_rate(0, output_name, u64::from(rate))];
+        let output_name = provider.output_name().unwrap_or("fixed-clock");
+        let branches = [kclk::ClkBranch::fixed_rate(0, output_name, rate)];
 
         // NullClkReg: a fixed clock is purely computational.
         let reg: Arc<dyn kclk::ClkRegAccess> = Arc::new(kclk::NullClkReg);
-        match kclk::register_table(table, reg, &branches) {
-            Ok(()) => {
-                kclk::register_provider(table);
-                log::warn!(
-                    "clk-fixed-clock: registered {output_name} ({rate} Hz, phandle 0x{phandle:x})"
-                );
-            }
-            Err(e) => log::warn!("clk-fixed-clock: failed to register {output_name}: {e:?}"),
-        }
+        kclk::register_table(table, reg, &branches).map_err(map_clk_probe_error)?;
+        kclk::register_provider(table);
+        log::debug!("clk-fixed-clock: registered {output_name} ({rate} Hz, phandle 0x{phandle:x})");
 
         Ok(())
     }
 }
 
-/// Walk the DT for the first `fixed-clock` node's phandle + frequency.
-fn first_fixed_clock_node() -> Option<(u32, u32)> {
-    let fdt = of::fdt()?;
-    for node in fdt.all_nodes() {
-        if node.compatibles().any(|c| c == "fixed-clock")
-            && let Some(freq) = node.property_u32("clock-frequency")
-        {
-            // QEMU-virt style nodes carry `phandle`; fall back to
-            // `linux,phandle` for older DT generators.
-            let phandle = node
-                .property_u32("phandle")
-                .or_else(|| node.property_u32("linux,phandle"))?;
-            return Some((phandle, freq));
-        }
+fn map_clk_probe_error(error: kclk::ClkError) -> DriverError {
+    match error {
+        kclk::ClkError::NoProvider => DriverError::WouldBlock,
+        kclk::ClkError::Io | kclk::ClkError::ParentError => DriverError::Io,
+        kclk::ClkError::Busy | kclk::ClkError::Aborted => DriverError::ResourceBusy,
+        kclk::ClkError::NotSupported => DriverError::Unsupported,
+        kclk::ClkError::NotFound
+        | kclk::ClkError::InvalidRate
+        | kclk::ClkError::InvalidParent
+        | kclk::ClkError::BadState => DriverError::InvalidInput,
     }
-    None
-}
-
-/// The fixed-clock node's `clock-output-names` (preferred) or node name.
-fn fixed_clock_output_name() -> Option<&'static str> {
-    let fdt = of::fdt()?;
-    for node in fdt.all_nodes() {
-        if node.compatibles().any(|c| c == "fixed-clock") {
-            // clock-output-names is a NUL-separated string list; take the
-            // first entry.
-            let prop = node.property("clock-output-names")?;
-            let name = prop.value.split(|&b| b == 0).next()?;
-            return core::str::from_utf8(name).ok();
-        }
-    }
-    None
 }
 
 /// Factory for the built-in driver registry.

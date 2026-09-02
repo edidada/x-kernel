@@ -77,7 +77,6 @@ kdma.workspace = true
 device_res = { workspace = true }
 device_res_xkernel = { workspace = true }
 kclk = { workspace = true }
-of = { workspace = true }
 driver_base = { workspace = true }
 karch = { workspace = true }
 kclass = { workspace = true }

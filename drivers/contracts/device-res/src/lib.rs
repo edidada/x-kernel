@@ -41,8 +41,10 @@ pub enum ResourceDesc {
     Irq(crate::irq::IrqResource),
     /// Coherent DMA buffer request.
     Dma(crate::dma::DmaSpec),
-    /// Clock consumer specifier.
-    Clk(crate::clk::ClkSpec),
+    /// Clock consumer connection, including its optional consumer-local name.
+    Clk(crate::clk::ClkResource),
+    /// Metadata carried by a clock-provider device.
+    ClkProvider(crate::clk::ClkProviderDesc),
 }
 
 /// A collection of resources for a single device.
@@ -110,13 +112,29 @@ mod tests {
     use unittest::def_test;
 
     use crate::{
-        DeviceResource, DmaAllocation, DmaOp, DmaSpec, IrqEvent, IrqHandler, IrqHandlerToken,
-        IrqOp, IrqResource, IrqThreadHandler, IrqTrigger, MmioMapping, MmioOp, MmioRegion,
-        ResError, ResResult, ResourceDesc,
+        ClkProviderDesc, ClkResource, ClkSpec, DeviceResource, DmaAllocation, DmaOp, DmaSpec,
+        IrqEvent, IrqHandler, IrqHandlerToken, IrqOp, IrqResource, IrqThreadHandler, IrqTrigger,
+        MmioMapping, MmioOp, MmioRegion, ResError, ResResult, ResourceDesc,
         clk::{ClkConsumer, ClkRateEvent, NotifierVote},
         devm_alloc_coherent_with_provider, devm_iomap_with_provider,
         devm_request_irq_with_provider,
     };
+
+    #[def_test]
+    fn clock_resource_preserves_connection_and_provider_metadata() {
+        let spec = ClkSpec::by_phandle_index(0x42, 7);
+        let connection = ClkResource::named("baudclk", spec);
+        assert_eq!(connection.connection_name(), Some("baudclk"));
+        assert_eq!(connection.spec(), spec);
+
+        let provider = ClkProviderDesc::new(0x42, 1)
+            .with_fixed_rate(24_000_000)
+            .with_output_name("osc24m");
+        assert_eq!(provider.provider_id(), 0x42);
+        assert_eq!(provider.clock_cells(), 1);
+        assert_eq!(provider.fixed_rate_hz(), Some(24_000_000));
+        assert_eq!(provider.output_name(), Some("osc24m"));
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Event {

@@ -97,6 +97,92 @@ impl crate::ClkHwOps for CountingOps {
     }
 }
 
+struct FailingGateOps {
+    fail_prepare: bool,
+    fail_enable: bool,
+}
+
+struct ReparentThenFailOps {
+    parent: SpinNoIrq<u8>,
+}
+
+struct RejectChangedParentOps {
+    initial_parent_rate: u64,
+}
+
+impl ClkHwOps for RejectChangedParentOps {
+    fn recalc_rate(&self, parent_rate: u64) -> crate::ClkResult<u64> {
+        if parent_rate == self.initial_parent_rate {
+            Ok(parent_rate)
+        } else {
+            Err(ClkError::Io)
+        }
+    }
+
+    fn round_rate(&self, rate: u64, _parent_rate: u64) -> crate::ClkResult<crate::RoundResult> {
+        Ok(crate::RoundResult {
+            rate,
+            parent_target: Some(rate),
+        })
+    }
+}
+
+impl ReparentThenFailOps {
+    fn new() -> Self {
+        Self {
+            parent: SpinNoIrq::new(0),
+        }
+    }
+}
+
+impl ClkHwOps for ReparentThenFailOps {
+    fn recalc_rate(&self, parent_rate: u64) -> crate::ClkResult<u64> {
+        Ok(parent_rate)
+    }
+
+    fn determine_rate(
+        &self,
+        req: &mut crate::ClkRateRequest,
+        _parents: &[(u8, u64)],
+    ) -> crate::ClkResult<()> {
+        req.best_parent_index = Some(1);
+        req.best_parent_rate = 32_000_000;
+        req.rate = 30_000_000;
+        Ok(())
+    }
+
+    fn set_rate(&self, _rate: u64, _parent_rate: u64) -> crate::ClkResult<u64> {
+        Err(ClkError::Io)
+    }
+
+    fn get_parent(&self) -> crate::ClkResult<u8> {
+        Ok(*self.parent.lock())
+    }
+
+    fn set_parent(&self, index: u8) -> crate::ClkResult<()> {
+        *self.parent.lock() = index;
+        Ok(())
+    }
+}
+
+impl crate::ClkHwOps for FailingGateOps {
+    fn prepare(&self) -> crate::ClkResult<()> {
+        if self.fail_prepare {
+            Err(ClkError::Io)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn enable(&self) -> crate::ClkResult<()> {
+        if self.fail_enable {
+            Err(ClkError::Io)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 // Serializes tests that touch the global provider registry.
 static PROVIDER_SERIAL: SpinNoIrq<()> = SpinNoIrq::new(());
 
@@ -1019,6 +1105,75 @@ fn mux_determine_rate_selects_closest_parent() {
 }
 
 #[def_test(serial)]
+fn failed_rate_program_restores_selected_parent() {
+    let osc24 = ClkBuilder::new("txn_osc24", FixedRate::new(24_000_000).into_ops())
+        .build()
+        .unwrap();
+    let osc32 = ClkBuilder::new("txn_osc32", FixedRate::new(32_000_000).into_ops())
+        .build()
+        .unwrap();
+    let ops = Arc::new(ReparentThenFailOps::new());
+    let clk = ClkBuilder::new("txn_mux", ops.clone() as Arc<dyn ClkHwOps>)
+        .parent(osc24)
+        .parent(osc32)
+        .build()
+        .unwrap();
+    let events: Arc<SpinNoIrq<Vec<ClkEvent>>> = Arc::new(SpinNoIrq::new(Vec::new()));
+    let event_log = events.clone();
+    clk.add_notifier(Arc::new(move |event| {
+        event_log.lock().push(*event);
+        NotifierResult::Proceed
+    }));
+
+    assert_eq!(clk.set_rate(30_000_000), Err(ClkError::Io));
+    assert_eq!(clk.get_parent().unwrap().name(), "txn_osc24");
+    assert_eq!(clk.get_rate(), 24_000_000);
+    assert_eq!(*ops.parent.lock(), 0);
+    assert!(matches!(
+        events.lock().as_slice(),
+        [
+            ClkEvent::PreRateChange { .. },
+            ClkEvent::RateChangeAborted { .. }
+        ]
+    ));
+}
+
+#[def_test(serial)]
+fn failed_child_recalc_restores_programmed_parent_rate() {
+    let root = ClkBuilder::new("txn_rate_root", FixedRate::new(1_000_000_000).into_ops())
+        .build()
+        .unwrap();
+    let parent = ClkBuilder::new(
+        "txn_rate_parent",
+        Divider::into_ops(
+            Arc::new(MockReg::new()),
+            0,
+            0,
+            4,
+            None,
+            DividerFlags::empty(),
+        ),
+    )
+    .parent(root)
+    .build()
+    .unwrap();
+    let child = ClkBuilder::new(
+        "txn_rate_child",
+        Arc::new(RejectChangedParentOps {
+            initial_parent_rate: 1_000_000_000,
+        }),
+    )
+    .flags(ClkFlags::SET_RATE_PARENT)
+    .parent(parent.clone())
+    .build()
+    .unwrap();
+
+    assert_eq!(child.set_rate(250_000_000), Err(ClkError::Io));
+    assert_eq!(parent.get_rate(), 1_000_000_000);
+    assert_eq!(child.get_rate(), 1_000_000_000);
+}
+
+#[def_test(serial)]
 fn orphan_is_adopted_when_parent_registers() {
     let child = ClkBuilder::new("child", FixedFactor::new(2, 1).unwrap().into_ops())
         .parent_name("pll")
@@ -1331,6 +1486,68 @@ fn active_orphan_adoption_migrates_refs_to_new_parent() {
 }
 
 #[def_test(serial)]
+fn active_orphan_adoption_migrates_all_consumer_refs() {
+    let pll_ops = Arc::new(CountingOps::new());
+    let child = ClkBuilder::new(
+        "multi_orphan_child",
+        FixedFactor::new(1, 1).unwrap().into_ops(),
+    )
+    .parent_name("multi_orphan_parent")
+    .build()
+    .unwrap();
+    let first = ClkHandle::new(child.clone());
+    let second = ClkHandle::new(child);
+    first.prepare_enable().unwrap();
+    second.prepare_enable().unwrap();
+
+    let _parent = ClkBuilder::new("multi_orphan_parent", pll_ops.clone() as Arc<dyn ClkHwOps>)
+        .build()
+        .unwrap();
+    assert_eq!(pll_ops.snapshot(), (1, 0, 1, 0));
+
+    first.disable_unprepare();
+    assert_eq!(pll_ops.snapshot(), (1, 0, 1, 0));
+    second.disable_unprepare();
+    assert_eq!(pll_ops.snapshot(), (1, 1, 1, 1));
+}
+
+#[def_test(serial)]
+fn failed_active_orphan_adoption_remains_retryable() {
+    let child = ClkBuilder::new(
+        "retry_orphan_child",
+        FixedFactor::new(1, 1).unwrap().into_ops(),
+    )
+    .parent_name("retry_orphan_parent")
+    .build()
+    .unwrap();
+    let handle = ClkHandle::new(child.clone());
+    handle.prepare_enable().unwrap();
+
+    let failed = ClkBuilder::new(
+        "retry_orphan_parent",
+        Arc::new(FailingGateOps {
+            fail_prepare: true,
+            fail_enable: false,
+        }),
+    )
+    .build();
+    assert!(matches!(failed, Err(ClkError::Io)));
+    assert!(child.get_parent().is_none());
+
+    let parent_ops = Arc::new(CountingOps::new());
+    let parent = ClkBuilder::new(
+        "retry_orphan_parent",
+        parent_ops.clone() as Arc<dyn ClkHwOps>,
+    )
+    .build()
+    .unwrap();
+    assert!(child.get_parent().is_some());
+    assert_eq!(parent.counts(), (1, 1));
+    handle.disable_unprepare();
+    assert_eq!(parent.counts(), (0, 0));
+}
+
+#[def_test(serial)]
 fn register_table_failure_rolls_back_global_list() {
     let _serial = PROVIDER_SERIAL.lock();
     static TABLE: ClkTable = ClkTable::new(0x70);
@@ -1348,6 +1565,51 @@ fn register_table_failure_rolls_back_global_list() {
     assert!(register_table(&TABLE, reg, &branches).is_err());
     // The global list is back to its pre-registration size.
     assert_eq!(crate::clocks_len(), before);
+    reset_providers();
+}
+
+#[def_test(serial)]
+fn register_table_failure_restores_active_orphan_for_retry() {
+    let _serial = PROVIDER_SERIAL.lock();
+    static TABLE: ClkTable = ClkTable::new(0x71);
+    TABLE.clear();
+    reset_providers();
+
+    let child = ClkBuilder::new(
+        "rb_existing_child",
+        FixedFactor::new(1, 1).unwrap().into_ops(),
+    )
+    .parent_name("rb_parent")
+    .build()
+    .unwrap();
+    let handle = ClkHandle::new(child.clone());
+    handle.prepare_enable().unwrap();
+
+    // Building rb_parent adopts the active child. The second branch then
+    // fails during local-parent resolution, so the adoption must be undone.
+    let parent_ops = Arc::new(CountingOps::new());
+    let branches = [
+        ClkBranch::custom(
+            0,
+            "rb_parent",
+            parent_ops.clone() as Arc<dyn ClkHwOps>,
+            &[],
+            ClkFlags::empty(),
+        ),
+        ClkBranch::gate(1, "rb_bad_child", 0, 0, GateFlags::empty(), &["rb_missing"]),
+    ];
+    assert!(register_table(&TABLE, Arc::new(MockReg::new()), &branches).is_err());
+    assert!(child.get_parent().is_none());
+    assert_eq!(parent_ops.snapshot(), (1, 1, 1, 1));
+
+    let replacement_ops = Arc::new(CountingOps::new());
+    let replacement = ClkBuilder::new("rb_parent", replacement_ops.clone() as Arc<dyn ClkHwOps>)
+        .build()
+        .unwrap();
+    assert_eq!(child.get_parent().unwrap().name(), replacement.name());
+    assert_eq!(replacement.counts(), (1, 1));
+    handle.disable_unprepare();
+    assert_eq!(replacement.counts(), (0, 0));
     reset_providers();
 }
 

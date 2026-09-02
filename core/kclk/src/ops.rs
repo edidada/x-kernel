@@ -26,9 +26,11 @@
 //!   it only flips a gate bit (use `HIWORD_MASK` on a shared register word).
 //!
 //! The remaining callbacks (`recalc_rate`, `recalc_accuracy`, `is_enabled`,
-//! `is_prepared`, `get_parent`, `init`, `determine_rate`) may be invoked
-//! without the global lock (`get_rate` with `GET_RATE_NOCACHE`, `build`,
-//! `is_enabled`), so they **must not sleep** either.
+//! `is_prepared`, `get_parent`, `set_parent`, `init`, `determine_rate`) may be
+//! invoked without the sleepable lock or, for `set_parent` and reparent-time
+//! recalculation, while `CLK_ENABLE_LOCK` has disabled IRQs. They **must not
+//! sleep**. `set_rate` runs only under `CLK_LOCK` and may sleep, but returning
+//! an error must leave its hardware state unchanged.
 //!
 //! # Re-entrancy
 //!
@@ -145,7 +147,10 @@ pub trait ClkHwOps: Send + Sync {
     }
 
     /// Program a new rate and return the rate now in effect.
-    /// Default: not supported.
+    ///
+    /// Returning an error must leave the clock's programmable state unchanged;
+    /// the framework may need to roll back a parent-selection transaction and
+    /// emits `RateChangeAborted` under that contract. Default: not supported.
     fn set_rate(&self, _rate: Rate, _parent_rate: Rate) -> ClkResult<Rate> {
         Err(ClkError::NotSupported)
     }
@@ -162,7 +167,9 @@ pub trait ClkHwOps: Send + Sync {
         Ok(0)
     }
 
-    /// Select parent `index`. Default: not supported.
+    /// Select parent `index`. Must be quick and non-sleeping: topology commits
+    /// call this while holding the IRQ-saving enable lock. Returning an error
+    /// must leave the hardware parent unchanged. Default: not supported.
     fn set_parent(&self, _index: u8) -> ClkResult {
         Err(ClkError::NotSupported)
     }
