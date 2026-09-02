@@ -24,7 +24,7 @@
 │  │ Io read*/write* → ptr.read_volatile / write_volatile   │ │
 │  └─────────────────────────────────────────────────────────┘ │
 │                                                              │
-│  MmioOp / IrqOp / DmaOp / TimeOp provider traits            │
+│  MmioOp / IrqOp / DmaOp / TimeOp / ClkOp provider traits     │
 └──────────────────┬───────────────────────────────────────────┘
                    │
                    v
@@ -32,7 +32,7 @@
 ```
 
 - **驱动代码**：信任 `device-res` 正确管理 RAII handle 的生命周期和边界检查。
-- **Host Kernel 提供者**：信任 `MmioOp` / `IrqOp` / `DmaOp` / `TimeOp`
+- **Host Kernel 提供者**：信任 `MmioOp` / `IrqOp` / `DmaOp` / `TimeOp` / `ClkOp`
   实现正确执行映射、注册和释放操作。
 - **驱动框架**：负责持有并显式传入 host provider；`device-res` 不维护全局
   provider 状态。
@@ -154,6 +154,8 @@ unsafe { ptr.write_volatile(value) };
 | `DmaAllocation` | 手动 `unsafe impl` | auto `!Sync`（`NonNull`） | 地址值可在线程间移动 |
 | `Io` | auto（字段均为 `Send`） | `!Sync`（`NonNull`） | 同一 handle 不可跨线程共享 |
 | `Irq` | auto | auto | `IrqResource` 为 `Copy`，`bool` 为 `Send+Sync` |
+| `ClkSpec` / `ClkResource` | auto | auto | 纯数据（`Copy`），无内部可变性 |
+| `Clk` | auto | auto | 内部 `Arc<dyn ClkConsumer>`；并发操作由宿主框架的时钟锁串行化 |
 | `DmaCoherent` | auto（字段均为 `Send`） | `!Sync`（`NonNull`） | 同一 handle 不可跨线程共享 |
 
 ## 威胁分析
@@ -166,6 +168,7 @@ unsafe { ptr.write_volatile(value) };
 | T-04 | 中断风暴导致 CPU 资源耗尽 | 中 | 设备持续触发中断或中断未正确确认 | 由 `IrqOp` 实现负责限流和中断屏蔽；`Irq::set_enabled(false)` 可临时禁用 |
 | T-05 | Drop 释放到错误 provider | 高 | acquire 使用一个 provider，drop 阶段重新查询到另一个 provider | RAII handle 保存创建时 provider，drop 回到同一 provider |
 | T-06 | 重复映射同一 MMIO 区域 | 中 | 两个驱动请求重叠的 MMIO 区域 | 由 `MmioOp` 实现负责检测 `Busy` 并拒绝；本模块不做区域重叠检查 |
+| T-07 | 伪造的时钟 specifier 解析到错误时钟 | 中 | 固件提供的 (phandle, index) 指向未注册或错误输出 | `ClkOp::get_clock` 返回 `NoProvider`（可重试）或 `NotFound`（永久），驱动可区分 defer 与失败 |
 | T-07 | 固件提供恶意或错误的资源描述 | 高 | 恶意或 buggy 固件报告错误的 MMIO 基地址、零大小区域或无效 IRQ 号 | provider 实现应在 `map_mmio` / `request_irq` 中验证参数；本模块不校验 `ResourceDesc` 内容 |
 | T-09 | driver 自行构造 MSI message | 高 | driver 使用当前 APIC id 或裸 vector 写 MSI-X table | SMP/affinity/x2APIC 下投递目标错误或 vector 冲突 | API 只提供 provider 生成的 `MsiResource::message`，不提供 APIC id 查询 |
 | T-10 | MSI resource 隐式复制后重复释放 | 中 | resource 是 `Copy` 或被多个 owner 持有 | backend vector double-free 或 stale MSI message 被继续使用 | `MsiResource` 不实现 `Copy`，释放路径要求移动所有权 |

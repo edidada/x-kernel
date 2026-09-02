@@ -26,6 +26,7 @@
 drivers/contracts/device-res/
 ├── src/
 │   ├── lib.rs
+│   ├── clk.rs
 │   ├── dma.rs
 │   ├── irq.rs
 │   ├── mmio.rs
@@ -76,9 +77,11 @@ drivers/contracts/device-res/
 
 | 组件 | 职责 |
 |------|------|
-| `ResourceDesc` / `ResourceSet` | 描述单个设备的硬件资源（MMIO、I/O 端口、中断、DMA） |
-| `MmioOp` / `IrqOp` / `DmaOp` / `TimeOp` traits | host kernel 实现的能力后端（map/unmap、request/release IRQ、alloc/free DMA、alloc/free MSI-X、monotonic time） |
-| `ResourceProvider` trait | `MmioOp + IrqOp + DmaOp + TimeOp` 的组合 trait，供驱动框架持有完整资源能力 |
+| `ResourceDesc` / `ResourceSet` | 描述单个设备的硬件资源（MMIO、I/O 端口、中断、DMA、时钟连接/提供者元数据） |
+| `MmioOp` / `IrqOp` / `DmaOp` / `TimeOp` / `ClkOp` traits | host kernel 实现的能力后端（map/unmap、request/release IRQ、alloc/free DMA、alloc/free MSI-X、monotonic time、时钟解析） |
+| `ClkSpec` / `ClkResource` | 时钟查找键（SoC 输出名或 phandle+index）、消费者连接（含 `clock-names` 本地名）；提供者的注册参数由驱动经固件节点按需读取，不在资源层建模 |
+| `Clk` / `ClkConsumer` | 时钟消费者句柄（devm 生命周期绑定）与操作面（两相门控、速率、父选择、通知器） |
+| `ResourceProvider` trait | `MmioOp + IrqOp + DmaOp + TimeOp + ClkOp` 的组合 trait，供驱动框架持有完整资源能力（时钟是常驻宿主基础设施，与 Linux CCF 内建同级；无时钟树的机器仍实现 `ClkOp` 并报告 absent provider） |
 | `Io` | MMIO 映射的 RAII handle，提供带 acquire/release fence 的寄存器读写方法 |
 | `Irq` | 中断注册的 RAII handle，drop 时自动释放 |
 | `DmaCoherent` | 一致性 DMA 缓冲区的 RAII handle，drop 时自动释放 |

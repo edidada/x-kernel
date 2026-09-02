@@ -396,7 +396,7 @@ unsafe impl IxgbeHal for IxgbeHalImpl { ... }
 |------|----------|----------|----------|----------|--------|----------|
 | F-01 | PCI 总线枚举失败 | ECAM/MmioCam 映射失败或 config space 不可访问 | PCI 设备全部不可用 | 依赖 PCI 设备的功能（virtio-blk/net/gpu/…）缺失 | 2 | `PciBus::new` 失败时记录 error 并返回，不阻断 platform 总线枚举 |
 | F-02 | firmware 无设备描述 | DT/ACPI 表缺失或 `has_device_description()` 返回 false | firmware 枚举路径无设备注册 | 仅静态设备（ramdisk + 编译期配置的 AHCI/sdmmc）可用 | 3 | 静态设备路径独立于 firmware；记录 info 日志 |
-| F-03 | 单个设备 probe 失败 | 驱动 `probe_device` 返回错误 | 该设备不可用 | 同总线其他设备正常激活 | 4 | probe 错误记录 warn 并进入 unclaimed 列表，不阻断后续设备 |
+| F-03 | 单个设备 probe 失败 | 驱动 `probe_device` 返回错误 | 该设备不可用 | 同总线其他设备正常激活 | 4 | probe 错误记录 warn 并进入 unclaimed 列表，不阻断后续设备。**可重试子集**：`DriverError::WouldBlock`（含时钟 `NoProvider`→WouldBlock 映射）不进入 unclaimed，而是 `ProbeOutcome::Deferred`，枚举循环在依赖激活后重试（含 IRQ 注册路径的 provider 缺席情形） |
 | F-04 | PCI BAR 分配器未初始化 | `pci_bar_allocation_range()` 返回 None 且设备有未分配 MEM BAR | 该 PCI 设备被跳过 | 单个 PCI 设备不可用 | 3 | `configure_pci_device_if_needed` 返回 `NoMemory`，设备跳过 |
 | F-05 | VirtIO MMIO 探测返回空设备 | MMIO 区域不存在 VirtIO 设备或 MagicValue 不匹配 | 该 MMIO 区域跳过 | 不影响其他 platform 设备 | 4 | `probe_mmio_device` 返回 None → `virtio_mmio_registration` 返回 None，记录 trace 后跳过 |
 | F-06 | IRQ handler 注册失败 | `kirq` 拒绝 shared action 或共享 action 已达上限 | 设备无法接收中断 | 该设备功能不可用或降级到轮询 | 3 | `request_irq` 返回 `Busy`，驱动 probe 返回错误 |
