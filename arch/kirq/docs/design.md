@@ -535,7 +535,7 @@ drain 仍只使用 restart limit；Linux `__do_softirq()` 的 `need_resched()` �
 Workerqueue state and lifecycle rules are owned by `task/kwork`. This section
 documents how IRQ bottom-half code consumes `kwork`; the authoritative
 queue/pool state machines are documented in `task/kwork/docs/design.md`,
-`task/kworkqueue`, and `task/kworkerpool`.
+`task/kwork/crates/kworkqueue`, and `task/kwork/crates/kworkerpool`.
 
 ```text
 schedule_work(work_item)

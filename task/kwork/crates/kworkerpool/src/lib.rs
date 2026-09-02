@@ -2,16 +2,17 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Kernel worker-pool scheduling and ktask runtime.
+//! Internal worker-pool scheduling and ktask runtime for `kwork`.
 //!
 //! This crate owns worker-pool state, runnable/deferred pool queues, and
 //! lifecycle management decisions. It also owns ktask-backed worker and
 //! manager task loops. Built-in system pool instances live in `kwork`.
 //!
-//! Most kernel code should use a product layer such as `kwork`. Use this crate
-//! directly only when a subsystem needs its own bounded worker-pool scheduler
-//! and can provide the runtime glue that validates opaque entries, wakes worker
-//! contexts, and runs callbacks.
+//! Kernel code should normally use `kwork`. This crate is kept as a separate
+//! internal core so `kwork` can test and evolve worker-pool scheduling without
+//! mixing callback-facing workqueue APIs into the scheduler state machine. Use
+//! it directly only when implementing a custom runtime that can validate opaque
+//! entries, wake worker contexts, and run callbacks.
 //!
 //! # Core Types
 //!
@@ -36,7 +37,8 @@
 //! - [`KtaskWorkerPool`] adds ktask-backed worker and manager threads around
 //!   [`WorkerPool`].
 //! - [`WorkerPoolExecutionContext`] and [`decode_task_context`] let scheduler
-//!   accounting code recognize a ktask that is currently running pool work.
+//!   accounting code recognize the pool, CPU placement, worker slot, and
+//!   execution token for a ktask that is currently running pool work.
 //!
 //! # Direct State-Machine Use
 //!
@@ -46,7 +48,6 @@
 //! workers, raise bottom halves, or arm timers.
 //!
 //! ```rust
-//! use kcpu_id_map::LogicalCpuId;
 //! use kworkerpool::{
 //!     EntryKey, EntryOwner, EntryPayload, EntrySource, PoolEntry, PoolId, PoolKind, WorkerPool,
 //!     WorkerPoolPolicy,
@@ -54,7 +55,7 @@
 //!
 //! let policy = WorkerPoolPolicy::scalable_threaded(1, 4);
 //!
-//! let pool_id = PoolId::new(PoolKind::new(0), LogicalCpuId::new(0));
+//! let pool_id = PoolId::new(PoolKind::new(0));
 //! let mut pool: WorkerPool<(), 4, 128> = WorkerPool::new(pool_id, policy);
 //! let entry = PoolEntry::new(
 //!     EntrySource::new(1),
@@ -131,6 +132,10 @@
 //! [`WorkerRuntimeFactory`], starts initial workers with
 //! [`KtaskWorkerPool::start_worker_task`], and starts one manager for a
 //! scalable pool set with [`start_manager_task`].
+//!
+//! `PoolId` identifies the logical pool. `WorkerPoolPlacement` identifies where
+//! ktask-backed worker and manager tasks run. The runtime factory receives both
+//! values so product layers do not need to encode CPU placement into `PoolId`.
 //!
 //! The runtime type created by [`WorkerRuntimeFactory`] implements
 //! [`WorkerRuntime`] and [`RunnableClaimer`]. Its `claim` method translates an

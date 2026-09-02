@@ -18,7 +18,7 @@ use kspin::SpinNoIrq;
 use ktime_types::{MonotonicInstant, TimeSpan};
 use kworkerpool::{
     ActionBatch, PoolEntry, PoolId, RunnableClaim, RunnableClaimer, WorkerExecutionToken, WorkerId,
-    WorkerRuntime,
+    WorkerPoolPlacement, WorkerRuntime,
 };
 use log::{debug, warn};
 
@@ -142,12 +142,17 @@ pub(crate) struct BuiltinWorkerRuntime {
 }
 
 impl BuiltinWorkerRuntime {
-    pub(crate) fn new(pool_id: PoolId, _worker: WorkerId, wake_source: Arc<PollEvent>) -> Self {
+    pub(crate) fn new(
+        pool_id: PoolId,
+        placement: WorkerPoolPlacement,
+        _worker: WorkerId,
+        wake_source: Arc<PollEvent>,
+    ) -> Self {
         let pool_kind = SystemPoolKind::from_usize(pool_id.kind().as_usize())
             .expect("built-in worker runtime must use a built-in pool kind");
         Self {
             pool_kind,
-            cpu_id: pool_id.cpu(),
+            cpu_id: placement.cpu_id(),
             wake_source,
         }
     }

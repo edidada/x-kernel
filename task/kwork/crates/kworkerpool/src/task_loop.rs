@@ -4,8 +4,8 @@
 
 use crate::{
     ActionBatch, KtaskWorkerPool, ParkDecision, PoolEntry, PoolId, RunnableCandidateResult,
-    RunnableClaim, RunnableClaimer, WorkerExecutionToken, WorkerId, WorkerRuntime,
-    execution::encode_task_context,
+    RunnableClaim, RunnableClaimer, WorkerExecutionToken, WorkerId, WorkerPoolPlacement,
+    WorkerRuntime, execution::encode_task_context,
 };
 
 /// ktask-backed worker task body for one core worker-pool instance.
@@ -121,7 +121,9 @@ where
         };
 
         let pool_id = self.pool.lock().id();
-        let _current = CurrentWorkerPoolExecutionGuard::enter(pool_id, self.worker, token);
+        let placement = self.pool.placement();
+        let _current =
+            CurrentWorkerPoolExecutionGuard::enter(pool_id, placement, self.worker, token);
         self.runtime
             .run_claimed_work(self.pool, self.worker, token, work);
 
@@ -144,8 +146,13 @@ pub(crate) struct CurrentWorkerPoolExecutionGuard {
 
 impl CurrentWorkerPoolExecutionGuard {
     /// Enters a worker-pool execution context for scheduler accounting.
-    pub(crate) fn enter(pool: PoolId, worker: WorkerId, token: WorkerExecutionToken) -> Self {
-        let context = encode_task_context(pool, worker, token);
+    pub(crate) fn enter(
+        pool: PoolId,
+        placement: WorkerPoolPlacement,
+        worker: WorkerId,
+        token: WorkerExecutionToken,
+    ) -> Self {
+        let context = encode_task_context(pool, placement.cpu_id(), worker, token);
         let previous = ktask::set_current_execution_context(context);
         if previous.is_some() {
             warn!("nested worker-pool execution context entered");

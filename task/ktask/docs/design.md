@@ -145,8 +145,8 @@ daemon 每完成一轮实际 softirq work 后会主动 `yield_now()`，再回到
 `cond_resched()` 的调度友好语义。若等待注册因内存压力等原因失败，daemon 也会
 先让出 CPU 再重试，避免无 waiter 的紧循环。
 
-`kworkerpool` 依赖 `ktask` 创建 `kwork/normal/<cpu>:<worker_id>` worker task
-和 `kwork/normal/<cpu>/manager` manager task。`kwork` 拥有 builtin queue/pool
+`kworkerpool` 依赖 `ktask` 创建 `kworkerpool/normal/<cpu>:<worker_id>` worker
+task 和 `kworkerpool/normal/<cpu>/manager` manager task。`kwork` 拥有 builtin queue/pool
 实例和 enqueue 语义；`kworkqueue` 负责 queue 状态；`kworkerpool` 负责 worker
 调度、动态伸缩和 CPU-intensive accounting。system/custom/dynamic task-context
 queue 都绑定到同 CPU 的 Normal pool，不创建 queue-owned worker。每个 CPU 启动一个

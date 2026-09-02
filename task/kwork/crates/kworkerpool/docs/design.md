@@ -31,7 +31,6 @@ Most kernel users should use a product layer such as `kwork`; direct users must
 provide a runtime that executes returned actions and validates claimed entries.
 
 ```rust
-use kcpu_id_map::LogicalCpuId;
 use kworkerpool::{
     EntryKey, EntryOwner, EntryPayload, EntrySource, PoolEntry, PoolId, PoolKind,
     WorkerId, WorkerPool, WorkerPoolPolicy,
@@ -39,7 +38,7 @@ use kworkerpool::{
 
 let policy = WorkerPoolPolicy::scalable_threaded(1, 4);
 
-let pool_id = PoolId::new(PoolKind::new(0), LogicalCpuId::new(0));
+let pool_id = PoolId::new(PoolKind::new(0));
 let mut pool: WorkerPool<(), 4, 128> = WorkerPool::new(pool_id, policy);
 
 let entry = PoolEntry::new(
@@ -111,9 +110,9 @@ CPU-intensive. That execution keeps running, but it no longer consumes bounded
 concurrency. If runnable entries remain, the pool can wake or create another
 worker.
 
-The ktask integration stores only an opaque pool/worker/token identity in
-`ktask::TaskExecutionContext`. Product-layer work identity never enters
-`ktask`.
+The ktask integration stores only an opaque pool/CPU/worker/token identity in
+`ktask::TaskExecutionContext`. The CPU value records runtime placement and is
+not part of `PoolId`. Product-layer work identity never enters `ktask`.
 
 ## Locking Rules
 

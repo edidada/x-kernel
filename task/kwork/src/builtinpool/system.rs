@@ -6,7 +6,7 @@
 
 use kcpu_id_map::LogicalCpuId;
 use ktime_types::MonotonicInstant;
-use kworkerpool::{PoolId, WorkerId, WorkerRuntime, WorkerRuntimeFactory, decode_task_context};
+use kworkerpool::{WorkerId, WorkerRuntime, WorkerRuntimeFactory, decode_task_context};
 
 use super::{
     cpu::{BuiltinCpuPoolInitResult, BuiltinCpuWorkerPools},
@@ -77,7 +77,7 @@ impl BuiltinSystemWorkerPools {
     /// Returns whether the selected built-in pool exists with the expected id.
     pub(crate) fn is_pool_ready(&'static self, kind: SystemPoolKind, cpu_id: LogicalCpuId) -> bool {
         self.pool(kind, cpu_id).is_some_and(|pool| {
-            pool.id() == PoolId::new(kind.pool_kind(), cpu_id) && pool.is_ready()
+            pool.id().kind() == kind.pool_kind() && pool.cpu_id() == cpu_id && pool.is_ready()
         })
     }
 
@@ -159,7 +159,7 @@ pub(crate) fn account_system_execution_tick(
 ) -> Option<MonotonicInstant> {
     let decoded = decode_task_context(context)?;
     let kind = SystemPoolKind::from_usize(decoded.pool_id.kind().as_usize())?;
-    let pool = system_pools().pool(kind, decoded.pool_id.cpu())?;
+    let pool = system_pools().pool(kind, decoded.cpu_id)?;
     let result = pool.runtime().account_execution_tick(context, now)?;
     super::pool::handle_actions(pool.cpu_id(), result.actions);
     result.deadline
@@ -176,7 +176,7 @@ pub(crate) fn account_system_execution_blocked(
     let Some(kind) = SystemPoolKind::from_usize(decoded.pool_id.kind().as_usize()) else {
         return;
     };
-    let Some(pool) = system_pools().pool(kind, decoded.pool_id.cpu()) else {
+    let Some(pool) = system_pools().pool(kind, decoded.cpu_id) else {
         return;
     };
     if let Some(actions) = pool.runtime().account_worker_blocked(context, now) {
@@ -192,7 +192,7 @@ pub(crate) fn account_system_execution_resumed(context: ktask::TaskExecutionCont
     let Some(kind) = SystemPoolKind::from_usize(decoded.pool_id.kind().as_usize()) else {
         return;
     };
-    let Some(pool) = system_pools().pool(kind, decoded.pool_id.cpu()) else {
+    let Some(pool) = system_pools().pool(kind, decoded.cpu_id) else {
         return;
     };
     let _ = pool.runtime().account_worker_resumed(context);
@@ -204,7 +204,7 @@ pub(crate) fn system_execution_tick_deadline(
 ) -> Option<MonotonicInstant> {
     let decoded = decode_task_context(context)?;
     let kind = SystemPoolKind::from_usize(decoded.pool_id.kind().as_usize())?;
-    let pool = system_pools().pool(kind, decoded.pool_id.cpu())?;
+    let pool = system_pools().pool(kind, decoded.cpu_id)?;
     pool.runtime().execution_tick_deadline(context)
 }
 

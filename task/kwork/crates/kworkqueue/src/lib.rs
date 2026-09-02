@@ -2,10 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Workqueue semantic core.
+//! Internal workqueue semantic core for `kwork`.
 //!
-//! This crate contains the queue-side state machine used by higher-level
-//! workqueue products. It stores work state, per-CPU queue bindings,
+//! This crate contains the queue-side state machine used by `kwork`. It stores
+//! work state, per-CPU queue bindings,
 //! active/inactive accounting, flush colors, delayed activation state,
 //! cancellation state, and executor operations.
 //!

@@ -17,6 +17,7 @@ const CONTEXT_TOKEN: usize = 3;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkerPoolExecutionContext {
     pub pool_id: PoolId,
+    pub cpu_id: LogicalCpuId,
     pub worker: WorkerId,
     pub token: WorkerExecutionToken,
 }
@@ -24,12 +25,13 @@ pub struct WorkerPoolExecutionContext {
 /// Encodes worker-pool execution identity into ktask's opaque task context.
 pub(crate) fn encode_task_context(
     pool_id: PoolId,
+    cpu_id: LogicalCpuId,
     worker: WorkerId,
     token: WorkerExecutionToken,
 ) -> ktask::TaskExecutionContext {
     ktask::TaskExecutionContext::new([
         pool_id.kind().as_usize(),
-        pool_id.cpu().as_usize(),
+        cpu_id.as_usize(),
         worker.as_usize(),
         token.as_usize(),
     ])
@@ -41,10 +43,8 @@ pub fn decode_task_context(
 ) -> Option<WorkerPoolExecutionContext> {
     let words = context.words();
     Some(WorkerPoolExecutionContext {
-        pool_id: PoolId::new(
-            PoolKind::new(words[CONTEXT_POOL_KIND]),
-            LogicalCpuId::new(words[CONTEXT_CPU_ID]),
-        ),
+        pool_id: PoolId::new(PoolKind::new(words[CONTEXT_POOL_KIND])),
+        cpu_id: LogicalCpuId::new(words[CONTEXT_CPU_ID]),
         worker: WorkerId::new(words[CONTEXT_WORKER_ID]),
         token: WorkerExecutionToken::from_usize(words[CONTEXT_TOKEN]),
     })

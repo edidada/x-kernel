@@ -577,8 +577,7 @@ impl WorkQueue {
         // wait on a queue that can target the same per-CPU worker pool. The check
         // intentionally does not inspect pending state, so it may reject a flush
         // that would be immediately complete.
-        self.backend == WorkQueueBackend::System
-            && self.core.binding(context.pool_id.cpu()).is_some()
+        self.backend == WorkQueueBackend::System && self.core.binding(context.cpu_id).is_some()
     }
 
     fn rollback_queued_work(
@@ -887,7 +886,7 @@ impl ScheduledWork {
             return Ok(false);
         }
         if queue.backend == WorkQueueBackend::System
-            && current_worker.is_some_and(|context| context.pool_id.cpu() == cpu_id)
+            && current_worker.is_some_and(|context| context.cpu_id == cpu_id)
         {
             return Err(WorkqueueError::WouldDeadlock);
         }
@@ -1004,7 +1003,7 @@ impl ScheduledWork {
             }
             kworkqueue::CancelWorkResult::WaitingRunning(snapshot) => {
                 if queue.backend == WorkQueueBackend::System
-                    && current_worker.is_some_and(|context| context.pool_id.cpu() == cpu_id)
+                    && current_worker.is_some_and(|context| context.cpu_id == cpu_id)
                 {
                     return Err(WorkqueueError::WouldDeadlock);
                 }

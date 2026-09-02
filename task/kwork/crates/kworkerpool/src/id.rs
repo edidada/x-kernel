@@ -4,8 +4,6 @@
 
 //! Pool and worker identifiers.
 
-use kcpu_id_map::LogicalCpuId;
-
 /// Runtime-defined worker-pool class.
 ///
 /// This is identity only. Scheduling policy, manager use, and execution
@@ -29,23 +27,17 @@ impl PoolKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PoolId {
     kind: PoolKind,
-    cpu: LogicalCpuId,
 }
 
 impl PoolId {
-    /// Creates a per-CPU pool identifier.
-    pub const fn new(kind: PoolKind, cpu: LogicalCpuId) -> Self {
-        Self { kind, cpu }
+    /// Creates a pool identifier.
+    pub const fn new(kind: PoolKind) -> Self {
+        Self { kind }
     }
 
     /// Returns the pool kind.
     pub const fn kind(self) -> PoolKind {
         self.kind
-    }
-
-    /// Returns the CPU that owns this per-CPU pool.
-    pub const fn cpu(self) -> LogicalCpuId {
-        self.cpu
     }
 }
 

@@ -2,7 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kcpu_id_map::LogicalCpuId;
 use kspin::SpinNoIrq;
 use ktime_types::{MonotonicInstant, TimeSpan};
 use unittest::{assert, assert_eq, def_test};
@@ -47,7 +46,7 @@ const fn bottom_half_policy() -> WorkerPoolPolicy {
 }
 
 const fn pool_id() -> PoolId {
-    PoolId::new(PoolKind::new(1), LogicalCpuId::new(0))
+    PoolId::new(PoolKind::new(1))
 }
 
 fn entry(key: usize) -> PoolEntry {

@@ -28,7 +28,7 @@ use crate::{
 /// The factory is supplied by the product layer. It receives only worker-pool
 /// runtime identity and this worker's wait source; callback storage and
 /// workqueue semantics remain outside `kworkerpool`.
-pub type WorkerRuntimeFactory<R> = fn(PoolId, WorkerId, Arc<PollEvent>) -> R;
+pub type WorkerRuntimeFactory<R> = fn(PoolId, WorkerPoolPlacement, WorkerId, Arc<PollEvent>) -> R;
 
 /// Converts a pool identity into a runtime-visible name component.
 pub type PoolNameResolver = fn(PoolId) -> &'static str;
@@ -251,7 +251,7 @@ impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> KtaskWorkerPool<MAX_WORKE
                     // retirement. Hold a task ref cloned from ktask's current-task
                     // slot until the entry closure returns into ktask's exit path.
                     let _entry_task_ref = ktask::current().clone();
-                    let runtime = runtime_factory(pool_id, worker, wake_source);
+                    let runtime = runtime_factory(pool_id, placement, worker, wake_source);
                     WorkerTask::new(self, worker, runtime).run();
                 }
             },

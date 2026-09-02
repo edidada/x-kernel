@@ -33,7 +33,7 @@ impl BuiltinSystemWorkerPool {
     pub(super) const fn new(kind: SystemPoolKind, cpu_id: LogicalCpuId) -> Self {
         Self {
             runtime: KtaskWorkerPool::new(
-                PoolId::new(kind.pool_kind(), cpu_id),
+                PoolId::new(kind.pool_kind()),
                 WorkerPoolPlacement::bound_to(cpu_id),
                 builtin_policy(kind),
             ),
@@ -67,7 +67,7 @@ impl BuiltinSystemWorkerPool {
     /// Configures an empty const-initialized pool before workers are installed.
     pub(crate) fn configure_empty(&self, kind: SystemPoolKind, cpu_id: LogicalCpuId) -> bool {
         self.runtime.configure_empty(
-            PoolId::new(kind.pool_kind(), cpu_id),
+            PoolId::new(kind.pool_kind()),
             WorkerPoolPlacement::bound_to(cpu_id),
             builtin_policy(kind),
         )
