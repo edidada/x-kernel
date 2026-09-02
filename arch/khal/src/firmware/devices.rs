@@ -61,6 +61,12 @@ pub struct FirmwareDevice {
     pub source: FirmwareSource,
     pub mmio: Option<MmioResource>,
     pub irq: Option<InterruptInfo>,
+    /// For `fixed-clock` nodes: the `clock-frequency` property, in Hz.
+    /// Extracted during enumeration so clock controller drivers can
+    /// register without re-walking the DT.
+    pub clock_frequency: Option<u32>,
+    /// The DT `phandle` property, used as the clock ProviderId.
+    pub phandle: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -216,6 +222,8 @@ pub fn for_each_compatible(
             source: FirmwareSource::DeviceTree,
             mmio,
             irq,
+            clock_frequency: node.property_u32("clock-frequency"),
+            phandle: node.property_u32("phandle"),
         });
     }
 }
