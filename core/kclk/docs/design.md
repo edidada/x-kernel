@@ -198,14 +198,17 @@ makes `get_rate` re-read the hardware rate instead of the cache.
 
 ## Data Flow
 
-### Registration (provider side, boot/probe time)
+### Registration (provider side, device-model probe)
 
 ```text
-controller driver
-   |-- builds ClkHwOps (basic type or custom PLL)
-   |-- ClkBuilder::new(name, ops).parent(..).flags(..).build()  -> Arc<ClkCore>
-   |-- ClkTable::register(index, name, core)
-   \-- register_provider(&TABLE)  (each controller its own id)
+DT node (compatible = "fixed-clock" or SoC-specific controller)
+   \-- platform bus backend enumerates -> DeviceObject
+   \-- bus match on compatible -> controller driver
+   \-- driver.probe_device():
+         |-- builds ClkHwOps (basic type or custom PLL)
+         |-- ClkBuilder::new(name, ops).parent(..).flags(..).build() -> Arc<ClkCore>
+         |-- ClkTable::register(index, name, core)
+         \-- register_provider(&TABLE)  (each controller its own id)
 ```
 
 ### Resolution (consumer side, driver probe)
@@ -383,22 +386,40 @@ pub fn init_ccu(ccu_vaddr: usize) {
 }
 ```
 
-### Step 4 — install the provider once, during platform init
+### Step 4 — register the provider via the device model
 
-Each controller registers itself with `register_provider` (each under its own
-`ProviderId`, usually the DT phandle) before any consumer resolves its clocks.
-This belongs in the platform's early init (alongside
-`install_resource_provider`):
+A clock controller is a platform device like any other: its DT node is
+enumerated by the platform bus backend, matched to its driver by
+compatible, and probed. The probe registers the provider — the same
+lifecycle as serial/block/net drivers. A controller with `compatible =
+"fixed-clock"` is handled by the built-in `clk-fixed-clock` driver in
+`kdriver` (see `driver_registry/clk/`); SoC-specific controllers follow the
+same pattern with their own compatible and MMIO:
 
 ```rust
-// platforms/kplat-aarch64/src/init.rs
-pub fn early_driver_init() {
-    // ... timer, irq, boot console ...
-    kdriver::install_resource_provider();
+// drivers/integration/kdriver/src/driver_registry/clk/mod.rs (generic fixed-clock)
+impl DeviceDriver for FixedClockDriver {
+    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+        // Read clock-frequency (extracted by the firmware layer at enumeration).
+        let rate = /* from FirmwareDevice::clock_frequency */;
+        let branches = [ClkBranch::fixed_rate(0, "uart-ref", rate)];
+        let reg: Arc<dyn ClkRegAccess> = Arc::new(NullClkReg);
+        register_table(&TABLE, reg, &branches)?;
+        register_provider(&TABLE);
+        Ok(())
+    }
+}
 
-    let ccu_vaddr = /* discovered from device tree */;
-    my_ccu_driver::init_ccu(ccu_vaddr);
-    kclk::register_provider(&my_ccu_driver::CCU);
+// An SoC controller driver (e.g. rk3588-cru) — same shape, plus MMIO:
+impl DeviceDriver for Rk3588CruDriver {
+    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+        let mmio = device.first_mmio().ok_or(DriverError::InvalidInput)?;
+        let ptr = device.devm_iomap(mmio, "cru")?;
+        let reg: Arc<dyn ClkRegAccess> = Arc::new(unsafe { MmioClkReg::new(ptr) });
+        my_ccu_driver::init_ccu(reg.clone());
+        kclk::register_provider(&my_ccu_driver::CCU);
+        Ok(())
+    }
 }
 ```
 

@@ -49,6 +49,8 @@ firmware (DT / ACPI) / PCI config space
 - `kdriver` 信任 `virtio` crate 的 `probe_mmio_device` 在访问 MMIO 寄存器前已完成必要的 volatile read 安全检查。
 - `kdriver` 信任各 driver crate（`block::ahci`、`block::sdmmc`、`net::ixgbe`）对其 `new(vaddr)` 入口参数的 safety precondition 定义正确。
 - 外部调用者（`kruntime` 启动路径）信任 `init_drivers` 在 platform `early_driver_init` 之后调用。
+- `kdriver` 信任固件层（`khal::firmware::devices`）正确提取 DT 的 `clock-frequency` 与 `phandle`；时钟控制器 probe 消费这些值前不再重遍 DT，错误的值会直接进入时钟注册表。
+- `kdriver` 信任 `kclk` 的 `register_table` / `register_provider` 校验时钟拓扑（父引用、环检测、索引唯一性）；probe 只透传固件层数据。
 
 ## 外部边界 / 攻击面
 

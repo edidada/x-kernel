@@ -134,6 +134,22 @@ drivers/integration/kdriver/
 通过 `kdevice::adopt_active_device` 把已运行的设备注册到设备树中，
 使后续的 sysfs/设备查询路径能发现它。
 
+### 4. 时钟控制器注册（设备模型 probe，`driver_registry/clk/`）
+
+时钟控制器是普通平台设备：DT 节点（`compatible = "fixed-clock"` 等）由
+`PlatformBackend` 枚举为 `DeviceObject`，经 bus match 绑定到
+`FixedClockDriver`（或 SoC 专用控制器驱动），在 `probe_device` 中调用
+`kclk::register_table` + `register_provider` 注册时钟。
+
+固件层在枚举时从 DT 节点提取 `clock-frequency` 与 `phandle`，通过
+`FirmwareDevice` 传递（`khal::firmware::devices`），probe 直接读取而无需
+重遍 DT。注册在描述符优先路径中自然完成——调度器已启动，满足 kclk
+全局锁（可休眠 mutex）需要当前任务的要求，无需额外的手动 init 调用。
+
+SoC 专用控制器（PLL/mux/divider/gate 树）遵循同一模式：注册自己的
+compatible、携带 MMIO 窗口、在 probe 中 `register_table`。通用
+`fixed-clock` 驱动自动跳过带 MMIO 的节点，让专用驱动认领。
+
 ## 状态机
 
 ### 设备核心状态
