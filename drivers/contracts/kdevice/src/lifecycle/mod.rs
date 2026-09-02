@@ -49,6 +49,8 @@ pub enum ProbeOutcome {
     Skipped,
     /// No registered driver matched this device.
     Requeue,
+    /// A matching driver asked to retry after a dependency becomes available.
+    Deferred,
     /// Matching drivers existed but none succeeded; the descriptor remains unclaimed.
     Unclaimed,
 }
@@ -403,10 +405,17 @@ fn probe_device_desc_with_drivers(
             // partially-initialized probe cannot leak resources.
             device.run_cleanups();
             device.detach_driver();
-            // Record the failed driver so reprobe passes skip it and move on
-            // to the next-best candidate.
-            device_registry().mark_device_desc_attempted(desc.id(), driver.id());
+            // A retryable error means an external dependency is not ready yet
+            // (for example a clock provider). Keep this driver eligible for a
+            // later reprobe; permanent failures advance to the next candidate.
+            let should_retry = error.should_retry();
+            if !should_retry {
+                device_registry().mark_device_desc_attempted(desc.id(), driver.id());
+            }
             requeue_desc(desc.id());
+            if should_retry {
+                return Ok(ProbeOutcome::Deferred);
+            }
             log::debug!(
                 "descriptor {:?} probe exhausted candidates: {:?}",
                 desc.id(),
