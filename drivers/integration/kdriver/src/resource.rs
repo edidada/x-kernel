@@ -212,3 +212,204 @@ impl DeviceResourceExt for DeviceObject {
         devm_alloc_coherent(self, spec)
     }
 }
+
+#[cfg(unittest)]
+pub mod clk_e2e_tests {
+    use alloc::{sync::Arc, vec::Vec};
+
+    use device_res::{ClkSpec, DeviceResource};
+    use kspin::SpinNoIrq;
+    use unittest::{TestResult, def_test, ktest_println};
+
+    use crate::resource::devm_clk_get;
+
+    // ---- mock controller: a table the "device" resolves clocks through ----
+
+    static CCU: kclk::ClkTable = kclk::ClkTable::new(0x5A);
+    /// Serializes tests touching the global kclk provider registry.
+    static E2E_SERIAL: SpinNoIrq<()> = SpinNoIrq::new(());
+
+    /// Build osc(24M) → pll(×50) → div(programmable) → uart gate and install
+    /// the provider. Mirrors what a real CCU driver does in probe().
+    fn install_mock_ccu() {
+        use kclk::{ClkBranch, DividerFlags, GateFlags};
+
+        CCU.clear();
+        kclk::reset_providers();
+        let branches = [
+            ClkBranch::fixed_rate(0, "osc24m", 24_000_000),
+            ClkBranch::fixed_factor(1, "pll1200", 50, 1, &["osc24m"]),
+            // The clock the UART consumes: a divider (bits [7:4]) + gate
+            // (bit 11) in one word — the standard composite node shape.
+            ClkBranch::composite(
+                3,
+                "uart_clk",
+                None,
+                Some(kclk::DividerDesc {
+                    offset: 0x30,
+                    shift: 4,
+                    width: 4,
+                    table: None,
+                    flags: DividerFlags::empty(),
+                }),
+                Some(kclk::GateDesc {
+                    offset: 0x30,
+                    bit: 11,
+                    flags: GateFlags::empty(),
+                }),
+                &["pll1200"],
+                kclk::ClkFlags::empty(),
+            ),
+        ];
+        // The register window backs the divider + gate; a memory-backed
+        // accessor is enough because only field math is exercised.
+        let reg: Arc<dyn kclk::ClkRegAccess> = Arc::new(RamClkReg::new());
+        kclk::register_table(&CCU, reg, &branches).unwrap();
+        kclk::register_provider(&CCU);
+    }
+
+    /// Memory-backed register window standing in for the controller's MMIO.
+    struct RamClkReg {
+        words: SpinNoIrq<[u32; 16]>,
+    }
+    impl RamClkReg {
+        fn new() -> Self {
+            Self {
+                words: SpinNoIrq::new([0; 16]),
+            }
+        }
+    }
+    impl kclk::ClkRegAccess for RamClkReg {
+        fn reg_read(&self, offset: usize) -> u32 {
+            self.words.lock()[offset / 4]
+        }
+
+        fn reg_write(&self, offset: usize, value: u32) {
+            self.words.lock()[offset / 4] = value;
+        }
+    }
+
+    // ---- mock device: the minimum a driver's probe sees ----
+
+    struct UartDevice {
+        cleanups: SpinNoIrq<Vec<alloc::boxed::Box<dyn FnOnce() + Send>>>,
+    }
+    impl UartDevice {
+        fn new() -> Self {
+            Self {
+                cleanups: SpinNoIrq::new(Vec::new()),
+            }
+        }
+
+        /// The remove path: LIFO devres drain (DeviceObject::run_cleanups).
+        fn remove(&self) {
+            let mut cleanups = self.cleanups.lock();
+            while let Some(cleanup) = cleanups.pop() {
+                cleanup();
+            }
+        }
+    }
+    impl DeviceResource for UartDevice {
+        fn resources(&self) -> &[device_res::ResourceDesc] {
+            &[]
+        }
+
+        fn register_cleanup(&self, cleanup: alloc::boxed::Box<dyn FnOnce() + Send>) {
+            self.cleanups.lock().push(cleanup);
+        }
+    }
+
+    // ---- the device driver's probe/remove, exactly as a real one writes it ----
+
+    #[def_test(serial)]
+    fn device_consumes_clock_end_to_end() -> TestResult {
+        let _serial = E2E_SERIAL.lock();
+        install_mock_ccu();
+
+        // probe(): resolve the clock the DT would describe as
+        //   clocks = <&ccu 3>; clock-names = "baudclk";
+        // and the driver requests by SoC name (the contracts layer resolves it).
+        let device = UartDevice::new();
+        let clk = match devm_clk_get(&device, ClkSpec::by_phandle_index(0x5A, 3)) {
+            Ok(clk) => clk,
+            Err(e) => {
+                ktest_println!("E2E FAIL: devm_clk_get returned {e:?}");
+                return TestResult::Failed;
+            }
+        };
+        ktest_println!("E2E: resolved {} via devm_clk_get", clk.name());
+        if clk.name() != "uart_clk" {
+            return TestResult::Failed;
+        }
+
+        // Turn the clock on — the driver's usual first action.
+        if let Err(e) = clk.prepare_enable() {
+            ktest_println!("E2E FAIL: prepare_enable {e:?}");
+            return TestResult::Failed;
+        }
+        if !clk.is_enabled().unwrap_or(false) {
+            ktest_println!("E2E FAIL: clock not enabled after prepare_enable");
+            return TestResult::Failed;
+        }
+
+        // Program the UART divisor from the actual clock rate.
+        // Boot state: div field 0 (÷1) of pll1200 → 1.2 GHz.
+        let rate = clk.get_rate();
+        ktest_println!("E2E: baudclk = {rate} Hz");
+        if rate != 1_200_000_000 {
+            return TestResult::Failed;
+        }
+
+        // DVFS: ask for 150 MHz (divider ÷8), read it back through the handle.
+        let actual = match clk.set_rate(150_000_000) {
+            Ok(r) => r,
+            Err(e) => {
+                ktest_println!("E2E FAIL: set_rate {e:?}");
+                return TestResult::Failed;
+            }
+        };
+        ktest_println!("E2E: set_rate(150 MHz) -> {actual} Hz");
+        if !(140_000_000..=170_000_000).contains(&actual) {
+            return TestResult::Failed;
+        }
+        let rounded = clk.round_rate(99_999_999).unwrap_or(0);
+        ktest_println!("E2E: round_rate(100 MHz) -> {rounded} Hz");
+
+        // A second consumer on the same clock: independent handle, shared gate.
+        let clk2 = match devm_clk_get(&device, ClkSpec::by_name("uart_clk")) {
+            Ok(c) => c,
+            Err(e) => {
+                ktest_println!("E2E FAIL: second devm_clk_get {e:?}");
+                return TestResult::Failed;
+            }
+        };
+        // Enable through the second handle, then release it: the first
+        // consumer still holds a reference, so the shared gate must stay on.
+        if let Err(e) = clk2.prepare_enable() {
+            ktest_println!("E2E FAIL: second prepare_enable {e:?}");
+            return TestResult::Failed;
+        }
+        clk2.disable_unprepare();
+        if !clk.is_enabled().unwrap_or(false) {
+            ktest_println!("E2E FAIL: HW gated while another consumer holds it");
+            return TestResult::Failed;
+        }
+
+        // remove(): devres drains LIFO — the handles drop, the clock releases.
+        drop(clk2);
+        clk.disable_unprepare();
+        drop(clk);
+        device.remove();
+        ktest_println!("E2E: device removed, devres drained");
+
+        // The provider itself is gone from lookup.
+        kclk::reset_providers();
+        let gone = devm_clk_get(&device, ClkSpec::by_phandle_index(0x5A, 3));
+        if gone.is_ok() {
+            ktest_println!("E2E FAIL: lookup succeeded after provider removal");
+            return TestResult::Failed;
+        }
+        ktest_println!("E2E: OK — full contracts→kdriver→kclk round trip");
+        TestResult::Ok
+    }
+}
