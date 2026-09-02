@@ -5,13 +5,31 @@
 //! Common clock framework core for x-kernel.
 //!
 //! This crate is the in-kernel analogue of the Linux `drivers/clk/clk.c` core
-//! plus the basic reusable clock types. This first slice provides the
-//! provider-side hardware operation trait ([`ClkHwOps`]) and the composable
-//! basic types in [`basic`] ([`FixedRate`], [`FixedFactor`], [`Gate`],
-//! [`Mux`], [`Divider`], [`Composite`]).
+//! plus the basic reusable clock types. It provides:
 //!
-//! The node model, provider registry, consumer handles, and declarative batch
-//! registration land in subsequent slices of this crate.
+//! - [`ClkHwOps`], the provider-side hardware operation trait (the `clk_ops`
+//!   equivalent), including the two-phase `prepare`/`enable` gate.
+//! - [`ClkCore`], a clock-tree node that caches rate/accuracy and serializes
+//!   reference-counted gating and rate/parent changes that propagate to the
+//!   selected parent.
+//! - [`ClkLookup`] / [`register_provider`] / [`ClkTable`], the global provider
+//!   registry that consumers query via [`clk_get_by_name`] /
+//!   [`clk_get_by_index`] (by `(provider_id, index)`).
+//! - [`ClkHandle`], the consumer-side reference returned to drivers, owning
+//!   its per-consumer rate-range vote and notifier registration.
+//! - Basic composable types in [`basic`]: [`FixedRate`], [`FixedFactor`],
+//!   [`Gate`], [`Mux`], [`Divider`], [`Composite`].
+//! - [`register_table`] with [`ClkBranch`]/[`ParentRef`]: declarative,
+//!   order-independent batch registration for a whole controller, including
+//!   cross-provider parents ([`ParentRef::External`]).
+//! - [`clk_summary`] for bring-up diagnostics and [`clk_disable_unused`] for
+//!   the late-init gate-down pass.
+//!
+//! Concrete clock-controller drivers (SoC PLL/mux/divider chips) register their
+//! outputs here, mirroring how the [`device_res`] capability providers are
+//! wired into the kernel.
+//!
+//! [`device_res`]: device_res
 #![cfg_attr(not(test), no_std)]
 #![warn(missing_docs)]
 
@@ -30,6 +48,12 @@ mod provider;
 mod rate;
 mod reg;
 mod table;
+
+#[cfg(unittest)]
+mod invariants;
+
+#[cfg(unittest)]
+mod tests;
 
 pub use core::{ClkBuilder, ClkCore, ClkSummaryEntry, clk_disable_unused, clk_summary, clocks_len};
 
@@ -59,9 +83,3 @@ pub use table::{
 ///
 /// Corresponds to the cell value in a DT `clocks = <&phandle N>` specifier.
 pub type ClkIndex = u32;
-
-#[cfg(unittest)]
-mod invariants;
-
-#[cfg(unittest)]
-mod tests;
