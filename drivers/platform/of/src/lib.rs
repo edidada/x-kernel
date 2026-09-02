@@ -6,6 +6,8 @@
 
 #![no_std]
 
+extern crate alloc;
+
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use lazyinit::LazyInit;
@@ -720,6 +722,12 @@ pub fn read_named_reserved_memory_regions<const N: usize>() -> ([NamedMemoryRegi
         ))
 }
 
+mod clocks;
 #[cfg(unittest)]
 #[path = "test_of.rs"]
 mod unittest_tests;
+
+pub use clocks::{
+    ClockSpec, clock_output_name, device_clock_index_by_name, device_clock_names,
+    device_clock_spec_by_name, device_clock_specs, device_fixed_clock_hz,
+};
