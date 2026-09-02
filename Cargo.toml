@@ -8,6 +8,8 @@ members = [
     "boot/*",
     "task/kworkerpool",
     "task/kworkqueue",
+    # clock subsystem core
+    "core/kclk",
     "tee/tee_crypto",
     "tee/xdice",
 ]
