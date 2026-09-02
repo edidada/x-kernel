@@ -89,7 +89,12 @@ impl EnumerationContext {
             match kdevice::probe_device_desc(desc.id()) {
                 Ok(ProbeOutcome::Activated) => activated += 1,
                 Ok(ProbeOutcome::Skipped) => {}
-                Ok(ProbeOutcome::Requeue | ProbeOutcome::Unclaimed) => self.add_unclaimed(desc),
+                // Deferred (retryable dependency) degrades to unclaimed here;
+                // the deferred-probe retry loop arrives with the clock
+                // integration that produces it.
+                Ok(ProbeOutcome::Requeue | ProbeOutcome::Deferred | ProbeOutcome::Unclaimed) => {
+                    self.add_unclaimed(desc);
+                }
                 Err(err) => {
                     log::warn!(
                         "failed to probe descriptor {:?} ({:?} at {:?}): {:?}",
