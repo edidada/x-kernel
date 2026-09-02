@@ -144,6 +144,51 @@ impl DeviceObject {
         })
     }
 
+    /// Find the first clock resource.
+    pub fn first_clk(&self) -> Option<crate::ClkSpec> {
+        self.resources.iter().find_map(|resource| match resource {
+            ResourceDesc::Clk(resource) => Some(resource.spec()),
+            _ => None,
+        })
+    }
+
+    /// Find the clock resource at declaration index `index`.
+    ///
+    /// Mirrors the `clocks = <&phandle N>, <&phandle M>` declaration order;
+    /// `clock-names` entries map to these indices.
+    pub fn clk_at(&self, index: usize) -> Option<crate::ClkSpec> {
+        self.resources
+            .iter()
+            .filter_map(|resource| match resource {
+                ResourceDesc::Clk(resource) => Some(resource.spec()),
+                _ => None,
+            })
+            .nth(index)
+    }
+
+    /// Find the clock resource matching `name`'s `clock-names` index.
+    ///
+    /// Resolves a `clock-names` entry by looking up the name's position in
+    /// the firmware-described name list, then indexing into the clock
+    /// resources. Returns `None` when no clock resources exist or the name
+    /// is out of range.
+    pub fn clk_by_name(&self, name: &str) -> Option<crate::ClkSpec> {
+        self.resources.iter().find_map(|resource| match resource {
+            ResourceDesc::Clk(resource) if resource.connection_name() == Some(name) => {
+                Some(resource.spec())
+            }
+            _ => None,
+        })
+    }
+
+    /// Clock-provider metadata carried by this device, if it is a provider.
+    pub fn clk_provider(&self) -> Option<crate::ClkProviderDesc> {
+        self.resources.iter().find_map(|resource| match resource {
+            ResourceDesc::ClkProvider(provider) => Some(*provider),
+            _ => None,
+        })
+    }
+
     /// Current lifecycle state — lock-free atomic read.
     ///
     /// The atomic is only ever written via [`DeviceState::as_u8`], so an
@@ -422,6 +467,49 @@ impl core::fmt::Debug for DeviceObject {
             .field("identity", &self.identity)
             .field("state", &self.state())
             .finish()
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::{assert_eq, def_test};
+
+    use super::DeviceObject;
+    use crate::{
+        BusId, ClkProviderDesc, ClkResource, ClkSpec, DeviceId, DeviceIdentity, DeviceLocation,
+        DiscoveryOrigin, PlatformIdentity, ResourceDesc,
+    };
+
+    #[def_test]
+    fn clock_lookup_preserves_consumer_connection_names() {
+        let baud = ClkSpec::by_phandle_index(0x42, 3);
+        let apb = ClkSpec::by_phandle_index(0x42, 7);
+        let provider = ClkProviderDesc::new(0x42, 24_000_000).with_output_name("osc24m");
+        let device = DeviceObject::new(
+            DeviceId::new(1),
+            BusId::new(1),
+            DeviceLocation::FirmwareNode { id: 1 },
+            DiscoveryOrigin::DeviceTree,
+            DeviceIdentity::Platform(PlatformIdentity {
+                alias: None,
+                firmware_id: Some("test,uart"),
+            }),
+            None,
+            [
+                ResourceDesc::Clk(ClkResource::named("baudclk", baud)),
+                ResourceDesc::Clk(ClkResource::named("apb_pclk", apb)),
+                ResourceDesc::ClkProvider(provider),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        assert_eq!(device.first_clk(), Some(baud));
+        assert_eq!(device.clk_at(1), Some(apb));
+        assert_eq!(device.clk_by_name("baudclk"), Some(baud));
+        assert_eq!(device.clk_by_name("apb_pclk"), Some(apb));
+        assert_eq!(device.clk_by_name("missing"), None);
+        assert_eq!(device.clk_provider(), Some(provider));
     }
 }
 
