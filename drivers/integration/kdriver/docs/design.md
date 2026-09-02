@@ -256,7 +256,16 @@ VirtIO 驱动在 PCI 和 MMIO 两条传输路径上共享同一激活入口：
    - `DeviceKind::Vsock` → `VirtIoSocket::try_new` → `kclass::publish_vsock`
    - `DeviceKind::Fs9p` → `VirtIo9p::try_new` → `kclass::publish_virtio_9p`
 
-### 资源管理 (devres)
+### 资源管理
+
+**时钟资源失败与重试契约**（`map_res_err`，resource.rs）：
+
+| ResError | DriverError | 语义 |
+|----------|-------------|------|
+| `NoProvider` | `WouldBlock` | 时钟提供者尚未 probe（可重试）——设备模型据此返回 `ProbeOutcome::Deferred`，枚举循环在任一 provider 激活后重试本消费者 |
+| `NotFound` | `InvalidInput` | 已注册但无该条目（永久失败）——不应重试 |
+
+ (devres)
 
 `device-res-xkernel` 提供 X-Kernel 对 `device-res` provider contract 的实现类型；
 driver-facing 资源 API 由 `kdriver::resource` 以 `DeviceResourceExt` 暴露给驱动。
