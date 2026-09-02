@@ -141,10 +141,29 @@ drivers/integration/kdriver/
 `FixedClockDriver`（或 SoC 专用控制器驱动），在 `probe_device` 中调用
 `kclk::register_table` + `register_provider` 注册时钟。
 
-固件层在枚举时从 DT 节点提取 `clock-frequency` 与 `phandle`，通过
-`FirmwareDevice` 传递（`khal::firmware::devices`），probe 直接读取而无需
-重遍 DT。注册在描述符优先路径中自然完成——调度器已启动，满足 kclk
-全局锁（可休眠 mutex）需要当前任务的要求，无需额外的手动 init 调用。
+**probe 顺序保证**：`PlatformBackend` 枚举时分流——带 `#clock-cells` 的
+节点（时钟提供者）先注册、后注册消费者。注册顺序即 probe 顺序，因此
+单轮 probe 即满足"提供者先于消费者"的依赖（等效 Linux `of_clk_init` +
+`EPROBE_DEFER` 的保证；DT 中 `/pl011@9000000` 排在 `/apb-pclk` 前面的
+顺序问题由此解决）。
+
+固件层（`khal::firmware::devices`）在枚举时从 DT 节点提取四类时钟信息，
+全部通过 `FirmwareDevice` 传递：
+
+| 字段 | 来源属性 | 用途 |
+|------|----------|------|
+| `clock_frequency` | `clock-frequency` | fixed-clock 节点的频率 |
+| `phandle` | `phandle` | 作为 kclk ProviderId，`clocks = <&phandle>` 引用据此解析 |
+| `clock_cells` | `#clock-cells` | 标记节点是时钟提供者（分流依据） |
+| `clock_specs` | `clocks` | 消费者节点的 (provider, index) 对，转成 `ResourceDesc::Clk` |
+
+消费者侧：`clock_specs` 在注册 DeviceDesc 时自动转成
+`ResourceDesc::Clk(ClkSpec::by_phandle_index(provider, index))`，驱动用
+`first_clk()` / `clk_at(i)` 取用，与 MMIO/IRQ 完全对称——无需
+`by_name` 硬编码。
+
+注册在描述符优先路径中自然完成——调度器已启动，满足 kclk 全局锁
+（可休眠 mutex）需要当前任务的要求，无需额外的手动 init 调用。
 
 SoC 专用控制器（PLL/mux/divider/gate 树）遵循同一模式：注册自己的
 compatible、携带 MMIO 窗口、在 probe 中 `register_table`。通用

@@ -394,18 +394,28 @@ compatible, and probed. The probe registers the provider — the same
 lifecycle as serial/block/net drivers. A controller with `compatible =
 "fixed-clock"` is handled by the built-in `clk-fixed-clock` driver in
 `kdriver` (see `driver_registry/clk/`); SoC-specific controllers follow the
-same pattern with their own compatible and MMIO:
+same pattern with their own compatible and MMIO.
+
+Probe order is guaranteed by the platform bus backend: nodes carrying
+`#clock-cells` (clock providers) are registered — and therefore probed —
+before their consumers, so one probe pass satisfies the dependency. This
+is the equivalent of Linux's `of_clk_init` + `EPROBE_DEFER` guarantee.
+Consumer nodes' `clocks` properties are auto-converted to
+`ResourceDesc::Clk` entries during the same enumeration pass.
 
 ```rust
 // drivers/integration/kdriver/src/driver_registry/clk/mod.rs (generic fixed-clock)
 impl DeviceDriver for FixedClockDriver {
     fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
-        // Read clock-frequency (extracted by the firmware layer at enumeration).
-        let rate = /* from FirmwareDevice::clock_frequency */;
-        let branches = [ClkBranch::fixed_rate(0, "uart-ref", rate)];
+        // The firmware layer extracts phandle + clock-frequency at
+        // enumeration; the driver registers under the DT phandle so
+        // `clocks = <&phandle>` references resolve.
+        let (phandle, rate) = /* from the DT node */;
+        let table: &'static ClkTable = Box::leak(Box::new(ClkTable::new(phandle)));
+        let branches = [ClkBranch::fixed_rate(0, "clk24mhz", rate)];
         let reg: Arc<dyn ClkRegAccess> = Arc::new(NullClkReg);
-        register_table(&TABLE, reg, &branches)?;
-        register_provider(&TABLE);
+        register_table(table, reg, &branches)?;
+        register_provider(table);
         Ok(())
     }
 }
