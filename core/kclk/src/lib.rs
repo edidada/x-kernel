@@ -57,7 +57,9 @@ mod tests;
 
 pub use core::{ClkBuilder, ClkCore, ClkSummaryEntry, clk_disable_unused, clk_summary, clocks_len};
 
-pub use basic::{Composite, Divider, DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux};
+pub use basic::{
+    Composite, DivTableEntry, Divider, DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux,
+};
 pub use error::{ClkError, ClkResult};
 pub use event::{ClkEvent, ClkNotifier, ClkNotifierId, NotifierResult};
 pub use flags::ClkFlags;

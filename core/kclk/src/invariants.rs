@@ -711,8 +711,8 @@ fn register_table_cycle_rollback_keeps_global_list_clean() {
 
     let reg: Arc<dyn crate::ClkRegAccess> = Arc::new(crate::tests::MockRegShared::new());
     let branches = [
-        crate::ClkBranch::gate(0, "cy_a", 0, 0, crate::GateFlags::SET_TO_ENABLE, &["cy_b"]),
-        crate::ClkBranch::gate(1, "cy_b", 0, 1, crate::GateFlags::SET_TO_ENABLE, &["cy_a"]),
+        crate::ClkBranch::gate(0, "cy_a", 0, 0, crate::GateFlags::empty(), &["cy_b"]),
+        crate::ClkBranch::gate(1, "cy_b", 0, 1, crate::GateFlags::empty(), &["cy_a"]),
     ];
     assert!(crate::register_table(table, reg, &branches).is_err());
     assert_eq!(crate::clocks_len(), before);

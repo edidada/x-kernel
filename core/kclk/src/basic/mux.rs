@@ -11,8 +11,9 @@ use crate::{ClkError, ClkHwOps, ClkRateRequest, ClkRegAccess, ClkResult, Rate, R
 /// A clock that picks one of `N` parents using a bit field in a register.
 ///
 /// The field occupies `width` bits at `shift` within the word at `offset`.
-/// When a `table` is given, register values are translated to parent indices
-/// through it (useful when the hardware encoding is sparse or reordered);
+/// When a `table` is given it maps *parent index → register value*
+/// (`table[index] = raw`, matching Linux's `clk_mux` table direction), so
+/// sparse or reordered hardware encodings list only the parents they use;
 /// otherwise the register value is the parent index directly.
 pub struct Mux {
     reg: Arc<dyn ClkRegAccess>,
@@ -60,10 +61,18 @@ impl Mux {
     }
 
     /// Translate a register value to a parent index.
+    ///
+    /// With a table (`table[index] = raw`), scan for the index whose raw
+    /// value matches — matching Linux `clk_mux_get_parent`.
     fn raw_to_index(&self, raw: u32) -> ClkResult<u8> {
         match self.table {
-            // The table maps consecutive register values to parent indices.
-            Some(table) => table.get(raw as usize).copied().ok_or(ClkError::BadState),
+            Some(table) => u8::try_from(
+                table
+                    .iter()
+                    .position(|&r| u32::from(r) == raw)
+                    .ok_or(ClkError::BadState)?,
+            )
+            .map_err(|_| ClkError::BadState),
             None => u8::try_from(raw).map_err(|_| ClkError::BadState),
         }
     }
@@ -71,12 +80,10 @@ impl Mux {
     /// Translate a parent index to the register value to write.
     fn index_to_raw(&self, index: u8) -> ClkResult<u32> {
         match self.table {
-            Some(table) => table
-                .iter()
-                .position(|&p| p == index)
-                .map(|p| p as u32)
-                .ok_or(ClkError::InvalidParent),
-            None => Ok(index as u32),
+            Some(table) => Ok(u32::from(
+                *table.get(index as usize).ok_or(ClkError::InvalidParent)?,
+            )),
+            None => Ok(u32::from(index)),
         }
     }
 }

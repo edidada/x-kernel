@@ -32,6 +32,29 @@ this crate; they live in a sibling crate and register their outputs here.
 [`Divider`]: ../src/basic/divider.rs
 [`Composite`]: ../src/basic/composite.rs
 
+## Linux Semantics Alignment
+
+The basic types mirror Linux CCF (`include/linux/clk-provider.h`) in both
+names and polarity. Verified against `drivers/clk/clk-*.c`:
+
+| Ours | Linux | Same direction? |
+|------|-------|-----------------|
+| `DividerFlags::ONE_BASED` | `CLK_DIVIDER_ONE_BASED` | ✓ `div = raw` (default: `raw + 1`) |
+| `DividerFlags::POWER_OF_TWO` | `CLK_DIVIDER_POWER_OF_TWO` | ✓ `div = 1 << raw`; encode is `floor(log2)` (`fls-1`) |
+| `DivTableEntry(val, div)` | `struct clk_div_table` | ✓ sparse (val, div) pairs |
+| `GateFlags::SET_TO_DISABLE` | `CLK_GATE_SET_TO_DISABLE` | ✓ default writes 1 to enable |
+| `GateFlags::HIWORD_MASK` | `CLK_GATE_HIWORD_MASK` | ✓ |
+| Mux `table[index] = raw` | `clk_mux` table | ✓ index → register value |
+| `ClkFlags::SET_RATE_GATE` | `CLK_SET_RATE_GATE` | ✓ rejects `set_rate` when enabled |
+| `ClkFlags::SET_PARENT_GATE` | `CLK_SET_PARENT_GATE` | ✓ rejects `set_parent` when prepared |
+| `ClkFlags::SET_RATE_PARENT` | `CLK_SET_RATE_PARENT` | ✓ |
+| `ClkFlags::IS_CRITICAL` / `IGNORE_UNUSED` | same names | ✓ honored by `clk_disable_unused` |
+| `ClkFlags::GET_RATE_NOCACHE` | `CLK_GET_RATE_NOCACHE` | ✓ |
+| enable-before-prepare | `__clk_enable` WARN | debug assertion (no log in core crates) |
+
+`ClkFlags` bit positions differ from the Linux C ABI (Rust bitflags, no FFI
+sharing), so flags must be written by name, never by numeric value.
+
 ## Layering
 
 Clock support is split across three crates, mirroring how IRQ is wired through
@@ -386,7 +409,7 @@ pub fn init_ccu(ccu_vaddr: usize) {
                 None,
                 DividerFlags::empty(),
             )),
-            Some(Gate::into_ops(reg.clone(), 0x30, 11, GateFlags::SET_TO_ENABLE)),
+            Some(Gate::into_ops(reg.clone(), 0x30, 11, GateFlags::empty())),
         ),
     )
     .parent(pll)

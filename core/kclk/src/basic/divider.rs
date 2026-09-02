@@ -40,8 +40,27 @@ pub struct Divider {
     offset: usize,
     shift: u8,
     width: u8,
-    table: Option<&'static [u32]>,
+    /// Linux-style `(register value, divider)` pairs; `val` entries are
+    /// matched by linear scan (matching Linux `_get_table_div`), so sparse
+    /// encodings work without padding holes.
+    table: Option<&'static [DivTableEntry]>,
     flags: DividerFlags,
+}
+
+/// One `(register value, divider)` row of a divider table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DivTableEntry {
+    /// The raw register field value.
+    pub val: u32,
+    /// The divider it represents.
+    pub div: u32,
+}
+
+impl DivTableEntry {
+    /// Construct a `(val, div)` row.
+    pub const fn new(val: u32, div: u32) -> Self {
+        Self { val, div }
+    }
 }
 
 impl Divider {
@@ -54,7 +73,7 @@ impl Divider {
         offset: usize,
         shift: u8,
         width: u8,
-        table: Option<&'static [u32]>,
+        table: Option<&'static [DivTableEntry]>,
         flags: DividerFlags,
     ) -> Self {
         // Soundness: `1u32 << width` is UB at width >= 32. This is a driver
@@ -78,7 +97,7 @@ impl Divider {
         offset: usize,
         shift: u8,
         width: u8,
-        table: Option<&'static [u32]>,
+        table: Option<&'static [DivTableEntry]>,
         flags: DividerFlags,
     ) -> Arc<dyn ClkHwOps> {
         Arc::new(Self::new(reg, offset, shift, width, table, flags))
@@ -92,7 +111,7 @@ impl Divider {
     /// Maximum achievable divider value.
     fn max_div(&self) -> u32 {
         if let Some(table) = self.table {
-            return table.iter().copied().max().unwrap_or(1).max(1);
+            return table.iter().map(|e| e.div).max().unwrap_or(1).max(1);
         }
         if self.flags.contains(DividerFlags::POWER_OF_TWO) {
             1u32 << self.width
@@ -113,7 +132,12 @@ impl Divider {
     /// Convert a raw register value to its divider.
     fn raw_to_div(&self, raw: u32) -> u32 {
         if let Some(table) = self.table {
-            return table.get(raw as usize).copied().unwrap_or(1).max(1);
+            return table
+                .iter()
+                .find(|e| e.val == raw)
+                .map(|e| e.div)
+                .unwrap_or(1)
+                .max(1);
         }
         if self.flags.contains(DividerFlags::POWER_OF_TWO) {
             return 1u32 << raw.min(self.width as u32);
@@ -129,21 +153,23 @@ impl Divider {
     /// Convert a desired divider to the raw register value (closest).
     fn div_to_raw(&self, div: u32) -> ClkResult<u32> {
         if let Some(table) = self.table {
-            // Pick the table entry whose divider is closest to `div`.
-            let mut best = 0u32;
+            // Pick the table entry whose divider is closest to `div`
+            // (matching Linux `_get_table_val`).
+            let mut best = table.first().map_or(0, |e| e.val);
             let mut best_diff = u64::MAX;
-            for (i, entry) in table.iter().enumerate() {
-                let d = diff(div as u64, *entry as u64);
+            for entry in table.iter() {
+                let d = diff(div as u64, entry.div as u64);
                 if d < best_diff {
                     best_diff = d;
-                    best = i as u32;
+                    best = entry.val;
                 }
             }
             return Ok(best);
         }
         if self.flags.contains(DividerFlags::POWER_OF_TWO) {
-            // Round to the nearest power of two, clamped to the field width.
-            let exp = div.max(1).next_power_of_two().trailing_zeros();
+            // floor(log2(div)), matching Linux's `fls(divider) - 1`: a
+            // divider of 5 encodes as 2^2 = 4, never overshooting to 2^3.
+            let exp = 31 - div.max(1).leading_zeros();
             return Ok(exp.min(self.width as u32));
         }
         if self.flags.contains(DividerFlags::ONE_BASED) {
@@ -157,7 +183,7 @@ impl Divider {
         if let Some(table) = self.table {
             let mut best = 1u32;
             let mut best_diff = u64::MAX;
-            for &d in table.iter() {
+            for d in table.iter().map(|e| e.div) {
                 let r = rate_for(parent_rate, d);
                 let df = diff(r, target);
                 if df < best_diff {

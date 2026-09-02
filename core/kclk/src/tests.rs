@@ -16,9 +16,10 @@ use unittest::{assert_eq, def_test};
 
 use crate::{
     ClkBranch, ClkBuilder, ClkError, ClkEvent, ClkFlags, ClkHandle, ClkHwOps, ClkRegAccess,
-    ClkTable, Divider, DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux, NotifierResult,
-    ParentRef, basic::Composite, clk_disable_unused, clk_get_by_index, clk_get_by_name,
-    register_provider, register_table, reset_providers, table::ClkNodeDesc, unregister_provider,
+    ClkTable, DivTableEntry, Divider, DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux,
+    NotifierResult, ParentRef, basic::Composite, clk_disable_unused, clk_get_by_index,
+    clk_get_by_name, register_provider, register_table, reset_providers, table::ClkNodeDesc,
+    unregister_provider,
 };
 
 /// Array-backed register accessor for testing field math.
@@ -293,6 +294,63 @@ fn divider_one_based_raw_zero_clamps_to_passthrough() {
     assert_eq!(div.get_rate(), 300_000_000);
 }
 
+#[def_test(serial)]
+fn divider_table_uses_linux_val_div_pairs() {
+    let parent = ClkBuilder::new("p", FixedRate::new(1_000_000_000).into_ops())
+        .build()
+        .unwrap();
+    let reg = Arc::new(MockReg::new());
+    // Linux clk_div_table form: (val, div) pairs, sparse encoding allowed.
+    static TABLE: &[DivTableEntry] = &[
+        DivTableEntry::new(0, 1),
+        DivTableEntry::new(1, 2),
+        DivTableEntry::new(4, 8),
+    ];
+    let div = ClkBuilder::new(
+        "div",
+        Divider::into_ops(reg.clone(), 0, 0, 3, Some(TABLE), DividerFlags::empty()),
+    )
+    .parent(parent)
+    .build()
+    .unwrap();
+
+    // Asking for 250 MHz (÷4): closest table divider is 8 (raw 4).
+    let actual = div.set_rate(250_000_000).unwrap();
+    assert_eq!(actual, 125_000_000);
+    assert_eq!(reg.word(0), 4);
+    assert_eq!(div.get_rate(), 125_000_000);
+
+    // Asking for 600 MHz (÷1.67): closest table divider is 2 (raw 1).
+    div.set_rate(600_000_000).unwrap();
+    assert_eq!(reg.word(0), 1);
+}
+
+#[def_test(serial)]
+fn divider_power_of_two_encodes_floor_log2() {
+    let parent = ClkBuilder::new("p", FixedRate::new(1_000_000_000).into_ops())
+        .build()
+        .unwrap();
+    let reg = Arc::new(MockReg::new());
+    let div = ClkBuilder::new(
+        "div",
+        Divider::into_ops(reg.clone(), 0, 0, 3, None, DividerFlags::POWER_OF_TWO),
+    )
+    .parent(parent)
+    .build()
+    .unwrap();
+
+    // A raw of 3 is 2^3 = 8: 1 GHz / 8 = 125 MHz.
+    let actual = div.set_rate(125_000_000).unwrap();
+    assert_eq!(actual, 125_000_000);
+    assert_eq!(reg.word(0), 3);
+
+    // div_to_raw uses floor(log2(div)) like Linux fls()-1: an intermediate
+    // request clamps to the power of two below, never above.
+    let actual = div.set_rate(300_000_000).unwrap();
+    assert_eq!(actual, 250_000_000); // ÷4, not ÷2 (which would need ceil)
+    assert_eq!(reg.word(0), 2);
+}
+
 // ---------------------------------------------------------------------------
 // Gate enable/disable toggles the register bit
 // ---------------------------------------------------------------------------
@@ -300,7 +358,7 @@ fn divider_one_based_raw_zero_clamps_to_passthrough() {
 #[def_test(serial)]
 fn gate_enable_writes_bit_and_reports_state() {
     let reg = Arc::new(MockReg::new());
-    let gate = Gate::new(reg.clone(), 0, 5, GateFlags::SET_TO_ENABLE);
+    let gate = Gate::new(reg.clone(), 0, 5, GateFlags::empty());
 
     assert_eq!(gate.is_enabled().unwrap(), false);
     gate.enable().unwrap();
@@ -315,14 +373,80 @@ fn gate_enable_writes_bit_and_reports_state() {
 #[def_test(serial)]
 fn gate_inverted_polarity_clears_bit_to_enable() {
     let reg = Arc::new(MockReg::new());
-    // set_to_enable=false: the bit is an "is_disabled" flag, so enabling clears it.
-    let gate = Gate::new(reg.clone(), 0, 2, GateFlags::empty());
+    // SET_TO_DISABLE (Linux CLK_GATE_SET_TO_DISABLE): the bit is an
+    // "is_disabled" flag, so enabling clears it.
+    let gate = Gate::new(reg.clone(), 0, 2, GateFlags::SET_TO_DISABLE);
 
     reg.mem.lock()[0] = 1 << 2; // initially disabled
     assert_eq!(gate.is_enabled().unwrap(), false);
     gate.enable().unwrap();
     assert_eq!(reg.word(0), 0);
     assert!(gate.is_enabled().unwrap());
+}
+
+#[def_test(serial)]
+fn gate_default_polarity_sets_bit_to_enable_linux_default() {
+    let reg = Arc::new(MockReg::new());
+    // Default (no flags) matches Linux's gate default: writing 1 enables.
+    let gate = Gate::new(reg.clone(), 0, 3, GateFlags::empty());
+
+    gate.enable().unwrap();
+    assert_eq!(reg.word(0), 1 << 3);
+    assert!(gate.is_enabled().unwrap());
+
+    gate.disable();
+    assert_eq!(reg.word(0), 0);
+    assert_eq!(gate.is_enabled().unwrap(), false);
+}
+
+#[def_test(serial)]
+fn mux_table_maps_parent_index_to_register_value() {
+    let reg = Arc::new(MockReg::new());
+    // Linux clk_mux table direction: table[index] = raw register value.
+    // Parent 0 -> raw 0, parent 1 -> raw 2, parent 2 -> raw 3 (sparse).
+    static TABLE: &[u8] = &[0, 2, 3];
+    let mux = Mux::new(reg.clone(), 0, 0, 0x3, Some(TABLE));
+
+    // Selecting parent 1 writes raw 2.
+    mux.set_parent(1).unwrap();
+    assert_eq!(reg.word(0), 2);
+    assert_eq!(mux.get_parent().unwrap(), 1);
+
+    // A raw field of 3 reads back as parent 2.
+    reg.mem.lock()[0] = 3;
+    assert_eq!(mux.get_parent().unwrap(), 2);
+}
+
+#[def_test(serial)]
+fn set_parent_gate_rejects_switch_while_prepared() {
+    // CLK_SET_PARENT_GATE: a prepared mux refuses to switch sources, a
+    // prepared-then-disabled one also refuses (Linux gates on prepare
+    // state, not enable state), and after unprepare it succeeds.
+    let p1 = ClkBuilder::new("p1", FixedRate::new(24_000_000).into_ops())
+        .build()
+        .unwrap();
+    let p2 = ClkBuilder::new("p2", FixedRate::new(32_000_000).into_ops())
+        .build()
+        .unwrap();
+    let mux = ClkBuilder::new(
+        "mux",
+        Mux::into_ops(Arc::new(MockReg::new()), 0, 0, 0x1, None),
+    )
+    .flags(ClkFlags::SET_PARENT_GATE)
+    .parents(alloc::vec![Some(p1), Some(p2)])
+    .build()
+    .unwrap();
+
+    let h = ClkHandle::new(mux.clone());
+    h.prepare_enable().unwrap();
+    assert_eq!(mux.set_parent(1).unwrap_err(), ClkError::Busy);
+
+    // Disable alone does not release the gate (prepare is the gated state).
+    h.disable();
+    assert_eq!(mux.set_parent(1).unwrap_err(), ClkError::Busy);
+
+    h.unprepare().unwrap();
+    mux.set_parent(1).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -454,7 +578,7 @@ fn composite_dispatches_rate_and_gate_to_sub_nodes() {
 
     let mux = Mux::into_ops(reg.clone(), 0, 0, 0x1, None);
     let div = Divider::into_ops(reg.clone(), 0, 4, 2, None, DividerFlags::empty());
-    let gate = Gate::into_ops(reg.clone(), 0, 8, GateFlags::SET_TO_ENABLE);
+    let gate = Gate::into_ops(reg.clone(), 0, 8, GateFlags::empty());
 
     let comp = ClkBuilder::new("comp", Composite::new(Some(mux), Some(div), Some(gate)))
         .parent(parent)
@@ -522,7 +646,7 @@ fn consumer_handle_prepare_enable_through_provider() {
         .unwrap();
     let gate = ClkBuilder::new(
         "uart_clk",
-        Gate::into_ops(reg.clone(), 0, 3, GateFlags::SET_TO_ENABLE),
+        Gate::into_ops(reg.clone(), 0, 3, GateFlags::empty()),
     )
     .parent(parent)
     .build()
@@ -851,7 +975,7 @@ fn clk_disable_unused_gates_idle_and_skips_critical() {
     reg.mem.lock()[0] = 1; // bootloader left the gate on
     let idle = ClkBuilder::new(
         "idle",
-        Gate::into_ops(reg.clone(), 0, 0, GateFlags::SET_TO_ENABLE),
+        Gate::into_ops(reg.clone(), 0, 0, GateFlags::empty()),
     )
     .build()
     .unwrap();
@@ -861,7 +985,7 @@ fn clk_disable_unused_gates_idle_and_skips_critical() {
     reg2.mem.lock()[0] = 1;
     let _critical = ClkBuilder::new(
         "crit",
-        Gate::into_ops(reg2.clone(), 0, 0, GateFlags::SET_TO_ENABLE),
+        Gate::into_ops(reg2.clone(), 0, 0, GateFlags::empty()),
     )
     .flags(ClkFlags::IS_CRITICAL)
     .build()
@@ -920,7 +1044,7 @@ fn register_table_builds_tree_by_name_in_any_order() {
     let reg: Arc<dyn ClkRegAccess> = Arc::new(MockReg::new());
     // Children listed BEFORE parents — order-independent, parents by name.
     let branches = [
-        ClkBranch::gate(2, "uart_clk", 0, 7, GateFlags::SET_TO_ENABLE, &["pll1200"]),
+        ClkBranch::gate(2, "uart_clk", 0, 7, GateFlags::empty(), &["pll1200"]),
         ClkBranch::fixed_factor(1, "pll1200", 50, 1, &["osc24m"]),
         ClkBranch::fixed_rate(0, "osc24m", 24_000_000),
     ];
@@ -1036,13 +1160,13 @@ fn set_parent_migrates_prepare_enable_refs() {
 
 #[def_test(serial)]
 fn hiword_mask_gate_writes_atomic_single_word() {
-    // bit 5, SET_TO_ENABLE, hiword-mask: a single reg_write of (mask<<16)|value.
+    // bit 5, default polarity, hiword-mask: a single reg_write of (mask<<16)|value.
     let reg = Arc::new(MockReg::new());
     let gate = Gate::new(
         reg.clone(),
         0,
         5,
-        GateFlags::SET_TO_ENABLE | GateFlags::HIWORD_MASK,
+        GateFlags::empty() | GateFlags::HIWORD_MASK,
     );
 
     gate.enable().unwrap();
@@ -1125,8 +1249,8 @@ fn register_table_rejects_parent_cycle() {
     let reg: Arc<dyn ClkRegAccess> = Arc::new(MockReg::new());
     // a -> b -> a: a genuine cycle must be rejected, not silently accepted.
     let branches = [
-        ClkBranch::gate(0, "a", 0, 0, GateFlags::SET_TO_ENABLE, &["b"]),
-        ClkBranch::gate(1, "b", 0, 1, GateFlags::SET_TO_ENABLE, &["a"]),
+        ClkBranch::gate(0, "a", 0, 0, GateFlags::empty(), &["b"]),
+        ClkBranch::gate(1, "b", 0, 1, GateFlags::empty(), &["a"]),
     ];
     assert!(register_table(&TABLE, reg, &branches).is_err());
     reset_providers();
@@ -1218,8 +1342,8 @@ fn register_table_failure_rolls_back_global_list() {
     // A cycle in the table makes the resolve pass fail after nodes were built;
     // the batch must be rolled back out of the global clock list.
     let branches = [
-        ClkBranch::gate(0, "rb_a", 0, 0, GateFlags::SET_TO_ENABLE, &["rb_b"]),
-        ClkBranch::gate(1, "rb_b", 0, 1, GateFlags::SET_TO_ENABLE, &["rb_a"]),
+        ClkBranch::gate(0, "rb_a", 0, 0, GateFlags::empty(), &["rb_b"]),
+        ClkBranch::gate(1, "rb_b", 0, 1, GateFlags::empty(), &["rb_a"]),
     ];
     assert!(register_table(&TABLE, reg, &branches).is_err());
     // The global list is back to its pre-registration size.
@@ -1252,7 +1376,7 @@ fn register_table_resolves_external_parent_refs() {
         ClkNodeDesc::Gate {
             offset: 0,
             bit: 3,
-            flags: GateFlags::SET_TO_ENABLE,
+            flags: GateFlags::empty(),
         },
     )];
     register_table(&PMU, reg, &pmu_branches).unwrap();
@@ -1276,7 +1400,7 @@ fn register_table_resolves_external_parent_refs() {
         ClkNodeDesc::Gate {
             offset: 0,
             bit: 0,
-            flags: GateFlags::SET_TO_ENABLE,
+            flags: GateFlags::empty(),
         },
     )];
     assert!(register_table(&BAD, Arc::new(MockReg::new()), &bad_branches).is_err());

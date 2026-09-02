@@ -17,13 +17,17 @@ bitflags! {
         ///
         /// **Implemented:** honored by `ClkCore::round_rate` / `set_rate`.
         const SET_RATE_PARENT = 1 << 0;
-        /// The clock's rate or parent may only be changed while it is disabled
-        /// (Linux `CLK_SET_RATE_GATE`). An enabled clock's `set_rate` /
-        /// `set_parent` is rejected with [`Busy`](crate::ClkError::Busy) —
-        /// reprogramming running hardware is glitch-prone, and the
-        /// disable/change/re-enable alternative strands the enable count on
-        /// gated hardware if the re-enable fails.
+        /// The clock's rate may only be changed while it is disabled
+        /// (Linux `CLK_SET_RATE_GATE`). An enabled clock's `set_rate` is
+        /// rejected with [`Busy`](crate::ClkError::Busy) — reprogramming
+        /// running hardware is glitch-prone, and the disable/change/re-enable
+        /// alternative strands the enable count on gated hardware if the
+        /// re-enable fails.
         const SET_RATE_GATE = 1 << 1;
+        /// The clock's parent may only be changed while it is not prepared
+        /// (Linux `CLK_SET_PARENT_GATE`). A prepared clock's `set_parent` is
+        /// rejected with [`Busy`](crate::ClkError::Busy).
+        const SET_PARENT_GATE = 1 << 4;
         /// Never gate this clock, even when it appears unused.
         ///
         /// **Implemented:** honored by [`crate::clk_disable_unused`], which

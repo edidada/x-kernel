@@ -500,6 +500,17 @@ impl ClkCore {
     /// Internal enable; the caller holds [`CLK_ENABLE_LOCK`]. Propagates to
     /// the parent first and rolls it back on a hardware failure.
     pub(crate) fn enable_locked(&self) -> ClkResult {
+        // Linux __clk_enable WARN semantics: enabling an unprepared clock is
+        // consumer misuse — hardware needs prepare (PLL settle, async
+        // unlocks) before it can be safely ungated. kclk (like the other
+        // core-service crates) has no logging dependency, so this surfaces
+        // as a debug-build assertion rather than a runtime warning.
+        debug_assert!(
+            self.state.lock().prepare_count > 0,
+            "kclk: enabling unprepared clock \"{}\" — call prepare() first",
+            self.name
+        );
+
         let parent_done = match self.parent_node() {
             Some(parent) => {
                 parent.enable_locked()?;
@@ -754,15 +765,16 @@ impl ClkCore {
     /// Select parent `index` and refresh the cached rate and accuracy.
     ///
     /// Serialized by [`CLK_LOCK`]. The new parent must already be registered at
-    /// `index`. When [`ClkFlags::SET_RATE_GATE`] is set and the clock is
-    /// enabled, the switch is rejected with [`Busy`](crate::ClkError::Busy)
-    /// (Linux `CLK_SET_RATE_GATE` semantics).
+    /// `index`. When [`ClkFlags::SET_PARENT_GATE`] is set and the clock is
+    /// prepared, the switch is rejected with [`Busy`](crate::ClkError::Busy)
+    /// (Linux `CLK_SET_PARENT_GATE` semantics).
     pub fn set_parent(&self, index: u8) -> ClkResult {
         let _guard = CLK_LOCK.lock();
-        // SET_RATE_GATE (Linux CLK_SET_RATE_GATE): reject the mux switch while
-        // the clock is enabled, instead of a disable/switch/re-enable dance
-        // (whose re-enable failure would strand enabled-count on gated HW).
-        if self.flags.contains(ClkFlags::SET_RATE_GATE) && self.state.lock().enable_count > 0 {
+        // SET_PARENT_GATE (Linux CLK_SET_PARENT_GATE): reject the mux switch
+        // while the clock is prepared, instead of a disable/switch/re-enable
+        // dance (whose re-enable failure would strand enabled-count on gated
+        // HW).
+        if self.flags.contains(ClkFlags::SET_PARENT_GATE) && self.state.lock().prepare_count > 0 {
             return Err(ClkError::Busy);
         }
         self.switch_parent_locked(index)

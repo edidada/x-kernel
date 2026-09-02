@@ -260,7 +260,7 @@ pub mod clk_e2e_tests {
                 Some(kclk::GateDesc {
                     offset: 0x30,
                     bit: 11,
-                    flags: GateFlags::SET_TO_ENABLE,
+                    flags: GateFlags::empty(),
                 }),
                 &["pll1200"],
                 kclk::ClkFlags::empty(),
@@ -511,7 +511,7 @@ pub mod clk_vccu_tests {
                 Some(GateDesc {
                     offset: 0x20,
                     bit: 8,
-                    flags: GateFlags::SET_TO_ENABLE,
+                    flags: GateFlags::empty(),
                 }),
                 &["v_mux"],
                 kclk::ClkFlags::empty(),

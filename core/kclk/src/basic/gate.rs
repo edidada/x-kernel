@@ -11,12 +11,16 @@ use bitflags::bitflags;
 use crate::{ClkHwOps, ClkRegAccess, ClkResult, Rate, RoundResult};
 
 bitflags! {
-    /// Policy bits for a [`Gate`].
+    /// Policy bits for a [`Gate`]. Semantics match Linux's `CLK_GATE_*`
+    /// (`include/linux/clk-provider.h`).
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     pub struct GateFlags: u32 {
-        /// Writing a 1 to the bit enables the clock; otherwise writing a 0
-        /// enables it (hardware inversion, e.g. an "is_disabled" bit).
-        const SET_TO_ENABLE = 1 << 0;
+        /// Writing a 1 to the bit *disables* the clock (hardware inversion,
+        /// an "is_disabled" bit). Matches Linux `CLK_GATE_SET_TO_DISABLE`.
+        ///
+        /// When clear (the default, matching Linux's gate default), writing
+        /// a 1 *enables* the clock — the common active-high enable bit.
+        const SET_TO_DISABLE = 1 << 0;
         /// Write the gate bit atomically via the hiword-mask convention
         /// (Linux `CLK_GATE_HIWORD_MASK`): the upper 16 bits are a write mask,
         /// the lower 16 the value. This is a single `reg_write`, not a
@@ -69,7 +73,8 @@ impl Gate {
 
     /// Register value to OR in for the desired logical `enabled` state.
     fn enable_value(&self, enabled: bool) -> u32 {
-        let bit_should_be_set = enabled == self.flags.contains(GateFlags::SET_TO_ENABLE);
+        // Default polarity: set the bit to enable. SET_TO_DISABLE inverts.
+        let bit_should_be_set = enabled != self.flags.contains(GateFlags::SET_TO_DISABLE);
         if bit_should_be_set { self.mask() } else { 0 }
     }
 
@@ -106,10 +111,10 @@ impl ClkHwOps for Gate {
 
     fn is_enabled(&self) -> ClkResult<bool> {
         let bit = (self.reg.reg_read(self.offset) >> self.bit_idx) & 1;
-        let clock_on = if self.flags.contains(GateFlags::SET_TO_ENABLE) {
-            bit != 0
-        } else {
+        let clock_on = if self.flags.contains(GateFlags::SET_TO_DISABLE) {
             bit == 0
+        } else {
+            bit != 0
         };
         Ok(clock_on)
     }

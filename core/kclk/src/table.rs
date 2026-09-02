@@ -27,7 +27,7 @@
 //! static BRANCHES: [kclk::ClkBranch; 3] = [
 //!     kclk::ClkBranch::fixed_rate(0, "osc24m", 24_000_000),
 //!     kclk::ClkBranch::fixed_factor(1, "pll1200", 50, 1, &["osc24m"]),
-//!     kclk::ClkBranch::gate(2, "uart_clk", 0x30, 7, kclk::GateFlags::SET_TO_ENABLE, &["pll1200"]),
+//!     kclk::ClkBranch::gate(2, "uart_clk", 0x30, 7, kclk::GateFlags::empty(), &["pll1200"]),
 //! ];
 //! kclk::register_table(&CCU, reg, &BRANCHES).unwrap();
 //! kclk::register_provider(&CCU);
@@ -242,7 +242,7 @@ impl ClkBranch {
         offset: usize,
         shift: u8,
         width: u8,
-        table: Option<&'static [u32]>,
+        table: Option<&'static [crate::DivTableEntry]>,
         flags: DividerFlags,
         parents: &'static [&'static str],
     ) -> Self {
@@ -338,7 +338,7 @@ pub enum ClkNodeDesc {
         /// Field width in bits (`1..32`).
         width: u8,
         /// Optional explicit divider-value table.
-        table: Option<&'static [u32]>,
+        table: Option<&'static [crate::DivTableEntry]>,
         /// Divider policy flags.
         flags: DividerFlags,
     },
@@ -378,8 +378,8 @@ pub struct DividerDesc {
     pub shift: u8,
     /// Field width in bits (`1..32`).
     pub width: u8,
-    /// Optional explicit divider-value table.
-    pub table: Option<&'static [u32]>,
+    /// Optional `(register value, divider)` table (Linux `clk_div_table`).
+    pub table: Option<&'static [crate::DivTableEntry]>,
     /// Divider policy flags.
     pub flags: DividerFlags,
 }

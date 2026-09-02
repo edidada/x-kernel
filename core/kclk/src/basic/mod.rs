@@ -18,7 +18,7 @@ mod gate;
 mod mux;
 
 pub use composite::Composite;
-pub use divider::{Divider, DividerFlags};
+pub use divider::{DivTableEntry, Divider, DividerFlags};
 pub use fixed_factor::FixedFactor;
 pub use fixed_rate::FixedRate;
 pub use gate::{Gate, GateFlags};
