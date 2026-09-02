@@ -1201,6 +1201,7 @@ name = "device-res-xkernel"
 version = "0.2.0-rc2"
 dependencies = [
  "device-res",
+ "kclk",
  "kdma",
  "khal",
  "kirq",

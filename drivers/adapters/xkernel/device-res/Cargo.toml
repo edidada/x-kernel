@@ -17,6 +17,7 @@ device_res = { workspace = true }
 kdma = { workspace = true }
 kirq = { workspace = true }
 khal = { workspace = true }
+kclk = { workspace = true }
 ktime_types = { workspace = true }
 log = { workspace = true }
 memaddr = { workspace = true }
