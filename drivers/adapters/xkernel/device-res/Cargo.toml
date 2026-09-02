@@ -12,6 +12,10 @@ documentation.workspace = true
 [lib]
 name = "device_res_xkernel"
 
+[features]
+default = []
+dma-trace = ["kdma/dma-trace"]
+
 [dependencies]
 device_res = { workspace = true }
 kdma = { workspace = true }
