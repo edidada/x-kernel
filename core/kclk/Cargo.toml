@@ -19,7 +19,3 @@ kspin = { workspace = true }
 ksync = { workspace = true }
 bitflags = { workspace = true }
 unittest = { workspace = true }
-# Test-only: the concurrency stress test spawns contending kernel tasks.
-# A normal dependency (not dev-dependency) because `--cfg unittest` builds do
-# not separate dev deps in this workspace's Kconfig flow.
-ktask = { workspace = true }

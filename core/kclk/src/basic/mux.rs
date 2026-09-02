@@ -134,10 +134,14 @@ impl ClkHwOps for Mux {
 
     fn determine_rate(&self, req: &mut ClkRateRequest, parents: &[(u8, Rate)]) -> ClkResult<()> {
         let requested = req.rate;
-        let Some(&best) = parents
-            .iter()
-            .min_by_key(|(_, prate)| diff(requested, *prate))
-        else {
+        // Honor the request's min/max bounds when picking a source: prefer a
+        // parent whose output already lands inside the allowed range, and
+        // only fall back to the closest overall when none does.
+        let Some(&best) = parents.iter().min_by_key(|(_, prate)| {
+            let in_range = req.min_rate <= *prate && *prate <= req.max_rate;
+            // Sort by (out-of-range, |diff|): in-range parents win first.
+            (!in_range, diff(requested, *prate))
+        }) else {
             return Ok(());
         };
         req.best_parent_index = Some(best.0);
