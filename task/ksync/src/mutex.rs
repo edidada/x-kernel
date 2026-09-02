@@ -116,7 +116,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
         let current_id = current().owner_key();
         let mut spin = Spin::new(self.config);
         let mut owner_id = self.owner_id.load(Ordering::Relaxed);
-        #[cfg(feature = "stats")]
+        #[cfg(any(feature = "stats", feature = "watchdog"))]
         let mut did_block = false;
 
         loop {
@@ -162,18 +162,20 @@ unsafe impl lock_api::RawMutex for RawMutex {
                 continue;
             }
 
-            #[cfg(feature = "stats")]
+            #[cfg(any(feature = "stats", feature = "watchdog"))]
             if !did_block {
+                #[cfg(feature = "stats")]
                 self.record_blocking();
+
+                #[cfg(feature = "watchdog")]
+                current().inner().set_waiting_lock(
+                    self as *const _ as usize,
+                    owner_id,
+                    khal::time::now_ticks(),
+                );
+
                 did_block = true;
             }
-
-            #[cfg(feature = "watchdog")]
-            current().inner().set_waiting_lock(
-                self as *const _ as usize,
-                owner_id,
-                khal::time::now_ticks(),
-            );
             block_on(listener);
             owner_id = self.owner_id.load(Ordering::Acquire);
         }

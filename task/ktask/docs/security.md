@@ -107,8 +107,9 @@ ksched algorithms / karch context switch / allocator
 6. `register_timer_irq_note` 只写入 `'static fn()`；timer IRQ 路径 Acquire 后
    transmute 调用，钩子必须短小且不阻塞。
 7. mutex 等待记录先写 owner key 与起始 ticks，再以 Release 发布非零 mutex 地址；
-   NMI 检查先以 Acquire 读取地址，再读取配套字段。清理时先清零地址，避免观察到已重置
-   的 owner 或时间戳。
+   NMI 检查先以 Acquire 读取地址，再读取配套字段。一次连续加锁尝试只发布首次阻塞
+   时间；扫描期间观察到晚于 watchdog 时间样本的记录时跳过本轮，禁止 wrapping 差值
+   触发错误 deadlock 报告。清理时只清零发布地址，旧元数据由下一次发布覆盖。
 8. NMI 任务 dump 不读取 `SpinNoIrq<String>` 任务名，只读取 owner key、trace id、原子
    state、mutex 等待记录和 held-lock slots，避免 pseudo-NMI 重入同 CPU spinlock。
 
