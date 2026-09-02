@@ -106,6 +106,11 @@ ksched algorithms / karch context switch / allocator
    避免把 in-flight 项当成最远期 deadline 装进 32-bit TVAL。
 6. `register_timer_irq_note` 只写入 `'static fn()`；timer IRQ 路径 Acquire 后
    transmute 调用，钩子必须短小且不阻塞。
+7. mutex 等待记录先写 owner key 与起始 ticks，再以 Release 发布非零 mutex 地址；
+   NMI 检查先以 Acquire 读取地址，再读取配套字段。清理时先清零地址，避免观察到已重置
+   的 owner 或时间戳。
+8. NMI 任务 dump 不读取 `SpinNoIrq<String>` 任务名，只读取 owner key、trace id、原子
+   state、mutex 等待记录和 held-lock slots，避免 pseudo-NMI 重入同 CPU spinlock。
 
 ## 内存与并发不变量
 
@@ -134,6 +139,8 @@ ksched algorithms / karch context switch / allocator
 | T-04 | `need_resched` 在错误时机触发重入调度 | 中 | 临界区内或异常/IRQ trapframe guard 未释放时直接抢占切换 | 仅设置 pending，`enable_preempt` 安全点检查，并在 active exception context 内延迟实际切换 |
 | T-05 | `task_registry` 指针槽位损坏 | 高 | 非法写入或重复释放 | CAS 协议 + 0/ptr 双态约束 + 弱引用升级校验 |
 | T-06 | snapshot 竞态读取错误 trap frame | 中 | 并发 snapshot session | begin/finish 会话串行 + per-CPU 槽位隔离 |
+| T-06a | mutex watchdog 缺少锁依赖身份导致现场无法定位 | 中 | 任务等待超过 20s 后只返回布尔失败 | 阻塞前记录 mutex owner key；触发时输出等待者、锁、owner、等待时间、held locks 和等待任务保存栈 |
+| T-06b | NMI dump 重入任务元数据 spinlock | 高 | pseudo-NMI 打断任务名更新并再次格式化 `TaskInner` | force/NMI dump 使用 lock-free 字段，跳过任务名与普通 `Debug` 路径 |
 | T-07 | affinity 迁移竞态导致任务丢失 | 中 | 迁移中状态被并发修改 | `migrate_current` 受 run queue 临界区保护；`enforce_affinity_placement` 对已入队 ready 持 RQ 锁 `remove_task`，未占用 CPU 时只改 mask，对 running 等远端 preempt 完成 |
 | T-07a | `setaffinity` 静默成功但任务仍在非法 CPU | 高 | 非 current 只写 mask | 成功路径要求当前未占用禁止 CPU（running/queued 必须迁走，未入队只改 mask），否则 `false`/`EBUSY`；`preempt_resched`/`yield` 强制 affinity migrate |
 | T-07b | 运行任务离开路径漏 deactivate 导致调度器残留状态 | 高 | 新 leave 路径绕过统一 API | 全部经 `leave_current`；EEVDF `curr` 非 owning；`pick_next` 断言 |

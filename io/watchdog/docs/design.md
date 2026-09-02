@@ -59,8 +59,8 @@
 
 ```text
 Idle ──try_trigger（首个失败 CPU 原子迁移）──▶ Triggered
-Triggered ──各 CPU NMI 中 mark_arrived──▶（等待 all_arrived_mask）
-Triggered ──cause CPU 收集/打印快照后 mark_dump_done──▶ DumpDone
+Triggered ──各 CPU NMI 中 mark_arrived──▶（等待 all_arrived_mask 或 12s 超时）
+Triggered ──cause CPU 打印原因并收集已到达 CPU 快照后 mark_dump_done──▶ DumpDone
 DumpDone ──cause CPU panic（系统停止）──▶ 终态
 ```
 
@@ -72,8 +72,13 @@ DumpDone ──cause CPU panic（系统停止）──▶ 终态
 
 1. `check_watchdog_tasks()`：遍历本 CPU 队列（`HardLockupDetection`、`MutexDeadlock`），失败则返回任务名；
 2. 有失败：`ktask::snapshot::nmi_begin()` 成功则 `rv::try_trigger()`（CAS Idle→Triggered，成功者成为 cause CPU）；
-3. 所有 CPU 在各自 NMI 中 `mark_arrived` 并 `nmi_collect_local()`；
-4. cause CPU `wait_all_arrived_strong()` 后打印失败信息、`nmi_dump_all`、`mark_dump_done`、panic；其余 CPU 自旋等待 `is_dump_done`。
+3. cause CPU 在等待 rendezvous 前立即打印失败类型和初始 arrival bitmap；
+4. 所有 CPU 在各自 NMI 中 `mark_arrived` 并 `nmi_collect_local()`；
+5. cause CPU 最多等待 12s，随后打印缺失 CPU bitmap，按实际 arrival bitmap 执行 `nmi_dump_all`、`mark_dump_done` 和 panic；其余 CPU 自旋等待 `is_dump_done`。
+
+`MutexDeadlock` 检查在触发 rendezvous 前输出等待任务 owner key、mutex 地址、
+检测时观察到的 mutex owner key、等待纳秒数和该任务持有的 mutex 地址，并从任务保存
+上下文直接输出等待者回溯。该路径只读取原子诊断字段，不读取由 spinlock 保护的任务名。
 
 ### 软锁检测
 
@@ -90,7 +95,7 @@ DumpDone ──cause CPU panic（系统停止）──▶ 终态
 ## 设计决策
 
 - **阈值**：软锁 20s、硬锁 10s；watchdog 任务 4s 触碰一次，20s 阈值内 5 次机会，避免误报；
-- **强 rendezvous（无超时）**：cause CPU 必须等所有 CPU 到达才 dump，避免漏 CPU 快照；代价是任一 CPU 无法进入 NMI 时会永久等待（此时系统已不可用，可接受）；
+- **有界 rendezvous**：cause CPU 等待 12s，为运行中的 CPU 留出一个 PMU NMI 周期，同时覆盖 KVM idle vCPU 不再推进 PMU counter 的情况；缺失 CPU 以 bitmap 和 `NOT RESPONDING` 记录，已到达 CPU 的现场仍可输出；
 - **NMI 机制不可用时显式降级**：启动日志提示 hardlockup 关闭，不静默失败；
 - **快照重入保护**：`nmi_begin()` 失败（已有快照在跑）时跳过本次 dump；
 - **软锁报告限速**：每阈值周期最多报告一次。

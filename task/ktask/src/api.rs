@@ -991,28 +991,79 @@ mod tests_api {
     }
 }
 
-/// Returns `true` when no suspicious long lock-waits are observed on this CPU.
-/// Returns `false` when a task appears to have been waiting on a lock for too long.
-///
-/// Note: this is a *heuristic* watchdog check, not a full deadlock detector.
 #[cfg(feature = "watchdog")]
-pub fn check_mutex_deadlock(now: khal::time::TimerTicks) -> bool {
-    let mut ok = true;
+const MUTEX_WAIT_REPORT_THRESHOLD: ktime_types::TimeSpan = ktime_types::TimeSpan::from_secs(20);
+
+#[cfg(feature = "watchdog")]
+struct MutexWaitObservation {
+    task: KtaskRef,
+    lock_addr: usize,
+    lock_owner_key: u64,
+    waited_ns: u64,
+    held_locks: [usize; crate::task::HELD_LOCK_SLOTS],
+}
+
+#[cfg(feature = "watchdog")]
+fn find_suspicious_mutex_wait(now: khal::time::TimerTicks) -> Option<MutexWaitObservation> {
+    let mut observation = None;
     crate::task_registry::for_each_tracked_task(khal::percpu::this_cpu_id(), |weaktask| {
-        if !ok {
+        if observation.is_some() {
             return;
         }
         if let Some(task) = weaktask.upgrade() {
-            let Some((_lock, since)) = task.inner().waiting_snapshot() else {
+            let Some((lock_addr, lock_owner_key, since)) = task.inner().waiting_snapshot() else {
                 return;
             };
 
-            let blocked = now.wrapping_duration_since(since);
-            if khal::time::ticks_to_span(blocked) > ktime_types::TimeSpan::from_secs(20) {
-                // suspect stall (20s)
-                ok = false;
+            let waited = khal::time::ticks_to_span(now.wrapping_duration_since(since));
+            if waited > MUTEX_WAIT_REPORT_THRESHOLD {
+                observation = Some(MutexWaitObservation {
+                    held_locks: task.inner().held_locks_snapshot(),
+                    task,
+                    lock_addr,
+                    lock_owner_key,
+                    waited_ns: waited.as_nanos_u64_saturating(),
+                });
             }
         }
     });
-    ok
+    observation
+}
+
+/// Returns `true` when no suspicious long mutex waits are observed on this CPU.
+///
+/// A wait longer than 20 seconds is treated as suspicious. This heuristic does
+/// not prove that the mutex participates in a deadlock.
+#[cfg(feature = "watchdog")]
+pub fn check_mutex_deadlock(now: khal::time::TimerTicks) -> bool {
+    find_suspicious_mutex_wait(now).is_none()
+}
+
+/// Checks for a suspicious mutex wait and emits an NMI-safe diagnostic report.
+///
+/// The report includes the waiting task owner key, mutex address, observed
+/// mutex owner key, elapsed nanoseconds, held mutex addresses, and the saved
+/// backtrace of the waiting task. Task names are omitted because their storage
+/// is protected by a spinlock and cannot be read safely from NMI context.
+///
+/// Returns `true` when no suspicious wait is found.
+#[cfg(feature = "watchdog")]
+pub fn check_mutex_deadlock_and_report(now: khal::time::TimerTicks) -> bool {
+    let Some(observation) = find_suspicious_mutex_wait(now) else {
+        return true;
+    };
+
+    let task_owner_key = observation.task.inner().owner_key();
+    khal::kprint_atomic!(
+        "[watchdog] mutex wait cpu={} task_owner_key={} lock={:#x} lock_owner_key={} waited_ns={} \
+         held_locks={:#x?}\n",
+        khal::percpu::this_cpu_id().as_usize(),
+        task_owner_key,
+        observation.lock_addr,
+        observation.lock_owner_key,
+        observation.waited_ns,
+        observation.held_locks,
+    );
+    crate::snapshot::dump_mutex_waiter(&observation.task);
+    false
 }

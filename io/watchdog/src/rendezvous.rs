@@ -108,12 +108,29 @@ pub fn all_arrived_mask() -> usize {
     }
 }
 
-/// Busy-wait until all CPUs have arrived.
+fn arrivals_complete(arrived: usize, expected: usize) -> bool {
+    arrived & expected == expected
+}
+
+/// Busy-wait until all CPUs have arrived or `timeout` elapses.
 ///
-/// This is a *strong* rendezvous: no timeout.
-pub fn wait_all_arrived_strong() {
-    let expect = all_arrived_mask();
-    while arrived_bitmap() & expect != expect {
+/// Returns the last observed arrival bitmap. A bounded wait is required because
+/// an idle KVM vCPU may not receive a PMU overflow NMI while it is blocked in
+/// the host, so waiting for every periodic NMI can otherwise freeze the cause
+/// CPU permanently.
+pub fn wait_all_arrived(timeout: ktime_types::TimeSpan) -> usize {
+    let expected = all_arrived_mask();
+    let started_at = khal::time::now_ticks();
+    loop {
+        let arrived = arrived_bitmap();
+        if arrivals_complete(arrived, expected) {
+            return arrived;
+        }
+        let elapsed =
+            khal::time::ticks_to_span(khal::time::now_ticks().wrapping_duration_since(started_at));
+        if elapsed >= timeout {
+            return arrived;
+        }
         core::hint::spin_loop();
     }
 }
@@ -125,12 +142,25 @@ pub fn mark_dump_done() {
 
 /// Reset rendezvous state.
 ///
-/// Note: in your intended flow, other CPUs may keep spinning in NMI forever.
-/// If you want them to be able to return from NMI, call this after
-/// `mark_dump_done()` and after ensuring they observed it.
+/// Call this only after `mark_dump_done()` and after ensuring participating
+/// CPUs observed the completed phase.
 #[inline]
 pub fn reset() {
     ARRIVED_BITMAP.store(0, Ordering::Release);
     CAUSE_CPU.store(usize::MAX, Ordering::Release);
     PHASE.store(Phase::Idle as usize, Ordering::Release);
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::{assert, def_test};
+
+    use super::arrivals_complete;
+
+    #[def_test]
+    fn arrivals_require_every_expected_cpu() {
+        assert!(arrivals_complete(0b1111, 0b1111));
+        assert!(arrivals_complete(0b1_1111, 0b1111));
+        assert!(!arrivals_complete(0b0111, 0b1111));
+    }
 }

@@ -19,6 +19,7 @@ static LAST_SOFTLOCKUP_REPORT: Option<ktime_types::MonotonicInstant> = None;
 
 const SOFTLOCKUP_TOUCH_INTERVAL: TimeSpan = TimeSpan::from_secs(4);
 const WATCHDOG_TASK_PRIO: isize = -20;
+const NMI_RENDEZVOUS_TIMEOUT: TimeSpan = TimeSpan::from_secs(12);
 
 /// Common watchdog initialization for both primary and secondary CPUs.
 ///
@@ -94,19 +95,30 @@ fn init_nmi_watchdog() {
                 let this_cpu = this_cpu_id().as_usize();
                 let is_cause = rv::cause_cpu() == Some(this_cpu);
                 if is_cause {
-                    // Strong rendezvous: MUST wait until all CPUs are in NMI.
-                    rv::wait_all_arrived_strong();
-
                     khal::kprint_atomic!(
                         "[watchdog] failure detected on cpu {}, failed_task={:?}, \
-                         arrived_mask={:#x}",
+                         expected_mask={:#x}, initial_arrived_mask={:#x}\n",
                         this_cpu,
                         fail_name,
+                        rv::all_arrived_mask(),
                         rv::arrived_bitmap()
                     );
 
-                    // Cause CPU dumps all tasks for all CPUs.
-                    ktask::snapshot::nmi_dump_all(rv::all_arrived_mask());
+                    let arrived_mask = rv::wait_all_arrived(NMI_RENDEZVOUS_TIMEOUT);
+                    let expected_mask = rv::all_arrived_mask();
+                    if arrived_mask & expected_mask != expected_mask {
+                        khal::kprint_atomic!(
+                            "[watchdog] rendezvous timeout after {} ns, arrived_mask={:#x}, \
+                             missing_mask={:#x}\n",
+                            NMI_RENDEZVOUS_TIMEOUT.as_nanos_u64_saturating(),
+                            arrived_mask,
+                            expected_mask & !arrived_mask,
+                        );
+                    }
+
+                    // Missing CPUs are reported by the snapshot dumper instead
+                    // of preventing the cause CPU from emitting any evidence.
+                    ktask::snapshot::nmi_dump_all(arrived_mask);
 
                     // Notify others that dump is done.
                     rv::mark_dump_done();

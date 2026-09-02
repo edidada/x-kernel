@@ -42,9 +42,10 @@
 |------|----------|----------|----------|----------|
 | T-01 | NMI 回调获取普通 IRQ 锁 | 高（同 CPU 自死锁） | pseudo-NMI 抢占持锁的普通 IRQ 路径 | NMI 路径只用原子与自旋；代码审查约束 |
 | T-02 | NMI 未按预期周期到达 | 中（误报 hardlockup） | TCG 仿真下 NMI 延迟 / 丢失 | hardlockup 计数需先初始化（`current != 0`）；NMI 不可用时启动期禁用检测 |
-| T-03 | 某 CPU 永远无法进入 NMI | 高（cause CPU 永久自旋） | 该 CPU 中断/NMI 停摆 | 强 rendezvous 无超时属有意设计（系统已不可用）；记录于设计文档 |
+| T-03 | 某 CPU 无法进入 NMI | 中（该 CPU 快照缺失） | KVM idle vCPU 不推进 PMU counter，或目标 CPU 的 NMI 停摆 | cause CPU 在等待前打印原因；rendezvous 限时 12s，超时后打印 missing bitmap 并继续输出已到达 CPU 快照 |
 | T-04 | 快照重入 | 中（快照损坏/死锁） | NMI 打断已有快照流程 | `nmi_begin()` 失败跳过 dump；`kprint_atomic` 原子输出 |
 | T-05 | 软锁误报刷屏 | 低（日志风暴） | watchdog 任务饥饿但定时器正常 | 每阈值周期限速一次报告 |
+| T-06 | NMI dump 读取任务名时重入 task-name spinlock | 高（同 CPU 自死锁） | NMI 打断任务名更新或其它持锁格式化路径 | NMI dump 只输出 lock-free owner key、trace id、state 与 mutex 记录；任务名只在普通日志路径读取 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -54,7 +55,7 @@
 | F-02 | 周期 NMI 武装失败 | PMU 不可用 / 武装返回 false | 本 CPU hardlockup 关闭 | 单 CPU 失去硬锁检测 | 3 | `enable_periodic_nmi` 失败记录 error |
 | F-03 | watchdog 任务饿死 | 调度问题 | 软锁误报 | 日志风暴 + dump | 3 | 4s 触碰 + 20s 阈值 + 限速 |
 | F-04 | 定时器中断停摆 | 中断屏蔽/硬件故障 | `hrtimer_interrupts` 不前进 | NMI 判定 hardlockup → rendezvous → panic | 2 | 这是硬锁检测的预期行为 |
-| F-05 | rendezvous 中 cause CPU panic | 检测到任务失败 | 系统停止 | 停机（保留 dump 输出） | 1 | 有意设计：宁可停机也要输出诊断 |
+| F-05 | rendezvous 中 cause CPU panic | 检测到任务失败 | 系统停止 | 停机并保留可获得的 dump 输出 | 1 | 原因在等待前打印；等待有 12s 上限；按 arrival bitmap 输出部分快照后 panic |
 
 ## 故障管理
 
@@ -68,7 +69,7 @@
 
 ## 已知限制
 
-- 强 rendezvous 无超时：任一 CPU 无法进入 NMI 时 cause CPU 永久自旋；
+- 未到达 rendezvous 的 CPU 只能记录为 `NOT RESPONDING`，无法导出该 CPU 的 trap frame；
 - hardlockup 依赖 NMI 周期精度（平台 PMU 后端当前按固定 2.5GHz 折算周期阈值，见 `platforms/kplat-aarch64/src/peripherals/pmu.rs`；代码 TODO 为改读 DT OPP 频率）；
 - `usize::BITS` 位图限制：CPU 数 ≥ 64 时 `mark_arrived` 直接忽略（`all_arrived_mask` 处理到位宽上限）；
 - `reset()` 与仍在 NMI 自旋的 CPU 并发时语义需谨慎（注释已说明）。
@@ -78,5 +79,7 @@
 - [ ] NMI 回调路径是否存在普通 IRQ 自旋锁 / 阻塞调用？
 - [ ] per-CPU 状态访问是否都有迁移保护（固定核 / IRQ 关闭 / NMI）？
 - [ ] rendezvous 状态迁移是否全部使用正确原子序？
+- [ ] rendezvous 等待是否保持有界，且超时后使用实际 arrival bitmap？
 - [ ] 快照重入是否都有 `nmi_begin()` 保护？
+- [ ] NMI dump 是否只读取原子或不可变任务字段？
 - [ ] NMI 不可用 / 武装失败路径是否都显式记录并降级？

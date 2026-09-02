@@ -148,7 +148,7 @@ unsafe impl Sync for UserRuntimeSlot {}
 
 // How many held locks we track per task (debug only).
 #[cfg(feature = "snapshot")]
-const HELD_LOCK_SLOTS: usize = 4;
+pub(crate) const HELD_LOCK_SLOTS: usize = 4;
 #[cfg(feature = "snapshot")]
 type HeldLocks = [AtomicUsize; HELD_LOCK_SLOTS];
 
@@ -156,6 +156,8 @@ type HeldLocks = [AtomicUsize; HELD_LOCK_SLOTS];
 struct PerTaskRecording {
     /// 0 = not waiting, otherwise lock address.
     waiting_lock: AtomicUsize,
+    /// Owner key observed immediately before blocking on `waiting_lock`.
+    waiting_lock_owner: AtomicU64,
     /// Timer counter sample captured when waiting on `waiting_lock` began.
     waiting_since: AtomicU64,
     held_locks: HeldLocks,
@@ -166,6 +168,7 @@ impl PerTaskRecording {
     fn new() -> Self {
         Self {
             waiting_lock: AtomicUsize::new(0),
+            waiting_lock_owner: AtomicU64::new(0),
             waiting_since: AtomicU64::new(0),
             held_locks: [const { AtomicUsize::new(0) }; HELD_LOCK_SLOTS],
         }
@@ -566,39 +569,46 @@ impl TaskInner {
         crate::run_queue::kick_running_task(self);
     }
 
+    /// Publishes the mutex wait observed immediately before this task blocks.
     #[cfg(feature = "snapshot")]
     #[inline(always)]
-    pub fn set_waiting_lock(&self, lock: usize, now: khal::time::TimerTicks) {
-        // Publish `since` first, then `lock` with Release so readers that see
-        // a non-zero lock also see the matching `since`.
+    pub fn set_waiting_lock(&self, lock: usize, owner_key: u64, now: khal::time::TimerTicks) {
+        // Publish the owner and timestamp first, then the lock with Release so
+        // NMI readers that see a non-zero lock also see one matching snapshot.
+        self.record_lock
+            .waiting_lock_owner
+            .store(owner_key, Ordering::Relaxed);
         self.record_lock
             .waiting_since
             .store(now.as_raw(), Ordering::Relaxed);
         self.record_lock.waiting_lock.store(lock, Ordering::Release);
     }
 
+    /// Clears the published mutex-wait snapshot after acquisition.
     #[cfg(feature = "snapshot")]
     #[inline(always)]
     pub fn clear_waiting_lock(&self) {
-        // Clear `lock` first (Release) so readers won't observe a stale lock
-        // paired with a reset `since`.
+        // Clear only the publication field. Keeping the old metadata avoids a
+        // reader that already observed the lock racing with metadata resets.
+        // The next wait replaces both fields before publishing its lock.
         self.record_lock.waiting_lock.store(0, Ordering::Release);
-        self.record_lock.waiting_since.store(0, Ordering::Relaxed);
     }
 
-    /// A lock-free snapshot of the lock-wait state, safe for NMI/watchdog paths.
+    /// Returns a lock-free mutex-wait snapshot for NMI/watchdog paths.
+    ///
+    /// Tuple fields are the mutex address, observed owner key, and wait start
+    /// in platform timer ticks.
     #[cfg(feature = "snapshot")]
     #[inline(always)]
-    pub fn waiting_snapshot(&self) -> Option<(usize, khal::time::TimerTicks)> {
+    pub fn waiting_snapshot(&self) -> Option<(usize, u64, khal::time::TimerTicks)> {
         let lock = self.record_lock.waiting_lock.load(Ordering::Acquire);
         if lock == 0 {
             return None;
         }
-        // Since lock is observed with Acquire and stored with Release, this
-        // relaxed load is ordered after the lock read and should see the
-        // corresponding `since` in practice.
+        // The lock's Acquire load pairs with the publishing Release store.
+        let owner_key = self.record_lock.waiting_lock_owner.load(Ordering::Relaxed);
         let since = self.record_lock.waiting_since.load(Ordering::Relaxed);
-        Some((lock, khal::time::TimerTicks::from_raw(since)))
+        Some((lock, owner_key, khal::time::TimerTicks::from_raw(since)))
     }
 
     /// Getter: current waiting lock address (0 means none).
@@ -1235,5 +1245,24 @@ mod tests_on_cpu_mask {
             assert!(mask.get(2));
             assert!(mask.get(3));
         }
+    }
+}
+
+#[cfg(all(feature = "snapshot", unittest))]
+mod tests_lock_wait_snapshot {
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+
+    #[def_test]
+    fn lock_wait_snapshot_keeps_observed_owner_and_timestamp() {
+        let task = TaskInner::new_common(TaskIdentity::Internal, "lock-wait-test".into());
+        let since = khal::time::TimerTicks::from_raw(1234);
+
+        task.set_waiting_lock(0x1000, 77, since);
+        assert_eq!(task.waiting_snapshot(), Some((0x1000, 77, since)));
+
+        task.clear_waiting_lock();
+        assert_eq!(task.waiting_snapshot(), None);
     }
 }

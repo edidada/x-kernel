@@ -76,6 +76,12 @@ update_current() → pending      blocked_resched / unblock_task / resched
 | `timers` | 显式周期回调（与调度 timer 解耦） |
 | `snapshot/task_registry` | 可选诊断：snapshot/watchdog/NMI 共享的任务遍历视图 |
 
+启用 snapshot/watchdog 后，每个任务以原子字段记录当前等待的 mutex 地址、阻塞前观察到
+的 mutex owner key、等待起始 ticks，以及最多四个已持有 mutex 地址。mutex 地址最后以
+Release 发布，NMI 读取端以 Acquire 读取后再读取其余字段，得到同一轮等待记录。
+watchdog 超过 20s 阈值时先输出这组关系和等待任务的保存栈，再进入多 CPU rendezvous。
+任务名由 `SpinNoIrq<String>` 保护，NMI dump 不读取任务名。
+
 ## 创建与发布模型
 
 `ktask` 现在显式区分两段用户可见生命周期：

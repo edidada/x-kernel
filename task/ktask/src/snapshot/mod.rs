@@ -233,6 +233,15 @@ pub fn dump_cpu_tasks(cpu_id: LogicalCpuId) {
     dump::dump_cpu_task_backtrace(cpu_id, false);
 }
 
+/// Dump the saved backtrace of a task that exceeded the mutex-wait threshold.
+///
+/// This function is safe to call from NMI context. It uses lock-free task
+/// metadata and does not read the task name because task names are protected
+/// by a spinlock.
+pub(crate) fn dump_mutex_waiter(task: &crate::KtaskRef) {
+    dump::dump_blocked_task_backtrace(task);
+}
+
 /// Begin an NMI-driven snapshot session.
 ///
 /// Returns `true` if the snapshot was successfully initiated. When `true` is

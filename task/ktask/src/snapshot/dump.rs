@@ -43,12 +43,47 @@ pub(crate) fn current_task_for_cpu(cpu_id: LogicalCpuId) -> Option<crate::KtaskR
     running
 }
 
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn dump_task_with_backtrace(
+    cpu_id: LogicalCpuId,
+    task: &crate::KtaskRef,
+    force: bool,
+    backtrace: &backtrace::Backtrace,
+) {
+    if force {
+        let waiting = task.inner().waiting_snapshot();
+        let held = task.inner().held_locks_snapshot();
+        dump_println(
+            true,
+            format_args!(
+                "cpu_id: {}, task_owner_key={}, trace_id={}, state={:?}, waiting={:?}, \
+                 held_locks={:#x?}\n{backtrace}",
+                cpu_id.as_usize(),
+                task.inner().owner_key(),
+                task.inner().trace_id(),
+                task.inner().state(),
+                waiting,
+                held,
+            ),
+        );
+    } else {
+        dump_println(
+            false,
+            format_args!(
+                "cpu_id: {}, {:?}\n{backtrace}",
+                cpu_id.as_usize(),
+                task.inner()
+            ),
+        );
+    }
+}
+
 /// Dump backtraces for all non-running tasks on the given CPU.
 #[cfg(target_arch = "aarch64")]
 pub(crate) fn dump_cpu_task_backtrace(cpu_id: LogicalCpuId, force: bool) {
     crate::task_registry::for_each_tracked_task(cpu_id, |weaktask| {
         if let Some(task) = weaktask.upgrade()
-            && !task.inner().is_running()
+            && has_stable_saved_task_context(&task)
         {
             let ctx = task.inner().ctx();
             let bt = backtrace::Backtrace::capture_trap(
@@ -56,10 +91,7 @@ pub(crate) fn dump_cpu_task_backtrace(cpu_id: LogicalCpuId, force: bool) {
                 ctx.lr as usize,  // ip
                 ctx.lr as usize,  // ra
             );
-            dump_println(
-                force,
-                format_args!("cpu_id: {}, {:?}\n{bt}", cpu_id.as_usize(), task.inner()),
-            );
+            dump_task_with_backtrace(cpu_id, &task, force, &bt);
         }
     });
 }
@@ -72,15 +104,12 @@ pub(crate) fn dump_cpu_task_backtrace(cpu_id: LogicalCpuId, force: bool) {
             && let Some((rbp, rip)) = task.inner().ctx().backtrace_frame()
         {
             let bt = backtrace::Backtrace::capture_trap(rbp, rip, 0);
-            dump_println(
-                force,
-                format_args!("cpu_id: {}, {:?}\n{bt}", cpu_id.as_usize(), task.inner()),
-            );
+            dump_task_with_backtrace(cpu_id, &task, force, &bt);
         }
     });
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 #[inline(always)]
 fn has_stable_saved_task_context(task: &crate::KtaskRef) -> bool {
     let inner = task.inner();
@@ -132,10 +161,7 @@ pub(crate) fn dump_cur_task_backtrace(_cpu_id: LogicalCpuId, _tf: &TrapFrame, _f
 fn dump_running_task_backtrace(cpu_id: LogicalCpuId, force: bool, bt: &backtrace::Backtrace) {
     // Zero-allocation on purpose: this runs on panic/NMI snapshot paths.
     match current_task_for_cpu(cpu_id).as_ref() {
-        Some(task) => dump_println(
-            force,
-            format_args!("cpu_id: {}, {:?}\n{bt}", cpu_id.as_usize(), task.inner()),
-        ),
+        Some(task) => dump_task_with_backtrace(cpu_id, task, force, bt),
         None => dump_println(
             force,
             format_args!(
@@ -144,4 +170,51 @@ fn dump_running_task_backtrace(cpu_id: LogicalCpuId, force: bool, bt: &backtrace
             ),
         ),
     }
+}
+
+/// Dump one blocked task without acquiring task-owned locks.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn dump_blocked_task_backtrace(task: &crate::KtaskRef) {
+    if !has_stable_saved_task_context(task) {
+        khal::kprint_atomic!(
+            "[watchdog] mutex waiter task_owner_key={} has no stable saved context\n",
+            task.inner().owner_key()
+        );
+        return;
+    }
+
+    let ctx = task.inner().ctx();
+    let backtrace =
+        backtrace::Backtrace::capture_trap(ctx.r29 as usize, ctx.lr as usize, ctx.lr as usize);
+    dump_task_with_backtrace(task.inner().cpu_id(), task, true, &backtrace);
+}
+
+/// Dump one blocked task without acquiring task-owned locks.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn dump_blocked_task_backtrace(task: &crate::KtaskRef) {
+    if !has_stable_saved_task_context(task) {
+        khal::kprint_atomic!(
+            "[watchdog] mutex waiter task_owner_key={} has no stable saved context\n",
+            task.inner().owner_key()
+        );
+        return;
+    }
+
+    let Some((rbp, rip)) = task.inner().ctx().backtrace_frame() else {
+        khal::kprint_atomic!(
+            "[watchdog] mutex waiter task_owner_key={} has no saved frame\n",
+            task.inner().owner_key()
+        );
+        return;
+    };
+    let backtrace = backtrace::Backtrace::capture_trap(rbp, rip, 0);
+    dump_task_with_backtrace(task.inner().cpu_id(), task, true, &backtrace);
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) fn dump_blocked_task_backtrace(task: &crate::KtaskRef) {
+    khal::kprint_atomic!(
+        "[watchdog] mutex waiter task_owner_key={} backtrace unsupported\n",
+        task.inner().owner_key()
+    );
 }
