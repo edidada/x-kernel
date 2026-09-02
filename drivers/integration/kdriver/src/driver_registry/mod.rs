@@ -12,6 +12,7 @@ use kdevice::{DeviceDriver, DeviceId};
 pub(crate) mod block;
 #[cfg(feature = "char")]
 pub(crate) mod char;
+pub(crate) mod clk;
 pub(crate) mod firmware_specs;
 pub(crate) mod net;
 pub(crate) mod virtio;
@@ -35,6 +36,7 @@ pub fn register_factories(registrar: &mut DriverRegistrar, factories: &[DriverFa
 
 /// Register all enabled non-VirtIO platform and PCI driver descriptors.
 pub fn register_platform_drivers(registrar: &mut DriverRegistrar) {
+    clk::register_all(registrar);
     block::register_all(registrar);
     net::register_all(registrar);
 }
