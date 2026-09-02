@@ -370,12 +370,22 @@ pub fn init_ccu(ccu_vaddr: usize) {
         .expect("pll1200");
     CCU.register(1, "pll1200", pll.clone());
 
-    // A UART clock: divider (bits[7:4], one-based) + gate (bit 11), one parent.
+    // A UART clock: zero-based divider (bits[7:4], raw 0 = ÷1) + gate
+    // (bit 11), one parent. DividerFlags semantics match Linux:
+    // `ONE_BASED` sets `divider = raw` (CLK_DIVIDER_ONE_BASED); the
+    // default is zero-based, `divider = raw + 1`.
     let uart = ClkBuilder::new(
         "uart_clk",
         kclk::Composite::new(
             None,
-            Some(Divider::into_ops(reg.clone(), 0x30, 4, 4, None, DividerFlags::ONE_BASED)),
+            Some(Divider::into_ops(
+                reg.clone(),
+                0x30,
+                4,
+                4,
+                None,
+                DividerFlags::empty(),
+            )),
             Some(Gate::into_ops(reg.clone(), 0x30, 11, GateFlags::SET_TO_ENABLE)),
         ),
     )

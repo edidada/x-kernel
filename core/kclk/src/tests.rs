@@ -191,11 +191,12 @@ fn three_level_tree_caches_rates_from_leaf_to_root() {
         .unwrap();
     assert_eq!(pll.get_rate(), 1_200_000_000);
 
-    // Divider at offset 0, 3-bit field, one-based; register reset value 0 -> div 1.
+    // Divider at offset 0, 3-bit field, zero-based default; register reset
+    // value 0 -> div 1 (pass-through).
     let reg = Arc::new(MockReg::new());
     let cpu = ClkBuilder::new(
         "cpu_div",
-        Divider::into_ops(reg, 0, 0, 3, None, DividerFlags::ONE_BASED),
+        Divider::into_ops(reg, 0, 0, 3, None, DividerFlags::empty()),
     )
     .parent(pll)
     .build()
@@ -216,13 +217,13 @@ fn divider_set_rate_writes_field_and_updates_rate() {
     let reg = Arc::new(MockReg::new());
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg.clone(), 0, 0, 3, None, DividerFlags::ONE_BASED),
+        Divider::into_ops(reg.clone(), 0, 0, 3, None, DividerFlags::empty()),
     )
     .parent(parent)
     .build()
     .unwrap();
 
-    // 1.2 GHz / 400 MHz = 3 -> one-based raw = 2.
+    // 1.2 GHz / 400 MHz = 3 -> zero-based raw = 2.
     let actual = div.set_rate(400_000_000).unwrap();
     assert_eq!(actual, 400_000_000);
     assert_eq!(reg.word(0), 2);
@@ -235,6 +236,61 @@ fn divider_set_rate_writes_field_and_updates_rate() {
 
     // round_rate for 700 MHz on a 1.2 GHz parent -> closest div 2 (600 MHz).
     assert_eq!(div.round_rate(700_000_000).unwrap(), 600_000_000);
+}
+
+// ---------------------------------------------------------------------------
+// Divider ONE_BASED matches Linux CLK_DIVIDER_ONE_BASED (raw == divider)
+// ---------------------------------------------------------------------------
+
+#[def_test(serial)]
+fn divider_one_based_raw_is_divider() {
+    let parent = ClkBuilder::new("p", FixedRate::new(1_000_000_000).into_ops())
+        .build()
+        .unwrap();
+    let reg = Arc::new(MockReg::new());
+    let div = ClkBuilder::new(
+        "div",
+        Divider::into_ops(reg.clone(), 0, 0, 3, None, DividerFlags::ONE_BASED),
+    )
+    .parent(parent)
+    .build()
+    .unwrap();
+
+    // Linux one-based: set_rate writes raw == divider directly.
+    // 1 GHz / 4 = 250 MHz -> raw 4 (a zero-based divider would write 3).
+    let actual = div.set_rate(250_000_000).unwrap();
+    assert_eq!(actual, 250_000_000);
+    assert_eq!(reg.word(0), 4);
+    assert_eq!(div.get_rate(), 250_000_000);
+
+    // Divider of 2 -> raw 2.
+    div.set_rate(500_000_000).unwrap();
+    assert_eq!(reg.word(0), 2);
+
+    // A 3-bit one-based field caps at raw 7 = ÷7 (the field mask, not
+    // 2^width as zero-based would allow): asking for 125 MHz (÷8) clamps.
+    let actual = div.set_rate(125_000_000).unwrap();
+    assert_eq!(actual, 1_000_000_000 / 7);
+    assert_eq!(reg.word(0), 7);
+    assert_eq!(div.get_rate(), 1_000_000_000 / 7);
+}
+
+#[def_test(serial)]
+fn divider_one_based_raw_zero_clamps_to_passthrough() {
+    let parent = ClkBuilder::new("p", FixedRate::new(300_000_000).into_ops())
+        .build()
+        .unwrap();
+    // Reset register: field 0 is not a valid one-based divider; treated as
+    // ÷1 pass-through rather than panicking on the recalc path.
+    let reg = Arc::new(MockReg::new());
+    let div = ClkBuilder::new(
+        "div",
+        Divider::into_ops(reg, 0, 0, 3, None, DividerFlags::ONE_BASED),
+    )
+    .parent(parent)
+    .build()
+    .unwrap();
+    assert_eq!(div.get_rate(), 300_000_000);
 }
 
 // ---------------------------------------------------------------------------
@@ -397,7 +453,7 @@ fn composite_dispatches_rate_and_gate_to_sub_nodes() {
         .unwrap();
 
     let mux = Mux::into_ops(reg.clone(), 0, 0, 0x1, None);
-    let div = Divider::into_ops(reg.clone(), 0, 4, 2, None, DividerFlags::ONE_BASED);
+    let div = Divider::into_ops(reg.clone(), 0, 4, 2, None, DividerFlags::empty());
     let gate = Gate::into_ops(reg.clone(), 0, 8, GateFlags::SET_TO_ENABLE);
 
     let comp = ClkBuilder::new("comp", Composite::new(Some(mux), Some(div), Some(gate)))
@@ -405,7 +461,7 @@ fn composite_dispatches_rate_and_gate_to_sub_nodes() {
         .build()
         .unwrap();
 
-    // Divider field reset value 0 -> one-based div 1 -> pass-through 1 GHz.
+    // Divider field reset value 0 -> zero-based div 1 -> pass-through 1 GHz.
     assert_eq!(comp.get_rate(), 1_000_000_000);
 
     comp.set_rate(500_000_000).unwrap();
@@ -498,7 +554,7 @@ fn set_rate_propagates_to_parent_when_flag_set() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::ONE_BASED),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
     )
     .parent(root)
     .build()
@@ -531,7 +587,7 @@ fn notifier_fires_pre_and_post_on_set_rate() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::ONE_BASED),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
     )
     .parent(parent)
     .build()
@@ -573,7 +629,7 @@ fn notifier_veto_aborts_set_rate() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::ONE_BASED),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
     )
     .parent(parent)
     .build()
@@ -608,7 +664,7 @@ fn fixed_factor_propagates_rate_to_parent_via_flag() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::ONE_BASED),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
     )
     .parent(root)
     .build()
@@ -720,7 +776,7 @@ fn rate_range_clamps_set_and_round() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::ONE_BASED),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
     )
     .parent(root)
     .build()
@@ -749,7 +805,7 @@ fn notifier_unregister_stops_delivery() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::ONE_BASED),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
     )
     .parent(root)
     .build()
@@ -919,7 +975,7 @@ fn parent_rate_change_cascades_to_descendant_cache() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::ONE_BASED),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
     )
     .parent(osc)
     .build()
@@ -1009,7 +1065,7 @@ fn rate_range_aggregates_per_consumer_and_relaxes_on_drop() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::ONE_BASED),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
     )
     .parent(root)
     .build()
@@ -1038,7 +1094,7 @@ fn notifier_is_unregistered_when_handle_drops() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::ONE_BASED),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
     )
     .parent(root)
     .build()
@@ -1084,7 +1140,7 @@ fn rate_range_rejects_empty_intersection() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::ONE_BASED),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
     )
     .parent(root)
     .build()
@@ -1111,7 +1167,7 @@ fn set_rate_gate_rejects_while_enabled() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::ONE_BASED),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
     )
     .parent(root)
     .flags(ClkFlags::SET_RATE_GATE)

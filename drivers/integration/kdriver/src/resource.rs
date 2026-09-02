@@ -255,7 +255,7 @@ pub mod clk_e2e_tests {
                     shift: 4,
                     width: 4,
                     table: None,
-                    flags: DividerFlags::ONE_BASED,
+                    flags: DividerFlags::empty(),
                 }),
                 Some(kclk::GateDesc {
                     offset: 0x30,
@@ -506,7 +506,7 @@ pub mod clk_vccu_tests {
                     shift: 0,
                     width: 4,
                     table: None,
-                    flags: DividerFlags::ONE_BASED,
+                    flags: DividerFlags::empty(),
                 }),
                 Some(GateDesc {
                     offset: 0x20,

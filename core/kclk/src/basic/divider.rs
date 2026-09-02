@@ -11,14 +11,20 @@ use bitflags::bitflags;
 use crate::{ClkHwOps, ClkRegAccess, ClkResult, Rate, RoundResult};
 
 bitflags! {
-    /// Policy bits for a [`Divider`].
+    /// Policy bits for a [`Divider`]. Semantics match Linux's
+    /// `CLK_DIVIDER_*` flags (`include/linux/clk-provider.h`).
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     pub struct DividerFlags: u32 {
-        /// The register value `0` maps to a divider of 1 (so an all-zero field
-        /// is a pass-through). When clear, the value is the divider directly.
+        /// `divider = raw` (register value 1 means ÷1, 2 means ÷2, ...).
+        /// Matches Linux `CLK_DIVIDER_ONE_BASED`.
+        ///
+        /// When clear (the default, matching Linux's divider default), the
+        /// encoding is zero-based: `divider = raw + 1`, so a freshly-reset
+        /// all-zero field is a ÷1 pass-through.
         const ONE_BASED = 1 << 0;
         /// Divider values are powers of two (1, 2, 4, ...); the register value
-        /// is the exponent. Implies the achievable rates are sparse.
+        /// is the exponent. Matches Linux `CLK_DIVIDER_POWER_OF_TWO`. Implies
+        /// the achievable rates are sparse.
         const POWER_OF_TWO = 1 << 1;
     }
 }
@@ -90,9 +96,11 @@ impl Divider {
         }
         if self.flags.contains(DividerFlags::POWER_OF_TWO) {
             1u32 << self.width
+        } else if self.flags.contains(DividerFlags::ONE_BASED) {
+            // Raw values [1, field_mask] map 1:1 to dividers.
+            self.field_mask()
         } else {
-            // Linear: the field can encode [1, 2^width] regardless of one_based
-            // (one_based only shifts how a raw value maps to a divider).
+            // Zero-based: raw values [0, field_mask] map to [1, 2^width].
             1u32 << self.width
         }
     }
@@ -111,9 +119,10 @@ impl Divider {
             return 1u32 << raw.min(self.width as u32);
         }
         if self.flags.contains(DividerFlags::ONE_BASED) {
-            raw + 1
-        } else {
+            // raw 0 is not a valid one-based divider; clamp defensively.
             raw.max(1)
+        } else {
+            raw + 1
         }
     }
 
@@ -138,9 +147,9 @@ impl Divider {
             return Ok(exp.min(self.width as u32));
         }
         if self.flags.contains(DividerFlags::ONE_BASED) {
-            return Ok(div.saturating_sub(1));
+            return Ok(div.min(self.field_mask()));
         }
-        Ok(div.min(self.field_mask()))
+        Ok(div.saturating_sub(1))
     }
 
     /// Find the divider giving a rate closest to `target` at `parent_rate`.
