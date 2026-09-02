@@ -49,7 +49,7 @@ pub use self::{
     bus::manager::{BusManager, default_bus_manager},
     driver_registry::{BusOwnershipSummary, DriverOwnershipSummary, OwnershipSummary},
     manager::{DeviceManager, device_manager, discover_unified},
-    resource::DeviceResourceExt,
+    resource::{DeviceResourceExt, devm_clk_get},
 };
 
 #[cfg(feature = "virtio")]
