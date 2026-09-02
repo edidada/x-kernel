@@ -19,8 +19,6 @@ pub enum ClkError {
     InvalidParent,
     /// The clock is busy and the operation cannot complete right now.
     Busy,
-    /// A parent clock operation failed during propagation.
-    ParentError,
     /// The hardware driver reported a generic I/O failure.
     Io,
     /// The clock is in an inconsistent internal state.

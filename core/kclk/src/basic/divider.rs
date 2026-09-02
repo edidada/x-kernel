@@ -8,7 +8,7 @@ use alloc::sync::Arc;
 
 use bitflags::bitflags;
 
-use crate::{ClkHwOps, ClkRegAccess, ClkResult, Rate, RoundResult};
+use crate::{ClkError, ClkHwOps, ClkRegAccess, ClkResult, Rate, RoundResult};
 
 bitflags! {
     /// Policy bits for a [`Divider`]. Semantics match Linux's
@@ -130,23 +130,26 @@ impl Divider {
     }
 
     /// Convert a raw register value to its divider.
-    fn raw_to_div(&self, raw: u32) -> u32 {
+    fn raw_to_div(&self, raw: u32) -> ClkResult<u32> {
         if let Some(table) = self.table {
-            return table
+            // A register value outside the table means uninitialized or
+            // corrupted hardware (or a misdescribed table) — surface it
+            // instead of silently decoding it as a legal ÷1 (Linux's
+            // _get_table_div returns -EINVAL here).
+            let entry = table
                 .iter()
                 .find(|e| e.val == raw)
-                .map(|e| e.div)
-                .unwrap_or(1)
-                .max(1);
+                .ok_or(ClkError::BadState)?;
+            return Ok(entry.div.max(1));
         }
         if self.flags.contains(DividerFlags::POWER_OF_TWO) {
-            return 1u32 << raw.min(self.width as u32);
+            return Ok(1u32 << raw.min(self.width as u32));
         }
         if self.flags.contains(DividerFlags::ONE_BASED) {
             // raw 0 is not a valid one-based divider; clamp defensively.
-            raw.max(1)
+            Ok(raw.max(1))
         } else {
-            raw + 1
+            Ok(raw + 1)
         }
     }
 
@@ -232,7 +235,7 @@ impl Divider {
 
 impl ClkHwOps for Divider {
     fn recalc_rate(&self, parent_rate: Rate) -> ClkResult<Rate> {
-        Ok(rate_for(parent_rate, self.raw_to_div(self.raw())))
+        Ok(rate_for(parent_rate, self.raw_to_div(self.raw())?))
     }
 
     fn round_rate(&self, rate: Rate, parent_rate: Rate) -> ClkResult<RoundResult> {
@@ -249,7 +252,7 @@ impl ClkHwOps for Divider {
         let field = (raw & self.field_mask()) << self.shift;
         self.reg
             .reg_modify(self.offset, self.field_mask() << self.shift, field);
-        Ok(rate_for(parent_rate, self.raw_to_div(raw)))
+        Ok(rate_for(parent_rate, self.raw_to_div(raw)?))
     }
 }
 

@@ -19,13 +19,42 @@ extern crate alloc;
 
 pub mod basic;
 
+mod core;
 mod error;
+mod event;
 mod flags;
+mod handle;
+mod lookup;
 mod ops;
+mod provider;
+mod rate;
 mod reg;
 
-pub use basic::{Composite, DivTableEntry, Divider, DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux};
+pub use core::{ClkBuilder, ClkCore, ClkSummaryEntry, clk_disable_unused, clk_summary, clocks_len};
+
+pub use basic::{
+    Composite, DivTableEntry, Divider, DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux,
+};
 pub use error::{ClkError, ClkResult};
+pub use event::{ClkEvent, ClkNotifier, ClkNotifierId, NotifierResult};
 pub use flags::ClkFlags;
+pub use handle::ClkHandle;
+pub use lookup::ClkTable;
 pub use ops::ClkHwOps;
+#[cfg(unittest)]
+pub use provider::reset_providers;
+#[cfg(unittest)]
+pub use provider::unregister_provider;
+pub use provider::{
+    ClkLookup, ProviderId, clk_get_by_index, clk_get_by_name, provider_installed, register_provider,
+};
+pub use rate::{ClkRateRequest, Rate, RoundResult};
 pub use reg::{ClkRegAccess, MmioClkReg, NullClkReg};
+
+/// Index into a provider's clock table.
+///
+/// Corresponds to the cell value in a DT `clocks = <&phandle N>` specifier.
+pub type ClkIndex = u32;
+
+#[cfg(unittest)]
+mod tests;
