@@ -191,11 +191,13 @@ pub(crate) fn assist_once() {
 }
 
 /// Attempts to acquire task-context ownership of network advancement.
+#[allow(dead_code)]
 pub(crate) fn try_advance_lease() -> Option<NetAdvanceLease<'static>> {
     network_poller().try_advance_lease()
 }
 
 /// Advances with a held lease or assists one existing scheduled round.
+#[allow(dead_code)]
 pub(crate) fn advance_or_assist(lease: Option<&NetAdvanceLease<'_>>, reason: PollReason) {
     advance_or_assist_with(network_poller(), lease, reason)
 }
@@ -213,15 +215,43 @@ fn advance_or_assist_with(
     }
 }
 
-/// Attempts I/O first and advances the poller only when no result is ready.
+/// Attempts I/O first and acquires a lease only when the operation would block.
 pub(crate) fn try_io_or_advance<T>(
     lease: &mut Option<NetAdvanceLease<'_>>,
     reason: PollReason,
     mut attempt: impl FnMut() -> KResult<T>,
 ) -> KResult<T> {
+    try_io_or_advance_with(network_poller(), lease, reason, &mut attempt)
+}
+
+fn try_io_or_advance_with<'a, T>(
+    poller: &'a NetworkPoller,
+    lease: &mut Option<NetAdvanceLease<'a>>,
+    reason: PollReason,
+    mut attempt: impl FnMut() -> KResult<T>,
+) -> KResult<T> {
+    try_io_or_advance_with_lease(
+        poller,
+        lease,
+        reason,
+        || poller.try_advance_lease(),
+        &mut attempt,
+    )
+}
+
+fn try_io_or_advance_with_lease<'a, T>(
+    poller: &'a NetworkPoller,
+    lease: &mut Option<NetAdvanceLease<'a>>,
+    reason: PollReason,
+    mut try_lease: impl FnMut() -> Option<NetAdvanceLease<'a>>,
+    mut attempt: impl FnMut() -> KResult<T>,
+) -> KResult<T> {
     match attempt() {
         Err(KError::WouldBlock) => {
-            advance_or_assist(lease.as_ref(), reason);
+            if lease.is_none() {
+                *lease = try_lease();
+            }
+            advance_or_assist_with(poller, lease.as_ref(), reason);
             release_lease_on_block(lease, attempt())
         }
         result => result,
@@ -330,17 +360,75 @@ mod tests {
     }
 
     #[def_test]
-    fn ready_io_skips_poller_advance() {
+    fn ready_io_does_not_acquire_lease_or_advance_poller() {
         static ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+        static LEASE_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 
         ATTEMPTS.store(0, Ordering::Release);
+        LEASE_ATTEMPTS.store(0, Ordering::Release);
+        POLL_CALLS.store(0, Ordering::Release);
+        let poller = test_poller();
         let mut lease = None;
-        let result = try_io_or_advance(&mut lease, PollReason::Rx, || {
-            ATTEMPTS.fetch_add(1, Ordering::AcqRel);
-            Ok(7)
-        });
+        let result = try_io_or_advance_with_lease(
+            &poller,
+            &mut lease,
+            PollReason::Rx,
+            || {
+                LEASE_ATTEMPTS.fetch_add(1, Ordering::AcqRel);
+                None
+            },
+            || {
+                ATTEMPTS.fetch_add(1, Ordering::AcqRel);
+                Ok(7)
+            },
+        );
 
         assert_eq!(result.unwrap(), 7);
         assert_eq!(ATTEMPTS.load(Ordering::Acquire), 1);
+        assert_eq!(LEASE_ATTEMPTS.load(Ordering::Acquire), 0);
+        assert_eq!(POLL_CALLS.load(Ordering::Acquire), 0);
+        assert!(lease.is_none());
+    }
+
+    #[def_test(serial)]
+    fn blocked_io_acquires_lease_before_retry() {
+        static ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+        static LEASE_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+
+        ATTEMPTS.store(0, Ordering::Release);
+        LEASE_ATTEMPTS.store(0, Ordering::Release);
+        POLL_CALLS.store(0, Ordering::Release);
+        let poller = test_poller();
+        let mut lease = None;
+        let result = try_io_or_advance_with_lease(
+            &poller,
+            &mut lease,
+            PollReason::Rx,
+            || {
+                LEASE_ATTEMPTS.fetch_add(1, Ordering::AcqRel);
+                poller
+                    .poller
+                    .acquire_lease_at_for_tests(u64::MAX)
+                    .map(|inner| NetAdvanceLease {
+                        owner: &poller,
+                        inner,
+                    })
+            },
+            || {
+                let attempt = ATTEMPTS.fetch_add(1, Ordering::AcqRel);
+                if attempt == 0 {
+                    Err(KError::WouldBlock)
+                } else {
+                    Ok(7)
+                }
+            },
+        );
+
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(ATTEMPTS.load(Ordering::Acquire), 2);
+        assert_eq!(POLL_CALLS.load(Ordering::Acquire), 1);
+        assert_eq!(LEASE_ATTEMPTS.load(Ordering::Acquire), 1);
+        assert!(lease.is_some());
+        lease.take();
     }
 }

@@ -28,10 +28,7 @@ use crate::{
     consts::{TCP_RX_BUF_LEN, TCP_TX_BUF_LEN},
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
-    poller::{
-        PollReason, advance_or_assist, assist_once, network_poller, release_lease_on_block,
-        try_advance_lease,
-    },
+    poller::{PollReason, assist_once, network_poller, try_io_or_advance},
     state::*,
 };
 
@@ -414,19 +411,19 @@ impl SocketOps for TcpSocket {
 
         // Here our state must be `CONNECTING`, and only one thread can run here.
         let is_nonblocking = self.general.nonblocking() || options.nonblocking;
-        let mut lease = try_advance_lease();
+        let mut lease = None;
         let result = self
             .general
             .send_poller_with_nonblocking(self, is_nonblocking, || {
-                advance_or_assist(lease.as_ref(), PollReason::Tx);
-                let result = if !self.poll_connect().contains(IoEvents::OUT) {
-                    Err(KError::WouldBlock)
-                } else if self.state() == State::Connected {
-                    Ok(())
-                } else {
-                    Err(k_err_type!(ConnectionRefused, "connection refused"))
-                };
-                release_lease_on_block(&mut lease, result)
+                try_io_or_advance(&mut lease, PollReason::Tx, || {
+                    if !self.poll_connect().contains(IoEvents::OUT) {
+                        Err(KError::WouldBlock)
+                    } else if self.state() == State::Connected {
+                        Ok(())
+                    } else {
+                        Err(k_err_type!(ConnectionRefused, "connection refused"))
+                    }
+                })
             });
         match result {
             Err(KError::WouldBlock) if is_nonblocking => {
@@ -480,63 +477,61 @@ impl SocketOps for TcpSocket {
         }
 
         let bound_endpoint = self.bound_endpoint()?;
-        let mut lease = try_advance_lease();
+        let mut lease = None;
         self.general
             .recv_poller_with_nonblocking(self, options.nonblocking, || {
-                advance_or_assist(lease.as_ref(), PollReason::Rx);
-                let result = {
-                    let mut sockets = SOCKET_SET.inner.lock();
-                    LISTEN_TABLE.accept(bound_endpoint, &mut sockets)
-                }
-                .map(|accepted| {
-                    Socket::Tcp(Box::new(TcpSocket::new_connected(
-                        accepted.handle,
-                        accepted.local_endpoint,
-                        accepted.remote_endpoint,
-                    )))
-                });
-                release_lease_on_block(&mut lease, result)
+                try_io_or_advance(&mut lease, PollReason::Rx, || {
+                    {
+                        let mut sockets = SOCKET_SET.inner.lock();
+                        LISTEN_TABLE.accept(bound_endpoint, &mut sockets)
+                    }
+                    .map(|accepted| {
+                        Socket::Tcp(Box::new(TcpSocket::new_connected(
+                            accepted.handle,
+                            accepted.local_endpoint,
+                            accepted.remote_endpoint,
+                        )))
+                    })
+                })
             })
     }
 
     fn send(&self, mut src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
         let mut total_sent = 0;
         let nonblocking = options.flags.nonblocking();
-        let mut lease = try_advance_lease();
+        let mut lease = None;
 
         while src.remaining() > 0 {
             let result = self
                 .general
                 .send_poller_with_nonblocking(self, nonblocking, || {
-                    let result = self.with_smol_socket(|socket| {
-                        if self.tx_closed.load(Ordering::Acquire) {
-                            Err(KError::BrokenPipe)
-                        } else if !socket.may_send() {
-                            Err(Self::send_state_error(socket.state()))
-                        } else if !socket.can_send() {
-                            Err(KError::WouldBlock)
-                        } else {
-                            let len = socket
-                                .send(|buffer| {
-                                    let result = src.read(buffer);
-                                    let len = result.as_ref().map_or(0, |len| *len);
-                                    (len, result)
-                                })
-                                .map_err(|_| k_err_type!(NotConnected, "not connected?"))??;
-                            Ok(len)
-                        }
-                    });
-                    release_lease_on_block(&mut lease, result)
+                    try_io_or_advance(&mut lease, PollReason::Tx, || {
+                        self.with_smol_socket(|socket| {
+                            if self.tx_closed.load(Ordering::Acquire) {
+                                Err(KError::BrokenPipe)
+                            } else if !socket.may_send() {
+                                Err(Self::send_state_error(socket.state()))
+                            } else if !socket.can_send() {
+                                Err(KError::WouldBlock)
+                            } else {
+                                let len = socket
+                                    .send(|buffer| {
+                                        let result = src.read(buffer);
+                                        let len = result.as_ref().map_or(0, |len| *len);
+                                        (len, result)
+                                    })
+                                    .map_err(|_| k_err_type!(NotConnected, "not connected?"))??;
+                                Ok(len)
+                            }
+                        })
+                    })
                 });
 
             match result {
                 Ok(0) => break,
                 Ok(len) => {
-                    if let Some(lease) = lease.as_ref() {
-                        lease.advance(PollReason::Tx);
-                    } else {
-                        network_poller().notify(PollReason::Tx);
-                    }
+                    lease.take();
+                    network_poller().notify(PollReason::Tx);
                     total_sent += len;
                 }
                 Err(_) if total_sent > 0 => return Ok(total_sent),
@@ -552,46 +547,46 @@ impl SocketOps for TcpSocket {
             return Err(KError::NotConnected);
         }
         let mut should_poll_rx_window = false;
-        let mut lease = try_advance_lease();
+        let mut lease = None;
         let received =
             self.general
                 .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
-                    advance_or_assist(lease.as_ref(), PollReason::Rx);
-                    let result = self.with_smol_socket(|socket| {
-                        if socket.can_recv() {
-                            if options.flags.contains(RecvFlags::PEEK) {
-                                dst.write(
-                                    socket
-                                        .peek(dst.remaining_mut())
-                                        .map_err(|_| k_err_type!(NotConnected, "not connected?"))?,
-                                )
-                            } else {
-                                let receive_capacity_bytes = socket.recv_capacity();
-                                let available_before_bytes =
-                                    receive_capacity_bytes.saturating_sub(socket.recv_queue());
-                                let result = socket
-                                    .recv(|buf| {
-                                        let result = dst.write(buf);
-                                        let len = result.unwrap_or(0);
-                                        (len, result)
-                                    })
-                                    .map_err(|_| k_err_type!(NotConnected, "not connected?"))?;
-                                if let Ok(received) = result {
-                                    should_poll_rx_window = should_poll_receive_window(
-                                        receive_capacity_bytes,
-                                        available_before_bytes,
-                                        received,
-                                    );
+                    try_io_or_advance(&mut lease, PollReason::Rx, || {
+                        self.with_smol_socket(|socket| {
+                            if socket.can_recv() {
+                                if options.flags.contains(RecvFlags::PEEK) {
+                                    dst.write(
+                                        socket.peek(dst.remaining_mut()).map_err(|_| {
+                                            k_err_type!(NotConnected, "not connected?")
+                                        })?,
+                                    )
+                                } else {
+                                    let receive_capacity_bytes = socket.recv_capacity();
+                                    let available_before_bytes =
+                                        receive_capacity_bytes.saturating_sub(socket.recv_queue());
+                                    let result = socket
+                                        .recv(|buf| {
+                                            let result = dst.write(buf);
+                                            let len = result.unwrap_or(0);
+                                            (len, result)
+                                        })
+                                        .map_err(|_| k_err_type!(NotConnected, "not connected?"))?;
+                                    if let Ok(received) = result {
+                                        should_poll_rx_window = should_poll_receive_window(
+                                            receive_capacity_bytes,
+                                            available_before_bytes,
+                                            received,
+                                        );
+                                    }
+                                    result
                                 }
-                                result
+                            } else if !socket.may_recv() {
+                                Ok(0)
+                            } else {
+                                Err(KError::WouldBlock)
                             }
-                        } else if !socket.may_recv() {
-                            Ok(0)
-                        } else {
-                            Err(KError::WouldBlock)
-                        }
-                    });
-                    release_lease_on_block(&mut lease, result)
+                        })
+                    })
                 })?;
         if should_poll_rx_window {
             if let Some(lease) = lease.as_ref() {
