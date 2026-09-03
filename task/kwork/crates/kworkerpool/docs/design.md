@@ -2,58 +2,79 @@
 
 ## Role
 
-`kworkerpool` owns worker-pool scheduling. It manages worker slots,
-runnable/deferred entry queues, concurrency accounting, CPU-intensive marking,
-dynamic worker creation, idle retirement, manager actions, ktask-backed worker
-threads, ktask-backed manager threads, and ktask task placement.
+`kworkerpool` owns the worker-pool scheduling machinery used below `kwork`.
+It does not model workqueues, callbacks, or product-level pool kinds. Entries
+are opaque source/owner/key/payload values. Product layers decide what those
+values mean and validate them after the pool has selected a candidate.
 
-The crate does not know what a workqueue is. Entries are opaque
-source/owner/key/payload values. Product layers decide what those values mean
-and validate them during claim.
+The crate has two pool models:
 
-## Main Types
+- normal ktask-backed pools, represented by `KtaskWorkerPool` over the
+  `WorkerPool` state machine;
+- bottom-half pools, represented by `BottomHalfWorkerPool` and driven by an
+  external bottom-half execution context.
 
-- `WorkerPool` is the pure locked state machine.
-- `KtaskWorkerPool` wraps `WorkerPool` with ktask thread references and wake
-  sources.
-- `PoolEntry` is an opaque executable entry. Its source is carried back to the
-  runtime for lookup, while its owner is used only as the pool grouping key for
-  deferred promotion.
-- `WorkerRuntime` is the callback interface used by a worker task.
-- `RunnableClaimer` validates a popped entry outside the pool lock.
-- `WorkerPoolPolicy` configures per-instance lifecycle behavior.
-- `WorkerPoolPlacement` describes where ktask-backed worker and manager tasks
-  are bound.
+The split is intentional. A normal pool owns worker tasks, dynamic worker
+creation, idle retirement, a manager task, and scheduler accounting. A
+bottom-half pool owns only queueing and one drain slot; the caller owns the
+actual bottom-half raise and run context.
 
-## Basic Usage
+## Scope
 
-Most kernel users should use a product layer such as `kwork`; direct users must
-provide a runtime that executes returned actions and validates claimed entries.
+The implementation is split by behavior instead of by product pool kind:
 
-```rust
-use kworkerpool::{
-    EntryKey, EntryOwner, EntryPayload, EntrySource, PoolEntry, PoolId, PoolKind,
-    WorkerId, WorkerPool, WorkerPoolPolicy,
-};
+- `core/` contains shared entry identity, payload, worker identifiers,
+  execution tokens, queue storage, errors, park decisions, and snapshots.
+- `normal/` contains task-backed worker state, policy, action batches,
+  ktask worker integration, manager integration, and execution-context
+  accounting.
+- `bottom_half/` contains the independent single-drain-slot state machine used
+  when execution is triggered by an external bottom-half mechanism.
 
-let policy = WorkerPoolPolicy::scalable_threaded(1, 4);
+`kworkerpool` does not contain a `PoolKind` or `PoolId`. Runtime routing belongs
+to the caller. Normal-pool task accounting uses an opaque internal
+`WorkerPoolIdentity` so multiple normal pools on the same CPU cannot be confused
+by scheduler tick, block, or resume callbacks.
 
-let pool_id = PoolId::new(PoolKind::new(0));
-let mut pool: WorkerPool<(), 4, 128> = WorkerPool::new(pool_id, policy);
+## Architecture
 
-let entry = PoolEntry::new(
-    EntrySource::new(1),
-    EntryOwner::new(1),
-    EntryKey::new(1),
-    EntryPayload::new(1),
-);
-let actions = pool.enqueue_runnable(entry, ktask::monotonic_time()).unwrap();
-let _ = actions;
-
-let _ = pool.worker_ready_to_park(WorkerId::new(0), ktask::monotonic_time());
+```text
+product layer, such as kwork
+  |
+  |  opaque PoolEntry values
+  v
++-------------------- kworkerpool --------------------+
+|                                                     |
+|  normal/                                            |
+|    KtaskWorkerPool<R>                               |
+|      - SpinNoIrq<WorkerPool<WorkerThreadRef>>       |
+|      - registered WorkerRuntimeFactory<R>           |
+|      - worker wake sources                          |
+|      - manager wake source                          |
+|                                                     |
+|    WorkerPool                                       |
+|      - worker slot state machine                    |
+|      - runnable FIFO and per-owner deferred queues  |
+|      - concurrency and CPU-intensive accounting     |
+|      - dynamic spawn and idle-retire decisions      |
+|                                                     |
+|  bottom_half/                                       |
+|    BottomHalfWorkerPool                             |
+|      - one drain slot                               |
+|      - runnable FIFO and per-owner deferred queues  |
+|      - no ktask worker and no manager               |
+|                                                     |
++-----------------------------------------------------+
 ```
 
-## Worker States
+The normal ktask wrapper exists to keep side effects out of the pure state
+machine. `WorkerPool` records decisions as data. `KtaskWorkerPool`, the worker
+runtime, and the manager runtime turn those decisions into ktask creation,
+wakeups, waits, and scheduler-accounting updates.
+
+## Normal Worker State Machine
+
+Normal worker slots move through the following states:
 
 ```text
 Empty
@@ -63,60 +84,163 @@ Empty
   -> Claiming
   -> Running
   -> Sleeping
+  -> Running
+  -> Idle
   -> RetireRequested
   -> Exiting
   -> Empty
 ```
 
-`Creating` reserves a slot while the manager creates a runtime thread. `Idle`,
-`Preparing`, `Claiming`, `Running`, `Sleeping`, `RetireRequested`, and `Exiting`
-are installed states. `Running` with normal accounting contributes to bounded
-concurrency; sleeping and CPU-intensive executions do not.
+Important transitions:
 
-Each execution has a `WorkerExecutionToken`. Tick, block, resume, finish, and
-discard operations must carry the current token so stale operations cannot
-mutate a reused worker slot.
+- `Empty -> Creating` reserves a slot before the manager creates a ktask
+  worker.
+- `Creating -> Idle` completes a successful worker installation.
+- `Idle -> Preparing` assigns an installed worker to runnable work.
+- `Preparing -> Claiming` pops one FIFO runnable entry and reserves a
+  `WorkerExecutionToken`.
+- `Claiming -> Running` happens only after the product runtime accepts the
+  opaque entry outside the pool lock.
+- `Running -> Sleeping -> Running` tracks sleepable blocking by the current
+  execution token.
+- `Running -> Idle` happens when accepted work finishes.
+- `Idle -> RetireRequested` is chosen by the manager when idle retirement is
+  enabled and the pool is above `min_workers`.
+- `RetireRequested -> Preparing` cancels pending retirement if work arrives
+  before the worker exits.
+- `RetireRequested -> Exiting -> Empty` releases a worker slot in the worker's
+  own task context.
 
-## Dispatch Contract
+The token is part of every execution-sensitive transition. Tick, block, resume,
+finish, commit, and discard operations must carry the token so stale callbacks
+cannot mutate a reused slot.
 
-The worker loop calls `worker_ready_to_park()` before blocking. If runnable work
-exists, the worker prepares a runnable candidate, drops the pool lock, and asks
-the runtime to claim the opaque entry. A successful claim enters `Running`; a
-stale claim is discarded and the worker can retry another entry.
+## Normal Dispatch Flow
 
-The pool owns FIFO runnable selection and deferred storage. The runtime owns
-external object validation and callback execution.
+The normal dispatch fast path is deliberately small:
 
-## Manager Contract
+1. A producer enqueues or promotes a runnable entry while holding the pool lock.
+2. The pool evaluates dispatch. If normal concurrency is available, it prefers
+   an already preparing worker, then a retiring worker that can be rescued, then
+   an idle worker.
+3. If no installed worker can run and creation is allowed, the pool marks
+   manager work pending and returns a manager wake action.
+4. The caller drops the pool lock and applies the returned immediate actions.
 
-Fast paths return `ImmediateAction` values for wakeups and bottom-half raises.
-Slow lifecycle decisions are represented as `ManagementAction` values and are
-processed by a manager task.
+The worker loop follows the same lock boundary:
 
-Scalable pools use the manager to create workers after the pool reserves a
-`Creating` slot and to request idle retirement. Worker exit happens in the
-worker's own context. A pending retire request can be canceled before the worker
-enters `Exiting`; once `Exiting` is reached, the slot is released only by
-`worker_exit_complete()`.
+1. It calls `worker_ready_to_park()` at the wait boundary.
+2. If work may be available, it calls `prepare_runnable_candidate()` while
+   holding the lock.
+3. It drops the lock and asks the product runtime to validate the opaque entry.
+4. A successful claim is committed and run. A stale claim is discarded and may
+   retry another candidate.
+5. After callback execution, the worker calls `worker_finished()` with the same
+   execution token.
 
-The manager handles a small bounded number of actions per pass so one busy pool
-does not monopolize the manager loop.
+The pool owns FIFO ordering and worker-state transitions. The runtime owns
+external object lookup, callback execution, wake implementation, and blocking
+wait implementation.
+
+## Actions And Manager Flow
+
+Normal pool state transitions never perform runtime side effects while holding
+the pool lock. They return an `ActionBatch` containing `ImmediateAction` values
+that must be applied after unlocking.
+
+`ImmediateAction` is a runtime side-effect request. It can be produced from
+three contexts:
+
+- producer paths, such as enqueue or promote, when new runnable work appears;
+- worker paths, such as stale discard, finish, block, or idle wait decisions;
+- manager paths, after a dynamic worker spawn succeeds or fails.
+
+These actions do not carry pool identity. The caller must keep the source pool
+handle together with the returned `ActionBatch` and apply the actions to that
+same pool. This matches the state-machine boundary: actions are the result of a
+specific pool transition, not a cross-pool routing message.
+
+`ManagementAction` is different. It is crate-internal lifecycle work consumed by
+the normal manager. The manager asks each pool for at most a small bounded
+number of actions per pass:
+
+- `SpawnWorker` means the pool already moved an empty slot to `Creating`; the
+  manager must create the ktask worker and then call spawn completion.
+- `RetireWorker` means the pool already moved an idle slot to
+  `RetireRequested`; the manager wakes that worker so it can observe the exit
+  decision in its own context.
+
+The manager can serve more than one normal pool on the same placement domain.
+Because `ManagementAction` is always fetched from one concrete pool and handled
+against that same pool, it does not need a product-level pool id.
+
+## Dynamic Worker Policy
+
+Normal pools are scalable by construction. Scaling is bounded by
+`min_workers`, `initial_workers`, and `max_workers`:
+
+- `initial_workers` controls initial bring-up.
+- `max_workers` caps dynamic creation.
+- `min_workers` is the idle-retirement floor.
+
+Worker creation is attempted only when runnable work exists, no normally
+accounted worker is providing concurrency, no worker is preparing, no retirement
+is pending, no creation is already in flight, and the installed plus creating
+count is below `max_workers`.
+
+After a creation failure, `create_retry_delay` delays the next creation attempt.
+When `min_workers == max_workers`, the count check naturally disables dynamic
+growth without needing a separate fixed-pool mode.
 
 ## CPU-Intensive Accounting
 
-A running worker starts with normal concurrency accounting. If scheduler ticks
-show that the same execution exceeds the policy threshold, the worker is marked
-CPU-intensive. That execution keeps running, but it no longer consumes bounded
-concurrency. If runnable entries remain, the pool can wake or create another
-worker.
+A running execution starts as normal concurrency. If scheduler ticks show that
+the same execution exceeds `cpu_intensive_threshold`, it is marked
+CPU-intensive. The execution continues running, but it no longer consumes the
+pool's bounded normal-concurrency slot. If runnable work remains, the pool may
+wake or create another worker.
 
-The ktask integration stores only an opaque pool/CPU/worker/token identity in
-`ktask::TaskExecutionContext`. The CPU value records runtime placement and is
-not part of `PoolId`. Product-layer work identity never enters `ktask`.
+The ktask integration stores these words in `ktask::TaskExecutionContext`:
 
-## Locking Rules
+```text
+WorkerPoolIdentity, cpu_id, worker_id, execution_token
+```
 
-`WorkerPool` is a state container and must be protected by the runtime's pool
-lock. Returned actions must be executed after the lock is dropped. Runtime
-callbacks, worker creation, wakeups, and blocking waits must not run while the
-pool lock is held.
+`WorkerPoolIdentity` is derived from the `KtaskWorkerPool` instance address and
+is checked together with the placement CPU. This prevents scheduler accounting
+for one normal pool from mutating another normal pool on the same CPU.
+
+## Bottom-Half Flow
+
+`BottomHalfWorkerPool` is not a ktask-backed normal pool with different policy.
+It has its own single-slot state machine and never creates or wakes worker
+threads.
+
+The product layer initializes the drain slot once. When enqueue or promotion
+makes work runnable, the product layer raises its own bottom-half mechanism.
+The bottom-half context then:
+
+1. calls `drain_ready_to_park()`;
+2. prepares a runnable candidate;
+3. validates the opaque entry outside the pool lock;
+4. commits and runs accepted work, or discards stale work;
+5. calls `drain_finished()` after accepted work completes.
+
+This keeps shared queueing semantics available to bottom-half users while
+excluding normal-only concepts such as worker ktasks, dynamic creation,
+retirement, manager wakeups, and CPU-intensive scheduler accounting.
+
+## Locking And Execution Context
+
+`WorkerPool` and `BottomHalfWorkerPool` are state machines protected by their
+wrappers' locks. Runtime callbacks, worker creation, wakeups, bottom-half
+raising, and blocking waits must not run while the pool lock is held.
+
+Normal worker and manager tasks require ktask scheduling to be available and
+may sleep in task context. Bottom-half pool operations can be used by a
+bottom-half integration layer, but callback execution must follow the caller's
+bottom-half context rules.
+
+The state machines are not reentrant for the same pool instance. Reentrancy
+must be handled above the pool by preserving lock ordering and by applying
+returned action batches only after leaving the locked section.

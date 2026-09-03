@@ -85,6 +85,9 @@ let _ = work.schedule_with(ScheduleAttrs::bottom_half());
 ## Built-In Topology
 
 Each CPU owns one normal built-in worker pool and one bottom-half worker pool.
+The implementation keeps these as separate per-CPU global tables and uses a
+small dispatch layer only when a path already carries an opaque built-in pool
+kind.
 
 ```text
 system_wq/default selector ----+

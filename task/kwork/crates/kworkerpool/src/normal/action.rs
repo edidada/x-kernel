@@ -2,39 +2,40 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Runtime actions produced by worker-pool state transitions.
+//! Task-backed runtime actions produced by worker-pool state transitions.
 
 use ktime_types::MonotonicInstant;
 
-use crate::{PoolId, WorkerId};
+use crate::WorkerId;
 
-/// Fast-path action that can be executed by the current runtime context after
-/// the pool lock is dropped.
+/// Fast-path runtime side effect requested by a pool state transition.
+///
+/// Normal worker-pool methods return these actions instead of performing
+/// wakeups or timer operations while the pool lock is held. The runtime must
+/// apply them after releasing the pool lock.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImmediateAction {
     /// Wake an existing runtime worker.
-    WakeWorker { pool: PoolId, worker: WorkerId },
-    /// Raise the bottom-half drain context for this pool.
-    RaiseBottomHalf { pool: PoolId },
+    WakeWorker { worker: WorkerId },
     /// Arm the CPU-intensive accounting deadline for a running worker.
-    ArmCpuIntensiveTimer {
-        pool: PoolId,
-        deadline: MonotonicInstant,
-    },
+    ArmCpuIntensiveTimer { deadline: MonotonicInstant },
     /// Wake the CPU-local worker-pool manager.
-    WakeManager { pool: PoolId },
+    WakeManager,
 }
 
 /// Slow-path lifecycle action owned by the per-CPU manager.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ManagementAction {
     /// Spawn a runtime worker for a reserved slot.
-    SpawnWorker { pool: PoolId, worker: WorkerId },
+    SpawnWorker { worker: WorkerId },
     /// Wake a retiring worker so it can exit in its own context.
-    RetireWorker { pool: PoolId, worker: WorkerId },
+    RetireWorker { worker: WorkerId },
 }
 
-/// Small fixed action batch returned by pool state transitions.
+/// Bounded set of runtime side effects returned by normal pool transitions.
+///
+/// A batch is data only. It records what the runtime should do after unlocking
+/// the pool; it does not wake workers, wake managers, or arm timers by itself.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ActionBatch {
     immediate: [Option<ImmediateAction>; Self::MAX_IMMEDIATE],

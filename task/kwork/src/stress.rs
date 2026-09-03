@@ -27,7 +27,7 @@ use crate::{
     BudgetedPollProgress, BudgetedPoller, CancelWorkResult, DelayedScheduledWork,
     QueueDelayedWorkResult, QueueWorkResult, ScheduleAttrs, ScheduledWork, WorkQueue,
     WorkQueueAttrs, WorkQueueHandle, WorkqueueError,
-    builtinpool::{self, SystemPoolKind},
+    builtinpool::{self, BuiltinPoolKind},
     runtime, system_bh_highpri_wq, system_percpu_wq, system_wq,
 };
 
@@ -240,12 +240,12 @@ pub fn stress_status_text() -> String {
 fn append_compact_state(out: &mut String) {
     for cpu in 0..kbuild_config::NR_CPUS {
         let cpu_id = LogicalCpuId::new(cpu);
-        let Some(pool) = builtinpool::system_pool_for_kind_cpu(SystemPoolKind::Normal, cpu_id)
+        let Some(pool) = builtinpool::builtin_pool_for_kind_cpu(BuiltinPoolKind::Normal, cpu_id)
         else {
             out.push_str(&format!("normal_pool cpu={cpu} unavailable\n"));
             continue;
         };
-        let snapshot = pool.pool().lock().snapshot();
+        let snapshot = pool.snapshot();
         out.push_str(&format!(
             "normal_pool cpu={cpu} installed={} idle={} preparing={} claiming={} running={} \
              runnable={} deferred={} workers={:?}\n",
@@ -328,14 +328,14 @@ pub fn run_stress_command(data: &[u8]) -> Result<String, StressError> {
 
 fn dump_state() -> String {
     let mut out = String::from("kwork stress state\n");
-    for kind in [SystemPoolKind::Normal, SystemPoolKind::Bh] {
+    for kind in [BuiltinPoolKind::Normal, BuiltinPoolKind::Bh] {
         for cpu in 0..kbuild_config::NR_CPUS {
             let cpu_id = LogicalCpuId::new(cpu);
-            let Some(pool) = builtinpool::system_pool_for_kind_cpu(kind, cpu_id) else {
+            let Some(pool) = builtinpool::builtin_pool_for_kind_cpu(kind, cpu_id) else {
                 out.push_str(&format!("pool kind={kind:?} cpu={cpu} unavailable\n"));
                 continue;
             };
-            let snapshot = pool.pool().lock().snapshot();
+            let snapshot = pool.snapshot();
             out.push_str(&format!(
                 "pool kind={kind:?} cpu={cpu} installed={} creating={} idle={} preparing={} \
                  claiming={} running={} sleeping={} retire={} exiting={} concurrency={} \
@@ -454,7 +454,7 @@ fn bench_system_balanced(seconds: usize, works: usize) -> Result<BenchSummary, S
 }
 
 fn bench_system_percpu(seconds: usize, works: usize) -> Result<BenchSummary, StressError> {
-    let cpus = ready_cpus(SystemPoolKind::Normal)?;
+    let cpus = ready_cpus(BuiltinPoolKind::Normal)?;
     let mut cursor = 0usize;
     run_bench_case("system-percpu", seconds, || {
         let cpu_id = cpus[cursor % cpus.len()];
@@ -484,7 +484,7 @@ fn bench_system_percpu(seconds: usize, works: usize) -> Result<BenchSummary, Str
 }
 
 fn bench_static_queue(seconds: usize, works: usize) -> Result<BenchSummary, StressError> {
-    let cpus = ready_cpus(SystemPoolKind::Normal)?;
+    let cpus = ready_cpus(BuiltinPoolKind::Normal)?;
     let mut cursor = 0usize;
     run_bench_case("static-queue", seconds, || {
         let cpu_id = cpus[cursor % cpus.len()];
@@ -512,7 +512,7 @@ fn bench_static_queue(seconds: usize, works: usize) -> Result<BenchSummary, Stre
 }
 
 fn bench_dynamic_serial(seconds: usize, works: usize) -> Result<BenchSummary, StressError> {
-    let cpus = ready_cpus(SystemPoolKind::Normal)?;
+    let cpus = ready_cpus(BuiltinPoolKind::Normal)?;
     let queue = WorkQueueHandle::alloc(
         "kwork_bench_dynamic_serial",
         WorkQueueAttrs::new().with_max_active(1),
@@ -547,7 +547,7 @@ fn bench_dynamic_serial(seconds: usize, works: usize) -> Result<BenchSummary, St
 }
 
 fn bench_bh_default(seconds: usize, works: usize) -> Result<BenchSummary, StressError> {
-    let cpu_id = stress_cpu(SystemPoolKind::Bh)?;
+    let cpu_id = stress_cpu(BuiltinPoolKind::Bh)?;
     run_bench_case("bh-default", seconds, || {
         let completed = Arc::new(AtomicUsize::new(0));
         let per_cpu = per_cpu_counters();
@@ -792,7 +792,7 @@ fn queue_failure_reason(result: QueueWorkResult) -> StressFailureReason {
 fn run_queue_flush(args: &[&str]) -> Result<StressSummary, StressError> {
     let rounds = parse_arg(args, 0, DEFAULT_ROUNDS, 1, MAX_ROUNDS)?;
     let works = parse_arg(args, 1, DEFAULT_WORKS, 1, MAX_WORKS)?;
-    let cpus = ready_cpus(SystemPoolKind::Normal)?;
+    let cpus = ready_cpus(BuiltinPoolKind::Normal)?;
     let completed = Arc::new(AtomicUsize::new(0));
     let per_cpu = per_cpu_counters();
     let queue = WorkQueueHandle::alloc(
@@ -840,7 +840,7 @@ fn run_queue_flush(args: &[&str]) -> Result<StressSummary, StressError> {
 fn run_static_queue(args: &[&str]) -> Result<StressSummary, StressError> {
     let rounds = parse_arg(args, 0, DEFAULT_ROUNDS, 1, MAX_ROUNDS)?;
     let works = parse_arg(args, 1, DEFAULT_WORKS, 1, MAX_WORKS)?;
-    let cpus = ready_cpus(SystemPoolKind::Normal)?;
+    let cpus = ready_cpus(BuiltinPoolKind::Normal)?;
     let completed = Arc::new(AtomicUsize::new(0));
     let per_cpu = per_cpu_counters();
     let mut queued = 0;
@@ -880,7 +880,7 @@ fn run_static_queue(args: &[&str]) -> Result<StressSummary, StressError> {
 fn run_balanced_fanout(args: &[&str]) -> Result<StressSummary, StressError> {
     let rounds = parse_arg(args, 0, DEFAULT_ROUNDS, 1, MAX_ROUNDS)?;
     let works = parse_arg(args, 1, DEFAULT_WORKS, 1, MAX_WORKS)?;
-    let ready = ready_cpus(SystemPoolKind::Normal)?.len();
+    let ready = ready_cpus(BuiltinPoolKind::Normal)?.len();
     let completed = Arc::new(AtomicUsize::new(0));
     let per_cpu = per_cpu_counters();
     let mut queued = 0;
@@ -926,7 +926,7 @@ fn run_balanced_fanout(args: &[&str]) -> Result<StressSummary, StressError> {
 fn run_percpu_fanout(args: &[&str]) -> Result<StressSummary, StressError> {
     let rounds = parse_arg(args, 0, DEFAULT_ROUNDS, 1, MAX_ROUNDS)?;
     let works = parse_arg(args, 1, DEFAULT_WORKS, 1, MAX_WORKS)?;
-    let cpus = ready_cpus(SystemPoolKind::Normal)?;
+    let cpus = ready_cpus(BuiltinPoolKind::Normal)?;
     let completed = Arc::new(AtomicUsize::new(0));
     let done = Arc::new(AtomicUsize::new(0));
     let failures = Arc::new(AtomicUsize::new(0));
@@ -986,7 +986,7 @@ fn run_percpu_fanout(args: &[&str]) -> Result<StressSummary, StressError> {
 
 fn run_yield_cpu(args: &[&str]) -> Result<StressSummary, StressError> {
     let rounds = parse_arg(args, 0, DEFAULT_ROUNDS, 1, MAX_ROUNDS)?;
-    let cpus = ready_cpus(SystemPoolKind::Normal)?;
+    let cpus = ready_cpus(BuiltinPoolKind::Normal)?;
     let completed = Arc::new(AtomicUsize::new(0));
     let per_cpu = per_cpu_counters();
     let mut queued = 0;
@@ -1042,7 +1042,7 @@ fn run_yield_cpu(args: &[&str]) -> Result<StressSummary, StressError> {
 
 fn run_bh_drain(args: &[&str]) -> Result<StressSummary, StressError> {
     let rounds = parse_arg(args, 0, DEFAULT_ROUNDS, 1, MAX_ROUNDS)?;
-    let cpu_id = stress_cpu(SystemPoolKind::Bh)?;
+    let cpu_id = stress_cpu(BuiltinPoolKind::Bh)?;
     let completed = Arc::new(AtomicUsize::new(0));
     let per_cpu = per_cpu_counters();
     let mut queued = 0;
@@ -1075,7 +1075,7 @@ fn run_bh_drain(args: &[&str]) -> Result<StressSummary, StressError> {
 
 fn run_bh_highpri(args: &[&str]) -> Result<StressSummary, StressError> {
     let rounds = parse_arg(args, 0, DEFAULT_ROUNDS, 1, MAX_ROUNDS)?;
-    let cpu_id = stress_cpu(SystemPoolKind::Bh)?;
+    let cpu_id = stress_cpu(BuiltinPoolKind::Bh)?;
     let completed = Arc::new(AtomicUsize::new(0));
     let per_cpu = per_cpu_counters();
     let mut queued = 0;
@@ -1184,7 +1184,7 @@ fn run_budgeted_poller(args: &[&str]) -> Result<StressSummary, StressError> {
 fn run_cancel_race(args: &[&str]) -> Result<StressSummary, StressError> {
     let rounds = parse_arg(args, 0, DEFAULT_ROUNDS, 1, MAX_ROUNDS)?;
     let works = parse_arg(args, 1, DEFAULT_WORKS, 1, MAX_WORKS)?;
-    let cpus = ready_cpus(SystemPoolKind::Normal)?;
+    let cpus = ready_cpus(BuiltinPoolKind::Normal)?;
     let completed = Arc::new(AtomicUsize::new(0));
     let cancel_sync = Arc::new(AtomicUsize::new(0));
     let failures = Arc::new(AtomicUsize::new(0));
@@ -1288,7 +1288,7 @@ fn run_cancel_race(args: &[&str]) -> Result<StressSummary, StressError> {
 fn run_disable_race(args: &[&str]) -> Result<StressSummary, StressError> {
     let rounds = parse_arg(args, 0, DEFAULT_ROUNDS, 1, MAX_ROUNDS)?;
     let works = parse_arg(args, 1, DEFAULT_WORKS, 1, MAX_WORKS)?;
-    let cpus = ready_cpus(SystemPoolKind::Normal)?;
+    let cpus = ready_cpus(BuiltinPoolKind::Normal)?;
     let completed = Arc::new(AtomicUsize::new(0));
     let disabled = Arc::new(AtomicUsize::new(0));
     let done = Arc::new(AtomicUsize::new(0));
@@ -1366,7 +1366,7 @@ fn run_disable_race(args: &[&str]) -> Result<StressSummary, StressError> {
 fn run_destroy_race(args: &[&str]) -> Result<StressSummary, StressError> {
     let rounds = parse_arg(args, 0, DEFAULT_ROUNDS, 1, MAX_ROUNDS)?;
     let works = parse_arg(args, 1, DEFAULT_WORKS, 1, MAX_WORKS)?;
-    let cpus = ready_cpus(SystemPoolKind::Normal)?;
+    let cpus = ready_cpus(BuiltinPoolKind::Normal)?;
     let completed = Arc::new(AtomicUsize::new(0));
     let disabled = Arc::new(AtomicUsize::new(0));
     let done = Arc::new(AtomicUsize::new(0));
@@ -1456,7 +1456,7 @@ fn run_destroy_race(args: &[&str]) -> Result<StressSummary, StressError> {
 fn run_delayed_cancel(args: &[&str]) -> Result<StressSummary, StressError> {
     let rounds = parse_arg(args, 0, DEFAULT_ROUNDS, 1, MAX_ROUNDS)?;
     let works = parse_arg(args, 1, DEFAULT_WORKS, 1, MAX_WORKS)?;
-    let cpus = ready_cpus(SystemPoolKind::Normal)?;
+    let cpus = ready_cpus(BuiltinPoolKind::Normal)?;
     let completed = Arc::new(AtomicUsize::new(0));
     let cancel_sync = Arc::new(AtomicUsize::new(0));
     let per_cpu = per_cpu_counters();
@@ -1513,7 +1513,7 @@ fn run_delayed_cancel(args: &[&str]) -> Result<StressSummary, StressError> {
 fn run_cancel_nonblocking(args: &[&str]) -> Result<StressSummary, StressError> {
     let rounds = parse_arg(args, 0, DEFAULT_ROUNDS, 1, MAX_ROUNDS)?;
     let works = parse_arg(args, 1, DEFAULT_WORKS, 1, MAX_WORKS)?;
-    let cpus = ready_cpus(SystemPoolKind::Normal)?;
+    let cpus = ready_cpus(BuiltinPoolKind::Normal)?;
     let completed = Arc::new(AtomicUsize::new(0));
     let canceled = Arc::new(AtomicUsize::new(0));
     let failures = Arc::new(AtomicUsize::new(0));
@@ -1620,7 +1620,7 @@ fn run_cancel_nonblocking(args: &[&str]) -> Result<StressSummary, StressError> {
 
 fn run_wait_deadlock(args: &[&str]) -> Result<StressSummary, StressError> {
     let rounds = parse_arg(args, 0, DEFAULT_ROUNDS, 1, MAX_ROUNDS)?;
-    let cpus = ready_cpus(SystemPoolKind::Normal)?;
+    let cpus = ready_cpus(BuiltinPoolKind::Normal)?;
     let completed = Arc::new(AtomicUsize::new(0));
     let rejected = Arc::new(AtomicUsize::new(0));
     let failures = Arc::new(AtomicUsize::new(0));
@@ -1696,7 +1696,7 @@ fn run_wait_deadlock(args: &[&str]) -> Result<StressSummary, StressError> {
 
 fn run_sleep_block(args: &[&str]) -> Result<StressSummary, StressError> {
     let rounds = parse_arg(args, 0, DEFAULT_ROUNDS, 1, MAX_ROUNDS)?;
-    let cpus = ready_cpus(SystemPoolKind::Normal)?;
+    let cpus = ready_cpus(BuiltinPoolKind::Normal)?;
     let completed = Arc::new(AtomicUsize::new(0));
     let failures = Arc::new(AtomicUsize::new(0));
     let per_cpu = per_cpu_counters();
@@ -1769,7 +1769,7 @@ fn run_sleep_block(args: &[&str]) -> Result<StressSummary, StressError> {
     })
 }
 
-fn stress_cpu(kind: SystemPoolKind) -> Result<LogicalCpuId, StressError> {
+fn stress_cpu(kind: BuiltinPoolKind) -> Result<LogicalCpuId, StressError> {
     let preferred = runtime::current_cpu_id();
     if ensure_pool_ready(kind, preferred) {
         return Ok(preferred);
@@ -1780,11 +1780,11 @@ fn stress_cpu(kind: SystemPoolKind) -> Result<LogicalCpuId, StressError> {
         .ok_or(StressError::PoolNotReady)
 }
 
-fn ready_cpus(kind: SystemPoolKind) -> Result<Vec<LogicalCpuId>, StressError> {
+fn ready_cpus(kind: BuiltinPoolKind) -> Result<Vec<LogicalCpuId>, StressError> {
     let mut cpus = Vec::new();
     for cpu in 0..kbuild_config::NR_CPUS {
         let cpu_id = LogicalCpuId::new(cpu);
-        if builtinpool::is_system_worker_pool_ready(kind, cpu_id) {
+        if builtinpool::is_builtin_pool_ready(kind, cpu_id) {
             cpus.push(cpu_id);
         }
     }
@@ -1799,12 +1799,12 @@ fn ready_cpus(kind: SystemPoolKind) -> Result<Vec<LogicalCpuId>, StressError> {
         .ok_or(StressError::PoolNotReady)
 }
 
-fn ensure_pool_ready(kind: SystemPoolKind, cpu_id: LogicalCpuId) -> bool {
-    if builtinpool::is_system_worker_pool_ready(kind, cpu_id) {
+fn ensure_pool_ready(kind: BuiltinPoolKind, cpu_id: LogicalCpuId) -> bool {
+    if builtinpool::is_builtin_pool_ready(kind, cpu_id) {
         return true;
     }
-    runtime::init_system_workqueue_worker_pools_for_cpu(cpu_id).is_some()
-        && builtinpool::is_system_worker_pool_ready(kind, cpu_id)
+    runtime::init_system_workqueue_worker_pools_for_cpu(cpu_id).is_ok()
+        && builtinpool::is_builtin_pool_ready(kind, cpu_id)
 }
 
 fn expect_queued(result: QueueWorkResult) -> Result<(), StressError> {

@@ -6,35 +6,16 @@
 
 use ktime_types::MonotonicInstant;
 
-use crate::{
-    ActionBatch, EntryKey, EntryOwner, EntryPayload, ImmediateAction, PoolEntry, PoolId,
-    QueueRemoveResult, WorkerExecutionToken, WorkerId, WorkerPoolPolicy, WorkerState,
+use super::{
     action::ManagementAction,
-    queue::PoolRunQueue,
     worker::{ExecutionAccounting, Worker},
 };
-
-/// Worker-pool operation error.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum WorkerPoolError {
-    /// Worker id is outside the configured slot table.
-    InvalidWorker,
-    /// Worker state does not allow the requested transition.
-    InvalidWorkerState,
-    /// Queue storage is full; the entry is returned to the caller.
-    QueueFull(PoolEntry),
-}
-
-/// Worker park decision.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ParkDecision {
-    /// Runnable entries are available; the worker should try taking one.
-    Run,
-    /// No runnable entries are available; the worker should block or park.
-    Wait,
-    /// The worker should exit in its own context.
-    Exit,
-}
+use crate::{
+    ActionBatch, EntryKey, EntryOwner, EntryPayload, ImmediateAction, ParkDecision, PoolEntry,
+    QueueRemoveResult, RunnableCandidate, RunnableCandidateDiscard, RunnableCandidateResult,
+    WorkerExecutionToken, WorkerId, WorkerPoolError, WorkerPoolPolicy, WorkerPoolSnapshot,
+    WorkerState, core::PoolRunQueue,
+};
 
 /// Result returned by an external runnable-entry claimer.
 #[derive(Debug, Eq, PartialEq)]
@@ -43,35 +24,6 @@ pub enum RunnableClaim<A, S> {
     Run(A),
     /// The entry no longer matches external state and was discarded.
     Stale(S),
-}
-
-/// Runnable candidate reserved for lock-free external claim validation.
-#[derive(Debug, Eq, PartialEq)]
-pub struct RunnableCandidate {
-    /// Popped runnable entry.
-    pub entry: PoolEntry,
-    /// Execution token reserved for this candidate.
-    pub token: WorkerExecutionToken,
-    /// Pool actions produced while dispatching.
-    pub actions: ActionBatch,
-}
-
-/// Result of trying to prepare one runnable candidate.
-#[derive(Debug, Eq, PartialEq)]
-pub enum RunnableCandidateResult {
-    /// A candidate was popped and reserved for external claim.
-    Candidate(RunnableCandidate),
-    /// No runnable entry is available for this worker.
-    Empty(ActionBatch),
-}
-
-/// Result of discarding a stale runnable candidate.
-#[derive(Debug, Eq, PartialEq)]
-pub struct RunnableCandidateDiscard {
-    /// Whether the worker should immediately try another runnable entry.
-    pub should_retry: bool,
-    /// Pool actions produced while discarding the candidate.
-    pub actions: ActionBatch,
 }
 
 /// External claim hook for opaque runnable entries.
@@ -118,7 +70,6 @@ pub(crate) enum ManagementComplete {
 /// protect it with the pool-instance lock and execute returned actions only
 /// after dropping that lock.
 pub struct WorkerPool<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize> {
-    id: PoolId,
     policy: WorkerPoolPolicy,
     workers: [Worker<ThreadRef>; MAX_WORKERS],
     counts: WorkerCounts,
@@ -127,31 +78,12 @@ pub struct WorkerPool<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usiz
     create_retry_after: Option<MonotonicInstant>,
 }
 
-/// Read-only worker-pool state snapshot for diagnostics.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WorkerPoolSnapshot<const MAX_WORKERS: usize> {
-    pub installed_workers: usize,
-    pub nr_creating: usize,
-    pub nr_idle: usize,
-    pub nr_preparing: usize,
-    pub nr_claiming: usize,
-    pub nr_running_state: usize,
-    pub nr_sleeping: usize,
-    pub nr_retire_requested: usize,
-    pub nr_exiting: usize,
-    pub nr_concurrency: usize,
-    pub runnable: usize,
-    pub deferred: usize,
-    pub worker_states: [WorkerState; MAX_WORKERS],
-}
-
 impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
     WorkerPool<ThreadRef, MAX_WORKERS, ENTRY_CAP>
 {
     /// Creates an empty pool instance with `policy`.
-    pub const fn new(id: PoolId, policy: WorkerPoolPolicy) -> Self {
+    pub const fn new(policy: WorkerPoolPolicy) -> Self {
         Self {
-            id,
             policy,
             workers: [const { Worker::new() }; MAX_WORKERS],
             counts: WorkerCounts::new(),
@@ -161,22 +93,15 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
         }
     }
 
-    /// Returns this pool identifier.
-    pub const fn id(&self) -> PoolId {
-        self.id
-    }
-
-    /// Configures the identity and policy before runtime workers are
-    /// installed.
+    /// Configures policy before runtime workers are installed.
     ///
     /// Runtime static pool tables often need `const` construction before their
-    /// CPU-local identity is known. Reconfiguration is accepted only while the
+    /// CPU-local placement is known. Reconfiguration is accepted only while the
     /// pool is completely empty.
-    pub(crate) fn configure_empty(&mut self, id: PoolId, policy: WorkerPoolPolicy) -> bool {
+    pub(crate) fn configure_empty(&mut self, policy: WorkerPoolPolicy) -> bool {
         if self.counts != WorkerCounts::new() || !self.queue.is_empty() {
             return false;
         }
-        self.id = id;
         self.policy = policy;
         true
     }
@@ -232,6 +157,22 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
     /// Returns the number of installed runtime workers.
     pub fn installed_workers(&self) -> usize {
         self.counts.installed_workers
+    }
+
+    /// Returns how many workers should be installed during initial bring-up.
+    pub(crate) fn initial_workers(&self) -> usize {
+        self.policy.initial_workers()
+    }
+
+    /// Returns whether a runtime worker can be installed into `worker`.
+    pub(crate) fn can_install_worker(&self, worker: WorkerId) -> bool {
+        let Ok(index) = self.checked_worker(worker) else {
+            return false;
+        };
+        matches!(
+            self.workers[index].state,
+            WorkerState::Empty | WorkerState::Creating
+        )
     }
 
     /// Returns the number of workers currently counted for concurrency.
@@ -396,10 +337,7 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
             .started_at
             .checked_add(self.policy.cpu_intensive_threshold())
         {
-            actions.push_immediate(ImmediateAction::ArmCpuIntensiveTimer {
-                pool: self.id,
-                deadline,
-            });
+            actions.push_immediate(ImmediateAction::ArmCpuIntensiveTimer { deadline });
         }
         Ok(actions)
     }
@@ -623,7 +561,6 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
         {
             self.transition(index, WorkerState::Creating);
             return Some(ManagementAction::SpawnWorker {
-                pool: self.id,
                 worker: WorkerId::new(index),
             });
         }
@@ -632,7 +569,6 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
         {
             self.transition(index, WorkerState::RetireRequested);
             return Some(ManagementAction::RetireWorker {
-                pool: self.id,
                 worker: WorkerId::new(index),
             });
         }
@@ -750,7 +686,7 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
         }
         if self.can_spawn_worker(now) {
             self.management_pending = true;
-            actions.push_immediate(ImmediateAction::WakeManager { pool: self.id });
+            actions.push_immediate(ImmediateAction::WakeManager);
         }
         actions
     }
@@ -785,8 +721,7 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
     }
 
     fn can_spawn_worker_after_retry(&self) -> bool {
-        self.policy.scalable()
-            && self.queue.runnable_len() != 0
+        self.queue.runnable_len() != 0
             && self.counts.nr_concurrency == 0
             && self.counts.nr_preparing == 0
             && self.counts.nr_retire_requested == 0
@@ -831,21 +766,14 @@ impl<ThreadRef, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
         };
         if self.workers[index].idle_since.is_some() {
             self.management_pending = true;
-            actions.push_immediate(ImmediateAction::WakeManager { pool: self.id });
+            actions.push_immediate(ImmediateAction::WakeManager);
         }
         actions
     }
 
     fn dispatch_worker_action(&self, worker: WorkerId) -> ActionBatch {
         let mut actions = ActionBatch::new();
-        if self.policy.wakes_worker_threads() {
-            actions.push_immediate(ImmediateAction::WakeWorker {
-                pool: self.id,
-                worker,
-            });
-        } else {
-            actions.push_immediate(ImmediateAction::RaiseBottomHalf { pool: self.id });
-        }
+        actions.push_immediate(ImmediateAction::WakeWorker { worker });
         actions
     }
 

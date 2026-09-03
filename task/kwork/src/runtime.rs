@@ -17,14 +17,14 @@ use kpoll::{PollEvent, PollRegistrations};
 use kspin::SpinNoIrq;
 use ktime_types::{MonotonicInstant, TimeSpan};
 use kworkerpool::{
-    ActionBatch, PoolEntry, PoolId, RunnableClaim, RunnableClaimer, WorkerExecutionToken, WorkerId,
+    ActionBatch, PoolEntry, RunnableClaim, RunnableClaimer, WorkerExecutionToken, WorkerId,
     WorkerPoolPlacement, WorkerRuntime,
 };
 use log::{debug, warn};
 
 use crate::{
     ScheduledWork,
-    builtinpool::{BuiltinPoolRuntime, SystemPoolBinding, SystemPoolKind},
+    builtinpool::{BuiltinBottomHalfPool, BuiltinKtaskWorkerPool, BuiltinPoolKind},
     builtinwq::BottomHalfWorkQueueKind,
     work::{
         WorkQueueRef, binding_for_executor_entry, release_scheduled_work, scheduled_work_by_key,
@@ -36,8 +36,9 @@ const BH_WORKER_RESTARTS: usize = 10;
 /// Initializes built-in workqueue worker pools for one CPU.
 pub fn init_system_workqueue_worker_pools_for_cpu(
     cpu_id: LogicalCpuId,
-) -> Option<crate::builtinpool::BuiltinCpuPoolInitResult> {
-    crate::builtinpool::init_system_worker_pools_for_cpu(cpu_id, BuiltinWorkerRuntime::new)
+) -> Result<crate::builtinpool::SystemWorkerPoolInitResult, crate::builtinpool::BuiltinPoolInitError>
+{
+    crate::builtinpool::init_system_worker_pools_for_cpu(cpu_id)
 }
 
 /// Timer handle used by delayed work.
@@ -118,40 +119,35 @@ pub(crate) fn arm_timer(
 #[kiface::provide]
 impl ktask::TaskExecutionAccountingIf {
     fn account_execution_tick(context: ktask::TaskExecutionContext) -> Option<MonotonicInstant> {
-        crate::builtinpool::account_system_execution_tick(context, ktask::monotonic_time())
+        crate::builtinpool::account_builtin_execution_tick(context, ktask::monotonic_time())
     }
 
     fn execution_tick_deadline(context: ktask::TaskExecutionContext) -> Option<MonotonicInstant> {
-        crate::builtinpool::system_execution_tick_deadline(context)
+        crate::builtinpool::builtin_execution_tick_deadline(context)
     }
 
     fn execution_blocked(context: ktask::TaskExecutionContext) {
-        crate::builtinpool::account_system_execution_blocked(context, ktask::monotonic_time());
+        crate::builtinpool::account_builtin_execution_blocked(context, ktask::monotonic_time());
     }
 
     fn execution_resumed(context: ktask::TaskExecutionContext) {
-        crate::builtinpool::account_system_execution_resumed(context);
+        crate::builtinpool::account_builtin_execution_resumed(context);
     }
 }
 
 /// Runtime hook used by ktask-backed built-in worker-pool workers.
 pub(crate) struct BuiltinWorkerRuntime {
-    pool_kind: SystemPoolKind,
     cpu_id: LogicalCpuId,
     wake_source: Arc<PollEvent>,
 }
 
 impl BuiltinWorkerRuntime {
     pub(crate) fn new(
-        pool_id: PoolId,
         placement: WorkerPoolPlacement,
         _worker: WorkerId,
         wake_source: Arc<PollEvent>,
     ) -> Self {
-        let pool_kind = SystemPoolKind::from_usize(pool_id.kind().as_usize())
-            .expect("built-in worker runtime must use a built-in pool kind");
         Self {
-            pool_kind,
             cpu_id: placement.cpu_id(),
             wake_source,
         }
@@ -185,7 +181,7 @@ impl RunnableClaimer for BuiltinWorkerRuntime {
         token: WorkerExecutionToken,
         entry: PoolEntry,
     ) -> RunnableClaim<Self::Accepted, Self::Stale> {
-        claim_builtin_pool_entry(self.pool_kind, self.cpu_id, worker, token, entry)
+        claim_builtin_pool_entry(BuiltinPoolKind::Normal, self.cpu_id, worker, token, entry)
     }
 
     fn record_stale(&mut self, stale: Self::Stale) {
@@ -193,32 +189,36 @@ impl RunnableClaimer for BuiltinWorkerRuntime {
     }
 }
 
-impl WorkerRuntime<&'static BuiltinPoolRuntime> for BuiltinWorkerRuntime {
+impl WorkerRuntime<&'static BuiltinKtaskWorkerPool> for BuiltinWorkerRuntime {
     fn now(&self) -> MonotonicInstant {
         ktask::monotonic_time()
     }
 
-    fn wait_for_worker_work(&mut self, _pool: &'static BuiltinPoolRuntime, _worker: WorkerId) {
+    fn wait_for_worker_work(&mut self, _pool: &'static BuiltinKtaskWorkerPool, _worker: WorkerId) {
         wait_for_worker_work(_pool, _worker, &self.wake_source);
     }
 
-    fn handle_worker_actions(&mut self, _pool: &'static BuiltinPoolRuntime, actions: ActionBatch) {
+    fn handle_worker_actions(
+        &mut self,
+        _pool: &'static BuiltinKtaskWorkerPool,
+        actions: ActionBatch,
+    ) {
         crate::builtinpool::handle_actions(self.cpu_id, actions);
     }
 
     fn run_claimed_work(
         &mut self,
-        _pool: &'static BuiltinPoolRuntime,
+        _pool: &'static BuiltinKtaskWorkerPool,
         _worker: WorkerId,
         _token: WorkerExecutionToken,
         work: Self::Accepted,
     ) {
-        run_claimed_builtin_work(self.pool_kind, self.cpu_id, work);
+        run_claimed_builtin_work(BuiltinPoolKind::Normal, self.cpu_id, work);
     }
 }
 
 fn claim_builtin_pool_entry(
-    pool_kind: SystemPoolKind,
+    pool_kind: BuiltinPoolKind,
     cpu_id: LogicalCpuId,
     worker: WorkerId,
     token: WorkerExecutionToken,
@@ -255,7 +255,7 @@ fn claim_builtin_pool_entry(
 }
 
 fn run_claimed_builtin_work(
-    pool_kind: SystemPoolKind,
+    pool_kind: BuiltinPoolKind,
     cpu_id: LogicalCpuId,
     claimed: ClaimedBuiltinWork,
 ) {
@@ -277,7 +277,7 @@ fn run_claimed_builtin_work(
             claimed.work.notify_state_change();
             claimed.queue.queue().notify_state_change();
             if let Some(op) = requeue_op
-                && let Some(pool) = crate::builtinpool::system_pool_for_kind_cpu(pool_kind, cpu_id)
+                && let Some(pool) = crate::builtinpool::builtin_pool_for_kind_cpu(pool_kind, cpu_id)
             {
                 let _ = pool.apply_executor_op(op);
                 if let Some(kind) = claimed.queue.bottom_half_kind() {
@@ -285,7 +285,7 @@ fn run_claimed_builtin_work(
                 }
             }
             if let Some(op) = promote_op
-                && let Some(pool) = crate::builtinpool::system_pool_for_kind_cpu(pool_kind, cpu_id)
+                && let Some(pool) = crate::builtinpool::builtin_pool_for_kind_cpu(pool_kind, cpu_id)
             {
                 match op {
                     kworkqueue::ExecutorOp::PromoteInactive { owner, budget } => {
@@ -311,7 +311,7 @@ fn run_claimed_builtin_work(
 }
 
 fn wait_for_worker_work(
-    pool: &'static BuiltinPoolRuntime,
+    pool: &'static BuiltinKtaskWorkerPool,
     worker: WorkerId,
     wake_source: &PollEvent,
 ) {
@@ -369,15 +369,13 @@ impl BottomHalfPoolBinding {
     }
 
     pub(crate) fn has_runnable_work(self) -> bool {
-        crate::builtinpool::system_pool_for_kind_cpu(SystemPoolKind::Bh, self.cpu_id)
-            .is_some_and(|pool| pool.pool().lock().runnable_len() != 0)
+        crate::builtinpool::bottom_half_pool_for_cpu(self.cpu_id)
+            .is_some_and(|pool| pool.pool().runnable_len() != 0)
     }
 }
 
 pub(crate) fn process_one_bottom_half_pool_work(binding: BottomHalfPoolBinding) -> bool {
-    let Some(pool) =
-        crate::builtinpool::system_pool_for_kind_cpu(SystemPoolKind::Bh, binding.cpu_id)
-    else {
+    let Some(pool) = crate::builtinpool::bottom_half_pool_for_cpu(binding.cpu_id) else {
         return false;
     };
     run_one_bottom_half_pool_work(binding.kind, pool)
@@ -433,62 +431,56 @@ fn drain_bh_workqueue(kind: BottomHalfWorkQueueKind) {
     }
 }
 
-fn run_one_bottom_half_pool_work(kind: BottomHalfWorkQueueKind, pool: SystemPoolBinding) -> bool {
+fn run_one_bottom_half_pool_work(
+    kind: BottomHalfWorkQueueKind,
+    pool: &'static BuiltinBottomHalfPool,
+) -> bool {
     let worker = WorkerId::new(0);
     let now = ktask::monotonic_time();
-    let Ok((decision, actions)) = pool.pool().lock().worker_ready_to_park(worker, now) else {
+    let Ok(decision) = pool.pool().drain_ready_to_park(now) else {
         return false;
     };
-    crate::builtinpool::handle_actions(pool.cpu_id(), actions);
     if decision != kworkerpool::ParkDecision::Run {
         return false;
     }
 
     let candidate = pool
         .pool()
-        .lock()
-        .prepare_runnable_candidate(worker, ktask::monotonic_time());
-    let Ok(kworkerpool::RunnableCandidateResult::Candidate(candidate)) = candidate else {
+        .prepare_runnable_candidate(ktask::monotonic_time());
+    let Ok(kworkerpool::BottomHalfRunnableCandidateResult::Candidate(candidate)) = candidate else {
         return false;
     };
-    crate::builtinpool::handle_actions(pool.cpu_id(), candidate.actions);
 
     match claim_builtin_pool_entry(
-        SystemPoolKind::Bh,
+        BuiltinPoolKind::Bh,
         pool.cpu_id(),
         worker,
         candidate.token,
         candidate.entry,
     ) {
         RunnableClaim::Run(claimed) => {
-            let Ok(actions) = pool.pool().lock().commit_runnable_candidate(
-                worker,
-                candidate.token,
-                ktask::monotonic_time(),
-            ) else {
+            let Ok(()) = pool
+                .pool()
+                .commit_runnable_candidate(candidate.token, ktask::monotonic_time())
+            else {
                 warn!("bottom-half workqueue claim commit failed");
                 return false;
             };
-            crate::builtinpool::handle_actions(pool.cpu_id(), actions);
             let _ = kind;
-            run_claimed_builtin_work(SystemPoolKind::Bh, pool.cpu_id(), claimed);
-            if let Ok(actions) =
-                pool.pool()
-                    .lock()
-                    .worker_finished(worker, candidate.token, ktask::monotonic_time())
-            {
-                crate::builtinpool::handle_actions(pool.cpu_id(), actions);
-            }
+            run_claimed_builtin_work(BuiltinPoolKind::Bh, pool.cpu_id(), claimed);
+            if let Ok(()) = pool
+                .pool()
+                .drain_finished(candidate.token, ktask::monotonic_time())
+            {}
             true
         }
         RunnableClaim::Stale(stale) => {
             debug!("discarded stale bottom-half workqueue entry: {:?}", stale);
-            if let Ok(discarded) = pool.pool().lock().discard_runnable_candidate(
-                worker,
-                candidate.token,
-                ktask::monotonic_time(),
-            ) {
-                crate::builtinpool::handle_actions(pool.cpu_id(), discarded.actions);
+            if let Ok(discarded) = pool
+                .pool()
+                .discard_runnable_candidate(candidate.token, ktask::monotonic_time())
+            {
+                let _ = discarded.should_retry;
             }
             false
         }

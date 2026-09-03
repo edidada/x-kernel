@@ -4,7 +4,7 @@
 
 //! Runnable and deferred entry storage for a worker pool.
 
-use crate::{EntryKey, EntryOwner, EntryPayload, EntrySource};
+use super::{EntryKey, EntryOwner, EntryPayload, EntrySource};
 
 /// Entry stored by one worker-pool instance.
 ///

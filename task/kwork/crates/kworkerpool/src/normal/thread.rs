@@ -20,7 +20,7 @@ pub struct WorkerThreadRef {
 
 impl WorkerThreadRef {
     /// Creates a live ktask-backed worker or manager thread reference.
-    pub fn new(task: ktask::KtaskRef, wake_source: Arc<PollEvent>) -> Self {
+    pub(crate) fn new(task: ktask::KtaskRef, wake_source: Arc<PollEvent>) -> Self {
         Self {
             task: Some(task),
             wake_source,
@@ -28,29 +28,19 @@ impl WorkerThreadRef {
     }
 
     /// Creates a non-task placeholder for execution contexts driven elsewhere.
-    pub fn placeholder() -> Self {
+    pub(crate) fn placeholder() -> Self {
         Self {
             task: None,
             wake_source: Arc::new(PollEvent::new()),
         }
     }
 
-    /// Returns the underlying task, if this slot is backed by ktask.
-    pub fn task(&self) -> Option<ktask::KtaskRef> {
-        self.task.clone()
-    }
-
     /// Wakes the pool-local wait source observed by this thread.
-    pub fn wake(&self) {
+    pub(crate) fn wake(&self) {
         if let Some(task) = &self.task {
             ktask::wake_task(task, true);
         }
         let _ = self.wake_source.notify();
-    }
-
-    /// Returns the wait source used by the worker or manager loop.
-    pub fn wake_source(&self) -> &PollEvent {
-        &self.wake_source
     }
 }
 

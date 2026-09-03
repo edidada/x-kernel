@@ -91,9 +91,7 @@ pub use work::{
 #[doc(hidden)]
 pub mod raw {
     pub use crate::{
-        builtinpool::{
-            BuiltinBhPoolInitResult, BuiltinCpuPoolInitResult, BuiltinWorkerPoolInitResult,
-        },
+        builtinpool::{BuiltinPoolInitError, SystemWorkerPoolInitResult},
         healthcheck::system_workqueue_watchdog_check,
         runtime::{init_bottom_half_workerqueue, init_system_workqueue_worker_pools_for_cpu},
     };

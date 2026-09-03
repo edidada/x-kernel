@@ -12,26 +12,39 @@ use kpoll::{PollEvent, PollRegistrations};
 use kspin::{SpinNoIrq, SpinNoIrqGuard};
 use ktime_types::MonotonicInstant;
 
-use crate::{
-    ActionBatch, ImmediateAction, PoolId, WorkerId, WorkerPool, WorkerPoolPolicy, WorkerRuntime,
-    WorkerThreadRef,
+use super::{
     action::ManagementAction,
-    decode_task_context,
+    execution::WorkerPoolIdentity,
     manager::{ManagerRuntime, ManagerTarget, ManagerTask},
     pool::ManagementComplete,
     task_loop::WorkerTask,
     thread::{prepare_bound_kthread, worker_name},
 };
+use crate::{
+    ActionBatch, ImmediateAction, WorkerId, WorkerPool, WorkerPoolPolicy, WorkerRuntime,
+    WorkerThreadRef, decode_task_context,
+};
 
 /// Builds the runtime object used by one ktask-backed worker.
 ///
-/// The factory is supplied by the product layer. It receives only worker-pool
-/// runtime identity and this worker's wait source; callback storage and
-/// workqueue semantics remain outside `kworkerpool`.
-pub type WorkerRuntimeFactory<R> = fn(PoolId, WorkerPoolPlacement, WorkerId, Arc<PollEvent>) -> R;
+/// The factory is registered on a [`KtaskWorkerPool`] before workers are
+/// started. It receives only worker-pool runtime identity and this worker's
+/// wait source; callback storage and workqueue semantics remain outside
+/// `kworkerpool`.
+pub type WorkerRuntimeFactory<R> = fn(WorkerPoolPlacement, WorkerId, Arc<PollEvent>) -> R;
 
-/// Converts a pool identity into a runtime-visible name component.
-pub type PoolNameResolver = fn(PoolId) -> &'static str;
+struct RegisteredWorkerRuntime<R> {
+    pool_name: &'static str,
+    factory: WorkerRuntimeFactory<R>,
+}
+
+impl<R> Clone for RegisteredWorkerRuntime<R> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<R> Copy for RegisteredWorkerRuntime<R> {}
 
 /// Runtime placement for ktask-backed worker-pool tasks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -61,25 +74,34 @@ pub struct ExecutionTickResult {
     pub deadline: Option<MonotonicInstant>,
 }
 
-/// ktask-backed runtime wrapper around one core worker-pool instance.
+/// ktask-backed normal worker pool.
 ///
 /// The core pool owns scheduling state. This wrapper owns ktask-specific
-/// objects attached to that state: worker tasks, worker wake sources, and the
-/// manager task wake source.
-pub struct KtaskWorkerPool<const MAX_WORKERS: usize, const ENTRY_CAP: usize> {
+/// objects attached to that state: the registered worker runtime factory,
+/// worker tasks, worker wake sources, and the manager task wake source.
+pub struct KtaskWorkerPool<R, const MAX_WORKERS: usize, const ENTRY_CAP: usize> {
     inner: SpinNoIrq<WorkerPool<WorkerThreadRef, MAX_WORKERS, ENTRY_CAP>>,
     placement: SpinNoIrq<WorkerPoolPlacement>,
+    runtime: SpinNoIrq<Option<RegisteredWorkerRuntime<R>>>,
     manager_thread: SpinNoIrq<Option<WorkerThreadRef>>,
 }
 
-impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> KtaskWorkerPool<MAX_WORKERS, ENTRY_CAP> {
+impl<R, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
+    KtaskWorkerPool<R, MAX_WORKERS, ENTRY_CAP>
+{
     /// Creates one ktask-backed pool instance.
-    pub const fn new(id: PoolId, placement: WorkerPoolPlacement, policy: WorkerPoolPolicy) -> Self {
+    pub const fn new(placement: WorkerPoolPlacement, policy: WorkerPoolPolicy) -> Self {
         Self {
-            inner: SpinNoIrq::new(WorkerPool::new(id, policy)),
+            inner: SpinNoIrq::new(WorkerPool::new(policy)),
             placement: SpinNoIrq::new(placement),
+            runtime: SpinNoIrq::new(None),
             manager_thread: SpinNoIrq::new(None),
         }
+    }
+
+    /// Returns this pool instance's opaque accounting identity.
+    pub(crate) fn identity(&self) -> WorkerPoolIdentity {
+        WorkerPoolIdentity::new(core::ptr::from_ref(self).addr())
     }
 
     /// Locks the core worker-pool state.
@@ -94,11 +116,6 @@ impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> KtaskWorkerPool<MAX_WORKE
         self.inner.try_lock()
     }
 
-    /// Returns this pool identity.
-    pub fn id(&self) -> PoolId {
-        self.inner.lock().id()
-    }
-
     /// Returns where this ktask-backed pool creates worker and manager tasks.
     pub fn placement(&self) -> WorkerPoolPlacement {
         *self.placement.lock()
@@ -107,14 +124,13 @@ impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> KtaskWorkerPool<MAX_WORKE
     /// Reconfigures an empty const-initialized pool.
     pub fn configure_empty(
         &self,
-        id: PoolId,
         placement: WorkerPoolPlacement,
         policy: WorkerPoolPolicy,
     ) -> bool {
-        if self.manager_thread.lock().is_some() {
+        if self.manager_thread.lock().is_some() || self.runtime.lock().is_some() {
             return false;
         }
-        let configured = self.inner.lock().configure_empty(id, policy);
+        let configured = self.inner.lock().configure_empty(policy);
         if !configured {
             return false;
         }
@@ -122,8 +138,29 @@ impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> KtaskWorkerPool<MAX_WORKE
         true
     }
 
+    /// Registers how this pool creates worker runtime state.
+    ///
+    /// The factory is called whenever this pool creates a ktask worker for an
+    /// internally selected worker slot. Register it before starting initial
+    /// workers or the manager.
+    pub fn register_worker_runtime(
+        &self,
+        pool_name: &'static str,
+        factory: WorkerRuntimeFactory<R>,
+    ) -> bool {
+        if self.manager_thread.lock().is_some() || self.inner.lock().installed_workers() != 0 {
+            return false;
+        }
+        let mut runtime = self.runtime.lock();
+        if runtime.is_some() {
+            return false;
+        }
+        *runtime = Some(RegisteredWorkerRuntime { pool_name, factory });
+        true
+    }
+
     /// Installs one already-created worker task into a pool slot.
-    pub fn install_worker(&self, worker: WorkerId, thread_ref: WorkerThreadRef) -> bool {
+    pub(crate) fn install_worker(&self, worker: WorkerId, thread_ref: WorkerThreadRef) -> bool {
         self.inner.lock().install_worker(worker, thread_ref).is_ok()
     }
 
@@ -142,9 +179,13 @@ impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> KtaskWorkerPool<MAX_WORKE
         self.inner.lock().worker_thread_ref(worker).cloned()
     }
 
-    /// Returns the manager thread reference.
-    pub fn manager_thread_ref(&self) -> Option<WorkerThreadRef> {
+    fn manager_thread_ref(&self) -> Option<WorkerThreadRef> {
         self.manager_thread.lock().clone()
+    }
+
+    /// Returns whether this pool has an installed manager task.
+    pub fn has_manager_thread(&self) -> bool {
+        self.manager_thread.lock().is_some()
     }
 
     /// Wakes one worker, if the slot is installed.
@@ -172,7 +213,7 @@ impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> KtaskWorkerPool<MAX_WORKE
         now: MonotonicInstant,
     ) -> Option<ExecutionTickResult> {
         let parts = decode_task_context(context)?;
-        if parts.pool_id != self.id() {
+        if parts.pool != self.identity() || parts.cpu_id != self.placement().cpu_id() {
             return None;
         }
 
@@ -194,7 +235,7 @@ impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> KtaskWorkerPool<MAX_WORKE
         context: ktask::TaskExecutionContext,
     ) -> Option<MonotonicInstant> {
         let parts = decode_task_context(context)?;
-        if parts.pool_id != self.id() {
+        if parts.pool != self.identity() || parts.cpu_id != self.placement().cpu_id() {
             return None;
         }
         self.inner
@@ -210,7 +251,7 @@ impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> KtaskWorkerPool<MAX_WORKE
     ) -> Option<ActionBatch> {
         let parts = decode_task_context(context)?;
         let mut inner = self.inner.lock();
-        if parts.pool_id != inner.id() {
+        if parts.pool != self.identity() || parts.cpu_id != self.placement().cpu_id() {
             return None;
         }
         inner.worker_blocked(parts.worker, parts.token, now).ok()
@@ -222,36 +263,55 @@ impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> KtaskWorkerPool<MAX_WORKE
             return false;
         };
         let mut inner = self.inner.lock();
-        if parts.pool_id != inner.id() {
+        if parts.pool != self.identity() || parts.cpu_id != self.placement().cpu_id() {
             return false;
         }
         inner.worker_resumed(parts.worker, parts.token).is_ok()
     }
 
-    /// Creates and activates one worker task for `worker`.
-    pub fn start_worker_task<R>(
-        &'static self,
-        worker: WorkerId,
-        pool_name: &'static str,
-        runtime_factory: WorkerRuntimeFactory<R>,
-    ) -> bool
+    /// Creates and activates this pool's configured initial worker tasks.
+    ///
+    /// The pool chooses worker slots from its policy's initial worker count.
+    /// Callers register the runtime factory first and do not pass worker ids for
+    /// initial bring-up.
+    pub fn start_initial_worker_tasks(&'static self) -> usize
     where
         R: WorkerRuntime<&'static Self> + 'static,
     {
-        let pool_id = self.id();
+        let initial_workers = self.inner.lock().initial_workers().min(MAX_WORKERS);
+        let mut started = 0usize;
+        for worker_id in 0..initial_workers {
+            if self.start_worker_task(WorkerId::new(worker_id)) {
+                started += 1;
+            }
+        }
+        started
+    }
+
+    /// Creates and activates one worker task for `worker`.
+    fn start_worker_task(&'static self, worker: WorkerId) -> bool
+    where
+        R: WorkerRuntime<&'static Self> + 'static,
+    {
+        let Some(runtime_config) = *self.runtime.lock() else {
+            return false;
+        };
+        if !self.inner.lock().can_install_worker(worker) {
+            return false;
+        }
         let placement = self.placement();
         let wake_source = Arc::new(PollEvent::new());
         let thread_wake_source = wake_source.clone();
         let task = prepare_bound_kthread(
             placement.cpu_id(),
-            worker_name(placement, worker, pool_name),
+            worker_name(placement, worker, runtime_config.pool_name),
             {
                 move || {
                     // The pool may clear its WorkerThreadRef when this worker begins
                     // retirement. Hold a task ref cloned from ktask's current-task
                     // slot until the entry closure returns into ktask's exit path.
                     let _entry_task_ref = ktask::current().clone();
-                    let runtime = runtime_factory(pool_id, placement, worker, wake_source);
+                    let runtime = (runtime_config.factory)(placement, worker, wake_source);
                     WorkerTask::new(self, worker, runtime).run();
                 }
             },
@@ -262,9 +322,8 @@ impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> KtaskWorkerPool<MAX_WORKE
             WorkerThreadRef::new(task.clone(), thread_wake_source),
         ) {
             warn!(
-                "failed to install workerpool worker {} for pool kind {} CPU {}",
+                "failed to install workerpool worker {} on CPU {}",
                 worker.as_usize(),
-                pool_id.kind().as_usize(),
                 placement.cpu_id().as_usize()
             );
             return false;
@@ -275,8 +334,10 @@ impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> KtaskWorkerPool<MAX_WORKE
     }
 }
 
-impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> ManagerTarget
-    for &'static KtaskWorkerPool<MAX_WORKERS, ENTRY_CAP>
+impl<R, const MAX_WORKERS: usize, const ENTRY_CAP: usize> ManagerTarget
+    for &'static KtaskWorkerPool<R, MAX_WORKERS, ENTRY_CAP>
+where
+    R: WorkerRuntime<&'static KtaskWorkerPool<R, MAX_WORKERS, ENTRY_CAP>> + 'static,
 {
     fn manager_should_run(&self, now: MonotonicInstant) -> bool {
         self.lock().manager_should_run(now)
@@ -307,20 +368,14 @@ impl<const MAX_WORKERS: usize, const ENTRY_CAP: usize> ManagerTarget
     }
 }
 
-struct KtaskManagerRuntime<R, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
-where
-    R: WorkerRuntime<&'static KtaskWorkerPool<MAX_WORKERS, ENTRY_CAP>> + 'static,
-{
-    runtime_factory: WorkerRuntimeFactory<R>,
-    pool_name: PoolNameResolver,
+struct KtaskManagerRuntime {
     wake_source: Arc<PollEvent>,
 }
 
 impl<R, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
-    ManagerRuntime<&'static KtaskWorkerPool<MAX_WORKERS, ENTRY_CAP>>
-    for KtaskManagerRuntime<R, MAX_WORKERS, ENTRY_CAP>
+    ManagerRuntime<&'static KtaskWorkerPool<R, MAX_WORKERS, ENTRY_CAP>> for KtaskManagerRuntime
 where
-    R: WorkerRuntime<&'static KtaskWorkerPool<MAX_WORKERS, ENTRY_CAP>> + 'static,
+    R: WorkerRuntime<&'static KtaskWorkerPool<R, MAX_WORKERS, ENTRY_CAP>> + 'static,
 {
     fn now(&self) -> MonotonicInstant {
         ktask::monotonic_time()
@@ -328,22 +383,22 @@ where
 
     fn wait_for_manager_work<const N: usize>(
         &mut self,
-        pools: &[&'static KtaskWorkerPool<MAX_WORKERS, ENTRY_CAP>; N],
+        pools: &[&'static KtaskWorkerPool<R, MAX_WORKERS, ENTRY_CAP>; N],
     ) {
         wait_for_manager_work(pools, &self.wake_source);
     }
 
     fn spawn_worker(
         &mut self,
-        pool: &&'static KtaskWorkerPool<MAX_WORKERS, ENTRY_CAP>,
+        pool: &&'static KtaskWorkerPool<R, MAX_WORKERS, ENTRY_CAP>,
         worker: WorkerId,
     ) -> bool {
-        pool.start_worker_task(worker, (self.pool_name)(pool.id()), self.runtime_factory)
+        pool.start_worker_task(worker)
     }
 
     fn wake_retiring_worker(
         &mut self,
-        pool: &&'static KtaskWorkerPool<MAX_WORKERS, ENTRY_CAP>,
+        pool: &&'static KtaskWorkerPool<R, MAX_WORKERS, ENTRY_CAP>,
         worker: WorkerId,
     ) {
         let _ = pool.wake_worker(worker);
@@ -351,26 +406,18 @@ where
 
     fn handle_pool_actions(
         &mut self,
-        pool: &&'static KtaskWorkerPool<MAX_WORKERS, ENTRY_CAP>,
+        pool: &&'static KtaskWorkerPool<R, MAX_WORKERS, ENTRY_CAP>,
         actions: ActionBatch,
     ) {
         for action in actions.immediate() {
             match action {
-                ImmediateAction::WakeWorker {
-                    pool: action_pool,
-                    worker,
-                } => {
-                    if action_pool == pool.id() {
-                        let _ = pool.wake_worker(worker);
-                    }
+                ImmediateAction::WakeWorker { worker } => {
+                    let _ = pool.wake_worker(worker);
                 }
-                ImmediateAction::WakeManager { pool: action_pool } => {
-                    if action_pool == pool.id() {
-                        let _ = pool.wake_manager();
-                    }
+                ImmediateAction::WakeManager => {
+                    let _ = pool.wake_manager();
                 }
-                ImmediateAction::RaiseBottomHalf { .. }
-                | ImmediateAction::ArmCpuIntensiveTimer { .. } => {}
+                ImmediateAction::ArmCpuIntensiveTimer { .. } => {}
             }
         }
     }
@@ -379,22 +426,19 @@ where
 /// Creates and activates one per-CPU manager task for a homogeneous pool set.
 ///
 /// The same manager wake source is installed into every pool in `pools`, so any
-/// scalable pool can request slow-path lifecycle work without owning its own
-/// manager task.
+/// normal pool can request slow-path lifecycle work without owning its own
+/// manager task. Each pool must already have a registered worker runtime
+/// factory so the manager can create dynamic workers for that pool.
 pub fn start_manager_task<R, const MAX_WORKERS: usize, const ENTRY_CAP: usize, const N: usize>(
     placement: WorkerPoolPlacement,
     name: String,
-    pools: [&'static KtaskWorkerPool<MAX_WORKERS, ENTRY_CAP>; N],
-    pool_name: PoolNameResolver,
-    runtime_factory: WorkerRuntimeFactory<R>,
+    pools: [&'static KtaskWorkerPool<R, MAX_WORKERS, ENTRY_CAP>; N],
 ) -> bool
 where
-    R: WorkerRuntime<&'static KtaskWorkerPool<MAX_WORKERS, ENTRY_CAP>> + 'static,
+    R: WorkerRuntime<&'static KtaskWorkerPool<R, MAX_WORKERS, ENTRY_CAP>> + 'static,
 {
     let manager_wake_source = Arc::new(PollEvent::new());
-    let runtime = KtaskManagerRuntime::<R, MAX_WORKERS, ENTRY_CAP> {
-        runtime_factory,
-        pool_name,
+    let runtime = KtaskManagerRuntime {
         wake_source: manager_wake_source.clone(),
     };
     let task = ManagerTask::new(pools, runtime);
@@ -411,10 +455,12 @@ where
     installed
 }
 
-fn wait_for_manager_work<const MAX_WORKERS: usize, const ENTRY_CAP: usize, const N: usize>(
-    pools: &[&'static KtaskWorkerPool<MAX_WORKERS, ENTRY_CAP>; N],
+fn wait_for_manager_work<R, const MAX_WORKERS: usize, const ENTRY_CAP: usize, const N: usize>(
+    pools: &[&'static KtaskWorkerPool<R, MAX_WORKERS, ENTRY_CAP>; N],
     wake_source: &PollEvent,
-) {
+) where
+    R: WorkerRuntime<&'static KtaskWorkerPool<R, MAX_WORKERS, ENTRY_CAP>> + 'static,
+{
     let now = ktask::monotonic_time();
     let deadline = pools
         .iter()

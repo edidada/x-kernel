@@ -6,7 +6,8 @@
 
 use ktime_types::MonotonicInstant;
 
-use crate::{ActionBatch, WorkerId, action::ManagementAction};
+use super::action::ManagementAction;
+use crate::{ActionBatch, WorkerId};
 
 /// Maximum lifecycle actions a manager performs for one pool in one pass.
 pub(crate) const MANAGEMENT_ACTION_BUDGET_PER_PASS: usize = 2;
@@ -136,7 +137,7 @@ where
             return;
         };
         match action {
-            ManagementAction::SpawnWorker { worker, .. } => {
+            ManagementAction::SpawnWorker { worker } => {
                 let success = runtime.spawn_worker(pool, worker);
                 let actions = pool.complete_worker_spawn(worker, success, runtime.now());
                 runtime.handle_pool_actions(pool, actions);
@@ -145,7 +146,7 @@ where
                     return;
                 }
             }
-            ManagementAction::RetireWorker { worker, .. } => {
+            ManagementAction::RetireWorker { worker } => {
                 runtime.wake_retiring_worker(pool, worker);
             }
         }

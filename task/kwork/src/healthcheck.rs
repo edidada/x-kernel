@@ -8,9 +8,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use ktime_types::{MonotonicInstant, TimeSpan};
 
-use crate::builtinpool::{SystemPoolKind, system_pools};
+use crate::builtinpool::{BuiltinPoolKind, builtin_pool_for_kind_cpu};
 
-const HEALTHCHECK_SLOTS: usize = SystemPoolKind::COUNT * kbuild_config::NR_CPUS;
+const HEALTHCHECK_SLOTS: usize = BuiltinPoolKind::COUNT * kbuild_config::NR_CPUS;
 
 static STUCK_SINCE_NS: [AtomicU64; HEALTHCHECK_SLOTS] =
     [const { AtomicU64::new(0) }; HEALTHCHECK_SLOTS];
@@ -31,14 +31,15 @@ pub fn system_workqueue_watchdog_check(now: MonotonicInstant, threshold: TimeSpa
     let threshold_ns = threshold.as_nanos_u64_saturating();
     let mut healthy = true;
 
-    for kind in SystemPoolKind::ALL {
+    for kind in BuiltinPoolKind::ALL {
         for cpu in 0..kbuild_config::NR_CPUS {
             let slot = kind.as_usize() * kbuild_config::NR_CPUS + cpu;
-            let Some(pool) = system_pools().pool(kind, kcpu_id_map::LogicalCpuId::new(cpu)) else {
+            let Some(pool) = builtin_pool_for_kind_cpu(kind, kcpu_id_map::LogicalCpuId::new(cpu))
+            else {
                 STUCK_SINCE_NS[slot].store(0, Ordering::Release);
                 continue;
             };
-            let Some(snapshot) = pool.try_lock().map(|pool| pool.snapshot()) else {
+            let Some(snapshot) = pool.try_snapshot() else {
                 STUCK_SINCE_NS[slot].store(0, Ordering::Release);
                 continue;
             };

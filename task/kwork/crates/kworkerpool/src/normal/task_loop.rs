@@ -2,10 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use super::execution::{WorkerPoolIdentity, encode_task_context};
 use crate::{
-    ActionBatch, KtaskWorkerPool, ParkDecision, PoolEntry, PoolId, RunnableCandidateResult,
-    RunnableClaim, RunnableClaimer, WorkerExecutionToken, WorkerId, WorkerPoolPlacement,
-    WorkerRuntime, execution::encode_task_context,
+    ActionBatch, KtaskWorkerPool, ParkDecision, PoolEntry, RunnableCandidateResult, RunnableClaim,
+    RunnableClaimer, WorkerExecutionToken, WorkerId, WorkerPoolPlacement, WorkerRuntime,
 };
 
 /// ktask-backed worker task body for one core worker-pool instance.
@@ -15,20 +15,20 @@ use crate::{
 /// and callback execution through [`WorkerRuntime`].
 pub(crate) struct WorkerTask<R, const MAX_WORKERS: usize, const ENTRY_CAP: usize>
 where
-    R: WorkerRuntime<&'static KtaskWorkerPool<MAX_WORKERS, ENTRY_CAP>>,
+    R: WorkerRuntime<&'static KtaskWorkerPool<R, MAX_WORKERS, ENTRY_CAP>> + 'static,
 {
-    pool: &'static KtaskWorkerPool<MAX_WORKERS, ENTRY_CAP>,
+    pool: &'static KtaskWorkerPool<R, MAX_WORKERS, ENTRY_CAP>,
     worker: WorkerId,
     runtime: R,
 }
 
 impl<R, const MAX_WORKERS: usize, const ENTRY_CAP: usize> WorkerTask<R, MAX_WORKERS, ENTRY_CAP>
 where
-    R: WorkerRuntime<&'static KtaskWorkerPool<MAX_WORKERS, ENTRY_CAP>>,
+    R: WorkerRuntime<&'static KtaskWorkerPool<R, MAX_WORKERS, ENTRY_CAP>> + 'static,
 {
     /// Creates one ktask-backed worker task body.
     pub(crate) const fn new(
-        pool: &'static KtaskWorkerPool<MAX_WORKERS, ENTRY_CAP>,
+        pool: &'static KtaskWorkerPool<R, MAX_WORKERS, ENTRY_CAP>,
         worker: WorkerId,
         runtime: R,
     ) -> Self {
@@ -120,10 +120,13 @@ where
             }
         };
 
-        let pool_id = self.pool.lock().id();
         let placement = self.pool.placement();
-        let _current =
-            CurrentWorkerPoolExecutionGuard::enter(pool_id, placement, self.worker, token);
+        let _current = CurrentWorkerPoolExecutionGuard::enter(
+            self.pool.identity(),
+            placement,
+            self.worker,
+            token,
+        );
         self.runtime
             .run_claimed_work(self.pool, self.worker, token, work);
 
@@ -147,7 +150,7 @@ pub(crate) struct CurrentWorkerPoolExecutionGuard {
 impl CurrentWorkerPoolExecutionGuard {
     /// Enters a worker-pool execution context for scheduler accounting.
     pub(crate) fn enter(
-        pool: PoolId,
+        pool: WorkerPoolIdentity,
         placement: WorkerPoolPlacement,
         worker: WorkerId,
         token: WorkerExecutionToken,
@@ -179,7 +182,7 @@ impl Drop for CurrentWorkerPoolExecutionGuard {
 impl<R, const MAX_WORKERS: usize, const ENTRY_CAP: usize> RunnableClaimer
     for WorkerTask<R, MAX_WORKERS, ENTRY_CAP>
 where
-    R: WorkerRuntime<&'static KtaskWorkerPool<MAX_WORKERS, ENTRY_CAP>>,
+    R: WorkerRuntime<&'static KtaskWorkerPool<R, MAX_WORKERS, ENTRY_CAP>> + 'static,
 {
     type Accepted = R::Accepted;
     type Stale = R::Stale;

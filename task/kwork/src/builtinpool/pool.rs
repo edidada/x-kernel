@@ -2,128 +2,62 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Built-in worker-pool instance and binding types.
+//! Shared built-in worker-pool bindings.
 
 use kcpu_id_map::LogicalCpuId;
-use kspin::SpinNoIrqGuard;
 use kworkerpool::{
-    ActionBatch, EntryOwner as PoolEntryOwner, ImmediateAction, KtaskWorkerPool, PoolId, WorkerId,
-    WorkerPool, WorkerPoolError, WorkerPoolPlacement, WorkerThreadRef,
+    ActionBatch, EntryOwner as PoolEntryOwner, ImmediateAction, KtaskWorkerPool, WorkerPoolError,
+    WorkerPoolSnapshot, WorkerState,
 };
 
 use super::{
     entry::{pool_entry, pool_key, pool_owner},
-    kind::{BUILTIN_POOL_ENTRY_CAP, BUILTIN_WORKERS_PER_POOL, SystemPoolKind, builtin_policy},
+    kind::{BUILTIN_POOL_ENTRY_CAP, BuiltinPoolKind},
 };
+use crate::runtime::BuiltinWorkerRuntime;
 
-/// Core state stored inside one built-in pool instance.
-pub(crate) type BuiltinPoolState =
-    WorkerPool<WorkerThreadRef, { BUILTIN_WORKERS_PER_POOL }, { BUILTIN_POOL_ENTRY_CAP }>;
+/// Maximum worker slots in one built-in pool.
+pub(crate) const BUILTIN_WORKERS_PER_POOL: usize = kbuild_config::WORKQUEUE_WORKERS_PER_POOL;
 
-/// Ktask-backed runtime pool stored inside one built-in pool instance.
-pub(crate) type BuiltinPoolRuntime =
-    KtaskWorkerPool<{ BUILTIN_WORKERS_PER_POOL }, { BUILTIN_POOL_ENTRY_CAP }>;
+/// Ktask-backed worker pool used by built-in pools.
+pub(crate) type BuiltinKtaskWorkerPool =
+    KtaskWorkerPool<BuiltinWorkerRuntime, { BUILTIN_WORKERS_PER_POOL }, { BUILTIN_POOL_ENTRY_CAP }>;
 
-/// One built-in system worker-pool instance.
-pub(crate) struct BuiltinSystemWorkerPool {
-    runtime: BuiltinPoolRuntime,
-}
+/// Built-in worker-pool snapshot normalized for diagnostics.
+pub(crate) type BuiltinPoolSnapshot = WorkerPoolSnapshot<{ BUILTIN_WORKERS_PER_POOL }>;
 
-impl BuiltinSystemWorkerPool {
-    pub(super) const fn new(kind: SystemPoolKind, cpu_id: LogicalCpuId) -> Self {
-        Self {
-            runtime: KtaskWorkerPool::new(
-                PoolId::new(kind.pool_kind()),
-                WorkerPoolPlacement::bound_to(cpu_id),
-                builtin_policy(kind),
-            ),
-        }
-    }
-
-    /// Returns this pool kind.
-    pub(crate) fn kind(&self) -> SystemPoolKind {
-        SystemPoolKind::from_usize(self.runtime.id().kind().as_usize())
-            .expect("built-in worker-pool kind should be known")
-    }
-
-    /// Returns this pool CPU.
-    pub(crate) fn cpu_id(&self) -> LogicalCpuId {
-        self.runtime.placement().cpu_id()
-    }
-
-    /// Returns this pool identity.
-    pub(crate) fn id(&self) -> PoolId {
-        self.runtime.id()
-    }
-
-    /// Returns whether this built-in pool has a runnable backend installed.
-    pub(crate) fn is_ready(&self) -> bool {
-        if self.kind().has_manager() {
-            return self.runtime.manager_thread_ref().is_some();
-        }
-        self.runtime.lock().installed_workers() != 0
-    }
-
-    /// Configures an empty const-initialized pool before workers are installed.
-    pub(crate) fn configure_empty(&self, kind: SystemPoolKind, cpu_id: LogicalCpuId) -> bool {
-        self.runtime.configure_empty(
-            PoolId::new(kind.pool_kind()),
-            WorkerPoolPlacement::bound_to(cpu_id),
-            builtin_policy(kind),
-        )
-    }
-
-    /// Returns the ktask-backed runtime pool.
-    pub(crate) const fn runtime(&self) -> &BuiltinPoolRuntime {
-        &self.runtime
-    }
-
-    /// Locks the worker-pool core state.
-    pub(crate) fn lock(&self) -> SpinNoIrqGuard<'_, BuiltinPoolState> {
-        self.runtime.lock()
-    }
-
-    /// Tries to lock the worker-pool core state without spinning.
-    pub(crate) fn try_lock(&self) -> Option<SpinNoIrqGuard<'_, BuiltinPoolState>> {
-        self.runtime.try_lock()
-    }
-
-    /// Installs a static worker slot for externally driven execution contexts.
-    pub(crate) fn install_static_worker(&self, worker: WorkerId) -> bool {
-        self.runtime
-            .install_worker(worker, WorkerThreadRef::placeholder())
-    }
-
-    /// Wakes one installed worker.
-    pub(crate) fn wake_worker(&self, worker: WorkerId) -> bool {
-        self.runtime.wake_worker(worker)
-    }
-
-    /// Wakes this pool's manager thread.
-    pub(crate) fn wake_manager(&self) -> bool {
-        self.runtime.wake_manager()
-    }
-}
-
-/// Opaque binding to one built-in system worker pool.
+/// Opaque binding to one built-in worker pool.
 #[derive(Clone, Copy)]
-pub(crate) struct SystemPoolBinding {
-    pool: &'static BuiltinSystemWorkerPool,
+pub(crate) enum BuiltinPoolBinding {
+    /// Task-context system worker pool.
+    System(&'static super::system::SystemWorkerPool),
+    /// Bottom-half worker-pool state.
+    BottomHalf(&'static super::bh::BottomHalfWorkerPool),
 }
 
-impl SystemPoolBinding {
-    pub(super) const fn new(pool: &'static BuiltinSystemWorkerPool) -> Self {
-        Self { pool }
-    }
-
+impl BuiltinPoolBinding {
     /// Returns the bound CPU.
     pub(crate) fn cpu_id(self) -> LogicalCpuId {
-        self.pool.cpu_id()
+        match self {
+            Self::System(pool) => pool.runtime().placement().cpu_id(),
+            Self::BottomHalf(pool) => pool.pool().placement().cpu_id(),
+        }
     }
 
-    /// Returns the bound pool object.
-    pub(crate) const fn pool(self) -> &'static BuiltinSystemWorkerPool {
-        self.pool
+    /// Returns a read-only state snapshot for diagnostics.
+    pub(crate) fn snapshot(self) -> BuiltinPoolSnapshot {
+        match self {
+            Self::System(pool) => pool.runtime().lock().snapshot(),
+            Self::BottomHalf(pool) => expand_bottom_half_snapshot(pool.pool().snapshot()),
+        }
+    }
+
+    /// Returns a read-only state snapshot without spinning.
+    pub(crate) fn try_snapshot(self) -> Option<BuiltinPoolSnapshot> {
+        match self {
+            Self::System(pool) => pool.runtime().try_lock().map(|pool| pool.snapshot()),
+            Self::BottomHalf(pool) => pool.pool().try_snapshot().map(expand_bottom_half_snapshot),
+        }
     }
 
     /// Applies one workqueue executor operation to this worker pool.
@@ -133,19 +67,13 @@ impl SystemPoolBinding {
     ) -> Result<(), BuiltinPoolEnqueueError> {
         let now = ktask::monotonic_time();
         let actions = match op {
-            kworkqueue::ExecutorOp::EnqueueRunnable(entry) => self
-                .pool()
-                .lock()
-                .enqueue_runnable(pool_entry(entry), now)?,
+            kworkqueue::ExecutorOp::EnqueueRunnable(entry) => self.enqueue_runnable(entry, now)?,
             kworkqueue::ExecutorOp::EnqueueInactive(entry) => {
-                self.pool().lock().enqueue_deferred(pool_entry(entry))?;
+                self.enqueue_deferred(entry)?;
                 ActionBatch::new()
             }
             kworkqueue::ExecutorOp::Remove(entry) => {
-                let _ = self
-                    .pool()
-                    .lock()
-                    .remove_entry(pool_owner(entry.owner), pool_key(entry.key));
+                let _ = self.remove_entry(entry);
                 ActionBatch::new()
             }
             kworkqueue::ExecutorOp::PromoteInactive { .. } => {
@@ -161,7 +89,14 @@ impl SystemPoolBinding {
         owner: PoolEntryOwner,
         now: ktime_types::MonotonicInstant,
     ) -> Result<Option<(kworkqueue::ExecutorEntry, ActionBatch)>, BuiltinPoolEnqueueError> {
-        let Some((entry, actions)) = self.pool().lock().promote_one_deferred(owner, now) else {
+        let promoted = match self {
+            Self::System(pool) => pool.runtime().lock().promote_one_deferred(owner, now),
+            Self::BottomHalf(pool) => pool
+                .pool()
+                .promote_one_deferred(owner, now)
+                .map(|entry| (entry, ActionBatch::new())),
+        };
+        let Some((entry, actions)) = promoted else {
             return Ok(None);
         };
         let entry = super::entry::executor_entry(entry)
@@ -176,31 +111,89 @@ impl SystemPoolBinding {
             | kworkqueue::ExecutorOp::Remove(entry) => entry,
             kworkqueue::ExecutorOp::PromoteInactive { .. } => return false,
         };
-        self.pool()
-            .lock()
-            .get_payload_mut(pool_owner(entry.owner), pool_key(entry.key))
-            .is_some()
+        match self {
+            Self::System(pool) => pool
+                .runtime()
+                .lock()
+                .get_payload_mut(pool_owner(entry.owner), pool_key(entry.key))
+                .is_some(),
+            Self::BottomHalf(pool) => pool
+                .pool()
+                .has_entry(pool_owner(entry.owner), pool_key(entry.key)),
+        }
+    }
+
+    fn enqueue_runnable(
+        self,
+        entry: kworkqueue::ExecutorEntry,
+        now: ktime_types::MonotonicInstant,
+    ) -> Result<ActionBatch, WorkerPoolError> {
+        match self {
+            Self::System(pool) => pool
+                .runtime()
+                .lock()
+                .enqueue_runnable(pool_entry(entry), now),
+            Self::BottomHalf(pool) => {
+                pool.pool().enqueue_runnable(pool_entry(entry), now)?;
+                Ok(ActionBatch::new())
+            }
+        }
+    }
+
+    fn enqueue_deferred(self, entry: kworkqueue::ExecutorEntry) -> Result<(), WorkerPoolError> {
+        match self {
+            Self::System(pool) => pool.runtime().lock().enqueue_deferred(pool_entry(entry)),
+            Self::BottomHalf(pool) => pool.pool().enqueue_deferred(pool_entry(entry)),
+        }
+    }
+
+    fn remove_entry(
+        self,
+        entry: kworkqueue::ExecutorEntry,
+    ) -> Option<(kworkerpool::PoolEntry, kworkerpool::QueueRemoveResult)> {
+        match self {
+            Self::System(pool) => pool
+                .runtime()
+                .lock()
+                .remove_entry(pool_owner(entry.owner), pool_key(entry.key)),
+            Self::BottomHalf(pool) => pool
+                .pool()
+                .remove_entry(pool_owner(entry.owner), pool_key(entry.key)),
+        }
+    }
+}
+
+fn expand_bottom_half_snapshot(snapshot: WorkerPoolSnapshot<1>) -> BuiltinPoolSnapshot {
+    let mut worker_states = [WorkerState::Empty; BUILTIN_WORKERS_PER_POOL];
+    if BUILTIN_WORKERS_PER_POOL != 0 {
+        worker_states[0] = snapshot.worker_states[0];
+    }
+    WorkerPoolSnapshot {
+        installed_workers: snapshot.installed_workers,
+        nr_creating: snapshot.nr_creating,
+        nr_idle: snapshot.nr_idle,
+        nr_preparing: snapshot.nr_preparing,
+        nr_claiming: snapshot.nr_claiming,
+        nr_running_state: snapshot.nr_running_state,
+        nr_sleeping: snapshot.nr_sleeping,
+        nr_retire_requested: snapshot.nr_retire_requested,
+        nr_exiting: snapshot.nr_exiting,
+        nr_concurrency: snapshot.nr_concurrency,
+        runnable: snapshot.runnable,
+        deferred: snapshot.deferred,
+        worker_states,
     }
 }
 
 pub(crate) fn handle_actions(cpu_id: LogicalCpuId, actions: ActionBatch) {
     for action in actions.immediate() {
         match action {
-            ImmediateAction::WakeWorker { pool, worker } => {
-                if let Some(kind) = SystemPoolKind::from_usize(pool.kind().as_usize()) {
-                    let _ = super::system::wake_system_worker(kind, cpu_id, worker);
-                }
+            ImmediateAction::WakeWorker { worker } => {
+                let _ =
+                    super::dispatch::wake_builtin_worker(BuiltinPoolKind::Normal, cpu_id, worker);
             }
-            ImmediateAction::WakeManager { pool } => {
-                if let Some(kind) = SystemPoolKind::from_usize(pool.kind().as_usize()) {
-                    let _ = super::system::wake_system_manager(kind, cpu_id);
-                }
-            }
-            ImmediateAction::RaiseBottomHalf { .. } => {
-                // A generic worker-pool action does not know which BH workqueue
-                // kind produced the runnable entry. kwork raises the exact
-                // softirq in enqueue, promote, and drain paths while it still
-                // has the BottomHalfWorkQueueKind.
+            ImmediateAction::WakeManager => {
+                let _ = super::dispatch::wake_builtin_manager(BuiltinPoolKind::Normal, cpu_id);
             }
             ImmediateAction::ArmCpuIntensiveTimer { .. } => {}
         }

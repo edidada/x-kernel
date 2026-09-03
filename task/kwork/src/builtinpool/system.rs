@@ -2,212 +2,116 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Static built-in worker-pool set.
+//! Per-CPU task-context system worker pools.
 
 use kcpu_id_map::LogicalCpuId;
-use ktime_types::MonotonicInstant;
-use kworkerpool::{WorkerId, WorkerRuntime, WorkerRuntimeFactory, decode_task_context};
+use kworkerpool::{WorkerId, WorkerPoolPlacement, WorkerPoolPolicy};
 
 use super::{
-    cpu::{BuiltinCpuPoolInitResult, BuiltinCpuWorkerPools},
-    kind::SystemPoolKind,
-    pool::{BuiltinPoolRuntime, BuiltinSystemWorkerPool, SystemPoolBinding},
+    init::{BuiltinPoolInitError, SystemWorkerPoolInitResult, init_system_pool},
+    pool::{BUILTIN_WORKERS_PER_POOL, BuiltinKtaskWorkerPool, BuiltinPoolBinding},
 };
 
-/// Built-in per-CPU system worker-pool set.
-pub(crate) struct BuiltinSystemWorkerPools {
-    cpus: [BuiltinCpuWorkerPools; kbuild_config::NR_CPUS],
+/// One task-context system worker pool.
+pub(crate) struct SystemWorkerPool {
+    runtime: BuiltinKtaskWorkerPool,
 }
 
-impl BuiltinSystemWorkerPools {
-    const fn new() -> Self {
-        Self { cpus: make_cpus() }
-    }
-
-    /// Returns one CPU's built-in worker pools.
-    pub(crate) fn cpu(
-        &'static self,
-        cpu_id: LogicalCpuId,
-    ) -> Option<&'static BuiltinCpuWorkerPools> {
-        self.cpus.get(cpu_id.as_usize())
-    }
-
-    /// Returns one built-in worker pool selected by kind and CPU.
-    pub(crate) fn pool(
-        &'static self,
-        kind: SystemPoolKind,
-        cpu_id: LogicalCpuId,
-    ) -> Option<&'static BuiltinSystemWorkerPool> {
-        let cpu = self.cpu(cpu_id)?;
-        match kind {
-            SystemPoolKind::Normal => Some(cpu.normal()),
-            SystemPoolKind::Bh => Some(cpu.bh()),
+impl SystemWorkerPool {
+    const fn new(cpu_id: LogicalCpuId) -> Self {
+        Self {
+            runtime: BuiltinKtaskWorkerPool::new(
+                WorkerPoolPlacement::bound_to(cpu_id),
+                system_pool_policy(),
+            ),
         }
     }
 
-    /// Resolves a pool by kind and CPU.
-    pub(crate) fn for_kind_cpu(
+    pub(crate) fn cpu_id(&self) -> LogicalCpuId {
+        self.runtime.placement().cpu_id()
+    }
+
+    pub(crate) fn is_ready(&self) -> bool {
+        self.runtime.has_manager_thread()
+    }
+
+    pub(crate) fn configure_empty(&self, cpu_id: LogicalCpuId) -> bool {
+        self.runtime
+            .configure_empty(WorkerPoolPlacement::bound_to(cpu_id), system_pool_policy())
+    }
+
+    pub(crate) const fn runtime(&self) -> &BuiltinKtaskWorkerPool {
+        &self.runtime
+    }
+
+    pub(crate) fn wake_worker(&self, worker: WorkerId) -> bool {
+        self.runtime.wake_worker(worker)
+    }
+
+    pub(crate) fn wake_manager(&self) -> bool {
+        self.runtime.wake_manager()
+    }
+}
+
+/// Built-in per-CPU task-context system worker-pool set.
+pub(crate) struct SystemWorkerPools {
+    pools: [SystemWorkerPool; kbuild_config::NR_CPUS],
+}
+
+impl SystemWorkerPools {
+    const fn new() -> Self {
+        Self {
+            pools: [const { SystemWorkerPool::new(LogicalCpuId::new(0)) }; kbuild_config::NR_CPUS],
+        }
+    }
+
+    pub(crate) fn cpu(&'static self, cpu_id: LogicalCpuId) -> Option<&'static SystemWorkerPool> {
+        self.pools.get(cpu_id.as_usize())
+    }
+
+    /// Resolves the system worker pool for one CPU.
+    pub(crate) fn for_cpu(&'static self, cpu_id: LogicalCpuId) -> Option<BuiltinPoolBinding> {
+        let pool = self.cpu(cpu_id)?;
+        pool.is_ready().then_some(BuiltinPoolBinding::System(pool))
+    }
+
+    /// Initializes this CPU's system worker pool.
+    pub(crate) fn init_cpu(
         &'static self,
-        kind: SystemPoolKind,
         cpu_id: LogicalCpuId,
-    ) -> Option<SystemPoolBinding> {
-        let pool = self.pool(kind, cpu_id)?;
-        pool.is_ready().then_some(SystemPoolBinding::new(pool))
+    ) -> Result<SystemWorkerPoolInitResult, BuiltinPoolInitError> {
+        let pool = self.cpu(cpu_id).ok_or(BuiltinPoolInitError::InvalidCpu)?;
+        pool.configure_empty(cpu_id)
+            .then_some(())
+            .ok_or(BuiltinPoolInitError::ConfigureFailed)?;
+        Ok(init_system_pool(pool, cpu_id))
     }
 
-    /// Resolves the normal system pool for one CPU.
-    pub(crate) fn for_cpu(&'static self, cpu_id: LogicalCpuId) -> Option<SystemPoolBinding> {
-        self.for_kind_cpu(SystemPoolKind::Normal, cpu_id)
+    /// Returns whether the system worker pool exists with the expected id.
+    pub(crate) fn is_cpu_ready(&'static self, cpu_id: LogicalCpuId) -> bool {
+        self.cpu(cpu_id)
+            .is_some_and(|pool| pool.cpu_id() == cpu_id && pool.is_ready())
     }
 
-    /// Initializes this CPU's built-in worker pools.
-    pub(crate) fn init_cpu<R>(
-        &'static self,
-        cpu_id: LogicalCpuId,
-        runtime_factory: WorkerRuntimeFactory<R>,
-    ) -> Option<BuiltinCpuPoolInitResult>
-    where
-        R: WorkerRuntime<&'static BuiltinPoolRuntime> + 'static,
-    {
-        let cpu = self.cpu(cpu_id)?;
-        cpu.configure(cpu_id).then_some(())?;
-        Some(cpu.init(cpu_id, runtime_factory))
-    }
-
-    /// Returns whether the selected built-in pool exists with the expected id.
-    pub(crate) fn is_pool_ready(&'static self, kind: SystemPoolKind, cpu_id: LogicalCpuId) -> bool {
-        self.pool(kind, cpu_id).is_some_and(|pool| {
-            pool.id().kind() == kind.pool_kind() && pool.cpu_id() == cpu_id && pool.is_ready()
-        })
-    }
-
-    /// Wakes one worker thread in a built-in pool.
-    pub(crate) fn wake_worker(
-        &'static self,
-        kind: SystemPoolKind,
-        cpu_id: LogicalCpuId,
-        worker: WorkerId,
-    ) -> bool {
-        self.pool(kind, cpu_id)
+    /// Wakes one system worker thread.
+    pub(crate) fn wake_worker(&'static self, cpu_id: LogicalCpuId, worker: WorkerId) -> bool {
+        self.cpu(cpu_id)
             .is_some_and(|pool| pool.wake_worker(worker))
     }
 
-    /// Wakes the manager thread for a built-in task-context pool.
-    pub(crate) fn wake_manager(&'static self, kind: SystemPoolKind, cpu_id: LogicalCpuId) -> bool {
-        if !kind.has_manager() {
-            return false;
-        }
-        self.pool(kind, cpu_id)
-            .is_some_and(|pool| pool.wake_manager())
+    /// Wakes the per-CPU system worker manager thread.
+    pub(crate) fn wake_manager(&'static self, cpu_id: LogicalCpuId) -> bool {
+        self.cpu(cpu_id).is_some_and(|pool| pool.wake_manager())
     }
 }
 
-static SYSTEM_WORKER_POOLS: BuiltinSystemWorkerPools = BuiltinSystemWorkerPools::new();
+static SYSTEM_WORKER_POOLS: SystemWorkerPools = SystemWorkerPools::new();
 
-/// Returns the global built-in worker-pool set.
-pub(crate) const fn system_pools() -> &'static BuiltinSystemWorkerPools {
+/// Returns the global task-context system worker-pool set.
+pub(crate) const fn system_worker_pools() -> &'static SystemWorkerPools {
     &SYSTEM_WORKER_POOLS
 }
 
-/// Initializes the current CPU's built-in system worker pools.
-pub(crate) fn init_system_worker_pools_for_cpu<R>(
-    cpu_id: LogicalCpuId,
-    runtime_factory: WorkerRuntimeFactory<R>,
-) -> Option<BuiltinCpuPoolInitResult>
-where
-    R: WorkerRuntime<&'static BuiltinPoolRuntime> + 'static,
-{
-    system_pools().init_cpu(cpu_id, runtime_factory)
-}
-
-/// Returns whether the built-in pool for `(kind, cpu_id)` has been initialized.
-pub(crate) fn is_system_worker_pool_ready(kind: SystemPoolKind, cpu_id: LogicalCpuId) -> bool {
-    system_pools().is_pool_ready(kind, cpu_id)
-}
-
-/// Resolves the normal system pool for one CPU.
-pub(crate) fn system_pool_for_cpu(cpu_id: LogicalCpuId) -> Option<SystemPoolBinding> {
-    system_pools().for_cpu(cpu_id)
-}
-
-/// Resolves a built-in system pool by kind and CPU.
-pub(crate) fn system_pool_for_kind_cpu(
-    kind: SystemPoolKind,
-    cpu_id: LogicalCpuId,
-) -> Option<SystemPoolBinding> {
-    system_pools().for_kind_cpu(kind, cpu_id)
-}
-
-/// Wakes one runtime worker thread owned by a built-in pool, if available.
-pub(crate) fn wake_system_worker(
-    kind: SystemPoolKind,
-    cpu_id: LogicalCpuId,
-    worker: WorkerId,
-) -> bool {
-    system_pools().wake_worker(kind, cpu_id, worker)
-}
-
-/// Wakes the per-CPU manager thread owned by a built-in pool.
-pub(crate) fn wake_system_manager(kind: SystemPoolKind, cpu_id: LogicalCpuId) -> bool {
-    system_pools().wake_manager(kind, cpu_id)
-}
-
-/// Accounts one scheduler tick for a task currently running built-in pool work.
-pub(crate) fn account_system_execution_tick(
-    context: ktask::TaskExecutionContext,
-    now: MonotonicInstant,
-) -> Option<MonotonicInstant> {
-    let decoded = decode_task_context(context)?;
-    let kind = SystemPoolKind::from_usize(decoded.pool_id.kind().as_usize())?;
-    let pool = system_pools().pool(kind, decoded.cpu_id)?;
-    let result = pool.runtime().account_execution_tick(context, now)?;
-    super::pool::handle_actions(pool.cpu_id(), result.actions);
-    result.deadline
-}
-
-/// Reports that a built-in worker-pool execution entered a sleepable block.
-pub(crate) fn account_system_execution_blocked(
-    context: ktask::TaskExecutionContext,
-    now: MonotonicInstant,
-) {
-    let Some(decoded) = decode_task_context(context) else {
-        return;
-    };
-    let Some(kind) = SystemPoolKind::from_usize(decoded.pool_id.kind().as_usize()) else {
-        return;
-    };
-    let Some(pool) = system_pools().pool(kind, decoded.cpu_id) else {
-        return;
-    };
-    if let Some(actions) = pool.runtime().account_worker_blocked(context, now) {
-        super::pool::handle_actions(pool.cpu_id(), actions);
-    }
-}
-
-/// Reports that a built-in worker-pool execution resumed from a sleepable block.
-pub(crate) fn account_system_execution_resumed(context: ktask::TaskExecutionContext) {
-    let Some(decoded) = decode_task_context(context) else {
-        return;
-    };
-    let Some(kind) = SystemPoolKind::from_usize(decoded.pool_id.kind().as_usize()) else {
-        return;
-    };
-    let Some(pool) = system_pools().pool(kind, decoded.cpu_id) else {
-        return;
-    };
-    let _ = pool.runtime().account_worker_resumed(context);
-}
-
-/// Returns the next CPU-intensive tick deadline for a built-in pool execution.
-pub(crate) fn system_execution_tick_deadline(
-    context: ktask::TaskExecutionContext,
-) -> Option<MonotonicInstant> {
-    let decoded = decode_task_context(context)?;
-    let kind = SystemPoolKind::from_usize(decoded.pool_id.kind().as_usize())?;
-    let pool = system_pools().pool(kind, decoded.cpu_id)?;
-    pool.runtime().execution_tick_deadline(context)
-}
-
-const fn make_cpus() -> [BuiltinCpuWorkerPools; kbuild_config::NR_CPUS] {
-    [const { BuiltinCpuWorkerPools::new() }; kbuild_config::NR_CPUS]
+pub(crate) const fn system_pool_policy() -> WorkerPoolPolicy {
+    WorkerPoolPolicy::threaded(1, BUILTIN_WORKERS_PER_POOL)
 }
