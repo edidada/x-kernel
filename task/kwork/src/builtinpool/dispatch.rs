@@ -29,6 +29,7 @@ pub(crate) fn is_system_pool_ready(cpu_id: LogicalCpuId) -> bool {
 }
 
 /// Returns whether the bottom-half pool for `cpu_id` is initialized.
+#[cfg(feature = "stress_test")]
 pub(crate) fn is_bottom_half_pool_ready(cpu_id: LogicalCpuId) -> bool {
     bh_worker_pools().is_cpu_ready(cpu_id)
 }

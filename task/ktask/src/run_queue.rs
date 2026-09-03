@@ -2585,11 +2585,9 @@ mod tests_wake_affinity {
 
 #[cfg(all(feature = "preempt", unittest))]
 mod tests_interrupt_kick {
-    use core::sync::atomic::{AtomicUsize, Ordering};
+    use unittest::{assert, def_test};
 
-    use unittest::{assert, assert_eq, def_test};
-
-    use crate::{current, yield_now};
+    use crate::current;
 
     #[def_test(serial)]
     fn interrupt_current_sets_preempt_pending() {
@@ -2607,10 +2605,13 @@ mod tests_interrupt_kick {
     #[cfg(feature = "smp")]
     #[def_test(serial)]
     fn interrupt_running_remote_task_sets_preempt_pending() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
         use kcpu_id_map::LogicalCpuId;
         use khal::percpu::this_cpu_id;
+        use unittest::assert_eq;
 
-        use crate::{KCpuMask, set_task_affinity, spawn};
+        use crate::{KCpuMask, set_task_affinity, spawn, yield_now};
 
         const TIMEOUT_NS: u64 = 2_000_000_000;
 

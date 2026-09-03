@@ -1550,18 +1550,24 @@ static SYSTEM_WQ_BALANCE_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
 fn select_balanced_normal_pool_cpu() -> LogicalCpuId {
     let current = runtime::current_cpu_id();
-    if kbuild_config::NR_CPUS <= 1 {
-        return current;
+    select_balanced_normal_pool_cpu_from::<{ kbuild_config::NR_CPUS }>(current)
+}
+
+fn select_balanced_normal_pool_cpu_from<const NR_CPUS: usize>(
+    fallback: LogicalCpuId,
+) -> LogicalCpuId {
+    if NR_CPUS <= 1 {
+        return fallback;
     }
 
-    let start = SYSTEM_WQ_BALANCE_CURSOR.fetch_add(1, Ordering::Relaxed) % kbuild_config::NR_CPUS;
-    for offset in 0..kbuild_config::NR_CPUS {
-        let cpu_id = LogicalCpuId::new((start + offset) % kbuild_config::NR_CPUS);
+    let start = SYSTEM_WQ_BALANCE_CURSOR.fetch_add(1, Ordering::Relaxed) % NR_CPUS;
+    for offset in 0..NR_CPUS {
+        let cpu_id = LogicalCpuId::new((start + offset) % NR_CPUS);
         if builtinpool::is_system_pool_ready(cpu_id) {
             return cpu_id;
         }
     }
-    current
+    fallback
 }
 
 #[cfg(unittest)]

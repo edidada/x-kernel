@@ -174,14 +174,17 @@ pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
     // Push the callback to all other CPUs' IPI event queues
     enqueue_broadcast_to_others(current_cpu_id, &callback);
 
-    // Send IPI to all other CPUs to trigger their callbacks
-    kirq::notify_cpu(
-        IPI_IRQ,
-        IpiTarget::AllButSelf {
-            me: current_cpu_id.as_usize(),
-            total: kcpu_id_map::nr_cpus(),
-        },
-    );
+    // Send IPI to all other CPUs to trigger their callbacks.
+    let total_cpus = kcpu_id_map::nr_cpus();
+    if total_cpus > 1 {
+        kirq::notify_cpu(
+            IPI_IRQ,
+            IpiTarget::AllButSelf {
+                me: current_cpu_id.as_usize(),
+                total: total_cpus,
+            },
+        );
+    }
 
     Ok(())
 }

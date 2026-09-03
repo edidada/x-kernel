@@ -99,6 +99,7 @@ impl BottomHalfWorkerPools {
     }
 
     /// Returns whether the bottom-half pool exists with the expected id.
+    #[cfg(feature = "stress_test")]
     pub(crate) fn is_cpu_ready(&'static self, cpu_id: LogicalCpuId) -> bool {
         self.cpu(cpu_id)
             .is_some_and(|pool| pool.cpu_id() == cpu_id && pool.is_ready())
