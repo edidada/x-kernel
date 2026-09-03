@@ -51,7 +51,6 @@ pub use provider::{
 };
 pub use rate::{ClkRateRequest, Rate, RoundResult};
 pub use reg::{ClkRegAccess, MmioClkReg, NullClkReg};
-
 pub use table::{
     ClkBranch, ClkNodeDesc, DividerDesc, GateDesc, MuxDesc, ParentRef, register_table,
 };

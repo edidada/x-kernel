@@ -15,10 +15,11 @@ use kspin::SpinNoIrq;
 use unittest::{assert_eq, def_test};
 
 use crate::{
-    ClkBuilder, ClkError, ClkEvent, ClkFlags, ClkHandle, ClkHwOps, ClkRegAccess, ClkTable,
-    DivTableEntry, Divider, DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux,
-    NotifierResult, basic::Composite, clk_disable_unused, clk_get_by_index, clk_get_by_name,
-    register_provider, reset_providers, unregister_provider,
+    ClkBranch, ClkBuilder, ClkError, ClkEvent, ClkFlags, ClkHandle, ClkHwOps, ClkRegAccess,
+    ClkTable, DivTableEntry, Divider, DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux,
+    NotifierResult, ParentRef, basic::Composite, clk_disable_unused, clk_get_by_index,
+    clk_get_by_name, register_provider, register_table, reset_providers, table::ClkNodeDesc,
+    unregister_provider,
 };
 
 /// Array-backed register accessor for testing field math.
