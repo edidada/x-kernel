@@ -192,11 +192,12 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 
 1. `poll_interfaces` 获取 `SERVICE` 和 `SOCKET_SET` 锁。
 2. `Service::poll` 调用 `Router::poll` 从设备拉取 IP 包。
-3. `Router::poll` 对收到的 IP 包执行 UDP error snoop 和 TCP listen snoop。
-4. smoltcp `Interface::poll` 驱动协议 socket。
-5. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
-6. `Router::dispatch` 把 smoltcp 生成的 TX IP 包按路由发到设备。
-7. loopback 或设备 TX 触发后继续返回 `true`，外层循环继续推进。
+3. `Router::poll` 在 RX buffer 元数据槽未满时调用 `poll_rx`；设备侧 `enqueue` 失败（含 payload 环碎片化）时丢包并停止本轮拉取。
+4. `Router::poll` 对入队成功的 IP 包执行 UDP error snoop 和 TCP listen snoop。
+5. smoltcp `Interface::poll` 驱动协议 socket。
+6. `ListenTable::wake_touched_acceptors` 唤醒 accept 等待者。
+7. `Router::dispatch` 把 smoltcp 生成的 TX IP 包按路由发到设备。
+8. loopback 或设备 TX 触发后继续返回 `true`，外层循环继续推进。
 
 ### TX 路由
 
@@ -231,6 +232,7 @@ updated ROUTE_STATE ──sync_netlink──> Service / Router / Interface / dev
 - TCP 状态转换使用 `StateLock` 的 atomic CAS，失败时返回当前状态。
 - socket option 和 shutdown 标志使用 atomics，跨线程读写只表达配置或关闭状态。
 - Unix stream 的 ring buffer producer 与 consumer 被 `channel: Mutex<Option<Channel>>` 包住，send 与 recv 对同一 channel 的 ring 操作串行执行。
+- Unix datagram 接收队列是有界 channel（32 条、单包不超过 64KiB），队列满时 send 返回 `WouldBlock`。
 - netlink `ROUTE_STATE` 使用 `RwLock`，rx queue 和 subscriber 列表使用 `Mutex`。
 - RX waker 由 `GeneralOptions::device_mask` 指向相关设备，`Service::register_rx_waker` 同时注册 timeout 和设备 IRQ waker。
 
@@ -265,6 +267,15 @@ rtnetlink mutation 先更新 `RtnetlinkState`，再同步到 `Service`、`Router
 Ethernet 设备为未解析 next-hop 保留 `pending_tx`。
 同一个 next-hop 的 ARP 回复到达后，设备按队头顺序发送等待中的 IP 包。
 当前队列存在 head-of-line blocking，长时间 unresolved 的 next-hop 会阻塞后续 pending 包。
+
+### Unix datagram 有界接收队列
+
+Unix datagram 原先使用 `async_channel::unbounded`。
+`/dev/log` 权限为 0o666，任意进程都可以向无界队列灌入数据报，直到堆耗尽。
+现在每条 bound/socketpair 队列最多 32 条报文、单包不超过 64KiB；
+超出长度返回 `EMSGSIZE`，队列满返回 `WouldBlock`。
+syslog 报文远小于这些上限，正常写 `/dev/log` 不受影响。
+数据报在 `send` 时记录发送进程的 pid/euid/egid，供 `/dev/log` 判断是否允许写入内核日志。
 
 ## Drop / 资源释放
 

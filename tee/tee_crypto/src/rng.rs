@@ -13,28 +13,28 @@ pub trait CryptoRng: rand_core::CryptoRng {}
 
 impl<T> CryptoRng for T where T: rand_core::CryptoRng + ?Sized {}
 
-/// ChaCha20-based deterministic RNG for tests and reproducible validation.
-pub struct DeterministicRng {
+/// Production ChaCha20 CSPRNG that can only be constructed from a 256-bit seed.
+///
+/// The seed must come from a hardware RNG or another cryptographic entropy
+/// source. This type does not accept a 64-bit integer seed.
+pub struct ChaCha20Csprng {
     inner: ChaCha20Rng,
 }
 
-impl DeterministicRng {
-    /// Create a new RNG seeded from a u64 value.
-    pub fn seed_from_u64(seed: u64) -> Self {
+impl ChaCha20Csprng {
+    /// Create a CSPRNG from a 256-bit seed.
+    pub fn from_seed(seed: [u8; 32]) -> Self {
         Self {
-            inner: ChaCha20Rng::seed_from_u64(seed),
+            inner: ChaCha20Rng::from_seed(seed),
         }
     }
 
-    /// Create a new RNG seeded from a 32-byte seed.
-    pub fn seed_from_bytes(seed: &[u8; 32]) -> Self {
-        Self {
-            inner: ChaCha20Rng::from_seed(*seed),
-        }
+    fn from_chacha(inner: ChaCha20Rng) -> Self {
+        Self { inner }
     }
 }
 
-impl TryRng for DeterministicRng {
+impl TryRng for ChaCha20Csprng {
     type Error = core::convert::Infallible;
 
     fn try_next_u32(&mut self) -> core::result::Result<u32, Self::Error> {
@@ -48,6 +48,52 @@ impl TryRng for DeterministicRng {
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> core::result::Result<(), Self::Error> {
         self.inner.fill_bytes(dest);
         Ok(())
+    }
+}
+
+impl TryCryptoRng for ChaCha20Csprng {}
+
+/// ChaCha20-based deterministic RNG for tests and reproducible validation.
+///
+/// `seed_from_u64` has only 64 bits of seed material and must not be used as a
+/// production entropy source. Production code should construct
+/// [`ChaCha20Csprng`] from a 256-bit hardware or OS seed.
+pub struct DeterministicRng {
+    inner: ChaCha20Csprng,
+}
+
+impl DeterministicRng {
+    /// Create a new RNG seeded from a u64 value.
+    ///
+    /// Intended for tests. Do not seed production key material or attestation
+    /// nonces from a 64-bit integer (including timestamps or TSC ticks).
+    pub fn seed_from_u64(seed: u64) -> Self {
+        Self {
+            inner: ChaCha20Csprng::from_chacha(ChaCha20Rng::seed_from_u64(seed)),
+        }
+    }
+
+    /// Create a new RNG seeded from a 32-byte seed.
+    pub fn seed_from_bytes(seed: &[u8; 32]) -> Self {
+        Self {
+            inner: ChaCha20Csprng::from_seed(*seed),
+        }
+    }
+}
+
+impl TryRng for DeterministicRng {
+    type Error = core::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> core::result::Result<u32, Self::Error> {
+        self.inner.try_next_u32()
+    }
+
+    fn try_next_u64(&mut self) -> core::result::Result<u64, Self::Error> {
+        self.inner.try_next_u64()
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> core::result::Result<(), Self::Error> {
+        self.inner.try_fill_bytes(dest)
     }
 }
 

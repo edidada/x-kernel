@@ -54,6 +54,7 @@ mod fs_htree;
 #[cfg(unittest)]
 mod fs_htree_tests;
 mod huk_subkey;
+mod hw_entropy;
 
 mod libutee;
 mod memtag;

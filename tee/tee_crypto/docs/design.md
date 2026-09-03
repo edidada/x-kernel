@@ -52,8 +52,10 @@ TA builds.
 - `bignum`: signed and unsigned big-number wrappers backed by `crypto-bigint`.
   This is the TEE arithmetic/MPI compatibility layer, so it stays outside
   `algorithms`.
-- `rng`: RNG abstraction aligned with `rand_core` crypto RNG traits. It is a
-  provider interface, so it stays outside `algorithms`.
+- `rng`: RNG abstraction aligned with `rand_core` crypto RNG traits. Production
+  callers use `ChaCha20Csprng` constructed from a 256-bit seed;
+  `DeterministicRng::seed_from_u64` is a test helper. It is a provider
+  interface, so it stays outside `algorithms`.
 - `streaming_cipher`: mbedtls-like update/final context for block, stream,
   and AEAD algorithms. It is a state-machine compatibility layer and therefore
   stays outside `algorithms`.

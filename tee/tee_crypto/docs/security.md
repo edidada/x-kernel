@@ -36,10 +36,12 @@ object parsing and public metadata checks, are not secret-bearing.
 ## Randomness
 
 `DeterministicRng` is useful for tests and reproducible TA validation.
-Production key generation should use a TEE-provided entropy source through the
-`CryptoRng` trait. Callers' RNGs are passed through to RustCrypto backends
-directly; tee_crypto does not reseed a secondary deterministic RNG from caller
-entropy. Do not treat deterministic seed helpers as production entropy.
+`seed_from_u64` is a 64-bit test helper and must not seed production key
+material or attestation nonces. Production code should construct
+`ChaCha20Csprng` from a 256-bit seed supplied by a hardware RNG or OS CSPRNG
+through the `CryptoRng` trait. Callers' RNGs are passed through to RustCrypto
+backends directly; tee_crypto does not reseed a secondary deterministic RNG
+from caller entropy.
 
 ## Padding And Verification
 

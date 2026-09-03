@@ -111,6 +111,19 @@ impl ExceptionContext {
         self.elr as usize
     }
 
+    /// Force `spsr` to a legal AArch64 EL0t value before `eret`.
+    ///
+    /// `rt_sigreturn` copies `pstate` from a user-writable signal frame.
+    /// Linux `valid_user_regs` rejects any `SPSR.M` other than EL0t; without
+    /// the same mask, `msr spsr_el1` + `eret` would resume at EL1 with a
+    /// user-controlled PC.
+    pub const fn sanitize_user_spsr(&mut self) {
+        // PSR_MODE_MASK (M[3:0]), MODE32 (M[4]), F, A, D, IL.
+        // Clearing M leaves EL0t (0). F/A/D/IL match Linux `valid_native_regs`.
+        const PSR_NOT_USER: u64 = 0x0f | (1 << 4) | (1 << 6) | (1 << 8) | (1 << 9) | (1 << 20);
+        self.spsr &= !PSR_NOT_USER;
+    }
+
     /// Sets the instruction pointer.
     pub const fn set_ip(&mut self, val: usize) {
         self.elr = val as u64;

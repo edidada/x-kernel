@@ -1061,6 +1061,7 @@ fn read_file_follow<B: BlockDevice>(
     fs: &mut Ext4FileSystem,
     path: &str,
     depth: usize,
+    follow_symlinks: bool,
 ) -> BlockDevResult<Option<Vec<u8>>> {
     if depth > 8 {
         return Err(BlockDevError::InvalidInput);
@@ -1073,13 +1074,16 @@ fn read_file_follow<B: BlockDevice>(
     };
 
     if inode.is_symlink() {
+        if !follow_symlinks {
+            return Err(BlockDevError::InvalidInput);
+        }
         let target_bytes = read_symlink_target(device, fs, &mut inode)?;
         let target = match core::str::from_utf8(&target_bytes) {
             Ok(s) => s,
             Err(_) => return Err(BlockDevError::Corrupted),
         };
         let resolved = resolve_symlink_path(path, target)?;
-        return read_file_follow(device, fs, &resolved, depth + 1);
+        return read_file_follow(device, fs, &resolved, depth + 1, true);
     }
 
     if !inode.is_file() {
@@ -2203,7 +2207,20 @@ pub fn read_file<B: BlockDevice>(
     path: &str,
 ) -> BlockDevResult<Option<Vec<u8>>> {
     let norm_path = normalize_path(path)?;
-    read_file_follow(device, fs, &norm_path, 0)
+    read_file_follow(device, fs, &norm_path, 0, true)
+}
+
+/// Read a regular file without following a final-component symlink.
+///
+/// Path lookup does not follow intermediate directory symlinks either.
+/// Returns [`BlockDevError::InvalidInput`] if `path` itself is a symlink.
+pub fn read_file_no_follow<B: BlockDevice>(
+    device: &mut Jbd2Dev<B>,
+    fs: &mut Ext4FileSystem,
+    path: &str,
+) -> BlockDevResult<Option<Vec<u8>>> {
+    let norm_path = normalize_path(path)?;
+    read_file_follow(device, fs, &norm_path, 0, false)
 }
 
 pub fn write_file<B: BlockDevice>(

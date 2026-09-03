@@ -27,35 +27,44 @@ impl DebugfsScript {
         }
     }
 
-    pub fn add_file(&mut self, file: &InstallFile) {
-        self.add_file_with_parent_mode(file, ParentDirMode::Create);
+    pub fn add_file(&mut self, file: &InstallFile) -> Result<(), String> {
+        self.add_file_with_parent_mode(file, ParentDirMode::Create)
     }
 
-    pub fn add_existing_parent_file(&mut self, file: &InstallFile) {
-        self.add_file_with_parent_mode(file, ParentDirMode::RequireExisting);
+    pub fn add_existing_parent_file(&mut self, file: &InstallFile) -> Result<(), String> {
+        self.add_file_with_parent_mode(file, ParentDirMode::RequireExisting)
     }
 
-    fn add_file_with_parent_mode(&mut self, file: &InstallFile, parent_mode: ParentDirMode) {
+    fn add_file_with_parent_mode(
+        &mut self,
+        file: &InstallFile,
+        parent_mode: ParentDirMode,
+    ) -> Result<(), String> {
+        validate_guest_path(&file.guest_path)?;
+        validate_host_path(&file.host_path)?;
         let parent = guest_parent(&file.guest_path);
         let name = guest_basename(&file.guest_path);
         if parent_mode == ParentDirMode::Create {
-            self.ensure_dir(&parent);
+            self.ensure_dir(&parent)?;
         }
-        self.commands.push(format!("cd {}", debugfs_quote(&parent)));
-        self.commands.push(format!("rm {}", debugfs_quote(name)));
+        self.commands
+            .push(format!("cd {}", debugfs_quote(&parent)?));
+        self.commands.push(format!("rm {}", debugfs_quote(name)?));
         self.commands.push(format!(
             "write {} {}",
-            debugfs_quote_path(&file.host_path),
-            debugfs_quote(name)
+            debugfs_quote_path(&file.host_path)?,
+            debugfs_quote(name)?
         ));
         self.commands.push(format!(
             "set_inode_field {} mode 0100{:03o}",
-            debugfs_quote(&file.guest_path),
+            debugfs_quote(&file.guest_path)?,
             file.mode
         ));
+        Ok(())
     }
 
-    pub fn ensure_dir(&mut self, guest_path: &str) {
+    pub fn ensure_dir(&mut self, guest_path: &str) -> Result<(), String> {
+        validate_guest_path(guest_path)?;
         let mut current = String::new();
         for component in guest_path
             .split('/')
@@ -68,10 +77,12 @@ impl DebugfsScript {
             };
             current.push('/');
             current.push_str(component);
-            self.commands.push(format!("cd {}", debugfs_quote(&parent)));
             self.commands
-                .push(format!("mkdir {}", debugfs_quote(component)));
+                .push(format!("cd {}", debugfs_quote(&parent)?));
+            self.commands
+                .push(format!("mkdir {}", debugfs_quote(component)?));
         }
+        Ok(())
     }
 
     pub fn write_to(&self, path: &Path) -> Result<(), String> {
@@ -130,7 +141,7 @@ pub fn guest_parent(path: &str) -> String {
 fn debugfs_stat(disk_img: &Path, path: &str) -> Result<String, String> {
     let output = Command::new("debugfs")
         .arg("-R")
-        .arg(format!("stat {}", debugfs_quote(path)))
+        .arg(format!("stat {}", debugfs_quote(path)?))
         .arg(disk_img)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -168,8 +179,9 @@ fn guest_basename(path: &str) -> &str {
 /// Guest paths are embedded into `debugfs` requests (`stat "<path>"`) and
 /// command scripts. Reject anything that could escape the intended location
 /// (`..`), break request parsing (control characters, NUL), or arrive without
-/// an absolute root. All values reaching [`debugfs_quote`] are expected to be
-/// pre-validated here.
+/// an absolute root. Guest path components and host paths are also checked
+/// again in [`debugfs_quote`] so a missed caller cannot inject extra script
+/// lines.
 pub(crate) fn validate_guest_path(path: &str) -> Result<(), String> {
     if path.trim().is_empty() {
         return Err(format!("guest path must not be empty: {path:?}"));
@@ -177,14 +189,7 @@ pub(crate) fn validate_guest_path(path: &str) -> Result<(), String> {
     if !path.starts_with('/') {
         return Err(format!("guest path must be absolute: {path:?}"));
     }
-    if path.contains('\0') {
-        return Err(format!("guest path must not contain NUL bytes: {path:?}"));
-    }
-    if path.chars().any(char::is_control) {
-        return Err(format!(
-            "guest path must not contain control characters: {path:?}"
-        ));
-    }
+    reject_debugfs_control_chars("guest path", path)?;
     if path.split('/').any(|component| component == "..") {
         return Err(format!(
             "guest path must not contain parent-directory (..) components: {path:?}"
@@ -193,19 +198,50 @@ pub(crate) fn validate_guest_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn debugfs_quote_path(path: &Path) -> String {
-    debugfs_quote(&path.to_string_lossy())
+/// Host paths are written into `debugfs -f` scripts as `write` arguments.
+/// Newlines and other controls would split the script into extra commands.
+pub(crate) fn validate_host_path(path: &Path) -> Result<(), String> {
+    let Some(text) = path.to_str() else {
+        return Err(format!(
+            "host path must be valid UTF-8: {}",
+            path.display()
+        ));
+    };
+    if text.is_empty() {
+        return Err("host path must not be empty".to_string());
+    }
+    reject_debugfs_control_chars("host path", text)
+}
+
+fn reject_debugfs_control_chars(kind: &str, value: &str) -> Result<(), String> {
+    if value.contains('\0') {
+        return Err(format!("{kind} must not contain NUL bytes: {value:?}"));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(format!(
+            "{kind} must not contain control characters: {value:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn debugfs_quote_path(path: &Path) -> Result<String, String> {
+    validate_host_path(path)?;
+    let text = path
+        .to_str()
+        .ok_or_else(|| format!("host path must be valid UTF-8: {}", path.display()))?;
+    debugfs_quote(text)
 }
 
 /// Escape `value` for a `debugfs` double-quoted argument.
 ///
-/// `debugfs` is invoked without a shell (`Command::new("debugfs").arg(...)`),
-/// so this only needs to defeat the `debugfs` request lexer: backslash and
-/// double-quote are the only characters that can alter quoting. Guest paths
-/// reaching here are pre-validated by [`validate_guest_path`].
-fn debugfs_quote(value: &str) -> String {
+/// Scripts are executed with `debugfs -f`, which splits on newlines. Control
+/// characters (including `\n`) cannot be quoted away and are rejected.
+/// Backslash and double-quote are escaped for the `debugfs` lexer.
+fn debugfs_quote(value: &str) -> Result<String, String> {
+    reject_debugfs_control_chars("debugfs argument", value)?;
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
+    Ok(format!("\"{escaped}\""))
 }
 
 #[cfg(test)]

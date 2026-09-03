@@ -197,6 +197,21 @@ FileLike::read/write
 5. 若存在目录项但用户缓冲区连一条也放不下，返回 `InvalidInput`。
 6. 将临时缓冲区写回用户空间，返回实际写入字节数。
 
+### `chroot`
+
+1. 要求调用方 `euid == 0`（当前内核的 `CAP_SYS_CHROOT` 等价物），否则返回 `OperationNotPermitted`。
+2. 从用户空间读取路径并解析。
+3. 目标必须是目录，否则返回 `NotADirectory`。
+4. 用该目录构造新的 `FsContext` 作为进程 root。
+
+### `fchownat` / `fchmodat` / `utimensat`
+
+1. 解析目标后读取当前 inode 元数据。
+2. `fchownat`：`euid == 0` 可改任意 uid/gid；否则必须 `fsuid` 等于文件所有者，不能把 uid 改给别人，gid 只能改到调用者所属组。
+3. `fchmodat`：文件所有者或特权调用者才可改 mode。
+4. `utimensat`：所有者或特权调用者可设任意时间戳；两个时间戳都设为现在时，对文件有写权限也可以。
+5. 通过检查后再调用 `Location::update_metadata`。
+
 ### `fallocate`
 
 1. 校验 `offset`、`len` 非负并检查 `offset + len` 溢出。
@@ -254,14 +269,17 @@ VFS/文件 syscall 与 fd-backed object 之间的互操作接线。
 `/proc/<pid>/fd/<fd>` 不是普通 VFS 路径解析。
 当前实现直接读取目标进程 fd 表并把 `File`/`Directory` 转回 `Location`。
 这样能支持 live procfd 语义。解析或枚举目标 fd 前，当前进程必须是目标自身、
-具备 root 特权，或当前 `fsuid` 与目标 real/effective/saved UID 全部一致；
+具备 root 特权，或当前 `fsuid`/`fsgid` 与目标 real/effective/saved UID 和 GID
+全部一致（Linux `ptrace_may_access` / `PTRACE_MODE_READ_FSCREDS` 的简化等价）；
 该规则同时用于直接 procfd 优化和 procfs 的 `ThreadFdDir` 后端，防止通过
 `readlink`、`O_PATH|O_NOFOLLOW` 或非规范等价路径绕过。目标进程生命周期和
 fd 表并发分别由 `get_process_state` 与 resources 层保证。
 
 ### 不支持的 mount 操作显式拒绝
 
-`sys_mount` 对 remount、bind、move 和 propagation flags 返回 `InvalidInput`，
+`sys_mount` / `sys_umount2` 要求调用方 `euid == 0`（当前内核的
+`CAP_SYS_ADMIN` 等价物），否则返回 `OperationNotPermitted`。
+对 remount、bind、move 和 propagation flags 返回 `InvalidInput`，
 `sys_umount2` 对 force、detach、expire、nofollow 返回 `InvalidInput`。
 显式拒绝比静默忽略更安全，
 因为静默忽略会让用户态误以为已经获得异步卸载或 bind mount 等语义。

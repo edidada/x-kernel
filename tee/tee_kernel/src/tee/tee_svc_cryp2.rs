@@ -19,7 +19,7 @@ use super::{
         TEE_CHAIN_MODE_XTS, tee_alg_get_chain_mode, tee_alg_get_class, tee_alg_get_main_alg,
     },
     tee_obj::{TeeObj, TeeObjIdType, tee_obj_close, tee_obj_get},
-    tee_svc_cryp::{TeeCryptObj, copy_in_attrs, tee_obj_attr_clear},
+    tee_svc_cryp::{TeeCryptObj, copy_in_attrs, load_user_attr_array, tee_obj_attr_clear},
     user_ta::user_ta_ctx,
     vm::vm_check_access_rights,
 };
@@ -32,9 +32,10 @@ use crate::tee::{
         crypto_acipher_rsaes_encrypt, crypto_acipher_rsanopad_decrypt,
         crypto_acipher_rsanopad_encrypt, crypto_acipher_rsassa_sign, crypto_acipher_rsassa_verify,
         crypto_acipher_sm2_pke_decrypt, crypto_acipher_sm2_pke_encrypt, crypto_authenc_dec_final,
-        crypto_authenc_enc_final, crypto_authenc_init, crypto_authenc_update_aad,
-        crypto_cipher_final, crypto_cipher_init, crypto_cipher_max_output_len,
-        crypto_cipher_update, crypto_ecc_init, crypto_rsa_init, crypto_xts_cipher_final,
+        crypto_authenc_enc_final, crypto_authenc_init, crypto_authenc_max_final_output_len,
+        crypto_authenc_update_aad, crypto_cipher_final, crypto_cipher_init,
+        crypto_cipher_max_output_len, crypto_cipher_update, crypto_ecc_init, crypto_rsa_init,
+        crypto_xts_cipher_final,
     },
     memtag::{memtag_strip_tag, memtag_strip_tag_const},
     rng_software::crypto_rng_read,
@@ -524,7 +525,43 @@ fn tee_cryp_asymm_init(
     }
 }
 
-// 创建一个TeeCrypState
+/// Holds `TeeObj.busy` until the crypto state is published, or clears it on
+/// error. `syscall_cryp_obj_close` refuses a busy object, so a failed
+/// `tee_cryp_state_alloc` must not leave the key stuck.
+struct ObjBusyGuard {
+    obj: Option<Arc<Mutex<TeeObj>>>,
+}
+
+impl ObjBusyGuard {
+    fn acquire(obj: &Arc<Mutex<TeeObj>>) -> TeeResult<Self> {
+        let mut guard = obj.lock();
+        if guard.busy {
+            return Err(TEE_ERROR_BUSY);
+        }
+        guard.busy = true;
+        drop(guard);
+        Ok(Self {
+            obj: Some(Arc::clone(obj)),
+        })
+    }
+
+    fn keep_busy(&mut self) {
+        self.obj = None;
+    }
+}
+
+impl Drop for ObjBusyGuard {
+    fn drop(&mut self) {
+        if let Some(obj) = self.obj.take() {
+            obj.lock().busy = false;
+        }
+    }
+}
+
+/// Allocate a crypto operation state and mark its keys busy.
+///
+/// On any failure before the state is inserted, `ObjBusyGuard` clears
+/// `TeeObj.busy` so the keys can be closed and reused.
 pub fn tee_cryp_state_alloc(
     algo: u32,
     mode: TEE_OperationMode,
@@ -538,30 +575,32 @@ pub fn tee_cryp_state_alloc(
     // 判断密钥对象是否存在，并取出密钥对象
     let mut o1_ok = false;
     let mut o2_ok = false;
+    let mut busy1 = None;
+    let mut busy2 = None;
     if let Some(key1) = key1
         && let Ok(obj1_arc) = tee_obj_get(key1 as TeeObjIdType)
     {
         o1_ok = true;
-        let mut o1 = obj1_arc.lock();
-        if o1.busy {
-            return Err(TEE_ERROR_BUSY);
+        let marked = ObjBusyGuard::acquire(&obj1_arc)?;
+        {
+            let o1 = obj1_arc.lock();
+            cs.key1 = Some(o1.info.objectId);
+            tee_svc_cryp_check_key_type(&o1, algo, mode)?;
         }
-        o1.busy = true;
-        cs.key1 = Some(o1.info.objectId);
-        tee_svc_cryp_check_key_type(&o1, algo, mode)?;
+        busy1 = Some(marked);
     }
 
     if let Some(key2) = key2
         && let Ok(obj2_arc) = tee_obj_get(key2 as TeeObjIdType)
     {
         o2_ok = true;
-        let mut o2 = obj2_arc.lock();
-        if o2.busy {
-            return Err(TEE_ERROR_BUSY);
+        let marked = ObjBusyGuard::acquire(&obj2_arc)?;
+        {
+            let o2 = obj2_arc.lock();
+            cs.key2 = Some(o2.info.objectId);
+            tee_svc_cryp_check_key_type(&o2, algo, mode)?;
         }
-        o2.busy = true;
-        cs.key2 = Some(o2.info.objectId);
-        tee_svc_cryp_check_key_type(&o2, algo, mode)?;
+        busy2 = Some(marked);
     }
 
     // 判断密钥是否符合算法要求
@@ -627,7 +666,16 @@ pub fn tee_cryp_state_alloc(
         let arc_cs = Arc::new(Mutex::new(cs));
         let _ = vacant.insert(arc_cs);
         Ok(())
-    })
+    })?;
+
+    // State owns the keys until `tee_cryp_state_free`.
+    if let Some(guard) = busy1.as_mut() {
+        guard.keep_busy();
+    }
+    if let Some(guard) = busy2.as_mut() {
+        guard.keep_busy();
+    }
+    Ok(())
 }
 
 pub fn syscall_cryp_state_alloc(
@@ -1159,6 +1207,8 @@ pub fn syscall_authenc_update_payload(
     )
 }
 
+/// Finish AEAD encryption. Returns `TEE_ERROR_SHORT_BUFFER` if `output` or
+/// `tag` cannot hold the remaining ciphertext and tag (GP; no silent truncate).
 pub fn tee_cryp_authenc_enc_final(
     id: u32,
     input: Option<&[u8]>,
@@ -1177,6 +1227,11 @@ pub fn tee_cryp_authenc_enc_final(
     }
 
     drop(cs_guard);
+    let input_len = input.map(|s| s.len()).unwrap_or(0);
+    let max_out = crypto_authenc_max_final_output_len(cs.clone(), input_len)?;
+    if output.len() < max_out {
+        return Err(TEE_ERROR_SHORT_BUFFER);
+    }
     crypto_authenc_enc_final(cs.clone(), input, output, tag)
 }
 
@@ -1214,6 +1269,8 @@ pub fn syscall_authenc_enc_final(
     Ok(())
 }
 
+/// Finish AEAD decryption. Returns `TEE_ERROR_SHORT_BUFFER` if `output` cannot
+/// hold the remaining plaintext. Tag check still happens only after this.
 pub fn tee_cryp_authenc_dec_final(
     id: u32,
     input: Option<&[u8]>,
@@ -1232,6 +1289,11 @@ pub fn tee_cryp_authenc_dec_final(
     }
 
     drop(cs_guard);
+    let input_len = input.map(|s| s.len()).unwrap_or(0);
+    let max_out = crypto_authenc_max_final_output_len(cs.clone(), input_len)?;
+    if output.len() < max_out {
+        return Err(TEE_ERROR_SHORT_BUFFER);
+    }
     crypto_authenc_dec_final(cs.clone(), input, output, tag)
 }
 
@@ -1383,11 +1445,8 @@ pub fn syscall_asymm_operate(
     let params_attrs = if num_params == 0 {
         None
     } else {
-        let usr_attrs = UserConstPtr::<utee_attribute>::from(arg1)
-            .load_vm_vec(num_params)
-            .map_err(map_user_mem_error)?;
-        let usr_attrs_slice = usr_attrs.as_slice();
-        Some(copy_in_attrs(&mut user_ta_ctx::default(), usr_attrs_slice)?)
+        let usr_attrs = load_user_attr_array(arg1 as *const utee_attribute, num_params)?;
+        Some(copy_in_attrs(&mut user_ta_ctx::default(), &usr_attrs)?)
     };
 
     let mut label_buf: Option<Box<[u8]>> = None;

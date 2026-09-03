@@ -17,9 +17,9 @@ use crate::{
 
 /// Linear mapping backend.
 ///
-/// The offset between the virtual address and the physical address is
-/// constant, which is specified by `pa_va_offset`. For example, the virtual
-/// address `vaddr` is mapped to the physical address `vaddr - pa_va_offset`.
+/// The difference between virtual and physical addresses is constant modulo
+/// `2^usize`. Physical address is `vaddr.wrapping_sub(offset)` where `offset`
+/// is stored as the `isize` bit-pattern of that wrapping difference.
 #[derive(Clone)]
 pub struct LinearBackend {
     offset: isize,
@@ -27,11 +27,10 @@ pub struct LinearBackend {
 
 impl LinearBackend {
     fn pa(&self, va: VirtAddr) -> PhysAddr {
-        let pa = (va.as_usize() as isize)
-            .checked_sub(self.offset)
-            .expect("linear address translation overflow");
-        assert!(pa >= 0, "linear address translation produced negative PA");
-        PhysAddr::from(pa as usize)
+        // Wrapping keeps high PAs (bit 63 set) representable. Signed
+        // `as isize` subtraction overflows when VA and PA sit on opposite
+        // halves of the address space.
+        PhysAddr::from(va.as_usize().wrapping_sub(self.offset as usize))
     }
 }
 

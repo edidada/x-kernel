@@ -1862,6 +1862,31 @@ pub fn tee_obj_attr_clear(o: &mut TeeObj) -> TeeResult {
     Ok(())
 }
 
+/// More attributes than any `TeeCrypObjTypeProps::num_type_attrs` (RSA keypair is 8).
+const MAX_CRYP_USER_ATTRS: usize = 32;
+
+/// Larger than a 4096-bit bignum or HMAC-1024 secret; small enough to refuse OOM.
+const MAX_CRYP_ATTR_MEMREF_BYTES: usize = 64 * 1024;
+
+/// Copy a TA `utee_attribute` array after bounding `count`.
+///
+/// `load_vm_vec` allocates before checking user addresses, so `count` must be
+/// capped here. Used by populate, generate-key, and asymmetric operate.
+pub(crate) fn load_user_attr_array(
+    ptr: *const utee_attribute,
+    count: usize,
+) -> TeeResult<Vec<utee_attribute>> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    if count > MAX_CRYP_USER_ATTRS {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    UserConstPtr::<utee_attribute>::from(ptr)
+        .load_vm_vec(count)
+        .map_err(map_user_mem_error)
+}
+
 /// Copy user ABI attributes into kernel-owned semantic attributes.
 pub(crate) fn copy_in_attrs(
     _uctx: &mut user_ta_ctx,
@@ -1878,15 +1903,18 @@ pub(crate) fn copy_in_attrs(
             });
         } else {
             let mut buf = usr_attr.a;
-            let len = usr_attr.b;
+            let len = usize::try_from(usr_attr.b).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+            if len > MAX_CRYP_ATTR_MEMREF_BYTES {
+                return Err(TEE_ERROR_BAD_PARAMETERS);
+            }
             let flags = TEE_MEMORY_ACCESS_READ | TEE_MEMORY_ACCESS_ANY_OWNER;
             buf = memtag_strip_tag_vaddr(buf as *const c_void) as u64;
-            vm_check_access_rights(flags, buf as usize, len as usize)?;
+            vm_check_access_rights(flags, buf as usize, len)?;
             let data = if len == 0 {
                 Box::new([])
             } else {
                 UserConstPtr::<u8>::from(buf as usize)
-                    .load_vm_vec(len as usize)
+                    .load_vm_vec(len)
                     .map_err(map_user_mem_error)?
                     .into_boxed_slice()
             };
@@ -2120,13 +2148,8 @@ pub fn syscall_cryp_obj_populate(
     user_attrs: *mut utee_attribute,
     attr_count: c_ulong,
 ) -> TeeResult {
-    let usr_attrs = if attr_count == 0 {
-        Vec::new()
-    } else {
-        UserConstPtr::<utee_attribute>::from(user_attrs.cast_const())
-            .load_vm_vec(attr_count as usize)
-            .map_err(map_user_mem_error)?
-    };
+    let attr_count = usize::try_from(attr_count).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    let usr_attrs = load_user_attr_array(user_attrs.cast_const(), attr_count)?;
 
     let o_arc = tee_obj_get(obj_id as TeeObjIdType)?;
     let mut o = o_arc.lock();
@@ -2338,13 +2361,8 @@ pub fn syscall_obj_generate_key(
     // Check that key_size follows restrictions
     check_key_size(type_props, key_size as _)?;
 
-    let usr_attrs_slice = if param_count == 0 {
-        Vec::new()
-    } else {
-        UserConstPtr::<utee_attribute>::from(usr_params)
-            .load_vm_vec(param_count as usize)
-            .map_err(map_user_mem_error)?
-    };
+    let param_count = usize::try_from(param_count).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    let usr_attrs_slice = load_user_attr_array(usr_params, param_count)?;
     let attrs = copy_in_attrs(&mut user_ta_ctx::default(), &usr_attrs_slice)?;
     tee_svc_cryp_check_attr(AttrUsage::GenerateKey, type_props, &attrs).inspect_err(|e| {
         tee_debug!("tee_svc_cryp_check_attr error: {:X?}", e);

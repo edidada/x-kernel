@@ -32,9 +32,13 @@ macro_rules! define_options {
     };
 }
 
-/// Credentials delivered over Unix-domain sockets.
+/// Credentials delivered over Unix-domain sockets (`SCM_CREDENTIALS`).
+///
+/// Datagram `send` stamps the sending task's pid, euid, and egid. `Default` is
+/// pid/uid/gid 0 (root), so consumers must not treat a missing stamp as
+/// [`Default`].
 #[repr(C)]
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, Copy)]
 pub struct UnixCredentials {
     pub pid: u32,
     pub uid: u32,

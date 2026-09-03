@@ -4,7 +4,10 @@
 
 //! VirtIO network driver adapter.
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{
+    mem,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use device_res::{Irq, IrqResource, IrqReturn, IrqTriggerMode};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
@@ -169,6 +172,13 @@ unsafe impl<H: Hal, T: Transport, const QS: usize> Send for VirtIoNetDev<H, T, Q
 // its buffer bookkeeping by SpinNoPreempt, so shared references remain synchronized.
 unsafe impl<H: Hal, T: Transport, const QS: usize> Sync for VirtIoNetDev<H, T, QS> {}
 
+impl<H: Hal, T: Transport, const QS: usize> VirtIoNetDev<H, T, QS> {
+    fn virtq_index(token: u16) -> Option<usize> {
+        let idx = usize::from(token);
+        (idx < QS).then_some(idx)
+    }
+}
+
 impl<H: Hal, T: Transport, const QS: usize> Drop for VirtIoNetDev<H, T, QS> {
     fn drop(&mut self) {
         if let (Some(irq), Some(handle_id)) = (self.irq, self.irq_handle_id) {
@@ -309,21 +319,31 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
         let mut rx_buf = unsafe { NetBuf::from_handle(rx_buf) };
         let mut bufs = self.bufs.lock();
         // SAFETY: `receive_begin` requires exclusive access to the buffer.
-        // We own `rx_buf` and will store it in `rx_buffers[new_token]`
-        // immediately after, ensuring it lives as long as the device holds
-        // the token.
+        // On success the device may DMA into `rx_buf`, so this function must
+        // keep that allocation alive (store it in `rx_buffers` or leak it)
+        // and never return it to `NetBufPool`.
         let new_token = unsafe {
             self.inner
                 .lock()
                 .receive_begin(rx_buf.buffer_mut())
                 .map_err(as_driver_error)?
         };
+        let idx = match Self::virtq_index(new_token) {
+            Some(idx) => idx,
+            None => {
+                mem::forget(rx_buf);
+                return Err(DriverError::BadState);
+            }
+        };
         // `rx_buffers[new_token]` is expected to be `None` since it was taken
         // away at `Self::recv()` and has not been added back.
-        if bufs.rx_buffers[new_token as usize].is_some() {
+        if let Some(stale) = bufs.rx_buffers[idx].replace(rx_buf) {
+            // The device now owns the newly submitted buffer. The previous
+            // occupant must not go back to the pool: a confused or malicious
+            // device may still DMA into that memory.
+            mem::forget(stale);
             return Err(DriverError::BadState);
         }
-        bufs.rx_buffers[new_token as usize] = Some(rx_buf);
         Ok(())
     }
 
@@ -340,9 +360,10 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
             // bookkeeping so concurrent network I/O on this device is not
             // blocked for the whole drain loop.
             let mut bufs = self.bufs.lock();
-            let tx_buf = bufs.tx_buffers[token as usize]
-                .take()
-                .ok_or(DriverError::BadState)?;
+            let Some(idx) = Self::virtq_index(token) else {
+                return Err(DriverError::BadState);
+            };
+            let tx_buf = bufs.tx_buffers[idx].take().ok_or(DriverError::BadState)?;
             // SAFETY: `transmit_complete` requires that the buffer frame
             // matches the token's previously submitted buffer. We obtained
             // `tx_buf` from `tx_buffers[token]`, which was placed there by
@@ -369,12 +390,22 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
         // buffer in `tx_buffers[token]` immediately after, ensuring it
         // remains valid until `recycle_tx()` retrieves it.
         let token = unsafe {
-            self.inner
-                .lock()
-                .transmit_begin(tx_buf.frame())
-                .map_err(as_driver_error)?
+            match self.inner.lock().transmit_begin(tx_buf.frame()) {
+                Ok(token) => token,
+                Err(err) => {
+                    // Device did not take the buffer. Return it to the TX
+                    // free list; dropping it would leak it from `free_tx_bufs`.
+                    bufs.free_tx_bufs.push(tx_buf);
+                    return Err(as_driver_error(err));
+                }
+            }
         };
-        bufs.tx_buffers[token as usize] = Some(tx_buf);
+        let Some(idx) = Self::virtq_index(token) else {
+            // Device already holds the buffer; do not return it to the free list.
+            mem::forget(tx_buf);
+            return Err(DriverError::BadState);
+        };
+        bufs.tx_buffers[idx] = Some(tx_buf);
         Ok(())
     }
 
@@ -386,9 +417,10 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
             inner.poll_receive()
         };
         if let Some(token) = token {
-            let mut rx_buf = bufs.rx_buffers[token as usize]
-                .take()
-                .ok_or(DriverError::BadState)?;
+            let Some(idx) = Self::virtq_index(token) else {
+                return Err(DriverError::BadState);
+            };
+            let mut rx_buf = bufs.rx_buffers[idx].take().ok_or(DriverError::BadState)?;
             // SAFETY: `receive_complete` requires that the buffer matches the
             // token's previously submitted buffer. We obtained `rx_buf` from
             // `rx_buffers[token]`, which was placed there during `try_new()`

@@ -60,7 +60,10 @@ pub fn slice_fmt(data: &[u8]) -> String {
         + if len > min_len { "..." } else { "" }
 }
 
-/// Fill `data` from the TEE software CSPRNG (seeded from `/dev/urandom`).
+/// Fill `data` from the TEE software CSPRNG.
+///
+/// The CSPRNG is seeded from CPU hardware entropy (RDSEED/RDRAND or RNDR)
+/// mixed with `/dev/urandom`. Do not replace this with a timestamp or TSC seed.
 #[cfg(feature = "csv_huk_key")]
 pub fn random_bytes(data: &mut [u8]) {
     crate::tee::rng_software::crypto_rng_read(data).expect("TEE RNG failure");

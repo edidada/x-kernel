@@ -1044,6 +1044,20 @@ pub(crate) fn crypto_authenc_update_payload(
     crypto_cipher_update(cs, input, output)
 }
 
+pub(crate) fn crypto_authenc_max_final_output_len(
+    cs: Arc<Mutex<TeeCrypState>>,
+    input_len: usize,
+) -> TeeResult<usize> {
+    let cs_guard = cs.lock();
+    match &cs_guard.ctx {
+        // crates.io `tee_crypto` 0.1 exposes update sizing only; GCM final
+        // emits this input (leftover is usually 0). CCM buffers until final
+        // and is caught by the exact-length check after compute.
+        CrypCtx::CipherCtx(ctx) => Ok(ctx.max_update_output_len(input_len)),
+        _ => Err(TEE_ERROR_BAD_PARAMETERS),
+    }
+}
+
 pub(crate) fn crypto_authenc_enc_final(
     cs: Arc<Mutex<TeeCrypState>>,
     input: Option<&[u8]>,
@@ -1051,18 +1065,28 @@ pub(crate) fn crypto_authenc_enc_final(
     tag: &mut [u8],
 ) -> TeeResult<usize> {
     let mut cs_guard = cs.lock();
+    let input_len = input.map(|s| s.len()).unwrap_or(0);
+    {
+        let CrypCtx::CipherCtx(ctx) = &cs_guard.ctx else {
+            return Err(TEE_ERROR_BAD_PARAMETERS);
+        };
+        if output.len() < ctx.max_update_output_len(input_len) {
+            return Err(TEE_ERROR_SHORT_BUFFER);
+        }
+    }
     let ctx = core::mem::replace(&mut cs_guard.ctx, CrypCtx::Finalized);
     if let CrypCtx::CipherCtx(ctx) = ctx {
         let (ct, tag_val) = ctx
             .encrypt_final_with_input(input)
             .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-        let ct_len = ct.len().min(output.len());
-        output[..ct_len].copy_from_slice(&ct[..ct_len]);
-        let tag_len = tag_val.len().min(tag.len());
-        tag[..tag_len].copy_from_slice(&tag_val[..tag_len]);
-        Ok(ct_len)
+        if output.len() < ct.len() || tag.len() < tag_val.len() {
+            return Err(TEE_ERROR_SHORT_BUFFER);
+        }
+        output[..ct.len()].copy_from_slice(&ct);
+        tag[..tag_val.len()].copy_from_slice(&tag_val);
+        Ok(ct.len())
     } else {
-        cs_guard.ctx = ctx; // put back
+        cs_guard.ctx = ctx;
         Err(TEE_ERROR_BAD_PARAMETERS)
     }
 }
@@ -1074,16 +1098,27 @@ pub(crate) fn crypto_authenc_dec_final(
     tag: &[u8],
 ) -> TeeResult<usize> {
     let mut cs_guard = cs.lock();
+    let input_len = input.map(|s| s.len()).unwrap_or(0);
+    {
+        let CrypCtx::CipherCtx(ctx) = &cs_guard.ctx else {
+            return Err(TEE_ERROR_BAD_PARAMETERS);
+        };
+        if output.len() < ctx.max_update_output_len(input_len) {
+            return Err(TEE_ERROR_SHORT_BUFFER);
+        }
+    }
     let ctx = core::mem::replace(&mut cs_guard.ctx, CrypCtx::Finalized);
     if let CrypCtx::CipherCtx(ctx) = ctx {
         let pt = ctx
             .decrypt_final_with_input(input, tag)
             .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
-        let pt_len = pt.len().min(output.len());
-        output[..pt_len].copy_from_slice(&pt[..pt_len]);
-        Ok(pt_len)
+        if output.len() < pt.len() {
+            return Err(TEE_ERROR_SHORT_BUFFER);
+        }
+        output[..pt.len()].copy_from_slice(&pt);
+        Ok(pt.len())
     } else {
-        cs_guard.ctx = ctx; // put back
+        cs_guard.ctx = ctx;
         Err(TEE_ERROR_BAD_PARAMETERS)
     }
 }

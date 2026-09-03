@@ -10,7 +10,7 @@
 //! - Hostname management
 
 use kbuild_config::ARCH;
-use kerrno::KResult;
+use kerrno::{KError, KResult};
 use kthread::{current_process_fs_context, processes};
 use linux_raw_sys::{
     ctypes::c_char,
@@ -109,10 +109,13 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> KResult<isize> {
     Ok(len as _)
 }
 
-/// Secure computing syscall for sandboxing (not fully implemented)
+/// Secure computing syscall.
+///
+/// Seccomp filters are not implemented. Returning success would let a
+/// sandbox believe its policy is active. Linux without `CONFIG_SECCOMP`
+/// does not provide this syscall (`ENOSYS`).
 pub fn sys_seccomp(_op: u32, _flags: u32, _args: *const ()) -> KResult<isize> {
-    warn!("dummy sys_seccomp");
-    Ok(0)
+    Err(KError::Unsupported)
 }
 
 /// Flush instruction cache (RISC-V architecture only)

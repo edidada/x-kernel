@@ -21,10 +21,20 @@ use smoltcp::{
 
 use crate::{
     consts::{ETHERNET_MAX_PENDING_PACKETS, STANDARD_MTU},
-    device::NetDevice as NetDeviceOps,
+    device::{self, NetDevice as NetDeviceOps},
     netlink::{AddrState, LinkState, NeighState},
     packet,
 };
+
+/// Outcome of parsing one Ethernet frame during RX poll.
+enum RxFrameResult {
+    /// An IPv4 datagram was copied into the router RX buffer.
+    Enqueued,
+    /// Frame was consumed without producing an IP packet.
+    Skipped,
+    /// Router RX buffer cannot accept this datagram; stop polling this device.
+    BufferFull,
+}
 
 const EMPTY_MAC: EthernetAddress = EthernetAddress([0; 6]);
 
@@ -134,11 +144,11 @@ impl EthernetDevice {
         buffer: &mut PacketBuffer<()>,
         timestamp: Instant,
         packet_snoop: &mut dyn FnMut(&[u8]),
-    ) -> bool {
+    ) -> RxFrameResult {
         let frame = EthernetFrame::new_unchecked(frame_data);
         let Ok(repr) = EthernetRepr::parse(&frame) else {
             warn!("Dropping malformed Ethernet frame");
-            return false;
+            return RxFrameResult::Skipped;
         };
 
         packet::publish_parsed_link_frame(
@@ -154,24 +164,24 @@ impl EthernetDevice {
             && repr.dst_addr != EMPTY_MAC
             && repr.dst_addr != self.mac_addr()
         {
-            return false;
+            return RxFrameResult::Skipped;
         }
 
         match repr.ethertype {
             EthernetProtocol::Ipv4 => {
                 // Ethernet frames carry the IP packet in the payload; loopback stores IP packets directly.
+                if !device::enqueue_rx_packet(buffer, frame.payload()) {
+                    return RxFrameResult::BufferFull;
+                }
                 packet_snoop(frame.payload());
-                buffer
-                    .enqueue(frame.payload().len(), ())
-                    .unwrap()
-                    .copy_from_slice(frame.payload());
-                return true;
+                RxFrameResult::Enqueued
             }
-            EthernetProtocol::Arp => self.handle_arp_packet(ifindex, frame.payload(), timestamp),
-            _ => {}
+            EthernetProtocol::Arp => {
+                self.handle_arp_packet(ifindex, frame.payload(), timestamp);
+                RxFrameResult::Skipped
+            }
+            _ => RxFrameResult::Skipped,
         }
-
-        false
     }
 
     fn send_arp_request(&mut self, ifindex: i32, target_ip: IpAddress) {
@@ -345,8 +355,10 @@ impl NetDeviceOps for EthernetDevice {
             let result =
                 self.handle_rx_frame(ifindex, rx_buf.data(), buffer, timestamp, packet_snoop);
             self.inner.recycle_rx(rx_buf).unwrap();
-            if result {
-                return true;
+            match result {
+                RxFrameResult::Enqueued => return true,
+                RxFrameResult::BufferFull => return false,
+                RxFrameResult::Skipped => {}
             }
         }
     }

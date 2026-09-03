@@ -6,12 +6,14 @@
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::task::Context;
 
-use async_channel::TryRecvError;
+use async_channel::{TryRecvError, TrySendError};
 use async_trait::async_trait;
-use kerrno::{KError, KResult};
-use kio::{Read, Write};
+use kerrno::{KError, KResult, LinuxError};
+use kio::{IoBuf, Read, Write};
 use kpoll::{IoEvents, PollSet, Pollable};
 use ksync::{Mutex, RwLock};
+use ktask::current;
+use kthread::AsThread;
 
 use crate::{
     AncillaryData, RecvFlags, RecvOptions, SendOptions, SocketAddrEx,
@@ -20,10 +22,64 @@ use crate::{
     unix::{UnixAddr, UnixTransport, UnixTransportOps, lookup_bind_entry},
 };
 
+/// Cap a single datagram so `send` cannot `read_to_end` an unbounded user
+/// buffer into the kernel. 64KiB matches the `/dev/log` recv buffer and is
+/// enough for syslog; larger payloads return `EMSGSIZE`.
+const DGRAM_MAX_BYTES: usize = 64 * 1024;
+
+/// Bound the in-kernel receive queue. An unbounded channel plus world-writable
+/// `/dev/log` would let any process exhaust heap. 32 × 64KiB is 2MiB worst case.
+const DGRAM_QUEUE_LEN: usize = 32;
+
+fn new_dgram_queue() -> (
+    async_channel::Sender<Datagram>,
+    async_channel::Receiver<Datagram>,
+) {
+    async_channel::bounded(DGRAM_QUEUE_LEN)
+}
+
+/// Credentials of the sending task, recorded at `send` time (Linux SCM_CREDENTIALS).
+///
+/// Kernel tasks are not user threads, so they must not look like `euid == 0`.
+/// [`UnixCredentials::default`] is pid/uid/gid 0 (root).
+fn current_send_credentials() -> UnixCredentials {
+    current()
+        .try_as_thread()
+        .map(|thread| {
+            let credentials = thread.process_state().credentials.read();
+            UnixCredentials {
+                pid: thread.pid(),
+                uid: credentials.euid(),
+                gid: credentials.egid(),
+            }
+        })
+        .unwrap_or(UnixCredentials {
+            pid: 0,
+            uid: u32::MAX,
+            gid: u32::MAX,
+        })
+}
+
+fn enqueue_dgram(
+    tx: &async_channel::Sender<Datagram>,
+    poll: &PollSet,
+    packet: Datagram,
+) -> KResult {
+    match tx.try_send(packet) {
+        Ok(()) => {
+            poll.wake();
+            Ok(())
+        }
+        Err(TrySendError::Full(_)) => Err(KError::WouldBlock),
+        Err(TrySendError::Closed(_)) => Err(KError::BrokenPipe),
+    }
+}
+
 struct Datagram {
     data: Vec<u8>,
     ancillary: Vec<AncillaryData>,
     sender: UnixAddr,
+    cred: UnixCredentials,
 }
 
 struct Channel {
@@ -81,8 +137,8 @@ impl DgramTransport {
     }
 
     pub fn new_pair(pid: u32) -> (Self, Self) {
-        let (tx1, rx1) = async_channel::unbounded();
-        let (tx2, rx2) = async_channel::unbounded();
+        let (tx1, rx1) = new_dgram_queue();
+        let (tx2, rx2) = new_dgram_queue();
         let poll1 = Arc::new(PollSet::new());
         let poll2 = Arc::new(PollSet::new());
         let transport1 = DgramTransport::new_connected(
@@ -151,7 +207,7 @@ impl UnixTransportOps for DgramTransport {
         if guard.is_some() {
             return Err(KError::InvalidInput);
         }
-        let (tx, rx) = async_channel::unbounded();
+        let (tx, rx) = new_dgram_queue();
         let poll = Arc::new(PollSet::new());
         *slot = Some(Bind {
             tx,
@@ -183,41 +239,59 @@ impl UnixTransportOps for DgramTransport {
         Err(KError::InvalidInput)
     }
 
-    fn send(&self, mut src: impl Read, options: SendOptions) -> KResult<usize> {
-        let mut message = Vec::new();
+    fn send(&self, mut src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
+        let remaining = src.remaining();
+        if remaining > DGRAM_MAX_BYTES {
+            return Err(LinuxError::EMSGSIZE.into());
+        }
+        let mut message = Vec::with_capacity(remaining);
         src.read_to_end(&mut message)?;
         let len = message.len();
         let packet = Datagram {
             data: message,
             ancillary: options.ancillary,
             sender: self.local_addr.read().clone(),
+            cred: current_send_credentials(),
         };
 
-        let connected = self.peer.read();
         if let Some(addr) = options.to {
             let addr = addr.into_unix()?;
             lookup_bind_entry(&addr, |slot| {
                 if let Some(bind) = slot.dgram.lock().as_ref() {
-                    bind.tx.try_send(packet).map_err(|_| KError::BrokenPipe)?;
-                    bind.poll.wake();
-                    Ok(())
+                    enqueue_dgram(&bind.tx, &bind.poll, packet)
                 } else {
                     Err(KError::NotConnected)
                 }
             })?;
-        } else if let Some(chan) = connected.as_ref() {
-            chan.tx.try_send(packet).map_err(|_| KError::BrokenPipe)?;
-            chan.poll.wake();
-        } else {
-            return Err(KError::NotConnected);
+            return Ok(len);
         }
-        Ok(len)
+
+        let mut pending = Some(packet);
+        self.options
+            .send_poller_with_nonblocking(self, options.flags.nonblocking(), || {
+                let connected = self.peer.read();
+                let Some(chan) = connected.as_ref() else {
+                    return Err(KError::NotConnected);
+                };
+                let packet = pending.take().ok_or(KError::WouldBlock)?;
+                match chan.tx.try_send(packet) {
+                    Ok(()) => {
+                        chan.poll.wake();
+                        Ok(len)
+                    }
+                    Err(TrySendError::Full(packet)) => {
+                        pending = Some(packet);
+                        Err(KError::WouldBlock)
+                    }
+                    Err(TrySendError::Closed(_)) => Err(KError::BrokenPipe),
+                }
+            })
     }
 
     fn recv(&self, mut dst: impl Write, mut options: RecvOptions) -> KResult<usize> {
         self.options.recv_poller(self, move || {
             let mut guard = self.rx.lock();
-            let Some((rx, _)) = guard.as_mut() else {
+            let Some((rx, poll)) = guard.as_mut() else {
                 return Err(KError::NotConnected);
             };
 
@@ -225,6 +299,7 @@ impl UnixTransportOps for DgramTransport {
                 data,
                 ancillary,
                 sender,
+                cred,
             } = match rx.try_recv() {
                 Ok(packet) => packet,
                 Err(TryRecvError::Empty) => {
@@ -234,6 +309,7 @@ impl UnixTransportOps for DgramTransport {
                     return Ok(0);
                 }
             };
+            poll.wake();
             let count = dst.write(&data)?;
             if count < data.len() {
                 warn!("UDP message truncated: {} -> {} bytes", data.len(), count);
@@ -241,6 +317,9 @@ impl UnixTransportOps for DgramTransport {
 
             if let Some(from) = options.from.as_mut() {
                 **from = SocketAddrEx::Unix(sender);
+            }
+            if let Some(dst) = options.unix_cred.as_mut() {
+                **dst = cred;
             }
             if let Some(dst) = options.ancillary.as_mut() {
                 dst.extend(ancillary);
@@ -257,18 +336,29 @@ impl UnixTransportOps for DgramTransport {
 
 impl Pollable for DgramTransport {
     fn poll(&self) -> IoEvents {
-        let mut events = IoEvents::OUT;
+        let mut events = IoEvents::empty();
         if let Some((rx, _)) = self.rx.lock().as_ref() {
             events.set(IoEvents::IN, !rx.is_empty());
         }
+        let can_send = match self.peer.read().as_ref() {
+            Some(chan) => !chan.tx.is_full(),
+            None => true,
+        };
+        events.set(IoEvents::OUT, can_send);
         events
     }
 
     fn register(&self, context: &mut Context<'_>, events: IoEvents) {
-        if let Some((_, poll)) = self.rx.lock().as_ref()
-            && events.contains(IoEvents::IN)
+        if events.contains(IoEvents::IN)
+            && let Some((_, poll)) = self.rx.lock().as_ref()
         {
             poll.register(context.waker());
+        }
+        if events.contains(IoEvents::OUT) {
+            if let Some(chan) = self.peer.read().as_ref() {
+                chan.poll.register(context.waker());
+            }
+            self.poll_state.register(context.waker());
         }
     }
 }

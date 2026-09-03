@@ -179,6 +179,8 @@ TaskContext       (每架构定义，callee-saved 寄存器用于上下文切换
 UserContext::run(&mut self) -> ReturnReason:
 1. karch::disable_local_irq()
 2. 保存内核 TLS 指针，设置用户 TLS 指针
+2.5. AArch64: `sanitize_user_spsr()` 强制 `SPSR.M == EL0t`，
+    防止 `rt_sigreturn` 从用户栈写入的 `pstate` 在 `eret` 时升到 EL1
 3. 调用 enter_user() [汇编]:
    - 从 trap frame 恢复用户寄存器
    - 切换用户页表

@@ -216,7 +216,9 @@ impl ThreadSignalManager {
     }
 
     /// Restores the signal frame. Called by `sigreturn`.
-    /// Restore user context from the signal frame during `sigreturn`.
+    ///
+    /// Architecture `mcontext.restore` must sanitize privilege-state fields
+    /// (`SPSR.M` on AArch64) before this context is used for `eret`.
     pub fn restore(&self, uctx: &mut UserContext) {
         let frame_ptr = uctx.sp() as *const SignalFrame;
         // SAFETY: pointer is valid

@@ -49,11 +49,16 @@ impl MContext {
     }
 
     /// Restore a user context from this machine context.
+    ///
+    /// `pstate` comes from a user-writable `ucontext`. It is sanitized to
+    /// AArch64 EL0t so `rt_sigreturn` cannot raise the exception level
+    /// (Linux `valid_user_regs` / `PSR_MODE_MASK`).
     pub fn restore(&self, uctx: &mut UserContext) {
         uctx.x = self.regs;
         uctx.sp = self.sp;
         uctx.elr = self.pc;
         uctx.spsr = self.pstate;
+        uctx.sanitize_user_spsr();
     }
 }
 

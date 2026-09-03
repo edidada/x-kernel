@@ -228,9 +228,13 @@ unsafe {
 | T-07 | raw socket 被无权限调用者创建 | 中 | syscall 层没有实施权限门禁 | `knet` 层只封装 raw socket 行为；权限策略应保留在 `posix/net::sys_socket` |
 | T-08 | netlink RX queue 被 uevent 或 response 填满 | 中 | 订阅者不消费，publisher 持续写入 | `NETLINK_RX_QUEUE_LIMIT` 限制单 socket queue 字节数，超限丢弃 |
 | T-09 | 路由状态与 data-plane 不一致 | 中 | rtnetlink mutation 只更新控制面或同步过程中出错 | `update_route_state` 写入 `ROUTE_STATE` 后调用 `SERVICE.lock().sync_netlink`；新增 mutation 需复用该路径 |
+| T-13 | 出站 IP 源地址与路由 `rule.src` 不一致导致 panic | 高 | raw socket 绑定非路由源，或 send 与 dispatch 之间路由表被替换 | `dispatch` 按目的地址选路，源不匹配只记 debug，不 `assert` |
+| T-14 | 变长包使 `PacketBuffer` payload 环碎片化后 `enqueue` panic | 高 | 外部主机以特定长度和顺序发送包，元数据槽未满但连续字节空间不足 | `is_full()` 只作元数据快路径；`enqueue` 失败时丢包并停止本轮 RX/TX，不 `unwrap` |
 | T-10 | 外部网络包触发 parser panic | 中 | malformed Ethernet、ARP、IP 或 TCP packet 进入 RX | RX 路径使用 smoltcp checked parser，错误包丢弃并记录 warn |
 | T-11 | 中断上下文误用导致锁竞争或延迟放大 | 中 | IRQ waker 回调中直接推进 `SERVICE`、`SOCKET_SET` 或执行阻塞 socket 操作 | 中断路径只注册和唤醒 waker，协议推进保留在普通 poll 路径 |
 | T-12 | driver buffer 或 DMA 输入破坏 packet 边界 | 高 | 驱动返回长度异常、数据在 recycle 后继续被访问、TX/RX buffer 生命周期使用错误 | RX 数据只在 `NetBufHandle` recycle 前解析和复制；外部帧使用 checked parser；TX buffer 由 driver handle 管理 |
+| T-15 | Unix datagram 无界队列耗尽内核堆 | 高 | `/dev/log` 或其它 AF_UNIX SOCK_DGRAM 对端慢于发送方 | 有界队列（32 条）和 64KiB 单包上限；满时 `WouldBlock`，过长 `EMSGSIZE` |
+| T-16 | 非特权进程把 `/dev/log` 报文写入内核日志 | 中 | `/dev/log` 服务端 `info!` 用户载荷且不校验发送者 | 数据报携带发送时 euid；仅 `euid == 0`（`CAP_SYSLOG` 等价）写入内核日志，并记录 pid/uid/from |
 
 影响等级定义：
 
@@ -254,6 +258,8 @@ unsafe {
 | F-10 | Unix stream peer 提前关闭 | channel 被 shutdown 或 drop | send 返回 `BrokenPipe`，recv 返回 EOF | 应用感知连接关闭 | 4 | shutdown 设置 atomic 并唤醒 peer poll set |
 | F-11 | 中断上下文执行重型网络推进 | IRQ 路径误调用 socket send、recv 或 `poll_interfaces` | 锁竞争、调度延迟或死锁 | 网络 IO 延迟上升，严重时系统卡顿 | 2 | IRQ 路径只做 waker notification，实际协议推进由 task 上下文执行 |
 | F-12 | RX buffer recycle 顺序错误 | frame payload 在 `recycle_rx` 后仍被引用 | 读取悬垂数据或数据损坏 | packet 解析异常，严重时破坏内存安全 | 1 | `EthernetDevice::poll_rx` 在 recycle 前完成解析和复制；新增设备适配需保持同样生命周期 |
+| F-13 | RX/TX `PacketBuffer` 无法 enqueue | 元数据槽未满但 payload 环碎片化，或槽位已满 | 当前包丢弃，本轮停止向该 buffer 入队 | 瞬时丢包，连接可重传恢复 | 3 | `enqueue_rx_packet` 和 `TxToken::consume` 对 `Full` 丢包并 warn，不 panic |
+| F-14 | Unix datagram 接收队列满 | 对端未及时 `recv`，发送方持续 `send` | 发送返回 `WouldBlock` | 日志或本地 IPC 短暂阻塞/丢报，内核堆保持有上界 | 3 | 有界 channel；connected send 在对端 `recv` 后被 poll wake |
 
 严重度定义：
 
@@ -267,8 +273,9 @@ unsafe {
 - 普通输入错误使用 `KError` 和 `LinuxError` 返回，例如 `EINVAL`、`EAFNOSUPPORT`、`ENETUNREACH`、`EADDRINUSE`、`EWOULDBLOCK`。
 - malformed netlink 请求返回 netlink error response，短到无法读取 header 的请求返回空 response。
 - malformed Ethernet、ARP、IP、TCP 包在 RX 路径丢弃，并通过 warn 或 trace 记录。
-- smoltcp buffer full 映射为 `WouldBlock`，poller 负责等待 IO readiness。
+- smoltcp socket buffer full 映射为 `WouldBlock`，poller 负责等待 IO readiness。
 - loopback 和 Ethernet 队列满时丢包并记录 warn。
+- Router RX/TX `PacketBuffer::enqueue` 返回 `Full`（含 payload 环碎片化）时丢包并记录 warn，不 panic。
 - panic 路径主要来自初始化顺序、内部 invariant 破坏和 `expect` 断言；新增公开入口应先返回 `KError`，再进入内部断言区。
 
 ## 隐私分析

@@ -345,7 +345,8 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 **发送流程**：
 
 1. 调用 `alloc_tx_buf(size)` 从 `free_tx_bufs` 栈中弹出缓冲区，设置 `payload_len`
-2. 上层填充数据后调用 `send()` → `transmit_begin(frame)` 提交到 VirtIO 发送队列
+2. 上层填充数据后调用 `send()` → `transmit_begin(frame)` 提交到 VirtIO 发送队列。
+   若 `transmit_begin` 失败（例如队列满），缓冲区退回 `free_tx_bufs`，不丢入 pool。
 3. 将 `NetBuf` 存入 `tx_buffers[token]`，确保缓冲区在设备使用期间存活
 4. 中断到来时调用 `recycle_tx()`：循环调用 `poll_transmit()` 获取已完成令牌，`transmit_complete()` 释放缓冲区，回收至 `free_tx_bufs`
 

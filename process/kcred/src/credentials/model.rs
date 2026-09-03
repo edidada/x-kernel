@@ -102,17 +102,22 @@ impl Credentials {
     }
 
     /// Returns whether these caller credentials may inspect a target process's
-    /// filesystem resources.
+    /// filesystem resources (`/proc/<pid>/fd/*` and equivalent shortcuts).
     ///
-    /// The current pre-capabilities policy permits the target process itself,
-    /// a privileged caller, or a caller whose filesystem UID matches all of
-    /// the target's real, effective, and saved UIDs.
+    /// Approximates Linux `__ptrace_may_access` with `PTRACE_MODE_READ_FSCREDS`:
+    /// the target itself, a privileged caller (`euid == 0` for `CAP_SYS_PTRACE`),
+    /// or a caller whose `fsuid` matches every target UID and whose `fsgid`
+    /// matches every target GID. Dumpable / LSM checks are not modeled yet.
     pub fn can_access_process_files(&self, target: &Self, is_self: bool) -> bool {
-        is_self
-            || self.is_privileged()
-            || [target.ruid, target.euid, target.suid]
+        if is_self || self.is_privileged() {
+            return true;
+        }
+        [target.ruid, target.euid, target.suid]
+            .into_iter()
+            .all(|target_uid| target_uid == self.fsuid)
+            && [target.rgid, target.egid, target.sgid]
                 .into_iter()
-                .all(|target_uid| target_uid == self.fsuid)
+                .all(|target_gid| target_gid == self.fsgid)
     }
 
     /// Implements Linux/POSIX `setuid`.

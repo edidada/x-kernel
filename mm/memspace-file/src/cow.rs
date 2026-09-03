@@ -100,13 +100,16 @@ impl CowBackend {
             let start = self.start.as_usize().saturating_sub(va.as_usize());
             assert!(start < self.size as _);
 
-            let file_start =
-                *file_start + va.as_usize().saturating_sub(self.start.as_usize()) as u64;
-            let max_read = file_end
-                .map_or(u64::MAX, |end| end.saturating_sub(file_start))
-                .min((buf.len() - start) as u64) as usize;
+            let page_off = va.as_usize().saturating_sub(self.start.as_usize()) as u64;
+            // Overflow would wrap to a low file offset and leak unrelated file
+            // contents into the COW page. Keep the already-zeroed frame instead.
+            if let Some(file_start) = file_start.checked_add(page_off) {
+                let max_read = file_end
+                    .map_or(u64::MAX, |end| end.saturating_sub(file_start))
+                    .min((buf.len() - start) as u64) as usize;
 
-            file.read_at(&mut &mut buf[start..start + max_read], file_start)?;
+                file.read_at(&mut &mut buf[start..start + max_read], file_start)?;
+            }
         }
         pgtbl
             .map(va, frame, self.size, flags)

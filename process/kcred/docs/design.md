@@ -21,6 +21,7 @@
 当前实现采用简化的特权模型：
 有效 UID 为 0 的进程被视为拥有 set-ID 操作所需权限。
 Linux capability 的细粒度权限尚未引入。
+`capget` 把该模型暴露为 V3 capability 字：特权进程全 1，其余全 0。
 
 ## 范围
 
@@ -77,8 +78,11 @@ VFS / DAC permission checks
 | `CredentialError` | 表示凭据转换被权限规则拒绝 |
 | `Uid` / `Gid` | Linux 用户和组 ID 的本地类型别名 |
 
-`Credentials::can_access_process_files` 集中实现跨进程文件资源检查的
-简化凭据规则，供 procfd 的直接解析和 procfs 后端共同使用，避免两个入口策略漂移。
+`Credentials::can_access_process_files` 集中实现跨进程文件资源检查，
+对齐 Linux `__ptrace_may_access` 的 `PTRACE_MODE_READ_FSCREDS`：
+目标自身、`euid == 0`（`CAP_SYS_PTRACE` 等价），或调用者 `fsuid`/`fsgid`
+分别匹配目标全部 real/effective/saved UID 与 GID。
+procfd 直接解析和 procfs 后端共用该函数，避免两个入口策略漂移。
 
 ## 状态机
 

@@ -382,7 +382,7 @@ impl<'a> BootMemmapRef<'a> {
     ) -> Result<Self, ParseError> {
         if header.desc_size < size_of::<MemoryDescriptor>()
             || header.buff_size < header.map_size
-            || (header.desc_size != 0 && header.map_size % header.desc_size != 0)
+            || (header.desc_size != 0 && !header.map_size.is_multiple_of(header.desc_size))
             || header.map_size > descriptors.len()
         {
             return Err(ParseError::InvalidBootMemmap);

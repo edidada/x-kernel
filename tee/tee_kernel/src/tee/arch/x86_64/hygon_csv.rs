@@ -94,7 +94,8 @@ fn construct_user_data() -> TeeResult<Box<csv_guest_user_data_attestation_t>> {
         hash: [0u8; 32],
     });
 
-    // Fill user_data and mnonce with random bytes
+    // mnonce is the attestation anti-replay nonce; it must come from the TEE
+    // CSPRNG, not a timestamp or TSC-derived seed.
     random_bytes(&mut udata.user_data);
     random_bytes(&mut udata.mnonce);
 

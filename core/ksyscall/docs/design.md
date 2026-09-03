@@ -139,6 +139,13 @@ ksyscall::dispatch_irq_syscall
 - `task/credentials.rs`
   - `get*id` / `set*id` / `getgroups` / `setgroups`
   - owner 在 `kthread` 当前进程 credential helper 与 `kcred` credential 模型
+- `task/ctl.rs`
+  - `capget` / `capset` / `prctl`
+  - `capget` 按目标 `euid == 0` 报告全开或全关 capability 字；
+    无独立 capability 状态。`capset` 不改变特权模型。
+  - `prctl(PR_SET_SECCOMP)` 未实现过滤器，返回 `EINVAL`。
+- `sys.rs`
+  - `seccomp` 未实现过滤器，返回 `ENOSYS`，避免沙箱误以为策略已生效。
 - `task/ids.rs`
   - `getpid` / `getppid`
   - owner 在 `kthread` 当前线程与父子进程关系

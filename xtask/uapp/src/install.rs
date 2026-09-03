@@ -11,7 +11,7 @@ use std::{
 use tempfile::NamedTempFile;
 
 use crate::{
-    debugfs::{DebugfsScript, InstallFile},
+    debugfs::{self, DebugfsScript, InstallFile},
     manifest::Uapp,
 };
 
@@ -61,12 +61,16 @@ fn persist_temp_file(file: NamedTempFile) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-pub fn add_autostart(script: &mut DebugfsScript, autostart_host_path: PathBuf, guest_path: &str) {
+pub fn add_autostart(
+    script: &mut DebugfsScript,
+    autostart_host_path: PathBuf,
+    guest_path: &str,
+) -> Result<(), String> {
     script.add_existing_parent_file(&InstallFile {
         host_path: autostart_host_path,
         guest_path: guest_path.to_string(),
         mode: 0o755,
-    });
+    })
 }
 
 fn append_install_entry(
@@ -85,12 +89,12 @@ fn append_install_entry(
     }
 
     if metadata.is_file() {
-        files.push(InstallFile {
-            host_path: fs::canonicalize(src)
+        files.push(install_file(
+            fs::canonicalize(src)
                 .map_err(|err| format!("failed to canonicalize {}: {err}", src.display()))?,
-            guest_path: dest.to_string(),
+            dest.to_string(),
             mode,
-        });
+        )?);
         return Ok(());
     }
 
@@ -141,12 +145,12 @@ fn append_dir(
                 )
             })?;
             let guest_path = join_guest_path(dest, relative)?;
-            files.push(InstallFile {
-                host_path: fs::canonicalize(&path)
+            files.push(install_file(
+                fs::canonicalize(&path)
                     .map_err(|err| format!("failed to canonicalize {}: {err}", path.display()))?,
                 guest_path,
                 mode,
-            });
+            )?);
         } else {
             return Err(format!(
                 "install source must be a regular file or directory: {}",
@@ -156,6 +160,18 @@ fn append_dir(
     }
 
     Ok(())
+}
+
+fn install_file(host_path: PathBuf, guest_path: String, mode: u32) -> Result<InstallFile, String> {
+    debugfs::validate_host_path(&host_path)
+        .map_err(|err| format!("invalid install host path: {err}"))?;
+    debugfs::validate_guest_path(&guest_path)
+        .map_err(|err| format!("invalid install guest path: {err}"))?;
+    Ok(InstallFile {
+        host_path,
+        guest_path,
+        mode,
+    })
 }
 
 fn resolve_src(uapp_dir: &Path, src: &str) -> PathBuf {
@@ -211,11 +227,13 @@ mod tests {
     #[test]
     fn debugfs_temp_script_retains_commands() {
         let mut script = DebugfsScript::new();
-        script.add_file(&InstallFile {
-            host_path: PathBuf::from("/tmp/x-kernel-uapp-test"),
-            guest_path: "/hello".to_string(),
-            mode: 0o644,
-        });
+        script
+            .add_file(&InstallFile {
+                host_path: PathBuf::from("/tmp/x-kernel-uapp-test"),
+                guest_path: "/hello".to_string(),
+                mode: 0o644,
+            })
+            .unwrap();
         let path = write_debugfs_script(&script).unwrap();
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("write"));

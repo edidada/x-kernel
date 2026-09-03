@@ -236,7 +236,9 @@ pub fn sys_rt_tgsigqueueinfo(
 
 /// Returns from a signal handler and restores context.
 ///
-/// See <https://man7.org/linux/man-pages/man2/sigreturn.2.html>.
+/// Privilege-state fields in the user `ucontext` are sanitized on restore
+/// (AArch64 `SPSR.M` is forced to EL0t). See
+/// <https://man7.org/linux/man-pages/man2/sigreturn.2.html>.
 pub fn sys_rt_sigreturn(uctx: &mut UserContext) -> KResult<isize> {
     kthread::current_thread().signal.restore(uctx);
     Ok(uctx.retval() as isize)

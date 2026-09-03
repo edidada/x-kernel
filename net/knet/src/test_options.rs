@@ -44,13 +44,13 @@ fn test_unix_credentials_clone() {
         gid: 2000,
     };
 
-    let cloned = original.clone();
+    let cloned = original;
     assert_eq!(original.pid, cloned.pid);
     assert_eq!(original.uid, cloned.uid);
     assert_eq!(original.gid, cloned.gid);
 
-    // Verify modifications to clone don't affect original
-    let mut modified_clone = original.clone();
+    // Verify modifications to a copy don't affect original
+    let mut modified_clone = original;
     modified_clone.pid = 999;
     assert_eq!(original.pid, 100);
     assert_eq!(modified_clone.pid, 999);

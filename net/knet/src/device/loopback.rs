@@ -50,11 +50,10 @@ impl NetDevice for LoopbackDevice {
         packet_snoop: &mut dyn FnMut(&[u8]),
     ) -> bool {
         self.queue.dequeue().ok().is_some_and(|(_, rx_buf)| {
+            if !super::enqueue_rx_packet(buffer, rx_buf) {
+                return false;
+            }
             packet_snoop(rx_buf);
-            buffer
-                .enqueue(rx_buf.len(), ())
-                .unwrap()
-                .copy_from_slice(rx_buf);
             true
         })
     }

@@ -169,6 +169,8 @@ pub struct RecvOptions<'a> {
     pub flags: RecvFlags,
     pub ancillary: Option<&'a mut Vec<AncillaryData>>,
     pub out_flags: Option<&'a mut RecvFlags>,
+    /// Filled by Unix datagram recv with the sender's send-time credentials.
+    pub unix_cred: Option<&'a mut crate::options::UnixCredentials>,
 }
 impl Debug for RecvOptions<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -176,6 +178,7 @@ impl Debug for RecvOptions<'_> {
             .field("from", &self.from)
             .field("flags", &self.flags)
             .field("out_flags", &self.out_flags.as_ref().map(|_| ()))
+            .field("unix_cred", &self.unix_cred.as_ref().map(|_| ()))
             .finish()
     }
 }

@@ -184,6 +184,8 @@ impl Router {
                 snoop_udp_error_packet(packet);
                 snoop_tcp_packet(packet, sockets);
             };
+            // `PacketBuffer::is_full()` only tracks metadata slots. A fragmented
+            // payload ring can still reject enqueue; `poll_rx` returns false then.
             while !self.rx_buffer.is_full()
                 && dev.poll_rx(ifindex, &mut self.rx_buffer, timestamp, &mut packet_snoop)
             {
@@ -222,10 +224,22 @@ impl Router {
                             warn!("No route found for destination: {}", dst_addr);
                             continue;
                         };
-                        assert_eq!(rule.src, IpAddress::Ipv4(ip_packet.src_addr()));
+                        // Packet src can differ from `rule.src` for raw
+                        // sockets and after a route-table update. Lookup is
+                        // by destination; do not panic on a src mismatch.
+                        if rule.src != IpAddress::Ipv4(ip_packet.src_addr()) {
+                            debug!(
+                                "outbound src {} differs from route src {}",
+                                ip_packet.src_addr(),
+                                rule.src
+                            );
+                        }
 
                         let next_hop = rule.via.unwrap_or(dst_addr);
-                        let dev = &mut self.devices[rule.dev];
+                        let Some(dev) = self.devices.get_mut(rule.dev) else {
+                            warn!("No device for route to {dst_addr}");
+                            continue;
+                        };
                         poll_next |= dev.send_ip_packet(
                             rule.dev as i32 + 1,
                             next_hop,
@@ -249,10 +263,19 @@ impl Router {
                             warn!("No route found for destination: {}", dst_addr);
                             continue;
                         };
-                        assert_eq!(rule.src, IpAddress::Ipv6(ip_packet.src_addr()));
+                        if rule.src != IpAddress::Ipv6(ip_packet.src_addr()) {
+                            debug!(
+                                "outbound src {} differs from route src {}",
+                                ip_packet.src_addr(),
+                                rule.src
+                            );
+                        }
 
                         let next_hop = rule.via.unwrap_or(dst_addr);
-                        let dev = &mut self.devices[rule.dev];
+                        let Some(dev) = self.devices.get_mut(rule.dev) else {
+                            warn!("No device for route to {dst_addr}");
+                            continue;
+                        };
                         poll_next |= dev.send_ip_packet(
                             rule.dev as i32 + 1,
                             next_hop,
@@ -274,10 +297,16 @@ impl smoltcp::phy::TxToken for TxToken<'_> {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        f(self
-            .0
-            .enqueue(len, ())
-            .expect("This was checked before creating the TxToken"))
+        match self.0.enqueue(len, ()) {
+            Ok(buf) => f(buf),
+            Err(_) => {
+                // `transmit()` only checks metadata `is_full()`; a fragmented
+                // payload ring can still reject this packet.
+                warn!("TX packet buffer cannot enqueue packet, dropping");
+                let mut scratch = vec![0u8; len];
+                f(&mut scratch)
+            }
+        }
     }
 }
 

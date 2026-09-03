@@ -229,6 +229,12 @@ fn validate_manifest(dir: &Path, manifest_path: &Path, manifest: &Manifest) -> R
 
     for entry in &manifest.install {
         validate_non_empty("install.src", &entry.src, manifest_path)?;
+        if entry.src.chars().any(char::is_control) {
+            return Err(format!(
+                "{}: install.src must not contain control characters",
+                manifest_path.display()
+            ));
+        }
         validate_guest_path("install.dest", &entry.dest, manifest_path)?;
         if entry.dest == "/etc/profile.d/99-autostart.sh" {
             return Err(format!(

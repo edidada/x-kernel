@@ -9,7 +9,13 @@ use std::{
 };
 
 use clap::Parser;
-use rsext4::{Jbd2Dev, config::BLOCK_SIZE, ext4::Ext4FileSystem, file::read_file};
+use rsext4::{
+    Jbd2Dev,
+    config::BLOCK_SIZE,
+    error::BlockDevError,
+    ext4::Ext4FileSystem,
+    file::read_file_no_follow,
+};
 
 mod blockdev;
 use blockdev::FileBlockDev;
@@ -48,9 +54,22 @@ fn main() -> Result<(), String> {
     let mut fs = Ext4FileSystem::mount(&mut jbd).map_err(|e| format!("mount failed: {}", e))?;
 
     let profraw_path = sanitize_profraw_path(&args.profraw_path)?;
-    let data = read_file(&mut jbd, &mut fs, &profraw_path)
-        .map_err(|e| format!("failed to read file from ext4: {:?}", e))?
-        .ok_or_else(|| format!("file {} not found in ext4 image", profraw_path))?;
+    // `sanitize_profraw_path` is lexical only. `read_file` would follow a
+    // symlink under `/.llvm-cov/` to any path in the image.
+    let data = match read_file_no_follow(&mut jbd, &mut fs, &profraw_path) {
+        Ok(Some(data)) => data,
+        Ok(None) => {
+            return Err(format!("file {profraw_path} not found in ext4 image"));
+        }
+        Err(BlockDevError::InvalidInput) => {
+            return Err(format!(
+                "refusing to follow symlink at {profraw_path}: coverage files must be regular files under /.llvm-cov/"
+            ));
+        }
+        Err(err) => {
+            return Err(format!("failed to read file from ext4: {err:?}"));
+        }
+    };
 
     let out_file_path = args.out_path;
 
@@ -66,6 +85,11 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
+/// Confine `--profraw-path` to a file under `/.llvm-cov/`.
+///
+/// This is lexical: `..` and paths outside the coverage root are rejected.
+/// The caller must not follow symlinks, or a link under `/.llvm-cov/` can
+/// still reach any file in the image.
 fn sanitize_profraw_path(input: &str) -> Result<String, String> {
     const COVERAGE_ROOT: &str = ".llvm-cov";
 

@@ -81,13 +81,13 @@ pub fn install(command: InstallCommand) -> Result<(), String> {
 
     let mut script = DebugfsScript::new();
     for file in &install_files {
-        script.add_file(file);
+        script.add_file(file)?;
     }
     install::add_autostart(
         &mut script,
         autostart_host_path.clone(),
         &command.autostart_target,
-    );
+    )?;
     let debugfs_script_path = install::write_debugfs_script(&script)?;
 
     if command.dry_run {

@@ -20,6 +20,25 @@ pub use vsock::*;
 
 use crate::netlink::{AddrState, LinkState, NeighState};
 
+/// Copies `payload` into a smoltcp packet ring.
+///
+/// [`PacketBuffer::is_full`] only tracks metadata slots. Variable-length
+/// packets can fragment the payload ring so [`PacketBuffer::enqueue`] still
+/// returns `Full` while slots remain. Callers must treat `false` as "stop
+/// enqueueing" rather than panicking.
+pub(crate) fn enqueue_rx_packet(buffer: &mut PacketBuffer<()>, payload: &[u8]) -> bool {
+    match buffer.enqueue(payload.len(), ()) {
+        Ok(slot) => {
+            slot.copy_from_slice(payload);
+            true
+        }
+        Err(_) => {
+            warn!("RX packet buffer cannot enqueue packet, dropping");
+            false
+        }
+    }
+}
+
 /// Trait implemented by network device backends.
 pub trait NetDevice: Send + Sync {
     fn name(&self) -> &str;
@@ -29,7 +48,10 @@ pub trait NetDevice: Send + Sync {
         None
     }
 
-    /// Polls the device and pushes received IP packets into `buffer`.
+    /// Polls the device and pushes one received IP packet into `buffer`.
+    ///
+    /// Returns `true` if a packet was enqueued. Returns `false` when the device
+    /// has no deliverable packet, or when `buffer` cannot accept the next one.
     fn poll_rx(
         &mut self,
         ifindex: i32,

@@ -312,6 +312,8 @@ fn procfd_entry(pid: u32, fd: c_int) -> KResult<Arc<dyn FileLike>> {
     let proc_state = get_process_state(pid)?;
     let is_self = pid == current_thread().pid();
     let target_credentials = (!is_self).then(|| proc_state.credentials.read());
+    // Live `/proc/<pid>/fd/<fd>` skips VFS DAC, so this is the only gate.
+    // Policy is `Credentials::can_access_process_files` (ptrace FSCREDS).
     let is_allowed = target_credentials
         .as_ref()
         .is_none_or(|target_credentials| {

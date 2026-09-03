@@ -9,14 +9,17 @@ use kerrno::{KError, KResult};
 use kfs::{File, FileFlags, OpenOptions};
 use ksync::RwLock;
 use kthread;
-use kvfs::{NodePermission, VfsError};
+use kvfs::{NodePermission, NodeType, VfsError, path::Path};
 use lazy_static::lazy_static;
 use linux_raw_sys::general::*;
 use slab::Slab;
 use tee_raw_sys::{TEE_ERROR_GENERIC, TEE_ERROR_ITEM_NOT_FOUND};
 
 use crate::{
-    file::{validate_tee_path, with_fs},
+    file::{
+        is_allowed_root_dir, require_allowed_location, require_confined_parent, validate_tee_path,
+        with_fs,
+    },
     tee::TeeResult,
 };
 
@@ -153,9 +156,16 @@ impl FileVariant {
         let path = validate_tee_path(path).map_err(|_| VfsError::InvalidInput)?;
         let mode = mode & !kthread::current_process_state().umask();
 
-        let options = flags_to_options(flags as c_int, mode as __kernel_mode_t, (0, 0));
-        let fd = with_fs(AT_FDCWD, |fs| options.open(fs, &path))
-            .and_then(|it| add_to_fd(it, flags as _))?;
+        // Last-component symlink following would let `/tmp/link` → `/etc/passwd`
+        // reach `OpenOptions::_open` (and O_TRUNC) before a post-check could deny it.
+        let mut options = flags_to_options(flags as c_int, mode as __kernel_mode_t, (0, 0));
+        options.no_follow(true);
+        let fd = with_fs(AT_FDCWD, |fs| {
+            require_confined_parent(fs, &path)?;
+            let file = options.open(fs, &path)?;
+            require_allowed_location(file.location())?;
+            add_to_fd(file, flags as _)
+        })?;
 
         tee_debug!("FileVariant::open = fd: {}", fd);
         Ok(Self { fd })
@@ -173,7 +183,12 @@ impl FileVariant {
     pub fn remove_file(path: &str) -> TeeResult {
         tee_debug!("FileVariant::remove file with path: {}", path);
         let path = validate_tee_path(path).map_err(|_| TEE_ERROR_GENERIC)?;
-        match with_fs(AT_FDCWD, |fs| fs.remove_file(&path)) {
+        match with_fs(AT_FDCWD, |fs| {
+            let entry = fs.resolve_no_follow(&path)?;
+            require_allowed_location(&entry)?;
+            let parent = entry.parent().ok_or(KError::IsADirectory)?;
+            parent.unlink(entry.name(), false)
+        }) {
             Ok(()) => Ok(()),
             Err(VfsError::NotFound) => {
                 tee_debug!("FileVariant::remove_file: file {} not found", path);
@@ -203,7 +218,14 @@ impl FileVariant {
         let path = validate_tee_path(path).map_err(|_| TEE_ERROR_GENERIC)?;
         let mode = NodePermission::from_bits_truncate(0o755);
         with_fs(AT_FDCWD, |fs| {
-            match fs.create_dir(&path, mode) {
+            let created = if is_allowed_root_dir(&path) {
+                fs.create_dir(&path, mode)
+            } else {
+                let (dir, name) = fs.resolve_parent(Path::new(&path))?;
+                require_allowed_location(&dir)?;
+                dir.create(&name, NodeType::Directory, mode)
+            };
+            match created {
                 Ok(_) => Ok(()),
                 Err(VfsError::AlreadyExists) => {
                     // Directory already exists, return success (idempotent)

@@ -60,7 +60,7 @@ kfd resources / kfs / kvfs / device and pipe implementations
 
 | 位置 | 调用路径 | 用途 | 不变量 / 安全理由 |
 |------|----------|------|-------------------|
-| `dir.rs::DirBuffer::write_entry` | `sys_getdents64 -> Directory::read_dir -> DirBuffer::write_entry` | 在临时 `Vec<u8>` 中按 `linux_dirent64` ABI 写目录项 | 写入前计算记录长度并检查 `remaining_space >= len`；`entry_ptr` 位于 `Vec` 已分配范围内；记录按 `align_of::<linux_dirent64>()` 对齐；文件名复制长度来自 `name.as_bytes().len()`；尾部写入 NUL；写完后只增加 `offset` 到已检查范围 |
+| `dir.rs::DirBuffer::write_entry` | `sys_getdents64 -> Directory::read_dir -> DirBuffer::write_entry` | 在临时 `Vec<u8>` 中按 `linux_dirent64` ABI 写目录项 | 写入前计算记录长度并检查 `remaining_space >= len`；`entry_ptr` 位于 `Vec` 已分配范围内；`d_reclen` 按 ABI 向上取整，但 `Vec<u8>` 基址不一定满足 `linux_dirent64` 对齐，header 使用 `write_unaligned`；文件名复制长度来自 `name.as_bytes().len()`；尾部写入 NUL；写完后只增加 `offset` 到已检查范围 |
 | `stat.rs::statfs` | `sys_statfs` / `sys_fstatfs` | 用零初始化创建 Linux `statfs` ABI 结构 | `statfs` 是 C ABI plain data 结构；零值用于初始化 padding 和暂未显式设置字段；函数随后逐项写入返回给用户态的可见字段 |
 
 新增 `unsafe` 块必须同时满足：
@@ -99,9 +99,11 @@ kfd resources / kfs / kvfs / device and pipe implementations
 3. `AT_EMPTY_PATH` 是空路径按 fd 解析的必要条件。
 4. `AT_SYMLINK_NOFOLLOW` / `O_NOFOLLOW` 必须影响符号链接和 procfd 解析。
 5. `mount` 不得静默忽略会改变语义的 unsupported operation flags。
-6. 创建文件和目录时应应用当前进程 `umask`。
-7. `chroot` 目标必须是目录。
-8. 绝对路径、`..`、绝对符号链接和 `dirfd` 都不得越过 `FsContext::root_dir()`。
+6. `mount` / `umount2` 仅允许特权进程（`euid == 0`）。
+7. 创建文件和目录时应应用当前进程 `umask`。
+8. `chroot` 仅允许特权进程（`euid == 0`，当前内核的 `CAP_SYS_CHROOT` 等价物），且目标必须是目录。
+9. 绝对路径、`..`、绝对符号链接和 `dirfd` 都不得越过 `FsContext::root_dir()`。
+10. `chown` 需要 `CAP_CHOWN` 等价特权（`euid == 0`）才能改所有者；文件所有者只能把组改到自己所属组。`chmod` 需要所有者或 `CAP_FOWNER` 等价特权。设置非“当前时间”的时间戳需要所有者或特权；把两个时间戳都设为现在时，写权限也可以。
 
 ## 线程安全
 
@@ -122,13 +124,18 @@ kfd resources / kfs / kvfs / device and pipe implementations
 | 编号 | 威胁描述 | 边界 | 影响等级 | 触发条件 | 应对措施 |
 |------|----------|------|----------|----------|----------|
 | T-01 | 用户坏指针导致内核越界读写 | 用户路径/缓冲区/iovec | 高 | 直接解引用用户地址或忽略 copy 错误 | 统一使用 `UserPtr`、`UserConstPtr`、`VmBytes`、`IoVectorBuf` 并传播 `KResult` |
-| T-02 | `getdents64` 写出目录项时越过临时缓冲区 | 用户输出缓冲区 / ABI 布局 | 高 | 记录长度计算错误或未检查剩余空间 | `DirBuffer::write_entry` 先检查空间，记录长度按 ABI 对齐 |
+| T-02 | `getdents64` 写出目录项时越过临时缓冲区 | 用户输出缓冲区 / ABI 布局 | 高 | 记录长度计算错误或未检查剩余空间 | `DirBuffer::write_entry` 先检查空间，`d_reclen` 按 ABI 向上取整 |
+| T-15 | `getdents64` 对未对齐 `linux_dirent64` 指针做对齐写入 | 用户输出缓冲区 / ABI 布局 | 高 | `Vec<u8>` 基址非 8 字节对齐，aligned `write` 在 AArch64 等架构上是 UB | header 使用 `write_unaligned`；不依赖 `offset` 倍数等于指针对齐 |
 | T-03 | `statfs` 向用户泄露未初始化内核栈数据 | 用户输出缓冲区 / ABI 布局 | 高 | C ABI 结构 padding 未初始化 | `statfs` 使用 zeroed 初始化后逐项赋值 |
-| T-04 | `/proc/<pid>/fd/<fd>` 绕过普通路径解析访问不该访问的对象 | procfd 路径 | 高 | 未校验 pid/fd 语法、fd 生命周期或调用者凭据 | `classify_procfd_path` 拒绝无效 pid/fd；直接解析和 procfs `ThreadFdDir` 均只允许目标自身、root 或 fsuid 匹配目标全部 UID 的调用者；fd 表读取持 read lock |
+| T-04 | `/proc/<pid>/fd/<fd>` 绕过普通路径解析访问不该访问的对象 | procfd 路径 | 高 | 未校验 pid/fd 语法、fd 生命周期或调用者凭据 | `classify_procfd_path` 拒绝无效 pid/fd；直接解析和 procfs `ThreadFdDir` 均调用 `can_access_process_files`（自身、root，或 fsuid/fsgid 匹配目标全部 UID/GID）；fd 表读取持 read lock |
 | T-05 | `O_NOFOLLOW` 被忽略导致符号链接或 procfd 路径被跟随 | 路径 flags | 高 | open/at flags 没有传入解析层 | `resolve_open_path_source` 将 `O_NOFOLLOW` 转为 `AT_SYMLINK_NOFOLLOW`，并对 live procfd 返回 loop 错误 |
 | T-06 | `fallocate` offset/len 溢出破坏文件大小或范围操作 | scalar 参数 / VFS | 高 | 负数或 `offset + len` 溢出 | 校验非负并用 `checked_add` |
 | T-07 | `copy_file_range` 同文件重叠复制造成数据破坏 | fd-to-fd 复制 | 中 | 同文件重叠检查未实现 | 已在设计文档列为限制；非零 flags 在边界被拒绝；新增完整语义前不应宣称等价 Linux |
 | T-08 | 未实现的 mount/umount flags 被静默忽略 | mount flags | 高 | 用户态请求 bind、remount、detach 等语义 | 对未实现 operation flags 返回 `InvalidInput` |
+| T-14 | 非特权进程挂载/卸载覆盖关键目录 | mount 特权 | 高 | 未检查 `euid` 即执行 `tmpfs` 挂载 | `sys_mount` / `sys_umount2` 要求 `is_privileged()`，否则 `EPERM` |
+| T-16 | 非特权进程 `chroot` 后配合 setuid 程序提权或逃逸沙箱 | chroot 特权 | 高 | 未检查 `euid` 即更换进程 root | `sys_chroot` 要求 `is_privileged()`，否则 `EPERM` |
+| T-17 | 非特权进程 `chown`/`chmod` 任意文件实现提权 | 元数据更新 | 高 | `fchownat`/`fchmodat` 未检查所有者或 `CAP_CHOWN`/`CAP_FOWNER` | 非特权调用者不能转让所有权；改组须为文件所有者且目标组是其成员；`chmod` 仅所有者或特权 |
+| T-18 | 非特权进程任意改文件时间戳掩盖审计痕迹 | 元数据更新 | 高 | `utime`/`utimensat` 未检查所有者或写权限 | 显式时间戳要求所有者或特权；仅设为当前时间时允许 DAC 写权限 |
 | T-09 | 文件锁占位返回成功导致应用误以为互斥成立 | fd_ops | 中 | `fcntl`/`flock` 锁语义未实现 | 文档列为限制；未来实现前审计所有锁相关返回路径 |
 | T-10 | 创建文件所有者固定为 root 导致 DAC 语义错误 | open/create | 高 | 创建路径未读取当前凭据 | `current_filesystem_ids()` 从当前 credential 读取 fsuid/fsgid 并传入 `OpenOptions::user` |
 | T-11 | `faccessat2` 权限检查与真实凭据不一致 | access | 中 | 仅检查 owner 权限位，不区分 UID/GID/补充组 | 文档列为限制；未来需接入 `kcred::AccessCredentials` |
@@ -210,5 +217,6 @@ kfd resources / kfs / kvfs / device and pipe implementations
 - [ ] 跨 fd 复制路径检查源目标类型、阻塞语义和用户 offset 写回。
 - [ ] 元数据和 access 改动与 `kcred` 凭据模型保持同步。
 - [ ] mount/umount 新 flags 要么完整实现，要么显式拒绝。
+- [ ] mount/umount 入口检查调用方特权（`euid == 0`）。
 - [ ] 新增日志不输出文件内容或敏感用户缓冲区。
 - [ ] 若修复当前已知限制，同步更新本文和 `design.md`。

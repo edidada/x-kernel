@@ -7,10 +7,18 @@
 use core::ffi::{c_char, c_void};
 
 use kerrno::{KError, KResult};
-use kthread::current_process_state;
+use kthread::{current_process_state, with_current_credentials};
 use kvfs::{MountFlags, ST_RDONLY};
 use memfs::MemoryFs;
 use posix_types::UserConstPtr;
+
+fn require_mount_privilege() -> KResult<()> {
+    if with_current_credentials(|credentials| credentials.is_privileged()) {
+        Ok(())
+    } else {
+        Err(KError::OperationNotPermitted)
+    }
+}
 
 fn superblock_flags_from_sys_mount(flags: i32) -> u32 {
     let f = flags as u32;
@@ -64,6 +72,9 @@ fn per_mount_flags(flags: i32) -> MountFlags {
 }
 
 /// Mount a filesystem at the specified target path.
+///
+/// Requires a privileged caller (`euid == 0`, standing in for Linux
+/// `CAP_SYS_ADMIN`). Unprivileged callers receive `EPERM`.
 pub fn sys_mount(
     source: UserConstPtr<c_char>,
     target: UserConstPtr<c_char>,
@@ -71,6 +82,7 @@ pub fn sys_mount(
     flags: i32,
     _data: UserConstPtr<c_void>,
 ) -> KResult<isize> {
+    require_mount_privilege()?;
     let f = flags as u32;
 
     // MS_NOUSER is never allowed from userspace.
@@ -123,7 +135,11 @@ pub fn sys_mount(
 }
 
 /// Unmount a filesystem at the specified target path.
+///
+/// Requires a privileged caller (`euid == 0`, standing in for Linux
+/// `CAP_SYS_ADMIN`). Unprivileged callers receive `EPERM`.
 pub fn sys_umount2(target: UserConstPtr<c_char>, flags: i32) -> KResult<isize> {
+    require_mount_privilege()?;
     // Reject flags we don't implement yet: MNT_FORCE(1), MNT_DETACH(2),
     // MNT_EXPIRE(4), UMOUNT_NOFOLLOW(8).  Silently ignoring them would
     // violate user-visible semantics (e.g. MNT_DETACH would behave as a

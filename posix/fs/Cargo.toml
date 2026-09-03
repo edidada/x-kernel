@@ -23,6 +23,7 @@ devfs.workspace = true
 memfs.workspace = true
 ktty.workspace = true
 kerrno.workspace = true
+kcred.workspace = true
 kfs.workspace = true
 khal.workspace = true
 kio.workspace = true

@@ -53,6 +53,8 @@ resource owners
 | T-04 | current-thread/process helper 在错误上下文调用 | 中 | 复用 `kthread` 现有约束，并在 syscall 入口保持 task-context 假设 |
 | T-05 | 不同 syscall 被历史目录误导，后续继续堆入错误模块 | 中 | crate-local design 文档固定 `vfs/ipc/time/task` 的 adapter 语义 |
 | T-06 | `execve` 检查线程数后并发 clone 发布新线程 | 高 | `execve` 与 `clone(CLONE_THREAD)` 都持有 `ProcessLifecycleState::exec_transition` |
+| T-07 | `capget` 对非特权进程返回全 1 capability，用户态据此跳过检查 | 中 | `capget` 按目标 `euid == 0` 填全开或全关；跨进程查询走 `can_access_process_files` |
+| T-08 | `seccomp`/`PR_SET_SECCOMP` 返回成功但未安装过滤器 | 中 | 未实现过滤时 `seccomp` 返回 `ENOSYS`，`prctl(PR_SET_SECCOMP)` 返回 `EINVAL` |
 
 ## 审计清单
 

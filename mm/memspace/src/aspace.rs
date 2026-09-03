@@ -271,7 +271,7 @@ impl AddrSpace {
             k_bail!(InvalidInput, "address is not aligned");
         }
 
-        let offset = start_vaddr.as_usize() as isize - start_paddr.as_usize() as isize;
+        let offset = start_vaddr.as_usize().wrapping_sub(start_paddr.as_usize()) as isize;
         let area = MemoryArea::new(start_vaddr, size, flags, Backend::new_linear(offset));
         self.areas.map(area, &mut self.pgtbl, false)?;
         Ok(())

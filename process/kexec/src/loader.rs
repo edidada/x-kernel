@@ -5,7 +5,7 @@
 //! ELF loading for user programs.
 
 use alloc::{borrow::ToOwned, string::String, vec, vec::Vec};
-use core::{ffi::CStr, iter};
+use core::{ffi::CStr, iter, ops::Range};
 
 use kernel_elf_parser::{AuxEntry, ELFHeaders, ELFHeadersBuilder, ELFParser, app_stack_region};
 use kerrno::{KError, KResult};
@@ -34,6 +34,10 @@ fn mapping_flags(flags: xmas_elf::program::Flags) -> MappingFlags {
     mapping_flags
 }
 
+fn is_load_seg_page_offset_consistent(vaddr: usize, file_offset: u64) -> bool {
+    vaddr.align_offset_4k() == file_offset as usize % PAGE_SIZE_4K
+}
+
 fn map_elf<'a>(
     uspace: &mut AddrSpace,
     base: usize,
@@ -56,7 +60,12 @@ fn map_elf<'a>(
             ph.flags
         );
         let seg_pad = vaddr.align_offset_4k();
-        assert_eq!(seg_pad, ph.offset as usize % PAGE_SIZE_4K);
+        // PT_LOAD p_vaddr and p_offset must share the same page offset so the
+        // mapping can be page-aligned. A mismatch is a malformed ELF from
+        // execve, not an internal invariant: return ENOEXEC instead of panicking.
+        if !is_load_seg_page_offset_consistent(vaddr, ph.offset) {
+            return Err(KError::InvalidExecutable);
+        }
 
         let seg_align_size =
             (ph.mem_size as usize + seg_pad + PAGE_SIZE_4K - 1) & !(PAGE_SIZE_4K - 1);
@@ -88,6 +97,25 @@ fn map_elf_error(err: &'static str) -> KError {
     KError::InvalidExecutable
 }
 
+/// Slice the program-header table out of an already-read prefix.
+///
+/// `slice.get(start..end)` returns `None` when the range is inverted or
+/// out of bounds, so a wrapped `e_phoff` cannot panic here.
+fn ph_table_in_prefix<'a>(data: &'a [u8], range: &Range<u64>) -> Option<&'a [u8]> {
+    let start = usize::try_from(range.start).ok()?;
+    let end = usize::try_from(range.end).ok()?;
+    data.get(start..end)
+}
+
+fn ph_table_file_span(range: &Range<u64>) -> KResult<(u64, usize)> {
+    let len = range
+        .end
+        .checked_sub(range.start)
+        .ok_or(KError::InvalidExecutable)?;
+    let len = usize::try_from(len).map_err(|_| KError::InvalidExecutable)?;
+    Ok((range.start, len))
+}
+
 #[self_referencing]
 struct ElfCacheEntry {
     cache: CachedFile,
@@ -107,11 +135,15 @@ impl ElfCacheEntry {
         match ElfCacheEntry::try_new_or_recover::<KError>(cache.clone(), data, |data| {
             let builder = ELFHeadersBuilder::new(data).map_err(map_elf_error)?;
             let range = builder.ph_range().map_err(map_elf_error)?;
-            if range.end as usize <= data.len() {
-                builder.build(&data[range.start as usize..range.end as usize])
+            if let Some(ph) = ph_table_in_prefix(data, &range) {
+                builder.build(ph)
             } else {
-                let mut buf = vec![0; (range.end - range.start) as usize];
-                cache.read_at(&mut buf[..], range.start)?;
+                let (offset, len) = ph_table_file_span(&range)?;
+                let mut buf = vec![0; len];
+                let read = cache.read_at(&mut buf[..], offset)?;
+                if read != len {
+                    return Err(KError::InvalidExecutable);
+                }
                 builder.build(&buf)
             }
             .map_err(map_elf_error)
@@ -173,7 +205,12 @@ impl ElfLoader {
             let cache = entry.borrow_cache();
             let mut data = vec![0; header.file_size as usize];
             let read = cache.read_at(&mut data[..], header.offset)?;
-            assert_eq!(data.len(), read);
+            // `read_at` returns a short count when the file ends early. A
+            // PT_INTERP `p_filesz` larger than the file is a malformed ELF,
+            // not an internal invariant.
+            if read != data.len() {
+                return Err(KError::InvalidExecutable);
+            }
 
             let ldso = CStr::from_bytes_with_nul(&data)
                 .ok()
@@ -224,6 +261,12 @@ impl ElfLoader {
 
 static ELF_LOADER: Mutex<ElfLoader> = Mutex::new(ElfLoader::new());
 
+/// Linux `execve(2)` allows at most four interpreter rewrites.
+///
+/// The `#!` parser and the `.sh` suffix rewrite share this budget so a
+/// cyclic script chain cannot overflow the kernel stack.
+const MAX_INTERP_DEPTH: usize = 4;
+
 /// Clear the ELF cache.
 ///
 /// Useful for removing noise during memory leak detection.
@@ -235,27 +278,46 @@ pub fn clear_elf_cache() {
 
 /// Load the user app to the user address space.
 ///
+/// Script files may rewrite to an interpreter. Nested `#!` lines and
+/// the `.sh` suffix rewrite share a depth budget of four, matching
+/// Linux `execve(2)`.
+///
 /// # Arguments
 ///
 /// - `uspace`: The address space of the user app.
+/// - `path`: Optional executable path. When omitted, the first argument
+///   is used.
 /// - `args`: The arguments of the user app. The first argument is the path of
-///   the user app.
+///   the user app when `path` is omitted.
 /// - `envs`: The environment variables of the user app.
 ///
 /// # Returns
 ///
 /// - The entry point of the user app.
 /// - The stack pointer of the user app.
+///
+/// # Errors
+///
+/// Returns [`KError::FilesystemLoop`] if interpreter rewriting nests more
+/// than four times, including cyclic `#!` references.
 pub fn load_user_app(
     uspace: &mut AddrSpace,
     path: Option<&str>,
     args: &[String],
     envs: &[String],
 ) -> KResult<(VirtAddr, VirtAddr)> {
-    load_user_app_resolved(uspace, None, path, args, envs)
+    load_user_app_resolved(uspace, None, path, args, envs, 0)
 }
 
 /// Load the user app from an already-resolved filesystem location.
+///
+/// Interpreter rewriting follows the same four-level budget as
+/// [`load_user_app`].
+///
+/// # Errors
+///
+/// Returns [`KError::FilesystemLoop`] if interpreter rewriting nests more
+/// than four times, including cyclic `#!` references.
 pub fn load_user_app_at(
     uspace: &mut AddrSpace,
     loc: Location,
@@ -263,7 +325,25 @@ pub fn load_user_app_at(
     args: &[String],
     envs: &[String],
 ) -> KResult<(VirtAddr, VirtAddr)> {
-    load_user_app_resolved(uspace, Some(loc), Some(path), args, envs)
+    load_user_app_resolved(uspace, Some(loc), Some(path), args, envs, 0)
+}
+
+fn next_interp_depth(interp_depth: usize) -> KResult<usize> {
+    if interp_depth >= MAX_INTERP_DEPTH {
+        Err(KError::FilesystemLoop)
+    } else {
+        Ok(interp_depth + 1)
+    }
+}
+
+fn load_next_interp(
+    uspace: &mut AddrSpace,
+    args: &[String],
+    envs: &[String],
+    interp_depth: usize,
+) -> KResult<(VirtAddr, VirtAddr)> {
+    let interp_depth = next_interp_depth(interp_depth)?;
+    load_user_app_resolved(uspace, None, None, args, envs, interp_depth)
 }
 
 fn load_user_app_resolved(
@@ -272,6 +352,7 @@ fn load_user_app_resolved(
     path: Option<&str>,
     args: &[String],
     envs: &[String],
+    interp_depth: usize,
 ) -> KResult<(VirtAddr, VirtAddr)> {
     let path = path
         .or_else(|| args.first().map(String::as_str))
@@ -282,7 +363,7 @@ fn load_user_app_resolved(
         let new_args: Vec<String> = iter::once("/bin/sh".to_owned())
             .chain(args.iter().cloned())
             .collect();
-        return load_user_app(uspace, None, &new_args, envs);
+        return load_next_interp(uspace, &new_args, envs, interp_depth);
     }
 
     let load_result = {
@@ -311,7 +392,7 @@ fn load_user_app_resolved(
                     .chain(iter::once(path.to_owned()))
                     .chain(args.iter().skip(1).cloned())
                     .collect();
-                return load_user_app(uspace, None, &new_args, envs);
+                return load_next_interp(uspace, &new_args, envs, interp_depth);
             }
             return Err(KError::InvalidExecutable);
         }

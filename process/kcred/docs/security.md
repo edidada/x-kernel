@@ -102,7 +102,7 @@ VFS / DAC permission checks
 | T-06 | 内部 unchecked helper 被外部误用绕过权限策略 | 高 | helper 作为 `pub` API 暴露给上层 syscall 路径 | 已将 `set_resuid_unchecked` / `set_resgid_unchecked` 收窄为 `pub(crate)`；新增 syscall 入口应调用 checked API |
 | T-07 | `apply_exec` 调用顺序错误丢失 setuid/setgid 程序语义 | 中 | setuid executable 支持先重置 saved ID 后更新 effective ID | `design.md` 记录顺序要求；未来 exec loader 改动需联动审计 |
 | T-08 | root 简化模型与 capability 语义不一致 | 中 | 引入 capability 后仍只检查 `euid == 0` | 把 `is_privileged` 作为替换点；capability 支持应在策略层接入 |
-| T-09 | procfd 直接路径与 procfs 后端的跨进程策略不一致 | 高 | 两处各自比较 UID 并发生漂移 | 两个入口统一调用 `Credentials::can_access_process_files`，单元测试覆盖 self/root/UID 转换 |
+| T-09 | procfd 直接路径与 procfs 后端的跨进程策略不一致 | 高 | 两处各自比较 UID 并发生漂移 | 两个入口统一调用 `Credentials::can_access_process_files`（含 UID 与 GID），单元测试覆盖 self/root/UID/GID 转换 |
 
 影响等级定义：
 
@@ -151,6 +151,7 @@ VFS / DAC permission checks
 
 1. **无 capability 模型**：
    当前 `is_privileged` 使用 `euid == 0`。
+   `capget` 按该判断返回全开或全关集合，不跟踪 `capset` 写入的位。
 2. **无 LSM / namespace 语义**：
    UID/GID 是全局数值，没有 user namespace 映射。
 3. **无补充组数量限制**：
@@ -159,6 +160,9 @@ VFS / DAC permission checks
 4. **setuid/setgid executable 支持尚未接入**：
    `apply_exec` 目前只重置 saved ID，
    未来接入文件 capability 或 setuid/setgid 位时需在调用前更新 effective ID。
+5. **无 dumpable 位**：
+   Linux `__ptrace_may_access` 还会拒绝 `dumpable != SUID_DUMP_USER` 的目标
+   （除非调用者有 `CAP_SYS_PTRACE`）。本实现尚未跟踪 dumpable。
 
 ## 其它说明（模板章节）
 

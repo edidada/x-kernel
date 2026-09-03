@@ -100,6 +100,29 @@ impl StreamingCipherCtx {
         !self.ciphertext.is_empty() || !self.plaintext.is_empty()
     }
 
+    /// Configured AEAD tag length in bytes.
+    pub fn tag_len(&self) -> usize {
+        self.tag_len
+    }
+
+    /// Bytes `encrypt_final_with_input` / `decrypt_final_with_input` may emit.
+    ///
+    /// CCM one-shots the buffered message; GCM emits leftover plus this input.
+    pub fn max_final_output_len(&self, input_len: usize) -> usize {
+        if !self.algo.is_aead() {
+            return self.max_update_output_len(input_len);
+        }
+        if self.algo.is_ccm() {
+            return self.buffer.len().saturating_add(input_len);
+        }
+        let leftover = if self.direction.is_decrypting() {
+            self.plaintext.len().saturating_sub(self.returned_len)
+        } else {
+            self.ciphertext.len().saturating_sub(self.returned_len)
+        };
+        leftover.saturating_add(input_len)
+    }
+
     /// Return the maximum number of bytes `update()` can emit for `input_len`.
     pub fn max_update_output_len(&self, input_len: usize) -> usize {
         if self.algo.is_aead() {

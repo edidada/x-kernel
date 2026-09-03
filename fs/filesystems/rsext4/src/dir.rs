@@ -229,7 +229,7 @@ pub fn insert_dir_entry<B: BlockDevice>(
             }
         };
 
-        let _ = fs.datablock_cache.modify(device, phys as u64, |data| {
+        fs.datablock_cache.modify(device, phys as u64, |data| {
             if inserted {
                 return;
             }
@@ -295,7 +295,7 @@ pub fn insert_dir_entry<B: BlockDevice>(
                 }
                 offset = entry_end;
             }
-        });
+        })?;
     }
 
     if inserted {
@@ -566,9 +566,13 @@ pub fn mkdir_with_ino<B: BlockDevice>(
     let (group_idx, _idx) = fs.inode_allocator.global_to_group(new_dir_ino);
     // 仅仅的视图，修改过后的
 
-    let mut inode_pre = fs
-        .get_inode_by_num(device, new_dir_ino)
-        .expect("Can't getinode");
+    let mut inode_pre = match fs.get_inode_by_num(device, new_dir_ino) {
+        Ok(inode) => inode,
+        Err(e) => {
+            error!("mkdir get_inode_by_num failed path={path} ino={new_dir_ino} err={e:?} ({e})");
+            return None;
+        }
+    };
     build_file_block_mapping(fs, &mut inode_pre, &[data_block], device);
     if fs
         .modify_inode(device, new_dir_ino, |inode| {
@@ -710,9 +714,7 @@ pub fn create_root_directory_entry<B: BlockDevice>(
 
     // 仅仅的视图，修改过后的
     let root_inode_num = fs.root_inode;
-    let mut inode_pre = fs
-        .get_inode_by_num(block_dev, root_inode_num)
-        .expect("Can't getinode");
+    let mut inode_pre = fs.get_inode_by_num(block_dev, root_inode_num)?;
     build_file_block_mapping(fs, &mut inode_pre, &[data_block], block_dev);
 
     fs.modify_inode(block_dev, fs.root_inode, |inode| {
@@ -797,9 +799,7 @@ pub fn create_lost_found_directory<B: BlockDevice>(
     let (lf_group, _idx) = fs.inode_allocator.global_to_group(lost_ino);
 
     // 仅仅的视图，修改过后的
-    let mut inode_pre = fs
-        .get_inode_by_num(block_dev, lost_ino)
-        .expect("Can't getinode");
+    let mut inode_pre = fs.get_inode_by_num(block_dev, lost_ino)?;
     build_file_block_mapping(fs, &mut inode_pre, &[data_block], block_dev);
     debug!(
         "When create lost+found inode iblock,:{:?} ,data_block:{:?}",
@@ -827,12 +827,9 @@ pub fn create_lost_found_directory<B: BlockDevice>(
     // 这里也需要根据extend来解析
     let mut root_inode = fs.get_root(block_dev)?;
     let root_block = resolve_inode_block(block_dev, &mut root_inode, 0)?
-        .expect("lost+found logical_block can't map to physical blcok!");
+        .filter(|&b| b != 0)
+        .ok_or(BlockDevError::Corrupted)?;
     remember_dir_block(fs, root_block as u64);
-
-    if root_block == 0 {
-        return Err(BlockDevError::Corrupted);
-    }
 
     fs.datablock_cache
         .modify(block_dev, root_block as u64, move |data| {

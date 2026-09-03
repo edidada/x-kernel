@@ -27,12 +27,19 @@ fn is_under_allowed_root(normalized: &str) -> bool {
     is_under_root(normalized, TEE_FS_ROOT) || is_under_root(normalized, TEE_TMP_ROOT)
 }
 
+/// True when `normalized` is exactly `/tee` or `/tmp` (the jail roots).
+pub(crate) fn is_allowed_root_dir(normalized: &str) -> bool {
+    normalized == TEE_FS_ROOT.trim_end_matches('/')
+        || normalized == TEE_TMP_ROOT.trim_end_matches('/')
+}
+
 /// Normalize and validate a path before TEE filesystem access.
 ///
 /// Rejects `..` traversal and confines absolute paths to `/tee/` or `/tmp/`.
-/// This is lexical validation only: a symlink under `/tee/` can still redirect
-/// `fs.resolve()` unless callers pass `AT_SYMLINK_NOFOLLOW`. `/tee/` is assumed
-/// to be created by a trusted installer and not writable by untrusted TAs.
+/// This is lexical only. Callers must still
+/// [`require_allowed_location`] after VFS resolution: intermediate components
+/// are followed, so a symlink under `/tmp/` (world-writable) can otherwise
+/// escape the jail.
 pub(crate) fn validate_tee_path(path: &str) -> KResult<String> {
     if path.is_empty() || path.as_bytes().contains(&0) {
         return Err(KError::InvalidInput);
@@ -52,6 +59,32 @@ pub(crate) fn validate_tee_path(path: &str) -> KResult<String> {
     }
 
     Ok(normalized.to_owned())
+}
+
+/// Reject a resolved location whose absolute path left `/tee/` or `/tmp/`.
+///
+/// VFS `resolve` / `resolve_no_follow` follow intermediate directory
+/// symlinks. Lexical [`validate_tee_path`] cannot see that, so every TEE
+/// lookup must re-check the location that was actually reached.
+pub(crate) fn require_allowed_location(loc: &Location) -> KResult<()> {
+    let abs = loc.absolute_path()?;
+    if !is_under_allowed_root(abs.as_str()) {
+        return Err(KError::PermissionDenied);
+    }
+    Ok(())
+}
+
+/// Ensure `path`'s parent is still inside the TEE jail after symlink following.
+///
+/// Must run before create/open so a directory symlink to `/etc` cannot be
+/// used to create or truncate a file outside the jail. The jail roots
+/// themselves have parent `/` and are allowed without treating `/` as in-jail.
+pub(crate) fn require_confined_parent(fs: &FsContext, path: &str) -> KResult<()> {
+    if is_allowed_root_dir(path) {
+        return Ok(());
+    }
+    let (parent, _) = fs.resolve_parent(Path::new(path))?;
+    require_allowed_location(&parent)
 }
 
 pub fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsContext) -> KResult<R>) -> KResult<R> {
@@ -78,6 +111,12 @@ impl ResolveAtResult {
     }
 }
 
+/// Resolve `path` relative to `dirfd` (must be `AT_FDCWD`) and keep the
+/// result inside `/tee/` or `/tmp/`.
+///
+/// Lexical validation happens first. After VFS lookup, the location's
+/// absolute path is checked again so a symlink under the jail cannot
+/// redirect into `/etc` or other host paths.
 pub fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> KResult<ResolveAtResult> {
     let path = path
         .filter(|path| !path.is_empty())
@@ -85,12 +124,13 @@ pub fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> KResult<Resol
     let path = validate_tee_path(path)?;
 
     with_fs(dirfd, |fs| {
-        if flags & AT_SYMLINK_NOFOLLOW != 0 {
-            fs.resolve_no_follow(&path)
+        let loc = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+            fs.resolve_no_follow(&path)?
         } else {
-            fs.resolve(&path)
-        }
-        .map(ResolveAtResult::File)
+            fs.resolve(&path)?
+        };
+        require_allowed_location(&loc)?;
+        Ok(ResolveAtResult::File(loc))
     })
 }
 

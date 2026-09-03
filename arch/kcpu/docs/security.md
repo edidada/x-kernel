@@ -46,6 +46,8 @@
 
 - **用户态寄存器状态**：`UserContext::run()` 切换到用户态后，用户可控制
   所有通用寄存器内容。trap handler 需正确处理任意寄存器值。
+  AArch64 上 `rt_sigreturn` 还可改写 `SPSR_EL1`；`sanitize_user_spsr`
+  在 `eret` 前强制 `M == EL0t`。
 
 - **中断/异常输入**：硬件中断和异常向量触发 trap 入口。IRQ 编号来自硬件，
   不完全可信。
@@ -284,6 +286,7 @@ $f0–$f31 的寄存器编号。
 | T-07 | 中断未关闭时调用 `switch_to` 或 `run` | 中 | 调用者违反调用约束 | `run()` 内部调用 `disable_local_irq()`；`switch_to` 要求调用者保证关中断 |
 | T-08 | `ExceptionContextGuard` 嵌套导致 per-CPU 指针被覆盖 | 低 | trap handler 执行期间再次触发异常 | `swap` 语义保存前一个值，guard drop 时恢复；深层嵌套通过 guard 链正确恢复 |
 | T-09 | LoongArch64 用户态构造恶意非对齐指令字 | 高 | 用户态程序执行非对齐访问，故障指令字被 `emulate_unaligned` 解码为意外操作 | `emulate_unaligned` 仅修改指令编码中指定的目标寄存器；未匹配操作码返回错误不修改任何状态；操作码掩码仅匹配已知指令类型 |
+| T-10 | `rt_sigreturn` 伪造 `SPSR.M` 使 `eret` 进入 EL1 | 高 | 信号处理期间改写用户栈 `SignalFrame.pstate` 为 EL1h/EL1t | `MContext::restore` 与 `UserContext::run` 调用 `sanitize_user_spsr`，强制 `SPSR.M == EL0t` 并清除 MODE32/F/A/D/IL |
 | T-10 | `init_trap()` 被重复调用导致硬件状态不一致 | 中 | 二次调用覆盖 GDT/IDT/向量表等已激活的硬件结构 | 由调用者保证仅调用一次（boot 阶段单线程执行）；无运行时防护 |
 | T-11 | x86_64 `orig_rax` 被恶意篡改导致 syscall 重启异常 | 中 | 用户态通过信号处理器修改 trap frame 中的 `orig_rax` | `orig_rax` 仅在 `syscall_entry` 汇编中写入，用户态无法直接修改；信号 delivery 代码通过 `syscall_restart_error()` 判断重启条件 |
 | T-12 | `rollback_syscall` 在非 syscall 上下文调用 | 低 | 信号处理代码误判上下文类型 | `is_from_syscall()` 检查 `orig_rax != u64::MAX`，非 syscall 上下文时 `rollback_syscall()` 和 `restart_with_syscall()` 为 no-op |

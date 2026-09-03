@@ -59,13 +59,21 @@ impl MmapMapper for FileMapper {
     }
 
     fn map_physical(&mut self, mut range: PhysAddrRange) -> kvfs::VfsResult<()> {
-        range.start += self.offset;
-        if range.is_empty() {
+        // `offset` is a userspace mmap argument. Adding it to the device PA
+        // must not panic: a page-aligned but huge offset can overflow usize.
+        let mapped_start = range
+            .start
+            .checked_add(self.offset)
+            .ok_or(kvfs::VfsError::InvalidInput)?;
+        if mapped_start >= range.end {
             return Err(kvfs::VfsError::InvalidInput);
         }
+        range.start = mapped_start;
         self.length = self.length.min(range.size().align_down(self.page_size));
+        // Store VA−PA as a wrapping `usize` bit pattern. `as isize`
+        // subtraction overflows when the physical start is above `isize::MAX`.
         self.backend = Some(Backend::new_linear(
-            self.start.as_usize() as isize - range.start.as_usize() as isize,
+            self.start.as_usize().wrapping_sub(range.start.as_usize()) as isize,
         ));
         Ok(())
     }
@@ -82,12 +90,16 @@ impl MmapMapper for FileMapper {
             )
         } else {
             let file_backend = (*self.file).backend()?.clone();
+            let file_start = self.offset as u64;
+            let file_end = file_start
+                .checked_add(self.length as u64)
+                .ok_or(kvfs::VfsError::InvalidInput)?;
             new_cow(
                 self.start,
                 self.page_size,
                 file_backend,
-                self.offset as u64,
-                None,
+                file_start,
+                Some(file_end),
             )
         };
         self.backend = Some(backend);

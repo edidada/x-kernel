@@ -6,6 +6,11 @@ NET ?= y
 GRAPHIC ?= n
 INPUT ?= y
 VSOCK ?= y
+# Only y/n. Use the unexpanded value so env/cmdline cannot inject $(shell ...).
+ifeq ($(filter $(value VSOCK),y n),)
+  $(error VSOCK must be y or n)
+endif
+override VSOCK := $(value VSOCK)
 UEFI ?= n
 VIRTIO_9P ?= n
 # VIRTIO_BUS default is set per-platform below. User can still override on the command line.

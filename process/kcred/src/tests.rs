@@ -195,15 +195,23 @@ fn test_supplementary_groups_are_sorted_and_preserve_duplicates() {
 }
 
 #[def_test]
-fn test_process_file_access_requires_self_privilege_or_matching_uids() {
+fn test_process_file_access_requires_self_privilege_or_matching_ids() {
     let caller = Credentials::new(1000, 100);
     let target = Credentials::new(2000, 200);
     assert!(caller.can_access_process_files(&target, true));
     assert!(!caller.can_access_process_files(&target, false));
     assert!(Credentials::root().can_access_process_files(&target, false));
 
-    let mut transitioned_target = Credentials::new(1000, 200);
-    assert!(caller.can_access_process_files(&transitioned_target, false));
-    transitioned_target.set_resuid_unchecked(None, Some(2000), None);
-    assert!(!caller.can_access_process_files(&transitioned_target, false));
+    // Same UID with a different GID is not enough: Linux FSCREDS also
+    // requires fsgid to match the target's real/effective/saved GIDs.
+    assert!(!caller.can_access_process_files(&Credentials::new(1000, 200), false));
+
+    let mut matching = Credentials::new(1000, 100);
+    assert!(caller.can_access_process_files(&matching, false));
+    matching.set_resuid_unchecked(None, Some(2000), None);
+    assert!(!caller.can_access_process_files(&matching, false));
+
+    let mut matching_gid = Credentials::new(1000, 100);
+    matching_gid.set_resgid_unchecked(None, Some(200), None);
+    assert!(!caller.can_access_process_files(&matching_gid, false));
 }

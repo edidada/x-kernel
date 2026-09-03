@@ -7,7 +7,7 @@ use ksync::Mutex;
 use tee_crypto::rng::{DeterministicRng, Infallible, Rng, TryCryptoRng, TryRng};
 use tee_raw_sys::TEE_ERROR_GENERIC;
 
-use crate::tee::TeeResult;
+use crate::tee::{TeeResult, hw_entropy};
 
 const RNG_SEED_SIZE: usize = 32;
 
@@ -21,7 +21,13 @@ fn tee_software_get_rand(output: &mut [u8]) {
     rand.fill_bytes(output);
 }
 
-fn kernel_random_seed() -> TeeResult<[u8; RNG_SEED_SIZE]> {
+fn xor_seed(dst: &mut [u8; RNG_SEED_SIZE], src: &[u8; RNG_SEED_SIZE]) {
+    for (d, s) in dst.iter_mut().zip(src) {
+        *d ^= *s;
+    }
+}
+
+fn read_urandom_seed() -> TeeResult<[u8; RNG_SEED_SIZE]> {
     let mut seed = [0u8; RNG_SEED_SIZE];
     let location = kfs::kernel_fs_context()
         .lock()
@@ -37,6 +43,23 @@ fn kernel_random_seed() -> TeeResult<[u8; RNG_SEED_SIZE]> {
         return Err(TEE_ERROR_GENERIC);
     }
     Ok(seed)
+}
+
+fn kernel_random_seed() -> TeeResult<[u8; RNG_SEED_SIZE]> {
+    let mut seed = [0u8; RNG_SEED_SIZE];
+    let has_cpu = hw_entropy::fill_cpu_entropy(&mut seed);
+    match read_urandom_seed() {
+        Ok(urandom) => {
+            if has_cpu {
+                xor_seed(&mut seed, &urandom);
+            } else {
+                seed = urandom;
+            }
+            Ok(seed)
+        }
+        Err(_) if has_cpu => Ok(seed),
+        Err(err) => Err(err),
+    }
 }
 
 fn software_rng_seed() -> [u8; RNG_SEED_SIZE] {

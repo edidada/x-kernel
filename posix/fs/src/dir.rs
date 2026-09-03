@@ -12,12 +12,21 @@ use core::{
 
 use kerrno::{KError, KResult};
 use kfs::{File, FsContext};
+use kthread::with_current_credentials;
 use kvfs::{NodePermission, NodeType};
 use linux_raw_sys::general::*;
 use osvm::VirtPtr;
 use posix_types::{UserConstPtr, UserPtr};
 
 use crate::path::with_fs;
+
+fn require_chroot_privilege() -> KResult<()> {
+    if with_current_credentials(|credentials| credentials.is_privileged()) {
+        Ok(())
+    } else {
+        Err(KError::OperationNotPermitted)
+    }
+}
 
 /// Changes the current working directory.
 pub fn sys_chdir(path: UserConstPtr<c_char>) -> KResult<isize> {
@@ -49,7 +58,11 @@ pub fn sys_mkdir(path: UserConstPtr<c_char>, mode: u32) -> KResult<isize> {
 }
 
 /// Changes the root directory of the calling process.
+///
+/// Requires a privileged caller (`euid == 0`, standing in for Linux
+/// `CAP_SYS_CHROOT`). Unprivileged callers receive `EPERM`.
 pub fn sys_chroot(path: UserConstPtr<c_char>) -> KResult<isize> {
+    require_chroot_privilege()?;
     let path = path.load_string()?;
     debug!("sys_chroot <= path: {path}");
 
@@ -107,10 +120,18 @@ impl DirBuffer {
             return false;
         }
 
-        // SAFETY: Bounds were checked above and the entry layout matches
-        // `linux_dirent64`. The byte buffer may not satisfy `linux_dirent64`
-        // alignment at arbitrary offsets, so the header write must be
-        // unaligned.
+        // SAFETY:
+        // - `remaining_space() >= len` was checked, so
+        //   `[self.offset, self.offset + len)` is inside `self.buf`.
+        // - `&mut self` makes this write exclusive; no other live reference
+        //   aliases these `Vec` bytes.
+        // - `Vec<u8>` is only 1-byte aligned. `offset` is rounded to
+        //   `align_of::<linux_dirent64>()`, but `buf.as_mut_ptr()` itself may
+        //   be unaligned, so the header must be stored with
+        //   `write_unaligned` rather than an aligned `write`.
+        // - The name copy is `name.len()` bytes and the trailing NUL is at
+        //   `NAME_OFFSET + name.len()`, both inside `len` because
+        //   `len` is `(NAME_OFFSET + name.len() + 1)` rounded up.
         unsafe {
             let entry_ptr = self.buf.as_mut_ptr().add(self.offset);
             entry_ptr

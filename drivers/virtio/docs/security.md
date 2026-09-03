@@ -128,7 +128,7 @@ let new_token = unsafe {
 
 **为何安全**：
 - `from_handle`：调用者（上层网络栈）保证 handle 由 `recv()` 返回且仅使用一次。
-- `receive_begin`：缓冲区存入 `rx_buffers[new_token]`，生命周期有保障。
+- `receive_begin`：成功后缓冲区必须保持存活。正常路径存入 `rx_buffers[new_token]`；若 token 越界或槽位仍被占用，泄漏该 DMA 缓冲，禁止 `Drop` 把它还回 `NetBufPool`。
 
 **调用者**：
 - 上层网络栈 — 保证 handle 的唯一性
@@ -232,12 +232,12 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 | 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
 |------|----------|----------|----------|----------|
 | T-01 | 传入无效 MMIO 地址导致 `probe_mmio_device` 访问非法内存 | 高 | 调用者传入未映射或错误的物理地址 | 调用者（平台初始化）负责验证地址；`MmioTransport::new` 内部验证魔数 |
-| T-02 | 网络设备缓冲区-令牌不匹配导致设备 DMA 到错误内存 | 高 | `rx_buffers`/`tx_buffers` 数组索引与 VirtIO 队列 token 不一致 | `try_new()` 中 `assert_eq!(token, i as u16)` 验证初始映射；`recycle_rx`/`recycle_tx` 从数组取缓冲区时检查 `is_some()` |
+| T-02 | 网络设备缓冲区-令牌不匹配或越界导致 DMA/panic | 高 | token 与队列不一致，或恶意设备返回 `token >= QS` | `try_new()` 校验初始 token；所有设备 token 经 `virtq_index` 范围检查，越界返回 `BadState` 而非索引 panic；`recycle_rx`/`send` 在已提交后泄漏缓冲 |
 | T-03 | `NetBuf::from_handle` 使用无效或重复 handle | 高 | 上层网络栈重复使用已消费的 handle | 由调用者保证 handle 唯一性；`from_handle` 为 unsafe，调用者承担证明责任 |
 | T-04 | GPU 帧缓冲区指针悬空 | 高 | 设备 Drop 后仍持有 `FrameBuffer` 引用 | `FrameBuffer` 生命周期绑定 `&self`，Rust 借用检查器阻止悬空引用 |
 | T-05 | 中断上下文与正常路径并发访问 net 设备导致数据竞争 | 中 | IRQ 回调与 `send`/`recv` 同时执行 | `InnerDev` 被 `SpinNoIrq` 包裹，所有访问通过 `lock()` 互斥 |
 | T-06 | IRQ 注册失败后仍使用设备 | 中 | `register_virtio_net_irq` 返回 `ResourceBusy` | `try_new()` 传播错误，设备不会被创建 |
-| T-07 | 网络设备 `free_tx_bufs` 耗尽导致发送失败 | 低 | 所有 tx 缓冲区都在飞行中 | `alloc_tx_buf` 返回 `DriverError::NoMemory`，上层应等待 `recycle_tx` 后重试 |
+| T-07 | 网络设备 `free_tx_bufs` 耗尽导致发送失败 | 低 | 所有 tx 缓冲区都在飞行中，或 `send` 失败路径未归还 | `alloc_tx_buf` 返回 `NoMemory`；`transmit_begin` 失败时把缓冲 push 回 `free_tx_bufs` |
 | T-08 | `probe_mmio_device` 传入空指针 | 高 | `reg_base` 为 null | `NonNull::new(...).unwrap()` 会 panic；调用者应确保地址非空 |
 | T-09 | 恶意 VMM 通过 VirtIO 设备返回超长 `pkt_len` | 高 | `receive_complete` 返回的 `pkt_len` 超过缓冲区容量 | `recv()` 在写回 `NetBuf` 元数据前显式检查 `hdr_len + pkt_len <= capacity`，超长长度直接返回 `DriverError::InvalidInput`；`NetBuf::set_payload_len` 的 `debug_assert` 作为开发期补充检查 |
 | T-10 | 恶意 VMM 返回伪造的 9p 响应 | 中 | `request()` 返回的数据不符合 9p 协议 | 上层 9p 文件系统应校验响应格式；本模块不解析内容 |

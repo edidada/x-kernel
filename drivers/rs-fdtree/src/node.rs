@@ -434,7 +434,7 @@ pub(crate) fn memory_regions<'b, 'a: 'b>(
         .flat_map(|node| node.reg().into_iter().flatten())
 }
 
-pub(crate) fn skip_current_node<'a>(stream: &mut FdtData<'a>, header: &LinuxFdt<'a>) -> bool {
+pub(crate) fn skip_current_node<'a>(stream: &mut FdtData<'a>, _header: &LinuxFdt<'a>) -> bool {
     let Some(tag) = stream.u32() else {
         return false;
     };
@@ -462,10 +462,10 @@ pub(crate) fn skip_current_node<'a>(stream: &mut FdtData<'a>, header: &LinuxFdt<
 
     loop {
         stream.skip_nops();
-        if !stream.peek_u32().is_some_and(|n| n.get() == FDT_BEGIN_NODE) {
+        if stream.peek_u32().is_none_or(|n| n.get() != FDT_BEGIN_NODE) {
             break;
         }
-        if !skip_current_node(stream, header) {
+        if !skip_current_node(stream, _header) {
             return false;
         }
     }

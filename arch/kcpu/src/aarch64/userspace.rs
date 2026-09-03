@@ -95,9 +95,12 @@ impl UserContext {
         }
 
         karch::disable_local_irq(); // updated module reference from asm -> instrs
+        // `rt_sigreturn` can overwrite `spsr` from a user stack frame. Force EL0t
+        // here so `RESTORE_REGS` cannot `eret` into EL1 with a user PC.
+        self.tf.sanitize_user_spsr();
         // SAFETY: `enter_user` is an assembly stub that restores user registers from
-        // `UserContext` and executes `eret`. `UserContext` fields are set up by `new()`
-        // with valid EL0t SPSR and user entry point.
+        // `UserContext` and executes `eret`. `sanitize_user_spsr` has just forced
+        // `SPSR.M` to EL0t, so the return is to user mode.
         let trap_kind = unsafe { enter_user(self) };
 
         let ret = match trap_kind {
