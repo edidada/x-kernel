@@ -29,6 +29,7 @@ mod ops;
 mod provider;
 mod rate;
 mod reg;
+mod table;
 
 pub use core::{ClkBuilder, ClkCore, ClkSummaryEntry, clk_disable_unused, clk_summary, clocks_len};
 
@@ -50,6 +51,10 @@ pub use provider::{
 };
 pub use rate::{ClkRateRequest, Rate, RoundResult};
 pub use reg::{ClkRegAccess, MmioClkReg, NullClkReg};
+
+pub use table::{
+    ClkBranch, ClkNodeDesc, DividerDesc, GateDesc, MuxDesc, ParentRef, register_table,
+};
 
 /// Index into a provider's clock table.
 ///
