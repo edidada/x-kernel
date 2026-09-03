@@ -164,15 +164,11 @@ pub fn devm_clk_get(
     device: &dyn device_res::DeviceResource,
     spec: device_res::ClkSpec,
 ) -> DriverResult<device_res::Clk> {
-    let clk = device_res::Clk::get_with(&CLK_OP, spec).map_err(map_res_err)?;
+    let clk = device_res::Clk::get_with(resource_provider(), spec).map_err(map_res_err)?;
     let cleanup = clk.clone();
     device.register_cleanup(Box::new(move || drop(cleanup)));
     Ok(clk)
 }
-
-/// The host `ClkOp` provider, implemented by `device-res-xkernel` bridging
-/// to the kclk framework engine (core/kclk).
-static CLK_OP: device_res_xkernel::XKernelClkOp = device_res_xkernel::XKernelClkOp;
 
 impl DeviceResourceExt for DeviceObject {
     fn devm_iomap(&self, region: MmioRegion, name: &'static str) -> DriverResult<NonNull<u8>> {

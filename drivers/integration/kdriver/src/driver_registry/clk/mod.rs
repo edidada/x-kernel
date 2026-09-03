@@ -20,7 +20,7 @@
 //! compatible strings and carry an MMIO register window; their drivers
 //! follow the same pattern in their own `probe_device`.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, format, sync::Arc};
 
 use driver_base::{DeviceKind, DriverError, DriverResult};
 use kdevice::{
@@ -85,18 +85,32 @@ impl DeviceDriver for FixedClockDriver {
             return Ok(());
         }
 
-        // The platform backend attaches metadata from this exact firmware
-        // node. Never re-walk the global DT here: several fixed-clock nodes
-        // may share the same compatible string but have distinct providers.
-        let provider = device.clk_provider().ok_or(DriverError::InvalidInput)?;
-        let rate = provider.fixed_rate_hz().ok_or(DriverError::InvalidInput)?;
-        let phandle = provider.provider_id();
+        // Read the registration parameters from this device's own firmware
+        // node — the Linux `dev.of_node` pattern. No global DT walk: the
+        // node belongs to exactly this device, so distinct fixed-clock
+        // nodes sharing the compatible route to their own parameters.
+        let node = device.firmware_node().ok_or(DriverError::InvalidInput)?;
+        let rate = u64::from(
+            node.read_u32("clock-frequency")
+                .ok_or(DriverError::InvalidInput)?,
+        );
+        // `phandle` is the canonical spelling; `linux,phandle` is the
+        // legacy alias some older generators emit.
+        let phandle = node
+            .read_u32("phandle")
+            .or_else(|| node.read_u32("linux,phandle"))
+            .ok_or(DriverError::InvalidInput)?;
 
         // Register under the DT phandle so `clocks = <&phandle>` references
         // resolve. The table is leaked: the provider registry holds a
         // 'static reference for the lifetime of the boot.
         let table: &'static kclk::ClkTable = Box::leak(Box::new(kclk::ClkTable::new(phandle)));
-        let output_name = provider.output_name().unwrap_or("fixed-clock");
+        // DT does not require clock-output-names; derive a unique fallback
+        // from the phandle so two anonymous fixed clocks cannot collide in
+        // the by-name registry.
+        let fallback_name: &'static str =
+            Box::leak(format!("fixed@0x{phandle:x}").into_boxed_str());
+        let output_name = node.read_str("clock-output-names").unwrap_or(fallback_name);
         let branches = [kclk::ClkBranch::fixed_rate(0, output_name, rate)];
 
         // NullClkReg: a fixed clock is purely computational.
@@ -112,7 +126,7 @@ impl DeviceDriver for FixedClockDriver {
 fn map_clk_probe_error(error: kclk::ClkError) -> DriverError {
     match error {
         kclk::ClkError::NoProvider => DriverError::WouldBlock,
-        kclk::ClkError::Io | kclk::ClkError::ParentError => DriverError::Io,
+        kclk::ClkError::Io => DriverError::Io,
         kclk::ClkError::Busy | kclk::ClkError::Aborted => DriverError::ResourceBusy,
         kclk::ClkError::NotSupported => DriverError::Unsupported,
         kclk::ClkError::NotFound

@@ -306,6 +306,7 @@ mod tests {
             }),
             None,
             ResourceSet::new(),
+            None,
         )
         .unwrap();
 
@@ -341,6 +342,7 @@ mod tests {
                     }),
                     None,
                     ResourceSet::new(),
+                    None,
                 )
                 .unwrap();
         }
