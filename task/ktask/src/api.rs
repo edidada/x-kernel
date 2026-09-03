@@ -1008,17 +1008,12 @@ fn checked_mutex_wait_ticks(
     now: khal::time::TimerTicks,
     since: khal::time::TimerTicks,
 ) -> Option<khal::time::TimerTicks> {
-    // A task can publish a new wait after the watchdog sampled `now` but
-    // before its registry slot is scanned. Skipping that record for one cycle
-    // prevents unsigned subtraction from producing a near-`u64::MAX` wait.
-    if since > now {
-        return None;
-    }
-    Some(now.wrapping_duration_since(since))
+    let elapsed_ticks = now.as_raw().checked_sub(since.as_raw())?;
+    Some(khal::time::TimerTicks::from_raw(elapsed_ticks))
 }
 
 #[cfg(feature = "watchdog")]
-fn find_suspicious_mutex_wait(now: khal::time::TimerTicks) -> Option<MutexWaitObservation> {
+fn find_suspicious_mutex_wait() -> Option<MutexWaitObservation> {
     let mut observation = None;
     crate::task_registry::for_each_tracked_task(khal::percpu::this_cpu_id(), |weaktask| {
         if observation.is_some() {
@@ -1029,6 +1024,10 @@ fn find_suspicious_mutex_wait(now: khal::time::TimerTicks) -> Option<MutexWaitOb
                 return;
             };
 
+            // Sampling after the wait snapshot keeps the ordinary publication
+            // order monotonic. `checked_mutex_wait_ticks` still rejects a
+            // concurrent or counter-wrap observation that appears newer.
+            let now = khal::time::now_ticks();
             let Some(waited_ticks) = checked_mutex_wait_ticks(now, since) else {
                 return;
             };
@@ -1049,13 +1048,13 @@ fn find_suspicious_mutex_wait(now: khal::time::TimerTicks) -> Option<MutexWaitOb
 
 /// Returns `true` when no suspicious long mutex waits are observed on this CPU.
 ///
-/// A wait longer than 20 seconds is treated as suspicious. A wait record newer
-/// than `now` is ignored until the next check because it was published during
-/// the current scan. This heuristic does not prove that the mutex participates
-/// in a deadlock.
+/// A wait longer than 20 seconds is treated as suspicious. The current time is
+/// sampled after each task's wait snapshot. A snapshot whose start time appears
+/// newer than that sample is ignored until the next check. This heuristic does
+/// not prove that the mutex participates in a deadlock.
 #[cfg(feature = "watchdog")]
-pub fn check_mutex_deadlock(now: khal::time::TimerTicks) -> bool {
-    find_suspicious_mutex_wait(now).is_none()
+pub fn check_mutex_deadlock() -> bool {
+    find_suspicious_mutex_wait().is_none()
 }
 
 /// Checks for a suspicious mutex wait and emits an NMI-safe diagnostic report.
@@ -1067,8 +1066,8 @@ pub fn check_mutex_deadlock(now: khal::time::TimerTicks) -> bool {
 ///
 /// Returns `true` when no suspicious wait is found.
 #[cfg(feature = "watchdog")]
-pub fn check_mutex_deadlock_and_report(now: khal::time::TimerTicks) -> bool {
-    let Some(observation) = find_suspicious_mutex_wait(now) else {
+pub fn check_mutex_deadlock_and_report() -> bool {
+    let Some(observation) = find_suspicious_mutex_wait() else {
         return true;
     };
 
@@ -1094,7 +1093,7 @@ mod tests_mutex_deadlock_check {
     use super::checked_mutex_wait_ticks;
 
     #[def_test]
-    fn wait_published_after_watchdog_sample_is_deferred() {
+    fn future_wait_timestamp_is_deferred() {
         let sampled_at = khal::time::TimerTicks::from_raw(100);
         let published_at = khal::time::TimerTicks::from_raw(101);
 

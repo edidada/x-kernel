@@ -74,13 +74,13 @@ update_current() → pending      blocked_resched / unblock_task / resched
 | `future::block_on` | 将 `Future` pending 映射为任务阻塞/唤醒 |
 | `WaitQueue` | 事件型阻塞等待 API |
 | `timers` | 显式周期回调（与调度 timer 解耦） |
-| `snapshot/task_registry` | 可选诊断：snapshot/watchdog/NMI 共享的任务遍历视图 |
+| `snapshot/task_registry` | 可选诊断：snapshot/watchdog/NMI 共享的任务遍历视图；mutex wait 检查在读取每个任务快照后采样当前 tick，并丢弃开始时间晚于当前样本的并发更新 |
 
 启用 snapshot/watchdog 后，每个任务以原子字段记录当前等待的 mutex 地址、阻塞前观察到
 的 mutex owner key、等待起始 ticks，以及最多四个已持有 mutex 地址。mutex 地址最后以
 Release 发布，NMI 读取端以 Acquire 读取后再读取其余字段，得到同一轮等待记录。
-一次连续加锁尝试只记录首次阻塞时间，后续虚假唤醒保留原始起点。watchdog 扫描开始时
-取得时间样本；扫描期间新发布的等待记录会留到下一轮检查，避免无符号时间差下溢。
+一次连续加锁尝试只记录首次阻塞时间，后续虚假唤醒保留原始起点。watchdog 读取每个
+任务的等待快照后再取得时间样本；晚于该样本的记录会留到下一轮检查，避免无符号时间差下溢。
 watchdog 超过 20s 阈值时先输出这组关系和等待任务的保存栈，再进入多 CPU rendezvous。
 任务名由 `SpinNoIrq<String>` 保护，NMI dump 不读取任务名。
 
