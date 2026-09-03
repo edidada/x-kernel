@@ -17,14 +17,13 @@ use kclk::ClkHandle;
 
 /// The [`ClkOp`] implementation: resolves a [`ClkSpec`] through the kclk
 /// provider registry into a consumer handle.
-#[derive(Debug, Default)]
-pub struct XKernelClkOp;
-
-impl ClkOp for XKernelClkOp {
+impl ClkOp for crate::XKernelResourceProvider {
     fn get_clock(&self, spec: ClkSpec) -> ResResult<Arc<dyn ClkConsumer>> {
-        let handle = match spec.name() {
-            Some(name) => kclk::clk_get_by_name(name).map_err(map_clk_err)?,
-            None => kclk::clk_get_by_index(spec.provider(), spec.index()).map_err(map_clk_err)?,
+        let handle = match spec {
+            ClkSpec::ByName(name) => kclk::clk_get_by_name(name).map_err(map_clk_err)?,
+            ClkSpec::ByPhandleIndex { provider, index } => {
+                kclk::clk_get_by_index(provider, index).map_err(map_clk_err)?
+            }
         };
         Ok(Arc::new(KclkConsumer(handle)))
     }
@@ -137,9 +136,7 @@ fn map_clk_err(err: kclk::ClkError) -> ResError {
         kclk::ClkError::NotSupported => ResError::Unsupported,
         kclk::ClkError::InvalidRate | kclk::ClkError::InvalidParent => ResError::InvalidResource,
         kclk::ClkError::Busy | kclk::ClkError::Aborted => ResError::Busy,
-        kclk::ClkError::Io | kclk::ClkError::ParentError | kclk::ClkError::BadState => {
-            ResError::InvalidResource
-        }
+        kclk::ClkError::Io | kclk::ClkError::BadState => ResError::InvalidResource,
     }
 }
 
@@ -148,13 +145,13 @@ mod tests {
     use device_res::{ClkOp, ClkSpec, ResError};
     use unittest::def_test;
 
-    use super::XKernelClkOp;
+    use crate::XKernelResourceProvider;
 
     #[def_test(serial)]
     fn absent_clock_provider_remains_retryable() {
         kclk::reset_providers();
         assert!(matches!(
-            XKernelClkOp.get_clock(ClkSpec::by_phandle_index(0xfeed, 0)),
+            XKernelResourceProvider.get_clock(ClkSpec::by_phandle_index(0xfeed, 0)),
             Err(ResError::NoProvider)
         ));
     }

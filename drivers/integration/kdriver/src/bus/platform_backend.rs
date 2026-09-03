@@ -118,11 +118,15 @@ impl PlatformBackend {
                         super::irq_trigger_from_firmware(irq.trigger),
                     )));
                 }
-                if let (Some(provider_id), Some(clock_cells)) = (dev.phandle, dev.clock_cells) {
-                    let mut provider = ClkProviderDesc::new(provider_id, clock_cells);
-                    if let Some(rate_hz) = dev.clock_frequency {
-                        provider = provider.with_fixed_rate(u64::from(rate_hz));
-                    }
+                // ClkProviderDesc describes exactly the DT fixed-clock form:
+                // #clock-cells = <0> (single output) plus a frequency. A node
+                // with more clock cells is a multi-output controller — its
+                // metadata belongs to the SoC driver that matches its
+                // compatible, not to this generic resource.
+                if dev.clock_cells == Some(0)
+                    && let (Some(provider_id), Some(rate_hz)) = (dev.phandle, dev.clock_frequency)
+                {
+                    let mut provider = ClkProviderDesc::new(provider_id, u64::from(rate_hz));
                     if let Some(name) = dev.clock_output_name {
                         provider = provider.with_output_name(name);
                     }

@@ -27,9 +27,6 @@ mod time;
 #[derive(Debug, Default)]
 pub struct XKernelResourceProvider;
 
-/// Re-exported for the driver framework's static provider instance.
-pub use clk::XKernelClkOp;
-
 impl XKernelResourceProvider {
     /// Create a stateless X-Kernel resource provider.
     pub const fn new() -> Self {
