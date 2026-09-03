@@ -432,10 +432,6 @@ pub fn sys_signalfd4(
 
     let flags = SignalfdFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
 
-    if fd != -1 && flags.contains(SignalfdFlags::CLOEXEC) {
-        return Err(KError::InvalidInput);
-    }
-
     let mut mask: SignalSet = mask.read_vm()?.into();
     // SIGKILL and SIGSTOP cannot be caught, so they are silently removed
     // from the signalfd mask — matching Linux do_signalfd4 behavior.
@@ -443,6 +439,9 @@ pub fn sys_signalfd4(
     mask.remove(Signo::SIGSTOP);
 
     if fd != -1 {
+        // Linux ignores flags when updating an existing signalfd. In
+        // particular, sd-event passes the creation flags again whenever it
+        // extends the watched signal mask.
         let file = kprocess::current_resources().get_file(fd)?;
         let signalfd = Signalfd::from_file(&file)?;
         signalfd.update_mask(mask);

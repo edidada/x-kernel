@@ -18,11 +18,14 @@ use bitflags::bitflags;
 use kerrno::{KError, KResult, LinuxError};
 use kpoll::PollRegistrations;
 use kprocess::{Pid, Process, wait_reap};
+use ksignal::{ChildExitInfo, ChildExitSignalInfo};
 use ktask::{current, future::block_on};
+use ktime_types::TimeSpan;
 use linux_raw_sys::general::{
     __WALL, __WCLONE, __WNOTHREAD, WCONTINUED, WEXITED, WNOHANG, WNOWAIT, WUNTRACED,
 };
 use osvm::{VirtMutPtr, VirtPtr};
+use posix_types::k_siginfo;
 
 bitflags! {
     #[derive(Debug, Clone, Copy)]
@@ -257,6 +260,50 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResult<isize
     };
 
     wait_on_matching_children(proc, selector, exit_code, options)
+}
+
+/// Waits for a child selected by Linux `waitid(2)` id types.
+pub fn sys_waitid(id_type: u32, id: u32, info: *mut k_siginfo, options: u32) -> KResult<isize> {
+    const P_ALL: u32 = 0;
+    const P_PID: u32 = 1;
+    const P_PGID: u32 = 2;
+
+    let current_thread = kprocess::current_user_thread();
+    let proc = current_thread.process();
+    let selector = match id_type {
+        P_ALL => WaitPid::Any,
+        P_PID if id != 0 => WaitPid::Pid(id),
+        P_PGID if id == 0 => WaitPid::Pgid(proc.group().pgid()),
+        P_PGID => WaitPid::Pgid(id),
+        _ => return Err(KError::InvalidInput),
+    };
+    let options = WaitOptions::from_bits(options).ok_or(KError::InvalidInput)?;
+    if !options.intersects(WaitOptions::WEXITED | WaitOptions::WUNTRACED | WaitOptions::WCONTINUED)
+    {
+        return Err(KError::InvalidInput);
+    }
+
+    let mut wait_status = 0;
+    let waited_pid = wait_on_matching_children(proc, selector, &mut wait_status, options)?;
+    if let Some(info) = info.check_non_null() {
+        let value = if waited_pid == 0 {
+            // SAFETY: an all-zero siginfo_t is the Linux waitid WNOHANG
+            // result when no child has changed state.
+            k_siginfo(unsafe { core::mem::zeroed() })
+        } else {
+            ChildExitSignalInfo::new_sigchld(ChildExitInfo::from_wait_status(
+                waited_pid as u32,
+                0,
+                wait_status,
+                TimeSpan::ZERO,
+                TimeSpan::ZERO,
+            ))
+            .into_signal_info()
+            .into()
+        };
+        info.write_vm(value)?;
+    }
+    Ok(0)
 }
 
 #[cfg(unittest)]

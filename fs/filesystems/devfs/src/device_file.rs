@@ -115,6 +115,10 @@ impl kvfs::FileOperations for DeviceFile {
     fn mmap(&self, file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
         self.operations()?.mmap(file, mapper)
     }
+
+    fn release(&self, inode: &VfsInode, file: &VfsFile) -> VfsResult<()> {
+        self.operations()?.release(inode, file)
+    }
 }
 
 pub(crate) fn device_dentry(

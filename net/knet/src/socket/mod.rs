@@ -178,6 +178,8 @@ pub struct SocketErrorInfo {
 #[derive(Debug, Clone)]
 pub enum KernelAncillaryData {
     IpError(SocketErrorInfo),
+    /// Credentials attached by a Unix-domain socket with `SO_PASSCRED`.
+    UnixCredentials(options::UnixCredentials),
 }
 
 /// Options for sending data to a socket.
@@ -188,6 +190,8 @@ pub struct SendOptions {
     pub to: Option<SocketAddrEx>,
     pub flags: SendFlags,
     pub ancillary: Vec<AncillaryData>,
+    /// Credentials captured from the task performing this send.
+    pub credentials: Option<options::UnixCredentials>,
 }
 
 /// Options for receiving data from a socket.

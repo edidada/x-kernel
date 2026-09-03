@@ -11,6 +11,11 @@ use crate::nodes;
 pub fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     let mut root = DirMapping::new();
 
+    root.add_dir(
+        "char",
+        SimpleDir::new_maker(fs.clone(), Arc::new(DirMapping::new())),
+    );
+
     nodes::null_zero_full::add_root_entries(&mut root, fs.clone());
     nodes::random::add_root_entries(&mut root, fs.clone());
     nodes::cpu_dma_latency::add_root_entries(&mut root, fs.clone());

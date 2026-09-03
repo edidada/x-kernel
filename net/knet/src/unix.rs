@@ -4,6 +4,7 @@
 
 //! Unix domain socket implementations.
 pub(crate) mod dgram;
+pub(crate) mod seqpacket;
 pub(crate) mod stream;
 
 use alloc::{boxed::Box, sync::Arc};
@@ -22,7 +23,7 @@ use kvfs::{
     WeakVfsInode,
 };
 
-pub use self::{dgram::DgramTransport, stream::StreamTransport};
+pub use self::{dgram::DgramTransport, seqpacket::SeqPacketTransport, stream::StreamTransport};
 use crate::{
     AcceptOptions, RecvOptions, SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
@@ -61,12 +62,14 @@ pub trait UnixTransportOps: Configurable + Pollable + Send + Sync {
 pub enum UnixTransport {
     Stream(StreamTransport),
     Dgram(DgramTransport),
+    SeqPacket(SeqPacketTransport),
 }
 impl Pollable for UnixTransport {
     fn poll(&self) -> IoEvents {
         match self {
             UnixTransport::Stream(stream) => stream.poll(),
             UnixTransport::Dgram(dgram) => dgram.poll(),
+            UnixTransport::SeqPacket(seqpacket) => seqpacket.poll(),
         }
     }
 
@@ -78,6 +81,7 @@ impl Pollable for UnixTransport {
         match self {
             UnixTransport::Stream(stream) => stream.register(context, events),
             UnixTransport::Dgram(dgram) => dgram.register(context, events),
+            UnixTransport::SeqPacket(seqpacket) => seqpacket.register(context, events),
         }
     }
 }
@@ -85,6 +89,7 @@ impl Pollable for UnixTransport {
 pub struct BindEntry {
     pub(crate) stream: Arc<Mutex<Option<stream::Bind>>>,
     pub(crate) dgram: Arc<Mutex<Option<dgram::Bind>>>,
+    pub(crate) seqpacket: Arc<Mutex<Option<seqpacket::Bind>>>,
 }
 
 impl Default for BindEntry {
@@ -92,6 +97,7 @@ impl Default for BindEntry {
         Self {
             stream: Arc::new(Mutex::new(None)),
             dgram: Arc::new(Mutex::new(None)),
+            seqpacket: Arc::new(Mutex::new(None)),
         }
     }
 }

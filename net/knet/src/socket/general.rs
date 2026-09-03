@@ -62,6 +62,11 @@ impl GeneralOptions {
         self.reuse_address.load(Ordering::Relaxed)
     }
 
+    /// Returns whether received Unix messages should include sender credentials.
+    pub fn pass_credentials(&self) -> bool {
+        self.pass_credentials.load(Ordering::Relaxed)
+    }
+
     /// Returns the configured send timeout.
     pub fn send_timeout(&self) -> Option<TimeSpan> {
         let nanos = self.send_timeout_nanos.load(Ordering::Relaxed);

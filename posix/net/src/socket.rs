@@ -23,7 +23,7 @@ use knet::{
     sock_alloc_file, sock_from_file,
     tcp::TcpSocket,
     udp::UdpSocket,
-    unix::{DgramTransport, StreamTransport, UnixDomainSocket},
+    unix::{DgramTransport, SeqPacketTransport, StreamTransport, UnixDomainSocket},
 };
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK, O_RDWR},
@@ -82,6 +82,9 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             // Unix domain datagram socket
             knet::Socket::Unix(Box::new(UnixDomainSocket::new(DgramTransport::new(pid))))
         }
+        (AF_UNIX, SOCK_SEQPACKET) => knet::Socket::Unix(Box::new(UnixDomainSocket::new(
+            SeqPacketTransport::new(pid),
+        ))),
         (AF_NETLINK, SOCK_RAW) | (AF_NETLINK, SOCK_DGRAM) => {
             if proto > i32::MAX as u32 {
                 return Err(KError::from(LinuxError::EPROTONOSUPPORT));
@@ -127,7 +130,13 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
 
 /// Bind a socket to a local address
 pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<isize> {
-    let addr = SocketAddrEx::read_from_user(addr, addrlen)?;
+    let addr = match SocketAddrEx::read_from_user(addr, addrlen)? {
+        SocketAddrEx::Netlink(mut addr) if addr.pid == 0 => {
+            addr.pid = kprocess::current_user_process().pid();
+            SocketAddrEx::Netlink(addr)
+        }
+        addr => addr,
+    };
 
     socket_from_fd(fd)?.bind(addr)?;
 
@@ -236,8 +245,13 @@ pub fn sys_socketpair(
             (UnixDomainSocket::new(sock1), UnixDomainSocket::new(sock2))
         }
         SOCK_DGRAM | SOCK_SEQPACKET => {
-            let (sock1, sock2) = DgramTransport::new_pair(pid);
-            (UnixDomainSocket::new(sock1), UnixDomainSocket::new(sock2))
+            if ty == SOCK_DGRAM {
+                let (sock1, sock2) = DgramTransport::new_pair(pid);
+                (UnixDomainSocket::new(sock1), UnixDomainSocket::new(sock2))
+            } else {
+                let (sock1, sock2) = SeqPacketTransport::new_pair(pid);
+                (UnixDomainSocket::new(sock1), UnixDomainSocket::new(sock2))
+            }
         }
         _ => {
             warn!("Unsupported socketpair type: {ty}");

@@ -380,6 +380,7 @@ impl Pollable for EventDev {
 pub fn input_devices(fs: Arc<SimpleFs>) -> DirMapping {
     let mut inputs = DirMapping::new();
     let input_devices = inputdev::input_drain_devices();
+    let first_uinput_index = input_devices.len();
     let mut keys = [0; 0x300usize.div_ceil(8)];
     for (i, device) in input_devices.into_iter().enumerate() {
         keys.fill(0);
@@ -398,10 +399,12 @@ pub fn input_devices(fs: Arc<SimpleFs>) -> DirMapping {
         }
         add_device_entry(&mut inputs, format!("event{i}"), dev);
     }
+    super::uinput::add_event_entries(&mut inputs, fs, first_uinput_index);
     inputs
 }
 
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
+    super::uinput::add_root_entry(root, fs.clone());
     root.add(
         "input",
         SimpleDir::new_maker(fs.clone(), Arc::new(input_devices(fs.clone()))),

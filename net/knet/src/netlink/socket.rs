@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{format, sync::Arc, vec, vec::Vec};
+use alloc::{boxed::Box, format, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::Ordering;
 
 use kcred::Cred;
@@ -19,7 +19,7 @@ use super::{
     wire::{NlMsgHeader, align},
 };
 use crate::{
-    RecvOptions, SendOptions, Shutdown, SocketAddrEx, SocketOps,
+    KernelAncillaryData, RecvOptions, SendOptions, Shutdown, SocketAddrEx, SocketOps,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
 };
 
@@ -82,20 +82,32 @@ impl NetlinkSocket {
         let mut request = Vec::with_capacity(src.remaining());
         src.read_to_end(&mut request)?;
 
-        match options.to {
+        let destination = match options.to {
             Some(SocketAddrEx::Netlink(addr))
                 if self.inner.protocol == NETLINK_ROUTE && (addr.pid != 0 || addr.groups != 0) =>
             {
                 return Err(LinuxError::EOPNOTSUPP.into());
             }
-            Some(SocketAddrEx::Netlink(_)) => {}
+            Some(SocketAddrEx::Netlink(addr)) => Some(addr),
             Some(_) => return Err(KError::InvalidInput),
-            None => {}
-        }
+            None => None,
+        };
 
         let _send_guard = self.inner.send_lock.lock();
 
-        if self.inner.protocol == NETLINK_ROUTE {
+        if self.inner.protocol == NETLINK_KOBJECT_UEVENT
+            && let Some(destination) = destination
+            && destination.groups != 0
+        {
+            multicast_kobject_uevent(
+                destination.groups,
+                NetlinkAddr {
+                    pid: self.local_addr_inner()?.pid,
+                    groups: destination.groups,
+                },
+                &request,
+            );
+        } else if self.inner.protocol == NETLINK_ROUTE {
             let requests = split_route_requests(&request)?;
             let has_mutation = requests
                 .iter()
@@ -177,6 +189,17 @@ pub fn publish_kobject_uevent(group: u32, payload: &[u8]) {
     payload_with_seqnum.extend_from_slice(payload);
     payload_with_seqnum.extend_from_slice(format!("SEQNUM={seqnum}\0").as_bytes());
 
+    multicast_kobject_uevent(
+        group,
+        NetlinkAddr {
+            pid: 0,
+            groups: group,
+        },
+        &payload_with_seqnum,
+    );
+}
+
+fn multicast_kobject_uevent(group: u32, from: NetlinkAddr, payload: &[u8]) {
     let mut subs = UEVENT_SUBSCRIBERS.lock();
     subs.retain(|weak| {
         let Some(inner) = weak.upgrade() else {
@@ -187,11 +210,8 @@ pub fn publish_kobject_uevent(group: u32, payload: &[u8]) {
         };
         if addr.groups & group != 0
             && inner.rx_queue.lock().push_back(NetlinkPacket {
-                from: NetlinkAddr {
-                    pid: 0,
-                    groups: group,
-                },
-                data: payload_with_seqnum.clone(),
+                from,
+                data: payload.to_vec(),
             })
         {
             inner.poll_rx.wake();
@@ -238,21 +258,39 @@ impl SocketOps for NetlinkSocket {
         self.inner
             .general
             .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
-                let mut rx_queue = self.inner.rx_queue.lock();
-                let packet_len = rx_queue
+                let packet = self
+                    .inner
+                    .rx_queue
+                    .lock()
                     .front()
-                    .map(|packet| packet.data.len())
+                    .cloned()
                     .ok_or(KError::WouldBlock)?;
-                if dst.remaining_mut() < packet_len {
-                    return Err(LinuxError::EMSGSIZE.into());
-                }
-                let packet = rx_queue.pop_front().ok_or(KError::WouldBlock)?;
                 if let Some(from) = options.from.as_deref_mut() {
                     *from = SocketAddrEx::Netlink(packet.from);
                 }
+                if self.inner.general.pass_credentials()
+                    && let Some(ancillary) = options.ancillary.as_deref_mut()
+                {
+                    ancillary.push(Box::new(KernelAncillaryData::UnixCredentials(
+                        crate::options::UnixCredentials::new(packet.from.pid),
+                    )));
+                }
 
-                let written = dst.write(&packet.data)?;
-                Ok(written)
+                let write_len = packet.data.len().min(dst.remaining_mut());
+                dst.write_all(&packet.data[..write_len])?;
+                if !options.flags.contains(crate::RecvFlags::PEEK) {
+                    let _ = self.inner.rx_queue.lock().pop_front();
+                }
+                if write_len < packet.data.len()
+                    && let Some(out_flags) = options.out_flags.as_deref_mut()
+                {
+                    *out_flags |= crate::RecvFlags::TRUNCATE;
+                }
+                Ok(if options.flags.contains(crate::RecvFlags::TRUNCATE) {
+                    packet.data.len()
+                } else {
+                    write_len
+                })
             })
     }
 

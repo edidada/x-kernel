@@ -119,7 +119,7 @@ Process
 | `ProcessLifecycleState` | 聚合进程生命周期事件和 CPU totals；内部 `ProcessEvents` 保存 child exit 事件流和 process exit completion，`ProcessCpuTotals` 保存已退出线程与已回收 child CPU time |
 | `ThreadMembership` | 保存进程自有的 published 线程成员表（`tid -> weak task`） |
 | `ThreadGroupExitState` | 保存进程退出码和 group-exit 标志，独立于线程成员表 |
-| `Thread` | 保存 task identity、所属 process/runtime、objective `real_cred`、subjective `cred` 和线程私有状态 |
+| `Thread` | 保存 task identity、所属 process/runtime、objective `real_cred`、subjective `cred`、parent-death signal 配置和线程私有状态 |
 | `ProcessGroup` | 保存 PGID、所属 session 和弱引用进程成员表 |
 | `Session` | 保存 SID、弱引用进程组表和 controlling terminal |
 | `INIT_PROC` | 保存全局 init 进程，供退出 reparent 和 `init_proc` 查询 |
@@ -197,7 +197,7 @@ Inherited group
    的 parent/group 关系，避免 parent children 残留不会运行的半构造进程。
    umask 不属于 `ProcessRuntime`：它与 root/pwd 一起由前一步准备的 `FsStruct`
    共享或复制，因此 `CLONE_FS` 自动共享 umask。
-5. child `Thread` 取得调用线程 subjective credential 的同一 `Arc<Cred>` 快照，并分别安装为自己的 `real_cred` 和 `cred`。
+5. child `Thread` 取得调用线程 subjective credential 的同一 `Arc<Cred>` 快照，并分别安装为自己的 `real_cred` 和 `cred`；parent-death signal 按 Linux task 语义初始化为未设置，而不是从调用线程继承。
 6. syscall 层通过 staged publication 事务先完成 publication，使 PID/TID 与 group/session lookup 对外一致可见；随后执行 `CLONE_PARENT_SETTID` / `CLONE_PIDFD` 等父侧 writeback，成功后才把 task 变为 runnable，失败则回滚 publication 与 owner-side child membership。顺序对齐 Linux `kernel_clone()` 的“先完成 parent-side return setup，再 `wake_up_new_task()`”约束。
 
 ### exec 状态发布
@@ -212,7 +212,7 @@ path + 旧 argv 的混合状态。
 
 1. process-domain owner 为 sibling thread 分配新的 thread `PidHandle`。
 2. 新 `Thread` 复用所属 `Process` 与 `ProcessRuntime`，并要求 task-owned identity 与 thread identity 保持一致。
-3. 新 `Thread` 初始共享调用线程的 committed credential `Arc`，之后任一线程提交新凭据时只替换自己的两个指针。
+3. 新 `Thread` 初始共享调用线程的 committed credential `Arc`，之后任一线程提交新凭据时只替换自己的两个指针；新线程的 parent-death signal 初始未设置。
 4. `prepare_user_task()` 在发布前校验 task identity / thread identity 一致性。
 5. publication 在单次 owner-side 事务里同时更新 task/process/group/session 可见性，并把 task 挂入 `Process` 自有线程成员表；事务对象在 activation 前若失败或被丢弃，会自动回滚 task/process 可见性以及未提交 child 的 owner-side 成员关系。可观测方应通过语义 helper 查询 published thread，而不是扫描全局 task 目录反推成员关系。
 
@@ -352,6 +352,7 @@ path + 旧 argv 的混合状态。
   对外统一使用 `TimeSpan`；`ProcessCpuTotals` 仅在内部以 relaxed `u64` 纳秒原子保存表示，加载后立即恢复为语义类型。
 - `ProcessGroup::processes` 和 `Session::process_groups` 使用 `WeakMap`，避免 group/session 成员表延长成员生命周期。
 - `Thread::real_cred` 与 `Thread::cred` 分别使用 `RwLock<Arc<Cred>>`；读路径只克隆 `Arc`，写路径按固定顺序同时替换两个指针。
+- `Thread::parent_death_signal` 是独立的 task 私有标量，使用 relaxed `AtomicU8` 保存；`0` 表示未设置，其余值只由 syscall 边界校验后写入。exec 不清除此字段，新建 task 从 `0` 开始。
 - `Session::terminal` 使用 `SpinNoIrq<Option<Arc<dyn ControllingTerminal>>>`，controlling terminal 只能设置一次；`set_terminal` 只在短临界区内 compare-and-install 已构造好的 `Arc`，清除时要求对象指针匹配。`kprocess` 只持有 controlling-terminal trait object，不了解具体 TTY 类型；需要 downcast 的 `/dev/tty` 解析留在 `ktty` 边界完成。
 - `exit_state` 使用 `AtomicProcessExitState` 表达 `Running` / `Zombie` / `Dead`，raw 编码被封装在 typed atomic 内。单字段查询仍用
   Acquire 读取；与 parent/children 关系有关的状态转换必须在 process-domain 临界区内完成。

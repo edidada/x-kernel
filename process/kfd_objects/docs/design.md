@@ -118,6 +118,22 @@ read/poll/close via generic fd syscalls
 - signal syscall ABI 入口；
 - fd table 分配策略。
 
+## `Inotify` 角色
+
+`Inotify` 拥有：
+
+- watch 描述符分配与同路径 watch 复用（重复 add_watch 返回既有 wd）；
+- Linux `inotify_event` 读取 ABI：事件头 + 可选 name 尾部；
+- `rm_watch` 先入队 `IN_IGNORED` 再释放 watch 的顺序；
+- `poll(IN)` 与事件队列非空的对应关系。
+
+它不处理：
+
+- `inotify_init1` 的 flag 校验与 fd table 分配；
+- watch mask 合法位校验（syscall 边界负责）；
+- 真实文件系统事件的产生与投递（尚未接入 fsnotify 源，接受 watch
+  但不产生事件，与“探测 inotify 可用性后回退轮询”的用户态模式兼容）。
+
 ## `Epoll` 角色
 
 `Epoll` 拥有：

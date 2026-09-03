@@ -127,23 +127,27 @@ impl DrmIoctl for DrmVersion {
         version.version_major = DRIVER_VERSION_MAJOR;
         version.version_minor = DRIVER_VERSION_MINOR;
         version.version_patchlevel = DRIVER_VERSION_PATCHLEVEL;
-        version.name_len = DRIVER_NAME.len();
-        version
-            .name
-            .write_vm_slice(DRIVER_NAME.as_bytes())
-            .map_err(|_| VfsError::BadAddress)?;
-        version.date_len = DRIVER_DATE.len();
-        version
-            .date
-            .write_vm_slice(DRIVER_DATE.as_bytes())
-            .map_err(|_| VfsError::BadAddress)?;
-        version.desc_len = DRIVER_DESC.len();
-        version
-            .desc
-            .write_vm_slice(DRIVER_DESC.as_bytes())
-            .map_err(|_| VfsError::BadAddress)?;
+        copy_version_string(version.name, &mut version.name_len, DRIVER_NAME)?;
+        copy_version_string(version.date, &mut version.date_len, DRIVER_DATE)?;
+        copy_version_string(version.desc, &mut version.desc_len, DRIVER_DESC)?;
         Ok(0)
     }
+}
+
+/// Copies one variable-length `DRM_IOCTL_VERSION` string using Linux's ABI.
+///
+/// The input length is the userspace buffer capacity and the returned length is
+/// the complete driver string length. A zero capacity therefore only queries
+/// the required size and must not dereference the corresponding null pointer.
+fn copy_version_string(buffer: UserPtr<u8>, buffer_len: &mut usize, value: &str) -> VfsResult<()> {
+    let copy_len = (*buffer_len).min(value.len());
+    if copy_len != 0 {
+        buffer
+            .write_vm_slice(&value.as_bytes()[..copy_len])
+            .map_err(|_| VfsError::BadAddress)?;
+    }
+    *buffer_len = value.len();
+    Ok(())
 }
 
 impl DrmIoctl for DrmSetVersion {

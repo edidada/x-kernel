@@ -48,7 +48,7 @@ driver layer / smoltcp / ringbuf
 - **设备输入**：driver 提供的 `NetBufHandle`、IRQ 唤醒、RX/TX 缓冲区生命周期；
 - **控制面输入**：每次发送携带的调用者凭据、批量 netlink message、header、
   attribute、route mutation、neighbor 更新；
-- **Unix / vsock 输入**：peer socket 数据、连接建立与关闭事件，
+- **Unix / vsock 输入**：peer socket stream、datagram 或 seqpacket 数据、连接建立与关闭事件，
   以及 pathname Unix socket 经 kvfs 解析的路径和 inode；
 - **上层 syscall 语义输入**：由 `posix/net` 传入的 socket 地址族、
   socket option、阻塞语义和权限决策结果。
@@ -194,6 +194,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 10. static init 顺序：创建 socket 前必须完成 `init_network` 初始化 `SERVICE`、`SOCKET_SET` 和 `LISTEN_TABLE`。
 11. pathname credential 一致性：一次 Unix pathname bind 的查找、创建和属主初始化必须使用同一份 `Cred` 快照。
 12. kernel caller 边界：没有当前用户任务的内核调用者不得进入隐式 `current_cred()` 路径；pathname 操作和 socket file 构造都必须显式选择凭据。
+13. Unix datagram sender 边界：`SO_PASSCRED` 返回的 PID/UID/GID 必须来自本次 send 的调用者快照，不能复用 socket 或 socketpair 创建者身份。
 13. `PacketBuf` 所有权：设备、Router、loopback 和 smoltcp adapter 之间按值转移报文；协议偏移只能落在当前有效数据范围内。
 14. IPv4 输入边界：本地交付前必须校验版本、头长、总长和头部校验和，并按 `total_len` 截断尾部数据。
 15. 网络类型边界：`RouteTable` 和 `NetDevice` 不暴露 smoltcp 地址或时间类型；控制面与协议兼容转换由 `Router`、`Service` 和初始化入口完成。
@@ -216,6 +217,7 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | `UdpSocket` | 字段满足 Send | `Arc<UdpPcb>` 内的锁、atomic 和分桶 PCB registry 保护共享状态 |
 | `RawSocket` | 字段满足 Send | `RwLock`、atomic 和 immutable handle 保护共享状态 |
 | `StreamTransport` | 字段满足 Send | `Mutex<Option<Channel>>` 串行化本端操作，per-direction `SpinNoPreempt` 排序数据发布、半关闭与 EOF 判定，三组 `PollSet` 隔离读、写和连接状态 waiter |
+| `SeqPacketTransport` | 字段满足 Send | `Mutex<Option<Channel>>` 串行化连接状态，每个 endpoint 的消息队列锁保持消息边界，原子关闭状态与 `PollSet` 协调 peer wakeup |
 | `NetlinkSocket` | 字段满足 Send | `Arc<NetlinkSocketInner>` 内部使用 `RwLock`、发送事务 `Mutex`、rx queue `Mutex` 和 `PollSet`；每次发送显式携带调用者凭据，socket 不保存权限主体 |
 | `Service` | 字段满足 Send | 通过内部 `Mutex` 分别保护 Interface、Router、IngressProcessor、timeout 和可复用 batch；网络 timer 与 deferred-close deadline 使用原子值发布，不在系统 tick 路径获取 sleepable mutex |
 | `Router` | 在 `Service` 内使用 | 通过 `Service` 的 Router mutex 间接共享 |
@@ -247,6 +249,8 @@ vtable 回调保持原指针与静态生命周期，不释放该测试计数器�
 | T-21 | 内核任务隐式读取用户凭据 | 高 | 启动期 pathname bind 调用普通 `SocketOps::bind`，当前线程不存在或主体错误 | 内核调用者使用 `bind_with_cred` 显式传入 `initial_cred()` 等已选择凭据；普通入口只服务当前用户任务 |
 | T-22 | Unix stream 在 EOF 后发布数据 | 中 | send、shutdown 与 peer recv 并发交错，关闭状态和 write index 缺少共同排序 | 每个发送方向使用共享 `tx_order`；send 在锁内复检后发布，recv 在锁内复查 empty 和 closed，Channel 释放前先发布关闭状态 |
 | T-23 | netlink socket 复用旧凭据导致越权 mutation | 高 | socket 跨进程传递或调用者凭据变化后继续使用创建时权限 | POSIX send 与 socket file write 路径仅在 netlink 分支取得当前 `Cred`，`NetlinkSocket::send_with_cred` 逐条检查 mutation；无权限请求生成 `NLMSG_ERROR` 和 `EPERM` |
+| T-34 | fork 后 Unix datagram 伪报创建者 PID | 中 | 子进程继承 socketpair endpoint 并向启用 `SO_PASSCRED` 的 peer 发送 | POSIX send 边界把当前 process PID/effective UID/GID 写入每条 datagram；接收端从消息快照生成 `SCM_CREDENTIALS` |
+| T-35 | udev multicast 被错误标记为 unicast | 中 | userspace 向 kobject uevent group 发送处理完成广播，但接收地址丢失 group bitmask | multicast 入队同时保存发送 port ID 与目标 group；systemd/libudev 可按标准 `sockaddr_nl` 语义执行 sender 校验 |
 | T-24 | 混合 netlink 批次发生部分 mutation | 高 | 同一发送同时包含 query 和 mutation，framing 错误位于已处理消息之后，或 response queue 在批次中途耗尽 | 发送事务锁串行化同一 socket 的 mutation 批次；完整批次先校验 framing 和类别；混合批次返回 syscall `EOPNOTSUPP`；同类 mutation 执行前检查完整 response 空间 |
 | T-25 | poller 执行期间丢失新事件 | 中 | RX、TX 或 timer 通知与完成 CAS 并发 | 单个 `AtomicU8` 将执行期通知发布为 `RUNNING_PENDING`；完成 CAS 失败后按观察到的状态重试，并通过一次成功 CAS 同时释放执行权和发布下一轮 |
 | T-26 | smoltcp 协议 timer 缺少推进事件 | 中 | TCP 重传或 keep-alive deadline 到期时没有设备 IRQ 或 socket 调用 | 每次 Interface poll 后通过 `poll_at` 注册 timer；到期后调用 `notify(PollReason::Timer)` 并唤醒 socket waiter；未来 deadline 不触发立即重轮询 |

@@ -15,8 +15,8 @@ use kerrno::{KError, KResult, LinuxError};
 use knet::{SocketErrorInfo, SocketErrorOrigin};
 use kvfs::VfsFile;
 use linux_raw_sys::net::{
-    AF_INET, AF_UNSPEC, IP_RECVERR, IPPROTO_IP, SCM_RIGHTS, SOL_SOCKET, cmsghdr, in_addr,
-    sockaddr_in,
+    AF_INET, AF_UNSPEC, IP_RECVERR, IPPROTO_IP, SCM_CREDENTIALS, SCM_RIGHTS, SOL_SOCKET, cmsghdr,
+    in_addr, sockaddr_in, ucred,
 };
 use osvm::{VirtPtr, write_vm_mem};
 use posix_types::{UserConstPtr, UserPtr};
@@ -128,6 +128,29 @@ pub(crate) fn push_ip_recverr_cmsg(
         };
 
         write_ip_recverr(data, &header, err.offender)
+    })
+}
+
+pub(crate) fn push_unix_credentials_cmsg(
+    builder: &mut CMsgBuilder<'_>,
+    credentials: knet::options::UnixCredentials,
+) -> KResult<bool> {
+    builder.push(SOL_SOCKET, SCM_CREDENTIALS, |data| {
+        if data.len() < size_of::<ucred>() {
+            return Err(KError::from(LinuxError::ENOBUFS));
+        }
+        let credentials = ucred {
+            pid: credentials.pid as _,
+            uid: credentials.uid,
+            gid: credentials.gid,
+        };
+        // SAFETY: `ucred` is a fully initialized Linux ABI structure, and the
+        // destination was checked for size. Ancillary payloads need not be
+        // naturally aligned, so the write is deliberately unaligned.
+        unsafe {
+            ptr::write_unaligned(data.as_mut_ptr().cast::<ucred>(), credentials);
+        }
+        Ok(size_of::<ucred>())
     })
 }
 

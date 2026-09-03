@@ -138,6 +138,7 @@ signal、scheduler 和 job-control 路径读取，调用者需要在上层执行
 ## 已知限制
 
 - subreaper 尚未实现，普通退出进程的子进程统一 reparent 到 init。
+- `PR_SET_PDEATHSIG` 配置已按 task 保存并可查询，但父 task 退出时的信号投递尚未接入；依赖该通知完成故障清理的用户态程序仍可能观察到语义缺失。
 - ID 冲突检查不在 `kprocess` 内集中执行，调用者需通过 registry 或 syscall 规则保证唯一性。
 - `Session::terminal` 使用 `ControllingTerminal` trait object，`kprocess` 只管理绑定槽，不了解具体 TTY 类型。
 - `Process::exit` 不主动从 process group 成员表删除进程，成员表依赖 weak entry 释放和 cleanup。

@@ -12,6 +12,7 @@
 use core::ffi::c_char;
 
 use kerrno::{KError, KResult};
+use ksignal::{MAX_SIGNALS, Signo};
 use ktask::current;
 use kuaccess::vm_load_string;
 use linux_raw_sys::general::{__user_cap_data_struct, __user_cap_header_struct};
@@ -69,6 +70,7 @@ pub fn sys_get_mempolicy(
 /// prctl() is called with a first argument describing what to do, and further
 /// arguments with a significance depending on the first one.
 /// The first argument can be:
+/// - PR_SET_PDEATHSIG / PR_GET_PDEATHSIG: configure or query the calling task's parent-death signal
 /// - PR_SET_NAME: set the name of the calling thread, using the value pointed to by `arg2`
 /// - PR_GET_NAME: get the name of the calling
 /// - PR_SET_SECCOMP: enable seccomp mode, with the mode specified in `arg2`
@@ -95,6 +97,23 @@ pub fn sys_prctl(
     debug!("sys_prctl <= option: {option}, args: {arg2}, {arg3}, {arg4}, {arg5}");
 
     match option {
+        PR_SET_PDEATHSIG => {
+            let signal = if arg2 == 0 {
+                None
+            } else {
+                if arg2 > MAX_SIGNALS {
+                    return Err(KError::InvalidInput);
+                }
+                Some(Signo::from_repr(arg2 as u8).ok_or(KError::InvalidInput)?)
+            };
+            kprocess::current_user_thread().set_parent_death_signal(signal);
+        }
+        PR_GET_PDEATHSIG => {
+            let signal = kprocess::current_user_thread()
+                .parent_death_signal()
+                .map_or(0, |signal| signal as i32);
+            write_vm_mem(arg2 as _, &[signal])?;
+        }
         PR_SET_NAME => {
             let s = vm_load_string(arg2 as *const c_char)?;
             current().set_name(&s);

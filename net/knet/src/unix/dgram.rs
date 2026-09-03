@@ -23,6 +23,7 @@ struct Datagram {
     data: Vec<u8>,
     ancillary: Vec<AncillaryData>,
     sender: UnixAddr,
+    credentials: UnixCredentials,
 }
 
 struct Channel {
@@ -196,6 +197,9 @@ impl UnixTransportOps for DgramTransport {
             data: message,
             ancillary: options.ancillary,
             sender: self.local_addr.read().clone(),
+            credentials: options
+                .credentials
+                .unwrap_or_else(|| UnixCredentials::new(self.pid)),
         };
 
         let connected = self.peer.read();
@@ -231,6 +235,7 @@ impl UnixTransportOps for DgramTransport {
                 data,
                 ancillary,
                 sender,
+                credentials,
             } = match rx.try_recv() {
                 Ok(packet) => packet,
                 Err(TryRecvError::Empty) => {
@@ -249,6 +254,11 @@ impl UnixTransportOps for DgramTransport {
                 **from = SocketAddrEx::Unix(sender);
             }
             if let Some(dst) = options.ancillary.as_mut() {
+                if self.options.pass_credentials() {
+                    dst.push(Box::new(crate::KernelAncillaryData::UnixCredentials(
+                        credentials,
+                    )));
+                }
                 dst.extend(ancillary);
             }
 

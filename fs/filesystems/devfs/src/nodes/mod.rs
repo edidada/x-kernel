@@ -27,3 +27,5 @@ pub(crate) mod log;
 pub(crate) mod memtrack;
 #[cfg(feature = "serial")]
 pub(crate) mod serial;
+#[cfg(feature = "input")]
+pub(crate) mod uinput;

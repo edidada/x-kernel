@@ -25,7 +25,7 @@ use super::{
     *,
 };
 use crate::{
-    RecvOptions, SERVICE, SendOptions, SocketAddrEx,
+    RecvFlags, RecvOptions, SERVICE, SendOptions, SocketAddrEx,
     buf::PacketBuf,
     device::{
         IF_OPER_DOWN, IF_OPER_UNKNOWN, IF_OPER_UP, LINK_FLAG_BROADCAST, LINK_FLAG_LOOPBACK,
@@ -917,7 +917,7 @@ fn test_publish_kobject_uevent_appends_monotonic_seqnum() {
 }
 
 #[def_test(serial)]
-fn test_recv_preserves_packet_when_dst_buffer_too_small() {
+fn test_recv_truncates_packet_when_dst_buffer_too_small() {
     let socket = NetlinkSocket::new(NETLINK_ROUTE);
     socket.inner.rx_queue.lock().push_back(NetlinkPacket {
         from: NetlinkAddr { pid: 1, groups: 0 },
@@ -926,13 +926,36 @@ fn test_recv_preserves_packet_when_dst_buffer_too_small() {
 
     let mut buf = [0u8; 2];
     let result = socket.recv(Cursor::new(buf.as_mut_slice()), RecvOptions::default());
+    // Linux netlink recv with a short buffer reads the prefix, pops the
+    // packet, and reports MSG_TRUNC through the out flags.
+    assert_eq!(result.unwrap(), 2);
+    assert_eq!(&buf, &[1, 2]);
+    assert!(socket.inner.rx_queue.lock().pop_front().is_none());
+}
 
-    assert_eq!(result, Err(LinuxError::EMSGSIZE.into()));
+#[def_test(serial)]
+fn test_recv_msg_truncate_reports_full_packet_length() {
+    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    socket.inner.rx_queue.lock().push_back(NetlinkPacket {
+        from: NetlinkAddr { pid: 1, groups: 0 },
+        data: vec![1, 2, 3, 4],
+    });
 
-    let mut queue = socket.inner.rx_queue.lock();
-    let packet = queue.pop_front().unwrap();
-    assert_eq!(packet.data, vec![1, 2, 3, 4]);
-    assert!(queue.pop_front().is_none());
+    let mut buf = [0u8; 2];
+    let mut from = SocketAddrEx::Unspecified;
+    let mut out_flags = RecvFlags::empty();
+    let result = socket.recv(
+        Cursor::new(buf.as_mut_slice()),
+        RecvOptions {
+            flags: RecvFlags::TRUNCATE,
+            from: Some(&mut from),
+            ancillary: None,
+            out_flags: Some(&mut out_flags),
+        },
+    );
+    assert_eq!(result.unwrap(), 4);
+    assert!(out_flags.contains(RecvFlags::TRUNCATE));
+    assert!(socket.inner.rx_queue.lock().pop_front().is_none());
 }
 
 #[def_test(serial)]

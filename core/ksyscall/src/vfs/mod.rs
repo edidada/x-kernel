@@ -4,4 +4,7 @@
 
 //! VFS and path-based syscall adapters.
 
+mod inotify;
+
+pub use inotify::*;
 pub use posix_fs::*;

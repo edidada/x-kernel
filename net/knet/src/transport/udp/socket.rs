@@ -398,6 +398,7 @@ impl SocketOps for UdpSocket {
             to,
             flags,
             ancillary: _,
+            credentials: _,
         } = options;
         let initial_len = src.remaining();
         self.send_reader(&mut src, to, flags)?;

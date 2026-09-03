@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 use alloc::{boxed::Box, sync::Arc};
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicUsize, Ordering};
 
 use kcred::Cred;
 use kerrno::KResult;
@@ -153,6 +153,7 @@ pub struct Thread {
     cred: RwLock<Arc<Cred>>,
     clear_child_tid: AtomicUsize,
     robust_list_head: AtomicUsize,
+    parent_death_signal: AtomicU8,
     signal: Arc<ThreadSignalManager>,
     time: Mutex<CpuTimeStatistics>,
     nice: AtomicI32,
@@ -181,6 +182,7 @@ impl Thread {
             cred: RwLock::new(cred),
             clear_child_tid: AtomicUsize::new(0),
             robust_list_head: AtomicUsize::new(0),
+            parent_death_signal: AtomicU8::new(0),
             time: Mutex::new(CpuTimeStatistics::new()),
             nice: AtomicI32::new(NiceValue::default().as_i32()),
             scheduler: Mutex::new(SchedulerState::default()),
@@ -270,6 +272,21 @@ impl Thread {
     pub fn set_robust_list_head(&self, robust_list_head: usize) {
         self.robust_list_head
             .store(robust_list_head, Ordering::Release);
+    }
+
+    /// Returns the signal configured for delivery when this thread's parent dies.
+    ///
+    /// The value is preserved across exec and starts unset for every newly
+    /// created thread, matching `PR_GET_PDEATHSIG` state lifetime. Parent-exit
+    /// delivery is not yet connected to this state.
+    pub fn parent_death_signal(&self) -> Option<ksignal::Signo> {
+        ksignal::Signo::from_repr(self.parent_death_signal.load(Ordering::Relaxed))
+    }
+
+    /// Configures the signal reported through `PR_GET_PDEATHSIG`.
+    pub fn set_parent_death_signal(&self, signal: Option<ksignal::Signo>) {
+        self.parent_death_signal
+            .store(signal.map_or(0, |signal| signal as u8), Ordering::Relaxed);
     }
 
     /// Returns the process-shared OOM score adjustment.

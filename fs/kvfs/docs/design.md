@@ -349,8 +349,9 @@ regular file、directory 和 socket，并对 sticky directory 写入执行 owner
 不可变目标的 symbolic link，供 devfs 等简单文件系统创建 FIFO、pathname Unix socket
 以及 `/dev/fd` 一类启动期链接。快速链接目标只存入 `VfsInode` cached-link 状态，
 对应 Linux `inode::i_link`；`SimpleFsNode` 只保存 inode number、mode、owner 和
-`i_size` 等元数据，不再用 `SimpleFile` closure 保存第二份目标。未显式支持动态插入的
-simple directory 保持返回 `EPERM`。
+`i_size` 等元数据，不再用 `SimpleFile` closure 保存第二份目标。`DirMapping` 同时支持
+删除和同目录 rename 这类动态非目录项；unlink 会从持久 mapping 移除 factory 并递减 inode link count，rename 在同一 mapping mutex 临界区移动 factory 并替换目标；
+未显式支持动态插入/删除的 simple directory 保持返回 `EPERM`。
 
 非递归 bind mount 创建新的 `Mount`，共享源 path 的 superblock 与 root dentry，但拥有
 独立 mount ID、父挂载位置和覆盖关系，并继承源 mount 的 per-mount flags。对应 Linux

@@ -143,6 +143,10 @@ impl FileOperations for ChrdevFileOperations {
         self.ops.mmap(file, mapper)
     }
 
+    fn release(&self, inode: &VfsInode, file: &VfsFile) -> VfsResult<()> {
+        self.ops.release(inode, file)
+    }
+
     fn poll(&self, file: &VfsFile) -> IoEvents {
         self.ops.poll(file)
     }
@@ -460,6 +464,11 @@ pub trait DeviceFileOps: Send + Sync {
     /// Default returns `ENODEV` (mmap not supported).
     fn mmap(&self, _file: &VfsFile, _mapper: &mut dyn MmapMapper) -> VfsResult<()> {
         Err(VfsError::NoSuchDevice)
+    }
+
+    /// Releases one open device file description.
+    fn release(&self, _inode: &VfsInode, _file: &VfsFile) -> VfsResult<()> {
+        Ok(())
     }
 
     /// Polls an open device file.

@@ -115,6 +115,9 @@ fn parse_oom_score_adj_input(data: &[u8]) -> VfsResult<Option<i32>> {
         return Ok(None);
     }
 
+    // Linux's procfs numeric parsers accept a userspace buffer that includes
+    // the C string terminator, as used by upstream IGT GPU Tools.
+    let data = data.strip_suffix(&[0]).unwrap_or(data);
     str::from_utf8(data)
         .ok()
         .map(str::trim)
@@ -896,6 +899,11 @@ mod tests {
     #[def_test]
     fn test_parse_oom_score_adj_accepts_newline_terminated_input() {
         assert_eq!(parse_oom_score_adj_input(b"100\n").unwrap(), Some(100));
+    }
+
+    #[def_test]
+    fn test_parse_oom_score_adj_accepts_null_terminated_input() {
+        assert_eq!(parse_oom_score_adj_input(b"1000\0").unwrap(), Some(1000));
     }
 
     #[def_test]

@@ -66,11 +66,14 @@ impl FileOperations for SocketFileOps {
         if file.is_nonblocking() {
             options.flags |= SendFlags::DONT_WAIT;
         }
+        let cred = kprocess::current_cred();
+        options.credentials = Some(crate::options::UnixCredentials {
+            pid: kprocess::current_user_process().pid(),
+            uid: cred.euid(),
+            gid: cred.egid(),
+        });
         match socket.as_ref() {
-            Socket::Netlink(_) => {
-                let cred = kprocess::current_cred();
-                socket.send_with_cred(src, options, &cred)
-            }
+            Socket::Netlink(_) => socket.send_with_cred(src, options, &cred),
             _ => socket.send(src, options),
         }
     }

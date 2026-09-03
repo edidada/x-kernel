@@ -153,6 +153,16 @@ pub trait SimpleDirOps: Send + Sync + 'static {
         Err(VfsError::OperationNotPermitted)
     }
 
+    /// Removes a persistent non-directory child.
+    fn remove_inode_child(&self, _name: &str) -> VfsResult<()> {
+        Err(VfsError::OperationNotPermitted)
+    }
+
+    /// Renames a persistent child within this directory.
+    fn rename_inode_child(&self, _old_name: &str, _new_name: &str) -> VfsResult<()> {
+        Err(VfsError::OperationNotPermitted)
+    }
+
     /// Combines two directories into one.
     fn chain<N: SimpleDirOps>(self, other: N) -> ChainedDirOps<Self, N>
     where
@@ -200,6 +210,21 @@ impl SimpleDirOps for DirMapping {
             }),
         );
         Ok(lookup.file_from_inode(name, inode))
+    }
+
+    fn remove_inode_child(&self, name: &str) -> VfsResult<()> {
+        self.entries
+            .lock()
+            .remove(name)
+            .map(|_| ())
+            .ok_or(VfsError::NotFound)
+    }
+
+    fn rename_inode_child(&self, old_name: &str, new_name: &str) -> VfsResult<()> {
+        let mut entries = self.entries.lock();
+        let entry = entries.remove(old_name).ok_or(VfsError::NotFound)?;
+        entries.insert(new_name.to_owned(), entry);
+        Ok(())
     }
 }
 
@@ -520,20 +545,33 @@ impl<O: SimpleDirOps> InodeDirOperations for SimpleDirInodeOperations<O> {
         Err(VfsError::OperationNotPermitted)
     }
 
-    fn unlink(&self, _dir: &crate::VfsInode, _dentry: &LockedDentry<'_>) -> VfsResult<()> {
-        Err(VfsError::OperationNotPermitted)
+    fn unlink(&self, _dir: &crate::VfsInode, dentry: &LockedDentry<'_>) -> VfsResult<()> {
+        self.dir.ops.remove_inode_child(dentry.name())?;
+        dentry.decrement_link_count();
+        Ok(())
     }
 
     fn rename(
         &self,
         _idmap: &crate::MountIdmap,
-        _old_dir: &crate::VfsInode,
-        _old_dentry: &LockedDentry<'_>,
-        _new_dir: &crate::VfsInode,
-        _new_dentry: &LockedDentry<'_>,
-        _flags: crate::RenameFlags,
+        old_dir: &crate::VfsInode,
+        old_dentry: &LockedDentry<'_>,
+        new_dir: &crate::VfsInode,
+        new_dentry: &LockedDentry<'_>,
+        flags: crate::RenameFlags,
     ) -> VfsResult<()> {
-        Err(VfsError::OperationNotPermitted)
+        if !core::ptr::eq(old_dir, new_dir)
+            || flags.intersects(crate::RenameFlags::NOREPLACE | crate::RenameFlags::EXCHANGE)
+        {
+            return Err(VfsError::OperationNotPermitted);
+        }
+        self.dir
+            .ops
+            .rename_inode_child(old_dentry.name(), new_dentry.name())?;
+        if new_dentry.is_really_positive() {
+            new_dentry.decrement_link_count();
+        }
+        Ok(())
     }
 }
 

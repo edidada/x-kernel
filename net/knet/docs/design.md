@@ -67,6 +67,7 @@ net/knet/
     │   └── udp_err.rs
     ├── unix/
     │   ├── dgram.rs
+    │   ├── seqpacket.rs
     │   └── stream.rs
     └── vsock/
         ├── connection_manager.rs
@@ -131,7 +132,7 @@ core/kruntime
 | `GeneralOptions` | 统一管理 nonblock、reuseaddr、超时和设备 mask |
 | `SocketOps` | 上层 socket syscall 使用的统一操作接口 |
 | `netlink` | 提供 AF_NETLINK socket、kobject uevent 和有限 rtnetlink 控制面 |
-| `unix` | 提供 Unix domain stream 与 datagram transport；pathname 地址通过 kvfs 查找或创建 socket inode |
+| `unix` | 提供 Unix domain stream、datagram 与 connection-oriented seqpacket transport；pathname 地址通过 kvfs 查找或创建 socket inode |
 | `vsock` | 在 `vsock` feature 下提供 virtio-vsock stream 支持 |
 
 ### Ethernet RX 调度边界
@@ -433,6 +434,14 @@ Linux 可从任务上下文隐式读取 `current_cred()`，但 knet 也服务于
 凭据不保存在 Unix socket、pathname lookup 状态或 dentry 中，避免凭据生命周期与路径状态耦合。
 `sock_alloc_file` 也显式接收 `Arc<Cred>`，只把它交给 `VfsFile::f_cred`；socket 对象不保存
 第二份 credential，也不在 knet 内部读取当前 task。
+
+Unix datagram 每次发送还通过 `SendOptions::credentials` 携带 syscall 边界捕获的
+PID/effective UID/effective GID。接收端启用 `SO_PASSCRED` 时从 datagram 自身生成
+`SCM_CREDENTIALS`，因此 socketpair endpoint 被 fork 后不会错误报告 socket 创建者 PID。
+
+NETLINK_KOBJECT_UEVENT 的 userspace multicast 会在接收侧地址中保留目标 group
+bitmask，并以发送 socket 的 port ID 作为 `nl_pid`。接收者据此区分 udev group 广播
+与受信任 sender 才能使用的 unicast。
 
 ### rtnetlink 每次发送传递凭据
 

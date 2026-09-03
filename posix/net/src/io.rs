@@ -34,7 +34,7 @@ use posix_types::{IoVec, IoVectorBuf, TimeSpanLike, UserConstPtr, UserPtr};
 
 use crate::{
     addr::SocketAddrExt,
-    cmsg::{CMsg, CMsgBuilder, push_ip_recverr_cmsg},
+    cmsg::{CMsg, CMsgBuilder, push_ip_recverr_cmsg, push_unix_credentials_cmsg},
 };
 
 // Linux ABI for sendmmsg/recvmmsg limits vlen to UIO_MAXIOV (1024).
@@ -89,6 +89,7 @@ fn parse_send_cmsgs(
 enum SocketAncillary {
     Rights { fds: Vec<Arc<VfsFile>> },
     IpError(SocketErrorInfo),
+    UnixCredentials(knet::options::UnixCredentials),
 }
 
 fn into_socket_ancillary(ancillary: AncillaryData) -> Option<SocketAncillary> {
@@ -106,6 +107,9 @@ fn into_socket_ancillary(ancillary: AncillaryData) -> Option<SocketAncillary> {
         let ancillary = ancillary.downcast::<KernelAncillaryData>().ok()?;
         return Some(match *ancillary {
             KernelAncillaryData::IpError(err) => SocketAncillary::IpError(err),
+            KernelAncillaryData::UnixCredentials(credentials) => {
+                SocketAncillary::UnixCredentials(credentials)
+            }
         });
     }
 
@@ -139,6 +143,9 @@ fn push_socket_cmsg(
             Ok(written)
         }),
         SocketAncillary::IpError(err) => push_ip_recverr_cmsg(builder, err),
+        SocketAncillary::UnixCredentials(credentials) => {
+            push_unix_credentials_cmsg(builder, credentials)
+        }
     }
 }
 
@@ -165,16 +172,19 @@ fn send_impl(
     if file.is_nonblocking() {
         send_flags |= SendFlags::DONT_WAIT;
     }
+    let cred = kprocess::current_cred();
     let options = SendOptions {
         to: addr,
         flags: send_flags,
         ancillary,
+        credentials: Some(knet::options::UnixCredentials {
+            pid: kprocess::current_user_process().pid(),
+            uid: cred.euid(),
+            gid: cred.egid(),
+        }),
     };
     let sent = match socket.as_ref() {
-        Socket::Netlink(_) => {
-            let cred = kprocess::current_cred();
-            socket.send_with_cred(&mut src, options, &cred)?
-        }
+        Socket::Netlink(_) => socket.send_with_cred(&mut src, options, &cred)?,
         _ => socket.send(&mut src, options)?,
     };
 
