@@ -513,7 +513,7 @@ fn run_one_bottom_half_pool_work(
                 .pool()
                 .discard_runnable_candidate(candidate.token, ktask::monotonic_time())
             {
-                let _ = discarded.should_retry;
+                return discarded.should_retry;
             }
             false
         }

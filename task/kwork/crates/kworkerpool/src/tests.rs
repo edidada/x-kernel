@@ -12,7 +12,7 @@ use crate::{
     DEFAULT_IDLE_RETIRE_AFTER, EntryKey, EntryOwner, EntryPayload, EntrySource, ImmediateAction,
     PoolEntry, RunnableCandidateResult, WorkerId, WorkerPool, WorkerPoolPlacement,
     WorkerPoolPolicy, WorkerPoolPolicyConfig, WorkerState,
-    bottom_half::BottomHalfWorkerPool,
+    bottom_half::{BottomHalfRunnableCandidateResult, BottomHalfWorkerPool},
     normal::{
         action::ManagementAction,
         manager::{ManagerRuntime, ManagerTarget, run_worker_pool_manager_pass},
@@ -124,6 +124,35 @@ fn bottom_half_pool_installs_drain_slot_without_worker_identity() {
     assert!(pool.install_drain_slot());
 
     assert!(pool.enqueue_runnable(entry(1), now(1)).is_ok());
+}
+
+#[def_test]
+fn bottom_half_discard_stale_candidate_retries_next_runnable_entry() {
+    let pool: BottomHalfWorkerPool<4> =
+        BottomHalfWorkerPool::new(WorkerPoolPlacement::bound_to(LogicalCpuId::new(2)));
+    assert!(pool.install_drain_slot());
+    assert!(pool.enqueue_runnable(entry(1), now(1)).is_ok());
+    assert!(pool.enqueue_runnable(entry(2), now(2)).is_ok());
+
+    let stale = match pool.prepare_runnable_candidate(now(3)).unwrap() {
+        BottomHalfRunnableCandidateResult::Candidate(candidate) => candidate,
+        BottomHalfRunnableCandidateResult::Empty => panic!("expected stale candidate"),
+    };
+    assert_eq!(stale.entry.key(), EntryKey::new(1));
+
+    let discarded = pool
+        .discard_runnable_candidate(stale.token, now(4))
+        .unwrap();
+    assert!(discarded.should_retry);
+    assert_eq!(pool.snapshot().worker_states[0], WorkerState::Preparing);
+
+    let next = match pool.prepare_runnable_candidate(now(5)).unwrap() {
+        BottomHalfRunnableCandidateResult::Candidate(candidate) => candidate,
+        BottomHalfRunnableCandidateResult::Empty => panic!("expected retry candidate"),
+    };
+    assert_eq!(next.entry.key(), EntryKey::new(2));
+    assert!(pool.commit_runnable_candidate(next.token, now(6)).is_ok());
+    assert!(pool.drain_finished(next.token, now(7)).is_ok());
 }
 
 #[def_test]

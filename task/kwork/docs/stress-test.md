@@ -17,12 +17,17 @@ Stress cases run only through `/proc/kwork_stress`, including the short
 
 ## Boundary
 
-The stress subsystem is a `kwork` runtime user. It must use public product
+The stress subsystem is a `kwork` runtime user. Cases must use public product
 APIs such as `ScheduledWork`, `DelayedScheduledWork`, `WorkQueueHandle`,
-`system_wq`, `system_bh_wq`, `flush`, `cancel`, and `cancel_sync`.
+`system_wq`, `system_bh_wq`, `flush`, `cancel`, and `cancel_sync` by default.
 
-It must not reach into `kworkqueue` binding internals or `kworkerpool` worker
-state to force progress. Those crates are validated separately by unit tests.
+Narrow diagnostic cases may inject crate-internal executor state when a
+production race cannot be made deterministic through public APIs. Such cases
+must still validate progress through the real runtime path under test and must
+not reach into `kworkerpool` worker state to force progress. For example,
+`bh-stale-drain` injects one stale bottom-half executor entry, then relies on
+normal enqueue and softirq drain to prove that the stale head does not block the
+valid work behind it.
 
 ## User trigger
 
@@ -37,6 +42,7 @@ percpu-fanout [rounds] [works]
 yield-cpu [rounds]
 bh-drain [rounds]
 bh-highpri [rounds]
+bh-stale-drain [rounds]
 budgeted-poller [rounds] [works]
 cancel-race [rounds] [works]
 disable-race [rounds] [works]
@@ -91,6 +97,10 @@ baseline before scheduler, pool, or queue policy changes.
   budget forces repeated restart. BH work remains CPU-local because the current
   softirq raise path is local to the caller CPU.
 - `bh-highpri`: enqueue work through `system_bh_highpri_wq`.
+- `bh-stale-drain`: inject one stale bottom-half executor entry ahead of a
+  valid bottom-half work item, then verify that the same softirq drain pass
+  discards the stale head and continues to the valid work behind it. This case
+  covers the `discard_runnable_candidate().should_retry` retry contract.
 - `budgeted-poller`: start a `BudgetedPoller`, repeatedly notify it, mix in
   foreground assist, and destroy it after all published units complete.
 - `cancel-race`: ktask producers and cancellers pinned to different CPUs race

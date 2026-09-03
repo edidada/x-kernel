@@ -159,8 +159,10 @@ queued work needs progress.
 ## Stress and Diagnostics
 
 The optional stress subsystem is behind `KFEAT_KWORK_STRESS` and is triggered
-through `/proc/kwork_stress`. It exercises public `kwork` APIs only. Boot never
-runs stress automatically.
+through `/proc/kwork_stress`. It exercises public `kwork` APIs by default, with
+narrow diagnostic cases allowed to inject crate-internal executor state when a
+race cannot be made deterministic through public APIs. Boot never runs stress
+automatically.
 
 The watchdog hook scans built-in pool snapshots and reports a stuck pool only
 after runnable work remains without execution progress for the configured

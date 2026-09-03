@@ -16,6 +16,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{
+    num::NonZeroUsize,
     str,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
@@ -62,6 +63,7 @@ const CASE_DELAYED_CANCEL: usize = 12;
 const CASE_CANCEL_NONBLOCKING: usize = 13;
 const CASE_WAIT_DEADLOCK: usize = 14;
 const CASE_SLEEP_BLOCK: usize = 15;
+const CASE_BH_STALE_DRAIN: usize = 16;
 
 const PHASE_NONE: usize = 0;
 const PHASE_CANCEL_SPAWN: usize = 1;
@@ -215,12 +217,12 @@ pub enum StressFailureReason {
 pub fn stress_status_text() -> String {
     let mut out = "kwork stress commands: queue-flush [rounds] [works], static-queue [rounds] \
                    [works], balanced-fanout [rounds] [works], percpu-fanout [rounds] [works], \
-                   yield-cpu [rounds], bh-drain [rounds], bh-highpri [rounds], budgeted-poller \
-                   [rounds] [works], cancel-race [rounds] [works], disable-race [rounds] [works], \
-                   destroy-race [rounds] [works], delayed-cancel [rounds] [works], \
-                   cancel-nonblocking [rounds] [works], wait-deadlock [rounds], sleep-block \
-                   [rounds], all [rounds] [works], smoke, soak [seconds] [works], bench [seconds] \
-                   [works], dump\n"
+                   yield-cpu [rounds], bh-drain [rounds], bh-highpri [rounds], bh-stale-drain \
+                   [rounds], budgeted-poller [rounds] [works], cancel-race [rounds] [works], \
+                   disable-race [rounds] [works], destroy-race [rounds] [works], delayed-cancel \
+                   [rounds] [works], cancel-nonblocking [rounds] [works], wait-deadlock [rounds], \
+                   sleep-block [rounds], all [rounds] [works], smoke, soak [seconds] [works], \
+                   bench [seconds] [works], dump\n"
         .to_string();
     let case = CURRENT_CASE.load(Ordering::Acquire);
     let phase = CURRENT_PHASE.load(Ordering::Acquire);
@@ -302,6 +304,7 @@ pub fn run_stress_command(data: &[u8]) -> Result<String, StressError> {
         "yield-cpu" => vec![run_yield_cpu(args.as_slice())?],
         "bh-drain" => vec![run_bh_drain(args.as_slice())?],
         "bh-highpri" => vec![run_bh_highpri(args.as_slice())?],
+        "bh-stale-drain" => vec![run_bh_stale_drain(args.as_slice())?],
         "budgeted-poller" => vec![run_budgeted_poller(args.as_slice())?],
         "cancel-race" => vec![run_cancel_race(args.as_slice())?],
         "disable-race" => vec![run_disable_race(args.as_slice())?],
@@ -604,6 +607,7 @@ fn run_all(args: &[&str]) -> Result<Vec<StressSummary>, StressError> {
         run_yield_cpu(args)?,
         run_bh_drain(args)?,
         run_bh_highpri(args)?,
+        run_bh_stale_drain(args)?,
         run_budgeted_poller(args)?,
         run_cancel_race(args)?,
         run_disable_race(args)?,
@@ -624,6 +628,7 @@ fn run_smoke() -> Result<Vec<StressSummary>, StressError> {
         run_yield_cpu(&["4"])?,
         run_bh_drain(&["4"])?,
         run_bh_highpri(&["4"])?,
+        run_bh_stale_drain(&["4"])?,
         run_budgeted_poller(&["4", "8"])?,
         run_cancel_race(&["2", "8"])?,
         run_disable_race(&["2", "8"])?,
@@ -664,6 +669,9 @@ fn run_soak_cycle(args: &[&str], iteration: usize) -> Result<Vec<StressSummary>,
     summaries.push(run_named_case("yield-cpu", || run_yield_cpu(args))?);
     summaries.push(run_named_case("bh-drain", || run_bh_drain(args))?);
     summaries.push(run_named_case("bh-highpri", || run_bh_highpri(args))?);
+    summaries.push(run_named_case("bh-stale-drain", || {
+        run_bh_stale_drain(args)
+    })?);
     summaries.push(run_named_case("budgeted-poller", || {
         run_budgeted_poller(args)
     })?);
@@ -733,6 +741,7 @@ fn case_id(case: &str) -> usize {
         "yield-cpu" => CASE_YIELD_CPU,
         "bh-drain" => CASE_BH_DRAIN,
         "bh-highpri" => CASE_BH_HIGHPRI,
+        "bh-stale-drain" => CASE_BH_STALE_DRAIN,
         "budgeted-poller" => CASE_BUDGETED_POLLER,
         "cancel-race" => CASE_CANCEL_RACE,
         "disable-race" => CASE_DISABLE_RACE,
@@ -754,6 +763,7 @@ fn case_name(case: usize) -> &'static str {
         CASE_YIELD_CPU => "yield-cpu",
         CASE_BH_DRAIN => "bh-drain",
         CASE_BH_HIGHPRI => "bh-highpri",
+        CASE_BH_STALE_DRAIN => "bh-stale-drain",
         CASE_BUDGETED_POLLER => "budgeted-poller",
         CASE_CANCEL_RACE => "cancel-race",
         CASE_DISABLE_RACE => "disable-race",
@@ -1120,6 +1130,60 @@ fn run_bh_highpri(args: &[&str]) -> Result<StressSummary, StressError> {
         failures: 0,
         active_cpus: active_cpu_count(&per_cpu),
     })
+}
+
+fn run_bh_stale_drain(args: &[&str]) -> Result<StressSummary, StressError> {
+    let rounds = parse_arg(args, 0, DEFAULT_ROUNDS, 1, MAX_ROUNDS)?;
+    let cpu_id = stress_bottom_half_cpu()?;
+    let completed = Arc::new(AtomicUsize::new(0));
+    let per_cpu = per_cpu_counters();
+
+    for round in 0..rounds {
+        CURRENT_ROUND.store(round, Ordering::Release);
+        inject_stale_bottom_half_entry(cpu_id, round)?;
+
+        let completed_ref = completed.clone();
+        let per_cpu = per_cpu.clone();
+        let work = ScheduledWork::new(move |_| {
+            record_current_cpu(&per_cpu);
+            completed_ref.fetch_add(1, Ordering::AcqRel);
+        });
+        expect_queued(work.schedule_with(ScheduleAttrs::bottom_half().on_cpu(cpu_id)))?;
+        wait_until(|| completed.load(Ordering::Acquire) > round)?;
+        work.flush().map_err(StressError::FlushFailed)?;
+    }
+
+    Ok(StressSummary {
+        case: "bh-stale-drain",
+        rounds,
+        queued: rounds,
+        completed: completed.load(Ordering::Acquire),
+        cancel: 0,
+        cancel_sync: 0,
+        would_deadlock: 0,
+        disabled: 0,
+        failures: 0,
+        active_cpus: active_cpu_count(&per_cpu),
+    })
+}
+
+fn inject_stale_bottom_half_entry(cpu_id: LogicalCpuId, round: usize) -> Result<(), StressError> {
+    let Some(pool) = builtinpool::bottom_half_pool_binding_for_cpu(cpu_id) else {
+        return Err(StressError::PoolNotReady);
+    };
+    let raw = usize::MAX - round;
+    let entry = kworkqueue::ExecutorEntry {
+        binding: kworkqueue::BindingId::new(nonzero_stress_id(raw)),
+        owner: kworkqueue::EntryOwner::new(nonzero_stress_id(raw - 1)),
+        key: kworkqueue::EntryKey::new(nonzero_stress_id(raw - 2)),
+        payload: kworkqueue::EntryPayload::new(nonzero_stress_id(raw - 3)),
+    };
+    pool.apply_executor_op(kworkqueue::ExecutorOp::EnqueueRunnable(entry))
+        .map_err(|_| StressError::Incomplete)
+}
+
+fn nonzero_stress_id(raw: usize) -> NonZeroUsize {
+    NonZeroUsize::new(raw).expect("stress ids are generated from usize::MAX")
 }
 
 fn run_budgeted_poller(args: &[&str]) -> Result<StressSummary, StressError> {
