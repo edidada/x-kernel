@@ -2,18 +2,16 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Dispatch helpers for built-in worker pools selected by kind.
+//! Dispatch helpers for built-in worker pools.
 
 use kcpu_id_map::LogicalCpuId;
 use ktime_types::MonotonicInstant;
-use kworkerpool::{WorkerId, decode_task_context};
+use kworkerpool::decode_task_context;
 
 use super::{
     bh::bh_worker_pools,
-    init::{BuiltinPoolInitError, SystemWorkerPoolInitResult},
-    kind::BuiltinPoolKind,
-    pool::BuiltinPoolBinding,
-    system::system_worker_pools,
+    pool::{BuiltinPoolBinding, BuiltinPoolInitError},
+    system::{SystemWorkerPoolInitResult, system_worker_pools},
 };
 
 /// Initializes the current CPU's built-in worker pools.
@@ -25,12 +23,14 @@ pub(crate) fn init_system_worker_pools_for_cpu(
     Ok(system)
 }
 
-/// Returns whether the built-in pool for `(kind, cpu_id)` has been initialized.
-pub(crate) fn is_builtin_pool_ready(kind: BuiltinPoolKind, cpu_id: LogicalCpuId) -> bool {
-    match kind {
-        BuiltinPoolKind::Normal => system_worker_pools().is_cpu_ready(cpu_id),
-        BuiltinPoolKind::Bh => bh_worker_pools().is_cpu_ready(cpu_id),
-    }
+/// Returns whether the task-context system pool for `cpu_id` is initialized.
+pub(crate) fn is_system_pool_ready(cpu_id: LogicalCpuId) -> bool {
+    system_worker_pools().is_cpu_ready(cpu_id)
+}
+
+/// Returns whether the bottom-half pool for `cpu_id` is initialized.
+pub(crate) fn is_bottom_half_pool_ready(cpu_id: LogicalCpuId) -> bool {
+    bh_worker_pools().is_cpu_ready(cpu_id)
 }
 
 /// Resolves the normal system pool for one CPU.
@@ -45,35 +45,9 @@ pub(crate) fn bottom_half_pool_for_cpu(
     bh_worker_pools().for_cpu_raw(cpu_id)
 }
 
-/// Resolves a built-in worker pool by kind and CPU.
-pub(crate) fn builtin_pool_for_kind_cpu(
-    kind: BuiltinPoolKind,
-    cpu_id: LogicalCpuId,
-) -> Option<BuiltinPoolBinding> {
-    match kind {
-        BuiltinPoolKind::Normal => system_worker_pools().for_cpu(cpu_id),
-        BuiltinPoolKind::Bh => bh_worker_pools().for_cpu(cpu_id),
-    }
-}
-
-/// Wakes one runtime worker thread owned by a built-in pool, if available.
-pub(crate) fn wake_builtin_worker(
-    kind: BuiltinPoolKind,
-    cpu_id: LogicalCpuId,
-    worker: WorkerId,
-) -> bool {
-    match kind {
-        BuiltinPoolKind::Normal => system_worker_pools().wake_worker(cpu_id, worker),
-        BuiltinPoolKind::Bh => false,
-    }
-}
-
-/// Wakes the per-CPU manager thread owned by a built-in pool.
-pub(crate) fn wake_builtin_manager(kind: BuiltinPoolKind, cpu_id: LogicalCpuId) -> bool {
-    match kind {
-        BuiltinPoolKind::Normal => system_worker_pools().wake_manager(cpu_id),
-        BuiltinPoolKind::Bh => false,
-    }
+/// Resolves the bottom-half worker-pool binding for one CPU.
+pub(crate) fn bottom_half_pool_binding_for_cpu(cpu_id: LogicalCpuId) -> Option<BuiltinPoolBinding> {
+    bh_worker_pools().for_cpu(cpu_id)
 }
 
 /// Accounts one scheduler tick for a task currently running built-in pool work.

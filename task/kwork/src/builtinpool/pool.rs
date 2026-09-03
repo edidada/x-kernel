@@ -12,9 +12,12 @@ use kworkerpool::{
 
 use super::{
     entry::{pool_entry, pool_key, pool_owner},
-    kind::{BUILTIN_POOL_ENTRY_CAP, BuiltinPoolKind},
+    system::system_worker_pools,
 };
 use crate::runtime::BuiltinWorkerRuntime;
+
+/// Pending executor entries retained by one built-in worker pool.
+pub(crate) const BUILTIN_POOL_ENTRY_CAP: usize = kbuild_config::WORKQUEUE_PENDING_CAP;
 
 /// Maximum worker slots in one built-in pool.
 pub(crate) const BUILTIN_WORKERS_PER_POOL: usize = kbuild_config::WORKQUEUE_WORKERS_PER_POOL;
@@ -25,6 +28,15 @@ pub(crate) type BuiltinKtaskWorkerPool =
 
 /// Built-in worker-pool snapshot normalized for diagnostics.
 pub(crate) type BuiltinPoolSnapshot = WorkerPoolSnapshot<{ BUILTIN_WORKERS_PER_POOL }>;
+
+/// Error returned while initializing built-in worker pools for one CPU.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuiltinPoolInitError {
+    /// The requested logical CPU has no built-in pool slot.
+    InvalidCpu,
+    /// The selected pool was not empty and could not be configured.
+    ConfigureFailed,
+}
 
 /// Opaque binding to one built-in worker pool.
 #[derive(Clone, Copy)]
@@ -189,11 +201,10 @@ pub(crate) fn handle_actions(cpu_id: LogicalCpuId, actions: ActionBatch) {
     for action in actions.immediate() {
         match action {
             ImmediateAction::WakeWorker { worker } => {
-                let _ =
-                    super::dispatch::wake_builtin_worker(BuiltinPoolKind::Normal, cpu_id, worker);
+                let _ = system_worker_pools().wake_worker(cpu_id, worker);
             }
             ImmediateAction::WakeManager => {
-                let _ = super::dispatch::wake_builtin_manager(BuiltinPoolKind::Normal, cpu_id);
+                let _ = system_worker_pools().wake_manager(cpu_id);
             }
             ImmediateAction::ArmCpuIntensiveTimer { .. } => {}
         }

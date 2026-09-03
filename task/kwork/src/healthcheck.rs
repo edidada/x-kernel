@@ -8,9 +8,10 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use ktime_types::{MonotonicInstant, TimeSpan};
 
-use crate::builtinpool::{BuiltinPoolKind, builtin_pool_for_kind_cpu};
+use crate::builtinpool::{bottom_half_pool_binding_for_cpu, system_pool_for_cpu};
 
-const HEALTHCHECK_SLOTS: usize = BuiltinPoolKind::COUNT * kbuild_config::NR_CPUS;
+const HEALTHCHECK_POOL_CLASSES: usize = 2;
+const HEALTHCHECK_SLOTS: usize = HEALTHCHECK_POOL_CLASSES * kbuild_config::NR_CPUS;
 
 static STUCK_SINCE_NS: [AtomicU64; HEALTHCHECK_SLOTS] =
     [const { AtomicU64::new(0) }; HEALTHCHECK_SLOTS];
@@ -31,38 +32,57 @@ pub fn system_workqueue_watchdog_check(now: MonotonicInstant, threshold: TimeSpa
     let threshold_ns = threshold.as_nanos_u64_saturating();
     let mut healthy = true;
 
-    for kind in BuiltinPoolKind::ALL {
-        for cpu in 0..kbuild_config::NR_CPUS {
-            let slot = kind.as_usize() * kbuild_config::NR_CPUS + cpu;
-            let Some(pool) = builtin_pool_for_kind_cpu(kind, kcpu_id_map::LogicalCpuId::new(cpu))
-            else {
-                STUCK_SINCE_NS[slot].store(0, Ordering::Release);
-                continue;
-            };
-            let Some(snapshot) = pool.try_snapshot() else {
-                STUCK_SINCE_NS[slot].store(0, Ordering::Release);
-                continue;
-            };
-            let has_progress_context = snapshot.nr_creating != 0
-                || snapshot.nr_preparing != 0
-                || snapshot.nr_claiming != 0
-                || snapshot.nr_running_state != 0;
-            let suspicious = snapshot.runnable != 0 && !has_progress_context;
-            if !suspicious {
-                STUCK_SINCE_NS[slot].store(0, Ordering::Release);
-                continue;
-            }
-
-            let since = STUCK_SINCE_NS[slot].load(Ordering::Acquire);
-            if since == 0 {
-                STUCK_SINCE_NS[slot].store(now_ns, Ordering::Release);
-                continue;
-            }
-            if now_ns.saturating_sub(since) >= threshold_ns {
-                healthy = false;
-            }
-        }
+    for cpu in 0..kbuild_config::NR_CPUS {
+        let cpu_id = kcpu_id_map::LogicalCpuId::new(cpu);
+        healthy &= check_pool_slot(
+            healthcheck_slot(0, cpu),
+            system_pool_for_cpu(cpu_id),
+            now_ns,
+            threshold_ns,
+        );
+        healthy &= check_pool_slot(
+            healthcheck_slot(1, cpu),
+            bottom_half_pool_binding_for_cpu(cpu_id),
+            now_ns,
+            threshold_ns,
+        );
     }
 
     healthy
+}
+
+fn healthcheck_slot(class: usize, cpu: usize) -> usize {
+    class * kbuild_config::NR_CPUS + cpu
+}
+
+fn check_pool_slot(
+    slot: usize,
+    pool: Option<crate::builtinpool::BuiltinPoolBinding>,
+    now_ns: u64,
+    threshold_ns: u64,
+) -> bool {
+    let Some(pool) = pool else {
+        STUCK_SINCE_NS[slot].store(0, Ordering::Release);
+        return true;
+    };
+    let Some(snapshot) = pool.try_snapshot() else {
+        STUCK_SINCE_NS[slot].store(0, Ordering::Release);
+        return true;
+    };
+    let has_progress_context = snapshot.nr_creating != 0
+        || snapshot.nr_preparing != 0
+        || snapshot.nr_claiming != 0
+        || snapshot.nr_running_state != 0;
+    let suspicious = snapshot.runnable != 0 && !has_progress_context;
+    if !suspicious {
+        STUCK_SINCE_NS[slot].store(0, Ordering::Release);
+        return true;
+    }
+
+    let since = STUCK_SINCE_NS[slot].load(Ordering::Acquire);
+    if since == 0 {
+        STUCK_SINCE_NS[slot].store(now_ns, Ordering::Release);
+        return true;
+    }
+    now_ns.saturating_sub(since) < threshold_ns
 }

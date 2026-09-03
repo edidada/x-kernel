@@ -5,12 +5,25 @@
 //! Per-CPU task-context system worker pools.
 
 use kcpu_id_map::LogicalCpuId;
-use kworkerpool::{WorkerId, WorkerPoolPlacement, WorkerPoolPolicy};
-
-use super::{
-    init::{BuiltinPoolInitError, SystemWorkerPoolInitResult, init_system_pool},
-    pool::{BUILTIN_WORKERS_PER_POOL, BuiltinKtaskWorkerPool, BuiltinPoolBinding},
+use kworkerpool::{
+    WorkerId, WorkerPoolPlacement, WorkerPoolPolicy, manager_name, start_manager_task,
 };
+
+use super::pool::{
+    BUILTIN_WORKERS_PER_POOL, BuiltinKtaskWorkerPool, BuiltinPoolBinding, BuiltinPoolInitError,
+};
+use crate::runtime::BuiltinWorkerRuntime;
+
+const NORMAL_POOL_NAME: &str = "normal";
+
+/// Result of built-in system worker-pool initialization for one CPU.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SystemWorkerPoolInitResult {
+    /// Number of initial worker threads successfully started.
+    pub initial_workers_started: usize,
+    /// Whether the per-CPU manager thread was started.
+    pub manager_started: bool,
+}
 
 /// One task-context system worker pool.
 pub(crate) struct SystemWorkerPool {
@@ -38,6 +51,23 @@ impl SystemWorkerPool {
     pub(crate) fn configure_empty(&self, cpu_id: LogicalCpuId) -> bool {
         self.runtime
             .configure_empty(WorkerPoolPlacement::bound_to(cpu_id), system_pool_policy())
+    }
+
+    pub(crate) fn init_runtime(&'static self, cpu_id: LogicalCpuId) -> SystemWorkerPoolInitResult {
+        let mut result = SystemWorkerPoolInitResult::default();
+        let runtime = self.runtime();
+
+        if !runtime.register_worker_runtime(NORMAL_POOL_NAME, BuiltinWorkerRuntime::new) {
+            return result;
+        }
+        result.initial_workers_started = runtime.start_initial_worker_tasks();
+
+        result.manager_started = start_manager_task(
+            WorkerPoolPlacement::bound_to(cpu_id),
+            manager_task_name(cpu_id),
+            [runtime],
+        );
+        result
     }
 
     pub(crate) const fn runtime(&self) -> &BuiltinKtaskWorkerPool {
@@ -84,7 +114,7 @@ impl SystemWorkerPools {
         pool.configure_empty(cpu_id)
             .then_some(())
             .ok_or(BuiltinPoolInitError::ConfigureFailed)?;
-        Ok(init_system_pool(pool, cpu_id))
+        Ok(pool.init_runtime(cpu_id))
     }
 
     /// Returns whether the system worker pool exists with the expected id.
@@ -114,4 +144,8 @@ pub(crate) const fn system_worker_pools() -> &'static SystemWorkerPools {
 
 pub(crate) const fn system_pool_policy() -> WorkerPoolPolicy {
     WorkerPoolPolicy::threaded(1, BUILTIN_WORKERS_PER_POOL)
+}
+
+fn manager_task_name(cpu_id: LogicalCpuId) -> alloc::string::String {
+    manager_name(WorkerPoolPlacement::bound_to(cpu_id), NORMAL_POOL_NAME)
 }

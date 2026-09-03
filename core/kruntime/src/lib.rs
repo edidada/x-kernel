@@ -570,9 +570,10 @@ fn init_interrupt() {
     khal::pmu::register_overflow_dispatch();
 
     ktask::init_softirqd_current_cpu();
-    if kwork::raw::init_system_workqueue_worker_pools_for_cpu(khal::percpu::this_cpu_id()).is_none()
+    if let Err(error) =
+        kwork::raw::init_system_workqueue_worker_pools_for_cpu(khal::percpu::this_cpu_id())
     {
-        warn!("failed to initialize built-in workqueue worker pools");
+        warn!("failed to initialize built-in workqueue worker pools: {error:?}");
     }
     // Enable IRQs before starting app
     karch::enable_local_irq();

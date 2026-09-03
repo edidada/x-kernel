@@ -7,11 +7,7 @@
 use kcpu_id_map::LogicalCpuId;
 use kworkerpool::{BottomHalfWorkerPool as KworkerBottomHalfWorkerPool, WorkerPoolPlacement};
 
-use super::{
-    init::{BuiltinPoolInitError, init_bh_pool},
-    kind::BUILTIN_POOL_ENTRY_CAP,
-    pool::BuiltinPoolBinding,
-};
+use super::pool::{BUILTIN_POOL_ENTRY_CAP, BuiltinPoolBinding, BuiltinPoolInitError};
 
 /// Bottom-half worker pool used by built-in pools.
 pub(crate) type BuiltinBottomHalfWorkerPool =
@@ -48,6 +44,10 @@ impl BottomHalfWorkerPool {
 
     pub(crate) fn install_drain_slot(&self) -> bool {
         self.pool.install_drain_slot()
+    }
+
+    pub(crate) fn init_drain_slot(&self) {
+        let _ = self.install_drain_slot();
     }
 }
 
@@ -94,7 +94,7 @@ impl BottomHalfWorkerPools {
         pool.configure_empty(cpu_id)
             .then_some(())
             .ok_or(BuiltinPoolInitError::ConfigureFailed)?;
-        init_bh_pool(pool);
+        pool.init_drain_slot();
         Ok(())
     }
 

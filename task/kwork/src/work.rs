@@ -18,7 +18,7 @@ use kspin::SpinNoIrq;
 use ktime_types::TimeSpan;
 
 use crate::{
-    builtinpool::{self, BuiltinPoolBinding, BuiltinPoolKind},
+    builtinpool::{self, BuiltinPoolBinding},
     builtinwq::{
         self, BottomHalfWorkQueueKind, SystemWorkQueueKind, system_bh_highpri_wq, system_bh_wq,
         system_percpu_wq, system_wq,
@@ -339,7 +339,7 @@ impl WorkQueue {
         let pool = match self.backend {
             WorkQueueBackend::System => builtinpool::system_pool_for_cpu(cpu_id),
             WorkQueueBackend::BottomHalf(_) => {
-                builtinpool::builtin_pool_for_kind_cpu(BuiltinPoolKind::Bh, cpu_id)
+                builtinpool::bottom_half_pool_binding_for_cpu(cpu_id)
             }
         };
         let Some(pool) = pool else {
@@ -537,12 +537,11 @@ impl WorkQueue {
             let Some(binding) = self.core_binding(cpu_id) else {
                 return Err(crate::builtinpool::BuiltinPoolEnqueueError::InvalidTransition);
             };
-            let (pool_kind, bottom_half_kind) = match self.backend {
-                WorkQueueBackend::System => (BuiltinPoolKind::Normal, None),
-                WorkQueueBackend::BottomHalf(kind) => (BuiltinPoolKind::Bh, Some(kind)),
+            let bottom_half_kind = match self.backend {
+                WorkQueueBackend::System => None,
+                WorkQueueBackend::BottomHalf(kind) => Some(kind),
             };
             return apply_promote_inactive_for_queue(
-                pool_kind,
                 bottom_half_kind,
                 cpu_id,
                 binding,
@@ -564,7 +563,7 @@ impl WorkQueue {
         match self.backend {
             WorkQueueBackend::System => builtinpool::system_pool_for_cpu(cpu_id),
             WorkQueueBackend::BottomHalf(_) => {
-                builtinpool::builtin_pool_for_kind_cpu(BuiltinPoolKind::Bh, cpu_id)
+                builtinpool::bottom_half_pool_binding_for_cpu(cpu_id)
             }
         }
     }
@@ -1200,7 +1199,7 @@ fn register_builtin_workqueues() {
 fn current_normal_worker_context() -> Option<kworkerpool::WorkerPoolExecutionContext> {
     let context = ktask::current_execution_context()?;
     let context = kworkerpool::decode_task_context(context)?;
-    builtinpool::is_builtin_pool_ready(BuiltinPoolKind::Normal, context.cpu_id).then_some(context)
+    builtinpool::is_system_pool_ready(context.cpu_id).then_some(context)
 }
 
 pub(crate) fn scheduled_work_by_key(key: kworkqueue::WorkKey) -> Option<ScheduledWork> {
@@ -1226,10 +1225,32 @@ pub(crate) fn scheduled_work_by_key(key: kworkqueue::WorkKey) -> Option<Schedule
     found
 }
 
-pub(crate) fn binding_for_executor_entry(
-    pool_kind: BuiltinPoolKind,
+pub(crate) fn binding_for_system_executor_entry(
     cpu_id: LogicalCpuId,
     entry: kworkqueue::ExecutorEntry,
+) -> Option<ExecutorBinding> {
+    binding_for_executor_entry(cpu_id, entry, |backend| match backend {
+        WorkQueueBackend::System => Some(None),
+        WorkQueueBackend::BottomHalf(_) => None,
+    })
+}
+
+pub(crate) fn binding_for_bottom_half_executor_entry(
+    cpu_id: LogicalCpuId,
+    entry: kworkqueue::ExecutorEntry,
+) -> Option<ExecutorBinding> {
+    binding_for_executor_entry(cpu_id, entry, |backend| match backend {
+        WorkQueueBackend::System => None,
+        WorkQueueBackend::BottomHalf(kind) => Some(Some(kind)),
+    })
+}
+
+fn binding_for_executor_entry(
+    cpu_id: LogicalCpuId,
+    entry: kworkqueue::ExecutorEntry,
+    bottom_half_kind_for_backend: impl FnOnce(
+        WorkQueueBackend,
+    ) -> Option<Option<BottomHalfWorkQueueKind>>,
 ) -> Option<ExecutorBinding> {
     register_builtin_workqueues();
     let registered = {
@@ -1246,11 +1267,7 @@ pub(crate) fn binding_for_executor_entry(
     }
     let queue_ref = registered.queue;
     let queue = queue_ref.queue();
-    let bottom_half_kind = match queue.backend {
-        WorkQueueBackend::System if pool_kind == BuiltinPoolKind::Normal => None,
-        WorkQueueBackend::BottomHalf(kind) if pool_kind == BuiltinPoolKind::Bh => Some(kind),
-        _ => return None,
-    };
+    let bottom_half_kind = bottom_half_kind_for_backend(queue.backend)?;
     let binding = queue.core_binding(registered.cpu_id)?;
     (binding.binding_id() == entry.binding && binding.owner() == entry.owner).then_some(
         ExecutorBinding {
@@ -1268,14 +1285,13 @@ pub(crate) struct ExecutorBinding {
 }
 
 pub(crate) fn apply_promote_inactive_for_queue(
-    pool_kind: BuiltinPoolKind,
     bottom_half_kind: Option<BottomHalfWorkQueueKind>,
     cpu_id: LogicalCpuId,
     binding: CoreQueueBinding<'_>,
     owner: kworkqueue::EntryOwner,
     budget: usize,
 ) -> Result<(), crate::builtinpool::BuiltinPoolEnqueueError> {
-    apply_promote_inactive(pool_kind, cpu_id, binding, owner, budget)?;
+    apply_promote_inactive(bottom_half_kind, cpu_id, binding, owner, budget)?;
     if let Some(kind) = bottom_half_kind {
         crate::runtime::raise_bottom_half_workqueue_on(cpu_id, kind);
     }
@@ -1283,13 +1299,17 @@ pub(crate) fn apply_promote_inactive_for_queue(
 }
 
 pub(crate) fn apply_promote_inactive(
-    pool_kind: BuiltinPoolKind,
+    bottom_half_kind: Option<BottomHalfWorkQueueKind>,
     cpu_id: LogicalCpuId,
     binding: CoreQueueBinding<'_>,
     owner: kworkqueue::EntryOwner,
     budget: usize,
 ) -> Result<(), crate::builtinpool::BuiltinPoolEnqueueError> {
-    let Some(pool) = builtinpool::builtin_pool_for_kind_cpu(pool_kind, cpu_id) else {
+    let pool = match bottom_half_kind {
+        Some(_) => builtinpool::bottom_half_pool_binding_for_cpu(cpu_id),
+        None => builtinpool::system_pool_for_cpu(cpu_id),
+    };
+    let Some(pool) = pool else {
         return Err(crate::builtinpool::BuiltinPoolEnqueueError::InvalidTransition);
     };
 
@@ -1305,12 +1325,16 @@ pub(crate) fn apply_promote_inactive(
             && let Some(work) = scheduled_work_by_key(work_key)
             && binding.commit_promoted(entry, work.core())
         {
-            crate::builtinpool::handle_actions(cpu_id, actions);
+            if bottom_half_kind.is_none() {
+                crate::builtinpool::handle_actions(cpu_id, actions);
+            }
         } else {
             // The pool entry became stale between queue accounting and backend
             // promotion. Leave it runnable; the normal claim path will discard
             // it without charging queue active accounting.
-            crate::builtinpool::handle_actions(cpu_id, actions);
+            if bottom_half_kind.is_none() {
+                crate::builtinpool::handle_actions(cpu_id, actions);
+            }
         }
     }
     Ok(())
@@ -1533,7 +1557,7 @@ fn select_balanced_normal_pool_cpu() -> LogicalCpuId {
     let start = SYSTEM_WQ_BALANCE_CURSOR.fetch_add(1, Ordering::Relaxed) % kbuild_config::NR_CPUS;
     for offset in 0..kbuild_config::NR_CPUS {
         let cpu_id = LogicalCpuId::new((start + offset) % kbuild_config::NR_CPUS);
-        if builtinpool::is_builtin_pool_ready(BuiltinPoolKind::Normal, cpu_id) {
+        if builtinpool::is_system_pool_ready(cpu_id) {
             return cpu_id;
         }
     }
@@ -1557,11 +1581,11 @@ mod tests {
     const RESULT_UNEXPECTED: usize = 2;
 
     fn ensure_normal_pool_ready(cpu_id: LogicalCpuId) {
-        if builtinpool::is_builtin_pool_ready(BuiltinPoolKind::Normal, cpu_id) {
+        if builtinpool::is_system_pool_ready(cpu_id) {
             return;
         }
         if init_system_workqueue_worker_pools_for_cpu(cpu_id).is_err()
-            || !builtinpool::is_builtin_pool_ready(BuiltinPoolKind::Normal, cpu_id)
+            || !builtinpool::is_system_pool_ready(cpu_id)
         {
             panic!("failed to initialize normal workqueue pool for test");
         }
@@ -1571,7 +1595,7 @@ mod tests {
         let mut cpus = Vec::new();
         for cpu in 0..kbuild_config::NR_CPUS {
             let cpu_id = LogicalCpuId::new(cpu);
-            if builtinpool::is_builtin_pool_ready(BuiltinPoolKind::Normal, cpu_id) {
+            if builtinpool::is_system_pool_ready(cpu_id) {
                 cpus.push(cpu_id);
             }
         }

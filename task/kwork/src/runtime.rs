@@ -24,10 +24,11 @@ use log::{debug, warn};
 
 use crate::{
     ScheduledWork,
-    builtinpool::{BuiltinBottomHalfPool, BuiltinKtaskWorkerPool, BuiltinPoolKind},
+    builtinpool::{BuiltinBottomHalfPool, BuiltinKtaskWorkerPool},
     builtinwq::BottomHalfWorkQueueKind,
     work::{
-        WorkQueueRef, binding_for_executor_entry, release_scheduled_work, scheduled_work_by_key,
+        WorkQueueRef, binding_for_bottom_half_executor_entry, binding_for_system_executor_entry,
+        release_scheduled_work, scheduled_work_by_key,
     },
 };
 
@@ -181,7 +182,7 @@ impl RunnableClaimer for BuiltinWorkerRuntime {
         token: WorkerExecutionToken,
         entry: PoolEntry,
     ) -> RunnableClaim<Self::Accepted, Self::Stale> {
-        claim_builtin_pool_entry(BuiltinPoolKind::Normal, self.cpu_id, worker, token, entry)
+        claim_system_pool_entry(self.cpu_id, worker, token, entry)
     }
 
     fn record_stale(&mut self, stale: Self::Stale) {
@@ -213,21 +214,54 @@ impl WorkerRuntime<&'static BuiltinKtaskWorkerPool> for BuiltinWorkerRuntime {
         _token: WorkerExecutionToken,
         work: Self::Accepted,
     ) {
-        run_claimed_builtin_work(BuiltinPoolKind::Normal, self.cpu_id, work);
+        run_claimed_builtin_work(self.cpu_id, work);
     }
 }
 
-fn claim_builtin_pool_entry(
-    pool_kind: BuiltinPoolKind,
+fn claim_system_pool_entry(
     cpu_id: LogicalCpuId,
     worker: WorkerId,
     token: WorkerExecutionToken,
     entry: PoolEntry,
 ) -> RunnableClaim<ClaimedBuiltinWork, BuiltinClaimStale> {
+    claim_builtin_pool_entry(
+        cpu_id,
+        worker,
+        token,
+        entry,
+        binding_for_system_executor_entry,
+    )
+}
+
+fn claim_bottom_half_pool_entry(
+    cpu_id: LogicalCpuId,
+    worker: WorkerId,
+    token: WorkerExecutionToken,
+    entry: PoolEntry,
+) -> RunnableClaim<ClaimedBuiltinWork, BuiltinClaimStale> {
+    claim_builtin_pool_entry(
+        cpu_id,
+        worker,
+        token,
+        entry,
+        binding_for_bottom_half_executor_entry,
+    )
+}
+
+fn claim_builtin_pool_entry(
+    cpu_id: LogicalCpuId,
+    worker: WorkerId,
+    token: WorkerExecutionToken,
+    entry: PoolEntry,
+    binding_for_entry: fn(
+        LogicalCpuId,
+        kworkqueue::ExecutorEntry,
+    ) -> Option<crate::work::ExecutorBinding>,
+) -> RunnableClaim<ClaimedBuiltinWork, BuiltinClaimStale> {
     let Some(entry) = crate::builtinpool::executor_entry(entry) else {
         return RunnableClaim::Stale(BuiltinClaimStale::InvalidEntry);
     };
-    let Some(executor_binding) = binding_for_executor_entry(pool_kind, cpu_id, entry) else {
+    let Some(executor_binding) = binding_for_entry(cpu_id, entry) else {
         return RunnableClaim::Stale(BuiltinClaimStale::UnknownOwner);
     };
     let queue = executor_binding.queue;
@@ -254,11 +288,7 @@ fn claim_builtin_pool_entry(
     }
 }
 
-fn run_claimed_builtin_work(
-    pool_kind: BuiltinPoolKind,
-    cpu_id: LogicalCpuId,
-    claimed: ClaimedBuiltinWork,
-) {
+fn run_claimed_builtin_work(cpu_id: LogicalCpuId, claimed: ClaimedBuiltinWork) {
     claimed.work.run();
     let Some(binding) = claimed.queue.queue().core_binding(claimed.cpu_id) else {
         warn!("built-in workqueue finish lost its queue binding");
@@ -277,7 +307,7 @@ fn run_claimed_builtin_work(
             claimed.work.notify_state_change();
             claimed.queue.queue().notify_state_change();
             if let Some(op) = requeue_op
-                && let Some(pool) = crate::builtinpool::builtin_pool_for_kind_cpu(pool_kind, cpu_id)
+                && let Some(pool) = pool_for_completed_work(claimed.bottom_half_kind, cpu_id)
             {
                 let _ = pool.apply_executor_op(op);
                 if let Some(kind) = claimed.queue.bottom_half_kind() {
@@ -285,12 +315,11 @@ fn run_claimed_builtin_work(
                 }
             }
             if let Some(op) = promote_op
-                && let Some(pool) = crate::builtinpool::builtin_pool_for_kind_cpu(pool_kind, cpu_id)
+                && let Some(pool) = pool_for_completed_work(claimed.bottom_half_kind, cpu_id)
             {
                 match op {
                     kworkqueue::ExecutorOp::PromoteInactive { owner, budget } => {
                         let _ = crate::work::apply_promote_inactive_for_queue(
-                            pool_kind,
                             claimed.bottom_half_kind,
                             cpu_id,
                             binding,
@@ -307,6 +336,16 @@ fn run_claimed_builtin_work(
         kworkqueue::FinishResult::Stale => {
             warn!("built-in workqueue finish rejected a claimed work item");
         }
+    }
+}
+
+fn pool_for_completed_work(
+    bottom_half_kind: Option<BottomHalfWorkQueueKind>,
+    cpu_id: LogicalCpuId,
+) -> Option<crate::builtinpool::BuiltinPoolBinding> {
+    match bottom_half_kind {
+        Some(_) => crate::builtinpool::bottom_half_pool_binding_for_cpu(cpu_id),
+        None => crate::builtinpool::system_pool_for_cpu(cpu_id),
     }
 }
 
@@ -451,13 +490,7 @@ fn run_one_bottom_half_pool_work(
         return false;
     };
 
-    match claim_builtin_pool_entry(
-        BuiltinPoolKind::Bh,
-        pool.cpu_id(),
-        worker,
-        candidate.token,
-        candidate.entry,
-    ) {
+    match claim_bottom_half_pool_entry(pool.cpu_id(), worker, candidate.token, candidate.entry) {
         RunnableClaim::Run(claimed) => {
             let Ok(()) = pool
                 .pool()
@@ -467,7 +500,7 @@ fn run_one_bottom_half_pool_work(
                 return false;
             };
             let _ = kind;
-            run_claimed_builtin_work(BuiltinPoolKind::Bh, pool.cpu_id(), claimed);
+            run_claimed_builtin_work(pool.cpu_id(), claimed);
             if let Ok(()) = pool
                 .pool()
                 .drain_finished(candidate.token, ktask::monotonic_time())
