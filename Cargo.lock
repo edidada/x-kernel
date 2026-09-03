@@ -2125,6 +2125,7 @@ dependencies = [
  "bitflags 2.13.1",
  "kspin 0.2.0-rc1",
  "ksync",
+ "ktask",
  "unittest",
 ]
 
