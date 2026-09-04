@@ -12,7 +12,7 @@ use ksync::Mutex;
 use ktime_types::MonotonicInstant;
 
 use crate::{
-    buf::{PacketBuf, PacketOwner},
+    buf::PacketBuf,
     device::{
         IF_OPER_DOWN, IF_OPER_UNKNOWN, LINK_FLAG_LOOPBACK, LINK_FLAG_LOWER_UP, LINK_FLAG_RUNNING,
         LINK_FLAG_UP, LOOPBACK_MAX_MTU, LinkKind, LinkSendSnapshot, LinkSnapshot, NetDevice,
@@ -154,7 +154,6 @@ impl NetDevice for LoopbackDevice {
             return false;
         }
         packet.set_ifindex(ifindex);
-        packet.set_owner(PacketOwner::Loopback);
         let Some(packet) = net_rx::prepare_for_enqueue(packet) else {
             // Malformed IPv4 UDP is dropped in task context. Linux
             // `loopback_xmit` still returns `NETDEV_TX_OK` after `NET_RX_DROP`.
@@ -181,7 +180,7 @@ impl NetDevice for LoopbackDevice {
             return false;
         }
         self.rx_ifindex = Some(ifindex);
-        // Softirq not registered (or budget exhausted): finish stamped UDP
+        // Softirq not registered or budget exhausted: finish prepared UDP
         // in task context so sendto still completes before recvfrom waits.
         net_rx::drain_pending();
 
@@ -260,8 +259,7 @@ mod tests {
     fn loopback_rechecks_current_mtu_before_enqueue() {
         let mut device = LoopbackDevice::new();
         device.set_mtu(IPV4_MIN_MTU).unwrap();
-        let packet =
-            PacketBuf::from_ip_packet_vec(0, vec![0; IPV4_MIN_MTU + 1], PacketOwner::Ipv4Stack);
+        let packet = PacketBuf::from_ip_packet_vec(0, vec![0; IPV4_MIN_MTU + 1]);
         let queued_before = net_rx::queued_len();
 
         assert!(!device.send_ip_packet(

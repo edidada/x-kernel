@@ -22,7 +22,7 @@ pub(crate) use crate::netlink::{
     RTPROT_KERNEL as ROUTE_PROTOCOL_KERNEL,
 };
 use crate::{
-    buf::{PacketBuf, PacketOwner},
+    buf::PacketBuf,
     consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
     device::{
         LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice,
@@ -421,7 +421,7 @@ impl Router {
     ) -> KResult {
         let packets = self.fragment_ipv4_packet_for_output(packet)?;
         for packet in packets {
-            let buf = PacketBuf::from_ip_packet_vec(0, packet, PacketOwner::Ipv4Stack);
+            let buf = PacketBuf::from_ip_packet_vec(0, packet);
             // RX-ready hint for the poller, not send success. This path is
             // not the poller; a dropped loopback packet is still a successful
             // xmit, as documented above.
@@ -1068,11 +1068,10 @@ impl Router {
         let mut work_done = 0;
         let mut poll_next = false;
         while work_done < budget {
-            let Some(mut packet) = self.pop_tx_packet() else {
+            let Some(packet) = self.pop_tx_packet() else {
                 break;
             };
             work_done += 1;
-            packet.set_owner(PacketOwner::DeviceTx);
             let Some(ip_packet) = packet.network_packet() else {
                 continue;
             };
@@ -1271,7 +1270,7 @@ fn same_route_rule(lhs: Rule, rhs: Rule) -> bool {
 }
 
 fn tx_packet_buf(packet: Vec<u8>) -> PacketBuf {
-    PacketBuf::from_ip_packet_vec(0, packet, PacketOwner::Ipv4Stack)
+    PacketBuf::from_ip_packet_vec(0, packet)
 }
 
 #[cfg(unittest)]
@@ -1291,7 +1290,7 @@ mod tests {
     fn router_with_ready_loopback_packet() -> Router {
         let mut router = Router::new();
         let loopback = router.add_device(Box::new(LoopbackDevice::new()));
-        let packet = PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::Ipv4Stack);
+        let packet = PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20]);
         let _ = router.devices[loopback].send_ip_packet(
             1,
             IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)),

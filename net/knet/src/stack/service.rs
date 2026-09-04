@@ -1109,7 +1109,6 @@ mod tests {
 
     use super::*;
     use crate::{
-        buf::PacketOwner,
         device::LoopbackDevice,
         ip::{Ipv4Address, Ipv4Cidr},
         router::{Ipv4AddrEntry, ROUTE_SCOPE_HOST},
@@ -1265,8 +1264,8 @@ mod tests {
         let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
         let mut iface = Interface::new(config, &mut router, current);
         let mut packets = Vec::from([
-            PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::DeviceRx),
-            PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::DeviceRx),
+            PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20]),
+            PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20]),
         ]);
         router.enqueue_ingress_packets(&mut packets);
         let mut sockets = SocketSet::new(vec![]);

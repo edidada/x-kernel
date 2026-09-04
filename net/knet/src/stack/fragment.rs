@@ -21,7 +21,7 @@ use alloc::{
 use ktime_types::{MonotonicInstant, TimeSpan};
 
 use super::ipv4::{self, Ipv4Header};
-use crate::buf::{PacketBuf, PacketOwner, PacketType};
+use crate::buf::{PacketBuf, PacketType};
 
 const IPV4_REASSEMBLY_TIMEOUT: TimeSpan = TimeSpan::from_secs(30);
 const IPV4_REASSEMBLY_HIGH_BYTES: usize = 4 * 1024 * 1024;
@@ -367,7 +367,6 @@ fn build_reassembled_packet(ifindex: i32, queue: Ipv4ReassemblyQueue) -> Ipv4Rea
     Ipv4ReassemblyResult::Complete(PacketBuf::from_ip_packet_vec_with_type(
         ifindex,
         packet,
-        PacketOwner::Ipv4Stack,
         queue.packet_type,
     ))
 }
@@ -406,7 +405,7 @@ mod tests {
     use unittest::def_test;
 
     use super::*;
-    use crate::{buf::PacketOwner, ipv4};
+    use crate::ipv4;
 
     fn fragment(offset: usize, more_fragments: bool, payload: &[u8]) -> (PacketBuf, Ipv4Header) {
         fragment_with_id(0x1234, offset, more_fragments, payload)
@@ -435,7 +434,7 @@ mod tests {
 
         let mut bytes: Vec<u8> = header.to_bytes().into_iter().collect();
         bytes.extend_from_slice(payload);
-        let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
+        let mut packet = PacketBuf::from_ip_packet_vec(1, bytes);
         let header = Ipv4Header::validate_input_packet(&mut packet).unwrap();
         (packet, header)
     }

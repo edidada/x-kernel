@@ -13,7 +13,7 @@ use etherparse::{
 };
 
 use crate::{
-    buf::{ChecksumState, PacketBuf, PacketType},
+    buf::{PacketBuf, PacketType},
     ip::Ipv4Address,
 };
 
@@ -231,12 +231,6 @@ impl Ipv4Header {
         packet
             .truncate_network_packet(self.total_len)
             .ok_or(Ipv4Error::Malformed)?;
-        let transport_offset = packet
-            .network_offset()
-            .and_then(|offset| offset.checked_add(self.header_len))
-            .ok_or(Ipv4Error::Malformed)?;
-        packet.set_transport_offset(transport_offset);
-        packet.set_checksum_state(ChecksumState::Verified);
         Ok(self)
     }
 }
@@ -546,7 +540,6 @@ mod tests {
     use unittest::def_test;
 
     use super::*;
-    use crate::buf::PacketOwner;
 
     fn ipv4_packet(protocol: u8, payload: &[u8]) -> Vec<u8> {
         let mut packet = vec![0u8; IPV4_MIN_HEADER_LEN + payload.len()];
@@ -577,19 +570,17 @@ mod tests {
 
     #[def_test]
     fn test_validate_input_packet_accepts_valid_checksum() {
-        let mut packet = PacketBuf::from_ip_packet_vec(
-            1,
-            ipv4_packet(PROTOCOL_UDP, &[1, 2]),
-            PacketOwner::DeviceRx,
-        );
+        let mut packet = PacketBuf::from_ip_packet_vec(1, ipv4_packet(PROTOCOL_UDP, &[1, 2]));
 
         let header = Ipv4Header::validate_input_packet(&mut packet).unwrap();
 
         assert_eq!(header.protocol(), PROTOCOL_UDP);
         assert_eq!(header.header_len(), IPV4_MIN_HEADER_LEN);
         assert_eq!(header.total_len(), IPV4_MIN_HEADER_LEN + 2);
-        assert_eq!(packet.transport_offset(), Some(IPV4_MIN_HEADER_LEN));
-        assert_eq!(packet.checksum_state(), ChecksumState::Verified);
+        assert_eq!(
+            packet.network_packet().unwrap().len(),
+            IPV4_MIN_HEADER_LEN + 2
+        );
     }
 
     #[def_test]
@@ -599,7 +590,7 @@ mod tests {
         header.more_fragments = true;
         header.header_checksum = header.calc_header_checksum();
         bytes[..IPV4_MIN_HEADER_LEN].copy_from_slice(&header.to_bytes());
-        let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
+        let mut packet = PacketBuf::from_ip_packet_vec(1, bytes);
 
         let header = Ipv4Header::validate_input_packet(&mut packet).unwrap();
 
@@ -610,7 +601,7 @@ mod tests {
     fn test_validate_input_packet_rejects_bad_checksum() {
         let mut bytes = ipv4_packet(PROTOCOL_TCP, &[]);
         bytes[10] ^= 0xff;
-        let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
+        let mut packet = PacketBuf::from_ip_packet_vec(1, bytes);
 
         assert_eq!(
             Ipv4Header::validate_input_packet(&mut packet),
@@ -623,7 +614,7 @@ mod tests {
         let mut bytes = ipv4_packet(PROTOCOL_ICMP, &[]);
         bytes[10] = 0;
         bytes[11] = 0;
-        let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceTx);
+        let mut packet = PacketBuf::from_ip_packet_vec(1, bytes);
 
         Ipv4Header::prepare_output_packet(&mut packet).unwrap();
 
