@@ -5,13 +5,13 @@
 `io/watchdog` 提供 X-Kernel 的软锁（softlockup）与硬锁（hardlockup）检测：
 
 - 软锁：每 CPU watchdog 任务周期性更新时间戳，定时器回调检查时间戳是否过期；
-- 硬锁：依赖 NMI（`nmi` feature）周期检查本 CPU 定时器中断计数是否仍在前进；检测失败后触发全局 rendezvous、收集快照并 panic。
+- 硬锁：依赖 NMI（`nmi` feature）周期检查本 CPU 定时器中断计数是否仍在前进；检测失败后用专用 NMI SGI 主动唤醒其他 CPU，执行有界全局 rendezvous、收集快照并 panic。
 
-依赖：`khal`（NMI / percpu / 时间）、`ktask`（任务、定时器回调、快照）、`ktime_types`。
+依赖：`khal`（NMI / percpu / 时间）、`kirq`（专用 NMI SGI 注册与每 CPU 使能）、`ktask`（任务、定时器回调、快照）、`ktime_types`。
 
 ## 背景
 
-中断被长时间屏蔽或任务长时间不调度时，系统可能处于不可响应状态。软锁检测依赖调度与定时器本身（可能受影响）；硬锁检测依赖独立于普通 IRQ 的 NMI 源，能在普通中断完全停摆时仍然触发。X-Kernel 以 PMU 周期计数器作为 NMI 源（经 `kplat::NmiPeriodic`），本 crate 是 NMI 的唯一消费方。
+中断被长时间屏蔽或任务长时间不调度时，系统可能处于不可响应状态。软锁检测依赖调度与定时器本身（可能受影响）；硬锁检测依赖独立于普通 IRQ 的 NMI 源，能在普通中断完全停摆时仍然触发。X-Kernel 以 PMU 周期计数器作为 NMI 源（经 `kplat::NmiPeriodic`）。KVM 可在 vCPU 执行 WFI 时停止虚拟 PMU 计数，因此失败 CPU 不能只等其他 CPU 的下一次本地 PMU overflow；本 crate 另用专用 SGI 主动请求 NMI 快照，并保留 10s 超时降级。
 
 ## 范围
 
@@ -34,9 +34,12 @@
         └────────────────────────┴────────────────┤
                         检测失败                    │
                              ▼                    ▼
-                      软锁：log + dump        rendezvous（全局）
-                                              cause CPU 收集全部
-                                              CPU 快照 → panic
+                      软锁：log + dump       cause 发布 Triggered
+                                                    │
+                                  专用 SGI-NMI ─────┼──▶ peer CPU/WFI vCPU
+                                                    ▼
+                                      最多等待 10s，按 arrived_mask
+                                      dump；missing CPU 单独报告 → panic
 ```
 
 ## 调用约束 / 执行上下文
@@ -44,8 +47,9 @@
 | 入口 | 执行上下文 | 约束 |
 |------|------------|------|
 | `init_primary` / `init_secondary` | 主核 / 从核启动 | 每 CPU 一次 |
-| `init_nmi_watchdog` | 启动期（NMI feature） | 检查 `khal::nmi::mode()`，`None` 时记录并禁用 hardlockup |
-| NMI 回调（`enable_periodic_nmi` 的 handler） | NMI 上下文 | 只允许 NMI 安全操作：原子、快照、kprint；禁止普通 IRQ 自旋锁 |
+| `register_nmi_rendezvous_ipi` | 主核启动期 | 全局只注册一次 SGI handler，发生在从核越过启动屏障之前 |
+| `init_nmi_watchdog` | 每 CPU 启动期（NMI feature） | 提升并使能本 CPU 的专用 SGI；检查 `mode()`，`None` 时禁用 hardlockup |
+| PMU / SGI NMI 回调 | NMI 上下文 | 只允许 NMI 安全操作：原子、快照、原子打印与无锁 SGI 寄存器写；禁止普通 IRQ 自旋锁 |
 | 定时器回调（`timer_tick` / 软锁检查） | 定时器中断，IRQ 关闭 | 每 CPU 原子访问 |
 | watchdog 任务 | 每 CPU 固定核任务 | 只写软锁时间戳、睡眠 4s |
 
@@ -59,21 +63,23 @@
 
 ```text
 Idle ──try_trigger（首个失败 CPU 原子迁移）──▶ Triggered
-Triggered ──各 CPU NMI 中 mark_arrived──▶（等待 all_arrived_mask）
+Triggered ──cause 广播专用 NMI SGI──▶ peer CPU（可从 WFI 唤醒）
+Triggered ──各 CPU NMI 中 publish_arrived──▶（全部到达或等待 10s）
 Triggered ──cause CPU 收集/打印快照后 mark_dump_done──▶ DumpDone
 DumpDone ──cause CPU panic（系统停止）──▶ 终态
 ```
 
-`reset()` 提供返回 Idle 的路径（注释明确：其他 CPU 可能仍在 NMI 自旋，使用需谨慎）。
+`reset()` 提供返回 Idle 的路径；只能在 `mark_dump_done()` 且所有 responder 已观察释放之后使用。
 
 ## 算法流程
 
 ### NMI hardlockup 检查（每次 NMI）
 
 1. `check_watchdog_tasks()`：遍历本 CPU 队列（`HardLockupDetection`、`MutexDeadlock`），失败则返回任务名；
-2. 有失败：`ktask::snapshot::nmi_begin()` 成功则 `rv::try_trigger()`（CAS Idle→Triggered，成功者成为 cause CPU）；
-3. 所有 CPU 在各自 NMI 中 `mark_arrived` 并 `nmi_collect_local()`；
-4. cause CPU `wait_all_arrived_strong()` 后打印失败信息、`nmi_dump_all`、`mark_dump_done`、panic；其余 CPU 自旋等待 `is_dump_done`。
+2. 有失败：`ktask::snapshot::nmi_begin()` 成功则 `rv::try_trigger()`（CAS Idle→Triggered，成功者成为 cause CPU），随后经 `raise_nmi_all_but_self(WATCHDOG_NMI_IPI_IRQ)` 主动请求其他 CPU 进入 NMI；
+3. 其他 CPU 可由专用 SGI 或自身周期 PMU NMI 进入 `handle_nmi_rendezvous`，先执行 `nmi_collect_local()`，再以 Release 语义 `publish_arrived`；cause 的 Acquire 读取因此不会看到未完成的 trap frame；
+4. cause CPU 先打印首条故障信息，再调用 `wait_all_arrived(expected, 10s)`；全部到达则立即继续，否则超时打印 `arrived_mask` / `missing_mask`；
+5. cause 只把实际 `arrived` 位图交给 `nmi_dump_all`（未响应 CPU 由 snapshot 标记 `NOT RESPONDING`），然后 `mark_dump_done`、panic；其余 responder 自旋等待 `is_dump_done`。终态不调用 `nmi_finish()` 清槽，因为超时边界上可能仍有已观察 Triggered、尚未发布 arrived 的迟到 writer；panic/power-off 前保持 session active 可避免并发清理竞态。
 
 ### 软锁检测
 
@@ -84,13 +90,15 @@ DumpDone ──cause CPU panic（系统停止）──▶ 终态
 
 - `LockupDetection` 为每 CPU 状态，字段为原子量（`AtomicU64` / `AtomicU32` / `AtomicBool`），NMI 与定时器中断并发访问安全；
 - `WATCHDOG_TASK_QUEUE` 为每 CPU `Vec`，注册仅在 per-CPU init（迁移不可能），NMI 中只读遍历；
-- rendezvous 用全局原子（`PHASE` / `CAUSE_CPU` / `ARRIVED_BITMAP`）+ 自旋，NMI 上下文中不取锁；
+- rendezvous 用全局原子（`PHASE` / `CAUSE_CPU` / `ARRIVED_BITMAP`）+ 有界自旋，NMI 上下文中不取锁；
+- 专用 SGI 在启动期完成 handler 注册、每 CPU NMI 属性配置与使能；故障路径在 `Triggered` 发布后执行 DSB，再直接写 `ICC_SGI1R_EL1`，不获取普通 GIC 锁；
 - NMI 路径绝不触碰普通 IRQ 自旋锁（避免 pseudo-NMI 抢占持锁路径造成同 CPU 自死锁）。
 
 ## 设计决策
 
 - **阈值**：软锁 20s、硬锁 10s；watchdog 任务 4s 触碰一次，20s 阈值内 5 次机会，避免误报；
-- **强 rendezvous（无超时）**：cause CPU 必须等所有 CPU 到达才 dump，避免漏 CPU 快照；代价是任一 CPU 无法进入 NMI 时会永久等待（此时系统已不可用，可接受）；
+- **主动 + 有界 rendezvous**：像 Linux NMI backtrace 一样，cause 主动向其他 CPU 发送 NMI 请求，并最多等待 10s；诊断完整性不能以把所有 responder 永久困在 NMI 为代价；
+- **SGI 失败可降级**：注册、每 CPU 配置或 NMI 内广播失败均记录原因；周期 NMI 仍可自然加入 rendezvous，最终受 10s 上限保护；
 - **NMI 机制不可用时显式降级**：启动日志提示 hardlockup 关闭，不静默失败；
 - **快照重入保护**：`nmi_begin()` 失败（已有快照在跑）时跳过本次 dump；
 - **软锁报告限速**：每阈值周期最多报告一次。

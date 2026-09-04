@@ -16,8 +16,10 @@ registered through watchdog, so watchdog's own forward progress does not depend
 on system workqueue execution.
 
 The hard-lockup detector uses a periodic NMI to check each CPU's watchdog
-tasks, including whether timer interrupts are still arriving. On failure, all
-CPUs rendezvous, dump task snapshots, and the cause CPU panics.
+tasks, including whether timer interrupts are still arriving. On failure, the
+cause CPU sends a dedicated NMI SGI to wake peer CPUs (including KVM vCPUs in
+WFI), waits at most 10 seconds, dumps every snapshot that arrived, and panics.
+Missing CPUs are reported rather than leaving all responders stuck forever.
 
 ## Usage
 
@@ -41,15 +43,17 @@ Consumers never touch the NMI source.  The watchdog asks for a periodic NMI
 through the source-neutral `khal::nmi::enable_periodic_nmi(period_ns, cb)`
 interface; the platform backend (currently the PMU cycle counter) owns the
 counter, the per-CPU GIC promotion (priority 0 / NMI attribute), and the
-one-time global handler registration.
+one-time global handler registration. The failure rendezvous uses a separate
+SGI configured through the same NMI mechanism; its send path is allocation-
+and lock-free because it is invoked from NMI context.
 
 ## Notes
 
 - Currently supported on AArch64 only.
 - Requires initialization on each core in multi-core systems.
 - The NMI interrupt is promoted to the highest GIC priority (0).
-- Hard lockup failure response: global snapshot dump via `ktask::snapshot`,
-  then panic on the cause CPU.
+- Hard lockup failure response: actively request peer snapshots, use a bounded
+  rendezvous, dump via `ktask::snapshot`, then panic on the cause CPU.
 
 ## Development Status
 

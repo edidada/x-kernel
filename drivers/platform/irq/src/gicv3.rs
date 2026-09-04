@@ -345,3 +345,34 @@ pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
     // SGI-send ordering.
     aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
 }
+
+/// Raise an NMI-configured SGI on every PE except the caller.
+///
+/// Unlike [`notify_cpu`], this path is safe in NMI context: it does not touch
+/// the locked `GIC` object and emits no log records. The SGI line must have
+/// been registered, configured as NMI, and enabled on every target CPU during
+/// boot before this function is used.
+pub fn raise_nmi_all_but_self(interrupt_id: usize) -> bool {
+    if interrupt_id >= 16 {
+        return false;
+    }
+
+    // Complete publication of the rendezvous state before a target can
+    // observe the SGI. ICC_SGI1R_EL1.INTID is bits [27:24], and IRM bit 40
+    // selects all PEs except the requesting PE.
+    aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::ST);
+    let sgi1r = ((interrupt_id as u64) << 24) | (1u64 << 40);
+    // SAFETY: ICC_SGI1R_EL1 is the architected GICv3 Group-1 SGI send
+    // register and is accessible at EL1 after the CPU interface is enabled.
+    // Deliberately omit `nomem`: this assembly is also a compiler barrier for
+    // the rendezvous-state publication ordered by the DSB above.
+    unsafe {
+        core::arch::asm!(
+            "msr ICC_SGI1R_EL1, {sgi1r}",
+            sgi1r = in(reg) sgi1r,
+            options(nostack)
+        );
+    }
+    aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
+    true
+}

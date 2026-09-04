@@ -91,7 +91,10 @@ ksched algorithms / karch context switch / allocator
 
 - `timers` 使用 per-CPU callback 容器原始引用；
 - `task_registry` 使用 `Box::into_raw/from_raw` 存放弱引用槽位；
-- `snapshot` 使用 `UnsafeCell` 持有 trap frame 快照，并 `unsafe impl Sync`。
+- `snapshot` 使用 `UnsafeCell` 持有 trap frame 快照，并 `unsafe impl Sync`。每 CPU
+  只写自己的 slot，调用方必须在 slot 写完后才发布 arrived；`nmi_finish()` 仅能在
+  确认没有迟到 writer 时清槽，有界且终态的 watchdog session 保持 active 直到
+  panic/power-off。
 
 **不变量**：
 

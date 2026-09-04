@@ -22,6 +22,8 @@ generic `kirq` API。
    `khal::nmi` 把 `mode()` / `enable_periodic_nmi()` 等接口 re-export 给消费者。
    机制不可用（`mode() == NmiMode::None`）时，消费者必须禁用依赖 NMI 的功能；
    `configure_nmi` / `enable_periodic_nmi` 返回 `false` 表示该 CPU 无法使用 NMI。
+   `raise_nmi_all_but_self` 可从 NMI 上下文调用，provider 必须避免分配、日志与
+   controller lock，并在发 SGI 前完成跨 CPU 状态发布。
    最终停机路径经 `quiesce_nmi()` 停掉当前 CPU 的周期源；该路径持有
    `NoPreempt`，并依赖 PMU backend 的共享计数器访问与原子 enabled 状态来安全
    覆盖可能已经到达的 NMI 分发。
@@ -56,6 +58,7 @@ generic `kirq` API。
 | T-03 | `IPI_IRQ` 移入 `kirq` | generic core 依赖 `kbuild_config` | crate 边界污染、特性耦合 | IPI 调用方直接使用 `kbuild_config::IPI_IRQ` |
 | T-04 | x86 helper 回流到 `khal::irq` | HAL adapter 再次暴露 APIC vector policy | crate 边界退化，驱动绕过 `kirq` MSI resource | `khal::irq` 不提供 MSI-X/APIC helper；x86 APIC 只实现 `kirq::MsiBackendIf` |
 | T-05 | 降级构建仍调用 NMI 接口 | 平台无 FEAT_NMI / GICv2 时消费者未检查 `mode()` | 无效寄存器访问或误报 NMI 已启用 | `mode() == None` 时平台返回 `false` / watchdog 启动期禁用 hardlockup；调用者契约要求先查询 `mode()` |
+| T-06 | NMI 内 SGI 发送获取普通 GIC 锁 | NMI 抢占正持有 GIC lock 的普通 IRQ 路径 | 同 CPU 自死锁 | `raise_nmi_all_but_self` contract 禁止锁；GICv3 provider 直接写系统寄存器 |
 
 ## 故障模式与影响分析（FMEA）
 

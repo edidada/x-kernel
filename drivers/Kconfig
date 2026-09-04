@@ -113,6 +113,16 @@ config IPI_IRQ
     help
       Define the interrupt number for Inter-Processor Interrupts (IPI).
 
+config WATCHDOG_NMI_IPI_IRQ
+    usize "Watchdog NMI IPI IRQ Number"
+    default 2
+    depends on ARCH_AARCH64
+    depends on KFEAT_WATCHDOG_HARDLOCKUP
+    help
+      Define the dedicated SGI used by the hard-lockup watchdog to request
+      NMI snapshots from peer CPUs. This must be an unused SGI in the range
+      0..15 and must not equal IPI_IRQ.
+
 endmenu # IRQ Configuration
 
 menu "Device Drivers Features"

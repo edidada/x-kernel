@@ -169,9 +169,11 @@ NMI 机制由平台探测并在每 CPU 使能，`kruntime` 负责在正确的初
   使能。hardware 模式在此开启 `SCTLR_EL1.NMI` / ALLINT；pseudo 与降级（`None`）
   无需 per-CPU 寄存器操作。
 - late-init 线程中的 `[watchdog] init_primary`（以及从核 idle 前的
-  `init_secondary`）调用 `init_nmi_watchdog`：`mode() == None` 时打印
-  "hard lockup detection disabled" 并跳过武装；否则经
-  `khal::nmi::enable_periodic_nmi` 用 PMU 周期源武装硬锁检测。
+  `init_secondary`）初始化 hardlockup：主核先全局注册专用 rendezvous SGI
+  handler，各 CPU 再把该 SGI 提升为 NMI 并使能；`mode() == None` 时打印
+  "hard lockup detection disabled" 并跳过武装，否则经
+  `khal::nmi::enable_periodic_nmi` 用 PMU 周期源武装检测。检测失败时专用 SGI
+  主动唤醒 peer CPU，rendezvous 最多等待 10s。
 - PMU 溢出分发由 `pmu` feature init 独立注册（normal IRQ 或 NMI fallback），与
   watchdog 解耦，因此降级平台上 perf 事件仍可用。
 

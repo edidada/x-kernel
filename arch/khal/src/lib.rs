@@ -98,6 +98,7 @@ pub use kplat::boot::final_init_ap as final_init_secondary;
 pub mod nmi {
     pub use kplat::nm_irq::{
         NmiCb, NmiMode, NmiSourceInfo, early_init, enable_periodic_nmi, info, late_init, mode,
+        raise_nmi_all_but_self,
     };
 }
 

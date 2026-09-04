@@ -6,6 +6,13 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use khal::percpu::this_cpu_id;
+use ktime_types::TimeSpan;
+
+/// Maximum time the cause CPU waits for peer CPUs to enter the snapshot NMI.
+///
+/// Linux's NMI backtrace rendezvous is also bounded: an unresponsive CPU must
+/// be reported as missing instead of trapping every responder in NMI forever.
+pub const WAIT_TIMEOUT: TimeSpan = TimeSpan::from_secs(10);
 
 /// Rendezvous phases.
 #[repr(usize)]
@@ -56,7 +63,7 @@ pub fn is_dump_done() -> bool {
 /// The calling CPU becomes the cause CPU only if this call transitions the
 /// rendezvous from idle to triggered.
 #[inline]
-pub fn try_trigger() {
+pub fn try_trigger() -> bool {
     let cpu = this_cpu_id().as_usize();
     if PHASE
         .compare_exchange(
@@ -68,6 +75,9 @@ pub fn try_trigger() {
         .is_ok()
     {
         CAUSE_CPU.store(cpu, Ordering::Release);
+        true
+    } else {
+        false
     }
 }
 
@@ -81,15 +91,19 @@ pub fn cause_cpu() -> Option<usize> {
     (cpu != usize::MAX).then_some(cpu)
 }
 
-/// Mark the current CPU as arrived.
+/// Publish that the current CPU has completed its local snapshot.
+///
+/// The caller must finish writing every datum consumed by the cause CPU before
+/// this call. The Release operation pairs with [`arrived_bitmap`]'s Acquire
+/// load, so observing this bit also makes the completed snapshot visible.
 #[inline]
-pub fn mark_arrived() {
+pub fn publish_arrived() {
     let id = this_cpu_id().as_usize();
     if id >= usize::BITS as usize {
         // Cannot represent this CPU in the bitmap without overflowing the shift.
         return;
     }
-    ARRIVED_BITMAP.fetch_or(1usize << id, Ordering::AcqRel);
+    ARRIVED_BITMAP.fetch_or(1usize << id, Ordering::Release);
 }
 
 pub fn arrived_bitmap() -> usize {
@@ -108,12 +122,25 @@ pub fn all_arrived_mask() -> usize {
     }
 }
 
-/// Busy-wait until all CPUs have arrived.
+#[inline]
+fn wait_finished(arrived: usize, expected: usize, elapsed: TimeSpan, timeout: TimeSpan) -> bool {
+    arrived & expected == expected || elapsed >= timeout
+}
+
+/// Busy-wait for the expected CPUs, returning the bitmap that actually arrived.
 ///
-/// This is a *strong* rendezvous: no timeout.
-pub fn wait_all_arrived_strong() {
-    let expect = all_arrived_mask();
-    while arrived_bitmap() & expect != expect {
+/// This function is safe to call from the watchdog NMI path: it allocates
+/// nothing and takes no locks. The bounded wait is a correctness requirement,
+/// not merely a diagnostic policy; a CPU that cannot enter NMI must not keep
+/// all responding CPUs trapped in the rendezvous forever.
+pub fn wait_all_arrived(expected: usize, timeout: TimeSpan) -> usize {
+    let start = khal::time::monotonic_time();
+    loop {
+        let arrived = arrived_bitmap();
+        let elapsed = khal::time::monotonic_time().saturating_duration_since(start);
+        if wait_finished(arrived, expected, elapsed, timeout) {
+            return arrived;
+        }
         core::hint::spin_loop();
     }
 }
@@ -125,12 +152,50 @@ pub fn mark_dump_done() {
 
 /// Reset rendezvous state.
 ///
-/// Note: in your intended flow, other CPUs may keep spinning in NMI forever.
-/// If you want them to be able to return from NMI, call this after
-/// `mark_dump_done()` and after ensuring they observed it.
+/// Call this only after `mark_dump_done()` and after ensuring every responding
+/// CPU observed it; otherwise a responder could miss the release transition
+/// and continue spinning until the terminal panic path stops the machine.
 #[inline]
 pub fn reset() {
     ARRIVED_BITMAP.store(0, Ordering::Release);
     CAUSE_CPU.store(usize::MAX, Ordering::Release);
     PHASE.store(Phase::Idle as usize, Ordering::Release);
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::{assert, def_test};
+
+    use super::*;
+
+    #[def_test]
+    fn wait_finishes_when_every_expected_cpu_arrived() {
+        let timeout = TimeSpan::from_secs(10);
+        assert!(wait_finished(0b111, 0b101, TimeSpan::ZERO, timeout));
+    }
+
+    #[def_test(serial)]
+    fn wait_returns_after_timeout_when_a_cpu_never_arrives() {
+        let timeout = TimeSpan::from_secs(10);
+        assert!(!wait_finished(
+            0b001,
+            0b011,
+            TimeSpan::from_secs(9),
+            timeout
+        ));
+        assert!(wait_finished(
+            0b001,
+            0b011,
+            TimeSpan::from_secs(10),
+            timeout
+        ));
+
+        // Exercise the production loop against the real monotonic clock with
+        // no published arrivals. Returning from this call is the regression
+        // guarantee for a CPU that can never enter the rendezvous.
+        reset();
+        let expected = all_arrived_mask();
+        let arrived = wait_all_arrived(expected, TimeSpan::from_millis(1));
+        assert!(arrived & expected != expected);
+    }
 }

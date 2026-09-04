@@ -37,7 +37,7 @@ kernel-boot / 平台固件
 | 链接符号 | `_stext`、`_etext`、`.init_array` 边界 | backtrace 范围错误、构造函数表越界、任意跳转 | 只取 ZST 符号地址；`.init_array` 通过链接脚本和 `#[register_init]` 约束 |
 | SMP bring-up | DT/ACPI 发现的 present CPU、AP 栈、`boot_ap` | 从核使用错误栈、AP 未启动导致主核自旋 | 每个 AP 使用独立 boot stack；`SCHED_READY_CPUS` 串行握手（等 AP 注册 run queue）；全局完成由 `INITED_CPUS == nr_cpus()` 判断 |
 | 中断和 timer | softirq runner、timer/IPI/PMU IRQ 号与 handler | 未安装 runner 或未注册 handler 时中断 bottom-half、timer deadline 错乱 | `init_interrupt` 先安装 softirq runner 和注册 handler 再 `enable_local_irq()`；从核在完成本地 runtime 初始化和全局屏障后才开 IRQ |
-| NMI 机制 | GIC 版本 / FEAT_NMI 探测与每 CPU 使能（`khal::nmi::early_init` / `late_init`） | 机制误判导致无效寄存器访问，或 watchdog 误报 hardlockup | 平台 `detect_mode()` 门控；`NmiMode::None` 时 watchdog 启动期禁用硬锁检测；所有 NMI 寄存器访问均有 readiness 门控 |
+| NMI 机制 | GIC 版本 / FEAT_NMI 探测、每 CPU 使能与 watchdog 专用 SGI | 机制误判导致无效寄存器访问，或 watchdog 误报/诊断 hang | 平台 `detect_mode()` 门控；`NmiMode::None` 时禁用硬锁检测；专用 SGI 启动期注册/配置且 NMI 内无锁发送；rendezvous 10s 超时 |
 | DMA 页表属性 | `kdma` 传入的内核 VA、size、flags | 错误修改内核页表属性 | `DmaPageTableIf::protect` 委托 `memspace::kernel_layout().protect()` 进行范围和页表处理 |
 
 本 crate 不直接处理用户内存、用户提供指针、DMA buffer 内容或设备寄存器读写；相关 trust boundary 位于 `memspace`、`kdma`、`kdriver` 和具体 HAL/driver 中。它会注册 boot console 的固定 MMIO 映射元数据，但不直接访问该 MMIO。
@@ -148,6 +148,7 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 | F-08 | region 日志摘要数组溢出 | distinct region name/flags 超过 64 | `expect("too many region log summaries")` panic | 启动日志阶段失败 | 3 | `MAX_REGION_LOG_SUMMARIES = 64`；异常平台需扩大上限或调整汇总策略 |
 | F-09 | timer handler 重复立刻触发或 deadline 倒退 | 时间源异常或 deadline 更新逻辑被改坏 | tick 过密、调度异常 | 性能下降或 hang | 2 | deadline 取当前记录与 `now + interval` 的较大值，再写入下一 tick |
 | F-10 | NMI 机制探测或每 CPU 使能失败 | 平台缺 FEAT_NMI / GIC 版本过低 / 初始化顺序错误 | 本 CPU 无 NMI 或 hardlockup 被禁用 | 系统失去硬锁检测（软锁仍在） | 3 | 启动日志 + `mode()` / `enable_periodic_nmi` 返回值显式降级 |
+| F-11 | watchdog rendezvous SGI 初始化或发送失败 | IRQ 冲突 / GIC 拒绝属性 / 非 GICv3 | peer CPU 不能被主动拉入快照 | 快照不完整但 cause 不永久等待 | 2 | 启动/NMI 原子日志；周期 NMI fallback；10s 后按 missing mask 继续 panic |
 
 ## 故障管理
 

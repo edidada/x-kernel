@@ -236,13 +236,18 @@ pub fn dump_cpu_tasks(cpu_id: LogicalCpuId) {
 /// Begin an NMI-driven snapshot session.
 ///
 /// Returns `true` if the snapshot was successfully initiated. When `true` is
-/// returned the caller is the *cause CPU* and must eventually call
-/// [`nmi_finish`] after calling [`nmi_dump_all`].
+/// returned the caller is the *cause CPU*. A recoverable caller must eventually
+/// call [`nmi_finish`] after [`nmi_dump_all`]. A terminal caller using a bounded
+/// rendezvous may instead leave the session active and panic: clearing slots
+/// would race a CPU that entered collection immediately before the timeout.
 pub fn nmi_begin() -> bool {
     begin()
 }
 
 /// Collect the local CPU's trap frame from NMI context.
+///
+/// The slot and the internal collected bit are published before this returns.
+/// An external rendezvous must publish its own arrival bit only afterwards.
 pub fn nmi_collect_local() {
     collect_local();
 }
@@ -254,7 +259,11 @@ pub fn nmi_dump_all(mask: usize) {
     dump_all(mask);
 }
 
-/// Finish an NMI-driven snapshot session.
+/// Finish a recoverable NMI-driven snapshot session.
+///
+/// The caller must know that no CPU can still be writing a snapshot slot. A
+/// terminal bounded-rendezvous path must leave the session active instead of
+/// clearing storage underneath a late responder.
 pub fn nmi_finish() {
     finish();
 }

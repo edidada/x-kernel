@@ -48,6 +48,7 @@ watchdog / perf 消费者
             |-- early_init / late_init   # 机制探测 + 每 CPU 使能
             |-- mode / info              # 运行时机制查询（Pseudo / Hardware / None）
             |-- enable_periodic_nmi      # 周期 NMI 源（当前为 PMU）
+            |-- raise_nmi_all_but_self   # NMI-safe 专用 SGI 广播
             |-- quiesce_nmi               # 终止路径停靠本地周期源
             `-- khal::irq::configure_nmi # 每 CPU 提升中断线
 ```
@@ -67,6 +68,9 @@ watchdog / perf 消费者
   一次（每 CPU）；hardware 模式在此开启 `SCTLR_EL1.NMI` / ALLINT 使能。
 - `khal::nmi::enable_periodic_nmi(period_ns, cb)`：每 CPU 调用；返回 `false`
   表示本 CPU 无法武装（机制不可用或资源冲突），消费者应显式降级。
+- `khal::nmi::raise_nmi_all_but_self(hwirq)`：仅接受已在每 CPU 配置、使能的
+  专用 SGI；可从 NMI 上下文调用，平台必须无分配、无日志、无锁并满足
+  publish-before-notify。当前 AArch64 GICv3 provider 直接写 `ICC_SGI1R_EL1`。
 - `khal::quiesce_nmi()`：仅供终止停机路径调用；以 `NoPreempt` 钉住当前 CPU，
   停掉已武装的本地周期源但保留回调和 IRQ 配置。没有 `nmi_pmu` source 或本地
   source 未初始化时为 no-op，调用后不得重新武装。

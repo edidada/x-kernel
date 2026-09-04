@@ -6,7 +6,7 @@
 
 ## 外部边界 / 攻击面
 
-- 定时器中断与 NMI（PMU 溢出）事件：事件频率与正确性依赖硬件/仿真；
+- 定时器中断与 NMI（PMU 溢出、专用 rendezvous SGI）事件：事件频率与正确性依赖硬件/仿真；
 - 内核内部：`ktask` 快照、任务状态、互斥锁状态（`check_mutex_deadlock`）；
 - 触发后的输出：`kprint_atomic`（原子打印，NMI 安全）。
 
@@ -28,7 +28,7 @@
 
 - 每 CPU 状态只能被所属 CPU 访问；
 - NMI 回调中引用的 `&'static` per-CPU 指针与内核同生命周期；
-- 原子量排序：`Release` 写 + `Acquire` 读保证软锁时间戳初始化可见；`AcqRel` 用于 rendezvous 状态迁移。
+- 原子量排序：`Release` 写 + `Acquire` 读保证软锁时间戳初始化可见；`AcqRel` 用于 rendezvous 状态迁移；SGI 广播前的 DSB 保证 target 处理中断前可见已发布的 `Triggered` 状态；每 CPU 先写 snapshot slot 再 Release 发布 arrived，cause Acquire 后才读取该 slot。
 
 ## 线程安全
 
@@ -42,9 +42,11 @@
 |------|----------|----------|----------|----------|
 | T-01 | NMI 回调获取普通 IRQ 锁 | 高（同 CPU 自死锁） | pseudo-NMI 抢占持锁的普通 IRQ 路径 | NMI 路径只用原子与自旋；代码审查约束 |
 | T-02 | NMI 未按预期周期到达 | 中（误报 hardlockup） | TCG 仿真下 NMI 延迟 / 丢失 | hardlockup 计数需先初始化（`current != 0`）；NMI 不可用时启动期禁用检测 |
-| T-03 | 某 CPU 永远无法进入 NMI | 高（cause CPU 永久自旋） | 该 CPU 中断/NMI 停摆 | 强 rendezvous 无超时属有意设计（系统已不可用）；记录于设计文档 |
+| T-03 | 某 CPU 永远无法进入 NMI | 高（诊断路径再度挂死） | KVM WFI 停止 vPMU、目标 CPU/中断控制器故障 | 专用 SGI 主动唤醒；cause 最多等待 10s，打印 missing mask 后继续 dump/panic |
 | T-04 | 快照重入 | 中（快照损坏/死锁） | NMI 打断已有快照流程 | `nmi_begin()` 失败跳过 dump；`kprint_atomic` 原子输出 |
 | T-05 | 软锁误报刷屏 | 低（日志风暴） | watchdog 任务饥饿但定时器正常 | 每阈值周期限速一次报告 |
+| T-06 | 专用 SGI 与普通 IPI 冲突或越界 | 高（错误 handler / 无法唤醒） | Kconfig IRQ 号错误 | const assert 要求 SGI `< 16` 且不等于 `IPI_IRQ`；默认使用 SGI 2 |
+| T-07 | rendezvous 超时清槽与迟到 CPU 写 slot 竞争 | 高（UnsafeCell data race） | target 在超时前观察 Triggered、超时后才完成 collect | arrived 只在 slot 写完后发布；cause 按固定 mask 读取；终态不调用 `nmi_finish()`，保持 session active 直到 panic/power-off |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -55,11 +57,13 @@
 | F-03 | watchdog 任务饿死 | 调度问题 | 软锁误报 | 日志风暴 + dump | 3 | 4s 触碰 + 20s 阈值 + 限速 |
 | F-04 | 定时器中断停摆 | 中断屏蔽/硬件故障 | `hrtimer_interrupts` 不前进 | NMI 判定 hardlockup → rendezvous → panic | 2 | 这是硬锁检测的预期行为 |
 | F-05 | rendezvous 中 cause CPU panic | 检测到任务失败 | 系统停止 | 停机（保留 dump 输出） | 1 | 有意设计：宁可停机也要输出诊断 |
+| F-06 | rendezvous SGI 注册/配置/使能失败 | IRQ 号冲突、平台拒绝 NMI 属性 | 无法主动唤醒部分 CPU | 快照可能缺 CPU，但不会永久卡住 | 2 | 启动日志；保留周期 NMI 加入路径；10s 有界等待 |
+| F-07 | NMI 内 SGI 广播失败 | 非 GICv3 或非法 SGI | peer 不被主动唤醒 | 依赖自然周期 NMI，超时后继续 | 2 | NMI-safe 原子日志 + 有界等待 |
 
 ## 故障管理
 
 - 软锁：记录日志、dump 调度统计与 CPU 任务，不停止系统；
-- 硬锁：全局 rendezvous → 收集所有 CPU 快照 → cause CPU panic 停机；
+- 硬锁：主动广播 NMI → 最多等待 10s → 收集已响应 CPU 快照并标记 missing CPU → cause CPU panic 停机；
 - 启动期失败（NMI 不可用 / 武装失败）：记录并禁用对应检测，不阻塞启动。
 
 ## 隐私分析
@@ -68,9 +72,9 @@
 
 ## 已知限制
 
-- 强 rendezvous 无超时：任一 CPU 无法进入 NMI 时 cause CPU 永久自旋；
+- 10s rendezvous 上限会牺牲完全失联 CPU 的快照，但保留 `NOT RESPONDING`、`arrived_mask` 和 `missing_mask` 证据；
 - hardlockup 依赖 NMI 周期精度（平台 PMU 后端当前按固定 2.5GHz 折算周期阈值，见 `platforms/kplat-aarch64/src/peripherals/pmu.rs`；代码 TODO 为改读 DT OPP 频率）；
-- `usize::BITS` 位图限制：CPU 数 ≥ 64 时 `mark_arrived` 直接忽略（`all_arrived_mask` 处理到位宽上限）；
+- `usize::BITS` 位图限制：CPU 数 ≥ 64 时 `publish_arrived` 直接忽略（`all_arrived_mask` 处理到位宽上限）；
 - `reset()` 与仍在 NMI 自旋的 CPU 并发时语义需谨慎（注释已说明）。
 
 ## 审计清单
@@ -78,5 +82,7 @@
 - [ ] NMI 回调路径是否存在普通 IRQ 自旋锁 / 阻塞调用？
 - [ ] per-CPU 状态访问是否都有迁移保护（固定核 / IRQ 关闭 / NMI）？
 - [ ] rendezvous 状态迁移是否全部使用正确原子序？
+- [ ] NMI 内跨核请求是否仍为无分配、无日志锁、无 GIC 普通锁的寄存器发送？
+- [ ] 所有等待路径是否仍有 10s 上限并按实际 arrived mask dump？
 - [ ] 快照重入是否都有 `nmi_begin()` 保护？
 - [ ] NMI 不可用 / 武装失败路径是否都显式记录并降级？

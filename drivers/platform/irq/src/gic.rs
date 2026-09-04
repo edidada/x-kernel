@@ -268,6 +268,19 @@ pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
     }
 }
 
+/// Raise an SGI on every CPU except the caller without taking controller locks.
+///
+/// The only supported backend is GICv3, whose SGI send register is directly
+/// accessible from EL1. This is kept separate from [`notify_cpu`] because it
+/// is callable from NMI context and therefore cannot use the ordinary locked
+/// GIC object.
+pub fn raise_nmi_all_but_self(interrupt_id: usize) -> bool {
+    match active_version() {
+        GicVersion::V2 => false,
+        GicVersion::V3 => gicv3::raise_nmi_all_but_self(interrupt_id),
+    }
+}
+
 pub fn set_prio(irq: usize, priority: u8) {
     // NMI classification relies on the invariant that only NMI sources live
     // below IRQ_THRESHOLD: excp routes IRQs taken with PMR <= NMI_ONLY to the
