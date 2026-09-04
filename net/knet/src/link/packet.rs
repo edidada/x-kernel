@@ -474,8 +474,8 @@ pub(crate) fn publish_link_frame(ifindex: i32, frame: &[u8], local_addr: [u8; 6]
         packet_addr_from_frame(
             ifindex,
             raw_ethertype(frame),
-            frame_ref.dst_addr().bytes(),
-            frame_ref.src_addr().bytes(),
+            frame_ref.dst_addr().octets(),
+            frame_ref.src_addr().octets(),
             local_addr,
             None,
         ),
@@ -492,7 +492,7 @@ pub(crate) fn publish_link_packet(packet: &PacketBuf, src_addr: MacAddress, prot
         active_sockets,
         packet.ifindex(),
         packet.data(),
-        packet_addr_from_packet(packet, src_addr.bytes(), protocol),
+        packet_addr_from_packet(packet, src_addr.octets(), protocol),
     );
 }
 
@@ -512,8 +512,8 @@ pub(crate) fn publish_outgoing_frame(ifindex: i32, frame: &[u8], local_addr: [u8
         packet_addr_from_frame(
             ifindex,
             raw_ethertype(frame),
-            frame_ref.dst_addr().bytes(),
-            frame_ref.src_addr().bytes(),
+            frame_ref.dst_addr().octets(),
+            frame_ref.src_addr().octets(),
             local_addr,
             Some(PACKET_OUTGOING),
         ),

@@ -220,7 +220,7 @@ impl Ipv4Cidr {
     }
 
     pub(crate) fn is_directed_broadcast(self, addr: Ipv4Address) -> bool {
-        self.broadcast() == Some(addr)
+        self.prefix_len < 31 && self.broadcast() == Some(addr)
     }
 
     pub(crate) fn contains_addr(self, addr: &IpAddress) -> bool {

@@ -7,8 +7,6 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::ops::Range;
 
-use super::wire::{ETHERNET_HEADER_LEN, EtherType, MacAddress};
-
 /// Link-layer packet type used by packet sockets and link input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PacketType {
@@ -36,50 +34,26 @@ struct PacketBufInner {
 }
 
 impl PacketBuf {
-    pub(crate) fn from_ip_packet_vec(ifindex: i32, data: Vec<u8>) -> Self {
+    /// Creates a buffer from owned bytes and layer-derived packet metadata.
+    ///
+    /// `network_offset` is measured from the start of `data` and must not
+    /// exceed its length.
+    pub(crate) fn new(
+        data: Vec<u8>,
+        ifindex: i32,
+        packet_type: PacketType,
+        network_offset: Option<usize>,
+    ) -> Self {
         let tail = data.len();
+        debug_assert!(network_offset.is_none_or(|offset| offset <= tail));
+
         Self {
             inner: Arc::new(PacketBufInner {
                 data,
                 head: 0,
                 tail,
                 ifindex,
-                packet_type: PacketType::Host,
-                network_offset: Some(0),
-            }),
-        }
-    }
-
-    pub(crate) fn from_ip_packet_vec_with_type(
-        ifindex: i32,
-        data: Vec<u8>,
-        packet_type: PacketType,
-    ) -> Self {
-        let mut packet = Self::from_ip_packet_vec(ifindex, data);
-        Arc::make_mut(&mut packet.inner).packet_type = packet_type;
-        packet
-    }
-
-    pub(crate) fn from_ethernet_frame(
-        ifindex: i32,
-        frame: &[u8],
-        dst_addr: MacAddress,
-        protocol: EtherType,
-        local_addr: MacAddress,
-    ) -> Self {
-        // TODO: Parse 802.1Q and 802.1ad tags before deriving the network offset.
-        let network_offset = match protocol {
-            EtherType::Ipv4 | EtherType::Ipv6 => Some(ETHERNET_HEADER_LEN),
-            _ => None,
-        };
-
-        Self {
-            inner: Arc::new(PacketBufInner {
-                data: frame.to_vec(),
-                head: 0,
-                tail: frame.len(),
-                ifindex,
-                packet_type: packet_type(dst_addr, local_addr),
+                packet_type,
                 network_offset,
             }),
         }
@@ -89,6 +63,7 @@ impl PacketBuf {
         self.inner.ifindex
     }
 
+    /// Updates the network interface index using copy-on-write when the packet is shared.
     pub(crate) fn set_ifindex(&mut self, ifindex: i32) {
         Arc::make_mut(&mut self.inner).ifindex = ifindex;
     }
@@ -117,22 +92,16 @@ impl PacketBuf {
         inner.data.get_mut(offset..inner.tail)
     }
 
+    /// Moves `tail` to set the valid IP packet length.
     pub(crate) fn truncate_network_packet(&mut self, len: usize) -> Option<()> {
         let offset = self.inner.network_offset?;
-        let tail = offset.checked_add(len)?;
+        let tail = offset.checked_add(len)?; // new tail = network_offset + len
         if tail > self.inner.data.len() {
             return None;
         }
         let inner = Arc::make_mut(&mut self.inner);
         inner.tail = tail;
         Some(())
-    }
-
-    #[cfg(unittest)]
-    pub(crate) fn is_ip_packet(&self) -> bool {
-        self.network_packet()
-            .and_then(|packet| packet.first().map(|byte| byte >> 4))
-            .is_some_and(|version| matches!(version, 4 | 6))
     }
 
     #[cfg(unittest)]
@@ -145,18 +114,6 @@ impl PacketBuf {
     }
 }
 
-fn packet_type(dst_addr: MacAddress, local_addr: MacAddress) -> PacketType {
-    if dst_addr.is_broadcast() {
-        PacketType::Broadcast
-    } else if dst_addr.is_multicast() {
-        PacketType::Multicast
-    } else if dst_addr == local_addr {
-        PacketType::Host
-    } else {
-        PacketType::OtherHost
-    }
-}
-
 #[cfg(unittest)]
 mod tests {
     use alloc::vec;
@@ -164,58 +121,30 @@ mod tests {
     use unittest::def_test;
 
     use super::*;
-    use crate::link::wire::{EtherType, MacAddress};
-
-    const LOCAL_MAC: MacAddress = MacAddress([0x02, 0, 0, 0, 0, 1]);
-    const REMOTE_MAC: MacAddress = MacAddress([0x02, 0, 0, 0, 0, 2]);
-
     #[def_test]
-    fn test_ip_packet_records_network_offset() {
-        let packet = PacketBuf::from_ip_packet_vec(
-            2,
-            vec![
-                0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 127, 0, 0, 1, 127, 0, 0, 1,
-            ],
-        );
+    fn test_packet_records_zero_network_offset() {
+        let packet = PacketBuf::new(vec![1, 2, 3, 4], 2, PacketType::Host, Some(0));
 
         assert_eq!(packet.ifindex(), 2);
         assert_eq!(packet.network_offset(), Some(0));
-        assert!(packet.is_ip_packet());
         assert_eq!(packet.network_packet().unwrap(), packet.data());
     }
 
     #[def_test]
-    fn test_ethernet_frame_records_network_offset_and_packet_type() {
-        let frame = [
-            LOCAL_MAC.0[0],
-            LOCAL_MAC.0[1],
-            LOCAL_MAC.0[2],
-            LOCAL_MAC.0[3],
-            LOCAL_MAC.0[4],
-            LOCAL_MAC.0[5],
-            REMOTE_MAC.0[0],
-            REMOTE_MAC.0[1],
-            REMOTE_MAC.0[2],
-            REMOTE_MAC.0[3],
-            REMOTE_MAC.0[4],
-            REMOTE_MAC.0[5],
-            0x08,
-            0x00,
-            0x45,
-            0,
-        ];
-        let packet =
-            PacketBuf::from_ethernet_frame(3, &frame, LOCAL_MAC, EtherType::Ipv4, LOCAL_MAC);
+    fn test_packet_records_network_offset_and_packet_type() {
+        let mut data = vec![0; 16];
+        data[14] = 0x45;
+        let packet = PacketBuf::new(data, 3, PacketType::Multicast, Some(14));
 
         assert_eq!(packet.ifindex(), 3);
-        assert_eq!(packet.packet_type(), PacketType::Host);
+        assert_eq!(packet.packet_type(), PacketType::Multicast);
         assert_eq!(packet.network_offset(), Some(14));
         assert_eq!(packet.network_packet().unwrap(), &[0x45, 0]);
     }
 
     #[def_test]
     fn test_packet_handle_is_pointer_sized_and_uses_copy_on_write() {
-        let packet = PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20]);
+        let packet = PacketBuf::new(vec![0x45, 0, 0, 20], 1, PacketType::Host, Some(0));
         let mut copy = packet.clone();
 
         assert_eq!(

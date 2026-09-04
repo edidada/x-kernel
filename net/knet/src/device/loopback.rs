@@ -259,7 +259,12 @@ mod tests {
     fn loopback_rechecks_current_mtu_before_enqueue() {
         let mut device = LoopbackDevice::new();
         device.set_mtu(IPV4_MIN_MTU).unwrap();
-        let packet = PacketBuf::from_ip_packet_vec(0, vec![0; IPV4_MIN_MTU + 1]);
+        let packet = PacketBuf::new(
+            vec![0; IPV4_MIN_MTU + 1],
+            0,
+            crate::buf::PacketType::Host,
+            Some(0),
+        );
         let queued_before = net_rx::queued_len();
 
         assert!(!device.send_ip_packet(

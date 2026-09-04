@@ -364,11 +364,7 @@ fn build_reassembled_packet(ifindex: i32, queue: Ipv4ReassemblyQueue) -> Ipv4Rea
         return Ipv4ReassemblyResult::Dropped;
     }
 
-    Ipv4ReassemblyResult::Complete(PacketBuf::from_ip_packet_vec_with_type(
-        ifindex,
-        packet,
-        queue.packet_type,
-    ))
+    Ipv4ReassemblyResult::Complete(PacketBuf::new(packet, ifindex, queue.packet_type, Some(0)))
 }
 
 fn aligned_payload_len(payload_len: usize, more_fragments: bool) -> usize {
@@ -434,7 +430,7 @@ mod tests {
 
         let mut bytes: Vec<u8> = header.to_bytes().into_iter().collect();
         bytes.extend_from_slice(payload);
-        let mut packet = PacketBuf::from_ip_packet_vec(1, bytes);
+        let mut packet = PacketBuf::new(bytes, 1, PacketType::Host, Some(0));
         let header = Ipv4Header::validate_input_packet(&mut packet).unwrap();
         (packet, header)
     }

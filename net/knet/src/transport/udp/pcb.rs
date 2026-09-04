@@ -188,6 +188,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        buf::PacketType,
         ip::Ipv4Address,
         ipv4,
         udp::{UDP_HEADER_LEN, UdpSocketState, output::write_udp_header},
@@ -214,7 +215,7 @@ mod tests {
             &udp_packet,
         )
         .unwrap();
-        let packet = PacketBuf::from_ip_packet_vec(1, packet);
+        let packet = PacketBuf::new(packet, 1, PacketType::Host, Some(0));
         let header = ipv4::Ipv4Header::parse_input(packet.network_packet().unwrap()).unwrap();
         crate::udp::prepare_ipv4_packet(header, packet).unwrap()
     }
