@@ -22,7 +22,7 @@ pub(crate) use crate::netlink::{
     RTPROT_KERNEL as ROUTE_PROTOCOL_KERNEL,
 };
 use crate::{
-    buf::PacketBuf,
+    buf::{PacketBuf, PacketType},
     consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
     device::{
         LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice,
@@ -388,13 +388,16 @@ impl Router {
 
     pub fn queue_ipv4_packet(&mut self, packet: Vec<u8>, oif: i32) -> KResult {
         let packets = self.fragment_ipv4_packet_for_output(packet)?;
-        self.data_tx_queue
-            .try_extend(
-                packets.into_iter().map(|packet| {
-                    PacketBuf::from_ip_packet_vec(oif, packet, PacketOwner::Ipv4Stack)
-                }),
-            )
-            .map_err(|_| KError::WouldBlock)
+        if !self.can_enqueue_tx_packets(packets.len()) {
+            return Err(KError::WouldBlock);
+        }
+
+        self.data_tx_queue.extend(
+            packets
+                .into_iter()
+                .map(|packet| PacketBuf::new(packet, oif, PacketType::Host, Some(0))),
+        );
+        Ok(())
     }
 
     /// Returns whether `dst` is routed through a loopback device.
@@ -421,7 +424,7 @@ impl Router {
     ) -> KResult {
         let packets = self.fragment_ipv4_packet_for_output(packet)?;
         for packet in packets {
-            let buf = PacketBuf::from_ip_packet_vec(0, packet);
+            let buf = PacketBuf::new(packet, 0, PacketType::Host, Some(0));
             // RX-ready hint for the poller, not send success. This path is
             // not the poller; a dropped loopback packet is still a successful
             // xmit, as documented above.
@@ -1270,7 +1273,7 @@ fn same_route_rule(lhs: Rule, rhs: Rule) -> bool {
 }
 
 fn tx_packet_buf(packet: Vec<u8>) -> PacketBuf {
-    PacketBuf::from_ip_packet_vec(0, packet)
+    PacketBuf::new(packet, 0, PacketType::Host, Some(0))
 }
 
 #[cfg(unittest)]
@@ -1290,7 +1293,7 @@ mod tests {
     fn router_with_ready_loopback_packet() -> Router {
         let mut router = Router::new();
         let loopback = router.add_device(Box::new(LoopbackDevice::new()));
-        let packet = PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20]);
+        let packet = PacketBuf::new(vec![0x45, 0, 0, 20], 1, PacketType::Host, Some(0));
         let _ = router.devices[loopback].send_ip_packet(
             1,
             IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)),
@@ -1599,16 +1602,8 @@ impl smoltcp::phy::TxToken for TxToken<'_> {
     {
         let mut ip_packet = vec![0u8; len];
         let result = f(&mut ip_packet);
-        assert!(
-            self.0
-                .try_push(PacketBuf::from_ip_packet_vec(
-                    0,
-                    ip_packet,
-                    PacketOwner::Ipv4Stack,
-                ))
-                .is_ok(),
-            "smoltcp consumed a TX token without queue capacity"
-        );
+        self.0
+            .push_back(PacketBuf::new(ip_packet, 0, PacketType::Host, Some(0)));
         result
     }
 }

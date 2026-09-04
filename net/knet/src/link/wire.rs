@@ -15,10 +15,15 @@ use crate::ip::Ipv4Address;
 /// Ethernet header length in bytes.
 pub(crate) const ETHERNET_HEADER_LEN: usize = 14;
 
+/// ARP payload length for Ethernet + IPv4.
 const ARP_ETHERNET_IPV4_LEN: usize = 28;
+/// ARP hardware type for Ethernet.
 const ARP_HARDWARE_ETHERNET: u16 = 1;
+/// ARP protocol type for IPv4.
 const ARP_PROTOCOL_IPV4: u16 = 0x0800;
+/// Ethernet MAC address length in bytes.
 const ARP_HARDWARE_LEN_ETHERNET: u8 = 6;
+/// IPv4 address length in bytes.
 const ARP_PROTOCOL_LEN_IPV4: u8 = 4;
 
 #[repr(C)]
@@ -26,6 +31,9 @@ const ARP_PROTOCOL_LEN_IPV4: u8 = 4;
 struct EthernetHeader {
     dst_addr: [u8; 6],
     src_addr: [u8; 6],
+    // Used to tell which protocol the payload using.
+    // `U16` always uses network byte order, which is big-endian.
+    // rust `u16` uses the CPU's own byte order.
     ethertype: U16,
 }
 
@@ -37,7 +45,7 @@ impl MacAddress {
     pub(crate) const BROADCAST: Self = Self([0xff; 6]);
     pub(crate) const ZERO: Self = Self([0; 6]);
 
-    pub(crate) const fn bytes(self) -> [u8; 6] {
+    pub(crate) const fn octets(self) -> [u8; 6] {
         self.0
     }
 

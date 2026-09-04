@@ -299,7 +299,7 @@ mod tests {
     use crate::ip::Ipv4Address;
 
     fn test_packet(ifindex: i32) -> PacketBuf {
-        PacketBuf::from_ip_packet_vec(ifindex, vec![0; 20])
+        PacketBuf::new(vec![0; 20], ifindex, crate::buf::PacketType::Host, Some(0))
     }
 
     fn prepared_udp_packet(ifindex: i32) -> NetRxPacket {
@@ -313,7 +313,13 @@ mod tests {
             &udp_packet,
         )
         .unwrap();
-        prepare_for_enqueue(PacketBuf::from_ip_packet_vec(ifindex, packet)).unwrap()
+        prepare_for_enqueue(PacketBuf::new(
+            packet,
+            ifindex,
+            crate::buf::PacketType::Host,
+            Some(0),
+        ))
+        .unwrap()
     }
 
     // Serial: fills and discards entries on the shared NetRx queue.

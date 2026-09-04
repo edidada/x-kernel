@@ -50,7 +50,7 @@ mod tests {
     };
     use crate::{
         ConnectOptions, RecvOptions, Shutdown, SocketAddrEx, SocketOps,
-        buf::PacketBuf,
+        buf::{PacketBuf, PacketType},
         device::{LoopbackDevice, NetDevice},
         ip::{IpAddress, IpEndpoint, Ipv4Address},
         ipv4,
@@ -170,7 +170,7 @@ mod tests {
             .expect("UDP header length is valid");
         let packet = ipv4::build_ipv4_packet(local_ip, local_ip, ipv4::PROTOCOL_UDP, 64, &udp)
             .expect("IPv4 packet length is valid");
-        let mut packet = PacketBuf::from_ip_packet_vec(1, packet);
+        let mut packet = PacketBuf::new(packet, 1, PacketType::Host, Some(0));
         ipv4::Ipv4Header::prepare_output_packet(&mut packet).expect("IPv4 header is valid");
 
         let mut device = LoopbackDevice::new();
@@ -208,8 +208,9 @@ mod tests {
             .expect("UDP header length is valid");
         let packet = ipv4::build_ipv4_packet(local_ip, local_ip, ipv4::PROTOCOL_UDP, 64, &udp)
             .expect("IPv4 packet length is valid");
-        let mut packet = PacketBuf::from_ip_packet_vec(1, packet);
+        let mut packet = PacketBuf::new(packet, 1, PacketType::Host, Some(0));
         ipv4::Ipv4Header::prepare_output_packet(&mut packet).expect("IPv4 header is valid");
+        let expected_packet = packet.network_packet().unwrap().to_vec();
 
         let mut device = LoopbackDevice::new();
         assert!(device.send_ip_packet(
@@ -224,6 +225,12 @@ mod tests {
             .poll_rx(1, ktime_types::MonotonicInstant::ORIGIN)
             .expect("unmatched UDP should remain for the task poller");
         assert_eq!(leftover.ifindex(), 1);
+        assert_eq!(leftover.network_packet().unwrap(), expected_packet);
+        assert!(
+            device
+                .poll_rx(1, ktime_types::MonotonicInstant::ORIGIN)
+                .is_none()
+        );
 
         clear_registry();
     }

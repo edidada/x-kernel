@@ -570,7 +570,12 @@ mod tests {
 
     #[def_test]
     fn test_validate_input_packet_accepts_valid_checksum() {
-        let mut packet = PacketBuf::from_ip_packet_vec(1, ipv4_packet(PROTOCOL_UDP, &[1, 2]));
+        let mut packet = PacketBuf::new(
+            ipv4_packet(PROTOCOL_UDP, &[1, 2]),
+            1,
+            PacketType::Host,
+            Some(0),
+        );
 
         let header = Ipv4Header::validate_input_packet(&mut packet).unwrap();
 
@@ -590,7 +595,7 @@ mod tests {
         header.more_fragments = true;
         header.header_checksum = header.calc_header_checksum();
         bytes[..IPV4_MIN_HEADER_LEN].copy_from_slice(&header.to_bytes());
-        let mut packet = PacketBuf::from_ip_packet_vec(1, bytes);
+        let mut packet = PacketBuf::new(bytes, 1, PacketType::Host, Some(0));
 
         let header = Ipv4Header::validate_input_packet(&mut packet).unwrap();
 
@@ -601,7 +606,7 @@ mod tests {
     fn test_validate_input_packet_rejects_bad_checksum() {
         let mut bytes = ipv4_packet(PROTOCOL_TCP, &[]);
         bytes[10] ^= 0xff;
-        let mut packet = PacketBuf::from_ip_packet_vec(1, bytes);
+        let mut packet = PacketBuf::new(bytes, 1, PacketType::Host, Some(0));
 
         assert_eq!(
             Ipv4Header::validate_input_packet(&mut packet),
@@ -614,7 +619,7 @@ mod tests {
         let mut bytes = ipv4_packet(PROTOCOL_ICMP, &[]);
         bytes[10] = 0;
         bytes[11] = 0;
-        let mut packet = PacketBuf::from_ip_packet_vec(1, bytes);
+        let mut packet = PacketBuf::new(bytes, 1, PacketType::Host, Some(0));
 
         Ipv4Header::prepare_output_packet(&mut packet).unwrap();
 

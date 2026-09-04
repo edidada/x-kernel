@@ -21,7 +21,7 @@ use ktime_types::{MonotonicInstant, TimeSpan};
 use lazyinit::LazyInit;
 
 use crate::{
-    buf::PacketBuf,
+    buf::{PacketBuf, PacketType},
     consts::ETHERNET_MAX_PENDING_PACKETS,
     device::{
         IF_OPER_DOWN, IF_OPER_UP, LINK_FLAG_BROADCAST, LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST,
@@ -37,6 +37,18 @@ use crate::{
 };
 
 const NET_RX_SOFTIRQ_BATCH: usize = 8;
+
+fn classify_packet_type(dst_addr: MacAddress, local_addr: MacAddress) -> PacketType {
+    if dst_addr.is_broadcast() {
+        PacketType::Broadcast
+    } else if dst_addr.is_multicast() {
+        PacketType::Multicast
+    } else if dst_addr == local_addr {
+        PacketType::Host
+    } else {
+        PacketType::OtherHost
+    }
+}
 
 fn is_ipv4_source_usable_for_egress(
     next_hop: IpAddress,
@@ -368,7 +380,7 @@ impl EthernetDevice {
             warn!("send failed: {:?}", err);
             None
         } else {
-            frame_data.map(|frame_data| (src_addr.bytes(), frame_data))
+            frame_data.map(|frame_data| (src_addr.octets(), frame_data))
         }
     }
 
@@ -419,17 +431,22 @@ impl EthernetDevice {
         let dst_addr = frame.dst_addr();
         let src_addr = frame.src_addr();
         let ethertype = frame.ethertype();
+        let local_addr = self.mac_addr();
 
-        let packet_buf = PacketBuf::from_ethernet_frame(
+        // TODO: Parse 802.1Q and 802.1ad tags before deriving the network offset.
+        let network_offset = match ethertype {
+            EtherType::Ipv4 | EtherType::Ipv6 => Some(ETHERNET_HEADER_LEN),
+            _ => None,
+        };
+        let packet_buf = PacketBuf::new(
+            frame_data.to_vec(),
             ifindex,
-            frame_data,
-            dst_addr,
-            ethertype,
-            self.mac_addr(),
+            classify_packet_type(dst_addr, local_addr),
+            network_offset,
         );
         packet::publish_link_packet(&packet_buf, src_addr, ethertype);
 
-        if !dst_addr.is_broadcast() && dst_addr != MacAddress::ZERO && dst_addr != self.mac_addr() {
+        if !dst_addr.is_broadcast() && dst_addr != MacAddress::ZERO && dst_addr != local_addr {
             return None;
         }
 
@@ -852,6 +869,28 @@ mod tests {
 
     use super::*;
 
+    #[def_test]
+    fn classify_ethernet_packet_type() {
+        let local_addr = MacAddress([0x02, 0, 0, 0, 0, 1]);
+
+        assert_eq!(
+            classify_packet_type(MacAddress::BROADCAST, local_addr),
+            PacketType::Broadcast
+        );
+        assert_eq!(
+            classify_packet_type(MacAddress([0x01, 0, 0, 0, 0, 1]), local_addr),
+            PacketType::Multicast
+        );
+        assert_eq!(
+            classify_packet_type(local_addr, local_addr),
+            PacketType::Host
+        );
+        assert_eq!(
+            classify_packet_type(MacAddress([0x02, 0, 0, 0, 0, 2]), local_addr),
+            PacketType::OtherHost
+        );
+    }
+
     unsafe fn waker_clone(data: *const ()) -> RawWaker {
         RawWaker::new(data, &WAKER_VTABLE)
     }
@@ -891,7 +930,7 @@ mod tests {
         bytes[2..4].copy_from_slice(&packet_len.to_be_bytes());
         bytes[12..16].copy_from_slice(&source.octets());
         bytes[16..20].copy_from_slice(&[198, 51, 100, 1]);
-        PacketBuf::from_ip_packet_vec(1, bytes)
+        PacketBuf::new(bytes, 1, PacketType::Host, Some(0))
     }
 
     #[def_test]
