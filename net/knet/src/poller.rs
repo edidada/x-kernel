@@ -5,17 +5,16 @@
 //! Budgeted network data-plane poller.
 
 use klazy::lazy_static;
-use kpoll::{PollContext, PollRegisterError, PollSet};
 
 use crate::SERVICE;
 
-const DEFAULT_BACKGROUND_BUDGET: PollBudget = PollBudget {
+const BACKGROUND_BUDGET: PollBudget = PollBudget {
     rx_packets: 512,
     tx_packets: 256,
     timer_events: 32,
 };
 
-const DEFAULT_ASSIST_BUDGET: PollBudget = PollBudget {
+const ASSIST_BUDGET: PollBudget = PollBudget {
     rx_packets: 16,
     tx_packets: 16,
     timer_events: 8,
@@ -23,21 +22,21 @@ const DEFAULT_ASSIST_BUDGET: PollBudget = PollBudget {
 
 const BACKGROUND_MAX_ROUNDS: usize = 4;
 
+// Global network poller, initialized on first access.
 lazy_static! {
-    static ref NETWORK_POLLER: NetworkPoller = NetworkPoller::new(NetworkPollerConfig {
-        background_budget: DEFAULT_BACKGROUND_BUDGET,
-        assist_budget: DEFAULT_ASSIST_BUDGET,
-    });
+    static ref NETWORK_POLLER: NetworkPoller = NetworkPoller::new();
 }
 
 #[derive(Clone, Copy)]
 pub(crate) enum PollReason {
     Rx,
-    RxWindow,
+    RxWindow, // Receive buffer space is freed,
+    // causing the receive window (TCP flow control) to change.
     Tx,
     Timer,
 }
 
+/// The budget for a single network polling round.
 #[derive(Clone, Copy)]
 pub(crate) struct PollBudget {
     pub rx_packets: usize,
@@ -45,37 +44,29 @@ pub(crate) struct PollBudget {
     pub timer_events: usize,
 }
 
+/// The progress made in a single network polling round.
 #[derive(Default)]
 pub(crate) struct PollProgress {
     pub rx_packets: usize,
     pub tx_packets: usize,
     pub timer_events: usize,
-    /// Whether this round increased data TX queue capacity.
-    pub tx_capacity_changed: bool,
     /// Whether work is ready for immediate processing in another round.
     ///
     /// A future protocol timer deadline does not count as immediate work.
     pub has_more: bool,
 }
 
-pub(crate) struct NetworkPollerConfig {
-    background_budget: PollBudget,
-    assist_budget: PollBudget,
-}
-
 pub(crate) struct NetworkPoller {
-    tx_waiters: PollSet,
     poller: kwork::BudgetedPoller<PollBudget, fn(PollBudget) -> kwork::BudgetedPollProgress>,
 }
 
 impl NetworkPoller {
-    fn new(config: NetworkPollerConfig) -> Self {
+    fn new() -> Self {
         Self {
-            tx_waiters: PollSet::new(),
             poller: kwork::BudgetedPoller::new(
                 "knet-poller",
-                config.background_budget,
-                config.assist_budget,
+                BACKGROUND_BUDGET,
+                ASSIST_BUDGET,
                 BACKGROUND_MAX_ROUNDS,
                 poll_network_once,
             ),
@@ -98,47 +89,28 @@ impl NetworkPoller {
         let _ = self.poller.notify_irq_safe();
     }
 
-    pub(crate) fn register_tx_waker(
-        &self,
-        context: &mut PollContext<'_>,
-    ) -> Result<(), PollRegisterError> {
-        context.register(&self.tx_waiters)
-    }
-
     /// Assists one already scheduled round from the current task context.
     pub(crate) fn assist_once(&self) {
         self.poller.assist_once();
     }
-
-    fn run_once(&self, budget: PollBudget) -> PollProgress {
-        if !SERVICE.is_inited() {
-            return PollProgress::default();
-        }
-
-        let progress = SERVICE.poll_budgeted(budget);
-        if progress.tx_capacity_changed {
-            self.tx_waiters.wake();
-        }
-        debug_assert!(progress.rx_packets <= budget.rx_packets);
-        debug_assert!(progress.tx_packets <= budget.tx_packets);
-        debug_assert!(progress.timer_events <= budget.timer_events);
-        progress
-    }
 }
 
+// Return a reference to the global network poller.
 pub(crate) fn network_poller() -> &'static NetworkPoller {
     &NETWORK_POLLER
 }
 
-/// Assists one already scheduled network polling round from task context.
-///
-/// The call does not publish new work or wait for another executor.
-pub(crate) fn assist_once() {
-    network_poller().assist_once();
-}
-
 fn poll_network_once(budget: PollBudget) -> kwork::BudgetedPollProgress {
+    if !SERVICE.is_inited() {
+        return kwork::BudgetedPollProgress::default();
+    }
+
+    let progress = SERVICE.poll_budgeted(budget);
+    debug_assert!(progress.rx_packets <= budget.rx_packets);
+    debug_assert!(progress.tx_packets <= budget.tx_packets);
+    debug_assert!(progress.timer_events <= budget.timer_events);
+
     kwork::BudgetedPollProgress {
-        has_more: NETWORK_POLLER.run_once(budget).has_more,
+        has_more: progress.has_more,
     }
 }
