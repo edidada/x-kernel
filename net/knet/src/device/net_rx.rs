@@ -5,19 +5,19 @@
 //! Shared `NetRx` packet queue.
 //!
 //! Analog of Linux `softnet_data.input_pkt_queue`: producers enqueue a
-//! [`PacketBuf`] and raise `NetRx`; the softirq (or a task-context fallback)
-//! drains stamped UDP. X-Kernel currently has one netns and one loopback, so one
-//! global queue state is enough. `NetRx` does not look up `LoopbackDevice`.
+//! prepared packet and raise `NetRx`; the softirq or a task-context fallback
+//! drains validated UDP. X-Kernel currently has one netns and one loopback, so
+//! one global queue state is enough. `NetRx` does not look up `LoopbackDevice`.
 //!
-//! Complete IPv4 UDP is stamped in task context before BH is disabled
-//! ([`prepare_for_enqueue`]). The action then moves those handles into the PCB
-//! queue. That keeps `Arc::make_mut` / parser work off the `SoftirqAction` hot
-//! path, while PCB enqueue itself only splices an existing handle into a
-//! reserved `VecDeque`.
+//! Complete IPv4 UDP is parsed into [`udp::PreparedUdpPacket`] in task context
+//! before BH is disabled by [`prepare_for_enqueue`]. The action then moves the
+//! validated packet into the PCB queue. Parser work stays off the
+//! `SoftirqAction` hot path, while PCB enqueue only appends an existing value to
+//! a reserved `VecDeque`.
 //!
-//! Packets without UDP metadata enter a separate deferred handle queue for the
-//! task poller. Unmatched UDP has its metadata cleared before joining that
-//! queue, so a later `process_pending` does not pick it up again.
+//! Other packets enter a separate [`PacketBuf`] queue for the task poller.
+//! Unmatched UDP is converted back into its generic buffer before joining that
+//! queue, so a later [`process_pending`] does not pick it up again.
 //!
 //! Occupancy is `pending_udp.len() + deferred.len() + in_flight`. `in_flight`
 //! covers packets taken out for UDP delivery so producers cannot refill those
@@ -35,14 +35,30 @@ use crate::{
     buf::PacketBuf,
     consts::SOCKET_BUFFER_SIZE,
     ipv4::{self, Ipv4Header},
-    udp,
+    udp::{self, PreparedUdpPacket},
 };
 
 /// Packets processed by one `NetRx` softirq invocation.
 pub(crate) const NET_RX_BUDGET: usize = 16;
 
+#[derive(Debug)]
+pub(crate) enum NetRxPacket {
+    PreparedUdp(PreparedUdpPacket),
+    Deferred(PacketBuf),
+}
+
+impl NetRxPacket {
+    #[cfg(unittest)]
+    fn ifindex(&self) -> i32 {
+        match self {
+            Self::PreparedUdp(packet) => packet.packet().ifindex(),
+            Self::Deferred(packet) => packet.ifindex(),
+        }
+    }
+}
+
 struct NetRxQueues {
-    pending_udp: VecDeque<PacketBuf>,
+    pending_udp: VecDeque<PreparedUdpPacket>,
     deferred: VecDeque<PacketBuf>,
     /// UDP packets currently outside the lock for PCB delivery.
     in_flight: usize,
@@ -89,16 +105,19 @@ pub(crate) fn has_work_for(ifindex: i32) -> bool {
         || queues
             .pending_udp
             .iter()
-            .chain(queues.deferred.iter())
+            .any(|packet| packet.packet().ifindex() == ifindex)
+        || queues
+            .deferred
+            .iter()
             .any(|packet| packet.ifindex() == ifindex)
 }
 
-/// Stamps complete IPv4 UDP metadata onto `packet` in task context.
+/// Parses complete IPv4 UDP into an owned validated packet in task context.
 ///
 /// Returns `None` when the packet is IPv4 UDP but fails the checked parser;
 /// the caller should drop it without occupying the queue. Other packets are
 /// returned unchanged for the task poller.
-pub(crate) fn prepare_for_enqueue(packet: PacketBuf) -> Option<PacketBuf> {
+pub(crate) fn prepare_for_enqueue(packet: PacketBuf) -> Option<NetRxPacket> {
     debug_assert!(
         !kirq::context::is_in_interrupt_context(),
         "prepare_for_enqueue requires task context"
@@ -108,42 +127,45 @@ pub(crate) fn prepare_for_enqueue(packet: PacketBuf) -> Option<PacketBuf> {
         .and_then(|ip_packet| Ipv4Header::parse_input(ip_packet).ok())
         .filter(|header| header.protocol() == ipv4::PROTOCOL_UDP && !header.is_fragmented());
     match udp_header {
-        Some(header) => match udp::prepare_ipv4_packet(header, packet) {
-            Ok(prepared) => Some(prepared.into_packet()),
-            Err(_) => None,
-        },
-        None => Some(packet),
+        Some(header) => udp::prepare_ipv4_packet(header, packet)
+            .ok()
+            .map(NetRxPacket::PreparedUdp),
+        None => Some(NetRxPacket::Deferred(packet)),
     }
 }
 
-/// Enqueue `packet` onto the matching shared handle queue.
+/// Enqueues a prepared UDP packet or a generic deferred packet.
 ///
 /// Returns `Err(packet)` when occupancy is already [`SOCKET_BUFFER_SIZE`].
-pub(crate) fn enqueue(packet: PacketBuf) -> Result<(), PacketBuf> {
+pub(crate) fn enqueue(packet: NetRxPacket) -> Result<(), NetRxPacket> {
     ensure_net_rx_queue();
     let mut queues = NET_RX_QUEUE.lock();
     if queues.occupancy() >= SOCKET_BUFFER_SIZE {
         return Err(packet);
     }
-    if packet.udp_metadata().is_some() {
-        debug_assert!(queues.pending_udp.len() < queues.pending_udp.capacity());
-        queues.pending_udp.push_back(packet);
-    } else {
-        debug_assert!(queues.deferred.len() < queues.deferred.capacity());
-        queues.deferred.push_back(packet);
+    match packet {
+        NetRxPacket::PreparedUdp(packet) => {
+            debug_assert!(queues.pending_udp.len() < queues.pending_udp.capacity());
+            queues.pending_udp.push_back(packet);
+        }
+        NetRxPacket::Deferred(packet) => {
+            debug_assert!(queues.deferred.len() < queues.deferred.capacity());
+            queues.deferred.push_back(packet);
+        }
     }
     Ok(())
 }
 
-/// Deliver up to `budget` stamped UDP packets without holding `NET_RX_QUEUE`
+/// Delivers up to `budget` prepared UDP packets without holding `NET_RX_QUEUE`
 /// across PCB enqueue or waiter wake.
 ///
-/// Returns whether stamped UDP remains after this batch, so the softirq can
+/// Returns whether prepared UDP remains after this batch, so the softirq can
 /// re-raise and [`drain_pending`] can continue.
 pub(crate) fn process_pending(budget: usize) -> bool {
     ensure_net_rx_queue();
     let batch_budget = budget.min(NET_RX_BUDGET);
-    let mut batch: [Option<PacketBuf>; NET_RX_BUDGET] = core::array::from_fn(|_| None);
+    let mut batch: [Option<PreparedUdpPacket>; NET_RX_BUDGET] = core::array::from_fn(|_| None);
+    let mut unmatched: [Option<PacketBuf>; NET_RX_BUDGET] = core::array::from_fn(|_| None);
     let mut batch_len = 0;
     {
         let mut queues = NET_RX_QUEUE.lock();
@@ -160,21 +182,23 @@ pub(crate) fn process_pending(budget: usize) -> bool {
         }
     }
 
-    for slot in &mut batch[..batch_len] {
+    for (slot, unmatched_slot) in batch[..batch_len]
+        .iter_mut()
+        .zip(unmatched[..batch_len].iter_mut())
+    {
         let Some(packet) = slot.take() else {
             continue;
         };
-        *slot = deliver_stamped_udp(packet);
+        *unmatched_slot = deliver_prepared_udp(packet);
     }
 
     let mut queues = NET_RX_QUEUE.lock();
     debug_assert!(queues.in_flight >= batch_len);
     queues.in_flight -= batch_len;
-    for slot in &mut batch[..batch_len] {
-        let Some(mut packet) = slot.take() else {
+    for slot in &mut unmatched[..batch_len] {
+        let Some(packet) = slot.take() else {
             continue;
         };
-        packet.clear_udp_metadata();
         debug_assert!(queues.occupancy() < SOCKET_BUFFER_SIZE);
         if queues.occupancy() < SOCKET_BUFFER_SIZE {
             debug_assert!(queues.deferred.len() < queues.deferred.capacity());
@@ -183,10 +207,12 @@ pub(crate) fn process_pending(budget: usize) -> bool {
             *slot = Some(packet);
         }
     }
-    !queues.pending_udp.is_empty()
+    let has_pending = !queues.pending_udp.is_empty();
+    drop(queues);
+    has_pending
 }
 
-/// Drain the stamped UDP present at entry with a bounded number of rounds.
+/// Drains the prepared UDP present at entry with a bounded number of rounds.
 pub(crate) fn drain_pending() {
     ensure_net_rx_queue();
     let pending_at_entry = NET_RX_QUEUE.lock().pending_udp.len();
@@ -219,8 +245,25 @@ pub(crate) fn discard_ifindex(ifindex: i32) {
     let mut dropped = Vec::with_capacity(SOCKET_BUFFER_SIZE);
     {
         let mut queues = NET_RX_QUEUE.lock();
-        take_ifindex(&mut queues.pending_udp, ifindex, &mut dropped);
+        take_prepared_ifindex(&mut queues.pending_udp, ifindex, &mut dropped);
         take_ifindex(&mut queues.deferred, ifindex, &mut dropped);
+    }
+}
+
+fn take_prepared_ifindex(
+    queue: &mut VecDeque<PreparedUdpPacket>,
+    ifindex: i32,
+    dropped: &mut Vec<PacketBuf>,
+) {
+    for _ in 0..queue.len() {
+        let Some(packet) = queue.pop_front() else {
+            break;
+        };
+        if packet.packet().ifindex() == ifindex {
+            dropped.push(packet.into_packet());
+        } else {
+            queue.push_back(packet);
+        }
     }
 }
 
@@ -237,12 +280,8 @@ fn take_ifindex(queue: &mut VecDeque<PacketBuf>, ifindex: i32, dropped: &mut Vec
     }
 }
 
-fn deliver_stamped_udp(packet: PacketBuf) -> Option<PacketBuf> {
-    let prepared = match udp::PreparedUdpPacket::from_stamped(packet) {
-        Ok(packet) => packet,
-        Err(packet) => return Some(packet),
-    };
-    match udp::deliver_ipv4_packet(prepared) {
+fn deliver_prepared_udp(packet: PreparedUdpPacket) -> Option<PacketBuf> {
+    match udp::deliver_ipv4_packet(packet) {
         (udp::InputDisposition::Accepted, _) => None,
         (udp::InputDisposition::NoSocket, returned) => {
             returned.map(udp::PreparedUdpPacket::into_packet)
@@ -253,15 +292,28 @@ fn deliver_stamped_udp(packet: PacketBuf) -> Option<PacketBuf> {
 #[cfg(unittest)]
 mod tests {
     use alloc::vec;
-    use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
     use unittest::def_test;
 
     use super::*;
-    use crate::buf::{PacketOwner, UdpPacketMetadata};
+    use crate::ip::Ipv4Address;
 
     fn test_packet(ifindex: i32) -> PacketBuf {
-        PacketBuf::from_ip_packet_vec(ifindex, vec![0; 20], PacketOwner::Loopback)
+        PacketBuf::from_ip_packet_vec(ifindex, vec![0; 20])
+    }
+
+    fn prepared_udp_packet(ifindex: i32) -> NetRxPacket {
+        let local_addr = Ipv4Address::new(127, 0, 0, 1);
+        let udp_packet = [0x30, 0x39, 0x13, 0x88, 0, 8, 0, 0];
+        let packet = crate::ipv4::build_ipv4_packet(
+            local_addr,
+            local_addr,
+            crate::ipv4::PROTOCOL_UDP,
+            64,
+            &udp_packet,
+        )
+        .unwrap();
+        prepare_for_enqueue(PacketBuf::from_ip_packet_vec(ifindex, packet)).unwrap()
     }
 
     // Serial: fills and discards entries on the shared NetRx queue.
@@ -282,7 +334,7 @@ mod tests {
     }
 
     #[def_test(serial)]
-    fn unstamped_packets_are_visible_to_the_task_poller() {
+    fn deferred_packets_are_visible_to_the_task_poller() {
         ensure_net_rx_queue();
         const IFINDEX: i32 = 1_000_002;
         enqueue(prepare_for_enqueue(test_packet(IFINDEX)).unwrap()).unwrap();
@@ -290,18 +342,14 @@ mod tests {
         assert!(!process_pending(NET_RX_BUDGET));
         let packet = pop_deferred(IFINDEX).expect("non-UDP should remain queued");
         assert_eq!(packet.ifindex(), IFINDEX);
-        assert!(packet.udp_metadata().is_none());
         assert!(!has_work_for(IFINDEX));
     }
 
     #[def_test(serial)]
-    fn stamped_udp_is_not_visible_to_the_task_poller() {
+    fn prepared_udp_is_not_visible_to_the_task_poller() {
         ensure_net_rx_queue();
         const IFINDEX: i32 = 1_000_003;
-        let mut packet = test_packet(IFINDEX);
-        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 12_345));
-        packet.set_udp_metadata(UdpPacketMetadata::new(addr, addr, 0, 0));
-        enqueue(packet).unwrap();
+        enqueue(prepared_udp_packet(IFINDEX)).unwrap();
 
         assert!(pop_deferred(IFINDEX).is_none());
         discard_ifindex(IFINDEX);

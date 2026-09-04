@@ -21,7 +21,7 @@ use ktime_types::{MonotonicInstant, TimeSpan};
 use lazyinit::LazyInit;
 
 use crate::{
-    buf::{PacketBuf, PacketOwner},
+    buf::PacketBuf,
     consts::ETHERNET_MAX_PENDING_PACKETS,
     device::{
         IF_OPER_DOWN, IF_OPER_UP, LINK_FLAG_BROADCAST, LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST,
@@ -424,12 +424,10 @@ impl EthernetDevice {
             ifindex,
             frame_data,
             dst_addr,
-            src_addr,
             ethertype,
             self.mac_addr(),
-            PacketOwner::DeviceRx,
         );
-        packet::publish_link_packet(&packet_buf);
+        packet::publish_link_packet(&packet_buf, src_addr, ethertype);
 
         if !dst_addr.is_broadcast() && dst_addr != MacAddress::ZERO && dst_addr != self.mac_addr() {
             return None;
@@ -893,7 +891,7 @@ mod tests {
         bytes[2..4].copy_from_slice(&packet_len.to_be_bytes());
         bytes[12..16].copy_from_slice(&source.octets());
         bytes[16..20].copy_from_slice(&[198, 51, 100, 1]);
-        PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceTx)
+        PacketBuf::from_ip_packet_vec(1, bytes)
     }
 
     #[def_test]

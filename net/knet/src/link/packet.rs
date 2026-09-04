@@ -31,7 +31,7 @@ use crate::{
         SetSocketOption,
     },
     service::Service,
-    wire::{ETHERNET_HEADER_LEN, EthernetFrameRef},
+    wire::{ETHERNET_HEADER_LEN, EtherType, EthernetFrameRef, MacAddress},
 };
 
 const ETH_P_ALL: u16 = 0x0003;
@@ -482,21 +482,17 @@ pub(crate) fn publish_link_frame(ifindex: i32, frame: &[u8], local_addr: [u8; 6]
     );
 }
 
-pub(crate) fn publish_link_packet(packet: &PacketBuf) {
+pub(crate) fn publish_link_packet(packet: &PacketBuf, src_addr: MacAddress, protocol: EtherType) {
     let active_sockets = PACKET_HANDLERS.active_sockets();
     if active_sockets.is_empty() {
         return;
     }
 
-    let Some(link_metadata) = packet.link_metadata() else {
-        return;
-    };
-
     publish_frame(
         active_sockets,
         packet.ifindex(),
         packet.data(),
-        packet_addr_from_packet(packet, link_metadata.src_addr.0),
+        packet_addr_from_packet(packet, src_addr.bytes(), protocol),
     );
 }
 
@@ -603,16 +599,15 @@ fn packet_addr_from_frame(
     }
 }
 
-fn packet_addr_from_packet(packet: &PacketBuf, src_addr: [u8; 6]) -> PacketAddr {
+fn packet_addr_from_packet(
+    packet: &PacketBuf,
+    src_addr: [u8; 6],
+    protocol: EtherType,
+) -> PacketAddr {
     let mut addr = [0; 8];
     addr[..src_addr.len()].copy_from_slice(&src_addr);
-    let protocol = packet
-        .link_metadata()
-        .map(|metadata| u16::from(metadata.protocol))
-        .unwrap_or(0);
-
     PacketAddr {
-        protocol: protocol.to_be(),
+        protocol: u16::from(protocol).to_be(),
         ifindex: packet.ifindex(),
         hatype: ARPHRD_ETHER,
         pkttype: packet_type_to_packet_addr(packet.packet_type()),

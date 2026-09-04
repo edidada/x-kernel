@@ -4,12 +4,26 @@
 
 use alloc::{collections::VecDeque, sync::Arc};
 
-use ::core::net::SocketAddr;
+use ::core::{net::SocketAddr, ops::Range};
 use kspin::SpinNoIrq;
 use ksync::RwLock;
 
 use super::{IPV4_DEFAULT_TTL, UDP_RX_QUEUE_CAPACITY, state::UdpSocketState};
-use crate::buf::{PacketBuf, UdpPacketMetadata};
+use crate::buf::PacketBuf;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UdpPacketMetadata {
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+    payload_start: usize,
+    payload_end: usize,
+}
+
+impl UdpPacketMetadata {
+    fn payload_range(self) -> Range<usize> {
+        self.payload_start..self.payload_end
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct UdpPayload {
@@ -33,14 +47,15 @@ pub(super) struct UdpDatagram {
 }
 
 /// A validated IPv4 UDP view over a reference-counted [`PacketBuf`].
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct PreparedUdpPacket {
     packet: PacketBuf,
+    metadata: UdpPacketMetadata,
 }
 
 impl PreparedUdpPacket {
     pub(super) fn new(
-        mut packet: PacketBuf,
+        packet: PacketBuf,
         payload_offset: usize,
         payload_len: usize,
         local_addr: SocketAddr,
@@ -57,13 +72,13 @@ impl PreparedUdpPacket {
             return Err(packet);
         }
 
-        packet.set_udp_metadata(UdpPacketMetadata::new(
+        let metadata = UdpPacketMetadata {
             local_addr,
             remote_addr,
-            payload_offset,
+            payload_start: payload_offset,
             payload_end,
-        ));
-        Ok(Self { packet })
+        };
+        Ok(Self { packet, metadata })
     }
 
     pub(crate) fn packet(&self) -> &PacketBuf {
@@ -71,29 +86,19 @@ impl PreparedUdpPacket {
     }
 
     pub(super) fn local_addr(&self) -> SocketAddr {
-        self.metadata().local_addr()
+        self.metadata.local_addr
     }
 
     pub(super) fn remote_addr(&self) -> SocketAddr {
-        self.metadata().remote_addr()
+        self.metadata.remote_addr
     }
 
     pub(crate) fn into_packet(self) -> PacketBuf {
         self.packet
     }
 
-    /// Rebuilds a validated view from a packet stamped by [`super::input::prepare_ipv4_packet`].
-    pub(crate) fn from_stamped(packet: PacketBuf) -> Result<Self, PacketBuf> {
-        if packet.udp_metadata().is_none() {
-            return Err(packet);
-        }
-        Ok(Self { packet })
-    }
-
     fn metadata(&self) -> UdpPacketMetadata {
-        self.packet
-            .udp_metadata()
-            .expect("PreparedUdpPacket always carries validated UDP metadata")
+        self.metadata
     }
 }
 
@@ -183,7 +188,6 @@ mod tests {
 
     use super::*;
     use crate::{
-        buf::PacketOwner,
         ip::Ipv4Address,
         ipv4,
         udp::{UDP_HEADER_LEN, UdpSocketState, output::write_udp_header},
@@ -210,7 +214,7 @@ mod tests {
             &udp_packet,
         )
         .unwrap();
-        let packet = PacketBuf::from_ip_packet_vec(1, packet, PacketOwner::DeviceRx);
+        let packet = PacketBuf::from_ip_packet_vec(1, packet);
         let header = ipv4::Ipv4Header::parse_input(packet.network_packet().unwrap()).unwrap();
         crate::udp::prepare_ipv4_packet(header, packet).unwrap()
     }
@@ -252,7 +256,7 @@ mod tests {
     }
 
     #[def_test]
-    fn enqueue_and_peek_reuse_the_prepared_packet_allocation() {
+    fn enqueue_and_peek_share_packet_storage() {
         let pcb = UdpPcb::new(UdpSocketState::new());
         let remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 1000);
         let packet = queued_packet(remote, 1);
@@ -286,10 +290,6 @@ mod tests {
     fn receive_queue_is_reserved_at_pcb_creation() {
         let pcb = UdpPcb::new(UdpSocketState::new());
         let capacity_at_create = pcb.rx_queue.lock().capacity();
-        assert_eq!(
-            core::mem::size_of::<PreparedUdpPacket>(),
-            core::mem::size_of::<usize>()
-        );
         assert!(capacity_at_create >= UDP_RX_QUEUE_CAPACITY);
 
         let remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 1000);
