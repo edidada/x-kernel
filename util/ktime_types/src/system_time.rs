@@ -40,6 +40,8 @@ impl SystemTime {
     };
 
     /// Creates a timestamp from normalized Unix second and nanosecond components.
+    ///
+    /// Returns `None` if `nanoseconds` is greater than or equal to one second.
     pub const fn from_unix_parts(seconds: i64, nanoseconds: u32) -> Option<Self> {
         if nanoseconds >= NANOS_PER_SEC as u32 {
             return None;
@@ -59,6 +61,10 @@ impl SystemTime {
     }
 
     /// Creates a timestamp from signed nanoseconds relative to the Unix epoch.
+    ///
+    /// Negative fractions use the preceding whole second and a non-negative
+    /// nanosecond remainder; for example, -1 ns is (-1 s, 999_999_999 ns).
+    /// Returns `None` outside the inclusive range [`Self::MIN`] to [`Self::MAX`].
     pub const fn from_unix_nanos(nanoseconds: i128) -> Option<Self> {
         let seconds = nanoseconds.div_euclid(NANOS_PER_SEC as i128);
         if seconds < i64::MIN as i128 || seconds > i64::MAX as i128 {
@@ -121,6 +127,12 @@ impl SystemTime {
     }
 
     /// Returns the non-negative duration since `earlier`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemTimeError`] with the exact positive difference if
+    /// `earlier` is later than `self`. Either direction's difference fits in
+    /// [`TimeSpan`], including the two extreme representable timestamps.
     pub const fn duration_since(self, earlier: Self) -> Result<TimeSpan, SystemTimeError> {
         let delta = self.unix_nanos() - earlier.unix_nanos();
         if delta < 0 {

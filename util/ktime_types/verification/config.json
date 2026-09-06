@@ -1,0 +1,426 @@
+{
+  "schema": 2,
+  "production": "util/ktime_types",
+  "library": "ktime_types",
+  "source_exclusions": [
+    "src/tests.rs"
+  ],
+  "tools": {
+    "kani": "cargo-kani 0.67.0",
+    "cvc5": "cvc5 1.3.4 [git f3b21c4 on branch HEAD]",
+    "host_toolchain": "1.95.0"
+  },
+  "timeout": "360s",
+  "loop_bounds": "_RNvNtNtCsci0VKyKEi6N_4core3str5count14do_count_chars.0:1,_RNvNtNtCsci0VKyKEi6N_4core3str5count14do_count_chars.1:1,_RNvNtNtCsci0VKyKEi6N_4core3str5count14do_count_chars.2:2,_RNvNtNtCsci0VKyKEi6N_4core3str5count14do_count_chars.3:3",
+  "host_tests": [
+    "tests/formatting.rs"
+  ],
+  "production_sha256": {
+    "util/ktime_types/Cargo.toml": "4e203f07be7db2a59ba31571bdfc33fce0db0ce59170f0b7742265ee4b253b16",
+    "util/ktime_types/src/instant.rs": "faff5c6322de1506989297c0c150176911f9534bba4fd942ce63b026fcac8eee",
+    "util/ktime_types/src/lib.rs": "dccc1287a5ef6b5f791f0b851efc54d80318dfa02ce247705c5f934155bf5f26",
+    "util/ktime_types/src/span.rs": "97e7f93c71f9beec7e587c168b2be7e7b678055ef3ef14a7a925656fb97acfb7",
+    "util/ktime_types/src/system_time.rs": "b34209638cd32e8bdb7ba1209bd678eedcbb7512c3c18b4548375145b25665e1",
+    "util/ktime_types/src/timestamp.rs": "6f058e922275ccf7ceadbcfa277364d6c14abe2bec97017ddf7989366913ab3e",
+    "util/ktime_types/src/units.rs": "2f79d943546d9ea267fa504110efbf737da13c68ee93e5996b364897e0b84e4b"
+  },
+  "harnesses": {
+    "verification::formatting::formatting_error_budget_error": {
+      "panic": false
+    },
+    "verification::formatting::formatting_error_default_length": {
+      "panic": false
+    },
+    "verification::formatting::formatting_error_propagates_sink_error": {
+      "panic": false
+    },
+    "verification::formatting::formatting_instant_budget_error": {
+      "panic": false
+    },
+    "verification::formatting::formatting_instant_default_length": {
+      "panic": false
+    },
+    "verification::formatting::formatting_instant_propagates_sink_error": {
+      "panic": false
+    },
+    "verification::formatting::formatting_limits_budget_error": {
+      "panic": false
+    },
+    "verification::formatting::formatting_limits_default_length": {
+      "panic": false
+    },
+    "verification::formatting::formatting_limits_propagates_sink_error": {
+      "panic": false
+    },
+    "verification::formatting::formatting_span_budget_error": {
+      "panic": false
+    },
+    "verification::formatting::formatting_span_default_length": {
+      "panic": false
+    },
+    "verification::formatting::formatting_system_budget_error": {
+      "panic": false
+    },
+    "verification::formatting::formatting_system_default_length": {
+      "panic": false
+    },
+    "verification::formatting::formatting_system_propagates_sink_error": {
+      "panic": false
+    },
+    "verification::instant::instant_add_panics_at_boundary": {
+      "panic": true,
+      "universal": false,
+      "functions": [
+        "core::option::expect_failed"
+      ]
+    },
+    "verification::instant::instant_addition_boottime": {
+      "panic": false
+    },
+    "verification::instant::instant_addition_monotonic": {
+      "panic": false
+    },
+    "verification::instant::instant_addition_process_cpu": {
+      "panic": false
+    },
+    "verification::instant::instant_addition_thread_cpu": {
+      "panic": false
+    },
+    "verification::instant::instant_constructors_all_domains": {
+      "panic": false
+    },
+    "verification::instant::instant_difference_panics_for_reversed_order": {
+      "panic": true,
+      "universal": false,
+      "functions": [
+        "core::option::expect_failed"
+      ]
+    },
+    "verification::instant::instant_differences_boottime": {
+      "panic": false
+    },
+    "verification::instant::instant_differences_monotonic": {
+      "panic": false
+    },
+    "verification::instant::instant_differences_process_cpu": {
+      "panic": false
+    },
+    "verification::instant::instant_differences_thread_cpu": {
+      "panic": false
+    },
+    "verification::instant::instant_sub_panics_before_origin": {
+      "panic": true,
+      "universal": false,
+      "functions": [
+        "core::option::expect_failed"
+      ]
+    },
+    "verification::instant::instant_subtraction_boottime": {
+      "panic": false
+    },
+    "verification::instant::instant_subtraction_monotonic": {
+      "panic": false
+    },
+    "verification::instant::instant_subtraction_process_cpu": {
+      "panic": false
+    },
+    "verification::instant::instant_subtraction_thread_cpu": {
+      "panic": false
+    },
+    "verification::panic_contracts::panic_contract_clamp_instant": {
+      "panic": true,
+      "universal": true,
+      "functions": [
+        "<ktime_types::Instant<ktime_types::Monotonic> as core::cmp::Ord>::clamp",
+        "<ktime_types::Instant<ktime_types::Boottime> as core::cmp::Ord>::clamp",
+        "<ktime_types::Instant<ktime_types::ProcessCpu> as core::cmp::Ord>::clamp",
+        "<ktime_types::Instant<ktime_types::ThreadCpu> as core::cmp::Ord>::clamp",
+        "<ktime_types::Instant<verification::panic_contracts::OrderedApplicationClock> as core::cmp::Ord>::clamp"
+      ],
+      "description": "assertion failed: min <= max",
+      "assertion": ".assertion.1"
+    },
+    "verification::panic_contracts::panic_contract_clamp_span": {
+      "panic": true,
+      "universal": true,
+      "functions": [
+        "<ktime_types::TimeSpan as core::cmp::Ord>::clamp"
+      ],
+      "description": "assertion failed: min <= max",
+      "assertion": ".assertion.1"
+    },
+    "verification::panic_contracts::panic_contract_clamp_system": {
+      "panic": true,
+      "universal": true,
+      "functions": [
+        "<ktime_types::SystemTime as core::cmp::Ord>::clamp"
+      ],
+      "description": "assertion failed: min <= max",
+      "assertion": ".assertion.1"
+    },
+    "verification::panic_contracts::panic_contract_instant_add": {
+      "panic": true,
+      "universal": true,
+      "functions": [
+        "core::option::expect_failed"
+      ]
+    },
+    "verification::panic_contracts::panic_contract_instant_difference": {
+      "panic": true,
+      "universal": true,
+      "functions": [
+        "core::option::expect_failed"
+      ]
+    },
+    "verification::panic_contracts::panic_contract_instant_sub": {
+      "panic": true,
+      "universal": true,
+      "functions": [
+        "core::option::expect_failed"
+      ]
+    },
+    "verification::panic_contracts::panic_contract_limits_excess_granularity": {
+      "panic": true,
+      "universal": true,
+      "functions": [
+        "ktime_types::TimestampLimits::new"
+      ]
+    },
+    "verification::panic_contracts::panic_contract_limits_reversed_range": {
+      "panic": true,
+      "universal": true,
+      "functions": [
+        "ktime_types::TimestampLimits::new"
+      ]
+    },
+    "verification::panic_contracts::panic_contract_limits_zero_granularity": {
+      "panic": true,
+      "universal": true,
+      "functions": [
+        "ktime_types::TimestampLimits::new"
+      ]
+    },
+    "verification::panic_contracts::panic_contract_span_normalization": {
+      "panic": true,
+      "universal": true,
+      "functions": [
+        "core::option::expect_failed"
+      ]
+    },
+    "verification::panic_contracts::panic_contract_system_add": {
+      "panic": true,
+      "universal": true,
+      "functions": [
+        "core::option::expect_failed"
+      ]
+    },
+    "verification::panic_contracts::panic_contract_system_sub": {
+      "panic": true,
+      "universal": true,
+      "functions": [
+        "core::option::expect_failed"
+      ]
+    },
+    "verification::span::span_checked_add_has_exact_domain_and_value": {
+      "panic": false
+    },
+    "verification::span::span_checked_arithmetic_is_reversible": {
+      "panic": false
+    },
+    "verification::span::span_checked_sub_has_exact_domain_and_value": {
+      "panic": false
+    },
+    "verification::span::span_constants_and_default": {
+      "panic": false
+    },
+    "verification::span::span_core_roundtrip_and_components": {
+      "panic": false
+    },
+    "verification::span::span_getters_round_down": {
+      "panic": false
+    },
+    "verification::span::span_nanos_roundtrip": {
+      "panic": false
+    },
+    "verification::span::span_new_normalizes_representable_components": {
+      "panic": false
+    },
+    "verification::span::span_new_panics_at_overflow_boundary": {
+      "panic": true,
+      "universal": false,
+      "functions": [
+        "core::option::expect_failed"
+      ]
+    },
+    "verification::span::span_order_matches_total_nanoseconds": {
+      "panic": false
+    },
+    "verification::span::span_saturating_arithmetic_matches_clamped_totals": {
+      "panic": false
+    },
+    "verification::span::span_try_from_nanos_has_exact_domain": {
+      "panic": false
+    },
+    "verification::span::span_u64_conversions_have_exact_boundaries": {
+      "panic": false
+    },
+    "verification::span::span_unit_constructors_are_exact": {
+      "panic": false
+    },
+    "verification::system_time::system_add_panics_at_boundary": {
+      "panic": true,
+      "universal": false,
+      "functions": [
+        "core::option::expect_failed"
+      ]
+    },
+    "verification::system_time::system_checked_add_matches_signed_total": {
+      "panic": false
+    },
+    "verification::system_time::system_checked_sub_matches_signed_total": {
+      "panic": false
+    },
+    "verification::system_time::system_constants_and_seconds": {
+      "panic": false
+    },
+    "verification::system_time::system_duration_since_reports_exact_magnitude_and_sign": {
+      "panic": false
+    },
+    "verification::system_time::system_nanos_have_exact_domain_and_floor_normalization": {
+      "panic": false
+    },
+    "verification::system_time::system_nanos_roundtrip_and_order": {
+      "panic": false
+    },
+    "verification::system_time::system_parts_have_exact_domain": {
+      "panic": false
+    },
+    "verification::system_time::system_sub_panics_at_boundary": {
+      "panic": true,
+      "universal": false,
+      "functions": [
+        "core::option::expect_failed"
+      ]
+    },
+    "verification::timestamp_limits_constants_and_units": {
+      "panic": false
+    },
+    "verification::timestamp_limits_construction_preserves_components": {
+      "panic": false
+    },
+    "verification::timestamp_limits_panics_for_excess_granularity": {
+      "panic": true,
+      "universal": false,
+      "functions": [
+        "ktime_types::TimestampLimits::new"
+      ]
+    },
+    "verification::timestamp_limits_panics_for_reversed_range": {
+      "panic": true,
+      "universal": false,
+      "functions": [
+        "ktime_types::TimestampLimits::new"
+      ]
+    },
+    "verification::timestamp_limits_panics_for_zero_granularity": {
+      "panic": true,
+      "universal": false,
+      "functions": [
+        "ktime_types::TimestampLimits::new"
+      ]
+    },
+    "verification::traits::custom_clock_addition": {
+      "panic": false
+    },
+    "verification::traits::custom_clock_constructors": {
+      "panic": false
+    },
+    "verification::traits::custom_clock_differences": {
+      "panic": false
+    },
+    "verification::traits::custom_clock_subtraction": {
+      "panic": false
+    },
+    "verification::traits::traits_clamp_instant_boottime": {
+      "panic": false
+    },
+    "verification::traits::traits_clamp_instant_custom_clock": {
+      "panic": false
+    },
+    "verification::traits::traits_clamp_instant_monotonic": {
+      "panic": false
+    },
+    "verification::traits::traits_clamp_instant_process_cpu": {
+      "panic": false
+    },
+    "verification::traits::traits_clamp_instant_thread_cpu": {
+      "panic": false
+    },
+    "verification::traits::traits_clamp_span": {
+      "panic": false
+    },
+    "verification::traits::traits_clamp_system": {
+      "panic": false
+    },
+    "verification::traits::traits_error_equality_and_copy": {
+      "panic": false
+    },
+    "verification::traits::traits_instant_boottime": {
+      "panic": false
+    },
+    "verification::traits::traits_instant_custom_clock": {
+      "panic": false
+    },
+    "verification::traits::traits_instant_hash_all_domains": {
+      "panic": false
+    },
+    "verification::traits::traits_instant_monotonic": {
+      "panic": false
+    },
+    "verification::traits::traits_instant_process_cpu": {
+      "panic": false
+    },
+    "verification::traits::traits_instant_thread_cpu": {
+      "panic": false
+    },
+    "verification::traits::traits_limits_equality_and_copy": {
+      "panic": false
+    },
+    "verification::traits::traits_span_hash_is_exact_component_stream": {
+      "panic": false
+    },
+    "verification::traits::traits_span_order_and_copy": {
+      "panic": false
+    },
+    "verification::traits::traits_system_hash_is_exact_component_stream": {
+      "panic": false
+    },
+    "verification::traits::traits_system_order_and_copy": {
+      "panic": false
+    },
+    "verification::truncate_clamps_to_exact_endpoints": {
+      "panic": false
+    },
+    "verification::truncate_input_classes_are_reachable": {
+      "panic": false
+    },
+    "verification::truncate_is_idempotent": {
+      "panic": false
+    },
+    "verification::truncate_is_monotonic": {
+      "panic": false
+    },
+    "verification::truncate_preserves_range_and_normalization": {
+      "panic": false
+    },
+    "verification::truncate_respects_granularity": {
+      "panic": false
+    },
+    "verification::truncate_rounds_interior_down_by_less_than_one_granule": {
+      "panic": false
+    }
+  },
+  "doctests": [
+    "tests/domains.rs"
+  ]
+}

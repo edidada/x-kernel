@@ -53,7 +53,11 @@ impl TimeSpan {
         ))
     }
 
-    /// Creates a time span from normalized second and nanosecond components.
+    /// Creates a time span, carrying excess nanoseconds into whole seconds.
+    ///
+    /// # Panics
+    ///
+    /// Panics if normalization would overflow the `u64` seconds component.
     pub const fn new(seconds: u64, nanoseconds: u32) -> Self {
         Self(Duration::new(seconds, nanoseconds))
     }
