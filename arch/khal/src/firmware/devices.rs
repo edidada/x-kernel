@@ -28,8 +28,8 @@ use alloc::vec::Vec;
 #[cfg(target_arch = "x86_64")]
 use lazyinit::LazyInit;
 pub use of::{
-    ClockSpec, InterruptControllerKind, InterruptInfo, InterruptTrigger, PciHostCam, PciHostInfo,
-    PciRangeInfo,
+    AssignedClock, ClockSpec, InterruptControllerKind, InterruptInfo, InterruptTrigger, PciHostCam,
+    PciHostInfo, PciRangeInfo,
 };
 
 /// Cached IO-APIC physical address from ACPI MADT.
@@ -81,7 +81,14 @@ pub struct FirmwareDevice {
     /// `ResourceDesc::Clk` by the DT-to-device builder so drivers resolve
     /// clocks through `first_clk()` like MMIO and IRQ.
     pub clock_specs: Vec<of::ClockSpec>,
+    /// For clock-controller nodes: the parsed `assigned-clocks` +
+    /// `assigned-clock-rates` pair, in declaration order (Linux
+    /// `of_clk_set_defaults` input). Empty when the node assigns nothing.
+    pub assigned_clocks: Vec<AssignedClock>,
 }
+
+/// One `assigned-clocks` entry with its `assigned-clock-rates` target.
+/// Re-exported from the `of` crate (see [`of::AssignedClock`]).
 
 #[derive(Debug, Clone, Copy)]
 pub struct MmioResource {
@@ -241,6 +248,7 @@ pub fn for_each_compatible(
             clock_cells: node.property_u32("#clock-cells"),
             clock_output_name: of::clock_output_name(node),
             clock_specs: of::device_clock_specs(node),
+            assigned_clocks: of::device_assigned_clocks(node),
         });
     }
 }

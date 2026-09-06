@@ -27,6 +27,9 @@ use kdevice::{
     BusTypeId, DeviceDriver, DeviceMatcher, DeviceObject, FirmwareMatchSpec, MatchResult, priority,
 };
 
+#[cfg(feature = "clk-rk3588-cru")]
+pub(crate) mod rk3588_cru;
+
 /// Match DT `fixed-clock` nodes.
 struct FixedClockMatcher;
 
@@ -89,7 +92,11 @@ impl DeviceDriver for FixedClockDriver {
         // node. Never re-walk the global DT here: several fixed-clock nodes
         // may share the same compatible string but have distinct providers.
         let provider = device.clk_provider().ok_or(DriverError::InvalidInput)?;
-        let rate = provider.fixed_rate_hz();
+        // Multi-output controllers carry a provider descriptor without a
+        // fixed rate; this driver only claims the fixed-clock form.
+        let Some(rate) = provider.fixed_rate_hz() else {
+            return Ok(());
+        };
         let phandle = provider.provider_id();
 
         // Register under the DT phandle so `clocks = <&phandle>` references
@@ -136,4 +143,10 @@ const DRIVER_FACTORIES: &[crate::driver_registry::DriverFactory] = &[fixed_clock
 
 pub fn register_all(registrar: &mut crate::driver_registry::DriverRegistrar) {
     crate::driver_registry::register_factories(registrar, DRIVER_FACTORIES);
+}
+
+/// Register the RK3588 CRU controller driver (feature `clk-rk3588-cru`).
+#[cfg(feature = "clk-rk3588-cru")]
+pub fn register_rk3588_cru(registrar: &mut crate::driver_registry::DriverRegistrar) {
+    crate::driver_registry::register_factories(registrar, &[rk3588_cru::rk3588_cru_descriptor]);
 }

@@ -702,9 +702,11 @@ impl ClkCore {
 
         let parents: Vec<(u8, Rate)> = {
             let table = self.parents.lock();
+            let no_reparent = self.flags.contains(ClkFlags::NO_REPARENT);
             let entries: Vec<(u8, Arc<ClkCore>)> = table
                 .iter()
                 .enumerate()
+                .filter(|(i, _)| !no_reparent || *i as u8 == current)
                 .filter_map(|(i, p)| p.as_ref().map(|pc| (i as u8, pc.clone())))
                 .collect();
             entries
@@ -755,6 +757,16 @@ impl ClkCore {
         let _guard = CLK_LOCK.lock();
         let rate = self.clamp_rate(rate);
         let old = self.get_rate();
+
+        // Same-rate request: a no-op. Mirrors Linux `clk_core_set_rate_nolock`,
+        // which returns early when the request equals the current rate — the
+        // hardware sequence (mux dances, PLL power cycles) must not re-run for
+        // an already-active rate, and subscribers must not observe a zero-delta
+        // "change". This is what makes re-applying firmware/bootloader rates
+        // (DT assigned-clock-rates) safe on live hardware.
+        if rate == old {
+            return Ok(old);
+        }
 
         if !self.notify_pre(old, rate) {
             self.notify_aborted(old, rate);
@@ -820,20 +832,39 @@ impl ClkCore {
             // Upward: the node asks its selected parent to change rate.
             let parent = self.parent_node().ok_or(ClkError::NotSupported)?;
             let old_parent_rate = parent.get_rate();
+            if old_parent_rate == target {
+                // Parent already at target (e.g. set through another path):
+                // nothing to program; report this node through recalc.
+                return self.ops.recalc_rate(old_parent_rate);
+            }
+            // The parent's own subscribers observe this change too: Linux
+            // fires rate notifiers on every clock whose rate changes,
+            // including parents changed on a child's behalf (clk_change_rate).
+            // The rockchip cpuclk/frac remux dances hook exactly these events.
+            if !parent.notify_pre(old_parent_rate, target) {
+                parent.notify_aborted(old_parent_rate, target);
+                return Err(ClkError::Aborted);
+            }
             match parent.set_rate_locked(target) {
-                Ok(actual_parent) => match self.ops.recalc_rate(actual_parent) {
-                    Ok(rate) => Ok(rate),
-                    Err(error) => {
-                        // The child could not accept the newly programmed
-                        // parent rate. Restore the upstream transaction before
-                        // reporting an aborted change to this node's consumer.
-                        match parent.set_rate_locked(old_parent_rate) {
-                            Ok(restored) if restored == old_parent_rate => Err(error),
-                            Ok(_) | Err(_) => Err(ClkError::BadState),
+                Ok(actual_parent) => {
+                    parent.notify_post(old_parent_rate, actual_parent);
+                    match self.ops.recalc_rate(actual_parent) {
+                        Ok(rate) => Ok(rate),
+                        Err(error) => {
+                            // The child could not accept the newly programmed
+                            // parent rate. Restore the upstream transaction before
+                            // reporting an aborted change to this node's consumer.
+                            match parent.set_rate_locked(old_parent_rate) {
+                                Ok(restored) if restored == old_parent_rate => Err(error),
+                                Ok(_) | Err(_) => Err(ClkError::BadState),
+                            }
                         }
                     }
-                },
-                Err(error) => Err(error),
+                }
+                Err(error) => {
+                    parent.notify_aborted(old_parent_rate, target);
+                    Err(error)
+                }
             }
         } else {
             // Own rate field. A transparent node (no `set_rate`) only

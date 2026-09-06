@@ -1,0 +1,1 @@
+orange-pi-5.10-rk3588 @ eb1c681e5184e51d8ce1f351559d149d17f48b57 (Rockchip 5.10 BSP; sparse: dt-bindings clock/reset rk3588 + clk-rk3588.c, fetched 2026-09-06)

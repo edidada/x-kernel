@@ -43,5 +43,14 @@ bitflags! {
         /// **Implemented:** `get_rate` re-reads the hardware rate (and refreshes
         /// the cache) instead of returning the cached value.
         const GET_RATE_NOCACHE = 1 << 6;
+        /// Never switch parents during rate changes (Linux `CLK_SET_RATE_NO_REPARENT`).
+        ///
+        /// **Implemented:** `determine_rate` sees only the currently selected
+        /// parent, so a mux carrying this flag rounds by reprogramming its
+        /// parent (with [`SET_RATE_PARENT`](Self::SET_RATE_PARENT)) instead of
+        /// laterally selecting a different source. The rockchip CPU-clock and
+        /// PLL mode muxes rely on this: their source switching is driven by
+        /// dedicated sequences, not by generic rate rounding.
+        const NO_REPARENT = 1 << 7;
     }
 }

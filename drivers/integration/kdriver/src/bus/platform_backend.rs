@@ -118,19 +118,43 @@ impl PlatformBackend {
                         super::irq_trigger_from_firmware(irq.trigger),
                     )));
                 }
-                // ClkProviderDesc describes exactly the DT fixed-clock form:
-                // #clock-cells = <0> (single output) plus a frequency. A node
-                // with more clock cells is a multi-output controller — its
-                // metadata belongs to the SoC driver that matches its
-                // compatible, not to this generic resource.
-                if dev.clock_cells == Some(0)
-                    && let (Some(provider_id), Some(rate_hz)) = (dev.phandle, dev.clock_frequency)
+                // ClkProviderDesc carries the node's provider identity (its DT
+                // phandle). For `fixed-clock` nodes (`#clock-cells = <0>`) it
+                // also carries the mandatory fixed rate. A node with more
+                // clock cells is a multi-output controller — its rate data
+                // belongs to the SoC driver that matches its compatible; the
+                // descriptor just hands that driver its ProviderId.
+                if dev.clock_cells.is_some()
+                    && let Some(provider_id) = dev.phandle
                 {
-                    let mut provider = ClkProviderDesc::new(provider_id, u64::from(rate_hz));
-                    if let Some(name) = dev.clock_output_name {
-                        provider = provider.with_output_name(name);
+                    // A fixed-clock without a frequency is a firmware error:
+                    // it produces no resource at all.
+                    let provider = match (dev.clock_cells, dev.clock_frequency) {
+                        (Some(0), Some(rate_hz)) => {
+                            Some(ClkProviderDesc::new(provider_id, u64::from(rate_hz)))
+                        }
+                        (Some(0), None) => None,
+                        _ => Some(ClkProviderDesc::controller(provider_id)),
+                    };
+                    if let Some(provider) = provider {
+                        let provider = match dev.clock_output_name {
+                            Some(name) => provider.with_output_name(name),
+                            None => provider,
+                        };
+                        resources.push(ResourceDesc::ClkProvider(provider));
                     }
-                    resources.push(ResourceDesc::ClkProvider(provider));
+                }
+                // assigned-clocks/assigned-clock-rates on a clock-controller
+                // node become per-entry resources the controller driver applies
+                // after registering its outputs (Linux of_clk_set_defaults).
+                // The firmware type is converted to the resource-contract type
+                // here, mirroring the ClockSpec → ClkSpec boundary.
+                for assigned in &dev.assigned_clocks {
+                    resources.push(ResourceDesc::AssignedClock(device_res::AssignedClock {
+                        provider: assigned.provider,
+                        index: assigned.index,
+                        rate_hz: assigned.rate_hz,
+                    }));
                 }
 
                 let registration = if dev.firmware_id == VIRTIO_MMIO_DT_COMPATIBLE {

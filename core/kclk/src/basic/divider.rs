@@ -26,6 +26,18 @@ bitflags! {
         /// is the exponent. Matches Linux `CLK_DIVIDER_POWER_OF_TWO`. Implies
         /// the achievable rates are sparse.
         const POWER_OF_TWO = 1 << 1;
+        /// Write the divider field atomically via the hiword-mask convention
+        /// (Linux `CLK_DIVIDER_HIWORD_MASK`): the upper 16 bits of the written
+        /// word are the write-enable mask, the lower 16 the value. This is a
+        /// single `reg_write`, not a read-modify-write, so the field update
+        /// cannot lose a race against a gate's fast-path enable on a shared
+        /// register word (Rockchip CRU style). Requires `shift + width <= 16`.
+        const HIWORD_MASK = 1 << 2;
+        /// The divider field is maintained by another agent (bootloader,
+        /// secure firmware); the driver must only read it. Matches Linux
+        /// `CLK_DIVIDER_READ_ONLY`: `set_rate` is rejected and rounding
+        /// reports the rate already in hardware.
+        const READ_ONLY = 1 << 3;
     }
 }
 
@@ -106,6 +118,25 @@ impl Divider {
     /// Field mask for `width` bits.
     fn field_mask(&self) -> u32 {
         (1u32 << self.width) - 1
+    }
+
+    /// Whether to use the hiword-mask atomic write (single `reg_write`) instead
+    /// of a read-modify-write. The hiword convention needs the field within
+    /// the low 16 bits so the write mask (`field << 16`) stays in the upper half.
+    fn hiword(&self) -> bool {
+        self.flags.contains(DividerFlags::HIWORD_MASK) && self.shift + self.width <= 16
+    }
+
+    /// Write the raw field value. Atomic (single write) when `hiword`, else RMW.
+    fn write_raw(&self, raw: u32) {
+        let field = (raw & self.field_mask()) << self.shift;
+        if self.hiword() {
+            let mask = self.field_mask() << (self.shift + 16);
+            self.reg.reg_write(self.offset, mask | field);
+        } else {
+            self.reg
+                .reg_modify(self.offset, self.field_mask() << self.shift, field);
+        }
     }
 
     /// Maximum achievable divider value.
@@ -239,6 +270,15 @@ impl ClkHwOps for Divider {
     }
 
     fn round_rate(&self, rate: Rate, parent_rate: Rate) -> ClkResult<RoundResult> {
+        // READ_ONLY: report the rate already in hardware (Linux's read-only
+        // divider ops carry no rounding hook, so the core sees the current
+        // divider as the only "achievable" rate).
+        if self.flags.contains(DividerFlags::READ_ONLY) {
+            return Ok(RoundResult {
+                rate: self.recalc_rate(parent_rate)?,
+                parent_target: None,
+            });
+        }
         let div = self.closest_div(parent_rate, rate);
         Ok(RoundResult {
             rate: rate_for(parent_rate, div),
@@ -247,11 +287,12 @@ impl ClkHwOps for Divider {
     }
 
     fn set_rate(&self, rate: Rate, parent_rate: Rate) -> ClkResult<Rate> {
+        if self.flags.contains(DividerFlags::READ_ONLY) {
+            return Err(ClkError::NotSupported);
+        }
         let div = self.closest_div(parent_rate, rate);
         let raw = self.div_to_raw(div)?;
-        let field = (raw & self.field_mask()) << self.shift;
-        self.reg
-            .reg_modify(self.offset, self.field_mask() << self.shift, field);
+        self.write_raw(raw);
         Ok(rate_for(parent_rate, self.raw_to_div(raw)?))
     }
 }

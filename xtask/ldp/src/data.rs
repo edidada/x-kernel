@@ -121,6 +121,10 @@ pub struct FieldClaim {
     /// 参考树内的符号名(如 `MSG_ID_MASK`)。提取器据参考文件机械导出
     /// 它的 [lsb, msb] 真值,与 `claim` 比对。
     pub ref_symbol: String,
+    /// 可选:该字段的移位符号(如 `XXX_SHIFT`,MASK/SHIFT 对写法的寄存器)。
+    /// 给出时,真值 = mask 符号位段整体右移 shift 后的绝对位段。
+    #[serde(default)]
+    pub ref_shift_symbol: Option<String>,
     /// 移植方声明。`lsb`/`msb` 是被验证的断言(抄对了吗),非自由字段。
     pub claim: FieldSpan,
 }

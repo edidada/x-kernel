@@ -9,7 +9,7 @@
 //! hardware. The provider registry is replaceable under `--cfg unittest`, so
 //! each provider-scoped test installs its own [`ClkTable`].
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 
 use kspin::SpinNoIrq;
 use unittest::{assert_eq, def_test};
@@ -17,9 +17,9 @@ use unittest::{assert_eq, def_test};
 use crate::{
     ClkBranch, ClkBuilder, ClkError, ClkEvent, ClkFlags, ClkHandle, ClkHwOps, ClkRegAccess,
     ClkTable, DivTableEntry, Divider, DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux,
-    NotifierResult, ParentRef, basic::Composite, clk_disable_unused, clk_get_by_index,
-    clk_get_by_name, register_provider, register_table, reset_providers, table::ClkNodeDesc,
-    unregister_provider,
+    MuxFlags, NotifierResult, NullClkReg, ParentRef, Rate, basic::Composite, clk_disable_unused,
+    clk_get_by_index, clk_get_by_name, register_provider, register_table, reset_providers,
+    table::ClkNodeDesc, unregister_provider,
 };
 
 /// Array-backed register accessor for testing field math.
@@ -491,7 +491,7 @@ fn mux_table_maps_parent_index_to_register_value() {
     // Linux clk_mux table direction: table[index] = raw register value.
     // Parent 0 -> raw 0, parent 1 -> raw 2, parent 2 -> raw 3 (sparse).
     static TABLE: &[u8] = &[0, 2, 3];
-    let mux = Mux::new(reg.clone(), 0, 0, 0x3, Some(TABLE));
+    let mux = Mux::new(reg.clone(), 0, 0, 0x3, Some(TABLE), MuxFlags::empty());
 
     // Selecting parent 1 writes raw 2.
     mux.set_parent(1).unwrap();
@@ -506,7 +506,7 @@ fn mux_table_maps_parent_index_to_register_value() {
 #[def_test(serial)]
 fn mux_selects_parent_and_reports_index() {
     let reg = Arc::new(MockReg::new());
-    let mux = Mux::new(reg.clone(), 0, 0, 0x3, None);
+    let mux = Mux::new(reg.clone(), 0, 0, 0x3, None, MuxFlags::empty());
 
     assert_eq!(mux.num_parents(), 4);
     assert_eq!(mux.get_parent().unwrap(), 0);
@@ -538,7 +538,7 @@ fn set_parent_gate_rejects_switch_while_prepared() {
         .unwrap();
     let mux = ClkBuilder::new(
         "mux",
-        Mux::into_ops(Arc::new(MockReg::new()), 0, 0, 0x1, None),
+        Mux::into_ops(Arc::new(MockReg::new()), 0, 0, 0x1, None, MuxFlags::empty()),
     )
     .flags(ClkFlags::SET_PARENT_GATE)
     .parents(alloc::vec![Some(p1), Some(p2)])
@@ -570,8 +570,14 @@ fn core_set_parent_recomputes_rate_from_new_parent() {
         .build()
         .unwrap();
     // A rate-transparent mux feeding a CPU clock.
-    let mux_ops: Arc<dyn crate::ClkHwOps> =
-        Arc::new(Mux::new(Arc::new(MockReg::new()), 0, 0, 0x3, None));
+    let mux_ops: Arc<dyn crate::ClkHwOps> = Arc::new(Mux::new(
+        Arc::new(MockReg::new()),
+        0,
+        0,
+        0x3,
+        None,
+        MuxFlags::empty(),
+    ));
     let cpu = ClkBuilder::new("cpu", mux_ops)
         .parent(osc24.clone())
         .parent(osc32.clone())
@@ -662,7 +668,7 @@ fn composite_dispatches_rate_and_gate_to_sub_nodes() {
         .build()
         .unwrap();
 
-    let mux = Mux::into_ops(reg.clone(), 0, 0, 0x1, None);
+    let mux = Mux::into_ops(reg.clone(), 0, 0, 0x1, None, MuxFlags::empty());
     let div = Divider::into_ops(reg.clone(), 0, 4, 2, None, DividerFlags::empty());
     let gate = Gate::into_ops(reg.clone(), 0, 8, GateFlags::empty());
 
@@ -816,7 +822,7 @@ fn set_rate_propagates_to_parent_when_flag_set() {
 
     // A pass-through mux carrying SET_RATE_PARENT; it has no own set_rate, so a
     // rate request must climb to the divider parent.
-    let mux = Mux::into_ops(Arc::new(MockReg::new()), 0, 0, 0x1, None);
+    let mux = Mux::into_ops(Arc::new(MockReg::new()), 0, 0, 0x1, None, MuxFlags::empty());
     let passthrough = ClkBuilder::new("pass", mux)
         .flags(ClkFlags::SET_RATE_PARENT)
         .parent(div.clone())
@@ -873,7 +879,7 @@ fn mux_determine_rate_selects_closest_parent() {
     let osc32 = ClkBuilder::new("osc32", FixedRate::new(32_000_000).into_ops())
         .build()
         .unwrap();
-    let mux = Mux::into_ops(Arc::new(MockReg::new()), 0, 0, 0x1, None);
+    let mux = Mux::into_ops(Arc::new(MockReg::new()), 0, 0, 0x1, None, MuxFlags::empty());
     let clk = ClkBuilder::new("mux", mux)
         .parent(osc24)
         .parent(osc32)
@@ -982,7 +988,7 @@ fn children_back_edge_tracks_selected_parent() {
         .unwrap();
     // A two-parent mux: child selects osc initially.
     let reg = Arc::new(MockReg::new());
-    let mux = Mux::into_ops(reg, 0, 0, 0x1, None);
+    let mux = Mux::into_ops(reg, 0, 0, 0x1, None, MuxFlags::empty());
     let child = ClkBuilder::new("child", mux)
         .parent(osc.clone())
         .parent(alt.clone())
@@ -1044,7 +1050,7 @@ fn set_parent_migrates_prepare_enable_refs() {
         .build()
         .unwrap();
     let reg = Arc::new(MockReg::new());
-    let mux = Mux::into_ops(reg, 0, 0, 0x1, None);
+    let mux = Mux::into_ops(reg, 0, 0, 0x1, None, MuxFlags::empty());
     let child = ClkBuilder::new("child", mux)
         .parent(osc.clone())
         .parent(alt.clone())
@@ -1722,4 +1728,190 @@ fn clk_summary_lists_registered_clocks() {
 #[def_test(serial)]
 fn aaaa_trivial_fifteenth_test_probe() {
     assert_eq!(1 + 1, 2);
+}
+
+// ---------------------------------------------------------------------------
+// Framework increments added for the RK3588 CRU port (req-clk-framework)
+// ---------------------------------------------------------------------------
+
+/// F7: a same-rate set_rate must neither notify nor touch hardware — the
+/// bootloader-configured assigned rates must be safe to re-apply.
+#[def_test(serial)]
+fn same_rate_set_rate_is_a_noop_without_notify_or_hw() {
+    use crate::NotifierResult;
+
+    let reg = Arc::new(MockReg::new());
+    let root = ClkBuilder::new("f7_root", FixedRate::new(1_000_000_000).into_ops())
+        .build()
+        .unwrap();
+    // Divider field reset value 0 -> zero-based ÷1 -> 1 GHz pass-through.
+    let div = Divider::into_ops(reg.clone(), 0, 0, 4, None, DividerFlags::empty());
+    let core = ClkBuilder::new("f7_div", div).parent(root).build().unwrap();
+    let notified = Arc::new(SpinNoIrq::new(0u32));
+    let counter = notified.clone();
+    core.add_notifier(Arc::new(move |event| {
+        if matches!(event, ClkEvent::PreRateChange { .. }) {
+            *counter.lock() += 1;
+        }
+        NotifierResult::Proceed
+    }));
+
+    core.set_rate(1_000_000_000).unwrap();
+    assert_eq!(*notified.lock(), 0, "same-rate set_rate must not notify");
+    // Divider word untouched (raw field still 0).
+    assert_eq!(reg.word(0), 0);
+}
+
+/// F6: when a child with SET_RATE_PARENT propagates a change into its parent,
+/// the parent's own subscribers observe PRE/POST (the rockchip cpuclk/frac
+/// remux dances hook exactly these events).
+#[def_test(serial)]
+fn parent_notifier_fires_when_child_propagates_rate_change() {
+    let root = ClkBuilder::new("f6_root", FixedRate::new(2_000).into_ops())
+        .build()
+        .unwrap();
+    // The parent is a settable divider (raw=1 → ÷2) starting at 1 GHz.
+    let parent_reg = Arc::new(MockReg::new());
+    parent_reg.reg_write(0, 1); // raw 1 → ÷2
+    let parent = ClkBuilder::new(
+        "f6_pll",
+        Divider::into_ops(parent_reg, 0, 0, 4, None, DividerFlags::empty()),
+    )
+    .parent(root)
+    .build()
+    .unwrap();
+    // Transparent node declaring the parent determines its rate.
+    let child = ClkBuilder::new("f6_child", FixedFactor::new(1, 1).unwrap().into_ops())
+        .parent(parent.clone())
+        .flags(ClkFlags::SET_RATE_PARENT)
+        .build()
+        .unwrap();
+    assert_eq!(child.get_rate(), 1_000);
+
+    let events = Arc::new(SpinNoIrq::new(Vec::new()));
+    let sink = events.clone();
+    parent.add_notifier(Arc::new(move |event| {
+        let rates = match *event {
+            ClkEvent::PreRateChange { old, new } => Some((old, new, "pre")),
+            ClkEvent::PostRateChange { old, new } => Some((old, new, "post")),
+            _ => None,
+        };
+        if let Some((_, _, phase)) = rates {
+            sink.lock().push(phase);
+        }
+        NotifierResult::Proceed
+    }));
+
+    child.set_rate(2_000).unwrap();
+    let seen = events.lock();
+    // Parent changed from 1000 to 2000; child's transparent ops report 2000.
+    assert_eq!(child.get_rate(), 2_000);
+    assert_eq!(&*seen, &["pre", "post"]);
+}
+
+/// F8: a NO_REPARENT mux rounds by reprogramming its selected parent instead
+/// of laterally switching sources (PLL mode mux semantics).
+#[def_test(serial)]
+fn no_reparent_mux_propagates_instead_of_switching() {
+    // The "pll" is a settable divider over a fixed 2 GHz root so a propagated
+    // request can actually land; the "osc" is a fixed 100 Hz alternative.
+    let root = ClkBuilder::new("f8_root", FixedRate::new(2_000).into_ops())
+        .build()
+        .unwrap();
+    let osc = ClkBuilder::new("f8_osc", FixedRate::new(100).into_ops())
+        .build()
+        .unwrap();
+    let pll = ClkBuilder::new(
+        "f8_pll",
+        Divider::into_ops(
+            Arc::new(MockReg::new()),
+            0,
+            0,
+            4,
+            None,
+            DividerFlags::empty(),
+        ),
+    )
+    .parent(root)
+    .flags(ClkFlags::SET_RATE_PARENT)
+    .build()
+    .unwrap();
+
+    let reg = Arc::new(MockReg::new());
+    let mux = Mux::into_ops(reg.clone(), 0, 0, 0x1, None, MuxFlags::empty());
+    let mux_clk = ClkBuilder::new("f8_mux", mux)
+        .parents(vec![Some(osc), Some(pll)])
+        .flags(ClkFlags::SET_RATE_PARENT | ClkFlags::NO_REPARENT)
+        .build()
+        .unwrap();
+    // Hardware selects parent 1 (the 2 GHz pll output).
+    mux_clk.set_parent(1).unwrap();
+    assert_eq!(mux_clk.get_rate(), 2_000);
+
+    // A rate only reachable by changing the parent must reprogram THAT parent
+    // (divider to ÷2), never fall back to the 100 Hz oscillator.
+    mux_clk.set_rate(1_000).unwrap();
+    assert_eq!(mux_clk.get_rate(), 1_000);
+    assert_eq!(mux_clk.get_parent().unwrap().name(), "f8_pll");
+}
+
+/// F5: a HIWORD divider writes the field atomically — mask in the high half —
+/// instead of read-modify-write, and READ_ONLY dividers reject set_rate.
+#[def_test(serial)]
+fn hiword_divider_writes_masked_word_and_read_only_rejects() {
+    let reg = Arc::new(MockReg::new());
+    let div = Divider::into_ops(
+        reg.clone(),
+        0,
+        0,
+        5,
+        None,
+        DividerFlags::HIWORD_MASK | DividerFlags::READ_ONLY,
+    );
+    let core = ClkBuilder::new("f5_div", div)
+        .flags(ClkFlags::SET_RATE_PARENT)
+        .build()
+        .unwrap();
+    // READ_ONLY rounds to the rate already in hardware (÷1 here).
+    assert_eq!(core.round_rate(100).unwrap(), core.get_rate());
+    assert_eq!(core.set_rate(100).unwrap_err(), ClkError::NotSupported);
+}
+
+/// F1: register_table resolves local parent names through the global provider
+/// registry when they are not in the batch (a CRU consuming the board's
+/// fixed-clock xin24m), mirroring Linux's __clk_lookup fallback.
+#[def_test(serial)]
+fn register_table_resolves_cross_provider_parents_by_name() {
+    let _serial = PROVIDER_SERIAL.lock();
+    static FIXED: ClkTable = ClkTable::new(0x77);
+    let reg: Arc<dyn ClkRegAccess> = Arc::new(NullClkReg);
+    kclk_register_fixed(&FIXED, &reg, "xin24m", 24_000_000);
+    register_provider(&FIXED);
+
+    static CRU: ClkTable = ClkTable::new(0x78);
+    let branches = [
+        ClkBranch::fixed_factor(5, "xin12m", 1, 2, &["xin24m"]),
+        ClkBranch::gate(6, "uart_gate", 0x10, 3, GateFlags::empty(), &["xin12m"]),
+    ];
+    register_table(&CRU, Arc::new(NullClkReg), &branches).unwrap();
+    register_provider(&CRU);
+
+    let uart = clk_get_by_index(0x78, 6).unwrap();
+    assert_eq!(uart.get_rate(), 12_000_000);
+    // Cleanup for other provider-scoped tests.
+    FIXED.clear();
+    CRU.clear();
+    crate::reset_providers();
+}
+
+// The helper above needs NullClkReg + kclk-internal registration glue; keep
+// the test self-contained by registering a fixed-rate node into a table.
+fn kclk_register_fixed(
+    table: &ClkTable,
+    reg: &Arc<dyn ClkRegAccess>,
+    name: &'static str,
+    rate: Rate,
+) {
+    let branches = [ClkBranch::fixed_rate(0, name, rate)];
+    crate::register_table(table, reg.clone(), &branches).unwrap();
 }

@@ -33,6 +33,19 @@ use alloc::vec::Vec;
 
 use crate::{FdtNode, fdt, property_u32};
 
+/// One `assigned-clocks` entry: the target specifier plus the rate to apply.
+/// Firmware-only view; the DT-to-device builder converts it to
+/// `device_res::AssignedClock`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssignedClock {
+    /// The controller's DT phandle.
+    pub provider: u32,
+    /// The controller-local clock index.
+    pub index: u32,
+    /// The rate in Hz to apply (0 = leave untouched per DT spec).
+    pub rate_hz: u64,
+}
+
 /// One resolved `clocks` entry: the controller phandle plus the
 /// controller-local specifier (an index for most controllers).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,9 +65,15 @@ pub struct ClockSpec {
 /// fixed-clock referenced by phandle alone, 1 for the common index form).
 /// Returns the [`ClockSpec`] list in declaration order.
 pub fn device_clock_specs(node: FdtNode<'static, 'static>) -> Vec<ClockSpec> {
+    device_clock_specs_for(node, "clocks")
+}
+
+/// [`device_clock_specs`] against an arbitrary phandle-specifier property
+/// (same `<&phandle cells...>` layout, e.g. `assigned-clocks`).
+pub fn device_clock_specs_for(node: FdtNode<'static, 'static>, prop_name: &str) -> Vec<ClockSpec> {
     let mut specs = Vec::new();
 
-    let Some(prop) = node.property("clocks") else {
+    let Some(prop) = node.property(prop_name) else {
         return specs;
     };
     let raw = prop.value;
@@ -137,6 +156,51 @@ pub fn clock_output_name(node: FdtNode<'static, 'static>) -> Option<&'static str
 pub fn device_clock_spec_by_name(node: FdtNode<'static, 'static>, name: &str) -> Option<ClockSpec> {
     let index = device_clock_index_by_name(node, name)?;
     device_clock_specs(node).into_iter().nth(index)
+}
+
+/// Parse `assigned-clocks` + `assigned-clock-rates` in declaration order.
+///
+/// The specifier cells parse exactly like `clocks`; each entry pairs with its
+/// rate from `assigned-clock-rates`. Rates may be one cell (zero-extended
+/// u32 — the common vendor form) or two cells (u64) per entry; the layout is
+/// detected from the property length against the spec count. Entries without
+/// a rate (or a truncated property) are dropped rather than guessed.
+pub fn device_assigned_clocks(node: FdtNode<'static, 'static>) -> Vec<AssignedClock> {
+    let specs = device_clock_specs_for(node, "assigned-clocks");
+    if specs.is_empty() {
+        return Vec::new();
+    }
+    let Some(prop) = node.property("assigned-clock-rates") else {
+        return Vec::new();
+    };
+    let cells: Vec<u32> = prop
+        .value
+        .chunks_exact(4)
+        .map(|c| u32::from_be_bytes(c.try_into().unwrap_or([0; 4])))
+        .collect();
+
+    // Per-entry cell width: 2 cells/entry (u64) when the property length
+    // matches, else 1 cell/entry (u32 zero-extended).
+    let wide = cells.len() == specs.len() * 2;
+    if !wide && cells.len() < specs.len() {
+        return Vec::new();
+    }
+    specs
+        .into_iter()
+        .enumerate()
+        .map(|(i, spec)| {
+            let rate_hz = if wide {
+                (u64::from(cells[i * 2]) << 32) | u64::from(cells[i * 2 + 1])
+            } else {
+                u64::from(cells[i])
+            };
+            AssignedClock {
+                provider: spec.provider,
+                index: spec.index,
+                rate_hz,
+            }
+        })
+        .collect()
 }
 
 /// The fixed reference frequency from a `clock-frequency` property, if the

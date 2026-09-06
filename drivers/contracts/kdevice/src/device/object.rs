@@ -189,6 +189,18 @@ impl DeviceObject {
         })
     }
 
+    /// Firmware-directed initial rates (`assigned-clock-rates`) carried by
+    /// this clock controller, in DT declaration order.
+    pub fn assigned_clocks(&self) -> Vec<crate::AssignedClock> {
+        self.resources
+            .iter()
+            .filter_map(|resource| match resource {
+                ResourceDesc::AssignedClock(assigned) => Some(*assigned),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Current lifecycle state — lock-free atomic read.
     ///
     /// The atomic is only ever written via [`DeviceState::as_u8`], so an

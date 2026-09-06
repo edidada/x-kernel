@@ -22,4 +22,4 @@ pub use divider::{DivTableEntry, Divider, DividerFlags};
 pub use fixed_factor::FixedFactor;
 pub use fixed_rate::FixedRate;
 pub use gate::{Gate, GateFlags};
-pub use mux::Mux;
+pub use mux::{Mux, MuxFlags};

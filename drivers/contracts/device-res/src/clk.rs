@@ -66,6 +66,24 @@ pub enum NotifierVote {
 /// non-re-entrant global clock lock).
 pub type ClkNotifier = Arc<dyn Fn(&ClkRateEvent) -> NotifierVote + Send + Sync>;
 
+/// Firmware-directed initial rate for one clock of a provider device.
+///
+/// Models the DT `assigned-clocks` + `assigned-clock-rates` pair on a clock
+/// controller node: after the controller registers its outputs, it applies
+/// each `(provider, index)` output to `rate_hz` (Linux applies the same
+/// properties in the driver core at probe time via `of_clk_set_defaults`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssignedClock {
+    /// The controller phandle the assignment refers to (normally the device
+    /// carrying the property, so the driver matches it against its own id).
+    pub provider: u32,
+    /// The controller-local clock index (the DT specifier cell).
+    pub index: u32,
+    /// The rate in Hz to apply (`assigned-clock-rates`, zero-extended from a
+    /// single cell when the property was compiled 32-bit wide).
+    pub rate_hz: u64,
+}
+
 /// A specifier describing which clock a device consumes.
 ///
 /// Mirrors the two cells of a DT `clocks = <&phandle index>` specifier: the
@@ -133,23 +151,22 @@ impl ClkResource {
 
 /// Firmware-normalized description of a clock provider device.
 ///
-/// This is device metadata rather than a host-kernel handle: it carries only
-/// stable provider identity and fixed-clock properties, so it remains usable
-/// by OS-neutral driver frameworks and by firmware sources other than DT.
-/// Firmware metadata describing a **fixed-clock provider**.
-///
-/// This type only describes DT `fixed-clock` nodes — `#clock-cells = <0>`,
-/// exactly one output, one fixed frequency. Multi-output controllers
-/// (`#clock-cells >= 1`) are driven by their SoC-specific driver matched on
-/// compatible and do not carry this resource.
+/// This is device metadata rather than a host-kernel handle: it carries the
+/// stable provider identity (the DT phandle) plus, for `fixed-clock` nodes,
+/// the single fixed output rate. Multi-output controllers (`#clock-cells >= 1`,
+/// e.g. an RK3588 CRU) carry no rate here — their outputs are registered by
+/// the SoC-specific driver matched on the node's compatible; the descriptor
+/// just hands that driver its `ProviderId` so `clocks = <&phandle N>`
+/// references resolve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClkProviderDesc {
     /// Stable provider identifier: the node's DT phandle. Doubles as the
     /// kclk `ProviderId` so `clocks = <&phandle>` references resolve.
     provider_id: u32,
-    /// The fixed output rate in Hz. Mandatory: a fixed clock without a
-    /// frequency is a firmware error and produces no resource at all.
-    fixed_rate_hz: u64,
+    /// The fixed output rate in Hz. `Some` only for `fixed-clock` nodes
+    /// (`#clock-cells = <0>` with a `clock-frequency`); a mandatory property
+    /// there — a fixed clock without a frequency produces no resource.
+    fixed_rate_hz: Option<u64>,
     /// Output name from `clock-output-names`, if the node declares one.
     output_name: Option<&'static str>,
 }
@@ -159,7 +176,17 @@ impl ClkProviderDesc {
     pub const fn new(provider_id: u32, fixed_rate_hz: u64) -> Self {
         Self {
             provider_id,
-            fixed_rate_hz,
+            fixed_rate_hz: Some(fixed_rate_hz),
+            output_name: None,
+        }
+    }
+
+    /// Construct a multi-output clock-controller description (no fixed rate;
+    /// outputs are published by the controller's own driver).
+    pub const fn controller(provider_id: u32) -> Self {
+        Self {
+            provider_id,
+            fixed_rate_hz: None,
             output_name: None,
         }
     }
@@ -175,8 +202,9 @@ impl ClkProviderDesc {
         self.provider_id
     }
 
-    /// The fixed output rate in hertz.
-    pub const fn fixed_rate_hz(self) -> u64 {
+    /// The fixed output rate in hertz, for `fixed-clock` providers only.
+    /// `None` for multi-output controllers.
+    pub const fn fixed_rate_hz(self) -> Option<u64> {
         self.fixed_rate_hz
     }
 

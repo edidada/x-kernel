@@ -78,7 +78,8 @@ fn iomap_mmio(
     feature = "ahci",
     feature = "sdmmc",
     feature = "ixgbe",
-    feature = "fxmac"
+    feature = "fxmac",
+    feature = "clk-rk3588-cru"
 ))]
 fn first_mmio_resource(
     device: &kdevice::DeviceObject,
@@ -88,7 +89,12 @@ fn first_mmio_resource(
         .ok_or(driver_base::DriverError::InvalidInput)
 }
 
-#[cfg(any(feature = "ahci", feature = "sdmmc", feature = "ixgbe"))]
+#[cfg(any(
+    feature = "ahci",
+    feature = "sdmmc",
+    feature = "ixgbe",
+    feature = "clk-rk3588-cru"
+))]
 fn iomap_first_mmio(
     device: &kdevice::DeviceObject,
     name: &'static str,

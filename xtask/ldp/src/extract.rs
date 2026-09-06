@@ -64,6 +64,15 @@ pub fn extract_c_symbol(src: &str, symbol: &str) -> Result<ExtractedC, String> {
             }));
         }
         if let Some(val) = parse_scalar_hex(&body) {
+            // 连续掩码(如 rockchip `0x3ff`/`0x7`)按位段理解:[trailing_zeros,
+            // trailing_zeros+popcount-1];非连续值(寄存器偏移等)仍是标量。
+            if let Some(span) = mask_span(val) {
+                return Ok(ExtractedC::Span(ExtractedSpan {
+                    name: symbol.to_string(),
+                    span,
+                    line: i as u32 + 1,
+                }));
+            }
             return Ok(ExtractedC::Scalar {
                 name: symbol.to_string(),
                 value: val,
@@ -74,6 +83,24 @@ pub fn extract_c_symbol(src: &str, symbol: &str) -> Result<ExtractedC, String> {
     Err(format!(
         "参考里找不到符号 `{symbol}` 的 GENMASK/BIT/标量定义(它可能用别的写法,或不在该文件)"
     ))
+}
+
+/// 连续非零掩码 → [lsb, msb]。`0x3ff` → [0,9],`0xe0` → [5,7];`0x600` 这类
+/// 非连续值返回 None(它们是偏移/标量,不是位段)。
+pub fn mask_span(value: u64) -> Option<FieldSpan> {
+    if value == 0 {
+        return None;
+    }
+    let lsb = value.trailing_zeros();
+    let width = value.count_ones();
+    // 连续性:从 lsb 起 width 位全 1。
+    if value != ((1u64 << width << lsb) - 1) << lsb >> lsb {
+        return None;
+    }
+    Some(FieldSpan {
+        lsb,
+        msb: lsb + width - 1,
+    })
 }
 
 /// `#define <symbol>` 开头? 返回 symbol 之后的 body。
@@ -497,12 +524,29 @@ pub fn extract_layout_from_ref(
     let mut out = Vec::new();
     for f in fields {
         match extract_c_symbol(&src, &f.ref_symbol)? {
-            ExtractedC::Span(s) => out.push(RefField {
-                name: f.name.clone(),
-                truth: Some(s.span),
-                truth_line: s.line,
-                extracted_kind: "GENMASK/BIT".to_string(),
-            }),
+            ExtractedC::Span(mut s) => {
+                // MASK/SHIFT 对写法(rockchip 常见):真值 = 掩码位段整体
+                // 平移 shift(参考里的 `XXX_SHIFT` 标量)。
+                if let Some(shift_sym) = &f.ref_shift_symbol {
+                    match extract_c_symbol(&src, shift_sym)? {
+                        ExtractedC::Scalar { value, .. } => {
+                            s.span = FieldSpan {
+                                lsb: s.span.lsb + value as u32,
+                                msb: s.span.msb + value as u32,
+                            };
+                        }
+                        ExtractedC::Span(_) => {
+                            return Err(format!("移位符号 `{shift_sym}` 不是标量数值"));
+                        }
+                    }
+                }
+                out.push(RefField {
+                    name: f.name.clone(),
+                    truth: Some(s.span),
+                    truth_line: s.line,
+                    extracted_kind: "GENMASK/BIT/MASK".to_string(),
+                })
+            }
             ExtractedC::Scalar { value, line, .. } => out.push(RefField {
                 name: f.name.clone(),
                 truth: None,

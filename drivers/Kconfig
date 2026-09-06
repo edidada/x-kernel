@@ -165,6 +165,14 @@ menu "Device Drivers"
 
 comment "Block device drivers"
 
+config KFEAT_DRIVER_CLK_RK3588_CRU
+    bool "RK3588 CRU clock controller driver"
+    help
+      Register the Rockchip RK3588 Clock and Reset Unit as a kclk provider
+      (PLLs, mux/divider/gate tree, frac branches, CPU clocks). Consumer
+      devices resolve their DT `clocks = <&cru N>` through it. Probes the
+      `rockchip,rk3588-cru` platform device.
+
 config KFEAT_DRIVER_VIRTIO_BLK
     bool "virtio-blk block device"
     depends on KFEAT_FS

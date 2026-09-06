@@ -45,6 +45,9 @@ pub enum ResourceDesc {
     Clk(crate::clk::ClkResource),
     /// Metadata carried by a clock-provider device.
     ClkProvider(crate::clk::ClkProviderDesc),
+    /// Firmware-directed initial rate (`assigned-clock-rates`) for one output
+    /// of the carrying clock controller.
+    AssignedClock(crate::clk::AssignedClock),
 }
 
 /// A collection of resources for a single device.
@@ -129,8 +132,12 @@ mod tests {
 
         let provider = ClkProviderDesc::new(0x42, 24_000_000).with_output_name("osc24m");
         assert_eq!(provider.provider_id(), 0x42);
-        assert_eq!(provider.fixed_rate_hz(), 24_000_000);
+        assert_eq!(provider.fixed_rate_hz(), Some(24_000_000));
         assert_eq!(provider.output_name(), Some("osc24m"));
+        // A multi-output controller carries the id but no fixed rate.
+        let controller = ClkProviderDesc::controller(0x02);
+        assert_eq!(controller.provider_id(), 0x02);
+        assert_eq!(controller.fixed_rate_hz(), None);
         // Mutually exclusive forms: a by-name spec carries no phandle pair.
         assert_eq!(ClkSpec::by_name("osc24m").provider(), None);
         assert_eq!(ClkSpec::by_name("osc24m").name(), Some("osc24m"));

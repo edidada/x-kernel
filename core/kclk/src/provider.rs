@@ -147,6 +147,20 @@ pub fn clk_get_by_index(provider_id: ProviderId, index: ClkIndex) -> ClkResult<C
     }
 }
 
+/// Resolve a clock's core node by its globally-unique SoC name.
+///
+/// Internal variant of [`clk_get_by_name`] for cross-provider parent
+/// resolution during table registration (Linux resolves branch parent names
+/// through the global clock lookup at registration time). Returns
+/// [`ClkError::NotFound`] when no registered provider carries the name.
+pub(crate) fn clk_get_core_by_name(name: &str) -> ClkResult<Arc<ClkCore>> {
+    let providers = REGISTRY.lock().provider_snapshot();
+    providers
+        .iter()
+        .find_map(|p| p.get_by_name(name))
+        .ok_or(ClkError::NotFound)
+}
+
 /// Resolve a clock by its globally-unique SoC name into a consumer handle.
 ///
 /// `name` is the clock's provider output name (e.g. `"uart0_clk"`), **not** a

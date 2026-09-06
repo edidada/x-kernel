@@ -1,513 +1,527 @@
 {
-  "$comment": "真相源。knowledge/gaps.md 由 ldp gen-doc 生成。status 状态机 + effective 治理(Ch3)。改这里,别改 md。",
-  "severity_guide": {
-    "blocker": "没它驱动无法初始化或无法工作;必须先补该子系统,或明确接受'此驱动不可用',不得静默 stub",
-    "works-around": "可绕过/stub,驱动能在受限场景跑;在驱动里写明 stub 与前提条件,缺口照报",
-    "optional": "锦上添花,缺了基本功能仍可用;缺口照报,可低优先级"
+ "$comment": "真相源。knowledge/gaps.md 由 ldp gen-doc 生成。status 状态机 + effective 治理(Ch3)。改这里,别改 md。",
+ "severity_guide": {
+  "blocker": "没它驱动无法初始化或无法工作;必须先补该子系统,或明确接受'此驱动不可用',不得静默 stub",
+  "works-around": "可绕过/stub,驱动能在受限场景跑;在驱动里写明 stub 与前提条件,缺口照报",
+  "optional": "锦上添花,缺了基本功能仍可用;缺口照报,可低优先级"
+ },
+ "triage_framework": [
+  "初始化必需资源(clk/reset/gpio enable/regulator 供电)→ 多半 blocker",
+  "性能/特性增强(pm_runtime、regmap 缓存、pinctrl 复用)→ 多半 optional/works-around",
+  "能用现有原语手写等效(regmap→Io RMW、completion→WaitQueue)→ works-around",
+  "拿不准按 blocker 上报,交人决策"
+ ],
+ "subsystems": [
+  {
+   "id": "clk-framework",
+   "name": "clk framework",
+   "symbols": [
+    "clk_disable_unprepare",
+    "clk_divider_ops",
+    "clk_fractional_divider_ops",
+    "clk_gate_ops",
+    "clk_get",
+    "clk_get_rate",
+    "clk_hw_register",
+    "clk_hw_register_composite",
+    "clk_mux_ops",
+    "clk_prepare_enable",
+    "clk_register_composite",
+    "clk_register_divider",
+    "clk_register_fixed_rate",
+    "clk_register_gate",
+    "clk_register_mux",
+    "clk_set_rate",
+    "devm_clk_hw_register",
+    "of_clk_add_provider",
+    "of_clk_src_onecell_get"
+   ],
+   "status": "partial",
+   "effective": {
+    "from": "2025-01",
+    "until": null,
+    "note": "core/kclk 已随 clk/pr1-pr4 落地主线(2026-08):ClkHwOps/ClkCore/provider 注册表/ClkHandle/基本类型(gate·mux·divider·composite·fixed)/register_table 事务注册/notifier。剩余:frac/half-divider/cpuclk/PLL 由 SoC 驱动自带 Custom ops;多输出控制器 provider 元数据与 assigned-clocks 枚举待补。"
+   },
+   "xkernel_status": "core/kclk 通用时钟框架已落地主线(core/kclk:两阶段 prepare/enable、全局 provider 注册表(ProviderId=DT phandle)、消费者 ClkHandle、ClkBranch 静态表事务注册、PRE/POST rate notifier、clk_summary/clk_disable_unused)。device-res 有 clk 消费/提供者契约,kdriver 平台总线按 provider-first 顺序 probe,clk-fixed-clock 驱动已接 DT fixed-clock。RK3588 CRU 是首个真实 SoC 控制器驱动。",
+   "dimensions": [
+    {
+     "name": "clk-enable",
+     "linux": [
+      "clk_prepare_enable",
+      "clk_disable_unprepare"
+     ],
+     "severity": "works-around",
+     "workaround": "firmware 已把时钟供着,删除 enable/disable 调用,注释 'clock assumed enabled by firmware'",
+     "report_template": "clk-enable — works-around. Removed clk_prepare_enable×N (firmware provides clock)."
+    },
+    {
+     "name": "clk-rate",
+     "linux": [
+      "clk_get_rate",
+      "clk_set_rate"
+     ],
+     "severity": "conditional",
+     "severity_branches": {
+      "rate_resolvable": {
+       "severity": "works-around",
+       "when": "clk::devm_clk_get 返回的 Clk 能查到速率"
+      },
+      "provider_unavailable": {
+       "severity": "blocker",
+       "when": "devm_clk_get 返回 Err/速率 None(该 phandle 没注册 provider)",
+       "label": "smoke-path blocker"
+      }
+     },
+     "workaround": "provider 不可用时走 fallback(U-Boot 实测值作常量 + probe 日志标注来源 + CLKDIV 公式照搬 Linux)。RK3588 SCMI 的 ciu 直接用 RATE_GET 返回值,不 ÷2。Rockchip DT 通常只有 max-frequency 不是 clock-frequency,不能当 CLKDIV 分母。",
+     "report_template": "clk-rate — Tier-0 框架已在 RK3588 适配分支落地(drivers/clk/ 未随主线合入):clk::devm_clk_get(device,\"ciu\") 走 phandle 键多 provider 注册表。RK3588 sdmmc 的 ciu 经 SCMI provider(CLOCK_RATE_GET)解析到真值(~49.5 MHz)。曾因 SCMI 消息头位段记反(message_id/token)误判成'固件 stub'——实为 header bug,已修正。"
+    }
+   ],
+   "key_lesson": "clk-rate 维度最易被误判为 works-around。驱动算硬件分频(MMC CLKDIV/I2C SCL/UART baud/SPI 速率)时需要知道输入时钟速率本身,这跟'时钟开没开'是两回事。provider 不可用 → 分频算错 → 卡识别/通信失败,不得用'看起来合理'的常量静默糊弄。",
+   "context": [
+    "clk",
+    "clock",
+    "rate",
+    "CIU",
+    "CLKDIV",
+    "SCMI"
+   ],
+   "infra_type": "multi-provider"
   },
-  "triage_framework": [
-    "初始化必需资源(clk/reset/gpio enable/regulator 供电)→ 多半 blocker",
-    "性能/特性增强(pm_runtime、regmap 缓存、pinctrl 复用)→ 多半 optional/works-around",
-    "能用现有原语手写等效(regmap→Io RMW、completion→WaitQueue)→ works-around",
-    "拿不准按 blocker 上报,交人决策"
-  ],
-  "subsystems": [
-    {
-      "id": "clk-framework",
-      "name": "clk framework",
-      "symbols": [
-        "clk_get",
-        "clk_prepare_enable",
-        "clk_disable_unprepare",
-        "clk_set_rate",
-        "clk_get_rate"
-      ],
-      "status": "missing",
-      "effective": {
-        "from": "2025-01",
-        "until": null,
-        "note": "Tier-0 在 RK3588 适配分支已实现(未随本次合入主线);enable/set_rate/PLL 仍缺"
-      },
-      "xkernel_status": "Tier-0 中性时钟框架 drivers/clk/ 已在 RK3588 适配分支实现(未随本次合入主线;ClkProvider trait + phandle 键多 provider 注册表 + clk::devm_clk_get 消费者 API + FixedClockProvider)。Tier 0 只做只读速率查询;enable/set_rate/PLL/速率变更传播是 Tier 1/2(未实现)。RK3588 时钟由 bootloader 配好,内核侧多数驱动继承当前配置。",
-      "dimensions": [
-        {
-          "name": "clk-enable",
-          "linux": [
-            "clk_prepare_enable",
-            "clk_disable_unprepare"
-          ],
-          "severity": "works-around",
-          "workaround": "firmware 已把时钟供着,删除 enable/disable 调用,注释 'clock assumed enabled by firmware'",
-          "report_template": "clk-enable — works-around. Removed clk_prepare_enable×N (firmware provides clock)."
-        },
-        {
-          "name": "clk-rate",
-          "linux": [
-            "clk_get_rate",
-            "clk_set_rate"
-          ],
-          "severity": "conditional",
-          "severity_branches": {
-            "rate_resolvable": {
-              "severity": "works-around",
-              "when": "clk::devm_clk_get 返回的 Clk 能查到速率"
-            },
-            "provider_unavailable": {
-              "severity": "blocker",
-              "when": "devm_clk_get 返回 Err/速率 None(该 phandle 没注册 provider)",
-              "label": "smoke-path blocker"
-            }
-          },
-          "workaround": "provider 不可用时走 fallback(U-Boot 实测值作常量 + probe 日志标注来源 + CLKDIV 公式照搬 Linux)。RK3588 SCMI 的 ciu 直接用 RATE_GET 返回值,不 ÷2。Rockchip DT 通常只有 max-frequency 不是 clock-frequency,不能当 CLKDIV 分母。",
-          "report_template": "clk-rate — Tier-0 框架已在 RK3588 适配分支落地(drivers/clk/ 未随主线合入):clk::devm_clk_get(device,\"ciu\") 走 phandle 键多 provider 注册表。RK3588 sdmmc 的 ciu 经 SCMI provider(CLOCK_RATE_GET)解析到真值(~49.5 MHz)。曾因 SCMI 消息头位段记反(message_id/token)误判成'固件 stub'——实为 header bug,已修正。"
-        }
-      ],
-      "key_lesson": "clk-rate 维度最易被误判为 works-around。驱动算硬件分频(MMC CLKDIV/I2C SCL/UART baud/SPI 速率)时需要知道输入时钟速率本身,这跟'时钟开没开'是两回事。provider 不可用 → 分频算错 → 卡识别/通信失败,不得用'看起来合理'的常量静默糊弄。",
-      "context": [
-        "clk",
-        "clock",
-        "rate",
-        "CIU",
-        "CLKDIV",
-        "SCMI"
-      ],
-      "infra_type": "multi-provider"
+  {
+   "id": "regmap",
+   "name": "regmap",
+   "symbols": [
+    "devm_regmap_init_mmio",
+    "regmap_update_bits"
+   ],
+   "status": "missing",
+   "effective": {
+    "from": "2025-01",
+    "until": null
+   },
+   "xkernel_status": "无 regmap。",
+   "severity": "works-around",
+   "workaround": "用 Io::read32/write32 手写读-改-写,封装本地 helper fn regmap_update_bits(io, off, mask, val)。",
+   "report_template": "regmap — works-around. Replaced regmap_update_bits with a local Io-based RMW helper (N call sites). No caching.",
+   "context": [
+    "regmap",
+    "RMW",
+    "update_bits"
+   ],
+   "infra_type": "framework"
+  },
+  {
+   "id": "gpio",
+   "name": "gpio / gpiod",
+   "symbols": [
+    "devm_gpiod_get",
+    "gpiod_set_value"
+   ],
+   "status": "missing",
+   "effective": {
+    "from": "2025-01",
+    "until": null
+   },
+   "xkernel_status": "无 GPIO 框架、无 pinctrl。",
+   "severity": "conditional",
+   "severity_branches": {
+    "power_reset_pin": {
+     "severity": "works-around",
+     "when": "电源使能/复位引脚且 firmware 已拉好电平"
     },
-    {
-      "id": "regmap",
-      "name": "regmap",
-      "symbols": [
-        "devm_regmap_init_mmio",
-        "regmap_update_bits"
-      ],
-      "status": "missing",
-      "effective": {
-        "from": "2025-01",
-        "until": null
-      },
-      "xkernel_status": "无 regmap。",
-      "severity": "works-around",
-      "workaround": "用 Io::read32/write32 手写读-改-写,封装本地 helper fn regmap_update_bits(io, off, mask, val)。",
-      "report_template": "regmap — works-around. Replaced regmap_update_bits with a local Io-based RMW helper (N call sites). No caching.",
-      "context": [
-        "regmap",
-        "RMW",
-        "update_bits"
-      ],
-      "infra_type": "framework"
-    },
-    {
-      "id": "gpio",
-      "name": "gpio / gpiod",
-      "symbols": [
-        "devm_gpiod_get",
-        "gpiod_set_value"
-      ],
-      "status": "missing",
-      "effective": {
-        "from": "2025-01",
-        "until": null
-      },
-      "xkernel_status": "无 GPIO 框架、无 pinctrl。",
-      "severity": "conditional",
-      "severity_branches": {
-        "power_reset_pin": {
-          "severity": "works-around",
-          "when": "电源使能/复位引脚且 firmware 已拉好电平"
-        },
-        "functional_pin": {
-          "severity": "blocker",
-          "when": "作为功能引脚(中断、bus)"
-        }
-      },
-      "workaround": "若 gpio 只是上电/复位且 firmware 已拉好电平,删调用并注释;否则 blocker 上报。",
-      "report_template": "gpio (gpiod) — works-around. gpiod_set_value(reset_gpio,1) at probe removed; reset line held deasserted by firmware.",
-      "context": [
-        "gpio",
-        "gpiod",
-        "pinctrl",
-        "reset_gpio"
-      ],
-      "infra_type": "multi-provider"
-    },
-    {
-      "id": "pinctrl",
-      "name": "pinctrl",
-      "symbols": [
-        "pinctrl_pm_select_*",
-        "pinctrl"
-      ],
-      "status": "missing",
-      "effective": {
-        "from": "2025-01",
-        "until": null
-      },
-      "xkernel_status": "无 pinctrl。引脚复用由 firmware 配置。",
-      "severity": "works-around",
-      "workaround": "删除 pinctrl 调用,注释 'pinmux configured by firmware'。",
-      "report_template": "pinctrl — works-around. Pinmux configured by firmware; pinctrl calls removed.",
-      "context": [
-        "pinctrl",
-        "pinmux"
-      ],
-      "infra_type": "multi-provider"
-    },
-    {
-      "id": "reset",
-      "name": "reset controller",
-      "symbols": [
-        "reset_control_assert",
-        "reset_control_deassert",
-        "devm_reset_control_get"
-      ],
-      "status": "missing",
-      "effective": {
-        "from": "2025-01",
-        "until": null
-      },
-      "xkernel_status": "无 reset 框架。",
-      "severity": "conditional",
-      "severity_branches": {
-        "already_deasserted": {
-          "severity": "works-around",
-          "when": "probe 时已解除复位"
-        },
-        "need_runtime_sequence": {
-          "severity": "blocker",
-          "when": "需主动 assert/deassert 复位时序"
-        }
-      },
-      "workaround": "删 deassert 调用并注释 'deasserted by firmware';assert/deassert 序列留 TODO。",
-      "report_template": "reset — works-around. reset_control_deassert removed; device deasserted by firmware.",
-      "context": [
-        "reset",
-        "reset_control"
-      ],
-      "infra_type": "multi-provider"
-    },
-    {
-      "id": "regulator",
-      "name": "regulator",
-      "symbols": [
-        "regulator_enable",
-        "devm_regulator_get"
-      ],
-      "status": "missing",
-      "effective": {
-        "from": "2025-01",
-        "until": null
-      },
-      "xkernel_status": "无 regulator 框架。",
-      "severity": "conditional",
-      "severity_branches": {
-        "pmic_powered": {
-          "severity": "blocker",
-          "when": "PMIC 供电的外设(RK3588 部分模块经 RK806 PMIC),且内核侧无法上电"
-        },
-        "fixed_rail": {
-          "severity": "works-around",
-          "when": "板载固定供电"
-        }
-      },
-      "workaround": "删调用注释 'power supplied by fixed rail';PMIC 路径 blocker 上报(通常级联 I2C→PMIC,I2C 子系统也缺)。",
-      "report_template": "regulator — works-around. Fixed-rail power; regulator_enable removed. PMIC path → blocker (cascades I2C subsystem).",
-      "context": [
-        "regulator",
-        "PMIC",
-        "RK806",
-        "power"
-      ],
-      "infra_type": "multi-provider"
-    },
-    {
-      "id": "iommu",
-      "name": "iommu",
-      "symbols": [
-        "iommu_map",
-        "iommu_unmap",
-        "arm_iommu_attach_device"
-      ],
-      "status": "missing",
-      "effective": {
-        "from": "2025-01",
-        "until": null
-      },
-      "xkernel_status": "无 iommu。",
-      "severity": "conditional",
-      "severity_branches": {
-        "iommu_isolated": {
-          "severity": "blocker",
-          "when": "需要 DMA 且设备经 IOMMU 隔离(RK3588 GPU/VPU/codec)"
-        },
-        "direct_dma": {
-          "severity": "works-around",
-          "when": "直连 DMA(MMC/网卡),不涉及"
-        }
-      },
-      "workaround": "无;上报。RK3588 多数多媒体 IP 受此阻塞。",
-      "report_template": "iommu — blocker. Device requires DMA via IOMMU; no iommu framework. RK3588 GPU/VPU/codec blocked.",
-      "context": [
-        "iommu",
-        "DMA",
-        "SMMU"
-      ],
-      "infra_type": "multi-provider"
-    },
-    {
-      "id": "phy",
-      "name": "phy",
-      "symbols": [
-        "phy_init",
-        "phy_power_on",
-        "devm_phy_get"
-      ],
-      "status": "missing",
-      "effective": {
-        "from": "2025-01",
-        "until": null
-      },
-      "xkernel_status": "无 phy 框架。",
-      "severity": "conditional",
-      "severity_branches": {
-        "independent_phy_ip": {
-          "severity": "blocker",
-          "when": "PCIe/USB3/SATA 带独立 PHY IP,不上电链路不起来"
-        },
-        "mmc_phy": {
-          "severity": "works-around",
-          "when": "MMC 的 phy 多为简单延迟配置"
-        }
-      },
-      "workaround": "MMC phy 用固定寄存器配置替代;PCIe/USB phy blocker 上报。",
-      "report_template": "phy — blocker. PCIe/USB require powered PHY IP; no phy framework. Requires phy framework first.",
-      "context": [
-        "phy",
-        "PCIe",
-        "USB3",
-        "PHY"
-      ],
-      "infra_type": "multi-provider"
-    },
-    {
-      "id": "workqueue",
-      "name": "workqueue / tasklet",
-      "symbols": [
-        "INIT_WORK",
-        "schedule_work",
-        "tasklet_schedule"
-      ],
-      "status": "missing",
-      "effective": {
-        "from": "2025-01",
-        "until": null
-      },
-      "xkernel_status": "无 workqueue/tasklet。",
-      "severity": "works-around",
-      "workaround": "用 ktask 起内核线程:上半部(IrqHandler)只清中断+置标志+唤醒,线程 wait_until(|| pending) 后做重活。",
-      "report_template": "workqueue — works-around. Replaced schedule_work with a dedicated ktask thread woken by WaitQueue from the top-half IrqHandler.",
-      "context": [
-        "workqueue",
-        "tasklet",
-        "schedule_work",
-        "bottom_half"
-      ],
-      "infra_type": "framework"
-    },
-    {
-      "id": "completion",
-      "name": "completion",
-      "symbols": [
-        "init_completion",
-        "wait_for_completion",
-        "complete"
-      ],
-      "status": "workaround",
-      "effective": {
-        "from": "2025-01",
-        "until": null
-      },
-      "xkernel_status": "无 Completion 类型;用 ktask::WaitQueue 替代。",
-      "severity": "works-around",
-      "workaround": "wq.wait_timeout_until(deadline, || done.load(Ordering::Acquire));完成方 done.store(true);wq.notify_one(true)。",
-      "report_template": "completion — works-around. Modeled with WaitQueue::wait_timeout_until + AtomicBool.",
-      "context": [
-        "completion",
-        "wait_for_completion",
-        "WaitQueue"
-      ],
-      "infra_type": "framework"
-    },
-    {
-      "id": "busy-wait",
-      "name": "忙等延时(udelay/mdelay/ndelay)",
-      "symbols": [
-        "udelay",
-        "mdelay",
-        "ndelay"
-      ],
-      "status": "workaround",
-      "effective": {
-        "from": "2025-01",
-        "until": null
-      },
-      "xkernel_status": "无 busy-wait helper。",
-      "severity": "works-around",
-      "workaround": "core::hint::spin_loop() 自旋 + monotonic_time_nanos 截止循环(注意:关中断上下文不可用,需可抢占/进程上下文)。",
-      "report_template": "udelay/mdelay — works-around. udelay(N) replaced with a monotonic_time_nanos() busy-loop (probe context, IRQs on).",
-      "context": [
-        "udelay",
-        "mdelay",
-        "ndelay",
-        "busy_wait",
-        "delay"
-      ],
-      "infra_type": "framework"
-    },
-    {
-      "id": "timer",
-      "name": "定时器(timer_setup/mod_timer/hrtimer)",
-      "symbols": [
-        "timer_setup",
-        "mod_timer",
-        "hrtimer"
-      ],
-      "status": "workaround",
-      "effective": {
-        "from": "2025-01",
-        "until": null
-      },
-      "xkernel_status": "ktask 仅 register_timer_callback(很薄),无通用 hrtimer/softirq 定时器。",
-      "severity": "works-around",
-      "workaround": "用内核线程 loop { sleep(Duration); do_work(); }。",
-      "report_template": "timer — works-around. Periodic work modeled with a ktask loop thread.",
-      "context": [
-        "timer",
-        "hrtimer",
-        "mod_timer",
-        "watchdog"
-      ],
-      "infra_type": "framework"
-    },
-    {
-      "id": "device-class",
-      "name": "设备子系统无 class(i2c/spi/watchdog/rtc/mmc-core/tty)",
-      "symbols": [
-        "i2c_add_adapter",
-        "spi_register_master"
-      ],
-      "status": "missing",
-      "effective": {
-        "from": "2025-01",
-        "until": null
-      },
-      "xkernel_status": "DeviceKind 只有 Block/Char/Net/Display/Input/Vsock/Fs9p/Bus,无 I2C-SPI-Watchdog-RTC 专用类与 publish_*。mmc controller 走自定义 BlockDevice 路径(见 sdmmc),无 mmc-core 协议栈复用。",
-      "severity": "conditional",
-      "severity_branches": {
-        "i2c_controller": {
-          "severity": "blocker",
-          "when": "无 publish_i2c,无法挂 I2C 总线及从设备"
-        },
-        "watchdog": {
-          "severity": "works-around",
-          "when": "做成 char 设备 publish_char,但无统一 watchdog 子系统"
-        },
-        "rtc": {
-          "severity": "works-around",
-          "when": "char 设备"
-        },
-        "mmc_controller": {
-          "severity": "works-around",
-          "when": "项目走自定义 BlockDevice 路径"
-        }
-      },
-      "workaround": "能套 Block/Char/Net 的就套(watchdog→char);套不上的(i2c/spi controller)→ blocker,需先建子系统。",
-      "report_template": "i2c subsystem — blocker. No DeviceKind::I2c / publish_i2c; controller can probe and init registers but cannot register an I2C bus for child devices. Requires building the i2c class first.",
-      "context": [
-        "i2c",
-        "spi",
-        "watchdog",
-        "rtc",
-        "publish_i2c",
-        "DeviceKind",
-        "class"
-      ],
-      "infra_type": "subsystem-class"
-    },
-    {
-      "id": "misc",
-      "name": "其他(vmalloc/RCU/kmem_cache/leds/pm_runtime)",
-      "symbols": [
-        "vmalloc",
-        "RCU",
-        "kmem_cache_create"
-      ],
-      "status": "workaround",
-      "effective": {
-        "from": "2025-01",
-        "until": null
-      },
-      "xkernel_status": "vmalloc 无(大缓冲用 devm_alloc_coherent 或 alloc_pages);RCU 无(用 Arc/RwLock 替代);kmem_cache/slab 无(用 Box/Vec);leds/input 框架薄;pm_runtime 仅 DeviceDriver::suspend/resume。",
-      "severity": "optional",
-      "workaround": "vmalloc→devm_alloc_coherent/alloc_pages;RCU→Arc/RwLock;kmem_cache→Box/Vec;pm_runtime→删 runtime pm 调用保留系统级 suspend/resume。",
-      "report_template": "misc — optional/works-around per item (vmalloc/RCU/kmem_cache/pm_runtime).",
-      "context": [
-        "vmalloc",
-        "RCU",
-        "kmem_cache",
-        "slab",
-        "leds",
-        "pm_runtime"
-      ],
-      "infra_type": "framework"
+    "functional_pin": {
+     "severity": "blocker",
+     "when": "作为功能引脚(中断、bus)"
     }
-  ],
-  "cascade_gaps": [
-    {
-      "area": "PCIe",
-      "chain": [
-        "phy(blocker)",
-        "clk(CRU)",
-        "reset",
-        "iommu(可选)",
-        "regmap(pipe-grf)"
-      ],
-      "note": "多重 blocker,需先补 phy/clk 框架"
+   },
+   "workaround": "若 gpio 只是上电/复位且 firmware 已拉好电平,删调用并注释;否则 blocker 上报。",
+   "report_template": "gpio (gpiod) — works-around. gpiod_set_value(reset_gpio,1) at probe removed; reset line held deasserted by firmware.",
+   "context": [
+    "gpio",
+    "gpiod",
+    "pinctrl",
+    "reset_gpio"
+   ],
+   "infra_type": "multi-provider"
+  },
+  {
+   "id": "pinctrl",
+   "name": "pinctrl",
+   "symbols": [
+    "pinctrl_pm_select_*",
+    "pinctrl"
+   ],
+   "status": "missing",
+   "effective": {
+    "from": "2025-01",
+    "until": null
+   },
+   "xkernel_status": "无 pinctrl。引脚复用由 firmware 配置。",
+   "severity": "works-around",
+   "workaround": "删除 pinctrl 调用,注释 'pinmux configured by firmware'。",
+   "report_template": "pinctrl — works-around. Pinmux configured by firmware; pinctrl calls removed.",
+   "context": [
+    "pinctrl",
+    "pinmux"
+   ],
+   "infra_type": "multi-provider"
+  },
+  {
+   "id": "reset",
+   "name": "reset controller",
+   "symbols": [
+    "reset_control_assert",
+    "reset_control_deassert",
+    "devm_reset_control_get"
+   ],
+   "status": "missing",
+   "effective": {
+    "from": "2025-01",
+    "until": null
+   },
+   "xkernel_status": "无 reset 框架。",
+   "severity": "conditional",
+   "severity_branches": {
+    "already_deasserted": {
+     "severity": "works-around",
+     "when": "probe 时已解除复位"
     },
-    {
-      "area": "USB3 (dwc3)",
-      "chain": [
-        "phy",
-        "clk",
-        "regulator(PMIC)",
-        "reset"
-      ],
-      "note": ""
-    },
-    {
-      "area": "GPU/VPU/codec",
-      "chain": [
-        "iommu(blocker)",
-        "clk",
-        "regulator",
-        "reset"
-      ],
-      "note": ""
-    },
-    {
-      "area": "I2C controller",
-      "chain": [
-        "i2c subsystem(blocker)",
-        "clk(rate)"
-      ],
-      "note": ""
-    },
-    {
-      "area": "以太网",
-      "chain": [
-        "phy(MDIO)",
-        "clk"
-      ],
-      "note": "若用标准 NetDevice + publish_net 则主干可用,phy 走 works-around"
+    "need_runtime_sequence": {
+     "severity": "blocker",
+     "when": "需主动 assert/deassert 复位时序"
     }
-  ]
+   },
+   "workaround": "删 deassert 调用并注释 'deasserted by firmware';assert/deassert 序列留 TODO。",
+   "report_template": "reset — works-around. reset_control_deassert removed; device deasserted by firmware.",
+   "context": [
+    "reset",
+    "reset_control"
+   ],
+   "infra_type": "multi-provider"
+  },
+  {
+   "id": "regulator",
+   "name": "regulator",
+   "symbols": [
+    "regulator_enable",
+    "devm_regulator_get"
+   ],
+   "status": "missing",
+   "effective": {
+    "from": "2025-01",
+    "until": null
+   },
+   "xkernel_status": "无 regulator 框架。",
+   "severity": "conditional",
+   "severity_branches": {
+    "pmic_powered": {
+     "severity": "blocker",
+     "when": "PMIC 供电的外设(RK3588 部分模块经 RK806 PMIC),且内核侧无法上电"
+    },
+    "fixed_rail": {
+     "severity": "works-around",
+     "when": "板载固定供电"
+    }
+   },
+   "workaround": "删调用注释 'power supplied by fixed rail';PMIC 路径 blocker 上报(通常级联 I2C→PMIC,I2C 子系统也缺)。",
+   "report_template": "regulator — works-around. Fixed-rail power; regulator_enable removed. PMIC path → blocker (cascades I2C subsystem).",
+   "context": [
+    "regulator",
+    "PMIC",
+    "RK806",
+    "power"
+   ],
+   "infra_type": "multi-provider"
+  },
+  {
+   "id": "iommu",
+   "name": "iommu",
+   "symbols": [
+    "iommu_map",
+    "iommu_unmap",
+    "arm_iommu_attach_device"
+   ],
+   "status": "missing",
+   "effective": {
+    "from": "2025-01",
+    "until": null
+   },
+   "xkernel_status": "无 iommu。",
+   "severity": "conditional",
+   "severity_branches": {
+    "iommu_isolated": {
+     "severity": "blocker",
+     "when": "需要 DMA 且设备经 IOMMU 隔离(RK3588 GPU/VPU/codec)"
+    },
+    "direct_dma": {
+     "severity": "works-around",
+     "when": "直连 DMA(MMC/网卡),不涉及"
+    }
+   },
+   "workaround": "无;上报。RK3588 多数多媒体 IP 受此阻塞。",
+   "report_template": "iommu — blocker. Device requires DMA via IOMMU; no iommu framework. RK3588 GPU/VPU/codec blocked.",
+   "context": [
+    "iommu",
+    "DMA",
+    "SMMU"
+   ],
+   "infra_type": "multi-provider"
+  },
+  {
+   "id": "phy",
+   "name": "phy",
+   "symbols": [
+    "phy_init",
+    "phy_power_on",
+    "devm_phy_get"
+   ],
+   "status": "missing",
+   "effective": {
+    "from": "2025-01",
+    "until": null
+   },
+   "xkernel_status": "无 phy 框架。",
+   "severity": "conditional",
+   "severity_branches": {
+    "independent_phy_ip": {
+     "severity": "blocker",
+     "when": "PCIe/USB3/SATA 带独立 PHY IP,不上电链路不起来"
+    },
+    "mmc_phy": {
+     "severity": "works-around",
+     "when": "MMC 的 phy 多为简单延迟配置"
+    }
+   },
+   "workaround": "MMC phy 用固定寄存器配置替代;PCIe/USB phy blocker 上报。",
+   "report_template": "phy — blocker. PCIe/USB require powered PHY IP; no phy framework. Requires phy framework first.",
+   "context": [
+    "phy",
+    "PCIe",
+    "USB3",
+    "PHY"
+   ],
+   "infra_type": "multi-provider"
+  },
+  {
+   "id": "workqueue",
+   "name": "workqueue / tasklet",
+   "symbols": [
+    "INIT_WORK",
+    "schedule_work",
+    "tasklet_schedule"
+   ],
+   "status": "missing",
+   "effective": {
+    "from": "2025-01",
+    "until": null
+   },
+   "xkernel_status": "无 workqueue/tasklet。",
+   "severity": "works-around",
+   "workaround": "用 ktask 起内核线程:上半部(IrqHandler)只清中断+置标志+唤醒,线程 wait_until(|| pending) 后做重活。",
+   "report_template": "workqueue — works-around. Replaced schedule_work with a dedicated ktask thread woken by WaitQueue from the top-half IrqHandler.",
+   "context": [
+    "workqueue",
+    "tasklet",
+    "schedule_work",
+    "bottom_half"
+   ],
+   "infra_type": "framework"
+  },
+  {
+   "id": "completion",
+   "name": "completion",
+   "symbols": [
+    "init_completion",
+    "wait_for_completion",
+    "complete"
+   ],
+   "status": "workaround",
+   "effective": {
+    "from": "2025-01",
+    "until": null
+   },
+   "xkernel_status": "无 Completion 类型;用 ktask::WaitQueue 替代。",
+   "severity": "works-around",
+   "workaround": "wq.wait_timeout_until(deadline, || done.load(Ordering::Acquire));完成方 done.store(true);wq.notify_one(true)。",
+   "report_template": "completion — works-around. Modeled with WaitQueue::wait_timeout_until + AtomicBool.",
+   "context": [
+    "completion",
+    "wait_for_completion",
+    "WaitQueue"
+   ],
+   "infra_type": "framework"
+  },
+  {
+   "id": "busy-wait",
+   "name": "忙等延时(udelay/mdelay/ndelay)",
+   "symbols": [
+    "udelay",
+    "mdelay",
+    "ndelay"
+   ],
+   "status": "workaround",
+   "effective": {
+    "from": "2025-01",
+    "until": null
+   },
+   "xkernel_status": "无 busy-wait helper。",
+   "severity": "works-around",
+   "workaround": "core::hint::spin_loop() 自旋 + monotonic_time_nanos 截止循环(注意:关中断上下文不可用,需可抢占/进程上下文)。",
+   "report_template": "udelay/mdelay — works-around. udelay(N) replaced with a monotonic_time_nanos() busy-loop (probe context, IRQs on).",
+   "context": [
+    "udelay",
+    "mdelay",
+    "ndelay",
+    "busy_wait",
+    "delay"
+   ],
+   "infra_type": "framework"
+  },
+  {
+   "id": "timer",
+   "name": "定时器(timer_setup/mod_timer/hrtimer)",
+   "symbols": [
+    "timer_setup",
+    "mod_timer",
+    "hrtimer"
+   ],
+   "status": "workaround",
+   "effective": {
+    "from": "2025-01",
+    "until": null
+   },
+   "xkernel_status": "ktask 仅 register_timer_callback(很薄),无通用 hrtimer/softirq 定时器。",
+   "severity": "works-around",
+   "workaround": "用内核线程 loop { sleep(Duration); do_work(); }。",
+   "report_template": "timer — works-around. Periodic work modeled with a ktask loop thread.",
+   "context": [
+    "timer",
+    "hrtimer",
+    "mod_timer",
+    "watchdog"
+   ],
+   "infra_type": "framework"
+  },
+  {
+   "id": "device-class",
+   "name": "设备子系统无 class(i2c/spi/watchdog/rtc/mmc-core/tty)",
+   "symbols": [
+    "i2c_add_adapter",
+    "spi_register_master"
+   ],
+   "status": "missing",
+   "effective": {
+    "from": "2025-01",
+    "until": null
+   },
+   "xkernel_status": "DeviceKind 只有 Block/Char/Net/Display/Input/Vsock/Fs9p/Bus,无 I2C-SPI-Watchdog-RTC 专用类与 publish_*。mmc controller 走自定义 BlockDevice 路径(见 sdmmc),无 mmc-core 协议栈复用。",
+   "severity": "conditional",
+   "severity_branches": {
+    "i2c_controller": {
+     "severity": "blocker",
+     "when": "无 publish_i2c,无法挂 I2C 总线及从设备"
+    },
+    "watchdog": {
+     "severity": "works-around",
+     "when": "做成 char 设备 publish_char,但无统一 watchdog 子系统"
+    },
+    "rtc": {
+     "severity": "works-around",
+     "when": "char 设备"
+    },
+    "mmc_controller": {
+     "severity": "works-around",
+     "when": "项目走自定义 BlockDevice 路径"
+    }
+   },
+   "workaround": "能套 Block/Char/Net 的就套(watchdog→char);套不上的(i2c/spi controller)→ blocker,需先建子系统。",
+   "report_template": "i2c subsystem — blocker. No DeviceKind::I2c / publish_i2c; controller can probe and init registers but cannot register an I2C bus for child devices. Requires building the i2c class first.",
+   "context": [
+    "i2c",
+    "spi",
+    "watchdog",
+    "rtc",
+    "publish_i2c",
+    "DeviceKind",
+    "class"
+   ],
+   "infra_type": "subsystem-class"
+  },
+  {
+   "id": "misc",
+   "name": "其他(vmalloc/RCU/kmem_cache/leds/pm_runtime)",
+   "symbols": [
+    "vmalloc",
+    "RCU",
+    "kmem_cache_create"
+   ],
+   "status": "workaround",
+   "effective": {
+    "from": "2025-01",
+    "until": null
+   },
+   "xkernel_status": "vmalloc 无(大缓冲用 devm_alloc_coherent 或 alloc_pages);RCU 无(用 Arc/RwLock 替代);kmem_cache/slab 无(用 Box/Vec);leds/input 框架薄;pm_runtime 仅 DeviceDriver::suspend/resume。",
+   "severity": "optional",
+   "workaround": "vmalloc→devm_alloc_coherent/alloc_pages;RCU→Arc/RwLock;kmem_cache→Box/Vec;pm_runtime→删 runtime pm 调用保留系统级 suspend/resume。",
+   "report_template": "misc — optional/works-around per item (vmalloc/RCU/kmem_cache/pm_runtime).",
+   "context": [
+    "vmalloc",
+    "RCU",
+    "kmem_cache",
+    "slab",
+    "leds",
+    "pm_runtime"
+   ],
+   "infra_type": "framework"
+  }
+ ],
+ "cascade_gaps": [
+  {
+   "area": "PCIe",
+   "chain": [
+    "phy(blocker)",
+    "clk(CRU)",
+    "reset",
+    "iommu(可选)",
+    "regmap(pipe-grf)"
+   ],
+   "note": "多重 blocker,需先补 phy/clk 框架"
+  },
+  {
+   "area": "USB3 (dwc3)",
+   "chain": [
+    "phy",
+    "clk",
+    "regulator(PMIC)",
+    "reset"
+   ],
+   "note": ""
+  },
+  {
+   "area": "GPU/VPU/codec",
+   "chain": [
+    "iommu(blocker)",
+    "clk",
+    "regulator",
+    "reset"
+   ],
+   "note": ""
+  },
+  {
+   "area": "I2C controller",
+   "chain": [
+    "i2c subsystem(blocker)",
+    "clk(rate)"
+   ],
+   "note": ""
+  },
+  {
+   "area": "以太网",
+   "chain": [
+    "phy(MDIO)",
+    "clk"
+   ],
+   "note": "若用标准 NetDevice + publish_net 则主干可用,phy 走 works-around"
+  }
+ ]
 }

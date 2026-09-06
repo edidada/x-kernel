@@ -12,22 +12,22 @@ Phase 2(映射)的查表依据。**每一条 x-kernel 接口都来自项目源�
 
 | Linux | x-kernel 对应 | 备注 / 位置 |
 |-------|---------------|-------------|
-| `struct platform_driver + .probe/.remove` | impl DeviceDriver for XxxDriver (probe_device/remove) | DeviceDriver trait 的 probe_device/remove/suspend/resume/shutdown;除 probe_device 外都有默认实现 [drivers/kdevice/src/driver/mod.rs] |
-| `static const struct of_device_id xxx_match[] / of_match_table` | const XXX: FirmwareMatchSpec { alias, dt_compatibles, acpi_ids } | dt_compatibles 即匹配表 [drivers/kdriver/src/driver_registry/firmware_specs.rs] |
-| `module_platform_driver(xxx) / module_init` | pub(super) fn descriptor() -> BoxedDriver { Arc::new(XxxDriver) } + 编译期 DRIVER_FACTORIES | 无运行时 module [drivers/kdriver/src/driver_registry] |
+| `struct platform_driver + .probe/.remove` | impl DeviceDriver for XxxDriver (probe_device/remove) | DeviceDriver trait 的 probe_device/remove/suspend/resume/shutdown;除 probe_device 外都有默认实现 [drivers/contracts/kdevice/src/driver/mod.rs] |
+| `static const struct of_device_id xxx_match[] / of_match_table` | const XXX: FirmwareMatchSpec { alias, dt_compatibles, acpi_ids } | dt_compatibles 即匹配表 [drivers/integration/kdriver/src/driver_registry/firmware_specs.rs] |
+| `module_platform_driver(xxx) / module_init` | pub(super) fn descriptor() -> BoxedDriver { Arc::new(XxxDriver) } + 编译期 DRIVER_FACTORIES | 无运行时 module [drivers/integration/kdriver/src/driver_registry] |
 | `platform_set_drvdata / platform_get_drvdata` | 用 Arc<T> 持有私有数据,经 kclass::publish_* 发布 | 无直接等价;drvdata 模式 → RAII 所有权替代 |
-| `module_pci_driver` | 同 platform,但 bus_types() 返回 &[BusTypeId::PCI] | [drivers/kdevice/src/bus/bus_type.rs] |
+| `module_pci_driver` | 同 platform,但 bus_types() 返回 &[BusTypeId::PCI] | [drivers/contracts/kdevice/src/bus/bus_type.rs] |
 | `MODULE_AUTHOR/LICENSE/DESCRIPTION` | 文件头 SPDX 许可注释 | // SPDX-License-Identifier: Apache-2.0 |
 
 ## 2. 设备资源 — MMIO 寄存器
 
 | Linux | x-kernel 对应 | 备注 / 位置 |
 |-------|---------------|-------------|
-| `platform_get_resource(pdev, IORESOURCE_MEM, n)` | device.first_mmio()(首个区域)或遍历 device.resources() | 多区域时遍历 resources() [drivers/kdevice/src/device/object.rs:132] |
-| `devm_platform_ioremap_resource / devm_ioremap` | 胶水:crate::iomap_first_mmio(dev, "name")? 返回 (NonNull<u8>, size);底层 device_res::devm_iomap(dev, region, "name") | 推荐 vaddr 模式 [drivers/kdriver/src/lib.rs:93] |
-| `ioremap(非 devm)` | Io::map(MmioRegion{base,size}, "name")?(RAII,drop 时 unmap) | [drivers/device-res/src/mmio.rs] |
-| `readl/writel, readb/readw/readq, writeb…` | Io::read32(offset) / write32(offset, val);另有 read8/16/64、write8/16/64 | 带边界检查 + Acquire/Release fence [drivers/device-res/src/mmio.rs] |
-| `ioread32/iowrite32` | 同上(Io 句柄方法) | [drivers/device-res/src/mmio.rs] |
+| `platform_get_resource(pdev, IORESOURCE_MEM, n)` | device.first_mmio()(首个区域)或遍历 device.resources() | 多区域时遍历 resources() [drivers/contracts/kdevice/src/device/object.rs:132] |
+| `devm_platform_ioremap_resource / devm_ioremap` | 胶水:crate::iomap_first_mmio(dev, "name")? 返回 (NonNull<u8>, size);底层 device_res::devm_iomap(dev, region, "name") | 推荐 vaddr 模式 [drivers/integration/kdriver/src/lib.rs:93] |
+| `ioremap(非 devm)` | Io::map(MmioRegion{base,size}, "name")?(RAII,drop 时 unmap) | [drivers/contracts/device-res/src/mmio.rs] |
+| `readl/writel, readb/readw/readq, writeb…` | Io::read32(offset) / write32(offset, val);另有 read8/16/64、write8/16/64 | 带边界检查 + Acquire/Release fence [drivers/contracts/device-res/src/mmio.rs] |
+| `ioread32/iowrite32` | 同上(Io 句柄方法) | [drivers/contracts/device-res/src/mmio.rs] |
 | `devm_platform_get_and_ioremap_resource` | first_mmio() + devm_iomap(或直接 iomap_first_mmio) |  |
 | `memcpy_fromio / memcpy_toio` | 用 Io::as_ptr()->NonNull<u8> 自行 volatile 拷贝(无封装 helper) | 无 helper |
 
@@ -35,35 +35,35 @@ Phase 2(映射)的查表依据。**每一条 x-kernel 接口都来自项目源�
 
 | Linux | x-kernel 对应 | 备注 / 位置 |
 |-------|---------------|-------------|
-| `platform_get_irq(pdev, n) / of_irq_get` | device.first_irq() -> Option<IrqResource>(已解析) | [drivers/kdevice/src/device/object.rs:140] |
-| `devm_request_irq(dev, irq, handler, flags, name, data)` | device_res::devm_request_irq(dev, irq: IrqResource, Arc<dyn IrqHandler>)? 或胶水 helper | [drivers/device-res/src/irq.rs] |
-| `request_irq(非 devm)` | Irq::request(irq, Arc<dyn IrqHandler>)?(RAII,drop 释放) | [drivers/device-res/src/irq.rs] |
-| `irqreturn_t (*handler)(int irq, void *data)` | impl IrqHandler { fn handle(&self) -> IrqEvent };闭包 Fn()->IrqEvent + Send+Sync 自动实现 | 可直接 Arc::new(|| { … IrqEvent::HANDLED }) [drivers/device-res/src/irq.rs] |
-| `IRQ_HANDLED / IRQ_NONE` | IrqEvent::HANDLED / IrqEvent::NOT_HANDLED(另有 from_sources(u8)) | [drivers/device-res/src/irq.rs] |
-| `IRQF_TRIGGER_*` | IrqTrigger::{EdgeRising, EdgeFalling, LevelHigh, LevelLow, Unknown(u32)} | DT 已解析时直接用 first_irq() 的 trigger [drivers/device-res/src/irq.rs] |
-| `disable_irq/enable_irq` | Irq::set_enabled(bool) | [drivers/device-res/src/irq.rs] |
-| `free_irq` | drop Irq 句柄(RAII) | [drivers/device-res/src/irq.rs] |
+| `platform_get_irq(pdev, n) / of_irq_get` | device.first_irq() -> Option<IrqResource>(已解析) | [drivers/contracts/kdevice/src/device/object.rs:140] |
+| `devm_request_irq(dev, irq, handler, flags, name, data)` | device_res::devm_request_irq(dev, irq: IrqResource, Arc<dyn IrqHandler>)? 或胶水 helper | [drivers/contracts/device-res/src/irq.rs] |
+| `request_irq(非 devm)` | Irq::request(irq, Arc<dyn IrqHandler>)?(RAII,drop 释放) | [drivers/contracts/device-res/src/irq.rs] |
+| `irqreturn_t (*handler)(int irq, void *data)` | impl IrqHandler { fn handle(&self) -> IrqEvent };闭包 Fn()->IrqEvent + Send+Sync 自动实现 | 可直接 Arc::new(|| { … IrqEvent::HANDLED }) [drivers/contracts/device-res/src/irq.rs] |
+| `IRQ_HANDLED / IRQ_NONE` | IrqEvent::HANDLED / IrqEvent::NOT_HANDLED(另有 from_sources(u8)) | [drivers/contracts/device-res/src/irq.rs] |
+| `IRQF_TRIGGER_*` | IrqTrigger::{EdgeRising, EdgeFalling, LevelHigh, LevelLow, Unknown(u32)} | DT 已解析时直接用 first_irq() 的 trigger [drivers/contracts/device-res/src/irq.rs] |
+| `disable_irq/enable_irq` | Irq::set_enabled(bool) | [drivers/contracts/device-res/src/irq.rs] |
+| `free_irq` | drop Irq 句柄(RAII) | [drivers/contracts/device-res/src/irq.rs] |
 | `request_threaded_irq / 中断下半部` `missing` | 缺口:无线程化 IRQ;上半部用 IrqHandler,延后处理见 gaps(workqueue) | status=missing |
 
 ## 4. 设备资源 — DMA
 
 | Linux | x-kernel 对应 | 备注 / 位置 |
 |-------|---------------|-------------|
-| `dmam_alloc_coherent / dma_alloc_coherent` | device_res::devm_alloc_coherent(dev, DmaSpec)? 返回 (NonNull<u8>, bus_addr: u64) | [drivers/device-res/src/dma.rs] |
-| `dma_alloc_coherent(非 devm)` | DmaCoherent::alloc(DmaSpec)?(RAII);类型化 CoherentBox<T>::alloc / CoherentArray<T>::alloc | [drivers/device-res/src/dma.rs] |
-| `DMA_TO_DEVICE/BIDIRECTIONAL/FROM_DEVICE` | DmaDirection::{DriverToDevice, Bidirectional, DeviceToDriver} | DmaSpec::new 默认 Bidirectional;.with_direction(d) 覆盖 [drivers/device-res/src/dma.rs] |
-| `dma_free_coherent` | drop DmaCoherent(RAII) | [drivers/device-res/src/dma.rs] |
-| `dma_map_single / dma_unmap_single(streaming)` | DmaOp::map_streaming(默认 Unsupported,看宿主是否实现) | 多数路径走 coherent [drivers/device-res/src/dma.rs] |
-| `dma_sync_single_for_cpu/device` | DmaOp::sync_for_cpu/sync_for_device(默认 no-op) | coherent 内存无需 sync [drivers/device-res/src/dma.rs] |
+| `dmam_alloc_coherent / dma_alloc_coherent` | device_res::devm_alloc_coherent(dev, DmaSpec)? 返回 (NonNull<u8>, bus_addr: u64) | [drivers/contracts/device-res/src/dma.rs] |
+| `dma_alloc_coherent(非 devm)` | DmaCoherent::alloc(DmaSpec)?(RAII);类型化 CoherentBox<T>::alloc / CoherentArray<T>::alloc | [drivers/contracts/device-res/src/dma.rs] |
+| `DMA_TO_DEVICE/BIDIRECTIONAL/FROM_DEVICE` | DmaDirection::{DriverToDevice, Bidirectional, DeviceToDriver} | DmaSpec::new 默认 Bidirectional;.with_direction(d) 覆盖 [drivers/contracts/device-res/src/dma.rs] |
+| `dma_free_coherent` | drop DmaCoherent(RAII) | [drivers/contracts/device-res/src/dma.rs] |
+| `dma_map_single / dma_unmap_single(streaming)` | DmaOp::map_streaming(默认 Unsupported,看宿主是否实现) | 多数路径走 coherent [drivers/contracts/device-res/src/dma.rs] |
+| `dma_sync_single_for_cpu/device` | DmaOp::sync_for_cpu/sync_for_device(默认 no-op) | coherent 内存无需 sync [drivers/contracts/device-res/src/dma.rs] |
 | `dma_set_mask_and_coherent` | 当前无显式掩码 API;RK3588 aarch64 默认 64-bit | 视为可选,缺口记录 |
 
 ## 5. 设备类发布(把驱动实例挂进系统)
 
 | Linux | x-kernel 对应 | 备注 / 位置 |
 |-------|---------------|-------------|
-| `register_netdev / net_device_ops` | impl NetDevice for … + kclass::publish_net(device, Box::new(dev))? | 宏生成 [drivers/kclass/src/lib.rs:478] |
-| `block_device_operations + add_disk / gendisk` | impl BlockDevice for … + kclass::publish_block(device, Box::new(dev))? | [drivers/block/src/lib.rs] |
-| `misc_register / cdev_init+add / tty_register_driver` | impl CharDevice for … + impl Device + kclass::publish_char(device, Box::new(dev))? | [drivers/kdriver/src/driver_registry/char/serial.rs] |
+| `register_netdev / net_device_ops` | impl NetDevice for … + kclass::publish_net(device, Box::new(dev))? | 宏生成 [drivers/contracts/kclass/src/lib.rs:478] |
+| `block_device_operations + add_disk / gendisk` | impl BlockDevice for … + kclass::publish_block(device, Box::new(dev))? | [drivers/contracts/block/src/lib.rs] |
+| `misc_register / cdev_init+add / tty_register_driver` | impl CharDevice for … + impl Device + kclass::publish_char(device, Box::new(dev))? | [drivers/integration/kdriver/src/driver_registry/char/serial.rs] |
 | `platform_device_register(静态设备)` | 平台后端的 static device 机制(一般无需驱动侧操作) |  |
 | `i2c/spi/watchdog/rtc/… subsystem 注册` `missing` | 缺口:无对应 DeviceKind 与 class;见 gaps | RK3588 移植最常见的阻塞点;status=missing |
 
@@ -92,7 +92,7 @@ Phase 2(映射)的查表依据。**每一条 x-kernel 接口都来自项目源�
 | `devm_kmalloc/devm_kzalloc` | Box::new(x),生命周期挂设备时用 device.register_cleanup(Box::new(|| …)) | 无专用 devm 分配器;RAII + cleanup |
 | `kcalloc / 数组分配` | vec![T::default(); n] 或 Vec::with_capacity(n) |  |
 | `kmem_cache_create(slab)` `missing` | 缺口:无 slab cache;用 Box/Vec,性能敏感上报 | status=optional |
-| `get_zeroed_page / __get_free_page` | axalloc::global_allocator().alloc_pages(pages, PAGE_SIZE_4K, UsageKind::Dma) | fxmac 用法 [drivers/kdriver/src/driver_registry/net/fxmac.rs:27] |
+| `get_zeroed_page / __get_free_page` | axalloc::global_allocator().alloc_pages(pages, PAGE_SIZE_4K, UsageKind::Dma) | fxmac 用法 [drivers/integration/kdriver/src/driver_registry/net/fxmac.rs:27] |
 | `alloc_pages / __get_free_pages` | 同 get_zeroed_page |  |
 | `vmalloc` `workaround` | 缺口:无 vmalloc 等价;大缓冲用 DMA coherent 或上报 | status=workaround |
 | `kmap/kunmap` | 无(aarch64 直接用虚拟地址) |  |
@@ -116,22 +116,22 @@ Phase 2(映射)的查表依据。**每一条 x-kernel 接口都来自项目源�
 |-------|---------------|-------------|
 | `dev_info/dev_err/dev_warn/dev_dbg` | log::info!/error!/warn!/debug!(无 dev_ 变体,自行拼 device.location()/name) | 早期 init 的 log::* 静默,改用 kernel_boot::bootln! |
 | `printk / pr_info/pr_err` | log::info! 等 |  |
-| `-ENOMEM` | DriverError::NoMemory | [drivers/driver_base/src/lib.rs:137] |
-| `-EINVAL` | DriverError::InvalidInput | [drivers/driver_base/src/lib.rs:137] |
-| `-ENODEV/-ENXIO` | DriverError::BadState 或 InvalidInput(视语义) | [drivers/driver_base/src/lib.rs:137] |
-| `-EBUSY` | DriverError::ResourceBusy | [drivers/driver_base/src/lib.rs:137] |
-| `-EIO` | DriverError::Io | [drivers/driver_base/src/lib.rs:137] |
-| `-ENOTSUPP/-EOPNOTSUPP` | DriverError::Unsupported | [drivers/driver_base/src/lib.rs:137] |
-| `-EEXIST` | DriverError::AlreadyExists | [drivers/driver_base/src/lib.rs:137] |
+| `-ENOMEM` | DriverError::NoMemory | [drivers/contracts/driver_base/src/lib.rs:137] |
+| `-EINVAL` | DriverError::InvalidInput | [drivers/contracts/driver_base/src/lib.rs:137] |
+| `-ENODEV/-ENXIO` | DriverError::BadState 或 InvalidInput(视语义) | [drivers/contracts/driver_base/src/lib.rs:137] |
+| `-EBUSY` | DriverError::ResourceBusy | [drivers/contracts/driver_base/src/lib.rs:137] |
+| `-EIO` | DriverError::Io | [drivers/contracts/driver_base/src/lib.rs:137] |
+| `-ENOTSUPP/-EOPNOTSUPP` | DriverError::Unsupported | [drivers/contracts/driver_base/src/lib.rs:137] |
+| `-EEXIST` | DriverError::AlreadyExists | [drivers/contracts/driver_base/src/lib.rs:137] |
 | `错误传播 < 0 返回 + IS_ERR` | ? 运算符 + DriverResult<T> / ResResult<T>;map_err 在两套错误间转换 |  |
 
 ## 10. 设备树属性读取
 
 | Linux | x-kernel 对应 | 备注 / 位置 |
 |-------|---------------|-------------|
-| `of_property_read_u32(node, "x", &val)` | of::property_u32(node, "x") -> Option<u32> | [drivers/of/src/lib.rs:89] |
-| `of_find_compatible_node` | of::find_compatible("vendor,x") -> Option<FdtNode> | [drivers/of/src/lib.rs] |
-| `of_find_node_by_name/path` | of::find_node("/path") / resolve_node(path_or_alias) | resolve_node 偶有不稳;稳健按结构找 fdt.all_nodes().find(...) [drivers/of/src/lib.rs] |
+| `of_property_read_u32(node, "x", &val)` | of::property_u32(node, "x") -> Option<u32> | [drivers/platform/of/src/lib.rs:89] |
+| `of_find_compatible_node` | of::find_compatible("vendor,x") -> Option<FdtNode> | [drivers/platform/of/src/lib.rs] |
+| `of_find_node_by_name/path` | of::find_node("/path") / resolve_node(path_or_alias) | resolve_node 偶有不稳;稳健按结构找 fdt.all_nodes().find(...) [drivers/platform/of/src/lib.rs] |
 | `取设备时钟(clocks/clock-names)` `missing` | clk::devm_clk_get(device, "ciu") -> ResResult<Clk>(总线已预解析 ResourceDesc::Clock) | 驱动不碰 DT;详见 clk-subsystem [docs/ai/skills/linux-driver-port/knowledge/clk-subsystem.md] |
 | `of_get_named_gpio` `missing` | 缺口:无 gpio;见 gaps | status=missing |
 | `of_irq_by_resource / of_irq_get` | device.first_irq()(已解析)或 of::first_interrupt_desc(node) |  |
@@ -143,7 +143,7 @@ Phase 2(映射)的查表依据。**每一条 x-kernel 接口都来自项目源�
 
 | Linux | x-kernel 对应 | 备注 / 位置 |
 |-------|---------------|-------------|
-| `virt_to_phys` | khal::mem::v2p(VirtAddr) -> PhysAddr | [drivers/kdriver/src/driver_registry/net/fxmac.rs:18] |
+| `virt_to_phys` | khal::mem::v2p(VirtAddr) -> PhysAddr | [drivers/integration/kdriver/src/driver_registry/net/fxmac.rs:18] |
 | `phys_to_virt` | khal::mem::p2v(PhysAddr) -> VirtAddr |  |
 | `PAGE_SIZE` | khal::mem::PAGE_SIZE_4K |  |
 | `物理地址类型` | khal::mem::PhysAddr::from_usize / VirtAddr::from_usize | serial.rs 用法 |

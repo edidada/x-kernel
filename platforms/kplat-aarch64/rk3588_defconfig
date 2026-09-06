@@ -27,6 +27,12 @@ NR_CPUS=8
 KERNEL_STACK_SIZE=0x40000
 # Character device class (the NS16550 MMIO console driver depends on it).
 KFEAT_CHAR=y
+# RK3588 CRU clock controller: registers the SoC clock tree so consumers
+# (console UART, eMMC, ...) resolve their DT clocks to real rates.
+KFEAT_DRIVER_CLK_RK3588_CRU=y
+# Runtime NS16550 UART driver: each UART node becomes a char device and
+# re-derives its baud divisor from the CRU-provided baudclk (P6 evidence).
+KFEAT_DRIVER_SERIAL_NS16550_MMIO=y
 # RK3588 UART2 is a DesignWare APB UART (16550-compatible) -> ns16550-mmio.
 KFEAT_DRIVER_CONSOLE_NS16550_MMIO=y
 # KFEAT_DRIVER_CONSOLE_PL011 is not set

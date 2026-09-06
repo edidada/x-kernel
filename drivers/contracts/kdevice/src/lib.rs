@@ -71,8 +71,8 @@ pub use device::{
     handles::{BusHandle, DeviceCore, DriverCore},
     object::{DeviceObject, DeviceUse},
     resource::{
-        ClkProviderDesc, ClkResource, ClkSpec, DmaSpec, IoPortRange, IrqResource, IrqTrigger,
-        MmioRegion, ResourceDesc, ResourceSet,
+        AssignedClock, ClkProviderDesc, ClkResource, ClkSpec, DmaSpec, IoPortRange, IrqResource,
+        IrqTrigger, MmioRegion, ResourceDesc, ResourceSet,
     },
 };
 pub use driver::{

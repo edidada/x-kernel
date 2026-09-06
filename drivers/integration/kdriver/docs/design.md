@@ -176,6 +176,17 @@ SoC 专用控制器（PLL/mux/divider/gate 树）遵循同一模式：注册自�
 compatible、携带 MMIO 窗口、在 probe 中 `register_table`。通用
 `fixed-clock` 驱动自动跳过带 MMIO 的节点，让专用驱动认领。
 
+首个真实控制器已落地：`clk/rk3588_cru/`（feature `clk-rk3588-cru`，
+Kconfig `KFEAT_DRIVER_CLK_RK3588_CRU`，RK3588 Orange Pi 5 Plus）。它在 probe 中
+注册整棵时钟树（PLL×9 + mode mux、armclk×3、静态分支表、frac/halfdiv/gate-link
+custom ops），ProviderId 取节点 DT phandle；多输出控制器的 phandle 由
+`ClkProviderDesc::controller` 资源携带（fixed-clock 形态仍要求固定频率）。
+节点上的 `assigned-clocks`/`assigned-clock-rates` 枚举为
+`ResourceDesc::AssignedClock`，probe 末尾按序 apply（同速率短路保证
+bootloader 已配好的钟不被重跑序列）。外部输入钟（PHY/pinctrl/SCMI）由驱动
+注册 rate-0 占位（Linux 孤儿等价），名单见
+`docs/ai/skills/linux-driver-port/examples/rk3588-cru/rk3588-cru-gap-report.md`。
+
 provider-first 是常见路径的优化，不是正确性的唯一前提。消费者若在对应
 provider 注册前请求时钟，错误链保持为 `ClkError::NoProvider` →
 `ResError::NoProvider` → `DriverError::WouldBlock`，probe 结果记为

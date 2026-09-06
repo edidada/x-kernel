@@ -1,0 +1,28 @@
+{
+  "requirements": [
+    {
+      "id": "req-clk-framework",
+      "gap_id": "clk-framework",
+      "title": "实现 clk framework(clk_disable_unprepare)",
+      "infra_type": "multi-provider",
+      "status": "landed",
+      "source": "scan:docs/ai/skills/linux-driver-port/data/references/linux/drivers/clk/rockchip",
+      "symbol": "clk_disable_unprepare",
+      "created_ts": 1788714408,
+      "confirmed_ts": 1788714523,
+      "file": "req-clk-framework.md"
+    },
+    {
+      "id": "req-busy-wait",
+      "gap_id": "busy-wait",
+      "title": "实现 忙等延时(udelay/mdelay/ndelay)(udelay)",
+      "infra_type": "framework",
+      "status": "confirmed",
+      "source": "scan:docs/ai/skills/linux-driver-port/data/references/linux/drivers/clk/rockchip",
+      "symbol": "udelay",
+      "created_ts": 1788714408,
+      "confirmed_ts": 1788714523,
+      "file": "req-busy-wait.md"
+    }
+  ]
+}

@@ -479,6 +479,7 @@ pub mod clk_vccu_tests {
                     shift: 0,
                     mask: 0x1,
                     table: None,
+                    flags: kclk::MuxFlags::empty(),
                 }),
                 None,
                 None,

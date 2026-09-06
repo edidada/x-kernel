@@ -37,6 +37,8 @@ pub fn register_factories(registrar: &mut DriverRegistrar, factories: &[DriverFa
 /// Register all enabled non-VirtIO platform and PCI driver descriptors.
 pub fn register_platform_drivers(registrar: &mut DriverRegistrar) {
     clk::register_all(registrar);
+    #[cfg(feature = "clk-rk3588-cru")]
+    clk::register_rk3588_cru(registrar);
     block::register_all(registrar);
     net::register_all(registrar);
 }

@@ -728,6 +728,7 @@ mod clocks;
 mod unittest_tests;
 
 pub use clocks::{
-    ClockSpec, clock_output_name, device_clock_index_by_name, device_clock_names,
-    device_clock_spec_by_name, device_clock_specs, device_fixed_clock_hz,
+    AssignedClock, ClockSpec, clock_output_name, device_assigned_clocks,
+    device_clock_index_by_name, device_clock_names, device_clock_spec_by_name, device_clock_specs,
+    device_fixed_clock_hz,
 };

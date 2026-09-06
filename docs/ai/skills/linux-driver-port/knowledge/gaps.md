@@ -20,9 +20,9 @@ x-kernel 目前只实现了驱动模型的「主干」:MMIO / IRQ / coherent DMA
 
 ### clk framework (`clk-framework`)
 
-- **状态**:`missing`
-- **现状**:Tier-0 中性时钟框架 drivers/clk/ 已在 RK3588 适配分支实现(未随本次合入主线;ClkProvider trait + phandle 键多 provider 注册表 + clk::devm_clk_get 消费者 API + FixedClockProvider)。Tier 0 只做只读速率查询;enable/set_rate/PLL/速率变更传播是 Tier 1/2(未实现)。RK3588 时钟由 bootloader 配好,内核侧多数驱动继承当前配置。
-- **Linux 符号**:`clk_get`, `clk_prepare_enable`, `clk_disable_unprepare`, `clk_set_rate`, `clk_get_rate`
+- **状态**:`partial`
+- **现状**:core/kclk 通用时钟框架已落地主线(core/kclk:两阶段 prepare/enable、全局 provider 注册表(ProviderId=DT phandle)、消费者 ClkHandle、ClkBranch 静态表事务注册、PRE/POST rate notifier、clk_summary/clk_disable_unused)。device-res 有 clk 消费/提供者契约,kdriver 平台总线按 provider-first 顺序 probe,clk-fixed-clock 驱动已接 DT fixed-clock。RK3588 CRU 是首个真实 SoC 控制器驱动。
+- **Linux 符号**:`clk_disable_unprepare`, `clk_divider_ops`, `clk_fractional_divider_ops`, `clk_gate_ops`, `clk_get`, `clk_get_rate`, `clk_hw_register`, `clk_hw_register_composite`, `clk_mux_ops`, `clk_prepare_enable`, `clk_register_composite`, `clk_register_divider`, `clk_register_fixed_rate`, `clk_register_gate`, `clk_register_mux`, `clk_set_rate`, `devm_clk_hw_register`, `of_clk_add_provider`, `of_clk_src_onecell_get`
 - **按维度定级**:
   - `clk-enable` (works-around): firmware 已把时钟供着,删除 enable/disable 调用,注释 'clock assumed enabled by firmware'  · 口径:clk-enable — works-around. Removed clk_prepare_enable×N (firmware provides clock).
   - `clk-rate` (conditional): provider 不可用时走 fallback(U-Boot 实测值作常量 + probe 日志标注来源 + CLKDIV 公式照搬 Linux)。RK3588 SCMI 的 ciu 直接用 RATE_GET 返回值,不 ÷2。Rockchip DT 通常只有 max-frequency 不是 clock-frequency,不能当 CLKDIV 分母。  · 口径:clk-rate — Tier-0 框架已在 RK3588 适配分支落地(drivers/clk/ 未随主线合入):clk::devm_clk_get(device,"ciu") 走 phandle 键多 provider 注册表。RK3588 sdmmc 的 ciu 经 SCMI provider(CLOCK_RATE_GET)解析到真值(~49.5 MHz)。曾因 SCMI 消息头位段记反(message_id/token)误判成'固件 stub'——实为 header bug,已修正。

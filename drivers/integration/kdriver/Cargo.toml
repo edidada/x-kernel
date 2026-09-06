@@ -68,6 +68,8 @@ fxmac = ["any_firmware_driver", "net"]
 ahci = ["any_firmware_driver", "block"]
 bcm2835-sdhci = ["any_firmware_driver", "block"]
 sdmmc = ["any_firmware_driver", "block"]
+# RK3588 CRU clock controller (kclk-based; needs no device class).
+clk-rk3588-cru = []
 
 default = []
 

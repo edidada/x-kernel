@@ -59,6 +59,7 @@ pub use core::{ClkBuilder, ClkCore, ClkSummaryEntry, clk_disable_unused, clk_sum
 
 pub use basic::{
     Composite, DivTableEntry, Divider, DividerFlags, FixedFactor, FixedRate, Gate, GateFlags, Mux,
+    MuxFlags,
 };
 pub use error::{ClkError, ClkResult};
 pub use event::{ClkEvent, ClkNotifier, ClkNotifierId, NotifierResult};

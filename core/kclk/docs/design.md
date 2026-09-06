@@ -50,6 +50,10 @@ names and polarity. Verified against `drivers/clk/clk-*.c`:
 | `ClkFlags::SET_RATE_PARENT` | `CLK_SET_RATE_PARENT` | ✓ |
 | `ClkFlags::IS_CRITICAL` / `IGNORE_UNUSED` | same names | ✓ honored by `clk_disable_unused` |
 | `ClkFlags::GET_RATE_NOCACHE` | `CLK_GET_RATE_NOCACHE` | ✓ |
+| `ClkFlags::NO_REPARENT` | `CLK_SET_RATE_NO_REPARENT` | ✓ `determine_rate` only sees the selected parent (PLL mode mux, cpuclk) |
+| `MuxFlags::HIWORD_MASK` | `CLK_MUX_HIWORD_MASK` | ✓ single masked write, no RMW window |
+| `DividerFlags::HIWORD_MASK` | `CLK_DIVIDER_HIWORD_MASK` | ✓ single masked write, no RMW window |
+| `DividerFlags::READ_ONLY` | `CLK_DIVIDER_READ_ONLY` | ✓ rounds to the hardware rate, rejects `set_rate` |
 | enable-before-prepare | `__clk_enable` WARN | debug assertion (no log in core crates) |
 
 `ClkFlags` bit positions differ from the Linux C ABI (Rust bitflags, no FFI
@@ -138,6 +142,11 @@ parent. Descendant caches are then refreshed top-down. If any migration or
 recalculation step fails, the child remains an orphan and the provider can be
 retried without leaked references.
 
+A `set_rate` request equal to the current rate is a no-op: no notifier fires
+and no hardware op runs (Linux `clk_core_set_rate_nolock` early return). This
+is what makes re-applying firmware/bootloader rates (DT assigned-clock-rates)
+safe on live hardware.
+
 Reference-counted gating propagates up the tree: `prepare`/`enable` act on the
 parent first, then on this node, and roll the parent back if this node's
 hardware op fails. Rate and parent changes refresh the cache and, when
@@ -178,6 +187,12 @@ pre-existing orphan slots adopted by the batch, and releases every migrated
 prepare/enable reference. The restored orphan can therefore be adopted by a
 later retry.
 
+Parent names are resolved in two steps, mirroring Linux `clk_register`:
+a batch-local name first, then the global provider registry by name (a
+controller consuming the board's `xin24m` fixed-clock provider). A name that
+resolves through neither step fails the whole batch — a half-linked tree
+reading rate 0 at the gap would mislead consumers, so orphans never pass.
+
 ### Global clock locks
 
 The sleepable mutex (`CLK_LOCK` in `core.rs`) serializes every slow mutation.
@@ -208,8 +223,12 @@ A driver registers a [`ClkNotifier`] on a clock to learn when its rate
 changes. `set_rate` delivers [`ClkEvent::PreRateChange`] before the change
 (a subscriber may veto by returning `NotifierResult::Stop`, which aborts with
 `ClkError::Aborted`) and [`ClkEvent::PostRateChange`] after. Notifiers fire on
-the node on which `set_rate` was called; intermediate parents changed during
-upward propagation do not receive separate notifications.
+the node on which `set_rate` was called *and* on every parent changed during
+upward propagation (`SET_RATE_PARENT`) — mirroring Linux `clk_change_rate`,
+which notifies each changed clock. The rockchip cpuclk/frac remux dances hook
+exactly these parent events. A veto on the parent aborts the transaction
+before any hardware is touched. (Also on abort, subscribers receive
+`RateChangeAborted` so latch-style state can be restored.)
 
 Registration returns an id (`ClkNotifierId`) that can be passed to
 `unregister_notifier` to remove the subscriber.
