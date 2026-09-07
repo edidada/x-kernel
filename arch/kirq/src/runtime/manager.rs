@@ -155,31 +155,14 @@ pub fn try_enable_irq(spec: impl Into<IrqSpec>) -> Result<(), IrqDescError> {
 /// global disable depth. The owner manages CPU readiness and must retain the
 /// handler and mapping while any CPU can receive this interrupt. May be used
 /// during boot or in ordinary IRQ context, but never from NMI context.
-/// These reversible control operations serialize through global IRQ locks;
-/// they are not suitable for terminal cleanup when another CPU may be stopped
-/// while holding those locks. Terminal owners use CPU-local masking instead.
+/// Must not be mixed with shared-line disable-depth operations on the same IRQ.
+/// Takes global IRQ locks; terminal owners use CPU-local masking for cleanup.
 ///
 /// # Errors
 /// Returns an error for an unknown, unregistered, non-per-CPU or tearing-down
 /// descriptor. Pins the caller through controller configuration and enablement.
 pub fn try_enable_percpu_irq(spec: impl Into<IrqSpec>) -> Result<(), IrqDescError> {
-    set_percpu_irq_enabled(spec.into(), true)
-}
-
-/// Masks a registered per-CPU interrupt on the calling CPU only.
-///
-/// This is a non-synchronizing operation: an already accepted interrupt can
-/// still run, and pending delivery may resume after re-enable. The owner must
-/// withdraw CPU readiness first and keep its handler/storage alive. It must
-/// not mix this API with shared-line disable-depth operations on the same IRQ.
-/// Physical masking is backend-dependent: a LAPIC IPI vector cannot be masked
-/// individually, and requires an owner-side software dispatch gate instead.
-/// Execution-context and error rules match [`try_enable_percpu_irq`].
-pub fn try_disable_percpu_irq(spec: impl Into<IrqSpec>) -> Result<(), IrqDescError> {
-    set_percpu_irq_enabled(spec.into(), false)
-}
-
-fn set_percpu_irq_enabled(spec: IrqSpec, enabled: bool) -> Result<(), IrqDescError> {
+    let spec = spec.into();
     let _pin = kspin::NoPreempt::new();
     let _control_guard = IRQ_CONTROL_LOCK.lock();
     let desc = {
@@ -189,7 +172,7 @@ fn set_percpu_irq_enabled(spec: IrqSpec, enabled: bool) -> Result<(), IrqDescErr
         let _ = reject_teardown(
             Some(entry),
             virq,
-            "control per-CPU IRQ",
+            "enable per-CPU IRQ",
             TeardownReject::Error,
         )?;
         if !entry.desc.flags.contains(crate::IrqFlags::PER_CPU) {
@@ -202,10 +185,8 @@ fn set_percpu_irq_enabled(spec: IrqSpec, enabled: bool) -> Result<(), IrqDescErr
     };
     // SGI/PPI configuration is banked. A global configured-generation or
     // disable-depth check would incorrectly skip work on another CPU.
-    if enabled {
-        configure_platform_irq(desc);
-    }
-    set_platform_irq_enabled(desc, enabled);
+    configure_platform_irq(desc);
+    set_platform_irq_enabled(desc, true);
     Ok(())
 }
 
@@ -841,10 +822,9 @@ pub mod tests_irq {
     use super::{
         DYNAMIC_VIRQ_BASE, IRQ_STATE, IrqDesc, IrqDescError, IrqDomainId, IrqStateDesc,
         WAIT_FOR_IN_FLIGHT_HOOK, dispatch_actions, run_claimed_irq_tail,
-        run_irq_exit_tail_with_context, try_disable_irq, try_disable_irq_nosync,
-        try_disable_percpu_irq, try_enable, try_enable_irq, try_enable_percpu_irq, try_free_irq,
-        try_free_irq_action, try_map, try_register, try_register_disabled, try_register_shared,
-        try_synchronize_irq, unregister,
+        run_irq_exit_tail_with_context, try_disable_irq, try_disable_irq_nosync, try_enable,
+        try_enable_irq, try_enable_percpu_irq, try_free_irq, try_free_irq_action, try_map,
+        try_register, try_register_disabled, try_register_shared, try_synchronize_irq, unregister,
     };
     use crate::{
         GIC_ROOT_DOMAIN, IrqController, IrqEvent, IrqFlags, IrqLifecycleHooks, IrqRef, IrqSource,
@@ -1874,20 +1854,16 @@ pub mod tests_irq {
     }
 
     #[def_test(serial)]
-    fn test_percpu_control_does_not_change_shared_disable_depth() {
+    fn test_percpu_enable_does_not_change_shared_disable_depth() {
         let virq = 0x6f31;
         // MSI-tagged fixtures bypass physical controller programming. This
-        // tests descriptor state only; kipi integration tests cover banked
-        // controller enable/disable and real delivery on boot-owned IPIs.
+        // tests descriptor state only; kipi integration tests cover per-CPU
+        // controller enablement and real delivery on boot-owned IPIs.
         let desc = IrqDesc::from_virq(virq).with_flags(IrqFlags::PER_CPU | IrqFlags::MSI);
         assert!(try_register_disabled(desc, Arc::new(test_handler)).unwrap());
         let _fixture = LocalIrqFixture(virq);
-        for enabled in [true, false, false, true] {
-            if enabled {
-                try_enable_percpu_irq(desc).unwrap();
-            } else {
-                try_disable_percpu_irq(desc).unwrap();
-            }
+        for _ in 0..2 {
+            try_enable_percpu_irq(desc).unwrap();
             let state = IRQ_STATE.lock();
             let entry = state.descs.get(&virq).unwrap();
             assert_eq!(entry.disable_depth_for_tests(), 1);
@@ -1896,7 +1872,7 @@ pub mod tests_irq {
     }
 
     #[def_test(serial)]
-    fn test_percpu_control_rejects_shared_or_unknown_irq() {
+    fn test_percpu_enable_rejects_shared_or_unknown_irq() {
         let virq = 0x6f32;
         assert!(try_register_disabled(virq, Arc::new(test_handler)).unwrap());
         let fixture = LocalIrqFixture(virq);
@@ -1904,13 +1880,8 @@ pub mod tests_irq {
             try_enable_percpu_irq(virq),
             Err(IrqDescError::NotPerCpu { virq })
         );
-        assert_eq!(
-            try_disable_percpu_irq(virq),
-            Err(IrqDescError::NotPerCpu { virq })
-        );
         drop(fixture);
         assert_eq!(try_enable_percpu_irq(virq), Err(IrqDescError::UnknownIrq));
-        assert_eq!(try_disable_percpu_irq(virq), Err(IrqDescError::UnknownIrq));
     }
 
     #[def_test(serial)]

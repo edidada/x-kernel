@@ -32,7 +32,7 @@ pub enum CpuBacktraceDelivery {
 
 /// Returns the calling CPU's currently enabled backtrace delivery mode.
 ///
-/// A disabled, unsupported or not-yet-initialized CPU reports `Unavailable`.
+/// An unsupported, not-yet-initialized or stopping CPU reports `Unavailable`.
 /// This read is lock-free and can be used in IRQ/NMI context.
 pub fn cpu_backtrace_delivery() -> CpuBacktraceDelivery {
     delivery_for_cpu(khal::percpu::this_cpu_id().as_usize())
@@ -56,8 +56,8 @@ pub fn register_cpu_backtrace_handler(handler: fn()) -> bool {
         return false;
     };
     let handler = Arc::new(move |_| {
-        // A sender may have snapshotted readiness just before local disable.
-        // Keep the handler installed, but reject late delivery while disabled.
+        // A sender may have snapshotted readiness before terminal withdrawal.
+        // The handler stays installed and rejects delivery once unready.
         if cpu_backtrace_delivery() == CpuBacktraceDelivery::Unavailable {
             return kirq::IrqEvent::HANDLED;
         }
@@ -80,9 +80,9 @@ pub fn register_cpu_backtrace_handler(handler: fn()) -> bool {
 /// NMI promotion is attempted first. If it is unavailable, the line remains
 /// usable as a regular per-CPU IRQ; callers must retain a bounded wait because
 /// that fallback cannot interrupt a CPU that has masked ordinary IRQs.
-/// Repeated enable is idempotent; enable after disable resumes the same
-/// permanently registered handler. NMI attributes remain installed while the
-/// line is masked, so no NMI-table mutation is needed during local teardown.
+/// Repeated enable is idempotent. The handler and NMI attributes remain
+/// installed until terminal stop; must not be called after that CPU has
+/// withdrawn its readiness for stopping.
 /// Call after global handler registration. Pins the caller and masks ordinary
 /// IRQs until controller setup and readiness publication complete; this is not
 /// an NMI-context operation.
@@ -124,28 +124,8 @@ pub fn enable_cpu_backtrace() -> CpuBacktraceDelivery {
     delivery
 }
 
-/// Withdraws readiness and masks the calling CPU's backtrace interrupt.
-///
-/// Idempotent and non-synchronizing; call from ordinary kernel/IRQ context,
-/// never NMI. A racing sender may still issue an IPI, so the handler and its
-/// storage remain registered for the kernel lifetime. The dispatch guard
-/// rejects late delivery while disabled. This is not a handler-unregister or
-/// complete CPU-hotplug operation. Returns `false` if IRQ-core validation
-/// rejected masking; readiness stays withdrawn and a later call retries.
-pub fn disable_cpu_backtrace() -> bool {
-    let _local = kspin::NoPreemptIrqSave::new();
-    withdraw_local_readiness();
-    if !CPU_BACKTRACE_REGISTERED.load(Ordering::Acquire) {
-        return true;
-    }
-    let Some(desc) = kirq::ipi_desc(kirq::IpiKind::CpuBacktrace) else {
-        return true;
-    };
-    kirq::try_disable_percpu_irq(desc).is_ok()
-}
-
-/// Withdraws dispatch readiness without entering the IRQ control plane.
-/// Caller is pinned; terminal callers must also mask CPU-local delivery.
+/// Withdraws dispatch readiness for terminal stop without entering IRQ control.
+/// The caller is pinned and has masked CPU-local interrupt delivery.
 pub(super) fn withdraw_local_readiness() {
     CPU_BACKTRACE_DELIVERY[khal::percpu::this_cpu_id().as_usize()]
         .store(CpuBacktraceDelivery::Unavailable as u8, Ordering::Release);
@@ -209,6 +189,52 @@ mod tests {
     static RELEASE: AtomicBool = AtomicBool::new(false);
     static RELAY_SENT: AtomicBool = AtomicBool::new(false);
 
+    struct RestoreLocalIpiReadiness {
+        cpu: usize,
+        backtrace_delivery: CpuBacktraceDelivery,
+    }
+
+    impl Drop for RestoreLocalIpiReadiness {
+        fn drop(&mut self) {
+            CPU_BACKTRACE_DELIVERY[self.cpu]
+                .store(self.backtrace_delivery as u8, Ordering::Release);
+            crate::IPI_QUEUE_READY[self.cpu].store(true, Ordering::Release);
+        }
+    }
+
+    // QEMU integration coverage for the software part of terminal quiescence.
+    // Restore only the dispatch gates: the controller configuration, periodic
+    // NMI source and CPU execution state remain unchanged throughout this test.
+    #[def_test(serial)]
+    fn test_terminal_ipi_quiesce_avoids_irq_control_and_queue_locks() {
+        let _local = kspin::NoPreemptIrqSave::new();
+        let cpu = this_cpu_id();
+        assert!(crate::is_ipi_queue_ready(cpu));
+        let _restore = RestoreLocalIpiReadiness {
+            cpu: cpu.as_usize(),
+            backtrace_delivery: cpu_backtrace_delivery(),
+        };
+        let (is_ready, delivery, is_initialized, is_backtrace_rejected) = crate::IPI_EVENT_QUEUE
+            .with_current(|queue| {
+                let _queue = queue.lock();
+                kirq::test_support::with_irq_control_locked(|| {
+                    crate::quiesce_local_ipis();
+                    // A late Generic IPI must return before it touches the queue.
+                    crate::ipi_handler();
+                    (
+                        crate::is_ipi_queue_ready(cpu),
+                        cpu_backtrace_delivery(),
+                        queue.is_inited(),
+                        !send_cpu_backtrace(KCpuMask::one_shot_logical(cpu)),
+                    )
+                })
+            });
+        assert!(!is_ready);
+        assert_eq!(delivery, CpuBacktraceDelivery::Unavailable);
+        assert!(is_initialized);
+        assert!(is_backtrace_rejected);
+    }
+
     struct ProbeGuard;
 
     impl Drop for ProbeGuard {
@@ -251,21 +277,12 @@ mod tests {
         true
     }
 
-    struct RestoreLocalBacktrace;
-
-    impl Drop for RestoreLocalBacktrace {
-        fn drop(&mut self) {
-            let _ = enable_cpu_backtrace();
-        }
-    }
-
     #[def_test(serial)]
-    fn backtrace_local_lifecycle_and_delivery() {
+    fn backtrace_enable_and_delivery() {
         if kirq::ipi_desc(kirq::IpiKind::CpuBacktrace).is_none() {
             return unittest::TestResult::Ignored;
         }
         let _pin = NoPreempt::new();
-        let cpu = this_cpu_id();
         let delivery = cpu_backtrace_delivery();
         assert!(delivery != CpuBacktraceDelivery::Unavailable);
         #[cfg(not(feature = "nmi"))]
@@ -274,15 +291,6 @@ mod tests {
         for peer in 0..kcpu_id_map::nr_cpus() {
             assert!(ready.get(peer));
         }
-        let _restore = RestoreLocalBacktrace;
-
-        assert!(disable_cpu_backtrace());
-        assert!(disable_cpu_backtrace());
-        assert_eq!(cpu_backtrace_delivery(), CpuBacktraceDelivery::Unavailable);
-        let mut peers = ready;
-        peers.set_logical(cpu, false);
-        assert_eq!(cpu_backtrace_ready_mask(), peers);
-        assert!(!send_cpu_backtrace(KCpuMask::one_shot_logical(cpu)));
         assert_eq!(enable_cpu_backtrace(), delivery);
         assert_eq!(enable_cpu_backtrace(), delivery);
         assert_eq!(cpu_backtrace_ready_mask(), ready);

@@ -4,8 +4,6 @@
 
 //! CPU control operations for LoongArch64.
 
-use super::irq::disable_local_irq;
-
 /// Halt the current CPU terminally.
 ///
 /// Disables local interrupts and remains in the LoongArch idle
@@ -14,7 +12,7 @@ use super::irq::disable_local_irq;
 /// is a terminal operation and never returns.
 #[inline]
 pub fn stop_cpu() -> ! {
-    disable_local_irq();
+    crate::prepare_cpu_stop();
     loop {
         // SAFETY: with local IRQs disabled, putting the current CPU into the
         // LoongArch idle instruction is the intended terminal halt path.

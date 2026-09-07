@@ -68,8 +68,9 @@ pub fn halt() -> ! {
     // Keep the terminal CPU pinned even after the stop provider returns:
     // dropping its own guard must not reschedule before the final park.
     let _terminal = kspin::NoPreempt::new();
-    karch::prepare_cpu_stop();
     SmpStopIf::stop_other_cpus();
+    // Establish the local terminal mask even when the stop provider is a no-op.
+    karch::prepare_cpu_stop();
     // Quiesce the terminal CPU's local NMI source so an NMI-driven
     // hard-lockup watchdog cannot wake it from the final stop loop and
     // panic into a power-off.
@@ -83,8 +84,9 @@ pub fn halt() -> ! {
 /// returns.
 pub fn power_off() -> ! {
     let _terminal = kspin::NoPreempt::new();
-    karch::prepare_cpu_stop();
     SmpStopIf::stop_other_cpus();
+    // Firmware power-off can finish without ever reaching `karch::stop_cpu()`.
+    karch::prepare_cpu_stop();
     crate::quiesce_nmi();
     platform_power_off()
 }

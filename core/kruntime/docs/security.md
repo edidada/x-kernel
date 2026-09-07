@@ -121,7 +121,7 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 - backtrace handler 注册独立于 watchdog；普通请求只读取本 CPU active trap frame 并
   原子输出，不进入全局 snapshot 协议。共享 IRQ 锁、任务注册表遍历和其他 CPU 等待
   不应加入此回调；watchdog 活跃 terminal session 仍由其唯一写者协议与 10s 上限保护。
-- `kipi` 本地启停在 `NoPreemptIrqSave` 内完成；停机 ACK 前先撤销 IPI readiness，
+- `kipi` 本地启用在 `NoPreemptIrqSave` 内完成；停机 ACK 前屏蔽中断并撤销 IPI readiness，
   但保留静态 handler/队列以承接迟到请求。runtime 不实现 CPU hotplug 资源释放。
 - `DmaPageTableIf::protect()` 通过 `memspace::kernel_layout().lock()` 串行化内核页表属性更新。
 

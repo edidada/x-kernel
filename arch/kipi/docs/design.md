@@ -116,14 +116,12 @@ watchdog NMI
 - 回调必须足够短，不应依赖长时间阻塞语义；它们最终在 IPI handler 上执行。
 - `register_cpu_backtrace_handler()` 由 runtime 在主核启动期调用一次，不依赖
   watchdog；`enable_cpu_backtrace()` 必须在每个目标 CPU 上调用。
-  Generic / CpuBacktrace 启停均通过 `NoPreemptIrqSave` 保证本地操作不迁移、
-  不被普通 IRQ 中的另一次启停交错。NMI 提升失败时保留
+  Generic / CpuBacktrace 启用均通过 `NoPreemptIrqSave` 保证本地操作不迁移、
+  不被普通 IRQ 中的另一次启用交错。NMI 提升失败时保留
   regular-IRQ fallback，并以返回枚举向 consumer 暴露降级。
-- `disable_ipi()` / `disable_cpu_backtrace()` 先撤销 readiness，再禁用本地投递；
-  可在普通内核/IRQ 上下文调用，不可在 NMI 中调用。不等待 handler 退出、不释放
-  handler/队列，也不撤销 NMI 属性；重新 enable 使用同一份静态资源。
-- 最终停机使用独立的 `quiesce_local_ipis()`：CPU 本地中断已屏蔽时，仅撤销两类
-  IPI readiness，保留全部存储，不调用持有全局锁的普通 per-CPU IRQ 启停接口。
+- 启用后保持投递能力直到最终停机。`quiesce_local_ipis()` 在 CPU 本地中断已屏蔽时，
+  仅撤销两类 IPI readiness，保留全部存储，不进入持有全局锁的 IRQ 控制路径。
+  撤销后不再启用，也不提供运行期间的局部 disable/re-enable API。
 - `cpu_backtrace_ready_mask()` 与 `send_cpu_backtrace()` 可从 NMI 调用，只访问原子
   readiness，并要求 IRQ backend 的 `CpuBacktrace` 分支无分配、无日志、无锁。
 
@@ -169,27 +167,25 @@ Enabled
    -> consumer snapshots ready mask (Acquire)
    -> send CpuBacktrace to exact peer mask
    -> NMI handler, or regular IRQ handler when promotion failed
-   -> disable: publish Unavailable, then mask local line
-Disabled (handler/mapping/storage retained)
-   -> enable: configure + unmask + republish delivery
+   -> terminal stop: mask CPU-local delivery, then publish Unavailable
+Stopped (handler/mapping/storage retained; no resume path)
 ```
 
 注册使用 `kirq::register_nmi()`，因此 NMI 表与 normal-IRQ fallback action 指向同一
 handler。`CpuBacktraceDelivery` 以每 CPU 单个原子值同时表达 readiness 与 delivery，
-避免两次独立发布产生不一致。发送方拒绝当前未就绪目标；与 disable 竞争的旧 mask
-仍可能送达，因此 handler 也检查本地 delivery，禁用期间直接返回。
+避免两次独立发布产生不一致。发送方拒绝当前未就绪目标；与终端 readiness 撤销竞争
+的旧 mask 仍可能发出，因此 handler 也检查本地 delivery，未就绪时直接返回。
 
 `nmi` feature 只控制 promotion，不控制注册、普通 IRQ fallback 或发送 API。
 runtime 默认回调只打印被中断 CPU 的当前任务栈；存在 watchdog terminal rendezvous
 时才交给 watchdog 消费。普通诊断不改写 watchdog 的全局快照槽、不等待其他 CPU。
 
-Generic 同样使用独立的 per-CPU 启停接口，不能操作共享 IRQ 的 disable depth。
-disable 不清空队列；旧 sender 仍可完成入队，重新 enable 后通过 self-IPI 恢复排队工作。
+Generic 同样使用独立的 per-CPU 启用接口，不能操作共享 IRQ 的 disable depth。
+终端撤销 readiness 不清空队列；旧 sender 仍可完成入队，存储保留到内核终止。
 x86 self-IPI 区分 APIC 模式：x2APIC 使用 SELF_IPI MSR；xAPIC 使用本地 APIC ID
 经普通 ICR 定向发送，不能访问仅 x2APIC 存在的 SELF_IPI 寄存器。
-x86 LAPIC 不支持按单个 IPI vector 屏蔽，依靠 handler readiness gate 禁用普通分发；
-RISC-V 本地控制通过 `sie.SSIE` mask/unmask，启动期在队列就绪前保持该位关闭。
-最终 park 仍需屏蔽 CPU 本地中断。以上不是完整 CPU hotplug，不支持释放 CPU 资源。
+RISC-V 启动期在队列就绪前保持 `sie.SSIE` 关闭，本地启用时再打开。
+最终 park 屏蔽 CPU 本地中断并撤销软件 readiness，不提供 CPU hotplug 或资源释放。
 
 ### TLB shootdown request slot
 
@@ -454,8 +450,8 @@ orchestrator 而永不 park，而真正的 orchestrator 却在等它 ack，直�
 - 通用回调的生命周期由 `Callback` / `MulticastCallback` 自然管理；
 - 广播回调通过 `Arc` 克隆，再在目标 CPU 上转换成一次性 `Callback`；
 - `IpiEventQueue` 中的事件在 `pop_one()` 后被消费；
-- per-CPU disable 仅撤销 readiness/投递，不回收静态 handler、映射、队列或 NMI 属性；
-- 生命周期集成测试以 RAII 恢复本地投递；真实 self/peer IRQ/NMI 等待均有 2s 上限；
+- 终端停机仅撤销 readiness，不回收静态 handler、映射、队列或 NMI 属性；
+- 集成测试以 RAII 恢复探针和测试改动的软件 readiness；真实 IRQ/NMI 等待有 2s 上限；
 - `ActiveShootdownSlot` 通过 `Drop` 自动清除 active 状态，防止异常路径遗留 slot 占用；
 - `kipi` 本身不拥有跨 CPU 长生命周期的内存池或设备资源，主要资源都是
   per-CPU 队列和原子状态。
@@ -463,8 +459,8 @@ orchestrator 而永不 park，而真正的 orchestrator 却在等它 ack，直�
 ## 生命周期验证
 
 - `kirq` 局部 fixture 验证 PER_CPU 校验和共享 disable depth 不变；不编程物理 IRQ。
-- `kipi` QEMU 集成测试使用启动期已安装的 handler，以 RAII 恢复本地 readiness/使能，
-  验证重复 disable/enable、不影响其他 CPU、重新启用后处理保留的回调，以及实际投递。
+- `kipi` QEMU 集成测试使用启动期已安装的 handler，验证每核 readiness、重复启用
+  回溯向量、真实 IRQ/NMI 投递，以及未就绪目标的拒绝行为。
 - AArch64 四核覆盖 NMI + watchdog、NMI 无 watchdog/snapshot，以及完全关闭
   NMI/PMU/watchdog/snapshot 的 RegularIrq 配置。真实投递等待有 2s 上限。
 - x86/RISC-V 覆盖 Generic self-IPI、跨 CPU 回调与 TLB 协议；不支持的 CpuBacktrace
@@ -472,7 +468,7 @@ orchestrator 而永不 park，而真正的 orchestrator 却在等它 ack，直�
 - LoongArch 配置验证超出支持范围的 CPU 数收敛为 1；完整 CPU hotplug 不在验证范围。
 - `test_terminal_ipi_quiesce_avoids_irq_control_and_queue_locks` 同时持有 IRQ
   控制锁、状态锁和本地队列锁，验证 readiness 撤销与迟到分发不依赖这些锁。
-  fixture 只恢复软件 gate 的普通启停，不停靠 CPU 或停止周期源。
+  fixture 直接恢复软件 readiness，不重新配置硬件、不停靠 CPU 或停止周期源。
 - GICv2/v3 发送回归测试持有配置对象锁，覆盖 self、指定 CPU、mask 和广播；
   旧的发送实现会递归获取该锁而无法完成。
 - 单测结束经正常 `power_off()` 进入不可返回的 stop 路径；测试不尝试撤销终端停机。

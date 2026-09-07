@@ -9,59 +9,6 @@ use unittest::{assert, assert_eq, assert_ne, def_test};
 
 use crate::{IPI_QUEUE_READY, KipiError};
 
-struct RestoreLocalGenericIpi;
-
-impl Drop for RestoreLocalGenericIpi {
-    fn drop(&mut self) {
-        let _ = crate::enable_ipi();
-    }
-}
-
-struct RestoreLocalIpis {
-    backtrace_delivery: crate::CpuBacktraceDelivery,
-}
-
-impl Drop for RestoreLocalIpis {
-    fn drop(&mut self) {
-        if self.backtrace_delivery != crate::CpuBacktraceDelivery::Unavailable {
-            // Terminal withdrawal kept the line enabled. Mask it through the
-            // ordinary lifecycle before restoring its previous NMI/IRQ mode.
-            core::assert!(crate::disable_cpu_backtrace());
-            core::assert_eq!(crate::enable_cpu_backtrace(), self.backtrace_delivery);
-        }
-        core::assert!(crate::enable_ipi());
-    }
-}
-
-// QEMU integration coverage for the software part of terminal quiescence.
-// The real stop protocol cannot be undone. This fixture restores only the
-// dispatch gates; it never parks a CPU or stops its periodic NMI source.
-#[def_test(serial)]
-fn test_terminal_ipi_quiesce_avoids_irq_control_and_queue_locks() {
-    let _local = kspin::NoPreemptIrqSave::new();
-    let cpu = khal::percpu::this_cpu_id();
-    assert!(crate::is_ipi_queue_ready(cpu));
-    let _restore = RestoreLocalIpis {
-        backtrace_delivery: crate::cpu_backtrace_delivery(),
-    };
-    let (is_ready, delivery, is_initialized) = crate::IPI_EVENT_QUEUE.with_current(|queue| {
-        let _queue = queue.lock();
-        kirq::test_support::with_irq_control_locked(|| {
-            crate::quiesce_local_ipis();
-            // A late Generic IPI must return before it touches the queue.
-            crate::ipi_handler();
-            (
-                crate::is_ipi_queue_ready(cpu),
-                crate::cpu_backtrace_delivery(),
-                queue.is_inited(),
-            )
-        })
-    });
-    assert!(!is_ready);
-    assert_eq!(delivery, crate::CpuBacktraceDelivery::Unavailable);
-    assert!(is_initialized);
-}
-
 struct WithdrawIpiReadiness {
     cpu: LogicalCpuId,
     was_ready: bool,
@@ -80,57 +27,6 @@ impl Drop for WithdrawIpiReadiness {
     fn drop(&mut self) {
         IPI_QUEUE_READY[self.cpu.as_usize()].store(self.was_ready, Ordering::Release);
     }
-}
-
-// QEMU integration test: keep the boot-owned queue/handler alive, restore
-// delivery on every exit, and bound the wait for a real self-IPI.
-#[def_test(serial)]
-fn test_local_ipi_reenable_resumes_pending_work() {
-    static HIT: AtomicUsize = AtomicUsize::new(0);
-
-    let _pin = kspin::NoPreempt::new();
-    let cpu = khal::percpu::this_cpu_id();
-    assert!(crate::is_ipi_queue_ready(cpu));
-    let ready: [bool; kbuild_config::NR_CPUS] =
-        core::array::from_fn(|index| IPI_QUEUE_READY[index].load(Ordering::Acquire));
-    let _restore = RestoreLocalGenericIpi;
-    HIT.store(0, Ordering::Relaxed);
-    {
-        let _irq = kspin::IrqSave::new();
-        assert!(crate::disable_ipi());
-        assert!(crate::disable_ipi());
-        assert!(!crate::is_ipi_queue_ready(cpu));
-        for (index, was_ready) in ready.into_iter().enumerate() {
-            if index != cpu.as_usize() {
-                assert_eq!(IPI_QUEUE_READY[index].load(Ordering::Acquire), was_ready);
-            }
-        }
-        // Model a producer that passed readiness validation before disable:
-        // its enqueue remains valid because local queue storage is retained.
-        crate::IPI_EVENT_QUEUE.with_current(|queue| {
-            queue.lock().push(
-                cpu,
-                (|| {
-                    HIT.fetch_add(1, Ordering::Release);
-                })
-                .into(),
-            );
-        });
-        crate::ipi_handler();
-        assert_eq!(HIT.load(Ordering::Acquire), 0);
-        assert!(crate::enable_ipi());
-        assert!(crate::enable_ipi());
-        assert!(crate::is_ipi_queue_ready(cpu));
-    }
-
-    let start = khal::time::monotonic_time();
-    while HIT.load(Ordering::Acquire) == 0
-        && khal::time::monotonic_time().saturating_duration_since(start)
-            < ktime_types::TimeSpan::from_secs(2)
-    {
-        core::hint::spin_loop();
-    }
-    assert_eq!(HIT.load(Ordering::Acquire), 1);
 }
 
 #[def_test]

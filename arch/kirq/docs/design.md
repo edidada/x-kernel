@@ -142,13 +142,12 @@ ipi_desc(IpiKind) / send_ipi(IpiKind, TargetCpu)
   depth 到 `0` 时启动平台 line；depth 已经是 `0` 时仍会下发平台 enable，以保留
   per-CPU/static IRQ bring-up 的既有语义。新代码应优先使用语义更明确的 `try_*` /
   `*_irq` 入口处理 descriptor 冲突和 enable/disable nesting。
-- per-CPU IPI 使用 `try_enable_percpu_irq()` / `try_disable_percpu_irq()`：只查找
+- per-CPU IPI 使用 `try_enable_percpu_irq()`：只查找
   已注册、非 teardown 且带 `PER_CPU` 的 descriptor，不改变全局 disable depth，
-  每次直接配置/启停当前 CPU 的 banked line。调用过程 pin CPU，不等待 handler，
+  每次直接配置并启用当前 CPU 的 banked line。调用过程 pin CPU，不等待 handler，
   禁止 NMI 上下文；owner 必须保留 handler/mapping 并维护本地 readiness。
-  不得与共享 IRQ depth API 混用；x86 单个 LAPIC IPI vector 不能物理 mask，
-  需由 owner 的软件 gate 禁用 dispatch。普通控制仍获取 `IRQ_CONTROL_LOCK` /
-  `IRQ_STATE`，因此不能用于必须容忍持锁 CPU 失去响应的最终停机清理。
+  不得与共享 IRQ depth API 混用。启用操作获取 `IRQ_CONTROL_LOCK` / `IRQ_STATE`；
+  最终停机由 owner 使用 CPU 本地中断屏蔽与 readiness 撤销，不能进入这些锁。
 - `handle_irq()` 运行在 hardirq trap adapter 调用路径中。调用者必须已经屏蔽本地
   IRQ、禁用抢占并 pin 当前 CPU，函数本身不能睡眠。
 - `handle_nmi()` 运行在 IRQ-off NMI adapter 调用路径中（pseudo-NMI 或 hardware

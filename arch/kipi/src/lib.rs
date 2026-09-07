@@ -39,8 +39,8 @@ mod stop;
 pub mod tlb;
 
 pub use backtrace::{
-    CpuBacktraceDelivery, cpu_backtrace_delivery, cpu_backtrace_ready_mask, disable_cpu_backtrace,
-    enable_cpu_backtrace, register_cpu_backtrace_handler, send_cpu_backtrace,
+    CpuBacktraceDelivery, cpu_backtrace_delivery, cpu_backtrace_ready_mask, enable_cpu_backtrace,
+    register_cpu_backtrace_handler, send_cpu_backtrace,
 };
 pub use event::{Callback, MulticastCallback};
 use queue::IpiEventQueue;
@@ -53,7 +53,7 @@ pub type Result<T> = core::result::Result<T, KipiError>;
 pub enum KipiError {
     /// Invalid CPU ID (exceeds system CPU count)
     InvalidCpuId,
-    /// Target CPU exists but has not enabled, or has disabled, its local IPI delivery.
+    /// Target CPU exists but has not enabled IPI delivery or has begun terminal stop.
     TargetCpuNotReady,
     /// Queue full (too many pending callbacks)
     QueueFull,
@@ -109,6 +109,8 @@ pub fn register_ipi_handler(handler: fn()) -> bool {
 ///
 /// Call after global registration and local [`init`], from ordinary kernel/IRQ
 /// context, not NMI. Pins the CPU and masks ordinary IRQs through publication.
+/// Delivery stays enabled until terminal stop; must not be called after that
+/// CPU has withdrawn its readiness for stopping.
 /// Returns `false` when the vector is unavailable or could not be enabled.
 pub fn enable_ipi() -> bool {
     let _local = kspin::NoPreemptIrqSave::new();
@@ -122,30 +124,7 @@ pub fn enable_ipi() -> bool {
         return false;
     }
     IPI_QUEUE_READY[this_cpu_id().as_usize()].store(true, Ordering::Release);
-    // Re-enable can expose callbacks queued by a sender racing disable.
-    // Queue storage and the handler remain installed across local masking.
-    let _ = send_generic_ipi(IpiTarget::Self_);
     true
-}
-
-/// Withdraws Generic IPI readiness and disables dispatch on the calling CPU.
-///
-/// Call from ordinary kernel/IRQ context, not NMI. Does not drain callbacks
-/// or free queue storage: producers that already passed readiness validation
-/// may still enqueue. [`enable_ipi`] resumes queued work on the same CPU.
-/// Before leaving delivery disabled, the caller must quiesce work that requires
-/// cross-CPU callbacks or TLB acknowledgements. This does not take a CPU offline
-/// or remove it from scheduler/mm target sets.
-/// Controllers mask the local line where supported. An x86 LAPIC cannot mask
-/// an individual IPI vector, so the handler's readiness check gates dispatch.
-/// Returns `false` if IRQ-core validation rejected the disable operation.
-pub fn disable_ipi() -> bool {
-    let _local = kspin::NoPreemptIrqSave::new();
-    IPI_QUEUE_READY[this_cpu_id().as_usize()].store(false, Ordering::Release);
-    let Some(desc) = kirq::ipi_desc(kirq::IpiKind::Generic) else {
-        return true;
-    };
-    kirq::try_disable_percpu_irq(desc).is_ok()
 }
 
 /// Withdraws local IPI readiness for the final CPU stop, retaining all storage.

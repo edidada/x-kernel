@@ -7,7 +7,7 @@
 - 软锁：每 CPU watchdog 任务周期性更新时间戳，定时器回调检查时间戳是否过期；
 - 硬锁：依赖 NMI（`nmi` feature）周期检查本 CPU 定时器中断计数是否仍在前进；检测失败后通过语义化 `CpuBacktrace` IPI 主动唤醒已就绪 CPU，执行有界全局 rendezvous、收集快照并 panic。
 
-依赖：`khal`（周期 NMI / percpu / 时间）、`kipi`（读取 CPU-backtrace readiness 与精确 mask 投递）、`ktask`（任务、定时器回调、快照）、`ktime_types`。backtrace 注册/每 CPU 启停由 runtime/kipi 独立管理。
+依赖：`khal`（周期 NMI / percpu / 时间）、`kipi`（读取 CPU-backtrace readiness 与精确 mask 投递）、`ktask`（任务、定时器回调、快照）、`ktime_types`。backtrace 注册、每 CPU 启用与终端 readiness 撤销由 runtime/kipi 独立管理。
 
 ## 背景
 

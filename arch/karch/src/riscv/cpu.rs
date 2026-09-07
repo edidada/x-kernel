@@ -4,8 +4,6 @@
 
 //! CPU control operations for RISC-V.
 
-use super::irq::disable_local_irq;
-
 /// Halt the current CPU terminally.
 ///
 /// Disables local interrupts and remains in `wfi` until the hart is
@@ -14,7 +12,7 @@ use super::irq::disable_local_irq;
 /// terminal operation and never returns.
 #[inline]
 pub fn stop_cpu() -> ! {
-    disable_local_irq();
+    crate::prepare_cpu_stop();
     loop {
         riscv::asm::wfi();
     }

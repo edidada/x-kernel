@@ -103,7 +103,9 @@ NMI-safe 的精确 mask 发送契约也留在真正拥有 IPI 硬件编码的 IR
 
 ### 最终电源终点的执行上下文
 
-`power::halt()` / `power::power_off()` 在调用 SMP stop provider 前屏蔽 CPU
-本地中断，并持有外层 `NoPreempt` 直到不可返回的平台终点。provider 返回时不会
-因其内部 guard 释放而触发调度。终止后的 readiness 撤销和本地屏蔽不参与可逆的
+`power::halt()` / `power::power_off()` 持有外层 `NoPreempt` 直到不可返回的
+平台终点，provider 返回时不会因其内部 guard 释放而触发调度。SMP stop
+provider 自行建立协调期间的中断约束；返回后，电源入口统一屏蔽 CPU 本地
+中断，再进入平台终点。这也覆盖 UP 的 no-op provider 和直接请求固件断电、
+不经过 `stop_cpu()` 的路径。终止后的 readiness 撤销和本地屏蔽不参与可逆的
 IRQ 启停生命周期；完整流程见 `docs/power.md`。

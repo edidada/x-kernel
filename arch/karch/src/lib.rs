@@ -32,7 +32,11 @@ pub(crate) fn flush_icache_others() {
     crate::IcacheFlushIf::flush_others();
 }
 
-/// Masks local interrupt delivery before the final CPU stop protocol.
+/// Masks local interrupt delivery for terminal CPU stop.
+///
+/// Every architecture's [`stop_cpu`] calls this before its terminal wait loop,
+/// including direct platform stop paths. Shutdown protocols may also call it
+/// before publishing terminal state; repeated calls reapply the same mask.
 ///
 /// This is a one-way operation: callers must remain pinned and enter a power
 /// terminal or [`stop_cpu`] without restoring interrupts. It only accesses

@@ -62,6 +62,11 @@ by the boot-established FEAT_NMI state in `aarch64/irq.rs`; unsupported CPUs nev
 execute that register access. Other architectures mask normal local interrupts.
 Sources that bypass those masks still need owner-side terminal quiescence.
 
+Every implemented `stop_cpu()` calls `prepare_cpu_stop()` before its terminal
+wait loop. Direct platform stops therefore establish their own local mask,
+without depending on an earlier SMP shutdown step. The architecture-specific
+wait instruction may wake, but `stop_cpu()` never returns to its caller.
+
 `kipi` uses this operation before stop coordination and before a peer's final
 acknowledgement. Ordinary IRQ save/restore and reversible per-IRQ enable/disable
 keep their existing contracts. The terminal mask must never be used as an IRQ

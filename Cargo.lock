@@ -2869,7 +2869,7 @@ dependencies = [
  "kirq",
  "klogger",
  "knet",
- "kspin 0.2.0-rc1",
+ "kspin 0.2.0-rc2",
  "ktask",
  "ktime",
  "ktime_types",

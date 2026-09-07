@@ -162,22 +162,21 @@ CpuBacktrace 只接受精确 mask；Generic 保留 all-but-self 广播。
 
 6. **CPU-backtrace readiness 必须晚于本 CPU vector enable**
    `CPU_BACKTRACE_DELIVERY[cpu]` 用 Release 同时发布 mode/readiness，发送方用 Acquire
-   形成精确 mask。disable 先发布 `Unavailable`，再屏蔽本地向量；旧 mask 仍可能
-   送达，handler 必须检查本地 delivery，不能把 readiness 当作同步完成证明。
+   形成精确 mask。终端停机先屏蔽 CPU 本地中断，再发布 `Unavailable`；旧 sender
+   仍可能发出请求，handler 必须检查本地 delivery，不能把 readiness 当作同步完成证明。
 
 7. **最终停机不得进入普通 IRQ 控制平面**
    在已经失去响应的 CPU 可能持锁时，发送和本地清理都不能等待该锁。
-   终止清理只使用 CPU 屏蔽、周期源停止与 readiness 原子撤销；普通
-   `disable_ipi()` / `disable_cpu_backtrace()` 仍可获取 IRQ 管理锁，用于可逆启停。
+   终止清理只使用 CPU 屏蔽、周期源停止与 readiness 原子撤销；不调用持有
+   IRQ 管理锁的控制接口。
    `khal::power` 的外层抢占保护覆盖 provider 返回后的平台终点。
 
-8. **本地 disable 不允许回收存储**
+8. **终端撤销 readiness 不允许回收存储**
    Generic sender 可能在撤销 readiness 后完成已经通过校验的入队；队列、handler、
-   映射与 NMI 属性保留到内核终止。重新 enable 用 self-IPI 恢复排队工作。
-   per-CPU IRQ 控制不修改共享 disable depth；`NoPreemptIrqSave` 排除本地迁移和
-   普通 IRQ 启停重入，不支持 NMI 内的控制操作或完整 CPU hotplug 回收。
-   Generic 禁用不会把 CPU 移出 scheduler/mm target set；长期禁用前调用方必须停止
-   依赖回调/TLB ACK 的工作，不能把 readiness 当作 CPU offline 的证明。
+   映射与 NMI 属性保留到内核终止，撤销后不再恢复投递。
+   per-CPU IRQ 启用不修改共享 disable depth；`NoPreemptIrqSave` 排除本地迁移和
+   普通 IRQ 启用重入，不支持 NMI 内的控制操作或完整 CPU hotplug 回收。
+   readiness 撤销不会把 CPU 移出 scheduler/mm target set，仅用于最终停机协议。
 
 ## 线程安全
 
@@ -210,7 +209,7 @@ CpuBacktrace 只接受精确 mask；Generic 保留 all-but-self 广播。
 | T-09 | 等待集包含 IPI 未使能的 present CPU | AP 尚未执行 `kipi::enable_ipi()` 即触发停机 | 该 CPU 无法及时 ack，每次停机固定白等 1s 超时并误报告警 | 只等待发布时 Generic 已就绪的 CPU；保留 `AllButSelf` 广播，使晚启动 CPU 仍可处理 pending stop IPI |
 | T-10 | watchdog/consumer 选择裸 SGI，与 Generic IPI 冲突 | raw IRQ 号越过 IPI ownership boundary | handler 错配、无法唤醒或普通 handler 在 NMI 重入 | consumer 只见语义类型；所有架构移除 `IPI_IRQ`，由 backend 固定保留并复用映射 |
 | T-11 | CPU-backtrace NMI 发送获取普通 GIC lock | NMI 抢占持锁的普通 IRQ/IPI 路径 | 同 CPU 自死锁 | GICv3 共用 SGI1R 编码路径无锁、无日志、无分配；backtrace 入口只接受精确 mask |
-| T-12 | 用共享 disable depth 禁用多个 CPU 的 banked IRQ | 第二个 CPU 的 disable 被全局计数短路 | 部分 CPU 仍能接收 IPI | 专用 per-CPU 控制每次调用本地 backend；readiness 独立管理，拒绝非 PER_CPU descriptor |
+| T-12 | 共享启用状态跳过其它 CPU 的本地配置 | 将 per-CPU 启用替换为普通 IRQ 启用接口 | 部分 CPU 不能接收 IPI | 专用 per-CPU 启用每次配置本地 backend；readiness 独立发布，拒绝非 PER_CPU descriptor |
 | T-13 | 停机发送或清理等待失去响应的 CPU 所持有的锁 | peer 卡在 IRQ/GIC 控制或 console 锁内 | 超时后仍无法进入平台终点 | SGI 无共享锁发送；CPU 本地终止屏蔽与 readiness 撤销；原子输出超时诊断 |
 | T-13 | 关闭 watchdog 连带丢失 backtrace 能力 | handler 注册依附 PMU/watchdog 初始化 | 普通诊断无法唤醒其他 CPU | runtime 独立注册/每 CPU 使能；无 NMI feature 时验证 RegularIrq 投递 |
 
@@ -253,8 +252,8 @@ CpuBacktrace 只接受精确 mask；Generic 保留 all-but-self 广播。
 - TLB shootdown 在等待 ack 时采用自旋，不适合极长延迟目标；
 - `kipi` 只保证跨 CPU 投递，不保证回调本身适合在 IPI 中断上下文运行；
 - CPU-backtrace 的 NMI-safe 主动投递目前只由 AArch64 GICv3 backend 提供；
-- CPU-backtrace / Generic 支持本地 disable/re-enable 与终端停机清理，但不提供
-  handler unregister、队列回收或完整 CPU hotplug；x86 单向量禁用依靠软件 readiness gate；
+- CPU-backtrace / Generic 只提供每核启用和终端停机清理，不提供运行期间的可逆禁用、
+  handler unregister、队列回收或完整 CPU hotplug；
 - LoongArch 的 secondary boot mailbox 不等于 runtime IPI，当前显式限制为单核；
 - `pending_epoch` 只是性能优化门槛，不是完整协议状态，因此测试若直接操作内部 slot，
   必须同步更新该 gate。

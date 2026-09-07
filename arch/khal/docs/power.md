@@ -59,8 +59,10 @@ khal::power::{halt, power_off}          khal::power::platform_power_off
 ## 调用约束 / 执行上下文
 
 - `halt` / `power_off` 永不返回；调用前必须完成所有上层清理。入口持有
-  `NoPreempt` 直到平台终点，并调用 `karch::prepare_cpu_stop()`，避免 provider
-  返回时释放内部 guard 后触发调度，或本地 IRQ handler 等待失去响应的 peer。
+  `NoPreempt` 直到平台终点，避免 provider 返回时释放内部 guard 后触发调度。
+  provider 自行建立协调期间的中断约束；返回后，入口调用
+  `karch::prepare_cpu_stop()`，保证 UP 的 no-op provider 以及不经过
+  `stop_cpu()` 的固件断电路径也在本地中断屏蔽后执行。
 - `SmpStopIf` 的 provider 必须可以在关中断上下文调用（例如调度器内的
   init 任务退出路径），不得睡眠；`kipi` 的实现不分配内存、带 1s 有界超
   时。provider 返回时允许保持本地 IRQ/NMI 屏蔽及 IPI readiness 撤销，调用方

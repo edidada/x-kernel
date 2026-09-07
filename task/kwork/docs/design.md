@@ -96,9 +96,12 @@ system_bh_highpri_wq ----------+--> bottom-half pool on CPU N
 ```
 
 `system_wq()` uses a ready-pool rotation for default placement so
-interrupt-heavy producers do not permanently overload the current CPU. Explicit
-CPU targeting uses the selected CPU. `system_percpu_wq()` and dynamic queues use
-the current CPU unless `ScheduleAttrs::on_cpu()` or `queue_work_on()` is used.
+interrupt-heavy producers do not permanently overload the current CPU. The
+rotation covers the CPUs discovered at runtime, skips pools that are not ready,
+and falls back to the current CPU if none are ready. A single-CPU system uses
+the current CPU directly. Explicit CPU targeting uses the selected CPU.
+`system_percpu_wq()` and dynamic queues use the current CPU unless
+`ScheduleAttrs::on_cpu()` or `queue_work_on()` is used.
 
 Normal pool callbacks run in ktask-backed workers. Bottom-half callbacks run
 from registered softirq drain actions. Both pool kinds use the same

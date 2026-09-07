@@ -8,16 +8,11 @@
 ///
 /// Masks every DAIF exception class — debug exceptions, SError, IRQs
 /// (including PMR-mode pseudo-NMIs), and FIQs — and active hardware NMIs
-/// via ALLINT, then remains in the
-/// architected wait state until the CPU is reset. This is a terminal
-/// operation and never returns.
+/// via ALLINT, then repeatedly executes `wfi` until the CPU is reset.
+/// A wake-up may end the wait instruction, but interrupt delivery is never
+/// restored and execution stays in the terminal loop. This never returns.
 #[inline]
 pub fn stop_cpu() -> ! {
-    // Masking all four DAIF classes deliberately breaks the PMR-mode rule
-    // that keeps `DAIF.I` clear (see `irq.rs`), because this one-way park
-    // path must also block the pseudo-NMIs, SError, and debug exceptions
-    // that could otherwise resume the CPU and panic it into a power-off.
-    // Nothing runs on this CPU afterwards, so no restore path is needed.
     crate::prepare_cpu_stop();
     loop {
         aarch64_cpu::asm::wfi();

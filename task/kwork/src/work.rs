@@ -1528,13 +1528,14 @@ static SYSTEM_WQ_BALANCE_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
 fn select_balanced_normal_pool_cpu() -> LogicalCpuId {
     let current = runtime::current_cpu_id();
-    if kbuild_config::NR_CPUS <= 1 {
+    let cpu_count = kcpu_id_map::nr_cpus();
+    if cpu_count <= 1 {
         return current;
     }
 
-    let start = SYSTEM_WQ_BALANCE_CURSOR.fetch_add(1, Ordering::Relaxed) % kbuild_config::NR_CPUS;
-    for offset in 0..kbuild_config::NR_CPUS {
-        let cpu_id = LogicalCpuId::new((start + offset) % kbuild_config::NR_CPUS);
+    let start = SYSTEM_WQ_BALANCE_CURSOR.fetch_add(1, Ordering::Relaxed) % cpu_count;
+    for offset in 0..cpu_count {
+        let cpu_id = LogicalCpuId::new((start + offset) % cpu_count);
         if builtinpool::is_system_worker_pool_ready(SystemPoolKind::Normal, cpu_id) {
             return cpu_id;
         }

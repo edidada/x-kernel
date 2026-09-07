@@ -6,8 +6,6 @@
 
 use core::arch::asm;
 
-use super::irq::disable_local_irq;
-
 /// Halt the current CPU terminally.
 ///
 /// Disables maskable interrupts and remains in `hlt` (the host-test build
@@ -16,7 +14,7 @@ use super::irq::disable_local_irq;
 /// is a terminal operation and never returns.
 #[inline]
 pub fn stop_cpu() -> ! {
-    disable_local_irq();
+    crate::prepare_cpu_stop();
     loop {
         await_interrupts();
     }

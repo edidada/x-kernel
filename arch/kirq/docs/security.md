@@ -170,17 +170,17 @@ Callers must also avoid holding locks or resources that their IRQ handler may
 acquire while waiting; otherwise teardown can wait for a handler that is blocked
 behind the caller's own lock.
 
-普通 per-CPU 控制接口仍获取全局控制锁与状态锁，不提供终止停机保证。
+per-CPU 启用接口获取全局控制锁与状态锁，不提供终止停机保证。
 停机消费者必须使用 CPU 本地屏蔽和软件 gate，不得把这个接口用于超时后的清理。
 所有语义 IPI 发送均不能等待跨 CPU 共享锁，Generic 发送由 wrapper 钉住当前 CPU；
 CpuBacktrace 还必须满足 NMI 上下文约束。
 
-per-CPU 控制接口只操作已注册的 `PER_CPU` descriptor，拒绝共享 IRQ、缺失 action
+per-CPU 启用接口只操作已注册的 `PER_CPU` descriptor，拒绝共享 IRQ、缺失 action
 或 teardown 状态；它持有控制面锁并 pin CPU，直接调用本地 backend，不消耗全局
-disable depth。关闭不是同步 barrier，不跟踪完整 per-CPU in-flight/CPU hotplug
-生命周期；owner 必须先撤销 readiness，保留 handler/mapping/storage，并处理
-已经投递的中断。IPI owner 不能在 disable 后调用共享 IRQ free/unregister。
-metadata 单测使用不编程物理控制器的 fixture，banked 启停由 kipi QEMU 集成测试覆盖。
+disable depth。不提供独立的 per-CPU 禁用或完整 CPU hotplug 生命周期；IPI owner
+在最终停机时屏蔽 CPU 本地中断并撤销 readiness，保留 handler/mapping/storage，
+不能调用共享 IRQ free/unregister 回收仍可能被旧 sender 使用的资源。
+metadata 单测使用不编程物理控制器的 fixture，每核启用与投递由 kipi QEMU 测试覆盖。
 x86 的 self-IPI 根据 APIC 模式选择专用 MSR 或普通 ICR 定向发送；xAPIC 模式
 不能调用第三方库仅适用于 x2APIC 的 SELF_IPI 寄存器入口，否则会写入非法 MMIO 偏移。
 
