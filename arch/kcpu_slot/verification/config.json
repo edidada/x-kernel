@@ -1,0 +1,586 @@
+{
+  "schema": 2,
+  "production": "arch/kcpu_slot",
+  "library": "kcpu_slot",
+  "source_exclusions": [
+    "src/tests.rs"
+  ],
+  "tools": {
+    "kani": "cargo-kani 0.67.0",
+    "cvc5": "cvc5 1.3.4 [git f3b21c4 on branch HEAD]",
+    "host_toolchain": "1.95.0"
+  },
+  "timeout": "360s",
+  "kbuild_config": "kbuild.rs",
+  "kani_unstable_features": [
+    "cfg_select"
+  ],
+  "production_sha256": {
+    "arch/kcpu_slot/Cargo.toml": "33233e620b50074be843364e92633f2bb2f328f1af3af84b21d52d29f0c7c9c8",
+    "arch/kcpu_slot/src/arch.rs": "b77d8a8d27a9941fa03a0d10f2172f19cb4aad82d6ce44d597f7301844b04fd1",
+    "arch/kcpu_slot/src/dynamic.rs": "7f49e92d9d05ec1a70fd24fffa0324fd30bdf7dff5ca868d377771e4d0582f70",
+    "arch/kcpu_slot/src/guard.rs": "16f80be7dea9efb5387dea9655ee62c8400cc171f1336be7a324006e01f2abe5",
+    "arch/kcpu_slot/src/layout.rs": "33ad93d4a9c3098815eb72c3f16da9297eb91258c84379b4069a940d994ad214",
+    "arch/kcpu_slot/src/lib.rs": "49c30655184e89f1a98f54ed4ddfe2282ae1de2a9fdc448909ba9ec6e7464847",
+    "arch/kcpu_slot/src/macros.rs": "d5b771af46be62ab4f2ea8005034d83b09f69ef9e48695d139ceb98fcf1fbefc",
+    "arch/kcpu_slot/src/static_slot.rs": "c4ab9c19497c2eb1848356d9d0d23f4227e31cb78a6c0df1ef0076eba9eb48ae"
+  },
+  "harnesses": {
+    "dynamic::allocation_isolation_and_access": {
+      "panic": false,
+      "unwind": 5
+    },
+    "dynamic::capacity_is_not_reclaimed_on_drop": {
+      "panic": false,
+      "unwind": 5
+    },
+    "dynamic::constructor_rejects_null_all_numeric_inputs": {
+      "panic": false,
+      "unwind": null
+    },
+    "dynamic::constructor_rejects_total_size_overflow": {
+      "panic": false,
+      "unwind": null
+    },
+    "dynamic::constructor_rejects_zero_dimensions": {
+      "panic": false,
+      "unwind": null
+    },
+    "dynamic::failed_capacity_reservation_preserves_remaining_bytes": {
+      "panic": false,
+      "unwind": 9
+    },
+    "dynamic::initialization_failure_cleanup_and_reservation": {
+      "panic": false,
+      "unwind": 5
+    },
+    "dynamic::local_access_rejects_cpu_outside_chunk": {
+      "panic": false,
+      "unwind": 5
+    },
+    "dynamic::misaligned_base_does_not_reserve_space": {
+      "panic": false,
+      "unwind": 9
+    },
+    "dynamic::misaligned_stride_is_rejected_without_reservation": {
+      "panic": false,
+      "unwind": 5
+    },
+    "dynamic::successful_handle_drops_each_cpu_once": {
+      "panic": false,
+      "unwind": 5
+    },
+    "dynamic::zero_sized_slots_initialize_without_consuming_capacity": {
+      "panic": false,
+      "unwind": 5
+    },
+    "errors::debug_matches_variant_and_u8_payload": {
+      "panic": false,
+      "unwind": 33
+    },
+    "errors::equality_matches_variant_and_payload": {
+      "panic": false,
+      "unwind": null
+    },
+    "static_slots::area_size_under_linker_size_contract": {
+      "panic": false,
+      "unwind": null,
+      "stubs": [
+        {
+          "original": "kcpu_slot :: template_size",
+          "replacement": "symbolic_size"
+        }
+      ],
+      "model_contract": "linker offsets/template bytes and CPU base register; see README.md"
+    },
+    "static_slots::boolean::static_type_under_platform_contract": {
+      "panic": false,
+      "unwind": 65,
+      "stubs": [
+        {
+          "original": "kcpu_slot :: arch :: current_base",
+          "replacement": "current_base"
+        },
+        {
+          "original": "kcpu_slot :: arch :: set_current_base",
+          "replacement": "set_current_base"
+        },
+        {
+          "original": "kcpu_slot :: template_size",
+          "replacement": "full_template_size"
+        },
+        {
+          "original": "kcpu_slot :: layout :: template_start",
+          "replacement": "zero_template_start"
+        },
+        {
+          "original": "ARRAY :: offset",
+          "replacement": "array_offset"
+        },
+        {
+          "original": "VALUE :: offset",
+          "replacement": "word_offset"
+        }
+      ],
+      "model_contract": "linker offsets/template bytes and CPU base register; see README.md"
+    },
+    "static_slots::empty_array::static_type_under_platform_contract": {
+      "panic": false,
+      "unwind": 65,
+      "stubs": [
+        {
+          "original": "kcpu_slot :: arch :: current_base",
+          "replacement": "current_base"
+        },
+        {
+          "original": "kcpu_slot :: arch :: set_current_base",
+          "replacement": "set_current_base"
+        },
+        {
+          "original": "kcpu_slot :: template_size",
+          "replacement": "full_template_size"
+        },
+        {
+          "original": "kcpu_slot :: layout :: template_start",
+          "replacement": "zero_template_start"
+        },
+        {
+          "original": "ARRAY :: offset",
+          "replacement": "array_offset"
+        },
+        {
+          "original": "VALUE :: offset",
+          "replacement": "word_offset"
+        }
+      ],
+      "model_contract": "linker offsets/template bytes and CPU base register; see README.md"
+    },
+    "static_slots::initialization_and_static_access_under_platform_contract": {
+      "panic": false,
+      "unwind": 65,
+      "stubs": [
+        {
+          "original": "kcpu_slot :: arch :: current_base",
+          "replacement": "current_base"
+        },
+        {
+          "original": "kcpu_slot :: arch :: set_current_base",
+          "replacement": "set_current_base"
+        },
+        {
+          "original": "kcpu_slot :: template_size",
+          "replacement": "template_size"
+        },
+        {
+          "original": "kcpu_slot :: layout :: template_start",
+          "replacement": "template_start"
+        },
+        {
+          "original": "CELL :: offset",
+          "replacement": "cell_offset"
+        },
+        {
+          "original": "WORD :: offset",
+          "replacement": "word_offset"
+        }
+      ],
+      "model_contract": "linker offsets/template bytes and CPU base register; see README.md"
+    },
+    "static_slots::nested_array::static_type_under_platform_contract": {
+      "panic": false,
+      "unwind": 65,
+      "stubs": [
+        {
+          "original": "kcpu_slot :: arch :: current_base",
+          "replacement": "current_base"
+        },
+        {
+          "original": "kcpu_slot :: arch :: set_current_base",
+          "replacement": "set_current_base"
+        },
+        {
+          "original": "kcpu_slot :: template_size",
+          "replacement": "full_template_size"
+        },
+        {
+          "original": "kcpu_slot :: layout :: template_start",
+          "replacement": "zero_template_start"
+        },
+        {
+          "original": "ARRAY :: offset",
+          "replacement": "array_offset"
+        },
+        {
+          "original": "VALUE :: offset",
+          "replacement": "word_offset"
+        }
+      ],
+      "model_contract": "linker offsets/template bytes and CPU base register; see README.md"
+    },
+    "static_slots::signed16::static_type_under_platform_contract": {
+      "panic": false,
+      "unwind": 65,
+      "stubs": [
+        {
+          "original": "kcpu_slot :: arch :: current_base",
+          "replacement": "current_base"
+        },
+        {
+          "original": "kcpu_slot :: arch :: set_current_base",
+          "replacement": "set_current_base"
+        },
+        {
+          "original": "kcpu_slot :: template_size",
+          "replacement": "full_template_size"
+        },
+        {
+          "original": "kcpu_slot :: layout :: template_start",
+          "replacement": "zero_template_start"
+        },
+        {
+          "original": "ARRAY :: offset",
+          "replacement": "array_offset"
+        },
+        {
+          "original": "VALUE :: offset",
+          "replacement": "word_offset"
+        }
+      ],
+      "model_contract": "linker offsets/template bytes and CPU base register; see README.md"
+    },
+    "static_slots::signed32::static_type_under_platform_contract": {
+      "panic": false,
+      "unwind": 65,
+      "stubs": [
+        {
+          "original": "kcpu_slot :: arch :: current_base",
+          "replacement": "current_base"
+        },
+        {
+          "original": "kcpu_slot :: arch :: set_current_base",
+          "replacement": "set_current_base"
+        },
+        {
+          "original": "kcpu_slot :: template_size",
+          "replacement": "full_template_size"
+        },
+        {
+          "original": "kcpu_slot :: layout :: template_start",
+          "replacement": "zero_template_start"
+        },
+        {
+          "original": "ARRAY :: offset",
+          "replacement": "array_offset"
+        },
+        {
+          "original": "VALUE :: offset",
+          "replacement": "word_offset"
+        }
+      ],
+      "model_contract": "linker offsets/template bytes and CPU base register; see README.md"
+    },
+    "static_slots::signed64::static_type_under_platform_contract": {
+      "panic": false,
+      "unwind": 65,
+      "stubs": [
+        {
+          "original": "kcpu_slot :: arch :: current_base",
+          "replacement": "current_base"
+        },
+        {
+          "original": "kcpu_slot :: arch :: set_current_base",
+          "replacement": "set_current_base"
+        },
+        {
+          "original": "kcpu_slot :: template_size",
+          "replacement": "full_template_size"
+        },
+        {
+          "original": "kcpu_slot :: layout :: template_start",
+          "replacement": "zero_template_start"
+        },
+        {
+          "original": "ARRAY :: offset",
+          "replacement": "array_offset"
+        },
+        {
+          "original": "VALUE :: offset",
+          "replacement": "word_offset"
+        }
+      ],
+      "model_contract": "linker offsets/template bytes and CPU base register; see README.md"
+    },
+    "static_slots::signed8::static_type_under_platform_contract": {
+      "panic": false,
+      "unwind": 65,
+      "stubs": [
+        {
+          "original": "kcpu_slot :: arch :: current_base",
+          "replacement": "current_base"
+        },
+        {
+          "original": "kcpu_slot :: arch :: set_current_base",
+          "replacement": "set_current_base"
+        },
+        {
+          "original": "kcpu_slot :: template_size",
+          "replacement": "full_template_size"
+        },
+        {
+          "original": "kcpu_slot :: layout :: template_start",
+          "replacement": "zero_template_start"
+        },
+        {
+          "original": "ARRAY :: offset",
+          "replacement": "array_offset"
+        },
+        {
+          "original": "VALUE :: offset",
+          "replacement": "word_offset"
+        }
+      ],
+      "model_contract": "linker offsets/template bytes and CPU base register; see README.md"
+    },
+    "static_slots::signed_size::static_type_under_platform_contract": {
+      "panic": false,
+      "unwind": 65,
+      "stubs": [
+        {
+          "original": "kcpu_slot :: arch :: current_base",
+          "replacement": "current_base"
+        },
+        {
+          "original": "kcpu_slot :: arch :: set_current_base",
+          "replacement": "set_current_base"
+        },
+        {
+          "original": "kcpu_slot :: template_size",
+          "replacement": "full_template_size"
+        },
+        {
+          "original": "kcpu_slot :: layout :: template_start",
+          "replacement": "zero_template_start"
+        },
+        {
+          "original": "ARRAY :: offset",
+          "replacement": "array_offset"
+        },
+        {
+          "original": "VALUE :: offset",
+          "replacement": "word_offset"
+        }
+      ],
+      "model_contract": "linker offsets/template bytes and CPU base register; see README.md"
+    },
+    "static_slots::static_cpu_areas_remain_isolated_under_platform_contract": {
+      "panic": false,
+      "unwind": 65,
+      "stubs": [
+        {
+          "original": "kcpu_slot :: arch :: current_base",
+          "replacement": "current_base"
+        },
+        {
+          "original": "kcpu_slot :: arch :: set_current_base",
+          "replacement": "set_current_base"
+        },
+        {
+          "original": "kcpu_slot :: template_size",
+          "replacement": "template_size"
+        },
+        {
+          "original": "kcpu_slot :: layout :: template_start",
+          "replacement": "template_start"
+        },
+        {
+          "original": "CELL :: offset",
+          "replacement": "cell_offset"
+        },
+        {
+          "original": "WORD :: offset",
+          "replacement": "word_offset"
+        }
+      ],
+      "model_contract": "linker offsets/template bytes and CPU base register; see README.md"
+    },
+    "static_slots::template_copy_and_install_order_under_platform_contract": {
+      "panic": false,
+      "unwind": 65,
+      "stubs": [
+        {
+          "original": "kcpu_slot :: arch :: set_current_base",
+          "replacement": "install_after_copy"
+        },
+        {
+          "original": "kcpu_slot :: layout :: template_start",
+          "replacement": "symbolic_template_start"
+        },
+        {
+          "original": "kcpu_slot :: template_size",
+          "replacement": "symbolic_size"
+        }
+      ],
+      "model_contract": "linker offsets/template bytes and CPU base register; see README.md"
+    },
+    "static_slots::unsigned16::static_type_under_platform_contract": {
+      "panic": false,
+      "unwind": 65,
+      "stubs": [
+        {
+          "original": "kcpu_slot :: arch :: current_base",
+          "replacement": "current_base"
+        },
+        {
+          "original": "kcpu_slot :: arch :: set_current_base",
+          "replacement": "set_current_base"
+        },
+        {
+          "original": "kcpu_slot :: template_size",
+          "replacement": "full_template_size"
+        },
+        {
+          "original": "kcpu_slot :: layout :: template_start",
+          "replacement": "zero_template_start"
+        },
+        {
+          "original": "ARRAY :: offset",
+          "replacement": "array_offset"
+        },
+        {
+          "original": "VALUE :: offset",
+          "replacement": "word_offset"
+        }
+      ],
+      "model_contract": "linker offsets/template bytes and CPU base register; see README.md"
+    },
+    "static_slots::unsigned32::static_type_under_platform_contract": {
+      "panic": false,
+      "unwind": 65,
+      "stubs": [
+        {
+          "original": "kcpu_slot :: arch :: current_base",
+          "replacement": "current_base"
+        },
+        {
+          "original": "kcpu_slot :: arch :: set_current_base",
+          "replacement": "set_current_base"
+        },
+        {
+          "original": "kcpu_slot :: template_size",
+          "replacement": "full_template_size"
+        },
+        {
+          "original": "kcpu_slot :: layout :: template_start",
+          "replacement": "zero_template_start"
+        },
+        {
+          "original": "ARRAY :: offset",
+          "replacement": "array_offset"
+        },
+        {
+          "original": "VALUE :: offset",
+          "replacement": "word_offset"
+        }
+      ],
+      "model_contract": "linker offsets/template bytes and CPU base register; see README.md"
+    },
+    "static_slots::unsigned64::static_type_under_platform_contract": {
+      "panic": false,
+      "unwind": 65,
+      "stubs": [
+        {
+          "original": "kcpu_slot :: arch :: current_base",
+          "replacement": "current_base"
+        },
+        {
+          "original": "kcpu_slot :: arch :: set_current_base",
+          "replacement": "set_current_base"
+        },
+        {
+          "original": "kcpu_slot :: template_size",
+          "replacement": "full_template_size"
+        },
+        {
+          "original": "kcpu_slot :: layout :: template_start",
+          "replacement": "zero_template_start"
+        },
+        {
+          "original": "ARRAY :: offset",
+          "replacement": "array_offset"
+        },
+        {
+          "original": "VALUE :: offset",
+          "replacement": "word_offset"
+        }
+      ],
+      "model_contract": "linker offsets/template bytes and CPU base register; see README.md"
+    },
+    "static_slots::unsigned8::static_type_under_platform_contract": {
+      "panic": false,
+      "unwind": 65,
+      "stubs": [
+        {
+          "original": "kcpu_slot :: arch :: current_base",
+          "replacement": "current_base"
+        },
+        {
+          "original": "kcpu_slot :: arch :: set_current_base",
+          "replacement": "set_current_base"
+        },
+        {
+          "original": "kcpu_slot :: template_size",
+          "replacement": "full_template_size"
+        },
+        {
+          "original": "kcpu_slot :: layout :: template_start",
+          "replacement": "zero_template_start"
+        },
+        {
+          "original": "ARRAY :: offset",
+          "replacement": "array_offset"
+        },
+        {
+          "original": "VALUE :: offset",
+          "replacement": "word_offset"
+        }
+      ],
+      "model_contract": "linker offsets/template bytes and CPU base register; see README.md"
+    },
+    "static_slots::unsigned_size::static_type_under_platform_contract": {
+      "panic": false,
+      "unwind": 65,
+      "stubs": [
+        {
+          "original": "kcpu_slot :: arch :: current_base",
+          "replacement": "current_base"
+        },
+        {
+          "original": "kcpu_slot :: arch :: set_current_base",
+          "replacement": "set_current_base"
+        },
+        {
+          "original": "kcpu_slot :: template_size",
+          "replacement": "full_template_size"
+        },
+        {
+          "original": "kcpu_slot :: layout :: template_start",
+          "replacement": "zero_template_start"
+        },
+        {
+          "original": "ARRAY :: offset",
+          "replacement": "array_offset"
+        },
+        {
+          "original": "VALUE :: offset",
+          "replacement": "word_offset"
+        }
+      ],
+      "model_contract": "linker offsets/template bytes and CPU base register; see README.md"
+    },
+    "stride_contract": {
+      "panic": false,
+      "unwind": null
+    }
+  },
+  "cargo_tests": true
+}

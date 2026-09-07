@@ -45,3 +45,20 @@ RISC-V 使用 `gp` 作为 per-CPU base register，与仓库现有 `percpu 0.4` �
 安全访问 API 的实施顺序是：先由 `kspin` 的真实 guard 实现 `PinCurrentCpu`，再为
 `NoPreemptIrqSave` 实现 `CpuLocalGuard`，最后把普通 slot 访问从 `unsafe` 迁移到
 guard 约束的安全方法；迁移完成后仅保留少量底层 unsafe 边界。
+
+## 形式化验证
+
+`verification/` 是独立 workspace，path 依赖真实 `kcpu_slot`；生产 `src/` 不包含
+证明模块。复用 `scripts/verification/run.py` 本地验收，不接 CI。
+32 个 Kani 入口包括 15 个直接证明和 17 个平台契约模型下的证明，另有类型限制及
+四架构偏移/基址指令回归检查。范围覆盖布局数值、有限规模动态生命周期和条件化的静态
+访问/模板复制；不等同于全部架构、任意 CPU/类型/历史的整库无条件证明。
+详细接口清单、模型假设及保留项见 [验证说明](../verification/README.md)。
+
+AArch64 的模板偏移按完整 64 位装载，避免只装入低 16 位导致 64 KiB 边界截断。
+静态描述符可在 const 初始化时建立，CPU area 必须在实际访问前完成初始化。
+
+四个 64 位架构共用模板大小上限 0x7ffff000，根链接脚本超限即报错；这保证偏移
+落在各架构立即数和重定位的共同可表示范围内。AArch64 使用完整 64 位装载并不
+取消此跨架构约束。验证目录分别交叉编译 x86_64、AArch64、RISC-V 64 和
+LoongArch64，核对偏移边界、指定基址寄存器及链接期拒绝边界。

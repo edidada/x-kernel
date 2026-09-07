@@ -30,6 +30,29 @@ def check_sources(root, config):
             raise ValueError(f"{name}: source changed; review contracts before updating scope hash")
 
 
+def audit_harnesses(harnesses, policies):
+    """Reject undeclared model replacements, including in otherwise passing proofs."""
+    seen = set()
+    for harness in harnesses:
+        name = harness["pretty_name"]
+        if name not in policies:
+            continue
+        if name in seen:
+            raise ValueError(f"{name}: duplicate harness metadata")
+        seen.add(name)
+        attributes = harness["attributes"]
+        normalize = lambda stubs: sorted(
+            ("".join(s["original"].split()), "".join(s["replacement"].split())) for s in stubs)
+        if (normalize(attributes["stubs"]) != normalize(policies[name].get("stubs", []))
+                or attributes["verified_stubs"]):
+            raise ValueError(f"{name}: unreviewed model replacements")
+        if ("unwind" in policies[name]
+                and attributes["unwind_value"] != policies[name]["unwind"]):
+            raise ValueError(f"{name}: unreviewed loop bound")
+    if seen != set(policies):
+        raise ValueError("missing harness metadata")
+
+
 def audit_report(report, name, policy):
     ending = "VERIFICATION:- SUCCESSFUL"
     if policy["panic"]:

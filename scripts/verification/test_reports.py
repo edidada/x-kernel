@@ -141,5 +141,46 @@ class ReportTests(unittest.TestCase):
                 check_sources(root, config)
 
 
+
+
+class HarnessModelTests(unittest.TestCase):
+    def metadata(self, stubs=None, unwind=5, verified=None):
+        return [{"pretty_name": NAME, "attributes": {
+            "stubs": stubs or [], "unwind_value": unwind,
+            "verified_stubs": verified or []}}]
+
+    def test_reviewed_model_and_bound(self):
+        from reports import audit_harnesses
+        stub = {"original": "crate :: hardware", "replacement": "model"}
+        audit_harnesses(self.metadata([stub]), {NAME: {
+            "stubs": [{"original": "crate::hardware", "replacement": "model"}], "unwind": 5}})
+
+    def test_undeclared_model_rejected(self):
+        from reports import audit_harnesses
+        with self.assertRaisesRegex(ValueError, "unreviewed model"):
+            audit_harnesses(self.metadata([{"original": "real", "replacement": "fake"}]), {NAME: {}})
+
+    def test_missing_model_rejected(self):
+        from reports import audit_harnesses
+        with self.assertRaisesRegex(ValueError, "unreviewed model"):
+            audit_harnesses(self.metadata(), {NAME: {"stubs": [{"original": "real", "replacement": "model"}]}})
+
+    def test_missing_or_duplicate_metadata_rejected(self):
+        from reports import audit_harnesses
+        for metadata in ([], self.metadata() * 2):
+            with self.assertRaises(ValueError):
+                audit_harnesses(metadata, {NAME: {}})
+
+    def test_changed_bound_rejected(self):
+        from reports import audit_harnesses
+        with self.assertRaisesRegex(ValueError, "unreviewed loop bound"):
+            audit_harnesses(self.metadata(), {NAME: {"unwind": 9}})
+
+    def test_verified_stub_requires_separate_review(self):
+        from reports import audit_harnesses
+        with self.assertRaisesRegex(ValueError, "unreviewed model"):
+            audit_harnesses(self.metadata(verified=["some_contract"]), {NAME: {}})
+
+
 if __name__ == "__main__":
     unittest.main()

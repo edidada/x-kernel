@@ -25,6 +25,9 @@ macro_rules! __cpu_slot_symbol_offset {
                 unsafe {
                     core::arch::asm!(
                         "movz {0}, #:abs_g0_nc:{VAR}",
+                        "movk {0}, #:abs_g1_nc:{VAR}",
+                        "movk {0}, #:abs_g2_nc:{VAR}",
+                        "movk {0}, #:abs_g3:{VAR}",
                         out(reg) value,
                         VAR = sym $symbol,
                     );

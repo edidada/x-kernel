@@ -136,6 +136,10 @@ SECTIONS
         _cpu_slot_template_vma_end = .;
     }
     _cpu_slot_template_size = _cpu_slot_template_vma_end - _cpu_slot_template_vma_start;
+    /* Keep offsets positive and representable by every architecture's
+       immediate relocations, including RISC-V's rounded HI20/LO12 pair. */
+    ASSERT(_cpu_slot_template_size <= 0x7ffff000,
+           "kcpu_slot template exceeds the shared architecture offset range")
     _cpu_slot_template_lma_end = _cpu_slot_template_lma_start + _cpu_slot_template_size;
     _cpu_slot_area_stride = ALIGN(_cpu_slot_template_size, 64);
     _cpu_slot_area_start = ALIGN(_cpu_slot_template_lma_end, 64);

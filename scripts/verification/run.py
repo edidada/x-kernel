@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 
-from reports import check_reports, check_sources, digest
+from reports import audit_harnesses, check_reports, check_sources, digest
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -33,7 +33,8 @@ def execute(command, *, cwd, env, log=None):
 
 def snapshot(config_path, manifests):
     # Include all local dependency sources, verification tools/config and locks.
-    paths = {ROOT / "Cargo.toml", ROOT / "Cargo.lock", ROOT / "rust-toolchain.toml"}
+    paths = {ROOT / "Cargo.toml", ROOT / "Cargo.lock", ROOT / "rust-toolchain.toml",
+             ROOT / "linker.lds.S"}
     for manifest in manifests:
         paths.add(manifest)
         paths.update(manifest.parent.rglob("*.rs"))
@@ -85,6 +86,15 @@ def main():
         env.pop("RUSTC_WRAPPER", None)
         env.pop("RUSTC_WORKSPACE_WRAPPER", None)
         env["RUSTUP_TOOLCHAIN"] = config["tools"]["host_toolchain"]
+        # A crate-local fixture makes configuration dependencies reproducible,
+        # independent of whichever kernel platform was last built.
+        if config.get("kbuild_config"):
+            fixture = (verification / config["kbuild_config"]).resolve()
+            fixture.relative_to(verification)
+            generated = work / "kbuild" / "verification" / "config.rs"
+            generated.parent.mkdir(parents=True)
+            shutil.copyfile(fixture, generated)
+            env.update(TARGET_DIR=str(work), K_PLAT_NAME="verification")
         wrapper = work / "cvc5"
         env["VERIFICATION_CVC5"] = cvc5
         wrapper.write_text('#!/bin/sh\nexec "$VERIFICATION_CVC5" --solve-bv-as-int=sum "$@"\n')
@@ -101,8 +111,9 @@ def main():
             execute([sys.executable, "-m", "unittest", "discover", "-s", str(ROOT / "scripts/verification"),
                      "-p", "test_*.py"], cwd=work, env=env, log=run / "tool-tests.log")
             rlib = work / ("lib" + config["library"] + ".rlib")
-            execute(["rustc", "--edition=2024", "--crate-name", config["library"], "--crate-type", "rlib",
-                     "--check-cfg=cfg(unittest)", str(crate / "src/lib.rs"), "-o", str(rlib)], cwd=work, env=env)
+            if config.get("doctests") or config.get("host_tests"):
+                execute(["rustc", "--edition=2024", "--crate-name", config["library"], "--crate-type", "rlib",
+                         "--check-cfg=cfg(unittest)", str(crate / "src/lib.rs"), "-o", str(rlib)], cwd=work, env=env)
             for index, test in enumerate(config.get("doctests", [])):
                 execute(["rustdoc", "--edition=2024", "--test", "--crate-name", config["library"],
                          "--check-cfg=cfg(unittest)", "--extern", f'{config["library"]}={rlib}',
@@ -112,10 +123,22 @@ def main():
                 execute(["rustc", "--edition=2024", "--test", str(verification / test), "--extern",
                          f'{config["library"]}={rlib}', "-o", str(binary)], cwd=work, env=env)
                 execute([str(binary)], cwd=work, env=env, log=run / f"host-test-{index}.log")
+            if config.get("cargo_tests"):
+                execute(["cargo", "test", "--locked", "--manifest-path", str(manifest),
+                         "--target-dir", str(work / "host-target")],
+                        cwd=work, env=env, log=run / "cargo-tests.log")
         env["CARGO_NET_OFFLINE"] = "true"
+        # Enable syntax stabilized after Kani's bundled compiler, without
+        # modifying production crates or disabling any verification checks.
+        for feature in config.get("kani_unstable_features", []):
+            if not feature.isidentifier():
+                raise ValueError(f"invalid compiler feature: {feature}")
+            env["RUSTFLAGS"] += f" -Zcrate-attr=feature({feature})"
         command = [kani, "--manifest-path", str(manifest), "--target-dir", str(run),
                    "-j", str(args.j), "--harness-timeout", config["timeout"],
                    "--output-format", "terse", "--output-into-files", "-Z", "unstable-options"]
+        if any(policy.get("stubs") for policy in config["harnesses"].values()):
+            command.extend(["-Z", "stubbing"])
         for harness in args.harness:
             command.extend(["--harness", harness])
         if config.get("loop_bounds"):
@@ -134,6 +157,12 @@ def main():
         if directories[0] != run / "result_output_dir":
             shutil.copytree(directories[0], run / "result_output_dir")
         result = check_reports(run, config, filtered=bool(args.harness))
+        metadata = [h for path in run.rglob("*.kani-metadata.json")
+                    for h in json.loads(path.read_text())["proof_harnesses"]]
+        executed = {p.name: config["harnesses"][p.name]
+                    for p in (run / "result_output_dir").iterdir() if p.is_file()}
+        audit_harnesses(metadata, executed)
+        result["modeled_harnesses"] = sum(bool(p.get("stubs")) for p in executed.values())
         result["full_acceptance"] = not args.harness
         (run / "acceptance.json").write_text(json.dumps(result, indent=2) + "\n")
         print(json.dumps(result), flush=True)

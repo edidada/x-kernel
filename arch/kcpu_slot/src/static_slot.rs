@@ -46,9 +46,9 @@ impl<T: StaticSlotValue> CpuSlot<T> {
     ///
     /// # Safety
     /// `offset_fn` must be the `offset` generated for a `.cpu_slot.template`
-    /// symbol by [`crate::cpu_slot!`]; the linker layout must have been
-    /// initialized with [`crate::initialize_cpu`]. An arbitrary offset_fn could
-    /// name a memory region outside the CPU area.
+    /// symbol by [`crate::cpu_slot!`]. Each CPU area must be initialized with
+    /// [`crate::initialize_cpu`] before accessing this descriptor. An arbitrary
+    /// offset_fn could name a memory region outside the CPU area.
     #[doc(hidden)]
     pub const unsafe fn from_offset_fn(offset_fn: fn() -> usize) -> Self {
         Self {
@@ -67,7 +67,7 @@ impl<T: StaticSlotValue> CpuSlot<T> {
     /// `self` must be a descriptor created by [`crate::cpu_slot!`], the linker
     /// layout must have been initialized with [`crate::initialize_cpu`], and the
     /// caller must not migrate off the pinned CPU while the returned reference
-    /// is alive.
+    /// is alive. No conflicting mutable access may occur during that lifetime.
     pub unsafe fn get<'a>(&'a self, pin: &'a impl PinCurrentCpu) -> &'a T {
         // SAFETY: The offset function names a linker-retained template symbol,
         // `pin.base()` names the pinned CPU's initialized area, and the caller
@@ -124,9 +124,9 @@ impl<T: StaticSlotValue> CpuSlotCell<T> {
     ///
     /// # Safety
     /// `offset_fn` must be the `offset` generated for a `.cpu_slot.template`
-    /// symbol by [`crate::cpu_slot_cell!`]; the linker layout must have been
-    /// initialized with [`crate::initialize_cpu`]. An arbitrary offset_fn could
-    /// name a memory region outside the CPU area.
+    /// symbol by [`crate::cpu_slot_cell!`]. Each CPU area must be initialized
+    /// with [`crate::initialize_cpu`] before accessing this descriptor. An
+    /// arbitrary offset_fn could name a memory region outside the CPU area.
     #[doc(hidden)]
     pub const unsafe fn from_offset_fn(offset_fn: fn() -> usize) -> Self {
         Self {
@@ -164,6 +164,8 @@ impl<T: StaticSlotValue> CpuSlotCell<T> {
     where
         T: Copy,
     {
+        // SAFETY: The caller provides an initialized, pinned cell with no
+        // conflicting access; copying T does not retain a reference to it.
         unsafe { *self.get(pin).get() }
     }
 
@@ -173,6 +175,8 @@ impl<T: StaticSlotValue> CpuSlotCell<T> {
     /// See [`Self::get`]; the caller must establish exclusive access to the
     /// selected CPU's value for the duration of the operation.
     pub unsafe fn write<'a>(&'a self, pin: &'a impl PinCurrentCpu, value: T) {
+        // SAFETY: The caller provides exclusive access to the initialized cell
+        // and prevents migration for the duration of this write.
         unsafe { *self.get(pin).get() = value };
     }
 }

@@ -41,11 +41,12 @@ pub fn template_size() -> usize {
 }
 
 /// Initializes one CPU's slot area from the linker template and selects it.
-/// `base` must point to at least `stride()` writable bytes.
+/// `base` must point to at least [`area_size()`] writable bytes.
 ///
 /// # Safety
 /// `base` must be unique for this CPU and valid for copying the complete
-/// template. No slot may be accessed until this function returns.
+/// template, with no overlap with the template source. No slot may be accessed
+/// until this function returns.
 pub unsafe fn initialize_cpu(base: *mut u8) {
     let size = template_size();
     // SAFETY: Preconditions guarantee both regions are valid and non-overlapping.
@@ -58,6 +59,10 @@ pub unsafe fn initialize_cpu(base: *mut u8) {
 }
 
 /// Number of bytes required for one CPU's slot area.
+///
+/// Rounds up to 64-byte alignment when representable. Inputs larger than
+/// `usize::MAX - 63` return `usize::MAX - 63`, which is smaller than the input
+/// and must not be used as sufficient allocation capacity for that input.
 pub const fn stride(template_size: usize) -> usize {
     template_size.saturating_add(CACHE_LINE - 1) & !(CACHE_LINE - 1)
 }

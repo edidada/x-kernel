@@ -42,11 +42,15 @@ pub struct CpuSlotChunk {
 impl CpuSlotChunk {
     /// Creates a chunk over caller-owned memory.
     ///
+    /// Null pointers, zero CPU counts or strides, and overflowing total sizes
+    /// return `None` without accessing the backing store. Type alignment is
+    /// checked separately by [`Self::alloc`].
+    ///
     /// # Safety
-    /// `base` must point to `cpu_count * area_stride` writable bytes for the
-    /// entire lifetime of the chunk. `area_stride` must be aligned for every
-    /// `T` that will be allocated from the chunk. No other chunk may alias
-    /// that memory.
+    /// If the arguments pass the checks above, `base` must point to one
+    /// allocation containing `cpu_count * area_stride` writable bytes for the
+    /// entire lifetime of the chunk and all its handles. No other chunk may
+    /// alias that memory. Rejected arguments require no valid backing store.
     pub unsafe fn from_raw_parts(
         base: *mut u8,
         cpu_count: usize,
