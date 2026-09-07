@@ -3,6 +3,10 @@
 // See LICENSES for license details.
 
 //! GIC interrupt controller integration for AArch64 platforms.
+//!
+//! IPI SGIs are reserved by this backend: `Generic` uses SGI 1 and
+//! `CpuBacktrace` uses SGI 2 (currently delivered only by GICv3). Consumers
+//! select an [`IpiKind`]; neither SGI is configurable through Kconfig.
 
 use core::fmt;
 
@@ -11,7 +15,7 @@ mod gicv2;
 #[path = "gicv3.rs"]
 mod gicv3;
 
-use kirq::TargetCpu;
+use kirq::{IpiKind, TargetCpu};
 use lazyinit::LazyInit;
 use memaddr::{PhysAddr, VirtAddr};
 use memspace::iomap_device;
@@ -21,6 +25,21 @@ const GICC_NAME: &str = "gicc";
 const GICR_NAME: &str = "gicr";
 static GIC_INFO: LazyInit<GicConfig> = LazyInit::new();
 static ACTIVE_GIC: LazyInit<GicVersion> = LazyInit::new();
+
+// The GIC backend owns the SGI allocation. Consumers refer only to IpiKind,
+// just as Linux's generic callers use an IPI message type rather than an SGI
+// number. Keep a fixed backend-local layout so registration, enablement and
+// delivery cannot disagree because of independently configured IRQ numbers.
+const GENERIC_IPI_SGI: usize = 1;
+const CPU_BACKTRACE_SGI: usize = 2;
+const _: () = {
+    assert!(GENERIC_IPI_SGI < 16, "generic GIC IPI must be an SGI");
+    assert!(CPU_BACKTRACE_SGI < 16, "CPU-backtrace IPI must be an SGI");
+    assert!(
+        GENERIC_IPI_SGI != CPU_BACKTRACE_SGI,
+        "generic and CPU-backtrace IPIs must use different SGIs"
+    );
+};
 
 pub const GIC_ROOT_DOMAIN: kirq::IrqDomainId = kirq::GIC_ROOT_DOMAIN;
 
@@ -261,23 +280,33 @@ pub fn complete_irq(completion_cookie: usize) {
     }
 }
 
-pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
+fn notify_cpu(interrupt_id: usize, target: TargetCpu) -> bool {
     match active_version() {
         GicVersion::V2 => gicv2::notify_cpu(interrupt_id, target),
         GicVersion::V3 => gicv3::notify_cpu(interrupt_id, target),
     }
 }
 
-/// Raise an SGI on every CPU except the caller without taking controller locks.
-///
-/// The only supported backend is GICv3, whose SGI send register is directly
-/// accessible from EL1. This is kept separate from [`notify_cpu`] because it
-/// is callable from NMI context and therefore cannot use the ordinary locked
-/// GIC object.
-pub fn raise_nmi_all_but_self(interrupt_id: usize) -> bool {
-    match active_version() {
-        GicVersion::V2 => false,
-        GicVersion::V3 => gicv3::raise_nmi_all_but_self(interrupt_id),
+fn ipi_desc(kind: IpiKind) -> Option<kirq::IrqDesc> {
+    let hwirq = match kind {
+        IpiKind::Generic => GENERIC_IPI_SGI,
+        IpiKind::CpuBacktrace if active_version() == GicVersion::V3 => CPU_BACKTRACE_SGI,
+        IpiKind::CpuBacktrace => return None,
+    };
+    Some(edge_irq_desc(hwirq))
+}
+
+fn send_ipi(kind: IpiKind, target: TargetCpu) -> bool {
+    match kind {
+        IpiKind::Generic => notify_cpu(GENERIC_IPI_SGI, target),
+        // The CPU-backtrace IPI can be raised by a PMU NMI. Bypass the
+        // ordinary locked GIC object and accept only an exact CPU mask.
+        IpiKind::CpuBacktrace => match (active_version(), target) {
+            (GicVersion::V3, TargetCpu::Mask(mask)) => {
+                gicv3::send_ipi_mask_nmi_safe(CPU_BACKTRACE_SGI, mask)
+            }
+            _ => false,
+        },
     }
 }
 
@@ -358,11 +387,42 @@ impl kirq::IntrManagerIf {
         crate::gic::complete_irq(completion_cookie);
     }
 
-    fn notify_cpu(interrupt_id: usize, target: kirq::TargetCpu) {
-        crate::gic::notify_cpu(interrupt_id, target);
+    fn ipi_desc(kind: kirq::IpiKind) -> Option<kirq::IrqDesc> {
+        crate::gic::ipi_desc(kind)
+    }
+
+    fn send_ipi(kind: kirq::IpiKind, target: kirq::TargetCpu) -> bool {
+        crate::gic::send_ipi(kind, target)
     }
 
     fn set_prio(irq: usize, priority: u8) {
         crate::gic::set_prio(irq, priority);
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::*;
+
+    #[def_test]
+    fn semantic_ipi_descriptors_use_fixed_sgis() {
+        // Read only the immutable, boot-owned backend selection. No test
+        // changes IRQ registrations, per-CPU enablement or controller state.
+        let generic = ipi_desc(IpiKind::Generic).unwrap();
+        assert_eq!(generic.hwirq, 1);
+        assert_eq!(generic.domain, Some(GIC_ROOT_DOMAIN));
+        assert_eq!(generic.trigger, kirq::IrqTrigger::EdgeRising);
+
+        match active_version() {
+            GicVersion::V3 => {
+                let backtrace = ipi_desc(IpiKind::CpuBacktrace).unwrap();
+                assert_eq!(backtrace.hwirq, 2);
+                assert_eq!(backtrace.domain, generic.domain);
+                assert_eq!(backtrace.trigger, kirq::IrqTrigger::EdgeRising);
+            }
+            GicVersion::V2 => assert!(ipi_desc(IpiKind::CpuBacktrace).is_none()),
+        }
     }
 }

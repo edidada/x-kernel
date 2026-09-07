@@ -22,8 +22,8 @@
 //!             → NmiMode::Hardware → GIC NMI attribute
 //!             → NmiMode::Pseudo   → gic::set_prio(hwirq, 0)
 //!   hardlockup detector
-//!     → khal::nmi::raise_nmi_all_but_self(watchdog_sgi)
-//!       → lockless, allocation-free platform SGI send
+//!     → kipi::send_cpu_backtrace(ready_mask)
+//!       → semantic, lockless IRQ-backend IPI send
 //!   pmu feature init (kruntime)
 //!     → khal::pmu::register_overflow_dispatch(hwirq)
 //!       → pmu-only build: kirq::register(...)
@@ -96,16 +96,6 @@ pub trait NmiDef {
     /// (SPIs) the write is idempotent across CPUs.  Returns `false` when the
     /// platform cannot deliver NMI on this line.
     fn configure_nmi(hwirq: usize) -> bool;
-
-    /// Raise the NMI-configured SGI `hwirq` on every CPU except the caller.
-    ///
-    /// This operation is intended for Linux-style cross-CPU diagnostic
-    /// rendezvous. It may be called from NMI context, so an implementation
-    /// must not allocate, log, or acquire locks. All memory writes made before
-    /// the call must be visible to a target before that target handles the
-    /// interrupt. Returns `false` when `hwirq` is not a valid SGI or the
-    /// platform cannot issue an NMI-safe broadcast.
-    fn raise_nmi_all_but_self(hwirq: usize) -> bool;
 }
 
 /// Source‑neutral periodic NMI provider.

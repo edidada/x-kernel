@@ -8,8 +8,10 @@
 //! using Inter-Processor Interrupts (IPI). It maintains per-CPU callback queues,
 //! dispatches generic callbacks from the shared IPI handler, hosts the TLB
 //! shootdown protocol used by page-table updates, and the system-wide CPU
-//! stop protocol used before entering a platform power terminal
-//! ([`stop_other_cpus`]).
+//! stop protocol used before entering a platform power terminal through
+//! [`khal::power::SmpStopIf`]. It also owns the CPU-backtrace IPI lifecycle;
+//! the optional `nmi` feature promotes delivery when supported. The irqchip,
+//! not consumers or Kconfig, chooses each concrete vector.
 //!
 //! ## Safety
 //!
@@ -23,19 +25,23 @@ extern crate alloc;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use kbuild_config::IPI_IRQ;
 use kcpu_id_map::{LogicalCpuId, for_each_present_logical_cpu, raw_cpu_id};
 use khal::percpu::this_cpu_id;
 use kirq::TargetCpu as IpiTarget;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 
+mod backtrace;
 mod event;
 mod icache;
 mod queue;
 mod stop;
 pub mod tlb;
 
+pub use backtrace::{
+    CpuBacktraceDelivery, cpu_backtrace_delivery, cpu_backtrace_ready_mask, disable_cpu_backtrace,
+    enable_cpu_backtrace, register_cpu_backtrace_handler, send_cpu_backtrace,
+};
 pub use event::{Callback, MulticastCallback};
 use queue::IpiEventQueue;
 
@@ -47,7 +53,7 @@ pub type Result<T> = core::result::Result<T, KipiError>;
 pub enum KipiError {
     /// Invalid CPU ID (exceeds system CPU count)
     InvalidCpuId,
-    /// Target CPU exists in the logical CPU map but has not initialized its local IPI queue yet.
+    /// Target CPU exists but has not enabled, or has disabled, its local IPI delivery.
     TargetCpuNotReady,
     /// Queue full (too many pending callbacks)
     QueueFull,
@@ -77,16 +83,80 @@ fn is_ipi_queue_ready(cpu_id: LogicalCpuId) -> bool {
     IPI_QUEUE_READY[cpu_id.as_usize()].load(Ordering::Acquire)
 }
 
+#[inline]
+fn send_generic_ipi(target: IpiTarget) -> bool {
+    kirq::send_ipi(kirq::IpiKind::Generic, target)
+}
+
+/// Registers the platform-owned generic IPI vector during primary boot.
+///
+/// Returns `false` when the platform has no generic IPI descriptor or the
+/// descriptor already has a handler.
+pub fn register_ipi_handler(handler: fn()) -> bool {
+    let Some(desc) = kirq::ipi_desc(kirq::IpiKind::Generic) else {
+        return false;
+    };
+    kirq::register_disabled(
+        desc.with_flags(kirq::IrqFlags::PER_CPU),
+        alloc::sync::Arc::new(move |_| {
+            handler();
+            kirq::IrqEvent::HANDLED
+        }),
+    )
+}
+
+/// Enables the platform-owned generic IPI vector on the calling CPU.
+///
+/// Call after global registration and local [`init`], from ordinary kernel/IRQ
+/// context, not NMI. Pins the CPU and masks ordinary IRQs through publication.
+/// Returns `false` when the vector is unavailable or could not be enabled.
+pub fn enable_ipi() -> bool {
+    let _local = kspin::NoPreemptIrqSave::new();
+    if !IPI_EVENT_QUEUE.with_current(|queue| queue.is_inited()) {
+        return false;
+    }
+    let Some(desc) = kirq::ipi_desc(kirq::IpiKind::Generic) else {
+        return false;
+    };
+    if kirq::try_enable_percpu_irq(desc).is_err() {
+        return false;
+    }
+    IPI_QUEUE_READY[this_cpu_id().as_usize()].store(true, Ordering::Release);
+    // Re-enable can expose callbacks queued by a sender racing disable.
+    // Queue storage and the handler remain installed across local masking.
+    let _ = send_generic_ipi(IpiTarget::Self_);
+    true
+}
+
+/// Withdraws Generic IPI readiness and disables dispatch on the calling CPU.
+///
+/// Call from ordinary kernel/IRQ context, not NMI. Does not drain callbacks
+/// or free queue storage: producers that already passed readiness validation
+/// may still enqueue. [`enable_ipi`] resumes queued work on the same CPU.
+/// Before leaving delivery disabled, the caller must quiesce work that requires
+/// cross-CPU callbacks or TLB acknowledgements. This does not take a CPU offline
+/// or remove it from scheduler/mm target sets.
+/// Controllers mask the local line where supported. An x86 LAPIC cannot mask
+/// an individual IPI vector, so the handler's readiness check gates dispatch.
+/// Returns `false` if IRQ-core validation rejected the disable operation.
+pub fn disable_ipi() -> bool {
+    let _local = kspin::NoPreemptIrqSave::new();
+    IPI_QUEUE_READY[this_cpu_id().as_usize()].store(false, Ordering::Release);
+    let Some(desc) = kirq::ipi_desc(kirq::IpiKind::Generic) else {
+        return true;
+    };
+    kirq::try_disable_percpu_irq(desc).is_ok()
+}
+
 /// Initializes the current CPU's local IPI event queue.
 ///
 /// This must run on every CPU before that CPU can receive callbacks through
-/// [`run_on_cpu`] or either broadcast API.
+/// [`run_on_cpu`] or either broadcast API. Readiness is published separately by
+/// [`enable_ipi`], only after local controller setup is complete.
 pub fn init() {
-    let cpu_id = this_cpu_id();
     IPI_EVENT_QUEUE.with_current(|ipi_queue| {
         ipi_queue.init_once(SpinNoIrq::new(IpiEventQueue::default()));
     });
-    IPI_QUEUE_READY[cpu_id.as_usize()].store(true, Ordering::Release);
 }
 
 /// Executes a callback on the specified destination CPU via IPI.
@@ -110,7 +180,7 @@ pub fn init() {
 /// range or does not belong to a present logical CPU.
 ///
 /// Returns `KipiError::TargetCpuNotReady` if the destination CPU exists but
-/// has not finished initializing its local IPI queue.
+/// its local IPI queue/delivery is not enabled.
 pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: LogicalCpuId, callback: T) -> Result<()> {
     let cpu_num = kbuild_config::NR_CPUS;
     let dest_cpu_index = dest_cpu.as_usize();
@@ -136,10 +206,7 @@ pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: LogicalCpuId, callback: T) -> Res
         callback.into().call();
     } else {
         if !is_ipi_queue_ready(dest_cpu) {
-            error!(
-                "CPU {} has not initialized its IPI queue yet",
-                dest_cpu_index
-            );
+            error!("CPU {} IPI delivery is not ready", dest_cpu_index);
             return Err(KipiError::TargetCpuNotReady);
         }
         // SAFETY: `dest_cpu` was validated as present in the logical CPU map,
@@ -148,7 +215,11 @@ pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: LogicalCpuId, callback: T) -> Res
         unsafe { IPI_EVENT_QUEUE.remote_ref_raw(dest_cpu_index) }
             .lock()
             .push(this_cpu_id(), callback.into());
-        kirq::notify_cpu(IPI_IRQ, IpiTarget::Specific(dest_cpu_index));
+        // Once enqueued, a failed notification cannot be rolled back safely
+        // because the target may already be draining it. Leave the callback
+        // queued for a later generic IPI, matching the former fire-and-forget
+        // notification contract.
+        let _ = send_generic_ipi(IpiTarget::Specific(dest_cpu_index));
     }
 
     Ok(())
@@ -175,13 +246,10 @@ pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
     enqueue_broadcast_to_others(current_cpu_id, &callback);
 
     // Send IPI to all other CPUs to trigger their callbacks
-    kirq::notify_cpu(
-        IPI_IRQ,
-        IpiTarget::AllButSelf {
-            me: current_cpu_id.as_usize(),
-            total: kcpu_id_map::nr_cpus(),
-        },
-    );
+    let _ = send_generic_ipi(IpiTarget::AllButSelf {
+        me: current_cpu_id.as_usize(),
+        total: kcpu_id_map::nr_cpus(),
+    });
 
     Ok(())
 }
@@ -209,14 +277,11 @@ pub fn run_on_each_cpu_via_ipi<T: Into<MulticastCallback>>(callback: T) -> Resul
 
     enqueue_broadcast_to_others(current_cpu_id, &callback);
 
-    kirq::notify_cpu(IPI_IRQ, IpiTarget::Self_);
-    kirq::notify_cpu(
-        IPI_IRQ,
-        IpiTarget::AllButSelf {
-            me: current_cpu_id.as_usize(),
-            total: kcpu_id_map::nr_cpus(),
-        },
-    );
+    let _ = send_generic_ipi(IpiTarget::Self_);
+    let _ = send_generic_ipi(IpiTarget::AllButSelf {
+        me: current_cpu_id.as_usize(),
+        total: kcpu_id_map::nr_cpus(),
+    });
 
     Ok(())
 }
@@ -224,7 +289,7 @@ pub fn run_on_each_cpu_via_ipi<T: Into<MulticastCallback>>(callback: T) -> Resul
 fn validate_broadcast_targets(current_cpu_id: LogicalCpuId, include_self: bool) -> Result<()> {
     if include_self && !is_ipi_queue_ready(current_cpu_id) {
         error!(
-            "CPU {} has not initialized its local IPI queue yet",
+            "CPU {} local IPI delivery is not ready",
             current_cpu_id.as_usize()
         );
         return Err(KipiError::TargetCpuNotReady);
@@ -240,10 +305,7 @@ fn validate_broadcast_targets(current_cpu_id: LogicalCpuId, include_self: bool) 
         }
     });
     if let Some(cpu_id) = not_ready_cpu {
-        error!(
-            "CPU {} has not initialized its IPI queue yet",
-            cpu_id.as_usize()
-        );
+        error!("CPU {} IPI delivery is not ready", cpu_id.as_usize());
         return Err(KipiError::TargetCpuNotReady);
     }
     Ok(())
@@ -272,6 +334,10 @@ fn enqueue_broadcast_to_others(current_cpu_id: LogicalCpuId, callback: &Multicas
 /// never reaches the TLB shootdown or callback queues.
 pub fn ipi_handler() {
     stop::handle_stop_request();
+
+    if !is_ipi_queue_ready(this_cpu_id()) {
+        return;
+    }
 
     // Process TLB shootdown requests before handling generic callbacks.
     tlb::handle_shootdown();

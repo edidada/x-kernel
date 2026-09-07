@@ -209,7 +209,7 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     knet::init_vsock();
 
     #[cfg(feature = "ipi")]
-    kipi::init();
+    init_cpu_ipis();
 
     #[cfg(feature = "smp")]
     kipi::tlb::mark_all_cpus_started();
@@ -551,16 +551,18 @@ fn init_interrupt() {
     );
 
     #[cfg(feature = "ipi")]
-    kirq::register(
-        kbuild_config::IPI_IRQ,
-        alloc::sync::Arc::new(|_| {
-            #[cfg(feature = "arm-timer-resume-fixup")]
-            timer_driver::arm_generic::handle_ipi_fixup();
-            #[cfg(feature = "ipi")]
-            kipi::ipi_handler();
-            kirq::IrqEvent::HANDLED
-        }),
-    );
+    {
+        assert!(
+            kipi::register_ipi_handler(handle_runtime_ipi),
+            "platform does not provide a usable Generic IPI"
+        );
+        if kirq::ipi_desc(kirq::IpiKind::CpuBacktrace).is_some() {
+            assert!(
+                kipi::register_cpu_backtrace_handler(handle_cpu_backtrace),
+                "failed to register CPU-backtrace IPI"
+            );
+        }
+    }
 
     // PMU overflow dispatch.  Perf counters report overflow on the PMU
     // interrupt line; register the dispatch handler under the `pmu` feature
@@ -576,4 +578,47 @@ fn init_interrupt() {
     }
     // Enable IRQs before starting app
     karch::enable_local_irq();
+}
+
+#[cfg(feature = "ipi")]
+fn init_cpu_ipis() {
+    let _pin = kspin::NoPreempt::new();
+    kipi::init();
+    assert!(kipi::enable_ipi(), "failed to enable Generic IPI");
+    // Backtrace is an SMP diagnostic facility, not a watchdog/PMU source.
+    // Without an NMI mechanism it remains usable as a regular IRQ.
+    let delivery = kipi::enable_cpu_backtrace();
+    if delivery == kipi::CpuBacktraceDelivery::Unavailable
+        && kirq::ipi_desc(kirq::IpiKind::CpuBacktrace).is_some()
+    {
+        warn!(
+            "failed to enable CPU-backtrace IPI on CPU {}",
+            khal::percpu::this_cpu_id().as_usize()
+        );
+    } else {
+        debug!("CPU-backtrace IPI delivery: {delivery:?}");
+    }
+}
+
+#[cfg(feature = "ipi")]
+fn handle_cpu_backtrace() {
+    #[cfg(feature = "watchdog_hardlockup")]
+    if watchdog::init::try_handle_cpu_backtrace() {
+        return;
+    }
+    // Use the interrupted frame directly. Ordinary backtrace requests do not
+    // need task-registry scans, snapshot slots, or the watchdog feature.
+    let cpu = khal::percpu::this_cpu_id();
+    if let Some(tf) = khal::context::active_exception_context() {
+        khal::kprint_atomic!("[backtrace] cpu={}\n{}", cpu.as_usize(), tf.backtrace());
+    } else {
+        khal::kprint_atomic!("[backtrace] cpu={} no active trap frame\n", cpu.as_usize());
+    }
+}
+
+#[cfg(feature = "ipi")]
+fn handle_runtime_ipi() {
+    #[cfg(feature = "arm-timer-resume-fixup")]
+    timer_driver::arm_generic::handle_ipi_fixup();
+    kipi::ipi_handler();
 }

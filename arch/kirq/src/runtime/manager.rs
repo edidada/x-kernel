@@ -32,7 +32,8 @@ pub use crate::{
     },
     nmi::{register_nmi, unregister_nmi},
     platform::{
-        DispatchedIrq, Handler, IntrManagerIf, PendingIrq, TargetCpu, notify_cpu, set_prio,
+        DispatchedIrq, Handler, IntrManagerIf, IpiKind, PendingIrq, TargetCpu, ipi_desc, send_ipi,
+        set_prio,
     },
     state::DYNAMIC_VIRQ_BASE,
 };
@@ -131,6 +132,63 @@ pub fn enable_irq(spec: impl Into<IrqSpec>) {
 /// Try to enable an IRQ line after a previous disable or disabled registration.
 pub fn try_enable_irq(spec: impl Into<IrqSpec>) -> Result<(), IrqDescError> {
     try_enable_irq_inner(spec.into(), false)
+}
+
+/// Enables a registered per-CPU interrupt on the calling CPU only.
+///
+/// Unlike shared-line enable/disable, this does not change the descriptor's
+/// global disable depth. The owner manages CPU readiness and must retain the
+/// handler and mapping while any CPU can receive this interrupt. May be used
+/// during boot or in ordinary IRQ context, but never from NMI context.
+///
+/// # Errors
+/// Returns an error for an unknown, unregistered, non-per-CPU or tearing-down
+/// descriptor. Pins the caller through controller configuration and enablement.
+pub fn try_enable_percpu_irq(spec: impl Into<IrqSpec>) -> Result<(), IrqDescError> {
+    set_percpu_irq_enabled(spec.into(), true)
+}
+
+/// Masks a registered per-CPU interrupt on the calling CPU only.
+///
+/// This is a non-synchronizing operation: an already accepted interrupt can
+/// still run, and pending delivery may resume after re-enable. The owner must
+/// withdraw CPU readiness first and keep its handler/storage alive. It must
+/// not mix this API with shared-line disable-depth operations on the same IRQ.
+/// Physical masking is backend-dependent: a LAPIC IPI vector cannot be masked
+/// individually, and requires an owner-side software dispatch gate instead.
+/// Execution-context and error rules match [`try_enable_percpu_irq`].
+pub fn try_disable_percpu_irq(spec: impl Into<IrqSpec>) -> Result<(), IrqDescError> {
+    set_percpu_irq_enabled(spec.into(), false)
+}
+
+fn set_percpu_irq_enabled(spec: IrqSpec, enabled: bool) -> Result<(), IrqDescError> {
+    let _pin = kspin::NoPreempt::new();
+    let _control_guard = IRQ_CONTROL_LOCK.lock();
+    let desc = {
+        let state = IRQ_STATE.lock();
+        let virq = state.lookup_virq(spec).ok_or(IrqDescError::UnknownIrq)?;
+        let entry = state.descs.get(&virq).ok_or(IrqDescError::UnknownIrq)?;
+        let _ = reject_teardown(
+            Some(entry),
+            virq,
+            "control per-CPU IRQ",
+            TeardownReject::Error,
+        )?;
+        if !entry.desc.flags.contains(crate::IrqFlags::PER_CPU) {
+            return Err(IrqDescError::NotPerCpu { virq });
+        }
+        if !entry.has_actions() {
+            return Err(IrqDescError::NoIrqAction { virq });
+        }
+        entry.desc
+    };
+    // SGI/PPI configuration is banked. A global configured-generation or
+    // disable-depth check would incorrectly skip work on another CPU.
+    if enabled {
+        configure_platform_irq(desc);
+    }
+    set_platform_irq_enabled(desc, enabled);
+    Ok(())
 }
 
 fn try_enable_irq_inner(spec: IrqSpec, force_platform_enable: bool) -> Result<(), IrqDescError> {
@@ -765,9 +823,10 @@ pub mod tests_irq {
     use super::{
         DYNAMIC_VIRQ_BASE, IRQ_STATE, IrqDesc, IrqDescError, IrqDomainId, IrqStateDesc,
         WAIT_FOR_IN_FLIGHT_HOOK, dispatch_actions, run_claimed_irq_tail,
-        run_irq_exit_tail_with_context, try_disable_irq, try_disable_irq_nosync, try_enable,
-        try_enable_irq, try_free_irq, try_free_irq_action, try_map, try_register,
-        try_register_disabled, try_register_shared, try_synchronize_irq, unregister,
+        run_irq_exit_tail_with_context, try_disable_irq, try_disable_irq_nosync,
+        try_disable_percpu_irq, try_enable, try_enable_irq, try_enable_percpu_irq, try_free_irq,
+        try_free_irq_action, try_map, try_register, try_register_disabled, try_register_shared,
+        try_synchronize_irq, unregister,
     };
     use crate::{
         GIC_ROOT_DOMAIN, IrqController, IrqEvent, IrqFlags, IrqLifecycleHooks, IrqRef, IrqSource,
@@ -1786,6 +1845,54 @@ pub mod tests_irq {
         }
 
         assert!(unregister(virq).is_some());
+    }
+
+    struct LocalIrqFixture(usize);
+
+    impl Drop for LocalIrqFixture {
+        fn drop(&mut self) {
+            let _ = unregister(self.0);
+        }
+    }
+
+    #[def_test(serial)]
+    fn test_percpu_control_does_not_change_shared_disable_depth() {
+        let virq = 0x6f31;
+        // MSI-tagged fixtures bypass physical controller programming. This
+        // tests descriptor state only; kipi integration tests cover banked
+        // controller enable/disable and real delivery on boot-owned IPIs.
+        let desc = IrqDesc::from_virq(virq).with_flags(IrqFlags::PER_CPU | IrqFlags::MSI);
+        assert!(try_register_disabled(desc, Arc::new(test_handler)).unwrap());
+        let _fixture = LocalIrqFixture(virq);
+        for enabled in [true, false, false, true] {
+            if enabled {
+                try_enable_percpu_irq(desc).unwrap();
+            } else {
+                try_disable_percpu_irq(desc).unwrap();
+            }
+            let state = IRQ_STATE.lock();
+            let entry = state.descs.get(&virq).unwrap();
+            assert_eq!(entry.disable_depth_for_tests(), 1);
+            assert!(!entry.is_enabled_for_tests());
+        }
+    }
+
+    #[def_test(serial)]
+    fn test_percpu_control_rejects_shared_or_unknown_irq() {
+        let virq = 0x6f32;
+        assert!(try_register_disabled(virq, Arc::new(test_handler)).unwrap());
+        let fixture = LocalIrqFixture(virq);
+        assert_eq!(
+            try_enable_percpu_irq(virq),
+            Err(IrqDescError::NotPerCpu { virq })
+        );
+        assert_eq!(
+            try_disable_percpu_irq(virq),
+            Err(IrqDescError::NotPerCpu { virq })
+        );
+        drop(fixture);
+        assert_eq!(try_enable_percpu_irq(virq), Err(IrqDescError::UnknownIrq));
+        assert_eq!(try_disable_percpu_irq(virq), Err(IrqDescError::UnknownIrq));
     }
 
     #[def_test(serial)]

@@ -9,6 +9,14 @@
 extern crate log;
 #[macro_use]
 extern crate kplat;
+
+// Secondary boot mailboxes do not yet provide the runtime Generic IPI
+// protocol needed by SMP scheduling, TLB shootdown and CPU stop.
+const _: () = assert!(
+    kbuild_config::NR_CPUS == 1,
+    "LoongArch runtime IPI is not implemented"
+);
+
 mod init;
 mod irq;
 #[cfg(feature = "smp")]

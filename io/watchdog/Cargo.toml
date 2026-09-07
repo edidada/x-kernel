@@ -10,7 +10,7 @@ categories = ["no-std", "embedded", "hardware-support"]
 
 [features]
 default = []
-nmi = ["khal/nmi", "dep:kirq"]
+nmi = ["khal/nmi", "dep:kipi", "kipi/nmi"]
 
 [dependencies]
 khal.workspace = true
@@ -21,5 +21,5 @@ log.workspace = true
 percpu.workspace = true
 kbuild_config = { workspace = true }
 kcpu_id_map = { workspace = true }
-kirq = { workspace = true, optional = true }
+kipi = { workspace = true, optional = true }
 unittest.workspace = true

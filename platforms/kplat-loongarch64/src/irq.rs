@@ -94,8 +94,14 @@ impl kirq::IntrManagerIf {
 
     fn complete_irq(_completion_cookie: usize) {}
 
-    fn notify_cpu(_interrupt_id: usize, _target: TargetCpu) {
-        todo!()
+    fn ipi_desc(_kind: kirq::IpiKind) -> Option<kirq::IrqDesc> {
+        // Secondary boot uses the mailbox, but runtime IPI dispatch is not
+        // implemented. Do not advertise an unrelated device IRQ as an IPI.
+        None
+    }
+
+    fn send_ipi(_kind: kirq::IpiKind, _target: TargetCpu) -> bool {
+        false
     }
 
     fn set_prio(_irq: usize, _priority: u8) {

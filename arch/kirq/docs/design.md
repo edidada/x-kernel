@@ -57,11 +57,14 @@ arch/kirq/src/
     └── softirq.rs      # fixed-vector softirq pending bits and bounded runner
 ```
 
-`kirq` deliberately does not depend on `khal`, `kcpu`, `kplat`,
-`kbuild_config`, or `device_res`. Architecture trap registration and x86 APIC
+`kirq` deliberately does not depend on `khal`, `kcpu`, `kplat` or
+`device_res`. It uses `kcpu_id_map::KCpuMask` as the architecture-neutral exact
+IPI target vocabulary and `kbuild_config` for fixed per-CPU core state sizing.
+Architecture trap registration and x86 APIC
 trap adapters remain in `khal::irq`; x86 APIC MSI vector allocation is an
 irqchip/backend detail reached through `kirq::MsiBackendIf`, not through
-`khal`. `IPI_IRQ` stays at Kconfig call sites such as `kipi`, not in `kirq`.
+`khal`. IPI consumers select `IpiKind` rather than choosing a raw vector; each
+irqchip backend supplies the descriptor used for registration and enablement.
 Driver devres integration is owned by `kdriver::resource`, which translates
 `device_res` IRQ resources into `kirq` descriptors and handlers.
 
@@ -115,6 +118,9 @@ alloc_msix()
 register_nmi()
     |-- IRQ_STATE fallback metadata
     `-- NMI_TABLE keyed by hwirq
+
+ipi_desc(IpiKind) / send_ipi(IpiKind, TargetCpu)
+    `-- IntrManagerIf maps semantic message -> platform descriptor/vector
 ```
 
 ## 调用约束 / 执行上下文
@@ -136,6 +142,12 @@ register_nmi()
   depth 到 `0` 时启动平台 line；depth 已经是 `0` 时仍会下发平台 enable，以保留
   per-CPU/static IRQ bring-up 的既有语义。新代码应优先使用语义更明确的 `try_*` /
   `*_irq` 入口处理 descriptor 冲突和 enable/disable nesting。
+- per-CPU IPI 使用 `try_enable_percpu_irq()` / `try_disable_percpu_irq()`：只查找
+  已注册、非 teardown 且带 `PER_CPU` 的 descriptor，不改变全局 disable depth，
+  每次直接配置/启停当前 CPU 的 banked line。调用过程 pin CPU，不等待 handler，
+  禁止 NMI 上下文；owner 必须保留 handler/mapping 并维护本地 readiness。
+  不得与共享 IRQ depth API 混用；x86 单个 LAPIC IPI vector 不能物理 mask，
+  需由 owner 的软件 gate 禁用 dispatch。
 - `handle_irq()` 运行在 hardirq trap adapter 调用路径中。调用者必须已经屏蔽本地
   IRQ、禁用抢占并 pin 当前 CPU，函数本身不能睡眠。
 - `handle_nmi()` 运行在 IRQ-off NMI adapter 调用路径中（pseudo-NMI 或 hardware
@@ -157,8 +169,9 @@ register_nmi()
 - `alloc_msix()` / `free_msix()` 必须从普通内核上下文调用。它们通过 backend
   分配控制器本地 vector 并返回 OS-visible virq 与 device-visible MSI message；
   调用方不能读取当前 APIC id 或假设 virq 等于硬件 vector。
-- `IntrManagerIf::notify_cpu()` 必须满足 publish-before-notify 顺序，IPI/TLB
-  shootdown 依赖该契约。
+- `IntrManagerIf::send_ipi()` 必须满足 publish-before-notify 顺序，IPI/TLB
+  shootdown 依赖该契约；`CpuBacktrace` 分支还可从 NMI 调用，必须无分配、无日志、
+  无锁。`TargetCpu::Mask` 表示精确逻辑 CPU 集合，不能扩大为 all-but-self。
 
 ## 中断控制器后端契约
 
@@ -208,11 +221,22 @@ handler fanout、上下文和 completion ordering；irqchip driver 负责具体�
   handler fanout 后最终 EOI/deactivate，避免 handler 处理前重新触发。edge-triggered
   line 可以使用 cookie `0` no-op。
 
-### notify_cpu publish-before-notify
+### semantic IPI / publish-before-notify
 
-`notify_cpu(id, target)` 必须保证调用者在 Normal memory 中发布的请求状态先于 IPI
-被目标 CPU 观察。x86、GIC 和 RISC-V backend 应在各自实现中提供架构等价的 fence 或
-barrier；调用者不应在每个 IPI call site 重复补 fence。
+`ipi_desc(kind)` 由 irqchip 把 `IpiKind::{Generic, CpuBacktrace}` 映射为完整
+descriptor；consumer 不选择 virq/hwirq。`send_ipi(kind, target)` 必须保证调用者在
+Normal memory 中发布的请求状态先于 IPI 被目标 CPU 观察。x86、GIC 和 RISC-V
+backend 应在各自实现中提供架构等价的 fence 或 barrier；调用者不应在每个 IPI
+call site 重复补 fence。`CpuBacktrace` 的 GICv3 路径绕过普通 controller lock，
+按 `TargetCpu::Mask` 逐 affinity 写 `ICC_SGI1R_EL1`；无法表达某个目标时返回
+`false`，由有界诊断协议处理缺失 CPU。
+
+AArch64 的 GIC backend 统一固定 SGI 布局：`Generic` 使用 SGI 1，
+`CpuBacktrace` 使用 SGI 2；descriptor 查询与发送使用同一组 backend-local 常量。
+所有架构均移除了 `IPI_IRQ`：x86 Generic 固定使用保留的 LAPIC vector `0xf3`
+（位于 MSI-X 分配范围之外），RISC-V 使用固定的 supervisor software interrupt。
+LoongArch 的 runtime IPI 返回不支持，当前限制单核。该布局是 X-Kernel 的内部规划，
+不要求数值与 Linux 的 IPI 枚举一致，也没有按旧配置换号的兼容分支。
 
 ## 状态机
 

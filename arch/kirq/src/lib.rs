@@ -6,9 +6,10 @@
 //!
 //! `kirq` owns the IRQ descriptor namespace, handler registration, hardirq
 //! dispatch context, pseudo-NMI dispatch table, lifecycle hooks, and the
-//! generic interrupt-controller interface. Architecture trap entry remains
-//! outside this crate; HAL adapters call [`handle_irq`] and [`handle_nmi`] from
-//! their exception handlers.
+//! generic interrupt-controller interface. IPI users select an [`IpiKind`]
+//! and target set; the irqchip backend owns the concrete vector or SGI.
+//! Architecture trap entry remains outside this crate; HAL adapters call
+//! [`handle_irq`] and [`handle_nmi`] from their exception handlers.
 
 #![cfg_attr(not(test), no_std)]
 

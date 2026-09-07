@@ -188,16 +188,6 @@ macro_rules! nmi_if_impl {
                 false
             }
 
-            fn raise_nmi_all_but_self(hwirq: usize) -> bool {
-                if matches!(current_mode(), NmiMode::None) {
-                    return false;
-                }
-                // This function is reached from watchdog NMI context. The
-                // irqchip helper writes ICC_SGI1R_EL1 directly and therefore
-                // cannot deadlock on the ordinary GIC controller lock.
-                gic::raise_nmi_all_but_self(hwirq)
-            }
-
             fn info() -> NmiSourceInfo {
                 NmiSourceInfo {
                     name: if current_mode() == NmiMode::Hardware {

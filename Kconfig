@@ -181,9 +181,15 @@ config BOOT_STACK_SIZE
     help
       Specify the stack size for the boot process in bytes.
 
+config NR_CPUS_LIMIT
+    usize
+    default 1 if ARCH_LOONGARCH64
+    default 8
+
 config NR_CPUS
     usize "Maximum number of CPUs (NR_CPUS)"
-    range 1 8
+    range 1 NR_CPUS_LIMIT
+    default 1 if ARCH_LOONGARCH64
     default 4
     help
       Compile-time upper bound on the number of CPUs the kernel can support.
@@ -195,6 +201,7 @@ config NR_CPUS
       usage (e.g. 256 KiB of secondary stack per CPU). Bounded to [1, 8];
       raising the cap above 8 also requires re-auditing the static per-CPU
       allocation budget (secondary stacks, id map, IPI/snapshot slots).
+      LoongArch is limited to one CPU until runtime IPI support is implemented.
 
 config TICKS_PER_SECOND
     u32 "Ticks Per Second"

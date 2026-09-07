@@ -18,6 +18,7 @@ irq_stat = []
 bitflags = { workspace = true }
 karch = { workspace = true }
 kbuild_config = { workspace = true }
+kcpu_id_map = { workspace = true }
 kiface = { workspace = true }
 kpoll = { workspace = true }
 kspin = { workspace = true }

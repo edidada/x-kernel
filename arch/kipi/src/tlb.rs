@@ -34,7 +34,6 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use kbuild_config::IPI_IRQ;
 use kcpu_id_map::{KCpuMask, KCpuMaskExt, LogicalCpuId, for_each_present_logical_cpu};
 use khal::percpu::this_cpu_id;
 use kirq::TargetCpu;
@@ -423,11 +422,11 @@ fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
             for target in targets.iter().flatten() {
                 note_pending_for_cpu(*target);
             }
-            // `notify_cpu()` is responsible for publish-before-notify ordering
+            // `send_ipi()` is responsible for publish-before-notify ordering
             // on each architecture, so the target cannot observe the IPI
             // before this request becomes visible.
             for target in targets.iter().flatten() {
-                kirq::notify_cpu(IPI_IRQ, TargetCpu::Specific(target.as_usize()));
+                let _ = crate::send_generic_ipi(TargetCpu::Specific(target.as_usize()));
             }
 
             let start = khal::time::monotonic_time();
@@ -473,7 +472,7 @@ fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
                     // of waiting on a single IPI that never arrived.
                     if now.saturating_duration_since(last_resend) >= SHOOTDOWN_RESEND_INTERVAL {
                         last_resend = now;
-                        kirq::notify_cpu(IPI_IRQ, TargetCpu::Specific(target.as_usize()));
+                        let _ = crate::send_generic_ipi(TargetCpu::Specific(target.as_usize()));
                     }
                     if !warned && elapsed >= SHOOTDOWN_WARN {
                         warned = true;

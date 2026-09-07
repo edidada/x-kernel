@@ -105,7 +105,13 @@ impl kirq::IntrManagerIf {
 
     fn complete_irq(_completion_cookie: usize) {}
 
-    fn notify_cpu(_irq: usize, _target: kirq::TargetCpu) {}
+    fn ipi_desc(_kind: kirq::IpiKind) -> Option<kirq::IrqDesc> {
+        None
+    }
+
+    fn send_ipi(_kind: kirq::IpiKind, _target: kirq::TargetCpu) -> bool {
+        false
+    }
 
     fn set_prio(_irq: usize, _priority: u8) {}
 }

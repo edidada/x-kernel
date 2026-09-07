@@ -175,8 +175,8 @@ impl<A: VmmArch> VmShared<A> {
             VcpuRunState::RunningGuest => {
                 let pcpu = self.vcpu_pcpu(vcpu_id);
                 if pcpu >= 0 {
-                    kirq::notify_cpu(
-                        kbuild_config::IPI_IRQ,
+                    let _ = kirq::send_ipi(
+                        kirq::IpiKind::Generic,
                         kirq::TargetCpu::Specific(pcpu as usize),
                     );
                 }

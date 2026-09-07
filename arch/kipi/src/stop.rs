@@ -31,8 +31,8 @@
 //!    acknowledgement knows that CPU will never run again.
 //! 3. The orchestrator waits for the target CPUs to acknowledge, bounded
 //!    by a timeout. Only present CPUs whose IPI queues were initialized
-//!    when the request was published are waited for: a present CPU that
-//!    has not reached `kipi::init()` cannot take the shared IPI and
+//!    and enabled when the request was published are waited for: a CPU that
+//!    has not reached `kipi::enable_ipi()` cannot take the shared IPI and
 //!    acknowledge, so waiting for it would burn the timeout on every
 //!    shutdown. A CPU that never acknowledges (for example because it
 //!    spins with interrupts disabled on a lock) does not block the
@@ -46,7 +46,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use kbuild_config::{IPI_IRQ, NR_CPUS};
+use kbuild_config::NR_CPUS;
 use kcpu_id_map::{KCpuMask, KCpuMaskExt, LogicalCpuId};
 use khal::{percpu::this_cpu_id, power::SmpStopIf};
 use kirq::TargetCpu as IpiTarget;
@@ -87,10 +87,27 @@ static STOP_ACKED: [AtomicBool; NR_CPUS] = [const { AtomicBool::new(false) }; NR
 /// power-off, defeating [`khal::power::halt`]. Quiescing the source is
 /// also defense-in-depth on platforms whose watchdog is a pseudo-NMI that
 /// CPU-level masking already blocks (e.g. the AArch64 PMU cycle counter).
-/// No-op when the platform has no NMI facility.
+/// Also withdraws readiness and disables local IPI dispatch before the final
+/// acknowledgement. Static handlers and queue storage are retained, so a
+/// racing sender cannot access freed storage.
 #[inline]
-fn quiesce_local_nmi() {
+fn quiesce_local_interrupt_sources() {
     khal::quiesce_nmi();
+    if !crate::disable_cpu_backtrace() {
+        warn!("could not mask the local CPU-backtrace IPI before stopping");
+    }
+    if crate::is_ipi_queue_ready(this_cpu_id()) && !crate::disable_ipi() {
+        warn!("could not disable the local Generic IPI before stopping");
+    }
+}
+
+/// Keeps the orchestrator's IPI delivery usable until stop coordination ends.
+struct QuiesceLocalOnReturn;
+
+impl Drop for QuiesceLocalOnReturn {
+    fn drop(&mut self) {
+        quiesce_local_interrupt_sources();
+    }
 }
 
 /// Acknowledges the stop request and parks the current CPU forever.
@@ -103,7 +120,7 @@ fn quiesce_local_nmi() {
 /// once — followed only by the non-returnable stop loop.
 fn ack_and_park(current_cpu_index: usize) -> ! {
     karch::disable_local_irq();
-    quiesce_local_nmi();
+    quiesce_local_interrupt_sources();
     STOP_ACKED[current_cpu_index].store(true, Ordering::Release);
     karch::stop_cpu()
 }
@@ -120,8 +137,8 @@ fn ack_and_park(current_cpu_index: usize) -> ! {
 /// source via [`khal::quiesce_nmi`]. This prevents an NMI-driven hard-lockup
 /// watchdog from waking a parked CPU and mistaking the intentional stop for a
 /// lockup, which would panic into a platform power-off and defeat
-/// `khal::power::halt()`. The calling CPU's own NMI source is quiesced by
-/// `khal::power` just before the bare platform terminal.
+/// `khal::power::halt()`. Each target also withdraws local IPI readiness before
+/// acknowledging; the orchestrator quiesces its own sources before returning.
 ///
 /// Re-entrant by construction: if another CPU is already orchestrating a
 /// stop, the caller acknowledges and parks itself instead of returning.
@@ -143,9 +160,10 @@ impl SmpStopIf {
         // orchestrator and never park, while this CPU waited for it until
         // the timeout expired.
         let _no_preempt = NoPreempt::new();
+        let _quiesce_on_return = QuiesceLocalOnReturn;
 
         // Degrade to a no-op until this CPU's IPI event queue is ready, so
-        // terminals reached before `kipi::init()` fall through to the bare
+        // terminals reached before `kipi::enable_ipi()` fall through to the bare
         // platform terminal instead of broadcasting into uninitialized
         // queues.
         if !crate::is_ipi_queue_ready(this_cpu_id()) {
@@ -182,8 +200,8 @@ impl SmpStopIf {
         }
 
         // Snapshot the CPUs this protocol waits for: every present CPU
-        // except the caller whose IPI queue is already initialized. A
-        // present CPU that has not reached `kipi::init()` cannot take the
+        // except the caller whose IPI queue and delivery are ready. A
+        // present CPU that has not reached `kipi::enable_ipi()` cannot take the
         // shared IPI and therefore cannot acknowledge; waiting for one
         // would burn the full timeout on every shutdown. The broadcast
         // below still reaches such a CPU, and `handle_stop_request` parks
@@ -200,13 +218,10 @@ impl SmpStopIf {
             "requesting stop of all CPUs except CPU {}",
             current_cpu_index
         );
-        kirq::notify_cpu(
-            IPI_IRQ,
-            IpiTarget::AllButSelf {
-                me: current_cpu_index,
-                total: kcpu_id_map::nr_cpus(),
-            },
-        );
+        let _ = crate::send_generic_ipi(IpiTarget::AllButSelf {
+            me: current_cpu_index,
+            total: kcpu_id_map::nr_cpus(),
+        });
 
         let deadline = khal::time::monotonic_time() + STOP_OTHER_CPUS_TIMEOUT;
         let unacked = |cpu_id: LogicalCpuId| !STOP_ACKED[cpu_id.as_usize()].load(Ordering::Acquire);

@@ -20,8 +20,8 @@ kirq
 
 默认前提：
 
-- 平台后端正确实现 `IntrManagerIf` 的 configure、enable、dispatch、complete 和
-  notify ordering；
+- 平台后端正确实现 `IntrManagerIf` 的 configure、enable、dispatch、complete、
+  semantic IPI mapping 和 send ordering；
 - 平台后端把 normal dispatch 映射为 OS-visible virq，并且不会在 MSI mapping miss
   时把 raw vector 当作 virq 派发；
 - MSI backend 正确实现 `MsiBackendIf` 的 vector allocation、free 和 message
@@ -49,8 +49,9 @@ kirq
    trigger、polarity、domain 或 hwirq 配置错误。
 
 3. **平台控制器后端**
-   GIC/APIC/PLIC 后端负责 MMIO、priority、EOI/deactivate 和 IPI 发送。`kirq`
-   通过 trait contract 约束它们，但不直接验证 MMIO side effect。
+   GIC/APIC/PLIC 后端负责 MMIO、priority、EOI/deactivate、`IpiKind` 到具体
+   vector 的映射和 IPI 发送。`kirq` 通过 trait contract 约束它们，但不直接验证
+   MMIO side effect。
 
 4. **MSI backend**
    x86 APIC 等后端负责把 controller-local vector 和 CPU/APIC destination 编码成
@@ -169,6 +170,15 @@ Callers must also avoid holding locks or resources that their IRQ handler may
 acquire while waiting; otherwise teardown can wait for a handler that is blocked
 behind the caller's own lock.
 
+per-CPU 控制接口只操作已注册的 `PER_CPU` descriptor，拒绝共享 IRQ、缺失 action
+或 teardown 状态；它持有控制面锁并 pin CPU，直接调用本地 backend，不消耗全局
+disable depth。关闭不是同步 barrier，不跟踪完整 per-CPU in-flight/CPU hotplug
+生命周期；owner 必须先撤销 readiness，保留 handler/mapping/storage，并处理
+已经投递的中断。IPI owner 不能在 disable 后调用共享 IRQ free/unregister。
+metadata 单测使用不编程物理控制器的 fixture，banked 启停由 kipi QEMU 集成测试覆盖。
+x86 的 self-IPI 根据 APIC 模式选择专用 MSR 或普通 ICR 定向发送；xAPIC 模式
+不能调用第三方库仅适用于 x2APIC 的 SELF_IPI 寄存器入口，否则会写入非法 MMIO 偏移。
+
 MSI allocation 也通过 `IRQ_STATE` 建立 `(MSI_DOMAIN, backend_vector) -> virq`
 映射并发布到 MSI domain snapshot。普通 `unregister()` 不删除 MSI descriptor 或
 mapping；最终清理由 `free_msix()` 在确认 handler state 已撤销后完成，
@@ -244,7 +254,8 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | T-05 | claimed IRQ 未 complete | normal control flow 提前返回或忘记显式 complete | 控制器认为中断仍 active，后续中断异常 | claimed IRQ guard Drop 补偿 completion |
 | T-06 | lifecycle enter/exit 不配对 | IRQ 中途 clear/re-register hook | hardirq nesting 或 deferred work 状态损坏 | guard 保存 entry 时的 exit hook 快照 |
 | T-07 | hook/handler 睡眠或持有错误锁 | 调用者违反 hardirq/NMI 上下文约束 | deadlock、latency spike 或调度状态错误 | rustdoc 和设计文档明确回调上下文，IRQ core 不提供 sleepable dispatch |
-| T-08 | IPI 请求先于内存发布被目标 CPU 观察 | 平台 `notify_cpu` 缺少顺序保证 | TLB shootdown 等跨核协议漏处理 | `IntrManagerIf::notify_cpu` 文档要求 publish-before-notify |
+| T-08 | IPI 请求先于内存发布被目标 CPU 观察 | 平台 `send_ipi` 缺少顺序保证 | TLB shootdown 等跨核协议漏处理 | `IntrManagerIf::send_ipi` 文档要求 publish-before-notify |
+| T-08b | NMI 内 backtrace IPI 走普通 controller lock 或扩大目标集 | `CpuBacktrace` backend 复用普通 locked send / IRM all-but-self | 同 CPU 自锁，或未初始化 CPU 收到 handler | `CpuBacktrace` 只接受精确 `Mask`；GICv3 直接编码 affinity 写 SGI1R，失败返回 `false` |
 | T-09 | deferred executor 在 completion 前或 hardirq depth 内运行 | executor work 拉长 active IRQ、影响 EOI/deactivate 或被误判为 hardirq | interrupt tail latency、controller 状态异常或 context 诊断错误 | irqchip 的 generic helper 在返回前 complete；`handle_irq()` 随后固定执行 drop hardirq context、deferred、lifecycle exit |
 | T-10 | 全局 reentry guard 抑制其它 CPU | SMP 上一个 CPU 的 executor 运行期间另一个 CPU 被跳过 | lost handoff opportunity | 当前不实现全局 guard；后续使用 per-CPU pending/reentry |
 | T-11 | per-CPU context 非原子状态被本地 IRQ 并发访问 | 普通任务查询被 IRQ 打断，同时读写同一 CPU slot | context snapshot 不一致或 data race | public path 用 `NoPreemptIrqSave`，hardirq/softirq IRQ-tail path 只走已 masked/pinned 的 `*_irqoff` helper |
@@ -412,7 +423,7 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
 - 新增 wake notification 功能是否走新的 async/wait notification 机制，而不是扩展
   `kirq::notify` 迁移桥或重新引入 `subscribe_wakeup*()` API。
 - 新增 NMI 功能是否避免读取或写入 normal IRQ shared state。
-- 新增平台 backend 是否满足 `DispatchedIrq` completion 和 `notify_cpu`
+- 新增平台 backend 是否满足 `DispatchedIrq` completion 和 `send_ipi`
   publish-before-notify 契约。
 - 新增平台 backend 是否只在 generic handler fanout 后对 level IRQ 做最终
   EOI/deactivate。

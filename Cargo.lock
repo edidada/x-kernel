@@ -1991,6 +1991,7 @@ dependencies = [
  "riscv",
  "riscv_plic",
  "sbi-rt",
+ "unittest",
  "x86-apic",
 ]
 
@@ -2538,6 +2539,7 @@ dependencies = [
  "bitflags 2.13.1",
  "karch",
  "kbuild_config",
+ "kcpu_id_map",
  "kiface",
  "kpoll",
  "kspin 0.2.0-rc2",
@@ -2865,6 +2867,7 @@ dependencies = [
  "kirq",
  "klogger",
  "knet",
+ "kspin 0.2.0-rc1",
  "ktask",
  "ktime",
  "ktime_types",
@@ -5594,7 +5597,7 @@ dependencies = [
  "kbuild_config",
  "kcpu_id_map",
  "khal",
- "kirq",
+ "kipi",
  "ktask",
  "ktime_types",
  "kwork",

@@ -42,8 +42,9 @@ config KFEAT_WATCHDOG_HARDLOCKUP
       Enable the hard lockup watchdog backend. Requires NMI support (the
       source is selected together with NMI).  On AArch64 QEMU virt this is
       currently implemented through the PMU-backed periodic NMI source and
-      a dedicated cross-CPU NMI SGI. The snapshot rendezvous is bounded so a
-      CPU that cannot respond cannot permanently trap all other CPUs in NMI.
+      the platform-owned CpuBacktrace IPI. The snapshot rendezvous is bounded
+      so a CPU that cannot respond cannot permanently trap all other CPUs in
+      NMI.
 
 config KFEAT_LOCK_STAT
     bool "Lock contention statistics (/proc/lock_stat)"

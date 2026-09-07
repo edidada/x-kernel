@@ -5,13 +5,19 @@
 //! GICv3 backend.
 
 use arm_gic_driver::v3::*;
-use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
+use kcpu_id_map::{KCpuMask, KCpuMaskExt, LogicalCpuId, raw_cpu_id};
 use kirq::TargetCpu;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 
 static GIC: LazyInit<SpinNoIrq<Gic>> = LazyInit::new();
 static TRAP_OP: LazyInit<TrapOp> = LazyInit::new();
+// Cache the distributor's immutable capabilities at boot: an NMI sender
+// must not acquire GIC.lock() to decide whether an affinity is addressable.
+static GICD_TYPER: LazyInit<u32> = LazyInit::new();
+
+const GICD_TYPER_RSS: u32 = 1 << 26;
+const ICC_CTLR_RSS: u64 = 1 << 18;
 
 pub fn init(gicd_base: memaddr::VirtAddr, gicr_base: memaddr::VirtAddr) {
     if GIC.get().is_some() {
@@ -24,6 +30,7 @@ pub fn init(gicd_base: memaddr::VirtAddr, gicr_base: memaddr::VirtAddr) {
     // discovery and point at the mapped GICv3 MMIO frames for this machine.
     let mut gic = unsafe { Gic::new(gicd_base, gicr_base) };
     gic.init();
+    GICD_TYPER.init_once(gic.typer_raw());
     GIC.init_once(SpinNoIrq::new(gic));
     let cpu = GIC.lock().cpu_interface();
     TRAP_OP.init_once(cpu.trap_operations());
@@ -311,12 +318,13 @@ pub fn complete_irq(completion_cookie: usize) {
     TRAP_OP.dir(intid);
 }
 
-pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
+pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) -> bool {
     // `ICC_SGI1R_EL1` is written via a system-register `msr`, so we need
     // `dsb st` here rather than a mere ordering barrier. This guarantees the
     // shootdown request state stored in Normal memory has completed before the
     // target CPU can observe the SGI delivery.
     aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::ST);
+    let mut all_sent = true;
     match target {
         TargetCpu::Self_ => {
             GIC.lock()
@@ -326,7 +334,7 @@ pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
         TargetCpu::Specific(logical_cpu_id) => {
             let Some(raw_cpu_id) = raw_cpu_id(LogicalCpuId::new(logical_cpu_id)) else {
                 warn!("GICv3 notify_cpu: missing raw CPU id for logical CPU {logical_cpu_id}");
-                return;
+                return false;
             };
             let affinity = Affinity::from_mpidr(raw_cpu_id.as_usize() as u64);
             let target = SGITarget::list([affinity]);
@@ -339,40 +347,150 @@ pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
                 .cpu_interface()
                 .send_sgi(IntId::sgi(interrupt_id as u32), SGITarget::All);
         }
+        TargetCpu::Mask(mask) => {
+            let gic = GIC.lock();
+            let cpu = gic.cpu_interface();
+            for logical_cpu_id in mask.iter_logical() {
+                let Some(raw_cpu_id) = raw_cpu_id(logical_cpu_id) else {
+                    warn!(
+                        "GICv3 notify_cpu: missing raw CPU id for logical CPU {}",
+                        logical_cpu_id.as_usize()
+                    );
+                    all_sent = false;
+                    continue;
+                };
+                let affinity = Affinity::from_mpidr(raw_cpu_id.as_usize() as u64);
+                cpu.send_sgi(IntId::sgi(interrupt_id as u32), SGITarget::list([affinity]));
+            }
+        }
     }
     // `isb` forces the SGI system-register write to be observed as issued
     // before subsequent instructions continue, matching Linux's GICv3
     // SGI-send ordering.
     aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
+    all_sent
 }
 
-/// Raise an NMI-configured SGI on every PE except the caller.
+/// Send an SGI to exactly the requested logical CPUs from NMI context.
 ///
 /// Unlike [`notify_cpu`], this path is safe in NMI context: it does not touch
 /// the locked `GIC` object and emits no log records. The SGI line must have
 /// been registered, configured as NMI, and enabled on every target CPU during
-/// boot before this function is used.
-pub fn raise_nmi_all_but_self(interrupt_id: usize) -> bool {
+/// boot before this function is used. The line may use regular-IRQ priority as
+/// a bounded fallback when NMI promotion was unavailable.
+pub fn send_ipi_mask_nmi_safe(interrupt_id: usize, target_mask: KCpuMask) -> bool {
     if interrupt_id >= 16 {
         return false;
     }
 
-    // Complete publication of the rendezvous state before a target can
-    // observe the SGI. ICC_SGI1R_EL1.INTID is bits [27:24], and IRM bit 40
-    // selects all PEs except the requesting PE.
+    if target_mask.is_empty() {
+        return true;
+    }
+    let Some(gicd_typer) = GICD_TYPER.get().copied() else {
+        return false;
+    };
+    let icc_ctlr = read_icc_ctlr();
+
+    // Complete publication of the rendezvous state before any target can
+    // observe the SGI. Each ICC_SGI1R_EL1 write below names one exact
+    // affinity, avoiding IRM's all-but-self delivery to CPUs that have not
+    // initialized the backtrace vector.
     aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::ST);
-    let sgi1r = ((interrupt_id as u64) << 24) | (1u64 << 40);
-    // SAFETY: ICC_SGI1R_EL1 is the architected GICv3 Group-1 SGI send
-    // register and is accessible at EL1 after the CPU interface is enabled.
-    // Deliberately omit `nomem`: this assembly is also a compiler barrier for
-    // the rendezvous-state publication ordered by the DSB above.
-    unsafe {
-        core::arch::asm!(
-            "msr ICC_SGI1R_EL1, {sgi1r}",
-            sgi1r = in(reg) sgi1r,
-            options(nostack)
-        );
+
+    let mut all_sent = true;
+    for logical_cpu_id in target_mask.iter_logical() {
+        let Some(raw_cpu_id) = raw_cpu_id(logical_cpu_id) else {
+            all_sent = false;
+            continue;
+        };
+        let mpidr = raw_cpu_id.as_usize() as u64;
+        let Some(sgi1r) = sgi1r_value(interrupt_id, mpidr, gicd_typer, icc_ctlr) else {
+            all_sent = false;
+            continue;
+        };
+
+        // SAFETY: ICC_SGI1R_EL1 is the architected GICv3 Group-1 SGI send
+        // register and is accessible at EL1 after the CPU interface is
+        // enabled. The value contains a valid SGI INTID and a target affinity
+        // derived from the boot-validated logical/raw CPU map. Deliberately
+        // omit `nomem`: this assembly is also a compiler barrier for the
+        // rendezvous-state publication ordered by the DSB above.
+        unsafe {
+            core::arch::asm!(
+                "msr ICC_SGI1R_EL1, {sgi1r}",
+                sgi1r = in(reg) sgi1r,
+                options(nostack)
+            );
+        }
     }
     aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
-    true
+    all_sent
+}
+
+fn sgi1r_value(interrupt_id: usize, mpidr: u64, gicd_typer: u32, icc_ctlr: u64) -> Option<u64> {
+    let aff0 = mpidr & 0xff;
+    let range_selector = aff0 >> 4;
+    // RS != 0 needs both CPU-interface and distributor support. With only
+    // ICC_CTLR.RSS, a distributor lacking RSS may ignore RS and send to the
+    // wrong CPU instead of reporting a failure (see Linux gic_cpu_sys_reg_init).
+    let has_rss = gicd_typer & GICD_TYPER_RSS != 0 && icc_ctlr & ICC_CTLR_RSS != 0;
+    if interrupt_id >= 16 || (range_selector != 0 && !has_rss) {
+        return None;
+    }
+    Some(
+        ((mpidr >> 32) & 0xff) << 48
+            | range_selector << 44
+            | ((mpidr >> 16) & 0xff) << 32
+            | (interrupt_id as u64) << 24
+            | ((mpidr >> 8) & 0xff) << 16
+            | 1u64 << (aff0 & 0xf),
+    )
+}
+
+#[inline]
+fn read_icc_ctlr() -> u64 {
+    let icc_ctlr: u64;
+    // SAFETY: ICC_CTLR_EL1 is readable after the GICv3 CPU interface has
+    // enabled system-register access. This helper is used only by the live
+    // GICv3 IPI path and reads no memory or stack state.
+    unsafe {
+        core::arch::asm!(
+            "mrs {icc_ctlr}, ICC_CTLR_EL1",
+            icc_ctlr = out(reg) icc_ctlr,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    icc_ctlr
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::*;
+
+    #[def_test]
+    fn sgi_range_selector_requires_both_rss_capabilities() {
+        assert!(sgi1r_value(2, 0x10, 0, ICC_CTLR_RSS).is_none());
+        assert!(sgi1r_value(2, 0x10, GICD_TYPER_RSS, 0).is_none());
+        assert!(sgi1r_value(2, 0x10, 0, 0).is_none());
+        assert_eq!(
+            sgi1r_value(2, 0x10, GICD_TYPER_RSS, ICC_CTLR_RSS),
+            Some((1 << 44) | (2 << 24) | 1)
+        );
+        assert_eq!(sgi1r_value(2, 0xf, 0, 0), Some((2 << 24) | (1 << 15)));
+    }
+
+    #[def_test]
+    fn sgi_mask_encoding_preserves_affinities_without_broadcasting() {
+        // MPIDR.Aff3 is in bits 39:32; bits 31:24 are not affinity bits.
+        let mpidr = (0x12 << 32) | (0xff << 24) | (0x34 << 16) | (0x56 << 8) | 0x78;
+        let value = sgi1r_value(2, mpidr, GICD_TYPER_RSS, ICC_CTLR_RSS).unwrap();
+        assert_eq!(
+            value,
+            (0x12 << 48) | (7 << 44) | (0x34 << 32) | (2 << 24) | (0x56 << 16) | (1 << 8)
+        );
+        assert_eq!(value & (1 << 40), 0); // IRM must remain clear.
+        assert!(sgi1r_value(16, 0, GICD_TYPER_RSS, ICC_CTLR_RSS).is_none());
+    }
 }

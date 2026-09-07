@@ -131,7 +131,7 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     SCHED_READY_CPUS.fetch_add(1, Ordering::Release);
 
     #[cfg(feature = "ipi")]
-    kipi::init();
+    super::init_cpu_ipis();
 
     info!("Secondary CPU {:x} init OK.", logical_cpu_id.as_usize());
     super::INITED_CPUS.fetch_add(1, Ordering::Release);
@@ -139,9 +139,6 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     while !super::is_init_ok() {
         core::hint::spin_loop();
     }
-
-    #[cfg(feature = "ipi")]
-    kirq::enable(kbuild_config::IPI_IRQ, true);
 
     ktask::init_softirqd_current_cpu();
     if kwork::raw::init_system_workqueue_worker_pools_for_cpu(logical_cpu_id).is_none() {

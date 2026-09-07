@@ -113,7 +113,7 @@ late-init thread (Internal, PID-less):
     → [fs] fs_boot (root namespace, virtual filesystems)
     → [fs9p] fs_boot host-share mount
     → [net/vsock] knet
-    → [ipi] kipi::init, mark_all_cpus_started
+    → [ipi] init_cpu_ipis (queue + Generic/CpuBacktrace local enable), mark_all_cpus_started
         (khal::power 的 SMP stop 由 kipi 在链接期提供 SmpStopIf provider)
     → [watchdog] init_primary
     → finish_allocator_init, log_memory_regions
@@ -168,12 +168,18 @@ NMI 机制由平台探测并在每 CPU 使能，`kruntime` 负责在正确的初
 - 主核 `final_init` 与每个从核 `final_init_ap` → `khal::nmi::late_init()`：每 CPU
   使能。hardware 模式在此开启 `SCTLR_EL1.NMI` / ALLINT；pseudo 与降级（`None`）
   无需 per-CPU 寄存器操作。
-- late-init 线程中的 `[watchdog] init_primary`（以及从核 idle 前的
-  `init_secondary`）初始化 hardlockup：主核先全局注册专用 rendezvous SGI
-  handler，各 CPU 再把该 SGI 提升为 NMI 并使能；`mode() == None` 时打印
-  "hard lockup detection disabled" 并跳过武装，否则经
-  `khal::nmi::enable_periodic_nmi` 用 PMU 周期源武装检测。检测失败时专用 SGI
-  主动唤醒 peer CPU，rendezvous 最多等待 10s。
+- `[ipi] init_interrupt` 在开 IRQ、启动 AP 前全局注册 Generic/CpuBacktrace；
+  各 CPU 的 `init_cpu_ipis` 在同一 CPU 上完成队列初始化、本地使能和 readiness
+  发布，从核在 `INITED_CPUS` 发布前完成。该生命周期不依赖 watchdog、PMU 或
+  snapshot feature；`kfeat/nmi` 只为已链接的 `kipi` 打开 NMI promotion。
+  提升失败或无 NMI feature 时使用 regular-IRQ fallback。
+- 普通 CpuBacktrace 回调直接从本 CPU active trap frame 调用 `backtrace()`，使用
+  原子控制台输出，不扫描 task registry、不读写全局快照槽、不等待其他 CPU。
+  仅当 `try_handle_cpu_backtrace()` 发现 watchdog terminal rendezvous 时才交给它。
+- late-init 中的 `[watchdog] init_primary` / 从核 `init_secondary` 只初始化检测器与
+  周期源。`mode() == None` 时打印 "hard lockup detection disabled" 并跳过武装，否则经
+  `khal::nmi::enable_periodic_nmi` 用 PMU 周期源武装检测。检测失败时只向本次
+  ready mask 主动发送 backtrace IPI，rendezvous 最多等待 10s。
 - PMU 溢出分发由 `pmu` feature init 独立注册（normal IRQ 或 NMI fallback），与
   watchdog 解耦，因此降级平台上 perf 事件仍可用。
 
@@ -185,11 +191,12 @@ SecondaryKernelEntry::enter(logical_cpu_id)
     → memspace::init_memory_management_secondary
     → final_init_secondary, init_scheduler_secondary
     → SCHED_READY_CPUS += 1  (供 start_secondary_cpus 等待; RQ 已注册, 跨核 spawn 安全)
-    → [ipi] kipi::init
+    → [ipi] init_cpu_ipis (kipi::init + enable_ipi + enable_cpu_backtrace)
     → INITED_CPUS += 1
     → spin until is_init_ok()
-    → enable IPI/PMU IRQ, enable_local_irq
+    → init softirqd/workqueue pools, enable_local_irq
     → [watchdog] init_secondary
+    → [pmu] enable_irq
     → run_idle()  (永不返回)
 ```
 
@@ -234,10 +241,10 @@ sleep-control 寄存器地址与 S5 写值）。x86-64（SeaBIOS）不受影响�
 | Feature | 作用 |
 |---------|------|
 | `smp` | 从核启动、`rust_main_secondary`、`memspace`/`ktask`/`khal` SMP |
-| `ipi` | 依赖 `kipi`；IPI 中断处理 |
+| `ipi` | 依赖 `kipi`；Generic/CpuBacktrace 注册、每 CPU 使能及回调；不强制启用 snapshot/watchdog |
 | `fs` / `fs9p` / `net` / `vsock` / `display` / `input` | 驱动与子系统初始化（经 `kdriver`）；具体 filesystem feature 只负责链接其自注册实现 |
 | `rtc` | 启动时打印墙钟时间 |
-| `watchdog` / `watchdog_hardlockup` | 看门狗主/从核初始化；`watchdog_hardlockup` 额外启用 NMI 驱动的硬锁检测（`watchdog/nmi`） |
+| `watchdog` / `watchdog_hardlockup` | 看门狗主/从核初始化；`watchdog_hardlockup` 额外启用 NMI 驱动的硬锁检测（`watchdog/nmi`）与 `ipi`，包括 UP 构建 |
 | `pmu` | PMU 溢出中断；`kruntime` 在 `pmu` feature 下独立注册溢出分发（`khal::pmu::register_overflow_dispatch`），perf 与 watchdog 解耦；配合 `watchdog_hardlockup` 时 PMU 线可被提升为周期 NMI 源 |
 | `arm-timer-resume-fixup` | 修复 AArch64 虚拟计时器在 idle/WFI 返回后的计数回退 |
 | `rootfs-secondary-block` | 将第二个块设备作为根文件系统后端 |

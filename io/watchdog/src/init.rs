@@ -5,12 +5,6 @@
 //! Watchdog initialization and optional NMI handler setup.
 
 use alloc::format;
-#[cfg(feature = "nmi")]
-use alloc::sync::Arc;
-#[cfg(all(feature = "nmi", unittest))]
-use core::sync::atomic::AtomicUsize;
-#[cfg(feature = "nmi")]
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use khal::percpu::this_cpu_id;
@@ -25,26 +19,6 @@ static LAST_SOFTLOCKUP_REPORT: Option<ktime_types::MonotonicInstant> = None;
 
 const SOFTLOCKUP_TOUCH_INTERVAL: TimeSpan = TimeSpan::from_secs(4);
 const WATCHDOG_TASK_PRIO: isize = -20;
-
-#[cfg(feature = "nmi")]
-static NMI_RENDEZVOUS_IPI_REGISTERED: AtomicBool = AtomicBool::new(false);
-
-#[cfg(all(feature = "nmi", unittest))]
-static NMI_IPI_TEST_ACTIVE: AtomicBool = AtomicBool::new(false);
-#[cfg(all(feature = "nmi", unittest))]
-static NMI_IPI_TEST_ARRIVED: AtomicUsize = AtomicUsize::new(0);
-
-#[cfg(feature = "nmi")]
-const _: () = {
-    assert!(
-        kbuild_config::WATCHDOG_NMI_IPI_IRQ < 16,
-        "watchdog NMI IPI must use an SGI in the range 0..15"
-    );
-    assert!(
-        kbuild_config::WATCHDOG_NMI_IPI_IRQ != kbuild_config::IPI_IRQ,
-        "watchdog NMI IPI must not share the ordinary IPI SGI"
-    );
-};
 
 /// Common watchdog initialization for both primary and secondary CPUs.
 ///
@@ -79,25 +53,6 @@ fn init_nmi_watchdog() {
         return;
     }
 
-    if NMI_RENDEZVOUS_IPI_REGISTERED.load(Ordering::Acquire) {
-        let desc = nmi_rendezvous_irq_desc();
-        if !khal::irq::configure_nmi(kbuild_config::WATCHDOG_NMI_IPI_IRQ) {
-            log::error!(
-                "[watchdog] failed to configure rendezvous SGI {} as NMI on cpu {}; bounded \
-                 periodic-NMI fallback remains active",
-                kbuild_config::WATCHDOG_NMI_IPI_IRQ,
-                this_cpu_id().as_usize()
-            );
-        } else if let Err(err) = kirq::try_enable(desc, true) {
-            log::error!(
-                "[watchdog] failed to enable rendezvous SGI {} on cpu {}: {err:?}; bounded \
-                 periodic-NMI fallback remains active",
-                kbuild_config::WATCHDOG_NMI_IPI_IRQ,
-                this_cpu_id().as_usize()
-            );
-        }
-    }
-
     // Register hard lockup detection task.
     crate::register_hardlockup_detection_task();
 
@@ -125,39 +80,19 @@ fn init_nmi_watchdog() {
     }
 }
 
+/// Handles a CPU-backtrace request belonging to an active watchdog rendezvous.
+///
+/// Returns `false` when no watchdog rendezvous owns the request, allowing the
+/// runtime to run its ordinary local backtrace handler. Registration and
+/// per-CPU IPI enablement belong to the runtime/kipi lifecycle, not watchdog.
+/// May be called in IRQ or NMI context and uses the existing bounded protocol.
 #[cfg(feature = "nmi")]
-fn nmi_rendezvous_irq_desc() -> kirq::IrqDesc {
-    // SGIs are architecturally edge-triggered. Keeping the full GIC descriptor
-    // shape consistent across registration and per-CPU enable avoids falling
-    // back to a different logical IRQ identity.
-    kirq::gic_edge_irq_desc(kbuild_config::WATCHDOG_NMI_IPI_IRQ)
-}
-
-/// Register the dedicated rendezvous SGI once, before secondary CPUs leave
-/// their boot barrier and before any watchdog periodic NMI can trigger.
-#[cfg(feature = "nmi")]
-fn register_nmi_rendezvous_ipi() {
-    if khal::nmi::mode() == khal::nmi::NmiMode::None {
-        return;
+pub fn try_handle_cpu_backtrace() -> bool {
+    if !crate::rendezvous::is_triggered() && !crate::rendezvous::is_dump_done() {
+        return false;
     }
-
-    let handler = Arc::new(|_| {
-        #[cfg(unittest)]
-        if handle_nmi_ipi_test_probe() {
-            return kirq::IrqEvent::HANDLED;
-        }
-        handle_nmi_rendezvous(None);
-        kirq::IrqEvent::HANDLED
-    });
-    if kirq::register_nmi(nmi_rendezvous_irq_desc(), handler) {
-        NMI_RENDEZVOUS_IPI_REGISTERED.store(true, Ordering::Release);
-    } else {
-        log::error!(
-            "[watchdog] failed to register rendezvous SGI {}; bounded periodic-NMI fallback \
-             remains active",
-            kbuild_config::WATCHDOG_NMI_IPI_IRQ
-        );
-    }
+    handle_nmi_rendezvous(None);
+    true
 }
 
 /// Periodic watchdog callback invoked in local NMI context.
@@ -171,15 +106,17 @@ fn watchdog_periodic_nmi() {
     if fail_name.is_some() {
         if ktask::snapshot::nmi_begin() {
             if rv::try_trigger() {
-                // Linux-style active backtrace request: wake peer vCPUs with a
-                // dedicated NMI SGI instead of waiting for their local PMU
-                // overflow, which may stop while KVM has the vCPU in WFI.
-                if !NMI_RENDEZVOUS_IPI_REGISTERED.load(Ordering::Acquire)
-                    || !khal::nmi::raise_nmi_all_but_self(kbuild_config::WATCHDOG_NMI_IPI_IRQ)
-                {
+                // Linux-style active backtrace request: snapshot the CPUs that
+                // have enabled the semantic backtrace vector and send to
+                // exactly those peers. CPUs without a usable IPI can still
+                // join via their periodic NMI during the bounded wait.
+                let this_cpu = this_cpu_id();
+                let mut targets = kipi::cpu_backtrace_ready_mask();
+                targets.set_logical(this_cpu, false);
+                if !kipi::send_cpu_backtrace(targets) {
                     khal::kprint_atomic!(
-                        "[watchdog] failed to broadcast rendezvous NMI; using bounded \
-                         periodic-NMI fallback\n"
+                        "[watchdog] failed to send CPU-backtrace IPI to every ready CPU; using \
+                         bounded periodic-NMI fallback\n"
                     );
                 }
             } else {
@@ -195,13 +132,16 @@ fn watchdog_periodic_nmi() {
     handle_nmi_rendezvous(fail_name);
 }
 
-/// Join an active watchdog rendezvous from either the PMU NMI or the dedicated
-/// cross-CPU SGI. This path is allocation-free and lock-free.
+/// Join an active watchdog rendezvous from either the PMU NMI or the semantic
+/// CPU-backtrace IPI. This path is allocation-free and lock-free.
 #[cfg(feature = "nmi")]
 fn handle_nmi_rendezvous(fail_name: Option<&'static str>) {
     use crate::rendezvous as rv;
 
-    if !rv::is_triggered() {
+    // A regular-IRQ backtrace handler can be interrupted by a PMU NMI. Only
+    // the first entry on each CPU may write the snapshot slot; a nested entry
+    // must return without publishing arrival or waiting for its outer writer.
+    if !rv::try_join() {
         return;
     }
 
@@ -212,6 +152,9 @@ fn handle_nmi_rendezvous(fail_name: Option<&'static str>) {
     rv::publish_arrived();
     let this_cpu = this_cpu_id().as_usize();
     if rv::cause_cpu() == Some(this_cpu) {
+        // Keep the existing present-CPU wait set even if registration or
+        // enablement of the backtrace IPI failed. Such a CPU may still arrive
+        // via its periodic PMU NMI; otherwise the deadline reports it missing.
         let expected = rv::all_arrived_mask();
 
         khal::kprint_atomic!(
@@ -250,19 +193,6 @@ fn handle_nmi_rendezvous(fail_name: Option<&'static str>) {
             core::hint::spin_loop();
         }
     }
-}
-
-#[cfg(all(feature = "nmi", unittest))]
-fn handle_nmi_ipi_test_probe() -> bool {
-    if !NMI_IPI_TEST_ACTIVE.load(Ordering::Acquire) {
-        return false;
-    }
-
-    let cpu = this_cpu_id().as_usize();
-    if cpu < usize::BITS as usize {
-        NMI_IPI_TEST_ARRIVED.fetch_or(1usize << cpu, Ordering::Release);
-    }
-    true
 }
 
 /// Initialize soft lockup detection.
@@ -352,45 +282,10 @@ impl crate::watchdog_task::WatchdogTask for SystemWorkqueueCheck {
 
 /// Initialize watchdogs on the primary CPU.
 pub fn init_primary() {
-    #[cfg(feature = "nmi")]
-    register_nmi_rendezvous_ipi();
     init_common();
 }
 
 /// Initialize watchdogs on a secondary CPU.
 pub fn init_secondary() {
     init_common();
-}
-
-#[cfg(all(feature = "nmi", unittest))]
-mod tests {
-    use unittest::{assert, def_test};
-
-    use super::*;
-
-    #[def_test(serial)]
-    fn dedicated_nmi_ipi_reaches_peer_cpus() {
-        let this_bit = 1usize << this_cpu_id().as_usize();
-        let expected = crate::rendezvous::all_arrived_mask() & !this_bit;
-
-        NMI_IPI_TEST_ARRIVED.store(0, Ordering::Release);
-        NMI_IPI_TEST_ACTIVE.store(true, Ordering::Release);
-        let sent = NMI_RENDEZVOUS_IPI_REGISTERED.load(Ordering::Acquire)
-            && khal::nmi::raise_nmi_all_but_self(kbuild_config::WATCHDOG_NMI_IPI_IRQ);
-
-        let start = khal::time::monotonic_time();
-        let timeout = TimeSpan::from_secs(2);
-        let mut arrived = NMI_IPI_TEST_ARRIVED.load(Ordering::Acquire);
-        while sent
-            && arrived & expected != expected
-            && khal::time::monotonic_time().saturating_duration_since(start) < timeout
-        {
-            core::hint::spin_loop();
-            arrived = NMI_IPI_TEST_ARRIVED.load(Ordering::Acquire);
-        }
-        NMI_IPI_TEST_ACTIVE.store(false, Ordering::Release);
-
-        assert!(sent);
-        assert!(arrived & expected == expected);
-    }
 }

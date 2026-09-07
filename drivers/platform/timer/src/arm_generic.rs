@@ -513,8 +513,8 @@ fn request_remote_timer_fixup() {
     }
 
     IPI_FIXUP_PENDING.fetch_or(remote_mask, Ordering::AcqRel);
-    kirq::notify_cpu(
-        kbuild_config::IPI_IRQ,
+    let _ = kirq::send_ipi(
+        kirq::IpiKind::Generic,
         kirq::TargetCpu::AllButSelf {
             me: current_cpu.into(),
             total: kcpu_id_map::nr_cpus(),

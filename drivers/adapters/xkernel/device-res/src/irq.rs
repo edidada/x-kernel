@@ -207,7 +207,8 @@ fn map_irq_desc_error(err: kirq::IrqDescError) -> ResError {
         | kirq::IrqDescError::TeardownInProgress { .. }
         | kirq::IrqDescError::NoIrqAction { .. }
         | kirq::IrqDescError::InvalidContext { .. }
-        | kirq::IrqDescError::SyncWaitFailed { .. } => ResError::InvalidResource,
+        | kirq::IrqDescError::SyncWaitFailed { .. }
+        | kirq::IrqDescError::NotPerCpu { .. } => ResError::InvalidResource,
     }
 }
 

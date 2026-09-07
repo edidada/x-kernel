@@ -10,6 +10,7 @@ repository.workspace = true
 
 [features]
 default = []
+nmi = ["khal/nmi"]
 
 [dependencies]
 kiface.workspace = true

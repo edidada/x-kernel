@@ -4,7 +4,7 @@
 
 use core::{num::NonZeroU32, ptr::NonNull};
 
-use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
+use kcpu_id_map::{KCpuMaskExt, LogicalCpuId, raw_cpu_id};
 use kirq::TargetCpu;
 use kplat::cpu::id as this_cpu_id;
 use kspin::SpinNoIrq;
@@ -20,7 +20,6 @@ const PLIC_MMIO_SIZE: usize = 0x0400_0000;
 const PLIC_IOMAP_NAME: &str = "plic";
 pub const PLIC_DOMAIN: kirq::IrqDomainId = kirq::PLIC_ROOT_DOMAIN;
 pub const INTC_IRQ_BASE: usize = 1 << (usize::BITS - 1);
-#[allow(unused)]
 pub const S_SOFT: usize = INTC_IRQ_BASE + 1;
 pub const S_TIMER: usize = INTC_IRQ_BASE + 5;
 pub const S_EXT: usize = INTC_IRQ_BASE + 9;
@@ -79,7 +78,7 @@ fn this_context() -> usize {
     hart_id * 2 + 1
 }
 
-fn send_ipi_to_raw_hart(raw_hart_id: usize) {
+fn send_ipi_to_raw_hart(raw_hart_id: usize) -> bool {
     // SAFETY: this fence publishes the caller's prior memory writes before the
     // SBI IPI request, so remote handlers cannot observe the interrupt before
     // its request state becomes visible.
@@ -87,6 +86,9 @@ fn send_ipi_to_raw_hart(raw_hart_id: usize) {
     let res = sbi_rt::send_ipi(HartMask::from_mask_base(1, raw_hart_id));
     if res.is_err() {
         warn!("notify_cpu failed: {res:?}");
+        false
+    } else {
+        true
     }
 }
 
@@ -98,7 +100,8 @@ pub fn init_percpu() {
     // SAFETY: these CSR writes only affect interrupt-enable bits on the
     // current hart during local interrupt-controller initialization.
     unsafe {
-        sie::set_ssoft();
+        // Generic IPI is unmasked later by kipi, after its queue is ready.
+        sie::clear_ssoft();
         sie::set_stimer();
         sie::set_sext();
     }
@@ -146,7 +149,17 @@ impl kirq::IntrManagerIf {
                     }
                 }
             },
-            @S_SOFT => {},
+            @S_SOFT => {
+                // SAFETY: these CSR writes only toggle this hart's software
+                // interrupt enable bit; pending work survives local masking.
+                unsafe {
+                    if enabled {
+                        sie::set_ssoft();
+                    } else {
+                        sie::clear_ssoft();
+                    }
+                }
+            },
             @S_EXT => {},
             @EX_IRQ => {
                 let Some(irq) = NonZeroU32::new(irq as _) else {
@@ -220,7 +233,17 @@ impl kirq::IntrManagerIf {
         plic().lock().complete(this_context(), irq);
     }
 
-    fn notify_cpu(_interrupt_id: usize, target: TargetCpu) {
+    fn ipi_desc(kind: kirq::IpiKind) -> Option<kirq::IrqDesc> {
+        match kind {
+            kirq::IpiKind::Generic => Some(kirq::IrqDesc::from_virq(S_SOFT)),
+            kirq::IpiKind::CpuBacktrace => None,
+        }
+    }
+
+    fn send_ipi(kind: kirq::IpiKind, target: TargetCpu) -> bool {
+        if kind != kirq::IpiKind::Generic {
+            return false;
+        }
         match target {
             TargetCpu::Self_ => {
                 let logical_cpu_id = this_cpu_id();
@@ -230,19 +253,20 @@ impl kirq::IntrManagerIf {
                         logical_cpu_id.as_usize()
                     )
                 });
-                send_ipi_to_raw_hart(raw_cpu_id.as_usize());
+                send_ipi_to_raw_hart(raw_cpu_id.as_usize())
             }
             TargetCpu::Specific(logical_cpu_id) => {
                 let Some(raw_cpu_id) = raw_cpu_id(LogicalCpuId::new(logical_cpu_id)) else {
                     warn!("RISC-V notify_cpu: missing raw CPU id for logical CPU {logical_cpu_id}");
-                    return;
+                    return false;
                 };
-                send_ipi_to_raw_hart(raw_cpu_id.as_usize());
+                send_ipi_to_raw_hart(raw_cpu_id.as_usize())
             }
             TargetCpu::AllButSelf {
                 me: local_logical_cpu_id,
                 total: cpu_num,
             } => {
+                let mut all_sent = true;
                 for logical_cpu_id in 0..cpu_num {
                     if logical_cpu_id != local_logical_cpu_id {
                         let Some(raw_cpu_id) = raw_cpu_id(LogicalCpuId::new(logical_cpu_id)) else {
@@ -250,11 +274,28 @@ impl kirq::IntrManagerIf {
                                 "RISC-V notify_cpu: missing raw CPU id for logical CPU \
                                  {logical_cpu_id}"
                             );
+                            all_sent = false;
                             continue;
                         };
-                        send_ipi_to_raw_hart(raw_cpu_id.as_usize());
+                        all_sent &= send_ipi_to_raw_hart(raw_cpu_id.as_usize());
                     }
                 }
+                all_sent
+            }
+            TargetCpu::Mask(mask) => {
+                let mut all_sent = true;
+                for logical_cpu_id in mask.iter_logical() {
+                    let Some(raw_cpu_id) = raw_cpu_id(logical_cpu_id) else {
+                        warn!(
+                            "RISC-V notify_cpu: missing raw CPU id for logical CPU {}",
+                            logical_cpu_id.as_usize()
+                        );
+                        all_sent = false;
+                        continue;
+                    };
+                    all_sent &= send_ipi_to_raw_hart(raw_cpu_id.as_usize());
+                }
+                all_sent
             }
         }
     }

@@ -46,6 +46,9 @@ static CAUSE_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// Per-cpu arrived bitmap stored in an AtomicUsize where bit i means CPU i arrived.
 static ARRIVED_BITMAP: AtomicUsize = AtomicUsize::new(0);
 
+/// CPUs that own a snapshot write, including writers not yet published as arrived.
+static CLAIMED_BITMAP: AtomicUsize = AtomicUsize::new(0);
+
 /// Returns whether a rendezvous is in progress.
 #[inline]
 pub fn is_triggered() -> bool {
@@ -89,6 +92,27 @@ pub fn cause_cpu() -> Option<usize> {
     }
     let cpu = CAUSE_CPU.load(Ordering::Acquire);
     (cpu != usize::MAX).then_some(cpu)
+}
+
+fn try_claim_cpu(claimed: &AtomicUsize, cpu: usize) -> bool {
+    if cpu >= usize::BITS as usize {
+        return false;
+    }
+    let bit = 1usize << cpu;
+    // Acquire keeps snapshot writes after the claim. Arrival publication is
+    // separate: claiming a slot does not mean it is safe for remote readers.
+    claimed.fetch_or(bit, Ordering::AcqRel) & bit == 0
+}
+
+/// Claims the current CPU's single snapshot write in an active rendezvous.
+///
+/// A nested NMI can interrupt a regular-IRQ backtrace responder before it
+/// publishes arrival. A losing entry must return immediately, without writing,
+/// publishing arrival, or waiting for the interrupted writer to finish.
+/// Call from IRQ/NMI context, with the current CPU pinned through collection
+/// and arrival publication.
+pub fn try_join() -> bool {
+    is_triggered() && try_claim_cpu(&CLAIMED_BITMAP, this_cpu_id().as_usize())
 }
 
 /// Publish that the current CPU has completed its local snapshot.
@@ -158,6 +182,7 @@ pub fn mark_dump_done() {
 #[inline]
 pub fn reset() {
     ARRIVED_BITMAP.store(0, Ordering::Release);
+    CLAIMED_BITMAP.store(0, Ordering::Release);
     CAUSE_CPU.store(usize::MAX, Ordering::Release);
     PHASE.store(Phase::Idle as usize, Ordering::Release);
 }
@@ -167,6 +192,18 @@ mod tests {
     use unittest::{assert, def_test};
 
     use super::*;
+
+    #[def_test]
+    fn nested_entry_cannot_claim_an_unpublished_snapshot() {
+        let claimed = AtomicUsize::new(0);
+        assert!(try_claim_cpu(&claimed, 0));
+        // Simulate a PMU NMI preempting the regular-IRQ writer before its
+        // snapshot is complete. It must neither overwrite nor acknowledge it.
+        assert!(!try_claim_cpu(&claimed, 0));
+        assert!(try_claim_cpu(&claimed, 1));
+        assert!(!try_claim_cpu(&claimed, 0));
+        assert!(!try_claim_cpu(&claimed, usize::BITS as usize));
+    }
 
     #[def_test]
     fn wait_finishes_when_every_expected_cpu_arrived() {

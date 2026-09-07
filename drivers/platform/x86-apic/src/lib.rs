@@ -27,8 +27,16 @@ use x86_64::instructions::port::Port;
 pub const APIC_TIMER_VECTOR: u8 = 0xf0;
 pub const APIC_SPURIOUS_VECTOR: u8 = 0xf1;
 pub const APIC_ERROR_VECTOR: u8 = 0xf2;
+/// Reserved local-APIC vector for ordinary cross-CPU work.
+pub const GENERIC_IPI_VECTOR: u8 = 0xf3;
 pub const MSIX_VECTOR_BASE: u8 = 0x40;
 pub const IO_APIC_VECTOR_BASE: usize = 0x20;
+
+const _: () = {
+    assert!(GENERIC_IPI_VECTOR > APIC_TIMER_VECTOR);
+    assert!(GENERIC_IPI_VECTOR != APIC_SPURIOUS_VECTOR);
+    assert!(GENERIC_IPI_VECTOR != APIC_ERROR_VECTOR);
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IoApicTriggerMode {
@@ -355,10 +363,17 @@ pub fn init_secondary() {
 
 pub fn send_ipi_self(interrupt_id: usize) {
     with_local_apic(|lapic| {
-        // SAFETY: the current CPU's LAPIC handle is initialized before self-IPIs
-        // are used, and the x2apic crate requires `&mut self` only to model the
-        // CPU-local register programming performed here.
-        unsafe { lapic.send_ipi_self(interrupt_id as _) };
+        // SAFETY: the local LAPIC handle is initialized and IRQ-masked. The
+        // dedicated SELF_IPI register exists only in x2APIC mode; in xAPIC
+        // mode, the raw ID register already has the ICR destination layout.
+        unsafe {
+            if IS_X2APIC.load(Ordering::Relaxed) {
+                lapic.send_ipi_self(interrupt_id as _);
+            } else {
+                let destination = lapic.id();
+                lapic.send_ipi(interrupt_id as _, destination);
+            }
+        }
     });
 }
 

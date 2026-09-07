@@ -5,6 +5,7 @@
 //! GICv2 backend.
 
 use arm_gic_driver::v2::*;
+use kcpu_id_map::KCpuMaskExt;
 use kirq::TargetCpu;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
@@ -128,7 +129,7 @@ pub fn complete_irq(completion_cookie: usize) {
     TRAP_OP.dir(ack);
 }
 
-pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
+pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) -> bool {
     // `dmb ishst` orders the caller's prior Normal-memory stores before the
     // SGI MMIO write, which is required for cross-CPU publish-before-notify
     // semantics.
@@ -149,5 +150,16 @@ pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
             GIC.lock()
                 .send_sgi(IntId::sgi(interrupt_id as u32), SGITarget::AllOther);
         }
+        TargetCpu::Mask(mask) => {
+            let gic = GIC.lock();
+            for cpu_id in mask.iter_logical() {
+                let target_list = TargetList::new(core::iter::once(cpu_id.as_usize()));
+                gic.send_sgi(
+                    IntId::sgi(interrupt_id as u32),
+                    SGITarget::TargetList(target_list),
+                );
+            }
+        }
     }
+    true
 }

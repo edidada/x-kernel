@@ -12,6 +12,8 @@
 use alloc::sync::Arc;
 use core::marker::PhantomData;
 
+use kcpu_id_map::KCpuMask;
+
 use crate::{
     IrqAffinity, IrqController, IrqDesc, IrqFlags, IrqHandler, IrqPolarity, IrqRef, IrqSource,
     IrqTrigger, Virq, state::DYNAMIC_VIRQ_BASE,
@@ -23,14 +25,35 @@ use crate::{
 /// counterpart of Linux's `dev_id` — with no side table or trampoline.
 pub type Handler = Arc<dyn IrqHandler>;
 
+/// Semantic inter-processor interrupt classes owned by the IRQ backend.
+///
+/// Callers select why an IPI is being sent, while the platform irqchip owns
+/// the concrete vector or SGI assigned to that class. This mirrors Linux's
+/// separation between an IPI message number and its virq/hwirq mapping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IpiKind {
+    /// Shared ordinary IPI used for normal cross-CPU work.
+    Generic,
+    /// Diagnostic request asking target CPUs to collect a backtrace snapshot.
+    CpuBacktrace,
+}
+
 /// Target CPU(s) for inter-processor interrupts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TargetCpu {
     /// Target the current CPU.
     Self_,
     /// Target a specific CPU by ID.
     Specific(usize),
     /// Target all CPUs except the caller.
-    AllButSelf { me: usize, total: usize },
+    AllButSelf {
+        /// Logical CPU ID of the caller to exclude.
+        me: usize,
+        /// Number of logical CPUs considered by the broadcast.
+        total: usize,
+    },
+    /// Target exactly the logical CPUs present in this mask.
+    Mask(KCpuMask),
 }
 
 /// An IRQ claimed by the platform and not yet completed.
@@ -196,14 +219,26 @@ pub trait IntrManagerIf {
     /// final EOI or deactivate after generic handler fanout.
     fn complete_irq(completion_cookie: usize);
 
-    /// Sends an IPI to another CPU.
+    /// Resolves a semantic IPI class to its platform-owned IRQ descriptor.
+    ///
+    /// `None` means this irqchip cannot provide the requested IPI class.
+    fn ipi_desc(kind: IpiKind) -> Option<IrqDesc>;
+
+    /// Sends a semantic IPI to one or more CPUs.
     ///
     /// Implementations must ensure that all Normal-memory writes performed by
-    /// the caller before `notify_cpu()` become visible to the target CPU before
+    /// the caller before `send_ipi()` become visible to the target CPU before
     /// that CPU can observe and handle the delivered IPI. TLB shootdown relies
     /// on this publish-before-notify ordering to make the request state visible
     /// before the target acknowledges it.
-    fn notify_cpu(id: usize, target: TargetCpu);
+    ///
+    /// The [`IpiKind::CpuBacktrace`] path may be invoked from NMI context. Its
+    /// implementation must therefore avoid allocation, logging, and locks.
+    /// Returns `false` when the class or target set cannot be issued in full;
+    /// partial delivery is possible. Success is not a target acknowledgement.
+    /// [`IpiKind::CpuBacktrace`] requires [`TargetCpu::Mask`]; other target
+    /// forms may be rejected even on a backend supporting that class.
+    fn send_ipi(kind: IpiKind, target: TargetCpu) -> bool;
 
     /// Sets a controller-local interrupt priority.
     ///
@@ -267,9 +302,24 @@ fn platform_complete_irq(completion_cookie: usize) {
     IntrManagerIf::complete_irq(completion_cookie)
 }
 
+/// Resolves a semantic IPI class to the descriptor owned by the active irqchip.
+///
+/// Returns `None` when the active backend does not implement `kind`.
 #[inline]
-pub fn notify_cpu(id: usize, target: TargetCpu) {
-    IntrManagerIf::notify_cpu(id, target)
+pub fn ipi_desc(kind: IpiKind) -> Option<IrqDesc> {
+    IntrManagerIf::ipi_desc(kind)
+}
+
+/// Sends a semantic IPI to `target` through the active irqchip backend.
+///
+/// Returns `false` when the backend cannot deliver the requested class or
+/// target set. [`IpiKind::CpuBacktrace`] is safe to request from NMI context;
+/// callers must not assume the same for other classes. A successful call
+/// only issues the notification; it does not wait for target acknowledgement.
+/// On failure, some targets may already have been notified.
+#[inline]
+pub fn send_ipi(kind: IpiKind, target: TargetCpu) -> bool {
+    IntrManagerIf::send_ipi(kind, target)
 }
 
 #[inline]

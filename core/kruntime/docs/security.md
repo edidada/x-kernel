@@ -36,8 +36,8 @@ kernel-boot / 平台固件
 | `BootInfo` | CPU ID、内存表、boot console PA/VA/size | 错误内存映射、错误 CPU 初始化、MMIO 区域越界 | `khal::firmware::init`、`khal::mem::init` 和 `memspace` 负责校验；boot console VA/PA 页内偏移由 `assert_eq!` 检查 |
 | 链接符号 | `_stext`、`_etext`、`.init_array` 边界 | backtrace 范围错误、构造函数表越界、任意跳转 | 只取 ZST 符号地址；`.init_array` 通过链接脚本和 `#[register_init]` 约束 |
 | SMP bring-up | DT/ACPI 发现的 present CPU、AP 栈、`boot_ap` | 从核使用错误栈、AP 未启动导致主核自旋 | 每个 AP 使用独立 boot stack；`SCHED_READY_CPUS` 串行握手（等 AP 注册 run queue）；全局完成由 `INITED_CPUS == nr_cpus()` 判断 |
-| 中断和 timer | softirq runner、timer/IPI/PMU IRQ 号与 handler | 未安装 runner 或未注册 handler 时中断 bottom-half、timer deadline 错乱 | `init_interrupt` 先安装 softirq runner 和注册 handler 再 `enable_local_irq()`；从核在完成本地 runtime 初始化和全局屏障后才开 IRQ |
-| NMI 机制 | GIC 版本 / FEAT_NMI 探测、每 CPU 使能与 watchdog 专用 SGI | 机制误判导致无效寄存器访问，或 watchdog 误报/诊断 hang | 平台 `detect_mode()` 门控；`NmiMode::None` 时禁用硬锁检测；专用 SGI 启动期注册/配置且 NMI 内无锁发送；rendezvous 10s 超时 |
+| 中断和 timer | softirq runner、timer/IPI/PMU descriptor 与 handler | 未安装 runner 或未注册 handler 时中断 bottom-half、timer deadline 错乱 | `init_interrupt` 先安装 softirq runner，并经 `kipi` 注册 Generic/CpuBacktrace descriptor，再 `enable_local_irq()`；每 CPU 的队列/使能先于 readiness，AP 屏障后才开本地 IRQ |
+| NMI 机制 | GIC 版本 / FEAT_NMI 探测、每 CPU 使能与 backtrace IPI readiness | 机制误判导致无效寄存器访问，或 watchdog 误报/诊断 hang | 平台 `detect_mode()` 门控；`NmiMode::None` 时禁用硬锁检测但保留 backtrace 普通 IRQ；runtime/kipi 独立管理生命周期，irqchip 在 NMI 内无锁精确发送；watchdog rendezvous 10s 超时 |
 | DMA 页表属性 | `kdma` 传入的内核 VA、size、flags | 错误修改内核页表属性 | `DmaPageTableIf::protect` 委托 `memspace::kernel_layout().protect()` 进行范围和页表处理 |
 
 本 crate 不直接处理用户内存、用户提供指针、DMA buffer 内容或设备寄存器读写；相关 trust boundary 位于 `memspace`、`kdma`、`kdriver` 和具体 HAL/driver 中。它会注册 boot console 的固定 MMIO 映射元数据，但不直接访问该 MMIO。
@@ -116,7 +116,13 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 - `INITED_CPUS` 使用 `Release`/`Acquire` 作为全局 runtime-ready 屏障。主核 late-init 线程和每个从核完成本地 runtime 初始化后递增；`SystemInitEntry::enter()` 和依赖跨 CPU 调度的 late-start worker 只在屏障满足后运行。
 - `SCHED_READY_CPUS` 只表达 AP 已注册 run queue（进入 runtime 后进一步完成内存管理与调度器初始化），不代表 AP 初始化完成；它与 `INITED_CPUS` 分离，避免把“可跨核调度”/“可启动下一个 AP”和“全局 runtime ready”混在一起。
 - `LoggerAdapter::cpu_id()` 和 `task_id()` 在 `is_init_ok()` 前避免读取可能未就绪的 current task / CPU-local 运行时状态；非 SMP 构建下 CPU ID 固定为 0。
-- 从核在 `INITED_CPUS` 屏障后才启用 IPI/PMU IRQ、本地 IRQ 和 watchdog，并最终进入 `ktask::run_idle()`。
+- 从核在 `INITED_CPUS` 发布前完成 IPI 队列、本地 Generic/CpuBacktrace 使能和 readiness；
+  屏障后初始化 softirqd/workqueue pools、开本地 IRQ，再初始化 watchdog/PMU，进入 idle。
+- backtrace handler 注册独立于 watchdog；普通请求只读取本 CPU active trap frame 并
+  原子输出，不进入全局 snapshot 协议。共享 IRQ 锁、任务注册表遍历和其他 CPU 等待
+  不应加入此回调；watchdog 活跃 terminal session 仍由其唯一写者协议与 10s 上限保护。
+- `kipi` 本地启停在 `NoPreemptIrqSave` 内完成；停机 ACK 前先撤销 IPI readiness，
+  但保留静态 handler/队列以承接迟到请求。runtime 不实现 CPU hotplug 资源释放。
 - `DmaPageTableIf::protect()` 通过 `memspace::kernel_layout().lock()` 串行化内核页表属性更新。
 
 ## 威胁分析
@@ -148,7 +154,7 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 | F-08 | region 日志摘要数组溢出 | distinct region name/flags 超过 64 | `expect("too many region log summaries")` panic | 启动日志阶段失败 | 3 | `MAX_REGION_LOG_SUMMARIES = 64`；异常平台需扩大上限或调整汇总策略 |
 | F-09 | timer handler 重复立刻触发或 deadline 倒退 | 时间源异常或 deadline 更新逻辑被改坏 | tick 过密、调度异常 | 性能下降或 hang | 2 | deadline 取当前记录与 `now + interval` 的较大值，再写入下一 tick |
 | F-10 | NMI 机制探测或每 CPU 使能失败 | 平台缺 FEAT_NMI / GIC 版本过低 / 初始化顺序错误 | 本 CPU 无 NMI 或 hardlockup 被禁用 | 系统失去硬锁检测（软锁仍在） | 3 | 启动日志 + `mode()` / `enable_periodic_nmi` 返回值显式降级 |
-| F-11 | watchdog rendezvous SGI 初始化或发送失败 | IRQ 冲突 / GIC 拒绝属性 / 非 GICv3 | peer CPU 不能被主动拉入快照 | 快照不完整但 cause 不永久等待 | 2 | 启动/NMI 原子日志；周期 NMI fallback；10s 后按 missing mask 继续 panic |
+| F-11 | watchdog `CpuBacktrace` IPI 初始化或发送失败 | irqchip 不提供语义向量、GIC 拒绝 NMI 属性或 affinity 无法编码 | peer CPU 不能被主动拉入快照 | 快照不完整但 cause 不永久等待 | 2 | regular-IRQ/周期 NMI fallback；只投递 ready mask；10s 后按 missing mask 继续 panic |
 
 ## 故障管理
 

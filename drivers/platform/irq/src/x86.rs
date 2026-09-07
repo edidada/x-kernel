@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 use core::sync::atomic::Ordering;
 
-use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
+use kcpu_id_map::{KCpuMaskExt, LogicalCpuId, raw_cpu_id};
 use kirq::{IrqPolarity, IrqTrigger, TargetCpu};
 
 pub const IO_APIC_DOMAIN: kirq::IrqDomainId = kirq::IO_APIC_DOMAIN;
@@ -30,15 +30,18 @@ fn enable(irq: usize, enabled: bool) {
     x86_apic::set_irq_enabled(irq, enabled);
 }
 
-fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
+fn notify_cpu(interrupt_id: usize, target: TargetCpu) -> bool {
     // Publish prior Normal-memory stores before programming the local APIC
-    // ICR/MSR. x86 TSO orders ordinary WB-memory accesses, but `notify_cpu()`
+    // ICR/MSR. x86 TSO orders ordinary WB-memory accesses, but `send_ipi()`
     // is also the architecture boundary where we transition into device/APIC
     // state. Keep the publish-before-notify guarantee here so callers do not
     // need a separate fence before every IPI send.
     core::sync::atomic::fence(Ordering::SeqCst);
     match target {
-        TargetCpu::Self_ => x86_apic::send_ipi_self(interrupt_id),
+        TargetCpu::Self_ => {
+            x86_apic::send_ipi_self(interrupt_id);
+            true
+        }
         TargetCpu::Specific(logical_cpu_id) => {
             let logical_cpu_id = LogicalCpuId::new(logical_cpu_id);
             let Some(raw_cpu_id) = raw_cpu_id(logical_cpu_id) else {
@@ -46,11 +49,30 @@ fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
                     "x86 notify_cpu: missing raw CPU id for logical CPU {}",
                     logical_cpu_id.as_usize()
                 );
-                return;
+                return false;
             };
             x86_apic::send_ipi_raw(interrupt_id, raw_cpu_id);
+            true
         }
-        TargetCpu::AllButSelf { me: _, total: _ } => x86_apic::send_ipi_all_but_self(interrupt_id),
+        TargetCpu::AllButSelf { me: _, total: _ } => {
+            x86_apic::send_ipi_all_but_self(interrupt_id);
+            true
+        }
+        TargetCpu::Mask(mask) => {
+            let mut all_sent = true;
+            for logical_cpu_id in mask.iter_logical() {
+                let Some(raw_cpu_id) = raw_cpu_id(logical_cpu_id) else {
+                    warn!(
+                        "x86 notify_cpu: missing raw CPU id for logical CPU {}",
+                        logical_cpu_id.as_usize()
+                    );
+                    all_sent = false;
+                    continue;
+                };
+                x86_apic::send_ipi_raw(interrupt_id, raw_cpu_id);
+            }
+            all_sent
+        }
     }
 }
 
@@ -109,8 +131,20 @@ impl kirq::IntrManagerIf {
         }
     }
 
-    fn notify_cpu(interrupt_id: usize, target: kirq::TargetCpu) {
-        notify_cpu(interrupt_id, target);
+    fn ipi_desc(kind: kirq::IpiKind) -> Option<kirq::IrqDesc> {
+        match kind {
+            kirq::IpiKind::Generic => Some(kirq::IrqDesc::from_virq(
+                x86_apic::GENERIC_IPI_VECTOR as usize,
+            )),
+            kirq::IpiKind::CpuBacktrace => None,
+        }
+    }
+
+    fn send_ipi(kind: kirq::IpiKind, target: kirq::TargetCpu) -> bool {
+        match kind {
+            kirq::IpiKind::Generic => notify_cpu(x86_apic::GENERIC_IPI_VECTOR as usize, target),
+            kirq::IpiKind::CpuBacktrace => false,
+        }
     }
 
     fn set_prio(_irq: usize, _priority: u8) {
