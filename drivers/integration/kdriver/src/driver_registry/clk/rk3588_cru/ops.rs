@@ -528,9 +528,11 @@ impl FracBranch {
     /// child mux onto the fraction while its rate changes (clk.c:419-456).
     /// Called after the tree is live; ops are invoked directly (the notifier
     /// runs under the framework clock lock and must not re-enter it).
-    pub fn wire_notifiers(provider_id: u32, fracs: &[&'static FracChild]) {
-        for child in fracs {
-            let Ok(frac) = kclk::clk_get_by_index(provider_id, child.index) else {
+    pub fn wire_notifiers(provider_id: u32, fracs: &[(ClkIndex, &'static FracChild)]) {
+        for (frac_index, child) in fracs {
+            // The notifier hooks the FRACTION node (its rate is what changes
+            // during the dance); `child` describes the exposed mux it drives.
+            let Ok(frac) = kclk::clk_get_by_index(provider_id, *frac_index) else {
                 log::error!("clk-rk3588: frac {} not found for notifier", child.name);
                 continue;
             };

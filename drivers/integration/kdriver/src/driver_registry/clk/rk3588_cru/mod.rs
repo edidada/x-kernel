@@ -254,7 +254,9 @@ fn register_tree(
     branches.extend_from_slice(&data::BRANCHES);
 
     let mut deferred_links: Vec<(&'static str, &'static str)> = Vec::new();
-    let mut fracs: Vec<&FracChild> = Vec::new();
+    // (frac node DT index, child mux descriptor) — the notifier hook needs
+    // the FRACTION node's index; the child carries only its own (mux) index.
+    let mut fracs: Vec<(ClkIndex, &'static FracChild)> = Vec::new();
 
     // -- PLLs: internal pll node + exported mode mux ------------------------
     let mut internal_index = INTERNAL_INDEX_BASE + data::ORPHAN_PARENTS.len() as ClkIndex;
@@ -318,7 +320,7 @@ fn register_tree(
                     child.parents,
                     kclk::ClkFlags::SET_RATE_PARENT,
                 ));
-                fracs.push(child);
+                fracs.push((spec.index.ok_or_else(bad_custom)?, child));
             }
             CustomKind::GateLink => {
                 // The gate itself is in the static table; only the link
@@ -336,6 +338,11 @@ fn register_tree(
         log::error!("clk-rk3588: clock tree registration failed: {err:?}");
         return Err(map_clk_error(err));
     }
+
+    // Publish the provider ONLY after the whole batch succeeded, so no
+    // consumer can observe a half-built tree (Linux of_clk_add_provider
+    // ordering; the post-registration wiring below resolves through it).
+    kclk::register_provider(table);
 
     // Post-registration wiring that needs live nodes (public handle API).
     ops::ArmClk::post_register(&armclks);
