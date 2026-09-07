@@ -7,7 +7,8 @@
 /// Halt the current CPU terminally.
 ///
 /// Masks every DAIF exception class — debug exceptions, SError, IRQs
-/// (including PMR-mode pseudo-NMIs), and FIQs — then remains in the
+/// (including PMR-mode pseudo-NMIs), and FIQs — and active hardware NMIs
+/// via ALLINT, then remains in the
 /// architected wait state until the CPU is reset. This is a terminal
 /// operation and never returns.
 #[inline]
@@ -17,7 +18,7 @@ pub fn stop_cpu() -> ! {
     // path must also block the pseudo-NMIs, SError, and debug exceptions
     // that could otherwise resume the CPU and panic it into a power-off.
     // Nothing runs on this CPU afterwards, so no restore path is needed.
-    super::irq::disable_local_exceptions();
+    crate::prepare_cpu_stop();
     loop {
         aarch64_cpu::asm::wfi();
     }

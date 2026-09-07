@@ -24,6 +24,7 @@ pub use cache::{
 };
 pub use cpu::{await_interrupts, stop_cpu};
 pub use fp::enable_fp;
+pub(crate) use irq::disable_local_exceptions;
 #[cfg(feature = "nmi-hardware")]
 pub use irq::{allint_active, allint_clear, allint_is_set, mark_allint_active};
 pub use irq::{

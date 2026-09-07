@@ -12,6 +12,10 @@ use lazyinit::LazyInit;
 
 static GIC: LazyInit<SpinNoIrq<Gic>> = LazyInit::new();
 static TRAP_OP: LazyInit<TrapOp> = LazyInit::new();
+// A CPU-local handle exposes the driver's single-write SGI operation without
+// borrowing the shared configuration object on runtime or terminal paths.
+#[percpu::def_percpu]
+static IPI_INTERFACE: LazyInit<CpuInterface> = LazyInit::new();
 const GUEST_VTIMER_IRQ: usize = 27;
 
 pub fn init(gicd_base: memaddr::VirtAddr, gicc_base: memaddr::VirtAddr) {
@@ -35,6 +39,11 @@ pub fn init_current_cpu() {
     let mut cpu = GIC.lock().cpu_interface();
     cpu.init_current_cpu();
     cpu.set_eoi_mode_ns(true);
+    IPI_INTERFACE.with_current(|interface| {
+        // The primary CPU is configured in both early and final init. Its
+        // register mapping stays fixed, so retain the first sender handle.
+        let _ = interface.call_once(|| cpu);
+    });
 }
 
 pub fn set_trigger(interrupt_id: usize, edge: bool) {
@@ -130,36 +139,72 @@ pub fn complete_irq(completion_cookie: usize) {
 }
 
 pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) -> bool {
+    if interrupt_id >= 16 {
+        return false;
+    }
     // `dmb ishst` orders the caller's prior Normal-memory stores before the
     // SGI MMIO write, which is required for cross-CPU publish-before-notify
     // semantics.
     aarch64_cpu::asm::barrier::dmb(aarch64_cpu::asm::barrier::ISHST);
-    match target {
-        TargetCpu::Self_ => {
-            GIC.lock()
-                .send_sgi(IntId::sgi(interrupt_id as u32), SGITarget::Current);
-        }
-        TargetCpu::Specific(cpu_id) => {
-            let target_list = TargetList::new(core::iter::once(cpu_id));
-            GIC.lock().send_sgi(
-                IntId::sgi(interrupt_id as u32),
-                SGITarget::TargetList(target_list),
-            );
-        }
-        TargetCpu::AllButSelf { .. } => {
-            GIC.lock()
-                .send_sgi(IntId::sgi(interrupt_id as u32), SGITarget::AllOther);
-        }
-        TargetCpu::Mask(mask) => {
-            let gic = GIC.lock();
-            for cpu_id in mask.iter_logical() {
-                let target_list = TargetList::new(core::iter::once(cpu_id.as_usize()));
-                gic.send_sgi(
+    IPI_INTERFACE.with_current(|interface| {
+        let Some(cpu) = interface.get() else {
+            return false;
+        };
+        match target {
+            TargetCpu::Self_ => {
+                cpu.send_sgi(IntId::sgi(interrupt_id as u32), SGITarget::Current);
+            }
+            TargetCpu::Specific(cpu_id) => {
+                let target_list = TargetList::new(core::iter::once(cpu_id));
+                cpu.send_sgi(
                     IntId::sgi(interrupt_id as u32),
                     SGITarget::TargetList(target_list),
                 );
             }
+            TargetCpu::AllButSelf { .. } => {
+                cpu.send_sgi(IntId::sgi(interrupt_id as u32), SGITarget::AllOther);
+            }
+            TargetCpu::Mask(mask) => {
+                for cpu_id in mask.iter_logical() {
+                    let target_list = TargetList::new(core::iter::once(cpu_id.as_usize()));
+                    cpu.send_sgi(
+                        IntId::sgi(interrupt_id as u32),
+                        SGITarget::TargetList(target_list),
+                    );
+                }
+            }
+        }
+        true
+    })
+}
+
+#[cfg(unittest)]
+mod tests {
+    use unittest::{assert, def_test};
+
+    use super::*;
+
+    // The self-SGI is handled only after the guard restores local IRQs. A
+    // sender that re-enters the configuration lock would deadlock here.
+    #[def_test(serial)]
+    fn send_sgi_does_not_acquire_configuration_lock() {
+        let Some(gic) = GIC.get() else {
+            return unittest::TestResult::Ignored;
+        };
+        let _guard = gic.lock();
+        let cpu = kplat::cpu::id();
+        let mut mask = kcpu_id_map::KCpuMask::new();
+        mask.set_logical(cpu, true);
+        for target in [
+            TargetCpu::Self_,
+            TargetCpu::Specific(cpu.as_usize()),
+            TargetCpu::Mask(mask),
+            TargetCpu::AllButSelf {
+                me: cpu.as_usize(),
+                total: kcpu_id_map::nr_cpus(),
+            },
+        ] {
+            assert!(notify_cpu(super::super::GENERIC_IPI_SGI, target));
         }
     }
-    true
 }

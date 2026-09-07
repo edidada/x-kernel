@@ -83,13 +83,7 @@ fn send_ipi_to_raw_hart(raw_hart_id: usize) -> bool {
     // SBI IPI request, so remote handlers cannot observe the interrupt before
     // its request state becomes visible.
     unsafe { core::arch::asm!("fence rw, rw", options(nomem, nostack)) };
-    let res = sbi_rt::send_ipi(HartMask::from_mask_base(1, raw_hart_id));
-    if res.is_err() {
-        warn!("notify_cpu failed: {res:?}");
-        false
-    } else {
-        true
-    }
+    sbi_rt::send_ipi(HartMask::from_mask_base(1, raw_hart_id)).is_ok()
 }
 
 pub fn init_current_cpu_context() {
@@ -247,17 +241,13 @@ impl kirq::IntrManagerIf {
         match target {
             TargetCpu::Self_ => {
                 let logical_cpu_id = this_cpu_id();
-                let raw_cpu_id = raw_cpu_id(logical_cpu_id).unwrap_or_else(|| {
-                    panic!(
-                        "missing raw CPU id mapping for current logical CPU {}",
-                        logical_cpu_id.as_usize()
-                    )
-                });
+                let Some(raw_cpu_id) = raw_cpu_id(logical_cpu_id) else {
+                    return false;
+                };
                 send_ipi_to_raw_hart(raw_cpu_id.as_usize())
             }
             TargetCpu::Specific(logical_cpu_id) => {
                 let Some(raw_cpu_id) = raw_cpu_id(LogicalCpuId::new(logical_cpu_id)) else {
-                    warn!("RISC-V notify_cpu: missing raw CPU id for logical CPU {logical_cpu_id}");
                     return false;
                 };
                 send_ipi_to_raw_hart(raw_cpu_id.as_usize())
@@ -270,10 +260,6 @@ impl kirq::IntrManagerIf {
                 for logical_cpu_id in 0..cpu_num {
                     if logical_cpu_id != local_logical_cpu_id {
                         let Some(raw_cpu_id) = raw_cpu_id(LogicalCpuId::new(logical_cpu_id)) else {
-                            warn!(
-                                "RISC-V notify_cpu: missing raw CPU id for logical CPU \
-                                 {logical_cpu_id}"
-                            );
                             all_sent = false;
                             continue;
                         };
@@ -286,10 +272,6 @@ impl kirq::IntrManagerIf {
                 let mut all_sent = true;
                 for logical_cpu_id in mask.iter_logical() {
                     let Some(raw_cpu_id) = raw_cpu_id(logical_cpu_id) else {
-                        warn!(
-                            "RISC-V notify_cpu: missing raw CPU id for logical CPU {}",
-                            logical_cpu_id.as_usize()
-                        );
                         all_sent = false;
                         continue;
                     };

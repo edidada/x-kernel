@@ -40,6 +40,21 @@ pub use crate::{
 
 static IRQ_CONTROL_LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
 
+/// Scoped fixtures for cross-crate IRQ integration tests.
+#[cfg(unittest)]
+pub mod test_support {
+    /// Runs a probe while both ordinary IRQ-control locks are held.
+    ///
+    /// The probe must not use descriptor registration or normal IRQ control.
+    /// This exercises emergency operations without adding a production hook
+    /// or depending on remote-CPU scheduling to create lock contention.
+    pub fn with_irq_control_locked<T>(probe: impl FnOnce() -> T) -> T {
+        let _control = super::IRQ_CONTROL_LOCK.lock();
+        let _state = super::IRQ_STATE.lock();
+        probe()
+    }
+}
+
 /// Options for installing a regular IRQ handler.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IrqRegisterOptions {
@@ -140,6 +155,9 @@ pub fn try_enable_irq(spec: impl Into<IrqSpec>) -> Result<(), IrqDescError> {
 /// global disable depth. The owner manages CPU readiness and must retain the
 /// handler and mapping while any CPU can receive this interrupt. May be used
 /// during boot or in ordinary IRQ context, but never from NMI context.
+/// These reversible control operations serialize through global IRQ locks;
+/// they are not suitable for terminal cleanup when another CPU may be stopped
+/// while holding those locks. Terminal owners use CPU-local masking instead.
 ///
 /// # Errors
 /// Returns an error for an unknown, unregistered, non-per-CPU or tearing-down

@@ -32,6 +32,24 @@ pub(crate) fn flush_icache_others() {
     crate::IcacheFlushIf::flush_others();
 }
 
+/// Masks local interrupt delivery before the final CPU stop protocol.
+///
+/// This is a one-way operation: callers must remain pinned and enter a power
+/// terminal or [`stop_cpu`] without restoring interrupts. It only accesses
+/// CPU-local registers and never waits for another CPU or an IRQ-control lock.
+/// AArch64 masks DAIF and, when active, hardware-NMI ALLINT. Architectures
+/// without a CPU-level NMI mask still require the owner to stop local NMI
+/// sources before acknowledging that this CPU has parked.
+#[inline]
+pub fn prepare_cpu_stop() {
+    #[cfg(target_arch = "aarch64")]
+    aarch64::disable_local_exceptions();
+    #[cfg(not(target_arch = "aarch64"))]
+    disable_local_irq();
+    // Keep subsequent terminal state publication after the CPU mask change.
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
 cfg_if::cfg_if! {
     if #[cfg(target_arch = "x86_64")] {
         mod x86_64;

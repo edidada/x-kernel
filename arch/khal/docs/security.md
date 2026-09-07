@@ -24,7 +24,9 @@ generic `kirq` API。
    `configure_nmi` / `enable_periodic_nmi` 返回 `false` 表示该 CPU 无法使用 NMI。
    最终停机路径经 `quiesce_nmi()` 停掉当前 CPU 的周期源；该路径持有
    `NoPreempt`，并依赖 PMU backend 的共享计数器访问与原子 enabled 状态来安全
-   覆盖可能已经到达的 NMI 分发。
+   覆盖可能已经到达的 NMI 分发。普通电源终点的外层 `NoPreempt` 保持到最终
+   平台调用，不因 stop provider 返回而恢复调度；入口经 `karch::prepare_cpu_stop()`
+   屏蔽 CPU 本地中断，AArch64 硬件 NMI 模式同时屏蔽 ALLINT。
 
 本模块不直接处理用户指针、DMA buffer、设备 MMIO 或文件/网络数据。
 

@@ -45,10 +45,6 @@ fn notify_cpu(interrupt_id: usize, target: TargetCpu) -> bool {
         TargetCpu::Specific(logical_cpu_id) => {
             let logical_cpu_id = LogicalCpuId::new(logical_cpu_id);
             let Some(raw_cpu_id) = raw_cpu_id(logical_cpu_id) else {
-                warn!(
-                    "x86 notify_cpu: missing raw CPU id for logical CPU {}",
-                    logical_cpu_id.as_usize()
-                );
                 return false;
             };
             x86_apic::send_ipi_raw(interrupt_id, raw_cpu_id);
@@ -62,10 +58,6 @@ fn notify_cpu(interrupt_id: usize, target: TargetCpu) -> bool {
             let mut all_sent = true;
             for logical_cpu_id in mask.iter_logical() {
                 let Some(raw_cpu_id) = raw_cpu_id(logical_cpu_id) else {
-                    warn!(
-                        "x86 notify_cpu: missing raw CPU id for logical CPU {}",
-                        logical_cpu_id.as_usize()
-                    );
                     all_sent = false;
                     continue;
                 };

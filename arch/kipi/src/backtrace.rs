@@ -134,8 +134,7 @@ pub fn enable_cpu_backtrace() -> CpuBacktraceDelivery {
 /// rejected masking; readiness stays withdrawn and a later call retries.
 pub fn disable_cpu_backtrace() -> bool {
     let _local = kspin::NoPreemptIrqSave::new();
-    CPU_BACKTRACE_DELIVERY[khal::percpu::this_cpu_id().as_usize()]
-        .store(CpuBacktraceDelivery::Unavailable as u8, Ordering::Release);
+    withdraw_local_readiness();
     if !CPU_BACKTRACE_REGISTERED.load(Ordering::Acquire) {
         return true;
     }
@@ -143,6 +142,13 @@ pub fn disable_cpu_backtrace() -> bool {
         return true;
     };
     kirq::try_disable_percpu_irq(desc).is_ok()
+}
+
+/// Withdraws dispatch readiness without entering the IRQ control plane.
+/// Caller is pinned; terminal callers must also mask CPU-local delivery.
+pub(super) fn withdraw_local_readiness() {
+    CPU_BACKTRACE_DELIVERY[khal::percpu::this_cpu_id().as_usize()]
+        .store(CpuBacktraceDelivery::Unavailable as u8, Ordering::Release);
 }
 
 /// Returns the exact set of CPUs that enabled the CPU-backtrace vector.

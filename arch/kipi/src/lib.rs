@@ -148,6 +148,18 @@ pub fn disable_ipi() -> bool {
     kirq::try_disable_percpu_irq(desc).is_ok()
 }
 
+/// Withdraws local IPI readiness for the final CPU stop, retaining all storage.
+///
+/// The caller is pinned and has masked CPU-local interrupt delivery. This
+/// terminal path only publishes software gates: it must not enter ordinary
+/// per-CPU IRQ control, whose global locks may be held by a stopped peer.
+/// Pending notifications and racing enqueues remain valid because handlers,
+/// descriptors, and queues are never reclaimed or re-enabled after this point.
+fn quiesce_local_ipis() {
+    IPI_QUEUE_READY[this_cpu_id().as_usize()].store(false, Ordering::Release);
+    backtrace::withdraw_local_readiness();
+}
+
 /// Initializes the current CPU's local IPI event queue.
 ///
 /// This must run on every CPU before that CPU can receive callbacks through

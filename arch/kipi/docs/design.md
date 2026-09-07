@@ -122,6 +122,8 @@ watchdog NMI
 - `disable_ipi()` / `disable_cpu_backtrace()` 先撤销 readiness，再禁用本地投递；
   可在普通内核/IRQ 上下文调用，不可在 NMI 中调用。不等待 handler 退出、不释放
   handler/队列，也不撤销 NMI 属性；重新 enable 使用同一份静态资源。
+- 最终停机使用独立的 `quiesce_local_ipis()`：CPU 本地中断已屏蔽时，仅撤销两类
+  IPI readiness，保留全部存储，不调用持有全局锁的普通 per-CPU IRQ 启停接口。
 - `cpu_backtrace_ready_mask()` 与 `send_cpu_backtrace()` 可从 NMI 调用，只访问原子
   readiness，并要求 IRQ backend 的 `CpuBacktrace` 分支无分配、无日志、无锁。
 
@@ -284,8 +286,8 @@ inactive
    态；并发调用方 CAS 失败，置 ack 并自行 park。发布后保持 Generic IPI 的
    `AllButSelf` 广播；就绪 mask 只限定等待范围，不缩小停机覆盖范围。
 2. 任何 CPU 进入 `ipi_handler` 时，若看到停机请求且自己不是 orchestrator，
-   先完成所有仍会触碰共享状态的收尾（日志、屏蔽本地中断、停靠本地
-   NMI/pseudo-NMI 源，撤销 Generic/CpuBacktrace readiness 并禁用本地投递），**然后才**置位本 CPU 的
+   先用 `karch::prepare_cpu_stop()` 屏蔽本地中断，停靠本地周期 NMI 源，
+   撤销 Generic/CpuBacktrace readiness，**然后才**置位本 CPU 的
    `STOP_ACKED`——ack 是停靠 CPU 对共享状态的最后一次写，之后立即进入
    屏蔽本地异常的 `wfi/hlt` 永久停靠。orchestrator 观察到 ack 即可确定
    该 CPU 不会再执行任何共享状态路径。
@@ -295,8 +297,17 @@ inactive
    `smp_send_stop()`。
 
 orchestrator 全程持有 `NoPreempt` 守卫钉在本 CPU 上（见设计决策），否则
-认领、广播与等待所依据的 CPU id 会在迁移后失效。返回前的 RAII guard 先 quiesce
-自身周期 NMI 与 IPI，再释放迁移保护，覆盖正常完成、超时与启动早期退出。
+认领、广播与等待所依据的 CPU id 会在迁移后失效。入口先屏蔽 CPU 本地中断，
+防止 orchestrator 被普通 handler 打断后等待失去响应的 CPU 所持有的锁。
+`coordinate_stop()` 的正常完成、超时与启动早期退出都回到显式的本地清理步骤；
+清理只停止周期源、撤销软件 readiness，不查询或修改 IRQ descriptor。
+`khal::power` 在整个不可返回的电源终点中持有外层 `NoPreempt`，保证 provider
+返回时释放内部 guard 也不会触发待处理的调度。
+
+所有 IPI backend 的发送路径不得分配、记录普通日志或等待其他 CPU 的共享锁。
+GICv3 的两类 IPI 共用寄存器发送实现；GICv2 在每 CPU 初始化时保存驱动提供的
+CPU-interface handle，发送只调用其 SGI 单次写操作。停机超时诊断使用
+`kprint_atomic!`，避免告警重新依赖普通 console/logger 锁。
 
 停靠前必须停靠本地 NMI 源：CPU 级异常屏蔽挡不住真正的 NMI（如 x86 NMI
 看门狗）；若不停靠，停靠中的 CPU 会被看门狗 NMI 反复唤醒，并把“故意停机”
@@ -404,10 +415,10 @@ CPU 发布），一次 `compare_exchange` 同时完成选主与发布，观察�
 
 ### 为什么停靠前要停靠本地 NMI 源
 
-`karch::stop_cpu()` 现在是 `-> !` 的终结停靠：AArch64 侧以 `msr daifset,
-#0xf` 全掩 DAIF 四类异常（debug、SError、IRQ 含 pseudo-NMI、FIQ），其它
-架构屏蔽本地可屏蔽中断并循环进入等待指令。但 CPU 级屏蔽挡不住真正的
-NMI（x86 的 NMI 不受 IF 控制）。若不先把 NMI 源停掉：
+`karch::stop_cpu()` 是 `-> !` 的终结停靠：AArch64 全掩 DAIF 四类异常
+（debug、SError、IRQ 含 pseudo-NMI、FIQ），硬件 NMI 机制已启用时还设置
+ALLINT；其它架构屏蔽本地可屏蔽中断并循环进入等待指令。x86 的 NMI
+不受 IF 控制，仍须单独停掉周期源。若不先把 NMI 源停掉：
 
 - 带 NMI 看门狗的平台（如 x86 NMI watchdog）上，停靠中的 CPU 会被周期性
   NMI 反复唤醒，无法真正停下；
@@ -459,4 +470,9 @@ orchestrator 而永不 park，而真正的 orchestrator 却在等它 ack，直�
 - x86/RISC-V 覆盖 Generic self-IPI、跨 CPU 回调与 TLB 协议；不支持的 CpuBacktrace
   测试显式跳过。x86 需覆盖 xAPIC 的 ICR self-send，不能只在 x2APIC 上测试。
 - LoongArch 配置验证超出支持范围的 CPU 数收敛为 1；完整 CPU hotplug 不在验证范围。
+- `test_terminal_ipi_quiesce_avoids_irq_control_and_queue_locks` 同时持有 IRQ
+  控制锁、状态锁和本地队列锁，验证 readiness 撤销与迟到分发不依赖这些锁。
+  fixture 只恢复软件 gate 的普通启停，不停靠 CPU 或停止周期源。
+- GICv2/v3 发送回归测试持有配置对象锁，覆盖 self、指定 CPU、mask 和广播；
+  旧的发送实现会递归获取该锁而无法完成。
 - 单测结束经正常 `power_off()` 进入不可返回的 stop 路径；测试不尝试撤销终端停机。

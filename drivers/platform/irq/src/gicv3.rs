@@ -4,8 +4,9 @@
 
 //! GICv3 backend.
 
+use aarch64_cpu::registers::{MPIDR_EL1, Readable};
 use arm_gic_driver::v3::*;
-use kcpu_id_map::{KCpuMask, KCpuMaskExt, LogicalCpuId, raw_cpu_id};
+use kcpu_id_map::{KCpuMaskExt, LogicalCpuId, raw_cpu_id};
 use kirq::TargetCpu;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
@@ -318,113 +319,63 @@ pub fn complete_irq(completion_cookie: usize) {
     TRAP_OP.dir(intid);
 }
 
-pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) -> bool {
-    // `ICC_SGI1R_EL1` is written via a system-register `msr`, so we need
-    // `dsb st` here rather than a mere ordering barrier. This guarantees the
-    // shootdown request state stored in Normal memory has completed before the
-    // target CPU can observe the SGI delivery.
-    aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::ST);
-    let mut all_sent = true;
-    match target {
-        TargetCpu::Self_ => {
-            GIC.lock()
-                .cpu_interface()
-                .send_sgi(IntId::sgi(interrupt_id as u32), SGITarget::current());
-        }
-        TargetCpu::Specific(logical_cpu_id) => {
-            let Some(raw_cpu_id) = raw_cpu_id(LogicalCpuId::new(logical_cpu_id)) else {
-                warn!("GICv3 notify_cpu: missing raw CPU id for logical CPU {logical_cpu_id}");
-                return false;
-            };
-            let affinity = Affinity::from_mpidr(raw_cpu_id.as_usize() as u64);
-            let target = SGITarget::list([affinity]);
-            GIC.lock()
-                .cpu_interface()
-                .send_sgi(IntId::sgi(interrupt_id as u32), target);
-        }
-        TargetCpu::AllButSelf { .. } => {
-            GIC.lock()
-                .cpu_interface()
-                .send_sgi(IntId::sgi(interrupt_id as u32), SGITarget::All);
-        }
-        TargetCpu::Mask(mask) => {
-            let gic = GIC.lock();
-            let cpu = gic.cpu_interface();
-            for logical_cpu_id in mask.iter_logical() {
-                let Some(raw_cpu_id) = raw_cpu_id(logical_cpu_id) else {
-                    warn!(
-                        "GICv3 notify_cpu: missing raw CPU id for logical CPU {}",
-                        logical_cpu_id.as_usize()
-                    );
-                    all_sent = false;
-                    continue;
-                };
-                let affinity = Affinity::from_mpidr(raw_cpu_id.as_usize() as u64);
-                cpu.send_sgi(IntId::sgi(interrupt_id as u32), SGITarget::list([affinity]));
-            }
-        }
-    }
-    // `isb` forces the SGI system-register write to be observed as issued
-    // before subsequent instructions continue, matching Linux's GICv3
-    // SGI-send ordering.
-    aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
-    all_sent
-}
-
-/// Send an SGI to exactly the requested logical CPUs from NMI context.
+/// Sends an SGI using only immutable capabilities and CPU-local registers.
 ///
-/// Unlike [`notify_cpu`], this path is safe in NMI context: it does not touch
-/// the locked `GIC` object and emits no log records. The SGI line must have
-/// been registered, configured as NMI, and enabled on every target CPU during
-/// boot before this function is used. The line may use regular-IRQ priority as
-/// a bounded fallback when NMI promotion was unavailable.
-pub fn send_ipi_mask_nmi_safe(interrupt_id: usize, target_mask: KCpuMask) -> bool {
+/// Generic and CPU-backtrace delivery share this sender. It neither borrows
+/// the locked configuration object nor logs, so terminal and NMI callers do
+/// not depend on another CPU releasing GIC state. The caller is pinned by the
+/// Generic IPI wrapper or interrupt context; targets must have enabled the SGI.
+pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) -> bool {
     if interrupt_id >= 16 {
         return false;
-    }
-
-    if target_mask.is_empty() {
-        return true;
     }
     let Some(gicd_typer) = GICD_TYPER.get().copied() else {
         return false;
     };
     let icc_ctlr = read_icc_ctlr();
-
-    // Complete publication of the rendezvous state before any target can
-    // observe the SGI. Each ICC_SGI1R_EL1 write below names one exact
-    // affinity, avoiding IRM's all-but-self delivery to CPUs that have not
-    // initialized the backtrace vector.
-    aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::ST);
-
-    let mut all_sent = true;
-    for logical_cpu_id in target_mask.iter_logical() {
-        let Some(raw_cpu_id) = raw_cpu_id(logical_cpu_id) else {
-            all_sent = false;
-            continue;
-        };
-        let mpidr = raw_cpu_id.as_usize() as u64;
+    let send_to_mpidr = |mpidr| {
         let Some(sgi1r) = sgi1r_value(interrupt_id, mpidr, gicd_typer, icc_ctlr) else {
-            all_sent = false;
-            continue;
+            return false;
         };
+        write_sgi1r(sgi1r);
+        true
+    };
+    let send_to_cpu = |cpu| raw_cpu_id(cpu).is_some_and(|raw| send_to_mpidr(raw.as_usize() as u64));
 
-        // SAFETY: ICC_SGI1R_EL1 is the architected GICv3 Group-1 SGI send
-        // register and is accessible at EL1 after the CPU interface is
-        // enabled. The value contains a valid SGI INTID and a target affinity
-        // derived from the boot-validated logical/raw CPU map. Deliberately
-        // omit `nomem`: this assembly is also a compiler barrier for the
-        // rendezvous-state publication ordered by the DSB above.
-        unsafe {
-            core::arch::asm!(
-                "msr ICC_SGI1R_EL1, {sgi1r}",
-                sgi1r = in(reg) sgi1r,
-                options(nostack)
-            );
+    // Complete publication of request state before the first notification.
+    // Exact masks never use IRM: unready CPUs must not receive a backtrace.
+    aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::ST);
+    let all_sent = match target {
+        TargetCpu::Self_ => send_to_mpidr(MPIDR_EL1.get()),
+        TargetCpu::Specific(cpu) => send_to_cpu(LogicalCpuId::new(cpu)),
+        TargetCpu::AllButSelf { .. } => {
+            write_sgi1r(((interrupt_id as u64) << 24) | (1 << 40));
+            true
         }
-    }
+        TargetCpu::Mask(mask) => {
+            let mut all_sent = true;
+            for cpu in mask.iter_logical() {
+                all_sent &= send_to_cpu(cpu);
+            }
+            all_sent
+        }
+    };
     aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
     all_sent
+}
+
+fn write_sgi1r(sgi1r: u64) {
+    // SAFETY: the boot-enabled GICv3 CPU interface exposes ICC_SGI1R_EL1.
+    // Callers encode a validated SGI and either a boot-validated affinity or
+    // the architectural all-but-self shorthand. Omit `nomem` so publication
+    // cannot be moved past this notification by the compiler.
+    unsafe {
+        core::arch::asm!(
+            "msr ICC_SGI1R_EL1, {sgi1r}",
+            sgi1r = in(reg) sgi1r,
+            options(nostack)
+        );
+    }
 }
 
 fn sgi1r_value(interrupt_id: usize, mpidr: u64, gicd_typer: u32, icc_ctlr: u64) -> Option<u64> {
@@ -468,6 +419,30 @@ mod tests {
     use unittest::{assert, assert_eq, def_test};
 
     use super::*;
+
+    // This exercises the actual SGI sender while the shared configuration
+    // object is unavailable, as it may be during terminal stop or NMI entry.
+    #[def_test(serial)]
+    fn send_sgi_does_not_acquire_configuration_lock() {
+        let Some(gic) = GIC.get() else {
+            return unittest::TestResult::Ignored;
+        };
+        let _guard = gic.lock();
+        let cpu = kplat::cpu::id();
+        let mut mask = kcpu_id_map::KCpuMask::new();
+        mask.set_logical(cpu, true);
+        for target in [
+            TargetCpu::Self_,
+            TargetCpu::Specific(cpu.as_usize()),
+            TargetCpu::Mask(mask),
+            TargetCpu::AllButSelf {
+                me: cpu.as_usize(),
+                total: kcpu_id_map::nr_cpus(),
+            },
+        ] {
+            assert!(notify_cpu(super::super::GENERIC_IPI_SGI, target));
+        }
+    }
 
     #[def_test]
     fn sgi_range_selector_requires_both_rss_capabilities() {

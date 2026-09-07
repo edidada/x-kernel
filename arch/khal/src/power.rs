@@ -20,8 +20,9 @@
 //!
 //! Panic and crash paths must use [`platform_halt`] or
 //! [`platform_power_off`] directly instead of these terminals: the SMP stop
-//! exchanges IPIs, which can deadlock when the panicking CPU holds a lock
-//! that the other CPUs spin on with interrupts disabled.
+//! protocol is only supported in ordinary execution context. A panic may
+//! originate in NMI context and must not wait for cooperative IRQ delivery
+//! or the normal stop deadline before reaching the platform terminal.
 
 use kerrno::KResult;
 #[cfg(feature = "smp")]
@@ -34,7 +35,10 @@ pub use kplat::sys::{
 /// `kiface` for stopping all other CPUs on the terminal path.
 ///
 /// The provider must stop every present CPU except its caller before
-/// returning, and must be callable with local interrupts disabled.
+/// returning, best-effort and bounded, and must be callable with local
+/// interrupts disabled. Callers must remain pinned through the following
+/// platform terminal; a provider may leave local interrupts masked and IPI
+/// readiness withdrawn. This operation has no resume path.
 /// Providers degrade to a no-op while their machinery is not ready yet
 /// (for example before IPI delivery is initialized).
 ///
@@ -61,6 +65,10 @@ impl SmpStopIf {
 /// See the module documentation for the terminal contract; this never
 /// returns.
 pub fn halt() -> ! {
+    // Keep the terminal CPU pinned even after the stop provider returns:
+    // dropping its own guard must not reschedule before the final park.
+    let _terminal = kspin::NoPreempt::new();
+    karch::prepare_cpu_stop();
     SmpStopIf::stop_other_cpus();
     // Quiesce the terminal CPU's local NMI source so an NMI-driven
     // hard-lockup watchdog cannot wake it from the final stop loop and
@@ -74,6 +82,8 @@ pub fn halt() -> ! {
 /// See the module documentation for the terminal contract; this never
 /// returns.
 pub fn power_off() -> ! {
+    let _terminal = kspin::NoPreempt::new();
+    karch::prepare_cpu_stop();
     SmpStopIf::stop_other_cpus();
     crate::quiesce_nmi();
     platform_power_off()

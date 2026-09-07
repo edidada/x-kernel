@@ -10,8 +10,8 @@ This crate provides a uniform API across all supported architectures (AArch64, x
 - **DMA ordering**: `dma_read_barrier()` — orders prior CPU stores before a
   device reads the same memory via DMA (`dbar 0` on LoongArch64, no-op on
   cache-coherent architectures)
-- **CPU control**: `stop_cpu() -> !` (terminal halt; never returns),
-  `await_interrupts()`
+- **CPU control**: `prepare_cpu_stop()` (one-way local interrupt masking),
+  `stop_cpu() -> !` (terminal halt; never returns), `await_interrupts()`
 - **Local interrupt management**:
   - `enable_local_irq()`, `disable_local_irq()`, `local_irq_enabled()`
   - `save_irq_and_disable() -> usize` — atomically save interrupt state and disable local interrupts
@@ -51,3 +51,18 @@ building block for other crates.
 - `arm-el2`: Enable AArch64 EL2 (hypervisor) variants of TLB flush, page table root, and trap vector operations.
 - `smp`: Delegate remote instruction-cache flushes to the `kipi` provider. Without
   this feature, `karch` installs a uniprocessor no-op provider for remote flushes.
+
+## Terminal CPU masking
+
+`prepare_cpu_stop()` only touches local CPU registers and never acquires an
+IRQ/controller lock. Callers stay pinned and proceed to a power terminal without
+restoring interrupt delivery. AArch64 masks DAIF, including pseudo-NMIs, and sets
+ALLINT when the per-CPU hardware-NMI mechanism is active. ALLINT access is gated
+by the boot-established FEAT_NMI state in `aarch64/irq.rs`; unsupported CPUs never
+execute that register access. Other architectures mask normal local interrupts.
+Sources that bypass those masks still need owner-side terminal quiescence.
+
+`kipi` uses this operation before stop coordination and before a peer's final
+acknowledgement. Ordinary IRQ save/restore and reversible per-IRQ enable/disable
+keep their existing contracts. The terminal mask must never be used as an IRQ
+critical-section guard or restored after a stop acknowledgement.

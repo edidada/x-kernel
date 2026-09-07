@@ -17,6 +17,51 @@ impl Drop for RestoreLocalGenericIpi {
     }
 }
 
+struct RestoreLocalIpis {
+    backtrace_delivery: crate::CpuBacktraceDelivery,
+}
+
+impl Drop for RestoreLocalIpis {
+    fn drop(&mut self) {
+        if self.backtrace_delivery != crate::CpuBacktraceDelivery::Unavailable {
+            // Terminal withdrawal kept the line enabled. Mask it through the
+            // ordinary lifecycle before restoring its previous NMI/IRQ mode.
+            core::assert!(crate::disable_cpu_backtrace());
+            core::assert_eq!(crate::enable_cpu_backtrace(), self.backtrace_delivery);
+        }
+        core::assert!(crate::enable_ipi());
+    }
+}
+
+// QEMU integration coverage for the software part of terminal quiescence.
+// The real stop protocol cannot be undone. This fixture restores only the
+// dispatch gates; it never parks a CPU or stops its periodic NMI source.
+#[def_test(serial)]
+fn test_terminal_ipi_quiesce_avoids_irq_control_and_queue_locks() {
+    let _local = kspin::NoPreemptIrqSave::new();
+    let cpu = khal::percpu::this_cpu_id();
+    assert!(crate::is_ipi_queue_ready(cpu));
+    let _restore = RestoreLocalIpis {
+        backtrace_delivery: crate::cpu_backtrace_delivery(),
+    };
+    let (is_ready, delivery, is_initialized) = crate::IPI_EVENT_QUEUE.with_current(|queue| {
+        let _queue = queue.lock();
+        kirq::test_support::with_irq_control_locked(|| {
+            crate::quiesce_local_ipis();
+            // A late Generic IPI must return before it touches the queue.
+            crate::ipi_handler();
+            (
+                crate::is_ipi_queue_ready(cpu),
+                crate::cpu_backtrace_delivery(),
+                queue.is_inited(),
+            )
+        })
+    });
+    assert!(!is_ready);
+    assert_eq!(delivery, crate::CpuBacktraceDelivery::Unavailable);
+    assert!(is_initialized);
+}
+
 struct WithdrawIpiReadiness {
     cpu: LogicalCpuId,
     was_ready: bool,

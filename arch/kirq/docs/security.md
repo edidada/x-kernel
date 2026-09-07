@@ -170,6 +170,11 @@ Callers must also avoid holding locks or resources that their IRQ handler may
 acquire while waiting; otherwise teardown can wait for a handler that is blocked
 behind the caller's own lock.
 
+普通 per-CPU 控制接口仍获取全局控制锁与状态锁，不提供终止停机保证。
+停机消费者必须使用 CPU 本地屏蔽和软件 gate，不得把这个接口用于超时后的清理。
+所有语义 IPI 发送均不能等待跨 CPU 共享锁，Generic 发送由 wrapper 钉住当前 CPU；
+CpuBacktrace 还必须满足 NMI 上下文约束。
+
 per-CPU 控制接口只操作已注册的 `PER_CPU` descriptor，拒绝共享 IRQ、缺失 action
 或 teardown 状态；它持有控制面锁并 pin CPU，直接调用本地 backend，不消耗全局
 disable depth。关闭不是同步 barrier，不跟踪完整 per-CPU in-flight/CPU hotplug
@@ -255,7 +260,7 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | T-06 | lifecycle enter/exit 不配对 | IRQ 中途 clear/re-register hook | hardirq nesting 或 deferred work 状态损坏 | guard 保存 entry 时的 exit hook 快照 |
 | T-07 | hook/handler 睡眠或持有错误锁 | 调用者违反 hardirq/NMI 上下文约束 | deadlock、latency spike 或调度状态错误 | rustdoc 和设计文档明确回调上下文，IRQ core 不提供 sleepable dispatch |
 | T-08 | IPI 请求先于内存发布被目标 CPU 观察 | 平台 `send_ipi` 缺少顺序保证 | TLB shootdown 等跨核协议漏处理 | `IntrManagerIf::send_ipi` 文档要求 publish-before-notify |
-| T-08b | NMI 内 backtrace IPI 走普通 controller lock 或扩大目标集 | `CpuBacktrace` backend 复用普通 locked send / IRM all-but-self | 同 CPU 自锁，或未初始化 CPU 收到 handler | `CpuBacktrace` 只接受精确 `Mask`；GICv3 直接编码 affinity 写 SGI1R，失败返回 `false` |
+| T-08b | NMI 内 backtrace IPI 走普通 controller lock 或扩大目标集 | backend 获取配置锁，或把精确 mask 扩大为 IRM all-but-self | 同 CPU 自锁，或未初始化 CPU 收到 handler | 两类 IPI 共用无锁 GICv3 sender；`CpuBacktrace` 只接受精确 `Mask`，失败返回 `false` |
 | T-09 | deferred executor 在 completion 前或 hardirq depth 内运行 | executor work 拉长 active IRQ、影响 EOI/deactivate 或被误判为 hardirq | interrupt tail latency、controller 状态异常或 context 诊断错误 | irqchip 的 generic helper 在返回前 complete；`handle_irq()` 随后固定执行 drop hardirq context、deferred、lifecycle exit |
 | T-10 | 全局 reentry guard 抑制其它 CPU | SMP 上一个 CPU 的 executor 运行期间另一个 CPU 被跳过 | lost handoff opportunity | 当前不实现全局 guard；后续使用 per-CPU pending/reentry |
 | T-11 | per-CPU context 非原子状态被本地 IRQ 并发访问 | 普通任务查询被 IRQ 打断，同时读写同一 CPU slot | context snapshot 不一致或 data race | public path 用 `NoPreemptIrqSave`，hardirq/softirq IRQ-tail path 只走已 masked/pinned 的 `*_irqoff` helper |

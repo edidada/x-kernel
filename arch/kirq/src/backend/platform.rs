@@ -232,6 +232,10 @@ pub trait IntrManagerIf {
     /// on this publish-before-notify ordering to make the request state visible
     /// before the target acknowledges it.
     ///
+    /// Sending must not allocate, log, or acquire locks shared with other CPUs:
+    /// terminal stop uses Generic delivery even if a peer holds such a lock.
+    /// CPU-local exclusion is allowed for Generic delivery.
+    ///
     /// The [`IpiKind::CpuBacktrace`] path may be invoked from NMI context. Its
     /// implementation must therefore avoid allocation, logging, and locks.
     /// Returns `false` when the class or target set cannot be issued in full;
@@ -316,9 +320,14 @@ pub fn ipi_desc(kind: IpiKind) -> Option<IrqDesc> {
 /// target set. [`IpiKind::CpuBacktrace`] is safe to request from NMI context;
 /// callers must not assume the same for other classes. A successful call
 /// only issues the notification; it does not wait for target acknowledgement.
-/// On failure, some targets may already have been notified.
+/// On failure, some targets may already have been notified. Generic delivery
+/// pins the caller and all backends avoid locks shared with other CPUs.
 #[inline]
 pub fn send_ipi(kind: IpiKind, target: TargetCpu) -> bool {
+    if kind == IpiKind::Generic {
+        let _pin = kspin::NoPreempt::new();
+        return IntrManagerIf::send_ipi(kind, target);
+    }
     IntrManagerIf::send_ipi(kind, target)
 }
 

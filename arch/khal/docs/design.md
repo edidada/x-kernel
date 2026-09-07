@@ -100,3 +100,10 @@ MSI-X vector allocation、APIC destination selection 和 MSI message composition
 descriptor 和目标集合问题。调用方经 `kipi` 使用 `CpuBacktrace` 语义，`kirq`
 把它交给 irqchip 映射成实际 SGI/vector。这样 `khal::nmi` 不再暴露裸 SGI 号，
 NMI-safe 的精确 mask 发送契约也留在真正拥有 IPI 硬件编码的 IRQ backend。
+
+### 最终电源终点的执行上下文
+
+`power::halt()` / `power::power_off()` 在调用 SMP stop provider 前屏蔽 CPU
+本地中断，并持有外层 `NoPreempt` 直到不可返回的平台终点。provider 返回时不会
+因其内部 guard 释放而触发调度。终止后的 readiness 撤销和本地屏蔽不参与可逆的
+IRQ 启停生命周期；完整流程见 `docs/power.md`。

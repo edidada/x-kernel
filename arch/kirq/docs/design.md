@@ -147,7 +147,8 @@ ipi_desc(IpiKind) / send_ipi(IpiKind, TargetCpu)
   每次直接配置/启停当前 CPU 的 banked line。调用过程 pin CPU，不等待 handler，
   禁止 NMI 上下文；owner 必须保留 handler/mapping 并维护本地 readiness。
   不得与共享 IRQ depth API 混用；x86 单个 LAPIC IPI vector 不能物理 mask，
-  需由 owner 的软件 gate 禁用 dispatch。
+  需由 owner 的软件 gate 禁用 dispatch。普通控制仍获取 `IRQ_CONTROL_LOCK` /
+  `IRQ_STATE`，因此不能用于必须容忍持锁 CPU 失去响应的最终停机清理。
 - `handle_irq()` 运行在 hardirq trap adapter 调用路径中。调用者必须已经屏蔽本地
   IRQ、禁用抢占并 pin 当前 CPU，函数本身不能睡眠。
 - `handle_nmi()` 运行在 IRQ-off NMI adapter 调用路径中（pseudo-NMI 或 hardware
@@ -170,8 +171,9 @@ ipi_desc(IpiKind) / send_ipi(IpiKind, TargetCpu)
   分配控制器本地 vector 并返回 OS-visible virq 与 device-visible MSI message；
   调用方不能读取当前 APIC id 或假设 virq 等于硬件 vector。
 - `IntrManagerIf::send_ipi()` 必须满足 publish-before-notify 顺序，IPI/TLB
-  shootdown 依赖该契约；`CpuBacktrace` 分支还可从 NMI 调用，必须无分配、无日志、
-  无锁。`TargetCpu::Mask` 表示精确逻辑 CPU 集合，不能扩大为 all-but-self。
+  shootdown 依赖该契约；所有类别均不得分配、记录日志或获取跨 CPU 共享锁，
+  以支持终止停机。Generic wrapper 钉住当前 CPU；`CpuBacktrace` 分支还须可从
+  NMI 调用，不允许任何锁。`TargetCpu::Mask` 表示精确逻辑 CPU 集合，不能扩大为 all-but-self。
 
 ## 中断控制器后端契约
 
@@ -227,9 +229,10 @@ handler fanout、上下文和 completion ordering；irqchip driver 负责具体�
 descriptor；consumer 不选择 virq/hwirq。`send_ipi(kind, target)` 必须保证调用者在
 Normal memory 中发布的请求状态先于 IPI 被目标 CPU 观察。x86、GIC 和 RISC-V
 backend 应在各自实现中提供架构等价的 fence 或 barrier；调用者不应在每个 IPI
-call site 重复补 fence。`CpuBacktrace` 的 GICv3 路径绕过普通 controller lock，
-按 `TargetCpu::Mask` 逐 affinity 写 `ICC_SGI1R_EL1`；无法表达某个目标时返回
-`false`，由有界诊断协议处理缺失 CPU。
+call site 重复补 fence。GICv3 的两类 IPI 共用无锁发送实现，mask 按 affinity
+写 `ICC_SGI1R_EL1`，Generic 也支持广播；GICv2 保存每 CPU 的驱动 CPU-interface
+handle，发送不再借用共享配置对象。无法表达某个目标时返回 `false`，由上层
+确认协议处理缺失 CPU；backtrace 的精确 mask 不能被扩大为广播。
 
 AArch64 的 GIC backend 统一固定 SGI 布局：`Generic` 使用 SGI 1，
 `CpuBacktrace` 使用 SGI 2；descriptor 查询与发送使用同一组 backend-local 常量。

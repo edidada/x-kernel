@@ -298,12 +298,20 @@ pub fn restore_irq(state: usize) {
 /// setting all four mask bits is the only architectural way to also block
 /// the pseudo-NMIs, SError, and debug exceptions that could otherwise
 /// resume a parked CPU. It is therefore reserved for one-way terminal
-/// paths that never restore interrupts — currently only
-/// [`super::cpu::stop_cpu`]. PMR is not touched: once every DAIF class is
-/// masked, the CPU takes no interrupt at any priority.
+/// paths that never restore interrupts. Hardware NMIs bypass DAIF, so an
+/// active FEAT_NMI mechanism also requires ALLINT. PMR is not touched.
 #[inline]
 pub fn disable_local_exceptions() {
     DAIF.write(DAIF::D::Masked + DAIF::A::Masked + DAIF::I::Masked + DAIF::F::Masked);
+    #[cfg(feature = "nmi-hardware")]
+    if allint_active() {
+        // SAFETY: `allint_active()` is published only after this CPU's
+        // FEAT_NMI setup. Setting ALLINT masks IRQs and superpriority NMIs
+        // locally; the terminal caller never restores interrupt delivery.
+        unsafe {
+            asm!("msr s3_0_c4_c3_0, {}", in(reg) ALLINT_MASK, options(nomem, nostack));
+        }
+    }
 }
 
 /// GIC priority mask (PMR) access for pseudo‑NMI support.

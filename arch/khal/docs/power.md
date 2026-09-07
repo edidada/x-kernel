@@ -44,8 +44,8 @@ khal::power::{halt, power_off}          khal::power::platform_power_off
 ```
 
 - UP 构建（无远端 CPU 可停）或 provider 未就绪（`kipi` 的本地 IPI 队列
-  初始化之前走到终点）时，SMP stop 退化为 no-op，普通终点等效于裸平台
-  终点。
+  初始化之前走到终点）时，跳过跨 CPU 协调，但电源入口仍屏蔽本地中断并
+  停止本地周期 NMI 源，然后进入裸平台终点。
 - 平台 `halt` 实现统一为调用一次 `karch::stop_cpu()`（`-> !` 终结：屏蔽
   本地异常后循环执行架构等待指令 wfi/hlt/idle），不调用任何断电代理；
   平台 `power_off` 保持各平台原有断电路径，断电请求意外返回时同样落进
@@ -58,12 +58,15 @@ khal::power::{halt, power_off}          khal::power::platform_power_off
 
 ## 调用约束 / 执行上下文
 
-- `halt` / `power_off` 永不返回；调用前必须完成所有上层清理。
+- `halt` / `power_off` 永不返回；调用前必须完成所有上层清理。入口持有
+  `NoPreempt` 直到平台终点，并调用 `karch::prepare_cpu_stop()`，避免 provider
+  返回时释放内部 guard 后触发调度，或本地 IRQ handler 等待失去响应的 peer。
 - `SmpStopIf` 的 provider 必须可以在关中断上下文调用（例如调度器内的
   init 任务退出路径），不得睡眠；`kipi` 的实现不分配内存、带 1s 有界超
-  时。
-- panic / crash 路径禁止走 SMP stop：panic CPU 可能持有其他 CPU 自旋等
-  待的锁，IPI 停机会死锁；必须使用 `platform_*` 裸终点。
+  时。provider 返回时允许保持本地 IRQ/NMI 屏蔽及 IPI readiness 撤销，调用方
+  必须继续保持 CPU 固定并立即进入平台终点。
+- panic / crash 路径使用 `platform_*` 裸终点：panic 可能来自 NMI，超出普通
+  停机协议的调用上下文，也不应为合作式 IRQ 响应等待正常停机超时。
 - 平台终点实现不得依赖 VFS、process、syscall 或任何上层子系统。
 
 ## 并发模型
@@ -86,15 +89,15 @@ khal::power::{halt, power_off}          khal::power::platform_power_off
 再进终点"的序列只有一份实现，且链接器保证全图恰好一个 provider（与
 `karch::IcacheFlushIf` 同款模式：`kipi` 通过 Cargo features 打开
 `khal/smp`，把本模块的 no-op 兜底编译掉）。UP 构建不链接 `kipi`，兜底自
-动生效；provider 在 `kipi::init()` 之前的调用退化为 no-op，对应旧注册式
-实现"runtime 初始化完成后才挂钩子"的时序语义。
+动生效；provider 在本地 `kipi::enable_ipi()` 之前跳过跨 CPU 协调，本地终止
+屏蔽与周期源停止仍由电源入口保证。
 
 ### 为什么 panic 路径绕过钩子
 
 `kipi` 的 SMP stop provider 通过普通 IPI 停机，目标 CPU 必须能进入 IPI
-handler；panic CPU 持锁时其他 CPU 可能在关中断自旋，永远无法响应。Linux
-用 NMI 做 crash stop，本仓库尚无对应机制，故 panic 走裸终点、best-effort
-断电，保持拆分 `shutdown()` 之前的行为。
+handler；panic CPU 持锁时其他 CPU 可能在关中断自旋，无法响应普通 IPI。
+正常停机对此有限等待，但 panic 可能来自 NMI 上下文，不能依赖这个普通协议，
+也不应增加等待超时的延迟，因此直接进入裸终点进行 best-effort 断电。
 
 ### 为什么不在本层保存 NoRequest/Halt/PowerOff 状态
 
@@ -105,8 +108,8 @@ runtime、HAL 之间复制多份。
 ### 为什么 park 前要停靠本地 NMI 源
 
 `karch::stop_cpu()` 在 CPU 级屏蔽异常：AArch64 全掩 DAIF 四类（含
-pseudo-NMI），其它架构屏蔽本地可屏蔽中断。但真正的 NMI（x86 的 NMI 不受
-IF 控制）无法靠 CPU 级屏蔽挡住。在启用 NMI hard-lockup 看门狗的平台，
+pseudo-NMI），硬件 NMI 模式还设置 ALLINT；其它架构屏蔽本地可屏蔽中断。
+但 x86 的真正 NMI 不受 IF 控制，无法靠这个 CPU 级屏蔽挡住。在启用 NMI hard-lockup 看门狗的平台，
 若不停靠 NMI 源，停靠中的 CPU 会被周期性 NMI 反复唤醒，看门狗还会把
 "所有任务都不再运行"误判为 hard lockup 并 panic 走平台断电——这会让
 `halt` 在数十秒后变成 `power_off`。因此在 park 前调用 `quiesce_nmi()`

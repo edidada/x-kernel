@@ -299,11 +299,11 @@ fn ipi_desc(kind: IpiKind) -> Option<kirq::IrqDesc> {
 fn send_ipi(kind: IpiKind, target: TargetCpu) -> bool {
     match kind {
         IpiKind::Generic => notify_cpu(GENERIC_IPI_SGI, target),
-        // The CPU-backtrace IPI can be raised by a PMU NMI. Bypass the
-        // ordinary locked GIC object and accept only an exact CPU mask.
+        // CPU-backtrace accepts only exact masks; both classes use the
+        // same lock-free GICv3 sender.
         IpiKind::CpuBacktrace => match (active_version(), target) {
             (GicVersion::V3, TargetCpu::Mask(mask)) => {
-                gicv3::send_ipi_mask_nmi_safe(CPU_BACKTRACE_SGI, mask)
+                gicv3::notify_cpu(CPU_BACKTRACE_SGI, TargetCpu::Mask(mask))
             }
             _ => false,
         },
