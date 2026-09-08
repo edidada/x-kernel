@@ -11,13 +11,22 @@
 `bitflags` 类型表示。解码使用 `from_bits_retain` 保留未知磁盘位，避免把不同 feature
 类别中数值相同的位混为一类，并保证挂载协商仍能报告原始 unsupported bits。
 
-当前 `Ext4SbInfo` mount state 同时发布读取和 mutation API，类型系统尚未区分只读
-legacy block-map mount。因此挂载协商要求 superblock 启用 `EXT4_FEATURE_INCOMPAT_EXTENTS`：
-整盘 `^extents` 格式在读取 group descriptor、replay journal 或发布 VFS root 前返回
-`Unsupported(NonExtentFilesystem)`。带 extents feature 的镜像仍可只读解析个别 legacy inode，
-但其 buffered-write reservation、`page_mkwrite` 和后续 mutation 会在复制或标脏用户数据前返回
-`Unsupported(NonExtentInode)`。完整放开整盘 legacy 格式必须同时实现
-direct/single/double/triple indirect 的分配、释放、truncate 与 resize，不能只移除挂载检查。
+### Extent support and mutation boundaries
+
+`Ext4SbInfo` exposes both read and mutation operations; its type does not provide
+an isolated, read-only mount interface for legacy indirect block maps. Mount
+negotiation therefore requires `EXT4_FEATURE_INCOMPAT_EXTENTS`.
+
+| Boundary | Current behavior | Source |
+| --- | --- | --- |
+| Filesystem without the extents feature | Reject the mount with `Unsupported(NonExtentFilesystem)`; passing read-only feature validation alone is insufficient. | [`validate_mount`](../src/disk/features.rs) |
+| Legacy inode in an extent-enabled filesystem | Checked legacy reads remain available, but regular-file mutation rejects the inode with `Unsupported(NonExtentInode)`. | [`Ext4SbInfo::ensure_regular_file_mutation_supported`](../src/file.rs) |
+
+The filesystem-level feature bit does not prove that every inode uses extents.
+Keep both checks: accepting an extent-enabled filesystem must not implicitly
+allow writes to a legacy inode. Supporting a whole legacy filesystem requires
+allocation, release, truncate, and resize support for direct and indirect block
+maps, rather than merely removing the mount guard.
 
 ## 背景
 

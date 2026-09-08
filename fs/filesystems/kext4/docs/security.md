@@ -39,10 +39,19 @@ KExt4 的 KVFS operation 实现信任 KVFS 已经提供内核拥有的 path name
 经检查，本 crate 使用 `#![forbid(unsafe_code)]`，不直接访问 MMIO/PIO，不管理 DMA
 所有权，不使用 FFI、inline assembly 或架构专有裸接口。
 
-## unsafe 代码清单
+## Unsafe code inventory
 
-无。`fs/filesystems/kext4/src/lib.rs` 对整个 crate 禁止 unsafe code。Unsafe 或设备专有
-操作位于本 crate 边界之外。
+There is no crate-local unsafe code: [`src/lib.rs`](../src/lib.rs) declares
+`#![forbid(unsafe_code)]`. Unsafe implementation details in dependencies and
+block-device drivers remain outside this crate's audit boundary.
+
+This compiler restriction does not validate filesystem images or establish
+crash consistency. Disk metadata remains untrusted and still requires the
+format, bounds, and checksum checks described in the trust model. In particular,
+[`validate_mount`](../src/disk/features.rs) rejects a filesystem without extents,
+while [`ensure_regular_file_mutation_supported`](../src/file.rs) separately
+rejects legacy regular-file inodes. These are capability checks, not evidence
+that the rest of an image is valid.
 
 ## 内存安全不变量
 
