@@ -10,7 +10,7 @@ use alloc::{
     vec::Vec,
 };
 
-use kspin::{SpinNoIrq, SpinRaw};
+use kspin::SpinNoIrq;
 use ksync::{Mutex, static_lock};
 
 use crate::{
@@ -54,7 +54,7 @@ static_lock! {
 /// `clk_enable_lock`). An IRQ-saving spinlock: usable from interrupt context,
 /// and holding it makes the per-CPU IRQ-off guarantee deadlock-free against
 /// same-CPU handlers. Never sleep while holding it.
-static CLK_ENABLE_LOCK: SpinRaw<()> = SpinRaw::new(());
+static CLK_ENABLE_LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
 
 /// Global list of every registered clock, used by the unused-clock gate-down
 /// pass and future PM walks. Strong references mirror Linux, which never frees
@@ -258,7 +258,6 @@ impl ClkCore {
         self.set_rate_vote(0, min, max)
     }
 
-    /// The current `(min, max)` rate range.
     /// The current effective `(min, max)` rate range (tightest intersection of
     /// all consumer votes + the legacy slot).
     pub fn get_rate_range(&self) -> (Rate, Rate) {
@@ -1122,14 +1121,23 @@ impl ClkBuilder {
         adopt_orphans(core.name(), core.clone())?;
         // Register this node's own deferred-parent slots only after adoption
         // succeeds, so a failed build cannot strand entries referencing an
-        // unpublished node.
-        for (index, pname) in pending_parents {
-            ORPHANS.lock().push(OrphanEntry {
-                child: core.clone(),
-                parent_index: index,
-                parent_name: pname,
-            });
-        }
+        // unpublished node. The push runs under CLK_LOCK, the same lock
+        // `adopt_orphans` holds while draining ORPHANS: an unlocked push
+        // racing a concurrent adoption could slot in just after the scan and
+        // never be adopted (a permanently orphaned child whose parent
+        // registered all along). The entry is deliberately not resolved
+        // against CLOCKS here — adoption is triggered by *registration* (the
+        // publish path below), and a same-named node may already exist from
+        // a prior registration without being this child's intended parent.
+        with_clk_lock(|| {
+            for (index, pname) in pending_parents {
+                ORPHANS.lock().push(OrphanEntry {
+                    child: core.clone(),
+                    parent_index: index,
+                    parent_name: pname,
+                });
+            }
+        });
         CLOCKS.lock().push(core.clone());
         Ok(core)
     }
@@ -1262,7 +1270,7 @@ pub(crate) fn with_clk_lock<T>(f: impl FnOnce() -> T) -> T {
 
 /// Acquire the enable-path lock (for callers already holding `CLK_LOCK`; the
 /// CLK_LOCK → CLK_ENABLE_LOCK order is the only legal nesting).
-pub(crate) fn enable_lock() -> kspin::SpinRawGuard<'static, ()> {
+pub(crate) fn enable_lock() -> kspin::SpinNoIrqGuard<'static, ()> {
     CLK_ENABLE_LOCK.lock()
 }
 
@@ -1408,6 +1416,11 @@ pub fn clk_disable_unused() {
         {
             continue;
         }
+        // Re-check and gate under the enable lock: a concurrent
+        // `clk_enable` from interrupt context could otherwise raise the
+        // count and set the gate bit between the count read here and the
+        // `disable` below, silently turning a live clock off.
+        let _el = CLK_ENABLE_LOCK.lock();
         let unused = {
             let st = clk.state.lock();
             st.enable_count == 0

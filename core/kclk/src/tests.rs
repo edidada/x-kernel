@@ -1482,3 +1482,78 @@ fn divider_table_miss_is_bad_state_not_silent_div1() {
     reg.mem.lock()[0] = 3;
     assert_eq!(ops.recalc_rate(1_000_000_000), Err(ClkError::BadState));
 }
+
+#[def_test(serial)]
+fn divider_request_below_min_rate_clamps_to_max_div() {
+    // Regression: a request below the divider's minimum achievable rate
+    // previously produced an empty candidate window and silently returned
+    // the ÷1 pass-through (full parent speed) — over-clocking the consumer
+    // instead of clamping to the slowest achievable step.
+    let parent = ClkBuilder::new("p", FixedRate::new(1_000_000_000).into_ops())
+        .build()
+        .unwrap();
+    let reg = Arc::new(MockReg::new());
+    // 4-bit zero-based divider: achievable 1..=16, min rate 62.5 MHz.
+    let div = ClkBuilder::new(
+        "div",
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
+    )
+    .parent(parent)
+    .build()
+    .unwrap();
+
+    // Asking for 1 MHz (far below 62.5 MHz) must clamp to ÷16 = 62.5 MHz,
+    // never report or program the 1 GHz pass-through.
+    assert_eq!(div.round_rate(1_000_000).unwrap(), 62_500_000);
+    let actual = div.set_rate(1_000_000).unwrap();
+    assert_eq!(actual, 62_500_000);
+    assert_eq!(div.get_rate(), 62_500_000);
+}
+
+#[def_test(serial)]
+fn divider_power_of_two_width_31_does_not_overflow() {
+    // Regression: at width == 31 the exponent loop's `d <<= 1` past the
+    // final 2^31 candidate overflows — debug builds panicked and release
+    // builds wrapped to 0, looping forever while holding the global lock.
+    let parent = ClkBuilder::new("p", FixedRate::new(1_000_000_000).into_ops())
+        .build()
+        .unwrap();
+    let reg = Arc::new(MockReg::new());
+    let div = ClkBuilder::new(
+        "div31",
+        Divider::into_ops(reg, 0, 0, 31, None, DividerFlags::POWER_OF_TWO),
+    )
+    .parent(parent)
+    .build()
+    .unwrap();
+
+    // Round-trip still works and terminates.
+    let actual = div.set_rate(250_000_000).unwrap();
+    assert_eq!(actual, 250_000_000);
+    assert_eq!(div.get_rate(), 250_000_000);
+}
+
+#[def_test(serial)]
+fn composite_gate_only_is_rate_transparent() {
+    // Regression: a composite with neither mux nor divider used to echo the
+    // requested rate back from determine_rate instead of reporting the
+    // selected parent's achievable rate.
+    let parent = ClkBuilder::new("p", FixedRate::new(100_000_000).into_ops())
+        .build()
+        .unwrap();
+    let reg = Arc::new(MockReg::new());
+    let gate_only = ClkBuilder::new(
+        "gonly",
+        Composite::new(
+            None,
+            None,
+            Some(Gate::into_ops(reg, 0, 0, GateFlags::empty())),
+        ),
+    )
+    .parent(parent)
+    .build()
+    .unwrap();
+
+    // round_rate reports the parent's rate, not the unreachable request.
+    assert_eq!(gate_only.round_rate(400_000_000).unwrap(), 100_000_000);
+}

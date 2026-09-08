@@ -108,6 +108,13 @@ impl ClkHwOps for Composite {
             // The divider satisfies the request on the chosen parent; it does
             // not ask the framework to change that parent's rate.
             req.parent_target = rr.parent_target;
+        } else if self.mux.is_none() {
+            // A gate-only composite is rate-transparent, exactly like a bare
+            // Gate: report the achievable rate on the selected parent instead
+            // of echoing the (unreachable) requested value back to the core,
+            // and propagate the request upward when allowed.
+            req.rate = req.best_parent_rate;
+            req.parent_target = Some(requested);
         }
         Ok(())
     }

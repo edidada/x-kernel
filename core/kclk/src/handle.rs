@@ -131,8 +131,9 @@ impl ClkHandle {
     /// `CLK_LOCK` acquisition, so a concurrent reparent cannot observe the
     /// prepare half propagating to one parent and the enable half to another
     /// (the halves independently re-resolve "current parent" otherwise,
-    /// leaking a reference on the pre-switch parent — a race the concurrency
-    /// stress test caught live). On enable failure the prepare reference is
+    /// leaking a reference on the pre-switch parent — a race verified by the
+    /// concurrency stress tests of the invariant suite). On enable failure the
+    /// prepare reference is
     /// rolled back, matching Linux `clk_prepare_enable`.
     pub fn prepare_enable(&self) -> ClkResult {
         crate::core::with_clk_lock(|| -> ClkResult<()> {
@@ -196,8 +197,6 @@ impl ClkHandle {
         self.core.set_rate(rate)
     }
 
-    /// Constrain this clock's rate to `[min, max]` for later `set_rate`/
-    /// `round_rate` calls.
     /// Constrain this consumer's view of the clock's rate to `[min, max]`.
     /// The effective range is the tightest intersection across all consumers'
     /// votes (and the legacy core-level slot), so two consumers cannot clobber

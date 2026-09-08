@@ -200,11 +200,18 @@ impl Divider {
             let mut best = 1u32;
             let mut best_diff = u64::MAX;
             let mut d = 1u32;
-            while d <= self.max_div() {
+            loop {
                 let df = diff(rate_for(parent_rate, d), target);
                 if df < best_diff {
                     best_diff = df;
                     best = d;
+                }
+                // Stop before doubling would wrap: at width == 31 the final
+                // candidate 2^31 is the last representable power, and
+                // `d <<= 1` past it overflows (debug panic, release wrap to 0
+                // and an infinite loop while holding the global clock lock).
+                if d > self.max_div() / 2 || d == self.max_div() {
+                    break;
                 }
                 d <<= 1;
             }
@@ -212,11 +219,17 @@ impl Divider {
         }
         // Linear dividers: the divider minimizing |parent/div - target| is the
         // rounded quotient, clamped to the achievable range. Check its floor and
-        // ceiling to absorb integer rounding at the boundary.
+        // ceiling to absorb integer rounding at the boundary. The quotient is
+        // clamped into [1, max_div] *before* forming the candidate window:
+        // a request below the divider's minimum achievable rate
+        // (target < parent/max_div) otherwise makes the window empty and the
+        // loop below never runs, silently returning the ÷1 pass-through
+        // (full parent speed) instead of the closest achievable step.
         let approx: u32 = parent_rate
             .checked_div(target)
             .map(|r| r.min(u32::MAX as u64) as u32)
-            .unwrap_or(1);
+            .unwrap_or(u32::MAX)
+            .clamp(1, self.max_div());
         let lo = approx.saturating_sub(1).max(1);
         let hi = (approx + 1).min(self.max_div());
         let mut best = 1u32;
