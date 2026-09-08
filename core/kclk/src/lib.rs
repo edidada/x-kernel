@@ -61,4 +61,7 @@ pub use table::{
 pub type ClkIndex = u32;
 
 #[cfg(unittest)]
+mod invariants;
+
+#[cfg(unittest)]
 mod tests;
