@@ -72,6 +72,7 @@ sdmmc = ["any_firmware_driver", "block"]
 default = []
 
 [dependencies]
+of = { workspace = true }
 kalloc = { workspace = true, optional = true }
 kdma.workspace = true
 device_res = { workspace = true }

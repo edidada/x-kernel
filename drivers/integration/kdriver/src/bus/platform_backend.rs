@@ -136,6 +136,7 @@ impl PlatformBackend {
                     identity,
                     transport,
                     resources,
+                    dev.node.and_then(OfFirmwareNode::shared),
                 ) {
                     log::warn!(
                         "platform: failed to register {:?} from {:?}: {:?}",
@@ -378,5 +379,43 @@ impl PlatformBackend {
         }
 
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FirmwareNode bridge (DT on-demand property reads for probes)
+// ---------------------------------------------------------------------------
+
+/// [`kdevice::FirmwareNode`] adapter over one DT node — the Linux
+/// `dev.of_node` pattern: probes read provider registration parameters
+/// from their own node on demand instead of carrying pre-extracted copies
+/// in the resource list. Lives here (not in the `of` crate) because the
+/// device tree crate must not depend on the device-model contract; this
+/// integration layer already depends on both.
+struct OfFirmwareNode(of::FdtNode<'static, 'static>);
+
+impl OfFirmwareNode {
+    fn shared(
+        node: of::FdtNode<'static, 'static>,
+    ) -> Option<alloc::sync::Arc<dyn kdevice::FirmwareNode>> {
+        Some(alloc::sync::Arc::new(Self(node)) as alloc::sync::Arc<dyn kdevice::FirmwareNode>)
+    }
+}
+
+impl kdevice::FirmwareNode for OfFirmwareNode {
+    fn read_u32(&self, name: &str) -> Option<u32> {
+        of::property_u32(self.0, name)
+    }
+
+    fn read_str(&self, name: &str) -> Option<&'static str> {
+        // Firmware string-list properties are NUL-separated; the first
+        // entry is the meaningful one for single-output lookups.
+        let prop = self.0.property(name)?;
+        let end = prop
+            .value
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(prop.value.len());
+        core::str::from_utf8(&prop.value[..end]).ok()
     }
 }

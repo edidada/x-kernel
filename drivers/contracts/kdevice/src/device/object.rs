@@ -52,6 +52,10 @@ pub struct DeviceObject {
     /// live reference (an opened handle, an in-flight operation) cannot have
     /// the device torn down underneath it.
     usage: AtomicUsize,
+    /// The firmware node this device was enumerated from, when the
+    /// discovery source provides one. Probes read provider registration
+    /// parameters from it on demand (Linux `dev.of_node` pattern).
+    node: crate::SharedFirmwareNode,
     /// Driver-registered cleanup callbacks ("devres"), run in LIFO order when
     /// a probe fails or the device is removed. Lets a driver attach resource
     /// teardown (free IRQ, release queues, ...) to the device's lifetime so a
@@ -62,6 +66,7 @@ pub struct DeviceObject {
 
 impl DeviceObject {
     /// Create a newly discovered device object.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: DeviceId,
         bus_id: BusId,
@@ -70,6 +75,7 @@ impl DeviceObject {
         identity: DeviceIdentity,
         transport: Option<TransportInfo>,
         resources: ResourceSet,
+        node: crate::SharedFirmwareNode,
     ) -> Self {
         Self {
             id,
@@ -79,6 +85,7 @@ impl DeviceObject {
             identity,
             transport,
             resources,
+            node,
             lifecycle: AtomicU8::new(DeviceState::Discovered.as_u8()),
             usage: AtomicUsize::new(0),
             devres: SpinNoPreempt::new(Vec::new()),
@@ -144,6 +151,15 @@ impl DeviceObject {
         })
     }
 
+    /// The firmware node this device was enumerated from, if any.
+    ///
+    /// Provider drivers read their registration parameters from it at
+    /// probe time (clock frequency, phandle, output names), instead of
+    /// carrying pre-extracted copies in the resource list.
+    pub fn firmware_node(&self) -> Option<&Arc<dyn crate::FirmwareNode>> {
+        self.node.as_ref()
+    }
+
     /// Find the first clock resource.
     pub fn first_clk(&self) -> Option<crate::ClkSpec> {
         self.resources.iter().find_map(|resource| match resource {
@@ -177,14 +193,6 @@ impl DeviceObject {
             ResourceDesc::Clk(resource) if resource.connection_name() == Some(name) => {
                 Some(resource.spec())
             }
-            _ => None,
-        })
-    }
-
-    /// Clock-provider metadata carried by this device, if it is a provider.
-    pub fn clk_provider(&self) -> Option<crate::ClkProviderDesc> {
-        self.resources.iter().find_map(|resource| match resource {
-            ResourceDesc::ClkProvider(provider) => Some(*provider),
             _ => None,
         })
     }
@@ -476,15 +484,14 @@ mod tests {
 
     use super::DeviceObject;
     use crate::{
-        BusId, ClkProviderDesc, ClkResource, ClkSpec, DeviceId, DeviceIdentity, DeviceLocation,
-        DiscoveryOrigin, PlatformIdentity, ResourceDesc,
+        BusId, ClkResource, ClkSpec, DeviceId, DeviceIdentity, DeviceLocation, DiscoveryOrigin,
+        PlatformIdentity, ResourceDesc, ResourceSet,
     };
 
     #[def_test]
     fn clock_lookup_preserves_consumer_connection_names() {
         let baud = ClkSpec::by_phandle_index(0x42, 3);
         let apb = ClkSpec::by_phandle_index(0x42, 7);
-        let provider = ClkProviderDesc::new(0x42, 24_000_000).with_output_name("osc24m");
         let device = DeviceObject::new(
             DeviceId::new(1),
             BusId::new(1),
@@ -498,10 +505,10 @@ mod tests {
             [
                 ResourceDesc::Clk(ClkResource::named("baudclk", baud)),
                 ResourceDesc::Clk(ClkResource::named("apb_pclk", apb)),
-                ResourceDesc::ClkProvider(provider),
             ]
             .into_iter()
             .collect(),
+            None,
         );
 
         assert_eq!(device.first_clk(), Some(baud));
@@ -509,7 +516,42 @@ mod tests {
         assert_eq!(device.clk_by_name("baudclk"), Some(baud));
         assert_eq!(device.clk_by_name("apb_pclk"), Some(apb));
         assert_eq!(device.clk_by_name("missing"), None);
-        assert_eq!(device.clk_provider(), Some(provider));
+        // No firmware node attached: probes see None, not a panic.
+        assert!(device.firmware_node().is_none());
+    }
+
+    struct TestNode;
+
+    impl crate::FirmwareNode for TestNode {
+        fn read_u32(&self, name: &str) -> Option<u32> {
+            (name == "clock-frequency").then_some(24_000_000)
+        }
+
+        fn read_str(&self, name: &str) -> Option<&'static str> {
+            (name == "clock-output-names").then_some("clk24mhz")
+        }
+    }
+
+    #[def_test]
+    fn firmware_node_round_trips_through_device() {
+        let device = DeviceObject::new(
+            DeviceId::new(2),
+            BusId::new(1),
+            DeviceLocation::FirmwareNode { id: 2 },
+            DiscoveryOrigin::DeviceTree,
+            DeviceIdentity::Platform(PlatformIdentity {
+                alias: None,
+                firmware_id: Some("fixed-clock"),
+            }),
+            None,
+            ResourceSet::new(),
+            Some(alloc::sync::Arc::new(TestNode)),
+        );
+        let node = device.firmware_node().expect("node attached");
+        // The probe-side on-demand read path (Linux of_* accessor pattern).
+        assert_eq!(node.read_u32("clock-frequency"), Some(24_000_000));
+        assert_eq!(node.read_str("clock-output-names"), Some("clk24mhz"));
+        assert_eq!(node.read_u32("no-such-prop"), None);
     }
 }
 

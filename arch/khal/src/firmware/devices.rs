@@ -62,20 +62,17 @@ pub enum FirmwareSource {
 pub struct FirmwareDevice {
     pub firmware_id: &'static str,
     pub source: FirmwareSource,
+    /// The DT node this description was extracted from, so the device
+    /// model can carry an on-demand property reader to probes (the
+    /// `dev.of_node` pattern) instead of pre-extracting every attribute
+    /// enumeration might someday need.
+    pub node: Option<of::FdtNode<'static, 'static>>,
     pub mmio: Option<MmioResource>,
     pub irq: Option<InterruptInfo>,
-    /// For `fixed-clock` nodes: the `clock-frequency` property, in Hz.
-    /// Extracted during enumeration so clock controller drivers can
-    /// register without re-walking the DT.
-    pub clock_frequency: Option<u32>,
-    /// The DT `phandle` property, used as the clock ProviderId.
-    pub phandle: Option<u32>,
     /// The `#clock-cells` property: `Some(_)` marks this node as a clock
     /// provider. Used by the platform backend to probe clock controllers
     /// before their consumers (Linux `of_clk_init` ordering).
     pub clock_cells: Option<u32>,
-    /// First `clock-output-names` entry for provider nodes.
-    pub clock_output_name: Option<&'static str>,
     /// For consumer nodes: the parsed `clocks` property, each entry a
     /// (provider phandle, controller-local index) pair. Converted to
     /// `ResourceDesc::Clk` by the DT-to-device builder so drivers resolve
@@ -234,12 +231,10 @@ pub fn for_each_compatible(
         visitor(FirmwareDevice {
             firmware_id,
             source: FirmwareSource::DeviceTree,
+            node: Some(node),
             mmio,
             irq,
-            clock_frequency: node.property_u32("clock-frequency"),
-            phandle: node.property_u32("phandle"),
             clock_cells: node.property_u32("#clock-cells"),
-            clock_output_name: of::clock_output_name(node),
             clock_specs: of::device_clock_specs(node),
         });
     }

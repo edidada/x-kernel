@@ -333,6 +333,7 @@ mod tests {
                 }),
                 None,
                 ResourceSet::new(),
+                None,
             ));
             index.add_device(device.clone());
             device
