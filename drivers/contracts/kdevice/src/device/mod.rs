@@ -5,6 +5,7 @@
 //! Device descriptors, objects, handles, and resource metadata.
 
 pub mod desc;
+pub mod firmware_node;
 pub mod handles;
 pub mod object;
 pub mod resource;

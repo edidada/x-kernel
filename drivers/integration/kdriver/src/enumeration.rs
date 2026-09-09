@@ -44,6 +44,7 @@ impl EnumerationContext {
     }
 
     /// Add a newly enumerated descriptor to the shared device core.
+    #[allow(clippy::too_many_arguments)]
     pub fn register_device(
         &mut self,
         bus_id: BusId,
@@ -52,9 +53,10 @@ impl EnumerationContext {
         identity: DeviceIdentity,
         transport: Option<TransportInfo>,
         resources: ResourceSet,
+        node: kdevice::SharedFirmwareNode,
     ) -> DriverResult<DeviceDescId> {
         self.register_device_with_parent(
-            bus_id, None, location, origin, identity, transport, resources,
+            bus_id, None, location, origin, identity, transport, resources, node,
         )
     }
 
@@ -70,9 +72,10 @@ impl EnumerationContext {
         identity: DeviceIdentity,
         transport: Option<TransportInfo>,
         resources: ResourceSet,
+        node: kdevice::SharedFirmwareNode,
     ) -> DriverResult<DeviceDescId> {
         let desc = kdevice::device_desc_add_with_parent(
-            bus_id, parent, location, origin, identity, transport, resources,
+            bus_id, parent, location, origin, identity, transport, resources, node,
         )?;
         let id = desc.id();
         self.registered_count += 1;
@@ -162,6 +165,7 @@ mod tests {
                 }),
                 None,
                 ResourceSet::new(),
+                None,
             )
             .unwrap();
 
@@ -187,6 +191,7 @@ mod tests {
                 }),
                 None,
                 ResourceSet::new(),
+                None,
             )
             .unwrap();
 

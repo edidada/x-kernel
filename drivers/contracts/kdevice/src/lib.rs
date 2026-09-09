@@ -68,11 +68,12 @@ pub use device::{
         DeviceDesc, DeviceDescId, DeviceId, DeviceIdentity, DeviceLocation, DeviceNumber,
         DeviceRecord, DeviceState, DiscoveryOrigin, PciIdentity, PlatformIdentity, TransportInfo,
     },
+    firmware_node::{FirmwareNode, SharedFirmwareNode},
     handles::{BusHandle, DeviceCore, DriverCore},
     object::{DeviceObject, DeviceUse},
     resource::{
-        ClkProviderDesc, ClkResource, ClkSpec, DmaSpec, IoPortRange, IrqResource, IrqTrigger,
-        MmioRegion, ResourceDesc, ResourceSet,
+        ClkResource, ClkSpec, DmaSpec, IoPortRange, IrqResource, IrqTrigger, MmioRegion,
+        ResourceDesc, ResourceSet,
     },
 };
 pub use driver::{

@@ -174,7 +174,7 @@ pub enum DeviceIdentity {
 ///
 /// A descriptor represents a device candidate and its resources. It is not a
 /// runtime device instance and must not carry bound-driver or lifecycle state.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DeviceDesc {
     id: DeviceDescId,
     bus_id: BusId,
@@ -184,10 +184,27 @@ pub struct DeviceDesc {
     identity: DeviceIdentity,
     transport: Option<TransportInfo>,
     resources: ResourceSet,
+    node: crate::SharedFirmwareNode,
+}
+
+impl core::fmt::Debug for DeviceDesc {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DeviceDesc")
+            .field("id", &self.id)
+            .field("bus_id", &self.bus_id)
+            .field("location", &self.location)
+            .field("origin", &self.origin)
+            .field("identity", &self.identity)
+            .field("transport", &self.transport)
+            .field("resources", &self.resources)
+            .field("node", &self.node.as_ref().map(|_| "<firmware-node>"))
+            .finish()
+    }
 }
 
 impl DeviceDesc {
     /// Build a new discovery-stage device description.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: DeviceDescId,
         bus_id: BusId,
@@ -196,9 +213,10 @@ impl DeviceDesc {
         identity: DeviceIdentity,
         transport: Option<TransportInfo>,
         resources: ResourceSet,
+        node: crate::SharedFirmwareNode,
     ) -> Self {
         Self::new_with_parent(
-            id, bus_id, None, location, origin, identity, transport, resources,
+            id, bus_id, None, location, origin, identity, transport, resources, node,
         )
     }
 
@@ -218,6 +236,7 @@ impl DeviceDesc {
         identity: DeviceIdentity,
         transport: Option<TransportInfo>,
         resources: ResourceSet,
+        node: crate::SharedFirmwareNode,
     ) -> Self {
         Self {
             id,
@@ -228,6 +247,7 @@ impl DeviceDesc {
             identity,
             transport,
             resources,
+            node,
         }
     }
 
@@ -265,6 +285,11 @@ impl DeviceDesc {
     }
 
     /// Identity used for driver matching.
+    /// The firmware node this device was enumerated from, if any.
+    pub fn firmware_node(&self) -> &crate::SharedFirmwareNode {
+        &self.node
+    }
+
     pub const fn identity(&self) -> DeviceIdentity {
         self.identity
     }

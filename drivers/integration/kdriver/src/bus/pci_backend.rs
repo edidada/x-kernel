@@ -464,7 +464,7 @@ impl BusBackend for PciBackend {
             });
 
             context.register_device_with_parent(
-                ep_bus, parent, location, origin, identity, transport, resources,
+                ep_bus, parent, location, origin, identity, transport, resources, None,
             )?;
         }
 

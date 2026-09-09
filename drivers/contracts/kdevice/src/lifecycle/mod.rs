@@ -170,9 +170,10 @@ pub fn device_desc_add(
     identity: DeviceIdentity,
     transport: Option<crate::TransportInfo>,
     resources: ResourceSet,
+    node: crate::SharedFirmwareNode,
 ) -> Result<DeviceDesc, DriverError> {
     device_desc_add_with_parent(
-        bus_id, None, location, origin, identity, transport, resources,
+        bus_id, None, location, origin, identity, transport, resources, node,
     )
 }
 
@@ -187,6 +188,7 @@ pub fn device_desc_add_with_parent(
     identity: DeviceIdentity,
     transport: Option<crate::TransportInfo>,
     resources: ResourceSet,
+    node: crate::SharedFirmwareNode,
 ) -> Result<DeviceDesc, DriverError> {
     init_device_registry();
 
@@ -196,7 +198,7 @@ pub fn device_desc_add_with_parent(
         let bus_type = index.find_bus_type(bus.bus_type());
         let id = index.alloc_device_desc_id();
         let desc = DeviceDesc::new_with_parent(
-            id, bus_id, parent, location, origin, identity, transport, resources,
+            id, bus_id, parent, location, origin, identity, transport, resources, node,
         );
         index.add_device_desc(desc.clone());
         (desc, bus_type)
@@ -261,6 +263,7 @@ fn new_unpublished_device_from_desc(
         desc.identity(),
         desc.transport(),
         resources,
+        desc.firmware_node().clone(),
     ));
     Ok((device, bus_type))
 }
@@ -478,6 +481,7 @@ pub fn adopt_active_device(
         adoption.identity,
         adoption.transport,
         adoption.resources.clone(),
+        None,
     );
     let device = Arc::new(DeviceObject::new(
         id,
@@ -487,6 +491,7 @@ pub fn adopt_active_device(
         adoption.identity,
         adoption.transport,
         adoption.resources,
+        None,
     ));
 
     {
@@ -755,6 +760,7 @@ mod tests {
             }),
             None,
             ResourceSet::new(),
+            None,
         )
         .unwrap();
 
@@ -776,6 +782,7 @@ mod tests {
             }),
             None,
             ResourceSet::new(),
+            None,
         )
         .unwrap();
 

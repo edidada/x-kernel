@@ -2244,6 +2244,7 @@ dependencies = [
  "memaddr",
  "memspace",
  "net",
+ "of",
  "pci",
  "smallvec",
  "unittest",
