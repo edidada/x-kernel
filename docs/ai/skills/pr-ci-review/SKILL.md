@@ -157,6 +157,7 @@ for h in hits: print(h['number'], h.get('result') or 'RUNNING', h['url'])
    (`artifact/.ci/` is open to anonymous GET):
 
    ```bash
+   BASE="https://jenkins.openkylin.top/job/x-kernel-ci-test"
    BU=945
    # per-stage logs:
    #   $BASE/$BU/artifact/.ci/stage-logs/<Stage_Name>.log
@@ -190,7 +191,8 @@ for c in json.load(sys.stdin):
 
 Classify each comment:
 
-- `x-cibot` + `<!-- x-review: -->` marker: latest AI verdict (`## AI Re-review`
+- `x-cibot` + `<!-- x-review:summary -->` / `<!-- x-review:review -->` markers:
+  latest AI verdict (`## AI Re-review`
   or `## AI Code Review Summary`: dimensions table, conclusion like "建议合并"
   or blocking issues, reviewed commit SHA).
 - `openkylin-cibot` + `<!-- x-kernel-ci -->`: CI result report posted to PR.
