@@ -93,6 +93,7 @@ RAMDISK_IMG_FS ?= ext4
 RAMDISK_ROOTFS ?= $(DISK_IMG)
 ROOTFS_URL ?= https://gitee.com/openkylin/x-kernel-image/releases/download/rootfs
 ROOTFS_VARIANT ?= debian-openrc
+DOCKER_PKGS_DIR ?= $(CURDIR)/tools/docker-pkgs
 
 UNITTEST ?= n
 UNITTEST_CRATE ?=
@@ -158,6 +159,7 @@ _HOOKS_BOOTSTRAP := $(shell \
 .PHONY: unittest unittest_no_fail_fast
 .PHONY: defconfig oldconfig olddefconfig menuconfig saveconfig savedefconfig gen-const
 .PHONY: rootfs uapps rootfs-uapps teefs disk_img ramdisk_img
+.PHONY: docker-assets dockerfs docker-check
 .PHONY: install-tools check_deps deps check_header header fmt hooks clean distclean symbolize
 .PHONY: ci-test
 
@@ -275,6 +277,31 @@ uapps:
 		--cross-compile "$$cross_compile"
 
 rootfs-uapps: rootfs uapps
+
+# Offline Docker support (see docs/docker-support.md and
+# tools/docker-pkgs/README.md). docker-assets must run once on a networked
+# machine; dockerfs (injection) and docker-check are fully offline.
+docker-assets:
+	@sh "$(DOCKER_PKGS_DIR)/build-deb-closure.sh" "$(DOCKER_PKGS_DIR)"
+
+docker-check:
+	@test -f "$(DOCKER_PKGS_DIR)/SHA256SUMS" || { \
+		echo "docker assets missing; run 'make docker-assets' once on a networked machine" >&2; \
+		exit 1; \
+	}
+	@(cd "$(DOCKER_PKGS_DIR)" && sha256sum -c SHA256SUMS --quiet)
+	@echo "docker assets OK: $(DOCKER_PKGS_DIR)"
+
+dockerfs:
+	@test -f "$(DISK_IMG)" || { echo "disk image not found: $(DISK_IMG); run 'make rootfs' first"; exit 1; }
+	@echo "Injecting offline docker assets into $(DISK_IMG)..."
+	@$(UAPP_TOOL) install \
+		$(UAPP_ARGS) \
+		--uapps-dir "$(UAPP_DIR)" \
+		--disk-img "$(DISK_IMG)" \
+		--select docker-offline \
+		--repo-root "$(CURDIR)" \
+		--build-dir "$(TARGET_DIR)/uapps"
 
 teefs:
 	@arch="$$($(XKMAKE) config arch)"; \

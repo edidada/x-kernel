@@ -1,0 +1,13 @@
+{
+  "storage-driver": "vfs",
+  "iptables": false,
+  "bridge": "none",
+  "ip-forward": false,
+  "ip-masq": false,
+  "log-driver": "json-file",
+  "max-concurrent-downloads": 1,
+  "registry-mirrors": [],
+  "features": {
+    "containerd-snapshotter": false
+  }
+}

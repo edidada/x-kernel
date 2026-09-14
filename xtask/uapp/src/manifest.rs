@@ -162,6 +162,14 @@ pub fn discover(uapps_dir: &Path) -> Result<Vec<Uapp>, String> {
     Ok(uapps)
 }
 
+/// Select the uapps to operate on.
+///
+/// `all` picks every enabled uapp; `none` picks nothing. An explicit,
+/// comma-separated selection always matches the named uapps even when they
+/// are marked disabled (`enabled = false`), so that opt-in manifests such as
+/// `docker-offline` (which requires prebuilt assets that not every checkout
+/// carries) can be installed on demand without breaking the default `all`
+/// flow.
 pub fn select_uapps(uapps: Vec<Uapp>, selection: &str) -> Result<Vec<Uapp>, String> {
     let selection = selection.trim();
     if selection == "all" {
@@ -185,9 +193,8 @@ pub fn select_uapps(uapps: Vec<Uapp>, selection: &str) -> Result<Vec<Uapp>, Stri
         let Some(uapp) = uapps.iter().find(|uapp| uapp.matches_selection(selection)) else {
             return Err(format!("selected uapp not found: {selection}"));
         };
-        if !uapp.is_enabled() {
-            return Err(format!("selected uapp is disabled: {selection}"));
-        }
+        // Explicit selection is a deliberate opt-in: do not reject manifests
+        // that are disabled by default.
         selected.push(uapp.clone());
     }
     Ok(selected)

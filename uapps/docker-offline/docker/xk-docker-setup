@@ -1,0 +1,93 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# xk-docker-setup — first-boot offline Docker engine bring-up for X-Kernel.
+#
+# Injected at /etc/init.d/xk-docker-setup by the docker-offline uapp. On the
+# first invocation it:
+#   1. installs the prebuilt docker/containerd deb closure with dpkg (offline,
+#      no package source access);
+#   2. starts containerd/dockerd through their init scripts when present;
+#   3. docker-loads the prebuilt images (best effort until kernel ABI support
+#      catches up; failures are logged, never fatal to the boot);
+#   4. writes a completion marker so later invocations are no-ops.
+#
+# Usage: xk-docker-setup start|stop|status
+
+set -eu
+
+PKG_ROOT=/opt/xk-docker
+DOCKER_STATE=/var/lib/xk-docker
+MARKER="${DOCKER_STATE}/setup.done"
+LOG=/var/log/xk-docker-setup.log
+
+log() {
+    printf '%s\n' "[xk-docker-setup] $*" >>"${LOG}" 2>/dev/null || true
+}
+
+start() {
+    if [ -f "${MARKER}" ]; then
+        log "already complete (${MARKER}); nothing to do"
+        return 0
+    fi
+    mkdir -p "${DOCKER_STATE}" /var/log
+    : >"${LOG}"
+
+    log "installing prebuilt docker debs offline (dpkg -i)"
+    if ! dpkg -i "${PKG_ROOT}"/pkgs/*.deb >>"${LOG}" 2>&1; then
+        log "dpkg -i failed; check ${LOG}"
+        return 1
+    fi
+
+    # Best effort: openrc service units for containerd/docker are validated in
+    # the guest bring-up phase. Until then, missing units are reported, not fatal.
+    for service in containerd docker; do
+        if command -v rc-service >/dev/null 2>&1 && rc-service "${service}" start >>"${LOG}" 2>&1; then
+            log "started ${service}"
+        else
+            log "could not start ${service} (kernel ABI or init unit may be pending); continuing"
+        fi
+    done
+
+    if command -v docker >/dev/null 2>&1; then
+        for image in "${PKG_ROOT}"/images/*.tar; do
+            [ -f "${image}" ] || continue
+            if docker load -i "${image}" >>"${LOG}" 2>&1; then
+                log "loaded ${image##*/}"
+            else
+                log "docker load failed for ${image##*/} (daemon/kernel features may be incomplete)"
+            fi
+        done
+    else
+        log "docker CLI not available after dpkg -i; skipping image load"
+    fi
+
+    touch "${MARKER}"
+    log "setup complete; marker written"
+}
+
+stop() {
+    for service in docker containerd; do
+        if command -v rc-service >/dev/null 2>&1; then
+            rc-service "${service}" stop >>"${LOG}" 2>&1 || true
+        fi
+    done
+}
+
+status() {
+    if [ -f "${MARKER}" ]; then
+        echo "xk-docker-setup: completed (see ${LOG})"
+    else
+        echo "xk-docker-setup: not yet run"
+    fi
+}
+
+case "${1:-}" in
+    start) start ;;
+    stop) stop ;;
+    status) status ;;
+    *)
+        echo "usage: $0 start|stop|status" >&2
+        exit 1
+        ;;
+esac

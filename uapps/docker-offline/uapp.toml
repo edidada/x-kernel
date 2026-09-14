@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: Apache-2.0
+# docker-offline — inject prebuilt offline Docker engine assets into disk.img.
+#
+# Default-off uapp: without prebuilt assets (tools/docker-pkgs), preparation
+# fails fast with instructions so no half-injected state can be produced.
+# Install explicitly with:
+#
+#   make dockerfs          # or: make uapps UAPPS=docker-offline
+#
+# Layout injected into the guest:
+#   /opt/xk-docker/pkgs/*.deb          docker/containerd/CLI deb closure
+#   /opt/xk-docker/images/*.tar        docker save container images
+#   /etc/docker/daemon.json            offline-fallback daemon config
+#   /etc/init.d/xk-docker-setup        first-boot offline setup (openrc script)
+#
+# Guest first boot (Phase 2+): autostart runs
+#   rc-service xk-docker-setup start
+# which dpkg -i's the local debs (offline), docker load's the images, then
+# (when kernel ABI support lands) starts containerd/dockerd.
+
+[package]
+name = "docker-offline"
+description = "Inject prebuilt offline Docker engine + images into disk.img"
+enabled = false
+order = 90
+
+[prepare]
+commands = [
+  "sh prepare.sh",
+]
+
+[[install]]
+src = "out/pkgs"
+dest = "/opt/xk-docker/pkgs"
+mode = "0644"
+
+[[install]]
+src = "out/images"
+dest = "/opt/xk-docker/images"
+mode = "0644"
+
+[[install]]
+src = "out/etc-docker/daemon.json"
+dest = "/etc/docker/daemon.json"
+mode = "0644"
+
+[[install]]
+src = "out/xk-docker-setup"
+dest = "/etc/init.d/xk-docker-setup"
+mode = "0755"
+
+[[autostart]]
+name = "xk-docker-setup"
+command = "rc-service xk-docker-setup start"
+background = true
+check_alive = false
