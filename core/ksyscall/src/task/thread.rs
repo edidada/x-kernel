@@ -69,9 +69,10 @@ pub fn sys_arch_prctl(
     }
 }
 
-/// Returns the thread ID of the current thread.
+/// Returns the thread ID of the current thread, as visible in its active PID
+/// namespace.
 pub fn sys_gettid() -> KResult<isize> {
-    Ok(kprocess::current_user_tid() as _)
+    Ok(kprocess::current_user_thread().tid_in_active_ns() as _)
 }
 
 /// Sets the `clear_child_tid` pointer for the current thread.

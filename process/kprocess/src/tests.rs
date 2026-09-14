@@ -690,6 +690,356 @@ fn test_clone_parent_inherits_callers_exit_signal_contract() {
 }
 
 #[def_test(serial)]
+fn test_newpid_fork_allocates_leader_in_new_namespace() {
+    let init = ensure_init();
+    let parent_task_number = kidentity::PidHandle::fixed_root(1_501);
+    let parent = init.fork_with_task_number(parent_task_number.clone(), None);
+    let fs_context = fs_context::copy_init_fs_struct();
+    let signal_actions = Arc::new(ksync::spin::SpinNoIrq::new(
+        ksignal::api::SignalActions::default(),
+    ));
+    let thread = build_process_thread(
+        parent.clone(),
+        parent_task_number.clone(),
+        String::from("[newpid-test]"),
+        Arc::new(vec![]),
+        mapped_test_address_space(),
+        fs_context,
+        signal_actions,
+        initial_cred(),
+    );
+    let task = TaskInner::new_user(
+        || {},
+        String::from("newpid-test"),
+        parent_task_number,
+        thread,
+    );
+
+    let prepared = task
+        .as_thread()
+        .prepare_process_fork(ProcessForkConfig {
+            parent: ForkParent::Caller,
+            address_space: ForkAddressSpace::Private,
+            fs: ForkFs::Private,
+            signal_actions: ForkSignalActions::Private,
+            fd_table: ForkFdTable::Private,
+            namespace_flags: kns::NamespaceFlags::NEWPID,
+            exit_signal: Some(ksignal::Signo::SIGCHLD),
+        })
+        .expect("CLONE_NEWPID fork should prepare");
+    let (child, child_handle) = prepared.into_parts();
+
+    // The handle carries one number per ancestor namespace, so a NEWPID child
+    // has exactly two: PID 1 in the fresh child namespace plus a unique
+    // root/global number.
+    assert_eq!(
+        child_handle.numbers().len(),
+        2,
+        "NEWPID handle must carry child-namespace and root numbers"
+    );
+    let child_ns = child_handle
+        .numbers()
+        .iter()
+        .find(|upid| !upid.ns().is_root())
+        .map(|upid| upid.ns())
+        .expect("NEWPID handle must carry a child-namespace number");
+    assert_eq!(
+        child_handle.nr_in(child_ns),
+        Some(1),
+        "child is PID 1 in its own namespace"
+    );
+    assert!(
+        child_ns.parent().unwrap().is_root(),
+        "the new namespace is created below the root namespace in this test"
+    );
+
+    // User-visible views report the namespace-local PID/TID, while the
+    // root/global identity stays the internal key.
+    assert_eq!(child.pid_in_active_ns(), 1);
+    assert_eq!(child.tid_in_active_ns(), 1);
+    assert_eq!(child.pid(), child_handle.root_nr());
+
+    child.process().discard_unpublished();
+    parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    parent.free();
+}
+
+#[def_test(serial)]
+fn test_plain_fork_keeps_parent_pid_namespace() {
+    let init = ensure_init();
+    let parent_task_number = kidentity::PidHandle::fixed_root(1_502);
+    let parent = init.fork_with_task_number(parent_task_number.clone(), None);
+    let fs_context = fs_context::copy_init_fs_struct();
+    let signal_actions = Arc::new(ksync::spin::SpinNoIrq::new(
+        ksignal::api::SignalActions::default(),
+    ));
+    let thread = build_process_thread(
+        parent.clone(),
+        parent_task_number.clone(),
+        String::from("[plain-fork-test]"),
+        Arc::new(vec![]),
+        mapped_test_address_space(),
+        fs_context,
+        signal_actions,
+        initial_cred(),
+    );
+    let task = TaskInner::new_user(
+        || {},
+        String::from("plain-fork-test"),
+        parent_task_number,
+        thread,
+    );
+
+    let prepared = task
+        .as_thread()
+        .prepare_process_fork(ProcessForkConfig {
+            parent: ForkParent::Caller,
+            address_space: ForkAddressSpace::Private,
+            fs: ForkFs::Private,
+            signal_actions: ForkSignalActions::Private,
+            fd_table: ForkFdTable::Private,
+            namespace_flags: kns::NamespaceFlags::empty(),
+            exit_signal: Some(ksignal::Signo::SIGCHLD),
+        })
+        .expect("plain fork should prepare");
+    let (child, child_handle) = prepared.into_parts();
+
+    // No NEWPID: the child keeps the parent's namespace and is allocated
+    // directly in it (a single number for the root namespace here).
+    assert_eq!(child_handle.numbers().len(), 1);
+    assert!(child_handle.numbers()[0].ns().is_root());
+    assert!(Arc::ptr_eq(
+        kidentity::root_pid_namespace(),
+        &child
+            .active_pid_ns()
+            .expect("child runtime must expose its pid namespace")
+    ));
+    assert_eq!(child.pid_in_active_ns(), child.pid());
+
+    child.process().discard_unpublished();
+    parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    parent.free();
+}
+
+#[def_test(serial)]
+fn test_unshare_newpid_reparents_future_children() {
+    let init = ensure_init();
+    let parent_task_number = kidentity::PidHandle::fixed_root(1_503);
+    let parent = init.fork_with_task_number(parent_task_number.clone(), None);
+    let fs_context = fs_context::copy_init_fs_struct();
+    let signal_actions = Arc::new(ksync::spin::SpinNoIrq::new(
+        ksignal::api::SignalActions::default(),
+    ));
+    let thread = build_process_thread(
+        parent.clone(),
+        parent_task_number.clone(),
+        String::from("[unshare-newpid-test]"),
+        Arc::new(vec![]),
+        mapped_test_address_space(),
+        fs_context,
+        signal_actions,
+        initial_cred(),
+    );
+    let task = TaskInner::new_user(
+        || {},
+        String::from("unshare-newpid-test"),
+        parent_task_number,
+        thread,
+    );
+    let thread = task.as_thread();
+
+    let old_ns = thread
+        .active_pid_ns()
+        .expect("runtime must expose its pid namespace");
+    assert!(old_ns.is_root());
+
+    thread
+        .process_runtime()
+        .unshare_namespaces(kns::NamespaceFlags::NEWPID)
+        .expect("unshare(CLONE_NEWPID) should apply");
+
+    // The caller keeps its own identity but children are born in a fresh,
+    // deeper namespace and the first child is PID 1 there.
+    let new_ns = thread
+        .active_pid_ns()
+        .expect("unshared runtime must expose its pid namespace");
+    assert!(!Arc::ptr_eq(&old_ns, &new_ns));
+    assert_eq!(old_ns.level() + 1, new_ns.level());
+    assert!(Arc::ptr_eq(new_ns.parent().unwrap(), &old_ns,));
+
+    let prepared = thread
+        .prepare_process_fork(ProcessForkConfig {
+            parent: ForkParent::Caller,
+            address_space: ForkAddressSpace::Private,
+            fs: ForkFs::Private,
+            signal_actions: ForkSignalActions::Private,
+            fd_table: ForkFdTable::Private,
+            namespace_flags: kns::NamespaceFlags::empty(),
+            exit_signal: Some(ksignal::Signo::SIGCHLD),
+        })
+        .expect("fork after unshare(CLONE_NEWPID) should prepare");
+    let (child, child_handle) = prepared.into_parts();
+    assert_eq!(
+        child_handle.nr_in(&new_ns),
+        Some(1),
+        "first unshared child is PID 1"
+    );
+    assert_eq!(child_handle.numbers().len(), 2);
+
+    child.process().discard_unpublished();
+    parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    parent.free();
+}
+
+#[def_test(serial)]
+fn test_unshare_newuts_copies_hostname_into_fresh_namespace() {
+    let init = ensure_init();
+    let parent_task_number = kidentity::PidHandle::fixed_root(1_504);
+    let parent = init.fork_with_task_number(parent_task_number.clone(), None);
+    let fs_context = fs_context::copy_init_fs_struct();
+    let signal_actions = Arc::new(ksync::spin::SpinNoIrq::new(
+        ksignal::api::SignalActions::default(),
+    ));
+    let thread = build_process_thread(
+        parent.clone(),
+        parent_task_number.clone(),
+        String::from("[unshare-uts-test]"),
+        Arc::new(vec![]),
+        mapped_test_address_space(),
+        fs_context,
+        signal_actions,
+        initial_cred(),
+    );
+    let task = TaskInner::new_user(
+        || {},
+        String::from("unshare-uts-test"),
+        parent_task_number,
+        thread,
+    );
+    let thread = task.as_thread();
+
+    let old_uts = thread.process_runtime().uts_ns().unwrap();
+    old_uts.set_nodename(b"original-host").unwrap();
+
+    thread
+        .process_runtime()
+        .unshare_namespaces(kns::NamespaceFlags::NEWUTS)
+        .expect("unshare(CLONE_NEWUTS) should apply");
+
+    let new_uts = thread.process_runtime().uts_ns().unwrap();
+    assert!(!Arc::ptr_eq(&old_uts, &new_uts));
+    assert_eq!(new_uts.nodename(), b"original-host");
+
+    // Mutating the new namespace must not leak into the old one.
+    new_uts.set_nodename(b"child-host").unwrap();
+    assert_eq!(old_uts.nodename(), b"original-host");
+    assert_eq!(new_uts.nodename(), b"child-host");
+
+    parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    parent.free();
+}
+
+#[def_test(serial)]
+fn test_unshare_newns_rejects_shared_fs_context() {
+    let init = ensure_init();
+    let parent_task_number = kidentity::PidHandle::fixed_root(1_505);
+    let parent = init.fork_with_task_number(parent_task_number.clone(), None);
+    let fs_context = fs_context::copy_init_fs_struct();
+    let signal_actions = Arc::new(ksync::spin::SpinNoIrq::new(
+        ksignal::api::SignalActions::default(),
+    ));
+    let thread = build_process_thread(
+        parent.clone(),
+        parent_task_number.clone(),
+        String::from("[unshare-newns-test]"),
+        Arc::new(vec![]),
+        mapped_test_address_space(),
+        fs_context,
+        signal_actions,
+        initial_cred(),
+    );
+    let task = TaskInner::new_user(
+        || {},
+        String::from("unshare-newns-test"),
+        parent_task_number,
+        thread,
+    );
+    let thread = task.as_thread();
+    let runtime = thread.process_runtime();
+
+    // Simulate CLONE_FS sharing: a second Arc owner of the same fs context.
+    // The extra owner is dropped at the end of this scope.
+    {
+        let _extra_owner = runtime.fs_context().expect("runtime keeps a fs context");
+        let err = runtime
+            .unshare_namespaces(kns::NamespaceFlags::NEWNS)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            kerrno::KError::InvalidInput,
+            "shared fs must reject CLONE_NEWNS"
+        );
+    }
+
+    // Without the extra owner the same request succeeds.
+    runtime
+        .unshare_namespaces(kns::NamespaceFlags::NEWNS)
+        .expect("private fs context must allow CLONE_NEWNS");
+
+    parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    parent.free();
+}
+
+#[def_test(serial)]
+fn test_unshare_rejects_unimplemented_namespace_types() {
+    let init = ensure_init();
+    let parent_task_number = kidentity::PidHandle::fixed_root(1_506);
+    let parent = init.fork_with_task_number(parent_task_number.clone(), None);
+    let fs_context = fs_context::copy_init_fs_struct();
+    let signal_actions = Arc::new(ksync::spin::SpinNoIrq::new(
+        ksignal::api::SignalActions::default(),
+    ));
+    let thread = build_process_thread(
+        parent.clone(),
+        parent_task_number.clone(),
+        String::from("[unshare-unsupported-test]"),
+        Arc::new(vec![]),
+        mapped_test_address_space(),
+        fs_context,
+        signal_actions,
+        initial_cred(),
+    );
+    let task = TaskInner::new_user(
+        || {},
+        String::from("unshare-unsupported-test"),
+        parent_task_number,
+        thread,
+    );
+    let runtime = task.as_thread().process_runtime();
+
+    for flags in [
+        kns::NamespaceFlags::NEWNET,
+        kns::NamespaceFlags::NEWUSER,
+        kns::NamespaceFlags::NEWCGROUP,
+        kns::NamespaceFlags::NEWTIME,
+    ] {
+        assert_eq!(
+            runtime.unshare_namespaces(flags).unwrap_err(),
+            kerrno::KError::Unsupported,
+            "{flags:?}"
+        );
+    }
+    assert!(
+        runtime
+            .unshare_namespaces(kns::NamespaceFlags::empty())
+            .is_ok()
+    );
+
+    parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    parent.free();
+}
+
+#[def_test(serial)]
 fn test_free_only_reaps_target_zombie_child() {
     let init = ensure_init();
     let first = init.fork(400);

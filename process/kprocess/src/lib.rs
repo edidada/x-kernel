@@ -79,11 +79,6 @@ pub use timer_delivery::{
     dispatch_timer_delivery, init_timer_runtime, poll_cpu_timers, spawn_alarm_task,
 };
 
-pub(crate) fn allocate_thread_task_number()
--> kerrno::KResult<alloc::sync::Arc<kidentity::PidHandle>> {
-    kidentity::allocate_root_pid_handle()
-}
-
 /// Runtime action requested by a syscall after handling a user trap.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UserThreadRuntimeAction {
@@ -99,6 +94,16 @@ pub fn current_resources() -> alloc::sync::Arc<kresources::ProcessResources> {
     current_user_process()
         .resources()
         .expect("current user thread must still expose process resources")
+}
+
+/// Applies `unshare(2)` namespace changes to the calling process.
+///
+/// The flags are the same `CLONE_NEW*` bits used by `clone(2)`; supported
+/// types are mount, UTS, IPC and PID-for-children. Unsupported namespace
+/// types return `Unsupported`.
+pub fn unshare_current(flags: kns::NamespaceFlags) -> kerrno::KResult<()> {
+    let runtime = current_user_thread().process_runtime();
+    runtime.unshare_namespaces(flags)
 }
 
 /// Returns the current process umask.

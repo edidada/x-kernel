@@ -21,6 +21,7 @@ mod exit;
 mod ids;
 mod job;
 mod limits;
+mod ns;
 mod pidfd;
 mod rusage;
 mod sched;
@@ -31,5 +32,5 @@ mod wait;
 
 pub use self::{
     clone::*, clone3::*, cpu_time::*, credentials::*, ctl::*, execve::*, exit::*, ids::*, job::*,
-    limits::*, pidfd::*, rusage::*, sched::*, signal::*, thread::*, umask::*, wait::*,
+    limits::*, ns::*, pidfd::*, rusage::*, sched::*, signal::*, thread::*, umask::*, wait::*,
 };

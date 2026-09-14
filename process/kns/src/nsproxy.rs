@@ -117,6 +117,10 @@ impl NsProxy {
     /// - With `CLONE_NEWNS`, a new mount namespace is cloned from the parent.
     /// - With `CLONE_NEWUTS`, a new `UtsNamespace` is cloned from the parent.
     /// - With `CLONE_NEWIPC`, a new empty `IpcNamespace` is created.
+    /// - With `CLONE_NEWPID`, a new child PID namespace is created for the
+    ///   child and its descendants. The caller must allocate the child's
+    ///   `PidHandle` inside this namespace (see `kidentity::PidHandle::
+    ///   allocate_in`).
     /// - Unimplemented flags (`CLONE_NEWCGROUP`, `CLONE_NEWNET`, etc.) return an
     ///   error so the caller can translate it to the appropriate errno.
     pub fn clone_for_child(
@@ -128,7 +132,6 @@ impl NsProxy {
         let unimplemented = NamespaceFlags::NEWNET
             | NamespaceFlags::NEWUSER
             | NamespaceFlags::NEWCGROUP
-            | NamespaceFlags::NEWPID
             | NamespaceFlags::NEWTIME;
         if flags.intersects(unimplemented) {
             return Err(CloneNsError::Unimplemented);
@@ -163,11 +166,20 @@ impl NsProxy {
             self.ipc_ns.clone()
         };
 
+        let pid_ns_for_children = if flags.contains(NamespaceFlags::NEWPID) {
+            // The new namespace is created below the parent's active PID
+            // namespace (modeled as `pid_ns_for_children`). The child and its
+            // descendants are the first members of the new namespace.
+            PidNamespace::new_child(&self.pid_ns_for_children)
+        } else {
+            self.pid_ns_for_children.clone()
+        };
+
         Ok(Arc::new(Self {
             mnt_ns,
             uts_ns,
             ipc_ns,
-            pid_ns_for_children: self.pid_ns_for_children.clone(),
+            pid_ns_for_children,
             net_ns: self.net_ns.clone(),
             cgroup_ns: self.cgroup_ns.clone(),
             time_ns: self.time_ns.clone(),
@@ -315,14 +327,56 @@ mod tests_nsproxy {
         );
         assert!(
             parent
-                .clone_for_child(NamespaceFlags::NEWPID, NamespaceFsContext::Shared)
-                .is_err()
-        );
-        assert!(
-            parent
                 .clone_for_child(NamespaceFlags::NEWCGROUP, NamespaceFsContext::Shared)
                 .is_err()
         );
+    }
+
+    #[def_test]
+    fn test_nsproxy_clone_newpid_creates_child_pid_namespace() {
+        let parent = make_nsproxy();
+        let child = parent
+            .clone_for_child(NamespaceFlags::NEWPID, NamespaceFsContext::Shared)
+            .unwrap();
+
+        // The child gets a new, deeper PID namespace below the parent's.
+        assert!(!Arc::ptr_eq(
+            &parent.pid_ns_for_children,
+            &child.pid_ns_for_children
+        ));
+        assert_eq!(
+            child.pid_ns_for_children.parent().unwrap().level(),
+            parent.pid_ns_for_children.level()
+        );
+        assert_eq!(
+            child.pid_ns_for_children.level(),
+            parent.pid_ns_for_children.level() + 1
+        );
+
+        // Everything else is shared as usual.
+        assert!(Arc::ptr_eq(&parent.mnt_ns, &child.mnt_ns));
+        assert!(Arc::ptr_eq(&parent.uts_ns, &child.uts_ns));
+        assert!(Arc::ptr_eq(&parent.ipc_ns, &child.ipc_ns));
+    }
+
+    #[def_test]
+    fn test_nsproxy_clone_without_newpid_shares_pid_namespace() {
+        let parent = make_nsproxy();
+        let child = parent
+            .clone_for_child(NamespaceFlags::empty(), NamespaceFsContext::Shared)
+            .unwrap();
+
+        assert!(Arc::ptr_eq(
+            &parent.pid_ns_for_children,
+            &child.pid_ns_for_children
+        ));
+        let with_uts = parent
+            .clone_for_child(NamespaceFlags::NEWUTS, NamespaceFsContext::Shared)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &parent.pid_ns_for_children,
+            &with_uts.pid_ns_for_children
+        ));
     }
 
     #[def_test]

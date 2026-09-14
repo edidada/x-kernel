@@ -193,9 +193,11 @@ Inherited group
 1. `fork_process_runtime` 先按 `ForkFs` 准备 child filesystem context，并按
    `NamespaceFlags` 克隆 child `NsProxy`；共享 fs 场景若 parent 正处于 exec
    临界状态会返回 `WouldBlock`。
-2. 当前 `CLONE_NEWPID` 尚未启用，因此 leader `PidHandle` 仍在 root PID namespace
-   分配，并保持 root-visible `tid == pid`；后续 task-active PID namespace 应挂在
-   task/PID identity 层，而不是 `NsProxy`。
+2. `CLONE_NEWPID` 时在父 active PID namespace 下创建新 namespace 并分配 child
+   leader `PidHandle`（`allocate_in(new_ns)`），否则在父 `pid_ns_for_children`
+   内分配；handle 因此携带 root-visible 唯一编号（`root_nr`）与各 ancestor
+   namespace 的可见编号（`nr_in`）。线程克隆同样按进程 active namespace 分配，
+   保证容器内 `tid` 一致。
 3. 再创建子进程稳定身份、预分配 child relation slot，并加入 group 的 weak
    member 表。`ProcessForkConfig` 使用 `ForkParent`、`ForkAddressSpace`、
    `ForkFs`、`ForkSignalActions` 和 `ForkFdTable` 表达 clone 语义，syscall 层

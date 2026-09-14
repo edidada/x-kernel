@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 
 use kcgroup::{Cgroup, TaskCharge, TaskMembership};
 use kcred::Cred;
-use kerrno::KResult;
+use kerrno::{KError, KResult};
 use ksignal::{SignalStack, api::ThreadSignalManager};
 use ksync::{Mutex, RwLock};
 use ktask::KtaskRef;
@@ -16,10 +16,7 @@ use ktime_types::TimeSpan;
 use tee_task_iface::TeeSessionCtxTrait;
 
 use super::cpu_time::{CpuTimeState, CpuTimeStatistics};
-use crate::{
-    Pid, Process, ProcessForkConfig, ProcessRuntime, Tid, allocate_thread_task_number,
-    fork_process_runtime,
-};
+use crate::{Pid, Process, ProcessForkConfig, ProcessRuntime, Tid, fork_process_runtime};
 
 /// The current user thread handle.
 pub struct CurrentThread(pub(super) KtaskRef);
@@ -252,7 +249,13 @@ impl Thread {
     pub fn prepare_thread_clone(&self) -> KResult<PreparedUserClone> {
         let _transaction = self.process.cgroup_transaction();
         let charge = self.cgroup.reserve_child()?;
-        let task_number = allocate_thread_task_number()?;
+        // Threads live in the process's active PID namespace, so their
+        // `PidHandle` gets one number per ancestor namespace from there up to
+        // root (see `fork_process_runtime` for the process-leader analogue).
+        let task_number = self
+            .active_pid_ns()
+            .ok_or(KError::NoSuchProcess)
+            .and_then(|ns| kidentity::PidHandle::allocate_in(&ns))?;
         let thread = Self::new_with_charge(
             self.process.clone(),
             self.runtime.clone(),
@@ -267,9 +270,51 @@ impl Thread {
         })
     }
 
-    /// Returns the user-visible thread identifier.
+    /// Returns the PID namespace in which this thread's PIDs are visible to
+    /// its own userspace (its active PID namespace).
+    ///
+    /// The active namespace is the process's `pid_ns_for_children`; with the
+    /// current namespace model the two coincide for every live process, so a
+    /// single lookup serves both `tid`/`pid` views and child allocation.
+    pub(crate) fn active_pid_ns(&self) -> Option<Arc<kidentity::PidNamespace>> {
+        self.runtime
+            .nsproxy()
+            .map(|nsproxy| nsproxy.pid_ns_for_children().clone())
+    }
+
+    /// Returns the user-visible thread identifier (root/global view).
     pub fn tid(&self) -> Tid {
         self.task_number.root_nr()
+    }
+
+    /// Returns the thread ID visible in the thread's active PID namespace.
+    pub fn tid_in_active_ns(&self) -> Tid {
+        match &self.active_pid_ns() {
+            Some(ns) => self.task_number.nr_in(ns).unwrap_or_else(|| self.tid()),
+            None => self.tid(),
+        }
+    }
+
+    /// Returns the owning process ID visible in the thread's active PID
+    /// namespace.
+    pub fn pid_in_active_ns(&self) -> Pid {
+        match &self.active_pid_ns() {
+            Some(ns) => self.process().pid_in_ns(ns).unwrap_or_else(|| self.pid()),
+            None => self.pid(),
+        }
+    }
+
+    /// Returns the parent process ID visible in the thread's active PID
+    /// namespace, or zero when the wait parent is not a member of that
+    /// namespace (Linux reports `0` for an invisible parent).
+    pub fn ppid_in_active_ns(&self) -> Pid {
+        let Some(parent) = self.process().parent() else {
+            return 0;
+        };
+        match &self.active_pid_ns() {
+            Some(ns) => parent.pid_in_ns(ns).unwrap_or(0),
+            None => parent.pid(),
+        }
     }
 
     /// Returns the task's canonical cgroup node.

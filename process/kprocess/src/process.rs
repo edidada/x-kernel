@@ -16,7 +16,7 @@ pub use exit::{
     ProcessExitPublication, WaitChildKind, WaitChildScan, WaitChildSelector, WaitReapMode,
     WaitedChild,
 };
-use kidentity::PidHandle;
+use kidentity::{PidHandle, PidNamespace};
 use ksignal::Signo;
 use kspin::SpinNoIrq;
 use ksync::{Mutex, MutexGuard};
@@ -69,13 +69,23 @@ pub struct Process {
 impl Process {
     /// The [`Process`] ID.
     ///
-    /// Returns the root/global PID number from the leader task-number handle.
-    /// This is stable under the current global-PID semantics. Once
-    /// `CLONE_NEWPID` is fully enabled across all syscall paths, callers that
-    /// need a namespace-relative view should use `nr_in(ns)` on the underlying
-    /// [`kidentity::PidHandle`] instead.
+    /// Returns the root/global PID number from the leader task-number handle,
+    /// which is stable and unique across namespace boundaries. Internal
+    /// bookkeeping (wait queues, lookup registries, job control) is keyed on
+    /// this value and must never switch to a namespace-relative view.
     pub fn pid(&self) -> Pid {
         self.leader_task_number.root_nr()
+    }
+
+    /// Returns the PID number visible inside `ns`, if this handle carries one
+    /// for that namespace.
+    ///
+    /// A handle always carries a number for the root namespace; it carries
+    /// numbers for deeper namespaces only when the process was allocated
+    /// inside them (directly or via an ancestor that made them its active
+    /// namespace).
+    pub fn pid_in_ns(&self, ns: &Arc<PidNamespace>) -> Option<Pid> {
+        self.leader_task_number.nr_in(ns)
     }
 
     /// Returns the exit signal configured for this process.

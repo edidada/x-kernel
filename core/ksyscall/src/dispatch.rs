@@ -377,6 +377,7 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
             uctx.arg4().into(),
         ) as _,
         Sysno::umount2 => sys_umount2(uctx.arg0().into(), uctx.arg1() as _) as _,
+        Sysno::pivot_root => sys_pivot_root(uctx.arg0().into(), uctx.arg1().into()),
 
         // pipe
         Sysno::pipe2 => sys_pipe2(uctx.arg0().into(), uctx.arg1() as _),
@@ -468,6 +469,10 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         Sysno::getppid => sys_getppid(),
         Sysno::gettid => sys_gettid(),
         Sysno::getrusage => sys_getrusage(uctx.arg0() as _, uctx.arg1().into()),
+
+        // namespaces
+        Sysno::unshare => sys_unshare(uctx.arg0() as u64),
+        Sysno::setns => sys_setns(uctx.arg0() as _, uctx.arg1() as u64),
 
         // task sched
         Sysno::sched_yield => sys_sched_yield(),

@@ -282,27 +282,63 @@ fn per_mount_flags(flags: u32, current_flags: MountFlags) -> MountFlags {
 
 /// Unmount a filesystem at the specified target path.
 pub fn sys_umount2(target: UserConstPtr<c_char>, flags: i32) -> KResult<isize> {
-    // Reject flags we don't implement yet: MNT_FORCE(1), MNT_DETACH(2),
-    // MNT_EXPIRE(4), UMOUNT_NOFOLLOW(8).  Silently ignoring them would
-    // violate user-visible semantics (e.g. MNT_DETACH would behave as a
-    // synchronous unmount).
+    // Reject flags we don't implement yet: MNT_FORCE(1), MNT_EXPIRE(4),
+    // UMOUNT_NOFOLLOW(8). MNT_DETACH is supported: it detaches the mount tree
+    // without busy checks (lazy unmount), as required by OCI runtime rootfs
+    // setups after `pivot_root`.
     let f = flags as u32;
     if f & (linux_raw_sys::general::MNT_FORCE
-        | linux_raw_sys::general::MNT_DETACH
         | linux_raw_sys::general::MNT_EXPIRE
         | linux_raw_sys::general::UMOUNT_NOFOLLOW)
         != 0
     {
         return Err(KError::InvalidInput);
     }
+    let detach = f & linux_raw_sys::general::MNT_DETACH != 0;
 
     let target = target.load_string()?;
-    debug!("sys_umount2 <= target: {target:?}");
+    debug!("sys_umount2 <= target: {target:?}, flags: {flags} (detach: {detach})");
 
     let process = current_user_process();
     let cred = kprocess::current_cred();
     let target = lookup_mount_path(&process, &target, &cred)?;
-    process.mnt_ns()?.detach(&target)?;
+    if detach {
+        process.mnt_ns()?.detach_tree(&target)?;
+    } else {
+        process.mnt_ns()?.detach(&target)?;
+    }
+    Ok(0)
+}
+
+/// Change the mount namespace's root (`pivot_root(2)`).
+///
+/// Makes `new_root` (which must be a mount point) the new root of the calling
+/// process's mount namespace and relocates the previous root mount at
+/// `put_old` (an unmounted directory, typically inside the new root's
+/// filesystem). After a successful pivot the caller's filesystem root and
+/// current directory are retargeted to the new root so later `chdir("/")`
+/// style lookups resolve through it, mirroring Linux `chroot_fs_refs`.
+pub fn sys_pivot_root(
+    new_root: UserConstPtr<c_char>,
+    put_old: UserConstPtr<c_char>,
+) -> KResult<isize> {
+    let new_root = new_root.load_string_with_max_len(PATH_MAX)?;
+    let put_old = put_old.load_string_with_max_len(PATH_MAX)?;
+    debug!("sys_pivot_root <= new_root: {new_root:?}, put_old: {put_old:?}");
+
+    let process = current_user_process();
+    let cred = kprocess::current_cred();
+    let new_root = lookup_mount_path(&process, &new_root, &cred)?;
+    let put_old = lookup_mount_path(&process, &put_old, &cred)?;
+
+    let namespace = process.mnt_ns()?;
+    namespace.pivot_root(&new_root, &put_old)?;
+
+    let visible_root = namespace.visible_root_path();
+    let fs_context = process.fs_context()?;
+    fs_context
+        .lock()
+        .replace_root_and_pwd(visible_root.clone(), visible_root)?;
     Ok(0)
 }
 

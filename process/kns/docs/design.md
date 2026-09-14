@@ -147,7 +147,8 @@ mount 查找子 mount 的层次。
 - 初始 cgroup namespace 由 `kcgroup` 持有，`NsProxy::new_initial` 只复用其 `Arc`。
   因此启动挂载与 PID 1 不会各自创建互不相干的 hierarchy。
 - mount propagation、shared/slave/private 传播组和 `setns` 尚未实现，因此当前 copy
-  只覆盖基本 mount tree 隔离。
+  只覆盖基本 mount tree 隔离；`unshare(2)` 已通过复用 `clone_for_child` 接入
+  （NEWNS/NEWUTS/NEWIPC/NEWPID）。
 - PID namespace 的对象图和编号链已经建立，但 syscall ABI 仍保持 root/global PID
   语义。`NsProxy` 只保存 `pid_ns_for_children`；完整 `CLONE_NEWPID` 支持要等
   task-active PID namespace、lookup、signal、wait、procfs 一起 namespace-aware

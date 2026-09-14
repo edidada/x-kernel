@@ -374,6 +374,58 @@ impl ProcessRuntime {
         self.nsproxy().map(|nsproxy| nsproxy.uts_ns().clone())
     }
 
+    /// Applies `unshare(2)`-style namespace changes to the calling process.
+    ///
+    /// Supported flags mirror the implemented `CLONE_NEW*` set: `NEWNS`
+    /// (new mount namespace, retargeting this runtime's fs root/pwd),
+    /// `NEWUTS` (copied hostname in a fresh namespace), `NEWIPC` (fresh empty
+    /// namespace) and `NEWPID` (a new namespace for the caller's future
+    /// children; the caller itself keeps its own identity, mirroring Linux).
+    ///
+    /// Following Linux, `NEWNS` is rejected while the filesystem context is
+    /// shared with other threads/processes (`CLONE_FS`). Namespace types the
+    /// kernel does not execute yet (`NEWNET`, `NEWUSER`, `NEWCGROUP`,
+    /// `NEWTIME`) fail explicitly with `Unsupported` instead of silently
+    /// sharing global state.
+    pub(crate) fn unshare_namespaces(&self, flags: kns::NamespaceFlags) -> KResult<()> {
+        if flags.is_empty() {
+            return Ok(());
+        }
+
+        let needs_new_mnt = flags.contains(kns::NamespaceFlags::NEWNS);
+        let parent_nsproxy = self.nsproxy().ok_or(KError::NoSuchProcess)?;
+
+        let fs_context = if needs_new_mnt {
+            let fs_context = self.fs_context().ok_or(KError::NoSuchProcess)?;
+            // `self.fs_context()` already cloned the Arc for us, so a
+            // `CLONE_FS`-shared fs_struct shows as more than the runtime's own
+            // reference plus this local clone (`strong_count > 2`). Match
+            // Linux: unshare(CLONE_NEWNS) fails with EINVAL while fs->users > 1.
+            if Arc::strong_count(&fs_context) > 2 {
+                return Err(KError::InvalidInput);
+            }
+            Some(fs_context)
+        } else {
+            None
+        };
+
+        let new_nsproxy = match &fs_context {
+            Some(fs_context) => {
+                let mut fs = fs_context.lock();
+                parent_nsproxy.clone_for_child(flags, NamespaceFsContext::Private(&mut fs))
+            }
+            None => parent_nsproxy.clone_for_child(flags, NamespaceFsContext::Shared),
+        }
+        .map_err(|err| match err {
+            kns::CloneNsError::InvalidFlagCombination => KError::InvalidInput,
+            kns::CloneNsError::Unimplemented => KError::Unsupported,
+            kns::CloneNsError::Mount(err) => err,
+        })?;
+
+        *self.nsproxy.write() = Some(new_nsproxy);
+        Ok(())
+    }
+
     pub(crate) fn exit_fs(&self) {
         let fs_context = self.fs_context.write().take();
         drop(fs_context);
@@ -449,7 +501,23 @@ pub(crate) fn fork_process_runtime(
     config: ProcessForkConfig,
 ) -> KResult<(Arc<ProcessRuntime>, Arc<kidentity::PidHandle>)> {
     let fs_namespaces = prepare_fork_fs_and_namespaces(parent, &config)?;
-    let leader_task_number = kidentity::allocate_root_pid_handle()?;
+    // Allocate the child leader's `PidHandle` in the namespace the child will
+    // live in: the freshly created child namespace for `CLONE_NEWPID`, the
+    // parent's active PID namespace (modeled as its `pid_ns_for_children`)
+    // otherwise. The handle therefore carries one number per ancestor
+    // namespace, keeping `root_nr()` unique while `nr_in(ns)` serves
+    // namespace-relative views.
+    let leader_task_number = {
+        let alloc_ns = if config.namespace_flags.contains(kns::NamespaceFlags::NEWPID) {
+            fs_namespaces.nsproxy.pid_ns_for_children().clone()
+        } else {
+            parent
+                .nsproxy()
+                .map(|nsproxy| nsproxy.pid_ns_for_children().clone())
+                .ok_or(KError::NoSuchProcess)?
+        };
+        kidentity::PidHandle::allocate_in(&alloc_ns)?
+    };
     let process = parent.process().fork_with_tree_parent(
         leader_task_number.clone(),
         config.parent,
