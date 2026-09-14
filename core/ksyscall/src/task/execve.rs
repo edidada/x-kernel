@@ -14,9 +14,9 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::ffi::c_char;
+use core::ffi::{c_char, c_int};
 
-use kerrno::{KError, KResult};
+use kerrno::{KError, KResult, LinuxError};
 use kexec::{ExecRequest, load_prepared_user_app, prepare_user_app_request};
 use khal::uspace::UserContext;
 use ktask::current;
@@ -67,20 +67,11 @@ pub(super) fn exec_owned(
     path: String,
     args: Vec<String>,
     envs: Vec<String>,
-    #[cfg(unittest)] mut probe: Option<&mut lifecycle_tests::ExecProbe>,
+    #[cfg(unittest)] probe: Option<&mut lifecycle_tests::ExecProbe>,
 ) -> KResult<isize> {
     debug!("sys_execve <= path: {path:?}, args: {args:?}, envs: {envs:?}");
 
-    let curr = current();
-    let thread = kprocess::current_user_thread();
-    let process = thread.process().clone();
-
-    if kprocess::scheduler::process_task_count(process.as_ref()) > 1 {
-        // TODO: dispatch_irq multi-thread case
-        error!("sys_execve: multi-thread not supported");
-        return Err(KError::WouldBlock);
-    }
-
+    let process = kprocess::current_user_thread().process().clone();
     let fs_context = process.fs_context()?;
     let fs = fs_context.lock();
     let cred = kprocess::current_cred();
@@ -92,15 +83,153 @@ pub(super) fn exec_owned(
         &cred,
     )?;
     drop(fs);
+    exec_resolved(
+        uctx,
+        loc,
+        path,
+        args,
+        envs,
+        cred,
+        #[cfg(unittest)]
+        probe,
+    )
+}
+
+/// `execveat(2)`: execute a program selected by `dirfd`/`pathname`.
+///
+/// Two forms are supported, matching what runc's memfd self-reexec
+/// (glibc `fexecve`) needs:
+/// - `AT_EMPTY_PATH` with an empty pathname: exec the file already open on
+///   `dirfd` (anonymous memfd / tmpfs file); the display path is reported as
+///   `/proc/self/fd/<dirfd>`.
+/// - a non-empty pathname: resolve relative to `dirfd` (`AT_FDCWD` = caller
+///   cwd) and exec, following symlinks like `execve`.
+///
+/// `AT_SYMLINK_NOFOLLOW` is accepted but currently treated as follow (Linux
+/// returns `ELOOP` for a symlink target under it; X-Kernel does not yet
+/// distinguish) — documented as a follow-up.
+pub fn sys_execveat(
+    uctx: &mut UserContext,
+    dirfd: c_int,
+    pathname: *const c_char,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+    flags: u32,
+) -> KResult<isize> {
+    use linux_raw_sys::general::{AT_EMPTY_PATH, AT_FDCWD};
+
+    let (args, envs) = load_strings(argv, envp)?;
+    let cred = kprocess::current_cred();
+
+    // Linux requires a non-NULL pathname; `AT_EMPTY_PATH` selects the file
+    // already open on `dirfd` only when the pathname is the empty string.
+    if pathname.is_null() {
+        return Err(KError::from(LinuxError::EFAULT));
+    }
+    let path = vm_load_string(pathname)?;
+
+    if flags & AT_EMPTY_PATH != 0 && path.is_empty() {
+        let file = kprocess::current_resources().get_file(dirfd)?;
+        let display = alloc::format!("/proc/self/fd/{dirfd}");
+        debug!("sys_execveat <= fd {dirfd} (AT_EMPTY_PATH), args: {args:?}");
+        return exec_resolved(
+            uctx,
+            file.path().clone(),
+            display,
+            args,
+            envs,
+            cred,
+            #[cfg(unittest)]
+            None,
+        );
+    }
+
+    debug!("sys_execveat <= dirfd {dirfd}, path: {path:?}, args: {args:?}");
+    let process = kprocess::current_user_thread().process().clone();
+    let fs_context = process.fs_context()?;
+    let fs = fs_context.lock();
+    let location = if path.as_str().chars().next().is_some_and(|c| c == '/') || dirfd == AT_FDCWD {
+        Filename::new(path.as_str()).lookup_at(
+            fs.root(),
+            fs.pwd(),
+            LookupIntent::Exec,
+            LookupFlags::follow(),
+            &cred,
+        )?
+    } else {
+        let dir_file = kprocess::current_resources().get_file(dirfd)?;
+        if !dir_file.is_dir() {
+            return Err(KError::NotADirectory);
+        }
+        let snapshot = fs.clone_with_pwd(dir_file.path().clone())?;
+        Filename::new(path.as_str()).lookup_at(
+            snapshot.root(),
+            snapshot.pwd(),
+            LookupIntent::Exec,
+            LookupFlags::follow(),
+            &cred,
+        )?
+    };
+    drop(fs);
+    exec_resolved(
+        uctx,
+        location,
+        path,
+        args,
+        envs,
+        cred,
+        #[cfg(unittest)]
+        None,
+    )
+}
+
+/// Loads `argv`/`envp` (NUL-terminated pointer arrays) into owned strings.
+fn load_strings(
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> KResult<(Vec<String>, Vec<String>)> {
+    let load = |ptr: *const *const c_char| -> KResult<Vec<String>> {
+        if ptr.is_null() {
+            return Ok(Vec::new());
+        }
+        load_vec_until_null(ptr)?
+            .into_iter()
+            .map(vm_load_string)
+            .collect::<Result<Vec<_>, _>>()
+    };
+    Ok((load(argv)?, load(envp)?))
+}
+
+/// Prepares the resolved executable and swaps the caller's address space and
+/// register context for the new program. Shared by `execve`/`execveat`.
+fn exec_resolved(
+    uctx: &mut UserContext,
+    loc: kvfs::Path,
+    display_path: String,
+    args: Vec<String>,
+    envs: Vec<String>,
+    cred: Arc<kcred::Cred>,
+    #[cfg(unittest)] mut probe: Option<&mut lifecycle_tests::ExecProbe>,
+) -> KResult<isize> {
+    let curr = current();
+    let thread = kprocess::current_user_thread();
+    let process = thread.process().clone();
+
+    if kprocess::scheduler::process_task_count(process.as_ref()) > 1 {
+        // TODO: dispatch_irq multi-thread case
+        error!("sys_execve: multi-thread not supported");
+        return Err(KError::WouldBlock);
+    }
+
     let absolute_path = loc
         .absolute_path()
         .map(|path| path.to_string())
-        .unwrap_or_else(|_| path.clone());
+        .unwrap_or_else(|_| display_path.clone());
     let entry_name = loc.name();
 
     let prepared = prepare_user_app_request(ExecRequest::from_resolved_with_display(
         loc,
-        path,
+        display_path,
         args.clone(),
         envs,
         cred,
