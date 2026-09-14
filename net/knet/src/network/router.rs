@@ -2,16 +2,24 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Route rules, attributes, and table lookup.
+//! Routing rules, route selection, and address-derived routes.
 
 use alloc::vec::Vec;
 
-use crate::ip::{IpAddress, IpCidr, Ipv4Cidr};
+use kerrno::{KError, KResult, LinuxError};
+
 pub(crate) use crate::netlink::{
     RT_SCOPE_HOST as ROUTE_SCOPE_HOST, RT_SCOPE_LINK as ROUTE_SCOPE_LINK,
     RT_SCOPE_UNIVERSE as ROUTE_SCOPE_UNIVERSE, RT_TABLE_MAIN as ROUTE_TABLE_MAIN,
     RTN_UNICAST as ROUTE_TYPE_UNICAST, RTPROT_BOOT as ROUTE_PROTOCOL_BOOT,
     RTPROT_KERNEL as ROUTE_PROTOCOL_KERNEL,
+};
+use crate::{
+    device::{
+        LinkKind,
+        interfaces::InterfaceSet,
+    },
+    ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -57,7 +65,7 @@ pub(crate) struct Rule {
 }
 
 impl Rule {
-    pub(crate) fn new(filter: IpCidr, via: Option<IpAddress>, dev: usize, src: IpAddress) -> Self {
+    pub fn new(filter: IpCidr, via: Option<IpAddress>, dev: usize, src: IpAddress) -> Self {
         Self {
             filter,
             via,
@@ -73,7 +81,7 @@ impl Rule {
         }
     }
 
-    pub(crate) fn with_route_attrs(
+    pub fn with_route_attrs(
         filter: IpCidr,
         via: Option<IpAddress>,
         dev: usize,
@@ -190,15 +198,15 @@ pub(crate) struct RouteAttrs {
 }
 
 // TODO(mivik): optimize
-pub(crate) struct RouteTable {
+struct RouteTable {
     rules: Vec<Rule>,
 }
 impl RouteTable {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self { rules: Vec::new() }
     }
 
-    pub(crate) fn add_rule(&mut self, rule: Rule) {
+    pub fn add_rule(&mut self, rule: Rule) {
         let rank = (
             rule.filter.prefix_len(),
             matches!(
@@ -225,17 +233,17 @@ impl RouteTable {
         self.rules.insert(idx, rule);
     }
 
-    pub(crate) fn lookup(&self, dst: &IpAddress) -> Option<&Rule> {
+    pub fn lookup(&self, dst: &IpAddress) -> Option<&Rule> {
         self.rules
             .iter()
             .find(|rule| rule.filter.contains_addr(dst))
     }
 
-    pub(crate) fn rules(&self) -> &[Rule] {
+    pub fn rules(&self) -> &[Rule] {
         &self.rules
     }
 
-    pub(crate) fn remove_exact_rule(&mut self, route: Rule) {
+    pub fn remove_exact_rule(&mut self, route: Rule) {
         if let Some(index) = self.rules.iter().position(|rule| {
             matches!(rule.origin, RuleOrigin::Configured) && rule.same_route_as(route)
         }) {
@@ -243,19 +251,19 @@ impl RouteTable {
         }
     }
 
-    pub(crate) fn remove_ipv4_address_routes(&mut self) {
+    fn remove_ipv4_address_routes(&mut self) {
         self.rules
             .retain(|rule| matches!(rule.origin, RuleOrigin::Configured));
     }
 
-    pub(crate) fn remove_configured_routes_with_source(&mut self, source: IpAddress) {
+    fn remove_configured_routes_with_source(&mut self, source: IpAddress) {
         self.rules.retain(|rule| {
             !matches!(rule.origin, RuleOrigin::Configured)
                 || rule.preferred_source() != Some(source)
         });
     }
 
-    pub(crate) fn remove_device(&mut self, dev: usize) {
+    pub fn remove_device(&mut self, dev: usize) {
         self.rules.retain(|rule| {
             rule.dev != dev
                 && !matches!(
@@ -273,5 +281,227 @@ impl RouteTable {
                 *owner_dev -= 1;
             }
         }
+    }
+}
+
+/// Owns configured and address-derived routes.
+///
+/// Interface state is borrowed for route validation and source selection.
+/// The service serializes those reads with configuration changes.
+pub(crate) struct Router {
+    table: RouteTable,
+}
+
+impl Router {
+    pub(crate) fn new() -> Self {
+        Self {
+            table: RouteTable::new(),
+        }
+    }
+
+    /// Returns the most specific route for a destination.
+    pub(crate) fn lookup(&self, dst: &IpAddress) -> Option<&Rule> {
+        self.table.lookup(dst)
+    }
+
+    pub fn route_mtu(&self, interfaces: &InterfaceSet, dst: &IpAddress) -> Option<usize> {
+        let rule = self.table.lookup(dst)?;
+        interfaces
+            .devices()
+            .get(rule.dev)
+            .map(|device| device.mtu().min(u16::MAX as usize))
+    }
+
+    /// Returns the source address for an output route with an active device.
+    ///
+    /// `oif` is a 1-based bound device index; `0` means the socket is unbound.
+    /// Limited broadcasts with a bound device use that device's primary
+    /// address (or `0.0.0.0`) without requiring a unicast route.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ENETUNREACH` when the route or its device is absent, when
+    /// the selected device is administratively down, or when `oif` disagrees
+    /// with the looked-up output device.
+    pub fn output_route_source(
+        &self,
+        interfaces: &InterfaceSet,
+        dst: &IpAddress,
+        oif: i32,
+    ) -> KResult<IpAddress> {
+        if dst.is_broadcast() && oif > 0 {
+            let device = interfaces
+                .devices()
+                .get((oif - 1) as usize)
+                .ok_or(KError::from(LinuxError::ENETUNREACH))?;
+            if !device.is_link_up() {
+                return Err(LinuxError::ENETUNREACH.into());
+            }
+            return Ok(interfaces
+                .first_ipv4_addr_for_device(oif as u32)
+                .map(|cidr| IpAddress::Ipv4(cidr.address()))
+                .unwrap_or(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED)));
+        }
+        // Unbound limited broadcast still needs a route so the later
+        // dispatch flood has a source address.
+
+        let rule = self
+            .table
+            .lookup(dst)
+            .ok_or(KError::from(LinuxError::ENETUNREACH))?;
+        if oif > 0 && rule.dev != (oif - 1) as usize {
+            return Err(KError::from(LinuxError::ENETUNREACH));
+        }
+        let device = interfaces
+            .devices()
+            .get(rule.dev)
+            .ok_or(KError::from(LinuxError::ENETUNREACH))?;
+        if !device.is_link_up() {
+            return Err(LinuxError::ENETUNREACH.into());
+        }
+        match rule.source {
+            RuleSource::Fixed(source) => Ok(source),
+            RuleSource::DevicePrimary => interfaces
+                .select_ipv4_source(rule.dev, &rule.via.unwrap_or(*dst), rule.scope)
+                .map(IpAddress::Ipv4)
+                .ok_or(KError::from(LinuxError::ENETUNREACH)),
+        }
+    }
+
+    /// Returns whether `dst` is routed through a loopback device.
+    pub(crate) fn is_loopback_destination(
+        &self,
+        interfaces: &InterfaceSet,
+        dst: &IpAddress,
+    ) -> bool {
+        self.table.lookup(dst).is_some_and(|rule| {
+            interfaces
+                .devices()
+                .get(rule.dev)
+                .is_some_and(|device| device.link_kind() == LinkKind::Loopback)
+        })
+    }
+
+    pub fn add_rule(&mut self, rule: Rule) {
+        self.table.add_rule(rule);
+    }
+
+    pub fn route_snapshot(&self) -> Vec<Rule> {
+        self.table.rules().to_vec()
+    }
+
+    pub fn add_route_rule(
+        &mut self,
+        interfaces: &InterfaceSet,
+        rule: Rule,
+    ) -> Result<(), LinuxError> {
+        self.validate_configured_route(interfaces, rule)?;
+        self.table.add_rule(rule);
+        Ok(())
+    }
+
+    pub fn replace_route_rule(
+        &mut self,
+        interfaces: &InterfaceSet,
+        existing: Rule,
+        replacement: Rule,
+    ) -> Result<(), LinuxError> {
+        self.validate_configured_route(interfaces, replacement)?;
+        self.table.remove_exact_rule(existing);
+        self.table.add_rule(replacement);
+        Ok(())
+    }
+
+    pub fn remove_exact_route_rule(&mut self, route: Rule) {
+        self.table.remove_exact_rule(route);
+    }
+
+    fn validate_configured_route(
+        &self,
+        interfaces: &InterfaceSet,
+        rule: Rule,
+    ) -> Result<(), LinuxError> {
+        if !rule.is_configured() {
+            return Err(LinuxError::EINVAL);
+        }
+        if rule.table != ROUTE_TABLE_MAIN || rule.route_type != ROUTE_TYPE_UNICAST {
+            return Err(LinuxError::EOPNOTSUPP);
+        }
+        if !matches!(rule.filter, IpCidr::Ipv4(_)) {
+            return Err(LinuxError::EAFNOSUPPORT);
+        }
+        if rule.dev >= interfaces.devices().len() {
+            return Err(LinuxError::ENODEV);
+        }
+        if let Some(prefsrc) = rule.preferred_source()
+            && !matches!(prefsrc, IpAddress::Ipv4(address) if interfaces.has_ipv4_address(address))
+        {
+            return Err(LinuxError::EINVAL);
+        }
+        if let Some(gateway) = rule.via {
+            let IpAddress::Ipv4(gateway) = gateway else {
+                return Err(LinuxError::EAFNOSUPPORT);
+            };
+            if !gateway.is_unicast()
+                || interfaces.is_ipv4_directed_broadcast_for_device(rule.dev, gateway)
+            {
+                return Err(LinuxError::EINVAL);
+            }
+            if !interfaces.has_ipv4_subnet_for_device(rule.dev, gateway.into()) {
+                return Err(LinuxError::ENETUNREACH);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn rebuild_ipv4_address_routes(&mut self, interfaces: &InterfaceSet) {
+        self.table.remove_ipv4_address_routes();
+        let loopback_dev = interfaces
+            .devices()
+            .iter()
+            .position(|device| device.link_kind() == crate::device::LinkKind::Loopback);
+        let entries = interfaces.ipv4_addr_entries().iter().copied();
+        let mut connected = Vec::new();
+        for entry in entries {
+            if let Some(loopback_dev) = loopback_dev {
+                self.table.add_rule(Rule::for_local_ipv4_address(
+                    loopback_dev,
+                    entry.dev,
+                    entry.addr,
+                ));
+            }
+
+            let network = entry.addr.network();
+            if entry.addr.prefix_len() == 32
+                || network.address().is_unspecified()
+                || connected.contains(&(entry.dev, network))
+            {
+                continue;
+            }
+            connected.push((entry.dev, network));
+            let scope = if interfaces.devices()[entry.dev].link_kind()
+                == crate::device::LinkKind::Loopback
+            {
+                ROUTE_SCOPE_HOST
+            } else {
+                ROUTE_SCOPE_LINK
+            };
+            self.table.add_rule(Rule::for_connected_ipv4_address(
+                entry.dev,
+                entry.addr,
+                scope,
+            ));
+        }
+    }
+
+    /// Removes routes referencing a removed interface and renumbers later slots.
+    pub(crate) fn remove_device_routes(&mut self, index: usize) {
+        self.table.remove_device(index);
+    }
+
+    /// Removes configured routes that require a source address whose last owner left.
+    pub(crate) fn remove_routes_with_source(&mut self, source: Ipv4Address) {
+        self.table
+            .remove_configured_routes_with_source(source.into());
     }
 }

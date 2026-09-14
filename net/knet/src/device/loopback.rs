@@ -128,7 +128,7 @@ impl NetDevice for LoopbackDevice {
         // Task-context fallback when NetRx did not run (unit tests, or the
         // vector is owned by another action). Stamped UDP is consumed first.
         // A true result is a bounded-progress hint, not a missing packet:
-        // `has_rx_work` is checked again by Router after this poll, and the
+        // `has_rx_work` is checked again by PacketIo after this poll, and the
         // next round continues draining remaining work. Retrying here would make
         // device polling unbounded while producers keep enqueueing packets.
         net_rx::drain_pending();

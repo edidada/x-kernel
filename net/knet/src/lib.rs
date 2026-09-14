@@ -6,16 +6,13 @@
 //!
 //! # Organization
 //!
-//! - [`TcpSocket`](tcp::TcpSocket): A TCP socket that provides POSIX-like APIs.
-//! - [`UdpSocket`](udp::UdpSocket): A UDP socket that provides POSIX-like APIs.
+//! - [`TcpSocket`]: A TCP socket that provides POSIX-like APIs.
+//! - [`UdpSocket`]: A UDP socket that provides POSIX-like APIs.
 //! - [`send_link_frame`]: Sends a link-layer frame through a selected interface.
 //! - [`UdpDatagramRelay`]: A persistent nonblocking UDP relay socket.
-#![allow(
-    clippy::expect_used,
-    reason = "CG-021-no-panic-on-reachable-failure: case (b): legacy knet has 20 diagnostic \
-              sites, too many to judge individually in this migration; new code remains reviewed"
-)]
+//! - [`dns_query`]: Function for DNS query.
 #![no_std]
+#![allow(rustdoc::broken_intra_doc_links)]
 
 #[macro_use]
 extern crate log;
@@ -26,9 +23,9 @@ mod control;
 mod device;
 mod ip;
 mod link;
-mod netfilter;
 pub mod netlink;
 mod network;
+mod poller;
 mod runtime;
 mod socket;
 mod stack;
@@ -53,26 +50,25 @@ use kerrno::KError;
 use lazyinit::LazyInit;
 pub(crate) use link::{buf, wire};
 pub use link::{packet, send_link_frame};
-pub(crate) use network::ipv4;
-pub(crate) use runtime::{poller, service};
+pub(crate) use network::{ipv4, router};
 pub use socket::{
     file::{sock_alloc_file, sock_from_file},
     options, *,
 };
 pub(crate) use socket::{general, state};
-pub(crate) use stack::{router, socket_set};
+pub(crate) use stack::{service, socket_set};
 pub(crate) use transport::{listen_table, udp_err};
 pub use transport::{raw, tcp, udp, udp::UdpDatagramRelay};
 
 use crate::{
-    consts::{GATEWAY, IP, IP_PREFIX},
-    device::{EthernetDevice, LoopbackDevice},
+    consts::{GATEWAY, IP, IP_PREFIX, TIMER_SAMPLE_PERIOD},
+    device::{EthernetDevice, LoopbackDevice, interfaces::Ipv4AddrEntry},
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
     listen_table::ListenTable,
-    network::router::{ROUTE_SCOPE_HOST, ROUTE_SCOPE_UNIVERSE, Rule},
-    router::{Ipv4AddrEntry, Router},
+    router::{ROUTE_SCOPE_HOST, ROUTE_SCOPE_UNIVERSE, Rule},
     service::Service,
     socket_set::SocketSetWrapper,
+    stack::packet_io::PacketIo,
 };
 
 static LISTEN_TABLE: LazyInit<ListenTable> = LazyInit::new();
@@ -81,31 +77,18 @@ static SOCKET_SET: LazyInit<SocketSetWrapper> = LazyInit::new();
 static SERVICE: LazyInit<Service> = LazyInit::new();
 
 /// Initializes the network subsystem by NIC devices.
-///
-/// Call once after scheduler and timer IRQ initialization. Publishes the global
-/// service and poller before starting the retained sampling timer.
-///
-/// # Panics
-/// Panics on repeated global initialization or if the initial sampling deadline
-/// exceeds the timer core's nanosecond range.
 pub fn init_network() {
     info!("Initialize network subsystem...");
 
-    // Prepare stable Work storage before installing NIC notification sources.
-    let _ = poller::network_poller();
-
     let mut net_devs = net_devices();
 
-    let mut router = Router::new();
-    let lo_dev = router.add_device(Box::new(LoopbackDevice::new()));
+    let mut packet_io = PacketIo::new();
+    let lo_dev = packet_io
+        .interfaces
+        .add_device(Box::new(LoopbackDevice::new()));
 
-    #[expect(
-        clippy::unwrap_used,
-        reason = "CG-021-no-panic-on-reachable-failure: the fixed loopback prefix length 8 is \
-                  within the IPv4 range 0 through 32"
-    )]
-    let lo_ip = Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8).unwrap();
-    router
+    let lo_ip = Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8);
+    packet_io
         .add_ipv4_addr(Ipv4AddrEntry {
             dev: lo_dev,
             addr: lo_ip,
@@ -123,9 +106,9 @@ pub fn init_network() {
             .expect("configured IPv4 prefix length must be valid");
 
         let eth0 = EthernetDevice::new("eth0".to_owned(), handle);
-        let eth0_dev = router.add_device(Box::new(eth0));
+        let eth0_dev = packet_io.interfaces.add_device(Box::new(eth0));
 
-        router
+        packet_io
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev: eth0_dev,
                 addr: eth0_ip,
@@ -133,13 +116,8 @@ pub fn init_network() {
                 broadcast: None,
             })
             .expect("Ethernet IPv4 address must fit the interface");
-        #[expect(
-            clippy::unwrap_used,
-            reason = "CG-021-no-panic-on-reachable-failure: the fixed default-route IPv4 prefix \
-                      length 0 is valid"
-        )]
-        router.add_rule(Rule::new(
-            Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).unwrap().into(),
+        packet_io.routing.add_rule(Rule::new(
+            Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).into(),
             Some(IpAddress::Ipv4(
                 GATEWAY.parse().expect("Invalid gateway address"),
             )),
@@ -155,18 +133,18 @@ pub fn init_network() {
         warn!("  No network device found!");
     }
 
-    for dev in &router.devices {
+    for dev in packet_io.interfaces.devices() {
         info!("Device: {}", dev.name());
     }
 
-    let service = Service::new(router);
+    let service = Service::new(packet_io);
     SERVICE.init_once(service);
 
     SOCKET_SET.init_once(SocketSetWrapper::new());
     LISTEN_TABLE.init_once(ListenTable::new());
     udp::init_udp_registry();
     poller::network_poller().start();
-    SERVICE.start_timer();
+    ktask::register_timer_callback(TIMER_SAMPLE_PERIOD, |_| SERVICE.handle_timer_tick());
 }
 
 fn subscribe_network_unregister(id: kdevice::DeviceId) {

@@ -23,11 +23,10 @@ use crate::{
     SERVICE, control,
     device::{
         LINK_FLAG_UP, LINK_FLAG_VOLATILE, LinkConfigUpdate, LinkKind, LinkSnapshot, NeighborState,
-        NeighborUpdate,
+        NeighborUpdate, NeighborUpdatePolicy, interfaces::Ipv4AddrEntry,
     },
     ip::{IpAddress as KernelIpAddress, IpCidr, Ipv4Cidr},
-    network::router::{RouteAttrs as RouterRouteAttrs, Rule},
-    router::{Ipv4AddrEntry, NeighborUpdatePolicy},
+    router::{RouteAttrs as RouterRouteAttrs, Rule},
     service::ExistingIpv4AddrAction,
 };
 

@@ -26,14 +26,15 @@ use smoltcp::{
 use crate::{
     LISTEN_TABLE, SOCKET_SET,
     buf::PacketBuf,
-    device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborUpdate},
+    device::{
+        LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NeighborUpdatePolicy,
+    },
     ip::{self, IpAddress},
-    network::router::Rule,
     poller::{PollBudget, PollProgress},
-    router::{NeighborUpdatePolicy, Router},
+    router::Rule,
     stack::{
         ingress::{IngressProcessor, prepare_smoltcp_ingress},
-        time::{earliest_poll_deadline, has_immediate_timer_work, now, to_smoltcp_instant},
+        packet_io::PacketIo,
     },
 };
 
@@ -70,6 +71,22 @@ pub(crate) enum ExistingIpv4AddrAction {
     Reject,
 }
 
+fn to_smoltcp_instant(instant: MonotonicInstant) -> SmoltcpInstant {
+    let micros = instant.span_since_origin().as_micros();
+    let micros = i64::try_from(micros).unwrap_or(i64::MAX);
+    SmoltcpInstant::from_micros_const(micros)
+}
+
+#[cfg(unittest)]
+fn from_smoltcp_instant(instant: SmoltcpInstant) -> MonotonicInstant {
+    let micros = u64::try_from(instant.total_micros()).unwrap_or(0);
+    MonotonicInstant::from_span_since_origin(TimeSpan::from_micros(micros))
+}
+
+pub(crate) fn now() -> SmoltcpInstant {
+    to_smoltcp_instant(monotonic_time())
+}
+
 fn ipv4_reassembly_timer_state(next: Option<MonotonicInstant>) -> u64 {
     let Some(next) = next else {
         return 0;
@@ -82,48 +99,9 @@ fn ipv4_reassembly_timer_state(next: Option<MonotonicInstant>) -> u64 {
         .saturating_add(IPV4_REASSEMBLY_DEADLINE_OFFSET)
 }
 
-struct NetworkTimer;
-
-#[cfg(unittest)]
-static SAMPLE_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-#[unittest::mod_test]
-mod timer_irq_tests {
-    //! Runtime integration probe using the permanent boot-created service.
-    //! This only observes IRQ progress; the timeout is a hang bound, not a
-    //! latency requirement. No global registration is installed by the test.
-
-    use unittest::{assert, def_test};
-
-    use super::*;
-
-    #[def_test(serial)]
-    fn network_sampling_repeats_from_real_timer_irq() {
-        let before = SAMPLE_COUNT.load(Ordering::Acquire);
-        let limit = monotonic_time() + TimeSpan::from_secs(2);
-        while SAMPLE_COUNT.load(Ordering::Acquire) < before + 3 {
-            assert!(monotonic_time() < limit);
-            ktask::sleep(TimeSpan::from_millis(10));
-        }
-    }
-}
-
-impl ktask::TimerHandler for NetworkTimer {
-    fn on_expiration(&self, timer: ktask::TimerControl<'_>, _: ktask::Expiration) {
-        crate::SERVICE.handle_timer_tick();
-        // Preserve completion-relative sampling, without catch-up callbacks.
-        if let Err(error) = timer.rearm(monotonic_time() + crate::consts::TIMER_SAMPLE_PERIOD) {
-            log::error!("[knet] timer sampling stopped: {error:?}");
-        }
-        #[cfg(unittest)]
-        SAMPLE_COUNT.fetch_add(1, Ordering::Release);
-    }
-}
-
-pub(crate) struct Service {
-    timer: ktask::Timer<NetworkTimer>,
+pub struct Service {
     pub(crate) iface: Mutex<Interface>,
-    router: Mutex<Router>,
+    packet_io: Mutex<PacketIo>,
     ingress: Mutex<IngressProcessor>,
     rx_batch: Mutex<Vec<PacketBuf>>,
     accepted_batch: Mutex<Vec<PacketBuf>>,
@@ -136,14 +114,13 @@ pub(crate) struct Service {
 }
 
 impl Service {
-    pub(crate) fn new(mut router: Router) -> Self {
+    pub fn new(mut packet_io: PacketIo) -> Self {
         let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
-        let iface = Interface::new(config, &mut router, to_smoltcp_instant(monotonic_time()));
+        let iface = Interface::new(config, &mut packet_io, to_smoltcp_instant(monotonic_time()));
 
         let service = Self {
-            timer: ktask::Timer::new(NetworkTimer),
             iface: Mutex::new(iface),
-            router: Mutex::new(router),
+            packet_io: Mutex::new(packet_io),
             ingress: Mutex::new(IngressProcessor::new()),
             rx_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
             accepted_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
@@ -158,21 +135,6 @@ impl Service {
         service
     }
 
-    /// Starts sampling after the global service and poller have been published.
-    ///
-    /// # Panics
-    /// Panics if the first deadline exceeds the timer core's nanosecond range.
-    pub(crate) fn start_timer(&'static self) {
-        // SAFETY: network initialization follows local scheduler/IRQ setup.
-        // SERVICE and the poller are published and remain live. The handler
-        // performs IRQ-safe notification without sleeping or changing IRQ state.
-        unsafe {
-            self.timer
-                .start(monotonic_time() + crate::consts::TIMER_SAMPLE_PERIOD)
-        }
-        .expect("network sampling deadline must fit the timer core");
-    }
-
     /// Advances the network data plane within one bounded poll round.
     ///
     /// The caller must run in task context without holding spinlocks because
@@ -181,12 +143,7 @@ impl Service {
     /// pending batches intact and reports immediate work for a later round.
     /// A due IPv4 reassembly timer remains pending across ingress-lock
     /// contention without aborting TX or protocol progress in the current round.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "CG-028-focused-functions: TODO(cg): legacy budgeted poll round; split ingress, \
-                  timers and transmit phases"
-    )]
-    pub(crate) fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
+    pub fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
         let round_started_at = monotonic_time();
         let device_timestamp = round_started_at;
         let mut control_packets = self.control_batch.lock();
@@ -200,24 +157,21 @@ impl Service {
         );
         let mut timer_events = ipv4_expiration.timer_events;
         if !self.try_flush_ingress_batches(&mut accepted_packets, &mut control_packets) {
-            return deferred_poll_progress(0, 0, timer_events);
+            return deferred_poll_progress(0, 0, timer_events, false);
         }
 
-        let Some(mut router) = self.router.try_lock() else {
-            return deferred_poll_progress(0, 0, timer_events);
+        let Some(mut packet_io) = self.packet_io.try_lock() else {
+            return deferred_poll_progress(0, 0, timer_events, false);
         };
-        let TxDispatchProgress {
-            packet_count: mut tx_packets,
-            mut has_reached_time_limit,
-            capacity_poll,
-        } = dispatch_tx_budgeted(
-            &mut router,
+        let tx_capacity_before = packet_io.available_tx_packet_slots();
+        let (mut tx_packets, mut has_reached_time_limit) = dispatch_tx_budgeted(
+            &mut packet_io,
             device_timestamp,
             budget.tx_packets,
             round_started_at,
         );
-        drop(router);
-        wake_tx_capacity_waiters(capacity_poll);
+        let mut tx_capacity_changed = packet_io.available_tx_packet_slots() > tx_capacity_before;
+        drop(packet_io);
         let mut tx_remaining = budget.tx_packets.saturating_sub(tx_packets);
 
         let rx_progress = self.poll_device_rx_budgeted(
@@ -235,18 +189,38 @@ impl Service {
         let mut rx_packets = rx_progress.packets;
         has_reached_time_limit |= rx_progress.has_reached_time_limit;
         if rx_progress.has_lock_contention {
-            return deferred_poll_progress(rx_packets, tx_packets, timer_events);
+            return deferred_poll_progress(
+                rx_packets,
+                tx_packets,
+                timer_events,
+                tx_capacity_changed,
+            );
         }
 
         let Some(mut sockets) = SOCKET_SET.inner.try_lock() else {
-            return deferred_poll_progress(rx_packets, tx_packets, timer_events);
+            return deferred_poll_progress(
+                rx_packets,
+                tx_packets,
+                timer_events,
+                tx_capacity_changed,
+            );
         };
-        let Some(mut router) = self.router.try_lock() else {
-            return deferred_poll_progress(rx_packets, tx_packets, timer_events);
+        let Some(mut packet_io) = self.packet_io.try_lock() else {
+            return deferred_poll_progress(
+                rx_packets,
+                tx_packets,
+                timer_events,
+                tx_capacity_changed,
+            );
         };
         let current = now();
         let Some(mut iface) = self.iface.try_lock() else {
-            return deferred_poll_progress(rx_packets, tx_packets, timer_events);
+            return deferred_poll_progress(
+                rx_packets,
+                tx_packets,
+                timer_events,
+                tx_capacity_changed,
+            );
         };
         // Maintenance and one egress pass remain bounded and preserve protocol
         // progress after bulk RX or TX reaches the round time limit.
@@ -258,7 +232,7 @@ impl Service {
             poll_smoltcp_ingress_budgeted(
                 &mut iface,
                 current,
-                &mut router,
+                &mut packet_io,
                 &mut sockets,
                 budget.rx_packets,
                 round_started_at,
@@ -270,7 +244,7 @@ impl Service {
         let mut stack_tx_passes = 0;
         let stack_tx_pass_limit = budget.tx_packets.max(1);
         loop {
-            let result = iface.poll_egress(current, &mut *router, &mut sockets);
+            let result = iface.poll_egress(current, &mut *packet_io, &mut sockets);
             if result == PollResult::None {
                 break;
             }
@@ -303,20 +277,17 @@ impl Service {
         if has_reached_time_limit {
             tx_remaining = 0;
         }
-        let TxDispatchProgress {
-            packet_count: dispatched,
-            has_reached_time_limit: tx_time_limit,
-            capacity_poll,
-        } = dispatch_tx_budgeted(
-            &mut router,
+        let tx_capacity_before = packet_io.available_tx_packet_slots();
+        let (dispatched, tx_time_limit) = dispatch_tx_budgeted(
+            &mut packet_io,
             device_timestamp,
             tx_remaining,
             round_started_at,
         );
         tx_packets += dispatched;
+        tx_capacity_changed |= packet_io.available_tx_packet_slots() > tx_capacity_before;
         has_reached_time_limit |= tx_time_limit;
-        drop(router);
-        wake_tx_capacity_waiters(capacity_poll);
+        drop(packet_io);
 
         let rx_remaining = budget.rx_packets.saturating_sub(rx_packets);
         if !has_reached_time_limit && rx_remaining > 0 {
@@ -330,7 +301,12 @@ impl Service {
             );
             rx_packets += tail_progress.packets;
             if tail_progress.has_lock_contention {
-                return deferred_poll_progress(rx_packets, tx_packets, timer_events);
+                return deferred_poll_progress(
+                    rx_packets,
+                    tx_packets,
+                    timer_events,
+                    tx_capacity_changed,
+                );
             }
         }
 
@@ -339,16 +315,22 @@ impl Service {
         let timer_has_more = has_immediate_timer_work(timer_current, next_poll);
         self.update_poll_timeout(timer_current, next_poll);
 
-        let Some(mut router) = self.router.try_lock() else {
-            return deferred_poll_progress(rx_packets, tx_packets, timer_events);
+        let Some(mut packet_io) = self.packet_io.try_lock() else {
+            return deferred_poll_progress(
+                rx_packets,
+                tx_packets,
+                timer_events,
+                tx_capacity_changed,
+            );
         };
-        let ingress_has_more = router.has_pending_ingress();
-        let rx_has_more = router.has_immediate_rx_work();
-        let (_, tx_has_more) = router.dispatch_budgeted(device_timestamp, 0);
+        let ingress_has_more = packet_io.has_pending_ingress();
+        let rx_has_more = packet_io.has_immediate_rx_work();
+        let (_, tx_has_more) = packet_io.dispatch_budgeted(device_timestamp, 0);
         PollProgress {
             rx_packets,
             tx_packets,
             timer_events,
+            tx_capacity_changed,
             has_more: rx_has_more
                 || ingress_has_more
                 || tx_has_more
@@ -390,7 +372,7 @@ impl Service {
                 }
             }
 
-            let Some(mut router) = self.router.try_lock() else {
+            let Some(mut packet_io) = self.packet_io.try_lock() else {
                 progress.has_lock_contention = true;
                 break;
             };
@@ -398,15 +380,12 @@ impl Service {
                 .saturating_sub(progress.packets)
                 .min(RX_INGRESS_BATCH_PACKETS)
                 .min(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS)
-                .min(router.ingress_capacity());
+                .min(packet_io.ingress_capacity());
             if batch_budget == 0 {
                 break;
             }
-            let drain = router.drain_rx_budgeted_into(device_timestamp, batch_budget, rx_batch);
-            drop(router);
-            if let Some((ifindex, error)) = &drain.error {
-                warn!("network RX poll failed on ifindex {ifindex}: {error:?}");
-            }
+            let drain = packet_io.drain_rx_budgeted_into(device_timestamp, batch_budget, rx_batch);
+            drop(packet_io);
             progress.packets += drain.work_done;
             packets_since_time_check = packets_since_time_check.saturating_add(drain.work_done);
 
@@ -418,11 +397,6 @@ impl Service {
             ) || !self.try_flush_ingress_batches(accepted_packets, control_packets)
             {
                 progress.has_lock_contention = true;
-                break;
-            }
-            // Keep the partial batch above, but end this round rather than
-            // spinning on a failed device; later poll rounds may retry it.
-            if drain.error.is_some() {
                 break;
             }
             if !drain.has_more || drain.work_done == 0 {
@@ -507,7 +481,7 @@ impl Service {
             };
             Some(sockets)
         };
-        let Some(mut router) = self.router.try_lock() else {
+        let Some(mut packet_io) = self.packet_io.try_lock() else {
             return false;
         };
         if let Some(sockets) = &mut sockets {
@@ -515,41 +489,52 @@ impl Service {
             // socket set. A failed nonblocking acquisition leaves the complete
             // batch available for an identical retry in a later poll round.
             prepare_smoltcp_ingress(accepted_packets, sockets);
-            router.enqueue_ingress_packets(accepted_packets);
+            packet_io.enqueue_ingress_packets(accepted_packets);
         }
         for packet in control_packets.drain(..) {
-            if let Err(err) = router.queue_control_ipv4_packet(packet) {
+            if let Err(err) = packet_io.queue_control_ipv4_packet(packet) {
                 warn!("Dropping network control packet: {}", err);
             }
         }
         true
     }
 
-    pub(crate) fn get_smoltcp_source_address(
+    pub fn get_smoltcp_source_address(
         &self,
         dst_addr: &SmoltcpIpAddress,
     ) -> KResult<SmoltcpIpAddress> {
         let dst_addr = ip::from_smoltcp_ip_address(*dst_addr);
-        self.router
-            .lock()
-            .output_route_source(&dst_addr, 0)
-            .map(ip::to_smoltcp_ip_address)
+        {
+            let packet_io = self.packet_io.lock();
+            packet_io
+                .routing
+                .output_route_source(&packet_io.interfaces, &dst_addr, 0)
+        }
+        .map(ip::to_smoltcp_ip_address)
     }
 
-    pub(crate) fn get_source_address(&self, dst_addr: &IpAddress) -> KResult<IpAddress> {
-        self.router.lock().output_route_source(dst_addr, 0)
+    pub fn get_source_address(&self, dst_addr: &IpAddress) -> KResult<IpAddress> {
+        {
+            let packet_io = self.packet_io.lock();
+            packet_io
+                .routing
+                .output_route_source(&packet_io.interfaces, dst_addr, 0)
+        }
     }
 
     #[cfg(unittest)]
-    pub(crate) fn ipv4_route_mtu(&self, dst_addr: &IpAddress) -> Option<usize> {
-        self.router.lock().route_mtu(dst_addr)
+    pub fn ipv4_route_mtu(&self, dst_addr: &IpAddress) -> Option<usize> {
+        {
+            let packet_io = self.packet_io.lock();
+            packet_io.routing.route_mtu(&packet_io.interfaces, dst_addr)
+        }
     }
 
-    pub(crate) fn can_send_ip_packet(&self) -> bool {
-        self.router.lock().can_enqueue_tx_packet()
+    pub fn can_send_ip_packet(&self) -> bool {
+        self.packet_io.lock().can_enqueue_tx_packet()
     }
 
-    pub(crate) fn prepare_and_send_ipv4_packet(
+    pub fn prepare_and_send_ipv4_packet(
         &self,
         bound_src: Option<IpAddress>,
         dst_addr: &IpAddress,
@@ -558,27 +543,33 @@ impl Service {
         packet: &mut Option<Vec<u8>>,
         prepare: impl FnOnce(&mut [u8], IpAddress, Option<usize>) -> KResult,
     ) -> KResult {
-        let mut router = self.router.lock();
-        if router.ipv4_dest_requires_broadcast(dst_addr) && !allow_broadcast {
+        let mut packet_io_guard = self.packet_io.lock();
+        let packet_io = &mut *packet_io_guard;
+        if packet_io.interfaces.ipv4_dest_requires_broadcast(dst_addr) && !allow_broadcast {
             return Err(KError::from(LinuxError::EACCES));
         }
         let packet_len = packet.as_ref().ok_or(KError::InvalidInput)?.len();
-        let route_source = router.output_route_source(dst_addr, oif)?;
+        let route_source =
+            packet_io
+                .routing
+                .output_route_source(&packet_io.interfaces, dst_addr, oif)?;
         let source_addr = bound_src.unwrap_or(route_source);
-        let is_loopback = router.is_loopback_destination(dst_addr);
+        let is_loopback = packet_io
+            .routing
+            .is_loopback_destination(&packet_io.interfaces, dst_addr);
 
         if !is_loopback {
-            if !router.can_enqueue_tx_packet() {
+            if !packet_io.can_enqueue_tx_packet() {
                 return Err(KError::WouldBlock);
             }
 
-            let packet_count = output_ipv4_packet_count(&router, dst_addr, packet_len)?;
-            if !router.can_enqueue_tx_packets(packet_count) {
+            let packet_count = output_ipv4_packet_count(packet_io, dst_addr, packet_len)?;
+            if !packet_io.can_enqueue_tx_packets(packet_count) {
                 return Err(KError::WouldBlock);
             }
         }
 
-        let route_mtu = router.route_mtu(dst_addr);
+        let route_mtu = packet_io.routing.route_mtu(&packet_io.interfaces, dst_addr);
         prepare(
             packet.as_deref_mut().ok_or(KError::InvalidInput)?,
             source_addr,
@@ -586,13 +577,13 @@ impl Service {
         )?;
         let packet = packet.take().ok_or(KError::InvalidInput)?;
         if is_loopback {
-            router.transmit_ipv4_now(packet, monotonic_time())
+            packet_io.transmit_ipv4_now(packet, monotonic_time())
         } else {
-            router.queue_ipv4_packet(packet, oif)
+            packet_io.queue_ipv4_packet(packet, oif)
         }
     }
 
-    pub(crate) fn register_rx_waker(
+    pub fn register_rx_waker(
         &self,
         mask: u32,
         context: &mut PollContext<'_>,
@@ -609,7 +600,14 @@ impl Service {
         drop(sockets);
         self.update_poll_timeout(current, next);
 
-        for (index, device) in self.router.lock().devices.iter().enumerate() {
+        for (index, device) in self
+            .packet_io
+            .lock()
+            .interfaces
+            .devices()
+            .iter()
+            .enumerate()
+        {
             if mask & (1 << index) != 0 {
                 // Ethernet devices that support interrupt-driven RX register
                 // on their NetRx softirq-backed poll source. Loopback and
@@ -617,18 +615,6 @@ impl Service {
                 device.register_rx_waker(&source_waker, context)?;
             }
         }
-        Ok(source_waker)
-    }
-
-    /// Registers protocol progress and data-queue capacity for a send recheck.
-    ///
-    /// The caller must recheck send readiness after registration.
-    pub(crate) fn register_tx_waker(
-        &self,
-        context: &mut PollContext<'_>,
-    ) -> Result<Waker, PollRegisterError> {
-        let source_waker = self.register_rx_waker(u32::MAX, context)?;
-        self.router.lock().register_tx_waker(context)?;
         Ok(source_waker)
     }
 
@@ -722,7 +708,7 @@ impl Service {
     }
 
     fn sync_local_ipv4_views(&self) {
-        let local_ipv4_addrs = self.router.lock().local_ipv4_addrs();
+        let local_ipv4_addrs = self.packet_io.lock().interfaces.local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
     }
 
@@ -741,9 +727,9 @@ impl Service {
         });
     }
 
-    fn rebuild_interface(&self, router: &mut Router, iface: &mut Interface) {
+    fn rebuild_interface(&self, packet_io: &mut PacketIo, iface: &mut Interface) {
         let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
-        let mut new_iface = Interface::new(config, router, to_smoltcp_instant(monotonic_time()));
+        let mut new_iface = Interface::new(config, packet_io, to_smoltcp_instant(monotonic_time()));
         let current_addrs = iface.ip_addrs().to_vec();
         new_iface.update_ip_addrs(|ip_addrs| {
             for addr in current_addrs {
@@ -759,49 +745,61 @@ impl Service {
         self.rebuild_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn link_snapshots(&self) -> Vec<LinkSnapshot> {
-        self.router.lock().link_snapshots()
+    pub fn link_snapshots(&self) -> Vec<LinkSnapshot> {
+        self.packet_io.lock().interfaces.link_snapshots()
     }
 
-    pub(crate) fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
-        self.router.lock().link_snapshot_for_ifindex(ifindex)
+    pub fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
+        self.packet_io
+            .lock()
+            .interfaces
+            .link_snapshot_for_ifindex(ifindex)
     }
 
-    pub(crate) fn has_device(&self, ifindex: i32) -> bool {
-        self.router.lock().has_device(ifindex)
+    pub fn has_device(&self, ifindex: i32) -> bool {
+        self.packet_io.lock().interfaces.has_device(ifindex)
     }
 
-    pub(crate) fn device_index_by_name(&self, name: &str) -> Option<usize> {
-        self.router.lock().device_index_by_name(name)
+    pub fn device_index_by_name(&self, name: &str) -> Option<usize> {
+        self.packet_io.lock().interfaces.device_index_by_name(name)
     }
 
-    pub(crate) fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
-        self.router.lock().link_send_snapshot_for_ifindex(ifindex)
+    pub fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
+        self.packet_io
+            .lock()
+            .interfaces
+            .link_send_snapshot_for_ifindex(ifindex)
     }
 
-    pub(crate) fn ipv4_addr_snapshots(&self) -> Vec<crate::router::Ipv4AddrSnapshot> {
-        self.router.lock().ipv4_addr_snapshots()
+    pub(crate) fn ipv4_addr_snapshots(&self) -> Vec<crate::device::interfaces::Ipv4AddrSnapshot> {
+        self.packet_io.lock().interfaces.ipv4_addr_snapshots()
     }
 
     #[cfg(unittest)]
-    pub(crate) fn ipv4_addr_entries(&self) -> Vec<crate::router::Ipv4AddrEntry> {
-        self.router.lock().ipv4_addr_entries().to_vec()
+    pub(crate) fn ipv4_addr_entries(&self) -> Vec<crate::device::interfaces::Ipv4AddrEntry> {
+        self.packet_io
+            .lock()
+            .interfaces
+            .ipv4_addr_entries()
+            .to_vec()
     }
 
     pub(crate) fn interface_ipv4_addr(
         &self,
         name: &str,
     ) -> Result<crate::ip::Ipv4Cidr, LinuxError> {
-        self.router.lock().interface_ipv4_addr(name)
+        self.packet_io.lock().interfaces.interface_ipv4_addr(name)
     }
 
     pub(crate) fn add_ipv4_addr(
         &self,
-        entry: crate::router::Ipv4AddrEntry,
+        entry: crate::device::interfaces::Ipv4AddrEntry,
         existing_action: ExistingIpv4AddrAction,
     ) -> Result<(), LinuxError> {
-        let mut router = self.router.lock();
-        let is_existing = router
+        let mut packet_io_guard = self.packet_io.lock();
+        let packet_io = &mut *packet_io_guard;
+        let is_existing = packet_io
+            .interfaces
             .ipv4_addr_entries()
             .iter()
             .any(|existing| existing.dev == entry.dev && existing.addr == entry.addr);
@@ -811,22 +809,23 @@ impl Service {
                 ExistingIpv4AddrAction::Reject => Err(LinuxError::EEXIST),
             };
         }
-        router.add_ipv4_addr(entry)?;
-        let local_ipv4_addrs = router.local_ipv4_addrs();
+        packet_io.add_ipv4_addr(entry)?;
+        let local_ipv4_addrs = packet_io.interfaces.local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
         Ok(())
     }
 
     pub(crate) fn remove_ipv4_addr(
         &self,
-        entry: crate::router::Ipv4AddrEntry,
+        entry: crate::device::interfaces::Ipv4AddrEntry,
     ) -> Result<bool, LinuxError> {
-        let mut router = self.router.lock();
-        if !router.remove_ipv4_addr(entry) {
+        let mut packet_io_guard = self.packet_io.lock();
+        let packet_io = &mut *packet_io_guard;
+        if !packet_io.remove_ipv4_addr(entry) {
             return Err(LinuxError::EADDRNOTAVAIL);
         }
-        let is_last_owner = !router.has_ipv4_address(entry.addr.address());
-        let local_ipv4_addrs = router.local_ipv4_addrs();
+        let is_last_owner = !packet_io.interfaces.has_ipv4_address(entry.addr.address());
+        let local_ipv4_addrs = packet_io.interfaces.local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
         Ok(is_last_owner)
     }
@@ -836,27 +835,35 @@ impl Service {
         dev: usize,
         addr: crate::ip::Ipv4Cidr,
     ) -> Result<(), LinuxError> {
-        let mut router = self.router.lock();
-        router.set_primary_ipv4_addr(dev, addr)?;
-        let local_ipv4_addrs = router.local_ipv4_addrs();
+        let mut packet_io_guard = self.packet_io.lock();
+        let packet_io = &mut *packet_io_guard;
+        packet_io.set_primary_ipv4_addr(dev, addr)?;
+        let local_ipv4_addrs = packet_io.interfaces.local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
         Ok(())
     }
 
     pub(crate) fn remove_primary_ipv4_addr(&self, dev: usize) -> Result<(), LinuxError> {
-        let mut router = self.router.lock();
-        router.remove_primary_ipv4_addr(dev)?;
-        let local_ipv4_addrs = router.local_ipv4_addrs();
+        let mut packet_io_guard = self.packet_io.lock();
+        let packet_io = &mut *packet_io_guard;
+        packet_io.remove_primary_ipv4_addr(dev)?;
+        let local_ipv4_addrs = packet_io.interfaces.local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
         Ok(())
     }
 
     pub(crate) fn route_snapshot(&self) -> Vec<Rule> {
-        self.router.lock().route_snapshot()
+        self.packet_io.lock().routing.route_snapshot()
     }
 
     pub(crate) fn add_route_rule(&self, rule: Rule) -> Result<(), LinuxError> {
-        self.router.lock().add_route_rule(rule)
+        {
+            let mut guard = self.packet_io.lock();
+            let packet_io = &mut *guard;
+            packet_io
+                .routing
+                .add_route_rule(&packet_io.interfaces, rule)
+        }
     }
 
     pub(crate) fn replace_route_rule(
@@ -864,11 +871,17 @@ impl Service {
         existing: Rule,
         replacement: Rule,
     ) -> Result<(), LinuxError> {
-        self.router.lock().replace_route_rule(existing, replacement)
+        {
+            let mut guard = self.packet_io.lock();
+            let packet_io = &mut *guard;
+            packet_io
+                .routing
+                .replace_route_rule(&packet_io.interfaces, existing, replacement)
+        }
     }
 
     pub(crate) fn remove_route_rule(&self, route: Rule) {
-        self.router.lock().remove_exact_route_rule(route);
+        self.packet_io.lock().routing.remove_exact_route_rule(route);
     }
 
     pub(crate) fn set_ipv4_broadcast(
@@ -876,36 +889,41 @@ impl Service {
         dev: usize,
         broadcast: crate::ip::Ipv4Address,
     ) -> Result<(), LinuxError> {
-        self.router.lock().set_ipv4_broadcast(dev, broadcast)
+        self.packet_io
+            .lock()
+            .interfaces
+            .set_ipv4_broadcast(dev, broadcast)
     }
 
     pub(crate) fn set_ipv4_netmask(&self, dev: usize, prefix_len: u8) -> Result<(), LinuxError> {
-        let mut router = self.router.lock();
-        router.set_ipv4_netmask(dev, prefix_len)?;
-        let local_ipv4_addrs = router.local_ipv4_addrs();
+        let mut packet_io_guard = self.packet_io.lock();
+        let packet_io = &mut *packet_io_guard;
+        packet_io.set_ipv4_netmask(dev, prefix_len)?;
+        let local_ipv4_addrs = packet_io.interfaces.local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
         Ok(())
     }
 
-    pub(crate) fn update_device_link(
+    pub fn update_device_link(
         &self,
         ifindex: i32,
         update: LinkConfigUpdate,
     ) -> Result<(), LinuxError> {
-        let mut router = self.router.lock();
-        let is_effective_mtu_changed = router.update_device_link(ifindex, update)?;
+        let mut packet_io_guard = self.packet_io.lock();
+        let packet_io = &mut *packet_io_guard;
+        let is_effective_mtu_changed = packet_io.interfaces.update_device_link(ifindex, update)?;
         if is_effective_mtu_changed {
             let mut iface = self.iface.lock();
-            self.rebuild_interface(&mut router, &mut iface);
+            self.rebuild_interface(packet_io, &mut iface);
         }
         Ok(())
     }
 
     #[cfg(unittest)]
-    pub(crate) fn replace_router_for_tests(&self, mut router: Router) {
+    pub(crate) fn replace_packet_io_for_tests(&self, mut packet_io: PacketIo) {
         let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
-        let iface = Interface::new(config, &mut router, to_smoltcp_instant(monotonic_time()));
-        *self.router.lock() = router;
+        let iface = Interface::new(config, &mut packet_io, to_smoltcp_instant(monotonic_time()));
+        *self.packet_io.lock() = packet_io;
         *self.iface.lock() = iface;
         self.sync_local_ipv4_views();
         self.timeout_deadline_micros.store(0, Ordering::Release);
@@ -922,14 +940,15 @@ impl Service {
     /// Callers must hold [`crate::control::network_config_lock`] so device
     /// removal cannot interleave with other control-plane mutations.
     pub(crate) fn remove_device_by_model_id(&self, id: kdevice::DeviceId) -> Option<()> {
-        let mut router = self.router.lock();
-        let effective_mtu = router.effective_mtu();
-        router.remove_device_by_model_id(id)?;
-        if router.effective_mtu() != effective_mtu {
+        let mut packet_io_guard = self.packet_io.lock();
+        let packet_io = &mut *packet_io_guard;
+        let effective_mtu = packet_io.interfaces.effective_mtu();
+        packet_io.remove_device_by_model_id(id)?;
+        if packet_io.interfaces.effective_mtu() != effective_mtu {
             let mut iface = self.iface.lock();
-            self.rebuild_interface(&mut router, &mut iface);
+            self.rebuild_interface(packet_io, &mut iface);
         }
-        let local_ipv4_addrs = router.local_ipv4_addrs();
+        let local_ipv4_addrs = packet_io.interfaces.local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
         Some(())
     }
@@ -939,25 +958,31 @@ impl Service {
         update: NeighborUpdate,
         policy: NeighborUpdatePolicy,
     ) -> Result<(), LinuxError> {
-        self.router.lock().apply_neighbor_update(update, policy)?;
+        self.packet_io
+            .lock()
+            .interfaces
+            .apply_neighbor_update(update, policy)?;
         self.timeout_poll.wake();
         Ok(())
     }
 
     #[cfg(unittest)]
     pub(crate) fn has_neighbor(&self, dev: usize, dst: IpAddress) -> bool {
-        self.router.lock().has_neighbor(dev, dst)
+        self.packet_io.lock().interfaces.has_neighbor(dev, dst)
     }
 
-    pub(crate) fn send_link_frame(&self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
-        self.router.lock().send_link_frame(ifindex, frame)
+    pub fn send_link_frame(&self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
+        self.packet_io
+            .lock()
+            .interfaces
+            .send_link_frame(ifindex, frame)
     }
 }
 
 fn poll_smoltcp_ingress_budgeted(
     iface: &mut Interface,
     current: SmoltcpInstant,
-    router: &mut Router,
+    packet_io: &mut PacketIo,
     sockets: &mut SocketSet<'_>,
     budget_packets: usize,
     round_started_at: MonotonicInstant,
@@ -974,7 +999,7 @@ fn poll_smoltcp_ingress_budgeted(
             break;
         }
 
-        match iface.poll_ingress_single(current, router, sockets) {
+        match iface.poll_ingress_single(current, packet_io, sockets) {
             PollIngressSingleResult::None => break,
             PollIngressSingleResult::PacketProcessed => {}
             PollIngressSingleResult::SocketStateChanged => {
@@ -1002,36 +1027,30 @@ fn deferred_poll_progress(
     rx_packets: usize,
     tx_packets: usize,
     timer_events: usize,
+    tx_capacity_changed: bool,
 ) -> PollProgress {
     PollProgress {
         rx_packets,
         tx_packets,
         timer_events,
+        tx_capacity_changed,
         has_more: true,
     }
 }
 
-struct TxDispatchProgress {
-    packet_count: usize,
-    has_reached_time_limit: bool,
-    /// Captured under the queue lock and consumed after releasing that lock.
-    capacity_poll: Option<PollSet>,
-}
-
 fn dispatch_tx_budgeted(
-    router: &mut Router,
+    packet_io: &mut PacketIo,
     timestamp: MonotonicInstant,
     budget: usize,
     round_started_at: MonotonicInstant,
-) -> TxDispatchProgress {
-    let capacity_before = router.available_tx_packet_slots();
+) -> (usize, bool) {
     let mut work_done = 0;
     let mut remaining = budget;
     let mut has_reached_time_limit = false;
 
     while remaining > 0 {
         let chunk = remaining.min(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS);
-        let (dispatched, _) = router.dispatch_budgeted(timestamp, chunk);
+        let (dispatched, _) = packet_io.dispatch_budgeted(timestamp, chunk);
         work_done += dispatched;
         remaining = remaining.saturating_sub(dispatched);
         if dispatched < chunk {
@@ -1043,23 +1062,22 @@ fn dispatch_tx_budgeted(
         }
     }
 
-    let capacity_poll =
-        (router.available_tx_packet_slots() > capacity_before).then(|| router.tx_capacity_poll());
-    TxDispatchProgress {
-        packet_count: work_done,
-        has_reached_time_limit,
-        capacity_poll,
-    }
+    (work_done, has_reached_time_limit)
 }
 
-fn wake_tx_capacity_waiters(capacity_poll: Option<PollSet>) {
-    if let Some(capacity_poll) = capacity_poll {
-        capacity_poll.wake();
-    }
+fn has_immediate_timer_work(current: SmoltcpInstant, next_poll: Option<SmoltcpInstant>) -> bool {
+    next_poll.is_some_and(|deadline| deadline <= current)
+}
+
+fn earliest_poll_deadline(
+    protocol: Option<SmoltcpInstant>,
+    deferred_close: Option<SmoltcpInstant>,
+) -> Option<SmoltcpInstant> {
+    [protocol, deferred_close].into_iter().flatten().min()
 }
 
 fn output_ipv4_packet_count(
-    router: &Router,
+    packet_io: &PacketIo,
     dst_addr: &IpAddress,
     packet_len: usize,
 ) -> KResult<usize> {
@@ -1067,7 +1085,7 @@ fn output_ipv4_packet_count(
         return Err(LinuxError::EMSGSIZE.into());
     }
 
-    let Some(mtu) = router.route_mtu(dst_addr) else {
+    let Some(mtu) = packet_io.routing.route_mtu(&packet_io.interfaces, dst_addr) else {
         return Ok(1);
     };
     if packet_len <= mtu {
@@ -1088,23 +1106,20 @@ fn output_ipv4_packet_count(
         / max_fragment_payload_len)
 }
 
-#[unittest::mod_test]
+#[cfg(unittest)]
 mod tests {
-    use alloc::{boxed::Box, sync::Weak, task::Wake, vec, vec::Vec};
-    use core::{sync::atomic::AtomicBool, task::Context};
+    use alloc::{boxed::Box, vec, vec::Vec};
 
-    use kpoll::PollRegistrations;
     use smoltcp::iface::SocketSet;
     use unittest::{assert, def_test};
 
     use super::*;
     use crate::{
         buf::PacketOwner,
-        device::LoopbackDevice,
+        device::{LoopbackDevice, interfaces::Ipv4AddrEntry},
         ip::{Ipv4Address, Ipv4Cidr},
-        ipv4,
-        network::router::ROUTE_SCOPE_HOST,
-        router::Ipv4AddrEntry,
+        network::ipv4,
+        router::ROUTE_SCOPE_HOST,
     };
 
     const TEST_POLL_BUDGET: PollBudget = PollBudget {
@@ -1113,56 +1128,53 @@ mod tests {
         timer_events: 1,
     };
 
-    struct TxCapacityWakeProbe {
-        service: Weak<Service>,
-        wake_count: AtomicUsize,
-        was_router_unlocked: AtomicBool,
+    #[def_test]
+    fn test_smoltcp_deadline_clamps_expired_delay() {
+        let current = MonotonicInstant::from_span_since_origin(TimeSpan::from_micros(10_000));
+        let deadline = from_smoltcp_instant(SmoltcpInstant::from_micros_const(9_999));
+
+        assert_eq!(deadline.saturating_duration_since(current), TimeSpan::ZERO);
     }
 
-    impl Wake for TxCapacityWakeProbe {
-        fn wake(self: Arc<Self>) {
-            let was_unlocked = self
-                .service
-                .upgrade()
-                .is_some_and(|service| service.router.try_lock().is_some());
-            self.was_router_unlocked
-                .store(was_unlocked, Ordering::Relaxed);
-            self.wake_count.fetch_add(1, Ordering::Relaxed);
-        }
+    #[def_test]
+    fn test_smoltcp_deadline_preserves_future_delay() {
+        let current = MonotonicInstant::from_span_since_origin(TimeSpan::from_micros(10_000));
+        let deadline = from_smoltcp_instant(SmoltcpInstant::from_micros_const(12_500));
+
+        assert_eq!(
+            deadline.checked_duration_since(current),
+            Some(TimeSpan::from_micros(2_500))
+        );
     }
 
-    #[def_test(serial)]
-    fn tx_capacity_wakes_after_router_unlock_before_deferred_return() {
-        let mut router = Router::new();
-        let token =
-            smoltcp::phy::Device::transmit(&mut router, SmoltcpInstant::from_millis(0)).unwrap();
-        smoltcp::phy::TxToken::consume(token, 20, |bytes| bytes.fill(0));
-        let service = Arc::new(Service::new(router));
-        let probe = Arc::new(TxCapacityWakeProbe {
-            service: Arc::downgrade(&service),
-            wake_count: AtomicUsize::new(0),
-            was_router_unlocked: AtomicBool::new(false),
-        });
-        let waker = Waker::from(probe.clone());
-        let context = Context::from_waker(&waker);
-        let mut registrations = PollRegistrations::new();
-        service
-            .register_tx_waker(&mut registrations.context(&context))
-            .unwrap();
+    #[def_test]
+    fn deadline_crossed_during_round_is_immediate_work() {
+        let current = SmoltcpInstant::from_millis(10);
+        let future = SmoltcpInstant::from_millis(11);
+        let later = SmoltcpInstant::from_millis(12);
 
-        // Force the round to return before protocol processing, after TX.
-        let _iface = service.iface.lock();
-        let progress = service.poll_budgeted(TEST_POLL_BUDGET);
+        assert!(!has_immediate_timer_work(current, Some(future)));
+        assert!(has_immediate_timer_work(later, Some(future)));
+    }
 
-        assert_eq!(progress.tx_packets, 1);
-        assert!(progress.has_more);
-        assert_eq!(probe.wake_count.load(Ordering::Relaxed), 1);
-        assert!(probe.was_router_unlocked.load(Ordering::Relaxed));
+    #[def_test]
+    fn due_timer_is_immediate_work() {
+        let current = SmoltcpInstant::from_millis(10);
+
+        assert!(has_immediate_timer_work(current, Some(current)));
+    }
+
+    #[def_test]
+    fn deferred_close_deadline_can_precede_protocol_deadline() {
+        let close = SmoltcpInstant::from_millis(10);
+        let protocol = SmoltcpInstant::from_millis(20);
+
+        assert!(earliest_poll_deadline(Some(protocol), Some(close)) == Some(close));
     }
 
     #[def_test]
     fn protocol_deadline_update_preserves_ipv4_reassembly_timer_source() {
-        let service = Service::new(Router::new());
+        let service = Service::new(PacketIo::new());
         let reassembly_deadline = monotonic_time() + TimeSpan::from_secs(30);
         service.update_ipv4_reassembly_timeout(Some(reassembly_deadline));
         let reassembly_state = service
@@ -1181,7 +1193,7 @@ mod tests {
 
     #[def_test]
     fn unrelated_ingress_lock_contention_is_not_ipv4_timer_work() {
-        let service = Service::new(Router::new());
+        let service = Service::new(PacketIo::new());
         let _ingress = service.ingress.lock();
         let mut control_packets = Vec::new();
 
@@ -1208,34 +1220,34 @@ mod tests {
     #[def_test]
     fn smoltcp_ingress_keeps_packets_after_reaching_budget() {
         let current = SmoltcpInstant::from_millis(10);
-        let mut router = Router::new();
+        let mut packet_io = PacketIo::new();
         let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
-        let mut iface = Interface::new(config, &mut router, current);
+        let mut iface = Interface::new(config, &mut packet_io, current);
         let mut packets = Vec::from([
             PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::DeviceRx),
             PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::DeviceRx),
         ]);
-        router.enqueue_ingress_packets(&mut packets);
+        packet_io.enqueue_ingress_packets(&mut packets);
         let mut sockets = SocketSet::new(vec![]);
 
         let progress = poll_smoltcp_ingress_budgeted(
             &mut iface,
             current,
-            &mut router,
+            &mut packet_io,
             &mut sockets,
             1,
             monotonic_time(),
         );
 
         assert_eq!(progress.packets, 1);
-        assert!(router.has_pending_ingress());
+        assert!(packet_io.has_pending_ingress());
     }
 
     /// Regression test for <https://gitee.com/openkylin/x-kernel/issues/IK97G7>.
     #[def_test]
-    fn poll_round_defers_router_lock_contention() {
-        let service = Service::new(Router::new());
-        let _router = service.router.lock();
+    fn poll_round_defers_packet_io_lock_contention() {
+        let service = Service::new(PacketIo::new());
+        let _packet_io = service.packet_io.lock();
 
         let progress = service.poll_budgeted(TEST_POLL_BUDGET);
 
@@ -1247,8 +1259,10 @@ mod tests {
     #[def_test(serial)]
     fn poll_round_dispatches_tx_when_due_ipv4_expiration_lock_is_contended() {
         let loopback_addr = Ipv4Address::new(127, 0, 0, 1);
-        let mut router = Router::new();
-        let loopback = router.add_device(Box::new(LoopbackDevice::new()));
+        let mut router = PacketIo::new();
+        let loopback = router
+            .interfaces
+            .add_device(Box::new(LoopbackDevice::new()));
         router
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev: loopback,
@@ -1260,10 +1274,12 @@ mod tests {
         let packet =
             ipv4::build_ipv4_packet(loopback_addr, loopback_addr, ipv4::PROTOCOL_ICMP, 64, &[])
                 .unwrap();
-        router
+        let service = Service::new(router);
+        service
+            .packet_io
+            .lock()
             .queue_ipv4_packet(packet, loopback as i32 + 1)
             .unwrap();
-        let service = Service::new(router);
         service
             .ipv4_reassembly_deadline_micros
             .store(IPV4_REASSEMBLY_TIMER_PENDING, Ordering::Release);
@@ -1278,9 +1294,11 @@ mod tests {
     #[def_test(serial)]
     fn tx_dispatch_exposes_loopback_rx_in_the_same_round() {
         let loopback_addr = Ipv4Address::new(127, 0, 0, 1);
-        let mut router = Router::new();
-        let loopback = router.add_device(Box::new(LoopbackDevice::new()));
-        router
+        let mut packet_io = PacketIo::new();
+        let loopback = packet_io
+            .interfaces
+            .add_device(Box::new(LoopbackDevice::new()));
+        packet_io
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev: loopback,
                 addr: Ipv4Cidr::new(loopback_addr, 8).unwrap(),
@@ -1291,26 +1309,25 @@ mod tests {
         let packet =
             ipv4::build_ipv4_packet(loopback_addr, loopback_addr, ipv4::PROTOCOL_ICMP, 64, &[])
                 .unwrap();
-        router
+        packet_io
             .queue_ipv4_packet(packet, loopback as i32 + 1)
             .unwrap();
         let round_started_at = monotonic_time();
 
-        let tx_progress = dispatch_tx_budgeted(
-            &mut router,
+        let (tx_packets, _) = dispatch_tx_budgeted(
+            &mut packet_io,
             round_started_at,
             TEST_POLL_BUDGET.tx_packets,
             round_started_at,
         );
         let mut packets = Vec::new();
-        let rx_progress = router.drain_rx_budgeted_into(
+        let rx_progress = packet_io.drain_rx_budgeted_into(
             round_started_at,
             TEST_POLL_BUDGET.rx_packets,
             &mut packets,
         );
 
-        assert_eq!(tx_progress.packet_count, 1);
-        assert!(tx_progress.capacity_poll.is_some());
+        assert_eq!(tx_packets, 1);
         assert_eq!(rx_progress.work_done, 1);
     }
 }

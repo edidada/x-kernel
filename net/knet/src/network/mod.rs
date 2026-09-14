@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Network-layer packet processing, fragment reassembly, and routing rules.
+//! Network-layer routing, packet processing, and fragment reassembly.
 
 pub(crate) mod fragment;
 pub(crate) mod ipv4;

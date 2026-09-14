@@ -11,11 +11,12 @@ use kpoll::{PollContext, PollRegisterError};
 use ktime_types::MonotonicInstant;
 
 mod ethernet;
+pub(crate) mod interfaces;
 mod loopback;
 mod net_rx;
 
-pub(crate) use ethernet::*;
-pub(crate) use loopback::*;
+pub use ethernet::*;
+pub use loopback::*;
 
 use crate::{
     buf::PacketBuf,
@@ -123,7 +124,7 @@ pub(crate) struct NeighborUpdate {
 }
 
 /// Trait implemented by network device backends.
-pub(crate) trait NetDevice: Send + Sync {
+pub trait NetDevice: Send + Sync {
     fn name(&self) -> &str;
 
     /// Returns the link-layer kind without allocating a snapshot.
@@ -147,21 +148,17 @@ pub(crate) trait NetDevice: Send + Sync {
     }
 
     /// Polls one received packet from the device.
-    ///
-    /// `Ok(None)` means no packet is available. Receive or buffer-recycling
-    /// failures are returned separately so the caller can end and report a
-    /// failed poll instead of treating a device error as an empty queue.
-    fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> KResult<Option<PacketBuf>>;
+    fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> Option<PacketBuf>;
 
     /// Returns whether the device has RX work available without waiting.
     fn has_rx_work(&self) -> bool;
 
     /// Sends a validated IP packet to the next hop.
     ///
-    /// The Router calls this in task context. Implementations may allocate and
+    /// PacketIo calls this in task context. Implementations may allocate and
     /// callers must not invoke it from hardirq, softirq, or BH-disabled context.
     ///
-    /// `source_addr` is the source parsed by the Router before dispatch.
+    /// `source_addr` is the source parsed by PacketIo before dispatch.
     /// Returns `true` when the send made RX ready, typically after a
     /// successful loopback enqueue. Returns `false` when it did not:
     /// Ethernet TX, or a drop such as link down, over-MTU, or a full
@@ -234,7 +231,14 @@ pub(crate) trait NetDevice: Send + Sync {
     }
 }
 
-#[unittest::mod_test]
+/// Conditions under which a control-plane neighbor update may be applied.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct NeighborUpdatePolicy {
+    pub(crate) can_create: bool,
+    pub(crate) can_replace: bool,
+}
+
+#[cfg(unittest)]
 mod tests {
     use unittest::def_test;
 
