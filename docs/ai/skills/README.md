@@ -51,3 +51,8 @@ Current skills:
   multi-agent design-first workflow for X-Kernel memory subsystem topics,
   coordinating Linux semantic analysis, X-Kernel adaptation, arbiter review,
   and implementation task splitting without code generation.
+- `pr-ci-review/`:
+  Gitee PR lifecycle: creating/updating PRs, tracking latest Jenkins CI
+  status and failure diagnosis, and reading the latest review opinions from
+  the Gitee PR comment area (AI summary + human comments) rather than from
+  the Jenkins console.
