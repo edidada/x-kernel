@@ -1731,7 +1731,7 @@ fn test_current_process_mutation_helpers_preserve_process_boundary() {
         String::from("--check"),
     ]);
     process
-        .set_exec_metadata(exe_path.clone(), cmdline.clone())
+        .set_exec_metadata(exe_path.clone(), cmdline.clone(), None)
         .expect("current process must expose mutable exec metadata");
     assert_eq!(
         process
@@ -1753,7 +1753,7 @@ fn test_current_process_mutation_helpers_preserve_process_boundary() {
         .set_heap_top(old_heap_top)
         .expect("current process must restore its previous heap top");
     process
-        .set_exec_metadata(old_exe_path, old_cmdline)
+        .set_exec_metadata(old_exe_path, old_cmdline, None)
         .expect("current process must restore its previous exec metadata");
 
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);

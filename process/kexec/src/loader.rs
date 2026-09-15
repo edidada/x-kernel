@@ -265,6 +265,16 @@ impl PreparedExecImage {
     }
 }
 
+impl PreparedExecImage {
+    /// Returns the executable file pinned by this prepared image.
+    ///
+    /// Exec uses it to publish `/proc/<pid>/exe`; the pinned reference keeps the
+    /// backing file alive independently of the ELF cache.
+    pub fn executable_file(&self) -> Arc<VfsFile> {
+        self.executable.cache_entry.borrow_file().clone()
+    }
+}
+
 struct PreparedElfImage {
     cache_entry: Arc<ElfCacheEntry>,
     image: ValidatedElfImage,

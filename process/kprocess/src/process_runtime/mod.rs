@@ -337,6 +337,11 @@ impl ProcessRuntime {
         String::from(self.exec_metadata().exe_path())
     }
 
+    /// Returns the opened backing executable file, if any.
+    pub fn exe_file(&self) -> Option<Arc<kvfs::VfsFile>> {
+        self.exec_metadata().exe_file()
+    }
+
     /// Returns the command-line arguments.
     pub(crate) fn cmdline(&self) -> Arc<Vec<String>> {
         self.exec_metadata().cmdline().clone()
@@ -353,8 +358,14 @@ impl ProcessRuntime {
     }
 
     /// Updates the executable metadata snapshot after a successful exec.
-    pub(crate) fn set_exec_metadata(&self, exe_path: String, cmdline: Arc<Vec<String>>) {
-        self.posix_state.set_exec_metadata(exe_path, cmdline);
+    pub(crate) fn set_exec_metadata(
+        &self,
+        exe_path: String,
+        cmdline: Arc<Vec<String>>,
+        exe_file: Option<Arc<kvfs::VfsFile>>,
+    ) {
+        self.posix_state
+            .set_exec_metadata(exe_path, cmdline, exe_file);
     }
 
     /// Returns a live address-space capability if user mappings are still active.
@@ -584,6 +595,14 @@ fn finish_fork_runtime(
     );
     process_runtime.set_oom_score_adj(parent.oom_score_adj());
     process_runtime.set_heap_top(parent.heap_top());
+    // Inherit the opened backing executable so `/proc/<pid>/exe` resolves in
+    // forked children — runc/crun create their init via `fork` +
+    // `execve("/proc/self/exe")`, which follows the magic link to this file.
+    process_runtime.set_exec_metadata(
+        String::from(exec_metadata.exe_path()),
+        exec_metadata.cmdline().clone(),
+        exec_metadata.exe_file(),
+    );
 
     let files = parent
         .resources()
