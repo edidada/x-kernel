@@ -121,6 +121,19 @@ fn do_epoll_wait(
         })?;
 
     events.write_vm_slice(&output[..ready])?;
+    // Strace: log which fds fired, so the epoll event-fd timeline can be
+    // correlated against epoll_ctl ADD/DEL and peer writes.
+    let strace_min = kprocess::strace_tid();
+    if strace_min != 0 && kprocess::current_user_tid() >= strace_min && ready > 0 {
+        for (i, ev) in output[..ready].iter().enumerate() {
+            warn!(
+                "strace epoll_event tid={} idx={i} data={:#x} events={:#x}",
+                kprocess::current_user_tid(),
+                ev.data,
+                ev.events
+            );
+        }
+    }
     Ok(ready as isize)
 }
 
