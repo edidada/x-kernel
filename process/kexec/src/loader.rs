@@ -474,7 +474,7 @@ pub fn clear_elf_cache() {
 pub fn load_user_app_request(
     uspace: &mut MmSpace,
     request: ExecRequest,
-) -> KResult<(VirtAddr, VirtAddr)> {
+) -> KResult<(VirtAddr, VirtAddr, Arc<VfsFile>)> {
     load_user_app_request_inner(uspace, request, 0)
 }
 
@@ -491,7 +491,7 @@ fn load_user_app_request_inner(
     uspace: &mut MmSpace,
     request: ExecRequest,
     mut script_depth: usize,
-) -> KResult<(VirtAddr, VirtAddr)> {
+) -> KResult<(VirtAddr, VirtAddr, Arc<VfsFile>)> {
     let mut request = request;
     let prepared = loop {
         let binprm = request.prepare()?;
@@ -570,7 +570,7 @@ fn load_user_app_request_inner(
         VmRuntimeRef::new_anon_private(heap_start, PageSize::Size4K),
     )?;
 
-    Ok((entry, user_sp))
+    Ok((entry, user_sp, prepared.binprm.executable().clone()))
 }
 
 #[cfg(unittest)]

@@ -101,6 +101,8 @@ pub struct ProcessExecUpdate {
     pub(super) exe_path: String,
     pub(super) cmdline: Arc<Vec<String>>,
     pub(super) heap_top: usize,
+    /// Opened backing executable file, exposed through `/proc/<pid>/exe`.
+    pub(super) exe_file: Option<Arc<kvfs::VfsFile>>,
     #[cfg(feature = "tee")]
     pub(super) ta_head_bytes: Vec<u8>,
 }
@@ -112,9 +114,16 @@ impl ProcessExecUpdate {
             exe_path,
             cmdline,
             heap_top,
+            exe_file: None,
             #[cfg(feature = "tee")]
             ta_head_bytes: Vec::new(),
         }
+    }
+
+    /// Installs the opened backing executable file for `/proc/<pid>/exe`.
+    pub fn with_exe_file(mut self, exe_file: Arc<kvfs::VfsFile>) -> Self {
+        self.exe_file = Some(exe_file);
+        self
     }
 
     /// Installs the TEE TA header bytes that should be applied on exec.
@@ -245,6 +254,12 @@ impl Process {
     /// Returns the current executable path while runtime remains attached.
     pub fn exe_path(&self) -> KResult<String> {
         self.runtime().map(|runtime| runtime.exe_path())
+    }
+
+    /// Returns the opened backing executable file, if any, while runtime
+    /// remains attached. `/proc/<pid>/exe` follows to this file.
+    pub fn exe_file(&self) -> KResult<Option<Arc<kvfs::VfsFile>>> {
+        self.runtime().map(|runtime| runtime.exe_file())
     }
 
     /// Returns the current command line while runtime remains attached.
@@ -406,9 +421,10 @@ impl Process {
         &self,
         exe_path: String,
         cmdline: Arc<Vec<String>>,
+        exe_file: Option<Arc<kvfs::VfsFile>>,
     ) -> KResult<()> {
         self.runtime()
-            .map(|runtime| runtime.set_exec_metadata(exe_path, cmdline))
+            .map(|runtime| runtime.set_exec_metadata(exe_path, cmdline, exe_file))
     }
 
     /// Applies the process-shared post-exec state transition.
@@ -427,7 +443,7 @@ impl Process {
         runtime.with_tipc_handles(|handles| handles.write().uctx_handle_close_all());
         #[cfg(feature = "tee")]
         runtime.clear_tee_runtime_private();
-        runtime.set_exec_metadata(update.exe_path, update.cmdline);
+        runtime.set_exec_metadata(update.exe_path, update.cmdline, update.exe_file);
         Ok(())
     }
 

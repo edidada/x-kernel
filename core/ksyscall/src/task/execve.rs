@@ -163,13 +163,14 @@ fn run_exec(uctx: &mut UserContext, request: ExecRequest) -> KResult<isize> {
 
     let aspace_ref = process.address_space()?;
     let mut aspace = aspace_ref.lock();
-    let (entry_point, user_stack_base) = load_user_app_request(&mut aspace, request)?;
+    let (entry_point, user_stack_base, exe_file) = load_user_app_request(&mut aspace, request)?;
     drop(aspace);
 
     curr.set_name(entry_name.as_str());
 
     let exec_update =
-        kprocess::ProcessExecUpdate::new(display_path.clone(), Arc::new(args), USER_HEAP_BASE);
+        kprocess::ProcessExecUpdate::new(display_path.clone(), Arc::new(args), USER_HEAP_BASE)
+            .with_exe_file(exe_file);
 
     #[cfg(feature = "tee")]
     let exec_update = {

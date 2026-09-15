@@ -438,6 +438,129 @@ impl MagicLinkOps for ProcFdLink {
     }
 }
 
+/// Magic link backing `/proc/<pid>/exe`.
+///
+/// `readlink` reports the process executable display path; `open`/lookup
+/// follows to the opened backing executable file (set on exec), so runtimes
+/// can `open("/proc/self/exe")` and `fcntl(F_GET_SEALS)` it (runc/crun
+/// self-clone re-exec for CVE-2019-5736).
+struct ProcExeLink {
+    node: SimpleFsNode,
+    task: WeakKtaskRef,
+}
+
+impl ProcExeLink {
+    fn new(fs: Arc<SimpleFs>, task: WeakKtaskRef) -> Arc<Self> {
+        Arc::new(Self {
+            node: SimpleFsNode::new(
+                fs,
+                NodeType::Symlink,
+                NodePermission::from_bits_truncate(0o777),
+            ),
+            task,
+        })
+    }
+
+    fn display_target(&self) -> VfsResult<String> {
+        let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
+        task.as_thread().process().exe_path()
+    }
+
+    fn target_len(&self) -> VfsResult<u64> {
+        Ok(self.display_target()?.len() as u64)
+    }
+}
+
+impl InodeOperations for ProcExeLink {
+    fn symlink_operations(&self) -> Option<&dyn InodeSymlinkOperations> {
+        Some(self)
+    }
+
+    fn getattr(
+        &self,
+        idmap: &kvfs::MountIdmap,
+        path: Option<&kvfs::Path>,
+        request_mask: kvfs::GetattrRequestMask,
+        query_flags: kvfs::GetattrQueryFlags,
+    ) -> VfsResult<Metadata> {
+        let mut metadata = self.node.getattr(idmap, path, request_mask, query_flags)?;
+        metadata.size = self.target_len()?;
+        Ok(metadata)
+    }
+
+    fn setattr(
+        &self,
+        idmap: &kvfs::MountIdmap,
+        dentry: &Dentry,
+        update: MetadataUpdate,
+    ) -> VfsResult<MetadataUpdate> {
+        self.node.setattr(idmap, dentry, update)
+    }
+}
+
+impl InodeSymlinkOperations for ProcExeLink {
+    fn get_link(
+        &self,
+        _dentry: Option<&Dentry>,
+        _inode: &kvfs::VfsInode,
+        _done: &mut kvfs::DelayedCall,
+    ) -> VfsResult<String> {
+        self.display_target()
+    }
+}
+
+impl FileOperations for ProcExeLink {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+        let target = self.display_target()?;
+        let data = target.as_bytes();
+        if offset >= data.len() as u64 {
+            return Ok(0);
+        }
+        let data = &data[offset as usize..];
+        let read = data.len().min(buf.len());
+        buf[..read].copy_from_slice(&data[..read]);
+        Ok(read)
+    }
+
+    fn magic_link(self: Arc<Self>) -> Option<Arc<dyn MagicLinkOps>> {
+        Some(self)
+    }
+}
+
+impl MagicLinkOps for ProcExeLink {
+    fn readlink_display(&self) -> VfsResult<String> {
+        self.display_target()
+    }
+
+    fn follow(&self, _intent: LookupIntent, flags: LookupFlags) -> VfsResult<ResolvedObject> {
+        if flags.rejects_magic_links() || !flags.follows_final() {
+            return Err(VfsError::FilesystemLoop);
+        }
+        let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
+        let process = task.as_thread().process();
+        let exe_file = process
+            .exe_file()
+            .ok()
+            .flatten()
+            .ok_or(VfsError::NotFound)?;
+        Ok(ResolvedObject::location(exe_file.path().clone()))
+    }
+}
+
+fn proc_exe_link_child(
+    lookup: SimpleDirLookup<'_>,
+    name: &str,
+    link: Arc<ProcExeLink>,
+) -> VfsResult<Dentry> {
+    let init = link.node.inode_init().with_size(link.target_len()?);
+    let inode = VfsInode::new_file_with_flags(link, NodeFlags::NON_CACHEABLE, init);
+    Ok(lookup.file_from_inode(name, inode))
+}
+
 struct ThreadFdDir {
     fs: Arc<SimpleFs>,
     task: WeakKtaskRef,
@@ -827,19 +950,7 @@ impl SimpleDirOps for ThreadDir {
                     }),
                 ),
             ),
-            "exe" => lookup.file(
-                name,
-                SimpleFile::new(fs.clone(), NodeType::Symlink, {
-                    let task_weak = task_weak.clone();
-                    move || {
-                        // Linux proc_exe_link() returns ENOENT when the task
-                        // is gone: readlink is path resolution, unlike reads
-                        // on an already-open status file.
-                        let task = task_weak.upgrade().ok_or(VfsError::NotFound)?;
-                        task.as_thread().process().exe_path()
-                    }
-                }),
-            ),
+            "exe" => proc_exe_link_child(lookup, name, ProcExeLink::new(fs.clone(), task_weak)),
             "fd" => {
                 let task = task_weak.upgrade().ok_or(VfsError::NotFound)?;
                 Ok(lookup.dir(

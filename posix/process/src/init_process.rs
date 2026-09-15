@@ -85,7 +85,7 @@ pub fn spawn_init_process(
     // Load the image through the same loader entry point used by exec, reusing
     // the resolved location (and the args/envs already cloned into `binprm`) to
     // avoid a redundant lookup and a second full copy of args/envs.
-    let (entry_vaddr, ustack_top) = load_user_app_request(
+    let (entry_vaddr, ustack_top, _exe_file) = load_user_app_request(
         &mut uspace,
         ExecRequest::from_resolved(
             binprm.location().clone(),
@@ -95,6 +95,8 @@ pub fn spawn_init_process(
         ),
     )
     .unwrap_or_else(|e| panic!("Failed to load init image: {e}"));
+    // The init runtime is constructed via the low-level build_process_thread
+    // path; stashing its exe file for `/proc/1/exe` is left to a follow-up.
 
     let uctx = UserContext::new(entry_vaddr.into(), ustack_top, 0);
     let page_table_root = uspace.page_table_hw_root();
