@@ -279,6 +279,12 @@ pub fn sys_waitid(
         0 => WaitPid::Any,
         1 => WaitPid::Pid(id as _),
         2 => WaitPid::Pgid(id as _),
+        3 => {
+            // P_PIDFD: `id` is a pidfd file descriptor referring to a process.
+            let file = kprocess::current_resources().get_file(id as i32)?;
+            let pidfd = kprocess::PidFd::from_file(&file)?;
+            WaitPid::Pid(pidfd.process().pid())
+        }
         _ => return Err(KError::from(LinuxError::EINVAL)),
     };
     let options = WaitOptions::from_bits_truncate(options);
