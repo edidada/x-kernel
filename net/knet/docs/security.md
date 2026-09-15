@@ -56,7 +56,7 @@ flowchart TD
             SOCKET["TCP · UDP · raw · packet socket"]
             UNIX["Unix socket"]
             NETLINK["netlink socket"]
-            CORE["Service · NetworkRuntime<br/>Router · InterfaceSet"]
+            CORE["Service · NetworkState<br/>Router · InterfaceSet"]
         end
 
         subgraph UNSAFE["unsafe boundary"]
@@ -357,7 +357,13 @@ All reads and writes to `SocketSet` must acquire the `SOCKET_SET.inner` mutex.
 
 ### 3. `Service` Mutual Exclusion
 
-The `Service::network` mutex protects routing, interface state, packet queues, and the RX cursor during configuration and packet processing. Separate mutexes protect the smoltcp Interface and Ipv4IngressState. IPv4 validation and UDP demultiplexing run outside the NetworkRuntime lock; TCP listener preparation holds socket-set and NetworkRuntime locks through batch handoff.
+NetworkState protects interface inventory and routing with separate RwLocks,
+ordered interfaces before routing when both are needed. Service protects NetIo
+queues and the RX cursor with a separate mutex. Stack and Ipv4Ingress own their
+state mutexes. Device RX takes interfaces then NetIo; native IPv4 processing
+releases both first. TCP listener preparation holds socket-set then NetIo
+through handoff. TX releases NetIo and route read guards before taking the
+interface write guard for device submission.
 
 ### 4. Ring-Buffer Publication Rules
 
@@ -384,7 +390,11 @@ The configuration guard owned by `NetworkConfig` serializes individual mutations
 Batches mixing queries and mutations must be rejected before any state update.
 Before executing a mutation-only batch, response-queue space must be checked for the entire batch.
 A mutation-only batch is processed message by message. A later validation or operation error does not roll back earlier successful mutations. Capacity preflight reserves room for mutation responses on that socket, but does not provide all-or-nothing transaction semantics.
-Responses are generated outside the receive-queue lock. The fixed lock order is send-transaction lock, the configuration guard owned by `NetworkConfig`, NetworkRuntime, ingress processing, Interface, and netlink receive queue, skipping locks that are not involved.
+Responses are generated outside the receive-queue lock. The send-transaction
+lock precedes NetworkConfig. State mutations acquire interfaces before routing,
+then release both before ingress and Interface projections. RX cursor repair
+takes interfaces then NetIo; Stack rebuild takes NetIo then Interface. Response
+enqueue takes the receive-queue lock after mutation processing.
 
 ### 9. Route Index Boundary
 
@@ -475,15 +485,15 @@ Derived state bits in `ifi_change` are preserved according to Linux `IFF_VOLATIL
 
 ### 25. IPv4 Address Lifecycle
 
-After an address or its device is removed, InterfaceSet address entries, automatic routes, Ipv4IngressState, the smoltcp Interface, and device projections must be refreshed while holding the NetworkRuntime lock once.
+NetworkConfig serializes an address or device removal through all projection updates. InterfaceSet, device projections, and automatic routes change under the interface and routing write guards. These guards are released before updating Ipv4IngressState and the smoltcp Interface under their own mutexes; readers can observe these stages separately. Copied TX routes revalidate device identity and local source before submission.
 Legacy ioctl updates target only the primary address entry and preserve other addresses on the same device. Netmask updates must preserve address scope and custom broadcast addresses.
 When the last instance of an address value disappears, configured routes in Router that depend on that `prefsrc` must be removed at the same time.
-Device removal must also discard the device's state, delete its routes, renumber subsequent interface indices, and repair the RX cursor within the same NetworkRuntime critical section.
+Device removal deletes device state and routes and renumbers slots under the inventory guards, then repairs the RX cursor under interfaces followed by NetIo. NetworkConfig excludes other configuration writers throughout this sequence.
 
 ### 26. Poller Handoff Under Lock Contention
 
-While holding global execution ownership, the poller may acquire NetworkRuntime, Ipv4IngressState, the smoltcp Interface, and socket-set locks only through `try_lock`.
-Handing off an admitted-packet batch must acquire socket-set before NetworkRuntime. A batch containing only control packets skips socket-set.
+While holding global execution ownership, the poller acquires interfaces and routing only through `try_read` or `try_write`, and NetIo, Ipv4IngressState, Interface, and socket-set only through `try_lock`. Its reusable batch mutexes belong exclusively to this executor.
+Handing off an admitted-packet batch must acquire socket-set before NetIo. A batch containing only control packets skips socket-set.
 Contention must return `has_more`.
 If an expired IPv4 reassembly event encounters Ipv4IngressState contention, it retains its pending state and allows TX and protocol processing to continue for the current round.
 The expiration path does not acquire this lock when no reassembly queue exists or no queue has expired.
@@ -530,8 +540,8 @@ RAII must return the slot if reservation fails, the operation is interrupted, or
 | `RawSocket` | All fields satisfy Send | `RwLock`, atomics, and immutable handles protect shared state |
 | `StreamTransport` | All fields satisfy Send | `Mutex<Option<Channel>>` serializes local endpoint operations; the `ListenerState` mutex serializes the pending queue, capacity reservations, listening, and closure; a `SpinNoPreempt` lock for each send direction orders data publication, half-close, and EOF checks; three `PollSet` groups manage read, write, and connection-state waiters separately |
 | `NetlinkSocket` | All fields satisfy Send | `Arc<NetlinkSocketInner>` internally uses `RwLock`, a send-transaction `Mutex`, a receive-queue `Mutex`, and `PollSet`; each send explicitly carries caller credentials, and the socket does not retain an authorization identity |
-| `Service` | All fields satisfy Send | Stack, Ipv4Ingress, and NetworkDataPlane own their respective Interface/state/batch mutexes; Service owns the shared network transaction; the poller acquires shared processing locks without blocking and retains batches during contention; network-timer and deferred-close deadlines are published atomically, and the periodic sampling callback never acquires sleeping mutexes |
-| `NetworkState`, `NetIo`, `Ipv4Output` | Used within `Service` | Owned by private NetworkRuntime storage under one transaction mutex; temporary callbacks and StackDevice borrows cannot outlive its guard |
+| `Service` | All fields satisfy Send | Stack, Ipv4Ingress, and NetworkDataPlane own their respective Interface/state/batch mutexes; Service owns NetIo and independently locked NetworkState; the poller acquires shared processing locks without blocking and retains batches during contention; network-timer and deferred-close deadlines are published atomically, and the periodic sampling callback never acquires sleeping mutexes |
+| `NetworkState`, `NetIo`, `Ipv4Output` | Used within `Service` | NetworkState owns interface and routing RwLocks; Service wraps NetIo in its own mutex; Ipv4Output allocates fragment IDs atomically; StackDevice borrows end before the NetIo guard is released |
 
 ## Threat Analysis
 
@@ -545,7 +555,7 @@ RAII must return the slot if reservation fails, the operation is interrupted, or
 | T-06 | A SYN flood fills the listen backlog | Medium | Many connection requests target the same listener | Legitimate connection requests are dropped, making the listener unavailable. | The listen backlog is capped at `LISTEN_QUEUE_SIZE`; excess requests are dropped with warning logs |
 | T-07 | An unauthorized caller creates a raw socket | Medium | The syscall layer omits permission checks | An unauthorized process gains raw packet transmission or reception access. | `knet` only encapsulates raw socket behavior; permission policy should remain in `posix/net::sys_socket` |
 | T-08 | uevents or responses fill the netlink receive queue | Medium | Subscribers do not consume messages while publishers keep writing | Subscribers lose uevents or request responses once queue capacity is exhausted. | `NETLINK_RX_QUEUE_LIMIT` bounds queue bytes per socket; excess messages are dropped |
-| T-09 | Control-plane and data-plane state diverge | Medium | Link mutations fail to update device-owned state; rtnetlink and legacy socket ioctl address mutations interleave; device removal leaves stale address projections or control-plane routes; configured routes retain invalid `prefsrc` references after address deletion; or route and neighbor mutations bypass their state owners | Packets use stale devices, source addresses, or routes, causing misrouting or configuration inconsistency. | The configuration guard owned by `NetworkConfig` serializes updates across entry points and `unregister_netdev`; link queries and mutations directly access the `NetDevice` state owner; address queries and mutations access InterfaceSet; route queries and mutations access Router; interface-address queries complete under a single NetworkRuntime lock acquisition; `RTM_NEWNEIGH` directly accesses the target device; address and device deletion refresh automatic routes, ingress processing, Interface, and device projections; deleting the last instance of an address value or deleting a device also cleans up Router routes and updates interface indices |
+| T-09 | Control-plane and data-plane state diverge | Medium | Link mutations fail to update device-owned state; rtnetlink and legacy socket ioctl address mutations interleave; device removal leaves stale address projections or control-plane routes; configured routes retain invalid `prefsrc` references after address deletion; or route and neighbor mutations bypass their state owners | Packets use stale devices, source addresses, or routes, causing misrouting or configuration inconsistency. | The configuration guard owned by `NetworkConfig` serializes updates across entry points and `unregister_netdev`; link queries and mutations directly access the `NetDevice` state owner; address queries and mutations access InterfaceSet; route queries and mutations access Router; interface-address queries complete under a single interface read-lock acquisition; `RTM_NEWNEIGH` directly accesses the target device; address and device deletion refresh automatic routes, ingress processing, Interface, and device projections; deleting the last instance of an address value or deleting a device also cleans up Router routes and updates interface indices |
 | T-10 | External network packets trigger parser panics | Medium | Malformed Ethernet, ARP, IP, UDP, or TCP packets enter RX | A parser panic interrupts kernel network processing and can make service unavailable. | Ethernet and ARP use bounds-checked `zerocopy` views; IPv4 and UDP use in-crate bounds-checked parsers; TCP, raw IP, and IPv6 use smoltcp bounds-checked parsers; malformed packets are dropped |
 | T-11 | Interrupt-context misuse causes lock contention or increased latency | Medium | An IRQ wakeup callback directly advances `SERVICE` or `SOCKET_SET`, or performs blocking socket operations | Blocking or contended work delays interrupt processing and can deadlock network IO. | The VirtIO interrupt handler only acknowledges interrupts and schedules the NetRx softirq; Ethernet NetRx marks or wakes receive event sources, while loopback NetRx delivers prepared UDP handles through the bounded non-sleeping PCB path; remaining work is queued for `knet-poller`; the kwork callback executes bounded batches of at most four rounds in ordinary task context |
 | T-12 | Driver buffers or DMA input violate packet boundaries | High | A driver returns an invalid length, data is accessed after recycling, or TX/RX buffer lifetimes are mismanaged | Stale buffer references or invalid lengths can expose dangling data or violate memory safety. | RX data is parsed and copied only before `NetBufHandle` recycling; external frames use bounds-checked parsers; driver handles manage TX buffers |
@@ -570,7 +580,7 @@ RAII must return the slot if reservation fails, the operation is interrupted, or
 | T-31 | TCP zero-window recovery lacks background processing | Medium | The application reads the TCP receive buffer while the advertised window is still encoded as zero, without publishing window-recovery work | The peer continues to observe a closed receive window, stalling transmission. | Reads call `notify(PollReason::RxWindow)` when receive-buffer free space is below the maximum window-scaling quantum; after that quantum is reached, RX and registered protocol timers drive further window growth |
 | T-32 | New events are lost during poller execution | Medium | RX, TX, or timer notifications race with the completion CAS | Pending RX, TX, or timer work is stranded after the executor finishes. | NetRx softirq, TX, and timer notifications share the same `kwork::BudgetedPoller` state machine; work arriving during execution is published as `RUNNING_PENDING`; a failed completion CAS retries according to the observed state, and one successful CAS both releases execution ownership and publishes the next round |
 | T-33 | A compound link update commits partially | Medium | Renaming succeeds before MTU or flag validation fails | The device is renamed while other requested configuration fields remain unchanged. | `InterfaceSet::update_device_link` validates the target device, name format and uniqueness, and MTU range before writing; the rtnetlink entry point ignores `IFF_VOLATILE` changes and rejects actual changes to unsupported writable bits; device setters receive only validated values |
-| T-34 | Shared mutexes held by ordinary tasks retain poller execution ownership for an extended period | Medium | After acquiring `RUNNING`, the poller waits for NetworkRuntime, Ipv4IngressState, Interface, or socket-set held by another socket or control-plane task | Other network work cannot progress while the sole poller waits for a shared lock. | Polling rounds use `try_lock` for these shared locks; contention preserves batches awaiting handoff, returns `has_more`, and schedules later rounds through the existing four-state machine; IPv4 reassembly attempts the Ipv4IngressState lock only when expired events are pending and continues TX after contention; assisted processing remains limited to one round and attempts only one CAS to acquire execution ownership |
+| T-34 | Shared mutexes held by ordinary tasks retain poller execution ownership for an extended period | Medium | After acquiring `RUNNING`, the poller waits for interfaces, routing, NetIo, Ipv4IngressState, Interface, or socket-set held by another socket or control-plane task | Other network work cannot progress while the sole poller waits for a shared lock. | Polling rounds use nonblocking acquisition for these shared locks; contention preserves batches awaiting handoff, returns `has_more`, and schedules later rounds through the existing four-state machine; IPv4 reassembly attempts the Ipv4IngressState lock only when expired events are pending and continues TX after contention; assisted processing remains limited to one round and attempts only one CAS to acquire execution ownership |
 | T-35 | Loopback UDP delivery depends on poller ownership | Medium | `sendto` only queues the packet for transmission, and a short `SO_RCVTIMEO` expires while poller execution ownership is occupied | A locally sent datagram misses the receive deadline and causes a user-visible timeout. | The loopback send path writes validated UDP metadata before disabling BH, enqueues the packet in `NET_RX_QUEUE`, and triggers `NetRx`; when BH is restored, complete IPv4 UDP packets enter the PCB; TCP/ICMP and UDP packets without a matching socket continue through the poller |
 | T-36 | Pending Unix stream listener connections exhaust kernel memory | Medium | An attacker continuously connects while the server does not call `accept` | Queued connections retain ring buffers and exhaust memory available to the kernel. | The backlog is converted according to Linux counting rules and capped at `LISTEN_QUEUE_SIZE`; capacity is reserved before ring-buffer allocation; nonblocking connections return `EAGAIN`, while blocking connections wait for capacity according to `SO_SNDTIMEO` and return `EAGAIN` on timeout; shutdown and Drop wake waiters |
 | T-37 | A UDP socket receives ICMP errors from another device | Medium | ICMP error lookup loses the ingress interface index and treats an unknown device as a wildcard | A device-bound socket reports an asynchronous error for traffic from another interface. | Ingress processing passes `PacketBuf::ifindex` to UDP PCB lookup; a device-bound PCB matches only the same interface index |
@@ -613,7 +623,7 @@ Impact levels:
 | F-21 | RX or TX backlogs monopolize the processing task | A sustained packet rate exceeds the per-round budget | A round reaches its budget or 1 ms soft time limit with work still pending | Scheduling delays for other tasks or reduced network throughput | 3 | Device RX, stack ingress, stack egress, and NetIo TX check time after at most 32 work items; each batch runs at most four consecutive rounds, then reschedules and releases execution ownership, leaving remaining work for the next batch |
 | F-22 | A TCP peer does not send FIN after the local file closes | The peer acknowledges the local FIN, but the protocol handle remains in `FIN_WAIT_2` after detachment from the user file object | The deferred-close registry keeps socket buffers alive | Network memory grows with unresponsive connections | 3 | Set a 60-second deadline on entry to `FIN_WAIT_2`, include it in the unified poll timer, and reclaim the handle on expiration |
 | F-23 | The IPv4 output device is administratively down | `RTM_NEWLINK` clears `IFF_UP` on the device selected by the matching route | The current UDP or raw IP send fails | The application receives `ENETUNREACH` | 4 | UDP and raw IP validate the output route and device administrative state through `SERVICE` before committing the send buffer |
-| F-24 | Data-plane shared-lock contention | A socket or control-plane task holds NetworkRuntime, Ipv4IngressState, Interface, or socket-set | The current polling round ends early and retains its batches | Network work is deferred to the next round | 3 | Return `has_more`; the sole executor publishes `SCHEDULED` through the completion CAS; raw, admitted, and control-packet batches retain ownership and resume from their saved positions in the next round |
+| F-24 | Data-plane shared-lock contention | A socket or control-plane task holds interfaces, routing, NetIo, Ipv4IngressState, Interface, or socket-set | The current polling round ends early and retains its batches | Network work is deferred to the next round | 3 | Return `has_more`; the sole executor publishes `SCHEDULED` through the completion CAS; raw, admitted, and control-packet batches retain ownership and resume from their saved positions in the next round |
 | F-25 | Short-timeout loopback UDP loses packets while the poller is busy | `sendto` only notifies the poller, and the 1-jiffy `recvfrom` timeout expires first | Concurrent libc-test `socket.exe` runs intermittently report `ETIMEDOUT` | A user-visible functional regression | 3 | `NetRx` delivers loopback UDP to the PCB within the send path's BH window; the poller no longer performs this delivery; stress tests cover four concurrent short-timeout operations with SMP=1 and SMP=4 |
 | F-26 | A TCP child connection remains in the SYN queue indefinitely | The packet marker is consumed before the child becomes acceptable, and later ingress processing or timer polling does not refresh the listener | The accept queue stays empty | The server remains blocked in `accept` after connection establishment | 2 | Refresh listeners with nonempty SYN queues after each actual network poll; wake waiters only after a child enters the accept queue; SYN queues do not request continuous polling |
 | F-27 | Connect or accept waits indefinitely after Unix listener shutdown | A listener state change does not notify capacity and request events | Blocking `connect` or `accept` cannot return | Application threads remain asleep indefinitely | 2 | Both `shutdown(SHUT_RD)` and Drop notify `capacity_available` and `request_available`; queued requests are delivered first, and blocking `accept` on an empty queue returns `EINVAL`; blocking `connect` with `SO_SNDTIMEO` returns `EAGAIN` when its capacity wait times out |
@@ -658,7 +668,7 @@ Ordinary logs omit payload contents, while trace logs record Ethernet frame byte
 - IPv4 output fragmentation supports only packets generated within the stack without IP options. IP option copying semantics are not yet implemented.
 - Route dumps read configured routes and address-derived routes from Router.
 - smoltcp maintenance and each egress operation have bounded work, while ingress advances packet by packet through `poll_ingress_single`. Protocol processing for one packet or a single egress operation can still briefly exceed the soft time limit.
-- Nonblocking retry on NetworkRuntime, Ipv4IngressState, Interface, and socket-set contention preserves the poller ownership boundary. Short critical sections within transports, the listen table, and device callbacks can still briefly exceed the soft time limit.
+- Nonblocking retry on interfaces, routing, NetIo, Ipv4IngressState, Interface, and socket-set contention preserves the poller ownership boundary. Short critical sections within transports, the listen table, and device callbacks can still briefly exceed the soft time limit.
 - Each UDP receive queue reserves 1024 pointer-sized slots at PCB creation, so idle sockets still incur this fixed metadata overhead.
 - Address dumps read InterfaceSet and route dumps read Router directly; link dumps read live device snapshots directly.
 - The syscall layer controls raw socket creation permissions; `knet` constructors themselves take no process-credential argument.
@@ -681,6 +691,8 @@ for this document update. Test names are resolved against current source.
 | AF_PACKET memory accounting | [src/link/packet.rs](../src/link/packet.rs): `test_datagram_empty_payload_frames_are_accounted` exercises the frame-count limit for empty datagrams; `test_queue_drop_statistics` checks oversized-frame rejection and drop accounting. |
 | AF_PACKET transmission rejection | [src/link/packet.rs](../src/link/packet.rs): `test_send_ifindex_errors` and `test_send_link_state_validation` check interface, link-state, short-header, and MTU failures. |
 | AF_PACKET receive ownership | [src/link/packet.rs](../src/link/packet.rs): `test_peek_preserves_frame` and `test_recv_write_failure_preserves_packet` check retention across PEEK and failed destination writes. These tests do not cover Unix stream PEEK. |
+| Poller contention and TX retry | [src/service.rs](../src/service.rs): `poll_round_defers_interface_snapshot_contention`; [src/network/state.rs](../src/network/state.rs): `poller_queries_defer_inventory_and_routing_contention`; [src/dataplane.rs](../src/dataplane.rs): `contended_tx_retains_order_and_obeys_a_smaller_retry_budget` checks retained order, capacity notification, and a smaller retry budget. |
+| Broadcast contention | [src/network/ipv4/output.rs](../src/network/ipv4/output.rs): `broadcast_returns_packet_before_contended_fanout`; [src/stack/ipv6_output.rs](../src/stack/ipv6_output.rs): `ipv6_multicast_returns_packet_before_contended_fanout` verifies ownership return before fan-out. |
 | IPv4 overlap and duplicate handling | [src/network/fragment.rs](../src/network/fragment.rs): `test_ipv4_reassembly_drops_overlapping_fragments` and `test_ipv4_reassembly_keeps_queue_on_duplicate_fragment`. |
 | Reassembly deadlines and bounded expiration | [src/network/fragment.rs](../src/network/fragment.rs): `test_ipv4_reassembly_deadline_is_fixed_at_queue_creation` and `test_ipv4_reassembly_expiration_respects_timer_budget`. |
 | Unix address lookup and lock handoff | [src/unix.rs](../src/unix.rs): `unix_missing_abstract_address_returns_connection_refused` and `unix_abstract_lookup_releases_registry_before_callback`. Pathname DAC remains a kvfs contract and is not established by these abstract-address tests. |
@@ -745,33 +757,30 @@ Changes to this module must verify the following:
   Callers must select credentials explicitly.
 - Before adding a public API, verify whether cross-crate exposure is required.
 
-## Migration handoff invariants
+## Packet and configuration handoff invariants
 
-- `NetworkConfig` owns the configuration guard until the operation finishes. Configuration
-  locks remain ordered as configuration guard, network transaction, and each
-  address-projection lock in turn. Device deletion repairs route indices and the
-  RX cursor before publishing projected addresses or a rebuilt Stack interface.
-- IPv4 preparation checks every fragment's required TX slot before invoking the
-  caller's preparation callback or taking its packet. Queue contention returns
-  `WouldBlock` with the original packet available for retry.
-- `NetworkDataPlane::flush_ingress` acquires the socket set and network transaction
-  before listener preparation. Failure retains both accepted and control batches.
-  Native UDP processing takes place after the transaction and socket locks are released.
-- Stack's encoded protocol deadline and Ipv4Ingress's encoded reassembly deadline
-  retain separate atomics. A published reassembly-pending state survives RX deadline
-  refresh until task polling consumes expiry work. Timer callbacks perform atomic
-  transitions and ServiceEvents notifications; fragment reclamation stays in task context.
-- Temporary StackDevice tokens exclusively borrow NetIo queues. RX token creation
-  still requires a free data TX slot. Device submission accepts an egress and next hop
-  already selected by Ipv4Output or the existing IPv6 adapter.
-- This ownership split adds no unsafe code. Existing IPv6 parser assertions and
-  the absence of IPv6 route prefixes remain part of the current support boundary.
-
-Configuration callers hold a `NetworkConfig` object across target lookup, route
-matching, and mutation. Its private owned guard proves that configuration
-serialization lasts through early returns and successful completion. The sole
-constructor acquires the global mutex; each nested operation borrows network
-state without acquiring another configuration guard. Global entry points check
-Service initialization before borrowing it. Address-update errors return before
-projection publication; the successful update and both projections share one
-network transaction guard.
+- NetworkConfig owns the configuration guard through target lookup, mutation,
+  cursor repair, and projection updates. Interface and routing guards cover
+  the inventory mutation; ingress and Stack projections use separate critical
+  sections after those guards are released. This serializes writers without
+  promising atomic visibility across all data-plane views.
+- Output copies route, source, MTU, and device identity before queue preparation.
+  Non-loopback sends hold NetIo across fragment capacity preflight, preparation,
+  and enqueue. Loopback uses the copied route synchronously. Device submission
+  validates device identity and local source after reacquiring interfaces.
+- Poller TX retains up to 32 dequeued packets in a reusable FIFO. A failed
+  route or interface lock acquisition returns the current packet to its front,
+  preserving the tail and order. Retries honor the new round's budget and run
+  before further dequeue. Broadcast/multicast acquire interfaces before any
+  clone is submitted, so contention retries cannot duplicate a partial fan-out.
+- Data capacity notifications belong to dequeue, even if dispatch later defers.
+  Retained TX contributes to `has_more` even with a zero remaining TX budget.
+- `NetworkDataPlane::flush_ingress` acquires socket-set then NetIo before listener
+  preparation. Failure retains accepted and control batches. Native UDP runs
+  after interface, queue, and socket-set guards have been released.
+- Protocol and reassembly deadlines retain separate atomics. A published
+  reassembly-pending state survives RX refresh until task polling consumes it.
+  Timer callbacks perform only atomic transitions and wakeups.
+- Temporary StackDevice tokens borrow NetIo queues. RX token creation requires
+  a free data TX slot. Existing IPv6 parser assertions and the IPv4-only route
+  model remain part of the support boundary.

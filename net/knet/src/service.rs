@@ -119,8 +119,8 @@ impl Service {
 
     /// Advances one bounded network round in task context without spinlocks.
     /// Queue and ingress contention retain batches and report immediate work.
-    /// Device TX and configuration snapshots still take blocking interface
-    /// locks. Pending reassembly expiry does not block TX.
+    /// Interface and routing contention also defer the round, retaining TX
+    /// ownership. Pending reassembly expiry does not block TX.
     pub fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
         let round_started_at = monotonic_time();
         let device_timestamp = round_started_at;
@@ -180,7 +180,17 @@ impl Service {
             );
         }
 
-        let mtu = self.network.effective_mtu();
+        let Some(mtu) = self
+            .network
+            .try_with_interfaces(|interfaces| interfaces.effective_mtu())
+        else {
+            return deferred_poll_progress(
+                rx_packets,
+                tx_packets,
+                timer_events,
+                tx_capacity_changed,
+            );
+        };
         let Some(mut sockets) = SOCKET_SET.inner.try_lock() else {
             return deferred_poll_progress(
                 rx_packets,
@@ -281,15 +291,24 @@ impl Service {
         let ingress_has_more = io.has_stack_ingress();
         let tx_has_more = io.has_pending_tx();
         drop(io);
-        let rx_has_more = self
+        let Some(rx_has_more) = self
             .network
-            .with_interfaces(|interfaces| interfaces.has_rx_work());
+            .try_with_interfaces(|interfaces| interfaces.has_rx_work())
+        else {
+            return deferred_poll_progress(
+                rx_packets,
+                tx_packets,
+                timer_events,
+                tx_capacity_changed,
+            );
+        };
         PollProgress {
             rx_packets,
             tx_packets,
             timer_events,
             tx_capacity_changed,
-            has_more: rx_has_more
+            has_more: self.dataplane.has_pending_tx()
+                || rx_has_more
                 || ingress_has_more
                 || tx_has_more
                 || timer_has_more
@@ -481,6 +500,21 @@ pub(crate) mod tests {
         assert!(!has_reached_poll_round_time_limit(start, before_limit));
         assert!(has_reached_poll_round_time_limit(start, at_limit));
     }
+    #[def_test]
+    fn poll_round_defers_interface_snapshot_contention() {
+        let service = Service::new(NetworkState::new());
+        let _interfaces = service.network.try_write_interfaces().unwrap();
+        // Zero device budgets reach the MTU snapshot without doing device RX/TX.
+        let progress = service.poll_budgeted(PollBudget {
+            rx_packets: 0,
+            tx_packets: 0,
+            timer_events: 0,
+        });
+        assert!(progress.has_more);
+        assert_eq!(progress.rx_packets, 0);
+        assert_eq!(progress.tx_packets, 0);
+    }
+
     #[def_test]
     fn poll_round_defers_packet_io_lock_contention() {
         let service = Service::new(NetworkState::new());

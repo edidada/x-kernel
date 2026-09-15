@@ -8,13 +8,15 @@ use smoltcp::wire::Ipv6Packet;
 
 use crate::{buf::PacketBuf, ip::IpAddress, network::state::NetworkState};
 
+/// Returns the unsent packet on route or interface contention.
+/// Successful dispatch returns the existing device RX-ready hint.
 pub(crate) fn dispatch(
     state: &NetworkState,
     packet: PacketBuf,
     timestamp: MonotonicInstant,
-) -> bool {
+) -> Result<bool, PacketBuf> {
     let Some(ip_packet) = packet.network_packet() else {
-        return false;
+        return Ok(false);
     };
     let (src_addr, dst_addr, is_multicast) = {
         let ip_packet = Ipv6Packet::new_checked(ip_packet).expect("got invalid IPv6 packet");
@@ -25,28 +27,32 @@ pub(crate) fn dispatch(
         )
     };
     if is_multicast {
-        return state.with_interfaces_mut(|interfaces| {
-            let mut poll_next = false;
-            let device_count = interfaces.devices().len();
-            for dev_index in 0..device_count {
-                poll_next |= interfaces.devices_mut()[dev_index].send_ip_packet(
-                    dev_index as i32 + 1,
-                    dst_addr,
-                    src_addr,
-                    packet.clone(),
-                    timestamp,
-                );
-            }
-            poll_next
-        });
+        let Some(mut interfaces) = state.try_write_interfaces() else {
+            return Err(packet);
+        };
+        let mut poll_next = false;
+        let device_count = interfaces.devices().len();
+        for dev_index in 0..device_count {
+            poll_next |= interfaces.devices_mut()[dev_index].send_ip_packet(
+                dev_index as i32 + 1,
+                dst_addr,
+                src_addr,
+                packet.clone(),
+                timestamp,
+            );
+        }
+        return Ok(poll_next);
     }
 
-    let Some(route) = state.resolve(&dst_addr) else {
+    let Some(route) = state.try_resolve(&dst_addr) else {
+        return Err(packet);
+    };
+    let Some(route) = route else {
         warn!("No route found for destination: {}", dst_addr);
-        return false;
+        return Ok(false);
     };
     assert_eq!(route.source, src_addr);
-    state.submit_ip_packet(route, src_addr, packet, timestamp)
+    state.try_submit_ip_packet(route, src_addr, packet, timestamp)
 }
 
 #[cfg(unittest)]
@@ -70,13 +76,23 @@ mod tests {
         bytes[39] = 1;
         PacketBuf::from_ip_packet_vec(0, bytes, PacketOwner::Ipv4Stack)
     }
+    #[def_test]
+    fn ipv6_multicast_returns_packet_before_contended_fanout() {
+        let state = NetworkState::new();
+        let original = packet(true);
+        let returned = state.with_interfaces(|_| {
+            dispatch(&state, original.clone(), MonotonicInstant::ORIGIN).unwrap_err()
+        });
+        assert_eq!(returned.network_packet(), original.network_packet());
+    }
+
     #[def_test(serial)]
     fn ipv6_multicast_reaches_each_device() {
         let state = NetworkState::new();
         state.add_device(Box::new(LoopbackDevice::new()));
         state.add_device(Box::new(LoopbackDevice::new()));
         let mut io = NetIo::new();
-        assert!(dispatch(&state, packet(true), MonotonicInstant::ORIGIN));
+        assert!(dispatch(&state, packet(true), MonotonicInstant::ORIGIN).unwrap());
         let mut packets = Vec::new();
         let drain = state.with_interfaces_mut(|interfaces| {
             io.drain_device_rx_budgeted(interfaces, MonotonicInstant::ORIGIN, 4, &mut packets)
@@ -90,7 +106,7 @@ mod tests {
         let state = NetworkState::new();
         state.add_device(Box::new(LoopbackDevice::new()));
         let mut io = NetIo::new();
-        assert!(!dispatch(&state, packet(false), MonotonicInstant::ORIGIN));
+        assert!(!dispatch(&state, packet(false), MonotonicInstant::ORIGIN).unwrap());
         let mut packets = Vec::new();
         let drain = state.with_interfaces_mut(|interfaces| {
             io.drain_device_rx_budgeted(interfaces, MonotonicInstant::ORIGIN, 1, &mut packets)

@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! Reusable packet batches and native/stack data-plane handoff.
-use alloc::vec::Vec;
+use alloc::{collections::VecDeque, vec::Vec};
 
 use khal::time::monotonic_time;
 use ksync::Mutex;
@@ -39,7 +39,8 @@ pub(crate) struct NetworkDataPlane {
     pub(crate) rx_batch: Mutex<Vec<PacketBuf>>,
     pub(crate) stack_ingress_batch: Mutex<Vec<PacketBuf>>,
     pub(crate) control_tx_batch: Mutex<Vec<Vec<u8>>>,
-    tx_batch: Mutex<Vec<PacketBuf>>,
+    /// Accessed only by the sole poll-round executor, including readiness checks.
+    tx_batch: Mutex<VecDeque<PacketBuf>>,
 }
 
 impl NetworkDataPlane {
@@ -48,8 +49,13 @@ impl NetworkDataPlane {
             rx_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
             stack_ingress_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
             control_tx_batch: Mutex::new(Vec::new()),
-            tx_batch: Mutex::new(Vec::with_capacity(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS)),
+            tx_batch: Mutex::new(VecDeque::with_capacity(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS)),
         }
+    }
+
+    /// Reports retained TX while the caller owns protocol progression.
+    pub(crate) fn has_pending_tx(&self) -> bool {
+        !self.tx_batch.lock().is_empty()
     }
 
     pub(crate) fn poll_rx_budgeted(
@@ -200,7 +206,7 @@ impl NetworkDataPlane {
             .unwrap_or(false)
     }
 
-    fn dequeue_tx_batch(io: &mut NetIo, budget: usize, packets: &mut Vec<PacketBuf>) -> bool {
+    fn dequeue_tx_batch(io: &mut NetIo, budget: usize, packets: &mut VecDeque<PacketBuf>) -> bool {
         debug_assert!(packets.is_empty());
         let capacity_before = io.available_data_tx_slots();
         while packets.len() < budget {
@@ -208,7 +214,7 @@ impl NetworkDataPlane {
                 break;
             };
             packet.set_owner(PacketOwner::DeviceTx);
-            packets.push(packet);
+            packets.push_back(packet);
         }
         // Capture freed capacity in the dequeue critical section so another
         // producer or lock contender cannot hide the TX wakeup obligation.
@@ -218,23 +224,30 @@ impl NetworkDataPlane {
     fn dispatch_dequeued(
         state: &NetworkState,
         ipv4_output: &Ipv4Output,
-        packets: &mut Vec<PacketBuf>,
+        packets: &mut VecDeque<PacketBuf>,
         timestamp: MonotonicInstant,
-    ) {
-        for packet in packets.drain(..) {
-            let Some(ip_packet) = packet.network_packet() else {
-                continue;
+        budget: usize,
+    ) -> (usize, bool) {
+        let mut dispatched = 0;
+        while dispatched < budget {
+            let Some(packet) = packets.pop_front() else {
+                break;
             };
-            match ipv4::ip_version(ip_packet) {
-                Some(4) => {
-                    ipv4_output.dispatch(state, packet, timestamp);
+            let result = match packet.network_packet().and_then(ipv4::ip_version) {
+                Some(4) => ipv4_output.dispatch(state, packet, timestamp),
+                Some(6) => crate::stack::ipv6_output::dispatch(state, packet, timestamp),
+                _ => {
+                    debug!("Dropping packet with invalid IP version");
+                    Ok(false)
                 }
-                Some(6) => {
-                    crate::stack::ipv6_output::dispatch(state, packet, timestamp);
-                }
-                _ => debug!("Dropping packet with invalid IP version"),
+            };
+            if let Err(packet) = result {
+                packets.push_front(packet);
+                return (dispatched, true);
             }
+            dispatched += 1;
         }
+        (dispatched, false)
     }
 
     pub(crate) fn poll_tx_budgeted(
@@ -251,7 +264,7 @@ impl NetworkDataPlane {
 
         while progress.packets < budget {
             let chunk = (budget - progress.packets).min(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS);
-            {
+            if packets.is_empty() {
                 let Some(mut io) = io.try_lock() else {
                     progress.has_lock_contention = true;
                     break;
@@ -259,10 +272,14 @@ impl NetworkDataPlane {
                 progress.tx_capacity_changed |=
                     Self::dequeue_tx_batch(&mut io, chunk, &mut packets);
             }
-            let dequeued = packets.len();
-            Self::dispatch_dequeued(state, ipv4_output, &mut packets, timestamp);
-            progress.packets += dequeued;
-            if dequeued < chunk {
+            let (dispatched, has_lock_contention) =
+                Self::dispatch_dequeued(state, ipv4_output, &mut packets, timestamp, chunk);
+            progress.packets += dispatched;
+            if has_lock_contention {
+                progress.has_lock_contention = true;
+                break;
+            }
+            if dispatched < chunk {
                 break;
             }
             if has_reached_poll_round_time_limit(round_started_at, monotonic_time()) {
@@ -288,6 +305,82 @@ mod tests {
         router::ROUTE_SCOPE_HOST,
         service::tests::TEST_POLL_BUDGET,
     };
+    #[def_test]
+    fn contended_tx_retains_order_and_obeys_a_smaller_retry_budget() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::device::test_device::TestDevice;
+
+        let sends = Arc::new(AtomicUsize::new(0));
+        let state = NetworkState::new();
+        let dev = state.add_device(Box::new(TestDevice::ethernet(1, 1500).with_send_hook({
+            let sends = sends.clone();
+            move || {
+                sends.fetch_add(1, Ordering::Relaxed);
+            }
+        })));
+        let src = Ipv4Address::new(192, 0, 2, 1);
+        state
+            .add_ipv4_addr(Ipv4AddrEntry {
+                dev,
+                addr: Ipv4Cidr::new(src, 24),
+                scope: crate::router::ROUTE_SCOPE_UNIVERSE,
+                broadcast: None,
+            })
+            .unwrap();
+        let packet_fn = |marker| {
+            PacketBuf::from_ip_packet_vec(
+                0,
+                ipv4::build_ipv4_packet(
+                    src,
+                    Ipv4Address::new(192, 0, 2, 2),
+                    ipv4::PROTOCOL_ICMP,
+                    64,
+                    &[marker],
+                )
+                .unwrap(),
+                PacketOwner::Ipv4Stack,
+            )
+        };
+        let first = packet_fn(1);
+        let second = packet_fn(2);
+        let mut io = NetIo::new();
+        io.enqueue_tx([first.clone(), second.clone()].into_iter());
+        let io = Mutex::new(io);
+        let plane = NetworkDataPlane::new();
+        let output = Ipv4Output::new();
+        let poll_fn = |budget| {
+            let current = monotonic_time();
+            plane.poll_tx_budgeted(&state, &io, &output, current, budget, current)
+        };
+        // A read guard permits route resolution but prevents device submission.
+        let progress = state.with_interfaces(|_| poll_fn(2));
+        assert!(progress.has_lock_contention);
+        assert!(progress.tx_capacity_changed);
+        assert_eq!(progress.packets, 0);
+        assert_eq!(sends.load(Ordering::Relaxed), 0);
+        {
+            let pending = plane.tx_batch.lock();
+            assert_eq!(pending.len(), 2);
+            assert_eq!(pending[0].network_packet(), first.network_packet());
+            assert_eq!(pending[1].network_packet(), second.network_packet());
+        }
+        io.lock().enqueue_tx(core::iter::once(packet_fn(3)));
+        let progress = poll_fn(1);
+        assert_eq!(progress.packets, 1);
+        assert!(!progress.tx_capacity_changed);
+        assert!(plane.has_pending_tx());
+        {
+            let pending = plane.tx_batch.lock();
+            assert_eq!(pending[0].network_packet(), second.network_packet());
+        }
+        assert!(io.lock().has_pending_tx());
+        assert_eq!(poll_fn(1).packets, 1);
+        assert!(!plane.has_pending_tx());
+        assert_eq!(poll_fn(1).packets, 1);
+        assert_eq!(sends.load(Ordering::Relaxed), 3);
+    }
+
     #[def_test]
     fn control_dispatch_does_not_free_data_tx_capacity() {
         let state = NetworkState::new();

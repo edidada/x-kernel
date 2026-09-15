@@ -59,8 +59,8 @@ impl NetworkState {
         use_fn(&mut self.interfaces.write())
     }
 
-    /// Nonblocking write guard for poller RX that also needs `NetIo`.
-    /// Callers that then take `NetIo` must acquire this guard first.
+    /// Nonblocking interface guard for poller device RX and broadcast TX.
+    /// RX callers that also take `NetIo` must acquire this guard first.
     pub(crate) fn try_write_interfaces(&self) -> Option<RwLockWriteGuard<'_, InterfaceSet>> {
         self.interfaces.try_write()
     }
@@ -91,19 +91,25 @@ impl NetworkState {
     }
 
     /// Looks up the forwarding path and copies the fields later stages need.
+    #[cfg(unittest)]
     pub(crate) fn resolve(&self, dst: &IpAddress) -> Option<ResolvedRoute> {
-        self.with_inventory(|interfaces, routing| {
-            let rule = routing.lookup(dst)?;
-            let device = interfaces.devices().get(rule.dev)?;
-            Some(ResolvedRoute {
-                device: rule.dev,
-                device_id: device.device_id(),
-                next_hop: rule.via.unwrap_or(*dst),
-                mtu: device.mtu().min(u16::MAX as usize),
-                source: rule.src,
-                is_loopback: device.link_kind() == LinkKind::Loopback,
-            })
-        })
+        self.with_inventory(|interfaces, routing| resolve_route(interfaces, routing, dst))
+    }
+
+    /// Returns `None` on lock contention, or the copied lookup result otherwise.
+    pub(crate) fn try_resolve(&self, dst: &IpAddress) -> Option<Option<ResolvedRoute>> {
+        let interfaces = self.interfaces.try_read()?;
+        let routing = self.routing.try_read()?;
+        Some(resolve_route(&interfaces, &routing, dst))
+    }
+
+    /// Copies an interface query without waiting for a configuration writer.
+    pub(crate) fn try_with_interfaces<R>(
+        &self,
+        use_fn: impl FnOnce(&InterfaceSet) -> R,
+    ) -> Option<R> {
+        let interfaces = self.interfaces.try_read()?;
+        Some(use_fn(&interfaces))
     }
 
     pub(crate) fn resolve_output(&self, dst: &IpAddress, oif: i32) -> KResult<ResolvedRoute> {
@@ -146,6 +152,7 @@ impl NetworkState {
         self.with_inventory(|interfaces, routing| routing.output_route_source(interfaces, dst, 0))
     }
 
+    #[cfg(unittest)]
     pub(crate) fn route_mtu(&self, dst: &IpAddress) -> Option<usize> {
         self.resolve(dst).map(|route| route.mtu)
     }
@@ -316,27 +323,28 @@ impl NetworkState {
         timestamp: ktime_types::MonotonicInstant,
     ) -> bool {
         self.with_interfaces_mut(|interfaces| {
-            if let IpAddress::Ipv4(source) = source
-                && !interfaces.has_ipv4_address(source)
-            {
-                return false;
-            }
-            let Some(device) = interfaces.devices_mut().get_mut(route.device) else {
-                return false;
-            };
-            // Removable devices have a model ID; the built-in loopback has
-            // none and remains registered for the service lifetime.
-            if device.device_id() != route.device_id {
-                return false;
-            }
-            device.send_ip_packet(
-                route.device as i32 + 1,
-                route.next_hop,
-                source,
-                packet,
-                timestamp,
-            )
+            submit_ip_packet(interfaces, route, source, packet, timestamp)
         })
+    }
+
+    /// Returns ownership on interface contention, before any device submission.
+    pub(crate) fn try_submit_ip_packet(
+        &self,
+        route: ResolvedRoute,
+        source: IpAddress,
+        packet: crate::buf::PacketBuf,
+        timestamp: ktime_types::MonotonicInstant,
+    ) -> Result<bool, crate::buf::PacketBuf> {
+        let Some(mut interfaces) = self.interfaces.try_write() else {
+            return Err(packet);
+        };
+        Ok(submit_ip_packet(
+            &mut interfaces,
+            route,
+            source,
+            packet,
+            timestamp,
+        ))
     }
 }
 
@@ -392,6 +400,52 @@ impl NetworkState {
     }
 }
 
+fn resolve_route(
+    interfaces: &InterfaceSet,
+    routing: &Router,
+    dst: &IpAddress,
+) -> Option<ResolvedRoute> {
+    let rule = routing.lookup(dst)?;
+    let device = interfaces.devices().get(rule.dev)?;
+    Some(ResolvedRoute {
+        device: rule.dev,
+        device_id: device.device_id(),
+        next_hop: rule.via.unwrap_or(*dst),
+        mtu: device.mtu().min(u16::MAX as usize),
+        source: rule.src,
+        is_loopback: device.link_kind() == LinkKind::Loopback,
+    })
+}
+
+fn submit_ip_packet(
+    interfaces: &mut InterfaceSet,
+    route: ResolvedRoute,
+    source: IpAddress,
+    packet: crate::buf::PacketBuf,
+    timestamp: ktime_types::MonotonicInstant,
+) -> bool {
+    if let IpAddress::Ipv4(source) = source
+        && !interfaces.has_ipv4_address(source)
+    {
+        return false;
+    }
+    let Some(device) = interfaces.devices_mut().get_mut(route.device) else {
+        return false;
+    };
+    // Removable devices have a model ID; the built-in loopback has
+    // none and remains registered for the service lifetime.
+    if device.device_id() != route.device_id {
+        return false;
+    }
+    device.send_ip_packet(
+        route.device as i32 + 1,
+        route.next_hop,
+        source,
+        packet,
+        timestamp,
+    )
+}
+
 fn refresh_address_routes(
     interfaces: &InterfaceSet,
     routing: &mut Router,
@@ -418,6 +472,27 @@ mod configuration_tests {
         ip::Ipv4Address,
         router::{ROUTE_PROTOCOL_KERNEL, ROUTE_SCOPE_HOST, ROUTE_SCOPE_UNIVERSE, Rule},
     };
+
+    #[def_test]
+    fn poller_queries_defer_inventory_and_routing_contention() {
+        let state = NetworkState::new();
+        let dst = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 2));
+        {
+            let _interfaces = state.interfaces.write();
+            assert!(
+                state
+                    .try_with_interfaces(|interfaces| interfaces.effective_mtu())
+                    .is_none()
+            );
+            assert!(state.try_resolve(&dst).is_none());
+        }
+        {
+            let _routing = state.routing.write();
+            assert!(state.try_resolve(&dst).is_none());
+            assert!(state.interfaces.try_write().is_some());
+        }
+        assert_eq!(state.try_resolve(&dst), Some(None));
+    }
 
     #[def_test]
     fn stale_route_does_not_transmit_on_a_reused_device_slot() {
