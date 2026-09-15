@@ -673,45 +673,17 @@ pub fn sys_sendfile(
 /// Copy data from one file to another, both with optional fixed offsets
 /// Copies a range of bytes between two file descriptors.
 pub fn sys_copy_file_range(
-    fd_in: c_int,
-    off_in: UserPtr<u64>,
-    fd_out: c_int,
-    off_out: UserPtr<u64>,
-    len: usize,
-    flags: u32,
+    _fd_in: c_int,
+    _off_in: UserPtr<u64>,
+    _fd_out: c_int,
+    _off_out: UserPtr<u64>,
+    _len: usize,
+    _flags: u32,
 ) -> KResult<isize> {
-    debug!(
-        "sys_copy_file_range <= fd_in: {}, off_in: {}, fd_out: {}, off_out: {}, len: {}, flags: {}",
-        fd_in,
-        !off_in.is_null(),
-        fd_out,
-        !off_out.is_null(),
-        len,
-        flags
-    );
-
-    if flags != 0 {
-        return Err(KError::InvalidInput);
-    }
-    // TODO: check both regular files
-    // TODO: check same file and overlap
-
-    // Source can use fixed offset or current file position
-    let resources = kprocess::current_resources();
-    let src = if !off_in.is_null() {
-        SendFile::Offset(resources.get_file(fd_in)?, off_in)
-    } else {
-        SendFile::Direct(resources.get_file(fd_in)?)
-    };
-
-    // Destination can also use fixed offset or current file position
-    let dst = if !off_out.is_null() {
-        SendFile::Offset(resources.get_file(fd_out)?, off_out)
-    } else {
-        SendFile::Direct(resources.get_file(fd_out)?)
-    };
-
-    do_send(src, dst, len).map(|n| n as _)
+    // Return ENOSYS so Go runtime falls back to read+write for pipe
+    // relay, which it can poll via netpoll. copy_file_range blocks the
+    // entire M-thread (Go doesn't register it as pollable I/O).
+    Err(KError::Unsupported)
 }
 
 /// Move data between file descriptors, with at least one being a pipe
