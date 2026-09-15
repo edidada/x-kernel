@@ -20,14 +20,14 @@ use super::{
     *,
 };
 use crate::{
-    SERVICE, control,
+    SERVICE,
+    control::{ExistingIpv4AddrAction, NetworkConfig},
     device::{
         LINK_FLAG_UP, LINK_FLAG_VOLATILE, LinkConfigUpdate, LinkKind, LinkSnapshot, NeighborState,
         NeighborUpdate, NeighborUpdatePolicy, interfaces::Ipv4AddrEntry,
     },
     ip::{IpAddress as KernelIpAddress, IpCidr, Ipv4Cidr},
     router::{RouteAttrs as RouterRouteAttrs, Rule},
-    service::ExistingIpv4AddrAction,
 };
 
 #[derive(Clone, Debug)]
@@ -358,7 +358,7 @@ pub(super) fn apply_link_update(request: LinkUpdateRequest) -> Result<(), LinuxE
     if !SERVICE.is_inited() {
         return Err(LinuxError::ENODEV);
     }
-    let _network_config_guard = control::network_config_lock();
+    let config = NetworkConfig::lock(&SERVICE);
 
     let current_flags = SERVICE
         .link_snapshot_for_ifindex(request.index)
@@ -375,7 +375,7 @@ pub(super) fn apply_link_update(request: LinkUpdateRequest) -> Result<(), LinuxE
     if changed_flags & !(LINK_FLAG_UP | LINK_FLAG_VOLATILE) != 0 {
         return Err(LinuxError::EOPNOTSUPP);
     }
-    SERVICE.update_device_link(
+    config.update_link(
         request.index,
         LinkConfigUpdate {
             name: request.name,
@@ -390,13 +390,13 @@ pub(super) fn add_addr(request: AddrRequest, flags: u16) -> Result<(), LinuxErro
     if !SERVICE.is_inited() {
         return Err(LinuxError::ENODEV);
     }
-    let _network_config_guard = control::network_config_lock();
+    let config = NetworkConfig::lock(&SERVICE);
     let existing_action = if flags & NLM_F_REPLACE != 0 && flags & NLM_F_EXCL == 0 {
         ExistingIpv4AddrAction::Keep
     } else {
         ExistingIpv4AddrAction::Reject
     };
-    SERVICE.add_ipv4_addr(entry, existing_action)
+    config.add_ipv4_addr(entry, existing_action)
 }
 
 pub(super) fn del_addr(request: AddrRequest) -> Result<(), LinuxError> {
@@ -404,8 +404,8 @@ pub(super) fn del_addr(request: AddrRequest) -> Result<(), LinuxError> {
     if !SERVICE.is_inited() {
         return Err(LinuxError::ENODEV);
     }
-    let _network_config_guard = control::network_config_lock();
-    SERVICE.remove_ipv4_addr(entry)?;
+    let config = NetworkConfig::lock(&SERVICE);
+    config.remove_ipv4_addr(entry)?;
     Ok(())
 }
 
@@ -414,20 +414,17 @@ pub(super) fn add_route(request: RouteRequest, flags: u16) -> Result<(), LinuxEr
     if !SERVICE.is_inited() {
         return Err(LinuxError::ENODEV);
     }
-    let _network_config_guard = control::network_config_lock();
-    let existing = SERVICE
-        .route_snapshot()
-        .into_iter()
-        .find(|route| same_route_key(*route, &request));
+    let config = NetworkConfig::lock(&SERVICE);
+    let existing = config.find_route(|route| same_route_key(*route, &request));
     if let Some(existing) = existing {
         if flags & NLM_F_EXCL != 0 || flags & NLM_F_REPLACE == 0 || !existing.is_configured() {
             return Err(LinuxError::EEXIST);
         }
-        SERVICE.replace_route_rule(existing, rule)?;
+        config.replace_route(existing, rule)?;
     } else if flags & NLM_F_CREATE == 0 {
         return Err(LinuxError::ENOENT);
     } else {
-        SERVICE.add_route_rule(rule)?;
+        config.add_route(rule)?;
     }
     Ok(())
 }
@@ -442,31 +439,32 @@ pub(super) fn del_route(request: RouteRequest) -> Result<(), LinuxError> {
     if !SERVICE.is_inited() {
         return Err(LinuxError::ENODEV);
     }
-    let _network_config_guard = control::network_config_lock();
+    let config = NetworkConfig::lock(&SERVICE);
     if request.oif != 0 {
         ensure_link_exists(request.oif)?;
     }
-    let route = SERVICE
-        .route_snapshot()
-        .into_iter()
-        .find(|route| route.is_configured() && route_delete_matches(*route, &request))
+    let route = config
+        .find_route(|route| route.is_configured() && route_delete_matches(*route, &request))
         .ok_or(LinuxError::ESRCH)?;
-    SERVICE.remove_route_rule(route);
+    config.remove_route(route);
     Ok(())
 }
 
 pub(super) fn add_neigh(request: NeighRequest, flags: u16) -> Result<(), LinuxError> {
-    let _network_config_guard = control::network_config_lock();
     if request.family != wire_route::FAMILY_IPV4 {
         return Err(LinuxError::EAFNOSUPPORT);
     }
+    if !SERVICE.is_inited() {
+        return Err(LinuxError::ENODEV);
+    }
+    let config = NetworkConfig::lock(&SERVICE);
     ensure_link_exists(request.ifindex)?;
     let update = neighbor_update_from_request(request)?;
     let policy = NeighborUpdatePolicy {
         can_create: flags & NLM_F_CREATE != 0,
         can_replace: flags & NLM_F_REPLACE != 0 && flags & NLM_F_EXCL == 0,
     };
-    SERVICE.apply_neighbor_update(update, policy)
+    config.update_neighbor(update, policy)
 }
 
 fn ensure_link_exists(ifindex: u32) -> Result<(), LinuxError> {

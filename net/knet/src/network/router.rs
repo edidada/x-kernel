@@ -386,6 +386,15 @@ impl Router {
         self.table.add_rule(rule);
     }
 
+    /// Returns the first matching rule without copying the complete routing table.
+    pub(crate) fn find_rule(&self, mut matches_fn: impl FnMut(&Rule) -> bool) -> Option<Rule> {
+        self.table
+            .rules()
+            .iter()
+            .find(|rule| matches_fn(rule))
+            .copied()
+    }
+
     pub fn route_snapshot(&self) -> Vec<Rule> {
         self.table.rules().to_vec()
     }

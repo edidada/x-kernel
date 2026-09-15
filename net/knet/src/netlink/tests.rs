@@ -5,12 +5,11 @@
 extern crate alloc;
 
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
-use core::{sync::atomic::Ordering, task::Waker};
+use core::sync::atomic::Ordering;
 
 use kcred::Cred;
 use kerrno::LinuxError;
 use kio::Cursor;
-use ktime_types::MonotonicInstant;
 use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address};
 use unittest::def_test;
 
@@ -25,149 +24,28 @@ use super::{
     *,
 };
 use crate::{
-    KernelAncillaryData, RecvFlags, RecvOptions, SERVICE, SendOptions, SocketAddrEx,
-    buf::PacketBuf,
     device::{
-        IF_OPER_DOWN, IF_OPER_UNKNOWN, IF_OPER_UP, LINK_FLAG_BROADCAST, LINK_FLAG_LOOPBACK,
-        LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST, LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind,
-        LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice, interfaces::Ipv4AddrEntry,
+        IF_OPER_UNKNOWN, IF_OPER_UP, LINK_FLAG_BROADCAST, LINK_FLAG_LOOPBACK, LINK_FLAG_LOWER_UP,
+        LINK_FLAG_MULTICAST, LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind, LinkSnapshot,
+        interfaces::Ipv4AddrEntry, test_device::TestDevice,
     },
+    KernelAncillaryData, RecvFlags, RecvOptions, SERVICE, SendOptions, SocketAddrEx,
+    network::state::NetworkState,
     router::Rule,
     service::Service,
     socket::{
         SocketOps,
         options::{Configurable, SetSocketOption},
     },
-    stack::packet_io::PacketIo,
 };
 
 fn valid_ipv4_cidr(address: crate::ip::Ipv4Address, prefix_len: u8) -> crate::ip::Ipv4Cidr {
     crate::ip::Ipv4Cidr::new(address, prefix_len).unwrap()
 }
 
-struct TestDevice {
-    link: LinkSnapshot,
-    device_id: Option<kdevice::DeviceId>,
-    neighbors: Vec<crate::ip::IpAddress>,
-}
-
-impl TestDevice {
-    fn new(link: LinkSnapshot) -> Self {
-        Self {
-            link,
-            device_id: None,
-            neighbors: Vec::new(),
-        }
-    }
-
-    fn with_device_id(mut self, device_id: kdevice::DeviceId) -> Self {
-        self.device_id = Some(device_id);
-        self
-    }
-}
-
-impl NetDevice for TestDevice {
-    fn name(&self) -> &str {
-        &self.link.name
-    }
-
-    fn link_kind(&self) -> LinkKind {
-        self.link.kind
-    }
-
-    fn mtu(&self) -> usize {
-        self.link.mtu
-    }
-
-    fn is_link_up(&self) -> bool {
-        self.link.flags & LINK_FLAG_UP != 0
-    }
-
-    fn link_snapshot(&self, ifindex: i32) -> LinkSnapshot {
-        LinkSnapshot {
-            ifindex,
-            ..self.link.clone()
-        }
-    }
-
-    fn link_send_snapshot(&self) -> LinkSendSnapshot {
-        LinkSendSnapshot {
-            is_up: self.is_link_up(),
-            mtu: self.link.mtu,
-            hardware_addr: self.link.hardware_addr,
-        }
-    }
-
-    fn device_id(&self) -> Option<kdevice::DeviceId> {
-        self.device_id
-    }
-
-    fn poll_rx(&mut self, _ifindex: i32, _timestamp: MonotonicInstant) -> Option<PacketBuf> {
-        None
-    }
-
-    fn has_rx_work(&self) -> bool {
-        false
-    }
-
-    fn send_ip_packet(
-        &mut self,
-        _ifindex: i32,
-        _next_hop: crate::ip::IpAddress,
-        _source_addr: crate::ip::IpAddress,
-        _packet: PacketBuf,
-        _timestamp: MonotonicInstant,
-    ) -> bool {
-        false
-    }
-
-    fn register_rx_waker(
-        &self,
-        _source_waker: &Waker,
-        _context: &mut kpoll::PollContext<'_>,
-    ) -> Result<(), kpoll::PollRegisterError> {
-        Ok(())
-    }
-
-    fn set_name(&mut self, name: String) {
-        self.link.name = name;
-    }
-
-    fn set_mtu(&mut self, mtu: usize) -> Result<(), LinuxError> {
-        self.link.kind.validate_mtu(mtu)?;
-        self.link.mtu = mtu;
-        Ok(())
-    }
-
-    fn set_link_up(&mut self, is_up: bool) {
-        if is_up {
-            self.link.flags |= LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOWER_UP;
-            self.link.operstate = if self.link.kind == LinkKind::Ethernet {
-                IF_OPER_UP
-            } else {
-                IF_OPER_UNKNOWN
-            };
-        } else {
-            self.link.flags &= !(LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOWER_UP);
-            self.link.operstate = IF_OPER_DOWN;
-        }
-    }
-
-    fn apply_neighbor_update(&mut self, update: NeighborUpdate) -> Result<(), LinuxError> {
-        if !self.neighbors.contains(&update.dst) {
-            self.neighbors.push(update.dst);
-        }
-        Ok(())
-    }
-
-    fn has_neighbor(&self, dst: crate::ip::IpAddress) -> bool {
-        self.neighbors.contains(&dst)
-    }
-}
-
 fn init_test_state() {
-    let mut packet_io = PacketIo::new();
-    packet_io
+    let mut state = NetworkState::new();
+    state
         .interfaces
         .add_device(Box::new(TestDevice::new(LinkSnapshot {
             ifindex: 1,
@@ -179,7 +57,7 @@ fn init_test_state() {
             hardware_addr: [0; 6],
             broadcast_addr: [0; 6],
         })));
-    packet_io.interfaces.add_device(Box::new(
+    state.interfaces.add_device(Box::new(
         TestDevice::new(LinkSnapshot {
             ifindex: 2,
             name: String::from("eth0"),
@@ -196,7 +74,7 @@ fn init_test_state() {
         })
         .with_device_id(kdevice::DeviceId::new(2)),
     ));
-    packet_io
+    state
         .add_ipv4_addr(Ipv4AddrEntry {
             dev: 0,
             addr: valid_ipv4_cidr(crate::ip::Ipv4Address::new(127, 0, 0, 1), 8),
@@ -204,7 +82,7 @@ fn init_test_state() {
             broadcast: None,
         })
         .unwrap();
-    packet_io.routing.add_rule(Rule::new(
+    state.routing.add_rule(Rule::new(
         crate::ip::Ipv4Cidr::new(crate::ip::Ipv4Address::UNSPECIFIED, 0).into(),
         Some(crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(
             192, 168, 1, 1,
@@ -212,7 +90,7 @@ fn init_test_state() {
         1,
         crate::ip::Ipv4Address::new(192, 168, 1, 2).into(),
     ));
-    packet_io
+    state
         .add_ipv4_addr(Ipv4AddrEntry {
             dev: 1,
             addr: valid_ipv4_cidr(crate::ip::Ipv4Address::new(192, 168, 1, 2), 24),
@@ -221,9 +99,9 @@ fn init_test_state() {
         })
         .unwrap();
     if SERVICE.is_inited() {
-        SERVICE.replace_packet_io_for_tests(packet_io);
+        SERVICE.replace_network_for_tests(state);
     } else {
-        SERVICE.init_once(Service::new(packet_io));
+        SERVICE.init_once(Service::new(state));
     }
 }
 
@@ -517,7 +395,7 @@ fn test_device_removal_refreshes_views() {
     assert_eq!(service.rebuild_count_for_tests(), rebuild_count + 1);
     assert_eq!(service.link_snapshots().len(), 1);
     assert_eq!(
-        service.iface.lock().ip_addrs(),
+        service.stack.ipv4_addrs_for_tests(),
         &[IpCidr::Ipv4(smoltcp::wire::Ipv4Cidr::new(
             Ipv4Address::new(127, 0, 0, 1),
             8,
@@ -886,6 +764,34 @@ fn test_add_and_delete_route() {
             .route_snapshot()
             .iter()
             .any(|route| route.filter.prefix_len() == req.dst_len && route.via.is_some())
+    );
+}
+
+#[def_test(serial)]
+fn test_ioctl_route_matching_preserves_distinct_gateways_and_wildcard_delete() {
+    use core::net::Ipv4Addr;
+
+    use crate::control;
+
+    init_test_state();
+    let dst = Some(Ipv4Addr::new(172, 20, 0, 0));
+    let first_gateway = Some(Ipv4Addr::new(192, 168, 1, 1));
+    let second_gateway = Some(Ipv4Addr::new(192, 168, 1, 3));
+    control::add_ipv4_route(dst, 24, first_gateway, Some("eth0")).unwrap();
+    assert_eq!(
+        control::add_ipv4_route(dst, 24, first_gateway, Some("eth0")),
+        Err(LinuxError::EEXIST)
+    );
+    control::add_ipv4_route(dst, 24, second_gateway, Some("eth0")).unwrap();
+    control::del_ipv4_route(dst, 24, first_gateway, Some("eth0")).unwrap();
+    assert_eq!(
+        control::del_ipv4_route(dst, 24, first_gateway, Some("eth0")),
+        Err(LinuxError::ESRCH)
+    );
+    control::del_ipv4_route(dst, 24, None, None).unwrap();
+    assert_eq!(
+        control::del_ipv4_route(dst, 24, None, None),
+        Err(LinuxError::ESRCH)
     );
 }
 
@@ -1288,8 +1194,8 @@ fn test_interface_ipv4_addr_survives_middle_device_removal() {
         })
         .with_device_id(kdevice::DeviceId::new(id))
     };
-    let mut packet_io = PacketIo::new();
-    packet_io
+    let mut state = NetworkState::new();
+    state
         .interfaces
         .add_device(Box::new(TestDevice::new(LinkSnapshot {
             ifindex: 1,
@@ -1301,10 +1207,10 @@ fn test_interface_ipv4_addr_survives_middle_device_removal() {
             hardware_addr: [0; 6],
             broadcast_addr: [0; 6],
         })));
-    packet_io
+    state
         .interfaces
         .add_device(Box::new(ethernet(2, "eth0", 2)));
-    packet_io
+    state
         .interfaces
         .add_device(Box::new(ethernet(3, "eth1", 3)));
     for (dev, addr, scope) in [
@@ -1324,7 +1230,7 @@ fn test_interface_ipv4_addr_survives_middle_device_removal() {
             wire_route::SCOPE_UNIVERSE,
         ),
     ] {
-        packet_io
+        state
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev,
                 addr: valid_ipv4_cidr(addr, 24),
@@ -1334,9 +1240,9 @@ fn test_interface_ipv4_addr_survives_middle_device_removal() {
             .unwrap();
     }
     if SERVICE.is_inited() {
-        SERVICE.replace_packet_io_for_tests(packet_io);
+        SERVICE.replace_network_for_tests(state);
     } else {
-        SERVICE.init_once(Service::new(packet_io));
+        SERVICE.init_once(Service::new(state));
     }
 
     // Removing eth0 renumbers eth1 from slot 2 to slot 1; the lookup must

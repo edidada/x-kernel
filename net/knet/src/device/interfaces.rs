@@ -18,9 +18,9 @@ use crate::{
     netlink::RT_SCOPE_UNIVERSE as ROUTE_SCOPE_UNIVERSE,
 };
 
-/// Owns live devices and their aggregate MTU under the service packet-I/O lock.
+/// Owns live devices and their aggregate MTU under the service network transaction lock.
 ///
-/// PacketIo coordinates inventory and address changes with route cleanup.
+/// NetworkState owns the inventory; NetworkConfig coordinates route and stack projections.
 pub(crate) struct InterfaceSet {
     devices: Vec<Box<dyn NetDevice>>,
     ipv4_addrs: Vec<Ipv4AddrEntry>,

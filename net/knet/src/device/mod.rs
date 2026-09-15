@@ -155,10 +155,10 @@ pub trait NetDevice: Send + Sync {
 
     /// Sends a validated IP packet to the next hop.
     ///
-    /// PacketIo calls this in task context. Implementations may allocate and
+    /// NetIo calls this in task context. Implementations may allocate and
     /// callers must not invoke it from hardirq, softirq, or BH-disabled context.
     ///
-    /// `source_addr` is the source parsed by PacketIo before dispatch.
+    /// `source_addr` is the source selected by the output module before dispatch.
     /// Returns `true` when the send made RX ready, typically after a
     /// successful loopback enqueue. Returns `false` when it did not:
     /// Ethernet TX, or a drop such as link down, over-MTU, or a full
@@ -263,3 +263,6 @@ mod tests {
         assert_eq!(validate_interface_name("eth\x0b1"), Err(LinuxError::EINVAL));
     }
 }
+
+#[cfg(unittest)]
+pub(crate) mod test_device;

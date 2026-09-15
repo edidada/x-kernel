@@ -4,7 +4,9 @@
 
 //! Network stack orchestration around smoltcp.
 
+pub(crate) mod device;
 pub(crate) mod ingress;
-pub(crate) mod packet_io;
-pub(crate) mod service;
+pub(crate) mod interface;
+pub(crate) mod ipv6_output;
 pub(crate) mod socket_set;
+pub(crate) mod time;

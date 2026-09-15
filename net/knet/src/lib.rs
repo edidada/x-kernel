@@ -20,6 +20,8 @@ extern crate alloc;
 
 mod consts;
 mod control;
+mod datapath;
+mod dataplane;
 mod device;
 mod ip;
 mod link;
@@ -27,6 +29,7 @@ pub mod netlink;
 mod network;
 mod poller;
 mod runtime;
+mod service;
 mod socket;
 mod stack;
 mod transport;
@@ -56,7 +59,7 @@ pub use socket::{
     options, *,
 };
 pub(crate) use socket::{general, state};
-pub(crate) use stack::{service, socket_set};
+pub(crate) use stack::socket_set;
 pub(crate) use transport::{listen_table, udp_err};
 pub use transport::{raw, tcp, udp, udp::UdpDatagramRelay};
 
@@ -65,10 +68,10 @@ use crate::{
     device::{EthernetDevice, LoopbackDevice, interfaces::Ipv4AddrEntry},
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
     listen_table::ListenTable,
+    network::state::NetworkState,
     router::{ROUTE_SCOPE_HOST, ROUTE_SCOPE_UNIVERSE, Rule},
     service::Service,
     socket_set::SocketSetWrapper,
-    stack::packet_io::PacketIo,
 };
 
 static LISTEN_TABLE: LazyInit<ListenTable> = LazyInit::new();
@@ -82,13 +85,11 @@ pub fn init_network() {
 
     let mut net_devs = net_devices();
 
-    let mut packet_io = PacketIo::new();
-    let lo_dev = packet_io
-        .interfaces
-        .add_device(Box::new(LoopbackDevice::new()));
+    let mut state = NetworkState::new();
+    let lo_dev = state.interfaces.add_device(Box::new(LoopbackDevice::new()));
 
     let lo_ip = Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8);
-    packet_io
+    state
         .add_ipv4_addr(Ipv4AddrEntry {
             dev: lo_dev,
             addr: lo_ip,
@@ -106,9 +107,9 @@ pub fn init_network() {
             .expect("configured IPv4 prefix length must be valid");
 
         let eth0 = EthernetDevice::new("eth0".to_owned(), handle);
-        let eth0_dev = packet_io.interfaces.add_device(Box::new(eth0));
+        let eth0_dev = state.interfaces.add_device(Box::new(eth0));
 
-        packet_io
+        state
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev: eth0_dev,
                 addr: eth0_ip,
@@ -116,7 +117,7 @@ pub fn init_network() {
                 broadcast: None,
             })
             .expect("Ethernet IPv4 address must fit the interface");
-        packet_io.routing.add_rule(Rule::new(
+        state.routing.add_rule(Rule::new(
             Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).into(),
             Some(IpAddress::Ipv4(
                 GATEWAY.parse().expect("Invalid gateway address"),
@@ -133,11 +134,11 @@ pub fn init_network() {
         warn!("  No network device found!");
     }
 
-    for dev in packet_io.interfaces.devices() {
+    for dev in state.interfaces.devices() {
         info!("Device: {}", dev.name());
     }
 
-    let service = Service::new(packet_io);
+    let service = Service::new(state);
     SERVICE.init_once(service);
 
     SOCKET_SET.init_once(SocketSetWrapper::new());
@@ -160,14 +161,14 @@ fn subscribe_network_unregister(id: kdevice::DeviceId) {
 
 /// Removes a NIC from the network stack.
 ///
-/// Takes [`control::network_config_lock`] so teardown is serialized with
+/// Acquires [`control::NetworkConfig`] so teardown is serialized with
 /// control-plane mutations.
 pub(crate) fn unregister_netdev(id: kdevice::DeviceId) -> bool {
     if !SERVICE.is_inited() {
         return false;
     }
-    let _network_config_guard = control::network_config_lock();
-    SERVICE.remove_device_by_model_id(id).is_some()
+    let config = control::NetworkConfig::lock(&SERVICE);
+    config.remove_device(id).is_some()
 }
 
 /// Init vsock subsystem by vsock devices.
