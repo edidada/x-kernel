@@ -20,11 +20,10 @@ pub(crate) enum InputDisposition {
     NoSocket,
 }
 
-/// Validates an IPv4 UDP packet and records its receive metadata.
+/// Validates an IPv4 UDP packet in task context and records receive metadata.
 ///
-/// This function must run in task context. Loopback stamps packets before
-/// disabling BH; ordinary ingress is already processed by a task. The existing
-/// reference-counted `PacketBuf` is retained without another allocation.
+/// Loopback must call this before disabling BH. Ordinary ingress already runs
+/// in a task. The existing `PacketBuf` is retained without another allocation.
 pub(crate) fn prepare_ipv4_packet(
     header: ipv4::Ipv4Header,
     packet: PacketBuf,

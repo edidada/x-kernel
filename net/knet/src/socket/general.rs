@@ -239,6 +239,7 @@ impl Configurable for GeneralOptions {
                 let ifindex = self.bound_dev_if();
                 **name = if ifindex > 0 && SERVICE.is_inited() {
                     SERVICE
+                        .network()
                         .link_snapshot_for_ifindex(ifindex)
                         .map(|link| link.name)
                 } else {
@@ -280,6 +281,7 @@ impl Configurable for GeneralOptions {
                             0
                         } else if SERVICE.is_inited() {
                             SERVICE
+                                .network()
                                 .link_snapshots()
                                 .into_iter()
                                 .find(|link| &link.name == dev_name)

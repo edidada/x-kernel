@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! Shared synthetic device for configuration and output boundary tests.
-use alloc::{string::String, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
 use core::task::Waker;
 
 use kerrno::LinuxError;
@@ -18,6 +18,7 @@ pub(crate) struct TestDevice {
     link: LinkSnapshot,
     device_id: Option<kdevice::DeviceId>,
     neighbors: Vec<crate::ip::IpAddress>,
+    send_hook: Option<Box<dyn FnMut() + Send + Sync>>,
 }
 
 impl TestDevice {
@@ -26,11 +27,18 @@ impl TestDevice {
             link,
             device_id: None,
             neighbors: Vec::new(),
+            send_hook: None,
         }
     }
 
     pub(crate) fn with_device_id(mut self, device_id: kdevice::DeviceId) -> Self {
         self.device_id = Some(device_id);
+        self
+    }
+
+    /// Runs a test-owned action at the device handoff boundary.
+    pub(crate) fn with_send_hook(mut self, hook_fn: impl FnMut() + Send + Sync + 'static) -> Self {
+        self.send_hook = Some(Box::new(hook_fn));
         self
     }
 }
@@ -87,6 +95,9 @@ impl NetDevice for TestDevice {
         _packet: PacketBuf,
         _timestamp: MonotonicInstant,
     ) -> bool {
+        if let Some(hook_fn) = &mut self.send_hook {
+            hook_fn();
+        }
         false
     }
 

@@ -7,14 +7,13 @@
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use kerrno::KResult;
 use khal::time::monotonic_time;
 use ksync::Mutex;
 use ktime_types::MonotonicInstant;
 use smoltcp::{
     iface::{Interface, PollIngressSingleResult, PollResult, SocketSet},
     time::Instant as SmoltcpInstant,
-    wire::{HardwareAddress, IpAddress as SmoltcpIpAddress, IpCidr as SmoltcpIpCidr},
+    wire::{HardwareAddress, IpCidr as SmoltcpIpCidr},
 };
 
 use crate::{
@@ -22,7 +21,6 @@ use crate::{
     buf::PacketBuf,
     datapath::NetIo,
     ip,
-    network::state::NetworkState,
     poller::PollBudget,
     service::{
         POLL_TIME_CHECK_INTERVAL_WORK_ITEMS, ServiceEvents, has_reached_poll_round_time_limit,
@@ -76,16 +74,6 @@ impl Stack {
         });
     }
 
-    pub(crate) fn select_source_address(
-        &self,
-        state: &NetworkState,
-        dst: &SmoltcpIpAddress,
-    ) -> KResult<SmoltcpIpAddress> {
-        state
-            .select_source_address(&ip::from_smoltcp_ip_address(*dst))
-            .map(ip::to_smoltcp_ip_address)
-    }
-
     /// Provides the interface context while the caller holds the socket set lock.
     pub(crate) fn with_context<R>(
         &self,
@@ -119,7 +107,7 @@ impl Stack {
                 .is_ok()
     }
 
-    /// Advances smoltcp with socket set and network transaction already held.
+    /// Advances smoltcp with the socket set and `NetIo` already held.
     pub(crate) fn poll(
         &self,
         io: &mut NetIo,

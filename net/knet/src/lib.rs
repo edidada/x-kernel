@@ -85,8 +85,8 @@ pub fn init_network() {
 
     let mut net_devs = net_devices();
 
-    let mut state = NetworkState::new();
-    let lo_dev = state.interfaces.add_device(Box::new(LoopbackDevice::new()));
+    let state = NetworkState::new();
+    let lo_dev = state.add_device(Box::new(LoopbackDevice::new()));
 
     let lo_ip = Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8);
     state
@@ -107,7 +107,7 @@ pub fn init_network() {
             .expect("configured IPv4 prefix length must be valid");
 
         let eth0 = EthernetDevice::new("eth0".to_owned(), handle);
-        let eth0_dev = state.interfaces.add_device(Box::new(eth0));
+        let eth0_dev = state.add_device(Box::new(eth0));
 
         state
             .add_ipv4_addr(Ipv4AddrEntry {
@@ -117,7 +117,7 @@ pub fn init_network() {
                 broadcast: None,
             })
             .expect("Ethernet IPv4 address must fit the interface");
-        state.routing.add_rule(Rule::new(
+        state.add_rule(Rule::new(
             Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).into(),
             Some(IpAddress::Ipv4(
                 GATEWAY.parse().expect("Invalid gateway address"),
@@ -134,9 +134,11 @@ pub fn init_network() {
         warn!("  No network device found!");
     }
 
-    for dev in state.interfaces.devices() {
-        info!("Device: {}", dev.name());
-    }
+    state.with_interfaces(|interfaces| {
+        for dev in interfaces.devices() {
+            info!("Device: {}", dev.name());
+        }
+    });
 
     let service = Service::new(state);
     SERVICE.init_once(service);

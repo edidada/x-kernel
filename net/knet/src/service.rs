@@ -6,7 +6,7 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::task::Waker;
 
-use kerrno::{KResult, LinuxError};
+use kerrno::KResult;
 use khal::time::monotonic_time;
 use kpoll::{PollContext, PollRegisterError, PollSet};
 use ksync::Mutex;
@@ -15,9 +15,8 @@ use smoltcp::wire::IpAddress as SmoltcpIpAddress;
 
 use crate::{
     SOCKET_SET,
-    datapath::NetIo,
+    datapath::{NetIo, io::RxDrain},
     dataplane::NetworkDataPlane,
-    device::{LinkSendSnapshot, LinkSnapshot},
     ip::IpAddress,
     network::{
         ipv4::{
@@ -27,7 +26,6 @@ use crate::{
         state::NetworkState,
     },
     poller::{PollBudget, PollProgress},
-    router::Rule,
     stack::{
         interface::Stack,
         time::{earliest_poll_deadline, has_immediate_timer_work, now},
@@ -35,15 +33,12 @@ use crate::{
 };
 const POLL_ROUND_TIME_LIMIT: TimeSpan = TimeSpan::from_millis(1);
 pub(crate) const POLL_TIME_CHECK_INTERVAL_WORK_ITEMS: usize = 32;
-/// Transaction storage; behavior belongs to the three owners inside it.
-struct NetworkRuntime {
-    pub state: NetworkState,
-    pub io: NetIo,
-    pub ipv4_output: Ipv4Output,
-}
+
 pub(crate) struct Service {
     pub(crate) stack: Stack,
-    network: Mutex<NetworkRuntime>,
+    network: NetworkState,
+    io: Mutex<NetIo>,
+    ipv4_output: Ipv4Output,
     dataplane: NetworkDataPlane,
     pub(crate) ipv4_ingress: Ipv4Ingress,
     pub(crate) events: ServiceEvents,
@@ -78,47 +73,54 @@ impl ServiceEvents {
 impl Service {
     pub(crate) fn new(state: NetworkState) -> Self {
         let mut io = NetIo::new();
-        let stack = Stack::new(&mut io, state.interfaces.effective_mtu());
+        let mtu = state.effective_mtu();
+        let stack = Stack::new(&mut io, mtu);
         let ipv4_ingress = Ipv4Ingress::new();
-        let addrs = state.interfaces.local_ipv4_addrs();
+        let addrs = state.local_ipv4_addrs();
         ipv4_ingress.set_ipv4_addrs(&addrs);
         stack.set_ipv4_addrs(&addrs);
         Self {
             stack,
-            network: Mutex::new(NetworkRuntime {
-                state,
-                io,
-                ipv4_output: Ipv4Output::new(),
-            }),
+            network: state,
+            io: Mutex::new(io),
+            ipv4_output: Ipv4Output::new(),
             dataplane: NetworkDataPlane::new(),
             ipv4_ingress,
             events: ServiceEvents::new(),
         }
     }
 
-    /// Borrows inventory and transport under the shared network transaction.
-    pub(crate) fn with_network<R>(
-        &self,
-        use_fn: impl FnOnce(&mut NetworkState, &mut NetIo) -> R,
-    ) -> R {
-        let mut guard = self.network.lock();
-        let NetworkRuntime { state, io, .. } = &mut *guard;
-        use_fn(state, io)
+    pub(crate) fn network(&self) -> &NetworkState {
+        &self.network
     }
 
-    /// Leaves all handoff state untouched when the transaction is contended.
-    pub(crate) fn try_with_network<R>(
+    pub(crate) fn with_io<R>(&self, use_fn: impl FnOnce(&mut NetIo) -> R) -> R {
+        use_fn(&mut self.io.lock())
+    }
+
+    pub(crate) fn try_with_io<R>(&self, use_fn: impl FnOnce(&mut NetIo) -> R) -> Option<R> {
+        let mut io = self.io.try_lock()?;
+        Some(use_fn(&mut io))
+    }
+
+    /// Device RX takes the interface write lock first, then `NetIo`, matching
+    /// configuration teardown. Both guards are released before ingress.
+    pub(crate) fn try_drain_device_rx(
         &self,
-        use_fn: impl FnOnce(&mut NetworkState, &mut NetIo) -> R,
-    ) -> Option<R> {
-        let mut guard = self.network.try_lock()?;
-        let NetworkRuntime { state, io, .. } = &mut *guard;
-        Some(use_fn(state, io))
+        timestamp: MonotonicInstant,
+        budget: usize,
+        packets: &mut Vec<crate::buf::PacketBuf>,
+    ) -> Option<RxDrain> {
+        let mut interfaces = self.network.try_write_interfaces()?;
+        let mut io = self.io.try_lock()?;
+        let batch_budget = budget.min(io.stack_ingress_capacity());
+        Some(io.drain_device_rx_budgeted(&mut interfaces, timestamp, batch_budget, packets))
     }
 
     /// Advances one bounded network round in task context without spinlocks.
-    /// Shared progression uses `try_lock`; contention retains batches and
-    /// reports immediate work. Pending reassembly expiry does not block TX.
+    /// Queue and ingress contention retain batches and report immediate work.
+    /// Device TX and configuration snapshots still take blocking interface
+    /// locks. Pending reassembly expiry does not block TX.
     pub fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
         let round_started_at = monotonic_time();
         let device_timestamp = round_started_at;
@@ -139,21 +141,20 @@ impl Service {
             return deferred_poll_progress(0, 0, timer_events, false);
         }
 
-        let Some(mut network_guard) = self.network.try_lock() else {
-            return deferred_poll_progress(0, 0, timer_events, false);
-        };
-        let network = &mut *network_guard;
-        let tx_capacity_before = network.io.available_data_tx_slots();
-        let (mut tx_packets, mut has_reached_time_limit) = NetworkDataPlane::poll_tx_budgeted(
-            &mut network.state,
-            &mut network.io,
-            &mut network.ipv4_output,
+        let tx_progress = self.dataplane.poll_tx_budgeted(
+            &self.network,
+            &self.io,
+            &self.ipv4_output,
             device_timestamp,
             budget.tx_packets,
             round_started_at,
         );
-        let mut tx_capacity_changed = network.io.available_data_tx_slots() > tx_capacity_before;
-        drop(network_guard);
+        let mut tx_packets = tx_progress.packets;
+        let mut has_reached_time_limit = tx_progress.has_reached_time_limit;
+        let mut tx_capacity_changed = tx_progress.tx_capacity_changed;
+        if tx_progress.has_lock_contention {
+            return deferred_poll_progress(0, tx_packets, timer_events, tx_capacity_changed);
+        }
         let mut tx_remaining = budget.tx_packets.saturating_sub(tx_packets);
 
         let rx_progress = self.dataplane.poll_rx_budgeted(
@@ -179,6 +180,7 @@ impl Service {
             );
         }
 
+        let mtu = self.network.effective_mtu();
         let Some(mut sockets) = SOCKET_SET.inner.try_lock() else {
             return deferred_poll_progress(
                 rx_packets,
@@ -187,7 +189,7 @@ impl Service {
                 tx_capacity_changed,
             );
         };
-        let Some(mut network_guard) = self.network.try_lock() else {
+        let Some(mut io) = self.io.try_lock() else {
             return deferred_poll_progress(
                 rx_packets,
                 tx_packets,
@@ -195,10 +197,9 @@ impl Service {
                 tx_capacity_changed,
             );
         };
-        let network = &mut *network_guard;
         let Some(stack_progress) = self.stack.poll(
-            &mut network.io,
-            network.state.interfaces.effective_mtu(),
+            &mut io,
+            mtu,
             &mut sockets,
             budget,
             round_started_at,
@@ -215,25 +216,32 @@ impl Service {
         let has_socket_state_change = stack_progress.has_socket_state_change;
         let protocol_deadline = stack_progress.protocol_deadline;
         let deferred_close_deadline = stack_progress.deferred_close_deadline;
+        drop(io);
         drop(sockets);
         timer_events += usize::from(timer_events < budget.timer_events && has_socket_state_change);
 
         if has_reached_time_limit {
             tx_remaining = 0;
         }
-        let tx_capacity_before = network.io.available_data_tx_slots();
-        let (dispatched, tx_time_limit) = NetworkDataPlane::poll_tx_budgeted(
-            &mut network.state,
-            &mut network.io,
-            &mut network.ipv4_output,
+        let tx_progress = self.dataplane.poll_tx_budgeted(
+            &self.network,
+            &self.io,
+            &self.ipv4_output,
             device_timestamp,
             tx_remaining,
             round_started_at,
         );
-        tx_packets += dispatched;
-        tx_capacity_changed |= network.io.available_data_tx_slots() > tx_capacity_before;
-        has_reached_time_limit |= tx_time_limit;
-        drop(network_guard);
+        tx_packets += tx_progress.packets;
+        tx_capacity_changed |= tx_progress.tx_capacity_changed;
+        has_reached_time_limit |= tx_progress.has_reached_time_limit;
+        if tx_progress.has_lock_contention {
+            return deferred_poll_progress(
+                rx_packets,
+                tx_packets,
+                timer_events,
+                tx_capacity_changed,
+            );
+        }
 
         let rx_remaining = budget.rx_packets.saturating_sub(rx_packets);
         if !has_reached_time_limit && rx_remaining > 0 {
@@ -262,7 +270,7 @@ impl Service {
         self.stack
             .update_protocol_deadline(timer_current, next_poll, &self.events);
 
-        let Some(mut network_guard) = self.network.try_lock() else {
+        let Some(io) = self.io.try_lock() else {
             return deferred_poll_progress(
                 rx_packets,
                 tx_packets,
@@ -270,10 +278,12 @@ impl Service {
                 tx_capacity_changed,
             );
         };
-        let network = &mut *network_guard;
-        let ingress_has_more = network.io.has_stack_ingress();
-        let rx_has_more = network.io.has_rx_work(&network.state.interfaces);
-        let tx_has_more = network.io.has_pending_tx();
+        let ingress_has_more = io.has_stack_ingress();
+        let tx_has_more = io.has_pending_tx();
+        drop(io);
+        let rx_has_more = self
+            .network
+            .with_interfaces(|interfaces| interfaces.has_rx_work());
         PollProgress {
             rx_packets,
             tx_packets,
@@ -288,55 +298,7 @@ impl Service {
         }
     }
 
-    pub fn link_snapshots(&self) -> Vec<LinkSnapshot> {
-        self.network.lock().state.link_snapshots()
-    }
-
-    pub fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
-        self.network.lock().state.link_snapshot_for_ifindex(ifindex)
-    }
-
-    pub fn has_device(&self, ifindex: i32) -> bool {
-        self.network.lock().state.has_device(ifindex)
-    }
-
-    pub fn device_index_by_name(&self, name: &str) -> Option<usize> {
-        self.network.lock().state.device_index_by_name(name)
-    }
-
-    pub fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
-        self.network
-            .lock()
-            .state
-            .link_send_snapshot_for_ifindex(ifindex)
-    }
-
-    pub(crate) fn ipv4_addr_snapshots(&self) -> Vec<crate::device::interfaces::Ipv4AddrSnapshot> {
-        self.network.lock().state.ipv4_addr_snapshots()
-    }
-
-    #[cfg(unittest)]
-    pub(crate) fn ipv4_addr_entries(&self) -> Vec<crate::device::interfaces::Ipv4AddrEntry> {
-        self.network.lock().state.ipv4_addr_entries()
-    }
-
-    pub(crate) fn interface_ipv4_addr(
-        &self,
-        name: &str,
-    ) -> Result<crate::ip::Ipv4Cidr, LinuxError> {
-        self.network.lock().state.interface_ipv4_addr(name)
-    }
-
-    pub(crate) fn route_snapshot(&self) -> Vec<Rule> {
-        self.network.lock().state.route_snapshot()
-    }
-
-    #[cfg(unittest)]
-    pub(crate) fn has_neighbor(&self, dev: usize, dst: IpAddress) -> bool {
-        self.network.lock().state.has_neighbor(dev, dst)
-    }
-
-    /// Prepares and sends IPv4 under one route, source, MTU, and queue transaction.
+    /// Resolves the route before the queue preparation and enqueue transaction.
     /// Capacity failure preserves the caller's packet for retry.
     pub fn prepare_and_send_ipv4_packet(
         &self,
@@ -347,15 +309,9 @@ impl Service {
         packet: &mut Option<Vec<u8>>,
         prepare: impl FnOnce(&mut [u8], IpAddress, Option<usize>) -> KResult,
     ) -> KResult {
-        let mut network = self.network.lock();
-        let NetworkRuntime {
-            state,
-            io,
-            ipv4_output,
-        } = &mut *network;
-        ipv4_output.prepare_and_send(
-            state,
-            io,
+        self.ipv4_output.prepare_and_send(
+            &self.network,
+            &self.io,
             Ipv4SendOptions {
                 bound_src,
                 dst_addr: *dst_addr,
@@ -368,19 +324,20 @@ impl Service {
     }
 
     pub(crate) fn get_source_address(&self, dst: &IpAddress) -> KResult<IpAddress> {
-        self.network.lock().state.select_source_address(dst)
+        self.network.select_source_address(dst)
     }
 
     pub(crate) fn get_smoltcp_source_address(
         &self,
         dst: &SmoltcpIpAddress,
     ) -> KResult<SmoltcpIpAddress> {
-        self.stack
-            .select_source_address(&self.network.lock().state, dst)
+        self.network
+            .select_source_address(&crate::ip::from_smoltcp_ip_address(*dst))
+            .map(crate::ip::to_smoltcp_ip_address)
     }
 
     pub(crate) fn can_send_ip_packet(&self) -> bool {
-        self.network.lock().io.can_enqueue_tx_packet()
+        self.with_io(|io| io.can_enqueue_tx_packet())
     }
 
     pub(crate) fn register_rx_waker(
@@ -390,10 +347,14 @@ impl Service {
     ) -> Result<Waker, PollRegisterError> {
         let waker = self.events.register(context)?;
         self.stack.refresh_deadline(&self.events);
-        let network = self.network.lock();
-        network
-            .io
-            .register_rx_waker(&network.state.interfaces, mask, &waker, context)?;
+        self.network.with_interfaces(|interfaces| {
+            for (index, device) in interfaces.devices().iter().enumerate() {
+                if mask & (1 << index) != 0 {
+                    device.register_rx_waker(&waker, context)?;
+                }
+            }
+            Ok(())
+        })?;
         Ok(waker)
     }
 
@@ -407,14 +368,8 @@ impl Service {
     }
 
     pub(crate) fn send_link_frame(&self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
-        let mut network = self.network.lock();
-        let NetworkRuntime { state, io, .. } = &mut *network;
-        io.send_link_frame(&mut state.interfaces, ifindex, frame)
-    }
-
-    #[cfg(unittest)]
-    pub(crate) fn ipv4_route_mtu(&self, dst: &IpAddress) -> Option<usize> {
-        self.network.lock().state.route_mtu(dst)
+        self.network
+            .with_interfaces_mut(|interfaces| interfaces.send_link_frame(ifindex, frame))
     }
 
     #[cfg(unittest)]
@@ -424,17 +379,30 @@ impl Service {
             .load(core::sync::atomic::Ordering::Relaxed)
     }
 
+    pub(crate) fn rebuild_stack(&self) {
+        let mtu = self.network.effective_mtu();
+        self.with_io(|io| {
+            self.stack.rebuild_interface(io, mtu, &self.events);
+        });
+    }
+
+    pub(crate) fn repair_rx_cursor_after_device_removed(&self, removed_index: usize) {
+        self.network.with_interfaces(|interfaces| {
+            self.with_io(|io| {
+                io.on_device_removed(interfaces, removed_index);
+            });
+        });
+    }
+
     #[cfg(unittest)]
     pub(crate) fn replace_network_for_tests(&self, state: NetworkState) {
-        let mut network = self.network.lock();
-        *network = NetworkRuntime {
-            state,
-            io: NetIo::new(),
-            ipv4_output: Ipv4Output::new(),
-        };
-        let mtu = network.state.interfaces.effective_mtu();
-        self.stack.replace_for_tests(&mut network.io, mtu);
-        let addrs = network.state.interfaces.local_ipv4_addrs();
+        self.network.replace_for_tests(state);
+        *self.io.lock() = NetIo::new();
+        let mtu = self.network.effective_mtu();
+        self.with_io(|io| {
+            self.stack.replace_for_tests(io, mtu);
+        });
+        let addrs = self.network.local_ipv4_addrs();
         self.ipv4_ingress.set_ipv4_addrs(&addrs);
         self.stack.set_ipv4_addrs(&addrs);
         self.events.wake();
@@ -516,7 +484,7 @@ pub(crate) mod tests {
     #[def_test]
     fn poll_round_defers_packet_io_lock_contention() {
         let service = Service::new(NetworkState::new());
-        let _network = service.network.lock();
+        let _io = service.io.lock();
 
         let progress = service.poll_budgeted(TEST_POLL_BUDGET);
 
@@ -527,10 +495,8 @@ pub(crate) mod tests {
     #[def_test(serial)]
     fn poll_round_dispatches_tx_when_due_ipv4_expiration_lock_is_contended() {
         let loopback_addr = Ipv4Address::new(127, 0, 0, 1);
-        let mut router = NetworkState::new();
-        let loopback = router
-            .interfaces
-            .add_device(Box::new(LoopbackDevice::new()));
+        let router = NetworkState::new();
+        let loopback = router.add_device(Box::new(LoopbackDevice::new()));
         router
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev: loopback,
@@ -543,17 +509,15 @@ pub(crate) mod tests {
             ipv4::build_ipv4_packet(loopback_addr, loopback_addr, ipv4::PROTOCOL_ICMP, 64, &[])
                 .unwrap();
         let service = Service::new(router);
-        {
-            let mut guard = service.network.lock();
-            let NetworkRuntime {
-                state,
-                io,
-                ipv4_output,
-            } = &mut *guard;
-            ipv4_output
-                .send(state, io, packet, loopback as i32 + 1)
-                .unwrap();
-        }
+        let dst = IpAddress::Ipv4(loopback_addr);
+        let mtu = service.network.route_mtu(&dst);
+        service
+            .with_io(|io| {
+                service
+                    .ipv4_output
+                    .send(io, mtu, packet, loopback as i32 + 1)
+            })
+            .unwrap();
         service
             .ipv4_ingress
             .reassembly_deadline_micros
@@ -589,7 +553,7 @@ pub(crate) mod tests {
         assert_eq!(accepted.len(), 1);
         assert_eq!(control.len(), 1);
         {
-            let _network = service.network.lock();
+            let _io = service.io.lock();
             assert!(
                 !service
                     .dataplane
@@ -605,8 +569,7 @@ pub(crate) mod tests {
         );
         assert!(accepted.is_empty());
         assert!(control.is_empty());
-        let network = service.network.lock();
-        assert!(network.io.has_stack_ingress());
-        assert!(network.io.has_pending_tx());
+        assert!(service.with_io(|io| io.has_stack_ingress()));
+        assert!(service.with_io(|io| io.has_pending_tx()));
     }
 }

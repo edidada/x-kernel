@@ -287,7 +287,9 @@ impl RouteTable {
 /// Owns configured and address-derived routes.
 ///
 /// Interface state is borrowed for route validation and source selection.
-/// The service serializes those reads with configuration changes.
+/// [`crate::network::state::NetworkState`] keeps this table behind a
+/// read-mostly lock so lookups copy a [`crate::network::state::ResolvedRoute`]
+/// and drop the guard before packet I/O.
 pub(crate) struct Router {
     table: RouteTable,
 }
@@ -302,14 +304,6 @@ impl Router {
     /// Returns the most specific route for a destination.
     pub(crate) fn lookup(&self, dst: &IpAddress) -> Option<&Rule> {
         self.table.lookup(dst)
-    }
-
-    pub fn route_mtu(&self, interfaces: &InterfaceSet, dst: &IpAddress) -> Option<usize> {
-        let rule = self.table.lookup(dst)?;
-        interfaces
-            .devices()
-            .get(rule.dev)
-            .map(|device| device.mtu().min(u16::MAX as usize))
     }
 
     /// Returns the source address for an output route with an active device.
@@ -366,20 +360,6 @@ impl Router {
                 .map(IpAddress::Ipv4)
                 .ok_or(KError::from(LinuxError::ENETUNREACH)),
         }
-    }
-
-    /// Returns whether `dst` is routed through a loopback device.
-    pub(crate) fn is_loopback_destination(
-        &self,
-        interfaces: &InterfaceSet,
-        dst: &IpAddress,
-    ) -> bool {
-        self.table.lookup(dst).is_some_and(|rule| {
-            interfaces
-                .devices()
-                .get(rule.dev)
-                .is_some_and(|device| device.link_kind() == LinkKind::Loopback)
-        })
     }
 
     pub fn add_rule(&mut self, rule: Rule) {

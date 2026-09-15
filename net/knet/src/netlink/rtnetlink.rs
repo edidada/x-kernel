@@ -230,9 +230,10 @@ fn get_link(request: &[u8], header: &NlMsgHeader, payload: &[u8]) -> Vec<Netlink
             return Err(LinuxError::ENODEV);
         }
         let link = if query.index > 0 {
-            SERVICE.link_snapshot_for_ifindex(query.index)
+            SERVICE.network().link_snapshot_for_ifindex(query.index)
         } else {
             SERVICE
+                .network()
                 .link_snapshots()
                 .into_iter()
                 .find(|link| query.name.as_deref() == Some(link.name.as_str()))
@@ -258,6 +259,7 @@ fn dump_links(request: &NlMsgHeader, _payload: &[u8]) -> Vec<NetlinkPacket> {
         return Vec::new();
     }
     SERVICE
+        .network()
         .link_snapshots()
         .into_iter()
         .map(|link| NetlinkPacket {
@@ -279,6 +281,7 @@ fn dump_addrs(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
         return Vec::new();
     }
     SERVICE
+        .network()
         .ipv4_addr_snapshots()
         .into_iter()
         .filter(|snapshot| ifindex == 0 || snapshot.entry.dev as u32 + 1 == ifindex)
@@ -299,6 +302,7 @@ fn dump_routes(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
         return Vec::new();
     }
     SERVICE
+        .network()
         .route_snapshot()
         .into_iter()
         .filter(|route| route_family(*route) == family)
@@ -361,6 +365,7 @@ pub(super) fn apply_link_update(request: LinkUpdateRequest) -> Result<(), LinuxE
     let config = NetworkConfig::lock(&SERVICE);
 
     let current_flags = SERVICE
+        .network()
         .link_snapshot_for_ifindex(request.index)
         .ok_or(LinuxError::ENODEV)?
         .flags;
@@ -470,7 +475,10 @@ pub(super) fn add_neigh(request: NeighRequest, flags: u16) -> Result<(), LinuxEr
 fn ensure_link_exists(ifindex: u32) -> Result<(), LinuxError> {
     let ifindex = i32::try_from(ifindex).map_err(|_| LinuxError::ENODEV)?;
     let exists = if SERVICE.is_inited() {
-        SERVICE.link_snapshot_for_ifindex(ifindex).is_some()
+        SERVICE
+            .network()
+            .link_snapshot_for_ifindex(ifindex)
+            .is_some()
     } else {
         false
     };

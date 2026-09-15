@@ -18,9 +18,12 @@ use crate::{
     netlink::RT_SCOPE_UNIVERSE as ROUTE_SCOPE_UNIVERSE,
 };
 
-/// Owns live devices and their aggregate MTU under the service network transaction lock.
+/// Owns live devices, IPv4 addresses, and the aggregate MTU.
 ///
-/// NetworkState owns the inventory; NetworkConfig coordinates route and stack projections.
+/// [`crate::network::state::NetworkState`] protects this inventory with a
+/// read-mostly lock. Packet I/O takes the write side only while polling or
+/// transmitting on a device; NetworkConfig coordinates route and stack
+/// projections.
 pub(crate) struct InterfaceSet {
     devices: Vec<Box<dyn NetDevice>>,
     ipv4_addrs: Vec<Ipv4AddrEntry>,
@@ -57,6 +60,10 @@ impl InterfaceSet {
     /// Borrows device backends for packet I/O without resizing the inventory.
     pub(crate) fn devices_mut(&mut self) -> &mut [Box<dyn NetDevice>] {
         &mut self.devices
+    }
+
+    pub(crate) fn has_rx_work(&self) -> bool {
+        self.devices.iter().any(|device| device.has_rx_work())
     }
 
     pub(crate) fn new() -> Self {

@@ -36,7 +36,7 @@ pub(crate) enum ExistingIpv4AddrAction {
 /// Serializes configuration from target lookup through mutation and projection updates.
 ///
 /// The owned guard excludes ioctl, rtnetlink, and device-removal transactions.
-/// Network state is borrowed separately for each operation in this transaction.
+/// Inventory and routing use their own read-mostly locks for each operation.
 pub(crate) struct NetworkConfig<'a> {
     service: &'a Service,
     _guard: MutexGuard<'static, ()>,
@@ -54,15 +54,15 @@ impl<'a> NetworkConfig<'a> {
     /// Resolves a name while configuration serialization keeps device indices stable.
     fn device_index_by_name(&self, name: &str) -> Result<usize, LinuxError> {
         self.service
+            .network()
             .device_index_by_name(name)
             .ok_or(LinuxError::ENODEV)
     }
 
-    /// Copies the first matching route under the network lock without allocating a snapshot.
+    /// Copies the first matching route under the routing read lock without allocating a snapshot.
     /// The predicate must use only the supplied route and its captured request values.
     pub(crate) fn find_route(&self, matches_fn: impl FnMut(&Rule) -> bool) -> Option<Rule> {
-        self.service
-            .with_network(|state, _io| state.routing.find_rule(matches_fn))
+        self.service.network().find_rule(matches_fn)
     }
 
     pub(crate) fn add_ipv4_addr(
@@ -70,31 +70,23 @@ impl<'a> NetworkConfig<'a> {
         entry: Ipv4AddrEntry,
         existing_action: ExistingIpv4AddrAction,
     ) -> Result<(), LinuxError> {
-        self.service.with_network(|state, _io| {
-            let is_existing = state
-                .interfaces
-                .ipv4_addr_entries()
-                .iter()
-                .any(|existing| existing.dev == entry.dev && existing.addr == entry.addr);
-            if is_existing {
-                return match existing_action {
-                    ExistingIpv4AddrAction::Keep => Ok(()),
-                    ExistingIpv4AddrAction::Reject => Err(LinuxError::EEXIST),
-                };
-            }
-            self.update_ipv4_state(state, |state| state.add_ipv4_addr(entry))
-        })
+        let is_existing = self.service.network().has_exact_ipv4_addr(entry);
+        if is_existing {
+            return match existing_action {
+                ExistingIpv4AddrAction::Keep => Ok(()),
+                ExistingIpv4AddrAction::Reject => Err(LinuxError::EEXIST),
+            };
+        }
+        self.update_ipv4_state(|state| state.add_ipv4_addr(entry))
     }
 
     /// Removes an address and reports whether its last local owner was removed.
     pub(crate) fn remove_ipv4_addr(&self, entry: Ipv4AddrEntry) -> Result<bool, LinuxError> {
-        self.service.with_network(|state, _io| {
-            self.update_ipv4_state(state, |state| {
-                if !state.remove_ipv4_addr(entry) {
-                    return Err(LinuxError::EADDRNOTAVAIL);
-                }
-                Ok(!state.interfaces.has_ipv4_address(entry.addr.address()))
-            })
+        self.update_ipv4_state(|state| {
+            if !state.remove_ipv4_addr(entry) {
+                return Err(LinuxError::EADDRNOTAVAIL);
+            }
+            Ok(!state.has_ipv4_address(entry.addr.address()))
         })
     }
 
@@ -103,20 +95,15 @@ impl<'a> NetworkConfig<'a> {
         dev: usize,
         addr: Ipv4Cidr,
     ) -> Result<(), LinuxError> {
-        self.service.with_network(|state, _io| {
-            self.update_ipv4_state(state, |state| state.set_primary_ipv4_addr(dev, addr))
-        })
+        self.update_ipv4_state(|state| state.set_primary_ipv4_addr(dev, addr))
     }
 
     pub(crate) fn remove_primary_ipv4_addr(&self, dev: usize) -> Result<(), LinuxError> {
-        self.service.with_network(|state, _io| {
-            self.update_ipv4_state(state, |state| state.remove_primary_ipv4_addr(dev))
-        })
+        self.update_ipv4_state(|state| state.remove_primary_ipv4_addr(dev))
     }
 
     pub(crate) fn add_route(&self, rule: Rule) -> Result<(), LinuxError> {
-        self.service
-            .with_network(|state, _io| state.routing.add_route_rule(&state.interfaces, rule))
+        self.service.network().add_route_rule(rule)
     }
 
     pub(crate) fn replace_route(
@@ -124,17 +111,13 @@ impl<'a> NetworkConfig<'a> {
         existing: Rule,
         replacement: Rule,
     ) -> Result<(), LinuxError> {
-        self.service.with_network(|state, _io| {
-            state
-                .routing
-                .replace_route_rule(&state.interfaces, existing, replacement)
-        })
+        self.service
+            .network()
+            .replace_route_rule(existing, replacement)
     }
 
     pub(crate) fn remove_route(&self, route: Rule) {
-        self.service.with_network(|state, _io| {
-            state.routing.remove_exact_route_rule(route);
-        })
+        self.service.network().remove_exact_route_rule(route);
     }
 
     pub(crate) fn set_ipv4_broadcast(
@@ -142,14 +125,11 @@ impl<'a> NetworkConfig<'a> {
         dev: usize,
         broadcast: Ipv4Address,
     ) -> Result<(), LinuxError> {
-        self.service
-            .with_network(|state, _io| state.interfaces.set_ipv4_broadcast(dev, broadcast))
+        self.service.network().set_ipv4_broadcast(dev, broadcast)
     }
 
     pub(crate) fn set_ipv4_netmask(&self, dev: usize, prefix_len: u8) -> Result<(), LinuxError> {
-        self.service.with_network(|state, _io| {
-            self.update_ipv4_state(state, |state| state.set_ipv4_netmask(dev, prefix_len))
-        })
+        self.update_ipv4_state(|state| state.set_ipv4_netmask(dev, prefix_len))
     }
 
     pub(crate) fn update_link(
@@ -157,36 +137,24 @@ impl<'a> NetworkConfig<'a> {
         ifindex: i32,
         update: LinkConfigUpdate,
     ) -> Result<(), LinuxError> {
-        self.service.with_network(|state, io| {
-            let is_effective_mtu_changed = state.interfaces.update_device_link(ifindex, update)?;
-            if is_effective_mtu_changed {
-                self.service.stack.rebuild_interface(
-                    io,
-                    state.interfaces.effective_mtu(),
-                    &self.service.events,
-                );
-            }
-            Ok(())
-        })
+        if self.service.network().update_device_link(ifindex, update)? {
+            self.service.rebuild_stack();
+        }
+        Ok(())
     }
 
     /// Removes the device, repairs route indices and RX cursor, and synchronizes projections.
     pub(crate) fn remove_device(&self, id: kdevice::DeviceId) -> Option<()> {
-        self.service.with_network(|state, io| {
-            let effective_mtu = state.interfaces.effective_mtu();
-            let removed_index = state.remove_device(id)?;
-            io.on_device_removed(&state.interfaces, removed_index);
-            if state.interfaces.effective_mtu() != effective_mtu {
-                self.service.stack.rebuild_interface(
-                    io,
-                    state.interfaces.effective_mtu(),
-                    &self.service.events,
-                );
-            }
-            let local_ipv4_addrs = state.interfaces.local_ipv4_addrs();
-            self.sync_local_ipv4_views(&local_ipv4_addrs);
-            Some(())
-        })
+        let previous_mtu = self.service.network().effective_mtu();
+        let removed_index = self.service.network().remove_device(id)?;
+        self.service
+            .repair_rx_cursor_after_device_removed(removed_index);
+        if self.service.network().effective_mtu() != previous_mtu {
+            self.service.rebuild_stack();
+        }
+        let local_ipv4_addrs = self.service.network().local_ipv4_addrs();
+        self.sync_local_ipv4_views(&local_ipv4_addrs);
+        Some(())
     }
 
     pub(crate) fn update_neighbor(
@@ -195,20 +163,20 @@ impl<'a> NetworkConfig<'a> {
         policy: NeighborUpdatePolicy,
     ) -> Result<(), LinuxError> {
         self.service
-            .with_network(|state, _io| state.interfaces.apply_neighbor_update(update, policy))?;
+            .network()
+            .apply_neighbor_update(update, policy)?;
         self.service.events.wake();
         Ok(())
     }
 
-    /// Applies an address mutation and synchronizes projections within the caller's
-    /// network transaction. Errors return before publishing any new projections.
+    /// Applies an address mutation and synchronizes projections.
+    /// Errors return before publishing any new projections.
     fn update_ipv4_state<T>(
         &self,
-        state: &mut NetworkState,
-        update_fn: impl FnOnce(&mut NetworkState) -> Result<T, LinuxError>,
+        update_fn: impl FnOnce(&NetworkState) -> Result<T, LinuxError>,
     ) -> Result<T, LinuxError> {
-        let result = update_fn(state)?;
-        self.sync_local_ipv4_views(&state.interfaces.local_ipv4_addrs());
+        let result = update_fn(self.service.network())?;
+        self.sync_local_ipv4_views(&self.service.network().local_ipv4_addrs());
         Ok(result)
     }
 
@@ -227,12 +195,12 @@ impl<'a> NetworkConfig<'a> {
         let dev = self.device_index_by_name(oif_name)?;
         let filter = ipv4_route_filter(dst, dst_len)?;
         let via = gateway.map(|addr| IpAddress::Ipv4(Ipv4Address::from_octets(addr.octets())));
-        let source = self.service.with_network(|state, _io| {
-            state
-                .primary_ipv4_addr(dev)
-                .map(|addr| IpAddress::Ipv4(addr.address()))
-                .unwrap_or(filter.address())
-        });
+        let source = self
+            .service
+            .network()
+            .primary_ipv4_addr(dev)
+            .map(|addr| IpAddress::Ipv4(addr.address()))
+            .unwrap_or(filter.address());
         Ok(Rule::with_route_attrs(
             filter,
             via,
@@ -272,6 +240,7 @@ pub fn find_interface(name: &str) -> Option<NetInterfaceInfo> {
         return None;
     }
     let link = SERVICE
+        .network()
         .link_snapshots()
         .into_iter()
         .find(|link| link.name == name)?;
@@ -289,7 +258,7 @@ pub fn find_interface(name: &str) -> Option<NetInterfaceInfo> {
 
 /// Returns the primary IPv4 address of the specified interface.
 ///
-/// Device resolution and address lookup run under one network transaction lock.
+/// Device resolution and address lookup copy a consistent interface snapshot.
 ///
 /// # Errors
 ///
@@ -300,6 +269,7 @@ pub fn interface_ipv4_addr(name: &str) -> Result<Ipv4Addr, LinuxError> {
         return Err(LinuxError::ENODEV);
     }
     SERVICE
+        .network()
         .interface_ipv4_addr(name)
         .map(|cidr| Ipv4Addr::from(cidr.address().octets()))
 }
@@ -464,13 +434,9 @@ mod tests {
     use crate::device::test_device::TestDevice;
 
     fn service_with_devices() -> Service {
-        let mut state = NetworkState::new();
-        state
-            .interfaces
-            .add_device(Box::new(TestDevice::ethernet(1, 1500)));
-        state
-            .interfaces
-            .add_device(Box::new(TestDevice::ethernet(2, 1500)));
+        let state = NetworkState::new();
+        state.add_device(Box::new(TestDevice::ethernet(1, 1500)));
+        state.add_device(Box::new(TestDevice::ethernet(2, 1500)));
         Service::new(state)
     }
 
@@ -492,7 +458,7 @@ mod tests {
             .add_ipv4_addr(shared, ExistingIpv4AddrAction::Reject)
             .unwrap();
         let views_before = service.stack.ipv4_addrs_for_tests();
-        let addresses_before = service.ipv4_addr_entries();
+        let addresses_before = service.network().ipv4_addr_entries();
         let changed_attributes = Ipv4AddrEntry {
             scope: ROUTE_SCOPE_LINK,
             broadcast: None,
@@ -507,7 +473,7 @@ mod tests {
             Err(LinuxError::EEXIST)
         );
         assert_eq!(config.set_ipv4_netmask(0, 33), Err(LinuxError::EINVAL));
-        assert_eq!(service.ipv4_addr_entries(), addresses_before);
+        assert_eq!(service.network().ipv4_addr_entries(), addresses_before);
         assert_eq!(service.stack.ipv4_addrs_for_tests(), views_before);
 
         assert_eq!(config.remove_ipv4_addr(entry), Ok(false));

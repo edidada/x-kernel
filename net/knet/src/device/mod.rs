@@ -155,7 +155,7 @@ pub trait NetDevice: Send + Sync {
 
     /// Sends a validated IP packet to the next hop.
     ///
-    /// NetIo calls this in task context. Implementations may allocate and
+    /// The output path calls this in task context. Implementations may allocate and
     /// callers must not invoke it from hardirq, softirq, or BH-disabled context.
     ///
     /// `source_addr` is the source selected by the output module before dispatch.

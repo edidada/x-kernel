@@ -2,19 +2,19 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Packet queues and device transport, borrowed under the network transaction.
+//! Packet queues and device transport.
+//!
+//! `NetIo` is the queue mutex domain. Device RX still borrows `InterfaceSet`
+//! while that write lock is already held; TX enqueue/dequeue does not.
 use alloc::{collections::VecDeque, vec::Vec};
-use core::task::Waker;
 
 use kerrno::{KError, KResult};
-use kpoll::{PollContext, PollRegisterError};
 use ktime_types::MonotonicInstant;
 
 use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::SOCKET_BUFFER_SIZE,
     device::interfaces::InterfaceSet,
-    ip::IpAddress,
 };
 const CONTROL_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
 pub(crate) const DATA_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
@@ -44,49 +44,6 @@ impl NetIo {
         self.data_tx_queue.extend(packets);
     }
 
-    /// Submits a packet after the output owner selected the device and next hop.
-    pub(crate) fn submit_ip_packet(
-        &mut self,
-        interfaces: &mut InterfaceSet,
-        dev: usize,
-        next_hop: IpAddress,
-        source: IpAddress,
-        packet: PacketBuf,
-        timestamp: MonotonicInstant,
-    ) -> bool {
-        interfaces.devices_mut()[dev].send_ip_packet(
-            dev as i32 + 1,
-            next_hop,
-            source,
-            packet,
-            timestamp,
-        )
-    }
-
-    pub(crate) fn send_link_frame(
-        &mut self,
-        interfaces: &mut InterfaceSet,
-        ifindex: i32,
-        frame: &[u8],
-    ) -> KResult<usize> {
-        interfaces.send_link_frame(ifindex, frame)
-    }
-
-    pub(crate) fn register_rx_waker(
-        &self,
-        interfaces: &InterfaceSet,
-        mask: u32,
-        waker: &Waker,
-        context: &mut PollContext<'_>,
-    ) -> Result<(), PollRegisterError> {
-        for (index, device) in interfaces.devices().iter().enumerate() {
-            if mask & (1 << index) != 0 {
-                device.register_rx_waker(waker, context)?;
-            }
-        }
-        Ok(())
-    }
-
     pub fn can_enqueue_tx_packet(&self) -> bool {
         self.data_tx_queue.len() < DATA_TX_QUEUE_SIZE
     }
@@ -113,7 +70,7 @@ impl NetIo {
         if budget == 0 || interfaces.devices().is_empty() {
             return RxDrain {
                 work_done: 0,
-                has_more: self.has_rx_work(interfaces),
+                has_more: interfaces.has_rx_work(),
             };
         }
 
@@ -131,7 +88,7 @@ impl NetIo {
                     self.next_rx_device = next_device_index(dev_index, device_count);
                     return RxDrain {
                         work_done,
-                        has_more: self.has_rx_work(interfaces),
+                        has_more: interfaces.has_rx_work(),
                     };
                 }
 
@@ -185,13 +142,6 @@ impl NetIo {
         !self.control_tx_queue.is_empty() || !self.data_tx_queue.is_empty()
     }
 
-    pub(crate) fn has_rx_work(&self, interfaces: &InterfaceSet) -> bool {
-        interfaces
-            .devices()
-            .iter()
-            .any(|device| device.has_rx_work())
-    }
-
     pub(crate) fn on_device_removed(&mut self, interfaces: &InterfaceSet, removed_index: usize) {
         if interfaces.devices().is_empty() {
             self.next_rx_device = 0;
@@ -217,48 +167,46 @@ mod tests {
     use unittest::{assert, assert_eq, def_test};
 
     use super::*;
-    use crate::{device::LoopbackDevice, ip::Ipv4Address, network::state::NetworkState};
+    use crate::{
+        device::LoopbackDevice,
+        ip::{IpAddress, Ipv4Address},
+        network::state::NetworkState,
+    };
     fn network_with_ready_loopback_packet() -> (NetworkState, NetIo) {
-        let mut packet_io = NetworkState::new();
-        let loopback = packet_io
-            .interfaces
-            .add_device(Box::new(LoopbackDevice::new()));
+        let packet_io = NetworkState::new();
+        let loopback = packet_io.add_device(Box::new(LoopbackDevice::new()));
         let packet = PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::Ipv4Stack);
-        let _ = packet_io.interfaces.devices_mut()[loopback].send_ip_packet(
-            1,
-            IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)),
-            IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)),
-            packet,
-            MonotonicInstant::ORIGIN,
-        );
+        packet_io.with_interfaces_mut(|interfaces| {
+            interfaces.devices_mut()[loopback].send_ip_packet(
+                loopback as i32 + 1,
+                IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)),
+                IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)),
+                packet,
+                MonotonicInstant::ORIGIN,
+            )
+        });
         (packet_io, NetIo::new())
     }
     #[def_test(serial)]
     fn exact_rx_budget_does_not_report_empty_device() {
-        let (mut state, mut io) = network_with_ready_loopback_packet();
+        let (state, mut io) = network_with_ready_loopback_packet();
         let mut packets = Vec::new();
 
-        let drain = io.drain_device_rx_budgeted(
-            &mut state.interfaces,
-            MonotonicInstant::ORIGIN,
-            1,
-            &mut packets,
-        );
+        let drain = state.with_interfaces_mut(|interfaces| {
+            io.drain_device_rx_budgeted(interfaces, MonotonicInstant::ORIGIN, 1, &mut packets)
+        });
 
         assert_eq!(drain.work_done, 1);
         assert!(!drain.has_more);
     }
     #[def_test(serial)]
     fn zero_rx_budget_reports_ready_device() {
-        let (mut state, mut io) = network_with_ready_loopback_packet();
+        let (state, mut io) = network_with_ready_loopback_packet();
         let mut packets = Vec::new();
 
-        let drain = io.drain_device_rx_budgeted(
-            &mut state.interfaces,
-            MonotonicInstant::ORIGIN,
-            0,
-            &mut packets,
-        );
+        let drain = state.with_interfaces_mut(|interfaces| {
+            io.drain_device_rx_budgeted(interfaces, MonotonicInstant::ORIGIN, 0, &mut packets)
+        });
 
         assert_eq!(drain.work_done, 0);
         assert!(drain.has_more);
@@ -272,11 +220,9 @@ mod tests {
             router::ROUTE_SCOPE_UNIVERSE,
             service::Service,
         };
-        let mut state = NetworkState::new();
+        let state = NetworkState::new();
         for index in 0..3 {
-            let dev = state
-                .interfaces
-                .add_device(Box::new(TestDevice::ethernet(index + 1, 1500)));
+            let dev = state.add_device(Box::new(TestDevice::ethernet(index + 1, 1500)));
             state
                 .add_ipv4_addr(Ipv4AddrEntry {
                     dev,
@@ -287,23 +233,19 @@ mod tests {
                 .unwrap();
         }
         let service = Service::new(state);
-        service.with_network(|_, io| io.next_rx_device = 2);
+        service.with_io(|io| io.next_rx_device = 2);
         let config = crate::control::NetworkConfig::lock(&service);
         config.remove_device(kdevice::DeviceId::new(2)).unwrap();
-        let (cursor, route_dev, removed_route) = service.with_network(|state, io| {
-            let route = state
-                .routing
-                .lookup(&IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 2)))
-                .unwrap();
-            (
-                io.next_rx_device,
-                route.dev,
-                state
-                    .routing
-                    .lookup(&IpAddress::Ipv4(Ipv4Address::new(192, 0, 1, 2)))
-                    .is_some(),
-            )
-        });
+        let cursor = service.with_io(|io| io.next_rx_device);
+        let route_dev = service
+            .network()
+            .lookup_route(&IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 2)))
+            .unwrap()
+            .dev;
+        let removed_route = service
+            .network()
+            .lookup_route(&IpAddress::Ipv4(Ipv4Address::new(192, 0, 1, 2)))
+            .is_some();
         assert_eq!(cursor, 1);
         assert_eq!(route_dev, 1);
         assert!(!removed_route);

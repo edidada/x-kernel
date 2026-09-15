@@ -6,17 +6,16 @@
 use ktime_types::MonotonicInstant;
 use smoltcp::wire::Ipv6Packet;
 
-use crate::{buf::PacketBuf, datapath::NetIo, ip::IpAddress, network::state::NetworkState};
+use crate::{buf::PacketBuf, ip::IpAddress, network::state::NetworkState};
+
 pub(crate) fn dispatch(
-    state: &mut NetworkState,
-    io: &mut NetIo,
+    state: &NetworkState,
     packet: PacketBuf,
     timestamp: MonotonicInstant,
 ) -> bool {
     let Some(ip_packet) = packet.network_packet() else {
         return false;
     };
-    let mut poll_next = false;
     let (src_addr, dst_addr, is_multicast) = {
         let ip_packet = Ipv6Packet::new_checked(ip_packet).expect("got invalid IPv6 packet");
         (
@@ -26,34 +25,28 @@ pub(crate) fn dispatch(
         )
     };
     if is_multicast {
-        for dev_index in 0..state.interfaces.devices().len() {
-            poll_next |= io.submit_ip_packet(
-                &mut state.interfaces,
-                dev_index,
-                dst_addr,
-                src_addr,
-                packet.clone(),
-                timestamp,
-            );
-        }
-    } else {
-        let Some(rule) = state.routing.lookup(&dst_addr).copied() else {
-            warn!("No route found for destination: {}", dst_addr);
-            return false;
-        };
-        assert_eq!(rule.src, src_addr);
-
-        let next_hop = rule.via.unwrap_or(dst_addr);
-        poll_next |= io.submit_ip_packet(
-            &mut state.interfaces,
-            rule.dev,
-            next_hop,
-            src_addr,
-            packet,
-            timestamp,
-        );
+        return state.with_interfaces_mut(|interfaces| {
+            let mut poll_next = false;
+            let device_count = interfaces.devices().len();
+            for dev_index in 0..device_count {
+                poll_next |= interfaces.devices_mut()[dev_index].send_ip_packet(
+                    dev_index as i32 + 1,
+                    dst_addr,
+                    src_addr,
+                    packet.clone(),
+                    timestamp,
+                );
+            }
+            poll_next
+        });
     }
-    poll_next
+
+    let Some(route) = state.resolve(&dst_addr) else {
+        warn!("No route found for destination: {}", dst_addr);
+        return false;
+    };
+    assert_eq!(route.source, src_addr);
+    state.submit_ip_packet(route, src_addr, packet, timestamp)
 }
 
 #[cfg(unittest)]
@@ -63,7 +56,9 @@ mod tests {
     use unittest::{assert, assert_eq, def_test};
 
     use super::*;
-    use crate::{buf::PacketOwner, device::LoopbackDevice};
+    use crate::{
+        buf::PacketOwner, datapath::NetIo, device::LoopbackDevice, network::state::NetworkState,
+    };
     fn packet(multicast: bool) -> PacketBuf {
         let mut bytes = vec![0; 40];
         bytes[0] = 0x60;
@@ -77,45 +72,29 @@ mod tests {
     }
     #[def_test(serial)]
     fn ipv6_multicast_reaches_each_device() {
-        let mut state = NetworkState::new();
-        state.interfaces.add_device(Box::new(LoopbackDevice::new()));
-        state.interfaces.add_device(Box::new(LoopbackDevice::new()));
+        let state = NetworkState::new();
+        state.add_device(Box::new(LoopbackDevice::new()));
+        state.add_device(Box::new(LoopbackDevice::new()));
         let mut io = NetIo::new();
-        assert!(dispatch(
-            &mut state,
-            &mut io,
-            packet(true),
-            MonotonicInstant::ORIGIN
-        ));
+        assert!(dispatch(&state, packet(true), MonotonicInstant::ORIGIN));
         let mut packets = Vec::new();
-        let drain = io.drain_device_rx_budgeted(
-            &mut state.interfaces,
-            MonotonicInstant::ORIGIN,
-            4,
-            &mut packets,
-        );
+        let drain = state.with_interfaces_mut(|interfaces| {
+            io.drain_device_rx_budgeted(interfaces, MonotonicInstant::ORIGIN, 4, &mut packets)
+        });
         assert_eq!(drain.work_done, 2);
         assert_eq!(packets[0].ifindex(), 1);
         assert_eq!(packets[1].ifindex(), 2);
     }
     #[def_test(serial)]
     fn ipv6_unicast_without_route_does_not_submit() {
-        let mut state = NetworkState::new();
-        state.interfaces.add_device(Box::new(LoopbackDevice::new()));
+        let state = NetworkState::new();
+        state.add_device(Box::new(LoopbackDevice::new()));
         let mut io = NetIo::new();
-        assert!(!dispatch(
-            &mut state,
-            &mut io,
-            packet(false),
-            MonotonicInstant::ORIGIN
-        ));
+        assert!(!dispatch(&state, packet(false), MonotonicInstant::ORIGIN));
         let mut packets = Vec::new();
-        let drain = io.drain_device_rx_budgeted(
-            &mut state.interfaces,
-            MonotonicInstant::ORIGIN,
-            1,
-            &mut packets,
-        );
+        let drain = state.with_interfaces_mut(|interfaces| {
+            io.drain_device_rx_budgeted(interfaces, MonotonicInstant::ORIGIN, 1, &mut packets)
+        });
         assert_eq!(drain.work_done, 0);
     }
 }

@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Temporary smoltcp adapter borrowing transport queues for one transaction.
+//! Temporary smoltcp adapter borrowing `NetIo` queues while that mutex is held.
 use alloc::{collections::VecDeque, vec};
 
 use smoltcp::{

@@ -252,6 +252,7 @@ impl PacketSocket {
                 }
                 let service: &Service = &SERVICE;
                 let link = service
+                    .network()
                     .link_send_snapshot_for_ifindex(ifindex)
                     .ok_or(KError::from(LinuxError::ENODEV))?;
                 validate_link_state_for_send(&link, data_len, kind)?;
@@ -704,7 +705,7 @@ fn protocol_to_host(protocol: u16) -> u16 {
 }
 
 fn validate_ifindex_or_any(ifindex: i32) -> KResult {
-    if ifindex == 0 || SERVICE.is_inited() && SERVICE.has_device(ifindex) {
+    if ifindex == 0 || SERVICE.is_inited() && SERVICE.network().has_device(ifindex) {
         Ok(())
     } else {
         Err(LinuxError::ENODEV.into())
