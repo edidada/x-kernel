@@ -136,6 +136,8 @@ pub struct ProcessExecUpdate {
     failure_hits: Option<Arc<AtomicUsize>>,
     pub(super) exe_path: String,
     pub(super) cmdline: Arc<Vec<String>>,
+    /// Opened backing executable file, exposed through `/proc/<pid>/exe`.
+    pub(super) exe_file: Option<Arc<kvfs::VfsFile>>,
     #[cfg(feature = "tee")]
     pub(super) ta_head_bytes: Vec<u8>,
 }
@@ -148,6 +150,7 @@ impl ProcessExecUpdate {
             failure_hits: None,
             exe_path,
             cmdline,
+            exe_file: None,
             #[cfg(feature = "tee")]
             ta_head_bytes: Vec::new(),
         }
@@ -157,6 +160,12 @@ impl ProcessExecUpdate {
     #[cfg(unittest)]
     pub fn with_failure_probe(mut self, hits: Arc<AtomicUsize>) -> Self {
         self.failure_hits = Some(hits);
+        self
+    }
+
+    /// Installs the opened backing executable file for `/proc/<pid>/exe`.
+    pub fn with_exe_file(mut self, exe_file: Arc<kvfs::VfsFile>) -> Self {
+        self.exe_file = Some(exe_file);
         self
     }
 
@@ -329,6 +338,12 @@ impl Process {
     /// be upgraded.
     pub fn exe_path(&self) -> KResult<String> {
         self.runtime().map(|runtime| runtime.exe_path())
+    }
+
+    /// Returns the opened backing executable file, if any, while runtime
+    /// remains attached. `/proc/<pid>/exe` follows to this file.
+    pub fn exe_file(&self) -> KResult<Option<Arc<kvfs::VfsFile>>> {
+        self.runtime().map(|runtime| runtime.exe_file())
     }
 
     /// Returns the current command line while runtime remains attached.
@@ -570,9 +585,10 @@ impl Process {
         &self,
         exe_path: String,
         cmdline: Arc<Vec<String>>,
+        exe_file: Option<Arc<kvfs::VfsFile>>,
     ) -> KResult<()> {
         self.runtime()
-            .map(|runtime| runtime.set_exec_metadata(exe_path, cmdline))
+            .map(|runtime| runtime.set_exec_metadata(exe_path, cmdline, exe_file))
     }
 
     /// Applies the process-shared post-exec state transition.
@@ -601,7 +617,7 @@ impl Process {
         runtime.with_tipc_handles(|handles| handles.write().uctx_handle_close_all());
         #[cfg(feature = "tee")]
         runtime.clear_tee_runtime_private();
-        runtime.set_exec_metadata(update.exe_path, update.cmdline);
+runtime.set_exec_metadata(update.exe_path, update.cmdline, update.exe_file);
         #[cfg(unittest)]
         if let Some(hits) = update.failure_hits {
             hits.fetch_add(1, Ordering::Relaxed);

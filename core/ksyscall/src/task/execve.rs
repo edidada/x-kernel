@@ -234,7 +234,11 @@ fn exec_resolved(
         envs,
         cred,
     ))?;
-    let exec_update = kprocess::ProcessExecUpdate::new(absolute_path.clone(), Arc::new(args));
+    // Pin the backing executable for `/proc/<pid>/exe` before `prepared` is
+    // consumed by installation.
+    let exe_file = prepared.executable_file();
+    let exec_update = kprocess::ProcessExecUpdate::new(absolute_path.clone(), Arc::new(args))
+        .with_exe_file(exe_file);
     #[cfg(unittest)]
     let (prepared, exec_update) = if let Some(probe) = probe.as_deref_mut() {
         probe.attach_failure_probes(prepared, exec_update)
