@@ -10,6 +10,23 @@
 
 extern crate alloc;
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
+/// Per-tid syscall tracing switch used by the in-kernel strace helper.
+/// 0 = off; otherwise only that user TID is traced. Written from
+/// `/proc/xk_strace`, read by `ksyscall::dispatch`.
+static STRACE_TID: AtomicU32 = AtomicU32::new(0);
+
+/// Returns the TID currently being traced (0 = off).
+pub fn strace_tid() -> u32 {
+    STRACE_TID.load(Ordering::Acquire)
+}
+
+/// Sets the TID to trace (0 disables).
+pub fn set_strace_tid(tid: u32) {
+    STRACE_TID.store(tid, Ordering::Release);
+}
+
 mod tests;
 
 /// Capability-target validation helpers.

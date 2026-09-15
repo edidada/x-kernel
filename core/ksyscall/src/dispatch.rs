@@ -65,6 +65,21 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
 
     trace!("Syscall {sysno:?}");
 
+    let strace_min = kprocess::strace_tid();
+    let strace_on = strace_min != 0 && kprocess::current_user_tid() >= strace_min;
+    if strace_on {
+        warn!(
+            "strace enter tid={} {sysno:?} a0={:#x} a1={:#x} a2={:#x} a3={:#x} a4={:#x} a5={:#x}",
+            kprocess::current_user_tid(),
+            uctx.arg0(),
+            uctx.arg1(),
+            uctx.arg2(),
+            uctx.arg3(),
+            uctx.arg4(),
+            uctx.arg5()
+        );
+    }
+
     let result = match sysno {
         // fs ctl
         Sysno::ioctl => {
@@ -856,6 +871,14 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
     };
 
     debug!("Syscall {sysno} return {result:?}");
+
+    if strace_on {
+        let tid = kprocess::current_user_tid();
+        match &result {
+            Ok(ret) => warn!("strace exit  tid={tid} {sysno:?} = {ret}"),
+            Err(err) => warn!("strace exit  tid={tid} {sysno:?} = ERR {err:?}"),
+        }
+    }
 
     uctx.set_retval(result.unwrap_or_else(|err| -LinuxError::from(err).into_raw() as _) as _);
 

@@ -7,9 +7,28 @@ use core::fmt::Write;
 
 use kbuild_config::ARCH;
 use kcpu_id_map::for_each_present_logical_cpu;
-use kvfs::{DirMapping, SimpleDir, SimpleFile, SimpleFs};
+use kvfs::{CommandFile, DirMapping, SimpleDir, SimpleFile, SimpleFileOperation, SimpleFs};
 
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
+    root.add(
+        "xk_strace",
+        SimpleFile::new_regular(
+            fs.clone(),
+            CommandFile::new(|req| match req {
+                SimpleFileOperation::Read => {
+                    Ok(Some(format!("{}\n", kprocess::strace_tid()).into_bytes()))
+                }
+                SimpleFileOperation::Write { data, .. } => {
+                    let s = core::str::from_utf8(data)
+                        .map_err(|_| kvfs::VfsError::InvalidInput)?
+                        .trim();
+                    let tid: u32 = s.parse().map_err(|_| kvfs::VfsError::InvalidInput)?;
+                    kprocess::set_strace_tid(tid);
+                    Ok(None)
+                }
+            }),
+        ),
+    );
     root.add(
         "cmdline",
         SimpleFile::new_regular(fs.clone(), || {
