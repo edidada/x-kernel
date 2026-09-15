@@ -30,6 +30,8 @@ pub(crate) struct ResolvedRoute {
     pub device: usize,
     device_id: Option<kdevice::DeviceId>,
     pub next_hop: IpAddress,
+    /// Egress-device MTU copied at resolve time. TX fragmentation uses this
+    /// instead of [`InterfaceSet::effective_mtu`] or a later inventory lookup.
     pub mtu: usize,
     pub source: IpAddress,
     pub is_loopback: bool,

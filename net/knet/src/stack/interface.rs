@@ -3,9 +3,7 @@
 // See LICENSES for license details.
 
 //! smoltcp interface, staged progression, and protocol timer ownership.
-#[cfg(unittest)]
-use core::sync::atomic::AtomicUsize;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use khal::time::monotonic_time;
 use ksync::Mutex;
@@ -44,6 +42,10 @@ pub(crate) struct StackProgress {
 }
 pub(crate) struct Stack {
     iface: Mutex<Interface>,
+    /// Last `InterfaceSet::effective_mtu` applied to the smoltcp `StackDevice`.
+    /// That value is the min of live device MTUs for one virtual interface, not
+    /// a per-egress or PMTU cache. TX uses [`crate::network::state::ResolvedRoute::mtu`].
+    mtu: AtomicUsize,
     pub(crate) protocol_deadline_micros: AtomicU64,
     #[cfg(unittest)]
     pub(crate) rebuild_count: AtomicUsize,
@@ -54,10 +56,15 @@ impl Stack {
         let iface = Interface::new(config, &mut StackDevice::new(io, mtu), now());
         Self {
             iface: Mutex::new(iface),
+            mtu: AtomicUsize::new(mtu),
             protocol_deadline_micros: AtomicU64::new(0),
             #[cfg(unittest)]
             rebuild_count: AtomicUsize::new(0),
         }
+    }
+
+    pub(crate) fn device_mtu(&self) -> usize {
+        self.mtu.load(Ordering::Acquire)
     }
 
     pub(crate) fn set_ipv4_addrs(&self, addrs: &[ip::Ipv4Cidr]) {
@@ -260,6 +267,7 @@ impl Stack {
             }
         });
         *iface = new_iface;
+        self.mtu.store(mtu, Ordering::Release);
         self.protocol_deadline_micros.store(0, Ordering::Release);
         events.wake();
         #[cfg(unittest)]
@@ -316,6 +324,7 @@ impl Stack {
             &mut StackDevice::new(io, mtu),
             now(),
         );
+        self.mtu.store(mtu, Ordering::Release);
         self.protocol_deadline_micros.store(0, Ordering::Release);
     }
 }

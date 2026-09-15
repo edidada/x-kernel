@@ -119,8 +119,8 @@ impl Service {
 
     /// Advances one bounded network round in task context without spinlocks.
     /// Queue and ingress contention retain batches and report immediate work.
-    /// Interface and routing contention also defer the round, retaining TX
-    /// ownership. Pending reassembly expiry does not block TX.
+    /// TX or device-RX lock contention pauses that stage and continues
+    /// protocol and timer progress. Pending reassembly expiry does not block TX.
     pub fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
         let round_started_at = monotonic_time();
         let device_timestamp = round_started_at;
@@ -152,10 +152,12 @@ impl Service {
         let mut tx_packets = tx_progress.packets;
         let mut has_reached_time_limit = tx_progress.has_reached_time_limit;
         let mut tx_capacity_changed = tx_progress.tx_capacity_changed;
-        if tx_progress.has_lock_contention {
-            return deferred_poll_progress(0, tx_packets, timer_events, tx_capacity_changed);
-        }
-        let mut tx_remaining = budget.tx_packets.saturating_sub(tx_packets);
+        let mut tx_lock_contention = tx_progress.has_lock_contention;
+        let mut tx_remaining = if tx_lock_contention {
+            0
+        } else {
+            budget.tx_packets.saturating_sub(tx_packets)
+        };
 
         let rx_progress = self.dataplane.poll_rx_budgeted(
             self,
@@ -171,26 +173,11 @@ impl Service {
         );
         let mut rx_packets = rx_progress.packets;
         has_reached_time_limit |= rx_progress.has_reached_time_limit;
-        if rx_progress.has_lock_contention {
-            return deferred_poll_progress(
-                rx_packets,
-                tx_packets,
-                timer_events,
-                tx_capacity_changed,
-            );
-        }
+        let mut rx_lock_contention = rx_progress.has_lock_contention;
 
-        let Some(mtu) = self
-            .network
-            .try_with_interfaces(|interfaces| interfaces.effective_mtu())
-        else {
-            return deferred_poll_progress(
-                rx_packets,
-                tx_packets,
-                timer_events,
-                tx_capacity_changed,
-            );
-        };
+        // One smoltcp device; its MTU is the cached effective_mtu from the last
+        // rebuild. Per-egress send MTU is already on `ResolvedRoute`.
+        let mtu = self.stack.device_mtu();
         let Some(mut sockets) = SOCKET_SET.inner.try_lock() else {
             return deferred_poll_progress(
                 rx_packets,
@@ -230,31 +217,26 @@ impl Service {
         drop(sockets);
         timer_events += usize::from(timer_events < budget.timer_events && has_socket_state_change);
 
-        if has_reached_time_limit {
+        if has_reached_time_limit || tx_lock_contention {
             tx_remaining = 0;
         }
-        let tx_progress = self.dataplane.poll_tx_budgeted(
-            &self.network,
-            &self.io,
-            &self.ipv4_output,
-            device_timestamp,
-            tx_remaining,
-            round_started_at,
-        );
-        tx_packets += tx_progress.packets;
-        tx_capacity_changed |= tx_progress.tx_capacity_changed;
-        has_reached_time_limit |= tx_progress.has_reached_time_limit;
-        if tx_progress.has_lock_contention {
-            return deferred_poll_progress(
-                rx_packets,
-                tx_packets,
-                timer_events,
-                tx_capacity_changed,
+        if tx_remaining > 0 {
+            let tx_progress = self.dataplane.poll_tx_budgeted(
+                &self.network,
+                &self.io,
+                &self.ipv4_output,
+                device_timestamp,
+                tx_remaining,
+                round_started_at,
             );
+            tx_packets += tx_progress.packets;
+            tx_capacity_changed |= tx_progress.tx_capacity_changed;
+            has_reached_time_limit |= tx_progress.has_reached_time_limit;
+            tx_lock_contention |= tx_progress.has_lock_contention;
         }
 
         let rx_remaining = budget.rx_packets.saturating_sub(rx_packets);
-        if !has_reached_time_limit && rx_remaining > 0 {
+        if !has_reached_time_limit && !rx_lock_contention && rx_remaining > 0 {
             let tail_progress = self.dataplane.poll_rx_budgeted(
                 self,
                 round_started_at,
@@ -264,14 +246,7 @@ impl Service {
                 &mut control_packets,
             );
             rx_packets += tail_progress.packets;
-            if tail_progress.has_lock_contention {
-                return deferred_poll_progress(
-                    rx_packets,
-                    tx_packets,
-                    timer_events,
-                    tx_capacity_changed,
-                );
-            }
+            rx_lock_contention |= tail_progress.has_lock_contention;
         }
 
         let next_poll = earliest_poll_deadline(protocol_deadline, deferred_close_deadline);
@@ -280,37 +255,30 @@ impl Service {
         self.stack
             .update_protocol_deadline(timer_current, next_poll, &self.events);
 
-        let Some(io) = self.io.try_lock() else {
-            return deferred_poll_progress(
-                rx_packets,
-                tx_packets,
-                timer_events,
-                tx_capacity_changed,
-            );
-        };
-        let ingress_has_more = io.has_stack_ingress();
-        let tx_has_more = io.has_pending_tx();
-        drop(io);
-        let Some(rx_has_more) = self
+        let mut ingress_has_more = false;
+        let mut tx_has_more = false;
+        let mut queue_snapshot_contention = false;
+        if let Some(io) = self.io.try_lock() {
+            ingress_has_more = io.has_stack_ingress();
+            tx_has_more = io.has_pending_tx();
+        } else {
+            queue_snapshot_contention = true;
+        }
+        let rx_has_more = self
             .network
-            .try_with_interfaces(|interfaces| interfaces.has_rx_work())
-        else {
-            return deferred_poll_progress(
-                rx_packets,
-                tx_packets,
-                timer_events,
-                tx_capacity_changed,
-            );
-        };
+            .try_with_interfaces(|interfaces| interfaces.has_rx_work());
         PollProgress {
             rx_packets,
             tx_packets,
             timer_events,
             tx_capacity_changed,
-            has_more: self.dataplane.has_pending_tx()
-                || rx_has_more
+            has_more: tx_lock_contention
+                || rx_lock_contention
+                || queue_snapshot_contention
+                || rx_has_more.unwrap_or(true)
                 || ingress_has_more
                 || tx_has_more
+                || self.dataplane.has_pending_tx()
                 || timer_has_more
                 || ipv4_expiration.has_more
                 || self.ipv4_ingress.has_pending_timer(),
@@ -504,7 +472,8 @@ pub(crate) mod tests {
     fn poll_round_defers_interface_snapshot_contention() {
         let service = Service::new(NetworkState::new());
         let _interfaces = service.network.try_write_interfaces().unwrap();
-        // Zero device budgets reach the MTU snapshot without doing device RX/TX.
+        // Zero device budgets skip RX/TX; protocol poll uses the cached
+        // effective_mtu and does not wait on the held inventory write lock.
         let progress = service.poll_budgeted(PollBudget {
             rx_packets: 0,
             tx_packets: 0,
@@ -513,6 +482,68 @@ pub(crate) mod tests {
         assert!(progress.has_more);
         assert_eq!(progress.rx_packets, 0);
         assert_eq!(progress.tx_packets, 0);
+    }
+
+    #[def_test(serial)]
+    fn poll_round_continues_stack_after_tx_and_rx_lock_contention() {
+        use alloc::sync::Arc;
+        use core::sync::atomic::AtomicUsize;
+
+        use crate::{device::test_device::TestDevice, router::ROUTE_SCOPE_UNIVERSE};
+
+        let sends = Arc::new(AtomicUsize::new(0));
+        let state = NetworkState::new();
+        let src = Ipv4Address::new(192, 0, 2, 1);
+        let dev = state.add_device(Box::new(TestDevice::ethernet(1, 1500).with_send_hook({
+            let sends = sends.clone();
+            move || {
+                sends.fetch_add(1, Ordering::Relaxed);
+            }
+        })));
+        state
+            .add_ipv4_addr(Ipv4AddrEntry {
+                dev,
+                addr: Ipv4Cidr::new(src, 24),
+                scope: ROUTE_SCOPE_UNIVERSE,
+                broadcast: None,
+            })
+            .unwrap();
+        let packet = ipv4::build_ipv4_packet(
+            src,
+            Ipv4Address::new(192, 0, 2, 2),
+            ipv4::PROTOCOL_ICMP,
+            64,
+            &[],
+        )
+        .unwrap();
+        let service = Service::new(state);
+        let dst = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 2));
+        let mtu = service.network.route_mtu(&dst);
+        service
+            .with_io(|io| service.ipv4_output.send(io, mtu, packet, 0))
+            .unwrap();
+
+        const SENTINEL: u64 = 0xDEAD;
+        service
+            .stack
+            .protocol_deadline_micros
+            .store(SENTINEL, Ordering::Release);
+        let _interfaces = service.network.try_write_interfaces().unwrap();
+
+        let progress = service.poll_budgeted(TEST_POLL_BUDGET);
+
+        assert_eq!(progress.tx_packets, 0);
+        assert_eq!(progress.rx_packets, 0);
+        assert_eq!(sends.load(Ordering::Relaxed), 0);
+        assert!(progress.has_more);
+        assert!(service.dataplane.has_pending_tx());
+        assert!(
+            service
+                .stack
+                .protocol_deadline_micros
+                .load(Ordering::Acquire)
+                != SENTINEL
+        );
     }
 
     #[def_test]
