@@ -745,6 +745,9 @@ Changes to this module must verify the following:
 - Changes to locking in `Service::poll_budgeted` preserve `try_lock` semantics for shared processing locks and set `has_more` on contention.
   IPv4 expiration retries occur only for pending events; their contention still permits TX processing. TX/RX contention still permits protocol maintenance and egress. Raw, admitted, and control-packet batches retain ownership before retrying.
   TCP listener preparation occurs only when the admitted-packet batch can immediately enter NetIo.
+  Reusable batches are locked by `NetworkDataPlane` for the owning stage only, in control, RX, then stack-ingress order, skipping unused batches. smoltcp `poll_stack` does not hold those batch mutexes.
+  Normal completion collects immediate reschedule reasons as `PendingWork` bitflags and sets `PollProgress::has_more` when any are present. Interface snapshot contention is distinct from device RX readiness; remaining IPv4 reassembly work is distinct from a pending reassembly timer.
+  Failure to acquire a stack prerequisite returns completed counters with `has_more = true` immediately, skipping tail stages, deadline publication, and readiness snapshots.
 - TCP listener progress changes verify that entries with nonempty SYN queues are refreshed after actual network polling. Waiters are awakened outside the entry lock only after child connections enter the accept queue, and SYN queues remain excluded from `PollProgress::has_more`.
 - Changes to poller execution boundaries verify that assisted processing attempts only one CAS and respects the single-round budget.
   Loopback UDP must reach the PCB within the send path's BH/`NetRx` window, independently of poller execution ownership.

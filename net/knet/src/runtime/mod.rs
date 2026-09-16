@@ -10,5 +10,6 @@
 
 pub(crate) mod dataplane;
 pub(crate) mod io;
+pub(crate) mod poll_round;
 pub(crate) mod poller;
 pub(crate) mod service;

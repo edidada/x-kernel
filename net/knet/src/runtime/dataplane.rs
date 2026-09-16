@@ -14,8 +14,11 @@ use crate::{
     buf::{PacketBuf, PacketOwner},
     io::NetIo,
     network::{
-        ipv4,
-        ipv4::output::Ipv4Output,
+        ipv4::{
+            self,
+            ingress::{Ipv4ExpirationProgress, Ipv4Ingress},
+            output::Ipv4Output,
+        },
         state::{NetworkState, TxBatch},
     },
     service::{POLL_TIME_CHECK_INTERVAL_WORK_ITEMS, Service, has_reached_poll_round_time_limit},
@@ -40,10 +43,13 @@ pub(crate) struct DeviceTxProgress {
     pub tx_capacity_changed: bool,
 }
 
+/// Reusable packet batches with stage-scoped locking.
+///
+/// When combined, batch locks follow control, RX, then stack-ingress order.
 pub(crate) struct NetworkDataPlane {
-    pub(crate) rx_batch: Mutex<Vec<PacketBuf>>,
-    pub(crate) stack_ingress_batch: Mutex<Vec<PacketBuf>>,
-    pub(crate) control_tx_batch: Mutex<Vec<Vec<u8>>>,
+    rx_batch: Mutex<Vec<PacketBuf>>,
+    stack_ingress_batch: Mutex<Vec<PacketBuf>>,
+    control_tx_batch: Mutex<Vec<Vec<u8>>>,
     /// Accessed only by the sole poll-round executor, including readiness checks.
     tx_batch: Mutex<VecDeque<PacketBuf>>,
 }
@@ -63,7 +69,46 @@ impl NetworkDataPlane {
         !self.tx_batch.lock().is_empty()
     }
 
+    /// Expires IPv4 fragments into the control batch under that mutex only.
+    pub(crate) fn expire_ipv4_fragments(
+        &self,
+        ingress: &Ipv4Ingress,
+        timestamp: MonotonicInstant,
+        timer_budget: usize,
+    ) -> Ipv4ExpirationProgress {
+        let mut control = self.control_tx_batch.lock();
+        ingress.expire_fragments(timestamp, timer_budget, &mut control)
+    }
+
+    /// Flushes retained stack-ingress and control batches under their mutexes.
+    pub(crate) fn flush_retained_ingress(&self, service: &Service) -> bool {
+        let mut control = self.control_tx_batch.lock();
+        let mut accepted = self.stack_ingress_batch.lock();
+        self.flush_ingress(service, &mut accepted, &mut control)
+    }
+
+    /// Drains devices and hands off accepted packets, locking reusable batches
+    /// only for this RX stage.
     pub(crate) fn poll_rx_budgeted(
+        &self,
+        service: &Service,
+        round_started_at: MonotonicInstant,
+        budget: usize,
+    ) -> DeviceRxProgress {
+        let mut control_packets = self.control_tx_batch.lock();
+        let mut rx_batch = self.rx_batch.lock();
+        let mut accepted_packets = self.stack_ingress_batch.lock();
+        self.poll_rx_budgeted_locked(
+            service,
+            round_started_at,
+            budget,
+            &mut rx_batch,
+            &mut accepted_packets,
+            &mut control_packets,
+        )
+    }
+
+    fn poll_rx_budgeted_locked(
         &self,
         service: &Service,
         round_started_at: MonotonicInstant,
@@ -301,6 +346,19 @@ impl NetworkDataPlane {
         }
 
         progress
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn retained_stack_ingress_len(&self) -> usize {
+        self.stack_ingress_batch.lock().len()
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn retain_stack_ingress_for_tests(
+        &self,
+        packets: impl IntoIterator<Item = PacketBuf>,
+    ) {
+        self.stack_ingress_batch.lock().extend(packets);
     }
 }
 

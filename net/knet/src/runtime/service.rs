@@ -12,21 +12,22 @@ use kpoll::{PollContext, PollRegisterError, PollSet};
 use ksync::Mutex;
 use ktime_types::{MonotonicInstant, TimeSpan};
 
+use super::poll_round::{PendingWork, PollRound, PollStageResult};
 use crate::{
     SOCKET_SET,
-    dataplane::{DeviceRxProgress, NetworkDataPlane},
+    dataplane::{DeviceRxProgress, DeviceTxProgress, NetworkDataPlane},
     io::{NetIo, RxDrain},
     ip::IpAddress,
     network::{
         ipv4::{
-            ingress::Ipv4Ingress,
+            ingress::{Ipv4ExpirationProgress, Ipv4Ingress},
             output::{Ipv4Output, Ipv4SendOptions},
         },
         state::NetworkState,
     },
     poller::{PollBudget, PollProgress},
     stack::{
-        interface::Stack,
+        interface::{Stack, StackProgress},
         time::{earliest_poll_deadline, has_immediate_timer_work, now},
     },
 };
@@ -128,173 +129,188 @@ impl Service {
     /// TX or device-RX lock contention pauses that stage and continues
     /// protocol and timer progress. Pending reassembly expiry does not block TX.
     pub fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
-        let round_started_at = monotonic_time();
-        let device_timestamp = round_started_at;
-        let mut control_packets = self.dataplane.control_tx_batch.lock();
-        let mut rx_batch = self.dataplane.rx_batch.lock();
-        let mut accepted_packets = self.dataplane.stack_ingress_batch.lock();
+        let mut round = PollRound::new(budget, monotonic_time());
+        self.poll_ipv4_timers(&mut round);
+        self.flush_retained_ingress(&mut round);
+        self.poll_tx(&mut round);
+        self.poll_rx(&mut round);
+        if self.poll_stack(&mut round) == PollStageResult::Deferred {
+            return round.into_deferred_progress();
+        }
+        self.poll_remaining_tx(&mut round);
+        self.poll_remaining_rx(&mut round);
+        self.update_poll_deadline(&mut round);
+        self.finish_poll_round(round)
+    }
 
-        let ipv4_expiration = self.ipv4_ingress.expire_fragments(
-            device_timestamp,
-            budget.timer_events,
-            &mut control_packets,
+    fn poll_ipv4_timers(&self, round: &mut PollRound) {
+        let progress = self.dataplane.expire_ipv4_fragments(
+            &self.ipv4_ingress,
+            round.started_at,
+            round.budget.timer_events,
         );
-        let mut timer_events = ipv4_expiration.timer_events;
-        let has_flushed_ingress =
-            self.dataplane
-                .flush_ingress(self, &mut accepted_packets, &mut control_packets);
+        Self::apply_ipv4_timer_progress(round, progress);
+    }
 
-        let tx_progress = self.dataplane.poll_tx_budgeted(
+    fn apply_ipv4_timer_progress(round: &mut PollRound, progress: Ipv4ExpirationProgress) {
+        round.add_timer_events(progress.timer_events);
+        if progress.has_more {
+            round.mark_pending(PendingWork::IPV4_REASSEMBLY_WORK);
+        }
+    }
+
+    fn flush_retained_ingress(&self, round: &mut PollRound) {
+        if !self.dataplane.flush_retained_ingress(self) {
+            // Stack polling must free ingress slots before the retained batch
+            // can be retried. Keep device RX paused while that batch is pending.
+            round.mark_pending(PendingWork::RX_DEFERRED);
+        }
+    }
+
+    fn poll_tx(&self, round: &mut PollRound) {
+        let progress = self.dataplane.poll_tx_budgeted(
             &self.network,
             &self.io,
             &self.ipv4_output,
-            device_timestamp,
-            budget.tx_packets,
-            round_started_at,
+            round.started_at,
+            round.budget.tx_packets,
+            round.started_at,
         );
-        let mut tx_packets = tx_progress.packets;
-        let mut has_reached_time_limit = tx_progress.has_reached_time_limit;
-        let mut tx_capacity_changed = tx_progress.tx_capacity_changed;
-        let mut tx_lock_contention = tx_progress.has_lock_contention;
-        let mut tx_remaining = if tx_lock_contention {
-            0
-        } else {
-            budget.tx_packets.saturating_sub(tx_packets)
-        };
+        Self::apply_tx_progress(round, progress);
+    }
 
-        let rx_progress = if has_flushed_ingress {
-            self.dataplane.poll_rx_budgeted(
-                self,
-                round_started_at,
-                if has_reached_time_limit {
-                    0
-                } else {
-                    budget.rx_packets
-                },
-                &mut rx_batch,
-                &mut accepted_packets,
-                &mut control_packets,
-            )
-        } else {
-            // Stack polling must free ingress slots before the retained batch
-            // can be retried. Keep device RX paused while that batch is pending.
-            DeviceRxProgress {
-                is_deferred: true,
-                ..DeviceRxProgress::default()
-            }
-        };
-        let mut rx_packets = rx_progress.packets;
-        has_reached_time_limit |= rx_progress.has_reached_time_limit;
-        let mut is_rx_deferred = rx_progress.is_deferred;
+    fn apply_tx_progress(round: &mut PollRound, progress: DeviceTxProgress) {
+        round.add_tx_packets(progress.packets);
+        if progress.has_reached_time_limit {
+            round.reach_time_limit();
+        }
+        if progress.tx_capacity_changed {
+            round.mark_tx_capacity_changed();
+        }
+        if progress.has_lock_contention {
+            round.mark_pending(PendingWork::TX_CONTENTION);
+        }
+    }
 
+    fn poll_rx(&self, round: &mut PollRound) {
+        if round.is_rx_deferred() {
+            return;
+        }
+        let progress =
+            self.dataplane
+                .poll_rx_budgeted(self, round.started_at, round.remaining_rx());
+        Self::apply_rx_progress(round, progress);
+    }
+
+    fn apply_rx_progress(round: &mut PollRound, progress: DeviceRxProgress) {
+        round.add_rx_packets(progress.packets);
+        if progress.has_reached_time_limit {
+            round.reach_time_limit();
+        }
+        if progress.is_deferred {
+            round.mark_pending(PendingWork::RX_DEFERRED);
+        }
+    }
+
+    fn poll_stack(&self, round: &mut PollRound) -> PollStageResult {
         // One smoltcp device; its MTU is the cached effective_mtu from the last
         // rebuild. Per-egress send MTU is already on `ResolvedRoute`.
-        let mtu = self.stack.device_mtu();
         let Some(mut sockets) = SOCKET_SET.inner.try_lock() else {
-            return deferred_poll_progress(
-                rx_packets,
-                tx_packets,
-                timer_events,
-                tx_capacity_changed,
-            );
+            return PollStageResult::Deferred;
         };
         let Some(mut io) = self.io.try_lock() else {
-            return deferred_poll_progress(
-                rx_packets,
-                tx_packets,
-                timer_events,
-                tx_capacity_changed,
-            );
+            return PollStageResult::Deferred;
         };
         let Some(stack_progress) = self.stack.poll(
             &mut io,
-            mtu,
+            self.stack.device_mtu(),
             &mut sockets,
-            budget,
-            round_started_at,
-            has_reached_time_limit,
+            round.budget,
+            round.started_at,
+            round.reached_time_limit(),
         ) else {
-            return deferred_poll_progress(
-                rx_packets,
-                tx_packets,
-                timer_events,
-                tx_capacity_changed,
-            );
+            return PollStageResult::Deferred;
         };
-        has_reached_time_limit = stack_progress.has_reached_time_limit;
-        let has_socket_state_change = stack_progress.has_socket_state_change;
-        let protocol_deadline = stack_progress.protocol_deadline;
-        let deferred_close_deadline = stack_progress.deferred_close_deadline;
         drop(io);
         drop(sockets);
-        timer_events += usize::from(timer_events < budget.timer_events && has_socket_state_change);
+        Self::apply_stack_progress(round, stack_progress);
+        PollStageResult::Complete
+    }
 
-        if has_reached_time_limit || tx_lock_contention {
-            tx_remaining = 0;
+    fn apply_stack_progress(round: &mut PollRound, progress: StackProgress) {
+        round.set_reached_time_limit(progress.has_reached_time_limit);
+        if progress.has_socket_state_change && round.can_record_timer_event() {
+            round.add_timer_events(1);
         }
-        if tx_remaining > 0 {
-            let tx_progress = self.dataplane.poll_tx_budgeted(
-                &self.network,
-                &self.io,
-                &self.ipv4_output,
-                device_timestamp,
-                tx_remaining,
-                round_started_at,
-            );
-            tx_packets += tx_progress.packets;
-            tx_capacity_changed |= tx_progress.tx_capacity_changed;
-            has_reached_time_limit |= tx_progress.has_reached_time_limit;
-            tx_lock_contention |= tx_progress.has_lock_contention;
-        }
+        round.set_next_poll_deadline(earliest_poll_deadline(
+            progress.protocol_deadline,
+            progress.deferred_close_deadline,
+        ));
+    }
 
-        let rx_remaining = budget.rx_packets.saturating_sub(rx_packets);
-        if !has_reached_time_limit && !is_rx_deferred && rx_remaining > 0 {
-            let tail_progress = self.dataplane.poll_rx_budgeted(
-                self,
-                round_started_at,
-                rx_remaining,
-                &mut rx_batch,
-                &mut accepted_packets,
-                &mut control_packets,
-            );
-            rx_packets += tail_progress.packets;
-            is_rx_deferred |= tail_progress.is_deferred;
+    fn poll_remaining_tx(&self, round: &mut PollRound) {
+        let remaining = round.remaining_tx();
+        if remaining == 0 {
+            return;
         }
+        let progress = self.dataplane.poll_tx_budgeted(
+            &self.network,
+            &self.io,
+            &self.ipv4_output,
+            round.started_at,
+            remaining,
+            round.started_at,
+        );
+        Self::apply_tx_progress(round, progress);
+    }
 
-        let next_poll = earliest_poll_deadline(protocol_deadline, deferred_close_deadline);
+    fn poll_remaining_rx(&self, round: &mut PollRound) {
+        let remaining = round.remaining_rx();
+        if remaining == 0 {
+            return;
+        }
+        let progress = self
+            .dataplane
+            .poll_rx_budgeted(self, round.started_at, remaining);
+        Self::apply_rx_progress(round, progress);
+    }
+
+    fn update_poll_deadline(&self, round: &mut PollRound) {
+        let next_poll = round.next_poll_deadline();
         let timer_current = now();
-        let timer_has_more = has_immediate_timer_work(timer_current, next_poll);
+        if has_immediate_timer_work(timer_current, next_poll) {
+            round.mark_pending(PendingWork::PROTOCOL_TIMER);
+        }
         self.stack
             .update_protocol_deadline(timer_current, next_poll, &self.events);
+    }
 
-        let mut ingress_has_more = false;
-        let mut tx_has_more = false;
-        let mut queue_snapshot_contention = false;
+    fn finish_poll_round(&self, mut round: PollRound) -> PollProgress {
         if let Some(io) = self.io.try_lock() {
-            ingress_has_more = io.has_stack_ingress();
-            tx_has_more = io.has_pending_tx();
+            if io.has_stack_ingress() {
+                round.mark_pending(PendingWork::INGRESS_QUEUE);
+            }
+            if io.has_pending_tx() {
+                round.mark_pending(PendingWork::TX_QUEUE);
+            }
         } else {
-            queue_snapshot_contention = true;
+            round.mark_pending(PendingWork::QUEUE_SNAPSHOT_CONTENTION);
         }
-        let rx_has_more = self
+        match self
             .network
-            .try_with_interfaces(|interfaces| interfaces.has_rx_work());
-        PollProgress {
-            rx_packets,
-            tx_packets,
-            timer_events,
-            tx_capacity_changed,
-            has_more: tx_lock_contention
-                || is_rx_deferred
-                || queue_snapshot_contention
-                || rx_has_more.unwrap_or(true)
-                || ingress_has_more
-                || tx_has_more
-                || self.dataplane.has_pending_tx()
-                || timer_has_more
-                || ipv4_expiration.has_more
-                || self.ipv4_ingress.has_pending_timer(),
+            .try_with_interfaces(|interfaces| interfaces.has_rx_work())
+        {
+            Some(true) => round.mark_pending(PendingWork::DEVICE_RX_READY),
+            Some(false) => {}
+            None => round.mark_pending(PendingWork::INTERFACE_SNAPSHOT_CONTENTION),
         }
+        if self.dataplane.has_pending_tx() {
+            round.mark_pending(PendingWork::DATAPLANE_TX);
+        }
+        if self.ipv4_ingress.has_pending_timer() {
+            round.mark_pending(PendingWork::IPV4_REASSEMBLY_TIMER);
+        }
+        round.into_progress()
     }
 
     /// Resolves the route before the queue preparation and enqueue transaction.
@@ -390,20 +406,6 @@ pub(crate) fn has_reached_poll_round_time_limit(
     current: MonotonicInstant,
 ) -> bool {
     current.saturating_duration_since(round_started_at) >= POLL_ROUND_TIME_LIMIT
-}
-fn deferred_poll_progress(
-    rx_packets: usize,
-    tx_packets: usize,
-    timer_events: usize,
-    tx_capacity_changed: bool,
-) -> PollProgress {
-    PollProgress {
-        rx_packets,
-        tx_packets,
-        timer_events,
-        tx_capacity_changed,
-        has_more: true,
-    }
 }
 
 #[cfg(unittest)]
@@ -755,9 +757,7 @@ pub(crate) mod tests {
         });
         service
             .dataplane
-            .stack_ingress_batch
-            .lock()
-            .extend([packet.clone(), packet]);
+            .retain_stack_ingress_for_tests([packet.clone(), packet]);
         let budget = PollBudget {
             rx_packets: 1,
             tx_packets: 0,
@@ -768,15 +768,15 @@ pub(crate) mod tests {
         assert!(progress.has_more);
         assert_eq!(progress.rx_packets, 0);
         assert_eq!(service.with_io(|io| io.available_stack_ingress_slots()), 1);
-        assert_eq!(service.dataplane.stack_ingress_batch.lock().len(), 2);
+        assert_eq!(service.dataplane.retained_stack_ingress_len(), 2);
 
         let progress = service.poll_budgeted(budget);
         assert!(progress.has_more);
         assert_eq!(service.with_io(|io| io.available_stack_ingress_slots()), 2);
-        assert_eq!(service.dataplane.stack_ingress_batch.lock().len(), 2);
+        assert_eq!(service.dataplane.retained_stack_ingress_len(), 2);
 
         service.poll_budgeted(budget);
-        assert!(service.dataplane.stack_ingress_batch.lock().is_empty());
+        assert_eq!(service.dataplane.retained_stack_ingress_len(), 0);
         assert_eq!(service.with_io(|io| io.available_stack_ingress_slots()), 1);
     }
 }

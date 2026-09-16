@@ -681,7 +681,30 @@ release queue slots. Deferred RX sets `has_more` for the next round.
 
 Device draining rotates its starting position across devices, consuming each device until it is empty or the batch budget is exhausted. A batch borrows the device inventory under a read guard and acquires each device mutex once, without allocating a handle snapshot. IPv4 validation, destination filtering, reassembly, and UDP delivery run after releasing the device, interface, and NetIo guards. Unmatched unicast UDP can generate ICMP port-unreachable responses; unsupported unicast IPv4 protocols can generate protocol-unreachable responses. ICMP errors are inspected for UDP before eligible packets enter the smoltcp batch. IPv6 enters that batch directly.
 
-The following pseudocode summarizes the round. Failed shared-state `try_lock` acquisitions retain pending batches and set `has_more = true`. TX or device-RX contention ends that stage while allowing protocol maintenance and egress to advance; contention on protocol prerequisites defers protocol processing. Contention during reassembly expiration only defers that timer work. Reusable batch mutexes and nested listener operations still use blocking locks.
+The following pseudocode summarizes the round. `poll_budgeted` only sequences
+named stages; [`PollRound`](../src/runtime/poll_round.rs) stores the round's
+shared counters, budgets, time-limit state, TX capacity progress, merged poll
+deadline, and `PendingWork` reason flags. Module-specific progress types stay
+in their owners; [`Service`](../src/runtime/service.rs) maps those results into
+`PollRound`. Stack progress merges protocol and deferred-close deadlines
+immediately. Pending flags distinguish TX contention, RX deferral,
+NetIo and interface snapshot contention, device RX readiness, ingress and TX
+queues, retained data-plane TX, due protocol timers, remaining IPv4 reassembly
+work, and pending IPv4 reassembly timers. Normal completion derives `has_more`
+from whether these flags are nonempty. A deferred stack stage returns the
+completed counters with `has_more = true`, skipping tail stages, deadline
+publication, and readiness snapshots.
+
+Each data-plane stage acquires its own reusable batch mutexes
+and releases them before returning, so smoltcp polling does not hold RX,
+stack-ingress, or control batches. Combined batch locks retain the order
+control, RX, then stack-ingress, skipping batches unused by the stage.
+Failed shared-state `try_lock` acquisitions
+retain pending batches and set `has_more = true`. TX or device-RX contention
+ends that stage while allowing protocol maintenance and egress to advance;
+contention on protocol prerequisites defers protocol processing. Contention
+during reassembly expiration only defers that timer work. Nested listener
+operations still use blocking locks.
 
 **Algorithm 2. RX Progress**
 
@@ -692,38 +715,38 @@ The following pseudocode summarizes the round. Failed shared-state `try_lock` ac
 | Line | Operation |
 |---:|:---|
 | 1 | **Procedure** `poll_budgeted(budget)` |
-| 2 | &emsp;start = monotonic_time() |
-| 3 | &emsp;lock reusable RX, accepted, and control batches |
-| 4 | &emsp;try to expire pending IPv4 fragments within $B_{\mathrm{timer}}$ |
-| 5 | &emsp;try to flush retained batches; on failure defer device RX and retain both batches |
-| 6 | &emsp;tx_done = dispatch queued TX within $B_{\mathrm{tx}}$ |
-| 7 | &emsp;if the retained handoff succeeded, drain_device_rx($B_{\mathrm{rx}}$ unless time limit reached) |
-| 8 | &emsp;use the cached Stack MTU; `try_lock` socket set, NetIo, then Interface; otherwise return retry |
-| 9 | &emsp;`Interface.poll_maintenance()` |
-| 10 | &emsp;**if** time limit has not been reached: |
-| 11 | &emsp;&emsp;poll smoltcp ingress within $B_{\mathrm{rx}}$ |
-| 12 | &emsp;call `Interface.poll_egress()` at least once |
-| 13 | &emsp;**repeat** while progress continues, within $\max(B_{\mathrm{tx}}, 1)$ passes and the soft time limit |
-| 14 | &emsp;reap deferred TCP closes and read `Interface.poll_at()` |
-| 15 | &emsp;release Interface; refresh TCP acceptors; release NetIo and socket set |
-| 16 | &emsp;dispatch queued TX within remaining TX budget if time remains and earlier TX did not contend |
-| 17 | &emsp;retain unsent TX and remember dispatch contention |
-| 18 | &emsp;**if** time and device-RX budget remain and earlier RX was not deferred: |
-| 19 | &emsp;&emsp;drain_device_rx(remaining device-RX budget) |
-| 20 | &emsp;publish the earliest protocol / deferred-close deadline |
-| 21 | &emsp;`try_lock` NetIo for queue readiness, release it, then `try_read` interfaces and `try_lock` devices for readiness; contention counts as pending work |
-| 22 | &emsp;**return** progress with `has_more` for contention, deferred RX, pending device RX, ingress or TX, immediately due protocol work, or pending reassembly expiration |
-| 23 | **Procedure** `drain_device_rx(remaining)` |
-| 24 | &emsp;process retained RX batch and flush accepted/control batches |
-| 25 | &emsp;**while** budget and time remain: |
-| 26 | &emsp;&emsp;`try_read` interfaces, then `try_lock` NetIo, or return retry |
-| 27 | &emsp;&emsp;`try_lock` each device once to pull at most 32 work items, limited by smoltcp ingress capacity; record and skip busy devices |
-| 28 | &emsp;&emsp;release device guards, NetIo, and interfaces |
-| 29 | &emsp;&emsp;`try_lock` Ipv4IngressState, or retain batch and return retry |
-| 30 | &emsp;&emsp;validate/filter IPv4, reassemble fragments, deliver UDP, collect ICMP responses and packets accepted for smoltcp |
-| 31 | &emsp;&emsp;release Ipv4IngressState |
-| 32 | &emsp;&emsp;flush accepted/control batches, or return retry |
-| 33 | &emsp;&emsp;**stop** on device contention, zero progress, or no more work |
+| 2 | &emsp;`round = PollRound::new(budget, monotonic_time())` |
+| 3 | &emsp;`poll_ipv4_timers`: lock control batch, expire pending fragments within $B_{\mathrm{timer}}$, unlock |
+| 4 | &emsp;`flush_retained_ingress`: lock control then accepted batches; on failure defer device RX and retain both |
+| 5 | &emsp;`poll_tx`: dispatch queued TX within $B_{\mathrm{tx}}$ (TX batch lock is internal) |
+| 6 | &emsp;`poll_rx`: if the retained handoff succeeded, drain_device_rx($B_{\mathrm{rx}}$ unless time limit reached) |
+| 7 | &emsp;`poll_stack`: `try_lock` socket set, NetIo, then Interface; on failure return `round.into_deferred_progress()` immediately |
+| 8 | &emsp;`Interface.poll_maintenance()` |
+| 9 | &emsp;**if** time limit has not been reached: |
+| 10 | &emsp;&emsp;poll smoltcp ingress within $B_{\mathrm{rx}}$ |
+| 11 | &emsp;call `Interface.poll_egress()` at least once |
+| 12 | &emsp;**repeat** while progress continues, within $\max(B_{\mathrm{tx}}, 1)$ passes and the soft time limit |
+| 13 | &emsp;reap deferred TCP closes and read `Interface.poll_at()` |
+| 14 | &emsp;release Interface; refresh TCP acceptors; release NetIo and socket set; record stack progress and merge deadlines |
+| 15 | &emsp;`poll_remaining_tx` if time remains and earlier TX did not contend |
+| 16 | &emsp;retain unsent TX and remember dispatch contention |
+| 17 | &emsp;`poll_remaining_rx` **if** time and device-RX budget remain and earlier RX was not deferred |
+| 18 | &emsp;`update_poll_deadline`: publish the earliest protocol / deferred-close deadline |
+| 19 | &emsp;`finish_poll_round`: `try_lock` NetIo for queue readiness, then `try_read` interfaces for RX readiness |
+| 20 | &emsp;**return** `PollProgress` with `has_more = !pending.is_empty()`; preserve distinct contention, readiness, queue, and timer reasons |
+| 21 | **Procedure** `drain_device_rx(remaining)` |
+| 22 | &emsp;lock control, RX, then accepted batches for this stage only |
+| 23 | &emsp;process retained RX batch and flush accepted/control batches |
+| 24 | &emsp;**while** budget and time remain: |
+| 25 | &emsp;&emsp;`try_read` interfaces, then `try_lock` NetIo, or return retry |
+| 26 | &emsp;&emsp;`try_lock` each device once to pull at most 32 work items, limited by smoltcp ingress capacity; record and skip busy devices |
+| 27 | &emsp;&emsp;release device guards, NetIo, and interfaces |
+| 28 | &emsp;&emsp;`try_lock` Ipv4IngressState, or retain batch and return retry |
+| 29 | &emsp;&emsp;validate/filter IPv4, reassemble fragments, deliver UDP, collect ICMP responses and packets accepted for smoltcp |
+| 30 | &emsp;&emsp;release Ipv4IngressState |
+| 31 | &emsp;&emsp;flush accepted/control batches, or return retry |
+| 32 | &emsp;&emsp;**stop** on device contention, zero progress, or no more work |
+| 33 | &emsp;release accepted, RX, then control batches |
 | 34 | **Procedure** `flush accepted/control batches` |
 | 35 | &emsp;`try_lock` socket set if accepted batch is nonempty |
 | 36 | &emsp;`try_lock` NetIo and check all accepted packets fit; on failure retain both batches and return retry |
@@ -735,7 +758,7 @@ The 1 ms limit is a soft bound checked between work batches. Maintenance and one
 
 A background callback runs at most four rounds, each with fresh budgets; assist runs at most one. Completion reschedules immediate work or notifications received during execution. The periodic timer callback checks protocol and reassembly deadlines, wakes waiters, and publishes timer work. Future deadlines alone do not set `has_more`.
 
-Sources: [`poller`](../src/runtime/poller.rs), [`Service`](../src/runtime/service.rs), [`Ipv4Ingress`](../src/network/ipv4/ingress.rs), and [`NetIo`](../src/runtime/io.rs).
+Sources: [`poller`](../src/runtime/poller.rs), [`Service`](../src/runtime/service.rs), [`PollRound`](../src/runtime/poll_round.rs), [`NetworkDataPlane`](../src/runtime/dataplane.rs), [`Ipv4Ingress`](../src/network/ipv4/ingress.rs), and [`NetIo`](../src/runtime/io.rs).
 
 ### TX Routing
 
