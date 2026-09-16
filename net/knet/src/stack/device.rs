@@ -3,48 +3,35 @@
 // See LICENSES for license details.
 
 //! Temporary smoltcp adapter borrowing `NetIo` queues while that mutex is held.
-use alloc::{collections::VecDeque, vec};
+use alloc::vec;
 
 use smoltcp::{
     phy::{DeviceCapabilities, Medium},
     time::Instant,
 };
 
-use crate::{
-    buf::{PacketBuf, PacketOwner},
-    consts::SOCKET_BUFFER_SIZE,
-    datapath::{NetIo, io::DATA_TX_QUEUE_SIZE},
-};
+use crate::{buf::PacketBuf, consts::SOCKET_BUFFER_SIZE, datapath::NetIo};
 pub(crate) struct StackDevice<'a> {
-    rx_queue: &'a mut VecDeque<PacketBuf>,
-    data_tx_queue: &'a mut VecDeque<PacketBuf>,
+    io: &'a mut NetIo,
     mtu: usize,
 }
 impl<'a> StackDevice<'a> {
     pub(crate) fn new(io: &'a mut NetIo, mtu: usize) -> Self {
-        Self {
-            rx_queue: &mut io.rx_queue,
-            data_tx_queue: &mut io.data_tx_queue,
-            mtu,
-        }
+        Self { io, mtu }
     }
 }
-pub struct TxToken<'a>(&'a mut VecDeque<PacketBuf>);
+pub struct TxToken<'a>(&'a mut NetIo);
 
 impl smoltcp::phy::TxToken for TxToken<'_> {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        debug_assert!(self.0.len() < SOCKET_BUFFER_SIZE);
+        debug_assert!(self.0.can_enqueue_tx_packet());
 
         let mut ip_packet = vec![0u8; len];
         let result = f(&mut ip_packet);
-        self.0.push_back(PacketBuf::from_ip_packet_vec(
-            0,
-            ip_packet,
-            PacketOwner::Ipv4Stack,
-        ));
+        self.0.enqueue_stack_tx(ip_packet);
         result
     }
 }
@@ -74,21 +61,18 @@ impl smoltcp::phy::Device for StackDevice<'_> {
         Self: 'a;
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        if self.rx_queue.is_empty() || self.data_tx_queue.len() >= DATA_TX_QUEUE_SIZE {
-            None
-        } else {
-            Some((
-                RxToken(self.rx_queue.pop_front().unwrap()),
-                TxToken(self.data_tx_queue),
-            ))
+        if !self.io.can_receive_from_stack() {
+            return None;
         }
+        let packet = self.io.pop_stack_ingress()?;
+        Some((RxToken(packet), TxToken(self.io)))
     }
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
-        if self.data_tx_queue.len() >= DATA_TX_QUEUE_SIZE {
+        if !self.io.can_enqueue_tx_packet() {
             None
         } else {
-            Some(TxToken(self.data_tx_queue))
+            Some(TxToken(self.io))
         }
     }
 

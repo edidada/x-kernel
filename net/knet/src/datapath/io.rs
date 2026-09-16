@@ -17,19 +17,23 @@ use crate::{
     consts::SOCKET_BUFFER_SIZE,
     device::DeviceHandle,
 };
+
 const CONTROL_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
-pub(crate) const DATA_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
+const DATA_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
+
 pub(crate) struct NetIo {
-    pub(crate) rx_queue: VecDeque<PacketBuf>,
+    rx_queue: VecDeque<PacketBuf>,
     control_tx_queue: VecDeque<PacketBuf>,
-    pub(crate) data_tx_queue: VecDeque<PacketBuf>,
+    data_tx_queue: VecDeque<PacketBuf>,
     next_rx_device: usize,
 }
+
 pub(crate) struct RxDrain {
     pub work_done: usize,
     pub has_more: bool,
     pub has_lock_contention: bool,
 }
+
 impl NetIo {
     pub(crate) fn new() -> Self {
         Self {
@@ -52,6 +56,19 @@ impl NetIo {
 
     pub(crate) fn available_data_tx_slots(&self) -> usize {
         DATA_TX_QUEUE_SIZE.saturating_sub(self.data_tx_queue.len())
+    }
+
+    pub fn can_receive_from_stack(&self) -> bool {
+        !self.rx_queue.is_empty() && self.can_enqueue_tx_packet()
+    }
+
+    pub(crate) fn pop_stack_ingress(&mut self) -> Option<PacketBuf> {
+        self.rx_queue.pop_front()
+    }
+
+    pub(crate) fn enqueue_stack_tx(&mut self, ip_packet: Vec<u8>) {
+        debug_assert!(self.can_enqueue_tx_packet());
+        self.data_tx_queue.push_back(tx_packet_buf(ip_packet));
     }
 
     pub fn can_enqueue_tx_packets(&self, packet_count: usize) -> bool {
