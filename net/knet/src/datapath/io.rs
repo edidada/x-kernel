@@ -14,12 +14,12 @@ use ktime_types::MonotonicInstant;
 
 use crate::{
     buf::{PacketBuf, PacketOwner},
-    consts::SOCKET_BUFFER_SIZE,
     device::DeviceHandle,
 };
 
-const CONTROL_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
-const DATA_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
+const STACK_RX_QUEUE_CAPACITY: usize = 64;
+const DATA_TX_QUEUE_CAPACITY: usize = 64;
+const CONTROL_TX_QUEUE_CAPACITY: usize = 64;
 
 pub(crate) struct NetIo {
     rx_queue: VecDeque<PacketBuf>,
@@ -37,11 +37,19 @@ pub(crate) struct RxDrain {
 impl NetIo {
     pub(crate) fn new() -> Self {
         Self {
-            rx_queue: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
-            control_tx_queue: VecDeque::with_capacity(CONTROL_TX_QUEUE_SIZE),
-            data_tx_queue: VecDeque::with_capacity(DATA_TX_QUEUE_SIZE),
+            rx_queue: VecDeque::with_capacity(STACK_RX_QUEUE_CAPACITY),
+            control_tx_queue: VecDeque::with_capacity(CONTROL_TX_QUEUE_CAPACITY),
+            data_tx_queue: VecDeque::with_capacity(DATA_TX_QUEUE_CAPACITY),
             next_rx_device: 0,
         }
+    }
+
+    pub fn available_stack_ingress_slots(&self) -> usize {
+        STACK_RX_QUEUE_CAPACITY.saturating_sub(self.rx_queue.len())
+    }
+
+    fn stack_ingress_full(&self) -> bool {
+        self.rx_queue.len() >= STACK_RX_QUEUE_CAPACITY
     }
 
     /// Appends a complete output batch after capacity preflight under the same transaction.
@@ -51,11 +59,19 @@ impl NetIo {
     }
 
     pub fn can_enqueue_tx_packet(&self) -> bool {
-        self.data_tx_queue.len() < DATA_TX_QUEUE_SIZE
+        !self.data_tx_queue_full()
+    }
+
+    fn data_tx_queue_full(&self) -> bool {
+        self.data_tx_queue.len() >= DATA_TX_QUEUE_CAPACITY
     }
 
     pub(crate) fn available_data_tx_slots(&self) -> usize {
-        DATA_TX_QUEUE_SIZE.saturating_sub(self.data_tx_queue.len())
+        DATA_TX_QUEUE_CAPACITY.saturating_sub(self.data_tx_queue.len())
+    }
+
+    fn control_tx_queue_full(&self) -> bool {
+        self.control_tx_queue.len() >= CONTROL_TX_QUEUE_CAPACITY
     }
 
     pub fn can_receive_from_stack(&self) -> bool {
@@ -75,7 +91,7 @@ impl NetIo {
         self.data_tx_queue
             .len()
             .checked_add(packet_count)
-            .is_some_and(|len| len <= DATA_TX_QUEUE_SIZE)
+            .is_some_and(|len| len <= DATA_TX_QUEUE_CAPACITY)
     }
 
     pub fn drain_device_rx_budgeted(
@@ -139,12 +155,12 @@ impl NetIo {
     }
 
     pub fn enqueue_stack_ingress(&mut self, packets: &mut Vec<PacketBuf>) {
-        debug_assert!(packets.len() <= self.stack_ingress_capacity());
+        debug_assert!(
+            !self.stack_ingress_full(),
+            "ingress batch exceeds available stack RX slots"
+        );
+        debug_assert!(packets.len() <= self.available_stack_ingress_slots());
         self.rx_queue.extend(packets.drain(..));
-    }
-
-    pub fn stack_ingress_capacity(&self) -> usize {
-        SOCKET_BUFFER_SIZE.saturating_sub(self.rx_queue.len())
     }
 
     pub fn has_stack_ingress(&self) -> bool {
@@ -152,7 +168,7 @@ impl NetIo {
     }
 
     pub fn enqueue_control_tx(&mut self, packet: Vec<u8>) -> KResult {
-        if self.control_tx_queue.len() >= CONTROL_TX_QUEUE_SIZE {
+        if self.control_tx_queue_full() {
             return Err(KError::WouldBlock);
         }
         self.control_tx_queue.push_back(tx_packet_buf(packet));

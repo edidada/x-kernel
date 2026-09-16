@@ -114,7 +114,7 @@ impl Service {
     ) -> Option<RxDrain> {
         self.network.try_with_interfaces(|interfaces| {
             let mut io = self.io.try_lock()?;
-            let batch_budget = budget.min(io.stack_ingress_capacity());
+            let batch_budget = budget.min(io.available_stack_ingress_slots());
             Some(io.drain_device_rx_budgeted(
                 interfaces.devices(),
                 timestamp,

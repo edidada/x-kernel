@@ -21,10 +21,11 @@ use lazyinit::LazyInit;
 
 use crate::{
     buf::PacketBuf,
-    consts::SOCKET_BUFFER_SIZE,
     ipv4::{self, Ipv4Header},
     udp,
 };
+
+const RX_DEFERRED_QUEUE_CAPACITY: usize = 64;
 
 /// Packets processed by one `NetRx` softirq invocation.
 pub(crate) const NET_RX_BUDGET: usize = 16;
@@ -55,6 +56,10 @@ impl NetRxQueues {
     fn occupancy(&self) -> usize {
         self.pending_udp.len() + self.deferred.len() + self.in_flight
     }
+
+    fn is_full(&self) -> bool {
+        self.occupancy() >= RX_DEFERRED_QUEUE_CAPACITY
+    }
 }
 
 static NET_RX_QUEUE: LazyInit<SpinNoIrq<NetRxQueues>> = LazyInit::new();
@@ -67,8 +72,8 @@ static NET_RX_QUEUE: LazyInit<SpinNoIrq<NetRxQueues>> = LazyInit::new();
 pub(crate) fn ensure_net_rx_queue() {
     NET_RX_QUEUE.call_once(|| {
         SpinNoIrq::new(NetRxQueues {
-            pending_udp: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
-            deferred: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
+            pending_udp: VecDeque::with_capacity(RX_DEFERRED_QUEUE_CAPACITY),
+            deferred: VecDeque::with_capacity(RX_DEFERRED_QUEUE_CAPACITY),
             in_flight: 0,
         })
     });
@@ -123,11 +128,11 @@ pub(crate) fn prepare_for_enqueue(packet: PacketBuf) -> Option<SharedRxPacket> {
 
 /// Enqueue `packet` onto the matching shared handle queue.
 ///
-/// Returns `Err(packet)` when occupancy is already [`SOCKET_BUFFER_SIZE`].
+/// Returns `Err(packet)` when the shared queue is already full.
 pub(crate) fn enqueue(packet: SharedRxPacket) -> Result<(), PacketBuf> {
     ensure_net_rx_queue();
     let mut queues = NET_RX_QUEUE.lock();
-    if queues.occupancy() >= SOCKET_BUFFER_SIZE {
+    if queues.is_full() {
         return Err(packet.into_packet());
     }
     match packet {
@@ -184,8 +189,8 @@ pub(crate) fn process_pending(budget: usize) -> bool {
             continue;
         };
         packet.clear_udp_metadata();
-        debug_assert!(queues.occupancy() < SOCKET_BUFFER_SIZE);
-        if queues.occupancy() < SOCKET_BUFFER_SIZE {
+        debug_assert!(!queues.is_full());
+        if !queues.is_full() {
             debug_assert!(queues.deferred.len() < queues.deferred.capacity());
             queues.deferred.push_back(packet);
         } else {
@@ -225,7 +230,7 @@ pub(crate) fn pop_deferred(ifindex: i32) -> Option<PacketBuf> {
 /// with Linux `skb->dev` teardown during `netif_receive_skb`.
 pub(crate) fn discard_ifindex(ifindex: i32) {
     ensure_net_rx_queue();
-    let mut dropped = Vec::with_capacity(SOCKET_BUFFER_SIZE);
+    let mut dropped = Vec::with_capacity(RX_DEFERRED_QUEUE_CAPACITY);
     {
         let mut queues = NET_RX_QUEUE.lock();
         take_prepared_ifindex(&mut queues.pending_udp, ifindex, &mut dropped);

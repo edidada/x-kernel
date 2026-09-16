@@ -513,7 +513,7 @@ Delivery of complete IPv4 UDP packets is independent of the poller's `RUNNING` e
 
 ### 28. `NET_RX_QUEUE` Capacity and Ownership Boundary
 
-`pending_udp` and `deferred` must be preallocated according to `SOCKET_BUFFER_SIZE` when the device is created. `enqueue` checks capacity against the combined number of queued and in-flight packets and rejects excess packets, so `push_back` must never trigger capacity growth within `SpinNoIrq` or the `NetRx` softirq.
+`pending_udp` and `deferred` must be preallocated according to `RX_DEFERRED_QUEUE_CAPACITY` when the device is created. `enqueue` checks capacity against the combined number of queued and in-flight packets and rejects excess packets, so `push_back` must never trigger capacity growth within `SpinNoIrq` or the `NetRx` softirq.
 UDP packets with validated metadata taken by `process_pending` must count toward the in-flight reservation. Each batch is limited to `NET_RX_BUDGET` and delivered outside the lock.
 Packets without a matching PCB must retain exclusive handle ownership, have their metadata cleared, and enter `deferred`.
 When the queue is full, `enqueue` must return the packet to the caller. The send path then drops it after releasing the `NET_RX_QUEUE` lock and BH guard.

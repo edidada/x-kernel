@@ -10,7 +10,10 @@ use smoltcp::{
     time::Instant,
 };
 
-use crate::{buf::PacketBuf, consts::SOCKET_BUFFER_SIZE, datapath::NetIo};
+use crate::{buf::PacketBuf, datapath::NetIo};
+
+const STACK_MAX_BURST_SIZE: usize = 64;
+
 pub(crate) struct StackDevice<'a> {
     io: &'a mut NetIo,
     mtu: usize,
@@ -80,7 +83,7 @@ impl smoltcp::phy::Device for StackDevice<'_> {
         let mut caps = DeviceCapabilities::default();
         caps.medium = Medium::Ip;
         caps.max_transmission_unit = self.mtu;
-        caps.max_burst_size = Some(SOCKET_BUFFER_SIZE);
+        caps.max_burst_size = Some(STACK_MAX_BURST_SIZE);
         caps
     }
 }
