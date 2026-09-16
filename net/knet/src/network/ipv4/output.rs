@@ -17,7 +17,7 @@ use crate::{
     ip::IpAddress,
     network::{
         ipv4::{self, Ipv4Error, Ipv4Header},
-        state::{NetworkState, ResolvedRoute},
+        state::{NetworkState, ResolvedRoute, TxBatch},
     },
 };
 
@@ -53,8 +53,8 @@ impl Ipv4Output {
 
     /// Resolves the path before taking `NetIo` for capacity preflight,
     /// packet preparation, fragmentation, and enqueue as one transaction.
-    /// Loopback dispatch uses the interface write lock after the queue lock
-    /// is released. Capacity failure preserves the caller's packet.
+    /// Loopback dispatch holds inventory read access through device handoff
+    /// after the queue lock is released. Capacity failure preserves the caller's packet.
     pub fn prepare_and_send(
         &self,
         state: &NetworkState,
@@ -153,17 +153,17 @@ impl Ipv4Output {
             let _poll_next = if header.dst_addr().is_broadcast() {
                 dispatch_ipv4_broadcast(state, buf, src_addr, dst_addr, timestamp)
             } else {
-                submit_resolved_unicast(state, route, src_addr, buf, timestamp)
+                submit_resolved_unicast(state, route.clone(), src_addr, buf, timestamp)
             };
         }
         Ok(())
     }
 
     /// Dispatches a poller packet, returning ownership when a shared lock is busy.
-    /// Broadcast fan-out acquires its interface guard before submitting any clone.
+    /// The batch retains inventory and routing read access through submission.
     pub(crate) fn dispatch(
         &self,
-        state: &NetworkState,
+        batch: &mut TxBatch<'_>,
         mut packet: PacketBuf,
         timestamp: MonotonicInstant,
     ) -> Result<bool, PacketBuf> {
@@ -174,33 +174,27 @@ impl Ipv4Output {
         let src_addr = IpAddress::Ipv4(header.src_addr());
         let dst_addr = IpAddress::Ipv4(header.dst_addr());
         if header.dst_addr().is_broadcast() {
-            let Some(mut interfaces) = state.try_write_interfaces() else {
-                return Err(packet);
-            };
-            return Ok(dispatch_broadcast_on_interfaces(
-                &mut interfaces,
-                packet,
-                src_addr,
-                dst_addr,
-                timestamp,
-            ));
+            return batch.broadcast(packet.ifindex(), src_addr, dst_addr, packet, timestamp);
         }
-        let Some(route) = state.try_resolve(&dst_addr) else {
-            return Err(packet);
-        };
-        let Some(route) = route else {
+        let Some(route) = batch.resolve(&dst_addr) else {
             warn!("No route found for destination: {}", dst_addr);
             return Ok(false);
         };
         let bound_if = packet.ifindex();
-        if bound_if != 0 && bound_if != route.device as i32 + 1 {
+        if bound_if != 0 && bound_if != route.dev as i32 + 1 {
             warn!(
                 "Dropping IPv4 packet bound to ifindex {bound_if} via device {}",
-                route.device as i32 + 1
+                route.dev as i32 + 1
             );
             return Ok(false);
         }
-        state.try_submit_ip_packet(route, src_addr, packet, timestamp)
+        batch.submit_ip_packet(
+            route.dev,
+            route.via.unwrap_or(dst_addr),
+            src_addr,
+            packet,
+            timestamp,
+        )
     }
 
     fn fragment(&self, mtu: Option<usize>, packet: Vec<u8>) -> KResult<Vec<Vec<u8>>> {
@@ -246,52 +240,41 @@ fn dispatch_ipv4_broadcast(
     dst_addr: IpAddress,
     timestamp: MonotonicInstant,
 ) -> bool {
-    state.with_interfaces_mut(|interfaces| {
-        dispatch_broadcast_on_interfaces(interfaces, packet, src_addr, dst_addr, timestamp)
-    })
-}
-
-fn dispatch_broadcast_on_interfaces(
-    interfaces: &mut crate::device::interfaces::InterfaceSet,
-    packet: PacketBuf,
-    src_addr: IpAddress,
-    dst_addr: IpAddress,
-    timestamp: MonotonicInstant,
-) -> bool {
-    let IpAddress::Ipv4(src_v4) = src_addr else {
-        return false;
-    };
-    let bound_if = packet.ifindex();
-    if !(src_v4.is_unspecified() || interfaces.has_ipv4_address(src_v4)) {
-        warn!("Dropping IPv4 broadcast packet with source {}", src_addr);
-        return false;
-    }
-    let device_count = interfaces.devices().len();
-    let mut poll_next = false;
-    for dev_index in 0..device_count.saturating_sub(1) {
-        let ifindex = dev_index as i32 + 1;
-        if bound_if != 0 && bound_if != ifindex {
-            continue;
+    state.with_interfaces(|interfaces| {
+        let IpAddress::Ipv4(source) = src_addr else {
+            return false;
+        };
+        if !source.is_unspecified() && !interfaces.has_ipv4_address(source) {
+            return false;
         }
-        poll_next |= interfaces.devices_mut()[dev_index].send_ip_packet(
-            ifindex,
-            dst_addr,
-            src_addr,
-            packet.clone(),
-            timestamp,
-        );
-    }
-    if device_count > 0 && (bound_if == 0 || bound_if == device_count as i32) {
-        let last = device_count - 1;
-        poll_next |= interfaces.devices_mut()[last].send_ip_packet(
-            device_count as i32,
-            dst_addr,
-            src_addr,
-            packet,
-            timestamp,
-        );
-    }
-    poll_next
+        let bound_if = packet.ifindex();
+        let mut devices = interfaces
+            .devices()
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| bound_if == 0 || bound_if == *index as i32 + 1);
+        let Some((last_index, last_device)) = devices.next_back() else {
+            return false;
+        };
+        let mut has_rx_work = false;
+        for (index, device) in devices {
+            has_rx_work |= device.send_ip_packet(
+                index as i32 + 1,
+                dst_addr,
+                src_addr,
+                packet.clone(),
+                timestamp,
+            );
+        }
+        has_rx_work
+            | last_device.send_ip_packet(
+                last_index as i32 + 1,
+                dst_addr,
+                src_addr,
+                packet,
+                timestamp,
+            )
+    })
 }
 
 fn output_ipv4_packet_count(mtu: Option<usize>, packet_len: usize) -> KResult<usize> {
@@ -337,9 +320,18 @@ mod tests {
     #[def_test]
     fn broadcast_returns_packet_before_contended_fanout() {
         let state = NetworkState::new();
+        let sends = alloc::sync::Arc::new(AtomicUsize::new(0));
+        for id in 1..=2 {
+            state.add_device(Box::new(TestDevice::ethernet(id, 1500).with_send_hook({
+                let sends = sends.clone();
+                move || {
+                    sends.fetch_add(1, Ordering::Relaxed);
+                }
+            })));
+        }
         let output = Ipv4Output::new();
         let original = PacketBuf::from_ip_packet_vec(
-            1,
+            0,
             ipv4::build_ipv4_packet(
                 Ipv4Address::UNSPECIFIED,
                 Ipv4Address::BROADCAST,
@@ -350,13 +342,17 @@ mod tests {
             .unwrap(),
             PacketOwner::Ipv4Stack,
         );
-        let returned = state.with_interfaces(|_| {
-            output
-                .dispatch(&state, original.clone(), MonotonicInstant::ORIGIN)
-                .unwrap_err()
-        });
+        let handle = state.with_interfaces(|interfaces| interfaces.devices()[1].clone());
+        let _device = handle.lock();
+        let returned = state
+            .try_with_tx_batch(|batch| {
+                output.dispatch(batch, original.clone(), MonotonicInstant::ORIGIN)
+            })
+            .unwrap()
+            .unwrap_err();
         assert_eq!(returned.network_packet(), original.network_packet());
-        assert_eq!(returned.ifindex(), 1);
+        assert_eq!(returned.ifindex(), 0);
+        assert_eq!(sends.load(Ordering::Relaxed), 0);
     }
 
     #[def_test]

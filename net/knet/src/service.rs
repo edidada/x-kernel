@@ -6,7 +6,7 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::task::Waker;
 
-use kerrno::KResult;
+use kerrno::{KError, KResult, LinuxError};
 use khal::time::monotonic_time;
 use kpoll::{PollContext, PollRegisterError, PollSet};
 use ksync::Mutex;
@@ -103,18 +103,25 @@ impl Service {
         Some(use_fn(&mut io))
     }
 
-    /// Device RX takes the interface write lock first, then `NetIo`, matching
-    /// configuration teardown. Both guards are released before ingress.
+    /// Device RX holds inventory read access, then `NetIo`, then one device
+    /// mutex per bounded batch. Inventory access keeps ifindices stable without
+    /// allocating a handle snapshot. All guards are released before ingress.
     pub(crate) fn try_drain_device_rx(
         &self,
         timestamp: MonotonicInstant,
         budget: usize,
         packets: &mut Vec<crate::buf::PacketBuf>,
     ) -> Option<RxDrain> {
-        let mut interfaces = self.network.try_write_interfaces()?;
-        let mut io = self.io.try_lock()?;
-        let batch_budget = budget.min(io.stack_ingress_capacity());
-        Some(io.drain_device_rx_budgeted(&mut interfaces, timestamp, batch_budget, packets))
+        self.network.try_with_interfaces(|interfaces| {
+            let mut io = self.io.try_lock()?;
+            let batch_budget = budget.min(io.stack_ingress_capacity());
+            Some(io.drain_device_rx_budgeted(
+                interfaces.devices(),
+                timestamp,
+                batch_budget,
+                packets,
+            ))
+        })?
     }
 
     /// Advances one bounded network round in task context without spinlocks.
@@ -355,8 +362,16 @@ impl Service {
     }
 
     pub(crate) fn send_link_frame(&self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
-        self.network
-            .with_interfaces_mut(|interfaces| interfaces.send_link_frame(ifindex, frame))
+        if ifindex <= 0 {
+            return Err(KError::InvalidInput);
+        }
+        self.network.with_interfaces(|interfaces| {
+            let device = interfaces
+                .devices()
+                .get((ifindex - 1) as usize)
+                .ok_or(KError::from(LinuxError::ENODEV))?;
+            device.send_link_frame(ifindex, frame)
+        })
     }
 
     #[cfg(unittest)]
@@ -376,7 +391,7 @@ impl Service {
     pub(crate) fn repair_rx_cursor_after_device_removed(&self, removed_index: usize) {
         self.network.with_interfaces(|interfaces| {
             self.with_io(|io| {
-                io.on_device_removed(interfaces, removed_index);
+                io.on_device_removed(interfaces.devices().len(), removed_index);
             });
         });
     }
@@ -557,6 +572,36 @@ pub(crate) mod tests {
         assert_eq!(progress.tx_packets, 0);
         assert!(progress.has_more);
     }
+
+    #[def_test(serial)]
+    fn poll_round_continues_protocol_on_device_mutex_contention() {
+        use crate::device::test_device::TestDevice;
+
+        let state = NetworkState::new();
+        state.add_device(Box::new(TestDevice::ethernet(1, 1500)));
+        let handle = state.with_interfaces(|interfaces| interfaces.devices()[0].clone());
+        let service = Service::new(state);
+        const SENTINEL: u64 = 0xDEAD;
+        service
+            .stack
+            .protocol_deadline_micros
+            .store(SENTINEL, Ordering::Release);
+
+        let _device = handle.lock();
+        let progress = service.poll_budgeted(TEST_POLL_BUDGET);
+
+        assert_eq!(progress.rx_packets, 0);
+        assert!(progress.has_more);
+        assert!(
+            service
+                .stack
+                .protocol_deadline_micros
+                .load(Ordering::Acquire)
+                != SENTINEL
+        );
+        assert!(service.io.try_lock().is_some());
+    }
+
     #[def_test(serial)]
     fn poll_round_dispatches_tx_when_due_ipv4_expiration_lock_is_contended() {
         let loopback_addr = Ipv4Address::new(127, 0, 0, 1);

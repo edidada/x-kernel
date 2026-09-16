@@ -20,6 +20,7 @@ net/knet/
 └── src/
     ├── device/
     │   ├── ethernet.rs
+    │   ├── handle.rs
     │   ├── interfaces.rs
     │   ├── test_device.rs
     │   ├── loopback.rs
@@ -209,7 +210,9 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 | Router | Owns configured and address-derived routes and selects sources and next hops. |
 | InterfaceSet | Owns devices, IPv4 addresses, link configuration, and aggregate MTU. |
 | NetworkState | Owns Router and InterfaceSet and keeps address-derived routes consistent. |
-| NetIo | Owns three packet queues and the RX cursor; borrows devices under the interface write guard for RX. |
+| DeviceHandle | Owns a shared device mutex and cached identity, link kind, and MTU. |
+| TxBatch | Borrows inventory and routing for one bounded TX chunk and reuses the selected device guard. |
+| NetIo | Owns three packet queues and the RX cursor; borrows devices under inventory read access and locks each device once per RX batch. |
 | Ipv4Output | Owns IPv4 identification and performs transactional preparation, fragmentation, and egress selection. |
 | Stack | Owns smoltcp Interface and the protocol/deferred-close deadline; borrows StackDevice queues for staged polling. |
 | Ipv4Ingress | Owns the locked local-address/reassembly state and the atomic reassembly deadline. |
@@ -246,10 +249,12 @@ used by dump queries; ioctl and rtnetlink retain their existing match predicates
 
 `Service` owns NetworkState, a `Mutex<NetIo>`, and Ipv4Output with an atomic
 fragment identification counter. NetworkState has separate `RwLock`s for
-interfaces and routing; paths needing both acquire interfaces first. TX copies
-a route and releases both guards before device submission, then revalidates
-device identity and local source under the interface write guard. Device
-removal can renumber slots between those stages. StackDevice borrows NetIo
+interfaces and routing; paths needing both acquire interfaces first. Poller TX
+holds both read guards through a bounded device batch. Synchronous output copies
+a route before preparation and revalidates slot identity and local source under
+inventory read access held through submission. Device removal can renumber slots
+between those stages, so a retained handle alone cannot authorize submission.
+StackDevice borrows NetIo
 queues while its mutex is held. Socket and listener ownership remains in
 `SOCKET_SET` and `LISTEN_TABLE`.
 
@@ -263,13 +268,14 @@ soft limit, with maintenance and one egress pass retained after bulk work expire
 
 IPv4 output resolves source and MTU before locking NetIo. Non-loopback sends
 hold NetIo across capacity preflight, preparation, fragmentation, and enqueue.
-Loopback sends use the copied route and submit synchronously under the interface
-write guard. Poller TX dequeues into a bounded reusable FIFO, releases NetIo,
+Loopback sends use the copied route and submit synchronously under an interface
+read guard and device mutex. Poller TX dequeues into a bounded reusable FIFO, releases NetIo,
 and uses nonblocking route lookup and device-lock acquisition. Contention
 returns the current packet to the FIFO front and retains the unsent tail;
 later rounds resume it before dequeuing more work and obey their own budgets.
 Freed data capacity is reported in the dequeue round even when dispatch defers.
-Broadcast and multicast acquire their interface guard before any fan-out.
+Broadcast and multicast acquire their inventory read guard and all selected
+device guards before any fan-out; the last recipient takes the original packet.
 IPv6 retains its parser and multicast behavior; the IPv4-only route model still
 leaves IPv6 unicast on the existing missing-route path.
 
@@ -667,9 +673,9 @@ Ethernet RX notifications use `NetRx` to wake RX poll sources and schedule `knet
 
 Each `Service::poll_budgeted` round first attempts pending IPv4 reassembly expiration and flushes retained ingress/control batches. It then dispatches queued TX, drains device RX, advances smoltcp, and uses the remaining TX and device-RX budgets for a second pass. Device RX and smoltcp ingress each have a separate allowance of `budget.rx_packets`.
 
-Device draining rotates its starting position across devices, consuming each device until it is empty or the batch budget is exhausted. IPv4 validation, destination filtering, reassembly, and UDP delivery run after releasing the interface and NetIo guards. Unmatched unicast UDP can generate ICMP port-unreachable responses; unsupported unicast IPv4 protocols can generate protocol-unreachable responses. ICMP errors are inspected for UDP before eligible packets enter the smoltcp batch. IPv6 enters that batch directly.
+Device draining rotates its starting position across devices, consuming each device until it is empty or the batch budget is exhausted. A batch borrows the device inventory under a read guard and acquires each device mutex once, without allocating a handle snapshot. IPv4 validation, destination filtering, reassembly, and UDP delivery run after releasing the device, interface, and NetIo guards. Unmatched unicast UDP can generate ICMP port-unreachable responses; unsupported unicast IPv4 protocols can generate protocol-unreachable responses. ICMP errors are inspected for UDP before eligible packets enter the smoltcp batch. IPv6 enters that batch directly.
 
-The following pseudocode summarizes the round. Failed shared-state `try_lock` acquisitions retain pending batches and return `has_more = true`. Contention during reassembly expiration only defers that timer work, allowing the round to continue. Reusable batch mutexes and nested listener operations still use blocking locks.
+The following pseudocode summarizes the round. Failed shared-state `try_lock` acquisitions retain pending batches and set `has_more = true`. TX or device-RX contention ends that stage while allowing protocol maintenance and egress to advance; contention on protocol prerequisites defers protocol processing. Contention during reassembly expiration only defers that timer work. Reusable batch mutexes and nested listener operations still use blocking locks.
 
 **Algorithm 2. RX Progress**
 
@@ -686,7 +692,7 @@ The following pseudocode summarizes the round. Failed shared-state `try_lock` ac
 | 5 | &emsp;flush retained batches, or return retry |
 | 6 | &emsp;tx_done = dispatch queued TX within $B_{\mathrm{tx}}$ |
 | 7 | &emsp;drain_device_rx($B_{\mathrm{rx}}$ unless time limit reached) |
-| 8 | &emsp;copy MTU with `try_read` on interfaces; `try_lock` socket set, NetIo, then Interface; otherwise return retry |
+| 8 | &emsp;use the cached Stack MTU; `try_lock` socket set, NetIo, then Interface; otherwise return retry |
 | 9 | &emsp;`Interface.poll_maintenance()` |
 | 10 | &emsp;**if** time limit has not been reached: |
 | 11 | &emsp;&emsp;poll smoltcp ingress within $B_{\mathrm{rx}}$ |
@@ -694,24 +700,24 @@ The following pseudocode summarizes the round. Failed shared-state `try_lock` ac
 | 13 | &emsp;**repeat** while progress continues, within $\max(B_{\mathrm{tx}}, 1)$ passes and the soft time limit |
 | 14 | &emsp;reap deferred TCP closes and read `Interface.poll_at()` |
 | 15 | &emsp;release Interface; refresh TCP acceptors; release NetIo and socket set |
-| 16 | &emsp;dispatch queued TX within remaining TX budget if time remains |
-| 17 | &emsp;retain unsent TX and return retry on dispatch contention |
-| 18 | &emsp;**if** time and device-RX budget remain: |
+| 16 | &emsp;dispatch queued TX within remaining TX budget if time remains and earlier TX did not contend |
+| 17 | &emsp;retain unsent TX and remember dispatch contention |
+| 18 | &emsp;**if** time and device-RX budget remain and earlier RX did not contend: |
 | 19 | &emsp;&emsp;drain_device_rx(remaining device-RX budget) |
 | 20 | &emsp;publish the earliest protocol / deferred-close deadline |
-| 21 | &emsp;`try_lock` NetIo for queue readiness, release it, then `try_read` interfaces for device readiness; otherwise return retry |
-| 22 | &emsp;**return** progress with `has_more` for pending RX, ingress, TX, immediately due protocol work, or pending reassembly expiration |
+| 21 | &emsp;`try_lock` NetIo for queue readiness, release it, then `try_read` interfaces and `try_lock` devices for readiness; contention counts as pending work |
+| 22 | &emsp;**return** progress with `has_more` for contention, pending RX, ingress, TX, immediately due protocol work, or pending reassembly expiration |
 | 23 | **Procedure** `drain_device_rx(remaining)` |
 | 24 | &emsp;process retained RX batch and flush accepted/control batches |
 | 25 | &emsp;**while** budget and time remain: |
-| 26 | &emsp;&emsp;`try_write` interfaces, then `try_lock` NetIo, or return retry |
-| 27 | &emsp;&emsp;pull a bounded batch, limited by smoltcp ingress capacity |
-| 28 | &emsp;&emsp;release NetIo and interfaces |
+| 26 | &emsp;&emsp;`try_read` interfaces, then `try_lock` NetIo, or return retry |
+| 27 | &emsp;&emsp;`try_lock` each device once to pull at most 32 work items, limited by smoltcp ingress capacity; record and skip busy devices |
+| 28 | &emsp;&emsp;release device guards, NetIo, and interfaces |
 | 29 | &emsp;&emsp;`try_lock` Ipv4IngressState, or retain batch and return retry |
 | 30 | &emsp;&emsp;validate/filter IPv4, reassemble fragments, deliver UDP, collect ICMP responses and packets accepted for smoltcp |
 | 31 | &emsp;&emsp;release Ipv4IngressState |
 | 32 | &emsp;&emsp;flush accepted/control batches, or return retry |
-| 33 | &emsp;&emsp;**stop** when device draining reports no more work |
+| 33 | &emsp;&emsp;**stop** on device contention, zero progress, or no more work |
 | 34 | **Procedure** `flush accepted/control batches` |
 | 35 | &emsp;`try_lock` socket set if accepted batch is nonempty |
 | 36 | &emsp;`try_lock` NetIo; on failure retain both batches and return retry |
@@ -743,17 +749,17 @@ UDP builds IPv4 packets in knet; TCP and raw sockets submit packets through smol
 | 4 | for non-loopback output, lock NetIo and preflight all fragment slots |
 | 5 | build the UDP checksum and IPv4 header, choose DF, and fragment using the copied MTU |
 | 6 | for non-loopback output, enqueue all fragments and release NetIo |
-| 7 | for loopback output, submit synchronously with device/source revalidation under the interface write guard |
+| 7 | for loopback output, hold an interface read guard through slot/handle and source revalidation and device-locked submission |
 | 8 | notify(Tx); assist_once() |
 | 9 | **Procedure** `dispatch_budgeted(tx_budget)` |
 | 10 | resume retained TX first; otherwise try-lock NetIo and dequeue a bounded batch, preferring control traffic |
 | 11 | record freed data capacity and release NetIo before dispatch |
-| 12 | for IPv4 unicast, prepare the header and try-read interfaces then routing to copy a route |
-| 13 | release read guards; validate binding, try-write interfaces, revalidate device identity and local source, then submit |
-| 14 | for IPv4 limited broadcast or IPv6 multicast, try-write interfaces before the complete fan-out |
-| 15 | for IPv6 unicast, use the same nonblocking route and submission stages with the existing source check |
+| 12 | try-read interfaces then routing once per chunk of at most 32 packets; retain both guards through dispatch |
+| 13 | for IPv4 unicast, prepare the header, copy a route rule, validate binding/source, and submit; reuse the device guard for consecutive packets on the same egress |
+| 14 | for IPv4 limited broadcast or IPv6 multicast, release the cached egress guard and try-lock every selected device before sending; clone for earlier recipients and move the packet to the last |
+| 15 | for IPv6 unicast, use the same batch view and device guard with the existing source check |
 | 16 | on lock contention, restore the current packet to the FIFO front and retain the tail for retry |
-| 17 | count completed or dropped packets against this round's budget; check the soft time limit between chunks |
+| 17 | count completed or dropped packets against this round's budget; release device and read guards before checking the soft time limit between chunks |
 | 18 | return dispatch count, capacity change, and contention; retained TX contributes to `has_more` |
 
 IPv4 limited broadcast is replicated subject to interface binding. Other IPv4 destinations, including multicast and directed broadcast, use route lookup. IPv6 multicast is replicated to all devices in this dispatch path. These rules differ from a general multicast fan-out policy.
@@ -770,12 +776,19 @@ Concurrency is organized around a single owner for protocol progress, with finer
 
 The global `SERVICE` is a `LazyInit<Service>`. Stack and Ipv4Ingress own their
 state mutexes and atomic deadlines. NetworkState owns interface and routing
-RwLocks; Service owns the NetIo mutex. NetworkDataPlane's four batch mutexes
+RwLocks; each DeviceHandle owns a device mutex and caches immutable identity,
+link kind, and the atomically updated MTU. Service owns the NetIo mutex.
+NetworkDataPlane's four batch mutexes
 are private to the sole protocol executor. All shared processing-lock
-acquisitions in a poll round use `try_lock`, `try_read`, or `try_write`.
-Contention retains pending packets and reports `has_more`, allowing the
-executor to release its RUNNING ownership. Route guards end before device I/O;
-device submission rechecks the copied identity and local IPv4 source.
+acquisitions in a poll round use `try_lock` or `try_read`, including device
+readiness checks. A busy device conservatively reports pending work.
+Contention retains pending packets and reports `has_more`; TX/RX stage
+contention still permits protocol progress before the executor releases its
+RUNNING ownership. TxBatch retains inventory and routing read guards through
+each bounded chunk and reuses the selected device guard. This keeps source
+addresses and slot-based ifindices stable through handoff. Synchronous sends
+recheck copied handle identity and source under inventory read access held
+through device submission.
 
 `NetworkPoller` represents this execution right with the four states maintained by `kwork::BudgetedPoller`: `IDLE`, `SCHEDULED`, `RUNNING`, and `RUNNING_PENDING`. A kwork background batch may process 512 RX packets, 256 TX packets, and 32 timer events. A socket-assisted batch uses smaller budgets of 16, 16, and 8. Every round also has a 1-ms soft time limit. Background batches run at most four consecutive rounds, while one assistance call runs at most one round. When a background batch reaches its round limit, it queues another batch and releases the execution right.
 
@@ -785,8 +798,8 @@ The global `SOCKET_SET` wraps `SocketSetState` in a single mutex. The smoltcp so
 
 ### Receive Path and UDP Queues
 
-Device RX acquires the interface write guard before NetIo and releases both
-before native IPv4 processing. TX dequeues under NetIo and releases it before
+Device RX acquires an interface read guard before NetIo and the device mutex,
+then releases all three before native IPv4 processing. TX dequeues under NetIo and releases it before
 route lookup or device submission. TCP snooping holds socket-set then NetIo
 through accepted-batch handoff. The fixed-capacity smoltcp ingress queue and
 retained batches preserve packets across budget exhaustion and contention.
@@ -833,7 +846,7 @@ Readable, writable, and connection-state events use separate `PollSet` instances
 
 ### Control Plane and RX Wakeups
 
-Control-plane state is divided between InterfaceSet, which owns the device inventory and IPv4 addresses, and Router, which owns configured and address-derived routes and selects sources and next hops. Devices own their link state and neighbor tables. Netlink parses requests and encodes live snapshots through Service; mutations acquire their configuration guard through NetworkConfig::lock and borrow state under its interface and routing locks.
+Control-plane state is divided between InterfaceSet, which owns the device inventory and IPv4 addresses, and Router, which owns configured and address-derived routes and selects sources and next hops. Devices own their link state and neighbor tables. Neighbor existence checks, update-policy validation, and updates hold one device mutex continuously so RX neighbor learning cannot interleave with the decision. Netlink parses requests and encodes live snapshots through Service; mutations acquire their configuration guard through NetworkConfig::lock and borrow state under its interface and routing locks.
 
 `control::NetworkConfig::lock` serializes control-plane mutations across sockets, legacy socket-ioctl mutations, and `unregister_netdev`. Each netlink socket has mutexes for its send transaction and RX queue and an `RwLock` for its local address. The global `UEVENT_SUBSCRIBERS` mutex protects weak subscriber references, and `UEVENT_SEQNUM` atomically allocates event sequence numbers. The send-transaction lock covers capacity preflight, mutation execution, and response enqueueing for one socket. Responses are generated outside the RX-queue lock; that lock is taken only to check capacity and enqueue the result. The send-transaction lock precedes NetworkConfig. Within a state update, interfaces precede routing. Those guards are released before ingress and Interface projections are updated separately; RX cursor repair takes interfaces then NetIo, and Stack rebuild takes NetIo then Interface. Response enqueue takes the netlink RX lock after mutation processing.
 
@@ -863,17 +876,17 @@ The `NetRx` softirq, socket TX paths, protocol timers, and socket assist share o
 
 Loopback UDP is delivered directly to the PCB within the transmit path's bottom-half window, following the Linux sequence from `dev_queue_xmit` through `loopback_xmit` and `__netif_rx` to softirq processing at `local_bh_enable`. TCP, ICMP, and IPv6 use the poller's TX-then-RX rounds.
 
-RX, TX, and timers have separate budgets, and each `Service` round has a 1 ms soft time limit. Staged smoltcp APIs bound ingress and egress work. TX stages share one budget, as do the main and final RX stages, allowing loopback TCP and ICMP to complete a device round trip within one assist. Control traffic takes priority over data traffic. Interface inventory, routing, NetIo, Interface, or socket-set contention ends the round with `has_more` set. IPv4 reassembly processing acquires the `Ipv4IngressState` lock only for pending expiry events; contention preserves those events while TX continues. Expiry events are processed under the timer budget across successive rounds.
+RX, TX, and timers have separate budgets, and each `Service` round has a 1 ms soft time limit. Staged smoltcp APIs bound ingress and egress work. TX stages share one budget, as do the main and final RX stages, allowing loopback TCP and ICMP to complete a device round trip within one assist. Control traffic takes priority over data traffic. Contention sets `has_more`. TX and device-RX contention defers the affected stage while protocol maintenance and egress continue when their prerequisite locks are available. IPv4 reassembly processing acquires the `Ipv4IngressState` lock only for pending expiry events; contention preserves those events while TX continues. Expiry events are processed under the timer budget across successive rounds.
 
 TCP sends fill the smoltcp buffer and notify the poller, which advances the protocol and dispatches TX in bounded batches. TCP receives publish `RxWindow` when free buffer space before the read is below the maximum window-scaling quantum; subsequent window growth uses RX and timer processing. TCP and raw sockets register aggregate send wakers with smoltcp, while `PollProgress::tx_capacity_changed` wakes poller TX waiters when NetIo data-queue slots become available. Separate atomic deadline sources track protocol and deferred-close timers and IPv4 reassembly. Periodic sampling wakes socket waiters and notifies the poller when deadlines expire.
 
 ### Control-Plane State Ownership
 
-Devices own link configuration and expose interface names, MTUs, administrative and operational states, and hardware addresses through `NetDevice::link_snapshot`. `RTM_GETLINK` and `RTM_NEWLINK` access this device-owned state directly. The AF_PACKET send path obtains an allocation-free `LinkSendSnapshot` under the interface read lock, validates it after releasing that lock, and acquires the interface write lock through `Service::send_link_frame` for transmission. Snapshot validation and dispatch are separate critical sections. Device-existence checks use `has_device`, and route MTU queries read the matching device directly. Configuration changes or device removal rebuild the smoltcp `Interface` only when the effective MTU changes, keeping cached `DeviceCapabilities` consistent with the device set while otherwise preserving runtime caches.
+Devices own link configuration and expose interface names, MTUs, administrative and operational states, and hardware addresses through `NetDevice::link_snapshot`. `RTM_GETLINK` and `RTM_NEWLINK` access this device-owned state directly. The AF_PACKET send path obtains an allocation-free `LinkSendSnapshot` under the interface read lock and validates it after releasing that lock. `Service::send_link_frame` reacquires inventory read access, selects the current device slot, and retains that guard through device-locked transmission. Snapshot validation and dispatch are separate critical sections. Device-existence checks use `has_device`, and route MTU queries read the cached device MTU. Configuration changes or device removal rebuild the smoltcp `Interface` only when the effective MTU changes, keeping cached `DeviceCapabilities` consistent with the device set while otherwise preserving runtime caches.
 
 `InterfaceSet` owns `Ipv4AddrEntry` values with `dev`, `addr`, `scope`, and optional `broadcast` fields. The broadcast override is exposed as `ifa_broadcast` in rtnetlink. Broadcast addresses default to the CIDR-derived value. Insertion validates the device, unicast address, and smoltcp address capacity. Legacy address and netmask ioctls update the primary entry while preserving other addresses on the device. Netmask updates retain the scope and recompute the broadcast address only when its previous value was mask-derived.
 
-Each address produces a `/32` local route and a connected route for its network. Address removal clears derived routes, routes whose preferred source becomes invalid, and the device's pending TX. InterfaceSet projects addresses into devices, and NetworkConfig updates Stack and Ipv4Ingress address views under the NetworkConfig-owned configuration guard, after releasing the inventory locks. Ethernet uses its address view for ARP, directed broadcasts, and packets awaiting neighbor resolution.
+Each address produces a `/32` local route and a connected route for its network. Address removal clears derived routes, routes whose preferred source becomes invalid, and the device's pending TX. Inventory read access spans source validation and device submission, excluding address removal from that handoff interval. InterfaceSet projects addresses into devices, and NetworkConfig updates Stack and Ipv4Ingress address views under the NetworkConfig-owned configuration guard, after releasing the inventory locks. Ethernet uses its address view for ARP, directed broadcasts, and packets awaiting neighbor resolution.
 
 Configured routes belong to `Router`, where `RTM_NEWROUTE` and `SIOCADDRT` require gateways to lie within the output interface's IPv4 subnet and exclude directed-broadcast addresses. Ethernet devices own their neighbor tables, so route and neighbor mutations operate through their respective owners. `unregister_netdev` holds the configuration guard owned by `NetworkConfig` while NetworkConfig removes the interface through NetworkState, repairs routes through Router, and adjusts the NetIo RX cursor.
 
@@ -987,16 +1000,7 @@ Implementation details: [packet.rs](../src/link/packet.rs), [rtnetlink.rs](../sr
 | Unix datagram drop | Clears the binding slot, releases the peer channel, and wakes peer waiters. |
 | Unix pathname socket close | Releases the transport binding; the inode remains under VFS ownership. |
 | Ethernet RX completion | Returns the frame buffer through the driver's `recycle_rx` interface. |
-| Ethernet device removal | Detaches the RX scheduler and unregisters its RX source. `unregister_netdev` removes Router routes and InterfaceSet addresses and device state under the configuration guard owned by `NetworkConfig`. |
+| Ethernet device removal | Inventory write access waits for bounded TX/RX read sections, then removes Router routes and InterfaceSet addresses and device state under the configuration guard owned by `NetworkConfig`. Retained DeviceHandles keep the object alive; copied routes must revalidate the current slot before submission. Final device destruction detaches the RX scheduler and unregisters its RX source. |
 | vsock transport removal | Clears device/transport state, closes tracked connections, wakes connection/listener/credit waiters, clears listen and bridge-event queues, and resets polling references. Existing socket references retain connection entries until cleanup. |
 | vsock stream drop | Shuts down the connection and removes its manager entry. |
 | Bridge connection close | Removes the bridge entry and TIPC handle-set registration, closes the channel, and disconnects vsock. Disconnect/abort wakes credit waiters before removing the manager entry. Reverse TIPC ports remain registered for the global bridge runtime's lifetime. |
-
-### IPv4 module layout
-
-`network/ipv4/mod.rs` declares the ingress and output modules and exports the
-packet-processing interface implemented in private `process.rs`. The latter
-owns header validation, packet construction, fragmentation helpers, and ICMP
-error construction. `ingress.rs` owns local delivery, reassembly state, and
-expiration; `output.rs` owns route-based output preparation and fragment ID
-allocation. `Service` and `NetworkDataPlane` use these modules directly.

@@ -6,12 +6,12 @@
 use ktime_types::MonotonicInstant;
 use smoltcp::wire::Ipv6Packet;
 
-use crate::{buf::PacketBuf, ip::IpAddress, network::state::NetworkState};
+use crate::{buf::PacketBuf, ip::IpAddress, network::state::TxBatch};
 
-/// Returns the unsent packet on route or interface contention.
+/// Returns the unsent packet on device contention within the forwarding batch.
 /// Successful dispatch returns the existing device RX-ready hint.
 pub(crate) fn dispatch(
-    state: &NetworkState,
+    batch: &mut TxBatch<'_>,
     packet: PacketBuf,
     timestamp: MonotonicInstant,
 ) -> Result<bool, PacketBuf> {
@@ -27,32 +27,21 @@ pub(crate) fn dispatch(
         )
     };
     if is_multicast {
-        let Some(mut interfaces) = state.try_write_interfaces() else {
-            return Err(packet);
-        };
-        let mut poll_next = false;
-        let device_count = interfaces.devices().len();
-        for dev_index in 0..device_count {
-            poll_next |= interfaces.devices_mut()[dev_index].send_ip_packet(
-                dev_index as i32 + 1,
-                dst_addr,
-                src_addr,
-                packet.clone(),
-                timestamp,
-            );
-        }
-        return Ok(poll_next);
+        return batch.broadcast(0, src_addr, dst_addr, packet, timestamp);
     }
 
-    let Some(route) = state.try_resolve(&dst_addr) else {
-        return Err(packet);
-    };
-    let Some(route) = route else {
+    let Some(route) = batch.resolve(&dst_addr) else {
         warn!("No route found for destination: {}", dst_addr);
         return Ok(false);
     };
-    assert_eq!(route.source, src_addr);
-    state.try_submit_ip_packet(route, src_addr, packet, timestamp)
+    assert_eq!(route.src, src_addr);
+    batch.submit_ip_packet(
+        route.dev,
+        route.via.unwrap_or(dst_addr),
+        src_addr,
+        packet,
+        timestamp,
+    )
 }
 
 #[cfg(unittest)]
@@ -80,9 +69,13 @@ mod tests {
     fn ipv6_multicast_returns_packet_before_contended_fanout() {
         let state = NetworkState::new();
         let original = packet(true);
-        let returned = state.with_interfaces(|_| {
-            dispatch(&state, original.clone(), MonotonicInstant::ORIGIN).unwrap_err()
-        });
+        state.add_device(Box::new(LoopbackDevice::new()));
+        let handle = state.with_interfaces(|interfaces| interfaces.devices()[0].clone());
+        let _device = handle.lock();
+        let returned = state
+            .try_with_tx_batch(|batch| dispatch(batch, original.clone(), MonotonicInstant::ORIGIN))
+            .unwrap()
+            .unwrap_err();
         assert_eq!(returned.network_packet(), original.network_packet());
     }
 
@@ -92,10 +85,20 @@ mod tests {
         state.add_device(Box::new(LoopbackDevice::new()));
         state.add_device(Box::new(LoopbackDevice::new()));
         let mut io = NetIo::new();
-        assert!(dispatch(&state, packet(true), MonotonicInstant::ORIGIN).unwrap());
+        assert!(
+            state
+                .try_with_tx_batch(|batch| dispatch(batch, packet(true), MonotonicInstant::ORIGIN))
+                .unwrap()
+                .unwrap()
+        );
         let mut packets = Vec::new();
-        let drain = state.with_interfaces_mut(|interfaces| {
-            io.drain_device_rx_budgeted(interfaces, MonotonicInstant::ORIGIN, 4, &mut packets)
+        let drain = state.with_interfaces(|interfaces| {
+            io.drain_device_rx_budgeted(
+                interfaces.devices(),
+                MonotonicInstant::ORIGIN,
+                4,
+                &mut packets,
+            )
         });
         assert_eq!(drain.work_done, 2);
         assert_eq!(packets[0].ifindex(), 1);
@@ -106,10 +109,20 @@ mod tests {
         let state = NetworkState::new();
         state.add_device(Box::new(LoopbackDevice::new()));
         let mut io = NetIo::new();
-        assert!(!dispatch(&state, packet(false), MonotonicInstant::ORIGIN).unwrap());
+        assert!(
+            !state
+                .try_with_tx_batch(|batch| dispatch(batch, packet(false), MonotonicInstant::ORIGIN))
+                .unwrap()
+                .unwrap()
+        );
         let mut packets = Vec::new();
-        let drain = state.with_interfaces_mut(|interfaces| {
-            io.drain_device_rx_budgeted(interfaces, MonotonicInstant::ORIGIN, 1, &mut packets)
+        let drain = state.with_interfaces(|interfaces| {
+            io.drain_device_rx_budgeted(
+                interfaces.devices(),
+                MonotonicInstant::ORIGIN,
+                1,
+                &mut packets,
+            )
         });
         assert_eq!(drain.work_done, 0);
     }

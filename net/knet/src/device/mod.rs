@@ -11,11 +11,13 @@ use kpoll::{PollContext, PollRegisterError};
 use ktime_types::MonotonicInstant;
 
 mod ethernet;
+mod handle;
 pub(crate) mod interfaces;
 mod loopback;
 mod net_rx;
 
 pub use ethernet::*;
+pub(crate) use handle::DeviceHandle;
 pub use loopback::*;
 
 use crate::{

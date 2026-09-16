@@ -6,10 +6,10 @@
 
 use alloc::{boxed::Box, string::String, vec::Vec};
 
-use kerrno::{KError, KResult, LinuxError};
+use kerrno::LinuxError;
 
 use super::{
-    LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NeighborUpdate,
+    DeviceHandle, LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NeighborUpdate,
     NeighborUpdatePolicy, NetDevice,
 };
 use crate::{
@@ -18,14 +18,14 @@ use crate::{
     netlink::RT_SCOPE_UNIVERSE as ROUTE_SCOPE_UNIVERSE,
 };
 
-/// Owns live devices, IPv4 addresses, and the aggregate MTU.
+/// Owns live device handles, IPv4 addresses, and the aggregate MTU.
 ///
 /// [`crate::network::state::NetworkState`] protects this inventory with a
-/// read-mostly lock. Packet I/O takes the write side only while polling or
-/// transmitting on a device; NetworkConfig coordinates route and stack
-/// projections.
+/// read-mostly lock. Packet I/O retains that read guard while locking each
+/// device so source addresses and indices stay valid through a bounded batch.
+/// Writers use the write side for add/remove, addresses, and link configuration.
 pub(crate) struct InterfaceSet {
-    devices: Vec<Box<dyn NetDevice>>,
+    devices: Vec<DeviceHandle>,
     ipv4_addrs: Vec<Ipv4AddrEntry>,
     effective_mtu: usize,
 }
@@ -52,14 +52,9 @@ pub(crate) struct Ipv4AddrSnapshot {
 }
 
 impl InterfaceSet {
-    /// Borrows the live interfaces in their current slot order.
-    pub(crate) fn devices(&self) -> &[Box<dyn NetDevice>] {
+    /// Borrows the live device handles in their current slot order.
+    pub(crate) fn devices(&self) -> &[DeviceHandle] {
         &self.devices
-    }
-
-    /// Borrows device backends for packet I/O without resizing the inventory.
-    pub(crate) fn devices_mut(&mut self) -> &mut [Box<dyn NetDevice>] {
-        &mut self.devices
     }
 
     pub(crate) fn has_rx_work(&self) -> bool {
@@ -139,16 +134,7 @@ impl InterfaceSet {
         let effective_mtu = self.effective_mtu;
 
         let LinkConfigUpdate { name, mtu, is_up } = update;
-        let device = &mut self.devices[dev];
-        if let Some(mtu) = mtu {
-            device.set_mtu(mtu)?;
-        }
-        if let Some(name) = name {
-            device.set_name(name);
-        }
-        if let Some(is_up) = is_up {
-            device.set_link_up(is_up);
-        }
+        self.devices[dev].apply_link_config(name, mtu, is_up)?;
         if is_mtu_changed {
             self.recompute_effective_mtu();
         }
@@ -164,15 +150,8 @@ impl InterfaceSet {
         update: NeighborUpdate,
         policy: NeighborUpdatePolicy,
     ) -> Result<(), LinuxError> {
-        let device = self.devices.get_mut(update.dev).ok_or(LinuxError::ENODEV)?;
-        let exists = device.has_neighbor(update.dst);
-        if exists && !policy.can_replace {
-            return Err(LinuxError::EEXIST);
-        }
-        if !exists && !policy.can_create {
-            return Err(LinuxError::ENOENT);
-        }
-        device.apply_neighbor_update(update)
+        let device = self.devices.get(update.dev).ok_or(LinuxError::ENODEV)?;
+        device.apply_neighbor_update(update, policy)
     }
 
     #[cfg(unittest)]
@@ -191,17 +170,8 @@ impl InterfaceSet {
             .unwrap_or(STANDARD_MTU);
     }
 
-    pub fn send_link_frame(&mut self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
-        let dev_index = Self::device_index(ifindex).ok_or(KError::InvalidInput)?;
-        let dev = self
-            .devices
-            .get_mut(dev_index)
-            .ok_or(KError::from(LinuxError::ENODEV))?;
-        dev.send_link_frame(ifindex, frame)
-    }
-
     pub fn add_device(&mut self, device: Box<dyn NetDevice>) -> usize {
-        self.devices.push(device);
+        self.devices.push(DeviceHandle::new(device));
         self.sync_device_ipv4_addrs();
         self.recompute_effective_mtu();
         self.devices.len() - 1
@@ -217,6 +187,7 @@ impl InterfaceSet {
             .iter()
             .filter_map(|entry| (entry.dev == pos).then_some(entry.addr.address()))
             .collect();
+        self.devices[pos].with_mut(|device| device.set_link_up(false));
         self.devices.remove(pos);
         self.ipv4_addrs.retain(|entry| entry.dev != pos);
         for entry in &mut self.ipv4_addrs {
@@ -226,7 +197,7 @@ impl InterfaceSet {
         }
         for source in removed_sources {
             if !self.has_ipv4_address(source) {
-                for device in &mut self.devices {
+                for device in &self.devices {
                     device.remove_pending_ipv4_source(source);
                 }
             }
@@ -292,7 +263,7 @@ impl InterfaceSet {
             .filter_map(|entry| {
                 self.devices.get(entry.dev).map(|device| Ipv4AddrSnapshot {
                     entry: *entry,
-                    label: String::from(device.name()),
+                    label: device.name(),
                 })
             })
             .collect()
@@ -476,7 +447,7 @@ impl InterfaceSet {
         if self.has_ipv4_address(address) {
             return;
         }
-        for device in &mut self.devices {
+        for device in &self.devices {
             device.remove_pending_ipv4_source(address);
         }
     }
@@ -512,7 +483,7 @@ impl InterfaceSet {
                     .collect()
             })
             .collect();
-        for (device, assigned_addrs) in self.devices.iter_mut().zip(assigned_addrs) {
+        for (device, assigned_addrs) in self.devices.iter().zip(assigned_addrs) {
             device.set_ipv4_addrs(&assigned_addrs, &local_addrs);
         }
     }

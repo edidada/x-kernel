@@ -4,8 +4,9 @@
 
 //! Packet queues and device transport.
 //!
-//! `NetIo` is the queue mutex domain. Device RX still borrows `InterfaceSet`
-//! while that write lock is already held; TX enqueue/dequeue does not.
+//! `NetIo` is the queue mutex domain. Device RX borrows [`DeviceHandle`]s
+//! under the inventory read lock and polls a bounded batch per device mutex.
+//! TX enqueue/dequeue does not borrow the inventory.
 use alloc::{collections::VecDeque, vec::Vec};
 
 use kerrno::{KError, KResult};
@@ -14,7 +15,7 @@ use ktime_types::MonotonicInstant;
 use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::SOCKET_BUFFER_SIZE,
-    device::interfaces::InterfaceSet,
+    device::DeviceHandle,
 };
 const CONTROL_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
 pub(crate) const DATA_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
@@ -27,6 +28,7 @@ pub(crate) struct NetIo {
 pub(crate) struct RxDrain {
     pub work_done: usize,
     pub has_more: bool,
+    pub has_lock_contention: bool,
 }
 impl NetIo {
     pub(crate) fn new() -> Self {
@@ -61,21 +63,24 @@ impl NetIo {
 
     pub fn drain_device_rx_budgeted(
         &mut self,
-        interfaces: &mut InterfaceSet,
+        devices: &[DeviceHandle],
         timestamp: MonotonicInstant,
         budget: usize,
         packets: &mut Vec<PacketBuf>,
     ) -> RxDrain {
         packets.clear();
-        if budget == 0 || interfaces.devices().is_empty() {
+        let has_rx_work_fn = || devices.iter().any(|device| device.has_rx_work());
+        if budget == 0 || devices.is_empty() {
             return RxDrain {
                 work_done: 0,
-                has_more: interfaces.has_rx_work(),
+                has_more: has_rx_work_fn(),
+                has_lock_contention: false,
             };
         }
 
         let mut work_done = 0;
-        let device_count = interfaces.devices().len();
+        let mut has_lock_contention = false;
+        let device_count = devices.len();
         if self.next_rx_device >= device_count {
             self.next_rx_device = 0;
         }
@@ -83,19 +88,23 @@ impl NetIo {
         for _ in 0..device_count {
             let dev_index = self.next_rx_device;
             let ifindex = dev_index as i32 + 1;
+            let Some(mut device) = devices[dev_index].try_lock() else {
+                has_lock_contention = true;
+                self.next_rx_device = next_device_index(dev_index, device_count);
+                continue;
+            };
             loop {
                 if work_done >= budget {
                     self.next_rx_device = next_device_index(dev_index, device_count);
+                    drop(device);
                     return RxDrain {
                         work_done,
-                        has_more: interfaces.has_rx_work(),
+                        has_more: has_lock_contention || has_rx_work_fn(),
+                        has_lock_contention,
                     };
                 }
 
-                let packet = {
-                    let dev = &mut interfaces.devices_mut()[dev_index];
-                    dev.poll_rx(ifindex, timestamp)
-                };
+                let packet = device.poll_rx(ifindex, timestamp);
                 let Some(packet) = packet else {
                     break;
                 };
@@ -107,7 +116,8 @@ impl NetIo {
 
         RxDrain {
             work_done,
-            has_more: false,
+            has_more: has_lock_contention,
+            has_lock_contention,
         }
     }
 
@@ -142,12 +152,12 @@ impl NetIo {
         !self.control_tx_queue.is_empty() || !self.data_tx_queue.is_empty()
     }
 
-    pub(crate) fn on_device_removed(&mut self, interfaces: &InterfaceSet, removed_index: usize) {
-        if interfaces.devices().is_empty() {
+    pub(crate) fn on_device_removed(&mut self, device_count: usize, removed_index: usize) {
+        if device_count == 0 {
             self.next_rx_device = 0;
         } else if removed_index < self.next_rx_device {
             self.next_rx_device -= 1;
-        } else if self.next_rx_device >= interfaces.devices().len() {
+        } else if self.next_rx_device >= device_count {
             self.next_rx_device = 0;
         }
     }
@@ -176,8 +186,8 @@ mod tests {
         let packet_io = NetworkState::new();
         let loopback = packet_io.add_device(Box::new(LoopbackDevice::new()));
         let packet = PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::Ipv4Stack);
-        packet_io.with_interfaces_mut(|interfaces| {
-            interfaces.devices_mut()[loopback].send_ip_packet(
+        packet_io.with_interfaces(|interfaces| {
+            interfaces.devices()[loopback].send_ip_packet(
                 loopback as i32 + 1,
                 IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)),
                 IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)),
@@ -192,8 +202,13 @@ mod tests {
         let (state, mut io) = network_with_ready_loopback_packet();
         let mut packets = Vec::new();
 
-        let drain = state.with_interfaces_mut(|interfaces| {
-            io.drain_device_rx_budgeted(interfaces, MonotonicInstant::ORIGIN, 1, &mut packets)
+        let drain = state.with_interfaces(|interfaces| {
+            io.drain_device_rx_budgeted(
+                interfaces.devices(),
+                MonotonicInstant::ORIGIN,
+                1,
+                &mut packets,
+            )
         });
 
         assert_eq!(drain.work_done, 1);
@@ -204,12 +219,59 @@ mod tests {
         let (state, mut io) = network_with_ready_loopback_packet();
         let mut packets = Vec::new();
 
-        let drain = state.with_interfaces_mut(|interfaces| {
-            io.drain_device_rx_budgeted(interfaces, MonotonicInstant::ORIGIN, 0, &mut packets)
+        let drain = state.with_interfaces(|interfaces| {
+            io.drain_device_rx_budgeted(
+                interfaces.devices(),
+                MonotonicInstant::ORIGIN,
+                0,
+                &mut packets,
+            )
         });
 
         assert_eq!(drain.work_done, 0);
         assert!(drain.has_more);
+    }
+
+    #[def_test(serial)]
+    fn device_contention_retains_rx_for_retry() {
+        let (state, mut io) = network_with_ready_loopback_packet();
+        let handle = state.with_interfaces(|interfaces| interfaces.devices()[0].clone());
+        let mut packets = Vec::new();
+        {
+            let _device = handle.lock();
+            let drain = state.with_interfaces(|interfaces| {
+                io.drain_device_rx_budgeted(
+                    interfaces.devices(),
+                    MonotonicInstant::ORIGIN,
+                    1,
+                    &mut packets,
+                )
+            });
+            assert_eq!(drain.work_done, 0);
+            assert!(drain.has_more);
+            assert!(drain.has_lock_contention);
+            // Readiness remains conservative even with no RX capacity.
+            let drain = state.with_interfaces(|interfaces| {
+                io.drain_device_rx_budgeted(
+                    interfaces.devices(),
+                    MonotonicInstant::ORIGIN,
+                    0,
+                    &mut packets,
+                )
+            });
+            assert!(drain.has_more);
+        }
+        let drain = state.with_interfaces(|interfaces| {
+            io.drain_device_rx_budgeted(
+                interfaces.devices(),
+                MonotonicInstant::ORIGIN,
+                1,
+                &mut packets,
+            )
+        });
+        assert_eq!(drain.work_done, 1);
+        assert!(!drain.has_lock_contention);
+        assert!(!drain.has_more);
     }
 
     #[def_test]

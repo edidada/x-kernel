@@ -13,7 +13,11 @@ use crate::{
     SOCKET_SET,
     buf::{PacketBuf, PacketOwner},
     datapath::NetIo,
-    network::{ipv4, ipv4::output::Ipv4Output, state::NetworkState},
+    network::{
+        ipv4,
+        ipv4::output::Ipv4Output,
+        state::{NetworkState, TxBatch},
+    },
     service::{POLL_TIME_CHECK_INTERVAL_WORK_ITEMS, Service, has_reached_poll_round_time_limit},
     stack::interface::Stack,
 };
@@ -105,6 +109,7 @@ impl NetworkDataPlane {
                 break;
             };
             progress.packets += drain.work_done;
+            progress.has_lock_contention |= drain.has_lock_contention;
             packets_since_time_check = packets_since_time_check.saturating_add(drain.work_done);
 
             if !self.process_rx_batch(
@@ -118,7 +123,7 @@ impl NetworkDataPlane {
                 progress.has_lock_contention = true;
                 break;
             }
-            if !drain.has_more || drain.work_done == 0 {
+            if drain.has_lock_contention || !drain.has_more || drain.work_done == 0 {
                 break;
             }
         }
@@ -222,7 +227,7 @@ impl NetworkDataPlane {
     }
 
     fn dispatch_dequeued(
-        state: &NetworkState,
+        batch: &mut TxBatch<'_>,
         ipv4_output: &Ipv4Output,
         packets: &mut VecDeque<PacketBuf>,
         timestamp: MonotonicInstant,
@@ -234,8 +239,8 @@ impl NetworkDataPlane {
                 break;
             };
             let result = match packet.network_packet().and_then(ipv4::ip_version) {
-                Some(4) => ipv4_output.dispatch(state, packet, timestamp),
-                Some(6) => crate::stack::ipv6_output::dispatch(state, packet, timestamp),
+                Some(4) => ipv4_output.dispatch(batch, packet, timestamp),
+                Some(6) => crate::stack::ipv6_output::dispatch(batch, packet, timestamp),
                 _ => {
                     debug!("Dropping packet with invalid IP version");
                     Ok(false)
@@ -272,8 +277,15 @@ impl NetworkDataPlane {
                 progress.tx_capacity_changed |=
                     Self::dequeue_tx_batch(&mut io, chunk, &mut packets);
             }
-            let (dispatched, has_lock_contention) =
-                Self::dispatch_dequeued(state, ipv4_output, &mut packets, timestamp, chunk);
+            if packets.is_empty() {
+                break;
+            }
+            let Some((dispatched, has_lock_contention)) = state.try_with_tx_batch(|batch| {
+                Self::dispatch_dequeued(batch, ipv4_output, &mut packets, timestamp, chunk)
+            }) else {
+                progress.has_lock_contention = true;
+                break;
+            };
             progress.packets += dispatched;
             if has_lock_contention {
                 progress.has_lock_contention = true;
@@ -301,7 +313,7 @@ mod tests {
     use super::*;
     use crate::{
         device::{LoopbackDevice, interfaces::Ipv4AddrEntry},
-        ip::{Ipv4Address, Ipv4Cidr},
+        ip::{IpAddress, Ipv4Address, Ipv4Cidr},
         router::ROUTE_SCOPE_HOST,
         service::tests::TEST_POLL_BUDGET,
     };
@@ -353,8 +365,13 @@ mod tests {
             let current = monotonic_time();
             plane.poll_tx_budgeted(&state, &io, &output, current, budget, current)
         };
-        // A read guard permits route resolution but prevents device submission.
-        let progress = state.with_interfaces(|_| poll_fn(2));
+        let dst = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 2));
+        let route = state.resolve(&dst).unwrap();
+        // Device-mutex contention retains the batch; inventory reads stay available.
+        let progress = {
+            let _device = route.lock_egress();
+            poll_fn(2)
+        };
         assert!(progress.has_lock_contention);
         assert!(progress.tx_capacity_changed);
         assert_eq!(progress.packets, 0);
@@ -505,9 +522,9 @@ mod tests {
             round_started_at,
         );
         let mut packets = Vec::new();
-        let rx_progress = state.with_interfaces_mut(|interfaces| {
+        let rx_progress = state.with_interfaces(|interfaces| {
             io.lock().drain_device_rx_budgeted(
-                interfaces,
+                interfaces.devices(),
                 round_started_at,
                 TEST_POLL_BUDGET.rx_packets,
                 &mut packets,

@@ -5,17 +5,22 @@
 //! Network inventory and routing under independent read-mostly locks.
 //!
 //! Lock order when a path needs both: `interfaces` then `routing`.
-//! Callers that need both must not acquire `routing` first. Packet I/O
-//! copies a [`ResolvedRoute`] and releases these locks before queue or
-//! device work.
+//! Callers that need both must not acquire `routing` first. TX batches retain
+//! these read guards through device submission; RX retains inventory read
+//! access. Configuration therefore cannot invalidate addresses or ifindices
+//! during a handoff. Queue preparation uses a copied [`ResolvedRoute`].
 use alloc::{boxed::Box, vec::Vec};
 
 use kerrno::{KError, KResult, LinuxError};
-use ksync::{RwLock, RwLockWriteGuard};
+#[cfg(unittest)]
+use ksync::RwLockWriteGuard;
+use ksync::{MutexGuard, RwLock};
+use ktime_types::MonotonicInstant;
 
 use crate::{
+    buf::PacketBuf,
     device::{
-        LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NeighborUpdate,
+        DeviceHandle, LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NeighborUpdate,
         NeighborUpdatePolicy, NetDevice,
         interfaces::{InterfaceSet, Ipv4AddrEntry},
     },
@@ -24,11 +29,12 @@ use crate::{
 };
 
 /// Copied forwarding decision; the routing and interface read locks are
-/// already released when this value is returned.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// already released when this value is returned. Submission revalidates the
+/// handle's slot and the source under inventory read access through handoff.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedRoute {
     pub device: usize,
-    device_id: Option<kdevice::DeviceId>,
+    handle: DeviceHandle,
     pub next_hop: IpAddress,
     /// Egress-device MTU copied at resolve time. TX fragmentation uses this
     /// instead of [`InterfaceSet::effective_mtu`] or a later inventory lookup.
@@ -37,9 +43,18 @@ pub(crate) struct ResolvedRoute {
     pub is_loopback: bool,
 }
 
+impl ResolvedRoute {
+    #[cfg(unittest)]
+    pub(crate) fn lock_egress(
+        &self,
+    ) -> ksync::MutexGuard<'_, alloc::boxed::Box<dyn crate::device::NetDevice>> {
+        self.handle.lock()
+    }
+}
+
 /// Read-mostly inventory and route table. Configuration writers take the
-/// corresponding write side; the data path copies snapshots and drops the
-/// read guards before protocol or queue work.
+/// corresponding write side; bounded device batches borrow read views.
+/// Protocol processing and TX queue access run outside these guards.
 pub(crate) struct NetworkState {
     interfaces: RwLock<InterfaceSet>,
     routing: RwLock<Router>,
@@ -61,8 +76,9 @@ impl NetworkState {
         use_fn(&mut self.interfaces.write())
     }
 
-    /// Nonblocking interface guard for poller device RX and broadcast TX.
-    /// RX callers that also take `NetIo` must acquire this guard first.
+    /// Nonblocking interface write guard for configuration tests that hold
+    /// inventory exclusive access. Packet TX/RX no longer take this guard.
+    #[cfg(unittest)]
     pub(crate) fn try_write_interfaces(&self) -> Option<RwLockWriteGuard<'_, InterfaceSet>> {
         self.interfaces.try_write()
     }
@@ -98,11 +114,19 @@ impl NetworkState {
         self.with_inventory(|interfaces, routing| resolve_route(interfaces, routing, dst))
     }
 
-    /// Returns `None` on lock contention, or the copied lookup result otherwise.
-    pub(crate) fn try_resolve(&self, dst: &IpAddress) -> Option<Option<ResolvedRoute>> {
+    /// Borrows a consistent forwarding view for one bounded TX chunk.
+    /// Device guards cached by the batch are released before its read views.
+    pub(crate) fn try_with_tx_batch<R>(
+        &self,
+        use_fn: impl FnOnce(&mut TxBatch<'_>) -> R,
+    ) -> Option<R> {
         let interfaces = self.interfaces.try_read()?;
         let routing = self.routing.try_read()?;
-        Some(resolve_route(&interfaces, &routing, dst))
+        Some(use_fn(&mut TxBatch {
+            interfaces: &interfaces,
+            routing: &routing,
+            egress: None,
+        }))
     }
 
     /// Copies an interface query without waiting for a configuration writer.
@@ -123,14 +147,7 @@ impl NetworkState {
                     .devices()
                     .get(device_index)
                     .ok_or(KError::from(LinuxError::ENETUNREACH))?;
-                return Ok(ResolvedRoute {
-                    device: device_index,
-                    device_id: device.device_id(),
-                    next_hop: *dst,
-                    mtu: device.mtu().min(u16::MAX as usize),
-                    source,
-                    is_loopback: device.link_kind() == LinkKind::Loopback,
-                });
+                return Ok(resolved_route(device_index, device, *dst, source));
             }
             let rule = routing
                 .lookup(dst)
@@ -139,14 +156,12 @@ impl NetworkState {
                 .devices()
                 .get(rule.dev)
                 .ok_or(KError::from(LinuxError::ENETUNREACH))?;
-            Ok(ResolvedRoute {
-                device: rule.dev,
-                device_id: device.device_id(),
-                next_hop: rule.via.unwrap_or(*dst),
-                mtu: device.mtu().min(u16::MAX as usize),
+            Ok(resolved_route(
+                rule.dev,
+                device,
+                rule.via.unwrap_or(*dst),
                 source,
-                is_loopback: device.link_kind() == LinkKind::Loopback,
-            })
+            ))
         })
     }
 
@@ -315,8 +330,8 @@ impl NetworkState {
         })
     }
 
-    /// Revalidates the device identity and IPv4 source while submitting a
-    /// copied route. Device removal can renumber slots after resolution.
+    /// Revalidates a copied slot, identity, and source through device handoff.
+    /// The inventory read guard excludes address deletion and slot renumbering.
     pub(crate) fn submit_ip_packet(
         &self,
         route: ResolvedRoute,
@@ -324,29 +339,24 @@ impl NetworkState {
         packet: crate::buf::PacketBuf,
         timestamp: ktime_types::MonotonicInstant,
     ) -> bool {
-        self.with_interfaces_mut(|interfaces| {
-            submit_ip_packet(interfaces, route, source, packet, timestamp)
+        self.with_interfaces(|interfaces| {
+            if !has_local_source(interfaces, source) {
+                return false;
+            }
+            let Some(device) = interfaces.devices().get(route.device) else {
+                return false;
+            };
+            if device != &route.handle {
+                return false;
+            }
+            device.send_ip_packet(
+                route.device as i32 + 1,
+                route.next_hop,
+                source,
+                packet,
+                timestamp,
+            )
         })
-    }
-
-    /// Returns ownership on interface contention, before any device submission.
-    pub(crate) fn try_submit_ip_packet(
-        &self,
-        route: ResolvedRoute,
-        source: IpAddress,
-        packet: crate::buf::PacketBuf,
-        timestamp: ktime_types::MonotonicInstant,
-    ) -> Result<bool, crate::buf::PacketBuf> {
-        let Some(mut interfaces) = self.interfaces.try_write() else {
-            return Err(packet);
-        };
-        Ok(submit_ip_packet(
-            &mut interfaces,
-            route,
-            source,
-            packet,
-            timestamp,
-        ))
     }
 }
 
@@ -402,6 +412,7 @@ impl NetworkState {
     }
 }
 
+#[cfg(unittest)]
 fn resolve_route(
     interfaces: &InterfaceSet,
     routing: &Router,
@@ -409,43 +420,123 @@ fn resolve_route(
 ) -> Option<ResolvedRoute> {
     let rule = routing.lookup(dst)?;
     let device = interfaces.devices().get(rule.dev)?;
-    Some(ResolvedRoute {
-        device: rule.dev,
-        device_id: device.device_id(),
-        next_hop: rule.via.unwrap_or(*dst),
-        mtu: device.mtu().min(u16::MAX as usize),
-        source: rule.src,
-        is_loopback: device.link_kind() == LinkKind::Loopback,
-    })
+    Some(resolved_route(
+        rule.dev,
+        device,
+        rule.via.unwrap_or(*dst),
+        rule.src,
+    ))
 }
 
-fn submit_ip_packet(
-    interfaces: &mut InterfaceSet,
-    route: ResolvedRoute,
+fn resolved_route(
+    device_index: usize,
+    device: &DeviceHandle,
+    next_hop: IpAddress,
     source: IpAddress,
-    packet: crate::buf::PacketBuf,
-    timestamp: ktime_types::MonotonicInstant,
-) -> bool {
-    if let IpAddress::Ipv4(source) = source
-        && !interfaces.has_ipv4_address(source)
-    {
-        return false;
-    }
-    let Some(device) = interfaces.devices_mut().get_mut(route.device) else {
-        return false;
-    };
-    // Removable devices have a model ID; the built-in loopback has
-    // none and remains registered for the service lifetime.
-    if device.device_id() != route.device_id {
-        return false;
-    }
-    device.send_ip_packet(
-        route.device as i32 + 1,
-        route.next_hop,
+) -> ResolvedRoute {
+    ResolvedRoute {
+        device: device_index,
+        handle: device.clone(),
+        next_hop,
+        mtu: device.mtu().min(u16::MAX as usize),
         source,
-        packet,
-        timestamp,
-    )
+        is_loopback: device.link_kind() == LinkKind::Loopback,
+    }
+}
+
+fn has_local_source(interfaces: &InterfaceSet, source: IpAddress) -> bool {
+    match source {
+        IpAddress::Ipv4(source) => interfaces.has_ipv4_address(source),
+        IpAddress::Ipv6(_) => true,
+    }
+}
+
+/// A bounded TX chunk's forwarding view and most recently used device guard.
+///
+/// The owning inventory guard keeps borrowed devices, indices, and addresses
+/// stable. Consecutive unicast packets reuse one device guard. Switching egress
+/// releases it before acquiring another; fan-out releases it before preflight.
+pub(crate) struct TxBatch<'a> {
+    interfaces: &'a InterfaceSet,
+    routing: &'a Router,
+    egress: Option<(usize, MutexGuard<'a, Box<dyn NetDevice>>)>,
+}
+
+impl TxBatch<'_> {
+    pub(crate) fn resolve(&self, dst: &IpAddress) -> Option<Rule> {
+        let rule = self.routing.lookup(dst)?;
+        self.interfaces.devices().get(rule.dev)?;
+        Some(*rule)
+    }
+
+    /// Returns the untouched packet when the selected device is busy.
+    pub(crate) fn submit_ip_packet(
+        &mut self,
+        device_index: usize,
+        next_hop: IpAddress,
+        source: IpAddress,
+        packet: PacketBuf,
+        timestamp: MonotonicInstant,
+    ) -> Result<bool, PacketBuf> {
+        if !has_local_source(self.interfaces, source) {
+            return Ok(false);
+        }
+        if self
+            .egress
+            .as_ref()
+            .is_none_or(|(index, _)| *index != device_index)
+        {
+            self.egress = None;
+            let Some(handle) = self.interfaces.devices().get(device_index) else {
+                return Ok(false);
+            };
+            let Some(device) = handle.try_lock() else {
+                return Err(packet);
+            };
+            self.egress = Some((device_index, device));
+        }
+        let (_, device) = self.egress.as_mut().unwrap();
+        Ok(device.send_ip_packet(device_index as i32 + 1, next_hop, source, packet, timestamp))
+    }
+
+    /// Acquires the complete fan-out before sending so retries cannot duplicate
+    /// a prefix. IPv4 broadcast permits an unspecified source for DHCP.
+    pub(crate) fn broadcast(
+        &mut self,
+        bound_if: i32,
+        source: IpAddress,
+        destination: IpAddress,
+        packet: PacketBuf,
+        timestamp: MonotonicInstant,
+    ) -> Result<bool, PacketBuf> {
+        self.egress = None;
+        if !source.is_unspecified() && !has_local_source(self.interfaces, source) {
+            return Ok(false);
+        }
+        let mut guards = Vec::new();
+        for (index, handle) in self.interfaces.devices().iter().enumerate() {
+            let ifindex = index as i32 + 1;
+            if bound_if != 0 && bound_if != ifindex {
+                continue;
+            }
+            let Some(device) = handle.try_lock() else {
+                return Err(packet);
+            };
+            guards.push((ifindex, device));
+        }
+        let Some((last, prefix)) = guards.split_last_mut() else {
+            return Ok(false);
+        };
+        let mut has_rx_work = false;
+        for (ifindex, device) in prefix {
+            has_rx_work |=
+                device.send_ip_packet(*ifindex, destination, source, packet.clone(), timestamp);
+        }
+        has_rx_work |= last
+            .1
+            .send_ip_packet(last.0, destination, source, packet, timestamp);
+        Ok(has_rx_work)
+    }
 }
 
 fn refresh_address_routes(
@@ -486,14 +577,25 @@ mod configuration_tests {
                     .try_with_interfaces(|interfaces| interfaces.effective_mtu())
                     .is_none()
             );
-            assert!(state.try_resolve(&dst).is_none());
+            assert!(
+                state
+                    .try_with_tx_batch(|batch| batch.resolve(&dst))
+                    .is_none()
+            );
         }
         {
             let _routing = state.routing.write();
-            assert!(state.try_resolve(&dst).is_none());
+            assert!(
+                state
+                    .try_with_tx_batch(|batch| batch.resolve(&dst))
+                    .is_none()
+            );
             assert!(state.interfaces.try_write().is_some());
         }
-        assert_eq!(state.try_resolve(&dst), Some(None));
+        assert!(matches!(
+            state.try_with_tx_batch(|batch| batch.resolve(&dst)),
+            Some(None)
+        ));
     }
 
     #[def_test]
@@ -529,7 +631,7 @@ mod configuration_tests {
         state.remove_device(kdevice::DeviceId::new(1)).unwrap();
         let packet_fn = || PacketBuf::from_ip_packet_vec(0, vec![0; 20], PacketOwner::Ipv4Stack);
         state.submit_ip_packet(
-            stale,
+            stale.clone(),
             IpAddress::Ipv4(src),
             packet_fn(),
             ktime_types::MonotonicInstant::ORIGIN,
@@ -543,6 +645,178 @@ mod configuration_tests {
             IpAddress::Ipv4(src),
             packet_fn(),
             ktime_types::MonotonicInstant::ORIGIN,
+        );
+        assert_eq!(sends.load(Ordering::Relaxed), 1);
+    }
+
+    #[def_test]
+    fn stale_route_is_rejected_after_preceding_device_removal() {
+        use crate::{buf::PacketOwner, device::test_device::TestDevice};
+
+        let state = NetworkState::new();
+        state.add_device(Box::new(TestDevice::ethernet(1, 1500)));
+        let sends = Arc::new(AtomicUsize::new(0));
+        let dev = state.add_device(Box::new(TestDevice::ethernet(2, 1500).with_send_hook({
+            let sends = sends.clone();
+            move || {
+                sends.fetch_add(1, Ordering::Relaxed);
+            }
+        })));
+        let source = Ipv4Address::new(192, 0, 2, 1);
+        state
+            .add_ipv4_addr(Ipv4AddrEntry {
+                dev,
+                addr: Ipv4Cidr::new(source, 24),
+                scope: ROUTE_SCOPE_UNIVERSE,
+                broadcast: None,
+            })
+            .unwrap();
+        let destination = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 2));
+        let stale = state.resolve(&destination).unwrap();
+        state.remove_device(kdevice::DeviceId::new(1)).unwrap();
+        let packet_fn = || PacketBuf::from_ip_packet_vec(0, vec![0; 20], PacketOwner::Ipv4Stack);
+
+        state.submit_ip_packet(
+            stale,
+            IpAddress::Ipv4(source),
+            packet_fn(),
+            MonotonicInstant::ORIGIN,
+        );
+        assert_eq!(sends.load(Ordering::Relaxed), 0);
+        let current = state.resolve(&destination).unwrap();
+        assert_eq!(current.device, 0);
+        state.submit_ip_packet(
+            current,
+            IpAddress::Ipv4(source),
+            packet_fn(),
+            MonotonicInstant::ORIGIN,
+        );
+        assert_eq!(sends.load(Ordering::Relaxed), 1);
+    }
+
+    #[def_test]
+    fn device_handoff_excludes_address_and_inventory_mutation() {
+        use crate::{buf::PacketOwner, device::test_device::TestDevice};
+
+        let state = Arc::new(NetworkState::new());
+        let excluded_mutations = Arc::new(AtomicUsize::new(0));
+        let dev = state.add_device(Box::new(TestDevice::ethernet(1, 1500).with_send_hook({
+            let state = Arc::downgrade(&state);
+            let excluded_mutations = excluded_mutations.clone();
+            move || {
+                let state = state.upgrade().unwrap();
+                if state.try_write_interfaces().is_none() {
+                    excluded_mutations.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        })));
+        let source = Ipv4Address::new(192, 0, 2, 1);
+        let entry = Ipv4AddrEntry {
+            dev,
+            addr: Ipv4Cidr::new(source, 24),
+            scope: ROUTE_SCOPE_UNIVERSE,
+            broadcast: None,
+        };
+        state.add_ipv4_addr(entry).unwrap();
+        let destination = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 2));
+        let route = state.resolve(&destination).unwrap();
+        let packet_fn = || PacketBuf::from_ip_packet_vec(0, vec![0; 20], PacketOwner::Ipv4Stack);
+
+        state.submit_ip_packet(
+            route.clone(),
+            IpAddress::Ipv4(source),
+            packet_fn(),
+            MonotonicInstant::ORIGIN,
+        );
+        state
+            .try_with_tx_batch(|batch| {
+                batch
+                    .submit_ip_packet(
+                        dev,
+                        destination,
+                        IpAddress::Ipv4(source),
+                        packet_fn(),
+                        MonotonicInstant::ORIGIN,
+                    )
+                    .unwrap();
+                batch
+                    .broadcast(
+                        0,
+                        IpAddress::Ipv4(source),
+                        IpAddress::Ipv4(Ipv4Address::BROADCAST),
+                        packet_fn(),
+                        MonotonicInstant::ORIGIN,
+                    )
+                    .unwrap();
+            })
+            .unwrap();
+        assert_eq!(excluded_mutations.load(Ordering::Relaxed), 3);
+        assert!(state.remove_ipv4_addr(entry));
+        state.submit_ip_packet(
+            route,
+            IpAddress::Ipv4(source),
+            packet_fn(),
+            MonotonicInstant::ORIGIN,
+        );
+        assert_eq!(excluded_mutations.load(Ordering::Relaxed), 3);
+    }
+
+    #[def_test]
+    fn unicast_submit_uses_device_mutex_not_inventory_write() {
+        use crate::{
+            buf::{PacketBuf, PacketOwner},
+            device::test_device::TestDevice,
+        };
+
+        let state = NetworkState::new();
+        let sends = Arc::new(AtomicUsize::new(0));
+        let dev = state.add_device(Box::new(TestDevice::ethernet(1, 1500).with_send_hook({
+            let sends = sends.clone();
+            move || {
+                sends.fetch_add(1, Ordering::Relaxed);
+            }
+        })));
+        let src = Ipv4Address::new(192, 0, 2, 1);
+        state
+            .add_ipv4_addr(Ipv4AddrEntry {
+                dev,
+                addr: Ipv4Cidr::new(src, 24),
+                scope: ROUTE_SCOPE_UNIVERSE,
+                broadcast: None,
+            })
+            .unwrap();
+        let dst = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 2));
+        let route = state.resolve(&dst).unwrap();
+        let packet_fn = || PacketBuf::from_ip_packet_vec(0, vec![0; 20], PacketOwner::Ipv4Stack);
+
+        {
+            let _device = route.lock_egress();
+            assert!(
+                state
+                    .try_with_tx_batch(|batch| batch.submit_ip_packet(
+                        route.device,
+                        route.next_hop,
+                        IpAddress::Ipv4(src),
+                        packet_fn(),
+                        ktime_types::MonotonicInstant::ORIGIN,
+                    ))
+                    .unwrap()
+                    .is_err()
+            );
+            assert_eq!(sends.load(Ordering::Relaxed), 0);
+        }
+
+        assert!(
+            !state
+                .try_with_tx_batch(|batch| batch.submit_ip_packet(
+                    route.device,
+                    route.next_hop,
+                    IpAddress::Ipv4(src),
+                    packet_fn(),
+                    ktime_types::MonotonicInstant::ORIGIN,
+                ))
+                .unwrap()
+                .expect("device mutex is free")
         );
         assert_eq!(sends.load(Ordering::Relaxed), 1);
     }
