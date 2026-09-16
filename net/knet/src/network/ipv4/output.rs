@@ -13,7 +13,7 @@ use ktime_types::MonotonicInstant;
 
 use crate::{
     buf::{PacketBuf, PacketOwner},
-    datapath::NetIo,
+    io::NetIo,
     ip::IpAddress,
     network::{
         ipv4::{self, Ipv4Error, Ipv4Header},
@@ -88,11 +88,8 @@ impl Ipv4Output {
         }
 
         let mut io = io.lock();
-        if !io.can_enqueue_tx_packet() {
-            return Err(KError::WouldBlock);
-        }
         let packet_count = output_ipv4_packet_count(Some(route.mtu), packet_len)?;
-        if !io.can_enqueue_tx_packets(packet_count) {
+        if !io.can_admit_ipv4_egress(packet_count) {
             return Err(KError::WouldBlock);
         }
         prepare(
@@ -112,7 +109,7 @@ impl Ipv4Output {
         oif: i32,
     ) -> KResult {
         let packets = self.fragment(route_mtu, packet)?;
-        if !io.can_enqueue_tx_packets(packets.len()) {
+        if !io.can_admit_ipv4_egress(packets.len()) {
             return Err(KError::WouldBlock);
         }
 
@@ -371,11 +368,13 @@ mod tests {
             .unwrap();
         let mut io = NetIo::new();
         let output = Ipv4Output::new();
-        let capacity = io.available_data_tx_slots();
-        io.enqueue_tx(
-            (0..capacity - 1)
-                .map(|_| PacketBuf::from_ip_packet_vec(0, vec![0; 20], PacketOwner::Ipv4Stack)),
-        );
+        while io.can_admit_ipv4_egress(2) {
+            io.enqueue_tx(core::iter::once(PacketBuf::from_ip_packet_vec(
+                0,
+                vec![0; 20],
+                PacketOwner::Ipv4Stack,
+            )));
+        }
         let io = Mutex::new(io);
         let original =
             ipv4::build_ipv4_packet(src, dst, ipv4::PROTOCOL_ICMP, 64, &[0; 80]).unwrap();
@@ -399,7 +398,8 @@ mod tests {
         assert_eq!(result, Err(KError::WouldBlock));
         assert!(!prepared);
         assert_eq!(packet.as_ref(), Some(&original));
-        assert_eq!(io.lock().available_data_tx_slots(), 1);
+        assert!(io.lock().can_admit_ipv4_egress(1));
+        assert!(!io.lock().can_admit_ipv4_egress(2));
         io.lock().dequeue_tx().unwrap();
         let mut selected = None;
         output
@@ -423,7 +423,7 @@ mod tests {
         assert_eq!(selected, Some((IpAddress::Ipv4(src), Some(68))));
         assert!(prepared);
         assert!(packet.is_none());
-        assert_eq!(io.lock().available_data_tx_slots(), 0);
+        assert!(!io.lock().can_admit_ipv4_egress(1));
     }
 
     #[def_test(serial)]

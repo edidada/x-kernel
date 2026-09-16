@@ -10,7 +10,7 @@ use smoltcp::{
     time::Instant,
 };
 
-use crate::{buf::PacketBuf, datapath::NetIo};
+use crate::{buf::PacketBuf, io::NetIo};
 
 const STACK_MAX_BURST_SIZE: usize = 64;
 
@@ -30,7 +30,7 @@ impl smoltcp::phy::TxToken for TxToken<'_> {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        debug_assert!(self.0.can_enqueue_tx_packet());
+        debug_assert!(self.0.can_transmit_from_stack());
 
         let mut ip_packet = vec![0u8; len];
         let result = f(&mut ip_packet);
@@ -72,7 +72,7 @@ impl smoltcp::phy::Device for StackDevice<'_> {
     }
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
-        if !self.io.can_enqueue_tx_packet() {
+        if !self.io.can_transmit_from_stack() {
             None
         } else {
             Some(TxToken(self.io))

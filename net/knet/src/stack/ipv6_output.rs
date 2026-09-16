@@ -52,7 +52,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        buf::PacketOwner, datapath::NetIo, device::LoopbackDevice, network::state::NetworkState,
+        buf::PacketOwner, device::LoopbackDevice, io::NetIo, network::state::NetworkState,
     };
     fn packet(multicast: bool) -> PacketBuf {
         let mut bytes = vec![0; 40];

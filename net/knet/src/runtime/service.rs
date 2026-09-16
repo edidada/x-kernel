@@ -15,8 +15,8 @@ use smoltcp::wire::IpAddress as SmoltcpIpAddress;
 
 use crate::{
     SOCKET_SET,
-    datapath::{NetIo, io::RxDrain},
     dataplane::NetworkDataPlane,
+    io::{NetIo, RxDrain},
     ip::IpAddress,
     network::{
         ipv4::{
@@ -331,7 +331,7 @@ impl Service {
     }
 
     pub(crate) fn can_send_ip_packet(&self) -> bool {
-        self.with_io(|io| io.can_enqueue_tx_packet())
+        self.with_io(|io| io.can_admit_ipv4_egress(1))
     }
 
     pub(crate) fn register_rx_waker(

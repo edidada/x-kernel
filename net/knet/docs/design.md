@@ -37,9 +37,12 @@ net/knet/
     │   ├── socket.rs
     │   ├── tests.rs
     │   └── wire.rs
-    ├── datapath/
+    ├── runtime/
     │   ├── mod.rs
-    │   └── io.rs
+    │   ├── io.rs
+    │   ├── dataplane.rs
+    │   ├── poller.rs
+    │   └── service.rs
     ├── network/
     │   ├── fragment.rs
     │   ├── ipv4/
@@ -96,11 +99,8 @@ net/knet/
     │   └── stream.rs
     ├── consts.rs
     ├── control.rs
-    ├── dataplane.rs
-    ├── service.rs
     ├── ip.rs
     ├── lib.rs
-    ├── poller.rs
     ├── unix.rs
     └── vsock.rs
 ```
@@ -665,7 +665,7 @@ In the `SCHEDULED` state, the dynamic kwork of `knet-poller` and socket assist c
 | 15 | &emsp;`network_poller.start()` |
 | 16 | &emsp;`register_timer_callback(TIMER_SAMPLE_PERIOD, SERVICE.handle_timer_tick)` |
 
-Source: [`init_network`](../src/lib.rs) and [`Service::new`](../src/service.rs). The pseudocode abbreviates address and route construction.
+Source: [`init_network`](../src/lib.rs) and [`Service::new`](../src/runtime/service.rs). The pseudocode abbreviates address and route construction.
 
 ### RX Progress
 
@@ -729,7 +729,7 @@ The 1 ms limit is a soft bound checked between work batches. Maintenance and one
 
 A background callback runs at most four rounds, each with fresh budgets; assist runs at most one. Completion reschedules immediate work or notifications received during execution. The periodic timer callback checks protocol and reassembly deadlines, wakes waiters, and publishes timer work. Future deadlines alone do not set `has_more`.
 
-Sources: [`poller`](../src/poller.rs), [`Service`](../src/service.rs), [`Ipv4Ingress`](../src/network/ipv4/ingress.rs), and [`NetIo`](../src/datapath/io.rs).
+Sources: [`poller`](../src/runtime/poller.rs), [`Service`](../src/runtime/service.rs), [`Ipv4Ingress`](../src/network/ipv4/ingress.rs), and [`NetIo`](../src/runtime/io.rs).
 
 ### TX Routing
 
@@ -766,7 +766,7 @@ IPv4 limited broadcast is replicated subject to interface binding. Other IPv4 de
 
 `EthernetDevice` currently accepts IPv4 output only. It checks link state, source, and MTU, then sends limited and directed broadcasts to the Ethernet broadcast address. Other next hops use the ARP cache: a valid entry permits immediate transmission; an unresolved or expired entry triggers an ARP request when needed and retains the packet in bounded `pending_tx`. A full pending queue drops the packet. IPv6 remains available in the smoltcp and loopback paths, while the Ethernet adapter drops IPv6 output.
 
-Sources: [`UDP send`](../src/transport/udp/socket.rs), [`Service::prepare_and_send_ipv4_packet`](../src/service.rs), [`NetIo`](../src/datapath/io.rs), and [`EthernetDevice::send_ip_packet`](../src/device/ethernet.rs).
+Sources: [`UDP send`](../src/transport/udp/socket.rs), [`Service::prepare_and_send_ipv4_packet`](../src/runtime/service.rs), [`NetIo`](../src/runtime/io.rs), and [`EthernetDevice::send_ip_packet`](../src/device/ethernet.rs).
 
 ## Concurrency Model
 

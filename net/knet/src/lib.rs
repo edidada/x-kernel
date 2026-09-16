@@ -20,16 +20,12 @@ extern crate alloc;
 
 mod consts;
 mod control;
-mod datapath;
-mod dataplane;
 mod device;
 mod ip;
 mod link;
 pub mod netlink;
 mod network;
-mod poller;
 mod runtime;
-mod service;
 mod socket;
 mod stack;
 mod transport;
@@ -54,6 +50,7 @@ use lazyinit::LazyInit;
 pub(crate) use link::{buf, wire};
 pub use link::{packet, send_link_frame};
 pub(crate) use network::{ipv4, router};
+pub(crate) use runtime::{dataplane, io, poller, service};
 pub use socket::{
     file::{sock_alloc_file, sock_from_file},
     options, *,

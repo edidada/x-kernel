@@ -17,7 +17,7 @@ use smoltcp::{
 use crate::{
     LISTEN_TABLE, SOCKET_SET,
     buf::PacketBuf,
-    datapath::NetIo,
+    io::NetIo,
     ip,
     poller::PollBudget,
     service::{

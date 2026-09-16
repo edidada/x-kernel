@@ -12,7 +12,7 @@ use ktime_types::MonotonicInstant;
 use crate::{
     SOCKET_SET,
     buf::{PacketBuf, PacketOwner},
-    datapath::NetIo,
+    io::NetIo,
     network::{
         ipv4,
         ipv4::output::Ipv4Output,
@@ -213,17 +213,11 @@ impl NetworkDataPlane {
 
     fn dequeue_tx_batch(io: &mut NetIo, budget: usize, packets: &mut VecDeque<PacketBuf>) -> bool {
         debug_assert!(packets.is_empty());
-        let capacity_before = io.available_data_tx_slots();
-        while packets.len() < budget {
-            let Some(mut packet) = io.dequeue_tx() else {
-                break;
-            };
+        let capacity_freed = io.pull_tx_packets(budget, packets);
+        for packet in packets.iter_mut() {
             packet.set_owner(PacketOwner::DeviceTx);
-            packets.push_back(packet);
         }
-        // Capture freed capacity in the dequeue critical section so another
-        // producer or lock contender cannot hide the TX wakeup obligation.
-        io.available_data_tx_slots() > capacity_before
+        capacity_freed
     }
 
     fn dispatch_dequeued(
@@ -404,7 +398,7 @@ mod tests {
         let mut io = NetIo::new();
         let output = Ipv4Output::new();
         io.enqueue_control_tx(vec![0; 20]).unwrap();
-        let capacity_before = io.available_data_tx_slots();
+        let could_admit_before = io.can_admit_ipv4_egress(1);
         let io = Mutex::new(io);
         let current = monotonic_time();
         let progress =
@@ -412,7 +406,7 @@ mod tests {
 
         assert_eq!(progress.packets, 1);
         assert!(!progress.tx_capacity_changed);
-        assert_eq!(io.lock().available_data_tx_slots(), capacity_before);
+        assert_eq!(could_admit_before, io.lock().can_admit_ipv4_egress(1));
     }
     #[def_test]
     fn data_dispatch_frees_data_tx_capacity() {
@@ -424,7 +418,6 @@ mod tests {
             vec![0; 20],
             PacketOwner::Ipv4Stack,
         )));
-        let capacity_before = io.available_data_tx_slots();
         let io = Mutex::new(io);
         let current = monotonic_time();
         let progress =
@@ -432,7 +425,7 @@ mod tests {
 
         assert_eq!(progress.packets, 1);
         assert!(progress.tx_capacity_changed);
-        assert_eq!(io.lock().available_data_tx_slots(), capacity_before + 1);
+        assert!(io.lock().can_admit_ipv4_egress(1));
     }
 
     #[def_test]
@@ -468,12 +461,13 @@ mod tests {
         let packet = ipv4::build_ipv4_packet(src, dst, ipv4::PROTOCOL_ICMP, 64, &[]).unwrap();
         {
             let mut io = io.lock();
-            let capacity = io.available_data_tx_slots();
-            io.enqueue_tx(
-                (0..capacity).map(|_| {
-                    PacketBuf::from_ip_packet_vec(0, packet.clone(), PacketOwner::Ipv4Stack)
-                }),
-            );
+            while io.can_admit_ipv4_egress(1) {
+                io.enqueue_tx(core::iter::once(PacketBuf::from_ip_packet_vec(
+                    0,
+                    packet.clone(),
+                    PacketOwner::Ipv4Stack,
+                )));
+            }
         }
         let current = monotonic_time();
         let progress = NetworkDataPlane::new().poll_tx_budgeted(
@@ -487,7 +481,7 @@ mod tests {
 
         assert_eq!(progress.packets, 1);
         assert!(progress.tx_capacity_changed);
-        assert_eq!(io.lock().available_data_tx_slots(), 0);
+        assert!(!io.lock().can_admit_ipv4_egress(1));
     }
     #[def_test(serial)]
     fn tx_dispatch_exposes_loopback_rx_in_the_same_round() {
