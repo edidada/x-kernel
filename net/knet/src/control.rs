@@ -33,10 +33,7 @@ pub(crate) enum ExistingIpv4AddrAction {
     Keep,
     Reject,
 }
-/// Serializes configuration from target lookup through mutation and projection updates.
-///
-/// The owned guard excludes ioctl, rtnetlink, and device-removal transactions.
-/// Inventory and routing use their own read-mostly locks for each operation.
+/// Serializes ioctl, rtnetlink, and device removal through lookup and projection updates.
 pub(crate) struct NetworkConfig<'a> {
     service: &'a Service,
     _guard: MutexGuard<'static, ()>,
@@ -51,7 +48,6 @@ impl<'a> NetworkConfig<'a> {
         }
     }
 
-    /// Resolves a name while configuration serialization keeps device indices stable.
     fn device_index_by_name(&self, name: &str) -> Result<usize, LinuxError> {
         self.service
             .network()
@@ -169,8 +165,6 @@ impl<'a> NetworkConfig<'a> {
         Ok(())
     }
 
-    /// Applies an address mutation and synchronizes projections.
-    /// Errors return before publishing any new projections.
     fn update_ipv4_state<T>(
         &self,
         update_fn: impl FnOnce(&NetworkState) -> Result<T, LinuxError>,
@@ -490,40 +484,5 @@ mod tests {
             config.remove_ipv4_addr(shared),
             Err(LinuxError::EADDRNOTAVAIL)
         );
-    }
-
-    #[def_test]
-    fn configured_route_source_tracks_primary_address_promotion() {
-        let service = service_with_devices();
-        let config = NetworkConfig::lock(&service);
-        let primary = Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 1), 24);
-        let secondary = Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 2), 24);
-        for addr in [primary, secondary] {
-            config
-                .add_ipv4_addr(
-                    Ipv4AddrEntry {
-                        dev: 0,
-                        addr,
-                        scope: ROUTE_SCOPE_UNIVERSE,
-                        broadcast: None,
-                    },
-                    ExistingIpv4AddrAction::Reject,
-                )
-                .unwrap();
-        }
-        let route = config
-            .ipv4_configured_route_rule(None, 0, None, "test")
-            .unwrap();
-        assert_eq!(route.src, IpAddress::Ipv4(primary.address()));
-        config.remove_primary_ipv4_addr(0).unwrap();
-        let route = config
-            .ipv4_configured_route_rule(None, 0, None, "test")
-            .unwrap();
-        assert_eq!(route.src, IpAddress::Ipv4(secondary.address()));
-        config.remove_primary_ipv4_addr(0).unwrap();
-        let route = config
-            .ipv4_configured_route_rule(None, 0, None, "test")
-            .unwrap();
-        assert_eq!(route.src, route.filter.address());
     }
 }

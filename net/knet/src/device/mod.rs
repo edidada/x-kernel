@@ -195,10 +195,9 @@ pub trait NetDevice: Send + Sync {
     /// Updates the user-visible interface name for this device.
     fn set_name(&mut self, _name: String) {}
 
-    /// Applies a network-layer MTU configuration to this backend.
-    ///
-    /// [`DeviceHandle`](handle::DeviceHandle) owns the published MTU; backends
-    /// validate the request and update any driver-local state needed for I/O.
+    /// Applies a network-layer MTU configuration to this backend. The handle
+    /// owns the published MTU; the backend validates the value and updates any
+    /// driver-local state needed for I/O.
     ///
     /// # Errors
     ///

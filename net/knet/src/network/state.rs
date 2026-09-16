@@ -4,11 +4,8 @@
 
 //! Network inventory and routing under independent read-mostly locks.
 //!
-//! Lock order when a path needs both: `interfaces` then `routing`.
-//! Callers that need both must not acquire `routing` first. TX batches retain
-//! these read guards through device submission; RX retains inventory read
-//! access. Configuration therefore cannot invalidate addresses or ifindices
-//! during a handoff. Queue preparation uses a copied [`ResolvedRoute`].
+//! Acquire `interfaces` before `routing`. TX batches retain both read guards
+//! through submission; RX retains inventory access to keep ifindices stable.
 use alloc::{boxed::Box, vec::Vec};
 
 use kerrno::{KError, KResult, LinuxError};
@@ -28,16 +25,13 @@ use crate::{
     network::router::{Router, Rule},
 };
 
-/// Copied forwarding decision; the routing and interface read locks are
-/// already released when this value is returned. Submission revalidates the
-/// handle's slot and the source under inventory read access through handoff.
+/// Copied route; submission must revalidate device identity and local source.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedRoute {
     pub device: usize,
     handle: DeviceHandle,
     pub next_hop: IpAddress,
-    /// Egress-device MTU copied at resolve time. TX fragmentation uses this
-    /// instead of [`InterfaceSet::effective_mtu`] or a later inventory lookup.
+    /// Egress MTU used for fragmentation, copied during route resolution.
     pub mtu: usize,
     pub source: IpAddress,
     pub is_loopback: bool,
@@ -52,9 +46,7 @@ impl ResolvedRoute {
     }
 }
 
-/// Read-mostly inventory and route table. Configuration writers take the
-/// corresponding write side; bounded device batches borrow read views.
-/// Protocol processing and TX queue access run outside these guards.
+/// Independently locked device inventory and route table.
 pub(crate) struct NetworkState {
     interfaces: RwLock<InterfaceSet>,
     routing: RwLock<Router>,
@@ -76,8 +68,6 @@ impl NetworkState {
         use_fn(&mut self.interfaces.write())
     }
 
-    /// Nonblocking interface write guard for configuration tests that hold
-    /// inventory exclusive access. Packet TX/RX no longer take this guard.
     #[cfg(unittest)]
     pub(crate) fn try_write_interfaces(&self) -> Option<RwLockWriteGuard<'_, InterfaceSet>> {
         self.interfaces.try_write()
@@ -108,7 +98,6 @@ impl NetworkState {
         self.with_interfaces_mut(|interfaces| interfaces.add_device(device))
     }
 
-    /// Looks up the forwarding path and copies the fields later stages need.
     #[cfg(unittest)]
     pub(crate) fn resolve(&self, dst: &IpAddress) -> Option<ResolvedRoute> {
         self.with_inventory(|interfaces, routing| resolve_route(interfaces, routing, dst))
@@ -129,7 +118,6 @@ impl NetworkState {
         }))
     }
 
-    /// Copies an interface query without waiting for a configuration writer.
     pub(crate) fn try_with_interfaces<R>(
         &self,
         use_fn: impl FnOnce(&InterfaceSet) -> R,
@@ -464,11 +452,8 @@ fn has_local_source(interfaces: &InterfaceSet, source: IpAddress) -> bool {
     }
 }
 
-/// A bounded TX chunk's forwarding view and most recently used device guard.
-///
-/// The owning inventory guard keeps borrowed devices, indices, and addresses
-/// stable. Consecutive unicast packets reuse one device guard. Switching egress
-/// releases it before acquiring another; fan-out releases it before preflight.
+/// Forwarding view for a bounded TX chunk, retaining inventory read access.
+/// Reuses one device guard, releasing it before switching egress or fan-out.
 pub(crate) struct TxBatch<'a> {
     interfaces: &'a InterfaceSet,
     routing: &'a Router,
@@ -580,99 +565,64 @@ mod configuration_tests {
     };
 
     #[def_test]
-    fn stale_route_does_not_transmit_on_a_reused_device_slot() {
+    fn stale_route_is_rejected_after_device_removal() {
         use crate::{
             buf::{PacketBuf, PacketOwner},
             device::test_device::TestDevice,
         };
 
-        let state = NetworkState::new();
-        let sends = Arc::new(AtomicUsize::new(0));
-        let first = state.add_device(Box::new(TestDevice::ethernet(1, 1500)));
-        let second = state.add_device(Box::new(TestDevice::ethernet(2, 1500).with_send_hook({
-            let sends = sends.clone();
-            move || {
-                sends.fetch_add(1, Ordering::Relaxed);
+        for removed_has_address in [true, false] {
+            let state = NetworkState::new();
+            let sends = Arc::new(AtomicUsize::new(0));
+            let first = state.add_device(Box::new(TestDevice::ethernet(1, 1500)));
+            let second =
+                state.add_device(Box::new(TestDevice::ethernet(2, 1500).with_send_hook({
+                    let sends = sends.clone();
+                    move || {
+                        sends.fetch_add(1, Ordering::Relaxed);
+                    }
+                })));
+            let src = Ipv4Address::new(192, 0, 2, 1);
+            for dev in [first, second] {
+                if dev == first && !removed_has_address {
+                    continue;
+                }
+                state
+                    .add_ipv4_addr(Ipv4AddrEntry {
+                        dev,
+                        addr: Ipv4Cidr::new(src, 24),
+                        scope: ROUTE_SCOPE_UNIVERSE,
+                        broadcast: None,
+                    })
+                    .unwrap();
             }
-        })));
-        let src = Ipv4Address::new(192, 0, 2, 1);
-        for dev in [first, second] {
-            state
-                .add_ipv4_addr(Ipv4AddrEntry {
-                    dev,
-                    addr: Ipv4Cidr::new(src, 24),
-                    scope: ROUTE_SCOPE_UNIVERSE,
-                    broadcast: None,
-                })
-                .unwrap();
+            let dst = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 2));
+            let stale = state.resolve(&dst).unwrap();
+            assert_eq!(
+                stale.device,
+                if removed_has_address { first } else { second }
+            );
+            state.remove_device(kdevice::DeviceId::new(1)).unwrap();
+            let packet_fn =
+                || PacketBuf::from_ip_packet_vec(0, vec![0; 20], PacketOwner::Ipv4Stack);
+            state.submit_ip_packet(
+                stale.clone(),
+                IpAddress::Ipv4(src),
+                packet_fn(),
+                ktime_types::MonotonicInstant::ORIGIN,
+            );
+            assert_eq!(sends.load(Ordering::Relaxed), 0);
+
+            let current = state.resolve(&dst).unwrap();
+            assert_eq!(current.device, 0);
+            state.submit_ip_packet(
+                current,
+                IpAddress::Ipv4(src),
+                packet_fn(),
+                ktime_types::MonotonicInstant::ORIGIN,
+            );
+            assert_eq!(sends.load(Ordering::Relaxed), 1);
         }
-        let dst = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 2));
-        let stale = state.resolve(&dst).unwrap();
-        assert_eq!(stale.device, first);
-        state.remove_device(kdevice::DeviceId::new(1)).unwrap();
-        let packet_fn = || PacketBuf::from_ip_packet_vec(0, vec![0; 20], PacketOwner::Ipv4Stack);
-        state.submit_ip_packet(
-            stale.clone(),
-            IpAddress::Ipv4(src),
-            packet_fn(),
-            ktime_types::MonotonicInstant::ORIGIN,
-        );
-        assert_eq!(sends.load(Ordering::Relaxed), 0);
-
-        let current = state.resolve(&dst).unwrap();
-        assert_eq!(current.device, stale.device);
-        state.submit_ip_packet(
-            current,
-            IpAddress::Ipv4(src),
-            packet_fn(),
-            ktime_types::MonotonicInstant::ORIGIN,
-        );
-        assert_eq!(sends.load(Ordering::Relaxed), 1);
-    }
-
-    #[def_test]
-    fn stale_route_is_rejected_after_preceding_device_removal() {
-        use crate::{buf::PacketOwner, device::test_device::TestDevice};
-
-        let state = NetworkState::new();
-        state.add_device(Box::new(TestDevice::ethernet(1, 1500)));
-        let sends = Arc::new(AtomicUsize::new(0));
-        let dev = state.add_device(Box::new(TestDevice::ethernet(2, 1500).with_send_hook({
-            let sends = sends.clone();
-            move || {
-                sends.fetch_add(1, Ordering::Relaxed);
-            }
-        })));
-        let source = Ipv4Address::new(192, 0, 2, 1);
-        state
-            .add_ipv4_addr(Ipv4AddrEntry {
-                dev,
-                addr: Ipv4Cidr::new(source, 24),
-                scope: ROUTE_SCOPE_UNIVERSE,
-                broadcast: None,
-            })
-            .unwrap();
-        let destination = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 2));
-        let stale = state.resolve(&destination).unwrap();
-        state.remove_device(kdevice::DeviceId::new(1)).unwrap();
-        let packet_fn = || PacketBuf::from_ip_packet_vec(0, vec![0; 20], PacketOwner::Ipv4Stack);
-
-        state.submit_ip_packet(
-            stale,
-            IpAddress::Ipv4(source),
-            packet_fn(),
-            MonotonicInstant::ORIGIN,
-        );
-        assert_eq!(sends.load(Ordering::Relaxed), 0);
-        let current = state.resolve(&destination).unwrap();
-        assert_eq!(current.device, 0);
-        state.submit_ip_packet(
-            current,
-            IpAddress::Ipv4(source),
-            packet_fn(),
-            MonotonicInstant::ORIGIN,
-        );
-        assert_eq!(sends.load(Ordering::Relaxed), 1);
     }
 
     #[def_test]

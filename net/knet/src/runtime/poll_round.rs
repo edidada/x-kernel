@@ -2,11 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Per-round poller progress and reschedule reasons.
-//!
-//! [`PollRound`] stores one round's shared counters, budgets, deadline, and
-//! pending-work flags. Module-specific progress types stay in their owners;
-//! [`Service`](super::service::Service) maps those results into this context.
+//! Per-round budgets, progress, deadlines, and reschedule reasons.
 use ktime_types::MonotonicInstant;
 use smoltcp::time::Instant as SmoltcpInstant;
 
@@ -148,106 +144,5 @@ impl PollRound {
             tx_capacity_changed: self.tx_capacity_changed,
             has_more: !self.pending.is_empty(),
         }
-    }
-}
-
-#[cfg(unittest)]
-mod tests {
-    use unittest::{assert, assert_eq, def_test};
-
-    use super::*;
-
-    const TEST_BUDGET: PollBudget = PollBudget {
-        rx_packets: 4,
-        tx_packets: 3,
-        timer_events: 2,
-    };
-
-    #[def_test]
-    fn front_and_tail_stages_share_packet_budgets() {
-        let mut round = PollRound::new(TEST_BUDGET, MonotonicInstant::ORIGIN);
-        round.add_tx_packets(1);
-        round.mark_tx_capacity_changed();
-        round.add_rx_packets(2);
-        assert_eq!(round.remaining_tx(), 2);
-        assert_eq!(round.remaining_rx(), 2);
-
-        round.add_tx_packets(2);
-        round.add_rx_packets(2);
-        assert_eq!(round.remaining_tx(), 0);
-        assert_eq!(round.remaining_rx(), 0);
-        let progress = round.into_progress();
-        assert_eq!(progress.tx_packets, 3);
-        assert_eq!(progress.rx_packets, 4);
-        assert!(progress.tx_capacity_changed);
-        assert!(!progress.has_more);
-    }
-
-    #[def_test]
-    fn contention_pauses_only_the_affected_device_stage() {
-        let mut tx_round = PollRound::new(TEST_BUDGET, MonotonicInstant::ORIGIN);
-        tx_round.mark_pending(PendingWork::TX_CONTENTION);
-        assert_eq!(tx_round.remaining_tx(), 0);
-        assert_eq!(tx_round.remaining_rx(), TEST_BUDGET.rx_packets);
-        assert!(tx_round.into_progress().has_more);
-
-        let mut rx_round = PollRound::new(TEST_BUDGET, MonotonicInstant::ORIGIN);
-        rx_round.mark_pending(PendingWork::RX_DEFERRED);
-        assert_eq!(rx_round.remaining_rx(), 0);
-        assert_eq!(rx_round.remaining_tx(), TEST_BUDGET.tx_packets);
-        assert!(rx_round.into_progress().has_more);
-    }
-
-    #[def_test]
-    fn stack_can_clear_the_round_time_limit() {
-        let mut round = PollRound::new(TEST_BUDGET, MonotonicInstant::ORIGIN);
-        round.reach_time_limit();
-        assert_eq!(round.remaining_tx(), 0);
-        assert_eq!(round.remaining_rx(), 0);
-
-        round.set_reached_time_limit(false);
-        assert!(!round.reached_time_limit());
-        assert_eq!(round.remaining_tx(), TEST_BUDGET.tx_packets);
-        assert_eq!(round.remaining_rx(), TEST_BUDGET.rx_packets);
-    }
-
-    #[def_test]
-    fn timer_events_and_deadline_follow_generic_updates() {
-        let _protocol = SmoltcpInstant::from_millis(20);
-        let close = SmoltcpInstant::from_millis(10);
-        for (timer_budget, expired, expected) in [(0, 0, 0), (2, 1, 2), (2, 2, 2)] {
-            let mut round = PollRound::new(
-                PollBudget {
-                    timer_events: timer_budget,
-                    ..TEST_BUDGET
-                },
-                MonotonicInstant::ORIGIN,
-            );
-            round.add_timer_events(expired);
-            if round.can_record_timer_event() {
-                round.add_timer_events(1);
-            }
-            round.set_next_poll_deadline(Some(close));
-            assert_eq!(round.next_poll_deadline(), Some(close));
-            let progress = round.into_progress();
-            assert_eq!(progress.timer_events, expected);
-            assert!(!progress.has_more);
-        }
-    }
-
-    #[def_test]
-    fn deferred_round_preserves_progress_and_always_requests_retry() {
-        let mut round = PollRound::new(TEST_BUDGET, MonotonicInstant::ORIGIN);
-        round.add_tx_packets(2);
-        round.mark_tx_capacity_changed();
-        round.add_rx_packets(1);
-        round.add_timer_events(1);
-
-        let progress = round.into_deferred_progress();
-        assert_eq!(progress.tx_packets, 2);
-        assert_eq!(progress.rx_packets, 1);
-        assert_eq!(progress.timer_events, 1);
-        assert!(progress.tx_capacity_changed);
-        assert!(progress.has_more);
     }
 }

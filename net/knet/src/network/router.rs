@@ -284,12 +284,7 @@ impl RouteTable {
     }
 }
 
-/// Owns configured and address-derived routes.
-///
-/// Interface state is borrowed for route validation and source selection.
-/// [`crate::network::state::NetworkState`] keeps this table behind a
-/// read-mostly lock so lookups copy a [`crate::network::state::ResolvedRoute`]
-/// and drop the guard before packet I/O.
+/// Configured and address-derived routes; borrows interfaces for source selection.
 pub(crate) struct Router {
     table: RouteTable,
 }
@@ -307,16 +302,10 @@ impl Router {
     }
 
     /// Returns the source address for an output route with an active device.
-    ///
-    /// `oif` is a 1-based bound device index; `0` means the socket is unbound.
-    /// Limited broadcasts with a bound device use that device's primary
-    /// address (or `0.0.0.0`) without requiring a unicast route.
-    ///
-    /// # Errors
-    ///
-    /// Returns `ENETUNREACH` when the route or its device is absent, when
-    /// the selected device is administratively down, or when `oif` disagrees
-    /// with the looked-up output device.
+    /// `oif` is a 1-based bound device index; `0` means unbound. A bound
+    /// limited broadcast uses that device's primary address without a unicast
+    /// route. Missing routes, down devices, and an `oif` mismatch return
+    /// `ENETUNREACH`.
     pub fn output_route_source(
         &self,
         interfaces: &InterfaceSet,

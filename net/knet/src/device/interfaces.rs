@@ -18,12 +18,7 @@ use crate::{
     netlink::RT_SCOPE_UNIVERSE as ROUTE_SCOPE_UNIVERSE,
 };
 
-/// Owns live device handles, IPv4 addresses, and the aggregate MTU.
-///
-/// [`crate::network::state::NetworkState`] protects this inventory with a
-/// read-mostly lock. Packet I/O retains that read guard while locking each
-/// device so source addresses and indices stay valid through a bounded batch.
-/// Writers use the write side for add/remove, addresses, and link configuration.
+/// Device and IPv4 address inventory protected by [`crate::network::state::NetworkState`].
 pub(crate) struct InterfaceSet {
     devices: Vec<DeviceHandle>,
     ipv4_addrs: Vec<Ipv4AddrEntry>,
@@ -223,13 +218,8 @@ impl InterfaceSet {
                 .any(|entry| entry.addr.is_directed_broadcast(address))
     }
 
-    /// Returns the primary IPv4 address of the device named `name`.
-    ///
-    /// Device resolution and address lookup happen under one interface-set borrow so
-    /// a concurrent device removal cannot renumber slots between the two
-    /// steps, matching Linux `devinet_ioctl` holding `rtnl_lock`.
-    ///
-    /// # Errors
+    /// Returns the primary IPv4 address of `name`, with device resolution and
+    /// lookup under one borrow so removal cannot renumber slots between them.
     ///
     /// Returns `ENODEV` for an unknown device and `EADDRNOTAVAIL` when the
     /// device has no IPv4 address.
@@ -292,11 +282,8 @@ impl InterfaceSet {
         Ok(())
     }
 
-    /// Updates the primary IPv4 address on `dev` in its owning address table.
-    ///
-    /// Other addresses on the device remain unchanged. Updating an existing
-    /// address resets its scope and broadcast fields like Linux
-    /// `SIOCSIFADDR`; setting the same local address is a no-op.
+    /// Updates the primary IPv4 address on `dev`; other addresses remain unchanged.
+    /// Updating an existing address resets its scope and broadcast fields.
     pub fn set_primary_ipv4_addr(&mut self, dev: usize, addr: Ipv4Cidr) -> Result<(), LinuxError> {
         if dev >= self.devices.len() {
             return Err(LinuxError::ENODEV);
@@ -337,10 +324,8 @@ impl InterfaceSet {
         Ok(())
     }
 
-    /// Removes the primary IPv4 address from `dev`.
-    ///
-    /// Other addresses on the device remain unchanged. An interface without
-    /// an IPv4 address is accepted to match `SIOCSIFADDR 0.0.0.0`.
+    /// Removes the primary IPv4 address from `dev`; other addresses remain
+    /// unchanged and a device without one is accepted.
     pub fn remove_primary_ipv4_addr(&mut self, dev: usize) -> Result<(), LinuxError> {
         if dev >= self.devices.len() {
             return Err(LinuxError::ENODEV);
@@ -400,10 +385,8 @@ impl InterfaceSet {
         Ok(())
     }
 
-    /// Updates the prefix length of the primary IPv4 address on `dev`.
-    ///
-    /// Linux `SIOCSIFNETMASK` keeps `ifa_scope` and only recalculates
-    /// `ifa_broadcast` when it still matches the old derived mask.
+    /// Updates the prefix length of the primary IPv4 address on `dev`, keeping
+    /// its scope and recomputing a mask-derived broadcast only.
     pub fn set_ipv4_netmask(&mut self, dev: usize, prefix_len: u8) -> Result<(), LinuxError> {
         if prefix_len > 32 {
             return Err(LinuxError::EINVAL);

@@ -31,12 +31,8 @@ struct DeviceShared {
     mtu: AtomicUsize,
 }
 
-/// Shared identity for a live `NetDevice`.
-///
-/// Packet I/O borrows this handle while holding the inventory read lock, which
-/// keeps source addresses and interface indices valid through submission.
-/// Identity, link kind, and MTU are cached so route resolution does not take
-/// the device mutex. Lock order is inventory, then this mutex.
+/// Shared device identity and mutex, acquired after the inventory lock.
+/// Cached identity, link kind, and MTU allow route lookup without this mutex.
 #[derive(Clone)]
 pub(crate) struct DeviceHandle {
     inner: Arc<DeviceShared>,
@@ -94,8 +90,7 @@ impl DeviceHandle {
     }
 
     pub(crate) fn has_rx_work(&self) -> bool {
-        // A busy device must keep the poller scheduled without making its sole
-        // executor wait behind a foreground sender or configuration operation.
+        // Busy devices request a retry without blocking the sole poller.
         self.try_lock().is_none_or(|device| device.has_rx_work())
     }
 

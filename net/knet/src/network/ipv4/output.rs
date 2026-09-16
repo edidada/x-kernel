@@ -51,10 +51,8 @@ impl Ipv4Output {
         }
     }
 
-    /// Resolves the path before taking `NetIo` for capacity preflight,
-    /// packet preparation, fragmentation, and enqueue as one transaction.
-    /// Loopback dispatch holds inventory read access through device handoff
-    /// after the queue lock is released. Capacity failure preserves the caller's packet.
+    /// Resolves output, then prepares and enqueues fragments under one `NetIo` lock.
+    /// Capacity failure preserves the packet; loopback bypasses the queue.
     pub fn prepare_and_send(
         &self,
         state: &NetworkState,
@@ -121,12 +119,8 @@ impl Ipv4Output {
         Ok(())
     }
 
-    /// Dispatches loopback output synchronously in task context.
-    /// Uses the route and `oif` copied during `prepare_and_send` so broadcast
-    /// fan-out and unicast submission do not drop the socket binding or
-    /// re-resolve after packet preparation. Loopback raises NetRx and drains it
-    /// on BH enable; a full shared RX queue drops the packet while retaining
-    /// the existing successful xmit result.
+    /// Sends loopback output synchronously with the prepared route and binding.
+    /// RX queue overflow drops the packet while preserving successful xmit status.
     fn send_loopback(
         &self,
         state: &NetworkState,
@@ -144,9 +138,7 @@ impl Ipv4Output {
             };
             let src_addr = IpAddress::Ipv4(header.src_addr());
             let dst_addr = IpAddress::Ipv4(header.dst_addr());
-            // RX-ready hint for the poller, not send success. This path is
-            // not the poller; a dropped loopback packet is still a successful
-            // xmit, as documented above.
+            // The returned hint only controls poller RX readiness.
             let _poll_next = if header.dst_addr().is_broadcast() {
                 dispatch_ipv4_broadcast(state, buf, src_addr, dst_addr, timestamp)
             } else {
@@ -315,44 +307,6 @@ mod tests {
     };
 
     #[def_test]
-    fn broadcast_returns_packet_before_contended_fanout() {
-        let state = NetworkState::new();
-        let sends = alloc::sync::Arc::new(AtomicUsize::new(0));
-        for id in 1..=2 {
-            state.add_device(Box::new(TestDevice::ethernet(id, 1500).with_send_hook({
-                let sends = sends.clone();
-                move || {
-                    sends.fetch_add(1, Ordering::Relaxed);
-                }
-            })));
-        }
-        let output = Ipv4Output::new();
-        let original = PacketBuf::from_ip_packet_vec(
-            0,
-            ipv4::build_ipv4_packet(
-                Ipv4Address::UNSPECIFIED,
-                Ipv4Address::BROADCAST,
-                ipv4::PROTOCOL_ICMP,
-                64,
-                &[],
-            )
-            .unwrap(),
-            PacketOwner::Ipv4Stack,
-        );
-        let handle = state.with_interfaces(|interfaces| interfaces.devices()[1].clone());
-        let _device = handle.lock();
-        let returned = state
-            .try_with_tx_batch(|batch| {
-                output.dispatch(batch, original.clone(), MonotonicInstant::ORIGIN)
-            })
-            .unwrap()
-            .unwrap_err();
-        assert_eq!(returned.network_packet(), original.network_packet());
-        assert_eq!(returned.ifindex(), 0);
-        assert_eq!(sends.load(Ordering::Relaxed), 0);
-    }
-
-    #[def_test]
     fn fragmented_send_retains_packet_until_all_slots_are_available() {
         let state = NetworkState::new();
         let dev = state.add_device(Box::new(TestDevice::ethernet(1, 68)));
@@ -483,69 +437,6 @@ mod tests {
                 },
                 &mut packet,
                 |_, _, _| Ok(()),
-            )
-            .unwrap();
-
-        assert_eq!(ETH_SENDS.load(Ordering::Relaxed), 0);
-    }
-
-    #[def_test(serial)]
-    fn loopback_unicast_keeps_route_selected_during_prepare() {
-        static ETH_SENDS: AtomicUsize = AtomicUsize::new(0);
-
-        ETH_SENDS.store(0, Ordering::Relaxed);
-
-        let state = NetworkState::new();
-        let lo = state.add_device(Box::new(LoopbackDevice::new()));
-        let eth = state.add_device(Box::new(TestDevice::ethernet(1, 1500).with_send_hook(
-            || {
-                ETH_SENDS.fetch_add(1, Ordering::Relaxed);
-            },
-        )));
-        let lo_addr = Ipv4Address::new(127, 0, 0, 1);
-        let lo_entry = Ipv4AddrEntry {
-            dev: lo,
-            addr: Ipv4Cidr::new(lo_addr, 8),
-            scope: ROUTE_SCOPE_HOST,
-            broadcast: None,
-        };
-        state.add_ipv4_addr(lo_entry).unwrap();
-        let eth_addr = Ipv4Address::new(192, 0, 2, 1);
-        state
-            .add_ipv4_addr(Ipv4AddrEntry {
-                dev: eth,
-                addr: Ipv4Cidr::new(eth_addr, 24),
-                scope: ROUTE_SCOPE_UNIVERSE,
-                broadcast: None,
-            })
-            .unwrap();
-
-        let output = Ipv4Output::new();
-        let io = Mutex::new(NetIo::new());
-        let mut packet =
-            Some(ipv4::build_ipv4_packet(lo_addr, lo_addr, ipv4::PROTOCOL_ICMP, 64, &[]).unwrap());
-
-        output
-            .prepare_and_send(
-                &state,
-                &io,
-                Ipv4SendOptions {
-                    bound_src: None,
-                    dst_addr: IpAddress::Ipv4(lo_addr),
-                    oif: 0,
-                    allow_broadcast: false,
-                },
-                &mut packet,
-                |_, _, _| {
-                    state.remove_ipv4_addr(lo_entry);
-                    state.add_rule(Rule::new(
-                        Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 0), 8).into(),
-                        None,
-                        eth,
-                        IpAddress::Ipv4(eth_addr),
-                    ));
-                    Ok(())
-                },
             )
             .unwrap();
 

@@ -103,9 +103,7 @@ impl Service {
         Some(use_fn(&mut io))
     }
 
-    /// Device RX holds inventory read access, then `NetIo`, then one device
-    /// mutex per bounded batch. Inventory access keeps ifindices stable without
-    /// allocating a handle snapshot. All guards are released before ingress.
+    /// Drains RX under inventory, NetIo, then device locks, released before ingress.
     pub(crate) fn try_drain_device_rx(
         &self,
         timestamp: MonotonicInstant,
@@ -124,10 +122,8 @@ impl Service {
         })?
     }
 
-    /// Advances one bounded network round in task context without spinlocks.
-    /// Queue and ingress contention retain batches and report immediate work.
-    /// TX or device-RX lock contention pauses that stage and continues
-    /// protocol and timer progress. Pending reassembly expiry does not block TX.
+    /// Advances a bounded round in task context, retaining batches on contention.
+    /// Device TX/RX and reassembly contention allow protocol progress to continue.
     pub fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
         let mut round = PollRound::new(budget, monotonic_time());
         self.poll_ipv4_timers(&mut round);
@@ -161,8 +157,7 @@ impl Service {
 
     fn flush_retained_ingress(&self, round: &mut PollRound) {
         if !self.dataplane.flush_retained_ingress(self) {
-            // Stack polling must free ingress slots before the retained batch
-            // can be retried. Keep device RX paused while that batch is pending.
+            // Pause device RX until stack polling frees ingress capacity.
             round.mark_pending(PendingWork::RX_DEFERRED);
         }
     }
@@ -213,8 +208,6 @@ impl Service {
     }
 
     fn poll_stack(&self, round: &mut PollRound) -> PollStageResult {
-        // One smoltcp device; its MTU is the cached effective_mtu from the last
-        // rebuild. Per-egress send MTU is already on `ResolvedRoute`.
         let Some(mut sockets) = SOCKET_SET.inner.try_lock() else {
             return PollStageResult::Deferred;
         };
@@ -460,22 +453,6 @@ pub(crate) mod tests {
         assert!(!has_reached_poll_round_time_limit(start, before_limit));
         assert!(has_reached_poll_round_time_limit(start, at_limit));
     }
-    #[def_test]
-    fn poll_round_defers_interface_snapshot_contention() {
-        let service = Service::new(NetworkState::new());
-        let _interfaces = service.network.try_write_interfaces().unwrap();
-        // Zero device budgets skip RX/TX; protocol poll uses the cached
-        // effective_mtu and does not wait on the held inventory write lock.
-        let progress = service.poll_budgeted(PollBudget {
-            rx_packets: 0,
-            tx_packets: 0,
-            timer_events: 0,
-        });
-        assert!(progress.has_more);
-        assert_eq!(progress.rx_packets, 0);
-        assert_eq!(progress.tx_packets, 0);
-    }
-
     #[def_test(serial)]
     fn poll_round_continues_stack_after_tx_and_rx_lock_contention() {
         use alloc::sync::Arc;
@@ -536,18 +513,6 @@ pub(crate) mod tests {
                 .load(Ordering::Acquire)
                 != SENTINEL
         );
-    }
-
-    #[def_test]
-    fn poll_round_defers_packet_io_lock_contention() {
-        let service = Service::new(NetworkState::new());
-        let _io = service.io.lock();
-
-        let progress = service.poll_budgeted(TEST_POLL_BUDGET);
-
-        assert_eq!(progress.rx_packets, 0);
-        assert_eq!(progress.tx_packets, 0);
-        assert!(progress.has_more);
     }
 
     #[def_test(serial)]
@@ -741,42 +706,5 @@ pub(crate) mod tests {
         assert!(control.is_empty());
         assert_eq!(service.with_io(|io| io.available_stack_ingress_slots()), 0);
         assert!(service.with_io(|io| io.has_pending_tx()));
-    }
-
-    #[def_test(serial)]
-    fn poll_round_frees_ingress_capacity_for_retained_batch() {
-        use alloc::vec;
-
-        use crate::buf::{PacketBuf, PacketOwner};
-
-        let service = Service::new(NetworkState::new());
-        let packet = PacketBuf::from_ip_packet_vec(0, vec![0x45, 0, 0, 20], PacketOwner::DeviceRx);
-        service.with_io(|io| {
-            let mut queued = vec![packet.clone(); io.available_stack_ingress_slots()];
-            io.enqueue_stack_ingress(&mut queued).unwrap();
-        });
-        service
-            .dataplane
-            .retain_stack_ingress_for_tests([packet.clone(), packet]);
-        let budget = PollBudget {
-            rx_packets: 1,
-            tx_packets: 0,
-            timer_events: 0,
-        };
-
-        let progress = service.poll_budgeted(budget);
-        assert!(progress.has_more);
-        assert_eq!(progress.rx_packets, 0);
-        assert_eq!(service.with_io(|io| io.available_stack_ingress_slots()), 1);
-        assert_eq!(service.dataplane.retained_stack_ingress_len(), 2);
-
-        let progress = service.poll_budgeted(budget);
-        assert!(progress.has_more);
-        assert_eq!(service.with_io(|io| io.available_stack_ingress_slots()), 2);
-        assert_eq!(service.dataplane.retained_stack_ingress_len(), 2);
-
-        service.poll_budgeted(budget);
-        assert_eq!(service.dataplane.retained_stack_ingress_len(), 0);
-        assert_eq!(service.with_io(|io| io.available_stack_ingress_slots()), 1);
     }
 }

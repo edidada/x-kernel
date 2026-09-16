@@ -42,9 +42,7 @@ pub(crate) struct StackProgress {
 }
 pub(crate) struct Stack {
     iface: Mutex<Interface>,
-    /// Last `InterfaceSet::effective_mtu` applied to the smoltcp `StackDevice`.
-    /// That value is the min of live device MTUs for one virtual interface, not
-    /// a per-egress or PMTU cache. TX uses [`crate::network::state::ResolvedRoute::mtu`].
+    /// Aggregate smoltcp MTU; egress uses [`crate::network::state::ResolvedRoute::mtu`].
     mtu: AtomicUsize,
     pub(crate) protocol_deadline_micros: AtomicU64,
     #[cfg(unittest)]

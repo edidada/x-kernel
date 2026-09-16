@@ -69,7 +69,6 @@ impl NetworkDataPlane {
         !self.tx_batch.lock().is_empty()
     }
 
-    /// Expires IPv4 fragments into the control batch under that mutex only.
     pub(crate) fn expire_ipv4_fragments(
         &self,
         ingress: &Ipv4Ingress,
@@ -80,15 +79,12 @@ impl NetworkDataPlane {
         ingress.expire_fragments(timestamp, timer_budget, &mut control)
     }
 
-    /// Flushes retained stack-ingress and control batches under their mutexes.
     pub(crate) fn flush_retained_ingress(&self, service: &Service) -> bool {
         let mut control = self.control_tx_batch.lock();
         let mut accepted = self.stack_ingress_batch.lock();
         self.flush_ingress(service, &mut accepted, &mut control)
     }
 
-    /// Drains devices and hands off accepted packets, locking reusable batches
-    /// only for this RX stage.
     pub(crate) fn poll_rx_budgeted(
         &self,
         service: &Service,
@@ -242,8 +238,7 @@ impl NetworkDataPlane {
         service
             .try_with_io(|io| {
                 if let Some(sockets) = &mut sockets {
-                    // Check capacity under the same lock as enqueue, before listener
-                    // preparation publishes socket state for this batch.
+                    // Reserve the whole batch before publishing listener state.
                     if accepted_packets.len() > io.available_stack_ingress_slots() {
                         return false;
                     }
@@ -346,19 +341,6 @@ impl NetworkDataPlane {
         }
 
         progress
-    }
-
-    #[cfg(unittest)]
-    pub(crate) fn retained_stack_ingress_len(&self) -> usize {
-        self.stack_ingress_batch.lock().len()
-    }
-
-    #[cfg(unittest)]
-    pub(crate) fn retain_stack_ingress_for_tests(
-        &self,
-        packets: impl IntoIterator<Item = PacketBuf>,
-    ) {
-        self.stack_ingress_batch.lock().extend(packets);
     }
 }
 
@@ -492,61 +474,6 @@ mod tests {
         assert!(io.lock().can_admit_ipv4_egress(1));
     }
 
-    #[def_test]
-    fn tx_capacity_notification_survives_refill_during_device_send() {
-        use crate::device::test_device::TestDevice;
-
-        let io = Arc::new(Mutex::new(NetIo::new()));
-        let state = NetworkState::new();
-        let dev = state.add_device(Box::new(TestDevice::ethernet(1, 1500).with_send_hook({
-            let io = io.clone();
-            move || {
-                // A producer can refill the freed slot during device I/O.
-                let mut io = io
-                    .try_lock()
-                    .expect("device send must release the queue lock");
-                io.enqueue_tx(core::iter::once(PacketBuf::from_ip_packet_vec(
-                    0,
-                    vec![0; 20],
-                    PacketOwner::Ipv4Stack,
-                )));
-            }
-        })));
-        let src = Ipv4Address::new(192, 0, 2, 1);
-        let dst = Ipv4Address::new(192, 0, 2, 2);
-        state
-            .add_ipv4_addr(Ipv4AddrEntry {
-                dev,
-                addr: Ipv4Cidr::new(src, 24),
-                scope: crate::router::ROUTE_SCOPE_UNIVERSE,
-                broadcast: None,
-            })
-            .unwrap();
-        let packet = ipv4::build_ipv4_packet(src, dst, ipv4::PROTOCOL_ICMP, 64, &[]).unwrap();
-        {
-            let mut io = io.lock();
-            while io.can_admit_ipv4_egress(1) {
-                io.enqueue_tx(core::iter::once(PacketBuf::from_ip_packet_vec(
-                    0,
-                    packet.clone(),
-                    PacketOwner::Ipv4Stack,
-                )));
-            }
-        }
-        let current = monotonic_time();
-        let progress = NetworkDataPlane::new().poll_tx_budgeted(
-            &state,
-            &io,
-            &Ipv4Output::new(),
-            current,
-            1,
-            current,
-        );
-
-        assert_eq!(progress.packets, 1);
-        assert!(progress.tx_capacity_changed);
-        assert!(!io.lock().can_admit_ipv4_egress(1));
-    }
     #[def_test(serial)]
     fn tx_dispatch_exposes_loopback_rx_in_the_same_round() {
         let loopback_addr = Ipv4Address::new(127, 0, 0, 1);

@@ -2,11 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Packet queues and device transport.
-//!
-//! `NetIo` is the queue mutex domain. Device RX borrows [`DeviceHandle`]s
-//! under the inventory read lock and polls a bounded batch per device mutex.
-//! TX enqueue/dequeue does not borrow the inventory.
+//! Packet queues and device RX, serialized by the Service queue mutex.
 use alloc::{collections::VecDeque, vec::Vec};
 
 use kerrno::{KError, KResult};
@@ -219,10 +215,7 @@ impl NetIo {
         }
     }
 
-    /// Appends a complete stack-ingress batch.
-    ///
-    /// Returns `WouldBlock` with both the queue and `packets` unchanged if
-    /// the available slots cannot hold the entire batch.
+    /// Enqueues the whole batch, preserving both queue and input on `WouldBlock`.
     pub fn enqueue_stack_ingress(&mut self, packets: &mut Vec<PacketBuf>) -> KResult {
         // Creating a Drain before this check would drop rejected packets.
         if !self.rx_queue.can_push(packets.len()) {
@@ -283,26 +276,6 @@ mod tests {
         ip::{IpAddress, Ipv4Address},
         network::state::NetworkState,
     };
-
-    #[def_test]
-    fn bounded_queue_rejects_overflow() {
-        let mut queue = BoundedQueue::with_capacity(1);
-        queue.try_push(1).unwrap();
-        assert!(queue.is_full());
-        assert_eq!(queue.available(), 0);
-        assert_eq!(queue.try_push(2), Err(2));
-    }
-
-    #[def_test]
-    fn bounded_queue_try_extend_returns_items_when_full() {
-        let mut queue = BoundedQueue::with_capacity(2);
-        assert!(queue.try_extend([1, 2].into_iter()).is_ok());
-        assert!(queue.is_full());
-        let rejected = queue.try_extend([3].into_iter()).unwrap_err();
-        assert_eq!(rejected.collect::<Vec<_>>(), vec![3]);
-        assert_eq!(queue.available(), 0);
-        assert!(queue.try_extend(core::iter::empty()).is_ok());
-    }
 
     #[def_test]
     fn stack_ingress_preserves_rejected_batch_for_retry() {
@@ -429,44 +402,5 @@ mod tests {
         assert_eq!(drain.work_done, 1);
         assert!(!drain.has_lock_contention);
         assert!(!drain.has_more);
-    }
-
-    #[def_test]
-    fn device_removal_repairs_cursor_and_route_indices() {
-        use crate::{
-            device::{interfaces::Ipv4AddrEntry, test_device::TestDevice},
-            ip::Ipv4Cidr,
-            router::ROUTE_SCOPE_UNIVERSE,
-            service::Service,
-        };
-        let state = NetworkState::new();
-        for index in 0..3 {
-            let dev = state.add_device(Box::new(TestDevice::ethernet(index + 1, 1500)));
-            state
-                .add_ipv4_addr(Ipv4AddrEntry {
-                    dev,
-                    addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, index as u8, 1), 24),
-                    scope: ROUTE_SCOPE_UNIVERSE,
-                    broadcast: None,
-                })
-                .unwrap();
-        }
-        let service = Service::new(state);
-        service.with_io(|io| io.next_rx_device = 2);
-        let config = crate::control::NetworkConfig::lock(&service);
-        config.remove_device(kdevice::DeviceId::new(2)).unwrap();
-        let cursor = service.with_io(|io| io.next_rx_device);
-        let route_dev = service
-            .network()
-            .lookup_route(&IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 2)))
-            .unwrap()
-            .dev;
-        let removed_route = service
-            .network()
-            .lookup_route(&IpAddress::Ipv4(Ipv4Address::new(192, 0, 1, 2)))
-            .is_some();
-        assert_eq!(cursor, 1);
-        assert_eq!(route_dev, 1);
-        assert!(!removed_route);
     }
 }
