@@ -63,6 +63,7 @@ impl<T> BoundedQueue<T> {
         self.queue.pop_front()
     }
 
+    /// Returns the original iterator without advancing it if the batch does not fit.
     fn try_extend<I>(&mut self, items: I) -> Result<(), I>
     where
         I: ExactSizeIterator<Item = T>,
@@ -218,11 +219,18 @@ impl NetIo {
         }
     }
 
-    pub fn enqueue_stack_ingress(&mut self, packets: &mut Vec<PacketBuf>) {
-        debug_assert!(self.rx_queue.can_push(packets.len()));
-        if self.rx_queue.try_extend(packets.drain(..)).is_err() {
-            panic!("stack ingress batch exceeds available RX slots");
+    /// Appends a complete stack-ingress batch.
+    ///
+    /// Returns `WouldBlock` with both the queue and `packets` unchanged if
+    /// the available slots cannot hold the entire batch.
+    pub fn enqueue_stack_ingress(&mut self, packets: &mut Vec<PacketBuf>) -> KResult {
+        // Creating a Drain before this check would drop rejected packets.
+        if !self.rx_queue.can_push(packets.len()) {
+            return Err(KError::WouldBlock);
         }
+        self.rx_queue
+            .try_extend(packets.drain(..))
+            .map_err(|_| KError::WouldBlock)
     }
 
     pub fn has_stack_ingress(&self) -> bool {
@@ -294,6 +302,41 @@ mod tests {
         assert_eq!(rejected.collect::<Vec<_>>(), vec![3]);
         assert_eq!(queue.available(), 0);
         assert!(queue.try_extend(core::iter::empty()).is_ok());
+    }
+
+    #[def_test]
+    fn stack_ingress_preserves_rejected_batch_for_retry() {
+        let mut io = NetIo::new();
+        let mut queued = (0..STACK_RX_QUEUE_CAPACITY - 1)
+            .map(|index| {
+                PacketBuf::from_ip_packet_vec(index as i32, vec![0], PacketOwner::DeviceRx)
+            })
+            .collect();
+        io.enqueue_stack_ingress(&mut queued).unwrap();
+        let first = PacketBuf::from_ip_packet_vec(100, vec![1], PacketOwner::DeviceRx);
+        let second = PacketBuf::from_ip_packet_vec(101, vec![2], PacketOwner::DeviceRx);
+        let mut pending = vec![first.clone(), second.clone()];
+
+        assert_eq!(
+            io.enqueue_stack_ingress(&mut pending),
+            Err(KError::WouldBlock)
+        );
+        assert_eq!(io.available_stack_ingress_slots(), 1);
+        assert_eq!(pending.len(), 2);
+        assert!(pending[0].shares_storage_with(&first));
+        assert!(pending[1].shares_storage_with(&second));
+
+        assert_eq!(io.pop_stack_ingress().unwrap().ifindex(), 0);
+        io.enqueue_stack_ingress(&mut pending).unwrap();
+        assert!(pending.is_empty());
+        assert_eq!(io.available_stack_ingress_slots(), 0);
+        io.enqueue_stack_ingress(&mut pending).unwrap();
+        for index in 1..STACK_RX_QUEUE_CAPACITY - 1 {
+            assert_eq!(io.pop_stack_ingress().unwrap().ifindex(), index as i32);
+        }
+        assert!(io.pop_stack_ingress().unwrap().shares_storage_with(&first));
+        assert!(io.pop_stack_ingress().unwrap().shares_storage_with(&second));
+        assert!(!io.has_stack_ingress());
     }
 
     fn network_with_ready_loopback_packet() -> (NetworkState, NetIo) {

@@ -673,6 +673,12 @@ Ethernet RX notifications use `NetRx` to wake RX poll sources and schedule `knet
 
 Each `Service::poll_budgeted` round first attempts pending IPv4 reassembly expiration and flushes retained ingress/control batches. It then dispatches queued TX, drains device RX, advances smoltcp, and uses the remaining TX and device-RX budgets for a second pass. Device RX and smoltcp ingress each have a separate allowance of `budget.rx_packets`.
 
+Stack-ingress handoff checks space for the entire accepted batch under the
+NetIo lock before preparing TCP listeners or draining the batch. Insufficient
+space preserves both accepted and control batches for retry. A deferred handoff
+pauses device RX while TX and smoltcp continue, allowing existing ingress to
+release queue slots. Deferred RX sets `has_more` for the next round.
+
 Device draining rotates its starting position across devices, consuming each device until it is empty or the batch budget is exhausted. A batch borrows the device inventory under a read guard and acquires each device mutex once, without allocating a handle snapshot. IPv4 validation, destination filtering, reassembly, and UDP delivery run after releasing the device, interface, and NetIo guards. Unmatched unicast UDP can generate ICMP port-unreachable responses; unsupported unicast IPv4 protocols can generate protocol-unreachable responses. ICMP errors are inspected for UDP before eligible packets enter the smoltcp batch. IPv6 enters that batch directly.
 
 The following pseudocode summarizes the round. Failed shared-state `try_lock` acquisitions retain pending batches and set `has_more = true`. TX or device-RX contention ends that stage while allowing protocol maintenance and egress to advance; contention on protocol prerequisites defers protocol processing. Contention during reassembly expiration only defers that timer work. Reusable batch mutexes and nested listener operations still use blocking locks.
@@ -689,9 +695,9 @@ The following pseudocode summarizes the round. Failed shared-state `try_lock` ac
 | 2 | &emsp;start = monotonic_time() |
 | 3 | &emsp;lock reusable RX, accepted, and control batches |
 | 4 | &emsp;try to expire pending IPv4 fragments within $B_{\mathrm{timer}}$ |
-| 5 | &emsp;flush retained batches, or return retry |
+| 5 | &emsp;try to flush retained batches; on failure defer device RX and retain both batches |
 | 6 | &emsp;tx_done = dispatch queued TX within $B_{\mathrm{tx}}$ |
-| 7 | &emsp;drain_device_rx($B_{\mathrm{rx}}$ unless time limit reached) |
+| 7 | &emsp;if the retained handoff succeeded, drain_device_rx($B_{\mathrm{rx}}$ unless time limit reached) |
 | 8 | &emsp;use the cached Stack MTU; `try_lock` socket set, NetIo, then Interface; otherwise return retry |
 | 9 | &emsp;`Interface.poll_maintenance()` |
 | 10 | &emsp;**if** time limit has not been reached: |
@@ -702,11 +708,11 @@ The following pseudocode summarizes the round. Failed shared-state `try_lock` ac
 | 15 | &emsp;release Interface; refresh TCP acceptors; release NetIo and socket set |
 | 16 | &emsp;dispatch queued TX within remaining TX budget if time remains and earlier TX did not contend |
 | 17 | &emsp;retain unsent TX and remember dispatch contention |
-| 18 | &emsp;**if** time and device-RX budget remain and earlier RX did not contend: |
+| 18 | &emsp;**if** time and device-RX budget remain and earlier RX was not deferred: |
 | 19 | &emsp;&emsp;drain_device_rx(remaining device-RX budget) |
 | 20 | &emsp;publish the earliest protocol / deferred-close deadline |
 | 21 | &emsp;`try_lock` NetIo for queue readiness, release it, then `try_read` interfaces and `try_lock` devices for readiness; contention counts as pending work |
-| 22 | &emsp;**return** progress with `has_more` for contention, pending RX, ingress, TX, immediately due protocol work, or pending reassembly expiration |
+| 22 | &emsp;**return** progress with `has_more` for contention, deferred RX, pending device RX, ingress or TX, immediately due protocol work, or pending reassembly expiration |
 | 23 | **Procedure** `drain_device_rx(remaining)` |
 | 24 | &emsp;process retained RX batch and flush accepted/control batches |
 | 25 | &emsp;**while** budget and time remain: |
@@ -720,7 +726,7 @@ The following pseudocode summarizes the round. Failed shared-state `try_lock` ac
 | 33 | &emsp;&emsp;**stop** on device contention, zero progress, or no more work |
 | 34 | **Procedure** `flush accepted/control batches` |
 | 35 | &emsp;`try_lock` socket set if accepted batch is nonempty |
-| 36 | &emsp;`try_lock` NetIo; on failure retain both batches and return retry |
+| 36 | &emsp;`try_lock` NetIo and check all accepted packets fit; on failure retain both batches and return retry |
 | 37 | &emsp;prepare TCP listeners and enqueue accepted packets |
 | 38 | &emsp;enqueue control packets; drop a control packet if its TX queue is full |
 | 39 | &emsp;release acquired locks |

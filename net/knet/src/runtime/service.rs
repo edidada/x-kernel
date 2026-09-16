@@ -15,7 +15,7 @@ use smoltcp::wire::IpAddress as SmoltcpIpAddress;
 
 use crate::{
     SOCKET_SET,
-    dataplane::NetworkDataPlane,
+    dataplane::{DeviceRxProgress, NetworkDataPlane},
     io::{NetIo, RxDrain},
     ip::IpAddress,
     network::{
@@ -141,12 +141,9 @@ impl Service {
             &mut control_packets,
         );
         let mut timer_events = ipv4_expiration.timer_events;
-        if !self
-            .dataplane
-            .flush_ingress(self, &mut accepted_packets, &mut control_packets)
-        {
-            return deferred_poll_progress(0, 0, timer_events, false);
-        }
+        let has_flushed_ingress =
+            self.dataplane
+                .flush_ingress(self, &mut accepted_packets, &mut control_packets);
 
         let tx_progress = self.dataplane.poll_tx_budgeted(
             &self.network,
@@ -166,21 +163,30 @@ impl Service {
             budget.tx_packets.saturating_sub(tx_packets)
         };
 
-        let rx_progress = self.dataplane.poll_rx_budgeted(
-            self,
-            round_started_at,
-            if has_reached_time_limit {
-                0
-            } else {
-                budget.rx_packets
-            },
-            &mut rx_batch,
-            &mut accepted_packets,
-            &mut control_packets,
-        );
+        let rx_progress = if has_flushed_ingress {
+            self.dataplane.poll_rx_budgeted(
+                self,
+                round_started_at,
+                if has_reached_time_limit {
+                    0
+                } else {
+                    budget.rx_packets
+                },
+                &mut rx_batch,
+                &mut accepted_packets,
+                &mut control_packets,
+            )
+        } else {
+            // Stack polling must free ingress slots before the retained batch
+            // can be retried. Keep device RX paused while that batch is pending.
+            DeviceRxProgress {
+                is_deferred: true,
+                ..DeviceRxProgress::default()
+            }
+        };
         let mut rx_packets = rx_progress.packets;
         has_reached_time_limit |= rx_progress.has_reached_time_limit;
-        let mut rx_lock_contention = rx_progress.has_lock_contention;
+        let mut is_rx_deferred = rx_progress.is_deferred;
 
         // One smoltcp device; its MTU is the cached effective_mtu from the last
         // rebuild. Per-egress send MTU is already on `ResolvedRoute`.
@@ -243,7 +249,7 @@ impl Service {
         }
 
         let rx_remaining = budget.rx_packets.saturating_sub(rx_packets);
-        if !has_reached_time_limit && !rx_lock_contention && rx_remaining > 0 {
+        if !has_reached_time_limit && !is_rx_deferred && rx_remaining > 0 {
             let tail_progress = self.dataplane.poll_rx_budgeted(
                 self,
                 round_started_at,
@@ -253,7 +259,7 @@ impl Service {
                 &mut control_packets,
             );
             rx_packets += tail_progress.packets;
-            rx_lock_contention |= tail_progress.has_lock_contention;
+            is_rx_deferred |= tail_progress.is_deferred;
         }
 
         let next_poll = earliest_poll_deadline(protocol_deadline, deferred_close_deadline);
@@ -280,7 +286,7 @@ impl Service {
             timer_events,
             tx_capacity_changed,
             has_more: tx_lock_contention
-                || rx_lock_contention
+                || is_rx_deferred
                 || queue_snapshot_contention
                 || rx_has_more.unwrap_or(true)
                 || ingress_has_more
@@ -681,5 +687,127 @@ pub(crate) mod tests {
         assert!(control.is_empty());
         assert!(service.with_io(|io| io.has_stack_ingress()));
         assert!(service.with_io(|io| io.has_pending_tx()));
+    }
+
+    #[def_test(serial)]
+    fn ingress_handoff_defers_listener_preparation_until_batch_fits() {
+        use alloc::vec;
+
+        use smoltcp::wire::IpListenEndpoint;
+
+        use crate::{
+            LISTEN_TABLE,
+            buf::{PacketBuf, PacketOwner},
+        };
+
+        struct ListenerGuard(IpListenEndpoint);
+        impl Drop for ListenerGuard {
+            fn drop(&mut self) {
+                LISTEN_TABLE.unlisten(self.0);
+            }
+        }
+
+        let src = Ipv4Address::new(192, 0, 2, 10);
+        let dst = Ipv4Address::new(192, 0, 2, 11);
+        let listener = (49152..=65535)
+            .find_map(|port| {
+                let endpoint = IpListenEndpoint {
+                    addr: Some(SmoltcpIpAddress::Ipv4(dst.into())),
+                    port,
+                };
+                LISTEN_TABLE
+                    .listen(endpoint, 1)
+                    .ok()
+                    .map(|()| ListenerGuard(endpoint))
+            })
+            .unwrap();
+        let socket_count = SOCKET_SET.inner.lock().iter().count();
+        let mut syn = [0u8; 20];
+        syn[..2].copy_from_slice(&12345u16.to_be_bytes());
+        syn[2..4].copy_from_slice(&listener.0.port.to_be_bytes());
+        syn[12] = 5 << 4;
+        syn[13] = 0x02;
+        let syn = PacketBuf::from_ip_packet_vec(
+            1,
+            ipv4::build_ipv4_packet(src, dst, ipv4::PROTOCOL_TCP, 64, &syn).unwrap(),
+            PacketOwner::DeviceRx,
+        );
+        let mut accepted = vec![syn.clone(), syn.clone()];
+        let mut control = vec![vec![0; 20]];
+        let service = Service::new(NetworkState::new());
+        service.with_io(|io| {
+            let mut queued = vec![
+                PacketBuf::from_ip_packet_vec(0, vec![0], PacketOwner::DeviceRx);
+                io.available_stack_ingress_slots() - 1
+            ];
+            io.enqueue_stack_ingress(&mut queued).unwrap();
+        });
+
+        assert!(
+            !service
+                .dataplane
+                .flush_ingress(&service, &mut accepted, &mut control)
+        );
+        assert_eq!(SOCKET_SET.inner.lock().iter().count(), socket_count);
+        assert_eq!(accepted.len(), 2);
+        assert!(
+            accepted
+                .iter()
+                .all(|packet| packet.shares_storage_with(&syn))
+        );
+        assert_eq!(control, vec![vec![0; 20]]);
+        assert_eq!(service.with_io(|io| io.available_stack_ingress_slots()), 1);
+        assert!(!service.with_io(|io| io.has_pending_tx()));
+
+        service.with_io(|io| io.pop_stack_ingress()).unwrap();
+        assert!(
+            service
+                .dataplane
+                .flush_ingress(&service, &mut accepted, &mut control)
+        );
+        assert_eq!(SOCKET_SET.inner.lock().iter().count(), socket_count + 1);
+        assert!(accepted.is_empty());
+        assert!(control.is_empty());
+        assert_eq!(service.with_io(|io| io.available_stack_ingress_slots()), 0);
+        assert!(service.with_io(|io| io.has_pending_tx()));
+    }
+
+    #[def_test(serial)]
+    fn poll_round_frees_ingress_capacity_for_retained_batch() {
+        use alloc::vec;
+
+        use crate::buf::{PacketBuf, PacketOwner};
+
+        let service = Service::new(NetworkState::new());
+        let packet = PacketBuf::from_ip_packet_vec(0, vec![0x45, 0, 0, 20], PacketOwner::DeviceRx);
+        service.with_io(|io| {
+            let mut queued = vec![packet.clone(); io.available_stack_ingress_slots()];
+            io.enqueue_stack_ingress(&mut queued).unwrap();
+        });
+        service
+            .dataplane
+            .stack_ingress_batch
+            .lock()
+            .extend([packet.clone(), packet]);
+        let budget = PollBudget {
+            rx_packets: 1,
+            tx_packets: 0,
+            timer_events: 0,
+        };
+
+        let progress = service.poll_budgeted(budget);
+        assert!(progress.has_more);
+        assert_eq!(progress.rx_packets, 0);
+        assert_eq!(service.with_io(|io| io.available_stack_ingress_slots()), 1);
+        assert_eq!(service.dataplane.stack_ingress_batch.lock().len(), 2);
+
+        let progress = service.poll_budgeted(budget);
+        assert!(progress.has_more);
+        assert_eq!(service.with_io(|io| io.available_stack_ingress_slots()), 2);
+        assert_eq!(service.dataplane.stack_ingress_batch.lock().len(), 2);
+
+        service.poll_budgeted(budget);
+        assert!(service.dataplane.stack_ingress_batch.lock().is_empty());
+        assert_eq!(service.with_io(|io| io.available_stack_ingress_slots()), 1);
     }
 }

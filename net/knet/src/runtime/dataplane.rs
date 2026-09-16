@@ -28,7 +28,8 @@ const RX_INGRESS_BATCH_PACKETS: usize = 64;
 pub(crate) struct DeviceRxProgress {
     pub packets: usize,
     pub has_reached_time_limit: bool,
-    pub has_lock_contention: bool,
+    /// RX was deferred by lock contention or stack-ingress capacity.
+    pub is_deferred: bool,
 }
 
 #[derive(Default)]
@@ -83,7 +84,7 @@ impl NetworkDataPlane {
             control_packets,
         ) || !self.flush_ingress(service, accepted_packets, control_packets)
         {
-            progress.has_lock_contention = true;
+            progress.is_deferred = true;
             return progress;
         }
 
@@ -105,11 +106,11 @@ impl NetworkDataPlane {
                 rx_batch,
             );
             let Some(drain) = drain else {
-                progress.has_lock_contention = true;
+                progress.is_deferred = true;
                 break;
             };
             progress.packets += drain.work_done;
-            progress.has_lock_contention |= drain.has_lock_contention;
+            progress.is_deferred |= drain.has_lock_contention;
             packets_since_time_check = packets_since_time_check.saturating_add(drain.work_done);
 
             if !self.process_rx_batch(
@@ -120,7 +121,7 @@ impl NetworkDataPlane {
                 control_packets,
             ) || !self.flush_ingress(service, accepted_packets, control_packets)
             {
-                progress.has_lock_contention = true;
+                progress.is_deferred = true;
                 break;
             }
             if drain.has_lock_contention || !drain.has_more || drain.work_done == 0 {
@@ -174,6 +175,7 @@ impl NetworkDataPlane {
         true
     }
 
+    /// Hands off complete batches, retaining them on lock or RX-capacity failure.
     pub(crate) fn flush_ingress(
         &self,
         service: &Service,
@@ -195,11 +197,15 @@ impl NetworkDataPlane {
         service
             .try_with_io(|io| {
                 if let Some(sockets) = &mut sockets {
-                    // Acquire both destinations before listener preparation mutates the
-                    // socket set. A failed nonblocking acquisition leaves the complete
-                    // batch available for an identical retry in a later poll round.
+                    // Check capacity under the same lock as enqueue, before listener
+                    // preparation publishes socket state for this batch.
+                    if accepted_packets.len() > io.available_stack_ingress_slots() {
+                        return false;
+                    }
                     Stack::prepare_ingress(accepted_packets, sockets);
-                    io.enqueue_stack_ingress(accepted_packets);
+                    if io.enqueue_stack_ingress(accepted_packets).is_err() {
+                        return false;
+                    }
                 }
                 for packet in control_packets.drain(..) {
                     if let Err(err) = io.enqueue_control_tx(packet) {

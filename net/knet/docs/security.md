@@ -696,6 +696,7 @@ for this document update. Test names are resolved against current source.
 | AF_PACKET transmission rejection | [src/link/packet.rs](../src/link/packet.rs): `test_send_ifindex_errors` and `test_send_link_state_validation` check interface, link-state, short-header, and MTU failures. |
 | AF_PACKET receive ownership | [src/link/packet.rs](../src/link/packet.rs): `test_peek_preserves_frame` and `test_recv_write_failure_preserves_packet` check retention across PEEK and failed destination writes. These tests do not cover Unix stream PEEK. |
 | Poller contention and TX retry | [src/runtime/service.rs](../src/runtime/service.rs): `poll_round_defers_interface_snapshot_contention`; [src/network/state.rs](../src/network/state.rs): `poller_queries_defer_inventory_and_routing_contention`; [src/runtime/dataplane.rs](../src/runtime/dataplane.rs): `contended_tx_retains_order_and_obeys_a_smaller_retry_budget` checks retained order, capacity notification, and a smaller retry budget. |
+| Stack-ingress capacity and retry | [src/runtime/io.rs](../src/runtime/io.rs): `stack_ingress_preserves_rejected_batch_for_retry` checks ownership, FIFO order, exact-fit retry, and empty batches; [src/runtime/service.rs](../src/runtime/service.rs): `ingress_handoff_defers_listener_preparation_until_batch_fits` checks that capacity rejection preserves both batches and socket state, while `poll_round_frees_ingress_capacity_for_retained_batch` checks protocol-stack progress and eventual admission. |
 | Broadcast contention | [src/network/ipv4/output.rs](../src/network/ipv4/output.rs): `broadcast_returns_packet_before_contended_fanout`; [src/stack/ipv6_output.rs](../src/stack/ipv6_output.rs): `ipv6_multicast_returns_packet_before_contended_fanout` verifies ownership return before fan-out. |
 | Device contention and protocol progress | [src/runtime/service.rs](../src/runtime/service.rs): `poll_round_continues_protocol_on_device_mutex_contention`; [src/runtime/io.rs](../src/runtime/io.rs): `device_contention_retains_rx_for_retry` checks nonblocking readiness and RX ownership across retry. |
 | Configuration exclusion during TX | [src/network/state.rs](../src/network/state.rs): `device_handoff_excludes_address_and_inventory_mutation` checks exclusion at synchronous, batched, and broadcast submission; `stale_route_is_rejected_after_preceding_device_removal` checks slot renumbering and a fresh route. |
@@ -784,9 +785,13 @@ Changes to this module must verify the following:
   original packet to avoid an extra copy-on-write allocation.
 - Data capacity notifications belong to dequeue, even if dispatch later defers.
   Retained TX contributes to `has_more` even with a zero remaining TX budget.
-- `NetworkDataPlane::flush_ingress` acquires socket-set then NetIo before listener
-  preparation. Failure retains accepted and control batches. Native UDP runs
-  after interface, queue, and socket-set guards have been released.
+- `NetworkDataPlane::flush_ingress` acquires socket-set then NetIo and checks
+  capacity for the complete accepted batch before listener preparation. Lock or
+  capacity failure retains accepted and control batches. RX enqueue checks
+  capacity before creating a `Vec::drain`, preserving rejected packet ownership.
+  Deferred handoff pauses device RX while TX and smoltcp continue to free slots;
+  `has_more` schedules retry. Native UDP runs after interface, queue, and
+  socket-set guards have been released.
 - Protocol and reassembly deadlines retain separate atomics. A published
   reassembly-pending state survives RX refresh until task polling consumes it.
   Timer callbacks perform only atomic transitions and wakeups.

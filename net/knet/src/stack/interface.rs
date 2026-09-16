@@ -348,7 +348,7 @@ mod tests {
             PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::DeviceRx),
             PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::DeviceRx),
         ]);
-        packet_io.enqueue_stack_ingress(&mut packets);
+        packet_io.enqueue_stack_ingress(&mut packets).unwrap();
         let mut sockets = SocketSet::new(vec![]);
 
         let progress = Stack::poll_ingress_budgeted(
