@@ -87,10 +87,6 @@ impl NetDevice for LoopbackDevice {
         LinkKind::Loopback
     }
 
-    fn mtu(&self) -> usize {
-        self.mtu
-    }
-
     fn is_link_up(&self) -> bool {
         self.flags & LINK_FLAG_UP != 0
     }
@@ -233,7 +229,7 @@ impl NetDevice for LoopbackDevice {
         self.name = name;
     }
 
-    fn set_mtu(&mut self, mtu: usize) -> Result<(), LinuxError> {
+    fn apply_mtu(&mut self, mtu: usize) -> Result<(), LinuxError> {
         LinkKind::Loopback.validate_mtu(mtu)?;
         self.mtu = mtu;
         Ok(())
@@ -263,7 +259,7 @@ mod tests {
     #[def_test(serial)]
     fn loopback_rechecks_current_mtu_before_enqueue() {
         let mut device = LoopbackDevice::new();
-        device.set_mtu(IPV4_MIN_MTU).unwrap();
+        device.apply_mtu(IPV4_MIN_MTU).unwrap();
         let packet =
             PacketBuf::from_ip_packet_vec(0, vec![0; IPV4_MIN_MTU + 1], PacketOwner::Ipv4Stack);
         let queued_before = net_rx::queued_len();
@@ -282,7 +278,7 @@ mod tests {
     #[def_test]
     fn loopback_link_state_updates_are_idempotent() {
         let mut device = LoopbackDevice::new();
-        assert_eq!(device.mtu(), LOOPBACK_MAX_MTU);
+        assert_eq!(device.link_snapshot(1).mtu, LOOPBACK_MAX_MTU);
 
         device.set_link_up(false);
         device.set_link_up(false);

@@ -606,10 +606,6 @@ impl NetDeviceOps for EthernetDevice {
         LinkKind::Ethernet
     }
 
-    fn mtu(&self) -> usize {
-        self.mtu
-    }
-
     fn is_link_up(&self) -> bool {
         self.flags & LINK_FLAG_UP != 0
     }
@@ -759,7 +755,7 @@ impl NetDeviceOps for EthernetDevice {
         self.name = name;
     }
 
-    fn set_mtu(&mut self, mtu: usize) -> Result<(), LinuxError> {
+    fn apply_mtu(&mut self, mtu: usize) -> Result<(), LinuxError> {
         LinkKind::Ethernet.validate_mtu(mtu)?;
         self.mtu = mtu;
         Ok(())

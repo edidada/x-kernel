@@ -52,10 +52,6 @@ impl NetDevice for TestDevice {
         self.link.kind
     }
 
-    fn mtu(&self) -> usize {
-        self.link.mtu
-    }
-
     fn is_link_up(&self) -> bool {
         self.link.flags & LINK_FLAG_UP != 0
     }
@@ -113,7 +109,7 @@ impl NetDevice for TestDevice {
         self.link.name = name;
     }
 
-    fn set_mtu(&mut self, mtu: usize) -> Result<(), LinuxError> {
+    fn apply_mtu(&mut self, mtu: usize) -> Result<(), LinuxError> {
         self.link.kind.validate_mtu(mtu)?;
         self.link.mtu = mtu;
         Ok(())

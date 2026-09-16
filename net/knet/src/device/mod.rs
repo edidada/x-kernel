@@ -132,9 +132,6 @@ pub trait NetDevice: Send + Sync {
     /// Returns the link-layer kind without allocating a snapshot.
     fn link_kind(&self) -> LinkKind;
 
-    /// Returns the configured IP-layer MTU.
-    fn mtu(&self) -> usize;
-
     /// Returns whether the device can currently receive and transmit packets.
     fn is_link_up(&self) -> bool;
 
@@ -198,12 +195,15 @@ pub trait NetDevice: Send + Sync {
     /// Updates the user-visible interface name for this device.
     fn set_name(&mut self, _name: String) {}
 
-    /// Updates the device MTU.
+    /// Applies a network-layer MTU configuration to this backend.
+    ///
+    /// [`DeviceHandle`](handle::DeviceHandle) owns the published MTU; backends
+    /// validate the request and update any driver-local state needed for I/O.
     ///
     /// # Errors
     ///
     /// Returns `EINVAL` when `mtu` is outside the backend's supported range.
-    fn set_mtu(&mut self, _mtu: usize) -> Result<(), LinuxError> {
+    fn apply_mtu(&mut self, _mtu: usize) -> Result<(), LinuxError> {
         Err(LinuxError::EOPNOTSUPP)
     }
 

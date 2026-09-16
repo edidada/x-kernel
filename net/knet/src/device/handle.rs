@@ -26,7 +26,8 @@ struct DeviceShared {
     device: Mutex<Box<dyn NetDevice>>,
     device_id: Option<kdevice::DeviceId>,
     link_kind: LinkKind,
-    /// Published by link config (`Release`); route snapshots load `Acquire`.
+    /// Network-layer MTU published by link config (`Release`); readers load
+    /// `Acquire` without taking the device mutex.
     mtu: AtomicUsize,
 }
 
@@ -45,7 +46,7 @@ impl DeviceHandle {
     pub(crate) fn new(device: Box<dyn NetDevice>) -> Self {
         let device_id = device.device_id();
         let link_kind = device.link_kind();
-        let mtu = device.mtu();
+        let mtu = device.link_snapshot(1).mtu;
         Self {
             inner: Arc::new(DeviceShared {
                 device: Mutex::new(device),
@@ -104,11 +105,15 @@ impl DeviceHandle {
     }
 
     pub(crate) fn link_snapshot(&self, ifindex: i32) -> LinkSnapshot {
-        self.with(|device| device.link_snapshot(ifindex))
+        let mut snapshot = self.with(|device| device.link_snapshot(ifindex));
+        snapshot.mtu = self.mtu();
+        snapshot
     }
 
     pub(crate) fn link_send_snapshot(&self) -> LinkSendSnapshot {
-        self.with(|device| device.link_send_snapshot())
+        let mut snapshot = self.with(|device| device.link_send_snapshot());
+        snapshot.mtu = self.mtu();
+        snapshot
     }
 
     pub(crate) fn register_rx_waker(
@@ -151,8 +156,8 @@ impl DeviceHandle {
     ) -> Result<(), LinuxError> {
         let mut device = self.inner.device.lock();
         if let Some(mtu) = mtu {
-            device.set_mtu(mtu)?;
-            self.inner.mtu.store(device.mtu(), Ordering::Release);
+            device.apply_mtu(mtu)?;
+            self.inner.mtu.store(mtu, Ordering::Release);
         }
         if let Some(name) = name {
             device.set_name(name);
