@@ -169,6 +169,19 @@ impl NetworkState {
         self.with_inventory(|interfaces, routing| routing.output_route_source(interfaces, dst, 0))
     }
 
+    pub(crate) fn send_link_frame(&self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
+        if ifindex <= 0 {
+            return Err(KError::InvalidInput);
+        }
+        self.with_interfaces(|interfaces| {
+            let device = interfaces
+                .devices()
+                .get((ifindex - 1) as usize)
+                .ok_or(KError::from(LinuxError::ENODEV))?;
+            device.send_link_frame(ifindex, frame)
+        })
+    }
+
     #[cfg(unittest)]
     pub(crate) fn route_mtu(&self, dst: &IpAddress) -> Option<usize> {
         self.resolve(dst).map(|route| route.mtu)

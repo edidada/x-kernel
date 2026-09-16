@@ -221,7 +221,7 @@ impl UdpSocket {
         {
             return Ok(local.addr);
         }
-        SERVICE.get_source_address(&remote_addr)
+        SERVICE.network().select_source_address(&remote_addr)
     }
 
     fn write_datagram(
@@ -576,7 +576,7 @@ impl Pollable for UdpSocket {
         events.set(IoEvents::IN, can_receive);
         events.set(
             IoEvents::OUT,
-            !self.state().is_write_shutdown() && SERVICE.can_send_ip_packet(),
+            !self.state().is_write_shutdown() && SERVICE.with_io(|io| io.can_admit_ipv4_egress(1)),
         );
         self.state().readiness(events)
     }

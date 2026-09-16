@@ -277,7 +277,7 @@ impl PacketSocket {
             frame.len(),
             PacketSocketKind::Raw,
             nonblocking,
-            |service, _link| service.send_link_frame(ifindex, frame),
+            |service, _link| service.network().send_link_frame(ifindex, frame),
         )
     }
 
@@ -296,7 +296,7 @@ impl PacketSocket {
             nonblocking,
             |service, link| {
                 frame[6..12].copy_from_slice(&link.hardware_addr);
-                service.send_link_frame(addr.ifindex, &frame)?;
+                service.network().send_link_frame(addr.ifindex, &frame)?;
                 Ok(payload.len())
             },
         )

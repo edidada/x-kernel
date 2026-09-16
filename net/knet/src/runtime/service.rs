@@ -6,12 +6,11 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::task::Waker;
 
-use kerrno::{KError, KResult, LinuxError};
+use kerrno::KResult;
 use khal::time::monotonic_time;
 use kpoll::{PollContext, PollRegisterError, PollSet};
 use ksync::Mutex;
 use ktime_types::{MonotonicInstant, TimeSpan};
-use smoltcp::wire::IpAddress as SmoltcpIpAddress;
 
 use crate::{
     SOCKET_SET,
@@ -323,23 +322,6 @@ impl Service {
         )
     }
 
-    pub(crate) fn get_source_address(&self, dst: &IpAddress) -> KResult<IpAddress> {
-        self.network.select_source_address(dst)
-    }
-
-    pub(crate) fn get_smoltcp_source_address(
-        &self,
-        dst: &SmoltcpIpAddress,
-    ) -> KResult<SmoltcpIpAddress> {
-        self.network
-            .select_source_address(&crate::ip::from_smoltcp_ip_address(*dst))
-            .map(crate::ip::to_smoltcp_ip_address)
-    }
-
-    pub(crate) fn can_send_ip_packet(&self) -> bool {
-        self.with_io(|io| io.can_admit_ipv4_egress(1))
-    }
-
     pub(crate) fn register_rx_waker(
         &self,
         mask: u32,
@@ -365,19 +347,6 @@ impl Service {
         if protocol_expired || reassembly_expired {
             self.events.notify_timer();
         }
-    }
-
-    pub(crate) fn send_link_frame(&self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
-        if ifindex <= 0 {
-            return Err(KError::InvalidInput);
-        }
-        self.network.with_interfaces(|interfaces| {
-            let device = interfaces
-                .devices()
-                .get((ifindex - 1) as usize)
-                .ok_or(KError::from(LinuxError::ENODEV))?;
-            device.send_link_frame(ifindex, frame)
-        })
     }
 
     #[cfg(unittest)]
@@ -693,7 +662,7 @@ pub(crate) mod tests {
     fn ingress_handoff_defers_listener_preparation_until_batch_fits() {
         use alloc::vec;
 
-        use smoltcp::wire::IpListenEndpoint;
+        use smoltcp::wire::{IpAddress as SmoltcpIpAddress, IpListenEndpoint};
 
         use crate::{
             LISTEN_TABLE,

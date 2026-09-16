@@ -300,7 +300,7 @@ fn test_down_device_keeps_route_mtu_for_output_checks() {
 
     assert_eq!(SERVICE.network().route_mtu(&destination), Some(1500));
     assert_eq!(
-        SERVICE.get_source_address(&destination),
+        SERVICE.network().select_source_address(&destination),
         Err(LinuxError::ENETUNREACH.into())
     );
 }
@@ -739,9 +739,11 @@ fn test_deleting_last_address_owner_removes_configured_prefsrc_route() {
     .unwrap();
 
     assert_eq!(
-        SERVICE.get_source_address(&crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(
-            8, 8, 8, 8
-        ),)),
+        SERVICE
+            .network()
+            .select_source_address(&crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(
+                8, 8, 8, 8
+            ),)),
         Err(LinuxError::ENETUNREACH.into())
     );
 }

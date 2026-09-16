@@ -17,5 +17,5 @@ pub fn send_link_frame(ifindex: i32, frame: &[u8]) -> KResult<usize> {
     if !SERVICE.is_inited() {
         return Err(KError::OperationNotSupported);
     }
-    SERVICE.send_link_frame(ifindex, frame)
+    SERVICE.network().send_link_frame(ifindex, frame)
 }

@@ -27,6 +27,7 @@ use crate::{
     SocketAddrEx, SocketOps,
     consts::{RAW_RX_BUF_LEN, RAW_TX_BUF_LEN},
     general::GeneralOptions,
+    ip::{from_smoltcp_ip_address, to_smoltcp_ip_address},
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     poller::{PollReason, network_poller},
 };
@@ -98,7 +99,11 @@ impl RawSocket {
         if let Some(local) = *self.local_addr.read() {
             return Ok(local);
         }
-        SERVICE.get_smoltcp_source_address(&remote)
+        Ok(to_smoltcp_ip_address(
+            SERVICE
+                .network()
+                .select_source_address(&from_smoltcp_ip_address(remote))?,
+        ))
     }
 
     /// Delivers the next packet from the connected peer, discarding packets
@@ -218,7 +223,11 @@ impl SocketOps for RawSocket {
         let remote_addr = remote_addr.into_ip()?;
         let remote = self.check_ip_version(remote_addr.ip().into())?;
         if self.local_addr.read().is_none() {
-            *self.local_addr.write() = Some(SERVICE.get_smoltcp_source_address(&remote)?);
+            *self.local_addr.write() = Some(to_smoltcp_ip_address(
+                SERVICE
+                    .network()
+                    .select_source_address(&from_smoltcp_ip_address(remote))?,
+            ));
         }
         *self.peer_addr.write() = Some(remote);
         Ok(())
@@ -231,7 +240,11 @@ impl SocketOps for RawSocket {
 
         let remote = self.remote_address(&options)?;
         let local = if let Some(local) = *self.local_addr.read() {
-            SERVICE.get_smoltcp_source_address(&remote)?;
+            to_smoltcp_ip_address(
+                SERVICE
+                    .network()
+                    .select_source_address(&from_smoltcp_ip_address(remote))?,
+            );
             local
         } else {
             self.local_address_for(remote)?

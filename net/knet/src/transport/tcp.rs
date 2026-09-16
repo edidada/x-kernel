@@ -23,8 +23,8 @@ use smoltcp::{
 };
 
 use crate::{
-    AcceptOptions, ConnectOptions, LISTEN_TABLE, RecvFlags, RecvOptions, SERVICE, SOCKET_SET,
-    SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
+    AcceptOptions, ConnectOptions, LISTEN_TABLE, RecvFlags, RecvOptions, SOCKET_SET, SendOptions,
+    Shutdown, Socket, SocketAddrEx, SocketOps,
     consts::{TCP_RX_BUF_LEN, TCP_TX_BUF_LEN},
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
@@ -423,8 +423,11 @@ impl SocketOps for TcpSocket {
                 let remote_endpoint = IpEndpoint::from(remote_addr);
                 let mut bound_endpoint = *self.bound_endpoint.lock();
                 if bound_endpoint.addr.is_none() {
-                    bound_endpoint.addr =
-                        Some(SERVICE.get_smoltcp_source_address(&remote_endpoint.addr)?);
+                    bound_endpoint.addr = Some(crate::ip::to_smoltcp_ip_address(
+                        crate::SERVICE.network().select_source_address(
+                            &crate::ip::from_smoltcp_ip_address(remote_endpoint.addr),
+                        )?,
+                    ));
                 }
                 if bound_endpoint.port == 0 {
                     let local_addr = bound_endpoint
