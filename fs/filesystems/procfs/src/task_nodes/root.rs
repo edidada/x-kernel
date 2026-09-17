@@ -116,6 +116,16 @@ fn parse_oom_score_adj_input(data: &[u8]) -> VfsResult<Option<i32>> {
         return Ok(None);
     }
 
+    // Linux `oom_score_adj_write()` copies the buffer with `memdup_user_nul()`
+    // and parses it with `kstrtoint()`, so the first NUL byte terminates the
+    // number. Writers such as runc's nsexec send the netlink payload verbatim
+    // including its NUL terminator ("0\0"); that trailing NUL must not poison
+    // the parse.
+    let data = match data.iter().position(|&b| b == 0) {
+        Some(end) => &data[..end],
+        None => data,
+    };
+
     str::from_utf8(data)
         .ok()
         .map(str::trim)
@@ -1086,6 +1096,18 @@ mod tests {
     #[def_test]
     fn test_parse_oom_score_adj_accepts_newline_terminated_input() {
         assert_eq!(parse_oom_score_adj_input(b"100\n").unwrap(), Some(100));
+    }
+
+    #[def_test]
+    fn test_parse_oom_score_adj_accepts_nul_terminated_input() {
+        // runc's nsexec writes the netlink payload verbatim: "0\0".
+        assert_eq!(parse_oom_score_adj_input(b"0\0").unwrap(), Some(0));
+    }
+
+    #[def_test]
+    fn test_parse_oom_score_adj_rejects_nul_only_input() {
+        // Linux `kstrtoint("")` fails, so a bare NUL is still EINVAL.
+        assert!(parse_oom_score_adj_input(b"\0").is_err());
     }
 
     #[def_test]
