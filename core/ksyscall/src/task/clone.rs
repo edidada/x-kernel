@@ -369,17 +369,12 @@ impl CloneRequest {
             return Err(KError::from(LinuxError::EINVAL));
         }
 
-        // Unimplemented namespace flags: return ENOSYS. NEWPID is included
-        // here because, although the flag is parsed, full PID-namespace
-        // support is not wired up yet.
+        // Unimplemented namespace flags: return ENOSYS. These namespaces have
+        // no table isolation yet (see `kns::NsProxy::prepare_unshare`), so
+        // accepting their flags would create pseudo-isolation.
         let unimplemented =
             CloneFlags::NEWNET | CloneFlags::NEWUSER | CloneFlags::NEWCGROUP | CloneFlags::NEWTIME;
         if ns.intersects(unimplemented) {
-            return Err(KError::from(LinuxError::ENOSYS));
-        }
-
-        // CLONE_NEWPID is not yet fully supported
-        if ns.contains(CloneFlags::NEWPID) {
             return Err(KError::from(LinuxError::ENOSYS));
         }
 
@@ -500,6 +495,13 @@ mod tests_clone {
         let mut req = CloneRequest::new();
         req.set_flags(CloneFlags::NEWPID | CloneFlags::PARENT);
         assert!(req.validate_namespace_flags().is_err());
+    }
+
+    #[def_test]
+    fn test_validate_accepts_newpid() {
+        let mut req = CloneRequest::new();
+        req.set_flags(CloneFlags::NEWPID);
+        assert!(req.validate_namespace_flags().is_ok());
     }
 
     #[def_test]
