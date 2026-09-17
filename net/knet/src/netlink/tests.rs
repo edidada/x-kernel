@@ -1639,10 +1639,11 @@ fn rtnetlink_dump_is_scoped_to_the_socket_namespace() {
 
     let packets = super::rtnetlink::handle_rtnetlink_request(&request, &fresh);
 
+    // A dump replies with RTM_NEWLINK records, not with the request type.
     let link_messages = packets
         .iter()
         .filter(|packet| {
-            NlMsgHeader::read(&packet.data).is_some_and(|header| header.msg_type == RTM_GETLINK)
+            NlMsgHeader::read(&packet.data).is_some_and(|header| header.msg_type == RTM_NEWLINK)
         })
         .collect::<Vec<_>>();
 

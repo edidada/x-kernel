@@ -347,7 +347,15 @@ mod tests {
         let names = interface_names(&fresh);
         assert_eq!(names.len(), 1);
         assert_eq!(names[0], "lo");
-        assert_eq!(fresh.service().route_snapshot().len(), 0);
+        // Only the loopback connected routes exist: no default route and no
+        // initial-namespace leak (eth0's universe-scope routes stay behind).
+        assert!(fresh.service().route_snapshot().iter().all(|rule| {
+            rule.filter.prefix_len() >= 8
+                && matches!(
+                    rule.filter.address(),
+                    crate::ip::IpAddress::Ipv4(address) if address.octets()[0] == 127
+                )
+        }));
         assert!(fresh.service().link_snapshot_for_ifindex(2).is_none());
 
         let addresses = fresh.service().ipv4_addr_snapshots();
@@ -374,10 +382,11 @@ mod tests {
         let endpoint = loopback_endpoint(45_001);
 
         fresh.listen_table().listen(endpoint, 1).unwrap();
-        assert!(fresh.listen_table().can_listen(endpoint));
-        // The initial namespace owns a separate listen table, so the same
-        // address and port are still free there.
-        assert!(!expect_init_net().listen_table().can_listen(endpoint));
+        // `can_listen` reports whether the endpoint is still free: occupied
+        // inside the fresh namespace, free in the initial namespace's
+        // separate table.
+        assert!(!fresh.listen_table().can_listen(endpoint));
+        assert!(expect_init_net().listen_table().can_listen(endpoint));
     }
 
     /// Serial: socket sets are per namespace.
