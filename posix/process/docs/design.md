@@ -84,6 +84,14 @@ stored deadline is kept.
 Signals that arrive after that single rescan keep their interrupt notification
 for the next interruptible wait or trap.
 
+`exec_de_thread` (Linux `de_thread()`): `execve` on a multi-threaded process
+SIGKILLs every sibling thread and joins them, so only the execing thread
+swaps the address space. The first sibling's death marks the group exited
+and queues a group-kill `SIGKILL` for the execing thread; the group-exit
+bookkeeping (`reset_group_exit`) and the queued signal are both undone.
+Go runtimes always have helper threads alive at exec time, so without this
+every Go program that execs (runc init, containerd-shim) fails.
+
 `do_exit` performs the following order:
 
 1. Traverse the registered robust-futex list, then clear `clear_child_tid` and
