@@ -17,8 +17,17 @@ use crate::auxv::{AuxEntry, AuxType};
 pub struct ELFHeadersBuilder<'a>(ELFHeaders<'a>);
 impl<'a> ELFHeadersBuilder<'a> {
     pub fn new(input: &'a [u8]) -> Result<Self, &'static str> {
+        let header = xmas_elf::header::parse_header(input)?;
+        // This kernel only runs its own architecture's binaries. Rejecting
+        // foreign machines here returns a clean ENOEXEC to execve instead of
+        // loading, say, an amd64 image on aarch64 and faulting at its entry
+        // (buildkit's archutil probes execute exactly such foreign blobs).
+        let machine = header.pt2.machine();
+        if machine.as_machine() != xmas_elf::header::Machine::AArch64 {
+            return Err("unsupported ELF machine");
+        }
         Ok(Self(ELFHeaders {
-            header: xmas_elf::header::parse_header(input)?,
+            header,
             ph: Vec::new(),
         }))
     }
