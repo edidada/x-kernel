@@ -382,6 +382,10 @@ impl FilterTable {
     pub(crate) fn built_in_chain(&self, hook: FilterHook) -> &Chain {
         &self.chains[self.built_in_chains[hook.index()].index()]
     }
+
+    pub(crate) fn built_in_chain_id(&self, hook: FilterHook) -> ChainId {
+        self.built_in_chains[hook.index()]
+    }
 }
 
 fn validate_rule_matches(chain: &Chain) -> Result<(), FilterTableError> {
