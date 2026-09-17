@@ -161,7 +161,10 @@ fn run_exec(uctx: &mut UserContext, request: ExecRequest) -> KResult<isize> {
 
     let aspace_ref = process.address_space()?;
     let mut aspace = aspace_ref.lock();
-    let (entry_point, user_stack_base, exe_file) = load_user_app_request(&mut aspace, request)?;
+    let (entry_point, user_stack_base, exe_file) = load_user_app_request(&mut aspace, request)
+        .inspect_err(|err| {
+            warn!("DEBUG exec load failed: display={display_path} err={err:?}");
+        })?;
     drop(aspace);
 
     curr.set_name(entry_name.as_str());

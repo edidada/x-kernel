@@ -221,7 +221,7 @@ impl UnixTransportOps for StreamTransport {
         ))
     }
 
-    fn send(&self, mut src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
+    fn send(&self, mut src: impl Read + IoBuf, mut options: SendOptions) -> KResult<usize> {
         if options.to.is_some() {
             return Err(KError::InvalidInput);
         }
@@ -276,6 +276,19 @@ impl UnixTransportOps for StreamTransport {
                 }
                 total += count;
                 if count > 0 {
+                    // Queue control data against the peer's receive position:
+                    // it becomes visible once the consumer has read past the
+                    // byte this send appended (Linux attaches control data to
+                    // the stream position written with it).
+                    if !options.ancillary.is_empty() {
+                        let seq = chan.peer_endpoint.rx_bytes_total.load(Ordering::Acquire)
+                            + count as u64;
+                        let queued = core::mem::take(&mut options.ancillary);
+                        chan.peer_endpoint
+                            .ancillary_queue
+                            .lock()
+                            .push_back((seq, queued));
+                    }
                     chan.peer_endpoint.polls.readable.wake();
                 }
 
@@ -287,7 +300,7 @@ impl UnixTransportOps for StreamTransport {
             })
     }
 
-    fn recv(&self, mut dst: impl Write + IoBufMut, options: RecvOptions) -> KResult<usize> {
+    fn recv(&self, mut dst: impl Write + IoBufMut, mut options: RecvOptions) -> KResult<usize> {
         let is_zero_length = dst.remaining_mut() == 0;
         self.options
             .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
@@ -318,6 +331,24 @@ impl UnixTransportOps for StreamTransport {
                         && channel::is_stream_writable(occupied_after)
                     {
                         chan.peer_endpoint.polls.writable.wake();
+                    }
+                    // Deliver control data queued by the peer whose stream
+                    // position this read has passed. Data is dropped when the
+                    // receiver did not ask for ancillary data, matching Linux.
+                    let consumed = self
+                        .endpoint
+                        .rx_bytes_total
+                        .fetch_add(count as u64, Ordering::AcqRel)
+                        + count as u64;
+                    let mut queue = self.endpoint.ancillary_queue.lock();
+                    while let Some((seq, _)) = queue.front() {
+                        if *seq > consumed {
+                            break;
+                        }
+                        let (_, data) = queue.pop_front().expect("front checked");
+                        if let Some(dst) = options.ancillary.as_mut() {
+                            dst.extend(data);
+                        }
                     }
                     return Ok(count);
                 }

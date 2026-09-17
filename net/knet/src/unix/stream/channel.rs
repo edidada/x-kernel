@@ -4,16 +4,19 @@
 
 //! Connected Unix stream channel state.
 
-use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
 use kerrno::LinuxError;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet};
 use kspin::SpinNoPreempt;
+use ksync::Mutex;
 use ringbuf::{
     HeapCons, HeapProd, HeapRb,
     traits::{Observer, Split},
 };
+
+use crate::socket::AncillaryData;
 
 pub(super) const STREAM_BUF_BYTES: usize = 64 * 1024;
 pub(super) const STREAM_WRITABLE_MAX_OCCUPIED_BYTES: usize = STREAM_BUF_BYTES / 4;
@@ -73,6 +76,13 @@ pub(super) struct StreamEndpoint {
     pub(super) rx_closed: AtomicBool,
     pub(super) tx_closed: AtomicBool,
     pub(super) socket_error: AtomicI32,
+    /// Total bytes this endpoint's consumer has read from the channel.
+    pub(super) rx_bytes_total: AtomicU64,
+    /// Ancillary data queued by the peer, keyed by the byte count this
+    /// endpoint must have consumed before the data is delivered
+    /// (Linux delivers control data attached to the stream position that
+    /// was written when it was sent).
+    pub(super) ancillary_queue: Mutex<VecDeque<(u64, Vec<AncillaryData>)>>,
 }
 
 pub(super) fn new_duplex_channel(
