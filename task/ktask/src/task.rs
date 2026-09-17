@@ -211,6 +211,11 @@ pub struct TaskInner {
     name: SpinNoIrq<String>,
     is_init: bool,
 
+    /// Monotonic timestamp (nanoseconds since boot) taken when the task was
+    /// created. Immutable after construction; reported by procfs as the
+    /// `/proc/[pid]/stat` `starttime` field (converted to clock ticks).
+    start_time_ns: u64,
+
     entry: Cell<Option<Box<dyn FnOnce()>>>,
     state: AtomicU8,
 
@@ -666,6 +671,7 @@ impl TaskInner {
             identity,
             name: SpinNoIrq::new(name),
             is_init: false,
+            start_time_ns: khal::time::monotonic_time_nanos(),
             entry: Cell::new(None),
             state: AtomicU8::new(TaskState::Ready as u8),
             // By default, the task is allowed to run on all CPUs.
@@ -741,6 +747,13 @@ impl TaskInner {
     #[inline]
     pub fn state(&self) -> TaskState {
         self.state.load(Ordering::Acquire).into()
+    }
+
+    /// Returns the monotonic timestamp (nanoseconds since boot) at which the
+    /// task was created.
+    #[inline]
+    pub fn start_time_ns(&self) -> u64 {
+        self.start_time_ns
     }
 
     #[inline]
