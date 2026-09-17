@@ -52,7 +52,11 @@ pub(crate) fn prepare_ipv4_packet(
 pub(crate) fn deliver_ipv4_packet(
     packet: PreparedUdpPacket,
 ) -> (InputDisposition, Option<PreparedUdpPacket>) {
+    // Delivery is scoped to the namespace of the receiving device: loopback
+    // stamps its owner, and physical NICs always belong to the initial
+    // namespace.
     let Some(pcb) = registry::lookup_udp_pcb_on_device(
+        packet.packet().net_ns(),
         packet.local_addr(),
         packet.remote_addr(),
         packet.packet().ifindex(),

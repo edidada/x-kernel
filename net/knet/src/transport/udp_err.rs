@@ -12,6 +12,7 @@ use super::udp::{self, UdpSocketQueuedError};
 use crate::{
     SocketErrorInfo, SocketErrorOrigin,
     ipv4::{self, Ipv4Header},
+    netns::NetNsId,
 };
 
 const ICMPV4_DST_UNREACHABLE: u8 = 3;
@@ -40,12 +41,15 @@ const ICMPV4_CODE_FRAG_EXPIRED: u8 = 1;
 pub(crate) type QueuedUdpError = UdpSocketQueuedError;
 
 fn queue_ipv4_error(
+    net_ns: NetNsId,
     local: SocketAddrV4,
     remote: SocketAddrV4,
     ingress_ifindex: i32,
     error: QueuedUdpError,
 ) {
-    if let Some(state) = udp::lookup_udp_error_state(local.into(), remote.into(), ingress_ifindex) {
+    if let Some(state) =
+        udp::lookup_udp_error_state(net_ns, local.into(), remote.into(), ingress_ifindex)
+    {
         if state.peer_endpoint().is_some() {
             state.record_socket_error(error.ancillary.errno);
         }
@@ -108,7 +112,7 @@ fn icmpv4_errno(icmp: &Icmpv4Slice<'_>) -> Option<(LinuxError, u32)> {
 ///
 /// This mirrors Linux's UDP ICMP error lookup in
 /// `net/ipv4/udp.c::__udp4_lib_err()`.
-pub(crate) fn inspect_icmpv4_error(packet: &[u8], ingress_ifindex: i32) {
+pub(crate) fn inspect_icmpv4_error(packet: &[u8], net_ns: NetNsId, ingress_ifindex: i32) {
     let ip_packet = match Ipv4Header::parse_input(packet) {
         Ok(header) if header.protocol() == ipv4::PROTOCOL_ICMP => header,
         _ => return,
@@ -162,7 +166,7 @@ pub(crate) fn inspect_icmpv4_error(packet: &[u8], ingress_ifindex: i32) {
             offender: Some(offender),
         },
     };
-    queue_ipv4_error(local, remote, ingress_ifindex, error);
+    queue_ipv4_error(net_ns, local, remote, ingress_ifindex, error);
 }
 
 #[cfg(unittest)]
@@ -180,8 +184,13 @@ mod tests {
         buf::PacketType,
         ip::{IpAddress, IpEndpoint},
         ipv4::{Icmpv4Error, Ipv4Header},
+        netns::NetNsId,
         udp::{UdpSocketState, register_udp_state_for_test},
     };
+
+    fn net_ns() -> NetNsId {
+        crate::netns::INIT_NET_ID
+    }
 
     fn endpoint(addr: Ipv4Addr, port: u16) -> IpEndpoint {
         SocketAddrV4::new(addr, port).into()
@@ -266,10 +275,10 @@ mod tests {
 
         let local = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 8080);
         let remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 5353);
-        let bound = UdpSocketState::new();
+        let bound = UdpSocketState::new(crate::netns::test_init_net());
         bound.set_recv_err(true);
         bound.set_local_endpoint(Some(endpoint(*local.ip(), local.port())));
-        let connected = UdpSocketState::new();
+        let connected = UdpSocketState::new(crate::netns::test_init_net());
         connected.set_recv_err(true);
         connected.set_local_endpoint(Some(endpoint(*local.ip(), local.port())));
         connected.set_peer_endpoint(Some((
@@ -277,9 +286,15 @@ mod tests {
             IpAddress::Ipv4((*local.ip()).into()),
         )));
 
-        register_udp_state_for_test(bound.clone());
-        register_udp_state_for_test(connected.clone());
-        queue_ipv4_error(local, remote, 1, queued_error(LinuxError::ECONNREFUSED, 1));
+        register_udp_state_for_test(crate::netns::INIT_NET_ID, bound.clone());
+        register_udp_state_for_test(crate::netns::INIT_NET_ID, connected.clone());
+        queue_ipv4_error(
+            net_ns(),
+            local,
+            remote,
+            1,
+            queued_error(LinuxError::ECONNREFUSED, 1),
+        );
 
         assert!(!bound.has_pending_error());
         assert!(connected.has_pending_error());
@@ -293,15 +308,21 @@ mod tests {
 
         let local = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 8080);
         let remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 5353);
-        let connected = UdpSocketState::new();
+        let connected = UdpSocketState::new(crate::netns::test_init_net());
         connected.set_local_endpoint(Some(endpoint(*local.ip(), local.port())));
         connected.set_peer_endpoint(Some((
             endpoint(*remote.ip(), remote.port()),
             IpAddress::Ipv4((*local.ip()).into()),
         )));
 
-        register_udp_state_for_test(connected.clone());
-        queue_ipv4_error(local, remote, 1, queued_error(LinuxError::ECONNREFUSED, 1));
+        register_udp_state_for_test(crate::netns::INIT_NET_ID, connected.clone());
+        queue_ipv4_error(
+            net_ns(),
+            local,
+            remote,
+            1,
+            queued_error(LinuxError::ECONNREFUSED, 1),
+        );
 
         assert_eq!(
             connected.consume_socket_error(),
@@ -318,7 +339,7 @@ mod tests {
 
         let local = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 8080);
         let remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 5353);
-        let connected = UdpSocketState::new();
+        let connected = UdpSocketState::new(crate::netns::test_init_net());
         connected.set_recv_err(true);
         connected.set_local_endpoint(Some(endpoint(*local.ip(), local.port())));
         connected.set_peer_endpoint(Some((
@@ -326,15 +347,33 @@ mod tests {
             IpAddress::Ipv4((*local.ip()).into()),
         )));
         connected.set_bound_dev_if_for_test(2);
-        register_udp_state_for_test(connected.clone());
+        register_udp_state_for_test(crate::netns::INIT_NET_ID, connected.clone());
 
-        queue_ipv4_error(local, remote, 0, queued_error(LinuxError::ECONNREFUSED, 0));
+        queue_ipv4_error(
+            net_ns(),
+            local,
+            remote,
+            0,
+            queued_error(LinuxError::ECONNREFUSED, 0),
+        );
         assert!(!connected.has_pending_error());
 
-        queue_ipv4_error(local, remote, 1, queued_error(LinuxError::ECONNREFUSED, 1));
+        queue_ipv4_error(
+            net_ns(),
+            local,
+            remote,
+            1,
+            queued_error(LinuxError::ECONNREFUSED, 1),
+        );
         assert!(!connected.has_pending_error());
 
-        queue_ipv4_error(local, remote, 2, queued_error(LinuxError::ECONNREFUSED, 2));
+        queue_ipv4_error(
+            net_ns(),
+            local,
+            remote,
+            2,
+            queued_error(LinuxError::ECONNREFUSED, 2),
+        );
         assert!(connected.has_pending_error());
 
         clear_registry();
@@ -346,14 +385,14 @@ mod tests {
 
         let local = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 8080);
         let remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 5353);
-        let connected = UdpSocketState::new();
+        let connected = UdpSocketState::new(crate::netns::test_init_net());
         connected.set_recv_err(true);
         connected.set_local_endpoint(Some(endpoint(*local.ip(), local.port())));
         connected.set_peer_endpoint(Some((
             endpoint(*remote.ip(), remote.port()),
             IpAddress::Ipv4((*local.ip()).into()),
         )));
-        register_udp_state_for_test(connected.clone());
+        register_udp_state_for_test(crate::netns::INIT_NET_ID, connected.clone());
 
         let mut udp = vec![0u8; 24];
         let udp_len = udp.len() as u16;
@@ -377,7 +416,7 @@ mod tests {
         )
         .unwrap();
 
-        inspect_icmpv4_error(&error, 1);
+        inspect_icmpv4_error(&error, net_ns(), 1);
 
         assert_eq!(
             connected.consume_socket_error(),
@@ -391,7 +430,7 @@ mod tests {
 
     #[def_test]
     fn test_udp_error_queue_drops_oldest_entry_when_full() {
-        let state = UdpSocketState::new();
+        let state = UdpSocketState::new(crate::netns::test_init_net());
         state.set_recv_err(true);
 
         for byte in 0..33 {
@@ -404,7 +443,7 @@ mod tests {
 
     #[def_test]
     fn test_udp_socket_error_is_read_and_clear() {
-        let state = UdpSocketState::new();
+        let state = UdpSocketState::new(crate::netns::test_init_net());
         state.set_recv_err(true);
         state.enqueue_error(queued_error(LinuxError::ECONNREFUSED, 1));
 

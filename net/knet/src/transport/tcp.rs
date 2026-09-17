@@ -23,10 +23,11 @@ use smoltcp::{
 };
 
 use crate::{
-    AcceptOptions, ConnectOptions, LISTEN_TABLE, RecvFlags, RecvOptions, SERVICE, SOCKET_SET,
-    SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
+    AcceptOptions, ConnectOptions, RecvFlags, RecvOptions, SendOptions, Shutdown, Socket,
+    SocketAddrEx, SocketOps,
     consts::{TCP_RX_BUF_LEN, TCP_TX_BUF_LEN},
     general::GeneralOptions,
+    netns::{NetNamespace, NetNsId},
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     poller::{PollReason, assist_once, network_poller},
     state::*,
@@ -41,6 +42,8 @@ pub(crate) fn new_tcp_socket() -> smol::Socket<'static> {
 
 /// A TCP socket that provides POSIX-like APIs.
 pub struct TcpSocket {
+    /// Namespace this socket was created in; all network lookups use it.
+    net_ns: Arc<NetNamespace>,
     state: StateLock,
     dispatch_irq: SocketHandle,
     bound_endpoint: Mutex<IpListenEndpoint>,
@@ -54,17 +57,18 @@ pub struct TcpSocket {
 }
 
 impl TcpSocket {
-    /// Creates a new TCP socket.
-    pub fn new() -> Self {
-        let dispatch_irq = SOCKET_SET.add(new_tcp_socket());
+    /// Creates a new TCP socket in `net_ns`.
+    pub fn new(net_ns: Arc<NetNamespace>) -> Self {
+        let dispatch_irq = net_ns.socket_set().add(new_tcp_socket());
         Self {
+            net_ns: net_ns.clone(),
             state: StateLock::new(State::Idle),
             dispatch_irq,
             bound_endpoint: Mutex::new(empty_endpoint()),
             accepted_remote_endpoint: None,
             bound_registered: AtomicBool::new(false),
 
-            general: GeneralOptions::new(),
+            general: GeneralOptions::new(net_ns.clone()),
             rx_closed: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
             poll_rx_closed: Arc::new(PollSet::new()),
@@ -77,15 +81,17 @@ impl TcpSocket {
         dispatch_irq: SocketHandle,
         local_endpoint: IpEndpoint,
         remote_endpoint: IpEndpoint,
+        net_ns: Arc<NetNamespace>,
     ) -> Self {
         let result = Self {
+            net_ns: net_ns.clone(),
             state: StateLock::new(State::Connected),
             dispatch_irq,
             bound_endpoint: Mutex::new(empty_endpoint()),
             accepted_remote_endpoint: Some(remote_endpoint),
             bound_registered: AtomicBool::new(false),
 
-            general: GeneralOptions::new(),
+            general: GeneralOptions::new(net_ns.clone()),
             rx_closed: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
             poll_rx_closed: Arc::new(PollSet::new()),
@@ -99,7 +105,7 @@ impl TcpSocket {
 
 impl Default for TcpSocket {
     fn default() -> Self {
-        Self::new()
+        Self::new(crate::netns::global_options_net_ns())
     }
 }
 
@@ -115,7 +121,14 @@ impl TcpSocket {
     }
 
     fn with_smol_socket<R>(&self, f: impl FnOnce(&mut smol::Socket) -> R) -> R {
-        SOCKET_SET.with_socket_mut::<smol::Socket, _, _>(self.dispatch_irq, f)
+        self.net_ns
+            .socket_set()
+            .with_socket_mut::<smol::Socket, _, _>(self.dispatch_irq, f)
+    }
+
+    /// Returns the namespace this socket belongs to.
+    fn net_ns(&self) -> &Arc<NetNamespace> {
+        &self.net_ns
     }
 
     // File close must inspect the receive queue before any protocol packet is
@@ -158,7 +171,9 @@ impl TcpSocket {
         if let Ok(guard) = self.state.lock(State::Listening) {
             guard.transit(State::Closed, || {
                 let bound_endpoint = self.bound_endpoint()?;
-                LISTEN_TABLE.unlisten(bound_endpoint);
+                self.net_ns
+                    .listen_table()
+                    .unlisten(bound_endpoint, self.net_ns.socket_set());
                 self.unregister_bound_endpoint();
                 *self.bound_endpoint.lock() = empty_endpoint();
                 if progress_immediately {
@@ -238,8 +253,11 @@ impl TcpSocket {
             .bound_endpoint()
             .ok()
             .and_then(|endpoint| {
-                let sockets = SOCKET_SET.inner.lock();
-                LISTEN_TABLE.can_accept(endpoint, &sockets).ok()
+                let sockets = self.net_ns.socket_set().inner.lock();
+                self.net_ns
+                    .listen_table()
+                    .can_accept(endpoint, &sockets)
+                    .ok()
             })
             .unwrap_or(false);
         events.set(IoEvents::IN, readable);
@@ -314,7 +332,7 @@ impl SocketOps for TcpSocket {
             .transit(State::Idle, || {
                 // TODO: check addr is available
                 if local_addr.port() == 0 {
-                    local_addr.set_port(get_ephemeral_port(local_addr.ip().into())?);
+                    local_addr.set_port(get_ephemeral_port(self.net_ns(), local_addr.ip().into())?);
                 }
 
                 let endpoint = IpListenEndpoint {
@@ -325,7 +343,8 @@ impl SocketOps for TcpSocket {
                     },
                     port: local_addr.port(),
                 };
-                if !self.general.reuse_address() && !LISTEN_TABLE.can_listen(endpoint) {
+                if !self.general.reuse_address() && !self.net_ns.listen_table().can_listen(endpoint)
+                {
                     return Err(KError::AddrInUse);
                 }
                 if self.bound_endpoint.lock().port != 0 {
@@ -356,23 +375,26 @@ impl SocketOps for TcpSocket {
                 let remote_endpoint = IpEndpoint::from(remote_addr);
                 let mut bound_endpoint = *self.bound_endpoint.lock();
                 if bound_endpoint.addr.is_none() {
-                    bound_endpoint.addr =
-                        Some(SERVICE.get_smoltcp_source_address(&remote_endpoint.addr)?);
+                    bound_endpoint.addr = Some(
+                        self.net_ns
+                            .service()
+                            .get_smoltcp_source_address(&remote_endpoint.addr)?,
+                    );
                 }
                 if bound_endpoint.port == 0 {
                     let local_addr = bound_endpoint
                         .addr
                         .expect("source address must be resolved before ephemeral bind");
-                    bound_endpoint.port = get_ephemeral_port(local_addr)?;
+                    bound_endpoint.port = get_ephemeral_port(self.net_ns(), local_addr)?;
                 }
                 let should_register = !self.bound_registered.load(Ordering::Acquire);
                 if should_register {
-                    register_tcp_bound(bound_endpoint)?;
+                    register_tcp_bound(self.net_ns(), bound_endpoint)?;
                 }
 
                 let result = {
-                    let mut sockets = SOCKET_SET.inner.lock();
-                    let mut iface = crate::SERVICE.iface.lock();
+                    let mut sockets = self.net_ns.socket_set().inner.lock();
+                    let mut iface = self.net_ns.service().iface.lock();
                     let context = iface.context();
                     let socket = sockets.get_mut::<smol::Socket>(self.dispatch_irq);
                     socket
@@ -387,7 +409,7 @@ impl SocketOps for TcpSocket {
                 };
                 if let Err(err) = result {
                     if should_register {
-                        unregister_tcp_bound(bound_endpoint);
+                        unregister_tcp_bound(self.net_ns(), bound_endpoint);
                     }
                     return Err(err);
                 }
@@ -440,15 +462,15 @@ impl SocketOps for TcpSocket {
                     let local_addr = bound_endpoint
                         .addr
                         .unwrap_or(IpAddress::Ipv4(smoltcp::wire::Ipv4Address::UNSPECIFIED));
-                    bound_endpoint.port = get_ephemeral_port(local_addr)?;
+                    bound_endpoint.port = get_ephemeral_port(self.net_ns(), local_addr)?;
                 }
                 let should_register = !self.bound_registered.load(Ordering::Acquire);
                 if should_register {
-                    register_tcp_bound(bound_endpoint)?;
+                    register_tcp_bound(self.net_ns(), bound_endpoint)?;
                 }
-                if let Err(err) = LISTEN_TABLE.listen(bound_endpoint, backlog) {
+                if let Err(err) = self.net_ns.listen_table().listen(bound_endpoint, backlog) {
                     if should_register {
-                        unregister_tcp_bound(bound_endpoint);
+                        unregister_tcp_bound(self.net_ns(), bound_endpoint);
                     }
                     return Err(err);
                 }
@@ -475,14 +497,17 @@ impl SocketOps for TcpSocket {
             .recv_poller_with_nonblocking(self, options.nonblocking, || {
                 assist_once();
                 let accepted = {
-                    let mut sockets = SOCKET_SET.inner.lock();
-                    LISTEN_TABLE.accept(bound_endpoint, &mut sockets)?
+                    let mut sockets = self.net_ns.socket_set().inner.lock();
+                    self.net_ns
+                        .listen_table()
+                        .accept(bound_endpoint, &mut sockets)?
                 };
                 Ok({
                     Socket::Tcp(Box::new(TcpSocket::new_connected(
                         accepted.handle,
                         accepted.local_endpoint,
                         accepted.remote_endpoint,
+                        self.net_ns.clone(),
                     )))
                 })
             })
@@ -654,8 +679,10 @@ impl Pollable for TcpSocket {
             && events.contains(IoEvents::IN)
             && let Ok(endpoint) = self.bound_endpoint()
         {
-            let sockets = SOCKET_SET.inner.lock();
-            LISTEN_TABLE.register_accept_waker(endpoint, &sockets, context)?;
+            let sockets = self.net_ns.socket_set().inner.lock();
+            self.net_ns
+                .listen_table()
+                .register_accept_waker(endpoint, &sockets, context)?;
         }
         if events.contains(IoEvents::RDHUP) {
             context.register(&self.poll_rx_closed)?;
@@ -671,7 +698,7 @@ impl Drop for TcpSocket {
         }
         self.unregister_bound_endpoint();
 
-        let mut sockets = SOCKET_SET.inner.lock();
+        let mut sockets = self.net_ns.socket_set().inner.lock();
         let socket = sockets.get_mut::<smol::Socket>(self.dispatch_irq);
         let has_unread_data = socket.can_recv();
         let is_protocol_closed = {
@@ -713,7 +740,7 @@ fn endpoint_from_ip_endpoint(endpoint: IpEndpoint) -> IpListenEndpoint {
 impl TcpSocket {
     fn register_bound_endpoint(&self, endpoint: IpListenEndpoint) -> KResult {
         if !self.bound_registered.load(Ordering::Acquire) {
-            register_tcp_bound(endpoint)?;
+            register_tcp_bound(self.net_ns(), endpoint)?;
             self.bound_registered.store(true, Ordering::Release);
         }
         Ok(())
@@ -721,23 +748,35 @@ impl TcpSocket {
 
     fn unregister_bound_endpoint(&self) {
         if self.bound_registered.swap(false, Ordering::AcqRel) {
-            unregister_tcp_bound(*self.bound_endpoint.lock());
+            unregister_tcp_bound(self.net_ns(), *self.bound_endpoint.lock());
         }
     }
 }
 
+/// Bound INET listen addresses for one port inside one namespace.
+type BoundAddrs = Vec<Option<IpAddress>>;
+
+/// Bound INET endpoints of one namespace, keyed by port.
+type BoundEndpointsByPort = HashMap<u16, BoundAddrs>;
+
 lazy_static! {
-    static ref TCP_BOUND_ENDPOINTS: Mutex<HashMap<u16, Vec<Option<IpAddress>>>> =
+    /// Bound INET endpoints per namespace, mirroring Linux per-net bind
+    /// bookkeeping. Two namespaces can bind the same port independently.
+    static ref TCP_BOUND_ENDPOINTS: Mutex<HashMap<NetNsId, BoundEndpointsByPort>> =
         Mutex::new(HashMap::new());
 }
 
-fn register_tcp_bound(endpoint: IpListenEndpoint) -> KResult {
+fn register_tcp_bound(net_ns: &NetNamespace, endpoint: IpListenEndpoint) -> KResult {
     if endpoint.port == 0 {
         return Ok(());
     }
 
     let mut bound_endpoints = TCP_BOUND_ENDPOINTS.lock();
-    let bound_addrs = bound_endpoints.entry(endpoint.port).or_default();
+    let bound_addrs = bound_endpoints
+        .entry(net_ns.id())
+        .or_default()
+        .entry(endpoint.port)
+        .or_default();
     if bound_addrs
         .iter()
         .any(|&addr| listen_addrs_conflict(addr, endpoint.addr))
@@ -748,28 +787,35 @@ fn register_tcp_bound(endpoint: IpListenEndpoint) -> KResult {
     Ok(())
 }
 
-fn unregister_tcp_bound(endpoint: IpListenEndpoint) {
+fn unregister_tcp_bound(net_ns: &NetNamespace, endpoint: IpListenEndpoint) {
     if endpoint.port == 0 {
         return;
     }
 
     let mut bound_endpoints = TCP_BOUND_ENDPOINTS.lock();
-    let Some(bound_addrs) = bound_endpoints.get_mut(&endpoint.port) else {
+    let Some(per_ns) = bound_endpoints.get_mut(&net_ns.id()) else {
+        return;
+    };
+    let Some(bound_addrs) = per_ns.get_mut(&endpoint.port) else {
         return;
     };
     if let Some(index) = bound_addrs.iter().position(|&addr| addr == endpoint.addr) {
         bound_addrs.swap_remove(index);
     }
     if bound_addrs.is_empty() {
-        bound_endpoints.remove(&endpoint.port);
+        per_ns.remove(&endpoint.port);
+        if per_ns.is_empty() {
+            bound_endpoints.remove(&net_ns.id());
+        }
     }
 }
 
-fn tcp_port_available(endpoint: IpListenEndpoint) -> bool {
-    LISTEN_TABLE.can_listen(endpoint)
+fn tcp_port_available(net_ns: &NetNamespace, endpoint: IpListenEndpoint) -> bool {
+    net_ns.listen_table().can_listen(endpoint)
         && !TCP_BOUND_ENDPOINTS
             .lock()
-            .get(&endpoint.port)
+            .get(&net_ns.id())
+            .and_then(|per_ns| per_ns.get(&endpoint.port))
             .is_some_and(|bound_addrs| {
                 bound_addrs
                     .iter()
@@ -781,7 +827,7 @@ fn listen_addrs_conflict(a: Option<IpAddress>, b: Option<IpAddress>) -> bool {
     a.is_none() || b.is_none() || a == b
 }
 
-fn get_ephemeral_port(local_addr: smoltcp::wire::IpAddress) -> KResult<u16> {
+fn get_ephemeral_port(net_ns: &NetNamespace, local_addr: smoltcp::wire::IpAddress) -> KResult<u16> {
     const PORT_START: u16 = 0xc000;
     const PORT_END: u16 = 0xffff;
     static_lock! {
@@ -802,7 +848,7 @@ fn get_ephemeral_port(local_addr: smoltcp::wire::IpAddress) -> KResult<u16> {
             addr: (!local_addr.is_unspecified()).then_some(local_addr),
             port,
         };
-        if tcp_port_available(listen_endpoint) {
+        if tcp_port_available(net_ns, listen_endpoint) {
             return Ok(port);
         }
         tries += 1;
@@ -840,6 +886,18 @@ mod tests {
 
     fn clear_bound_registry() {
         TCP_BOUND_ENDPOINTS.lock().clear();
+    }
+
+    fn test_net_ns() -> Arc<NetNamespace> {
+        crate::netns::test_init_net()
+    }
+
+    fn bound_addrs_of(net_ns: &NetNamespace, port: u16) -> Vec<Option<IpAddress>> {
+        TCP_BOUND_ENDPOINTS
+            .lock()
+            .get(&net_ns.id())
+            .and_then(|per_ns| per_ns.get(&port).cloned())
+            .unwrap_or_default()
     }
 
     fn next_ephemeral_port(port: u16) -> u16 {
@@ -967,12 +1025,17 @@ mod tests {
         let addr_b = listen_endpoint(Some(Ipv4Addr::new(192, 0, 2, 2)), 40000);
         let wildcard = listen_endpoint(None, 40000);
 
-        assert!(register_tcp_bound(addr_a).is_ok());
-        assert!(register_tcp_bound(addr_b).is_ok());
-        assert_eq!(register_tcp_bound(addr_a), Err(KError::AddrInUse));
-        assert_eq!(register_tcp_bound(wildcard), Err(KError::AddrInUse));
+        let ns = test_net_ns();
+        assert!(register_tcp_bound(&ns, addr_a).is_ok());
+        assert!(register_tcp_bound(&ns, addr_b).is_ok());
+        assert_eq!(register_tcp_bound(&ns, addr_a), Err(KError::AddrInUse));
+        assert_eq!(register_tcp_bound(&ns, wildcard), Err(KError::AddrInUse));
 
-        let bound_addrs = TCP_BOUND_ENDPOINTS.lock().get(&40000).cloned().unwrap();
+        let bound_addrs = TCP_BOUND_ENDPOINTS
+            .lock()
+            .get(&ns.id())
+            .and_then(|per_ns| per_ns.get(&40000).cloned())
+            .unwrap();
         assert_eq!(bound_addrs.len(), 2);
         assert!(bound_addrs.contains(&addr_a.addr));
         assert!(bound_addrs.contains(&addr_b.addr));
@@ -984,23 +1047,24 @@ mod tests {
         let addr_a = listen_endpoint(Some(Ipv4Addr::new(192, 0, 2, 10)), 40001);
         let addr_b = listen_endpoint(Some(Ipv4Addr::new(192, 0, 2, 11)), 40001);
 
-        register_tcp_bound(addr_a).unwrap();
-        register_tcp_bound(addr_b).unwrap();
+        let ns = test_net_ns();
+        register_tcp_bound(&ns, addr_a).unwrap();
+        register_tcp_bound(&ns, addr_b).unwrap();
 
-        unregister_tcp_bound(addr_a);
+        unregister_tcp_bound(&ns, addr_a);
         {
-            let bound_addrs = TCP_BOUND_ENDPOINTS.lock().get(&40001).cloned().unwrap();
+            let bound_addrs = bound_addrs_of(&ns, 40001);
             assert_eq!(bound_addrs, vec![addr_b.addr]);
         }
 
-        unregister_tcp_bound(addr_a);
+        unregister_tcp_bound(&ns, addr_a);
         {
-            let bound_addrs = TCP_BOUND_ENDPOINTS.lock().get(&40001).cloned().unwrap();
+            let bound_addrs = bound_addrs_of(&ns, 40001);
             assert_eq!(bound_addrs, vec![addr_b.addr]);
         }
 
-        unregister_tcp_bound(addr_b);
-        assert!(TCP_BOUND_ENDPOINTS.lock().get(&40001).is_none());
+        unregister_tcp_bound(&ns, addr_b);
+        assert!(bound_addrs_of(&ns, 40001).is_empty());
     }
 
     #[def_test(serial)]
@@ -1010,12 +1074,13 @@ mod tests {
         let addr_b = listen_endpoint(Some(Ipv4Addr::new(198, 51, 100, 2)), 40002);
         let wildcard = listen_endpoint(None, 40002);
 
-        assert!(tcp_port_available(addr_a));
+        let ns = test_net_ns();
+        assert!(tcp_port_available(&ns, addr_a));
 
-        register_tcp_bound(addr_a).unwrap();
-        assert!(!tcp_port_available(addr_a));
-        assert!(tcp_port_available(addr_b));
-        assert!(!tcp_port_available(wildcard));
+        register_tcp_bound(&ns, addr_a).unwrap();
+        assert!(!tcp_port_available(&ns, addr_a));
+        assert!(tcp_port_available(&ns, addr_b));
+        assert!(!tcp_port_available(&ns, wildcard));
     }
 
     #[def_test(serial)]
@@ -1023,16 +1088,17 @@ mod tests {
         let _reset = BoundRegistryReset::new();
         let local_addr = IpAddress::Ipv4(Ipv4Address::new(203, 0, 113, 10));
 
-        let first = get_ephemeral_port(local_addr).unwrap();
+        let ns = test_net_ns();
+        let first = get_ephemeral_port(&ns, local_addr).unwrap();
         assert!((PORT_START..=PORT_END).contains(&first));
 
         let blocked = listen_endpoint(
             Some(Ipv4Addr::new(203, 0, 113, 10)),
             next_ephemeral_port(first),
         );
-        register_tcp_bound(blocked).unwrap();
+        register_tcp_bound(&ns, blocked).unwrap();
 
-        let second = get_ephemeral_port(local_addr).unwrap();
+        let second = get_ephemeral_port(&ns, local_addr).unwrap();
         assert!((PORT_START..=PORT_END).contains(&second));
         assert_ne!(second, blocked.port);
     }

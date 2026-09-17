@@ -25,15 +25,15 @@ use super::{
     *,
 };
 use crate::{
-    RecvFlags, RecvOptions, SERVICE, SendOptions, SocketAddrEx,
+    RecvFlags, RecvOptions, SendOptions, SocketAddrEx,
     buf::PacketBuf,
     device::{
         IF_OPER_DOWN, IF_OPER_UNKNOWN, IF_OPER_UP, LINK_FLAG_BROADCAST, LINK_FLAG_LOOPBACK,
         LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST, LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind,
         LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice,
     },
+    netlink::{NetlinkAddr, NetlinkPacket, NetlinkSocket},
     router::{Ipv4AddrEntry, Router, Rule},
-    service::Service,
     socket::SocketOps,
 };
 
@@ -210,11 +210,48 @@ fn init_test_state() {
             broadcast: None,
         })
         .unwrap();
-    if SERVICE.is_inited() {
-        SERVICE.replace_router_for_tests(router);
-    } else {
-        SERVICE.init_once(Service::new(router));
-    }
+    // The shared test namespace is created on first use; every test rebuilds
+    // its router so the assertions run against a deterministic device table.
+    test_net_ns().service().replace_router_for_tests(router);
+}
+
+/// Returns the loopback-only namespace shared by the rtnetlink tests.
+fn test_net_ns() -> Arc<crate::netns::NetNamespace> {
+    crate::netns::test_init_net()
+}
+
+/// Runs an rtnetlink request against the shared test namespace.
+fn handle_rtnetlink_request(request: &[u8]) -> Vec<NetlinkPacket> {
+    super::rtnetlink::handle_rtnetlink_request(request, &test_net_ns())
+}
+
+fn apply_link_update(request: LinkUpdateRequest) -> Result<(), LinuxError> {
+    super::rtnetlink::apply_link_update(&test_net_ns(), request)
+}
+
+fn add_addr(request: AddrRequest, flags: u16) -> Result<(), LinuxError> {
+    super::rtnetlink::add_addr(&test_net_ns(), request, flags)
+}
+
+fn del_addr(request: AddrRequest) -> Result<(), LinuxError> {
+    super::rtnetlink::del_addr(&test_net_ns(), request)
+}
+
+fn add_route(request: RouteRequest, flags: u16) -> Result<(), LinuxError> {
+    super::rtnetlink::add_route(&test_net_ns(), request, flags)
+}
+
+fn del_route(request: RouteRequest) -> Result<(), LinuxError> {
+    super::rtnetlink::del_route(&test_net_ns(), request)
+}
+
+fn add_neigh(request: NeighRequest, flags: u16) -> Result<(), LinuxError> {
+    super::rtnetlink::add_neigh(&test_net_ns(), request, flags)
+}
+
+/// Creates a netlink socket bound to the shared test namespace.
+fn netlink_socket_for_tests(protocol: i32) -> NetlinkSocket {
+    NetlinkSocket::new(protocol, test_net_ns())
 }
 
 fn nl_header(msg_type: u16, flags: u16, seq: u32) -> NlMsgHeader {
@@ -272,7 +309,7 @@ fn test_rtnetlink_operation_classifies_supported_mutations() {
 
 #[def_test]
 fn test_malformed_unsupported_protocol_request_does_not_queue_empty_response() {
-    let socket = NetlinkSocket::new(i32::MAX);
+    let socket = netlink_socket_for_tests(i32::MAX);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 50, groups: 0 }))
         .unwrap();
@@ -290,14 +327,20 @@ fn test_malformed_unsupported_protocol_request_does_not_queue_empty_response() {
 #[def_test(serial)]
 fn test_router_owns_configured_routes() {
     init_test_state();
-    assert!(SERVICE.route_snapshot().iter().any(|route| {
-        route.is_configured()
-            && route.filter.prefix_len() == 0
-            && route.via
-                == Some(crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(
-                    192, 168, 1, 1,
-                )))
-    }));
+    assert!(
+        test_net_ns()
+            .service()
+            .route_snapshot()
+            .iter()
+            .any(|route| {
+                route.is_configured()
+                    && route.filter.prefix_len() == 0
+                    && route.via
+                        == Some(crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(
+                            192, 168, 1, 1,
+                        )))
+            })
+    );
 }
 
 #[def_test(serial)]
@@ -347,7 +390,8 @@ fn test_apply_link_update_rename_and_down() {
     };
     apply_link_update(request).unwrap();
 
-    let link = SERVICE
+    let link = test_net_ns()
+        .service()
         .link_snapshot_for_ifindex(2)
         .expect("eth0 link snapshot");
     assert_eq!(link.name, "ens3");
@@ -359,7 +403,10 @@ fn test_apply_link_update_rename_and_down() {
 fn test_device_mtu_is_route_mtu_source() {
     init_test_state();
     let destination = crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(8, 8, 8, 8));
-    assert_eq!(SERVICE.ipv4_route_mtu(&destination), Some(1500));
+    assert_eq!(
+        test_net_ns().service().ipv4_route_mtu(&destination),
+        Some(1500)
+    );
 
     apply_link_update(LinkUpdateRequest {
         index: 2,
@@ -370,9 +417,13 @@ fn test_device_mtu_is_route_mtu_source() {
     })
     .unwrap();
 
-    assert_eq!(SERVICE.ipv4_route_mtu(&destination), Some(1400));
+    assert_eq!(
+        test_net_ns().service().ipv4_route_mtu(&destination),
+        Some(1400)
+    );
     assert!(
-        SERVICE
+        test_net_ns()
+            .service()
             .route_snapshot()
             .iter()
             .any(|route| route.is_configured())
@@ -382,7 +433,7 @@ fn test_device_mtu_is_route_mtu_source() {
 #[def_test(serial)]
 fn test_unchanged_mtu_does_not_rebuild_interface() {
     init_test_state();
-    let rebuild_count = SERVICE.rebuild_count_for_tests();
+    let rebuild_count = test_net_ns().service().rebuild_count_for_tests();
 
     apply_link_update(LinkUpdateRequest {
         index: 2,
@@ -393,7 +444,10 @@ fn test_unchanged_mtu_does_not_rebuild_interface() {
     })
     .unwrap();
 
-    assert_eq!(SERVICE.rebuild_count_for_tests(), rebuild_count);
+    assert_eq!(
+        test_net_ns().service().rebuild_count_for_tests(),
+        rebuild_count
+    );
 }
 
 #[def_test(serial)]
@@ -410,9 +464,12 @@ fn test_down_device_keeps_route_mtu_for_output_checks() {
     })
     .unwrap();
 
-    assert_eq!(SERVICE.ipv4_route_mtu(&destination), Some(1500));
     assert_eq!(
-        SERVICE.get_source_address(&destination),
+        test_net_ns().service().ipv4_route_mtu(&destination),
+        Some(1500)
+    );
+    assert_eq!(
+        test_net_ns().service().get_source_address(&destination),
         Err(LinuxError::ENETUNREACH.into())
     );
 }
@@ -420,7 +477,7 @@ fn test_down_device_keeps_route_mtu_for_output_checks() {
 #[def_test(serial)]
 fn test_non_effective_mtu_change_does_not_rebuild_interface() {
     init_test_state();
-    let rebuild_count = SERVICE.rebuild_count_for_tests();
+    let rebuild_count = test_net_ns().service().rebuild_count_for_tests();
 
     apply_link_update(LinkUpdateRequest {
         index: 1,
@@ -431,11 +488,16 @@ fn test_non_effective_mtu_change_does_not_rebuild_interface() {
     })
     .unwrap();
 
-    assert_eq!(SERVICE.rebuild_count_for_tests(), rebuild_count);
     assert_eq!(
-        SERVICE.ipv4_route_mtu(&crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(
-            127, 0, 0, 1
-        ))),
+        test_net_ns().service().rebuild_count_for_tests(),
+        rebuild_count
+    );
+    assert_eq!(
+        test_net_ns()
+            .service()
+            .ipv4_route_mtu(&crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(
+                127, 0, 0, 1
+            ))),
         Some(60_000)
     );
 }
@@ -452,7 +514,8 @@ fn test_link_change_mask_ignores_volatile_flags() {
         mtu: None,
     })
     .unwrap();
-    let current_flags = SERVICE
+    let current_flags = test_net_ns()
+        .service()
         .link_snapshot_for_ifindex(2)
         .expect("eth0 link snapshot")
         .flags;
@@ -466,7 +529,8 @@ fn test_link_change_mask_ignores_volatile_flags() {
         mtu: None,
     })
     .unwrap();
-    let down_flags = SERVICE
+    let down_flags = test_net_ns()
+        .service()
         .link_snapshot_for_ifindex(2)
         .expect("eth0 link snapshot")
         .flags;
@@ -488,7 +552,8 @@ fn test_link_change_mask_ignores_volatile_flags() {
 #[def_test(serial)]
 fn test_device_removal_refreshes_views() {
     init_test_state();
-    let service = &SERVICE;
+    let net_ns = test_net_ns();
+    let service = net_ns.service();
     let rebuild_count = service.rebuild_count_for_tests();
     add_neigh(
         NeighRequest {
@@ -513,8 +578,14 @@ fn test_device_removal_refreshes_views() {
             8,
         ))]
     );
-    assert!(SERVICE.route_snapshot().iter().all(|route| route.dev != 1));
-    assert!(!SERVICE.has_neighbor(
+    assert!(
+        test_net_ns()
+            .service()
+            .route_snapshot()
+            .iter()
+            .all(|route| route.dev != 1)
+    );
+    assert!(!test_net_ns().service().has_neighbor(
         1,
         crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(192, 168, 1, 10)),
     ));
@@ -556,7 +627,8 @@ fn test_reject_invalid_link_name_and_mtu_without_partial_update() {
         Err(LinuxError::EINVAL)
     );
 
-    let link = SERVICE
+    let link = test_net_ns()
+        .service()
         .link_snapshot_for_ifindex(2)
         .expect("eth0 remains present");
     assert_eq!(link.name, "eth0");
@@ -770,7 +842,8 @@ fn test_add_replace_and_delete_address() {
 
     add_addr(req, NLM_F_CREATE | NLM_F_EXCL).unwrap();
     assert!(
-        SERVICE
+        test_net_ns()
+            .service()
             .ipv4_addr_entries()
             .iter()
             .any(
@@ -785,7 +858,8 @@ fn test_add_replace_and_delete_address() {
     };
     add_addr(replaced, NLM_F_REPLACE).unwrap();
     assert!(
-        SERVICE
+        test_net_ns()
+            .service()
             .ipv4_addr_entries()
             .iter()
             .any(
@@ -796,7 +870,8 @@ fn test_add_replace_and_delete_address() {
 
     del_addr(replaced).unwrap();
     assert!(
-        !SERVICE
+        !test_net_ns()
+            .service()
             .ipv4_addr_entries()
             .iter()
             .any(
@@ -819,9 +894,15 @@ fn test_deleting_last_address_owner_removes_configured_prefsrc_route() {
     })
     .unwrap();
 
-    assert!(SERVICE.route_snapshot().iter().all(|route| {
-        route.preferred_source() != Some(crate::ip::IpAddress::Ipv4(address.into()))
-    }));
+    assert!(
+        test_net_ns()
+            .service()
+            .route_snapshot()
+            .iter()
+            .all(|route| {
+                route.preferred_source() != Some(crate::ip::IpAddress::Ipv4(address.into()))
+            })
+    );
 
     add_neigh(
         NeighRequest {
@@ -837,9 +918,11 @@ fn test_deleting_last_address_owner_removes_configured_prefsrc_route() {
     .unwrap();
 
     assert_eq!(
-        SERVICE.get_source_address(&crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(
-            8, 8, 8, 8
-        ),)),
+        test_net_ns()
+            .service()
+            .get_source_address(&crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(
+                8, 8, 8, 8
+            ),)),
         Err(LinuxError::ENETUNREACH.into())
     );
 }
@@ -864,7 +947,8 @@ fn test_add_and_delete_route() {
 
     add_route(req, NLM_F_CREATE | NLM_F_EXCL).unwrap();
     assert!(
-        SERVICE
+        test_net_ns()
+            .service()
             .route_snapshot()
             .iter()
             .any(|route| route.filter.prefix_len() == req.dst_len && route.via.is_some())
@@ -872,7 +956,8 @@ fn test_add_and_delete_route() {
 
     del_route(req).unwrap();
     assert!(
-        !SERVICE
+        !test_net_ns()
+            .service()
             .route_snapshot()
             .iter()
             .any(|route| route.filter.prefix_len() == req.dst_len && route.via.is_some())
@@ -911,13 +996,19 @@ fn test_newroute_ignores_unknown_attributes() {
     assert_eq!(packets.len(), 1);
     assert_eq!(read_u16_ne(&packets[0].data, 4), Some(NLMSG_ERROR));
     assert_eq!(read_i32_ne(&packets[0].data, NLMSG_HDR_LEN), Some(0));
-    assert!(SERVICE.route_snapshot().iter().any(|route| {
-        route.filter.prefix_len() == 24
-            && route.via
-                == Some(crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(
-                    192, 168, 1, 1,
-                )))
-    }));
+    assert!(
+        test_net_ns()
+            .service()
+            .route_snapshot()
+            .iter()
+            .any(|route| {
+                route.filter.prefix_len() == 24
+                    && route.via
+                        == Some(crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(
+                            192, 168, 1, 1,
+                        )))
+            })
+    );
 }
 
 #[def_test(serial)]
@@ -933,7 +1024,7 @@ fn test_add_and_replace_neighbour() {
     };
 
     add_neigh(req, NLM_F_CREATE | NLM_F_REPLACE).unwrap();
-    assert!(SERVICE.has_neighbor(
+    assert!(test_net_ns().service().has_neighbor(
         1,
         crate::ip::IpAddress::Ipv4(match req.dst {
             IpAddress::Ipv4(address) => address.into(),
@@ -951,7 +1042,7 @@ fn test_add_and_replace_neighbour() {
         ..req
     };
     add_neigh(replaced, NLM_F_REPLACE).unwrap();
-    assert!(SERVICE.has_neighbor(
+    assert!(test_net_ns().service().has_neighbor(
         1,
         crate::ip::IpAddress::Ipv4(match replaced.dst {
             IpAddress::Ipv4(address) => address.into(),
@@ -1025,7 +1116,8 @@ fn test_newaddr_accepts_legacy_ipv4_address_flags() {
     assert_eq!(packets.len(), 1);
     assert_eq!(read_i32_ne(&packets[0].data, NLMSG_HDR_LEN), Some(0));
     assert!(
-        SERVICE
+        test_net_ns()
+            .service()
             .ipv4_addr_entries()
             .iter()
             .any(|entry| entry.addr.address() == address.into())
@@ -1034,7 +1126,7 @@ fn test_newaddr_accepts_legacy_ipv4_address_flags() {
 
 #[def_test(serial)]
 fn test_publish_kobject_uevent_to_group_subscriber() {
-    let socket = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT);
+    let socket = netlink_socket_for_tests(NETLINK_KOBJECT_UEVENT);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 0, groups: 1 }))
         .unwrap();
@@ -1051,7 +1143,7 @@ fn test_publish_kobject_uevent_to_group_subscriber() {
 
 #[def_test(serial)]
 fn test_publish_kobject_uevent_drops_when_rx_queue_limit_exceeded() {
-    let socket = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT);
+    let socket = netlink_socket_for_tests(NETLINK_KOBJECT_UEVENT);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 0, groups: 1 }))
         .unwrap();
@@ -1070,7 +1162,7 @@ fn test_publish_kobject_uevent_drops_when_rx_queue_limit_exceeded() {
 
 #[def_test(serial)]
 fn test_publish_kobject_uevent_appends_monotonic_seqnum() {
-    let socket = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT);
+    let socket = netlink_socket_for_tests(NETLINK_KOBJECT_UEVENT);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 0, groups: 1 }))
         .unwrap();
@@ -1101,7 +1193,7 @@ fn test_publish_kobject_uevent_appends_monotonic_seqnum() {
 
 #[def_test(serial)]
 fn test_recv_reports_datagram_length_and_truncation() {
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = netlink_socket_for_tests(NETLINK_ROUTE);
     socket.inner.rx_queue.lock().push_back(NetlinkPacket {
         from: NetlinkAddr { pid: 1, groups: 0 },
         data: vec![1, 2, 3, 4],
@@ -1140,7 +1232,7 @@ fn test_recv_reports_datagram_length_and_truncation() {
 #[def_test(serial)]
 fn test_route_dump_ignores_nonzero_short_trailer() {
     init_test_state();
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = netlink_socket_for_tests(NETLINK_ROUTE);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 42, groups: 0 }))
         .unwrap();
@@ -1165,7 +1257,7 @@ fn test_route_dump_ignores_nonzero_short_trailer() {
 #[def_test(serial)]
 fn test_route_dump_stops_at_invalid_trailing_header() {
     init_test_state();
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = netlink_socket_for_tests(NETLINK_ROUTE);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 42, groups: 0 }))
         .unwrap();
@@ -1255,11 +1347,7 @@ fn test_interface_ipv4_addr_survives_middle_device_removal() {
             })
             .unwrap();
     }
-    if SERVICE.is_inited() {
-        SERVICE.replace_router_for_tests(router);
-    } else {
-        SERVICE.init_once(Service::new(router));
-    }
+    test_net_ns().service().replace_router_for_tests(router);
 
     // Removing eth0 renumbers eth1 from slot 2 to slot 1; the lookup must
     // still resolve eth1 by name and never return eth0's address.
@@ -1274,7 +1362,7 @@ fn test_interface_ipv4_addr_survives_middle_device_removal() {
 #[def_test(serial)]
 fn test_route_mutation_checks_each_send_credential() {
     init_test_state();
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = netlink_socket_for_tests(NETLINK_ROUTE);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 42, groups: 0 }))
         .unwrap();
@@ -1322,7 +1410,7 @@ fn test_route_mutation_checks_each_send_credential() {
 #[def_test(serial)]
 fn test_route_socket_processes_same_class_mutation_batch() {
     init_test_state();
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = netlink_socket_for_tests(NETLINK_ROUTE);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 43, groups: 0 }))
         .unwrap();
@@ -1352,13 +1440,15 @@ fn test_route_socket_processes_same_class_mutation_batch() {
     drop(queue);
 
     assert!(
-        SERVICE
+        test_net_ns()
+            .service()
             .ipv4_addr_entries()
             .iter()
             .any(|entry| { entry.addr.address() == first_addr.into() && entry.dev == 1 })
     );
     assert!(
-        SERVICE
+        test_net_ns()
+            .service()
             .ipv4_addr_entries()
             .iter()
             .any(|entry| { entry.addr.address() == second_addr.into() && entry.dev == 1 })
@@ -1368,7 +1458,7 @@ fn test_route_socket_processes_same_class_mutation_batch() {
 #[def_test(serial)]
 fn test_route_socket_processes_query_batch() {
     init_test_state();
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = netlink_socket_for_tests(NETLINK_ROUTE);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 47, groups: 0 }))
         .unwrap();
@@ -1397,7 +1487,7 @@ fn test_route_socket_processes_query_batch() {
 #[def_test(serial)]
 fn test_route_socket_rejects_mixed_query_and_mutation_batch() {
     init_test_state();
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = netlink_socket_for_tests(NETLINK_ROUTE);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 48, groups: 0 }))
         .unwrap();
@@ -1419,7 +1509,8 @@ fn test_route_socket_rejects_mixed_query_and_mutation_batch() {
     );
     assert!(socket.inner.rx_queue.lock().is_empty());
     assert!(
-        !SERVICE
+        !test_net_ns()
+            .service()
             .ipv4_addr_entries()
             .iter()
             .any(|entry| { entry.addr.address() == address.into() && entry.dev == 1 })
@@ -1429,7 +1520,7 @@ fn test_route_socket_rejects_mixed_query_and_mutation_batch() {
 #[def_test(serial)]
 fn test_malformed_nlmsg_len_does_not_mutate_network_state() {
     init_test_state();
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = netlink_socket_for_tests(NETLINK_ROUTE);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 44, groups: 0 }))
         .unwrap();
@@ -1452,7 +1543,8 @@ fn test_malformed_nlmsg_len_does_not_mutate_network_state() {
     );
     assert!(socket.inner.rx_queue.lock().is_empty());
     assert!(
-        !SERVICE
+        !test_net_ns()
+            .service()
             .ipv4_addr_entries()
             .iter()
             .any(|entry| { entry.addr.address() == address.into() && entry.dev == 1 })
@@ -1461,7 +1553,7 @@ fn test_malformed_nlmsg_len_does_not_mutate_network_state() {
 
 #[def_test(serial)]
 fn test_route_socket_rejects_non_kernel_destination() {
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = netlink_socket_for_tests(NETLINK_ROUTE);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 45, groups: 0 }))
         .unwrap();
@@ -1491,7 +1583,7 @@ fn test_route_socket_rejects_non_kernel_destination() {
 
 #[def_test]
 fn test_route_socket_rejects_unsupported_multicast_subscription() {
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = netlink_socket_for_tests(NETLINK_ROUTE);
     assert_eq!(
         socket.bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 49, groups: 1 })),
         Err(LinuxError::EOPNOTSUPP.into())
@@ -1505,7 +1597,7 @@ fn test_route_socket_rejects_unsupported_multicast_subscription() {
 #[def_test(serial)]
 fn test_mutation_queue_reservation_failure_preserves_network_state() {
     init_test_state();
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = netlink_socket_for_tests(NETLINK_ROUTE);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 46, groups: 0 }))
         .unwrap();
@@ -1529,9 +1621,38 @@ fn test_mutation_queue_reservation_failure_preserves_network_state() {
         Err(LinuxError::ENOBUFS.into())
     );
     assert!(
-        !SERVICE
+        !test_net_ns()
+            .service()
             .ipv4_addr_entries()
             .iter()
             .any(|entry| { entry.addr.address() == address.into() && entry.dev == 1 })
     );
+}
+
+/// A fresh namespace only dumps its own devices: even though the initial
+/// namespace holds eth0, its dump never leaks into another namespace.
+#[def_test(serial)]
+fn rtnetlink_dump_is_scoped_to_the_socket_namespace() {
+    init_test_state();
+    let fresh = crate::netns::fresh_unregistered();
+    let request = build_nlmsg(RTM_GETLINK, 7, NLM_F_REQUEST | NLM_F_DUMP, Vec::new());
+
+    let packets = super::rtnetlink::handle_rtnetlink_request(&request, &fresh);
+
+    let link_messages = packets
+        .iter()
+        .filter(|packet| {
+            NlMsgHeader::read(&packet.data).is_some_and(|header| header.msg_type == RTM_GETLINK)
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(link_messages.len(), 1);
+    assert!(
+        link_messages
+            .iter()
+            .all(|packet| !packet.data.windows(4).any(|window| window == b"eth0"))
+    );
+    assert!(packets.iter().any(|packet| {
+        NlMsgHeader::read(&packet.data).is_some_and(|header| header.msg_type == NLMSG_DONE)
+    }));
 }

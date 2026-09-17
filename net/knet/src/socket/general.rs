@@ -3,6 +3,7 @@
 // See LICENSES for license details.
 
 //! General socket options and polling helpers.
+use alloc::sync::Arc;
 use core::{
     sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
     task::Waker,
@@ -14,12 +15,14 @@ use ktask::future::{block_on, poll_io, timeout};
 use ktime_types::TimeSpan;
 
 use crate::{
-    SERVICE,
+    netns::{self, NetNamespace},
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
 };
 
 /// General options for all sockets.
 pub(crate) struct GeneralOptions {
+    /// Namespace the socket was created in; every network lookup uses it.
+    net_ns: Arc<NetNamespace>,
     /// Whether the socket is non-blocking.
     nonblock: AtomicBool,
     /// Whether the socket should reuse the address.
@@ -36,14 +39,18 @@ pub(crate) struct GeneralOptions {
     device_binding_changed: PollEvent,
 }
 impl Default for GeneralOptions {
+    /// Creates options bound to the namespace view of non-namespaced
+    /// transports (AF_UNIX, vsock); see [`crate::netns`].
     fn default() -> Self {
-        Self::new()
+        Self::new(crate::netns::global_options_net_ns())
     }
 }
+
 impl GeneralOptions {
-    /// Create a new set of general options with defaults.
-    pub fn new() -> Self {
+    /// Creates a new set of general options bound to `net_ns`.
+    pub fn new(net_ns: Arc<NetNamespace>) -> Self {
         Self {
+            net_ns,
             nonblock: AtomicBool::new(false),
             reuse_address: AtomicBool::new(false),
             broadcast: AtomicBool::new(false),
@@ -128,7 +135,7 @@ impl GeneralOptions {
         context: &mut PollContext<'_>,
     ) -> Result<Waker, PollRegisterError> {
         self.register_rx_waker_with(context, |mask, context| {
-            SERVICE.register_rx_waker(mask, context)
+            self.net_ns.service().register_rx_waker(mask, context)
         })
     }
 
@@ -153,7 +160,7 @@ impl GeneralOptions {
         &self,
         context: &mut PollContext<'_>,
     ) -> Result<Waker, PollRegisterError> {
-        let source_waker = SERVICE.register_rx_waker(u32::MAX, context)?;
+        let source_waker = self.net_ns.service().register_rx_waker(u32::MAX, context)?;
         crate::poller::network_poller().register_tx_waker(context)?;
         Ok(source_waker)
     }
@@ -228,8 +235,9 @@ impl Configurable for GeneralOptions {
             }
             O::BindToDevice(name) => {
                 let ifindex = self.bound_dev_if();
-                **name = if ifindex > 0 && SERVICE.is_inited() {
-                    SERVICE
+                **name = if ifindex > 0 && netns::initialized() {
+                    self.net_ns
+                        .service()
                         .link_snapshot_for_ifindex(ifindex)
                         .map(|link| link.name)
                 } else {
@@ -266,8 +274,9 @@ impl Configurable for GeneralOptions {
                     Some(dev_name) => {
                         if dev_name.is_empty() {
                             0
-                        } else if SERVICE.is_inited() {
-                            SERVICE
+                        } else if netns::initialized() {
+                            self.net_ns
+                                .service()
                                 .link_snapshots()
                                 .into_iter()
                                 .find(|link| &link.name == dev_name)
@@ -319,7 +328,7 @@ mod tests {
     #[def_test]
     fn rx_registration_rechecks_binding_changes_before_event_subscription() {
         for next_ifindex in [2, 0] {
-            let options = GeneralOptions::new();
+            let options = GeneralOptions::new(crate::netns::test_init_net());
             options.set_bound_dev_if(1);
             let counter = Arc::new(WakeCounter::default());
             let waker = Waker::from(counter.clone());
@@ -341,7 +350,7 @@ mod tests {
 
     #[def_test]
     fn binding_changes_rebuild_device_registrations_and_cancel_old_sources() {
-        let options = GeneralOptions::new();
+        let options = GeneralOptions::new(crate::netns::test_init_net());
         options.set_bound_dev_if(1);
         let devices = [PollSet::new(), PollSet::new()];
         let counter = Arc::new(WakeCounter::default());
@@ -396,7 +405,7 @@ mod tests {
 
     #[def_test]
     fn unchanged_binding_preserves_event_generation() {
-        let options = GeneralOptions::new();
+        let options = GeneralOptions::new(crate::netns::test_init_net());
         for ifindex in [0, 1, 2, 32, 0] {
             options.set_bound_dev_if(ifindex);
             let generation = options.device_binding_changed.generation();

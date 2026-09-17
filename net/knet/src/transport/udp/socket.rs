@@ -17,11 +17,12 @@ use super::{
     state::UdpSocketState,
 };
 use crate::{
-    AncillaryData, ConnectOptions, KernelAncillaryData, RecvFlags, RecvOptions, SERVICE, SendFlags,
+    AncillaryData, ConnectOptions, KernelAncillaryData, RecvFlags, RecvOptions, SendFlags,
     SendOptions, Shutdown, SocketAddrEx, SocketOps,
     consts::{UDP_RX_BUF_LEN, UDP_TX_BUF_LEN},
     ip::{IpAddress, IpEndpoint, Ipv4Address},
     ipv4,
+    netns::NetNamespace,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     poller::{PollReason, assist_once, network_poller},
     udp_err::QueuedUdpError,
@@ -44,16 +45,19 @@ struct RecvErrorMsg<'a> {
 
 /// A UDP socket that provides POSIX-like APIs.
 pub struct UdpSocket {
+    /// Namespace this socket was created in; all network lookups use it.
+    pub(super) net_ns: Arc<NetNamespace>,
     pub(super) pcb: Arc<UdpPcb>,
 }
 
 impl UdpSocket {
-    /// Creates a new UDP socket.
+    /// Creates a new UDP socket in `net_ns`.
     #[allow(clippy::new_without_default)]
-    pub fn new() -> Self {
+    pub fn new(net_ns: Arc<NetNamespace>) -> Self {
         registry::init_udp_registry();
-        let state = UdpSocketState::new();
+        let state = UdpSocketState::new(net_ns.clone());
         Self {
+            net_ns,
             pcb: UdpPcb::new(state),
         }
     }
@@ -106,7 +110,12 @@ impl UdpSocket {
         }
 
         let reuse_address = self.state().reuse_address();
-        registry::bind_udp_pcb(self.pcb.clone(), local_endpoint, reuse_address)?;
+        registry::bind_udp_pcb(
+            self.net_ns.id(),
+            self.pcb.clone(),
+            local_endpoint,
+            reuse_address,
+        )?;
         let endpoint = registry::listen_endpoint(local_endpoint);
 
         info!("UDP socket: bound on {}", endpoint);
@@ -120,6 +129,7 @@ impl UdpSocket {
 
         let reuse_address = self.state().reuse_address();
         let endpoint = registry::bind_udp_auto_ephemeral_pcb(
+            self.net_ns.id(),
             self.pcb.clone(),
             Ipv4Address::UNSPECIFIED.into(),
             reuse_address,
@@ -190,7 +200,7 @@ impl UdpSocket {
                     .state()
                     .local_endpoint()
                     .and_then(|local| (!local.addr.is_unspecified()).then_some(local.addr));
-                SERVICE.prepare_and_send_ipv4_packet(
+                self.net_ns.service().prepare_and_send_ipv4_packet(
                     bound_source_addr,
                     &remote_endpoint.addr,
                     self.state().bound_dev_if(),
@@ -215,7 +225,7 @@ impl UdpSocket {
         {
             return Ok(local.addr);
         }
-        SERVICE.get_source_address(&remote_addr)
+        self.net_ns.service().get_source_address(&remote_addr)
     }
 
     fn write_datagram(
@@ -385,6 +395,7 @@ impl SocketOps for UdpSocket {
 
             let reuse_address = self.state().reuse_address();
             let endpoint = registry::bind_udp_explicit_ephemeral_pcb(
+                self.net_ns.id(),
                 self.pcb.clone(),
                 local_addr.ip().into(),
                 reuse_address,
@@ -569,7 +580,7 @@ impl Pollable for UdpSocket {
         events.set(IoEvents::IN, can_receive);
         events.set(
             IoEvents::OUT,
-            !self.state().is_write_shutdown() && SERVICE.can_send_ip_packet(),
+            !self.state().is_write_shutdown() && self.net_ns.service().can_send_ip_packet(),
         );
         self.state().readiness(events)
     }
@@ -645,13 +656,23 @@ mod tests {
     // Serial: exercises the shared UDP registry; socket Drop unregisters both PCBs.
     #[def_test(serial)]
     fn receive_waiter_isolated_from_other_sockets_and_device_binding_changes() {
-        let socket = UdpSocket::new();
-        let other = UdpSocket::new();
+        let socket = UdpSocket::new(crate::netns::test_init_net());
+        let other = UdpSocket::new(crate::netns::test_init_net());
         let local_addr = Ipv4Address::new(192, 0, 2, 1).into();
-        let local =
-            registry::bind_udp_auto_ephemeral_pcb(socket.pcb.clone(), local_addr, false).unwrap();
-        let other_local =
-            registry::bind_udp_auto_ephemeral_pcb(other.pcb.clone(), local_addr, false).unwrap();
+        let local = registry::bind_udp_auto_ephemeral_pcb(
+            socket.net_ns.id(),
+            socket.pcb.clone(),
+            local_addr,
+            false,
+        )
+        .unwrap();
+        let other_local = registry::bind_udp_auto_ephemeral_pcb(
+            other.net_ns.id(),
+            other.pcb.clone(),
+            local_addr,
+            false,
+        )
+        .unwrap();
         let counter = Arc::new(WakeCounter::default());
         let waker = Waker::from(counter.clone());
         let context = Context::from_waker(&waker);
@@ -697,7 +718,7 @@ mod tests {
 
     #[def_test]
     fn receive_waiter_observes_errors_and_shutdown() {
-        let socket = UdpSocket::new();
+        let socket = UdpSocket::new(crate::netns::test_init_net());
         let counter = Arc::new(WakeCounter::default());
         let waker = Waker::from(counter.clone());
         let context = Context::from_waker(&waker);
@@ -740,7 +761,7 @@ mod tests {
 
     #[def_test]
     fn udp_datagram_is_written_into_preallocated_ipv4_packet() {
-        let socket = UdpSocket::new();
+        let socket = UdpSocket::new(crate::netns::test_init_net());
         let src_addr = Ipv4Address::new(192, 0, 2, 1);
         let dst_addr = Ipv4Address::new(192, 0, 2, 2);
         let local_endpoint: IpEndpoint =

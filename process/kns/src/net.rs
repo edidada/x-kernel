@@ -2,13 +2,18 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Network namespace (placeholder).
+//! Network namespace handle carried by the namespace proxy.
+//!
+//! The authoritative network namespace of a process lives on the process
+//! itself as a `knetns::NetNsId` (see `kprocess::Process::net_ns`); this
+//! handle only records namespace membership inside [`crate::NsProxy`] so the
+//! proxy structure stays complete.
 
 use kcred::NamespaceId;
 
 /// Network namespace.
 ///
-/// Placeholder for future network namespace isolation.
+/// Placeholder until the namespace proxy owns real network namespace state.
 pub struct NetNamespace {
     id: NamespaceId,
 }

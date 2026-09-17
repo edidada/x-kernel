@@ -18,6 +18,7 @@ use knet::vsock::{VsockSocket, VsockStreamTransport};
 use knet::{
     AcceptOptions, ConnectOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
     netlink::NetlinkSocket,
+    netns,
     packet::{PacketSocket, PacketSocketKind},
     raw::{IpProtocol, IpVersion, RawSocket},
     sock_alloc_file, sock_from_file,
@@ -55,6 +56,9 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
 
     let pid = kprocess::current_user_thread().pid();
     let cred = kprocess::current_cred();
+    // A socket belongs to the namespace of its creating process; every later
+    // lookup (bind, connect, dump) is scoped to it.
+    let net_ns = netns::current();
     // Create the appropriate socket type based on domain and type
     let socket = match (domain, ty) {
         (AF_INET, SOCK_STREAM) => {
@@ -62,14 +66,14 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             if proto != 0 && proto != IPPROTO_TCP as u32 {
                 return Err(KError::from(LinuxError::EPROTONOSUPPORT));
             }
-            knet::Socket::Tcp(Box::new(TcpSocket::new()))
+            knet::Socket::Tcp(Box::new(TcpSocket::new(net_ns)))
         }
         (AF_INET, SOCK_DGRAM) => {
             // UDP socket - verify protocol if specified
             if proto != 0 && proto != IPPROTO_UDP as u32 {
                 return Err(KError::from(LinuxError::EPROTONOSUPPORT));
             }
-            knet::Socket::Udp(Box::new(UdpSocket::new()))
+            knet::Socket::Udp(Box::new(UdpSocket::new(net_ns)))
         }
         (AF_INET, SOCK_RAW) => {
             // SOCK_RAW requires CAP_NET_RAW, matching Linux semantics.
@@ -77,7 +81,7 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
                 return Err(KError::from(LinuxError::EPERM));
             }
             let ip_proto = inet_raw_protocol(proto)?;
-            knet::Socket::Raw(Box::new(RawSocket::new(IpVersion::Ipv4, ip_proto)))
+            knet::Socket::Raw(Box::new(RawSocket::new(IpVersion::Ipv4, ip_proto, net_ns)))
         }
         // IPv6 is not exposed yet because the address family lacks full support.
         // The previous raw ICMPv6-only path was removed with this policy.
@@ -94,7 +98,7 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             if proto > i32::MAX as u32 {
                 return Err(KError::from(LinuxError::EPROTONOSUPPORT));
             }
-            knet::Socket::Netlink(Box::new(NetlinkSocket::new(proto as i32)))
+            knet::Socket::Netlink(Box::new(NetlinkSocket::new(proto as i32, net_ns)))
         }
         (AF_PACKET, SOCK_RAW) | (AF_PACKET, SOCK_DGRAM) => {
             if !cred.is_privileged() {
@@ -108,10 +112,15 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             } else {
                 PacketSocketKind::Datagram
             };
-            knet::Socket::Packet(Box::new(PacketSocket::new(kind, proto as u16)?))
+            knet::Socket::Packet(Box::new(PacketSocket::new(kind, proto as u16, net_ns)?))
         }
         #[cfg(feature = "vsock")]
         (AF_VSOCK, SOCK_STREAM) => {
+            // vsock is intentionally not namespaced: report the limitation
+            // instead of exposing another namespace's transport.
+            if !net_ns.is_initial() {
+                return Err(KError::from(LinuxError::EOPNOTSUPP));
+            }
             // Virtio socket (hypervisor communication)
             knet::Socket::Vsock(Box::new(VsockSocket::new(VsockStreamTransport::new())))
         }

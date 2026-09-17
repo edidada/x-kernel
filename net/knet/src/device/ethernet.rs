@@ -420,7 +420,7 @@ impl EthernetDevice {
         let src_addr = frame.src_addr();
         let ethertype = frame.ethertype();
 
-        let packet_buf = PacketBuf::from_ethernet_frame(
+        let mut packet_buf = PacketBuf::from_ethernet_frame(
             ifindex,
             frame_data,
             dst_addr,
@@ -429,6 +429,11 @@ impl EthernetDevice {
             self.mac_addr(),
             PacketOwner::DeviceRx,
         );
+        // Physical NICs are owned by the initial namespace only: RX interrupts
+        // are never routed to a user-created namespace. The assertion documents
+        // the invariant that `init_network` is the only Ethernet producer.
+        packet_buf.set_net_ns(crate::netns::INIT_NET_ID);
+        debug_assert_eq!(packet_buf.net_ns(), crate::netns::INIT_NET_ID);
         packet::publish_link_packet(&packet_buf);
 
         if !dst_addr.is_broadcast() && dst_addr != MacAddress::ZERO && dst_addr != self.mac_addr() {

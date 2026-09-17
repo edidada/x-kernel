@@ -4,7 +4,7 @@
 
 //! Raw IP socket implementation for ICMP-style traffic.
 
-use alloc::vec;
+use alloc::{sync::Arc, vec};
 use core::{
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::atomic::{AtomicBool, Ordering},
@@ -23,10 +23,10 @@ use smoltcp::{
 };
 
 use crate::{
-    ConnectOptions, RecvFlags, RecvOptions, SERVICE, SOCKET_SET, SendOptions, Shutdown,
-    SocketAddrEx, SocketOps,
+    ConnectOptions, RecvFlags, RecvOptions, SendOptions, Shutdown, SocketAddrEx, SocketOps,
     consts::{RAW_RX_BUF_LEN, RAW_TX_BUF_LEN},
     general::GeneralOptions,
+    netns::NetNamespace,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     poller::{PollReason, assist_once, network_poller},
 };
@@ -45,6 +45,8 @@ pub(crate) fn new_raw_socket(
 
 /// A raw IP socket used for ICMP and ICMPv6 traffic.
 pub struct RawSocket {
+    /// Namespace this socket was created in; all network lookups use it.
+    net_ns: Arc<NetNamespace>,
     dispatch_irq: SocketHandle,
     ip_version: IpVersion,
     local_addr: RwLock<Option<IpAddress>>,
@@ -56,10 +58,13 @@ pub struct RawSocket {
 }
 
 impl RawSocket {
-    pub fn new(ip_version: IpVersion, ip_protocol: IpProtocol) -> Self {
-        let dispatch_irq = SOCKET_SET.add(new_raw_socket(ip_version, ip_protocol));
-        let general = GeneralOptions::new();
+    pub fn new(ip_version: IpVersion, ip_protocol: IpProtocol, net_ns: Arc<NetNamespace>) -> Self {
+        let dispatch_irq = net_ns
+            .socket_set()
+            .add(new_raw_socket(ip_version, ip_protocol));
+        let general = GeneralOptions::new(net_ns.clone());
         Self {
+            net_ns,
             dispatch_irq,
             ip_version,
             local_addr: RwLock::new(None),
@@ -72,7 +77,9 @@ impl RawSocket {
     }
 
     fn with_smol_socket<R>(&self, f: impl FnOnce(&mut smol::Socket) -> R) -> R {
-        SOCKET_SET.with_socket_mut::<smol::Socket, _, _>(self.dispatch_irq, f)
+        self.net_ns
+            .socket_set()
+            .with_socket_mut::<smol::Socket, _, _>(self.dispatch_irq, f)
     }
 
     fn check_ip_version(&self, addr: IpAddress) -> KResult<IpAddress> {
@@ -98,7 +105,7 @@ impl RawSocket {
         if let Some(local) = *self.local_addr.read() {
             return Ok(local);
         }
-        SERVICE.get_smoltcp_source_address(&remote)
+        self.net_ns.service().get_smoltcp_source_address(&remote)
     }
 
     fn parse_ip_packet<'a>(&self, packet: &'a [u8]) -> KResult<(IpAddress, &'a [u8])> {
@@ -172,7 +179,8 @@ impl SocketOps for RawSocket {
         let remote_addr = remote_addr.into_ip()?;
         let remote = self.check_ip_version(remote_addr.ip().into())?;
         if self.local_addr.read().is_none() {
-            *self.local_addr.write() = Some(SERVICE.get_smoltcp_source_address(&remote)?);
+            *self.local_addr.write() =
+                Some(self.net_ns.service().get_smoltcp_source_address(&remote)?);
         }
         *self.peer_addr.write() = Some(remote);
         Ok(())
@@ -185,7 +193,7 @@ impl SocketOps for RawSocket {
 
         let remote = self.remote_address(&options)?;
         let local = if let Some(local) = *self.local_addr.read() {
-            SERVICE.get_smoltcp_source_address(&remote)?;
+            self.net_ns.service().get_smoltcp_source_address(&remote)?;
             local
         } else {
             self.local_address_for(remote)?
@@ -398,8 +406,13 @@ impl Pollable for RawSocket {
 impl Drop for RawSocket {
     fn drop(&mut self) {
         let _ = self.shutdown(Shutdown::Both);
-        SOCKET_SET.remove(self.dispatch_irq);
+        self.net_ns.socket_set().remove(self.dispatch_irq);
     }
+}
+
+#[cfg(unittest)]
+fn test_net_ns() -> Arc<NetNamespace> {
+    crate::netns::test_init_net()
 }
 
 #[cfg(unittest)]
@@ -447,7 +460,7 @@ mod tests {
 
     #[def_test(serial)]
     fn raw_socket_ip_version_checks_and_defaults() {
-        let socket = RawSocket::new(IpVersion::Ipv4, IpProtocol::Icmp);
+        let socket = RawSocket::new(IpVersion::Ipv4, IpProtocol::Icmp, test_net_ns());
 
         assert_eq!(
             socket
@@ -471,7 +484,7 @@ mod tests {
 
     #[def_test(serial)]
     fn raw_socket_parses_ipv4_and_ipv6_packets() {
-        let ipv4 = RawSocket::new(IpVersion::Ipv4, IpProtocol::Icmp);
+        let ipv4 = RawSocket::new(IpVersion::Ipv4, IpProtocol::Icmp, test_net_ns());
         let ipv4_packet = ipv4_packet_bytes(
             Ipv4Addr::new(10, 0, 0, 1),
             Ipv4Addr::new(10, 0, 0, 2),
@@ -481,7 +494,7 @@ mod tests {
         assert_eq!(source, IpAddress::Ipv4(Ipv4Addr::new(10, 0, 0, 1)));
         assert_eq!(packet, ipv4_packet.as_slice());
 
-        let ipv6 = RawSocket::new(IpVersion::Ipv6, IpProtocol::Icmpv6);
+        let ipv6 = RawSocket::new(IpVersion::Ipv6, IpProtocol::Icmpv6, test_net_ns());
         let ipv6_packet = ipv6_packet_bytes(
             Ipv6Addr::LOCALHOST,
             Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2),
@@ -498,7 +511,7 @@ mod tests {
 
     #[def_test(serial)]
     fn raw_socket_ttl_remote_and_local_shortcuts() {
-        let socket = RawSocket::new(IpVersion::Ipv4, IpProtocol::Icmp);
+        let socket = RawSocket::new(IpVersion::Ipv4, IpProtocol::Icmp, test_net_ns());
         let mut ttl = 0u8;
 
         socket
@@ -539,7 +552,7 @@ mod tests {
 
     #[def_test(serial)]
     fn raw_socket_bind_and_shutdown_gate_fast_paths() {
-        let socket = RawSocket::new(IpVersion::Ipv4, IpProtocol::Icmp);
+        let socket = RawSocket::new(IpVersion::Ipv4, IpProtocol::Icmp, test_net_ns());
 
         socket
             .bind(SocketAddrEx::Ip(SocketAddr::new(

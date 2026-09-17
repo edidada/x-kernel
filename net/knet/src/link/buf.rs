@@ -8,6 +8,7 @@ use alloc::{sync::Arc, vec::Vec};
 use core::{net::SocketAddr, ops::Range};
 
 use super::wire::{ETHERNET_HEADER_LEN, EtherType, MacAddress};
+use crate::netns::{INIT_NET_ID, NetNsId};
 
 /// Link-layer packet type used by packet sockets and link input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -91,6 +92,9 @@ struct PacketBufInner {
     head: usize,
     tail: usize,
     ifindex: i32,
+    /// Namespace the owning device belongs to. Packets are delivered only to
+    /// the sockets of this namespace, mirroring Linux `skb->dev` -> `net`.
+    net_ns: NetNsId,
     packet_type: PacketType,
     checksum_state: ChecksumState,
     owner: PacketOwner,
@@ -109,6 +113,7 @@ impl PacketBuf {
                 head: 0,
                 tail,
                 ifindex,
+                net_ns: INIT_NET_ID,
                 packet_type: PacketType::Host,
                 checksum_state: ChecksumState::Unverified,
                 owner,
@@ -152,6 +157,7 @@ impl PacketBuf {
                 head: 0,
                 tail: frame.len(),
                 ifindex,
+                net_ns: INIT_NET_ID,
                 packet_type: packet_type(dst_addr, local_addr),
                 checksum_state: ChecksumState::Unverified,
                 owner,
@@ -173,6 +179,15 @@ impl PacketBuf {
 
     pub(crate) fn set_ifindex(&mut self, ifindex: i32) {
         Arc::make_mut(&mut self.inner).ifindex = ifindex;
+    }
+
+    /// Returns the namespace the originating device belongs to.
+    pub(crate) fn net_ns(&self) -> NetNsId {
+        self.inner.net_ns
+    }
+
+    pub(crate) fn set_net_ns(&mut self, net_ns: NetNsId) {
+        Arc::make_mut(&mut self.inner).net_ns = net_ns;
     }
 
     pub(crate) fn packet_type(&self) -> PacketType {

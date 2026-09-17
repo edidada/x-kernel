@@ -35,6 +35,7 @@ use crate::{
     buf::PacketBuf,
     consts::SOCKET_BUFFER_SIZE,
     ipv4::{self, Ipv4Header},
+    netns::NetNsId,
     udp,
 };
 
@@ -77,12 +78,13 @@ pub(crate) fn queued_len() -> usize {
     NET_RX_QUEUE.lock().occupancy()
 }
 
-/// Returns whether the shared queue may contain work for `ifindex`.
+/// Returns whether the shared queue may contain work for `net_ns` and `ifindex`.
 ///
 /// `in_flight` does not retain per-device counts, so an in-flight UDP packet
 /// conservatively reports work for every queried interface. The runtime
-/// currently has one loopback device, which keeps this approximation bounded.
-pub(crate) fn has_work_for(ifindex: i32) -> bool {
+/// currently has one loopback device per namespace, which keeps this
+/// approximation bounded.
+pub(crate) fn has_work_for(net_ns: NetNsId, ifindex: i32) -> bool {
     ensure_net_rx_queue();
     let queues = NET_RX_QUEUE.lock();
     queues.in_flight > 0
@@ -90,7 +92,15 @@ pub(crate) fn has_work_for(ifindex: i32) -> bool {
             .pending_udp
             .iter()
             .chain(queues.deferred.iter())
-            .any(|packet| packet.ifindex() == ifindex)
+            .any(|packet| packet_matches(packet, net_ns, ifindex))
+}
+
+/// Matches a queued packet against the querying device.
+///
+/// Every loopback device uses interface index 1, so the owning namespace must
+/// be part of the match: packets must never cross a namespace boundary.
+fn packet_matches(packet: &PacketBuf, net_ns: NetNsId, ifindex: i32) -> bool {
+    packet.ifindex() == ifindex && packet.net_ns() == net_ns
 }
 
 /// Stamps complete IPv4 UDP metadata onto `packet` in task context.
@@ -198,13 +208,13 @@ pub(crate) fn drain_pending() {
     }
 }
 
-pub(crate) fn pop_deferred(ifindex: i32) -> Option<PacketBuf> {
+pub(crate) fn pop_deferred(net_ns: NetNsId, ifindex: i32) -> Option<PacketBuf> {
     ensure_net_rx_queue();
     let mut queues = NET_RX_QUEUE.lock();
     let position = queues
         .deferred
         .iter()
-        .position(|packet| packet.ifindex() == ifindex)?;
+        .position(|packet| packet_matches(packet, net_ns, ifindex))?;
     queues.deferred.remove(position)
 }
 
@@ -214,22 +224,27 @@ pub(crate) fn pop_deferred(ifindex: i32) -> Option<PacketBuf> {
 /// moved into a local buffer under the lock and dropped after the guard is
 /// released. Packets already extracted into `in_flight` are best-effort, as
 /// with Linux `skb->dev` teardown during `netif_receive_skb`.
-pub(crate) fn discard_ifindex(ifindex: i32) {
+pub(crate) fn discard_ifindex(net_ns: NetNsId, ifindex: i32) {
     ensure_net_rx_queue();
     let mut dropped = Vec::with_capacity(SOCKET_BUFFER_SIZE);
     {
         let mut queues = NET_RX_QUEUE.lock();
-        take_ifindex(&mut queues.pending_udp, ifindex, &mut dropped);
-        take_ifindex(&mut queues.deferred, ifindex, &mut dropped);
+        take_matching(&mut queues.pending_udp, net_ns, ifindex, &mut dropped);
+        take_matching(&mut queues.deferred, net_ns, ifindex, &mut dropped);
     }
 }
 
-fn take_ifindex(queue: &mut VecDeque<PacketBuf>, ifindex: i32, dropped: &mut Vec<PacketBuf>) {
+fn take_matching(
+    queue: &mut VecDeque<PacketBuf>,
+    net_ns: NetNsId,
+    ifindex: i32,
+    dropped: &mut Vec<PacketBuf>,
+) {
     for _ in 0..queue.len() {
         let Some(packet) = queue.pop_front() else {
             break;
         };
-        if packet.ifindex() == ifindex {
+        if packet_matches(&packet, net_ns, ifindex) {
             dropped.push(packet);
         } else {
             queue.push_back(packet);
@@ -258,7 +273,14 @@ mod tests {
     use unittest::def_test;
 
     use super::*;
-    use crate::buf::{PacketOwner, UdpPacketMetadata};
+    use crate::{
+        buf::{PacketOwner, UdpPacketMetadata},
+        netns::{INIT_NET_ID, NetNsId},
+    };
+
+    fn test_ns() -> NetNsId {
+        INIT_NET_ID
+    }
 
     fn test_packet(ifindex: i32) -> PacketBuf {
         PacketBuf::from_ip_packet_vec(ifindex, vec![0; 20], PacketOwner::Loopback)
@@ -277,8 +299,8 @@ mod tests {
         };
         assert_eq!(overflowed.ifindex(), IFINDEX);
         drop(overflowed);
-        discard_ifindex(IFINDEX);
-        assert!(!has_work_for(IFINDEX));
+        discard_ifindex(test_ns(), IFINDEX);
+        assert!(!has_work_for(test_ns(), IFINDEX));
     }
 
     #[def_test(serial)]
@@ -288,10 +310,10 @@ mod tests {
         enqueue(prepare_for_enqueue(test_packet(IFINDEX)).unwrap()).unwrap();
 
         assert!(!process_pending(NET_RX_BUDGET));
-        let packet = pop_deferred(IFINDEX).expect("non-UDP should remain queued");
+        let packet = pop_deferred(test_ns(), IFINDEX).expect("non-UDP should remain queued");
         assert_eq!(packet.ifindex(), IFINDEX);
         assert!(packet.udp_metadata().is_none());
-        assert!(!has_work_for(IFINDEX));
+        assert!(!has_work_for(test_ns(), IFINDEX));
     }
 
     #[def_test(serial)]
@@ -303,8 +325,8 @@ mod tests {
         packet.set_udp_metadata(UdpPacketMetadata::new(addr, addr, 0, 0));
         enqueue(packet).unwrap();
 
-        assert!(pop_deferred(IFINDEX).is_none());
-        discard_ifindex(IFINDEX);
-        assert!(!has_work_for(IFINDEX));
+        assert!(pop_deferred(test_ns(), IFINDEX).is_none());
+        discard_ifindex(test_ns(), IFINDEX);
+        assert!(!has_work_for(test_ns(), IFINDEX));
     }
 }

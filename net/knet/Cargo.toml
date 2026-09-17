@@ -26,6 +26,7 @@ ksync = { workspace = true }
 kspin = { workspace = true }
 ktask = { workspace = true }
 kwork = { workspace = true }
+knetns = { workspace = true }
 kprocess = { workspace = true }
 kcred = { workspace = true }
 kerrno = { workspace = true }

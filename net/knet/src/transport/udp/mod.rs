@@ -68,6 +68,14 @@ mod tests {
         clear_udp_registry_for_test();
     }
 
+    fn test_init_net() -> Arc<crate::netns::NetNamespace> {
+        crate::netns::test_init_net()
+    }
+
+    fn test_ns() -> crate::netns::NetNsId {
+        crate::netns::INIT_NET_ID
+    }
+
     #[def_test]
     fn udp_checksum_accepts_zero_checksum() {
         let packet = [0, 1, 0, 2, 0, 8, 0, 0];
@@ -94,7 +102,7 @@ mod tests {
 
     #[def_test]
     fn recv_after_read_shutdown_returns_eof() {
-        let socket = UdpSocket::new();
+        let socket = UdpSocket::new(test_init_net());
         socket.state().shutdown(Shutdown::Read);
 
         let mut data = [0u8; 8];
@@ -106,10 +114,10 @@ mod tests {
     fn af_unspec_disconnect_releases_auto_bound_udp_socket() {
         clear_registry();
 
-        let socket = UdpSocket::new();
+        let socket = UdpSocket::new(test_init_net());
         let local = endpoint(Ipv4Address::new(10, 0, 0, 2), 49152);
         let remote = endpoint(Ipv4Address::new(192, 0, 2, 1), 5353);
-        bind_udp_auto_pcb_for_test(socket.pcb.clone(), local, false).unwrap();
+        bind_udp_auto_pcb_for_test(socket.net_ns.id(), socket.pcb.clone(), local, false).unwrap();
         socket.state().set_peer_endpoint(Some((remote, local.addr)));
 
         socket
@@ -120,12 +128,13 @@ mod tests {
         assert_eq!(socket.state().peer_endpoint(), None);
         assert!(
             lookup_udp_pcb(
+                test_ns(),
                 socket_addr(Ipv4Address::new(10, 0, 0, 2), 49152),
                 socket_addr(Ipv4Address::new(192, 0, 2, 1), 5353)
             )
             .is_none()
         );
-        assert!(udp_port_available(listen_endpoint(local)));
+        assert!(udp_port_available(test_ns(), listen_endpoint(local)));
         clear_registry();
     }
 
@@ -133,10 +142,10 @@ mod tests {
     fn af_unspec_disconnect_preserves_explicit_udp_bind() {
         clear_registry();
 
-        let socket = UdpSocket::new();
+        let socket = UdpSocket::new(test_init_net());
         let local = endpoint(Ipv4Address::new(10, 0, 0, 2), 49152);
         let remote = endpoint(Ipv4Address::new(192, 0, 2, 1), 5353);
-        bind_udp_pcb(socket.pcb.clone(), local, false).unwrap();
+        bind_udp_pcb(socket.net_ns.id(), socket.pcb.clone(), local, false).unwrap();
         socket.state().set_peer_endpoint(Some((remote, local.addr)));
 
         socket
@@ -146,12 +155,13 @@ mod tests {
         assert_eq!(socket.state().local_endpoint(), Some(local));
         assert_eq!(socket.state().peer_endpoint(), None);
         let selected = lookup_udp_pcb(
+            test_ns(),
             socket_addr(Ipv4Address::new(10, 0, 0, 2), 49152),
             socket_addr(Ipv4Address::new(192, 0, 2, 2), 5353),
         )
         .expect("disconnected UDP PCB should keep receiving on its local port");
         assert!(Arc::ptr_eq(&selected, &socket.pcb));
-        assert!(!udp_port_available(listen_endpoint(local)));
+        assert!(!udp_port_available(test_ns(), listen_endpoint(local)));
         clear_registry();
     }
 
@@ -159,10 +169,10 @@ mod tests {
     fn loopback_net_rx_delivers_udp_without_poller() {
         clear_registry();
 
-        let socket = UdpSocket::new();
+        let socket = UdpSocket::new(test_init_net());
         let local_ip = Ipv4Address::new(127, 0, 0, 1);
         let local = endpoint(local_ip, 5000);
-        bind_udp_pcb(socket.pcb.clone(), local, false).unwrap();
+        bind_udp_pcb(socket.net_ns.id(), socket.pcb.clone(), local, false).unwrap();
 
         let mut udp = alloc::vec![0u8; UDP_HEADER_LEN + 1];
         udp[UDP_HEADER_LEN] = b'x';

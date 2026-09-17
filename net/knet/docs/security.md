@@ -114,8 +114,9 @@ The trust relationships in the diagram define the security responsibilities of e
 | Filesystem ownership fields | Path lookup and creation pass the same `Cred` to kvfs. kvfs uses `fsuid`, `fsgid`, supplementary groups, inode owner/group, and mode bits for DAC and ownership initialization. User bind supplies `0777 & !umask`; `bind_with_cred` receives an explicit mode from its kernel caller. |
 | Driver RX/TX memory and `PacketBuf` data | `EthernetDevice::poll_rx` finishes `handle_rx_frame` before `recycle_rx`; the provider owns buffer validity. `PacketBuf` owns packet storage and validates offsets and ranges through its accessors. Reference-counted handles keep storage alive across queues. |
 | Unix stream and vsock ring-buffer storage | The unsafe inventory specifies the occupied/vacant range and lock prerequisites for slice access and index advancement. Publication must be limited to initialized bytes; consumption must remain within occupied bytes. |
-| smoltcp `SocketHandle` values | `SOCKET_SET` owns handles under its mutex, and TCP deferred-close processing retains protocol state until closure permits reclamation. |
+| smoltcp `SocketHandle` values | Each namespace's socket set owns handles under its mutex, and TCP deferred-close processing retains protocol state until closure permits reclamation. |
 | Interface configuration and device identity | `NetDevice` owns link and neighbor state; Router owns addresses and routes. `network_config_lock` protects individual control-plane mutations and device removal. UDP matching uses `PacketBuf::ifindex` and `GeneralOptions::bound_dev_if` to preserve device selection. |
+| Network namespace boundary | Each `NetNamespace` owns its Service (devices, addresses, routes), listen table, and socket set. INET, packet, and netlink sockets capture `netns::current()` at creation and never consult another namespace. `PacketBuf` carries the namespace of its originating device, so UDP delivery, ICMP error delivery, and AF_PACKET fan-out only reach sockets of that namespace. Physical NICs stamp the initial namespace, and only `init_network` creates them. |
 | TIPC channels, message handles, and client UUIDs | `VsockBridge::read_tipc_msg` rejects attached handles. `accept_reverse_tipc` checks the UUID returned by `ipc_port_accept` against `TipcToVsockMapping::allowed_uuids`, with an empty list explicitly permitting all UUIDs. |
 | Queued AF_PACKET frame storage | `PacketFrame` retains an `Arc<[u8]>`; `PacketRxQueue::push_back` counts the full retained frame allocation and caps each queue at 64 KiB and 1024 frames. `recv_lock` serializes consumption while payload copies run outside `rx_queue`. |
 
@@ -171,6 +172,40 @@ network bytes, peer payloads, and control-plane requests as untrusted.
 | `VsockBridge::recv_exact_record`, `parse_service_name`, and `read_tipc_msg` in [src/vsock/bridge.rs](../src/vsock/bridge.rs) | Host records are capped at `IPC_CHAN_MAX_BUF_SIZE` or return `OutOfRange`. Service names permit one trailing newline, require valid UTF-8, and must be nonempty, shorter than `IPC_PORT_PATH_MAX`, and NUL-free; failures return `InvalidInput` and trigger `[1]` rejection plus closure. TIPC messages with handles return `Unsupported`, oversized messages return `OutOfRange`, and short reads return `Io`; forwarding errors close the connection. |
 | `VsockBridge::accept_reverse_tipc` in [src/vsock/bridge.rs](../src/vsock/bridge.rs) | TIPC returns a channel and client UUID through `ipc_port_accept`. `uuid_allowed` accepts a listed UUID or any UUID if the list is empty. A mismatch closes the channel and returns `PermissionDenied` before creating a vsock connection. The current `TIPC_TO_VSOCK_MAP` uses an empty allowlist. |
 | `publish_kobject_uevent` in [src/netlink/socket.rs](../src/netlink/socket.rs) | A kernel publisher supplies a group and byte payload; the function appends a sequence number and delivers only to matching subscribed groups. Receive queues enforce `NETLINK_RX_QUEUE_LIMIT`; overflow drops the event. Publisher identity and payload provenance are trusted kernel-caller responsibilities. |
+
+### Network Namespace Isolation Boundary
+
+`clone(CLONE_NEWNET)` and `unshare(CLONE_NEWNET)` build a fresh namespace whose
+device table contains only a down loopback with `127.0.0.1/8`, and whose route,
+listen, and socket tables are empty. Isolation is enforced by object ownership
+rather than by filtering: a socket holds the `Arc<NetNamespace>` it was created
+with, every lookup (bind conflict, connect source address, listen queue,
+rtnetlink dump, UDP PCB delivery) reads that namespace's tables, and the
+namespace table maps one identifier to one namespace object. There is no code
+path that lists devices or sockets across namespaces.
+
+Unsupported or undefined paths report errors instead of pretending success:
+`setns` returns `EOPNOTSUPP`, vsock socket creation outside the initial
+namespace returns `EOPNOTSUPP`, packet sockets bound to a missing interface
+return `ENODEV`, and an unresolvable namespace identifier degrades to the
+initial namespace with a warning rather than being served from a different
+namespace.
+
+Residual trust decisions are explicit and documented:
+
+* `AF_UNIX` stays global, unlike Linux, where Unix sockets are per-namespace.
+  Container path lookups of a host-mounted socket (for example
+  `/var/run/docker.sock`) must keep working, and the pathname permission checks
+  above still apply to every connection.
+* vsock stays global because it models a host transport, not a network device;
+  creation from a non-initial namespace fails with `EOPNOTSUPP`.
+* Namespaces are never reclaimed. This cannot cause use-after-free — the
+  registry and socket references keep the object alive — but idle namespaces
+  accumulate across repeated `CLONE_NEWNET` use.
+* `CAP_SYS_ADMIN`-style authorization for `CLONE_NEWNET` is delegated to the
+  caller's capability check, which currently treats every in-kernel caller as
+  fully privileged; an unprivileged user-space `unshare` therefore succeeds
+  where Linux would return `EPERM`.
 
 ### Authorization and Residual Trust
 
@@ -349,11 +384,11 @@ Test callback raw pointers are covered by entries 5 and 6; socket IO uses
 
 ### 1. `SocketHandle` Lifetime
 
-Every smoltcp socket handle must still exist in `SOCKET_SET` when accessed.
+Every smoltcp socket handle must still exist in its namespace's socket set when accessed.
 
 ### 2. `SocketSet` Mutual Exclusion
 
-All reads and writes to `SocketSet` must acquire the `SOCKET_SET.inner` mutex.
+All reads and writes to a `SocketSet` must acquire that socket set's `inner` mutex.
 
 ### 3. `Service` Mutual Exclusion
 
@@ -393,7 +428,7 @@ After converting an rtnetlink route's `oif` into a device index, `dev < devices.
 
 ### 10. Static Object Initialization Order
 
-`init_network` must initialize `SERVICE`, `SOCKET_SET`, and `LISTEN_TABLE` before any socket is created.
+`init_network` must build the initial namespace (its `Service`, socket set, and listen table) before any socket is created.
 
 ### 11. Credential Consistency for Pathname Operations
 
@@ -458,7 +493,7 @@ An actual increase in Router's data transmit-queue capacity must set `tx_capacit
 
 ### 22. TCP Close Lifecycle
 
-After the user file object is released, smoltcp handles with pending data, FIN, or retransmission state must remain in `SOCKET_SET`.
+After the user file object is released, smoltcp handles with pending data, FIN, or retransmission state must remain in their namespace's socket set.
 If the receive queue contains unread data, the aborted connection's handle must be retained until RST is sent.
 A handle may be removed only after the protocol enters `Closed`.
 The 60-second reclamation deadline applies only to `FIN_WAIT_2` handles detached from user file objects.
@@ -549,7 +584,7 @@ RAII must return the slot if reservation fails, the operation is interrupted, or
 | T-08 | uevents or responses fill the netlink receive queue | Medium | Subscribers do not consume messages while publishers keep writing | Subscribers lose uevents or request responses once queue capacity is exhausted. | `NETLINK_RX_QUEUE_LIMIT` bounds queue bytes per socket; excess messages are dropped |
 | T-09 | Control-plane and data-plane state diverge | Medium | Link mutations fail to update device-owned state; rtnetlink and legacy socket ioctl address mutations interleave; device removal leaves stale address projections or control-plane routes; configured routes retain invalid `prefsrc` references after address deletion; or route and neighbor mutations bypass their state owners | Packets use stale devices, source addresses, or routes, causing misrouting or configuration inconsistency. | `network_config_lock` serializes updates across entry points and `unregister_netdev`; link queries and mutations directly access the `NetDevice` state owner; address and route queries and mutations directly access Router; interface-address queries complete under a single Router lock acquisition; `RTM_NEWNEIGH` directly accesses the target device; address and device deletion refresh automatic routes, ingress processing, Interface, and device projections; deleting the last instance of an address value or deleting a device also cleans up Router routes and updates interface indices |
 | T-10 | External network packets trigger parser panics | Medium | Malformed Ethernet, ARP, IP, UDP, or TCP packets enter RX | A parser panic interrupts kernel network processing and can make service unavailable. | Ethernet and ARP use bounds-checked `zerocopy` views; IPv4 and UDP use in-crate bounds-checked parsers; TCP, raw IP, and IPv6 use smoltcp bounds-checked parsers; malformed packets are dropped |
-| T-11 | Interrupt-context misuse causes lock contention or increased latency | Medium | An IRQ wakeup callback directly advances `SERVICE` or `SOCKET_SET`, or performs blocking socket operations | Blocking or contended work delays interrupt processing and can deadlock network IO. | The VirtIO interrupt handler only acknowledges interrupts and schedules the NetRx softirq; Ethernet NetRx marks or wakes receive event sources, while loopback NetRx delivers prepared UDP handles through the bounded non-sleeping PCB path; remaining work is queued for `knet-poller`; the kwork callback executes bounded batches of at most four rounds in ordinary task context |
+| T-11 | Interrupt-context misuse causes lock contention or increased latency | Medium | An IRQ wakeup callback directly advances a namespace's `Service` or socket set, or performs blocking socket operations | Blocking or contended work delays interrupt processing and can deadlock network IO. | The VirtIO interrupt handler only acknowledges interrupts and schedules the NetRx softirq; Ethernet NetRx marks or wakes receive event sources, while loopback NetRx delivers prepared UDP handles through the bounded non-sleeping PCB path; remaining work is queued for `knet-poller`; the kwork callback executes bounded batches of at most four rounds in ordinary task context |
 | T-12 | Driver buffers or DMA input violate packet boundaries | High | A driver returns an invalid length, data is accessed after recycling, or TX/RX buffer lifetimes are mismanaged | Stale buffer references or invalid lengths can expose dangling data or violate memory safety. | RX data is parsed and copied only before `NetBufHandle` recycling; external frames use bounds-checked parsers; driver handles manage TX buffers |
 | T-13 | The vsock-TIPC bridge incorrectly routes ordinary AF_VSOCK connections to TIPC | Medium | Event routing fails to distinguish bridge ports or already bridged connections | Ordinary socket traffic reaches the wrong IPC service or is consumed by the bridge. | The bridge takes ownership only of static port mappings and connection IDs it manages; unmatched events continue to `VSOCK_CONN_MANAGER` |
 | T-14 | The host injects oversized or invalid TIPC messages through the bridge | Medium | A `Received` record exceeds TIPC slot capacity or the port 0 service name is invalid | Oversized or malformed records disrupt bridge connections and pressure message-buffer resources. | The bridge limits record length to `IPC_CHAN_MAX_BUF_SIZE`; dynamic service names must pass UTF-8, NUL, and length checks; invalid names receive `[1]` and the connection is closed |
@@ -600,7 +635,7 @@ Impact levels:
 | F-06 | A TCP connection awaiting acceptance is aborted | The peer resets during the handshake or the smoltcp child connection closes | `accept` returns `ConnectionAborted` | The application retries accept | 4 | `ListenTable::accept` removes closed child connections and continues scanning the queue |
 | F-07 | A poll wakeup or protocol-timer event is lost | UDP socket notifications are lost; the TCP/raw device mask is incorrect; timeout or Ethernet RX event sources are not registered; the registration owner is released during `Pending`; readiness is not rechecked after registration; or timer expiration fails to notify the poller | Delayed blocking socket waits, TCP retransmissions, or keepalives | Higher application IO latency or connection timeout | 3 | UDP receive waiters are notified when packets are enqueued, errors occur, or the socket is shut down; changes to TCP/raw device bindings notify waiters to rebuild RX registrations and recheck the event version; `Service::register_rx_waker` uses the same `PollContext` to register timeout polling and Ethernet receive-poll event sources that support interrupt-driven reception; devices without `NetRxScheduler` fall back to the timeout aggregate waker; callers retain `PollRegistrations` and recheck readiness after registration; each Interface poll registers the deadline returned by `poll_at` and calls `notify(PollReason::Timer)` on expiration |
 | F-08 | Malformed netlink request | Invalid header or attribute length | An empty response or netlink error is returned | The caller's request fails | 4 | Bounds-checked readers and error-response handling |
-| F-09 | Network service or control plane is uninitialized | An AF_PACKET or netlink route request precedes `SERVICE` or Router initialization | AF_PACKET device binding and sending return `ENODEV`; link dumps are empty, mutations return errors, and address or route dumps are empty | The corresponding network functions are temporarily unavailable | 2 | Check initialization before every `SERVICE` query; initialize Router and `SERVICE` before public network interfaces become available; new boot paths must preserve this order |
+| F-09 | Network service or control plane is uninitialized | An AF_PACKET or netlink route request precedes the namespace `Service` or Router initialization | AF_PACKET device binding and sending return `ENODEV`; link dumps are empty, mutations return errors, and address or route dumps are empty | The corresponding network functions are temporarily unavailable | 2 | Check initialization before every `Service` query; initialize the initial namespace Router and `Service` before public network interfaces become available; new boot paths must preserve this order |
 | F-10 | A Unix stream peer closes early | The channel is shut down or released | send returns `BrokenPipe` if no progress was made, or a partial byte count otherwise; recv returns EOF after draining the local buffer; if the peer discards unread input on closure, recv returns `ConnectionReset` once; polling reports `RDHUP`, `HUP`, or `ERR` | The application observes connection closure | 4 | Endpoint atomics record both half-close states and pending resets; `tx_order` for each send direction orders closure and data together; three `PollSet` groups selectively wake waiters for affected events |
 | F-11 | Heavy network processing runs in interrupt context | IRQ or `NetRx` incorrectly calls socket send, recv, or `poller::assist_once` | Lock contention, scheduling delays, or deadlock | Higher network IO latency or severe system stalls | 2 | IRQ paths only acknowledge device interrupts, mark RX pending, and schedule `NetRx`; Ethernet `NetRx` only wakes the device RX `PollSet`; loopback writes validated UDP metadata into the existing `PacketBuf` before disabling BH; `NetRx` takes only UDP packets with validated metadata from `NET_RX_QUEUE` and delivers them through allocation-free `SpinNoIrq` lookup and handle enqueueing without looking up `LoopbackDevice`; softirqs must not call `poller::assist_once` or acquire `Service` / `SocketSet` mutexes |
 | F-12 | Incorrect RX buffer recycling order | Frame payload remains referenced after `recycle_rx` | Dangling-data reads or data corruption | Packet parsing errors or, in severe cases, memory-safety violations | 1 | `EthernetDevice::poll_rx` completes parsing and copying before recycling; new device adapters must preserve this lifetime |
@@ -614,10 +649,11 @@ Impact levels:
 | F-20 | Mixed or truncated netlink batch | A single send mixes queries and mutations, or a subsequent message is too short or truncated | A mixed batch is not executed and returns a syscall error; a truncated tail only stops further parsing | The caller must correct or split the batch | 4 | Classify the batch before state updates or response generation; stop splitting when fewer than a header's worth of bytes remain or `nlmsg_len` is invalid |
 | F-21 | RX or TX backlogs monopolize the processing task | A sustained packet rate exceeds the per-round budget | A round reaches its budget or 1 ms soft time limit with work still pending | Scheduling delays for other tasks or reduced network throughput | 3 | Device RX, stack ingress, stack egress, and Router TX check time after at most 32 work items; each batch runs at most four consecutive rounds, then reschedules and releases execution ownership, leaving remaining work for the next batch |
 | F-22 | A TCP peer does not send FIN after the local file closes | The peer acknowledges the local FIN, but the protocol handle remains in `FIN_WAIT_2` after detachment from the user file object | The deferred-close registry keeps socket buffers alive | Network memory grows with unresponsive connections | 3 | Set a 60-second deadline on entry to `FIN_WAIT_2`, include it in the unified poll timer, and reclaim the handle on expiration |
-| F-23 | The IPv4 output device is administratively down | `RTM_NEWLINK` clears `IFF_UP` on the device selected by the matching route | The current UDP or raw IP send fails | The application receives `ENETUNREACH` | 4 | UDP and raw IP validate the output route and device administrative state through `SERVICE` before committing the send buffer |
+| F-23 | The IPv4 output device is administratively down | `RTM_NEWLINK` clears `IFF_UP` on the device selected by the matching route | The current UDP or raw IP send fails | The application receives `ENETUNREACH` | 4 | UDP and raw IP validate the output route and device administrative state through their namespace `Service` before committing the send buffer |
 | F-24 | Data-plane shared-lock contention | A socket or control-plane task holds Router, IngressProcessor, Interface, or socket-set | The current polling round ends early and retains its batches | Network work is deferred to the next round | 3 | Return `has_more`; the sole executor publishes `SCHEDULED` through the completion CAS; raw, admitted, and control-packet batches retain ownership and resume from their saved positions in the next round |
 | F-25 | Short-timeout loopback UDP loses packets while the poller is busy | `sendto` only notifies the poller, and the 1-jiffy `recvfrom` timeout expires first | Concurrent libc-test `socket.exe` runs intermittently report `ETIMEDOUT` | A user-visible functional regression | 3 | `NetRx` delivers loopback UDP to the PCB within the send path's BH window; the poller no longer performs this delivery; stress tests cover four concurrent short-timeout operations with SMP=1 and SMP=4 |
 | F-26 | A TCP child connection remains in the SYN queue indefinitely | The packet marker is consumed before the child becomes acceptable, and later ingress processing or timer polling does not refresh the listener | The accept queue stays empty | The server remains blocked in `accept` after connection establishment | 2 | Refresh listeners with nonempty SYN queues after each actual network poll; wake waiters only after a child enters the accept queue; SYN queues do not request continuous polling |
+| F-28 | A namespace lookup crosses into another namespace | A socket, packet, or netlink request resolves state from a namespace it does not own | Data or configuration from one namespace becomes visible in another | Namespace isolation silently breaks | 2 | Sockets capture `netns::current()` at creation and only read that namespace's tables; `PacketBuf` carries the namespace of its originating device; the registry maps one identifier to one namespace. An unresolvable identifier logs a warning and returns the initial namespace, and registry entries are never removed while referenced, so the degradation stays observable and bounded |
 | F-27 | Connect or accept waits indefinitely after Unix listener shutdown | A listener state change does not notify capacity and request events | Blocking `connect` or `accept` cannot return | Application threads remain asleep indefinitely | 2 | Both `shutdown(SHUT_RD)` and Drop notify `capacity_available` and `request_available`; queued requests are delivered first, and blocking `accept` on an empty queue returns `EINVAL`; blocking `connect` with `SO_SNDTIMEO` returns `EAGAIN` when its capacity wait times out |
 
 Severity levels:
@@ -702,7 +738,7 @@ callbacks automatically.
 Changes to this module must verify the following:
 
 - Every `unsafe` block has a `SAFETY:` comment.
-- The lifecycle of each new smoltcp socket handle is protected by `SOCKET_SET`.
+- The lifecycle of each new smoltcp socket handle is protected by its namespace's socket set.
 - New link and neighbor mutations directly update state owned by the target device.
   Address and route mutations update Router and refresh derived projections under `network_config_lock`.
   Deleting the last instance of an address value also removes configured Router routes that depend on that `prefsrc`.

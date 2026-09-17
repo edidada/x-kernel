@@ -39,7 +39,10 @@ impl VsockStreamTransport {
             connection: Mutex::new(None),
             tx_lock: Mutex::new(()),
             state: StateLock::new(State::Idle),
-            general: GeneralOptions::new(),
+            // vsock stays a global transport: it is not namespaced (see the
+            // netns design), so its options always talk to the initial
+            // namespace view.
+            general: GeneralOptions::new(crate::netns::global_options_net_ns()),
         }
     }
 

@@ -147,6 +147,14 @@ impl SimpleFile {
         })
     }
 
+    /// Overrides the inode number reported for this file.
+    ///
+    /// Synthetic filesystems use this when the inode number carries meaning of
+    /// its own, such as the network namespace id behind `/proc/<pid>/ns/net`.
+    pub fn set_inode_number(&self, ino: u64) {
+        self.node.set_inode_number(ino);
+    }
+
     /// Returns the inode fields used when materializing this simple file.
     pub fn inode_init(&self) -> VfsInodeInit {
         self.node.inode_init()

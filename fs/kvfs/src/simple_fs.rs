@@ -153,6 +153,14 @@ impl SimpleFsNode {
         self.metadata.lock().rdev = rdev;
     }
 
+    /// Overrides the inode number reported by `getattr`.
+    ///
+    /// Synthetic filesystems use this when the inode number carries meaning of
+    /// its own, such as the network namespace id behind `/proc/<pid>/ns/net`.
+    pub fn set_inode_number(&self, ino: u64) {
+        self.metadata.lock().inode = ino;
+    }
+
     pub(crate) fn filesystem(&self) -> Arc<SimpleFs> {
         self.fs.clone()
     }

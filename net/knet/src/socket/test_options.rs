@@ -196,7 +196,7 @@ fn test_ttl_boundary_values() {
 #[def_test]
 fn test_broadcast_option_get_set() {
     use crate::socket::general::GeneralOptions;
-    let opts = GeneralOptions::new();
+    let opts = GeneralOptions::new(crate::netns::test_init_net());
     assert!(!opts.broadcast());
 
     opts.set_option_inner(SetSocketOption::Broadcast(&true))
@@ -221,7 +221,7 @@ fn test_broadcast_option_get_set() {
 #[def_test]
 fn test_bindtodevice_option_default_and_unbind() {
     use crate::socket::general::GeneralOptions;
-    let opts = GeneralOptions::new();
+    let opts = GeneralOptions::new(crate::netns::test_init_net());
     assert_eq!(opts.bound_dev_if(), 0);
 
     // Unbinding (None) on an already-unbound socket is a no-op.
@@ -239,7 +239,7 @@ fn test_bindtodevice_option_default_and_unbind() {
 #[def_test]
 fn test_bindtodevice_unbind_uses_all_devices() {
     use crate::socket::general::GeneralOptions;
-    let opts = GeneralOptions::new();
+    let opts = GeneralOptions::new(crate::netns::test_init_net());
     assert_eq!(opts.rx_device_mask(), u32::MAX);
     opts.set_bound_dev_if_for_test(3);
     assert_eq!(opts.rx_device_mask(), 0b0100);

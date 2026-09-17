@@ -20,6 +20,7 @@ use crate::{
     Shutdown, SocketErrorInfo,
     general::GeneralOptions,
     ip::{IpAddress, IpEndpoint},
+    netns::NetNamespace,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
 };
 
@@ -59,7 +60,7 @@ pub(crate) struct UdpSocketState {
 }
 
 impl UdpSocketState {
-    pub(crate) fn new() -> Arc<Self> {
+    pub(crate) fn new(net_ns: Arc<NetNamespace>) -> Arc<Self> {
         Arc::new(Self {
             lifecycle: RwLock::new(UdpSocketLifecycle::Init),
             local_endpoint: RwLock::new(None),
@@ -70,7 +71,7 @@ impl UdpSocketState {
             socket_error: AtomicI32::new(0),
             error_queue: Mutex::new(VecDeque::new()),
             waiters: UdpSocketWaiters::new(),
-            options: GeneralOptions::new(),
+            options: GeneralOptions::new(net_ns),
         })
     }
 
@@ -332,7 +333,7 @@ mod tests {
 
     #[def_test]
     fn test_state_endpoint_state_transitions() {
-        let state = UdpSocketState::new();
+        let state = UdpSocketState::new(crate::netns::test_init_net());
         let local = endpoint(Ipv4Addr::new(10, 0, 0, 2), 8080);
         let peer = endpoint(Ipv4Addr::new(192, 0, 2, 1), 5353);
 
@@ -355,7 +356,7 @@ mod tests {
 
     #[def_test]
     fn test_state_error_queue_respects_recv_err_option() {
-        let state = UdpSocketState::new();
+        let state = UdpSocketState::new(crate::netns::test_init_net());
 
         state.enqueue_error(queued_error(LinuxError::ECONNREFUSED, 1));
         assert!(!state.has_pending_error());
@@ -371,7 +372,7 @@ mod tests {
 
     #[def_test]
     fn test_state_recorded_error_is_read_once() {
-        let state = UdpSocketState::new();
+        let state = UdpSocketState::new(crate::netns::test_init_net());
 
         state.record_socket_error(LinuxError::ECONNREFUSED);
 
@@ -384,7 +385,7 @@ mod tests {
 
     #[def_test]
     fn test_state_readiness_merges_shutdown_and_error_state() {
-        let state = UdpSocketState::new();
+        let state = UdpSocketState::new(crate::netns::test_init_net());
 
         state.set_recv_err(true);
         state.enqueue_error(queued_error(LinuxError::ECONNREFUSED, 1));

@@ -121,7 +121,10 @@ impl NsProxy {
     ///   child and its descendants. The caller must allocate the child's
     ///   `PidHandle` inside this namespace (see `kidentity::PidHandle::
     ///   allocate_in`).
-    /// - Unimplemented flags (`CLONE_NEWCGROUP`, `CLONE_NEWNET`, etc.) return an
+    /// - `CLONE_NEWNET` is ignored here: the network namespace is owned by the
+    ///   process (see `kprocess::Process::net_ns`) and created by the network
+    ///   subsystem, not by the namespace proxy.
+    /// - Unimplemented flags (`CLONE_NEWCGROUP`, `CLONE_NEWUSER`, ...) return an
     ///   error so the caller can translate it to the appropriate errno.
     pub fn clone_for_child(
         &self,
@@ -129,10 +132,8 @@ impl NsProxy {
         fs_context: NamespaceFsContext<'_>,
     ) -> Result<Arc<Self>, CloneNsError> {
         // Reject unimplemented namespace flags
-        let unimplemented = NamespaceFlags::NEWNET
-            | NamespaceFlags::NEWUSER
-            | NamespaceFlags::NEWCGROUP
-            | NamespaceFlags::NEWTIME;
+        let unimplemented =
+            NamespaceFlags::NEWUSER | NamespaceFlags::NEWCGROUP | NamespaceFlags::NEWTIME;
         if flags.intersects(unimplemented) {
             return Err(CloneNsError::Unimplemented);
         }
@@ -315,21 +316,29 @@ mod tests_nsproxy {
     #[def_test]
     fn test_nsproxy_clone_unimplemented_flags_rejected() {
         let parent = make_nsproxy();
-        assert!(
-            parent
-                .clone_for_child(NamespaceFlags::NEWNET, NamespaceFsContext::Shared)
-                .is_err()
-        );
-        assert!(
-            parent
-                .clone_for_child(NamespaceFlags::NEWUSER, NamespaceFsContext::Shared)
-                .is_err()
-        );
-        assert!(
-            parent
-                .clone_for_child(NamespaceFlags::NEWCGROUP, NamespaceFsContext::Shared)
-                .is_err()
-        );
+        for flags in [
+            NamespaceFlags::NEWUSER,
+            NamespaceFlags::NEWCGROUP,
+            NamespaceFlags::NEWTIME,
+        ] {
+            assert!(
+                parent
+                    .clone_for_child(flags, NamespaceFsContext::Shared)
+                    .is_err(),
+                "expected {flags:?} to be rejected"
+            );
+        }
+    }
+
+    #[def_test]
+    fn test_nsproxy_clone_shares_net_namespace_handle() {
+        let parent = make_nsproxy();
+        // `CLONE_NEWNET` is owned by the process, so the proxy shares its
+        // namespace handle and never rejects the flag.
+        let child = parent
+            .clone_for_child(NamespaceFlags::NEWNET, NamespaceFsContext::Shared)
+            .unwrap();
+        assert!(Arc::ptr_eq(child.net_ns(), parent.net_ns()));
     }
 
     #[def_test]

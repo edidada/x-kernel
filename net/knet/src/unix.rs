@@ -244,6 +244,14 @@ pub struct UnixDomainSocket {
     peer_endpoint: Mutex<UnixAddr>,
 }
 impl UnixDomainSocket {
+    /// Returns the Linux `SOCK_*` type constant of this socket.
+    pub fn socket_type(&self) -> u8 {
+        match self.transport {
+            UnixTransport::Stream(_) => crate::socket::SOCK_STREAM,
+            UnixTransport::Dgram(_) => crate::socket::SOCK_DGRAM,
+        }
+    }
+
     pub fn new(transport: impl Into<UnixTransport>) -> Self {
         Self {
             transport: transport.into(),

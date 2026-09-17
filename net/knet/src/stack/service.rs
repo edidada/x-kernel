@@ -24,13 +24,14 @@ use smoltcp::{
 };
 
 use crate::{
-    LISTEN_TABLE, SOCKET_SET,
     buf::PacketBuf,
     device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborUpdate},
     ip::IpAddress,
+    listen_table::ListenTable,
     poller::{PollBudget, PollProgress},
     router::{NeighborUpdatePolicy, Router, Rule},
     stack::ingress::{IngressProcessor, prepare_smoltcp_ingress},
+    wrapper::SocketSetWrapper,
 };
 
 const IPV4_HEADER_LEN: usize = 20;
@@ -104,12 +105,25 @@ pub struct Service {
     timeout_deadline_micros: AtomicU64,
     ipv4_reassembly_deadline_micros: AtomicU64,
     timeout_poll: Arc<PollSet>,
+    /// Socket set of the owning namespace.
+    socket_set: Arc<SocketSetWrapper<'static>>,
+    /// INET listen table of the owning namespace.
+    listen_table: Arc<ListenTable>,
     #[cfg(unittest)]
     rebuild_count: AtomicUsize,
 }
 
 impl Service {
-    pub fn new(mut router: Router) -> Self {
+    /// Builds the service of one network namespace around `router`.
+    ///
+    /// `socket_set` and `listen_table` are the namespace's own tables; they are
+    /// shared with the namespace object so socket paths and the data plane see
+    /// the same state.
+    pub fn new(
+        mut router: Router,
+        socket_set: Arc<SocketSetWrapper<'static>>,
+        listen_table: Arc<ListenTable>,
+    ) -> Self {
         let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
         let iface = Interface::new(config, &mut router, to_smoltcp_instant(monotonic_time()));
 
@@ -123,6 +137,8 @@ impl Service {
             timeout_deadline_micros: AtomicU64::new(0),
             ipv4_reassembly_deadline_micros: AtomicU64::new(0),
             timeout_poll: Arc::new(PollSet::new()),
+            socket_set,
+            listen_table,
             #[cfg(unittest)]
             rebuild_count: AtomicUsize::new(0),
         };
@@ -192,7 +208,7 @@ impl Service {
             );
         }
 
-        let Some(mut sockets) = SOCKET_SET.inner.try_lock() else {
+        let Some(mut sockets) = self.socket_set.inner.try_lock() else {
             return deferred_poll_progress(
                 rx_packets,
                 tx_packets,
@@ -265,7 +281,7 @@ impl Service {
         let deferred_close_deadline = sockets.reap_deferred_tcp_closes(current);
         let protocol_deadline = iface.poll_at(current, &sockets);
         drop(iface);
-        LISTEN_TABLE.refresh_acceptors(&mut sockets);
+        self.listen_table.refresh_acceptors(&mut sockets);
         drop(sockets);
         timer_events += usize::from(timer_events < budget.timer_events && has_socket_state_change);
 
@@ -471,7 +487,7 @@ impl Service {
         let mut sockets = if accepted_packets.is_empty() {
             None
         } else {
-            let Some(sockets) = SOCKET_SET.inner.try_lock() else {
+            let Some(sockets) = self.socket_set.inner.try_lock() else {
                 return false;
             };
             Some(sockets)
@@ -483,7 +499,7 @@ impl Service {
             // Acquire both destinations before listener preparation mutates the
             // socket set. A failed nonblocking acquisition leaves the complete
             // batch available for an identical retry in a later poll round.
-            prepare_smoltcp_ingress(accepted_packets, sockets);
+            prepare_smoltcp_ingress(accepted_packets, &self.listen_table, sockets);
             router.enqueue_ingress_packets(accepted_packets);
         }
         for packet in control_packets.drain(..) {
@@ -570,7 +586,7 @@ impl Service {
         let source_waker = Waker::from(self.timeout_poll.clone());
 
         let current = now();
-        let sockets = SOCKET_SET.inner.lock();
+        let sockets = self.socket_set.inner.lock();
         let next = earliest_poll_deadline(
             self.iface.lock().poll_at(current, &sockets),
             sockets.deferred_tcp_close_deadline(),
@@ -1040,7 +1056,7 @@ fn output_ipv4_packet_count(
 
 #[cfg(unittest)]
 mod tests {
-    use alloc::{boxed::Box, vec, vec::Vec};
+    use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 
     use smoltcp::iface::SocketSet;
     use unittest::{assert, def_test};
@@ -1050,9 +1066,17 @@ mod tests {
         buf::PacketOwner,
         device::LoopbackDevice,
         ip::{Ipv4Address, Ipv4Cidr},
+        listen_table::ListenTable,
         router::{Ipv4AddrEntry, ROUTE_SCOPE_HOST},
         stack::ipv4,
+        wrapper::SocketSetWrapper,
     };
+
+    fn test_service() -> Service {
+        let listen_table = Arc::new(ListenTable::new());
+        let socket_set = Arc::new(SocketSetWrapper::new());
+        Service::new(Router::new(), socket_set, listen_table)
+    }
 
     const TEST_POLL_BUDGET: PollBudget = PollBudget {
         rx_packets: 1,
@@ -1106,7 +1130,7 @@ mod tests {
 
     #[def_test]
     fn protocol_deadline_update_preserves_ipv4_reassembly_timer_source() {
-        let service = Service::new(Router::new());
+        let service = test_service();
         let reassembly_deadline = monotonic_time() + TimeSpan::from_secs(30);
         service.update_ipv4_reassembly_timeout(Some(reassembly_deadline));
         let reassembly_state = service
@@ -1125,7 +1149,7 @@ mod tests {
 
     #[def_test]
     fn unrelated_ingress_lock_contention_is_not_ipv4_timer_work() {
-        let service = Service::new(Router::new());
+        let service = test_service();
         let _ingress = service.ingress.lock();
         let mut control_packets = Vec::new();
 
@@ -1178,7 +1202,7 @@ mod tests {
     /// Regression test for <https://gitee.com/openkylin/x-kernel/issues/IK97G7>.
     #[def_test]
     fn poll_round_defers_router_lock_contention() {
-        let service = Service::new(Router::new());
+        let service = test_service();
         let _router = service.router.lock();
 
         let progress = service.poll_budgeted(TEST_POLL_BUDGET);
@@ -1207,7 +1231,11 @@ mod tests {
         router
             .queue_ipv4_packet(packet, loopback as i32 + 1)
             .unwrap();
-        let service = Service::new(router);
+        let service = Service::new(
+            router,
+            Arc::new(SocketSetWrapper::new()),
+            Arc::new(ListenTable::new()),
+        );
         service
             .ipv4_reassembly_deadline_micros
             .store(IPV4_REASSEMBLY_TIMER_PENDING, Ordering::Release);

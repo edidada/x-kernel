@@ -17,9 +17,9 @@ use super::{
     ipv4::{self, Icmpv4Error, Ipv4Error, Ipv4Header},
 };
 use crate::{
-    LISTEN_TABLE,
     buf::PacketBuf,
     ip::{Ipv4Address, Ipv4Cidr},
+    listen_table::ListenTable,
     udp, udp_err,
 };
 
@@ -170,7 +170,7 @@ impl IngressProcessor {
         }
 
         if let Some(ip_packet) = packet.network_packet() {
-            udp_err::inspect_icmpv4_error(ip_packet, packet.ifindex());
+            udp_err::inspect_icmpv4_error(ip_packet, packet.net_ns(), packet.ifindex());
         }
         accepted_packets.push(packet);
     }
@@ -191,7 +191,11 @@ impl IngressProcessor {
 /// smoltcp socket-set lock. This keeps custom UDP ingress independent from
 /// unrelated TCP socket operations while preserving listener setup before a
 /// TCP SYN reaches smoltcp.
-pub(crate) fn prepare_smoltcp_ingress(packets: &[PacketBuf], sockets: &mut SocketSet<'_>) {
+pub(crate) fn prepare_smoltcp_ingress(
+    packets: &[PacketBuf],
+    listen_table: &ListenTable,
+    sockets: &mut SocketSet<'_>,
+) {
     for packet in packets {
         let Some(ip_packet) = packet.network_packet() else {
             continue;
@@ -209,10 +213,11 @@ pub(crate) fn prepare_smoltcp_ingress(packets: &[PacketBuf], sockets: &mut Socke
                     SmoltcpIpAddress::Ipv4(header.src_addr().into()),
                     SmoltcpIpAddress::Ipv4(header.dst_addr().into()),
                     payload,
+                    listen_table,
                     sockets,
                 );
             }
-            Some(6) => snoop_ipv6_tcp_packet(ip_packet, sockets),
+            Some(6) => snoop_ipv6_tcp_packet(ip_packet, listen_table, sockets),
             _ => {}
         }
     }
@@ -242,7 +247,7 @@ fn should_emit_protocol_unreachable(header: Ipv4Header) -> bool {
         )
 }
 
-fn snoop_ipv6_tcp_packet(buf: &[u8], sockets: &mut SocketSet<'_>) {
+fn snoop_ipv6_tcp_packet(buf: &[u8], listen_table: &ListenTable, sockets: &mut SocketSet<'_>) {
     let Ok(ip_packet) = Ipv6Packet::new_checked(buf) else {
         return;
     };
@@ -257,6 +262,7 @@ fn snoop_ipv6_tcp_packet(buf: &[u8], sockets: &mut SocketSet<'_>) {
         SmoltcpIpAddress::Ipv6(ip_packet.src_addr()),
         SmoltcpIpAddress::Ipv6(ip_packet.dst_addr()),
         ip_packet.payload(),
+        listen_table,
         sockets,
     );
 }
@@ -266,6 +272,7 @@ fn snoop_tcp_segment(
     src_addr: SmoltcpIpAddress,
     dst_addr: SmoltcpIpAddress,
     payload: &[u8],
+    listen_table: &ListenTable,
     sockets: &mut SocketSet<'_>,
 ) {
     if protocol != ipv4::PROTOCOL_TCP {
@@ -277,8 +284,8 @@ fn snoop_tcp_segment(
     };
     let src_addr = (src_addr, tcp_packet.src_port()).into();
     let dst_addr = (dst_addr, tcp_packet.dst_port()).into();
-    LISTEN_TABLE.note_tcp_packet(dst_addr);
+    listen_table.note_tcp_packet(dst_addr);
     if tcp_packet.syn() && !tcp_packet.ack() {
-        LISTEN_TABLE.incoming_tcp_packet(src_addr, dst_addr, sockets);
+        listen_table.incoming_tcp_packet(src_addr, dst_addr, sockets);
     }
 }

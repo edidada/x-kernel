@@ -16,8 +16,8 @@ use smoltcp::{
 };
 
 use crate::{
-    SOCKET_SET,
     consts::{LISTEN_QUEUE_SIZE, TCP_RX_BUF_LEN, TCP_TX_BUF_LEN},
+    wrapper::SocketSetWrapper,
 };
 
 /// Mutable listen backlog state. The accept wakeup source lives on
@@ -111,7 +111,7 @@ impl ListenTable {
         Ok(())
     }
 
-    pub fn unlisten(&self, endpoint: IpListenEndpoint) {
+    pub fn unlisten(&self, endpoint: IpListenEndpoint, socket_set: &SocketSetWrapper<'static>) {
         let entry = {
             let mut entries = self.entries.lock();
             entries.remove(&endpoint)
@@ -128,7 +128,7 @@ impl ListenTable {
         };
 
         for handle in handles {
-            SOCKET_SET.remove(handle);
+            socket_set.remove(handle);
         }
     }
 

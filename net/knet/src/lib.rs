@@ -24,6 +24,7 @@ mod device;
 mod ip;
 mod link;
 pub mod netlink;
+pub mod netns;
 mod poller;
 mod socket;
 mod stack;
@@ -45,7 +46,6 @@ use kclass::{NetDevice, net_devices};
 use kdevice::subscribe_device_removed;
 #[cfg(feature = "vsock")]
 use kerrno::KError;
-use lazyinit::LazyInit;
 pub(crate) use link::{buf, wire};
 pub use link::{packet, send_link_frame};
 pub use socket::{
@@ -61,16 +61,8 @@ use crate::{
     consts::{GATEWAY, IP, IP_PREFIX, TIMER_SAMPLE_PERIOD},
     device::{EthernetDevice, LoopbackDevice},
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
-    listen_table::ListenTable,
     router::{Ipv4AddrEntry, ROUTE_SCOPE_HOST, ROUTE_SCOPE_UNIVERSE, Router, Rule},
-    service::Service,
-    wrapper::SocketSetWrapper,
 };
-
-static LISTEN_TABLE: LazyInit<ListenTable> = LazyInit::new();
-static SOCKET_SET: LazyInit<SocketSetWrapper> = LazyInit::new();
-
-static SERVICE: LazyInit<Service> = LazyInit::new();
 
 /// Initializes the network subsystem by NIC devices.
 pub fn init_network() {
@@ -130,14 +122,11 @@ pub fn init_network() {
         info!("Device: {}", dev.name());
     }
 
-    let service = Service::new(router);
-    SERVICE.init_once(service);
-
-    SOCKET_SET.init_once(SocketSetWrapper::new());
-    LISTEN_TABLE.init_once(ListenTable::new());
+    let init_net = netns::init_initial(router);
     udp::init_udp_registry();
     poller::network_poller().start();
-    ktask::register_timer_callback(TIMER_SAMPLE_PERIOD, |_| SERVICE.handle_timer_tick());
+    ktask::register_timer_callback(TIMER_SAMPLE_PERIOD, |_| netns::sample_timers());
+    debug_assert_eq!(init_net.id().as_u64(), 1);
 }
 
 fn subscribe_network_unregister(id: kdevice::DeviceId) {
@@ -156,11 +145,12 @@ fn subscribe_network_unregister(id: kdevice::DeviceId) {
 /// Takes [`control::network_config_lock`] so teardown is serialized with
 /// control-plane mutations.
 pub(crate) fn unregister_netdev(id: kdevice::DeviceId) -> bool {
-    if !SERVICE.is_inited() {
+    // Physical NICs are only ever owned by the initial namespace.
+    let Some(init_net) = netns::init_net() else {
         return false;
-    }
+    };
     let _network_config_guard = control::network_config_lock();
-    SERVICE.remove_device_by_model_id(id).is_some()
+    init_net.service().remove_device_by_model_id(id).is_some()
 }
 
 /// Init vsock subsystem by vsock devices.

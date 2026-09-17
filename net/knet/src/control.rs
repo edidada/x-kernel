@@ -11,9 +11,9 @@ use kerrno::LinuxError;
 use ksync::{Mutex, MutexGuard, static_lock};
 
 use crate::{
-    SERVICE,
     device::{ARPHRD_ETHER, ARPHRD_LOOPBACK, LINK_FLAG_UP, LinkConfigUpdate, LinkKind},
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
+    netns,
     router::{
         Ipv4AddrEntry, ROUTE_PROTOCOL_BOOT, ROUTE_SCOPE_LINK, ROUTE_SCOPE_UNIVERSE,
         ROUTE_TABLE_MAIN, ROUTE_TYPE_UNICAST, RouteAttrs, Rule,
@@ -50,10 +50,12 @@ pub struct NetInterfaceInfo {
 
 /// Finds a network interface by name.
 pub fn find_interface(name: &str) -> Option<NetInterfaceInfo> {
-    if !SERVICE.is_inited() {
+    if !netns::initialized() {
         return None;
     }
-    let link = SERVICE
+    let net_ns = netns::current();
+    let link = net_ns
+        .service()
         .link_snapshots()
         .into_iter()
         .find(|link| link.name == name)?;
@@ -78,10 +80,12 @@ pub fn find_interface(name: &str) -> Option<NetInterfaceInfo> {
 /// Returns `ENODEV` when `name` is unknown and `EADDRNOTAVAIL` when the
 /// interface has no IPv4 address.
 pub fn interface_ipv4_addr(name: &str) -> Result<Ipv4Addr, LinuxError> {
-    if !SERVICE.is_inited() {
+    if !netns::initialized() {
         return Err(LinuxError::ENODEV);
     }
-    SERVICE
+    let net_ns = netns::current();
+    net_ns
+        .service()
         .interface_ipv4_addr(name)
         .map(|cidr| Ipv4Addr::from(cidr.address().octets()))
 }
@@ -96,10 +100,12 @@ pub fn set_interface_ipv4_addr(
 ) -> Result<(), LinuxError> {
     let _network_config_guard = network_config_lock();
     let dev = device_index_by_name(name)?;
+    let net_ns = netns::current();
+    let service = net_ns.service();
     if addr.is_unspecified() {
-        return SERVICE.remove_primary_ipv4_addr(dev);
+        return service.remove_primary_ipv4_addr(dev);
     }
-    SERVICE.set_primary_ipv4_addr(
+    service.set_primary_ipv4_addr(
         dev,
         Ipv4Cidr::new(Ipv4Address::from_octets(addr.octets()), prefix_len),
     )
@@ -117,7 +123,8 @@ pub fn set_interface_ipv4_addr(
 pub fn set_interface_ipv4_netmask(name: &str, prefix_len: u8) -> Result<(), LinuxError> {
     let _network_config_guard = network_config_lock();
     let dev = device_index_by_name(name)?;
-    SERVICE.set_ipv4_netmask(dev, prefix_len)
+    let net_ns = netns::current();
+    net_ns.service().set_ipv4_netmask(dev, prefix_len)
 }
 
 /// Sets the IPv4 broadcast address stored on the first address of `name`.
@@ -129,7 +136,10 @@ pub fn set_interface_ipv4_netmask(name: &str, prefix_len: u8) -> Result<(), Linu
 pub fn set_interface_ipv4_broadcast(name: &str, broadcast: Ipv4Addr) -> Result<(), LinuxError> {
     let _network_config_guard = network_config_lock();
     let dev = device_index_by_name(name)?;
-    SERVICE.set_ipv4_broadcast(dev, Ipv4Address::from_octets(broadcast.octets()))
+    let net_ns = netns::current();
+    net_ns
+        .service()
+        .set_ipv4_broadcast(dev, Ipv4Address::from_octets(broadcast.octets()))
 }
 
 /// Applies the `IFF_UP` state requested through `SIOCSIFFLAGS`.
@@ -140,7 +150,8 @@ pub fn set_interface_ipv4_broadcast(name: &str, broadcast: Ipv4Addr) -> Result<(
 pub fn set_interface_flags(name: &str, flags: u16) -> Result<(), LinuxError> {
     let _network_config_guard = network_config_lock();
     let ifindex = (device_index_by_name(name)? + 1) as i32;
-    SERVICE.update_device_link(
+    let net_ns = netns::current();
+    net_ns.service().update_device_link(
         ifindex,
         LinkConfigUpdate {
             name: None,
@@ -169,7 +180,9 @@ pub fn add_ipv4_route(
 ) -> Result<(), LinuxError> {
     let _network_config_guard = network_config_lock();
     let rule = ipv4_configured_route_rule(dst, dst_len, gateway, oif_name)?;
-    if SERVICE.route_snapshot().iter().any(|existing| {
+    let net_ns = netns::current();
+    let service = net_ns.service();
+    if service.route_snapshot().iter().any(|existing| {
         existing.is_configured()
             && existing.filter == rule.filter
             && existing.via == rule.via
@@ -177,7 +190,7 @@ pub fn add_ipv4_route(
     }) {
         return Err(LinuxError::EEXIST);
     }
-    SERVICE.add_route_rule(rule)
+    service.add_route_rule(rule)
 }
 
 /// Deletes an IPv4 route owned by `Router`. Missing entries return `ESRCH`.
@@ -203,7 +216,9 @@ pub fn del_ipv4_route(
     };
     let filter = ipv4_route_filter(dst, dst_len)?;
     let via = gateway.map(|addr| IpAddress::Ipv4(Ipv4Address::from_octets(addr.octets())));
-    let existing = SERVICE
+    let net_ns = netns::current();
+    let service = net_ns.service();
+    let existing = service
         .route_snapshot()
         .into_iter()
         .find(|existing| {
@@ -213,7 +228,7 @@ pub fn del_ipv4_route(
                 && (via.is_none() || existing.via == via)
         })
         .ok_or(LinuxError::ESRCH)?;
-    SERVICE.remove_route_rule(existing);
+    service.remove_route_rule(existing);
     Ok(())
 }
 
@@ -260,14 +275,20 @@ fn ipv4_configured_route_rule(
 }
 
 fn device_index_by_name(name: &str) -> Result<usize, LinuxError> {
-    if !SERVICE.is_inited() {
+    if !netns::initialized() {
         return Err(LinuxError::ENODEV);
     }
-    SERVICE.device_index_by_name(name).ok_or(LinuxError::ENODEV)
+    let net_ns = netns::current();
+    net_ns
+        .service()
+        .device_index_by_name(name)
+        .ok_or(LinuxError::ENODEV)
 }
 
 fn ipv4_entries_for_device(dev: usize) -> Vec<Ipv4AddrEntry> {
-    SERVICE
+    let net_ns = netns::current();
+    net_ns
+        .service()
         .ipv4_addr_snapshots()
         .into_iter()
         .filter(|snapshot| snapshot.entry.dev == dev)

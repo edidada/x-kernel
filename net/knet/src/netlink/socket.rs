@@ -20,6 +20,7 @@ use super::{
 };
 use crate::{
     ConnectOptions, RecvFlags, RecvOptions, SendOptions, Shutdown, SocketAddrEx, SocketOps,
+    netns::NetNamespace,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
 };
 
@@ -29,17 +30,27 @@ pub struct NetlinkSocket {
 }
 
 impl NetlinkSocket {
-    pub fn new(protocol: i32) -> Self {
+    /// Creates a netlink socket in `net_ns`.
+    ///
+    /// rtnetlink requests only observe and mutate the namespace the socket was
+    /// created in, matching Linux per-netnetlink tables.
+    pub fn new(protocol: i32, net_ns: Arc<NetNamespace>) -> Self {
         Self {
             inner: Arc::new(NetlinkSocketInner {
                 protocol,
+                net_ns: net_ns.clone(),
                 local_addr: ksync::RwLock::new(None),
                 send_lock: ksync::Mutex::new(()),
                 rx_queue: ksync::Mutex::new(NetlinkRxQueue::default()),
                 poll_rx: Arc::new(PollSet::new()),
-                general: crate::general::GeneralOptions::new(),
+                general: crate::general::GeneralOptions::new(net_ns.clone()),
             }),
         }
+    }
+
+    /// Returns the namespace this socket operates on.
+    pub(super) fn net_ns(&self) -> &Arc<NetNamespace> {
+        &self.inner.net_ns
     }
 
     fn local_addr_inner(&self) -> KResult<NetlinkAddr> {
@@ -54,7 +65,7 @@ impl NetlinkSocket {
                     data: build_error_response(request, LinuxError::EPERM),
                 }]
             }
-            NETLINK_ROUTE => handle_rtnetlink_request(request),
+            NETLINK_ROUTE => handle_rtnetlink_request(request, self.net_ns()),
             NETLINK_KOBJECT_UEVENT => Vec::new(),
             _ => vec![NetlinkPacket {
                 from: NetlinkAddr { pid: 0, groups: 0 },

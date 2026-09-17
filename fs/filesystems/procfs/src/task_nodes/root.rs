@@ -667,6 +667,19 @@ fn namespace_link_target(kind: &str) -> String {
     format!("{kind}:[{}]", namespace_inode(kind))
 }
 
+/// Returns the inode number of a task's `ns/<kind>` symlink.
+///
+/// Network namespaces report the namespace id itself so that consumers such as
+/// libnetwork can tell namespaces apart through `stat()`; the initial
+/// namespace therefore reports `1`, and every created namespace a distinct
+/// value. Other namespace kinds keep the fixed placeholders.
+fn task_namespace_inode(kind: &str, task: &KtaskRef) -> VfsResult<u64> {
+    if kind == "net" {
+        return Ok(task.as_thread().process().net_ns().as_u64());
+    }
+    Ok(namespace_inode(kind))
+}
+
 fn task_namespace_link_target(kind: &str, task: &KtaskRef) -> VfsResult<String> {
     if kind == "cgroup" {
         let id = task
@@ -677,6 +690,8 @@ fn task_namespace_link_target(kind: &str, task: &KtaskRef) -> VfsResult<String> 
             .id()
             .as_u64();
         Ok(format!("{kind}:[{id}]"))
+    } else if kind == "net" {
+        Ok(format!("net:[{}]", task_namespace_inode(kind, task)?))
     } else {
         Ok(namespace_link_target(kind))
     }
@@ -705,12 +720,13 @@ impl SimpleDirOps for ThreadNsDir {
         }
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
         let target = task_namespace_link_target(name, &task)?;
-        lookup.file(
-            name,
-            SimpleFile::new(self.fs.clone(), NodeType::Symlink, move || {
-                Ok(target.clone())
-            }),
-        )
+        let inode = SimpleFile::new(self.fs.clone(), NodeType::Symlink, move || {
+            Ok(target.clone())
+        });
+        // `stat()` must expose the namespace identity (see
+        // `task_namespace_inode`) so separate namespaces are distinguishable.
+        inode.set_inode_number(task_namespace_inode(name, &task)?);
+        lookup.file(name, inode)
     }
 
     fn supports_dentry_cache(&self) -> bool {
@@ -1017,7 +1033,7 @@ mod tests {
     use unittest::{assert_eq, def_test};
 
     use super::{
-        MapsEntry, PROC_MAPS_ADDR_WIDTH, PROC_MAPS_PATH_COLUMN, format_oom_score_adj,
+        MapsEntry, PROC_MAPS_ADDR_WIDTH, PROC_MAPS_PATH_COLUMN, PROC_NS_BASE, format_oom_score_adj,
         format_task_status, maps_permissions, namespace_inode, namespace_link_target,
         parse_oom_score_adj_input, render_maps_line, special_mapping_name,
     };
@@ -1026,7 +1042,9 @@ mod tests {
     fn test_namespace_inode_has_expected_known_values() {
         assert_eq!(namespace_inode("mnt"), 0xf000_0001);
         assert_eq!(namespace_inode("pid"), 0xf000_0002);
-        assert_eq!(namespace_inode("net"), 0xf000_0003);
+        // `net` is resolved per task from the process network namespace id, so
+        // it has no fixed placeholder value.
+        assert_eq!(namespace_inode("net"), PROC_NS_BASE + 3);
     }
 
     #[def_test]

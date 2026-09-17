@@ -34,6 +34,7 @@ net/knet/
     │   ├── socket.rs
     │   ├── tests.rs
     │   └── wire.rs
+    ├── netns.rs
     ├── socket/
     │   ├── file.rs
     │   ├── general.rs
@@ -202,7 +203,7 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 
 * **Initialization order**
 
-  `init_network` must complete before Internet sockets access `SERVICE`, `SOCKET_SET`, or `LISTEN_TABLE`, or routing and protocol processing begin. Unix sockets use their own transport and binding state; vsock initialization is handled separately by `init_vsock`. It initializes `SERVICE`, `SOCKET_SET`, `LISTEN_TABLE`, and the initial Router state. The dynamic workqueue used by `knet-poller` is started only after these objects are initialized.
+  `init_network` must complete before Internet sockets access a namespace's `Service`, `SocketSet`, or `ListenTable`, or routing and protocol processing begin. It builds the initial network namespace (id `1`) around the initial Router state and starts the UDP registry and the `knet-poller` workqueue. Unix sockets use their own transport and binding state; vsock initialization is handled separately by `init_vsock`.
 
 * **vsock startup and callbacks**
 
@@ -236,9 +237,9 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 
   A blocking Unix stream `connect` waits for listener backlog capacity through `event-listener` when the backlog is full. The wait is bounded by `SO_SNDTIMEO` and therefore requires scheduler support and an interruptible task context.
 
-* **Global state is not tied to a fixed current process or thread**
+* **Namespace state resolves through the caller, not a global default**
 
-  Shared access to `SERVICE`, `SOCKET_SET`, and Router state is mainly protected by global locks and atomic state. Syscall-specific semantics are still provided by `posix/net`, which supplies the process file-descriptor context and caller credentials.
+  Each namespace owns its `Service`, `SocketSet`, and `ListenTable`. INET sockets capture `netns::current()` at creation and use that namespace for every later lookup, so shared access is protected by the namespace's own locks and atomic state. Syscall-specific semantics are still provided by `posix/net`, which supplies the process file-descriptor context and caller credentials.
 
   Netlink `send` and socket-file `write` take a snapshot of the current caller credentials when the operation begins. Credentials are not cached in the socket itself.
 
@@ -572,12 +573,10 @@ In the `SCHEDULED` state, the dynamic kwork of `knet-poller` and socket assist c
 | 8 | &emsp;&emsp;`router.add_ipv4_addr(eth, configured_ipv4, universe_scope)` |
 | 9 | &emsp;&emsp;`router.add_default_route(eth, configured_gateway)` |
 | 10 | &emsp;&emsp;`subscribe_network_unregister(nic.id)` |
-| 11 | &emsp;`SERVICE.init_once(Service.new(router))` |
-| 12 | &emsp;`SOCKET_SET.init_once(SocketSetWrapper.new())` |
-| 13 | &emsp;`LISTEN_TABLE.init_once(ListenTable.new())` |
-| 14 | &emsp;`init_udp_registry()` |
-| 15 | &emsp;`network_poller.start()` |
-| 16 | &emsp;`register_timer_callback(TIMER_SAMPLE_PERIOD, SERVICE.handle_timer_tick)` |
+| 11 | &emsp;`init_net = netns.init_initial(router)` (id 1) |
+| 12 | &emsp;`init_udp_registry()` |
+| 13 | &emsp;`network_poller.start()` |
+| 14 | &emsp;`register_timer_callback(TIMER_SAMPLE_PERIOD, tick all namespaces)` |
 
 Source: [`init_network`](../src/lib.rs) and [`Service::new`](../src/stack/service.rs). The pseudocode abbreviates address and route construction.
 
@@ -702,13 +701,13 @@ Concurrency is organized around a single owner for protocol progress, with finer
 
 ### Protocol Progress
 
-The global `SERVICE` is a `LazyInit<Service>`. Separate mutexes protect the smoltcp `Interface`, the `Router`, the `IngressProcessor`, and each reusable RX, accepted-packet, and control-packet batch. The poller acquires the first three with `try_lock`. If any of these locks is contended, the poller retains the batch and reports that work remains immediately available. These batches are accessed only by the executor that owns the global protocol-progress right.
+Each namespace owns one `Service`. Separate mutexes protect the smoltcp `Interface`, the `Router`, the `IngressProcessor`, and each reusable RX, accepted-packet, and control-packet batch. The poller acquires the first three with `try_lock`. If any of these locks is contended, the poller retains the batch and reports that work remains immediately available. These batches are accessed only by the executor that owns the global protocol-progress right.
 
 `NetworkPoller` represents this execution right with the four states maintained by `kwork::BudgetedPoller`: `IDLE`, `SCHEDULED`, `RUNNING`, and `RUNNING_PENDING`. A kwork background batch may process 512 RX packets, 256 TX packets, and 32 timer events. A socket-assisted batch uses smaller budgets of 16, 16, and 8. Every round also has a 1-ms soft time limit. Background batches run at most four consecutive rounds, while one assistance call runs at most one round. When a background batch reaches its round limit, it queues another batch and releases the execution right.
 
 Protocol and IPv4 reassembly deadlines use separate `AtomicU64` fields. The periodic sampling callback is deliberately small: it checks the atomic deadline, wakes waiters, and notifies the poller. Each successful staged smoltcp poll refreshes the protocol timer through `Interface::poll_at`, so TCP retransmission and similar deadlines continue to advance even when socket waiters are blocked.
 
-The global `SOCKET_SET` wraps `SocketSetState` in a single mutex. The smoltcp socket set and TCP deferred-close metadata share this ownership lock, so socket registration, protocol progress, close, and reclamation never transfer a handle between two mutexes. TCP transition admission uses atomic compare-and-swap through `StateLock::lock`, returning the observed state if admission fails; `StateGuard::transit` publishes the result or restores the previous state with an atomic store. Socket options and shutdown flags use atomics only for configuration and shutdown state shared across threads.
+Each namespace's socket set wraps `SocketSetState` in a single mutex. The smoltcp socket set and TCP deferred-close metadata share this ownership lock, so socket registration, protocol progress, close, and reclamation never transfer a handle between two mutexes. TCP transition admission uses atomic compare-and-swap through `StateLock::lock`, returning the observed state if admission fails; `StateGuard::transit` publishes the result or restores the previous state with an atomic store. Socket options and shutdown flags use atomics only for configuration and shutdown state shared across threads.
 
 ### Receive Path and UDP Queues
 
@@ -722,17 +721,17 @@ Each PCB reserves 1,024 `VecDeque` slots at creation. This follows the Linux `__
 
 The shared `NET_RX_QUEUE` is also protected by `SpinNoIrq` and is used by loopback transmit, `NetRx`, and task-context `poll_rx`. Its `pending_udp` and `deferred` queues both contain pointer-sized `PacketBuf` values. `NetRx` removes already-annotated entries from `pending_udp` under its budget for UDP delivery; the task poller removes other packets from `deferred`. Capacity accounting includes both queue lengths and all in-flight packets, so producers cannot consume slots that are temporarily vacant while a packet is being delivered to a PCB. If a UDP packet matches no PCB, this path retains unique ownership, clears the packet metadata, and moves it to `deferred`.
 
-`IngressProcessor::ipv4_reassembler` owns reassembly queues and is protected by `Service::ingress`, a `Mutex<IngressProcessor>`. The global `SERVICE` is a `LazyInit<Service>` with separate component locks.
+`IngressProcessor::ipv4_reassembler` owns reassembly queues and is protected by `Service::ingress`, a `Mutex<IngressProcessor>`. Each namespace owns one `Service` with separate component locks.
 
 The UDP socket lifecycle and local endpoint use separate `RwLock`s, while the peer endpoint uses `SpinNoIrq` for softirq lookup. The asynchronous-error queue has its own mutex; error status, shutdown flags, and receive-error enablement use atomics. Socket-local waiter sets report data, errors, write readiness, and shutdown independently of device RX notifications.
 
 ### TCP and Unix Stream Synchronization
 
-`LISTEN_TABLE` stores listeners in a `Mutex<HashMap<...>>`, and each listener entry uses its own mutex for the backlog queue. The entry's `accept_poll` sits outside that mutex. `register_accept_waker` first registers with `accept_poll` without taking the entry lock, then briefly locks the entry to recheck readiness. This preserves the register-and-recheck sequence without running `Waker::clone` or other `PollSet` operations under the queue lock.
+Each namespace's `ListenTable` stores listeners in a `Mutex<HashMap<...>>`, and each listener entry uses its own mutex for the backlog queue. The entry's `accept_poll` sits outside that mutex. `register_accept_waker` first registers with `accept_poll` without taking the entry lock, then briefly locks the entry to recheck readiness. This preserves the register-and-recheck sequence without running `Waker::clone` or other `PollSet` operations under the queue lock.
 
 The poller revisits an entry after a new packet arrives or whenever its SYN queue is nonempty. A child that becomes acceptable during a later ingress or timer poll can then move from the SYN queue to the accept queue. `accept_poll` wakes its waiters only after the entry lock has been released.
 
-TCP's `bound_endpoint` mutex protects one socket's local binding. `TCP_BOUND_ENDPOINTS` uses a mutex to serialize port-conflict accounting, and the ephemeral-port cursor is separately mutex-protected. Raw socket local and peer addresses and TTL use `RwLock`s; their smoltcp buffers remain under `SOCKET_SET`.
+TCP's `bound_endpoint` mutex protects one socket's local binding. The per-namespace `TCP_BOUND_ENDPOINTS` map uses a mutex to serialize port-conflict accounting, and the ephemeral-port cursor is separately mutex-protected. Raw socket local and peer addresses and TTL use `RwLock`s; their smoltcp buffers remain under the namespace's socket set.
 
 `ABSTRACT_BINDINGS` and `PATH_BINDINGS` use separate mutexes for Unix address lookup. Each `BindEntry` contains independently locked stream and datagram binding slots. `UnixDomainSocket` protects its local and peer addresses with mutexes. Datagram transports protect the receiver and binding slot with mutexes and the connected peer and local address with `RwLock`s; `async_channel` and poll sets handle queued delivery and notifications.
 
@@ -775,6 +774,33 @@ UDP receive-only waits subscribe to socket events in `UdpSocketWaiters`. Receive
 Ethernet RX source registration is protected by `NET_RX_SOURCES: SpinNoIrq<NetRxSources>`. Each source publishes pending work through an atomic flag, and the IRQ-safe scheduler keeps only a weak source reference. Device teardown detaches the scheduler and unregisters the source. Source identifiers and softirq availability also use atomics.
 
 ## Design Decisions
+
+### Network Namespace Instances
+
+A [`netns::NetNamespace`](../src/netns.rs) owns one complete protocol stack: the
+`Service` (smoltcp interface plus device and route tables), the INET listen
+table, and the smoltcp socket set. The initial namespace (id `1`) is built by
+`init_network` from the physical NICs and behaves exactly as the stack did while
+this state was global; `create_fresh()` builds a namespace with a single
+loopback device that carries `127.0.0.1/8` with the link down, matching Linux
+`create_new_namespaces`.
+
+The current namespace is resolved per call: `knetns::NetNsResolver::current()`
+returns the identifier stored on the process (plain atomic read, valid from any
+execution context), and `netns::current()` looks it up in the namespace table.
+Contexts without a process, such as softirqs, timer callbacks, and kernel
+threads, resolve to the initial namespace, so kernel-internal networking never
+lands in a user-created namespace. An identifier without a table entry falls
+back to the initial namespace with a warning rather than being served from
+another namespace.
+
+Sockets capture their namespace at creation time: INET, packet, and netlink
+sockets store an `Arc<NetNamespace>` and route every bind, connect, listen,
+send, poll, option, and rtnetlink dump through it. Delivery is scoped the same
+way: a `PacketBuf` carries the namespace of its originating device, loopback
+stamps its owner, and physical NICs always stamp the initial namespace because
+only `init_network` attaches them. The poller takes a snapshot of the namespace
+table and then polls each namespace's service without holding the table lock.
 
 ### UDP and IPv4 Data Paths
 
@@ -880,6 +906,7 @@ With `vsock_tipc_bridge` enabled, `bind()` rejects explicit binding to ports in 
 
 | Area | Support and limits |
 |---|---|
+| Network namespaces | `clone`/`unshare(CLONE_NEWNET)` create an isolated namespace with loopback down; `setns` is unsupported and returns `EOPNOTSUPP`. Namespaces are never reclaimed once created, and `AF_UNIX` and vsock stay global by design. Physical NICs always belong to the initial namespace. |
 | Internet / UDP | Configuration and native UDP support IPv4 only; IPv6 UDP endpoints return `EAFNOSUPPORT`. smoltcp IPv6 support does not extend these interfaces. |
 | UDP ephemeral binding | Port-zero bind and automatic binding on first connect or send select randomized candidates in `49152–65535` using kernel entropy. If entropy is not ready, both blocking and nonblocking sockets return `EAGAIN` and remain unbound. Explicit nonzero-port binding retains its existing behavior. |
 | Device binding | UDP demultiplexing checks the bound device. TCP/raw bound-device packet filtering and complete IPv6 scope semantics remain separate compatibility work. |
@@ -899,8 +926,9 @@ Implementation details: [packet.rs](../src/link/packet.rs), [rtnetlink.rs](../sr
 
 | Resource / trigger | Cleanup and remaining state |
 |---|---|
+| Namespace lifetime | A namespace lives as long as the registry entry or any socket reference. Entries are not reclaimed when the last process leaves, so repeated `CLONE_NEWNET` use accumulates idle namespaces; their services are loopback-only and cost one cheap poll sample each. |
 | TCP file close | Removes a `Closed` handle immediately when no reset is pending. Unread RX data causes abort, with the handle retained until RST is sent. Other handles remain in deferred close while the poller completes transmission and closure. Detached connections receive a 60-second reclamation deadline only in `FIN_WAIT_2`. |
-| TCP listener close | Marks the listener closed, drains child handles, and removes them from `SOCKET_SET`. |
+| TCP listener close | Marks the listener closed, drains child handles, and removes them from the namespace's socket set. |
 | Unix stream listener drop | Closes the listener queue, wakes waiters, clears the binding slot, and releases pending requests and ring buffers. |
 | Unix stream shutdown / channel drop | Publishes directional closure and wakes affected waiters; channel drop closes both directions before releasing buffers. Peer recv drains published data before EOF, and poll reports `RDHUP`. Discarded unread data records one peer `ConnectionReset`, consumed by recv or `SO_ERROR`. |
 | UDP socket / PCB drop | Unregisters the socket from the PCB registry; PCB destruction releases receive and asynchronous-error queues. |

@@ -7,7 +7,7 @@
 use klazy::lazy_static;
 use kpoll::{PollContext, PollRegisterError, PollSet};
 
-use crate::SERVICE;
+use crate::netns;
 
 const DEFAULT_BACKGROUND_BUDGET: PollBudget = PollBudget {
     rx_packets: 512,
@@ -111,17 +111,25 @@ impl NetworkPoller {
     }
 
     fn run_once(&self, budget: PollBudget) -> PollProgress {
-        if !SERVICE.is_inited() {
-            return PollProgress::default();
-        }
+        // The registry snapshot is taken before polling, so no namespace state
+        // is ever touched while the registry lock is held.
+        let namespaces = netns::snapshot();
 
-        let progress = SERVICE.poll_budgeted(budget);
+        let mut progress = PollProgress::default();
+        for net_ns in namespaces {
+            let ns_progress = net_ns.service().poll_budgeted(budget);
+            debug_assert!(ns_progress.rx_packets <= budget.rx_packets);
+            debug_assert!(ns_progress.tx_packets <= budget.tx_packets);
+            debug_assert!(ns_progress.timer_events <= budget.timer_events);
+            progress.rx_packets += ns_progress.rx_packets;
+            progress.tx_packets += ns_progress.tx_packets;
+            progress.timer_events += ns_progress.timer_events;
+            progress.tx_capacity_changed |= ns_progress.tx_capacity_changed;
+            progress.has_more |= ns_progress.has_more;
+        }
         if progress.tx_capacity_changed {
             self.tx_waiters.wake();
         }
-        debug_assert!(progress.rx_packets <= budget.rx_packets);
-        debug_assert!(progress.tx_packets <= budget.tx_packets);
-        debug_assert!(progress.timer_events <= budget.timer_events);
         progress
     }
 }

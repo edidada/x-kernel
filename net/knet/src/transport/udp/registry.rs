@@ -16,7 +16,10 @@ use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 
 use super::{output::ipv4_to_core, pcb::UdpPcb, state::UdpSocketState};
-use crate::ip::{IpAddress, IpEndpoint, IpListenEndpoint};
+use crate::{
+    ip::{IpAddress, IpEndpoint, IpListenEndpoint},
+    netns::NetNsId,
+};
 
 const UDP_REGISTRY_BUCKETS: usize = 256;
 const UDP_EPHEMERAL_PORT_START: u16 = 0xc000;
@@ -32,6 +35,9 @@ enum UdpBindKind {
 }
 
 struct UdpBindRecord {
+    /// Namespace of the owning socket. Delivery and bind-conflict checks only
+    /// ever consider records of one namespace.
+    net_ns: NetNsId,
     pcb: Arc<UdpPcb>,
     local_endpoint: IpEndpoint,
     kind: UdpBindKind,
@@ -56,13 +62,13 @@ impl UdpPcbRegistry {
     }
 
     #[cfg(unittest)]
-    fn register(&self, pcb: Arc<UdpPcb>) {
+    fn register(&self, net_ns: NetNsId, pcb: Arc<UdpPcb>) {
         let Some(local_endpoint) = pcb.state.local_endpoint() else {
             return;
         };
         self.bucket(local_endpoint.port)
             .lock()
-            .register(pcb, local_endpoint);
+            .register(net_ns, pcb, local_endpoint);
     }
 
     fn unregister(&self, pcb: &Arc<UdpPcb>) {
@@ -76,12 +82,14 @@ impl UdpPcbRegistry {
 
     fn lookup_map<T>(
         &self,
+        net_ns: NetNsId,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
         ifindex: i32,
         map_pcb_fn: impl Fn(&Arc<UdpPcb>) -> T,
     ) -> Option<T> {
         self.bucket(local_addr.port()).lock().lookup_in_bucket(
+            net_ns,
             local_addr,
             remote_addr,
             ifindex,
@@ -91,32 +99,41 @@ impl UdpPcbRegistry {
 
     fn lookup(
         &self,
+        net_ns: NetNsId,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
         ifindex: i32,
     ) -> Option<Arc<UdpPcb>> {
-        self.lookup_map(local_addr, remote_addr, ifindex, |pcb| pcb.clone())
+        self.lookup_map(net_ns, local_addr, remote_addr, ifindex, |pcb| pcb.clone())
     }
 
     fn lookup_state(
         &self,
+        net_ns: NetNsId,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
         ifindex: i32,
     ) -> Option<Arc<UdpSocketState>> {
-        self.lookup_map(local_addr, remote_addr, ifindex, |pcb| pcb.state.clone())
+        self.lookup_map(net_ns, local_addr, remote_addr, ifindex, |pcb| {
+            pcb.state.clone()
+        })
     }
 
     fn bind(
         &self,
+        net_ns: NetNsId,
         pcb: Arc<UdpPcb>,
         endpoint: IpEndpoint,
         kind: UdpBindKind,
         reuse_address: bool,
     ) -> KResult {
-        self.bucket(endpoint.port)
-            .lock()
-            .bind(pcb.clone(), endpoint, kind, reuse_address)?;
+        self.bucket(endpoint.port).lock().bind(
+            net_ns,
+            pcb.clone(),
+            endpoint,
+            kind,
+            reuse_address,
+        )?;
         // `set_local_endpoint` takes a sleepable lock; keep it outside the
         // IRQ-safe bucket used by `NetRx` lookup.
         pcb.state.set_local_endpoint(Some(endpoint));
@@ -125,6 +142,7 @@ impl UdpPcbRegistry {
 
     fn bind_ephemeral(
         &self,
+        net_ns: NetNsId,
         pcb: Arc<UdpPcb>,
         local_addr: IpAddress,
         kind: UdpBindKind,
@@ -136,8 +154,8 @@ impl UdpPcbRegistry {
                 port,
             };
             let mut bucket = self.bucket(endpoint.port).lock();
-            if !bucket.contains_bind_conflict(listen_endpoint(endpoint), reuse_address) {
-                bucket.bind(pcb.clone(), endpoint, kind, reuse_address)?;
+            if !bucket.contains_bind_conflict(net_ns, listen_endpoint(endpoint), reuse_address) {
+                bucket.bind(net_ns, pcb.clone(), endpoint, kind, reuse_address)?;
                 drop(bucket);
                 pcb.state.set_local_endpoint(Some(endpoint));
                 return Ok(endpoint);
@@ -148,10 +166,15 @@ impl UdpPcbRegistry {
     }
 
     #[cfg(unittest)]
-    fn contains_bind_conflict(&self, endpoint: IpListenEndpoint, reuse_address: bool) -> bool {
+    fn contains_bind_conflict(
+        &self,
+        net_ns: NetNsId,
+        endpoint: IpListenEndpoint,
+        reuse_address: bool,
+    ) -> bool {
         self.bucket(endpoint.port)
             .lock()
-            .contains_bind_conflict(endpoint, reuse_address)
+            .contains_bind_conflict(net_ns, endpoint, reuse_address)
     }
 
     #[cfg(unittest)]
@@ -197,11 +220,11 @@ impl UdpPcbBucket {
     }
 
     #[cfg(unittest)]
-    fn register(&mut self, pcb: Arc<UdpPcb>, local_endpoint: IpEndpoint) {
+    fn register(&mut self, net_ns: NetNsId, pcb: Arc<UdpPcb>, local_endpoint: IpEndpoint) {
         if self.contains(&pcb, local_endpoint.port) {
             return;
         };
-        self.insert(pcb, local_endpoint, UdpBindKind::Explicit, false);
+        self.insert(net_ns, pcb, local_endpoint, UdpBindKind::Explicit, false);
     }
 
     fn unregister(&mut self, pcb: &Arc<UdpPcb>, local_endpoint: IpEndpoint) {
@@ -219,6 +242,7 @@ impl UdpPcbBucket {
 
     fn bind(
         &mut self,
+        net_ns: NetNsId,
         pcb: Arc<UdpPcb>,
         endpoint: IpEndpoint,
         kind: UdpBindKind,
@@ -229,16 +253,17 @@ impl UdpPcbBucket {
         }
 
         let listen_endpoint = listen_endpoint(endpoint);
-        if self.contains_bind_conflict(listen_endpoint, reuse_address) {
+        if self.contains_bind_conflict(net_ns, listen_endpoint, reuse_address) {
             return Err(kerrno::KError::AddrInUse);
         }
 
-        self.insert(pcb, endpoint, kind, reuse_address);
+        self.insert(net_ns, pcb, endpoint, kind, reuse_address);
         Ok(())
     }
 
     fn insert(
         &mut self,
+        net_ns: NetNsId,
         pcb: Arc<UdpPcb>,
         local_endpoint: IpEndpoint,
         kind: UdpBindKind,
@@ -248,6 +273,7 @@ impl UdpPcbBucket {
             .entry(local_endpoint.port)
             .or_default()
             .push(UdpBindRecord {
+                net_ns,
                 pcb,
                 local_endpoint,
                 kind,
@@ -271,6 +297,7 @@ impl UdpPcbBucket {
 
     fn lookup_in_bucket<T>(
         &self,
+        net_ns: NetNsId,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
         ifindex: i32,
@@ -281,6 +308,9 @@ impl UdpPcbBucket {
         let mut selected = None;
         let mut selected_score = 0;
         for record in records {
+            if record.net_ns != net_ns {
+                continue;
+            }
             let local_endpoint = record.local_endpoint;
             if !local_endpoint_matches(local_endpoint, local_addr) {
                 continue;
@@ -300,20 +330,28 @@ impl UdpPcbBucket {
         selected
     }
 
-    fn contains_bind_conflict(&self, endpoint: IpListenEndpoint, reuse_address: bool) -> bool {
+    fn contains_bind_conflict(
+        &self,
+        net_ns: NetNsId,
+        endpoint: IpListenEndpoint,
+        reuse_address: bool,
+    ) -> bool {
         let Some(records) = self.by_port.get(&endpoint.port) else {
             return false;
         };
 
-        records.iter().any(|record| {
-            let existing_endpoint = listen_endpoint(record.local_endpoint);
-            udp_bind_entries_conflict(
-                existing_endpoint,
-                record.reuse_address,
-                endpoint,
-                reuse_address,
-            )
-        })
+        records
+            .iter()
+            .filter(|record| record.net_ns == net_ns)
+            .any(|record| {
+                let existing_endpoint = listen_endpoint(record.local_endpoint);
+                udp_bind_entries_conflict(
+                    existing_endpoint,
+                    record.reuse_address,
+                    endpoint,
+                    reuse_address,
+                )
+            })
     }
 
     #[cfg(unittest)]
@@ -359,42 +397,56 @@ pub(crate) fn init_udp_registry() {
 }
 
 #[cfg(unittest)]
-pub(super) fn register_udp_pcb(pcb: Arc<UdpPcb>) {
+pub(super) fn register_udp_pcb(net_ns: NetNsId, pcb: Arc<UdpPcb>) {
     init_udp_registry();
-    UDP_PCB_REGISTRY.register(pcb);
+    UDP_PCB_REGISTRY.register(net_ns, pcb);
 }
 
-pub(super) fn bind_udp_pcb(pcb: Arc<UdpPcb>, endpoint: IpEndpoint, reuse_address: bool) -> KResult {
-    init_udp_registry();
-    UDP_PCB_REGISTRY.bind(pcb, endpoint, UdpBindKind::Explicit, reuse_address)
-}
-
-#[cfg(unittest)]
-pub(super) fn bind_udp_auto_pcb_for_test(
+pub(super) fn bind_udp_pcb(
+    net_ns: NetNsId,
     pcb: Arc<UdpPcb>,
     endpoint: IpEndpoint,
     reuse_address: bool,
 ) -> KResult {
     init_udp_registry();
-    UDP_PCB_REGISTRY.bind(pcb, endpoint, UdpBindKind::Auto, reuse_address)
+    UDP_PCB_REGISTRY.bind(net_ns, pcb, endpoint, UdpBindKind::Explicit, reuse_address)
+}
+
+#[cfg(unittest)]
+pub(super) fn bind_udp_auto_pcb_for_test(
+    net_ns: NetNsId,
+    pcb: Arc<UdpPcb>,
+    endpoint: IpEndpoint,
+    reuse_address: bool,
+) -> KResult {
+    init_udp_registry();
+    UDP_PCB_REGISTRY.bind(net_ns, pcb, endpoint, UdpBindKind::Auto, reuse_address)
 }
 
 pub(super) fn bind_udp_auto_ephemeral_pcb(
+    net_ns: NetNsId,
     pcb: Arc<UdpPcb>,
     local_addr: IpAddress,
     reuse_address: bool,
 ) -> KResult<IpEndpoint> {
     init_udp_registry();
-    UDP_PCB_REGISTRY.bind_ephemeral(pcb, local_addr, UdpBindKind::Auto, reuse_address)
+    UDP_PCB_REGISTRY.bind_ephemeral(net_ns, pcb, local_addr, UdpBindKind::Auto, reuse_address)
 }
 
 pub(super) fn bind_udp_explicit_ephemeral_pcb(
+    net_ns: NetNsId,
     pcb: Arc<UdpPcb>,
     local_addr: IpAddress,
     reuse_address: bool,
 ) -> KResult<IpEndpoint> {
     init_udp_registry();
-    UDP_PCB_REGISTRY.bind_ephemeral(pcb, local_addr, UdpBindKind::Explicit, reuse_address)
+    UDP_PCB_REGISTRY.bind_ephemeral(
+        net_ns,
+        pcb,
+        local_addr,
+        UdpBindKind::Explicit,
+        reuse_address,
+    )
 }
 
 pub(super) fn unregister_udp_pcb(pcb: &Arc<UdpPcb>) {
@@ -418,34 +470,37 @@ pub(crate) fn clear_udp_registry_for_test() {
 }
 
 #[cfg(unittest)]
-pub(crate) fn register_udp_state_for_test(state: Arc<UdpSocketState>) {
-    register_udp_pcb(UdpPcb::new(state));
+pub(crate) fn register_udp_state_for_test(net_ns: NetNsId, state: Arc<UdpSocketState>) {
+    register_udp_pcb(net_ns, UdpPcb::new(state));
 }
 
 #[cfg(unittest)]
 pub(super) fn lookup_udp_pcb(
+    net_ns: NetNsId,
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
 ) -> Option<Arc<UdpPcb>> {
-    lookup_udp_pcb_on_device(local_addr, remote_addr, 0)
+    lookup_udp_pcb_on_device(net_ns, local_addr, remote_addr, 0)
 }
 
 pub(super) fn lookup_udp_pcb_on_device(
+    net_ns: NetNsId,
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
     ifindex: i32,
 ) -> Option<Arc<UdpPcb>> {
     init_udp_registry();
-    UDP_PCB_REGISTRY.lookup(local_addr, remote_addr, ifindex)
+    UDP_PCB_REGISTRY.lookup(net_ns, local_addr, remote_addr, ifindex)
 }
 
 pub(crate) fn lookup_udp_error_state(
+    net_ns: NetNsId,
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
     ifindex: i32,
 ) -> Option<Arc<UdpSocketState>> {
     init_udp_registry();
-    UDP_PCB_REGISTRY.lookup_state(local_addr, remote_addr, ifindex)
+    UDP_PCB_REGISTRY.lookup_state(net_ns, local_addr, remote_addr, ifindex)
 }
 
 fn bound_device_matches(bound_dev_if: i32, packet_ifindex: i32) -> bool {
@@ -497,9 +552,9 @@ pub(super) fn listen_endpoint(endpoint: IpEndpoint) -> IpListenEndpoint {
 }
 
 #[cfg(unittest)]
-pub(super) fn udp_port_available(endpoint: IpListenEndpoint) -> bool {
+pub(super) fn udp_port_available(net_ns: NetNsId, endpoint: IpListenEndpoint) -> bool {
     init_udp_registry();
-    !UDP_PCB_REGISTRY.contains_bind_conflict(endpoint, false)
+    !UDP_PCB_REGISTRY.contains_bind_conflict(net_ns, endpoint, false)
 }
 
 fn udp_bind_entries_conflict(
@@ -543,9 +598,21 @@ mod tests {
         clear_udp_registry_for_test();
     }
 
+    fn test_ns() -> NetNsId {
+        crate::netns::INIT_NET_ID
+    }
+
+    fn test_init_net() -> Arc<crate::netns::NetNamespace> {
+        crate::netns::test_init_net()
+    }
+
+    fn new_pcb() -> Arc<UdpPcb> {
+        UdpPcb::new(UdpSocketState::new(test_init_net()))
+    }
+
     fn bind_test_pcb(local: IpEndpoint, reuse_address: bool) -> Arc<UdpPcb> {
-        let pcb = UdpPcb::new(UdpSocketState::new());
-        bind_udp_pcb(pcb.clone(), local, reuse_address).unwrap();
+        let pcb = new_pcb();
+        bind_udp_pcb(test_ns(), pcb.clone(), local, reuse_address).unwrap();
         pcb
     }
 
@@ -580,7 +647,8 @@ mod tests {
         bind_test_pcb(endpoint(Ipv4Address::UNSPECIFIED, 8080), false);
         assert!(
             bind_udp_pcb(
-                UdpPcb::new(UdpSocketState::new()),
+                test_ns(),
+                new_pcb(),
                 endpoint(Ipv4Address::new(10, 0, 0, 2), 8080),
                 false
             )
@@ -597,7 +665,8 @@ mod tests {
         bind_test_pcb(endpoint(Ipv4Address::new(10, 0, 0, 2), 8081), true);
         assert!(
             bind_udp_pcb(
-                UdpPcb::new(UdpSocketState::new()),
+                test_ns(),
+                new_pcb(),
                 endpoint(Ipv4Address::new(10, 0, 0, 2), 8081),
                 true
             )
@@ -605,7 +674,8 @@ mod tests {
         );
         assert!(
             bind_udp_pcb(
-                UdpPcb::new(UdpSocketState::new()),
+                test_ns(),
+                new_pcb(),
                 endpoint(Ipv4Address::new(10, 0, 0, 2), 8081),
                 false
             )
@@ -622,7 +692,8 @@ mod tests {
         bind_test_pcb(endpoint(Ipv4Address::new(10, 0, 0, 2), 8082), false);
         assert!(
             bind_udp_pcb(
-                UdpPcb::new(UdpSocketState::new()),
+                test_ns(),
+                new_pcb(),
                 endpoint(Ipv4Address::new(10, 0, 0, 2), 8082),
                 true
             )
@@ -637,13 +708,15 @@ mod tests {
         clear_registry();
 
         let first = bind_udp_auto_ephemeral_pcb(
-            UdpPcb::new(UdpSocketState::new()),
+            test_ns(),
+            new_pcb(),
             IpAddress::Ipv4(Ipv4Address::UNSPECIFIED),
             false,
         )
         .unwrap();
         let second = bind_udp_auto_ephemeral_pcb(
-            UdpPcb::new(UdpSocketState::new()),
+            test_ns(),
+            new_pcb(),
             IpAddress::Ipv4(Ipv4Address::UNSPECIFIED),
             false,
         )
@@ -661,18 +734,19 @@ mod tests {
         let local = endpoint(Ipv4Address::new(10, 0, 0, 2), 8080);
         let remote = endpoint(Ipv4Address::new(192, 0, 2, 1), 5353);
 
-        let bound_state = UdpSocketState::new();
+        let bound_state = UdpSocketState::new(test_init_net());
         bound_state.set_local_endpoint(Some(local));
         let bound = UdpPcb::new(bound_state);
-        register_udp_pcb(bound);
+        register_udp_pcb(test_ns(), bound);
 
-        let connected_state = UdpSocketState::new();
+        let connected_state = UdpSocketState::new(test_init_net());
         connected_state.set_local_endpoint(Some(local));
         connected_state.set_peer_endpoint(Some((remote, local.addr)));
         let connected = UdpPcb::new(connected_state);
-        register_udp_pcb(connected.clone());
+        register_udp_pcb(test_ns(), connected.clone());
 
         let selected = lookup_udp_pcb(
+            test_ns(),
             socket_addr(Ipv4Address::new(10, 0, 0, 2), 8080),
             socket_addr(Ipv4Address::new(192, 0, 2, 1), 5353),
         )
@@ -686,17 +760,18 @@ mod tests {
     fn lookup_scans_only_matching_local_port_bucket() {
         clear_registry();
 
-        let first_state = UdpSocketState::new();
+        let first_state = UdpSocketState::new(test_init_net());
         first_state.set_local_endpoint(Some(endpoint(Ipv4Address::new(10, 0, 0, 2), 8080)));
         let first = UdpPcb::new(first_state);
-        register_udp_pcb(first);
+        register_udp_pcb(test_ns(), first);
 
-        let second_state = UdpSocketState::new();
+        let second_state = UdpSocketState::new(test_init_net());
         second_state.set_local_endpoint(Some(endpoint(Ipv4Address::new(10, 0, 0, 2), 5353)));
         let second = UdpPcb::new(second_state);
-        register_udp_pcb(second.clone());
+        register_udp_pcb(test_ns(), second.clone());
 
         let selected = lookup_udp_pcb(
+            test_ns(),
             socket_addr(Ipv4Address::new(10, 0, 0, 2), 5353),
             socket_addr(Ipv4Address::new(192, 0, 2, 1), 49152),
         )
@@ -714,18 +789,19 @@ mod tests {
         let wildcard = endpoint(Ipv4Address::UNSPECIFIED, 8083);
         let remote = endpoint(Ipv4Address::new(192, 0, 2, 1), 5353);
 
-        let specific_state = UdpSocketState::new();
+        let specific_state = UdpSocketState::new(test_init_net());
         specific_state.set_local_endpoint(Some(local));
         let specific = UdpPcb::new(specific_state);
-        register_udp_pcb(specific);
+        register_udp_pcb(test_ns(), specific);
 
-        let wildcard_state = UdpSocketState::new();
+        let wildcard_state = UdpSocketState::new(test_init_net());
         wildcard_state.set_local_endpoint(Some(wildcard));
         wildcard_state.set_peer_endpoint(Some((remote, wildcard.addr)));
         let wildcard_connected = UdpPcb::new(wildcard_state);
-        register_udp_pcb(wildcard_connected.clone());
+        register_udp_pcb(test_ns(), wildcard_connected.clone());
 
         let selected = lookup_udp_pcb(
+            test_ns(),
             socket_addr(Ipv4Address::new(10, 0, 0, 2), 8083),
             socket_addr(Ipv4Address::new(192, 0, 2, 1), 5353),
         )
@@ -740,14 +816,15 @@ mod tests {
         clear_registry();
 
         let local = endpoint(Ipv4Address::new(10, 0, 0, 2), 8068);
-        let bound_state = UdpSocketState::new();
+        let bound_state = UdpSocketState::new(test_init_net());
         bound_state.set_local_endpoint(Some(local));
         bound_state.set_bound_dev_if_for_test(2);
         let bound = UdpPcb::new(bound_state);
-        register_udp_pcb(bound.clone());
+        register_udp_pcb(test_ns(), bound.clone());
 
         assert!(
             lookup_udp_pcb_on_device(
+                test_ns(),
                 socket_addr(Ipv4Address::new(10, 0, 0, 2), 8068),
                 socket_addr(Ipv4Address::new(192, 0, 2, 1), 67),
                 1,
@@ -755,6 +832,7 @@ mod tests {
             .is_none()
         );
         let selected = lookup_udp_pcb_on_device(
+            test_ns(),
             socket_addr(Ipv4Address::new(10, 0, 0, 2), 8068),
             socket_addr(Ipv4Address::new(192, 0, 2, 1), 67),
             2,
@@ -775,12 +853,47 @@ mod tests {
 
         assert!(
             lookup_udp_pcb(
+                test_ns(),
                 socket_addr(Ipv4Address::new(10, 0, 0, 2), 8084),
                 socket_addr(Ipv4Address::new(192, 0, 2, 1), 49152)
             )
             .is_none()
         );
-        assert!(udp_port_available(listen_endpoint(local)));
+        assert!(udp_port_available(test_ns(), listen_endpoint(local)));
+        clear_registry();
+    }
+    /// Serial: bind and delivery are scoped per namespace.
+    #[def_test(serial)]
+    fn udp_registry_is_isolated_between_namespaces() {
+        clear_registry();
+        let init_net = crate::netns::test_init_net();
+        let fresh = crate::netns::fresh_unregistered();
+        let local = endpoint(Ipv4Address::new(127, 0, 0, 1), 8085);
+
+        // The same endpoint can be bound in both namespaces independently.
+        let init_pcb = new_pcb();
+        let fresh_pcb = new_pcb();
+        bind_udp_pcb(init_net.id(), init_pcb.clone(), local, false).unwrap();
+        bind_udp_pcb(fresh.id(), fresh_pcb.clone(), local, false).unwrap();
+
+        // Delivery of a packet that belongs to the fresh namespace must never
+        // reach the initial namespace's PCB.
+        let local_addr = socket_addr(Ipv4Address::new(127, 0, 0, 1), 8085);
+        let remote_addr = socket_addr(Ipv4Address::new(127, 0, 0, 1), 40000);
+        assert!(Arc::ptr_eq(
+            &lookup_udp_pcb(fresh.id(), local_addr, remote_addr).unwrap(),
+            &fresh_pcb
+        ));
+        assert!(Arc::ptr_eq(
+            &lookup_udp_pcb(init_net.id(), local_addr, remote_addr).unwrap(),
+            &init_pcb
+        ));
+        // The binding is visible in its own namespace...
+        assert!(!udp_port_available(init_net.id(), listen_endpoint(local)));
+        // ... and still free in a namespace that did not bind it.
+        let third = crate::netns::fresh_unregistered();
+        assert!(udp_port_available(third.id(), listen_endpoint(local)));
+
         clear_registry();
     }
 }

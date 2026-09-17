@@ -312,6 +312,13 @@ impl<T: SocketOps + ?Sized> SocketOps for Box<T> {
     }
 }
 
+/// Linux `SOCK_STREAM` (1), as reported by `SO_TYPE`.
+pub const SOCK_STREAM: u8 = 1;
+/// Linux `SOCK_DGRAM` (2), as reported by `SO_TYPE`.
+pub const SOCK_DGRAM: u8 = 2;
+/// Linux `SOCK_RAW` (3), as reported by `SO_TYPE`.
+pub const SOCK_RAW: u8 = 3;
+
 /// Network socket abstraction.
 #[allow(clippy::large_enum_variant)]
 #[enum_dispatch(Configurable, SocketOps)]
@@ -327,6 +334,17 @@ pub enum Socket {
 }
 
 impl Socket {
+    /// Returns the Linux `SOCK_*` type constant of this socket, as reported
+    /// through `getsockopt(SOL_SOCKET, SO_TYPE)`.
+    pub fn socket_type(&self) -> u8 {
+        match self {
+            Socket::Tcp(_) | Socket::Vsock(_) => SOCK_STREAM,
+            Socket::Udp(_) => SOCK_DGRAM,
+            Socket::Raw(_) | Socket::Netlink(_) | Socket::Packet(_) => SOCK_RAW,
+            Socket::Unix(unix) => unix.socket_type(),
+        }
+    }
+
     /// Sends data using the credential active at the syscall boundary.
     ///
     /// The credential is required by protocols such as rtnetlink whose

@@ -19,6 +19,7 @@ use crate::{
         net_rx,
     },
     ip::IpAddress,
+    netns::NetNsId,
 };
 
 /// Loopback device backed by the shared NetRx packet queue.
@@ -50,21 +51,39 @@ pub struct LoopbackDevice {
     /// `has_rx_work` and `Drop` use it to find this device's packets in the
     /// shared `NetRx` queue without registering the device with `NetRx`.
     rx_ifindex: Option<i32>,
+    /// Namespace this loopback device belongs to; every packet it transmits is
+    /// delivered to that namespace's sockets only.
+    net_ns: NetNsId,
     /// Aggregated Service RX/timeout waker. Must not be replaced by a
     /// task-local waker from a bypass of `Service::register_rx_waker`.
     rx_waker: Mutex<Option<Waker>>,
 }
 
 impl LoopbackDevice {
-    /// Create a new loopback device.
+    /// Create a new loopback device in the initial namespace.
     pub fn new() -> Self {
+        Self::new_in_net_ns(crate::netns::INIT_NET_ID)
+    }
+
+    /// Create a new loopback device owned by `net_ns`.
+    ///
+    /// A freshly created namespace keeps its loopback down, matching Linux
+    /// `netns` initial state; the initial namespace keeps the historical
+    /// always-up loopback.
+    pub fn new_in_net_ns(net_ns: NetNsId) -> Self {
         let _ = super::ethernet::ensure_net_rx_softirq_available();
+        let is_initial = net_ns == crate::netns::INIT_NET_ID;
         Self {
             name: String::from("lo"),
-            flags: LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOOPBACK | LINK_FLAG_LOWER_UP,
+            flags: if is_initial {
+                LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOOPBACK | LINK_FLAG_LOWER_UP
+            } else {
+                LINK_FLAG_LOOPBACK | LINK_FLAG_LOWER_UP
+            },
             mtu: LOOPBACK_MAX_MTU,
             operstate: IF_OPER_UNKNOWN,
             rx_ifindex: None,
+            net_ns,
             rx_waker: Mutex::new(None),
         }
     }
@@ -73,7 +92,7 @@ impl LoopbackDevice {
 impl Drop for LoopbackDevice {
     fn drop(&mut self) {
         if let Some(ifindex) = self.rx_ifindex {
-            net_rx::discard_ifindex(ifindex);
+            net_rx::discard_ifindex(self.net_ns, ifindex);
         }
     }
 }
@@ -128,11 +147,12 @@ impl NetDevice for LoopbackDevice {
         // next round continues draining remaining work. Retrying here would make
         // device polling unbounded while producers keep enqueueing packets.
         net_rx::drain_pending();
-        net_rx::pop_deferred(ifindex)
+        net_rx::pop_deferred(self.net_ns, ifindex)
     }
 
     fn has_rx_work(&self) -> bool {
-        self.rx_ifindex.is_some_and(net_rx::has_work_for)
+        self.rx_ifindex
+            .is_some_and(|ifindex| net_rx::has_work_for(self.net_ns, ifindex))
     }
 
     fn send_ip_packet(
@@ -154,6 +174,7 @@ impl NetDevice for LoopbackDevice {
             return false;
         }
         packet.set_ifindex(ifindex);
+        packet.set_net_ns(self.net_ns);
         packet.set_owner(PacketOwner::Loopback);
         let Some(packet) = net_rx::prepare_for_enqueue(packet) else {
             // Malformed IPv4 UDP is dropped in task context. Linux
@@ -187,7 +208,7 @@ impl NetDevice for LoopbackDevice {
 
         // A PCB hit wakes its socket waiter during UDP enqueue. The device
         // source only needs a kick when work remains for the task poller.
-        if net_rx::has_work_for(ifindex) {
+        if net_rx::has_work_for(self.net_ns, ifindex) {
             let waker = self.rx_waker.lock().clone();
             if let Some(waker) = waker {
                 waker.wake();

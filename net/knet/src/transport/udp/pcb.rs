@@ -217,7 +217,7 @@ mod tests {
 
     #[def_test]
     fn receive_preserves_fifo_order() {
-        let pcb = UdpPcb::new(UdpSocketState::new());
+        let pcb = UdpPcb::new(UdpSocketState::new(crate::netns::test_init_net()));
         let old_remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 1000);
         let connected_remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 2), 2000);
         assert!(pcb.enqueue(queued_packet(old_remote, 1)));
@@ -233,7 +233,7 @@ mod tests {
 
     #[def_test]
     fn peek_returns_a_copy_without_consuming() {
-        let pcb = UdpPcb::new(UdpSocketState::new());
+        let pcb = UdpPcb::new(UdpSocketState::new(crate::netns::test_init_net()));
         let first_remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 1000);
         let second_remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 2), 2000);
         assert!(pcb.enqueue(queued_packet(first_remote, 1)));
@@ -253,7 +253,7 @@ mod tests {
 
     #[def_test]
     fn enqueue_and_peek_reuse_the_prepared_packet_allocation() {
-        let pcb = UdpPcb::new(UdpSocketState::new());
+        let pcb = UdpPcb::new(UdpSocketState::new(crate::netns::test_init_net()));
         let remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 1000);
         let packet = queued_packet(remote, 1);
         let packet_observer = packet.clone();
@@ -284,7 +284,7 @@ mod tests {
 
     #[def_test]
     fn receive_queue_is_reserved_at_pcb_creation() {
-        let pcb = UdpPcb::new(UdpSocketState::new());
+        let pcb = UdpPcb::new(UdpSocketState::new(crate::netns::test_init_net()));
         let capacity_at_create = pcb.rx_queue.lock().capacity();
         assert_eq!(
             core::mem::size_of::<PreparedUdpPacket>(),
@@ -299,7 +299,7 @@ mod tests {
 
     #[def_test]
     fn full_receive_queue_drops_without_growing() {
-        let pcb = UdpPcb::new(UdpSocketState::new());
+        let pcb = UdpPcb::new(UdpSocketState::new(crate::netns::test_init_net()));
         let remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 1000);
         let capacity_at_create = pcb.rx_queue.lock().capacity();
 

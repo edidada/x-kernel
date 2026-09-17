@@ -20,12 +20,13 @@ use super::{
     *,
 };
 use crate::{
-    SERVICE, control,
+    control,
     device::{
         LINK_FLAG_UP, LINK_FLAG_VOLATILE, LinkConfigUpdate, LinkKind, LinkSnapshot, NeighborState,
         NeighborUpdate,
     },
     ip::{IpAddress as KernelIpAddress, IpCidr, Ipv4Cidr},
+    netns::NetNamespace,
     router::{Ipv4AddrEntry, NeighborUpdatePolicy, RouteAttrs as RouterRouteAttrs, Rule},
     service::ExistingIpv4AddrAction,
 };
@@ -183,7 +184,10 @@ pub(super) fn build_ack_response(request: &[u8]) -> Vec<u8> {
     build_nlmsg_error_response(&header, 0, request)
 }
 
-pub(super) fn handle_rtnetlink_request(request: &[u8]) -> Vec<NetlinkPacket> {
+pub(super) fn handle_rtnetlink_request(
+    request: &[u8],
+    net_ns: &NetNamespace,
+) -> Vec<NetlinkPacket> {
     let Some(header) = NlMsgHeader::read(request) else {
         return Vec::new();
     };
@@ -200,16 +204,16 @@ pub(super) fn handle_rtnetlink_request(request: &[u8]) -> Vec<NetlinkPacket> {
     let operation = RtnetlinkOperation::from_msg_type(header.msg_type);
     let is_dump = operation.is_dump_request(header.flags);
     let mut packets = match operation {
-        RtnetlinkOperation::GetLink if is_dump => dump_links(&header, payload),
-        RtnetlinkOperation::GetLink => get_link(request, &header, payload),
-        RtnetlinkOperation::GetAddr => dump_addrs(&header, payload),
-        RtnetlinkOperation::GetRoute => dump_routes(&header, payload),
-        RtnetlinkOperation::NewLink => apply_newlink(request, &header, payload),
-        RtnetlinkOperation::NewAddr => apply_newaddr(request, &header, payload),
-        RtnetlinkOperation::DelAddr => apply_deladdr(request, &header, payload),
-        RtnetlinkOperation::NewRoute => apply_newroute(request, &header, payload),
-        RtnetlinkOperation::DelRoute => apply_delroute(request, &header, payload),
-        RtnetlinkOperation::NewNeigh => apply_newneigh(request, &header, payload),
+        RtnetlinkOperation::GetLink if is_dump => dump_links(net_ns, &header, payload),
+        RtnetlinkOperation::GetLink => get_link(net_ns, request, &header, payload),
+        RtnetlinkOperation::GetAddr => dump_addrs(net_ns, &header, payload),
+        RtnetlinkOperation::GetRoute => dump_routes(net_ns, &header, payload),
+        RtnetlinkOperation::NewLink => apply_newlink(net_ns, request, &header, payload),
+        RtnetlinkOperation::NewAddr => apply_newaddr(net_ns, request, &header, payload),
+        RtnetlinkOperation::DelAddr => apply_deladdr(net_ns, request, &header, payload),
+        RtnetlinkOperation::NewRoute => apply_newroute(net_ns, request, &header, payload),
+        RtnetlinkOperation::DelRoute => apply_delroute(net_ns, request, &header, payload),
+        RtnetlinkOperation::NewNeigh => apply_newneigh(net_ns, request, &header, payload),
         RtnetlinkOperation::Unsupported => vec![NetlinkPacket {
             from: NetlinkAddr { pid: 0, groups: 0 },
             data: build_error_response(request, LinuxError::EOPNOTSUPP),
@@ -224,15 +228,21 @@ pub(super) fn handle_rtnetlink_request(request: &[u8]) -> Vec<NetlinkPacket> {
     packets
 }
 
-fn get_link(request: &[u8], header: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
+fn get_link(
+    net_ns: &NetNamespace,
+    request: &[u8],
+    header: &NlMsgHeader,
+    payload: &[u8],
+) -> Vec<NetlinkPacket> {
+    let service = net_ns.service();
     let result = parse_link_query(payload).and_then(|query| {
-        if !SERVICE.is_inited() {
+        if !crate::netns::initialized() {
             return Err(LinuxError::ENODEV);
         }
         let link = if query.index > 0 {
-            SERVICE.link_snapshot_for_ifindex(query.index)
+            service.link_snapshot_for_ifindex(query.index)
         } else {
-            SERVICE
+            service
                 .link_snapshots()
                 .into_iter()
                 .find(|link| query.name.as_deref() == Some(link.name.as_str()))
@@ -253,11 +263,12 @@ fn get_link(request: &[u8], header: &NlMsgHeader, payload: &[u8]) -> Vec<Netlink
     }
 }
 
-fn dump_links(request: &NlMsgHeader, _payload: &[u8]) -> Vec<NetlinkPacket> {
-    if !SERVICE.is_inited() {
+fn dump_links(net_ns: &NetNamespace, request: &NlMsgHeader, _payload: &[u8]) -> Vec<NetlinkPacket> {
+    if !crate::netns::initialized() {
         return Vec::new();
     }
-    SERVICE
+    net_ns
+        .service()
         .link_snapshots()
         .into_iter()
         .map(|link| NetlinkPacket {
@@ -267,7 +278,7 @@ fn dump_links(request: &NlMsgHeader, _payload: &[u8]) -> Vec<NetlinkPacket> {
         .collect()
 }
 
-fn dump_addrs(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
+fn dump_addrs(net_ns: &NetNamespace, request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
     let info = IfAddrMsg::read(payload).ok();
     let family = info
         .map(|info| info.family)
@@ -275,10 +286,11 @@ fn dump_addrs(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
         .filter(|family| *family != 0)
         .unwrap_or(wire_route::FAMILY_IPV4);
     let ifindex = info.map_or(0, |info| info.index);
-    if family != wire_route::FAMILY_IPV4 || !SERVICE.is_inited() {
+    if family != wire_route::FAMILY_IPV4 || !crate::netns::initialized() {
         return Vec::new();
     }
-    SERVICE
+    net_ns
+        .service()
         .ipv4_addr_snapshots()
         .into_iter()
         .filter(|snapshot| ifindex == 0 || snapshot.entry.dev as u32 + 1 == ifindex)
@@ -289,16 +301,17 @@ fn dump_addrs(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
         .collect()
 }
 
-fn dump_routes(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
+fn dump_routes(net_ns: &NetNamespace, request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
     let family = payload
         .first()
         .copied()
         .filter(|family| *family != 0)
         .unwrap_or(wire_route::FAMILY_IPV4);
-    if !SERVICE.is_inited() {
+    if !crate::netns::initialized() {
         return Vec::new();
     }
-    SERVICE
+    net_ns
+        .service()
         .route_snapshot()
         .into_iter()
         .filter(|route| route_family(*route) == family)
@@ -309,58 +322,92 @@ fn dump_routes(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
         .collect()
 }
 
-fn apply_newlink(request: &[u8], header: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
-    match parse_link_update(payload).and_then(apply_link_update) {
+fn apply_newlink(
+    net_ns: &NetNamespace,
+    request: &[u8],
+    header: &NlMsgHeader,
+    payload: &[u8],
+) -> Vec<NetlinkPacket> {
+    match parse_link_update(payload).and_then(|req| apply_link_update(net_ns, req)) {
         Ok(()) => ack_packets(request, header),
         Err(errno) => error_packets(request, errno),
     }
 }
 
-fn apply_newaddr(request: &[u8], header: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
-    match parse_addr_request(payload).and_then(|req| add_addr(req, header.flags)) {
+fn apply_newaddr(
+    net_ns: &NetNamespace,
+    request: &[u8],
+    header: &NlMsgHeader,
+    payload: &[u8],
+) -> Vec<NetlinkPacket> {
+    match parse_addr_request(payload).and_then(|req| add_addr(net_ns, req, header.flags)) {
         Ok(()) => ack_packets(request, header),
         Err(errno) => error_packets(request, errno),
     }
 }
 
-fn apply_deladdr(request: &[u8], header: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
-    match parse_addr_request(payload).and_then(del_addr) {
+fn apply_deladdr(
+    net_ns: &NetNamespace,
+    request: &[u8],
+    header: &NlMsgHeader,
+    payload: &[u8],
+) -> Vec<NetlinkPacket> {
+    match parse_addr_request(payload).and_then(|req| del_addr(net_ns, req)) {
         Ok(()) => ack_packets(request, header),
         Err(errno) => error_packets(request, errno),
     }
 }
 
-fn apply_newroute(request: &[u8], header: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
-    match parse_route_request(payload).and_then(|req| add_route(req, header.flags)) {
+fn apply_newroute(
+    net_ns: &NetNamespace,
+    request: &[u8],
+    header: &NlMsgHeader,
+    payload: &[u8],
+) -> Vec<NetlinkPacket> {
+    match parse_route_request(payload).and_then(|req| add_route(net_ns, req, header.flags)) {
         Ok(()) => ack_packets(request, header),
         Err(errno) => error_packets(request, errno),
     }
 }
 
-fn apply_delroute(request: &[u8], header: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
-    match parse_route_request(payload).and_then(del_route) {
+fn apply_delroute(
+    net_ns: &NetNamespace,
+    request: &[u8],
+    header: &NlMsgHeader,
+    payload: &[u8],
+) -> Vec<NetlinkPacket> {
+    match parse_route_request(payload).and_then(|req| del_route(net_ns, req)) {
         Ok(()) => ack_packets(request, header),
         Err(errno) => error_packets(request, errno),
     }
 }
 
-fn apply_newneigh(request: &[u8], header: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
-    match parse_neigh_request(payload).and_then(|req| add_neigh(req, header.flags)) {
+fn apply_newneigh(
+    net_ns: &NetNamespace,
+    request: &[u8],
+    header: &NlMsgHeader,
+    payload: &[u8],
+) -> Vec<NetlinkPacket> {
+    match parse_neigh_request(payload).and_then(|req| add_neigh(net_ns, req, header.flags)) {
         Ok(()) => ack_packets(request, header),
         Err(errno) => error_packets(request, errno),
     }
 }
 
-pub(super) fn apply_link_update(request: LinkUpdateRequest) -> Result<(), LinuxError> {
+pub(super) fn apply_link_update(
+    net_ns: &NetNamespace,
+    request: LinkUpdateRequest,
+) -> Result<(), LinuxError> {
     if request.index <= 0 {
         return Err(LinuxError::ENODEV);
     }
-    if !SERVICE.is_inited() {
+    if !crate::netns::initialized() {
         return Err(LinuxError::ENODEV);
     }
     let _network_config_guard = control::network_config_lock();
 
-    let current_flags = SERVICE
+    let current_flags = net_ns
+        .service()
         .link_snapshot_for_ifindex(request.index)
         .ok_or(LinuxError::ENODEV)?
         .flags;
@@ -375,7 +422,7 @@ pub(super) fn apply_link_update(request: LinkUpdateRequest) -> Result<(), LinuxE
     if changed_flags & !(LINK_FLAG_UP | LINK_FLAG_VOLATILE) != 0 {
         return Err(LinuxError::EOPNOTSUPP);
     }
-    SERVICE.update_device_link(
+    net_ns.service().update_device_link(
         request.index,
         LinkConfigUpdate {
             name: request.name,
@@ -385,9 +432,13 @@ pub(super) fn apply_link_update(request: LinkUpdateRequest) -> Result<(), LinuxE
     )
 }
 
-pub(super) fn add_addr(request: AddrRequest, flags: u16) -> Result<(), LinuxError> {
+pub(super) fn add_addr(
+    net_ns: &NetNamespace,
+    request: AddrRequest,
+    flags: u16,
+) -> Result<(), LinuxError> {
     let entry = ipv4_addr_entry_from_request(request)?;
-    if !SERVICE.is_inited() {
+    if !crate::netns::initialized() {
         return Err(LinuxError::ENODEV);
     }
     let _network_config_guard = control::network_config_lock();
@@ -396,26 +447,31 @@ pub(super) fn add_addr(request: AddrRequest, flags: u16) -> Result<(), LinuxErro
     } else {
         ExistingIpv4AddrAction::Reject
     };
-    SERVICE.add_ipv4_addr(entry, existing_action)
+    net_ns.service().add_ipv4_addr(entry, existing_action)
 }
 
-pub(super) fn del_addr(request: AddrRequest) -> Result<(), LinuxError> {
+pub(super) fn del_addr(net_ns: &NetNamespace, request: AddrRequest) -> Result<(), LinuxError> {
     let entry = ipv4_addr_entry_from_request(request)?;
-    if !SERVICE.is_inited() {
+    if !crate::netns::initialized() {
         return Err(LinuxError::ENODEV);
     }
     let _network_config_guard = control::network_config_lock();
-    SERVICE.remove_ipv4_addr(entry)?;
+    net_ns.service().remove_ipv4_addr(entry)?;
     Ok(())
 }
 
-pub(super) fn add_route(request: RouteRequest, flags: u16) -> Result<(), LinuxError> {
+pub(super) fn add_route(
+    net_ns: &NetNamespace,
+    request: RouteRequest,
+    flags: u16,
+) -> Result<(), LinuxError> {
     let rule = route_rule_from_request(request)?;
-    if !SERVICE.is_inited() {
+    if !crate::netns::initialized() {
         return Err(LinuxError::ENODEV);
     }
     let _network_config_guard = control::network_config_lock();
-    let existing = SERVICE
+    let existing = net_ns
+        .service()
         .route_snapshot()
         .into_iter()
         .find(|route| same_route_key(*route, &request));
@@ -423,56 +479,64 @@ pub(super) fn add_route(request: RouteRequest, flags: u16) -> Result<(), LinuxEr
         if flags & NLM_F_EXCL != 0 || flags & NLM_F_REPLACE == 0 || !existing.is_configured() {
             return Err(LinuxError::EEXIST);
         }
-        SERVICE.replace_route_rule(existing, rule)?;
+        net_ns.service().replace_route_rule(existing, rule)?;
     } else if flags & NLM_F_CREATE == 0 {
         return Err(LinuxError::ENOENT);
     } else {
-        SERVICE.add_route_rule(rule)?;
+        net_ns.service().add_route_rule(rule)?;
     }
     Ok(())
 }
 
-pub(super) fn del_route(request: RouteRequest) -> Result<(), LinuxError> {
+pub(super) fn del_route(net_ns: &NetNamespace, request: RouteRequest) -> Result<(), LinuxError> {
     validate_route_request(request)?;
     if normalize_route_table(request.table) != RT_TABLE_MAIN
         || normalize_route_type(request.route_type) != RTN_UNICAST
     {
         return Err(LinuxError::EOPNOTSUPP);
     }
-    if !SERVICE.is_inited() {
+    if !crate::netns::initialized() {
         return Err(LinuxError::ENODEV);
     }
     let _network_config_guard = control::network_config_lock();
     if request.oif != 0 {
-        ensure_link_exists(request.oif)?;
+        ensure_link_exists(net_ns, request.oif)?;
     }
-    let route = SERVICE
+    let route = net_ns
+        .service()
         .route_snapshot()
         .into_iter()
         .find(|route| route.is_configured() && route_delete_matches(*route, &request))
         .ok_or(LinuxError::ESRCH)?;
-    SERVICE.remove_route_rule(route);
+    net_ns.service().remove_route_rule(route);
     Ok(())
 }
 
-pub(super) fn add_neigh(request: NeighRequest, flags: u16) -> Result<(), LinuxError> {
+pub(super) fn add_neigh(
+    net_ns: &NetNamespace,
+    request: NeighRequest,
+    flags: u16,
+) -> Result<(), LinuxError> {
     let _network_config_guard = control::network_config_lock();
     if request.family != wire_route::FAMILY_IPV4 {
         return Err(LinuxError::EAFNOSUPPORT);
     }
-    ensure_link_exists(request.ifindex)?;
+    ensure_link_exists(net_ns, request.ifindex)?;
     let update = neighbor_update_from_request(request)?;
     let policy = NeighborUpdatePolicy {
         can_create: flags & NLM_F_CREATE != 0,
         can_replace: flags & NLM_F_REPLACE != 0 && flags & NLM_F_EXCL == 0,
     };
-    SERVICE.apply_neighbor_update(update, policy)
+    net_ns.service().apply_neighbor_update(update, policy)
 }
 
-fn ensure_link_exists(ifindex: u32) -> Result<(), LinuxError> {
+fn ensure_link_exists(net_ns: &NetNamespace, ifindex: u32) -> Result<(), LinuxError> {
     let ifindex = i32::try_from(ifindex).map_err(|_| LinuxError::ENODEV)?;
-    let exists = if SERVICE.is_inited() {
-        SERVICE.link_snapshot_for_ifindex(ifindex).is_some()
+    let exists = if crate::netns::initialized() {
+        net_ns
+            .service()
+            .link_snapshot_for_ifindex(ifindex)
+            .is_some()
     } else {
         false
     };

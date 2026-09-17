@@ -14,6 +14,7 @@
 use bitflags::bitflags;
 use kerrno::{KError, KResult, LinuxError};
 use khal::uspace::UserContext;
+use knet::netns;
 use kns::NamespaceFlags;
 use kprocess::{
     ForkAddressSpace, ForkFdTable, ForkFs, ForkParent, ForkSignalActions, Pid, PidFd,
@@ -225,6 +226,14 @@ impl CloneRequest {
             0
         };
 
+        // Create the fresh network namespace before any child state is
+        // prepared, so a failure here leaves no half-created child behind.
+        let fresh_net_ns = if self.flags.contains(CloneFlags::NEWNET) {
+            Some(netns::create_fresh()?)
+        } else {
+            None
+        };
+
         let curr = current();
         let current_thread = current_user_thread();
         let prepared = if self.flags.contains(CloneFlags::THREAD) {
@@ -263,6 +272,9 @@ impl CloneRequest {
         };
         let tid = prepared.tid();
         let child_process = prepared.process().clone();
+        if let Some(net_ns) = fresh_net_ns.as_ref() {
+            child_process.set_net_ns(net_ns.id());
+        }
         let page_table_root = prepared.page_table_root();
         let (thr, task_number) = prepared.into_parts();
 
@@ -364,9 +376,17 @@ impl CloneRequest {
             return Err(KError::from(LinuxError::EINVAL));
         }
 
-        // Unimplemented namespace flags: return ENOSYS.
-        let unimplemented =
-            CloneFlags::NEWNET | CloneFlags::NEWUSER | CloneFlags::NEWCGROUP | CloneFlags::NEWTIME;
+        // CLONE_NEWNET | CLONE_THREAD is invalid here: the network namespace
+        // is owned by the thread group, so a new thread cannot switch it
+        // without changing the caller's own namespace.
+        if ns.contains(CloneFlags::NEWNET | CloneFlags::THREAD) {
+            return Err(KError::from(LinuxError::EINVAL));
+        }
+
+        // Unimplemented namespace flags: return ENOSYS. `CLONE_NEWNET` is not
+        // listed because [`Self::do_clone`] creates the fresh namespace through
+        // the network subsystem instead of the namespace proxy.
+        let unimplemented = CloneFlags::NEWUSER | CloneFlags::NEWCGROUP | CloneFlags::NEWTIME;
         if ns.intersects(unimplemented) {
             return Err(KError::from(LinuxError::ENOSYS));
         }
@@ -392,9 +412,9 @@ impl CloneRequest {
         if self.flags.contains(CloneFlags::NEWPID) {
             ns |= NamespaceFlags::NEWPID;
         }
-        if self.flags.contains(CloneFlags::NEWNET) {
-            ns |= NamespaceFlags::NEWNET;
-        }
+        // `CLONE_NEWNET` is intentionally not mapped: the network namespace is
+        // owned by the process and created in `do_clone`, not by the namespace
+        // proxy.
         if self.flags.contains(CloneFlags::NEWCGROUP) {
             ns |= NamespaceFlags::NEWCGROUP;
         }
@@ -511,17 +531,22 @@ mod tests_clone {
 
     #[def_test]
     fn test_validate_rejects_unimplemented_namespaces_with_enosys() {
-        for flags in [CloneFlags::NEWNET, CloneFlags::NEWUSER] {
-            let mut req = CloneRequest::new();
-            req.set_flags(flags);
-            let err = req.validate_namespace_flags().unwrap_err();
-            // ENOSYS is the expected errno for unimplemented namespaces.
-            assert_eq!(
-                LinuxError::from(err),
-                LinuxError::ENOSYS,
-                "expected ENOSYS for {flags:?}"
-            );
-        }
+        let mut req = CloneRequest::new();
+        req.set_flags(CloneFlags::NEWUSER);
+        let err = req.validate_namespace_flags().unwrap_err();
+        // ENOSYS is the expected errno for unimplemented namespaces.
+        assert_eq!(
+            LinuxError::from(err),
+            LinuxError::ENOSYS,
+            "expected ENOSYS for NEWUSER"
+        );
+    }
+
+    #[def_test]
+    fn validate_accepts_newnet_because_it_is_created_by_the_clone_path() {
+        let mut req = CloneRequest::new();
+        req.set_flags(CloneFlags::NEWNET);
+        assert!(req.validate_namespace_flags().is_ok());
     }
 
     #[def_test]

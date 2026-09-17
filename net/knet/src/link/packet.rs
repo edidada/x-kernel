@@ -21,11 +21,11 @@ use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::{Mutex, RwLock};
 
 use crate::{
-    ConnectOptions, RecvFlags, RecvOptions, SERVICE, SendOptions, Shutdown, SocketAddrEx,
-    SocketOps,
+    ConnectOptions, RecvFlags, RecvOptions, SendOptions, Shutdown, SocketAddrEx, SocketOps,
     buf::{PacketBuf, PacketType},
     device::{ARPHRD_ETHER, LinkSendSnapshot},
     general::GeneralOptions,
+    netns::{INIT_NET_ID, NetNamespace, NetNsId},
     options::{
         Configurable, GetSocketOption, OptionHandled, PacketMembership, PacketStatistics,
         SetSocketOption,
@@ -183,6 +183,9 @@ impl PacketRxQueue {
 }
 
 struct PacketSocketInner {
+    /// Namespace this socket was created in; it only sees that namespace's
+    /// devices and frames.
+    net_ns: Arc<NetNamespace>,
     kind: PacketSocketKind,
     protocol: u16,
     local_addr: RwLock<Option<PacketAddr>>,
@@ -209,18 +212,19 @@ impl PacketSocket {
     ///
     /// A zero protocol leaves the socket protocol unset. Such a socket receives
     /// no frames until `bind` supplies a non-zero protocol.
-    pub fn new(kind: PacketSocketKind, protocol: u16) -> KResult<Self> {
+    pub fn new(kind: PacketSocketKind, protocol: u16, net_ns: Arc<NetNamespace>) -> KResult<Self> {
         validate_protocol(protocol)?;
 
         let socket = Self {
             inner: Arc::new(PacketSocketInner {
+                net_ns: net_ns.clone(),
                 kind,
                 protocol,
                 local_addr: RwLock::new(None),
                 rx_queue: Mutex::new(PacketRxQueue::default()),
                 recv_lock: Mutex::new(()),
                 poll_rx: Arc::new(PollSet::new()),
-                general: GeneralOptions::new(),
+                general: GeneralOptions::new(net_ns.clone()),
                 packets: AtomicU32::new(0),
                 drops: AtomicU32::new(0),
             }),
@@ -247,10 +251,10 @@ impl PacketSocket {
         self.inner
             .general
             .send_poller_with_nonblocking(self, nonblocking, || {
-                if !SERVICE.is_inited() {
+                if !crate::netns::initialized() {
                     return Err(LinuxError::ENODEV.into());
                 }
-                let service: &Service = &SERVICE;
+                let service: &Service = self.inner.net_ns.service();
                 let link = service
                     .link_send_snapshot_for_ifindex(ifindex)
                     .ok_or(KError::from(LinuxError::ENODEV))?;
@@ -345,7 +349,7 @@ impl Configurable for PacketSocket {
 impl SocketOps for PacketSocket {
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         let mut addr = local_addr.into_packet()?;
-        validate_ifindex_or_any(addr.ifindex)?;
+        validate_ifindex_or_any(&self.inner.net_ns, addr.ifindex)?;
         if addr.protocol == 0 {
             addr.protocol = self.inner.protocol;
         }
@@ -469,6 +473,7 @@ pub(crate) fn publish_link_frame(ifindex: i32, frame: &[u8], local_addr: [u8; 6]
     };
     publish_frame(
         active_sockets,
+        INIT_NET_ID,
         ifindex,
         frame,
         packet_addr_from_frame(
@@ -494,6 +499,7 @@ pub(crate) fn publish_link_packet(packet: &PacketBuf) {
 
     publish_frame(
         active_sockets,
+        packet.net_ns(),
         packet.ifindex(),
         packet.data(),
         packet_addr_from_packet(packet, link_metadata.src_addr.0),
@@ -501,6 +507,16 @@ pub(crate) fn publish_link_packet(packet: &PacketBuf) {
 }
 
 pub(crate) fn publish_outgoing_frame(ifindex: i32, frame: &[u8], local_addr: [u8; 6]) {
+    // Only the initial namespace owns physical devices, hence outgoing frames.
+    publish_outgoing_frame_in(INIT_NET_ID, ifindex, frame, local_addr);
+}
+
+pub(crate) fn publish_outgoing_frame_in(
+    net_ns: NetNsId,
+    ifindex: i32,
+    frame: &[u8],
+    local_addr: [u8; 6],
+) {
     let active_sockets = PACKET_HANDLERS.active_sockets();
     if active_sockets.is_empty() {
         return;
@@ -511,6 +527,7 @@ pub(crate) fn publish_outgoing_frame(ifindex: i32, frame: &[u8], local_addr: [u8
     };
     publish_frame(
         active_sockets,
+        net_ns,
         ifindex,
         frame,
         packet_addr_from_frame(
@@ -530,6 +547,7 @@ pub(crate) fn has_packet_handlers() -> bool {
 
 fn publish_frame(
     active_sockets: Vec<Arc<PacketSocketInner>>,
+    net_ns: NetNsId,
     ifindex: i32,
     frame: &[u8],
     from: PacketAddr,
@@ -538,7 +556,8 @@ fn publish_frame(
     let protocol = protocol_to_host(from.protocol);
 
     for socket in active_sockets {
-        if socket_matches(&socket, ifindex, protocol, from.pkttype) {
+        if socket.net_ns.id() == net_ns && socket_matches(&socket, ifindex, protocol, from.pkttype)
+        {
             let packet = PacketFrame::new(
                 from,
                 data.clone(),
@@ -703,12 +722,19 @@ fn protocol_to_host(protocol: u16) -> u16 {
     u16::from_be(protocol)
 }
 
-fn validate_ifindex_or_any(ifindex: i32) -> KResult {
-    if ifindex == 0 || SERVICE.is_inited() && SERVICE.has_device(ifindex) {
+fn validate_ifindex_or_any(net_ns: &NetNamespace, ifindex: i32) -> KResult {
+    if ifindex == 0 || net_ns.service().has_device(ifindex) {
         Ok(())
     } else {
+        // A namespace without the requested device reports the failure instead
+        // of silently sending on another namespace's interface.
         Err(LinuxError::ENODEV.into())
     }
+}
+
+#[cfg(unittest)]
+fn packet_socket(kind: PacketSocketKind, protocol: u16) -> PacketSocket {
+    PacketSocket::new(kind, protocol, crate::netns::test_init_net()).unwrap()
 }
 
 #[cfg(unittest)]
@@ -751,7 +777,7 @@ mod tests {
 
     #[def_test(serial)]
     fn test_protocol_and_ifindex_filtering() {
-        let socket = PacketSocket::new(PacketSocketKind::Raw, ETH_P_ALL.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Raw, ETH_P_ALL.to_be());
         *socket.inner.local_addr.write() = Some(PacketAddr::new(ETH_P_IP.to_be(), 2));
 
         publish_test_frame(1, &[1, 2, 3, 4]);
@@ -763,7 +789,7 @@ mod tests {
 
     #[def_test(serial)]
     fn test_recvmsg_writes_packet_address() {
-        let socket = PacketSocket::new(PacketSocketKind::Raw, ETH_P_IP.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Raw, ETH_P_IP.to_be());
         let frame = ethernet_frame(TEST_LOCAL_MAC, ETH_P_IP, &[1, 2, 3, 4]);
         publish_link_frame(2, &frame, TEST_LOCAL_MAC);
 
@@ -792,7 +818,7 @@ mod tests {
 
     #[def_test(serial)]
     fn test_datagram_recv_strips_ethernet_header() {
-        let socket = PacketSocket::new(PacketSocketKind::Datagram, ETH_P_IP.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Datagram, ETH_P_IP.to_be());
         let payload = [1, 2, 3, 4];
         let frame = ethernet_frame(TEST_LOCAL_MAC, ETH_P_IP, &payload);
         publish_link_frame(2, &frame, TEST_LOCAL_MAC);
@@ -821,7 +847,7 @@ mod tests {
 
     #[def_test(serial)]
     fn test_peek_preserves_frame() {
-        let socket = PacketSocket::new(PacketSocketKind::Raw, ETH_P_IP.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Raw, ETH_P_IP.to_be());
         let frame = ethernet_frame(TEST_LOCAL_MAC, ETH_P_IP, &[1, 2, 3, 4]);
         publish_link_frame(2, &frame, TEST_LOCAL_MAC);
 
@@ -848,7 +874,7 @@ mod tests {
 
     #[def_test(serial)]
     fn test_truncate_returns_original_frame_len() {
-        let socket = PacketSocket::new(PacketSocketKind::Raw, ETH_P_IP.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Raw, ETH_P_IP.to_be());
         let frame = ethernet_frame(TEST_LOCAL_MAC, ETH_P_IP, &[1, 2, 3, 4]);
         publish_link_frame(2, &frame, TEST_LOCAL_MAC);
 
@@ -873,7 +899,7 @@ mod tests {
 
     #[def_test(serial)]
     fn test_small_buffer_without_truncate_returns_written_len() {
-        let socket = PacketSocket::new(PacketSocketKind::Raw, ETH_P_IP.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Raw, ETH_P_IP.to_be());
         let frame = ethernet_frame(TEST_LOCAL_MAC, ETH_P_IP, &[1, 2, 3, 4]);
         publish_link_frame(2, &frame, TEST_LOCAL_MAC);
 
@@ -897,7 +923,7 @@ mod tests {
 
     #[def_test(serial)]
     fn test_peek_with_truncation_preserves_frame() {
-        let socket = PacketSocket::new(PacketSocketKind::Raw, ETH_P_IP.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Raw, ETH_P_IP.to_be());
         let frame = ethernet_frame(TEST_LOCAL_MAC, ETH_P_IP, &[1, 2, 3, 4]);
         publish_link_frame(2, &frame, TEST_LOCAL_MAC);
 
@@ -918,7 +944,7 @@ mod tests {
 
     #[def_test(serial)]
     fn test_eth_p_all_receives_ipv6_and_unknown_protocols() {
-        let socket = PacketSocket::new(PacketSocketKind::Raw, ETH_P_ALL.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Raw, ETH_P_ALL.to_be());
         let ipv6_frame = ethernet_frame(TEST_LOCAL_MAC, 0x86DD, &[1, 2, 3, 4]);
         let unknown_frame = ethernet_frame(TEST_LOCAL_MAC, 0x88B5, &[5, 6, 7, 8]);
 
@@ -942,7 +968,7 @@ mod tests {
 
     #[def_test(serial)]
     fn test_eth_p_ip_filters_ipv6_and_unknown_protocols() {
-        let socket = PacketSocket::new(PacketSocketKind::Raw, ETH_P_IP.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Raw, ETH_P_IP.to_be());
         let ipv6_frame = ethernet_frame(TEST_LOCAL_MAC, 0x86DD, &[1, 2, 3, 4]);
         let unknown_frame = ethernet_frame(TEST_LOCAL_MAC, 0x88B5, &[5, 6, 7, 8]);
 
@@ -956,7 +982,7 @@ mod tests {
     fn test_custom_ethertype_matches() {
         const ETH_P_CUSTOM: u16 = 0x88b5;
 
-        let socket = PacketSocket::new(PacketSocketKind::Raw, ETH_P_CUSTOM.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Raw, ETH_P_CUSTOM.to_be());
         let frame = ethernet_frame(TEST_LOCAL_MAC, ETH_P_CUSTOM, &[1, 2, 3, 4]);
 
         publish_link_frame(2, &frame, TEST_LOCAL_MAC);
@@ -971,7 +997,7 @@ mod tests {
 
     #[def_test(serial)]
     fn test_datagram_empty_payload_frames_are_accounted() {
-        let socket = PacketSocket::new(PacketSocketKind::Datagram, ETH_P_ALL.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Datagram, ETH_P_ALL.to_be());
         let frame = ethernet_frame(TEST_LOCAL_MAC, ETH_P_IP, &[]);
 
         for _ in 0..=PACKET_RX_QUEUE_LIMIT_FRAMES {
@@ -985,7 +1011,7 @@ mod tests {
 
     #[def_test(serial)]
     fn test_zero_protocol_does_not_receive_until_bound() {
-        let socket = PacketSocket::new(PacketSocketKind::Raw, 0).unwrap();
+        let socket = packet_socket(PacketSocketKind::Raw, 0);
         let frame = ethernet_frame(TEST_LOCAL_MAC, ETH_P_IP, &[1, 2, 3, 4]);
 
         publish_link_frame(2, &frame, TEST_LOCAL_MAC);
@@ -1000,7 +1026,7 @@ mod tests {
 
     #[def_test(serial)]
     fn test_outgoing_frame_is_published() {
-        let socket = PacketSocket::new(PacketSocketKind::Raw, ETH_P_ALL.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Raw, ETH_P_ALL.to_be());
         let frame = ethernet_frame(TEST_LOCAL_MAC, ETH_P_IP, &[1, 2, 3, 4]);
 
         publish_outgoing_frame(2, &frame, TEST_LOCAL_MAC);
@@ -1024,7 +1050,7 @@ mod tests {
 
     #[def_test(serial)]
     fn test_otherhost_is_filtered_without_promisc_support() {
-        let socket = PacketSocket::new(PacketSocketKind::Raw, ETH_P_ALL.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Raw, ETH_P_ALL.to_be());
         let frame = ethernet_frame(TEST_OTHER_MAC, ETH_P_IP, &[1, 2, 3, 4]);
 
         publish_link_frame(2, &frame, TEST_LOCAL_MAC);
@@ -1033,7 +1059,7 @@ mod tests {
 
     #[def_test(serial)]
     fn test_packet_membership_is_unsupported() {
-        let socket = PacketSocket::new(PacketSocketKind::Raw, ETH_P_ALL.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Raw, ETH_P_ALL.to_be());
         let membership = PacketMembership {
             ifindex: 2,
             membership_type: PACKET_MR_PROMISC,
@@ -1053,7 +1079,7 @@ mod tests {
 
     #[def_test(serial)]
     fn test_zero_destination_mac_is_otherhost() {
-        let socket = PacketSocket::new(PacketSocketKind::Raw, ETH_P_ALL.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Raw, ETH_P_ALL.to_be());
         let frame = ethernet_frame([0; 6], ETH_P_IP, &[1, 2, 3, 4]);
 
         publish_link_frame(2, &frame, TEST_LOCAL_MAC);
@@ -1063,7 +1089,7 @@ mod tests {
 
     #[def_test(serial)]
     fn test_send_ifindex_errors() {
-        let socket = PacketSocket::new(PacketSocketKind::Raw, ETH_P_IP.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Raw, ETH_P_IP.to_be());
         let frame = ethernet_frame(TEST_LOCAL_MAC, ETH_P_IP, &[1, 2, 3, 4]);
 
         assert_eq!(
@@ -1136,7 +1162,7 @@ mod tests {
 
     #[def_test(serial)]
     fn test_unsupported_connection_ops() {
-        let socket = PacketSocket::new(PacketSocketKind::Raw, ETH_P_IP.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Raw, ETH_P_IP.to_be());
         let addr = SocketAddrEx::Packet(PacketAddr::new(ETH_P_IP.to_be(), 2));
 
         assert_eq!(
@@ -1194,7 +1220,7 @@ mod tests {
             }
         }
 
-        let socket = PacketSocket::new(PacketSocketKind::Raw, ETH_P_IP.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Raw, ETH_P_IP.to_be());
         let frame = ethernet_frame(TEST_LOCAL_MAC, ETH_P_IP, &[1, 2, 3, 4]);
         publish_link_frame(2, &frame, TEST_LOCAL_MAC);
 
@@ -1231,7 +1257,7 @@ mod tests {
             }
         }
 
-        let socket = PacketSocket::new(PacketSocketKind::Raw, ETH_P_IP.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Raw, ETH_P_IP.to_be());
         let frame = ethernet_frame(TEST_LOCAL_MAC, ETH_P_IP, &[1, 2, 3, 4]);
         publish_link_frame(2, &frame, TEST_LOCAL_MAC);
 
@@ -1273,7 +1299,7 @@ mod tests {
             }
         }
 
-        let socket = PacketSocket::new(PacketSocketKind::Raw, ETH_P_IP.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Raw, ETH_P_IP.to_be());
         let frame = ethernet_frame(TEST_LOCAL_MAC, ETH_P_IP, &[1, 2, 3, 4]);
         publish_link_frame(2, &frame, TEST_LOCAL_MAC);
 
@@ -1286,7 +1312,7 @@ mod tests {
 
     #[def_test(serial)]
     fn test_queue_drop_statistics() {
-        let socket = PacketSocket::new(PacketSocketKind::Raw, ETH_P_IP.to_be()).unwrap();
+        let socket = packet_socket(PacketSocketKind::Raw, ETH_P_IP.to_be());
         let frame = ethernet_frame(
             TEST_LOCAL_MAC,
             ETH_P_IP,

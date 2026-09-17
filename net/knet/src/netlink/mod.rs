@@ -122,6 +122,7 @@ impl NetlinkRxQueue {
 
 pub(super) struct NetlinkSocketInner {
     pub(super) protocol: i32,
+    pub(super) net_ns: Arc<crate::netns::NetNamespace>,
     pub(super) local_addr: RwLock<Option<NetlinkAddr>>,
     pub(super) send_lock: Mutex<()>,
     pub(super) rx_queue: Mutex<NetlinkRxQueue>,
