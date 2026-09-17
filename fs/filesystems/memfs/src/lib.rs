@@ -57,6 +57,32 @@ fn init_tmpfs_context(context: &mut FsContext<'_>) -> VfsResult<()> {
 /// Registered tmpfs filesystem type.
 pub static TMPFS_TYPE: FileSystemType = FileSystemType::nodev("tmpfs", init_tmpfs_context);
 
+fn mqueue_get_tree(
+    context: &mut FsContext<'_>,
+    _lookup_root: &kvfs::Path,
+    _lookup_pwd: &kvfs::Path,
+) -> VfsResult<Arc<SuperBlock>> {
+    get_tree_nodev(context, |file_system_type, flags| {
+        Ok(ramfs::new_ramfs_with_file_system_type_and_flags(
+            file_system_type,
+            flags,
+        ))
+    })
+}
+
+static MQUEUE_CONTEXT_OPERATIONS: FsContextOperations = FsContextOperations::new(mqueue_get_tree);
+
+fn init_mqueue_context(context: &mut FsContext<'_>) -> VfsResult<()> {
+    context.set_operations(&MQUEUE_CONTEXT_OPERATIONS);
+    Ok(())
+}
+
+/// Registered mqueue filesystem type.
+///
+/// POSIX message queue nodes are not implemented yet; each mount is an empty
+/// private tree, which is what container rootfs setup (`/dev/mqueue`)
+/// requires to succeed.
+pub static MQUEUE_TYPE: FileSystemType = FileSystemType::nodev("mqueue", init_mqueue_context);
 #[macros::register_init]
 fn init_memory_filesystems() {
     #[expect(
@@ -72,6 +98,12 @@ fn init_memory_filesystems() {
                   registered once by its unique linker initialization entry"
     )]
     kvfs::register_filesystem(&TMPFS_TYPE).expect("tmpfs filesystem type must register once");
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Each statically named filesystem is \
+                  registered once by its unique linker initialization entry"
+    )]
+    kvfs::register_filesystem(&MQUEUE_TYPE).expect("mqueue filesystem type must register once");
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]
