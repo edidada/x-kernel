@@ -93,18 +93,18 @@ impl<'a> ELFParser<'a> {
         self.headers.header.pt2.ph_entry_size() as usize
     }
 
-    /// The offset of the program header table in the ELF file.
-    pub fn phdr(&self) -> usize {
+    /// The address of the program header table in the ELF image.
+    ///
+    /// Returns `None` when the file has no `PT_PHDR` segment covering the
+    /// program header table. `PT_PHDR` is optional in the ELF specification,
+    /// so `AT_PHDR` is simply absent from the auxiliary vector in that case;
+    /// userspace loaders handle a missing `AT_PHDR` (Linux never requires it).
+    pub fn phdr(&self) -> Option<usize> {
         let ph_offset = self.headers.header.pt2.ph_offset() as usize;
-        let header = self
-            .headers
-            .ph
-            .iter()
-            .find(|header| {
-                (header.offset..header.offset + header.file_size).contains(&(ph_offset as u64))
-            })
-            .expect("can not find program header table address in elf");
-        ph_offset - header.offset as usize + header.virtual_addr as usize + self.base
+        let header = self.headers.ph.iter().find(|header| {
+            (header.offset..header.offset + header.file_size).contains(&(ph_offset as u64))
+        })?;
+        Some(ph_offset - header.offset as usize + header.virtual_addr as usize + self.base)
     }
 
     /// The base address of the ELF file loaded into the memory.
@@ -129,15 +129,16 @@ impl<'a> ELFParser<'a> {
         pagesz: usize,
         ldso_base: Option<usize>,
     ) -> impl Iterator<Item = AuxEntry> {
-        [
-            (AuxType::PHDR, self.phdr()),
-            (AuxType::PHENT, self.phent()),
-            (AuxType::PHNUM, self.phnum()),
-            (AuxType::PAGESZ, pagesz),
-            (AuxType::ENTRY, self.entry()),
-        ]
-        .into_iter()
-        .chain(ldso_base.into_iter().map(|base| (AuxType::BASE, base)))
-        .map(|(at, val)| AuxEntry::new(at, val))
+        self.phdr()
+            .map(|phdr| (AuxType::PHDR, phdr))
+            .into_iter()
+            .chain([
+                (AuxType::PHENT, self.phent()),
+                (AuxType::PHNUM, self.phnum()),
+                (AuxType::PAGESZ, pagesz),
+                (AuxType::ENTRY, self.entry()),
+            ])
+            .chain(ldso_base.into_iter().map(|base| (AuxType::BASE, base)))
+            .map(|(at, val)| AuxEntry::new(at, val))
     }
 }
