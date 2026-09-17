@@ -262,9 +262,9 @@ fn wait_on_matching_children(
 /// `waitid(2)`: wait for a child selected by `idtype`/`id` and report its
 /// status through a `siginfo_t`.
 ///
-/// Supports the `idtype_t` selectors runc actually uses (`P_ALL`, `P_PID`,
-/// `P_PGID`); `P_PIDFD` is rejected with `EINVAL` until pidfd-based waiting
-/// is wired. `WNOWAIT`/`WNOHANG`/`WEXITED` are honored by the shared wait
+/// Supports the full `idtype_t` set (`P_ALL`, `P_PID`, `P_PGID`, `P_PIDFD`).
+/// `P_PIDFD` resolves `id` as a pidfd file descriptor and waits on its target
+/// process. `WNOWAIT`/`WNOHANG`/`WEXITED` are honored by the shared wait
 /// machinery. The optional `rusage` argument is accepted but not populated
 /// (runc's `isWaitable` probe passes `NULL`).
 pub fn sys_waitid(
