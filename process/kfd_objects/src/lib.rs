@@ -27,6 +27,7 @@ extern crate klogger;
 
 extern crate alloc;
 
+pub mod bpf_stub;
 pub mod epoll;
 pub mod eventfd;
 pub mod signalfd;
