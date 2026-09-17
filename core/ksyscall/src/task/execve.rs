@@ -137,11 +137,9 @@ fn run_exec(uctx: &mut UserContext, request: ExecRequest) -> KResult<isize> {
     let thread = kprocess::current_user_thread();
     let process = thread.process().clone();
 
-    if kprocess::scheduler::process_task_count(process.as_ref()) > 1 {
-        // TODO: dispatch_irq multi-thread case
-        error!("exec: multi-thread not supported");
-        return Err(KError::WouldBlock);
-    }
+    // Linux `de_thread()`: execve replaces the whole thread group. Go
+    // runtimes (runc init) always have helper threads alive at exec time.
+    posix_process::exec_de_thread();
 
     // The display path drives process metadata (argv[0] rewrite target,
     // /proc/self/exe). For `AT_EMPTY_PATH` exec the caller already supplied
