@@ -216,10 +216,26 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
 Until unified user-namespace capability authorization exists, `clone` /
 `clone3` return `ENOSYS` for `CLONE_NEWCGROUP` instead of improvising
 namespace-creation permission with UID checks. The exec credential path
-does not yet enforce `no_new_privileges` promotion constraints, so
-`PR_SET_NO_NEW_PRIVS` returns `ENOSYS` and `PR_GET_NO_NEW_PRIVS` reports
-unset. seccomp likewise has no execution engine yet: `seccomp(2)` and
-`PR_SET_SECCOMP` return `ENOSYS` rather than faking success.
+never grants privileges (no setuid-bit or file-capability transitions), so
+`PR_SET_NO_NEW_PRIVS` accepts and records the flag (`PR_GET_NO_NEW_PRIVS`
+reports it), and `PR_SET_PDEATHSIG`/`PR_GET_PDEATHSIG` store the parent-death
+signal on the process identity. seccomp has no execution engine yet:
+`seccomp(2)` and `PR_SET_SECCOMP` return `ENOSYS` rather than faking
+success.
+
+`waitid` and `execveat` share the wait and exec machinery with `wait4` and
+`execve`:
+
+- `task/wait.rs` implements `wait4`/`waitid` over one scan (the
+  `wait_reap::WaitChildSelector` built from `WaitPid`). `waitid` accepts
+  `P_ALL`/`P_PID`/`P_PGID`/`P_PIDFD`; `P_PIDFD` resolves `id` as a pidfd
+  file descriptor and waits on its target process. `WNOWAIT`/`WNOHANG`/
+  `WEXITED` are honored by the shared machinery.
+- `task/execve.rs` implements `execve`/`execveat` through a single
+  `run_exec`. `execveat` accepts `AT_EMPTY_PATH` (exec the file already
+  open on `dirfd`, e.g. a memfd) and `AT_SYMLINK_NOFOLLOW` (currently
+  treated as follow). A multi-threaded `exec` runs `de_thread` (see
+  `posix-process`) to replace the whole thread group instead of failing.
 
 ## Non-goals
 

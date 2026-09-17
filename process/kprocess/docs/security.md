@@ -145,6 +145,8 @@ missing targets are ignored by delivery glue rather than reviving retired tasks.
 | T-07 | Exit signal exposes state before autoreap commits | Medium | Signal handler/waiter runs while parent contract changes | Prepare outside domain, revalidate parent/exit-signal and retry, commit state before signal queueing/wakeup. Failed notification is logged; UID fallback can reduce payload accuracy. |
 | T-08 | Cgroup movement races child publication | Medium | Migration and clone operate concurrently | Process cgroup gate stabilizes authorization and reconciles unpublished membership; kcgroup owns group charge/migration invariants. |
 | T-09 | Exec failure leaves partially updated runtime | Medium | Close-on-exec cleanup returns error | Error propagates before metadata pair publication; earlier timer/heap/signal changes are not rolled back. Caller must handle exec failure state appropriately. |
+| T-10 | `de_thread` sweep kills sibling threads while another executor also sends signals | Medium | Exec races a second `kill`/`tgkill` | The sweep is owned by the execing thread and joins every sibling before the address-space swap; a racing signal to an already-dying sibling is harmless (the thread is exiting anyway). Group exit/queued-kill undo is process-private under the group lock. |
+| T-11 | `/proc/<pid>/exe` follows to a backing file that outlives the process | Medium | Magic-link open races final exit | The backing `Arc<VfsFile>` is read from a snapshot; a concurrent teardown may detach owners, so the follow returns NotFound when the backing file is gone, never a stale path string alone. |
 
 ## Failure modes and handling
 
@@ -173,8 +175,11 @@ explicitly scrubbed on drop here.
 Root/global PID projection, missing subreaper support, representative-thread
 credentials, simplified ptrace privilege semantics, UID-zero child-exit fallback
 and external syscall authorization are current limits. Resource-object or mm-ID
-availability does not prove a live fd table or active mappings. Optional TEE/TIPC
-paths require feature-specific validation.
+availability does not prove a live fd table or active mappings. `de_thread`
+relies on the sibling threads being in the same process and reachable through
+the scheduler; an uncancellable sibling in uninterruptible kernel work delays
+the execing thread indefinitely (Linux has the same property). Optional
+TEE/TIPC paths require feature-specific validation.
 
 `src/tests.rs` exercises publication, PID reuse, rollback, parent/wait/exit,
 resource detach and related invariants. Inline tests cover ptrace checks, pidfd

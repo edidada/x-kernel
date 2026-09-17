@@ -180,6 +180,15 @@ earlier changes: the operation is not an all-state rollback transaction. The
 combined metadata update is atomic, but separate path and cmdline calls need not
 observe the same generation across a concurrent exec.
 
+`de_thread`: `execve` on a multi-threaded process (Go runtimes, OCI container
+init) first SIGKILLs every sibling thread and joins them, so only the execing
+thread reaches the shared address-space swap. The first sibling's death marked
+the group exited and queued a group-kill `SIGKILL` for the execing thread;
+`reset_group_exit` and a queued-signal drain undo both. `execve` also installs
+the opened backing executable file (`with_exe_file`), replacing/inheriting the
+display path in `ExecMetadata` so `/proc/<pid>/exe` can follow to the real file
+across exec, fork, and the init process created via `fork` + `execve`.
+
 ## Concurrency model
 
 Lock order for publication is process cgroup gate → publication tables → process
@@ -282,5 +291,9 @@ callers from reconstructing lifecycle policy from weak runtime references.
 Known limits include root/global PID semantics, no child-subreaper implementation,
 representative-thread credential snapshots, simplified ptrace privilege checks
 (effective UID zero substitutes for CAP_SYS_PTRACE), and no full authorization
-policy in signal/job-control facade helpers. Optional TEE/TIPC behavior exists
+policy in signal/job-control facade helpers. `PR_SET_PDEATHSIG` records the
+signal on the identity but delivery at parent-death reparenting is not yet
+wired. The init process is bootstrapped through the low-level
+`build_process_thread` path, so its backing `exe_file` is not stashed for
+`/proc/1/exe` (a documented follow-up). Optional TEE/TIPC behavior exists
 only with its Cargo feature enabled.

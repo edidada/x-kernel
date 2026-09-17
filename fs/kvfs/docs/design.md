@@ -511,6 +511,23 @@ topology；清理和最终 flush 仍继续执行。
 mount，并清空 detached mount 的 parent location，使仍持有该 mount 的打开路径不能沿旧
 parent 返回已经离开的 namespace。
 
+`MntNamespace::pivot_root()`（`pivot_root(2)` 语义）把 namespace 的可见 root 换成
+`new_root` 指向的已注册 mount，并把原可见 root 挂载到 `put_old`（OCI runtime 随后以
+`umount2(MNT_DETACH)` 摘除）。要求：`new_root` 是已注册 mount 根、`put_old` 是普通未挂载
+目录且不与新旧 root dentry 重合。手术在 registry mutex + 受影响 inode 的 namespace 写锁
+（按 root 在前的固定顺序、按 Arc 去重）下执行：先把 `new_root` 从原位置摘除并恢复其覆盖
+层，使其压栈到 namespace 的 structural root 之上，再把原可见 root 从其被 `new_root` 覆盖的
+位置取出（其自身覆盖链仍随后续 root 保留，对应 Linux 的 stack-preserving move），最后把
+原 root 挂到 `put_old`。所有可失败校验在首次修改前完成，保证失败的 pivot 不留下半编辑的
+树。`mount_edge_detach` 是共享的单边摘除原语（恢复 covers/删除 child 索引 + 清空
+location），供 pivot 与后续 MS_MOVE 复用。
+
+`MntNamespace::make_mount_private()`/`make_mount_slave()` 记录一次性传播属性。KVFS 尚无
+共享传播组，因此 slave 与 private 行为等价：没有共享 master 时 slave 不接收任何传播事件。
+两者各自校验调用（`MS_PRIVATE`/`MS_SLAVE` 可带 `MS_REC`/`MS_SILENT`，其余组合返回
+`EINVAL`），防止把非法 flags 静默吃掉。递归 bind（`MS_BIND | MS_REC`）仅在源子树挂载数为
+零时接受——此时与克隆单 mount 的结果一致；否则返回 `EINVAL` 而不是静默压平挂载树。
+
 ### pathname 与打开文件
 
 `VfsFile` 捕获 open 时使用的 `Arc<Cred>`，对应 Linux `file::f_cred`。path-based
