@@ -759,6 +759,141 @@ fn test_clone_parent_inherits_callers_exit_signal_contract() {
 }
 
 #[def_test(serial)]
+fn test_clone_newnpid_allocates_child_in_fresh_pid_namespace() {
+    let init = ensure_init();
+    let parent_task_number = kidentity::PidHandle::fixed_root(1_700);
+    let parent =
+        init.fork_with_task_number(parent_task_number.clone(), Some(ksignal::Signo::SIGCHLD));
+    let fs_context = fs_context::copy_init_fs_struct();
+    let signal_actions = Arc::new(ksync::spin::SpinNoIrq::new(
+        ksignal::api::SignalActions::default(),
+    ));
+    let thread = build_process_thread(
+        parent.clone(),
+        parent_task_number.clone(),
+        String::from("[newnpid-parent]"),
+        Arc::new(vec![]),
+        mapped_test_address_space(),
+        fs_context,
+        signal_actions,
+        initial_cred(),
+    );
+    let task = TaskInner::new_user(
+        || {},
+        String::from("newnpid-parent"),
+        parent_task_number,
+        thread,
+    );
+
+    let parent_pid_ns = parent
+        .pid_ns_for_children()
+        .expect("parent runtime exposes the pid namespace");
+    let prepared = task
+        .as_thread()
+        .prepare_process_fork(ProcessForkConfig {
+            parent: ForkParent::Caller,
+            address_space: ForkAddressSpace::Private,
+            fs: ForkFs::Private,
+            signal_actions: ForkSignalActions::Private,
+            fd_table: ForkFdTable::Private,
+            namespace_flags: kns::NamespaceFlags::NEWPID,
+            exit_signal: Some(ksignal::Signo::SIGCHLD),
+        })
+        .expect("CLONE_NEWPID fork should prepare");
+
+    let child = prepared.process().clone();
+    let child_pid_ns = child
+        .pid_ns_for_children()
+        .expect("child runtime exposes the pid namespace");
+
+    // The child owns a fresh PID namespace nested one level below the parent's.
+    assert!(!Arc::ptr_eq(&parent_pid_ns, &child_pid_ns));
+    assert!(Arc::ptr_eq(
+        child_pid_ns.parent().expect("child pid ns has parent"),
+        &parent_pid_ns
+    ));
+
+    // The child leader is allocated inside the fresh namespace (number 1)
+    // while still carrying a root projection for global lookup.
+    let (_, task_number) = prepared.into_parts();
+    assert_eq!(task_number.number_in(&child_pid_ns), Some(1));
+    assert_eq!(task_number.number_in(&parent_pid_ns), None);
+    assert!(
+        task_number.visible_number(&parent_pid_ns).is_some(),
+        "the parent- or root-level observer still sees a number"
+    );
+
+    child.discard_unpublished();
+    parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    parent.free();
+}
+
+#[def_test(serial)]
+fn test_apply_prepared_unshare_installs_namespace_bundle() {
+    let (parent, task) = build_prepared_test_user_task();
+    let thread = task.as_thread();
+
+    let prepared = thread
+        .process()
+        .nsproxy()
+        .expect("runtime exposes namespace bundle")
+        .prepare_unshare(
+            kns::NamespaceFlags::NEWUTS | kns::NamespaceFlags::NEWIPC,
+            kns::UnshareContext {
+                privileged: true,
+                fs_shared_with_others: false,
+                unshare_fs: false,
+                unshare_files: false,
+            },
+            &thread.process().fs_context().expect("fs context").lock(),
+        )
+        .expect("unshare preparation should succeed");
+
+    let before_uts = thread.process().uts_ns().expect("uts before");
+    let before_ipc = thread.process().ipc_ns().expect("ipc before");
+    thread
+        .process()
+        .apply_prepared_unshare(prepared)
+        .expect("commit succeeds");
+
+    let after_uts = thread.process().uts_ns().expect("uts after");
+    let after_ipc = thread.process().ipc_ns().expect("ipc after");
+    let after_nsproxy = thread.process().nsproxy().expect("bundle after");
+    assert!(!Arc::ptr_eq(&before_uts, &after_uts));
+    assert!(!Arc::ptr_eq(&before_ipc, &after_ipc));
+    assert!(Arc::ptr_eq(&after_ipc, after_nsproxy.ipc_ns()));
+    // Only requested slots changed: the mount namespace reference is preserved.
+    assert!(Arc::ptr_eq(
+        after_nsproxy.mnt_ns(),
+        &thread.process().mnt_ns().expect("mnt after")
+    ));
+
+    // Commit respects the CLONE_FILES request.
+    let prepared_files = thread
+        .process()
+        .nsproxy()
+        .expect("bundle")
+        .prepare_unshare(
+            kns::NamespaceFlags::empty(),
+            kns::UnshareContext {
+                privileged: false,
+                fs_shared_with_others: false,
+                unshare_fs: false,
+                unshare_files: true,
+            },
+            &thread.process().fs_context().expect("fs context").lock(),
+        )
+        .expect("files-only unshare prepares");
+    thread
+        .process()
+        .apply_prepared_unshare(prepared_files)
+        .expect("files unshare commits");
+
+    parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    parent.free();
+}
+
+#[def_test(serial)]
 fn test_free_only_reaps_target_zombie_child() {
     let init = ensure_init();
     let first = init.fork(400);

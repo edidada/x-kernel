@@ -400,6 +400,19 @@ impl ProcessRuntime {
         self.nsproxy.read().clone()
     }
 
+    /// Replaces the process namespace bundle installed in this runtime.
+    ///
+    /// Dropping the previous bundle releases the strong reference to the old
+    /// namespaces; namespace owners then release their own resources.
+    pub(crate) fn set_nsproxy(&self, nsproxy: Arc<NsProxy>) {
+        *self.nsproxy.write() = Some(nsproxy);
+    }
+
+    /// Replaces the process filesystem context installed in this runtime.
+    pub(crate) fn set_fs_context(&self, fs_context: Arc<Mutex<FsStruct>>) {
+        *self.fs_context.write() = Some(fs_context);
+    }
+
     /// Returns the UTS namespace while the namespace proxy remains attached.
     pub(crate) fn uts_ns(&self) -> Option<Arc<kns::UtsNamespace>> {
         self.nsproxy().map(|nsproxy| nsproxy.uts_ns().clone())
@@ -496,7 +509,14 @@ pub(crate) fn fork_process_runtime(
     config: ProcessForkConfig,
 ) -> KResult<(Arc<ProcessRuntime>, Arc<kidentity::PidHandle>)> {
     let fs_namespaces = prepare_fork_fs_and_namespaces(parent, &config)?;
-    let leader_task_number = kidentity::allocate_root_pid_handle()?;
+    // With CLONE_NEWPID the child leader is allocated inside the fresh child
+    // PID namespace (visible as 1 there, plus a new root projection), matching
+    // Linux `copy_pid_ns`; otherwise the root allocator hands out the number.
+    let leader_task_number = if config.namespace_flags.contains(kns::NamespaceFlags::NEWPID) {
+        kidentity::PidHandle::allocate_in(fs_namespaces.nsproxy.pid_ns_for_children())?
+    } else {
+        kidentity::allocate_root_pid_handle()?
+    };
     let process = parent.process().fork_with_tree_parent(
         leader_task_number.clone(),
         config.parent,
