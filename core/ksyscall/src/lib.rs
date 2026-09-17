@@ -16,6 +16,8 @@ extern crate klogger;
 extern crate alloc;
 
 mod arch;
+#[cfg(not(feature = "ebpf"))]
+mod bpf;
 mod dispatch;
 mod io_mpx;
 mod ipc;

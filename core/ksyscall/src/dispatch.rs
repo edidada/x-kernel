@@ -811,7 +811,7 @@ pub fn dispatch_irq_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         #[cfg(feature = "ebpf")]
         Sysno::bpf => posix_bpf::sys_bpf(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
         #[cfg(not(feature = "ebpf"))]
-        Sysno::bpf => sys_dummy_fd(sysno),
+        Sysno::bpf => crate::bpf::sys_bpf_stub(uctx.arg0() as _, uctx.arg1(), uctx.arg2() as _),
 
         // dummy fds
         Sysno::fanotify_init
