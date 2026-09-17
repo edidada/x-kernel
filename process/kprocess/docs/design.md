@@ -157,7 +157,10 @@ membership).
 Fork takes the process cgroup gate, reserves a child charge, clones/shares fs and
 namespaces, allocates a root identity and validates/attaches the child relation.
 Shared fs while its parent is in exec returns WouldBlock; namespace errors map
-to InvalidInput/Unsupported or a mount error. `CallerParent` inherits the
+to InvalidInput/Unsupported or a mount error. With `CLONE_NEWPID` the child
+leader is allocated inside the freshly created child PID namespace (visible as 1
+there) while still carrying a root projection for global lookup, matching Linux
+`copy_pid_ns`. `CallerParent` inherits the
 caller's current parent and exit-signal contract, rechecking it under the domain
 lock. Thread preparation clones/shares the caller's fd table; runtime preparation
 then clones/shares mm and signal actions;
@@ -367,10 +370,19 @@ Preallocated intrusive child slots keep commit-time relations within the
 non-sleeping domain boundary; stable publication slots separate visibility from
 allocating/deleting BTreeMap entries. Dedicated semantic query modules prevent
 callers from reconstructing lifecycle policy from weak runtime references.
-Known limits include root/global PID semantics, no child-subreaper implementation,
-representative-thread credential snapshots, simplified ptrace privilege checks
-(effective UID zero substitutes for CAP_SYS_PTRACE), and no full authorization
-policy in signal/job-control facade helpers. `PR_SET_PDEATHSIG` records the
+`ProcessRuntime` holds the process namespace bundle in an `RwLock<Option<NsProxy>>`.
+`apply_prepared_unshare` installs a validated bundle (optionally swapping the
+filesystem context for `NEWNS`/`CLONE_FS`) and unshares the fd table for
+`CLONE_FILES`; `apply_setns` swaps one namespace slot and retargets the fs
+root/pwd into a mount namespace for `CLONE_NEWNS`. Both paths only install
+state validated by `kns`, so the commit surface is small. `Process::nsproxy` and
+the per-namespace accessors expose the bundle to `setns` and `/proc/<pid>/ns`.
+Known limits include the fs-sharing check covering only the caller's published
+threads (cross-process `CLONE_FS` sharing is not counted), PID lookups still
+keyed by root numbers, no child-subreaper implementation, representative-thread
+credential snapshots, simplified ptrace privilege checks (effective UID zero
+substitutes for CAP_SYS_PTRACE), and no full authorization policy in
+signal/job-control facade helpers. `PR_SET_PDEATHSIG` records the
 signal on the identity but delivery at parent-death reparenting is not yet
 wired. The init process is bootstrapped through the low-level
 `build_process_thread` path, so its backing `exe_file` is not stashed for
