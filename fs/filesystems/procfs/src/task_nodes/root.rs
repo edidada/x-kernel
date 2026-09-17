@@ -719,13 +719,25 @@ impl SimpleDirOps for ThreadNsDir {
             return Err(VfsError::NotFound);
         }
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
+        let inode_number = task_namespace_inode(name, &task)?;
+        // `ns/net` is exposed as a real file whose inode number is the
+        // namespace id instead of a dangling magic symlink: libnetwork
+        // persists a sandbox with `mount --bind /proc/self/ns/net <path>`,
+        // runc tells namespaces apart through `stat()`, and `setns(2)`
+        // resolves the id back through the inode. Deviation from Linux's
+        // nsfs-backed magic symlinks: `readlink` fails with EINVAL.
+        if name == "net" {
+            let file = SimpleFile::new_regular(self.fs.clone(), || Ok(Vec::new()));
+            file.set_inode_number(inode_number);
+            return lookup.file(name, file);
+        }
         let target = task_namespace_link_target(name, &task)?;
         let inode = SimpleFile::new(self.fs.clone(), NodeType::Symlink, move || {
             Ok(target.clone())
         });
         // `stat()` must expose the namespace identity (see
         // `task_namespace_inode`) so separate namespaces are distinguishable.
-        inode.set_inode_number(task_namespace_inode(name, &task)?);
+        inode.set_inode_number(inode_number);
         lookup.file(name, inode)
     }
 

@@ -4,7 +4,10 @@
 
 //! Namespace syscalls (`unshare`, `setns`).
 
+use core::ffi::c_int;
+
 use kerrno::{KError, KResult};
+use knetns::NetNsId;
 use kns::NamespaceFlags;
 
 /// Separates namespace state from the rest of the process (`unshare(2)`).
@@ -48,8 +51,19 @@ pub fn sys_setns(fd: usize, nstype: u64) -> KResult<isize> {
     if nstype != 0 && (type_bits.bits() != nstype || !is_single_bit(nstype)) {
         return Err(KError::InvalidInput);
     }
-    debug!("sys_setns <= fd: {fd:#x}, nstype: {nstype:#x} — unsupported (namespace fds not wired)");
-    Err(KError::Unsupported)
+
+    // Only network namespaces are supported. The fd must reference a
+    // `/proc/[pid]/ns/net` file, which carries the namespace id in its inode
+    // number (see procfs `ThreadNsDir`).
+    if nstype != 0 && nstype != NamespaceFlags::NEWNET.bits() {
+        return Err(KError::Unsupported);
+    }
+    let file = kprocess::current_resources().get_file(fd as c_int)?;
+    let inode_number = file.inode().metadata().inode;
+    let id = NetNsId::from_u64(inode_number).ok_or(KError::InvalidInput)?;
+    let net_ns = knet::netns::resolve(id).ok_or(KError::InvalidInput)?;
+    kprocess::current_user_process().set_net_ns(net_ns.id());
+    Ok(0)
 }
 
 fn is_single_bit(value: u64) -> bool {

@@ -1017,8 +1017,15 @@ fn test_unshare_rejects_unimplemented_namespace_types() {
     );
     let runtime = task.as_thread().process_runtime();
 
+    // NEWNET is accepted at this layer: the fresh namespace is created and
+    // committed by the syscall layer (see ksyscall `sys_unshare`), while the
+    // remaining kinds stay unsupported.
+    assert!(
+        runtime
+            .unshare_namespaces(kns::NamespaceFlags::NEWNET)
+            .is_ok()
+    );
     for flags in [
-        kns::NamespaceFlags::NEWNET,
         kns::NamespaceFlags::NEWUSER,
         kns::NamespaceFlags::NEWCGROUP,
         kns::NamespaceFlags::NEWTIME,

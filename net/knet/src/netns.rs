@@ -250,6 +250,11 @@ fn loopback_router(id: NetNsId) -> Router {
     router
 }
 
+/// Returns the namespace registered under `id`, if it is still alive.
+pub fn resolve(id: NetNsId) -> Option<Arc<NetNamespace>> {
+    NETNS_TABLE.lock().get(&id).cloned()
+}
+
 /// Returns the namespaces that currently exist, as strong snapshots.
 ///
 /// Used by the poller: the registry lock is released before any namespace is

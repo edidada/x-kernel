@@ -2982,6 +2982,7 @@ dependencies = [
  "khal",
  "klogger",
  "knet",
+ "knetns",
  "kns",
  "kpoll",
  "kprocess",
