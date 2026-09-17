@@ -9,6 +9,17 @@ use ktask::{TaskInner, TaskState};
 
 use crate::AsThread;
 
+/// Number of nanoseconds in one second.
+const NSEC_PER_SEC: u64 = 1_000_000_000;
+/// User-visible clock-tick frequency used by `/proc/[pid]/stat` (USER_HZ).
+const USER_HZ: u64 = 100;
+
+/// Converts a monotonic nanoseconds-since-boot timestamp into the
+/// `/proc/[pid]/stat` `starttime` representation (clock ticks since boot).
+fn starttime_ticks(start_time_ns: u64) -> u64 {
+    start_time_ns / (NSEC_PER_SEC / USER_HZ)
+}
+
 /// Represents the `/proc/[pid]/stat` file.
 #[derive(Default)]
 pub struct TaskStat {
@@ -146,6 +157,12 @@ impl TaskStat {
         let pgrp = proc.group().pgid();
         let session = proc.group().session().sid();
         let nice = thread.nice();
+        // Linux reports `starttime` in clock ticks since boot with USER_HZ=100
+        // (i.e. nanoseconds / 10_000_000). It must be a real non-zero value for
+        // processes started after the first tick: runtimes such as Go's (runc)
+        // compare it against persisted state to decide whether a process is
+        // still the one they spawned.
+        let starttime = starttime_ticks(task.start_time_ns());
         Ok(Self {
             pid,
             comm: comm.to_owned(),
@@ -156,6 +173,7 @@ impl TaskStat {
             priority: nice.proc_stat_priority(),
             nice: nice.as_i32(),
             num_threads: proc.thread_count() as u32,
+            starttime,
             exit_signal: proc.exit_signal().map_or(0, |signo| signo as u8),
             exit_code: proc.exit_code(),
             ..Default::default()
@@ -236,7 +254,16 @@ impl fmt::Display for TaskStat {
 mod tests_stat {
     use unittest::def_test;
 
-    use super::TaskStat;
+    use super::{TaskStat, starttime_ticks};
+
+    #[def_test]
+    fn test_starttime_ticks_conversion() {
+        // USER_HZ=100: one tick per 10 ms.
+        assert_eq!(starttime_ticks(0), 0);
+        assert_eq!(starttime_ticks(9_999_999), 0);
+        assert_eq!(starttime_ticks(10_000_000), 1);
+        assert_eq!(starttime_ticks(118_490_000_000), 11_849);
+    }
 
     #[def_test]
     fn test_taskstat_display_default() {
