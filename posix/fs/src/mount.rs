@@ -124,7 +124,6 @@ fn path_mount(
     // combination execute with part of the request silently ignored.
     let unsupported_operations = linux_raw_sys::general::MS_MOVE
         | linux_raw_sys::general::MS_SHARED
-        | linux_raw_sys::general::MS_SLAVE
         | linux_raw_sys::general::MS_UNBINDABLE;
     if flags & unsupported_operations != 0 {
         return Err(KError::InvalidInput);
@@ -134,16 +133,20 @@ fn path_mount(
     let superblock_flags = superblock_flags(flags);
     let namespace = process.mnt_ns()?;
 
+    // KVFS has no shared propagation groups, so `MS_PRIVATE` and `MS_SLAVE`
+    // are behaviorally identical; each is validated and recorded per-mount.
+    // Descendants are also covered by construction, so an accompanying
+    // `MS_REC` requires no additional traversal.
     if flags & linux_raw_sys::general::MS_PRIVATE != 0 {
-        validate_private_propagation_flags(flags)?;
+        validate_propagation_flags(flags, linux_raw_sys::general::MS_PRIVATE)?;
         namespace.make_mount_private(target)?;
-        // Descendants are also private by construction, so MS_REC requires no
-        // additional traversal until KVFS gains shared propagation groups.
         return Ok(());
     }
 
-    if flags & linux_raw_sys::general::MS_REC != 0 {
-        return Err(KError::InvalidInput);
+    if flags & linux_raw_sys::general::MS_SLAVE != 0 {
+        validate_propagation_flags(flags, linux_raw_sys::general::MS_SLAVE)?;
+        namespace.make_mount_slave(target)?;
+        return Ok(());
     }
 
     if flags & (linux_raw_sys::general::MS_REMOUNT | linux_raw_sys::general::MS_BIND)
@@ -166,11 +169,17 @@ fn path_mount(
         namespace.remount(target, &mut context, mount_flags)?;
         return Ok(());
     }
+
+    let recursive = flags & linux_raw_sys::general::MS_REC != 0;
     if flags & linux_raw_sys::general::MS_BIND != 0 {
         // Linux `do_loopback()` clones the source mount flags; ordinary flags
         // in an initial bind request are ignored. `MS_REMOUNT | MS_BIND` is the
         // operation that changes the cloned mount's per-mount flags.
-        return do_loopback(process, cred, &namespace, target, dev_name);
+        return do_loopback(process, cred, &namespace, target, dev_name, recursive);
+    }
+
+    if recursive {
+        return Err(KError::InvalidInput);
     }
 
     let fs_type = fs_type.ok_or(KError::InvalidInput)?;
@@ -212,11 +221,19 @@ fn do_loopback(
     namespace: &MntNamespace,
     mountpoint: &Path,
     old_name: Option<&str>,
+    recursive: bool,
 ) -> KResult<()> {
     let old_name = old_name
         .filter(|name| !name.is_empty())
         .ok_or(KError::InvalidInput)?;
     let old_path = lookup_mount_path(process, old_name, cred)?;
+    // Linux `do_loopback()` clones the whole source subtree for a recursive
+    // bind. KVFS clones a single mount, which only matches Linux's result
+    // while the source subtree has no mounts attached; reject the request
+    // otherwise instead of silently flattening the cloned tree.
+    if recursive && old_path.has_child_mount() {
+        return Err(KError::InvalidInput);
+    }
     namespace.attach_bind(&old_path, mountpoint)?;
     Ok(())
 }
@@ -241,10 +258,8 @@ fn superblock_flags(flags: u32) -> SuperBlockFlags {
     superblock_flags
 }
 
-fn validate_private_propagation_flags(flags: u32) -> KResult<()> {
-    let allowed = linux_raw_sys::general::MS_PRIVATE
-        | linux_raw_sys::general::MS_REC
-        | linux_raw_sys::general::MS_SILENT;
+fn validate_propagation_flags(flags: u32, operation: u32) -> KResult<()> {
+    let allowed = operation | linux_raw_sys::general::MS_REC | linux_raw_sys::general::MS_SILENT;
     if flags & !allowed != 0 {
         return Err(KError::InvalidInput);
     }
@@ -356,11 +371,14 @@ pub fn sys_pivot_root(
     let namespace = process.mnt_ns()?;
     namespace.pivot_root(&new_root, &put_old)?;
 
-    let visible_root = namespace.visible_root_path();
+    // Linux `chroot_fs_refs(&root, &new)`: the caller's root and pwd move to
+    // the new root path. When `put_old` coincided with `new_root` (runc's
+    // `pivot_root(".", ".")`), the relocated old root covers this path until
+    // the caller umounts it, so it must stay unresolved to the topmost mount.
     let fs_context = process.fs_context()?;
     fs_context
         .lock()
-        .replace_root_and_pwd(visible_root.clone(), visible_root)?;
+        .replace_root_and_pwd(new_root.clone(), new_root)?;
     Ok(0)
 }
 
@@ -430,11 +448,16 @@ mod tests {
     #[def_test]
     fn private_propagation_accepts_optional_recursive_scope() {
         assert!(
-            super::validate_private_propagation_flags(linux_raw_sys::general::MS_PRIVATE).is_ok()
+            super::validate_propagation_flags(
+                linux_raw_sys::general::MS_PRIVATE,
+                linux_raw_sys::general::MS_PRIVATE
+            )
+            .is_ok()
         );
         assert!(
-            super::validate_private_propagation_flags(
-                linux_raw_sys::general::MS_PRIVATE | linux_raw_sys::general::MS_REC
+            super::validate_propagation_flags(
+                linux_raw_sys::general::MS_PRIVATE | linux_raw_sys::general::MS_REC,
+                linux_raw_sys::general::MS_PRIVATE
             )
             .is_ok()
         );
@@ -443,8 +466,9 @@ mod tests {
     #[def_test]
     fn private_propagation_accepts_silent_flag() {
         assert!(
-            super::validate_private_propagation_flags(
-                linux_raw_sys::general::MS_PRIVATE | linux_raw_sys::general::MS_SILENT
+            super::validate_propagation_flags(
+                linux_raw_sys::general::MS_PRIVATE | linux_raw_sys::general::MS_SILENT,
+                linux_raw_sys::general::MS_PRIVATE
             )
             .is_ok()
         );
@@ -453,8 +477,37 @@ mod tests {
     #[def_test]
     fn private_propagation_rejects_unrelated_flags() {
         assert!(
-            super::validate_private_propagation_flags(
-                linux_raw_sys::general::MS_PRIVATE | linux_raw_sys::general::MS_RDONLY
+            super::validate_propagation_flags(
+                linux_raw_sys::general::MS_PRIVATE | linux_raw_sys::general::MS_RDONLY,
+                linux_raw_sys::general::MS_PRIVATE
+            )
+            .is_err()
+        );
+    }
+
+    #[def_test]
+    fn slave_propagation_accepts_recursive_scope_only() {
+        assert!(
+            super::validate_propagation_flags(
+                linux_raw_sys::general::MS_SLAVE | linux_raw_sys::general::MS_REC,
+                linux_raw_sys::general::MS_SLAVE
+            )
+            .is_ok()
+        );
+        // runc's `prepareRoot()` sends exactly `MS_SLAVE | MS_REC`.
+        assert!(
+            super::validate_propagation_flags(
+                linux_raw_sys::general::MS_SLAVE
+                    | linux_raw_sys::general::MS_REC
+                    | linux_raw_sys::general::MS_SILENT,
+                linux_raw_sys::general::MS_SLAVE
+            )
+            .is_ok()
+        );
+        assert!(
+            super::validate_propagation_flags(
+                linux_raw_sys::general::MS_SLAVE | linux_raw_sys::general::MS_PRIVATE,
+                linux_raw_sys::general::MS_SLAVE
             )
             .is_err()
         );
