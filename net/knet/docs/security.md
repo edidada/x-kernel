@@ -125,6 +125,7 @@ The trust relationships in the diagram define the security responsibilities of e
 | Unix stream and vsock ring-buffer storage | The unsafe inventory specifies the occupied/vacant range and lock prerequisites for slice access and index advancement. Publication must be limited to initialized bytes; consumption must remain within occupied bytes. |
 | smoltcp `SocketHandle` values | `SOCKET_SET` owns handles under its mutex, and TCP deferred-close processing retains protocol state until closure permits reclamation. |
 | Interface configuration and device identity | `NetDevice` owns link and neighbor state; Router owns addresses and routes. `network_config_lock` protects individual control-plane mutations and device removal. UDP matching uses `PacketBuf::ifindex` and `GeneralOptions::bound_dev_if` to preserve device selection. |
+| IPv4 filter-table structure | `netfilter::model::FilterTable` owns its strings, rules, matches, and targets. Construction requires exactly one canonical built-in chain for each supported hook and rejects invalid IPv4 prefixes, dangling jumps, jumps into built-in chains, and recursive chain graphs. |
 | TIPC channels, message handles, and client UUIDs | `VsockBridge::read_tipc_msg` rejects attached handles. `accept_reverse_tipc` checks the UUID returned by `ipc_port_accept` against `TipcToVsockMapping::allowed_uuids`, with an empty list explicitly permitting all UUIDs. |
 | Queued AF_PACKET frame storage | `PacketFrame` retains an `Arc<[u8]>`; `PacketRxQueue::push_back` counts the full retained frame allocation and caps each queue at 64 KiB and 1024 frames. `recv_lock` serializes consumption while payload copies run outside `rx_queue`. |
 
@@ -557,6 +558,15 @@ The sum of pending requests and capacity reservations must not exceed `LISTEN_QU
 The two 64 KiB ring buffers for each connection may be allocated only after capacity has been reserved successfully.
 RAII must return the slot if reservation fails, the operation is interrupted, or the source socket's state rejects the connection.
 
+### 31. IPv4 Filter Table Ownership and Graph Validity
+
+A `FilterTable` contains owned semantic values and table-local `ChainId`
+indices. `FilterTable::new` requires one canonical built-in chain per supported
+hook, resolves every jump within the same table, restricts jumps to user-defined
+chains, and rejects cyclic graphs. A future ABI decoder must convert raw
+pointers, byte offsets, extension data, and integer verdict encodings before it
+constructs this model.
+
 ## Thread Safety
 
 | Type | Send Conditions | Sync Conditions |
@@ -569,6 +579,7 @@ RAII must return the slot if reservation fails, the operation is interrupted, or
 | `NetlinkSocket` | All fields satisfy Send | `Arc<NetlinkSocketInner>` internally uses `RwLock`, a send-transaction `Mutex`, a receive-queue `Mutex`, and `PollSet`; each send explicitly carries caller credentials, and the socket does not retain an authorization identity |
 | `Service` | All fields satisfy Send | Separate internal `Mutex` instances protect Interface, Router, IngressProcessor, timeouts, and reusable batches; the poller acquires shared processing locks without blocking and retains batches during contention; network-timer and deferred-close deadlines are published atomically, and the periodic sampling callback never acquires sleeping mutexes |
 | `Router` | Used within `Service` | Shared indirectly through the Router mutex in `Service` |
+| `FilterTable` | All fields satisfy Send | The current model owns all chain, rule, match, and target data. It has no shared publication point and is not accessed by packet processing. |
 
 ## Threat Analysis
 
@@ -682,6 +693,7 @@ Ordinary logs omit payload contents, while trace logs record Ethernet frame byte
 
 ## Known Limitations
 
+- The IPv4 netfilter work currently defines only the owned `filter` table model and structural validation. There is no `IPT_SO_SET_REPLACE` decoder, shared snapshot, packet evaluator, hook integration, counter accounting, or save path, so the model does not filter traffic yet. `FilterTable` also relies on the future decoder to enforce byte, chain, rule, match, and jump-depth limits.
 - `StreamTransport::recv` currently consumes copied bytes even when `RecvFlags::PEEK` is requested. `DgramTransport::recv` also dequeues before copying. Callers must not rely on non-consuming Unix socket PEEK semantics until those paths implement them.
 - netlink mutation-only batches have response-capacity preflight and per-socket serialization, but later operation failures do not roll back earlier mutations. `network_config_lock` is acquired per mutation, so different callers can interleave between messages in a batch.
 - Unix datagram channels are unbounded. The stream listener limit and AF_PACKET/netlink queue limits do not bound their queued payloads or ancillary objects.
@@ -725,6 +737,7 @@ for this document update. Test names are resolved against current source.
 | UDP and Ethernet test waker use | [src/transport/udp/wait.rs](../src/transport/udp/wait.rs): `test_udp_socket_waiters_wake_all_read_waiters`; [src/device/ethernet.rs](../src/device/ethernet.rs): `test_net_rx_softirq_wakes_only_pending_sources`. They exercise callback use, not a complete proof of raw-waker soundness. |
 | TIPC UUID policy, record length, and handle rejection | Inspect `uuid_allowed`, `accept_reverse_tipc`, `recv_exact_record`, and `read_tipc_msg` in [src/vsock/bridge.rs](../src/vsock/bridge.rs), together with `TIPC_TO_VSOCK_MAP` in [src/vsock/bridge_port_map.rs](../src/vsock/bridge_port_map.rs). The empty allowlist and error branches are directly reproducible source checks. |
 | Trace payload exposure | Inspect the `trace!` calls in `EthernetDevice::send_frame` and `poll_rx` in [src/device/ethernet.rs](../src/device/ethernet.rs) and the deployment's enabled log level. |
+| IPv4 filter-table structural validation | [src/netfilter/model.rs](../src/netfilter/model.rs): unit tests check built-in hook mapping and cardinality, chain names, match-value ranges and masks, IPv4 prefix rejection, invalid jump targets, recursive-chain rejection, and acceptance of an acyclic user-chain graph. ABI decoding and packet evaluation are outside the current implementation. |
 
 To run crate unit tests, prepare `.config` from a platform defconfig and use
 `make unittest UNITTEST_CRATE=knet` according to the repository
@@ -754,6 +767,7 @@ Changes to this module must verify the following:
 - Unix listener changes keep the sum of pending requests and capacity reservations within `LISTEN_QUEUE_SIZE`. Ring buffers are allocated after capacity reservation; binding-slot and state locks are released before blocking waits; shutdown and Drop wake connect and accept waiters.
 - Unix pathname filesystem-context locks and abstract-address binding-table locks are released before transport callbacks. Blocking connect does not hold address-lookup-layer locks.
 - New external network inputs use bounds-checked parsers.
+- Filter-table model changes preserve exactly one canonical built-in chain per supported hook, valid IPv4 prefixes, table-local jump targets, user-chain-only jumps, and acyclic control flow.
 - IPv4 fragment reassembly changes preserve queue-count, memory, and timeout limits and reject overlapping ranges.
 - `SO_BINDTODEVICE` updates `GeneralOptions::bound_dev_if` through atomic exchange. UDP receive filtering, UDP transmission, and TCP/raw RX device selection read the same field. Relaxed reads carry only the interface index. When the value changes, the `PollEvent` version publishes the update with Release/Acquire ordering and wakes device RX waiters. RX registration retains the subscription to configuration events and rechecks the event version to detect changes between device selection and registration completion. Binding and unbinding rebuild device RX registrations; default and unbound states select all devices. Notifications trigger readiness rechecks, and actual IO state determines user-visible events. Protocol receive filtering enforces packet isolation.
 - UDP waits for reception alone subscribe only to the socket's read, error, and shutdown events. Packet enqueueing, asynchronous errors, and read shutdown publish their state before notifying waiters. Readiness checks after registration account for notifications that arrived earlier, and cancellation removes all subscriptions. Ingress filters packets using the current `bound_dev_if`, so existing receive subscriptions remain valid when the binding changes. Ethernet RX, loopback sends, and timers independently advance network processing. Waits for reception alone are independent of device RX broadcasts and global protocol timer broadcasts. Waits that include write events retain the network progress notifications required for TX.
