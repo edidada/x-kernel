@@ -828,13 +828,16 @@ fn mutation_error_requires_abort(error: Ext4Error) -> bool {
         error,
         Ext4Error::Device(_)
             | Ext4Error::JournalAborted
-            | Ext4Error::InsufficientJournalCredits
             | Ext4Error::JournalBusy
             | Ext4Error::InvalidJournalTransaction
             | Ext4Error::ChecksumMismatch { .. }
             | Ext4Error::Corrupt(_)
             | Ext4Error::Unsupported(UnsupportedKind::ConcurrentMetadataTransaction)
     )
+    // Note: `InsufficientJournalCredits` intentionally does NOT abort the
+    // journal. Linux treats credit exhaustion as a retryable condition (the
+    // transaction is committed and the operation retried), never as a reason
+    // to poison the whole journal for every other task.
 }
 
 impl Ext4Recovery {
