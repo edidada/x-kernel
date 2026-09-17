@@ -11,7 +11,8 @@
 
 use core::ffi::c_char;
 
-use kerrno::{KError, KResult, LinuxError};
+use kerrno::{KError, KResult};
+use ksignal::MAX_SIGNALS;
 use ktask::current;
 use kuaccess::vm_load_string;
 use linux_raw_sys::general::{__user_cap_data_struct, __user_cap_header_struct};
@@ -117,11 +118,27 @@ pub fn sys_prctl(
             }
             return Ok(0);
         }
+        PR_GET_PDEATHSIG => {
+            // Linux kernel/sys.c: `put_user(me->pdeath_signal, (int __user *)arg2)`.
+            let signal = kprocess::current_user_process().pdeath_signal();
+            write_vm_mem(arg2 as _, &signal.to_ne_bytes())?;
+        }
+        PR_SET_PDEATHSIG => {
+            // Linux `valid_signal(arg2)`: 0 clears, otherwise 1..=MAX_SIGNALS-1.
+            if arg2 >= MAX_SIGNALS {
+                return Err(KError::InvalidInput);
+            }
+            kprocess::current_user_process().set_pdeath_signal(arg2 as u32);
+        }
         PR_SET_NO_NEW_PRIVS => {
             if arg2 != 1 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
                 return Err(KError::InvalidInput);
             }
-            return Err(KError::from(LinuxError::ENOSYS));
+            // Execve in this kernel never grants privileges (no setuid-bit or
+            // file-capability transitions), so the no-new-privileges contract
+            // holds unconditionally; record the flag for `PR_GET_NO_NEW_PRIVS`
+            // and clone inheritance.
+            kprocess::current_user_thread().set_no_new_privileges();
         }
         PR_GET_NO_NEW_PRIVS => {
             if arg2 != 0 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
@@ -210,7 +227,7 @@ pub fn sys_prctl(
 
 #[cfg(unittest)]
 mod tests {
-    use kerrno::{KError, LinuxError};
+    use kerrno::KError;
     use linux_raw_sys::prctl::*;
     use unittest::{assert_eq, def_test};
 
@@ -269,10 +286,26 @@ mod tests {
     }
 
     #[def_test(user, serial)]
-    fn prctl_set_no_new_privs_requires_exec_enforcement() {
+    fn prctl_set_no_new_privs_rejects_invalid_args() {
         assert_eq!(
-            sys_prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0),
-            Err(KError::from(LinuxError::ENOSYS))
+            sys_prctl(PR_SET_NO_NEW_PRIVS, 1, 1, 0, 0),
+            Err(KError::InvalidInput)
+        );
+        assert_eq!(
+            sys_prctl(PR_SET_NO_NEW_PRIVS, 2, 0, 0, 0),
+            Err(KError::InvalidInput)
+        );
+    }
+
+    #[def_test(user, serial)]
+    fn prctl_set_pdeath_sig_validates_signal_range() {
+        // Linux `valid_signal`: 0 (clear) and valid signals are accepted.
+        assert_eq!(sys_prctl(PR_SET_PDEATHSIG, 0, 0, 0, 0), Ok(0));
+        assert_eq!(sys_prctl(PR_SET_PDEATHSIG, 9, 0, 0, 0), Ok(0));
+        // Out-of-range signals are rejected with EINVAL.
+        assert_eq!(
+            sys_prctl(PR_SET_PDEATHSIG, 64, 0, 0, 0),
+            Err(KError::InvalidInput)
         );
     }
 

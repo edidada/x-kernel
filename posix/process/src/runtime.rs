@@ -4,7 +4,7 @@
 
 //! User-thread runtime helpers used by process-related syscalls.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::ffi::c_long;
 
 use bytemuck::AnyBitPattern;
@@ -14,7 +14,7 @@ use kidentity::PidHandle;
 use kprocess::{
     AsThread, CpuTimeState, Pid, Thread, Tid, UserThreadRuntimeAction, current_user_process,
     current_user_process_address_space, current_user_thread, poll_cpu_timers, process_exit,
-    process_signals,
+    process_signals, scheduler,
 };
 use ksignal::{SignalInfo, SignalOSAction, SignalSet, Signo};
 use ktask::{TaskInner, current};
@@ -306,6 +306,49 @@ fn exit_robust_list(head: *const RobustListHead, tid: Tid) {
     if !pending_address.is_null() && !pending_is_pi {
         let _ = dispatch_irq_futex_death(pending_address, offset, tid, true);
     }
+}
+
+/// Terminates every sibling thread before `execve` swaps the address space
+/// (Linux `de_thread()`).
+///
+/// Sibling threads receive a thread-directed `SIGKILL` and are waited out, so
+/// only the execing thread remains when the caller proceeds. The group-exit
+/// bookkeeping and any group-kill signal the siblings' death queued for this
+/// thread are undone, so a later exit reports this thread's own code.
+///
+/// Call only in the current user thread's sleepable context; `join` blocks
+/// until every sibling has fully exited.
+pub fn exec_de_thread() {
+    let thr = current_user_thread();
+    let process = thr.process();
+    let tid = thr.tid();
+
+    let siblings: Vec<_> = scheduler::process_tasks(process.as_ref())
+        .into_iter()
+        .filter(|task| task.as_thread().tid() != tid)
+        .collect();
+    if siblings.is_empty() {
+        return;
+    }
+
+    let kill = SignalInfo::new_kernel(Signo::SIGKILL);
+    for task in &siblings {
+        let _ = process_signals::send_to_thread(None, task.as_thread().tid(), Some(kill.clone()));
+    }
+    // Wait for every sibling to fully exit before touching the shared
+    // address space, mirroring Linux waiting on each thread's exit.
+    for task in siblings {
+        let _ = task.join();
+    }
+
+    // The first sibling's death marked the group as exited and queued a
+    // group-kill `SIGKILL` for this thread too; undo both so this thread
+    // survives the next signal check and reports its own exit code later.
+    process.reset_group_exit();
+    let manager = thr.signal_manager();
+    let mut kill_mask = SignalSet::default();
+    kill_mask.add(Signo::SIGKILL);
+    while manager.dequeue_signal(&kill_mask).is_some() {}
 }
 
 /// Tears down the current user thread and optionally terminates its siblings.

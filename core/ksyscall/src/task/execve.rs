@@ -23,6 +23,7 @@ use ktask::current;
 use kuaccess::vm_load_string;
 use kvfs::{Filename, LookupFlags, LookupIntent};
 use osvm::load_vec_until_null;
+use posix_process::exec_de_thread;
 
 pub fn sys_execve(
     uctx: &mut UserContext,
@@ -215,12 +216,6 @@ fn exec_resolved(
     let thread = kprocess::current_user_thread();
     let process = thread.process().clone();
 
-    if kprocess::scheduler::process_task_count(process.as_ref()) > 1 {
-        // TODO: dispatch_irq multi-thread case
-        error!("sys_execve: multi-thread not supported");
-        return Err(KError::WouldBlock);
-    }
-
     let absolute_path = loc
         .absolute_path()
         .map(|path| path.to_string())
@@ -234,6 +229,13 @@ fn exec_resolved(
         envs,
         cred,
     ))?;
+    // Validate the whole image before joining the thread group, mirroring
+    // Linux, which only reaches `de_thread()` inside `begin_new_exec` after the
+    // binary format is confirmed. Go runtimes (runc init) keep helper threads
+    // alive at exec time, so this is the normal path.
+    if kprocess::scheduler::process_task_count(process.as_ref()) > 1 {
+        exec_de_thread();
+    }
     // Pin the backing executable for `/proc/<pid>/exe` before `prepared` is
     // consumed by installation.
     let exe_file = prepared.executable_file();

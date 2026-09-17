@@ -7,6 +7,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+use core::sync::atomic::Ordering;
 
 use kerrno::{KError, KResult};
 use kspin::SpinNoIrq;
@@ -203,6 +204,29 @@ impl Process {
     /// Marks the [`Process`] as group exited.
     pub(crate) fn group_exit(&self) {
         self.group_exit.lock().group_exited = true;
+    }
+
+    /// Clears group-exit bookkeeping after a `de_thread()` sibling sweep.
+    ///
+    /// `execve` on a multithreaded process SIGKILLs and reaps its sibling
+    /// threads; the first death marks the whole group exited and records that
+    /// thread's status. `de_thread` then undoes both so the execing thread
+    /// survives the next signal check and reports its own exit code later.
+    pub fn reset_group_exit(&self) {
+        let mut group = self.group_exit.lock();
+        group.group_exited = false;
+        group.exit_code = 0;
+    }
+
+    /// The signal delivered to the parent's `wait` when this process's parent
+    /// dies first (`prctl(PR_SET_PDEATHSIG)`); zero when unset.
+    pub fn pdeath_signal(&self) -> u32 {
+        self.pdeath_signal.load(Ordering::Relaxed)
+    }
+
+    /// Sets the parent-death signal delivered to the parent's `wait`.
+    pub fn set_pdeath_signal(&self, signo: u32) {
+        self.pdeath_signal.store(signo, Ordering::Relaxed);
     }
 
     /// The exit code of the [`Process`].
