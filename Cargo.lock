@@ -1203,6 +1203,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "devpts"
+version = "0.2.0-rc3"
+dependencies = [
+ "devfs",
+ "kvfs",
+ "unittest",
+]
+
+[[package]]
 name = "dice-driver"
 version = "0.3.0-dev"
 dependencies = [
@@ -1600,6 +1609,7 @@ dependencies = [
  "bpffs",
  "cgroup2fs",
  "devfs",
+ "devpts",
  "fs_context",
  "kbuild_config",
  "kclass",
