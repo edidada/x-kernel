@@ -985,9 +985,14 @@ impl SuperBlock {
         if !lifecycle.is_available() {
             return Ok(false);
         }
-        if requested_flags
-            .is_some_and(|requested_flags| has_readonly_mismatch(self.flags(), requested_flags))
-        {
+        // A read-only superblock can never back a writable mount, but the
+        // reverse is legal: Linux allows a writable superblock (for example
+        // the shared sysfs instance) to back a read-only mount by enforcing
+        // read-only as a per-mount flag (`MNT_READONLY`).
+        if requested_flags.is_some_and(|requested_flags| {
+            !requested_flags.contains(SuperBlockFlags::RDONLY)
+                && self.flags().contains(SuperBlockFlags::RDONLY)
+        }) {
             return Err(VfsError::ResourceBusy);
         }
         Ok(lifecycle.try_acquire_mount())
