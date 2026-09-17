@@ -90,6 +90,7 @@ kresources = { path = "process/kresources" }
 kcgroup = { path = "process/kcgroup" }
 kns = { path = "process/kns" }
 ktimer = { path = "process/ktimer" }
+knetns = { path = "process/knetns" }
 kprocess = { path = "process/kprocess" }
 osvm = { path = "process/osvm" }
 

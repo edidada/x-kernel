@@ -37,6 +37,8 @@ mod credentials;
 pub mod job_control;
 mod lifecycle;
 mod lookup;
+/// Network namespace ownership and the `NetNsResolver` provider.
+pub mod net_ns;
 /// PID-file-descriptor type and pidfd-related target resolution.
 pub mod pidfd;
 mod process;
@@ -70,6 +72,7 @@ extern crate klogger;
 
 pub use cgroup::{cgroup_member_process_ids, migrate_cgroup_process};
 pub use credentials::{current_cred, current_real_cred};
+pub use net_ns::{current_net_ns, try_current_net_ns};
 pub use pidfd::PidFd;
 pub use posix_types::{Pid, Tid};
 pub use process::{

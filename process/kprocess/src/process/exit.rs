@@ -2,15 +2,15 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use kpoll::{Completion, PollSet};
-use ksignal::Signo;
+use ksignal::{SignalInfo, Signo};
 use ktime_types::TimeSpan;
 
 use super::{INIT_PROC, Process};
-use crate::{Pid, process_domain};
+use crate::{Pid, process_domain, process_signals};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -90,6 +90,10 @@ pub(crate) struct ProcessExitTransition<T> {
     pub(crate) prepared_sigchld: Option<T>,
     pub(crate) autoreaped: bool,
     pub(crate) reparented_zombie_parent: Option<Arc<Process>>,
+    /// Live children reparented by this exit that carry a parent-death signal
+    /// (`prctl(PR_SET_PDEATHSIG)`). Delivered once the process-domain lock is
+    /// released, mirroring Linux `forget_original_parent()`.
+    pub(crate) pdeath_children: Vec<Arc<Process>>,
 }
 
 struct ExitParentSnapshot {
@@ -301,12 +305,13 @@ impl Process {
                             prepared_sigchld: None,
                             autoreaped: false,
                             reparented_zombie_parent: None,
+                            pdeath_children: Vec::new(),
                         },
                         false,
                         true,
                     )
                 } else {
-                    let (state_changed, reparented_zombie_parent) =
+                    let (state_changed, reparented_zombie_parent, pdeath_children) =
                         self.finish_exit_locked(&domain, autoreap, current.parent.as_ref());
                     let prepared_sigchld = if state_changed {
                         prepared_sigchld
@@ -321,6 +326,7 @@ impl Process {
                             prepared_sigchld,
                             autoreaped: autoreap && state_changed,
                             reparented_zombie_parent,
+                            pdeath_children,
                         },
                         state_changed,
                         false,
@@ -332,6 +338,19 @@ impl Process {
                 self.lifecycle.notify_exit();
             }
             if !retry {
+                for child in &transition.pdeath_children {
+                    if let Some(signo) = Signo::from_repr(child.pdeath_signal() as u8)
+                        && let Err(err) = process_signals::send_to_process_ref(
+                            child,
+                            Some(SignalInfo::new_kernel(signo)),
+                        )
+                    {
+                        warn!(
+                            "failed to send parent-death signal {signo:?} to child {}: {err:?}",
+                            child.pid()
+                        );
+                    }
+                }
                 return transition;
             }
         }
@@ -367,12 +386,12 @@ impl Process {
         domain: &process_domain::ProcessDomainWriteGuard<'_>,
         autoreap: bool,
         parent: Option<&Arc<Process>>,
-    ) -> (bool, Option<Arc<Process>>) {
+    ) -> (bool, Option<Arc<Process>>, Vec<Arc<Process>>) {
         // TODO: child subreaper
         let reaper = INIT_PROC.get().unwrap();
 
         if Arc::ptr_eq(self, reaper) {
-            return (false, None);
+            return (false, None, Vec::new());
         }
 
         let exit_state = if autoreap {
@@ -390,7 +409,7 @@ impl Process {
             )
             .is_err()
         {
-            return (false, None);
+            return (false, None, Vec::new());
         }
 
         if autoreap && let Some(parent) = parent {
@@ -399,6 +418,7 @@ impl Process {
         }
 
         let mut reparented_zombie_parent = None;
+        let mut pdeath_children = Vec::new();
         loop {
             let Some(old_slot) = self.children.lock().pop_front() else {
                 break;
@@ -411,12 +431,17 @@ impl Process {
             if child.exit_state_locked(domain) == ProcessExitState::Dead {
                 continue;
             }
+            // Linux `forget_original_parent()`: a reparented child receives
+            // its parent-death signal at this point.
+            if child.pdeath_signal() != 0 {
+                pdeath_children.push(child.clone());
+            }
             if child.exit_state_locked(domain) == ProcessExitState::Zombie {
                 reparented_zombie_parent = Some(reaper.clone());
             }
         }
 
-        (true, reparented_zombie_parent)
+        (true, reparented_zombie_parent, pdeath_children)
     }
 
     /// Frees a waitable zombie [`Process`]. Removes it from the parent.

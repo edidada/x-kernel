@@ -14,7 +14,6 @@ tipc = ["dep:tipc_handle"]
 
 [dependencies]
 anon_inodefs.workspace = true
-kiface.workspace = true
 fs_context.workspace = true
 kaddr_layout.workspace = true
 karch.workspace = true
@@ -24,6 +23,7 @@ kcgroup.workspace = true
 kerrno.workspace = true
 kfd.workspace = true
 khal.workspace = true
+kiface.workspace = true
 ktime_types.workspace = true
 klazy.workspace = true
 kpoll.workspace = true
@@ -31,6 +31,7 @@ kidentity.workspace = true
 kresources.workspace = true
 ksignal.workspace = true
 klogger.workspace = true
+knetns.workspace = true
 kns.workspace = true
 kvfs.workspace = true
 posix-types.workspace = true

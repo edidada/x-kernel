@@ -394,8 +394,9 @@ impl ProcessRuntime {
     /// children; the caller itself keeps its own identity, mirroring Linux).
     ///
     /// Following Linux, `NEWNS` is rejected while the filesystem context is
-    /// shared with other threads/processes (`CLONE_FS`). Namespace types the
-    /// kernel does not execute yet (`NEWNET`, `NEWUSER`, `NEWCGROUP`,
+    /// shared with other threads/processes (`CLONE_FS`). `NEWNET` is handled by
+    /// the caller (`kprocess::Process::net_ns`), so it is ignored here.
+    /// Namespace types the kernel does not execute yet (`NEWUSER`, `NEWCGROUP`,
     /// `NEWTIME`) fail explicitly with `Unsupported` instead of silently
     /// sharing global state.
     pub(crate) fn unshare_namespaces(&self, flags: kns::NamespaceFlags) -> KResult<()> {

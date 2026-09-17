@@ -9,7 +9,10 @@ mod thread_membership;
 mod tree;
 
 use alloc::sync::{Arc, Weak};
-use core::fmt;
+use core::{
+    fmt,
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
+};
 
 use exit::{AtomicProcessExitState, ProcessExitState};
 pub use exit::{
@@ -17,6 +20,7 @@ pub use exit::{
     WaitedChild,
 };
 use kidentity::{PidHandle, PidNamespace};
+use knetns::NetNsId;
 use ksignal::Signo;
 use kspin::SpinNoIrq;
 use ksync::{Mutex, MutexGuard};
@@ -44,6 +48,13 @@ pub struct Process {
     exit_state: AtomicProcessExitState,
     thread_membership: SpinNoIrq<ThreadMembership>,
     cgroup_target: Mutex<Option<Arc<kcgroup::Cgroup>>>,
+    /// Network namespace of this thread group; [`knetns::INIT_NET_ID`] unless a
+    /// `CLONE_NEWNET` clone or `unshare` moved it out of the initial namespace.
+    ///
+    /// Only the identifier lives here (see `net_ns`); the namespace object is
+    /// owned by the network stack, which resolves it through `NetNsResolver`.
+    /// Read from every execution context, hence the plain atomic.
+    net_ns: AtomicU64,
     group_exit: SpinNoIrq<ThreadGroupExitState>,
     lifecycle: ProcessLifecycleState,
 
@@ -64,6 +75,14 @@ pub struct Process {
     /// Published PID slot, retained so exit/reap can retire visibility without
     /// taking the publication table lock inside `process_domain`.
     pid_publication_slot: SpinNoIrq<Option<Weak<PublishedProcessSlot>>>,
+    /// Parent-death signal (`prctl(PR_SET_PDEATHSIG)`), 0 = none.
+    ///
+    /// Linux stores this per thread; this kernel applies it thread-group wide,
+    /// which matches how OCI runtimes (runc, crun, containerd-shim) use it on
+    /// the freshly forked container init. Delivered when the process is
+    /// reparented because its parent exited. Unlike Linux, it is not cleared
+    /// on credential changes.
+    pdeath_signal: AtomicU32,
 }
 
 impl Process {
@@ -92,6 +111,29 @@ impl Process {
     pub fn exit_signal(&self) -> Option<Signo> {
         let _domain = process_domain::read_lock();
         self.parent_relation.exit_signal()
+    }
+
+    /// Returns the parent-death signal (0 = none) set via
+    /// `prctl(PR_SET_PDEATHSIG)`.
+    pub fn pdeath_signal(&self) -> u32 {
+        self.pdeath_signal.load(Ordering::Relaxed)
+    }
+
+    /// Sets the parent-death signal (0 clears it).
+    pub fn set_pdeath_signal(&self, signo: u32) {
+        self.pdeath_signal.store(signo, Ordering::Relaxed)
+    }
+
+    /// Clears the thread-group-exit state recorded by exiting siblings.
+    ///
+    /// `execve` on a multi-threaded process terminates the sibling threads,
+    /// whose exits mark the group as exited; the execing thread survives and
+    /// must later report its own exit code, so that bookkeeping is undone
+    /// once the siblings are gone.
+    pub fn reset_group_exit(&self) {
+        let mut group = self.group_exit.lock();
+        group.group_exited = false;
+        group.exit_code = 0;
     }
 
     /// Returns `true` if the [`Process`] is the init process.
@@ -212,6 +254,13 @@ impl Process {
             exit_state: AtomicProcessExitState::new(ProcessExitState::Running),
             thread_membership: SpinNoIrq::new(ThreadMembership::default()),
             cgroup_target: Mutex::new(None),
+            // A child shares its parent's network namespace (fork semantics);
+            // `clone`/`unshare` with `CLONE_NEWNET` replaces this afterwards.
+            net_ns: AtomicU64::new(
+                parent
+                    .as_ref()
+                    .map_or(knetns::INIT_NET_ID.as_u64(), |p| p.net_ns().as_u64()),
+            ),
             group_exit: SpinNoIrq::new(ThreadGroupExitState::default()),
             lifecycle: ProcessLifecycleState::new(),
             children: SpinNoIrq::new(List::new()),
@@ -219,12 +268,32 @@ impl Process {
             group_membership,
             runtime_ref: SpinNoIrq::new(None),
             pid_publication_slot: SpinNoIrq::new(None),
+            pdeath_signal: AtomicU32::new(0),
         })
     }
 
     /// Serializes thread publication and whole-process cgroup migration.
     pub(crate) fn cgroup_transaction(&self) -> MutexGuard<'_, Option<Arc<kcgroup::Cgroup>>> {
         self.cgroup_target.lock()
+    }
+
+    /// Returns the network namespace of this thread group.
+    ///
+    /// Threads share the process network namespace, matching Linux where the
+    /// namespace is owned by the process. Lock-free and valid from any
+    /// execution context; see [`crate::net_ns`].
+    pub fn net_ns(&self) -> NetNsId {
+        NetNsId::from_u64(self.net_ns.load(Ordering::Relaxed))
+            .expect("network namespace id is never zero")
+    }
+
+    /// Moves this process into `net_ns`.
+    ///
+    /// Called by the syscall layer once a `CLONE_NEWNET` clone or
+    /// `unshare(CLONE_NEWNET)` has created the fresh namespace. Sockets
+    /// created earlier keep their namespace, matching Linux.
+    pub fn set_net_ns(&self, net_ns: NetNsId) {
+        self.net_ns.store(net_ns.as_u64(), Ordering::Relaxed);
     }
 
     fn attach_prepared_locked(

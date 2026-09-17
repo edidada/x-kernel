@@ -2606,6 +2606,7 @@ dependencies = [
  "kio",
  "kirq",
  "klazy",
+ "knetns",
  "kpoll",
  "kprocess",
  "kspin 0.2.0-rc3",
@@ -2622,6 +2623,14 @@ dependencies = [
  "tipc",
  "unittest",
  "zerocopy",
+]
+
+[[package]]
+name = "knetns"
+version = "0.2.0-rc3"
+dependencies = [
+ "kiface",
+ "unittest",
 ]
 
 [[package]]
@@ -2803,6 +2812,7 @@ dependencies = [
  "kiface",
  "klazy",
  "klogger",
+ "knetns",
  "kns",
  "kpoll",
  "kresources",
@@ -2971,6 +2981,7 @@ dependencies = [
  "kfutex",
  "khal",
  "klogger",
+ "knet",
  "kns",
  "kpoll",
  "kprocess",
