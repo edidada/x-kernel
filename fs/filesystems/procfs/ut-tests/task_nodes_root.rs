@@ -444,6 +444,18 @@ fn test_parse_oom_score_adj_accepts_newline_terminated_input() {
 }
 
 #[def_test]
+fn test_parse_oom_score_adj_accepts_nul_terminated_input() {
+    // runc's nsexec writes the netlink payload verbatim: "0\0".
+    assert_eq!(parse_oom_score_adj_input(b"0\0").unwrap(), Some(0));
+}
+
+#[def_test]
+fn test_parse_oom_score_adj_rejects_nul_only_input() {
+    // Linux `kstrtoint("")` fails, so a bare NUL is still EINVAL.
+    assert!(parse_oom_score_adj_input(b"\0").is_err());
+}
+
+#[def_test]
 fn test_parse_oom_score_adj_accepts_empty_input_as_noop() {
     assert_eq!(parse_oom_score_adj_input(b"").unwrap(), None);
 }
