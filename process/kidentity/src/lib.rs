@@ -43,15 +43,28 @@ use lazyinit::LazyInit;
 /// PID namespace identity.
 #[derive(Debug)]
 pub struct PidNamespace {
+    id: u64,
     parent: Option<Arc<PidNamespace>>,
     level: u32,
     next_nr: AtomicU32,
+}
+
+/// Kernel-wide monotonic PID-namespace identity allocator.
+///
+/// The identity is stable for the namespace's lifetime and is exported through
+/// `/proc/<pid>/ns/pid` as the inode number, mirroring Linux's nsfs-backed
+/// namespace inode. The counter starts at one; exhaustion is not checked.
+static NEXT_PID_NS_ID: AtomicU32 = AtomicU32::new(1);
+
+fn allocate_pid_ns_id() -> u64 {
+    NEXT_PID_NS_ID.fetch_add(1, Ordering::Relaxed) as u64
 }
 
 impl PidNamespace {
     /// Creates the root PID namespace.
     pub fn new_root() -> Self {
         Self {
+            id: allocate_pid_ns_id(),
             parent: None,
             level: 0,
             next_nr: AtomicU32::new(1),
@@ -61,10 +74,16 @@ impl PidNamespace {
     /// Creates a child PID namespace below `parent`.
     pub fn new_child(parent: &Arc<Self>) -> Arc<Self> {
         Arc::new(Self {
+            id: allocate_pid_ns_id(),
             parent: Some(parent.clone()),
             level: parent.level + 1,
             next_nr: AtomicU32::new(1),
         })
+    }
+
+    /// Returns the stable namespace identity.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// Returns the parent namespace, if any.
