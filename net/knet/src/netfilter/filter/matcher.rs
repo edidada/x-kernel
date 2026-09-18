@@ -36,12 +36,8 @@ impl PortRange {
         }
     }
 
-    pub(crate) const fn start(self) -> u16 {
-        self.start
-    }
-
-    pub(crate) const fn end(self) -> u16 {
-        self.end
+    pub(crate) const fn contains(self, port: u16) -> bool {
+        self.start <= port && port <= self.end
     }
 }
 
@@ -340,10 +336,6 @@ fn interface_matches(pattern: &InterfaceMatch, device_name: &str) -> bool {
     }
 }
 
-fn port_in_range(range: PortRange, port: u16) -> bool {
-    port >= range.start() && port <= range.end()
-}
-
 fn tcp_flags_match(expected: TcpFlagsMatch, flags_byte: u8) -> bool {
     (flags_byte & expected.mask()) == expected.expected()
 }
@@ -386,10 +378,10 @@ fn match_tcp(spec: &TcpMatch, packet: &FilterPacket<'_>) -> L4Outcome<bool> {
 
     let mut matched = true;
     if let Some(range) = spec.source_port_range() {
-        matched &= port_in_range(range, u16::from_be_bytes([header[0], header[1]]));
+        matched &= range.contains(u16::from_be_bytes([header[0], header[1]]));
     }
     if let Some(range) = spec.destination_port_range() {
-        matched &= port_in_range(range, u16::from_be_bytes([header[2], header[3]]));
+        matched &= range.contains(u16::from_be_bytes([header[2], header[3]]));
     }
     if let Some(flags) = spec.flags_match() {
         matched &= tcp_flags_match(flags, header[13]);
@@ -414,10 +406,10 @@ fn match_udp(spec: &UdpMatch, packet: &FilterPacket<'_>) -> L4Outcome<bool> {
 
     let mut matched = true;
     if let Some(range) = spec.source_port_range() {
-        matched &= port_in_range(range, header.source_port());
+        matched &= range.contains(header.source_port());
     }
     if let Some(range) = spec.destination_port_range() {
-        matched &= port_in_range(range, header.destination_port());
+        matched &= range.contains(header.destination_port());
     }
 
     L4Outcome::Ready(matched)
@@ -450,8 +442,10 @@ mod tests {
     #[def_test]
     fn match_value_constructors_validate_ranges_and_masks() {
         let port_range = PortRange::new(80, 443).unwrap();
-        assert_eq!(port_range.start(), 80);
-        assert_eq!(port_range.end(), 443);
+        assert!(port_range.contains(80));
+        assert!(port_range.contains(443));
+        assert!(!port_range.contains(79));
+        assert!(!port_range.contains(444));
         assert_eq!(PortRange::new(443, 80), None);
 
         let flags = TcpFlagsMatch::new(0x12, 0x02).unwrap();

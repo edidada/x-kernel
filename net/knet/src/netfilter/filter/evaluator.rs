@@ -9,7 +9,7 @@
 
 use super::{
     matcher::{FilterPacket, MatchOutcome, evaluate_matches},
-    model::{ChainId, ChainKind, FilterHook, FilterTable, MAX_JUMP_DEPTH, Rule, Target, Verdict},
+    model::{ChainId, ChainKind, FilterHook, FilterTable, MAX_JUMP_DEPTH, Target, Verdict},
 };
 
 /// Maximum number of rules evaluated for one packet.
@@ -63,11 +63,20 @@ fn evaluate_from(
             return Verdict::Drop;
         }
         rule_steps += 1;
-        match evaluate_rule(table, rule, packet) {
-            RuleOutcome::NextRule => rule_index += 1,
-            RuleOutcome::Continue => rule_index += 1,
-            RuleOutcome::Verdict(verdict) => return verdict,
-            RuleOutcome::Jump(target) => {
+
+        match evaluate_matches(rule.matches(), packet) {
+            MatchOutcome::HotDrop => return Verdict::Drop,
+            MatchOutcome::NotMatched => {
+                rule_index += 1;
+                continue;
+            }
+            MatchOutcome::Matched => {}
+        }
+
+        match rule.target() {
+            Target::Continue => rule_index += 1,
+            Target::Verdict(verdict) => return verdict,
+            Target::Jump(target) => {
                 if stack_top >= MAX_JUMP_DEPTH {
                     return Verdict::Drop;
                 }
@@ -79,7 +88,7 @@ fn evaluate_from(
                 chain_id = target;
                 rule_index = 0;
             }
-            RuleOutcome::Return => {
+            Target::Return => {
                 if stack_top == 0 {
                     return builtin_policy(table, chain_id);
                 }
@@ -91,36 +100,6 @@ fn evaluate_from(
                 rule_index = frame.next_rule;
             }
         }
-    }
-}
-
-enum RuleOutcome {
-    NextRule,
-    Continue,
-    Verdict(Verdict),
-    Jump(ChainId),
-    Return,
-}
-
-fn evaluate_rule(table: &FilterTable, rule: &Rule, packet: &FilterPacket<'_>) -> RuleOutcome {
-    match evaluate_matches(rule.matches(), packet) {
-        MatchOutcome::HotDrop => RuleOutcome::Verdict(Verdict::Drop),
-        MatchOutcome::NotMatched => RuleOutcome::NextRule,
-        MatchOutcome::Matched => match rule.target() {
-            Target::Verdict(verdict) => RuleOutcome::Verdict(verdict),
-            Target::Continue => RuleOutcome::Continue,
-            Target::Return => RuleOutcome::Return,
-            Target::Jump(chain_id) => {
-                if table
-                    .chain(chain_id)
-                    .is_some_and(|chain| matches!(chain.kind(), ChainKind::UserDefined { .. }))
-                {
-                    RuleOutcome::Jump(chain_id)
-                } else {
-                    RuleOutcome::Verdict(Verdict::Drop)
-                }
-            }
-        },
     }
 }
 
