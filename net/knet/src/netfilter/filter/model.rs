@@ -4,29 +4,24 @@
 
 //! Immutable rule graph for the IPv4 `filter` table.
 
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{collections::BTreeSet, string::String, vec, vec::Vec};
 
-use super::matcher::{Match, MatchKind};
-
-const BUILTIN_CHAIN_COUNT: usize = 3;
+use super::matcher::Match;
 
 /// IPv4 hooks supported by the initial `filter` table.
+#[repr(usize)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FilterHook {
-    Input,
-    Forward,
-    Output,
+    Input   = 0,
+    Forward = 1,
+    Output  = 2,
 }
 
 impl FilterHook {
-    const ALL: [Self; BUILTIN_CHAIN_COUNT] = [Self::Input, Self::Forward, Self::Output];
+    const ALL: [Self; 3] = [Self::Input, Self::Forward, Self::Output];
 
     const fn index(self) -> usize {
-        match self {
-            Self::Input => 0,
-            Self::Forward => 1,
-            Self::Output => 2,
-        }
+        self as usize
     }
 
     const fn chain_name(self) -> &'static str {
@@ -37,6 +32,8 @@ impl FilterHook {
         }
     }
 }
+
+const BUILTIN_CHAIN_COUNT: usize = FilterHook::ALL.len();
 
 /// A terminal packet-filtering decision.
 ///
@@ -93,29 +90,22 @@ impl Rule {
 }
 
 /// Built-in or user-defined chain role.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ChainKind {
     BuiltIn { hook: FilterHook, policy: Verdict },
-    UserDefined,
+    UserDefined { name: String },
 }
 
-/// Ordered rules belonging to one named chain.
+/// Ordered rules belonging to one built-in or user-defined chain.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Chain {
-    name: String,
     kind: ChainKind,
     rules: Vec<Rule>,
 }
 
 impl Chain {
-    pub(crate) fn built_in(
-        name: String,
-        hook: FilterHook,
-        policy: Verdict,
-        rules: Vec<Rule>,
-    ) -> Self {
+    pub(crate) fn built_in(hook: FilterHook, policy: Verdict, rules: Vec<Rule>) -> Self {
         Self {
-            name,
             kind: ChainKind::BuiltIn { hook, policy },
             rules,
         }
@@ -123,18 +113,20 @@ impl Chain {
 
     pub(crate) fn user_defined(name: String, rules: Vec<Rule>) -> Self {
         Self {
-            name,
-            kind: ChainKind::UserDefined,
+            kind: ChainKind::UserDefined { name },
             rules,
         }
     }
 
     pub(crate) fn name(&self) -> &str {
-        &self.name
+        match &self.kind {
+            ChainKind::BuiltIn { hook, .. } => hook.chain_name(),
+            ChainKind::UserDefined { name } => name,
+        }
     }
 
-    pub(crate) const fn kind(&self) -> ChainKind {
-        self.kind
+    pub(crate) const fn kind(&self) -> &ChainKind {
+        &self.kind
     }
 
     pub(crate) fn rules(&self) -> &[Rule] {
@@ -147,13 +139,11 @@ impl Chain {
 pub(crate) enum FilterTableError {
     EmptyChainName,
     DuplicateChainName,
-    InvalidBuiltInChainName(FilterHook),
-    MissingBuiltInChain(FilterHook),
-    DuplicateBuiltInChain(FilterHook),
-    InvalidIpv4Prefix(u8),
+    MissingHook(FilterHook),
+    DuplicateHook(FilterHook),
     InvalidJumpTarget(ChainId),
     JumpToBuiltInChain(ChainId),
-    RecursiveChainGraph,
+    ChainCycle,
 }
 
 /// Immutable, validated representation of the IPv4 `filter` table.
@@ -167,68 +157,46 @@ impl FilterTable {
     /// Builds a table and validates its chain graph.
     pub(crate) fn new(chains: Vec<Chain>) -> Result<Self, FilterTableError> {
         let mut built_in_chains = [None; BUILTIN_CHAIN_COUNT];
+        let mut chain_names = BTreeSet::new();
 
         for (index, chain) in chains.iter().enumerate() {
-            if chain.name.is_empty() {
+            if chain.name().is_empty() {
                 return Err(FilterTableError::EmptyChainName);
             }
 
-            if let ChainKind::BuiltIn { hook, .. } = chain.kind {
-                if chain.name != hook.chain_name() {
-                    return Err(FilterTableError::InvalidBuiltInChainName(hook));
-                }
+            if let ChainKind::BuiltIn { hook, .. } = &chain.kind {
                 let slot = &mut built_in_chains[hook.index()];
                 if slot.replace(ChainId::from_index(index)).is_some() {
-                    return Err(FilterTableError::DuplicateBuiltInChain(hook));
+                    return Err(FilterTableError::DuplicateHook(*hook));
                 }
             }
 
-            if chains[..index]
-                .iter()
-                .any(|existing| existing.name == chain.name)
-            {
+            if !chain_names.insert(chain.name()) {
                 return Err(FilterTableError::DuplicateChainName);
             }
-
-            validate_rule_matches(chain)?;
         }
 
-        let input = built_in_chains[FilterHook::Input.index()]
-            .ok_or(FilterTableError::MissingBuiltInChain(FilterHook::Input))?;
-        let forward = built_in_chains[FilterHook::Forward.index()]
-            .ok_or(FilterTableError::MissingBuiltInChain(FilterHook::Forward))?;
-        let output = built_in_chains[FilterHook::Output.index()]
-            .ok_or(FilterTableError::MissingBuiltInChain(FilterHook::Output))?;
+        let built_in_chains = [
+            require_hook(&built_in_chains, FilterHook::Input)?,
+            require_hook(&built_in_chains, FilterHook::Forward)?,
+            require_hook(&built_in_chains, FilterHook::Output)?,
+        ];
 
         validate_jump_graph(&chains)?;
 
         Ok(Self {
             chains,
-            built_in_chains: [input, forward, output],
+            built_in_chains,
         })
     }
 
     /// Returns an empty table whose built-in policies all accept packets.
     pub(crate) fn accept_all() -> Self {
         let chains: Vec<_> = FilterHook::ALL
-            .map(|hook| {
-                Chain::built_in(
-                    String::from(hook.chain_name()),
-                    hook,
-                    Verdict::Accept,
-                    Vec::new(),
-                )
-            })
+            .map(|hook| Chain::built_in(hook, Verdict::Accept, Vec::new()))
             .into();
 
-        Self {
-            chains,
-            built_in_chains: [
-                ChainId::from_index(0),
-                ChainId::from_index(1),
-                ChainId::from_index(2),
-            ],
-        }
+        Self::new(chains).expect("generated filter table must be valid")
     }
 
     pub(crate) fn chains(&self) -> &[Chain] {
@@ -248,23 +216,11 @@ impl FilterTable {
     }
 }
 
-fn validate_rule_matches(chain: &Chain) -> Result<(), FilterTableError> {
-    for rule in &chain.rules {
-        for condition in &rule.matches {
-            let prefix_len = match condition.kind() {
-                MatchKind::SourceAddress(cidr) | MatchKind::DestinationAddress(cidr) => {
-                    Some(cidr.prefix_len())
-                }
-                _ => None,
-            };
-            if let Some(prefix_len) = prefix_len
-                && prefix_len > 32
-            {
-                return Err(FilterTableError::InvalidIpv4Prefix(prefix_len));
-            }
-        }
-    }
-    Ok(())
+fn require_hook(
+    built_in_chains: &[Option<ChainId>; BUILTIN_CHAIN_COUNT],
+    hook: FilterHook,
+) -> Result<ChainId, FilterTableError> {
+    built_in_chains[hook.index()].ok_or(FilterTableError::MissingHook(hook))
 }
 
 fn validate_jump_graph(chains: &[Chain]) -> Result<(), FilterTableError> {
@@ -278,7 +234,7 @@ fn validate_jump_graph(chains: &[Chain]) -> Result<(), FilterTableError> {
             let Some(target_chain) = chains.get(target.index()) else {
                 return Err(FilterTableError::InvalidJumpTarget(target));
             };
-            if matches!(target_chain.kind, ChainKind::BuiltIn { .. }) {
+            if matches!(&target_chain.kind, ChainKind::BuiltIn { .. }) {
                 return Err(FilterTableError::JumpToBuiltInChain(target));
             }
             incoming_edges[target.index()] += 1;
@@ -308,7 +264,7 @@ fn validate_jump_graph(chains: &[Chain]) -> Result<(), FilterTableError> {
     if visited == chains.len() {
         Ok(())
     } else {
-        Err(FilterTableError::RecursiveChainGraph)
+        Err(FilterTableError::ChainCycle)
     }
 }
 
@@ -319,28 +275,13 @@ mod tests {
     use unittest::def_test;
 
     use super::*;
-    use crate::ip::{Ipv4Address, Ipv4Cidr};
+    use crate::netfilter::filter::matcher::MatchKind;
 
     fn built_in_chains() -> Vec<Chain> {
         vec![
-            Chain::built_in(
-                "INPUT".to_string(),
-                FilterHook::Input,
-                Verdict::Accept,
-                Vec::new(),
-            ),
-            Chain::built_in(
-                "FORWARD".to_string(),
-                FilterHook::Forward,
-                Verdict::Drop,
-                Vec::new(),
-            ),
-            Chain::built_in(
-                "OUTPUT".to_string(),
-                FilterHook::Output,
-                Verdict::Accept,
-                Vec::new(),
-            ),
+            Chain::built_in(FilterHook::Input, Verdict::Accept, Vec::new()),
+            Chain::built_in(FilterHook::Forward, Verdict::Drop, Vec::new()),
+            Chain::built_in(FilterHook::Output, Verdict::Accept, Vec::new()),
         ]
     }
 
@@ -351,7 +292,7 @@ mod tests {
         assert_eq!(table.built_in_chain(FilterHook::Input).name(), "INPUT");
         assert_eq!(
             table.built_in_chain(FilterHook::Forward).kind(),
-            ChainKind::BuiltIn {
+            &ChainKind::BuiltIn {
                 hook: FilterHook::Forward,
                 policy: Verdict::Drop,
             }
@@ -362,31 +303,18 @@ mod tests {
         missing_output.pop();
         assert_eq!(
             FilterTable::new(missing_output),
-            Err(FilterTableError::MissingBuiltInChain(FilterHook::Output))
+            Err(FilterTableError::MissingHook(FilterHook::Output))
         );
 
         let mut duplicate_input = built_in_chains();
         duplicate_input.push(Chain::built_in(
-            "INPUT".to_string(),
             FilterHook::Input,
             Verdict::Accept,
             Vec::new(),
         ));
         assert_eq!(
             FilterTable::new(duplicate_input),
-            Err(FilterTableError::DuplicateBuiltInChain(FilterHook::Input))
-        );
-
-        let mut misnamed_input = built_in_chains();
-        misnamed_input[0] = Chain::built_in(
-            "BAD-INPUT".to_string(),
-            FilterHook::Input,
-            Verdict::Accept,
-            Vec::new(),
-        );
-        assert_eq!(
-            FilterTable::new(misnamed_input),
-            Err(FilterTableError::InvalidBuiltInChainName(FilterHook::Input))
+            Err(FilterTableError::DuplicateHook(FilterHook::Input))
         );
 
         let mut empty_name = built_in_chains();
@@ -402,23 +330,6 @@ mod tests {
         assert_eq!(
             FilterTable::new(duplicate_name),
             Err(FilterTableError::DuplicateChainName)
-        );
-    }
-
-    #[def_test]
-    fn filter_table_rejects_invalid_ipv4_prefix() {
-        let mut chains = built_in_chains();
-        chains[0].rules.push(Rule::new(
-            vec![Match::new(
-                MatchKind::SourceAddress(Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 33)),
-                false,
-            )],
-            Target::Verdict(Verdict::Drop),
-        ));
-
-        assert_eq!(
-            FilterTable::new(chains),
-            Err(FilterTableError::InvalidIpv4Prefix(33))
         );
     }
 
@@ -457,10 +368,7 @@ mod tests {
             vec![Rule::new(Vec::new(), Target::Jump(ChainId::from_index(3)))],
         ));
 
-        assert_eq!(
-            FilterTable::new(chains),
-            Err(FilterTableError::RecursiveChainGraph)
-        );
+        assert_eq!(FilterTable::new(chains), Err(FilterTableError::ChainCycle));
     }
 
     #[def_test]

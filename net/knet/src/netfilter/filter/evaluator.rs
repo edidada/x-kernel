@@ -109,7 +109,7 @@ fn evaluate_rule(table: &FilterTable, rule: &Rule, packet: &FilterPacket<'_>) ->
             Target::Jump(chain_id) => {
                 if table
                     .chain(chain_id)
-                    .is_some_and(|chain| matches!(chain.kind(), ChainKind::UserDefined))
+                    .is_some_and(|chain| matches!(chain.kind(), ChainKind::UserDefined { .. }))
                 {
                     RuleOutcome::Jump(chain_id)
                 } else {
@@ -125,8 +125,8 @@ fn builtin_policy(table: &FilterTable, chain_id: ChainId) -> Verdict {
         return Verdict::Drop;
     };
     match chain.kind() {
-        ChainKind::BuiltIn { policy, .. } => policy,
-        ChainKind::UserDefined => Verdict::Drop,
+        ChainKind::BuiltIn { policy, .. } => *policy,
+        ChainKind::UserDefined { .. } => Verdict::Drop,
     }
 }
 
@@ -154,29 +154,14 @@ mod tests {
 
     fn built_in_chains() -> Vec<Chain> {
         vec![
-            Chain::built_in(
-                "INPUT".to_string(),
-                FilterHook::Input,
-                Verdict::Accept,
-                Vec::new(),
-            ),
-            Chain::built_in(
-                "FORWARD".to_string(),
-                FilterHook::Forward,
-                Verdict::Drop,
-                Vec::new(),
-            ),
-            Chain::built_in(
-                "OUTPUT".to_string(),
-                FilterHook::Output,
-                Verdict::Accept,
-                Vec::new(),
-            ),
+            Chain::built_in(FilterHook::Input, Verdict::Accept, Vec::new()),
+            Chain::built_in(FilterHook::Forward, Verdict::Drop, Vec::new()),
+            Chain::built_in(FilterHook::Output, Verdict::Accept, Vec::new()),
         ]
     }
 
     fn with_input_rules(mut chains: Vec<Chain>, policy: Verdict, rules: Vec<Rule>) -> Vec<Chain> {
-        chains[0] = Chain::built_in("INPUT".to_string(), FilterHook::Input, policy, rules);
+        chains[0] = Chain::built_in(FilterHook::Input, policy, rules);
         chains
     }
 
@@ -353,14 +338,15 @@ mod tests {
             vec![Rule::new(
                 vec![
                     Match::new(
-                        MatchKind::SourceAddress(Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 0), 24)),
+                        MatchKind::SourceAddress(
+                            Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 0), 24).unwrap(),
+                        ),
                         false,
                     ),
                     Match::new(
-                        MatchKind::DestinationAddress(Ipv4Cidr::new(
-                            Ipv4Address::new(192, 0, 2, 0),
-                            24,
-                        )),
+                        MatchKind::DestinationAddress(
+                            Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 0), 24).unwrap(),
+                        ),
                         false,
                     ),
                     Match::new(

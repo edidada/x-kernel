@@ -206,7 +206,7 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 | vsock | Provides optional guest-host stream communication through virtio-vsock. |
 | smoltcp | Provides IPv4/IPv6 processing for the smoltcp socket path. |
 | knet IPv4 / ICMPv4 | Validates and reassembles IPv4 packets, delivers UDP input, and handles ICMPv4 errors and responses. |
-| IPv4 filter model | Stores validated `filter` table structure as built-in and user-defined chains, ordered rules, typed matches, and typed targets. `netfilter::filter::evaluator` evaluates one IPv4 packet against a validated table using a bounded jump stack and no heap allocation; `netfilter::filter::matcher` applies rule conditions within the declared IPv4 payload. ABI decoding, snapshot publication, hook integration, counters, and save output remain later stages. |
+| IPv4 filter model | Defines a validated, typed `filter` table and an internal IPv4 packet evaluator. The model is not connected to the packet path. |
 | Router | Selects routes, fragments outgoing IPv4 packets, and dispatches RX/TX queues across devices. |
 | LoopbackDevice | Returns locally transmitted packets to the receive path. |
 | EthernetDevice | Adapts kclass network devices to knet's NetDevice interface and handles Ethernet and ARP. |
@@ -753,87 +753,6 @@ IPv4 limited broadcast is replicated subject to interface binding. Other IPv4 de
 
 Sources: [`UDP send`](../src/transport/udp/socket.rs), [`Service::prepare_and_send_ipv4_packet`](../src/runtime/service.rs), [`Router`](../src/stack/router.rs), and [`EthernetDevice::send_ip_packet`](../src/device/ethernet.rs).
 
-### IPv4 Filter Table Model
-
-`netfilter::filter::model` owns tables, chains, rules, and targets. Each rule holds
-conditions defined by `netfilter::filter::matcher`, which owns the match types,
-their constructor constraints, and their packet-matching behavior.
-`netfilter::filter::evaluator` walks chains and executes targets.
-The model validates table structure; the evaluator does not decode the legacy ABI
-or attach to ingress or egress hooks. Semantics follow Linux 6.8.12:
-
-- `include/uapi/linux/netfilter.h` defines the generic hook order and terminal
-  `NF_ACCEPT` / `NF_DROP` verdicts;
-- `net/ipv4/netfilter/iptable_filter.c` registers `filter` only at
-  `NF_INET_LOCAL_IN`, `NF_INET_FORWARD`, and `NF_INET_LOCAL_OUT`;
-- `include/uapi/linux/netfilter_ipv4/ip_tables.h` defines an entry as IPv4
-  conditions, zero or more extension matches, counters, and one target; and
-- `net/ipv4/netfilter/ip_tables.c::ipt_do_table` evaluates rules in order,
-  requires every match to succeed, maintains a jump stack, maps `RETURN` to
-  the caller or built-in underflow policy, and stops on a terminal verdict.
-
-The current construction path is:
-
-```text
-owned Vec<Chain>
-      |
-      v
-FilterTable::new
-      |
-      v
-validated FilterTable
-      |
-      v
-FilterTable::evaluate (per hook + FilterPacket)
-```
-
-| Type | Invariant and responsibility |
-|---|---|
-| `FilterTable` | Owns one immutable rule graph and exactly one `INPUT`, `FORWARD`, and `OUTPUT` built-in chain. Construction rejects duplicate names, missing or duplicate built-ins, invalid IPv4 prefixes, invalid jump targets, jumps into built-in chains, and recursive chain graphs. |
-| `FilterPacket` | Holds one parsed IPv4 header, the backing packet bytes, and the input and output interface names used by interface matches. |
-| `Chain` | Owns an ordered rule list. A built-in chain binds one `FilterHook` to an `Accept` or `Drop` policy; a user-defined chain has no policy. |
-| `Rule` | Holds an ordered conjunction of match conditions and one target. |
-| `Match` | Wraps one atomic `MatchKind` and its inversion flag. The closed set covers source and destination IPv4 CIDRs, protocol, input and output interface names, and protocol-level `Tcp`, `Udp`, and `Icmp` matchers. Separate `Match` entries preserve the independent inversion bits in Linux `xt_tcp` and `xt_udp`. |
-| `Target` | Represents a terminal verdict, fall-through to the next rule, `RETURN`, or a jump to a validated user-chain `ChainId`. |
-| `Verdict` | Contains only `Accept` and `Drop`. `RETURN` and rule continuation cannot escape built-in-chain evaluation as final packet decisions. |
-
-`ChainId` is valid only within its `FilterTable`. Table construction verifies
-that every jump selects an existing user-defined chain and rejects cycles with
-a graph traversal. The packet evaluator can therefore use indices without
-performing chain-name lookup or cycle detection.
-
-The ABI and packet-path stages must preserve these boundaries:
-
-- The legacy decoder copies and validates the complete replacement before it
-  constructs semantic values. Raw offsets, padding, and integer verdict
-  encodings do not enter `FilterTable`.
-- Table publication replaces one complete validated snapshot. A packet uses
-  one stable snapshot for the full evaluation.
-- Evaluation scans rules in order and treats their matches as a conjunction.
-  `Continue` advances to the next rule, `Jump` enters a user chain, and
-  `Return` resumes the caller or selects the built-in policy. `Accept` and
-  `Drop` terminate evaluation. L4 matches fail on protocol mismatch or
-  non-first fragments before applying per-condition inversion. Transport reads
-  stay within IPv4 `total_len`, excluding trailing link-layer padding.
-  Truncated L4 base headers hot-drop the packet. As in Linux
-  `net/netfilter/xt_tcpudp.c`, TCP port and flag matches require the fixed
-  20-byte header regardless of the data offset, and ICMP type and code matches
-  require the eight-byte base header regardless of timestamp message length.
-- The decoder bounds replacement bytes, chains, rules, matches, and jump depth.
-  The evaluator keeps a fixed-size jump stack (`MAX_JUMP_STACK_DEPTH`) and
-  performs no heap allocation while evaluating a packet.
-
-The future packet-path integration uses these hook positions:
-
-| Hook | X-Kernel placement |
-|---|---|
-| `INPUT` | After IPv4 validation, local-destination classification, and fragment reassembly, before UDP delivery, ICMP inspection, TCP listener snooping, or smoltcp ingress. Loopback must apply the same hook in task context before entering its bottom-half window. |
-| `FORWARD` | Included in the model for legacy compatibility. The current Router has no IPv4 forwarding path, so no packet reaches this hook yet. |
-| `OUTPUT` | After a locally generated IPv4 packet has a selected source and output route, before output fragmentation and device dispatch. All native UDP, raw, TCP/smoltcp, control-packet, and loopback output paths must converge on this check. |
-
-ABI decoding, snapshot publication, hook integration, counters, and save
-output remain outside the current implementation.
-
 ## Concurrency Model
 
 Concurrency is organized around a single owner for protocol progress, with finer-grained locks protecting socket, queue, and control-plane state.
@@ -922,21 +841,6 @@ UDP receive-only waits subscribe to socket events in `UdpSocketWaiters`. Receive
 Ethernet RX source registration is protected by `NET_RX_SOURCES: SpinNoIrq<NetRxSources>`. Each source publishes pending work through an atomic flag, and the IRQ-safe scheduler keeps only a weak source reference. Device teardown detaches the scheduler and unregisters the source. Source identifiers and softirq availability also use atomics.
 
 ## Design Decisions
-
-### Typed Netfilter Model
-
-Linux legacy iptables stores one table as a packed byte region and identifies
-extension behavior through registered match and target implementations. That
-representation is required at the compatibility boundary but is unsuitable as
-X-Kernel's long-lived data-plane state: offsets depend on ABI layout, target
-verdicts overload integers, and names require runtime resolution.
-
-The internal model uses closed Rust enums and owned values. `Verdict` contains
-terminal packet decisions, while `Target` contains chain control.
-Built-in policies cannot represent `Return`; user chains cannot acquire a
-policy; and jumps use table-local `ChainId` values. The closed initial match
-set defines the compatibility scope. The ABI decoder will reject unsupported
-extensions instead of introducing opaque callbacks into the packet path.
 
 ### UDP and IPv4 Data Paths
 
@@ -1042,7 +946,6 @@ With `vsock_tipc_bridge` enabled, `bind()` rejects explicit binding to ports in 
 
 | Area | Support and limits |
 |---|---|
-| IPv4 netfilter | The typed `filter` table model, structural validation, and internal packet evaluator are present. ABI decoding, snapshot publication, hook execution, counters, forwarding, and save output remain later stages. The initial model excludes IPv6, NAT/mangle/raw tables, conntrack/state, `REJECT`, `LOG`, `QUEUE`, and `goto`. |
 | Internet / UDP | Configuration and native UDP support IPv4 only; IPv6 UDP endpoints return `EAFNOSUPPORT`. smoltcp IPv6 support does not extend these interfaces. |
 | UDP ephemeral binding | Port-zero bind and automatic binding on first connect or send select randomized candidates in `49152–65535` using kernel entropy. If entropy is not ready, both blocking and nonblocking sockets return `EAGAIN` and remain unbound. Explicit nonzero-port binding retains its existing behavior. |
 | Device binding | UDP demultiplexing checks the bound device. TCP/raw bound-device packet filtering and complete IPv6 scope semantics remain separate compatibility work. |

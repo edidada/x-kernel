@@ -285,12 +285,8 @@ pub(crate) fn evaluate_matches(matches: &[Match], packet: &FilterPacket<'_>) -> 
 
 fn evaluate_match(condition: &Match, packet: &FilterPacket<'_>) -> MatchOutcome {
     let matched = match condition.kind() {
-        MatchKind::SourceAddress(cidr) => {
-            address_matches(cidr.address(), cidr.prefix_len(), packet.header.src_addr())
-        }
-        MatchKind::DestinationAddress(cidr) => {
-            address_matches(cidr.address(), cidr.prefix_len(), packet.header.dst_addr())
-        }
+        MatchKind::SourceAddress(cidr) => address_matches(*cidr, packet.header.src_addr()),
+        MatchKind::DestinationAddress(cidr) => address_matches(*cidr, packet.header.dst_addr()),
         MatchKind::Protocol(protocol) => packet.header.protocol() == *protocol,
         MatchKind::InputInterface(pattern) => interface_matches(pattern, packet.indev),
         MatchKind::OutputInterface(pattern) => interface_matches(pattern, packet.outdev),
@@ -318,8 +314,8 @@ fn evaluate_match(condition: &Match, packet: &FilterPacket<'_>) -> MatchOutcome 
     }
 }
 
-fn address_matches(network: Ipv4Address, prefix_len: u8, addr: Ipv4Address) -> bool {
-    crate::ip::Ipv4Cidr::new(network, prefix_len).contains_addr(&IpAddress::Ipv4(addr))
+fn address_matches(cidr: Ipv4Cidr, addr: Ipv4Address) -> bool {
+    cidr.contains_addr(&IpAddress::Ipv4(addr))
 }
 
 fn interface_matches(pattern: &InterfaceMatch, device_name: &str) -> bool {
