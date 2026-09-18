@@ -35,9 +35,12 @@ net/knet/
     │   ├── tests.rs
     │   └── wire.rs
     ├── netfilter/
-    │   ├── evaluator.rs
-    │   ├── mod.rs
-    │   └── model.rs
+    │   ├── filter/
+    │   │   ├── evaluator.rs
+    │   │   ├── matcher.rs
+    │   │   ├── mod.rs
+    │   │   └── model.rs
+    │   └── mod.rs
     ├── network/
     │   ├── ipv4/
     │   │   ├── mod.rs
@@ -203,7 +206,7 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 | vsock | Provides optional guest-host stream communication through virtio-vsock. |
 | smoltcp | Provides IPv4/IPv6 processing for the smoltcp socket path. |
 | knet IPv4 / ICMPv4 | Validates and reassembles IPv4 packets, delivers UDP input, and handles ICMPv4 errors and responses. |
-| IPv4 filter model | Stores validated `filter` table structure as built-in and user-defined chains, ordered rules, typed matches, and typed targets. `netfilter::evaluator` evaluates one IPv4 packet against a validated table using a bounded jump stack and no heap allocation. ABI decoding, snapshot publication, hook integration, counters, and save output remain later stages. |
+| IPv4 filter model | Stores validated `filter` table structure as built-in and user-defined chains, ordered rules, typed matches, and typed targets. `netfilter::filter::evaluator` evaluates one IPv4 packet against a validated table using a bounded jump stack and no heap allocation; `netfilter::filter::matcher` applies rule conditions within the declared IPv4 payload. ABI decoding, snapshot publication, hook integration, counters, and save output remain later stages. |
 | Router | Selects routes, fragments outgoing IPv4 packets, and dispatches RX/TX queues across devices. |
 | LoopbackDevice | Returns locally transmitted packets to the receive path. |
 | EthernetDevice | Adapts kclass network devices to knet's NetDevice interface and handles Ethernet and ARP. |
@@ -752,8 +755,10 @@ Sources: [`UDP send`](../src/transport/udp/socket.rs), [`Service::prepare_and_se
 
 ### IPv4 Filter Table Model
 
-`netfilter::model` defines an owned representation of the IPv4 `filter` table,
-and `netfilter::evaluator` evaluates one IPv4 packet against a validated table.
+`netfilter::filter::model` owns tables, chains, rules, and targets. Each rule holds
+conditions defined by `netfilter::filter::matcher`, which owns the match types,
+their constructor constraints, and their packet-matching behavior.
+`netfilter::filter::evaluator` walks chains and executes targets.
 The model validates table structure; the evaluator does not decode the legacy ABI
 or attach to ingress or egress hooks. Semantics follow Linux 6.8.12:
 
@@ -788,7 +793,7 @@ FilterTable::evaluate (per hook + FilterPacket)
 | `FilterPacket` | Holds one parsed IPv4 header, the backing packet bytes, and the input and output interface names used by interface matches. |
 | `Chain` | Owns an ordered rule list. A built-in chain binds one `FilterHook` to an `Accept` or `Drop` policy; a user-defined chain has no policy. |
 | `Rule` | Holds an ordered conjunction of match conditions and one target. |
-| `Match` | Wraps one atomic `MatchKind` and its inversion flag. The closed set covers source and destination IPv4 CIDRs, protocol, input and output interface names, TCP and UDP port ranges, TCP flags, and ICMP type and code. Separate L4 fields preserve the independent inversion bits in Linux `xt_tcp` and `xt_udp`. |
+| `Match` | Wraps one atomic `MatchKind` and its inversion flag. The closed set covers source and destination IPv4 CIDRs, protocol, input and output interface names, and protocol-level `Tcp`, `Udp`, and `Icmp` matchers. Separate `Match` entries preserve the independent inversion bits in Linux `xt_tcp` and `xt_udp`. |
 | `Target` | Represents a terminal verdict, fall-through to the next rule, `RETURN`, or a jump to a validated user-chain `ChainId`. |
 | `Verdict` | Contains only `Accept` and `Drop`. `RETURN` and rule continuation cannot escape built-in-chain evaluation as final packet decisions. |
 
@@ -810,8 +815,10 @@ The ABI and packet-path stages must preserve these boundaries:
   `Drop` terminate evaluation. L4 matches fail on protocol mismatch or
   non-first fragments before applying per-condition inversion. Transport reads
   stay within IPv4 `total_len`, excluding trailing link-layer padding.
-  Truncated L4 headers hot-drop the packet; ICMP requires its full eight-byte
-  base header before matching type and code.
+  Truncated L4 base headers hot-drop the packet. As in Linux
+  `net/netfilter/xt_tcpudp.c`, TCP port and flag matches require the fixed
+  20-byte header regardless of the data offset, and ICMP type and code matches
+  require the eight-byte base header regardless of timestamp message length.
 - The decoder bounds replacement bytes, chains, rules, matches, and jump depth.
   The evaluator keeps a fixed-size jump stack (`MAX_JUMP_STACK_DEPTH`) and
   performs no heap allocation while evaluating a packet.

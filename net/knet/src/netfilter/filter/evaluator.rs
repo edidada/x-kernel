@@ -2,21 +2,14 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! IPv4 `filter` table packet evaluator.
+//! IPv4 `filter` table chain evaluator.
 //!
 //! Evaluates a validated [`FilterTable`] against one IPv4 packet using the
-//! semantics of Linux 6.8 `ipt_do_table`, `ip_packet_match`, and the built-in
-//! `tcp` / `udp` / `icmp` matches.
+//! semantics of Linux 6.8 `ipt_do_table`.
 
-use super::model::{
-    ChainId, ChainKind, FilterHook, FilterTable, IcmpMatch, InterfaceMatch, Match, MatchKind,
-    PortRange, Rule, Target, TcpFlagsMatch, Verdict,
-};
-#[cfg(unittest)]
-use crate::stack::ipv4::IPV4_MIN_HEADER_LEN;
-use crate::{
-    ip::{IpAddress, Ipv4Address},
-    stack::ipv4::{Ipv4Error, Ipv4Header, PROTOCOL_ICMP, PROTOCOL_TCP, PROTOCOL_UDP},
+use super::{
+    matcher::{FilterPacket, MatchOutcome, evaluate_matches},
+    model::{ChainId, ChainKind, FilterHook, FilterTable, Rule, Target, Verdict},
 };
 
 /// Maximum user-chain nesting tracked on the preallocated jump stack.
@@ -24,45 +17,6 @@ use crate::{
 /// Deeper recursion returns [`Verdict::Drop`], matching Linux stack overflow
 /// handling in `ipt_do_table`.
 pub(crate) const MAX_JUMP_STACK_DEPTH: usize = 8;
-
-const TCP_HEADER_LEN: usize = 20;
-const UDP_HEADER_LEN: usize = 8;
-const ICMP_HEADER_LEN: usize = 8;
-const TCP_FLAGS_BYTE_OFFSET: usize = 13;
-/// Linux treats `frag_off == 1` (8-byte payload offset) as an evil TCP fragment.
-const TCP_EVIL_FRAGMENT_OFFSET_BYTES: usize = 8;
-
-/// Parsed IPv4 packet metadata supplied to the evaluator.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct FilterPacket<'a> {
-    packet: &'a [u8],
-    header: Ipv4Header,
-    indev: &'a str,
-    outdev: &'a str,
-}
-
-impl<'a> FilterPacket<'a> {
-    pub(crate) fn parse(
-        packet: &'a [u8],
-        indev: &'a str,
-        outdev: &'a str,
-    ) -> Result<Self, Ipv4Error> {
-        let header = Ipv4Header::parse_input(packet)?;
-        Ok(Self {
-            packet,
-            header,
-            indev,
-            outdev,
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MatchOutcome {
-    Matched,
-    NotMatched,
-    HotDrop,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct JumpFrame {
@@ -176,228 +130,29 @@ fn builtin_policy(table: &FilterTable, chain_id: ChainId) -> Verdict {
     }
 }
 
-fn evaluate_matches(matches: &[Match], packet: &FilterPacket<'_>) -> MatchOutcome {
-    for condition in matches {
-        match evaluate_match(condition, packet) {
-            MatchOutcome::HotDrop => return MatchOutcome::HotDrop,
-            MatchOutcome::NotMatched => return MatchOutcome::NotMatched,
-            MatchOutcome::Matched => {}
-        }
-    }
-    MatchOutcome::Matched
-}
-
-fn evaluate_match(condition: &Match, packet: &FilterPacket<'_>) -> MatchOutcome {
-    let matched = match condition.kind() {
-        MatchKind::SourceAddress(cidr) => {
-            address_matches(cidr.address(), cidr.prefix_len(), packet.header.src_addr())
-        }
-        MatchKind::DestinationAddress(cidr) => {
-            address_matches(cidr.address(), cidr.prefix_len(), packet.header.dst_addr())
-        }
-        MatchKind::Protocol(protocol) => packet.header.protocol() == *protocol,
-        MatchKind::InputInterface(pattern) => interface_matches(pattern, packet.indev),
-        MatchKind::OutputInterface(pattern) => interface_matches(pattern, packet.outdev),
-        MatchKind::TcpSourcePort(range) => match tcp_field(packet, TcpField::SourcePort) {
-            FieldOutcome::Matched(value) => port_in_range(*range, value),
-            FieldOutcome::NotMatched => return MatchOutcome::NotMatched,
-            FieldOutcome::HotDrop => return MatchOutcome::HotDrop,
-        },
-        MatchKind::TcpDestinationPort(range) => {
-            match tcp_field(packet, TcpField::DestinationPort) {
-                FieldOutcome::Matched(value) => port_in_range(*range, value),
-                FieldOutcome::NotMatched => return MatchOutcome::NotMatched,
-                FieldOutcome::HotDrop => return MatchOutcome::HotDrop,
-            }
-        }
-        MatchKind::TcpFlags(flags) => match tcp_flags_byte(packet) {
-            FieldOutcome::Matched(value) => tcp_flags_match(*flags, value),
-            FieldOutcome::NotMatched => return MatchOutcome::NotMatched,
-            FieldOutcome::HotDrop => return MatchOutcome::HotDrop,
-        },
-        MatchKind::UdpSourcePort(range) => match udp_field(packet, UdpField::SourcePort) {
-            FieldOutcome::Matched(value) => port_in_range(*range, value),
-            FieldOutcome::NotMatched => return MatchOutcome::NotMatched,
-            FieldOutcome::HotDrop => return MatchOutcome::HotDrop,
-        },
-        MatchKind::UdpDestinationPort(range) => {
-            match udp_field(packet, UdpField::DestinationPort) {
-                FieldOutcome::Matched(value) => port_in_range(*range, value),
-                FieldOutcome::NotMatched => return MatchOutcome::NotMatched,
-                FieldOutcome::HotDrop => return MatchOutcome::HotDrop,
-            }
-        }
-        MatchKind::Icmp(icmp) => match icmp_field(packet) {
-            FieldOutcome::Matched((icmp_type, code)) => icmp_matches(*icmp, icmp_type, code),
-            FieldOutcome::NotMatched => return MatchOutcome::NotMatched,
-            FieldOutcome::HotDrop => return MatchOutcome::HotDrop,
-        },
-    };
-
-    if matched ^ condition.is_inverted() {
-        MatchOutcome::Matched
-    } else {
-        MatchOutcome::NotMatched
-    }
-}
-
-fn address_matches(network: Ipv4Address, prefix_len: u8, addr: Ipv4Address) -> bool {
-    crate::ip::Ipv4Cidr::new(network, prefix_len).contains_addr(&IpAddress::Ipv4(addr))
-}
-
-fn interface_matches(pattern: &InterfaceMatch, device_name: &str) -> bool {
-    match pattern {
-        InterfaceMatch::Exact(expected) => device_name == expected,
-        InterfaceMatch::Prefix(prefix) => device_name.starts_with(prefix.as_str()),
-    }
-}
-
-fn port_in_range(range: PortRange, port: u16) -> bool {
-    port >= range.start() && port <= range.end()
-}
-
-fn tcp_flags_match(expected: TcpFlagsMatch, flags_byte: u8) -> bool {
-    (flags_byte & expected.mask()) == expected.expected()
-}
-
-fn icmp_matches(spec: IcmpMatch, icmp_type: u8, code: u8) -> bool {
-    let type_ok = spec
-        .icmp_type()
-        .is_none_or(|expected| expected == icmp_type);
-    type_ok && code >= spec.code_start() && code <= spec.code_end()
-}
-
-enum FieldOutcome<T> {
-    Matched(T),
-    NotMatched,
-    HotDrop,
-}
-
-enum TcpField {
-    SourcePort,
-    DestinationPort,
-}
-
-enum UdpField {
-    SourcePort,
-    DestinationPort,
-}
-
-fn l4_unavailable(header: Ipv4Header, l4_protocol: u8) -> bool {
-    header.protocol() != l4_protocol || header.fragment_offset() != 0
-}
-
-fn transport_slice<'a>(
-    packet: &'a FilterPacket<'_>,
-    required_len: usize,
-) -> Result<&'a [u8], FieldOutcome<()>> {
-    // Link-layer padding cannot supply bytes missing from the IPv4 payload.
-    crate::stack::ipv4::payload(packet.packet, &packet.header)
-        .and_then(|payload| payload.get(..required_len))
-        .ok_or(FieldOutcome::HotDrop)
-}
-
-fn tcp_field(packet: &FilterPacket<'_>, field: TcpField) -> FieldOutcome<u16> {
-    if l4_unavailable(packet.header, PROTOCOL_TCP) {
-        if packet.header.protocol() == PROTOCOL_TCP
-            && packet.header.fragment_offset() == TCP_EVIL_FRAGMENT_OFFSET_BYTES
-        {
-            return FieldOutcome::HotDrop;
-        }
-        return FieldOutcome::NotMatched;
-    }
-
-    let transport = match transport_slice(packet, TCP_HEADER_LEN) {
-        Ok(slice) => slice,
-        Err(FieldOutcome::HotDrop) => return FieldOutcome::HotDrop,
-        Err(FieldOutcome::NotMatched) => return FieldOutcome::NotMatched,
-        Err(FieldOutcome::Matched(_)) => unreachable!(),
-    };
-
-    match field {
-        TcpField::SourcePort => {
-            FieldOutcome::Matched(u16::from_be_bytes([transport[0], transport[1]]))
-        }
-        TcpField::DestinationPort => {
-            FieldOutcome::Matched(u16::from_be_bytes([transport[2], transport[3]]))
-        }
-    }
-}
-
-fn tcp_flags_byte(packet: &FilterPacket<'_>) -> FieldOutcome<u8> {
-    if l4_unavailable(packet.header, PROTOCOL_TCP) {
-        if packet.header.protocol() == PROTOCOL_TCP
-            && packet.header.fragment_offset() == TCP_EVIL_FRAGMENT_OFFSET_BYTES
-        {
-            return FieldOutcome::HotDrop;
-        }
-        return FieldOutcome::NotMatched;
-    }
-
-    let transport = match transport_slice(packet, TCP_HEADER_LEN) {
-        Ok(slice) => slice,
-        Err(FieldOutcome::HotDrop) => return FieldOutcome::HotDrop,
-        Err(FieldOutcome::NotMatched) => return FieldOutcome::NotMatched,
-        Err(FieldOutcome::Matched(_)) => unreachable!(),
-    };
-
-    if transport.len() <= TCP_FLAGS_BYTE_OFFSET {
-        FieldOutcome::HotDrop
-    } else {
-        FieldOutcome::Matched(transport[TCP_FLAGS_BYTE_OFFSET])
-    }
-}
-
-fn udp_field(packet: &FilterPacket<'_>, field: UdpField) -> FieldOutcome<u16> {
-    if l4_unavailable(packet.header, PROTOCOL_UDP) {
-        return FieldOutcome::NotMatched;
-    }
-
-    let transport = match transport_slice(packet, UDP_HEADER_LEN) {
-        Ok(slice) => slice,
-        Err(FieldOutcome::HotDrop) => return FieldOutcome::HotDrop,
-        Err(FieldOutcome::NotMatched) => return FieldOutcome::NotMatched,
-        Err(FieldOutcome::Matched(_)) => unreachable!(),
-    };
-
-    match field {
-        UdpField::SourcePort => {
-            FieldOutcome::Matched(u16::from_be_bytes([transport[0], transport[1]]))
-        }
-        UdpField::DestinationPort => {
-            FieldOutcome::Matched(u16::from_be_bytes([transport[2], transport[3]]))
-        }
-    }
-}
-
-fn icmp_field(packet: &FilterPacket<'_>) -> FieldOutcome<(u8, u8)> {
-    if l4_unavailable(packet.header, PROTOCOL_ICMP) {
-        return FieldOutcome::NotMatched;
-    }
-
-    let transport = match transport_slice(packet, ICMP_HEADER_LEN) {
-        Ok(slice) => slice,
-        Err(FieldOutcome::HotDrop) => return FieldOutcome::HotDrop,
-        Err(FieldOutcome::NotMatched) => return FieldOutcome::NotMatched,
-        Err(FieldOutcome::Matched(_)) => unreachable!(),
-    };
-
-    FieldOutcome::Matched((transport[0], transport[1]))
-}
-
 #[cfg(unittest)]
 mod tests {
     use alloc::{string::ToString, vec, vec::Vec};
 
-    use etherparse::{IpFragOffset, IpNumber, Ipv4Header as EtherIpv4Header};
+    use etherparse::{IpFragOffset, IpNumber, Ipv4Header as EtherIpv4Header, TcpHeader, UdpHeader};
     use unittest::def_test;
 
-    use super::*;
-    use crate::ip::Ipv4Cidr;
+    use super::{
+        super::{
+            matcher::{
+                IcmpMatch, InterfaceMatch, Match, MatchKind, PortRange, TcpFlagsMatch, TcpMatch,
+                UdpMatch,
+            },
+            model::{Chain, Rule},
+        },
+        *,
+    };
+    use crate::{
+        ip::{Ipv4Address, Ipv4Cidr},
+        stack::ipv4::{IPV4_MIN_HEADER_LEN, PROTOCOL_ICMP, PROTOCOL_TCP, PROTOCOL_UDP},
+    };
 
-    fn built_in_chains() -> Vec<super::super::model::Chain> {
-        use super::super::model::Chain;
-
+    fn built_in_chains() -> Vec<Chain> {
         vec![
             Chain::built_in(
                 "INPUT".to_string(),
@@ -420,13 +175,7 @@ mod tests {
         ]
     }
 
-    fn with_input_rules(
-        mut chains: Vec<super::super::model::Chain>,
-        policy: Verdict,
-        rules: Vec<Rule>,
-    ) -> Vec<super::super::model::Chain> {
-        use super::super::model::Chain;
-
+    fn with_input_rules(mut chains: Vec<Chain>, policy: Verdict, rules: Vec<Rule>) -> Vec<Chain> {
         chains[0] = Chain::built_in("INPUT".to_string(), FilterHook::Input, policy, rules);
         chains
     }
@@ -448,18 +197,17 @@ mod tests {
     }
 
     fn tcp_payload(src_port: u16, dst_port: u16, flags: u8) -> Vec<u8> {
-        let mut payload = vec![0u8; TCP_HEADER_LEN];
-        payload[0..2].copy_from_slice(&src_port.to_be_bytes());
-        payload[2..4].copy_from_slice(&dst_port.to_be_bytes());
-        payload[TCP_FLAGS_BYTE_OFFSET] = flags;
-        payload
+        let mut header = TcpHeader::new(src_port, dst_port, 0, 0);
+        header.syn = flags & 0x02 != 0;
+        header.ack = flags & 0x10 != 0;
+        header.to_bytes().to_vec()
     }
 
     fn udp_payload(src_port: u16, dst_port: u16) -> Vec<u8> {
-        let mut payload = vec![0u8; UDP_HEADER_LEN];
-        payload[0..2].copy_from_slice(&src_port.to_be_bytes());
-        payload[2..4].copy_from_slice(&dst_port.to_be_bytes());
-        payload
+        UdpHeader::without_ipv4_checksum(src_port, dst_port, 0)
+            .unwrap()
+            .to_bytes()
+            .to_vec()
     }
 
     fn icmp_payload(icmp_type: u8, code: u8) -> Vec<u8> {
@@ -489,7 +237,9 @@ mod tests {
                     vec![
                         Match::new(MatchKind::Protocol(PROTOCOL_TCP), false),
                         Match::new(
-                            MatchKind::TcpDestinationPort(PortRange::new(443, 443).unwrap()),
+                            MatchKind::Tcp(TcpMatch::destination_port(
+                                PortRange::new(443, 443).unwrap(),
+                            )),
                             false,
                         ),
                     ],
@@ -507,6 +257,73 @@ mod tests {
         assert_eq!(evaluate_input(&table, &tcp_https, "eth0"), Verdict::Drop);
         assert_eq!(evaluate_input(&table, &tcp_other, "eth0"), Verdict::Accept);
         assert_eq!(evaluate_input(&table, &udp_packet, "eth0"), Verdict::Accept);
+
+        // Linux port matching only requires the fixed TCP header, even when
+        // the data offset describes an invalid or incomplete options area.
+        for data_offset in [0, 4, 6, 15] {
+            let mut payload = tcp_payload(1234, 80, 0x02);
+            payload[12] = data_offset << 4;
+            let packet = ipv4_packet(PROTOCOL_TCP, &payload);
+            assert_eq!(
+                evaluate_input(&table, &packet, "eth0"),
+                Verdict::Accept,
+                "TCP data offset {data_offset} must not hot-drop a port mismatch"
+            );
+        }
+    }
+
+    #[def_test]
+    fn udp_matches_honor_port_ranges_and_independent_inversion() {
+        for (invert_source, invert_destination) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let table = FilterTable::new(with_input_rules(
+                built_in_chains(),
+                Verdict::Drop,
+                vec![Rule::new(
+                    vec![
+                        Match::new(
+                            MatchKind::Udp(UdpMatch::source_port(
+                                PortRange::new(1000, 2000).unwrap(),
+                            )),
+                            invert_source,
+                        ),
+                        Match::new(
+                            MatchKind::Udp(UdpMatch::destination_port(
+                                PortRange::new(53, 54).unwrap(),
+                            )),
+                            invert_destination,
+                        ),
+                    ],
+                    Target::Verdict(Verdict::Accept),
+                )],
+            ))
+            .unwrap();
+
+            for (source, destination, source_matches, destination_matches) in [
+                (1000, 53, true, true),
+                (2000, 54, true, true),
+                (999, 53, false, true),
+                (2001, 54, false, true),
+                (1000, 52, true, false),
+                (2000, 55, true, false),
+                (999, 55, false, false),
+            ] {
+                let expected = if (source_matches ^ invert_source)
+                    && (destination_matches ^ invert_destination)
+                {
+                    Verdict::Accept
+                } else {
+                    Verdict::Drop
+                };
+                let packet = ipv4_packet(PROTOCOL_UDP, &udp_payload(source, destination));
+                assert_eq!(
+                    evaluate_input(&table, &packet, "eth0"),
+                    expected,
+                    "UDP {source}:{destination}, inversion {invert_source}:{invert_destination}"
+                );
+            }
+        }
     }
 
     #[def_test]
@@ -556,15 +373,15 @@ mod tests {
                     ),
                     Match::new(MatchKind::Protocol(PROTOCOL_TCP), false),
                     Match::new(
-                        MatchKind::TcpSourcePort(PortRange::new(1000, 2000).unwrap()),
+                        MatchKind::Tcp(TcpMatch::source_port(PortRange::new(1000, 2000).unwrap())),
                         false,
                     ),
                     Match::new(
-                        MatchKind::TcpDestinationPort(PortRange::new(80, 80).unwrap()),
+                        MatchKind::Tcp(TcpMatch::destination_port(PortRange::new(80, 80).unwrap())),
                         false,
                     ),
                     Match::new(
-                        MatchKind::TcpFlags(TcpFlagsMatch::new(0x12, 0x02).unwrap()),
+                        MatchKind::Tcp(TcpMatch::flags(TcpFlagsMatch::new(0x12, 0x02).unwrap())),
                         false,
                     ),
                 ],
@@ -581,24 +398,44 @@ mod tests {
 
     #[def_test]
     fn icmp_match_honors_type_and_code_range() {
-        let chains = with_input_rules(
-            built_in_chains(),
-            Verdict::Accept,
-            vec![Rule::new(
-                vec![Match::new(
-                    MatchKind::Icmp(IcmpMatch::new(Some(3), 0, 1).unwrap()),
-                    false,
+        for (expected_type, packet_type, code, payload_len, expected) in [
+            (3, 3, 1, 8, Verdict::Drop),
+            (3, 3, 2, 8, Verdict::Accept),
+            (3, 8, 0, 8, Verdict::Accept),
+            (3, 13, 0, 8, Verdict::Accept),
+            (3, 13, 0, 20, Verdict::Accept),
+            (3, 13, 0, 24, Verdict::Accept),
+            (3, 14, 0, 8, Verdict::Accept),
+            (3, 14, 0, 20, Verdict::Accept),
+            (3, 14, 0, 24, Verdict::Accept),
+            (13, 13, 0, 8, Verdict::Drop),
+            (13, 13, 0, 20, Verdict::Drop),
+            (13, 13, 0, 24, Verdict::Drop),
+            (14, 14, 0, 8, Verdict::Drop),
+            (14, 14, 0, 20, Verdict::Drop),
+            (14, 14, 0, 24, Verdict::Drop),
+        ] {
+            let table = FilterTable::new(with_input_rules(
+                built_in_chains(),
+                Verdict::Accept,
+                vec![Rule::new(
+                    vec![Match::new(
+                        MatchKind::Icmp(IcmpMatch::new(Some(expected_type), 0, 1).unwrap()),
+                        false,
+                    )],
+                    Target::Verdict(Verdict::Drop),
                 )],
-                Target::Verdict(Verdict::Drop),
-            )],
-        );
-
-        let table = FilterTable::new(chains).unwrap();
-        let matching = ipv4_packet(PROTOCOL_ICMP, &icmp_payload(3, 1));
-        let wrong_code = ipv4_packet(PROTOCOL_ICMP, &icmp_payload(3, 2));
-
-        assert_eq!(evaluate_input(&table, &matching, "eth0"), Verdict::Drop);
-        assert_eq!(evaluate_input(&table, &wrong_code, "eth0"), Verdict::Accept);
+            ))
+            .unwrap();
+            let mut payload = icmp_payload(packet_type, code);
+            payload.resize(payload_len, 0);
+            let packet = ipv4_packet(PROTOCOL_ICMP, &payload);
+            assert_eq!(
+                evaluate_input(&table, &packet, "eth0"),
+                expected,
+                "ICMP rule type {expected_type}, packet {packet_type}/{code}, length {payload_len}"
+            );
+        }
     }
 
     #[def_test]
@@ -634,12 +471,12 @@ mod tests {
                 Rule::new(Vec::new(), Target::Verdict(Verdict::Accept)),
             ],
         );
-        chains.push(super::super::model::Chain::user_defined(
+        chains.push(Chain::user_defined(
             "TCP-CHECK".to_string(),
             vec![
                 Rule::new(
                     vec![Match::new(
-                        MatchKind::TcpDestinationPort(PortRange::new(22, 22).unwrap()),
+                        MatchKind::Tcp(TcpMatch::destination_port(PortRange::new(22, 22).unwrap())),
                         false,
                     )],
                     Target::Verdict(Verdict::Drop),
@@ -677,7 +514,7 @@ mod tests {
             Verdict::Accept,
             vec![Rule::new(
                 vec![Match::new(
-                    MatchKind::TcpDestinationPort(PortRange::new(80, 80).unwrap()),
+                    MatchKind::Tcp(TcpMatch::destination_port(PortRange::new(80, 80).unwrap())),
                     false,
                 )],
                 Target::Verdict(Verdict::Drop),
@@ -698,24 +535,51 @@ mod tests {
     }
 
     #[def_test]
-    fn truncated_l4_header_hotdrops_when_tcp_match_present() {
-        let chains = with_input_rules(
-            built_in_chains(),
-            Verdict::Accept,
-            vec![Rule::new(
-                vec![Match::new(
-                    MatchKind::TcpDestinationPort(PortRange::new(80, 80).unwrap()),
-                    false,
+    fn l4_matches_require_base_headers_within_ipv4_length() {
+        let range = PortRange::new(80, 80).unwrap();
+        for (protocol, kind, payload) in [
+            (
+                PROTOCOL_TCP,
+                MatchKind::Tcp(TcpMatch::destination_port(range)),
+                tcp_payload(1, 80, 0),
+            ),
+            (
+                PROTOCOL_UDP,
+                MatchKind::Udp(UdpMatch::destination_port(range)),
+                udp_payload(1, 80),
+            ),
+            (
+                PROTOCOL_ICMP,
+                MatchKind::Icmp(IcmpMatch::new(Some(8), 0, 0).unwrap()),
+                icmp_payload(8, 0),
+            ),
+        ] {
+            let table = FilterTable::new(with_input_rules(
+                built_in_chains(),
+                Verdict::Accept,
+                vec![Rule::new(
+                    vec![Match::new(kind, false)],
+                    Target::Verdict(Verdict::Accept),
                 )],
-                Target::Verdict(Verdict::Accept),
-            )],
-        );
+            ))
+            .unwrap();
 
-        let table = FilterTable::new(chains).unwrap();
-        let mut packet = ipv4_packet(PROTOCOL_TCP, &[]);
-        packet.truncate(IPV4_MIN_HEADER_LEN + 4);
-
-        assert_eq!(evaluate_input(&table, &packet, "eth0"), Verdict::Drop);
+            for payload_len in [0, 2, 4, payload.len() - 1, payload.len()] {
+                let expected = if payload_len == payload.len() {
+                    Verdict::Accept
+                } else {
+                    Verdict::Drop
+                };
+                let mut packet = ipv4_packet(protocol, &payload[..payload_len]);
+                // Trailing link-layer padding must not complete a short header.
+                packet.extend_from_slice(&payload[payload_len..]);
+                assert_eq!(
+                    evaluate_input(&table, &packet, "eth0"),
+                    expected,
+                    "protocol {protocol}, IPv4 payload length {payload_len}"
+                );
+            }
+        }
     }
 
     #[def_test]
@@ -733,7 +597,7 @@ mod tests {
             } else {
                 Target::Jump(ChainId::from_index(index + 4))
             };
-            chains.push(super::super::model::Chain::user_defined(
+            chains.push(Chain::user_defined(
                 name,
                 vec![Rule::new(Vec::new(), target)],
             ));
@@ -754,7 +618,7 @@ mod tests {
                 vec![
                     Match::new(MatchKind::Protocol(PROTOCOL_TCP), false),
                     Match::new(
-                        MatchKind::TcpDestinationPort(PortRange::new(80, 80).unwrap()),
+                        MatchKind::Tcp(TcpMatch::destination_port(PortRange::new(80, 80).unwrap())),
                         true,
                     ),
                 ],
@@ -768,45 +632,6 @@ mod tests {
         header.more_fragments = true;
         header.header_checksum = header.calc_header_checksum();
         packet[..IPV4_MIN_HEADER_LEN].copy_from_slice(&header.to_bytes());
-
-        assert_eq!(evaluate_input(&table, &packet, "eth0"), Verdict::Drop);
-    }
-
-    #[def_test]
-    fn tcp_header_must_fit_declared_ipv4_length() {
-        let table = FilterTable::new(with_input_rules(
-            built_in_chains(),
-            Verdict::Drop,
-            vec![Rule::new(
-                vec![Match::new(
-                    MatchKind::TcpDestinationPort(PortRange::new(80, 80).unwrap()),
-                    false,
-                )],
-                Target::Verdict(Verdict::Accept),
-            )],
-        ))
-        .unwrap();
-        let mut packet = ipv4_packet(PROTOCOL_TCP, &[]);
-        packet.extend_from_slice(&tcp_payload(1024, 80, 0x02));
-
-        assert_eq!(evaluate_input(&table, &packet, "eth0"), Verdict::Drop);
-    }
-
-    #[def_test]
-    fn icmp_short_header_hotdrops() {
-        let table = FilterTable::new(with_input_rules(
-            built_in_chains(),
-            Verdict::Accept,
-            vec![Rule::new(
-                vec![Match::new(
-                    MatchKind::Icmp(IcmpMatch::new(Some(8), 0, 0).unwrap()),
-                    false,
-                )],
-                Target::Verdict(Verdict::Accept),
-            )],
-        ))
-        .unwrap();
-        let packet = ipv4_packet(PROTOCOL_ICMP, &[8, 0]);
 
         assert_eq!(evaluate_input(&table, &packet, "eth0"), Verdict::Drop);
     }

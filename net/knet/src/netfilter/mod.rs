@@ -8,16 +8,4 @@
 //! this module. The model stores owned semantic values and does not retain
 //! offsets or pointers into the userspace replacement blob.
 
-#[cfg_attr(
-    not(unittest),
-    expect(
-        dead_code,
-        reason = "filter hook integration is implemented in a later stage"
-    )
-)]
-pub(crate) mod evaluator;
-#[expect(
-    dead_code,
-    reason = "the legacy ABI decoder and hook integration are implemented in later stages"
-)]
-pub(crate) mod model;
+pub(crate) mod filter;

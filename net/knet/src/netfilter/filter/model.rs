@@ -6,7 +6,7 @@
 
 use alloc::{string::String, vec, vec::Vec};
 
-use crate::ip::Ipv4Cidr;
+use super::matcher::{Match, MatchKind};
 
 const BUILTIN_CHAIN_COUNT: usize = 3;
 
@@ -69,146 +69,6 @@ pub(crate) enum Target {
     Continue,
     Return,
     Jump(ChainId),
-}
-
-/// A closed inclusive transport-port range.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct PortRange {
-    start: u16,
-    end: u16,
-}
-
-impl PortRange {
-    pub(crate) const fn new(start: u16, end: u16) -> Option<Self> {
-        if start <= end {
-            Some(Self { start, end })
-        } else {
-            None
-        }
-    }
-
-    pub(crate) const fn start(self) -> u16 {
-        self.start
-    }
-
-    pub(crate) const fn end(self) -> u16 {
-        self.end
-    }
-}
-
-/// Interface-name condition accepted from legacy iptables syntax.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum InterfaceMatch {
-    Exact(String),
-    Prefix(String),
-}
-
-impl InterfaceMatch {
-    pub(crate) fn name(&self) -> &str {
-        match self {
-            Self::Exact(name) | Self::Prefix(name) => name,
-        }
-    }
-
-    pub(crate) const fn is_prefix(&self) -> bool {
-        matches!(self, Self::Prefix(_))
-    }
-}
-
-/// TCP flag mask and expected value.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct TcpFlagsMatch {
-    mask: u8,
-    expected: u8,
-}
-
-impl TcpFlagsMatch {
-    pub(crate) const fn new(mask: u8, expected: u8) -> Option<Self> {
-        if expected & !mask == 0 {
-            Some(Self { mask, expected })
-        } else {
-            None
-        }
-    }
-
-    pub(crate) const fn mask(self) -> u8 {
-        self.mask
-    }
-
-    pub(crate) const fn expected(self) -> u8 {
-        self.expected
-    }
-}
-
-/// ICMP type and inclusive code range selected by the initial L4 matcher.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct IcmpMatch {
-    icmp_type: Option<u8>,
-    code_start: u8,
-    code_end: u8,
-}
-
-impl IcmpMatch {
-    pub(crate) const fn new(icmp_type: Option<u8>, code_start: u8, code_end: u8) -> Option<Self> {
-        if code_start <= code_end {
-            Some(Self {
-                icmp_type,
-                code_start,
-                code_end,
-            })
-        } else {
-            None
-        }
-    }
-
-    pub(crate) const fn icmp_type(self) -> Option<u8> {
-        self.icmp_type
-    }
-
-    pub(crate) const fn code_start(self) -> u8 {
-        self.code_start
-    }
-
-    pub(crate) const fn code_end(self) -> u8 {
-        self.code_end
-    }
-}
-
-/// Semantic match operations supported by the initial IPv4 filter model.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum MatchKind {
-    SourceAddress(Ipv4Cidr),
-    DestinationAddress(Ipv4Cidr),
-    Protocol(u8),
-    InputInterface(InterfaceMatch),
-    OutputInterface(InterfaceMatch),
-    TcpSourcePort(PortRange),
-    TcpDestinationPort(PortRange),
-    TcpFlags(TcpFlagsMatch),
-    UdpSourcePort(PortRange),
-    UdpDestinationPort(PortRange),
-    Icmp(IcmpMatch),
-}
-
-/// One independently invertible rule condition.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Match {
-    kind: MatchKind,
-    is_inverted: bool,
-}
-
-impl Match {
-    pub(crate) fn new(kind: MatchKind, is_inverted: bool) -> Self {
-        Self { kind, is_inverted }
-    }
-
-    pub(crate) const fn kind(&self) -> &MatchKind {
-        &self.kind
-    }
-
-    pub(crate) const fn is_inverted(&self) -> bool {
-        self.is_inverted
-    }
 }
 
 /// Ordered conjunction of match conditions and its selected action.
@@ -391,7 +251,7 @@ impl FilterTable {
 fn validate_rule_matches(chain: &Chain) -> Result<(), FilterTableError> {
     for rule in &chain.rules {
         for condition in &rule.matches {
-            let prefix_len = match &condition.kind {
+            let prefix_len = match condition.kind() {
                 MatchKind::SourceAddress(cidr) | MatchKind::DestinationAddress(cidr) => {
                     Some(cidr.prefix_len())
                 }
@@ -459,7 +319,7 @@ mod tests {
     use unittest::def_test;
 
     use super::*;
-    use crate::ip::Ipv4Address;
+    use crate::ip::{Ipv4Address, Ipv4Cidr};
 
     fn built_in_chains() -> Vec<Chain> {
         vec![
@@ -543,25 +403,6 @@ mod tests {
             FilterTable::new(duplicate_name),
             Err(FilterTableError::DuplicateChainName)
         );
-    }
-
-    #[def_test]
-    fn match_value_constructors_validate_ranges_and_masks() {
-        let port_range = PortRange::new(80, 443).unwrap();
-        assert_eq!(port_range.start(), 80);
-        assert_eq!(port_range.end(), 443);
-        assert_eq!(PortRange::new(443, 80), None);
-
-        let flags = TcpFlagsMatch::new(0x12, 0x02).unwrap();
-        assert_eq!(flags.mask(), 0x12);
-        assert_eq!(flags.expected(), 0x02);
-        assert_eq!(TcpFlagsMatch::new(0x02, 0x12), None);
-
-        let icmp = IcmpMatch::new(Some(3), 0, 15).unwrap();
-        assert_eq!(icmp.icmp_type(), Some(3));
-        assert_eq!(icmp.code_start(), 0);
-        assert_eq!(icmp.code_end(), 15);
-        assert_eq!(IcmpMatch::new(Some(3), 15, 0), None);
     }
 
     #[def_test]
