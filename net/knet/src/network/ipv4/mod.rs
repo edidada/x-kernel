@@ -6,6 +6,8 @@
 
 mod process;
 
+#[cfg(unittest)]
+pub(crate) use process::IPV4_MIN_HEADER_LEN;
 pub(crate) use process::{
     Icmpv4Error, Ipv4Error, Ipv4FragmentError, Ipv4Header, PROTOCOL_ICMP, PROTOCOL_TCP,
     PROTOCOL_UDP, build_icmpv4_error_packet, fragment_output_packet, ip_version, payload,

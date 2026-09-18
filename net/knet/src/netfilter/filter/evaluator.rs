@@ -8,7 +8,7 @@
 //! semantics of Linux 6.8 `ipt_do_table`.
 
 use super::{
-    matcher::{FilterPacket, MatchOutcome, evaluate_matches},
+    matcher::{FilterPacket, MatchOutcome, evaluate_rule},
     model::{ChainId, ChainKind, FilterHook, FilterTable, MAX_JUMP_DEPTH, Target, Verdict},
 };
 
@@ -64,7 +64,7 @@ fn evaluate_from(
         }
         rule_steps += 1;
 
-        match evaluate_matches(rule.matches(), packet) {
+        match evaluate_rule(rule, packet) {
             MatchOutcome::HotDrop => return Verdict::Drop,
             MatchOutcome::NotMatched => {
                 rule_index += 1;
@@ -123,8 +123,8 @@ mod tests {
     use super::{
         super::{
             matcher::{
-                IcmpMatch, InterfaceMatch, Match, MatchKind, PortRange, TcpFlagsMatch, TcpMatch,
-                UdpMatch,
+                BaseMatch, ExtensionMatch, IcmpMatch, InterfaceMatch, Negated, PortRange,
+                TcpFlagsMatch, TcpMatch, UdpMatch,
             },
             model::{Chain, Rule},
         },
@@ -132,7 +132,7 @@ mod tests {
     };
     use crate::{
         ip::{Ipv4Address, Ipv4Cidr},
-        stack::ipv4::{IPV4_MIN_HEADER_LEN, PROTOCOL_ICMP, PROTOCOL_TCP, PROTOCOL_UDP},
+        ipv4::{IPV4_MIN_HEADER_LEN, PROTOCOL_ICMP, PROTOCOL_TCP, PROTOCOL_UDP},
     };
 
     fn built_in_chains() -> Vec<Chain> {
@@ -146,6 +146,10 @@ mod tests {
     fn with_input_rules(mut chains: Vec<Chain>, policy: Verdict, rules: Vec<Rule>) -> Vec<Chain> {
         chains[0] = Chain::built_in(FilterHook::Input, policy, rules);
         chains
+    }
+
+    fn rule(base: BaseMatch, extensions: Vec<ExtensionMatch>, target: Target) -> Rule {
+        Rule::new(base, extensions, target).expect("test rule must be valid")
     }
 
     fn ipv4_packet(protocol: u8, payload: &[u8]) -> Vec<u8> {
@@ -201,19 +205,21 @@ mod tests {
             built_in_chains(),
             Verdict::Accept,
             vec![
-                Rule::new(
-                    vec![
-                        Match::new(MatchKind::Protocol(PROTOCOL_TCP), false),
-                        Match::new(
-                            MatchKind::Tcp(TcpMatch::destination_port(
-                                PortRange::new(443, 443).unwrap(),
-                            )),
-                            false,
-                        ),
-                    ],
+                rule(
+                    BaseMatch {
+                        protocol: Some(Negated::new(PROTOCOL_TCP, false)),
+                        ..BaseMatch::default()
+                    },
+                    vec![ExtensionMatch::Tcp(TcpMatch::new().with_destination_port(
+                        Negated::new(PortRange::new(443, 443).unwrap(), false),
+                    ))],
                     Target::Verdict(Verdict::Drop),
                 ),
-                Rule::new(Vec::new(), Target::Verdict(Verdict::Accept)),
+                rule(
+                    BaseMatch::default(),
+                    Vec::new(),
+                    Target::Verdict(Verdict::Accept),
+                ),
             ],
         );
 
@@ -241,6 +247,89 @@ mod tests {
     }
 
     #[def_test]
+    fn base_conditions_apply_inversion() {
+        let bytes = ipv4_packet(PROTOCOL_TCP, &[]);
+        let packet = FilterPacket::parse(&bytes, "eth0", "eth1").unwrap();
+
+        for is_inverted in [false, true] {
+            for value_matches in [false, true] {
+                let source = if value_matches { 1 } else { 3 };
+                let destination = if value_matches { 2 } else { 3 };
+                let input_interface = if value_matches { "eth" } else { "lo" };
+                let output_interface = if value_matches { "eth1" } else { "eth0" };
+                let protocol = if value_matches {
+                    PROTOCOL_TCP
+                } else {
+                    PROTOCOL_UDP
+                };
+
+                for base in [
+                    BaseMatch {
+                        source: Some(Negated::new(
+                            Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, source), 32).unwrap(),
+                            is_inverted,
+                        )),
+                        ..BaseMatch::default()
+                    },
+                    BaseMatch {
+                        destination: Some(Negated::new(
+                            Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, destination), 32).unwrap(),
+                            is_inverted,
+                        )),
+                        ..BaseMatch::default()
+                    },
+                    BaseMatch {
+                        input_interface: Some(Negated::new(
+                            InterfaceMatch::prefix(input_interface.to_string()).unwrap(),
+                            is_inverted,
+                        )),
+                        ..BaseMatch::default()
+                    },
+                    BaseMatch {
+                        output_interface: Some(Negated::new(
+                            InterfaceMatch::exact(output_interface.to_string()).unwrap(),
+                            is_inverted,
+                        )),
+                        ..BaseMatch::default()
+                    },
+                    BaseMatch {
+                        protocol: Some(Negated::new(protocol, is_inverted)),
+                        ..BaseMatch::default()
+                    },
+                ] {
+                    let rule = rule(base, Vec::new(), Target::Continue);
+                    let expected = if value_matches ^ is_inverted {
+                        MatchOutcome::Matched
+                    } else {
+                        MatchOutcome::NotMatched
+                    };
+                    assert_eq!(evaluate_rule(&rule, &packet), expected, "rule {rule:?}");
+                }
+            }
+        }
+    }
+
+    #[def_test]
+    fn base_mismatch_skips_extension_payload_read() {
+        let bytes = ipv4_packet(PROTOCOL_TCP, &[]);
+        let packet = FilterPacket::parse(&bytes, "eth0", "eth1").unwrap();
+        let rule = rule(
+            BaseMatch {
+                source: Some(Negated::new(
+                    Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 3), 32).unwrap(),
+                    false,
+                )),
+                protocol: Some(Negated::new(PROTOCOL_TCP, false)),
+                ..BaseMatch::default()
+            },
+            vec![ExtensionMatch::Tcp(TcpMatch::new())],
+            Target::Continue,
+        );
+
+        assert_eq!(evaluate_rule(&rule, &packet), MatchOutcome::NotMatched);
+    }
+
+    #[def_test]
     fn udp_matches_honor_port_ranges_and_independent_inversion() {
         for (invert_source, invert_destination) in
             [(false, false), (true, false), (false, true), (true, true)]
@@ -248,21 +337,22 @@ mod tests {
             let table = FilterTable::new(with_input_rules(
                 built_in_chains(),
                 Verdict::Drop,
-                vec![Rule::new(
-                    vec![
-                        Match::new(
-                            MatchKind::Udp(UdpMatch::source_port(
+                vec![rule(
+                    BaseMatch {
+                        protocol: Some(Negated::new(PROTOCOL_UDP, false)),
+                        ..BaseMatch::default()
+                    },
+                    vec![ExtensionMatch::Udp(
+                        UdpMatch::new()
+                            .with_source_port(Negated::new(
                                 PortRange::new(1000, 2000).unwrap(),
-                            )),
-                            invert_source,
-                        ),
-                        Match::new(
-                            MatchKind::Udp(UdpMatch::destination_port(
+                                invert_source,
+                            ))
+                            .with_destination_port(Negated::new(
                                 PortRange::new(53, 54).unwrap(),
+                                invert_destination,
                             )),
-                            invert_destination,
-                        ),
-                    ],
+                    )],
                     Target::Verdict(Verdict::Accept),
                 )],
             ))
@@ -299,8 +389,12 @@ mod tests {
         let chains = with_input_rules(
             built_in_chains(),
             Verdict::Accept,
-            vec![Rule::new(
-                vec![Match::new(MatchKind::Protocol(PROTOCOL_TCP), true)],
+            vec![rule(
+                BaseMatch {
+                    protocol: Some(Negated::new(PROTOCOL_TCP, true)),
+                    ..BaseMatch::default()
+                },
+                Vec::new(),
                 Target::Verdict(Verdict::Drop),
             )],
         );
@@ -315,99 +409,126 @@ mod tests {
 
     #[def_test]
     fn address_interface_and_l4_matches_apply() {
-        let chains = with_input_rules(
-            built_in_chains(),
-            Verdict::Accept,
-            vec![Rule::new(
-                vec![
-                    Match::new(
-                        MatchKind::SourceAddress(
+        for inversion in 0u8..8 {
+            let chains = with_input_rules(
+                built_in_chains(),
+                Verdict::Accept,
+                vec![rule(
+                    BaseMatch {
+                        source: Some(Negated::new(
                             Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 0), 24).unwrap(),
-                        ),
-                        false,
-                    ),
-                    Match::new(
-                        MatchKind::DestinationAddress(
+                            false,
+                        )),
+                        destination: Some(Negated::new(
                             Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 0), 24).unwrap(),
-                        ),
-                        false,
-                    ),
-                    Match::new(
-                        MatchKind::InputInterface(
+                            false,
+                        )),
+                        input_interface: Some(Negated::new(
                             InterfaceMatch::prefix("eth".to_string()).unwrap(),
-                        ),
-                        false,
-                    ),
-                    Match::new(
-                        MatchKind::OutputInterface(
+                            false,
+                        )),
+                        output_interface: Some(Negated::new(
                             InterfaceMatch::exact("eth1".to_string()).unwrap(),
-                        ),
-                        false,
-                    ),
-                    Match::new(MatchKind::Protocol(PROTOCOL_TCP), false),
-                    Match::new(
-                        MatchKind::Tcp(TcpMatch::source_port(PortRange::new(1000, 2000).unwrap())),
-                        false,
-                    ),
-                    Match::new(
-                        MatchKind::Tcp(TcpMatch::destination_port(PortRange::new(80, 80).unwrap())),
-                        false,
-                    ),
-                    Match::new(
-                        MatchKind::Tcp(TcpMatch::flags(TcpFlagsMatch::new(0x12, 0x02).unwrap())),
-                        false,
-                    ),
-                ],
-                Target::Verdict(Verdict::Drop),
-            )],
-        );
+                            false,
+                        )),
+                        protocol: Some(Negated::new(PROTOCOL_TCP, false)),
+                    },
+                    vec![ExtensionMatch::Tcp(
+                        TcpMatch::new()
+                            .with_source_port(Negated::new(
+                                PortRange::new(1000, 2000).unwrap(),
+                                inversion & 1 != 0,
+                            ))
+                            .with_destination_port(Negated::new(
+                                PortRange::new(80, 80).unwrap(),
+                                inversion & 2 != 0,
+                            ))
+                            .with_flags(Negated::new(
+                                TcpFlagsMatch::new(0x12, 0x02).unwrap(),
+                                inversion & 4 != 0,
+                            )),
+                    )],
+                    Target::Verdict(Verdict::Drop),
+                )],
+            );
 
-        let table = FilterTable::new(chains).unwrap();
-        let matching = ipv4_packet(PROTOCOL_TCP, &tcp_payload(1024, 80, 0x02));
-
-        assert_eq!(evaluate_input(&table, &matching, "eth0"), Verdict::Drop);
-        assert_eq!(evaluate_input(&table, &matching, "lo"), Verdict::Accept);
+            let table = FilterTable::new(chains).unwrap();
+            for mismatch in 0u8..8 {
+                let source = if mismatch & 1 == 0 { 1024 } else { 999 };
+                let destination = if mismatch & 2 == 0 { 80 } else { 81 };
+                let flags = if mismatch & 4 == 0 { 0x02 } else { 0x10 };
+                let packet = ipv4_packet(PROTOCOL_TCP, &tcp_payload(source, destination, flags));
+                let expected = if mismatch == inversion {
+                    Verdict::Drop
+                } else {
+                    Verdict::Accept
+                };
+                assert_eq!(
+                    evaluate_input(&table, &packet, "eth0"),
+                    expected,
+                    "TCP mismatch {mismatch}, inversion {inversion}"
+                );
+                assert_eq!(evaluate_input(&table, &packet, "lo"), Verdict::Accept);
+            }
+        }
     }
 
     #[def_test]
     fn icmp_match_honors_type_and_code_range() {
-        for (expected_type, packet_type, code, payload_len, expected) in [
-            (3, 3, 1, 8, Verdict::Drop),
-            (3, 3, 2, 8, Verdict::Accept),
-            (3, 8, 0, 8, Verdict::Accept),
-            (3, 13, 0, 8, Verdict::Accept),
-            (3, 13, 0, 20, Verdict::Accept),
-            (3, 13, 0, 24, Verdict::Accept),
-            (3, 14, 0, 8, Verdict::Accept),
-            (3, 14, 0, 20, Verdict::Accept),
-            (3, 14, 0, 24, Verdict::Accept),
-            (13, 13, 0, 8, Verdict::Drop),
-            (13, 13, 0, 20, Verdict::Drop),
-            (13, 13, 0, 24, Verdict::Drop),
-            (14, 14, 0, 8, Verdict::Drop),
-            (14, 14, 0, 20, Verdict::Drop),
-            (14, 14, 0, 24, Verdict::Drop),
-        ] {
-            let table = FilterTable::new(with_input_rules(
-                built_in_chains(),
-                Verdict::Accept,
-                vec![Rule::new(
-                    vec![Match::new(
-                        MatchKind::Icmp(IcmpMatch::new(Some(expected_type), 0, 1).unwrap()),
-                        false,
+        for is_inverted in [false, true] {
+            for (expected_type, packet_type, code, payload_len, expected) in [
+                (3, 3, 1, 8, Verdict::Drop),
+                (3, 3, 2, 8, Verdict::Accept),
+                (3, 8, 0, 8, Verdict::Accept),
+                (3, 13, 0, 8, Verdict::Accept),
+                (3, 13, 0, 20, Verdict::Accept),
+                (3, 13, 0, 24, Verdict::Accept),
+                (3, 14, 0, 8, Verdict::Accept),
+                (3, 14, 0, 20, Verdict::Accept),
+                (3, 14, 0, 24, Verdict::Accept),
+                (13, 13, 0, 8, Verdict::Drop),
+                (13, 13, 0, 20, Verdict::Drop),
+                (13, 13, 0, 24, Verdict::Drop),
+                (14, 14, 0, 8, Verdict::Drop),
+                (14, 14, 0, 20, Verdict::Drop),
+                (14, 14, 0, 24, Verdict::Drop),
+            ] {
+                let table = FilterTable::new(with_input_rules(
+                    built_in_chains(),
+                    Verdict::Accept,
+                    vec![rule(
+                        BaseMatch {
+                            protocol: Some(Negated::new(PROTOCOL_ICMP, false)),
+                            ..BaseMatch::default()
+                        },
+                        vec![ExtensionMatch::Icmp(
+                            IcmpMatch::new(Some(expected_type), 0, 1)
+                                .unwrap()
+                                .with_inversion(is_inverted),
+                        )],
+                        Target::Verdict(Verdict::Drop),
                     )],
-                    Target::Verdict(Verdict::Drop),
-                )],
-            ))
-            .unwrap();
-            let mut payload = icmp_payload(packet_type, code);
-            payload.resize(payload_len, 0);
-            let packet = ipv4_packet(PROTOCOL_ICMP, &payload);
-            assert_eq!(
-                evaluate_input(&table, &packet, "eth0"),
-                expected,
-                "ICMP rule type {expected_type}, packet {packet_type}/{code}, length {payload_len}"
-            );
+                ))
+                .unwrap();
+                let mut payload = icmp_payload(packet_type, code);
+                payload.resize(payload_len, 0);
+                let packet = ipv4_packet(PROTOCOL_ICMP, &payload);
+                let expected = if is_inverted {
+                    if expected == Verdict::Drop {
+                        Verdict::Accept
+                    } else {
+                        Verdict::Drop
+                    }
+                } else {
+                    expected
+                };
+                assert_eq!(
+                    evaluate_input(&table, &packet, "eth0"),
+                    expected,
+                    "ICMP rule type {expected_type}, packet {packet_type}/{code}, length \
+                     {payload_len}"
+                );
+            }
         }
     }
 
@@ -417,11 +538,19 @@ mod tests {
             built_in_chains(),
             Verdict::Accept,
             vec![
-                Rule::new(
-                    vec![Match::new(MatchKind::Protocol(PROTOCOL_UDP), false)],
+                rule(
+                    BaseMatch {
+                        protocol: Some(Negated::new(PROTOCOL_UDP, false)),
+                        ..BaseMatch::default()
+                    },
+                    Vec::new(),
                     Target::Continue,
                 ),
-                Rule::new(Vec::new(), Target::Verdict(Verdict::Drop)),
+                rule(
+                    BaseMatch::default(),
+                    Vec::new(),
+                    Target::Verdict(Verdict::Drop),
+                ),
             ],
         );
 
@@ -437,24 +566,35 @@ mod tests {
             built_in_chains(),
             Verdict::Accept,
             vec![
-                Rule::new(
-                    vec![Match::new(MatchKind::Protocol(PROTOCOL_TCP), false)],
+                rule(
+                    BaseMatch {
+                        protocol: Some(Negated::new(PROTOCOL_TCP, false)),
+                        ..BaseMatch::default()
+                    },
+                    Vec::new(),
                     Target::Jump(ChainId::from_index(3)),
                 ),
-                Rule::new(Vec::new(), Target::Verdict(Verdict::Accept)),
+                rule(
+                    BaseMatch::default(),
+                    Vec::new(),
+                    Target::Verdict(Verdict::Accept),
+                ),
             ],
         );
         chains.push(Chain::user_defined(
             "TCP-CHECK".to_string(),
             vec![
-                Rule::new(
-                    vec![Match::new(
-                        MatchKind::Tcp(TcpMatch::destination_port(PortRange::new(22, 22).unwrap())),
-                        false,
-                    )],
+                rule(
+                    BaseMatch {
+                        protocol: Some(Negated::new(PROTOCOL_TCP, false)),
+                        ..BaseMatch::default()
+                    },
+                    vec![ExtensionMatch::Tcp(TcpMatch::new().with_destination_port(
+                        Negated::new(PortRange::new(22, 22).unwrap(), false),
+                    ))],
                     Target::Verdict(Verdict::Drop),
                 ),
-                Rule::new(Vec::new(), Target::Return),
+                rule(BaseMatch::default(), Vec::new(), Target::Return),
             ],
         ));
 
@@ -471,7 +611,7 @@ mod tests {
         let chains = with_input_rules(
             built_in_chains(),
             Verdict::Drop,
-            vec![Rule::new(Vec::new(), Target::Return)],
+            vec![rule(BaseMatch::default(), Vec::new(), Target::Return)],
         );
 
         let table = FilterTable::new(chains).unwrap();
@@ -485,11 +625,14 @@ mod tests {
         let chains = with_input_rules(
             built_in_chains(),
             Verdict::Accept,
-            vec![Rule::new(
-                vec![Match::new(
-                    MatchKind::Tcp(TcpMatch::destination_port(PortRange::new(80, 80).unwrap())),
-                    false,
-                )],
+            vec![rule(
+                BaseMatch {
+                    protocol: Some(Negated::new(PROTOCOL_TCP, false)),
+                    ..BaseMatch::default()
+                },
+                vec![ExtensionMatch::Tcp(TcpMatch::new().with_destination_port(
+                    Negated::new(PortRange::new(80, 80).unwrap(), false),
+                ))],
                 Target::Verdict(Verdict::Drop),
             )],
         );
@@ -509,48 +652,58 @@ mod tests {
 
     #[def_test]
     fn l4_matches_require_base_headers_within_ipv4_length() {
-        let range = PortRange::new(80, 80).unwrap();
-        for (protocol, kind, payload) in [
-            (
-                PROTOCOL_TCP,
-                MatchKind::Tcp(TcpMatch::destination_port(range)),
-                tcp_payload(1, 80, 0),
-            ),
-            (
-                PROTOCOL_UDP,
-                MatchKind::Udp(UdpMatch::destination_port(range)),
-                udp_payload(1, 80),
-            ),
-            (
-                PROTOCOL_ICMP,
-                MatchKind::Icmp(IcmpMatch::new(Some(8), 0, 0).unwrap()),
-                icmp_payload(8, 0),
-            ),
-        ] {
-            let table = FilterTable::new(with_input_rules(
-                built_in_chains(),
-                Verdict::Accept,
-                vec![Rule::new(
-                    vec![Match::new(kind, false)],
-                    Target::Verdict(Verdict::Accept),
-                )],
-            ))
-            .unwrap();
+        for is_inverted in [false, true] {
+            let range = Negated::new(PortRange::new(80, 80).unwrap(), is_inverted);
+            for (protocol, kind, payload) in [
+                (
+                    PROTOCOL_TCP,
+                    ExtensionMatch::Tcp(TcpMatch::new().with_destination_port(range)),
+                    tcp_payload(1, 80, 0),
+                ),
+                (
+                    PROTOCOL_UDP,
+                    ExtensionMatch::Udp(UdpMatch::new().with_destination_port(range)),
+                    udp_payload(1, 80),
+                ),
+                (
+                    PROTOCOL_ICMP,
+                    ExtensionMatch::Icmp(
+                        IcmpMatch::new(Some(8), 0, 0)
+                            .unwrap()
+                            .with_inversion(is_inverted),
+                    ),
+                    icmp_payload(8, 0),
+                ),
+            ] {
+                let table = FilterTable::new(with_input_rules(
+                    built_in_chains(),
+                    Verdict::Accept,
+                    vec![rule(
+                        BaseMatch {
+                            protocol: Some(Negated::new(protocol, false)),
+                            ..BaseMatch::default()
+                        },
+                        vec![kind],
+                        Target::Verdict(Verdict::Accept),
+                    )],
+                ))
+                .unwrap();
 
-            for payload_len in [0, 2, 4, payload.len() - 1, payload.len()] {
-                let expected = if payload_len == payload.len() {
-                    Verdict::Accept
-                } else {
-                    Verdict::Drop
-                };
-                let mut packet = ipv4_packet(protocol, &payload[..payload_len]);
-                // Trailing link-layer padding must not complete a short header.
-                packet.extend_from_slice(&payload[payload_len..]);
-                assert_eq!(
-                    evaluate_input(&table, &packet, "eth0"),
-                    expected,
-                    "protocol {protocol}, IPv4 payload length {payload_len}"
-                );
+                for payload_len in [0, 2, 4, payload.len() - 1, payload.len()] {
+                    let expected = if payload_len == payload.len() {
+                        Verdict::Accept
+                    } else {
+                        Verdict::Drop
+                    };
+                    let mut packet = ipv4_packet(protocol, &payload[..payload_len]);
+                    // Trailing link-layer padding must not complete a short header.
+                    packet.extend_from_slice(&payload[payload_len..]);
+                    assert_eq!(
+                        evaluate_input(&table, &packet, "eth0"),
+                        expected,
+                        "protocol {protocol}, IPv4 payload length {payload_len}"
+                    );
+                }
             }
         }
     }
@@ -561,13 +714,17 @@ mod tests {
             built_in_chains(),
             Verdict::Accept,
             vec![
-                Rule::new(Vec::new(), Target::Jump(ChainId::from_index(3)));
+                rule(
+                    BaseMatch::default(),
+                    Vec::new(),
+                    Target::Jump(ChainId::from_index(3))
+                );
                 MAX_RULE_STEPS / 2 + 1
             ],
         );
         chains.push(Chain::user_defined(
             "SHARED".to_string(),
-            vec![Rule::new(Vec::new(), Target::Return)],
+            vec![rule(BaseMatch::default(), Vec::new(), Target::Return)],
         ));
 
         let table = FilterTable::new(chains).unwrap();
@@ -581,14 +738,14 @@ mod tests {
         let table = FilterTable::new(with_input_rules(
             built_in_chains(),
             Verdict::Drop,
-            vec![Rule::new(
-                vec![
-                    Match::new(MatchKind::Protocol(PROTOCOL_TCP), false),
-                    Match::new(
-                        MatchKind::Tcp(TcpMatch::destination_port(PortRange::new(80, 80).unwrap())),
-                        true,
-                    ),
-                ],
+            vec![rule(
+                BaseMatch {
+                    protocol: Some(Negated::new(PROTOCOL_TCP, false)),
+                    ..BaseMatch::default()
+                },
+                vec![ExtensionMatch::Tcp(TcpMatch::new().with_destination_port(
+                    Negated::new(PortRange::new(80, 80).unwrap(), true),
+                ))],
                 Target::Verdict(Verdict::Accept),
             )],
         ))

@@ -12,13 +12,51 @@ use alloc::string::String;
 
 use etherparse::{Icmpv4Header, TcpHeader, UdpHeaderSlice};
 
+use super::model::Rule;
 use crate::{
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
-    stack::ipv4::{Ipv4Error, Ipv4Header, PROTOCOL_ICMP, PROTOCOL_TCP, PROTOCOL_UDP},
+    ipv4::{Ipv4Error, Ipv4Header, PROTOCOL_ICMP, PROTOCOL_TCP, PROTOCOL_UDP},
 };
 
 /// Linux treats `frag_off == 1` (8-byte payload offset) as an evil TCP fragment.
 const TCP_EVIL_FRAGMENT_OFFSET_BYTES: usize = 8;
+
+/// A condition value with an independently controlled logical inversion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Negated<T> {
+    value: T,
+    is_inverted: bool,
+}
+
+impl<T> Negated<T> {
+    pub(crate) const fn new(value: T, is_inverted: bool) -> Self {
+        Self { value, is_inverted }
+    }
+
+    fn matches(&self, match_fn: impl FnOnce(&T) -> bool) -> bool {
+        match_fn(&self.value) ^ self.is_inverted
+    }
+
+    pub(crate) const fn value(&self) -> &T {
+        &self.value
+    }
+
+    pub(crate) const fn is_inverted(&self) -> bool {
+        self.is_inverted
+    }
+}
+
+/// Fixed IPv4 rule fields, evaluated before any extension inspects the payload.
+///
+/// Absent fields impose no condition; populated fields are ANDed together.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct BaseMatch {
+    pub(crate) source: Option<Negated<Ipv4Cidr>>,
+    pub(crate) destination: Option<Negated<Ipv4Cidr>>,
+    pub(crate) input_interface: Option<Negated<InterfaceMatch>>,
+    pub(crate) output_interface: Option<Negated<InterfaceMatch>>,
+    pub(crate) protocol: Option<Negated<u8>>,
+}
 
 /// A closed inclusive transport-port range.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,89 +137,92 @@ impl TcpFlagsMatch {
     }
 }
 
-/// TCP-specific match fields. Only populated fields participate in the condition.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// TCP conditions, ANDed after applying each populated field's inversion.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct TcpMatch {
-    source_port: Option<PortRange>,
-    destination_port: Option<PortRange>,
-    flags: Option<TcpFlagsMatch>,
+    source_port: Option<Negated<PortRange>>,
+    destination_port: Option<Negated<PortRange>>,
+    flags: Option<Negated<TcpFlagsMatch>>,
 }
 
 impl TcpMatch {
-    pub(crate) const fn source_port(range: PortRange) -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
-            source_port: Some(range),
+            source_port: None,
             destination_port: None,
             flags: None,
         }
     }
 
-    pub(crate) const fn destination_port(range: PortRange) -> Self {
-        Self {
-            source_port: None,
-            destination_port: Some(range),
-            flags: None,
-        }
+    pub(crate) const fn with_source_port(mut self, range: Negated<PortRange>) -> Self {
+        self.source_port = Some(range);
+        self
     }
 
-    pub(crate) const fn flags(spec: TcpFlagsMatch) -> Self {
-        Self {
-            source_port: None,
-            destination_port: None,
-            flags: Some(spec),
-        }
+    pub(crate) const fn with_destination_port(mut self, range: Negated<PortRange>) -> Self {
+        self.destination_port = Some(range);
+        self
     }
 
-    pub(crate) const fn source_port_range(self) -> Option<PortRange> {
+    pub(crate) const fn with_flags(mut self, flags: Negated<TcpFlagsMatch>) -> Self {
+        self.flags = Some(flags);
+        self
+    }
+
+    pub(crate) const fn source_port_range(self) -> Option<Negated<PortRange>> {
         self.source_port
     }
 
-    pub(crate) const fn destination_port_range(self) -> Option<PortRange> {
+    pub(crate) const fn destination_port_range(self) -> Option<Negated<PortRange>> {
         self.destination_port
     }
 
-    pub(crate) const fn flags_match(self) -> Option<TcpFlagsMatch> {
+    pub(crate) const fn flags_match(self) -> Option<Negated<TcpFlagsMatch>> {
         self.flags
     }
 }
 
-/// UDP-specific match fields. Only populated fields participate in the condition.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// UDP conditions, ANDed after applying each populated field's inversion.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct UdpMatch {
-    source_port: Option<PortRange>,
-    destination_port: Option<PortRange>,
+    source_port: Option<Negated<PortRange>>,
+    destination_port: Option<Negated<PortRange>>,
 }
 
 impl UdpMatch {
-    pub(crate) const fn source_port(range: PortRange) -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
-            source_port: Some(range),
+            source_port: None,
             destination_port: None,
         }
     }
 
-    pub(crate) const fn destination_port(range: PortRange) -> Self {
-        Self {
-            source_port: None,
-            destination_port: Some(range),
-        }
+    pub(crate) const fn with_source_port(mut self, range: Negated<PortRange>) -> Self {
+        self.source_port = Some(range);
+        self
     }
 
-    pub(crate) const fn source_port_range(self) -> Option<PortRange> {
+    pub(crate) const fn with_destination_port(mut self, range: Negated<PortRange>) -> Self {
+        self.destination_port = Some(range);
+        self
+    }
+
+    pub(crate) const fn source_port_range(self) -> Option<Negated<PortRange>> {
         self.source_port
     }
 
-    pub(crate) const fn destination_port_range(self) -> Option<PortRange> {
+    pub(crate) const fn destination_port_range(self) -> Option<Negated<PortRange>> {
         self.destination_port
     }
 }
 
-/// ICMP type and inclusive code range selected by the initial L4 matcher.
+/// ICMP type and inclusive code range with joint inversion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct IcmpMatch {
     icmp_type: Option<u8>,
     code_start: u8,
     code_end: u8,
+    is_inverted: bool,
 }
 
 impl IcmpMatch {
@@ -191,6 +232,7 @@ impl IcmpMatch {
                 icmp_type,
                 code_start,
                 code_end,
+                is_inverted: false,
             })
         } else {
             None
@@ -199,6 +241,12 @@ impl IcmpMatch {
 
     pub(crate) const fn icmp_type(self) -> Option<u8> {
         self.icmp_type
+    }
+
+    /// Inverts the combined type and code condition after header validation.
+    pub(crate) const fn with_inversion(mut self, is_inverted: bool) -> Self {
+        self.is_inverted = is_inverted;
+        self
     }
 
     pub(crate) const fn code_start(self) -> u8 {
@@ -210,37 +258,23 @@ impl IcmpMatch {
     }
 }
 
-/// Semantic match operations supported by the initial IPv4 filter matcher.
+/// Ordered extension matches following the fixed IPv4 rule fields.
+///
+/// Each extension owns its field-level inversion semantics.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum MatchKind {
-    SourceAddress(Ipv4Cidr),
-    DestinationAddress(Ipv4Cidr),
-    Protocol(u8),
-    InputInterface(InterfaceMatch),
-    OutputInterface(InterfaceMatch),
+pub(crate) enum ExtensionMatch {
     Tcp(TcpMatch),
     Udp(UdpMatch),
     Icmp(IcmpMatch),
 }
 
-/// One independently invertible rule condition.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Match {
-    kind: MatchKind,
-    is_inverted: bool,
-}
-
-impl Match {
-    pub(crate) fn new(kind: MatchKind, is_inverted: bool) -> Self {
-        Self { kind, is_inverted }
-    }
-
-    pub(crate) const fn kind(&self) -> &MatchKind {
-        &self.kind
-    }
-
-    pub(crate) const fn is_inverted(&self) -> bool {
-        self.is_inverted
+impl ExtensionMatch {
+    pub(super) const fn required_protocol(&self) -> u8 {
+        match self {
+            Self::Tcp(_) => PROTOCOL_TCP,
+            Self::Udp(_) => PROTOCOL_UDP,
+            Self::Icmp(_) => PROTOCOL_ICMP,
+        }
     }
 }
 
@@ -282,45 +316,46 @@ enum L4Outcome<T> {
     HotDrop,
 }
 
-pub(crate) fn evaluate_matches(matches: &[Match], packet: &FilterPacket<'_>) -> MatchOutcome {
-    for condition in matches {
-        match evaluate_match(condition, packet) {
-            MatchOutcome::HotDrop => return MatchOutcome::HotDrop,
-            MatchOutcome::NotMatched => return MatchOutcome::NotMatched,
+/// Checks the base fields before evaluating extensions in their stored order.
+pub(crate) fn evaluate_rule(rule: &Rule, packet: &FilterPacket<'_>) -> MatchOutcome {
+    if !evaluate_base_match(rule.base(), packet) {
+        return MatchOutcome::NotMatched;
+    }
+
+    for extension in rule.extensions() {
+        match evaluate_extension_match(extension, packet) {
             MatchOutcome::Matched => {}
+            outcome => return outcome,
         }
     }
     MatchOutcome::Matched
 }
 
-fn evaluate_match(condition: &Match, packet: &FilterPacket<'_>) -> MatchOutcome {
-    let matched = match condition.kind() {
-        MatchKind::SourceAddress(cidr) => address_matches(*cidr, packet.header.src_addr()),
-        MatchKind::DestinationAddress(cidr) => address_matches(*cidr, packet.header.dst_addr()),
-        MatchKind::Protocol(protocol) => packet.header.protocol() == *protocol,
-        MatchKind::InputInterface(pattern) => interface_matches(pattern, packet.indev),
-        MatchKind::OutputInterface(pattern) => interface_matches(pattern, packet.outdev),
-        MatchKind::Tcp(tcp) => match match_tcp(tcp, packet) {
-            L4Outcome::Ready(matched) => matched,
-            L4Outcome::Unavailable => return MatchOutcome::NotMatched,
-            L4Outcome::HotDrop => return MatchOutcome::HotDrop,
-        },
-        MatchKind::Udp(udp) => match match_udp(udp, packet) {
-            L4Outcome::Ready(matched) => matched,
-            L4Outcome::Unavailable => return MatchOutcome::NotMatched,
-            L4Outcome::HotDrop => return MatchOutcome::HotDrop,
-        },
-        MatchKind::Icmp(icmp) => match match_icmp(icmp, packet) {
-            L4Outcome::Ready(matched) => matched,
-            L4Outcome::Unavailable => return MatchOutcome::NotMatched,
-            L4Outcome::HotDrop => return MatchOutcome::HotDrop,
-        },
-    };
+fn evaluate_base_match(base: &BaseMatch, packet: &FilterPacket<'_>) -> bool {
+    base.source.as_ref().is_none_or(|condition| {
+        condition.matches(|cidr| address_matches(*cidr, packet.header.src_addr()))
+    }) && base.destination.as_ref().is_none_or(|condition| {
+        condition.matches(|cidr| address_matches(*cidr, packet.header.dst_addr()))
+    }) && base.input_interface.as_ref().is_none_or(|condition| {
+        condition.matches(|pattern| interface_matches(pattern, packet.indev))
+    }) && base.output_interface.as_ref().is_none_or(|condition| {
+        condition.matches(|pattern| interface_matches(pattern, packet.outdev))
+    }) && base
+        .protocol
+        .as_ref()
+        .is_none_or(|condition| condition.matches(|protocol| packet.header.protocol() == *protocol))
+}
 
-    if matched ^ condition.is_inverted() {
-        MatchOutcome::Matched
-    } else {
-        MatchOutcome::NotMatched
+fn evaluate_extension_match(extension: &ExtensionMatch, packet: &FilterPacket<'_>) -> MatchOutcome {
+    let outcome = match extension {
+        ExtensionMatch::Tcp(tcp) => match_tcp(tcp, packet),
+        ExtensionMatch::Udp(udp) => match_udp(udp, packet),
+        ExtensionMatch::Icmp(icmp) => match_icmp(icmp, packet),
+    };
+    match outcome {
+        L4Outcome::Ready(true) => MatchOutcome::Matched,
+        L4Outcome::Ready(false) | L4Outcome::Unavailable => MatchOutcome::NotMatched,
+        L4Outcome::HotDrop => MatchOutcome::HotDrop,
     }
 }
 
@@ -344,7 +379,7 @@ fn icmp_matches(spec: IcmpMatch, icmp_type: u8, code: u8) -> bool {
     let type_ok = spec
         .icmp_type()
         .is_none_or(|expected| expected == icmp_type);
-    type_ok && code >= spec.code_start() && code <= spec.code_end()
+    (type_ok && code >= spec.code_start() && code <= spec.code_end()) ^ spec.is_inverted
 }
 
 fn l4_unavailable(header: Ipv4Header, l4_protocol: u8) -> bool {
@@ -353,7 +388,7 @@ fn l4_unavailable(header: Ipv4Header, l4_protocol: u8) -> bool {
 
 fn transport_payload<'a>(packet: &FilterPacket<'a>) -> Option<&'a [u8]> {
     // Link-layer padding cannot supply bytes missing from the IPv4 payload.
-    crate::stack::ipv4::payload(packet.packet, &packet.header)
+    crate::ipv4::payload(packet.packet, &packet.header)
 }
 
 fn match_tcp(spec: &TcpMatch, packet: &FilterPacket<'_>) -> L4Outcome<bool> {
@@ -378,13 +413,15 @@ fn match_tcp(spec: &TcpMatch, packet: &FilterPacket<'_>) -> L4Outcome<bool> {
 
     let mut matched = true;
     if let Some(range) = spec.source_port_range() {
-        matched &= range.contains(u16::from_be_bytes([header[0], header[1]]));
+        matched &=
+            range.matches(|range| range.contains(u16::from_be_bytes([header[0], header[1]])));
     }
     if let Some(range) = spec.destination_port_range() {
-        matched &= range.contains(u16::from_be_bytes([header[2], header[3]]));
+        matched &=
+            range.matches(|range| range.contains(u16::from_be_bytes([header[2], header[3]])));
     }
     if let Some(flags) = spec.flags_match() {
-        matched &= tcp_flags_match(flags, header[13]);
+        matched &= flags.matches(|flags| tcp_flags_match(*flags, header[13]));
     }
 
     L4Outcome::Ready(matched)
@@ -406,10 +443,10 @@ fn match_udp(spec: &UdpMatch, packet: &FilterPacket<'_>) -> L4Outcome<bool> {
 
     let mut matched = true;
     if let Some(range) = spec.source_port_range() {
-        matched &= range.contains(header.source_port());
+        matched &= range.matches(|range| range.contains(header.source_port()));
     }
     if let Some(range) = spec.destination_port_range() {
-        matched &= range.contains(header.destination_port());
+        matched &= range.matches(|range| range.contains(header.destination_port()));
     }
 
     L4Outcome::Ready(matched)
@@ -459,13 +496,22 @@ mod tests {
         assert_eq!(icmp.code_end(), 15);
         assert_eq!(IcmpMatch::new(Some(3), 15, 0), None);
 
-        let tcp = TcpMatch::destination_port(port_range);
+        let source_port_range = Negated::new(PortRange::new(1024, 2048).unwrap(), false);
+        let port_range = Negated::new(port_range, false);
+        let flags = Negated::new(flags, false);
+        let tcp = TcpMatch::new()
+            .with_source_port(source_port_range)
+            .with_destination_port(port_range)
+            .with_flags(flags);
+        assert_eq!(tcp.source_port_range(), Some(source_port_range));
         assert_eq!(tcp.destination_port_range(), Some(port_range));
-        assert_eq!(tcp.source_port_range(), None);
+        assert_eq!(tcp.flags_match(), Some(flags));
 
-        let udp = UdpMatch::source_port(port_range);
-        assert_eq!(udp.source_port_range(), Some(port_range));
-        assert_eq!(udp.destination_port_range(), None);
+        let udp = UdpMatch::new()
+            .with_source_port(source_port_range)
+            .with_destination_port(port_range);
+        assert_eq!(udp.source_port_range(), Some(source_port_range));
+        assert_eq!(udp.destination_port_range(), Some(port_range));
 
         let exact = InterfaceMatch::exact("eth0".into()).unwrap();
         assert_eq!(exact.name(), "eth0");

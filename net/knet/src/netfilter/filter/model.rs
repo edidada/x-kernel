@@ -6,14 +6,14 @@
 
 use alloc::{collections::BTreeSet, string::String, vec, vec::Vec};
 
-use super::matcher::Match;
+use super::matcher::{BaseMatch, ExtensionMatch};
 
 /// Maximum number of built-in and user-defined chains in one table.
 pub(crate) const MAX_CHAINS: usize = 256;
 /// Maximum total number of rules across all chains in one table.
 pub(crate) const MAX_RULES: usize = 4096;
-/// Maximum number of match conditions attached to one rule.
-pub(crate) const MAX_MATCHES_PER_RULE: usize = 16;
+/// Maximum number of extension matches attached to one rule.
+pub(crate) const MAX_EXTENSION_MATCHES_PER_RULE: usize = 16;
 /// Maximum user-defined chain-name length in bytes.
 pub(crate) const MAX_CHAIN_NAME_LEN: usize = 29;
 /// Maximum number of nested user-chain calls.
@@ -78,25 +78,84 @@ pub(crate) enum Target {
     Jump(ChainId),
 }
 
-/// Ordered conjunction of match conditions and its selected action.
+/// Cross-field validation failure while constructing a rule.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RuleError {
+    MissingProtocol {
+        required_protocol: u8,
+    },
+    InvertedProtocol {
+        required_protocol: u8,
+        actual_protocol: u8,
+    },
+    ProtocolMismatch {
+        required_protocol: u8,
+        actual_protocol: u8,
+    },
+}
+
+/// Fixed IPv4 conditions, ordered extension matches, and their selected action.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Rule {
-    matches: Vec<Match>,
+    base: BaseMatch,
+    extensions: Vec<ExtensionMatch>,
     target: Target,
 }
 
 impl Rule {
-    pub(crate) fn new(matches: Vec<Match>, target: Target) -> Self {
-        Self { matches, target }
+    /// Builds a rule after checking each extension against its base protocol.
+    ///
+    /// This follows Linux 6.8 `xt_check_match`: a protocol-specific extension
+    /// requires the same non-inverted protocol in the rule's fixed IPv4 fields.
+    pub(crate) fn new(
+        base: BaseMatch,
+        extensions: Vec<ExtensionMatch>,
+        target: Target,
+    ) -> Result<Self, RuleError> {
+        validate_extensions(&base, &extensions)?;
+
+        Ok(Self {
+            base,
+            extensions,
+            target,
+        })
     }
 
-    pub(crate) fn matches(&self) -> &[Match] {
-        &self.matches
+    pub(crate) const fn base(&self) -> &BaseMatch {
+        &self.base
+    }
+
+    pub(crate) fn extensions(&self) -> &[ExtensionMatch] {
+        &self.extensions
     }
 
     pub(crate) const fn target(&self) -> Target {
         self.target
     }
+}
+
+fn validate_extensions(base: &BaseMatch, extensions: &[ExtensionMatch]) -> Result<(), RuleError> {
+    for extension in extensions {
+        let required_protocol = extension.required_protocol();
+        let Some(protocol) = base.protocol.as_ref() else {
+            return Err(RuleError::MissingProtocol { required_protocol });
+        };
+        let actual_protocol = *protocol.value();
+        if protocol.is_inverted() {
+            return Err(RuleError::InvertedProtocol {
+                required_protocol,
+                actual_protocol,
+            });
+        }
+        if actual_protocol != required_protocol {
+            return Err(RuleError::ProtocolMismatch {
+                required_protocol,
+                actual_protocol,
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// Built-in or user-defined chain role.
@@ -149,7 +208,7 @@ impl Chain {
 pub(crate) enum FilterTableError {
     TooManyChains,
     TooManyRules,
-    TooManyMatches,
+    TooManyExtensionMatches,
     EmptyChainName,
     ChainNameTooLong,
     DuplicateChainName,
@@ -194,9 +253,9 @@ impl FilterTable {
             if chain
                 .rules
                 .iter()
-                .any(|rule| rule.matches.len() > MAX_MATCHES_PER_RULE)
+                .any(|rule| rule.extensions.len() > MAX_EXTENSION_MATCHES_PER_RULE)
             {
-                return Err(FilterTableError::TooManyMatches);
+                return Err(FilterTableError::TooManyExtensionMatches);
             }
 
             if let ChainKind::BuiltIn { hook, .. } = &chain.kind {
@@ -315,7 +374,10 @@ mod tests {
     use unittest::def_test;
 
     use super::*;
-    use crate::netfilter::filter::matcher::MatchKind;
+    use crate::{
+        ipv4::{PROTOCOL_ICMP, PROTOCOL_TCP, PROTOCOL_UDP},
+        netfilter::filter::matcher::{IcmpMatch, Negated, TcpMatch, UdpMatch},
+    };
 
     fn built_in_chains() -> Vec<Chain> {
         vec![
@@ -323,6 +385,10 @@ mod tests {
             Chain::built_in(FilterHook::Forward, Verdict::Drop, Vec::new()),
             Chain::built_in(FilterHook::Output, Verdict::Accept, Vec::new()),
         ]
+    }
+
+    fn rule(base: BaseMatch, extensions: Vec<ExtensionMatch>, target: Target) -> Rule {
+        Rule::new(base, extensions, target).expect("test rule must be valid")
     }
 
     #[def_test]
@@ -374,6 +440,74 @@ mod tests {
     }
 
     #[def_test]
+    fn rule_requires_noninverted_compatible_protocol_for_extensions() {
+        for (extension, required_protocol) in [
+            (ExtensionMatch::Tcp(TcpMatch::new()), PROTOCOL_TCP),
+            (ExtensionMatch::Udp(UdpMatch::new()), PROTOCOL_UDP),
+            (
+                ExtensionMatch::Icmp(IcmpMatch::new(None, 0, u8::MAX).unwrap()),
+                PROTOCOL_ICMP,
+            ),
+        ] {
+            assert_eq!(
+                Rule::new(
+                    BaseMatch::default(),
+                    vec![extension.clone()],
+                    Target::Continue,
+                ),
+                Err(RuleError::MissingProtocol { required_protocol })
+            );
+            assert_eq!(
+                Rule::new(
+                    BaseMatch {
+                        protocol: Some(Negated::new(required_protocol, true)),
+                        ..BaseMatch::default()
+                    },
+                    vec![extension.clone()],
+                    Target::Continue,
+                ),
+                Err(RuleError::InvertedProtocol {
+                    required_protocol,
+                    actual_protocol: required_protocol,
+                })
+            );
+
+            let actual_protocol = if required_protocol == PROTOCOL_TCP {
+                PROTOCOL_UDP
+            } else {
+                PROTOCOL_TCP
+            };
+            assert_eq!(
+                Rule::new(
+                    BaseMatch {
+                        protocol: Some(Negated::new(actual_protocol, false)),
+                        ..BaseMatch::default()
+                    },
+                    vec![extension.clone()],
+                    Target::Continue,
+                ),
+                Err(RuleError::ProtocolMismatch {
+                    required_protocol,
+                    actual_protocol,
+                })
+            );
+            assert!(
+                Rule::new(
+                    BaseMatch {
+                        protocol: Some(Negated::new(required_protocol, false)),
+                        ..BaseMatch::default()
+                    },
+                    vec![extension],
+                    Target::Continue,
+                )
+                .is_ok()
+            );
+        }
+
+        assert!(Rule::new(BaseMatch::default(), Vec::new(), Target::Continue).is_ok());
+    }
+
+    #[def_test]
     fn filter_table_enforces_structural_limits() {
         let mut too_many_chains = built_in_chains();
         for index in BUILTIN_CHAIN_COUNT..=MAX_CHAINS {
@@ -388,20 +522,33 @@ mod tests {
         );
 
         let mut too_many_rules = built_in_chains();
-        too_many_rules[0].rules = vec![Rule::new(Vec::new(), Target::Continue); MAX_RULES + 1];
+        too_many_rules[0].rules =
+            vec![rule(BaseMatch::default(), Vec::new(), Target::Continue); MAX_RULES + 1];
         assert_eq!(
             FilterTable::new(too_many_rules),
             Err(FilterTableError::TooManyRules)
         );
 
         let mut too_many_matches = built_in_chains();
-        too_many_matches[0].rules.push(Rule::new(
-            vec![Match::new(MatchKind::Protocol(6), false); MAX_MATCHES_PER_RULE + 1],
+        let base = BaseMatch {
+            protocol: Some(Negated::new(6, false)),
+            ..BaseMatch::default()
+        };
+        let mut at_match_limit = built_in_chains();
+        at_match_limit[0].rules.push(rule(
+            base.clone(),
+            vec![ExtensionMatch::Tcp(TcpMatch::new()); MAX_EXTENSION_MATCHES_PER_RULE],
+            Target::Continue,
+        ));
+        assert!(FilterTable::new(at_match_limit).is_ok());
+        too_many_matches[0].rules.push(rule(
+            base,
+            vec![ExtensionMatch::Tcp(TcpMatch::new()); MAX_EXTENSION_MATCHES_PER_RULE + 1],
             Target::Continue,
         ));
         assert_eq!(
             FilterTable::new(too_many_matches),
-            Err(FilterTableError::TooManyMatches)
+            Err(FilterTableError::TooManyExtensionMatches)
         );
 
         let mut long_chain_name = built_in_chains();
@@ -418,9 +565,11 @@ mod tests {
     #[def_test]
     fn filter_table_rejects_invalid_jump_targets() {
         let mut chains = built_in_chains();
-        chains[0]
-            .rules
-            .push(Rule::new(Vec::new(), Target::Jump(ChainId::from_index(3))));
+        chains[0].rules.push(rule(
+            BaseMatch::default(),
+            Vec::new(),
+            Target::Jump(ChainId::from_index(3)),
+        ));
 
         assert_eq!(
             FilterTable::new(chains),
@@ -428,9 +577,11 @@ mod tests {
         );
 
         let mut chains = built_in_chains();
-        chains[0]
-            .rules
-            .push(Rule::new(Vec::new(), Target::Jump(ChainId::from_index(1))));
+        chains[0].rules.push(rule(
+            BaseMatch::default(),
+            Vec::new(),
+            Target::Jump(ChainId::from_index(1)),
+        ));
 
         assert_eq!(
             FilterTable::new(chains),
@@ -443,11 +594,19 @@ mod tests {
         let mut chains = built_in_chains();
         chains.push(Chain::user_defined(
             "A".to_string(),
-            vec![Rule::new(Vec::new(), Target::Jump(ChainId::from_index(4)))],
+            vec![rule(
+                BaseMatch::default(),
+                Vec::new(),
+                Target::Jump(ChainId::from_index(4)),
+            )],
         ));
         chains.push(Chain::user_defined(
             "B".to_string(),
-            vec![Rule::new(Vec::new(), Target::Jump(ChainId::from_index(3)))],
+            vec![rule(
+                BaseMatch::default(),
+                Vec::new(),
+                Target::Jump(ChainId::from_index(3)),
+            )],
         ));
 
         assert_eq!(FilterTable::new(chains), Err(FilterTableError::ChainCycle));
@@ -456,13 +615,21 @@ mod tests {
     #[def_test]
     fn filter_table_accepts_acyclic_user_chain() {
         let mut chains = built_in_chains();
-        chains[0].rules.push(Rule::new(
-            vec![Match::new(MatchKind::Protocol(6), false)],
+        chains[0].rules.push(rule(
+            BaseMatch {
+                protocol: Some(Negated::new(6, false)),
+                ..BaseMatch::default()
+            },
+            Vec::new(),
             Target::Jump(ChainId::from_index(3)),
         ));
         chains.push(Chain::user_defined(
             "TCP-IN".to_string(),
-            vec![Rule::new(Vec::new(), Target::Verdict(Verdict::Accept))],
+            vec![rule(
+                BaseMatch::default(),
+                Vec::new(),
+                Target::Verdict(Verdict::Accept),
+            )],
         ));
 
         let table = FilterTable::new(chains).unwrap();
@@ -476,7 +643,8 @@ mod tests {
     #[def_test]
     fn filter_table_rejects_excessive_jump_depth() {
         let mut chains = built_in_chains();
-        chains[0].rules.push(Rule::new(
+        chains[0].rules.push(rule(
+            BaseMatch::default(),
             Vec::new(),
             Target::Jump(ChainId::from_index(BUILTIN_CHAIN_COUNT)),
         ));
@@ -489,12 +657,16 @@ mod tests {
             };
             chains.push(Chain::user_defined(
                 alloc::format!("CHAIN-{depth}"),
-                vec![Rule::new(Vec::new(), target)],
+                vec![rule(BaseMatch::default(), Vec::new(), target)],
             ));
         }
         chains.push(Chain::user_defined(
             "DEEPEST".to_string(),
-            vec![Rule::new(Vec::new(), Target::Verdict(Verdict::Accept))],
+            vec![rule(
+                BaseMatch::default(),
+                Vec::new(),
+                Target::Verdict(Verdict::Accept),
+            )],
         ));
 
         assert_eq!(
