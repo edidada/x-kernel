@@ -17,6 +17,9 @@ pub mod aarch64;
 pub mod dma;
 #[cfg(target_arch = "riscv64")]
 pub mod riscv64;
+/// Ported VirtIO MMIO infrastructure and VirtIO block device model.
+pub mod virtio;
+pub mod virtio_blk;
 
 pub use vdev_core::{
     GuestDma, IrqController, IrqSender, MmioBus, MmioDevice, RxChannel, TxChannel, VcpuWaker,
