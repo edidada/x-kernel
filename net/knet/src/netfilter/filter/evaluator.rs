@@ -9,14 +9,13 @@
 
 use super::{
     matcher::{FilterPacket, MatchOutcome, evaluate_matches},
-    model::{ChainId, ChainKind, FilterHook, FilterTable, Rule, Target, Verdict},
+    model::{ChainId, ChainKind, FilterHook, FilterTable, MAX_JUMP_DEPTH, Rule, Target, Verdict},
 };
 
-/// Maximum user-chain nesting tracked on the preallocated jump stack.
+/// Maximum number of rules evaluated for one packet.
 ///
-/// Deeper recursion returns [`Verdict::Drop`], matching Linux stack overflow
-/// handling in `ipt_do_table`.
-pub(crate) const MAX_JUMP_STACK_DEPTH: usize = 8;
+/// This also bounds repeated evaluation of shared user-defined chains.
+pub(crate) const MAX_RULE_STEPS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct JumpFrame {
@@ -37,8 +36,9 @@ fn evaluate_from(
     mut rule_index: usize,
     packet: &FilterPacket<'_>,
 ) -> Verdict {
-    let mut jump_stack: [Option<JumpFrame>; MAX_JUMP_STACK_DEPTH] = [None; MAX_JUMP_STACK_DEPTH];
+    let mut jump_stack: [Option<JumpFrame>; MAX_JUMP_DEPTH] = [None; MAX_JUMP_DEPTH];
     let mut stack_top = 0usize;
+    let mut rule_steps = 0usize;
 
     loop {
         let Some(chain) = table.chain(chain_id) else {
@@ -59,12 +59,16 @@ fn evaluate_from(
         }
 
         let rule = &chain.rules()[rule_index];
+        if rule_steps >= MAX_RULE_STEPS {
+            return Verdict::Drop;
+        }
+        rule_steps += 1;
         match evaluate_rule(table, rule, packet) {
             RuleOutcome::NextRule => rule_index += 1,
             RuleOutcome::Continue => rule_index += 1,
             RuleOutcome::Verdict(verdict) => return verdict,
             RuleOutcome::Jump(target) => {
-                if stack_top >= MAX_JUMP_STACK_DEPTH {
+                if stack_top >= MAX_JUMP_DEPTH {
                     return Verdict::Drop;
                 }
                 jump_stack[stack_top] = Some(JumpFrame {
@@ -350,11 +354,15 @@ mod tests {
                         false,
                     ),
                     Match::new(
-                        MatchKind::InputInterface(InterfaceMatch::Prefix("eth".to_string())),
+                        MatchKind::InputInterface(
+                            InterfaceMatch::prefix("eth".to_string()).unwrap(),
+                        ),
                         false,
                     ),
                     Match::new(
-                        MatchKind::OutputInterface(InterfaceMatch::Exact("eth1".to_string())),
+                        MatchKind::OutputInterface(
+                            InterfaceMatch::exact("eth1".to_string()).unwrap(),
+                        ),
                         false,
                     ),
                     Match::new(MatchKind::Protocol(PROTOCOL_TCP), false),
@@ -569,25 +577,19 @@ mod tests {
     }
 
     #[def_test]
-    fn jump_stack_overflow_drops_packet() {
+    fn rule_step_limit_drops_packet() {
         let mut chains = with_input_rules(
             built_in_chains(),
             Verdict::Accept,
-            vec![Rule::new(Vec::new(), Target::Jump(ChainId::from_index(3)))],
+            vec![
+                Rule::new(Vec::new(), Target::Jump(ChainId::from_index(3)));
+                MAX_RULE_STEPS / 2 + 1
+            ],
         );
-
-        for index in 0..=MAX_JUMP_STACK_DEPTH {
-            let name = alloc::format!("CHAIN-{index}");
-            let target = if index == MAX_JUMP_STACK_DEPTH {
-                Target::Verdict(Verdict::Accept)
-            } else {
-                Target::Jump(ChainId::from_index(index + 4))
-            };
-            chains.push(Chain::user_defined(
-                name,
-                vec![Rule::new(Vec::new(), target)],
-            ));
-        }
+        chains.push(Chain::user_defined(
+            "SHARED".to_string(),
+            vec![Rule::new(Vec::new(), Target::Return)],
+        ));
 
         let table = FilterTable::new(chains).unwrap();
         let packet = ipv4_packet(PROTOCOL_UDP, &udp_payload(1, 2));

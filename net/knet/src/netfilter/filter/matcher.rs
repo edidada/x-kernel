@@ -46,21 +46,35 @@ impl PortRange {
 }
 
 /// Interface-name condition accepted from legacy iptables syntax.
+///
+/// Linux interface names occupy a 16-byte array including the trailing NUL.
+pub(crate) const MAX_INTERFACE_NAME_LEN: usize = 15;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum InterfaceMatch {
-    Exact(String),
-    Prefix(String),
+pub(crate) struct InterfaceMatch {
+    name: String,
+    is_prefix: bool,
 }
 
 impl InterfaceMatch {
+    pub(crate) fn exact(name: String) -> Option<Self> {
+        Self::new(name, false)
+    }
+
+    pub(crate) fn prefix(name: String) -> Option<Self> {
+        Self::new(name, true)
+    }
+
+    fn new(name: String, is_prefix: bool) -> Option<Self> {
+        (name.len() <= MAX_INTERFACE_NAME_LEN).then_some(Self { name, is_prefix })
+    }
+
     pub(crate) fn name(&self) -> &str {
-        match self {
-            Self::Exact(name) | Self::Prefix(name) => name,
-        }
+        &self.name
     }
 
     pub(crate) const fn is_prefix(&self) -> bool {
-        matches!(self, Self::Prefix(_))
+        self.is_prefix
     }
 }
 
@@ -458,5 +472,16 @@ mod tests {
         let udp = UdpMatch::source_port(port_range);
         assert_eq!(udp.source_port_range(), Some(port_range));
         assert_eq!(udp.destination_port_range(), None);
+
+        let exact = InterfaceMatch::exact("eth0".into()).unwrap();
+        assert_eq!(exact.name(), "eth0");
+        assert!(!exact.is_prefix());
+        let prefix = InterfaceMatch::prefix("veth".into()).unwrap();
+        assert_eq!(prefix.name(), "veth");
+        assert!(prefix.is_prefix());
+        assert_eq!(
+            InterfaceMatch::exact("X".repeat(MAX_INTERFACE_NAME_LEN + 1)),
+            None
+        );
     }
 }
