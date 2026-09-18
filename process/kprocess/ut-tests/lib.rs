@@ -813,14 +813,22 @@ fn test_clone_newnpid_allocates_child_in_fresh_pid_namespace() {
         &parent_pid_ns
     ));
 
-    // The child leader is allocated inside the fresh namespace (number 1)
-    // while still carrying a root projection for global lookup.
+    // The child leader is allocated inside the fresh namespace (number 1).
+    // Following Linux `struct pid`/`upid`, the identity also carries fresh
+    // projections for every ancestor namespace, including the parent's.
     let (_, task_number) = prepared.into_parts();
     assert_eq!(task_number.number_in(&child_pid_ns), Some(1));
-    assert_eq!(task_number.number_in(&parent_pid_ns), None);
-    assert!(
-        task_number.visible_number(&parent_pid_ns).is_some(),
-        "the parent- or root-level observer still sees a number"
+    let parent_ns_nr = task_number
+        .number_in(&parent_pid_ns)
+        .expect("child identity holds a fresh number in the parent namespace too");
+    assert_ne!(
+        parent_ns_nr, 1,
+        "parent namespace number is allocated independently"
+    );
+    assert_eq!(
+        task_number.visible_number(&parent_pid_ns),
+        Some(parent_ns_nr),
+        "an observer in the parent namespace resolves the parent projection"
     );
 
     child.discard_unpublished();

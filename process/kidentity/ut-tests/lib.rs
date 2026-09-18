@@ -137,11 +137,21 @@ fn pid_handle_lifecycle_state_machine_is_enforced() {
     let ns = Arc::new(PidNamespace::new_root());
     let handle = PidHandle::allocate_in(&ns).unwrap();
 
-    // Reserved: not lookup-visible, cannot retire or reclaim before publish.
+    // Reserved: not lookup-visible; retiring is illegal before publish,
+    // but an aborted (never-published) allocation may be reclaimed directly.
     assert_eq!(handle.lifecycle_state(), PidLifecycleState::Reserved);
     assert!(!handle.is_lookup_visible());
     assert!(!handle.mark_retiring());
-    assert!(!handle.mark_reclaimed());
+    assert!(handle.mark_reclaimed());
+    assert_eq!(handle.lifecycle_state(), PidLifecycleState::Reclaimed);
+    assert!(!handle.is_lookup_visible());
+
+    // A second handle exercises the publish -> retire -> reap path.
+    let handle = PidHandle::allocate_in(&ns).unwrap();
+    // Reserved: not lookup-visible, cannot retire before publish.
+    assert_eq!(handle.lifecycle_state(), PidLifecycleState::Reserved);
+    assert!(!handle.is_lookup_visible());
+    assert!(!handle.mark_retiring());
 
     // Publish: transition legal, identity becomes visible.
     assert!(handle.mark_published());
