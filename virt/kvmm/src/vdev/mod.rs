@@ -20,6 +20,8 @@ pub mod riscv64;
 /// Ported VirtIO MMIO infrastructure and VirtIO block device model.
 pub mod virtio;
 pub mod virtio_blk;
+/// virtio-blk bound to the VM MMIO bus (RAM-disk backend).
+pub mod virtio_blk_bus;
 
 pub use vdev_core::{
     GuestDma, IrqController, IrqSender, MmioBus, MmioDevice, RxChannel, TxChannel, VcpuWaker,
