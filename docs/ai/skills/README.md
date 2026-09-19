@@ -31,9 +31,6 @@ Current skills:
 - `code-guidelines/`:
   executable coding and code-review conventions for Rust kernel code,
   backed by `docs/coding-guidelines/`.
-- `unsafe-audit-workflow/`:
-  standards-first workflow for unsafe auditing, independent confirmation,
-  remediation ordering, and reporting standard gaps during unsafe cleanup.
 - `test-harness/`:
   shared Starry Test Harness workflow for regression cases,
   suite registration, execution, and result inspection.
