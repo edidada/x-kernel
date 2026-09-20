@@ -11,7 +11,8 @@
 
 mod backend;
 mod block;
-mod constants;
+/// VirtIO block constants (device config offsets, request types, features).
+pub mod constants;
 mod mmio;
 
 // Re-export from the shared VirtIO module
