@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Link-layer socket support.
+//! Link-layer support: shared packet bytes, RX/TX context, and AF_PACKET sockets.
 
 use kerrno::{KError, KResult};
 
@@ -10,6 +10,8 @@ use crate::SERVICE;
 
 pub(crate) mod buf;
 pub mod packet;
+pub(crate) mod rx;
+pub(crate) mod tx;
 pub(crate) mod wire;
 
 /// Sends a complete link-layer frame through the interface identified by `ifindex`.

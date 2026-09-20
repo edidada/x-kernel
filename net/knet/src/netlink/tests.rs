@@ -33,6 +33,7 @@ use crate::{
         LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice,
     },
     router::{Ipv4AddrEntry, Router, Rule},
+    rx::RxPacket,
     service::Service,
     socket::SocketOps,
 };
@@ -98,7 +99,7 @@ impl NetDevice for TestDevice {
         self.device_id
     }
 
-    fn poll_rx(&mut self, _ifindex: i32, _timestamp: MonotonicInstant) -> Option<PacketBuf> {
+    fn poll_rx(&mut self, _ifindex: i32, _timestamp: MonotonicInstant) -> Option<RxPacket> {
         None
     }
 

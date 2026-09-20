@@ -19,6 +19,7 @@ use crate::{
         net_rx,
     },
     ip::IpAddress,
+    rx::{PacketType, RxPacket},
 };
 
 /// Loopback device backed by the shared NetRx packet queue.
@@ -116,7 +117,7 @@ impl NetDevice for LoopbackDevice {
         }
     }
 
-    fn poll_rx(&mut self, ifindex: i32, _timestamp: MonotonicInstant) -> Option<PacketBuf> {
+    fn poll_rx(&mut self, ifindex: i32, _timestamp: MonotonicInstant) -> Option<RxPacket> {
         self.rx_ifindex = Some(ifindex);
         if !self.is_link_up() {
             return None;
@@ -140,21 +141,20 @@ impl NetDevice for LoopbackDevice {
         ifindex: i32,
         next_hop: IpAddress,
         _source_addr: IpAddress,
-        mut packet: PacketBuf,
+        packet: PacketBuf,
         _timestamp: MonotonicInstant,
     ) -> bool {
         if !self.is_link_up() {
             return false;
         }
-        if packet
-            .network_packet()
-            .is_none_or(|network_packet| network_packet.len() > self.mtu)
-        {
+        if packet.as_slice().len() > self.mtu {
             warn!("Dropping packet exceeding loopback MTU {}", self.mtu);
             return false;
         }
-        packet.set_ifindex(ifindex);
-        let Some(packet) = net_rx::prepare_for_enqueue(packet) else {
+        // Loopback delivers its own transmission as an ingress frame on the
+        // same interface, with the IP header at the start of the view.
+        let rx_packet = RxPacket::new(packet, ifindex, PacketType::Host, Some(0));
+        let Some(packet) = net_rx::prepare_for_enqueue(rx_packet) else {
             // Malformed IPv4 UDP is dropped in task context. Linux
             // `loopback_xmit` still returns `NETDEV_TX_OK` after `NET_RX_DROP`.
             return true;
@@ -259,12 +259,7 @@ mod tests {
     fn loopback_rechecks_current_mtu_before_enqueue() {
         let mut device = LoopbackDevice::new();
         device.set_mtu(IPV4_MIN_MTU).unwrap();
-        let packet = PacketBuf::new(
-            vec![0; IPV4_MIN_MTU + 1],
-            0,
-            crate::buf::PacketType::Host,
-            Some(0),
-        );
+        let packet = PacketBuf::new(vec![0; IPV4_MIN_MTU + 1]);
         let queued_before = net_rx::queued_len();
 
         assert!(!device.send_ip_packet(

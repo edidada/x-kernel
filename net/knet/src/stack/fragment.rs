@@ -21,7 +21,10 @@ use alloc::{
 use ktime_types::{MonotonicInstant, TimeSpan};
 
 use super::ipv4::{self, Ipv4Header};
-use crate::buf::{PacketBuf, PacketType};
+use crate::{
+    buf::PacketBuf,
+    rx::{PacketType, RxPacket},
+};
 
 const IPV4_REASSEMBLY_TIMEOUT: TimeSpan = TimeSpan::from_secs(30);
 const IPV4_REASSEMBLY_HIGH_BYTES: usize = 4 * 1024 * 1024;
@@ -73,7 +76,7 @@ pub(crate) struct Ipv4ExpirationBatch {
 }
 
 pub(crate) enum Ipv4ReassemblyResult {
-    Complete(PacketBuf),
+    Complete(RxPacket),
     Pending,
     Dropped,
 }
@@ -108,7 +111,7 @@ impl Ipv4Reassembler {
 
     pub(crate) fn reassemble(
         &mut self,
-        packet: PacketBuf,
+        packet: RxPacket,
         header: Ipv4Header,
         now: MonotonicInstant,
     ) -> Ipv4ReassemblyResult {
@@ -117,7 +120,7 @@ impl Ipv4Reassembler {
             dst_addr: header.dst_addr().octets(),
             identification: header.identification(),
             protocol: header.protocol(),
-            ifindex: packet.ifindex(),
+            ifindex: packet.ingress_ifindex(),
         };
         let Some(ip_packet) = packet.network_packet() else {
             return Ipv4ReassemblyResult::Dropped;
@@ -364,7 +367,14 @@ fn build_reassembled_packet(ifindex: i32, queue: Ipv4ReassemblyQueue) -> Ipv4Rea
         return Ipv4ReassemblyResult::Dropped;
     }
 
-    Ipv4ReassemblyResult::Complete(PacketBuf::new(packet, ifindex, queue.packet_type, Some(0)))
+    // The rebuilt bytes start at the IPv4 header of a frame received on the
+    // interface that owned the fragments.
+    Ipv4ReassemblyResult::Complete(RxPacket::new(
+        PacketBuf::new(packet),
+        ifindex,
+        queue.packet_type,
+        Some(0),
+    ))
 }
 
 fn aligned_payload_len(payload_len: usize, more_fragments: bool) -> usize {
@@ -403,7 +413,7 @@ mod tests {
     use super::*;
     use crate::ipv4;
 
-    fn fragment(offset: usize, more_fragments: bool, payload: &[u8]) -> (PacketBuf, Ipv4Header) {
+    fn fragment(offset: usize, more_fragments: bool, payload: &[u8]) -> (RxPacket, Ipv4Header) {
         fragment_with_id(0x1234, offset, more_fragments, payload)
     }
 
@@ -412,7 +422,7 @@ mod tests {
         offset: usize,
         more_fragments: bool,
         payload: &[u8],
-    ) -> (PacketBuf, Ipv4Header) {
+    ) -> (RxPacket, Ipv4Header) {
         let offset_units = u16::try_from(offset / 8).unwrap();
         let mut header = EtherIpv4Header::new(
             payload.len() as u16,
@@ -430,7 +440,7 @@ mod tests {
 
         let mut bytes: Vec<u8> = header.to_bytes().into_iter().collect();
         bytes.extend_from_slice(payload);
-        let mut packet = PacketBuf::new(bytes, 1, PacketType::Host, Some(0));
+        let mut packet = RxPacket::new(PacketBuf::new(bytes), 1, PacketType::Host, Some(0));
         let header = Ipv4Header::validate_input_packet(&mut packet).unwrap();
         (packet, header)
     }

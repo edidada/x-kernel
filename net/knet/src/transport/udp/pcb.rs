@@ -9,7 +9,7 @@ use kspin::SpinNoIrq;
 use ksync::RwLock;
 
 use super::{IPV4_DEFAULT_TTL, UDP_RX_QUEUE_CAPACITY, state::UdpSocketState};
-use crate::buf::PacketBuf;
+use crate::rx::RxPacket;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct UdpPacketMetadata {
@@ -33,7 +33,7 @@ pub(super) struct UdpPayload {
 impl UdpPayload {
     pub(super) fn as_slice(&self) -> &[u8] {
         self.packet
-            .packet()
+            .rx_packet()
             .network_packet()
             .and_then(|data| data.get(self.packet.metadata().payload_range()))
             .unwrap_or(&[])
@@ -46,21 +46,30 @@ pub(super) struct UdpDatagram {
     pub(super) remote_addr: SocketAddr,
 }
 
-/// A validated IPv4 UDP view over a reference-counted [`PacketBuf`].
+/// A validated IPv4 UDP view over a reference-counted received packet.
+///
+/// The queue holds handles to shared prepared state: protocol metadata is
+/// allocated when a datagram is prepared in task context, while later softirq
+/// delivery only moves or clones pointer-sized handles.
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedUdpPacket {
-    packet: PacketBuf,
+    inner: Arc<PreparedUdpPacketInner>,
+}
+
+#[derive(Debug)]
+struct PreparedUdpPacketInner {
+    packet: RxPacket,
     metadata: UdpPacketMetadata,
 }
 
 impl PreparedUdpPacket {
     pub(super) fn new(
-        packet: PacketBuf,
+        packet: RxPacket,
         payload_offset: usize,
         payload_len: usize,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
-    ) -> Result<Self, PacketBuf> {
+    ) -> Result<Self, RxPacket> {
         let Some(payload_end) = payload_offset.checked_add(payload_len) else {
             return Err(packet);
         };
@@ -78,27 +87,32 @@ impl PreparedUdpPacket {
             payload_start: payload_offset,
             payload_end,
         };
-        Ok(Self { packet, metadata })
+        Ok(Self {
+            inner: Arc::new(PreparedUdpPacketInner { packet, metadata }),
+        })
     }
 
-    pub(crate) fn packet(&self) -> &PacketBuf {
-        &self.packet
+    pub(crate) fn rx_packet(&self) -> &RxPacket {
+        &self.inner.packet
     }
 
     pub(super) fn local_addr(&self) -> SocketAddr {
-        self.metadata.local_addr
+        self.inner.metadata.local_addr
     }
 
     pub(super) fn remote_addr(&self) -> SocketAddr {
-        self.metadata.remote_addr
+        self.inner.metadata.remote_addr
     }
 
-    pub(crate) fn into_packet(self) -> PacketBuf {
-        self.packet
+    pub(crate) fn into_rx_packet(self) -> RxPacket {
+        match Arc::try_unwrap(self.inner) {
+            Ok(inner) => inner.packet,
+            Err(inner) => inner.packet.clone(),
+        }
     }
 
     fn metadata(&self) -> UdpPacketMetadata {
-        self.metadata
+        self.inner.metadata
     }
 }
 
@@ -134,9 +148,9 @@ impl UdpPcb {
     /// Enqueues a validated packet. Safe from `NetRx` as well as task context.
     ///
     /// The socket queue is reserved to its occupancy bound when the PCB is
-    /// created, and `PacketBuf` already owns the shared packet allocation, so
-    /// this path does not allocate or grow the `VecDeque`. A full queue drops
-    /// the packet and returns `false`.
+    /// created, and the prepared handle already owns the shared packet
+    /// allocation, so this path does not allocate or grow the `VecDeque`. A
+    /// full queue drops the packet and returns `false`.
     pub(super) fn enqueue(&self, packet: PreparedUdpPacket) -> bool {
         let mut queue = self.rx_queue.lock();
         if queue.len() >= UDP_RX_QUEUE_CAPACITY {
@@ -188,9 +202,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        buf::PacketType,
+        buf::PacketBuf,
         ip::Ipv4Address,
         ipv4,
+        rx::{PacketType, RxPacket},
         udp::{UDP_HEADER_LEN, UdpSocketState, output::write_udp_header},
     };
 
@@ -215,7 +230,7 @@ mod tests {
             &udp_packet,
         )
         .unwrap();
-        let packet = PacketBuf::new(packet, 1, PacketType::Host, Some(0));
+        let packet = RxPacket::new(PacketBuf::new(packet), 1, PacketType::Host, Some(0));
         let header = ipv4::Ipv4Header::parse_input(packet.network_packet().unwrap()).unwrap();
         crate::udp::prepare_ipv4_packet(header, packet).unwrap()
     }
@@ -226,7 +241,7 @@ mod tests {
         let first_remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 1000);
         let second_remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 2), 2000);
         let first_packet = queued_packet(first_remote, 1);
-        let observer = first_packet.clone().into_packet();
+        let observer = first_packet.clone().into_rx_packet();
         assert!(pcb.enqueue(first_packet));
         assert!(pcb.enqueue(queued_packet(second_remote, 2)));
 
@@ -237,7 +252,7 @@ mod tests {
             peeked
                 .payload
                 .packet
-                .packet()
+                .rx_packet()
                 .shares_storage_with(&observer)
         );
 
@@ -255,6 +270,10 @@ mod tests {
         let pcb = UdpPcb::new(UdpSocketState::new());
         let remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 1000);
         let capacity_at_create = pcb.rx_queue.lock().capacity();
+        assert_eq!(
+            core::mem::size_of::<PreparedUdpPacket>(),
+            core::mem::size_of::<usize>()
+        );
         assert!(capacity_at_create >= UDP_RX_QUEUE_CAPACITY);
 
         for payload in 0..UDP_RX_QUEUE_CAPACITY {

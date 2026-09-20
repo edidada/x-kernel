@@ -25,11 +25,11 @@ use smoltcp::{
 
 use crate::{
     LISTEN_TABLE, SOCKET_SET,
-    buf::PacketBuf,
     device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborUpdate},
     ip::IpAddress,
     poller::{PollBudget, PollProgress},
     router::{NeighborUpdatePolicy, Router, Rule},
+    rx::RxPacket,
     stack::ingress::{IngressProcessor, prepare_smoltcp_ingress},
 };
 
@@ -137,8 +137,8 @@ pub struct Service {
     pub(crate) iface: Mutex<Interface>,
     router: Mutex<Router>,
     ingress: Mutex<IngressProcessor>,
-    rx_batch: Mutex<Vec<PacketBuf>>,
-    accepted_batch: Mutex<Vec<PacketBuf>>,
+    rx_batch: Mutex<Vec<RxPacket>>,
+    accepted_batch: Mutex<Vec<RxPacket>>,
     control_batch: Mutex<Vec<Vec<u8>>>,
     timeout_deadline_micros: AtomicU64,
     ipv4_reassembly_deadline_micros: AtomicU64,
@@ -370,8 +370,8 @@ impl Service {
         device_timestamp: MonotonicInstant,
         round_started_at: MonotonicInstant,
         budget: usize,
-        rx_batch: &mut Vec<PacketBuf>,
-        accepted_packets: &mut Vec<PacketBuf>,
+        rx_batch: &mut Vec<RxPacket>,
+        accepted_packets: &mut Vec<RxPacket>,
         control_packets: &mut Vec<Vec<u8>>,
     ) -> DeviceRxProgress {
         let mut progress = DeviceRxProgress::default();
@@ -466,8 +466,8 @@ impl Service {
     fn try_process_rx_batch(
         &self,
         device_timestamp: MonotonicInstant,
-        rx_batch: &mut Vec<PacketBuf>,
-        accepted_packets: &mut Vec<PacketBuf>,
+        rx_batch: &mut Vec<RxPacket>,
+        accepted_packets: &mut Vec<RxPacket>,
         control_packets: &mut Vec<Vec<u8>>,
     ) -> bool {
         if rx_batch.is_empty() {
@@ -491,7 +491,7 @@ impl Service {
 
     fn try_flush_ingress_batches(
         &self,
-        accepted_packets: &mut Vec<PacketBuf>,
+        accepted_packets: &mut Vec<RxPacket>,
         control_packets: &mut Vec<Vec<u8>>,
     ) -> bool {
         if accepted_packets.is_empty() && control_packets.is_empty() {
@@ -1264,16 +1264,16 @@ mod tests {
         let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
         let mut iface = Interface::new(config, &mut router, current);
         let mut packets = Vec::from([
-            PacketBuf::new(
-                vec![0x45, 0, 0, 20],
+            RxPacket::new(
+                crate::buf::PacketBuf::new(vec![0x45, 0, 0, 20]),
                 1,
-                crate::buf::PacketType::Host,
+                crate::rx::PacketType::Host,
                 Some(0),
             ),
-            PacketBuf::new(
-                vec![0x45, 0, 0, 20],
+            RxPacket::new(
+                crate::buf::PacketBuf::new(vec![0x45, 0, 0, 20]),
                 1,
-                crate::buf::PacketType::Host,
+                crate::rx::PacketType::Host,
                 Some(0),
             ),
         ]);

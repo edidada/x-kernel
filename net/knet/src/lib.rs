@@ -47,7 +47,7 @@ use kdevice::subscribe_device_removed;
 #[cfg(feature = "vsock")]
 use kerrno::KError;
 use lazyinit::LazyInit;
-pub(crate) use link::{buf, wire};
+pub(crate) use link::{buf, rx, tx, wire};
 pub use link::{packet, send_link_frame};
 pub use socket::{
     file::{sock_alloc_file, sock_from_file},

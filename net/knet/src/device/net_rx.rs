@@ -15,8 +15,8 @@
 //! `SoftirqAction` hot path, while PCB enqueue only appends an existing value to
 //! a reserved `VecDeque`.
 //!
-//! Other packets enter a separate [`PacketBuf`] queue for the task poller.
-//! Unmatched UDP is converted back into its generic buffer before joining that
+//! Other packets enter a separate [`RxPacket`] queue for the task poller.
+//! Unmatched UDP is converted back into its receive context before joining that
 //! queue, so a later [`process_pending`] does not pick it up again.
 //!
 //! Occupancy is `pending_udp.len() + deferred.len() + in_flight`. `in_flight`
@@ -32,9 +32,9 @@ use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 
 use crate::{
-    buf::PacketBuf,
     consts::SOCKET_BUFFER_SIZE,
     ipv4::{self, Ipv4Header},
+    rx::RxPacket,
     udp::{self, PreparedUdpPacket},
 };
 
@@ -44,22 +44,22 @@ pub(crate) const NET_RX_BUDGET: usize = 16;
 #[derive(Debug)]
 pub(crate) enum NetRxPacket {
     PreparedUdp(PreparedUdpPacket),
-    Deferred(PacketBuf),
+    Deferred(RxPacket),
 }
 
 impl NetRxPacket {
     #[cfg(unittest)]
     fn ifindex(&self) -> i32 {
         match self {
-            Self::PreparedUdp(packet) => packet.packet().ifindex(),
-            Self::Deferred(packet) => packet.ifindex(),
+            Self::PreparedUdp(packet) => packet.rx_packet().ingress_ifindex(),
+            Self::Deferred(packet) => packet.ingress_ifindex(),
         }
     }
 }
 
 struct NetRxQueues {
     pending_udp: VecDeque<PreparedUdpPacket>,
-    deferred: VecDeque<PacketBuf>,
+    deferred: VecDeque<RxPacket>,
     /// UDP packets currently outside the lock for PCB delivery.
     in_flight: usize,
 }
@@ -105,11 +105,11 @@ pub(crate) fn has_work_for(ifindex: i32) -> bool {
         || queues
             .pending_udp
             .iter()
-            .any(|packet| packet.packet().ifindex() == ifindex)
+            .any(|packet| packet.rx_packet().ingress_ifindex() == ifindex)
         || queues
             .deferred
             .iter()
-            .any(|packet| packet.ifindex() == ifindex)
+            .any(|packet| packet.ingress_ifindex() == ifindex)
 }
 
 /// Parses complete IPv4 UDP into an owned validated packet in task context.
@@ -117,7 +117,7 @@ pub(crate) fn has_work_for(ifindex: i32) -> bool {
 /// Returns `None` when the packet is IPv4 UDP but fails the checked parser;
 /// the caller should drop it without occupying the queue. Other packets are
 /// returned unchanged for the task poller.
-pub(crate) fn prepare_for_enqueue(packet: PacketBuf) -> Option<NetRxPacket> {
+pub(crate) fn prepare_for_enqueue(packet: RxPacket) -> Option<NetRxPacket> {
     debug_assert!(
         !kirq::context::is_in_interrupt_context(),
         "prepare_for_enqueue requires task context"
@@ -165,7 +165,7 @@ pub(crate) fn process_pending(budget: usize) -> bool {
     ensure_net_rx_queue();
     let batch_budget = budget.min(NET_RX_BUDGET);
     let mut batch: [Option<PreparedUdpPacket>; NET_RX_BUDGET] = core::array::from_fn(|_| None);
-    let mut unmatched: [Option<PacketBuf>; NET_RX_BUDGET] = core::array::from_fn(|_| None);
+    let mut unmatched: [Option<RxPacket>; NET_RX_BUDGET] = core::array::from_fn(|_| None);
     let mut batch_len = 0;
     {
         let mut queues = NET_RX_QUEUE.lock();
@@ -224,13 +224,13 @@ pub(crate) fn drain_pending() {
     }
 }
 
-pub(crate) fn pop_deferred(ifindex: i32) -> Option<PacketBuf> {
+pub(crate) fn pop_deferred(ifindex: i32) -> Option<RxPacket> {
     ensure_net_rx_queue();
     let mut queues = NET_RX_QUEUE.lock();
     let position = queues
         .deferred
         .iter()
-        .position(|packet| packet.ifindex() == ifindex)?;
+        .position(|packet| packet.ingress_ifindex() == ifindex)?;
     queues.deferred.remove(position)
 }
 
@@ -253,38 +253,38 @@ pub(crate) fn discard_ifindex(ifindex: i32) {
 fn take_prepared_ifindex(
     queue: &mut VecDeque<PreparedUdpPacket>,
     ifindex: i32,
-    dropped: &mut Vec<PacketBuf>,
+    dropped: &mut Vec<NetRxPacket>,
 ) {
     for _ in 0..queue.len() {
         let Some(packet) = queue.pop_front() else {
             break;
         };
-        if packet.packet().ifindex() == ifindex {
-            dropped.push(packet.into_packet());
+        if packet.rx_packet().ingress_ifindex() == ifindex {
+            dropped.push(NetRxPacket::PreparedUdp(packet));
         } else {
             queue.push_back(packet);
         }
     }
 }
 
-fn take_ifindex(queue: &mut VecDeque<PacketBuf>, ifindex: i32, dropped: &mut Vec<PacketBuf>) {
+fn take_ifindex(queue: &mut VecDeque<RxPacket>, ifindex: i32, dropped: &mut Vec<NetRxPacket>) {
     for _ in 0..queue.len() {
         let Some(packet) = queue.pop_front() else {
             break;
         };
-        if packet.ifindex() == ifindex {
-            dropped.push(packet);
+        if packet.ingress_ifindex() == ifindex {
+            dropped.push(NetRxPacket::Deferred(packet));
         } else {
             queue.push_back(packet);
         }
     }
 }
 
-fn deliver_prepared_udp(packet: PreparedUdpPacket) -> Option<PacketBuf> {
+fn deliver_prepared_udp(packet: PreparedUdpPacket) -> Option<RxPacket> {
     match udp::deliver_ipv4_packet(packet) {
         (udp::InputDisposition::Accepted, _) => None,
         (udp::InputDisposition::NoSocket, returned) => {
-            returned.map(udp::PreparedUdpPacket::into_packet)
+            returned.map(udp::PreparedUdpPacket::into_rx_packet)
         }
     }
 }
@@ -296,10 +296,15 @@ mod tests {
     use unittest::def_test;
 
     use super::*;
-    use crate::ip::Ipv4Address;
+    use crate::{buf::PacketBuf, ip::Ipv4Address, rx::PacketType};
 
-    fn test_packet(ifindex: i32) -> PacketBuf {
-        PacketBuf::new(vec![0; 20], ifindex, crate::buf::PacketType::Host, Some(0))
+    fn test_packet(ifindex: i32) -> RxPacket {
+        RxPacket::new(
+            PacketBuf::new(vec![0; 20]),
+            ifindex,
+            PacketType::Host,
+            Some(0),
+        )
     }
 
     fn prepared_udp_packet(ifindex: i32) -> NetRxPacket {
@@ -313,10 +318,10 @@ mod tests {
             &udp_packet,
         )
         .unwrap();
-        prepare_for_enqueue(PacketBuf::new(
-            packet,
+        prepare_for_enqueue(RxPacket::new(
+            PacketBuf::new(packet),
             ifindex,
-            crate::buf::PacketType::Host,
+            PacketType::Host,
             Some(0),
         ))
         .unwrap()
@@ -347,7 +352,7 @@ mod tests {
 
         assert!(!process_pending(NET_RX_BUDGET));
         let packet = pop_deferred(IFINDEX).expect("non-UDP should remain queued");
-        assert_eq!(packet.ifindex(), IFINDEX);
+        assert_eq!(packet.ingress_ifindex(), IFINDEX);
         assert!(!has_work_for(IFINDEX));
     }
 

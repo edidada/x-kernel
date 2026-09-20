@@ -18,8 +18,8 @@ use super::{
 };
 use crate::{
     LISTEN_TABLE,
-    buf::PacketBuf,
     ip::{Ipv4Address, Ipv4Cidr},
+    rx::{PacketType, RxPacket},
     udp, udp_err,
 };
 
@@ -73,8 +73,8 @@ impl IngressProcessor {
     pub fn handle_rx_packets(
         &mut self,
         timestamp: MonotonicInstant,
-        packets: &mut Vec<PacketBuf>,
-        accepted_packets: &mut Vec<PacketBuf>,
+        packets: &mut Vec<RxPacket>,
+        accepted_packets: &mut Vec<RxPacket>,
         control_packets: &mut Vec<Vec<u8>>,
     ) {
         for packet in packets.drain(..) {
@@ -85,8 +85,8 @@ impl IngressProcessor {
     fn handle_rx_packet(
         &mut self,
         timestamp: MonotonicInstant,
-        packet: PacketBuf,
-        accepted_packets: &mut Vec<PacketBuf>,
+        packet: RxPacket,
+        accepted_packets: &mut Vec<RxPacket>,
         control_packets: &mut Vec<Vec<u8>>,
     ) {
         let Some(ip_packet) = packet.network_packet() else {
@@ -104,8 +104,8 @@ impl IngressProcessor {
     fn handle_ipv4_input(
         &mut self,
         timestamp: MonotonicInstant,
-        mut packet: PacketBuf,
-        accepted_packets: &mut Vec<PacketBuf>,
+        mut packet: RxPacket,
+        accepted_packets: &mut Vec<RxPacket>,
         control_packets: &mut Vec<Vec<u8>>,
     ) {
         let header = match Ipv4Header::validate_input_packet(&mut packet) {
@@ -140,7 +140,7 @@ impl IngressProcessor {
                     let Some(packet) = returned_packet else {
                         return;
                     };
-                    let Some(ip_packet) = packet.packet().network_packet() else {
+                    let Some(ip_packet) = packet.rx_packet().network_packet() else {
                         return;
                     };
                     queue_icmpv4_error(
@@ -170,7 +170,7 @@ impl IngressProcessor {
         }
 
         if let Some(ip_packet) = packet.network_packet() {
-            udp_err::inspect_icmpv4_error(ip_packet, packet.ifindex());
+            udp_err::inspect_icmpv4_error(ip_packet, packet.ingress_ifindex());
         }
         accepted_packets.push(packet);
     }
@@ -191,7 +191,7 @@ impl IngressProcessor {
 /// smoltcp socket-set lock. This keeps custom UDP ingress independent from
 /// unrelated TCP socket operations while preserving listener setup before a
 /// TCP SYN reaches smoltcp.
-pub(crate) fn prepare_smoltcp_ingress(packets: &[PacketBuf], sockets: &mut SocketSet<'_>) {
+pub(crate) fn prepare_smoltcp_ingress(packets: &[RxPacket], sockets: &mut SocketSet<'_>) {
     for packet in packets {
         let Some(ip_packet) = packet.network_packet() else {
             continue;
@@ -221,7 +221,7 @@ pub(crate) fn prepare_smoltcp_ingress(packets: &[PacketBuf], sockets: &mut Socke
 fn queue_icmpv4_error(
     control_packets: &mut Vec<Vec<u8>>,
     error: Icmpv4Error,
-    packet_type: crate::buf::PacketType,
+    packet_type: PacketType,
     offending_header: Ipv4Header,
     offending_packet: &[u8],
 ) {

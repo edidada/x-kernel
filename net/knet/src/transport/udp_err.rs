@@ -177,9 +177,9 @@ mod tests {
     use super::*;
     use crate::{
         SocketErrorOrigin,
-        buf::PacketType,
         ip::{IpAddress, IpEndpoint},
         ipv4::{Icmpv4Error, Ipv4Header},
+        rx::PacketType,
         udp::{UdpSocketState, register_udp_state_for_test},
     };
 

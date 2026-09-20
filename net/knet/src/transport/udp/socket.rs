@@ -623,7 +623,8 @@ mod tests {
 
     use super::{super::output::has_valid_udp_checksum, *};
     use crate::{
-        buf::{PacketBuf, PacketType},
+        buf::PacketBuf,
+        rx::{PacketType, RxPacket},
         udp::{InputDisposition, PreparedUdpPacket, deliver_ipv4_packet},
     };
 
@@ -638,7 +639,7 @@ mod tests {
 
     fn received_packet(ifindex: i32, local: IpEndpoint) -> PreparedUdpPacket {
         let remote = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 2), 4321).into();
-        let packet = PacketBuf::new(vec![42], ifindex, PacketType::Host, Some(0));
+        let packet = RxPacket::new(PacketBuf::new(vec![42]), ifindex, PacketType::Host, Some(0));
         PreparedUdpPacket::new(packet, 0, 1, local.into(), remote).unwrap()
     }
 

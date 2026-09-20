@@ -21,7 +21,7 @@ use ktime_types::{MonotonicInstant, TimeSpan};
 use lazyinit::LazyInit;
 
 use crate::{
-    buf::{PacketBuf, PacketType},
+    buf::PacketBuf,
     consts::ETHERNET_MAX_PENDING_PACKETS,
     device::{
         IF_OPER_DOWN, IF_OPER_UP, LINK_FLAG_BROADCAST, LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST,
@@ -30,6 +30,7 @@ use crate::{
     },
     ip::{IpAddress, Ipv4Cidr},
     packet,
+    rx::{PacketType, RxPacket},
     wire::{
         ArpIpv4Packet, ArpOperation, ETHERNET_HEADER_LEN, EtherType, EthernetFrameRef, MacAddress,
         emit_ethernet_header,
@@ -398,9 +399,7 @@ impl EthernetDevice {
         if !self.is_link_up() {
             return;
         }
-        let Some(ip_packet) = packet.network_packet() else {
-            return;
-        };
+        let ip_packet = packet.as_slice();
         if ip_packet.len() > self.mtu {
             warn!(
                 "Dropping IPv4 packet of {} bytes exceeding device MTU {}",
@@ -423,7 +422,7 @@ impl EthernetDevice {
         ifindex: i32,
         frame_data: &[u8],
         timestamp: MonotonicInstant,
-    ) -> Option<PacketBuf> {
+    ) -> Option<RxPacket> {
         let Some(frame) = EthernetFrameRef::new_checked(frame_data) else {
             warn!("Dropping malformed Ethernet frame");
             return None;
@@ -438,13 +437,13 @@ impl EthernetDevice {
             EtherType::Ipv4 | EtherType::Ipv6 => Some(ETHERNET_HEADER_LEN),
             _ => None,
         };
-        let packet_buf = PacketBuf::new(
-            frame_data.to_vec(),
+        let packet = RxPacket::new(
+            PacketBuf::new(frame_data.to_vec()),
             ifindex,
             classify_packet_type(dst_addr, local_addr),
             network_offset,
         );
-        packet::publish_link_packet(&packet_buf, src_addr, ethertype);
+        packet::publish_link_packet(&packet, src_addr, ethertype);
 
         if !dst_addr.is_broadcast() && dst_addr != MacAddress::ZERO && dst_addr != local_addr {
             return None;
@@ -452,7 +451,7 @@ impl EthernetDevice {
 
         match ethertype {
             EtherType::Ipv4 => {
-                return Some(packet_buf);
+                return Some(packet);
             }
             EtherType::Arp => self.handle_arp_packet(ifindex, frame.payload(), timestamp),
             _ => {}
@@ -652,7 +651,7 @@ impl NetDeviceOps for EthernetDevice {
         Some(self.inner.id())
     }
 
-    fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> Option<PacketBuf> {
+    fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> Option<RxPacket> {
         if !self.is_link_up() {
             return None;
         }
@@ -685,7 +684,7 @@ impl NetDeviceOps for EthernetDevice {
         ifindex: i32,
         next_hop: IpAddress,
         source_addr: IpAddress,
-        mut packet: PacketBuf,
+        packet: PacketBuf,
         timestamp: MonotonicInstant,
     ) -> bool {
         if !self.is_link_up() {
@@ -700,11 +699,7 @@ impl NetDeviceOps for EthernetDevice {
             return false;
         };
 
-        packet.set_ifindex(ifindex);
-        let Some(ip_packet) = packet.network_packet() else {
-            warn!("Dropping malformed IPv4 output packet");
-            return false;
-        };
+        let ip_packet = packet.as_slice();
         let is_limited_broadcast = next_hop.is_broadcast();
         if !is_ipv4_source_usable_for_egress(next_hop, source_addr, &self.assigned_ipv4_addrs) {
             warn!("Dropping IPv4 packet without a local IPv4 source");
@@ -930,7 +925,7 @@ mod tests {
         bytes[2..4].copy_from_slice(&packet_len.to_be_bytes());
         bytes[12..16].copy_from_slice(&source.octets());
         bytes[16..20].copy_from_slice(&[198, 51, 100, 1]);
-        PacketBuf::new(bytes, 1, PacketType::Host, Some(0))
+        PacketBuf::new(bytes)
     }
 
     #[def_test]

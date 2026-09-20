@@ -13,8 +13,9 @@ use etherparse::{
 };
 
 use crate::{
-    buf::{PacketBuf, PacketType},
+    buf::PacketBuf,
     ip::Ipv4Address,
+    rx::{PacketType, RxPacket},
 };
 
 pub(crate) const PROTOCOL_ICMP: u8 = 1;
@@ -110,15 +111,20 @@ impl Ipv4Header {
         Ok(Self::from_slice(&header_slice, total_len))
     }
 
-    pub(crate) fn validate_input_packet(packet: &mut PacketBuf) -> Result<Self, Ipv4Error> {
+    /// Validates a received network view and shortens it to the IPv4 total length.
+    pub(crate) fn validate_input_packet(packet: &mut RxPacket) -> Result<Self, Ipv4Error> {
         let header = Self::parse_input(packet.network_packet().ok_or(Ipv4Error::Malformed)?)?;
-        header.apply_to_packet(packet)
+        packet
+            .truncate_network_packet(header.total_len)
+            .ok_or(Ipv4Error::Malformed)?;
+        Ok(header)
     }
 
+    /// Validates an output view and repairs its total length and header checksum.
     pub(crate) fn prepare_output_packet(packet: &mut PacketBuf) -> Result<Self, Ipv4Error> {
-        let header = Self::parse_output(packet.network_packet().ok_or(Ipv4Error::Malformed)?)?;
+        let header = Self::parse_output(packet.as_slice())?;
         {
-            let data = packet.network_packet_mut().ok_or(Ipv4Error::Malformed)?;
+            let data = packet.as_mut_slice();
             let total_len = u16::try_from(data.len()).map_err(|_| Ipv4Error::Malformed)?;
             data[2..4].copy_from_slice(&total_len.to_be_bytes());
             let header_data = data
@@ -130,7 +136,7 @@ impl Ipv4Header {
             ether_header.header_checksum = ether_header.calc_header_checksum();
             header_data.copy_from_slice(&ether_header.to_bytes());
         }
-        header.apply_to_packet(packet)
+        Ok(header)
     }
 
     pub(crate) fn parse_output(packet: &[u8]) -> Result<Self, Ipv4Error> {
@@ -225,13 +231,6 @@ impl Ipv4Header {
             dscp_ecn: header_slice.slice()[1],
             is_fragmented: header_slice.is_fragmenting_payload(),
         }
-    }
-
-    fn apply_to_packet(self, packet: &mut PacketBuf) -> Result<Self, Ipv4Error> {
-        packet
-            .truncate_network_packet(self.total_len)
-            .ok_or(Ipv4Error::Malformed)?;
-        Ok(self)
     }
 }
 
@@ -557,6 +556,10 @@ mod tests {
         packet
     }
 
+    fn received_packet(bytes: Vec<u8>) -> RxPacket {
+        RxPacket::new(PacketBuf::new(bytes), 1, PacketType::Host, Some(0))
+    }
+
     fn dont_fragment_ipv4_packet(protocol: u8, payload: &[u8]) -> Vec<u8> {
         build_ipv4_packet_dont_fragment(
             Ipv4Address::new(192, 0, 2, 1),
@@ -570,12 +573,7 @@ mod tests {
 
     #[def_test]
     fn test_validate_input_packet_accepts_valid_checksum() {
-        let mut packet = PacketBuf::new(
-            ipv4_packet(PROTOCOL_UDP, &[1, 2]),
-            1,
-            PacketType::Host,
-            Some(0),
-        );
+        let mut packet = received_packet(ipv4_packet(PROTOCOL_UDP, &[1, 2]));
 
         let header = Ipv4Header::validate_input_packet(&mut packet).unwrap();
 
@@ -595,7 +593,7 @@ mod tests {
         header.more_fragments = true;
         header.header_checksum = header.calc_header_checksum();
         bytes[..IPV4_MIN_HEADER_LEN].copy_from_slice(&header.to_bytes());
-        let mut packet = PacketBuf::new(bytes, 1, PacketType::Host, Some(0));
+        let mut packet = received_packet(bytes);
 
         let header = Ipv4Header::validate_input_packet(&mut packet).unwrap();
 
@@ -606,7 +604,7 @@ mod tests {
     fn test_validate_input_packet_rejects_bad_checksum() {
         let mut bytes = ipv4_packet(PROTOCOL_TCP, &[]);
         bytes[10] ^= 0xff;
-        let mut packet = PacketBuf::new(bytes, 1, PacketType::Host, Some(0));
+        let mut packet = received_packet(bytes);
 
         assert_eq!(
             Ipv4Header::validate_input_packet(&mut packet),
@@ -619,11 +617,11 @@ mod tests {
         let mut bytes = ipv4_packet(PROTOCOL_ICMP, &[]);
         bytes[10] = 0;
         bytes[11] = 0;
-        let mut packet = PacketBuf::new(bytes, 1, PacketType::Host, Some(0));
+        let mut packet = PacketBuf::new(bytes);
 
         Ipv4Header::prepare_output_packet(&mut packet).unwrap();
 
-        let header = Ipv4Header::parse_input(packet.network_packet().unwrap()).unwrap();
+        let header = Ipv4Header::parse_input(packet.as_slice()).unwrap();
         assert_eq!(header.protocol(), PROTOCOL_ICMP);
     }
 

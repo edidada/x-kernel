@@ -20,6 +20,7 @@ pub use loopback::*;
 use crate::{
     buf::PacketBuf,
     ip::{IpAddress, Ipv4Cidr},
+    rx::RxPacket,
 };
 
 pub(crate) const LINK_FLAG_UP: u32 = 1 << 0;
@@ -147,7 +148,7 @@ pub trait NetDevice: Send + Sync {
     }
 
     /// Polls one received packet from the device.
-    fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> Option<PacketBuf>;
+    fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> Option<RxPacket>;
 
     /// Returns whether the device has RX work available without waiting.
     fn has_rx_work(&self) -> bool;

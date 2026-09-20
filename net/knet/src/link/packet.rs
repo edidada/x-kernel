@@ -23,13 +23,13 @@ use ksync::{Mutex, RwLock};
 use crate::{
     ConnectOptions, RecvFlags, RecvOptions, SERVICE, SendOptions, Shutdown, SocketAddrEx,
     SocketOps,
-    buf::{PacketBuf, PacketType},
     device::{ARPHRD_ETHER, LinkSendSnapshot},
     general::GeneralOptions,
     options::{
         Configurable, GetSocketOption, OptionHandled, PacketMembership, PacketStatistics,
         SetSocketOption,
     },
+    rx::{PacketType, RxPacket},
     service::Service,
     wire::{ETHERNET_HEADER_LEN, EtherType, EthernetFrameRef, MacAddress},
 };
@@ -482,7 +482,7 @@ pub(crate) fn publish_link_frame(ifindex: i32, frame: &[u8], local_addr: [u8; 6]
     );
 }
 
-pub(crate) fn publish_link_packet(packet: &PacketBuf, src_addr: MacAddress, protocol: EtherType) {
+pub(crate) fn publish_link_packet(packet: &RxPacket, src_addr: MacAddress, protocol: EtherType) {
     let active_sockets = PACKET_HANDLERS.active_sockets();
     if active_sockets.is_empty() {
         return;
@@ -490,7 +490,7 @@ pub(crate) fn publish_link_packet(packet: &PacketBuf, src_addr: MacAddress, prot
 
     publish_frame(
         active_sockets,
-        packet.ifindex(),
+        packet.ingress_ifindex(),
         packet.data(),
         packet_addr_from_packet(packet, src_addr.octets(), protocol),
     );
@@ -600,7 +600,7 @@ fn packet_addr_from_frame(
 }
 
 fn packet_addr_from_packet(
-    packet: &PacketBuf,
+    packet: &RxPacket,
     src_addr: [u8; 6],
     protocol: EtherType,
 ) -> PacketAddr {
@@ -608,7 +608,7 @@ fn packet_addr_from_packet(
     addr[..src_addr.len()].copy_from_slice(&src_addr);
     PacketAddr {
         protocol: u16::from(protocol).to_be(),
-        ifindex: packet.ifindex(),
+        ifindex: packet.ingress_ifindex(),
         hatype: ARPHRD_ETHER,
         pkttype: packet_type_to_packet_addr(packet.packet_type()),
         addr_len: src_addr.len() as u8,

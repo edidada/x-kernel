@@ -11,7 +11,7 @@ use super::{
     pcb::PreparedUdpPacket,
     registry,
 };
-use crate::{buf::PacketBuf, ipv4};
+use crate::{ipv4, rx::RxPacket};
 
 /// Result of UDP input delivery.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -23,12 +23,13 @@ pub(crate) enum InputDisposition {
 /// Validates an IPv4 UDP packet and returns an owned protocol-layer view.
 ///
 /// This function must run in task context. Loopback prepares packets before
-/// disabling BH; ordinary ingress is already processed by a task. The existing
-/// reference-counted `PacketBuf` is retained without another allocation.
+/// disabling BH; ordinary ingress is already processed by a task. The receive
+/// context stays attached so softirq delivery can match the ingress interface
+/// and later requeue an unmatched packet without re-parsing it.
 pub(crate) fn prepare_ipv4_packet(
     header: ipv4::Ipv4Header,
-    packet: PacketBuf,
-) -> Result<PreparedUdpPacket, PacketBuf> {
+    packet: RxPacket,
+) -> Result<PreparedUdpPacket, RxPacket> {
     debug_assert!(
         !kirq::context::is_in_interrupt_context(),
         "prepare_ipv4_packet requires task context"
@@ -55,7 +56,7 @@ pub(crate) fn deliver_ipv4_packet(
     let Some(pcb) = registry::lookup_udp_pcb_on_device(
         packet.local_addr(),
         packet.remote_addr(),
-        packet.packet().ifindex(),
+        packet.rx_packet().ingress_ifindex(),
     ) else {
         return (InputDisposition::NoSocket, Some(packet));
     };

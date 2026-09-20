@@ -8,11 +8,11 @@ use alloc::collections::VecDeque;
 
 use kpoll::{PollContext, PollRegisterError, PollSet};
 
-use crate::buf::PacketBuf;
+use crate::tx::TxPacket;
 
 /// Owns queued packets and capacity registrations under the enclosing I/O lock.
 pub(crate) struct DataTxQueue {
-    packets: VecDeque<PacketBuf>,
+    packets: VecDeque<TxPacket>,
     capacity: usize,
     capacity_poll: PollSet,
 }
@@ -42,7 +42,7 @@ impl DataTxQueue {
         self.capacity.saturating_sub(self.packets.len())
     }
 
-    pub(crate) fn try_push(&mut self, packet: PacketBuf) -> Result<(), PacketBuf> {
+    pub(crate) fn try_push(&mut self, packet: TxPacket) -> Result<(), TxPacket> {
         if self.is_full() {
             return Err(packet);
         }
@@ -54,7 +54,7 @@ impl DataTxQueue {
     /// Returns the unadvanced iterator when the complete batch does not fit.
     pub(crate) fn try_extend<I>(&mut self, packets: I) -> Result<(), I>
     where
-        I: ExactSizeIterator<Item = PacketBuf>,
+        I: ExactSizeIterator<Item = TxPacket>,
     {
         if !self.can_push(packets.len()) {
             return Err(packets);
@@ -65,7 +65,7 @@ impl DataTxQueue {
     }
 
     /// Removes a packet; the caller must notify capacity waiters after unlocking.
-    pub(crate) fn pop_front(&mut self) -> Option<PacketBuf> {
+    pub(crate) fn pop_front(&mut self) -> Option<TxPacket> {
         self.packets.pop_front()
     }
 
@@ -92,12 +92,11 @@ mod tests {
     use unittest::{assert, assert_eq, def_test};
 
     use super::*;
-    use crate::buf::PacketOwner;
+    use crate::buf::PacketBuf;
 
     #[def_test]
     fn data_tx_queue_preserves_rejected_packets_and_enforces_capacity() {
-        let packet_fn =
-            |marker| PacketBuf::from_ip_packet_vec(1, vec![marker], PacketOwner::Ipv4Stack);
+        let packet_fn = |marker| TxPacket::new(PacketBuf::new(vec![marker]), Some(marker.into()));
         let mut queue = DataTxQueue::with_capacity(2);
         assert!(queue.try_push(packet_fn(0)).is_ok());
         assert!(!queue.can_push(usize::MAX));
@@ -115,7 +114,8 @@ mod tests {
         assert!(rejected[1].shares_storage_with(&second));
 
         let queued = queue.pop_front().unwrap();
-        assert_eq!(queued.network_packet(), Some(&[0][..]));
+        assert_eq!(queued.packet().as_slice(), &[0]);
+        assert_eq!(queued.egress_ifindex(), Some(0));
         assert!(queue.try_extend(rejected.into_iter()).is_ok());
         assert!(queue.is_full());
         let extra = packet_fn(3);

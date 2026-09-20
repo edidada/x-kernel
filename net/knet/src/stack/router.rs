@@ -22,13 +22,15 @@ pub(crate) use crate::netlink::{
     RTPROT_KERNEL as ROUTE_PROTOCOL_KERNEL,
 };
 use crate::{
-    buf::{PacketBuf, PacketType},
+    buf::PacketBuf,
     consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
     device::{
         LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice,
     },
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
     runtime::tx_queue::DataTxQueue,
+    rx::RxPacket,
+    tx::TxPacket,
 };
 
 const CONTROL_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
@@ -275,7 +277,7 @@ impl RouteTable {
 }
 
 pub struct Router {
-    rx_queue: VecDeque<PacketBuf>,
+    rx_queue: VecDeque<RxPacket>,
     control_tx_queue: VecDeque<PacketBuf>,
     data_tx_queue: DataTxQueue,
     next_rx_device: usize,
@@ -392,12 +394,13 @@ impl Router {
             return Err(KError::WouldBlock);
         }
 
-        self.data_tx_queue.extend(
-            packets
-                .into_iter()
-                .map(|packet| PacketBuf::new(packet, oif, PacketType::Host, Some(0))),
-        );
-        Ok(())
+        self.data_tx_queue
+            .try_extend(
+                packets
+                    .into_iter()
+                    .map(|packet| TxPacket::new(PacketBuf::new(packet), bound_egress_ifindex(oif))),
+            )
+            .map_err(|_| KError::WouldBlock)
     }
 
     /// Returns whether `dst` is routed through a loopback device.
@@ -424,7 +427,7 @@ impl Router {
     ) -> KResult {
         let packets = self.fragment_ipv4_packet_for_output(packet)?;
         for packet in packets {
-            let buf = PacketBuf::new(packet, 0, PacketType::Host, Some(0));
+            let buf = TxPacket::new(PacketBuf::new(packet), None);
             // RX-ready hint for the poller, not send success. This path is
             // not the poller; a dropped loopback packet is still a successful
             // xmit, as documented above.
@@ -990,7 +993,7 @@ impl Router {
         &mut self,
         timestamp: MonotonicInstant,
         budget: usize,
-        packets: &mut Vec<PacketBuf>,
+        packets: &mut Vec<RxPacket>,
     ) -> RxDrain {
         packets.clear();
         if budget == 0 || self.devices.is_empty() {
@@ -1037,7 +1040,7 @@ impl Router {
         }
     }
 
-    pub fn enqueue_ingress_packets(&mut self, packets: &mut Vec<PacketBuf>) {
+    pub fn enqueue_ingress_packets(&mut self, packets: &mut Vec<RxPacket>) {
         debug_assert!(packets.len() <= self.ingress_capacity());
         self.rx_queue.extend(packets.drain(..));
     }
@@ -1075,9 +1078,10 @@ impl Router {
                 break;
             };
             work_done += 1;
-            let Some(ip_packet) = packet.network_packet() else {
+            let ip_packet = packet.packet().as_slice();
+            if ip_packet.is_empty() {
                 continue;
-            };
+            }
             match ipv4::ip_version(ip_packet) {
                 Some(4) => {
                     poll_next |= self.dispatch_ipv4_packet(packet, timestamp);
@@ -1098,7 +1102,7 @@ impl Router {
                                 dev_index as i32 + 1,
                                 dst_addr,
                                 src_addr,
-                                packet.clone(),
+                                packet.packet().clone(),
                                 timestamp,
                             );
                         }
@@ -1115,7 +1119,7 @@ impl Router {
                             rule.dev as i32 + 1,
                             next_hop,
                             src_addr,
-                            packet,
+                            packet.into_packet(),
                             timestamp,
                         );
                     }
@@ -1131,7 +1135,9 @@ impl Router {
     /// Returns whether the send made RX ready, which [`Self::dispatch_budgeted`]
     /// uses as its `poll_next` hint. Ethernet TX and dropped packets return
     /// `false`.
-    fn dispatch_ipv4_packet(&mut self, mut packet: PacketBuf, timestamp: MonotonicInstant) -> bool {
+    fn dispatch_ipv4_packet(&mut self, packet: TxPacket, timestamp: MonotonicInstant) -> bool {
+        let bound_if = packet.egress_ifindex();
+        let mut packet = packet.into_packet();
         let header = match Ipv4Header::prepare_output_packet(&mut packet) {
             Ok(header) => header,
             Err(Ipv4Error::Malformed | Ipv4Error::BadChecksum) => return false,
@@ -1145,7 +1151,6 @@ impl Router {
                 return false;
             }
 
-            let bound_if = packet.ifindex();
             let device_count = self.devices.len();
             let Some((last_device, preceding_devices)) = self.devices.split_last_mut() else {
                 return false;
@@ -1154,14 +1159,14 @@ impl Router {
             let mut poll_next = false;
             for (dev_index, dev) in preceding_devices.iter_mut().enumerate() {
                 let ifindex = dev_index as i32 + 1;
-                if bound_if != 0 && bound_if != ifindex {
+                if bound_if.is_some_and(|bound_if| bound_if != ifindex) {
                     continue;
                 }
                 poll_next |=
                     dev.send_ip_packet(ifindex, dst_addr, src_addr, packet.clone(), timestamp);
             }
             let last_ifindex = device_count as i32;
-            if bound_if == 0 || bound_if == last_ifindex {
+            if bound_if.is_none_or(|bound_if| bound_if == last_ifindex) {
                 poll_next |=
                     last_device.send_ip_packet(last_ifindex, dst_addr, src_addr, packet, timestamp);
             }
@@ -1172,8 +1177,9 @@ impl Router {
             warn!("No route found for destination: {}", dst_addr);
             return false;
         };
-        let bound_if = packet.ifindex();
-        if bound_if != 0 && bound_if != rule.dev as i32 + 1 {
+        if let Some(bound_if) = bound_if
+            && bound_if != rule.dev as i32 + 1
+        {
             warn!(
                 "Dropping IPv4 packet bound to ifindex {bound_if} via device {}",
                 rule.dev as i32 + 1
@@ -1227,13 +1233,14 @@ impl Router {
         if self.control_tx_queue.len() >= CONTROL_TX_QUEUE_SIZE {
             return Err(KError::WouldBlock);
         }
-        self.control_tx_queue.push_back(tx_packet_buf(packet));
+        self.control_tx_queue.push_back(PacketBuf::new(packet));
         Ok(())
     }
 
-    fn pop_tx_packet(&mut self) -> Option<PacketBuf> {
+    fn pop_tx_packet(&mut self) -> Option<TxPacket> {
         self.control_tx_queue
             .pop_front()
+            .map(|packet| TxPacket::new(packet, None))
             .or_else(|| self.data_tx_queue.pop_front())
     }
 
@@ -1272,8 +1279,12 @@ fn same_route_rule(lhs: Rule, rhs: Rule) -> bool {
         && lhs.preferred_source() == rhs.preferred_source()
 }
 
-fn tx_packet_buf(packet: Vec<u8>) -> PacketBuf {
-    PacketBuf::new(packet, 0, PacketType::Host, Some(0))
+/// Maps the socket's bound output interface to its routing constraint.
+///
+/// `SO_BINDTODEVICE` reports `0` for an unbound socket; any other value must
+/// match the device selected by routing.
+fn bound_egress_ifindex(oif: i32) -> Option<i32> {
+    (oif != 0).then_some(oif)
 }
 
 #[cfg(unittest)]
@@ -1293,7 +1304,7 @@ mod tests {
     fn router_with_ready_loopback_packet() -> Router {
         let mut router = Router::new();
         let loopback = router.add_device(Box::new(LoopbackDevice::new()));
-        let packet = PacketBuf::new(vec![0x45, 0, 0, 20], 1, PacketType::Host, Some(0));
+        let packet = PacketBuf::new(vec![0x45, 0, 0, 20]);
         let _ = router.devices[loopback].send_ip_packet(
             1,
             IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)),
@@ -1331,7 +1342,7 @@ mod tests {
         let mut router = Router::new();
         router
             .control_tx_queue
-            .push_back(tx_packet_buf(vec![0; 20]));
+            .push_back(PacketBuf::new(vec![0; 20]));
         let capacity_before = router.available_tx_packet_slots();
 
         let (work_done, _) = router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1);
@@ -1343,12 +1354,10 @@ mod tests {
     #[def_test]
     fn data_dispatch_frees_data_tx_capacity() {
         let mut router = Router::new();
-        assert!(
-            router
-                .data_tx_queue
-                .try_push(tx_packet_buf(vec![0; 20]))
-                .is_ok()
-        );
+        router
+            .data_tx_queue
+            .try_push(TxPacket::new(PacketBuf::new(vec![0; 20]), None))
+            .unwrap();
         let capacity_before = router.available_tx_packet_slots();
 
         let (work_done, _) = router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1);
@@ -1602,13 +1611,16 @@ impl smoltcp::phy::TxToken for TxToken<'_> {
     {
         let mut ip_packet = vec![0u8; len];
         let result = f(&mut ip_packet);
-        self.0
-            .push_back(PacketBuf::new(ip_packet, 0, PacketType::Host, Some(0)));
+        assert!(
+            self.0
+                .try_push(TxPacket::new(PacketBuf::new(ip_packet), None))
+                .is_ok()
+        );
         result
     }
 }
 
-pub struct RxToken(PacketBuf);
+pub struct RxToken(RxPacket);
 
 impl smoltcp::phy::RxToken for RxToken {
     fn consume<R, F>(self, f: F) -> R

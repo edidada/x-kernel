@@ -2,110 +2,66 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Packet buffer owned by the in-kernel network stack.
+//! Shared byte storage with independently owned views.
 
 use alloc::{sync::Arc, vec::Vec};
 use core::ops::Range;
 
-/// Link-layer packet type used by packet sockets and link input.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PacketType {
-    Host,
-    Broadcast,
-    Multicast,
-    OtherHost,
-}
-
-/// A reference-counted packet buffer with generic packet metadata.
+/// A byte view whose bounds can change without copying shared storage.
 #[derive(Clone, Debug)]
 pub(crate) struct PacketBuf {
-    inner: Arc<PacketBufInner>,
+    storage: Arc<PacketStorage>,
+    head: usize,
+    tail: usize,
 }
 
 #[derive(Clone, Debug)]
-struct PacketBufInner {
+struct PacketStorage {
     data: Vec<u8>,
-    // Reserved for packet headroom and future pull/push operations.
-    head: usize,
-    tail: usize,
-    ifindex: i32,
-    packet_type: PacketType,
-    network_offset: Option<usize>,
 }
 
 impl PacketBuf {
-    /// Creates a buffer from owned bytes and layer-derived packet metadata.
-    ///
-    /// `network_offset` is measured from the start of `data` and must not
-    /// exceed its length.
-    pub(crate) fn new(
-        data: Vec<u8>,
-        ifindex: i32,
-        packet_type: PacketType,
-        network_offset: Option<usize>,
-    ) -> Self {
+    /// Creates a view over newly owned bytes.
+    pub(crate) fn new(data: Vec<u8>) -> Self {
         let tail = data.len();
-        debug_assert!(network_offset.is_none_or(|offset| offset <= tail));
-
         Self {
-            inner: Arc::new(PacketBufInner {
-                data,
-                head: 0,
-                tail,
-                ifindex,
-                packet_type,
-                network_offset,
-            }),
+            storage: Arc::new(PacketStorage { data }),
+            head: 0,
+            tail,
         }
     }
 
-    pub(crate) fn ifindex(&self) -> i32 {
-        self.inner.ifindex
+    /// Returns the number of visible bytes.
+    pub(crate) fn len(&self) -> usize {
+        self.tail - self.head
     }
 
-    /// Updates the network interface index using copy-on-write when the packet is shared.
-    pub(crate) fn set_ifindex(&mut self, ifindex: i32) {
-        Arc::make_mut(&mut self.inner).ifindex = ifindex;
+    /// Returns the visible bytes.
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        &self.storage.data[self.head..self.tail]
     }
 
-    pub(crate) fn packet_type(&self) -> PacketType {
-        self.inner.packet_type
+    /// Returns writable bytes, copying the backing storage only when shared.
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut Arc::make_mut(&mut self.storage).data[self.head..self.tail]
     }
 
-    pub(crate) fn data(&self) -> &[u8] {
-        &self.inner.data[self.data_range()]
-    }
-
-    pub(crate) fn network_packet(&self) -> Option<&[u8]> {
-        let offset = self.inner.network_offset?;
-        self.inner.data.get(offset..self.inner.tail)
-    }
-
-    pub(crate) fn network_packet_mut(&mut self) -> Option<&mut [u8]> {
-        let offset = self.inner.network_offset?;
-        let inner = Arc::make_mut(&mut self.inner);
-        inner.data.get_mut(offset..inner.tail)
-    }
-
-    /// Sets the valid network packet length within the backing storage.
-    pub(crate) fn truncate_network_packet(&mut self, len: usize) -> Option<()> {
-        let offset = self.inner.network_offset?;
-        let tail = offset.checked_add(len)?;
-        if tail > self.inner.data.len() {
+    /// Restricts this view to a range relative to its current start.
+    ///
+    /// Returns `None` for a reversed or out-of-bounds range, leaving the view
+    /// unchanged. Empty ranges are valid. Shared bytes are never copied.
+    pub(crate) fn trim(&mut self, range: Range<usize>) -> Option<()> {
+        if range.start > range.end || range.end > self.len() {
             return None;
         }
-        let inner = Arc::make_mut(&mut self.inner);
-        inner.tail = tail;
+        self.tail = self.head + range.end;
+        self.head += range.start;
         Some(())
     }
 
     #[cfg(unittest)]
     pub(crate) fn shares_storage_with(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.inner, &other.inner)
-    }
-
-    fn data_range(&self) -> Range<usize> {
-        self.inner.head..self.inner.tail
+        Arc::ptr_eq(&self.storage, &other.storage)
     }
 }
 
@@ -118,32 +74,35 @@ mod tests {
     use super::*;
 
     #[def_test]
-    fn test_network_packet_view() {
-        let data = [1, 2, 3, 4];
-        for offset in [None, Some(0), Some(2), Some(data.len())] {
-            let packet = PacketBuf::new(data.to_vec(), 3, PacketType::Multicast, offset);
+    fn trimming_a_view_keeps_shared_bytes_and_checks_bounds() {
+        let packet = PacketBuf::new(vec![1, 2, 3, 4]);
+        let mut view = packet.clone();
+        assert_eq!(view.trim(1..3), Some(()));
+        assert_eq!(view.as_slice(), &[2, 3]);
+        assert_eq!(packet.as_slice(), &[1, 2, 3, 4]);
+        assert!(view.shares_storage_with(&packet));
 
-            assert_eq!(packet.ifindex(), 3);
-            assert_eq!(packet.packet_type(), PacketType::Multicast);
-            assert_eq!(packet.data(), data);
-            assert_eq!(
-                packet.network_packet(),
-                offset.map(|offset| &data[offset..])
-            );
+        for range in [Range { start: 2, end: 1 }, 0..3, 0..usize::MAX] {
+            assert_eq!(view.trim(range), None);
+            assert_eq!(view.as_slice(), &[2, 3]);
+            assert!(view.shares_storage_with(&packet));
         }
+        assert_eq!(view.trim(1..2), Some(()));
+        assert_eq!(view.as_slice(), &[3]);
+        assert_eq!(view.trim(1..1), Some(()));
+        assert_eq!(view.len(), 0);
+        assert!(view.shares_storage_with(&packet));
     }
 
     #[def_test]
-    fn test_packet_clone_uses_copy_on_write() {
-        let packet = PacketBuf::new(vec![0x45, 0, 0, 20], 1, PacketType::Host, Some(0));
-        let mut copy = packet.clone();
-
-        assert!(packet.shares_storage_with(&copy));
-
-        copy.network_packet_mut().unwrap()[0] = 0x60;
-
-        assert!(!packet.shares_storage_with(&copy));
-        assert_eq!(packet.network_packet().unwrap()[0], 0x45);
-        assert_eq!(copy.network_packet().unwrap()[0], 0x60);
+    fn writing_a_shared_view_copies_only_at_byte_mutation() {
+        let packet = PacketBuf::new(vec![1, 2, 3, 4]);
+        let mut view = packet.clone();
+        view.trim(1..3).unwrap();
+        assert!(view.shares_storage_with(&packet));
+        view.as_mut_slice()[0] = 9;
+        assert!(!view.shares_storage_with(&packet));
+        assert_eq!(packet.as_slice(), &[1, 2, 3, 4]);
+        assert_eq!(view.as_slice(), &[9, 3]);
     }
 }
