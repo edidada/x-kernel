@@ -133,22 +133,6 @@ fn path_mount(
     let superblock_flags = superblock_flags(flags);
     let namespace = process.mnt_ns()?;
 
-    // KVFS has no shared propagation groups, so `MS_PRIVATE` and `MS_SLAVE`
-    // are behaviorally identical; each is validated and recorded per-mount.
-    // Descendants are also covered by construction, so an accompanying
-    // `MS_REC` requires no additional traversal.
-    if flags & linux_raw_sys::general::MS_PRIVATE != 0 {
-        validate_propagation_flags(flags, linux_raw_sys::general::MS_PRIVATE)?;
-        namespace.make_mount_private(target)?;
-        return Ok(());
-    }
-
-    if flags & linux_raw_sys::general::MS_SLAVE != 0 {
-        validate_propagation_flags(flags, linux_raw_sys::general::MS_SLAVE)?;
-        namespace.make_mount_slave(target)?;
-        return Ok(());
-    }
-
     if flags & (linux_raw_sys::general::MS_REMOUNT | linux_raw_sys::general::MS_BIND)
         == (linux_raw_sys::general::MS_REMOUNT | linux_raw_sys::general::MS_BIND)
     {
@@ -173,9 +157,28 @@ fn path_mount(
     let recursive = flags & linux_raw_sys::general::MS_REC != 0;
     if flags & linux_raw_sys::general::MS_BIND != 0 {
         // Linux `do_loopback()` clones the source mount flags; ordinary flags
-        // in an initial bind request are ignored. `MS_REMOUNT | MS_BIND` is the
-        // operation that changes the cloned mount's per-mount flags.
+        // in an initial bind request are ignored, including the propagation
+        // bits. `MS_REMOUNT | MS_BIND` is the operation that changes the
+        // cloned mount's per-mount flags.
         return do_loopback(process, cred, &namespace, target, dev_name, recursive);
+    }
+
+    // KVFS has no shared propagation groups, so `MS_PRIVATE` and `MS_SLAVE`
+    // are behaviorally identical; each is validated and recorded per-mount.
+    // Descendants are also covered by construction, so an accompanying
+    // `MS_REC` requires no additional traversal. Linux dispatches these after
+    // REMOUNT/BIND, so combinations like `MS_BIND | MS_PRIVATE` perform the
+    // bind and ignore the propagation bit.
+    if flags & linux_raw_sys::general::MS_PRIVATE != 0 {
+        validate_propagation_flags(flags, linux_raw_sys::general::MS_PRIVATE)?;
+        namespace.make_mount_private(target)?;
+        return Ok(());
+    }
+
+    if flags & linux_raw_sys::general::MS_SLAVE != 0 {
+        validate_propagation_flags(flags, linux_raw_sys::general::MS_SLAVE)?;
+        namespace.make_mount_slave(target)?;
+        return Ok(());
     }
 
     if recursive {
@@ -229,9 +232,11 @@ fn do_loopback(
     let old_path = lookup_mount_path(process, old_name, cred)?;
     // Linux `do_loopback()` clones the whole source subtree for a recursive
     // bind. KVFS clones a single mount, which only matches Linux's result
-    // while the source subtree has no mounts attached; reject the request
-    // otherwise instead of silently flattening the cloned tree.
-    if recursive && old_path.has_child_mount() {
+    // while the source subtree has no mounts attached anywhere below it;
+    // reject the request otherwise instead of silently flattening the cloned
+    // tree. `Path::has_child_mount()` only sees a mount rooted exactly at the
+    // bind source, so consult the mount's full child list here.
+    if recursive && !old_path.mount().children().is_empty() {
         return Err(KError::InvalidInput);
     }
     namespace.attach_bind(&old_path, mountpoint)?;

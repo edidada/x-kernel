@@ -136,7 +136,13 @@ registered wakeups rather than polling or a timer.
   guarantee.
 
 - `PR_SET_PDEATHSIG` records the signal on the process identity but does not
-  yet deliver it at parent-death reparenting.
+  yet deliver it at parent-death reparenting, and — unlike Linux — does not
+  clear it when an exec changes the credentials.
+- `waitid` validates the option set and reports exits only: `WSTOPPED`/
+  `WCONTINUED` are accepted but stop/continue reports are not produced,
+  `rusage` is not populated, a `P_PIDFD` wait keys on the pid recorded when
+  the descriptor was created (pid reuse after close is not detected), and
+  pidfd `O_NONBLOCK` is not honored as `WNOHANG`.
 
 ## Audit checklist
 
