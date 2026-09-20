@@ -124,8 +124,9 @@ pub fn sys_prctl(
             write_vm_mem(arg2 as _, &signal.to_ne_bytes())?;
         }
         PR_SET_PDEATHSIG => {
-            // Linux `valid_signal(arg2)`: 0 clears, otherwise 1..=MAX_SIGNALS-1.
-            if arg2 >= MAX_SIGNALS {
+            // Linux `valid_signal(arg2)`: 0 clears, otherwise 1..=_NSIG (64,
+            // including SIGRTMAX).
+            if arg2 > MAX_SIGNALS {
                 return Err(KError::InvalidInput);
             }
             kprocess::current_user_process().set_pdeath_signal(arg2 as u32);
@@ -299,12 +300,14 @@ mod tests {
 
     #[def_test(user, serial)]
     fn prctl_set_pdeath_sig_validates_signal_range() {
-        // Linux `valid_signal`: 0 (clear) and valid signals are accepted.
+        // Linux `valid_signal`: 0 (clear) and signals 1..=_NSIG (64, including
+        // SIGRTMAX) are accepted.
         assert_eq!(sys_prctl(PR_SET_PDEATHSIG, 0, 0, 0, 0), Ok(0));
         assert_eq!(sys_prctl(PR_SET_PDEATHSIG, 9, 0, 0, 0), Ok(0));
+        assert_eq!(sys_prctl(PR_SET_PDEATHSIG, 64, 0, 0, 0), Ok(0));
         // Out-of-range signals are rejected with EINVAL.
         assert_eq!(
-            sys_prctl(PR_SET_PDEATHSIG, 64, 0, 0, 0),
+            sys_prctl(PR_SET_PDEATHSIG, 65, 0, 0, 0),
             Err(KError::InvalidInput)
         );
     }

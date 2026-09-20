@@ -75,7 +75,15 @@ impl ProcessPosixState {
         cmdline: Arc<Vec<String>>,
         exe_file: Option<Arc<kvfs::VfsFile>>,
     ) {
-        *self.exec_metadata.write() = ExecMetadata::new(exe_path, cmdline, exe_file);
+        // Replace first and drop the old snapshot outside the write lock: the
+        // replaced `ExecMetadata` owns an `Arc<VfsFile>` whose release path can
+        // take inode locks, and dropping it while the metadata lock is held
+        // would invert the lock order against readers of `/proc/<pid>/exe`.
+        let replaced = core::mem::replace(
+            &mut *self.exec_metadata.write(),
+            ExecMetadata::new(exe_path, cmdline, exe_file),
+        );
+        drop(replaced);
     }
 
     /// Returns the process OOM score adjustment.

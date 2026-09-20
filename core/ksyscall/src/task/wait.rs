@@ -265,8 +265,11 @@ fn wait_on_matching_children(
 /// Supports the full `idtype_t` set (`P_ALL`, `P_PID`, `P_PGID`, `P_PIDFD`).
 /// `P_PIDFD` resolves `id` as a pidfd file descriptor and waits on its target
 /// process. `WNOWAIT`/`WNOHANG`/`WEXITED` are honored by the shared wait
-/// machinery. The optional `rusage` argument is accepted but not populated
-/// (runc's `isWaitable` probe passes `NULL`).
+/// machinery; `WSTOPPED`/`WCONTINUED` are accepted for option validation but
+/// stop/continue reports are not produced yet, so the wait only completes on
+/// exit. The optional `rusage` argument is accepted but not populated (runc's
+/// `isWaitable` probe passes `NULL`). On success returns 0 with the child
+/// status in `siginfo`, matching Linux.
 pub fn sys_waitid(
     idtype: u32,
     id: u32,
@@ -274,15 +277,42 @@ pub fn sys_waitid(
     options: u32,
     _rusage: UserConstPtr<core::ffi::c_void>,
 ) -> KResult<isize> {
+    // Linux exit.c: reject unknown bits and a request that names no report
+    // class at all (`WSTOPPED` shares the `WUNTRACED` bit).
+    const WAITID_KNOWN: u32 = WNOHANG | WUNTRACED | WEXITED | WCONTINUED | WNOWAIT;
+    if options & !WAITID_KNOWN != 0 || options & (WEXITED | WUNTRACED | WCONTINUED) == 0 {
+        return Err(KError::from(LinuxError::EINVAL));
+    }
+
     // Linux `idtype_t`: P_ALL=0, P_PID=1, P_PGID=2, P_PIDFD=3.
     let selector = match idtype {
         0 => WaitPid::Any,
-        1 => WaitPid::Pid(id as _),
-        2 => WaitPid::Pgid(id as _),
+        1 => {
+            if id == 0 {
+                return Err(KError::from(LinuxError::EINVAL));
+            }
+            WaitPid::Pid(id as _)
+        }
+        2 => {
+            if id == 0 {
+                // Linux: `P_PGID` with id 0 waits on the caller's own group.
+                let current_thread = kprocess::current_user_thread();
+                WaitPid::Pgid(current_thread.process().group().pgid() as _)
+            } else {
+                WaitPid::Pgid(id as _)
+            }
+        }
         3 => {
             // P_PIDFD: `id` is a pidfd file descriptor referring to a process.
-            let file = kprocess::current_resources().get_file(id as i32)?;
-            let pidfd = kprocess::PidFd::from_file(&file)?;
+            // Linux: a negative or closed descriptor is `EBADF`, a valid
+            // descriptor that is not a pidfd is `EINVAL`.
+            let fd = id as i32;
+            if fd < 0 {
+                return Err(KError::from(LinuxError::EINVAL));
+            }
+            let file = kprocess::current_resources().get_file(fd)?;
+            let pidfd =
+                kprocess::PidFd::from_file(&file).map_err(|_| KError::from(LinuxError::EINVAL))?;
             WaitPid::Pid(pidfd.process().pid())
         }
         _ => return Err(KError::from(LinuxError::EINVAL)),
@@ -310,6 +340,7 @@ pub fn sys_waitid(
         siginfo.write_vm(info.0)?;
         Ok(())
     })
+    .map(|_pid| 0)
 }
 
 pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResult<isize> {

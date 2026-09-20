@@ -218,13 +218,15 @@ impl Process {
         group.exit_code = 0;
     }
 
-    /// The signal delivered to the parent's `wait` when this process's parent
-    /// dies first (`prctl(PR_SET_PDEATHSIG)`); zero when unset.
+    /// The parent-death signal recorded by `prctl(PR_SET_PDEATHSIG)` — the
+    /// signal this process should receive when its parent dies first. Zero
+    /// when unset. Storage only: the parent-exit delivery path is not wired
+    /// up yet (see `core/ksyscall/docs/security.md`).
     pub fn pdeath_signal(&self) -> u32 {
         self.pdeath_signal.load(Ordering::Relaxed)
     }
 
-    /// Sets the parent-death signal delivered to the parent's `wait`.
+    /// Records the parent-death signal for this process.
     pub fn set_pdeath_signal(&self, signo: u32) {
         self.pdeath_signal.store(signo, Ordering::Relaxed);
     }
