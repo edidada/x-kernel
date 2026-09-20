@@ -315,7 +315,7 @@ mod tests {
         state
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev,
-                addr: Ipv4Cidr::new(src, 24),
+                addr: Ipv4Cidr::new(src, 24).unwrap(),
                 scope: ROUTE_SCOPE_UNIVERSE,
                 broadcast: None,
             })
@@ -392,7 +392,7 @@ mod tests {
         state
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev: lo,
-                addr: Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8),
+                addr: Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8).unwrap(),
                 scope: ROUTE_SCOPE_HOST,
                 broadcast: None,
             })
@@ -406,13 +406,13 @@ mod tests {
         state
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev: eth,
-                addr: Ipv4Cidr::new(eth_addr, 24),
+                addr: Ipv4Cidr::new(eth_addr, 24).unwrap(),
                 scope: ROUTE_SCOPE_UNIVERSE,
                 broadcast: None,
             })
             .unwrap();
         state.add_rule(Rule::new(
-            Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).into(),
+            Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).unwrap().into(),
             None,
             eth,
             IpAddress::Ipv4(eth_addr),

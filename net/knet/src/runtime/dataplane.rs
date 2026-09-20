@@ -375,7 +375,7 @@ mod tests {
         state
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev,
-                addr: Ipv4Cidr::new(src, 24),
+                addr: Ipv4Cidr::new(src, 24).unwrap(),
                 scope: crate::router::ROUTE_SCOPE_UNIVERSE,
                 broadcast: None,
             })
@@ -482,7 +482,7 @@ mod tests {
         state
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev: loopback,
-                addr: Ipv4Cidr::new(loopback_addr, 8),
+                addr: Ipv4Cidr::new(loopback_addr, 8).unwrap(),
                 scope: ROUTE_SCOPE_HOST,
                 broadcast: None,
             })

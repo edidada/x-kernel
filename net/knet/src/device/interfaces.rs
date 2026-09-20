@@ -415,7 +415,7 @@ impl InterfaceSet {
             .iter_mut()
             .find(|entry| entry.dev == dev)
             .ok_or(LinuxError::EADDRNOTAVAIL)?;
-        entry.addr = Ipv4Cidr::new(old.addr.address(), prefix_len);
+        entry.addr = Ipv4Cidr::new(old.addr.address(), prefix_len).ok_or(LinuxError::EINVAL)?;
         if should_recalculate_broadcast {
             entry.broadcast = None;
         } else if entry.broadcast.is_none() {

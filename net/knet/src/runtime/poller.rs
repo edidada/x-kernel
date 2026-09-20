@@ -48,6 +48,8 @@ pub(crate) struct PollProgress {
     pub rx_packets: usize,
     pub tx_packets: usize,
     pub timer_events: usize,
+    /// Whether dispatching TX increased the available data-queue capacity.
+    pub tx_capacity_changed: bool,
     /// Whether work is ready for immediate processing in another round.
     ///
     /// A future protocol timer deadline does not count as immediate work.

@@ -590,7 +590,7 @@ mod configuration_tests {
                 state
                     .add_ipv4_addr(Ipv4AddrEntry {
                         dev,
-                        addr: Ipv4Cidr::new(src, 24),
+                        addr: Ipv4Cidr::new(src, 24).unwrap(),
                         scope: ROUTE_SCOPE_UNIVERSE,
                         broadcast: None,
                     })
@@ -643,7 +643,7 @@ mod configuration_tests {
         let src = Ipv4Address::new(192, 0, 2, 1);
         let entry = Ipv4AddrEntry {
             dev,
-            addr: Ipv4Cidr::new(src, 24),
+            addr: Ipv4Cidr::new(src, 24).unwrap(),
             scope: ROUTE_SCOPE_UNIVERSE,
             broadcast: None,
         };
@@ -668,7 +668,7 @@ mod configuration_tests {
         let dev = router.add_device(Box::new(LoopbackDevice::new()));
         let entry = Ipv4AddrEntry {
             dev,
-            addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 7), 24),
+            addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 7), 24).unwrap(),
             scope: ROUTE_SCOPE_HOST,
             broadcast: None,
         };
@@ -699,7 +699,7 @@ mod configuration_tests {
         router
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev,
-                addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 7), 24),
+                addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 7), 24).unwrap(),
                 scope: ROUTE_SCOPE_HOST,
                 broadcast: None,
             })
@@ -723,7 +723,7 @@ mod configuration_tests {
             router
                 .add_ipv4_addr(Ipv4AddrEntry {
                     dev,
-                    addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, index as u8 + 1), 32),
+                    addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, index as u8 + 1), 32).unwrap(),
                     scope: ROUTE_SCOPE_HOST,
                     broadcast: None,
                 })
@@ -733,7 +733,7 @@ mod configuration_tests {
         assert_eq!(
             router.add_ipv4_addr(Ipv4AddrEntry {
                 dev,
-                addr: Ipv4Cidr::new(Ipv4Address::new(198, 51, 100, 1), 32),
+                addr: Ipv4Cidr::new(Ipv4Address::new(198, 51, 100, 1), 32).unwrap(),
                 scope: ROUTE_SCOPE_HOST,
                 broadcast: None,
             }),
@@ -747,20 +747,20 @@ mod configuration_tests {
         let dev = router.add_device(Box::new(LoopbackDevice::new()));
         let primary = Ipv4AddrEntry {
             dev,
-            addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 7), 24),
+            addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 7), 24).unwrap(),
             scope: ROUTE_SCOPE_HOST,
             broadcast: Some(Ipv4Address::new(192, 0, 2, 111)),
         };
         let secondary = Ipv4AddrEntry {
             dev,
-            addr: Ipv4Cidr::new(Ipv4Address::new(198, 51, 100, 7), 24),
+            addr: Ipv4Cidr::new(Ipv4Address::new(198, 51, 100, 7), 24).unwrap(),
             scope: ROUTE_SCOPE_HOST,
             broadcast: None,
         };
         router.add_ipv4_addr(primary).unwrap();
         router.add_ipv4_addr(secondary).unwrap();
 
-        let replacement = Ipv4Cidr::new(Ipv4Address::new(203, 0, 113, 7), 24);
+        let replacement = Ipv4Cidr::new(Ipv4Address::new(203, 0, 113, 7), 24).unwrap();
         router.set_primary_ipv4_addr(dev, replacement).unwrap();
 
         assert_eq!(router.ipv4_addr_entries().len(), 2);
@@ -776,13 +776,13 @@ mod configuration_tests {
         let dev = router.add_device(Box::new(LoopbackDevice::new()));
         let primary = Ipv4AddrEntry {
             dev,
-            addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 7), 24),
+            addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 7), 24).unwrap(),
             scope: ROUTE_SCOPE_HOST,
             broadcast: None,
         };
         let secondary = Ipv4AddrEntry {
             dev,
-            addr: Ipv4Cidr::new(Ipv4Address::new(198, 51, 100, 7), 24),
+            addr: Ipv4Cidr::new(Ipv4Address::new(198, 51, 100, 7), 24).unwrap(),
             scope: ROUTE_SCOPE_HOST,
             broadcast: None,
         };
@@ -801,14 +801,14 @@ mod configuration_tests {
         let custom_broadcast = Ipv4Address::new(192, 0, 2, 111);
         let secondary = Ipv4AddrEntry {
             dev,
-            addr: Ipv4Cidr::new(Ipv4Address::new(198, 51, 100, 7), 24),
+            addr: Ipv4Cidr::new(Ipv4Address::new(198, 51, 100, 7), 24).unwrap(),
             scope: ROUTE_SCOPE_UNIVERSE,
             broadcast: None,
         };
         router
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev,
-                addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 7), 24),
+                addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 7), 24).unwrap(),
                 scope: ROUTE_SCOPE_HOST,
                 broadcast: Some(custom_broadcast),
             })
@@ -833,7 +833,7 @@ mod configuration_tests {
         let dev = router.add_device(Box::new(LoopbackDevice::new()));
         let entry = Ipv4AddrEntry {
             dev,
-            addr: Ipv4Cidr::new(Ipv4Address::new(198, 51, 100, 7), 24),
+            addr: Ipv4Cidr::new(Ipv4Address::new(198, 51, 100, 7), 24).unwrap(),
             scope: ROUTE_SCOPE_HOST,
             broadcast: None,
         };
@@ -860,14 +860,14 @@ mod configuration_tests {
         router
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev,
-                addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 7), 24),
+                addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 7), 24).unwrap(),
                 scope: ROUTE_SCOPE_HOST,
                 broadcast: None,
             })
             .unwrap();
 
         let unreachable = Rule::new(
-            Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).into(),
+            Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).unwrap().into(),
             Some(IpAddress::Ipv4(Ipv4Address::new(198, 51, 100, 1))),
             dev,
             IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 7)),
@@ -878,7 +878,7 @@ mod configuration_tests {
         );
 
         let default = Rule::new(
-            Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).into(),
+            Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).unwrap().into(),
             Some(IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1))),
             dev,
             IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 7)),

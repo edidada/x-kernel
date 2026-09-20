@@ -423,11 +423,8 @@ impl SocketOps for TcpSocket {
                 let remote_endpoint = IpEndpoint::from(remote_addr);
                 let mut bound_endpoint = *self.bound_endpoint.lock();
                 if bound_endpoint.addr.is_none() {
-                    bound_endpoint.addr = Some(crate::ip::to_smoltcp_ip_address(
-                        crate::SERVICE.network().select_source_address(
-                            &crate::ip::from_smoltcp_ip_address(remote_endpoint.addr),
-                        )?,
-                    ));
+                    bound_endpoint.addr =
+                        Some(crate::SERVICE.select_smoltcp_source_address(remote_endpoint.addr)?);
                 }
                 if bound_endpoint.port == 0 {
                     let local_addr = bound_endpoint

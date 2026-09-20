@@ -81,7 +81,9 @@ fn init_test_state() {
         })
         .unwrap();
     state.add_rule(Rule::new(
-        crate::ip::Ipv4Cidr::new(crate::ip::Ipv4Address::UNSPECIFIED, 0).into(),
+        crate::ip::Ipv4Cidr::new(crate::ip::Ipv4Address::UNSPECIFIED, 0)
+            .unwrap()
+            .into(),
         Some(crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(
             192, 168, 1, 1,
         ))),

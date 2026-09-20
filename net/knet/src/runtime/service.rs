@@ -11,13 +11,14 @@ use khal::time::monotonic_time;
 use kpoll::{PollContext, PollRegisterError, PollSet};
 use ksync::Mutex;
 use ktime_types::{MonotonicInstant, TimeSpan};
+use smoltcp::wire::IpAddress as SmoltcpIpAddress;
 
 use super::poll_round::{PendingWork, PollRound, PollStageResult};
 use crate::{
     SOCKET_SET,
     dataplane::{DeviceRxProgress, DeviceTxProgress, NetworkDataPlane},
     io::{NetIo, RxDrain},
-    ip::IpAddress,
+    ip::{IpAddress, from_smoltcp_ip_address, to_smoltcp_ip_address},
     network::{
         ipv4::{
             ingress::{Ipv4ExpirationProgress, Ipv4Ingress},
@@ -45,11 +46,13 @@ pub(crate) struct Service {
 }
 pub(crate) struct ServiceEvents {
     poll: Arc<PollSet>,
+    tx_capacity: Arc<PollSet>,
 }
 impl ServiceEvents {
     fn new() -> Self {
         Self {
             poll: Arc::new(PollSet::new()),
+            tx_capacity: Arc::new(PollSet::new()),
         }
     }
 
@@ -68,6 +71,18 @@ impl ServiceEvents {
     pub(crate) fn notify_timer(&self) {
         self.wake();
         crate::poller::network_poller().notify(crate::poller::PollReason::Timer);
+    }
+
+    fn register_tx_capacity(
+        &self,
+        context: &mut PollContext<'_>,
+    ) -> Result<Waker, PollRegisterError> {
+        context.register(self.tx_capacity.as_ref())?;
+        Ok(Waker::from(self.tx_capacity.clone()))
+    }
+
+    fn wake_tx_capacity(&self) {
+        self.tx_capacity.wake();
     }
 }
 impl Service {
@@ -92,6 +107,15 @@ impl Service {
 
     pub(crate) fn network(&self) -> &NetworkState {
         &self.network
+    }
+
+    pub(crate) fn select_smoltcp_source_address(
+        &self,
+        dst: SmoltcpIpAddress,
+    ) -> KResult<SmoltcpIpAddress> {
+        self.network
+            .select_source_address(&from_smoltcp_ip_address(dst))
+            .map(to_smoltcp_ip_address)
     }
 
     pub(crate) fn with_io<R>(&self, use_fn: impl FnOnce(&mut NetIo) -> R) -> R {
@@ -131,12 +155,22 @@ impl Service {
         self.poll_tx(&mut round);
         self.poll_rx(&mut round);
         if self.poll_stack(&mut round) == PollStageResult::Deferred {
-            return round.into_deferred_progress();
+            let progress = round.into_deferred_progress();
+            self.notify_tx_capacity_changed(&progress);
+            return progress;
         }
         self.poll_remaining_tx(&mut round);
         self.poll_remaining_rx(&mut round);
         self.update_poll_deadline(&mut round);
-        self.finish_poll_round(round)
+        let progress = self.finish_poll_round(round);
+        self.notify_tx_capacity_changed(&progress);
+        progress
+    }
+
+    fn notify_tx_capacity_changed(&self, progress: &PollProgress) {
+        if progress.tx_capacity_changed {
+            self.events.wake_tx_capacity();
+        }
     }
 
     fn poll_ipv4_timers(&self, round: &mut PollRound) {
@@ -349,6 +383,13 @@ impl Service {
         Ok(waker)
     }
 
+    pub(crate) fn register_tx_waker(
+        &self,
+        context: &mut PollContext<'_>,
+    ) -> Result<Waker, PollRegisterError> {
+        self.events.register_tx_capacity(context)
+    }
+
     pub(crate) fn handle_timer_tick(&self) {
         let current_micros = u64::try_from(now().total_micros()).unwrap_or(0);
         let protocol_expired = self.stack.handle_timer_tick(current_micros);
@@ -472,7 +513,7 @@ pub(crate) mod tests {
         state
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev,
-                addr: Ipv4Cidr::new(src, 24),
+                addr: Ipv4Cidr::new(src, 24).unwrap(),
                 scope: ROUTE_SCOPE_UNIVERSE,
                 broadcast: None,
             })
@@ -552,7 +593,7 @@ pub(crate) mod tests {
         router
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev: loopback,
-                addr: Ipv4Cidr::new(loopback_addr, 8),
+                addr: Ipv4Cidr::new(loopback_addr, 8).unwrap(),
                 scope: ROUTE_SCOPE_HOST,
                 broadcast: None,
             })

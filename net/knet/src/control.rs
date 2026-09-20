@@ -440,7 +440,7 @@ mod tests {
         let config = NetworkConfig::lock(&service);
         let entry = Ipv4AddrEntry {
             dev: 0,
-            addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 1), 24),
+            addr: Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 1), 24).unwrap(),
             scope: ROUTE_SCOPE_UNIVERSE,
             broadcast: Some(Ipv4Address::new(192, 0, 2, 254)),
         };

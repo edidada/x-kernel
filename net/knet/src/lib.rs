@@ -85,7 +85,8 @@ pub fn init_network() {
     let state = NetworkState::new();
     let lo_dev = state.add_device(Box::new(LoopbackDevice::new()));
 
-    let lo_ip = Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8);
+    let lo_ip = Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8)
+        .expect("loopback IPv4 prefix length is valid");
     state
         .add_ipv4_addr(Ipv4AddrEntry {
             dev: lo_dev,
@@ -115,7 +116,9 @@ pub fn init_network() {
             })
             .expect("Ethernet IPv4 address must fit the interface");
         state.add_rule(Rule::new(
-            Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).into(),
+            Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0)
+                .expect("IPv4 default route prefix length is valid")
+                .into(),
             Some(IpAddress::Ipv4(
                 GATEWAY.parse().expect("Invalid gateway address"),
             )),
@@ -144,7 +147,10 @@ pub fn init_network() {
     LISTEN_TABLE.init_once(ListenTable::new());
     udp::init_udp_registry();
     poller::network_poller().start();
-    ktask::register_timer_callback(TIMER_SAMPLE_PERIOD, |_| SERVICE.handle_timer_tick());
+    ktask::register_timer_callback(
+        core::time::Duration::from_nanos(TIMER_SAMPLE_PERIOD.as_nanos_u64_saturating()),
+        |_| SERVICE.handle_timer_tick(),
+    );
 }
 
 fn subscribe_network_unregister(id: kdevice::DeviceId) {
