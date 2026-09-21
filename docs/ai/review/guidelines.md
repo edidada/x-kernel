@@ -47,7 +47,7 @@
 | 模块、可见性、import、macro、attribute | `modules-and-attributes.md` |
 | unsafe、裸指针、FFI、`MaybeUninit` | `unsafety.md` |
 | 锁、原子、wait/wake、IRQ 并发 | `concurrency.md` |
-| `Result`、panic、日志和恢复 | `error-handling-and-logging.md` |
+| `Result`、panic、错误映射和恢复 | `docs/ai/code-guidelines/errors-cn.md`、`error-handling-and-logging.md` |
 | hot path、资源生命周期和复杂度 | `performance-and-resources.md` |
 | 回归测试、commit 完整性 | `git-and-testing.md` |
 | `.S`、`global_asm!`、内联汇编 | `assembly.md` |
@@ -215,10 +215,12 @@ diff 出现内联汇编、手写底层 CPU 操作或通用数据结构/算法时
 
 检查：
 
-- 普通错误是否使用 `?` 和 typed error 传播；
-- `.unwrap()` / `.expect()` 是否会把合法运行时状态升级为 kernel panic；
-- `let _ =`、`.ok()` 或默认值是否静默吞错；
-- 有意忽略错误时是否说明原因并保留必要日志；
+- 可恢复运行时失败是否符合
+  `docs/ai/code-guidelines/errors-cn.md` 的 `CG-ERR-001`；
+- 忽略 `Result` 是否符合
+  `docs/ai/code-guidelines/errors-cn.md` 的 `CG-ERR-002`；
+- 错误映射是否符合
+  `docs/ai/code-guidelines/errors-cn.md` 的 `CG-ERR-003`；
 - 日志级别、前缀和内容是否符合 crate 惯例；
 - 热路径是否新增高频日志或昂贵格式化；
 - 错误消息是否具体并遵守项目格式。

@@ -108,7 +108,8 @@ When reviewing Rust kernel code:
    For new or moved `Mutex` / `RwLock` / spin statics, also check
    `concurrency.md` lock construction (`static_lock!` vs `::new`).
 7. Check whether syscall boundaries and current-context assumptions are explicit.
-8. Check whether `?`, typed errors, and logging levels are used appropriately.
+8. For error handling, load `docs/ai/code-guidelines/errors-cn.md`
+   and apply the matching `CG-ERR-*` rules.
 9. Check whether modules, visibility, macros, and attributes stay disciplined.
 10. Check whether the code introduces avoidable hot-path scans,
    copies, allocations, or atomics.
@@ -136,7 +137,7 @@ Before considering a code change aligned with this skill, verify:
 - visibility changes satisfy `CG-MOD-001`;
 - workspace-managed dependencies satisfy `CG-MOD-002`;
 - modules, imports, and attributes stay narrowly scoped;
-- error paths use `Result` and `?` rather than hidden panics;
+- error paths satisfy `docs/ai/code-guidelines/errors-cn.md`;
 - logging uses crate-standard prefixes and appropriate severity;
 - container choices match their access pattern; queues needing middle
   removal, stable element addresses, or IRQ-safe enqueue are not built
