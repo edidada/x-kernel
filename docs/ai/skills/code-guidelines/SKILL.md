@@ -95,7 +95,8 @@ When writing or editing Rust kernel code:
 
 When reviewing Rust kernel code:
 
-1. Check whether names reflect the real semantics and units.
+1. For naming changes, load `docs/ai/code-guidelines/naming-cn.md`
+   and apply matching `CG-NAME-*` rules.
 2. Check whether comments explain intent rather than paraphrasing code.
 3. If the patch touches `unsafe`, load
    `docs/ai/code-guidelines/unsafe-cn.md` and `unsafety.md`;
@@ -120,7 +121,7 @@ When reviewing Rust kernel code:
 
 Before considering a code change aligned with this skill, verify:
 
-- names are descriptive, accurate, and unit-aware where needed;
+- naming satisfies `docs/ai/code-guidelines/naming-cn.md`;
 - implementation comments explain intent;
 - current-context semantics are explicit where the API depends on them;
 - unsafe block proof obligations satisfy `CG-UNSAFE-001`;

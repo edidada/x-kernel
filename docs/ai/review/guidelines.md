@@ -40,7 +40,7 @@
 
 | 变更内容 | 必读主题文件 |
 |---|---|
-| 命名、函数结构、可读性 | `naming-and-structure.md` |
+| 命名、函数结构、可读性 | `docs/ai/code-guidelines/naming-cn.md`、`naming-and-structure.md` |
 | 实现注释 | `comments.md` |
 | public API、trait、参数和状态表达 | `api-design.md` |
 | syscall、用户内存、current-context | `docs/ai/code-guidelines/context-cn.md`、`boundaries-and-context.md` |
@@ -160,11 +160,7 @@ diff 出现内联汇编、手写底层 CPU 操作或通用数据结构/算法时
 
 检查：
 
-- 名称是否准确表达真实副作用和成本；
-- 类型无法表达时，名称是否包含 bytes/pages/ns 等单位；
-- boolean 是否使用 `is_`、`has_`、`can_` 等断言式命名；
-- 持有闭包/函数的变量是否符合项目 `_fn` 约定；
-- 已实际使用的参数是否仍保留误导性的 `_` 前缀；
+- 命名是否违反 `docs/ai/code-guidelines/naming-cn.md` 的 `CG-NAME-*`；
 - 函数是否混合 syscall 语义、状态管理和底层字节操作；
 - 嵌套、控制流和文件布局是否符合自顶向下阅读。
 

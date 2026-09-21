@@ -127,8 +127,7 @@ reviewing Rust kernel code.
 
 Key local rules:
 
-- Use accurate, descriptive names and encode units where the type does not.
-- Keep boolean names assertion-like, such as `is_*`, `has_*`, or `can_*`.
+- Naming must satisfy `docs/ai/code-guidelines/naming-cn.md`.
 - Comments should explain why, not restate what the code does.
 - Unsafe block proof obligations are defined by
   `docs/ai/code-guidelines/unsafe-cn.md` (`CG-UNSAFE-001`).
