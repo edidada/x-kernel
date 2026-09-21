@@ -150,21 +150,8 @@ Default workflow:
 1. Implement the code change.
 2. Review the patch against
    `docs/ai/skills/code-guidelines/SKILL.md`.
-3. Check whether the change requires documentation updates:
-   - crate-local `docs/design.md`
-   - crate-local `docs/security.md`
-   - rustdoc on touched public APIs
-   - shared skills or top-level docs if workflow or policy changed
+3. Check documentation obligations with
+   `docs/ai/skills/module-docs/SKILL.md`.
 4. Update the required documentation before final validation.
 5. Run the relevant build, lint, and test commands from
    `docs/ai/skills/build-workflow/SKILL.md`.
-
-Documentation sync is usually required when a change affects:
-
-- public API behavior or contracts;
-- module architecture, file layout, or major type roles;
-- execution-context assumptions;
-- state machines, lifecycle, or cleanup behavior;
-- `unsafe` boundaries or invariants;
-- external inputs, trust boundaries, threat model, or failure handling;
-- project workflow, commands, or agent-facing guidance.

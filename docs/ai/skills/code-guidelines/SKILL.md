@@ -17,7 +17,7 @@ standard.
 This skill covers:
 
 - naming and API shape;
-- comments, rustdoc, and module-level documentation;
+- implementation comments;
 - `unsafe` usage and safety reasoning;
 - visibility, modules, attributes, and workspace dependencies;
 - syscall and current-context boundary semantics;
@@ -31,7 +31,7 @@ This skill does not replace:
 
 - project build/run/test commands
   (`docs/ai/skills/build-workflow/SKILL.md`);
-- per-crate design and security documentation generation
+- rustdoc and per-crate design/security documentation rules
   (`docs/ai/skills/module-docs/SKILL.md`).
 
 This skill primarily targets Rust code-writing and code review.
@@ -51,7 +51,7 @@ Then load the canonical rule files and supporting topic files relevant
 to the change:
 
 - `naming-and-structure.md`
-- `comments-and-rustdoc.md`
+- `comments.md`
 - `api-design.md`
 - `boundaries-and-context.md`
 - `modules-and-attributes.md`
@@ -88,7 +88,8 @@ When writing or editing Rust kernel code:
    error propagation,
    and logging quality.
 6. If the change alters public behavior or module contracts,
-   update rustdoc and any crate-local docs that describe that behavior.
+   load `docs/ai/skills/module-docs/SKILL.md` for rustdoc and
+   crate-local documentation requirements.
 
 ## Review Workflow
 
@@ -117,7 +118,7 @@ When reviewing Rust kernel code:
 Before considering a code change aligned with this skill, verify:
 
 - names are descriptive, accurate, and unit-aware where needed;
-- comments and rustdoc explain intent and contracts;
+- implementation comments explain intent;
 - current-context semantics are explicit where the API depends on them;
 - unsafe block proof obligations satisfy `CG-UNSAFE-001`;
 - public unsafe API and unsafe impl contracts satisfy `CG-UNSAFE-002`;

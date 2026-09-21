@@ -30,7 +30,7 @@
 - syscall、用户内存和 current-context；
 - `Cargo.toml`、Kconfig、feature 和 attribute；
 - 测试；
-- rustdoc、`design.md`、`security.md` 和工作流文档。
+- 工作流文档。
 
 ### 2. 加载相关规范
 
@@ -41,7 +41,7 @@
 | 变更内容 | 必读主题文件 |
 |---|---|
 | 命名、函数结构、可读性 | `naming-and-structure.md` |
-| 注释、rustdoc、模块文档 | `comments-and-rustdoc.md` |
+| 实现注释 | `comments.md` |
 | public API、trait、参数和状态表达 | `api-design.md` |
 | syscall、用户内存、current-context | `boundaries-and-context.md` |
 | 模块、可见性、import、macro、attribute | `modules-and-attributes.md` |
@@ -60,7 +60,7 @@
 - 修改 `Cargo.toml` 时读取当前 crate manifest；涉及共享依赖时读取 workspace 根 manifest。
 - 新增 public item 或模块入口时读取相邻 `lib.rs`、`mod.rs` 和父模块。
 - 修改 arch 私有实现时搜索同架构相邻模块和其他架构对应实现。
-- 修改设计、安全或生命周期时读取 crate 下现有 `docs/design.md` 和 `docs/security.md`。
+- 文档同步问题由 module-docs / docreview 规则负责；本阶段只在代码规范问题需要上下文时读取文档。
 
 ### 4. 搜索代码库惯例
 
@@ -195,7 +195,6 @@ diff 出现内联汇编、手写底层 CPU 操作或通用数据结构/算法时
   `docs/ai/code-guidelines/unsafe-cn.md` 的 `CG-UNSAFE-002`；
 - public safe API 是否真的封装住不安全前置条件；
 - raw pointer、FFI、`MaybeUninit`、所有权重建和 `Send/Sync` 是否使用最窄 sound pattern；
-- 设计或安全文档是否需要同步更新。
 
 不要接受“调用这里是安全的”一类循环论证注释。
 
@@ -224,20 +223,17 @@ diff 出现内联汇编、手写底层 CPU 操作或通用数据结构/算法时
 - 热路径是否新增高频日志或昂贵格式化；
 - 错误消息是否具体并遵守项目格式。
 
-### 10. 注释、rustdoc 与模块文档
+### 10. 实现注释
 
 检查：
 
 - 注释解释“为什么”和不明显的约束，而不是复述代码；
 - 设计决策和外部规范是否引用来源；
-- public API 是否说明参数、返回值、errors、panics 和 safety；
 - 标识符是否用反引号，完整句子是否有标点；
-- 行为、签名或错误变化后，相邻文档是否同步；
-- 架构、状态机、生命周期、并发模型变化是否更新 `docs/design.md`；
-- trust boundary、unsafe、不变量或失败处理变化是否更新 `docs/security.md`。
+- 行为变化后，相邻实现注释是否仍然准确。
 
-文档同步 finding 必须指出哪个现有描述已过期或缺少哪个新契约，
-不能只说“建议补充文档”。
+rustdoc、`docs/design.md` 和 `docs/security.md` 的覆盖率与同步要求
+由 module-docs / docreview 规则负责，本阶段不重复报告。
 
 ### 11. 测试与变更完整性
 
@@ -248,7 +244,7 @@ diff 出现内联汇编、手写底层 CPU 操作或通用数据结构/算法时
 - unsafe、并发和错误路径是否只测 happy path；
 - 架构/feature 改动是否有对应构建或运行验证；
 - refactor 与功能变化是否混在一起导致难以验证；
-- 相关 rustdoc、设计、安全和测试是否与实现一起完成。
+- 相关测试和实现是否一起完成。
 
 测试建议必须具体到要验证的行为和预期结果。
 
