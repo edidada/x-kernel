@@ -46,7 +46,7 @@
 | syscall、用户内存、current-context | `boundaries-and-context.md` |
 | 模块、可见性、import、macro、attribute | `modules-and-attributes.md` |
 | unsafe、裸指针、FFI、`MaybeUninit` | `unsafety.md` |
-| 锁、原子、wait/wake、IRQ 并发 | `concurrency.md` |
+| 锁、原子、wait/wake、IRQ 并发 | `docs/ai/code-guidelines/concurrency-cn.md`、`concurrency.md` |
 | `Result`、panic、错误映射和恢复 | `docs/ai/code-guidelines/errors-cn.md`、`error-handling-and-logging.md` |
 | hot path、资源生命周期和复杂度 | `performance-and-resources.md` |
 | 回归测试、commit 完整性 | `git-and-testing.md` |
@@ -210,6 +210,8 @@ diff 出现内联汇编、手写底层 CPU 操作或通用数据结构/算法时
 
 检查锁作用域、原子 ordering、wake/block 交接和资源销毁。
 上下文前置条件应由类型、API 边界或准确文档表达，不能只存在于作者假设中。
+静态锁构造按 `docs/ai/code-guidelines/concurrency-cn.md`
+的 `CG-CONC-001` 检查。
 
 ### 9. 错误处理与日志
 
