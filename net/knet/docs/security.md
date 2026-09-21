@@ -427,7 +427,8 @@ Both pathname operations and socket file construction must select credentials ex
 ### 13. `PacketBuf` Ownership
 
 A pointer-sized reference-counted handle is created when a packet enters the network stack. Devices, Router, loopback, PCB, and smoltcp adapters transfer this handle by value.
-Modifications after sharing use copy-on-write. Protocol offsets and validated UDP payload ranges must remain within the currently valid data range.
+Metadata and packet bytes use independent copy-on-write boundaries: metadata updates preserve shared bytes, and writable byte access isolates the modified bytes from other handles.
+Protocol offsets and validated UDP payload ranges must remain within the currently valid data range.
 
 ### 14. IPv4 Input Boundary
 

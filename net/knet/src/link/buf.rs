@@ -80,6 +80,8 @@ impl UdpPacketMetadata {
 }
 
 /// A reference-counted packet buffer with protocol and ownership metadata.
+///
+/// Metadata updates preserve shared bytes; writable byte access uses copy-on-write.
 #[derive(Clone, Debug)]
 pub(crate) struct PacketBuf {
     inner: Arc<PacketBufInner>,
@@ -87,7 +89,7 @@ pub(crate) struct PacketBuf {
 
 #[derive(Clone, Debug)]
 struct PacketBufInner {
-    data: Vec<u8>,
+    data: Arc<Vec<u8>>,
     head: usize,
     tail: usize,
     ifindex: i32,
@@ -105,7 +107,7 @@ impl PacketBuf {
         let tail = data.len();
         Self {
             inner: Arc::new(PacketBufInner {
-                data,
+                data: Arc::new(data),
                 head: 0,
                 tail,
                 ifindex,
@@ -148,7 +150,7 @@ impl PacketBuf {
 
         Self {
             inner: Arc::new(PacketBufInner {
-                data: frame.to_vec(),
+                data: Arc::new(frame.to_vec()),
                 head: 0,
                 tail: frame.len(),
                 ifindex,
@@ -218,7 +220,7 @@ impl PacketBuf {
         let offset = self.inner.network_offset?;
         let inner = Arc::make_mut(&mut self.inner);
         inner.udp_metadata = None;
-        inner.data.get_mut(offset..inner.tail)
+        Arc::make_mut(&mut inner.data).get_mut(offset..inner.tail)
     }
 
     pub(crate) fn truncate_network_packet(&mut self, len: usize) -> Option<()> {
@@ -285,7 +287,7 @@ impl PacketBuf {
 
     #[cfg(unittest)]
     pub(crate) fn shares_storage_with(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.inner, &other.inner)
+        Arc::ptr_eq(&self.inner.data, &other.inner.data)
     }
 
     fn data_range(&self) -> Range<usize> {
@@ -387,20 +389,30 @@ mod tests {
 
     #[def_test]
     fn test_packet_handle_is_pointer_sized_and_uses_copy_on_write() {
-        let packet = PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::DeviceRx);
-        let mut copy = packet.clone();
-
         assert_eq!(
             core::mem::size_of::<PacketBuf>(),
             core::mem::size_of::<usize>()
         );
-        assert!(packet.shares_storage_with(&copy));
 
-        copy.network_packet_mut().unwrap()[0] = 0x60;
+        for update_metadata in [false, true] {
+            let packet =
+                PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::DeviceRx);
+            let mut copy = packet.clone();
+            assert!(packet.shares_storage_with(&copy));
 
-        assert!(!packet.shares_storage_with(&copy));
-        assert_eq!(packet.network_packet().unwrap()[0], 0x45);
-        assert_eq!(copy.network_packet().unwrap()[0], 0x60);
+            if update_metadata {
+                copy.set_ifindex(2);
+                assert_eq!(packet.ifindex(), 1);
+                assert_eq!(copy.ifindex(), 2);
+                assert!(packet.shares_storage_with(&copy));
+            }
+
+            copy.network_packet_mut().unwrap()[0] = 0x60;
+
+            assert!(!packet.shares_storage_with(&copy));
+            assert_eq!(packet.network_packet().unwrap()[0], 0x45);
+            assert_eq!(copy.network_packet().unwrap()[0], 0x60);
+        }
     }
 
     #[def_test]
