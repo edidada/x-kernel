@@ -34,7 +34,8 @@ Examples:
 - organize files and impl blocks for top-down reading;
 - place public entry points before private helpers where possible;
 - split files when multiple distinct concepts start competing for attention;
-- default to the narrowest visibility that works;
+- for visibility, apply
+  `docs/ai/code-guidelines/modules-cn.md` (`CG-MOD-001`);
 - prefer existing workspace abstractions and dependencies
   over ad hoc local reinvention.
 

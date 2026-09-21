@@ -7,12 +7,15 @@
 开始分析前必须读取：
 
 1. `docs/ai/review/common.md`；
-2. `docs/ai/skills/code-guidelines/SKILL.md`；
-3. driver 相关变更还必须读取 `docs/ai/driver-subsystem-boundaries.md`；
-4. 根据本文件路由出的相关主题文件。
+2. `docs/ai/code-guidelines/README.md`；
+3. `docs/ai/skills/code-guidelines/SKILL.md`；
+4. driver 相关变更还必须读取 `docs/ai/driver-subsystem-boundaries.md`；
+5. 根据本文件路由出的相关主题文件。
 
-`code-guidelines/SKILL.md` 是编码规范的权威入口。
-本文件定义如何在自动 review 中应用它，不复制并替代完整规范。
+`docs/ai/code-guidelines/` 是编码规范规则的事实来源。
+`code-guidelines/SKILL.md` 是 code agent 使用这些规则的入口。
+本文件只定义自动 review 如何加载、取证和输出 finding，
+不维护另一套编码规范事实。
 
 ## 强制工作流
 
@@ -30,6 +33,10 @@
 - rustdoc、`design.md`、`security.md` 和工作流文档。
 
 ### 2. 加载相关规范
+
+先完整读取 `docs/ai/code-guidelines/README.md`。
+再按变更内容读取 `docs/ai/code-guidelines/` 下对应主题规则文件。
+命中结构化规则时，按规则的判定方法和例外字段判断是否可以输出 finding。
 
 | 变更内容 | 必读主题文件 |
 |---|---|
@@ -86,8 +93,8 @@
 
 - driver 子系统边界是否符合 `docs/ai/driver-subsystem-boundaries.md`：
   可复用具体驱动只能依赖 driver contract，不能直接调用 host-kernel API；
-- 新增 `pub` 是否真的需要跨 crate 暴露；
-- 仅供 crate 或父模块使用的 item 是否应为 `pub(crate)` / `pub(super)` / private；
+- 新增或扩大的程序项可见性是否符合
+  `docs/ai/code-guidelines/modules-cn.md` 的 `CG-MOD-001`；
 - 类型和 helper 是否放在真正拥有其状态、不变量和生命周期的 crate；
 - 公共能力是否错误地放在 arch 私有、platform 私有或具体驱动目录；
 - 公共接口是否泄露实现类型、内部字段或锁；
@@ -167,7 +174,8 @@ diff 出现内联汇编、手写底层 CPU 操作或通用数据结构/算法时
 
 检查：
 
-- workspace 已声明的依赖是否使用 `.workspace = true`；
+- workspace 已管理的依赖是否符合
+  `docs/ai/code-guidelines/modules-cn.md` 的 `CG-MOD-002`；
 - 可能被多个成员使用的新依赖是否应由 workspace 统一管理；
 - feature 是否在 crate、workspace、Kconfig 和调用点之间正确传递；
 - `cfg` 是否导致未覆盖或语义不一致的构建组合；
@@ -181,8 +189,10 @@ diff 出现内联汇编、手写底层 CPU 操作或通用数据结构/算法时
 
 - unsafe 是否必要，能否使用项目安全封装；
 - block 是否最小化；
-- `SAFETY:` 是否陈述有效性、对齐、生命周期、aliasing、初始化和并发不变量；
-- `unsafe fn` / `unsafe trait` 是否有完整 `# Safety`；
+- unsafe block 是否符合
+  `docs/ai/code-guidelines/unsafe-cn.md` 的 `CG-UNSAFE-001`；
+- 公开 unsafe API 和 unsafe impl 是否符合
+  `docs/ai/code-guidelines/unsafe-cn.md` 的 `CG-UNSAFE-002`；
 - public safe API 是否真的封装住不安全前置条件；
 - raw pointer、FFI、`MaybeUninit`、所有权重建和 `Send/Sync` 是否使用最窄 sound pattern；
 - 设计或安全文档是否需要同步更新。
@@ -256,7 +266,7 @@ diff 出现内联汇编、手写底层 CPU 操作或通用数据结构/算法时
 ## 输出要求
 
 遵循 `common.md` 的 finding JSON 格式。
-每条评论应明确指出违反的规范名称或主题，说明实际维护/安全影响，并给出具体建议。
+每条评论应明确指出违反的规则 ID 或规范主题，说明实际维护/安全影响，并给出具体建议。
 对重命名、可见性收窄、workspace 依赖、下划线参数、单行错误处理和注释同步，
 能可靠单行修复时必须提供 suggestion。
 没有明确规范问题时输出 `未发现问题`。

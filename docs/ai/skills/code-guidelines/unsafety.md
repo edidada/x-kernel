@@ -5,10 +5,11 @@ modifies, or reviews `unsafe` code.
 
 ## Mandatory Rules
 
-- every `unsafe` block must have a preceding `// SAFETY:` comment;
-- every `unsafe fn` and `unsafe trait` must include a `# Safety` rustdoc section;
-- `unsafe impl` must have an explicit safety argument in nearby comments or docs;
-- safety arguments must state concrete invariants and who upholds them;
+- for `unsafe` block proof obligations, apply
+  `docs/ai/code-guidelines/unsafe-cn.md` (`CG-UNSAFE-001`);
+- for public `unsafe fn`, public `unsafe trait`, and `unsafe impl`
+  contracts, apply `docs/ai/code-guidelines/unsafe-cn.md`
+  (`CG-UNSAFE-002`);
 - keep each `unsafe` block as small as practical,
   so the audited region is obvious;
 - inside `unsafe fn`, still isolate each unsafe operation
@@ -21,20 +22,8 @@ modifies, or reviews `unsafe` code.
 
 ## SAFETY Comment Standard
 
-Use `// SAFETY:` comments as local proof obligations,
-not as labels.
-
-Each `// SAFETY:` comment should:
-
-- describe the specific unsafe operation being justified;
-- name the concrete invariants it relies on;
-- say who established those invariants
-  or what earlier check/guard/state transition established them;
-- mention all relevant categories when there is more than one,
-  such as validity plus alignment, or initialization plus exclusivity;
-- be placed immediately above the `unsafe {}` block it justifies.
-
-Good `// SAFETY:` comments usually answer one or more of:
+`CG-UNSAFE-001` defines the required fields for a valid `// SAFETY:`
+comment. Useful comments usually answer one or more of:
 
 - why is this pointer valid for reads or writes here?
 - why is alignment satisfied, or why is unaligned access intentional?
@@ -43,7 +32,7 @@ Good `// SAFETY:` comments usually answer one or more of:
 - why is concurrent access synchronized?
 - why is this ABI/layout assumption valid?
 
-Avoid `// SAFETY:` comments that only say:
+Avoid comments that only say:
 
 - "pointer is valid";
 - "caller guarantees safety";
@@ -517,8 +506,8 @@ Avoid patterns like:
 
 Check specifically for:
 
-- missing `// SAFETY:` comments;
-- `unsafe fn` without `# Safety`;
+- violations of `CG-UNSAFE-001`;
+- violations of `CG-UNSAFE-002`;
 - unsafe operations inside `unsafe fn`
   that are not wrapped in a minimal `unsafe {}` block;
 - invariants that are asserted but not actually enforced;
@@ -527,7 +516,6 @@ Check specifically for:
 - uses of uninitialized storage that should instead be modeled
   with `MaybeUninit<T>`;
 - private mutable state shared across too large a module boundary;
-- `unsafe impl` added without a clear thread-safety or ownership argument;
 - FFI calls or callbacks whose ABI, lifetime, ownership,
   or unwind assumptions are not stated;
 - opportunities to move the unsafe edge behind an existing safe abstraction

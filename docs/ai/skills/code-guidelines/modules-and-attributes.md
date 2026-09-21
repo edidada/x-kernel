@@ -5,7 +5,8 @@ imports, crate dependencies, macros, lints, or attributes.
 
 ## Visibility And Imports
 
-- default to the narrowest visibility that works;
+- for visibility, apply
+  `docs/ai/code-guidelines/modules-cn.md` (`CG-MOD-001`);
 - keep module boundaries aligned with ownership and audit surface;
 - define crate boundaries around cohesive ownership domains:
   tightly related data, state, invariants, lifecycle rules, and execution-context
@@ -24,7 +25,8 @@ imports, crate dependencies, macros, lints, or attributes.
   not the internal structures used to assemble or cache them;
 - prefer importing a parent module and qualifying free-function calls
   rather than importing free functions directly by name;
-- use workspace dependencies instead of ad hoc per-crate version drift.
+- for workspace-managed dependencies, apply
+  `docs/ai/code-guidelines/modules-cn.md` (`CG-MOD-002`).
 
 ## Attributes
 
@@ -46,7 +48,7 @@ imports, crate dependencies, macros, lints, or attributes.
 
 Check specifically for:
 
-- over-wide visibility;
+- visibility changes covered by `CG-MOD-001`;
 - crates whose contents do not share a coherent ownership, state, and invariant model;
 - implementation-only modules promoted to crates without a real cross-crate reuse boundary;
 - shared state/data components left inside one crate even though multiple peer crates depend
@@ -54,7 +56,7 @@ Check specifically for:
 - internal structs or free functions that were made public only for convenience,
   testing, or migration wiring;
 - direct free-function imports that remove call-site context;
-- dependency declarations that bypass workspace conventions;
+- dependency declarations covered by `CG-MOD-002`;
 - broad lint suppression;
 - attributes or derives ordered inconsistently with the project convention;
 - macros used where a normal function would be clearer.

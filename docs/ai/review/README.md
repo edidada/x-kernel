@@ -47,7 +47,7 @@ docs/ai/review/
 | Bug | `bug.md`、`common.md` | 相关模块设计与安全文档 |
 | Performance | `performance.md`、`common.md` | performance skill 中相关 reference |
 | Logic | `logic.md`、`common.md` | code-guidelines 中 unsafe、并发、边界等主题文件 |
-| Guidelines | `guidelines.md`、`common.md` | code-guidelines 的入口和相关主题文件 |
+| Guidelines | `guidelines.md`、`common.md`、`../code-guidelines/README.md` | code-guidelines 主题规则文件、skill 和相关主题文件 |
 
 `common.md` 负责统一评论格式、行号、证据门槛、suggestion 和误报约束。
 各阶段文件不重复定义公共协议，只描述本阶段的审查职责。
@@ -72,8 +72,8 @@ docs/ai/review/
 修改本目录时应遵守以下原则：
 
 1. 项目特有规则写在这里，review 服务只负责调度和提供工具。
-2. 可复用的编码规范继续以 `docs/ai/skills/code-guidelines/` 为权威来源，
-   本目录只说明 review 阶段如何选择和执行这些规范。
+2. 可复用的编码规范以 `docs/ai/code-guidelines/` 为事实来源。
+   本目录只说明 review 阶段如何选择、取证和执行这些规范。
 3. 新增工具依赖时，必须确认 `x-review` 已向对应阶段暴露该工具。
 4. 规则必须能导向可验证的证据，避免“代码不够优雅”一类无法落行的要求。
 5. 发现型规则只评论 PR diff 中可评论的行，不借 review 处理无关历史问题。

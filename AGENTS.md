@@ -130,11 +130,14 @@ Key local rules:
 - Use accurate, descriptive names and encode units where the type does not.
 - Keep boolean names assertion-like, such as `is_*`, `has_*`, or `can_*`.
 - Comments should explain why, not restate what the code does.
-- Every `unsafe` block needs a preceding `SAFETY:` justification.
+- Unsafe block proof obligations are defined by
+  `docs/ai/code-guidelines/unsafe-cn.md` (`CG-UNSAFE-001`).
 - Validate at subsystem boundaries and trust validated internal invariants.
 - Use `?` for ordinary error propagation.
 - Avoid casual atomics and linear scans on hot paths.
-- Use workspace dependencies and existing local helper APIs where available.
+- Workspace dependency use is defined by
+  `docs/ai/code-guidelines/modules-cn.md` (`CG-MOD-002`);
+  prefer existing local helper APIs where available.
 
 ## Change Completeness
 

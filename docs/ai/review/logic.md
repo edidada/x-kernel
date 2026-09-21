@@ -117,9 +117,10 @@ diff 出现以下任一内容时，必须完整读取 `unsafety.md`：
 - 并发访问是否满足 `Send` / `Sync` 和同步要求；
 - arch/MMIO 操作的 barrier、宽度和顺序是否正确。
 
-每个 unsafe block 前必须有紧邻的 `// SAFETY:` 注释，
-注释需要说明调用者或当前代码如何维护上述真实不变量，不能只复述操作。
-`unsafe fn` / `unsafe trait` 必须在 rustdoc 中包含 `# Safety`，明确调用者义务。
+unsafe block 证明义务按
+`docs/ai/code-guidelines/unsafe-cn.md` 的 `CG-UNSAFE-001` 检查。
+公开 unsafe API 和 unsafe impl 契约按
+`docs/ai/code-guidelines/unsafe-cn.md` 的 `CG-UNSAFE-002` 检查。
 
 检查 unsafe 作用域是否最小。
 如果项目已有安全封装，优先复用；
