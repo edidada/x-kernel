@@ -107,7 +107,9 @@ When reviewing Rust kernel code:
 6. Check whether lock scope, lock order, and wake/block behavior are safe.
    For new or moved `Mutex` / `RwLock` / spin statics, apply
    `docs/ai/code-guidelines/concurrency-cn.md` (`CG-CONC-001`).
-7. Check whether syscall boundaries and current-context assumptions are explicit.
+7. For syscall and user-memory boundaries, load
+   `docs/ai/code-guidelines/context-cn.md` and apply matching `CG-CTX-*`
+   rules. Also check whether current-context assumptions are explicit.
 8. For error handling, load `docs/ai/code-guidelines/errors-cn.md`
    and apply the matching `CG-ERR-*` rules.
 9. Check whether modules, visibility, macros, and attributes stay disciplined.
@@ -131,6 +133,7 @@ Before considering a code change aligned with this skill, verify:
   lifetime, aliasing, and ABI assumptions where relevant;
 - shared-state code has sane lock scope and lock ordering;
 - static lock construction satisfies `CG-CONC-001`;
+- user-memory boundary handling satisfies `docs/ai/code-guidelines/context-cn.md`;
 - boundary validation happens at subsystem edges;
 - visibility changes satisfy `CG-MOD-001`;
 - workspace-managed dependencies satisfy `CG-MOD-002`;

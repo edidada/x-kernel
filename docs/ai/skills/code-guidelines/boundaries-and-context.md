@@ -15,20 +15,15 @@ or any API whose meaning depends on the current execution context.
 
 ## Validation Boundaries
 
+- for user pointer, user address, and user ABI carrier rules, apply
+  `docs/ai/code-guidelines/context-cn.md` (`CG-CTX-001`, `CG-CTX-002`);
 - validate at subsystem boundaries, then trust validated internal invariants;
 - syscall frontends are the primary validation boundary for user input;
-- once user data is copied into kernel-owned values,
-  deeper subsystem logic should operate on those kernel values,
-  not on raw user pointers;
 - keep nullable-pointer semantics explicit at the syscall boundary.
 
 ## ABI Separation
 
-- separate raw ABI carrier types from in-kernel semantic types;
-- convert between ABI carriers and semantic types
-  as early as practical at the boundary;
-- do not push raw ABI wrappers deeper into subsystem logic
-  when a semantic type can be formed.
+Apply `docs/ai/code-guidelines/context-cn.md` (`CG-CTX-002`).
 
 ## X-Kernel-Specific Context Rules
 
@@ -45,6 +40,5 @@ or any API whose meaning depends on the current execution context.
 Check specifically for:
 
 - hidden assumptions about "current process" vs "current execution path";
-- user pointers passed deeper than necessary into subsystem code;
-- raw ABI carriers leaking into internal semantic layers;
+- violations of `CG-CTX-001` or `CG-CTX-002`;
 - low-level fd-table manipulation in code that should use higher-level wrappers.

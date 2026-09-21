@@ -105,7 +105,8 @@ panic 类规则事实以 `docs/ai/code-guidelines/errors-cn.md`
 对 syscall、设备输入、文件系统数据、网络包、配置和启动参数检查：
 
 - 长度、范围、标志位和枚举值是否在使用前验证；
-- 用户指针是否只通过项目的用户内存抽象访问；
+- 用户指针、用户地址和用户态 ABI 类型是否违反
+  `docs/ai/code-guidelines/context-cn.md` 的 `CG-CTX-*`；
 - 验证后的值是否在使用前被替换或失效；
 - 部分 copy、短读写和 fault 是否被正确处理；
 - 不可信索引是否能选择越权对象或错误 namespace 中的资源。

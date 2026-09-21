@@ -163,19 +163,10 @@ The review should name the scenario explicitly.
 
 ### User Memory And Syscall ABI
 
-Prefer:
-
-- `UserPtr<T>` / `UserConstPtr<T>` for typed user pointers;
-- `UserRead` / `UserWrite` for by-value syscall ABI objects;
-- `core/kuaccess` and `process/osvm` helpers for checked copy-in/copy-out;
-- `IoVectorBuf`, `VmBytes`, `VmBytesMut`,
-  or equivalent existing wrappers for bulk or vectored buffers.
-
-Avoid:
-
-- direct dereference of user pointers in syscall code;
-- ad hoc `from_raw_parts` over user addresses;
-- copying raw bytes into arbitrary `T` without a `UserRead`-style validity contract.
+First apply `docs/ai/code-guidelines/context-cn.md` (`CG-CTX-*`)
+for user pointer, user address, and user ABI carrier rules.
+Then use this scenario to audit the remaining unsafe proof obligations
+inside the user-memory abstraction or syscall ABI conversion code.
 
 Repository examples:
 

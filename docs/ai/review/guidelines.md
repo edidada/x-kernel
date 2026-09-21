@@ -43,7 +43,7 @@
 | 命名、函数结构、可读性 | `naming-and-structure.md` |
 | 实现注释 | `comments.md` |
 | public API、trait、参数和状态表达 | `api-design.md` |
-| syscall、用户内存、current-context | `boundaries-and-context.md` |
+| syscall、用户内存、current-context | `docs/ai/code-guidelines/context-cn.md`、`boundaries-and-context.md` |
 | 模块、可见性、import、macro、attribute | `modules-and-attributes.md` |
 | unsafe、裸指针、FFI、`MaybeUninit` | `unsafety.md` |
 | 锁、原子、wait/wake、IRQ 并发 | `docs/ai/code-guidelines/concurrency-cn.md`、`concurrency.md` |
@@ -212,6 +212,8 @@ diff 出现内联汇编、手写底层 CPU 操作或通用数据结构/算法时
 上下文前置条件应由类型、API 边界或准确文档表达，不能只存在于作者假设中。
 静态锁构造按 `docs/ai/code-guidelines/concurrency-cn.md`
 的 `CG-CONC-001` 检查。
+用户指针、用户地址和用户态 ABI 类型按 `docs/ai/code-guidelines/context-cn.md`
+的 `CG-CTX-*` 检查。
 
 ### 9. 错误处理与日志
 
