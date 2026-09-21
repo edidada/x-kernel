@@ -9,3 +9,13 @@
 //! offsets or pointers into the userspace replacement blob.
 
 pub(crate) mod filter;
+
+pub use filter::LegacyFilterTable;
+
+/// Captures the current IPv4 `filter` table in the legacy iptables layout.
+///
+/// The returned snapshot owns its entry bytes and remains stable if a later
+/// table replacement publishes new state.
+pub fn legacy_ipv4_filter_table() -> LegacyFilterTable {
+    filter::snapshot()
+}

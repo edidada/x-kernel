@@ -10,6 +10,7 @@ mod basic_nodes;
 mod device_nodes;
 mod irq_nodes;
 mod mem_nodes;
+mod net_nodes;
 mod root;
 #[cfg(feature = "sysrq")]
 mod sysrq_nodes;
@@ -62,6 +63,7 @@ fn new_procfs_with_type(
 
 #[cfg(unittest)]
 mod tests {
+    use kvfs::NodeType;
     use unittest::{assert_eq, def_test};
 
     use super::*;
@@ -73,5 +75,15 @@ mod tests {
         assert_eq!(fs.name(), "proc");
         let stat = fs.stat().unwrap();
         assert_eq!(stat.fs_type, 0x9fa0);
+    }
+
+    #[def_test]
+    fn test_proc_net_exposes_legacy_filter_table_name() {
+        let fs = new_procfs(SuperBlockFlags::empty());
+        let net = fs.root_dir().lookup("net").unwrap();
+        let table_names = net.lookup("ip_tables_names").unwrap();
+
+        assert_eq!(net.node_type(), NodeType::Directory);
+        assert_eq!(table_names.node_type(), NodeType::RegularFile);
     }
 }

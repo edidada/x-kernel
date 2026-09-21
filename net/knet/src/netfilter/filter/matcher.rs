@@ -77,6 +77,14 @@ impl PortRange {
     pub(crate) const fn contains(self, port: u16) -> bool {
         self.start <= port && port <= self.end
     }
+
+    pub(super) const fn start(self) -> u16 {
+        self.start
+    }
+
+    pub(super) const fn end(self) -> u16 {
+        self.end
+    }
 }
 
 /// Interface-name condition accepted from legacy iptables syntax.
@@ -255,6 +263,10 @@ impl IcmpMatch {
 
     pub(crate) const fn code_end(self) -> u8 {
         self.code_end
+    }
+
+    pub(super) const fn is_inverted(self) -> bool {
+        self.is_inverted
     }
 }
 

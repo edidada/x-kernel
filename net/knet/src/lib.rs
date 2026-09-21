@@ -50,6 +50,7 @@ use kerrno::KError;
 use lazyinit::LazyInit;
 pub(crate) use link::{buf, wire};
 pub use link::{packet, send_link_frame};
+pub use netfilter::{LegacyFilterTable, legacy_ipv4_filter_table};
 pub(crate) use network::ipv4;
 pub(crate) use runtime::{poller, service};
 pub use socket::{

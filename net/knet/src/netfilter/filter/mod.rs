@@ -12,6 +12,7 @@
     )
 )]
 mod evaluator;
+mod legacy;
 #[cfg_attr(
     not(unittest),
     expect(
@@ -20,8 +21,14 @@ mod evaluator;
     )
 )]
 mod matcher;
-#[expect(
-    dead_code,
-    reason = "the legacy ABI decoder and hook integration are implemented in later stages"
+#[cfg_attr(
+    not(unittest),
+    expect(
+        dead_code,
+        reason = "the legacy ABI decoder and hook integration are implemented in later stages"
+    )
 )]
 mod model;
+
+pub use legacy::LegacyFilterTable;
+pub(crate) use legacy::snapshot;

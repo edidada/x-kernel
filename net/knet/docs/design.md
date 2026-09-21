@@ -37,6 +37,7 @@ net/knet/
     ├── netfilter/
     │   ├── filter/
     │   │   ├── evaluator.rs
+    │   │   ├── legacy.rs
     │   │   ├── matcher.rs
     │   │   ├── mod.rs
     │   │   └── model.rs
@@ -151,6 +152,9 @@ uevents / rtnetlink")
 Guest-host streams")
         end
 
+        FILTER("IPv4 filter model
+Legacy table snapshot")
+
         subgraph IP["IP processing"]
             SMOL("smoltcp
 IPv4 / IPv6")
@@ -176,6 +180,7 @@ NIC driver")
 virtio-vsock driver")
 
     CALLER --> API
+    CALLER -.->|iptables GET snapshot| FILTER
     API --> TCP & UDP & PACKET & UNIX & NETLINK & VSOCK
     TCP --> SMOL
     UDP --> IPV4
@@ -206,7 +211,7 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 | vsock | Provides optional guest-host stream communication through virtio-vsock. |
 | smoltcp | Provides IPv4/IPv6 processing for the smoltcp socket path. |
 | knet IPv4 / ICMPv4 | Validates and reassembles IPv4 packets, delivers UDP input, and handles ICMPv4 errors and responses. |
-| IPv4 filter model | Defines a validated, typed `filter` table and an internal IPv4 packet evaluator. The model is not connected to the packet path. |
+| IPv4 filter model | Defines a validated, typed `filter` table, an internal IPv4 packet evaluator, and a legacy `ipt_entry` snapshot for `GET_INFO` and `GET_ENTRIES`. The model is not connected to the packet path. |
 | Router | Selects routes, fragments outgoing IPv4 packets, and dispatches RX/TX queues across devices. |
 | LoopbackDevice | Returns locally transmitted packets to the receive path. |
 | EthernetDevice | Adapts kclass network devices to knet's NetDevice interface and handles Ethernet and ARP. |
@@ -228,6 +233,10 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 * **Normal protocol processing runs in task context**
 
   Paths such as `NetworkPoller::assist_once`, socket `send` / `recv` / `connect` / `accept`, and netlink mutations may acquire `Mutex` or `RwLock` objects and may execute relatively heavy data-plane work. These paths must run in normal task context.
+
+* **Legacy filter export runs in syscall task context**
+
+  `legacy_ipv4_filter_table` allocates an owned snapshot and serializes all chains and rules. The POSIX socket-option layer checks the caller credential, copies the table name and request length from userspace, and copies the resulting ABI bytes back. The snapshot operation does not access user memory.
 
 * **IRQ handlers only signal RX work**
 
@@ -607,6 +616,12 @@ or network processing. Notifications arriving before queue readiness retain
 pending demand and are replayed by `start`. These IRQ-side notifications do
 not allocate submission storage or execute the data plane.
 
+### Legacy IPv4 Filter Export
+
+The legacy serializer calculates chain and rule offsets before producing bytes. Built-in chain heads populate `hook_entry`; built-in policy entries populate `underflow`. User-defined chains receive an `ERROR` marker followed by their rules and a standard `RETURN` footer. Standard jump verdicts point to the first rule after the destination chain marker. A terminal `ERROR` entry closes the table. Fixed IPv4 fields and the supported TCP, UDP, and ICMP matches use native legacy structure alignment, while IPv4 addresses and masks remain in network byte order. Counter fields are emitted as zero until counter accounting is added.
+
+The POSIX layer wraps this entry array in Linux `ipt_getinfo` and `ipt_get_entries` responses. `GET_INFO` returns the hook offsets, entry count, and byte size. `GET_ENTRIES` accepts only the size from the preceding snapshot and returns `EAGAIN` when it differs from the current size. `/proc/net/ip_tables_names` advertises `filter` so `iptables-save` can discover the table.
+
 ### Network Initialization
 
 `init_network` always creates loopback with `127.0.0.1/8`. It also attaches one registered NIC when available, using the configured IPv4 address and default gateway. Router address entries generate local and connected routes; `Service::new` synchronizes the IPv4 views used by smoltcp and ingress.
@@ -954,6 +969,7 @@ With `vsock_tipc_bridge` enabled, `bind()` rejects explicit binding to ports in 
 | rtnetlink operations | Supports link queries/updates, IPv4 address and route queries/add/delete, and IPv4 neighbor updates. Other message types return `NLMSG_ERROR` with `EOPNOTSUPP`; neighbors accept only incomplete/permanent states with no flags. |
 | Netlink sockets | Route sockets reject multicast subscriptions, userspace-peer destinations, and mixed query/mutation batches. Kobject-uevent sockets support group delivery, `SO_PASSCRED`, and validated no-op classic-BPF attach/detach compatibility. Connect, peer queries, and shutdown are unsupported. |
 | Socket options | Options unhandled by the selected protocol return `ENOPROTOOPT`. |
+| Legacy IPv4 filter queries | Privileged IPv4 sockets support `IPT_SO_GET_INFO` and `IPT_SO_GET_ENTRIES`; `/proc/net/ip_tables_names` advertises `filter`. The initial table contains empty `INPUT`, `FORWARD`, and `OUTPUT` chains with `ACCEPT` policies. |
 | Unix datagrams | Receive queues use unbounded `async_channel` queues. |
 | vsock / TIPC bridge | Stream transport only; the bridge forwards bytes, excluding TIPC handles and memory references. |
 | Ethernet progress | Failed RX-scheduler attachment falls back to timeout polling. ARP pending traffic is subject to head-of-line blocking. |

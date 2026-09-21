@@ -11,6 +11,8 @@
 //!
 //! Linux stores nonzero send and receive timeouts in jiffies. Socket timeout
 //! conversion therefore rounds a userspace `timeval` up to one kernel tick.
+//! Legacy IPv4 `GET_INFO` and `GET_ENTRIES` requests expose the validated
+//! `filter` table snapshot used by `iptables-save`.
 
 use alloc::{vec, vec::Vec};
 
@@ -24,6 +26,8 @@ use linux_raw_sys::net::{
 };
 use osvm::{VirtPtr, write_vm_mem};
 use posix_types::{UserConstPtr, UserPtr, UserRead};
+
+use crate::legacy_iptables;
 
 const PROTO_TCP: u32 = linux_raw_sys::net::IPPROTO_TCP as u32;
 
@@ -102,6 +106,13 @@ fn validate_classic_filter_instructions(instructions: &[SockFilter]) -> KResult<
 
 fn supports_kobject_filter_compat(socket: &knet::Socket) -> bool {
     matches!(socket, knet::Socket::Netlink(netlink) if netlink.is_kobject_uevent())
+}
+
+fn supports_legacy_ipv4_filter_get(socket: &knet::Socket) -> bool {
+    matches!(
+        socket,
+        knet::Socket::Tcp(_) | knet::Socket::Udp(_) | knet::Socket::Raw(_)
+    )
 }
 
 mod conv {
@@ -343,6 +354,15 @@ pub fn sys_getsockopt(
 
     let file = kprocess::current_resources().get_file(fd)?;
     let socket = sock_from_file(&file)?;
+
+    if level == PROTO_IP && legacy_iptables::is_get_option(optname) {
+        if !supports_legacy_ipv4_filter_get(socket.as_ref()) {
+            return Err(KError::from(LinuxError::ENOPROTOOPT));
+        }
+        legacy_iptables::get(optname, optval, optlen)?;
+        optlen_ptr.write_vm(optlen)?;
+        return Ok(0);
+    }
 
     macro_rules! dispatch {
         ($which:ident) => {
