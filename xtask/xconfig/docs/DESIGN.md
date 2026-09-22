@@ -129,7 +129,10 @@ Generates:
 - `autoconf.h`: C header with preprocessor macros
 - `config.rs`: typed Rust constants; hex emission re-canonicalizes because
   standalone paths (`gen-const`) feed raw `.config` maps that never passed
-  through the normalizing symbol table
+  through the normalizing symbol table. Bool symbols that are in the Kconfig
+  type map but missing from the resolved value map (unselected, or pruned
+  because `depends on` failed) are emitted as `false`, so kernel crates can
+  reference them unconditionally.
 
 ## Design Decisions
 

@@ -273,3 +273,7 @@ flatten_objects = "0.2.4"
 weak-map = "0.1.1"
 tock-registers = "0.10.1"
 xmas-elf = { version = "0.9", default-features = false }
+
+# Local test of the kvirtiodrivers notify/batch branch. Do not commit with the DMA PR.
+[patch.crates-io]
+kvirtiodrivers = { path = "/home/sunhaosheng/kvirtiodrivers" }

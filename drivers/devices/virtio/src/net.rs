@@ -258,19 +258,20 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
         // 1. Fill all rx buffers.
         for (i, rx_buf_place) in rx_buffers.iter_mut().enumerate() {
             let mut rx_buf = buf_pool.alloc_boxed().ok_or(DriverError::NoMemory)?;
-            // SAFETY: `receive_begin` requires exclusive access to the buffer
+            // SAFETY: `receive_add` requires exclusive access to the buffer
             // for the duration it is in the VirtIO queue. The buffer is owned
             // by `rx_buf` and stored in `rx_buffers[i]` immediately after,
             // ensuring it lives as long as the device holds the token.
             let token = unsafe {
                 inner
                     .lock()
-                    .receive_begin(rx_buf.buffer_mut())
+                    .receive_add(rx_buf.buffer_mut())
                     .map_err(as_driver_error)?
             };
             assert_eq!(token, i as u16);
             *rx_buf_place = Some(rx_buf);
         }
+        inner.lock().receive_commit();
 
         // 2. Allocate all tx buffers.
         for _ in 0..QS {
@@ -362,14 +363,14 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
         // The caller guarantees the handle is valid and not used elsewhere.
         let mut rx_buf = unsafe { NetBuf::from_handle(rx_buf) };
         let mut bufs = self.bufs.lock();
-        // SAFETY: `receive_begin` requires exclusive access to the buffer.
+        // SAFETY: `receive_add` requires exclusive access to the buffer.
         // We own `rx_buf` and will store it in `rx_buffers[new_token]`
         // immediately after, ensuring it lives as long as the device holds
         // the token.
         let new_token = unsafe {
             self.inner
                 .lock()
-                .receive_begin(rx_buf.buffer_mut())
+                .receive_add(rx_buf.buffer_mut())
                 .map_err(as_driver_error)?
         };
         // `rx_buffers[new_token]` is expected to be `None` since it was taken
@@ -463,6 +464,7 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
 
             Ok(rx_buf.into_handle())
         } else {
+            self.inner.lock().receive_commit();
             Err(DriverError::WouldBlock)
         }
     }
