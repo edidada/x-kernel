@@ -6,17 +6,21 @@
 
 #[cfg(feature = "kvm-guest-mem-share")]
 use khal::mem::PAGE_SIZE_4K;
-use kplat::dma::PlatformDmaIf;
+use kplat::dma::{DmaDirection, PlatformDmaIf};
 
 #[kiface::provide]
 impl PlatformDmaIf {
-    fn can_dma_direct() -> bool {
-        // Enforce the capability boundary even if a seed config explicitly
-        // enables direct DMA for an unsupported machine or protected guest.
-        kbuild_config::DMA_DIRECT_COHERENT
-            && kbuild_config::MACHINE_AARCH64_QEMU
-            && !cfg!(feature = "kvm-guest-mem-share")
-            && !kbuild_config::KFEAT_VIRTCCA_HUK_KEY
+    fn direct_dma_addr(paddr: usize, _size: usize, _direction: DmaDirection) -> Option<usize> {
+        // `DMA_DIRECT_COHERENT` is selected by the verified QEMU defconfig.
+        // Sharing and VirtCCA still force bounce if a seed config sets the
+        // option on a protected guest.
+        if !kbuild_config::DMA_DIRECT_COHERENT
+            || cfg!(feature = "kvm-guest-mem-share")
+            || kbuild_config::KFEAT_VIRTCCA_HUK_KEY
+        {
+            return None;
+        }
+        Some(paddr.wrapping_add(kbuild_config::PHYS_BUS_OFFSET))
     }
 
     fn prepare(paddr: usize, size: usize) -> kerrno::KResult {

@@ -12,11 +12,11 @@
 extern crate log;
 extern crate irq_driver as _;
 extern crate kernel_boot;
+mod dma;
 mod init;
 #[cfg(feature = "smp")]
 mod mp;
 mod peripherals;
 mod power;
 
-kplat::default_dma_if_impl!();
 kplat::default_mmio_if_impl!();

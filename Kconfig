@@ -218,16 +218,16 @@ config TIMER_FREQUENCY_HZ
 
 config DMA_DIRECT_COHERENT
     bool "Direct DMA for coherent, host-accessible linear-map memory"
-    depends on MACHINE_AARCH64_QEMU
-    depends on !KFEAT_KVM_GUEST_MEM_SHARE && !KFEAT_VIRTCCA_HUK_KEY
     default n
     help
-      Map temporary DMA buffers in place when every device can access
-      ordinary cached linear-map memory coherently, without changing page
-      attributes or sharing private pages. Enable only for a verified
-      coherent, unprotected VM. Bounce buffers remain the copy fallback
-      when this is off, the buffer is not wholly in the linear map, or
-      isolation, encryption, or cache maintenance is required.
+      The platform can hand ordinary cached linear-map memory to devices
+      without bounce copies, page sharing, or attribute changes. This is a
+      platform capability, not a machine whitelist. Verified defconfigs
+      select it; the ordinary AArch64 and x86_64 QEMU defconfigs do. Platform code
+      still returns no direct bus address for guests that share or encrypt
+      memory, even if a seed config sets this option. Bounce buffers remain
+      the copy fallback when this is off, the buffer is not wholly in the
+      linear map, or the platform declines the range.
 
 config KFEAT_KVM_GUEST_MEM_SHARE
     bool "Enable KVM guest memory share/unshare hooks"

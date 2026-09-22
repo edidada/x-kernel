@@ -99,12 +99,14 @@ each with `# Safety` sections and `SAFETY:` comments:
 - `unmap_dma_buffer` asserts the length matches the recorded mapping;
   unmapping an unknown address panics (contract violation, not a runtime
   condition).
-- Direct DMA requires `kplat::dma::can_dma_direct()` and whole-buffer
-  linear-map membership. The platform guarantees coherent, device-accessible
-  memory without sharing or attribute changes; default capability is false.
-  `DMA_DIRECT_COHERENT` is enabled by the ordinary AArch64 QEMU defconfig.
-  The platform separately enforces machine, KVM page-sharing and VirtCCA
-  exclusions even if a seed configuration explicitly requests direct DMA.
+- Direct DMA requires a whole-buffer linear-map range and
+  `kplat::dma::direct_dma_addr()` returning that range's bus address. The
+  platform guarantees coherent, device-accessible memory without sharing or
+  attribute changes; the default answer is `None`. `DMA_DIRECT_COHERENT` is
+  enabled by the ordinary AArch64 QEMU and x86_64 QEMU defconfigs. Those
+  platforms still reject protected guests (AArch64 KVM page-sharing and
+  VirtCCA; x86_64 SEV C-bit and CSV HUK) even if a seed configuration
+  explicitly requests direct DMA.
 - Direct mappings own no bounce allocation; only `StreamingMapping::Bounce`
   carries a layout eligible for recycling.
 - Coherent allocations are page-granular, so attribute updates and

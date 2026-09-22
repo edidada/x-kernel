@@ -134,6 +134,16 @@ pub enum DmaDirection {
     Bidirectional,
 }
 
+impl From<DmaDirection> for kplat::dma::DmaDirection {
+    fn from(direction: DmaDirection) -> Self {
+        match direction {
+            DmaDirection::DriverToDevice => Self::DriverToDevice,
+            DmaDirection::DeviceToDriver => Self::DeviceToDriver,
+            DmaDirection::Bidirectional => Self::Bidirectional,
+        }
+    }
+}
+
 /// Maps an existing buffer for temporary DMA access.
 ///
 /// Buffers wholly within the linear map are handed to the device directly

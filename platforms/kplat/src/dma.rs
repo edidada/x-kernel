@@ -6,16 +6,32 @@
 
 use kplat_macros::device_interface;
 
+/// Direction of a temporary DMA mapping.
+///
+/// This is the platform query's view of the transfer. `kdma` keeps its own
+/// public direction type and converts at the call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DmaDirection {
+    /// The device reads data the CPU produced.
+    DriverToDevice,
+    /// The device produces data the CPU reads.
+    DeviceToDriver,
+    /// The device both reads and writes the buffer.
+    Bidirectional,
+}
+
 #[device_interface]
 pub trait PlatformDmaIf {
-    /// Whether ordinary cached linear-map memory is directly device-accessible.
+    /// Bus address for `paddr..paddr+size` when that range can be handed to a
+    /// device without bounce, cache maintenance, page sharing, or attribute
+    /// changes.
     ///
-    /// Returning true guarantees coherent DMA in both directions for every
-    /// device using this platform DMA backend, without cache maintenance,
-    /// page-attribute changes, or page sharing. Platforms requiring any of
-    /// those operations must keep the default false and use coherent buffers.
-    fn can_dma_direct() -> bool {
-        false
+    /// `None` means the caller must bounce. The default is `None`; a platform
+    /// returns `Some` only for a verified coherent guest. Machine identity
+    /// stays inside that platform. Device DMA masks and IOMMU translation are
+    /// not part of this query.
+    fn direct_dma_addr(_paddr: usize, _size: usize, _direction: DmaDirection) -> Option<usize> {
+        None
     }
 
     /// Finalize a DMA mapping after page attributes have been updated.

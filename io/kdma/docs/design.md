@@ -20,13 +20,15 @@ point for address-space integration.
   `DmaPageTableIf::protect`, and registers the range with the platform
   (`kplat::dma::prepare`). `deallocate_dma_memory` reverses all three
   steps.
-- Temporary mappings: `map_dma_buffer(buffer, direction)` first asks
-  `kplat::dma::can_dma_direct()`. Direct access requires a wholly linear-map
-  range and a platform guarantee of coherence and device reachability without
-  page sharing or attribute changes. Otherwise the buffer uses the coherent
-  bounce pool, with copy-in unless `DeviceToDriver` and copy-out unless
-  `DriverToDevice`. Both paths track the bus address and length, and use
-  `SeqCst` fences around device ownership transitions.
+- Temporary mappings: `map_dma_buffer(buffer, direction)` converts a wholly
+  linear-map buffer to a physical address and asks
+  `kplat::dma::direct_dma_addr()`. The platform returns the bus address when
+  that range is coherent and device-reachable without page sharing or
+  attribute changes, and `None` otherwise. `None`, or a buffer that is not
+  wholly in the linear map, uses the coherent bounce pool, with copy-in
+  unless `DeviceToDriver` and copy-out unless `DriverToDevice`. Both paths
+  track the bus address and length, and use `SeqCst` fences around device
+  ownership transitions.
 - Address translation: `p2b` / `b2p` over the linear
   `kbuild_config::PHYS_BUS_OFFSET` mapping, and `DmaBusAddress` as the
   `u64` bus address wrapper handed to devices.
@@ -72,8 +74,9 @@ drivers
   v                                              |
 SpinNoIrq<DmaAllocator>  <--- one global lock ---+
   |  alloc_coherent_pages                             |
-  |                                   platform permits + whole linear range?
-  |                                   yes: direct address; no: bounce below
+  |                                   whole linear range?
+  |                                   platform direct_dma_addr()
+  |                                   Some(bus): direct; None: bounce below
   |    kalloc alloc_dma_pages (UsageKind::Dma)        v
   |    DmaPageTableIf::protect (UNCACHED|SHARED)   BouncePool (lazy, 1024 pages)
   |    kplat::dma::prepare / release                 TLSF byte allocator
@@ -129,11 +132,13 @@ SpinNoIrq<DmaAllocator>  <--- one global lock ---+
 - Direct mappings expose exactly the caller-provided buffer range. Other
   mappings expose a bounce allocation. Neither path provides IOMMU isolation;
   the caller and device must obey descriptor bounds and ownership rules.
-- Platform direct-access capability defaults to false. Only the ordinary
-  AArch64 QEMU defconfig enables `DMA_DIRECT_COHERENT`. The platform also checks
-  machine identity, KVM page-sharing and VirtCCA exclusions independently of
-  the configuration request. Board and protected-guest configs
-  retain bounce memory and its page-granular prepare/release lifecycle.
+- Platform direct-access capability defaults to `None`. The ordinary
+  AArch64 QEMU and x86_64 QEMU defconfigs enable `DMA_DIRECT_COHERENT`.
+  Those platforms return the bus address for the requested physical range.
+  AArch64 still returns `None` for KVM page-sharing and VirtCCA; x86_64
+  still returns `None` for a non-zero SEV C-bit or the CSV HUK path.
+  Other platforms keep the default and bounce. Machine identity is not
+  part of the `kdma` check.
 - Platform integration (`kplat::dma::prepare`/`release`) treats each
   page-granular coherent region as shareable; the `SHARED` flag keeps
   TEE/platform share-unshare hooks balanced per allocation.
@@ -157,13 +162,15 @@ internal forwardings, each with `# Safety` sections and matching
 ## Design Decisions
 
 - Platform-authorized direct mapping behind a stable API: virtual-address
-  membership proves contiguity, while the platform separately owns coherence
-  and accessibility. A default-deny capability prevents architecture-wide
-  assumptions from bypassing private-memory sharing or cache requirements.
-  This is the same split as Linux 6.8 `dma_direct_map_page`: the original
-  buffer is mapped in place when it is device-addressable and coherent;
-  SWIOTLB bounce (`kernel/dma/swiotlb.c`) is the copy fallback when
-  addressing, isolation, encryption, or cache maintenance require it.
+  membership proves contiguity and yields a physical address. The platform
+  answers with the bus address for that range, or declines. `kdma` does not
+  assume `p2b` is valid after a separate boolean check. A default of `None`
+  keeps unverified platforms on bounce. This is the same split as Linux 6.8
+  `dma_direct_map_page`: the original buffer is mapped in place when it is
+  device-addressable and coherent; SWIOTLB bounce (`kernel/dma/swiotlb.c`)
+  is the copy fallback when addressing, isolation, encryption, or cache
+  maintenance require it. Device DMA masks and IOMMU translation stay out
+  of this interface until a real device needs them.
 - `StreamingMapping` distinguishes direct mappings from bounce allocations;
   only the bounce variant owns an allocation layout and is recycled on unmap.
 - Page-granular coherent allocations: page-table attribute updates and

@@ -178,7 +178,7 @@ impl DmaAllocator {
             return Err(AllocError::InvalidInput);
         }
 
-        if let Some(dma_info) = direct_dma_info(buffer) {
+        if let Some(dma_info) = direct_dma_info(buffer, direction) {
             if self
                 .active_mappings
                 .contains_key(&dma_info.bus_addr.as_u64())
@@ -431,29 +431,29 @@ fn v2b(addr: VirtAddr) -> DmaBusAddress {
     p2b(paddr)
 }
 
-/// Bus address of `buffer` when it already lives in the linear map.
+fn in_linear_map(vaddr: usize) -> bool {
+    vaddr >= kaddr_layout::LINEAR_MAP_VADDR
+        && vaddr - kaddr_layout::LINEAR_MAP_VADDR < kaddr_layout::LINEAR_MAP_VSIZE
+}
+
+/// Bus address of `buffer` when the whole range is in the linear map and the
+/// platform accepts that physical range for direct DMA.
 ///
-/// The platform must guarantee coherence and device access without changing
-/// page attributes or sharing pages. Linear-map membership alone only proves
-/// physical contiguity, not whether the device can access cached CPU memory.
-fn direct_dma_info(buffer: NonNull<[u8]>) -> Option<DMAInfo> {
-    if !kplat::dma::can_dma_direct() {
-        return None;
-    }
+/// Linear-map membership proves physical contiguity. The platform returns the
+/// bus address, or `None` when the range must bounce.
+fn direct_dma_info(buffer: NonNull<[u8]>, direction: DmaDirection) -> Option<DMAInfo> {
     let len = buffer.len();
     let vaddr = buffer.as_ptr() as *mut u8 as usize;
     let last = vaddr.checked_add(len)?.checked_sub(1)?;
-    let in_linear_fn = |va: usize| {
-        va >= kaddr_layout::LINEAR_MAP_VADDR
-            && va - kaddr_layout::LINEAR_MAP_VADDR < kaddr_layout::LINEAR_MAP_VSIZE
-    };
-    if !in_linear_fn(vaddr) || !in_linear_fn(last) {
+    if !in_linear_map(vaddr) || !in_linear_map(last) {
         return None;
     }
+    let paddr = v2p(va!(vaddr));
+    let bus_addr = kplat::dma::direct_dma_addr(paddr.as_usize(), len, direction.into())?;
     let cpu_addr = NonNull::new(vaddr as *mut u8)?;
     Some(DMAInfo {
         cpu_addr,
-        bus_addr: v2b(va!(vaddr)),
+        bus_addr: DmaBusAddress::new(bus_addr as u64),
     })
 }
 
@@ -474,6 +474,16 @@ mod tests {
     use super::*;
 
     #[def_test]
+    fn platform_accepts_linear_phys_when_direct_dma_is_configured() {
+        let bus = kplat::dma::direct_dma_addr(0, 1, DmaDirection::Bidirectional.into());
+        if kbuild_config::DMA_DIRECT_COHERENT {
+            assert_eq!(bus, Some(kbuild_config::PHYS_BUS_OFFSET));
+        } else {
+            assert_eq!(bus, None);
+        }
+    }
+
+    #[def_test]
     fn streaming_mapping_preserves_direction_and_platform_contract() {
         for direction in [
             DmaDirection::DriverToDevice,
@@ -482,7 +492,7 @@ mod tests {
         ] {
             let mut buffer = vec![0x5a; 1526];
             let ptr = NonNull::from(buffer.as_mut_slice());
-            let is_direct = direct_dma_info(ptr).is_some();
+            let is_direct = direct_dma_info(ptr, direction).is_some();
             // SAFETY: the backing allocation remains live until unmap, and
             // only the simulated device accesses mapped contents in between.
             let dma = unsafe { crate::map_dma_buffer(ptr, direction).unwrap() };
@@ -503,6 +513,14 @@ mod tests {
             // mapping and buffer returned above; this unmaps it once.
             unsafe { crate::unmap_dma_buffer(dma.bus_addr, ptr, direction) };
             assert_eq!(has_same_cpu_addr, is_direct);
+            if kbuild_config::DMA_DIRECT_COHERENT {
+                let vaddr = ptr.as_ptr() as *mut u8 as usize;
+                assert!(
+                    in_linear_map(vaddr) && in_linear_map(vaddr + 1525),
+                    "heap buffers must sit in the linear map on a direct-DMA platform"
+                );
+                assert!(is_direct);
+            }
             if let Some(byte) = device_byte {
                 assert_eq!(byte, 0x5a);
             }
@@ -528,9 +546,16 @@ mod tests {
         ] {
             // Address classification never dereferences these synthetic pointers.
             let ptr = NonNull::slice_from_raw_parts(NonNull::new(addr as *mut u8).unwrap(), len);
+            let platform_accepts = is_in_linear_map
+                && kplat::dma::direct_dma_addr(
+                    v2p(va!(addr)).as_usize(),
+                    len,
+                    DmaDirection::Bidirectional.into(),
+                )
+                .is_some();
             assert_eq!(
-                direct_dma_info(ptr).is_some(),
-                kplat::dma::can_dma_direct() && is_in_linear_map,
+                direct_dma_info(ptr, DmaDirection::Bidirectional).is_some(),
+                platform_accepts,
             );
         }
     }
