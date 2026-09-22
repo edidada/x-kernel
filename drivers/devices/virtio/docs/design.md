@@ -28,7 +28,9 @@ drivers/devices/virtio/
 │   ├── blk.rs          # VirtIO Block 适配器
 │   ├── gpu.rs          # VirtIO GPU 适配器
 │   ├── input.rs        # VirtIO Input 适配器
-│   ├── net.rs          # VirtIO Net 适配器（含 IRQ 管理）
+│   ├── net.rs          # VirtIO Net 适配器及 IRQ 管理
+│   ├── net_raw.rs      # 网络队列及 RX 通知批处理
+│   ├── net_tests.rs    # 网络通知协议回归测试
 │   ├── socket.rs       # VirtIO Vsock 适配器
 │   ├── virtio_9p.rs    # VirtIO 9p 适配器
 │   └── mock_virtio.rs  # 单元测试 Mock（Hal + Transport）
@@ -81,7 +83,8 @@ Feature flags 控制编译哪些设备适配器：
 | `blk.rs` / `blk/requests.rs` | `VirtIoBlkDev` 实现 `BlockDeviceOperations`，管理准入、请求及 DMA 回收 |
 | `gpu.rs` | 将 `VirtIOGpu` 封装为实现 `DisplayDevice` 的 `VirtIoGpuDev` |
 | `input.rs` | 将 `VirtIOInput` 封装为实现 `InputDevice` 的 `VirtIoInputDev` |
-| `net.rs` | 将 `VirtIONetRaw` 封装为实现 `NetDevice` 的 `VirtIoNetDev`，管理收发缓冲区、IRQ ack 和网络 RX scheduler 调度 |
+| `net.rs` | 将 `RawNet` 封装为实现 `NetDevice` 的 `VirtIoNetDev`，管理收发缓冲区、IRQ ack 和网络 RX scheduler 调度 |
+| `net_raw.rs` | 使用依赖提供的 `VirtQueue` 持有收发队列，协商网络特性并管理 RX 通知批次 |
 | `socket.rs` | 将 `VirtIOSocket` 封装为实现 `VsockDevice` 的原始包收发适配器 `VirtIoVsockDev`；连接状态由 `net/knet` 的 `VSOCK_CONN_MANAGER` 持有 |
 | `virtio_9p.rs` | 将 `VirtIO9p` 封装为实现 `Virtio9pDevice` 的 `VirtIo9pDev`，提供 `mount_tag()` 和 `request()` |
 | `mock_virtio.rs` | 提供 `MockHal` 和 `MockTransport`，用于单元测试 |
@@ -371,7 +374,7 @@ headers and allocator overhead. The logical sector size is the protocol's fixed
 
 1. `try_new(transport, irq)` → `InnerDev::new(transport)`：协商 feature、分配 VirtIO 队列
 2. 创建 `NetBufPool`（容量 `2 * QS`，缓冲区长度 1526 字节）
-3. 填充所有 rx 缓冲区：对每个 `rx_buffers[i]`，调用 `receive_begin()` 提交到接收队列，验证 `token == i`
+3. 填充所有 rx 缓冲区：对每个 `rx_buffers[i]`，调用 `receive_begin()` 提交到接收队列，验证 `token == i`，填充结束后刷新待通知批次
 4. 预分配所有 tx 缓冲区：对每个缓冲区，调用 `fill_buffer_header()` 填充帧头，存入 `free_tx_bufs`
 5. 若提供 `irq`，调用 `register_virtio_net_irq()` 注册中断回调
 
@@ -388,6 +391,16 @@ headers and allocator overhead. The logical sector size is the protocol's fixed
 2. 从 `rx_buffers[token]` 取出缓冲区，调用 `receive_complete()` 读取帧头和包长度
 3. 设置 `hdr_len` 和 `payload_len`，返回 `NetBufHandle`
 4. 上层处理完毕后调用 `recycle_rx()`：`receive_begin()` 重新提交缓冲区，存回 `rx_buffers[new_token]`
+
+`RawNet` 在每次发布 `avail.idx` 后执行完整内存屏障，读取设备通知请求，
+并将结果累计到当前批次。批次达到 `min(16, QS)` 时发送已请求的 RX 通知；
+初始化填充结束和 `recv()` 返回 `WouldBlock` 前刷新不足一个批次的尾部。
+已观察到的通知请求保持到批次刷新，涵盖 16 位索引回绕和设备通知抑制变化。
+TX 在每次发布后检查并立即发送通知。描述符完成数量与设备剩余缓冲数量分别由
+CPU 回收进度和设备消费进度决定，批处理使用固定上限及排空边界。
+
+内存顺序遵循 [Virtio 1.2 通知要求](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html)。
+
 
 **IRQ 处理流程**：
 

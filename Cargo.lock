@@ -2224,6 +2224,7 @@ dependencies = [
  "kspin 0.3.0-dev",
  "log",
  "memaddr",
+ "unittest",
 ]
 
 [[package]]

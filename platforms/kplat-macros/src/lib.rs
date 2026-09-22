@@ -70,6 +70,10 @@ pub fn default_dma_if_impl(item: TokenStream) -> TokenStream {
     quote! {
         #[kplat::__priv::provide]
         impl kplat::dma::PlatformDmaIf {
+            fn can_dma_direct() -> bool {
+                false
+            }
+
             fn prepare(_pa: usize, _size: usize) -> kplat::kerrno::KResult {
                 Ok(())
             }

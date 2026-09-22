@@ -6,10 +6,13 @@
 //!
 //! `kvirtiodrivers::device::net::VirtIONetRaw::receive_begin` notifies the
 //! device after every refilled buffer. The RX refill path here uses the
-//! public [`VirtQueue`] instead, and kicks once per 16 buffers unless the
-//! device is already holding fewer than a quarter of the queue.
+//! public [`VirtQueue`] instead, and checks notification requests after each
+//! publication while deferring the kick until a batch or a drain boundary.
 
-use core::mem::size_of;
+use core::{
+    mem::size_of,
+    sync::atomic::{Ordering, fence},
+};
 
 use log::warn;
 use virtio_drivers::{
@@ -69,10 +72,10 @@ pub(super) struct RawNet<H: Hal, T: Transport, const QS: usize> {
     recv_queue: VirtQueue<H, QS>,
     send_queue: VirtQueue<H, QS>,
     legacy_header: bool,
-    /// Receive buffers currently visible to the device.
-    rx_posted: u16,
-    /// Refills since the last receive-queue kick.
+    /// Refills since the last receive-queue flush.
     rx_since_notify: u16,
+    /// A notification requested by any publication in the current batch.
+    needs_rx_notify: bool,
 }
 
 impl<H: Hal, T: Transport, const QS: usize> RawNet<H, T, QS> {
@@ -104,8 +107,8 @@ impl<H: Hal, T: Transport, const QS: usize> RawNet<H, T, QS> {
             send_queue,
             legacy_header: !negotiated_features.contains(Features::VERSION_1)
                 && !negotiated_features.contains(Features::MRG_RXBUF),
-            rx_posted: 0,
             rx_since_notify: 0,
+            needs_rx_notify: false,
         })
     }
 
@@ -136,6 +139,8 @@ impl<H: Hal, T: Transport, const QS: usize> RawNet<H, T, QS> {
         self.check_tx_buf_len(tx_buf)?;
         // SAFETY: the caller keeps `tx_buf` live until `transmit_complete`.
         let token = unsafe { self.send_queue.add(&[tx_buf], &mut [])? };
+        // Publish avail.idx before reading the device's notification request.
+        fence(Ordering::SeqCst);
         if self.send_queue.should_notify() {
             self.transport.notify(QUEUE_TRANSMIT);
         }
@@ -155,24 +160,28 @@ impl<H: Hal, T: Transport, const QS: usize> RawNet<H, T, QS> {
         Ok(len as usize)
     }
 
-    /// Submits one receive buffer. The device is kicked every
-    /// [`RX_REFILL_BATCH`] buffers, or immediately when fewer than a quarter
-    /// of the queue is already posted.
+    /// Submits one receive buffer and batches requested kicks across at most
+    /// [`RX_REFILL_BATCH`] refills, bounded by the queue capacity.
     ///
     /// # Safety
     ///
-    /// `rx_buf` must stay unmodified until `receive_complete` consumes `token`.
+    /// `rx_buf` must stay live and must not be accessed until
+    /// `receive_complete` consumes the returned token.
     pub(super) unsafe fn receive_begin(&mut self, rx_buf: &mut [u8]) -> Result<u16> {
         if rx_buf.len() < MIN_BUFFER_LEN {
             warn!("Receive buffer len {} is too small", rx_buf.len());
             return Err(Error::InvalidParam);
         }
-        let scarce = self.rx_posted < low_water::<QS>();
         // SAFETY: the caller keeps `rx_buf` live until `receive_complete`.
         let token = unsafe { self.recv_queue.add(&[], &mut [rx_buf])? };
-        self.rx_posted = self.rx_posted.saturating_add(1);
-        self.rx_since_notify = self.rx_since_notify.saturating_add(1);
-        if self.rx_since_notify >= RX_REFILL_BATCH || scarce {
+        // Virtio 1.2 section 2.7.13.4.1 requires a full barrier between
+        // publishing avail.idx and reading flags/avail_event. Check each
+        // publication: should_notify() is not an interval test and cannot
+        // detect an event crossed by an entire batch spanning u16 wraparound.
+        fence(Ordering::SeqCst);
+        self.needs_rx_notify |= self.recv_queue.should_notify();
+        self.rx_since_notify += 1;
+        if usize::from(self.rx_since_notify) >= usize::from(RX_REFILL_BATCH).min(QS) {
             self.flush_receive_notify();
         }
         Ok(token)
@@ -183,10 +192,11 @@ impl<H: Hal, T: Transport, const QS: usize> RawNet<H, T, QS> {
         if self.rx_since_notify == 0 {
             return;
         }
-        if self.recv_queue.should_notify() {
+        if self.needs_rx_notify {
             self.transport.notify(QUEUE_RECEIVE);
         }
         self.rx_since_notify = 0;
+        self.needs_rx_notify = false;
     }
 
     pub(super) fn poll_receive(&self) -> Option<u16> {
@@ -203,7 +213,6 @@ impl<H: Hal, T: Transport, const QS: usize> RawNet<H, T, QS> {
     ) -> Result<(usize, usize)> {
         // SAFETY: `rx_buf` matches the descriptor chain identified by `token`.
         let len = unsafe { self.recv_queue.pop_used(token, &[], &mut [rx_buf])? } as usize;
-        self.rx_posted = self.rx_posted.saturating_sub(1);
         let hdr_size = if self.legacy_header {
             size_of::<VirtioNetHdrLegacy>()
         } else {
@@ -228,10 +237,6 @@ impl<H: Hal, T: Transport, const QS: usize> RawNet<H, T, QS> {
     }
 }
 
-fn low_water<const QS: usize>() -> u16 {
-    u16::try_from(QS / 4).unwrap_or(u16::MAX).max(1)
-}
-
 fn write_header<H: Default + IntoBytes + Immutable>(buffer: &mut [u8]) -> Result<usize> {
     let header = H::default();
     let bytes = header.as_bytes();
@@ -241,3 +246,7 @@ fn write_header<H: Default + IntoBytes + Immutable>(buffer: &mut [u8]) -> Result
     buffer[..bytes.len()].copy_from_slice(bytes);
     Ok(bytes.len())
 }
+
+#[cfg(unittest)]
+#[path = "net_tests.rs"]
+mod tests;

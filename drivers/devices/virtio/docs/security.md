@@ -95,7 +95,8 @@ sharing mutable scratch. Wait preparation is task-only and all waits occur
 outside the device lock. Activation/transport lifetime remains a host obligation.
 
 Tests use an identity-mapped fake HAL and real dependency descriptors; production
-uses the existing host bounce pool. Passing fake tests does not prove physical
+uses the host DMA provider, which selects platform-authorized direct mapping
+or coherent bounce memory. Passing fake tests does not prove physical
 device DMA coherency, which remains a hardware-validation obligation.
 
 Close accounts calls before wait preparation, not only published descriptors.
@@ -109,6 +110,18 @@ the closing task. The device's immutable geometry/read-only cache is valid after
 close. No IRQ callback owns activation or can run its synchronous destructor.
 Malformed device completion remains fatal; graceful close has no forced-DMA
 cancellation or timeout guarantee for a nonresponsive device.
+
+## Network queue ownership and notification ordering
+
+`net_raw.rs` owns both `VirtQueue` instances and the RX notification batch.
+RX buffers remain live and inaccessible to the CPU while device-owned; TX
+buffers remain live and unmodified until completion. Each publication is
+followed by a full barrier before observing notification suppression. A
+requested RX kick remains latched until flush, including across u16 index
+wraparound; later suppression cannot erase it. Full batches and explicit
+drain boundaries bound deferred notifications. Tests drive the real queue
+with a single-threaded fake device and cover index wrap, short batches and
+suppression changes. They do not establish hardware DMA coherence.
 
 ## unsafe 代码清单
 

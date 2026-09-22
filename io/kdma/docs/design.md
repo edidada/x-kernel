@@ -4,7 +4,8 @@
 
 `kdma` is the kernel's DMA memory layer: it allocates coherent memory that
 devices can read and write, maps existing CPU buffers into temporary DMA
-transactions through a pooled coherent bounce area, and defines the bus
+transactions directly when authorized by the platform or through a pooled
+coherent bounce area, and defines the bus
 address type and physical↔bus conversion shared by all DMA-capable
 drivers. It exposes two flat unsafe entry pairs —
 `allocate_dma_memory`/`deallocate_dma_memory` and
@@ -19,12 +20,13 @@ point for address-space integration.
   `DmaPageTableIf::protect`, and registers the range with the platform
   (`kplat::dma::prepare`). `deallocate_dma_memory` reverses all three
   steps.
-- Temporary mappings: `map_dma_buffer(buffer, direction)` stages the
-  buffer through the coherent bounce pool (copy-in unless the direction is
-  `DeviceToDriver`), tracks the mapping in `active_mappings` keyed by bus
-  address, and fences (`SeqCst`) around the copies. `unmap_dma_buffer`
-  copies data back (unless `DriverToDevice`), removes the tracking entry,
-  and recycles the bounce buffer.
+- Temporary mappings: `map_dma_buffer(buffer, direction)` first asks
+  `kplat::dma::can_dma_direct()`. Direct access requires a wholly linear-map
+  range and a platform guarantee of coherence and device reachability without
+  page sharing or attribute changes. Otherwise the buffer uses the coherent
+  bounce pool, with copy-in unless `DeviceToDriver` and copy-out unless
+  `DriverToDevice`. Both paths track the bus address and length, and use
+  `SeqCst` fences around device ownership transitions.
 - Address translation: `p2b` / `b2p` over the linear
   `kbuild_config::PHYS_BUS_OFFSET` mapping, and `DmaBusAddress` as the
   `u64` bus address wrapper handed to devices.
@@ -41,8 +43,8 @@ point for address-space integration.
 - No IOMMU management: bus addresses are direct physical+offset values;
   IOVA translation and IOMMU programming are out of scope.
 - No cache maintenance beyond the chosen mapping attributes: coherence is
-  achieved with `UNCACHED` mappings plus fences, not architecture cache
-  flush calls.
+  achieved with platform-guaranteed coherent direct access, or `UNCACHED`
+  bounce mappings plus fences. Noncoherent platforms retain bounce mappings.
 - No streaming scatter-gather: `map_dma_buffer` handles one contiguous
   slice per mapping; descriptors chaining multiple buffers live in
   drivers.
@@ -70,11 +72,13 @@ drivers
   v                                              |
 SpinNoIrq<DmaAllocator>  <--- one global lock ---+
   |  alloc_coherent_pages                             |
+  |                                   platform permits + whole linear range?
+  |                                   yes: direct address; no: bounce below
   |    kalloc alloc_dma_pages (UsageKind::Dma)        v
   |    DmaPageTableIf::protect (UNCACHED|SHARED)   BouncePool (lazy, 1024 pages)
   |    kplat::dma::prepare / release                 TLSF byte allocator
   |    p2b -> DMAInfo{cpu_addr, bus_addr}            copy-in/out + SeqCst fences
-  |                                           active_mappings: BTreeMap<bus, BounceMapping>
+  |                                           active_mappings: BTreeMap<bus, StreamingMapping>
 ```
 
 ## Execution Context
@@ -86,8 +90,8 @@ SpinNoIrq<DmaAllocator>  <--- one global lock ---+
   table updates, so it must run after `kalloc` and the address-space
   subsystem are initialized; first use of the bounce path lazily
   allocates the pool through the same path.
-- `map_dma_buffer`/`unmap_dma_buffer` copy up to the buffer length on the
-  calling thread; they are intended for driver submit/completion paths.
+- `map_dma_buffer`/`unmap_dma_buffer` copy up to the buffer length only on
+  the bounce path; they are intended for driver submit/completion paths.
 - The `dma-trace` feature adds allocation-site bookkeeping for
   debugging; it is off in production builds.
 
@@ -122,9 +126,14 @@ SpinNoIrq<DmaAllocator>  <--- one global lock ---+
   contracts require callers to expose an allocation's bus address only to
   devices allowed to DMA that buffer, and to stop device access before
   `unmap_dma_buffer`.
-- The bounce pool stages all temporary mappings, so driver-owned buffers
-  are never directly exposed to devices today; this bounds the blast
-  radius of a mis-programmed device to the 1024-page coherent pool.
+- Direct mappings expose exactly the caller-provided buffer range. Other
+  mappings expose a bounce allocation. Neither path provides IOMMU isolation;
+  the caller and device must obey descriptor bounds and ownership rules.
+- Platform direct-access capability defaults to false. Only the ordinary
+  AArch64 QEMU defconfig enables `DMA_DIRECT_COHERENT`. The platform also checks
+  machine identity, KVM page-sharing and VirtCCA exclusions independently of
+  the configuration request. Board and protected-guest configs
+  retain bounce memory and its page-granular prepare/release lifecycle.
 - Platform integration (`kplat::dma::prepare`/`release`) treats each
   page-granular coherent region as shareable; the `SHARED` flag keeps
   TEE/platform share-unshare hooks balanced per allocation.
@@ -147,10 +156,12 @@ internal forwardings, each with `# Safety` sections and matching
 
 ## Design Decisions
 
-- Bounce-staged temporary mappings behind a stable API: staging through
-  pooled coherent memory keeps driver code simple and safe today; a
-  direct-map fast path can be reintroduced later without touching
-  drivers.
+- Platform-authorized direct mapping behind a stable API: virtual-address
+  membership proves contiguity, while the platform separately owns coherence
+  and accessibility. A default-deny capability prevents architecture-wide
+  assumptions from bypassing private-memory sharing or cache requirements.
+- `StreamingMapping` distinguishes direct mappings from bounce allocations;
+  only the bounce variant owns an allocation layout and is recycled on unmap.
 - Page-granular coherent allocations: page-table attribute updates and
   platform prepare/release hooks stay balanced per allocation, avoiding
   partial-page flag aliasing between coherent and cached uses.

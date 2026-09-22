@@ -6,25 +6,35 @@
 
 #[cfg(feature = "kvm-guest-mem-share")]
 use khal::mem::PAGE_SIZE_4K;
-#[cfg(feature = "kvm-guest-mem-share")]
 use kplat::dma::PlatformDmaIf;
 
-#[cfg(feature = "kvm-guest-mem-share")]
 #[kiface::provide]
 impl PlatformDmaIf {
+    fn can_dma_direct() -> bool {
+        // Enforce the capability boundary even if a seed config explicitly
+        // enables direct DMA for an unsupported machine or protected guest.
+        kbuild_config::DMA_DIRECT_COHERENT
+            && kbuild_config::MACHINE_AARCH64_QEMU
+            && !cfg!(feature = "kvm-guest-mem-share")
+            && !kbuild_config::KFEAT_VIRTCCA_HUK_KEY
+    }
+
     fn prepare(paddr: usize, size: usize) -> kerrno::KResult {
+        #[cfg(feature = "kvm-guest-mem-share")]
         dma_share_pages(paddr, size);
+        #[cfg(not(feature = "kvm-guest-mem-share"))]
+        let _ = (paddr, size);
         Ok(())
     }
 
     fn release(paddr: usize, size: usize) -> kerrno::KResult {
+        #[cfg(feature = "kvm-guest-mem-share")]
         dma_unshare_pages(paddr, size);
+        #[cfg(not(feature = "kvm-guest-mem-share"))]
+        let _ = (paddr, size);
         Ok(())
     }
 }
-
-#[cfg(not(feature = "kvm-guest-mem-share"))]
-kplat::default_dma_if_impl!();
 
 #[cfg(feature = "kvm-guest-mem-share")]
 fn dma_unshare_pages(paddr: usize, size: usize) {

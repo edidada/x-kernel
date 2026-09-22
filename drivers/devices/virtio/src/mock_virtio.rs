@@ -8,6 +8,7 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+use kspin::SpinRaw;
 use virtio_drivers::{
     BufferDirection, Error, Hal, PhysAddr, Result,
     transport::{DeviceStatus, DeviceType, InterruptStatus, Transport},
@@ -91,6 +92,9 @@ pub struct MockTransport {
     pub features: u64,
     pub config_space: RefCell<[u8; 256]>,
     pub interrupt_ack_count: Arc<AtomicUsize>,
+    pub queue_addresses: Arc<SpinRaw<[[PhysAddr; 3]; 2]>>,
+    pub notify_count: Arc<[AtomicUsize; 2]>,
+    pub queue_size: u32,
 }
 
 impl MockTransport {
@@ -105,6 +109,9 @@ impl MockTransport {
             features: 0,
             config_space: RefCell::new([0; 256]),
             interrupt_ack_count: Arc::new(AtomicUsize::new(0)),
+            queue_addresses: Arc::new(SpinRaw::new([[0; 3]; 2])),
+            notify_count: Arc::new(core::array::from_fn(|_| AtomicUsize::new(0))),
+            queue_size: 32,
         }
     }
 }
@@ -127,10 +134,14 @@ impl Transport for MockTransport {
     fn write_driver_features(&mut self, _features: u64) {}
 
     fn max_queue_size(&mut self, _queue: u16) -> u32 {
-        32
+        self.queue_size
     }
 
-    fn notify(&mut self, _queue: u16) {}
+    fn notify(&mut self, queue: u16) {
+        if let Some(count) = self.notify_count.get(usize::from(queue)) {
+            count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 
     fn get_status(&self) -> DeviceStatus {
         *self.status.borrow()
@@ -148,12 +159,16 @@ impl Transport for MockTransport {
 
     fn queue_set(
         &mut self,
-        _queue: u16,
+        queue: u16,
         _size: u32,
-        _descriptors: PhysAddr,
-        _driver_area: PhysAddr,
-        _device_area: PhysAddr,
+        descriptors: PhysAddr,
+        driver_area: PhysAddr,
+        device_area: PhysAddr,
     ) {
+        let mut slots = self.queue_addresses.lock();
+        if let Some(addresses) = slots.get_mut(usize::from(queue)) {
+            *addresses = [descriptors, driver_area, device_area];
+        }
     }
 
     fn queue_unset(&mut self, _queue: u16) {}
