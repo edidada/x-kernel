@@ -4,7 +4,7 @@
 
 use alloc::sync::Arc;
 
-use crate::vdev::virtio::{
+use crate::{
     GuestPhysAddr,
     constants::*,
     error::{VirtioError, VirtioResult},
@@ -182,13 +182,13 @@ impl<T: GuestMemoryAccessor + Clone> AvailableRing<T> {
         }
 
         self.accessor
-            .write_obj(self.base_addr, header)
+            .write_obj(self.base_addr, *header)
             .map_err(|_| VirtioError::InvalidAddress)
     }
 
     /// Read the current available index from guest memory
     pub fn read_avail_idx(&self) -> VirtioResult<u16> {
-        let mut memory = crate::vdev::virtio::AddressSpaceMemory::new(&*self.accessor);
+        let mut memory = crate::AddressSpaceMemory::new(&*self.accessor);
         self.read_avail_idx_with_memory(&mut memory)
     }
 
@@ -212,7 +212,7 @@ impl<T: GuestMemoryAccessor + Clone> AvailableRing<T> {
 
     /// Read a descriptor index from the available ring
     pub fn read_avail_ring_entry(&self, ring_index: u16) -> VirtioResult<u16> {
-        let mut memory = crate::vdev::virtio::AddressSpaceMemory::new(&*self.accessor);
+        let mut memory = crate::AddressSpaceMemory::new(&*self.accessor);
         self.read_avail_ring_entry_with_memory(ring_index, &mut memory)
     }
 
@@ -313,7 +313,7 @@ impl<T: GuestMemoryAccessor + Clone> AvailableRing<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vdev::virtio::NoGuestMemoryAccessor;
+    use crate::NoGuestMemoryAccessor;
 
     #[test]
     fn layout_size_counts_header_entries_and_footer() {

@@ -2,38 +2,36 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Host-side self-test for the KVMM virtio-blk device.
+//! Host-side self-test for the virtio-blk device.
 //!
-//! Drives [`super::virtio_blk_bus::VirtioBlkDevice`] through the exact MMIO
-//! sequence a Linux driver performs — status/feature negotiation, queue
-//! programming, `QUEUE_READY`, descriptor-chain submission, `QUEUE_NOTIFY`,
-//! used-ring completion and interrupt injection — without creating a VM or
-//! running a guest. Guest memory is a host buffer behind a fake [`GuestDma`],
-//! and a recording [`IrqSender`] counts used-ring notifications.
+//! Drives [`VirtioBlkDevice`] through the exact MMIO sequence a Linux driver
+//! performs — status/feature negotiation, queue programming, `QUEUE_READY`,
+//! descriptor-chain submission, `QUEUE_NOTIFY`, used-ring completion and
+//! interrupt injection — without creating a VM or running a guest. Guest memory
+//! is a host buffer behind a fake [`GuestDma`], and a recording [`IrqSender`]
+//! counts used-ring notifications.
 //!
 //! Run it on the QEMU unittest/kernel-runtime path via
-//! `kvmm::vdev::virtio_blk_selftest::vmm_selftest_virtio_blk()`.
+//! `vdev_virtio_blk::selftest::vmm_selftest_virtio_blk()`.
 
 use alloc::{sync::Arc, vec, vec::Vec};
 
 use ksync::Mutex as KsyncMutex;
 use vdev_core::{DmaError, GuestDma, IrqSender, MmioDevice};
+use vdev_virtio::constants::{
+    VIRTIO_STATUS_ACKNOWLEDGE, VIRTIO_STATUS_DRIVER, VIRTIO_STATUS_DRIVER_OK,
+    VIRTIO_STATUS_FEATURES_OK, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE,
+    mmio::{
+        VIRTIO_MMIO_QUEUE_AVAIL_HIGH, VIRTIO_MMIO_QUEUE_AVAIL_LOW, VIRTIO_MMIO_QUEUE_DESC_HIGH,
+        VIRTIO_MMIO_QUEUE_DESC_LOW, VIRTIO_MMIO_QUEUE_NOTIFY, VIRTIO_MMIO_QUEUE_NUM,
+        VIRTIO_MMIO_QUEUE_READY, VIRTIO_MMIO_QUEUE_SEL, VIRTIO_MMIO_QUEUE_USED_HIGH,
+        VIRTIO_MMIO_QUEUE_USED_LOW, VIRTIO_MMIO_STATUS,
+    },
+};
 
-use super::{
-    virtio::constants::{
-        VIRTIO_STATUS_ACKNOWLEDGE, VIRTIO_STATUS_DRIVER, VIRTIO_STATUS_DRIVER_OK,
-        VIRTIO_STATUS_FEATURES_OK, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE,
-        mmio::{
-            VIRTIO_MMIO_QUEUE_AVAIL_HIGH, VIRTIO_MMIO_QUEUE_AVAIL_LOW, VIRTIO_MMIO_QUEUE_DESC_HIGH,
-            VIRTIO_MMIO_QUEUE_DESC_LOW, VIRTIO_MMIO_QUEUE_NOTIFY, VIRTIO_MMIO_QUEUE_NUM,
-            VIRTIO_MMIO_QUEUE_READY, VIRTIO_MMIO_QUEUE_SEL, VIRTIO_MMIO_QUEUE_USED_HIGH,
-            VIRTIO_MMIO_QUEUE_USED_LOW, VIRTIO_MMIO_STATUS,
-        },
-    },
-    virtio_blk::constants::{
-        VIRTIO_BLK_S_OK, VIRTIO_BLK_T_FLUSH, VIRTIO_BLK_T_IN, VIRTIO_BLK_T_OUT,
-    },
-    virtio_blk_bus::{DEFAULT_CAPACITY_BYTES, VirtioBlkDevice},
+use crate::{
+    bus::{DEFAULT_CAPACITY_BYTES, VirtioBlkDevice},
+    constants::{VIRTIO_BLK_S_OK, VIRTIO_BLK_T_FLUSH, VIRTIO_BLK_T_IN, VIRTIO_BLK_T_OUT},
 };
 
 /// Guest memory layout for the selftest (inside the fake 16 MiB guest RAM).

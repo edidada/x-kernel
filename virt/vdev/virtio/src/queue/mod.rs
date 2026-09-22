@@ -14,7 +14,7 @@ pub use descriptor::{DescriptorChain, DescriptorTable, VirtQueueDesc};
 use log::{trace, warn};
 pub use used::{UsedRing, VirtQueueUsed, VirtqUsedElem};
 
-use crate::vdev::virtio::{
+use crate::{
     GuestPhysAddr, VirtioDeviceID,
     constants::{VIRTQ_AVAIL_ALIGN, VIRTQ_DESC_ALIGN, VIRTQ_USED_ALIGN},
     error::{VirtioError, VirtioResult},
@@ -270,7 +270,7 @@ impl<T: GuestMemoryAccessor + Clone> VirtioQueue<T> {
     /// runtime accesses are what ultimately verify mid-region mapping.
     ///
     /// An accessor that cannot translate any guest address (such as
-    /// [`NoGuestMemoryAccessor`](crate::vdev::virtio::memory::NoGuestMemoryAccessor), whose
+    /// [`NoGuestMemoryAccessor`](crate::memory::NoGuestMemoryAccessor), whose
     /// `translate_and_get_limit` always returns `None`) fails every probe and
     /// therefore cannot satisfy this check; such layouts are rejected (the
     /// first rejection per configuration cycle is warned, later ones only
@@ -283,7 +283,7 @@ impl<T: GuestMemoryAccessor + Clone> VirtioQueue<T> {
     /// from "queue ready".
     pub fn validate_layout_with_memory(
         &self,
-        memory: &mut dyn crate::vdev::virtio::GuestMemory,
+        memory: &mut dyn crate::GuestMemory,
     ) -> VirtioResult<()> {
         self.validate_layout()?;
         for region in self.ring_regions() {
@@ -398,7 +398,7 @@ impl<T: GuestMemoryAccessor + Clone> VirtioQueue<T> {
     /// fault, matching the other avail-ring pre-read paths.
     pub fn read_avail_idx(&self) -> VirtioResult<u16> {
         let accessor = self.accessor.clone();
-        let mut memory = crate::vdev::virtio::AddressSpaceMemory::new(&*accessor);
+        let mut memory = crate::AddressSpaceMemory::new(&*accessor);
         self.read_avail_idx_with_memory(&mut memory)
     }
 
@@ -411,7 +411,7 @@ impl<T: GuestMemoryAccessor + Clone> VirtioQueue<T> {
     /// fault, matching the other avail-ring pre-read paths.
     pub fn read_avail_idx_with_memory(
         &self,
-        memory: &mut dyn crate::vdev::virtio::GuestMemory,
+        memory: &mut dyn crate::GuestMemory,
     ) -> VirtioResult<u16> {
         if self.faulted.load(Ordering::Acquire) {
             return Err(VirtioError::QueueFaulted);
@@ -467,14 +467,14 @@ impl<T: GuestMemoryAccessor + Clone> VirtioQueue<T> {
     /// more than `size`, which indicates a corrupted available ring.
     pub fn pop_available_head(&mut self) -> VirtioResult<Option<u16>> {
         let accessor = self.accessor.clone();
-        let mut memory = crate::vdev::virtio::AddressSpaceMemory::new(&*accessor);
+        let mut memory = crate::AddressSpaceMemory::new(&*accessor);
         self.pop_available_head_with_memory(&mut memory)
     }
 
     /// Consumes one available head with a scoped memory capability.
     pub fn pop_available_head_with_memory(
         &mut self,
-        memory: &mut dyn crate::vdev::virtio::GuestMemory,
+        memory: &mut dyn crate::GuestMemory,
     ) -> VirtioResult<Option<u16>> {
         if self.faulted.load(Ordering::Acquire) {
             return Err(VirtioError::QueueFaulted);
@@ -531,7 +531,7 @@ impl<T: GuestMemoryAccessor + Clone> VirtioQueue<T> {
 
     /// Build a validated [`DescriptorChain`] for an already-consumed head index.
     pub fn descriptor_chain(&self, head: u16) -> VirtioResult<DescriptorChain> {
-        let mut memory = crate::vdev::virtio::AddressSpaceMemory::new(&*self.accessor);
+        let mut memory = crate::AddressSpaceMemory::new(&*self.accessor);
         self.descriptor_chain_with_memory(head, &mut memory)
     }
 
@@ -543,7 +543,7 @@ impl<T: GuestMemoryAccessor + Clone> VirtioQueue<T> {
     pub fn descriptor_chain_with_memory(
         &self,
         head: u16,
-        memory: &mut dyn crate::vdev::virtio::GuestMemory,
+        memory: &mut dyn crate::GuestMemory,
     ) -> VirtioResult<DescriptorChain> {
         if self.faulted.load(Ordering::Acquire) {
             return Err(VirtioError::QueueFaulted);
@@ -581,7 +581,7 @@ impl<T: GuestMemoryAccessor + Clone> VirtioQueue<T> {
         &mut self,
         head: u16,
         written_len: u32,
-        memory: &mut dyn crate::vdev::virtio::GuestMemory,
+        memory: &mut dyn crate::GuestMemory,
     ) -> VirtioResult<bool> {
         if self.faulted.load(Ordering::Acquire) {
             return Err(VirtioError::QueueFaulted);
@@ -628,7 +628,7 @@ impl<T: GuestMemoryAccessor + Clone> VirtioQueue<T> {
     /// fault, matching the other avail-ring pre-read paths.
     pub fn read_avail_entry(&self, ring_index: u16) -> VirtioResult<u16> {
         let accessor = self.accessor.clone();
-        let mut memory = crate::vdev::virtio::AddressSpaceMemory::new(&*accessor);
+        let mut memory = crate::AddressSpaceMemory::new(&*accessor);
         self.read_avail_entry_with_memory(ring_index, &mut memory)
     }
 
@@ -642,7 +642,7 @@ impl<T: GuestMemoryAccessor + Clone> VirtioQueue<T> {
     pub fn read_avail_entry_with_memory(
         &self,
         ring_index: u16,
-        memory: &mut dyn crate::vdev::virtio::GuestMemory,
+        memory: &mut dyn crate::GuestMemory,
     ) -> VirtioResult<u16> {
         if self.faulted.load(Ordering::Acquire) {
             return Err(VirtioError::QueueFaulted);
@@ -692,7 +692,7 @@ impl<T: GuestMemoryAccessor + Clone> VirtioQueue<T> {
         let Some(ref desc_table) = self.desc_table else {
             return Err(VirtioError::QueueNotReady);
         };
-        let mut memory = crate::vdev::virtio::AddressSpaceMemory::new(&*self.accessor);
+        let mut memory = crate::AddressSpaceMemory::new(&*self.accessor);
         let result = desc_table
             .follow_chain(head_index, &mut memory)
             .map(|descriptors| descriptors.len() >= min_length);
@@ -718,7 +718,7 @@ impl<T: GuestMemoryAccessor + Clone> VirtioQueue<T> {
         let Some(ref desc_table) = self.desc_table else {
             return Err(VirtioError::QueueNotReady);
         };
-        let mut memory = crate::vdev::virtio::AddressSpaceMemory::new(&*self.accessor);
+        let mut memory = crate::AddressSpaceMemory::new(&*self.accessor);
         let result = desc_table.get_data_buffers(head_index, device_type, &mut memory);
         if result.is_err() {
             self.latch_fault();
@@ -738,7 +738,7 @@ impl<T: GuestMemoryAccessor + Clone> VirtioQueue<T> {
         let Some(ref desc_table) = self.desc_table else {
             return Err(VirtioError::QueueNotReady);
         };
-        let mut memory = crate::vdev::virtio::AddressSpaceMemory::new(&*self.accessor);
+        let mut memory = crate::AddressSpaceMemory::new(&*self.accessor);
         let result = desc_table.get_status_addr(head_index, &mut memory);
         if result.is_err() {
             self.latch_fault();

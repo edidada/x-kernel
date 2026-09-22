@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 
 use kspin::{SpinNoIrq as Mutex, SpinNoIrqGuard as MutexGuard};
 
-use crate::vdev::virtio::{
+use crate::{
     AccessWidth, GuestPhysAddr, VirtioQueue, VirtioResult, constants as vc, error::VirtioError,
     memory::GuestMemoryAccessor, mmio::transport,
 };
@@ -283,7 +283,7 @@ impl<T: GuestMemoryAccessor + Clone> VirtioMmioState<T> {
         addr: GuestPhysAddr,
         width: AccessWidth,
         val: usize,
-        memory: &mut dyn crate::vdev::virtio::GuestMemory,
+        memory: &mut dyn crate::GuestMemory,
     ) -> VirtioResult<MmioWriteAction> {
         self.mmio_write_inner(addr, width, val, Some(memory))
     }
@@ -298,7 +298,7 @@ impl<T: GuestMemoryAccessor + Clone> VirtioMmioState<T> {
         addr: GuestPhysAddr,
         width: AccessWidth,
         val: usize,
-        ready_memory: Option<&mut dyn crate::vdev::virtio::GuestMemory>,
+        ready_memory: Option<&mut dyn crate::GuestMemory>,
     ) -> VirtioResult<MmioWriteAction> {
         if !transport::is_address_in_range(addr, self.base_ipa, self.length) {
             return Ok(MmioWriteAction::None);
@@ -346,8 +346,7 @@ impl<T: GuestMemoryAccessor + Clone> VirtioMmioState<T> {
                             Some(memory) => q.validate_layout_with_memory(memory),
                             None => {
                                 let accessor = q.accessor().clone();
-                                let mut memory =
-                                    crate::vdev::virtio::AddressSpaceMemory::new(&*accessor);
+                                let mut memory = crate::AddressSpaceMemory::new(&*accessor);
                                 q.validate_layout_with_memory(&mut memory)
                             }
                         }

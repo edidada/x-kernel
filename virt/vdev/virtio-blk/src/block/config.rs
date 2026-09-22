@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use crate::vdev::virtio_blk::constants::*;
+use crate::constants::*;
 
 /// VirtIO Block Device Configuration
 /// Layout according to VirtIO specification

@@ -6,7 +6,7 @@
 
 use core::mem::size_of;
 
-use crate::vdev::virtio::{GuestPhysAddr, PhysAddr, VirtioError, VirtioResult};
+use crate::{GuestPhysAddr, PhysAddr, VirtioError, VirtioResult};
 
 /// Error returned by a guest-memory accessor when a translation or access
 /// fails or would cross the translated region.
@@ -30,12 +30,12 @@ pub trait GuestMemory {
 /// Address-space accessor capability required by the `VirtioQueue<T>`
 /// configuration setters and the [`AddressSpaceMemory`] adapter.
 ///
-/// This is the KVMM-local equivalent of the ArceOS `axaddrspace`
-/// `GuestMemoryAccessor` trait the VirtIO code was written against. KVMM's
-/// real guest memory is translated through [`crate::mm::GuestMem`]
-/// (`gpa_to_hpa` plus `p2v`); runtimes that only hold memory as a scoped
-/// capability at queue-processing time use [`NoGuestMemoryAccessor`] plus
-/// the `_with_memory` operations instead.
+/// This is the crate-local equivalent of the ArceOS `axaddrspace`
+/// `GuestMemoryAccessor` trait the VirtIO code was written against. A VMM that
+/// exposes a directly-dereferenceable host mapping implements it; a runtime
+/// that only holds guest memory as a scoped capability at queue-processing time
+/// uses [`NoGuestMemoryAccessor`] plus the `_with_memory` operations, backed by
+/// a `vdev_core::GuestDma`-based [`crate::GuestMemory`] instead.
 pub trait GuestMemoryAccessor: Clone {
     /// Translate a guest physical address to a host physical address and the
     /// contiguous guest bytes available at that translation.

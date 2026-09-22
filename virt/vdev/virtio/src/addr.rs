@@ -5,10 +5,10 @@
 //! Minimal guest-address and access-width types for the ported VirtIO layer.
 //!
 //! The ArceOS sources model guest physical addresses on `axvm_types` /
-//! `ax_memory_addr` (`def_usize_addr`); KVMM passes raw guest physical
-//! addresses through its MMIO bus and `GuestMem` translation, so the port
-//! defines the minimal `usize`-backed newtypes the VirtIO queue/MMIO data
-//! paths need, mirroring `def_usize_addr` exactly.
+//! `ax_memory_addr` (`def_usize_addr`); VMMs pass raw guest physical addresses
+//! through their MMIO bus and DMA translation, so the port defines the minimal
+//! `usize`-backed newtypes the VirtIO queue/MMIO data paths need, mirroring
+//! `def_usize_addr` exactly.
 
 /// Guest physical address with the helper methods the VirtIO data paths use.
 ///
@@ -59,7 +59,7 @@ impl core::ops::Sub<usize> for GuestPhysAddr {
 }
 
 /// Host physical address as returned by
-/// [`GuestMemoryAccessor::translate_and_get_limit`](crate::vdev::virtio::memory::GuestMemoryAccessor::translate_and_get_limit).
+/// [`GuestMemoryAccessor::translate_and_get_limit`](crate::memory::GuestMemoryAccessor::translate_and_get_limit).
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct PhysAddr(usize);

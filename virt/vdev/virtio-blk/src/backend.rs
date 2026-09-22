@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use crate::vdev::virtio::VirtioResult;
+use vdev_virtio::VirtioResult;
 
 /// Trait for block device backends
 pub trait BlockBackend: Send + Sync {

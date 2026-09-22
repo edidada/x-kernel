@@ -17,21 +17,13 @@ pub mod aarch64;
 pub mod dma;
 #[cfg(target_arch = "riscv64")]
 pub mod riscv64;
-/// Ported VirtIO MMIO infrastructure and VirtIO block device model.
-pub mod virtio;
-pub mod virtio_blk;
-/// virtio-blk bound to the VM MMIO bus (RAM-disk backend).
-pub mod virtio_blk_bus;
-/// Host-side device self-test (driver-sequence simulation).
-pub mod virtio_blk_selftest;
 
 #[cfg(unittest)]
 mod unittest_tests {
     use unittest::{assert, def_test};
+    use vdev_virtio_blk::selftest::vmm_selftest_virtio_blk;
 
-    use super::virtio_blk_selftest::vmm_selftest_virtio_blk;
-
-    /// Full virtio-blk driver sequence against the KVMM device: negotiation,
+    /// Full virtio-blk driver sequence against the vdev-virtio-blk device: negotiation,
     /// queue programming, OUT/IN/FLUSH data path, used-ring accounting and
     /// interrupt injection.
     #[def_test(serial)]

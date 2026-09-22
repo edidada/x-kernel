@@ -6,17 +6,14 @@ use alloc::{sync::Arc, vec};
 
 use kspin::SpinNoIrq;
 use log::{trace, warn};
+use vdev_virtio::{
+    AccessWidth, AddressSpaceMemory, GuestPhysAddr, MmioReadOutcome, MmioWriteAction,
+    VirtioDeviceID, VirtioError, VirtioMmioState, VirtioQueue, VirtioResult,
+    memory::GuestMemoryAccessor, mmio::transport, queue::VirtQueueDesc,
+};
 
-use crate::vdev::{
-    virtio::{
-        AccessWidth, AddressSpaceMemory, GuestPhysAddr, MmioReadOutcome, MmioWriteAction,
-        VirtioDeviceID, VirtioError, VirtioMmioState, VirtioQueue, VirtioResult,
-        memory::GuestMemoryAccessor, mmio::transport, queue::VirtQueueDesc,
-    },
-    virtio_blk::{
-        backend::BlockBackend, block::config::VirtioBlockConfig, constants::*,
-        mmio::VirtioBlockHeader,
-    },
+use crate::{
+    backend::BlockBackend, block::config::VirtioBlockConfig, constants::*, mmio::VirtioBlockHeader,
 };
 
 /// Action that the VMM must perform after an MMIO write.
@@ -144,7 +141,7 @@ impl<B: BlockBackend, T: GuestMemoryAccessor + Clone> VirtioMmioBlockDevice<B, T
         addr: GuestPhysAddr,
         width: AccessWidth,
         val: usize,
-        memory: &mut dyn crate::vdev::virtio::GuestMemory,
+        memory: &mut dyn vdev_virtio::GuestMemory,
     ) -> VirtioResult<BlockDeviceEvent> {
         match self
             .state
@@ -173,7 +170,7 @@ impl<B: BlockBackend, T: GuestMemoryAccessor + Clone> VirtioMmioBlockDevice<B, T
     pub fn process_pending_queue(
         &self,
         queue_index: u16,
-        memory: &mut dyn crate::vdev::virtio::GuestMemory,
+        memory: &mut dyn vdev_virtio::GuestMemory,
     ) -> VirtioResult<BlockDeviceEvent> {
         self.handle_queue_notify(queue_index, memory)
     }
@@ -182,7 +179,7 @@ impl<B: BlockBackend, T: GuestMemoryAccessor + Clone> VirtioMmioBlockDevice<B, T
     fn handle_queue_notify(
         &self,
         queue_index: u16,
-        memory: &mut dyn crate::vdev::virtio::GuestMemory,
+        memory: &mut dyn vdev_virtio::GuestMemory,
     ) -> VirtioResult<BlockDeviceEvent> {
         if !self.is_device_ready() {
             return Ok(BlockDeviceEvent::None);
@@ -230,7 +227,7 @@ impl<B: BlockBackend, T: GuestMemoryAccessor + Clone> VirtioMmioBlockDevice<B, T
         &self,
         queue: &VirtioQueue<T>,
         head: u16,
-        memory: &mut dyn crate::vdev::virtio::GuestMemory,
+        memory: &mut dyn vdev_virtio::GuestMemory,
     ) -> VirtioResult<Option<u32>> {
         let chain = queue.descriptor_chain_with_memory(head, memory)?;
         let descriptors = chain.descriptors();
@@ -277,7 +274,7 @@ impl<B: BlockBackend, T: GuestMemoryAccessor + Clone> VirtioMmioBlockDevice<B, T
         &self,
         sector: u64,
         descriptors: &[VirtQueueDesc],
-        memory: &mut dyn crate::vdev::virtio::GuestMemory,
+        memory: &mut dyn vdev_virtio::GuestMemory,
     ) -> VirtioResult<u32> {
         if !descriptors.iter().all(|descriptor| descriptor.is_write()) {
             return Err(VirtioError::InvalidDescriptor);
@@ -304,7 +301,7 @@ impl<B: BlockBackend, T: GuestMemoryAccessor + Clone> VirtioMmioBlockDevice<B, T
         &self,
         sector: u64,
         descriptors: &[VirtQueueDesc],
-        memory: &mut dyn crate::vdev::virtio::GuestMemory,
+        memory: &mut dyn vdev_virtio::GuestMemory,
     ) -> VirtioResult<u32> {
         if !descriptors.iter().all(|descriptor| !descriptor.is_write()) {
             return Err(VirtioError::InvalidDescriptor);
@@ -417,11 +414,12 @@ fn allocate_request_buffer(len: usize) -> VirtioResult<alloc::vec::Vec<u8>> {
 mod tests {
     use alloc::{sync::Arc, vec, vec::Vec};
 
-    use super::*;
-    use crate::vdev::virtio::{
+    use vdev_virtio::{
         GuestMemory, NoGuestMemoryAccessor,
         constants::{VIRTIO_MMIO_STATUS, VIRTQ_DESC_F_NEXT},
     };
+
+    use super::*;
 
     const DESC_TABLE: usize = 0x100;
     const HEADER: usize = 0x300;

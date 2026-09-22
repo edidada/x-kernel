@@ -4,7 +4,7 @@
 
 use alloc::sync::Arc;
 
-use crate::vdev::virtio::{
+use crate::{
     GuestPhysAddr,
     constants::*,
     error::{VirtioError, VirtioResult},
@@ -186,7 +186,7 @@ impl<T: GuestMemoryAccessor + Clone> UsedRing<T> {
     /// Add a used element to the ring
     pub fn add_used(&mut self, id: u32, len: u32) -> VirtioResult<()> {
         let accessor = self.accessor.clone();
-        let mut memory = crate::vdev::virtio::AddressSpaceMemory::new(&*accessor);
+        let mut memory = crate::AddressSpaceMemory::new(&*accessor);
         self.add_used_with_memory(id, len, &mut memory)
     }
 
@@ -227,7 +227,7 @@ impl<T: GuestMemoryAccessor + Clone> UsedRing<T> {
 
     /// Write the used index to the used ring header
     pub fn write_used_idx(&self) -> VirtioResult<()> {
-        let mut memory = crate::vdev::virtio::AddressSpaceMemory::new(&*self.accessor);
+        let mut memory = crate::AddressSpaceMemory::new(&*self.accessor);
         self.write_used_idx_with_memory(&mut memory)
     }
 
@@ -303,7 +303,7 @@ impl<T: GuestMemoryAccessor + Clone> UsedRing<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vdev::virtio::NoGuestMemoryAccessor;
+    use crate::NoGuestMemoryAccessor;
 
     #[test]
     fn layout_size_counts_header_elements_and_footer() {

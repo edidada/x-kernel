@@ -369,13 +369,13 @@ fn build_and_start_rv64(
                 irq_sender.clone(),
                 dma.clone(),
             )));
-        vm.shared().devices().register_mmio(Box::new(
-            kvmm::vdev::virtio_blk_bus::VirtioBlkDevice::new(
+        vm.shared()
+            .devices()
+            .register_mmio(Box::new(vdev_virtio_blk::bus::VirtioBlkDevice::new(
                 irq_sender,
                 dma,
-                kvmm::vdev::virtio_blk_bus::DEFAULT_CAPACITY_BYTES,
-            ),
-        ));
+                vdev_virtio_blk::bus::DEFAULT_CAPACITY_BYTES,
+            )));
     }
 
     if !CurrentArch::percpu_hw_init() {
@@ -423,8 +423,8 @@ fn unmap_rv64_mmio(vm: &mut Vm<CurrentArch>) -> VfsResult<()> {
         ),
         (
             "virtio-blk",
-            kvmm::vdev::virtio_blk_bus::VIRTIO_BLK_BASE,
-            kvmm::vdev::virtio_blk_bus::VIRTIO_BLK_SIZE,
+            vdev_virtio_blk::bus::VIRTIO_BLK_BASE,
+            vdev_virtio_blk::bus::VIRTIO_BLK_SIZE,
         ),
     ];
 
@@ -616,13 +616,13 @@ fn build_and_start_aarch64(
                 irq_sender.clone(),
                 dma.clone(),
             )));
-        vm.shared().devices().register_mmio(Box::new(
-            kvmm::vdev::virtio_blk_bus::VirtioBlkDevice::new(
+        vm.shared()
+            .devices()
+            .register_mmio(Box::new(vdev_virtio_blk::bus::VirtioBlkDevice::new(
                 irq_sender,
                 dma,
-                kvmm::vdev::virtio_blk_bus::DEFAULT_CAPACITY_BYTES,
-            ),
-        ));
+                vdev_virtio_blk::bus::DEFAULT_CAPACITY_BYTES,
+            )));
     }
 
     if !CurrentArch::percpu_hw_init() {

@@ -2,13 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! KVMM integration for the ported VirtIO MMIO block device model.
+//! MMIO-bus binding for the ported VirtIO MMIO block device model.
 //!
-//! Wraps [`super::virtio_blk::VirtioMmioBlockDevice`] as a
-//! [`vdev_core::MmioDevice`] on the VM MMIO bus: guest memory is served
-//! through the VM's [`GuestDma`] translation, used-ring notifications are
-//! mapped to the VM's IRQ sender, and the default backend is a synchronous
-//! in-memory RAM disk (so no deferred queue processing is needed).
+//! Wraps [`VirtioMmioBlockDevice`] as a [`vdev_core::MmioDevice`] on the shared
+//! MMIO bus: guest memory is served through a [`GuestDma`] translation, used-ring
+//! notifications are mapped to an [`IrqSender`], and the default backend is a
+//! synchronous in-memory RAM disk (so no deferred queue processing is needed).
 //!
 //! The default MMIO window follows the QEMU virt-platform `virtio_mmio`
 //! layout: slot 0 (`0x0a00_0000`) is occupied by `virt/vdev/virtio-net`,
@@ -22,13 +21,11 @@ use core::{
 
 use ksync::Mutex as KsyncMutex;
 use vdev_core::{GuestDma, IrqSender, MmioDevice};
-
-use super::{
-    virtio::{
-        AccessWidth, GuestMemory, GuestPhysAddr, NoGuestMemoryAccessor, VirtioError, VirtioResult,
-    },
-    virtio_blk::{BlockBackend, BlockDeviceEvent, VirtioBlockConfig, VirtioMmioBlockDevice},
+use vdev_virtio::{
+    AccessWidth, DmaGuestMemory, GuestPhysAddr, NoGuestMemoryAccessor, VirtioError, VirtioResult,
 };
+
+use crate::{BlockBackend, BlockDeviceEvent, VirtioBlockConfig, VirtioMmioBlockDevice};
 
 /// Default MMIO base of the virtio-blk device (QEMU virt `virtio_mmio` slot 1).
 pub const VIRTIO_BLK_BASE: u64 = 0x0a00_1000;
@@ -112,31 +109,12 @@ impl BlockBackend for RamDiskBackend {
     }
 }
 
-/// Scoped guest-memory capability backed by the VM's [`GuestDma`] translation.
-struct DmaGuestMemory<'a> {
-    dma: &'a dyn GuestDma,
-}
-
-impl GuestMemory for DmaGuestMemory<'_> {
-    fn read(&mut self, guest_addr: GuestPhysAddr, data: &mut [u8]) -> VirtioResult<()> {
-        self.dma
-            .read(guest_addr.as_usize() as u64, data)
-            .map_err(|_| VirtioError::InvalidAddress)
-    }
-
-    fn write(&mut self, guest_addr: GuestPhysAddr, data: &[u8]) -> VirtioResult<()> {
-        self.dma
-            .write(guest_addr.as_usize() as u64, data)
-            .map_err(|_| VirtioError::InvalidAddress)
-    }
-}
-
 /// virtio-blk device bound to the VM MMIO bus.
 ///
 /// MMIO reads go to the standard transport + block config space; MMIO writes
-/// are serviced with a scoped [`GuestMemory`] capability built from the VM DMA
-/// translation (the same design the ported `mmio_write_with_memory` exists
-/// for), and used-ring notifications are forwarded to `irq_sender`.
+/// are serviced with a scoped [`vdev_virtio::GuestMemory`] capability built from
+/// the VM DMA translation (the same design the ported `mmio_write_with_memory`
+/// exists for), and used-ring notifications are forwarded to `irq_sender`.
 pub struct VirtioBlkDevice {
     base: u64,
     size: u64,
@@ -152,8 +130,8 @@ pub struct VirtioBlkDevice {
 impl VirtioBlkDevice {
     /// Create the device with a RAM-disk backend of `capacity_bytes`.
     ///
-    /// `irq_sender` / `dma` come from the VM (`devices().irq_sender()` and
-    /// `vdev::dma::make_guest_dma(vm_shared)` respectively).
+    /// `irq_sender` and `dma` are the VM's interrupt-injection and guest-memory
+    /// translation capabilities.
     pub fn new(
         irq_sender: Arc<dyn IrqSender>,
         dma: Arc<dyn GuestDma>,
@@ -219,7 +197,7 @@ impl MmioDevice for VirtioBlkDevice {
         let Some(width) = access_width(size) else {
             return;
         };
-        let mut memory = DmaGuestMemory { dma: &*self.dma };
+        let mut memory = DmaGuestMemory::new(&*self.dma);
         let event = match self.model.mmio_write_with_memory(
             Self::device_address(self.base, offset),
             width,

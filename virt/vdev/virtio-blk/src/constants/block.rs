@@ -7,7 +7,7 @@
 //! This module contains constants specific to VirtIO block devices,
 //! including request types, status codes, feature flags, and configuration defaults.
 
-use crate::vdev::virtio_blk::constants::{VIRTIO_F_RING_EVENT_IDX, VIRTIO_F_VERSION_1};
+use crate::constants::{VIRTIO_F_RING_EVENT_IDX, VIRTIO_F_VERSION_1};
 
 // ============================================================================
 // VirtIO Block Device Configuration Space Offsets

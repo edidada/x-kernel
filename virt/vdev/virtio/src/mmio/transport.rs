@@ -3,8 +3,8 @@
 // See LICENSES for license details.
 
 /// MMIO transport layer utilities
-use crate::vdev::virtio::{AccessWidth, GuestPhysAddr};
-use crate::vdev::virtio::{VIRTIO_MMIO_CONFIG_OFFSET, VirtioResult, error::VirtioError};
+use crate::{AccessWidth, GuestPhysAddr};
+use crate::{VIRTIO_MMIO_CONFIG_OFFSET, VirtioResult, error::VirtioError};
 
 /// Macro to handle bytes-to-value conversion for different access widths
 macro_rules! convert_bytes_to_value {

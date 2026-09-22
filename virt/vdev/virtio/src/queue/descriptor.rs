@@ -4,7 +4,7 @@
 
 use alloc::vec::Vec;
 
-use crate::vdev::virtio::{
+use crate::{
     GuestPhysAddr, VirtioDeviceID,
     constants::*,
     error::{VirtioError, VirtioResult},
@@ -476,7 +476,7 @@ mod tests {
     use alloc::vec;
 
     use super::*;
-    use crate::vdev::virtio::{PhysAddr, memory::GuestMemoryAccessor};
+    use crate::{PhysAddr, memory::GuestMemoryAccessor};
 
     #[derive(Clone)]
     struct TestTranslator {
@@ -498,7 +498,7 @@ mod tests {
         let translator = TestTranslator {
             base_host_ptr: base_ptr,
         };
-        let mut memory = crate::vdev::virtio::AddressSpaceMemory::new(&translator);
+        let mut memory = crate::AddressSpaceMemory::new(&translator);
 
         // Create a descriptor table at a non-zero guest base within our backing buffer
         let base = GuestPhysAddr::from(0x10usize);

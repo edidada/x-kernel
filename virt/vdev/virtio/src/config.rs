@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use crate::vdev::virtio::{GuestPhysAddr, VirtioDeviceID, constants::*};
+use crate::{GuestPhysAddr, VirtioDeviceID, constants::*};
 /// Configuration for VirtIO devices with device index mapping
 #[derive(Debug, Clone)]
 pub struct VirtioConfig {
