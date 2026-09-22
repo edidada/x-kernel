@@ -6,15 +6,12 @@
 
 use kplat_macros::device_interface;
 
-/// Direction of a temporary DMA mapping.
-///
-/// This is the platform query's view of the transfer. `kdma` keeps its own
-/// public direction type and converts at the call.
+/// Transfer direction for a platform DMA query.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DmaDirection {
-    /// The device reads data the CPU produced.
+    /// The device reads CPU-produced data.
     DriverToDevice,
-    /// The device produces data the CPU reads.
+    /// The device writes data for the CPU.
     DeviceToDriver,
     /// The device both reads and writes the buffer.
     Bidirectional,
@@ -22,14 +19,9 @@ pub enum DmaDirection {
 
 #[device_interface]
 pub trait PlatformDmaIf {
-    /// Bus address for `paddr..paddr+size` when that range can be handed to a
-    /// device without bounce, cache maintenance, page sharing, or attribute
-    /// changes.
+    /// Bus address of `paddr..paddr+size` when the device can use it in place.
     ///
-    /// `None` means the caller must bounce. The default is `None`; a platform
-    /// returns `Some` only for a verified coherent guest. Machine identity
-    /// stays inside that platform. Device DMA masks and IOMMU translation are
-    /// not part of this query.
+    /// `None` means bounce. The default is `None`.
     fn direct_dma_addr(_paddr: usize, _size: usize, _direction: DmaDirection) -> Option<usize> {
         None
     }

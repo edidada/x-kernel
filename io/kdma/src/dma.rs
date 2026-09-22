@@ -186,8 +186,7 @@ impl DmaAllocator {
                 error!("DMA mapping is already active: {:?}", dma_info.bus_addr);
                 return Err(AllocError::InvalidInput);
             }
-            // The platform authorized coherent direct DMA. This fence publishes
-            // prior CPU writes before the device is told the bus address.
+            // Publish CPU writes before the device sees the bus address.
             fence(Ordering::SeqCst);
             self.active_mappings
                 .insert(dma_info.bus_addr.as_u64(), StreamingMapping::Direct { len });
@@ -258,8 +257,7 @@ impl DmaAllocator {
                     "DMA buffer length mismatch for {:?}",
                     dma_addr
                 );
-                // The platform guarantees coherence; order device completion
-                // before the caller's subsequent accesses to its own buffer.
+                // Order device completion before the caller reads the buffer.
                 fence(Ordering::SeqCst);
                 return;
             }
@@ -436,11 +434,7 @@ fn in_linear_map(vaddr: usize) -> bool {
         && vaddr - kaddr_layout::LINEAR_MAP_VADDR < kaddr_layout::LINEAR_MAP_VSIZE
 }
 
-/// Bus address of `buffer` when the whole range is in the linear map and the
-/// platform accepts that physical range for direct DMA.
-///
-/// Linear-map membership proves physical contiguity. The platform returns the
-/// bus address, or `None` when the range must bounce.
+/// Direct mapping when the whole buffer is in the linear map and the platform accepts it.
 fn direct_dma_info(buffer: NonNull<[u8]>, direction: DmaDirection) -> Option<DMAInfo> {
     let len = buffer.len();
     let vaddr = buffer.as_ptr() as *mut u8 as usize;

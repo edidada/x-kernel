@@ -9,9 +9,8 @@
 //!
 //! `kdma` is the kernel's DMA memory layer: [`allocate_dma_memory`] and
 //! [`deallocate_dma_memory`] manage coherent, device-reachable memory;
-//! [`map_dma_buffer`] / [`unmap_dma_buffer`] map buffers directly when the
-//! platform authorizes coherent access, or stage them through a coherent
-//! bounce pool for temporary transactions; [`p2b`] /
+//! [`map_dma_buffer`] / [`unmap_dma_buffer`] map a buffer in place or through
+//! the bounce pool; [`p2b`] /
 //! [`b2p`] convert between physical and bus addresses. See
 //! `docs/design.md` for the full boundary contracts.
 //!
@@ -146,9 +145,8 @@ impl From<DmaDirection> for kplat::dma::DmaDirection {
 
 /// Maps an existing buffer for temporary DMA access.
 ///
-/// Buffers wholly within the linear map are handed to the device directly
-/// only when the platform guarantees coherent access without page sharing or
-/// attribute changes. All other mappings use the coherent bounce pool.
+/// A wholly linear-map buffer is used in place when the platform returns a
+/// bus address. Otherwise the buffer goes through the bounce pool.
 ///
 /// # Errors
 ///

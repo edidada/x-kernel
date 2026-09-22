@@ -11,9 +11,7 @@ use kplat::dma::{DmaDirection, PlatformDmaIf};
 #[kiface::provide]
 impl PlatformDmaIf {
     fn direct_dma_addr(paddr: usize, _size: usize, _direction: DmaDirection) -> Option<usize> {
-        // `DMA_DIRECT_COHERENT` is selected by the verified QEMU defconfig.
-        // Sharing and VirtCCA still force bounce if a seed config sets the
-        // option on a protected guest.
+        // Share and VirtCCA guests bounce even when the option is set.
         if !kbuild_config::DMA_DIRECT_COHERENT
             || cfg!(feature = "kvm-guest-mem-share")
             || kbuild_config::KFEAT_VIRTCCA_HUK_KEY

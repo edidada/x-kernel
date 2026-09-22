@@ -220,14 +220,9 @@ config DMA_DIRECT_COHERENT
     bool "Direct DMA for coherent, host-accessible linear-map memory"
     default n
     help
-      The platform can hand ordinary cached linear-map memory to devices
-      without bounce copies, page sharing, or attribute changes. This is a
-      platform capability, not a machine whitelist. Verified defconfigs
-      select it; the ordinary AArch64 and x86_64 QEMU defconfigs do. Platform code
-      still returns no direct bus address for guests that share or encrypt
-      memory, even if a seed config sets this option. Bounce buffers remain
-      the copy fallback when this is off, the buffer is not wholly in the
-      linear map, or the platform declines the range.
+      In-place DMA for coherent linear-map memory. Ordinary AArch64 and
+      x86_64 QEMU defconfigs select this. Guests that share or encrypt
+      memory still bounce.
 
 config KFEAT_KVM_GUEST_MEM_SHARE
     bool "Enable KVM guest memory share/unshare hooks"
