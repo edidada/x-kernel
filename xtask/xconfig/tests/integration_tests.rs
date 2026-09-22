@@ -78,28 +78,6 @@ fn test_complete_workflow() {
 }
 
 #[test]
-fn missing_bool_symbols_are_emitted_as_false() {
-    let temp_dir = TempDir::new().unwrap();
-    let mut config = HashMap::new();
-    config.insert("FEATURE_ON".to_string(), "y".to_string());
-
-    let mut type_map = HashMap::new();
-    type_map.insert("FEATURE_ON".to_string(), SymbolType::Bool);
-    type_map.insert("FEATURE_OFF".to_string(), SymbolType::Bool);
-    type_map.insert("COUNT".to_string(), SymbolType::U32);
-
-    ConfigGenerator::generate_rust_consts(temp_dir.path(), &config, &type_map).unwrap();
-
-    let config_rs = std::fs::read_to_string(temp_dir.path().join("config.rs")).unwrap();
-    assert!(config_rs.contains("pub const FEATURE_ON: bool = true;"));
-    assert!(config_rs.contains("pub const FEATURE_OFF: bool = false;"));
-    assert!(
-        !config_rs.contains("pub const COUNT"),
-        "non-bool symbols without values must stay omitted"
-    );
-}
-
-#[test]
 fn test_source_recursion_workflow() {
     // Parse a project with nested source directives
     let kconfig_path = PathBuf::from("examples/sample_project/Kconfig");

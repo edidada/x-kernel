@@ -89,9 +89,6 @@ impl ConfigGenerator {
     /// parsed `.config` map and the authoritative Kconfig `SymbolType` map.
     ///
     /// - Bool symbols are emitted as `bool`.
-    /// - Bool symbols present in `type_map` but absent from the config map
-    ///   (unselected, or pruned because `depends on` failed) are emitted as
-    ///   `false`, matching Linux `IS_ENABLED()` for undefined `CONFIG_*`.
     /// - Tristate symbols are emitted as `&str`.
     /// - Integer types (`u8`...`isize`) use the exact declared Rust primitive.
     /// - `hex` values are emitted as `usize`.
@@ -134,50 +131,11 @@ impl ConfigGenerator {
             Self::emit_heuristic_const(&mut content, key, value)?;
         }
 
-        // Bool symbols omitted from the resolved map (unselected, or pruned
-        // because `depends on` failed) must still exist as `false`. Kernel
-        // crates reference them unconditionally; Linux would treat the same
-        // case as `IS_ENABLED(CONFIG_FOO) == 0`.
-        Self::emit_missing_bool_consts(&mut content, config, type_map);
-
         write_if_changed(&config_rs_path, &content)?;
 
         println!("📝 Generated config.rs at: {}", config_rs_path.display());
 
         Ok(())
-    }
-
-    fn config_has_symbol(config: &HashMap<String, String>, name: &str) -> bool {
-        config.contains_key(name)
-            || config.contains_key(&format!("CONFIG_{name}"))
-            || name
-                .strip_prefix("CONFIG_")
-                .is_some_and(|stripped| config.contains_key(stripped))
-    }
-
-    fn emit_missing_bool_consts(
-        content: &mut String,
-        config: &HashMap<String, String>,
-        type_map: &HashMap<String, SymbolType>,
-    ) {
-        let mut missing: Vec<&str> = type_map
-            .iter()
-            .filter_map(|(name, symbol_type)| {
-                if !matches!(symbol_type, SymbolType::Bool) {
-                    return None;
-                }
-                if Self::config_has_symbol(config, name) {
-                    return None;
-                }
-                Some(name.as_str())
-            })
-            .collect();
-        missing.sort_unstable();
-        for name in missing {
-            let const_name = name.strip_prefix("CONFIG_").unwrap_or(name);
-            content.push_str("#[allow(dead_code)]\n");
-            content.push_str(&format!("pub const {const_name}: bool = false;\n\n"));
-        }
     }
 
     /// Emit a `pub const` declaration using the authoritative SymbolType from Kconfig.
@@ -218,10 +176,7 @@ impl ConfigGenerator {
                 // never passed through the normalizing SymbolTable.
                 let canonical_hex =
                     crate::kconfig::canonical_symbol_value(symbol_type, value.to_string());
-                content.push_str(&format!(
-                    "pub const {}: usize = {};\n\n",
-                    key, canonical_hex
-                ));
+                content.push_str(&format!("pub const {}: usize = {};\n\n", key, canonical_hex));
                 Ok(true)
             }
 

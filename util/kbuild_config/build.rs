@@ -12,9 +12,6 @@ const FALLBACK_BOOLS: &[&str] = &[
     "KFEAT_ENTROPY_TRUST_HOST",
     "KFEAT_ENTROPY_JITTER",
     "KFEAT_DRIVER_VIRTIO_RNG",
-    "DMA_DIRECT_COHERENT",
-    "MACHINE_AARCH64_QEMU",
-    "KFEAT_VIRTCCA_HUK_KEY",
 ];
 
 fn append_missing_defaults(config: &mut String) {
