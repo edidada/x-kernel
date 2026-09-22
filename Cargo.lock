@@ -2208,6 +2208,7 @@ name = "kdma"
 version = "0.3.0-dev"
 dependencies = [
  "alloc-engine",
+ "kaddr_layout",
  "kalloc",
  "kbuild_config",
  "kerrno",
@@ -2217,6 +2218,7 @@ dependencies = [
  "kspin",
  "log",
  "memaddr",
+ "unittest",
 ]
 
 [[package]]

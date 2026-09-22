@@ -9,8 +9,9 @@
 //!
 //! `kdma` is the kernel's DMA memory layer: [`allocate_dma_memory`] and
 //! [`deallocate_dma_memory`] manage coherent, device-reachable memory;
-//! [`map_dma_buffer`] / [`unmap_dma_buffer`] stage ordinary buffers
-//! through a coherent bounce pool for temporary transactions; [`p2b`] /
+//! [`map_dma_buffer`] / [`unmap_dma_buffer`] map buffers directly when the
+//! platform authorizes coherent access, or stage them through a coherent
+//! bounce pool for temporary transactions; [`p2b`] /
 //! [`b2p`] convert between physical and bus addresses. See
 //! `docs/design.md` for the full boundary contracts.
 //!
@@ -25,7 +26,7 @@
 //! use kdma::{map_dma_buffer, unmap_dma_buffer, DmaDirection};
 //!
 //! # fn stage(buffer: NonNull<[u8]>) -> Result<(), alloc_engine::AllocError> {
-//! // 1. Stage the driver-owned buffer through the coherent bounce pool.
+//! // 1. Map the driver-owned buffer for device access.
 //! let dma = unsafe { map_dma_buffer(buffer, DmaDirection::DeviceToDriver) }?;
 //!
 //! // 2. Program the device with dma.bus_addr and wait for completion.
@@ -135,10 +136,9 @@ pub enum DmaDirection {
 
 /// Maps an existing buffer for temporary DMA access.
 ///
-/// The current backend always stages the mapping through pooled coherent bounce
-/// memory. Keeping this behind `kdma` lets future implementations restore
-/// direct-map optimizations with stricter page-granularity safety checks
-/// without changing driver code.
+/// Buffers wholly within the linear map are handed to the device directly
+/// only when the platform guarantees coherent access without page sharing or
+/// attribute changes. All other mappings use the coherent bounce pool.
 ///
 /// # Errors
 ///
@@ -150,7 +150,9 @@ pub enum DmaDirection {
 /// # Safety
 ///
 /// `buffer` must remain live and exclusively owned until it is later passed to
-/// [`unmap_dma_buffer`]. The caller must not let the device keep using the
+/// [`unmap_dma_buffer`]. CPU accesses must respect device ownership: a buffer
+/// being written by the device must not be read or written by the CPU, and a
+/// buffer being read by the device must not be modified. The caller must not let the device keep using the
 /// returned bus address after unmapping.
 pub unsafe fn map_dma_buffer(
     buffer: NonNull<[u8]>,

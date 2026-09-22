@@ -32,9 +32,14 @@ pub(crate) static ALLOCATOR: SpinNoIrq<DmaAllocator> = SpinNoIrq::new(DmaAllocat
 
 pub(crate) struct DmaAllocator {
     bounce_pool: Option<BouncePool>,
-    active_mappings: BTreeMap<u64, BounceMapping>,
+    active_mappings: BTreeMap<u64, StreamingMapping>,
     #[cfg(feature = "dma-trace")]
     coherent_allocs: BTreeMap<usize, CoherentAllocation>,
+}
+
+enum StreamingMapping {
+    Direct { len: usize },
+    Bounce(BounceMapping),
 }
 
 #[cfg(feature = "dma-trace")]
@@ -154,7 +159,7 @@ impl DmaAllocator {
         global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
     }
 
-    /// Maps an existing CPU buffer through the bounce pool for a temporary DMA transaction.
+    /// Maps a CPU buffer directly when authorized by the platform, or through the bounce pool.
     ///
     /// # Safety
     ///
@@ -171,6 +176,22 @@ impl DmaAllocator {
         let len = buffer.len();
         if len == 0 {
             return Err(AllocError::InvalidInput);
+        }
+
+        if let Some(dma_info) = direct_dma_info(buffer) {
+            if self
+                .active_mappings
+                .contains_key(&dma_info.bus_addr.as_u64())
+            {
+                error!("DMA mapping is already active: {:?}", dma_info.bus_addr);
+                return Err(AllocError::InvalidInput);
+            }
+            // The platform authorized coherent direct DMA. This fence publishes
+            // prior CPU writes before the device is told the bus address.
+            fence(Ordering::SeqCst);
+            self.active_mappings
+                .insert(dma_info.bus_addr.as_u64(), StreamingMapping::Direct { len });
+            return Ok(dma_info);
         }
 
         fence(Ordering::SeqCst);
@@ -199,17 +220,17 @@ impl DmaAllocator {
         }
         self.active_mappings.insert(
             dma_info.bus_addr.as_u64(),
-            BounceMapping {
+            StreamingMapping::Bounce(BounceMapping {
                 cpu_addr: dma_info.cpu_addr.as_ptr() as usize,
                 len,
                 layout,
-            },
+            }),
         );
 
         Ok(dma_info)
     }
 
-    /// Unmaps a previously bounced DMA buffer and synchronizes data back.
+    /// Ends a DMA mapping and makes device writes visible to the CPU.
     ///
     /// # Safety
     ///
@@ -230,12 +251,25 @@ impl DmaAllocator {
             .remove(&dma_addr.as_u64())
             .unwrap_or_else(|| panic!("DMA mapping is not active: {:?}", dma_addr));
 
+        let mapping = match mapping {
+            StreamingMapping::Direct { len: mapped_len } => {
+                assert_eq!(
+                    len, mapped_len,
+                    "DMA buffer length mismatch for {:?}",
+                    dma_addr
+                );
+                // The platform guarantees coherence; order device completion
+                // before the caller's subsequent accesses to its own buffer.
+                fence(Ordering::SeqCst);
+                return;
+            }
+            StreamingMapping::Bounce(mapping) => mapping,
+        };
         assert_eq!(
             len, mapping.len,
             "DMA buffer length mismatch for {:?}: expected {}, got {}",
             dma_addr, mapping.len, len
         );
-
         fence(Ordering::SeqCst);
         if direction != DmaDirection::DriverToDevice {
             // SAFETY: the bounce buffer and destination slice are distinct live
@@ -397,10 +431,107 @@ fn v2b(addr: VirtAddr) -> DmaBusAddress {
     p2b(paddr)
 }
 
+/// Bus address of `buffer` when it already lives in the linear map.
+///
+/// The platform must guarantee coherence and device access without changing
+/// page attributes or sharing pages. Linear-map membership alone only proves
+/// physical contiguity, not whether the device can access cached CPU memory.
+fn direct_dma_info(buffer: NonNull<[u8]>) -> Option<DMAInfo> {
+    if !kplat::dma::can_dma_direct() {
+        return None;
+    }
+    let len = buffer.len();
+    let vaddr = buffer.as_ptr() as *mut u8 as usize;
+    let last = vaddr.checked_add(len)?.checked_sub(1)?;
+    let in_linear_fn = |va: usize| {
+        va >= kaddr_layout::LINEAR_MAP_VADDR
+            && va - kaddr_layout::LINEAR_MAP_VADDR < kaddr_layout::LINEAR_MAP_VSIZE
+    };
+    if !in_linear_fn(vaddr) || !in_linear_fn(last) {
+        return None;
+    }
+    let cpu_addr = NonNull::new(vaddr as *mut u8)?;
+    Some(DMAInfo {
+        cpu_addr,
+        bus_addr: v2b(va!(vaddr)),
+    })
+}
+
 const fn layout_pages(layout: &Layout) -> usize {
     memaddr::align_up_4k(layout.size()) / PAGE_SIZE_4K
 }
 
 fn layout_for_pages(num_pages: usize) -> Layout {
     Layout::from_size_align(num_pages * PAGE_SIZE_4K, PAGE_SIZE_4K).unwrap()
+}
+
+#[cfg(unittest)]
+mod tests {
+    use alloc::vec;
+
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::*;
+
+    #[def_test]
+    fn streaming_mapping_preserves_direction_and_platform_contract() {
+        for direction in [
+            DmaDirection::DriverToDevice,
+            DmaDirection::DeviceToDriver,
+            DmaDirection::Bidirectional,
+        ] {
+            let mut buffer = vec![0x5a; 1526];
+            let ptr = NonNull::from(buffer.as_mut_slice());
+            let is_direct = direct_dma_info(ptr).is_some();
+            // SAFETY: the backing allocation remains live until unmap, and
+            // only the simulated device accesses mapped contents in between.
+            let dma = unsafe { crate::map_dma_buffer(ptr, direction).unwrap() };
+            let has_same_cpu_addr = dma.cpu_addr.as_ptr() == ptr.cast::<u8>().as_ptr();
+            let device_byte = if direction != DmaDirection::DeviceToDriver {
+                // SAFETY: the mapping covers 1526 initialized bytes; this
+                // read simulates device access after DMA publication.
+                Some(unsafe { dma.cpu_addr.as_ptr().read_volatile() })
+            } else {
+                None
+            };
+            if direction != DmaDirection::DriverToDevice {
+                // SAFETY: the mapping grants the simulated device write
+                // ownership of all 1526 bytes until completion below.
+                unsafe { dma.cpu_addr.as_ptr().write_bytes(0xa5, 1526) };
+            }
+            // SAFETY: the simulated device has stopped accessing the exact
+            // mapping and buffer returned above; this unmaps it once.
+            unsafe { crate::unmap_dma_buffer(dma.bus_addr, ptr, direction) };
+            assert_eq!(has_same_cpu_addr, is_direct);
+            if let Some(byte) = device_byte {
+                assert_eq!(byte, 0x5a);
+            }
+            let expected = if direction == DmaDirection::DriverToDevice {
+                0x5a
+            } else {
+                0xa5
+            };
+            assert!(buffer.iter().all(|&byte| byte == expected));
+        }
+    }
+
+    #[def_test]
+    fn direct_mapping_requires_a_whole_linear_range() {
+        let base = kaddr_layout::LINEAR_MAP_VADDR;
+        let end = base + kaddr_layout::LINEAR_MAP_VSIZE;
+        for (addr, len, is_in_linear_map) in [
+            (base, 1, true),
+            (end - 1, 1, true),
+            (base - 1, 2, false),
+            (end - 1, 2, false),
+            (usize::MAX - 1, 4, false),
+        ] {
+            // Address classification never dereferences these synthetic pointers.
+            let ptr = NonNull::slice_from_raw_parts(NonNull::new(addr as *mut u8).unwrap(), len);
+            assert_eq!(
+                direct_dma_info(ptr).is_some(),
+                kplat::dma::can_dma_direct() && is_in_linear_map,
+            );
+        }
+    }
 }
