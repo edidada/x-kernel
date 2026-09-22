@@ -173,6 +173,29 @@ impl DmaAllocator {
             return Err(AllocError::InvalidInput);
         }
 
+        if let Some(dma_info) = direct_dma_info(buffer) {
+            if self
+                .active_mappings
+                .contains_key(&dma_info.bus_addr.as_u64())
+            {
+                error!("DMA mapping is already active: {:?}", dma_info.bus_addr);
+                return Err(AllocError::InvalidInput);
+            }
+            // The platform DMA path is cache-coherent. This fence publishes
+            // prior CPU writes before the device is told the bus address.
+            fence(Ordering::SeqCst);
+            self.active_mappings.insert(
+                dma_info.bus_addr.as_u64(),
+                BounceMapping {
+                    cpu_addr: dma_info.cpu_addr.as_ptr() as usize,
+                    len,
+                    layout: Layout::from_size_align(1, 1).expect("direct mapping layout"),
+                    direct: true,
+                },
+            );
+            return Ok(dma_info);
+        }
+
         fence(Ordering::SeqCst);
         let (dma_info, layout) = self.alloc_bounce_buffer(len)?;
 
@@ -203,6 +226,7 @@ impl DmaAllocator {
                 cpu_addr: dma_info.cpu_addr.as_ptr() as usize,
                 len,
                 layout,
+                direct: false,
             },
         );
 
@@ -235,6 +259,12 @@ impl DmaAllocator {
             "DMA buffer length mismatch for {:?}: expected {}, got {}",
             dma_addr, mapping.len, len
         );
+        if mapping.direct {
+            // Device writes are coherent with this cached mapping. Order the
+            // completion against the caller's subsequent reads.
+            fence(Ordering::SeqCst);
+            return;
+        }
 
         fence(Ordering::SeqCst);
         if direction != DmaDirection::DriverToDevice {
@@ -395,6 +425,36 @@ impl core::fmt::Display for TraceSite {
 fn v2b(addr: VirtAddr) -> DmaBusAddress {
     let paddr = v2p(addr);
     p2b(paddr)
+}
+
+/// Bus address of `buffer` when it already lives in the linear map.
+///
+/// AArch64 device DMA in this kernel is cache-coherent, and the linear map is
+/// physically contiguous, so the device can use the buffer in place.
+fn direct_dma_info(buffer: NonNull<[u8]>) -> Option<DMAInfo> {
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let _ = buffer;
+        None
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let len = buffer.len();
+        let vaddr = buffer.as_ptr() as *mut u8 as usize;
+        let last = vaddr.checked_add(len)?.checked_sub(1)?;
+        let in_linear = |va: usize| {
+            va >= kaddr_layout::LINEAR_MAP_VADDR
+                && va - kaddr_layout::LINEAR_MAP_VADDR < kaddr_layout::LINEAR_MAP_VSIZE
+        };
+        if !in_linear(vaddr) || !in_linear(last) {
+            return None;
+        }
+        let cpu_addr = NonNull::new(vaddr as *mut u8)?;
+        Some(DMAInfo {
+            cpu_addr,
+            bus_addr: v2b(va!(vaddr)),
+        })
+    }
 }
 
 const fn layout_pages(layout: &Layout) -> usize {

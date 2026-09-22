@@ -135,10 +135,9 @@ pub enum DmaDirection {
 
 /// Maps an existing buffer for temporary DMA access.
 ///
-/// The current backend always stages the mapping through pooled coherent bounce
-/// memory. Keeping this behind `kdma` lets future implementations restore
-/// direct-map optimizations with stricter page-granularity safety checks
-/// without changing driver code.
+/// On AArch64, a buffer that already resides in the linear map is handed to
+/// the device directly. Other buffers are staged through the coherent bounce
+/// pool.
 ///
 /// # Errors
 ///

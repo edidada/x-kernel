@@ -39,6 +39,8 @@ pub use self::input::VirtIoInputDev;
 #[cfg(feature = "net")]
 mod net;
 #[cfg(feature = "net")]
+mod net_raw;
+#[cfg(feature = "net")]
 pub use self::net::VirtIoNetDev;
 
 #[cfg(feature = "rng")]

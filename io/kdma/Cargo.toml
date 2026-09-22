@@ -19,6 +19,7 @@ kalloc.workspace = true
 kerrno.workspace = true
 khal = { workspace = true }
 kplat = { workspace = true }
+kaddr_layout.workspace = true
 kiface.workspace = true
 kspin.workspace = true
 log.workspace = true

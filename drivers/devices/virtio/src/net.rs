@@ -12,9 +12,9 @@ use driver_net::{
     MacAddress, NetBuf, NetBufBox, NetBufHandle, NetBufPool, NetDevice, NetRxScheduler,
 };
 use kspin::{SpinNoIrq, SpinNoPreempt};
-use virtio_drivers::{Hal, device::net::VirtIONetRaw as InnerDev, transport::Transport};
+use virtio_drivers::{Hal, transport::Transport};
 
-use crate::as_driver_error;
+use crate::{as_driver_error, net_raw::RawNet as InnerDev};
 
 const NET_BUF_LEN: usize = 1526;
 
@@ -150,10 +150,10 @@ fn unregister_virtio_net_irq(irq: usize, handle_id: usize) {
 
 /// The VirtIO network device driver.
 ///
-/// Wraps `VirtIONetRaw` from `virtio-drivers` and implements the
-/// [`NetDevice`] trait, providing packet-level send/receive with buffer
-/// pool management, interrupt-driven IRQ acknowledgment, and a polling
-/// fallback when no IRQ is registered.
+/// Queue setup and the batched RX kick live in [`crate::net_raw::RawNet`].
+/// This implements the [`NetDevice`] trait, providing packet-level
+/// send/receive with buffer pool management, interrupt-driven IRQ
+/// acknowledgment, and a polling fallback when no IRQ is registered.
 ///
 /// `QS` is the VirtIO queue size.
 ///
@@ -271,6 +271,7 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
             assert_eq!(token, i as u16);
             *rx_buf_place = Some(rx_buf);
         }
+        inner.lock().flush_receive_notify();
 
         // 2. Allocate all tx buffers.
         for _ in 0..QS {
@@ -463,6 +464,7 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
 
             Ok(rx_buf.into_handle())
         } else {
+            self.inner.lock().flush_receive_notify();
             Err(DriverError::WouldBlock)
         }
     }

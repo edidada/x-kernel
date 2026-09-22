@@ -22,6 +22,10 @@ pub(super) struct BounceMapping {
     pub cpu_addr: usize,
     pub len: usize,
     pub layout: Layout,
+    /// The device was given the caller buffer's own bus address.
+    ///
+    /// There is no bounce allocation to recycle, and no copy on unmap.
+    pub direct: bool,
 }
 
 impl BouncePool {
