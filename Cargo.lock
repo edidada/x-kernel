@@ -3179,7 +3179,9 @@ dependencies = [
 
 [[package]]
 name = "kvirtiodrivers"
-version = "0.13.4"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a849490b1ee4001d897784ce8203950fc3bb990b61385096b10709d707b8a2a"
 dependencies = [
  "bitflags 2.13.2",
  "enumn",
