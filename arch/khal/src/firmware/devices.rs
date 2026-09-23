@@ -6,7 +6,7 @@
 //!
 //! This module is the single seam between firmware-table parsers (DT / ACPI)
 //! and consumers that need to know what hardware exists and how to reach it
-//! (e.g. `drivers/integration/kdriver` bus backends,
+//! (e.g. the driver-compose bus enumeration,
 //! `drivers/platform/pci` host detection, `drivers/devices/virtio` interrupt routing).
 //!
 //! Layering rationale
@@ -38,7 +38,7 @@ static IO_APIC_CACHE: LazyInit<Option<usize>> = LazyInit::new();
 
 /// Which firmware table the device description was read from.
 ///
-/// Kept as a flat enum here (rather than borrowing `kdriver`'s
+/// Kept as a flat enum here (rather than borrowing bus-backend
 /// `DiscoveryOrigin`) so this layer stays free of driver-framework deps.
 /// Callers that need to record the origin can map this 1:1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
