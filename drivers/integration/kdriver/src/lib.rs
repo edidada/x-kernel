@@ -28,8 +28,6 @@ extern crate alloc;
 #[macro_use]
 extern crate log;
 
-#[cfg(feature = "block")]
-pub(crate) use block::dispatch;
 #[cfg(all(unittest, feature = "virtio-blk"))]
 #[path = "tests/block_requests.rs"]
 mod block_request_tests;

@@ -50,7 +50,7 @@ pub use self::input::VirtIoInputDev;
 #[cfg(feature = "net")]
 mod net;
 #[cfg(feature = "net")]
-pub use self::net::VirtIoNetDev;
+pub use self::net::{VirtIoNetDev, VirtIoNetIrqWorker};
 
 #[cfg(feature = "rng")]
 mod rng;

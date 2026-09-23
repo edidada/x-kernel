@@ -31,6 +31,9 @@ extern crate alloc;
 
 mod clk;
 
+#[cfg(feature = "virtio-hal")]
+pub mod hal;
+
 use alloc::sync::Arc;
 
 pub use clk::ClkRegistry;

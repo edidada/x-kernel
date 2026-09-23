@@ -324,6 +324,15 @@ config KFEAT_DRIVER_CORE_VIRTIO_BLK
       KFEAT_DRIVER_VIRTIO_BLK; enable it instead of (not in addition to)
       the legacy symbol.
 
+config KFEAT_DRIVER_CORE_VIRTIO_NET
+    bool "virtio-net driver on the driver-core model (PCI)"
+    default n
+    help
+      Enable the new-model virtio-net driver: const PCI id table, per-device
+      interrupt ownership (no global IRQ routing), and net-class publication
+      through a detached class parent. Migration target for
+      KFEAT_DRIVER_VIRTIO_NET; enable it instead of the legacy symbol.
+
 config KFEAT_DRIVER_CORE_PL011
     bool "PL011 serial driver on the driver-core model (with fixed-clock provider)"
     depends on ARCH_AARCH64

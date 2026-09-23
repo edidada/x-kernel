@@ -706,3 +706,9 @@ pub mod prelude {
 pub fn remove_detached_char(owner: u64) -> Option<ClassDevice<CharDeviceImpl>> {
     char_class_registry().lock().remove_detached(owner)
 }
+
+/// Drop a detached (driver-core owned) net publication by its owning device id.
+#[cfg(feature = "net")]
+pub fn remove_detached_net(owner: u64) -> Option<ClassDevice<NetDeviceImpl>> {
+    net_class_registry().lock().remove_detached(owner)
+}

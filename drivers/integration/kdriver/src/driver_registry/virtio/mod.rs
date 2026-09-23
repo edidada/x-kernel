@@ -234,7 +234,7 @@ fn activate_virtio_mmio(device: Arc<DeviceObject>, device_kind: DeviceKind) -> D
 }
 
 #[cfg(feature = "virtio")]
-fn dispatch_virtio_try_new<T: virtio::Transport + Send + 'static>(
+fn dispatch_virtio_try_new<T: virtio::Transport + Send + Sync + 'static>(
     parent: Arc<DeviceObject>,
     kind: DeviceKind,
     transport: T,
@@ -243,8 +243,24 @@ fn dispatch_virtio_try_new<T: virtio::Transport + Send + 'static>(
     match kind {
         #[cfg(feature = "virtio-net")]
         DeviceKind::Net => {
-            use glue::VirtIoNet;
-            kclass::publish_net(parent, VirtIoNet::try_new(transport, irq)?).map(drop)
+            use alloc::sync::Arc as ArcAlias;
+
+            use device_res::{IrqEvent, IrqHandler, IrqResource, IrqTrigger};
+
+            use crate::DeviceResourceExt as _;
+
+            let (dev, worker) = glue::VirtIoNet::try_new(transport)?;
+            if let Some(irq) = irq {
+                let handler: ArcAlias<dyn IrqHandler> = Arc::new(move |_irq: usize| {
+                    if worker.service() {
+                        IrqEvent::HANDLED
+                    } else {
+                        IrqEvent::NOT_HANDLED
+                    }
+                });
+                parent.devm_request_irq(IrqResource::new(irq, IrqTrigger::Unknown(0)), handler)?;
+            }
+            kclass::publish_net(parent, dev).map(drop)
         }
         #[cfg(feature = "virtio-blk")]
         DeviceKind::Block => block::activate(parent, transport, irq),

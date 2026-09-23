@@ -1,0 +1,20 @@
+[package]
+name = "virtio-net-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "driver-core virtio-net driver over PCI with per-device IRQ ownership"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "virtio", "net", "x-kernel"]
+categories = ["os", "no-std"]
+
+[dependencies]
+driver-core = { workspace = true }
+driver-runtime = { workspace = true, features = ["virtio-hal"] }
+kdevice.workspace = true
+driver_base = { workspace = true }
+kclass = { workspace = true, features = ["net"] }
+pci = { workspace = true }
+virtio = { workspace = true, features = ["net"] }

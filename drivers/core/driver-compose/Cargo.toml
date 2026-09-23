@@ -14,6 +14,7 @@ categories = ["os", "no-std"]
 default = []
 serial-pl011 = ["dep:serial-pl011"]
 virtio-blk = ["dep:virtio-blk-core", "dep:block"]
+virtio-net = ["dep:virtio-net-core"]
 fixed-clock = ["dep:fixed-clock"]
 
 [dependencies]
@@ -28,4 +29,5 @@ of.workspace = true
 log.workspace = true
 serial-pl011 = { workspace = true, optional = true }
 virtio-blk-core = { workspace = true, optional = true }
+virtio-net-core = { workspace = true, optional = true }
 block = { workspace = true, optional = true }

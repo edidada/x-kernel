@@ -15,6 +15,11 @@ driver-core.workspace = true
 device_res.workspace = true
 device_res_xkernel.workspace = true
 kclk.workspace = true
+virtio = { workspace = true, optional = true }
+memaddr.workspace = true
 kspin.workspace = true
 log.workspace = true
 unittest = { workspace = true }
+
+[features]
+virtio-hal = ["dep:virtio"]

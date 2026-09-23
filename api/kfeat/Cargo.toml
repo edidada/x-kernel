@@ -138,6 +138,7 @@ driver_console_ns16550_ioport = ["kdriver/console-ns16550-ioport"]
 driver_serial_pl011 = ["kdriver/serial-pl011"]
 driver_core_pl011 = ["dep:driver-compose", "dep:serial-pl011", "dep:fixed-clock", "kdriver/driver-core-init", "driver-compose/serial-pl011", "driver-compose/fixed-clock"]
 driver_core_virtio_blk = ["dep:driver-compose", "dep:virtio-blk-core", "kdriver/driver-core-init", "driver-compose/virtio-blk"]
+driver_core_virtio_net = ["dep:driver-compose", "dep:virtio-net-core", "kdriver/driver-core-init", "driver-compose/virtio-net"]
 driver_serial_ns16550_mmio = ["kdriver/serial-ns16550-mmio"]
 driver_serial_ns16550_ioport = ["kdriver/serial-ns16550-ioport"]
 
@@ -210,6 +211,7 @@ driver-compose = { workspace = true, optional = true }
 serial-pl011 = { workspace = true, optional = true }
 fixed-clock = { workspace = true, optional = true }
 virtio-blk-core = { workspace = true, optional = true }
+virtio-net-core = { workspace = true, optional = true }
 kirq = { workspace = true, optional = true }
 kprocess.workspace = true
 kplat-aarch64 = { workspace = true, optional = true, features = [

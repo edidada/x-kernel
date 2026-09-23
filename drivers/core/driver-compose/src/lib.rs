@@ -45,6 +45,7 @@ pub fn init() {
         if let Some(device) = kclass::remove_detached_char(owner) {
             let _ = console_driver::runtime::unregister_console_device(device.id());
         }
+        let _ = kclass::remove_detached_net(owner);
     }));
 
     #[cfg(feature = "fixed-clock")]
@@ -56,9 +57,11 @@ pub fn init() {
         block::dispatch::reclaimer::init();
         virtio_blk_core::register();
     }
+    #[cfg(feature = "virtio-net")]
+    virtio_net_core::register();
 
     enumerate_firmware_devices();
-    #[cfg(feature = "virtio-blk")]
+    #[cfg(any(feature = "virtio-blk", feature = "virtio-net"))]
     enumerate_pci_devices();
 
     let domain = global_domain();
@@ -179,7 +182,7 @@ fn map_trigger(trigger: firmware::InterruptTrigger) -> driver_core::IrqTrigger {
 
 /// Walk the PCI hierarchy into domain descriptors (BARs and legacy INTx as
 /// named resources, vendor/device as identity).
-#[cfg(feature = "virtio-blk")]
+#[cfg(any(feature = "virtio-blk", feature = "virtio-net"))]
 fn enumerate_pci_devices() {
     use driver_core::{
         IrqSpec, IrqTrigger, MmioRegion, ResourceKind,

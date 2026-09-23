@@ -11,6 +11,9 @@ homepage.workspace = true
 repository.workspace = true
 categories.workspace = true
 
+[features]
+pci-non-ecam = []
+
 [dependencies]
 virtio-drivers = { workspace = true }
 kbuild_config = { workspace = true }
