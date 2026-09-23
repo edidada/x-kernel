@@ -120,6 +120,23 @@ pub struct PciIdentity {
     pub subclass: u8,
 }
 
+/// Firmware-node attributes that are not resources: node properties that
+/// provider drivers read (`clock-frequency`, `phandle`, `#clock-cells`).
+///
+/// Deliberately separate from [`ResourceMap`]: resources are what a consumer
+/// acquires; these are what a provider describes itself with.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FirmwareNodeInfo {
+    /// DT `phandle` (also used as the clock [`ProviderId`](kclk)).
+    pub phandle: Option<u32>,
+    /// `clock-frequency` property, in Hz (`fixed-clock` nodes).
+    pub clock_frequency: Option<u32>,
+    /// `#clock-cells`; `Some(_)` marks the node as a clock provider.
+    pub clock_cells: Option<u32>,
+    /// First `clock-output-names` entry, if present.
+    pub clock_output_name: Option<&'static str>,
+}
+
 /// The product of bus enumeration: everything the model knows about a device
 /// before any driver binds. Ids are assigned by the
 /// [`DeviceDomain`](crate::DeviceDomain) on insertion.
@@ -131,6 +148,7 @@ pub struct DeviceDescriptor {
     pub origin: DiscoveryOrigin,
     pub identity: DeviceIdentity,
     pub resources: ResourceMap,
+    pub firmware: Option<FirmwareNodeInfo>,
 }
 
 impl DeviceDescriptor {
@@ -142,6 +160,7 @@ impl DeviceDescriptor {
             origin: DiscoveryOrigin::PlatformStatic,
             identity,
             resources: ResourceMap::new(),
+            firmware: None,
         }
     }
 
@@ -152,6 +171,11 @@ impl DeviceDescriptor {
 
     pub fn with_resources(mut self, resources: ResourceMap) -> Self {
         self.resources = resources;
+        self
+    }
+
+    pub fn with_firmware(mut self, firmware: FirmwareNodeInfo) -> Self {
+        self.firmware = Some(firmware);
         self
     }
 }

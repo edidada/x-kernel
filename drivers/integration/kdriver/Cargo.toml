@@ -16,6 +16,7 @@ ignored = ["display", "input", "kalloc", "vsock"]
 
 [features]
 pci-non-ecam = []
+driver-core-init = ["dep:driver-compose"]
 net = ["dep:net", "kclass/net"]
 block = ["dep:block", "kclass/block", "dep:ktask", "dep:kpoll", "dep:kirq", "dep:linked_list_r4l", "dep:kcpu_id_map", "dep:ksync"]
 hwrng = ["dep:hwrng", "kclass/hwrng", "dep:ktask", "dep:kpoll"]
@@ -112,6 +113,8 @@ smallvec = { version = "1.15", features = ["const_generics", "union"] }
 unittest.workspace = true
 
 kbuild_config = { workspace = true }
+
+driver-compose = { workspace = true, optional = true }
 
 [lints]
 workspace = true

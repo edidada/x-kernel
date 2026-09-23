@@ -128,6 +128,9 @@ fn iomap_first_mmio(
 pub fn init_drivers() {
     info!("Initialize device drivers...");
 
+    #[cfg(feature = "driver-core-init")]
+    driver_compose::init();
+
     #[cfg(feature = "block")]
     block_completion_dispatch::init();
 

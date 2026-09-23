@@ -1,0 +1,18 @@
+[package]
+name = "serial-pl011"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "driver-core PL011 serial driver: golden template for consumer drivers"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "serial", "pl011", "x-kernel"]
+categories = ["os", "no-std"]
+
+[dependencies]
+console_driver = { workspace = true, features = ["pl011"] }
+driver-core.workspace = true
+driver-runtime.workspace = true
+khal.workspace = true
+log.workspace = true

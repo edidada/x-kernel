@@ -44,6 +44,22 @@ use driver_core::{
     ServiceError,
 };
 
+static GLOBAL_RUNTIME: kspin::SpinNoPreempt<Option<Arc<XKernelRuntime>>> =
+    kspin::SpinNoPreempt::new(None);
+
+/// Publish a clock controller through the composition-root runtime.
+///
+/// Driver-visible entry used by clock-provider drivers inside `probe`;
+/// equivalent to `runtime.register_clk_provider` on the installed global
+/// runtime. Wakes every probe parked on this provider's phandle.
+pub fn register_clk_provider(provider: &'static dyn kclk::ClkLookup) {
+    let runtime = GLOBAL_RUNTIME
+        .lock()
+        .clone()
+        .expect("driver-runtime: XKernelRuntime::install_global must run first");
+    runtime.register_clk_provider(provider);
+}
+
 fn map_res_error(err: ResError) -> RuntimeError {
     match err {
         ResError::InvalidResource => RuntimeError::Invalid,
@@ -107,6 +123,7 @@ impl XKernelRuntime {
             driver_core::global_domain().wake(dep);
         });
         driver_core::global_domain().set_services(runtime.clone());
+        *GLOBAL_RUNTIME.lock() = Some(runtime.clone());
         runtime
     }
 

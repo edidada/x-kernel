@@ -72,8 +72,8 @@ pub mod desc {
     //! Enumeration products handed to the model by bus backends.
 
     pub use crate::bus::{
-        DeviceDescriptor, DeviceIdentity, DeviceLocation, DiscoveryOrigin, PciIdentity,
-        PlatformIdentity,
+        DeviceDescriptor, DeviceIdentity, DeviceLocation, DiscoveryOrigin, FirmwareNodeInfo,
+        PciIdentity, PlatformIdentity,
     };
 }
 

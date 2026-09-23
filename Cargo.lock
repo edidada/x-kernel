@@ -1244,6 +1244,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-compose"
+version = "0.3.0-dev"
+dependencies = [
+ "driver-core",
+ "driver-runtime",
+ "fixed-clock",
+ "khal",
+ "log",
+ "of",
+ "serial-pl011",
+]
+
+[[package]]
 name = "driver-core"
 version = "0.3.0-dev"
 dependencies = [
@@ -1577,6 +1590,16 @@ checksum = "ef25905e51abafe4dcea6c15fec58c57b601cdbd0ee53d22ea1d3016c587d39b"
 [[package]]
 name = "firmware-handoff"
 version = "0.3.0-dev"
+
+[[package]]
+name = "fixed-clock"
+version = "0.3.0-dev"
+dependencies = [
+ "driver-core",
+ "driver-runtime",
+ "kclk",
+ "log",
+]
 
 [[package]]
 name = "flagset"
@@ -2287,6 +2310,7 @@ dependencies = [
  "device-res",
  "device-res-xkernel",
  "display",
+ "driver-compose",
  "driver_base",
  "hwrng",
  "input",
@@ -2460,9 +2484,11 @@ dependencies = [
  "alloc-engine",
  "backtrace",
  "devfs",
+ "driver-compose",
  "entropy",
  "fat",
  "fbdevice",
+ "fixed-clock",
  "inputdev",
  "kalloc",
  "kbpf",
@@ -2488,6 +2514,7 @@ dependencies = [
  "linux_sysno",
  "memspace",
  "procfs",
+ "serial-pl011",
  "tee_kernel",
  "tee_task_iface",
 ]
@@ -4779,6 +4806,17 @@ checksum = "66cf8fedced2fcf12406bcb34223dffb92eaf34908ede12fed414c82b7f00b3e"
 dependencies = [
  "base16ct",
  "serde",
+]
+
+[[package]]
+name = "serial-pl011"
+version = "0.3.0-dev"
+dependencies = [
+ "console-driver",
+ "driver-core",
+ "driver-runtime",
+ "khal",
+ "log",
 ]
 
 [[package]]

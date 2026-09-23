@@ -1,0 +1,25 @@
+[package]
+name = "driver-compose"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Composition root for the driver-core model: runtime install, DT enumeration, driver registration"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "x-kernel"]
+categories = ["os", "no-std"]
+
+[features]
+default = []
+serial-pl011 = ["dep:serial-pl011"]
+fixed-clock = ["dep:fixed-clock"]
+
+[dependencies]
+driver-core.workspace = true
+driver-runtime.workspace = true
+fixed-clock = { workspace = true, optional = true }
+khal.workspace = true
+of.workspace = true
+log.workspace = true
+serial-pl011 = { workspace = true, optional = true }

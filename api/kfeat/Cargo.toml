@@ -136,6 +136,7 @@ driver_console_pl011 = ["kdriver/console-pl011"]
 driver_console_ns16550_mmio = ["kdriver/console-ns16550-mmio"]
 driver_console_ns16550_ioport = ["kdriver/console-ns16550-ioport"]
 driver_serial_pl011 = ["kdriver/serial-pl011"]
+driver_core_pl011 = ["dep:driver-compose", "dep:serial-pl011", "dep:fixed-clock", "kdriver/driver-core-init", "driver-compose/serial-pl011", "driver-compose/fixed-clock"]
 driver_serial_ns16550_mmio = ["kdriver/serial-ns16550-mmio"]
 driver_serial_ns16550_ioport = ["kdriver/serial-ns16550-ioport"]
 
@@ -204,6 +205,9 @@ backtrace.workspace = true
 fbdevice = { workspace = true, optional = true }
 fat = { workspace = true, optional = true }
 kdriver.workspace = true
+driver-compose = { workspace = true, optional = true }
+serial-pl011 = { workspace = true, optional = true }
+fixed-clock = { workspace = true, optional = true }
 kirq = { workspace = true, optional = true }
 kprocess.workspace = true
 kplat-aarch64 = { workspace = true, optional = true, features = [

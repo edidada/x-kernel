@@ -12,6 +12,9 @@ members = [
     "task/ktimer-core",
     "drivers/core/driver-core",
     "drivers/core/driver-runtime",
+    "drivers/core/driver-compose",
+    "drivers/drv/fixed-clock",
+    "drivers/drv/serial-pl011",
     "tee/tee_crypto",
     "tee/xdice",
 ]
@@ -200,6 +203,9 @@ device_res = { path = "drivers/contracts/device-res", package = "device-res" }
 kclk = { path = "core/kclk" }
 driver-core = { path = "drivers/core/driver-core" }
 driver-runtime = { path = "drivers/core/driver-runtime" }
+driver-compose = { path = "drivers/core/driver-compose" }
+fixed-clock = { path = "drivers/drv/fixed-clock" }
+serial-pl011 = { path = "drivers/drv/serial-pl011" }
 kclass = { path = "drivers/contracts/kclass" }
 kdevice = { path = "drivers/contracts/kdevice" }
 input = { path = "drivers/contracts/input" }

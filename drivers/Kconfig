@@ -313,6 +313,16 @@ config KFEAT_DRIVER_SERIAL_PL011
       node becomes a character device; the stdout UART shares the early-boot
       instance.
 
+config KFEAT_DRIVER_CORE_PL011
+    bool "PL011 serial driver on the driver-core model (with fixed-clock provider)"
+    depends on ARCH_AARCH64
+    default n
+    help
+      Enable the new-model PL011 serial driver and the fixed-clock clock
+      provider driver, both registered in the driver-core device domain with
+      deferred probe. This is the migration target for KFEAT_DRIVER_SERIAL_PL011;
+      enable it instead of (not in addition to) the legacy symbol.
+
 config KFEAT_DRIVER_SERIAL_NS16550_MMIO
     bool "NS16550 MMIO per-instance serial driver"
     depends on KFEAT_CHAR

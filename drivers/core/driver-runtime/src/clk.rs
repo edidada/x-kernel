@@ -50,7 +50,7 @@ impl ClkOps for KclkHandle {
     }
 
     fn unprepare(&self) {
-        self.0.unprepare();
+        let _ = self.0.unprepare();
     }
 
     fn enable(&self) -> Result<(), RuntimeError> {
