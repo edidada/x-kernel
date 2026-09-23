@@ -1260,8 +1260,10 @@ dependencies = [
  "device-res",
  "device-res-xkernel",
  "driver-core",
+ "kclk",
  "kspin",
  "log",
+ "unittest",
 ]
 
 [[package]]
@@ -1397,6 +1399,8 @@ dependencies = [
 name = "entry"
 version = "0.3.0-dev"
 dependencies = [
+ "driver-core",
+ "driver-runtime",
  "fs_context",
  "kbuild_config",
  "kcpu_id_map",
@@ -2157,6 +2161,17 @@ dependencies = [
  "net",
  "virtio",
  "vsock",
+]
+
+[[package]]
+name = "kclk"
+version = "0.3.0-dev"
+dependencies = [
+ "bitflags 2.13.2",
+ "kspin",
+ "ksync",
+ "ktask",
+ "unittest",
 ]
 
 [[package]]

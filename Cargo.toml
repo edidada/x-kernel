@@ -197,6 +197,7 @@ char_driver = { path = "drivers/contracts/char" }
 display = { path = "drivers/contracts/display" }
 driver_base = { path = "drivers/contracts/driver_base" }
 device_res = { path = "drivers/contracts/device-res", package = "device-res" }
+kclk = { path = "core/kclk" }
 driver-core = { path = "drivers/core/driver-core" }
 driver-runtime = { path = "drivers/core/driver-runtime" }
 kclass = { path = "drivers/contracts/kclass" }

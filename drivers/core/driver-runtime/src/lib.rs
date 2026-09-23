@@ -40,8 +40,8 @@ use device_res::{
 };
 use device_res_xkernel::XKernelResourceProvider;
 use driver_core::{
-    ClkHandle, ClkOps, CoherentMem, DevIrq, DeviceServices, IoMap, IrqAction, IrqHandlerFn,
-    RuntimeError, ServiceError,
+    ClkHandle, CoherentMem, DevIrq, DeviceServices, IoMap, IrqAction, IrqHandlerFn, RuntimeError,
+    ServiceError,
 };
 
 fn map_res_error(err: ResError) -> RuntimeError {
@@ -110,10 +110,14 @@ impl XKernelRuntime {
         runtime
     }
 
-    /// Register a clock provider (`of_clk_add_hw_provider` analogue) and wake
-    /// every probe that was waiting for it.
-    pub fn register_clk_provider(&self, phandle: u64, ops: Arc<dyn ClkOps>) {
-        self.clks.register_provider(phandle, ops);
+    /// Register a clock controller (`of_clk_add_hw_provider` analogue) and
+    /// wake every probe that was waiting for it.
+    ///
+    /// The lookup must live for the kernel's lifetime, matching the kclk
+    /// registry's boot-static model — a controller driver typically leaks
+    /// or statics its table adapter.
+    pub fn register_clk_provider(&self, provider: &'static dyn kclk::ClkLookup) {
+        self.clks.register_provider(provider);
     }
 
     fn iomap_resource(&self, region: driver_core::MmioRegion) -> Result<MmioMapping, RuntimeError> {
@@ -187,6 +191,6 @@ impl DeviceServices for XKernelRuntime {
     }
 
     fn clk_get(&self, _device: u64, spec: driver_core::ClkSpec) -> Result<ClkHandle, ServiceError> {
-        self.clks.get(spec.provider)
+        self.clks.get(spec)
     }
 }

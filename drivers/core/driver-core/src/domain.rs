@@ -517,7 +517,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        device::{ClkHandle, ClkOps, DevIrq, IoMap},
+        device::{ClkHandle, ClkOps, DevIrq, IoMap, IrqAction},
         driver::{DriverDesc, DriverOps},
         platform::{OfMatch, PlatformBus},
     };
@@ -665,7 +665,6 @@ mod tests {
     }
 
     fn test_descriptor() -> DeviceDescriptor {
-        use crate::resource::ResourceEntry;
         let mut resources = crate::resource::ResourceMap::new();
         resources.push_kind(crate::resource::ResourceKind::Mmio(MmioRegion::new(
             0x1000, 0x100,
@@ -699,7 +698,8 @@ mod tests {
     #[def_test(serial)]
     fn probe_binds_data_and_remove_quiesces() {
         REMOVE_RAN.store(false, Ordering::Release);
-        let (domain, _services) = fresh_domain();
+        let (domain, services) = fresh_domain();
+        services.publish_clk(0x42);
         domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
 
         let id = domain.add_device(test_descriptor());
@@ -707,9 +707,8 @@ mod tests {
         assert_eq!(snapshot.state, DeviceState::Active);
         assert_eq!(snapshot.driver, Some("test-serial"));
 
-        domain
-            .with_data::<SerData, u64>(id, |data| data.clk.get_rate())
-            .inspect(|rate| assert_eq!(*rate, 24_000_000));
+        let rate = domain.with_data::<SerData, u64>(id, |data| data.clk.get_rate());
+        assert_eq!(rate, Some(24_000_000));
 
         domain.remove_device(id).unwrap();
         assert!(REMOVE_RAN.load(Ordering::Acquire));
@@ -738,7 +737,8 @@ mod tests {
 
     #[def_test(serial)]
     fn fatal_failure_falls_through_to_next_candidate() {
-        let (domain, _services) = fresh_domain();
+        let (domain, services) = fresh_domain();
+        services.publish_clk(0x42);
         domain.register_driver(DriverDesc::new("picky", PICKY_IDS, PickyDriver));
         domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
 

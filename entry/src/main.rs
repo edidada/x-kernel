@@ -10,6 +10,10 @@
 extern crate klogger;
 
 extern crate alloc;
+#[cfg(feature = "unittest")]
+extern crate driver_core;
+#[cfg(feature = "unittest")]
+extern crate driver_runtime;
 extern crate kfeat;
 extern crate kruntime;
 extern crate kuaccess;
