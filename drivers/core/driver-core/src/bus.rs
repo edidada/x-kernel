@@ -10,7 +10,7 @@
 //! tables (`&'static [B::IdEntry]`), the mechanical translation target of
 //! Linux `pci_device_id` / `of_device_id` arrays.
 
-use alloc::string::String;
+use alloc::{format, string::String};
 
 use crate::resource::ResourceMap;
 
@@ -47,6 +47,13 @@ pub enum MatchScore {
 /// types such as [`OfMatch`].
 pub trait IdMatchEntry {
     fn matches(&self, desc: &DeviceDescriptor) -> MatchScore;
+
+    /// The Linux `MODALIAS` string for this row, when the bus derives one
+    /// (`pci:v...d...`, `of:N...C<compatible>`). Devices publish it through
+    /// their uevent so userland can match drivers by modalias.
+    fn modalias(&self) -> Option<String> {
+        None
+    }
 }
 
 /// A bus type: the matching policy and descriptor shape for one bus.
@@ -224,6 +231,10 @@ impl OfMatch {
 }
 
 impl IdMatchEntry for OfMatch {
+    fn modalias(&self) -> Option<String> {
+        Some(format!("of:NcompatT(null)C{}", self.compatible))
+    }
+
     fn matches(&self, desc: &DeviceDescriptor) -> MatchScore {
         let DeviceIdentity::Platform(platform) = &desc.identity else {
             return MatchScore::NoMatch;
@@ -261,6 +272,14 @@ impl PciMatch {
 }
 
 impl IdMatchEntry for PciMatch {
+    fn modalias(&self) -> Option<String> {
+        Some(format!(
+            "pci:v{vendor:08X}d{device:08X}",
+            vendor = self.vendor_id,
+            device = self.device_id
+        ))
+    }
+
     fn matches(&self, desc: &DeviceDescriptor) -> MatchScore {
         let DeviceIdentity::Pci(pci) = &desc.identity else {
             return MatchScore::NoMatch;

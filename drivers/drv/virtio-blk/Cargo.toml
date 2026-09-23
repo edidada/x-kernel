@@ -15,6 +15,7 @@ categories = ["os", "no-std"]
 block = { workspace = true }
 device_res = { workspace = true }
 driver-core = { workspace = true }
+devnode = { workspace = true }
 driver-runtime = { workspace = true, features = ["virtio-hal"] }
 driver_base = { workspace = true }
 kclass = { workspace = true, features = ["block"] }

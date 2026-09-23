@@ -153,21 +153,17 @@ macro_rules! class_registry {
 
             if let Some(node_class) = device.with(ClassRuntimeMetadata::device_node_class)
                 && let ClassParent::Device(node_parent) = device.parent_ref().clone()
-                && let Err(error) = kdevice::register_device_node(
-                    node_parent.id(),
-                    node_class,
-                    String::from(device.name()),
-                    String::from(device.driver_name()),
-                    device.location(),
-                )
-            {
-                log::warn!(
-                    "device class '{}': failed to assign a device node for {:?}: {}",
-                    $kind.as_str(),
-                    id,
-                    error,
-                );
-            }
+                && {
+                    kdevice::register_device_node(
+                        node_parent.id(),
+                        node_class,
+                        String::from(device.name()),
+                        String::from(device.driver_name()),
+                        device.location(),
+                    );
+                    true
+                }
+            {}
 
             for callback in callbacks {
                 callback(device.clone());
@@ -367,7 +363,7 @@ impl ClassRuntimeMetadata for InputDeviceImpl {
                 String::from(self.unique_id()),
                 kdevice::InputDeviceNodeId::new(id.bus_type, id.vendor, id.product, id.version),
                 event_types,
-                event_codes,
+                event_codes.into_iter().collect(),
             ),
         ))
     }

@@ -409,6 +409,7 @@ impl fmt::Debug for ClkHandle {
 pub struct DeviceCtx<'a, B: Bus> {
     descriptor: &'a DeviceDescriptor,
     id: u64,
+    modalias: Option<&'a str>,
     services: &'a dyn DeviceServices,
     _bus: PhantomData<fn(&B)>,
 }
@@ -423,9 +424,32 @@ impl<'a, B: Bus> DeviceCtx<'a, B> {
         Self {
             descriptor,
             id,
+            modalias: None,
             services,
             _bus: PhantomData,
         }
+    }
+
+    /// Constructed by the domain with the matched id row's `MODALIAS`.
+    pub fn with_modalias(
+        descriptor: &'a DeviceDescriptor,
+        id: u64,
+        modalias: Option<&'a str>,
+        services: &'a dyn DeviceServices,
+    ) -> Self {
+        Self {
+            descriptor,
+            id,
+            modalias,
+            services,
+            _bus: PhantomData,
+        }
+    }
+
+    /// The `MODALIAS` derived from the id-table row this device matched
+    /// (published through uevent so userland can load drivers by alias).
+    pub fn modalias(&self) -> Option<&str> {
+        self.modalias
     }
 
     pub const fn id(&self) -> u64 {

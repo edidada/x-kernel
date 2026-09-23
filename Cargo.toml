@@ -13,6 +13,7 @@ members = [
     "drivers/core/driver-core",
     "drivers/core/driver-runtime",
     "drivers/core/driver-compose",
+    "drivers/contracts/devnode",
     "drivers/drv/fixed-clock",
     "drivers/drv/serial-pl011",
     "drivers/drv/virtio-blk",
@@ -206,6 +207,7 @@ kclk = { path = "core/kclk" }
 driver-core = { path = "drivers/core/driver-core" }
 driver-runtime = { path = "drivers/core/driver-runtime" }
 driver-compose = { path = "drivers/core/driver-compose" }
+devnode = { path = "drivers/contracts/devnode" }
 fixed-clock = { path = "drivers/drv/fixed-clock" }
 serial-pl011 = { path = "drivers/drv/serial-pl011" }
 virtio-blk-core = { path = "drivers/drv/virtio-blk" }

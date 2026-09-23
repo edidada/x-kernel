@@ -13,6 +13,7 @@ documentation.workspace = true
 device_res.workspace = true
 driver_base.workspace = true
 kspin.workspace = true
+devnode.workspace = true
 lazyinit.workspace = true
 log.workspace = true
 unittest = { workspace = true }

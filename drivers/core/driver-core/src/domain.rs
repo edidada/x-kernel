@@ -134,7 +134,17 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
         id: u64,
         services: &dyn DeviceServices,
     ) -> Result<Box<DataBox>, ProbeError> {
-        let mut ctx = DeviceCtx::new(desc, id, services);
+        // MODALIAS: the best-scoring matching id row's alias, computed once
+        // here so drivers forward it into their class publications.
+        let modalias = self
+            .desc
+            .ids
+            .iter()
+            .filter(|entry| entry.matches(desc) != MatchScore::NoMatch)
+            .filter_map(|entry| entry.modalias())
+            .next();
+        let modalias_ref = modalias.as_deref();
+        let mut ctx = DeviceCtx::with_modalias(desc, id, modalias_ref, services);
         let data = self.desc.ops.probe(&mut ctx)?;
         Ok(Box::new(data))
     }

@@ -29,6 +29,7 @@ klazy = { workspace = true }
 ksync = { workspace = true }
 device_res = { workspace = true }
 kbuild_config = { workspace = true }
+devnode = { workspace = true }
 khal = { workspace = true }
 kcpu_id_map = { workspace = true }
 kirq = { workspace = true }

@@ -25,7 +25,7 @@
 
 extern crate alloc;
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, string::String, sync::Arc};
 
 use block::{
     Gendisk,
@@ -197,6 +197,8 @@ fn activate<T: Transport + 'static>(
         .map_err(map_res_error)?,
     );
 
+    let modalias = dev.modalias().map(alloc::string::String::from);
+    let parent_path = pci_physical_path(dev.descriptor().location);
     let disk = Arc::new(
         Gendisk::new(
             device.name().into(),
@@ -205,7 +207,8 @@ fn activate<T: Transport + 'static>(
             1 << virtio::VIRTIO_BLK_PART_BITS,
             Box::new(device.clone()),
         )
-        .map_err(map_driver_error)?,
+        .map_err(map_driver_error)?
+        .with_devnode_context(&parent_path, modalias),
     );
     activation.disk = Some(disk.clone());
 
@@ -217,6 +220,22 @@ fn activate<T: Transport + 'static>(
     }
 
     Ok(Box::new(activation))
+}
+
+fn pci_physical_path(location: driver_core::desc::DeviceLocation) -> String {
+    use driver_core::desc::DeviceLocation as Ours;
+    match location {
+        Ours::Pci {
+            segment,
+            bus,
+            device,
+            function,
+        } => devnode::physical_path_pci(segment, bus, device, function),
+        Ours::Mmio { base, .. } => alloc::format!("platform/{base:x}.mmio"),
+        Ours::FirmwareNode { id } => alloc::format!("platform/firmware{id}"),
+        Ours::PlatformStatic { id } => alloc::format!("platform/static{id}"),
+        Ours::Bridge { domain } => alloc::format!("pci{domain:04x}:00"),
+    }
 }
 
 fn legacy_location(location: driver_core::desc::DeviceLocation) -> kdevice::DeviceLocation {

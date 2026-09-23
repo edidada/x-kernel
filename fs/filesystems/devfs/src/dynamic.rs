@@ -9,7 +9,7 @@ use alloc::{borrow::Cow, boxed::Box, collections::BTreeMap, string::String, sync
 #[cfg(feature = "input")]
 use kclass::find_input_device;
 use kclass::{ClassDeviceId, find_display_device};
-use kdevice::{DeviceNode, DeviceNodeEvent, DeviceNodeKind, subscribe_device_nodes};
+use kdevice::{DeviceNode, DeviceNodeEvent, subscribe_device_nodes};
 use klazy::Once;
 use ksync::Mutex;
 use kvfs::{
@@ -96,49 +96,35 @@ fn display_file(
     )))
 }
 
+fn node_key(node: &DeviceNode) -> ClassDeviceId {
+    ClassDeviceId::from_device(kdevice::DeviceId::new(node.id()))
+}
+
 fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
-    if projection
-        .records
-        .contains_key(&ClassDeviceId::from_device(node.core_id()))
-    {
+    if projection.records.contains_key(&node_key(&node)) {
         return;
     }
     let number = node.device_number();
     let number = DeviceId::new(number.major(), number.minor());
-    let file = match node.kind() {
+    let file = match node.subsystem() {
         #[cfg(feature = "input")]
-        DeviceNodeKind::Input => input_file(
-            projection.fs.clone(),
-            number,
-            ClassDeviceId::from_device(node.core_id()),
-        ),
-        #[cfg(not(feature = "input"))]
-        DeviceNodeKind::Input => None,
-        DeviceNodeKind::Drm => display_file(
-            projection.fs.clone(),
-            number,
-            ClassDeviceId::from_device(node.core_id()),
-        ),>>>>>>> 9cfe18b9a (refactor(kclass): decouple the class layer from the legacy device object)
-    };
-    let file = match file {
-        Ok(file) => file,
-        Err(error) => {
-            warn!(
-                "devtmpfs: cannot register device {:?}: {error:?}",
-                node.core_id()
-            );
-            return;
+        "input" => input_file(projection.fs.clone(), number, node_key(&node)),
+        "drm" => display_file(projection.fs.clone(), number, node_key(&node)),
+        "block" => {
+            let file = DeviceFile::new_block(projection.fs.clone(), number);
+            Some((file, Arc::new(|| {}) as DeviceRemovalCallback))
         }
+        _ => None,>>>>>>> 9faa13552 (feat(devnode): data-driven userland node projection with block and MODALIAS)
     };
     let Some((file, on_remove)) = file else {
         warn!(
             "devtmpfs: class device for node {:?} is unavailable",
-            ClassDeviceId::from_device(node.core_id())
+            node_key(&node)
         );
         return;
     };
     projection.records.insert(
-        ClassDeviceId::from_device(node.core_id()),
+        node_key(&node),
         DeviceNodeRecord {
             node,
             file,
@@ -150,10 +136,7 @@ fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
 fn remove_device(node: &DeviceNode) {
     let record = {
         let mut projection = projection().lock();
-        let Some(record) = projection
-            .records
-            .get(&ClassDeviceId::from_device(node.core_id()))
-        else {
+        let Some(record) = projection.records.get(&node_key(node)) else {
             return;
         };
         if record.node != *node {
@@ -166,7 +149,7 @@ fn remove_device(node: &DeviceNode) {
         )]
         projection
             .records
-            .remove(&ClassDeviceId::from_device(node.core_id()))
+            .remove(&node_key(node))
             .expect("checked device projection must remain present")
     };
     (record.on_remove)();
@@ -199,24 +182,20 @@ pub(crate) fn initialize(fs: Arc<SimpleFs>) {
 
 #[derive(Clone, Copy)]
 pub(crate) struct DynamicDeviceDir {
-    kind: DeviceNodeKind,
+    subsystem: &'static str,
 }
 
 impl DynamicDeviceDir {
     pub(crate) const fn input() -> Self {
-        Self {
-            kind: DeviceNodeKind::Input,
-        }
+        Self { subsystem: "input" }
     }
 
     pub(crate) const fn drm() -> Self {
-        Self {
-            kind: DeviceNodeKind::Drm,
-        }
+        Self { subsystem: "drm" }
     }
 
     fn local_name<'a>(&self, node: &'a DeviceNode) -> Option<&'a str> {
-        if node.kind() != self.kind {
+        if node.subsystem() != self.subsystem {
             return None;
         }
         node.devname().rsplit('/').next()
