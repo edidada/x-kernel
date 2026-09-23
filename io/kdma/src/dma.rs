@@ -467,10 +467,23 @@ mod tests {
 
     use super::*;
 
+    fn platform_allows_direct_dma() -> bool {
+        #[cfg(target_arch = "aarch64")]
+        let is_protected_guest =
+            kbuild_config::KFEAT_KVM_GUEST_MEM_SHARE || kbuild_config::KFEAT_VIRTCCA_HUK_KEY;
+        #[cfg(target_arch = "x86_64")]
+        let is_protected_guest =
+            kbuild_config::SEV_CBIT_POS != 0 || kbuild_config::KFEAT_CSV_HUK_KEY;
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        let is_protected_guest = true;
+
+        kbuild_config::DMA_DIRECT_COHERENT && !is_protected_guest
+    }
+
     #[def_test]
-    fn platform_accepts_linear_phys_when_direct_dma_is_configured() {
+    fn platform_direct_dma_matches_platform_policy() {
         let bus = kplat::dma::direct_dma_addr(0, 1, DmaDirection::Bidirectional.into());
-        if kbuild_config::DMA_DIRECT_COHERENT {
+        if platform_allows_direct_dma() {
             assert_eq!(bus, Some(kbuild_config::PHYS_BUS_OFFSET));
         } else {
             assert_eq!(bus, None);
@@ -507,13 +520,15 @@ mod tests {
             // mapping and buffer returned above; this unmaps it once.
             unsafe { crate::unmap_dma_buffer(dma.bus_addr, ptr, direction) };
             assert_eq!(has_same_cpu_addr, is_direct);
-            if kbuild_config::DMA_DIRECT_COHERENT {
+            if platform_allows_direct_dma() {
                 let vaddr = ptr.as_ptr() as *mut u8 as usize;
                 assert!(
                     in_linear_map(vaddr) && in_linear_map(vaddr + 1525),
                     "heap buffers must sit in the linear map on a direct-DMA platform"
                 );
                 assert!(is_direct);
+            } else {
+                assert!(!is_direct);
             }
             if let Some(byte) = device_byte {
                 assert_eq!(byte, 0x5a);
