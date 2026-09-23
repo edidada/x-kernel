@@ -1,0 +1,18 @@
+[package]
+name = "driver-runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Per-device service runtime for driver-core: bridges device-res providers, owns the clk registry"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "x-kernel"]
+categories = ["os", "no-std"]
+
+[dependencies]
+driver-core.workspace = true
+device_res.workspace = true
+device_res_xkernel.workspace = true
+kspin.workspace = true
+log.workspace = true

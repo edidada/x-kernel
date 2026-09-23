@@ -10,6 +10,8 @@ members = [
     "task/kworkng/crates/kworkqueue_ng",
     "task/kworkng",
     "task/ktimer-core",
+    "drivers/core/driver-core",
+    "drivers/core/driver-runtime",
     "tee/tee_crypto",
     "tee/xdice",
 ]
@@ -195,6 +197,8 @@ char_driver = { path = "drivers/contracts/char" }
 display = { path = "drivers/contracts/display" }
 driver_base = { path = "drivers/contracts/driver_base" }
 device_res = { path = "drivers/contracts/device-res", package = "device-res" }
+driver-core = { path = "drivers/core/driver-core" }
+driver-runtime = { path = "drivers/core/driver-runtime" }
 kclass = { path = "drivers/contracts/kclass" }
 kdevice = { path = "drivers/contracts/kdevice" }
 input = { path = "drivers/contracts/input" }

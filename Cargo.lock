@@ -1244,6 +1244,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-core"
+version = "0.3.0-dev"
+dependencies = [
+ "kspin",
+ "lazyinit",
+ "log",
+ "unittest",
+]
+
+[[package]]
+name = "driver-runtime"
+version = "0.3.0-dev"
+dependencies = [
+ "device-res",
+ "device-res-xkernel",
+ "driver-core",
+ "kspin",
+ "log",
+]
+
+[[package]]
 name = "driver_base"
 version = "0.3.0-dev"
 
