@@ -139,8 +139,10 @@ Active ──status 写 0──> Reset（丢弃 pending_head）──> Idle
 
 - `VirtioMmioBlockDevice` 内部状态由 `VirtioMmioState` 的 `SpinNoIrq` 锁保护；
   `pending_head` 另由 `SpinNoIrq<Option<u16>>` 保护。
-- `Arc<T>` accessor 共享；`RamDiskBackend` 用 `ksync::Mutex<Vec<u8>>` 串行化
-  内存盘访问。
+- `Arc<T>` accessor 共享；`RamDiskBackend` 用 `kspin::SpinNoIrq<Vec<u8>>` 串行化
+  内存盘访问。后端 I/O 在队列 `SpinNoIrq` 锁内执行，因此后端锁也必须是不可睡眠
+  的自旋锁：`ksync::Mutex` 在竞争时会阻塞当前任务，而此刻本地中断已被屏蔽，
+  可能死锁。
 - `VirtioBlkDevice` 的 `deferred_pending` 是 `AtomicBool`，仅作防御性记录。
 - 中断注入在锁外调用 `IrqSender::inject`。
 

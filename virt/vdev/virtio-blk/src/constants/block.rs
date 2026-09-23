@@ -7,7 +7,7 @@
 //! This module contains constants specific to VirtIO block devices,
 //! including request types, status codes, feature flags, and configuration defaults.
 
-use crate::constants::{VIRTIO_F_RING_EVENT_IDX, VIRTIO_F_VERSION_1};
+use crate::constants::VIRTIO_F_VERSION_1;
 
 // ============================================================================
 // VirtIO Block Device Configuration Space Offsets
@@ -131,9 +131,13 @@ pub const DEFAULT_OPT_IO_SIZE: u32 = 1;
 // Combined Feature Flags
 // ============================================================================
 
-/// Combined block device features for default configuration
+/// Combined block device features for default configuration.
+///
+/// Deliberately does not advertise `VIRTIO_F_RING_EVENT_IDX`: the queue layer
+/// does not implement the event-index threshold logic, and advertising it
+/// would let the driver rely on `used_event`/`avail_event` semantics the
+/// device never honors.
 pub const VIRTIO_BLK_FEATURES: u64 = VIRTIO_F_VERSION_1
-    | VIRTIO_F_RING_EVENT_IDX
     | VIRTIO_BLK_F_SIZE_MAX
     | VIRTIO_BLK_F_SEG_MAX
     | VIRTIO_BLK_F_BLK_SIZE

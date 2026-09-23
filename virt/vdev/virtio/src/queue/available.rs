@@ -170,9 +170,12 @@ impl<T: GuestMemoryAccessor + Clone> AvailableRing<T> {
             return Err(VirtioError::QueueNotReady);
         }
 
-        self.accessor
-            .read_obj(self.base_addr)
-            .map_err(|_| VirtioError::InvalidAddress)
+        // SAFETY: `VirtQueueAvail` is a `#[repr(C)]` header of two `u16`s.
+        unsafe {
+            self.accessor
+                .read_obj(self.base_addr)
+                .map_err(|_| VirtioError::InvalidAddress)
+        }
     }
 
     /// Write the available ring header
@@ -181,9 +184,12 @@ impl<T: GuestMemoryAccessor + Clone> AvailableRing<T> {
             return Err(VirtioError::QueueNotReady);
         }
 
-        self.accessor
-            .write_obj(self.base_addr, *header)
-            .map_err(|_| VirtioError::InvalidAddress)
+        // SAFETY: `VirtQueueAvail` is a `#[repr(C)]` header of two `u16`s.
+        unsafe {
+            self.accessor
+                .write_obj(self.base_addr, *header)
+                .map_err(|_| VirtioError::InvalidAddress)
+        }
     }
 
     /// Read the current available index from guest memory
@@ -245,9 +251,12 @@ impl<T: GuestMemoryAccessor + Clone> AvailableRing<T> {
             .ring_entry_addr(ring_index % self.size)
             .ok_or(VirtioError::InvalidQueue)?;
 
-        self.accessor
-            .write_obj(entry_addr, desc_index)
-            .map_err(|_| VirtioError::InvalidAddress)?;
+        // SAFETY: the available-ring entry is a plain `u16` index.
+        unsafe {
+            self.accessor
+                .write_obj(entry_addr, desc_index)
+                .map_err(|_| VirtioError::InvalidAddress)
+        }?;
 
         Ok(())
     }
@@ -292,9 +301,12 @@ impl<T: GuestMemoryAccessor + Clone> AvailableRing<T> {
         }
 
         let event_addr = self.used_event_addr();
-        self.accessor
-            .read_obj(event_addr)
-            .map_err(|_| VirtioError::InvalidAddress)
+        // SAFETY: the used_event footer is a plain `u16`.
+        unsafe {
+            self.accessor
+                .read_obj(event_addr)
+                .map_err(|_| VirtioError::InvalidAddress)
+        }
     }
 
     /// Write the used event field (for event_idx feature)
@@ -304,9 +316,12 @@ impl<T: GuestMemoryAccessor + Clone> AvailableRing<T> {
         }
 
         let event_addr = self.used_event_addr();
-        self.accessor
-            .write_obj(event_addr, event)
-            .map_err(|_| VirtioError::InvalidAddress)
+        // SAFETY: the used_event footer is a plain `u16`.
+        unsafe {
+            self.accessor
+                .write_obj(event_addr, event)
+                .map_err(|_| VirtioError::InvalidAddress)
+        }
     }
 }
 

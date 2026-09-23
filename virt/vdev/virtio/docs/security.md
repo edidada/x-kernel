@@ -33,8 +33,12 @@
 |------|--------|-----------|----------|
 | `memory.rs:66` `read_buffer` | `translate_and_get_limit` 返回的主机地址对至少 `limit` 字节可解引用，且 `limit >= data.len()` | 长度在拷贝前已校验；`copy_nonoverlapping` 的源区间与目标 `data` 不重叠 | 仅 `GuestMemoryAccessor` 实现者调用 |
 | `memory.rs:89` `write_buffer` | 同上（目标侧） | 长度已校验；目标为访客内存映射 | 同上 |
-| `memory.rs:105` `read_obj` | `T` 为可按字节寻址的 POD；`MaybeUninit<T>` 的字节视图有效 | `read_buffer` 填满全部字节后才 `assume_init` | 调用方保证 `T` 布局 |
-| `memory.rs:122` `write_obj` | `T` 为可按字节寻址的 POD | 读取活动值字节对 POD 安全 | 调用方保证 `T` 布局 |
+| `memory.rs:110` `read_obj`（`unsafe fn`） | `T` 为可按字节寻址、无非法位模式/填充不变量/自有指针的 POD；`MaybeUninit<T>` 的字节视图有效 | `read_buffer` 填满全部字节后才 `assume_init` | `unsafe fn` 的 `# Safety` 契约，调用方保证 `T` 布局 |
+| `memory.rs:132` `write_obj`（`unsafe fn`） | `T` 为 POD | 读取活动值字节对 POD 安全 | 同上 |
+
+`read_obj`/`write_obj` 已声明为 `unsafe fn`：`T: Sized` 不保证是 POD，若传入含
+指针、无效位模式或 `bool` 的类型会触发 UB，因此把 POD 约束作为调用方必须满足的
+`# Safety` 契约，而不是默认安全方法。
 
 调用方需满足：`translate_and_get_limit` 返回的宿主地址必须可直接解引用，且
 返回的 `limit` 必须真实反映连续可访问范围。
@@ -92,8 +96,9 @@
 ## 已知限制
 
 - 仅实现 VirtIO MMIO 传输（version 2），不支持 PCI 传输。
-- event-index（`VIRTIO_F_RING_EVENT_IDX`）尚未接线；布局计算按包含 event-index
-  footer 处理，但运行时不使用该特性。
+- event-index 尚未实现：传输不广告 `VIRTIO_F_RING_EVENT_IDX`，队列的
+  `event_idx_enabled` 恒为 `false`。布局计算仍按包含 event-index footer 处理，
+  以保证协商无关的环区间校验。
 - indirect 描述符的完整数据路径能力取决于上层设备实现。
 - 不负责中断注入与硬件交互，由设备实现/VMM 完成。
 
@@ -102,6 +107,7 @@
 - [ ] 任何新的访客内存读写是否都经过翻译与长度校验？
 - [ ] 新描述符处理是否保持链长度上限与回绕安全？
 - [ ] `QUEUE_READY` 前是否仍执行完整的环布局校验？
-- [ ] `unsafe` 块是否有 `SAFETY:` 说明并保持 `memory.rs` 的翻译契约？
+- [ ] `unsafe` 块 / `unsafe fn` 是否有 `SAFETY:`/`# Safety` 说明并保持
+      `memory.rs` 的翻译与 POD 契约？
 - [ ] MMIO 访问宽度校验是否覆盖新增寄存器？
 - [ ] 新增状态是否有对应锁保护，避免数据竞争？

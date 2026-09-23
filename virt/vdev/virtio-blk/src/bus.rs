@@ -19,7 +19,7 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use ksync::Mutex as KsyncMutex;
+use kspin::SpinNoIrq;
 use vdev_core::{GuestDma, IrqSender, MmioDevice};
 use vdev_virtio::{
     AccessWidth, DmaGuestMemory, GuestPhysAddr, NoGuestMemoryAccessor, VirtioError, VirtioResult,
@@ -42,9 +42,12 @@ const SECTOR_SIZE: usize = 512;
 ///
 /// `requires_deferred_processing` is `false`, so a queue notification is
 /// serviced inline on the MMIO write path and the guest is interrupted
-/// immediately when the used ring advances.
+/// immediately when the used ring advances. The data path runs under the
+/// VirtIO queue's `SpinNoIrq` lock, so the backing store is itself protected by
+/// a `SpinNoIrq` spinlock: a sleeping `ksync::Mutex` here could block while
+/// local interrupts are disabled and deadlock.
 pub struct RamDiskBackend {
-    bytes: KsyncMutex<Vec<u8>>,
+    bytes: SpinNoIrq<Vec<u8>>,
     capacity_sectors: u64,
 }
 
@@ -61,7 +64,7 @@ impl RamDiskBackend {
             "virtio-blk RAM disk capacity must be a positive multiple of 512 bytes"
         );
         Self {
-            bytes: KsyncMutex::new(alloc::vec![0u8; capacity_bytes as usize]),
+            bytes: SpinNoIrq::new(alloc::vec![0u8; capacity_bytes as usize]),
             capacity_sectors: capacity_bytes / SECTOR_SIZE as u64,
         }
     }

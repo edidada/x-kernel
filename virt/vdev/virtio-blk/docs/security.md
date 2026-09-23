@@ -40,9 +40,11 @@
 ## 线程安全
 
 - 设备实例作为 `Box<dyn MmioDevice>` 由 VMM MMIO 总线以 `&mut self` 串行访问；
-  内部 `SpinNoIrq`/`ksync::Mutex` 保护共享状态。
+  内部共享状态由 `SpinNoIrq` 保护。
 - `IrqSender` 为 `Send + Sync`；注入在设备锁外调用。
-- `RamDiskBackend` 的内存盘由 `ksync::Mutex` 保护，可在多 vCPU 触发下安全访问。
+- `RamDiskBackend` 的内存盘由 `kspin::SpinNoIrq` 保护，可在多 vCPU 触发下安全访问。
+  后端 I/O 运行在队列 `SpinNoIrq` 锁内（本地中断屏蔽），故后端锁必须不可睡眠，
+  避免在中断屏蔽状态下阻塞导致死锁。
 
 ## 威胁分析
 

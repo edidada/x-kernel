@@ -250,9 +250,12 @@ impl<T: GuestMemoryAccessor + Clone> UsedRing<T> {
             return Err(VirtioError::QueueNotReady);
         }
 
-        self.accessor
-            .read_obj(self.base_addr)
-            .map_err(|_| VirtioError::InvalidAddress)
+        // SAFETY: `VirtQueueUsed` is a `#[repr(C)]` header of two `u16`s.
+        unsafe {
+            self.accessor
+                .read_obj(self.base_addr)
+                .map_err(|_| VirtioError::InvalidAddress)
+        }
     }
 
     /// Write the used ring header
@@ -261,9 +264,12 @@ impl<T: GuestMemoryAccessor + Clone> UsedRing<T> {
             return Err(VirtioError::QueueNotReady);
         }
 
-        self.accessor
-            .write_obj(self.base_addr, *header)
-            .map_err(|_| VirtioError::InvalidAddress)
+        // SAFETY: `VirtQueueUsed` is a `#[repr(C)]` header of two `u16`s.
+        unsafe {
+            self.accessor
+                .write_obj(self.base_addr, *header)
+                .map_err(|_| VirtioError::InvalidAddress)
+        }
     }
 
     /// Get the current used index

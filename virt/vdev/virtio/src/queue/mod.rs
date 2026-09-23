@@ -25,11 +25,11 @@ use crate::{
 #[derive(Debug)]
 pub struct VirtioQueue<T: GuestMemoryAccessor + Clone> {
     /// Queue index
-    pub index: u16,
+    pub(crate) index: u16,
     /// Queue size
-    pub size: u16,
+    pub(crate) size: u16,
     /// Descriptor table
-    pub desc_table: Option<DescriptorTable>,
+    pub(crate) desc_table: Option<DescriptorTable>,
     /// Available ring
     avail_ring: Option<AvailableRing<T>>,
     /// Used ring
@@ -37,27 +37,27 @@ pub struct VirtioQueue<T: GuestMemoryAccessor + Clone> {
     /// Guest memory accessor
     accessor: Arc<T>,
     /// Maximum queue size
-    pub max_size: u16,
+    pub(crate) max_size: u16,
     /// Queue ready flag
-    pub ready: bool,
+    pub(crate) ready: bool,
     /// Descriptor table address (guest physical)
-    pub desc_table_addr: GuestPhysAddr,
+    pub(crate) desc_table_addr: GuestPhysAddr,
     /// Available ring address (guest physical)
-    pub avail_ring_addr: GuestPhysAddr,
+    pub(crate) avail_ring_addr: GuestPhysAddr,
     /// Used ring address (guest physical)
-    pub used_ring_addr: GuestPhysAddr,
+    pub(crate) used_ring_addr: GuestPhysAddr,
     /// Next available index
     next_avail: u16,
     /// Next used index
     next_used: u16,
     /// Event index enabled.
     ///
-    /// Currently always `false` and intentionally unused: event-index feature
-    /// negotiation is not implemented yet, and a follow-up will wire this
-    /// flag. Layout validation deliberately does not depend on it: the ring
+    /// Always `false`: the transport does not advertise
+    /// `VIRTIO_F_RING_EVENT_IDX`, so the event-index threshold logic is never
+    /// wired. Layout validation deliberately does not depend on it: the ring
     /// regions always include the 2-byte event-index footer through the
     /// `layout_size` math, so the check stays negotiation-independent.
-    pub event_idx_enabled: bool,
+    pub(crate) event_idx_enabled: bool,
     /// Set when a runtime ring/descriptor validation failure occurs; the queue
     /// rejects `pop`/`complete` and the guest-data paths until
     /// [`reset`](Self::reset) clears it.
@@ -795,10 +795,13 @@ impl<T: GuestMemoryAccessor + Clone> VirtioQueue<T> {
             head_index
         );
 
-        // Write the status byte to guest memory using the new memory access interface
-        self.accessor
-            .write_obj(status_addr_guest, status)
-            .map_err(|_| VirtioError::InvalidAddress)?;
+        // Write the status byte to guest memory using the new memory access interface.
+        // SAFETY: the VirtIO block status byte is a plain `u8`.
+        unsafe {
+            self.accessor
+                .write_obj(status_addr_guest, status)
+                .map_err(|_| VirtioError::InvalidAddress)?;
+        }
 
         Ok(())
     }
