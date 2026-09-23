@@ -155,8 +155,9 @@ impl LiveBlocks {
 
 /// Pages reserved for the free-head bitmap of a region of `region_pages`.
 ///
-/// Mirrors the reservation rule in `add_region`; the caller asserts the
-/// resulting usable page count so a rule change fails loudly here.
+/// Mirrors the reservation rule in `add_region`, which places those pages at
+/// the end of the region; the caller asserts the resulting usable page count
+/// so a rule change fails loudly here.
 fn reserved_bitmap_pages(region_pages: usize) -> usize {
     if region_pages <= INLINE_BITMAP_PAGES {
         0
@@ -194,9 +195,18 @@ fn stress(region_pages: usize, rounds: usize, seed: u64, label: &str) {
         region_pages - reserved,
         "{label}: usable page count does not match the documented reservation"
     );
-    let heap_base = storage.base() + reserved * PAGE;
+    // The reservation sits at the tail, so the usable window starts at the
+    // storage base and keeps its alignment. The only remaining bound on the
+    // largest block is `usable_pages` itself; a head reservation would push
+    // the window start off any power-of-two boundary and cost one order.
+    let heap_base = storage.base();
     let heap_end = heap_base + usable_pages * PAGE;
     let biggest = largest_aligned_block(heap_base, heap_end, usable_pages);
+    assert_eq!(
+        biggest,
+        1usize << (usize::BITS as usize - 1 - usable_pages.leading_zeros() as usize),
+        "{label}: bitmap reservation must not shrink the largest aligned block"
+    );
 
     let mut rng = XorShift(seed);
     for round in 0..rounds {

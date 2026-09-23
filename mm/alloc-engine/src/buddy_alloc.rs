@@ -42,10 +42,10 @@ struct FreeNode {
 intrusive_adapter!(FreeNodeAdapter = UnsafeRef<FreeNode>: FreeNode { link => LinkedListAtomicLink });
 
 /// A set bit certifies an initialized free node, not merely an unused page.
-/// Large regions reserve bitmap pages which are never handed to callers.
+/// Large regions reserve trailing bitmap pages which are never handed out.
 struct FreeHeadBitmap {
     inline: [usize; INLINE_BITMAP_WORDS],
-    /// Zero selects inline storage; otherwise points to the reserved prefix.
+    /// Zero selects inline storage; otherwise points to the reserved tail.
     storage: usize,
 }
 
@@ -56,7 +56,7 @@ impl FreeHeadBitmap {
         } else {
             // SAFETY: Region indexes this bitmap only for its usable pages.
             // add_region reserved and zeroed enough aligned words for every
-            // registered page, and callers cannot allocate the bitmap prefix.
+            // registered page, and callers cannot allocate the bitmap tail.
             let word = unsafe { (self.storage as *const usize).add(index) };
             // SAFETY: add_region initialized this aligned bitmap word; Region's
             // shared borrow prevents concurrent bitmap mutation.
@@ -91,7 +91,10 @@ impl FreeHeadBitmap {
 
 /// One exclusively owned contiguous region, including its reserved metadata.
 struct Region {
-    region_start: usize,
+    /// Exclusive end of the whole registered span, bitmap tail included.
+    region_end: usize,
+    /// First allocatable page. Equal to the caller's base, so the carving
+    /// below inherits that base's full natural alignment.
     heap_start: usize,
     total_pages: usize,
     free_pages: usize,
@@ -278,10 +281,12 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
 
     /// Add exclusively owned, page-aligned writable storage to the allocator.
     ///
-    /// Regions larger than the inline bitmap reserve a page-rounded prefix for
-    /// one free-head bit per registered page. Statistics and allocations exclude
-    /// that prefix. Storage must remain valid until reset and must not overlap
-    /// live allocations or another allocator's region.
+    /// Regions larger than the inline bitmap reserve page-rounded trailing
+    /// storage for one free-head bit per registered page. The heap therefore
+    /// still starts at `base` and keeps its natural alignment; statistics and
+    /// allocations exclude the reserved tail. Storage must remain valid until
+    /// reset and must not overlap live allocations or another allocator's
+    /// region.
     pub fn add_region(&mut self, base: usize, size: usize) -> AllocResult {
         if self.region_count >= MAX_REGIONS {
             return Err(AllocError::NoMemory);
@@ -301,8 +306,7 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
         let registered_pages = heap_size / PAGE_SIZE;
         // Overlap checks include metadata pages, not just allocatable chunks.
         for region in self.regions[..self.region_count].iter().flatten() {
-            let end = region.heap_start + region.total_pages * PAGE_SIZE;
-            if base < end && region.region_start < region_end {
+            if base < region.region_end && region.heap_start < region_end {
                 return Err(AllocError::MemoryOverlap);
             }
         }
@@ -311,32 +315,43 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
         } else {
             registered_pages.div_ceil(8).div_ceil(PAGE_SIZE)
         };
-        let heap_start = base + metadata_pages * PAGE_SIZE;
+        debug_assert!(metadata_pages < registered_pages);
+        // The bitmap goes at the tail so `heap_start` stays equal to `base`.
+        // A head prefix would drop the heap's alignment to
+        // `tz(metadata_pages)` -- usually 0, since that page count is odd --
+        // and the maximal-order carving below would then have to climb from a
+        // single page. Every chunk it produces would sit at `base + 2^k`, whose
+        // XOR buddy is `base` itself, so no two of them could ever coalesce and
+        // the largest block would be capped near half the region.
         let total_pages = registered_pages - metadata_pages;
+        let bitmap_start = base + total_pages * PAGE_SIZE;
         if metadata_pages != 0 {
             // SAFETY: The caller supplies exclusive, writable region storage.
-            // The checked prefix fits the region and is excluded from the heap.
-            unsafe { core::ptr::write_bytes(base as *mut u8, 0, metadata_pages * PAGE_SIZE) };
+            // The checked tail fits the region and is excluded from the heap.
+            unsafe {
+                core::ptr::write_bytes(bitmap_start as *mut u8, 0, metadata_pages * PAGE_SIZE)
+            };
         }
         let mut region = Region {
-            region_start: base,
-            heap_start,
+            region_end,
+            heap_start: base,
             total_pages,
             free_pages: 0,
             free_lists: [const { LinkedList::new(FreeNodeAdapter::NEW) }; MAX_ORDER + 1],
             free_heads: FreeHeadBitmap {
                 inline: [0; INLINE_BITMAP_WORDS],
-                storage: if metadata_pages == 0 { 0 } else { base },
+                storage: if metadata_pages == 0 { 0 } else { bitmap_start },
             },
         };
 
-        // Break the region into maximal-order buddy chunks.
+        // Break the region into maximal-order buddy chunks. `heap_start` is
+        // `base`, so the first chunk inherits the caller's alignment.
         let mut offset = 0usize;
         while offset < total_pages {
             let mut order = MAX_ORDER;
             loop {
                 let chunk_pages = 1 << order;
-                let addr = heap_start + offset * PAGE_SIZE;
+                let addr = base + offset * PAGE_SIZE;
                 if chunk_pages <= total_pages - offset
                     && addr.is_multiple_of(order_size::<PAGE_SIZE>(order))
                 {
@@ -347,7 +362,7 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
                 }
                 order -= 1;
             }
-            let addr = heap_start + offset * PAGE_SIZE;
+            let addr = base + offset * PAGE_SIZE;
             region.push_free::<PAGE_SIZE>(addr, order);
             offset += 1 << order;
         }
@@ -882,20 +897,29 @@ mod tests {
     }
 
     #[def_test]
-    fn test_bitmap_storage_is_reserved_and_overlap_checked() {
+    fn test_bitmap_tail_is_reserved_and_overlap_checked() {
         let heap = TestHeap::new(1024);
         let mut b = BuddyAllocator::<PAGE>::new();
         b.init_region(heap.base(), heap.size()).unwrap();
         assert_eq!(b.total_pages(), 1023);
         assert_eq!(b.free_pages(), 1023);
-        assert!(b.allocate_pages_at(heap.base(), 1, PAGE).is_err());
+        // The reserved bitmap is the last page: never handed out, and never
+        // accepted as a fresh registration either.
+        let tail = heap.base() + 1023 * PAGE;
+        assert!(b.allocate_pages_at(tail, 1, PAGE).is_err());
         assert_eq!(
             b.add_region(heap.base(), PAGE),
             Err(AllocError::MemoryOverlap)
         );
+        assert_eq!(b.add_region(tail, PAGE), Err(AllocError::MemoryOverlap));
+        // `heap_start == base`, so the region keeps the caller's alignment and
+        // the reservation costs no order: the largest power-of-two block that
+        // fits 1023 pages is still available at the very first address.
+        assert_eq!(b.allocate_pages(512, PAGE), Ok(heap.base()));
+        b.deallocate_pages(heap.base(), 512);
         let mut addrs = alloc::vec::Vec::new();
         while let Ok(addr) = b.allocate_pages(1, PAGE) {
-            assert!(addr >= heap.base() + PAGE);
+            assert!(addr < tail);
             addrs.push(addr);
         }
         assert_eq!(addrs.len(), 1023);

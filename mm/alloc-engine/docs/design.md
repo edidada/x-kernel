@@ -22,10 +22,21 @@ In particular, an arena allocated by an outer buddy may contain valid free-node
 headers belonging to a nested `SlabHeap` buddy; its outer head bit stays clear.
 
 Up to four machine words of bits are stored inline. Larger regions reserve a
-page-rounded prefix for one bit per registered page, before publishing any free
+page-rounded tail for one bit per registered page, before publishing any free
 blocks. There is no recursive heap allocation. With 4 KiB pages, a 1 GiB region
 reserves 32 KiB. `total_pages`, free/used counts and byte statistics exclude this
-prefix. Region-overlap checks include it; allocations cannot return it.
+tail. Region-overlap checks include it; allocations cannot return it.
+
+The reservation must not move `heap_start` off `base`. Maximal-order carving
+derives each chunk's order from that chunk's own address alignment, so a head
+prefix of `m` pages would leave the heap aligned only to `tz(m)` -- normally a
+single page, because `m` is odd for most region sizes. Carving would then place
+chunks at `base + 2^k` for ascending `k`, and each such chunk's XOR buddy is
+exactly `base`, which lies outside the heap: no two chunks could ever coalesce,
+and the largest block would stay capped near half the region for that region's
+whole lifetime. Keeping the reservation at the tail leaves `heap_start == base`,
+so the first chunk already carries the caller's alignment and the largest block
+is bounded by `total_pages` alone.
 
 ## Operations and complexity
 
@@ -58,12 +69,14 @@ cleared. `reset` and dropping the allocator discard bookkeeping; they do not
 release backing storage. Retiring a `Region` clears only its list headers
 (`Region::drop` calls `fast_clear` on each list); it never writes into caller
 memory, so a region can be retired after its pages have been handed back. The owner must first retire every allocation and then
-reclaim the original region, including its reserved bitmap prefix.
+reclaim the original region, including its reserved bitmap tail.
 
 ## Verification
 
 Unit tests cover sequential, reverse and fixed-random frees, preservation of
 live page contents, recovery of maximal coalesced blocks, inline and reserved
-bitmaps, overlapping registration, non-power-of-two region edges, alignment,
+bitmaps, the reserved tail being neither allocatable nor re-registrable, that the
+reservation costs no buddy order, overlapping registration, non-power-of-two
+region edges, alignment,
 fixed-address splitting and reset. Timing and scaling measurements belong in
 external benchmarks, not timing assertions in unit tests.

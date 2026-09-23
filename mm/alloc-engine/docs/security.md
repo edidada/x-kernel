@@ -12,7 +12,7 @@ pages returned for reuse. These external obligations remain unchanged.
 ## Unsafe operations and invariants
 
 `add_region` checks alignment, minimum page size, address-range overflow and
-region overlap before initializing a reserved bitmap prefix. Bitmap word access
+region overlap before initializing a reserved bitmap tail. Bitmap word access
 uses indices derived from usable pages; storage is sized for all registered
 pages and is never returned by allocation.
 
@@ -43,7 +43,7 @@ independent atomic cache and must never be updated outside this protocol.
 | ID | Risk | Concrete control | Status |
 | --- | --- | --- | --- |
 | A-01 | Live page bytes are interpreted as links | `Region::is_free` checks the out-of-band head bitmap before accessing `FreeNode`; live-payload permutation tests exercise this boundary | Mitigated within the caller ownership contract |
-| A-02 | Bitmap pages are allocated or registered again | Allocation starts after the reserved prefix; overlap checks start at `region_start`; reserved-prefix test checks both paths | Mitigated |
+| A-02 | Bitmap pages are allocated or registered again | `Region::contains` stops at `heap_start + total_pages`, before the reserved tail; overlap checks span `[heap_start, region_end)`, which includes it; the reserved-tail test covers both paths | Mitigated |
 | A-03 | A node is removed from the wrong order/list | Order is read only after bitmap validation; all removal paths use `remove_free` or `pop_free`; coalescing and fixed-address tests verify recoverable capacity | Mitigated |
 | A-04 | Coalescing time grows with fragmented free-list length | At most one indexed membership check and direct unlink per order; no free-list traversal in `deallocate_pages` | Mitigated |
 | A-05 | Double free, wrong allocation size, premature reuse or invalid backing pointer | Caller ownership, matching allocation/free sizes and higher-layer reuse completion are required; debug assertions detect some internal violations | External dependency; not fully detected by this API |
@@ -60,8 +60,9 @@ independent atomic cache and must never be updated outside this protocol.
 
 Invalid registration and overlaps return `AllocError` before writing new bitmap
 storage. Allocation exhaustion returns `NoMemory`; no partial allocation is
-published. Metadata reservation reduces allocatable capacity and may alter the
-largest available block. Freeing does not scrub old payload: initialization and
+published. Metadata reservation reduces allocatable capacity by a few pages;
+because it sits at the tail, `heap_start` stays at the caller's base and the
+largest available block is not reduced. Freeing does not scrub old payload: initialization and
 confidentiality before reuse remain the caller's responsibility.
 
 Backing memory is not freed by `reset` or Drop. Test fixtures explicitly retire
