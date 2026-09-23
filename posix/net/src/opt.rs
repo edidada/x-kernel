@@ -11,8 +11,8 @@
 //!
 //! Linux stores nonzero send and receive timeouts in jiffies. Socket timeout
 //! conversion therefore rounds a userspace `timeval` up to one kernel tick.
-//! Legacy IPv4 `GET_INFO` and `GET_ENTRIES` requests expose the validated
-//! `filter` table snapshot used by `iptables-save`.
+//! Legacy IPv4 `GET_INFO`, `GET_ENTRIES`, and `SET_REPLACE` operate on the
+//! validated `filter` table snapshot.
 
 use alloc::{vec, vec::Vec};
 
@@ -108,7 +108,7 @@ fn supports_kobject_filter_compat(socket: &knet::Socket) -> bool {
     matches!(socket, knet::Socket::Netlink(netlink) if netlink.is_kobject_uevent())
 }
 
-fn supports_legacy_ipv4_filter_get(socket: &knet::Socket) -> bool {
+fn supports_legacy_ipv4_filter(socket: &knet::Socket) -> bool {
     matches!(
         socket,
         knet::Socket::Tcp(_) | knet::Socket::Udp(_) | knet::Socket::Raw(_)
@@ -356,7 +356,7 @@ pub fn sys_getsockopt(
     let socket = sock_from_file(&file)?;
 
     if level == PROTO_IP && legacy_iptables::is_get_option(optname) {
-        if !supports_legacy_ipv4_filter_get(socket.as_ref()) {
+        if !supports_legacy_ipv4_filter(socket.as_ref()) {
             return Err(KError::from(LinuxError::ENOPROTOOPT));
         }
         legacy_iptables::get(optname, optval, optlen)?;
@@ -423,6 +423,13 @@ pub fn sys_setsockopt(
 
     let file = kprocess::current_resources().get_file(fd)?;
     let socket = sock_from_file(&file)?;
+    if level == PROTO_IP && legacy_iptables::is_set_option(optname) {
+        if !supports_legacy_ipv4_filter(socket.as_ref()) {
+            return Err(KError::from(LinuxError::ENOPROTOOPT));
+        }
+        legacy_iptables::set(optval, optlen)?;
+        return Ok(0);
+    }
     if level == SOL_SOCKET && optname == SO_ATTACH_FILTER {
         if !supports_kobject_filter_compat(socket.as_ref()) {
             return Err(KError::OperationNotSupported);

@@ -2,15 +2,16 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Userspace boundary for legacy IPv4 iptables queries.
+//! Userspace boundary for native legacy IPv4 iptables table operations.
 
 use core::mem::align_of;
 
 use kerrno::{KError, KResult, LinuxError};
 use linux_raw_sys::net::socklen_t;
 use osvm::VirtPtr;
-use posix_types::UserPtr;
+use posix_types::{UserConstPtr, UserPtr};
 
+pub(super) const IPT_SO_SET_REPLACE: u32 = 64;
 pub(super) const IPT_SO_GET_INFO: u32 = 64;
 pub(super) const IPT_SO_GET_ENTRIES: u32 = 65;
 
@@ -25,6 +26,69 @@ const GETINFO_HOOK_ENTRY_OFFSET: usize = 36;
 const GETINFO_UNDERFLOW_OFFSET: usize = 56;
 const GETINFO_NUM_ENTRIES_OFFSET: usize = 76;
 const GETINFO_SIZE_OFFSET: usize = 80;
+const IPT_REPLACE_HEADER_SIZE: usize = 96;
+const IPT_REPLACE_COUNTERS_OFFSET: usize = 88;
+const XT_COUNTER_SIZE: usize = 16;
+
+pub(super) const fn is_set_option(optname: u32) -> bool {
+    optname == IPT_SO_SET_REPLACE
+}
+
+pub(super) fn set(optval: UserConstPtr<u8>, optlen: socklen_t) -> KResult<()> {
+    if !kprocess::current_cred().is_privileged() {
+        return Err(KError::from(LinuxError::EPERM));
+    }
+    if (optlen as usize) < IPT_REPLACE_HEADER_SIZE {
+        return Err(KError::InvalidInput);
+    }
+    let header = osvm::load_vec::<u8>(optval.as_ptr(), IPT_REPLACE_HEADER_SIZE)?;
+    require_filter_table_bytes(&header[..XT_TABLE_MAXNAMELEN])?;
+    let size = read_u32(&header, 40) as usize;
+    let num_entries = read_u32(&header, 36);
+    let num_counters = read_u32(&header, 84);
+    if size > knet::MAX_LEGACY_FILTER_ENTRIES_SIZE
+        || num_entries == 0
+        || num_entries as usize > knet::MAX_LEGACY_FILTER_ENTRY_COUNT
+        || num_counters == 0
+        || num_counters >= (i32::MAX as u32 / XT_COUNTER_SIZE as u32)
+        || size
+            .checked_add(IPT_REPLACE_HEADER_SIZE)
+            .is_none_or(|total| total > optlen as usize)
+    {
+        return Err(KError::InvalidInput);
+    }
+    let entries =
+        osvm::load_vec::<u8>(optval.as_ptr().wrapping_add(IPT_REPLACE_HEADER_SIZE), size)?;
+    let mut hook_entry = [0; NF_INET_NUMHOOKS];
+    let mut underflow = [0; NF_INET_NUMHOOKS];
+    for index in 0..NF_INET_NUMHOOKS {
+        hook_entry[index] = read_u32(&header, 44 + index * 4);
+        underflow[index] = read_u32(&header, 64 + index * 4);
+    }
+    let request = knet::LegacyFilterReplace {
+        valid_hooks: read_u32(&header, 32),
+        hook_entry,
+        underflow,
+        num_entries,
+        num_counters,
+        entries: &entries,
+    };
+    let old_count =
+        knet::replace_legacy_ipv4_filter_table(request).map_err(|error| match error {
+            knet::LegacyReplaceError::InvalidInput => KError::InvalidInput,
+            knet::LegacyReplaceError::CounterMismatch => KError::from(LinuxError::EAGAIN),
+        })?;
+
+    // Linux reports success after publication even if the old counters cannot be copied.
+    let counters_ptr = usize::from_ne_bytes(
+        header[IPT_REPLACE_COUNTERS_OFFSET..IPT_REPLACE_HEADER_SIZE]
+            .try_into()
+            .unwrap(),
+    );
+    let counters = alloc::vec![0u8; old_count * XT_COUNTER_SIZE];
+    let _ = osvm::write_vm_bytes(counters_ptr as *mut u8, &counters);
+    Ok(())
+}
 
 pub(super) const fn is_get_option(optname: u32) -> bool {
     matches!(optname, IPT_SO_GET_INFO | IPT_SO_GET_ENTRIES)
@@ -137,10 +201,13 @@ mod tests {
     fn legacy_structure_sizes_match_native_linux_uapi() {
         assert_eq!(IPT_GETINFO_SIZE, 84);
         assert_eq!(IPT_GET_ENTRIES_DATA_OFFSET, 36);
+        assert_eq!(IPT_REPLACE_HEADER_SIZE, 96);
+        assert_eq!(IPT_REPLACE_COUNTERS_OFFSET, 88);
         assert_eq!(
             IPT_GET_ENTRIES_SIZE,
             if align_of::<u64>() == 8 { 40 } else { 36 }
         );
+        assert_eq!(is_set_option(IPT_SO_SET_REPLACE), true);
     }
 
     #[def_test]

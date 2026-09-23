@@ -37,6 +37,8 @@ net/knet/
     ├── netfilter/
     │   ├── filter/
     │   │   ├── evaluator.rs
+    │   │   ├── legacy/
+    │   │   │   └── decode.rs
     │   │   ├── legacy.rs
     │   │   ├── matcher.rs
     │   │   ├── mod.rs
@@ -616,11 +618,13 @@ or network processing. Notifications arriving before queue readiness retain
 pending demand and are replayed by `start`. These IRQ-side notifications do
 not allocate submission storage or execute the data plane.
 
-### Legacy IPv4 Filter Export
+### Legacy IPv4 Filter Replacement and Export
 
 The legacy serializer calculates chain and rule offsets before producing bytes. Built-in chain heads populate `hook_entry`; built-in policy entries populate `underflow`. User-defined chains receive an `ERROR` marker followed by their rules and a standard `RETURN` footer. Standard jump verdicts point to the first rule after the destination chain marker. A terminal `ERROR` entry closes the table. Fixed IPv4 fields and the supported TCP, UDP, and ICMP matches use native legacy structure alignment, while IPv4 addresses and masks remain in network byte order. Counter fields are emitted as zero until counter accounting is added.
 
 The POSIX layer wraps this entry array in Linux `ipt_getinfo` and `ipt_get_entries` responses. `GET_INFO` returns the hook offsets, entry count, and byte size. `GET_ENTRIES` accepts only the size from the preceding snapshot and returns `EAGAIN` when it differs from the current size. `/proc/net/ip_tables_names` advertises `filter` so `iptables-save` can discover the table.
+
+`IPT_SO_SET_REPLACE` copies a bounded native `ipt_replace` header and entry array from the caller. The decoder checks entry alignment and boundaries, match and target sizes, hook and policy offsets, supported IPv4 and TCP/UDP/ICMP conditions, and user-chain jumps before building a validated `FilterTable`. Serialization of the new table completes before a lock-protected swap publishes the semantic table and legacy export bytes together. The replacement compares `num_counters` with the current entry count at publication and returns `EAGAIN` on a stale request. Successful replacement writes zero-valued old counters to the supplied userspace array; counter accounting is not implemented. Filter hooks do not yet evaluate the published rules.
 
 ### Network Initialization
 
@@ -969,7 +973,7 @@ With `vsock_tipc_bridge` enabled, `bind()` rejects explicit binding to ports in 
 | rtnetlink operations | Supports link queries/updates, IPv4 address and route queries/add/delete, and IPv4 neighbor updates. Other message types return `NLMSG_ERROR` with `EOPNOTSUPP`; neighbors accept only incomplete/permanent states with no flags. |
 | Netlink sockets | Route sockets reject multicast subscriptions, userspace-peer destinations, and mixed query/mutation batches. Kobject-uevent sockets support group delivery, `SO_PASSCRED`, and validated no-op classic-BPF attach/detach compatibility. Connect, peer queries, and shutdown are unsupported. |
 | Socket options | Options unhandled by the selected protocol return `ENOPROTOOPT`. |
-| Legacy IPv4 filter queries | Privileged IPv4 sockets support `IPT_SO_GET_INFO` and `IPT_SO_GET_ENTRIES`; `/proc/net/ip_tables_names` advertises `filter`. The initial table contains empty `INPUT`, `FORWARD`, and `OUTPUT` chains with `ACCEPT` policies. |
+| Legacy IPv4 filter table operations | Privileged IPv4 sockets support `IPT_SO_GET_INFO`, `IPT_SO_GET_ENTRIES`, and bounded `IPT_SO_SET_REPLACE`; `/proc/net/ip_tables_names` advertises `filter`. The initial table contains empty `INPUT`, `FORWARD`, and `OUTPUT` chains with `ACCEPT` policies. |
 | Unix datagrams | Receive queues use unbounded `async_channel` queues. |
 | vsock / TIPC bridge | Stream transport only; the bridge forwards bytes, excluding TIPC handles and memory references. |
 | Ethernet progress | Failed RX-scheduler attachment falls back to timeout polling. ARP pending traffic is subject to head-of-line blocking. |

@@ -25,10 +25,13 @@ mod matcher;
     not(unittest),
     expect(
         dead_code,
-        reason = "the legacy ABI decoder and hook integration are implemented in later stages"
+        reason = "filter hook integration is implemented in a later stage"
     )
 )]
 mod model;
 
-pub use legacy::LegacyFilterTable;
 pub(crate) use legacy::snapshot;
+pub use legacy::{
+    LegacyFilterReplace, LegacyFilterTable, LegacyReplaceError, MAX_LEGACY_FILTER_ENTRIES_SIZE,
+    MAX_LEGACY_FILTER_ENTRY_COUNT, replace,
+};

@@ -2,12 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Legacy IPv4 iptables serialization.
+//! Native legacy IPv4 iptables state and serialization.
 
-use alloc::{vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::mem::{align_of, size_of};
 
 use klazy::Lazy;
+use ksync::Mutex;
 
 use super::{
     matcher::{ExtensionMatch, InterfaceMatch, Negated, PortRange},
@@ -56,7 +57,55 @@ const XT_ERROR_TARGET_SIZE: usize = align_up(XT_ENTRY_HEADER_SIZE + XT_ERROR_NAM
 const STANDARD_ENTRY_SIZE: usize = IPT_ENTRY_SIZE + XT_STANDARD_TARGET_SIZE;
 const ERROR_ENTRY_SIZE: usize = IPT_ENTRY_SIZE + XT_ERROR_TARGET_SIZE;
 
-static FILTER_TABLE: Lazy<FilterTable> = Lazy::new(FilterTable::accept_all);
+mod decode;
+
+/// Largest native entry array accepted by the legacy decoder.
+pub const MAX_LEGACY_FILTER_ENTRIES_SIZE: usize = decode::MAX_ENTRIES_SIZE;
+/// Largest number of native entries accepted by the legacy decoder.
+pub const MAX_LEGACY_FILTER_ENTRY_COUNT: usize = decode::MAX_ENTRY_COUNT;
+
+static FILTER_TABLE: Lazy<Mutex<Arc<FilterState>>> = Lazy::new(|| {
+    let table = FilterTable::accept_all();
+    let exported = encode_table(&table);
+    Mutex::new(Arc::new(FilterState { table, exported }))
+});
+
+struct FilterState {
+    #[cfg_attr(
+        not(unittest),
+        expect(
+            dead_code,
+            reason = "filter hooks consume the published model in a later stage"
+        )
+    )]
+    table: FilterTable,
+    exported: LegacyFilterTable,
+}
+
+/// Metadata copied from the native `ipt_replace` ABI after syscall validation.
+pub struct LegacyFilterReplace<'a> {
+    /// Hook mask; only INPUT, FORWARD, and OUTPUT are supported.
+    pub valid_hooks: u32,
+    /// Entry offsets for the five IPv4 hooks.
+    pub hook_entry: [u32; NF_INET_NUMHOOKS],
+    /// Policy-entry offsets for the five IPv4 hooks.
+    pub underflow: [u32; NF_INET_NUMHOOKS],
+    /// Number of `ipt_entry` records in `entries`.
+    pub num_entries: u32,
+    /// Expected count of the old table's counter records.
+    pub num_counters: u32,
+    /// Copied native `ipt_entry` byte array.
+    pub entries: &'a [u8],
+}
+
+/// Failure to decode or publish a legacy filter replacement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LegacyReplaceError {
+    /// The replacement has invalid layout or unsupported rule semantics.
+    InvalidInput,
+    /// The table changed after the caller read its counter count.
+    CounterMismatch,
+}
 
 /// Owned legacy representation of one IPv4 `filter` table snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -96,7 +145,36 @@ impl LegacyFilterTable {
 }
 
 pub(crate) fn snapshot() -> LegacyFilterTable {
-    encode_table(&FILTER_TABLE)
+    let current = Arc::clone(&FILTER_TABLE.lock());
+    current.exported.clone()
+}
+
+/// Validates and publishes a complete IPv4 `filter` table replacement.
+///
+/// Parsing and export construction finish before publication. Readers hold an
+/// owned snapshot, so each GET operation observes a single table generation.
+///
+/// # Errors
+///
+/// Returns `InvalidInput` for malformed or unsupported entries and
+/// `CounterMismatch` when `num_counters` does not match the current table.
+pub fn replace(request: LegacyFilterReplace<'_>) -> Result<usize, LegacyReplaceError> {
+    replace_in(&FILTER_TABLE, request)
+}
+
+fn replace_in(
+    store: &Mutex<Arc<FilterState>>,
+    request: LegacyFilterReplace<'_>,
+) -> Result<usize, LegacyReplaceError> {
+    let table = decode::decode_table(&request)?;
+    let exported = encode_table(&table);
+    let mut current = store.lock();
+    if request.num_counters != current.exported.num_entries {
+        return Err(LegacyReplaceError::CounterMismatch);
+    }
+    let old = core::mem::replace(&mut *current, Arc::new(FilterState { table, exported }));
+    drop(current);
+    Ok(old.exported.num_entries as usize)
 }
 
 #[derive(Clone, Debug)]
@@ -457,6 +535,83 @@ mod tests {
         i32::from_ne_bytes(input[offset..offset + 4].try_into().unwrap())
     }
 
+    fn replacement<'a>(
+        snapshot: &'a LegacyFilterTable,
+        num_counters: u32,
+    ) -> LegacyFilterReplace<'a> {
+        LegacyFilterReplace {
+            valid_hooks: snapshot.valid_hooks,
+            hook_entry: snapshot.hook_entry,
+            underflow: snapshot.underflow,
+            num_entries: snapshot.num_entries,
+            num_counters,
+            entries: &snapshot.entries,
+        }
+    }
+
+    #[def_test]
+    fn legacy_decoder_round_trips_initial_table() {
+        let table = FilterTable::accept_all();
+        let snapshot = encode_table(&table);
+        assert_eq!(decode::decode_table(&replacement(&snapshot, 4)), Ok(table));
+    }
+
+    #[def_test]
+    fn replacement_publishes_only_valid_complete_snapshots() {
+        let initial = FilterTable::accept_all();
+        let store = Mutex::new(Arc::new(FilterState {
+            exported: encode_table(&initial),
+            table: initial.clone(),
+        }));
+        let replacement_table = FilterTable::new(vec![
+            Chain::built_in(FilterHook::Input, Verdict::Drop, Vec::new()),
+            Chain::built_in(FilterHook::Forward, Verdict::Accept, Vec::new()),
+            Chain::built_in(FilterHook::Output, Verdict::Accept, Vec::new()),
+        ])
+        .unwrap();
+        let snapshot = encode_table(&replacement_table);
+        assert_eq!(
+            replace_in(&store, replacement(&snapshot, 3)),
+            Err(LegacyReplaceError::CounterMismatch)
+        );
+        assert_eq!(store.lock().table, initial);
+        let mut malformed = snapshot.clone();
+        malformed.underflow[1] = 7;
+        assert_eq!(
+            replace_in(&store, replacement(&malformed, 4)),
+            Err(LegacyReplaceError::InvalidInput)
+        );
+        assert_eq!(store.lock().table, initial);
+        assert_eq!(replace_in(&store, replacement(&snapshot, 4)), Ok(4));
+        assert_eq!(store.lock().table, replacement_table);
+        assert_eq!(store.lock().exported, snapshot);
+    }
+
+    #[def_test]
+    fn legacy_decoder_rejects_bad_entry_layout_and_policy() {
+        let snapshot = encode_table(&FilterTable::accept_all());
+        let mut bad = snapshot.clone();
+        bad.entries[90..92].copy_from_slice(&8u16.to_ne_bytes());
+        assert_eq!(
+            decode::decode_table(&replacement(&bad, 4)),
+            Err(LegacyReplaceError::InvalidInput)
+        );
+
+        let mut bad = snapshot.clone();
+        bad.entries[144..148].copy_from_slice(&(-5i32).to_ne_bytes());
+        assert_eq!(
+            decode::decode_table(&replacement(&bad, 4)),
+            Err(LegacyReplaceError::InvalidInput)
+        );
+
+        let mut bad = snapshot.clone();
+        bad.hook_entry[1] = 7;
+        assert_eq!(
+            decode::decode_table(&replacement(&bad, 4)),
+            Err(LegacyReplaceError::InvalidInput)
+        );
+    }
+
     #[def_test]
     fn default_filter_table_matches_linux_initial_layout() {
         let snapshot = encode_table(&FilterTable::accept_all());
@@ -504,6 +659,8 @@ mod tests {
         .unwrap();
 
         let snapshot = encode_table(&table);
+        let decoded = decode::decode_table(&replacement(&snapshot, 4)).unwrap();
+        assert_eq!(encode_table(&decoded), snapshot);
         let custom_head = 608usize;
         assert_eq!(read_i32(snapshot.entries(), 144), to_i32(custom_head + 176));
         assert_eq!(

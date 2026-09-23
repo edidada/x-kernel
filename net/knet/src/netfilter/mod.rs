@@ -10,7 +10,10 @@
 
 pub(crate) mod filter;
 
-pub use filter::LegacyFilterTable;
+pub use filter::{
+    LegacyFilterReplace, LegacyFilterTable, LegacyReplaceError, MAX_LEGACY_FILTER_ENTRIES_SIZE,
+    MAX_LEGACY_FILTER_ENTRY_COUNT,
+};
 
 /// Captures the current IPv4 `filter` table in the legacy iptables layout.
 ///
@@ -18,4 +21,16 @@ pub use filter::LegacyFilterTable;
 /// table replacement publishes new state.
 pub fn legacy_ipv4_filter_table() -> LegacyFilterTable {
     filter::snapshot()
+}
+
+/// Validates and publishes a complete legacy IPv4 `filter` replacement.
+///
+/// # Errors
+///
+/// Returns [`LegacyReplaceError::InvalidInput`] for unsupported or malformed
+/// rules, or [`LegacyReplaceError::CounterMismatch`] if the old table changed.
+pub fn replace_legacy_ipv4_filter_table(
+    request: LegacyFilterReplace<'_>,
+) -> Result<usize, LegacyReplaceError> {
+    filter::replace(request)
 }
