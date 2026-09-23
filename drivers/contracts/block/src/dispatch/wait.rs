@@ -6,13 +6,12 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
-use block::completion::{BlockSignals, BlockWaiter};
+use crate::completion::{BlockSignals, BlockWaiter};
 use driver_base::{DriverError, DriverResult};
 use kpoll::{Completion, PollRegisterError, PollRegistration};
 use ktask::future::PreparedTaskWait;
 
-#[cfg_attr(all(not(unittest), not(feature = "virtio-blk")), expect(dead_code))]
-pub(crate) fn prepare_block_wait() -> DriverResult<Box<dyn BlockWaiter>> {
+pub fn prepare_block_wait() -> DriverResult<Box<dyn BlockWaiter>> {
     Ok(Box::new(HostBlockWaiter::prepare()?))
 }
 
@@ -97,7 +96,3 @@ fn registration_error(error: PollRegisterError) -> DriverError {
     }
 }
 
-unittest::path_mod_test!(
-    block_completion_unittest,
-    "../ut-tests/block_completion_unittest.rs"
-);

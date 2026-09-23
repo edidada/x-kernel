@@ -29,16 +29,10 @@ extern crate alloc;
 extern crate log;
 
 #[cfg(feature = "block")]
-mod block_completion;
-#[cfg(feature = "block")]
-mod block_completion_dispatch;
-#[cfg(feature = "block")]
-mod block_irq;
-#[cfg(feature = "virtio-blk")]
-unittest::path_mod_test!(
-    block_requests_unittest,
-    "../ut-tests/block_requests_unittest.rs"
-);
+pub(crate) use block::dispatch;
+#[cfg(all(unittest, feature = "virtio-blk"))]
+#[path = "tests/block_requests.rs"]
+mod block_request_tests;
 mod bus;
 pub mod driver_registry;
 mod enumeration;
@@ -132,7 +126,7 @@ pub fn init_drivers() {
     driver_compose::init();
 
     #[cfg(feature = "block")]
-    block_completion_dispatch::init();
+    block::dispatch::reclaimer::init();
 
     // Initialize global object/metadata stores before any device is activated.
     kdevice::init_device_registry();

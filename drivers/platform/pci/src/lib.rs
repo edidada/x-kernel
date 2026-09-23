@@ -28,6 +28,10 @@ pub use virtio_drivers::transport::pci::bus::{
 };
 
 pub mod msix;
+pub mod support;
+
+#[macro_use]
+extern crate log;
 
 static PCI_CONFIG_BASE_OVERRIDE: AtomicU64 = AtomicU64::new(0);
 static PCI_BUS_END_OVERRIDE: AtomicU32 = AtomicU32::new(u32::MAX);

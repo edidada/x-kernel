@@ -479,7 +479,9 @@ fn add_devices(
     qemu_program: &str,
 ) -> Result<()> {
     let config = &bundle.context.config;
-    let needs_block = config.is_enabled("KFEAT_DRIVER_VIRTIO_BLK") && !args.no_block;
+    let needs_block = (config.is_enabled("KFEAT_DRIVER_VIRTIO_BLK")
+            || config.is_enabled("KFEAT_DRIVER_CORE_VIRTIO_BLK"))
+            && !args.no_block;
     let needs_net = config.is_enabled("KFEAT_DRIVER_VIRTIO_NET") && !args.no_net;
     let needs_graphic = config.is_enabled("KFEAT_DRIVER_VIRTIO_GPU") && args.graphic;
     let wants_vsock = config.is_enabled("KFEAT_DRIVER_VIRTIO_SOCKET") && !args.no_vsock;

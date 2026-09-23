@@ -313,6 +313,17 @@ config KFEAT_DRIVER_SERIAL_PL011
       node becomes a character device; the stdout UART shares the early-boot
       instance.
 
+config KFEAT_DRIVER_CORE_VIRTIO_BLK
+    bool "virtio-blk driver on the driver-core model (PCI)"
+    default n
+    help
+      Enable the new-model virtio-blk driver registered in the driver-core
+      device domain: const PCI id table, guards-in-Data activation (no
+      global side tables), and block-class publication through a detached
+      class parent. This is the migration target for
+      KFEAT_DRIVER_VIRTIO_BLK; enable it instead of (not in addition to)
+      the legacy symbol.
+
 config KFEAT_DRIVER_CORE_PL011
     bool "PL011 serial driver on the driver-core model (with fixed-clock provider)"
     depends on ARCH_AARCH64

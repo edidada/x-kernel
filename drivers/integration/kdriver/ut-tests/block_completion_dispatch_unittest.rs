@@ -8,7 +8,7 @@ use kirq::{context, softirq::test_support::ScopedDaemonWakeGate};
 use unittest::{assert, assert_eq, def_test};
 
 use super::*;
-use crate::block_completion::prepare_block_wait;
+use block::dispatch::wait::prepare_block_wait;
 
 struct Action<F>(F);
 impl<F: Fn() + Send + Sync> BlockCompletionOperations for Action<F> {

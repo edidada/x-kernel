@@ -13,6 +13,7 @@ categories = ["os", "no-std"]
 [features]
 default = []
 serial-pl011 = ["dep:serial-pl011"]
+virtio-blk = ["dep:virtio-blk-core", "dep:block"]
 fixed-clock = ["dep:fixed-clock"]
 
 [dependencies]
@@ -22,6 +23,9 @@ driver-runtime.workspace = true
 kclass = { workspace = true, features = ["char"] }
 fixed-clock = { workspace = true, optional = true }
 khal.workspace = true
+pci.workspace = true
 of.workspace = true
 log.workspace = true
 serial-pl011 = { workspace = true, optional = true }
+virtio-blk-core = { workspace = true, optional = true }
+block = { workspace = true, optional = true }

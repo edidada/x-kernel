@@ -14,7 +14,7 @@ use ksync::{Mutex, static_lock};
 use unittest::{assert, assert_eq, def_test};
 
 use super::*;
-use crate::block_completion::prepare_block_wait;
+use block::dispatch::wait::prepare_block_wait;
 
 const FAILED_IRQ: usize = 0x4003;
 struct MockProvider;

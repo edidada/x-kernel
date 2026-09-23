@@ -277,3 +277,16 @@ impl IdMatchEntry for PciMatch {
         }
     }
 }
+
+/// Reference PCI bus: PCI-segment locations with vendor/device identity.
+pub struct PciBus;
+
+impl Bus for PciBus {
+    type IdEntry = PciMatch;
+
+    const ID: BusId = BusId::new("pci");
+
+    fn accepts(desc: &DeviceDescriptor) -> bool {
+        matches!(desc.location, DeviceLocation::Pci { .. })
+    }
+}

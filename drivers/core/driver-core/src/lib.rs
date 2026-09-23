@@ -77,6 +77,13 @@ pub mod desc {
     };
 }
 
+pub mod pci {
+    //! Reference implementation of the PCI bus. Phase 3 moves this into a
+    //! dedicated `bus-pci` crate together with the enumeration backend.
+
+    pub use crate::bus::{PciBus, PciMatch};
+}
+
 pub mod platform {
     //! Reference implementation of the platform ("firmware node") bus.
     //!

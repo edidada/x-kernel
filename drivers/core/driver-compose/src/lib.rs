@@ -51,8 +51,15 @@ pub fn init() {
     fixed_clock::register();
     #[cfg(feature = "serial-pl011")]
     serial_pl011::register();
+    #[cfg(feature = "virtio-blk")]
+    {
+        block::dispatch::reclaimer::init();
+        virtio_blk_core::register();
+    }
 
     enumerate_firmware_devices();
+    #[cfg(feature = "virtio-blk")]
+    enumerate_pci_devices();
 
     let domain = global_domain();
     let devices = domain.devices();
@@ -167,5 +174,85 @@ fn map_trigger(trigger: firmware::InterruptTrigger) -> driver_core::IrqTrigger {
         firmware::InterruptTrigger::LevelHigh => driver_core::IrqTrigger::LevelHigh,
         firmware::InterruptTrigger::LevelLow => driver_core::IrqTrigger::LevelLow,
         firmware::InterruptTrigger::Unknown(_) => driver_core::IrqTrigger::Unknown,
+    }
+}
+
+/// Walk the PCI hierarchy into domain descriptors (BARs and legacy INTx as
+/// named resources, vendor/device as identity).
+#[cfg(feature = "virtio-blk")]
+fn enumerate_pci_devices() {
+    use driver_core::{
+        IrqSpec, IrqTrigger, MmioRegion, ResourceKind,
+        desc::{DeviceIdentity, DeviceLocation, PciIdentity},
+    };
+
+    let Ok(mut pci_access) = pci::PciBus::new(pci::support::pci_cam_kind()) else {
+        log::warn!("driver-core: PCI access unavailable");
+        return;
+    };
+    let pci_bus_end = pci_access.bus_end();
+
+    let (root, config) = pci_access.parts_mut();
+    for bus_nr in 0..=pci_bus_end {
+        for (bdf, info) in root.enumerate_bus(bus_nr).collect::<alloc::vec::Vec<_>>() {
+            if !matches!(info.header_type, pci::HeaderType::Standard) {
+                continue;
+            }
+            if let Err(err) = pci::support::configure_pci_device_if_needed(root, bdf) {
+                log::warn!("driver-core: PCI configure {bdf} failed: {err:?}");
+                continue;
+            }
+
+            let mut resources = ResourceMap::new();
+            let mut bar_idx = 0u8;
+            while bar_idx < 6 {
+                let Ok(Some(bar)) = root.bar_info(bdf, bar_idx) else {
+                    bar_idx += 1;
+                    continue;
+                };
+                let advance = if bar.takes_two_entries() { 2 } else { 1 };
+                match bar {
+                    pci::BarInfo::Memory { address, size, .. } if size > 0 && address != 0 => {
+                        resources.push_kind(ResourceKind::Mmio(MmioRegion::new(
+                            address as usize,
+                            size as usize,
+                        )));
+                    }
+                    pci::BarInfo::IO { address, size } if size > 0 && address > 0 => {
+                        resources.push_kind(ResourceKind::IoPort(driver_core::IoPortRange {
+                            base: (address & 0xffff) as u16,
+                            size: (size & 0xffff) as u16,
+                        }));
+                    }
+                    _ => {}
+                }
+                bar_idx += advance;
+            }
+            if let Some(route) = pci::legacy_interrupt_route(config, bdf) {
+                resources.push_kind(ResourceKind::Irq(IrqSpec::global(
+                    route.irq,
+                    map_trigger(route.trigger),
+                )));
+            }
+
+            let descriptor = DeviceDescriptor::new(
+                <driver_core::pci::PciBus as Bus>::ID,
+                DeviceLocation::Pci {
+                    segment: 0,
+                    bus: bdf.bus,
+                    device: bdf.device,
+                    function: bdf.function,
+                },
+                DeviceIdentity::Pci(PciIdentity {
+                    vendor_id: info.vendor_id,
+                    device_id: info.device_id,
+                    class: info.class,
+                    subclass: info.subclass,
+                }),
+            )
+            .with_origin(DiscoveryOrigin::PlatformStatic)
+            .with_resources(resources);
+            global_domain().add_device(descriptor);
+        }
     }
 }

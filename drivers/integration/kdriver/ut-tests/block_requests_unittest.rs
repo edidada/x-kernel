@@ -7,12 +7,14 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use block::{BlockDeviceOperations, completion::BlockCompletionOperations};
+use block::{
+    BlockDeviceOperations,
+    completion::BlockCompletionOperations,
+    dispatch::{reclaimer::BlockIoReclaimer, wait::prepare_block_wait},
+};
 use device_res::IrqHandler;
 use kirq::context::test_support::ScopedHardIrqContext;
 use unittest::{assert_eq, def_test};
-
-use crate::{block_completion::prepare_block_wait, block_completion_dispatch::BlockIoReclaimer};
 
 #[def_test(serial)]
 fn virtio_requests_sleep_across_cpus_and_reclaim_through_block_softirq() {

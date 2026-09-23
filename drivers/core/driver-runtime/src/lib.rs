@@ -60,6 +60,15 @@ pub fn register_clk_provider(provider: &'static dyn kclk::ClkLookup) {
     runtime.register_clk_provider(provider);
 }
 
+static RESOURCE_PROVIDER: XKernelResourceProvider = XKernelResourceProvider::new();
+
+/// The process-wide x-kernel resource provider as a `&'static` — for
+/// transport HALs and class services that still address the provider
+/// directly during the migration.
+pub fn resource_provider() -> &'static XKernelResourceProvider {
+    &RESOURCE_PROVIDER
+}
+
 fn map_res_error(err: ResError) -> RuntimeError {
     match err {
         ResError::InvalidResource => RuntimeError::Invalid,
