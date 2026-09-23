@@ -13,8 +13,11 @@ categories = ["os", "no-std"]
 [features]
 default = []
 serial-pl011 = ["dep:serial-pl011"]
-virtio-blk = ["dep:virtio-blk-core", "dep:block"]
+virtio-blk = ["dep:virtio-blk-core"]
 virtio-net = ["dep:virtio-net-core"]
+virtio-rng = ["dep:virtio-rng-core"]
+ramdisk = ["dep:ramdisk-core"]
+ramdisk-static = ["ramdisk", "ramdisk-core/ramdisk-static"]
 fixed-clock = ["dep:fixed-clock"]
 
 [dependencies]
@@ -30,4 +33,6 @@ log.workspace = true
 serial-pl011 = { workspace = true, optional = true }
 virtio-blk-core = { workspace = true, optional = true }
 virtio-net-core = { workspace = true, optional = true }
-block = { workspace = true, optional = true }
+virtio-rng-core = { workspace = true, optional = true }
+ramdisk-core = { workspace = true, optional = true }
+block = { workspace = true }

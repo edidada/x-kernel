@@ -60,18 +60,6 @@ serial-ns16550-ioport = ["console-ns16550-ioport"]
 
 ramdisk = ["block", "block/ramdisk"]
 ramdisk-static = ["ramdisk", "block/ramdisk-static"]
-# Placeholder concrete-driver feature names kept so source-level cfg(feature =
-# "...") remains check-cfg-clean after removing the old build.rs mapping.
-# They intentionally do not enable downstream dependencies yet.
-ixgbe = ["net"]
-# any_firmware_driver is an umbrella feature: true whenever any DT/ACPI
-# platform driver is enabled. Code uses cfg(feature = "any_firmware_driver")
-# instead of repeating the full any(ahci, bcm2835-sdhci, sdmmc, fxmac) list.
-any_firmware_driver = []
-fxmac = ["any_firmware_driver", "net"]
-ahci = ["any_firmware_driver", "block"]
-bcm2835-sdhci = ["any_firmware_driver", "block"]
-sdmmc = ["any_firmware_driver", "block"]
 
 default = []
 

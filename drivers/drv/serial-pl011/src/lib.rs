@@ -35,13 +35,13 @@ use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use driver_core::{
     BoundDevice, ClkHandle, DevIrq, DeviceCtx, DriverDesc, DriverOps, IoMap, IrqAction, ProbeError,
     RuntimeError,
-    platform::{OfMatch, PlatformBus},
+    platform::{OfMatch, PlatformBus, PlatformId},
 };
 use kclass::{ClassParent, publish_char};
 use khal::mem::{PhysAddr, VirtAddr};
 
 /// `static const struct of_device_id pl011_of_match[]`.
-static IDS: &[OfMatch] = &[OfMatch::compatible("arm,pl011")];
+static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("arm,pl011"))];
 
 /// Driver-private data (`struct uart_amba_port`).
 ///

@@ -658,7 +658,9 @@ mod tests {
 
     struct TestSer;
 
-    static IDS: &[OfMatch] = &[OfMatch::compatible("test,serial")];
+    static IDS: &[crate::platform::PlatformId] = &[crate::platform::PlatformId::Of(
+        OfMatch::compatible("test,serial"),
+    )];
 
     impl DriverOps<PlatformBus> for TestSer {
         type Data = SerData;
@@ -679,7 +681,9 @@ mod tests {
 
     struct PickyDriver;
 
-    static PICKY_IDS: &[OfMatch] = &[OfMatch::compatible("test,serial")];
+    static PICKY_IDS: &[crate::platform::PlatformId] = &[crate::platform::PlatformId::Of(
+        OfMatch::compatible("test,serial"),
+    )];
 
     impl DriverOps<PlatformBus> for PickyDriver {
         type Data = ();

@@ -36,7 +36,6 @@ pub fn register_factories(registrar: &mut DriverRegistrar, factories: &[DriverFa
 /// Register all enabled non-VirtIO platform and PCI driver descriptors.
 pub fn register_platform_drivers(registrar: &mut DriverRegistrar) {
     block::register_all(registrar);
-    net::register_all(registrar);
 }
 
 /// Lightweight summary of the current long-lived ownership graph visible at

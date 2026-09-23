@@ -11,12 +11,8 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
-// #[cfg(feature = "fxmac")]
-// /// fxmac driver for PhytiumPi
-// pub mod fxmac;
 // #[cfg(feature = "ixgbe")]
 // /// ixgbe NIC device driver.
-// pub mod ixgbe;
 #[doc(no_inline)]
 pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 

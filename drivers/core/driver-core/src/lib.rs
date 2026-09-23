@@ -92,5 +92,5 @@ pub mod platform {
     //! serial driver from the `clk/tail` branch) can proceed without waiting
     //! for the bus crates.
 
-    pub use crate::bus::{OfMatch, PlatformBus};
+    pub use crate::bus::{AliasMatch, OfMatch, PlatformBus, PlatformId};
 }

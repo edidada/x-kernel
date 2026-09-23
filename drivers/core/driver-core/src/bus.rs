@@ -187,11 +187,35 @@ impl DeviceDescriptor {
     }
 }
 
+/// One platform id-table row: a firmware compatible string or a
+/// board-static alias (`struct platform_device_id` union shape).
+#[derive(Debug, Clone, Copy)]
+pub enum PlatformId {
+    Of(OfMatch),
+    Alias(AliasMatch),
+}
+
+impl IdMatchEntry for PlatformId {
+    fn matches(&self, desc: &DeviceDescriptor) -> MatchScore {
+        match self {
+            Self::Of(of) => of.matches(desc),
+            Self::Alias(alias) => alias.matches(desc),
+        }
+    }
+
+    fn modalias(&self) -> Option<String> {
+        match self {
+            Self::Of(of) => of.modalias(),
+            Self::Alias(_) => None,
+        }
+    }
+}
+
 /// Reference platform bus: firmware nodes, static board devices, and raw MMIO.
 pub struct PlatformBus;
 
 impl Bus for PlatformBus {
-    type IdEntry = OfMatch;
+    type IdEntry = PlatformId;
 
     const ID: BusId = BusId::new("platform");
 
@@ -227,6 +251,31 @@ pub struct OfMatch {
 impl OfMatch {
     pub const fn compatible(compatible: &'static str) -> Self {
         Self { compatible }
+    }
+}
+
+/// One platform-static board alias row (`ramdisk`, `serial0`, ...):
+/// matches `PlatformIdentity::alias` exactly.
+#[derive(Debug, Clone, Copy)]
+pub struct AliasMatch {
+    pub alias: &'static str,
+}
+
+impl AliasMatch {
+    pub const fn new(alias: &'static str) -> Self {
+        Self { alias }
+    }
+}
+
+impl IdMatchEntry for AliasMatch {
+    fn matches(&self, desc: &DeviceDescriptor) -> MatchScore {
+        let DeviceIdentity::Platform(platform) = &desc.identity else {
+            return MatchScore::NoMatch;
+        };
+        match &platform.alias {
+            Some(alias) if alias == self.alias => MatchScore::Exact,
+            _ => MatchScore::NoMatch,
+        }
     }
 }
 

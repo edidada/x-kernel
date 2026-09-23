@@ -79,32 +79,6 @@ fn iomap_mmio(
     core::ptr::NonNull::new(vaddr.as_mut_ptr()).ok_or(driver_base::DriverError::BadState)
 }
 
-#[cfg(any(
-    feature = "ahci",
-    feature = "sdmmc",
-    feature = "ixgbe",
-    feature = "fxmac"
-))]
-fn first_mmio_resource(
-    device: &kdevice::DeviceObject,
-) -> driver_base::DriverResult<kdevice::MmioRegion> {
-    device
-        .first_mmio()
-        .ok_or(driver_base::DriverError::InvalidInput)
-}
-
-#[cfg(any(feature = "ahci", feature = "sdmmc", feature = "ixgbe"))]
-fn iomap_first_mmio(
-    device: &kdevice::DeviceObject,
-    name: &'static str,
-) -> driver_base::DriverResult<(core::ptr::NonNull<u8>, usize)> {
-    use resource::DeviceResourceExt as _;
-
-    let mmio = first_mmio_resource(device)?;
-    let ptr = device.devm_iomap(mmio, name)?;
-    Ok((ptr, mmio.size))
-}
-
 /// Initialize device drivers and populate typed `kclass` device classes.
 ///
 /// This is the primary entry point for the driver subsystem. It:

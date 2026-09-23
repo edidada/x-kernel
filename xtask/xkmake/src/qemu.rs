@@ -487,7 +487,8 @@ fn add_devices(
             && !args.no_net;
     let needs_graphic = config.is_enabled("KFEAT_DRIVER_VIRTIO_GPU") && args.graphic;
     let wants_vsock = config.is_enabled("KFEAT_DRIVER_VIRTIO_SOCKET") && !args.no_vsock;
-    let needs_rng = config.is_enabled("KFEAT_DRIVER_VIRTIO_RNG");
+    let needs_rng = config.is_enabled("KFEAT_DRIVER_VIRTIO_RNG")
+            || config.is_enabled("KFEAT_DRIVER_CORE_VIRTIO_RNG");
 
     let suffix = if needs_block || needs_net || needs_graphic || wants_vsock || needs_rng {
         virtio_device_suffix(config.virtio_bus())?

@@ -1,0 +1,20 @@
+[package]
+name = "virtio-rng-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "driver-core virtio-rng driver over PCI"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "virtio", "rng", "x-kernel"]
+categories = ["os", "no-std"]
+
+[dependencies]
+driver-core = { workspace = true }
+driver-runtime = { workspace = true, features = ["virtio-hal"] }
+driver_base = { workspace = true }
+kclass = { workspace = true, features = ["char"] }
+kdevice = { workspace = true }
+pci = { workspace = true }
+virtio = { workspace = true, features = ["rng"] }

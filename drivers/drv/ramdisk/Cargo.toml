@@ -1,0 +1,22 @@
+[package]
+name = "ramdisk-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "driver-core ramdisk driver (platform-static): golden template for static board devices"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "ramdisk", "x-kernel"]
+categories = ["os", "no-std"]
+
+[features]
+default = []
+ramdisk-static = ["block/ramdisk-static", "block/ramdisk-static"]
+
+[dependencies]
+block = { workspace = true, features = ["ramdisk"] }
+driver-core = { workspace = true }
+driver_base = { workspace = true }
+kclass = { workspace = true, features = ["block"] }
+kdevice = { workspace = true }

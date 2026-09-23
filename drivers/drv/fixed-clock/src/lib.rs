@@ -30,12 +30,12 @@ use alloc::{boxed::Box, sync::Arc};
 
 use driver_core::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError,
-    platform::{OfMatch, PlatformBus},
+    platform::{OfMatch, PlatformBus, PlatformId},
 };
 use kclk::{ClkBuilder, ClkCore, ClkLookup, FixedRate, ProviderId};
 
 /// `struct of_device_id fixed_clock_of_match[]` equivalent.
-static IDS: &[OfMatch] = &[OfMatch::compatible("fixed-clock")];
+static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("fixed-clock"))];
 
 /// One published fixed clock. Boot-static per the kclk model: the lookup is
 /// leaked into `'static` at probe time and intentionally never freed — clock

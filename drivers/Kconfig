@@ -333,6 +333,21 @@ config KFEAT_DRIVER_CORE_VIRTIO_NET
       through a detached class parent. Migration target for
       KFEAT_DRIVER_VIRTIO_NET; enable it instead of the legacy symbol.
 
+config KFEAT_DRIVER_CORE_VIRTIO_RNG
+    bool "virtio-rng driver on the driver-core model (PCI)"
+    default n
+    help
+      Enable the new-model virtio-rng driver: const PCI id table and char
+      class publication through a detached parent. Migration target for
+      KFEAT_DRIVER_VIRTIO_RNG.
+
+config KFEAT_DRIVER_CORE_RAMDISK
+    bool "ramdisk driver on the driver-core model"
+    default n
+    help
+      Enable the new-model ramdisk driver: alias-matched board-static device
+      publishing a block disk. Migration target for KFEAT_DRIVER_RAMDISK.
+
 config KFEAT_DRIVER_CORE_PL011
     bool "PL011 serial driver on the driver-core model (with fixed-clock provider)"
     depends on ARCH_AARCH64

@@ -128,7 +128,7 @@ mod tests {
         BoundDevice, DeviceCtx, DeviceDomain, DeviceState, DriverDesc, DriverOps, ProbeError,
         ResourceKind, ResourceMap,
         desc::{DeviceDescriptor, DeviceIdentity, DeviceLocation, PlatformIdentity},
-        platform::{OfMatch, PlatformBus},
+        platform::{OfMatch, PlatformBus, PlatformId},
     };
     use kclk::{ClkBuilder, ClkTable, FixedRate, ProviderId};
     use unittest::{assert_eq, def_test};
@@ -167,7 +167,7 @@ mod tests {
 
     struct SerDriver;
 
-    static SER_IDS: &[OfMatch] = &[OfMatch::compatible("test,serial")];
+    static SER_IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("test,serial"))];
 
     static PROBES: AtomicUsize = AtomicUsize::new(0);
 

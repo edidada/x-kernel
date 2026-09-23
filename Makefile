@@ -354,6 +354,20 @@ ramdisk_img:
 install-tools:
 	@$(XKMAKE) hygiene install-tools
 
+# Type-check a single workspace crate with the full resolved Kconfig feature
+# set (kernel crates need kfeat features like kalloc/slab to compile outside
+# a full build): make check-crate CRATE=driver-core [FEATURES=...]
+check-crate:
+	@set -eu; \
+	feats=$$(python3 scripts/kfeat-features.py); \
+	extra=""; \
+	if [ -n "$$(strip $(FEATURES))" ]; then extra=",$(FEATURES)"; fi; \
+	cargo check --manifest-path entry/Cargo.toml \
+		--target aarch64-unknown-none-softfloat \
+		--target-dir $(TARGET_DIR) \
+		-p entry -p $(CRATE) \
+		--features "$$feats$$extra"
+
 check_deps:
 	@$(XKMAKE) hygiene deps
 

@@ -59,9 +59,17 @@ pub fn init() {
     }
     #[cfg(feature = "virtio-net")]
     virtio_net_core::register();
+    #[cfg(feature = "virtio-rng")]
+    virtio_rng_core::register();
+    #[cfg(feature = "ramdisk")]
+    {
+        block::dispatch::reclaimer::init();
+        ramdisk_core::register();
+    }
 
     enumerate_firmware_devices();
-    #[cfg(any(feature = "virtio-blk", feature = "virtio-net"))]
+    enumerate_static_devices();
+    #[cfg(any(feature = "virtio-blk", feature = "virtio-net", feature = "virtio-rng"))]
     enumerate_pci_devices();
 
     let domain = global_domain();
@@ -170,6 +178,25 @@ fn build_descriptor(dev: firmware::FirmwareDevice) {
     global_domain().add_device(descriptor);
 }
 
+/// Board-static devices (no firmware description): the compose layer owns
+/// the one static device we migrate; the legacy backend registers the rest.
+#[cfg(feature = "ramdisk")]
+fn enumerate_static_devices() {
+    use driver_core::desc::{DeviceIdentity, DeviceLocation, PlatformIdentity};
+    let descriptor = DeviceDescriptor::new(
+        <PlatformBus as Bus>::ID,
+        DeviceLocation::PlatformStatic { id: 0 },
+        DeviceIdentity::Platform(PlatformIdentity {
+            firmware_id: None,
+            alias: Some(alloc::string::String::from("ramdisk")),
+        }),
+    );
+    global_domain().add_device(descriptor);
+}
+
+#[cfg(not(feature = "ramdisk"))]
+fn enumerate_static_devices() {}
+
 fn map_trigger(trigger: firmware::InterruptTrigger) -> driver_core::IrqTrigger {
     match trigger {
         firmware::InterruptTrigger::EdgeRising => driver_core::IrqTrigger::EdgeRising,
@@ -182,7 +209,7 @@ fn map_trigger(trigger: firmware::InterruptTrigger) -> driver_core::IrqTrigger {
 
 /// Walk the PCI hierarchy into domain descriptors (BARs and legacy INTx as
 /// named resources, vendor/device as identity).
-#[cfg(any(feature = "virtio-blk", feature = "virtio-net"))]
+#[cfg(any(feature = "virtio-blk", feature = "virtio-net", feature = "virtio-rng"))]
 fn enumerate_pci_devices() {
     use driver_core::{
         IrqSpec, IrqTrigger, MmioRegion, ResourceKind,
