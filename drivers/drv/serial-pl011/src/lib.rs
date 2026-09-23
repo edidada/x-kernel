@@ -6,7 +6,7 @@
 //! template for **consumer drivers**.
 //!
 //! Translated from the Linux `drivers/tty/serial/amba-pl011.c` shape and the
-//! previous `kdriver` PL011 glue, it demonstrates every framework facility in
+//! golden template, it demonstrates every framework facility in
 //! one file:
 //!
 //! * id table (`of_device_id` → [`IDS`])

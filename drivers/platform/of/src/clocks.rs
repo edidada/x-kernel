@@ -22,7 +22,7 @@
 //! The return type [`ClockSpec`] is deliberately *not* the device-res
 //! [`ClkSpec`](device_res::ClkSpec) — this crate sits below `device-res` in
 //! the dependency graph and must stay firmware-only. Callers (the DT-to-device
-//! builder in kdevice/kdriver) convert `ClockSpec` to `ResourceDesc::Clk`.
+//! builders) convert `ClockSpec` to ResourceKind::Clk entries.
 //!
 //! On boards without a clock controller DT node (QEMU `virt`), a plain
 //! `clock-frequency = <N>` property on the consumer describes a fixed

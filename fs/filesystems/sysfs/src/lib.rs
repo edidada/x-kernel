@@ -4,7 +4,7 @@
 
 //! Linux-compatible, read-mostly device discovery filesystem.
 //!
-//! This crate projects [`kdevice::DevNode`] registrations into dynamic
+//! This crate projects [`devnode::DevNode`] registrations into dynamic
 //! `/sys/devices`, `/sys/class`, `/sys/dev/char`, and `/sys/bus` trees. It also
 //! exposes device attributes and accepts validated user-triggered kobject
 //! uevents for device-management clients.
@@ -174,7 +174,7 @@ pub fn init_device_projection() {
         DEVICE_PROJECTION_EVENTS.init_once(Mutex::new(()));
 
         let mut projection = device_projection().lock();
-        // kdevice installs the subscriber and captures the snapshot under its
+        // devnode installs the subscriber and captures the snapshot under its
         // registry lock, but invokes callbacks only after releasing that lock.
         // Holding this mutex therefore serializes callbacks without creating a
         // lock cycle and prevents a stale snapshot from overtaking removal.
@@ -216,7 +216,7 @@ fn handle_device_event(event: DevNodeEvent) {
                 .filter(|projected| projected.node == node)
                 .cloned();
             if let Some(projected) = projected {
-                // `kdevice` marks the node unavailable before this callback.
+                // devnode marks the node unavailable before this callback.
                 // The exclusive guard waits for reads or uevent writes that
                 // already passed their availability check.
                 let _access = projected.access.write();

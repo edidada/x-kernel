@@ -4,7 +4,7 @@
 
 //! Composition root for the driver-core device model.
 //!
-//! Called once from the driver-layer init (`kdriver::init_drivers`):
+//! Called once from the runtime init (`kruntime`):
 //!
 //! 1. installs the x-kernel service runtime and wires it to the global
 //!    device domain (deferred probes wake through it);
@@ -113,8 +113,7 @@ pub fn init() {
 ///
 /// Every firmware node becomes a descriptor; nodes without a matching driver
 /// end up `Unclaimed` (visible in introspection, harmless). This is the
-/// new-model enumeration path — it does not touch the legacy `kdevice`
-/// registry, so both models coexist during the migration.
+/// enumeration path for the device domain.
 fn enumerate_firmware_devices() {
     // The khal `for_each_compatible` matcher must echo a `&'static str` (it
     // selects the firmware id from driver tables); enumerating *every* node

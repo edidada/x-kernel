@@ -55,7 +55,7 @@ pub enum DeviceLocation {
 }
 
 /// Packed `dev_t`: the same layout the block core and devfs use
-/// (`kdevice::DeviceNumber` re-exports this type).
+/// (block and kvfs re-export this type as their DeviceId).
 #[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Copy, Hash)]
 pub struct DeviceNumber(pub u64);
 
