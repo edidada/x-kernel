@@ -78,19 +78,7 @@ impl DriverOps<PciBus> for VirtioRngDriver {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
-        let device = VirtIoRngDev::<driver_runtime::hal::Hal, _>::try_new(
-            transport,
-            driver_runtime::time_ops(),
-        )
-        .map_err(map_driver_error)?;
-
-        let location = legacy_location(dev.descriptor().location);
-        publish_char(
-            ClassParent::detached("virtio-rng", location),
-            Box::new(device),
-        )
-        .map_err(map_driver_error)?;
-
+        activate(dev, transport)?;
         Ok(RngData)
     }
 
@@ -100,9 +88,27 @@ impl DriverOps<PciBus> for VirtioRngDriver {
     }
 }
 
-fn legacy_location(location: driver_core::desc::DeviceLocation) -> kdevice::DeviceLocation {
+/// Construct and publish the device for a probed transport — shared by the
+/// PCI driver above and the virtio-mmio transport driver.
+pub fn activate<B: driver_core::Bus>(
+    dev: &mut DeviceCtx<'_, B>,
+    transport: impl virtio::Transport + 'static,
+) -> Result<(), ProbeError> {
+    let device =
+        VirtIoRngDev::<driver_runtime::hal::Hal, _>::try_new(transport, driver_runtime::time_ops())
+            .map_err(map_driver_error)?;
+    let location = legacy_location(dev.descriptor().location);
+    publish_char(
+        ClassParent::detached("virtio-rng", location),
+        Box::new(device),
+    )
+    .map_err(map_driver_error)?;
+    Ok(())
+}
+
+fn legacy_location(location: driver_core::desc::DeviceLocation) -> devnode::DeviceLocation {
+    use devnode::DeviceLocation as Legacy;
     use driver_core::desc::DeviceLocation as Ours;
-    use kdevice::DeviceLocation as Legacy;
     match location {
         Ours::Pci {
             segment,

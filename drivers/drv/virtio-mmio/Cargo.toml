@@ -1,0 +1,36 @@
+[package]
+name = "virtio-mmio-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "driver-core virtio-mmio transport driver: claims virtio,mmio DT nodes and dispatches by device type"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "virtio", "mmio", "x-kernel"]
+categories = ["os", "no-std"]
+
+[features]
+default = []
+virtio-blk = ["dep:virtio-blk-core", "dep:block"]
+virtio-net = ["dep:virtio-net-core"]
+virtio-gpu = ["dep:virtio-gpu-core"]
+virtio-input = ["dep:virtio-input-core"]
+virtio-rng = ["dep:virtio-rng-core"]
+virtio-vsock = ["dep:virtio-vsock-core"]
+virtio-9p = ["dep:virtio-9p-core"]
+
+[dependencies]
+virtio-blk-core = { workspace = true, optional = true }
+virtio-net-core = { workspace = true, optional = true }
+virtio-gpu-core = { workspace = true, optional = true }
+virtio-input-core = { workspace = true, optional = true }
+virtio-rng-core = { workspace = true, optional = true }
+virtio-vsock-core = { workspace = true, optional = true }
+virtio-9p-core = { workspace = true, optional = true }
+block = { workspace = true, optional = true }
+driver-core = { workspace = true }
+driver-runtime = { workspace = true, features = ["virtio-hal"] }
+driver_base = { workspace = true }
+virtio = { workspace = true, features = ["alloc"] }
+log.workspace = true

@@ -16,7 +16,7 @@ console_driver = { workspace = true, features = ["pl011"] }
 driver_base.workspace = true
 driver-core.workspace = true
 kclass = { workspace = true, features = ["char"] }
-kdevice.workspace = true
+devnode.workspace = true
 driver-runtime.workspace = true
 khal.workspace = true
 log.workspace = true

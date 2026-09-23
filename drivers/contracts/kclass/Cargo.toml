@@ -11,7 +11,7 @@ documentation.workspace = true
 
 [dependencies]
 driver_base.workspace = true
-kdevice.workspace = true
+devnode.workspace = true
 kspin.workspace = true
 lazyinit.workspace = true
 log.workspace = true

@@ -10,8 +10,8 @@
 //! Drivers publish runtime capabilities here after probe succeeds so subsystems
 //! can enumerate existing devices and subscribe to later availability without
 //! depending on probe order.
-//! Input and display classes also translate their runtime metadata into
-//! [`kdevice::DeviceNode`] registrations when the parent device becomes active.
+//! Input and display classes also project their runtime metadata into
+//! devnode publications (devtmpfs/sysfs/uevent) on publish.
 
 #![no_std]
 
@@ -23,7 +23,6 @@ use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 pub use generic::{ClassDeviceId, ClassParent, DetachedParent};
-use kdevice::{DeviceEvent, DeviceEventKind};
 use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
@@ -31,32 +30,7 @@ mod generic;
 
 /// Re-export generic class-device primitives that are part of the public API.
 pub use self::generic::{ClassAvailabilityCallback, ClassDevice};
-use self::generic::{ClassDeviceMetadata, ClassRegistry};
-
-static ACTIVATION_BRIDGE: LazyInit<()> = LazyInit::new();
-
-fn ensure_event_bridge() {
-    ACTIVATION_BRIDGE.call_once(|| {
-        kdevice::subscribe_device_event_kind(
-            DeviceEventKind::Activated,
-            Arc::new(|event| {
-                let DeviceEvent::Activated { id, kind } = event else {
-                    return;
-                };
-                notify_class_available(kind, ClassDeviceId::from_device(id));
-            }),
-        );
-        kdevice::subscribe_device_event_kind(
-            DeviceEventKind::Removed,
-            Arc::new(|event| {
-                let DeviceEvent::Removed { id } = event else {
-                    return;
-                };
-                remove_class_device(ClassDeviceId::from_device(id));
-            }),
-        );
-    });
-}
+use self::generic::{ClassDeviceMetadata, ClassRegistry, ClassRemovalCallback};
 
 macro_rules! class_registry {
     (
@@ -69,6 +43,7 @@ macro_rules! class_registry {
         $devices_fn:ident,
         $find_fn:ident,
         $subscribe_fn:ident,
+        $removed_subscriber_fn:ident,
         $notify_fn:ident,
         $remove_fn:ident
     ) => {
@@ -77,7 +52,6 @@ macro_rules! class_registry {
 
         #[cfg(feature = $feature)]
         fn $registry_fn() -> &'static SpinNoPreempt<ClassRegistry<$ty>> {
-            ensure_event_bridge();
             $registry.call_once(|| SpinNoPreempt::new(ClassRegistry::new()));
             $registry.get().expect("class registry call_once succeeded")
         }
@@ -142,6 +116,11 @@ macro_rules! class_registry {
         }
 
         #[cfg(feature = $feature)]
+        pub fn $removed_subscriber_fn(callback: ClassRemovalCallback<$ty>) {
+            $registry_fn().lock().subscribe_removed(callback);
+        }
+
+        #[cfg(feature = $feature)]
         fn $notify_fn(id: ClassDeviceId) {
             let (device, callbacks) = {
                 let registry = $registry_fn().lock();
@@ -151,19 +130,23 @@ macro_rules! class_registry {
                 (device, registry.availability_callbacks())
             };
 
-            if let Some(node_class) = device.with(ClassRuntimeMetadata::device_node_class)
-                && let ClassParent::Device(node_parent) = device.parent_ref().clone()
-                && {
-                    kdevice::register_device_node(
-                        node_parent.id(),
-                        node_class,
-                        String::from(device.name()),
-                        String::from(device.driver_name()),
-                        device.location(),
-                    );
-                    true
+            if let Some(node_class) = device.with(ClassRuntimeMetadata::device_node_class) {
+                let node_id = device.parent_ref().id().raw();
+                let legacy = device.location();
+                match node_class {
+                    NodeClass::Input(metadata) => {
+                        crate::node_compat::input_node(
+                            node_id,
+                            metadata,
+                            &device.driver_name(),
+                            legacy,
+                        );
+                    }
+                    NodeClass::Drm => {
+                        crate::node_compat::drm_node(node_id, &device.driver_name(), legacy);
+                    }
                 }
-            {}
+            }
 
             for callback in callbacks {
                 callback(device.clone());
@@ -172,11 +155,18 @@ macro_rules! class_registry {
 
         #[cfg(feature = $feature)]
         fn $remove_fn(id: ClassDeviceId) {
-            let removed = { $registry_fn().lock().remove(id) };
+            let (removed, callbacks) = {
+                let mut registry = $registry_fn().lock();
+                let removed = registry.remove(id);
+                let callbacks = registry.removal_callbacks();
+                (removed, callbacks)
+            };
             if let Some(device) = removed {
-                if let ClassParent::Device(node_parent) = device.parent_ref() {
-                    kdevice::unregister_device_node(node_parent.id());
+                for callback in callbacks {
+                    callback(device.clone());
                 }
+                let node_id = device.parent_ref().id().raw();
+                devnode::withdraw(node_id);
                 device.with(ClassRuntimeMetadata::unpublish_class);
             }
         }
@@ -195,6 +185,7 @@ macro_rules! class_registries {
             $devices_fn:ident,
             $find_fn:ident,
             $subscribe_fn:ident,
+            $removed_subscriber_fn:ident,
             $notify_fn:ident,
             $remove_fn:ident
         );+ $(;)?
@@ -227,6 +218,7 @@ macro_rules! class_registries {
                 $devices_fn,
                 $find_fn,
                 $subscribe_fn,
+                $removed_subscriber_fn,
                 $notify_fn,
                 $remove_fn
             );
@@ -304,7 +296,7 @@ trait ClassRuntimeMetadata {
 
     fn unpublish_class(&self) {}
 
-    fn device_node_class(&self) -> Option<kdevice::DeviceNodeClass> {
+    fn device_node_class(&self) -> Option<NodeClass> {
         None
     }
 }
@@ -328,8 +320,8 @@ impl ClassRuntimeMetadata for HwrngDeviceImpl {}
 
 #[cfg(feature = "display")]
 impl ClassRuntimeMetadata for DisplayDeviceImpl {
-    fn device_node_class(&self) -> Option<kdevice::DeviceNodeClass> {
-        Some(kdevice::DeviceNodeClass::Drm)
+    fn device_node_class(&self) -> Option<NodeClass> {
+        Some(NodeClass::Drm)
     }
 }
 
@@ -339,7 +331,7 @@ impl ClassRuntimeMetadata for InputDeviceImpl {
         ClassDeviceMetadata::input(self.physical_location().into(), self.unique_id().into())
     }
 
-    fn device_node_class(&self) -> Option<kdevice::DeviceNodeClass> {
+    fn device_node_class(&self) -> Option<NodeClass> {
         let mut event_types = alloc::vec![0; (EventType::COUNT as usize).div_ceil(8)];
         let mut event_codes = BTreeMap::new();
         for raw in 0..EventType::COUNT {
@@ -356,16 +348,17 @@ impl ClassRuntimeMetadata for InputDeviceImpl {
             }
         }
         let id = self.device_id();
-        Some(kdevice::DeviceNodeClass::Input(
-            kdevice::InputDeviceNodeMetadata::new(
-                String::from(self.name()),
-                String::from(self.physical_location()),
-                String::from(self.unique_id()),
-                kdevice::InputDeviceNodeId::new(id.bus_type, id.vendor, id.product, id.version),
-                event_types,
-                event_codes.into_iter().collect(),
-            ),
-        ))
+        Some(NodeClass::Input(InputNodeMetadata {
+            name: String::from(self.name()),
+            physical_location: String::from(self.physical_location()),
+            unique_id: String::from(self.unique_id()),
+            bus_type: id.bus_type,
+            vendor: id.vendor,
+            product: id.product,
+            version: id.version,
+            event_types,
+            event_codes: event_codes.into_iter().collect(),
+        }))
     }
 }
 
@@ -578,6 +571,130 @@ impl Virtio9pDevice for ClassDevice<Virtio9pDeviceImpl> {
     }
 }
 
+/// The devnode publication shape for class devices that project into
+/// devtmpfs/sysfs/uevent.
+pub enum NodeClass {
+    Input(InputNodeMetadata),
+    Drm,
+}
+
+/// Input capability metadata carried into the node's uevent properties.
+pub struct InputNodeMetadata {
+    pub name: String,
+    pub physical_location: String,
+    pub unique_id: String,
+    pub bus_type: u16,
+    pub vendor: u16,
+    pub product: u16,
+    pub version: u16,
+    pub event_types: Vec<u8>,
+    pub event_codes: Vec<(u8, Vec<u8>)>,
+}
+
+mod node_compat {
+    use alloc::{format, string::String, vec::Vec};
+
+    use devnode::{DevNode, DevNodeType, DeviceLocation, bitmap_value};
+
+    use super::InputNodeMetadata;
+
+    static INPUT_TYPE: DevNodeType =
+        DevNodeType::new("input", 13, 64, 32, |index| format!("input/event{index}"));
+    static DRM_TYPE: DevNodeType =
+        DevNodeType::new("drm", 226, 0, 64, |index| format!("dri/card{index}"));
+
+    fn physical_path(location: DeviceLocation) -> String {
+        match location {
+            DeviceLocation::Pci {
+                segment,
+                bus,
+                device,
+                function,
+            } => devnode::physical_path_pci(segment, bus, device, function),
+            DeviceLocation::Mmio { base, .. } => format!("platform/{base:x}.mmio"),
+            DeviceLocation::FirmwareNode { id } => format!("platform/firmware{id}"),
+            DeviceLocation::PlatformStatic { id } => format!("platform/static{id}"),
+            DeviceLocation::Bridge { domain } => format!("pci{domain:04x}:00"),
+        }
+    }
+
+    fn sanitize(value: &str) -> String {
+        value
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect()
+    }
+
+    fn input_property_name(event_type: u8) -> Option<&'static str> {
+        Some(match event_type {
+            1 => "KEY",
+            2 => "REL",
+            3 => "ABS",
+            4 => "MSC",
+            5 => "SW",
+            0x11 => "LED",
+            0x12 => "SND",
+            0x15 => "FF",
+            _ => return None,
+        })
+    }
+
+    /// Build the input node publication (eventN with parent-path properties).
+    pub(super) fn input_node(
+        id: u64,
+        metadata: InputNodeMetadata,
+        driver_name: &str,
+        location: DeviceLocation,
+    ) -> DevNode {
+        let physical = physical_path(location);
+        let mut properties = Vec::new();
+        properties.push((
+            String::from("PRODUCT"),
+            format!(
+                "{:x}/{:x}/{:x}/{:x}",
+                metadata.bus_type, metadata.vendor, metadata.product, metadata.version
+            ),
+        ));
+        properties.push((String::from("NAME"), sanitize(&metadata.name)));
+        properties.push((String::from("PHYS"), sanitize(&metadata.physical_location)));
+        if !metadata.unique_id.is_empty() {
+            properties.push((String::from("UNIQ"), sanitize(&metadata.unique_id)));
+        }
+        properties.push((String::from("PROP"), String::from("0")));
+        properties.push((String::from("EV"), bitmap_value(&metadata.event_types)));
+        for (event_type, bits) in &metadata.event_codes {
+            if let Some(key) = input_property_name(*event_type) {
+                properties.push((String::from(key), bitmap_value(bits)));
+            }
+        }
+        devnode::publish(
+            id,
+            "input",
+            INPUT_TYPE.devname(0),
+            INPUT_TYPE.device_number(0),
+            &format!("{physical}/input"),
+            None,
+            properties,
+            Some(String::from(driver_name)),
+        )
+    }
+
+    /// Build the drm node publication (cardN).
+    pub(super) fn drm_node(id: u64, driver_name: &str, location: DeviceLocation) -> DevNode {
+        let physical = physical_path(location);
+        devnode::publish(
+            id,
+            "drm",
+            DRM_TYPE.devname(0),
+            DRM_TYPE.device_number(0),
+            &physical,
+            None,
+            Vec::new(),
+            Some(String::from(driver_name)),
+        )
+    }
+}
+
 class_registries! {
     "net",
     NetDeviceImpl,
@@ -588,6 +705,7 @@ class_registries! {
     net_devices,
     find_net_device,
     subscribe_net_available,
+    subscribe_net_removed,
     notify_net_available,
     remove_net_device;
     "block",
@@ -599,6 +717,7 @@ class_registries! {
     block_devices,
     find_block_device,
     subscribe_block_available,
+    subscribe_block_removed,
     notify_block_available,
     remove_block_device;
     "char",
@@ -610,6 +729,7 @@ class_registries! {
     char_devices,
     find_char_device,
     subscribe_char_available,
+    subscribe_char_removed,
     notify_char_available,
     remove_char_device;
     "hwrng",
@@ -632,6 +752,7 @@ class_registries! {
     display_devices,
     find_display_device,
     subscribe_display_available,
+    subscribe_display_removed,
     notify_display_available,
     remove_display_device;
     "input",
@@ -643,6 +764,7 @@ class_registries! {
     input_devices,
     find_input_device,
     subscribe_input_available,
+    subscribe_input_removed,
     notify_input_available,
     remove_input_device;
     "vsock",
@@ -654,6 +776,7 @@ class_registries! {
     vsock_devices,
     find_vsock_device,
     subscribe_vsock_available,
+    subscribe_vsock_removed,
     notify_vsock_available,
     remove_vsock_device;
     "virtio-9p",
@@ -665,6 +788,7 @@ class_registries! {
     virtio_9p_devices,
     find_virtio_9p_device,
     subscribe_virtio_9p_available,
+    subscribe_virtio_9p_removed,
     notify_virtio_9p_available,
     remove_virtio_9p_device;
 }
@@ -678,7 +802,7 @@ pub mod prelude {
     #[cfg(feature = "block")]
     pub use crate::BlockDeviceImpl;
     #[cfg(feature = "char")]
-    pub use crate::{CharDevice, CharDeviceImpl};
+    pub use crate::{CharDevice, CharDeviceImpl, subscribe_char_removed};
     #[cfg(feature = "display")]
     pub use crate::{DisplayDevice, DisplayDeviceImpl, DisplayInfo};
     #[cfg(feature = "input")]
@@ -686,7 +810,9 @@ pub mod prelude {
     #[cfg(feature = "hwrng")]
     pub use crate::{HwrngDevice, HwrngDeviceImpl};
     #[cfg(feature = "net")]
-    pub use crate::{NetBufHandle, NetDevice, NetDeviceImpl, NetRxScheduler};
+    pub use crate::{
+        NetBufHandle, NetDevice, NetDeviceImpl, NetRxScheduler, subscribe_net_removed,
+    };
     #[cfg(feature = "virtio-9p")]
     pub use crate::{Virtio9pDevice, Virtio9pDeviceImpl};
     #[cfg(feature = "vsock")]
@@ -707,4 +833,19 @@ pub fn remove_detached_char(owner: u64) -> Option<ClassDevice<CharDeviceImpl>> {
 #[cfg(feature = "net")]
 pub fn remove_detached_net(owner: u64) -> Option<ClassDevice<NetDeviceImpl>> {
     net_class_registry().lock().remove_detached(owner)
+}
+
+#[cfg(feature = "input")]
+pub fn remove_detached_input(owner: u64) -> Option<ClassDevice<InputDeviceImpl>> {
+    input_class_registry().lock().remove_detached(owner)
+}
+
+#[cfg(feature = "display")]
+pub fn remove_detached_display(owner: u64) -> Option<ClassDevice<DisplayDeviceImpl>> {
+    display_class_registry().lock().remove_detached(owner)
+}
+
+#[cfg(feature = "vsock")]
+pub fn remove_detached_vsock(owner: u64) -> Option<ClassDevice<VsockDeviceImpl>> {
+    vsock_class_registry().lock().remove_detached(owner)
 }

@@ -1,0 +1,26 @@
+[package]
+name = "serial-ns16550-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "driver-core NS16550 serial driver (MMIO and x86 I/O-port variants)"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "serial", "ns16550", "x-kernel"]
+categories = ["os", "no-std"]
+
+[features]
+default = []
+mmio = []
+ioport = []
+
+[dependencies]
+char_driver = { workspace = true }
+console_driver = { workspace = true, features = ["ns16550-mmio", "ns16550-ioport"] }
+driver-core = { workspace = true }
+devnode = { workspace = true }
+driver_base = { workspace = true }
+kclass = { workspace = true, features = ["char"] }
+khal = { workspace = true }
+log.workspace = true

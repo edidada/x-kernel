@@ -13,7 +13,7 @@ categories = ["os", "no-std"]
 [dependencies]
 driver-core = { workspace = true }
 driver-runtime = { workspace = true, features = ["virtio-hal"] }
-kdevice.workspace = true
+devnode.workspace = true
 driver_base = { workspace = true }
 kclass = { workspace = true, features = ["net"] }
 pci = { workspace = true }

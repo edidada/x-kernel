@@ -16,10 +16,10 @@ workqueue-bench = ["kworkng/bench"]
 smp = ["khal/smp", "ktask/smp", "memspace/smp", "fs_boot?/smp", "ipi"]
 ipi = ["dep:kipi", "ktask/ipi"]
 
-char = ["kdriver/char", "dep:ktty"]
-display = ["kdriver/display", "dep:fbdevice"]
-input = ["kdriver/input", "dep:inputdev"]
-fs = ["kdriver/block", "dep:fs_boot"]
+char = ["dep:ktty", "dep:kclass", "kclass/char"]
+display = ["dep:fbdevice", "dep:kclass", "kclass/display"]
+input = ["dep:inputdev", "dep:kclass", "kclass/input"]
+fs = ["dep:fs_boot", "dep:block", "dep:kclass", "kclass/block"]
 # 9P runtime glue only. The transport driver is selected at the top level via
 # `kfeat/driver_virtio_9p` (or any future 9P transport driver feature).
 fs9p = [
@@ -28,12 +28,11 @@ fs9p = [
 ]
 fs_cgroup2 = ["fs", "fs_boot/cgroup2"]
 fs_ebpf = ["fs", "fs_boot/ebpf"]
-net = ["kdriver/net", "dep:knet"]
-vsock = ["net", "kdriver/vsock"]
+net = ["dep:knet", "dep:kclass", "kclass/net"]
+vsock = ["net", "dep:kclass", "kclass/vsock"]
 vsock_tipc_bridge = []
 
 rtc = []
-# driver-dyn = ["kdriver/dyn"]
 arm-timer-resume-fixup = ["ktask/arm-timer-resume-fixup", "timer_driver/arm-timer-resume-fixup"]
 rootfs-secondary-block = ["fs", "fs_boot/rootfs-secondary-block"]
 watchdog = ["dep:watchdog"]
@@ -41,6 +40,8 @@ watchdog_hardlockup = ["watchdog/nmi"]
 pmu = ["khal/pmu"]
 
 [dependencies]
+kclass = { workspace = true, optional = true }
+block = { workspace = true, optional = true }
 kspin.workspace = true
 kalloc.workspace = true
 ktty = { workspace = true, optional = true }
@@ -50,7 +51,7 @@ kerrno.workspace = true
 fbdevice = { workspace = true, optional = true }
 fs_boot = { workspace = true, optional = true }
 inputdev = { workspace = true, optional = true }
-kdriver.workspace = true
+driver-compose.workspace = true
 kdma.workspace = true
 memaddr.workspace = true
 khal.workspace = true

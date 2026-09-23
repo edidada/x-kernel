@@ -14,13 +14,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-
-use bitmaps::Bitmap;
-use kclass::{
-    ClassDevice, Event, EventType, InputDevice, InputDeviceImpl, InputEventNotifier,
-    input_devices as class_input_devices, subscribe_input_available,
-};
-use kdevice::{DeviceId, subscribe_device_removed};
+>>>>>>> a62f4faf1 (refactor(driver): remove the legacy device model entirely — one model, one pipeline)
 use ksync::Mutex;
 use ktime_types::{MonotonicInstant, SystemTime};
 use kworkng::{SubmitError, WorkHandle};
@@ -343,11 +337,32 @@ static INPUT_ENDPOINTS: LazyInit<Mutex<Vec<Arc<InputEndpoint>>>> = LazyInit::new
 /// Initialize input devices and subscribe to later class activation/removal.
 pub fn init_input() {
     info!("Initialize input subsystem...");
-    INPUT_ENDPOINTS.init_once(Mutex::new(Vec::new()));
-    subscribe_device_removed(Arc::new(remove_input_device));
+
+    INPUT_DEVICES.init_once(Mutex::new(Vec::new()));
+
+    log::info!("inputdev: pre-scan");
+    register_input_devices(class_input_devices());
+    log::info!("inputdev: pre-subscribe-available");
     subscribe_input_available(Arc::new(register_input_device));
-    for device in class_input_devices() {
-        register_input_device(device);
+    log::info!("inputdev: pre-subscribe-removed");
+    {
+        use kclass::ClassDevice;
+        let _probe: Option<()> = None;
+        log::info!("inputdev: calling kclass subscribe");
+        kclass::subscribe_input_removed(Arc::new(|_removed: ClassDevice<InputDeviceImpl>| {}));
+        log::info!("inputdev: subscribe returned");
+    }
+    {
+        log::info!("inputdev: second subscribe probe");
+        kclass::subscribe_input_removed(Arc::new(|_removed: ClassDevice<InputDeviceImpl>| {}));
+        log::info!("inputdev: second subscribe ok");
+    }
+    log::info!("inputdev: init done");
+}
+
+fn register_input_devices(devices: Vec<ClassDevice<InputDeviceImpl>>) {
+    for handle in devices {
+        register_input_device(handle);>>>>>>> a62f4faf1 (refactor(driver): remove the legacy device model entirely — one model, one pipeline)
     }
 }
 
@@ -359,15 +374,15 @@ fn register_input_device(device: ClassDevice<InputDeviceImpl>) {
 }
 
 fn subscribe_input_unregister() {
-    subscribe_device_removed(Arc::new(|id| {
+    kclass::subscribe_input_removed(Arc::new(|removed| {
         if !INPUT_DEVICES.is_inited() {
             return;
         }
-        let class_id = kclass::ClassDeviceId::from_device(id);
+        let class_id = removed.id();
         let mut devs = INPUT_DEVICES.lock();
         if let Some(pos) = devs.iter().position(|h| h.id() == class_id) {
             devs.swap_remove(pos);
-            info!("input: unregistered removed device {:?}", id);
+            info!("input: unregistered removed device {:?}", class_id);
         }
     }));>>>>>>> 9cfe18b9a (refactor(kclass): decouple the class layer from the legacy device object)
 }

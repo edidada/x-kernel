@@ -47,7 +47,6 @@ pub use control::{
 #[cfg(feature = "vsock")]
 use kclass::{ClassDevice, VsockDeviceImpl, subscribe_vsock_available, vsock_devices};
 use kclass::{NetDevice, net_devices};
-use kdevice::subscribe_device_removed;
 #[cfg(feature = "vsock")]
 use kerrno::KError;
 use lazyinit::LazyInit;
@@ -174,8 +173,8 @@ pub fn init_network() {
 }
 
 fn subscribe_network_unregister(id: kclass::ClassDeviceId) {
-    subscribe_device_removed(Arc::new(move |removed_id| {
-        if kclass::ClassDeviceId::from_device(removed_id) != id {
+    kclass::subscribe_net_removed(Arc::new(move |removed| {
+        if removed.id() != id {
             return;
         }
         if unregister_netdev(id) {
@@ -236,8 +235,8 @@ fn register_vsock_handle(handle: ClassDevice<VsockDeviceImpl>) {
     if let Err(e) = crate::vsock::bridge::init() {
         warn!("Failed to initialize vsock-TIPC bridge: {:?}", e);
     }
-    subscribe_device_removed(Arc::new(move |removed_id| {
-        if kclass::ClassDeviceId::from_device(removed_id) == id && unregister_vsock_dev(id) {
+    kclass::subscribe_vsock_removed(Arc::new(move |removed| {
+        if removed.id() == id && unregister_vsock_dev(id) {
             warn!("vsock: detached removed device {:?}", id);
         }
     }));

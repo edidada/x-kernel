@@ -17,8 +17,11 @@ use kclass::{
     CharDeviceImpl, ClassDevice, char_devices, find_char_device, publish_char,
     subscribe_char_available,
 };
-use kdevice::{DeviceId, DeviceObject, subscribe_device_removed};
+<<<<<<< HEAD
 use kspin::SpinNoPreempt;
+=======
+use kspin::{SpinNoIrq, SpinNoPreempt};
+>>>>>>> eec3d1eb4 (refactor(driver): remove the legacy device model entirely — one model, one pipeline)
 use lazyinit::LazyInit;
 
 struct ConsoleSubsystem {
@@ -102,6 +105,7 @@ fn ensure_console_bridge() {
             add_console_device(handle);
         }
         subscribe_char_available(Arc::new(add_console_device));
+<<<<<<< HEAD
         subscribe_device_removed(Arc::new(|id| {
             let _ = unregister_console_device(id);
         }));
@@ -144,6 +148,16 @@ pub fn stdout_console() -> Option<ClassDevice<CharDeviceImpl>> {
     let handle = console_subsystem().lock().stdout_handle()?;
     handle.is_available().then_some(handle)
 }
+=======
+    });
+}
+
+/// The stdout device id that was registered before the device became active,
+/// waiting for its activation notification so it can be adopted into the
+/// console subsystem.
+static PENDING_STDOUT: SpinNoIrq<Option<ClassDeviceId>> = SpinNoIrq::new(None);
+static STDOUT_ADOPTION_BRIDGE: LazyInit<()> = LazyInit::new();
+>>>>>>> eec3d1eb4 (refactor(driver): remove the legacy device model entirely — one model, one pipeline)
 
 /// Identity of the adopted boot stdout.
 ///

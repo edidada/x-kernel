@@ -12,9 +12,9 @@ categories = ["os", "no-std"]
 
 [dependencies]
 driver-core = { workspace = true }
+devnode = { workspace = true }
 driver-runtime = { workspace = true, features = ["virtio-hal"] }
 driver_base = { workspace = true }
 kclass = { workspace = true, features = ["char"] }
-kdevice = { workspace = true }
 pci = { workspace = true }
 virtio = { workspace = true, features = ["rng"] }

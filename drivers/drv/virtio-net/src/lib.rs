@@ -84,35 +84,7 @@ impl DriverOps<PciBus> for VirtioNetDriver {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
-        let device = Arc::new(
-            VirtIoNetDev::<driver_runtime::hal::Hal, _, 64>::try_new(transport)
-                .map_err(map_driver_error)?,
-        );
-        let worker = device.irq_worker();
-        // The worker holds only shared internals; the publication owns the
-        // device exclusively.
-        let device =
-            Arc::try_unwrap(device).map_err(|_| ProbeError::Fatal(RuntimeError::BadState))?;
-
-        // Interrupt ownership: the handler holds only a share of the device
-        // internals; the guard in `Data` releases it when the device goes.
-        let irq = match dev.irq(0) {
-            Ok(spec) => Some(dev.request_irq(spec, "virtio-net", move || {
-                if worker.service() {
-                    IrqAction::Handled
-                } else {
-                    IrqAction::NotHandled
-                }
-            })?),
-            Err(_) => None,
-        };
-        let location = legacy_location(dev.descriptor().location);
-        publish_net(
-            ClassParent::detached("virtio-net", location),
-            Box::new(device),
-        )
-        .map_err(map_driver_error)?;
-
+        let irq = activate(dev, transport)?;
         Ok(NetData { _irq: irq })
     }
 
@@ -122,9 +94,46 @@ impl DriverOps<PciBus> for VirtioNetDriver {
     }
 }
 
-fn legacy_location(location: driver_core::desc::DeviceLocation) -> kdevice::DeviceLocation {
+/// Construct and publish the NIC for a probed transport — shared by the PCI
+/// driver above and the virtio-mmio transport driver. Returns the registered
+/// interrupt guard.
+pub fn activate<B: driver_core::Bus>(
+    dev: &mut DeviceCtx<'_, B>,
+    transport: impl virtio::Transport + 'static,
+) -> Result<Option<DevIrq>, ProbeError> {
+    let device = Arc::new(
+        VirtIoNetDev::<driver_runtime::hal::Hal, _, 64>::try_new(transport)
+            .map_err(map_driver_error)?,
+    );
+    let worker = device.irq_worker();
+    // The worker holds only shared internals; the publication owns the
+    // device exclusively.
+    let device = Arc::try_unwrap(device).map_err(|_| ProbeError::Fatal(RuntimeError::BadState))?;
+
+    // Interrupt ownership: the handler holds only a share of the device
+    // internals; the guard in `Data` releases it when the device goes.
+    let irq = match dev.irq(0) {
+        Ok(spec) => Some(dev.request_irq(spec, "virtio-net", move || {
+            if worker.service() {
+                IrqAction::Handled
+            } else {
+                IrqAction::NotHandled
+            }
+        })?),
+        Err(_) => None,
+    };
+    let location = legacy_location(dev.descriptor().location);
+    publish_net(
+        ClassParent::detached("virtio-net", location),
+        Box::new(device),
+    )
+    .map_err(map_driver_error)?;
+    Ok(irq)
+}
+
+fn legacy_location(location: driver_core::desc::DeviceLocation) -> devnode::DeviceLocation {
+    use devnode::DeviceLocation as Legacy;
     use driver_core::desc::DeviceLocation as Ours;
-    use kdevice::DeviceLocation as Legacy;
     match location {
         Ours::Pci {
             segment,

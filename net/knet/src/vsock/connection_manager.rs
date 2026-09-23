@@ -8,8 +8,8 @@ use alloc::collections::{BTreeSet, VecDeque};
 use alloc::{collections::BTreeMap, string::ToString, sync::Arc};
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use driver_base::{Device, DeviceKind};
 use kclass::{ClassDevice, ClassDeviceId, prelude::*};
-use kdevice::{Device, DeviceKind};
 use kerrno::{KError, KResult, k_bail};
 #[cfg(feature = "vsock_tipc_bridge")]
 use klazy::Lazy;

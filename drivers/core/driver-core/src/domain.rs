@@ -87,6 +87,10 @@ pub struct DeviceSnapshot {
     pub bus: BusId,
     pub state: DeviceState,
     pub driver: Option<&'static str>,
+    /// Device kind, when a driver is bound (the class view of the device).
+    pub kind: Option<crate::DeviceKind>,
+    /// Firmware identity string for `/proc` style listings.
+    pub identity: Option<alloc::string::String>,
 }
 
 trait AnyDriver: Send + Sync {
@@ -486,6 +490,8 @@ impl DeviceDomain {
             bus: entry.desc.bus,
             state: entry.state,
             driver: entry.driver.as_ref().map(|driver| driver.name()),
+            kind: None,
+            identity: None,
         })
     }
 
@@ -499,6 +505,18 @@ impl DeviceDomain {
                 bus: entry.desc.bus,
                 state: entry.state,
                 driver: entry.driver.as_ref().map(|driver| driver.name()),
+                kind: None,
+                identity: match &entry.desc.identity {
+                    crate::desc::DeviceIdentity::Platform(platform) => platform
+                        .firmware_id
+                        .clone()
+                        .or_else(|| platform.alias.clone()),
+                    crate::desc::DeviceIdentity::Pci(pci) => Some(alloc::format!(
+                        "pci {:#06x}:{:#06x}",
+                        pci.vendor_id,
+                        pci.device_id
+                    )),
+                },
             })
             .collect()
     }
@@ -527,6 +545,11 @@ static GLOBAL_DOMAIN: LazyInit<DeviceDomain> = LazyInit::new();
 
 /// The kernel's composition-root domain. Tests construct their own
 /// [`DeviceDomain`] instead.
+/// Read-only topology summary of the global domain (procfs/introspection).
+pub fn global_topology_summary() -> Vec<DeviceSnapshot> {
+    global_domain().devices()
+}
+
 pub fn global_domain() -> &'static DeviceDomain {
     GLOBAL_DOMAIN.call_once(DeviceDomain::new);
     GLOBAL_DOMAIN

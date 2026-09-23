@@ -14,6 +14,10 @@ use ktime_types::MonotonicInstant;
 use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address};
 use unittest::def_test;
 
+fn kclass_test_device_id(raw: u64) -> kclass::ClassDeviceId {
+    kclass::ClassDeviceId::new_detached_for_node(raw)
+}
+
 use super::{
     rtnetlink::*,
     socket::publish_kobject_uevent,
@@ -47,7 +51,7 @@ fn valid_ipv4_cidr(address: crate::ip::Ipv4Address, prefix_len: u8) -> crate::ip
 
 struct TestDevice {
     link: LinkSnapshot,
-    device_id: Option<kdevice::DeviceId>,
+    device_id: Option<u64>,
     neighbors: Vec<crate::ip::IpAddress>,
 }
 
@@ -60,7 +64,7 @@ impl TestDevice {
         }
     }
 
-    fn with_device_id(mut self, device_id: kdevice::DeviceId) -> Self {
+    fn with_device_id(mut self, device_id: u64) -> Self {
         self.device_id = Some(device_id);
         self
     }
@@ -99,7 +103,7 @@ impl NetDevice for TestDevice {
     }
 
     fn device_id(&self) -> Option<kclass::ClassDeviceId> {
-        self.device_id.map(kclass::ClassDeviceId::from_device)
+        self.device_id.map(kclass_test_device_id)
     }
 
     fn poll_rx(&mut self, _ifindex: i32, _timestamp: MonotonicInstant) -> kerrno::KResult<Option<PacketBuf>> {
@@ -192,7 +196,7 @@ fn init_test_state() {
             hardware_addr: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
             broadcast_addr: [0xff; 6],
         })
-        .with_device_id(kdevice::DeviceId::new(2)),
+        .with_device_id(2),
     ));
     router
         .add_ipv4_addr(Ipv4AddrEntry {
@@ -511,9 +515,7 @@ fn test_device_removal_refreshes_views() {
     )
     .unwrap();
 
-    assert!(crate::unregister_netdev(
-        kclass::ClassDeviceId::from_device(kdevice::DeviceId::new(2))
-    ));
+    assert!(crate::unregister_netdev(kclass_test_device_id(2)));
     assert_eq!(service.rebuild_count_for_tests(), rebuild_count + 1);
     assert_eq!(service.link_snapshots().len(), 1);
     assert_eq!(
@@ -1286,7 +1288,7 @@ fn test_interface_ipv4_addr_survives_middle_device_removal() {
             hardware_addr: [0x02, 0, 0, 0, 0, ifindex as u8],
             broadcast_addr: [0xff; 6],
         })
-        .with_device_id(kdevice::DeviceId::new(id))
+        .with_device_id(id)
     };
     let mut router = Router::new();
     router.add_device(Box::new(TestDevice::new(LinkSnapshot {
@@ -1335,9 +1337,7 @@ fn test_interface_ipv4_addr_survives_middle_device_removal() {
 
     // Removing eth0 renumbers eth1 from slot 2 to slot 1; the lookup must
     // still resolve eth1 by name and never return eth0's address.
-    assert!(crate::unregister_netdev(
-        kclass::ClassDeviceId::from_device(kdevice::DeviceId::new(2))
-    ));
+    assert!(crate::unregister_netdev(kclass_test_device_id(2)));
     assert_eq!(
         crate::interface_ipv4_addr("eth1"),
         Ok(core::net::Ipv4Addr::new(10, 0, 0, 2))

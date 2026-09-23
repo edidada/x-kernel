@@ -19,6 +19,13 @@ virtio-rng = ["dep:virtio-rng-core"]
 ramdisk = ["dep:ramdisk-core"]
 ramdisk-static = ["ramdisk", "ramdisk-core/ramdisk-static"]
 fixed-clock = ["dep:fixed-clock"]
+virtio-gpu = ["dep:virtio-gpu-core"]
+virtio-input = ["dep:virtio-input-core"]
+virtio-vsock = ["dep:virtio-vsock-core"]
+virtio-9p = ["dep:virtio-9p-core"]
+serial-ns16550-mmio = ["dep:serial-ns16550-core", "serial-ns16550-core/mmio"]
+serial-ns16550-ioport = ["dep:serial-ns16550-core", "serial-ns16550-core/ioport"]
+virtio-mmio = ["dep:virtio-mmio-core", "virtio-mmio-core/virtio-blk", "virtio-mmio-core/virtio-net", "virtio-mmio-core/virtio-gpu", "virtio-mmio-core/virtio-input", "virtio-mmio-core/virtio-rng", "virtio-mmio-core/virtio-vsock", "virtio-mmio-core/virtio-9p", "dep:virtio-blk-core", "dep:virtio-net-core", "dep:virtio-gpu-core", "dep:virtio-input-core", "dep:virtio-rng-core", "dep:virtio-vsock-core", "dep:virtio-9p-core"]
 
 [dependencies]
 console_driver.workspace = true
@@ -35,4 +42,10 @@ virtio-blk-core = { workspace = true, optional = true }
 virtio-net-core = { workspace = true, optional = true }
 virtio-rng-core = { workspace = true, optional = true }
 ramdisk-core = { workspace = true, optional = true }
+virtio-gpu-core = { workspace = true, optional = true }
+virtio-input-core = { workspace = true, optional = true }
+virtio-vsock-core = { workspace = true, optional = true }
+virtio-9p-core = { workspace = true, optional = true }
+serial-ns16550-core = { workspace = true, optional = true }
+virtio-mmio-core = { workspace = true, optional = true }
 block = { workspace = true }

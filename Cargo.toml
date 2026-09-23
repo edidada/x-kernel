@@ -20,6 +20,12 @@ members = [
     "drivers/drv/virtio-net",
     "drivers/drv/virtio-rng",
     "drivers/drv/ramdisk",
+    "drivers/drv/virtio-gpu",
+    "drivers/drv/virtio-input",
+    "drivers/drv/virtio-vsock",
+    "drivers/drv/virtio-9p",
+    "drivers/drv/serial-ns16550",
+    "drivers/drv/virtio-mmio",
     "tee/tee_crypto",
     "tee/xdice",
 ]
@@ -216,8 +222,13 @@ virtio-blk-core = { path = "drivers/drv/virtio-blk" }
 virtio-net-core = { path = "drivers/drv/virtio-net" }
 virtio-rng-core = { path = "drivers/drv/virtio-rng" }
 ramdisk-core = { path = "drivers/drv/ramdisk" }
+virtio-gpu-core = { path = "drivers/drv/virtio-gpu" }
+virtio-input-core = { path = "drivers/drv/virtio-input" }
+virtio-vsock-core = { path = "drivers/drv/virtio-vsock" }
+virtio-9p-core = { path = "drivers/drv/virtio-9p" }
+serial-ns16550-core = { path = "drivers/drv/serial-ns16550" }
+virtio-mmio-core = { path = "drivers/drv/virtio-mmio" }
 kclass = { path = "drivers/contracts/kclass" }
-kdevice = { path = "drivers/contracts/kdevice" }
 input = { path = "drivers/contracts/input" }
 net = { path = "drivers/contracts/net" }
 vsock = { path = "drivers/contracts/vsock" }
@@ -227,7 +238,6 @@ virtio = { path = "drivers/devices/virtio" }
 
 # Internal: driver adapters and integration
 device_res_xkernel = { path = "drivers/adapters/xkernel/device-res", package = "device-res-xkernel" }
-kdriver = { path = "drivers/integration/kdriver" }
 kdevice_uevent = { path = "drivers/integration/kdevice-uevent", package = "kdevice-uevent" }
 
 # Internal: platform, firmware, and host driver support

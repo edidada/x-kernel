@@ -17,6 +17,6 @@ ramdisk-static = ["block/ramdisk-static", "block/ramdisk-static"]
 [dependencies]
 block = { workspace = true, features = ["ramdisk"] }
 driver-core = { workspace = true }
+devnode = { workspace = true }
 driver_base = { workspace = true }
 kclass = { workspace = true, features = ["block"] }
-kdevice = { workspace = true }

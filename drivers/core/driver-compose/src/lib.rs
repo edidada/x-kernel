@@ -46,6 +46,9 @@ pub fn init() {
             let _ = console_driver::runtime::unregister_console_device(device.id());
         }
         let _ = kclass::remove_detached_net(owner);
+        let _ = kclass::remove_detached_input(owner);
+        let _ = kclass::remove_detached_display(owner);
+        let _ = kclass::remove_detached_vsock(owner);
     }));
 
     #[cfg(feature = "fixed-clock")]
@@ -61,6 +64,20 @@ pub fn init() {
     virtio_net_core::register();
     #[cfg(feature = "virtio-rng")]
     virtio_rng_core::register();
+    #[cfg(feature = "virtio-gpu")]
+    virtio_gpu_core::register();
+    #[cfg(feature = "virtio-input")]
+    virtio_input_core::register();
+    #[cfg(feature = "virtio-vsock")]
+    virtio_vsock_core::register();
+    #[cfg(feature = "virtio-9p")]
+    virtio_9p_core::register();
+    #[cfg(feature = "serial-ns16550-mmio")]
+    serial_ns16550_core::register_mmio();
+    #[cfg(feature = "serial-ns16550-ioport")]
+    serial_ns16550_core::register_ioport();
+    #[cfg(feature = "virtio-mmio")]
+    virtio_mmio_core::register();
     #[cfg(feature = "ramdisk")]
     {
         block::dispatch::reclaimer::init();
@@ -69,7 +86,15 @@ pub fn init() {
 
     enumerate_firmware_devices();
     enumerate_static_devices();
-    #[cfg(any(feature = "virtio-blk", feature = "virtio-net", feature = "virtio-rng"))]
+    #[cfg(any(
+        feature = "virtio-blk",
+        feature = "virtio-net",
+        feature = "virtio-rng",
+        feature = "virtio-gpu",
+        feature = "virtio-input",
+        feature = "virtio-vsock",
+        feature = "virtio-9p"
+    ))]
     enumerate_pci_devices();
 
     let domain = global_domain();
@@ -180,6 +205,9 @@ fn build_descriptor(dev: firmware::FirmwareDevice) {
 
 /// Board-static devices (no firmware description): the compose layer owns
 /// the one static device we migrate; the legacy backend registers the rest.
+#[cfg(feature = "serial-ns16550-ioport")]
+static COM_PORTS: [u16; 4] = [0x3f8, 0x2f8, 0x3e8, 0x2e8];
+
 #[cfg(feature = "ramdisk")]
 fn enumerate_static_devices() {
     use driver_core::desc::{DeviceIdentity, DeviceLocation, PlatformIdentity};
@@ -209,7 +237,15 @@ fn map_trigger(trigger: firmware::InterruptTrigger) -> driver_core::IrqTrigger {
 
 /// Walk the PCI hierarchy into domain descriptors (BARs and legacy INTx as
 /// named resources, vendor/device as identity).
-#[cfg(any(feature = "virtio-blk", feature = "virtio-net", feature = "virtio-rng"))]
+#[cfg(any(
+    feature = "virtio-blk",
+    feature = "virtio-net",
+    feature = "virtio-rng",
+    feature = "virtio-gpu",
+    feature = "virtio-input",
+    feature = "virtio-vsock",
+    feature = "virtio-9p"
+))]
 fn enumerate_pci_devices() {
     use driver_core::{
         IrqSpec, IrqTrigger, MmioRegion, ResourceKind,

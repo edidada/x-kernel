@@ -18,6 +18,7 @@ dice = ["dep:dice_driver", "dep:tee_crypto"]
 vmm = ["dep:kvmm-api"]
 
 [dependencies]
+devnode = { workspace = true }
 block.workspace = true
 kalloc.workspace = true
 kcred.workspace = true
@@ -58,7 +59,7 @@ kclass = { workspace = true, features = ["display"] }
 inputdev = { workspace = true, optional = true }
 console_driver = { workspace = true, optional = true }
 driver_base.workspace = true
-kdevice.workspace = true
+
 unittest.workspace = true
 
 [lints]

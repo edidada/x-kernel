@@ -11,7 +11,7 @@ repository.workspace = true
 [dependencies]
 block.workspace = true
 kcred = { workspace = true }
-kdevice = { workspace = true }
+devnode = { workspace = true }
 kerrno = { workspace = true}
 ktime_types.workspace = true
 ktime.workspace = true

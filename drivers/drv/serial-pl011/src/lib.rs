@@ -169,9 +169,9 @@ impl DriverOps<PlatformBus> for Pl011Driver {
     }
 }
 
-fn legacy_location(location: driver_core::desc::DeviceLocation) -> kdevice::DeviceLocation {
+fn legacy_location(location: driver_core::desc::DeviceLocation) -> devnode::DeviceLocation {
+    use devnode::DeviceLocation as Legacy;
     use driver_core::desc::DeviceLocation as Ours;
-    use kdevice::DeviceLocation as Legacy;
     match location {
         Ours::Pci {
             segment,

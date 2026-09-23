@@ -53,7 +53,7 @@ static IDS: &[PciMatch] = &[
 /// Erased activation owned by the device; closing quiesces in order:
 /// drain in-flight I/O, unregister the disk, stop IRQ generation, stop the
 /// reclaimer, then destroy the transport.
-trait Activation: Send + Sync {
+pub trait Activation: Send + Sync {
     fn close(self: Box<Self>);
 }
 
@@ -99,17 +99,20 @@ impl DriverOps<PciBus> for VirtioBlkDriver {
             .map(|(_, info)| info)
             .ok_or(ProbeError::Fatal(RuntimeError::BadState))?;
 
-        let provider = driver_runtime::resource_provider();
-        let (kind, transport, irq) = probe_pci_device::<
-            driver_runtime::hal::Hal,
-            pci::MmioCam<'static>,
-        >(root, bdf, &dev_info, config, provider)
-        .ok_or(ProbeError::Fatal(RuntimeError::BadState))?;
+        let (kind, transport, irq) =
+            probe_pci_device::<driver_runtime::hal::Hal, pci::MmioCam<'static>>(
+                root,
+                bdf,
+                &dev_info,
+                config,
+                driver_runtime::resource_provider(),
+            )
+            .ok_or(ProbeError::Fatal(RuntimeError::BadState))?;
         if !matches!(kind, driver_base::DeviceKind::Block) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
-        let activation = activate(dev, transport, irq, provider)?;
+        let activation = activate(dev, transport, irq)?;
         Ok(BlkData {
             activation: Some(activation),
         })
@@ -163,12 +166,14 @@ impl<H: VirtIoHal + 'static, T: Transport + 'static> Activation for BlkActivatio
     }
 }
 
-fn activate<T: Transport + 'static>(
-    dev: &mut DeviceCtx<'_, PciBus>,
+/// Construct and publish the block device for a probed transport — shared
+/// by the PCI driver above and the virtio-mmio transport driver.
+pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
+    dev: &mut DeviceCtx<'_, B>,
     transport: T,
     irq: usize,
-    provider: &'static dyn IrqOp,
 ) -> Result<Box<dyn Activation>, ProbeError> {
+    let provider: &'static dyn IrqOp = driver_runtime::resource_provider();
     let device = Arc::new(
         VirtIoBlkDev::<driver_runtime::hal::Hal, T>::try_new_irq(
             transport,
@@ -198,7 +203,7 @@ fn activate<T: Transport + 'static>(
     );
 
     let modalias = dev.modalias().map(alloc::string::String::from);
-    let parent_path = pci_physical_path(dev.descriptor().location);
+    let parent_path = physical_path(dev.descriptor().location);
     let disk = Arc::new(
         Gendisk::new(
             device.name().into(),
@@ -222,7 +227,7 @@ fn activate<T: Transport + 'static>(
     Ok(Box::new(activation))
 }
 
-fn pci_physical_path(location: driver_core::desc::DeviceLocation) -> String {
+fn physical_path(location: driver_core::desc::DeviceLocation) -> String {
     use driver_core::desc::DeviceLocation as Ours;
     match location {
         Ours::Pci {
@@ -238,9 +243,9 @@ fn pci_physical_path(location: driver_core::desc::DeviceLocation) -> String {
     }
 }
 
-fn legacy_location(location: driver_core::desc::DeviceLocation) -> kdevice::DeviceLocation {
+fn legacy_location(location: driver_core::desc::DeviceLocation) -> devnode::DeviceLocation {
+    use devnode::DeviceLocation as Legacy;
     use driver_core::desc::DeviceLocation as Ours;
-    use kdevice::DeviceLocation as Legacy;
     match location {
         Ours::Pci {
             segment,

@@ -10,7 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
-kdevice.workspace = true
+devnode.workspace = true
 klazy.workspace = true
 knet.workspace = true
 unittest.workspace = true

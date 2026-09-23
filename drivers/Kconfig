@@ -170,20 +170,7 @@ menu "Device Drivers"
 
 comment "Block device drivers"
 
-config KFEAT_DRIVER_VIRTIO_BLK
-    bool "virtio-blk block device"
-    depends on KFEAT_FS
-    default y
-    help
-      Enable the virtio-blk block device driver. Required by virtio-based
-      virtual platforms (QEMU/CrosVM) when a disk-backed filesystem is in use.
 
-config KFEAT_DRIVER_RAMDISK
-    bool "RAM disk block device"
-    depends on KFEAT_FS
-    help
-      Use an in-memory RAM disk to back the filesystem. Useful on platforms
-      that do not (yet) provide a real block device driver.
 
 config KFEAT_DRIVER_RAMDISK_STATIC
     bool "Back the RAM disk with an embedded filesystem image"
@@ -200,21 +187,7 @@ config KFEAT_DRIVER_RAMDISK_STATIC
 
 comment "Network drivers"
 
-config KFEAT_DRIVER_VIRTIO_NET
-    bool "virtio-net NIC"
-    depends on KFEAT_NET
-    default y
-    help
-      Enable the virtio-net NIC driver. Required by virtio-based virtual
-      platforms (QEMU/CrosVM) when networking is in use.
 
-config KFEAT_DRIVER_VIRTIO_SOCKET
-    bool "virtio-vsock transport"
-    depends on KFEAT_VSOCK
-    default y
-    help
-      Enable the virtio-vsock transport driver used by AF_VSOCK on virtio
-      platforms.
 
 config KFEAT_DRIVER_VIRTIO_RNG
     bool "virtio-rng hardware driver"
@@ -303,7 +276,6 @@ config KFEAT_DRIVER_CONSOLE_NS16550_IOPORT
       Build the NS16550 I/O-port UART backend used by the early-boot console
       and the per-instance serial driver.
 
-config KFEAT_DRIVER_SERIAL_PL011
     bool "PL011 per-instance serial driver"
     depends on KFEAT_CHAR && ARCH_AARCH64
     select KFEAT_DRIVER_CONSOLE_PL011
@@ -313,7 +285,6 @@ config KFEAT_DRIVER_SERIAL_PL011
       node becomes a character device; the stdout UART shares the early-boot
       instance.
 
-config KFEAT_DRIVER_CORE_VIRTIO_BLK
     bool "virtio-blk driver on the driver-core model (PCI)"
     default n
     help
@@ -324,7 +295,6 @@ config KFEAT_DRIVER_CORE_VIRTIO_BLK
       KFEAT_DRIVER_VIRTIO_BLK; enable it instead of (not in addition to)
       the legacy symbol.
 
-config KFEAT_DRIVER_CORE_VIRTIO_NET
     bool "virtio-net driver on the driver-core model (PCI)"
     default n
     help
@@ -333,7 +303,6 @@ config KFEAT_DRIVER_CORE_VIRTIO_NET
       through a detached class parent. Migration target for
       KFEAT_DRIVER_VIRTIO_NET; enable it instead of the legacy symbol.
 
-config KFEAT_DRIVER_CORE_VIRTIO_RNG
     bool "virtio-rng driver on the driver-core model (PCI)"
     default n
     help
@@ -341,14 +310,44 @@ config KFEAT_DRIVER_CORE_VIRTIO_RNG
       class publication through a detached parent. Migration target for
       KFEAT_DRIVER_VIRTIO_RNG.
 
-config KFEAT_DRIVER_CORE_RAMDISK
     bool "ramdisk driver on the driver-core model"
     default n
     help
       Enable the new-model ramdisk driver: alias-matched board-static device
       publishing a block disk. Migration target for KFEAT_DRIVER_RAMDISK.
 
-config KFEAT_DRIVER_CORE_PL011
+    bool "virtio-gpu driver on the driver-core model (PCI)"
+    default n
+    help
+
+    bool "virtio-input driver on the driver-core model (PCI)"
+    default n
+    help
+
+    bool "virtio-vsock driver on the driver-core model (PCI)"
+    default n
+    help
+
+    bool "virtio-9p driver on the driver-core model (PCI)"
+    default n
+    help
+
+    bool "NS16550 MMIO serial driver on the driver-core model"
+    default n
+    help
+
+    bool "NS16550 I/O-port serial driver on the driver-core model"
+    depends on ARCH_X86_64
+    default n
+    help
+
+    bool "virtio-mmio transport driver on the driver-core model"
+    default n
+    help
+      Claims DT "virtio,mmio" nodes and dispatches to the per-family
+      driver-core virtio drivers. Migration target for the legacy
+      platform-backend virtio-mmio probing.
+
     bool "PL011 serial driver on the driver-core model (with fixed-clock provider)"
     depends on ARCH_AARCH64
     default n
@@ -358,45 +357,119 @@ config KFEAT_DRIVER_CORE_PL011
       deferred probe. This is the migration target for KFEAT_DRIVER_SERIAL_PL011;
       enable it instead of (not in addition to) the legacy symbol.
 
+
+
+
+config KFEAT_DRIVER_SERIAL_PL011
+    bool "PL011 per-instance serial driver"
+    depends on KFEAT_CHAR && ARCH_AARCH64
+    select KFEAT_DRIVER_CONSOLE_PL011
+    default y if MACHINE_AARCH64_QEMU
+    help
+      PL011 UART driver on the driver-core model: of-device-id table,
+      early-console adoption, clock consumption with automatic deferred
+      probe. The stdout UART shares the early-boot instance.
+
+config KFEAT_DRIVER_VIRTIO_BLK
+    bool "virtio-blk driver (PCI)"
+    depends on KFEAT_CHAR
+    default y if MACHINE_AARCH64_QEMU
+    default y if MACHINE_RISCV64_QEMU
+    default y if MACHINE_X86_64_QEMU
+    default y if MACHINE_LOONGARCH64_QEMU
+    help
+      virtio-blk on the driver-core model: const PCI id table,
+      guards-in-Data activation, block-class publication with devtmpfs
+      projection and MODALIAS.
+
+config KFEAT_DRIVER_VIRTIO_NET
+    bool "virtio-net driver (PCI)"
+    depends on KFEAT_NET
+    default y if MACHINE_AARCH64_QEMU
+    default y if MACHINE_RISCV64_QEMU
+    default y if MACHINE_X86_64_QEMU
+    default y if MACHINE_LOONGARCH64_QEMU
+    help
+      virtio-net on the driver-core model: const PCI id table, per-device
+      interrupt ownership, net-class publication through a detached parent.
+
+config KFEAT_DRIVER_VIRTIO_RNG
+    bool "virtio-rng entropy source"
+    depends on KFEAT_CHAR
+    default y if MACHINE_AARCH64_QEMU
+    default y if MACHINE_RISCV64_QEMU
+    default y if MACHINE_X86_64_QEMU
+    default y if MACHINE_LOONGARCH64_QEMU
+    help
+      virtio-rng on the driver-core model: char-class publication consumed
+      by the entropy subsystem.
+
+config KFEAT_DRIVER_VIRTIO_GPU
+    bool "virtio-gpu display driver"
+    depends on KFEAT_DISPLAY
+    default n
+    help
+      virtio-gpu on the driver-core model (PCI).
+
+config KFEAT_DRIVER_VIRTIO_INPUT
+    bool "virtio-input driver"
+    depends on KFEAT_INPUT
+    default n
+    help
+      virtio-input on the driver-core model (PCI).
+
+config KFEAT_DRIVER_VIRTIO_SOCKET
+    bool "virtio-vsock driver"
+    depends on KFEAT_VSOCK
+    default n
+    help
+      virtio-vsock on the driver-core model (PCI).
+
+config KFEAT_DRIVER_VIRTIO_9P
+    bool "virtio-9p filesystem transport"
+    depends on KFEAT_FS_9P
+    default n
+    help
+      virtio-9p on the driver-core model (PCI).
+
+config KFEAT_DRIVER_VIRTIO_MMIO
+    bool "virtio-mmio transport driver"
+    depends on KFEAT_CHAR
+    default n
+    help
+      Claims DT "virtio,mmio" nodes and dispatches to the per-family
+      driver-core virtio drivers by probing the transport header.
+
+config KFEAT_DRIVER_RAMDISK
+    bool "ramdisk block device"
+    depends on KFEAT_CHAR
+    default n
+    help
+      ramdisk on the driver-core model: alias-matched board-static device
+      publishing a block disk. The zero-filled variant is bring-up only.
+
 config KFEAT_DRIVER_SERIAL_NS16550_MMIO
     bool "NS16550 MMIO per-instance serial driver"
     depends on KFEAT_CHAR
-    select KFEAT_DRIVER_CONSOLE_NS16550_MMIO
     default y if MACHINE_AARCH64_RK3588
     default y if MACHINE_RISCV64_QEMU
     default y if MACHINE_LOONGARCH64_QEMU
     help
-      Enable the kdriver per-instance serial driver for NS16550 MMIO UARTs.
+      NS16550 MMIO UART driver on the driver-core model.
 
 config KFEAT_DRIVER_SERIAL_NS16550_IOPORT
     bool "NS16550 I/O-port per-instance serial driver"
     depends on KFEAT_CHAR && ARCH_X86_64
-    select KFEAT_DRIVER_CONSOLE_NS16550_IOPORT
     default y if MACHINE_X86_64_QEMU
     help
-      Enable the kdriver per-instance serial driver for the NS16550 I/O-port
-      (x86 ISA COM) UART.
+      NS16550 x86 ISA COM port driver on the driver-core model.
+
 
 comment "Filesystem transport drivers"
 
-config KFEAT_DRIVER_VIRTIO_9P
-    bool "virtio-9p transport"
-    depends on KFEAT_FS_9P
-    default y
-    help
-      Enable the virtio-9p transport used by the 9P filesystem client (e.g.
-      QEMU hostshare).
 
 comment "Display / input drivers"
 
-config KFEAT_DRIVER_VIRTIO_GPU
-    bool "virtio-gpu display"
-    help
-      Enable the virtio-gpu display driver.
 
-config KFEAT_DRIVER_VIRTIO_INPUT
-    bool "virtio-input input device"
-    help
-      Enable the virtio-input input device driver.
 
 endmenu # Device Drivers

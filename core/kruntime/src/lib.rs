@@ -286,7 +286,7 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
 
     #[cfg(feature = "fs")]
     fs_boot::init_device_discovery();
-    kdriver::init_drivers();
+    driver_compose::init();
     #[cfg(feature = "char")]
     ktty::tty::try_handoff_console();
 

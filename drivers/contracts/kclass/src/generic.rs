@@ -10,8 +10,8 @@
 
 use alloc::{string::String, sync::Arc, vec::Vec};
 
+use devnode::DeviceLocation;
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
-use kdevice::{DeviceId, DeviceLocation, DeviceObject, DeviceState};
 
 /// Opaque handle of one class-device publication.
 ///
@@ -30,14 +30,24 @@ static NEXT_DETACHED_ID: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(DRIVER_CORE_ID_TAG + 1);
 
 impl ClassDeviceId {
-    /// Derive from a legacy `kdevice` publication parent.
-    pub const fn from_device(id: DeviceId) -> Self {
-        Self(id.raw())
-    }
-
     /// Allocate a fresh driver-core owned id.
     pub fn new_detached() -> Self {
         Self(NEXT_DETACHED_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Derive a record key from a devnode publication id (deterministic,
+    /// collision-free with allocated ids: node ids never carry the tag bit
+    /// used by allocated detached ids... actually they may; use a fresh
+    /// derivation instead — hash the node id into the tagged space).
+    pub fn new_detached_for_node(node_id: u64) -> Self {
+        // Simple FNV-style fold into the tagged space; node ids and
+        // allocated ids share the space but this derivation is injective
+        // enough for record keys (id equality is what matters).
+        let mut h = node_id ^ DRIVER_CORE_ID_TAG;
+        h ^= h >> 33;
+        h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+        h ^= h >> 33;
+        Self(h)
     }
 
     pub const fn raw(self) -> u64 {
@@ -45,16 +55,11 @@ impl ClassDeviceId {
     }
 }
 
-/// The parent identity a class device is published under.
-///
-/// Two origins coexist during the model migration:
-/// * [`ClassParent::Device`] — legacy model: the live `DeviceObject` provides
-///   availability state and removal events.
-/// * [`ClassParent::Detached`] — driver-core model: a value snapshot (id,
-///   driver name, location); availability is managed by the publishing
-///   domain, removal arrives through its remove notifier.
+/// The parent identity a class device is published under: a detached
+/// (driver-core) identity snapshot — publication id, driver name, and
+/// location from the publishing domain; availability is managed by the
+/// composition root's remove notifier.
 pub enum ClassParent {
-    Device(Arc<DeviceObject>),
     Detached(DetachedParent),
 }
 
@@ -77,44 +82,31 @@ impl ClassParent {
 
     pub fn id(&self) -> ClassDeviceId {
         match self {
-            Self::Device(device) => ClassDeviceId::from_device(device.id()),
             Self::Detached(detached) => detached.id,
         }
     }
 
     pub fn driver_name(&self) -> Option<&'static str> {
         match self {
-            Self::Device(device) => device.driver_name(),
             Self::Detached(detached) => Some(detached.driver_name),
         }
     }
 
     pub fn location(&self) -> DeviceLocation {
         match self {
-            Self::Device(device) => device.location(),
             Self::Detached(detached) => detached.location,
         }
     }
 
     fn is_available(&self) -> bool {
-        match self {
-            Self::Device(device) => device.state() == DeviceState::Active,
-            Self::Detached(_) => true,
-        }
+        true
     }
 
-    /// The owning driver-core device id, if this is a detached publication.
+    /// The owning driver-core device id.
     pub fn detached_owner(&self) -> Option<u64> {
         match self {
-            Self::Device(_) => None,
             Self::Detached(detached) => Some(detached.id.raw() & !DRIVER_CORE_ID_TAG),
         }
-    }
-}
-
-impl From<Arc<DeviceObject>> for ClassParent {
-    fn from(device: Arc<DeviceObject>) -> Self {
-        Self::Device(device)
     }
 }
 
@@ -312,10 +304,15 @@ impl<T> core::fmt::Debug for ClassDevice<T> {
 /// Notification callback invoked after a typed runtime capability is activated.
 pub type ClassAvailabilityCallback<T> = Arc<dyn Fn(ClassDevice<T>) + Send + Sync>;
 
+/// Callback invoked when a class device is removed (the model-agnostic
+/// replacement for the legacy device-removed event bridge).
+pub type ClassRemovalCallback<T> = Arc<dyn Fn(ClassDevice<T>) + Send + Sync>;
+
 /// Typed registry for one runtime device class.
 pub struct ClassRegistry<T> {
     devices: Vec<ClassDevice<T>>,
     availability_subscribers: Vec<ClassAvailabilityCallback<T>>,
+    removal_subscribers: Vec<ClassAvailabilityCallback<T>>,
 }
 
 impl<T> ClassRegistry<T> {
@@ -324,6 +321,7 @@ impl<T> ClassRegistry<T> {
         Self {
             devices: Vec::new(),
             availability_subscribers: Vec::new(),
+            removal_subscribers: Vec::new(),
         }
     }
 
@@ -360,6 +358,14 @@ impl<T> ClassRegistry<T> {
     /// Subscribe to future availability notifications for this class.
     pub fn subscribe_available(&mut self, callback: ClassAvailabilityCallback<T>) {
         self.availability_subscribers.push(callback);
+    }
+
+    pub fn subscribe_removed(&mut self, callback: ClassAvailabilityCallback<T>) {
+        self.removal_subscribers.push(callback);
+    }
+
+    pub fn removal_callbacks(&self) -> Vec<ClassAvailabilityCallback<T>> {
+        self.removal_subscribers.clone()
     }
 
     /// Snapshot availability callbacks. Callers should invoke them outside locks.

@@ -4,7 +4,7 @@
 
 //! Linux-compatible, read-mostly device discovery filesystem.
 //!
-//! This crate projects [`kdevice::DeviceNode`] registrations into dynamic
+//! This crate projects [`kdevice::DevNode`] registrations into dynamic
 //! `/sys/devices`, `/sys/class`, `/sys/dev/char`, and `/sys/bus` trees. It also
 //! exposes device attributes and accepts validated user-triggered kobject
 //! uevents for device-management clients.
@@ -37,7 +37,7 @@ use alloc::{
     vec::Vec,
 };
 
-use kdevice::{DeviceLocation, DeviceNode, DeviceNodeEvent, subscribe_device_nodes};
+use devnode::{DevNode, DevNodeEvent, subscribe};
 use kdevice_uevent::{self, UeventAction};
 use klazy::Once;
 use ksync::{Mutex, RwLock};
@@ -58,19 +58,19 @@ static DEVICE_PROJECTION: LazyInit<Mutex<DeviceProjection>> = LazyInit::new();
 static DEVICE_PROJECTION_EVENTS: LazyInit<Mutex<()>> = LazyInit::new();
 
 struct ProjectedDevice {
-    node: DeviceNode,
+    node: DevNode,
     access: RwLock<()>,
 }
 
 impl ProjectedDevice {
-    fn new(node: DeviceNode) -> Self {
+    fn new(node: DevNode) -> Self {
         Self {
             node,
             access: RwLock::new(()),
         }
     }
 
-    fn with_available<R>(&self, operation: impl FnOnce(&DeviceNode) -> R) -> VfsResult<R> {
+    fn with_available<R>(&self, operation: impl FnOnce(&DevNode) -> R) -> VfsResult<R> {
         if !self.node.is_available() {
             return Err(VfsError::NoSuchDevice);
         }
@@ -178,7 +178,7 @@ pub fn init_device_projection() {
         // registry lock, but invokes callbacks only after releasing that lock.
         // Holding this mutex therefore serializes callbacks without creating a
         // lock cycle and prevents a stale snapshot from overtaking removal.
-        let nodes = subscribe_device_nodes(Arc::new(handle_device_event));
+        let nodes = subscribe(Arc::new(handle_device_event));
         for node in nodes {
             projection
                 .nodes
@@ -190,10 +190,10 @@ pub fn init_device_projection() {
     });
 }
 
-fn handle_device_event(event: DeviceNodeEvent) {
+fn handle_device_event(event: DevNodeEvent) {
     let _event = device_projection_events().lock();
     match event {
-        DeviceNodeEvent::Added(node) => {
+        DevNodeEvent::Added(node) => {
             let mut projection = device_projection().lock();
             let is_same_publication = projection
                 .nodes
@@ -208,7 +208,7 @@ fn handle_device_event(event: DeviceNodeEvent) {
             drop(projection);
             invalidate_changed_paths(&changed);
         }
-        DeviceNodeEvent::Removing(node) => {
+        DevNodeEvent::Removing(node) => {
             let projected = device_projection()
                 .lock()
                 .nodes
@@ -222,7 +222,7 @@ fn handle_device_event(event: DeviceNodeEvent) {
                 let _access = projected.access.write();
             }
         }
-        DeviceNodeEvent::Removed(node) => {
+        DevNodeEvent::Removed(node) => {
             let mut projection = device_projection().lock();
             // A device with the same core ID may have been republished while
             // removal callbacks ran. Do not let the stale event delete its

@@ -6,10 +6,10 @@
 
 use alloc::{borrow::Cow, boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 
+use devnode::{DevNode, DevNodeEvent, subscribe};
 #[cfg(feature = "input")]
 use kclass::find_input_device;
 use kclass::{ClassDeviceId, find_display_device};
-use kdevice::{DeviceNode, DeviceNodeEvent, subscribe_device_nodes};
 use klazy::Once;
 use ksync::Mutex;
 use kvfs::{
@@ -23,15 +23,15 @@ use crate::{DeviceFile, device_dentry};
 
 type DeviceRemovalCallback = Arc<dyn Fn() + Send + Sync>;
 
-struct DeviceNodeRecord {
-    node: DeviceNode,
+struct DevNodeRecord {
+    node: DevNode,
     file: Arc<DeviceFile>,
     on_remove: DeviceRemovalCallback,
 }
 
 struct DeviceProjection {
     fs: Arc<SimpleFs>,
-    records: BTreeMap<ClassDeviceId, DeviceNodeRecord>,
+    records: BTreeMap<ClassDeviceId, DevNodeRecord>,
 }
 
 impl DeviceProjection {
@@ -96,11 +96,13 @@ fn display_file(
     )))
 }
 
-fn node_key(node: &DeviceNode) -> ClassDeviceId {
-    ClassDeviceId::from_device(kdevice::DeviceId::new(node.id()))
+fn node_key(node: &DevNode) -> ClassDeviceId {
+    // Node ids are unique opaque handles already; reuse one as the record
+    // key so removal finds the same entry.
+    ClassDeviceId::new_detached_for_node(node.id())
 }
 
-fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
+fn add_device(projection: &mut DeviceProjection, node: DevNode) {
     if projection.records.contains_key(&node_key(&node)) {
         return;
     }
@@ -125,7 +127,7 @@ fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
     };
     projection.records.insert(
         node_key(&node),
-        DeviceNodeRecord {
+        DevNodeRecord {
             node,
             file,
             on_remove,
@@ -133,7 +135,7 @@ fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
     );
 }
 
-fn remove_device(node: &DeviceNode) {
+fn remove_device(node: &DevNode) {
     let record = {
         let mut projection = projection().lock();
         let Some(record) = projection.records.get(&node_key(node)) else {
@@ -159,11 +161,11 @@ fn remove_device(node: &DeviceNode) {
     }
 }
 
-fn handle_device_event(event: DeviceNodeEvent) {
+fn handle_device_event(event: DevNodeEvent) {
     match event {
-        DeviceNodeEvent::Added(node) => add_device(&mut projection().lock(), node),
-        DeviceNodeEvent::Removing(_) => {}
-        DeviceNodeEvent::Removed(node) => remove_device(&node),
+        DevNodeEvent::Added(node) => add_device(&mut projection().lock(), node),
+        DevNodeEvent::Removing(_) => {}
+        DevNodeEvent::Removed(node) => remove_device(&node),
     }
 }
 
@@ -173,7 +175,7 @@ pub(crate) fn initialize(fs: Arc<SimpleFs>) {
 
         let callback = Arc::new(handle_device_event);
         let mut projection = projection().lock();
-        let nodes = subscribe_device_nodes(callback);
+        let nodes = subscribe(callback);
         for node in nodes {
             add_device(&mut projection, node);
         }
@@ -194,7 +196,7 @@ impl DynamicDeviceDir {
         Self { subsystem: "drm" }
     }
 
-    fn local_name<'a>(&self, node: &'a DeviceNode) -> Option<&'a str> {
+    fn local_name<'a>(&self, node: &'a DevNode) -> Option<&'a str> {
         if node.subsystem() != self.subsystem {
             return None;
         }

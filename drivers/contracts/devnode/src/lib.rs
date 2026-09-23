@@ -29,6 +29,31 @@ use alloc::{format, string::String, sync::Arc, vec::Vec};
 
 use kspin::SpinNoPreempt;
 
+/// Firmware-stated location of a device (the model-agnostic form every
+/// consumer — kclass parents, uevent paths — agrees on).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceLocation {
+    Pci {
+        segment: u16,
+        bus: u8,
+        device: u8,
+        function: u8,
+    },
+    Mmio {
+        base: usize,
+        size: usize,
+    },
+    FirmwareNode {
+        id: u16,
+    },
+    PlatformStatic {
+        id: u16,
+    },
+    Bridge {
+        domain: u16,
+    },
+}
+
 /// Packed `dev_t`: the same layout the block core and devfs use
 /// (`kdevice::DeviceNumber` re-exports this type).
 #[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Copy, Hash)]
