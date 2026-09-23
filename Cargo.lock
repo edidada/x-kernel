@@ -1247,9 +1247,11 @@ dependencies = [
 name = "driver-compose"
 version = "0.3.0-dev"
 dependencies = [
+ "console-driver",
  "driver-core",
  "driver-runtime",
  "fixed-clock",
+ "kclass",
  "khal",
  "log",
  "of",
@@ -4812,9 +4814,13 @@ dependencies = [
 name = "serial-pl011"
 version = "0.3.0-dev"
 dependencies = [
+ "char_driver",
  "console-driver",
  "driver-core",
  "driver-runtime",
+ "driver_base",
+ "kclass",
+ "kdevice",
  "khal",
  "log",
 ]

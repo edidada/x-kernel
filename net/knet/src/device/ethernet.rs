@@ -635,7 +635,7 @@ impl NetDeviceOps for EthernetDevice {
         }
     }
 
-    fn device_id(&self) -> Option<kdevice::DeviceId> {
+    fn device_id(&self) -> Option<kclass::ClassDeviceId> {
         Some(self.inner.id())
     }
 

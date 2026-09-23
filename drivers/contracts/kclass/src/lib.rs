@@ -22,7 +22,8 @@ use alloc::collections::BTreeMap;
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
-use kdevice::{DeviceEvent, DeviceEventKind, DeviceId, DeviceObject};
+pub use generic::{ClassDeviceId, ClassParent, DetachedParent};
+use kdevice::{DeviceEvent, DeviceEventKind};
 use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
@@ -42,7 +43,7 @@ fn ensure_event_bridge() {
                 let DeviceEvent::Activated { id, kind } = event else {
                     return;
                 };
-                notify_class_available(kind, id);
+                notify_class_available(kind, ClassDeviceId::from_device(id));
             }),
         );
         kdevice::subscribe_device_event_kind(
@@ -51,7 +52,7 @@ fn ensure_event_bridge() {
                 let DeviceEvent::Removed { id } = event else {
                     return;
                 };
-                remove_class_device(id);
+                remove_class_device(ClassDeviceId::from_device(id));
             }),
         );
     });
@@ -84,7 +85,7 @@ macro_rules! class_registry {
         /// Publish a runtime capability into its typed class registry.
         #[cfg(feature = $feature)]
         pub fn $publish_fn(
-            parent: Arc<DeviceObject>,
+            parent: impl Into<ClassParent>,
             runtime: $ty,
         ) -> DriverResult<ClassDevice<$ty>> {
             let name = runtime.name().into();
@@ -130,7 +131,7 @@ macro_rules! class_registry {
 
         /// Find one currently available runtime capability by device ID.
         #[cfg(feature = $feature)]
-        pub fn $find_fn(id: DeviceId) -> Option<ClassDevice<$ty>> {
+        pub fn $find_fn(id: ClassDeviceId) -> Option<ClassDevice<$ty>> {
             $registry_fn().lock().find(id)
         }
 
@@ -141,7 +142,7 @@ macro_rules! class_registry {
         }
 
         #[cfg(feature = $feature)]
-        fn $notify_fn(id: DeviceId) {
+        fn $notify_fn(id: ClassDeviceId) {
             let (device, callbacks) = {
                 let registry = $registry_fn().lock();
                 let Some(device) = registry.find(id) else {
@@ -151,8 +152,9 @@ macro_rules! class_registry {
             };
 
             if let Some(node_class) = device.with(ClassRuntimeMetadata::device_node_class)
+                && let ClassParent::Device(node_parent) = device.parent_ref().clone()
                 && let Err(error) = kdevice::register_device_node(
-                    id,
+                    node_parent.id(),
                     node_class,
                     String::from(device.name()),
                     String::from(device.driver_name()),
@@ -173,10 +175,12 @@ macro_rules! class_registry {
         }
 
         #[cfg(feature = $feature)]
-        fn $remove_fn(id: DeviceId) {
+        fn $remove_fn(id: ClassDeviceId) {
             let removed = { $registry_fn().lock().remove(id) };
             if let Some(device) = removed {
-                kdevice::unregister_device_node(id);
+                if let ClassParent::Device(node_parent) = device.parent_ref() {
+                    kdevice::unregister_device_node(node_parent.id());
+                }
                 device.with(ClassRuntimeMetadata::unpublish_class);
             }
         }
@@ -199,7 +203,7 @@ macro_rules! class_registries {
             $remove_fn:ident
         );+ $(;)?
     ) => {
-        fn notify_class_available(kind: DeviceKind, id: DeviceId) {
+        fn notify_class_available(kind: DeviceKind, id: ClassDeviceId) {
             match kind {
                 $(
                     #[cfg(feature = $feature)]
@@ -209,7 +213,7 @@ macro_rules! class_registries {
             }
         }
 
-        fn remove_class_device(id: DeviceId) {
+        fn remove_class_device(id: ClassDeviceId) {
             $(
                 #[cfg(feature = $feature)]
                 $remove_fn(id);
@@ -694,4 +698,11 @@ pub mod prelude {
         VsockAddr, VsockConnId, VsockConnectionInfo, VsockDevice, VsockDeviceImpl,
         VsockTransportEvent, VsockTransportEventKind,
     };
+}
+
+/// Drop a detached (driver-core owned) char publication by its owning device
+/// id. Called by the composition root's remove notifier.
+#[cfg(feature = "char")]
+pub fn remove_detached_char(owner: u64) -> Option<ClassDevice<CharDeviceImpl>> {
+    char_class_registry().lock().remove_detached(owner)
 }

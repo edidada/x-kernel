@@ -22,6 +22,8 @@
 
 extern crate alloc;
 
+use alloc::sync::Arc;
+
 use driver_core::{
     Bus, ResourceKind, ResourceMap,
     desc::{
@@ -37,6 +39,13 @@ use of;
 /// Bring up the new device model.
 pub fn init() {
     driver_runtime::XKernelRuntime::install_global();
+
+    // Drop detached class publications when their owning device goes away.
+    global_domain().set_remove_notifier(Arc::new(|owner| {
+        if let Some(device) = kclass::remove_detached_char(owner) {
+            let _ = console_driver::runtime::unregister_console_device(device.id());
+        }
+    }));
 
     #[cfg(feature = "fixed-clock")]
     fixed_clock::register();

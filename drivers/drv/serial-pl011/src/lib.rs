@@ -24,14 +24,20 @@
 
 extern crate alloc;
 
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc};
 
-use console_driver::serial::{SerialIdent, SerialPort, SerialRole, take_early_port};
+use char_driver::CharDevice;
+use console_driver::{
+    runtime::register_console_parented,
+    serial::{SerialIdent, SerialPort, SerialRole, take_early_port},
+};
+use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use driver_core::{
     BoundDevice, ClkHandle, DevIrq, DeviceCtx, DriverDesc, DriverOps, IoMap, IrqAction, ProbeError,
     RuntimeError,
     platform::{OfMatch, PlatformBus},
 };
+use kclass::{ClassParent, publish_char};
 use khal::mem::{PhysAddr, VirtAddr};
 
 /// `static const struct of_device_id pl011_of_match[]`.
@@ -117,6 +123,26 @@ impl DriverOps<PlatformBus> for Pl011Driver {
             Err(_) => None,
         };
 
+        // Publish the runtime capability: the stdout port joins the console
+        // subsystem (/dev/console backing), auxiliary ports become char
+        // devices. Both use a detached class parent — the class layer is
+        // model-agnostic since the Phase 1 decoupling.
+        let location = legacy_location(dev.descriptor().location);
+        let char_dev: kclass::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
+        match port.role() {
+            SerialRole::Stdout => {
+                register_console_parented(
+                    ClassParent::detached("pl011-serial", location),
+                    char_dev,
+                )
+                .map_err(map_driver_error)?;
+            }
+            SerialRole::Auxiliary => {
+                publish_char(ClassParent::detached("pl011-serial", location), char_dev)
+                    .map_err(map_driver_error)?;
+            }
+        }
+
         log::info!(
             "pl011: probed {} (paddr {:#x}, clk {}, irq {})",
             if regs.is_none() {
@@ -143,7 +169,69 @@ impl DriverOps<PlatformBus> for Pl011Driver {
     }
 }
 
+fn legacy_location(location: driver_core::desc::DeviceLocation) -> kdevice::DeviceLocation {
+    use driver_core::desc::DeviceLocation as Ours;
+    use kdevice::DeviceLocation as Legacy;
+    match location {
+        Ours::Pci {
+            segment,
+            bus,
+            device,
+            function,
+        } => Legacy::Pci {
+            segment,
+            bus,
+            device,
+            function,
+        },
+        Ours::Mmio { base, size } => Legacy::Mmio { base, size },
+        Ours::FirmwareNode { id } => Legacy::FirmwareNode { id },
+        Ours::PlatformStatic { id } => Legacy::PlatformStatic { id },
+        Ours::Bridge { domain } => Legacy::Bridge { domain },
+    }
+}
+
+fn map_driver_error(err: DriverError) -> ProbeError {
+    let error = match err {
+        DriverError::InvalidInput | DriverError::ReadOnly => RuntimeError::Invalid,
+        DriverError::NoMemory => RuntimeError::NoMemory,
+        DriverError::ResourceBusy | DriverError::AlreadyExists => RuntimeError::Busy,
+        DriverError::BadState => RuntimeError::BadState,
+        DriverError::Io | DriverError::WouldBlock => RuntimeError::Io,
+        DriverError::Unsupported => RuntimeError::Unsupported,
+    };
+    ProbeError::Fatal(error)
+}
+
 /// `module_platform_driver()` equivalent.
 pub fn register() {
     driver_core::global_domain().register_driver(DriverDesc::new("pl011-serial", IDS, Pl011Driver));
+}
+
+/// Char-device runtime wrapper over a `SerialPort` (the `/dev` view).
+struct SerialCharDev(Arc<SerialPort>);
+
+impl Device for SerialCharDev {
+    fn name(&self) -> &str {
+        "serial"
+    }
+
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Char
+    }
+
+    fn irq(&self) -> Option<usize> {
+        None
+    }
+}
+
+impl CharDevice for SerialCharDev {
+    fn read(&self, buf: &mut [u8]) -> DriverResult<usize> {
+        Ok(self.0.read_data(buf))
+    }
+
+    fn write(&self, buf: &[u8]) -> DriverResult<usize> {
+        self.0.write_data(buf);
+        Ok(buf.len())
+    }
 }

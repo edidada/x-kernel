@@ -8,8 +8,8 @@ use alloc::collections::{BTreeSet, VecDeque};
 use alloc::{collections::BTreeMap, string::ToString, sync::Arc};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use kclass::{ClassDevice, prelude::*};
-use kdevice::{Device, DeviceId, DeviceKind};
+use kclass::{ClassDevice, ClassDeviceId, prelude::*};
+use kdevice::{Device, DeviceKind};
 use kerrno::{KError, KResult, k_bail};
 #[cfg(feature = "vsock_tipc_bridge")]
 use klazy::Lazy;
@@ -22,12 +22,12 @@ use ktask::{
 use ktime_types::TimeSpan;
 use ringbuf::{HeapCons, HeapProd, HeapRb, traits::*};
 
-pub(crate) const VSOCK_RX_BUFFER_SIZE: usize = 128 * 1024; // 128KB receive buffer
+pub const VSOCK_RX_BUFFER_SIZE: usize = 128 * 1024; // 128KB receive buffer
 const VSOCK_ACCEPT_QUEUE_SIZE: usize = 128; // accept queue size
 
 /// connection states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConnectionState {
+pub enum ConnectionState {
     Idle,
     Listening,
     Connecting,
@@ -38,7 +38,7 @@ pub(crate) enum ConnectionState {
 /// Event delivered to the vsock-TIPC bridge for one of its owned connections.
 #[cfg(feature = "vsock_tipc_bridge")]
 #[derive(Debug)]
-pub(crate) enum VsockBridgeEvent {
+pub enum VsockBridgeEvent {
     /// The peer requested a new connection on a bridge-listened port.
     ConnectionRequest(VsockConnId),
     /// The peer accepted an outbound (reverse) bridge connection.
@@ -52,7 +52,7 @@ pub(crate) enum VsockBridgeEvent {
 }
 
 /// Connection
-pub(crate) struct Connection {
+pub struct Connection {
     state: ConnectionState,
     local_addr: VsockAddr,
     peer_addr: Option<VsockAddr>,
@@ -75,16 +75,7 @@ pub(crate) struct Connection {
     /// Current connection info (address + credit) for outgoing packet headers.
     pub(crate) info: VsockConnectionInfo,
     /// True for connections owned by the vsock-TIPC bridge.
-    #[expect(
-        clippy::allow_attributes,
-        reason = "CG-024-lint-exceptions: Bridge ownership is inspected only with the \
-                  vsock_tipc_bridge feature"
-    )]
-    #[allow(
-        dead_code,
-        reason = "CG-024-lint-exceptions: dead_code: Bridge ownership is inspected only with the \
-                  vsock_tipc_bridge feature"
-    )]
+    #[allow(dead_code)]
     is_bridge: bool,
     /// `fwd_cnt` value included in the last credit update we sent to the peer.
     last_sent_fwd_cnt: u32,
@@ -125,7 +116,7 @@ impl Connection {
     }
 
     /// Register a waker for receive Events
-    pub(crate) fn register_rx_poll(
+    pub fn register_rx_poll(
         &mut self,
         context: &mut PollContext<'_>,
     ) -> Result<(), PollRegisterError> {
@@ -133,7 +124,7 @@ impl Connection {
     }
 
     /// Register a waker for connect Events
-    pub(crate) fn register_connect_poll(
+    pub fn register_connect_poll(
         &mut self,
         context: &mut PollContext<'_>,
     ) -> Result<(), PollRegisterError> {
@@ -142,18 +133,18 @@ impl Connection {
 
     /// Get the free space in the receive buffer
     #[inline]
-    pub(crate) fn rx_buffer_free(&self) -> usize {
+    pub fn rx_buffer_free(&self) -> usize {
         self.rx_producer.vacant_len()
     }
 
     /// Get the used space in the receive buffer
     #[inline]
-    pub(crate) fn rx_buffer_used(&self) -> usize {
+    pub fn rx_buffer_used(&self) -> usize {
         self.rx_consumer.occupied_len()
     }
 
     /// push data into the receive buffer
-    pub(crate) fn push_rx_data(&mut self, data: &[u8]) -> usize {
+    pub fn push_rx_data(&mut self, data: &[u8]) -> usize {
         let available = self.rx_buffer_free();
         let to_write = data.len().min(available);
 
@@ -179,17 +170,17 @@ impl Connection {
     }
 
     #[inline]
-    pub(crate) fn tx_wait_queue(&self) -> Arc<WaitQueue> {
+    pub fn tx_wait_queue(&self) -> Arc<WaitQueue> {
         self.tx_wait_queue.clone()
     }
 
     #[inline]
-    pub(crate) fn rx_slices(&self) -> (&[u8], &[u8]) {
+    pub fn rx_slices(&self) -> (&[u8], &[u8]) {
         self.rx_consumer.as_slices()
     }
 
     #[inline]
-    pub(crate) fn advance_rx_read(&mut self, count: usize) {
+    pub fn advance_rx_read(&mut self, count: usize) {
         // SAFETY: Callers compute `count` from bytes copied out of `rx_slices`
         // while holding the connection lock, so the advance stays within the
         // currently occupied receive buffer.
@@ -199,109 +190,109 @@ impl Connection {
     }
 
     #[inline]
-    pub(crate) fn add_tx_bytes(&mut self, count: usize) {
+    pub fn add_tx_bytes(&mut self, count: usize) {
         self.info.tx_cnt = self.info.tx_cnt.wrapping_add(count as u32);
     }
 
     #[inline]
-    pub(crate) fn wake_rx(&mut self) {
+    pub fn wake_rx(&mut self) {
         self.rx_wakers.wake();
     }
 
     #[inline]
-    pub(crate) fn wake_connect(&mut self) {
+    pub fn wake_connect(&mut self) {
         self.connect_wakers.wake();
     }
 
     #[inline]
-    pub(crate) fn local_addr(&self) -> VsockAddr {
+    pub fn local_addr(&self) -> VsockAddr {
         self.local_addr
     }
 
     #[inline]
-    pub(crate) fn peer_addr(&self) -> Option<VsockAddr> {
+    pub fn peer_addr(&self) -> Option<VsockAddr> {
         self.peer_addr
     }
 
     #[inline]
-    pub(crate) fn set_state(&mut self, state: ConnectionState) {
+    pub fn set_state(&mut self, state: ConnectionState) {
         self.state = state;
     }
 
     #[inline]
-    pub(crate) fn state(&self) -> ConnectionState {
+    pub fn state(&self) -> ConnectionState {
         self.state
     }
 
     #[inline]
-    pub(crate) fn rx_closed(&self) -> bool {
+    pub fn rx_closed(&self) -> bool {
         self.rx_closed
     }
 
     #[inline]
-    pub(crate) fn tx_closed(&self) -> bool {
+    pub fn tx_closed(&self) -> bool {
         self.tx_closed
     }
 
     #[inline]
-    pub(crate) fn set_rx_closed(&mut self, closed: bool) {
+    pub fn set_rx_closed(&mut self, closed: bool) {
         self.rx_closed = closed;
     }
 
     #[inline]
-    pub(crate) fn set_tx_closed(&mut self, closed: bool) {
+    pub fn set_tx_closed(&mut self, closed: bool) {
         self.tx_closed = closed;
     }
 }
 
 /// A fixed-size accept queue
-pub(crate) struct AcceptQueue {
+pub struct AcceptQueue {
     producer: ringbuf::HeapProd<VsockConnId>,
     consumer: ringbuf::HeapCons<VsockConnId>,
 }
 
 impl AcceptQueue {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let rb = HeapRb::<VsockConnId>::new(VSOCK_ACCEPT_QUEUE_SIZE);
         let (producer, consumer) = rb.split();
         Self { producer, consumer }
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.consumer.is_empty()
     }
 
-    pub(crate) fn push(&mut self, conn_id: VsockConnId) -> KResult<()> {
+    pub fn push(&mut self, conn_id: VsockConnId) -> KResult<()> {
         match self.producer.try_push(conn_id) {
             Ok(_) => Ok(()),
             Err(_) => k_bail!(ResourceBusy, "accept queue full"),
         }
     }
 
-    pub(crate) fn pop(&mut self) -> Option<VsockConnId> {
+    pub fn pop(&mut self) -> Option<VsockConnId> {
         self.consumer.try_pop()
     }
 }
 
 /// listen queue
-pub(crate) struct ListenQueue {
+pub struct ListenQueue {
     pub accept_queue: AcceptQueue,
     pub wakers: PollSet,
 }
 
 impl ListenQueue {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             accept_queue: AcceptQueue::new(),
             wakers: PollSet::new(),
         }
     }
 
-    pub(crate) fn wake(&mut self) {
+    pub fn wake(&mut self) {
         self.wakers.wake();
     }
 
-    pub(crate) fn register_poll(
+    pub fn register_poll(
         &mut self,
         context: &mut PollContext<'_>,
     ) -> Result<(), PollRegisterError> {
@@ -310,7 +301,7 @@ impl ListenQueue {
 }
 
 /// Global connection manager
-pub(crate) struct VsockConnectionManager {
+pub struct VsockConnectionManager {
     connections: BTreeMap<VsockConnId, Arc<Mutex<Connection>>>,
     listen_queues: BTreeMap<u32, Arc<Mutex<ListenQueue>>>,
     next_ephemeral_port: u32,
@@ -326,7 +317,7 @@ impl VsockConnectionManager {
     const EPHEMERAL_PORT_END: u32 = 0xffff;
     const EPHEMERAL_PORT_START: u32 = 0xc000;
 
-    pub(crate) const fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             connections: BTreeMap::new(),
             listen_queues: BTreeMap::new(),
@@ -341,17 +332,14 @@ impl VsockConnectionManager {
     }
 
     /// Install the raw transport and return the guest CID assigned by the host.
-    pub(crate) fn set_raw_transport(
-        &mut self,
-        transport: Arc<dyn VsockDevice + Send + Sync>,
-    ) -> u64 {
+    pub fn set_raw_transport(&mut self, transport: Arc<dyn VsockDevice + Send + Sync>) -> u64 {
         self.guest_cid = transport.guest_cid();
         self.raw_transport = Some(transport);
         self.guest_cid
     }
 
     /// Returns the guest CID, or 0 if the transport has not been installed yet.
-    pub(crate) fn guest_cid(&self) -> u64 {
+    pub fn guest_cid(&self) -> u64 {
         self.guest_cid
     }
 
@@ -391,13 +379,13 @@ impl VsockConnectionManager {
     /// Bridge-side API:
     /// register a bridge-listened port as being owned by the vsock-TIPC bridge.
     #[cfg(feature = "vsock_tipc_bridge")]
-    pub(crate) fn listen_bridge_port(&mut self, port: u32) {
+    pub fn listen_bridge_port(&mut self, port: u32) {
         self.bridge_ports.insert(port);
     }
 
     /// Returns whether the connection belongs to the bridge.
     #[cfg(feature = "vsock_tipc_bridge")]
-    pub(crate) fn is_bridge_conn(&self, conn_id: VsockConnId) -> bool {
+    pub fn is_bridge_conn(&self, conn_id: VsockConnId) -> bool {
         self.bridge_ports.contains(&conn_id.local_port)
             || self
                 .connections
@@ -406,12 +394,12 @@ impl VsockConnectionManager {
     }
 
     /// Get listen queue from specified port
-    pub(crate) fn get_listen_queue(&self, port: u32) -> Option<Arc<Mutex<ListenQueue>>> {
+    pub fn get_listen_queue(&self, port: u32) -> Option<Arc<Mutex<ListenQueue>>> {
         self.listen_queues.get(&port).cloned()
     }
 
     /// allocate an ephemeral port
-    pub(crate) fn allocate_port(&mut self) -> KResult<u32> {
+    pub fn allocate_port(&mut self) -> KResult<u32> {
         let start = self.next_ephemeral_port;
         loop {
             let port = self.next_ephemeral_port;
@@ -443,7 +431,7 @@ impl VsockConnectionManager {
     }
 
     /// create a listen queue
-    pub(crate) fn listen(&mut self, local_addr: VsockAddr) -> KResult<()> {
+    pub fn listen(&mut self, local_addr: VsockAddr) -> KResult<()> {
         if self.listen_queues.contains_key(&local_addr.port) {
             k_bail!(AddrInUse, "port already in use");
         }
@@ -454,13 +442,13 @@ impl VsockConnectionManager {
     }
 
     /// stop listening
-    pub(crate) fn unlisten(&mut self, port: u32) {
+    pub fn unlisten(&mut self, port: u32) {
         self.listen_queues.remove(&port);
         debug!("Vsock unlisten on port {}", port);
     }
 
     /// check if port accept
-    pub(crate) fn can_accept(&self, port: u32) -> bool {
+    pub fn can_accept(&self, port: u32) -> bool {
         self.listen_queues
             .get(&port)
             .map(|q| !q.lock().accept_queue.is_empty())
@@ -468,7 +456,7 @@ impl VsockConnectionManager {
     }
 
     /// accept a connection
-    pub(crate) fn accept(&mut self, port: u32) -> KResult<(VsockConnId, VsockAddr)> {
+    pub fn accept(&mut self, port: u32) -> KResult<(VsockConnId, VsockAddr)> {
         let queue = self.listen_queues.get(&port).ok_or(KError::InvalidInput)?;
 
         let conn_id = queue.lock().accept_queue.pop().ok_or(KError::WouldBlock)?;
@@ -482,7 +470,7 @@ impl VsockConnectionManager {
     }
 
     /// create a new connection
-    pub(crate) fn create_connection(
+    pub fn create_connection(
         &mut self,
         conn_id: VsockConnId,
         local_addr: VsockAddr,
@@ -505,12 +493,12 @@ impl VsockConnectionManager {
     }
 
     /// get a connection by id
-    pub(crate) fn get_connection(&self, conn_id: VsockConnId) -> Option<Arc<Mutex<Connection>>> {
+    pub fn get_connection(&self, conn_id: VsockConnId) -> Option<Arc<Mutex<Connection>>> {
         self.connections.get(&conn_id).cloned()
     }
 
     /// remove a connection
-    pub(crate) fn remove_connection(&mut self, conn_id: VsockConnId) {
+    pub fn remove_connection(&mut self, conn_id: VsockConnId) {
         if let Some(_conn) = self.connections.remove(&conn_id) {
             stop_vsock_polling();
             debug!("Removed connection {:?}", conn_id);
@@ -525,7 +513,7 @@ impl VsockConnectionManager {
 
     /// Pop one pending bridge event, registering `context` if no event is ready.
     #[cfg(feature = "vsock_tipc_bridge")]
-    pub(crate) fn pop_bridge_event(
+    pub fn pop_bridge_event(
         &mut self,
         context: &mut PollContext<'_>,
     ) -> Result<Option<VsockBridgeEvent>, PollRegisterError> {
@@ -536,11 +524,6 @@ impl VsockConnectionManager {
         Ok(self.bridge_events.pop_front())
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "CG-028-focused-functions: TODO(cg): legacy vsock event handler; split per event \
-                  type"
-    )]
     fn handle_raw_event(&mut self, event: VsockTransportEvent, body: &[u8]) -> DriverResult<()> {
         let conn_id = VsockConnId {
             peer_addr: event.source,
@@ -783,16 +766,13 @@ impl VsockConnectionManager {
 
     /// Snapshot the connection info for `conn_id`. Returns `None` if the
     /// connection is not known to the manager.
-    pub(crate) fn connection_info_snapshot(
-        &self,
-        conn_id: VsockConnId,
-    ) -> Option<VsockConnectionInfo> {
+    pub fn connection_info_snapshot(&self, conn_id: VsockConnId) -> Option<VsockConnectionInfo> {
         self.connections.get(&conn_id).map(|c| c.lock().info)
     }
 
     /// Add `len` bytes to the connection's transmitted-byte counter.
     #[cfg(feature = "vsock_tipc_bridge")]
-    pub(crate) fn add_tx_bytes(&self, conn_id: VsockConnId, len: usize) {
+    pub fn add_tx_bytes(&self, conn_id: VsockConnId, len: usize) {
         if let Some(conn) = self.connections.get(&conn_id) {
             conn.lock().add_tx_bytes(len);
         }
@@ -803,7 +783,7 @@ impl VsockConnectionManager {
 static BRIDGE_EVENT_WAKERS: Lazy<PollSet> = Lazy::new(PollSet::new);
 
 static_lock! {
-    pub(crate) static VSOCK_CONN_MANAGER: Mutex<VsockConnectionManager> =
+    pub static VSOCK_CONN_MANAGER: Mutex<VsockConnectionManager> =
         Mutex::new(VsockConnectionManager::new());
 }
 
@@ -832,7 +812,7 @@ static_lock! {
 /// We take it over, install it into the connection manager, and start the poll
 /// task. The rest of the system (AF_VSOCK socket and vsock-TIPC bridge) uses
 /// [`VSOCK_CONN_MANAGER`] rather than the raw device directly.
-pub(crate) fn register_vsock_dev(raw: ClassDevice<VsockDeviceImpl>) -> KResult<()> {
+pub fn register_vsock_dev(raw: ClassDevice<VsockDeviceImpl>) -> KResult<()> {
     let mut guard = VSOCK_DEV.lock();
     if guard.is_some() {
         k_bail!(AlreadyExists, "vsock device already registered");
@@ -857,7 +837,7 @@ pub(crate) fn register_vsock_dev(raw: ClassDevice<VsockDeviceImpl>) -> KResult<(
     Ok(())
 }
 
-pub(crate) fn unregister_vsock_dev(id: DeviceId) -> bool {
+pub fn unregister_vsock_dev(id: ClassDeviceId) -> bool {
     let mut guard = VSOCK_DEV.lock();
     if guard.as_ref().is_none_or(|dev| dev.id() != id) {
         return false;
@@ -934,7 +914,7 @@ impl PollBackoff {
 }
 
 /// Start the background vsock polling task if needed.
-pub(crate) fn start_vsock_polling() {
+pub fn start_vsock_polling() {
     let mut state = POLLER_STATE.lock();
     state.ref_count += 1;
     debug!("start_vsock_polling: ref_count -> {}", state.ref_count);
@@ -950,7 +930,7 @@ pub(crate) fn start_vsock_polling() {
     }
 }
 
-pub(crate) fn stop_vsock_polling() {
+pub fn stop_vsock_polling() {
     let mut state = POLLER_STATE.lock();
     if state.ref_count == 0 {
         // this should not happen, log a warning
@@ -967,7 +947,6 @@ fn vsock_poll_task() {
             break;
         }
 
-        // Interruption resumes the loop, which rechecks the stop flag.
         let _ = block_on(interruptible(poll_vsock_adaptive()));
     }
 }
@@ -1044,7 +1023,7 @@ fn poll_vsock_devices() -> KResult<bool> {
 // Socket-facing helpers
 // ------------------------------------------------------------------
 
-pub(crate) fn vsock_connect(conn_id: VsockConnId) -> KResult<()> {
+pub fn vsock_connect(conn_id: VsockConnId) -> KResult<()> {
     let (transport, info) = {
         let manager = VSOCK_CONN_MANAGER.lock();
         let info = manager
@@ -1070,7 +1049,7 @@ pub(crate) fn vsock_connect(conn_id: VsockConnId) -> KResult<()> {
 /// a smaller chunk. For blocking sockets the caller waits on the TX wait queue
 /// until the peer advertises enough credit or the connection is closed;
 /// for non-blocking sockets [`KError::WouldBlock`] is returned immediately.
-pub(crate) fn vsock_send(
+pub fn vsock_send(
     conn_id: VsockConnId,
     buf: &[u8],
     nonblocking: bool,
@@ -1131,7 +1110,7 @@ pub(crate) fn vsock_send(
     }
 }
 
-pub(crate) fn vsock_disconnect(conn_id: VsockConnId) -> KResult<()> {
+pub fn vsock_disconnect(conn_id: VsockConnId) -> KResult<()> {
     let (transport, info) = {
         let manager = VSOCK_CONN_MANAGER.lock();
         let info = manager
@@ -1159,7 +1138,7 @@ pub(crate) fn vsock_disconnect(conn_id: VsockConnId) -> KResult<()> {
 ///
 /// Returns the connection id on success.
 #[cfg(feature = "vsock_tipc_bridge")]
-pub(crate) fn create_bridge_connection(
+pub fn create_bridge_connection(
     target_addr: VsockAddr,
     pre_connect: impl FnOnce(VsockConnId),
 ) -> KResult<VsockConnId> {
@@ -1215,7 +1194,7 @@ pub(crate) fn create_bridge_connection(
 /// [`DriverError::WouldBlock`].  The loop only retries after a credit-update
 /// wake-up when the peer's buffer was full.
 #[cfg(feature = "vsock_tipc_bridge")]
-pub(crate) fn send_bridge(conn_id: VsockConnId, buf: &[u8]) -> DriverResult<usize> {
+pub fn send_bridge(conn_id: VsockConnId, buf: &[u8]) -> DriverResult<usize> {
     if buf.is_empty() {
         return Ok(0);
     }
@@ -1271,7 +1250,7 @@ pub(crate) fn send_bridge(conn_id: VsockConnId, buf: &[u8]) -> DriverResult<usiz
 
 /// Receive up to `buf.len()` bytes from a bridge connection's receive buffer.
 #[cfg(feature = "vsock_tipc_bridge")]
-pub(crate) fn recv_bridge(conn_id: VsockConnId, buf: &mut [u8]) -> DriverResult<usize> {
+pub fn recv_bridge(conn_id: VsockConnId, buf: &mut [u8]) -> DriverResult<usize> {
     let count = {
         let manager = VSOCK_CONN_MANAGER.lock();
         let Some(conn) = manager.connections.get(&conn_id) else {
@@ -1297,17 +1276,16 @@ pub(crate) fn recv_bridge(conn_id: VsockConnId, buf: &mut [u8]) -> DriverResult<
             count
         }
     };
-    if count > 0
-        && let Err(e) = advance_rx_credit(conn_id, count)
-    {
-        warn!("recv_bridge: failed to update credit: {e:?}");
+    if count > 0 {
+        let _ = advance_rx_credit(conn_id, count)
+            .map_err(|e| warn!("recv_bridge: failed to update credit: {e:?}"));
     }
     Ok(count)
 }
 
 /// Disconnect a bridge connection and remove it from the manager.
 #[cfg(feature = "vsock_tipc_bridge")]
-pub(crate) fn disconnect_bridge(conn_id: VsockConnId) -> DriverResult<()> {
+pub fn disconnect_bridge(conn_id: VsockConnId) -> DriverResult<()> {
     let (transport, info, tx_wq) = {
         let manager = VSOCK_CONN_MANAGER.lock();
         let already_closed = manager
@@ -1342,7 +1320,7 @@ pub(crate) fn disconnect_bridge(conn_id: VsockConnId) -> DriverResult<()> {
 
 /// Forcibly abort a bridge connection and remove it from the manager.
 #[cfg(feature = "vsock_tipc_bridge")]
-pub(crate) fn abort_bridge(conn_id: VsockConnId) -> DriverResult<()> {
+pub fn abort_bridge(conn_id: VsockConnId) -> DriverResult<()> {
     let (transport, info, tx_wq) = {
         let manager = VSOCK_CONN_MANAGER.lock();
         let already_closed = manager
@@ -1382,7 +1360,7 @@ pub(crate) fn abort_bridge(conn_id: VsockConnId) -> DriverResult<()> {
 /// against the last `fwd_cnt` we reported, so only push an update once the
 /// free space visible to the peer drops below a low watermark. While the
 /// peer still has plenty of credit, an explicit update is pure overhead.
-pub(crate) fn advance_rx_credit(conn_id: VsockConnId, count: usize) -> DriverResult<()> {
+pub fn advance_rx_credit(conn_id: VsockConnId, count: usize) -> DriverResult<()> {
     let (transport, info, conn) = {
         let manager = VSOCK_CONN_MANAGER.lock();
         let conn = manager

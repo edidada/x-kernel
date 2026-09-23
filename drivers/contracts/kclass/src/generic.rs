@@ -11,7 +11,112 @@
 use alloc::{string::String, sync::Arc, vec::Vec};
 
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
-use kdevice::{BusId, DeviceCore, DeviceId, DeviceLocation, DeviceObject, DeviceState, DriverId};
+use kdevice::{DeviceId, DeviceLocation, DeviceObject, DeviceState};
+
+/// Opaque handle of one class-device publication.
+///
+/// Its own id space: legacy-model publications derive it from the publishing
+/// `DeviceObject` (same numeric value), while driver-core publications
+/// allocate from a dedicated high range so the two models can never collide.
+/// Consumers treat it as an opaque capability handle (compare, store, pass
+/// back to `find_*`/console APIs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ClassDeviceId(u64);
+
+/// High bit tags driver-core (new model) owned publications.
+const DRIVER_CORE_ID_TAG: u64 = 1 << 63;
+
+static NEXT_DETACHED_ID: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(DRIVER_CORE_ID_TAG + 1);
+
+impl ClassDeviceId {
+    /// Derive from a legacy `kdevice` publication parent.
+    pub const fn from_device(id: DeviceId) -> Self {
+        Self(id.raw())
+    }
+
+    /// Allocate a fresh driver-core owned id.
+    pub fn new_detached() -> Self {
+        Self(NEXT_DETACHED_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed))
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+/// The parent identity a class device is published under.
+///
+/// Two origins coexist during the model migration:
+/// * [`ClassParent::Device`] — legacy model: the live `DeviceObject` provides
+///   availability state and removal events.
+/// * [`ClassParent::Detached`] — driver-core model: a value snapshot (id,
+///   driver name, location); availability is managed by the publishing
+///   domain, removal arrives through its remove notifier.
+pub enum ClassParent {
+    Device(Arc<DeviceObject>),
+    Detached(DetachedParent),
+}
+
+/// Value snapshot for driver-core publications.
+pub struct DetachedParent {
+    pub id: ClassDeviceId,
+    pub driver_name: &'static str,
+    pub location: DeviceLocation,
+}
+
+impl ClassParent {
+    /// Publish under a driver-core device snapshot.
+    pub fn detached(driver_name: &'static str, location: DeviceLocation) -> Self {
+        Self::Detached(DetachedParent {
+            id: ClassDeviceId::new_detached(),
+            driver_name,
+            location,
+        })
+    }
+
+    pub fn id(&self) -> ClassDeviceId {
+        match self {
+            Self::Device(device) => ClassDeviceId::from_device(device.id()),
+            Self::Detached(detached) => detached.id,
+        }
+    }
+
+    pub fn driver_name(&self) -> Option<&'static str> {
+        match self {
+            Self::Device(device) => device.driver_name(),
+            Self::Detached(detached) => Some(detached.driver_name),
+        }
+    }
+
+    pub fn location(&self) -> DeviceLocation {
+        match self {
+            Self::Device(device) => device.location(),
+            Self::Detached(detached) => detached.location,
+        }
+    }
+
+    fn is_available(&self) -> bool {
+        match self {
+            Self::Device(device) => device.state() == DeviceState::Active,
+            Self::Detached(_) => true,
+        }
+    }
+
+    /// The owning driver-core device id, if this is a detached publication.
+    pub fn detached_owner(&self) -> Option<u64> {
+        match self {
+            Self::Device(_) => None,
+            Self::Detached(detached) => Some(detached.id.raw() & !DRIVER_CORE_ID_TAG),
+        }
+    }
+}
+
+impl From<Arc<DeviceObject>> for ClassParent {
+    fn from(device: Arc<DeviceObject>) -> Self {
+        Self::Device(device)
+    }
+}
 
 /// A typed runtime capability with a live parent device object.
 pub struct ClassDevice<T> {
@@ -19,7 +124,7 @@ pub struct ClassDevice<T> {
 }
 
 struct ClassDeviceInner<T> {
-    parent: Arc<DeviceObject>,
+    parent: ClassParent,
     runtime: T,
     name: String,
     device_kind: DeviceKind,
@@ -64,7 +169,7 @@ impl<T> Clone for ClassDevice<T> {
 impl<T> ClassDevice<T> {
     /// Create a class device with runtime-provided identity metadata.
     pub fn try_new_with_info(
-        parent: Arc<DeviceObject>,
+        parent: impl Into<ClassParent>,
         inner: T,
         name: String,
         device_kind: DeviceKind,
@@ -81,15 +186,15 @@ impl<T> ClassDevice<T> {
     }
 
     pub(crate) fn try_new_with_class_metadata(
-        parent: Arc<DeviceObject>,
+        parent: impl Into<ClassParent>,
         inner: T,
         name: String,
         device_kind: DeviceKind,
         irq: Option<usize>,
         metadata: ClassDeviceMetadata,
     ) -> DriverResult<Self> {
+        let parent = parent.into();
         parent.driver_name().ok_or(DriverError::BadState)?;
-        parent.driver_id().ok_or(DriverError::BadState)?;
         Ok(Self {
             inner: Arc::new(ClassDeviceInner {
                 parent,
@@ -102,14 +207,14 @@ impl<T> ClassDevice<T> {
         })
     }
 
-    /// Parent device object in the driver-core object graph.
-    pub fn parent(&self) -> Arc<DeviceObject> {
-        self.inner.parent.clone()
+    /// Unique class-publication handle (see [`ClassDeviceId`]).
+    pub fn id(&self) -> ClassDeviceId {
+        self.inner.parent.id()
     }
 
-    /// Unique device-model ID inherited from the parent.
-    pub fn id(&self) -> DeviceId {
-        self.inner.parent.id()
+    /// The parent identity this device was published under.
+    pub fn parent_ref(&self) -> &ClassParent {
+        &self.inner.parent
     }
 
     /// Stable runtime device name.
@@ -127,11 +232,6 @@ impl<T> ClassDevice<T> {
         self.inner.irq
     }
 
-    /// The bus instance this device belongs to.
-    pub fn bus_id(&self) -> BusId {
-        self.inner.parent.bus_id()
-    }
-
     /// Where the device lives on the bus topology.
     pub fn location(&self) -> DeviceLocation {
         self.inner.parent.location()
@@ -146,40 +246,10 @@ impl<T> ClassDevice<T> {
     /// through [`publish`](crate::prelude) validates this, so tripping
     /// the check indicates a bypass of the publish path.
     pub fn driver_name(&self) -> &'static str {
-        #[expect(
-            clippy::expect_used,
-            reason = "CG-021-no-panic-on-reachable-failure: Class-device publication validates \
-                      the retained parent has a bound driver"
-        )]
         self.inner
             .parent
             .driver_name()
             .expect("class device must have a bound driver")
-    }
-
-    /// The registered driver that activated this device.
-    /// Returns the bound driver's id.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the parent device has no bound driver; publication
-    /// validates this, so tripping the check indicates a bypass of the
-    /// publish path.
-    pub fn driver_id(&self) -> DriverId {
-        #[expect(
-            clippy::expect_used,
-            reason = "CG-021-no-panic-on-reachable-failure: Class-device publication validates \
-                      the retained parent has a bound driver"
-        )]
-        self.inner
-            .parent
-            .driver_id()
-            .expect("class device must have a bound driver")
-    }
-
-    /// Return the long-lived core handle associated with this runtime object.
-    pub fn core(&self) -> DeviceCore {
-        DeviceCore::new(self.id())
     }
 
     /// Borrow the runtime capability.
@@ -192,7 +262,7 @@ impl<T> ClassDevice<T> {
 
     /// Whether the parent device is active and not removed.
     pub fn is_available(&self) -> bool {
-        self.inner.parent.state() == DeviceState::Active
+        self.inner.parent.is_available()
     }
 
     pub(crate) fn input_physical_location(&self) -> &str {
@@ -233,10 +303,8 @@ impl<T> core::fmt::Debug for ClassDevice<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ClassDevice")
             .field("id", &self.id())
-            .field("bus_id", &self.bus_id())
             .field("location", &self.location())
             .field("driver_name", &self.driver_name())
-            .field("driver_id", &self.driver_id())
             .finish()
     }
 }
@@ -245,14 +313,14 @@ impl<T> core::fmt::Debug for ClassDevice<T> {
 pub type ClassAvailabilityCallback<T> = Arc<dyn Fn(ClassDevice<T>) + Send + Sync>;
 
 /// Typed registry for one runtime device class.
-pub(crate) struct ClassRegistry<T> {
+pub struct ClassRegistry<T> {
     devices: Vec<ClassDevice<T>>,
     availability_subscribers: Vec<ClassAvailabilityCallback<T>>,
 }
 
 impl<T> ClassRegistry<T> {
     /// Create an empty class registry.
-    pub(crate) const fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             devices: Vec::new(),
             availability_subscribers: Vec::new(),
@@ -263,7 +331,7 @@ impl<T> ClassRegistry<T> {
     ///
     /// Linux device registration rejects duplicate identities; replacement is
     /// a remove-then-add lifecycle rather than an implicit registry update.
-    pub(crate) fn publish(&mut self, device: ClassDevice<T>) -> DriverResult<()> {
+    pub fn publish(&mut self, device: ClassDevice<T>) -> DriverResult<()> {
         let id = device.id();
         if self.devices.iter().any(|existing| existing.id() == id) {
             return Err(DriverError::AlreadyExists);
@@ -273,7 +341,7 @@ impl<T> ClassRegistry<T> {
     }
 
     /// Return currently active devices in this class.
-    pub(crate) fn devices(&self) -> Vec<ClassDevice<T>> {
+    pub fn devices(&self) -> Vec<ClassDevice<T>> {
         self.devices
             .iter()
             .filter(|device| device.is_available())
@@ -282,7 +350,7 @@ impl<T> ClassRegistry<T> {
     }
 
     /// Find a currently active device in this class.
-    pub(crate) fn find(&self, id: DeviceId) -> Option<ClassDevice<T>> {
+    pub fn find(&self, id: ClassDeviceId) -> Option<ClassDevice<T>> {
         self.devices
             .iter()
             .find(|device| device.id() == id && device.is_available())
@@ -290,18 +358,28 @@ impl<T> ClassRegistry<T> {
     }
 
     /// Subscribe to future availability notifications for this class.
-    pub(crate) fn subscribe_available(&mut self, callback: ClassAvailabilityCallback<T>) {
+    pub fn subscribe_available(&mut self, callback: ClassAvailabilityCallback<T>) {
         self.availability_subscribers.push(callback);
     }
 
     /// Snapshot availability callbacks. Callers should invoke them outside locks.
-    pub(crate) fn availability_callbacks(&self) -> Vec<ClassAvailabilityCallback<T>> {
+    pub fn availability_callbacks(&self) -> Vec<ClassAvailabilityCallback<T>> {
         self.availability_subscribers.clone()
     }
 
-    /// Remove a class device by parent device ID.
-    pub(crate) fn remove(&mut self, id: DeviceId) -> Option<ClassDevice<T>> {
+    /// Remove a class device by its publication handle.
+    pub fn remove(&mut self, id: ClassDeviceId) -> Option<ClassDevice<T>> {
         let pos = self.devices.iter().position(|device| device.id() == id)?;
+        Some(self.devices.swap_remove(pos))
+    }
+
+    /// Remove a detached (driver-core owned) class device by its owning
+    /// device id. Legacy-model publications are never matched.
+    pub fn remove_detached(&mut self, owner: u64) -> Option<ClassDevice<T>> {
+        let pos = self
+            .devices
+            .iter()
+            .position(|device| device.inner.parent.detached_owner() == Some(owner))?;
         Some(self.devices.swap_remove(pos))
     }
 }

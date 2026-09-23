@@ -6,12 +6,10 @@
 
 use alloc::{borrow::Cow, boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 
-use kclass::find_display_device;
 #[cfg(feature = "input")]
 use kclass::find_input_device;
-use kdevice::{
-    DeviceId as CoreDeviceId, DeviceNode, DeviceNodeEvent, DeviceNodeKind, subscribe_device_nodes,
-};
+use kclass::{ClassDeviceId, find_display_device};
+use kdevice::{DeviceNode, DeviceNodeEvent, DeviceNodeKind, subscribe_device_nodes};
 use klazy::Once;
 use ksync::Mutex;
 use kvfs::{
@@ -33,7 +31,7 @@ struct DeviceNodeRecord {
 
 struct DeviceProjection {
     fs: Arc<SimpleFs>,
-    records: BTreeMap<CoreDeviceId, DeviceNodeRecord>,
+    records: BTreeMap<ClassDeviceId, DeviceNodeRecord>,
 }
 
 impl DeviceProjection {
@@ -63,19 +61,10 @@ fn projection() -> &'static Mutex<DeviceProjection> {
 fn input_file(
     fs: Arc<SimpleFs>,
     number: DeviceId,
-    id: CoreDeviceId,
-) -> VfsResult<Option<(Arc<DeviceFile>, DeviceRemovalCallback)>> {
-    let Some(device) = find_input_device(id) else {
-        return Ok(None);
-    };
-    let endpoint = match inputdev::input_endpoint(device.clone()) {
-        Ok(endpoint) => endpoint,
-        Err(error) => {
-            warn!("devtmpfs: input endpoint for {id:?} failed: {error:?}");
-            return Ok(None);
-        }
-    };
-    let event = Arc::new(EventDev::new(device, endpoint));
+    id: ClassDeviceId,
+) -> Option<(Arc<DeviceFile>, DeviceRemovalCallback)> {
+    let device = find_input_device(id)?;
+    let event = Arc::new(EventDev::new(device));>>>>>>> 9cfe18b9a (refactor(kclass): decouple the class layer from the legacy device object)
     let weak_event = Arc::downgrade(&event);
     let on_remove: DeviceRemovalCallback = Arc::new(move || {
         if let Some(event) = weak_event.upgrade() {
@@ -91,11 +80,9 @@ fn input_file(
 fn display_file(
     fs: Arc<SimpleFs>,
     number: DeviceId,
-    id: CoreDeviceId,
-) -> VfsResult<Option<(Arc<DeviceFile>, DeviceRemovalCallback)>> {
-    let Some(device) = find_display_device(id) else {
-        return Ok(None);
-    };
+    id: ClassDeviceId,
+) -> Option<(Arc<DeviceFile>, DeviceRemovalCallback)> {
+    let device = find_display_device(id)?;>>>>>>> 9cfe18b9a (refactor(kclass): decouple the class layer from the legacy device object)
     let card = drmdevice::DrmCard::new(device);
     let weak_card = Arc::downgrade(&card);
     let on_remove: DeviceRemovalCallback = Arc::new(move || {
@@ -110,17 +97,28 @@ fn display_file(
 }
 
 fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
-    if projection.records.contains_key(&node.core_id()) {
+    if projection
+        .records
+        .contains_key(&ClassDeviceId::from_device(node.core_id()))
+    {
         return;
     }
     let number = node.device_number();
     let number = DeviceId::new(number.major(), number.minor());
     let file = match node.kind() {
         #[cfg(feature = "input")]
-        DeviceNodeKind::Input => input_file(projection.fs.clone(), number, node.core_id()),
+        DeviceNodeKind::Input => input_file(
+            projection.fs.clone(),
+            number,
+            ClassDeviceId::from_device(node.core_id()),
+        ),
         #[cfg(not(feature = "input"))]
-        DeviceNodeKind::Input => Ok(None),
-        DeviceNodeKind::Drm => display_file(projection.fs.clone(), number, node.core_id()),
+        DeviceNodeKind::Input => None,
+        DeviceNodeKind::Drm => display_file(
+            projection.fs.clone(),
+            number,
+            ClassDeviceId::from_device(node.core_id()),
+        ),>>>>>>> 9cfe18b9a (refactor(kclass): decouple the class layer from the legacy device object)
     };
     let file = match file {
         Ok(file) => file,
@@ -135,12 +133,12 @@ fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
     let Some((file, on_remove)) = file else {
         warn!(
             "devtmpfs: class device for node {:?} is unavailable",
-            node.core_id()
+            ClassDeviceId::from_device(node.core_id())
         );
         return;
     };
     projection.records.insert(
-        node.core_id(),
+        ClassDeviceId::from_device(node.core_id()),
         DeviceNodeRecord {
             node,
             file,
@@ -152,7 +150,10 @@ fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
 fn remove_device(node: &DeviceNode) {
     let record = {
         let mut projection = projection().lock();
-        let Some(record) = projection.records.get(&node.core_id()) else {
+        let Some(record) = projection
+            .records
+            .get(&ClassDeviceId::from_device(node.core_id()))
+        else {
             return;
         };
         if record.node != *node {
@@ -165,7 +166,7 @@ fn remove_device(node: &DeviceNode) {
         )]
         projection
             .records
-            .remove(&node.core_id())
+            .remove(&ClassDeviceId::from_device(node.core_id()))
             .expect("checked device projection must remain present")
     };
     (record.on_remove)();

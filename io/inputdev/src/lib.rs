@@ -358,17 +358,18 @@ fn register_input_device(device: ClassDevice<InputDeviceImpl>) {
     }
 }
 
-fn remove_input_device(id: DeviceId) {
-    let endpoint = {
-        let mut endpoints = INPUT_ENDPOINTS.lock();
-        endpoints
-            .iter()
-            .position(|endpoint| endpoint.device.id() == id)
-            .map(|index| endpoints.swap_remove(index))
-    };
-    if let Some(endpoint) = endpoint {
-        endpoint.detach();
-    }
+fn subscribe_input_unregister() {
+    subscribe_device_removed(Arc::new(|id| {
+        if !INPUT_DEVICES.is_inited() {
+            return;
+        }
+        let class_id = kclass::ClassDeviceId::from_device(id);
+        let mut devs = INPUT_DEVICES.lock();
+        if let Some(pos) = devs.iter().position(|h| h.id() == class_id) {
+            devs.swap_remove(pos);
+            info!("input: unregistered removed device {:?}", id);
+        }
+    }));>>>>>>> 9cfe18b9a (refactor(kclass): decouple the class layer from the legacy device object)
 }
 
 /// Return the unique event endpoint for an active input class device.

@@ -210,6 +210,7 @@ struct DomainInner {
     pending: Vec<u64>,
     deferred: Vec<(u64, DepSource)>,
     services: Arc<dyn DeviceServices>,
+    remove_notifier: Option<Arc<dyn Fn(u64) + Send + Sync>>,
 }
 
 /// An instance of the device model.
@@ -227,6 +228,7 @@ impl DeviceDomain {
                 pending: Vec::new(),
                 deferred: Vec::new(),
                 services: Arc::new(NoServices),
+                remove_notifier: None,
             }),
         }
     }
@@ -235,6 +237,13 @@ impl DeviceDomain {
     /// called before probing; the clock registry wakes this domain.
     pub fn set_services(&self, services: Arc<dyn DeviceServices>) {
         self.inner.lock().services = services;
+    }
+
+    /// Install a callback invoked (outside the domain lock) after a device is
+    /// removed. The composition root uses it to drop class publications that
+    /// were created on behalf of the removed device.
+    pub fn set_remove_notifier(&self, callback: Arc<dyn Fn(u64) + Send + Sync>) {
+        self.inner.lock().remove_notifier = Some(callback);
     }
 
     /// Register a driver and immediately probe anything waiting for it.
@@ -446,9 +455,15 @@ impl DeviceDomain {
         }
         drop(data);
 
-        let mut inner = self.inner.lock();
-        if let Some(entry) = inner.devices.get_mut(&id) {
-            entry.state = DeviceState::Removed;
+        let notifier = self.inner.lock().remove_notifier.clone();
+        {
+            let mut inner = self.inner.lock();
+            if let Some(entry) = inner.devices.get_mut(&id) {
+                entry.state = DeviceState::Removed;
+            }
+        }
+        if let Some(notify) = notifier {
+            notify(id);
         }
         Ok(())
     }

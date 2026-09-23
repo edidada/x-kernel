@@ -173,9 +173,9 @@ pub fn init_network() {
     SERVICE.start_timer();
 }
 
-fn subscribe_network_unregister(id: kdevice::DeviceId) {
+fn subscribe_network_unregister(id: kclass::ClassDeviceId) {
     subscribe_device_removed(Arc::new(move |removed_id| {
-        if removed_id != id {
+        if kclass::ClassDeviceId::from_device(removed_id) != id {
             return;
         }
         if unregister_netdev(id) {
@@ -188,7 +188,7 @@ fn subscribe_network_unregister(id: kdevice::DeviceId) {
 ///
 /// Takes [`control::network_config_lock`] so teardown is serialized with
 /// control-plane mutations.
-pub(crate) fn unregister_netdev(id: kdevice::DeviceId) -> bool {
+pub(crate) fn unregister_netdev(id: kclass::ClassDeviceId) -> bool {
     if !SERVICE.is_inited() {
         return false;
     }
@@ -237,7 +237,7 @@ fn register_vsock_handle(handle: ClassDevice<VsockDeviceImpl>) {
         warn!("Failed to initialize vsock-TIPC bridge: {:?}", e);
     }
     subscribe_device_removed(Arc::new(move |removed_id| {
-        if removed_id == id && unregister_vsock_dev(id) {
+        if kclass::ClassDeviceId::from_device(removed_id) == id && unregister_vsock_dev(id) {
             warn!("vsock: detached removed device {:?}", id);
         }
     }));

@@ -11,8 +11,12 @@ keywords = ["driver", "serial", "pl011", "x-kernel"]
 categories = ["os", "no-std"]
 
 [dependencies]
+char_driver = { workspace = true }
 console_driver = { workspace = true, features = ["pl011"] }
+driver_base.workspace = true
 driver-core.workspace = true
+kclass = { workspace = true, features = ["char"] }
+kdevice.workspace = true
 driver-runtime.workspace = true
 khal.workspace = true
 log.workspace = true

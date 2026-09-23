@@ -16,8 +16,10 @@ serial-pl011 = ["dep:serial-pl011"]
 fixed-clock = ["dep:fixed-clock"]
 
 [dependencies]
+console_driver.workspace = true
 driver-core.workspace = true
 driver-runtime.workspace = true
+kclass = { workspace = true, features = ["char"] }
 fixed-clock = { workspace = true, optional = true }
 khal.workspace = true
 of.workspace = true
