@@ -35,6 +35,20 @@ const MIN_HEAP_SIZE: usize = 0x8000; // 32 K
 /// transferred from the page allocator instead of requiring a new high-order block.
 const LARGE_ALLOC_THRESHOLD_BYTES: usize = 1024 * 1024;
 
+/// Upper bound on one byte-heap growth step.
+///
+/// The byte heap never returns pages to the page allocator, and allocations
+/// above [`LARGE_ALLOC_THRESHOLD_BYTES`] bypass it and go straight to the page
+/// allocator. Growing the whole heap geometrically on every failed allocation
+/// therefore parks memory that only the byte heap can ever use: a 1 GiB guest
+/// was observed panicking on a 1.3 MiB request while the byte heap reported
+/// `used=0xd0a3800 avail=0xaf2fe00`, i.e. 175 MiB of its 384 MiB idle.
+///
+/// Growth stays geometric below this step and linear above it, which bounds the
+/// idle surplus to one step while keeping the region count well under the byte
+/// allocator's region limit.
+const HEAP_GROW_STEP_MAX_BYTES: usize = 32 * 1024 * 1024;
+
 fn pages_to_bytes(num_pages: usize) -> usize {
     num_pages
         .checked_mul(PAGE_SIZE_4K)
@@ -457,7 +471,10 @@ impl GlobalAllocator {
     ) -> AllocResult {
         let heap_ready = self.heap_ready.load(Ordering::Acquire);
         let old_size = if heap_ready { balloc.total_bytes() } else { 0 };
-        let exp_size = old_size
+        // Geometric while the heap is small, bounded steps once it is not: see
+        // `HEAP_GROW_STEP_MAX_BYTES` for why an unbounded doubling is unsafe.
+        let step = old_size.clamp(PAGE_SIZE_4K, HEAP_GROW_STEP_MAX_BYTES);
+        let exp_size = step
             .max(layout.size())
             .next_power_of_two()
             .max(PAGE_SIZE_4K);

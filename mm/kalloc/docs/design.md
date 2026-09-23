@@ -175,9 +175,15 @@ metadata mutation 仍由对应锁串行化。初始化调用本身依赖启动�
 4. 中央 byte allocator 无法满足请求时，从 `palloc` 取得新 region，加入 byte heap
    后重试。
 
-byte heap 首次建立至少使用 32 KiB。后续增长请求参考当前 heap 总量和本次 layout，
-取 power-of-two 大小；page allocation 失败时逐步减半，直到一页或能够容纳 layout 的
-最小 region。byte heap 已取得的 backing region 不主动归还 page allocator。
+byte heap 首次建立至少使用 32 KiB。后续增长请求以当前 heap 总量为基准取 power-of-two
+大小，但单步增长受 `HEAP_GROW_STEP_MAX_BYTES`（32 MiB）限制：heap 小于该值时几何增长，
+达到之后每次最多增加一个步长。page allocation 失败时逐步减半，直到一页或能够容纳
+layout 的最小 region。
+
+byte heap 已取得的 backing region 不主动归还 page allocator，所以单步上限同时就是空闲
+盈余的上限。这一条是必需的：超过 1 MiB 的大对象绕开 byte heap 直接向 page allocator 取，
+若允许无上限翻倍，一次瞬时失败就能把数百 MiB 物理页永久钉进只有 byte heap 能用的空间，
+随后一个 1.3 MiB 的分配会在 byte heap 仍报告上百 MiB 空闲时 panic。
 
 deallocation 必须携带原 allocation 的 pointer 和 layout。超过 1 MiB 的大对象返回 page
 allocator；slab-cache-eligible 对象优先进入当前 CPU cache；其他对象返回中央 byte
