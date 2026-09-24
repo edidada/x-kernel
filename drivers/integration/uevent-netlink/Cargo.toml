@@ -1,6 +1,6 @@
 [package]
-name = "kdevice-uevent"
-description = "X-Kernel device lifecycle uevent integration"
+name = "uevent-netlink"
+description = "Netlink transport for kobject uevents (drivers -> netlink KOBJECT_UEVENT)"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -11,8 +11,8 @@ documentation.workspace = true
 
 [dependencies]
 devnode.workspace = true
-klazy.workspace = true
 knet.workspace = true
+klazy.workspace = true
 unittest.workspace = true
 
 [lints]

@@ -53,7 +53,7 @@ const TMPFS_MOUNT_FLAGS: MountFlags = MountFlags::NOSUID
 /// independent of when userspace mounts sysfs.
 pub fn init_device_discovery() {
     sysfs::init_device_projection();
-    kdevice_uevent::init();
+    uevent_netlink::init();
 }
 
 #[cfg(feature = "fs9p")]

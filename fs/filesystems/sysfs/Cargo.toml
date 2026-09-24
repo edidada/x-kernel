@@ -12,7 +12,7 @@ documentation.workspace = true
 [dependencies]
 devnode = { workspace = true }
 
-kdevice_uevent.workspace = true
+uevent_netlink.workspace = true
 ksync.workspace = true
 kvfs.workspace = true
 klazy.workspace = true

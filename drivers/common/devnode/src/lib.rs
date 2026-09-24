@@ -29,6 +29,10 @@ use alloc::{format, string::String, sync::Arc, vec::Vec};
 
 use kspin::SpinNoPreempt;
 
+pub mod uevent;
+
+pub use uevent::bitmap_value;
+
 /// Firmware-stated location of a device (the model-agnostic form every
 /// consumer — kclass parents, uevent paths — agrees on).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -364,83 +368,4 @@ fn dispatch_added(
 /// location. Lives here so both device models' adapters share one format.
 pub fn physical_path_pci(segment: u16, bus: u8, device: u8, function: u8) -> String {
     format!("pci{segment:04x}:{bus:02x}/{segment:04x}:{bus:02x}:{device:02x}.{function}")
-}
-
-/// Linux capability-bitmap formatter: LE words, printed as space-separated
-/// hex words in big-endian word order, trailing zero words dropped.
-pub fn bitmap_value(bytes: &[u8]) -> String {
-    let words: Vec<u64> = bytes
-        .chunks(8)
-        .map(|chunk| {
-            let mut raw = [0u8; 8];
-            raw[..chunk.len()].copy_from_slice(chunk);
-            u64::from_le_bytes(raw)
-        })
-        .collect();
-    if words.is_empty() {
-        return String::from("0");
-    }
-    let last = words.iter().rposition(|word| *word != 0).unwrap_or(0);
-    words[..=last]
-        .iter()
-        .rev()
-        .map(|word| format!("{word:x}"))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-#[cfg(unittest)]
-mod tests {
-    use alloc::string::String;
-
-    use unittest::{assert_eq, def_test};
-
-    use super::*;
-
-    #[def_test]
-    fn devnode_type_projects_devname_and_number() {
-        let t = DevNodeType::new("input", 13, 64, 32, |i| format!("input/event{i}"));
-        assert_eq!(t.devname(3), String::from("input/event3"));
-        assert_eq!(t.device_number(3).major(), 13);
-        assert_eq!(t.device_number(3).minor(), 64 + 3);
-    }
-
-    #[def_test]
-    fn bitmap_format_keeps_linux_word_order() {
-        // Anchor from the !796 tests: LE words, big-endian word order,
-        // trailing zero words dropped.
-        assert_eq!(bitmap_value(&[1, 0, 0, 0, 2]), String::from("200000001"));
-        assert_eq!(bitmap_value(&[0]), String::from("0"));
-        assert_eq!(bitmap_value(&[]), String::from("0"));
-    }
-
-    #[def_test(serial)]
-    fn publish_withdraw_lifecycle_orders_events() {
-        let observed = Arc::new(kspin::SpinNoPreempt::new(
-            alloc::vec::Vec::<&'static str>::new(),
-        ));
-        let sink = observed.clone();
-        subscribe(Arc::new(move |event| match event {
-            DevNodeEvent::Added(_) => sink.lock().push("add"),
-            DevNodeEvent::Removing(_) => sink.lock().push("removing"),
-            DevNodeEvent::Removed(_) => sink.lock().push("removed"),
-        }));
-
-        publish(
-            0x9999,
-            "test-projection",
-            String::from("vdz"),
-            DeviceNumber::new(254, 16),
-            "pci0000:00/0000:00:01.0",
-            Some(String::from("pci:v00001AF4d00001001")),
-            Vec::new(),
-            Some(String::from("virtio-blk")),
-        );
-        withdraw(0x9999);
-
-        let events = observed.lock().clone();
-        assert_eq!(events.as_slice(), ["add", "removing", "removed"]);
-        // Boot-time publications may exist; ours must be gone.
-        assert!(!nodes().iter().any(|n| n.id() == 0x9999));
-    }
 }

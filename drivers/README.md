@@ -25,7 +25,7 @@ contract it is implementing or consuming.
                                (capability backend bridge)
                                         │
                                 integration/
-                                (console runtime, kdevice-uevent)
+                                (console runtime, uevent-netlink)
 ```
 
 ## Device Model and Runtime (`core/`)
@@ -99,7 +99,7 @@ Kconfig block.
 | Crate | Role |
 |------|------|
 | `devices/virtio` | Virtio device-family constructors (`VirtIoBlkDev`, …) over the vendored `virtio-drivers` transport, implementing the class traits. Shared by the drv/virtio modules and the HAL. |
-| `integration/kdevice-uevent` | Ordered devnode lifecycle events to netlink kobject uevents; the uevent payload format is a udev-visible compatibility surface. |
+| `integration/uevent-netlink` | Netlink transport for kobject uevents — the one drivers-tree consumer of `knet`. The payload format (a udev-visible compatibility surface) lives in `common/devnode::uevent`, shared with sysfs attributes. |
 
 ## Host Adapters and Platform Support
 

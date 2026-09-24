@@ -37,8 +37,7 @@ use alloc::{
     vec::Vec,
 };
 
-use devnode::{DevNode, DevNodeEvent, subscribe};
-use kdevice_uevent::{self, UeventAction};
+use devnode::{DevNode, DevNodeEvent, subscribe, uevent};
 use klazy::Once;
 use ksync::{Mutex, RwLock};
 use kvfs::{
@@ -47,6 +46,7 @@ use kvfs::{
     SuperBlock, SuperBlockFlags, VfsError, VfsResult, get_tree_nodev,
 };
 use lazyinit::LazyInit;
+use uevent_netlink::UeventAction;
 
 const SYSFS_MAGIC: u32 = 0x6265_6572;
 const READ_ONLY_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o444);
@@ -430,7 +430,7 @@ fn append_line(value: &str) -> Vec<u8> {
 }
 
 fn bitmap_text(bytes: &[u8]) -> Vec<u8> {
-    append_line(&kdevice_uevent::bitmap_value(bytes))
+    append_line(&uevent::bitmap_value(bytes))
 }
 
 fn add_common_device_entries(
@@ -459,7 +459,7 @@ fn add_common_device_entries(
         subsystem_link.clone(),
         TreeEntry::Symlink(relative_symlink(
             &subsystem_link,
-            &format!("class/{}", kdevice_uevent::subsystem_name(node)),
+            &format!("class/{}", node.subsystem()),
         )),
     );
     let character_device_link = format!("dev/char/{}:{}", number.major(), number.minor());
@@ -537,7 +537,7 @@ fn add_input_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<Pro
 
 fn add_drm_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<ProjectedDevice>) {
     let node = &projected.node;
-    let physical = kdevice_uevent::physical_device_path(node);
+    let physical = node.physical_path();
     let card = format!("devices/{}/{}", node.physical_path(), node.devname());
     add_directory(tree, &card);
     add_common_device_entries(tree, projected, &card);
@@ -573,7 +573,7 @@ fn build_tree(nodes: &BTreeMap<u64, Arc<ProjectedDevice>>) -> BTreeMap<String, T
 
     for projected in nodes.values() {
         let node = &projected.node;
-        let physical = kdevice_uevent::physical_device_path(node);
+        let physical = node.physical_path();
         let bus = bus_name(node.physical_path());
         add_directory(&mut tree, &format!("devices/{physical}"));
         if let Some(driver) = node.driver_name() {
@@ -690,7 +690,7 @@ impl SimpleDirOps for SysfsDirectory {
                 let file = CommandFile::new(move |operation| -> VfsResult<Option<Vec<u8>>> {
                     match operation {
                         SimpleFileOperation::Read => projected
-                            .with_available(|node| kdevice_uevent::uevent_file_contents(node))
+                            .with_available(|node| uevent::uevent_file_contents(node))
                             .map(Some),
                         SimpleFileOperation::Write { data, .. } => projected
                             .with_available(|node| -> VfsResult<()> {
@@ -699,7 +699,7 @@ impl SimpleDirOps for SysfsDirectory {
                                     .trim_matches(['\0', '\n', '\r', ' ']);
                                 let action = UeventAction::try_from(action)
                                     .map_err(|()| VfsError::InvalidInput)?;
-                                kdevice_uevent::publish(action, node);
+                                uevent_netlink::publish(action, node);
                                 Ok(())
                             })
                             .and_then(|result| result)

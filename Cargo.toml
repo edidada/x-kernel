@@ -219,7 +219,7 @@ virtio = { path = "drivers/drv/virtio/device" }
 
 # Internal: driver adapters and integration
 device_res_xkernel = { path = "drivers/adapters/xkernel/device-res", package = "device-res-xkernel" }
-kdevice_uevent = { path = "drivers/integration/kdevice-uevent", package = "kdevice-uevent" }
+uevent_netlink = { path = "drivers/integration/uevent-netlink", package = "uevent-netlink" }
 
 # Internal: platform, firmware, and host driver support
 aarch64-pmuv3 = { path = "drivers/platform/aarch64-pmuv3" }

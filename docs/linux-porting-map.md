@@ -75,7 +75,7 @@
 |---|---|
 | `device_create()` / `register_chrdev` | `kclass::publish_char(ClassParent::detached(name, location), Box::new(dev))`（char） |
 | `add_disk()` | `Gendisk::new(...).with_devnode_context(parent_path, modalias)` → `kclass::publish_block(...)`；`add_disk` 自动投影 `/dev/<name>` + uevent |
-| `device_add_disk` 的 uevent | devnode 注册表 → `kdevice_uevent` 发布 `ACTION/DEVPATH/SUBSYSTEM/MAJOR/MINOR/DEVNAME/MODALIAS` |
+| `device_add_disk` 的 uevent | devnode 注册表 → `uevent-netlink` 发布（格式层在 `devnode::uevent`） `ACTION/DEVPATH/SUBSYSTEM/MAJOR/MINOR/DEVNAME/MODALIAS` |
 | 平台驱动注册 clock provider | `dev.clk()` 的对偶：probe 末尾 `register_clk_provider` |
 
 ## 6. 组合根（driver-compose/src/lib.rs）

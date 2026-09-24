@@ -33,7 +33,8 @@ kclass = { workspace = true, optional = true }
 kbuild_config.workspace = true
 kerrno.workspace = true
 kcred.workspace = true
-kdevice_uevent.workspace = true
+uevent_netlink.workspace = true
+ksync.workspace = true
 kvfs.workspace = true
 log.workspace = true
 macros = { workspace = true, optional = true }
