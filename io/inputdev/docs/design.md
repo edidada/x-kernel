@@ -8,19 +8,33 @@ open, tracks device-wide key state, and delivers complete frames to independent
 listeners. Hardware probing and user-facing file semantics stay in the driver
 framework and devfs respectively.
 
-## Architecture
+## Responsibilities
+
+- Seed a process-wide snapshot from the input class registry.
+- Track later registration and removal callbacks by driver-core id.
+- Return cloned class handles so multiple kernel consumers can rescan without
+  consuming shared discovery state.
+
+## Non-responsibilities
+
+`inputdev` does not detect hardware, bind drivers, or define input-device
+identity; `devnode`, `kclass`, and input drivers own those tasks. It does not
+read input events, implement evdev operations, or provide blocking waits.
+Userspace device-node creation, numbering, file operations, and hot-remove
+behavior belong to devfs and its `EventDev` adapter.
+
+## Architecture and lifecycle
 
 ```text
-VirtIO input IRQ -> InputEventNotifier -> InputEndpoint::WorkHandle
-                                            |
-                                            v
-                                InputDevice::read_event()
-                                            |
-                               frame and key-state updates
-                                            |
-                          InputEventListener::receive_frame()
-                                            |
-                          independent devfs open-file queues
+kclass input snapshot + availability callback
+                    │
+                    ▼
+INPUT_DEVICES: Mutex<Vec<ClassDevice<InputDeviceImpl>>>
+                    │ clone
+                    ▼
+             input_devices()
+
+devnode removal callback ──> remove matching id>>>>>>> 9f18a37dd (docs: purge old-framework references from every module's docs)
 ```
 
 `INPUT_ENDPOINTS` holds at most one `InputEndpoint` per driver-core device id.

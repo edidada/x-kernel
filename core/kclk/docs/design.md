@@ -58,14 +58,14 @@ sharing), so flags must be written by name, never by numeric value.
 ## Layering
 
 Clock support is split across three crates, mirroring how IRQ is wired through
-`device-res` → `kdriver::resource` → `kirq`:
+`device-res` → `driver-runtime` → `kirq`:
 
 ```text
 device-res (OS-agnostic resource model)
   ClkSpec / ClkConsumer / ClkOp / Clk / devm_clk_get
         |  does NOT depend on kclk
         v
-kdriver::resource (OS adapter)
+driver-runtime (OS adapter)
   impl ClkOp for HostResourceProvider   -> calls kclk::clk_get_*
   KclkConsumer(ClkHandle)               -> wraps kclk as a ClkConsumer
         |
@@ -265,7 +265,7 @@ resolves `(provider, index)`:
 
 ```text
 driver: devm_clk_get(device, ClkSpec::by_phandle_index(ccu_phandle, 5))
-   -> kdriver::resource: ClkOp::get_clock -> kclk::clk_get_by_index
+   -> driver-runtime: ClkOp::get_clock -> kclk::clk_get_by_index
    -> ClkLookup::get_by_index -> Arc<ClkCore>
    -> wrapped as ClkConsumer, returned as device_res::Clk
 ```
@@ -448,7 +448,7 @@ enumerated by the platform bus backend, matched to its driver by
 compatible, and probed. The probe registers the provider — the same
 lifecycle as serial/block/net drivers. A controller with `compatible =
 "fixed-clock"` is handled by the built-in `clk-fixed-clock` driver in
-`kdriver` (see `driver_registry/clk/`); SoC-specific controllers follow the
+`drv/clk` (see `drv/clk/src/fixed_clock.rs`); SoC-specific controllers follow the
 same pattern with their own compatible and MMIO.
 
 Probe order is guaranteed by the platform bus backend: nodes carrying
@@ -459,7 +459,7 @@ Consumer nodes' `clocks` properties are auto-converted to
 `ResourceDesc::Clk` entries during the same enumeration pass.
 
 ```rust
-// drivers/integration/kdriver/src/driver_registry/clk/mod.rs (generic fixed-clock)
+// drivers/drv/clk/src/fixed_clock.rs (generic fixed-clock)
 impl DeviceDriver for FixedClockDriver {
     fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
         // The firmware layer extracts phandle + clock-frequency at
@@ -496,7 +496,7 @@ model, exactly like MMIO and IRQ:
 ```rust
 use device_res::{Clk, ClkSpec, devm_clk_get};
 // or, for the device-object-bound helper:
-use kdriver::devm_clk_get;
+use driver_core::DeviceCtx; // dev.clk("name")
 
 fn probe(uart: &DeviceObject) -> DriverResult {
     // Canonical DT path: the platform resolved the `clock-names` connection

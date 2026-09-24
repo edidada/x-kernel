@@ -42,7 +42,7 @@ drivers that can scan out guest memory directly.
 ## Scope
 
 ```text
-drivers/contracts/display/
+drivers/subsystems/display/
 ├── src/
 │   └── lib.rs        # DisplayDevice trait, display/scanout types
 ├── ut-tests/         # unit tests (unittest harness)

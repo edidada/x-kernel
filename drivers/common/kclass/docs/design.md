@@ -3,7 +3,7 @@
 ## Purpose
 
 `kclass` is x-kernel's typed runtime device class layer. Built on top of
-the `kdevice` device core, it provides type-safe publication, enumeration,
+the `driver-core` device model, it provides type-safe publication, enumeration,
 lookup, and availability-subscription interfaces for each device category
 (net / block / char / hwrng / display / input / vsock / 9p).
 
@@ -24,11 +24,11 @@ modifying class registry semantics, or adding new device categories.
 - No IRQ handling: interrupt registration and dispatch belong to `kirq`
   and `device-res-xkernel`; kclass stores only the `irq` metadata value.
 - No driver binding or probing: the discover → match → bind pipeline is
-  owned by `kdevice` and `kdriver`; kclass consumes the already-bound
+  owned by the `driver-core` domain; kclass consumes the already-bound
   device object at publish time.
 - No device lifecycle or node-allocation ownership: hotplug state transitions,
   class indices, major/minor numbers, and `devname` templates belong to
-  `kdevice`. kclass only supplies class-specific metadata at activation.
+  `driver-core`. kclass only supplies class-specific metadata at activation.
 - No runtime dispatch policy between consumers: after publication the
   consumer holds `ClassDevice<T>` directly and kclass steps out of the
   call path.
@@ -39,10 +39,10 @@ The Linux kernel class mechanism (`/sys/class/`) provides a view of
 devices organized by functional category, orthogonal to bus topology
 (`/sys/bus/`). `kclass` fills the same role in x-kernel:
 
-- **kdevice** owns bus attachment, lifecycle state, and driver binding;
+- **driver-core** owns bus attachment, lifecycle state, and driver binding;
 - **kclass** adds the typed per-category view
-  (net/block/char/hwrng/display/input/vsock/9p) on top;
-- **kdriver** calls `publish_*()` after a successful probe to inject the
+  (net/block/char/display/input/vsock/9p) on top;
+- Drivers call `publish_*()` after a successful probe to inject the
   runtime capability into the kclass registries.
 
 This layering lets upper subsystems (network stack, filesystem) stay
@@ -53,7 +53,7 @@ future availability notifications.
 ## Scope
 
 ```text
-drivers/contracts/kclass/
+drivers/common/kclass/
 ├── Cargo.toml
 ├── docs/
 │   ├── design.md
@@ -66,7 +66,7 @@ drivers/contracts/kclass/
 ## Architecture
 
 ```text
-                kdriver (probe success)
+                driver-compose (probe success)
                      │
                      │ publish_net / publish_block / publish_display / ...
                      v
@@ -75,7 +75,7 @@ drivers/contracts/kclass/
     │                                         │
     │  ┌─────────────────────────────────┐    │
     │  │     ACTIVATION_BRIDGE           │    │
-    │  │  (kdevice event subscriber)     │    │
+    │  │  (class-level subscription)     │    │
     │  │  Activated → notify_class_avail │    │
     │  │              + register node     │    │
     │  │  Removed   → remove_class_device│    │
@@ -123,11 +123,11 @@ drivers/contracts/kclass/
 | `ClassDevice<T>` | Typed runtime device handle; wraps `DeviceObject` + trait object and delegates trait method calls |
 | `ClassDeviceInner<T>` | `ClassDevice` internal shared state: parent, runtime, name, kind, irq, metadata |
 | `ClassRegistry<T>` | Typed registry: publish (unique publication), devices (enumerate available), find (lookup by id), subscribe (availability notification), remove (remove by id) |
-| `ACTIVATION_BRIDGE` | Global event bridge: subscribes to `kdevice` `Activated` / `Removed` events and drives class-level notify/remove |
-| `ClassRuntimeMetadata::device_node_class` | Supplies input capability metadata or the DRM primary class to `kdevice`; other runtime classes return no node request |
-| `class_registries!` macro | Declaratively generates all 8 class registries and their companion functions |
+| `ACTIVATION_BRIDGE` | Global event bridge: fires class-level availability/removal subscriptions and drives class-level notify/remove |
+| `ClassRuntimeMetadata::device_node_class` | Supplies input capability metadata or the DRM primary class to the devnode projection; other runtime classes return no node request |
+| `class_registries!` macro | Declaratively generates all 7 class registries and their companion functions |
 | `ClassDeviceMetadata` | Optional class-specific metadata (currently only the input class carries physical_location / unique_id) |
-| `prelude` module | Centralized re-export of all public types for publishers such as `kdriver` |
+| `prelude` module | Centralized re-export of all public types for publishers such as `drv/*` modules |
 | Trait delegation impls | Implement the operation traits (e.g. `NetDevice`) for categories consumed through class handles, delegating to the inner runtime; the net class also forwards `NetRxScheduler` attach/detach, while block I/O goes only through the block core canonical `BlockDevice` |
 
 ## State Machine
@@ -143,13 +143,13 @@ drivers/contracts/kclass/
                     │Published │  ← ClassDevice created, held by registry;
                     │(pending) │     parent.state != Active
                     └────┬─────┘
-                         │ kdevice Activated event
+                         │ class availability
                          ▼
                     ┌──────────┐
                     │Available │  ← parent.state == Active;
                     │(active)  │     DeviceNode assigned, then callbacks fired
                     └────┬─────┘
-                         │ kdevice Removed event
+                         │ class removal
                          ▼
                     ┌──────────┐
                     │ Removed  │  ← swap_remove from the registry
@@ -159,9 +159,9 @@ drivers/contracts/kclass/
 | From | To | Trigger |
 |----|----|----------|
 | — | Published | Driver calls `publish_<class>(parent, runtime)` |
-| Published | Available | `kdevice` dispatches `Activated`; `notify_class_available` registers any class node and then invokes subscriber callbacks |
+| Published | Available | `devnode` dispatches `Activated`; `notify_class_available` registers any class node and then invokes subscriber callbacks |
 | Published | Available (immediate) | `parent.state()` is already `Active` at publish time (desc-adoption path) |
-| Available | Removed | `kdevice` dispatches the `Removed` event; `remove_class_device` removes the entry |
+| Available | Removed | `devnode` dispatches the `Removed` event; `remove_class_device` removes the entry |
 | Published | — | Publishing the same `DeviceId` again returns `AlreadyExists` |
 
 ### Registry publish semantics
@@ -192,7 +192,7 @@ resident runtime is never silently replaced.
    - otherwise → push.
 8. If the device is already `Active`, `notify_class_available` runs
    synchronously. Input and display classes first register a `DeviceNode` in
-   `kdevice`, then notify class subscribers.
+   `devnode`, then notify class subscribers.
 
 ### Device enumeration and lookup
 
@@ -224,7 +224,7 @@ resident runtime is never silently replaced.
    it calls `notify_class_available(kind, id)`, dispatching on
    `DeviceKind` to the matching class notify function. Input and display
    notify functions capture their class metadata and call
-   `kdevice::register_device_node` before availability callbacks.
+   `devnode::publish` before availability callbacks.
 2. A `DeviceEventKind::Removed` subscriber is registered: on each event it
    calls `remove_class_device(id)`, which walks every class registry, removes
    the id, unregisters its optional `DeviceNode`, and then runs class-specific
@@ -351,14 +351,14 @@ encapsulation — callers could bypass device state checks.
 exchange for:
 
 - no explicit kclass init call inside `init_drivers`;
-- kclass consumers need no init-order knowledge — only that kdevice is
+- kclass consumers need no init-order knowledge — only that devnode is
   initialized;
 - if no class feature is enabled in the build, the bridge is never
   registered.
 
 **Rejected alternative**: registering events from a global constructor
 (e.g. a dummy `LazyInit`). More "proactive", but it creates a hidden
-init-order dependency — kdevice would have to be initialized whenever
+init-order dependency — devnode would have to be initialized whenever
 kclass constructs.
 
 ### Input class carries runtime identity metadata

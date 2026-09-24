@@ -54,7 +54,17 @@ Major areas:
 - `boot/`: boot protocol handoff, boot stubs, and loaders.
 - `core/`: core runtime, syscall, tracing, and services.
 - `mm/`: memory management and address-space abstractions.
-- `drivers/`: shared hardware drivers and device subsystems.
+- `drivers/`: the driver framework and concrete drivers.
+  - `core/`: device model (`driver-core`), host service bridge
+    (`driver-runtime`), composition root (`driver-compose`).
+  - `common/`: cross-subsystem foundations (`driver_base`, `device-res`,
+    `kclass`, `devnode`).
+  - `subsystems/`: per-class APIs and services (block/net/char/...).
+  - `drv/`: concrete drivers, one subsystem crate per family, one module
+    per driver (`drv/virtio`, `drv/serial`, `drv/clk`, `drv/block`).
+  - `bus/`, `firmware/`: PCI access; DT/ACPI/FDT parsing.
+  - `adapters/` (kernel capabilities -> framework), `integration/`
+    (framework -> kernel facilities).
 - `platforms/`: platform glue and defconfigs.
 - `process/`, `task/`, `fs/`, `io/`, `net/`, and `tee/`: subsystem crates.
 - `util/`: shared utility crates such as `klazy`.
@@ -85,7 +95,8 @@ ownership boundaries.
   delivery through `kirq::IntrManagerIf`.
 - Keep `device_res` OS-agnostic. The driver framework exposes kernel IRQ
   capability to drivers by adapting devres IRQ resources to `kirq` in
-  `kdriver::resource`; `kirq` must not depend on `device_res`.
+  `driver-runtime` (the DeviceServices bridge over `device-res-xkernel`);
+  `kirq` must not depend on `device_res`.
 - Treat `docs/ai/driver-subsystem-boundaries.md` as a hard constraint for
   driver work. Concrete reusable drivers must depend on driver subsystem
   contracts, not host-kernel crates such as `khal`, `kirq`, `memspace`,

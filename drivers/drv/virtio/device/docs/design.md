@@ -22,7 +22,7 @@ x-kernel 运行在裸机 `no_std` 环境中，需要通过 VirtIO 协议与虚�
 涉及的源文件：
 
 ```
-drivers/devices/virtio/
+drivers/drv/virtio/device/
 ├── src/
 │   ├── lib.rs          # 设备探测、错误转换、公共 re-export
 │   ├── blk.rs          # VirtIO Block 适配器
@@ -431,7 +431,7 @@ host IRQ 核心或工作队列。
 - `poll_event`：从 RX virtqueue 取出一个原始事件，把事件类型和 payload 交给调用者处理；
 - `guest_cid`：返回设备配置的 guest CID。
 
-`VsockDevice` 是低层 packet transport trait；`kdriver` 通过现有的 `VsockDevice` class
+`VsockDevice` 是低层 packet transport trait；`drv/virtio` 通过现有的 `VsockDevice` class
 注册表发布 `VirtIoVsockDev`。`net/knet` 的 `VSOCK_CONN_MANAGER` 直接消费该 trait，
 负责连接、监听、缓冲、credit 等所有连接语义。
 

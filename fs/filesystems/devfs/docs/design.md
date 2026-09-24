@@ -3,12 +3,12 @@
 ## Purpose
 
 `devfs` provides X-Kernel's singleton `devtmpfs` instance. It projects
-device-node identities assigned by `kdevice` into `/dev` character nodes and
+device-node identities published through `devnode` into `/dev` character nodes and
 adapts input and display class handles to VFS file operations.
 
 ## Responsibilities
 
-- Create `/dev/input/eventN` and `/dev/dri/cardN` from `kdevice::DeviceNode`
+- Create `/dev/input/eventN` and `/dev/dri/cardN` from `devnode::DevNode`
   events.
 - Register and unregister the assigned character-device numbers with KVFS.
 - Resolve dynamic directory enumeration and lookup to the current file-object
@@ -19,7 +19,7 @@ adapts input and display class handles to VFS file operations.
 
 `devfs` does not discover hardware, bind drivers, assign class indices,
 allocate major/minor numbers, choose `devname` values, or publish facts to
-sysfs. `kdevice` owns those identities and their lifecycle; `kclass` publishes
+sysfs. `devnode` owns those identities and their lifecycle; `kclass` publishes
 the runtime input and display capabilities. KVFS owns generic pathname,
 permission, inode, mount, and character-device dispatch semantics.
 
@@ -92,9 +92,9 @@ an optional device node whose registration conflicts with an existing owner.
 ```text
 kclass input/display activation
                │
-               │ register_device_node
+               │ devnode publish
                ▼
-      kdevice DeviceNode registry
+      devnode registry
       ├── index and dev_t assignment
       ├── devname templates
       └── add/remove notifications
@@ -124,24 +124,24 @@ The optional Cargo feature `input` enables `kclass/input` and `inputdev`; the to
 adapt input node assignments to `EventDev`. Display support is unconditional
 through `kclass/display`, so DRM primary nodes remain available independently.
 
-`devfs` depends on `kdevice` and `kclass`. `sysfs` depends directly on
-`kdevice`; there is no dependency edge from sysfs to devfs.
+`devfs` depends on `devnode` and `kclass`. `sysfs` depends directly on
+`devnode`; there is no dependency edge from sysfs to devfs.
 
 ## Initialization and lifecycle
 
 1. `new_devfs` creates the singleton superblock and private root mount.
 2. `dynamic::initialize` creates `DeviceProjection`, subscribes to
-   `kdevice::DeviceNodeEvent`, and receives the current snapshot atomically.
+   `devnode::DevNodeEvent`, and receives the current snapshot atomically.
 3. Initialization holds the projection mutex while installing the subscriber
    and applying the snapshot. A concurrent callback waits and therefore cannot
    make an older snapshot overwrite a newer removal.
 4. An add event looks up the already-active class handle by `DeviceId`, creates
    `EventDev` or `DrmCard`, and registers the exact `DeviceNumber` assigned by
-   `kdevice`.
+   `devnode`.
 5. Dynamic lookup reads the current projection, so add/remove is visible
    without rebuilding the directory or retaining cached dentries.
 6. A remove event deletes the projection record, detaches the file object,
-   unregisters the character-device number, and returns. `kdevice` releases
+   unregisters the character-device number, and returns. `devnode` releases
    the class index only after all projection callbacks finish.
 
 Open files retain their concrete backend through KVFS dispatch after removal.
@@ -204,7 +204,7 @@ worker. Hard-IRQ dispatch does not enter `EventDev` or take a client mutex.
 ## Concurrency model
 
 One `Mutex<DeviceProjection>` serializes filesystem record changes and lookup.
-The `kdevice` registry never invokes callbacks while holding its own lock.
+The `devnode` registry never invokes callbacks while holding its own lock.
 Removal extracts the record before running the class-specific detach callback
 or calling `cdev_del`, so those operations cannot re-enter the projection
 mutex.

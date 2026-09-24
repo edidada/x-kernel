@@ -26,7 +26,7 @@ on a single contract crate.
 - No protocol processing (L3/L4), sockets, or routing: the network stack owns
   all of that. The crate only moves framed byte buffers across the boundary.
 - No device discovery, enumeration, or binding: platform code and
-  `kdriver` own driver registration and probe.
+  `driver-compose` own driver registration and probe.
 - No concrete NIC drivers. The `fxmac` and `ixgbe` adapter sources are kept
   in-tree (`src/fxmac.rs`, `src/ixgbe.rs`) but their module declarations and
   features are disabled; they are not part of the built crate.
@@ -36,7 +36,7 @@ on a single contract crate.
 ## Scope
 
 ```text
-drivers/contracts/net/
+drivers/subsystems/net/
 ├── src/
 │   ├── lib.rs        # NetDevice, NetRxScheduler, MacAddress, re-exports
 │   ├── net_buf.rs    # NetBuf, NetBufHandle, NetBufBox, NetBufPool

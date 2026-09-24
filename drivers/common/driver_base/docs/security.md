@@ -11,7 +11,7 @@ excluded.
 ## Trust Model
 
 ```
-Driver sub-crates (block, net, display, input, vsock, virtio, kdriver)
+Driver crates (subsystems/*, drv/*)
    │
    │ safe API: DeviceKind, DriverError, DriverResult, Device
    │

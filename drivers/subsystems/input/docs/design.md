@@ -39,7 +39,7 @@ the `InputDevice` trait that drivers implement on top of the shared
 ## Scope
 
 ```text
-drivers/contracts/input/
+drivers/subsystems/input/
 ├── src/
 │   └── lib.rs        # EventType, Event, InputDeviceId, AbsInfo, InputDevice, notifier
 └── Cargo.toml

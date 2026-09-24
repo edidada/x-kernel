@@ -22,7 +22,7 @@ Upstream subsystems that depend on this module include:
   provider crate (in x-kernel, `device-res-xkernel`, backed by `memspace`,
   `kirq`, and `kdma`).
 - No global provider state or provider selection: the driver framework
-  (for example `kdriver::resource`) holds the provider instance and passes
+  (for example `driver-runtime`) holds the provider instance and passes
   it explicitly; this crate stores none.
 - No MMIO region overlap detection: rejecting overlapping maps (`Busy`) is
   owned by the `MmioOp` implementation.
@@ -52,7 +52,7 @@ traits, which is what makes drivers portable across kernels.
 ## Scope
 
 ```text
-drivers/contracts/device-res/
+drivers/common/device-res/
 ├── src/
 │   ├── lib.rs
 │   ├── dma.rs

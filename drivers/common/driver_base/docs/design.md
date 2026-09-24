@@ -6,7 +6,7 @@ This module provides the common base interfaces for all x-kernel device
 drivers: the device-category enum `DeviceKind`, the driver error type
 `DriverError` / `DriverResult`, and the `Device` trait every device must
 implement. It is the shared dependency of the driver sub-crates under
-`drivers/` (block, net, display, input, vsock, virtio, kdriver) and gives
+`drivers/` (subsystems/block, subsystems/net, …, drv/virtio) and gives
 the kernel driver framework one unified type contract.
 
 ## Background
@@ -21,7 +21,7 @@ identity.
 ## Scope
 
 ```text
-drivers/contracts/driver_base/
+drivers/common/driver_base/
 ├── src/
 │   └── lib.rs
 └── Cargo.toml
@@ -47,7 +47,7 @@ drivers/contracts/driver_base/
         ▲            ▲             ▲            ▲
         │            │             │            │
    block crate   net crate   display crate   virtio crate
-   (and kdriver, input, vsock, and all other driver sub-crates)
+   (and subsystems/*, drv/* — all other driver crates)
 ```
 
 | Component | Responsibility |

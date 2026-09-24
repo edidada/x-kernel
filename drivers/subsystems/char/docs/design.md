@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The package name is `char_driver` (directory `drivers/contracts/char/`).
+The package name is `char_driver` (directory `drivers/subsystems/char/`).
 
 `char_driver` defines the minimal contract for character device drivers that join
 the unified discover → bind → activate driver pipeline: the `CharDevice`
@@ -38,7 +38,7 @@ hand a boot-initialized device to the generic pipeline.
 ## Scope
 
 ```text
-drivers/contracts/char/
+drivers/subsystems/char/
 ├── src/
 │   └── lib.rs        # CharDevice trait, driver_base re-exports
 └── Cargo.toml

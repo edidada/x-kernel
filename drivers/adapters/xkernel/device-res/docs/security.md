@@ -35,7 +35,7 @@ device-res-xkernel
 
 The crate exposes no driver-facing `devm_*` helpers and never installs a
 global provider itself; resource acquisition must go through the
-`device_res` provider contract. `kdriver::resource` holds the static
+`device_res` provider contract. `driver-runtime` holds the static
 `XKernelResourceProvider` instance and passes it explicitly to
 `device_res::devm_*_with_provider()` and to internal adaptation paths
 such as VirtIO PCI/MSI-X that need direct provider capabilities.
@@ -78,7 +78,7 @@ Invariants:
 
 ## Concurrency And Lifecycle
 
-- The provider itself has no mutable shared state; `kdriver::resource`
+- The provider itself has no mutable shared state; `driver-runtime`
   holds the static provider reference and passes it explicitly at
   acquisition time.
 - IRQ action-list synchronization is protected by `kirq`.

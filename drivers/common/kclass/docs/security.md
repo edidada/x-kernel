@@ -12,7 +12,7 @@ reachable from the documented publish/query/subscribe API.
 ## Trust Model
 
 ```text
-    kdriver (probe success)
+    driver-compose (probe success)
        │
        │ trusted: parent DeviceObject (bound driver verified),
        │          runtime trait object (driver-constructed)
@@ -27,7 +27,7 @@ reachable from the documented publish/query/subscribe API.
 │  │   trait delegation       │
 │  ├─ Event bridge dispatch   │
 │  └─ DeviceNode metadata     │
-│      handoff to kdevice     │
+│      handoff to devnode     │
 │                             │
 │ (no unsafe boundary in      │
 │  kclass — see below)        │
@@ -38,12 +38,12 @@ reachable from the documented publish/query/subscribe API.
     knet / fs_boot / input subsystem / ...
 ```
 
-- `kclass` trusts `kdriver` to have finished the driver probe before
+- `kclass` trusts the driver model to have finished the driver probe before
   calling `publish_<class>()`, with the parent's `driver_name()` /
-  `driver_id()` set and the driver match validated by `kdevice`.
+  `driver_id()` set and the driver match validated by `devnode`.
 - `kclass` trusts the runtime trait object to be `Send + Sync` and
   internally concurrency-safe.
-- `kclass` trusts `kdevice` to dispatch `Activated` / `Removed` events in
+- `kclass` trusts `devnode` to dispatch `Activated` / `Removed` events in
   the correct order.
 - Upper subsystems trust that a `ClassDevice<T>` returned by `kclass`
   stays safely accessible after device removal (guaranteed by holding
@@ -55,16 +55,16 @@ reachable from the documented publish/query/subscribe API.
 touches hardware or external input directly. Its attack surface comes
 from:
 
-- **kdriver publish input**: the driver-supplied
+- **driver publish input**: the driver-supplied
   `parent: Arc<DeviceObject>` and `runtime: T`. kclass assumes `parent`
-  went through the full `kdevice` probe pipeline — driver matching
-  validated, `parent.state` transitions protected by `kdevice` internal
+  went through the full `devnode` probe pipeline — driver matching
+  validated, `parent.state` transitions protected by `devnode` internal
   locks.
 - **Event bridge**: the arrival order of `Activated` / `Removed` events
-  dispatched by `kdevice`. kclass trusts kdevice to dispatch only after
+  dispatched by `devnode`. kclass trusts devnode to dispatch only after
   state transitions complete.
 - **Device-node metadata**: active input and display runtimes supply immutable
-  class metadata to `kdevice`. The node registry validates class capacity and
+  class metadata to `devnode`. The node registry validates class capacity and
   owns index, major/minor, and `devname` assignment.
 - **ClassDevice trait delegation**: when upper subsystems call trait
   methods through `ClassDevice<T>`, calls delegate to the runtime trait
@@ -136,7 +136,7 @@ by a `GlobalPage` RAII allocation that lives for the kernel lifetime).
 
 | ID | Threat | Impact | Trigger | Existing control |
 |------|----------|----------|----------|----------|
-| T-02 | Event bridge fires before `kdevice` is initialized | High | `ensure_event_bridge` called before `kdevice::init_device_registry` | kdriver runs `init_device_registry` before any `publish_*`; the `ACTIVATION_BRIDGE` lazy init fires at first publish |
+| T-02 | Event bridge fires before `devnode` is initialized | High | `ensure_event_bridge` called before `devnode` initialization | driver-compose initializes the domain before any `publish_*`; publication notifies subscribers directly (the legacy event bridge is gone) |
 | T-03 | Publish race loses or duplicates a device | Medium | Concurrent publish of the same device | `SpinNoPreempt` serializes; a second publish of the same id returns `AlreadyExists` |
 | T-04 | A subscriber callback panics, skipping later subscribers | Medium | One callback panics inside the notification `for` loop | Callbacks run outside `catch_unwind`; currently no unwind protection — subscriber quality is relied upon |
 | T-05 | `with()` on a removed `ClassDevice` reaches freed runtime | Medium | Runtime trait object dropped before `ClassDeviceInner` | All `ClassDeviceInner` fields (including runtime) drop together; `Arc` counting delays drop until all references are gone |
@@ -163,7 +163,7 @@ Impact levels:
 | F-06 | `devices()` returns a very large `Vec` | Many devices active at once | Allocation may fail | Caller gets an empty `Vec` (no OOM handling) | 4 | `Vec::collect` may fail; callers should handle empty results |
 | F-07 | Duplicate publish | Driver bypasses the normal remove/add lifecycle | publish returns `AlreadyExists` | New runtime not visible | 4 | Class-specific publish is rolled back; the resident object is kept |
 | F-08 | Missing input metadata | Non-input class does not override `class_metadata` | `physical_location()` / `unique_id()` return empty strings | Input device identity incomplete | 4 | `ClassRuntimeMetadata` default returns `empty()`; the input class overrides explicitly |
-| F-09 | Device-node allocation fails | The fixed class index range is exhausted | No `/dev` or `/sys` projection is created for the runtime | Linux-compatible discovery is unavailable for that device | 3 | kdevice returns an error; kclass logs it and still notifies typed class consumers |
+| F-09 | Device-node allocation fails | The fixed class index range is exhausted | No `/dev` or `/sys` projection is created for the runtime | Linux-compatible discovery is unavailable for that device | 3 | devnode returns an error; kclass logs it and still notifies typed class consumers |
 
 Severity levels:
 

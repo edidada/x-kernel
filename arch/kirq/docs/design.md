@@ -81,7 +81,7 @@ arch/kirq/src/
 trap adapters remain in `khal::irq`; x86 APIC MSI vector allocation is an
 irqchip/backend detail reached through `kirq::MsiBackendIf`, not through
 `khal`. `IPI_IRQ` stays at Kconfig call sites such as `kipi`, not in `kirq`.
-Driver devres integration is owned by `kdriver::resource`, which translates
+Driver devres integration is owned by `driver-runtime`, which translates
 `device_res` IRQ resources into `kirq` descriptors and handlers.
 
 ## 架构
@@ -279,7 +279,7 @@ domain、affinity 和 flags，但不会丢掉已经确认的 metadata。hwirq、
 single-action API：它只允许空 line 上安装一个非 shared action，第二次 regular
 registration 继续返回 `false` 并记录 warning。`register_shared()` /
 `try_register_shared()` 会安装带 `IrqActionToken` 的 shared action；同一 line 上的
-shared action 由 `kirq` 在 dispatch 中统一 fanout，`kdriver::resource` 只保存
+shared action 由 `kirq` 在 dispatch 中统一 fanout，`driver-runtime` 只保存
 devres token 与 `IrqActionToken` 的适配关系。shared action 当前只支持默认
 auto-enable 路径，不暴露 disabled shared registration API。后续 shared action
 注册如果补齐了更具体的 descriptor metadata，`kirq` 会在不改变当前 enable/depth
@@ -340,20 +340,20 @@ future-only thread slot 的 action 在当前非线程化 core 中不可 dispatch
 - 同一 `virq` 不能同时作为两条不同 `(domain, hwirq)` mapping 的目标；显式 `virq`
   插入 mapping 前必须检查反向一致性。
 
-`kdriver::resource` 是 devres IRQ vocabulary 到 `kirq` 的边界 adapter。无
+`driver-runtime` 是 devres IRQ vocabulary 到 `kirq` 的边界 adapter。无
 `hwirq/domain/controller` metadata 的 `IrqResource` 必须转换成
 `IrqSpec::PlainVirq`；带硬件 routing metadata 的 resource 才转换成
 `IrqSpec::Desc`。这样 device resource 的 plain IRQ handle 不会误入 descriptor
 merge/mapping 分支。
 
 devres IRQ request 通过 `kirq::try_register_shared()` 安装 shared action，并把返回的
-`IrqActionToken` 包装成 `device_res::IrqHandlerToken`。release 时，`kdriver` 使用
+`IrqActionToken` 包装成 `device_res::IrqHandlerToken`。release 时，`driver-runtime` 使用
 `kirq::free_irq_action()` 删除单个 action；只有最后一个 action 离开时，
 `kirq` 才 mask line、等待 `in_flight` 归零并清理 descriptor。这样 shared IRQ 的
 fanout、teardown 和后续 threaded/oneshot 扩展点都集中在 IRQ core，而不是隐藏在
 devres adapter 的本地聚合表中。handler return 的 `IrqEvent` 由 `kirq`
 在同一 line 的 fanout 完成后合并；数据就绪通知由设备子系统负责。
-`kdriver` 不参与 IRQ wake bridge；它只负责 devres IRQ
+`driver-runtime` 不参与 IRQ wake bridge；它只负责 devres IRQ
 resource 到 `kirq` action 生命周期的适配。
 
 ### MSI/MSI-X
@@ -824,7 +824,7 @@ softirq、workerqueue 和 threaded IRQ 扩展持续依赖 HAL trap-entry 细节�
 ### 为什么 devres 只适配到 `kirq`
 
 `device_res` 是驱动框架的 OS-neutral resource model。它描述驱动需要的 IRQ 资源，
-但不拥有内核中断处理语义。x-kernel 的 devres provider 位于 `kdriver::resource`，
+但不拥有内核中断处理语义。x-kernel 的 devres provider 位于 `driver-runtime`，
 负责把 `device_res` 的 trigger/controller/domain/event/handler 转换为 `kirq`
 类型。这样驱动框架获得内核 IRQ 能力，同时 `kirq` 不反向依赖驱动框架。
 

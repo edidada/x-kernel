@@ -43,7 +43,7 @@ controller kind, generic PCI host bridge facts, the PMU IRQ, and the
 - No DTB parsing itself: structure parsing, node iteration, and property
   bytes belong to `rs_fdtree`; this crate only interprets them.
 - No device instantiation or driver binding: callers turn nodes into
-  devices; `kdriver` owns probing.
+  devices; `driver-compose` owns probing.
 - No interrupt controller programming: decoded `InterruptInfo` is data for
   `kirq`-based platform init, not a controller driver.
 - No MMIO mapping and no memory adoption: region arrays describe physical
