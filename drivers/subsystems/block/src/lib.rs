@@ -5,9 +5,9 @@
 //! Linux-style block-device core.
 //!
 //! Drivers provide [`BlockDeviceOperations`]. The block core owns persistent
-//! disk identity in [`Gendisk`], request geometry in [`RequestQueue`], and the
-//! whole-disk [`BlockDevice`] view. Capacity and offsets use fixed 512-byte
-//! sectors, while backend I/O remains aligned to the queue's logical block size.
+//! disk identity in [`Gendisk`], publishes the whole-disk [`BlockDevice`] view,
+//! validates capacity and I/O extents, and keeps generic disk state such as
+//! read-only status out of individual filesystems and drivers.
 
 #![no_std]
 #![cfg_attr(doc, feature(doc_cfg))]
@@ -22,40 +22,23 @@ pub mod ramdisk;
 #[cfg(feature = "ramdisk-static")]
 pub mod ramdisk_static;
 
+pub mod dispatch;
 #[cfg(feature = "ramdisk-static")]
 pub mod ramdisk_image;
-pub mod dispatch;
 
-use alloc::{
-    boxed::Box,
-    collections::BTreeMap,
-    string::String,
-    sync::{Arc, Weak},
-    vec::Vec,
-};
-use core::{
-    ops::Deref,
-    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
-};
+use alloc::{boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use devnode::DeviceNumber;
-use kerrno::{KError, KResult};
-use klazy::Lazy;
-use ksync::Mutex;
-
 // #[cfg(feature = "bcm2835-sdhci")]
-
-
-
-
-mod queue;
 
 // #[cfg(feature = "ahci")]
 // #[cfg(feature = "sdmmc")]
-
 #[doc(no_inline)]
 pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
-pub use queue::{QueueLimits, RequestQueue, SECTOR_SHIFT, SECTOR_SIZE};
+use kerrno::{KError, KResult};
+use klazy::Lazy;
+use ksync::Mutex;
 
 bitflags::bitflags! {
     /// Access mode passed from an opened block-device file to the block driver.
@@ -184,11 +167,11 @@ impl<T: BlockDeviceOperations + ?Sized> BlockDeviceOperations for Arc<T> {
     }
 }
 
-/// A generic disk and its whole-device view.
+/// A registered generic disk.
 ///
-/// This is the counterpart of Linux `struct gendisk`: disk identity, queue,
-/// state and driver operations belong to this object. Its lifetime is owned
-/// through `part0`, just as Linux `disk_to_dev()` uses `part0->bd_device`.
+/// This is the object-oriented counterpart of Linux `struct gendisk`: it owns
+/// the user-visible disk identity and delegates I/O to driver-private
+/// operations.
 pub struct Gendisk {
     name: String,
     major: u32,
@@ -198,7 +181,7 @@ pub struct Gendisk {
     state: AtomicUsize,
     operations: Box<dyn BlockDeviceOperations + Send + Sync>,
     devnode_parent_path: Option<String>,
-    devnode_modalias: Option<String>,>>>>>>> 9faa13552 (feat(devnode): data-driven userland node projection with block and MODALIAS)
+    devnode_modalias: Option<String>,
 }
 
 impl Gendisk {
@@ -207,24 +190,24 @@ impl Gendisk {
     /// # Errors
     ///
     /// Returns [`DriverError::InvalidInput`] for an empty name, an invalid
-    /// minor range, invalid queue geometry, or a byte capacity that overflows
-    /// `u64`.
-    pub fn alloc(
+    /// minor range, a zero block size, or a byte capacity that overflows `u64`.
+    pub fn new(
         name: String,
         major: u32,
         first_minor: u32,
         minors: u32,
         operations: Box<dyn BlockDeviceOperations + Send + Sync>,
-    ) -> DriverResult<GendiskRef> {
-        let limits = QueueLimits::new(operations.block_size())?;
-        let capacity_sectors = operations
-            .num_blocks()
-            .checked_mul(limits.logical_block_sectors())
-            .ok_or(DriverError::InvalidInput)?;
+    ) -> DriverResult<Self> {
+        let block_size = operations.block_size();
+        let capacity_is_valid = u64::try_from(block_size)
+            .ok()
+            .filter(|block_size| *block_size != 0)
+            .and_then(|block_size| operations.num_blocks().checked_mul(block_size))
+            .is_some();
         if name.is_empty()
             || minors == 0
             || first_minor.checked_add(minors - 1).is_none()
-            || capacity_sectors > u64::MAX >> SECTOR_SHIFT
+            || !capacity_is_valid
         {
             return Err(DriverError::InvalidInput);
         }
@@ -239,21 +222,21 @@ impl Gendisk {
             operations,
             devnode_parent_path: None,
             devnode_modalias: None,
-        })>>>>>>> 9faa13552 (feat(devnode): data-driven userland node projection with block and MODALIAS)
+        })
     }
 
     /// Returns the block major assigned to this disk.
-    pub fn major(&self) -> u32 {
+    pub const fn major(&self) -> u32 {
         self.major
     }
 
     /// Returns the first minor assigned to this disk.
-    pub fn first_minor(&self) -> u32 {
+    pub const fn first_minor(&self) -> u32 {
         self.first_minor
     }
 
     /// Returns the number of consecutive minors owned by this disk.
-    pub fn minors(&self) -> u32 {
+    pub const fn minors(&self) -> u32 {
         self.minors
     }
 
@@ -278,7 +261,7 @@ impl Gendisk {
     pub fn with_devnode_context(mut self, parent_path: &str, modalias: Option<String>) -> Self {
         self.devnode_parent_path = Some(String::from(parent_path));
         self.devnode_modalias = modalias;
-        self>>>>>>> 9faa13552 (feat(devnode): data-driven userland node projection with block and MODALIAS)
+        self
     }
 }
 
@@ -296,17 +279,65 @@ impl Device for Gendisk {
     }
 }
 
+impl BlockDeviceOperations for Gendisk {
+    fn num_blocks(&self) -> u64 {
+        self.operations.num_blocks()
+    }
+
+    fn block_size(&self) -> usize {
+        self.operations.block_size()
+    }
+
+    fn is_inherently_read_only(&self) -> bool {
+        self.is_inherently_read_only
+    }
+
+    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+        self.operations.read_block(block_id, buf)
+    }
+
+    fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
+        self.operations.write_block(block_id, buf)
+    }
+
+    fn flush(&self) -> DriverResult {
+        self.operations.flush()
+    }
+
+    fn open(&self, device: &BlockDevice, mode: BlockOpenMode) -> KResult<()> {
+        self.operations.open(device, mode)
+    }
+
+    fn release(&self, device: &BlockDevice) {
+        self.operations.release(device)
+    }
+
+    fn ioctl(
+        &self,
+        device: &BlockDevice,
+        mode: BlockOpenMode,
+        cmd: u32,
+        arg: usize,
+    ) -> KResult<usize> {
+        self.operations.ioctl(device, mode, cmd, arg)
+    }
+
+    fn set_read_only(&self, device: &BlockDevice, read_only: bool) -> KResult<()> {
+        self.operations.set_read_only(device, read_only)
+    }
+}
+
 /// A block-device view identified by one Linux-style device number.
 ///
 /// This corresponds to Linux `struct block_device`. The current block core
-/// creates the whole-disk view (`part0`); its start and length use the same
-/// fixed 512-byte sector unit as Linux `bd_start_sect` and `bd_nr_sectors`.
+/// creates the whole-disk view (`part0`); the start and length fields already
+/// express the Linux partition boundary without introducing a second device
+/// identity model.
 pub struct BlockDevice {
     disk: Arc<Gendisk>,
-    queue: Arc<RequestQueue>,
     device_number: DeviceNumber,
-    start_sector: u64,
-    num_sectors: AtomicU64,
+    start_block: u64,
+    num_blocks: AtomicU64,
     exclusive_holder: Mutex<bool>,
 }
 
@@ -349,14 +380,14 @@ impl Drop for BlockDeviceClaim {
 }
 
 impl BlockDevice {
-    fn whole(disk: Arc<Gendisk>, capacity_sectors: u64) -> Self {
+    fn whole(disk: Arc<Gendisk>) -> Self {
         let device_number = disk.device_number();
+        let num_blocks = disk.num_blocks();
         Self {
-            queue: disk.queue.clone(),
             disk,
             device_number,
-            start_sector: 0,
-            num_sectors: AtomicU64::new(capacity_sectors),
+            start_block: 0,
+            num_blocks: AtomicU64::new(num_blocks),
             exclusive_holder: Mutex::new(false),
         }
     }
@@ -387,57 +418,57 @@ impl BlockDevice {
         self.device_number
     }
 
-    /// Returns this device's owning generic disk (`bd_disk`).
-    ///
-    /// The disk remains alive for this device's entire lifetime, including
-    /// before publication and after removal from the registry.
-    pub fn disk(&self) -> &Gendisk {
+    /// Returns the owning generic disk (`bd_disk`).
+    pub fn disk(&self) -> &Arc<Gendisk> {
         &self.disk
     }
 
-    /// Returns the request queue used by this block-device view (`bd_queue`).
-    pub fn queue(&self) -> &Arc<RequestQueue> {
-        &self.queue
+    /// Returns the first backend block visible through this device.
+    pub const fn start_block(&self) -> u64 {
+        self.start_block
     }
 
-    /// Returns the first 512-byte sector visible through this device.
-    pub const fn start_sector(&self) -> u64 {
-        self.start_sector
+    /// Returns the number of backend blocks visible through this device.
+    pub fn num_blocks(&self) -> u64 {
+        self.num_blocks.load(Ordering::Acquire)
     }
 
-    /// Returns the number of 512-byte sectors visible through this device.
-    pub fn num_sectors(&self) -> u64 {
-        self.num_sectors.load(Ordering::Acquire)
-    }
-
-    /// Updates this view's capacity in 512-byte sectors.
+    /// Updates this view's capacity in backend blocks.
     ///
     /// This is the object-oriented equivalent of Linux `set_capacity()` and is
     /// used by media whose size changes after publication, such as loop disks.
     ///
     /// # Errors
     ///
-    /// Returns [`DriverError::InvalidInput`] when `capacity_sectors * 512`
+    /// Returns [`DriverError::InvalidInput`] when the resulting byte capacity
     /// cannot be represented in `u64`.
-    pub fn set_capacity(&self, capacity_sectors: u64) -> DriverResult<()> {
-        if capacity_sectors > u64::MAX >> SECTOR_SHIFT {
-            return Err(DriverError::InvalidInput);
-        }
-        self.num_sectors.store(capacity_sectors, Ordering::Release);
+    pub fn set_capacity(&self, num_blocks: u64) -> DriverResult<()> {
+        let block_size = u64::try_from(self.block_size()).map_err(|_| DriverError::InvalidInput)?;
+        num_blocks
+            .checked_mul(block_size)
+            .ok_or(DriverError::InvalidInput)?;
+        self.num_blocks.store(num_blocks, Ordering::Release);
         Ok(())
     }
 
-    /// Returns the queue's logical block size in bytes.
+    /// Returns the size of one backend block in bytes.
     pub fn block_size(&self) -> usize {
-        self.queue.limits().logical_block_size() as usize
+        self.disk.block_size()
     }
 
     /// Returns this device's capacity in bytes.
+    /// Returns the disk size in bytes (`num_blocks * block_size`).
     ///
-    /// [`Gendisk::alloc`] and [`Self::set_capacity`] ensure that the sector
-    /// capacity is representable in bytes.
+    /// # Panics
+    ///
+    /// Panics only if the block size or capacity were not validated at
+    /// publication time, which [`Gendisk::new`] and [`Self::set_capacity`]
+    /// already enforce.
     pub fn size(&self) -> u64 {
-        self.num_sectors() << SECTOR_SHIFT
+        let block_size = u64::try_from(self.block_size()).expect("validated block size");
+        self.num_blocks()
+            .checked_mul(block_size)
+            .expect("validated block-device capacity")
     }
 
     /// Returns whether inherent or administrative policy prohibits writes.
@@ -475,101 +506,29 @@ impl BlockDevice {
 
     /// Returns the user-visible disk name through the owning `gendisk`.
     pub fn name(&self) -> &str {
-        &self.disk.name
+        self.disk.name()
     }
 
-    /// Reads one or more contiguous logical blocks from this device view.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DriverError::InvalidInput`] for an unaligned or out-of-range
-    /// request. Backend failures are propagated unchanged.
-    pub fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
-        let backend_block = self.backend_block(block_id, buf.len())?;
-        self.disk.operations.read_block(backend_block, buf)
-    }
-
-    /// Writes one or more contiguous logical blocks to this device view.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DriverError::ReadOnly`] when writes are prohibited and
-    /// [`DriverError::InvalidInput`] for an unaligned or out-of-range request.
-    /// Backend failures are propagated unchanged.
-    pub fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
-        if self.is_read_only() {
-            return Err(DriverError::ReadOnly);
-        }
-        let backend_block = self.backend_block(block_id, buf.len())?;
-        self.disk.operations.write_block(backend_block, buf)
-    }
-
-    /// Flushes pending writes through the driver operations table.
-    ///
-    /// # Errors
-    ///
-    /// Propagates the backend flush error unchanged.
-    pub fn flush(&self) -> DriverResult {
-        self.disk.operations.flush()
-    }
-
-    /// Opens this block-device view with the requested access mode.
-    ///
-    /// # Errors
-    ///
-    /// Propagates the driver open error unchanged.
-    pub fn open(&self, mode: BlockOpenMode) -> KResult<()> {
-        self.disk.operations.open(self, mode)
-    }
-
-    /// Releases a previously opened block-device view.
-    pub fn release(&self) {
-        self.disk.operations.release(self);
-    }
-
-    /// Passes a device-specific ioctl to the driver operations table.
-    ///
-    /// Generic block ioctls are consumed before this method is called.
-    ///
-    /// # Errors
-    ///
-    /// Propagates the driver ioctl error unchanged.
-    pub fn driver_ioctl(&self, mode: BlockOpenMode, cmd: u32, arg: usize) -> KResult<usize> {
-        self.disk.operations.ioctl(self, mode, cmd, arg)
-    }
-
-    fn backend_block(&self, block_id: u64, len: usize) -> DriverResult<u64> {
+    fn validate_io(&self, block_id: u64, len: usize) -> DriverResult<()> {
         let block_size = self.block_size();
-        if !len.is_multiple_of(block_size) {
+        if block_size == 0 || !len.is_multiple_of(block_size) {
             return Err(DriverError::InvalidInput);
         }
-        let logical_block_sectors = self.queue.limits().logical_block_sectors();
-        let relative_sector = block_id
-            .checked_mul(logical_block_sectors)
+        let blocks = u64::try_from(len / block_size).map_err(|_| DriverError::InvalidInput)?;
+        let end = block_id
+            .checked_add(blocks)
             .ok_or(DriverError::InvalidInput)?;
-        let len_sectors =
-            u64::try_from(len >> SECTOR_SHIFT).map_err(|_| DriverError::InvalidInput)?;
-        let end_sector = relative_sector
-            .checked_add(len_sectors)
-            .ok_or(DriverError::InvalidInput)?;
-        let capacity_sectors = self.num_sectors();
-        if relative_sector > capacity_sectors || end_sector > capacity_sectors {
+        let capacity = self.num_blocks();
+        if block_id > capacity || end > capacity {
             return Err(DriverError::InvalidInput);
         }
-        let backend_sector = self
-            .start_sector
-            .checked_add(relative_sector)
-            .ok_or(DriverError::InvalidInput)?;
-        if !backend_sector.is_multiple_of(logical_block_sectors) {
-            return Err(DriverError::InvalidInput);
-        }
-        Ok(backend_sector / logical_block_sectors)
+        Ok(())
     }
 }
 
 impl Device for BlockDevice {
     fn name(&self) -> &str {
-        &self.disk.name
+        self.disk.name()
     }
 
     fn device_kind(&self) -> DeviceKind {
@@ -577,20 +536,17 @@ impl Device for BlockDevice {
     }
 
     fn irq(&self) -> Option<usize> {
-        None
+        self.disk.irq()
     }
 }
 
-// kext4 still consumes the synchronous operations interface until its Bio
-// migration. This derived view delegates to the canonical `BlockDevice`
-// methods and owns no geometry or capacity state of its own.
 impl BlockDeviceOperations for BlockDevice {
     fn num_blocks(&self) -> u64 {
-        self.num_sectors() / self.queue.limits().logical_block_sectors()
+        self.num_blocks()
     }
 
     fn block_size(&self) -> usize {
-        BlockDevice::block_size(self)
+        self.disk.block_size()
     }
 
     fn is_inherently_read_only(&self) -> bool {
@@ -598,23 +554,36 @@ impl BlockDeviceOperations for BlockDevice {
     }
 
     fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
-        BlockDevice::read_block(self, block_id, buf)
+        self.validate_io(block_id, buf.len())?;
+        let backend_block = self
+            .start_block
+            .checked_add(block_id)
+            .ok_or(DriverError::InvalidInput)?;
+        self.disk.read_block(backend_block, buf)
     }
 
     fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
-        BlockDevice::write_block(self, block_id, buf)
+        if self.is_read_only() {
+            return Err(DriverError::ReadOnly);
+        }
+        self.validate_io(block_id, buf.len())?;
+        let backend_block = self
+            .start_block
+            .checked_add(block_id)
+            .ok_or(DriverError::InvalidInput)?;
+        self.disk.write_block(backend_block, buf)
     }
 
     fn flush(&self) -> DriverResult {
-        BlockDevice::flush(self)
+        self.disk.flush()
     }
 
     fn open(&self, _device: &BlockDevice, mode: BlockOpenMode) -> KResult<()> {
-        BlockDevice::open(self, mode)
+        self.disk.open(self, mode)
     }
 
     fn release(&self, _device: &BlockDevice) {
-        BlockDevice::release(self);
+        self.disk.release(self);
     }
 
     fn ioctl(
@@ -624,40 +593,48 @@ impl BlockDeviceOperations for BlockDevice {
         cmd: u32,
         arg: usize,
     ) -> KResult<usize> {
-        self.driver_ioctl(mode, cmd, arg)
+        self.disk.ioctl(self, mode, cmd, arg)
     }
 
     fn set_read_only(&self, _device: &BlockDevice, read_only: bool) -> KResult<()> {
-        self.set_disk_read_only(read_only)
+        self.disk.set_read_only(self, read_only)
     }
 }
 
 impl Gendisk {
     /// Returns the device number assigned to the whole disk.
-    pub fn device_number(&self) -> DeviceNumber {
+    pub const fn device_number(&self) -> DeviceNumber {
         DeviceNumber::new(self.major, self.first_minor)
+    }
+
+    /// Returns this disk's registered whole-device view, if it is added.
+    pub fn part0(&self) -> Option<Arc<BlockDevice>> {
+        lookup_block_device(self.device_number())
+            .filter(|device| core::ptr::eq::<Gendisk>(device.disk().as_ref(), self))
     }
 }
 
-static BLOCK_DEVICES: Lazy<Mutex<BTreeMap<DeviceNumber, GendiskRef>>> =
+static BLOCK_DEVICES: Lazy<Mutex<BTreeMap<DeviceNumber, Arc<BlockDevice>>>> =
     Lazy::new(|| Mutex::new(BTreeMap::new()));
 
-/// Publishes a generic disk's existing whole-device `part0` view.
+/// Adds a generic disk and creates its whole-device `part0` view.
 ///
 /// # Errors
 ///
 /// Returns [`DriverError::InvalidInput`] when no major has been assigned, or
 /// [`DriverError::AlreadyExists`] when the device-number range conflicts with
 /// an existing disk.
-pub fn add_disk(disk: GendiskRef) -> DriverResult<Arc<BlockDevice>> {
+pub fn add_disk(disk: Arc<Gendisk>) -> DriverResult<Arc<BlockDevice>> {
     if disk.major() == 0 {
         return Err(DriverError::InvalidInput);
     }
     let device_number = disk.device_number();
+    let part0 = Arc::new(BlockDevice::whole(disk.clone()));
     let mut devices = BLOCK_DEVICES.lock();
     let first_minor = disk.first_minor();
     let last_minor = first_minor + disk.minors() - 1;
-    let conflicts = devices.values().any(|registered| {
+    let conflicts = devices.values().any(|device| {
+        let registered = device.disk();
         if registered.major() != disk.major() {
             return false;
         }
@@ -695,24 +672,17 @@ pub fn del_gendisk(device_number: DeviceNumber) -> Option<Arc<Gendisk>> {
     devices.retain(|_, device| !Arc::ptr_eq(device.disk(), &disk));
     drop(devices);
     devnode::withdraw(device_number.0);
-    Some(disk)>>>>>>> 9faa13552 (feat(devnode): data-driven userland node projection with block and MODALIAS)
+    Some(disk)
 }
 
 /// Looks up a registered block-device view by `dev_t`.
 pub fn lookup_block_device(device_number: DeviceNumber) -> Option<Arc<BlockDevice>> {
-    BLOCK_DEVICES
-        .lock()
-        .get(&device_number)
-        .map(|disk| disk.part0())
+    BLOCK_DEVICES.lock().get(&device_number).cloned()
 }
 
 /// Returns a snapshot of all registered block-device views.
 pub fn block_devices() -> Vec<Arc<BlockDevice>> {
-    BLOCK_DEVICES
-        .lock()
-        .values()
-        .map(|disk| disk.part0())
-        .collect()
+    BLOCK_DEVICES.lock().values().cloned().collect()
 }
 
 #[cfg(unittest)]
@@ -726,10 +696,7 @@ mod tests {
 
     const BLOCK_SIZE: usize = 512;
 
-    struct MemoryDisk {
-        block_size: usize,
-        storage: Mutex<Vec<u8>>,
-    }
+    struct MemoryDisk(Mutex<Vec<u8>>);
 
     struct GeometryDisk {
         blocks: u64,
@@ -740,53 +707,36 @@ mod tests {
 
     impl MemoryDisk {
         fn new(blocks: u64) -> Self {
-            Self::with_block_size(blocks, BLOCK_SIZE)
-        }
-
-        fn with_block_size(blocks: u64, block_size: usize) -> Self {
-            let blocks = usize::try_from(blocks).expect("test block count must fit in usize");
-            let len = blocks
-                .checked_mul(block_size)
-                .expect("test disk size must fit in usize");
-            Self {
-                block_size,
-                storage: Mutex::new(vec![0; len]),
-            }
+            Self(Mutex::new(vec![0; blocks as usize * BLOCK_SIZE]))
         }
     }
 
     impl BlockDeviceOperations for MemoryDisk {
         fn num_blocks(&self) -> u64 {
-            (self.storage.lock().len() / self.block_size) as u64
+            (self.0.lock().len() / BLOCK_SIZE) as u64
         }
 
         fn block_size(&self) -> usize {
-            self.block_size
+            BLOCK_SIZE
         }
 
         fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
-            let block_id = usize::try_from(block_id).map_err(|_| DriverError::InvalidInput)?;
-            let start = block_id
-                .checked_mul(self.block_size)
-                .ok_or(DriverError::InvalidInput)?;
+            let start = block_id as usize * BLOCK_SIZE;
             let end = start
                 .checked_add(buf.len())
                 .ok_or(DriverError::InvalidInput)?;
-            let storage = self.storage.lock();
+            let storage = self.0.lock();
             let source = storage.get(start..end).ok_or(DriverError::InvalidInput)?;
             buf.copy_from_slice(source);
             Ok(())
         }
 
         fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
-            let block_id = usize::try_from(block_id).map_err(|_| DriverError::InvalidInput)?;
-            let start = block_id
-                .checked_mul(self.block_size)
-                .ok_or(DriverError::InvalidInput)?;
+            let start = block_id as usize * BLOCK_SIZE;
             let end = start
                 .checked_add(buf.len())
                 .ok_or(DriverError::InvalidInput)?;
-            let mut storage = self.storage.lock();
+            let mut storage = self.0.lock();
             let target = storage
                 .get_mut(start..end)
                 .ok_or(DriverError::InvalidInput)?;
@@ -847,81 +797,17 @@ mod tests {
         }
     }
 
-    fn disk(name: &str, major: u32, first_minor: u32, minors: u32) -> GendiskRef {
-        Gendisk::alloc(
-            String::from(name),
-            major,
-            first_minor,
-            minors,
-            Box::new(MemoryDisk::new(8)),
+    fn disk(name: &str, major: u32, first_minor: u32, minors: u32) -> Arc<Gendisk> {
+        Arc::new(
+            Gendisk::new(
+                String::from(name),
+                major,
+                first_minor,
+                minors,
+                Box::new(MemoryDisk::new(8)),
+            )
+            .expect("valid test disk"),
         )
-        .expect("valid test disk")
-    }
-
-    #[def_test]
-    fn unpublished_part0_keeps_its_complete_disk_alive() {
-        let backend = Arc::new(MemoryDisk::new(8));
-        let backend_weak = Arc::downgrade(&backend);
-        let disk = Gendisk::alloc(
-            String::from("test-unpublished"),
-            239,
-            0,
-            1,
-            Box::new(backend),
-        )
-        .expect("valid unpublished disk");
-        let part0 = disk.part0();
-        let disk_weak = Arc::downgrade(&part0.disk);
-        let part0_weak = Arc::downgrade(&part0);
-        let queue_weak = Arc::downgrade(disk.queue());
-        let disk_identity = part0.disk() as *const Gendisk;
-
-        assert_eq!(part0.device_number(), DeviceNumber::new(239, 0));
-        assert_eq!(part0.start_sector(), 0);
-        assert_eq!(part0.num_sectors(), 8);
-        assert!(Arc::ptr_eq(disk.queue(), part0.queue()));
-        assert!(core::ptr::eq(part0.disk(), &*disk));
-        assert!(lookup_block_device(part0.device_number()).is_none());
-        drop(disk);
-
-        assert!(core::ptr::eq(part0.disk(), disk_identity));
-        assert_eq!(part0.disk().name(), "test-unpublished");
-        assert!(Arc::ptr_eq(&part0.disk().part0(), &part0));
-        part0
-            .write_block(0, &[0x5a; BLOCK_SIZE])
-            .expect("write unpublished disk");
-        let mut data = [0; BLOCK_SIZE];
-        part0
-            .read_block(0, &mut data)
-            .expect("read unpublished disk");
-        assert_eq!(data, [0x5a; BLOCK_SIZE]);
-        assert!(backend_weak.upgrade().is_some());
-        drop(part0);
-
-        assert!(part0_weak.upgrade().is_none());
-        assert!(disk_weak.upgrade().is_none());
-        assert!(queue_weak.upgrade().is_none());
-        assert!(backend_weak.upgrade().is_none());
-    }
-
-    #[def_test]
-    fn cloned_disk_reference_keeps_canonical_part0_alive() {
-        let disk = disk("test-disk-reference", 249, 0, 1);
-        let part0 = disk.part0();
-        let part0_weak = Arc::downgrade(&part0);
-        let disk_weak = Arc::downgrade(&part0.disk);
-        let retained = disk.clone();
-        drop(part0);
-        drop(disk);
-
-        assert!(Arc::ptr_eq(
-            &retained.part0(),
-            &part0_weak.upgrade().expect("retained part0"),
-        ));
-        assert!(core::ptr::eq(retained.part0().disk(), &*retained));
-        drop(retained);
-        assert!(part0_weak.upgrade().is_none());
-        assert!(disk_weak.upgrade().is_none());
     }
 
     #[def_test(serial)]
@@ -932,7 +818,7 @@ mod tests {
             &part0,
             &lookup_block_device(DeviceNumber::new(240, 64)).expect("lookup part0")
         ));
-        assert!(Arc::ptr_eq(&part0, &first.part0()));
+        assert!(Arc::ptr_eq(&part0, &first.part0().expect("gendisk part0")));
 
         let overlap = disk("test-range-overlap", 240, 70, 1);
         assert!(matches!(add_disk(overlap), Err(DriverError::AlreadyExists)));
@@ -964,16 +850,16 @@ mod tests {
     fn set_capacity_updates_the_resident_block_device() {
         let disk = disk("test-capacity", 242, 0, 1);
         let device = add_disk(disk.clone()).expect("publish capacity disk");
-        assert_eq!(device.num_sectors(), 8);
+        assert_eq!(device.num_blocks(), 8);
         device.set_capacity(3).expect("valid capacity");
-        assert_eq!(device.num_sectors(), 3);
+        assert_eq!(device.num_blocks(), 3);
         assert_eq!(device.size(), 3 * BLOCK_SIZE as u64);
         del_gendisk(disk.device_number()).expect("remove capacity disk");
     }
 
     #[def_test]
     fn gendisk_rejects_invalid_capacity_geometry() {
-        let zero_block_size = Gendisk::alloc(
+        let zero_block_size = Gendisk::new(
             String::from("zero-block-size"),
             245,
             0,
@@ -985,104 +871,17 @@ mod tests {
         );
         assert!(matches!(zero_block_size, Err(DriverError::InvalidInput)));
 
-        let overflowing_size = Gendisk::alloc(
+        let overflowing_size = Gendisk::new(
             String::from("overflowing-size"),
             245,
             0,
             1,
             Box::new(GeometryDisk {
                 blocks: u64::MAX,
-                block_size: BLOCK_SIZE,
+                block_size: 2,
             }),
         );
         assert!(matches!(overflowing_size, Err(DriverError::InvalidInput)));
-
-        let oversized_block = Gendisk::alloc(
-            String::from("oversized-logical-block"),
-            245,
-            0,
-            1,
-            Box::new(GeometryDisk {
-                blocks: 1,
-                block_size: 8192,
-            }),
-        );
-        assert!(matches!(oversized_block, Err(DriverError::InvalidInput)));
-    }
-
-    #[def_test]
-    fn four_kib_logical_io_uses_sector_capacity() {
-        let disk = Gendisk::alloc(
-            String::from("four-k-logical-blocks"),
-            247,
-            0,
-            1,
-            Box::new(MemoryDisk::with_block_size(2, 4096)),
-        )
-        .expect("valid 4-KiB logical geometry");
-
-        let limits = disk.queue().limits();
-        assert_eq!(limits.logical_block_size(), 4096);
-        assert_eq!(limits.physical_block_size(), 4096);
-        assert_eq!(limits.io_min(), 4096);
-        assert_eq!(limits.io_opt(), 0);
-        assert_eq!(limits.alignment_offset(), 0);
-        assert_eq!(disk.part0().num_sectors(), 16);
-        assert_eq!(disk.part0().size(), 8192);
-
-        let written = vec![0x5a; 4096];
-        disk.part0()
-            .write_block(1, &written)
-            .expect("write second logical block");
-        let mut read = vec![0; 4096];
-        disk.part0()
-            .read_block(1, &mut read)
-            .expect("read second logical block");
-        assert_eq!(read, written);
-        assert_eq!(
-            disk.part0().read_block(2, &mut read).unwrap_err(),
-            DriverError::InvalidInput
-        );
-
-        disk.part0()
-            .set_capacity(9)
-            .expect("sector capacity need not fill a logical block");
-        assert_eq!(disk.part0().size(), 9 * u64::from(SECTOR_SIZE));
-        assert_eq!(
-            BlockDeviceOperations::read_block(disk.part0().as_ref(), 1, &mut read).unwrap_err(),
-            DriverError::InvalidInput
-        );
-    }
-
-    #[def_test(serial)]
-    fn existing_part0_outlives_unpublication() {
-        let disk = disk("test-unpublished-lifetime", 248, 0, 1);
-        let device = add_disk(disk.clone()).expect("publish lifetime test disk");
-        let disk_weak = Arc::downgrade(&device.disk);
-        let part0_weak = Arc::downgrade(&device);
-        let queue_weak = Arc::downgrade(device.queue());
-        let disk_identity = device.disk() as *const Gendisk;
-        let removed = del_gendisk(disk.device_number()).expect("unpublish lifetime test disk");
-        assert!(core::ptr::eq(&*removed, &*disk));
-        drop(removed);
-        drop(disk);
-
-        assert!(lookup_block_device(device.device_number()).is_none());
-        assert!(core::ptr::eq(device.disk(), disk_identity));
-        assert!(Arc::ptr_eq(&device.disk().part0(), &device));
-        assert!(Arc::ptr_eq(device.disk().queue(), device.queue()));
-        let mut data = vec![0; BLOCK_SIZE];
-        device
-            .read_block(0, &mut data)
-            .expect("existing part0 keeps its disk alive");
-        device
-            .set_disk_read_only(true)
-            .expect("disk state is still available");
-        assert_eq!(device.write_block(0, &data), Err(DriverError::ReadOnly));
-        drop(device);
-        assert!(part0_weak.upgrade().is_none());
-        assert!(disk_weak.upgrade().is_none());
-        assert!(queue_weak.upgrade().is_none());
     }
 
     #[def_test(serial)]
@@ -1095,10 +894,6 @@ mod tests {
             device.write_block(0, &[0; BLOCK_SIZE]).unwrap_err(),
             DriverError::ReadOnly
         );
-        assert_eq!(
-            BlockDeviceOperations::write_block(device.as_ref(), 0, &[0; BLOCK_SIZE]).unwrap_err(),
-            DriverError::ReadOnly
-        );
         device.set_disk_read_only(false).expect("set disk writable");
         assert!(device.write_block(0, &[0; BLOCK_SIZE]).is_ok());
         del_gendisk(disk.device_number()).expect("remove read-only disk");
@@ -1106,14 +901,16 @@ mod tests {
 
     #[def_test(serial)]
     fn inherently_read_only_disk_cannot_be_made_writable() {
-        let disk = Gendisk::alloc(
-            String::from("test-inherently-read-only"),
-            246,
-            0,
-            1,
-            Box::new(InherentlyReadOnlyDisk(MemoryDisk::new(8))),
-        )
-        .expect("valid inherently read-only disk");
+        let disk = Arc::new(
+            Gendisk::new(
+                String::from("test-inherently-read-only"),
+                246,
+                0,
+                1,
+                Box::new(InherentlyReadOnlyDisk(MemoryDisk::new(8))),
+            )
+            .expect("valid inherently read-only disk"),
+        );
         let device = add_disk(disk.clone()).expect("publish inherently read-only disk");
 
         assert!(device.is_read_only());
