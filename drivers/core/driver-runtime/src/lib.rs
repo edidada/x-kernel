@@ -33,6 +33,8 @@ mod clk;
 
 #[cfg(feature = "virtio-hal")]
 pub mod hal;
+#[cfg(feature = "virtio-hal")]
+pub mod virtio_service;
 
 use alloc::sync::Arc;
 
@@ -169,77 +171,8 @@ impl XKernelRuntime {
 }
 
 impl DeviceServices for XKernelRuntime {
-    /// Probe a virtio PCI transport: configure the function, build the
-    /// transport, resolve the irq. One place owns the PCI + provider
-    /// boilerplate every virtio driver used to duplicate.
-    #[cfg(feature = "virtio-hal")]
-    fn virtio_pci_transport(
-        &self,
-        _device: u64,
-        location: driver_core::desc::DeviceLocation,
-    ) -> Result<
-        (
-            driver_core::DeviceKind,
-            driver_core::VirtioTransport,
-            Option<usize>,
-        ),
-        RuntimeError,
-    > {
-        use driver_core::desc::DeviceLocation as Loc;
-        use pci::{DeviceFunction, PciBus as PciRootAccess};
-
-        let Loc::Pci {
-            bus: bus_nr,
-            device: dev_nr,
-            function,
-            ..
-        } = location
-        else {
-            return Err(RuntimeError::Invalid);
-        };
-        let bdf = DeviceFunction {
-            bus: bus_nr,
-            device: dev_nr,
-            function,
-        };
-
-        let mut pci_root =
-            PciRootAccess::new(pci::support::pci_cam_kind()).map_err(|_| RuntimeError::Io)?;
-        let (root, config) = pci_root.parts_mut();
-        pci::support::configure_pci_device_if_needed(root, bdf).map_err(|_| RuntimeError::Io)?;
-        let dev_info = root
-            .enumerate_bus(bus_nr)
-            .find(|(b, _)| *b == bdf)
-            .map(|(_, info)| info)
-            .ok_or(RuntimeError::BadState)?;
-
-        let provider = resource_provider();
-        let (kind, transport, irq) = virtio::probe_pci_device::<hal::Hal, pci::MmioCam<'static>>(
-            root, bdf, &dev_info, config, provider,
-        )
-        .ok_or(RuntimeError::BadState)?;
-
-        Ok((
-            kind,
-            driver_core::VirtioTransport::new(alloc::boxed::Box::new(transport)),
-            Some(irq),
-        ))
-    }
-
-    #[cfg(not(feature = "virtio-hal"))]
-    fn virtio_pci_transport(
-        &self,
-        _: u64,
-        _: driver_core::desc::DeviceLocation,
-    ) -> Result<
-        (
-            driver_core::DeviceKind,
-            driver_core::VirtioTransport,
-            Option<usize>,
-        ),
-        RuntimeError,
-    > {
-        Err(RuntimeError::Unsupported)
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 
     fn iomap(
@@ -301,4 +234,60 @@ impl DeviceServices for XKernelRuntime {
     fn clk_get(&self, _device: u64, spec: driver_core::ClkSpec) -> Result<ClkHandle, ServiceError> {
         self.clks.get(spec)
     }
+}
+
+impl XKernelRuntime {
+    /// Probe a virtio PCI transport for a device location (the
+    /// `PciTransportService` extension backend). One place owns the PCI +
+    /// provider boilerplate every virtio driver would otherwise duplicate.
+    #[cfg(feature = "virtio-hal")]
+    pub fn probe_pci_transport(
+        &self,
+        location: driver_core::desc::DeviceLocation,
+    ) -> Result<(driver_core::DeviceKind, virtio::PciTransport, Option<usize>), RuntimeError> {
+        use driver_core::desc::DeviceLocation as Loc;
+        use pci::{DeviceFunction, PciBus as PciRootAccess};
+
+        let Loc::Pci {
+            bus: bus_nr,
+            device: dev_nr,
+            function,
+            ..
+        } = location
+        else {
+            return Err(RuntimeError::Invalid.into());
+        };
+        let bdf = DeviceFunction {
+            bus: bus_nr,
+            device: dev_nr,
+            function,
+        };
+
+        let mut pci_root =
+            PciRootAccess::new(pci::support::pci_cam_kind()).map_err(|_| RuntimeError::Io)?;
+        let (root, config) = pci_root.parts_mut();
+        pci::support::configure_pci_device_if_needed(root, bdf).map_err(|_| RuntimeError::Io)?;
+        let dev_info = root
+            .enumerate_bus(bus_nr)
+            .find(|(b, _)| *b == bdf)
+            .map(|(_, info)| info)
+            .ok_or(RuntimeError::BadState)?;
+
+        let (kind, transport, irq) = virtio::probe_pci_device::<hal::Hal, pci::MmioCam<'static>>(
+            root,
+            bdf,
+            &dev_info,
+            config,
+            resource_provider(),
+        )
+        .ok_or(RuntimeError::BadState)?;
+
+        Ok((kind, transport, Some(irq)))
+    }
+}
+
+/// The Arc to the globally installed runtime (extension services capture
+/// this; install_global holds the same Arc alive).
+pub(crate) fn global_runtime_arc() -> Option<Arc<XKernelRuntime>> {
+    GLOBAL_RUNTIME.lock().clone()
 }

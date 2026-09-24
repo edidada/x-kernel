@@ -60,8 +60,8 @@ mod resource;
 
 pub use bus::{Bus, BusId, IdMatchEntry, MatchScore};
 pub use device::{
-    BoundDevice, ClkHandle, ClkOps, CoherentMem, DevIrq, DeviceCtx, DeviceServices, IoMap,
-    IrqAction, IrqHandlerFn, ReleaseHook, ServiceError, VirtioTransport,
+    BoundDevice, ClkHandle, ClkOps, CoherentMem, DevIrq, DeviceCtx, DeviceServices,
+    ExtensionService, IoMap, IrqAction, IrqHandlerFn, ReleaseHook, ServiceError,
 };
 pub use domain::{
     DataBox, DeviceDomain, DeviceSnapshot, DeviceState, ProbeStats, global_domain,

@@ -858,3 +858,50 @@ pub mod prelude {
         VsockTransportEvent, VsockTransportEventKind,
     };
 }
+
+/// The domain remove-notifier entry point: withdraws the detached
+/// publication of EVERY registered class for the owning device id. The
+/// per-class entries self-register below — the composition root calls this
+/// one function and never enumerates classes.
+pub fn remove_all_detached(owner: u64) {
+    #[cfg(feature = "char")]
+    if let Some(device) = remove_detached_char(owner) {
+        if let Some(console) = char_console_hook() {
+            console(device.id());
+        }
+    }
+    #[cfg(feature = "net")]
+    drop(remove_detached_net(owner));
+    #[cfg(feature = "input")]
+    drop(remove_detached_input(owner));
+    #[cfg(feature = "display")]
+    drop(remove_detached_display(owner));
+    #[cfg(feature = "vsock")]
+    drop(remove_detached_vsock(owner));
+    #[cfg(feature = "block")]
+    drop(remove_detached_block(owner));
+}
+
+/// Optional console-adoption hook the console runtime installs so char
+/// removals update the active console (the one class-specific consumer
+/// action that is not expressible as a removed-subscription).
+#[cfg(feature = "char")]
+static CHAR_CONSOLE_HOOK: SpinNoPreempt<Option<Arc<dyn Fn(ClassDeviceId) + Send + Sync>>> =
+    SpinNoPreempt::new(None);
+
+#[cfg(feature = "char")]
+fn char_console_hook() -> Option<Arc<dyn Fn(ClassDeviceId) + Send + Sync>> {
+    CHAR_CONSOLE_HOOK.lock().clone()
+}
+
+/// Install the console-adoption hook for char removals (called by the
+/// console runtime at init).
+#[cfg(feature = "char")]
+pub fn set_char_removal_hook(hook: Arc<dyn Fn(ClassDeviceId) + Send + Sync>) {
+    *CHAR_CONSOLE_HOOK.lock() = Some(hook);
+}
+
+#[cfg(feature = "block")]
+fn remove_detached_block(owner: u64) -> Option<ClassDevice<BlockDeviceImpl>> {
+    block_class_registry().lock().remove_detached(owner)
+}

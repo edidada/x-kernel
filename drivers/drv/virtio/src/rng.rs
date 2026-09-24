@@ -35,7 +35,7 @@ impl DriverOps<PciBus> for VirtioRngDriver {
     type Data = RngData;
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PciBus>) -> Result<RngData, ProbeError> {
-        let (kind, transport, _irq) = dev.virtio_pci_transport_as::<virtio::PciTransport>()?;
+        let (kind, transport, _irq) = crate::common::pci_transport(dev)?;
         if !matches!(kind, driver_base::DeviceKind::Char) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }

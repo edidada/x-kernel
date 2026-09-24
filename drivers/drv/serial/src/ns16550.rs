@@ -44,7 +44,9 @@ static IOPORT_IDS: &[PlatformId] = &[PlatformId::Alias(driver_core::platform::Al
 /// registry; the mapping guard (MMIO variant, cold-start path) stays here so
 /// the mapping lives exactly as long as the binding.
 pub struct SerialData {
-    #[allow(dead_code)]
+    /// Kept alive for the binding: dropping it unmaps the cold-start UART
+    /// window. Field placement (after the port) encodes release order.
+    #[allow(dead_code)] // ownership-only field: read access is intentionally impossible
     regs: Option<driver_core::IoMap>,
 }
 

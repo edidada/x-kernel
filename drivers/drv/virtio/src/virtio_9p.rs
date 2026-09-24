@@ -31,7 +31,7 @@ impl DriverOps<PciBus> for NinepDriver {
     type Data = NinepData;
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PciBus>) -> Result<NinepData, ProbeError> {
-        let (kind, transport, _irq) = dev.virtio_pci_transport_as::<virtio::PciTransport>()?;
+        let (kind, transport, _irq) = crate::common::pci_transport(dev)?;
         if !matches!(kind, driver_base::DeviceKind::Fs9p) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }

@@ -41,14 +41,11 @@ pub fn init() {
     driver_runtime::XKernelRuntime::install_global();
 
     // Drop detached class publications when their owning device goes away.
+    // One entry point: kclass owns the class list, not this composition
+    // root. (New classes become removable by existing in kclass, not by
+    // editing this closure.)
     global_domain().set_remove_notifier(Arc::new(|owner| {
-        if let Some(device) = kclass::remove_detached_char(owner) {
-            let _ = console_driver::runtime::unregister_console_device(device.id());
-        }
-        let _ = kclass::remove_detached_net(owner);
-        let _ = kclass::remove_detached_input(owner);
-        let _ = kclass::remove_detached_display(owner);
-        let _ = kclass::remove_detached_vsock(owner);
+        kclass::remove_all_detached(owner);
     }));
 
     #[cfg(feature = "fixed-clock")]

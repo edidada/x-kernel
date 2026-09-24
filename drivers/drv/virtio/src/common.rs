@@ -75,3 +75,22 @@ pub(crate) fn map_res_error(err: device_res::ResError) -> ProbeError {
     };
     ProbeError::Fatal(error)
 }
+
+/// Probe this device's virtio PCI transport through the runtime's
+/// `PciTransportService` extension: kind + concrete transport + irq, with
+/// the PCI/provider boilerplate owned by the service. Compile-time typed —
+/// the wrong transport type cannot get past the compiler.
+pub(crate) fn pci_transport<B: driver_core::Bus>(
+    dev: &mut driver_core::DeviceCtx<'_, B>,
+) -> Result<(driver_core::DeviceKind, virtio::PciTransport, Option<usize>), driver_core::ProbeError>
+{
+    let location = dev.descriptor().location;
+    let service = dev
+        .extension::<driver_runtime::virtio_service::PciTransportService>()
+        .ok_or(driver_core::ProbeError::Fatal(
+            driver_core::RuntimeError::Unsupported,
+        ))?;
+    service
+        .probe(location)
+        .map_err(driver_core::ProbeError::Fatal)
+}

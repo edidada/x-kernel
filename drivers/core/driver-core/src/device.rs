@@ -80,32 +80,22 @@ impl From<RuntimeError> for ServiceError {
     }
 }
 
-/// Opaque virtio transport probed by the service layer. The concrete
-/// backing (PCI or MMIO) is a runtime implementation detail; drivers
-/// downcast via [`VirtioTransport::downcast`] with the type their device
-/// constructor expects, or consume it through
-/// [`DeviceCtx::virtio_transport_into`].
-pub struct VirtioTransport {
-    inner: alloc::boxed::Box<dyn core::any::Any + Send + Sync>,
-}
-
-impl VirtioTransport {
-    pub fn new(inner: alloc::boxed::Box<dyn core::any::Any + Send + Sync>) -> Self {
-        Self { inner }
-    }
-
-    /// Downcast to the concrete transport type.
-    pub fn downcast<T: Send + Sync + 'static>(self) -> Option<T> {
-        self.inner.downcast::<T>().ok().map(|boxed| *boxed)
-    }
-}
-
 /// Type-erased interrupt handler registered by [`DeviceCtx::request_irq`].
 ///
 /// The handler carries its own context (the `dev_id` pattern): drivers close
 /// over a `Weak` handle into their own `Data`; there is no global irq-to-
 /// device routing table anywhere in the framework.
 pub type IrqHandlerFn = Arc<dyn Fn() -> IrqAction + Send + Sync>;
+
+/// A family-specific service extension (virtio transport probing, future
+/// controller abstractions). The family declares the trait and teaches it
+/// how to recover itself from the installed runtime's service surface;
+/// driver-core itself never names a device family.
+pub trait ExtensionService: Sized {
+    /// Recover the extension from the runtime's service object, if the
+    /// installed runtime provides this capability.
+    fn from_services(services: &dyn DeviceServices) -> Option<Self>;
+}
 
 /// The per-device service surface, implemented by the runtime layer.
 ///
@@ -143,14 +133,9 @@ pub trait DeviceServices: Send + Sync {
     /// not registered yet.
     fn clk_get(&self, device: u64, spec: ClkSpec) -> Result<ClkHandle, ServiceError>;
 
-    /// Probe the virtio transport for a PCI device: configures the function,
-    /// builds the transport, and resolves its irq. Drivers receive the
-    /// kind + transport + irq without touching PCI internals or providers.
-    fn virtio_pci_transport(
-        &self,
-        device: u64,
-        location: crate::desc::DeviceLocation,
-    ) -> Result<(crate::DeviceKind, crate::VirtioTransport, Option<usize>), RuntimeError>;
+    /// The runtime's concrete type, for extension-trait downcasts. The core
+    /// stays family-agnostic: extensions name the runtime type they support.
+    fn as_any(&self) -> &dyn core::any::Any;
 }
 
 /// A mapped MMIO region with checked volatile accessors.
@@ -609,28 +594,12 @@ impl<'a, B: Bus> DeviceCtx<'a, B> {
         ProbeError::Deferred(dep)
     }
 
-    /// Probe this device's virtio transport (PCI): returns the device kind,
-    /// the type-erased transport, and the resolved irq. The framework does
-    /// PCI configuration and provider access; the driver does neither.
-    pub fn virtio_pci_transport(
-        &mut self,
-    ) -> Result<(crate::DeviceKind, crate::VirtioTransport, Option<usize>), ProbeError> {
-        let location = self.descriptor().location;
-        self.services
-            .virtio_pci_transport(self.id, location)
-            .map_err(ProbeError::Fatal)
-    }
-
-    /// [`DeviceCtx::virtio_pci_transport`] with the transport downcast to
-    /// the concrete type the device constructor takes.
-    pub fn virtio_pci_transport_as<T: Send + Sync + 'static>(
-        &mut self,
-    ) -> Result<(crate::DeviceKind, T, Option<usize>), ProbeError> {
-        let (kind, transport, irq) = self.virtio_pci_transport()?;
-        let transport = transport
-            .downcast::<T>()
-            .ok_or(ProbeError::Fatal(RuntimeError::BadState))?;
-        Ok((kind, transport, irq))
+    /// Look up a family-specific service extension on the installed runtime
+    /// (e.g. the virtio transport service). Extensions keep device-family
+    /// knowledge OUT of driver-core: the core stays generic, families
+    /// declare their own extension traits and ask for them here.
+    pub fn extension<E: ExtensionService>(&self) -> Option<E> {
+        E::from_services(self.services)
     }
 }
 

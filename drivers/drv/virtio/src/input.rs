@@ -28,7 +28,7 @@ impl DriverOps<PciBus> for InputDriver {
     type Data = InputData;
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PciBus>) -> Result<InputData, ProbeError> {
-        let (kind, transport, _irq) = dev.virtio_pci_transport_as::<virtio::PciTransport>()?;
+        let (kind, transport, _irq) = crate::common::pci_transport(dev)?;
         if !matches!(kind, driver_base::DeviceKind::Input) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }

@@ -184,6 +184,10 @@ struct DeviceEntry {
 struct NoServices;
 
 impl DeviceServices for NoServices {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
     fn iomap(
         &self,
         _: u64,
@@ -214,14 +218,6 @@ impl DeviceServices for NoServices {
 
     fn clk_get(&self, _: u64, _: ClkSpec) -> Result<crate::device::ClkHandle, ServiceError> {
         Err(ServiceError::Fatal(RuntimeError::Unsupported))
-    }
-
-    fn virtio_pci_transport(
-        &self,
-        _: u64,
-        _: crate::desc::DeviceLocation,
-    ) -> Result<(crate::DeviceKind, crate::VirtioTransport, Option<usize>), RuntimeError> {
-        Err(RuntimeError::Unsupported)
     }
 }
 
@@ -647,6 +643,10 @@ mod tests {
     }
 
     impl DeviceServices for MockServices {
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+
         fn iomap(
             &self,
             _: u64,
@@ -681,15 +681,6 @@ mod tests {
                 Some(ops) => Ok(ClkHandle::new(ops, None)),
                 None => Err(ServiceError::Deferred(DepSource::clk(spec.provider))),
             }
-        }
-
-        fn virtio_pci_transport(
-            &self,
-            _: u64,
-            _: crate::desc::DeviceLocation,
-        ) -> Result<(crate::DeviceKind, crate::VirtioTransport, Option<usize>), RuntimeError>
-        {
-            Err(RuntimeError::Unsupported)
         }
     }
 
