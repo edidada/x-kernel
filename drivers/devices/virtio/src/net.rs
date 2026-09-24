@@ -4,7 +4,10 @@
 
 //! VirtIO network driver adapter.
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{
+    num::NonZeroU16,
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+};
 
 use device_res::{Irq, IrqEvent, IrqEventSource, IrqOp, IrqResource, IrqTrigger};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
@@ -17,6 +20,13 @@ use virtio_drivers::{Hal, device::net::VirtIONetRaw as InnerDev, transport::Tran
 use crate::as_driver_error;
 
 const NET_BUF_LEN: usize = 1526;
+const TSO_TX_BUF_LEN: usize = 16 * 1024;
+const VIRTIO_NET_HDR_MAX_LEN: usize = 12;
+
+mod tso_transport;
+use tso_transport::{
+    TsoTransport, VIRTIO_NET_F_CSUM, VIRTIO_NET_F_HOST_ECN, VIRTIO_NET_F_HOST_TSO4,
+};
 
 static NEXT_IRQ_HANDLE_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -28,7 +38,7 @@ trait VirtIoNetIrqAck: Send + Sync {
 }
 
 struct VirtIoNetIrqHandle<H: Hal, T: Transport, const QS: usize> {
-    inner: Arc<SpinNoIrq<InnerDev<H, T, QS>>>,
+    inner: Arc<SpinNoIrq<InnerDev<H, TsoTransport<T>, QS>>>,
     rx_scheduler: Arc<SpinNoIrq<Option<Arc<dyn NetRxScheduler>>>>,
     id: usize,
     irq: usize,
@@ -103,7 +113,7 @@ fn handle_virtio_net_irq(irq: usize) -> IrqEvent {
 fn register_virtio_net_irq<H: Hal + 'static, T: Transport + 'static, const QS: usize>(
     irq_provider: &'static dyn IrqOp,
     irq: usize,
-    inner: &Arc<SpinNoIrq<InnerDev<H, T, QS>>>,
+    inner: &Arc<SpinNoIrq<InnerDev<H, TsoTransport<T>, QS>>>,
     rx_scheduler: &Arc<SpinNoIrq<Option<Arc<dyn NetRxScheduler>>>>,
 ) -> DriverResult<usize> {
     let handle_id = NEXT_IRQ_HANDLE_ID.fetch_add(1, Ordering::Relaxed);
@@ -183,9 +193,13 @@ pub struct VirtIoNetDev<H: Hal, T: Transport, const QS: usize> {
     bufs: SpinNoPreempt<NetBufState<QS>>,
     // Kept alive so that `NetBufBox`es in `bufs` remain valid.
     #[allow(dead_code)]
-    buf_pool: Arc<NetBufPool>,
-    inner: Arc<SpinNoIrq<InnerDev<H, T, QS>>>,
+    rx_buf_pool: Arc<NetBufPool>,
+    #[allow(dead_code)]
+    tx_buf_pool: Arc<NetBufPool>,
+    inner: Arc<SpinNoIrq<InnerDev<H, TsoTransport<T>, QS>>>,
     mac: MacAddress,
+    tso4: bool,
+    host_ecn: bool,
     irq: Option<usize>,
     irq_handle_id: Option<usize>,
     rx_scheduler: Arc<SpinNoIrq<Option<Arc<dyn NetRxScheduler>>>>,
@@ -247,17 +261,24 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
     ) -> DriverResult<Self> {
         // 0. Create a new driver instance.
         const NONE_BUF: Option<NetBufBox> = None;
+        let negotiated_features = Arc::new(AtomicU64::new(0));
+        let transport = TsoTransport::new(transport, negotiated_features.clone());
         let inner = Arc::new(SpinNoIrq::new(
             InnerDev::new(transport).map_err(as_driver_error)?,
         ));
+        let negotiated_features = negotiated_features.load(Ordering::Relaxed);
+        let tso4 = negotiated_features & (VIRTIO_NET_F_CSUM | VIRTIO_NET_F_HOST_TSO4)
+            == VIRTIO_NET_F_CSUM | VIRTIO_NET_F_HOST_TSO4;
+        let host_ecn = negotiated_features & VIRTIO_NET_F_HOST_ECN != 0;
         let mut rx_buffers = [NONE_BUF; QS];
         let tx_buffers = [NONE_BUF; QS];
-        let buf_pool = NetBufPool::new(2 * QS, NET_BUF_LEN)?;
+        let rx_buf_pool = NetBufPool::new(QS, NET_BUF_LEN)?;
+        let tx_buf_pool = NetBufPool::new(QS, if tso4 { TSO_TX_BUF_LEN } else { NET_BUF_LEN })?;
         let mut free_tx_bufs = Vec::with_capacity(QS);
 
         // 1. Fill all rx buffers.
         for (i, rx_buf_place) in rx_buffers.iter_mut().enumerate() {
-            let mut rx_buf = buf_pool.alloc_boxed().ok_or(DriverError::NoMemory)?;
+            let mut rx_buf = rx_buf_pool.alloc_boxed().ok_or(DriverError::NoMemory)?;
             // SAFETY: `receive_begin` requires exclusive access to the buffer
             // for the duration it is in the VirtIO queue. The buffer is owned
             // by `rx_buf` and stored in `rx_buffers[i]` immediately after,
@@ -274,7 +295,7 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
 
         // 2. Allocate all tx buffers.
         for _ in 0..QS {
-            let mut tx_buf = buf_pool.alloc_boxed().ok_or(DriverError::NoMemory)?;
+            let mut tx_buf = tx_buf_pool.alloc_boxed().ok_or(DriverError::NoMemory)?;
             // Fill header
             let hdr_len = inner
                 .lock()
@@ -306,9 +327,12 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
                 tx_buffers,
                 free_tx_bufs,
             }),
-            buf_pool,
+            rx_buf_pool,
+            tx_buf_pool,
             inner,
             mac,
+            tso4,
+            host_ecn,
             irq,
             irq_handle_id,
             rx_scheduler,
@@ -334,6 +358,10 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
     #[inline]
     fn mac(&self) -> MacAddress {
         self.mac
+    }
+
+    fn tcpv4_tso_max_frame_len(&self) -> Option<usize> {
+        self.tso4.then_some(TSO_TX_BUF_LEN - VIRTIO_NET_HDR_MAX_LEN)
     }
 
     #[inline]
@@ -414,9 +442,33 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
     }
 
     fn send(&self, tx_buf: NetBufHandle) -> DriverResult {
+        let tso_segment_size = tx_buf.tso_segment_size();
         // SAFETY: `from_handle` converts a handle back to an owned `NetBuf`.
         // The caller guarantees the handle is valid and not used elsewhere.
-        let tx_buf = unsafe { NetBuf::from_handle(tx_buf) };
+        let mut tx_buf = unsafe { NetBuf::from_handle(tx_buf) };
+        let header_result = self.inner.lock().fill_buffer_header(tx_buf.buffer_mut());
+        let hdr_len = match header_result {
+            Ok(hdr_len) => hdr_len,
+            Err(err) => {
+                self.bufs.lock().free_tx_bufs.push(tx_buf);
+                return Err(as_driver_error(err));
+            }
+        };
+        debug_assert_eq!(hdr_len, tx_buf.hdr_len());
+        if let Some(segment_size) = tso_segment_size {
+            if !self.tso4 {
+                self.bufs.lock().free_tx_bufs.push(tx_buf);
+                return Err(DriverError::Unsupported);
+            }
+            let frame_len = tx_buf.payload_len();
+            let (header, frame) = tx_buf.buffer_mut().split_at_mut(hdr_len);
+            if let Err(err) =
+                prepare_tso4_header(header, &mut frame[..frame_len], segment_size, self.host_ecn)
+            {
+                self.bufs.lock().free_tx_bufs.push(tx_buf);
+                return Err(err);
+            }
+        }
         let mut bufs = self.bufs.lock();
         // SAFETY: `transmit_begin` requires exclusive access to the buffer
         // frame for the duration it is in the VirtIO queue. We store the
@@ -426,7 +478,14 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
             self.inner
                 .lock()
                 .transmit_begin(tx_buf.frame())
-                .map_err(as_driver_error)?
+                .map_err(as_driver_error)
+        };
+        let token = match token {
+            Ok(token) => token,
+            Err(err) => {
+                bufs.free_tx_bufs.push(tx_buf);
+                return Err(err);
+            }
         };
         bufs.tx_buffers[token as usize] = Some(tx_buf);
         Ok(())
@@ -477,7 +536,10 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
             .ok_or(DriverError::NoMemory)?;
         let pkt_len = size;
 
-        net_buf.set_payload_len(pkt_len)?;
+        if let Err(err) = net_buf.set_payload_len(pkt_len) {
+            self.bufs.lock().free_tx_bufs.push(net_buf);
+            return Err(err);
+        }
 
         Ok(net_buf.into_handle())
     }
@@ -491,6 +553,60 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
     }
 }
 
+fn prepare_tso4_header(
+    header: &mut [u8],
+    frame: &mut [u8],
+    segment_size: NonZeroU16,
+    host_ecn: bool,
+) -> DriverResult {
+    const ETH_LEN: usize = 14;
+    const TCP_CHECKSUM_OFFSET: usize = 16;
+    if header.len() < 10 || frame.len() < ETH_LEN + 20 + 20 {
+        return Err(DriverError::InvalidInput);
+    }
+    if frame[12..14] != [0x08, 0x00] || frame[ETH_LEN] >> 4 != 4 {
+        return Err(DriverError::InvalidInput);
+    }
+    let ip_len = usize::from(frame[ETH_LEN] & 0x0f) * 4;
+    let tcp_start = ETH_LEN + ip_len;
+    let ip_packet_len = usize::from(u16::from_be_bytes([frame[ETH_LEN + 2], frame[ETH_LEN + 3]]));
+    if ip_len < 20
+        || ip_packet_len != frame.len() - ETH_LEN
+        || frame.len() < tcp_start + 20
+        || frame[ETH_LEN + 9] != 6
+        || (u16::from_be_bytes([frame[ETH_LEN + 6], frame[ETH_LEN + 7]]) & 0x3fff) != 0
+    {
+        return Err(DriverError::InvalidInput);
+    }
+    let tcp_len = usize::from(frame[tcp_start + 12] >> 4) * 4;
+    let header_len = tcp_start + tcp_len;
+    if tcp_len < 20 || frame.len() <= header_len + usize::from(segment_size.get()) {
+        return Err(DriverError::InvalidInput);
+    }
+    let is_ecn = frame[ETH_LEN + 1] & 0x03 != 0;
+    if is_ecn && !host_ecn {
+        return Err(DriverError::Unsupported);
+    }
+
+    // The device adds each segment's TCP length to this pseudo-header seed.
+    let mut sum = 6u32;
+    for word in frame[ETH_LEN + 12..ETH_LEN + 20].chunks_exact(2) {
+        sum += u32::from(u16::from_be_bytes([word[0], word[1]]));
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    frame[tcp_start + TCP_CHECKSUM_OFFSET..tcp_start + TCP_CHECKSUM_OFFSET + 2]
+        .copy_from_slice(&(sum as u16).to_be_bytes());
+    header[0] = 1; // VIRTIO_NET_HDR_F_NEEDS_CSUM
+    header[1] = if is_ecn { 0x81 } else { 1 }; // TCPv4, optionally ECN
+    header[2..4].copy_from_slice(&(header_len as u16).to_le_bytes());
+    header[4..6].copy_from_slice(&segment_size.get().to_le_bytes());
+    header[6..8].copy_from_slice(&(tcp_start as u16).to_le_bytes());
+    header[8..10].copy_from_slice(&(TCP_CHECKSUM_OFFSET as u16).to_le_bytes());
+    Ok(())
+}
+
 #[cfg(unittest)]
 mod tests {
     use alloc::sync::Arc;
@@ -499,6 +615,94 @@ mod tests {
 
     use super::*;
     use crate::mock_virtio::{MockHal, MockTransport};
+
+    #[def_test]
+    fn tso4_header_carries_segment_size_and_partial_checksum() {
+        let mut virtio_header = [0u8; 12];
+        let mut frame = [0u8; 14 + 20 + 20 + 3000];
+        frame[12..14].copy_from_slice(&[0x08, 0x00]);
+        frame[14] = 0x45;
+        frame[14 + 2..14 + 4].copy_from_slice(&(20 + 20 + 3000u16).to_be_bytes());
+        frame[14 + 9] = 6;
+        frame[14 + 12..14 + 20].copy_from_slice(&[192, 0, 2, 1, 198, 51, 100, 2]);
+        frame[14 + 20 + 12] = 0x50;
+
+        prepare_tso4_header(
+            &mut virtio_header,
+            &mut frame,
+            NonZeroU16::new(1460).unwrap(),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(&virtio_header[..10], &[1, 1, 54, 0, 180, 5, 34, 0, 16, 0]);
+        assert_eq!(&frame[14 + 20 + 16..14 + 20 + 18], &[0xec, 0x3d]);
+    }
+
+    #[def_test]
+    fn tso4_rejects_ecn_without_negotiation() {
+        let mut virtio_header = [0u8; 12];
+        let mut frame = [0u8; 14 + 20 + 20 + 3000];
+        frame[12..14].copy_from_slice(&[0x08, 0x00]);
+        frame[14] = 0x45;
+        frame[14 + 2..14 + 4].copy_from_slice(&(20 + 20 + 3000u16).to_be_bytes());
+        frame[14 + 1] = 0x02;
+        frame[14 + 9] = 6;
+        frame[14 + 20 + 12] = 0x50;
+
+        assert_eq!(
+            prepare_tso4_header(
+                &mut virtio_header,
+                &mut frame,
+                NonZeroU16::new(1460).unwrap(),
+                false,
+            ),
+            Err(DriverError::Unsupported)
+        );
+    }
+
+    #[def_test]
+    fn tso4_rejects_mismatched_ipv4_length() {
+        let mut virtio_header = [0u8; 12];
+        let mut frame = [0u8; 14 + 20 + 20 + 3000];
+        frame[12..14].copy_from_slice(&[0x08, 0x00]);
+        frame[14] = 0x45;
+        frame[14 + 2..14 + 4].copy_from_slice(&(20 + 20 + 2999u16).to_be_bytes());
+        frame[14 + 9] = 6;
+        frame[14 + 20 + 12] = 0x50;
+
+        assert_eq!(
+            prepare_tso4_header(
+                &mut virtio_header,
+                &mut frame,
+                NonZeroU16::new(1460).unwrap(),
+                false,
+            ),
+            Err(DriverError::InvalidInput)
+        );
+    }
+
+    #[def_test]
+    fn tso4_capability_requires_checksum_and_segmentation_features() {
+        for features in [
+            0,
+            VIRTIO_NET_F_CSUM,
+            VIRTIO_NET_F_HOST_TSO4,
+            VIRTIO_NET_F_CSUM | VIRTIO_NET_F_HOST_TSO4,
+        ] {
+            let mut transport = MockTransport::new();
+            transport.device_type = virtio_drivers::transport::DeviceType::Network;
+            transport.features = features;
+            let dev =
+                VirtIoNetDev::<MockHal, MockTransport, 32>::try_new(transport, None, None).unwrap();
+
+            assert_eq!(
+                dev.tcpv4_tso_max_frame_len(),
+                (features == VIRTIO_NET_F_CSUM | VIRTIO_NET_F_HOST_TSO4)
+                    .then_some(TSO_TX_BUF_LEN - VIRTIO_NET_HDR_MAX_LEN)
+            );
+        }
+    }
 
     struct MockIrqHandle {
         id: usize,

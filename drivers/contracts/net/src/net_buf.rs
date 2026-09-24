@@ -4,7 +4,7 @@
 
 //! Network buffer types and pool allocator.
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
-use core::ptr::NonNull;
+use core::{num::NonZeroU16, ptr::NonNull};
 
 use ksync::Mutex;
 
@@ -17,6 +17,7 @@ pub struct NetBufHandle {
     // The pointer to the payload data.
     data_ptr: NonNull<u8>,
     data_len: usize,
+    tso_segment_size: Option<NonZeroU16>,
 }
 
 impl NetBufHandle {
@@ -26,7 +27,18 @@ impl NetBufHandle {
             owner_ptr,
             data_ptr,
             data_len,
+            tso_segment_size: None,
         }
+    }
+
+    /// Requests TCP segmentation after a driver has advertised support.
+    pub fn set_tso_segment_size(&mut self, segment_size: NonZeroU16) {
+        self.tso_segment_size = Some(segment_size);
+    }
+
+    /// Returns the requested TCP payload size for each transmitted segment.
+    pub fn tso_segment_size(&self) -> Option<NonZeroU16> {
+        self.tso_segment_size
     }
 
     /// Return raw pointer of the owner object.

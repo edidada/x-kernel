@@ -4,14 +4,15 @@
 
 //! Routing table and route selection.
 use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
+use core::num::NonZeroUsize;
 
 use kerrno::{KError, KResult, LinuxError};
 use kpoll::{PollContext, PollRegisterError, PollSet};
 use ktime_types::MonotonicInstant;
 use smoltcp::{
-    phy::{DeviceCapabilities, Medium},
+    phy::{Checksum, DeviceCapabilities, Medium, PacketMeta},
     time::Instant,
-    wire::Ipv6Packet,
+    wire::{IpProtocol, Ipv4Packet, Ipv6Packet, TcpPacket},
 };
 
 pub(crate) use crate::netlink::{
@@ -284,6 +285,7 @@ pub struct Router {
     pub(crate) devices: Vec<Box<dyn NetDevice>>,
     pub(crate) table: RouteTable,
     effective_mtu: usize,
+    tcpv4_tso_max_packet_len: Option<usize>,
 }
 
 pub(crate) struct RxDrain {
@@ -302,6 +304,7 @@ impl Router {
             devices: Vec::new(),
             table: RouteTable::new(),
             effective_mtu: STANDARD_MTU,
+            tcpv4_tso_max_packet_len: None,
         }
     }
 
@@ -437,7 +440,7 @@ impl Router {
     pub fn add_device(&mut self, device: Box<dyn NetDevice>) -> usize {
         self.devices.push(device);
         self.sync_device_ipv4_addrs();
-        self.recompute_effective_mtu();
+        self.recompute_device_capabilities();
         self.devices.len() - 1
     }
 
@@ -471,7 +474,7 @@ impl Router {
         self.rebuild_ipv4_address_routes();
         self.sync_device_ipv4_addrs();
         self.adjust_rx_device_cursor_after_remove(pos);
-        self.recompute_effective_mtu();
+        self.recompute_device_capabilities();
         Some(())
     }
 
@@ -494,6 +497,26 @@ impl Router {
     /// Returns the MTU advertised through the smoltcp device capabilities.
     pub fn effective_mtu(&self) -> usize {
         self.effective_mtu
+    }
+
+    pub(crate) fn tcpv4_tso_max_packet_len(&self) -> Option<usize> {
+        self.tcpv4_tso_max_packet_len
+    }
+
+    fn recompute_tcpv4_tso_max_packet_len(&mut self) {
+        let mut ethernet_devices = self
+            .devices
+            .iter()
+            .filter(|device| device.link_kind() == LinkKind::Ethernet);
+        let mut max_packet_len = ethernet_devices
+            .next()
+            .and_then(|device| device.tcpv4_tso_max_packet_len());
+        for device in ethernet_devices {
+            max_packet_len = max_packet_len
+                .zip(device.tcpv4_tso_max_packet_len())
+                .map(|(limit, device_limit)| limit.min(device_limit));
+        }
+        self.tcpv4_tso_max_packet_len = max_packet_len;
     }
 
     pub fn link_snapshots(&self) -> Vec<LinkSnapshot> {
@@ -983,6 +1006,11 @@ impl Router {
             .unwrap_or(STANDARD_MTU);
     }
 
+    fn recompute_device_capabilities(&mut self) {
+        self.recompute_effective_mtu();
+        self.recompute_tcpv4_tso_max_packet_len();
+    }
+
     pub fn drain_rx_budgeted_into(
         &mut self,
         timestamp: MonotonicInstant,
@@ -1188,6 +1216,12 @@ impl Router {
 
         let next_hop = rule.via.unwrap_or(dst_addr);
         let dev = &mut self.devices[rule.dev];
+        if dev.link_kind() == LinkKind::Loopback
+            && packet.tso_segment_size().is_some()
+            && fill_tcp_checksum(&mut packet).is_none()
+        {
+            return false;
+        }
         dev.send_ip_packet(rule.dev as i32 + 1, next_hop, src_addr, packet, timestamp)
     }
 
@@ -1277,12 +1311,54 @@ fn tx_packet_buf(packet: Vec<u8>) -> PacketBuf {
 #[cfg(unittest)]
 mod tests {
     use alloc::{boxed::Box, vec, vec::Vec};
+    use core::num::NonZeroU16;
 
     use ktime_types::MonotonicInstant;
     use unittest::{assert, assert_eq, def_test};
 
     use super::*;
     use crate::device::LoopbackDevice;
+
+    #[def_test]
+    fn smoltcp_tx_token_preserves_tso_segment_size() {
+        let mut router = Router::new();
+        let mut token =
+            smoltcp::phy::Device::transmit(&mut router, Instant::from_millis(0)).unwrap();
+        let mut meta = PacketMeta::default();
+        meta.segmentation_offload_size = NonZeroU16::new(1460);
+        smoltcp::phy::TxToken::set_meta(&mut token, meta);
+        smoltcp::phy::TxToken::consume(token, 3000, |buffer| buffer.fill(0));
+        assert_eq!(
+            router.pop_tx_packet().unwrap().tso_segment_size(),
+            NonZeroU16::new(1460)
+        );
+    }
+
+    #[def_test]
+    fn tcp_checksum_fallback_preserves_existing_checksum() {
+        let mut bytes = vec![0u8; 40];
+        bytes[0] = 0x45;
+        bytes[2..4].copy_from_slice(&40u16.to_be_bytes());
+        bytes[9] = 6;
+        bytes[12..20].copy_from_slice(&[192, 0, 2, 1, 198, 51, 100, 2]);
+        bytes[20 + 12] = 0x50;
+        let mut packet = tx_packet_buf(bytes);
+
+        assert_eq!(fill_tcp_checksum(&mut packet), Some(()));
+        let tcp = TcpPacket::new_checked(&packet.network_packet().unwrap()[20..]).unwrap();
+        assert!(tcp.verify_checksum(
+            &smoltcp::wire::Ipv4Address::new(192, 0, 2, 1).into(),
+            &smoltcp::wire::Ipv4Address::new(198, 51, 100, 2).into(),
+        ));
+
+        let bytes = packet.network_packet_mut().unwrap();
+        bytes[20 + 16..20 + 18].copy_from_slice(&0x1234u16.to_be_bytes());
+        assert_eq!(fill_tcp_checksum(&mut packet), Some(()));
+        assert_eq!(
+            &packet.network_packet().unwrap()[20 + 16..20 + 18],
+            &[0x12, 0x34]
+        );
+    }
 
     fn valid_ipv4_cidr(address: Ipv4Address, prefix_len: u8) -> Ipv4Cidr {
         Ipv4Cidr::new(address, prefix_len).unwrap()
@@ -1591,7 +1667,11 @@ mod tests {
     }
 }
 
-pub struct TxToken<'a>(&'a mut DataTxQueue);
+pub struct TxToken<'a> {
+    queue: &'a mut DataTxQueue,
+    meta: PacketMeta,
+    is_tcp_checksum_offloaded: bool,
+}
 
 impl smoltcp::phy::TxToken for TxToken<'_> {
     fn consume<R, F>(self, len: usize, f: F) -> R
@@ -1600,17 +1680,23 @@ impl smoltcp::phy::TxToken for TxToken<'_> {
     {
         let mut ip_packet = vec![0u8; len];
         let result = f(&mut ip_packet);
+        let mut packet = PacketBuf::from_ip_packet_vec(0, ip_packet, PacketOwner::Ipv4Stack);
+        if let Some(segment_size) = self.meta.segmentation_offload_size {
+            packet.set_tso_segment_size(segment_size);
+        } else if self.is_tcp_checksum_offloaded {
+            // smoltcp leaves TCP checksums empty whenever TSO is advertised.
+            // Small packets still use the ordinary software checksum path.
+            let _ = fill_tcp_checksum(&mut packet);
+        }
         assert!(
-            self.0
-                .try_push(PacketBuf::from_ip_packet_vec(
-                    0,
-                    ip_packet,
-                    PacketOwner::Ipv4Stack,
-                ))
-                .is_ok(),
+            self.queue.try_push(packet).is_ok(),
             "smoltcp consumed a TX token without queue capacity"
         );
         result
+    }
+
+    fn set_meta(&mut self, meta: PacketMeta) {
+        self.meta = meta;
     }
 }
 
@@ -1636,9 +1722,14 @@ impl smoltcp::phy::Device for Router {
         if self.rx_queue.is_empty() || self.data_tx_queue.is_full() {
             None
         } else {
+            let is_tcp_checksum_offloaded = self.tcpv4_tso_max_packet_len().is_some();
             Some((
                 RxToken(self.rx_queue.pop_front().unwrap()),
-                TxToken(&mut self.data_tx_queue),
+                TxToken {
+                    queue: &mut self.data_tx_queue,
+                    meta: PacketMeta::default(),
+                    is_tcp_checksum_offloaded,
+                },
             ))
         }
     }
@@ -1647,7 +1738,12 @@ impl smoltcp::phy::Device for Router {
         if self.data_tx_queue.is_full() {
             None
         } else {
-            Some(TxToken(&mut self.data_tx_queue))
+            let is_tcp_checksum_offloaded = self.tcpv4_tso_max_packet_len().is_some();
+            Some(TxToken {
+                queue: &mut self.data_tx_queue,
+                meta: PacketMeta::default(),
+                is_tcp_checksum_offloaded,
+            })
         }
     }
 
@@ -1656,6 +1752,40 @@ impl smoltcp::phy::Device for Router {
         caps.medium = Medium::Ip;
         caps.max_transmission_unit = self.effective_mtu;
         caps.max_burst_size = Some(SOCKET_BUFFER_SIZE);
+        caps.segmentation.tcpv4 = self.tcpv4_tso_max_packet_len().and_then(NonZeroUsize::new);
+        if caps.segmentation.tcpv4.is_some() {
+            caps.checksum.tcp = Checksum::Rx;
+        }
         caps
     }
+}
+
+fn fill_tcp_checksum(packet: &mut PacketBuf) -> Option<()> {
+    let ip_packet = packet.network_packet_mut()?;
+    let (src_addr, dst_addr, tcp_offset) = match ip_packet.first()? >> 4 {
+        4 => {
+            let ipv4 = Ipv4Packet::new_checked(&*ip_packet).ok()?;
+            if ipv4.next_header() != IpProtocol::Tcp {
+                return None;
+            }
+            (
+                ipv4.src_addr().into(),
+                ipv4.dst_addr().into(),
+                ipv4.header_len() as usize,
+            )
+        }
+        6 => {
+            let ipv6 = Ipv6Packet::new_checked(&*ip_packet).ok()?;
+            if ipv6.next_header() != IpProtocol::Tcp {
+                return None;
+            }
+            (ipv6.src_addr().into(), ipv6.dst_addr().into(), 40)
+        }
+        _ => return None,
+    };
+    let mut tcp = TcpPacket::new_checked(ip_packet.get_mut(tcp_offset..)?).ok()?;
+    if tcp.checksum() == 0 {
+        tcp.fill_checksum(&src_addr, &dst_addr);
+    }
+    Some(())
 }

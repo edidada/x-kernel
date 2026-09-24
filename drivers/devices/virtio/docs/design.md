@@ -29,6 +29,7 @@ drivers/devices/virtio/
 │   ├── gpu.rs          # VirtIO GPU 适配器
 │   ├── input.rs        # VirtIO Input 适配器
 │   ├── net.rs          # VirtIO Net 适配器（含 IRQ 管理）
+│   ├── net/tso_transport.rs # 网络发送卸载能力协商
 │   ├── socket.rs       # VirtIO Vsock 适配器
 │   ├── virtio_9p.rs    # VirtIO 9p 适配器
 │   └── mock_virtio.rs  # 单元测试 Mock（Hal + Transport）
@@ -369,8 +370,8 @@ headers and allocator overhead. The logical sector size is the protocol's fixed
 
 **初始化流程**：
 
-1. `try_new(transport, irq)` → `InnerDev::new(transport)`：协商 feature、分配 VirtIO 队列
-2. 创建 `NetBufPool`（容量 `2 * QS`，缓冲区长度 1526 字节）
+1. `try_new(transport, irq)` 通过 `TsoTransport` 协商 `CSUM`、`HOST_TSO4` 和 `HOST_ECN`，随后由 `InnerDev::new()` 分配 VirtIO 队列
+2. 分别创建容量为 `QS` 的 RX 和 TX 缓冲池；RX 缓冲区长度为 1526 字节，协商 TSO 后 TX 缓冲区长度为 16 KiB，否则为 1526 字节
 3. 填充所有 rx 缓冲区：对每个 `rx_buffers[i]`，调用 `receive_begin()` 提交到接收队列，验证 `token == i`
 4. 预分配所有 tx 缓冲区：对每个缓冲区，调用 `fill_buffer_header()` 填充帧头，存入 `free_tx_bufs`
 5. 若提供 `irq`，调用 `register_virtio_net_irq()` 注册中断回调
@@ -378,7 +379,7 @@ headers and allocator overhead. The logical sector size is the protocol's fixed
 **发送流程**：
 
 1. 调用 `alloc_tx_buf(size)` 从 `free_tx_bufs` 栈中弹出缓冲区，设置 `payload_len`
-2. 上层填充数据后调用 `send()` → `transmit_begin(frame)` 提交到 VirtIO 发送队列
+2. 上层填充数据后调用 `send()`；每次发送重置 VirtIO 头，带有 TSO 段大小的 TCPv4 帧经过格式和 ECN 校验后写入 GSO、校验和字段，再由 `transmit_begin(frame)` 提交到 VirtIO 发送队列
 3. 将 `NetBuf` 存入 `tx_buffers[token]`，确保缓冲区在设备使用期间存活
 4. 中断到来时调用 `recycle_tx()`：循环调用 `poll_transmit()` 获取已完成令牌，`transmit_complete()` 释放缓冲区，回收至 `free_tx_bufs`
 

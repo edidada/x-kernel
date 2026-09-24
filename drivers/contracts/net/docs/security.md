@@ -22,6 +22,9 @@ documents the obligations each side must uphold.
 - `NetBufHandle` carries raw pointers (`owner_ptr`, `data_ptr`, `data_len`)
   across driver interfaces. Drivers receive these pointers and may only
   round-trip them back through `NetBuf::from_handle` / `recycle_rx`.
+- A TX handle may also carry a TCP segment size. The device contract advertises
+  its maximum TSO frame length, while the concrete driver validates the
+  packet layout and requested segment size before programming an offload.
 - `NetBufPool` storage is kernel heap memory (`Vec<u8>`), never
   device-owned memory; devices write into it only during driver-managed
   DMA.

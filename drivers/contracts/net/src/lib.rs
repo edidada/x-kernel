@@ -45,6 +45,13 @@ pub trait NetDevice: Device {
     /// The hardware address of the NIC.
     fn mac(&self) -> MacAddress;
 
+    /// Maximum Ethernet frame length accepted for TCPv4 segmentation.
+    ///
+    /// `None` means this device sends only frames within its normal MTU.
+    fn tcpv4_tso_max_frame_len(&self) -> Option<usize> {
+        None
+    }
+
     /// Whether the device can transmit packets.
     fn can_tx(&self) -> bool;
 

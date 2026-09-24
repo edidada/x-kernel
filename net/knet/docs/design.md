@@ -825,6 +825,16 @@ Ethernet RX source registration is protected by `NET_RX_SOURCES: SpinNoIrq<NetRx
 
 Crate-local types own UDP PCBs, bind-conflict checks, send and receive queues, IPv4 validation, fragment reassembly, output fragmentation, and ICMPv4 errors. TCP, raw IP, and IPv6 use the smoltcp socket set, driven by `knet-poller` and explicit `NetworkPoller::assist_once` calls. This boundary keeps UDP independent of smoltcp socket handles while preserving TCP and raw-socket semantics.
 
+The smoltcp device advertises TCPv4 segmentation only when every registered
+Ethernet device reports a TSO frame limit. Its TX token carries smoltcp's
+segment size through `PacketBuf` and `NetBufHandle` to the selected driver.
+The Router caches the common TSO packet limit when devices are added or removed,
+so packet transmission does not scan the device list.
+Ordinary TCP packets receive a software checksum because smoltcp's TSO
+capability disables its TCP transmit checksum calculation. Loopback TSO
+packets also receive a software checksum. Removing a device rebuilds the
+smoltcp interface when the common TSO limit changes.
+
 ### Budgeted Processing
 
 The `NetRx` softirq, socket TX paths, protocol timers, and socket assist share one `NetworkPoller`. Its four-state atomic state machine publishes pending work and grants execution to a single owner through a `SCHEDULED -> RUNNING` CAS. Notifications received during execution set `RUNNING_PENDING`, causing completion to schedule another batch. Assist only consumes scheduled work; it neither creates events nor waits for ownership.
@@ -837,7 +847,7 @@ TCP sends fill the smoltcp buffer and notify the poller, which advances the prot
 
 ### Control-Plane State Ownership
 
-Devices own link configuration and expose interface names, MTUs, administrative and operational states, and hardware addresses through `NetDevice::link_snapshot`. `RTM_GETLINK` and `RTM_NEWLINK` access this device-owned state directly. The AF_PACKET send path obtains an allocation-free `LinkSendSnapshot` under the Router lock, validates it after releasing that lock, and reacquires the Router lock through `Service::send_link_frame` for transmission. Snapshot validation and dispatch are separate critical sections. Device-existence checks use `has_device`, and route MTU queries read the matching device directly. Configuration changes or device removal rebuild the smoltcp `Interface` only when the effective MTU changes, keeping cached `DeviceCapabilities` consistent with the device set while otherwise preserving runtime caches.
+Devices own link configuration and expose interface names, MTUs, administrative and operational states, and hardware addresses through `NetDevice::link_snapshot`. `RTM_GETLINK` and `RTM_NEWLINK` access this device-owned state directly. The AF_PACKET send path obtains an allocation-free `LinkSendSnapshot` under the Router lock, validates it after releasing that lock, and reacquires the Router lock through `Service::send_link_frame` for transmission. Snapshot validation and dispatch are separate critical sections. Device-existence checks use `has_device`, and route MTU queries read the matching device directly. Configuration changes or device removal rebuild the smoltcp `Interface` when the effective MTU or common TCPv4 TSO frame limit changes, keeping cached `DeviceCapabilities` consistent with the device set while otherwise preserving runtime caches.
 
 `Router` owns `Ipv4AddrEntry` values with `dev`, `addr`, `scope`, and optional `broadcast` fields. The broadcast override is exposed as `ifa_broadcast` in rtnetlink. Broadcast addresses default to the CIDR-derived value. Insertion validates the device, unicast address, and smoltcp address capacity. Legacy address and netmask ioctls update the primary entry while preserving other addresses on the device. Netmask updates retain the scope and recompute the broadcast address only when its previous value was mask-derived.
 

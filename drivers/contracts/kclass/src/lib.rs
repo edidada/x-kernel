@@ -446,6 +446,10 @@ impl NetDevice for ClassDevice<NetDeviceImpl> {
         self.with(|device| device.mac())
     }
 
+    fn tcpv4_tso_max_frame_len(&self) -> Option<usize> {
+        self.with(|device| device.tcpv4_tso_max_frame_len())
+    }
+
     fn can_tx(&self) -> bool {
         self.with(|device| device.can_tx())
     }

@@ -463,6 +463,10 @@ When the queue is full, the PCB queue lock must be released before the current d
 
 The output MTU for in-stack UDP comes from the device selected by the matching route.
 UDP and raw IPv4 return `ENETUNREACH` when no route exists or the output device is administratively down, and return `EMSGSIZE` when a DF packet exceeds the MTU. Payloads of packets that permit fragmentation are split only at 8-byte-aligned boundaries.
+TCPv4 packets may exceed the route MTU only when smoltcp marks them for TSO
+and their IP length fits the selected device's advertised TSO limit. The
+smoltcp TX token computes ordinary TCP checksums in software when TSO is
+enabled; tagged loopback packets are checksummed before loopback delivery.
 
 ### 19. Poller Completion Conditions
 

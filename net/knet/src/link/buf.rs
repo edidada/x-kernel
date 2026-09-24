@@ -5,7 +5,7 @@
 //! Packet buffer owned by the in-kernel network stack.
 
 use alloc::{sync::Arc, vec::Vec};
-use core::{net::SocketAddr, ops::Range};
+use core::{net::SocketAddr, num::NonZeroU16, ops::Range};
 
 use super::wire::{ETHERNET_HEADER_LEN, EtherType, MacAddress};
 
@@ -98,6 +98,7 @@ struct PacketBufInner {
     network_offset: Option<usize>,
     transport_offset: Option<usize>,
     udp_metadata: Option<UdpPacketMetadata>,
+    tso_segment_size: Option<NonZeroU16>,
 }
 
 impl PacketBuf {
@@ -116,6 +117,7 @@ impl PacketBuf {
                 network_offset: Some(0),
                 transport_offset: None,
                 udp_metadata: None,
+                tso_segment_size: None,
             }),
         }
     }
@@ -163,6 +165,7 @@ impl PacketBuf {
                 network_offset,
                 transport_offset: None,
                 udp_metadata: None,
+                tso_segment_size: None,
             }),
         }
     }
@@ -195,6 +198,14 @@ impl PacketBuf {
 
     pub(crate) fn set_owner(&mut self, owner: PacketOwner) {
         Arc::make_mut(&mut self.inner).owner = owner;
+    }
+
+    pub(crate) fn tso_segment_size(&self) -> Option<NonZeroU16> {
+        self.inner.tso_segment_size
+    }
+
+    pub(crate) fn set_tso_segment_size(&mut self, segment_size: NonZeroU16) {
+        Arc::make_mut(&mut self.inner).tso_segment_size = Some(segment_size);
     }
 
     pub(crate) fn data(&self) -> &[u8] {

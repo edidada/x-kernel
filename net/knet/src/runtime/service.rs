@@ -910,8 +910,11 @@ impl Service {
     pub(crate) fn remove_device_by_model_id(&self, id: kdevice::DeviceId) -> Option<()> {
         let mut router = self.router.lock();
         let effective_mtu = router.effective_mtu();
+        let tso_max_packet_len = router.tcpv4_tso_max_packet_len();
         router.remove_device_by_model_id(id)?;
-        if router.effective_mtu() != effective_mtu {
+        if router.effective_mtu() != effective_mtu
+            || router.tcpv4_tso_max_packet_len() != tso_max_packet_len
+        {
             let mut iface = self.iface.lock();
             self.rebuild_interface(&mut router, &mut iface);
         }

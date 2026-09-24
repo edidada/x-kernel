@@ -14,7 +14,8 @@ on a single contract crate.
 
 - Define `NetDevice`, the operations a NIC driver must provide: address and
   queue capabilities, non-blocking `send`, `recv`, TX/RX recycling, and TX
-  buffer allocation.
+  buffer allocation. `tcpv4_tso_max_frame_len` advertises an optional maximum
+  Ethernet frame length for TCPv4 transmit segmentation.
 - Define `NetRxScheduler`, the IRQ-safe receive-scheduling hook stored by
   drivers and invoked after RX interrupt acknowledgement.
 - Provide the `NetBuf` / `NetBufHandle` / `NetBufBox` buffer family and the
@@ -69,6 +70,9 @@ network stack (caller)                NIC driver (implementer)
 - `NetBuf` is the buffer type; `NetBufBox` (`Box<NetBuf>`) is its RAII form
   and `NetBufHandle` its raw-pointer form for crossing driver interfaces
   without lifetime plumbing.
+- A TX `NetBufHandle` may carry a nonzero TCP segment size. The stack sets it
+  only for a packet within the driver's advertised TSO frame limit; the
+  driver translates it into device-specific segmentation metadata.
 
 ## Buffer Pool And Lifecycle
 

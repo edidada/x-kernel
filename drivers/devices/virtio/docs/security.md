@@ -256,6 +256,9 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
    MMIO 寄存器区域，且在设备使用期间不被释放。
 3. **NetBuf handle 唯一性**：`NetBuf::from_handle` 的调用者必须保证传入的
    handle 有效且未被重复使用。
+4. **TSO 发送边界**：协商 `CSUM` 和 `HOST_TSO4` 后才发布发送卸载能力。
+   驱动在写入 VirtIO GSO 头前校验以太网、IPv4 总长度、TCP 头长度、分片标志、
+   段大小和 ECN 能力，并在每次发送时清除复用缓冲区中的旧 VirtIO 头。
 
 ## 线程安全
 

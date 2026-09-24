@@ -9,7 +9,10 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::{
+    num::NonZeroU16,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 use hashbrown::HashMap;
 use kclass::{ClassDevice, prelude::*};
@@ -340,6 +343,7 @@ impl EthernetDevice {
         size: usize,
         f: F,
         proto: EtherType,
+        tso_segment_size: Option<NonZeroU16>,
     ) -> Option<([u8; 6], Vec<u8>)>
     where
         F: FnOnce(&mut [u8]),
@@ -362,6 +366,9 @@ impl EthernetDevice {
             return None;
         };
         f(payload);
+        if let Some(segment_size) = tso_segment_size {
+            tx_buf.set_tso_segment_size(segment_size);
+        }
         let frame_data = packet::has_packet_handlers().then(|| tx_buf.data().to_vec());
         trace!("SEND {} bytes: {:02X?}", tx_buf.len(), tx_buf.data());
         if let Err(err) = inner.send(tx_buf) {
@@ -372,11 +379,18 @@ impl EthernetDevice {
         }
     }
 
-    fn send_to<F>(&mut self, ifindex: i32, dst: MacAddress, size: usize, f: F, proto: EtherType)
-    where
+    fn send_to<F>(
+        &mut self,
+        ifindex: i32,
+        dst: MacAddress,
+        size: usize,
+        f: F,
+        proto: EtherType,
+        tso_segment_size: Option<NonZeroU16>,
+    ) where
         F: FnOnce(&mut [u8]),
     {
-        let sent = Self::send_frame(&self.inner, dst, size, f, proto);
+        let sent = Self::send_frame(&self.inner, dst, size, f, proto, tso_segment_size);
         if let Some((src_addr, frame_data)) = sent {
             packet::publish_outgoing_frame(ifindex, &frame_data, src_addr);
         }
@@ -389,7 +403,12 @@ impl EthernetDevice {
         let Some(ip_packet) = packet.network_packet() else {
             return;
         };
-        if ip_packet.len() > self.mtu {
+        if ip_packet.len() > self.mtu
+            && (packet.tso_segment_size().is_none()
+                || self
+                    .tcpv4_tso_max_packet_len()
+                    .is_none_or(|max_len| ip_packet.len() > max_len))
+        {
             warn!(
                 "Dropping IPv4 packet of {} bytes exceeding device MTU {}",
                 ip_packet.len(),
@@ -403,6 +422,7 @@ impl EthernetDevice {
             ip_packet.len(),
             |buf| buf.copy_from_slice(ip_packet),
             EtherType::Ipv4,
+            packet.tso_segment_size(),
         );
     }
 
@@ -479,6 +499,7 @@ impl EthernetDevice {
                 debug_assert!(emit_result.is_some());
             },
             EtherType::Arp,
+            None,
         );
 
         self.neighbors.insert(target_ip, None);
@@ -549,6 +570,7 @@ impl EthernetDevice {
                     debug_assert!(emit_result.is_some());
                 },
                 EtherType::Arp,
+                None,
             );
         }
 
@@ -606,6 +628,12 @@ impl NetDeviceOps for EthernetDevice {
 
     fn mtu(&self) -> usize {
         self.mtu
+    }
+
+    fn tcpv4_tso_max_packet_len(&self) -> Option<usize> {
+        self.inner
+            .tcpv4_tso_max_frame_len()
+            .and_then(|frame_len| frame_len.checked_sub(ETHERNET_HEADER_LEN))
     }
 
     fn is_link_up(&self) -> bool {
@@ -695,7 +723,12 @@ impl NetDeviceOps for EthernetDevice {
             warn!("Dropping IPv4 packet without a local IPv4 source");
             return false;
         }
-        if ip_packet.len() > self.mtu {
+        if ip_packet.len() > self.mtu
+            && (packet.tso_segment_size().is_none()
+                || self
+                    .tcpv4_tso_max_packet_len()
+                    .is_none_or(|max_len| ip_packet.len() > max_len))
+        {
             warn!("Dropping packet exceeding Ethernet MTU {}", self.mtu);
             return false;
         }

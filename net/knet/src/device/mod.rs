@@ -132,6 +132,11 @@ pub trait NetDevice: Send + Sync {
     /// Returns the configured IP-layer MTU.
     fn mtu(&self) -> usize;
 
+    /// Maximum IP packet length accepted for TCPv4 segmentation.
+    fn tcpv4_tso_max_packet_len(&self) -> Option<usize> {
+        None
+    }
+
     /// Returns whether the device can currently receive and transmit packets.
     fn is_link_up(&self) -> bool;
 

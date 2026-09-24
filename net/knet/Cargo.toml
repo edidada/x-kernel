@@ -63,6 +63,7 @@ features = [
   "socket-raw",
   "socket-icmp",
   "socket-tcp",
+  "segmentation-offload",
   "socket-dns",
   # "fragmentation-buffer-size-65536", "proto-ipv4-fragmentation",
   # "reassembly-buffer-size-65536", "reassembly-buffer-count-32",

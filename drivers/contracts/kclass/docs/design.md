@@ -128,7 +128,7 @@ drivers/contracts/kclass/
 | `class_registries!` macro | Declaratively generates all 7 class registries and their companion functions |
 | `ClassDeviceMetadata` | Optional class-specific metadata (currently only the input class carries physical_location / unique_id) |
 | `prelude` module | Centralized re-export of all public types for publishers such as `kdriver` |
-| Trait delegation impls | Implement the operation traits (e.g. `NetDevice`) for categories consumed through class handles, delegating to the inner runtime; the net class also forwards `NetRxScheduler` attach/detach, while block I/O goes only through the block core canonical `BlockDevice` |
+| Trait delegation impls | Implement the operation traits (e.g. `NetDevice`) for categories consumed through class handles, delegating to the inner runtime; the net class also forwards the TCPv4 TSO frame limit and `NetRxScheduler` attach/detach, while block I/O goes only through the block core canonical `BlockDevice` |
 
 ## State Machine
 
