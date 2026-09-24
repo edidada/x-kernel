@@ -2,8 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Wrappers of some devices in the [`virtio-drivers`] crate, that implement
-//! traits in the [`driver_base`] series crates.
+//! Virtio device-family constructors over the vendored `virtio-drivers`
+//! transport, implementing the class contracts (`block`, `net`, `char`, ...).
+//! Shared by the `drv/virtio` driver modules and the driver-runtime HAL.
 //!
 //! Like the [`virtio-drivers`] crate, you must implement the [`VirtIoHal`]
 //! trait (alias of `virtio_drivers::Hal`), to allocate DMA regions and

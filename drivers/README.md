@@ -6,29 +6,32 @@ contract it is implementing or consuming.
 ## Layers
 
 ```text
-                  driver contracts and device model
-               ┌────────────────────────────────────┐
-               │ driver_base / device-res / kdevice │
-               │ kclass / block / net / char / ...  │
-               └───────────────┬────────────────────┘
-                               │
-        ┌──────────────────────┴──────────────────────┐
-        │                                             │
-        ▼                                             ▼
-portable concrete drivers                 X-Kernel adapters/integration
-consume capability contracts              implement/consume contracts
-implement class contracts                 using host-kernel APIs
+              device model and service runtime
+             ┌──────────────────────────────────┐
+             │ driver-core / driver-runtime     │
+             │ driver-compose (composition root)│
+             └───────────────┬──────────────────┘
+                             │
+        ┌────────────────────┴────────────────────┐
+        ▼                                         ▼
+  driver contracts                       subsystem drivers
+  (class traits, capability ops)         (drv/*: one module per driver)
+        │                                         │
+        └────────────► device-res-xkernel ◄───────┘
+                       (host backend bridge)
 ```
 
-Portable concrete drivers and X-Kernel adapters meet at the published driver
-contracts. They must not call into each other through private implementation
-details, and portable concrete drivers must not call X-Kernel host APIs
-directly.
+## Device Model and Runtime
+
+| Crate | Role |
+|------|------|
+| `core/driver-core` | The device model: bus/device/driver contracts, id tables, deferred probe, the device domain. |
+| `core/driver-runtime` | Per-device services (`DeviceServices` implementation over the resource providers), the virtio HAL, and the clock registry. |
+| `core/driver-compose` | Composition root: runtime install, driver registration, DT/PCI enumeration into the domain. Called once from `kruntime`. |
 
 ## Driver Contracts
 
-These crates define the portable driver framework and the contracts between
-drivers and a host kernel:
+OS-neutral contracts; portable and host layers meet here.
 
 | Crate | Role |
 |------|------|
@@ -38,45 +41,38 @@ drivers and a host kernel:
 | `kclass` | Runtime publication layer for typed device classes. |
 | `block`, `char_driver`, `display`, `input`, `net`, `vsock`, `hwrng` | Device class contracts that concrete drivers implement and kernel subsystems consume. |
 
-These crates should stay OS-neutral. They may depend on other driver contract
-crates and small shared utility crates, but not on host-kernel implementation
-crates such as `khal`, `kirq`, `memspace`, `kdma`, `kruntime`, `ktask`, or
-`kwork`.
+These crates stay OS-neutral: no dependencies on `khal`, `kirq`, `memspace`,
+`kdma`, `kruntime`, `ktask`, or `kwork`.
 
-## X-Kernel Adapters
+## Subsystem Drivers (`drv/`)
 
-These crates or modules adapt the portable driver contracts to X-Kernel:
+One subsystem crate per family, one module per driver, one feature per driver —
+mirroring Linux's file-per-driver model. Adding a driver touches: a module
+file, one feature line in its subsystem crate, one compose registration, and a
+Kconfig block.
 
-| Crate or module | Role |
-|----------------|------|
-| `device-res-xkernel` | Implements `device-res` provider traits using `memspace`, `kirq`, `kdma`, and `khal`. |
-| `kdriver` | X-Kernel driver orchestration: bus discovery, provider holder, concrete-driver glue, and publication into `kclass`. |
-| `kdevice-uevent` | Adapts ordered `kdevice` node lifecycle events to X-Kernel kobject netlink messages and shared sysfs formatting. |
-| `irq-driver`, `timer-driver`, `rtc-driver`, `x86-apic`, `aarch64-pmuv3` | Host/platform driver integration pieces. |
-| `console-driver` | Boot and console integration; ordinary reusable serial drivers should use driver contracts instead. |
-| `pci`, `of`, `acpi`, `dice-driver`, `rs_fdtree` | Firmware, bus, and boot-discovery support. Keep host-specific conversions in adapter code, not in `kdevice` or portable drivers. |
+| Crate | Modules |
+|-------|---------|
+| `drv/virtio` | `blk`, `net`, `rng`, `gpu`, `input`, `vsock`, `virtio_9p`, plus the `mmio` transport driver. |
+| `drv/serial` | `pl011`, `ns16550` (MMIO + I/O-port). |
+| `drv/clk` | `fixed_clock` (DT `fixed-clock` provider). |
+| `drv/block` | `ramdisk`. |
 
-Adapter crates may depend on host-kernel implementation crates, but should do so
-only to implement or consume driver subsystem contracts.
+## Shared Device Layers
 
-## Portable Concrete Drivers
+| Crate | Role |
+|------|------|
+| `devices/virtio` | Virtio device-family constructors (`VirtIoBlkDev`, …) over the vendored `virtio-drivers` transport, implementing the class traits. Shared by the drv/virtio modules and the HAL. |
+| `integration/kdevice-uevent` | Ordered devnode lifecycle events to netlink kobject uevents; the uevent payload format is a udev-visible compatibility surface. |
 
-Concrete reusable drivers must depend on the driver contracts rather than host
-kernel APIs. Current examples include:
+## Host Adapters and Platform Support
 
-| Crate | Expected boundary |
-|------|-------------------|
-| `virtio` | Uses `virtio-drivers` plus `device-res` / class traits. It must not depend on `khal`, `kirq`, `memspace`, `kdma`, `kruntime`, `ktask`, or `kwork`. |
+| Crate | Role |
+|------|------|
+| `adapters/xkernel/device-res` | Implements the `device-res` capability traits against `memspace`, `kirq`, `kdma`, `khal`. |
+| `platform/*` (`pci`, `of`, `acpi`, `console`, `irq`, `timer`, `rtc`, `x86-apic`, `aarch64-pmuv3`, `rs-fdtree`, `dice`) | Bus, firmware, and platform infrastructure; `pci::support` owns CAM/BAR configuration shared by enumeration and drivers. |
 
-When a concrete driver needs a new kernel facility, add a capability contract
-first, implement it in an adapter crate, then pass the provider through
-`kdriver` glue.
+## Porting Workflow
 
-## Naming Guidance
-
-- Use `*-xkernel` for X-Kernel implementations of portable contracts, as with
-  `device-res-xkernel`.
-- Keep portable contracts free of `xkernel`, `khal`, `kirq`, `memspace`, or
-  other host implementation terms in their public API.
-- Avoid adding broad public helper APIs in adapter crates. Adapter crates should
-  mainly expose provider types or integration entry points.
+See `docs/linux-porting-map.md` — the normative Linux→x-kernel mapping for
+AI-assisted driver transcription, with the golden templates under `drv/`.
