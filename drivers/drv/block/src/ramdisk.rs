@@ -62,52 +62,14 @@ impl DriverOps<PlatformBus> for RamdiskDriver {
                 alloc::string::String::from("ramdisk"),
             )
         };
-        let disk = Gendisk::new(name, 1, 0, 1, dev).map_err(map_driver_error)?;
+        let disk = Gendisk::new(name, 1, 0, 1, dev).map_err(crate::common::map_driver_error)?;
         let location = legacy_location(_dev.descriptor().location);
         publish_block(ClassParent::detached("ramdisk", location), Arc::new(disk))
-            .map_err(map_driver_error)?;
+            .map_err(crate::common::map_driver_error)?;
         Ok(RamdiskData)
     }
 
     fn remove(&self, _dev: &mut BoundDevice<'_, PlatformBus, RamdiskData>) {}
-}
-
-fn legacy_location(location: driver_core::desc::DeviceLocation) -> devnode::DeviceLocation {
-    use devnode::DeviceLocation as Legacy;
-    use driver_core::desc::DeviceLocation as Ours;
-    match location {
-        Ours::Pci {
-            segment,
-            bus,
-            device,
-            function,
-        } => Legacy::Pci {
-            segment,
-            bus,
-            device,
-            function,
-        },
-        Ours::Mmio { base, size } => Legacy::Mmio { base, size },
-        Ours::FirmwareNode { id } => Legacy::FirmwareNode { id },
-        Ours::PlatformStatic { id } => Legacy::PlatformStatic { id },
-        Ours::Bridge { domain } => Legacy::Bridge { domain },
-    }
-}
-
-fn map_driver_error(err: driver_base::DriverError) -> ProbeError {
-    let error = match err {
-        driver_base::DriverError::InvalidInput | driver_base::DriverError::ReadOnly => {
-            RuntimeError::Invalid
-        }
-        driver_base::DriverError::NoMemory => RuntimeError::NoMemory,
-        driver_base::DriverError::ResourceBusy | driver_base::DriverError::AlreadyExists => {
-            RuntimeError::Busy
-        }
-        driver_base::DriverError::BadState => RuntimeError::BadState,
-        driver_base::DriverError::Io | driver_base::DriverError::WouldBlock => RuntimeError::Io,
-        driver_base::DriverError::Unsupported => RuntimeError::Unsupported,
-    };
-    ProbeError::Fatal(error)
 }
 
 /// `module_platform_driver()` equivalent.

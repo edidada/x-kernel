@@ -8,6 +8,8 @@
 
 #![no_std]
 
+mod common;
+
 #[cfg(feature = "blk")]
 pub mod blk;
 #[cfg(feature = "gpu")]

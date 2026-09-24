@@ -80,6 +80,26 @@ impl From<RuntimeError> for ServiceError {
     }
 }
 
+/// Opaque virtio transport probed by the service layer. The concrete
+/// backing (PCI or MMIO) is a runtime implementation detail; drivers
+/// downcast via [`VirtioTransport::downcast`] with the type their device
+/// constructor expects, or consume it through
+/// [`DeviceCtx::virtio_transport_into`].
+pub struct VirtioTransport {
+    inner: alloc::boxed::Box<dyn core::any::Any + Send + Sync>,
+}
+
+impl VirtioTransport {
+    pub fn new(inner: alloc::boxed::Box<dyn core::any::Any + Send + Sync>) -> Self {
+        Self { inner }
+    }
+
+    /// Downcast to the concrete transport type.
+    pub fn downcast<T: Send + Sync + 'static>(self) -> Option<T> {
+        self.inner.downcast::<T>().ok().map(|boxed| *boxed)
+    }
+}
+
 /// Type-erased interrupt handler registered by [`DeviceCtx::request_irq`].
 ///
 /// The handler carries its own context (the `dev_id` pattern): drivers close
@@ -122,6 +142,15 @@ pub trait DeviceServices: Send + Sync {
     /// Acquire a clock input (`clk_get`); may report that the provider has
     /// not registered yet.
     fn clk_get(&self, device: u64, spec: ClkSpec) -> Result<ClkHandle, ServiceError>;
+
+    /// Probe the virtio transport for a PCI device: configures the function,
+    /// builds the transport, and resolves its irq. Drivers receive the
+    /// kind + transport + irq without touching PCI internals or providers.
+    fn virtio_pci_transport(
+        &self,
+        device: u64,
+        location: crate::desc::DeviceLocation,
+    ) -> Result<(crate::DeviceKind, crate::VirtioTransport, Option<usize>), RuntimeError>;
 }
 
 /// A mapped MMIO region with checked volatile accessors.
@@ -578,6 +607,30 @@ impl<'a, B: Bus> DeviceCtx<'a, B> {
     /// Build a `-EPROBE_DEFER` return value for an out-of-band dependency.
     pub fn defer(&self, dep: DepSource) -> ProbeError {
         ProbeError::Deferred(dep)
+    }
+
+    /// Probe this device's virtio transport (PCI): returns the device kind,
+    /// the type-erased transport, and the resolved irq. The framework does
+    /// PCI configuration and provider access; the driver does neither.
+    pub fn virtio_pci_transport(
+        &mut self,
+    ) -> Result<(crate::DeviceKind, crate::VirtioTransport, Option<usize>), ProbeError> {
+        let location = self.descriptor().location;
+        self.services
+            .virtio_pci_transport(self.id, location)
+            .map_err(ProbeError::Fatal)
+    }
+
+    /// [`DeviceCtx::virtio_pci_transport`] with the transport downcast to
+    /// the concrete type the device constructor takes.
+    pub fn virtio_pci_transport_as<T: Send + Sync + 'static>(
+        &mut self,
+    ) -> Result<(crate::DeviceKind, T, Option<usize>), ProbeError> {
+        let (kind, transport, irq) = self.virtio_pci_transport()?;
+        let transport = transport
+            .downcast::<T>()
+            .ok_or(ProbeError::Fatal(RuntimeError::BadState))?;
+        Ok((kind, transport, irq))
     }
 }
 

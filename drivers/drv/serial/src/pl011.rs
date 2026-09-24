@@ -127,7 +127,7 @@ impl DriverOps<PlatformBus> for Pl011Driver {
         // subsystem (/dev/console backing), auxiliary ports become char
         // devices. Both use a detached class parent — the class layer is
         // model-agnostic since the Phase 1 decoupling.
-        let location = legacy_location(dev.descriptor().location);
+        let location = crate::common::legacy_location(dev.descriptor().location);
         let char_dev: kclass::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
         match port.role() {
             SerialRole::Stdout => {
@@ -135,11 +135,11 @@ impl DriverOps<PlatformBus> for Pl011Driver {
                     ClassParent::detached("pl011-serial", location),
                     char_dev,
                 )
-                .map_err(map_driver_error)?;
+                .map_err(crate::common::map_driver_error)?;
             }
             SerialRole::Auxiliary => {
                 publish_char(ClassParent::detached("pl011-serial", location), char_dev)
-                    .map_err(map_driver_error)?;
+                    .map_err(crate::common::map_driver_error)?;
             }
         }
 
@@ -167,40 +167,6 @@ impl DriverOps<PlatformBus> for Pl011Driver {
         // Guards in `Data` release after this in field order; nothing extra
         // to quiesce (the adopted stdout port must keep printing).
     }
-}
-
-fn legacy_location(location: driver_core::desc::DeviceLocation) -> devnode::DeviceLocation {
-    use devnode::DeviceLocation as Legacy;
-    use driver_core::desc::DeviceLocation as Ours;
-    match location {
-        Ours::Pci {
-            segment,
-            bus,
-            device,
-            function,
-        } => Legacy::Pci {
-            segment,
-            bus,
-            device,
-            function,
-        },
-        Ours::Mmio { base, size } => Legacy::Mmio { base, size },
-        Ours::FirmwareNode { id } => Legacy::FirmwareNode { id },
-        Ours::PlatformStatic { id } => Legacy::PlatformStatic { id },
-        Ours::Bridge { domain } => Legacy::Bridge { domain },
-    }
-}
-
-fn map_driver_error(err: DriverError) -> ProbeError {
-    let error = match err {
-        DriverError::InvalidInput | DriverError::ReadOnly => RuntimeError::Invalid,
-        DriverError::NoMemory => RuntimeError::NoMemory,
-        DriverError::ResourceBusy | DriverError::AlreadyExists => RuntimeError::Busy,
-        DriverError::BadState => RuntimeError::BadState,
-        DriverError::Io | DriverError::WouldBlock => RuntimeError::Io,
-        DriverError::Unsupported => RuntimeError::Unsupported,
-    };
-    ProbeError::Fatal(error)
 }
 
 /// `module_platform_driver()` equivalent.

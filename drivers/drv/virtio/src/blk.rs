@@ -38,7 +38,6 @@ use driver_core::{
     pci::{PciBus, PciMatch},
 };
 use kclass::{ClassParent, publish_block};
-use pci::{DeviceFunction, PciBus as PciRootAccess};
 use virtio::{Transport, VirtIoBlkDev, VirtIoHal, probe_pci_device};
 
 /// `struct pci_device_id virtio_blk_id_table[]`: modern 0x1042 and
@@ -70,49 +69,15 @@ impl DriverOps<PciBus> for VirtioBlkDriver {
     type Data = BlkData;
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PciBus>) -> Result<BlkData, ProbeError> {
-        use driver_core::desc::DeviceLocation;
-
-        let DeviceLocation::Pci {
-            bus: bus_nr,
-            device: dev_nr,
-            function,
-            ..
-        } = dev.descriptor().location
-        else {
-            return Err(ProbeError::Fatal(RuntimeError::Invalid));
-        };
-
-        let mut pci_root = PciRootAccess::new(pci::support::pci_cam_kind())
-            .map_err(|_| ProbeError::Fatal(RuntimeError::Io))?;
-        let bdf = DeviceFunction {
-            bus: bus_nr,
-            device: dev_nr,
-            function,
-        };
-
-        let (root, config) = pci_root.parts_mut();
-        pci::support::configure_pci_device_if_needed(root, bdf)
-            .map_err(|_| ProbeError::Fatal(RuntimeError::Io))?;
-        let dev_info = root
-            .enumerate_bus(bus_nr)
-            .find(|(b, _)| *b == bdf)
-            .map(|(_, info)| info)
-            .ok_or(ProbeError::Fatal(RuntimeError::BadState))?;
-
-        let (kind, transport, irq) =
-            probe_pci_device::<driver_runtime::hal::Hal, pci::MmioCam<'static>>(
-                root,
-                bdf,
-                &dev_info,
-                config,
-                driver_runtime::resource_provider(),
-            )
-            .ok_or(ProbeError::Fatal(RuntimeError::BadState))?;
+        let (kind, transport, irq) = dev.virtio_pci_transport_as::<virtio::PciTransport>()?;
         if !matches!(kind, driver_base::DeviceKind::Block) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
-        let activation = activate(dev, transport, irq)?;
+        let activation = match irq {
+            Some(irq) => activate(dev, transport, irq)?,
+            None => return Err(ProbeError::Fatal(RuntimeError::Invalid)),
+        };
         Ok(BlkData {
             activation: Some(activation),
         })
@@ -179,7 +144,7 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
             transport,
             block_wait::prepare_block_wait,
         )
-        .map_err(map_driver_error)?,
+        .map_err(crate::common::map_driver_error)?,
     );
 
     let completion: Arc<dyn block::completion::BlockCompletionOperations> = device.clone();
@@ -199,11 +164,11 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
             Arc::downgrade(&handler),
             activation.reclaimer.clone(),
         )
-        .map_err(map_res_error)?,
+        .map_err(crate::common::map_res_error)?,
     );
 
     let modalias = dev.modalias().map(alloc::string::String::from);
-    let parent_path = physical_path(dev.descriptor().location);
+    let parent_path = crate::common::physical_path(dev.descriptor().location);
     let disk = Arc::new(
         Gendisk::new(
             device.name().into(),
@@ -212,84 +177,19 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
             1 << virtio::VIRTIO_BLK_PART_BITS,
             Box::new(device.clone()),
         )
-        .map_err(map_driver_error)?
+        .map_err(crate::common::map_driver_error)?
         .with_devnode_context(&parent_path, modalias),
     );
     activation.disk = Some(disk.clone());
 
     device.enable_interrupts();
 
-    let location = legacy_location(dev.descriptor().location);
+    let location = crate::common::legacy_location(dev.descriptor().location);
     if let Err(error) = publish_block(ClassParent::detached("virtio-blk", location), disk) {
-        return Err(map_driver_error(error));
+        return Err(crate::common::map_driver_error(error));
     }
 
     Ok(Box::new(activation))
-}
-
-fn physical_path(location: driver_core::desc::DeviceLocation) -> String {
-    use driver_core::desc::DeviceLocation as Ours;
-    match location {
-        Ours::Pci {
-            segment,
-            bus,
-            device,
-            function,
-        } => devnode::physical_path_pci(segment, bus, device, function),
-        Ours::Mmio { base, .. } => alloc::format!("platform/{base:x}.mmio"),
-        Ours::FirmwareNode { id } => alloc::format!("platform/firmware{id}"),
-        Ours::PlatformStatic { id } => alloc::format!("platform/static{id}"),
-        Ours::Bridge { domain } => alloc::format!("pci{domain:04x}:00"),
-    }
-}
-
-fn legacy_location(location: driver_core::desc::DeviceLocation) -> devnode::DeviceLocation {
-    use devnode::DeviceLocation as Legacy;
-    use driver_core::desc::DeviceLocation as Ours;
-    match location {
-        Ours::Pci {
-            segment,
-            bus,
-            device,
-            function,
-        } => Legacy::Pci {
-            segment,
-            bus,
-            device,
-            function,
-        },
-        Ours::Mmio { base, size } => Legacy::Mmio { base, size },
-        Ours::FirmwareNode { id } => Legacy::FirmwareNode { id },
-        Ours::PlatformStatic { id } => Legacy::PlatformStatic { id },
-        Ours::Bridge { domain } => Legacy::Bridge { domain },
-    }
-}
-
-fn map_driver_error(err: driver_base::DriverError) -> ProbeError {
-    let error = match err {
-        driver_base::DriverError::InvalidInput | driver_base::DriverError::ReadOnly => {
-            RuntimeError::Invalid
-        }
-        driver_base::DriverError::NoMemory => RuntimeError::NoMemory,
-        driver_base::DriverError::ResourceBusy | driver_base::DriverError::AlreadyExists => {
-            RuntimeError::Busy
-        }
-        driver_base::DriverError::BadState => RuntimeError::BadState,
-        driver_base::DriverError::Io | driver_base::DriverError::WouldBlock => RuntimeError::Io,
-        driver_base::DriverError::Unsupported => RuntimeError::Unsupported,
-    };
-    ProbeError::Fatal(error)
-}
-
-fn map_res_error(err: device_res::ResError) -> ProbeError {
-    let error = match err {
-        device_res::ResError::InvalidResource => RuntimeError::Invalid,
-        device_res::ResError::MappingFailed => RuntimeError::Io,
-        device_res::ResError::NoMemory => RuntimeError::NoMemory,
-        device_res::ResError::Busy => RuntimeError::Busy,
-        device_res::ResError::Unsupported => RuntimeError::Unsupported,
-    };
-    ProbeError::Fatal(error)
 }
 
 /// `module_pci_driver()` equivalent.

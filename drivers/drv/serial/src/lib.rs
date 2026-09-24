@@ -8,6 +8,8 @@
 
 extern crate alloc;
 
+mod common;
+
 #[cfg(feature = "ns16550-mmio")]
 pub mod ns16550;
 #[cfg(feature = "pl011")]

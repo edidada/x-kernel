@@ -18,7 +18,6 @@ use driver_core::{
     pci::{PciBus, PciMatch},
 };
 use kclass::{ClassParent, publish_vsock};
-use pci::{DeviceFunction, PciBus as PciRootAccess};
 use virtio::probe_pci_device;
 
 /// `struct pci_device_id virtio_vsock_id_table[]`.
@@ -37,40 +36,7 @@ impl DriverOps<PciBus> for VsockDriver {
     type Data = VsockData;
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PciBus>) -> Result<VsockData, ProbeError> {
-        use driver_core::desc::DeviceLocation;
-
-        let DeviceLocation::Pci {
-            bus: bus_nr,
-            device: dev_nr,
-            function,
-            ..
-        } = dev.descriptor().location
-        else {
-            return Err(ProbeError::Fatal(RuntimeError::Invalid));
-        };
-
-        let mut pci_root = PciRootAccess::new(pci::support::pci_cam_kind())
-            .map_err(|_| ProbeError::Fatal(RuntimeError::Io))?;
-        let bdf = DeviceFunction {
-            bus: bus_nr,
-            device: dev_nr,
-            function,
-        };
-        let (root, config) = pci_root.parts_mut();
-        pci::support::configure_pci_device_if_needed(root, bdf)
-            .map_err(|_| ProbeError::Fatal(RuntimeError::Io))?;
-        let dev_info = root
-            .enumerate_bus(bus_nr)
-            .find(|(b, _)| *b == bdf)
-            .map(|(_, info)| info)
-            .ok_or(ProbeError::Fatal(RuntimeError::BadState))?;
-
-        let provider = driver_runtime::resource_provider();
-        let (kind, transport, _irq) = probe_pci_device::<
-            driver_runtime::hal::Hal,
-            pci::MmioCam<'static>,
-        >(root, bdf, &dev_info, config, provider)
-        .ok_or(ProbeError::Fatal(RuntimeError::BadState))?;
+        let (kind, transport, _irq) = dev.virtio_pci_transport_as::<virtio::PciTransport>()?;
         if !matches!(kind, driver_base::DeviceKind::Vsock) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
@@ -92,52 +58,14 @@ pub fn activate<B: driver_core::Bus>(
     transport: impl virtio::Transport + 'static,
 ) -> Result<(), ProbeError> {
     let device = virtio::VirtIoVsockDev::<driver_runtime::hal::Hal, _>::try_new(transport)
-        .map_err(map_driver_error)?;
-    let location = legacy_location(dev.descriptor().location);
+        .map_err(crate::common::map_driver_error)?;
+    let location = crate::common::legacy_location(dev.descriptor().location);
     publish_vsock(
         ClassParent::detached("virtio-vsock", location),
         Box::new(device),
     )
-    .map_err(map_driver_error)?;
+    .map_err(crate::common::map_driver_error)?;
     Ok(())
-}
-
-fn legacy_location(location: driver_core::desc::DeviceLocation) -> devnode::DeviceLocation {
-    use devnode::DeviceLocation as Legacy;
-    use driver_core::desc::DeviceLocation as Ours;
-    match location {
-        Ours::Pci {
-            segment,
-            bus,
-            device,
-            function,
-        } => Legacy::Pci {
-            segment,
-            bus,
-            device,
-            function,
-        },
-        Ours::Mmio { base, size } => Legacy::Mmio { base, size },
-        Ours::FirmwareNode { id } => Legacy::FirmwareNode { id },
-        Ours::PlatformStatic { id } => Legacy::PlatformStatic { id },
-        Ours::Bridge { domain } => Legacy::Bridge { domain },
-    }
-}
-
-fn map_driver_error(err: driver_base::DriverError) -> ProbeError {
-    let error = match err {
-        driver_base::DriverError::InvalidInput | driver_base::DriverError::ReadOnly => {
-            RuntimeError::Invalid
-        }
-        driver_base::DriverError::NoMemory => RuntimeError::NoMemory,
-        driver_base::DriverError::ResourceBusy | driver_base::DriverError::AlreadyExists => {
-            RuntimeError::Busy
-        }
-        driver_base::DriverError::BadState => RuntimeError::BadState,
-        driver_base::DriverError::Io | driver_base::DriverError::WouldBlock => RuntimeError::Io,
-        driver_base::DriverError::Unsupported => RuntimeError::Unsupported,
-    };
-    ProbeError::Fatal(error)
 }
 
 /// `module_pci_driver()` equivalent.
