@@ -10,10 +10,19 @@
 //! must probe the hardware to know what it is), and dispatches to the
 //! per-family activation entry points.
 //!
-//! This replaces the legacy platform backend's enumeration-time transport
-//! probing: the probe-on-probe now belongs to the driver that owns the
-//! device, and the families activate through their shared `activate`
-//! entry points (same code paths as their PCI drivers).
+//! # Ownership contract
+//!
+//! `MmioActivation` owns **everything** the device needs, in one object:
+//! the class publication (transport inside), the IRQ guard, and the MMIO
+//! register mapping. Its `close()` runs the Linux remove order —
+//!
+//! ```text
+//! quiesce hardware -> withdraw class publication -> release IRQ
+//!     -> drop transport -> unmap MMIO registers
+//! ```
+//!
+//! — so nothing outlives the mapping it dereferences. Field order alone
+//! never carries this contract; the explicit close sequence does.
 
 use driver_core::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, IoMap, ProbeError, RuntimeError,
@@ -22,20 +31,55 @@ use driver_core::{
 
 static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("virtio,mmio"))];
 
-/// Driver-private data: the per-family activation state (IRQ guard, block
-/// activation — whatever the family's `activate` returns) plus the mapped
-/// transport registers. Both live for the binding; release order is
-/// activation drop (quiesce hardware) first, registers unmap last.
+/// One activated virtio-mmio device: publication + guards, closed in the
+/// Linux remove order above. Held by `MmioData`; families construct it via
+/// [`ActivationBuilder`].
+pub trait MmioActivation: Send + Sync {
+    /// Tear the device down: quiesce, unpublish, release IRQ, drop
+    /// transport, unmap registers — in that order.
+    fn close(self: alloc::boxed::Box<Self>);
+}
+
+/// Constructor helper handed to family activations: owns the register
+/// mapping, so the transport's raw pointer stays valid for exactly as long
+/// as the activation object.
+pub struct ActivationBuilder {
+    regs: IoMap,
+}
+
+impl ActivationBuilder {
+    pub fn new(regs: IoMap) -> Self {
+        Self { regs }
+    }
+
+    /// Wrap a family activation: publication guard first (withdrawn at
+    /// close), then IRQ, then the register mapping last.
+    pub fn build<A: MmioActivation + 'static>(self, inner: A) -> MmioData {
+        MmioData {
+            activation: Some(alloc::boxed::Box::new(inner)),
+            regs: Some(self.regs),
+        }
+    }
+}
+
+/// Driver-private data: the family activation (publication + IRQ guards +
+/// transport) and the register mapping, one ownership chain.
 pub struct MmioData {
-    state: MmioFamilyState,
+    activation: Option<alloc::boxed::Box<dyn MmioActivation>>,
+    /// Register mapping; drops LAST (after the activation has closed and
+    /// nothing dereferences the window anymore).
     regs: Option<IoMap>,
 }
 
-/// The per-family runtime state returned by dispatch, held by `MmioData`.
-enum MmioFamilyState {
-    Net(Option<driver_core::DevIrq>),
-    Block(alloc::boxed::Box<dyn crate::blk::Activation>),
-    Other,
+impl Drop for MmioData {
+    fn drop(&mut self) {
+        // Field order would do this, but the explicit sequence documents
+        // the contract and guards against future field reordering.
+        if let Some(activation) = self.activation.take() {
+            activation.close();
+        }
+        drop(self.regs.take());
+    }
 }
 
 pub struct MmioDriver;
@@ -56,20 +100,14 @@ impl DriverOps<PlatformBus> for MmioDriver {
             return Err(ProbeError::Fatal(RuntimeError::BadState));
         };
 
-        // The family owns the device; the mapping stays with this binding.
-        // The dispatch result (IRQ guard / block activation) is held by
-        // `Data` so the hardware stays live for the binding.
-        let state = dispatch(dev, kind, transport)?;
-        Ok(MmioData {
-            state,
-            regs: Some(regs),
-        })
+        let builder = ActivationBuilder::new(regs);
+        dispatch(dev, kind, transport, builder)
     }
 
-    fn remove(&self, _dev: &mut BoundDevice<'_, PlatformBus, MmioData>) {
-        // Drop order from `Data`: family state first (IRQ release, block
-        // activation close — hardware quiesce), then the register mapping.
-        // Both happen via `Data`'s field order on drop.
+    fn remove(&self, dev: &mut BoundDevice<'_, PlatformBus, MmioData>) {
+        // The explicit teardown runs from `MmioData::drop`; `remove` is the
+        // quiesce hook for families that need ordered stopping beyond it.
+        let _ = dev;
     }
 }
 
@@ -78,73 +116,101 @@ fn dispatch<T: virtio::Transport + 'static>(
     dev: &mut DeviceCtx<'_, PlatformBus>,
     kind: driver_base::DeviceKind,
     transport: T,
-) -> Result<MmioFamilyState, ProbeError> {
+    builder: ActivationBuilder,
+) -> Result<MmioData, ProbeError> {
     use driver_base::DeviceKind;
     match kind {
-        #[cfg(all(feature = "rng", not(feature = "net"), not(feature = "blk")))]
-        DeviceKind::Char => {
-            crate::rng::activate(dev, transport)?;
-            Ok(MmioFamilyState::Other)
-        }
-        #[cfg(feature = "net")]
+        DeviceKind::Char => dispatch_char(dev, transport, builder),
         DeviceKind::Net => {
-            let irq = crate::net::activate(dev, transport)?;
-            Ok(MmioFamilyState::Net(irq))
+            #[cfg(feature = "net")]
+            {
+                crate::net::activate_mmio(dev, transport, builder)
+            }
+            #[cfg(not(feature = "net"))]
+            {
+                let _ = (dev, transport, builder);
+                Err(ProbeError::Fatal(RuntimeError::Unsupported))
+            }
         }
-        #[cfg(feature = "blk")]
         DeviceKind::Block => {
-            let irq = dev
-                .irq(0)
-                .map(|spec| spec.number)
-                .map_err(|_| ProbeError::Fatal(RuntimeError::Invalid))?;
-            let activation = crate::blk::activate(dev, transport, irq)?;
-            Ok(MmioFamilyState::Block(activation))
+            #[cfg(feature = "blk")]
+            {
+                let irq = dev
+                    .irq(0)
+                    .map(|spec| spec.number)
+                    .map_err(|_| ProbeError::Fatal(RuntimeError::Invalid))?;
+                crate::blk::activate_mmio(dev, transport, irq, builder)
+            }
+            #[cfg(not(feature = "blk"))]
+            {
+                let _ = (dev, transport, builder);
+                Err(ProbeError::Fatal(RuntimeError::Unsupported))
+            }
         }
-        #[cfg(any(
-            feature = "rng",
-            feature = "gpu",
-            feature = "input",
-            feature = "vsock",
-            feature = "fs9p"
-        ))]
-        DeviceKind::Char
-        | DeviceKind::Display
-        | DeviceKind::Input
-        | DeviceKind::Vsock
-        | DeviceKind::Fs9p => {
-            // The families own their devices through the class registries;
-            // no per-family runtime state beyond the register mapping.
-            dispatch_simple(dev, kind, transport)?;
-            Ok(MmioFamilyState::Other)
-        }
-        _ => {
-            log::warn!("virtio-mmio: unsupported device kind {kind:?}");
+        DeviceKind::Display => dispatch_simple_display(dev, transport, builder),
+        DeviceKind::Input => dispatch_simple_input(dev, transport, builder),
+        DeviceKind::Vsock => dispatch_simple_vsock(dev, transport, builder),
+        DeviceKind::Fs9p => dispatch_simple_9p(dev, transport, builder),
+        DeviceKind::Bus => {
+            log::warn!("virtio-mmio: unexpected bus device kind");
             Err(ProbeError::Fatal(RuntimeError::Unsupported))
         }
     }
 }
 
+/// Char-family dispatch: exactly one char family is wired per build
+/// (virtio-rng today); future char families get their own kind-checked arm.
 #[allow(unused_variables)]
-fn dispatch_simple<T: virtio::Transport + 'static>(
+fn dispatch_char<T: virtio::Transport + 'static>(
     dev: &mut DeviceCtx<'_, PlatformBus>,
-    kind: driver_base::DeviceKind,
     transport: T,
-) -> Result<(), ProbeError> {
-    use driver_base::DeviceKind;
-    match kind {
-        #[cfg(feature = "rng")]
-        DeviceKind::Char => crate::rng::activate(dev, transport),
-        #[cfg(feature = "gpu")]
-        DeviceKind::Display => crate::gpu::activate(dev, transport),
-        #[cfg(feature = "input")]
-        DeviceKind::Input => crate::input::activate(dev, transport),
-        #[cfg(feature = "vsock")]
-        DeviceKind::Vsock => crate::vsock::activate(dev, transport),
-        #[cfg(feature = "fs9p")]
-        DeviceKind::Fs9p => crate::virtio_9p::activate(dev, transport),
-        _ => Err(ProbeError::Fatal(RuntimeError::Unsupported)),
+    builder: ActivationBuilder,
+) -> Result<MmioData, ProbeError> {
+    #[cfg(feature = "rng")]
+    {
+        let _ = dev;
+        crate::rng::activate_mmio(
+            crate::common::legacy_location(dev.descriptor().location),
+            transport,
+            builder,
+        )
+    }
+    #[cfg(not(feature = "rng"))]
+    {
+        let _ = (dev, transport, builder);
+        Err(ProbeError::Fatal(RuntimeError::Unsupported))
     }
 }
+
+macro_rules! simple_family_dispatch {
+    ($fn_name:ident, $feature:literal, $module:ident) => {
+        #[allow(unused_variables)]
+        fn $fn_name<T: virtio::Transport + 'static>(
+            dev: &mut DeviceCtx<'_, PlatformBus>,
+            transport: T,
+            builder: ActivationBuilder,
+        ) -> Result<MmioData, ProbeError> {
+            #[cfg(feature = $feature)]
+            {
+                crate::$module::activate_mmio(
+                    crate::common::legacy_location(dev.descriptor().location),
+                    transport,
+                    builder,
+                )
+            }
+            #[cfg(not(feature = $feature))]
+            {
+                let _ = (dev, transport, builder);
+                Err(ProbeError::Fatal(RuntimeError::Unsupported))
+            }
+        }
+    };
+}
+
+simple_family_dispatch!(dispatch_simple_display, "gpu", gpu);
+simple_family_dispatch!(dispatch_simple_input, "input", input);
+simple_family_dispatch!(dispatch_simple_vsock, "vsock", vsock);
+simple_family_dispatch!(dispatch_simple_9p, "fs9p", virtio_9p);
 
 /// `module_platform_driver()` equivalent.
 pub fn register() {

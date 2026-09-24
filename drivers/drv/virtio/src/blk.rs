@@ -188,6 +188,31 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
     Ok(Box::new(activation))
 }
 
+/// virtio-mmio activation: owns the block activation (which owns the
+/// Gendisk publication + IRQ) through the same `Activation` close path;
+/// the mapping drops after close returns, so the transport never outlives
+/// its window.
+#[cfg(feature = "mmio")]
+pub fn activate_mmio<B: driver_core::Bus, T: Transport + 'static>(
+    dev: &mut DeviceCtx<'_, B>,
+    transport: T,
+    irq: usize,
+    builder: crate::mmio::ActivationBuilder,
+) -> Result<crate::mmio::MmioData, ProbeError> {
+    let activation = activate(dev, transport, irq)?;
+    struct BlkMmioActivation {
+        inner: Box<dyn Activation>,
+    }
+    impl crate::mmio::MmioActivation for BlkMmioActivation {
+        fn close(self: alloc::boxed::Box<Self>) {
+            // Activation::close already runs the Linux order: drain I/O,
+            // del_gendisk, disable IRQs, release guards.
+            self.inner.close();
+        }
+    }
+    Ok(builder.build(BlkMmioActivation { inner: activation }))
+}
+
 /// `module_pci_driver()` equivalent.
 pub fn register() {
     driver_core::global_domain().register_driver(DriverDesc::new(

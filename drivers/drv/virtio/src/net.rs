@@ -62,6 +62,18 @@ pub fn activate<B: driver_core::Bus>(
     dev: &mut DeviceCtx<'_, B>,
     transport: impl virtio::Transport + 'static,
 ) -> Result<Option<DevIrq>, ProbeError> {
+    // The PCI path's publication is withdrawn by the composition root's
+    // remove notifier (before Data drops — the domain ordering contract).
+    let (_publication, irq) = activate_with_irq(dev, transport)?;
+    Ok(irq)
+}
+
+/// Construct and publish the NIC, returning the publication handle and the
+/// registered IRQ guard (shared by the PCI driver and the mmio transport).
+fn activate_with_irq<B: driver_core::Bus, T: virtio::Transport + 'static>(
+    dev: &mut DeviceCtx<'_, B>,
+    transport: T,
+) -> Result<(kclass::ClassDevice<kclass::NetDeviceImpl>, Option<DevIrq>), ProbeError> {
     let device = Arc::new(
         VirtIoNetDev::<driver_runtime::hal::Hal, _, 64>::try_new(transport)
             .map_err(crate::common::map_driver_error)?,
@@ -72,7 +84,7 @@ pub fn activate<B: driver_core::Bus>(
     let device = Arc::try_unwrap(device).map_err(|_| ProbeError::Fatal(RuntimeError::BadState))?;
 
     // Interrupt ownership: the handler holds only a share of the device
-    // internals; the guard in `Data` releases it when the device goes.
+    // internals; the guard releases when the activation closes.
     let irq = match dev.irq(0) {
         Ok(spec) => Some(dev.request_irq(spec, "virtio-net", move || {
             if worker.service() {
@@ -84,12 +96,35 @@ pub fn activate<B: driver_core::Bus>(
         Err(_) => None,
     };
     let location = crate::common::legacy_location(dev.descriptor().location);
-    publish_net(
+    let handle = publish_net(
         ClassParent::detached("virtio-net", location),
         Box::new(device),
     )
     .map_err(crate::common::map_driver_error)?;
-    Ok(irq)
+    Ok((handle, irq))
+}
+
+/// virtio-mmio activation: owns the class publication and the IRQ guard;
+/// close() unpublishes first (consumers stop), then releases the IRQ, so
+/// nothing dereferences the transport after the mapping drops.
+#[cfg(feature = "mmio")]
+pub fn activate_mmio<B: driver_core::Bus, T: virtio::Transport + 'static>(
+    dev: &mut DeviceCtx<'_, B>,
+    transport: T,
+    builder: crate::mmio::ActivationBuilder,
+) -> Result<crate::mmio::MmioData, ProbeError> {
+    let (publication, irq) = activate_with_irq(dev, transport)?;
+    struct NetMmioActivation {
+        publication: kclass::ClassDevice<kclass::NetDeviceImpl>,
+        irq: Option<DevIrq>,
+    }
+    impl crate::mmio::MmioActivation for NetMmioActivation {
+        fn close(self: alloc::boxed::Box<Self>) {
+            kclass::unpublish_net(self.publication.id());
+            drop(self.irq);
+        }
+    }
+    Ok(builder.build(NetMmioActivation { publication, irq }))
 }
 
 /// `module_pci_driver()` equivalent.

@@ -11,10 +11,10 @@
 
 1. **建模块**：`drivers/drv/<subsystem>/src/<name>.rs`（新子系统家族才建聚合 crate）；
 2. **翻译 id 表**：`*_device_id` 数组 → `static IDS: &[<Bus>::IdEntry]`；
-3. **写 DriverOps**：`probe`/`remove`（`remove` 通常为空——`Data` 的 Drop 负责释放）；
+3. **写 DriverOps**：`probe`/`remove`；
+4. **资源获取**：通用资源走 `DeviceCtx`（block 补全/回收等**子系统服务**走对应子系统接口，如 `block::dispatch`）；guard 存进 `Self::Data`，**Rust 字段按声明顺序释放**——先确定资源依赖与硬件停止顺序，再排字段；RAII 不替代显式 quiesce（`remove()` 先停硬件，`Data` drop 再回收资源）；
+5. **类发布**：`kclass::publish_*(ClassParent::detached(...), ...)`；需要显式 teardown 的（中断/工作队列/class publication）在 `remove()` 中处理；
 6. **注册**：模块 `pub fn register()` + 子系统 crate 一行 feature + compose 一行调用。
-4. 通用设备资源走 `DeviceCtx`（block 补全/回收等**子系统服务**走对应子系统接口，如 `block::dispatch`）；guard 存进 `Self::Data`，**Rust 字段按声明顺序释放**——先确定资源依赖与硬件停止顺序，再排字段；RAII 不替代显式 quiesce（`remove()` 先停硬件，`Data` drop 再回收资源）；
-5. 类发布用 `kclass::publish_*(ClassParent::detached(...), ...)`；
 
 ## 1. 驱动骨架
 
@@ -23,7 +23,7 @@
 | `struct platform_driver` | `struct FooDriver;` + `impl DriverOps<PlatformBus>` |
 | `struct pci_driver` | `impl DriverOps<PciBus>` |
 | `probe(dev)` | `fn probe(&self, dev: &mut DeviceCtx<'_, Bus>) -> Result<Self::Data, ProbeError>` |
-| `remove(dev)` | `fn remove(&self, dev: &mut BoundDevice<'_, Bus, Self::Data>)` |
+| `remove(dev)` | `fn remove(&self, dev: &mut BoundDevice<'_, Bus, Self::Data>)` —— 负责停止设备、撤销可见性、等待异步活动结束；`Data::Drop` 负责释放已停止后的资源。**有 class publication/IRQ/work/DMA 时不要生成为空函数** |
 | `struct foo_priv`（dev_get_drvdata） | `type Data = FooData`（框架所有，`remove` 可 `data_mut()`） |
 | `module_platform_driver()` / `module_init()` | `pub fn register()`，由 `driver-compose` 的 feature 调用 |
 | `MODULE_DEVICE_TABLE`（自动 modalias） | 领域从匹配的 id 行计算，经 `dev.modalias()` → uevent `MODALIAS=` |

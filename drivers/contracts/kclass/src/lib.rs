@@ -454,6 +454,49 @@ class_api!(
 // Removal entries (compose root's remove notifier)
 // ---------------------------------------------------------------------------
 
+/// Unpublish by publication id — the family activation's close() path.
+#[cfg(feature = "char")]
+pub fn unpublish_char(id: ClassDeviceId) {
+    class_remove(char_class_registry, id);
+}
+
+/// Unpublish by publication id — the family activation's close() path.
+#[cfg(feature = "net")]
+pub fn unpublish_net(id: ClassDeviceId) {
+    class_remove(net_class_registry, id);
+}
+
+/// Unpublish by publication id — the family activation's close() path.
+#[cfg(feature = "display")]
+pub fn unpublish_display(id: ClassDeviceId) {
+    class_remove(display_class_registry, id);
+}
+
+/// Unpublish by publication id — the family activation's close() path.
+#[cfg(feature = "input")]
+pub fn unpublish_input(id: ClassDeviceId) {
+    class_remove(input_class_registry, id);
+}
+
+/// Unpublish by publication id — the family activation's close() path.
+#[cfg(feature = "vsock")]
+pub fn unpublish_vsock(id: ClassDeviceId) {
+    class_remove(vsock_class_registry, id);
+}
+
+/// Unpublish by publication id — the family activation's close() path.
+#[cfg(feature = "virtio-9p")]
+pub fn unpublish_virtio_9p(id: ClassDeviceId) {
+    class_remove(virtio_9p_class_registry, id);
+}
+
+/// Unpublish a block disk by dev_t (add_disk's inverse, invoked from the
+/// block activation close).
+#[cfg(feature = "block")]
+pub fn unpublish_block(device_number: devnode::DeviceNumber) {
+    block::del_gendisk(device_number);
+}
+
 /// Drop a detached (driver-core owned) char publication by its owning device
 /// id. Called by the composition root's remove notifier.
 #[cfg(feature = "char")]

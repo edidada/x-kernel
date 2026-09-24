@@ -452,8 +452,10 @@ impl DeviceDomain {
         batch
     }
 
-    /// Tear a device down: `remove()` first (quiesce), then drop `Data`
-    /// (guards release), then mark removed.
+    /// Tear a device down in the Linux order: `remove()` (quiesce), then the
+    /// remove notifier (class publications withdrawn and their consumers
+    /// detached — while the hardware is still mapped), then drop `Data`
+    /// (IRQ release, transport teardown, MMIO unmap last), then mark removed.
     pub fn remove_device(&self, id: u64) -> Result<(), RuntimeError> {
         let (desc, driver, mut data, services) = {
             let mut inner = self.inner.lock();
@@ -475,17 +477,21 @@ impl DeviceDomain {
         if let (Some(driver), Some(data)) = (driver.as_ref(), data.as_mut()) {
             driver.remove(&desc, id, data.as_mut(), services.as_ref());
         }
-        drop(data);
 
+        // Withdraw class publications (and notify consumers) BEFORE dropping
+        // `Data`: consumers may still touch the device, and the transport
+        // inside a publication dereferences the MMIO mapping held by `Data`.
         let notifier = self.inner.lock().remove_notifier.clone();
+        if let Some(notify) = notifier {
+            notify(id);
+        }
+
+        drop(data);
         {
             let mut inner = self.inner.lock();
             if let Some(entry) = inner.devices.get_mut(&id) {
                 entry.state = DeviceState::Removed;
             }
-        }
-        if let Some(notify) = notifier {
-            notify(id);
         }
         Ok(())
     }

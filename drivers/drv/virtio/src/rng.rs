@@ -68,6 +68,38 @@ pub fn activate<B: driver_core::Bus>(
     Ok(())
 }
 
+/// virtio-mmio activation: owns the class publication; close() unpublishes
+/// so nothing dereferences the transport after the mapping drops.
+#[cfg(feature = "mmio")]
+pub fn activate_mmio<T: virtio::Transport + 'static>(
+    location: devnode::DeviceLocation,
+    transport: T,
+    builder: crate::mmio::ActivationBuilder,
+) -> Result<crate::mmio::MmioData, ProbeError> {
+    let device =
+        VirtIoRngDev::<driver_runtime::hal::Hal, _>::try_new(transport, driver_runtime::time_ops())
+            .map_err(crate::common::map_driver_error)?;
+    let handle = publish_char(
+        ClassParent::detached("virtio-rng", location),
+        Box::new(device),
+    )
+    .map_err(crate::common::map_driver_error)?;
+
+    struct RngActivation {
+        publication: kclass::ClassDevice<kclass::CharDeviceImpl>,
+    }
+
+    impl crate::mmio::MmioActivation for RngActivation {
+        fn close(self: alloc::boxed::Box<Self>) {
+            kclass::unpublish_char(self.publication.id());
+        }
+    }
+
+    Ok(builder.build(RngActivation {
+        publication: handle,
+    }))
+}
+
 /// `module_pci_driver()` equivalent.
 pub fn register() {
     driver_core::global_domain().register_driver(DriverDesc::new(
