@@ -104,6 +104,17 @@ pub fn init() {
         "driver-core: {} firmware descriptor(s), {active} active",
         devices.len()
     );
+
+    // Probe-phase end: every driver and provider for this build registered.
+    // Devices still deferred are stuck — report and convert to Unclaimed
+    // with a warning instead of parking them silently forever.
+    let stuck = domain.deferred_report();
+    if !stuck.is_empty() {
+        for (id, dep) in &stuck {
+            log::warn!("driver-core: device {id} still deferred on {dep} at boot end");
+        }
+        domain.finish_probe_phase(false);
+    }
 }
 
 /// Translate the firmware device tree into domain descriptors.

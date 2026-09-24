@@ -273,6 +273,29 @@ impl DeviceDomain {
             let mut inner = self.inner.lock();
             let name = desc.name;
             inner.drivers.push(Arc::new(RegisteredDriver { desc }));
+            // Resweep: an Unclaimed device is a per-registration-generation
+            // verdict, not a terminal one. A driver registered later (module
+            // load, rebind) must be able to claim it; otherwise runtime
+            // driver registration would silently miss every device that
+            // exhausted its candidates during enumeration.
+            let resweep: Vec<u64> = inner
+                .devices
+                .iter()
+                .filter(|(_, entry)| entry.state == DeviceState::Unclaimed)
+                .filter(|(_, entry)| {
+                    inner.drivers.iter().any(|candidate| {
+                        !entry.attempted.contains(&driver_key(candidate))
+                            && candidate.matches(&entry.desc) != MatchScore::NoMatch
+                    })
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            for id in resweep {
+                if let Some(entry) = inner.devices.get_mut(&id) {
+                    entry.state = DeviceState::Pending;
+                }
+                inner.pending.push(id);
+            }
             log::debug!(
                 "driver-core: registered driver `{name}` for bus `{}`",
                 B::ID.name()
@@ -302,6 +325,46 @@ impl DeviceDomain {
         };
         self.probe_pending();
         id
+    }
+
+    /// One line per device still parked on a dependency: `(id, dep)`.
+    ///
+    /// The composition root logs this at boot end — Linux's
+    /// `deferred_probe_timeout` diagnostics analogue, minus the timer: the
+    /// root knows when enumeration + provider registration completed, so it
+    /// decides when a deferred device is stuck rather than still waiting.
+    pub fn deferred_report(&self) -> Vec<(u64, DepSource)> {
+        self.inner.lock().deferred.clone()
+    }
+
+    /// Declare probe activity finished (the boot/scan phase is over).
+    ///
+    /// Devices still Deferred after this point are permanently unclaimed —
+    /// their provider never arrived. Each is moved to `Unclaimed` with a
+    /// warning naming the dependency, instead of staying parked forever
+    /// with no diagnostic. Devices parked on a dependency that a FUTURE
+    /// driver might still publish stay deferred only if `keep_waiting` is
+    /// set; boot-time callers pass false (nothing else will register).
+    pub fn finish_probe_phase(&self, keep_waiting: bool) {
+        let stuck: Vec<(u64, DepSource)> = {
+            let mut inner = self.inner.lock();
+            if keep_waiting {
+                return;
+            }
+            core::mem::take(&mut inner.deferred)
+        };
+        for (id, dep) in stuck {
+            let mut inner = self.inner.lock();
+            if let Some(entry) = inner.devices.get_mut(&id) {
+                if entry.state == DeviceState::Deferred {
+                    entry.state = DeviceState::Unclaimed;
+                }
+            }
+            log::warn!(
+                "driver-core: device {id} gave up waiting on dependency {dep}                  \
+                 (provider never registered)"
+            );
+        }
     }
 
     /// Announce that a dependency published itself; parked devices waiting
@@ -452,23 +515,56 @@ impl DeviceDomain {
     /// remove notifier (class publications withdrawn and their consumers
     /// detached — while the hardware is still mapped), then drop `Data`
     /// (IRQ release, transport teardown, MMIO unmap last), then mark removed.
+    ///
+    /// A device that never reached `Active` (Pending/Deferred/Probing/
+    /// Unclaimed — e.g. hotplug of an unmatched card) takes the light path:
+    /// it is withdrawn from the pending/deferred worklists and its entry is
+    /// freed immediately; there is no binding to quiesce. `Removing`/`
+    /// `Removed` entries reject re-removal with `BadState`.
     pub fn remove_device(&self, id: u64) -> Result<(), RuntimeError> {
-        let (desc, driver, mut data, services) = {
+        let (desc, driver, mut data, services, light_path) = {
             let mut inner = self.inner.lock();
             let Some(entry) = inner.devices.get_mut(&id) else {
                 return Err(RuntimeError::NotFound);
             };
-            if !matches!(entry.state, DeviceState::Active) {
-                return Err(RuntimeError::BadState);
+            match entry.state {
+                DeviceState::Active => {
+                    entry.state = DeviceState::Removing;
+                    (
+                        Some(entry.desc.clone()),
+                        entry.driver.take(),
+                        entry.data.take(),
+                        inner.services.clone(),
+                        false,
+                    )
+                }
+                DeviceState::Removing | DeviceState::Removed => {
+                    return Err(RuntimeError::BadState);
+                }
+                // Never bound: nothing to quiesce, no publication to
+                // withdraw, no guards to release. Free the entry now —
+                // keeping it would grow the table unboundedly under churn.
+                DeviceState::Pending
+                | DeviceState::Probing
+                | DeviceState::Deferred
+                | DeviceState::Unclaimed => {
+                    inner.devices.remove(&id);
+                    inner.pending.retain(|pending| *pending != id);
+                    inner.deferred.retain(|(deferred, _)| *deferred != id);
+                    (None, None, None, inner.services.clone(), true)
+                }
             }
-            entry.state = DeviceState::Removing;
-            (
-                entry.desc.clone(),
-                entry.driver.take(),
-                entry.data.take(),
-                inner.services.clone(),
-            )
         };
+        if light_path {
+            log::debug!("driver-core: removed unbound device {id} (no binding to tear down)");
+            return Ok(());
+        }
+        let (desc, driver, mut data, services) = (
+            desc.expect("active path retains the descriptor"),
+            driver,
+            data,
+            services,
+        );
 
         if let (Some(driver), Some(data)) = (driver.as_ref(), data.as_mut()) {
             driver.remove(&desc, id, data.as_mut(), services.as_ref());
@@ -800,6 +896,117 @@ mod tests {
         assert_eq!(domain.wake(DepSource::clk(0x42)), 1);
         assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Active);
         assert_eq!(PROBES.load(Ordering::Relaxed), 2);
+    }
+
+    #[def_test(serial)]
+    fn late_driver_registration_claims_unclaimed_device() {
+        let (domain, services) = fresh_domain();
+        services.publish_clk(0x42);
+
+        // Device arrives before any driver: goes Unclaimed.
+        let id = domain.add_device(test_descriptor());
+        assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
+
+        // A driver registered later must still claim it.
+        domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
+        assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Active);
+        assert_eq!(domain.snapshot(id).unwrap().driver, Some("test-serial"));
+    }
+
+    #[def_test(serial)]
+    fn late_driver_registration_skips_unmatched_unclaimed() {
+        let (domain, _services) = fresh_domain();
+        let mut desc = test_descriptor();
+        desc.identity = crate::bus::DeviceIdentity::Platform(crate::bus::PlatformIdentity {
+            firmware_id: Some(alloc::string::String::from("nobody,matches")),
+            alias: None,
+        });
+        let id = domain.add_device(desc);
+        assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
+
+        // A driver that does not match must not disturb the terminal state.
+        domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
+        assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
+    }
+
+    #[def_test(serial)]
+    fn finish_probe_phase_unsticks_deferred_with_diagnostics() {
+        let (domain, _services) = fresh_domain();
+        domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
+
+        // Provider 0x42 never publishes: the device stays deferred.
+        let id = domain.add_device(test_descriptor());
+        assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Deferred);
+        assert_eq!(domain.deferred_report().len(), 1);
+
+        // Boot end: the stuck device converts to Unclaimed, not parked forever.
+        domain.finish_probe_phase(false);
+        assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
+        assert!(domain.deferred_report().is_empty());
+
+        // And the provider arriving late still claims it (resweep path).
+        _services.publish_clk(0x42);
+        assert_eq!(
+            domain.wake(DepSource::clk(0x42)),
+            0,
+            "no deferred left to wake"
+        );
+    }
+
+    #[def_test(serial)]
+    fn removing_unbound_device_frees_entry_and_worklists() {
+        let (domain, _services) = fresh_domain();
+
+        // Unclaimed device (no driver for it).
+        let mut desc = test_descriptor();
+        desc.identity = crate::bus::DeviceIdentity::Platform(crate::bus::PlatformIdentity {
+            firmware_id: Some(alloc::string::String::from("nobody,matches")),
+            alias: None,
+        });
+        let unclaimed = domain.add_device(desc);
+        assert_eq!(
+            domain.snapshot(unclaimed).unwrap().state,
+            DeviceState::Unclaimed
+        );
+
+        // Deferred device (driver registered, provider missing).
+        domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
+        let deferred = domain.add_device(test_descriptor());
+        assert_eq!(
+            domain.snapshot(deferred).unwrap().state,
+            DeviceState::Deferred
+        );
+
+        // Light-path removal: entries freed, worklists drained, not kept
+        // as tombstones — the table does not grow under hotplug churn.
+        domain.remove_device(unclaimed).unwrap();
+        domain.remove_device(deferred).unwrap();
+        assert!(domain.snapshot(unclaimed).is_none());
+        assert!(domain.snapshot(deferred).is_none());
+        assert_eq!(domain.devices().len(), 0);
+        assert!(domain.deferred_report().is_empty());
+
+        // A removed-unbound id can be re-added cleanly (ids are monotonic;
+        // no state collision).
+        let readded = domain.add_device(test_descriptor());
+        assert_eq!(
+            domain.snapshot(readded).unwrap().state,
+            DeviceState::Deferred
+        );
+    }
+
+    #[def_test(serial)]
+    fn removing_twice_rejects_with_bad_state() {
+        let (domain, services) = fresh_domain();
+        services.publish_clk(0x42);
+        domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
+        let id = domain.add_device(test_descriptor());
+
+        domain.remove_device(id).unwrap();
+        assert!(matches!(
+            domain.remove_device(id),
+            Err(crate::RuntimeError::BadState)
+        ));
     }
 
     #[def_test(serial)]
