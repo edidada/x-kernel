@@ -175,7 +175,7 @@ impl DeviceServices for XKernelRuntime {
     #[cfg(feature = "virtio-hal")]
     fn virtio_pci_transport(
         &self,
-        device: u64,
+        _device: u64,
         location: driver_core::desc::DeviceLocation,
     ) -> Result<
         (

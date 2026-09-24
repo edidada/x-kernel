@@ -7,10 +7,6 @@
 //! Template application of the PCI consumer pattern: const id table, one
 //! class publication, no interrupt ownership in this crate.
 
-#![no_std]
-
-extern crate alloc;
-
 use alloc::boxed::Box;
 
 use driver_core::{
@@ -18,7 +14,6 @@ use driver_core::{
     pci::{PciBus, PciMatch},
 };
 use kclass::{ClassParent, publish_input};
-use virtio::probe_pci_device;
 
 /// `struct pci_device_id virtio_input_id_table[]`.
 static IDS: &[PciMatch] = &[PciMatch::device(0x1af4, 0x1052)];

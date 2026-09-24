@@ -22,10 +22,6 @@
 //! is one file, registration is data, and the probe-to-wakeup handshake is
 //! the framework's job.
 
-#![no_std]
-
-extern crate alloc;
-
 use alloc::{boxed::Box, sync::Arc};
 
 use driver_core::{

@@ -20,10 +20,6 @@
 //! not done here: the class layer migrates in Phase 1. Console output keeps
 //! working through the early-stdout port this driver adopts.
 
-#![no_std]
-
-extern crate alloc;
-
 use alloc::{boxed::Box, sync::Arc};
 
 use char_driver::CharDevice;
@@ -31,7 +27,7 @@ use console_driver::{
     runtime::register_console_parented,
     serial::{SerialIdent, SerialPort, SerialRole, take_early_port},
 };
-use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+use driver_base::{Device, DeviceKind, DriverResult};
 use driver_core::{
     BoundDevice, ClkHandle, DevIrq, DeviceCtx, DriverDesc, DriverOps, IoMap, IrqAction, ProbeError,
     RuntimeError,

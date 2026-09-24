@@ -8,6 +8,8 @@
 
 #![no_std]
 
+extern crate alloc;
+
 mod common;
 
 #[cfg(feature = "blk")]

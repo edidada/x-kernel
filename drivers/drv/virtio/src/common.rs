@@ -5,8 +5,6 @@
 //! Shared helpers for the virtio driver modules (error mapping, class
 //! parent location conversion) — one copy instead of ten.
 
-extern crate alloc;
-
 use alloc::{format, string::String};
 
 use devnode::DeviceLocation as LegacyLocation;

@@ -12,8 +12,6 @@
 
 #![no_std]
 
-extern crate alloc;
-
 use alloc::{boxed::Box, sync::Arc};
 
 use char_driver::CharDevice;
@@ -26,7 +24,7 @@ use driver_core::{
 use kclass::{ClassParent, publish_char};
 
 /// `struct of_device_id ns16550_of_match[]` (MMIO variant).
-#[cfg(feature = "mmio")]
+#[cfg(feature = "ns16550-mmio")]
 static MMIO_IDS: &[PlatformId] = &[
     PlatformId::Of(driver_core::platform::OfMatch::compatible("ns16550a")),
     PlatformId::Of(driver_core::platform::OfMatch::compatible("ns16550")),
@@ -37,7 +35,7 @@ static MMIO_IDS: &[PlatformId] = &[
 ];
 
 /// `struct platform_device_id` (x86 static alias).
-#[cfg(feature = "ioport")]
+#[cfg(feature = "ns16550-ioport")]
 static IOPORT_IDS: &[PlatformId] = &[PlatformId::Alias(driver_core::platform::AliasMatch::new(
     "serial-ns16550-ioport",
 ))];
@@ -87,11 +85,11 @@ fn publish(dev: &mut DeviceCtx<'_, PlatformBus>, port: Arc<SerialPort>) -> Resul
             ClassParent::detached("serial-ns16550", location),
             char_dev,
         )
-        .map_err(map_driver_error),
+        .map_err(crate::common::map_driver_error),
         SerialRole::Auxiliary => {
             publish_char(ClassParent::detached("serial-ns16550", location), char_dev)
                 .map(drop)
-                .map_err(map_driver_error)
+                .map_err(crate::common::map_driver_error)
         }
     }
 }
@@ -100,10 +98,10 @@ fn publish(dev: &mut DeviceCtx<'_, PlatformBus>, port: Arc<SerialPort>) -> Resul
 // MMIO variant
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "mmio")]
+#[cfg(feature = "ns16550-mmio")]
 pub struct Ns16550MmioDriver;
 
-#[cfg(feature = "mmio")]
+#[cfg(feature = "ns16550-mmio")]
 impl DriverOps<PlatformBus> for Ns16550MmioDriver {
     type Data = SerialData;
 
@@ -150,10 +148,10 @@ impl DriverOps<PlatformBus> for Ns16550MmioDriver {
 // I/O-port variant (x86 ISA COM)
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "ioport")]
+#[cfg(feature = "ns16550-ioport")]
 pub struct Ns16550IoPortDriver;
 
-#[cfg(feature = "ioport")]
+#[cfg(feature = "ns16550-ioport")]
 impl DriverOps<PlatformBus> for Ns16550IoPortDriver {
     type Data = SerialData;
 
@@ -188,7 +186,7 @@ impl DriverOps<PlatformBus> for Ns16550IoPortDriver {
 }
 
 /// `module_platform_driver()` equivalents.
-#[cfg(feature = "mmio")]
+#[cfg(feature = "ns16550-mmio")]
 pub fn register_mmio() {
     driver_core::global_domain().register_driver(DriverDesc::new(
         "serial-ns16550-mmio",
@@ -197,7 +195,7 @@ pub fn register_mmio() {
     ));
 }
 
-#[cfg(feature = "ioport")]
+#[cfg(feature = "ns16550-ioport")]
 pub fn register_ioport() {
     driver_core::global_domain().register_driver(DriverDesc::new(
         "serial-ns16550-ioport",

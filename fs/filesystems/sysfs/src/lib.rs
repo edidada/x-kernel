@@ -472,7 +472,6 @@ fn add_common_device_entries(
 
 fn add_input_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<ProjectedDevice>) {
     let node = &projected.node;
-    let physical = kdevice_uevent::physical_device_path(node);
     let event = format!("devices/{}/{}", node.physical_path(), node.devname());
     let input = event
         .strip_suffix(|c: char| c.is_ascii_digit())
@@ -722,7 +721,7 @@ impl SimpleDirOps for SysfsDirectory {
 
 #[unittest::mod_test]
 mod tests {
-    use unittest::{assert_eq, assert_ne, def_test};
+    use unittest::{assert_eq, def_test};
 
     use super::*;
 

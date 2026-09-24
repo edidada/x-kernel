@@ -21,11 +21,7 @@
 //! * the completion path reuses the block-class dispatch services
 //!   (`block::dispatch`), which are model-agnostic.
 
-#![no_std]
-
-extern crate alloc;
-
-use alloc::{boxed::Box, string::String, sync::Arc};
+use alloc::{boxed::Box, sync::Arc};
 
 use block::{
     Gendisk,
@@ -38,7 +34,7 @@ use driver_core::{
     pci::{PciBus, PciMatch},
 };
 use kclass::{ClassParent, publish_block};
-use virtio::{Transport, VirtIoBlkDev, VirtIoHal, probe_pci_device};
+use virtio::{Transport, VirtIoBlkDev, VirtIoHal};
 
 /// `struct pci_device_id virtio_blk_id_table[]`: modern 0x1042 and
 /// transitional 0x1001. Note the transitional series is type-indexed

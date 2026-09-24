@@ -9,10 +9,6 @@
 //! `ramdisk-static` the disk is backed by the build-time embedded image
 //! (mountable root filesystem); otherwise it is a zero-filled region.
 
-#![no_std]
-
-extern crate alloc;
-
 use alloc::{boxed::Box, sync::Arc};
 
 use block::Gendisk;
@@ -63,7 +59,7 @@ impl DriverOps<PlatformBus> for RamdiskDriver {
             )
         };
         let disk = Gendisk::new(name, 1, 0, 1, dev).map_err(crate::common::map_driver_error)?;
-        let location = legacy_location(_dev.descriptor().location);
+        let location = crate::common::legacy_location(_dev.descriptor().location);
         publish_block(ClassParent::detached("ramdisk", location), Arc::new(disk))
             .map_err(crate::common::map_driver_error)?;
         Ok(RamdiskData)

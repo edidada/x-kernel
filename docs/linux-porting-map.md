@@ -9,11 +9,11 @@
 
 ## 0. 转写流程（一个驱动的完整步骤）
 
-1. **建模块**：`drivers/drv/<subsystem>/src/<name>.rs`（新家族则建聚合 crate）；
+1. **建模块**：`drivers/drv/<subsystem>/src/<name>.rs`（新子系统家族才建聚合 crate）；
 2. **翻译 id 表**：`*_device_id` 数组 → `static IDS: &[<Bus>::IdEntry]`；
 3. **写 DriverOps**：`probe`/`remove`（`remove` 通常为空——`Data` 的 Drop 负责释放）；
 6. **注册**：模块 `pub fn register()` + 子系统 crate 一行 feature + compose 一行调用。
-4. 资源获取一律走 `DeviceCtx`，**全部 guard 存进 `Self::Data`**（字段声明顺序 = 释放顺序）；
+4. 通用设备资源走 `DeviceCtx`（block 补全/回收等**子系统服务**走对应子系统接口，如 `block::dispatch`）；guard 存进 `Self::Data`，**Rust 字段按声明顺序释放**——先确定资源依赖与硬件停止顺序，再排字段；RAII 不替代显式 quiesce（`remove()` 先停硬件，`Data` drop 再回收资源）；
 5. 类发布用 `kclass::publish_*(ClassParent::detached(...), ...)`；
 
 ## 1. 驱动骨架
@@ -37,7 +37,15 @@
 | `static const struct pci_device_id foo_pci_tbl[] = { { PCI_DEVICE(0x8086, 0x100e) } }` | `PciMatch::device(0x8086, 0x100e)`（modern + transitional 各一行；**transitional 系列按类型索引：0x1000=net, 0x1001=blk, 0x1005=rng**——写错行会静默认领别人的设备） |
 | `MODULE_DEVICE_TABLE` 的 modalias | `pci:v00001AF4d00001001` / `of:NcompatT(null)C<x,y>`（框架自动计算） |
 
-## 3. 设备资源（DeviceCtx）
+## 3. 设备资源入口（分层的推荐做法）
+
+| 能力 | 推荐入口 |
+|---|---|
+| 通用设备资源：MMIO、IRQ、DMA、clock | `DeviceCtx` |
+| block 补全/回收/软中断 | `block::dispatch`（子系统接口） |
+| virtio transport 构造 | `DeviceCtx::virtio_pci_transport_as` |
+| HAL/provider 实现细节 | driver-runtime（驱动不直接接触） |
+
 
 | Linux | x-kernel | 返回 |
 |---|---|---|
@@ -59,7 +67,7 @@
 |---|---|
 | `request_irq` 的 `dev_id` 参数 | handler 闭包捕获设备内部状态的共享句柄（`Arc<SpinNoIrq<...>>`），**没有全局 IRQ 路由表** |
 | 共享中断线遍历 | kirq 的 action 机制处理；handler 返回 `IrqAction::NotHandled` 表示非本设备 |
-| `devm_request_threaded_irq` | `dev.request_irq`（worker 化在 kirq 层，接口一致） |
+| `devm_request_threaded_irq` | **尚无等价入口，禁止机械映射**。`dev.request_irq` 只有硬中断上下文；Linux 线程化 handler 的延迟执行语义当前丢失。需要时应先在框架补 threaded 通道 |
 
 ## 5. 类发布（用户态可见性）
 
@@ -78,10 +86,10 @@ pub fn init() {
     driver_runtime::XKernelRuntime::install_global();   // 服务装配
     // 移除通知：设备移除时清理 detached 类发布
     global_domain().set_remove_notifier(...);
-    // 驱动注册（一行一个，feature 门控）
-    #[cfg(feature = "fixed-clock")]  fixed_clock::register();
-    #[cfg(feature = "serial-pl011")] serial_pl011::register();
-    #[cfg(feature = "virtio-blk")]   { block::dispatch::reclaimer::init(); virtio_blk_core::register(); }
+    // 驱动注册（一行一个，feature 门控，聚合 crate 的模块路径）
+    #[cfg(feature = "fixed-clock")]  drv_clk::fixed_clock::register();
+    #[cfg(feature = "serial-pl011")] drv_serial::pl011::register();
+    #[cfg(feature = "virtio-blk")]   { block::dispatch::reclaimer::init(); drv_virtio::blk::register(); }
     // 枚举（固件 DT + 板级静态 + PCI）
     enumerate_firmware_devices();
     enumerate_static_devices();
@@ -89,18 +97,18 @@ pub fn init() {
 }
 ```
 
-新驱动接入 = ①新 crate；②compose 加 feature + 一行注册；③Kconfig 符号
-`KFEAT_DRIVER_CORE_<NAME>`；④kfeat 特性映射。**不改框架任何文件。**
+新驱动接入 = ①子系统 crate 加模块 + feature；②compose 加 feature + 一行注册；
+③Kconfig 符号 `KFEAT_DRIVER_<NAME>`（继承旧符号名与默认值）；④kfeat 特性
+转发到 `drv-<subsystem>/<module>`。**不改框架任何文件。**
 
 ## 7. Kconfig 接线（迁移开关模式）
 
 ```
-config KFEAT_DRIVER_CORE_<NAME>
-    bool "<NAME> on the driver-core model"
-    default n
+config KFEAT_DRIVER_<NAME>
+    bool "<NAME> driver"
+    default n   # 按平台填 default y if MACHINE_...
     help
-      Migration target for KFEAT_DRIVER_<NAME>; enable it instead of
-      (not in addition to) the legacy symbol.
+      <NAME> on the driver-core model.
 ```
 
 `api/kfeat/Cargo.toml`：
@@ -109,7 +117,7 @@ config KFEAT_DRIVER_CORE_<NAME>
 driver_<name> = [
     "dep:drv-<subsystem>", "drv-<subsystem>/<module>",
     "driver-compose/<name>",
-    # 类依赖（如 char/net/block）在此拉齐
+    # 类依赖（如 char/net/block）在此拉齐；模块内 cfg 必须用子系统 feature 名
 ]
 ```
 

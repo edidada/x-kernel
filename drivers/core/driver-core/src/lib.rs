@@ -26,10 +26,12 @@
 //!
 //! Every resource acquired through [`DeviceCtx`] is returned as a RAII guard.
 //! The intended discipline is: **store all guards in [`DriverOps::Data`]**.
-//! Probe failure then means "drop `Data`", which rolls back every resource in
-//! reverse field order; device removal means "quiesce in `remove()`, then drop
-//! `Data`". There is no separate devres closure list and no driver-side global
-//! cleanup tables.
+//! Probe failure then means "drop `Data`", which releases every guard in
+//! field-declaration order (Rust drops fields first-to-last); device removal
+//! means "quiesce hardware in `remove()`, then drop `Data`". Arrange field
+//! order so dependents release before their dependencies (e.g. the IRQ guard
+//! field before the MMIO mapping it serves). RAII is not a substitute for
+//! explicit hardware quiesce — `remove()` does that.
 //!
 //! # Deferred probe
 //!

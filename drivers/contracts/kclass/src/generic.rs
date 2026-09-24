@@ -15,11 +15,9 @@ use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 
 /// Opaque handle of one class-device publication.
 ///
-/// Its own id space: legacy-model publications derive it from the publishing
-/// `DeviceObject` (same numeric value), while driver-core publications
-/// allocate from a dedicated high range so the two models can never collide.
-/// Consumers treat it as an opaque capability handle (compare, store, pass
-/// back to `find_*`/console APIs).
+/// Allocated from a dedicated id space when a driver publishes. Consumers
+/// treat it as an opaque capability handle (compare, store, pass back to
+/// `find_*`/console APIs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ClassDeviceId(u64);
 
@@ -55,10 +53,10 @@ impl ClassDeviceId {
     }
 }
 
-/// The parent identity a class device is published under: a detached
-/// (driver-core) identity snapshot — publication id, driver name, and
-/// location from the publishing domain; availability is managed by the
-/// composition root's remove notifier.
+/// The parent identity a class device is published under: an identity
+/// snapshot (publication id, driver name, location) from the publishing
+/// domain; availability is managed by the composition root's remove
+/// notifier.
 pub enum ClassParent {
     Detached(DetachedParent),
 }
@@ -102,7 +100,7 @@ impl ClassParent {
         true
     }
 
-    /// The owning driver-core device id.
+    /// The owning device id.
     pub fn detached_owner(&self) -> Option<u64> {
         match self {
             Self::Detached(detached) => Some(detached.id.raw() & !DRIVER_CORE_ID_TAG),
@@ -304,8 +302,7 @@ impl<T> core::fmt::Debug for ClassDevice<T> {
 /// Notification callback invoked after a typed runtime capability is activated.
 pub type ClassAvailabilityCallback<T> = Arc<dyn Fn(ClassDevice<T>) + Send + Sync>;
 
-/// Callback invoked when a class device is removed (the model-agnostic
-/// replacement for the legacy device-removed event bridge).
+/// Callback invoked when a class device is removed.
 pub type ClassRemovalCallback<T> = Arc<dyn Fn(ClassDevice<T>) + Send + Sync>;
 
 /// Typed registry for one runtime device class.

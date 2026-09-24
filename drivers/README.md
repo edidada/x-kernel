@@ -41,8 +41,13 @@ OS-neutral contracts; portable and host layers meet here.
 | `kclass` | Runtime publication layer for typed device classes. |
 | `block`, `char_driver`, `display`, `input`, `net`, `vsock`, `hwrng` | Device class contracts that concrete drivers implement and kernel subsystems consume. |
 
-These crates stay OS-neutral: no dependencies on `khal`, `kirq`, `memspace`,
-`kdma`, `kruntime`, `ktask`, or `kwork`.
+Contracts stay host-free where possible (`driver_base`, `device-res`,
+`devnode`, `kclass`, and the per-class trait crates). Two pragmatic
+exceptions carry kernel-runtime dependencies by design: `block` (its
+dispatch services use `kirq`/`ktask`/`kcpu_id_map` — they are kernel
+class services, not portable contracts) and `kclass`'s `node_compat`
+(vendored input formatting). Treat those as the kernel-owned half of
+their subsystem.
 
 ## Subsystem Drivers (`drv/`)
 

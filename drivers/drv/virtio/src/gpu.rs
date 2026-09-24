@@ -7,10 +7,6 @@
 //! Template application of the PCI consumer pattern: const id table, one
 //! class publication, no interrupt ownership in this crate.
 
-#![no_std]
-
-extern crate alloc;
-
 use alloc::boxed::Box;
 
 use driver_core::{
@@ -18,7 +14,6 @@ use driver_core::{
     pci::{PciBus, PciMatch},
 };
 use kclass::{ClassParent, publish_display};
-use virtio::probe_pci_device;
 
 /// `struct pci_device_id virtio_gpu_id_table[]`.
 static IDS: &[PciMatch] = &[

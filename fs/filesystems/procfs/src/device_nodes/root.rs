@@ -4,10 +4,10 @@
 
 //! `/proc/devices` and `/proc/bus/*` — the driver-core domain projection.
 
-use alloc::{format, string::String, sync::Arc, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 use core::fmt::Write;
 
-use kvfs::{DirMapping, SeqFileInode, SeqIterator, SimpleDir, SimpleFs};
+use kvfs::{DirMapping, SeqFileInode, SeqIterator};
 
 /// `/proc/devices`: one line per bound device, grouped by class view.
 pub struct DevicesIter {
@@ -140,7 +140,7 @@ impl SeqIterator for BusDevicesIter {
     }
 }
 
-pub(crate) fn add_root_entries(root: &mut kvfs::DirMapping, fs: alloc::sync::Arc<kvfs::SimpleFs>) {
+pub(crate) fn add_root_entries(root: &mut DirMapping, fs: alloc::sync::Arc<kvfs::SimpleFs>) {
     root.add(
         "devices",
         SeqFileInode::new_regular(fs.clone(), || Ok(DevicesIter::new())),

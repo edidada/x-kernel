@@ -8,10 +8,6 @@
 //! publication (`char`), no interrupt. The entropy subsystem consumes it
 //! through the model-agnostic `kclass::char_devices()` view.
 
-#![no_std]
-
-extern crate alloc;
-
 use alloc::boxed::Box;
 
 use driver_core::{
@@ -19,7 +15,7 @@ use driver_core::{
     pci::{PciBus, PciMatch},
 };
 use kclass::{ClassParent, publish_char};
-use virtio::{VirtIoRngDev, probe_pci_device};
+use virtio::VirtIoRngDev;
 
 /// `struct pci_device_id virtio_rng_id_table[]`: transitional 0x1005 and
 /// modern 0x1045.

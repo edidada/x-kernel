@@ -10,7 +10,7 @@ extern crate alloc;
 
 mod common;
 
-#[cfg(feature = "ns16550-mmio")]
+#[cfg(any(feature = "ns16550-mmio", feature = "ns16550-ioport"))]
 pub mod ns16550;
 #[cfg(feature = "pl011")]
 pub mod pl011;

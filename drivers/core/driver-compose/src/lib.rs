@@ -25,7 +25,7 @@ extern crate alloc;
 use alloc::sync::Arc;
 
 use driver_core::{
-    Bus, ResourceKind, ResourceMap,
+    Bus, IrqTrigger, ResourceKind, ResourceMap,
     desc::{
         DeviceDescriptor, DeviceIdentity, DeviceLocation, DiscoveryOrigin, FirmwareNodeInfo,
         PlatformIdentity,
@@ -224,13 +224,13 @@ fn enumerate_static_devices() {
 #[cfg(not(feature = "ramdisk"))]
 fn enumerate_static_devices() {}
 
-fn map_trigger(trigger: firmware::InterruptTrigger) -> driver_core::IrqTrigger {
+fn map_trigger(trigger: firmware::InterruptTrigger) -> IrqTrigger {
     match trigger {
-        firmware::InterruptTrigger::EdgeRising => driver_core::IrqTrigger::EdgeRising,
-        firmware::InterruptTrigger::EdgeFalling => driver_core::IrqTrigger::EdgeFalling,
-        firmware::InterruptTrigger::LevelHigh => driver_core::IrqTrigger::LevelHigh,
-        firmware::InterruptTrigger::LevelLow => driver_core::IrqTrigger::LevelLow,
-        firmware::InterruptTrigger::Unknown(_) => driver_core::IrqTrigger::Unknown,
+        firmware::InterruptTrigger::EdgeRising => IrqTrigger::EdgeRising,
+        firmware::InterruptTrigger::EdgeFalling => IrqTrigger::EdgeFalling,
+        firmware::InterruptTrigger::LevelHigh => IrqTrigger::LevelHigh,
+        firmware::InterruptTrigger::LevelLow => IrqTrigger::LevelLow,
+        firmware::InterruptTrigger::Unknown(_) => IrqTrigger::Unknown,
     }
 }
 
@@ -247,7 +247,7 @@ fn map_trigger(trigger: firmware::InterruptTrigger) -> driver_core::IrqTrigger {
 ))]
 fn enumerate_pci_devices() {
     use driver_core::{
-        IrqSpec, IrqTrigger, MmioRegion, ResourceKind,
+        IrqSpec, MmioRegion, ResourceKind,
         desc::{DeviceIdentity, DeviceLocation, PciIdentity},
     };
 

@@ -687,6 +687,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     struct SerData {
         regs: IoMap,
         irq: DevIrq,

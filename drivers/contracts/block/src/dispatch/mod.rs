@@ -4,7 +4,7 @@
 
 //! Block-class dispatch services: portable waiting, deferred completion
 //! reclaiming, and IRQ wiring. Model-agnostic — usable by drivers on both
-//! the legacy and driver-core device models.
+//! all drivers on the driver-core model.
 
 pub mod irq;
 pub mod reclaimer;

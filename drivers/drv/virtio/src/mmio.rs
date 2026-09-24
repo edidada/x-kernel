@@ -15,8 +15,6 @@
 //! device, and the families activate through their shared `activate`
 //! entry points (same code paths as their PCI drivers).
 
-#![no_std]
-
 use driver_core::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, IoMap, ProbeError, RuntimeError,
     platform::{OfMatch, PlatformBus, PlatformId},
@@ -24,12 +22,20 @@ use driver_core::{
 
 static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("virtio,mmio"))];
 
-/// Driver-private data: the mapped transport registers (the transport is
-/// moved into the family's device on dispatch; the mapping lives for the
-/// binding, mirroring the HAL ownership note in the porting map).
+/// Driver-private data: the per-family activation state (IRQ guard, block
+/// activation — whatever the family's `activate` returns) plus the mapped
+/// transport registers. Both live for the binding; release order is
+/// activation drop (quiesce hardware) first, registers unmap last.
 pub struct MmioData {
-    #[allow(dead_code)]
+    state: MmioFamilyState,
     regs: Option<IoMap>,
+}
+
+/// The per-family runtime state returned by dispatch, held by `MmioData`.
+enum MmioFamilyState {
+    Net(Option<driver_core::DevIrq>),
+    Block(alloc::boxed::Box<dyn crate::blk::Activation>),
+    Other,
 }
 
 pub struct MmioDriver;
@@ -50,19 +56,20 @@ impl DriverOps<PlatformBus> for MmioDriver {
             return Err(ProbeError::Fatal(RuntimeError::BadState));
         };
 
-        // The transport borrows the mapped registers; the family takes
-        // ownership of the device, and the mapping stays with this binding.
-        // Split the guard: keep it alive in Data while the transport holds
-        // the raw pointer — the classic vendored-transport ownership note.
-        let result = dispatch(dev, kind, transport);
-        result?;
-
-        Ok(MmioData { regs: Some(regs) })
+        // The family owns the device; the mapping stays with this binding.
+        // The dispatch result (IRQ guard / block activation) is held by
+        // `Data` so the hardware stays live for the binding.
+        let state = dispatch(dev, kind, transport)?;
+        Ok(MmioData {
+            state,
+            regs: Some(regs),
+        })
     }
 
     fn remove(&self, _dev: &mut BoundDevice<'_, PlatformBus, MmioData>) {
-        // Families own their devices; the mapping releases with `Data`
-        // (boot-static devices are not removed in practice).
+        // Drop order from `Data`: family state first (IRQ release, block
+        // activation close — hardware quiesce), then the register mapping.
+        // Both happen via `Data`'s field order on drop.
     }
 }
 
@@ -71,15 +78,18 @@ fn dispatch<T: virtio::Transport + 'static>(
     dev: &mut DeviceCtx<'_, PlatformBus>,
     kind: driver_base::DeviceKind,
     transport: T,
-) -> Result<(), ProbeError> {
+) -> Result<MmioFamilyState, ProbeError> {
     use driver_base::DeviceKind;
     match kind {
-        #[cfg(feature = "rng")]
-        DeviceKind::Char => crate::rng::activate(dev, transport),
+        #[cfg(all(feature = "rng", not(feature = "net"), not(feature = "blk")))]
+        DeviceKind::Char => {
+            crate::rng::activate(dev, transport)?;
+            Ok(MmioFamilyState::Other)
+        }
         #[cfg(feature = "net")]
         DeviceKind::Net => {
-            crate::net::activate(dev, transport)?;
-            Ok(())
+            let irq = crate::net::activate(dev, transport)?;
+            Ok(MmioFamilyState::Net(irq))
         }
         #[cfg(feature = "blk")]
         DeviceKind::Block => {
@@ -87,9 +97,43 @@ fn dispatch<T: virtio::Transport + 'static>(
                 .irq(0)
                 .map(|spec| spec.number)
                 .map_err(|_| ProbeError::Fatal(RuntimeError::Invalid))?;
-            crate::blk::activate(dev, transport, irq)?;
-            Ok(())
+            let activation = crate::blk::activate(dev, transport, irq)?;
+            Ok(MmioFamilyState::Block(activation))
         }
+        #[cfg(any(
+            feature = "rng",
+            feature = "gpu",
+            feature = "input",
+            feature = "vsock",
+            feature = "fs9p"
+        ))]
+        DeviceKind::Char
+        | DeviceKind::Display
+        | DeviceKind::Input
+        | DeviceKind::Vsock
+        | DeviceKind::Fs9p => {
+            // The families own their devices through the class registries;
+            // no per-family runtime state beyond the register mapping.
+            dispatch_simple(dev, kind, transport)?;
+            Ok(MmioFamilyState::Other)
+        }
+        _ => {
+            log::warn!("virtio-mmio: unsupported device kind {kind:?}");
+            Err(ProbeError::Fatal(RuntimeError::Unsupported))
+        }
+    }
+}
+
+#[allow(unused_variables)]
+fn dispatch_simple<T: virtio::Transport + 'static>(
+    dev: &mut DeviceCtx<'_, PlatformBus>,
+    kind: driver_base::DeviceKind,
+    transport: T,
+) -> Result<(), ProbeError> {
+    use driver_base::DeviceKind;
+    match kind {
+        #[cfg(feature = "rng")]
+        DeviceKind::Char => crate::rng::activate(dev, transport),
         #[cfg(feature = "gpu")]
         DeviceKind::Display => crate::gpu::activate(dev, transport),
         #[cfg(feature = "input")]
@@ -98,10 +142,7 @@ fn dispatch<T: virtio::Transport + 'static>(
         DeviceKind::Vsock => crate::vsock::activate(dev, transport),
         #[cfg(feature = "fs9p")]
         DeviceKind::Fs9p => crate::virtio_9p::activate(dev, transport),
-        _ => {
-            log::warn!("virtio-mmio: unsupported device kind {kind:?}");
-            Err(ProbeError::Fatal(RuntimeError::Unsupported))
-        }
+        _ => Err(ProbeError::Fatal(RuntimeError::Unsupported)),
     }
 }
 

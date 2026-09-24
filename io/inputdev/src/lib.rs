@@ -340,24 +340,9 @@ pub fn init_input() {
 
     INPUT_DEVICES.init_once(Mutex::new(Vec::new()));
 
-    log::info!("inputdev: pre-scan");
     register_input_devices(class_input_devices());
-    log::info!("inputdev: pre-subscribe-available");
     subscribe_input_available(Arc::new(register_input_device));
-    log::info!("inputdev: pre-subscribe-removed");
-    {
-        use kclass::ClassDevice;
-        let _probe: Option<()> = None;
-        log::info!("inputdev: calling kclass subscribe");
-        kclass::subscribe_input_removed(Arc::new(|_removed: ClassDevice<InputDeviceImpl>| {}));
-        log::info!("inputdev: subscribe returned");
-    }
-    {
-        log::info!("inputdev: second subscribe probe");
-        kclass::subscribe_input_removed(Arc::new(|_removed: ClassDevice<InputDeviceImpl>| {}));
-        log::info!("inputdev: second subscribe ok");
-    }
-    log::info!("inputdev: init done");
+    subscribe_input_unregister();
 }
 
 fn register_input_devices(devices: Vec<ClassDevice<InputDeviceImpl>>) {

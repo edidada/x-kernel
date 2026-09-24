@@ -11,10 +11,6 @@
 //! device at registration time. The legacy `NET_IRQ_HANDLES` routing table
 //! is gone from the device crate entirely.
 
-#![no_std]
-
-extern crate alloc;
-
 use alloc::{boxed::Box, sync::Arc};
 
 use driver_core::{
@@ -22,7 +18,7 @@ use driver_core::{
     pci::{PciBus, PciMatch},
 };
 use kclass::{ClassParent, publish_net};
-use virtio::{VirtIoNetDev, probe_pci_device};
+use virtio::VirtIoNetDev;
 
 /// `struct pci_device_id virtio_net_id_table[]`: transitional 0x1000 and
 /// modern 0x1041.
