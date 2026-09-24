@@ -108,7 +108,8 @@ impl InterfaceMatch {
     }
 
     fn new(name: String, is_prefix: bool) -> Option<Self> {
-        (name.len() <= MAX_INTERFACE_NAME_LEN).then_some(Self { name, is_prefix })
+        let max_len = MAX_INTERFACE_NAME_LEN - usize::from(is_prefix);
+        (name.len() <= max_len).then_some(Self { name, is_prefix })
     }
 
     pub(crate) fn name(&self) -> &str {

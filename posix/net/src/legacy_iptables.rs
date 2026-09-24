@@ -12,14 +12,15 @@ use osvm::VirtPtr;
 use posix_types::{UserConstPtr, UserPtr};
 
 pub(super) const IPT_SO_SET_REPLACE: u32 = 64;
+pub(super) const IPT_SO_SET_ADD_COUNTERS: u32 = 65;
 pub(super) const IPT_SO_GET_INFO: u32 = 64;
 pub(super) const IPT_SO_GET_ENTRIES: u32 = 65;
 
 const XT_TABLE_MAXNAMELEN: usize = 32;
 const NF_INET_NUMHOOKS: usize = 5;
 const IPT_GETINFO_SIZE: usize = 84;
-const IPT_GET_ENTRIES_DATA_OFFSET: usize = 36;
-const IPT_GET_ENTRIES_SIZE: usize = align_up(IPT_GET_ENTRIES_DATA_OFFSET, align_of::<u64>());
+const IPT_GET_ENTRIES_DATA_OFFSET: usize = align_up(36, align_of::<u64>());
+const IPT_GET_ENTRIES_SIZE: usize = IPT_GET_ENTRIES_DATA_OFFSET;
 
 const GETINFO_VALID_HOOKS_OFFSET: usize = 32;
 const GETINFO_HOOK_ENTRY_OFFSET: usize = 36;
@@ -28,16 +29,25 @@ const GETINFO_NUM_ENTRIES_OFFSET: usize = 76;
 const GETINFO_SIZE_OFFSET: usize = 80;
 const IPT_REPLACE_HEADER_SIZE: usize = 96;
 const IPT_REPLACE_COUNTERS_OFFSET: usize = 88;
+const XT_COUNTERS_INFO_SIZE: usize = align_up(36, align_of::<u64>());
 const XT_COUNTER_SIZE: usize = 16;
 
 pub(super) const fn is_set_option(optname: u32) -> bool {
-    optname == IPT_SO_SET_REPLACE
+    matches!(optname, IPT_SO_SET_REPLACE | IPT_SO_SET_ADD_COUNTERS)
 }
 
-pub(super) fn set(optval: UserConstPtr<u8>, optlen: socklen_t) -> KResult<()> {
+pub(super) fn set(optname: u32, optval: UserConstPtr<u8>, optlen: socklen_t) -> KResult<()> {
     if !kprocess::current_cred().is_privileged() {
         return Err(KError::from(LinuxError::EPERM));
     }
+    match optname {
+        IPT_SO_SET_REPLACE => replace(optval, optlen),
+        IPT_SO_SET_ADD_COUNTERS => add_zero_counters(optval, optlen),
+        _ => Err(KError::from(LinuxError::ENOPROTOOPT)),
+    }
+}
+
+fn replace(optval: UserConstPtr<u8>, optlen: socklen_t) -> KResult<()> {
     if (optlen as usize) < IPT_REPLACE_HEADER_SIZE {
         return Err(KError::InvalidInput);
     }
@@ -87,6 +97,32 @@ pub(super) fn set(optval: UserConstPtr<u8>, optlen: socklen_t) -> KResult<()> {
     );
     let counters = alloc::vec![0u8; old_count * XT_COUNTER_SIZE];
     let _ = osvm::write_vm_bytes(counters_ptr as *mut u8, &counters);
+    Ok(())
+}
+
+fn add_zero_counters(optval: UserConstPtr<u8>, optlen: socklen_t) -> KResult<()> {
+    if (optlen as usize) < XT_COUNTERS_INFO_SIZE {
+        return Err(KError::InvalidInput);
+    }
+    let header = osvm::load_vec::<u8>(optval.as_ptr(), XT_COUNTERS_INFO_SIZE)?;
+    require_filter_table_bytes(&header[..XT_TABLE_MAXNAMELEN])?;
+    let count = read_u32(&header, XT_TABLE_MAXNAMELEN) as usize;
+    if count == 0
+        || count > knet::MAX_LEGACY_FILTER_ENTRY_COUNT
+        || XT_COUNTERS_INFO_SIZE + count * XT_COUNTER_SIZE != optlen as usize
+    {
+        return Err(KError::InvalidInput);
+    }
+    let counters = osvm::load_vec::<u8>(
+        optval.as_ptr().wrapping_add(XT_COUNTERS_INFO_SIZE),
+        count * XT_COUNTER_SIZE,
+    )?;
+    if count != knet::legacy_ipv4_filter_table().num_entries() as usize {
+        return Err(KError::InvalidInput);
+    }
+    if counters.iter().any(|&byte| byte != 0) {
+        return Err(KError::from(LinuxError::EOPNOTSUPP));
+    }
     Ok(())
 }
 
@@ -200,14 +236,16 @@ mod tests {
     #[def_test]
     fn legacy_structure_sizes_match_native_linux_uapi() {
         assert_eq!(IPT_GETINFO_SIZE, 84);
-        assert_eq!(IPT_GET_ENTRIES_DATA_OFFSET, 36);
+        assert_eq!(IPT_GET_ENTRIES_DATA_OFFSET, 40);
         assert_eq!(IPT_REPLACE_HEADER_SIZE, 96);
         assert_eq!(IPT_REPLACE_COUNTERS_OFFSET, 88);
+        assert_eq!(XT_COUNTERS_INFO_SIZE, 40);
         assert_eq!(
             IPT_GET_ENTRIES_SIZE,
             if align_of::<u64>() == 8 { 40 } else { 36 }
         );
         assert_eq!(is_set_option(IPT_SO_SET_REPLACE), true);
+        assert_eq!(is_set_option(IPT_SO_SET_ADD_COUNTERS), true);
     }
 
     #[def_test]

@@ -427,7 +427,7 @@ pub fn sys_setsockopt(
         if !supports_legacy_ipv4_filter(socket.as_ref()) {
             return Err(KError::from(LinuxError::ENOPROTOOPT));
         }
-        legacy_iptables::set(optval, optlen)?;
+        legacy_iptables::set(optname, optval, optlen)?;
         return Ok(0);
     }
     if level == SOL_SOCKET && optname == SO_ATTACH_FILTER {

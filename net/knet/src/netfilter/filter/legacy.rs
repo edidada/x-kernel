@@ -344,6 +344,7 @@ fn encode_interface(
     let bytes = interface.name().as_bytes();
     ip[name_offset..name_offset + bytes.len()].copy_from_slice(bytes);
     let mask_len = if interface.is_prefix() {
+        ip[name_offset + bytes.len()] = b'+';
         bytes.len()
     } else {
         bytes.len() + 1
@@ -552,6 +553,37 @@ mod tests {
     #[def_test]
     fn legacy_decoder_round_trips_initial_table() {
         let table = FilterTable::accept_all();
+        let snapshot = encode_table(&table);
+        assert_eq!(decode::decode_table(&replacement(&snapshot, 4)), Ok(table));
+    }
+
+    #[def_test]
+    fn legacy_interface_prefix_preserves_plus_syntax() {
+        let mut ip = [0; 84];
+        let interface = InterfaceMatch::prefix("eth".to_string()).unwrap();
+        encode_interface(&mut ip, 16, 48, &interface);
+        assert_eq!(&ip[16..21], b"eth+\0");
+        assert_eq!(&ip[48..52], &[0xff, 0xff, 0xff, 0]);
+        let table = FilterTable::new(vec![
+            Chain::built_in(
+                FilterHook::Input,
+                Verdict::Accept,
+                vec![
+                    Rule::new(
+                        BaseMatch {
+                            input_interface: Some(Negated::new(interface, false)),
+                            ..Default::default()
+                        },
+                        Vec::new(),
+                        Target::Verdict(Verdict::Drop),
+                    )
+                    .unwrap(),
+                ],
+            ),
+            Chain::built_in(FilterHook::Forward, Verdict::Accept, Vec::new()),
+            Chain::built_in(FilterHook::Output, Verdict::Accept, Vec::new()),
+        ])
+        .unwrap();
         let snapshot = encode_table(&table);
         assert_eq!(decode::decode_table(&replacement(&snapshot, 4)), Ok(table));
     }
