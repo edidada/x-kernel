@@ -9,12 +9,12 @@
 
 ## 0. 转写流程（一个驱动的完整步骤）
 
-1. **建 crate**：`drivers/drv/<name>`，单文件 `src/lib.rs`；
+1. **建模块**：`drivers/drv/<subsystem>/src/<name>.rs`（新家族则建聚合 crate）；
 2. **翻译 id 表**：`*_device_id` 数组 → `static IDS: &[<Bus>::IdEntry]`；
 3. **写 DriverOps**：`probe`/`remove`（`remove` 通常为空——`Data` 的 Drop 负责释放）；
-6. **注册**：`pub fn register()` → 组合根 `driver-compose` 一行调用。
+6. **注册**：模块 `pub fn register()` + 子系统 crate 一行 feature + compose 一行调用。
 4. 资源获取一律走 `DeviceCtx`，**全部 guard 存进 `Self::Data`**（字段声明顺序 = 释放顺序）；
-5. 类发布用 `kclass::publish_*(ClassParent::detached(...), ...)`。
+5. 类发布用 `kclass::publish_*(ClassParent::detached(...), ...)`；
 
 ## 1. 驱动骨架
 
@@ -73,6 +73,7 @@
 ## 6. 组合根（driver-compose/src/lib.rs）
 
 ```rust
+// core/kruntime 调 driver_compose::init()：
 pub fn init() {
     driver_runtime::XKernelRuntime::install_global();   // 服务装配
     // 移除通知：设备移除时清理 detached 类发布
@@ -104,9 +105,9 @@ config KFEAT_DRIVER_CORE_<NAME>
 
 `api/kfeat/Cargo.toml`：
 ```toml
-driver_core_<name> = [
-    "dep:driver-compose", "dep:<name>-core",
-    "kdriver/driver-core-init",
+# 子系统聚合 crate 的 feature 转发（drv-virtio / drv-serial / drv-clk / drv-block）：
+driver_<name> = [
+    "dep:drv-<subsystem>", "drv-<subsystem>/<module>",
     "driver-compose/<name>",
     # 类依赖（如 char/net/block）在此拉齐
 ]
