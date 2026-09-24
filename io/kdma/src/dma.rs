@@ -38,8 +38,8 @@ pub(crate) struct DmaAllocator {
 }
 
 enum StreamingMapping {
-    Direct { len: usize },
-    Bounce(BounceMapping),
+    InPlace { len: usize },
+    Bounced(BounceMapping),
 }
 
 #[cfg(feature = "dma-trace")]
@@ -188,8 +188,10 @@ impl DmaAllocator {
             }
             // Publish CPU writes before the device sees the bus address.
             fence(Ordering::SeqCst);
-            self.active_mappings
-                .insert(dma_info.bus_addr.as_u64(), StreamingMapping::Direct { len });
+            self.active_mappings.insert(
+                dma_info.bus_addr.as_u64(),
+                StreamingMapping::InPlace { len },
+            );
             return Ok(dma_info);
         }
 
@@ -219,7 +221,7 @@ impl DmaAllocator {
         }
         self.active_mappings.insert(
             dma_info.bus_addr.as_u64(),
-            StreamingMapping::Bounce(BounceMapping {
+            StreamingMapping::Bounced(BounceMapping {
                 cpu_addr: dma_info.cpu_addr.as_ptr() as usize,
                 len,
                 layout,
@@ -251,7 +253,7 @@ impl DmaAllocator {
             .unwrap_or_else(|| panic!("DMA mapping is not active: {:?}", dma_addr));
 
         let mapping = match mapping {
-            StreamingMapping::Direct { len: mapped_len } => {
+            StreamingMapping::InPlace { len: mapped_len } => {
                 assert_eq!(
                     len, mapped_len,
                     "DMA buffer length mismatch for {:?}",
@@ -261,7 +263,7 @@ impl DmaAllocator {
                 fence(Ordering::SeqCst);
                 return;
             }
-            StreamingMapping::Bounce(mapping) => mapping,
+            StreamingMapping::Bounced(mapping) => mapping,
         };
         assert_eq!(
             len, mapping.len,

@@ -171,7 +171,7 @@ internal forwardings, each with `# Safety` sections and matching
   is the copy fallback when addressing, isolation, encryption, or cache
   maintenance require it. Device DMA masks and IOMMU translation stay out
   of this interface until a real device needs them.
-- `StreamingMapping` distinguishes direct mappings from bounce allocations;
+- `StreamingMapping` distinguishes in-place mappings from bounce allocations;
   only the bounce variant owns an allocation layout and is recycled on unmap.
 - Page-granular coherent allocations: page-table attribute updates and
   platform prepare/release hooks stay balanced per allocation, avoiding

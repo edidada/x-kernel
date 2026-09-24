@@ -107,8 +107,8 @@ each with `# Safety` sections and `SAFETY:` comments:
   platforms still reject protected guests (AArch64 KVM page-sharing and
   VirtCCA; x86_64 SEV C-bit and CSV HUK) even if a seed configuration
   explicitly requests direct DMA.
-- Direct mappings own no bounce allocation; only `StreamingMapping::Bounce`
-  carries a layout eligible for recycling.
+- `StreamingMapping::InPlace` owns no bounce allocation; only
+  `StreamingMapping::Bounced` carries a layout eligible for recycling.
 - Coherent allocations are page-granular, so attribute updates and
   platform prepare/release hooks always cover whole pages.
 - Copies are bracketed by `fence(SeqCst)` before device handoff and after
