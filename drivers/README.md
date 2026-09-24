@@ -6,48 +6,79 @@ contract it is implementing or consuming.
 ## Layers
 
 ```text
-              device model and service runtime
-             ┌──────────────────────────────────┐
-             │ driver-core / driver-runtime     │
-             │ driver-compose (composition root)│
-             └───────────────┬──────────────────┘
-                             │
-        ┌────────────────────┴────────────────────┐
-        ▼                                         ▼
-  driver contracts                       subsystem drivers
-  (class traits, capability ops)         (drv/*: one module per driver)
-        │                                         │
-        └────────────► device-res-xkernel ◄───────┘
-                       (host backend bridge)
+                core/  device model + services + composition root
+               ┌──────────────────────────────────────┐
+               │ driver-core / driver-runtime         │
+               │ driver-compose                       │
+               └──────────────────┬───────────────────┘
+                                  │
+      ┌───────────────┬───────────┴───────────┬─────────────────┐
+      ▼               ▼                       ▼                 ▼
+ common/         subsystems/              drv/             bus/ firmware/
+ (cross-          (per-class APIs          (one module      (PCI access,
+  subsystem         + class services,      per driver,       DT/ACPI/FDT
+  foundations:      e.g. block dispatch)   family crates)    parsing)
+  driver_base,
+  device-res,           │                    │
+  kclass, devnode)      │                    │
+                        └────► adapters/xkernel/device-res ◄──┘
+                               (capability backend bridge)
+                                        │
+                                integration/
+                                (console runtime, kdevice-uevent)
 ```
 
-## Device Model and Runtime
+## Device Model and Runtime (`core/`)
 
 | Crate | Role |
 |------|------|
-| `core/driver-core` | The device model: bus/device/driver contracts, id tables, deferred probe, the device domain. |
-| `core/driver-runtime` | Per-device services (`DeviceServices` implementation over the resource providers), the virtio HAL, and the clock registry. |
+| `core/driver-core` | The device model: bus/device/driver contracts, id tables, deferred probe, the device domain, extension services. Family-agnostic by construction. |
+| `core/driver-runtime` | Per-device services (`DeviceServices` over the resource providers), the virtio transport extension and HAL, and the clock registry. |
 | `core/driver-compose` | Composition root: runtime install, driver registration, DT/PCI enumeration into the domain. Called once from `kruntime`. |
 
-## Driver Contracts
+## Cross-Subsystem Foundations (`common/`)
 
-OS-neutral contracts; portable and host layers meet here.
+Only crates that several subsystems depend on by design — not a dumping
+ground. Anything class-specific belongs in `subsystems/`.
 
 | Crate | Role |
 |------|------|
 | `driver_base` | Common driver error/result and base device trait. |
+<<<<<<< HEAD
 | `device-res` | Kernel capability contracts requested by drivers: MMIO, IRQ, DMA, time, and devres ownership helpers. |
 | `kdevice` | Shared bus/device/driver model, topology, matching, lifecycle, and device-managed cleanup storage. |
 | `kclass` | Runtime publication layer for typed device classes. |
 | `block`, `char_driver`, `display`, `input`, `net`, `vsock`, `hwrng` | Device class contracts that concrete drivers implement and kernel subsystems consume. |
+=======
+| `device-res` | Capability contracts (MMIO, IRQ, DMA, time) with RAII handles. |
+| `devnode` | Model-agnostic userland node projection (devtmpfs/sysfs/uevent): data-driven `DevNodeType`, `DeviceNumber`, `DeviceLocation`. |
+| `kclass` | Typed class publication: detached class parents, per-class registries, availability/removal subscriptions. |
+>>>>>>> 06c873276 (refactor(drivers): reorganize top-level layout for unambiguous driver placement)
 
-Contracts stay host-free where possible (`driver_base`, `device-res`,
-`devnode`, `kclass`, and the per-class trait crates). Two pragmatic
-exceptions carry kernel-runtime dependencies by design: `block` (its
-dispatch services use `kirq`/`ktask`/`kcpu_id_map` — they are kernel
-class services, not portable contracts) and `kclass`'s `node_compat`
-(vendored input formatting). Treat those as the kernel-owned half of
-their subsystem.
+## Per-Class Subsystems (`subsystems/`)
+
+APIs, class services, and shared objects for one device class.
+`subsystems/block` owns the Gendisk model, completion waiting, the
+softirq reclaimer, and IRQ wiring — that is kernel class service by
+design (it uses `kirq`/`ktask`), and the `contracts`-era pretense that
+it was a pure interface is gone with the directory name.
+
+## Concrete Drivers (`drv/`)
+
+One subsystem crate per family, one module per driver, one feature per
+driver — mirroring Linux's file-per-driver model. A virtio driver's
+hardware/protocol implementation lives beside its driver modules
+(`drv/virtio/device/`, package `virtio` — shared with the HAL and
+class layers, hence a separate package), so one family is one tree.
+
+## Bus and Firmware (`bus/`, `firmware/`)
+
+`bus/pci` — CAM/BAR configuration and access, shared by enumeration and
+drivers. `firmware/{of,acpi,rs-fdtree}` — DT/ACPI parsing and node
+discovery. The remaining `platform/` residents (irqchip, timer, rtc,
+apic, pmu, console) are hardware controller drivers and boot
+integration; their long-term home is `drv/<family>` and
+`integration/console`, migrated one-by-one when touched.
 
 ## Subsystem Drivers (`drv/`)
 

@@ -53,7 +53,7 @@ controller kind, generic PCI host bridge facts, the PMU IRQ, and the
 ## Scope
 
 ```text
-drivers/platform/of/
+drivers/firmware/of/
 ├── src/
 │   └── lib.rs      # global DTB, semantic accessors, PCI/interrupt/memory decoding
 ├── ut-tests/

@@ -13,7 +13,7 @@ members = [
     "drivers/core/driver-core",
     "drivers/core/driver-runtime",
     "drivers/core/driver-compose",
-    "drivers/contracts/devnode",
+    "drivers/common/devnode",
     "drivers/drv/*",
     "tee/tee_crypto",
     "tee/xdice",
@@ -194,12 +194,12 @@ ktty = { path = "io/ktty" }
 watchdog = { path = "io/watchdog" }
 
 # Internal: driver contracts and model
-block = { path = "drivers/contracts/block" }
-hwrng = { path = "drivers/contracts/hwrng" }
-char_driver = { path = "drivers/contracts/char" }
-display = { path = "drivers/contracts/display" }
-driver_base = { path = "drivers/contracts/driver_base" }
-device_res = { path = "drivers/contracts/device-res", package = "device-res" }
+block = { path = "drivers/subsystems/block" }
+char_driver = { path = "drivers/subsystems/char" }
+display = { path = "drivers/subsystems/display" }
+driver_base = { path = "drivers/common/driver_base" }
+device_res = { path = "drivers/common/device-res", package = "device-res" }
+hwrng = { path = "drivers/common/hwrng" }
 kclk = { path = "core/kclk" }
 driver-core = { path = "drivers/core/driver-core" }
 driver-runtime = { path = "drivers/core/driver-runtime" }
@@ -208,14 +208,14 @@ drv-virtio = { path = "drivers/drv/virtio" }
 drv-serial = { path = "drivers/drv/serial" }
 drv-clk = { path = "drivers/drv/clk" }
 drv-block = { path = "drivers/drv/block" }
-devnode = { path = "drivers/contracts/devnode" }
-kclass = { path = "drivers/contracts/kclass" }
-input = { path = "drivers/contracts/input" }
-net = { path = "drivers/contracts/net" }
-vsock = { path = "drivers/contracts/vsock" }
+devnode = { path = "drivers/common/devnode" }
+kclass = { path = "drivers/common/kclass" }
+input = { path = "drivers/subsystems/input" }
+net = { path = "drivers/subsystems/net" }
+vsock = { path = "drivers/subsystems/vsock" }
 
 # Internal: portable concrete drivers
-virtio = { path = "drivers/devices/virtio" }
+virtio = { path = "drivers/drv/virtio/device" }
 
 # Internal: driver adapters and integration
 device_res_xkernel = { path = "drivers/adapters/xkernel/device-res", package = "device-res-xkernel" }
@@ -224,10 +224,10 @@ kdevice_uevent = { path = "drivers/integration/kdevice-uevent", package = "kdevi
 # Internal: platform, firmware, and host driver support
 aarch64-pmuv3 = { path = "drivers/platform/aarch64-pmuv3" }
 console_driver = { path = "drivers/platform/console", package = "console-driver" }
-pci = { path = "drivers/platform/pci" }
-rs_fdtree = { path = "drivers/platform/rs-fdtree" }
-acpi = { path = "drivers/platform/acpi" }
-of = { path = "drivers/platform/of" }
+pci = { path = "drivers/bus/pci" }
+rs_fdtree = { path = "drivers/firmware/rs-fdtree" }
+acpi = { path = "drivers/firmware/acpi" }
+of = { path = "drivers/firmware/of" }
 dice_driver = { path = "drivers/platform/dice", package = "dice-driver" }
 irq_driver = { path = "drivers/platform/irq", package = "irq-driver" }
 rtc_driver = { path = "drivers/platform/rtc", package = "rtc-driver" }

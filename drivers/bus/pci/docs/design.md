@@ -59,7 +59,7 @@ and MSI-X capability setup (`msix` module).
 ## Scope
 
 ```text
-drivers/platform/pci/
+drivers/bus/pci/
 ├── src/
 │   ├── lib.rs        # config-space resolution, PciBus, PciConfigAccess,
 │   │                 # BAR allocation, configure_device, INTx routes

@@ -7,7 +7,7 @@
 //! This module is the single seam between firmware-table parsers (DT / ACPI)
 //! and consumers that need to know what hardware exists and how to reach it
 //! (e.g. the driver-compose bus enumeration,
-//! `drivers/platform/pci` host detection, `drivers/devices/virtio` interrupt routing).
+//! `drivers/bus/pci` host detection, `drivers/drv/virtio/device` interrupt routing).
 //!
 //! Layering rationale
 //! ------------------
