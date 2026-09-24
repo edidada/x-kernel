@@ -32,9 +32,9 @@ pub struct MmioData {
     regs: Option<IoMap>,
 }
 
-pub struct VirtioMmioDriver;
+pub struct MmioDriver;
 
-impl DriverOps<PlatformBus> for VirtioMmioDriver {
+impl DriverOps<PlatformBus> for MmioDriver {
     type Data = MmioData;
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PlatformBus>) -> Result<MmioData, ProbeError> {
@@ -74,30 +74,30 @@ fn dispatch<T: virtio::Transport + 'static>(
 ) -> Result<(), ProbeError> {
     use driver_base::DeviceKind;
     match kind {
-        #[cfg(feature = "virtio-rng")]
-        DeviceKind::Char => virtio_rng_core::activate(dev, transport),
-        #[cfg(feature = "virtio-net")]
+        #[cfg(feature = "rng")]
+        DeviceKind::Char => crate::rng::activate(dev, transport),
+        #[cfg(feature = "net")]
         DeviceKind::Net => {
-            virtio_net_core::activate(dev, transport)?;
+            crate::net::activate(dev, transport)?;
             Ok(())
         }
-        #[cfg(feature = "virtio-blk")]
+        #[cfg(feature = "blk")]
         DeviceKind::Block => {
             let irq = dev
                 .irq(0)
                 .map(|spec| spec.number)
                 .map_err(|_| ProbeError::Fatal(RuntimeError::Invalid))?;
-            virtio_blk_core::activate(dev, transport, irq)?;
+            crate::blk::activate(dev, transport, irq)?;
             Ok(())
         }
-        #[cfg(feature = "virtio-gpu")]
-        DeviceKind::Display => virtio_gpu_core::activate(dev, transport),
-        #[cfg(feature = "virtio-input")]
-        DeviceKind::Input => virtio_input_core::activate(dev, transport),
-        #[cfg(feature = "virtio-vsock")]
-        DeviceKind::Vsock => virtio_vsock_core::activate(dev, transport),
-        #[cfg(feature = "virtio-9p")]
-        DeviceKind::Fs9p => virtio_9p_core::activate(dev, transport),
+        #[cfg(feature = "gpu")]
+        DeviceKind::Display => crate::gpu::activate(dev, transport),
+        #[cfg(feature = "input")]
+        DeviceKind::Input => crate::input::activate(dev, transport),
+        #[cfg(feature = "vsock")]
+        DeviceKind::Vsock => crate::vsock::activate(dev, transport),
+        #[cfg(feature = "fs9p")]
+        DeviceKind::Fs9p => crate::virtio_9p::activate(dev, transport),
         _ => {
             log::warn!("virtio-mmio: unsupported device kind {kind:?}");
             Err(ProbeError::Fatal(RuntimeError::Unsupported))
@@ -107,9 +107,5 @@ fn dispatch<T: virtio::Transport + 'static>(
 
 /// `module_platform_driver()` equivalent.
 pub fn register() {
-    driver_core::global_domain().register_driver(DriverDesc::new(
-        "virtio-mmio",
-        IDS,
-        VirtioMmioDriver,
-    ));
+    driver_core::global_domain().register_driver(DriverDesc::new("virtio-mmio", IDS, MmioDriver));
 }

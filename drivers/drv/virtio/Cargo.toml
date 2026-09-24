@@ -1,0 +1,36 @@
+[package]
+name = "drv-virtio"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "driver-core virtio drivers: blk/net/rng/gpu/input/vsock/9p devices and the mmio transport"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["driver", "virtio", "x-kernel"]
+categories = ["os", "no-std"]
+
+[features]
+default = []
+blk = ["dep:block", "kclass/block", "virtio/block"]
+net = ["kclass/net", "virtio/net"]
+rng = ["kclass/char", "virtio/rng"]
+gpu = ["kclass/display", "virtio/gpu"]
+input = ["kclass/input", "virtio/input"]
+vsock = ["kclass/vsock", "virtio/socket"]
+fs9p = ["kclass/virtio-9p", "virtio/virtio-9p"]
+mmio = []
+
+[dependencies]
+block = { workspace = true, optional = true }
+devnode = { workspace = true }
+driver-core = { workspace = true }
+driver-runtime = { workspace = true, features = ["virtio-hal"] }
+driver_base = { workspace = true }
+kclass = { workspace = true }
+log.workspace = true
+memaddr.workspace = true
+pci = { workspace = true }
+virtio = { workspace = true, features = ["alloc"] }
+device_res = { workspace = true }
+

@@ -52,36 +52,36 @@ pub fn init() {
     }));
 
     #[cfg(feature = "fixed-clock")]
-    fixed_clock::register();
+    drv_clk::fixed_clock::register();
     #[cfg(feature = "serial-pl011")]
-    serial_pl011::register();
+    drv_serial::pl011::register();
     #[cfg(feature = "virtio-blk")]
     {
         block::dispatch::reclaimer::init();
-        virtio_blk_core::register();
+        drv_virtio::blk::register();
     }
     #[cfg(feature = "virtio-net")]
-    virtio_net_core::register();
+    drv_virtio::net::register();
     #[cfg(feature = "virtio-rng")]
-    virtio_rng_core::register();
+    drv_virtio::rng::register();
     #[cfg(feature = "virtio-gpu")]
-    virtio_gpu_core::register();
+    drv_virtio::gpu::register();
     #[cfg(feature = "virtio-input")]
-    virtio_input_core::register();
+    drv_virtio::input::register();
     #[cfg(feature = "virtio-vsock")]
-    virtio_vsock_core::register();
+    drv_virtio::vsock::register();
     #[cfg(feature = "virtio-9p")]
-    virtio_9p_core::register();
+    drv_virtio::virtio_9p::register();
     #[cfg(feature = "serial-ns16550-mmio")]
-    serial_ns16550_core::register_mmio();
+    drv_serial::ns16550::register_mmio();
     #[cfg(feature = "serial-ns16550-ioport")]
-    serial_ns16550_core::register_ioport();
+    drv_serial::ns16550::register_ioport();
     #[cfg(feature = "virtio-mmio")]
-    virtio_mmio_core::register();
+    drv_virtio::mmio::register();
     #[cfg(feature = "ramdisk")]
     {
         block::dispatch::reclaimer::init();
-        ramdisk_core::register();
+        drv_block::ramdisk::register();
     }
 
     enumerate_firmware_devices();

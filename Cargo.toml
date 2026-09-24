@@ -14,18 +14,7 @@ members = [
     "drivers/core/driver-runtime",
     "drivers/core/driver-compose",
     "drivers/contracts/devnode",
-    "drivers/drv/fixed-clock",
-    "drivers/drv/serial-pl011",
-    "drivers/drv/virtio-blk",
-    "drivers/drv/virtio-net",
-    "drivers/drv/virtio-rng",
-    "drivers/drv/ramdisk",
-    "drivers/drv/virtio-gpu",
-    "drivers/drv/virtio-input",
-    "drivers/drv/virtio-vsock",
-    "drivers/drv/virtio-9p",
-    "drivers/drv/serial-ns16550",
-    "drivers/drv/virtio-mmio",
+    "drivers/drv/*",
     "tee/tee_crypto",
     "tee/xdice",
 ]
@@ -215,19 +204,11 @@ kclk = { path = "core/kclk" }
 driver-core = { path = "drivers/core/driver-core" }
 driver-runtime = { path = "drivers/core/driver-runtime" }
 driver-compose = { path = "drivers/core/driver-compose" }
+drv-virtio = { path = "drivers/drv/virtio" }
+drv-serial = { path = "drivers/drv/serial" }
+drv-clk = { path = "drivers/drv/clk" }
+drv-block = { path = "drivers/drv/block" }
 devnode = { path = "drivers/contracts/devnode" }
-fixed-clock = { path = "drivers/drv/fixed-clock" }
-serial-pl011 = { path = "drivers/drv/serial-pl011" }
-virtio-blk-core = { path = "drivers/drv/virtio-blk" }
-virtio-net-core = { path = "drivers/drv/virtio-net" }
-virtio-rng-core = { path = "drivers/drv/virtio-rng" }
-ramdisk-core = { path = "drivers/drv/ramdisk" }
-virtio-gpu-core = { path = "drivers/drv/virtio-gpu" }
-virtio-input-core = { path = "drivers/drv/virtio-input" }
-virtio-vsock-core = { path = "drivers/drv/virtio-vsock" }
-virtio-9p-core = { path = "drivers/drv/virtio-9p" }
-serial-ns16550-core = { path = "drivers/drv/serial-ns16550" }
-virtio-mmio-core = { path = "drivers/drv/virtio-mmio" }
 kclass = { path = "drivers/contracts/kclass" }
 input = { path = "drivers/contracts/input" }
 net = { path = "drivers/contracts/net" }

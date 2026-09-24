@@ -12,40 +12,32 @@ categories = ["os", "no-std"]
 
 [features]
 default = []
-serial-pl011 = ["dep:serial-pl011"]
-virtio-blk = ["dep:virtio-blk-core"]
-virtio-net = ["dep:virtio-net-core"]
-virtio-rng = ["dep:virtio-rng-core"]
-ramdisk = ["dep:ramdisk-core"]
-ramdisk-static = ["ramdisk", "ramdisk-core/ramdisk-static"]
-fixed-clock = ["dep:fixed-clock"]
-virtio-gpu = ["dep:virtio-gpu-core"]
-virtio-input = ["dep:virtio-input-core"]
-virtio-vsock = ["dep:virtio-vsock-core"]
-virtio-9p = ["dep:virtio-9p-core"]
-serial-ns16550-mmio = ["dep:serial-ns16550-core", "serial-ns16550-core/mmio"]
-serial-ns16550-ioport = ["dep:serial-ns16550-core", "serial-ns16550-core/ioport"]
-virtio-mmio = ["dep:virtio-mmio-core", "virtio-mmio-core/virtio-blk", "virtio-mmio-core/virtio-net", "virtio-mmio-core/virtio-gpu", "virtio-mmio-core/virtio-input", "virtio-mmio-core/virtio-rng", "virtio-mmio-core/virtio-vsock", "virtio-mmio-core/virtio-9p", "dep:virtio-blk-core", "dep:virtio-net-core", "dep:virtio-gpu-core", "dep:virtio-input-core", "dep:virtio-rng-core", "dep:virtio-vsock-core", "dep:virtio-9p-core"]
+serial-pl011 = ["dep:drv-serial", "drv-serial/pl011", "dep:drv-clk", "drv-clk/fixed-clock"]
+serial-ns16550-mmio = ["dep:drv-serial", "drv-serial/ns16550-mmio"]
+serial-ns16550-ioport = ["dep:drv-serial", "drv-serial/ns16550-ioport"]
+virtio-blk = ["dep:drv-virtio", "drv-virtio/blk"]
+virtio-net = ["dep:drv-virtio", "drv-virtio/net"]
+virtio-rng = ["dep:drv-virtio", "drv-virtio/rng"]
+virtio-gpu = ["dep:drv-virtio", "drv-virtio/gpu"]
+virtio-input = ["dep:drv-virtio", "drv-virtio/input"]
+virtio-vsock = ["dep:drv-virtio", "drv-virtio/vsock"]
+virtio-9p = ["dep:drv-virtio", "drv-virtio/fs9p"]
+virtio-mmio = ["dep:drv-virtio", "drv-virtio/blk", "drv-virtio/net", "drv-virtio/gpu", "drv-virtio/input", "drv-virtio/rng", "drv-virtio/vsock", "drv-virtio/fs9p", "drv-virtio/mmio"]
+ramdisk = ["dep:drv-block"]
+ramdisk-static = ["ramdisk", "drv-block/ramdisk-static"]
+fixed-clock = ["dep:drv-clk"]
 
 [dependencies]
 console_driver.workspace = true
 driver-core.workspace = true
 driver-runtime.workspace = true
 kclass = { workspace = true, features = ["char"] }
-fixed-clock = { workspace = true, optional = true }
 khal.workspace = true
 pci.workspace = true
 of.workspace = true
 log.workspace = true
-serial-pl011 = { workspace = true, optional = true }
-virtio-blk-core = { workspace = true, optional = true }
-virtio-net-core = { workspace = true, optional = true }
-virtio-rng-core = { workspace = true, optional = true }
-ramdisk-core = { workspace = true, optional = true }
-virtio-gpu-core = { workspace = true, optional = true }
-virtio-input-core = { workspace = true, optional = true }
-virtio-vsock-core = { workspace = true, optional = true }
-virtio-9p-core = { workspace = true, optional = true }
-serial-ns16550-core = { workspace = true, optional = true }
-virtio-mmio-core = { workspace = true, optional = true }
 block = { workspace = true }
+drv-virtio = { workspace = true, optional = true }
+drv-serial = { workspace = true, optional = true }
+drv-clk = { workspace = true, optional = true }
+drv-block = { workspace = true, optional = true }
