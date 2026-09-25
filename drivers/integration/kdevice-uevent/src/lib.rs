@@ -295,7 +295,7 @@ fn publish_remove(node: &DeviceNode) {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

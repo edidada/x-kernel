@@ -730,7 +730,7 @@ pub fn sys_msgctl(msqid: i32, cmd: i32, buf: UserPtr<u8>) -> KResult<isize> {
     Err(KError::from(LinuxError::EINVAL))
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_msg {
     use alloc::vec;
 

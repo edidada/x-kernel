@@ -1941,7 +1941,7 @@ fn validate_non_overlapping_value_ranges(ranges: &mut [(usize, usize)]) -> Ext4R
     Ok(())
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{format, vec, vec::Vec};
 
@@ -2648,7 +2648,7 @@ mod tests {
 }
 
 /// QEMU unittest coverage for xattr layout decisions used by metadata writes.
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod unittests {
     use alloc::{vec, vec::Vec};
 

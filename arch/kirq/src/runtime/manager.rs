@@ -744,8 +744,7 @@ fn run_irq_exit_tail_with_context(
     ));
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 pub mod tests_irq {
     use alloc::{boxed::Box, sync::Arc, vec::Vec};
     use core::{

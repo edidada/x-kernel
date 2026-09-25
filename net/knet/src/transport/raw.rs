@@ -402,7 +402,7 @@ impl Drop for RawSocket {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{vec, vec::Vec};
     use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};

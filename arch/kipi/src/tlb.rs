@@ -567,7 +567,7 @@ pub fn trigger_flush_all(vaddr: Option<VirtAddr>) {
     TlbFlushIf::flush_all_cpus(vaddr);
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert, def_test};
 

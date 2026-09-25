@@ -1077,7 +1077,7 @@ impl Drop for VfsFile {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{vec, vec::Vec};
 

@@ -1582,7 +1582,7 @@ impl RenameData<'_> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_dentry {
     use alloc::{string::String, sync::Arc, vec::Vec};
     use core::sync::atomic::{AtomicUsize, Ordering};

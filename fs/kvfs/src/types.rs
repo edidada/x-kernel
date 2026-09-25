@@ -219,7 +219,7 @@ impl SetattrTime {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert, assert_eq, def_test};
 

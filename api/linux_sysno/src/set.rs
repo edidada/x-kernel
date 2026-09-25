@@ -408,7 +408,7 @@ impl<'de> Deserialize<'de> for SysnoSet {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     extern crate alloc;
     use alloc::{format, vec, vec::Vec};

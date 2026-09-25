@@ -257,7 +257,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use core::ptr::NonNull;
 

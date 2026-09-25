@@ -541,7 +541,7 @@ pub trait MappingViewNotifier: Send + Sync {
     fn invalidate(&self, work: &ObjectInvalidateWork, hit: &ObjectViewHit);
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::vec;
 

@@ -162,7 +162,7 @@ pub async fn timeout_at<F: IntoFuture>(
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod owned_sleep_tests {
     use alloc::{sync::Arc, task::Wake};
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -287,8 +287,7 @@ mod owned_sleep_tests {
     }
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 mod tests_subtick_precision {
     use alloc::{string::String, sync::Arc};
     use core::{

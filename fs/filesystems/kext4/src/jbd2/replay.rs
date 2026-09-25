@@ -314,7 +314,7 @@ fn committed_transactions(
         .filter(|transaction| transaction.state() == JournalTransactionState::Committed)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::collections::BTreeMap;
     use core::cell::RefCell;

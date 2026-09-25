@@ -48,7 +48,7 @@ pub(super) unsafe fn dispatch_round(
     any_due
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 

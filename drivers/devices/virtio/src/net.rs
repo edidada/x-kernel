@@ -491,7 +491,7 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
 

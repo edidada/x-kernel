@@ -597,7 +597,7 @@ impl<'a> Drop for PanicGuard<'a> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod unittest_tests {
     use unittest::{assert, assert_eq, def_test};
 

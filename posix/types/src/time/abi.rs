@@ -274,7 +274,7 @@ pub struct utimbuf {
     pub modtime: __kernel_old_time_t,
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

@@ -2631,7 +2631,7 @@ pub(crate) fn get_or_try_init_inode<E>(
     })
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{string::String, sync::Arc};
 

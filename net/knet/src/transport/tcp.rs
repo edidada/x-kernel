@@ -810,7 +810,7 @@ fn get_ephemeral_port(local_addr: smoltcp::wire::IpAddress) -> KResult<u16> {
     k_bail!(AddrInUse, "no available ports");
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::vec;
     use core::net::Ipv4Addr;

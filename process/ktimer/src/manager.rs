@@ -379,7 +379,7 @@ impl ProcessTimerManager {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use ksignal::Signo;
     use ktime_types::TimeSpan;

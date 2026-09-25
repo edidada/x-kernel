@@ -2673,7 +2673,7 @@ fn inode_checksum(
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 
@@ -3086,7 +3086,7 @@ mod tests {
 /// `target_os = "none"`), so they use the `unittest` assertion macros and,
 /// for the concurrency cases, the kernel scheduler (`ktask`) and
 /// synchronization primitives (`ksync`) instead of `std::thread`.
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod unittests {
     use alloc::vec::Vec;
 

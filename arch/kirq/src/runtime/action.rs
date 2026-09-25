@@ -202,8 +202,7 @@ impl IrqActionReturn {
     }
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
 

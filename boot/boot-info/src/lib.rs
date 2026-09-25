@@ -670,7 +670,7 @@ const _: () = {
     );
 };
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod unittest_tests {
     use alloc::{boxed::Box, format, vec, vec::Vec};
 

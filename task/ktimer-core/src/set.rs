@@ -343,7 +343,7 @@ impl<const N: usize> Default for TimerSet<N> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 pub(crate) mod tests {
     use ktime_types::{MonotonicInstant, TimeSpan};
     use unittest::{assert, assert_eq, def_test};

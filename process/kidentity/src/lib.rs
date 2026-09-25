@@ -203,7 +203,7 @@ pub fn allocate_root_pid_handle() -> KResult<Arc<PidHandle>> {
     PidHandle::allocate_in(root_pid_namespace())
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
 

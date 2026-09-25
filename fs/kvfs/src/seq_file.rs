@@ -235,7 +235,7 @@ impl<I: SeqIterator> FileOperations for SeqFileInode<I> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::string::String;
     use core::fmt;

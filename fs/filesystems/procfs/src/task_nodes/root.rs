@@ -893,7 +893,7 @@ impl SimpleDirOps for ProcFsHandler {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use khal::paging::MappingFlags;
     use kprocess::AsThread;

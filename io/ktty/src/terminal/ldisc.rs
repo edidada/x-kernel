@@ -521,7 +521,7 @@ impl<R: TtyRead, W: TtyWrite> LineDiscipline<R, W> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod ldisc_tests {
     use alloc::{collections::VecDeque, sync::Arc, task::Wake, vec};
     use core::{

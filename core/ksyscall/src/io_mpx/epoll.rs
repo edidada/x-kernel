@@ -159,7 +159,7 @@ pub fn sys_epoll_pwait2(
     do_epoll_wait(epfd, events, maxevents, timeout, sigmask, sigsetsize)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_epoll_padding {
     use alloc::vec;
     use core::mem::size_of;

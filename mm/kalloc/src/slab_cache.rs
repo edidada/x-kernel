@@ -369,8 +369,7 @@ pub(crate) unsafe fn drain_cache<A: ByteAllocator>(
     };
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 mod tests {
     use alloc::vec::Vec;
 

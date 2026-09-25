@@ -234,7 +234,7 @@ impl<H: TimerHandler + 'static, const N: usize> Drop for Timer<H, N> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 

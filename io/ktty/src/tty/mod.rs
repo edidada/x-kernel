@@ -443,7 +443,7 @@ impl DeviceFileOps for CurrentTty {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use kerrno::KError;
     use unittest::def_test;

@@ -1062,7 +1062,7 @@ pub fn may_mknod(mode: Umode) -> VfsResult<NodeType> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{string::String, sync::Arc, vec::Vec};
 

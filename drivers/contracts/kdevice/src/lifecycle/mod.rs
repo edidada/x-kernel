@@ -700,7 +700,7 @@ pub fn remove_device_managed(id: DeviceId) -> Result<(), DriverError> {
     Ok(())
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
 

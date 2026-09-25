@@ -684,7 +684,7 @@ pub fn tests_failed() -> bool {
     TEST_FAILED_FLAG.load(Ordering::Relaxed)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_test_framework {
     use alloc::{collections::BTreeMap, vec};
 

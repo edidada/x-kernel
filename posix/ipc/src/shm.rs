@@ -674,7 +674,7 @@ pub fn sys_shmdt(shmaddr: usize) -> KResult<isize> {
 }
 
 /// Regression cases for segment metadata, backing and attachment cleanup.
-#[cfg(unittest)]
+#[unittest::mod_test]
 pub mod tests_shm {
     use khal::paging::MappingFlags;
     use memaddr::VirtAddrRange;

@@ -446,7 +446,7 @@ pub(crate) fn new_shared_runtime(spec: FileSharedRuntimeSpec) -> VmRuntimeRef {
     VmRuntimeRef::new_file_shared(Arc::new(FileSharedRuntime(inner)))
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{vec, vec::Vec};
 

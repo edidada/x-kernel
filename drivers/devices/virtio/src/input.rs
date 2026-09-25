@@ -123,7 +123,7 @@ impl<H: Hal, T: Transport> InputDevice for VirtIoInputDev<H, T> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert, def_test};
 

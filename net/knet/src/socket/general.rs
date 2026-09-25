@@ -309,7 +309,7 @@ impl Configurable for GeneralOptions {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{sync::Arc, task::Wake};
     use core::{sync::atomic::AtomicUsize, task::Context};

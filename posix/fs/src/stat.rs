@@ -245,7 +245,7 @@ pub fn sys_fstatfs(fd: i32, buf: UserPtr<statfs>) -> KResult<isize> {
     Ok(0)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use kvfs::{MountFlags, StatFsFlags, SuperBlockFlags};
     use unittest::{assert, assert_eq, def_test};

@@ -932,7 +932,7 @@ impl FileOperations for EventpollFops {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod epoll_tests {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

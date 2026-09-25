@@ -141,8 +141,7 @@ fn daemon_name(cpu_id: LogicalCpuId) -> String {
     format!("ksoftirqd/{}", cpu_id.as_usize())
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 mod tests {
     use alloc::boxed::Box;
     use core::{

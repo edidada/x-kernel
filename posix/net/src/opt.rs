@@ -455,7 +455,7 @@ pub fn sys_setsockopt(
     Ok(0)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use kerrno::KError;
     use ktime_types::{NANOS_PER_SEC, TimeSpan};

@@ -342,7 +342,7 @@ unsafe fn page_table_user_asid(ctx: NonNull<()>) -> u16 {
     ctx.current_asid()
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

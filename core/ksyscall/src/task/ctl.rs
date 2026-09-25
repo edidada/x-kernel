@@ -208,7 +208,7 @@ pub fn sys_prctl(
     Ok(0)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use kerrno::{KError, LinuxError};
     use linux_raw_sys::prctl::*;

@@ -141,7 +141,7 @@ pub fn disable_irq(irq: usize) {
     disable_irq_impl(&mut MmioPchPic, irq);
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

@@ -214,7 +214,7 @@ fn handle_bottom_half(reasons: NotificationFlags) {
 #[cfg(unittest)]
 mod bottom_half_tests;
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert, assert_eq, def_test};
 

@@ -296,7 +296,7 @@ unsafe impl VirtMemIo for Vm {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use memspace::PageFaultOutcome;
     use osvm::MemError;

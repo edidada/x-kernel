@@ -230,7 +230,7 @@ pub trait NetDevice: Send + Sync {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

@@ -81,7 +81,7 @@ pub fn sys_setpgid(pid: i32, pgid: i32) -> KResult<isize> {
     Ok(0)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

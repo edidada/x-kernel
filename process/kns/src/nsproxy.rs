@@ -211,7 +211,7 @@ impl NsProxy {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_nsproxy {
     use alloc::sync::Arc;
 

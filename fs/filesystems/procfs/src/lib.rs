@@ -60,7 +60,7 @@ fn new_procfs_with_type(
     SimpleFs::new_with_superblock_flags(file_system_type, 0x9fa0, superblock_flags, root::builder)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

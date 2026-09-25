@@ -292,7 +292,7 @@ impl FileOperations for SignalfdFops {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use ksignal::{
         ChildExitInfo, ChildExitSignalInfo, Signo,

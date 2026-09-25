@@ -520,7 +520,7 @@ pub trait DeviceFileOps: Send + Sync {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{boxed::Box, string::String, sync::Arc, vec, vec::Vec};
 

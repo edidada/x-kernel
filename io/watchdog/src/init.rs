@@ -256,7 +256,7 @@ pub fn init_secondary() {
     init_common();
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod timer_irq_tests {
     //! Runtime integration probes, not timing benchmarks. Boot-created owners
     //! are intentionally permanent; this test only observes their IRQ progress.

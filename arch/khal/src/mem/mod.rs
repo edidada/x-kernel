@@ -128,8 +128,7 @@ unsafe extern "C" {
     fn boot_stack_top();
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 pub mod tests_mem {
     use unittest::def_test;
 

@@ -169,7 +169,7 @@ pub fn set_tee_session_ctx(thread: &Thread) {
 #[cfg(unittest)]
 pub use exec_fixture::ExecSessionFixture;
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod exec_fixture {
     use alloc::sync::Weak;
     use core::cell::Cell;

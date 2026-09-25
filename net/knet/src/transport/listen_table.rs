@@ -432,7 +432,7 @@ fn promote_ready_in_socket_set(
     moved
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use smoltcp::wire::{IpAddress, Ipv4Address};
     use unittest::{assert, def_test};

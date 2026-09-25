@@ -82,7 +82,7 @@ impl UdpSocketWaiters {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::boxed::Box;
     use core::{

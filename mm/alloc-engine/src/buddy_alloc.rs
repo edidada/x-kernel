@@ -635,8 +635,7 @@ pub fn split_to_chunks<const PAGE_SIZE: usize>(
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 mod tests {
     use core::ptr::NonNull;
 

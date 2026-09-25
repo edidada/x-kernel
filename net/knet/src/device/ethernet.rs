@@ -842,7 +842,7 @@ fn map_dev_err(err: DriverError) -> KError {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{boxed::Box, vec, vec::Vec};
     use core::{

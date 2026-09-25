@@ -760,7 +760,7 @@ mod tests {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_unittest {
     use alloc::format;
 

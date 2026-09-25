@@ -193,7 +193,7 @@ pub(super) fn exec_owned(
     Ok(0)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::format;
 

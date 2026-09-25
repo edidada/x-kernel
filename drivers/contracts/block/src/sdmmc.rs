@@ -95,7 +95,7 @@ impl BlockDeviceOperations for SdMmcDriver {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_sdmmc {
     use unittest::def_test;
 

@@ -96,8 +96,7 @@ where
     }
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 pub mod tests_iter {
     use unittest::def_test;
 

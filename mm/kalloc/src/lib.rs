@@ -914,8 +914,7 @@ pub fn is_page_allocator_ready() -> bool {
     GLOBAL_ALLOCATOR.is_page_allocator_ready()
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 pub mod tests_kalloc {
     use strum::VariantArray;
     use unittest::def_test;

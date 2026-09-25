@@ -166,7 +166,7 @@ pub fn smc_call(func: u32, arg0: usize, arg1: usize, arg2: usize) -> SmcccResult
     out
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

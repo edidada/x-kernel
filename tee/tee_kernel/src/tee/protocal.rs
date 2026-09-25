@@ -185,7 +185,7 @@ pub(crate) fn decode_message<T: DeserializeOwned>(payload: &[u8]) -> Result<T, p
     postcard::from_bytes(payload)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     #[test]
     fn tee_request_open_session_roundtrip() {

@@ -86,7 +86,7 @@ pub fn sys_getrusage(who: i32, usage: UserPtr<rusage>) -> KResult<isize> {
     Ok(0)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use ktime_types::TimeSpan;
     use unittest::def_test;

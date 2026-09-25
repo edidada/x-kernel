@@ -345,7 +345,7 @@ impl ProcessResources {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
 

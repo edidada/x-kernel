@@ -118,7 +118,7 @@ impl DentryOperations for PipeDentryOperations {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use kerrno::KError;
     use kpoll::IoEvents;

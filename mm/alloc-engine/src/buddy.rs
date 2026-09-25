@@ -76,8 +76,7 @@ impl ByteAllocator for BuddyByteAllocator {
     }
 }
 
-#[cfg(all(unittest, feature = "buddy"))]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 pub mod tests_buddy {
     use core::alloc::Layout;
 

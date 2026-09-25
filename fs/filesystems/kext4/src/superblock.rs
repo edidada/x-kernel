@@ -1983,7 +1983,7 @@ fn is_inode_physical_block_valid(
     true
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod unittests {
     use unittest::{assert_eq, def_test};
 

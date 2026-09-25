@@ -311,7 +311,7 @@ pub fn sys_seccomp(_op: u32, _flags: u32, _args: *const ()) -> KResult<isize> {
     Err(KError::from(kerrno::LinuxError::ENOSYS))
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_sysinfo {
     use alloc::vec;
     use core::mem::{offset_of, size_of};

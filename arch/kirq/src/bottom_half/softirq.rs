@@ -428,8 +428,7 @@ pub fn clear_softirq_pending_for_tests(vec: SoftirqVec) {
         .fetch_and(!vec.bit(), Ordering::Release);
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 pub mod test_support {
     use super::{
         SoftirqAction, SoftirqVec, clear_softirq_diagnostics, clear_softirq_pending_for_tests,
@@ -680,8 +679,7 @@ fn record_irqoff_misuse_warning(pin: &impl CpuPin) -> usize {
     }
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 pub mod tests_softirq {
     use core::sync::atomic::{AtomicUsize, Ordering};
 

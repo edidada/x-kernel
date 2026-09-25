@@ -8,8 +8,8 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
 use syn::{
-    DeriveInput, Error, Ident, Item, ItemFn, ItemImpl, ItemMod, LitInt, Token, parse_macro_input,
-    punctuated::Punctuated,
+    AttrStyle, Attribute, DeriveInput, Error, Ident, Item, ItemFn, ItemImpl, ItemMod, LitInt,
+    Token, parse_macro_input, parse_quote, punctuated::Punctuated,
 };
 
 /// Registers a function in the kernel runtime init array.
@@ -79,6 +79,13 @@ pub fn register_init(attr: TokenStream, function: TokenStream) -> TokenStream {
 /// This is equivalent to `#[cfg(unittest)]` but more readable.
 /// The module will only be compiled when `--test` flag is passed to the build.
 ///
+/// The module also allows `clippy::unwrap_used`, `clippy::expect_used`,
+/// `clippy::panic` and `missing_docs`: clippy's own test exemptions only
+/// recognise `#[cfg(test)]`, not `cfg(unittest)`.
+///
+/// Only inline modules (`mod name { ... }`) are supported on stable Rust;
+/// attribute macros on file modules (`mod name;`) are rejected with E0658.
+///
 /// # Example
 ///
 /// ```rust
@@ -101,32 +108,36 @@ pub fn register_init(attr: TokenStream, function: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro_attribute]
 pub fn mod_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    let module = parse_macro_input!(item as ItemMod);
+    let mut module = parse_macro_input!(item as ItemMod);
 
-    let mod_attrs = &module.attrs;
-    let mod_vis = &module.vis;
-    let mod_name = &module.ident;
-
-    let output = if let Some((brace, items)) = &module.content {
-        // Module with body
-        let _ = brace; // suppress unused warning
-        quote! {
-            #[cfg(unittest)]
-            #(#mod_attrs)*
-            #mod_vis mod #mod_name {
-                #(#items)*
-            }
+    // An inline module takes the allowances as inner attributes, a file module
+    // (`mod foo;`) as outer ones. rustc currently rejects attribute macros on
+    // file modules (E0658), so the outer form is not reachable on stable.
+    let mut allows: [Attribute; 2] = [
+        parse_quote! {
+            #[allow(
+                clippy::unwrap_used,
+                clippy::expect_used,
+                clippy::panic,
+                reason = "unittest module: test helpers may panic on failure"
+            )]
+        },
+        parse_quote! {
+            #[allow(missing_docs, reason = "unittest module: test code is outside rustdoc scope")]
+        },
+    ];
+    if module.content.is_some() {
+        for attr in &mut allows {
+            attr.style = AttrStyle::Inner(Token![!](Span::call_site()));
         }
-    } else {
-        // Module without body (e.g., `mod foo;`)
-        quote! {
-            #[cfg(unittest)]
-            #(#mod_attrs)*
-            #mod_vis mod #mod_name;
-        }
-    };
+    }
+    module.attrs.extend(allows);
 
-    output.into()
+    quote! {
+        #[cfg(unittest)]
+        #module
+    }
+    .into()
 }
 
 /// Marks a function as a unit test.
@@ -196,12 +207,24 @@ fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> 
         fn_name.to_string().to_uppercase()
     );
 
+    // clippy's `allow-*-in-tests` only recognises `#[cfg(test)]` / `#[test]`,
+    // so the unittest body is exempted here.
+    let unittest_allow = quote! {
+        #[allow(
+            clippy::unwrap_used,
+            clippy::expect_used,
+            clippy::panic,
+            reason = "unittest body: a failed assertion is the intended outcome"
+        )]
+    };
+
     // The test function itself becomes the wrapper - body is embedded directly
     // This way assert macros can use `return TestResult::Failed` correctly
     let test_fn = if has_return_type {
         // Function already returns TestResult
         quote! {
             #(#fn_attrs)*
+            #unittest_allow
             fn #fn_name() -> unittest::TestResult {
                 #(#fn_stmts)*
             }
@@ -210,6 +233,7 @@ fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> 
         // Function doesn't return anything, wrap it to return TestResult
         quote! {
             #(#fn_attrs)*
+            #unittest_allow
             fn #fn_name() -> unittest::TestResult {
                 #(#fn_stmts)*
                 unittest::TestResult::Ok

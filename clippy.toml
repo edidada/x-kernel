@@ -3,3 +3,8 @@
 # Lint levels (allow/warn/deny) live in `[workspace.lints]` of the root
 # `Cargo.toml`. This file only holds lint parameters: thresholds,
 # disallowed lists, and test exemptions.
+
+# std `#[test]` code only; `cfg(unittest)` code is exempted by `util/macros`.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

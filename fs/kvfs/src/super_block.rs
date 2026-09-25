@@ -1205,7 +1205,7 @@ impl core::fmt::Debug for SuperBlock {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{boxed::Box, string::String, sync::Arc};
     use core::sync::atomic::{AtomicUsize, Ordering};

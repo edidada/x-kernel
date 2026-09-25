@@ -227,7 +227,7 @@ pub fn new_file_private_vma(
     Ok((vma, runtime))
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
 

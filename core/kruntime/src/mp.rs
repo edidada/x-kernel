@@ -182,7 +182,7 @@ impl SecondaryKernelEntry {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 pub(super) mod tests_startup_order {
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
