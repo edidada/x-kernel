@@ -108,3 +108,6 @@ smallvec = { version = "1.15", features = ["const_generics", "union"] }
 unittest.workspace = true
 
 kbuild_config = { workspace = true }
+
+[lints]
+workspace = true
