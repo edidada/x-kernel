@@ -192,13 +192,19 @@ impl ProcessResources {
 
     /// Duplicates a descriptor into a newly allocated slot.
     ///
+    /// The source lookup, the `RLIMIT_NOFILE` check, and the insertion run
+    /// in one fd-table critical section, so `dup`-style syscalls take the
+    /// table lock once instead of a read lock followed by a write lock.
+    ///
     /// # Errors
     ///
-    /// Propagates source lookup errors from [`Self::get_file`] and insertion errors
-    /// from [`Self::add_file`]. The new slot shares the same open file.
+    /// Returns `KError::NoSuchProcess` after files detachment,
+    /// `KError::BadFileDescriptor` for an absent source descriptor, and
+    /// `KError::TooManyOpenFiles` when the limit or table capacity is
+    /// exhausted. The new slot shares the same open file.
     pub fn duplicate_file(&self, fd: c_int, cloexec: bool) -> kerrno::KResult<c_int> {
-        let file = self.get_file(fd)?;
-        self.add_file(file, cloexec)
+        let max_nofile = self.max_nofile();
+        self.with_fd_table(|fd_table| fd_table.write().duplicate_min_fd(fd, max_nofile, cloexec))
     }
 
     /// Duplicates a descriptor into a fixed slot.

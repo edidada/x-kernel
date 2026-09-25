@@ -130,6 +130,37 @@ impl FdTable {
             .map_err(|_| KError::TooManyOpenFiles)
     }
 
+    /// Duplicates the entry at `old_fd` into the lowest free slot under one
+    /// table lock acquisition, applying the `RLIMIT_NOFILE` soft check.
+    ///
+    /// Sharing one critical section for the source lookup and the insertion
+    /// keeps `dup`-style syscalls from taking the fd-table read and write
+    /// locks in sequence; the resource limit is read once by the caller
+    /// before the table lock is taken.
+    ///
+    /// # Errors
+    ///
+    /// Returns `KError::BadFileDescriptor` for an absent source descriptor
+    /// and `KError::TooManyOpenFiles` when the descriptor count reaches
+    /// `max_nofile` or no physical slot is available.
+    pub fn duplicate_min_fd(
+        &mut self,
+        old_fd: c_int,
+        max_nofile: u64,
+        cloexec: bool,
+    ) -> KResult<c_int> {
+        if old_fd < 0 {
+            return Err(KError::BadFileDescriptor);
+        }
+        let file = self.get_file(old_fd)?;
+        if self.count() as u64 >= max_nofile {
+            return Err(KError::TooManyOpenFiles);
+        }
+        self.add(FileDescriptor::new(file, cloexec))
+            .map(|fd| fd as c_int)
+            .map_err(|_| KError::TooManyOpenFiles)
+    }
+
     /// Inserts an open file without applying a resource-limit policy.
     ///
     /// # Errors

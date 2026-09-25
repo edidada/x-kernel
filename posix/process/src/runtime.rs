@@ -68,6 +68,18 @@ pub(crate) fn run_user_thread_loop(
 
     info!("Enter user space: ip={:#x}, sp={:#x}", uctx.ip(), uctx.sp());
 
+    // CPU-time timer polling cadence, in trap-loop iterations.
+    //
+    // Linux samples per-CPU accounting timers (ITIMER_VIRTUAL/PROF,
+    // CPUCLOCK timers) at tick granularity, on the order of a few
+    // milliseconds of CPU time. Polling on every trap return instead
+    // charges each syscall round-trip the full thread -> process ->
+    // runtime lookup chain even when no CPU-time timer is armed, which
+    // dominates lightweight syscall workloads. Polling every 256 traps
+    // bounds delivery staleness to roughly a Linux tick's worth of CPU
+    // time while keeping the per-trap fast path free of that chain.
+    const CPU_TIMER_POLL_TRAP_INTERVAL: u32 = 256;
+    let mut trap_count: u32 = 0;
     while !thr.is_exiting() {
         let reason = uctx.run(
             || thr.set_cpu_state(CpuTimeState::User),
@@ -160,7 +172,12 @@ pub(crate) fn run_user_thread_loop(
             }
         }
 
-        poll_cpu_timers();
+        // See `CPU_TIMER_POLL_TRAP_INTERVAL`: sample CPU-time timers on a
+        // bounded cadence instead of every trap return.
+        trap_count = trap_count.wrapping_add(1);
+        if trap_count.is_multiple_of(CPU_TIMER_POLL_TRAP_INTERVAL) {
+            poll_cpu_timers();
+        }
         ktask::check_preempt_pending();
         // `interrupt()` may have queued a signal in `poll_cpu_timers` (CPU-time
         // timer) or while this task was preempted (for example `alarm_task`).

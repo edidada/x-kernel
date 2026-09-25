@@ -57,7 +57,11 @@ file reference while the caller has stable table access.
 requested close-on-exec flag, and returns any replaced descriptor for later
 close. Equal source/target succeeds without changing flags after checking that
 the source exists. The syscall layer must impose its own dup2/dup3 distinctions.
-This operation does not apply the process soft limit.
+This operation does not apply the process soft limit. `duplicate_min_fd`
+performs the same source lookup and flag handling for the lowest free slot and
+applies the supplied soft cap, all under the single write lock the caller
+already holds; `ProcessResources::duplicate_file` reads the limit before taking
+the lock so `dup`-style syscalls acquire the fd-table lock once.
 
 Range removal clips its upper bound to the largest occupied index and ignores
 holes. Callers validate nonnegative ordered ranges. Close-on-exec removal first

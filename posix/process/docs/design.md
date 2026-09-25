@@ -55,6 +55,11 @@ in between, then lose its notification before the target enters a futex wait.
 `SkipSignalCheckOnce` suppresses the normal post-syscall signal check after
 signal return. Before reentering userspace, the loop polls CPU timers and checks
 preemption; an interrupt raised since the clear causes another signal check.
+CPU-time timer polling runs every `CPU_TIMER_POLL_TRAP_INTERVAL` (256) trap
+returns rather than on every return: Linux samples per-CPU accounting timers at
+tick granularity, and per-trap polling charges each syscall round-trip the full
+thread -> process -> runtime lookup chain even when no CPU-time timer is armed.
+Delivery staleness stays bounded to roughly one Linux tick of CPU time.
 Signals arriving after that final check retain their interrupt notification for
 the next interruptible wait or trap.
 

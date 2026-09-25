@@ -168,6 +168,41 @@ mod tests {
     }
 
     #[def_test]
+    fn test_duplicate_min_fd_inserts_lowest_slot_and_enforces_limit() {
+        let mut table = FdTable::default();
+        let first = table
+            .add_file(u64::MAX, snapshot_test_file(), false)
+            .unwrap();
+
+        let dup = table.duplicate_min_fd(first, u64::MAX, true).unwrap();
+
+        // The duplicate lands in the lowest free slot and shares the file.
+        assert_eq!(dup, 1);
+        assert_eq!(table.count(), 2);
+        assert!(table.get(dup as usize).unwrap().cloexec());
+        assert!(core::ptr::eq(
+            table.get(dup as usize).unwrap().file().as_ref(),
+            table.get(first as usize).unwrap().file().as_ref()
+        ));
+
+        // A source equal to the occupied count is rejected before insertion.
+        let limit = table.count() as u64;
+        assert!(matches!(
+            table.duplicate_min_fd(first, limit, false),
+            Err(kerrno::KError::TooManyOpenFiles)
+        ));
+        // Absent and negative sources are rejected first.
+        assert!(matches!(
+            table.duplicate_min_fd(42, u64::MAX, false),
+            Err(kerrno::KError::BadFileDescriptor)
+        ));
+        assert!(matches!(
+            table.duplicate_min_fd(-1, u64::MAX, false),
+            Err(kerrno::KError::BadFileDescriptor)
+        ));
+    }
+
+    #[def_test]
     fn test_fd_table_drop_closes_remaining_descriptors() {
         let flushes = Arc::new(AtomicUsize::new(0));
         let mut table = FdTable::default();
