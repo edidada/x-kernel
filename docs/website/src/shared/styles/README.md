@@ -5,8 +5,9 @@
   and the shared theme/language navigation controls. Define each token here once.
 - `home.css` owns homepage layout, navigation, footer and
   their responsive rules. Its dark rules change only those components.
-- `builder.css` owns the `.new-exe-page` component. Every selector is scoped to it;
-  it consumes tokens from `theme.css`, including error and input colors.
+- `builder.css` owns the kernel explorer builder component. Every selector is
+  scoped to `.kernel-explorer-page`; it consumes tokens from `theme.css`,
+  including error and input colors.
 - `terminal.css` owns the terminal player and its theme variants.
 - `../../assets/fonts/fonts.css` declares bundled font faces.
 

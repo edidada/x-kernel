@@ -414,14 +414,14 @@
 }
 
 @font-face {
-  font-family: "Exe Docs PrimeIcons";
+  font-family: "Docs PrimeIcons";
   font-display: block;
   src: url("../../../assets/fonts/primeicons/primeicons.woff2") format("woff2");
   font-weight: 400;
   font-style: normal;
 }
 .docs-icon {
-  font-family: "Exe Docs PrimeIcons";
+  font-family: "Docs PrimeIcons";
   font-style: normal;
   font-weight: 400;
   font-variant: normal;

@@ -5,11 +5,11 @@ import "../../../shared/styles/builder.css";
 import "../../../shared/styles/kernel-explorer.css";
 
 const modules = [
-  ["memory", "task"],
-  ["scheduler", "web-app"],
-  ["filesystem", "devbox"],
-  ["network", "software-factory"],
-  ["drivers", "vm"],
+  ["memory", "checklist"],
+  ["scheduler", "window"],
+  ["filesystem", "terminal"],
+  ["network", "gear"],
+  ["drivers", "stack"],
   ["tee", "more"],
 ] as const;
 const paths: Record<string, string> = {
@@ -33,7 +33,7 @@ export default function KernelExplorer() {
       <div className="kernel-explorer-heading">
         <h2 id="kernel-explorer-title">{t("explorer.title")}</h2>
       </div>
-      <div className="exe-composer kernel-composer">
+      <div className="explorer-composer kernel-composer">
         <div className="form-group">
           <div className="kind-row kernel-kind-row" role="tablist" aria-label={t("explorer.modulesLabel")}>
             <div className="kind-radios">
@@ -47,11 +47,11 @@ export default function KernelExplorer() {
                   <KindIcon
                     kind={
                       icon as
-                        | "task"
-                        | "web-app"
-                        | "devbox"
-                        | "software-factory"
-                        | "vm"
+                        | "checklist"
+                        | "window"
+                        | "terminal"
+                        | "gear"
+                        | "stack"
                     }
                   />
                 )}

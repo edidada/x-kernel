@@ -1,8 +1,8 @@
-/* Original ExeBuilder styles, expanded for reading. Vue scope hashes become component classes. */
-.kernel-explorer-page .exe-kind-icon {
+/* Kernel explorer builder styles, expanded for reading. Former Vue scope hashes became component classes. */
+.kernel-explorer-page .kind-icon {
   display: block;
 }
-.kernel-explorer-page .exe-composer {
+.kernel-explorer-page .explorer-composer {
   max-width: 540px;
   margin: 0 auto;
   width: 100%;

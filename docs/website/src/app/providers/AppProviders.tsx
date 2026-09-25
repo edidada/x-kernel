@@ -8,7 +8,7 @@ export function AppProviders({ children }: PropsWithChildren) {
       attribute="data-theme"
       defaultTheme="system"
       enableSystem
-      storageKey="exe-theme"
+      storageKey="xk-theme"
       disableTransitionOnChange
     >
       {children}
