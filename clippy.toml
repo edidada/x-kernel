@@ -1,0 +1,5 @@
+# Clippy lint parameters for the kernel workspace.
+#
+# Lint levels (allow/warn/deny) live in `[workspace.lints]` of the root
+# `Cargo.toml`. This file only holds lint parameters: thresholds,
+# disallowed lists, and test exemptions.
