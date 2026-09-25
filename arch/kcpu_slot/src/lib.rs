@@ -5,6 +5,10 @@
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
+#![allow(
+    clippy::new_without_default,
+    reason = "carried over from Cargo.toml; no public argument-less new() exists today"
+)]
 
 //! Architecture-backed typed per-CPU storage.
 //!
