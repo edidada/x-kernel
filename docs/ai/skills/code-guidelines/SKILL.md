@@ -28,7 +28,9 @@ This skill does not replace:
 - project build/run/test commands
   (`docs/ai/skills/build-workflow/SKILL.md`);
 - per-crate design and security documentation generation
-  (`docs/ai/skills/module-docs/SKILL.md`).
+  (`docs/ai/skills/module-docs/SKILL.md`);
+- lint-enforced rules
+  (`docs/ai/code-guidelines/lints.md`).
 
 This skill primarily targets Rust code-writing and code review.
 It also includes lightweight extension topics for:
@@ -96,7 +98,7 @@ When reviewing Rust kernel code:
    For new or moved `Mutex` / `RwLock` / spin statics, also check
    `concurrency.md` lock construction (`static_lock!` vs `::new`).
 7. Check whether syscall boundaries and current-context assumptions are explicit.
-8. Check whether `?`, typed errors, and logging levels are used appropriately.
+8. Check whether typed errors and logging levels are used appropriately.
 9. Check whether modules, visibility, macros, and attributes stay disciplined.
 10. Check whether the code introduces avoidable hot-path scans,
    copies, allocations, or atomics.
@@ -109,9 +111,6 @@ Before considering a code change aligned with this skill, verify:
 - comments and rustdoc explain intent and contracts;
 - current-context semantics are explicit where the API depends on them;
 - every `unsafe` site has a concrete safety argument;
-- every `unsafe` block has a nearby `SAFETY:` comment that
-  names the real invariants rather than using placeholders;
-- `unsafe fn` bodies do not silently rely on implicit whole-body unsafety;
 - `unsafe` review uses the scenario catalog from `unsafety.md`
   instead of ad hoc reasoning;
 - uninitialized storage uses `MaybeUninit<T>` or an equivalent explicit model;
@@ -123,7 +122,7 @@ Before considering a code change aligned with this skill, verify:
   an untracked const initializer is required;
 - boundary validation happens at subsystem edges;
 - modules, visibility, imports, and attributes stay narrowly scoped;
-- error paths use `Result` and `?` rather than hidden panics;
+- error paths use `Result`;
 - logging uses crate-standard prefixes and appropriate severity;
 - container choices match their access pattern; queues needing middle
   removal, stable element addresses, or IRQ-safe enqueue are not built
