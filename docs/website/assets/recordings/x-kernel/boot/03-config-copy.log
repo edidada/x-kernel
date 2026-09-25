@@ -1,0 +1,3 @@
+$ cp platforms/kplat-aarch64/qemu_defconfig .config
+
+[exit status: 0]

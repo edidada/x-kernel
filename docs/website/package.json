@@ -1,0 +1,50 @@
+{
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "format": "prettier --write src tooling docs scripts tests index.html vite.config.js eslint.config.js README.md assets/fonts/fonts.css",
+    "test": "tsx --test tests/*.test.ts",
+    "lint": "eslint .",
+    "format:check": "prettier --check src tooling docs scripts tests index.html vite.config.js eslint.config.js README.md assets/fonts/fonts.css",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "i18next": "^26.4.2",
+    "i18next-browser-languagedetector": "^8.2.1",
+    "next-themes": "^0.4.6",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-i18next": "^17.0.15",
+    "react-router-dom": "^7.18.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@types/node": "^26.6.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/sanitize-html": "^2.16.1",
+    "@vitejs/plugin-react": "^6.1.1",
+    "eslint": "^9.39.4",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.12.0",
+    "gray-matter": "^4.0.3",
+    "marked": "^18.0.14",
+    "marked-gfm-heading-id": "^4.1.4",
+    "prettier": "^3.9.9",
+    "sanitize-html": "^2.17.7",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.70.1",
+    "vite": "^8.3.0",
+    "wrangler": "^4.139.0"
+  },
+  "name": "x-kernel-website",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

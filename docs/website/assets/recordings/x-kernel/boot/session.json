@@ -1,0 +1,23 @@
+[
+  {
+    "command": "cp platforms/kplat-aarch64/qemu_defconfig .config",
+    "output": ""
+  },
+  {
+    "command": "make defconfig",
+    "output": "$ make defconfig\nApplying defconfig...\nDefconfig: .config\nKconfig: Kconfig\n✅ Generated .config\n✅ Generated auto.conf\n✅ Generated autoconf.h\n"
+  },
+  {
+    "command": "make build",
+    "output": "   Compiling kruntime v0.3.0-dev (/root/codes/x-kernel/core/kruntime)\n   Compiling entry v0.3.0-dev (/root/codes/x-kernel/entry)\nBuilt /root/codes/x-kernel/target/xkmake/kplat-aarch64/release\n"
+  },
+  {
+    "command": "make rootfs",
+    "output": "Image not found, downloading x-kernel-debian-openrc-aarch64.img...\n"
+  },
+  {
+    "command": "make run",
+    "output": "Running kplat-aarch64 (aarch64-unknown-none-softfloat)\n\n                 ++\n             *  ***\n           *******\n         *******++\n      ********+===\n    ******#*+======\n   *******#***++===\n   *********+**===\n  ##*********##==                  ====+\n%##****++==+****#                ***+=**\n#****++=====++****##            ********\n####*+=======+******===-     ***#*##****\n #%#******+**+==++**=======+*+*#%\n %#****+******=====+====+++==**\n  #*********##***###********##%\n   ***##%#%%%%*****#*###*****#%\n   *#%%%#%%%%%****   %%*******#%\n   #%%%%%%          %%%##***###%%\n    **#%           %%%%#% **#**##\n   ###%%         %%%%%   %%%***\n %%%%%%        %%%%%%%  %%%%#*\n %%%%%%                %%%%%%+=\n\narch = aarch64\nplatform = kplat-aarch64\nsmp = 4\nWelcome to Kylin X!\nUse apt to install packages.\n * Mounting /proc ... [ ok ]\n * Mounting /run ... [ ok ]\n",
+    "prompt": "root@kylin-x:~# "
+  }
+]

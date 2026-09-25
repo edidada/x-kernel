@@ -1,0 +1,7 @@
+$ bash -c find . -maxdepth 1 -name "*.img" -print -delete
+./x-kernel-debian-openrc-x86_64.img
+./x-kernel-debian-openrc-riscv64.img
+./x-kernel-debian-openrc-aarch64.img
+./disk.img
+
+[exit status: 0]

@@ -1,0 +1,317 @@
+.kernel-explorer {
+  max-width: 960px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 7rem 2rem 8rem;
+  color: var(--color-text, #344255);
+}
+.kernel-explorer-heading {
+  text-align: center;
+  margin-bottom: 2.5rem;
+}
+.kernel-explorer-heading h2 {
+  font-size: clamp(1.25rem, 2vw, 1.6rem);
+  font-weight: 400;
+  color: #64748b;
+  margin: 0;
+}
+.kernel-composer {
+  max-width: 100% !important;
+}
+.kernel-kind-row {
+  overflow: hidden;
+}
+.kernel-kind-row .kind-btn {
+  min-width: 0;
+  aspect-ratio: 1/1;
+}
+.kernel-prompt-box {
+  min-height: 20rem !important;
+  padding: 1.65rem 1.8rem 1.4rem !important;
+  border-radius: 16px !important;
+}
+.kernel-module-path {
+  width: max-content;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 5px 12px !important;
+  border-radius: 999px;
+  color: var(--text-color-secondary);
+  font-size: 12px;
+}
+.kernel-module-path strong {
+  font-weight: 600;
+  color: var(--text-color-secondary);
+}
+.kernel-prompt-copy h3 {
+  font-size: clamp(1.3rem, 2.8vw, 1.75rem);
+  font-weight: 400;
+  color: #64748b;
+  margin: 2rem 0 0.8rem;
+}
+.kernel-prompt-copy p {
+  max-width: 700px;
+  color: #7e8996;
+  font-size: 0.85rem;
+  line-height: 1.9;
+}
+.kernel-source-path {
+  margin-top: 1.5rem;
+  color: #98a5af;
+  font-size: 0.72rem;
+}
+.kernel-prompt-box .prompt-box-bar {
+  margin-top: auto;
+}
+.kernel-prompt-box .pill-link {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  justify-content: center;
+  font-size: 18px;
+}
+.kernel-prompt-box .send-btn {
+  /* Exact Builder button geometry; only the explorer placement differs. */
+  width: 36px;
+  height: 36px;
+}
+.kernel-module-caption {
+  text-align: center;
+  margin: 2rem auto 0;
+  font:
+    0.85rem/1.8 JetBrains Mono,
+    monospace;
+}
+.kernel-module-caption strong {
+  display: block;
+  color: #667383;
+  font-weight: 500;
+}
+.kernel-module-caption span {
+  display: block;
+  color: #8292a2;
+}
+@media (max-width: 600px) {
+  .kernel-explorer {
+    padding: 5rem 2.1rem 5rem;
+  }
+  .kernel-explorer-heading {
+    margin-bottom: 2.3rem;
+  }
+  .kernel-explorer-heading h2 {
+    font-size: 1.1rem;
+  }
+  .kernel-kind-row {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-start;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: visible;
+    scrollbar-width: none;
+    overscroll-behavior-x: contain;
+    transform: translateX(0);
+  }
+  .kernel-kind-row::-webkit-scrollbar {
+    display: none;
+  }
+  .kernel-kind-row .kind-btn {
+    width: 74px;
+    flex: 0 0 74px;
+    height: 90px;
+    aspect-ratio: auto;
+    border-radius: 12px;
+  }
+  .kernel-prompt-box {
+    min-height: 268px !important;
+    padding: 1.25rem 1.15rem !important;
+  }
+  .kernel-prompt-box .prompt-box-bar {
+    margin-top: auto;
+  }
+  .kernel-prompt-copy h3 {
+    font-size: 1.3rem;
+  }
+  .kernel-prompt-copy p {
+    font-size: 0.78rem;
+  }
+  .kernel-source-path {
+    font-size: 0.62rem;
+  }
+}
+.xkernel-architectures,
+.xkernel-values,
+.xkernel-cta {
+  max-width: 960px;
+  width: 100%;
+  margin: 0 auto;
+}
+.xkernel-section-heading {
+  text-align: center;
+  margin-bottom: 2.5rem;
+}
+.xkernel-eyebrow {
+  color: #91a995;
+  font:
+    0.62rem/1 JetBrains Mono,
+    monospace;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+}
+.xkernel-section-heading h2,
+.xkernel-architectures h2,
+.xkernel-values h2,
+.xkernel-cta h2 {
+  font-size: clamp(1.65rem, 3vw, 2.25rem);
+  font-weight: 500;
+  margin: 1rem 0 0.7rem;
+}
+.xkernel-section-heading > p:last-child,
+.xkernel-architectures > div > p:last-child,
+.xkernel-cta p {
+  color: #84909d;
+  font-size: 0.8rem;
+  line-height: 1.8;
+}
+.xkernel-architectures {
+  padding: 6rem 2rem 7rem;
+  display: grid;
+  grid-template-columns: 1fr 1.45fr;
+  gap: 4rem;
+}
+.architecture-support-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.7rem;
+}
+.architecture-support-grid > div {
+  border: 1px solid #d8e0e5;
+  border-radius: 0.35rem;
+  padding: 1.3rem 1.4rem;
+}
+.architecture-support-grid strong {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: #536474;
+}
+.architecture-support-grid small {
+  display: block;
+  color: #9aa5ae;
+  font-size: 0.62rem;
+  margin-top: 0.7rem;
+}
+.platform-line {
+  font-size: 0.65rem;
+  color: #829589;
+  margin-top: 1.2rem;
+}
+.platform-line span {
+  display: inline-block;
+  width: 0.35rem;
+  height: 0.35rem;
+  border-radius: 50%;
+  background: #7ea18a;
+  margin-right: 0.5rem;
+}
+.xkernel-values {
+  padding: 6rem 2rem 7rem;
+}
+.value-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.8rem;
+}
+.value-grid article {
+  border-top: 1px solid #d4ded8;
+  padding-top: 1.1rem;
+}
+.value-grid small {
+  color: #91a995;
+  font:
+    0.62rem JetBrains Mono,
+    monospace;
+}
+.value-grid h3 {
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: #536474;
+  margin: 1rem 0 0.7rem;
+}
+.value-grid p {
+  color: #89959e;
+  font-size: 0.7rem;
+  line-height: 1.8;
+}
+.xkernel-cta {
+  padding: 4rem 2rem 5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.xkernel-cta h2 {
+  font-size: 1.45rem;
+  margin: 0 0 0.7rem;
+}
+.xkernel-cta-actions {
+  display: flex;
+  gap: 0.7rem;
+}
+.xkernel-cta-actions a {
+  border: 1px solid #d4dce2;
+  border-radius: 0.3rem;
+  padding: 0.65rem 1rem;
+  color: #637382;
+  font-size: 0.7rem;
+}
+.xkernel-cta-actions a.primary {
+  background: #17251e;
+  color: #fff;
+  border-color: #17251e;
+}
+.xkernel-footer {
+  max-width: 960px;
+  margin: 0 auto;
+  justify-content: space-between;
+  font-size: 0.65rem;
+}
+.xkernel-footer span:last-child {
+  display: flex;
+  gap: 0.7rem;
+}
+.xkernel-footer i {
+  font-style: normal;
+  color: #bcc4c8;
+}
+@media (max-width: 600px) {
+  .xkernel-architecture {
+    padding: 5rem 2.1rem;
+  }
+  .xkernel-architectures {
+    display: block;
+    padding: 4.5rem 2.1rem;
+  }
+  .xkernel-architectures > div + div {
+    margin-top: 2rem;
+  }
+  .xkernel-values {
+    padding: 4.5rem 2.1rem;
+  }
+  .value-grid {
+    grid-template-columns: 1fr;
+    gap: 2rem;
+  }
+  .xkernel-cta {
+    display: block;
+    padding: 3.5rem 2.1rem;
+  }
+  .xkernel-cta-actions {
+    margin-top: 1.5rem;
+  }
+  .xkernel-footer {
+    display: block;
+    padding: 1.5rem 2.1rem;
+  }
+}

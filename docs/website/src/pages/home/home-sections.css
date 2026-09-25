@@ -1,0 +1,59 @@
+/* Chapters share a viewport-sized stage; content can grow on short screens. */
+.home-section {
+  min-height: 100svh;
+  box-sizing: border-box;
+  padding-block: clamp(100px, 15svh, 200px);
+  align-content: center;
+}
+section.home-section:is(
+    .kernel-explorer,
+    .kernel-architecture,
+    .xkernel-values
+  ) {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.home-section .home-page-head {
+  margin-bottom: 2.5rem;
+}
+.home-section .home-section-title,
+.home-section .kernel-explorer-heading h2,
+.home-section.kernel-architecture > h2,
+.home-section.xkernel-architectures h2,
+.home-section .xkernel-values > h2,
+.home-section .xkernel-cta h2 {
+  font-size: clamp(1.1rem, 2vw, 1.6rem);
+  font-weight: 400;
+  line-height: 1.6;
+  letter-spacing: normal;
+  color: #64748b;
+}
+.home-section .home-section-title {
+  margin: 0;
+}
+.home-section.xkernel-architectures {
+  align-items: center;
+}
+:root[data-theme="dark"] .home-section :is(.home-section-title, h2) {
+  color: #a1a1aa;
+}
+@media (max-width: 600px) {
+  .home-section {
+    padding-block: max(100px, 15svh);
+  }
+}
+
+/* Values and the invitation form one closing chapter. */
+.home-closing {
+  min-height: auto;
+  padding-bottom: 24px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: clamp(40px, 6svh, 72px);
+}
+.home-closing .xkernel-values,
+.home-closing .xkernel-cta {
+  padding-block: 0;
+}

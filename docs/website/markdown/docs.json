@@ -1,0 +1,16 @@
+{
+  "sections": [
+    {
+      "id": "introduction",
+      "title": {
+        "en": "Introduction",
+        "zh": "介绍"
+      },
+      "articles": [
+        "what-is-x-kernel",
+        "quick-start",
+        "getting-help"
+      ]
+    }
+  ]
+}

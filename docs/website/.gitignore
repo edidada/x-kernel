@@ -1,0 +1,7 @@
+/node_modules/
+/dist/
+/test-results/
+
+# Local development scripts and internal design documentation
+/scripts/
+/docs/

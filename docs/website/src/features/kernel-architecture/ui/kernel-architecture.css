@@ -1,0 +1,181 @@
+.kernel-architecture {
+  --architecture-border: #d5dde2;
+  --architecture-text: #64748b;
+  --architecture-muted: #91a3aa;
+  --architecture-green: #eff6f0;
+  --architecture-green-border: #b8cdbd;
+  --architecture-tile: #fff;
+  max-width: 960px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 5rem 2rem;
+  color: var(--architecture-text);
+}
+.kernel-architecture > h2 {
+  text-align: center;
+  font-size: clamp(1.1rem, 2vw, 1.6rem);
+  font-weight: 400;
+  margin: 0 0 2.5rem;
+}
+.kernel-architecture-panel {
+  border: 1px solid var(--architecture-border);
+  border-radius: 7px;
+  padding: 16px;
+}
+.kernel-architecture-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 9px;
+  color: var(--architecture-muted);
+  min-height: 18px;
+  margin-bottom: 12px;
+}
+.kernel-architecture-layer {
+  border: 1px solid var(--architecture-border);
+  border-radius: 4px;
+  padding: 8px;
+  text-align: center;
+  font-size: 10px;
+}
+.kernel-architecture-interface {
+  text-align: center;
+  font-size: 9px;
+  color: var(--architecture-muted);
+  padding: 5px;
+}
+.kernel-crates {
+  background: var(--architecture-green);
+  border: 1px solid var(--architecture-green-border);
+  border-radius: 4px;
+  padding: 10px;
+}
+.kernel-crates .kernel-architecture-label {
+  margin-bottom: 8px;
+}
+.kernel-crates-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--architecture-text);
+  cursor: pointer;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+.kernel-crates-toggle:focus-visible {
+  outline: 1px solid currentColor;
+  outline-offset: 2px;
+}
+.kernel-crates-rows {
+  display: grid;
+  gap: 6px;
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 12px,
+    #000 calc(100% - 12px),
+    transparent
+  );
+}
+.kernel-crates-row {
+  overflow: hidden;
+  min-width: 0;
+}
+.kernel-crates-track {
+  display: flex;
+  width: max(100%, 480px);
+  animation: kernel-crates-scroll 38s linear infinite;
+}
+.kernel-crates-row:nth-child(2) .kernel-crates-track {
+  animation-duration: 46s;
+  animation-delay: -13s;
+}
+.kernel-crates-row:nth-child(3) .kernel-crates-track {
+  animation-duration: 42s;
+  animation-delay: -5s;
+}
+.kernel-crates-group {
+  display: flex;
+  flex: 0 0 100%;
+  min-width: 480px;
+  gap: 6px;
+  padding-right: 6px;
+  box-sizing: border-box;
+}
+.kernel-crate {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1 0 auto;
+  padding: 0 24px;
+  height: 31px;
+  border-radius: 4px;
+  background: var(--architecture-tile);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.kernel-crate:nth-child(2) {
+  flex-grow: 1.6;
+}
+.kernel-crate:nth-child(4) {
+  flex-grow: 1.3;
+}
+.kernel-crates:hover .kernel-crates-track,
+.kernel-crates:has(:focus-visible) .kernel-crates-track,
+.kernel-crates[data-paused="true"] .kernel-crates-track {
+  animation-play-state: paused;
+}
+.kernel-architecture-note {
+  font-size: 8px;
+  text-align: right;
+  color: var(--architecture-muted);
+  margin: 8px 0 0;
+}
+@keyframes kernel-crates-scroll {
+  to {
+    transform: translateX(-100%);
+  }
+}
+@media (max-width: 640px) {
+  .kernel-architecture {
+    padding: 4rem 24px;
+  }
+  .kernel-architecture-panel {
+    padding: 12px;
+  }
+  .kernel-crates-track {
+    width: 480px;
+  }
+  .kernel-crate {
+    height: 29px;
+    font-size: 10px;
+    padding: 0 16px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .kernel-crates-track {
+    animation: none;
+    width: 100%;
+  }
+  .kernel-crates-group {
+    min-width: 0;
+    flex-wrap: wrap;
+    padding: 0;
+  }
+  .kernel-crates-group[aria-hidden="true"] {
+    display: none;
+  }
+  .kernel-crates-toggle {
+    display: none;
+  }
+  .kernel-crates-rows {
+    mask-image: none;
+  }
+}
+:root[data-theme="dark"] .kernel-architecture {
+  --architecture-border: #3f3f46;
+  --architecture-text: #b4bfcd;
+  --architecture-muted: #8c9c99;
+  --architecture-green: #18221e;
+  --architecture-green-border: #3e5848;
+  --architecture-tile: #252e29;
+}

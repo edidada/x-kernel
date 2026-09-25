@@ -1,0 +1,190 @@
+/* Global typography and semantic tokens. Components consume these values;
+   all theme selection uses html[data-theme], set before React mounts. */
+html {
+  font-size: 13px;
+  scrollbar-gutter: stable;
+}
+body {
+  font-family:
+    "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    monospace;
+  font-size: 1rem;
+  line-height: 1.6;
+  background: #f8fafc;
+  color: #334155;
+  -webkit-font-smoothing: antialiased;
+}
+.kernel-explorer-page {
+  --primary-color: #09090b;
+  --input-bg: #ffffff;
+  --input-border: #cbd5e1;
+  --danger-color: #dc2626;
+  --danger-bg: #fef2f2;
+  --danger-text: #dc2626;
+  --danger-border: #fecaca;
+  --surface-ground: #f8fafc;
+  --surface-card: #fff;
+  --surface-border: #e2e8f0;
+  --text-color: #334155;
+  --text-color-secondary: #64748b;
+  --text-color-muted: #64748b;
+  --input-text: #334155;
+  --input-placeholder: #64748b;
+  --tag-bg: #f1f5f9;
+  --tag-text: #64748b;
+}
+:root[data-theme="dark"] {
+  & {
+    color-scheme: dark;
+    color: #fff;
+  }
+  body {
+    background: #09090b;
+    color: #ffffff;
+  }
+  .kernel-explorer-page {
+    --primary-color: #ffffff;
+    --tag-bg: #27272a;
+    --tag-text: #a1a1aa;
+    --surface-ground: #09090b;
+    --surface-card: #18181b;
+    --surface-border: #3f3f46;
+    --text-color: #ffffff;
+    --text-color-secondary: #a1a1aa;
+    --text-color-muted: #a1a1aa;
+    --input-bg: #09090b;
+    --input-border: #52525b;
+    --input-text: #ffffff;
+  }
+}
+html[data-theme="light"] {
+  color-scheme: light;
+}
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.35rem;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  transition:
+    background-color 0.15s,
+    color 0.15s,
+    border-color 0.15s;
+}
+.theme-toggle:hover {
+  background: #f1f5f9;
+  color: #0f172a;
+  border-color: #94a3b8;
+}
+.theme-toggle:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+}
+:root[data-theme="dark"] .theme-toggle {
+  border-color: #3f3f46;
+  color: #a1a1aa;
+}
+:root[data-theme="dark"] .theme-toggle:hover {
+  background: #27272a;
+  color: #fafafa;
+  border-color: #71717a;
+}
+@media (prefers-reduced-motion: reduce) {
+  .theme-toggle {
+    transition: none;
+  }
+}
+
+/* Language controls share the navigation action's shape and height. */
+.language-switcher {
+  display: inline-flex;
+  align-items: center;
+  height: 30.05px;
+  min-height: 0;
+  gap: 0.12rem;
+  padding: 0.25rem 0.42rem;
+  border: 1px solid #d1d5db;
+  border-radius: 0.35rem;
+  background: #fff;
+  line-height: 1;
+}
+.language-option {
+  min-width: 2.05rem;
+  min-height: 1.8rem;
+  padding: 0.28rem 0.45rem;
+  border: 0;
+  border-radius: 0.25rem;
+  background: transparent;
+  color: #9ca3af;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.85rem;
+  transition:
+    color 0.15s ease,
+    background 0.15s ease;
+}
+.language-option:hover,
+.language-option.active {
+  color: #111;
+}
+.language-option.active {
+  background: #f3f4f6;
+  font-weight: 600;
+}
+.language-divider {
+  color: #d1d5db;
+  font-size: 0.85rem;
+  user-select: none;
+}
+:root[data-theme="dark"] {
+  .language-switcher {
+    border-color: #4b5563;
+    background: #1f2937;
+  }
+  .language-option.active {
+    color: #f3f4f6;
+    background: #374151;
+  }
+  .language-option:hover {
+    color: #f3f4f6;
+  }
+  .language-divider {
+    color: #4b5563;
+  }
+}
+
+/* Keep content and community destinations beside the logo on mobile. */
+@media (max-width: 640px) {
+  html nav[data-nav-collapse] {
+    padding: 12px;
+    gap: 8px;
+  }
+  html nav[data-nav-collapse] .nav-logo-text {
+    display: none;
+  }
+  html nav[data-nav-collapse] .nav-left {
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  html nav[data-nav-collapse] .nav-link-docs,
+  html nav[data-nav-collapse] .nav-link-blog,
+  html nav[data-nav-collapse] .nav-link-community {
+    display: inline;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  html nav[data-nav-collapse] .nav-right {
+    gap: 4px;
+  }
+  html nav[data-nav-collapse] .nav-demo {
+    padding: 6px 8px;
+    font-size: 12px;
+  }
+}
