@@ -78,10 +78,10 @@ pub fn tee_fs_rpc_create_dfh(dfh: Option<&TeeFsDirfileFileh>) -> TeeResult<FileV
 ///
 /// # Returns
 /// * `TeeResult<()>` - the result of the operation
-pub fn tee_fs_rpc_close(_fd: &FileVariant) -> TeeResult {
+pub fn tee_fs_rpc_close(fd: &FileVariant) -> TeeResult {
     // FileVariant is Copy; closing a copied handle is enough to remove the fd
     // entry from the global fd table, mirroring GP's rpc close semantics.
-    let mut fd = *_fd;
+    let mut fd = *fd;
     fd.close()
 }
 

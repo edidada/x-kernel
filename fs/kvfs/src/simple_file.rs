@@ -199,16 +199,16 @@ impl InodeOperations for SimpleFile {
 
     fn getattr(
         &self,
-        _idmap: &crate::MountIdmap,
-        _path: Option<&crate::Path>,
-        _request_mask: crate::GetattrRequestMask,
-        _query_flags: crate::GetattrQueryFlags,
+        idmap: &crate::MountIdmap,
+        path: Option<&crate::Path>,
+        request_mask: crate::GetattrRequestMask,
+        query_flags: crate::GetattrQueryFlags,
     ) -> VfsResult<Metadata>;
 
     fn setattr(
         &self,
-        _idmap: &crate::MountIdmap,
-        _dentry: &crate::Dentry,
+        idmap: &crate::MountIdmap,
+        dentry: &crate::Dentry,
         update: MetadataUpdate,
     ) -> VfsResult<MetadataUpdate>;
 }

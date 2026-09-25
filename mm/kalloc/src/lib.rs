@@ -216,10 +216,10 @@ cpu_slot_cell! {
 }
 
 fn with_current_usage_counters<T>(f: impl FnOnce(&UsageCounters) -> T) -> T {
-    let _preempt_guard = NoPreempt::new();
+    let preempt_guard = NoPreempt::new();
     // Early-boot allocation can precede this CPU's area publication; skip the
     // diagnostic accounting instead of panicking on an unpublished area.
-    let Some(area) = kcpu_slot::area(_preempt_guard.current_cpu()) else {
+    let Some(area) = kcpu_slot::area(preempt_guard.current_cpu()) else {
         return f(&UsageCounters::new());
     };
     let counters = PERCPU_USAGE_COUNTERS.shared_at(area);

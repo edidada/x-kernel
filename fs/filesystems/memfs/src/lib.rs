@@ -543,14 +543,14 @@ impl InodeDirOperations for MemoryNode {
     fn create(
         &self,
         _idmap: &kvfs::MountIdmap,
-        _dir: &kvfs::VfsInode,
+        dir: &kvfs::VfsInode,
         dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         _exclusive: bool,
         cred: &Cred,
     ) -> VfsResult<()> {
         let mode = mode.with_node_type(NodeType::RegularFile);
-        self.ramfs_mknod(_dir, dentry, mode, DeviceId::default(), cred)
+        self.ramfs_mknod(dir, dentry, mode, DeviceId::default(), cred)
     }
 
     fn mkdir(

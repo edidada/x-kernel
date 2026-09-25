@@ -1316,7 +1316,7 @@ pub(crate) fn crypto_acipher_rsaes_encrypt(
     cs: Arc<Mutex<TeeCrypState>>,
     input: &[u8],
     output: &mut [u8],
-    _label: &[u8],
+    label: &[u8],
     required: &mut usize,
 ) -> TeeResult<usize> {
     let cs_guard = cs.lock();
@@ -1332,7 +1332,7 @@ pub(crate) fn crypto_acipher_rsaes_encrypt(
             RsaEncPadding::Pkcs1v15 => rsa_ops::rsa_encrypt_pkcs1v15(&pubkey, input, &mut rng)
                 .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?,
             RsaEncPadding::Oaep => {
-                rsa_ops::rsa_encrypt_oaep(&pubkey, hash_algo, _label, input, &mut rng)
+                rsa_ops::rsa_encrypt_oaep(&pubkey, hash_algo, label, input, &mut rng)
                     .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?
             }
         };
@@ -1348,7 +1348,7 @@ pub(crate) fn crypto_acipher_rsaes_decrypt(
     cs: Arc<Mutex<TeeCrypState>>,
     input: &[u8],
     output: &mut [u8],
-    _label: &[u8],
+    label: &[u8],
     required: &mut usize,
 ) -> TeeResult<usize> {
     let cs_guard = cs.lock();
@@ -1372,7 +1372,7 @@ pub(crate) fn crypto_acipher_rsaes_decrypt(
             }
             RsaEncPadding::Oaep => {
                 let ciphertext = ciphertext_from_tee(input, CiphertextAlgorithm::RsaOaep);
-                rsa_ops::rsa_decrypt_oaep(&keypair, hash_algo, _label, &ciphertext)
+                rsa_ops::rsa_decrypt_oaep(&keypair, hash_algo, label, &ciphertext)
                     .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?
             }
         };

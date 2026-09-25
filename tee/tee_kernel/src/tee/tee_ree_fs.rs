@@ -657,12 +657,12 @@ pub fn ree_fs_write_primitive(
     out_of_place_write(fdp, pos, buf_core, buf_user, len)
 }
 
-pub fn ree_fs_close_primitive(_fdp: &mut TeeFsFd) {
+pub fn ree_fs_close_primitive(fdp: &mut TeeFsFd) {
     // Align with GP ree_fs_close_primitive():
     // close htree context then close underlying file descriptor.
-    let ht = core::mem::take(&mut _fdp.ht);
+    let ht = core::mem::take(&mut fdp.ht);
     let _ = tee_fs_htree_close(ht);
-    let _ = tee_fs_rpc_close(&_fdp.fd);
+    let _ = tee_fs_rpc_close(&fdp.fd);
 }
 
 pub fn ree_dirf_commit_writes(
