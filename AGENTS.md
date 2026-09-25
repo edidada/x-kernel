@@ -124,6 +124,9 @@ The current checked-in toolchain is described by `rust-toolchain.toml`.
 
 Read `docs/ai/skills/code-guidelines/SKILL.md` before writing or
 reviewing Rust kernel code.
+Lint levels, exception syntax (`#[expect(<lint>, reason = "...")]`),
+and the list of lints still being enabled live in
+`docs/ai/code-guidelines/lints.md`.
 
 Key local rules:
 
