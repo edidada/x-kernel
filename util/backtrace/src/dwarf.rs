@@ -349,7 +349,7 @@ pub(crate) fn fmt_frames(f: &mut fmt::Formatter<'_>, frames: &[crate::Frame]) ->
     Ok(())
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_unittest {
     use alloc::{format, string::String};
     use core::fmt;

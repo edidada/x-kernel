@@ -498,7 +498,7 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     );
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use ktime_types::{MonotonicInstant, SystemTime, TimeSpan};
     use unittest::{assert, assert_eq, def_test};

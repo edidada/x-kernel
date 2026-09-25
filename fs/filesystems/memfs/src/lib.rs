@@ -850,7 +850,7 @@ impl AddressSpaceOperations for MemoryAddressSpaceOperations {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use linux_raw_sys::general::{O_CREAT, O_EXCL, O_WRONLY};
     use unittest::{assert, assert_eq, def_test};

@@ -463,7 +463,7 @@ pub fn sys_vfork(uctx: &UserContext) -> KResult<isize> {
     request.do_clone(uctx)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_clone {
     use unittest::def_test;
 

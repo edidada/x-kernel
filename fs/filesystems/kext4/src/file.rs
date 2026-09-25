@@ -1169,7 +1169,7 @@ fn block_count_for_byte_span(
     u32::try_from(block_count).map_err(|_| Ext4Error::Overflow)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 
@@ -1195,7 +1195,7 @@ mod tests {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod unittests {
     use unittest::{assert_eq, def_test};
 

@@ -609,7 +609,7 @@ impl Drop for UdpSocket {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::task::Wake;
 

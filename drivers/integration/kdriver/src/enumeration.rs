@@ -128,7 +128,7 @@ impl Default for EnumerationContext {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use kdevice::PlatformIdentity;
     use unittest::{assert_eq, def_test};

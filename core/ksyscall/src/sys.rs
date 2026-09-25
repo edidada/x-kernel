@@ -333,7 +333,7 @@ pub fn sys_seccomp(op: u32, _flags: u32, _args: *const ()) -> KResult<isize> {
     Err(KError::from(kerrno::LinuxError::ENOSYS))
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_seccomp {
     use kerrno::KError;
     use linux_raw_sys::prctl::{PR_GET_NO_NEW_PRIVS, PR_GET_SECCOMP};
@@ -384,7 +384,7 @@ mod tests_seccomp {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_sysinfo {
     use alloc::vec;
     use core::mem::{offset_of, size_of};

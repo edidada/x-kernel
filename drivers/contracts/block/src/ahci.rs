@@ -101,7 +101,7 @@ impl<H: AhciHal> BlockDeviceOperations for AhciDriver<H> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 pub mod tests_ahci {
     use unittest::{assert, assert_eq, def_test};
 

@@ -644,7 +644,7 @@ pub fn install_device_node_lifecycle_publisher(
     device_node_registry().install_lifecycle_publisher(callback)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

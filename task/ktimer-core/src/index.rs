@@ -287,7 +287,7 @@ impl TimerIndex {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use core::ptr;
 

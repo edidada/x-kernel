@@ -759,7 +759,7 @@ fn scan_directory_block(
     Ok(true)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

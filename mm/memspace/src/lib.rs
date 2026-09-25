@@ -149,7 +149,7 @@ pub fn init_memory_management_secondary() {
     karch::flush_tlb(None);
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_memspace {
     use khal::{mem::MemFlags, paging::MappingFlags};
     use unittest::def_test;

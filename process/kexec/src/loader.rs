@@ -769,7 +769,7 @@ pub fn load_prepared_user_app(
     Ok((prepared.entry, user_sp))
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{borrow::ToOwned, string::String, sync::Arc, vec, vec::Vec};
 

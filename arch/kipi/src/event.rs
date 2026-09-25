@@ -70,8 +70,7 @@ pub struct IpiEvent {
     pub callback: Callback,
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 pub mod tests_event {
     use core::sync::atomic::{AtomicUsize, Ordering};
 

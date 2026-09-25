@@ -727,7 +727,7 @@ pub fn block_devices() -> Vec<Arc<BlockDevice>> {
         .collect()
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{boxed::Box, string::String, sync::Arc, vec, vec::Vec};
 

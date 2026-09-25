@@ -125,7 +125,7 @@ pub(crate) fn into_vfs_err<E>(err: fatfs::Error<E>) -> VfsError {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

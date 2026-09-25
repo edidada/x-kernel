@@ -168,7 +168,7 @@ pub fn tee_ta_get_session(handle: u32) -> TeeResult<SessionIdentity> {
     })
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     #[test]
     fn validated_payload_len_accepts_within_limit() {

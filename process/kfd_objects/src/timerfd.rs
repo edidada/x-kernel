@@ -407,7 +407,7 @@ impl FileOperations for TimerfdFops {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod timerfd_tests {
     use kpoll::IoEvents;
     use unittest::def_test;

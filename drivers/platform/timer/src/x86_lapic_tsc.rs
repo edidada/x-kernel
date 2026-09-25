@@ -553,7 +553,7 @@ fn disarm_timer() {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use raw_cpuid::{CpuId, CpuIdReader, CpuIdResult};
     use unittest::def_test;

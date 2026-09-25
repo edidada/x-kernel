@@ -239,7 +239,7 @@ pub fn read(config: RtcConfig) -> Option<SystemTime> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

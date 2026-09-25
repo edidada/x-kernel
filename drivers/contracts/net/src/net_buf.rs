@@ -308,7 +308,7 @@ impl NetBufPool {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 pub mod tests_netbuf {
     use unittest::def_test;
     extern crate alloc;

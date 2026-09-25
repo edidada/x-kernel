@@ -58,8 +58,7 @@ impl Default for IpiEventQueue {
     }
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 pub mod tests_queue {
     use kcpu_id_map::LogicalCpuId;
     use unittest::def_test;

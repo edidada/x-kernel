@@ -89,7 +89,7 @@ pub(crate) fn init_exception_table() {
     ex_table.sort_unstable();
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 pub mod tests_userspace_common {
     use unittest::def_test;
 

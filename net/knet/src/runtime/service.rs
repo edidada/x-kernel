@@ -87,7 +87,7 @@ struct NetworkTimer;
 #[cfg(unittest)]
 static SAMPLE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod timer_irq_tests {
     //! Runtime integration probe using the permanent boot-created service.
     //! This only observes IRQ progress; the timeout is a hang bound, not a
@@ -1075,7 +1075,7 @@ fn output_ipv4_packet_count(
         / max_fragment_payload_len)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{boxed::Box, sync::Weak, task::Wake, vec, vec::Vec};
     use core::{sync::atomic::AtomicBool, task::Context};

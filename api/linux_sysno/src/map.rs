@@ -336,7 +336,7 @@ impl<T> core::ops::IndexMut<Sysno> for SysnoMap<T> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     extern crate alloc;
     use alloc::{format, string::String, vec::Vec};

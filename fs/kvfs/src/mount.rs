@@ -1486,7 +1486,7 @@ fn retarget_path(path: &Path, mount_map: &HashMap<usize, Arc<Mount>>) -> VfsResu
     Ok(Path::new(mount.clone(), path.dentry.clone()))
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     extern crate alloc;
 

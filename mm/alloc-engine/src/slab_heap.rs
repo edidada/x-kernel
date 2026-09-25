@@ -388,8 +388,7 @@ fn size_class(layout: Layout) -> SizeClass {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 mod tests {
     use core::alloc::Layout;
 

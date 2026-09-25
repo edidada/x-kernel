@@ -298,7 +298,7 @@ pub fn set_log_level(level: &str) {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     extern crate alloc;
 

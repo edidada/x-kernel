@@ -45,7 +45,7 @@ macro_rules! handle_trap {
     }}
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 pub mod tests_excp {
     use unittest::def_test;
 

@@ -1150,7 +1150,7 @@ impl Default for VmAreaSet {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use kerrno::KError;
     use khal::paging::{MappingFlags, PageSize};

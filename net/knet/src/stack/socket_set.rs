@@ -142,7 +142,7 @@ impl<'a> SocketSetWrapper<'a> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use smoltcp::{socket::tcp, time::Instant};
     use unittest::{assert_eq, def_test};

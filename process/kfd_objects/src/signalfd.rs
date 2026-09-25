@@ -299,7 +299,7 @@ impl FileOperations for SignalfdFops {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use core::{
         sync::atomic::{AtomicUsize, Ordering},

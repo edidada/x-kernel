@@ -285,7 +285,7 @@ impl<H: Hal + Send, T: Transport + Send> IrqHandler for VirtIoRngDev<H, T> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
     use core::{

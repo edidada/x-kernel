@@ -1030,7 +1030,7 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
     use core::ptr::NonNull;

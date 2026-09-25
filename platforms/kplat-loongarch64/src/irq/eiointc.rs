@@ -148,7 +148,7 @@ pub fn claim_irq() -> Option<usize> {
     None
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

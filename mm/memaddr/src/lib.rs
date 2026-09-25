@@ -94,8 +94,7 @@ pub use floor_4k as align_down_4k;
 pub use floor_align as align_down;
 pub use rem_4k as align_offset_4k;
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 pub mod tests_memaddr {
     use unittest::def_test;
 

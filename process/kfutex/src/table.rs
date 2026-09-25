@@ -644,7 +644,7 @@ pub fn global_table() -> GlobalFutexTable {
     GlobalFutexTable
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
     use core::task::Waker;

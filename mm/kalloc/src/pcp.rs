@@ -430,8 +430,7 @@ pub(crate) fn drain_cache(
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 mod tests {
     use alloc_engine::BaseAllocator;
     use unittest::def_test;

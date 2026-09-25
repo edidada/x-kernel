@@ -13,8 +13,7 @@ pub use self::{
     range::{AddrRange, PhysAddrRange, VirtAddrRange},
 };
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 pub mod tests_units {
     use unittest::def_test;
 

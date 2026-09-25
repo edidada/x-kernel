@@ -169,8 +169,7 @@ fn free_msi(virq: Virq) -> bool {
     })
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

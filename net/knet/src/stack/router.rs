@@ -1048,7 +1048,7 @@ fn tx_packet_buf(packet: Vec<u8>) -> PacketBuf {
     PacketBuf::from_ip_packet_vec(0, packet, PacketOwner::Ipv4Stack)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{boxed::Box, vec, vec::Vec};
 

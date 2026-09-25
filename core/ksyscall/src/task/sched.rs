@@ -448,7 +448,7 @@ fn update_min_nice(min_nice: &mut Option<NiceValue>, nice: Option<NiceValue>) {
     *min_nice = Some(min_nice.map_or(nice, |current| current.min(nice)));
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod scheduler_query_tests {
     use alloc::sync::Arc;
 
@@ -646,7 +646,7 @@ mod scheduler_query_tests {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use kcred::Cred;
     use kerrno::KError;

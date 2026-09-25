@@ -19,7 +19,7 @@ pub enum ITimerType {
     Prof    = 2,
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

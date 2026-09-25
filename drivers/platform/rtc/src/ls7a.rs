@@ -160,7 +160,7 @@ pub(super) fn read_mapped(vaddr: VirtAddr) -> Option<SystemTime> {
     read_rtc_from(&mut regs)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use ktime_types::SystemTime;
     use unittest::{assert, assert_eq, assert_ne, def_test};

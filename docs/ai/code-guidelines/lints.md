@@ -38,9 +38,12 @@ AI 编写与审查也不重复检查。
 - **工具链升级**：修改 `rust-toolchain.toml` 的 PR 必须按上条的配置集合附 `make clippy` 全量复核，
   并确认本文件引用的 lint 名和 `clippy.toml` 键在新版本中仍然存在。
 - **测试代码**：`#[def_test]` / `#[mod_test]` 生成的测试函数和测试模块
-  由 `util/macros` 统一豁免 `clippy::unwrap_used`、`clippy::expect_used`、`clippy::panic`。
+  由 `util/macros` 统一豁免 `clippy::unwrap_used`、`clippy::expect_used`、`clippy::panic`；
+  `#[mod_test]` 另豁免 `missing_docs`（测试代码不在 module-docs 审计范围内）。
   测试代码里不手写 `allow` / `expect`；
-  裸 `#[cfg(unittest)] mod` 中的辅助函数命中时改用 `#[mod_test]`。
+  内联测试模块用 `#[mod_test]` 声明，不用裸 `#[cfg(unittest)] mod`。
+  文件模块（`mod name;`）上的属性宏在 stable 上被拒（E0658），仍用 `#[cfg(unittest)]`，
+  其中 `#[def_test]` 以外的辅助函数不在豁免范围内。
   host 侧 std `#[test]` 由 `clippy.toml` 的 `allow-*-in-tests` 覆盖。
   宏支持在启用 `clippy::panic` 之前落地。
 - **范围**：`missing_docs` 和 `rustdoc::*` lint 归 module-docs 轨道

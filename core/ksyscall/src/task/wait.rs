@@ -146,7 +146,7 @@ fn scan_waitable_child(
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod wait_test_sync {
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -259,7 +259,7 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResult<isize
     wait_on_matching_children(proc, selector, exit_code, options)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_wait {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};

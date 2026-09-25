@@ -86,7 +86,7 @@ pub fn ta_unix_socket_path(uuid: &str) -> TeeResult<String> {
     Ok(Uuid::parse_str(uuid)?.ta_unix_socket_path())
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     #[test]
     fn ta_unix_socket_path_valid_uuid() {

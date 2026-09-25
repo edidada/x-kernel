@@ -363,7 +363,7 @@ pub fn sys_set_robust_list(head: UserConstPtr<robust_list_head>, size: usize) ->
     Ok(0)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use kerrno::LinuxError;
     use kprocess::current_user_thread;

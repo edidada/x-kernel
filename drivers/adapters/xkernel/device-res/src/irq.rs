@@ -211,7 +211,7 @@ fn map_irq_desc_error(err: kirq::IrqDescError) -> ResError {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

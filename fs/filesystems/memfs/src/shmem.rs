@@ -434,7 +434,7 @@ fn attach_state(
     Ok(node.inode.attach_shmem_state(state))
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 
