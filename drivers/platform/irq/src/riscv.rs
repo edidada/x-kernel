@@ -259,17 +259,17 @@ impl kirq::IntrManagerIf {
         }
     }
 
-    fn set_prio(_irq: usize, _priority: u8) {
+    fn set_prio(irq: usize, priority: u8) {
         with_cause!(
-            _irq,
+            irq,
             @S_TIMER => {},
             @S_SOFT => {},
             @S_EXT => {},
             @EX_IRQ => {
-                let Some(irq) = NonZeroU32::new(_irq as _) else {
+                let Some(irq) = NonZeroU32::new(irq as _) else {
                     return;
                 };
-                plic().lock().set_priority(irq, _priority.into());
+                plic().lock().set_priority(irq, priority.into());
             }
         );
     }

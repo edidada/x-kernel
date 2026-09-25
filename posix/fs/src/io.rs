@@ -722,7 +722,7 @@ pub fn sys_splice(
     fd_out: c_int,
     off_out: UserPtr<i64>,
     len: usize,
-    _flags: u32,
+    flags: u32,
 ) -> KResult<isize> {
     debug!(
         "sys_splice <= fd_in: {}, off_in: {}, fd_out: {}, off_out: {}, len: {}, flags: {}",
@@ -731,7 +731,7 @@ pub fn sys_splice(
         fd_out,
         !off_out.is_null(),
         len,
-        _flags
+        flags
     );
 
     // Track if we have a pipe - at least one must be present for splice

@@ -69,9 +69,9 @@ pub static IO_LOCK: kspin::SpinNoIrq<()> = kspin::SpinNoIrq::new(());
 
 #[doc(hidden)]
 pub fn _sys_log(fmt: Arguments) {
-    let _l = IO_LOCK.lock();
+    let lock = IO_LOCK.lock();
     Logger.write_fmt(fmt).unwrap();
-    drop(_l);
+    drop(lock);
 }
 
 #[doc(hidden)]

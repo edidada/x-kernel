@@ -113,9 +113,9 @@ pub mod tests_ahci {
     struct MockAhciHal;
 
     impl AhciHal for MockAhciHal {
-        unsafe fn read_ptr(&self, _offset: usize) -> u32 {
+        unsafe fn read_ptr(&self, offset: usize) -> u32 {
             // Mock implementation - return safe test values
-            match _offset {
+            match offset {
                 0x00 => 0x12345678, // Version register mock
                 0x04 => 0x00000003, // Global capabilities mock (2 ports)
                 _ => 0,
