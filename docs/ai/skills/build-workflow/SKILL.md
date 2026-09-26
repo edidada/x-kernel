@@ -30,6 +30,9 @@ Do not use a bare `cargo check -p <crate>` as the main kernel validation path.
 - the target architecture's musl cross toolchain;
 - the matching QEMU system emulator for `make run`;
 - `cargo-shear 1.13.2` and `licensure 0.8.1` for repository hygiene checks;
+- `cargo-dylint 6.0.4` and `dylint-link 6.0.4`, plus `rustc-dev` and `llvm-tools` for
+  `nightly-2026-03-08` and the kernel target of each platform you scan
+  (`aarch64-unknown-none-softfloat`, `x86_64-unknown-none`), for `make dylint`;
 - an ext4 `disk.img` when the configured virtio block device is enabled.
 - for unit-test coverage: `debugfs`, `rust-profdata`, and `rust-cov`;
 - for x86_64 boot media: `mkfs.fat`, mtools (`mmd` and `mcopy`), and OVMF/EDK2
@@ -45,6 +48,14 @@ This delegates to XKMake so the installer and version checks share the same
 pinned version constants. Cargo installs these executables under
 `~/.cargo/bin` by default; that directory must be present in `PATH` for
 `make clippy` and the standalone hygiene targets.
+
+`make dylint` scans the kernel selected by the current `.config` with the
+repository Dylint lints (see `docs/code-guidelines/`). Lints only see code
+that the configuration compiles; CI scans the aarch64 and x86_64
+`qemu_defconfig` configurations. `make dylint_test`
+runs the lint's UI tests. The first run builds the Dylint driver and can take
+a few minutes; later runs are incremental. Install the pinned tools with
+`make install-tools` after adding the nightly components and target above.
 
 ## Configuration
 

@@ -283,7 +283,7 @@ enum CargoAction {
     Clippy,
 }
 
-fn generate_build_configuration(context: &BuildContext) -> Result<()> {
+pub(crate) fn generate_build_configuration(context: &BuildContext) -> Result<()> {
     if context.dry_run {
         return Ok(());
     }
@@ -295,13 +295,7 @@ fn generate_build_configuration(context: &BuildContext) -> Result<()> {
 }
 
 fn run_cargo(context: &BuildContext, action: CargoAction) -> Result<()> {
-    let feature_names = context
-        .config
-        .cargo_features()
-        .iter()
-        .map(|feature| format!("kfeat/{feature}"))
-        .chain(context.unittest.then(|| "unittest".to_string()))
-        .collect::<Vec<_>>();
+    let feature_names = kernel_feature_flags(context);
 
     let mut command = Process::new("cargo", context.dry_run, context.verbosity);
     command
@@ -315,7 +309,42 @@ fn run_cargo(context: &BuildContext, action: CargoAction) -> Result<()> {
         .arg("--target")
         .arg(context.config.target())
         .arg("--target-dir")
-        .arg(&context.target_dir)
+        .arg(&context.target_dir);
+    apply_kernel_env(&mut command, context);
+
+    if context.config.profile() == BuildProfile::Release {
+        command.arg("--release");
+    }
+    if !feature_names.is_empty() {
+        command.arg("--features").arg(feature_names.join(","));
+    }
+    match context.verbosity {
+        0 => {}
+        1 => {
+            command.arg("-v");
+        }
+        _ => {
+            command.arg("-vv");
+        }
+    }
+    if matches!(action, CargoAction::Clippy) {
+        command.arg("--").args(["-D", "warnings", "--cfg", "unittest"]);
+    }
+    command.run()
+}
+
+pub(crate) fn kernel_feature_flags(context: &BuildContext) -> Vec<String> {
+    context
+        .config
+        .cargo_features()
+        .iter()
+        .map(|feature| format!("kfeat/{feature}"))
+        .chain(context.unittest.then(|| "unittest".to_string()))
+        .collect()
+}
+
+pub(crate) fn apply_kernel_env(command: &mut Process, context: &BuildContext) {
+    command
         .env("RUSTC_BOOTSTRAP", "1")
         .env("TARGET_DIR", &context.target_dir)
         .env("K_ARCH", context.config.arch().as_str())
@@ -339,21 +368,6 @@ fn run_cargo(context: &BuildContext, action: CargoAction) -> Result<()> {
             format!("{}ranlib", context.config.arch().cross_compile_prefix()),
         );
 
-    if context.config.profile() == BuildProfile::Release {
-        command.arg("--release");
-    }
-    if !feature_names.is_empty() {
-        command.arg("--features").arg(feature_names.join(","));
-    }
-    match context.verbosity {
-        0 => {}
-        1 => {
-            command.arg("-v");
-        }
-        _ => {
-            command.arg("-vv");
-        }
-    }
     if context.config.arch() == KernelArch::X86_64 {
         command.env("CFLAGS_x86_64_unknown_none", "-mcmodel=large -mno-red-zone");
     }
@@ -362,12 +376,7 @@ fn run_cargo(context: &BuildContext, action: CargoAction) -> Result<()> {
     } else {
         command.env_remove("UNITTEST_CRATE");
     }
-    if matches!(action, CargoAction::Clippy) {
-        command
-            .arg("--")
-            .args(["-D", "warnings", "--cfg", "unittest"]);
-    }
-    command.run()
+
 }
 
 fn create_bundle(
