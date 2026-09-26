@@ -18,7 +18,7 @@ use kclass::{
     subscribe_char_available,
 };
 use kdevice::{DeviceId, DeviceObject, subscribe_device_removed};
-use kspin::{SpinNoIrq, SpinNoPreempt};
+use kspin::{SpinNoIrq, SpinNoPreempt, static_lock};
 use lazyinit::LazyInit;
 
 struct ConsoleSubsystem {
@@ -175,10 +175,12 @@ pub fn register_console_runtime(
     Ok(())
 }
 
-/// The stdout device id that was registered before the device became active,
-/// waiting for its activation notification so it can be adopted into the
-/// console subsystem.
-static PENDING_STDOUT: SpinNoIrq<Option<DeviceId>> = SpinNoIrq::new(None);
+static_lock! {
+    /// The stdout device id that was registered before the device became active,
+    /// waiting for its activation notification so it can be adopted into the
+    /// console subsystem.
+    static PENDING_STDOUT: SpinNoIrq<Option<DeviceId>> = SpinNoIrq::new(None);
+}
 static STDOUT_ADOPTION_BRIDGE: LazyInit<()> = LazyInit::new();
 
 /// Remember `id` as the future stdout console and subscribe (once) so that when

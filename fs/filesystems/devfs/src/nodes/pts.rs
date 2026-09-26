@@ -8,7 +8,7 @@ use alloc::{borrow::Cow, boxed::Box, string::ToString, sync::Arc, vec::Vec};
 
 use flatten_objects::FlattenObjects;
 use kerrno::{KError, KResult};
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, static_lock};
 use ktty::tty::{PtyDriver, create_pty_pair};
 use kvfs::{
     Dentry, DeviceFileOps, DeviceId, SimpleDirLookup, SimpleDirOps, SimpleFs, VfsFile,
@@ -17,8 +17,10 @@ use kvfs::{
 
 use crate::{DeviceFile, device_dentry};
 
-static PTS_TABLE: SpinNoIrq<FlattenObjects<Arc<DeviceFile>, 16>> =
-    SpinNoIrq::new(FlattenObjects::new());
+static_lock! {
+    static PTS_TABLE: SpinNoIrq<FlattenObjects<Arc<DeviceFile>, 16>> =
+        SpinNoIrq::new(FlattenObjects::new());
+}
 
 /// Add a slave pseudo-terminal to the PTS table.
 fn add_slave(fs: Arc<SimpleFs>, pty: Arc<PtyDriver>) -> KResult<u32> {

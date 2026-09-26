@@ -55,7 +55,7 @@ rustc_session::declare_lint! {
     /// }
     /// ```
     pub UNREGISTERED_STATIC_SPINLOCK,
-    Warn,
+    Deny,
     "static kspin::SpinLock built with `new` outside static_lock!",
     report_in_external_macro
 }
@@ -324,7 +324,7 @@ fn main() {}
 "#;
 
     /// Expected diagnostics for [`SOURCE`], as rendered by compiletest.
-    const STDERR: &str = r#"warning: static spinlock is not registered with static_lock!
+    const STDERR: &str = r#"error: static spinlock is not registered with static_lock!
   --> $DIR/unregistered_static_spinlock.rs:8:5
    |
 LL |     static A: SpinNoIrq<u32> = SpinNoIrq::new(0);
@@ -333,9 +333,9 @@ LL |     static A: SpinNoIrq<u32> = SpinNoIrq::new(0);
    |                                `SpinLock::new` binds `klockstat::NOOP_CLASS` under the `stats` feature; this lock never appears in /proc/lock_stat
    |
    = help: wrap the item: `static_lock! { static NAME: SpinNoIrq<T> = SpinNoIrq::new(..); }` (import `kspin::static_lock`); see docs/code-guidelines/CG-001-static-spinlock-registration.md
-   = note: `#[warn(unregistered_static_spinlock)]` on by default
+   = note: `#[deny(unregistered_static_spinlock)]` on by default
 
-warning: static spinlock is not registered with static_lock!
+error: static spinlock is not registered with static_lock!
   --> $DIR/unregistered_static_spinlock.rs:14:9
    |
 LL |         static B: L<u32> = L::new(0);
@@ -345,7 +345,7 @@ LL |         static B: L<u32> = L::new(0);
    |
    = help: wrap the item: `static_lock! { static NAME: SpinNoIrq<T> = SpinNoIrq::new(..); }` (import `kspin::static_lock`); see docs/code-guidelines/CG-001-static-spinlock-registration.md
 
-warning: static spinlock is not registered with static_lock!
+error: static spinlock is not registered with static_lock!
   --> $DIR/unregistered_static_spinlock.rs:18:5
    |
 LL |     static C: kspin::SpinNoIrq<u32> = kspin::SpinNoIrq::new(0);
@@ -355,7 +355,7 @@ LL |     static C: kspin::SpinNoIrq<u32> = kspin::SpinNoIrq::new(0);
    |
    = help: wrap the item: `static_lock! { static NAME: SpinNoIrq<T> = SpinNoIrq::new(..); }` (import `kspin::static_lock`); see docs/code-guidelines/CG-001-static-spinlock-registration.md
 
-warning: static spinlock is not registered with static_lock!
+error: static spinlock is not registered with static_lock!
   --> $DIR/unregistered_static_spinlock.rs:21:5
    |
 LL |     static mut D: SpinRaw<u32> = SpinRaw::new(0);
@@ -365,7 +365,7 @@ LL |     static mut D: SpinRaw<u32> = SpinRaw::new(0);
    |
    = help: wrap the item: `static_lock! { static NAME: SpinNoIrq<T> = SpinNoIrq::new(..); }` (import `kspin::static_lock`); see docs/code-guidelines/CG-001-static-spinlock-registration.md
 
-warning: static spinlock is not registered with static_lock!
+error: static spinlock is not registered with static_lock!
   --> $DIR/unregistered_static_spinlock.rs:24:5
    |
 LL |     static E: SpinNoIrq<u32> = unsafe { SpinNoIrq::new(0) };
@@ -375,7 +375,7 @@ LL |     static E: SpinNoIrq<u32> = unsafe { SpinNoIrq::new(0) };
    |
    = help: wrap the item: `static_lock! { static NAME: SpinNoIrq<T> = SpinNoIrq::new(..); }` (import `kspin::static_lock`); see docs/code-guidelines/CG-001-static-spinlock-registration.md
 
-warning: static spinlock is not registered with static_lock!
+error: static spinlock is not registered with static_lock!
   --> $DIR/unregistered_static_spinlock.rs:28:9
    |
 LL |         static F: kspin::SpinNoPreempt<u32> = kspin::SpinNoPreempt::new(0);
@@ -385,7 +385,7 @@ LL |         static F: kspin::SpinNoPreempt<u32> = kspin::SpinNoPreempt::new(0);
    |
    = help: wrap the item: `static_lock! { static NAME: SpinNoIrq<T> = SpinNoIrq::new(..); }` (import `kspin::static_lock`); see docs/code-guidelines/CG-001-static-spinlock-registration.md
 
-warning: static spinlock is not registered with static_lock!
+error: static spinlock is not registered with static_lock!
   --> $DIR/unregistered_static_spinlock.rs:33:5
    |
 LL |     pub(crate) static G: SpinNoIrq<u32> = { SpinNoIrq::new(0) };
@@ -395,7 +395,7 @@ LL |     pub(crate) static G: SpinNoIrq<u32> = { SpinNoIrq::new(0) };
    |
    = help: wrap the item: `static_lock! { static NAME: SpinNoIrq<T> = SpinNoIrq::new(..); }` (import `kspin::static_lock`); see docs/code-guidelines/CG-001-static-spinlock-registration.md
 
-warning: static spinlock is not registered with static_lock!
+error: static spinlock is not registered with static_lock!
   --> $DIR/unregistered_static_spinlock.rs:46:13
    |
 LL |             static H: SpinNoIrq<u32> = SpinNoIrq::new(0);
@@ -405,16 +405,16 @@ LL |             static H: SpinNoIrq<u32> = SpinNoIrq::new(0);
    |
    = help: wrap the item: `static_lock! { static NAME: SpinNoIrq<T> = SpinNoIrq::new(..); }` (import `kspin::static_lock`); see docs/code-guidelines/CG-001-static-spinlock-registration.md
 
-warning: static spinlock is not registered with static_lock!
+error: static spinlock is not registered with static_lock!
   --> $DIR/unregistered_static_spinlock.rs:51:5
    |
 LL |     kspin::declare_unregistered!(I);
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SpinLock::new` binds `klockstat::NOOP_CLASS` under the `stats` feature; this lock never appears in /proc/lock_stat
    |
    = help: wrap the item: `static_lock! { static NAME: SpinNoIrq<T> = SpinNoIrq::new(..); }` (import `kspin::static_lock`); see docs/code-guidelines/CG-001-static-spinlock-registration.md
-   = note: this warning originates in the macro `kspin::declare_unregistered` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `kspin::declare_unregistered` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-warning: static spinlock is not registered with static_lock!
+error: static spinlock is not registered with static_lock!
   --> $DIR/unregistered_static_spinlock.rs:60:5
    |
 LL |     static J: <() as Types>::L = kspin::SpinRaw::new(0);
@@ -424,7 +424,7 @@ LL |     static J: <() as Types>::L = kspin::SpinRaw::new(0);
    |
    = help: wrap the item: `static_lock! { static NAME: SpinNoIrq<T> = SpinNoIrq::new(..); }` (import `kspin::static_lock`); see docs/code-guidelines/CG-001-static-spinlock-registration.md
 
-warning: 10 warnings emitted
+error: aborting due to 10 previous errors
 
 "#;
 
