@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 use alloc::{boxed::Box, sync::Arc};
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 
 use kcgroup::{Cgroup, TaskCharge, TaskMembership};
 use kcred::Cred;
@@ -162,6 +162,16 @@ pub struct Thread {
     robust_list_head: AtomicUsize,
     signal: Arc<ThreadSignalManager>,
     time: SpinNoPreempt<CpuTimeStatistics>,
+    /// Monotonic nanoseconds of this thread's most recent CPU-accounting
+    /// boundary.
+    ///
+    /// Written by [`Thread::set_cpu_state`] while holding the accounting
+    /// lock, piggybacking the monotonic clock read that accounting already
+    /// performs, so the trap loop can gate CPU-timer polling on a constant
+    /// time interval without adding a clock read of its own. Only the owning
+    /// thread writes and reads it; the atomic form exists solely to keep
+    /// `Thread` sharable across CPUs.
+    last_cpu_boundary_ns: AtomicU64,
     nice: AtomicI32,
     scheduler: Mutex<SchedulerState>,
     is_exiting: AtomicBool,
@@ -211,6 +221,7 @@ impl Thread {
             clear_child_tid: AtomicUsize::new(0),
             robust_list_head: AtomicUsize::new(0),
             time: SpinNoPreempt::new(CpuTimeStatistics::new()),
+            last_cpu_boundary_ns: AtomicU64::new(0),
             nice: AtomicI32::new(NiceValue::default().as_i32()),
             scheduler: Mutex::new(SchedulerState::default()),
             is_exiting: AtomicBool::new(false),
@@ -552,9 +563,41 @@ impl Thread {
     /// IRQs masked, or to close its final interval during exit. Never sleeps.
     /// Must not be called from interrupt context.
     pub fn set_cpu_state(&self, state: CpuTimeState) {
-        self.time
-            .lock()
-            .set_state(state, khal::time::monotonic_time());
+        let mut time = self.time.lock();
+        // The clock is read inside the accounting lock so `last_wall` stays
+        // monotonic under concurrent samplers (`getrusage`, process CPU-time
+        // polling): a sampler between an unlocked read and this store could
+        // otherwise install a later timestamp that `set_state` then rolls
+        // back, double-charging the overlap.
+        let now = khal::time::monotonic_time();
+        self.last_cpu_boundary_ns
+            .store(now.as_nanos_u64_saturating(), Ordering::Relaxed);
+        time.set_state(state, now);
+    }
+
+    /// Returns whether this thread should poll the process's CPU-time
+    /// timers, gating on a constant time interval.
+    ///
+    /// The decision combines this thread's latest accounting-boundary
+    /// timestamp (updated by every user/kernel transition, so no extra clock
+    /// read is needed here) with the process-wide last-poll watermark, which
+    /// deduplicates polling across threads: whichever thread's gate expires
+    /// first polls for the whole process. Two threads whose gates expire
+    /// simultaneously may both poll once, which is idempotent.
+    ///
+    /// The gate bounds the interval between polls only while traps arrive;
+    /// a runnable task that never traps never polls, matching the
+    /// pre-existing behavior (Linux instead forces a tick when CPU timers
+    /// are armed, which is deliberately out of scope here).
+    pub fn poll_cpu_timers_due(&self, interval_ns: u64) -> bool {
+        let boundary_ns = self.last_cpu_boundary_ns.load(Ordering::Relaxed);
+        if boundary_ns.saturating_sub(self.runtime.last_cpu_timer_poll_ns()) < interval_ns {
+            return false;
+        }
+        // Mark before polling: a concurrent thread that also sees a stale
+        // watermark may still poll once, which is harmless.
+        self.runtime.mark_cpu_timer_poll_ns(boundary_ns);
+        true
     }
 
     /// Temporarily swaps the blocked-signal mask while executing `f`.
@@ -569,5 +612,51 @@ impl Thread {
         f: impl FnOnce() -> kerrno::KResult<R>,
     ) -> kerrno::KResult<R> {
         self.signal.with_temp_blocked(blocked, f)
+    }
+}
+
+/// Decides whether a CPU-timer poll is due from the accounting-boundary
+/// watermark and the process-wide last-poll watermark.
+///
+/// Kept as a pure function so the boundary semantics (first poll, interval
+/// comparison, saturation on stale watermarks) are unit-testable without
+/// constructing a full thread.
+fn cpu_timer_poll_due(boundary_ns: u64, last_poll_ns: u64, interval_ns: u64) -> bool {
+    boundary_ns.saturating_sub(last_poll_ns) >= interval_ns
+}
+
+#[cfg(unittest)]
+mod tests_cpu_timer_gate {
+    use unittest::{assert, def_test};
+
+    use super::cpu_timer_poll_due;
+
+    const INTERVAL: u64 = 1_000_000;
+
+    #[def_test]
+    fn test_poll_due_requires_full_interval() {
+        // Below the interval: not due.
+        assert!(!cpu_timer_poll_due(999_999, 0, INTERVAL));
+        // Exactly the interval: due.
+        assert!(cpu_timer_poll_due(INTERVAL, 0, INTERVAL));
+        // Above it: due.
+        assert!(cpu_timer_poll_due(INTERVAL * 4, INTERVAL, INTERVAL));
+    }
+
+    #[def_test]
+    fn test_first_poll_is_due_even_with_zero_watermarks() {
+        // A fresh thread (boundary 0) and a fresh process (last poll 0) read
+        // as an interval of zero elapsed time, which is below the interval;
+        // the trap loop's explicit first-iteration poll covers that case,
+        // and this assertion documents the pure-function behavior.
+        assert!(!cpu_timer_poll_due(0, 0, INTERVAL));
+    }
+
+    #[def_test]
+    fn test_stale_last_poll_never_wraps_or_panics() {
+        // A boundary older than the last poll (thread descheduled before it
+        // could poll, another thread refreshed the watermark) must fall
+        // back to "not due" without wrapping.
+        assert!(!cpu_timer_poll_due(100, 5_000_000, INTERVAL));
     }
 }

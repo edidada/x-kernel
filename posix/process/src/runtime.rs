@@ -68,18 +68,27 @@ pub(crate) fn run_user_thread_loop(
 
     info!("Enter user space: ip={:#x}, sp={:#x}", uctx.ip(), uctx.sp());
 
-    // CPU-time timer polling cadence, in trap-loop iterations.
+    // CPU-time timer polling cadence, in nanoseconds of elapsed time.
     //
     // Linux samples per-CPU accounting timers (ITIMER_VIRTUAL/PROF,
     // CPUCLOCK timers) at tick granularity, on the order of a few
-    // milliseconds of CPU time. Polling on every trap return instead
-    // charges each syscall round-trip the full thread -> process ->
-    // runtime lookup chain even when no CPU-time timer is armed, which
-    // dominates lightweight syscall workloads. Polling every 256 traps
-    // bounds delivery staleness to roughly a Linux tick's worth of CPU
-    // time while keeping the per-trap fast path free of that chain.
-    const CPU_TIMER_POLL_TRAP_INTERVAL: u32 = 256;
-    let mut trap_count: u32 = 0;
+    // milliseconds. Polling on every trap return instead charges each
+    // syscall round-trip the full thread -> process -> runtime lookup
+    // chain even when no CPU-time timer is armed, which dominates
+    // lightweight syscall workloads. The gate below compares the thread's
+    // latest accounting-boundary timestamp (refreshed by every
+    // user/kernel transition at no extra clock read) against the
+    // process-wide last-poll watermark, so the interval stays constant
+    // regardless of trap density and the first thread whose gate expires
+    // polls once for the whole process.
+    //
+    // Delivery staleness is bounded by the interval plus one trap-loop
+    // iteration, and only while traps arrive: a runnable task that never
+    // traps never polls, matching the pre-existing behavior. Linux instead
+    // forces a periodic tick while CPU timers are armed, which is out of
+    // scope here.
+    const CPU_TIMER_POLL_INTERVAL_NS: u64 = 1_000_000;
+    let mut first_cpu_timer_poll_pending = true;
     while !thr.is_exiting() {
         let reason = uctx.run(
             || thr.set_cpu_state(CpuTimeState::User),
@@ -172,10 +181,12 @@ pub(crate) fn run_user_thread_loop(
             }
         }
 
-        // See `CPU_TIMER_POLL_TRAP_INTERVAL`: sample CPU-time timers on a
-        // bounded cadence instead of every trap return.
-        trap_count = trap_count.wrapping_add(1);
-        if trap_count.is_multiple_of(CPU_TIMER_POLL_TRAP_INTERVAL) {
+        // See `CPU_TIMER_POLL_INTERVAL_NS`: sample CPU-time timers on a
+        // bounded time cadence instead of every trap return. The first
+        // iteration always polls so an already-expired timer armed before
+        // the loop starts is observed immediately.
+        if first_cpu_timer_poll_pending || thr.poll_cpu_timers_due(CPU_TIMER_POLL_INTERVAL_NS) {
+            first_cpu_timer_poll_pending = false;
             poll_cpu_timers();
         }
         ktask::check_preempt_pending();

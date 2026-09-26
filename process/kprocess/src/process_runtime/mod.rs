@@ -8,7 +8,7 @@ mod runtime_state;
 use alloc::{string::String, sync::Arc, vec::Vec};
 #[cfg(feature = "tee")]
 use core::any::Any;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use fs_context::FsStruct;
 use kerrno::{KError, KResult};
@@ -139,6 +139,17 @@ pub(crate) struct ProcessRuntime {
     /// bounded delay (one trap plus cache propagation), which can delay --
     /// never lose -- a CPU-timer delivery.
     cpu_timers_armed: AtomicBool,
+    /// Monotonic nanoseconds of the last completed CPU-timer poll for this
+    /// process.
+    ///
+    /// CPU-timer polling is a process-wide operation (each poll walks every
+    /// thread's accounting state), so the poll gate is deduplicated at the
+    /// process level: whichever thread's gate expires first polls for the
+    /// whole process and refreshes this watermark. Without it, `N` busy
+    /// threads each polling on their own cadence would take `N` polls per
+    /// interval and `N^2` accounting-lock acquisitions per interval.
+    /// Relaxed ordering suffices: a stale read can only cause one extra poll.
+    last_cpu_timer_poll_ns: AtomicU64,
     #[cfg(feature = "tee")]
     tee_ta_ctx: RwLock<TeeTaCtx>,
     #[cfg(feature = "tee")]
@@ -279,6 +290,7 @@ impl ProcessRuntime {
                 config.signal_trampoline,
             )),
             cpu_timers_armed: AtomicBool::new(false),
+            last_cpu_timer_poll_ns: AtomicU64::new(0),
         });
         runtime.process.set_runtime_ref(&runtime);
         runtime
@@ -427,6 +439,18 @@ impl ProcessRuntime {
     /// Re-derives the CPU-timer polling gate from the timer manager state.
     pub(crate) fn set_cpu_timers_armed(&self, armed: bool) {
         self.cpu_timers_armed.store(armed, Ordering::Release);
+    }
+
+    /// Returns the monotonic nanoseconds of the process's last completed
+    /// CPU-timer poll. See the field-level doc for the dedup invariant.
+    pub(crate) fn last_cpu_timer_poll_ns(&self) -> u64 {
+        self.last_cpu_timer_poll_ns.load(Ordering::Relaxed)
+    }
+
+    /// Marks a CPU-timer poll as completed at `poll_ns`.
+    pub(crate) fn mark_cpu_timer_poll_ns(&self, poll_ns: u64) {
+        self.last_cpu_timer_poll_ns
+            .store(poll_ns, Ordering::Relaxed);
     }
 
     /// Records the CPU that currently owns this process mm residency.
