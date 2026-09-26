@@ -9,13 +9,17 @@
 //! `tools/lints/README.md`.
 #![feature(rustc_private)]
 
+extern crate rustc_hir;
 extern crate rustc_lint;
+extern crate rustc_middle;
 extern crate rustc_session;
+extern crate rustc_span;
 
 dylint_linting::dylint_library!();
 
+mod unregistered_static_spinlock;
+
 #[cfg(test)]
-#[allow(dead_code, reason = "shared harness for the lint modules' UI tests")]
 mod testing;
 
 /// Registers every lint and pass in this library with `rustc`.
@@ -23,5 +27,7 @@ mod testing;
 #[unsafe(no_mangle)]
 pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint::LintStore) {
     dylint_linting::init_config(sess);
-    lint_store.register_lints(&[]);
+    lint_store.register_lints(&[unregistered_static_spinlock::UNREGISTERED_STATIC_SPINLOCK]);
+    lint_store
+        .register_late_pass(|_| Box::new(unregistered_static_spinlock::UnregisteredStaticSpinlock));
 }
