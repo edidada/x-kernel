@@ -123,7 +123,7 @@ Before considering a code change aligned with this skill, verify:
 - raw-pointer and FFI code states validity, alignment,
   lifetime, aliasing, and ABI assumptions where relevant;
 - shared-state code has sane lock scope and lock ordering;
-- static `Mutex` / `RwLock` / spin items use `static_lock!`,
+- static `Mutex` / `RwLock` items use `static_lock!`,
   and heap locks use `::new` rather than `const_new` unless
   an untracked const initializer is required;
 - boundary validation happens at subsystem edges;
