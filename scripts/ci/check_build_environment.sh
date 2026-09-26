@@ -5,6 +5,8 @@ echo "==> Checking Rust build environment..."
 NIGHTLY_TOOLCHAIN="${AUX_RUST_TOOLCHAIN}"
 CARGO_SHEAR_VERSION="1.13.2"
 LICENSURE_VERSION="0.8.1"
+CARGO_DYLINT_VERSION="6.0.4"
+DYLINT_LINK_VERSION="6.0.4"
 
 retry() {
     local attempts="$1"
@@ -46,6 +48,8 @@ DEFAULT_EXTRA_TARGETS=(
 NIGHTLY_TARGETS=(
     x86_64-unknown-linux-musl
     aarch64-unknown-linux-musl
+    aarch64-unknown-none-softfloat
+    x86_64-unknown-none
     riscv64gc-unknown-linux-musl
 )
 
@@ -63,7 +67,7 @@ for target in "${DEFAULT_TARGETS[@]}"; do
     default_install_args+=(--target "${target}")
 done
 
-nightly_install_args=("${NIGHTLY_TOOLCHAIN}" --profile minimal --component rustfmt --no-self-update)
+nightly_install_args=("${NIGHTLY_TOOLCHAIN}" --profile minimal --component rustfmt --component rustc-dev --component llvm-tools --no-self-update)
 for target in "${NIGHTLY_TARGETS[@]}"; do
     nightly_install_args+=(--target "${target}")
 done
@@ -73,6 +77,10 @@ retry 3 rustup toolchain install "${default_install_args[@]}"
 
 echo "==> Installing auxiliary nightly toolchain: ${NIGHTLY_TOOLCHAIN}"
 retry 3 rustup toolchain install "${nightly_install_args[@]}"
+
+if [ -n "${DYLINT_DRIVER_PATH:-}" ]; then
+    install -d "${DYLINT_DRIVER_PATH}"
+fi
 
 echo "==> Active default toolchain"
 cargo --version
@@ -213,8 +221,36 @@ ensure_cargo_tool licensure licensure "${LICENSURE_VERSION}"
 echo "==> License header analyzer"
 licensure --version
 
+# The Dylint tools cannot be probed with a bare `--version`: cargo-dylint
+# needs its subcommand and dylint-link forwards its arguments to the linker.
+# Trust the Cargo installation receipt instead.
+ensure_dylint_tool() {
+    local package="$1"
+    local version="$2"
+    local root
+
+    root="$(cargo_install_root_for "${package}" || true)"
+    if [ -n "${root}" ] && cargo_root_has_package "${package}" "${version}" "${root}"; then
+        return 0
+    fi
+
+    echo "==> Installing ${package} ${version}"
+    retry 3 cargo install "${package}" \
+        --version "${version}" --locked --force
+}
+
+ensure_dylint_tool cargo-dylint "${CARGO_DYLINT_VERSION}"
+ensure_dylint_tool dylint-link "${DYLINT_LINK_VERSION}"
+
+echo "==> Dylint tools"
+cargo-dylint dylint --version
+echo "dylint-link ${DYLINT_LINK_VERSION} (verified through the Cargo installation receipt)"
+
 echo "==> Installed default targets"
 rustup target list --installed
+
+echo "==> Installed nightly components"
+rustup +"${NIGHTLY_TOOLCHAIN}" component list --installed
 
 echo "==> Installed nightly targets"
 rustup +"${NIGHTLY_TOOLCHAIN}" target list --installed

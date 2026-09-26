@@ -49,6 +49,7 @@ pipeline {
         RUSTUP_PERMIT_COPY_RENAME = '1'
         PYTHONUNBUFFERED = '1'
         TARGET_DIR = '/xkernel-target'
+        DYLINT_DRIVER_PATH = '/xkernel-cache/cargo/dylint-drivers'
         ROOTFS_CACHE_DIR = '/xkernel-cache/rootfs'
         ROOTFS_VERSION = '20260302'
         HARNESS_JOBS = '2'
@@ -178,6 +179,18 @@ def ciBuildStages() {
         type: 'build',
         platform: 'kplat-aarch64-virtcca',
         defconfig: 'platforms/kplat-aarch64/qemu_virtcca_defconfig',
+    ], [
+        name: 'Lint Check: dylint kplat-aarch64',
+        failure: 'dylint 发现违反 docs/code-guidelines 规则的代码',
+        type: 'dylint',
+        platform: 'kplat-aarch64',
+        defconfig: 'platforms/kplat-aarch64/qemu_defconfig',
+    ], [
+        name: 'Lint Check: dylint kplat-x86_64',
+        failure: 'dylint 发现违反 docs/code-guidelines 规则的代码',
+        type: 'dylint',
+        platform: 'kplat-x86_64',
+        defconfig: 'platforms/kplat-x86_64/qemu_defconfig',
     ]]
 
     if (docCheckEnabled()) {
@@ -392,6 +405,9 @@ def runCiWorkload(Map spec) {
         case 'build':
             runClippyAndBuild(spec.platform, spec.defconfig ?: defconfigForPlatform(spec.platform))
             break
+        case 'dylint':
+            runDylintCheck(spec.name, spec.platform, spec.defconfig)
+            break
         case 'doc':
             runDocStage(spec.arch)
             break
@@ -471,6 +487,25 @@ cp ${defconfigPath} .config
 make defconfig
 make clippy
 stdbuf -oL -eL make build
+"""
+        }
+    }
+}
+
+def runDylintCheck(String stageName, String platform, String defconfigPath) {
+    initStageLog(stageName)
+    def dylintTargetDir = "/xkernel-target/dylint-${platform}"
+    withCleanSourceWorkspace("dylint-${platform}") {
+        withEnv(["TARGET_DIR=${dylintTargetDir}"]) {
+            sh label: "Dylint check ${platform}", script: """#!/bin/bash
+set -euo pipefail
+${stageLogTeeLine(stageName)}
+cp ${defconfigPath} .config
+make defconfig
+# The driver cache is shared by builds on this node.
+mkdir -p "\${DYLINT_DRIVER_PATH}"
+flock -x "\${DYLINT_DRIVER_PATH}/.jenkins.lock" make dylint_test
+flock -x "\${DYLINT_DRIVER_PATH}/.jenkins.lock" make dylint
 """
         }
     }

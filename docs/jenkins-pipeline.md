@@ -82,7 +82,7 @@ Jenkins Build 共享。
 
 | Volume | 容器路径 | 内容 |
 | --- | --- | --- |
-| `xkernel-cargo-home-v2` | `/xkernel-cache/cargo` | Cargo registry、git 与元数据缓存 |
+| `xkernel-cargo-home-v2` | `/xkernel-cache/cargo` | Cargo registry、git、元数据与 Dylint driver 缓存 |
 | `xkernel-rustup-toolchains-v2` | `/usr/local/rustup/toolchains` | 固定版本 Rust toolchain |
 | `xkernel-rootfs-cache-v2` | `/xkernel-cache/rootfs` | 按架构校验后的 rootfs 模板 |
 
@@ -95,6 +95,22 @@ Jenkins Build 共享。
 版本到 Rustup volume；后续构建复用它。安装通过 volume 内文件锁串行化。
 rootfs 下载同样按架构加锁，并通过临时文件、完整性检查和原子替换避免并发
 读到半成品。
+
+`AUX_RUST_TOOLCHAIN=nightly-2026-03-08` 还需安装 `rustfmt`、`rustc-dev`、
+`llvm-tools` 组件，以及 Dylint 扫描所需的 `aarch64-unknown-none-softfloat` 和
+`x86_64-unknown-none` target。
+环境检查把固定版本的 `cargo-dylint 6.0.4` 和 `dylint-link 6.0.4` 安装到
+`$CARGO_HOME/bin`（与镜像自带的 `/usr/local/cargo/bin` 工具不同），
+并创建 `DYLINT_DRIVER_PATH=/xkernel-cache/cargo/dylint-drivers`。该目录位于
+节点本地 Cargo named volume，复用首次构建约需半分钟的 Dylint driver。
+
+Build 阶段并行运行 `Lint Check: dylint kplat-aarch64` 和
+`Lint Check: dylint kplat-x86_64`，执行仓库全部 Dylint lint。lint 只检查当前配置
+实际编译的代码，两个分支分别覆盖两种架构的专属代码。每个分支在独立 workspace 中
+使用对应平台的 `qemu_defconfig` 执行 `make defconfig`、`make dylint_test` 和
+`make dylint`，并使用独立的 `/xkernel-target/dylint-<platform>` 构建输出目录；
+共享的 driver 缓存目录通过 `flock` 串行访问。检查结果与其他并行
+阶段一起进入 Gitee Check Run。
 
 guest case target、kernel target、覆盖率与测试制品不能放入共享缓存。
 
