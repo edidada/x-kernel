@@ -16,9 +16,11 @@
 //! * interrupt registration with the `dev_id` capture pattern
 //! * guards-in-`Data` ownership (drop order is the release order)
 //!
-//! Runtime console/char publication (the old `kclass` path) is intentionally
-//! not done here: the class layer migrates in Phase 1. Console output keeps
-//! working through the early-stdout port this driver adopts.
+//! Runtime console/char publication goes through the class layer
+//! (`kclass::publish_*` with a detached `ClassParent`): the stdout port
+//! registers as the console subsystem's device, auxiliary ports publish
+//! as char devices. Console output never stops — the early-stdout port
+//! this driver adopts is the same hardware instance printk keeps using.
 
 use alloc::{boxed::Box, sync::Arc};
 
@@ -122,7 +124,7 @@ impl DriverOps<PlatformBus> for Pl011Driver {
         // Publish the runtime capability: the stdout port joins the console
         // subsystem (/dev/console backing), auxiliary ports become char
         // devices. Both use a detached class parent — the class layer is
-        // model-agnostic since the Phase 1 decoupling.
+        // model-agnostic since the class-layer decoupling.
         let location = crate::common::legacy_location(dev.descriptor().location);
         let char_dev: kclass::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
         match port.role() {
