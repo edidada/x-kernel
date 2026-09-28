@@ -15,20 +15,12 @@
   color: #64748b;
   margin: 0;
 }
-.kernel-composer {
-  max-width: 100% !important;
-}
 .kernel-kind-row {
   overflow: hidden;
 }
 .kernel-kind-row .kind-btn {
   min-width: 0;
   aspect-ratio: 1/1;
-}
-.kernel-prompt-box {
-  min-height: 20rem !important;
-  padding: 1.65rem 1.8rem 1.4rem !important;
-  border-radius: 16px !important;
 }
 .kernel-module-path {
   width: max-content;
@@ -123,13 +115,6 @@
     height: 90px;
     aspect-ratio: auto;
     border-radius: 12px;
-  }
-  .kernel-prompt-box {
-    min-height: 268px !important;
-    padding: 1.25rem 1.15rem !important;
-  }
-  .kernel-prompt-box .prompt-box-bar {
-    margin-top: auto;
   }
   .kernel-prompt-copy h3 {
     font-size: 1.3rem;
