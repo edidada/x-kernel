@@ -10,11 +10,9 @@
 
 use alloc::boxed::Box;
 
-use driver_core::{
-    BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError,
-    pci::{PciBus, PciMatch},
-};
+use driver_core::{BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError};
 use kclass::{ClassParent, publish_char};
+use pci::{PciBus, PciMatch};
 use virtio::VirtIoRngDev;
 
 /// `struct pci_device_id virtio_rng_id_table[]`: transitional 0x1005 and

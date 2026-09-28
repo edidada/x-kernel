@@ -35,21 +35,77 @@ pub mod support;
 
 pub mod discover;
 
-use driver_core::{Bus, BusId, DeviceDescriptor, PciMatch};
+use driver_core::{
+    Bus, BusId, IdMatchEntry, MatchScore,
+    desc::{DeviceDescriptor, DeviceIdentity},
+};
 
-/// The PCI bus type in the driver-core device model.
+/// The PCI bus type in the driver-core device model — the single authority
+/// (Linux keeps `pci_bus_type` with the PCI subsystem in `drivers/pci`,
+/// not in the driver core).
 ///
-/// Matches descriptors with `DeviceLocation::Pci` against `PciMatch` id
+/// Matches descriptors with `DeviceLocation::Pci` against [`PciMatch`] id
 /// tables. The discovery pipeline lives in [`discover`].
-pub struct PciPlatformBus;
+pub struct PciBus;
 
-impl Bus for PciPlatformBus {
+impl Bus for PciBus {
     type IdEntry = PciMatch;
 
     const ID: BusId = BusId::new("pci");
 
     fn accepts(desc: &DeviceDescriptor) -> bool {
         matches!(desc.location, driver_core::DeviceLocation::Pci { .. })
+    }
+}
+
+/// One `struct pci_device_id` row, for PCI id tables.
+#[derive(Debug, Clone, Copy)]
+pub struct PciMatch {
+    pub vendor_id: u16,
+    pub device_id: u16,
+}
+
+impl PciMatch {
+    /// Exact vendor + device match.
+    pub const fn device(vendor_id: u16, device_id: u16) -> Self {
+        Self {
+            vendor_id,
+            device_id,
+        }
+    }
+
+    /// Any device from a vendor.
+    pub const fn vendor(vendor_id: u16) -> Self {
+        Self {
+            vendor_id,
+            device_id: u16::MAX,
+        }
+    }
+}
+
+impl IdMatchEntry for PciMatch {
+    fn modalias(&self) -> Option<alloc::string::String> {
+        Some(alloc::format!(
+            "pci:v{vendor:08X}d{device:08X}",
+            vendor = self.vendor_id,
+            device = self.device_id
+        ))
+    }
+
+    fn matches(&self, desc: &DeviceDescriptor) -> MatchScore {
+        let DeviceIdentity::Pci(pci) = &desc.identity else {
+            return MatchScore::NoMatch;
+        };
+        let device_match = self.device_id == u16::MAX || self.device_id == pci.device_id;
+        if self.vendor_id == pci.vendor_id && device_match {
+            if self.device_id == pci.device_id {
+                MatchScore::Exact
+            } else {
+                MatchScore::Generic
+            }
+        } else {
+            MatchScore::NoMatch
+        }
     }
 }
 
@@ -261,14 +317,14 @@ impl EcamOwner {
     }
 }
 
-pub struct PciBus {
+pub struct PciHost {
     root: PciRoot<MmioCam<'static>>,
     config_base: u64,
     bus_end: u8,
     source: PciConfigSource,
 }
 
-impl PciBus {
+impl PciHost {
     /// Brings up the PCI bus over the resolved configuration window.
     ///
     /// # Errors

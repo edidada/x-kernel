@@ -29,11 +29,9 @@ use block::{
 };
 use device_res::{IrqOp, IrqResource, IrqTrigger};
 use driver_base::Device as _;
-use driver_core::{
-    BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError,
-    pci::{PciBus, PciMatch},
-};
+use driver_core::{BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError};
 use kclass::{ClassParent, publish_block};
+use pci::{PciBus, PciMatch};
 use virtio::{Transport, VirtIoBlkDev, VirtIoHal};
 
 /// `struct pci_device_id virtio_blk_id_table[]`: modern 0x1042 and

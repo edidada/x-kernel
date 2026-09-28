@@ -15,9 +15,9 @@ use alloc::{boxed::Box, sync::Arc};
 
 use driver_core::{
     BoundDevice, DevIrq, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
-    pci::{PciBus, PciMatch},
 };
 use kclass::{ClassParent, publish_net};
+use pci::{PciBus, PciMatch};
 use virtio::VirtIoNetDev;
 
 /// `struct pci_device_id virtio_net_id_table[]`: transitional 0x1000 and

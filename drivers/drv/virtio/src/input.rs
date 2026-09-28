@@ -9,11 +9,9 @@
 
 use alloc::boxed::Box;
 
-use driver_core::{
-    BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError,
-    pci::{PciBus, PciMatch},
-};
+use driver_core::{BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError};
 use kclass::{ClassParent, publish_input};
+use pci::{PciBus, PciMatch};
 
 /// `struct pci_device_id virtio_input_id_table[]`.
 static IDS: &[PciMatch] = &[PciMatch::device(0x1af4, 0x1052)];

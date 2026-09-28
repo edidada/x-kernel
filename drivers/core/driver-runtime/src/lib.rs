@@ -246,7 +246,7 @@ impl XKernelRuntime {
         descriptor: &driver_core::desc::DeviceDescriptor,
     ) -> Result<(driver_core::DeviceKind, virtio::PciTransport, Option<usize>), RuntimeError> {
         use driver_core::desc::{DeviceIdentity, DeviceLocation as Loc};
-        use pci::{DeviceFunction, DeviceFunctionInfo, PciBus as PciRootAccess};
+        use pci::{DeviceFunction, DeviceFunctionInfo, PciHost};
 
         let Loc::Pci {
             bus: bus_nr,
@@ -287,7 +287,7 @@ impl XKernelRuntime {
         // decoded). Only per-device config access remains for the virtio
         // capability walk.
         let mut pci_root =
-            PciRootAccess::new(pci::support::pci_cam_kind()).map_err(|_| RuntimeError::Io)?;
+            PciHost::new(pci::support::pci_cam_kind()).map_err(|_| RuntimeError::Io)?;
         let root = pci_root.root_mut();
 
         let (kind, transport, transport_irq) =

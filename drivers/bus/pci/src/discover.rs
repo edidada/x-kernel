@@ -14,7 +14,7 @@ use driver_core::{
     desc::{DeviceDescriptor, DeviceIdentity, DeviceLocation, DiscoveryOrigin, PciIdentity},
 };
 
-use crate::{HeaderType, PciBus as PciBusWrapper, support};
+use crate::{HeaderType, PciHost, support};
 
 /// Discover all PCI devices and register them into the domain.
 ///
@@ -25,7 +25,7 @@ use crate::{HeaderType, PciBus as PciBusWrapper, support};
 ///
 /// Bridge devices and functions with unassignable BARs are logged and skipped.
 pub fn discover(domain: &driver_core::DeviceDomain) {
-    let Ok(mut pci) = PciBusWrapper::new(support::pci_cam_kind()) else {
+    let Ok(mut pci) = PciHost::new(support::pci_cam_kind()) else {
         log::warn!("pci: bus access unavailable");
         return;
     };
@@ -80,7 +80,7 @@ pub fn discover(domain: &driver_core::DeviceDomain) {
             }
 
             let descriptor = DeviceDescriptor::new(
-                <crate::PciPlatformBus as Bus>::ID,
+                <crate::PciBus as Bus>::ID,
                 DeviceLocation::Pci {
                     segment: 0,
                     bus: bdf.bus,

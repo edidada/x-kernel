@@ -60,7 +60,7 @@ mod resource;
 
 pub use bus::{
     Bus, BusId, DeviceDescriptor, DeviceIdentity, DeviceLocation, DiscoveryOrigin, IdMatchEntry,
-    MatchScore, PciMatch,
+    MatchScore,
 };
 pub use device::{
     BoundDevice, ClkHandle, ClkOps, CoherentMem, DevIrq, DeviceCtx, DeviceServices,
@@ -85,14 +85,6 @@ pub mod desc {
         DeviceDescriptor, DeviceIdentity, DeviceLocation, DiscoveryOrigin, FirmwareNodeInfo,
         PciIdentity, PlatformIdentity,
     };
-}
-
-pub mod pci {
-    //! Reference implementation of the PCI bus. This belongs in a
-    //! dedicated `bus-pci` crate eventually (the platform twin below
-    //! likewise); both stay here while only the compose root enumerates.
-
-    pub use crate::bus::{PciBus, PciMatch};
 }
 
 pub mod platform {

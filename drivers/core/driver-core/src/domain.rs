@@ -121,7 +121,11 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
     }
 
     fn matches(&self, desc: &DeviceDescriptor) -> MatchScore {
-        if !B::accepts(desc) {
+        // Bus identity first (Linux separates bus_type matching from
+        // structural checks): a driver registered for one bus never sees
+        // another bus's devices, even when their location shapes overlap.
+        // accepts() only validates the descriptor's structural fit.
+        if desc.bus != B::ID || !B::accepts(desc) {
             return MatchScore::NoMatch;
         }
         self.desc
