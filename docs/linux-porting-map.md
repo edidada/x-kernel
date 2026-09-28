@@ -139,4 +139,5 @@ driver_<name> = [
 | `devm_*` 完整矩阵（devm_kmemdup 等） | guards-in-Data 覆盖主路径；特殊形态按需加 `DeviceCtx` 方法 |
 | runtime PM（pm_runtime_get/put） | 未建模（`suspend/resume` 在 `DeviceDriver` 预留位，尚未接 PM 框架） |
 | virtio transport 的 MMIO/DMA 映射所有权 | 仍由 vendored `virtio-drivers` HAL 持有（映射生命周期 = transport 生命周期）；内核自有 transport 是后续工作 |
+| 设备 remove/hotplug 的消费者安全 | registry 移除后，外部持有的 `ClassDevice` clone 仍可访问设备；transport/mapping 由 `Data`（driver-core 域）持有，clone 不阻止 unmap。完整闭合需要 mapping 由共享 transport 对象持有或离线语义——hotplug 模板暂不推荐 |
 | MSI-X per-queue向量 | `device_res::MsiResource` 已有分配接口，`DeviceCtx` 方法未暴露 |

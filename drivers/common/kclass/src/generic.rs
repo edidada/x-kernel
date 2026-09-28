@@ -376,14 +376,14 @@ impl<T> ClassRegistry<T> {
         Some(self.devices.swap_remove(pos))
     }
 
-    /// Remove a detached (driver-core owned) class device by its owning
-    /// device id. Legacy-model publications are never matched.
-    pub fn remove_detached(&mut self, owner: u64) -> Option<ClassDevice<T>> {
-        let pos = self
-            .devices
+    /// Find the publication id for a detached (driver-core owned) device.
+    /// Legacy-model publications are never matched. Callers use this to run
+    /// the FULL removal path (callbacks, devnode, unpublish) via `remove`.
+    pub fn find_detached(&self, owner: u64) -> Option<crate::ClassDeviceId> {
+        self.devices
             .iter()
-            .position(|device| device.inner.parent.detached_owner() == Some(owner))?;
-        Some(self.devices.swap_remove(pos))
+            .find(|device| device.inner.parent.detached_owner() == Some(owner))
+            .map(|device| device.id())
     }
 }
 

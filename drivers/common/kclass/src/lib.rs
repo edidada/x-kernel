@@ -497,33 +497,6 @@ pub fn unpublish_block(device_number: devnode::DeviceNumber) {
     block::del_gendisk(device_number);
 }
 
-/// Drop a detached (driver-core owned) char publication by its owning device
-/// id. Called by the composition root's remove notifier.
-#[cfg(feature = "char")]
-pub fn remove_detached_char(owner: u64) -> Option<ClassDevice<CharDeviceImpl>> {
-    char_class_registry().lock().remove_detached(owner)
-}
-
-#[cfg(feature = "net")]
-pub fn remove_detached_net(owner: u64) -> Option<ClassDevice<NetDeviceImpl>> {
-    net_class_registry().lock().remove_detached(owner)
-}
-
-#[cfg(feature = "input")]
-pub fn remove_detached_input(owner: u64) -> Option<ClassDevice<InputDeviceImpl>> {
-    input_class_registry().lock().remove_detached(owner)
-}
-
-#[cfg(feature = "display")]
-pub fn remove_detached_display(owner: u64) -> Option<ClassDevice<DisplayDeviceImpl>> {
-    display_class_registry().lock().remove_detached(owner)
-}
-
-#[cfg(feature = "vsock")]
-pub fn remove_detached_vsock(owner: u64) -> Option<ClassDevice<VsockDeviceImpl>> {
-    vsock_class_registry().lock().remove_detached(owner)
-}
-
 /// Unpublish by publication id (event-driven removal, all classes).
 #[cfg(feature = "char")]
 pub fn remove_char_device(id: ClassDeviceId) {
@@ -864,24 +837,46 @@ pub mod prelude {
 /// per-class entries self-register below — the composition root calls this
 /// one function and never enumerates classes.
 pub fn remove_all_detached(owner: u64) {
+    // Find each class publication for this owner, then run the FULL removal
+    // path (removal callbacks, devnode withdraw, class unpublish) via the
+    // per-class unpublish_* entries — the same code the family activation
+    // close() paths use. This guarantees no cleanup step is bypassed and
+    // both removal entry points (composition-root notifier and activation
+    // close) are idempotent with each other.
     #[cfg(feature = "char")]
-    if let Some(device) = remove_detached_char(owner) {
+    if let Some(id) = char_class_registry().lock().find_detached(owner) {
+        class_remove(char_class_registry, id);
         if let Some(console) = char_console_hook() {
-            console(device.id());
+            console(id);
         }
     }
     #[cfg(feature = "net")]
-    drop(remove_detached_net(owner));
+    if let Some(id) = net_class_registry().lock().find_detached(owner) {
+        class_remove(net_class_registry, id);
+    }
     #[cfg(feature = "input")]
-    drop(remove_detached_input(owner));
+    if let Some(id) = input_class_registry().lock().find_detached(owner) {
+        class_remove(input_class_registry, id);
+    }
     #[cfg(feature = "display")]
-    drop(remove_detached_display(owner));
+    if let Some(id) = display_class_registry().lock().find_detached(owner) {
+        class_remove(display_class_registry, id);
+    }
     #[cfg(feature = "vsock")]
-    drop(remove_detached_vsock(owner));
-    #[cfg(feature = "block")]
-    drop(remove_detached_block(owner));
+    if let Some(id) = vsock_class_registry().lock().find_detached(owner) {
+        class_remove(vsock_class_registry, id);
+    }
     #[cfg(feature = "virtio-9p")]
-    drop(remove_detached_virtio_9p(owner));
+    if let Some(id) = virtio_9p_class_registry().lock().find_detached(owner) {
+        class_remove(virtio_9p_class_registry, id);
+    }
+    // Block publications carry the gendisk lifecycle in
+    // ClassRuntimeMetadata::unpublish_class (del_gendisk); the full
+    // class_remove path triggers it.
+    #[cfg(feature = "block")]
+    if let Some(id) = block_class_registry().lock().find_detached(owner) {
+        class_remove(block_class_registry, id);
+    }
 }
 
 /// Optional console-adoption hook the console runtime installs so char
@@ -901,14 +896,4 @@ fn char_console_hook() -> Option<Arc<dyn Fn(ClassDeviceId) + Send + Sync>> {
 #[cfg(feature = "char")]
 pub fn set_char_removal_hook(hook: Arc<dyn Fn(ClassDeviceId) + Send + Sync>) {
     *CHAR_CONSOLE_HOOK.lock() = Some(hook);
-}
-
-#[cfg(feature = "block")]
-fn remove_detached_block(owner: u64) -> Option<ClassDevice<BlockDeviceImpl>> {
-    block_class_registry().lock().remove_detached(owner)
-}
-
-#[cfg(feature = "virtio-9p")]
-fn remove_detached_virtio_9p(owner: u64) -> Option<ClassDevice<Virtio9pDeviceImpl>> {
-    virtio_9p_class_registry().lock().remove_detached(owner)
 }
