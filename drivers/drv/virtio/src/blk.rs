@@ -25,11 +25,12 @@ use alloc::{boxed::Box, sync::Arc};
 
 use block::{
     Gendisk,
-    dispatch::{irq as block_irq, reclaimer::BlockIoReclaimer, wait as block_wait},
+    dispatch::{reclaimer::BlockIoReclaimer, wait as block_wait},
 };
-use device_res::{IrqOp, IrqResource, IrqTrigger};
 use driver_base::Device as _;
-use driver_core::{BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError};
+use driver_core::{
+    BoundDevice, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
+};
 use kclass::{ClassParent, publish_block};
 use pci::{PciBus, PciMatch};
 use virtio::{Transport, VirtIoBlkDev, VirtIoHal};
@@ -96,7 +97,7 @@ impl Drop for BlkData {
 /// value owned by the device.
 struct BlkActivation<H: VirtIoHal, T: Transport> {
     device: Arc<VirtIoBlkDev<H, T>>,
-    irq: Option<device_res::Irq>,
+    irq: Option<driver_core::DevIrq>,
     reclaimer: Arc<BlockIoReclaimer>,
     disk: Option<Arc<Gendisk>>,
 }
@@ -132,7 +133,6 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
     transport: T,
     irq: usize,
 ) -> Result<Box<dyn Activation>, ProbeError> {
-    let provider: &'static dyn IrqOp = driver_runtime::resource_provider();
     let device = Arc::new(
         VirtIoBlkDev::<driver_runtime::hal::Hal, T>::try_new_irq(
             transport,
@@ -150,16 +150,31 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
         disk: None,
     };
 
+    // One IRQ entry point for every driver: DeviceCtx::request_irq (the
+    // same services path virtio-net takes). The handler keeps only a weak
+    // device reference (the activation owns the strong one and withdraws
+    // the irq before teardown) and marks the reclaimer for deferred I/O
+    // reclaiming when the device claimed the event.
     let handler: Arc<dyn device_res::IrqHandler> = device.clone();
-    activation.irq = Some(
-        block_irq::request_block_irq(
-            provider,
-            IrqResource::new(irq, IrqTrigger::Unknown(0)),
-            Arc::downgrade(&handler),
-            activation.reclaimer.clone(),
-        )
-        .map_err(crate::common::map_res_error)?,
-    );
+    let weak_handler = Arc::downgrade(&handler);
+    let weak_reclaimer = alloc::sync::Arc::downgrade(&activation.reclaimer);
+    activation.irq = Some(dev.request_irq(
+        driver_core::IrqSpec::global(irq, driver_core::IrqTrigger::Unknown),
+        "virtio-blk",
+        move || {
+            let Some(device) = weak_handler.upgrade() else {
+                return IrqAction::NotHandled;
+            };
+            if device.handle(0).handled() {
+                if let Some(reclaimer) = weak_reclaimer.upgrade() {
+                    reclaimer.mark_pending();
+                }
+                IrqAction::Handled
+            } else {
+                IrqAction::NotHandled
+            }
+        },
+    )?);
 
     let modalias = dev.modalias().map(alloc::string::String::from);
     let parent_path = crate::common::physical_path(dev.descriptor().location);

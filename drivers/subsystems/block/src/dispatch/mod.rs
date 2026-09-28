@@ -6,6 +6,5 @@
 //! reclaiming, and IRQ wiring. Model-agnostic — usable by drivers on both
 //! all drivers on the driver-core model.
 
-pub mod irq;
 pub mod reclaimer;
 pub mod wait;
