@@ -3,7 +3,6 @@ export default {
     docs: "docs",
     blog: "blog",
     language: "Language",
-    repository: "Start",
     community: "community",
     switchTo: "Switch to {{language}}",
   },

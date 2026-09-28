@@ -26,9 +26,6 @@ export default function Navbar() {
       </div>
       <div className="nav-right">
         <ThemeToggle />
-        <a href={links.repository} className="nav-demo">
-          {t("nav.repository")}
-        </a>
         <div
           className="language-switcher"
           role="group"

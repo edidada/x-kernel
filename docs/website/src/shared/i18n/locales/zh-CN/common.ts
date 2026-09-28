@@ -3,7 +3,6 @@ export default {
     docs: "文档",
     blog: "博客",
     language: "语言",
-    repository: "开始",
     community: "社区",
     switchTo: "切换到{{language}}",
   },
