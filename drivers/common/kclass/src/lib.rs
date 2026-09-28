@@ -337,9 +337,13 @@ fn class_remove<T: ClassRuntimeMetadata>(
         (removed, callbacks)
     };
     if let Some(device) = removed {
+        // Quiesce first: the driver's remove callbacks still see an
+        // available device. Only then flip the shared offline flag every
+        // consumer clone can observe, and withdraw the publication.
         for callback in callbacks {
             callback(device.clone());
         }
+        device.parent_ref().mark_offline();
         let node_id = device.parent_ref().id().raw();
         devnode::withdraw(node_id);
         device.with(ClassRuntimeMetadata::unpublish_class);

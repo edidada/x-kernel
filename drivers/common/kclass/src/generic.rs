@@ -66,6 +66,12 @@ pub struct DetachedParent {
     pub id: ClassDeviceId,
     pub driver_name: &'static str,
     pub location: DeviceLocation,
+    /// Flipped when the composition root removes the owning device (after
+    /// the quiesce callbacks returned). Shared by every [`ClassDevice`]
+    /// clone through the inner `Arc`, so a consumer holding a stale clone
+    /// can observe `is_available() == false` instead of silently poking a
+    /// device the framework no longer stands behind.
+    offline: core::sync::atomic::AtomicBool,
 }
 
 impl ClassParent {
@@ -73,6 +79,7 @@ impl ClassParent {
     pub fn detached(driver_name: &'static str, location: DeviceLocation) -> Self {
         Self::Detached(DetachedParent {
             id: ClassDeviceId::new_detached(),
+            offline: core::sync::atomic::AtomicBool::new(false),
             driver_name,
             location,
         })
@@ -97,7 +104,22 @@ impl ClassParent {
     }
 
     fn is_available(&self) -> bool {
-        true
+        match self {
+            Self::Detached(detached) => {
+                !detached.offline.load(core::sync::atomic::Ordering::Acquire)
+            }
+        }
+    }
+
+    /// Mark the parent device removed. Called by the removal orchestration
+    /// after the quiesce callbacks have returned, before the devnode and
+    /// class publication are withdrawn.
+    pub fn mark_offline(&self) {
+        match self {
+            Self::Detached(detached) => detached
+                .offline
+                .store(true, core::sync::atomic::Ordering::Release),
+        }
     }
 
     /// The owning device id.
@@ -246,6 +268,13 @@ impl<T> ClassDevice<T> {
     ///
     /// The runtime object is shared immutably; any mutation is the driver's
     /// responsibility via interior locking.
+    ///
+    /// This does **not** gate on [`Self::is_available`]: a clone taken
+    /// before removal keeps calling into `T` after the parent device went
+    /// away (the documented consumer-clone limitation). Consumers that can
+    /// observe removal — subsystem dispatch layers, poll loops — should
+    /// check [`Self::is_available`] first; drivers' own teardown paths run
+    /// before the offline flag flips and may keep using `with`.
     pub fn with<'a, R>(&'a self, f: impl FnOnce(&'a T) -> R) -> R {
         f(&self.inner.runtime)
     }
