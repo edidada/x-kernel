@@ -16,7 +16,6 @@ unittest = [
     "dep:unittest_support",
     "dep:driver-core",
     "dep:driver-runtime",
-    "ktask/execution-accounting",
 ]
 dma-trace = ["kfeat/dma-trace"]
 
