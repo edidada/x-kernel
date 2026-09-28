@@ -682,6 +682,7 @@ Ordinary logs omit payload contents, while trace logs record Ethernet frame byte
 
 ## Known Limitations
 
+- IPv4 filter match values are internal to `knet`. They currently have no rule table, packet evaluator, or userspace entry point, so they do not change packet handling.
 - `StreamTransport::recv` currently consumes copied bytes even when `RecvFlags::PEEK` is requested. `DgramTransport::recv` also dequeues before copying. Callers must not rely on non-consuming Unix socket PEEK semantics until those paths implement them.
 - netlink mutation-only batches have response-capacity preflight and per-socket serialization, but later operation failures do not roll back earlier mutations. `network_config_lock` is acquired per mutation, so different callers can interleave between messages in a batch.
 - Unix datagram channels are unbounded. The stream listener limit and AF_PACKET/netlink queue limits do not bound their queued payloads or ancillary objects.

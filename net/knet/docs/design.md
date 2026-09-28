@@ -34,6 +34,11 @@ net/knet/
     │   ├── socket.rs
     │   ├── tests.rs
     │   └── wire.rs
+    ├── netfilter/
+    │   ├── filter/
+    │   │   ├── matcher.rs
+    │   │   └── mod.rs
+    │   └── mod.rs
     ├── network/
     │   ├── ipv4/
     │   │   ├── mod.rs
@@ -198,6 +203,7 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 | vsock | Provides optional guest-host stream communication through virtio-vsock. |
 | smoltcp | Provides IPv4/IPv6 processing for the smoltcp socket path. |
 | knet IPv4 / ICMPv4 | Validates and reassembles IPv4 packets, delivers UDP input, and handles ICMPv4 errors and responses. |
+| IPv4 filter match values | Stores typed address, interface, protocol, and transport conditions for future filter rules. Constructors bound names, ranges, and TCP flag masks; no packet path consumes these values yet. |
 | Router | Selects routes, fragments outgoing IPv4 packets, and dispatches RX/TX queues across devices. |
 | LoopbackDevice | Returns locally transmitted packets to the receive path. |
 | EthernetDevice | Adapts kclass network devices to knet's NetDevice interface and handles Ethernet and ARP. |

@@ -23,6 +23,7 @@ mod control;
 mod device;
 mod ip;
 mod link;
+mod netfilter;
 pub mod netlink;
 mod network;
 mod runtime;
