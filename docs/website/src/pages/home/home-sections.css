@@ -18,16 +18,16 @@ section.home-section:is(
   margin-bottom: 2.5rem;
 }
 .home-section .home-section-title,
-.home-section .kernel-explorer-heading h2,
 .home-section.kernel-architecture > h2,
 .home-section.xkernel-architectures h2,
 .home-section .xkernel-values > h2,
 .home-section .xkernel-cta h2 {
-  font-size: clamp(1.1rem, 2vw, 1.6rem);
+  /* Same exe.dev composer scale as .kernel-explorer-heading h2. */
+  font-size: 1rem;
   font-weight: 400;
   line-height: 1.6;
   letter-spacing: normal;
-  color: #64748b;
+  color: #334155;
 }
 .home-section .home-section-title {
   margin: 0;

@@ -10,9 +10,11 @@
   margin-bottom: 2.5rem;
 }
 .kernel-explorer-heading h2 {
-  font-size: clamp(1.25rem, 2vw, 1.6rem);
+  /* exe.dev composer scale, independent of the other home-section headings. */
+  font-size: 1rem;
   font-weight: 400;
-  color: #64748b;
+  line-height: 1.6;
+  color: #334155;
   margin: 0;
 }
 .kernel-kind-row {
@@ -30,17 +32,22 @@
   padding: 5px 12px !important;
   border-radius: 999px;
   color: var(--text-color-secondary);
-  font-size: 12px;
+  font-size: 13px;
 }
 .kernel-module-path strong {
   font-weight: 600;
   color: var(--text-color-secondary);
 }
 .kernel-prompt-copy h3 {
-  font-size: clamp(1.3rem, 2.8vw, 1.75rem);
+  /* exe.dev composer scale: same size as the heading above the buttons. */
+  font-size: 1rem;
   font-weight: 400;
-  color: #64748b;
+  line-height: 1.6;
+  color: #334155;
   margin: 2rem 0 0.8rem;
+}
+:root[data-theme="dark"] .kernel-prompt-copy h3 {
+  color: #a1a1aa;
 }
 .kernel-prompt-copy p {
   max-width: 700px;
@@ -72,17 +79,17 @@
   text-align: center;
   margin: 2rem auto 0;
   font:
-    0.85rem/1.8 JetBrains Mono,
+    12px/1.8 JetBrains Mono,
     monospace;
 }
 .kernel-module-caption strong {
   display: block;
-  color: #667383;
+  color: #334155;
   font-weight: 500;
 }
 .kernel-module-caption span {
   display: block;
-  color: #8292a2;
+  color: #64748b;
 }
 @media (max-width: 600px) {
   .kernel-explorer {
@@ -92,7 +99,7 @@
     margin-bottom: 2.3rem;
   }
   .kernel-explorer-heading h2 {
-    font-size: 1.1rem;
+    font-size: 1rem;
   }
   .kernel-kind-row {
     display: flex;
@@ -117,7 +124,7 @@
     border-radius: 12px;
   }
   .kernel-prompt-copy h3 {
-    font-size: 1.3rem;
+    font-size: 1rem;
   }
   .kernel-prompt-copy p {
     font-size: 0.78rem;
