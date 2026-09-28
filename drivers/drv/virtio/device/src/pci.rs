@@ -300,11 +300,11 @@ pub fn resolve_legacy_irq(
     spec: &driver_core::IrqSpec,
     irq_provider: &'static dyn IrqOp,
 ) -> Option<usize> {
-    if spec.number == 0 {
-        return None;
-    }
+    // The bus stores the firmware route as controller + hwirq (number 0 per
+    // the IrqSpec contract); map it to the OS-visible virq here.
+    let hwirq = spec.hwirq?;
     let desc = IrqRouteDesc {
-        hwirq: spec.number,
+        hwirq,
         trigger: core_trigger_to_kind(spec.trigger),
         controller: match spec.controller {
             Some(driver_core::IrqControllerKind::Gic) => IrqController::Gic,

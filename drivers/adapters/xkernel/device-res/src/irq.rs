@@ -194,8 +194,15 @@ fn irq_resource_to_kirq_spec(irq: IrqResource) -> kirq::IrqSpec {
     let hwirq = irq.hwirq.unwrap_or(irq.number);
     let controller = irq.controller.unwrap_or(DevIrqController::Unknown);
     let mut desc = kirq::IrqDesc::new(hwirq, dev_irq_trigger_to_kirq(irq.trigger))
-        .with_controller(dev_irq_controller_to_kirq(controller))
-        .with_virq(irq.number);
+        .with_controller(dev_irq_controller_to_kirq(controller));
+    // Only pin the logical irq when the caller actually resolved one
+    // (number != 0). A firmware route (number 0 + hwirq + controller) maps
+    // through the controller's domain: an existing mapping is reused, a
+    // fresh dynamic virq is allocated — never a collision with a stale
+    // "preferred" number.
+    if irq.number != 0 {
+        desc = desc.with_virq(irq.number);
+    }
     if let Some(domain) = dev_irq_controller_to_kirq_domain(controller) {
         desc = desc.with_domain(domain);
     }

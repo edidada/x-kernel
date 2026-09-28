@@ -417,26 +417,43 @@ pub fn syscon_poweroff() -> Option<SysconControl> {
 pub fn interrupt_descs(node: FdtNode<'static, 'static>) -> Vec<InterruptInfo> {
     let mut out = Vec::new();
 
+    // Flat `interrupts`: the specifier width comes from the interrupt
+    // parent's `#interrupt-cells` (Linux of_irq_parse_one does the same —
+    // never guessed from the property length: a PLIC node with three
+    // one-cell interrupts <5 6 7> is length 3 and must not parse as one
+    // three-cell specifier).
     if let Some(parent) = interrupt_parent_node(node) {
         let controller = controller_kind(parent);
-        if let Some(value) = node.property("interrupts").map(|prop| prop.value) {
-            for width in [3usize, 1] {
-                if value.is_empty() || value.len() % (width * 4) != 0 {
-                    continue;
-                }
-                for chunk in value.chunks_exact(width * 4) {
-                    let cells: Vec<u32> = chunk
-                        .chunks_exact(4)
-                        .map(|w| u32::from_be_bytes(w.try_into().unwrap()))
-                        .collect();
-                    if let Some(info) = parse_interrupt_by_controller(controller, &cells) {
-                        out.push(info);
+        if let Some(cells_width) = property_u32(parent, "#interrupt-cells") {
+            let width = cells_width as usize;
+            if let Some(value) = node.property("interrupts").map(|prop| prop.value) {
+                if !value.is_empty() && value.len() % (width * 4) == 0 {
+                    for chunk in value.chunks_exact(width * 4) {
+                        let cells: Vec<u32> = chunk
+                            .chunks_exact(4)
+                            .map(|w| u32::from_be_bytes(w.try_into().unwrap()))
+                            .collect();
+                        if let Some(info) = parse_interrupt_by_controller(controller, &cells) {
+                            out.push(info);
+                        }
                     }
-                }
-                if !out.is_empty() {
                     return out;
                 }
+                if !value.is_empty() {
+                    log::warn!(
+                        "DT node '{}': interrupts property is {} bytes, not a multiple of \
+                         #interrupt-cells={} — skipped",
+                        node.name,
+                        value.len(),
+                        width
+                    );
+                }
             }
+        } else {
+            log::warn!(
+                "DT node '{}': interrupt parent has no #interrupt-cells — interrupts skipped",
+                node.name
+            );
         }
     }
 

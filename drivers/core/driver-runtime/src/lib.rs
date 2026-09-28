@@ -40,8 +40,9 @@ use alloc::sync::Arc;
 
 pub use clk::ClkRegistry;
 use device_res::{
-    DmaAllocation, DmaOp, DmaSpec, IrqEvent as ResIrqEvent, IrqHandler as ResIrqHandler, IrqOp,
-    IrqResource, IrqTrigger as ResIrqTrigger, MmioMapping, MmioOp, ResError,
+    DmaAllocation, DmaOp, DmaSpec, IrqController, IrqEvent as ResIrqEvent,
+    IrqHandler as ResIrqHandler, IrqOp, IrqResource, IrqTrigger as ResIrqTrigger, MmioMapping,
+    MmioOp, ResError,
 };
 use device_res_xkernel::XKernelResourceProvider;
 use driver_core::{
@@ -88,6 +89,16 @@ fn map_res_error(err: ResError) -> RuntimeError {
         ResError::Busy => RuntimeError::Busy,
         ResError::Unsupported => RuntimeError::Unsupported,
     }
+}
+
+fn map_controller(kind: Option<driver_core::IrqControllerKind>) -> Option<IrqController> {
+    Some(match kind? {
+        driver_core::IrqControllerKind::Gic => IrqController::Gic,
+        driver_core::IrqControllerKind::Plic => IrqController::Plic,
+        driver_core::IrqControllerKind::IoApic => IrqController::IoApic,
+        driver_core::IrqControllerKind::LoongArchExtioi => IrqController::LoongArchExtioi,
+        driver_core::IrqControllerKind::Unknown => IrqController::Unknown,
+    })
 }
 
 fn map_trigger(trigger: driver_core::IrqTrigger) -> ResIrqTrigger {
@@ -196,7 +207,12 @@ impl DeviceServices for XKernelRuntime {
         name: &'static str,
         handler: IrqHandlerFn,
     ) -> Result<DevIrq, RuntimeError> {
-        let resource = IrqResource::new(spec.number, map_trigger(spec.trigger));
+        // Preserve the firmware route: with controller (+ hwirq) present the
+        // provider maps through the controller's irq domain; a bare number
+        // becomes PlainVirq and assumes the bus already resolved it.
+        let mut resource = IrqResource::new(spec.number, map_trigger(spec.trigger));
+        resource.controller = map_controller(spec.controller);
+        resource.hwirq = spec.hwirq;
         let adapted: Arc<dyn ResIrqHandler> = Arc::new(AdaptedIrqHandler { handler });
         let token = self
             .provider

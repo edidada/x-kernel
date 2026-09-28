@@ -153,7 +153,13 @@ impl DriverOps<PlatformBus> for Pl011Driver {
             },
             mmio.base,
             clk.as_ref().map(|c| c.get_rate()).unwrap_or(0),
-            irq.as_ref().map(|i| i.number()).unwrap_or(usize::MAX),
+            // Log the hardware line (the descriptor's hwirq): for
+            // route-style specs the DevIrq number is 0 until the domain
+            // mapping resolves it.
+            dev.irq(0)
+                .ok()
+                .and_then(|spec| spec.hwirq)
+                .unwrap_or(usize::MAX),
         );
         let _ = RuntimeError::NotFound; // keep error vocabulary imported for future use
         Ok(Pl011Data {

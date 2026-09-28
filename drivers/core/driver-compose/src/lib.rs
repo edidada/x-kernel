@@ -181,10 +181,23 @@ fn build_descriptor(dev: firmware::FirmwareDevice) {
         )));
     }
     for irq in &dev.irqs {
-        resources.push_kind(ResourceKind::Irq(driver_core::IrqSpec::global(
-            irq.irq,
-            map_trigger(irq.trigger),
-        )));
+        // Keep the firmware route intact: controller + controller-relative
+        // hwirq travel with the resource, and the runtime maps them through
+        // the controller's irq domain at request time (Linux keeps DT spec
+        // cells until irq_create_of_mapping). Compressing to a bare global
+        // number only worked where the domain map is the identity (QEMU).
+        let mut spec = driver_core::IrqSpec::global(0, map_trigger(irq.trigger));
+        // Per IrqSpec's field contract: number 0 + hwirq means "resolve via
+        // the controller's irq domain at request time". The DT number IS the
+        // controller-relative hwirq (GIC 32+SPI math applied by the parser),
+        // not an OS-visible virq.
+        spec.controller = Some(match irq.controller {
+            firmware::InterruptControllerKind::Gic => driver_core::IrqControllerKind::Gic,
+            firmware::InterruptControllerKind::Plic => driver_core::IrqControllerKind::Plic,
+            firmware::InterruptControllerKind::Unknown => driver_core::IrqControllerKind::Unknown,
+        });
+        spec.hwirq = Some(irq.irq);
+        resources.push_kind(ResourceKind::Irq(spec));
     }
     for spec in &dev.clock_specs {
         let entry_kind = ResourceKind::Clk(driver_core::ClkSpec::by_phandle_index(
