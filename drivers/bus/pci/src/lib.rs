@@ -24,6 +24,7 @@ use khal::firmware::devices as fw;
 // crates (e.g. virtio) can consume them without taking a direct `khal`
 // dependency.
 pub use khal::firmware::devices::{InterruptControllerKind, InterruptTrigger};
+use lazyinit::LazyInit;
 pub use virtio_drivers::transport::pci::bus::{
     BarInfo, Cam, CapabilityInfo, Command, ConfigurationAccess, DeviceFunction, DeviceFunctionInfo,
     HeaderType, MemoryBarType, MmioCam, PciError, PciRoot, Status,
@@ -162,26 +163,50 @@ pub fn iomap_mmio(
     NonNull::new(vaddr.as_mut_ptr()).ok_or(PciInitError::MappingFailed)
 }
 
-pub struct PciBus {
-    root: PciRoot<MmioCam<'static>>,
+/// The single boot-lifetime owner of the mapped ECAM window.
+///
+/// Every [`PciBus`] is a handle over this one mapping. The `iomap_device`
+/// reference taken at resolve time is deliberately never released: the
+/// config window must outlive all `'static` config-space aliases handed
+/// to transports, so the owner holds it for the system lifetime.
+static ECAM_MAPPING: LazyInit<EcamOwner> = LazyInit::new();
+
+/// Resolved state of the ECAM window, computed exactly once.
+enum EcamOwner {
+    /// No usable config space on this platform (PCI absent).
+    Absent,
+    /// The window exists but could not be mapped; the failure is cached
+    /// so every later `PciBus::new` reports the same error.
+    Failed(PciInitError),
+    /// The mapped window.
+    Mapped(EcamWindow),
+}
+
+struct EcamWindow {
+    base: SendPtr,
+    cam: Cam,
     config_base: u64,
     bus_end: u8,
     source: PciConfigSource,
 }
 
-impl PciBus {
-    /// Brings up the PCI bus over the resolved configuration window.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PciInitError::InvalidRange`] when no config space exists,
-    /// and [`PciInitError::NoMemory`] / [`PciInitError::MappingFailed`]
-    /// when the ECAM window cannot be mapped.
-    pub fn new(cam: Cam) -> Result<Self, PciInitError> {
+/// The mapped ECAM base as plain shareable data.
+///
+/// The pointer itself is never dereferenced through this wrapper; every
+/// consumer re-derives an  under its own SAFETY obligations.
+/// Sharing the address across threads is sound for the same reason a
+///  would be.
+#[derive(Clone, Copy)]
+struct SendPtr(NonNull<u8>);
+unsafe impl Send for SendPtr {}
+unsafe impl Sync for SendPtr {}
+
+impl EcamOwner {
+    fn resolve(cam: Cam) -> Self {
         let (config_base, bus_end, source) = pci_config_space();
         if config_base == 0 {
             log::info!("PCI: no config space available; skipping PCI bus init");
-            return Err(PciInitError::InvalidRange);
+            return Self::Absent;
         }
         if source == PciConfigSource::Firmware
             && let Some(host) = fw::pci_host()
@@ -197,7 +222,7 @@ impl PciBus {
                     host.cam,
                     cam
                 );
-                return Self::new_static(cam);
+                return Self::resolve_static(cam);
             }
             log::info!(
                 "PCI bus using firmware host: cam={:?} ecam={:#x} bus_end={:#x}",
@@ -207,32 +232,95 @@ impl PciBus {
             );
         }
         let ecam_size = pci_ecam_size(bus_end, cam);
-        let base_vaddr = iomap_mmio(config_base as usize, ecam_size, "pci-ecam")?;
-        // SAFETY: `base_vaddr` maps the entire ECAM window described by `cam`.
-        let mmio_cam = unsafe { MmioCam::new(base_vaddr.as_ptr(), cam) };
-        let root = PciRoot::new(mmio_cam);
-        Ok(Self {
-            root,
-            config_base,
-            bus_end,
-            source,
-        })
+        match iomap_mmio(config_base as usize, ecam_size, "pci-ecam") {
+            Ok(base) => Self::Mapped(EcamWindow {
+                base: SendPtr(base),
+                cam,
+                config_base,
+                bus_end,
+                source,
+            }),
+            Err(err) => Self::Failed(err),
+        }
     }
 
-    fn new_static(cam: Cam) -> Result<Self, PciInitError> {
+    fn resolve_static(cam: Cam) -> Self {
         let config_base = kbuild_config::PCI_ECAM_BASE as u64;
         let bus_end = kbuild_config::PCI_BUS_END as u8;
         let ecam_size = pci_ecam_size(bus_end, cam);
-        let base_vaddr = iomap_mmio(config_base as usize, ecam_size, "pci-ecam")?;
-        // SAFETY: `base_vaddr` maps the entire static ECAM window described by `cam`.
-        let mmio_cam = unsafe { MmioCam::new(base_vaddr.as_ptr(), cam) };
-        let root = PciRoot::new(mmio_cam);
-        Ok(Self {
-            root,
-            config_base,
-            bus_end,
-            source: PciConfigSource::Static,
-        })
+        match iomap_mmio(config_base as usize, ecam_size, "pci-ecam") {
+            Ok(base) => Self::Mapped(EcamWindow {
+                base: SendPtr(base),
+                cam,
+                config_base,
+                bus_end,
+                source: PciConfigSource::Static,
+            }),
+            Err(err) => Self::Failed(err),
+        }
+    }
+}
+
+pub struct PciBus {
+    root: PciRoot<MmioCam<'static>>,
+    config_base: u64,
+    bus_end: u8,
+    source: PciConfigSource,
+}
+
+impl PciBus {
+    /// Brings up the PCI bus over the resolved configuration window.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PciInitError::InvalidRange`] when no config space exists,
+    /// and [`PciInitError::NoMemory`] / [`PciInitError::MappingFailed`]
+    /// when the ECAM window cannot be mapped.
+    /// Bring up (or attach to) the shared PCI bus over the resolved
+    /// configuration window.
+    ///
+    /// The ECAM mapping has exactly one owner ([`ECAM_MAPPING`]) for the
+    /// whole system lifetime: the first call resolves the window
+    /// (firmware host, with the kbuild static fallback) and maps it once;
+    /// every later call is a cheap handle over that same mapping — no
+    /// extra `iomap_device` reference is taken and no side effect runs.
+    /// This is the Linux `pci_remap_iospace()` model: the host bridge
+    /// config window is a boot-lifetime resource and is never unmapped,
+    /// which is also what keeps the `'static` config-space aliases (the
+    /// vendored `MmioCam` copies inside transports, the x86 MSI-X state
+    /// root) alive for as long as any device exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PciInitError::InvalidRange`] when no config space exists
+    /// (cached: platforms without PCI fail once, not per probe), and
+    /// [`PciInitError::NoMemory`] / [`PciInitError::MappingFailed`] when
+    /// the ECAM window cannot be mapped.
+    pub fn new(cam: Cam) -> Result<Self, PciInitError> {
+        ECAM_MAPPING.call_once(|| EcamOwner::resolve(cam));
+        match ECAM_MAPPING.get().expect("ECAM_MAPPING call_once ran") {
+            EcamOwner::Absent => Err(PciInitError::InvalidRange),
+            EcamOwner::Failed(err) => Err(*err),
+            EcamOwner::Mapped(ecam) => {
+                if ecam.cam != cam {
+                    log::warn!(
+                        "PCI: ECAM owner initialized for {:?} but {:?} requested",
+                        ecam.cam,
+                        cam
+                    );
+                    return Err(PciInitError::InvalidRange);
+                }
+                // SAFETY: the mapping is owned by `ECAM_MAPPING` for the
+                // system lifetime and covers the whole window for `cam`.
+                let mmio_cam = unsafe { MmioCam::new(ecam.base.0.as_ptr(), cam) };
+                Ok(Self {
+                    root: PciRoot::new(mmio_cam),
+                    config_base: ecam.config_base,
+                    bus_end: ecam.bus_end,
+                    source: ecam.source,
+                })
+            }
+        }
     }
 
     pub fn config_base(&self) -> u64 {
