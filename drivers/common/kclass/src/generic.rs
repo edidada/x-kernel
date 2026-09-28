@@ -458,7 +458,7 @@ mod tests {
 
     use super::*;
 
-    fn loc(id: u16) -> DeviceLocation {
+    fn loc(id: u32) -> DeviceLocation {
         DeviceLocation::FirmwareNode { id }
     }
 

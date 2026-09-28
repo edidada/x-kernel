@@ -93,7 +93,7 @@ pub enum DeviceLocation {
         size: usize,
     },
     FirmwareNode {
-        id: u16,
+        id: u32,
     },
     PlatformStatic {
         id: u16,

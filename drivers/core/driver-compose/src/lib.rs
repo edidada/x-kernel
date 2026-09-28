@@ -23,7 +23,7 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU16, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use driver_core::{
     Bus, IrqTrigger, ResourceKind, ResourceMap,
@@ -135,10 +135,19 @@ fn enumerate_firmware_devices() {
 /// order (stable within one boot). Every DT node gets a distinct
 /// `DeviceLocation::FirmwareNode`, so devnode paths, uevent DEVPATH and
 /// class parentage stay unique per device.
-static FIRMWARE_NODE_ID: AtomicU16 = AtomicU16::new(0);
+///
+/// u32 with an exhaustion guard: a wrap would silently hand two devices
+/// the same location, so the allocator refuses (and logs once) instead —
+/// a 4-billion-node device tree is a firmware error, not a case to mask.
+static FIRMWARE_NODE_ID: AtomicU32 = AtomicU32::new(0);
 
-fn next_firmware_node_id() -> u16 {
-    FIRMWARE_NODE_ID.fetch_add(1, Ordering::Relaxed)
+fn next_firmware_node_id() -> Option<u32> {
+    let id = FIRMWARE_NODE_ID.fetch_add(1, Ordering::Relaxed);
+    if id == u32::MAX {
+        log::error!("firmware node id space exhausted; skipping further DT devices");
+        return None;
+    }
+    Some(id)
 }
 
 fn enumerate_firmware_nodes_direct() {
@@ -233,11 +242,12 @@ fn build_descriptor(dev: firmware::FirmwareDevice) {
         clock_output_name: dev.clock_output_name,
     };
 
+    let Some(node_id) = next_firmware_node_id() else {
+        return;
+    };
     let descriptor = DeviceDescriptor::new(
         <PlatformBus as Bus>::ID,
-        DeviceLocation::FirmwareNode {
-            id: next_firmware_node_id(),
-        },
+        DeviceLocation::FirmwareNode { id: node_id },
         DeviceIdentity::Platform(PlatformIdentity {
             firmware_id: Some(alloc::string::String::from(dev.firmware_id)),
             alias: None,
