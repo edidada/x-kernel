@@ -31,7 +31,7 @@ pub fn discover(domain: &driver_core::DeviceDomain) {
     };
 
     let bus_end = pci.bus_end();
-    let (root, config) = pci.parts_mut();
+    let root = pci.root_mut();
 
     for bus_nr in 0..=bus_end {
         for (bdf, info) in root.enumerate_bus(bus_nr) {
@@ -75,7 +75,7 @@ pub fn discover(domain: &driver_core::DeviceDomain) {
             // Legacy INTx route: firmware (OF/ACPI) first, then the arch
             // static fallback. Resolved once here — probe only maps the
             // stored route to a virtual irq.
-            if let Some(spec) = resolve_legacy_route(config, bdf) {
+            if let Some(spec) = resolve_legacy_route(root, bdf) {
                 resources.push_kind(ResourceKind::Irq(spec));
             }
 
@@ -127,11 +127,11 @@ fn map_trigger(trigger: crate::InterruptTrigger) -> driver_core::IrqTrigger {
 /// This centralizes what the transport probe used to re-read per probe:
 /// route resolution belongs to the bus (done once at discovery), virtual
 /// irq mapping belongs to the runtime provider (done at probe).
-fn resolve_legacy_route(
-    config: &crate::PciConfigAccess,
+fn resolve_legacy_route<C: crate::ConfigurationAccess>(
+    root: &crate::PciRoot<C>,
     bdf: crate::DeviceFunction,
 ) -> Option<IrqSpec> {
-    if let Some(route) = crate::legacy_interrupt_route(config, bdf) {
+    if let Some(route) = crate::legacy_interrupt_route(root, bdf) {
         let mut spec = IrqSpec::global(route.irq, map_trigger(route.trigger));
         // khal's firmware enum only knows Gic/Plic today; anything else the
         // firmware stated (or did not) maps to Unknown and the provider
@@ -149,7 +149,7 @@ fn resolve_legacy_route(
     // from config space; other ports use fixed per-device lines.
     cfg_select! {
         target_arch = "x86_64" => {
-            let word = config.read_word(bdf, 0x3C);
+            let word = root.configuration_access.read_word(bdf, 0x3C);
             let irq_line = (word & 0xff) as usize;
             if irq_line == 0 || irq_line == 0xff {
                 return None;

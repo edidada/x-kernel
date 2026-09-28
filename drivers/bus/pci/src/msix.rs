@@ -17,7 +17,7 @@ use core::ptr::NonNull;
 use tock_registers::interfaces::{ReadWriteable, Readable, Writeable};
 use tock_registers::{register_bitfields, registers::ReadWrite};
 
-use super::{Command, ConfigurationAccess, DeviceFunction, PciConfigAccess, PciRoot};
+use super::{Command, ConfigurationAccess, DeviceFunction, PciRoot};
 
 /// PCI MSI-X capability ID.
 pub const MSIX_CAP_ID: u8 = 0x11;
@@ -29,7 +29,6 @@ const MSG_CTRL_MSIX_ENABLE: u16 = 1 << 15;
 const MSIX_ENABLE: u32 = (MSG_CTRL_MSIX_ENABLE as u32) << 16;
 const MSIX_FUNCTION_MASK: u32 = (MSG_CTRL_FUNCTION_MASK as u32) << 16;
 const MAX_MSIX_TABLE_ENTRIES: u16 = 2048;
-const STATUS_COMMAND_OFFSET: u16 = 0x04;
 
 /// Parsed MSI-X capability information for a PCI device.
 #[derive(Debug, Clone, Copy)]
@@ -134,7 +133,6 @@ impl MsixTable {
 /// Returns `None` if the device does not advertise MSI-X (capability ID 0x11).
 pub fn find_msix_capability<C: ConfigurationAccess>(
     root: &PciRoot<C>,
-    config: &PciConfigAccess,
     bdf: DeviceFunction,
 ) -> Option<MsixCapability> {
     let cap_info = root.capabilities(bdf).find(|cap| cap.id == MSIX_CAP_ID)?;
@@ -149,12 +147,16 @@ pub fn find_msix_capability<C: ConfigurationAccess>(
     let function_masked = msg_ctrl & MSG_CTRL_FUNCTION_MASK != 0;
 
     // Table BIR/Offset register is at cap_offset + 4.
-    let table_bir_word = config.read_word(bdf, cap_offset + 4);
+    let table_bir_word = root
+        .configuration_access
+        .read_word(bdf, (cap_offset + 4) as u8);
     let table_bar = (table_bir_word & 0x7) as u8;
     let table_offset = table_bir_word & !0x7;
 
     // PBA BIR/Offset register is at cap_offset + 8.
-    let pba_bir_word = config.read_word(bdf, cap_offset + 8);
+    let pba_bir_word = root
+        .configuration_access
+        .read_word(bdf, (cap_offset + 8) as u8);
     let pba_bar = (pba_bir_word & 0x7) as u8;
     let pba_offset = pba_bir_word & !0x7;
 
@@ -208,7 +210,6 @@ pub fn validate_msix_layout(
 /// Enables MSI-X with Function Mask set and disables legacy INTx.
 pub fn prepare_msix<C: ConfigurationAccess>(
     root: &mut PciRoot<C>,
-    config: &mut PciConfigAccess,
     bdf: DeviceFunction,
     cap: &MsixCapability,
 ) {
@@ -217,8 +218,14 @@ pub fn prepare_msix<C: ConfigurationAccess>(
     // Message Control is in bits 31:16 of that word.
     // The MSI-X Enable bit is bit 15 of Message Control = bit 31 of the word.
     // Function Mask is bit 14 of Message Control = bit 30 of the word.
-    let word = config.read_word(bdf, cap.cap_offset);
-    config.write_word(bdf, cap.cap_offset, word | MSIX_ENABLE | MSIX_FUNCTION_MASK);
+    let word = root
+        .configuration_access
+        .read_word(bdf, cap.cap_offset as u8);
+    root.configuration_access.write_word(
+        bdf,
+        cap.cap_offset as u8,
+        word | MSIX_ENABLE | MSIX_FUNCTION_MASK,
+    );
 
     // Disable legacy INTx to avoid spurious interrupts on the shared IRQ line.
     let (_, cmd) = root.get_status_command(bdf);
@@ -226,55 +233,47 @@ pub fn prepare_msix<C: ConfigurationAccess>(
 }
 
 /// Clears the MSI-X Function Mask after the device vectors are ready.
-pub fn activate_msix(config: &mut PciConfigAccess, bdf: DeviceFunction, cap: &MsixCapability) {
-    let word = config.read_word(bdf, cap.cap_offset);
-    config.write_word(bdf, cap.cap_offset, word & !MSIX_FUNCTION_MASK);
+pub fn activate_msix<C: ConfigurationAccess>(
+    root: &mut PciRoot<C>,
+    bdf: DeviceFunction,
+    cap: &MsixCapability,
+) {
+    let word = root
+        .configuration_access
+        .read_word(bdf, cap.cap_offset as u8);
+    root.configuration_access
+        .write_word(bdf, cap.cap_offset as u8, word & !MSIX_FUNCTION_MASK);
 }
 
 /// Disables MSI-X and re-enables legacy INTx delivery.
 pub fn disable_msix<C: ConfigurationAccess>(
     root: &mut PciRoot<C>,
-    config: &mut PciConfigAccess,
     bdf: DeviceFunction,
     cap: &MsixCapability,
 ) {
-    restore_msix_message_control(config, bdf, cap);
+    restore_msix_message_control(root, bdf, cap);
 
     let (_, cmd) = root.get_status_command(bdf);
     root.set_command(bdf, cmd & !Command::INTERRUPT_DISABLE);
 }
 
-/// Disables MSI-X using direct config-space access.
-///
-/// This is used after the PCI root object is no longer available, for example
-/// when tearing down a transport that already owns its copied config accessor.
-pub fn disable_msix_with_config(
-    config: &mut PciConfigAccess,
+fn restore_msix_message_control<C: ConfigurationAccess>(
+    root: &mut PciRoot<C>,
     bdf: DeviceFunction,
     cap: &MsixCapability,
 ) {
-    restore_msix_message_control(config, bdf, cap);
-
-    let status_command = config.read_word(bdf, STATUS_COMMAND_OFFSET);
-    let command = Command::from_bits_truncate(status_command as u16) & !Command::INTERRUPT_DISABLE;
-    // PCI Status bits are write-one-to-clear. Write zero to the upper Status
-    // half while updating the lower Command half.
-    config.write_word(bdf, STATUS_COMMAND_OFFSET, u32::from(command.bits()));
-}
-
-fn restore_msix_message_control(
-    config: &mut PciConfigAccess,
-    bdf: DeviceFunction,
-    cap: &MsixCapability,
-) {
-    let mut word = config.read_word(bdf, cap.cap_offset) & !(MSIX_ENABLE | MSIX_FUNCTION_MASK);
+    let mut word = root
+        .configuration_access
+        .read_word(bdf, cap.cap_offset as u8)
+        & !(MSIX_ENABLE | MSIX_FUNCTION_MASK);
     if cap.enabled {
         word |= MSIX_ENABLE;
     }
     if cap.function_masked {
         word |= MSIX_FUNCTION_MASK;
     }
-    config.write_word(bdf, cap.cap_offset, word);
+    root.configuration_access
+        .write_word(bdf, cap.cap_offset as u8, word);
 }
 
 /// Configures a single MSI-X table entry.

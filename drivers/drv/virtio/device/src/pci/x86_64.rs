@@ -3,14 +3,11 @@
 // See LICENSES for license details.
 
 use device_res::{IrqController, IrqOp, IrqRouteDesc, IrqTrigger, MsiResource};
-use pci::{
-    PciConfigAccess,
-    msix::{self, MsixCapability, MsixTable, MsixTableEntry, PCI_BAR_COUNT},
-};
+use pci::msix::{self, MsixCapability, MsixTable, MsixTableEntry, PCI_BAR_COUNT};
 use safe_mmio::{UniqueMmioPointer, field, field_shared, fields::ReadPureWrite};
 use virtio_drivers::{
     PhysAddr,
-    transport::pci::bus::{Command, ConfigurationAccess, DeviceFunction, PciRoot},
+    transport::pci::bus::{Command, ConfigurationAccess, DeviceFunction, MmioCam, PciRoot},
 };
 
 use crate::VirtIoHal;
@@ -23,7 +20,7 @@ impl Drop for super::PciTransport {
 
 pub(super) struct PciMsixState {
     common_cfg: VirtioPciCommonCfg,
-    config: PciConfigAccess,
+    root: PciRoot<MmioCam<'static>>,
     cap: MsixCapability,
     bdf: DeviceFunction,
     irq_provider: &'static dyn IrqOp,
@@ -103,19 +100,13 @@ impl PciMsixState {
         self.write_msix_vector(CommonCfgMsixVector::Queue, Self::QUEUE_TABLE_ENTRY, "queue")
     }
 
-    pub(super) fn activate(&self) {
-        let mut config = self.config;
-        msix::activate_msix(&mut config, self.bdf, &self.cap);
+    pub(super) fn activate(&mut self) {
+        msix::activate_msix(&mut self.root, self.bdf, &self.cap);
     }
 
-    pub(super) fn release(self) {
-        self.disable();
+    pub(super) fn release(mut self) {
+        msix::disable_msix(&mut self.root, self.bdf, &self.cap);
         self.irq_provider.free_msix(self.msi);
-    }
-
-    fn disable(&self) {
-        let mut config = self.config;
-        msix::disable_msix_with_config(&mut config, self.bdf, &self.cap);
     }
 
     fn write_msix_vector(
@@ -214,10 +205,9 @@ struct VirtioPciRegion {
     length: u32,
 }
 
-fn find_virtio_common_cfg<C: ConfigurationAccess>(
-    root: &PciRoot<C>,
+fn find_virtio_common_cfg(
+    root: &PciRoot<MmioCam<'static>>,
     bdf: DeviceFunction,
-    config: &PciConfigAccess,
 ) -> Option<VirtioPciRegion> {
     const PCI_CAP_ID_VNDR: u8 = 0x09;
     const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;
@@ -237,9 +227,16 @@ fn find_virtio_common_cfg<C: ConfigurationAccess>(
         }
 
         let cap_offset = capability.offset as u16;
-        let bar = (config.read_word(bdf, cap_offset + CAP_BAR_OFFSET) & 0xff) as u8;
-        let offset = config.read_word(bdf, cap_offset + CAP_BAR_OFFSET_OFFSET);
-        let length = config.read_word(bdf, cap_offset + CAP_LENGTH_OFFSET);
+        let bar = (root
+            .configuration_access
+            .read_word(bdf, (cap_offset + CAP_BAR_OFFSET) as u8)
+            & 0xff) as u8;
+        let offset = root
+            .configuration_access
+            .read_word(bdf, (cap_offset + CAP_BAR_OFFSET_OFFSET) as u8);
+        let length = root
+            .configuration_access
+            .read_word(bdf, (cap_offset + CAP_LENGTH_OFFSET) as u8);
 
         return Some(VirtioPciRegion {
             bar,
@@ -251,12 +248,11 @@ fn find_virtio_common_cfg<C: ConfigurationAccess>(
     None
 }
 
-fn map_virtio_common_cfg<H: VirtIoHal, C: ConfigurationAccess>(
-    root: &mut PciRoot<C>,
+fn map_virtio_common_cfg<H: VirtIoHal>(
+    root: &mut PciRoot<MmioCam<'static>>,
     bdf: DeviceFunction,
-    config: &PciConfigAccess,
 ) -> Option<VirtioPciCommonCfg> {
-    let region = find_virtio_common_cfg(root, bdf, config)?;
+    let region = find_virtio_common_cfg(root, bdf)?;
     if region.length < VirtioPciCommonCfg::MIN_LEN {
         log::warn!(
             "PCI virtio device at {:?}: common cfg too small: {} bytes",
@@ -299,17 +295,16 @@ fn map_virtio_common_cfg<H: VirtIoHal, C: ConfigurationAccess>(
     Some(VirtioPciCommonCfg::new(common_cfg))
 }
 
-pub(super) fn setup_msix<H: VirtIoHal, C: ConfigurationAccess>(
-    root: &mut PciRoot<C>,
+pub(super) fn setup_msix<H: VirtIoHal>(
+    root: &mut PciRoot<MmioCam<'static>>,
     bdf: DeviceFunction,
-    config: &mut PciConfigAccess,
     irq_provider: &'static dyn IrqOp,
 ) -> Option<(usize, PciMsixState)> {
     use core::mem::size_of;
 
     const REQUIRED_MSIX_TABLE_ENTRIES: u16 = 2;
 
-    let cap = msix::find_msix_capability(root, config, bdf)?;
+    let cap = msix::find_msix_capability(root, bdf)?;
     if cap.table_bar >= PCI_BAR_COUNT || cap.pba_bar >= PCI_BAR_COUNT {
         log::warn!(
             "PCI virtio device at {:?}: invalid MSI-X BAR index: table={} pba={}",
@@ -333,7 +328,7 @@ pub(super) fn setup_msix<H: VirtIoHal, C: ConfigurationAccess>(
     root.set_command(bdf, command | Command::MEMORY_SPACE | Command::BUS_MASTER);
 
     let prepared = (|| {
-        let common_cfg = map_virtio_common_cfg::<H, C>(root, bdf, config)?;
+        let common_cfg = map_virtio_common_cfg::<H>(root, bdf)?;
 
         let bar_info = match root.bar_info(bdf, cap.table_bar) {
             Ok(Some(info)) => info,
@@ -371,7 +366,7 @@ pub(super) fn setup_msix<H: VirtIoHal, C: ConfigurationAccess>(
         return None;
     };
 
-    msix::prepare_msix(root, config, bdf, &cap);
+    msix::prepare_msix(root, bdf, &cap);
 
     for entry in 0..usize::from(REQUIRED_MSIX_TABLE_ENTRIES) {
         if msix::configure_msix_entry(&table, entry, msi.message.address, msi.message.data)
@@ -385,16 +380,24 @@ pub(super) fn setup_msix<H: VirtIoHal, C: ConfigurationAccess>(
             bdf,
             entry
         );
-        msix::disable_msix(root, config, bdf, &cap);
+        msix::disable_msix(root, bdf, &cap);
         irq_provider.free_msix(msi);
         root.set_command(bdf, command);
         return None;
     }
 
     let irq = msi.irq.number;
+    // SAFETY: the state-owned root aliases the probe root's ECAM window.
+    // This is sound here because the state's config-space accesses (MSI-X
+    // enable/mask word and command register writes) are volatile MMIO
+    // accesses serialized with the probe-time root: `setup_msix` holds the
+    // only `&mut PciRoot` until it returns, and the state's root is used
+    // only afterwards (activate) or at teardown (release), after the
+    // transport has quiesced.
+    let state_root = unsafe { PciRoot::new(root.configuration_access.unsafe_clone()) };
     let msix = PciMsixState {
         common_cfg,
-        config: *config,
+        root: state_root,
         cap,
         bdf,
         irq_provider,

@@ -288,15 +288,11 @@ impl XKernelRuntime {
         // capability walk.
         let mut pci_root =
             PciRootAccess::new(pci::support::pci_cam_kind()).map_err(|_| RuntimeError::Io)?;
-        let (root, config) = pci_root.parts_mut();
+        let root = pci_root.root_mut();
 
-        let (kind, transport, transport_irq) = virtio::probe_pci_transport_only::<
-            hal::Hal,
-            pci::MmioCam<'static>,
-        >(
-            root, bdf, &dev_info, config, resource_provider()
-        )
-        .ok_or(RuntimeError::BadState)?;
+        let (kind, transport, transport_irq) =
+            virtio::probe_pci_transport_only::<hal::Hal>(root, bdf, &dev_info, resource_provider())
+                .ok_or(RuntimeError::BadState)?;
 
         let irq = transport_irq.or_else(|| {
             descriptor

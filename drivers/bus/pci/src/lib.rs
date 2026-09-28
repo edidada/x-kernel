@@ -70,8 +70,6 @@ pub enum PciInitError {
     NoMemory,
     InvalidRange,
     MappingFailed,
-    /// The device exposes an invalid PCI BAR encoding.
-    InvalidBar,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,7 +164,6 @@ pub fn iomap_mmio(
 
 pub struct PciBus {
     root: PciRoot<MmioCam<'static>>,
-    config: PciConfigAccess,
     config_base: u64,
     bus_end: u8,
     source: PciConfigSource,
@@ -214,11 +211,8 @@ impl PciBus {
         // SAFETY: `base_vaddr` maps the entire ECAM window described by `cam`.
         let mmio_cam = unsafe { MmioCam::new(base_vaddr.as_ptr(), cam) };
         let root = PciRoot::new(mmio_cam);
-        // SAFETY: `base_vaddr` maps the entire ECAM window described by `cam`.
-        let config = unsafe { PciConfigAccess::new(base_vaddr.as_ptr(), cam) };
         Ok(Self {
             root,
-            config,
             config_base,
             bus_end,
             source,
@@ -233,11 +227,8 @@ impl PciBus {
         // SAFETY: `base_vaddr` maps the entire static ECAM window described by `cam`.
         let mmio_cam = unsafe { MmioCam::new(base_vaddr.as_ptr(), cam) };
         let root = PciRoot::new(mmio_cam);
-        // SAFETY: `base_vaddr` maps the entire static ECAM window described by `cam`.
-        let config = unsafe { PciConfigAccess::new(base_vaddr.as_ptr(), cam) };
         Ok(Self {
             root,
-            config,
             config_base,
             bus_end,
             source: PciConfigSource::Static,
@@ -256,8 +247,10 @@ impl PciBus {
         self.source
     }
 
-    pub fn parts_mut(&mut self) -> (&mut PciRoot<MmioCam<'static>>, &mut PciConfigAccess) {
-        (&mut self.root, &mut self.config)
+    /// Mutable access to the bus root (config space via the public
+    /// `configuration_access` field of the vendored `PciRoot`).
+    pub fn root_mut(&mut self) -> &mut PciRoot<MmioCam<'static>> {
+        &mut self.root
     }
 }
 
@@ -286,11 +279,11 @@ pub fn pci_bar_allocation_range() -> Option<(u64, u64, PciConfigSource)> {
     range
 }
 
-pub fn legacy_interrupt_route(
-    config: &PciConfigAccess,
+pub fn legacy_interrupt_route<C: ConfigurationAccess>(
+    root: &PciRoot<C>,
     bdf: DeviceFunction,
 ) -> Option<LegacyInterruptRoute> {
-    let word = config.read_word(bdf, 0x3C);
+    let word = root.configuration_access.read_word(bdf, 0x3C);
     let pin = ((word >> 8) & 0xff) as u8;
     if pin == 0 || pin == 0xff {
         log::info!(
@@ -316,103 +309,7 @@ pub fn legacy_interrupt_route(
     })
 }
 
-/// Provides read/write access to PCI configuration space registers.
-///
-/// The `virtio-drivers` crate exposes `PciRoot` but keeps its internal
-/// `config_read_word` / `config_write_word` methods `pub(crate)`. This type
-/// re-implements the same memory-mapped access so that callers outside of
-/// `virtio-drivers` (e.g. the MSI-X subsystem) can also read/write arbitrary
-/// configuration space registers.
-///
-/// Create one from the same MMIO base pointer and [`Cam`] type used for
-/// [`PciRoot`]. Both types reference the same underlying memory region.
-#[derive(Clone, Copy)]
-pub struct PciConfigAccess {
-    mmio_base: usize,
-    cam: Cam,
-}
-
-impl PciConfigAccess {
-    /// Creates a new `PciConfigAccess` from a raw MMIO base and CAM type.
-    ///
-    /// # Safety
-    ///
-    /// `mmio_base` must meet the same requirements as for [`PciRoot::new`]:
-    /// it must be a valid, 4-byte-aligned, appropriately-mapped MMIO pointer
-    /// valid for the lifetime of the program. The mapped ECAM window must be
-    /// large enough for every later BDF/register access performed through this
-    /// wrapper, and no other abstraction may violate MMIO aliasing rules for
-    /// the same config window.
-    pub unsafe fn new(mmio_base: *mut u8, cam: Cam) -> Self {
-        assert!(mmio_base as usize & 0x3 == 0);
-        Self {
-            mmio_base: mmio_base as usize,
-            cam,
-        }
-    }
-
-    /// Computes the byte offset of a register within the flat MMIO CAM window.
-    fn cam_offset(&self, device_function: DeviceFunction, register_offset: u16) -> u32 {
-        let bdf = (device_function.bus as u32) << 8
-            | (device_function.device as u32) << 3
-            | device_function.function as u32;
-        let shift = match self.cam {
-            Cam::MmioCam => 8,
-            Cam::Ecam => 12,
-        };
-        (bdf << shift) | (register_offset as u32 & !0x3)
-    }
-
-    /// Reads a 32-bit word from PCI configuration space.
-    ///
-    /// `register_offset` is the byte offset of the register; the two LSBs are
-    /// ignored (the access is always 32-bit aligned).
-    pub fn read_word(&self, device_function: DeviceFunction, register_offset: u16) -> u32 {
-        let address = self.cam_offset(device_function, register_offset);
-        // SAFETY: The pointer arithmetic stays within the MMIO window because
-        // cam_offset() produces offsets bounded by Cam::size().
-        let register = unsafe { (self.mmio_base as *mut u32).add((address >> 2) as usize) };
-        // SAFETY: Construction retains a mapped CAM window, and cam_offset
-        // selects a naturally aligned 32-bit configuration register within it.
-        unsafe { register.read_volatile() }
-    }
-
-    /// Writes a 16-bit halfword to PCI configuration space.
-    ///
-    /// `register_offset` is the byte offset; the LSB is ignored. This is useful
-    /// for registers such as PCI Command whose adjacent halfword has different
-    /// write semantics.
-    pub fn write_halfword(
-        &mut self,
-        device_function: DeviceFunction,
-        register_offset: u16,
-        data: u16,
-    ) {
-        let address =
-            self.cam_offset(device_function, register_offset) + u32::from(register_offset & 0x2);
-        // SAFETY: The pointer arithmetic stays within the MMIO window because
-        // cam_offset() produces offsets bounded by Cam::size(), and the added
-        // halfword offset stays inside that 32-bit configuration word.
-        let register = unsafe { (self.mmio_base as *mut u8).add(address as usize) }.cast::<u16>();
-        // SAFETY: cam_offset() returns a word-aligned address, and adding the
-        // selected halfword offset (zero or two) keeps the u16 access naturally
-        // aligned and within that 32-bit configuration word.
-        unsafe { register.write_volatile(data) };
-    }
-
-    /// Writes a 32-bit word to PCI configuration space.
-    ///
-    /// `register_offset` is the byte offset; the two LSBs are ignored.
-    pub fn write_word(&mut self, device_function: DeviceFunction, register_offset: u16, data: u32) {
-        let address = self.cam_offset(device_function, register_offset);
-        // SAFETY: Same as read_word.
-        let register = unsafe { (self.mmio_base as *mut u32).add((address >> 2) as usize) };
-        // SAFETY: Construction retains a mapped CAM window, and cam_offset
-        // selects a naturally aligned 32-bit configuration register within it.
-        unsafe { register.write_volatile(data) };
-    }
-}
-
+>>>>>>> 3d5d64b1b (refactor(pci): drop PciConfigAccess, use the vendored root's public config field)
 /// Sequential allocator for MMIO address space used by PCI Base Address Registers.
 ///
 /// This allocator manages a contiguous range of physical addresses and dispenses
@@ -430,7 +327,7 @@ pub struct PciRangeAllocator {
 /// # Errors
 ///
 /// Returns [`PciInitError::NoMemory`] when the allocator cannot satisfy a
-/// BAR request, or [`PciInitError::InvalidBar`] for an invalid device BAR encoding.
+/// BAR request.
 ///
 /// # Panics
 ///
@@ -444,10 +341,7 @@ pub fn configure_device<C: ConfigurationAccess>(
 ) -> Result<(), PciInitError> {
     let mut bar = 0;
     while bar < 6 {
-        let info = match root
-            .bar_info(bdf, bar)
-            .map_err(|_| PciInitError::InvalidBar)?
-        {
+        let info = match root.bar_info(bdf, bar).unwrap() {
             Some(info) => info,
             None => {
                 bar += 1;
@@ -466,7 +360,7 @@ pub fn configure_device<C: ConfigurationAccess>(
         {
             let new_addr = allocator
                 .as_mut()
-                .ok_or(PciInitError::NoMemory)?
+                .expect("No memory ranges available for PCI BARs!")
                 .alloc_buf(size as _)
                 .ok_or(PciInitError::NoMemory)?;
             if address_type == MemoryBarType::Width32 {
@@ -476,10 +370,7 @@ pub fn configure_device<C: ConfigurationAccess>(
             }
         }
 
-        let info = match root
-            .bar_info(bdf, bar)
-            .map_err(|_| PciInitError::InvalidBar)?
-        {
+        let info = match root.bar_info(bdf, bar).unwrap() {
             Some(info) => info,
             None => {
                 bar += 1;

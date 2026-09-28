@@ -11,11 +11,8 @@ use device_res::{IrqController, IrqOp, IrqRouteDesc, IrqTrigger};
 #[cfg(target_arch = "x86_64")]
 use device_res::{IrqOp, IrqRouteDesc, IrqTrigger};
 use driver_base::DeviceKind;
-use pci::PciConfigAccess;
-#[cfg(not(target_arch = "x86_64"))]
-use pci::legacy_interrupt_route;
-#[cfg(not(target_arch = "x86_64"))]
-use pci::{InterruptControllerKind, InterruptTrigger};
+use pci::MmioCam;
+
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 use virtio_drivers::{
@@ -24,7 +21,7 @@ use virtio_drivers::{
         DeviceStatus, DeviceType, InterruptStatus, Transport,
         pci::{
             PciTransport as RawPciTransport, VirtioPciError,
-            bus::{Command, ConfigurationAccess, DeviceFunction, DeviceFunctionInfo, PciRoot},
+            bus::{Command, DeviceFunction, DeviceFunctionInfo, PciRoot},
             virtio_device_type,
         },
     },
@@ -50,15 +47,15 @@ type PciMsixStateOption = Option<()>;
 
 impl PciTransport {
     /// Construct a new PCI VirtIO transport.
-    pub fn new<H: VirtIoHal, C: ConfigurationAccess>(
-        root: &mut PciRoot<C>,
+    pub fn new<H: VirtIoHal>(
+        root: &mut PciRoot<MmioCam<'static>>,
         bdf: DeviceFunction,
     ) -> Result<Self, VirtioPciError> {
-        Self::new_with_msix::<H, C>(root, bdf, None)
+        Self::new_with_msix::<H>(root, bdf, None)
     }
 
-    fn new_with_msix<H: VirtIoHal, C: ConfigurationAccess>(
-        root: &mut PciRoot<C>,
+    fn new_with_msix<H: VirtIoHal>(
+        root: &mut PciRoot<MmioCam<'static>>,
         bdf: DeviceFunction,
         #[cfg_attr(
             not(target_arch = "x86_64"),
@@ -70,7 +67,7 @@ impl PciTransport {
         )]
         msix: PciMsixStateOption,
     ) -> Result<Self, VirtioPciError> {
-        let inner = match RawPciTransport::new::<H, C>(root, bdf) {
+        let inner = match RawPciTransport::new::<H, MmioCam>(root, bdf) {
             Ok(inner) => inner,
             Err(err) => {
                 #[cfg(target_arch = "x86_64")]
@@ -244,11 +241,10 @@ impl Transport for PciTransport {
 ///
 /// If the device is recognized, returns the device type and a transport object
 /// for later operations. Otherwise, returns [`None`].
-pub fn probe_pci_transport_only<H: VirtIoHal, C: ConfigurationAccess>(
-    root: &mut PciRoot<C>,
+pub fn probe_pci_transport_only<H: VirtIoHal>(
+    root: &mut PciRoot<MmioCam<'static>>,
     bdf: DeviceFunction,
     dev_info: &DeviceFunctionInfo,
-    config: &mut PciConfigAccess,
     irq_provider: &'static dyn IrqOp,
 ) -> Option<(DeviceKind, PciTransport, Option<usize>)> {
     let dev_kind = virtio_device_type(dev_info).and_then(as_device_kind)?;
@@ -261,7 +257,7 @@ pub fn probe_pci_transport_only<H: VirtIoHal, C: ConfigurationAccess>(
     // the caller falls back to the descriptor's legacy route otherwise.
     #[cfg(target_arch = "x86_64")]
     let (msix, transport_irq) = if dev_kind == DeviceKind::Net {
-        match setup_msix::<H, C>(root, bdf, config, irq_provider) {
+        match setup_msix::<H>(root, bdf, irq_provider) {
             Some((irq, msix)) => (Some(msix), Some(irq)),
             None => (None, None),
         }
@@ -277,7 +273,7 @@ pub fn probe_pci_transport_only<H: VirtIoHal, C: ConfigurationAccess>(
     #[cfg(not(target_arch = "x86_64"))]
     let msix = None;
 
-    let transport = PciTransport::new_with_msix::<H, C>(root, bdf, msix).ok()?;
+    let transport = PciTransport::new_with_msix::<H>(root, bdf, msix).ok()?;
     if matches!(dev_kind, DeviceKind::Vsock | DeviceKind::Input) {
         let (_, command) = root.get_status_command(bdf);
         root.set_command(bdf, command | Command::INTERRUPT_DISABLE);
