@@ -405,34 +405,3 @@ pub(super) fn setup_msix<H: VirtIoHal, C: ConfigurationAccess>(
 
     Some((irq, msix))
 }
-
-/// Reads the PCI Interrupt Line register (config space offset 0x3C) for the
-/// given device and returns it as a legacy IRQ number.
-///
-/// Returns 0xFF if the register has not been programmed by firmware, which
-/// means the device has no usable legacy IRQ assignment. The caller should
-/// treat 0xFF as "no IRQ".
-pub(super) fn legacy_irq_for_bdf(
-    config: &PciConfigAccess,
-    bdf: DeviceFunction,
-    irq_provider: &'static dyn IrqOp,
-) -> Option<usize> {
-    let word = config.read_word(bdf, 0x3C);
-    let irq_line = (word & 0xFF) as usize;
-    if irq_line == 0xFF || irq_line == 0 {
-        log::warn!(
-            "PCI device {:?}: Interrupt Line not assigned ({:#x}), legacy IRQ unavailable",
-            bdf,
-            irq_line
-        );
-        return None;
-    }
-
-    let desc = IrqRouteDesc {
-        hwirq: irq_line,
-        trigger: IrqTrigger::LevelLow,
-        controller: IrqController::IoApic,
-        domain: None,
-    };
-    Some(irq_provider.map_irq(desc).ok()?.number)
-}

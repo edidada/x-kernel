@@ -47,6 +47,19 @@ pub enum IrqTrigger {
     Unknown,
 }
 
+/// The interrupt controller a firmware-described irq route belongs to.
+///
+/// Bus layers encode the controller they resolved at discovery; consumers
+/// decode it back to their provider-facing representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrqControllerKind {
+    Gic,
+    Plic,
+    IoApic,
+    LoongArchExtioi,
+    Unknown,
+}
+
 /// An interrupt as stated by firmware, before resolution to a virtual irq.
 ///
 /// The controller/domain/hwirq triple is preserved from the firmware node so
@@ -59,8 +72,8 @@ pub struct IrqSpec {
     /// INTx). Zero with a set domain means "resolve via domain".
     pub number: usize,
     pub trigger: IrqTrigger,
-    /// Interrupt controller id, if firmware identified one.
-    pub controller: Option<u32>,
+    /// Interrupt controller, if the bus/firmware identified one.
+    pub controller: Option<IrqControllerKind>,
     /// Interrupt domain id within the controller.
     pub domain: Option<u32>,
     /// Controller-relative hardware irq.

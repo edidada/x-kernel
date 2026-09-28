@@ -84,13 +84,12 @@ pub(crate) fn pci_transport<B: driver_core::Bus>(
     dev: &mut driver_core::DeviceCtx<'_, B>,
 ) -> Result<(driver_core::DeviceKind, virtio::PciTransport, Option<usize>), driver_core::ProbeError>
 {
-    let location = dev.descriptor().location;
     let service = dev
         .extension::<driver_runtime::virtio_service::PciTransportService>()
         .ok_or(driver_core::ProbeError::Fatal(
             driver_core::RuntimeError::Unsupported,
         ))?;
     service
-        .probe(location)
+        .probe(dev.descriptor())
         .map_err(driver_core::ProbeError::Fatal)
 }

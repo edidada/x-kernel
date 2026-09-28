@@ -10,7 +10,7 @@
 //! fails at compile time, not at probe — and driver-core stays free of any
 //! device-family knowledge.
 
-use driver_core::{DeviceKind, ExtensionService, desc::DeviceLocation};
+use driver_core::{DeviceKind, ExtensionService, desc::DeviceDescriptor};
 
 use crate::XKernelRuntime;
 
@@ -23,12 +23,12 @@ pub struct PciTransportService {
 }
 
 impl PciTransportService {
-    /// Probe the transport for a device location.
+    /// Probe the transport for a device descriptor.
     pub fn probe(
         &self,
-        location: DeviceLocation,
+        descriptor: &DeviceDescriptor,
     ) -> Result<(DeviceKind, virtio::PciTransport, Option<usize>), driver_core::RuntimeError> {
-        self.runtime.probe_pci_transport(location)
+        self.runtime.probe_pci_transport(descriptor)
     }
 }
 

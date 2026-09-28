@@ -12,6 +12,8 @@
 
 #![no_std]
 
+extern crate alloc;
+
 use core::{
     ptr::NonNull,
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
@@ -29,6 +31,26 @@ pub use virtio_drivers::transport::pci::bus::{
 
 pub mod msix;
 pub mod support;
+
+pub mod discover;
+
+use driver_core::{Bus, BusId, DeviceDescriptor, PciMatch};
+
+/// The PCI bus type in the driver-core device model.
+///
+/// Matches descriptors with `DeviceLocation::Pci` against `PciMatch` id
+/// tables. The discovery pipeline lives in [`discover`].
+pub struct PciPlatformBus;
+
+impl Bus for PciPlatformBus {
+    type IdEntry = PciMatch;
+
+    const ID: BusId = BusId::new("pci");
+
+    fn accepts(desc: &DeviceDescriptor) -> bool {
+        matches!(desc.location, driver_core::DeviceLocation::Pci { .. })
+    }
+}
 
 #[macro_use]
 extern crate log;

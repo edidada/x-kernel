@@ -59,7 +59,7 @@ mod rng;
 pub use self::rng::VirtIoRngDev;
 
 mod pci;
-pub use self::pci::{PciTransport, probe_pci_device};
+pub use self::pci::{PciTransport, probe_pci_transport_only, resolve_legacy_irq};
 
 #[cfg(feature = "virtio-9p")]
 mod virtio_9p;

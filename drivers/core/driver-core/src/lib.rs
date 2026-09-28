@@ -58,7 +58,10 @@ mod driver;
 mod error;
 mod resource;
 
-pub use bus::{Bus, BusId, IdMatchEntry, MatchScore};
+pub use bus::{
+    Bus, BusId, DeviceDescriptor, DeviceIdentity, DeviceLocation, DiscoveryOrigin, IdMatchEntry,
+    MatchScore, PciMatch,
+};
 pub use device::{
     BoundDevice, ClkHandle, ClkOps, CoherentMem, DevIrq, DeviceCtx, DeviceServices,
     ExtensionService, IoMap, IrqAction, IrqHandlerFn, ReleaseHook, ServiceError,
@@ -71,7 +74,8 @@ pub use driver::{DriverDesc, DriverOps};
 pub use driver_base::DeviceKind;
 pub use error::{DepKind, DepSource, ProbeError, RuntimeError};
 pub use resource::{
-    ClkSpec, IoPortRange, IrqSpec, IrqTrigger, MmioRegion, ResourceEntry, ResourceKind, ResourceMap,
+    ClkSpec, IoPortRange, IrqControllerKind, IrqSpec, IrqTrigger, MmioRegion, ResourceEntry,
+    ResourceKind, ResourceMap,
 };
 
 pub mod desc {

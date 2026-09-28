@@ -522,7 +522,7 @@ impl DeviceDomain {
     /// freed immediately; there is no binding to quiesce. `Removing`/`
     /// `Removed` entries reject re-removal with `BadState`.
     pub fn remove_device(&self, id: u64) -> Result<(), RuntimeError> {
-        let (desc, driver, mut data, services, light_path) = {
+        let (desc, driver, data, services, light_path) = {
             let mut inner = self.inner.lock();
             let Some(entry) = inner.devices.get_mut(&id) else {
                 return Err(RuntimeError::NotFound);

@@ -243,17 +243,17 @@ impl XKernelRuntime {
     #[cfg(feature = "virtio-hal")]
     pub fn probe_pci_transport(
         &self,
-        location: driver_core::desc::DeviceLocation,
+        descriptor: &driver_core::desc::DeviceDescriptor,
     ) -> Result<(driver_core::DeviceKind, virtio::PciTransport, Option<usize>), RuntimeError> {
-        use driver_core::desc::DeviceLocation as Loc;
-        use pci::{DeviceFunction, PciBus as PciRootAccess};
+        use driver_core::desc::{DeviceIdentity, DeviceLocation as Loc};
+        use pci::{DeviceFunction, DeviceFunctionInfo, PciBus as PciRootAccess};
 
         let Loc::Pci {
             bus: bus_nr,
             device: dev_nr,
             function,
             ..
-        } = location
+        } = descriptor.location
         else {
             return Err(RuntimeError::Invalid.into());
         };
@@ -263,26 +263,49 @@ impl XKernelRuntime {
             function,
         };
 
+        // Identity comes from the descriptor (filled once at discovery) —
+        // no bus re-enumeration here. prog_if/revision/header/multifunction
+        // are not consumed by virtio transport setup.
+        let DeviceIdentity::Pci(pci_identity) = &descriptor.identity else {
+            return Err(RuntimeError::Invalid.into());
+        };
+        let dev_info = DeviceFunctionInfo {
+            vendor_id: pci_identity.vendor_id,
+            device_id: pci_identity.device_id,
+            class: pci_identity.class,
+            subclass: pci_identity.subclass,
+            prog_if: 0,
+            revision: 0,
+            header_type: pci::HeaderType::Standard,
+        };
+
+        // IRQ: the transport-bound vector (x86 MSI-X) first; otherwise the
+        // descriptor's legacy route (resolved once at discovery) mapped to
+        // a virtual irq by the platform provider.
+
+        // Discovery already configured the function (BARs assigned, memory
+        // decoded). Only per-device config access remains for the virtio
+        // capability walk.
         let mut pci_root =
             PciRootAccess::new(pci::support::pci_cam_kind()).map_err(|_| RuntimeError::Io)?;
         let (root, config) = pci_root.parts_mut();
-        pci::support::configure_pci_device_if_needed(root, bdf).map_err(|_| RuntimeError::Io)?;
-        let dev_info = root
-            .enumerate_bus(bus_nr)
-            .find(|(b, _)| *b == bdf)
-            .map(|(_, info)| info)
-            .ok_or(RuntimeError::BadState)?;
 
-        let (kind, transport, irq) = virtio::probe_pci_device::<hal::Hal, pci::MmioCam<'static>>(
-            root,
-            bdf,
-            &dev_info,
-            config,
-            resource_provider(),
+        let (kind, transport, transport_irq) = virtio::probe_pci_transport_only::<
+            hal::Hal,
+            pci::MmioCam<'static>,
+        >(
+            root, bdf, &dev_info, config, resource_provider()
         )
         .ok_or(RuntimeError::BadState)?;
 
-        Ok((kind, transport, Some(irq)))
+        let irq = transport_irq.or_else(|| {
+            descriptor
+                .resources
+                .irq(0)
+                .and_then(|spec| virtio::resolve_legacy_irq(&spec, resource_provider()))
+        });
+
+        Ok((kind, transport, irq))
     }
 }
 
