@@ -293,6 +293,21 @@ impl<T> ClassDevice<T> {
         self.inner.parent.is_available()
     }
 
+    /// Run a data-plane operation, refusing once the device is offline.
+    ///
+    /// Every consumer-facing class operation that returns a [`DriverResult`]
+    /// goes through here: after the composition root removed the owning
+    /// device (offline flips once the quiesce callbacks returned), the
+    /// operation fails with [`DriverError::BadState`] instead of touching
+    /// the possibly-torn-down runtime object. Internal teardown paths keep
+    /// using [`Self::with`] — they run before the offline flag flips.
+    pub fn with_available<R>(&self, f: impl FnOnce(&T) -> DriverResult<R>) -> DriverResult<R> {
+        if !self.is_available() {
+            return Err(DriverError::BadState);
+        }
+        f(&self.inner.runtime)
+    }
+
     pub(crate) fn input_physical_location(&self) -> &str {
         self.inner
             .metadata
