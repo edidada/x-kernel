@@ -138,16 +138,17 @@ pub enum UserThreadRuntimeAction {
     SkipSyscallRestart,
 }
 
-/// Returns the current process-owned resources.
+/// Returns an owned handle to the current user thread's process resources.
+///
+/// For synchronous access, borrow [`Thread::resources`] from
+/// [`current_user_thread`] instead. This handle keeps the resource object alive,
+/// but descriptor operations still fail after its files owner is detached.
 ///
 /// # Panics
 ///
-/// Panics outside a current user-thread runtime or when its process runtime
-/// is no longer reachable.
+/// Panics outside a current user-thread runtime.
 pub fn current_resources() -> alloc::sync::Arc<kresources::ProcessResources> {
-    current_user_process()
-        .resources()
-        .expect("current user thread must still expose process resources")
+    with_current_user_thread(|thread| thread.resources().clone())
 }
 
 /// Returns the current process umask.

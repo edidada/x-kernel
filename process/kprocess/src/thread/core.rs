@@ -495,6 +495,16 @@ impl Thread {
         &self.process
     }
 
+    /// Borrows the resources owned by this thread's process.
+    ///
+    /// The borrow cannot outlive the thread. Clone the returned `Arc` only
+    /// when the resource object must be retained independently of that borrow.
+    /// Keeping the resource object alive does not keep its descriptor table
+    /// attached: descriptor operations still fail after `exit_files`.
+    pub fn resources(&self) -> &Arc<kresources::ProcessResources> {
+        self.runtime.resources()
+    }
+
     /// Returns this task's objective credentials.
     pub fn real_cred(&self) -> Arc<Cred> {
         self.real_cred.read().clone()

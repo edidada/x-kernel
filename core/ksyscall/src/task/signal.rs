@@ -467,7 +467,7 @@ pub fn sys_signalfd4(
     mask.remove(Signo::SIGSTOP);
 
     if fd != -1 {
-        let file = kprocess::current_resources().get_file(fd)?;
+        let file = kprocess::current_user_thread().resources().get_file(fd)?;
         let signalfd = Signalfd::from_file(&file)?;
         signalfd.update_mask(mask);
         return Ok(fd as _);
@@ -479,7 +479,8 @@ pub fn sys_signalfd4(
         kprocess::current_cred(),
     )?;
 
-    kprocess::current_resources()
+    kprocess::current_user_thread()
+        .resources()
         .add_file(file, flags.contains(SignalfdFlags::CLOEXEC))
         .map(|fd| fd as _)
 }

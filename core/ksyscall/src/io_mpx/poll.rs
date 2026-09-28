@@ -29,6 +29,8 @@ fn do_poll(
 ) -> KResult<isize> {
     debug!("do_poll fds={poll_fds:?} timeout={timeout:?}");
 
+    let thread = kprocess::current_user_thread();
+    let resources = thread.resources();
     let mut res = 0isize;
     let mut fds = Vec::with_capacity(poll_fds.len());
     let mut revents = Vec::with_capacity(poll_fds.len());
@@ -37,7 +39,7 @@ fn do_poll(
             // Skip -1
             continue;
         }
-        match kprocess::current_resources().get_file(fd.fd) {
+        match resources.get_file(fd.fd) {
             Ok(f) => {
                 fds.push((
                     f,
@@ -58,7 +60,7 @@ fn do_poll(
     }
     let fds = FdPollSet(fds);
 
-    kprocess::current_user_thread().with_temp_blocked(sigmask, || {
+    thread.with_temp_blocked(sigmask, || {
         match block_on(future::timeout(
             timeout,
             poll_io(&fds, IoEvents::empty(), false, || {

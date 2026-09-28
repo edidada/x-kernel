@@ -57,6 +57,14 @@ retains init identity; orphan reparenting reserves an init relation slot.
   or `prepare_thread_clone`, construct `TaskInner::new_user` using the matching
   identity, then call `publish_user_task`. `PublishedUserTask::commit` runs
   parent-side writeback before activation; abort/drop rolls back publication.
+- Current-thread resource access borrows `Thread::resources()` through the
+  thread's existing strong `ProcessRuntime` owner. It does not resolve the
+  process identity's weak runtime or clone a resource handle. Callers retain
+  the thread handle for the borrow; `current_resources()` explicitly clones
+  the resource `Arc` when independent ownership is needed. Foreign-process
+  access still uses `Process::resources`.
+  This follows Linux `current->files` lookup layering without adding a cached
+  resource field or another context object. FD-table locking is unchanged.
 - `Process` runtime capabilities return filesystem/namespace/mm/resource/signal
   references and expose timer/exec/teardown operations. `LiveAddressSpace` owns
   an active mm-user handle; its mapping closure supplies both the locked space

@@ -872,8 +872,15 @@ fn test_exit_cleanup_clears_exclusive_address_space() {
 
 #[def_test(serial)]
 fn test_exit_owners_detach_before_process_exit_publication() {
-    let (proc, _task) = process_with_address_space(8_137, mapped_test_address_space());
-    let resources = proc.resources().expect("runtime must expose resources");
+    let (proc, task) = process_with_address_space(8_137, mapped_test_address_space());
+    let resources = task.as_thread().resources();
+    let replacement = kfd::FdTable::new_shared();
+    let old_table = resources.replace_fd_table(replacement.clone()).unwrap();
+    assert!(Arc::ptr_eq(&resources.fd_table().unwrap(), &replacement));
+    let old_table_weak = Arc::downgrade(&old_table);
+    drop(old_table);
+    assert!(old_table_weak.upgrade().is_none());
+    drop(replacement);
 
     assert!(proc.address_space().is_ok());
     assert!(resources.fd_table().is_ok());

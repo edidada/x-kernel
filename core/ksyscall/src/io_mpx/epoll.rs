@@ -30,7 +30,8 @@ pub fn sys_epoll_create1(flags: u32) -> KResult<isize> {
     let flags = EpollCreateFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
     debug!("sys_epoll_create1 <= flags: {flags:?}");
 
-    kprocess::current_resources()
+    kprocess::current_user_thread()
+        .resources()
         .add_file(
             Epoll::new_file(kprocess::current_cred())?,
             flags.contains(EpollCreateFlags::CLOEXEC),
@@ -45,9 +46,11 @@ pub fn sys_epoll_ctl(
     fd: i32,
     event: UserConstPtr<epoll_event>,
 ) -> KResult<isize> {
-    let epoll_file = kprocess::current_resources().get_file(epfd)?;
+    let thread = kprocess::current_user_thread();
+    let resources = thread.resources();
+    let epoll_file = resources.get_file(epfd)?;
     let epoll = Epoll::from_file(&epoll_file)?;
-    let file = kprocess::current_resources().get_file(fd)?;
+    let file = resources.get_file(fd)?;
     debug!("sys_epoll_ctl <= epfd: {epfd}, op: {op}, fd: {fd}");
 
     let parse_event = || -> KResult<(EpollEvent, EpollFlags)> {
@@ -96,7 +99,7 @@ fn do_epoll_wait(
         return Err(KError::InvalidInput);
     }
 
-    let epoll_file = kprocess::current_resources().get_file(epfd)?;
+    let epoll_file = kprocess::current_user_thread().resources().get_file(epfd)?;
     let epoll = Epoll::from_file(&epoll_file)?;
     // `posix-types::UserPtr` models copy-to-user semantics rather than a borrowed
     // mutable user slice, so we stage ready events in kernel memory and copy them

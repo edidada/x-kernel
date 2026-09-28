@@ -177,7 +177,7 @@ pub fn sys_dummy_fd(sysno: Sysno) -> KResult<isize> {
 pub fn sys_read(fd: i32, buf: UserPtr<u8>, len: usize) -> KResult<isize> {
     debug!("sys_read <= fd: {fd}, buf: {:p}, len: {len}", buf.as_ptr());
     // Get the file object and perform the read operation into the user buffer
-    let file = kprocess::current_resources().get_file(fd)?;
+    let file = kprocess::current_user_thread().resources().get_file(fd)?;
     Ok(read_file_to_io(&file, VmBytesMut::new(buf.as_ptr().cast_mut(), len))? as _)
 }
 
@@ -185,7 +185,7 @@ pub fn sys_read(fd: i32, buf: UserPtr<u8>, len: usize) -> KResult<isize> {
 pub fn sys_readv(fd: i32, iov: UserConstPtr<IoVec>, iovcnt: usize) -> KResult<isize> {
     debug!("sys_readv <= fd: {fd}, iovcnt: {iovcnt}");
     // Vectored read - read data into multiple buffers in a single operation
-    let f = kprocess::current_resources().get_file(fd)?;
+    let f = kprocess::current_user_thread().resources().get_file(fd)?;
     let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
     read_file_to_io(&f, iov.into_io()).map(|n| n as _)
 }
@@ -195,7 +195,7 @@ pub fn sys_readv(fd: i32, iov: UserConstPtr<IoVec>, iovcnt: usize) -> KResult<is
 /// Return the written size if success.
 pub fn sys_write(fd: i32, buf: UserConstPtr<u8>, len: usize) -> KResult<isize> {
     debug!("sys_write <= fd: {fd}, buf: {:p}, len: {len}", buf.as_ptr());
-    let file = kprocess::current_resources().get_file(fd)?;
+    let file = kprocess::current_user_thread().resources().get_file(fd)?;
     Ok(write_file_from_io(&file, VmBytes::new(buf.as_ptr(), len))? as _)
 }
 
@@ -203,7 +203,7 @@ pub fn sys_write(fd: i32, buf: UserConstPtr<u8>, len: usize) -> KResult<isize> {
 pub fn sys_writev(fd: i32, iov: UserConstPtr<IoVec>, iovcnt: usize) -> KResult<isize> {
     debug!("sys_writev <= fd: {fd}, iovcnt: {iovcnt}");
     // Vectored write - write data from multiple buffers in a single operation
-    let f = kprocess::current_resources().get_file(fd)?;
+    let f = kprocess::current_user_thread().resources().get_file(fd)?;
     let iov = IoVectorBuf::from_iovecs(IoVec::load_from_user(iov, iovcnt)?)?;
     write_file_from_io(&f, iov.into_io()).map(|n| n as _)
 }
@@ -211,7 +211,7 @@ pub fn sys_writev(fd: i32, iov: UserConstPtr<IoVec>, iovcnt: usize) -> KResult<i
 /// Repositions the read/write file offset.
 pub fn sys_lseek(fd: c_int, offset: __kernel_off_t, whence: c_int) -> KResult<isize> {
     debug!("sys_lseek <= {fd} {offset} {whence}");
-    let file = kprocess::current_resources().get_file(fd)?;
+    let file = kprocess::current_user_thread().resources().get_file(fd)?;
     Ok(file.llseek(offset, whence)? as _)
 }
 
@@ -244,7 +244,7 @@ pub fn sys_ftruncate(fd: c_int, length: __kernel_off_t) -> KResult<isize> {
     if length < 0 {
         return Err(KError::InvalidInput);
     }
-    let f = kprocess::current_resources().get_file(fd)?;
+    let f = kprocess::current_user_thread().resources().get_file(fd)?;
     f.truncate(length as _)?;
     Ok(0)
 }
@@ -282,7 +282,7 @@ pub fn sys_fallocate(
     let keep_size = (mode & FALLOC_FL_KEEP_SIZE) != 0;
     let base_mode = mode & !FALLOC_FL_KEEP_SIZE;
 
-    let f = kprocess::current_resources().get_file(fd)?;
+    let f = kprocess::current_user_thread().resources().get_file(fd)?;
     f.verify_mode(FMode::WRITE)?;
 
     let start = offset as u64;
@@ -396,7 +396,7 @@ pub fn sys_fallocate(
 pub fn sys_fsync(fd: c_int) -> KResult<isize> {
     debug!("sys_fsync <= {fd}");
     // Synchronize file to disk - syncs both data and metadata
-    let file = kprocess::current_resources().get_file(fd)?;
+    let file = kprocess::current_user_thread().resources().get_file(fd)?;
     file.fsync(false)?;
     Ok(0)
 }
@@ -404,7 +404,7 @@ pub fn sys_fsync(fd: c_int) -> KResult<isize> {
 /// Synchronizes file data and the metadata needed to retrieve it with storage.
 pub fn sys_fdatasync(fd: c_int) -> KResult<isize> {
     debug!("sys_fdatasync <= {fd}");
-    let file = kprocess::current_resources().get_file(fd)?;
+    let file = kprocess::current_user_thread().resources().get_file(fd)?;
     file.fsync(true)?;
     Ok(0)
 }
@@ -419,7 +419,7 @@ pub fn sys_fadvise64(
     debug!("sys_fadvise64 <= fd: {fd}, offset: {offset}, len: {len}, advice: {advice}");
     // Provide hints to kernel about how file will be accessed
     // Currently not fully implemented - pipes are not supported
-    let file = kprocess::current_resources().get_file(fd)?;
+    let file = kprocess::current_user_thread().resources().get_file(fd)?;
     if PipeObject::from_file(&file).is_ok() {
         return Err(KError::BrokenPipe);
     }
@@ -440,7 +440,7 @@ pub fn sys_pread64(
     if offset < 0 {
         return Err(KError::InvalidInput);
     }
-    let f = kprocess::current_resources().get_file(fd)?;
+    let f = kprocess::current_user_thread().resources().get_file(fd)?;
     reject_positioned_stream_io(&f)?;
     let read = read_file_at_to_io(
         &f,
@@ -461,7 +461,7 @@ pub fn sys_pwrite64(
     if offset < 0 {
         return Err(KError::InvalidInput);
     }
-    let f = kprocess::current_resources().get_file(fd)?;
+    let f = kprocess::current_user_thread().resources().get_file(fd)?;
     reject_positioned_stream_io(&f)?;
     if len == 0 {
         return Ok(0);
@@ -514,7 +514,7 @@ pub fn sys_preadv2(
     if flags != 0 {
         return Err(KError::Unsupported);
     }
-    let f = kprocess::current_resources().get_file(fd)?;
+    let f = kprocess::current_user_thread().resources().get_file(fd)?;
     if offset != -1 {
         reject_positioned_stream_io(&f)?;
     }
@@ -542,7 +542,7 @@ pub fn sys_pwritev2(
     if flags != 0 {
         return Err(KError::Unsupported);
     }
-    let f = kprocess::current_resources().get_file(fd)?;
+    let f = kprocess::current_user_thread().resources().get_file(fd)?;
     if offset != -1 {
         reject_positioned_stream_io(&f)?;
     }
@@ -653,7 +653,8 @@ pub fn sys_sendfile(
     );
 
     // Source can use fixed offset or current file position
-    let resources = kprocess::current_resources();
+    let thread = kprocess::current_user_thread();
+    let resources = thread.resources();
     let src = if !offset.is_null() {
         // Check offset fits in 32-bit range (legacy syscall limitation)
         if offset.read_vm()? > u32::MAX as u64 {
@@ -697,7 +698,8 @@ pub fn sys_copy_file_range(
     // TODO: check same file and overlap
 
     // Source can use fixed offset or current file position
-    let resources = kprocess::current_resources();
+    let thread = kprocess::current_user_thread();
+    let resources = thread.resources();
     let src = if !off_in.is_null() {
         SendFile::Offset(resources.get_file(fd_in)?, off_in)
     } else {
@@ -737,7 +739,8 @@ pub fn sys_splice(
     // Track if we have a pipe - at least one must be present for splice
     let mut has_pipe = false;
 
-    let resources = kprocess::current_resources();
+    let thread = kprocess::current_user_thread();
+    let resources = thread.resources();
 
     // Setup source: either with fixed offset or using current position
     let src = if !off_in.is_null() {

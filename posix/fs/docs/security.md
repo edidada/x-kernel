@@ -37,6 +37,8 @@ kfd resources / kvfs / device and pipe implementations
 
 - 用户态参数不可信，包括空指针、无效地址、过长路径、恶意 flags、负 offset 和 fd 复用。
 - `posix-fs` 信任 `posix_types` / `osvm` 对用户地址执行边界检查和错误传播。
+- 当前资源借用受 `Thread` 生命周期约束；runtime 存活不代表 FD 表仍附着。
+  `exit_files`、表替换和并发关闭继续由资源层的锁及文件引用保护。
 - `posix-fs` 信任 `kfd` 在 fd 查找、复制、关闭和 descriptor flags 上保持并发安全。
 - `posix-fs` 信任 `kvfs` / `kfd_objects` / 设备对象执行真实读写、权限、目录和挂载语义。
 - 进程当前上下文、fd 表、`FsStruct` 和用户地址空间必须来自当前 syscall 执行线程。

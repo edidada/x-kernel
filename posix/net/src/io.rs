@@ -182,7 +182,7 @@ fn send_impl(
 
     debug!("sys_send <= fd: {fd}, flags: {flags}, addr: {addr:?}");
 
-    let file = kprocess::current_resources().get_file(fd)?;
+    let file = kprocess::current_user_thread().resources().get_file(fd)?;
     let socket = sock_from_file(&file)?;
     let mut send_flags = parse_send_flags(flags);
     if file.is_nonblocking() {
@@ -219,7 +219,8 @@ pub fn sys_sendto(
 /// Send data with vectored I/O and ancillary data (control messages)
 pub fn sys_sendmsg(fd: i32, msg: UserConstPtr<msghdr>, flags: u32) -> KResult<isize> {
     let msg = msg.read_vm()?;
-    let resources = kprocess::current_resources();
+    let thread = kprocess::current_user_thread();
+    let resources = thread.resources();
     let ancillary = parse_send_cmsgs(
         resources.as_ref(),
         msg.msg_control as usize,
@@ -292,7 +293,8 @@ fn recv_impl(
 ) -> KResult<isize> {
     debug!("sys_recv <= fd: {fd}, flags: {flags}");
 
-    let resources = kprocess::current_user_process().resources()?;
+    let thread = kprocess::current_user_thread();
+    let resources = thread.resources();
     let file = resources.get_file(fd)?;
     let socket = sock_from_file(&file)?;
     let mut recv_flags = RecvFlags::empty();
@@ -437,7 +439,8 @@ pub fn sys_sendmmsg(fd: i32, msgvec: UserPtr<mmsghdr>, vlen: u32, flags: u32) ->
     }
 
     let mut msgvec_value = msgvec.load_vm_vec(vlen as usize)?;
-    let resources = kprocess::current_resources();
+    let thread = kprocess::current_user_thread();
+    let resources = thread.resources();
     let mut sent = 0;
     for msg in msgvec_value.iter_mut() {
         let ancillary = parse_send_cmsgs(

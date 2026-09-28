@@ -8,7 +8,6 @@ use alloc::sync::Arc;
 use core::ffi::{c_char, c_int};
 
 use kerrno::KResult;
-use kprocess::current_user_process;
 use kvfs::{Filename, NodePermission, Path, VfsFile};
 use linux_raw_sys::general::*;
 use posix_types::UserConstPtr;
@@ -29,8 +28,8 @@ fn open_path(
 }
 
 fn add_to_fd(file: Arc<VfsFile>, flags: u32) -> KResult<i32> {
-    current_user_process()
-        .resources()?
+    kprocess::current_user_thread()
+        .resources()
         .add_file(file, flags & O_CLOEXEC != 0)
 }
 

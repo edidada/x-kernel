@@ -70,7 +70,8 @@ fn do_select(
          {except_fds:?}] timeout: {timeout:?}"
     );
 
-    let resources = kprocess::current_resources();
+    let thread = kprocess::current_user_thread();
+    let resources = thread.resources();
     let fd_table = resources.fd_table()?;
     let fd_table = fd_table.read();
     let mut fds = Vec::with_capacity(nfds);

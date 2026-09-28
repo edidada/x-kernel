@@ -207,7 +207,7 @@ pub fn sys_getdents64(fd: i32, buf: UserPtr<u8>, len: usize) -> KResult<isize> {
     );
 
     let mut buffer = DirBuffer::new(len);
-    let dir = kprocess::current_resources().get_file(fd)?;
+    let dir = kprocess::current_user_thread().resources().get_file(fd)?;
     let mut has_remaining = false;
 
     let mut sink = |name: &str, ino, node_type, offset| {

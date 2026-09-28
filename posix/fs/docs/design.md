@@ -10,6 +10,14 @@
 目标读者是维护 `core/ksyscall` 文件系统分发路径、`kfd` 进程 fd 表、
 `kvfs` VFS 层，以及终端和设备文件兼容路径的开发者。
 
+## 当前线程资源访问
+
+同步 FD 操作通过 `current_user_thread().resources()` 借用线程已持有的 runtime
+中的资源对象；多次查表的 syscall 保留一个线程句柄并复用借用。
+不经由 Process 的弱 runtime 查找，不克隆临时资源 Arc，也不新增缓存字段。
+资源借用与 FD 表所有权是不同层次：查表、替换及释放仍由 `ProcessResources`
+内部同步，查到的文件仍持有独立 Arc，允许后续 I/O 与并发关闭安全交错。
+
 ## 背景
 
 POSIX 文件系统 syscall 同时接触用户指针、路径字符串、进程当前工作目录、

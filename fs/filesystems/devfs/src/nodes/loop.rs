@@ -142,7 +142,7 @@ impl LoopDevice {
                     return Err(KError::BadFileDescriptor);
                 }
                 let _validation = LOOP_VALIDATE_MUTEX.lock();
-                let file = kprocess::current_resources().get_file(fd)?;
+                let file = kprocess::current_user_thread().resources().get_file(fd)?;
                 self.validate_backing_file(&file, block_device)?;
                 let capacity = file.size() / 512;
                 let read_only = !file.mode().contains(FMode::WRITE)

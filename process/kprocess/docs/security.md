@@ -63,6 +63,14 @@ Signal delivery during sleepable old-MM teardown would violate this contract.
 
 ## Memory and lifecycle invariants
 
+`Thread::resources()` borrows from the runtime already owned by the thread.
+Rust ties this reference to the thread borrow; no weak upgrade or unchecked
+lifetime extension is needed. Neither this borrow nor `current_resources()`'s
+owned handle prevents `exit_files` from detaching the FD table.
+`ProcessResources` continues to serialize lookup, replacement and detachment
+with its owner lock. A looked-up file retains its own reference across concurrent
+close; borrowing resources does not authorize borrowing an unprotected FD entry.
+
 - A published task must carry the same stable handle as its Thread. Numeric ID
   equality alone does not protect against reuse; retire/delete paths check object
   identity and current slot state.
