@@ -64,6 +64,10 @@ pub enum ClassParent {
 /// Value snapshot for driver-core publications.
 pub struct DetachedParent {
     pub id: ClassDeviceId,
+    /// The owning driver-core device id. Explicit, never derived from the
+    /// publication id (Linux links class devices to their parent with a
+    /// real pointer; id arithmetic silently decouples the two counters).
+    pub owner: u64,
     pub driver_name: &'static str,
     pub location: DeviceLocation,
     /// Flipped when the composition root removes the owning device (after
@@ -76,9 +80,14 @@ pub struct DetachedParent {
 
 impl ClassParent {
     /// Publish under a driver-core device snapshot.
-    pub fn detached(driver_name: &'static str, location: DeviceLocation) -> Self {
+    ///
+    /// `owner` is the publishing device's driver-core id (`DeviceCtx::id()`);
+    /// the composition root's remove notifier uses it to find this
+    /// publication when that device goes away.
+    pub fn detached(owner: u64, driver_name: &'static str, location: DeviceLocation) -> Self {
         Self::Detached(DetachedParent {
             id: ClassDeviceId::new_detached(),
+            owner,
             offline: core::sync::atomic::AtomicBool::new(false),
             driver_name,
             location,
@@ -122,10 +131,10 @@ impl ClassParent {
         }
     }
 
-    /// The owning device id.
+    /// The owning device id, as passed to [`ClassParent::detached`].
     pub fn detached_owner(&self) -> Option<u64> {
         match self {
-            Self::Detached(detached) => Some(detached.id.raw() & !DRIVER_CORE_ID_TAG),
+            Self::Detached(detached) => Some(detached.owner),
         }
     }
 }
@@ -419,5 +428,52 @@ impl<T> ClassRegistry<T> {
 impl<T> Default for ClassRegistry<T> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    //! Regression: the class publication ↔ driver-core owner association
+    //! used to be derived by clearing a tag bit off an independently
+    //! allocated publication id — an off-by-one that made remove(0) leak
+    //! device 0's publication and remove(1) delete device 0's. The owner
+    //! is explicit now; this pins the correlation.
+
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+
+    fn loc(id: u16) -> DeviceLocation {
+        DeviceLocation::FirmwareNode { id }
+    }
+
+    #[def_test(serial)]
+    fn owner_correlation_is_explicit_not_derived() {
+        // Two devices with domain ids 0 and 1 — exactly the values the
+        // broken derivation shifted between.
+        let a = ClassParent::detached(0, "test-a", loc(0));
+        let b = ClassParent::detached(1, "test-b", loc(1));
+
+        // The owner each publication reports is the one it was created
+        // with, not id-derived arithmetic: the old code reported 1 and 2.
+        assert_eq!(a.detached_owner(), Some(0));
+        assert_eq!(b.detached_owner(), Some(1));
+        // Distinct devices never collide on owner.
+        assert!(a.detached_owner() != b.detached_owner());
+    }
+
+    #[def_test(serial)]
+    fn publication_id_is_an_independent_concept() {
+        // Publication ids are freshly allocated and need not correlate
+        // with owner ids in any way — two parents with the same owner
+        // shape still get distinct publication ids.
+        let a = ClassParent::detached(7, "test", loc(0));
+        let b = ClassParent::detached(7, "test", loc(1));
+        let (id_a, id_b) = match (&a, &b) {
+            (ClassParent::Detached(da), ClassParent::Detached(db)) => (da.id, db.id),
+        };
+        assert!(id_a != id_b);
+        assert_eq!(a.detached_owner(), Some(7));
+        assert_eq!(b.detached_owner(), Some(7));
     }
 }

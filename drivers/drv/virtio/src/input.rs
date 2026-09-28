@@ -51,7 +51,7 @@ pub fn activate<B: driver_core::Bus>(
         .map_err(crate::common::map_driver_error)?;
     let location = crate::common::legacy_location(dev.descriptor().location);
     publish_input(
-        ClassParent::detached("virtio-input", location),
+        ClassParent::detached(dev.id(), "virtio-input", location),
         Box::new(device),
     )
     .map_err(crate::common::map_driver_error)?;
@@ -69,7 +69,7 @@ pub fn activate_mmio<T: virtio::Transport + 'static>(
     let device = virtio::VirtIoInputDev::<driver_runtime::hal::Hal, _>::try_new(transport)
         .map_err(crate::common::map_driver_error)?;
     let handle = publish_input(
-        ClassParent::detached("virtio-input", location),
+        ClassParent::detached(dev.id(), "virtio-input", location),
         Box::new(device),
     )
     .map_err(crate::common::map_driver_error)?;

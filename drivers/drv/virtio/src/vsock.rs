@@ -54,7 +54,7 @@ pub fn activate<B: driver_core::Bus>(
         .map_err(crate::common::map_driver_error)?;
     let location = crate::common::legacy_location(dev.descriptor().location);
     publish_vsock(
-        ClassParent::detached("virtio-vsock", location),
+        ClassParent::detached(dev.id(), "virtio-vsock", location),
         Box::new(device),
     )
     .map_err(crate::common::map_driver_error)?;
@@ -72,7 +72,7 @@ pub fn activate_mmio<T: virtio::Transport + 'static>(
     let device = virtio::VirtIoVsockDev::<driver_runtime::hal::Hal, _>::try_new(transport)
         .map_err(crate::common::map_driver_error)?;
     let handle = publish_vsock(
-        ClassParent::detached("virtio-vsock", location),
+        ClassParent::detached(dev.id(), "virtio-vsock", location),
         Box::new(device),
     )
     .map_err(crate::common::map_driver_error)?;

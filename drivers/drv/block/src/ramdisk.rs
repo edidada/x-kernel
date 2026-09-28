@@ -60,8 +60,11 @@ impl DriverOps<PlatformBus> for RamdiskDriver {
         };
         let disk = Gendisk::new(name, 1, 0, 1, dev).map_err(crate::common::map_driver_error)?;
         let location = crate::common::legacy_location(_dev.descriptor().location);
-        publish_block(ClassParent::detached("ramdisk", location), Arc::new(disk))
-            .map_err(crate::common::map_driver_error)?;
+        publish_block(
+            ClassParent::detached(_dev.id(), "ramdisk", location),
+            Arc::new(disk),
+        )
+        .map_err(crate::common::map_driver_error)?;
         Ok(RamdiskData)
     }
 

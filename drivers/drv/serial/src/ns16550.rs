@@ -84,15 +84,16 @@ fn publish(dev: &mut DeviceCtx<'_, PlatformBus>, port: Arc<SerialPort>) -> Resul
     let char_dev: kclass::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
     match port.role() {
         SerialRole::Stdout => console_driver::runtime::register_console_parented(
-            ClassParent::detached("serial-ns16550", location),
+            ClassParent::detached(dev.id(), "serial-ns16550", location),
             char_dev,
         )
         .map_err(crate::common::map_driver_error),
-        SerialRole::Auxiliary => {
-            publish_char(ClassParent::detached("serial-ns16550", location), char_dev)
-                .map(drop)
-                .map_err(crate::common::map_driver_error)
-        }
+        SerialRole::Auxiliary => publish_char(
+            ClassParent::detached(dev.id(), "serial-ns16550", location),
+            char_dev,
+        )
+        .map(drop)
+        .map_err(crate::common::map_driver_error),
     }
 }
 

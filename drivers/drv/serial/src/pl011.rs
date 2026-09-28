@@ -130,14 +130,17 @@ impl DriverOps<PlatformBus> for Pl011Driver {
         match port.role() {
             SerialRole::Stdout => {
                 register_console_parented(
-                    ClassParent::detached("pl011-serial", location),
+                    ClassParent::detached(dev.id(), "pl011-serial", location),
                     char_dev,
                 )
                 .map_err(crate::common::map_driver_error)?;
             }
             SerialRole::Auxiliary => {
-                publish_char(ClassParent::detached("pl011-serial", location), char_dev)
-                    .map_err(crate::common::map_driver_error)?;
+                publish_char(
+                    ClassParent::detached(dev.id(), "pl011-serial", location),
+                    char_dev,
+                )
+                .map_err(crate::common::map_driver_error)?;
             }
         }
 
