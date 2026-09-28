@@ -62,8 +62,11 @@ pub enum FirmwareSource {
 pub struct FirmwareDevice {
     pub firmware_id: &'static str,
     pub source: FirmwareSource,
-    pub mmio: Option<MmioResource>,
-    pub irq: Option<InterruptInfo>,
+    /// Every `reg` entry of the node, in DT order.
+    pub mmios: Vec<MmioResource>,
+    /// Every interrupt specifier, in DT order (`interrupts` flat form or
+    /// `interrupts-extended`). Single-irq nodes keep index 0 stable.
+    pub irqs: Vec<InterruptInfo>,
     /// For `fixed-clock` nodes: the `clock-frequency` property, in Hz.
     /// Extracted during enumeration so clock controller drivers can
     /// register without re-walking the DT.
@@ -222,20 +225,23 @@ pub fn for_each_compatible(
             continue;
         };
 
-        let mmio = node
+        let mmios = node
             .reg()
-            .and_then(|mut regs| regs.next())
-            .map(|reg| MmioResource {
-                base: reg.starting_address as usize,
-                size: reg.size,
-            });
-        let irq = of::first_interrupt_desc(node);
+            .map(|regs| {
+                regs.map(|reg| MmioResource {
+                    base: reg.starting_address as usize,
+                    size: reg.size,
+                })
+                .collect()
+            })
+            .unwrap_or_default();
+        let irqs = of::interrupt_descs(node);
 
         visitor(FirmwareDevice {
             firmware_id,
             source: FirmwareSource::DeviceTree,
-            mmio,
-            irq,
+            mmios,
+            irqs,
             clock_frequency: node.property_u32("clock-frequency"),
             phandle: node.property_u32("phandle"),
             clock_cells: node.property_u32("#clock-cells"),

@@ -23,6 +23,7 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU16, Ordering};
 
 use driver_core::{
     Bus, IrqTrigger, ResourceKind, ResourceMap,
@@ -130,6 +131,16 @@ fn enumerate_firmware_devices() {
     enumerate_firmware_nodes_direct();
 }
 
+/// Monotonic firmware-node location id, allocated per boot in enumeration
+/// order (stable within one boot). Every DT node gets a distinct
+/// `DeviceLocation::FirmwareNode`, so devnode paths, uevent DEVPATH and
+/// class parentage stay unique per device.
+static FIRMWARE_NODE_ID: AtomicU16 = AtomicU16::new(0);
+
+fn next_firmware_node_id() -> u16 {
+    FIRMWARE_NODE_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 fn enumerate_firmware_nodes_direct() {
     let Some(fdt) = of::fdt() else {
         return;
@@ -141,14 +152,17 @@ fn enumerate_firmware_nodes_direct() {
         let dev = firmware::FirmwareDevice {
             firmware_id,
             source: firmware::FirmwareSource::DeviceTree,
-            mmio: node
+            mmios: node
                 .reg()
-                .and_then(|mut regs| regs.next())
-                .map(|reg| firmware::MmioResource {
-                    base: reg.starting_address as usize,
-                    size: reg.size,
-                }),
-            irq: of::first_interrupt_desc(node),
+                .map(|regs| {
+                    regs.map(|reg| firmware::MmioResource {
+                        base: reg.starting_address as usize,
+                        size: reg.size,
+                    })
+                    .collect()
+                })
+                .unwrap_or_default(),
+            irqs: of::interrupt_descs(node),
             clock_frequency: node.property_u32("clock-frequency"),
             phandle: node.property_u32("phandle"),
             clock_cells: node.property_u32("#clock-cells"),
@@ -161,12 +175,12 @@ fn enumerate_firmware_nodes_direct() {
 
 fn build_descriptor(dev: firmware::FirmwareDevice) {
     let mut resources = ResourceMap::new();
-    if let Some(mmio) = dev.mmio {
+    for mmio in &dev.mmios {
         resources.push_kind(ResourceKind::Mmio(driver_core::MmioRegion::new(
             mmio.base, mmio.size,
         )));
     }
-    if let Some(irq) = dev.irq {
+    for irq in &dev.irqs {
         resources.push_kind(ResourceKind::Irq(driver_core::IrqSpec::global(
             irq.irq,
             map_trigger(irq.trigger),
@@ -193,7 +207,9 @@ fn build_descriptor(dev: firmware::FirmwareDevice) {
 
     let descriptor = DeviceDescriptor::new(
         <PlatformBus as Bus>::ID,
-        DeviceLocation::FirmwareNode { id: 0 },
+        DeviceLocation::FirmwareNode {
+            id: next_firmware_node_id(),
+        },
         DeviceIdentity::Platform(PlatformIdentity {
             firmware_id: Some(alloc::string::String::from(dev.firmware_id)),
             alias: None,

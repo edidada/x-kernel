@@ -8,6 +8,7 @@
 
 extern crate alloc;
 
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use lazyinit::LazyInit;
@@ -403,6 +404,72 @@ pub fn syscon_poweroff() -> Option<SysconControl> {
         paddr: PhysAddr::from_usize((node_reg(regmap)? + offset) as usize),
         value: property_u32(node, "value")?,
     })
+}
+
+/// Returns every interrupt specifier for a device node, in DT order.
+///
+/// Handles the two DT spellings: a flat `interrupts` property (uniform
+/// specifier width under the node's interrupt parent — GIC-style 3-cell
+/// and simple 1-cell) and `interrupts-extended` (per-entry phandle +
+/// `#interrupt-cells` of the referenced controller).
+/// `first_interrupt_desc` remains the `interrupt_descs().first()` special
+/// case for existing single-irq callers.
+pub fn interrupt_descs(node: FdtNode<'static, 'static>) -> Vec<InterruptInfo> {
+    let mut out = Vec::new();
+
+    if let Some(parent) = interrupt_parent_node(node) {
+        let controller = controller_kind(parent);
+        if let Some(value) = node.property("interrupts").map(|prop| prop.value) {
+            for width in [3usize, 1] {
+                if value.is_empty() || value.len() % (width * 4) != 0 {
+                    continue;
+                }
+                for chunk in value.chunks_exact(width * 4) {
+                    let cells: Vec<u32> = chunk
+                        .chunks_exact(4)
+                        .map(|w| u32::from_be_bytes(w.try_into().unwrap()))
+                        .collect();
+                    if let Some(info) = parse_interrupt_by_controller(controller, &cells) {
+                        out.push(info);
+                    }
+                }
+                if !out.is_empty() {
+                    return out;
+                }
+            }
+        }
+    }
+
+    if let Some(value) = node.property("interrupts-extended").map(|prop| prop.value) {
+        let words: Vec<u32> = value
+            .chunks_exact(4)
+            .map(|w| u32::from_be_bytes(w.try_into().unwrap()))
+            .collect();
+        // Each entry: controller phandle, then that controller's
+        // `#interrupt-cells` specifiers.
+        let mut idx = 0usize;
+        while idx < words.len() {
+            let Some(controller_node) = find_node_by_phandle(words[idx]) else {
+                break;
+            };
+            let Some(cells) = property_u32(controller_node, "#interrupt-cells") else {
+                break;
+            };
+            let cells = cells as usize;
+            let end = (idx + 1 + cells).min(words.len());
+            if end > idx + 1
+                && let Some(info) = parse_interrupt_by_controller(
+                    controller_kind(controller_node),
+                    &words[idx + 1..end],
+                )
+            {
+                out.push(info);
+            }
+            idx = end;
+        }
+    }
+
+    out
 }
 
 /// Returns the first interrupt specifier for a device node.
