@@ -122,8 +122,8 @@ checked through the configured kernel's `make clippy` during this migration.
 First choose the backend. Rustc/Clippy checks inherit `[workspace.lints]` in
 root `Cargo.toml`; parameters live in root `clippy.toml`. Validate through
 `make clippy` after preparing a platform defconfig, as described in
-`docs/ai/skills/build-workflow/SKILL.md`. Dylint candidates will be listed in
-`pending.md`; landing one removes its row. AI checks describe judgments the
+`docs/ai/skills/build-workflow/SKILL.md`. Dylint candidates are listed in
+[pending.md](pending.md); landing one removes its row. AI checks describe judgments the
 lint backends cannot prove. x-review-ng loads only `CG-*.md` and selects rules
 with an `ai` check; files with only rustc/Clippy checks have no `triggers` and
 are ignored by AI review.
