@@ -38,7 +38,9 @@ checks:
     `ksync::Mutex` / `ksync::RwLock`.
   - Macro constraints: `#[cfg(..)]` goes outside the `static_lock!`
     invocation, doc comments go inside on the item, `static mut` is not
-    supported.
+    supported. The crate that owns the static must depend on `kspin`
+    directly: with `stats` the macro resolves that crate name from
+    `Cargo.toml`, even when the type is imported through `ksync`.
 - **Counter-example**:
 
 ```rust

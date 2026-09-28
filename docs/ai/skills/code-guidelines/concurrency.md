@@ -78,14 +78,6 @@ Write lock initialization so the `stats` paths compile when that feature
 is on. `make clippy` follows `.config`; do not special-case the feature
 in the build tool.
 
-When `stats` is off, `static_lock!` is an identity macro and
-`Mutex::new` / `RwLock::new` stay `const fn`. Wrapping static Mutex and RwLock
-items in `static_lock!` remains the right form.
-
-The crate that owns the static must depend on `ksync` (Mutex / RwLock)
-or `kspin` (spin types). The macro resolves those crate names from
-`Cargo.toml`.
-
 ### Heap and lazy runtime init
 
 Use `Mutex::new` / `RwLock::new` (and `Arc::new(Mutex::new(...))`,
@@ -93,15 +85,6 @@ Use `Mutex::new` / `RwLock::new` (and `Arc::new(Mutex::new(...))`,
 class via `#[track_caller]` and are **not** `const`.
 
 Do not call them from `const fn` or from a `static` initializer.
-
-If a constructor is only used at runtime, drop `const` so it can keep
-`Mutex::new` and remain tracked.
-
-### Untracked const init
-
-Use `Mutex::const_new(RawMutex::new(), val)` (and the RwLock equivalent)
-only when a `const` initializer is required and tracking is acceptable
-to lose. Do not use it as the default for ordinary statics.
 
 ### Recording
 
@@ -167,7 +150,6 @@ Check specifically for:
 - atomics used where a lock would be clearer and safer;
 - unstated assumptions about IRQ state, scheduler availability,
   or wakeup ordering;
-- `static Mutex` / `RwLock` without `static_lock!`;
 - `Mutex::new` / `RwLock::new` inside `const fn` or a `static`
   initializer (including `Foo(Mutex::new(...))` wrappers);
 - lock-stat counters updated by writing private fields instead of
