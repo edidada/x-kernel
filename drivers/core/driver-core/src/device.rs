@@ -335,7 +335,7 @@ impl Drop for CoherentMem {
 
 /// Provider-side clock operations behind a [`ClkHandle`].
 ///
-/// The `kclk` subsystem (ported from the `clk/tail` branch during Phase 0
+/// The `kclk` subsystem (the common clock framework core, ported from the `clk/tail` branch
 /// acceptance) implements this for real hardware clocks; tests implement it
 /// with fixed-rate fakes.
 pub trait ClkOps: Send + Sync {

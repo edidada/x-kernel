@@ -84,7 +84,7 @@ Invariants:
 - IRQ action-list synchronization is protected by `kirq`.
 - `TimeOp::monotonic_time()` keeps no crate state and forwards to the
   X-Kernel time source.
-- Devres cleanup runs in `DeviceObject` LIFO order; releasing an IRQ
+- Resource guards release in Data field-declaration order; releasing an IRQ
   waits through `kirq` for stale hardirq snapshots to drain.
 
 ## Known Limitations

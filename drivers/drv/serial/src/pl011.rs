@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! PL011 serial driver on the driver-core model — the Phase 0 golden
+//! PL011 serial driver on the driver-core model — the golden
 //! template for **consumer drivers**.
 //!
 //! Translated from the Linux `drivers/tty/serial/amba-pl011.c` shape and the

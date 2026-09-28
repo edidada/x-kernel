@@ -4,7 +4,7 @@
 
 //! Device model spine for porting Linux drivers into x-kernel.
 //!
-//! This crate is the Phase 0 core of the driver framework refactor. It keeps a
+//! This crate is the device model core of the driver framework. It keeps a
 //! deliberate structural homomorphism with the Linux driver model so that
 //! porting a Linux driver is a mostly mechanical, file-local transformation:
 //!
@@ -84,8 +84,9 @@ pub mod desc {
 }
 
 pub mod pci {
-    //! Reference implementation of the PCI bus. Phase 3 moves this into a
-    //! dedicated `bus-pci` crate together with the enumeration backend.
+    //! Reference implementation of the PCI bus. This belongs in a
+    //! dedicated `bus-pci` crate eventually (the platform twin below
+    //! likewise); both stay here while only the compose root enumerates.
 
     pub use crate::bus::{PciBus, PciMatch};
 }
@@ -93,10 +94,8 @@ pub mod pci {
 pub mod platform {
     //! Reference implementation of the platform ("firmware node") bus.
     //!
-    //! Phase 3 of the refactor moves this into a dedicated `bus-platform`
-    //! crate; it lives here so the Phase 0 acceptance work (porting the PL011
-    //! serial driver from the `clk/tail` branch) can proceed without waiting
-    //! for the bus crates.
+    //! This belongs in a dedicated `bus-platform` crate eventually; it stays
+    //! here while only the compose root enumerates.
 
     pub use crate::bus::{AliasMatch, OfMatch, PlatformBus, PlatformId};
 }

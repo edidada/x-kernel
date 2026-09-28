@@ -14,7 +14,7 @@ reachable from the documented publish/query/subscribe API.
 ```text
     driver-compose (probe success)
        │
-       │ trusted: parent DeviceObject (bound driver verified),
+       │ trusted: parent ClassParent (driver name verified),
        │          runtime trait object (driver-constructed)
        v
 ┌─────────────────────────────┐
@@ -47,7 +47,7 @@ reachable from the documented publish/query/subscribe API.
   the correct order.
 - Upper subsystems trust that a `ClassDevice<T>` returned by `kclass`
   stays safely accessible after device removal (guaranteed by holding
-  `Arc<DeviceObject>`).
+  the shared runtime `Arc`).
 
 ## External Boundaries / Attack Surface
 
@@ -56,7 +56,7 @@ touches hardware or external input directly. Its attack surface comes
 from:
 
 - **driver publish input**: the driver-supplied
-  `parent: Arc<DeviceObject>` and `runtime: T`. kclass assumes `parent`
+  `parent: ClassParent` (detached identity) and `runtime: T`. kclass assumes the parent
   went through the full `devnode` probe pipeline — driver matching
   validated, `parent.state` transitions protected by `devnode` internal
   locks.
@@ -94,13 +94,13 @@ by a `GlobalPage` RAII allocation that lives for the kernel lifetime).
 
 1. **ClassDevice Arc lifetime**: `ClassDevice` holds
    `Arc<ClassDeviceInner<T>>`, and `ClassDeviceInner` holds
-   `Arc<DeviceObject>`. As long as any `ClassDevice` clone exists, the
-   `DeviceObject` is not freed and its devres resources (MMIO mappings,
+   the shared runtime `Arc`. As long as any `ClassDevice` clone exists, the
+   the runtime is not freed and the driver's resource guards (MMIO mappings,
    IRQs, DMA buffers) stay valid.
 2. **ClassDevice remains safe to use after removal**:
    `ClassRegistry::remove` only drops the registry entry; clones held
    outside stay valid, and their `with()` calls reach device resources
-   through `Arc<DeviceObject>`. Trait methods may return errors once the
+   through the shared runtime. Trait methods may return errors once the
    device state is `Removing`/`Removed`, but no UB can occur.
 3. **No callbacks under the registry lock**: `publish` and `remove`
    complete inside the `SpinNoPreempt` lock without calling external
@@ -127,16 +127,16 @@ by a `GlobalPage` RAII allocation that lives for the kernel lifetime).
 | Type | Send condition | Sync condition |
 |------|-----------|-----------|
 | `ClassDevice<T>` | `Arc<ClassDeviceInner<T>>` is `Send` when `T: Send + Sync` | `Arc` provides shared access |
-| `ClassDeviceInner<T>` | `Arc<DeviceObject>` + `T: Send` + metadata `Send` | `Arc<DeviceObject>` + `T: Sync` |
+| `ClassDeviceInner<T>` | detached parent + `T: Send` + metadata `Send` | parent + `T: Sync` |
 | `ClassRegistry<T>` | `Vec<ClassDevice<T>>` + `Vec<Callback>` are `Send` | interior mutability via `SpinNoPreempt` |
 | `ClassAvailabilityCallback<T>` | `Arc<dyn Fn(...) + Send + Sync>` is `Send + Sync` | `Arc` provides shared access |
-| `ACTIVATION_BRIDGE` | `LazyInit<()>` is a zero-sized type | `LazyInit` makes initialization thread-safe |
+| Class registry statics | `LazyInit<SpinNoPreempt<...>>` | `LazyInit` makes initialization thread-safe |
 
 ## Threat Analysis
 
 | ID | Threat | Impact | Trigger | Existing control |
 |------|----------|----------|----------|----------|
-| T-02 | Event bridge fires before `devnode` is initialized | High | `ensure_event_bridge` called before `devnode` initialization | driver-compose initializes the domain before any `publish_*`; publication notifies subscribers directly (the legacy event bridge is gone) |
+| T-02 | Removal fires before `devnode` is initialized | High | remove notifier invoked before devnode init | driver-compose initializes the domain before any `publish_*`; the remove notifier runs between `remove()` and `drop(Data)` |
 | T-03 | Publish race loses or duplicates a device | Medium | Concurrent publish of the same device | `SpinNoPreempt` serializes; a second publish of the same id returns `AlreadyExists` |
 | T-04 | A subscriber callback panics, skipping later subscribers | Medium | One callback panics inside the notification `for` loop | Callbacks run outside `catch_unwind`; currently no unwind protection — subscriber quality is relied upon |
 | T-05 | `with()` on a removed `ClassDevice` reaches freed runtime | Medium | Runtime trait object dropped before `ClassDeviceInner` | All `ClassDeviceInner` fields (including runtime) drop together; `Arc` counting delays drop until all references are gone |
@@ -156,9 +156,9 @@ Impact levels:
 
 | ID | Failure mode | Cause | Local effect | System effect | Severity | Handling |
 |------|----------|----------|--------|------|----------|----------|
-| F-01 | Publish with an unbound parent | `DeviceObject` did not complete bind before publish | publish returns `BadState` | Device not published | 3 | `try_new_with_class_metadata` checks `driver_name()` and `driver_id()` |
+| F-01 | Publish with an unnamed parent | `ClassParent` carries no driver name | publish returns `BadState` | Device not published | 3 | `try_new_with_class_metadata` checks `driver_name()` |
 | F-02 | Publish with a mismatched device_kind | Driver passes a net device to `publish_block` | publish returns `InvalidInput` | Device not published | 4 | Kind check happens before `ClassDevice` construction |
-| F-03 | Event bridge not registered | `ensure_event_bridge` never called (no class feature enabled) | No Activated/Removed dispatch | Device state changes do not reach class registries | 4 | `ensure_event_bridge` is called by every `*_registry_fn()` |
+| F-03 | Remove notifier not installed | `set_remove_notifier` never called | No publication withdrawal on removal | Publications leak in class registries | 4 | driver-compose installs the notifier at init; devnode withdraw is idempotent |
 | F-04 | Subscriber callback panics | Callback bug causes unwinding | Later subscribers not notified | Some subsystems miss availability notices | 3 | Callbacks run in Vec order; no `catch_unwind` today; subscriber quality relied upon |
 | F-06 | `devices()` returns a very large `Vec` | Many devices active at once | Allocation may fail | Caller gets an empty `Vec` (no OOM handling) | 4 | `Vec::collect` may fail; callers should handle empty results |
 | F-07 | Duplicate publish | Driver bypasses the normal remove/add lifecycle | publish returns `AlreadyExists` | New runtime not visible | 4 | Class-specific publish is rolled back; the resident object is kept |
@@ -220,7 +220,7 @@ registries and `ClassDevice` objects.
 When modifying this module, verify:
 
 - Every `unsafe` block carries a `SAFETY:` comment.
-- A new class is added at the `class_registries!` macro call site, not by
+- A new class is added at the `class_api!` macro call site, not by
   hand-copying logic.
 - The new class's runtime type alias (e.g. `FooDeviceImpl`) is declared
   in lib.rs.
@@ -234,4 +234,4 @@ When modifying this module, verify:
 - Device-node registration remains after `Activated` and before availability
   callbacks; removal unregisters the node before class cleanup.
 - A node-allocation error must not suppress typed class availability callbacks.
-- Framebuffer changes respect the `Arc<DeviceObject>` lifetime guarantee.
+- Framebuffer changes respect the shared-runtime lifetime guarantee.

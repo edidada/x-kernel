@@ -295,7 +295,7 @@ impl IdMatchEntry for OfMatch {
     }
 }
 
-/// One `struct pci_device_id` row, for the Phase 3 PCI bus crate.
+/// One `struct pci_device_id` row, for PCI id tables.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct PciMatch {

@@ -74,7 +74,7 @@ drivers/common/kclass/
     │ kclass                                  │
     │                                         │
     │  ┌─────────────────────────────────┐    │
-    │  │     ACTIVATION_BRIDGE           │    │
+    │  │     ClassRegistry (per class)   │    │
     │  │  (class-level subscription)     │    │
     │  │  Activated → notify_class_avail │    │
     │  │              + register node     │    │
@@ -98,7 +98,7 @@ drivers/common/kclass/
     │  ┌─────────────┴───────────────────┐    │
     │  │  ClassDevice<T>                 │    │
     │  │   Arc<ClassDeviceInner<T>>      │    │
-    │  │   ├─ parent: Arc<DeviceObject>  │    │
+    │  │   ├─ parent: ClassParent        │    │
     │  │   ├─ runtime: T (Box<dyn Trait>)│    │
     │  │   ├─ name, device_kind, irq     │    │
     │  │   └─ metadata (input identity)  │    │
@@ -120,12 +120,12 @@ drivers/common/kclass/
 
 | Component | Responsibility |
 |------|------|
-| `ClassDevice<T>` | Typed runtime device handle; wraps `DeviceObject` + trait object and delegates trait method calls |
-| `ClassDeviceInner<T>` | `ClassDevice` internal shared state: parent, runtime, name, kind, irq, metadata |
+| `ClassDevice<T>` | Typed runtime device handle; wraps a detached `ClassParent` + trait object and delegates trait method calls |
+| `ClassDeviceInner<T>` | `ClassDevice` internal shared state: detached parent (id, driver name, location), runtime, name, kind, irq, metadata |
 | `ClassRegistry<T>` | Typed registry: publish (unique publication), devices (enumerate available), find (lookup by id), subscribe (availability notification), remove (remove by id) |
-| `ACTIVATION_BRIDGE` | Global event bridge: fires class-level availability/removal subscriptions and drives class-level notify/remove |
+| `class_notify` / `class_remove` | Shared functions every class uses for availability notification (with devnode projection for input/display) and removal (unsubscribe + unpublish) |
 | `ClassRuntimeMetadata::device_node_class` | Supplies input capability metadata or the DRM primary class to the devnode projection; other runtime classes return no node request |
-| `class_registries!` macro | Declaratively generates all 7 class registries and their companion functions |
+| `class_api!` macro | Instantiates each class's typed registry static and the stable-name forwarding functions; the notify/remove logic is shared hand-written code, not macro-generated |
 | `ClassDeviceMetadata` | Optional class-specific metadata (currently only the input class carries physical_location / unique_id) |
 | `prelude` module | Centralized re-export of all public types for publishers such as `drv/*` modules |
 | Trait delegation impls | Implement the operation traits (e.g. `NetDevice`) for categories consumed through class handles, delegating to the inner runtime; the net class also forwards `NetRxScheduler` attach/detach, while block I/O goes only through the block core canonical `BlockDevice` |
@@ -135,7 +135,7 @@ drivers/common/kclass/
 ### ClassDevice lifecycle
 
 ```text
-                    driver probe_device()
+                    driver probe()
                          │
                          │ publish_<class>(parent, runtime)
                          v
@@ -175,7 +175,7 @@ resident runtime is never silently replaced.
 
 ### Publish flow
 
-1. The driver creates the runtime device inside `DeviceDriver::probe_device`
+1. The driver creates the runtime device inside `DriverOps::probe`
    (e.g. `VirtIoNet::try_new`).
 2. It calls `publish_<class>(parent, runtime)` (macro-generated).
 3. `name()`, `device_kind()`, and `irq()` are extracted from the runtime.
@@ -215,22 +215,22 @@ resident runtime is never silently replaced.
 5. Callbacks run outside the lock so reentrancy inside subscriber code
    cannot deadlock the registry.
 
-### Event bridge
+### Removal semantics
 
-`ACTIVATION_BRIDGE` is lazily initialized on first class-registry access
-(`ensure_event_bridge`):
+There is no legacy event bridge. Removal flows through the composition
+root's remove notifier: `driver-compose` calls
+`kclass::remove_all_detached(owner)` between `remove()` and `drop(Data)`,
+so publications are withdrawn while the hardware is still mapped:
 
-1. A `DeviceEventKind::Activated` subscriber is registered: on each event
-   it calls `notify_class_available(kind, id)`, dispatching on
-   `DeviceKind` to the matching class notify function. Input and display
-   notify functions capture their class metadata and call
-   `devnode::publish` before availability callbacks.
-2. A `DeviceEventKind::Removed` subscriber is registered: on each event it
-   calls `remove_class_device(id)`, which walks every class registry, removes
-   the id, unregisters its optional `DeviceNode`, and then runs class-specific
-   unpublish cleanup.
-3. The bridge completes inside `LazyInit::call_once`, guaranteeing a
-   single registration.
+1. `class_remove(registry, id)`: remove from the registry, snapshot the
+   removal-subscriber list inside the lock, run the callbacks outside it.
+2. Withdraw the devnode publication (`devnode::withdraw`).
+3. Run class-specific unpublish cleanup (`ClassRuntimeMetadata::
+   unpublish_class` — block deletes the gendisk, etc.).
+
+Device removal may also be driven by a family activation's `close()`
+(virtio-mmio): `unpublish_<class>(id)` is the family-facing entry; both
+paths are idempotent.
 
 ### Device trait delegation
 
@@ -297,7 +297,7 @@ before publication; kclass does not implement waiting or entropy trust policy.
   - walk subscribers and run callbacks outside the lock.
   This prevents reentrancy inside subscriber callbacks from deadlocking
   the registry.
-- `ACTIVATION_BRIDGE` initialization is thread-safe through `LazyInit`.
+- Class registry statics initialize through `LazyInit` (thread-safe, once).
 - `ClassDevice<T>` is shared via `Arc`; `Clone` only bumps the reference
   count.
 - Runtime (trait object) concurrency safety is guaranteed by the
@@ -308,21 +308,22 @@ before publication; kclass does not implement waiting or entropy trust policy.
 
 ### Macro-driven instead of hand-written per class
 
-**Choice**: generate all code for the 8 device classes with the
-`class_registries!` macro.
+**Choice**: a small `class_api!` macro instantiates each class's typed
+registry static and the stable-name forwarding functions; the publish
+validation, notify (with devnode projection), and removal bodies are
+shared hand-written functions (`class_notify`, `class_remove`), not
+macro-expanded.
 
-**Trade-off**: macro debugging is harder, in exchange for:
+**Trade-off**: one macro to learn, in exchange for:
 
-- identical publish/devices/find/subscribe/notify/remove logic per class;
-  writing it 8 times by hand would duplicate heavily;
-- adding a new class is one line at the `class_registries!` call site,
-  with no repeated boilerplate;
-- the expanded code is exactly what a hand-written version would be — no
-  runtime overhead.
+- the notify/remove logic exists exactly once and is plainly readable;
+- adding a new class is one line at the `class_api!` call site;
+- lock scoping and callback ordering are auditable without expanding
+  anything.
 
-**Rejected alternative**: hand-writing each class in full. High
-duplication, and new classes tend to miss steps (notify or
-ensure_event_bridge calls); the macro enforces consistency.
+**Rejected alternative**: the original 12-parameter `class_registry!`
+generating notify/remove per class — duplicated logic invisible to IDE
+navigation; also hand-writing every class in full (duplication).
 
 ### Device trait delegation instead of exposing the trait object
 
@@ -335,75 +336,40 @@ delegating through `with()`.
   use `&dyn NetDevice`;
 - `ClassDevice` can insert common logic around delegated calls (stats,
   logging, permission checks) without touching driver implementations;
-- `DeviceObject` lifetime management is encapsulated; consumers never
+- Runtime lifetime management is encapsulated; consumers never
   inspect device state.
 
 **Rejected alternative**: expose `fn runtime(&self) -> &T` and let callers
 operate directly. That simplifies delegation code but breaks
 encapsulation — callers could bypass device state checks.
 
-### Lazily initialized event bridge
+### Removal through the composition root
 
-**Choice**: register event listeners on first class-registry access via
-`LazyInit` + `ensure_event_bridge()`.
+**Choice**: there is no lazily initialized event bridge. Publications are
+withdrawn by the composition root's remove notifier
+(`kclass::remove_all_detached(owner)`), which `driver-compose` invokes
+between `remove()` and `drop(Data)` — while the hardware is still mapped.
 
-**Trade-off**: a tiny one-time initialization cost on first access, in
-exchange for:
+**Trade-off**: one explicit call site instead of transparent event
+plumbing, in exchange for:
 
-- no explicit kclass init call inside `init_drivers`;
-- kclass consumers need no init-order knowledge — only that devnode is
-  initialized;
-- if no class feature is enabled in the build, the bridge is never
-  registered.
+- a single, documented teardown order (quiesce -> withdraw publications ->
+  release IRQ -> drop transport -> unmap) that no callback ordering can
+  violate;
+- no hidden global subscriptions that fire on access paths.
 
-**Rejected alternative**: registering events from a global constructor
-(e.g. a dummy `LazyInit`). More "proactive", but it creates a hidden
-init-order dependency — devnode would have to be initialized whenever
-kclass constructs.
-
-### Input class carries runtime identity metadata
-
-**Choice**: only the input class carries `physical_location` and
-`unique_id` through `ClassDeviceMetadata`.
-
-**Trade-off**: `ClassDeviceMetadata` is empty most of the time, in
-exchange for:
-
-- input subsystem device matching (evdev device identity) needs both
-  fields;
-- the `ClassRuntimeMetadata` trait's default implementation returns empty
-  metadata, so other classes work with zero extra code;
-- future classes can carry metadata by overriding `class_metadata()`.
-
-**Rejected alternative**: adding `physical_location` / `unique_id` to the
-`Device` trait. That would pollute the generic device abstraction with
-input-specific concepts.
-
-### Arc<DeviceObject> prevents use-after-remove
-
-**Choice**: `ClassDevice` holds a strong `Arc<DeviceObject>`.
-
-**Trade-off**: clones of a `ClassDevice` held outside the registry still
-reach the trait methods after the device is removed from the registry.
-This is necessary for:
-
-- pollers / async tasks holding a device reference that must finish a last
-  I/O after hot removal;
-- references obtained inside subscriber callbacks that may outlive the
-  removal.
-
-**Rejected alternative**: `ClassDevice` holding `Weak<DeviceObject>`. That
-would free the `DeviceObject` immediately on removal but requires
-upgrading the weak pointer before every `with()` call, adding a failure
-path (device already freed).
+**Rejected alternative**: the earlier `ensure_event_bridge()` design
+(subscribing to device-model events on first registry access) — it
+coupled kclass to the device model's event vocabulary and hid the
+teardown order inside lazy initialization.
 
 ## Drop / Resource Release
 
 - Dropping a `ClassDevice` only decrements the `Arc` count; it performs no
   device operations.
 - Registry removal is a `Vec::swap_remove` of the `ClassDevice` entry.
-- When the last `ClassDevice` and `DeviceObject` references are released,
-  the `DeviceObject` devres (MMIO mappings, IRQs, DMA buffers) is cleaned
-  up in LIFO order.
+- Resource guards (MMIO mappings, IRQs, DMA buffers) are owned by the
+  driver's `Data` in the device model, not by kclass; they release when
+  the model drops `Data` after publication withdrawal.
 - The runtime trait object is dropped by its `Box<T>` when
   `ClassDeviceInner` drops.

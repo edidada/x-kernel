@@ -61,7 +61,7 @@ static RAMDISK_CALLED: AtomicBool = AtomicBool::new(false);
 /// Returns a [`crate::ramdisk_static::RamDisk`] whose storage is the embedded
 /// image, used directly (zero-copy) rather than copied into the heap. This
 /// hands out a one-time `&'static mut [u8]` view over the image; it must be
-/// called at most once, and the ramdisk driver's `probe_device` path is the
+/// called at most once, and the ramdisk driver's probe path is the
 /// only intended caller.
 /// Returns the ramdisk backing image, consuming the embedded static.
 ///

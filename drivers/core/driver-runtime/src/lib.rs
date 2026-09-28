@@ -11,7 +11,7 @@
 //! resource layer is later folded into `driver-runtime` proper (refactor
 //! section 4.4), driver-facing code does not change.
 //!
-//! # Clock integration (Phase 0 acceptance path)
+//! # Clock integration
 //!
 //! `kclk` (ported from the `clk/tail` branch) registers clock controllers
 //! through [`ClkRegistry::register_provider`] — the analogue of

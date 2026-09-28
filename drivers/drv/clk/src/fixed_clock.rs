@@ -18,7 +18,7 @@
 //! that probed earlier and deferred on this phandle are woken by
 //! [`driver_runtime::register_clk_provider`].
 //!
-//! This is the Phase 0 golden template for **provider drivers**: everything
+//! This is the golden template for **provider drivers**: everything
 //! is one file, registration is data, and the probe-to-wakeup handshake is
 //! the framework's job.
 

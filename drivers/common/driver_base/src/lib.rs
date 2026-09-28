@@ -18,9 +18,9 @@
 //!
 //! Use the following crates for device-type-specific traits:
 //!
-//! - `kdriver_block`: block storage drivers.
-//! - `kdriver_display`: graphics display drivers.
-//! - `net`: network (NIC) drivers.
+//! - `subsystems/block`: block storage drivers.
+//! - `subsystems/display`: graphics display drivers.
+//! - `subsystems/net`: network (NIC) drivers.
 //!
 //! # Example
 //!

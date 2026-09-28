@@ -4,7 +4,7 @@
 
 //! virtio-blk driver on the driver-core model (PCI transport).
 //!
-//! The Phase 1 golden template for **PCI consumer drivers with class
+//! The golden template for **PCI consumer drivers with class
 //! publication**: the device is discovered on the PCI bus, matched by a
 //! const id table (`struct pci_device_id` → [`IDS`]), and the disk is
 //! published into the block class under a detached class parent.
