@@ -880,6 +880,8 @@ pub fn remove_all_detached(owner: u64) {
     drop(remove_detached_vsock(owner));
     #[cfg(feature = "block")]
     drop(remove_detached_block(owner));
+    #[cfg(feature = "virtio-9p")]
+    drop(remove_detached_virtio_9p(owner));
 }
 
 /// Optional console-adoption hook the console runtime installs so char
@@ -904,4 +906,9 @@ pub fn set_char_removal_hook(hook: Arc<dyn Fn(ClassDeviceId) + Send + Sync>) {
 #[cfg(feature = "block")]
 fn remove_detached_block(owner: u64) -> Option<ClassDevice<BlockDeviceImpl>> {
     block_class_registry().lock().remove_detached(owner)
+}
+
+#[cfg(feature = "virtio-9p")]
+fn remove_detached_virtio_9p(owner: u64) -> Option<ClassDevice<Virtio9pDeviceImpl>> {
+    virtio_9p_class_registry().lock().remove_detached(owner)
 }
