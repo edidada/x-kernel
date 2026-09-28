@@ -406,6 +406,28 @@ pub fn syscon_poweroff() -> Option<SysconControl> {
     })
 }
 
+/// Reads a property as a NUL-separated string list (e.g. `reg-names`,
+/// `interrupt-names`). Trailing garbage after the last NUL is rejected by
+/// FDT conventions; we tolerate a missing final NUL.
+pub fn string_list(node: FdtNode<'static, 'static>, name: &str) -> Option<Vec<&'static str>> {
+    let value = node.property(name)?.value;
+    if value.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut out = Vec::new();
+    let mut rest = value;
+    while let Some(pos) = rest.iter().position(|&b| b == 0) {
+        let s = core::str::from_utf8(&rest[..pos]).ok()?;
+        out.push(s);
+        rest = &rest[pos + 1..];
+    }
+    if !rest.is_empty() {
+        // Non-NUL-terminated tail: malformed by FDT rules — reject the list.
+        return None;
+    }
+    Some(out)
+}
+
 /// Returns every interrupt specifier for a device node, in DT order.
 ///
 /// Handles the two DT spellings: a flat `interrupts` property (uniform

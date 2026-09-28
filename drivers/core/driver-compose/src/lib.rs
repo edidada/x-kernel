@@ -152,17 +152,22 @@ fn enumerate_firmware_nodes_direct() {
         let dev = firmware::FirmwareDevice {
             firmware_id,
             source: firmware::FirmwareSource::DeviceTree,
-            mmios: node
-                .reg()
-                .map(|regs| {
-                    regs.map(|reg| firmware::MmioResource {
-                        base: reg.starting_address as usize,
-                        size: reg.size,
+            mmios: {
+                let reg_names = of::string_list(node, "reg-names");
+                node.reg()
+                    .map(|regs| {
+                        regs.enumerate()
+                            .map(|(idx, reg)| firmware::MmioResource {
+                                base: reg.starting_address as usize,
+                                size: reg.size,
+                                name: reg_names.as_ref().and_then(|names| names.get(idx)).copied(),
+                            })
+                            .collect()
                     })
-                    .collect()
-                })
-                .unwrap_or_default(),
+                    .unwrap_or_default()
+            },
             irqs: of::interrupt_descs(node),
+            irq_names: of::string_list(node, "interrupt-names"),
             clock_frequency: node.property_u32("clock-frequency"),
             phandle: node.property_u32("phandle"),
             clock_cells: node.property_u32("#clock-cells"),
@@ -175,12 +180,14 @@ fn enumerate_firmware_nodes_direct() {
 
 fn build_descriptor(dev: firmware::FirmwareDevice) {
     let mut resources = ResourceMap::new();
-    for mmio in &dev.mmios {
-        resources.push_kind(ResourceKind::Mmio(driver_core::MmioRegion::new(
-            mmio.base, mmio.size,
-        )));
+    for (idx, mmio) in dev.mmios.iter().enumerate() {
+        let kind = ResourceKind::Mmio(driver_core::MmioRegion::new(mmio.base, mmio.size));
+        match mmio.name {
+            Some(name) => resources.push_named(name, kind),
+            None => resources.push_kind(kind),
+        }
     }
-    for irq in &dev.irqs {
+    for (idx, irq) in dev.irqs.iter().enumerate() {
         // Keep the firmware route intact: controller + controller-relative
         // hwirq travel with the resource, and the runtime maps them through
         // the controller's irq domain at request time (Linux keeps DT spec
@@ -197,7 +204,15 @@ fn build_descriptor(dev: firmware::FirmwareDevice) {
             firmware::InterruptControllerKind::Unknown => driver_core::IrqControllerKind::Unknown,
         });
         spec.hwirq = Some(irq.irq);
-        resources.push_kind(ResourceKind::Irq(spec));
+        let name = dev
+            .irq_names
+            .as_ref()
+            .and_then(|names| names.get(idx))
+            .copied();
+        match name {
+            Some(name) => resources.push_named(name, ResourceKind::Irq(spec)),
+            None => resources.push_kind(ResourceKind::Irq(spec)),
+        }
     }
     for spec in &dev.clock_specs {
         let entry_kind = ResourceKind::Clk(driver_core::ClkSpec::by_phandle_index(

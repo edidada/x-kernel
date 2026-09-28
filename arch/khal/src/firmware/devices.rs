@@ -67,6 +67,9 @@ pub struct FirmwareDevice {
     /// Every interrupt specifier, in DT order (`interrupts` flat form or
     /// `interrupts-extended`). Single-irq nodes keep index 0 stable.
     pub irqs: Vec<InterruptInfo>,
+    /// Entry `i` of `interrupt-names`, when the node provides it
+    /// (parallel to `irqs`; `None` when absent).
+    pub irq_names: Option<Vec<&'static str>>,
     /// For `fixed-clock` nodes: the `clock-frequency` property, in Hz.
     /// Extracted during enumeration so clock controller drivers can
     /// register without re-walking the DT.
@@ -90,6 +93,8 @@ pub struct FirmwareDevice {
 pub struct MmioResource {
     pub base: usize,
     pub size: usize,
+    /// Entry `i` of `reg-names`, when the node provides it.
+    pub name: Option<&'static str>,
 }
 
 /// Returns `true` if any firmware device description (DT or ACPI) has been
@@ -225,23 +230,28 @@ pub fn for_each_compatible(
             continue;
         };
 
+        let reg_names = of::string_list(node, "reg-names");
         let mmios = node
             .reg()
             .map(|regs| {
-                regs.map(|reg| MmioResource {
-                    base: reg.starting_address as usize,
-                    size: reg.size,
-                })
-                .collect()
+                regs.enumerate()
+                    .map(|(idx, reg)| MmioResource {
+                        base: reg.starting_address as usize,
+                        size: reg.size,
+                        name: reg_names.as_ref().and_then(|names| names.get(idx)).copied(),
+                    })
+                    .collect()
             })
             .unwrap_or_default();
         let irqs = of::interrupt_descs(node);
+        let irq_names = of::string_list(node, "interrupt-names");
 
         visitor(FirmwareDevice {
             firmware_id,
             source: FirmwareSource::DeviceTree,
             mmios,
             irqs,
+            irq_names,
             clock_frequency: node.property_u32("clock-frequency"),
             phandle: node.property_u32("phandle"),
             clock_cells: node.property_u32("#clock-cells"),
