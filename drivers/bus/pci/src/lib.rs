@@ -473,11 +473,9 @@ pub struct PciRangeAllocator {
 /// Returns [`PciInitError::NoMemory`] when the allocator cannot satisfy a
 /// BAR request.
 ///
-/// # Panics
-///
-/// Panics via `expect` when `allocator` is `None` while a memory BAR is
-/// unassigned — configuring BARs without an allocation range is a
-/// platform configuration error.
+/// A function with unassigned memory BARs but no allocation range fails
+/// with [`PciInitError::NoMemory`] — a per-device configuration error the
+/// caller reports (discovery skips the function) rather than a panic.
 pub fn configure_device<C: ConfigurationAccess>(
     root: &mut PciRoot<C>,
     bdf: DeviceFunction,
@@ -485,7 +483,10 @@ pub fn configure_device<C: ConfigurationAccess>(
 ) -> Result<(), PciInitError> {
     let mut bar = 0;
     while bar < 6 {
-        let info = match root.bar_info(bdf, bar).unwrap() {
+        let info = match root
+            .bar_info(bdf, bar)
+            .map_err(|_| PciInitError::InvalidRange)?
+        {
             Some(info) => info,
             None => {
                 bar += 1;
@@ -504,7 +505,10 @@ pub fn configure_device<C: ConfigurationAccess>(
         {
             let new_addr = allocator
                 .as_mut()
-                .expect("No memory ranges available for PCI BARs!")
+                // A function needing assignment with no allocation range is a
+                // per-device configuration failure: propagate it so discovery
+                // can skip this function instead of taking the system down.
+                .ok_or(PciInitError::NoMemory)?
                 .alloc_buf(size as _)
                 .ok_or(PciInitError::NoMemory)?;
             if address_type == MemoryBarType::Width32 {
@@ -514,7 +518,10 @@ pub fn configure_device<C: ConfigurationAccess>(
             }
         }
 
-        let info = match root.bar_info(bdf, bar).unwrap() {
+        let info = match root
+            .bar_info(bdf, bar)
+            .map_err(|_| PciInitError::InvalidRange)?
+        {
             Some(info) => info,
             None => {
                 bar += 1;
