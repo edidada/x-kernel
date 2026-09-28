@@ -29,7 +29,37 @@ impl AddressSpace {
     }
 
     /// Runs `f` with the folio at `index`, materializing it when absent.
+    ///
+    /// The shared invalidate lock covers loading and the callback. When attached
+    /// to an inode, rejects pages starting at or beyond EOF under that lock.
+    /// The callback must not reenter this mapping or fault on user memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BadAddress` at or beyond inode EOF, `InvalidInput` for an invalid
+    /// index, or propagates folio materialization and callback errors.
     pub fn with_folio_or_create<R>(
+        &self,
+        index: PageIndex,
+        f: impl FnOnce(&mut Folio) -> KResult<R>,
+    ) -> KResult<R> {
+        let inode = self.inode();
+        let page_start = index
+            .checked_mul(PAGE_SIZE_4K as u64)
+            .ok_or(VfsError::InvalidInput)?;
+        let _invalidate_guard = self.invalidate_lock.read();
+        if inode
+            .as_ref()
+            .is_some_and(|inode| page_start >= inode.size())
+        {
+            return Err(VfsError::BadAddress);
+        }
+        self.with_folio_or_create_invalidate_locked(index, f)
+    }
+
+    // Shared invalidate or exclusive inode data locking excludes ordinary truncate.
+    // Final eviction instead requires no active inode users.
+    fn with_folio_or_create_invalidate_locked<R>(
         &self,
         index: PageIndex,
         f: impl FnOnce(&mut Folio) -> KResult<R>,
@@ -38,7 +68,21 @@ impl AddressSpace {
             index,
             |index| {
                 let mut folio = Folio::new_zeroed(index)?;
-                self.read_folio(&mut folio)?;
+                let file_len = self.inode().map(|inode| inode.size());
+                let read = self.read_folio(&mut folio)?;
+                if read > PAGE_SIZE_4K {
+                    return Err(VfsError::InvalidData);
+                }
+                let page_start = index
+                    .checked_mul(PAGE_SIZE_4K as u64)
+                    .ok_or(VfsError::InvalidInput)?;
+                if let Some(file_len) = file_len {
+                    let required = file_len.saturating_sub(page_start).min(PAGE_SIZE_4K as u64);
+                    if (read as u64) < required {
+                        return Err(VfsError::Io);
+                    }
+                }
+                folio.data()[read..].fill(0);
                 Ok(folio)
             },
             f,
@@ -66,7 +110,7 @@ impl AddressSpace {
             .checked_mul(PAGE_SIZE_4K as u64)
             .ok_or(VfsError::InvalidInput)?;
         let _invalidate_guard = self.invalidate_lock.read();
-        self.with_folio_or_create(index, |folio| {
+        self.with_folio_or_create_invalidate_locked(index, |folio| {
             let file_len = inode.size();
             if pos >= file_len {
                 return Err(VfsError::BadAddress);
@@ -110,50 +154,112 @@ impl AddressSpace {
     pub(super) fn read_from_page_cache(
         self: &Arc<Self>,
         iter: &mut IovIterDest<'_>,
-        mut offset: u64,
+        offset: u64,
         file_len: u64,
     ) -> VfsResult<usize> {
-        let mut total = 0usize;
+        let mut total = 0;
+        match self.read_cache_batches(iter, offset, file_len, &mut total) {
+            Ok(()) => Ok(total),
+            Err(error) if total == 0 => Err(error),
+            Err(_) => Ok(total),
+        }
+    }
+
+    fn read_cache_batches(
+        self: &Arc<Self>,
+        iter: &mut IovIterDest<'_>,
+        mut offset: u64,
+        file_len: u64,
+        total: &mut usize,
+    ) -> VfsResult<()> {
+        let inode = self.inode();
+        let current_file_len = || {
+            inode
+                .as_ref()
+                .map_or(file_len, |inode| inode.size().min(file_len))
+        };
+        if iter.count() == 0 || offset >= current_file_len() {
+            return Ok(());
+        }
+        if iter.count() <= PAGE_SIZE_4K - (offset % PAGE_SIZE_4K as u64) as usize {
+            *total = self.copy_folio_to_iter(iter, offset, &current_file_len)?;
+            return Ok(());
+        }
         let mut prepared_end = offset;
-        while iter.count() != 0 && offset < file_len {
-            if offset >= prepared_end {
-                prepared_end = self.prepare_read_window(offset, iter.count(), file_len)?;
-            }
-            // Window preparation is only a readahead hint. Resolve each folio
-            // again so a page removed after preparation follows the miss path.
-            let copied = self.copy_folio_to_iter(iter, offset, file_len)?;
-            if copied == 0 {
-                break;
-            }
-            offset += copied as u64;
-            total += copied;
-            if copied < Self::copy_len(offset - copied as u64, file_len)? {
-                break;
+        while iter.count() != 0 && offset < current_file_len() {
+            let batch = if offset >= prepared_end {
+                let (end, batch) =
+                    self.prepare_read_window_and_batch(offset, iter.count(), current_file_len())?;
+                prepared_end = end;
+                batch
+            } else {
+                let start = offset / PAGE_SIZE_4K as u64;
+                // Stay within this window to avoid rescanning the next one.
+                let end = prepared_end.min(current_file_len());
+                let count = end.div_ceil(PAGE_SIZE_4K as u64).saturating_sub(start) as usize;
+                self.i_pages.get_folios_contig(start, count)
+            };
+            for slot in 0..batch.len().max(1) {
+                if offset >= current_file_len() {
+                    return Ok(());
+                }
+                let page_remaining = PAGE_SIZE_4K - (offset % PAGE_SIZE_4K as u64) as usize;
+                let copied = match batch.with_read_folio(slot, |data| {
+                    Self::copy_cached_bytes(iter, data, offset, current_file_len())
+                }) {
+                    Some(result) => result?,
+                    None => self.copy_folio_to_iter(iter, offset, &current_file_len)?,
+                };
+                offset += copied as u64;
+                *total += copied;
+                if copied < page_remaining || iter.count() == 0 || offset >= current_file_len() {
+                    return Ok(());
+                }
             }
         }
-        Ok(total)
+        Ok(())
     }
 
     fn copy_folio_to_iter(
         &self,
         iter: &mut IovIterDest<'_>,
         offset: u64,
-        file_len: u64,
+        current_file_len: &impl Fn() -> u64,
     ) -> VfsResult<usize> {
         let index = offset / PAGE_SIZE_4K as u64;
-        let page_off = (offset % PAGE_SIZE_4K as u64) as usize;
-        let step = Self::copy_len(offset, file_len)?;
-        self.with_folio_or_create(index, |folio| {
-            iter.copy_to_iter(&folio.data()[page_off..page_off + step])
-        })
+        loop {
+            if let Some(result) = self.i_pages.with_folio(index, |folio| {
+                folio.map(|folio| {
+                    Self::copy_cached_bytes(iter, folio.data(), offset, current_file_len())
+                })
+            }) {
+                return result;
+            }
+            // Exclude truncate during loading, but release before user copy can fault or block.
+            let _invalidate_guard = self.invalidate_lock.read();
+            if offset >= current_file_len() {
+                return Ok(0);
+            }
+            self.with_folio_or_create_invalidate_locked(index, |_| Ok(()))?;
+        }
     }
 
-    fn copy_len(offset: u64, file_len: u64) -> VfsResult<usize> {
+    fn copy_cached_bytes(
+        iter: &mut IovIterDest<'_>,
+        data: &[u8],
+        offset: u64,
+        file_len: u64,
+    ) -> VfsResult<usize> {
         let page_off = (offset % PAGE_SIZE_4K as u64) as usize;
-        let end = offset
-            .saturating_add((PAGE_SIZE_4K - page_off) as u64)
-            .min(file_len);
-        usize::try_from(end - offset).map_err(|_| VfsError::InvalidInput)
+        let step = Self::copy_len(offset, file_len);
+        iter.copy_to_iter(&data[page_off..page_off + step])
+    }
+
+    fn copy_len(offset: u64, file_len: u64) -> usize {
+        let page_off = (offset % PAGE_SIZE_4K as u64) as usize;
+        file_len
+            .saturating_sub(offset)
+            .min((PAGE_SIZE_4K - page_off) as u64) as usize
     }
 
     /// Performs a buffered write from an iterator into this address space.
@@ -237,7 +343,7 @@ impl AddressSpace {
                 self.i_pages.resize_cached_folios(visible_len, prepared_end);
             }
             let mut copied = 0;
-            let copy_result = self.with_folio_or_create(index, |folio| {
+            let copy_result = self.with_folio_or_create_invalidate_locked(index, |folio| {
                 let data = folio.data();
                 copied = iter.copy_from_iter(&mut data[page_off..page_off + step])?;
                 if copied != 0 {

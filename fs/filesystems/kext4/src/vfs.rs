@@ -1476,7 +1476,7 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
         Ok(())
     }
 
-    fn readahead(&self, mapping: &AddressSpace, control: ReadaheadControl) -> VfsResult<()> {
+    fn readahead(&self, mapping: &AddressSpace, control: ReadaheadControl<'_>) -> VfsResult<()> {
         if control.count() == 0 {
             return Ok(());
         }

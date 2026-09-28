@@ -331,10 +331,11 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 
 ### Buffered read 窗口提示的有效性
 
-`prepared_end` 仅控制预读窗口准备的频率，不表示该区间仍驻留，不授权绕过 folio 查找、
-锁定或按需加载。窗口批量准备不新增裸页引用、长期 pin、用户复制期间的索引锁或
-invalidate lock；不改变原有读取的文件长度快照和并发 truncate 语义。短复制必须立即
-停止，复制和 readahead 的错误继续传播，不能因为窗口准备成功而忽略它们。
+`prepared_end` 仅控制准备频率；批次引用只保活分配，不保证驻留。普通和批次访问均
+在 folio lock 下拒绝失效候选，重查或装载时不重放已执行的 callback。
+缺页装载与同步预读发布持 shared invalidate lock，完成数据须覆盖读入前观察的可见页前缀。
+用户复制不持 mapping 或 invalidate lock；复制在 folio lock 内按当前 EOF 限长。
+短复制立即停止，后续错误有已完成前缀时返回该前缀，无进度时传播错误。
 
 ## 审计清单
 

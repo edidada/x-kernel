@@ -79,6 +79,10 @@ impl WriteEndRequest {
 /// one open file instance.
 pub trait AddressSpaceOperations: Send + Sync + 'static {
     /// Reads backing storage into a newly materialized folio.
+    ///
+    /// Returns an initialized prefix covering bytes visible before loading, at most one page.
+    /// VFS rejects missing visible bytes with `Io` and zeroes the remaining tail. Loading
+    /// and publication exclude truncate via shared invalidate or inode data locking.
     fn read_folio(&self, _mapping: &AddressSpace, _folio: &mut Folio) -> VfsResult<usize> {
         Err(VfsError::NoSuchDevice)
     }
@@ -102,8 +106,11 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
         Ok(!was_dirty)
     }
 
-    /// Starts readahead for the supplied folio window.
-    fn readahead(&self, _mapping: &AddressSpace, _control: ReadaheadControl) -> VfsResult<()> {
+    /// Starts synchronous readahead for the supplied folio window.
+    ///
+    /// `control` excludes truncate through completion; do not re-enter truncate
+    /// or retain asynchronous completions.
+    fn readahead(&self, _mapping: &AddressSpace, _control: ReadaheadControl<'_>) -> VfsResult<()> {
         Ok(())
     }
 
