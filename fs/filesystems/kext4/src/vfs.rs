@@ -1418,12 +1418,23 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
     }
 
     fn write_end(&self, mapping: &AddressSpace, request: WriteEndRequest) -> VfsResult<usize> {
+        let accepted = request.copied();
+        if accepted == request.len()
+            && let Some(accepted_end) = request.pos().checked_add(accepted as u64)
+        {
+            // Full copies retain their reservations. The generic write path's
+            // data lock also keeps the request's visible size stable.
+            if accepted != 0 && accepted_end > request.visible_size() {
+                mapping.write_end_set_size(accepted_end)?;
+            }
+            return Ok(accepted);
+        }
+
         let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
         let inode = vfs_inode.private::<Ext4Inode>()?;
         let super_block = vfs_inode.super_block()?;
         let ext4 = ext4_private(&super_block)?;
         let block_size = super_block.block_size();
-        let accepted = request.copied();
         let accepted_end = match request.pos().checked_add(accepted as u64) {
             Some(end) => end,
             None => {
@@ -1432,7 +1443,7 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
             }
         };
         finish_delalloc_write(ext4, inode, request, accepted, block_size)?;
-        if accepted != 0 {
+        if accepted != 0 && accepted_end > request.visible_size() {
             // The accepted prefix may still be dirty if size publication fails.
             mapping.write_end_set_size(accepted_end)?;
         }

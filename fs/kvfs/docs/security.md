@@ -195,6 +195,8 @@ membership TOCTOU。递归 detach 把 child mountpoint 的 overmount stack 一�
 可变状态。
 
 regular-file inode 的 data lock 覆盖 generic buffered write 和整个 set-length callback。
+`WriteEndRequest::visible_size()` 只在该 data-lock 临界区内有效；完成回调可以据此跳过
+覆盖写的 size 查询，但增长仍必须发布实际接受字节的 EOF，取消不得扩大文件长度。
 address-space invalidate lock 的 shared 侧保护 `page_mkwrite` 和完整 writeback，exclusive
 侧保护 truncate、mapped-view invalidation 与 page-cache truncate；目标 folio lock 串行化
 fault preparation、dirty 与 PTE publish。具体文件系统的 mapping/reservation lock 在这些

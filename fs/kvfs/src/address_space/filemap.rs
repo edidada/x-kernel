@@ -247,8 +247,9 @@ impl AddressSpace {
             });
             if let Err(error) = copy_result {
                 iter.revert(copied)?;
-                if let Err(cancel_error) =
-                    self.ops.write_end(self, WriteEndRequest::new(pos, step, 0))
+                if let Err(cancel_error) = self
+                    .ops
+                    .write_end(self, WriteEndRequest::new(pos, step, 0, visible_len))
                 {
                     log::warn!(
                         "failed to cancel buffered write at {pos} (len {step}): {cancel_error:?}"
@@ -261,7 +262,7 @@ impl AddressSpace {
             }
             let accepted = match self
                 .ops
-                .write_end(self, WriteEndRequest::new(pos, step, copied))
+                .write_end(self, WriteEndRequest::new(pos, step, copied, visible_len))
             {
                 Ok(accepted) => accepted,
                 Err(error) => {

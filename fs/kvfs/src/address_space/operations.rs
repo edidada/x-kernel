@@ -44,12 +44,22 @@ pub struct WriteEndRequest {
     pos: u64,
     len: usize,
     copied: usize,
+    visible_size: u64,
 }
 
 impl WriteEndRequest {
-    /// Creates a request for a buffered-write byte range.
-    pub const fn new(pos: u64, len: usize, copied: usize) -> Self {
-        Self { pos, len, copied }
+    /// Creates a completion request with the visible size observed before copying.
+    ///
+    /// The generic write path holds the inode data lock through completion,
+    /// so `visible_size` remains valid when deciding whether accepted bytes
+    /// extend the file. All offsets and sizes are measured in bytes.
+    pub const fn new(pos: u64, len: usize, copied: usize, visible_size: u64) -> Self {
+        Self {
+            pos,
+            len,
+            copied,
+            visible_size,
+        }
     }
 
     /// Returns the starting file byte offset.
@@ -70,6 +80,13 @@ impl WriteEndRequest {
     /// Returns the number of bytes copied into the cache.
     pub const fn copied(self) -> usize {
         self.copied
+    }
+
+    /// Returns the visible file size before this write, in bytes.
+    ///
+    /// The caller holds the inode data lock until completion or cancellation.
+    pub const fn visible_size(self) -> u64 {
+        self.visible_size
     }
 }
 
@@ -121,7 +138,9 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
     /// A `copied == 0` request can be a cancellation for a previously
     /// successful [`Self::write_begin`] call. When accepting bytes that extend
     /// the file, the implementation must publish the new visible size with
-    /// [`AddressSpace::write_end_set_size`].
+    /// [`AddressSpace::write_end_set_size`]. The request's visible size is stable
+    /// under the generic write path's inode data lock; an accepted end within
+    /// that size does not require another size lookup or publication.
     fn write_end(&self, _mapping: &AddressSpace, request: WriteEndRequest) -> VfsResult<usize> {
         let _ = request;
         Err(VfsError::InvalidInput)

@@ -574,6 +574,11 @@ invalidate exclusive lock 下执行，并在 backing prepare 后、释放 block 
 在同一 generic-write data-lock 临界区发布接受后的 `i_size`，而不把 ext4 语义伪装成
 libfs helper。
 
+Generic buffered write 将 data lock 下观察的 `visible_size` 随 `WriteEndRequest`
+传入完成或取消回调，并在每次接受字节后推进该观察值。覆盖已有范围时回调直接复用它，
+不再逐页查询或发布未变化的 `i_size`；增长写仍在每次完成回调内发布实际接受的 EOF，
+短写、取消及错误回滚仍按原协议处理。
+
 `AddressSpace` 自己持有 object-id、mapped views、静态共享的 `AddressSpaceOperations` 和
 `i_pages: MappingPages`。该字段直接组合缓存容器，不单独分配 `Arc`，对应 Linux
 `address_space::i_pages`；Folio 自身仍用 `Arc<Mutex<Folio>>` 保持引用和页锁生命周期。
