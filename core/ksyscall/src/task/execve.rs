@@ -238,11 +238,17 @@ fn exec_resolved(
         envs,
         cred,
     ))?;
+    // Everything that can still fail with a plain errno must run before the
+    // first irreversible step. `de_thread()` is that step: once the siblings
+    // are gone the old program cannot be resumed, so allocate the new address
+    // space up front.
+    let new_mm = memspace::MmSpace::new_user_empty()?;
     // Validate the whole image before joining the thread group, mirroring
     // Linux, which only reaches `de_thread()` inside `begin_new_exec` after the
     // binary format is confirmed. Go runtimes (runc init) keep helper threads
     // alive at exec time, so this is the normal path.
-    if kprocess::scheduler::process_task_count(process.as_ref()) > 1 {
+    let was_multithread = kprocess::scheduler::process_task_count(process.as_ref()) > 1;
+    if was_multithread {
         exec_de_thread();
     }
     // Pin the backing executable for `/proc/<pid>/exe` before `prepared` is
@@ -271,19 +277,28 @@ fn exec_resolved(
         exec_update.with_ta_head_bytes(ta_head_bytes)
     };
 
-    let new_mm = memspace::MmSpace::new_user_empty()?;
+    // From `de_thread()` onward the old thread group is already gone: a failure
+    // here is fatal rather than an errno the caller could resume from with a
+    // vanished thread group. A single-threaded exec has no such step, so it
+    // keeps returning the error with its state intact.
     // SAFETY: new_user_empty preserves kernel mappings. All request/metadata
     // inputs are owned, with no old-MM guard or user-copy window retained.
-    // After exchange, only successful installation/context reset or fatal exit
-    // can finish this syscall; the previous user context is never resumed.
-    unsafe {
+    let replaced = unsafe {
         kprocess::replace_current_address_space(
             new_mm,
             #[cfg(unittest)]
             probe
                 .as_ref()
                 .is_some_and(|probe| probe.should_fail_precheck()),
-        )?;
+        )
+    };
+    if let Err(error) = replaced {
+        if was_multithread {
+            error!("sys_execve: address-space swap failed after de_thread; terminating: {error}");
+            posix_process::do_exit(ksignal::Signo::SIGSEGV as i32, true);
+            return Ok(0);
+        }
+        return Err(error);
     }
     thread.reset_user_state_after_exec();
     // Keep every fallible post-exchange operation inside this fatal boundary.
