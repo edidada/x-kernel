@@ -20,7 +20,7 @@
 //! reproducible without a debugger.
 //!
 //! Coverage spans both free-head bitmap modes (inline for regions of at most
-//! `INLINE_BITMAP_WORDS * WORD_BITS` pages, reserved prefix above that),
+//! `INLINE_BITMAP_WORDS * WORD_BITS` pages, reserved suffix above that),
 //! non-power-of-two region sizes, fixed-address allocation through
 //! `allocate_pages_at`, several regions in one allocator, and repeated
 //! `init_region`/`reset` re-initialization.
@@ -166,20 +166,6 @@ fn reserved_bitmap_pages(region_pages: usize) -> usize {
     }
 }
 
-/// Largest power-of-two block that has an aligned slot inside the window.
-fn largest_aligned_block(heap_base: usize, heap_end: usize, usable_pages: usize) -> usize {
-    let mut pages = 1usize << (usize::BITS as usize - 1 - usable_pages.leading_zeros() as usize);
-    loop {
-        let span = pages * PAGE;
-        let start = (heap_base + span - 1) & !(span - 1);
-        if start + span <= heap_end {
-            return pages;
-        }
-        assert!(pages > 1, "no aligned block fits the usable window");
-        pages /= 2;
-    }
-}
-
 /// Runs `rounds` of randomized allocate / allocate-at / free sequences.
 fn stress(region_pages: usize, rounds: usize, seed: u64, label: &str) {
     let storage = BackingStorage::new(region_pages);
@@ -201,12 +187,7 @@ fn stress(region_pages: usize, rounds: usize, seed: u64, label: &str) {
     // the window start off any power-of-two boundary and cost one order.
     let heap_base = storage.base();
     let heap_end = heap_base + usable_pages * PAGE;
-    let biggest = largest_aligned_block(heap_base, heap_end, usable_pages);
-    assert_eq!(
-        biggest,
-        1usize << (usize::BITS as usize - 1 - usable_pages.leading_zeros() as usize),
-        "{label}: bitmap reservation must not shrink the largest aligned block"
-    );
+    let biggest = 1usize << (usize::BITS as usize - 1 - usable_pages.leading_zeros() as usize);
 
     let mut rng = XorShift(seed);
     for round in 0..rounds {
@@ -271,6 +252,11 @@ fn stress(region_pages: usize, rounds: usize, seed: u64, label: &str) {
                 allocator.free_pages()
             )
         });
+        assert_eq!(
+            addr,
+            storage.base(),
+            "{label} round {round}: largest coalesced block must start at the region base"
+        );
         allocator.deallocate_pages(addr, biggest);
         assert_eq!(
             allocator.free_pages(),
