@@ -19,6 +19,8 @@ use crate::{
         net_rx,
     },
     ip::IpAddress,
+    netfilter::{FilterHook, Verdict, evaluate_ipv4},
+    network::ipv4::{Ipv4Header, PROTOCOL_UDP},
 };
 
 /// Loopback device backed by the shared NetRx packet queue.
@@ -38,7 +40,8 @@ use crate::{
 /// Service re-registers the same source waker on every wait, and the new
 /// `PollSet` does not dedupe, so waiters would accumulate until the next RX.
 ///
-/// Complete IPv4 UDP datagrams are delivered from `NetRx` (Linux
+/// Complete IPv4 UDP datagrams pass INPUT filtering in task context and are
+/// then delivered from `NetRx` (Linux
 /// `loopback_xmit` → `__netif_rx` → `NET_RX_SOFTIRQ`). TCP, ICMP, IPv6,
 /// fragments, and unmatched UDP stay on the deferred queue for the task poller.
 pub struct LoopbackDevice {
@@ -155,6 +158,22 @@ impl NetDevice for LoopbackDevice {
         }
         packet.set_ifindex(ifindex);
         packet.set_owner(PacketOwner::Loopback);
+        let fast_udp = packet
+            .network_packet()
+            .and_then(|bytes| Ipv4Header::parse_input(bytes).ok())
+            .is_some_and(|header| header.protocol() == PROTOCOL_UDP && !header.is_fragmented());
+        if fast_udp && !packet.is_forwarded() {
+            if evaluate_ipv4(
+                FilterHook::Input,
+                packet.network_packet().unwrap(),
+                self.name(),
+                "",
+            ) != Verdict::Accept
+            {
+                return true;
+            }
+            packet.set_input_filtered();
+        }
         let Some(packet) = net_rx::prepare_for_enqueue(packet) else {
             // Malformed IPv4 UDP is dropped in task context. Linux
             // `loopback_xmit` still returns `NETDEV_TX_OK` after `NET_RX_DROP`.

@@ -24,6 +24,7 @@ use crate::{
         LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice,
     },
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
+    netfilter::{FilterHook, Verdict, evaluate_ipv4},
     network::{
         ipv4::{self, Ipv4Error, Ipv4Header},
         router::{
@@ -178,13 +179,52 @@ impl Router {
     }
 
     pub fn queue_ipv4_packet(&mut self, packet: Vec<u8>, oif: i32) -> KResult {
+        let header = Ipv4Header::parse_output(&packet).map_err(|_| KError::InvalidInput)?;
+        let is_unbound_broadcast = header.dst_addr().is_broadcast() && oif == 0;
+        let packet_count = self.output_packet_count(header, packet.len())?;
+        if !self.data_tx_queue.can_push(if is_unbound_broadcast {
+            1
+        } else {
+            packet_count
+        }) {
+            return Err(KError::WouldBlock);
+        }
+        if is_unbound_broadcast {
+            if self
+                .route_mtu(&IpAddress::Ipv4(header.dst_addr()))
+                .is_some_and(|mtu| packet.len() > mtu && header.dont_fragment())
+            {
+                return Err(LinuxError::EMSGSIZE.into());
+            }
+            let interfaces: Vec<_> = self
+                .devices
+                .iter()
+                .enumerate()
+                .filter(|(_, device)| {
+                    evaluate_ipv4(FilterHook::Output, &packet, "", device.name()) == Verdict::Accept
+                })
+                .map(|(index, device)| (index as i32 + 1, String::from(device.name())))
+                .collect();
+            if interfaces.is_empty() {
+                return Err(LinuxError::EPERM.into());
+            }
+            let mut buf = PacketBuf::from_ip_packet_vec(0, packet, PacketOwner::Ipv4Stack);
+            buf.set_broadcast_output_interfaces(interfaces.into_boxed_slice());
+            return self
+                .data_tx_queue
+                .try_push(buf)
+                .map_err(|_| KError::WouldBlock);
+        }
+        if !self.accepts_local_output(&packet, oif)? {
+            return Err(LinuxError::EPERM.into());
+        }
         let packets = self.fragment_ipv4_packet_for_output(packet)?;
         self.data_tx_queue
-            .try_extend(
-                packets.into_iter().map(|packet| {
-                    PacketBuf::from_ip_packet_vec(oif, packet, PacketOwner::Ipv4Stack)
-                }),
-            )
+            .try_extend(packets.into_iter().map(|packet| {
+                let mut buf = PacketBuf::from_ip_packet_vec(oif, packet, PacketOwner::Ipv4Stack);
+                buf.set_output_filtered();
+                buf
+            }))
             .map_err(|_| KError::WouldBlock)
     }
 
@@ -210,9 +250,13 @@ impl Router {
         packet: Vec<u8>,
         timestamp: MonotonicInstant,
     ) -> KResult {
+        if !self.accepts_local_output(&packet, 0)? {
+            return Err(LinuxError::EPERM.into());
+        }
         let packets = self.fragment_ipv4_packet_for_output(packet)?;
         for packet in packets {
-            let buf = PacketBuf::from_ip_packet_vec(0, packet, PacketOwner::Ipv4Stack);
+            let mut buf = PacketBuf::from_ip_packet_vec(0, packet, PacketOwner::Ipv4Stack);
+            buf.set_output_filtered();
             // RX-ready hint for the poller, not send success. This path is
             // not the poller; a dropped loopback packet is still a successful
             // xmit, as documented above.
@@ -928,6 +972,23 @@ impl Router {
                 return false;
             }
 
+            let fragments = if packet.broadcast_output_interfaces().is_some() {
+                let Some(bytes) = packet.network_packet() else {
+                    return false;
+                };
+                match self.fragment_ipv4_packet_for_output(bytes.to_vec()) {
+                    Ok(fragments) => fragments
+                        .into_iter()
+                        .map(|bytes| PacketBuf::from_ip_packet_vec(0, bytes, PacketOwner::DeviceTx))
+                        .collect(),
+                    Err(err) => {
+                        warn!("Dropping IPv4 broadcast packet during fragmentation: {err}");
+                        return false;
+                    }
+                }
+            } else {
+                vec![packet.clone()]
+            };
             let bound_if = packet.ifindex();
             let device_count = self.devices.len();
             let Some((last_device, preceding_devices)) = self.devices.split_last_mut() else {
@@ -940,13 +1001,67 @@ impl Router {
                 if bound_if != 0 && bound_if != ifindex {
                     continue;
                 }
-                poll_next |=
-                    dev.send_ip_packet(ifindex, dst_addr, src_addr, packet.clone(), timestamp);
+                if packet
+                    .broadcast_output_interfaces()
+                    .is_some_and(|interfaces| {
+                        !interfaces
+                            .iter()
+                            .any(|(index, name)| *index == ifindex && name == dev.name())
+                    })
+                {
+                    continue;
+                }
+                if !packet.output_filtered()
+                    && evaluate_ipv4(
+                        FilterHook::Output,
+                        packet.network_packet().unwrap(),
+                        "",
+                        dev.name(),
+                    ) != Verdict::Accept
+                {
+                    continue;
+                }
+                for fragment in &fragments {
+                    poll_next |= dev.send_ip_packet(
+                        ifindex,
+                        dst_addr,
+                        src_addr,
+                        fragment.clone(),
+                        timestamp,
+                    );
+                }
             }
             let last_ifindex = device_count as i32;
             if bound_if == 0 || bound_if == last_ifindex {
-                poll_next |=
-                    last_device.send_ip_packet(last_ifindex, dst_addr, src_addr, packet, timestamp);
+                if packet
+                    .broadcast_output_interfaces()
+                    .is_some_and(|interfaces| {
+                        !interfaces.iter().any(|(index, name)| {
+                            *index == last_ifindex && name == last_device.name()
+                        })
+                    })
+                {
+                    return poll_next;
+                }
+                if !packet.output_filtered()
+                    && evaluate_ipv4(
+                        FilterHook::Output,
+                        packet.network_packet().unwrap(),
+                        "",
+                        last_device.name(),
+                    ) != Verdict::Accept
+                {
+                    return poll_next;
+                }
+                for fragment in fragments {
+                    poll_next |= last_device.send_ip_packet(
+                        last_ifindex,
+                        dst_addr,
+                        src_addr,
+                        fragment,
+                        timestamp,
+                    );
+                }
             }
             return poll_next;
         }
@@ -963,7 +1078,7 @@ impl Router {
             );
             return false;
         }
-        if !self.is_local_ipv4_source(header.src_addr()) {
+        if !packet.is_forwarded() && !self.is_local_ipv4_source(header.src_addr()) {
             warn!(
                 "Dropping IPv4 packet with non-local source {} routed via {}",
                 src_addr, rule.src
@@ -972,8 +1087,183 @@ impl Router {
         }
 
         let next_hop = rule.via.unwrap_or(dst_addr);
+        let device_source = if packet.is_forwarded() {
+            let Some(source) = self.select_ipv4_source(rule.dev, &next_hop, rule.scope) else {
+                warn!("Dropping forwarded IPv4 packet without an egress source address");
+                return false;
+            };
+            IpAddress::Ipv4(source)
+        } else {
+            src_addr
+        };
         let dev = &mut self.devices[rule.dev];
-        dev.send_ip_packet(rule.dev as i32 + 1, next_hop, src_addr, packet, timestamp)
+        if !packet.is_forwarded()
+            && !packet.output_filtered()
+            && evaluate_ipv4(
+                FilterHook::Output,
+                packet.network_packet().unwrap(),
+                "",
+                dev.name(),
+            ) != Verdict::Accept
+        {
+            return false;
+        }
+        dev.send_ip_packet(
+            rule.dev as i32 + 1,
+            next_hop,
+            device_source,
+            packet,
+            timestamp,
+        )
+    }
+
+    fn accepts_local_output(&self, packet: &[u8], oif: i32) -> KResult<bool> {
+        let header = Ipv4Header::parse_output(packet).map_err(|_| KError::InvalidInput)?;
+        let dev = if oif > 0 {
+            self.devices.get((oif - 1) as usize)
+        } else {
+            self.table
+                .lookup(&IpAddress::Ipv4(header.dst_addr()))
+                .and_then(|rule| self.devices.get(rule.dev))
+        };
+        Ok(evaluate_ipv4(
+            FilterHook::Output,
+            packet,
+            "",
+            dev.map_or("", |device| device.name()),
+        ) == Verdict::Accept)
+    }
+
+    fn output_packet_count(&self, header: Ipv4Header, packet_len: usize) -> KResult<usize> {
+        let Some(mtu) = self.route_mtu(&IpAddress::Ipv4(header.dst_addr())) else {
+            return Ok(1);
+        };
+        if packet_len <= mtu || header.dont_fragment() {
+            return Ok(1);
+        }
+        let max_payload = mtu
+            .checked_sub(header.header_len())
+            .ok_or(KError::InvalidInput)?;
+        let aligned_payload = max_payload / 8 * 8;
+        if aligned_payload == 0 {
+            return Err(LinuxError::EMSGSIZE.into());
+        }
+        let payload_len = packet_len - header.header_len();
+        let count = 1 + (payload_len - max_payload).div_ceil(aligned_payload);
+        if count > DATA_TX_QUEUE_SIZE {
+            return Err(LinuxError::EMSGSIZE.into());
+        }
+        Ok(count)
+    }
+
+    /// Routes a received unicast IPv4 packet through the FORWARD chain.
+    /// A full TX queue leaves the input packet available to the caller for retry.
+    pub(crate) fn queue_forwarded_ipv4_packet(&mut self, packet: PacketBuf) -> KResult {
+        if !crate::ipv4_forwarding_enabled() {
+            return Ok(());
+        }
+        let ip_packet = packet.network_packet().ok_or(KError::InvalidInput)?;
+        let header = Ipv4Header::parse_input(ip_packet).map_err(|_| KError::InvalidInput)?;
+        let Some(rule) = self.table.lookup(&IpAddress::Ipv4(header.dst_addr())) else {
+            return Ok(());
+        };
+        if rule.route_type != ROUTE_TYPE_UNICAST {
+            return Ok(());
+        }
+        if header.ttl() <= 1 {
+            self.queue_forwarding_icmp(&packet, header, ipv4::Icmpv4Error::TimeToLiveExceeded)?;
+            return Ok(());
+        }
+        if !self
+            .devices
+            .get(rule.dev)
+            .ok_or(KError::InvalidInput)?
+            .is_link_up()
+        {
+            return Ok(());
+        }
+        let route_mtu = self.route_mtu(&IpAddress::Ipv4(header.dst_addr()));
+        if let Some(mtu) = route_mtu
+            && ip_packet.len() > mtu
+            && header.dont_fragment()
+        {
+            self.queue_forwarding_icmp(
+                &packet,
+                header,
+                ipv4::Icmpv4Error::FragmentationNeeded { mtu: mtu as u16 },
+            )?;
+            return Ok(());
+        }
+        let indev = packet
+            .ifindex()
+            .checked_sub(1)
+            .and_then(|index| self.devices.get(index as usize))
+            .map_or("", |device| device.name());
+        let outdev_name = self.devices[rule.dev].name();
+        let packet_count = self.output_packet_count(header, ip_packet.len())?;
+        if !self.data_tx_queue.can_push(packet_count) {
+            return Err(KError::WouldBlock);
+        }
+        if evaluate_ipv4(FilterHook::Forward, ip_packet, indev, outdev_name) != Verdict::Accept {
+            return Ok(());
+        }
+        let ifindex = rule.dev as i32 + 1;
+        let mut bytes = ip_packet.to_vec();
+        bytes[8] -= 1;
+        let header_len = header.header_len();
+        let mut parsed = etherparse::Ipv4HeaderSlice::from_slice(&bytes[..header_len])
+            .map_err(|_| KError::InvalidInput)?
+            .to_header();
+        parsed.header_checksum = parsed.calc_header_checksum();
+        bytes[..header_len].copy_from_slice(&parsed.to_bytes());
+        let packets = match route_mtu {
+            Some(mtu) if bytes.len() > mtu => {
+                ipv4::fragment_output_packet(&bytes, mtu, header.identification()).map_err(
+                    |error| match error {
+                        ipv4::Ipv4FragmentError::DontFragment
+                        | ipv4::Ipv4FragmentError::MtuTooSmall => LinuxError::EMSGSIZE.into(),
+                        ipv4::Ipv4FragmentError::Malformed => KError::InvalidInput,
+                    },
+                )?
+            }
+            _ => vec![bytes],
+        };
+        debug_assert_eq!(packets.len(), packet_count);
+        self.data_tx_queue
+            .try_extend(packets.into_iter().map(|bytes| {
+                let mut buf = PacketBuf::from_ip_packet_vec(ifindex, bytes, PacketOwner::Ipv4Stack);
+                buf.set_forwarded();
+                buf
+            }))
+            .map_err(|_| KError::WouldBlock)
+    }
+
+    fn queue_forwarding_icmp(
+        &mut self,
+        packet: &PacketBuf,
+        header: Ipv4Header,
+        error: ipv4::Icmpv4Error,
+    ) -> KResult {
+        let source = self
+            .output_route_source(&IpAddress::Ipv4(header.src_addr()), 0)
+            .ok()
+            .and_then(|addr| match addr {
+                IpAddress::Ipv4(addr) => Some(addr),
+                _ => None,
+            });
+        let Some(source) = source else {
+            return Ok(());
+        };
+        let Some(control) = ipv4::build_icmpv4_error_packet_from_source(
+            error,
+            packet.packet_type(),
+            header,
+            packet.network_packet().ok_or(KError::InvalidInput)?,
+            source,
+        ) else {
+            return Ok(());
+        };
+        self.queue_control_ipv4_packet(control)
     }
 
     fn fragment_ipv4_packet_for_output(&mut self, packet: Vec<u8>) -> KResult<Vec<Vec<u8>>> {
@@ -1010,7 +1300,12 @@ impl Router {
         if self.control_tx_queue.len() >= CONTROL_TX_QUEUE_SIZE {
             return Err(KError::WouldBlock);
         }
-        self.control_tx_queue.push_back(tx_packet_buf(packet));
+        if !self.accepts_local_output(&packet, 0)? {
+            return Ok(());
+        }
+        let mut buf = tx_packet_buf(packet);
+        buf.set_output_filtered();
+        self.control_tx_queue.push_back(buf);
         Ok(())
     }
 
@@ -1074,6 +1369,164 @@ mod tests {
             MonotonicInstant::ORIGIN,
         );
         router
+    }
+
+    #[def_test(serial)]
+    fn ipv4_forwarding_decrements_ttl_and_preserves_foreign_source() {
+        let mut router = Router::new();
+        let dev = router.add_device(Box::new(LoopbackDevice::new()));
+        let destination = Ipv4Address::new(198, 51, 100, 2);
+        router.add_rule(Rule::new(
+            valid_ipv4_cidr(destination, 32).into(),
+            None,
+            dev,
+            IpAddress::Ipv4(Ipv4Address::new(198, 51, 100, 1)),
+        ));
+        let source = Ipv4Address::new(203, 0, 113, 9);
+        let packet = crate::ipv4::build_ipv4_packet(
+            source,
+            destination,
+            crate::ipv4::PROTOCOL_ICMP,
+            2,
+            &[8, 0, 0, 0, 0, 0, 0, 0],
+        )
+        .unwrap();
+        let received = PacketBuf::from_ip_packet_vec(1, packet, PacketOwner::DeviceRx);
+
+        assert_eq!(router.queue_forwarded_ipv4_packet(received.clone()), Ok(()));
+        let capacity = router.available_tx_packet_slots();
+        assert_eq!(capacity, DATA_TX_QUEUE_SIZE);
+        crate::set_ipv4_forwarding_enabled(true);
+        assert_eq!(router.queue_forwarded_ipv4_packet(received), Ok(()));
+        assert_eq!(router.available_tx_packet_slots(), capacity - 1);
+        let queued = router.data_tx_queue.pop_front().unwrap();
+        assert!(queued.is_forwarded());
+        assert_eq!(
+            Ipv4Header::parse_input(queued.network_packet().unwrap())
+                .unwrap()
+                .ttl(),
+            1
+        );
+        assert_eq!(
+            Ipv4Header::parse_input(queued.network_packet().unwrap())
+                .unwrap()
+                .src_addr(),
+            source
+        );
+        router.add_rule(Rule::new(
+            valid_ipv4_cidr(source, 32).into(),
+            None,
+            dev,
+            IpAddress::Ipv4(Ipv4Address::new(198, 51, 100, 1)),
+        ));
+        let expired = crate::ipv4::build_ipv4_packet(
+            source,
+            destination,
+            crate::ipv4::PROTOCOL_ICMP,
+            1,
+            &[8, 0, 0, 0, 0, 0, 0, 0],
+        )
+        .unwrap();
+        let received = PacketBuf::from_ip_packet_vec(1, expired, PacketOwner::DeviceRx);
+        assert_eq!(router.queue_forwarded_ipv4_packet(received), Ok(()));
+        let control = router.control_tx_queue.pop_front().unwrap();
+        assert_eq!(control.network_packet().unwrap()[20], 11);
+        assert_eq!(control.network_packet().unwrap()[21], 0);
+
+        router.devices[dev].set_mtu(68).unwrap();
+        let oversized = crate::ipv4::build_ipv4_packet_dont_fragment(
+            source,
+            destination,
+            crate::ipv4::PROTOCOL_ICMP,
+            64,
+            &[0; 80],
+        )
+        .unwrap();
+        let received = PacketBuf::from_ip_packet_vec(1, oversized, PacketOwner::DeviceRx);
+        router
+            .control_tx_queue
+            .resize_with(CONTROL_TX_QUEUE_SIZE, || tx_packet_buf(vec![0; 20]));
+        assert_eq!(
+            router.queue_forwarded_ipv4_packet(received.clone()),
+            Err(KError::WouldBlock)
+        );
+        assert_eq!(
+            router.queue_forwarded_ipv4_packet(received.clone()),
+            Err(KError::WouldBlock)
+        );
+        router.control_tx_queue.clear();
+        assert_eq!(router.queue_forwarded_ipv4_packet(received), Ok(()));
+        let control = router.control_tx_queue.pop_front().unwrap();
+        assert_eq!(control.network_packet().unwrap()[20], 3);
+        assert_eq!(control.network_packet().unwrap()[21], 4);
+        crate::set_ipv4_forwarding_enabled(false);
+    }
+
+    #[def_test(serial)]
+    fn unbound_broadcast_filters_complete_packet_and_fragments_at_dispatch() {
+        let mut router = Router::new();
+        let dev = router.add_device(Box::new(LoopbackDevice::new()));
+        let source = Ipv4Address::new(127, 0, 0, 1);
+        let destination = Ipv4Address::new(255, 255, 255, 255);
+        router
+            .add_ipv4_addr(Ipv4AddrEntry {
+                dev,
+                addr: valid_ipv4_cidr(source, 8),
+                scope: ROUTE_SCOPE_HOST,
+                broadcast: None,
+            })
+            .unwrap();
+        router.add_rule(Rule::new(
+            valid_ipv4_cidr(destination, 32).into(),
+            None,
+            dev,
+            IpAddress::Ipv4(source),
+        ));
+        router.devices[dev].set_mtu(68).unwrap();
+        let bytes = crate::ipv4::build_ipv4_packet(
+            source,
+            destination,
+            crate::ipv4::PROTOCOL_UDP,
+            64,
+            &[0; 100],
+        )
+        .unwrap();
+        assert_eq!(router.queue_ipv4_packet(bytes, 0), Ok(()));
+        assert_eq!(router.available_tx_packet_slots(), DATA_TX_QUEUE_SIZE - 1);
+        let queued = router.data_tx_queue.pop_front().unwrap();
+        assert_eq!(queued.broadcast_output_interfaces().unwrap()[0].0, 1);
+        assert_eq!(queued.broadcast_output_interfaces().unwrap()[0].1, "lo");
+        assert_eq!(queued.network_packet().unwrap().len(), 120);
+        assert!(router.dispatch_ipv4_packet(queued, MonotonicInstant::ORIGIN));
+    }
+
+    #[def_test]
+    fn local_output_reserves_all_fragments_before_queueing() {
+        let mut router = Router::new();
+        let dev = router.add_device(Box::new(LoopbackDevice::new()));
+        router.devices[dev].set_mtu(68).unwrap();
+        let addr = Ipv4Address::new(127, 0, 0, 1);
+        router
+            .add_ipv4_addr(Ipv4AddrEntry {
+                dev,
+                addr: valid_ipv4_cidr(addr, 8),
+                scope: ROUTE_SCOPE_HOST,
+                broadcast: None,
+            })
+            .unwrap();
+        let bytes =
+            crate::ipv4::build_ipv4_packet(addr, addr, crate::ipv4::PROTOCOL_UDP, 64, &[0; 100])
+                .unwrap();
+        let before = router.available_tx_packet_slots();
+
+        assert_eq!(router.queue_ipv4_packet(bytes, dev as i32 + 1), Ok(()));
+        assert_eq!(router.available_tx_packet_slots(), before - 3);
+        for expected_offset in [0, 48, 96] {
+            let fragment = router.data_tx_queue.pop_front().unwrap();
+            let header = Ipv4Header::parse_input(fragment.network_packet().unwrap()).unwrap();
+            assert_eq!(header.fragment_offset(), expected_offset);
+            assert!(fragment.output_filtered());
+        }
     }
 
     #[def_test(serial)]
@@ -1365,7 +1818,7 @@ mod tests {
     }
 }
 
-pub struct TxToken<'a>(&'a mut DataTxQueue);
+pub struct TxToken<'a>(&'a mut Router);
 
 impl smoltcp::phy::TxToken for TxToken<'_> {
     fn consume<R, F>(self, len: usize, f: F) -> R
@@ -1374,16 +1827,25 @@ impl smoltcp::phy::TxToken for TxToken<'_> {
     {
         let mut ip_packet = vec![0u8; len];
         let result = f(&mut ip_packet);
-        assert!(
-            self.0
-                .try_push(PacketBuf::from_ip_packet_vec(
-                    0,
-                    ip_packet,
-                    PacketOwner::Ipv4Stack,
-                ))
-                .is_ok(),
-            "smoltcp consumed a TX token without queue capacity"
-        );
+        if ipv4::ip_version(&ip_packet) == Some(4) {
+            if let Err(error) = self.0.queue_ipv4_packet(ip_packet, 0)
+                && error != KError::from(LinuxError::EPERM)
+            {
+                warn!("Dropping smoltcp IPv4 output packet: {}", error);
+            }
+        } else {
+            assert!(
+                self.0
+                    .data_tx_queue
+                    .try_push(PacketBuf::from_ip_packet_vec(
+                        0,
+                        ip_packet,
+                        PacketOwner::Ipv4Stack,
+                    ))
+                    .is_ok(),
+                "smoltcp consumed a TX token without queue capacity"
+            );
+        }
         result
     }
 }
@@ -1410,10 +1872,8 @@ impl smoltcp::phy::Device for Router {
         if self.rx_queue.is_empty() || self.data_tx_queue.is_full() {
             None
         } else {
-            Some((
-                RxToken(self.rx_queue.pop_front().unwrap()),
-                TxToken(&mut self.data_tx_queue),
-            ))
+            let packet = self.rx_queue.pop_front().unwrap();
+            Some((RxToken(packet), TxToken(self)))
         }
     }
 
@@ -1421,7 +1881,7 @@ impl smoltcp::phy::Device for Router {
         if self.data_tx_queue.is_full() {
             None
         } else {
-            Some(TxToken(&mut self.data_tx_queue))
+            Some(TxToken(self))
         }
     }
 

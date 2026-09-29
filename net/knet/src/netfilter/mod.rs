@@ -9,10 +9,10 @@
 //! offsets or pointers into the userspace replacement blob.
 
 pub(crate) mod filter;
-
+pub(crate) use filter::{FilterHook, Verdict, evaluate_ipv4};
 pub use filter::{
-    LegacyFilterReplace, LegacyFilterTable, LegacyReplaceError, MAX_LEGACY_FILTER_ENTRIES_SIZE,
-    MAX_LEGACY_FILTER_ENTRY_COUNT,
+    LegacyCounter, LegacyFilterReplace, LegacyFilterTable, LegacyReplaceError,
+    MAX_LEGACY_FILTER_ENTRIES_SIZE, MAX_LEGACY_FILTER_ENTRY_COUNT,
 };
 
 /// Captures the current IPv4 `filter` table in the legacy iptables layout.
@@ -31,6 +31,18 @@ pub fn legacy_ipv4_filter_table() -> LegacyFilterTable {
 /// rules, or [`LegacyReplaceError::CounterMismatch`] if the old table changed.
 pub fn replace_legacy_ipv4_filter_table(
     request: LegacyFilterReplace<'_>,
-) -> Result<usize, LegacyReplaceError> {
+) -> Result<alloc::vec::Vec<LegacyCounter>, LegacyReplaceError> {
     filter::replace(request)
+}
+
+/// Adds packet and byte counters to the current IPv4 `filter` table.
+///
+/// # Errors
+///
+/// Returns [`LegacyReplaceError::CounterMismatch`] when the supplied entry
+/// count differs from the current table generation.
+pub fn add_legacy_ipv4_filter_counters(
+    counters: &[LegacyCounter],
+) -> Result<(), LegacyReplaceError> {
+    filter::add_counters(counters)
 }

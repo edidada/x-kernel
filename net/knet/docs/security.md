@@ -125,7 +125,7 @@ The trust relationships in the diagram define the security responsibilities of e
 | Unix stream and vsock ring-buffer storage | The unsafe inventory specifies the occupied/vacant range and lock prerequisites for slice access and index advancement. Publication must be limited to initialized bytes; consumption must remain within occupied bytes. |
 | smoltcp `SocketHandle` values | `SOCKET_SET` owns handles under its mutex, and TCP deferred-close processing retains protocol state until closure permits reclamation. |
 | Interface configuration and device identity | `NetDevice` owns link and neighbor state; Router owns addresses and routes. `network_config_lock` protects individual control-plane mutations and device removal. UDP matching uses `PacketBuf::ifindex` and `GeneralOptions::bound_dev_if` to preserve device selection. |
-| Legacy IPv4 filter snapshot | `FilterTable` validation bounds chains, rules, match count, chain names, jump targets, and jump depth before `legacy.rs` calculates offsets. The POSIX layer owns user-memory access and requires an effective UID of zero for `GET_INFO`, `GET_ENTRIES`, `SET_REPLACE`, and `SET_ADD_COUNTERS`. Replacement entry bytes are capped at 4 MiB and decoded into owned semantic values before publication. Counter additions validate the current entry count and accept only zero-valued records. |
+| Legacy IPv4 filter snapshot | `FilterTable` validation bounds chains, rules, match count, chain names, jump targets, and jump depth before `legacy.rs` calculates offsets. The POSIX layer owns user-memory access and requires an effective UID of zero for GET, SET, and revision socket options. Replacement entry bytes are capped at 4 MiB and decoded into owned semantic values before publication. Counter additions validate the current entry count; matching packets update only the generation they evaluated. |
 | TIPC channels, message handles, and client UUIDs | `VsockBridge::read_tipc_msg` rejects attached handles. `accept_reverse_tipc` checks the UUID returned by `ipc_port_accept` against `TipcToVsockMapping::allowed_uuids`, with an empty list explicitly permitting all UUIDs. |
 | Queued AF_PACKET frame storage | `PacketFrame` retains an `Arc<[u8]>`; `PacketRxQueue::push_back` counts the full retained frame allocation and caps each queue at 64 KiB and 1024 frames. `recv_lock` serializes consumption while payload copies run outside `rx_queue`. |
 
@@ -182,9 +182,16 @@ network bytes, peer payloads, and control-plane requests as untrusted.
 | `VsockBridge::accept_reverse_tipc` in [src/vsock/bridge.rs](../src/vsock/bridge.rs) | TIPC returns a channel and client UUID through `ipc_port_accept`. `uuid_allowed` accepts a listed UUID or any UUID if the list is empty. A mismatch closes the channel and returns `PermissionDenied` before creating a vsock connection. The current `TIPC_TO_VSOCK_MAP` uses an empty allowlist. |
 | `publish_kobject_uevent` and kobject receive in [src/netlink/socket.rs](../src/netlink/socket.rs) | A kernel publisher supplies a group and byte payload; the function appends a sequence number and delivers only to matching subscribed groups. Receive queues enforce `NETLINK_RX_QUEUE_LIMIT`; overflow drops the event. Only `NETLINK_KOBJECT_UEVENT` receive supplies fixed kernel credentials (`pid=0`, `uid=0`, `gid=0`) when `SO_PASSCRED` is enabled; the POSIX layer encodes them as `SCM_CREDENTIALS`. Other netlink protocols never receive these synthetic credentials. Publisher identity and payload provenance are trusted kernel-caller responsibilities. |
 | `legacy_ipv4_filter_table` in [src/netfilter/filter/legacy.rs](../src/netfilter/filter/legacy.rs) | The validated semantic table is serialized into an owned legacy ABI snapshot. Model resource limits keep all entry sizes in `u16` and total offsets in `i32` and `u32`. The serializer does not retain user pointers. |
-| `replace_legacy_ipv4_filter_table` and [src/netfilter/filter/legacy/decode.rs](../src/netfilter/filter/legacy/decode.rs) | The decoder validates each copied entry, extension, chain boundary, hook, policy, and jump before constructing a `FilterTable`. Replacement checks the current entry count and swaps a complete model/export pair under a mutex; malformed or stale requests leave the old state intact. The syscall copies the old zero-valued counters after publication and follows Linux's success result if that copy fails. |
+| `replace_legacy_ipv4_filter_table` and [src/netfilter/filter/legacy/decode.rs](../src/netfilter/filter/legacy/decode.rs) | The decoder validates each copied entry, extension, chain boundary, hook, policy, and jump before constructing a `FilterTable`. Replacement checks the current entry count and swaps a complete model/export/counter generation under a write lock after in-flight read-locked packet evaluations complete; malformed or stale requests leave the old state intact. The syscall copies the old counters after publication and follows Linux's success result if that copy fails. Counter export takes the exclusive table guard so concurrent packet updates and ADD_COUNTERS cannot expose a partially updated packet/byte pair. |
 
 ### Authorization and Residual Trust
+
+IPv4 forwarding admits only host-addressed link frames and checks DF against
+path MTU before FORWARD evaluation. A full ICMP control queue retries the
+original packet without charging its FORWARD counters. Unbound limited
+broadcasts retain the OUTPUT-approved interface indices and names on the queued
+packet; dispatch uses those entries after fragmentation instead of evaluating
+each fragment again. Synchronous local OUTPUT drops return `EPERM` to the sender.
 
 Netlink route mutations use `Cred::is_privileged()`, currently effective UID 0,
 and return `NLMSG_ERROR` with `EPERM` for an unauthorized request. This is a
@@ -528,6 +535,7 @@ Contention must return `has_more`.
 If an expired IPv4 reassembly event encounters IngressProcessor contention, it retains its pending state and allows TX and protocol processing to continue for the current round.
 The expiration path does not acquire this lock when no reassembly queue exists or no queue has expired.
 Raw-packet batches already taken from devices, admitted-packet batches awaiting smoltcp, and control-packet batches awaiting transmission must retain ownership until handoff succeeds. TCP listener preparation and enqueueing of the admitted-packet batch must occur within the same successful handoff.
+The pending forwarding batch retains packets across TX backpressure. Combined batch locks follow control, RX, admitted, then forward order and remain held only within the timer, handoff, or device-RX stage; TX dispatch and smoltcp progression run after these locks are released.
 
 ### 27. Loopback UDP Delivery Boundary
 
@@ -685,7 +693,7 @@ Ordinary logs omit payload contents, while trace logs record Ethernet frame byte
 
 ## Known Limitations
 
-- The IPv4 filter model exports the current table through the legacy GET ABI. It has no SET decoder, shared replacement publication point, counter accounting, or packet-path integration, so the initial accept-all table remains fixed and does not filter live traffic.
+- The IPv4 filter table covers only legacy IPv4 `filter` semantics and revision-zero TCP, UDP, ICMP, standard, and ERROR extensions. IPv6, NAT, conntrack, and other xtables modules remain outside this path. Forwarding ICMP errors require a route back to the source, and unsupported IPv4 option-copy behavior remains outside forwarding fragmentation.
 - `StreamTransport::recv` currently consumes copied bytes even when `RecvFlags::PEEK` is requested. `DgramTransport::recv` also dequeues before copying. Callers must not rely on non-consuming Unix socket PEEK semantics until those paths implement them.
 - netlink mutation-only batches have response-capacity preflight and per-socket serialization, but later operation failures do not roll back earlier mutations. `network_config_lock` is acquired per mutation, so different callers can interleave between messages in a batch.
 - Unix datagram channels are unbounded. The stream listener limit and AF_PACKET/netlink queue limits do not bound their queued payloads or ancillary objects.

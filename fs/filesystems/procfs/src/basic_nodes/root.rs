@@ -142,6 +142,43 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
             SimpleDir::new_maker(fs.clone(), Arc::new(kernel))
         });
 
+        sys.add("net", {
+            let mut net = DirMapping::new();
+            net.add("ipv4", {
+                let mut ipv4 = DirMapping::new();
+                ipv4.add(
+                    "ip_forward",
+                    SimpleFile::new_regular_with_permission(
+                        fs.clone(),
+                        NodePermission::OWNER_READ
+                            | NodePermission::OWNER_WRITE
+                            | NodePermission::GROUP_READ
+                            | NodePermission::OTHER_READ,
+                        CommandFile::new(|operation| match operation {
+                            SimpleFileOperation::Read => Ok(Some(format!(
+                                "{}\n",
+                                u8::from(knet::ipv4_forwarding_enabled())
+                            ))),
+                            SimpleFileOperation::Write { file, data } => {
+                                if !file.cred().is_privileged() {
+                                    return Err(VfsError::OperationNotPermitted);
+                                }
+                                let enabled = match data {
+                                    b"0" | b"0\n" => false,
+                                    b"1" | b"1\n" => true,
+                                    _ => return Err(VfsError::InvalidInput),
+                                };
+                                knet::set_ipv4_forwarding_enabled(enabled);
+                                Ok(None)
+                            }
+                        }),
+                    ),
+                );
+                SimpleDir::new_maker(fs.clone(), Arc::new(ipv4))
+            });
+            SimpleDir::new_maker(fs.clone(), Arc::new(net))
+        });
+
         SimpleDir::new_maker(fs.clone(), Arc::new(sys))
     });
 }
@@ -241,5 +278,37 @@ mod tests {
         assert_eq!(klogger::current_log_level(), log::LevelFilter::Warn);
 
         klogger::set_log_level_filter(previous);
+    }
+
+    #[def_test(serial)]
+    fn ipv4_forwarding_sysctl_controls_kernel_state() {
+        let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
+            let mut root = DirMapping::new();
+            add_root_entries(&mut root, fs.clone());
+            SimpleDir::new_maker(fs, Arc::new(root))
+        });
+        let root = Mount::new_root(&super_block).root_path();
+        let control = Filename::new("/sys/net/ipv4/ip_forward")
+            .open_with_flags_at(
+                &root,
+                &root,
+                OpenFlags::READ_WRITE.bits(),
+                NodePermission::empty(),
+                NodePermission::empty(),
+                kcred::initial_cred(),
+            )
+            .unwrap();
+
+        knet::set_ipv4_forwarding_enabled(false);
+        assert_eq!(control.write(b"1\n"), Ok(2));
+        assert!(knet::ipv4_forwarding_enabled());
+        let mut buf = [0u8; 2];
+        let mut pos = 0;
+        assert_eq!(control.read_from(&mut buf, &mut pos), Ok(2));
+        assert_eq!(&buf, b"1\n");
+        assert!(control.write(b"2\n").is_err());
+        assert!(knet::ipv4_forwarding_enabled());
+        assert_eq!(control.write(b"0"), Ok(1));
+        assert!(!knet::ipv4_forwarding_enabled());
     }
 }

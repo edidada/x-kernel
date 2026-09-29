@@ -4,7 +4,7 @@
 
 //! Packet buffer owned by the in-kernel network stack.
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 use core::{net::SocketAddr, ops::Range};
 
 use super::wire::{ETHERNET_HEADER_LEN, EtherType, MacAddress};
@@ -94,6 +94,10 @@ struct PacketBufInner {
     packet_type: PacketType,
     checksum_state: ChecksumState,
     owner: PacketOwner,
+    output_filtered: bool,
+    broadcast_output_interfaces: Option<Box<[(i32, String)]>>,
+    input_filtered: bool,
+    forwarded: bool,
     link_metadata: Option<LinkMetadata>,
     network_offset: Option<usize>,
     transport_offset: Option<usize>,
@@ -112,6 +116,10 @@ impl PacketBuf {
                 packet_type: PacketType::Host,
                 checksum_state: ChecksumState::Unverified,
                 owner,
+                output_filtered: false,
+                broadcast_output_interfaces: None,
+                input_filtered: false,
+                forwarded: false,
                 link_metadata: None,
                 network_offset: Some(0),
                 transport_offset: None,
@@ -155,6 +163,10 @@ impl PacketBuf {
                 packet_type: packet_type(dst_addr, local_addr),
                 checksum_state: ChecksumState::Unverified,
                 owner,
+                output_filtered: false,
+                broadcast_output_interfaces: None,
+                input_filtered: false,
+                forwarded: false,
                 link_metadata: Some(LinkMetadata {
                     dst_addr,
                     src_addr,
@@ -195,6 +207,40 @@ impl PacketBuf {
 
     pub(crate) fn set_owner(&mut self, owner: PacketOwner) {
         Arc::make_mut(&mut self.inner).owner = owner;
+    }
+
+    pub(crate) fn output_filtered(&self) -> bool {
+        self.inner.output_filtered
+    }
+
+    pub(crate) fn set_output_filtered(&mut self) {
+        Arc::make_mut(&mut self.inner).output_filtered = true;
+    }
+
+    pub(crate) fn broadcast_output_interfaces(&self) -> Option<&[(i32, String)]> {
+        self.inner.broadcast_output_interfaces.as_deref()
+    }
+
+    pub(crate) fn set_broadcast_output_interfaces(&mut self, interfaces: Box<[(i32, String)]>) {
+        let inner = Arc::make_mut(&mut self.inner);
+        inner.broadcast_output_interfaces = Some(interfaces);
+        inner.output_filtered = true;
+    }
+
+    pub(crate) fn input_filtered(&self) -> bool {
+        self.inner.input_filtered
+    }
+
+    pub(crate) fn set_input_filtered(&mut self) {
+        Arc::make_mut(&mut self.inner).input_filtered = true;
+    }
+
+    pub(crate) fn is_forwarded(&self) -> bool {
+        self.inner.forwarded
+    }
+
+    pub(crate) fn set_forwarded(&mut self) {
+        Arc::make_mut(&mut self.inner).forwarded = true;
     }
 
     pub(crate) fn data(&self) -> &[u8] {

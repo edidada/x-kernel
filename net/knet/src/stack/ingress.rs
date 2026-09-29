@@ -4,7 +4,7 @@
 
 //! Network-layer ingress processing outside the router lock.
 
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 use ktime_types::MonotonicInstant;
 use smoltcp::{
@@ -14,8 +14,9 @@ use smoltcp::{
 
 use crate::{
     LISTEN_TABLE,
-    buf::PacketBuf,
+    buf::{PacketBuf, PacketType},
     ip::{Ipv4Address, Ipv4Cidr},
+    netfilter::{FilterHook, Verdict, evaluate_ipv4},
     network::{
         fragment::{Ipv4Reassembler, Ipv4ReassemblyResult},
         ipv4::{self, Icmpv4Error, Ipv4Error, Ipv4Header},
@@ -25,6 +26,7 @@ use crate::{
 
 pub(crate) struct IngressProcessor {
     local_ipv4_addrs: Vec<Ipv4Cidr>,
+    device_names: Vec<String>,
     ipv4_reassembler: Ipv4Reassembler,
 }
 
@@ -32,6 +34,7 @@ impl IngressProcessor {
     pub fn new() -> Self {
         Self {
             local_ipv4_addrs: Vec::new(),
+            device_names: Vec::new(),
             ipv4_reassembler: Ipv4Reassembler::new(),
         }
     }
@@ -39,6 +42,10 @@ impl IngressProcessor {
     pub fn update_local_ipv4_addrs(&mut self, addrs: &[Ipv4Cidr]) {
         self.local_ipv4_addrs.clear();
         self.local_ipv4_addrs.extend_from_slice(addrs);
+    }
+
+    pub(crate) fn update_device_names(&mut self, names: Vec<String>) {
+        self.device_names = names;
     }
 
     pub(crate) fn ipv4_reassembly_deadline(&self) -> Option<MonotonicInstant> {
@@ -76,9 +83,16 @@ impl IngressProcessor {
         packets: &mut Vec<PacketBuf>,
         accepted_packets: &mut Vec<PacketBuf>,
         control_packets: &mut Vec<Vec<u8>>,
+        forwarded_packets: &mut Vec<PacketBuf>,
     ) {
         for packet in packets.drain(..) {
-            self.handle_rx_packet(timestamp, packet, accepted_packets, control_packets);
+            self.handle_rx_packet(
+                timestamp,
+                packet,
+                accepted_packets,
+                control_packets,
+                forwarded_packets,
+            );
         }
     }
 
@@ -88,12 +102,19 @@ impl IngressProcessor {
         packet: PacketBuf,
         accepted_packets: &mut Vec<PacketBuf>,
         control_packets: &mut Vec<Vec<u8>>,
+        forwarded_packets: &mut Vec<PacketBuf>,
     ) {
         let Some(ip_packet) = packet.network_packet() else {
             return;
         };
         match ipv4::ip_version(ip_packet) {
-            Some(4) => self.handle_ipv4_input(timestamp, packet, accepted_packets, control_packets),
+            Some(4) => self.handle_ipv4_input(
+                timestamp,
+                packet,
+                accepted_packets,
+                control_packets,
+                forwarded_packets,
+            ),
             Some(6) => {
                 accepted_packets.push(packet);
             }
@@ -107,6 +128,7 @@ impl IngressProcessor {
         mut packet: PacketBuf,
         accepted_packets: &mut Vec<PacketBuf>,
         control_packets: &mut Vec<Vec<u8>>,
+        forwarded_packets: &mut Vec<PacketBuf>,
     ) {
         let header = match Ipv4Header::validate_input_packet(&mut packet) {
             Ok(header) => header,
@@ -114,16 +136,42 @@ impl IngressProcessor {
         };
 
         if !self.is_local_ipv4_destination(header.dst_addr()) {
+            if packet.packet_type() == PacketType::Host
+                && !header.dst_addr().is_broadcast()
+                && !header.dst_addr().is_multicast()
+            {
+                forwarded_packets.push(packet);
+            }
             return;
         }
 
         if header.is_fragmented() {
             match self.ipv4_reassembler.reassemble(packet, header, timestamp) {
-                Ipv4ReassemblyResult::Complete(packet) => {
-                    self.handle_ipv4_input(timestamp, packet, accepted_packets, control_packets)
-                }
+                Ipv4ReassemblyResult::Complete(packet) => self.handle_ipv4_input(
+                    timestamp,
+                    packet,
+                    accepted_packets,
+                    control_packets,
+                    forwarded_packets,
+                ),
                 Ipv4ReassemblyResult::Pending | Ipv4ReassemblyResult::Dropped => {}
             }
+            return;
+        }
+
+        let indev = packet
+            .ifindex()
+            .checked_sub(1)
+            .and_then(|index| self.device_names.get(index as usize))
+            .map_or("", String::as_str);
+        if !packet.input_filtered()
+            && evaluate_ipv4(
+                FilterHook::Input,
+                packet.network_packet().unwrap(),
+                indev,
+                "",
+            ) != Verdict::Accept
+        {
             return;
         }
 
@@ -240,6 +288,88 @@ fn should_emit_protocol_unreachable(header: Ipv4Header) -> bool {
             header.protocol(),
             ipv4::PROTOCOL_TCP | ipv4::PROTOCOL_UDP | ipv4::PROTOCOL_ICMP
         )
+}
+
+#[cfg(unittest)]
+mod forwarding_tests {
+    use alloc::{vec, vec::Vec};
+
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+    use crate::buf::{PacketOwner, PacketType};
+
+    #[def_test]
+    fn nonlocal_ipv4_packet_enters_forwarding_batch() {
+        let mut ingress = IngressProcessor::new();
+        ingress
+            .update_local_ipv4_addrs(&[Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8).unwrap()]);
+        let bytes = ipv4::build_ipv4_packet(
+            Ipv4Address::new(203, 0, 113, 9),
+            Ipv4Address::new(198, 51, 100, 2),
+            ipv4::PROTOCOL_ICMP,
+            64,
+            &[8, 0, 0, 0, 0, 0, 0, 0],
+        )
+        .unwrap();
+        let mut input = vec![PacketBuf::from_ip_packet_vec(
+            1,
+            bytes,
+            PacketOwner::DeviceRx,
+        )];
+        let mut accepted = Vec::new();
+        let mut control = Vec::new();
+        let mut forwarded = Vec::new();
+
+        ingress.handle_rx_packets(
+            MonotonicInstant::ORIGIN,
+            &mut input,
+            &mut accepted,
+            &mut control,
+            &mut forwarded,
+        );
+
+        assert_eq!(input.len(), 0);
+        assert_eq!(accepted.len(), 0);
+        assert_eq!(control.len(), 0);
+        assert_eq!(forwarded.len(), 1);
+    }
+
+    #[def_test]
+    fn link_broadcast_with_unicast_ipv4_destination_is_not_forwarded() {
+        let mut ingress = IngressProcessor::new();
+        ingress
+            .update_local_ipv4_addrs(&[Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8).unwrap()]);
+        let bytes = ipv4::build_ipv4_packet(
+            Ipv4Address::new(203, 0, 113, 9),
+            Ipv4Address::new(198, 51, 100, 2),
+            ipv4::PROTOCOL_ICMP,
+            64,
+            &[8, 0, 0, 0, 0, 0, 0, 0],
+        )
+        .unwrap();
+        let mut input = vec![PacketBuf::from_ip_packet_vec_with_type(
+            1,
+            bytes,
+            PacketOwner::DeviceRx,
+            PacketType::Broadcast,
+        )];
+        let mut accepted = Vec::new();
+        let mut control = Vec::new();
+        let mut forwarded = Vec::new();
+
+        ingress.handle_rx_packets(
+            MonotonicInstant::ORIGIN,
+            &mut input,
+            &mut accepted,
+            &mut control,
+            &mut forwarded,
+        );
+
+        assert_eq!(accepted.len(), 0);
+        assert_eq!(control.len(), 0);
+        assert_eq!(forwarded.len(), 0);
+    }
 }
 
 fn snoop_ipv6_tcp_packet(buf: &[u8], sockets: &mut SocketSet<'_>) {

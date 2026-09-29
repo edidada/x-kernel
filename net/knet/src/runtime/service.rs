@@ -55,13 +55,19 @@ struct SmoltcpIngressProgress {
 struct DeviceRxProgress {
     packets: usize,
     has_reached_time_limit: bool,
-    has_lock_contention: bool,
+    has_deferred_work: bool,
 }
 
 #[derive(Default)]
 struct Ipv4ExpirationProgress {
     timer_events: usize,
     has_more: bool,
+}
+
+struct IngressBatches<'a> {
+    accepted: &'a mut Vec<PacketBuf>,
+    control: &'a mut Vec<Vec<u8>>,
+    forwarded: &'a mut Vec<PacketBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -128,6 +134,7 @@ pub struct Service {
     rx_batch: Mutex<Vec<PacketBuf>>,
     accepted_batch: Mutex<Vec<PacketBuf>>,
     control_batch: Mutex<Vec<Vec<u8>>>,
+    forward_batch: Mutex<Vec<PacketBuf>>,
     timeout_deadline_micros: AtomicU64,
     ipv4_reassembly_deadline_micros: AtomicU64,
     timeout_poll: Arc<PollSet>,
@@ -148,6 +155,7 @@ impl Service {
             rx_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
             accepted_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
             control_batch: Mutex::new(Vec::new()),
+            forward_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
             timeout_deadline_micros: AtomicU64::new(0),
             ipv4_reassembly_deadline_micros: AtomicU64::new(0),
             timeout_poll: Arc::new(PollSet::new()),
@@ -179,22 +187,23 @@ impl Service {
     /// transport and device handlers may acquire sleepable mutexes. Shared
     /// progression locks are acquired with `try_lock`; contention leaves the
     /// pending batches intact and reports immediate work for a later round.
+    /// The network poller serializes rounds; batch mutexes cover only their
+    /// timer, handoff, or RX stage and are released before TX and stack work.
     /// A due IPv4 reassembly timer remains pending across ingress-lock
     /// contention without aborting TX or protocol progress in the current round.
     pub fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
         let round_started_at = monotonic_time();
         let device_timestamp = round_started_at;
-        let mut control_packets = self.control_batch.lock();
-        let mut rx_batch = self.rx_batch.lock();
-        let mut accepted_packets = self.accepted_batch.lock();
-
-        let ipv4_expiration = self.try_expire_ipv4_fragments(
-            device_timestamp,
-            budget.timer_events,
-            &mut control_packets,
-        );
+        let ipv4_expiration = {
+            let mut control_packets = self.control_batch.lock();
+            self.try_expire_ipv4_fragments(
+                device_timestamp,
+                budget.timer_events,
+                &mut control_packets,
+            )
+        };
         let mut timer_events = ipv4_expiration.timer_events;
-        if !self.try_flush_ingress_batches(&mut accepted_packets, &mut control_packets) {
+        if !self.try_flush_retained_ingress_batches() {
             return deferred_poll_progress(0, 0, timer_events);
         }
 
@@ -223,13 +232,10 @@ impl Service {
             } else {
                 budget.rx_packets
             },
-            &mut rx_batch,
-            &mut accepted_packets,
-            &mut control_packets,
         );
         let mut rx_packets = rx_progress.packets;
         has_reached_time_limit |= rx_progress.has_reached_time_limit;
-        if rx_progress.has_lock_contention {
+        if rx_progress.has_deferred_work {
             return deferred_poll_progress(rx_packets, tx_packets, timer_events);
         }
 
@@ -315,16 +321,10 @@ impl Service {
 
         let rx_remaining = budget.rx_packets.saturating_sub(rx_packets);
         if !has_reached_time_limit && rx_remaining > 0 {
-            let tail_progress = self.poll_device_rx_budgeted(
-                device_timestamp,
-                round_started_at,
-                rx_remaining,
-                &mut rx_batch,
-                &mut accepted_packets,
-                &mut control_packets,
-            );
+            let tail_progress =
+                self.poll_device_rx_budgeted(device_timestamp, round_started_at, rx_remaining);
             rx_packets += tail_progress.packets;
-            if tail_progress.has_lock_contention {
+            if tail_progress.has_deferred_work {
                 return deferred_poll_progress(rx_packets, tx_packets, timer_events);
             }
         }
@@ -334,6 +334,7 @@ impl Service {
         let timer_has_more = has_immediate_timer_work(timer_current, next_poll);
         self.update_poll_timeout(timer_current, next_poll);
 
+        let has_pending_forward = !self.forward_batch.lock().is_empty();
         let Some(mut router) = self.router.try_lock() else {
             return deferred_poll_progress(rx_packets, tx_packets, timer_events);
         };
@@ -347,6 +348,7 @@ impl Service {
             has_more: rx_has_more
                 || ingress_has_more
                 || tx_has_more
+                || has_pending_forward
                 || timer_has_more
                 || ipv4_expiration.has_more
                 || self.has_pending_ipv4_reassembly_expiration(),
@@ -358,9 +360,31 @@ impl Service {
         device_timestamp: MonotonicInstant,
         round_started_at: MonotonicInstant,
         budget: usize,
+    ) -> DeviceRxProgress {
+        let mut control_packets = self.control_batch.lock();
+        let mut rx_batch = self.rx_batch.lock();
+        let mut accepted_packets = self.accepted_batch.lock();
+        let mut forwarded_packets = self.forward_batch.lock();
+        self.poll_device_rx_budgeted_locked(
+            device_timestamp,
+            round_started_at,
+            budget,
+            &mut rx_batch,
+            &mut IngressBatches {
+                accepted: &mut accepted_packets,
+                control: &mut control_packets,
+                forwarded: &mut forwarded_packets,
+            },
+        )
+    }
+
+    fn poll_device_rx_budgeted_locked(
+        &self,
+        device_timestamp: MonotonicInstant,
+        round_started_at: MonotonicInstant,
+        budget: usize,
         rx_batch: &mut Vec<PacketBuf>,
-        accepted_packets: &mut Vec<PacketBuf>,
-        control_packets: &mut Vec<Vec<u8>>,
+        batches: &mut IngressBatches<'_>,
     ) -> DeviceRxProgress {
         let mut progress = DeviceRxProgress::default();
         let mut packets_since_time_check = 0;
@@ -368,11 +392,16 @@ impl Service {
         if !self.try_process_rx_batch(
             device_timestamp,
             rx_batch,
-            accepted_packets,
-            control_packets,
-        ) || !self.try_flush_ingress_batches(accepted_packets, control_packets)
+            batches.accepted,
+            batches.control,
+            batches.forwarded,
+        ) || !self.try_flush_ingress_batches(
+            batches.accepted,
+            batches.control,
+            batches.forwarded,
+        ) || !batches.forwarded.is_empty()
         {
-            progress.has_lock_contention = true;
+            progress.has_deferred_work = true;
             return progress;
         }
 
@@ -386,7 +415,7 @@ impl Service {
             }
 
             let Some(mut router) = self.router.try_lock() else {
-                progress.has_lock_contention = true;
+                progress.has_deferred_work = true;
                 break;
             };
             let batch_budget = budget
@@ -405,11 +434,16 @@ impl Service {
             if !self.try_process_rx_batch(
                 device_timestamp,
                 rx_batch,
-                accepted_packets,
-                control_packets,
-            ) || !self.try_flush_ingress_batches(accepted_packets, control_packets)
+                batches.accepted,
+                batches.control,
+                batches.forwarded,
+            ) || !self.try_flush_ingress_batches(
+                batches.accepted,
+                batches.control,
+                batches.forwarded,
+            ) || !batches.forwarded.is_empty()
             {
-                progress.has_lock_contention = true;
+                progress.has_deferred_work = true;
                 break;
             }
             if !drain.has_more || drain.work_done == 0 {
@@ -457,19 +491,32 @@ impl Service {
         rx_batch: &mut Vec<PacketBuf>,
         accepted_packets: &mut Vec<PacketBuf>,
         control_packets: &mut Vec<Vec<u8>>,
+        forwarded_packets: &mut Vec<PacketBuf>,
     ) -> bool {
         if rx_batch.is_empty() {
             return true;
         }
 
+        let Some(router) = self.router.try_lock() else {
+            return false;
+        };
+        let device_names = router
+            .devices
+            .iter()
+            .map(|device| device.name().into())
+            .collect();
+        drop(router);
+
         let Some(mut ingress) = self.ingress.try_lock() else {
             return false;
         };
+        ingress.update_device_names(device_names);
         ingress.handle_rx_packets(
             device_timestamp,
             rx_batch,
             accepted_packets,
             control_packets,
+            forwarded_packets,
         );
         let next_deadline = ingress.ipv4_reassembly_deadline();
         self.update_ipv4_reassembly_timeout(next_deadline);
@@ -477,12 +524,25 @@ impl Service {
         true
     }
 
+    fn try_flush_retained_ingress_batches(&self) -> bool {
+        let mut control_packets = self.control_batch.lock();
+        let mut accepted_packets = self.accepted_batch.lock();
+        let mut forwarded_packets = self.forward_batch.lock();
+        self.try_flush_ingress_batches(
+            &mut accepted_packets,
+            &mut control_packets,
+            &mut forwarded_packets,
+        )
+    }
+
     fn try_flush_ingress_batches(
         &self,
         accepted_packets: &mut Vec<PacketBuf>,
         control_packets: &mut Vec<Vec<u8>>,
+        forwarded_packets: &mut Vec<PacketBuf>,
     ) -> bool {
-        if accepted_packets.is_empty() && control_packets.is_empty() {
+        if accepted_packets.is_empty() && control_packets.is_empty() && forwarded_packets.is_empty()
+        {
             return true;
         }
 
@@ -509,6 +569,18 @@ impl Service {
                 warn!("Dropping network control packet: {}", err);
             }
         }
+        let mut completed = 0;
+        for packet in forwarded_packets.iter() {
+            match router.queue_forwarded_ipv4_packet(packet.clone()) {
+                Ok(()) => completed += 1,
+                Err(KError::WouldBlock) => break,
+                Err(err) => {
+                    warn!("Dropping forwarded IPv4 packet: {}", err);
+                    completed += 1;
+                }
+            }
+        }
+        forwarded_packets.drain(..completed);
         true
     }
 
@@ -560,7 +632,13 @@ impl Service {
             }
 
             let packet_count = output_ipv4_packet_count(&router, dst_addr, packet_len)?;
-            if !router.can_enqueue_tx_packets(packet_count) {
+            let reserved_count =
+                if matches!(dst_addr, IpAddress::Ipv4(addr) if addr.is_broadcast()) && oif == 0 {
+                    1
+                } else {
+                    packet_count
+                };
+            if !router.can_enqueue_tx_packets(reserved_count) {
                 return Err(KError::WouldBlock);
             }
         }
@@ -1087,6 +1165,7 @@ mod tests {
     use super::*;
     use crate::{
         buf::PacketOwner,
+        consts::SOCKET_BUFFER_SIZE,
         device::LoopbackDevice,
         ip::{Ipv4Address, Ipv4Cidr},
         ipv4,
@@ -1104,6 +1183,7 @@ mod tests {
         service: Weak<Service>,
         wake_count: AtomicUsize,
         was_router_unlocked: AtomicBool,
+        were_batches_unlocked: AtomicBool,
     }
 
     impl Wake for TxCapacityWakeProbe {
@@ -1114,6 +1194,14 @@ mod tests {
                 .is_some_and(|service| service.router.try_lock().is_some());
             self.was_router_unlocked
                 .store(was_unlocked, Ordering::Relaxed);
+            let were_batches_unlocked = self.service.upgrade().is_some_and(|service| {
+                service.control_batch.try_lock().is_some()
+                    && service.rx_batch.try_lock().is_some()
+                    && service.accepted_batch.try_lock().is_some()
+                    && service.forward_batch.try_lock().is_some()
+            });
+            self.were_batches_unlocked
+                .store(were_batches_unlocked, Ordering::Relaxed);
             self.wake_count.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -1129,6 +1217,7 @@ mod tests {
             service: Arc::downgrade(&service),
             wake_count: AtomicUsize::new(0),
             was_router_unlocked: AtomicBool::new(false),
+            were_batches_unlocked: AtomicBool::new(false),
         });
         let waker = Waker::from(probe.clone());
         let context = Context::from_waker(&waker);
@@ -1145,6 +1234,7 @@ mod tests {
         assert!(progress.has_more);
         assert_eq!(probe.wake_count.load(Ordering::Relaxed), 1);
         assert!(probe.was_router_unlocked.load(Ordering::Relaxed));
+        assert!(probe.were_batches_unlocked.load(Ordering::Relaxed));
     }
 
     #[def_test]
@@ -1229,6 +1319,70 @@ mod tests {
         assert_eq!(progress.rx_packets, 0);
         assert_eq!(progress.tx_packets, 0);
         assert!(progress.has_more);
+    }
+
+    #[def_test(serial)]
+    fn full_tx_queue_retries_forward_packet_after_dispatch() {
+        let mut router = Router::new();
+        let dev = router.add_device(Box::new(LoopbackDevice::new()));
+        let destination = Ipv4Address::new(198, 51, 100, 2);
+        router.add_rule(Rule::new(
+            Ipv4Cidr::new(destination, 32).unwrap().into(),
+            None,
+            dev,
+            IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)),
+        ));
+        while let Some(token) =
+            smoltcp::phy::Device::transmit(&mut router, SmoltcpInstant::from_millis(0))
+        {
+            smoltcp::phy::TxToken::consume(token, 20, |bytes| bytes.fill(0));
+        }
+        assert_eq!(router.available_tx_packet_slots(), 0);
+        let packet = ipv4::build_ipv4_packet(
+            Ipv4Address::new(192, 0, 2, 1),
+            destination,
+            ipv4::PROTOCOL_ICMP,
+            64,
+            &[8, 0, 0, 0, 0, 0, 0, 0],
+        )
+        .unwrap();
+        let packet = PacketBuf::from_ip_packet_vec(1, packet, PacketOwner::DeviceRx);
+        crate::set_ipv4_forwarding_enabled(true);
+        assert_eq!(
+            router.queue_forwarded_ipv4_packet(packet.clone()),
+            Err(KError::WouldBlock)
+        );
+        let service = Service::new(router);
+        service.forward_batch.lock().push(packet);
+        let mut rx_batch = Vec::new();
+        let mut accepted = Vec::new();
+        let mut control = Vec::new();
+        let mut forwarded = service.forward_batch.lock();
+        let progress = service.poll_device_rx_budgeted_locked(
+            monotonic_time(),
+            monotonic_time(),
+            1,
+            &mut rx_batch,
+            &mut IngressBatches {
+                accepted: &mut accepted,
+                control: &mut control,
+                forwarded: &mut forwarded,
+            },
+        );
+        assert!(progress.has_deferred_work);
+        assert_eq!(progress.packets, 0);
+        assert_eq!(forwarded.len(), 1);
+        drop(forwarded);
+
+        let progress = service.poll_budgeted(PollBudget {
+            tx_packets: SOCKET_BUFFER_SIZE,
+            ..TEST_POLL_BUDGET
+        });
+
+        assert!(progress.has_more);
+        assert!(service.forward_batch.lock().is_empty());
+        assert!(service.router.lock().available_tx_packet_slots() > 0);
+        crate::set_ipv4_forwarding_enabled(false);
     }
 
     #[def_test(serial)]

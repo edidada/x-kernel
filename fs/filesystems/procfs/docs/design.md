@@ -18,7 +18,7 @@ Paths in this table are relative to `fs/filesystems/procfs/`.
 | `src/task_nodes/root.rs` | PID/TID directories, task metadata, maps, FD magic links, namespaces, process controls |
 | `src/task_nodes/mounts.rs` | Mount-tree traversal and mounts/mountinfo/mountstats formatting |
 | `src/task_nodes/tee.rs` | Feature-gated TA metadata through `tee_task_iface` |
-| `src/basic_nodes/root.rs` | Boot command line, CPU/filesystem information, kernel settings |
+| `src/basic_nodes/root.rs` | Boot command line, CPU/filesystem information, kernel settings, IPv4 forwarding sysctl |
 | `src/mem_nodes/root.rs` | Allocator-derived memory statistics |
 | `src/device_nodes/root.rs` | Device, bus, driver, and topology views through `kdevice` |
 | `src/trace_nodes/root.rs` | Trace records, event metadata and enable controls through `ktracing` |
@@ -38,6 +38,11 @@ unpublished reservations and pairs retained by surviving slave opens; it is not
 a count of visible pts entries. Each read samples the provider without retaining
 a PTY resource. Unlike Linux's writable `pty/max`, this interface reports a fixed
 limit of 16 pairs and does not support runtime resizing.
+
+`/proc/sys/net/ipv4/ip_forward` reads the kernel's forwarding flag as `0` or
+`1`. A privileged write of either value changes subsequent IPv4 forwarding
+decisions; the boot value is `0`. Procfs validates the complete write before
+changing the flag and delegates packet handling to `knet`.
 
 ## Calling Constraints and Execution Context
 

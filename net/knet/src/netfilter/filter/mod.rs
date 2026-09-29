@@ -4,34 +4,14 @@
 
 //! IPv4 `filter` table model, matcher, and evaluator.
 
-#[cfg_attr(
-    not(unittest),
-    expect(
-        dead_code,
-        reason = "filter hook integration is implemented in a later stage"
-    )
-)]
 mod evaluator;
 mod legacy;
-#[cfg_attr(
-    not(unittest),
-    expect(
-        dead_code,
-        reason = "filter hook integration is implemented in a later stage"
-    )
-)]
 mod matcher;
-#[cfg_attr(
-    not(unittest),
-    expect(
-        dead_code,
-        reason = "filter hook integration is implemented in a later stage"
-    )
-)]
 mod model;
 
-pub(crate) use legacy::snapshot;
 pub use legacy::{
-    LegacyFilterReplace, LegacyFilterTable, LegacyReplaceError, MAX_LEGACY_FILTER_ENTRIES_SIZE,
-    MAX_LEGACY_FILTER_ENTRY_COUNT, replace,
+    LegacyCounter, LegacyFilterReplace, LegacyFilterTable, LegacyReplaceError,
+    MAX_LEGACY_FILTER_ENTRIES_SIZE, MAX_LEGACY_FILTER_ENTRY_COUNT, add_counters, replace,
 };
+pub(crate) use legacy::{evaluate_ipv4, snapshot};
+pub(crate) use model::{FilterHook, Verdict};

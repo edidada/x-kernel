@@ -314,6 +314,20 @@ impl<'a> FilterPacket<'a> {
             outdev,
         })
     }
+
+    pub(crate) fn parse_output(packet: &'a [u8], outdev: &'a str) -> Result<Self, Ipv4Error> {
+        let header = Ipv4Header::parse_output(packet)?;
+        Ok(Self {
+            packet,
+            header,
+            indev: "",
+            outdev,
+        })
+    }
+
+    pub(crate) fn packet_len(&self) -> usize {
+        self.packet.len()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

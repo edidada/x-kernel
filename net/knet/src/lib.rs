@@ -35,6 +35,19 @@ pub mod unix;
 pub mod vsock;
 
 use alloc::{borrow::ToOwned, boxed::Box, sync::Arc};
+use core::sync::atomic::{AtomicBool, Ordering};
+
+static IPV4_FORWARDING_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Returns the IPv4 forwarding state used by the network data path.
+pub fn ipv4_forwarding_enabled() -> bool {
+    IPV4_FORWARDING_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Enables or disables IPv4 forwarding for nonlocal unicast packets.
+pub fn set_ipv4_forwarding_enabled(enabled: bool) {
+    IPV4_FORWARDING_ENABLED.store(enabled, Ordering::Relaxed);
+}
 
 pub use control::{
     NetInterfaceInfo, add_ipv4_route, del_ipv4_route, find_interface, interface_ipv4_addr,
@@ -51,8 +64,9 @@ use lazyinit::LazyInit;
 pub(crate) use link::{buf, wire};
 pub use link::{packet, send_link_frame};
 pub use netfilter::{
-    LegacyFilterReplace, LegacyFilterTable, LegacyReplaceError, MAX_LEGACY_FILTER_ENTRIES_SIZE,
-    MAX_LEGACY_FILTER_ENTRY_COUNT, legacy_ipv4_filter_table, replace_legacy_ipv4_filter_table,
+    LegacyCounter, LegacyFilterReplace, LegacyFilterTable, LegacyReplaceError,
+    MAX_LEGACY_FILTER_ENTRIES_SIZE, MAX_LEGACY_FILTER_ENTRY_COUNT, add_legacy_ipv4_filter_counters,
+    legacy_ipv4_filter_table, replace_legacy_ipv4_filter_table,
 };
 pub(crate) use network::ipv4;
 pub(crate) use runtime::{poller, service};

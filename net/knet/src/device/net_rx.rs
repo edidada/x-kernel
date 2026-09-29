@@ -103,6 +103,9 @@ pub(crate) fn prepare_for_enqueue(packet: PacketBuf) -> Option<PacketBuf> {
         !kirq::context::is_in_interrupt_context(),
         "prepare_for_enqueue requires task context"
     );
+    if packet.is_forwarded() {
+        return Some(packet);
+    }
     let udp_header = packet
         .network_packet()
         .and_then(|ip_packet| Ipv4Header::parse_input(ip_packet).ok())

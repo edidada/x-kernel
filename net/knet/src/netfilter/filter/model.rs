@@ -301,6 +301,7 @@ impl FilterTable {
         self.chains.get(id.index())
     }
 
+    #[cfg(unittest)]
     pub(crate) fn built_in_chain(&self, hook: FilterHook) -> &Chain {
         &self.chains[self.built_in_chains[hook.index()].index()]
     }

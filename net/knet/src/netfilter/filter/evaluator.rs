@@ -25,8 +25,18 @@ struct JumpFrame {
 
 impl FilterTable {
     /// Evaluates the built-in chain for `hook` against `packet`.
+    #[cfg(unittest)]
     pub(crate) fn evaluate(&self, hook: FilterHook, packet: &FilterPacket<'_>) -> Verdict {
-        evaluate_from(self, self.built_in_chain_id(hook), 0, packet)
+        self.evaluate_with_counter(hook, packet, |_, _| {})
+    }
+
+    pub(crate) fn evaluate_with_counter(
+        &self,
+        hook: FilterHook,
+        packet: &FilterPacket<'_>,
+        record: impl FnMut(ChainId, Option<usize>),
+    ) -> Verdict {
+        evaluate_from(self, self.built_in_chain_id(hook), 0, packet, record)
     }
 }
 
@@ -35,6 +45,7 @@ fn evaluate_from(
     mut chain_id: ChainId,
     mut rule_index: usize,
     packet: &FilterPacket<'_>,
+    mut record: impl FnMut(ChainId, Option<usize>),
 ) -> Verdict {
     let mut jump_stack: [Option<JumpFrame>; MAX_JUMP_DEPTH] = [None; MAX_JUMP_DEPTH];
     let mut stack_top = 0usize;
@@ -46,6 +57,7 @@ fn evaluate_from(
         };
 
         if rule_index >= chain.rules().len() {
+            record(chain_id, None);
             if stack_top == 0 {
                 return builtin_policy(table, chain_id);
             }
@@ -73,6 +85,8 @@ fn evaluate_from(
             MatchOutcome::Matched => {}
         }
 
+        record(chain_id, Some(rule_index));
+
         match rule.target() {
             Target::Continue => rule_index += 1,
             Target::Verdict(verdict) => return verdict,
@@ -90,6 +104,7 @@ fn evaluate_from(
             }
             Target::Return => {
                 if stack_top == 0 {
+                    record(chain_id, None);
                     return builtin_policy(table, chain_id);
                 }
                 stack_top -= 1;

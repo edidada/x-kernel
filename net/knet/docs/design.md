@@ -213,7 +213,7 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 | vsock | Provides optional guest-host stream communication through virtio-vsock. |
 | smoltcp | Provides IPv4/IPv6 processing for the smoltcp socket path. |
 | knet IPv4 / ICMPv4 | Validates and reassembles IPv4 packets, delivers UDP input, and handles ICMPv4 errors and responses. |
-| IPv4 filter model | Defines a validated, typed `filter` table, an internal IPv4 packet evaluator, and a legacy `ipt_entry` snapshot for `GET_INFO` and `GET_ENTRIES`. The model is not connected to the packet path. |
+| IPv4 filter model | Defines the validated `filter` table, evaluates INPUT/FORWARD/OUTPUT packets, counts matching entries, and exports legacy `ipt_entry` snapshots. |
 | Router | Selects routes, fragments outgoing IPv4 packets, and dispatches RX/TX queues across devices. |
 | LoopbackDevice | Returns locally transmitted packets to the receive path. |
 | EthernetDevice | Adapts kclass network devices to knet's NetDevice interface and handles Ethernet and ARP. |
@@ -620,11 +620,13 @@ not allocate submission storage or execute the data plane.
 
 ### Legacy IPv4 Filter Replacement and Export
 
-The legacy serializer calculates chain and rule offsets before producing bytes. Built-in chain heads populate `hook_entry`; built-in policy entries populate `underflow`. User-defined chains receive an `ERROR` marker followed by their rules and a standard `RETURN` footer. Standard jump verdicts point to the first rule after the destination chain marker. A terminal `ERROR` entry closes the table. Fixed IPv4 fields and the supported TCP, UDP, and ICMP matches use native legacy structure alignment, while IPv4 addresses and masks remain in network byte order. Counter fields are emitted as zero until counter accounting is added.
+The legacy serializer calculates chain and rule offsets before producing bytes. Built-in chain heads populate `hook_entry`; built-in policy entries populate `underflow`. User-defined chains receive an `ERROR` marker followed by their rules and a standard `RETURN` footer. Standard jump verdicts point to the first rule after the destination chain marker. A terminal `ERROR` entry closes the table. Fixed IPv4 fields and the supported TCP, UDP, and ICMP matches use native legacy structure alignment, while IPv4 addresses and masks remain in network byte order. Each published table generation owns atomic packet/byte counters for every native entry. Packet evaluation and counter additions hold a shared publication guard; export takes the exclusive guard before copying both fields into each `ipt_entry`, so it cannot observe half of one update.
 
-The POSIX layer wraps this entry array in Linux `ipt_getinfo` and `ipt_get_entries` responses. `GET_INFO` returns the hook offsets, entry count, and byte size. `GET_ENTRIES` accepts only the size from the preceding snapshot and returns `EAGAIN` when it differs from the current size. `/proc/net/ip_tables_names` advertises `filter` so `iptables-save` can discover the table.
+The POSIX layer wraps this entry array in Linux `ipt_getinfo` and `ipt_get_entries` responses. `GET_INFO` returns the hook offsets, entry count, and byte size. `GET_ENTRIES` accepts only the size from the preceding snapshot and returns `EAGAIN` when it differs from the current size. Revision queries report revision zero for the supported TCP, UDP, ICMP, standard, and ERROR extensions. `/proc/net/ip_tables_names` advertises `filter` so `iptables-save` can discover the table.
 
-`IPT_SO_SET_REPLACE` copies a bounded native `ipt_replace` header and entry array from the caller. The decoder checks entry alignment and boundaries, match and target sizes, hook and policy offsets, supported IPv4 and TCP/UDP/ICMP conditions, and user-chain jumps before building a validated `FilterTable`. Serialization of the new table completes before a lock-protected swap publishes the semantic table and legacy export bytes together. The replacement compares `num_counters` with the current entry count at publication and returns `EAGAIN` on a stale request. Successful replacement writes zero-valued old counters to the supplied userspace array. `IPT_SO_SET_ADD_COUNTERS` accepts a correctly sized zero-valued counter array, as sent by libiptc after ordinary rule changes; nonzero additions return `EOPNOTSUPP`. Packet counter accounting and filter hook evaluation are later stages.
+`IPT_SO_SET_REPLACE` copies a bounded native `ipt_replace` header and entry array from the caller. The decoder checks entry alignment and boundaries, match and target sizes, hook and policy offsets, supported IPv4 and TCP/UDP/ICMP conditions, and user-chain jumps before building a validated `FilterTable`. Serialization of the new table completes before a write-locked swap publishes the semantic table and legacy export bytes together. Packet evaluation holds a read lock through its counter updates, so replacement reads the old generation's complete counters after in-flight evaluations finish. The replacement compares `num_counters` with the current entry count at publication and returns `EAGAIN` on a stale request. Successful replacement writes the old generation's counters to the supplied userspace array. `IPT_SO_SET_ADD_COUNTERS` adds the supplied packet and byte totals to each current entry after checking its entry count.
+
+Local IPv4 packets enter INPUT after reassembly and before UDP delivery or smoltcp ingress. Complete loopback UDP packets enter INPUT in the task-context loopback transmit path before the NetRx fast delivery; a packet marker prevents a second evaluation if UDP has no receiver and falls back to normal ingress. Router evaluates OUTPUT for local stack packets before fragmentation, including smoltcp packets that enter through its TX token. Unbound limited broadcasts are evaluated once per device while the complete IPv4 packet is available. Accepted interface indices and names travel with one queued packet, which is fragmented at dispatch. Packet metadata prevents dispatch from evaluating already filtered packets a second time. Synchronous UDP sends return `EPERM` when OUTPUT drops every eligible copy. Kernel-generated IPv4 control packets and loopback traffic pass through OUTPUT. Nonlocal unicast packets enter a retained forwarding batch; with `/proc/sys/net/ipv4/ip_forward` set to `1`, Router accepts only host-addressed link frames, selects the egress route, checks DF against path MTU, evaluates FORWARD, decrements TTL, preserves the original IPv4 identification during egress fragmentation, and queues the packet for device dispatch without local-source validation or OUTPUT evaluation. The IP source remains the sender's address, while the egress device receives a local address for ARP. TTL expiry and DF packets above path MTU generate ICMP errors through the OUTPUT path when a reverse route exists. Forwarding is disabled at boot. Input and forwarding interface matches use device names derived from packet ifindex; output interface matches use the selected route or bound device.
 
 ### Network Initialization
 
@@ -661,11 +663,11 @@ Source: [`init_network`](../src/lib.rs) and [`Service::new`](../src/runtime/serv
 
 Ethernet RX notifications use `NetRx` to wake RX poll sources and schedule `knet-poller`. Prepared loopback UDP packets have a separate softirq delivery path; deferred loopback packets enter task-context polling. Socket assist executes one already-scheduled round. Background work and assist acquire the same execution right through `SCHEDULED -> RUNNING`; notifications received during execution are retained as `RUNNING_PENDING`.
 
-Each `Service::poll_budgeted` round first attempts pending IPv4 reassembly expiration and flushes retained ingress/control batches. It then dispatches queued TX, drains device RX, advances smoltcp, and uses the remaining TX and device-RX budgets for a second pass. Device RX and smoltcp ingress each have a separate allowance of `budget.rx_packets`.
+Each `Service::poll_budgeted` round first attempts pending IPv4 reassembly expiration and flushes retained ingress, control, and forwarding batches. It then dispatches queued TX, drains device RX, advances smoltcp, and uses the remaining TX and device-RX budgets for a second pass. The network poller owns the round's execution right. Batch locks are acquired only for timer expiration, retained-batch handoff, and each device-RX pass, then released before TX dispatch and smoltcp progression. When the TX queue cannot accept a forwarded packet, the pending forwarding batch stops further device RX until TX dispatch frees space; the poller keeps this work pending. Device RX and smoltcp ingress each have a separate allowance of `budget.rx_packets`.
 
 Device draining rotates its starting position across devices, consuming each device until it is empty or the batch budget is exhausted. IPv4 validation, destination filtering, reassembly, and UDP delivery run after releasing Router. Unmatched unicast UDP can generate ICMP port-unreachable responses; unsupported unicast IPv4 protocols can generate protocol-unreachable responses. ICMP errors are inspected for UDP before eligible packets enter the smoltcp batch. IPv6 enters that batch directly.
 
-The following pseudocode summarizes the round. Failed shared-state `try_lock` acquisitions retain pending batches and return `has_more = true`. Contention during reassembly expiration only defers that timer work, allowing the round to continue. Reusable batch mutexes and nested listener operations still use blocking locks.
+The following pseudocode summarizes the round. Failed shared-state `try_lock` acquisitions retain pending batches and return `has_more = true`. Contention during reassembly expiration only defers that timer work, allowing the round to continue. Reusable batch mutexes and nested listener operations still use blocking locks within their stages. Combined batch locks follow control, RX, accepted, then forward order.
 
 **Algorithm 2. RX Progress**
 
@@ -677,9 +679,9 @@ The following pseudocode summarizes the round. Failed shared-state `try_lock` ac
 |---:|:---|
 | 1 | **Procedure** `poll_budgeted(budget)` |
 | 2 | &emsp;start = monotonic_time() |
-| 3 | &emsp;lock reusable RX, accepted, and control batches |
-| 4 | &emsp;try to expire pending IPv4 fragments within $B_{\mathrm{timer}}$ |
-| 5 | &emsp;flush retained batches, or return retry |
+| 3 | &emsp;lock the control batch for pending IPv4 fragment expiration within $B_{\mathrm{timer}}$, then release it |
+| 4 | &emsp;lock retained control, accepted, and forward batches for handoff |
+| 5 | &emsp;flush retained batches and release their locks, or return retry |
 | 6 | &emsp;tx_done = dispatch queued TX within $B_{\mathrm{tx}}$ |
 | 7 | &emsp;drain_device_rx($B_{\mathrm{rx}}$ unless time limit reached) |
 | 8 | &emsp;`try_lock` socket set, then Router, then Interface; otherwise return retry |
@@ -696,9 +698,9 @@ The following pseudocode summarizes the round. Failed shared-state `try_lock` ac
 | 19 | &emsp;&emsp;drain_device_rx(remaining device-RX budget) |
 | 20 | &emsp;publish the earliest protocol / deferred-close deadline |
 | 21 | &emsp;`try_lock` Router, or return retry |
-| 22 | &emsp;**return** progress with `has_more` for pending RX, ingress, TX, immediately due protocol work, or pending reassembly expiration |
+| 22 | &emsp;**return** progress with `has_more` for pending RX, ingress, forwarding, TX, immediately due protocol work, or pending reassembly expiration |
 | 23 | **Procedure** `drain_device_rx(remaining)` |
-| 24 | &emsp;process retained RX batch and flush accepted/control batches |
+| 24 | &emsp;lock reusable batches, process retained RX, flush accepted/control/forward batches, then release the batch locks |
 | 25 | &emsp;**while** budget and time remain: |
 | 26 | &emsp;&emsp;`try_lock` Router, or return retry |
 | 27 | &emsp;&emsp;pull a bounded batch, limited by smoltcp ingress capacity |
@@ -708,11 +710,11 @@ The following pseudocode summarizes the round. Failed shared-state `try_lock` ac
 | 31 | &emsp;&emsp;release IngressProcessor |
 | 32 | &emsp;&emsp;flush accepted/control batches, or return retry |
 | 33 | &emsp;&emsp;**stop** when device draining reports no more work |
-| 34 | **Procedure** `flush accepted/control batches` |
+| 34 | **Procedure** `flush accepted/control/forward batches` |
 | 35 | &emsp;`try_lock` socket set if accepted batch is nonempty |
 | 36 | &emsp;`try_lock` Router; on failure retain both batches and return retry |
 | 37 | &emsp;prepare TCP listeners and enqueue accepted packets |
-| 38 | &emsp;enqueue control packets; drop a control packet if its TX queue is full |
+| 38 | &emsp;enqueue control packets, dropping them if their TX queue is full; retry forward packets when TX capacity is available |
 | 39 | &emsp;release acquired locks |
 
 The 1 ms limit is a soft bound checked between work batches. Maintenance and one egress call still run after bulk RX/TX reaches this limit, provided the required locks are acquired. Packets waiting in retained batches and FIFO queues remain for later rounds. The tail RX pass queues accepted smoltcp packets for a later round.
@@ -723,7 +725,7 @@ Sources: [`poller`](../src/runtime/poller.rs), [`Service`](../src/runtime/servic
 
 ### TX Routing
 
-UDP builds IPv4 packets in knet; TCP and raw sockets submit packets through smoltcp. UDP sends routed to loopback bypass the poller TX queue. Other UDP sends enter the data queue after fragmentation and capacity checks. smoltcp output enters the data queue, including loopback traffic, while generated ICMPv4 errors use the control queue. AF_PACKET sends link frames through Router directly to the selected device.
+UDP builds IPv4 packets in knet; TCP and raw sockets submit packets through smoltcp. UDP sends routed to loopback bypass the poller TX queue. Other UDP sends enter the data queue after capacity checks. Unbound limited broadcasts retain one complete packet in that queue until dispatch fragmentation. smoltcp output enters the data queue, including loopback traffic, while generated ICMPv4 errors use the control queue. AF_PACKET sends link frames through Router directly to the selected device.
 
 **Algorithm 3. TX Routing**
 
@@ -741,11 +743,11 @@ UDP builds IPv4 packets in knet; TCP and raw sockets submit packets through smol
 | 6 | &emsp;&emsp;check data-queue capacity for the expected packet count |
 | 7 | &emsp;build UDP checksum and IPv4 header |
 | 8 | &emsp;choose DF from `IP_MTU_DISCOVER` and route MTU |
-| 9 | &emsp;fragment oversized IPv4 output; return `EMSGSIZE` if DF forbids it |
+| 9 | &emsp;evaluate OUTPUT on the complete packet; return `EPERM` if it is dropped; return `EMSGSIZE` if DF forbids fragmentation |
 | 10 | &emsp;**if** output device is loopback: |
 | 11 | &emsp;&emsp;dispatch fragments immediately |
 | 12 | &emsp;**else**: |
-| 13 | &emsp;&emsp;enqueue all fragments with the bound interface, or return `WouldBlock` |
+| 13 | &emsp;&emsp;enqueue fragments, or one complete unbound limited broadcast with its accepted interfaces; return `WouldBlock` if capacity is unavailable |
 | 14 | &emsp;release Router |
 | 15 | &emsp;network_poller().notify(Tx); network_poller().assist_once() |
 | 16 | **Procedure** `dispatch_budgeted(tx_budget)` |
@@ -755,7 +757,7 @@ UDP builds IPv4 packets in knet; TCP and raw sockets submit packets through smol
 | 20 | &emsp;&emsp;**if** IPv4: |
 | 21 | &emsp;&emsp;&emsp;prepare IPv4 length/checksum fields |
 | 22 | &emsp;&emsp;&emsp;**if** limited broadcast: |
-| 23 | &emsp;&emsp;&emsp;&emsp;validate source and replicate to interfaces allowed by binding |
+| 23 | &emsp;&emsp;&emsp;&emsp;validate source, fragment a complete unbound broadcast, and replicate to accepted interfaces |
 | 24 | &emsp;&emsp;&emsp;**else**: |
 | 25 | &emsp;&emsp;&emsp;&emsp;look up longest-prefix route |
 | 26 | &emsp;&emsp;&emsp;&emsp;validate bound interface and local source |
@@ -973,7 +975,7 @@ With `vsock_tipc_bridge` enabled, `bind()` rejects explicit binding to ports in 
 | rtnetlink operations | Supports link queries/updates, IPv4 address and route queries/add/delete, and IPv4 neighbor updates. Other message types return `NLMSG_ERROR` with `EOPNOTSUPP`; neighbors accept only incomplete/permanent states with no flags. |
 | Netlink sockets | Route sockets reject multicast subscriptions, userspace-peer destinations, and mixed query/mutation batches. Kobject-uevent sockets support group delivery, `SO_PASSCRED`, and validated no-op classic-BPF attach/detach compatibility. Connect, peer queries, and shutdown are unsupported. |
 | Socket options | Options unhandled by the selected protocol return `ENOPROTOOPT`. |
-| Legacy IPv4 filter table operations | Privileged IPv4 sockets support `IPT_SO_GET_INFO`, `IPT_SO_GET_ENTRIES`, bounded `IPT_SO_SET_REPLACE`, and zero-valued `IPT_SO_SET_ADD_COUNTERS`; `/proc/net/ip_tables_names` advertises `filter`. The initial table contains empty `INPUT`, `FORWARD`, and `OUTPUT` chains with `ACCEPT` policies. |
+| Legacy IPv4 filter table operations | Privileged IPv4 sockets support `IPT_SO_GET_INFO`, `IPT_SO_GET_ENTRIES`, revision queries, bounded `IPT_SO_SET_REPLACE`, and nonzero `IPT_SO_SET_ADD_COUNTERS`; `/proc/net/ip_tables_names` advertises `filter`. The initial table contains empty `INPUT`, `FORWARD`, and `OUTPUT` chains with `ACCEPT` policies. |
 | Unix datagrams | Receive queues use unbounded `async_channel` queues. |
 | vsock / TIPC bridge | Stream transport only; the bridge forwards bytes, excluding TIPC handles and memory references. |
 | Ethernet progress | Failed RX-scheduler attachment falls back to timeout polling. ARP pending traffic is subject to head-of-line blocking. |

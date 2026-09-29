@@ -5,13 +5,16 @@
 //! Native legacy IPv4 iptables state and serialization.
 
 use alloc::{sync::Arc, vec, vec::Vec};
-use core::mem::{align_of, size_of};
+use core::{
+    mem::{align_of, size_of},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use klazy::Lazy;
-use ksync::Mutex;
+use ksync::RwLock;
 
 use super::{
-    matcher::{ExtensionMatch, InterfaceMatch, Negated, PortRange},
+    matcher::{ExtensionMatch, FilterPacket, InterfaceMatch, Negated, PortRange},
     model::{ChainKind, FilterHook, FilterTable, Rule, Target, Verdict},
 };
 
@@ -64,22 +67,117 @@ pub const MAX_LEGACY_FILTER_ENTRIES_SIZE: usize = decode::MAX_ENTRIES_SIZE;
 /// Largest number of native entries accepted by the legacy decoder.
 pub const MAX_LEGACY_FILTER_ENTRY_COUNT: usize = decode::MAX_ENTRY_COUNT;
 
-static FILTER_TABLE: Lazy<Mutex<Arc<FilterState>>> = Lazy::new(|| {
-    let table = FilterTable::accept_all();
-    let exported = encode_table(&table);
-    Mutex::new(Arc::new(FilterState { table, exported }))
-});
+static FILTER_TABLE: Lazy<RwLock<Arc<FilterState>>> =
+    Lazy::new(|| RwLock::new(Arc::new(FilterState::new(FilterTable::accept_all()))));
 
 struct FilterState {
-    #[cfg_attr(
-        not(unittest),
-        expect(
-            dead_code,
-            reason = "filter hooks consume the published model in a later stage"
-        )
-    )]
     table: FilterTable,
     exported: LegacyFilterTable,
+    counters: Vec<EntryCounter>,
+    counter_offsets: Vec<usize>,
+    chain_counters: Vec<ChainCounterIndices>,
+}
+
+struct EntryCounter {
+    packets: AtomicU64,
+    bytes: AtomicU64,
+}
+
+struct ChainCounterIndices {
+    rules: Vec<usize>,
+    footer: usize,
+}
+
+/// Packet and byte totals for one native legacy table entry.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LegacyCounter {
+    /// Number of packets that matched the entry.
+    pub packets: u64,
+    /// Sum of the matching packets' IPv4 lengths.
+    pub bytes: u64,
+}
+
+impl EntryCounter {
+    fn new() -> Self {
+        Self {
+            packets: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+        }
+    }
+
+    fn snapshot(&self) -> LegacyCounter {
+        LegacyCounter {
+            packets: self.packets.load(Ordering::Relaxed),
+            bytes: self.bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    fn add(&self, counter: LegacyCounter) {
+        self.packets.fetch_add(counter.packets, Ordering::Relaxed);
+        self.bytes.fetch_add(counter.bytes, Ordering::Relaxed);
+    }
+}
+
+impl FilterState {
+    fn new(table: FilterTable) -> Self {
+        let exported = encode_table(&table);
+        let (layouts, ..) = layout_table(&table);
+        let mut counter_offsets = Vec::with_capacity(exported.num_entries as usize);
+        let mut chain_counters = Vec::with_capacity(layouts.len());
+        for (chain, layout) in table.chains().iter().zip(&layouts) {
+            if matches!(chain.kind(), ChainKind::UserDefined { .. }) {
+                counter_offsets.push(layout.head_offset);
+            }
+            let mut rules = Vec::with_capacity(layout.rule_offsets.len());
+            for offset in &layout.rule_offsets {
+                rules.push(counter_offsets.len());
+                counter_offsets.push(*offset);
+            }
+            let footer = counter_offsets.len();
+            counter_offsets.push(layout.foot_offset);
+            chain_counters.push(ChainCounterIndices { rules, footer });
+        }
+        counter_offsets.push(exported.entries.len() - ERROR_ENTRY_SIZE);
+        debug_assert_eq!(counter_offsets.len(), exported.num_entries as usize);
+        let counters = (0..counter_offsets.len())
+            .map(|_| EntryCounter::new())
+            .collect();
+        Self {
+            table,
+            exported,
+            counters,
+            counter_offsets,
+            chain_counters,
+        }
+    }
+
+    fn counter_snapshot(&self) -> Vec<LegacyCounter> {
+        self.counters.iter().map(EntryCounter::snapshot).collect()
+    }
+
+    fn export_snapshot(&self) -> LegacyFilterTable {
+        let mut exported = self.exported.clone();
+        for (offset, counter) in self.counter_offsets.iter().zip(&self.counters) {
+            let value = counter.snapshot();
+            exported.entries[offset + 96..offset + 104]
+                .copy_from_slice(&value.packets.to_ne_bytes());
+            exported.entries[offset + 104..offset + 112]
+                .copy_from_slice(&value.bytes.to_ne_bytes());
+        }
+        exported
+    }
+
+    fn evaluate(&self, hook: FilterHook, packet: &FilterPacket<'_>) -> Verdict {
+        self.table
+            .evaluate_with_counter(hook, packet, |chain_id, rule_index| {
+                let chain = &self.chain_counters[chain_id.index()];
+                let index = rule_index.map_or(chain.footer, |rule| chain.rules[rule]);
+                self.counters[index].add(LegacyCounter {
+                    packets: 1,
+                    bytes: packet.packet_len() as u64,
+                });
+            })
+    }
 }
 
 /// Metadata copied from the native `ipt_replace` ABI after syscall validation.
@@ -145,8 +243,39 @@ impl LegacyFilterTable {
 }
 
 pub(crate) fn snapshot() -> LegacyFilterTable {
-    let current = Arc::clone(&FILTER_TABLE.lock());
-    current.exported.clone()
+    // Writers of entry counters hold a read guard; an exclusive guard keeps
+    // packet and byte totals from different updates out of the same export.
+    let current = FILTER_TABLE.write();
+    current.export_snapshot()
+}
+
+/// Evaluates a packet using one complete, published table generation.
+///
+/// A replacement waits for in-flight evaluations before reading old counters.
+pub(crate) fn evaluate_ipv4(hook: FilterHook, packet: &[u8], indev: &str, outdev: &str) -> Verdict {
+    let parsed = if hook == FilterHook::Output {
+        FilterPacket::parse_output(packet, outdev)
+    } else {
+        FilterPacket::parse(packet, indev, outdev)
+    };
+    match parsed {
+        Ok(parsed) => FILTER_TABLE.read().evaluate(hook, &parsed),
+        Err(_) => Verdict::Drop,
+    }
+}
+
+/// Adds native entry counters to the current filter table.
+///
+/// The record count is checked while holding the publication lock.
+pub fn add_counters(counters: &[LegacyCounter]) -> Result<(), LegacyReplaceError> {
+    let current = FILTER_TABLE.read();
+    if counters.len() != current.counters.len() {
+        return Err(LegacyReplaceError::CounterMismatch);
+    }
+    for (entry, value) in current.counters.iter().zip(counters) {
+        entry.add(*value);
+    }
+    Ok(())
 }
 
 /// Validates and publishes a complete IPv4 `filter` table replacement.
@@ -158,23 +287,24 @@ pub(crate) fn snapshot() -> LegacyFilterTable {
 ///
 /// Returns `InvalidInput` for malformed or unsupported entries and
 /// `CounterMismatch` when `num_counters` does not match the current table.
-pub fn replace(request: LegacyFilterReplace<'_>) -> Result<usize, LegacyReplaceError> {
+pub fn replace(request: LegacyFilterReplace<'_>) -> Result<Vec<LegacyCounter>, LegacyReplaceError> {
     replace_in(&FILTER_TABLE, request)
 }
 
 fn replace_in(
-    store: &Mutex<Arc<FilterState>>,
+    store: &RwLock<Arc<FilterState>>,
     request: LegacyFilterReplace<'_>,
-) -> Result<usize, LegacyReplaceError> {
+) -> Result<Vec<LegacyCounter>, LegacyReplaceError> {
     let table = decode::decode_table(&request)?;
-    let exported = encode_table(&table);
-    let mut current = store.lock();
+    let replacement = FilterState::new(table);
+    let mut current = store.write();
     if request.num_counters != current.exported.num_entries {
         return Err(LegacyReplaceError::CounterMismatch);
     }
-    let old = core::mem::replace(&mut *current, Arc::new(FilterState { table, exported }));
+    let old = core::mem::replace(&mut *current, Arc::new(replacement));
+    let old_counters = old.counter_snapshot();
     drop(current);
-    Ok(old.exported.num_entries as usize)
+    Ok(old_counters)
 }
 
 #[derive(Clone, Debug)]
@@ -591,10 +721,7 @@ mod tests {
     #[def_test]
     fn replacement_publishes_only_valid_complete_snapshots() {
         let initial = FilterTable::accept_all();
-        let store = Mutex::new(Arc::new(FilterState {
-            exported: encode_table(&initial),
-            table: initial.clone(),
-        }));
+        let store = RwLock::new(Arc::new(FilterState::new(initial.clone())));
         let replacement_table = FilterTable::new(vec![
             Chain::built_in(FilterHook::Input, Verdict::Drop, Vec::new()),
             Chain::built_in(FilterHook::Forward, Verdict::Accept, Vec::new()),
@@ -606,17 +733,78 @@ mod tests {
             replace_in(&store, replacement(&snapshot, 3)),
             Err(LegacyReplaceError::CounterMismatch)
         );
-        assert_eq!(store.lock().table, initial);
+        assert_eq!(store.read().table, initial);
         let mut malformed = snapshot.clone();
         malformed.underflow[1] = 7;
         assert_eq!(
             replace_in(&store, replacement(&malformed, 4)),
             Err(LegacyReplaceError::InvalidInput)
         );
-        assert_eq!(store.lock().table, initial);
-        assert_eq!(replace_in(&store, replacement(&snapshot, 4)), Ok(4));
-        assert_eq!(store.lock().table, replacement_table);
-        assert_eq!(store.lock().exported, snapshot);
+        assert_eq!(store.read().table, initial);
+        assert_eq!(
+            replace_in(&store, replacement(&snapshot, 4)),
+            Ok(vec![LegacyCounter::default(); 4])
+        );
+        assert_eq!(store.read().table, replacement_table);
+        assert_eq!(store.read().exported, snapshot);
+    }
+
+    #[def_test]
+    fn matched_rule_and_policy_counters_follow_packet_evaluation() {
+        let drop_icmp = Rule::new(
+            BaseMatch {
+                protocol: Some(Negated::new(crate::ipv4::PROTOCOL_ICMP, false)),
+                ..Default::default()
+            },
+            Vec::new(),
+            Target::Verdict(Verdict::Drop),
+        )
+        .unwrap();
+        let table = FilterTable::new(vec![
+            Chain::built_in(FilterHook::Input, Verdict::Accept, vec![drop_icmp]),
+            Chain::built_in(FilterHook::Forward, Verdict::Accept, Vec::new()),
+            Chain::built_in(FilterHook::Output, Verdict::Accept, Vec::new()),
+        ])
+        .unwrap();
+        let state = FilterState::new(table);
+        let packet = crate::ipv4::build_ipv4_packet(
+            crate::ip::Ipv4Address::new(192, 0, 2, 1),
+            crate::ip::Ipv4Address::new(192, 0, 2, 2),
+            crate::ipv4::PROTOCOL_ICMP,
+            64,
+            &[8, 0, 0, 0, 0, 0, 0, 0],
+        )
+        .unwrap();
+        let parsed = FilterPacket::parse(&packet, "lo", "").unwrap();
+        assert_eq!(state.evaluate(FilterHook::Input, &parsed), Verdict::Drop);
+        let snapshot = state.export_snapshot();
+        assert_eq!(
+            u64::from_ne_bytes(snapshot.entries[96..104].try_into().unwrap()),
+            1
+        );
+        assert_eq!(
+            u64::from_ne_bytes(snapshot.entries[104..112].try_into().unwrap()),
+            packet.len() as u64
+        );
+        assert_eq!(state.counter_snapshot()[1], LegacyCounter::default());
+
+        let tcp = crate::ipv4::build_ipv4_packet(
+            crate::ip::Ipv4Address::new(192, 0, 2, 1),
+            crate::ip::Ipv4Address::new(192, 0, 2, 2),
+            PROTOCOL_TCP,
+            64,
+            &[0; 20],
+        )
+        .unwrap();
+        let parsed = FilterPacket::parse(&tcp, "lo", "").unwrap();
+        assert_eq!(state.evaluate(FilterHook::Input, &parsed), Verdict::Accept);
+        assert_eq!(
+            state.counter_snapshot()[1],
+            LegacyCounter {
+                packets: 1,
+                bytes: tcp.len() as u64
+            }
+        );
     }
 
     #[def_test]

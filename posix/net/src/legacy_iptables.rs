@@ -15,6 +15,8 @@ pub(super) const IPT_SO_SET_REPLACE: u32 = 64;
 pub(super) const IPT_SO_SET_ADD_COUNTERS: u32 = 65;
 pub(super) const IPT_SO_GET_INFO: u32 = 64;
 pub(super) const IPT_SO_GET_ENTRIES: u32 = 65;
+pub(super) const IPT_SO_GET_REVISION_MATCH: u32 = 66;
+pub(super) const IPT_SO_GET_REVISION_TARGET: u32 = 67;
 
 const XT_TABLE_MAXNAMELEN: usize = 32;
 const NF_INET_NUMHOOKS: usize = 5;
@@ -31,6 +33,8 @@ const IPT_REPLACE_HEADER_SIZE: usize = 96;
 const IPT_REPLACE_COUNTERS_OFFSET: usize = 88;
 const XT_COUNTERS_INFO_SIZE: usize = align_up(36, align_of::<u64>());
 const XT_COUNTER_SIZE: usize = 16;
+const XT_GET_REVISION_SIZE: usize = 30;
+const XT_EXTENSION_MAXNAMELEN: usize = 29;
 
 pub(super) const fn is_set_option(optname: u32) -> bool {
     matches!(optname, IPT_SO_SET_REPLACE | IPT_SO_SET_ADD_COUNTERS)
@@ -42,7 +46,7 @@ pub(super) fn set(optname: u32, optval: UserConstPtr<u8>, optlen: socklen_t) -> 
     }
     match optname {
         IPT_SO_SET_REPLACE => replace(optval, optlen),
-        IPT_SO_SET_ADD_COUNTERS => add_zero_counters(optval, optlen),
+        IPT_SO_SET_ADD_COUNTERS => add_counters(optval, optlen),
         _ => Err(KError::from(LinuxError::ENOPROTOOPT)),
     }
 }
@@ -83,7 +87,7 @@ fn replace(optval: UserConstPtr<u8>, optlen: socklen_t) -> KResult<()> {
         num_counters,
         entries: &entries,
     };
-    let old_count =
+    let old_counters =
         knet::replace_legacy_ipv4_filter_table(request).map_err(|error| match error {
             knet::LegacyReplaceError::InvalidInput => KError::InvalidInput,
             knet::LegacyReplaceError::CounterMismatch => KError::from(LinuxError::EAGAIN),
@@ -95,12 +99,16 @@ fn replace(optval: UserConstPtr<u8>, optlen: socklen_t) -> KResult<()> {
             .try_into()
             .unwrap(),
     );
-    let counters = alloc::vec![0u8; old_count * XT_COUNTER_SIZE];
+    let mut counters = alloc::vec::Vec::with_capacity(old_counters.len() * XT_COUNTER_SIZE);
+    for counter in old_counters {
+        counters.extend_from_slice(&counter.packets.to_ne_bytes());
+        counters.extend_from_slice(&counter.bytes.to_ne_bytes());
+    }
     let _ = osvm::write_vm_bytes(counters_ptr as *mut u8, &counters);
     Ok(())
 }
 
-fn add_zero_counters(optval: UserConstPtr<u8>, optlen: socklen_t) -> KResult<()> {
+fn add_counters(optval: UserConstPtr<u8>, optlen: socklen_t) -> KResult<()> {
     if (optlen as usize) < XT_COUNTERS_INFO_SIZE {
         return Err(KError::InvalidInput);
     }
@@ -117,17 +125,27 @@ fn add_zero_counters(optval: UserConstPtr<u8>, optlen: socklen_t) -> KResult<()>
         optval.as_ptr().wrapping_add(XT_COUNTERS_INFO_SIZE),
         count * XT_COUNTER_SIZE,
     )?;
-    if count != knet::legacy_ipv4_filter_table().num_entries() as usize {
-        return Err(KError::InvalidInput);
-    }
-    if counters.iter().any(|&byte| byte != 0) {
-        return Err(KError::from(LinuxError::EOPNOTSUPP));
-    }
-    Ok(())
+    let counters = counters
+        .chunks_exact(XT_COUNTER_SIZE)
+        .map(|record| knet::LegacyCounter {
+            packets: u64::from_ne_bytes(record[..8].try_into().unwrap()),
+            bytes: u64::from_ne_bytes(record[8..].try_into().unwrap()),
+        })
+        .collect::<alloc::vec::Vec<_>>();
+    knet::add_legacy_ipv4_filter_counters(&counters).map_err(|error| match error {
+        knet::LegacyReplaceError::CounterMismatch => KError::InvalidInput,
+        knet::LegacyReplaceError::InvalidInput => KError::InvalidInput,
+    })
 }
 
 pub(super) const fn is_get_option(optname: u32) -> bool {
-    matches!(optname, IPT_SO_GET_INFO | IPT_SO_GET_ENTRIES)
+    matches!(
+        optname,
+        IPT_SO_GET_INFO
+            | IPT_SO_GET_ENTRIES
+            | IPT_SO_GET_REVISION_MATCH
+            | IPT_SO_GET_REVISION_TARGET
+    )
 }
 
 pub(super) fn get(optname: u32, optval: UserPtr<u8>, optlen: socklen_t) -> KResult<()> {
@@ -138,8 +156,40 @@ pub(super) fn get(optname: u32, optval: UserPtr<u8>, optlen: socklen_t) -> KResu
     match optname {
         IPT_SO_GET_INFO => get_info(optval, optlen),
         IPT_SO_GET_ENTRIES => get_entries(optval, optlen),
+        IPT_SO_GET_REVISION_MATCH | IPT_SO_GET_REVISION_TARGET => {
+            get_revision(optname, optval, optlen)
+        }
         _ => Err(KError::from(LinuxError::ENOPROTOOPT)),
     }
+}
+
+fn get_revision(optname: u32, optval: UserPtr<u8>, optlen: socklen_t) -> KResult<()> {
+    if optlen as usize != XT_GET_REVISION_SIZE {
+        return Err(KError::InvalidInput);
+    }
+    let mut request = osvm::load_vec::<u8>(optval.as_ptr(), XT_GET_REVISION_SIZE)?;
+    request[XT_EXTENSION_MAXNAMELEN - 1] = 0;
+    let end = request[..XT_EXTENSION_MAXNAMELEN]
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap();
+    let name = &request[..end];
+    supported_revision(optname, name, request[XT_EXTENSION_MAXNAMELEN])
+}
+
+fn supported_revision(optname: u32, name: &[u8], revision: u8) -> KResult<()> {
+    let is_supported = if optname == IPT_SO_GET_REVISION_MATCH {
+        name == b"tcp" || name == b"udp" || name == b"icmp"
+    } else {
+        name.is_empty() || name == b"ERROR"
+    };
+    if !is_supported {
+        return Err(KError::from(LinuxError::ENOENT));
+    }
+    if revision != 0 {
+        return Err(KError::from(LinuxError::EPROTONOSUPPORT));
+    }
+    Ok(())
 }
 
 fn get_info(optval: UserPtr<u8>, optlen: socklen_t) -> KResult<()> {
@@ -246,6 +296,34 @@ mod tests {
         );
         assert_eq!(is_set_option(IPT_SO_SET_REPLACE), true);
         assert_eq!(is_set_option(IPT_SO_SET_ADD_COUNTERS), true);
+    }
+
+    #[def_test]
+    fn revision_query_reports_only_supported_revision_zero_extensions() {
+        assert_eq!(
+            supported_revision(IPT_SO_GET_REVISION_MATCH, b"tcp", 0),
+            Ok(())
+        );
+        assert_eq!(
+            supported_revision(IPT_SO_GET_REVISION_MATCH, b"udp", 0),
+            Ok(())
+        );
+        assert_eq!(
+            supported_revision(IPT_SO_GET_REVISION_MATCH, b"icmp", 0),
+            Ok(())
+        );
+        assert_eq!(
+            supported_revision(IPT_SO_GET_REVISION_TARGET, b"", 0),
+            Ok(())
+        );
+        assert_eq!(
+            supported_revision(IPT_SO_GET_REVISION_MATCH, b"tcp", 1),
+            Err(KError::from(LinuxError::EPROTONOSUPPORT))
+        );
+        assert_eq!(
+            supported_revision(IPT_SO_GET_REVISION_MATCH, b"conntrack", 0),
+            Err(KError::from(LinuxError::ENOENT))
+        );
     }
 
     #[def_test]

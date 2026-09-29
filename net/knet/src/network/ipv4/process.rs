@@ -66,7 +66,9 @@ pub(crate) enum Ipv4FragmentError {
 pub(crate) enum Icmpv4Error {
     ProtocolUnreachable,
     PortUnreachable,
+    FragmentationNeeded { mtu: u16 },
     FragmentReassemblyTimeout,
+    TimeToLiveExceeded,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -153,6 +155,10 @@ impl Ipv4Header {
 
     pub(crate) fn protocol(self) -> u8 {
         self.protocol
+    }
+
+    pub(crate) fn ttl(self) -> u8 {
+        self.ttl
     }
 
     pub(crate) fn header_len(self) -> usize {
@@ -255,6 +261,22 @@ pub(crate) fn build_icmpv4_error_packet(
     offending_header: Ipv4Header,
     offending_packet: &[u8],
 ) -> Option<Vec<u8>> {
+    build_icmpv4_error_packet_from_source(
+        error,
+        packet_type,
+        offending_header,
+        offending_packet,
+        offending_header.dst_addr(),
+    )
+}
+
+pub(crate) fn build_icmpv4_error_packet_from_source(
+    error: Icmpv4Error,
+    packet_type: PacketType,
+    offending_header: Ipv4Header,
+    offending_packet: &[u8],
+    source: Ipv4Address,
+) -> Option<Vec<u8>> {
     if !can_send_icmpv4_error(packet_type, offending_header, offending_packet) {
         return None;
     }
@@ -268,7 +290,7 @@ pub(crate) fn build_icmpv4_error_packet(
 
     write_ipv4_header(
         &mut packet[..IPV4_MIN_HEADER_LEN],
-        offending_header.dst_addr,
+        source,
         offending_header.src_addr,
         PROTOCOL_ICMP,
         IPV4_DEFAULT_TTL,
@@ -284,8 +306,16 @@ pub(crate) fn build_icmpv4_error_packet(
         Icmpv4Error::PortUnreachable => {
             Icmpv4Type::DestinationUnreachable(DestUnreachableHeader::Port)
         }
+        Icmpv4Error::FragmentationNeeded { mtu } => {
+            Icmpv4Type::DestinationUnreachable(DestUnreachableHeader::FragmentationNeeded {
+                next_hop_mtu: mtu,
+            })
+        }
         Icmpv4Error::FragmentReassemblyTimeout => {
             Icmpv4Type::TimeExceeded(TimeExceededCode::FragmentReassemblyTimeExceeded)
+        }
+        Icmpv4Error::TimeToLiveExceeded => {
+            Icmpv4Type::TimeExceeded(TimeExceededCode::TtlExceededInTransit)
         }
     };
     let icmp_header = Icmpv4Header::with_checksum(icmp_type, quoted_packet);
@@ -338,10 +368,6 @@ pub(crate) fn fragment_output_packet(
     if header.dont_fragment() {
         return Err(Ipv4FragmentError::DontFragment);
     }
-    if header.is_fragmented() {
-        return Err(Ipv4FragmentError::Malformed);
-    }
-
     // The caller supplies the route-selected path MTU and the IPv4
     // identification value. RFC 791 stores fragment offsets in 8-byte units,
     // so every non-final fragment must carry a payload length aligned to that
@@ -366,7 +392,8 @@ pub(crate) fn fragment_output_packet(
         } else {
             aligned_payload_len
         };
-        let more_fragments = offset + fragment_payload_len < payload.len();
+        let more_fragments =
+            offset + fragment_payload_len < payload.len() || header.more_fragments();
         fragments.push(build_ipv4_fragment(
             packet,
             &header,
@@ -374,7 +401,11 @@ pub(crate) fn fragment_output_packet(
             offset,
             fragment_payload_len,
             more_fragments,
-            identification,
+            if header.is_fragmented() {
+                header.identification()
+            } else {
+                identification
+            },
         )?);
         offset += fragment_payload_len;
     }
@@ -493,7 +524,7 @@ fn build_ipv4_fragment(
         .checked_add(fragment_payload_len)
         .and_then(|len| u16::try_from(len).ok())
         .ok_or(Ipv4FragmentError::Malformed)?;
-    let offset_units = offset / IPV4_FRAGMENT_OFFSET_UNIT;
+    let offset_units = (header.fragment_offset() + offset) / IPV4_FRAGMENT_OFFSET_UNIT;
     let fragment_offset =
         IpFragOffset::try_new(offset_units as u16).map_err(|_| Ipv4FragmentError::Malformed)?;
 
@@ -649,6 +680,23 @@ mod tests {
             reassembled.extend_from_slice(payload(fragment, &header).unwrap());
         }
         assert_eq!(reassembled, original_payload);
+    }
+
+    #[def_test]
+    fn test_forwarding_subfragment_preserves_id_and_original_offset() {
+        let packet = ipv4_packet(PROTOCOL_UDP, &[0; 40]);
+        let original = fragment_output_packet(&packet, IPV4_MIN_HEADER_LEN + 16, 0x1234).unwrap();
+        let second = &original[1];
+        let pieces = fragment_output_packet(second, IPV4_MIN_HEADER_LEN + 8, 0x5678).unwrap();
+        assert_eq!(pieces.len(), 2);
+        let first = Ipv4Header::parse_input(&pieces[0]).unwrap();
+        let last = Ipv4Header::parse_input(&pieces[1]).unwrap();
+        assert_eq!(first.identification(), 0x1234);
+        assert_eq!(last.identification(), 0x1234);
+        assert_eq!(first.fragment_offset(), 16);
+        assert_eq!(last.fragment_offset(), 24);
+        assert!(first.more_fragments());
+        assert!(last.more_fragments());
     }
 
     #[def_test]
