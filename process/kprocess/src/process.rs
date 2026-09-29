@@ -13,8 +13,8 @@ use core::{fmt, sync::atomic::AtomicU32};
 
 use exit::{AtomicProcessExitState, ProcessExitState};
 pub use exit::{
-    ProcessExitPublication, WaitChildKind, WaitChildScan, WaitChildSelector, WaitReapMode,
-    WaitedChild,
+    ProcessExitPublication, WaitChildKind, WaitChildScan, WaitChildSelector, WaitEvents,
+    WaitReapMode, WaitedChild,
 };
 use kidentity::PidHandle;
 use ksignal::Signo;

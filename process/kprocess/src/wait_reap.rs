@@ -5,7 +5,7 @@
 use alloc::sync::Arc;
 
 pub use crate::process::{
-    WaitChildKind, WaitChildScan, WaitChildSelector, WaitReapMode, WaitedChild,
+    WaitChildKind, WaitChildScan, WaitChildSelector, WaitEvents, WaitReapMode, WaitedChild,
 };
 use crate::{Process, lookup};
 
@@ -68,8 +68,9 @@ pub fn scan_waitable_child(
     selector: WaitChildSelector,
     kind: WaitChildKind,
     mode: WaitReapMode,
+    events: WaitEvents,
 ) -> WaitChildScan {
-    let scan = parent.scan_waitable_child(selector, kind, mode);
+    let scan = parent.scan_waitable_child(selector, kind, mode, events);
     if let WaitChildScan::Ready(waited) = &scan
         && waited.was_consumed()
     {

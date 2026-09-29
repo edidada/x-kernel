@@ -127,16 +127,31 @@ enum WaitScanResult {
     NoMatchingChild,
 }
 
+/// Derives the child-event set a wait request is interested in.
+///
+/// `wait4`/`waitpid` always report exits even though they do not carry the
+/// `WEXITED` bit; `waitid` selects events explicitly, so a request that only
+/// names `WSTOPPED`/`WCONTINUED` must never report or reap an exit.
+fn wait_events(options: WaitOptions, always_report_exit: bool) -> wait_reap::WaitEvents {
+    wait_reap::WaitEvents {
+        exited: always_report_exit || options.contains(WaitOptions::WEXITED),
+        stopped: options.contains(WaitOptions::WUNTRACED),
+        continued: options.contains(WaitOptions::WCONTINUED),
+    }
+}
+
 fn scan_waitable_child(
     proc: &Arc<Process>,
     selector: WaitPid,
     options: WaitOptions,
+    events: wait_reap::WaitEvents,
 ) -> KResult<WaitScanResult> {
     match wait_reap::scan_waitable_child(
         proc,
         selector.to_selector(),
         wait_child_kind(options),
         wait_reap_mode(options),
+        events,
     ) {
         wait_reap::WaitChildScan::Ready(waited) => Ok(WaitScanResult::Ready(waited)),
         wait_reap::WaitChildScan::NoMatchingChild => Ok(WaitScanResult::NoMatchingChild),
@@ -191,11 +206,12 @@ fn wait_on_matching_children_with(
     proc: &Arc<Process>,
     selector: WaitPid,
     options: WaitOptions,
+    events: wait_reap::WaitEvents,
     on_ready: impl Fn(&WaitedChild) -> KResult<()>,
 ) -> KResult<isize> {
     let current = current();
 
-    let check_children = || match scan_waitable_child(proc, selector, options)? {
+    let check_children = || match scan_waitable_child(proc, selector, options, events)? {
         WaitScanResult::Ready(waited) => {
             on_ready(&waited)?;
             Ok(Some(waited.pid() as _))
@@ -251,12 +267,18 @@ fn wait_on_matching_children(
     exit_code: *mut i32,
     options: WaitOptions,
 ) -> KResult<isize> {
-    wait_on_matching_children_with(proc, selector, options, |waited| {
-        if let Some(exit_code) = exit_code.check_non_null() {
-            exit_code.write_vm(waited.exit_code())?;
-        }
-        Ok(())
-    })
+    wait_on_matching_children_with(
+        proc,
+        selector,
+        options,
+        wait_events(options, true),
+        |waited| {
+            if let Some(exit_code) = exit_code.check_non_null() {
+                exit_code.write_vm(waited.exit_code())?;
+            }
+            Ok(())
+        },
+    )
 }
 
 /// `waitid(2)`: wait for a child selected by `idtype`/`id` and report its
@@ -264,12 +286,13 @@ fn wait_on_matching_children(
 ///
 /// Supports the full `idtype_t` set (`P_ALL`, `P_PID`, `P_PGID`, `P_PIDFD`).
 /// `P_PIDFD` resolves `id` as a pidfd file descriptor and waits on its target
-/// process. `WNOWAIT`/`WNOHANG`/`WEXITED` are honored by the shared wait
-/// machinery; `WSTOPPED`/`WCONTINUED` are accepted for option validation but
-/// stop/continue reports are not produced yet, so the wait only completes on
-/// exit. The optional `rusage` argument is accepted but not populated (runc's
-/// `isWaitable` probe passes `NULL`). On success returns 0 with the child
-/// status in `siginfo`, matching Linux.
+/// process. `WNOWAIT`/`WNOHANG` are honored by the shared wait machinery, and
+/// the report is filtered by the requested event set: a request that names only
+/// `WSTOPPED`/`WCONTINUED` never reports or reaps an exited child. Stop/continue
+/// reports are not produced yet, so such a request only completes on an event
+/// this kernel can observe. The optional `rusage` argument is accepted but not
+/// populated (runc's `isWaitable` probe passes `NULL`). On success returns 0
+/// with the child status in `siginfo`, matching Linux.
 pub fn sys_waitid(
     idtype: u32,
     id: u32,
@@ -321,25 +344,31 @@ pub fn sys_waitid(
 
     let current_thread = kprocess::current_user_thread();
     let proc = current_thread.process();
-    wait_on_matching_children_with(proc, selector, options, |waited| {
-        // Linux reports the child-exit payload via a SIGCHLD-style `siginfo_t`.
-        let cred = waited
-            .process()
-            .credentials_snapshot()
-            .unwrap_or_else(|_| kcred::initial_cred());
-        let (utime, stime) = waited.total_cpu_time();
-        let child = ksignal::ChildExitInfo::from_wait_status(
-            waited.pid(),
-            cred.ruid(),
-            waited.exit_code(),
-            utime,
-            stime,
-        );
-        let info =
-            ksignal::ChildExitSignalInfo::new(ksignal::Signo::SIGCHLD, child).into_signal_info();
-        siginfo.write_vm(info.0)?;
-        Ok(())
-    })
+    wait_on_matching_children_with(
+        proc,
+        selector,
+        options,
+        wait_events(options, false),
+        |waited| {
+            // Linux reports the child-exit payload via a SIGCHLD-style `siginfo_t`.
+            let cred = waited
+                .process()
+                .credentials_snapshot()
+                .unwrap_or_else(|_| kcred::initial_cred());
+            let (utime, stime) = waited.total_cpu_time();
+            let child = ksignal::ChildExitInfo::from_wait_status(
+                waited.pid(),
+                cred.ruid(),
+                waited.exit_code(),
+                utime,
+                stime,
+            );
+            let info = ksignal::ChildExitSignalInfo::new(ksignal::Signo::SIGCHLD, child)
+                .into_signal_info();
+            siginfo.write_vm(info.0)?;
+            Ok(())
+        },
+    )
     .map(|_pid| 0)
 }
 

@@ -117,6 +117,32 @@ pub enum WaitReapMode {
     Consume,
 }
 
+/// Which child status events a wait request is interested in.
+///
+/// The scan reports (and, for a consuming wait, removes) only events selected
+/// here. A request that asks only for `stopped`/`continued` therefore never
+/// reports or reaps an exited child, matching `waitid(2)`'s event-set contract.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WaitEvents {
+    /// Child termination (`WEXITED`).
+    pub exited: bool,
+    /// Child stopped by a signal (`WSTOPPED`).
+    pub stopped: bool,
+    /// Stopped child continued (`WCONTINUED`).
+    pub continued: bool,
+}
+
+impl WaitEvents {
+    /// Events requested by `wait4`/`waitpid`, which always report exits.
+    pub const fn always_exit() -> Self {
+        Self {
+            exited: true,
+            stopped: false,
+            continued: false,
+        }
+    }
+}
+
 /// Which children a wait operation may observe.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WaitChildSelector {
@@ -474,6 +500,7 @@ impl Process {
         selector: WaitChildSelector,
         kind: WaitChildKind,
         mode: WaitReapMode,
+        events: WaitEvents,
     ) -> WaitChildScan {
         let domain = process_domain::write_lock();
         let (matched, ready_child) = {
@@ -489,7 +516,9 @@ impl Process {
                     continue;
                 }
                 matched = true;
-                if child.exit_state_locked(&domain) == ProcessExitState::Zombie {
+                // Only an exit is a waitable event today; a request that does
+                // not select `WEXITED` must not consume a zombie.
+                if events.exited && child.exit_state_locked(&domain) == ProcessExitState::Zombie {
                     ready_child = Some((slot.pid, child.clone()));
                     break;
                 }
