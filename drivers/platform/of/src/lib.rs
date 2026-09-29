@@ -536,6 +536,14 @@ pub fn generic_pci_non_prefetchable_mem_range() -> Option<PciRangeInfo> {
     preferred.or(fallback)
 }
 
+/// Upper bound, in 32-bit cells, on an `interrupt-map` entry's child and
+/// parent specifiers.
+///
+/// Mirrors the Linux `MAX_PHANDLE_ARGS` (== `NR_FWNODE_REFERENCE_ARGS`), the
+/// kernel-wide cap on a phandle argument list. Oversized specifiers are
+/// rejected loudly instead of silently returning "no route".
+pub const MAX_PHANDLE_ARGS: usize = 16;
+
 /// Resolves a legacy INTx route through the bridge's `interrupt-map` for a
 /// (bus, device, function, pin) address.
 pub fn generic_pci_legacy_interrupt(
@@ -552,7 +560,7 @@ pub fn generic_pci_legacy_interrupt(
         return None;
     }
 
-    let mut key = [0u32; 4];
+    let mut key = [0u32; MAX_PHANDLE_ARGS];
     key[0] = ((bus as u32) << 16) | ((device as u32) << 11) | ((function as u32) << 8);
     key[1] = 0;
     key[2] = 0;
@@ -562,7 +570,7 @@ pub fn generic_pci_legacy_interrupt(
     if mask_bytes.len() < key_cells * 4 {
         return None;
     }
-    let mut mask = [0u32; 4];
+    let mut mask = [0u32; MAX_PHANDLE_ARGS];
     for (idx, word) in mask_bytes.chunks_exact(4).take(key_cells).enumerate() {
         mask[idx] = u32::from_be_bytes(word.try_into().ok()?);
     }
@@ -570,7 +578,7 @@ pub fn generic_pci_legacy_interrupt(
     let map = node.property("interrupt-map")?.value;
     let mut offset = 0usize;
     while offset + (key_cells + 1) * 4 <= map.len() {
-        let mut child = [0u32; 4];
+        let mut child = [0u32; MAX_PHANDLE_ARGS];
         for (idx, slot) in child.iter_mut().enumerate().take(key_cells) {
             let start = offset + idx * 4;
             *slot = u32::from_be_bytes(map[start..start + 4].try_into().ok()?);
@@ -589,8 +597,16 @@ pub fn generic_pci_legacy_interrupt(
             return None;
         }
 
-        let mut parent = [0u32; 4];
-        if parent_total_cells > parent.len() {
+        let mut parent = [0u32; MAX_PHANDLE_ARGS];
+        if parent_total_cells > MAX_PHANDLE_ARGS {
+            // Loose in practice (a GIC needs at most 2 + 3 cells), but if a DT
+            // ever exceeds the cap, say so instead of pretending there is no
+            // route -- a silent "not found" here previously caused PCI INTx to
+            // be registered on a guessed, wrong line.
+            log::warn!(
+                "of: interrupt-map parent specifier needs {parent_total_cells} cells \
+(> MAX_PHANDLE_ARGS {MAX_PHANDLE_ARGS})"
+            );
             return None;
         }
         for (idx, slot) in parent.iter_mut().enumerate().take(parent_total_cells) {

@@ -314,9 +314,11 @@ fn legacy_irq_for_bdf(
         }
     }
 
-    // Static fallback (no firmware routing): legacy PCI INTx ranges used by
-    // each QEMU virt-style port. LoongArch PCH PIC starts at 0x10, RISC-V PLIC
-    // PCI IRQs at 0x20, aarch64 test DT interrupt-map covers 0x20..0x23.
+    // Static fallback when neither DT nor ACPI describes an INTx route: a
+    // hard-coded INTx->line mapping for the known QEMU virt-style layouts
+    // below. It is not derived from firmware, so it is only valid on those
+    // platforms; report it so a mis-assigned line is not silent.
+    log::warn!("virtio-pci: no firmware INTx route for {bdf:?}; using a hard-coded fallback line");
     cfg_select! {
         target_arch = "loongarch64" => {
             // LoongArch uses a 1:1 hwirq→virq mapping for these lines.
