@@ -54,9 +54,9 @@ pub fn activate<B: driver_core::Bus>(
     dev: &mut DeviceCtx<'_, B>,
     transport: impl virtio::Transport + 'static,
 ) -> Result<(), ProbeError> {
-    let device =
-        VirtIoRngDev::<driver_runtime::hal::Hal, _>::try_new(transport, driver_runtime::time_ops())
-            .map_err(crate::common::map_driver_error)?;
+    let time = dev.time().map_err(|err| ProbeError::Fatal(err))?;
+    let device = VirtIoRngDev::<driver_runtime::hal::Hal, _>::try_new(transport, time)
+        .map_err(crate::common::map_driver_error)?;
     let location = crate::common::legacy_location(dev.descriptor().location);
     publish_char(
         ClassParent::detached(dev.id(), "virtio-rng", location),
@@ -69,17 +69,17 @@ pub fn activate<B: driver_core::Bus>(
 /// virtio-mmio activation: owns the class publication; close() unpublishes
 /// so nothing dereferences the transport after the mapping drops.
 #[cfg(feature = "mmio")]
-pub fn activate_mmio<T: virtio::Transport + 'static>(
-    owner: u64,
-    location: devnode::DeviceLocation,
-    transport: T,
+pub fn activate_mmio(
+    dev: &mut driver_core::DeviceCtx<'_, driver_core::platform::PlatformBus>,
+    transport: impl virtio::Transport + 'static,
     builder: crate::mmio::ActivationBuilder,
 ) -> Result<crate::mmio::MmioData, ProbeError> {
-    let device =
-        VirtIoRngDev::<driver_runtime::hal::Hal, _>::try_new(transport, driver_runtime::time_ops())
-            .map_err(crate::common::map_driver_error)?;
+    let time = dev.time().map_err(driver_core::ProbeError::Fatal)?;
+    let device = VirtIoRngDev::<driver_runtime::hal::Hal, _>::try_new(transport, time)
+        .map_err(crate::common::map_driver_error)?;
+    let location = crate::common::legacy_location(dev.descriptor().location);
     let handle = publish_char(
-        ClassParent::detached(owner, "virtio-rng", location),
+        ClassParent::detached(dev.id(), "virtio-rng", location),
         Box::new(device),
     )
     .map_err(crate::common::map_driver_error)?;

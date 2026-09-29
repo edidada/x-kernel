@@ -250,6 +250,10 @@ impl DeviceServices for XKernelRuntime {
     fn clk_get(&self, _device: u64, spec: driver_core::ClkSpec) -> Result<ClkHandle, ServiceError> {
         self.clks.get(spec)
     }
+
+    fn time(&self) -> Result<&'static dyn device_res::TimeOp, RuntimeError> {
+        Ok(crate::time_ops())
+    }
 }
 
 impl XKernelRuntime {

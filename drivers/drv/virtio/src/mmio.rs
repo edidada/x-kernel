@@ -169,12 +169,7 @@ fn dispatch_char<T: virtio::Transport + 'static>(
     #[cfg(feature = "rng")]
     {
         let _ = dev;
-        crate::rng::activate_mmio(
-            dev.id(),
-            crate::common::legacy_location(dev.descriptor().location),
-            transport,
-            builder,
-        )
+        crate::rng::activate_mmio(dev, transport, builder)
     }
     #[cfg(not(feature = "rng"))]
     {

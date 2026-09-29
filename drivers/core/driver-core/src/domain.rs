@@ -223,10 +223,15 @@ impl DeviceServices for NoServices {
     fn clk_get(&self, _: u64, _: ClkSpec) -> Result<crate::device::ClkHandle, ServiceError> {
         Err(ServiceError::Fatal(RuntimeError::Unsupported))
     }
+
+    fn time(&self) -> Result<&'static dyn device_res::TimeOp, RuntimeError> {
+        Err(RuntimeError::Unsupported)
+    }
 }
 
 struct DomainInner {
     next_device_id: u64,
+    services_installed: bool,
     drivers: Vec<Arc<dyn AnyDriver>>,
     devices: BTreeMap<u64, DeviceEntry>,
     pending: Vec<u64>,
@@ -250,6 +255,7 @@ impl DeviceDomain {
                 pending: Vec::new(),
                 deferred: Vec::new(),
                 services: Arc::new(NoServices),
+                services_installed: false,
                 remove_notifier: None,
             }),
         }
@@ -258,7 +264,9 @@ impl DeviceDomain {
     /// Install the service bundle used by probes (MMIO/IRQ/DMA/clk). Must be
     /// called before probing; the clock registry wakes this domain.
     pub fn set_services(&self, services: Arc<dyn DeviceServices>) {
-        self.inner.lock().services = services;
+        let mut inner = self.inner.lock();
+        inner.services = services;
+        inner.services_installed = true;
     }
 
     /// Install a callback invoked (outside the domain lock) after a device is
@@ -312,6 +320,16 @@ impl DeviceDomain {
     pub fn add_device(&self, desc: DeviceDescriptor) -> u64 {
         let id = {
             let mut inner = self.inner.lock();
+            if !inner.services_installed {
+                // NoServices rejects every service call as Fatal-Unsupported
+                // and failed probes are never retried — a device added
+                // before set_services is permanently lost. Make the
+                // ordering violation loud instead of silent.
+                log::error!(
+                    "driver-core: device added before services were installed; probes will fail \
+                     permanently — call set_services first"
+                );
+            }
             let id = inner.next_device_id;
             inner.next_device_id += 1;
             inner.devices.insert(
@@ -786,6 +804,10 @@ mod tests {
                 Some(ops) => Ok(ClkHandle::new(ops, None)),
                 None => Err(ServiceError::Deferred(DepSource::clk(spec.provider))),
             }
+        }
+
+        fn time(&self) -> Result<&'static dyn device_res::TimeOp, RuntimeError> {
+            Err(RuntimeError::Unsupported)
         }
     }
 
