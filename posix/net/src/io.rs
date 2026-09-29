@@ -552,7 +552,8 @@ pub fn sys_recvmmsg(
             break;
         }
         msg.msg_hdr.msg_flags = 0;
-        match recv_impl(
+        let mut msg_namelen = msg.msg_hdr.msg_namelen as socklen_t;
+        let result = recv_impl(
             fd,
             IoVectorBuf::from_iovecs(IoVec::load_from_user(
                 posix_types::UserConstPtr::from(msg.msg_hdr.msg_iov as usize),
@@ -561,6 +562,8 @@ pub fn sys_recvmmsg(
             .into_io(),
             flags,
             RecvOutput {
+                addr: UserPtr::from(msg.msg_hdr.msg_name as usize),
+                addrlen: RecvAddrLen::Value(&mut msg_namelen),
                 cmsg_builder: (!msg.msg_hdr.msg_control.is_null()).then(|| {
                     CMsgBuilder::new(
                         UserPtr::from(msg.msg_hdr.msg_control as *mut cmsghdr),
@@ -568,12 +571,11 @@ pub fn sys_recvmmsg(
                     )
                 }),
                 msg_flags: Some(&mut msg.msg_hdr.msg_flags),
-                ..RecvOutput::new(
-                    UserPtr::from(msg.msg_hdr.msg_name as usize),
-                    UserPtr::from(&mut msg.msg_hdr.msg_namelen as *mut _ as *mut socklen_t),
-                )
+                out_flags: None,
             },
-        ) {
+        );
+        msg.msg_hdr.msg_namelen = msg_namelen as _;
+        match result {
             Ok(n) => {
                 msg.msg_len = n as u32;
                 received += 1;
