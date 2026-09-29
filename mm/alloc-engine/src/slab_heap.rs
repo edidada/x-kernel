@@ -191,16 +191,15 @@ impl SlabHeap {
 
     /// Adds more memory to the heap.
     ///
+    /// # Errors
+    ///
+    /// Propagates region-table exhaustion and invalid or overlapping input from
+    /// the internal buddy allocator.
+    ///
     /// # Safety
     ///
     /// The caller must ensure the memory range is valid and does not
     /// overlap with existing managed memory.
-    ///
-    /// # Errors
-    ///
-    /// Returns the backing buddy allocator's registration error when the
-    /// range is misaligned, too small, overflows, overlaps managed memory, or
-    /// exceeds the region table.
     pub unsafe fn add_memory(&mut self, start: usize, size: usize) -> AllocResult {
         self.buddy.add_region(start, size)
     }

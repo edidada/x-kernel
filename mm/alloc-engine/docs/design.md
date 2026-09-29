@@ -51,6 +51,9 @@ is bounded by `total_pages` alone.
   check and uses `split_towards` to return each unselected half exactly once.
 - Requests whose alignment exceeds their rounded allocation size retain the
   existing list search. Region selection is bounded by `MAX_REGIONS`.
+- `SlabHeap::add_memory` propagates the internal buddy's region-registration
+  result instead of panicking, so `SlabByteAllocator` can report a full region
+  table to its owner.
 
 ## Concurrency and lifecycle
 
@@ -77,6 +80,6 @@ Unit tests cover sequential, reverse and fixed-random frees, preservation of
 live page contents, recovery of maximal coalesced blocks, inline and reserved
 bitmaps, the reserved tail being neither allocatable nor re-registrable, that the
 reservation costs no buddy order, overlapping registration, non-power-of-two
-region edges, alignment,
+region edges, alignment, slab region-table exhaustion propagation,
 fixed-address splitting and reset. Timing and scaling measurements belong in
 external benchmarks, not timing assertions in unit tests.

@@ -116,4 +116,30 @@ pub(crate) mod tests_slab {
         alloc.init_region(base, size);
         assert_eq!(alloc.total_bytes(), alloc.available_bytes());
     }
+
+    #[def_test]
+    fn test_slab_add_region_propagates_region_exhaustion() {
+        const REGION_SIZE: usize = 4096;
+
+        #[derive(Clone)]
+        #[repr(align(4096))]
+        struct PageRegion([u8; REGION_SIZE]);
+
+        let mut regions = alloc::vec![alloc::boxed::Box::new(PageRegion([0; REGION_SIZE])); 64];
+        let mut alloc = SlabByteAllocator::new();
+        let first = regions[0].0.as_mut_ptr() as usize;
+        alloc.init_region(first, REGION_SIZE);
+
+        for region in regions.iter_mut().skip(1) {
+            alloc
+                .add_region(region.0.as_mut_ptr() as usize, REGION_SIZE)
+                .expect("the first 64 regions fit the buddy allocator");
+        }
+
+        let mut extra = alloc::boxed::Box::new(PageRegion([0; REGION_SIZE]));
+        assert_eq!(
+            alloc.add_region(extra.0.as_mut_ptr() as usize, REGION_SIZE),
+            Err(crate::AllocError::NoMemory)
+        );
+    }
 }

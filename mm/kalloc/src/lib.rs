@@ -509,7 +509,17 @@ impl GlobalAllocator {
                 heap_addr + req_size
             );
             if heap_ready {
-                balloc.add_region(heap_addr, req_size)?;
+                if let Err(error) = balloc.add_region(heap_addr, req_size) {
+                    // Return the pages acquired for a region the byte allocator
+                    // refused, instead of stranding them when the region table is
+                    // full. `alloc_pages` skips RustHeap usage accounting, and the
+                    // PCP fast path must not be reentered while the byte allocator
+                    // is locked.
+                    self.palloc
+                        .lock()
+                        .deallocate_pages(heap_addr, req_size / PAGE_SIZE_4K);
+                    return Err(error);
+                }
             } else {
                 balloc.init_region(heap_addr, req_size);
                 self.heap_ready.store(true, Ordering::Release);
