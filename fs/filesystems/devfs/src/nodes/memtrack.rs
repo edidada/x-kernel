@@ -11,7 +11,10 @@ use core::{
 
 use backtrace::Backtrace;
 use kexec::clear_elf_cache;
-use kvfs::{DeviceFileOps, DirMapping, NodeFlags, SimpleFs, VfsError, VfsFile, VfsResult};
+use kvfs::{
+    DeviceFileOps, DirMapping, NodeFlags, SimpleFs, VfsError, VfsFile, VfsFileBuilder, VfsInode,
+    VfsResult,
+};
 
 use crate::{DeviceFile, add_device_entry};
 
@@ -137,6 +140,14 @@ fn run_memory_analysis() {
 pub(crate) struct MemTrack;
 
 impl DeviceFileOps for MemTrack {
+    fn open(&self, _inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
+        // A command-driven control device: every write must be matched against
+        // the command table from offset 0, so declare the node a non-seekable
+        // stream and keep kvfs from advancing `f_pos` between writes.
+        file.stream_open();
+        Ok(())
+    }
+
     fn supports_read(&self) -> bool {
         true
     }

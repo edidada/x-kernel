@@ -20,7 +20,8 @@ const MEMBARRIER_CMD_QUERY: i32 = 0;
 const SUPPORTED_COMMANDS: i32 = 0;
 
 pub fn sys_membarrier(cmd: i32, flags: u32, _cpu_id: i32) -> KResult<isize> {
-    // No membarrier flag exists yet; Linux rejects any non-zero flags.
+    // No flag-taking membarrier command is supported here, so reject any
+    // non-zero flags.
     if flags != 0 {
         return Err(KError::InvalidInput);
     }
