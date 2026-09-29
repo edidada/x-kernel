@@ -876,6 +876,7 @@ mod tests {
             crate::bus::DeviceLocation::FirmwareNode { id: 1 },
             crate::bus::DeviceIdentity::Platform(crate::bus::PlatformIdentity {
                 firmware_id: Some(alloc::string::String::from("test,serial")),
+                compatibles: alloc::vec![alloc::string::String::from("test,serial")],
                 alias: None,
             }),
         )
@@ -966,6 +967,7 @@ mod tests {
         let mut desc = test_descriptor();
         desc.identity = crate::bus::DeviceIdentity::Platform(crate::bus::PlatformIdentity {
             firmware_id: Some(alloc::string::String::from("nobody,matches")),
+            compatibles: alloc::vec![alloc::string::String::from("nobody,matches")],
             alias: None,
         });
         let id = domain.add_device(desc);
@@ -1008,6 +1010,7 @@ mod tests {
         let mut desc = test_descriptor();
         desc.identity = crate::bus::DeviceIdentity::Platform(crate::bus::PlatformIdentity {
             firmware_id: Some(alloc::string::String::from("nobody,matches")),
+            compatibles: alloc::vec![alloc::string::String::from("nobody,matches")],
             alias: None,
         });
         let unclaimed = domain.add_device(desc);
@@ -1075,6 +1078,7 @@ mod tests {
         let mut desc = test_descriptor();
         desc.identity = crate::bus::DeviceIdentity::Platform(crate::bus::PlatformIdentity {
             firmware_id: Some(alloc::string::String::from("nobody,matches")),
+            compatibles: alloc::vec![alloc::string::String::from("nobody,matches")],
             alias: None,
         });
         let id = domain.add_device(desc);

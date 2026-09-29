@@ -10,7 +10,7 @@
 //! tables (`&'static [B::IdEntry]`), the mechanical translation target of
 //! Linux `pci_device_id` / `of_device_id` arrays.
 
-use alloc::{format, string::String};
+use alloc::{format, string::String, vec::Vec};
 
 use crate::resource::ResourceMap;
 
@@ -113,8 +113,14 @@ pub enum DeviceIdentity {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlatformIdentity {
-    /// `compatible` value, e.g. `"arm,pl011"`.
+    /// Primary (first) `compatible` value, e.g. `"arm,pl011"`. This is what
+    /// modalias and diagnostics report.
     pub firmware_id: Option<String>,
+    /// The node's full compatible list (`firmware_id` is its first entry).
+    /// Matching iterates this list — Linux `of_device_id` semantics: a DT
+    /// node `compatible = "vendor,soc-uart", "arm,pl011"` matches a driver
+    /// table entry naming EITHER string.
+    pub compatibles: Vec<String>,
     /// Board-level alias, e.g. `"serial0"`.
     pub alias: Option<String>,
 }
@@ -288,9 +294,50 @@ impl IdMatchEntry for OfMatch {
         let DeviceIdentity::Platform(platform) = &desc.identity else {
             return MatchScore::NoMatch;
         };
-        match &platform.firmware_id {
-            Some(firmware_id) if firmware_id == self.compatible => MatchScore::Exact,
-            _ => MatchScore::NoMatch,
+        // of_device_id semantics: the driver entry matches if it names ANY
+        // of the node's compatible strings (a SoC-specific entry followed by
+        // the generic IP name is the common DT spelling).
+        if platform.compatibles.iter().any(|c| c == self.compatible) {
+            MatchScore::Exact
+        } else {
+            MatchScore::NoMatch
         }
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    //! of_device_id matching semantics: a driver entry matches if it names
+    //! ANY of the node's compatible strings — SoC DT nodes commonly spell
+    //! `compatible = "vendor,soc-uart", "arm,pl011"` and the generic IP
+    //! driver must still claim the device.
+
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+    use crate::bus::{DeviceDescriptor, DeviceIdentity, DeviceLocation};
+
+    fn descriptor_with(compatibles: &[&str]) -> DeviceDescriptor {
+        DeviceDescriptor::new(
+            crate::platform::PlatformBus::ID,
+            DeviceLocation::FirmwareNode { id: 0 },
+            DeviceIdentity::Platform(PlatformIdentity {
+                firmware_id: compatibles.first().map(|c| String::from(*c)),
+                compatibles: compatibles.iter().map(|c| String::from(*c)).collect(),
+                alias: None,
+            }),
+        )
+    }
+
+    #[def_test(serial)]
+    fn of_match_hits_any_compatible_not_just_primary() {
+        let generic_entry = OfMatch::compatible("arm,pl011");
+        // SoC-specific primary, generic IP second: must match on the second.
+        let soc_node = descriptor_with(&["vendor,soc-uart", "arm,pl011"]);
+        assert_eq!(generic_entry.matches(&soc_node), MatchScore::Exact);
+
+        // A node that does not carry the entry's string anywhere: no match.
+        let other_node = descriptor_with(&["vendor,other-uart", "vendor,legacy"]);
+        assert_eq!(generic_entry.matches(&other_node), MatchScore::NoMatch);
     }
 }

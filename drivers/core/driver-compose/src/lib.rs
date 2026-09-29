@@ -160,6 +160,7 @@ fn enumerate_firmware_nodes_direct() {
         };
         let dev = firmware::FirmwareDevice {
             firmware_id,
+            all_compatibles: node.compatibles().collect(),
             source: firmware::FirmwareSource::DeviceTree,
             mmios: {
                 let reg_names = of::string_list(node, "reg-names");
@@ -250,6 +251,13 @@ fn build_descriptor(dev: firmware::FirmwareDevice) {
         DeviceLocation::FirmwareNode { id: node_id },
         DeviceIdentity::Platform(PlatformIdentity {
             firmware_id: Some(alloc::string::String::from(dev.firmware_id)),
+            // The full compatible list: matching iterates it (of_device_id
+            // any-match semantics); modalias reports the primary entry.
+            compatibles: dev
+                .all_compatibles
+                .iter()
+                .map(|c| alloc::string::String::from(*c))
+                .collect(),
             alias: None,
         }),
     )

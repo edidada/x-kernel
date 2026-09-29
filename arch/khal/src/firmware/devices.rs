@@ -60,7 +60,10 @@ pub enum FirmwareSource {
 /// description came from so consumers do not have to hard-code an origin.
 #[derive(Debug, Clone)]
 pub struct FirmwareDevice {
+    /// Primary (first) compatible — what identity/diagnostics report.
     pub firmware_id: &'static str,
+    /// The node's full compatible list, DT order.
+    pub all_compatibles: Vec<&'static str>,
     pub source: FirmwareSource,
     /// Every `reg` entry of the node, in DT order.
     pub mmios: Vec<MmioResource>,
@@ -248,6 +251,7 @@ pub fn for_each_compatible(
 
         visitor(FirmwareDevice {
             firmware_id,
+            all_compatibles: node.compatibles().collect(),
             source: FirmwareSource::DeviceTree,
             mmios,
             irqs,

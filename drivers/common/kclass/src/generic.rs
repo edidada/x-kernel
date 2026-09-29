@@ -478,6 +478,49 @@ mod tests {
     }
 
     #[def_test(serial)]
+    fn same_owner_multiple_publications_all_removable() {
+        // Regression: remove_all_detached used to take only the FIRST
+        // registry hit per class — a device publishing two class devices of
+        // one class leaked the second. The registry drain itself is what
+        // remove_all_detached loops on; pin it here.
+        use crate::generic::ClassRegistry;
+
+        fn loc(id: u32) -> DeviceLocation {
+            DeviceLocation::FirmwareNode { id }
+        }
+
+        let mut registry: ClassRegistry<u32> = ClassRegistry::default();
+        let a = ClassDevice::try_new_with_info(
+            ClassParent::detached(9, "test", loc(0)),
+            1u32,
+            alloc::string::String::from("a"),
+            driver_base::DeviceKind::Char,
+            None,
+        )
+        .unwrap();
+        let b = ClassDevice::try_new_with_info(
+            ClassParent::detached(9, "test", loc(1)),
+            2u32,
+            alloc::string::String::from("b"),
+            driver_base::DeviceKind::Char,
+            None,
+        )
+        .unwrap();
+        registry.publish(a).unwrap();
+        registry.publish(b).unwrap();
+
+        // Drain every publication of owner 9 — the second hit must be
+        // reachable after the first removal (the old single-find bug).
+        let mut drained = 0;
+        while let Some(id) = registry.find_detached(9) {
+            registry.remove(id);
+            drained += 1;
+        }
+        assert_eq!(drained, 2);
+        assert!(registry.find_detached(9).is_none());
+    }
+
+    #[def_test(serial)]
     fn publication_id_is_an_independent_concept() {
         // Publication ids are freshly allocated and need not correlate
         // with owner ids in any way — two parents with the same owner

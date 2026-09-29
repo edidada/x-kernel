@@ -195,6 +195,7 @@ mod tests {
             DeviceLocation::FirmwareNode { id: 1 },
             DeviceIdentity::Platform(PlatformIdentity {
                 firmware_id: Some(alloc::string::String::from("test,serial")),
+                compatibles: alloc::vec![alloc::string::String::from("test,serial")],
                 alias: None,
             }),
         )

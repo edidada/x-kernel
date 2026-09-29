@@ -848,37 +848,37 @@ pub fn remove_all_detached(owner: u64) {
     // both removal entry points (composition-root notifier and activation
     // close) are idempotent with each other.
     #[cfg(feature = "char")]
-    if let Some(id) = char_class_registry().lock().find_detached(owner) {
+    while let Some(id) = char_class_registry().lock().find_detached(owner) {
         class_remove(char_class_registry, id);
         if let Some(console) = char_console_hook() {
             console(id);
         }
     }
     #[cfg(feature = "net")]
-    if let Some(id) = net_class_registry().lock().find_detached(owner) {
+    while let Some(id) = net_class_registry().lock().find_detached(owner) {
         class_remove(net_class_registry, id);
     }
     #[cfg(feature = "input")]
-    if let Some(id) = input_class_registry().lock().find_detached(owner) {
+    while let Some(id) = input_class_registry().lock().find_detached(owner) {
         class_remove(input_class_registry, id);
     }
     #[cfg(feature = "display")]
-    if let Some(id) = display_class_registry().lock().find_detached(owner) {
+    while let Some(id) = display_class_registry().lock().find_detached(owner) {
         class_remove(display_class_registry, id);
     }
     #[cfg(feature = "vsock")]
-    if let Some(id) = vsock_class_registry().lock().find_detached(owner) {
+    while let Some(id) = vsock_class_registry().lock().find_detached(owner) {
         class_remove(vsock_class_registry, id);
     }
     #[cfg(feature = "virtio-9p")]
-    if let Some(id) = virtio_9p_class_registry().lock().find_detached(owner) {
+    while let Some(id) = virtio_9p_class_registry().lock().find_detached(owner) {
         class_remove(virtio_9p_class_registry, id);
     }
     // Block publications carry the gendisk lifecycle in
     // ClassRuntimeMetadata::unpublish_class (del_gendisk); the full
     // class_remove path triggers it.
     #[cfg(feature = "block")]
-    if let Some(id) = block_class_registry().lock().find_detached(owner) {
+    while let Some(id) = block_class_registry().lock().find_detached(owner) {
         class_remove(block_class_registry, id);
     }
 }
