@@ -29,8 +29,8 @@ runtime 不能直接引用它。
 
 - `mapping_pages.rs`：容器、锁内 resident tree/dirty marks 与 dirty reconciliation；
 - `folio.rs`：页分配、数据访问、dirty/writeback 状态和释放；
-- `folio_batch.rs`：有界、有序的 folio 引用集合；
-- `filemap.rs`：lookup、materialize 和 insert-if-absent；
+- `folio_batch.rs`：读取、写回与截断共用的有界引用集合，以及只读访问接口；
+- `filemap.rs`：lookup、连续引用批量收集、materialize 和 insert-if-absent；
 - `readahead.rs`：连续 cached run 查询；
 - `truncate.rs`：尺寸变化时的页移除、尾页清零和 final teardown；
 - `writeback.rs`：dirty candidate、batch helper、开始/完成协议与结果类型；
@@ -66,12 +66,16 @@ writeback 候选，不提供写回许可，也不引入第二份 folio 状态。
 
 ## 算法流程
 
+`FolioBatch` 共用原有的 31 个引用容量；连续收集在一个 state-lock 临界区中进行，
+遇到空洞停止，命中计数可继续覆盖超出容量的窗口尾部。批次只读访问逐 folio 加锁
+并拒绝失效引用，不持索引锁或改变 dirty 状态；窗口、EOF 和装载同步由 owner 管理。
+
 ### Materialize
 
 1. 查询 folio tree。
-2. 命中时复用现有 folio。
-3. 缺失时调用 owner 提供的 materialize closure。
-4. 在同一 index 已被并发插入时保留先到达的 folio。
+2. 命中时在 folio lock 下校验永久失效标记；失效候选重新查询当前 mapping。
+3. 缺失时调用 owner 提供的 materialize closure；owner 必须使 backing read 和发布与 truncate 串行化。
+4. 发布后若候选在锁定前被移除，则重试；factory 可以再次执行，访问 callback 只执行一次。
 
 ### Resize cached folios
 
@@ -178,5 +182,5 @@ dirty 状态。shrink 和 final teardown 会同时删除 resident folio 与对�
 surviving truncated tail 等待写回后清零并重新加入 dirty index；增长时保留尾页，在 folio 锁内清零并标脏，无需等待持数据副本的批量写回。
 
 MappingPages 的 Drop 不等待 I/O：最终所有权排除仍借用容器的写回操作；在任务上下文中
-清 dirty 后，由字段析构释放 entries/marks，外部持有的 folio 也完成清理。
+清 dirty 并标记失效后，由字段析构释放 entries/marks，外部持有的 folio 也完成清理。
 需要等待写回的清理通过显式 `truncate_final()` 完成。
