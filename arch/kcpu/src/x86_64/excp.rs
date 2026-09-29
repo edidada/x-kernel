@@ -24,7 +24,7 @@ pub(super) const IRQ_VECTOR_START: u8 = 0x20;
 pub(super) const IRQ_VECTOR_END: u8 = 0xff;
 
 /// Dispatches a page fault and panics if unhandled.
-fn dispatch_irq_page_fault(tf: &mut ExceptionContext) {
+fn handle_page_fault(tf: &mut ExceptionContext) {
     let access_flags = err_code_to_flags(tf.error_code)
         .unwrap_or_else(|e| panic!("Invalid #PF error code: {:#x}", e));
     let vaddr = va!(unsafe {
@@ -39,7 +39,7 @@ fn dispatch_irq_page_fault(tf: &mut ExceptionContext) {
     }
     core::hint::cold_path();
     panic!(
-        "Undispatch_irqd #PF @ {:#x}, fault_vaddr={:#x}, error_code={:#x} ({:?}):\n{:#x?}\n{}",
+        "Unhandled #PF @ {:#x}, fault_vaddr={:#x}, error_code={:#x} ({:?}):\n{:#x?}\n{}",
         tf.rip,
         vaddr,
         tf.error_code,
@@ -54,7 +54,7 @@ fn dispatch_irq_page_fault(tf: &mut ExceptionContext) {
 fn x86_trap_handler(tf: &mut ExceptionContext) {
     let _tf_guard = crate::ExceptionContextGuard::new(tf);
     match tf.vector as u8 {
-        PAGE_FAULT_VECTOR => dispatch_irq_page_fault(tf),
+        PAGE_FAULT_VECTOR => handle_page_fault(tf),
         BREAKPOINT_VECTOR => debug!("#BP @ {:#x} ", tf.rip),
         GENERAL_PROTECTION_FAULT_VECTOR => {
             panic!(
@@ -70,7 +70,7 @@ fn x86_trap_handler(tf: &mut ExceptionContext) {
         }
         _ => {
             panic!(
-                "Undispatch_irqd exception {} ({}, error_code={:#x}) @ {:#x}:\n{:#x?}\n{}",
+                "Unhandled exception {} ({}, error_code={:#x}) @ {:#x}:\n{:#x?}\n{}",
                 tf.vector,
                 vec_to_str(tf.vector),
                 tf.error_code,
