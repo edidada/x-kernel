@@ -495,9 +495,13 @@ impl<R: TtyRead, W: TtyWrite> LineDiscipline<R, W> {
         } else {
             let vtime = term.special_char(VTIME);
             if vtime > 0 {
-                todo!();
+                // The VTIME inter-byte timer is not modeled yet. Approximate
+                // it as VMIN == 1: block until at least one byte is available
+                // and return whatever is buffered, instead of panicking.
+                1
+            } else {
+                term.special_char(VMIN) as usize
             }
-            term.special_char(VMIN) as usize
         };
 
         if buf.len() < vmin {
