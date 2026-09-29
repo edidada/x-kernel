@@ -24,10 +24,10 @@ use linux_raw_sys::{
         LINUX_REBOOT_CMD_SW_SUSPEND, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
         LINUX_REBOOT_MAGIC2A, LINUX_REBOOT_MAGIC2B, LINUX_REBOOT_MAGIC2C,
     },
-    system::{new_utsname, sysinfo},
+    system::new_utsname,
 };
 use osvm::{VirtPtr, write_vm_mem};
-use posix_types::{UserConstPtr, UserPtr};
+use posix_types::{UserConstPtr, UserPtr, system::k_sysinfo};
 
 // Re-export the architecture-specific syscalls (e.g. `sys_riscv_hwprobe` on
 // riscv64) so dispatch can reach them via `crate::sys::*`. Gated to riscv64
@@ -102,23 +102,8 @@ pub fn sys_uname(name: UserPtr<new_utsname>) -> KResult<isize> {
 }
 
 /// Get general system information such as process count and memory unit
-pub fn sys_sysinfo(info: UserPtr<sysinfo>) -> KResult<isize> {
-    let mut kinfo = sysinfo {
-        uptime: 0,
-        loads: [0; 3],
-        totalram: 0,
-        freeram: 0,
-        sharedram: 0,
-        bufferram: 0,
-        totalswap: 0,
-        freeswap: 0,
-        procs: 0,
-        pad: 0,
-        totalhigh: 0,
-        freehigh: 0,
-        mem_unit: 0,
-        _f: linux_raw_sys::system::__IncompleteArrayField::new(),
-    };
+pub fn sys_sysinfo(info: UserPtr<k_sysinfo>) -> KResult<isize> {
+    let mut kinfo = k_sysinfo::default();
     kinfo.procs = kprocess::system_view::process_count() as _;
     kinfo.mem_unit = 1;
 

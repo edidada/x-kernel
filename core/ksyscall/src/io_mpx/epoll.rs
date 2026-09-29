@@ -13,9 +13,9 @@ use kpoll::IoEvents;
 use ktask::future::{self, block_on, poll_io};
 use ktime_types::TimeSpan;
 use linux_raw_sys::general::{
-    EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, epoll_event, timespec,
+    EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, timespec,
 };
-use posix_types::{TimeSpanLike, UserConstPtr, UserPtr, k_sigset};
+use posix_types::{TimeSpanLike, UserConstPtr, UserPtr, k_epoll_event, k_sigset};
 
 bitflags! {
     // Flags for the `epoll_create1` syscall.
@@ -43,7 +43,7 @@ pub fn sys_epoll_ctl(
     epfd: i32,
     op: u32,
     fd: i32,
-    event: UserConstPtr<epoll_event>,
+    event: UserConstPtr<k_epoll_event>,
 ) -> KResult<isize> {
     let epoll_file = kprocess::current_resources().get_file(epfd)?;
     let epoll = Epoll::from_file(&epoll_file)?;
@@ -52,13 +52,13 @@ pub fn sys_epoll_ctl(
 
     let parse_event = || -> KResult<(EpollEvent, EpollFlags)> {
         let event = event.read_vm()?;
-        let events = IoEvents::from_bits_truncate(event.events);
+        let events = IoEvents::from_bits_truncate(event.events());
         let flags =
-            EpollFlags::from_bits(event.events & !events.bits()).ok_or(KError::InvalidInput)?;
+            EpollFlags::from_bits(event.events() & !events.bits()).ok_or(KError::InvalidInput)?;
         Ok((
             EpollEvent {
                 events,
-                user_data: event.data,
+                user_data: event.data(),
             },
             flags,
         ))
@@ -83,7 +83,7 @@ pub fn sys_epoll_ctl(
 
 fn do_epoll_wait(
     epfd: i32,
-    events: UserPtr<epoll_event>,
+    events: UserPtr<k_epoll_event>,
     maxevents: i32,
     timeout: Option<TimeSpan>,
     sigmask: UserConstPtr<k_sigset>,
@@ -101,7 +101,7 @@ fn do_epoll_wait(
     // `posix-types::UserPtr` models copy-to-user semantics rather than a borrowed
     // mutable user slice, so we stage ready events in kernel memory and copy them
     // back once polling completes.
-    let mut output = vec![epoll_event { events: 0, data: 0 }; maxevents as usize];
+    let mut output = vec![k_epoll_event::default(); maxevents as usize];
     let sigmask = sigmask
         .check_non_null()
         .map(UserConstPtr::read_vm)
@@ -127,7 +127,7 @@ fn do_epoll_wait(
 /// Waits for epoll events with a millisecond timeout.
 pub fn sys_epoll_pwait(
     epfd: i32,
-    events: UserPtr<epoll_event>,
+    events: UserPtr<k_epoll_event>,
     maxevents: i32,
     timeout: i32,
     sigmask: UserConstPtr<k_sigset>,
@@ -144,7 +144,7 @@ pub fn sys_epoll_pwait(
 /// Waits for epoll events with a high-precision timeout.
 pub fn sys_epoll_pwait2(
     epfd: i32,
-    events: UserPtr<epoll_event>,
+    events: UserPtr<k_epoll_event>,
     maxevents: i32,
     timeout: UserConstPtr<timespec>,
     sigmask: UserConstPtr<k_sigset>,
