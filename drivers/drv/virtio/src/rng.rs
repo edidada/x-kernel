@@ -70,6 +70,7 @@ pub fn activate<B: driver_core::Bus>(
 /// so nothing dereferences the transport after the mapping drops.
 #[cfg(feature = "mmio")]
 pub fn activate_mmio<T: virtio::Transport + 'static>(
+    owner: u64,
     location: devnode::DeviceLocation,
     transport: T,
     builder: crate::mmio::ActivationBuilder,
@@ -78,7 +79,7 @@ pub fn activate_mmio<T: virtio::Transport + 'static>(
         VirtIoRngDev::<driver_runtime::hal::Hal, _>::try_new(transport, driver_runtime::time_ops())
             .map_err(crate::common::map_driver_error)?;
     let handle = publish_char(
-        ClassParent::detached(dev.id(), "virtio-rng", location),
+        ClassParent::detached(owner, "virtio-rng", location),
         Box::new(device),
     )
     .map_err(crate::common::map_driver_error)?;

@@ -182,7 +182,9 @@ impl DriverOps<PlatformBus> for Ns16550IoPortDriver {
             }
         };
         publish(dev, Arc::new(port))?;
-        Ok(SerialData)
+        // The ioport variant owns no MMIO mapping (cold-start guard is the
+        // MMIO path's); regs stays empty.
+        Ok(SerialData { regs: None })
     }
 
     fn remove(&self, _dev: &mut BoundDevice<'_, PlatformBus, SerialData>) {}

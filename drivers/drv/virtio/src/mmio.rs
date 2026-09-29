@@ -170,6 +170,7 @@ fn dispatch_char<T: virtio::Transport + 'static>(
     {
         let _ = dev;
         crate::rng::activate_mmio(
+            dev.id(),
             crate::common::legacy_location(dev.descriptor().location),
             transport,
             builder,
@@ -193,6 +194,7 @@ macro_rules! simple_family_dispatch {
             #[cfg(feature = $feature)]
             {
                 crate::$module::activate_mmio(
+                    dev.id(),
                     crate::common::legacy_location(dev.descriptor().location),
                     transport,
                     builder,
