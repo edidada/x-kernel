@@ -1600,12 +1600,19 @@ impl Path {
         if self.is_dir() {
             return Err(VfsError::IsADirectory);
         }
+        if !self.is_regular_file() {
+            // Only regular files have a truncatable size. Linux returns EINVAL
+            // for pipes, sockets, devices and other special files, so refuse
+            // the length change at the common truncate boundary instead of
+            // letting a resident metadata update publish a fake `i_size`.
+            return Err(VfsError::InvalidInput);
+        }
 
         let inode = self.inode();
         if len > self.max_file_size() {
             return Err(VfsError::FileTooLarge);
         }
-        if self.is_regular_file() && !inode.flags().contains(NodeFlags::NON_CACHEABLE) {
+        if !inode.flags().contains(NodeFlags::NON_CACHEABLE) {
             inode.set_len(len)?;
         } else {
             self.dentry.update_metadata(MetadataUpdate {

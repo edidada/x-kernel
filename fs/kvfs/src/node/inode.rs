@@ -495,7 +495,8 @@ static EMPTY_INODE_OPERATIONS: Lazy<Arc<EmptyInodeOperations>> =
 /// `setattr` accepts the update unchanged so owner/mode/timestamp changes on
 /// such objects succeed exactly like their Linux counterparts (e.g.
 /// `fchown` on a pipe). KVFS publishes the returned values to the resident
-/// inode.
+/// inode. A requested size change is refused: only regular files can change
+/// length, and the common truncate boundary already rejects special files.
 struct MetadataOnlyInodeOperations;
 
 impl InodeOperations for MetadataOnlyInodeOperations {
@@ -505,6 +506,9 @@ impl InodeOperations for MetadataOnlyInodeOperations {
         _dentry: &Dentry,
         update: MetadataUpdate,
     ) -> VfsResult<MetadataUpdate> {
+        if update.size.is_some() {
+            return Err(VfsError::InvalidInput);
+        }
         Ok(update)
     }
 }
@@ -1184,12 +1188,6 @@ pub struct VfsInode {
     namespace_lock: RwLock<()>,
     inode_operations: Arc<dyn InodeOperations>,
     file_operations: Arc<dyn FileOperations>,
-    /// Cached magic-link operations, computed once at inode construction from
-    /// the concrete `FileOperations` value. `FileOperations::magic_link` takes
-    /// `self: Arc<Self>` and so cannot be dispatched through a trait object at
-    /// runtime; caching the result lets `VfsInode::magic_link()` return it
-    /// without re-dispatch.
-    magic_link: Option<Arc<dyn crate::MagicLinkOps>>,
     private_data: Arc<dyn Any + Send + Sync>,
     mapping: Arc<AddressSpace>,
     special_state: InodeSpecialState,
@@ -1346,7 +1344,6 @@ struct InodeParts {
     private_data: Arc<dyn Any + Send + Sync>,
     inode_operations: Arc<dyn InodeOperations>,
     file_operations: Option<Arc<dyn FileOperations>>,
-    magic_link: Option<Arc<dyn crate::MagicLinkOps>>,
     flags: NodeFlags,
     address_space_operations: &'static dyn AddressSpaceOperations,
     init: VfsInodeInit,
@@ -1404,7 +1401,6 @@ impl VfsInode {
                 private_data,
                 inode_operations,
                 file_operations,
-                magic_link: node.clone().magic_link(),
                 flags,
                 address_space_operations,
                 init,
@@ -1418,15 +1414,13 @@ impl VfsInode {
     where
         T: Any + Send + Sync + InodeOperations + FileOperations,
     {
-        let magic_link = node.clone().magic_link();
         let private_data: Arc<dyn Any + Send + Sync> = node.clone();
         let inode_operations: Arc<dyn InodeOperations> = node.clone();
         let file_operations: Arc<dyn FileOperations> = node;
-        Self::new_file_with_operation_tables(
+        Self::new_file_with_operations(
             private_data,
             inode_operations,
-            Some(file_operations),
-            magic_link,
+            file_operations,
             NodeFlags::empty(),
             init,
         )
@@ -1437,18 +1431,10 @@ impl VfsInode {
     where
         T: Any + Send + Sync + InodeOperations + FileOperations,
     {
-        let magic_link = node.clone().magic_link();
         let private_data: Arc<dyn Any + Send + Sync> = node.clone();
         let inode_operations: Arc<dyn InodeOperations> = node.clone();
         let file_operations: Arc<dyn FileOperations> = node;
-        Self::new_file_with_operation_tables(
-            private_data,
-            inode_operations,
-            Some(file_operations),
-            magic_link,
-            flags,
-            init,
-        )
+        Self::new_file_with_operations(private_data, inode_operations, file_operations, flags, init)
     }
 
     /// Construct a file inode whose address space is implemented by `node`.
@@ -1460,7 +1446,6 @@ impl VfsInode {
     where
         T: Any + Send + Sync + InodeOperations + FileOperations,
     {
-        let magic_link = node.clone().magic_link();
         let private_data: Arc<dyn Any + Send + Sync> = node.clone();
         let inode_operations: Arc<dyn InodeOperations> = node.clone();
         let file_operations: Arc<dyn FileOperations> = node.clone();
@@ -1468,7 +1453,6 @@ impl VfsInode {
             private_data,
             inode_operations,
             Some(file_operations),
-            magic_link,
             NodeFlags::empty(),
             address_space_operations,
             init,
@@ -1485,7 +1469,6 @@ impl VfsInode {
     where
         T: Any + Send + Sync + InodeOperations + FileOperations,
     {
-        let magic_link = node.clone().magic_link();
         let private_data: Arc<dyn Any + Send + Sync> = node.clone();
         let inode_operations: Arc<dyn InodeOperations> = node.clone();
         let file_operations: Arc<dyn FileOperations> = node.clone();
@@ -1493,7 +1476,6 @@ impl VfsInode {
             private_data,
             inode_operations,
             Some(file_operations),
-            magic_link,
             flags,
             address_space_operations,
             init,
@@ -1517,7 +1499,6 @@ impl VfsInode {
             private_data,
             inode_operations,
             None,
-            None,
             flags,
             address_space_operations,
             init,
@@ -1538,14 +1519,8 @@ impl VfsInode {
         debug_assert!(node.symlink_operations().is_some());
         let private_data: Arc<dyn Any + Send + Sync> = node.clone();
         let inode_operations: Arc<dyn InodeOperations> = node;
-        let inode = Self::new_file_with_operation_tables(
-            private_data,
-            inode_operations,
-            None,
-            None,
-            flags,
-            init,
-        );
+        let inode =
+            Self::new_file_with_operation_tables(private_data, inode_operations, None, flags, init);
         inode.set_cached_link(target);
         inode
     }
@@ -1568,7 +1543,6 @@ impl VfsInode {
             private_data,
             inode_operations,
             file_operations,
-            magic_link: None,
             flags,
             address_space_operations: empty_address_space_operations(),
             init,
@@ -1587,7 +1561,6 @@ impl VfsInode {
             private_data,
             inode_operations,
             Some(file_operations),
-            None,
             flags,
             init,
         )
@@ -1600,21 +1573,13 @@ impl VfsInode {
         flags: NodeFlags,
         init: VfsInodeInit,
     ) -> Arc<Self> {
-        Self::new_file_with_operation_tables(
-            private_data,
-            inode_operations,
-            None,
-            None,
-            flags,
-            init,
-        )
+        Self::new_file_with_operation_tables(private_data, inode_operations, None, flags, init)
     }
 
     fn new_file_with_operation_tables(
         private_data: Arc<dyn Any + Send + Sync>,
         inode_operations: Arc<dyn InodeOperations>,
         file_operations: Option<Arc<dyn FileOperations>>,
-        magic_link: Option<Arc<dyn crate::MagicLinkOps>>,
         flags: NodeFlags,
         mut init: VfsInodeInit,
     ) -> Arc<Self> {
@@ -1644,7 +1609,6 @@ impl VfsInode {
             private_data,
             inode_operations,
             file_operations,
-            magic_link,
             flags,
             address_space_operations: ops,
             init,
@@ -1655,7 +1619,6 @@ impl VfsInode {
         private_data: Arc<dyn Any + Send + Sync>,
         inode_operations: Arc<dyn InodeOperations>,
         file_operations: Option<Arc<dyn FileOperations>>,
-        magic_link: Option<Arc<dyn crate::MagicLinkOps>>,
         flags: NodeFlags,
         ops: &'static dyn crate::AddressSpaceOperations,
         init: VfsInodeInit,
@@ -1666,7 +1629,6 @@ impl VfsInode {
             private_data,
             inode_operations,
             file_operations,
-            magic_link,
             flags,
             address_space_operations: ops,
             init,
@@ -1703,7 +1665,6 @@ impl VfsInode {
             private_data,
             inode_operations,
             file_operations,
-            magic_link,
             flags: _,
             address_space_operations,
             init,
@@ -1716,7 +1677,6 @@ impl VfsInode {
             namespace_lock: RwLock::new(()),
             inode_operations,
             file_operations: file_operations.unwrap_or_else(no_open_file_operations),
-            magic_link,
             private_data,
             mapping: AddressSpace::new(this.clone(), address_space_operations),
             special_state: InodeSpecialState::new(),
@@ -1802,7 +1762,6 @@ impl VfsInode {
             inode_operations,
             flags,
             file_operations: None,
-            magic_link: None,
             address_space_operations: empty_address_space_operations(),
             init,
         })
@@ -1845,7 +1804,6 @@ impl VfsInode {
             private_data,
             inode_operations,
             file_operations: Some(file_operations),
-            magic_link: None,
             flags,
             address_space_operations: empty_address_space_operations(),
             init,
@@ -2140,7 +2098,7 @@ impl VfsInode {
     }
 
     pub(crate) fn magic_link(&self) -> Option<Arc<dyn crate::MagicLinkOps>> {
-        self.magic_link.clone()
+        self.file_operations.clone().magic_link()
     }
 
     fn require_directory_operations(&self) -> VfsResult<&dyn InodeDirOperations> {
