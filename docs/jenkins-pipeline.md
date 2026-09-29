@@ -2,7 +2,7 @@
 
 `Jenkinsfile` 按能力标签调度，不绑定节点名。任何承接 X-Kernel CI 的节点都必须
 满足本文契约；不满足契约的节点不得配置
-`xkernel-agent && docker && vhost-vsock`。
+`xkernel-agent && docker && vhost-vsock && container-vsock`。
 
 ## Agent 身份与目录
 
@@ -30,20 +30,17 @@ Jenkins Controller 不承接构建任务，executor 数必须为 `0`。节点至
 label：
 
 ```text
-xkernel-agent docker vhost-vsock
+xkernel-agent docker vhost-vsock container-vsock
 ```
 
 ## 容器与设备
 
-流水线固定使用：
-
-```text
-yeanwang/x-kernel-builder:v2.0.0-rc.2
-sha256:b5e1c4fbf92b2e653fce0a8a4a171c893e960a782ae2288d20b10fd575ade09f
-```
-
-OCI index 只包含原生 `linux/amd64` 和 `linux/arm64` 镜像。镜像默认用户是
-`jenkins`（`1000:1000`），设备补充组 GID 是 `36`。
+流水线使用的 builder 镜像以 `Jenkinsfile` 顶部 `agent { docker { image ... } }` 中的 tag 和
+digest 为准。镜像的 Dockerfile 在仓库内的 `scripts/ci/docker/` 维护，构建、
+检查和发布方法见该目录的 README。OCI index 只包含原生 `linux/amd64` 和
+`linux/arm64` 镜像。镜像默认用户是
+`jenkins`（`1000:1000`）；设备组 `36` 由流水线在运行时通过 `--group-add 36`
+加入，镜像内不预置。
 
 宿主机必须将 `/dev/kvm` 和 `/dev/vhost-vsock` 持久设置为 group `36`、mode
 `0660`。流水线只显式传入这两个设备并执行 `--group-add 36`，不使用
@@ -88,7 +85,8 @@ Jenkins Build 共享。
 
 镜像中的这些挂载点已经是 `1000:1000`。Docker 第一次创建 volume 时会继承
 正确所有权，不需要预先进入 volume 修权限。Cargo 工具本体位于只读的
-`/usr/local/cargo`，与可变 Cargo 缓存分离。
+`/usr/local/cargo`，与可变 Cargo 缓存分离。Cargo 的镜像源配置放在镜像的
+`/.cargo/config.toml`，不在缓存 volume 里，随镜像更新生效。
 
 镜像不内置项目 Rust toolchain。首次在新节点运行时，
 `scripts/ci/check_build_environment.sh` 根据 `rust-toolchain.toml` 安装固定
