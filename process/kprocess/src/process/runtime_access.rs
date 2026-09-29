@@ -617,7 +617,7 @@ impl Process {
         runtime.with_tipc_handles(|handles| handles.write().uctx_handle_close_all());
         #[cfg(feature = "tee")]
         runtime.clear_tee_runtime_private();
-runtime.set_exec_metadata(update.exe_path, update.cmdline, update.exe_file);
+        runtime.set_exec_metadata(update.exe_path, update.cmdline, update.exe_file);
         #[cfg(unittest)]
         if let Some(hits) = update.failure_hits {
             hits.fetch_add(1, Ordering::Relaxed);
