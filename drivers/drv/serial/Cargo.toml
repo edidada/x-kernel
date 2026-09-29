@@ -22,6 +22,6 @@ devnode = { workspace = true }
 driver-core = { workspace = true }
 driver_base = { workspace = true }
 kclass = { workspace = true, features = ["char"] }
-khal = { workspace = true }
+memaddr = { workspace = true }
 char_driver = { workspace = true }
 log.workspace = true

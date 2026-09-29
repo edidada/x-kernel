@@ -110,7 +110,7 @@ impl DriverOps<PlatformBus> for Ns16550MmioDriver {
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PlatformBus>) -> Result<SerialData, ProbeError> {
         let mmio = dev.mmio(0)?;
-        let paddr = khal::mem::PhysAddr::from_usize(mmio.base);
+        let paddr = memaddr::PhysAddr::from_usize(mmio.base);
         let ident = SerialIdent::Mmio {
             paddr,
             size: mmio.size,
@@ -129,7 +129,7 @@ impl DriverOps<PlatformBus> for Ns16550MmioDriver {
                     // stays alive in `Data` for the binding's lifetime.
                     let port = unsafe {
                         SerialPort::new_mmio_ns16550(
-                            khal::mem::VirtAddr::from_usize(regs.as_ptr() as usize),
+                            memaddr::VirtAddr::from_usize(regs.as_ptr() as usize),
                             paddr,
                             mmio.size,
                             SerialRole::Auxiliary,

@@ -36,7 +36,7 @@ use driver_core::{
     platform::{OfMatch, PlatformBus, PlatformId},
 };
 use kclass::{ClassParent, publish_char};
-use khal::mem::{PhysAddr, VirtAddr};
+use memaddr::{PhysAddr, VirtAddr};
 
 /// `static const struct of_device_id pl011_of_match[]`.
 static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("arm,pl011"))];
