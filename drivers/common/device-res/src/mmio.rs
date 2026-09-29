@@ -79,6 +79,20 @@ impl Io {
         })
     }
 
+    /// Adopt an already-mapped token, holding it for the same lifetime
+    /// semantics as [`Io::map_with`].
+    ///
+    /// For lower layers (e.g. a vendored HAL) that must return a raw
+    /// pointer: map through the provider, hand out `mapping.vaddr`, and keep
+    /// this handle so the mapping lives exactly as long as the owner of the
+    /// handle — instead of dropping the token and leaking the reference.
+    pub fn from_mapping(provider: &'static dyn MmioOp, mapping: MmioMapping) -> Self {
+        Self {
+            provider: Some(provider),
+            mapping: Some(mapping),
+        }
+    }
+
     /// The virtual base address of the mapping.
     ///
     /// # Panics

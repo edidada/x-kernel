@@ -189,7 +189,7 @@ fn enumerate_firmware_nodes_direct() {
 
 fn build_descriptor(dev: firmware::FirmwareDevice) {
     let mut resources = ResourceMap::new();
-    for (idx, mmio) in dev.mmios.iter().enumerate() {
+    for mmio in &dev.mmios {
         let kind = ResourceKind::Mmio(driver_core::MmioRegion::new(mmio.base, mmio.size));
         match mmio.name {
             Some(name) => resources.push_named(name, kind),

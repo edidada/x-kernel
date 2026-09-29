@@ -306,9 +306,17 @@ impl XKernelRuntime {
             PciHost::new(pci::support::pci_cam_kind()).map_err(|_| RuntimeError::Io)?;
         let root = pci_root.root_mut();
 
-        let (kind, transport, transport_irq) =
-            virtio::probe_pci_transport_only::<hal::Hal>(root, bdf, &dev_info, resource_provider())
-                .ok_or(RuntimeError::BadState)?;
+        // The vendored constructor maps the device's MMIO regions through
+        // the HAL; the probe scope gathers those mapping leases so they can
+        // ride with the transport (released when it drops) instead of
+        // leaking at the trait boundary. On failure the leases drop here and
+        // the mappings die with the failed probe.
+        hal::begin_mmio_probe();
+        let probed =
+            virtio::probe_pci_transport_only::<hal::Hal>(root, bdf, &dev_info, resource_provider());
+        let leases = hal::take_mmio_probe_leases();
+        let (kind, mut transport, transport_irq) = probed.ok_or(RuntimeError::BadState)?;
+        transport.retain_mappings(leases);
 
         let irq = transport_irq.or_else(|| {
             descriptor

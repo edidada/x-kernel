@@ -4,12 +4,9 @@
 
 //! VirtIO PCI transport integration.
 
-#[cfg(target_arch = "x86_64")]
-use device_res::IrqController;
-#[cfg(not(target_arch = "x86_64"))]
+use alloc::vec::Vec;
+
 use device_res::{IrqController, IrqOp, IrqRouteDesc, IrqTrigger};
-#[cfg(target_arch = "x86_64")]
-use device_res::{IrqOp, IrqRouteDesc, IrqTrigger};
 use driver_base::DeviceKind;
 use pci::MmioCam;
 
@@ -37,6 +34,12 @@ pub struct PciTransport {
     inner: RawPciTransport,
     #[cfg(target_arch = "x86_64")]
     irq_state: PciIrqState,
+    /// MMIO leases for every region the vendored constructor mapped through
+    /// the HAL (declared last: the vendored transport drops before the
+    /// mappings are released). The mapping lives exactly as long as this
+    /// transport — and therefore as long as any class publication still
+    /// holding the device.
+    mmio_leases: Vec<device_res::Io>,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -81,7 +84,15 @@ impl PciTransport {
             inner,
             #[cfg(target_arch = "x86_64")]
             irq_state: PciIrqState::new(msix),
+            mmio_leases: Vec::new(),
         })
+    }
+
+    /// Take ownership of the MMIO mapping leases gathered during the
+    /// probe scope. Called once by the runtime right after construction.
+    pub fn retain_mappings(&mut self, leases: Vec<device_res::Io>) {
+        debug_assert!(self.mmio_leases.is_empty(), "mappings retained twice");
+        self.mmio_leases = leases;
     }
 
     #[cfg(target_arch = "x86_64")]
