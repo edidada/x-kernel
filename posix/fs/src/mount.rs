@@ -340,7 +340,7 @@ pub fn sys_umount2(target: UserConstPtr<c_char>, flags: i32) -> KResult<isize> {
     let process = current_user_process();
     let cred = kprocess::current_cred();
     let target = lookup_mount_path(&process, &target, &cred)?;
-// Lookup errors keep their priority, but no namespace state may change
+    // Lookup errors keep their priority, but no namespace state may change
     // before authorization; Linux `can_umount()` checks the same privilege
     // before validating the mount point.
     require_mount_privilege(&cred)?;
@@ -370,6 +370,10 @@ pub fn sys_pivot_root(
 
     let process = current_user_process();
     let cred = kprocess::current_cred();
+    // `pivot_root` rearranges the shared mount namespace root, which requires
+    // mount-management privilege; path reachability alone is not authorization
+    // (Linux `may_mount()`). Check before any tree surgery.
+    require_mount_privilege(&cred)?;
     let new_root = lookup_mount_path(&process, &new_root, &cred)?;
     let put_old = lookup_mount_path(&process, &put_old, &cred)?;
 

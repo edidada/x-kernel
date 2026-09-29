@@ -106,9 +106,9 @@ pub(super) fn exec_owned(
 /// - a non-empty pathname: resolve relative to `dirfd` (`AT_FDCWD` = caller
 ///   cwd) and exec, following symlinks like `execve`.
 ///
-/// `AT_SYMLINK_NOFOLLOW` is accepted but currently treated as follow (Linux
-/// returns `ELOOP` for a symlink target under it; X-Kernel does not yet
-/// distinguish) — documented as a follow-up.
+/// The final symlink is followed unless `AT_SYMLINK_NOFOLLOW` is set, in
+/// which case a symlink target is rejected like Linux. Unknown flag bits are
+/// rejected with `EINVAL`.
 pub fn sys_execveat(
     uctx: &mut UserContext,
     dirfd: c_int,
@@ -117,7 +117,16 @@ pub fn sys_execveat(
     envp: *const *const c_char,
     flags: u32,
 ) -> KResult<isize> {
-    use linux_raw_sys::general::{AT_EMPTY_PATH, AT_FDCWD};
+    use linux_raw_sys::general::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW};
+
+    if flags & !(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW) != 0 {
+        return Err(KError::from(LinuxError::EINVAL));
+    }
+    let lookup_flags = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        LookupFlags::empty()
+    } else {
+        LookupFlags::follow()
+    };
 
     let (args, envs) = load_strings(argv, envp)?;
     let cred = kprocess::current_cred();
@@ -154,7 +163,7 @@ pub fn sys_execveat(
             fs.root(),
             fs.pwd(),
             LookupIntent::Exec,
-            LookupFlags::follow(),
+            lookup_flags,
             &cred,
         )?
     } else {
@@ -167,7 +176,7 @@ pub fn sys_execveat(
             snapshot.root(),
             snapshot.pwd(),
             LookupIntent::Exec,
-            LookupFlags::follow(),
+            lookup_flags,
             &cred,
         )?
     };
