@@ -87,7 +87,7 @@ pub fn spawn_init_process(
         .map(|p| p.to_string())
         .unwrap_or_else(|_| init_path.clone());
 
-// Prepare without touching the unpublished MM, then install without any
+    // Prepare without touching the unpublished MM, then install without any
     // destructive exec commitment or current-user-runtime requirement.
     #[expect(
         clippy::panic,
