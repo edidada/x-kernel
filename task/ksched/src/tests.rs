@@ -2,10 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Kernel unit tests for Fair/Idle arbitration and EEVDF.
+//! Kernel unit tests for Fair, RT, and Idle arbitration.
 //!
-//! Stop, Deadline, and RT cases stay on `refactor_ksched` until those
-//! classes are wired here.
+//! Stop and Deadline stay unwired. Deadline `set_attr` is rejected.
 
 #![cfg(unittest)]
 
@@ -16,8 +15,9 @@ use alloc::sync::Arc;
 use unittest::{assert, assert_eq, def_test};
 
 use crate::{
-    DEFAULT_SLICE_NS, Decision, EnqueueKind, KernelClass, Nice, SchedAttr, SchedClass, SchedError,
-    SchedPolicy, SchedTask, Scheduler, UpdateKind,
+    DEFAULT_RR_SLICE_NS, DEFAULT_RT_PERIOD_NS, DEFAULT_RT_RUNTIME_NS, DEFAULT_SLICE_NS, Decision,
+    EnqueueKind, KernelClass, Nice, RtPrio, SchedAttr, SchedClass, SchedError, SchedPolicy,
+    SchedTask, Scheduler, UpdateKind,
 };
 
 const UNIT_NS: u64 = 4096;
@@ -44,6 +44,15 @@ fn nice_attr(nice: i32) -> SchedAttr {
     SchedAttr {
         policy: SchedPolicy::Normal,
         nice: Nice::new(nice).unwrap(),
+        rt_priority: RtPrio::NONE,
+    }
+}
+
+fn rt_attr(policy: SchedPolicy, priority: u8) -> SchedAttr {
+    SchedAttr {
+        policy,
+        nice: Nice::DEFAULT,
+        rt_priority: RtPrio::new(i32::from(priority)).unwrap(),
     }
 }
 
@@ -423,10 +432,21 @@ fn set_attr_invalid_does_not_change_class() {
     let t = task(1);
     enqueue_new(&mut s, t.clone());
     let bad = SchedAttr {
+        policy: SchedPolicy::Deadline,
+        nice: Nice::DEFAULT,
+        rt_priority: RtPrio::NONE,
+    };
+    assert_eq!(s.set_attr(&t, bad, 0), Err(SchedError::InvalidPolicy));
+    assert_eq!(t.sched_class(), SchedClass::Fair);
+    let bad_prio = SchedAttr {
         policy: SchedPolicy::Fifo,
         nice: Nice::DEFAULT,
+        rt_priority: RtPrio::NONE,
     };
-    assert!(s.set_attr(&t, bad, 0).is_err());
+    assert_eq!(
+        s.set_attr(&t, bad_prio, 0),
+        Err(SchedError::InvalidPriority)
+    );
     assert_eq!(t.sched_class(), SchedClass::Fair);
 }
 
@@ -475,4 +495,173 @@ fn enqueue_after_leave_window_rescheds() {
     assert!(s.curr_is_none());
     let d = enqueue_new(&mut s, task(2));
     assert!(d.resched);
+}
+
+fn leave_pick(s: &mut Scheduler<usize>, now_ns: u64) -> usize {
+    s.preempt_current(now_ns);
+    pick_id(s, now_ns)
+}
+
+#[def_test]
+fn rt_fifo_preempts_lower_and_fair() {
+    let mut s = sched();
+    let fair = task(1);
+    let low = task(2);
+    let high = task(3);
+    s.set_attr(&low, rt_attr(SchedPolicy::Fifo, 1), 0).unwrap();
+    s.set_attr(&high, rt_attr(SchedPolicy::Fifo, 8), 0).unwrap();
+    enqueue_new(&mut s, fair);
+    enqueue_new(&mut s, low);
+    assert_eq!(pick_id(&mut s, 0), 2);
+    let woke = s.enqueue(high, EnqueueKind::Wake { sync: false }, 0);
+    assert!(woke.resched);
+    assert_eq!(leave_pick(&mut s, 0), 3);
+}
+
+#[def_test]
+fn rt_same_priority_is_fifo() {
+    let mut s = sched();
+    let first = task(1);
+    let second = task(2);
+    s.set_attr(&first, rt_attr(SchedPolicy::Fifo, 4), 0)
+        .unwrap();
+    s.set_attr(&second, rt_attr(SchedPolicy::Fifo, 4), 0)
+        .unwrap();
+    enqueue_new(&mut s, first);
+    enqueue_new(&mut s, second);
+    assert_eq!(pick_id(&mut s, 0), 1);
+    s.yield_current(0);
+    assert_eq!(pick_id(&mut s, 0), 2);
+}
+
+#[def_test]
+fn rt_priority_change_requeues() {
+    let mut s = sched();
+    let low = task(1);
+    let raised = task(2);
+    s.set_attr(&low, rt_attr(SchedPolicy::Fifo, 2), 0).unwrap();
+    s.set_attr(&raised, rt_attr(SchedPolicy::Fifo, 2), 0)
+        .unwrap();
+    enqueue_new(&mut s, low);
+    enqueue_new(&mut s, raised.clone());
+    s.set_attr(&raised, rt_attr(SchedPolicy::Fifo, 9), 0)
+        .unwrap();
+    assert_eq!(pick_id(&mut s, 0), 2);
+}
+
+#[def_test]
+fn rt_rr_slice_rotates_same_priority() {
+    let mut s = sched();
+    let a = task(1);
+    let b = task(2);
+    s.set_attr(&a, rt_attr(SchedPolicy::Rr, 3), 0).unwrap();
+    s.set_attr(&b, rt_attr(SchedPolicy::Rr, 3), 0).unwrap();
+    enqueue_new(&mut s, a);
+    enqueue_new(&mut s, b);
+    assert_eq!(pick_id(&mut s, 0), 1);
+    let d = s.update(DEFAULT_RR_SLICE_NS, UpdateKind::Account);
+    assert!(d.resched);
+    assert_eq!(leave_pick(&mut s, DEFAULT_RR_SLICE_NS), 2);
+}
+
+#[def_test]
+fn rt_bandwidth_yields_to_fair() {
+    let mut s = sched();
+    let fair = task(1);
+    let rt = task(2);
+    s.set_attr(&rt, rt_attr(SchedPolicy::Fifo, 5), 0).unwrap();
+    enqueue_new(&mut s, fair);
+    enqueue_new(&mut s, rt);
+    assert_eq!(pick_id(&mut s, 0), 2);
+    let d = s.update(DEFAULT_RT_RUNTIME_NS, UpdateKind::Account);
+    assert!(d.resched);
+    assert_eq!(leave_pick(&mut s, DEFAULT_RT_RUNTIME_NS), 1);
+}
+
+#[def_test]
+fn rt_steal_prefers_rt_over_fair() {
+    let mut s = sched();
+    let fair = task(1);
+    let rt = task(2);
+    s.set_attr(&rt, rt_attr(SchedPolicy::Fifo, 1), 0).unwrap();
+    enqueue_new(&mut s, fair);
+    enqueue_new(&mut s, rt);
+    let stolen = s.steal(&mut |_| true, 0).unwrap();
+    assert_eq!(*stolen.inner(), 2);
+}
+
+#[def_test]
+fn rt_migrate_does_not_requeue() {
+    let mut s = sched();
+    let rt = task(1);
+    s.set_attr(&rt, rt_attr(SchedPolicy::Fifo, 1), 0).unwrap();
+    enqueue_new(&mut s, rt);
+    assert_eq!(pick_id(&mut s, 0), 1);
+    s.migrate_current(0);
+    assert!(s.curr_is_none());
+    assert_eq!(s.nr_queued(), 0);
+}
+
+#[def_test]
+fn rt_back_to_fair() {
+    let mut s = sched();
+    let t = task(1);
+    s.set_attr(&t, rt_attr(SchedPolicy::Fifo, 7), 0).unwrap();
+    enqueue_new(&mut s, t.clone());
+    assert_eq!(t.sched_class(), SchedClass::Rt);
+    s.set_attr(&t, SchedAttr::DEFAULT, 0).unwrap();
+    assert_eq!(t.sched_class(), SchedClass::Fair);
+    assert_eq!(t.rt_priority_snapshot(), 0);
+    assert_eq!(pick_id(&mut s, 0), 1);
+}
+
+#[def_test]
+fn rt_rr_refills_when_no_same_priority_peer() {
+    let mut s = sched();
+    let runner = task(1);
+    s.set_attr(&runner, rt_attr(SchedPolicy::Rr, 3), 0).unwrap();
+    enqueue_new(&mut s, runner);
+    assert_eq!(pick_id(&mut s, 0), 1);
+    let alone = s.update(DEFAULT_RR_SLICE_NS, UpdateKind::Account);
+    assert!(!alone.resched);
+    let peer = task(2);
+    s.set_attr(&peer, rt_attr(SchedPolicy::Rr, 3), 0).unwrap();
+    let woke = s.enqueue(peer, EnqueueKind::Wake { sync: false }, DEFAULT_RR_SLICE_NS);
+    assert!(!woke.resched);
+    let still = s.update(DEFAULT_RR_SLICE_NS + 1, UpdateKind::Account);
+    assert!(!still.resched);
+}
+
+#[def_test]
+fn rt_lowered_priority_queues_at_head() {
+    let mut s = sched();
+    let waiting = task(1);
+    let lowered = task(2);
+    s.set_attr(&waiting, rt_attr(SchedPolicy::Fifo, 4), 0)
+        .unwrap();
+    s.set_attr(&lowered, rt_attr(SchedPolicy::Fifo, 8), 0)
+        .unwrap();
+    enqueue_new(&mut s, waiting);
+    enqueue_new(&mut s, lowered.clone());
+    s.set_attr(&lowered, rt_attr(SchedPolicy::Fifo, 4), 0)
+        .unwrap();
+    assert_eq!(pick_id(&mut s, 0), 2);
+}
+
+#[def_test]
+fn rt_throttle_lifts_after_skipped_periods() {
+    let mut s = sched();
+    let fair = task(1);
+    let rt = task(2);
+    s.set_attr(&rt, rt_attr(SchedPolicy::Fifo, 5), 0).unwrap();
+    enqueue_new(&mut s, fair);
+    enqueue_new(&mut s, rt);
+    assert_eq!(pick_id(&mut s, 0), 2);
+    let throttled = s.update(DEFAULT_RT_RUNTIME_NS, UpdateKind::Account);
+    assert!(throttled.resched);
+    assert_eq!(leave_pick(&mut s, DEFAULT_RT_RUNTIME_NS), 1);
+    let later = DEFAULT_RT_RUNTIME_NS + 3 * DEFAULT_RT_PERIOD_NS;
+    let resumed = s.update(later, UpdateKind::Account);
+    assert!(resumed.resched);
+    assert_eq!(leave_pick(&mut s, later), 2);
 }

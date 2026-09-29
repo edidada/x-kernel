@@ -10,10 +10,7 @@ use khal::percpu::this_cpu_id;
 use super::rq::request_remote_resched;
 #[cfg(feature = "smp")]
 use super::stats::record_remote_resched;
-use super::{
-    current_run_queue,
-    placement::{select_run_queue, task_run_queue},
-};
+use super::{current_run_queue, placement::select_run_queue, task_run_queue};
 use crate::{KtaskRef, TaskInner, TaskState, api::current};
 
 /// The task routine for migrating the current task to the correct CPU.

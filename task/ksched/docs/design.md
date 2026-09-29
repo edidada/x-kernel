@@ -4,8 +4,8 @@
 
 `ksched` 的生产调度器是类仲裁器。`ktask` 在持有运行队列锁时调用
 `Scheduler`。仲裁器按 Linux 秩遍历 Stop、Deadline、RT、Fair、Idle：这一层
-只实现 Fair（EEVDF）和 Idle，更高三档 `pick_next` 返回空、`enqueue` 视为
-编程错误。
+实现 RT（FIFO/RR）、Fair（EEVDF）和 Idle。Stop 与 Deadline 仍只占秩，
+`pick_next` 返回空、`enqueue` 视为编程错误。
 
 ## 背景
 
@@ -19,14 +19,15 @@
 task/ksched/
 ├── src/
 │   ├── lib.rs          # Scheduler / SchedTask
-│   ├── config.rs       # SCHED_FAIR_REQUEST_US → DEFAULT_SLICE_NS
+│   ├── config.rs       # Fair request、RR 时间片、RT 带宽
 │   ├── policy.rs       # SchedClass 秩与用户策略
-│   ├── entity.rs       # SchedTask、FairEntity、RQ 令牌
+│   ├── entity.rs       # SchedTask、FairEntity、RtEntity、RQ 令牌
+│   ├── ready_list.rs   # RT 用的 intrusive FIFO 与 O(1) 摘除
 │   ├── class.rs        # ClassOps
-│   ├── classes/        # fair.rs（EEVDF）、idle.rs
-│   ├── scheduler.rs    # 五档仲裁；Stop/DL/RT 未接线
+│   ├── classes/        # rt.rs、fair.rs（EEVDF）、idle.rs
+│   ├── scheduler.rs    # 五档仲裁；Stop/Deadline 未接线
 │   ├── clock.rs
-│   └── tests.rs        # Fair/Idle 仲裁器单测
+│   └── tests.rs        # Fair / RT / Idle 仲裁器单测
 └── docs/
 ```
 
@@ -56,12 +57,13 @@ Blocked|Migrating --enqueue_task--> Ready
 
 ```
 pick_next: Stop -> Deadline -> RT -> Fair -> Idle
-           未接线返回 None              EEVDF    永远返回钉住的 idle
+           未接线返回 None         FIFO/RR   EEVDF    永远返回钉住的 idle
 ```
 
 | 组件 | 职责 |
 |------|------|
-| `SchedTask` | 调用方内部数据、class、seat、attr，以及每任务一份 `FairEntity` |
+| `SchedTask` | 调用方内部数据、class、seat、attr，以及每任务一份 `FairEntity` 和 `RtEntity` |
+| `RtClass` | 优先级 `1..=99` 的侵入式 FIFO；RR 时间片；RT 带宽节流 |
 | `FairClass` | 双侵入式 RB 树、lag、NEXT_BUDDY、request |
 | `IdleClass` | 每 RQ 一个钉住的 idle；不入队 |
 | `Scheduler::curr` | 运行任务的 `Arc`，`leave` 时交还 |
@@ -75,8 +77,20 @@ Fair 的放置与插件 EEVDF 对齐：`vruntime = V - lag`，离树的 runner �
 入队。Idle 的 `has_runnable` 恒为真，所以 `pick_next` 在 Fair 为空时落到
 idle，不会返回空。
 
-Stop / Deadline / RT 只占秩。`SchedAttr::validate` 拒绝这三档用户策略。
-Idle 任务拒绝 `set_attr`（`KernelClassImmutable`）。
+Stop / Deadline 只占秩。`SchedAttr::validate` 拒绝 Deadline。FIFO/RR
+要求优先级 `1..=99`，Fair 策略必须带 `RtPrio::NONE`。Idle 任务拒绝
+`set_attr`（`KernelClassImmutable`）。
+
+RT 与 Fair 同级切换时，排队任务先从旧类摘下再进新类；正在运行的任务只改
+class，不入队。更高优先级的 RT waiter 通过 `higher_class_runnable` 抢占
+Fair。同一 RT 优先级里，更高优先级 waiter 走 `wakeup_preempts`。`SCHED_RR`
+在同优先级还有 waiter 且时间片耗尽时要求重新调度，并把该任务放到队尾。
+一个 RT 周期内 `used_ns` 达到 `SCHED_RT_RUNTIME_US` 后整类节流，`pick_next`
+跳过 RT，让 Fair 运行，直到周期边界 `advance` 清零。
+
+`rt_priority_snapshot` 是 Release/Acquire 的锁外优先级，供 `ktask` 选核。
+`Scheduler::rt_preempt_rank` 在 RQ 锁下读当前 runner：Fair/Idle 为 0，RT 为
+其优先级，Stop/Deadline 为 255。`ktask` 把它写成每 CPU 原子，选核时不拿远端锁。
 
 ## 调用约束 / 执行上下文
 
@@ -128,7 +142,9 @@ Idle 任务拒绝 `set_attr`（`KernelClassImmutable`）。
 ## 设计决策
 
 - 生产路径走 `Scheduler`。Fair 默认 request 来自 Kconfig
-  `SCHED_FAIR_REQUEST_US`。Stop / Deadline / RT 仍只占秩。
+  `SCHED_FAIR_REQUEST_US`。RR 时间片是 `SCHED_RR_SLICE_US`（默认 100 ms）。
+  RT 带宽是 `SCHED_RT_RUNTIME_US` / `SCHED_RT_PERIOD_US`（默认 0.95 s / 1 s）。
+  Stop / Deadline 仍只占秩。
 - `Scheduler::curr` 持有运行任务的 `Arc`，和插件 EEVDF 的数值快照不是同一套
   所有权。`leave` 释放仲裁器这份引用；Block 路径仍要求调用方另持一份。
 - 用 `LeaveReason` 替代布尔 `preempt` + 散落的 `account_sleep`，避免调用方
@@ -136,8 +152,10 @@ Idle 任务拒绝 `set_attr`（`KernelClassImmutable`）。
 - 不再维护未接线的 metadata 分离调度器；生产与单测统一走 entity 内嵌实现。
 - EEVDF ready 索引使用 intrusive-collections 0.10.2 的两棵 RBTree，分别按
   `(deadline,id)` 和 `(vruntime,id)` 排序，直接索引同一实体，不再维护 id 反查表。
-  每实体预置两个 RBTreeAtomicLink；入队、摘除和查询不申请索引内存。FIFO/RR
-  统一使用同版本的 LinkedList，ksched 不再依赖 linked_list_r4l。
+  每实体预置两个 RBTreeAtomicLink；入队、摘除和查询不申请索引内存。RT
+  的 `1..=99` 队列复用 `ready_list`：`intrusive-collections` 的
+  `LinkedListAtomicLink`，按位图找最高优先级，按队列身份 O(1) 摘除。
+  Fair 不使用这条链表。
   依赖启用 nightly 特性以保留 scheduler 的 const 构造，
   由仓库现有 RUSTC_BOOTSTRAP 构建环境支持。
 - 每棵树缓存最早实体，常见最小值查询 O(1)；插入比较更新缓存，摘除最小值时
@@ -181,29 +199,19 @@ EEVDF steal 逐节点检查时，以游标 get_ptr 构造 ManuallyDrop<Arc<_>>
 命中后才 clone 一份真实强引用，结束游标借用，再走既有 remove_task。
 扫描期间树始终持有原有强引用；正常返回和 panic 都不释放借来的引用。
 
-## FIFO/RR 侵入式队列
+## RT 队列
 
-ReadyList 只收口 FIFO/RR 共有的队列操作，不持有调度策略。FifoTask 保留
-new/inner/into_inner/Deref，RRTask 保留 new/inner/Deref 和原时间片逻辑。
-移除旧容器专用的 GetLinks 实现，不向调用方暴露新链接。
+`RtClass` 为优先级 `1..=99` 各放一条 `ready_list::ReadyList`。`occupied`
+位图标出非空级，最高级是 `leading_zeros`。同优先级 FIFO 保持入队顺序；被抢占
+的任务插回队头，`SCHED_RR` 时间片耗尽后插回队尾。
 
-每个实体内嵌一个 LinkedListAtomicLink 和一个队列归属字。队列首次入队时取得
-全局唯一、永不复用的 usize 标识，构造仍是 const 且不分配内存；编号耗尽会在
-修改链表前明确 panic，不回绕。队列移动不改变标识，按任务摘除保持 O(1)。
-编号只在队列首次使用时访问全局原子计数，不在每次入队时竞争该计数。
+每条链表有一个首次入队时分配的、永不复用的身份。实体内嵌
+`LinkedListAtomicLink` 和归属字。入链成功后才写归属；摘除前先清归属，避免
+覆盖另一个队列刚写入的身份。按任务摘除先核对归属，再
+`cursor_mut_from_ptr`。归属不符返回 `None`，不减 `queued`。不能只凭
+`is_linked` 判断属于本队列。`Drop` 逐个 `pop_front`，清归属并释放链表持有的
+`Arc`。
 
-库的 AtomicLink 已负责拒绝重复入链。入链成功后才写入 owner，拒绝重复入队
-不会覆盖原归属；摘除时在释放 AtomicLink 之前清除 owner，避免覆盖另一个队列
-刚写入的新归属。owner 是原子身份标记而非发布锁，采用 Relaxed；实际链表访问
-由队列独占借用和外部 RQ 锁保护，链接跨队列占用由库的 acquire/release 维护。
-
-steal 使用游标逐个检查，命中只摘目标节点，未命中不改动链表。保留 Arc 谓词
-签名，以游标的原始数据指针构造 ManuallyDrop<Arc<T>> 临时视图，不增减引用计数。
-视图只以 &Arc 传给谓词，不能被移出；其存活期间游标独占借用列表，列表持有
-原有强引用。谓词 panic 不释放借用的引用；命中后的摘除转交列表的真实 Arc，
-此后不再使用临时视图。相比 clone_pointer，这避免每个被检查节点的原子计数成本。
-
-ReadyList Drop 正常逐个摘除并清除归属，外部仍持有的实体可以重新入队。
-队列拥有一个 Arc，摘除通过库转交所有权；不使用 fast_clear，不手写引用计数。
-ReadyItem 私有 unsafe trait 只约束字段偏移与字段封装，支持 RR const 泛型；
-ReadyAdapter 的正反投影使用具体字段 offset_of，不自写链表算法。
+节流是每 RQ 的：`account` 累加 runner 的墙钟，达到 runtime 后 `has_runnable`
+为假，`class_timer_ns` 指向本周期结束。周期推进在 `advance` 里用绝对
+`RqClock`，不另采样时钟。

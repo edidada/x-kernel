@@ -6,7 +6,7 @@
 ktask RunQueue（生产调用方）
    │  持有 RQ 锁后调用 Scheduler
    v
-Stop / Deadline / RT（未接线） -> Fair EEVDF -> Idle
+Stop / Deadline（未接线） -> RT FIFO/RR -> Fair EEVDF -> Idle
 ```
 
 - 调用方必须保证：同一 RQ 上序列化访问；运行任务离开必经
@@ -17,6 +17,8 @@ Stop / Deadline / RT（未接线） -> Fair EEVDF -> Idle
   `init_attr_unpublished` 仍是 `pub(crate)`，只适用于尚未发布、由创建者独占
   的任务。本 crate 不检查锁本身。
 - 调度器信任传入的任务状态已由调用方校验。用户策略只经 `SchedAttr::validate`。
+  FIFO/RR 的优先级必须在 `1..=99`。未特权的 `sched_setscheduler` 由 `ksyscall`
+  拒绝（`EPERM`），不进入本 crate。
 
 ## 外部边界 / 攻击面
 
@@ -65,8 +67,25 @@ EEVDF steal 另有原始所有权指针审计点：从游标 get_ptr（不是 &T
 
 `RqCell` 的 `get` / `set` 是 `UnsafeCell` 读写。读要求指针有效、值已初始化、
 无并发写；写还要求独占。这三件事都由 `RqLocked` 加上 `new`/`set` 的完整 `Copy`
-值保证。`seat` 与 `attr`、Fair 虚拟时间字段走同一套令牌。`class` 仍是
-`AtomicU8`，给无锁的 `sched_class()` 读。
+值保证。`seat`、`attr`、Fair 虚拟时间和 `rr_left_ns` 走同一套令牌。
+
+`class` 与 `rt_prio` 是 `AtomicU8`。`sched_class()` / `rt_priority_snapshot()`
+用 Acquire，配对 `set_class` / `store_rt_prio` 的 Release，给不持 RQ 锁的选核
+读。`seat` 仍走 `RqCell`，只在锁下读。
+
+RT 按地址摘除在 `ready_list`。`ReadyItem` 给出 `ReadyLinks` 的字段偏移，
+`ReadyAdapter` 用同一偏移做正反投影。摘除先核对非零且永不复用的队列身份，
+再调用 `cursor_mut_from_ptr`。不能只凭 `is_linked` 判断属于本队列。队列的
+独占借用盖住从检查到摘除的窗口。
+
+归属只在库成功取得链接后写入，并在库释放链接之前清零。错误队列删除返回
+`None`；重复入队由 `AtomicLink` 拒绝，不覆盖归属。`Drop` 逐个摘除并清归属。
+编号耗尽明确 panic，不复用身份。归属不是链表锁；Relaxed 足够，因为同一条
+链表的操作已经独占，别的链表只能写自己的身份或零。
+
+steal 用游标 `get_ptr` 构造 `ManuallyDrop<Arc<_>>`，不经 `&T` 再向前恢复
+`Arc` 头。链表仍持有原来的强引用。谓词只拿到 `&Arc`。命中后 `cursor.remove`
+转交那份 `Arc`，临时视图不再使用。
 
 ## 内存安全不变量
 
@@ -79,6 +98,9 @@ EEVDF steal 另有原始所有权指针审计点：从游标 get_ptr（不是 &T
 6. 两棵 EEVDF 树成员相同；挂树期间排序字段不变。修改优先级先摘两树再更新。
 7. 按实体摘除先核对键与指针身份，不用 is_linked 推断属于本树；错误队列中的
    set_priority 不得修改挂在别处的实体。重复入队为调用方契约错误，链接断言会拒绝。
+8. RT 任务同一时刻只挂在一条优先级链表上。归属字等于该链表的身份。摘除
+   失败不得减少 `queued`。节流期间任务仍可留在链表里，但 `has_runnable`
+   为假，`pick_next` 不得选出它们。
 
 ## 线程安全
 
@@ -111,7 +133,7 @@ IRQ/preempt 约束提供。
 ## 故障管理
 
 - 契约破坏优先 `assert!`（编程错误，不应静默恢复）。
-- 优先级越界返回 `false`，由上层决定是否向用户返回错误。
+- 用户策略不合法时 `SchedAttr::validate` 返回 `SchedError`，由 `ktask` 传给调用方。
 
 ## 隐私分析
 
@@ -119,9 +141,11 @@ IRQ/preempt 约束提供。
 
 ## 已知限制
 
-- CFS 在 `ktask` feature 接线仍指向历史 `axsched` 名称时不可用；算法本体在本 crate。
-- `Scheduler` 尚未替换 `ktask` 的 `BaseScheduler`。Stop、Deadline、RT 没有队列，
-  对应 `sched_setscheduler` 策略在 `SchedAttr::validate` 被拒绝。
+- Stop 与 Deadline 没有队列。`SCHED_DEADLINE` 在 `SchedAttr::validate` 被拒绝。
+- `SCHED_RESET_ON_FORK` 能通过策略字校验并记在线程快照里，fork 尚未按该标志
+  把子任务打回 `SCHED_NORMAL`。
+- RT 带宽按每个 RQ 计算，没有跨 CPU 的根域带宽池。选核是 `find_lowest_rq`
+  的优先级比较，没有 Linux `cpupri` push/pull。
 
 ## 审计清单
 
@@ -135,4 +159,5 @@ IRQ/preempt 约束提供。
 - [ ] EEVDF 双树和最早缓存是否一致，所有改键是否先摘树。
 - [ ] Adapter 的正反投影是否使用同一字段偏移，树是否持有真实 Arc。
 - [ ] `Scheduler` 调用是否仍在 RQ 锁下；`curr` 的 `Arc` 是否在 leave 时释放。
-- [ ] 未接线 class 的用户策略是否仍被 `validate` 拒绝。
+- [ ] 未接线 class（Stop / Deadline）的用户策略是否仍被 `validate` 拒绝。
+- [ ] RT 摘除是否先核对队列身份，再 `cursor_mut_from_ptr`。

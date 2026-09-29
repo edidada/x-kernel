@@ -13,7 +13,6 @@ use core::{future::poll_fn, sync::atomic::AtomicUsize, task::Poll};
 use kcpu_slot::cpu_slot_cell;
 use kspin::NoPreemptIrqSave;
 
-use crate::run_queue::task_run_queue;
 pub(crate) use crate::run_queue::{current_run_queue, select_run_queue, select_wake_run_queue};
 pub use crate::{
     task::{CurrentTask, TaskInner, TaskState, UserTaskRuntime},
@@ -503,7 +502,7 @@ where
 ///
 /// [CFS]: https://en.wikipedia.org/wiki/Completely_Fair_Scheduler
 pub fn set_prio(prio: isize) -> bool {
-    current_run_queue::<NoPreemptIrqSave>().set_current_priority(prio)
+    crate::run_queue::RunQueue::set_task_nice(&current().clone(), prio)
 }
 
 /// Set the priority for the specified task.
@@ -511,7 +510,7 @@ pub fn set_prio(prio: isize) -> bool {
 /// The interpretation of `prio` depends on the configured scheduler. For
 /// fair schedulers, it matches the Linux nice range `-20..=19`.
 pub fn set_task_prio(task: &KtaskRef, prio: isize) -> bool {
-    task_run_queue::<NoPreemptIrqSave>(task).set_task_priority(task, prio)
+    crate::run_queue::RunQueue::set_task_nice(task, prio)
 }
 
 /// Set the CPU affinity mask for `task`.

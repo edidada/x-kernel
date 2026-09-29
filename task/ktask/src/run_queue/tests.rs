@@ -81,7 +81,7 @@ mod tests_wake_affinity {
         WakeEnqueue,
         placement::{
             WakePlacement, can_idle_pull_task, find_idle_pull_src, find_idlest_cpu,
-            select_idle_cpu, select_wake_run_queue, wake_affinity_select,
+            find_lowest_rt_cpu, select_idle_cpu, select_wake_run_queue, wake_affinity_select,
         },
     };
     use crate::{KCpuMask, KtaskRef, TaskInner, TaskState};
@@ -384,6 +384,46 @@ mod tests_wake_affinity {
         assert!(!can_idle_pull_task(task.as_ref(), 0));
         assert!(can_idle_pull_task(task.as_ref(), 1));
         unittest::TestResult::Ok
+    }
+
+    #[def_test]
+    fn find_lowest_rt_cpu_stays_when_hint_is_preemptable() {
+        let mut mask = KCpuMask::new();
+        mask.set(0, true);
+        mask.set(1, true);
+        let idx = find_lowest_rt_cpu(&mask, 1, 5, |cpu| match cpu {
+            0 => Some(1),
+            1 => Some(2),
+            _ => None,
+        });
+        assert_eq!(idx, 1);
+    }
+
+    #[def_test]
+    fn find_lowest_rt_cpu_picks_weaker_runner() {
+        let mut mask = KCpuMask::new();
+        mask.set(0, true);
+        mask.set(1, true);
+        mask.set(2, true);
+        let idx = find_lowest_rt_cpu(&mask, 0, 5, |cpu| match cpu {
+            0 => Some(9),
+            1 => Some(4),
+            2 => Some(1),
+            _ => None,
+        });
+        assert_eq!(idx, 2);
+    }
+
+    #[def_test]
+    fn find_lowest_rt_cpu_skips_unready_cpu() {
+        let mut mask = KCpuMask::new();
+        mask.set(0, true);
+        mask.set(1, true);
+        let idx = find_lowest_rt_cpu(&mask, 2, 5, |cpu| match cpu {
+            1 => Some(9),
+            _ => None,
+        });
+        assert_eq!(idx, 1);
     }
 }
 

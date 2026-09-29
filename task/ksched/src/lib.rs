@@ -10,6 +10,7 @@ mod clock;
 mod config;
 mod entity;
 mod policy;
+mod ready_list;
 mod scheduler;
 #[cfg(unittest)]
 mod tests;
@@ -18,7 +19,9 @@ extern crate alloc;
 
 pub use class::{Decision, EnqueueKind, LeaveReason, UpdateKind};
 pub use clock::RqClock;
-pub use config::DEFAULT_SLICE_NS;
+pub use config::{
+    DEFAULT_RR_SLICE_NS, DEFAULT_RT_PERIOD_NS, DEFAULT_RT_RUNTIME_NS, DEFAULT_SLICE_NS,
+};
 pub use entity::{KernelClass, SchedTask};
-pub use policy::{Nice, SchedAttr, SchedClass, SchedError, SchedPolicy};
+pub use policy::{Nice, RtPrio, SchedAttr, SchedClass, SchedError, SchedPolicy};
 pub use scheduler::Scheduler;

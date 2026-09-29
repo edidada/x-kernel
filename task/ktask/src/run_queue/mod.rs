@@ -5,7 +5,8 @@
 //! Per-CPU run queue: ownership, placement, switch, and delayed reclaim.
 //!
 //! Submodules keep SMP placement out of the local leave/pick path:
-//! - `placement`: spawn idle-first, wake SIS, idle-pull source choice
+//! - `placement`: spawn idle-first or RT `find_lowest_rq`, wake SIS or RT
+//!   placement, idle-pull source choice
 //! - `rq`: leave / pick / switch / kick
 //! - `ownership`: `cpu_id` and `nr_running` / `nr_home` snapshots
 //! - `idle_pull`: steal a Ready `!on_cpu` waiter onto an about-to-idle CPU
@@ -15,8 +16,8 @@
 //!
 //! Callers still enter through `current_run_queue`, `select_run_queue`,
 //! `select_wake_run_queue`, `task_run_queue`, and `enforce_affinity_placement`.
-//! Placement reads remote `nr_running` / `nr_home` without taking a remote
-//! scheduler lock; `ksched` only sees the already-chosen queue.
+//! Placement reads remote `nr_running` / `nr_home` / `rt_preempt_rank` without
+//! taking a remote scheduler lock; `ksched` only sees the already-chosen queue.
 
 mod gc;
 #[cfg(feature = "smp")]
@@ -34,7 +35,7 @@ mod tests;
 
 use alloc::collections::VecDeque;
 #[cfg(feature = "smp")]
-use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::{AtomicU8, AtomicUsize};
 use core::{ptr::NonNull, sync::atomic::AtomicU64};
 
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
@@ -243,6 +244,13 @@ pub(crate) struct RunQueue {
     /// two idle CPUs prefer the one with fewer sticky residents.
     #[cfg(feature = "smp")]
     nr_home: AtomicUsize,
+    /// Snapshot of [`ksched::Scheduler::rt_preempt_rank`] for RT CPU pick.
+    ///
+    /// Written under [`Self::scheduler`] with `nr_running`. Remote selection
+    /// reads it without that lock. Relaxed is enough: a stale rank only
+    /// mis-places one wakeup, and the next enqueue rechecks on the dest RQ.
+    #[cfg(feature = "smp")]
+    rt_preempt_rank: AtomicU8,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]

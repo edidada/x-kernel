@@ -41,7 +41,8 @@ the node normally. Timer IRQ readiness remains a start-time requirement.
 
 X-Kernel splits class algorithms from the task runtime:
 
-- `ksched` supplies the Fair/Idle class arbitrator (`Scheduler`).
+- `ksched` supplies the class arbitrator (`Scheduler`): RT (FIFO/RR), Fair
+  (EEVDF), and Idle. Stop and Deadline still occupy rank only.
 - `ktask` owns lifecycle, current-task context, per-CPU run queues, switch,
   and block/wake.
 
@@ -560,10 +561,12 @@ readiness precedence and Linux restart policy belong to their callers.
   queueing delay for an unrelated runnable task.
 - A waker restores the task to `Ready` through
   `select_wake_run_queue(...).unblock_task(..., true)`.
-- SMP wake follows Linux `select_idle_sibling`: go home if `prev_cpu`
+- SMP wake for Fair follows Linux `select_idle_sibling`: go home if `prev_cpu`
   (`task.cpu_id()`) is idle; otherwise pick a `nr_running == 0` CPU in the
   cpumask; if all are busy stay on prev; only if home is outside the cpumask
-  and no idle CPU exists does it use `find_idlest_cpu`.
+  and no idle CPU exists does it use `find_idlest_cpu`. RT wake and spawn use
+  `find_lowest_rq`: stay on the hint CPU when this priority can preempt the
+  runner there, otherwise the allowed CPU whose runner rank is weakest.
 - `unblock_task(..., true)` sets `need_resched` on this CPU and, when
   `ipi + preempt` are available, requests the same on a remote CPU.
 - After waking `interrupt_waker`, `TaskInner::interrupt()` calls
@@ -618,24 +621,25 @@ exit completion.
     exists
 - SMP `switch_to` checks `next_task.cpu_id() == rq.cpu_id` so a task cannot
   switch onto the wrong queue.
-- `placement.rs` (`select_run_queue`) matches Linux fork `find_idlest_cpu`:
-  **idle-first** (`nr_running == 0`; a sleeper CPU still counts as idle),
-  then `nr_home`. After SIS is in place, landing a clone on a sleeper CPU is
-  safe: the displaced worker can seek idle on the next wake. Among idle CPUs,
-  lower `nr_home` still wins (an empty CPU beats a sleeper's CPU). Ties use
-  `prefer_local`, then RR.
-- `placement.rs` (`select_wake_run_queue`) matches Linux `select_idle_sibling`:
-  go home if prev is idle, otherwise pick a `nr_running == 0` CPU.
+- `placement.rs` (`select_run_queue`) for Fair matches Linux fork
+  `find_idlest_cpu`: **idle-first** (`nr_running == 0`; a sleeper CPU still
+  counts as idle), then `nr_home`. RT uses `select_rt_cpu` (`find_lowest_rq`)
+  against the lock-free `rt_preempt_rank` snapshot. After SIS is in place,
+  landing a Fair clone on a sleeper CPU is safe: the displaced worker can seek
+  idle on the next wake. Among idle CPUs, lower `nr_home` still wins (an empty
+  CPU beats a sleeper's CPU). Ties use `prefer_local`, then RR.
+- `placement.rs` (`select_wake_run_queue`) for Fair matches Linux
+  `select_idle_sibling`: go home if prev is idle, otherwise pick a
+  `nr_running == 0` CPU. RT uses the same `find_lowest_rq` ranking as spawn.
   `nr_running` is `refactor_ksched`'s `load_count`: queued plus a non-idle
   runner. Sticky-home plus "home busy → idle overflow" collapsed schbench to
   about 3-way parallelism (RPS ~450 → ~325). Under SIS the displaced worker
   can seek idle again (musical chairs, still about 4-way on average). Stay on
   prev when no idle CPU exists.
-- There is no periodic balancer. Besides affinity and the wake SIS above,
-  an about-to-idle CPU does a Linux-style idle-pull: steal one
-  **Ready && `!on_cpu`** waiter from a CPU with `nr_running >= 2`, through
-  source `steal_ready_task` (internal `remove_task`, PLACE_LAG) then local
-  `enqueue_task`. Lock only src, then dest enqueue, so dest-then-src cannot
+- There is no periodic balancer. Besides affinity and the wake placement
+  above, an about-to-idle CPU does a Linux-style idle-pull: steal one
+  **Ready && `!on_cpu`** RT waiter before any Fair waiter, from a CPU with
+  `nr_running >= 2`, through source `steal` then local `enqueue_task`. Lock only src, then dest enqueue, so dest-then-src cannot
   deadlock against a remote wake. Recheck cpumask after enqueue: affinity
   may have excluded dest between steal and enqueue; if dest is not allowed,
   `migrate_entry` immediately so this CPU does not pick a forbidden task.
@@ -831,10 +835,9 @@ The scheduling algorithm is selected by Kconfig (default EEVDF).
 These tests assert no early completion, not a wall-clock upper bound. Host load
 and QEMU timing affect latency; performance comparisons require controlled runs.
 
-Default request length is `ksched::DEFAULT_SLICE_NS` (2 ms). RR does not
-share this EEVDF request: its historical quantum stays
-`ksched::DEFAULT_RR_SLICE_NS` = 50 ms so RR context-switch rate is not
-multiplied by 25.
+Default request length is `ksched::DEFAULT_SLICE_NS` (2 ms). `SCHED_RR` does
+not share this EEVDF request. Its quantum is `ksched::DEFAULT_RR_SLICE_NS`
+(100 ms, `SCHED_RR_SLICE_US`).
 
 ## Design decisions
 

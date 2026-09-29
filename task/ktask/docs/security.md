@@ -228,7 +228,7 @@ Invariants:
 2. `&'static mut RunQueue` from `try_get` does not mean the caller already
    holds that CPU's IRQ/preempt exclusion. Local paths rely on IRQ/preempt
    off; cross-CPU paths rely on the dest RQ `SpinRaw` (`nr_running` /
-   `nr_home` are atomics). Do not hold two `&mut RunQueue` aliases for the
+   `nr_home` / `rt_preempt_rank` are atomics). Do not hold two `&mut RunQueue` aliases for the
    same CPU.
 3. Each `RUN_QUEUES` slot is written once at that CPU's `init` /
    `init_secondary`.
@@ -442,10 +442,11 @@ Known limits:
    scheduler lock so a remote CPU cannot snatch the buddy between two
    acquires. A running task must leave through unified `leave_current`.
    EEVDF `curr` is not a task-lifetime owner.
-2. `select_run_queue` is idle-first (`nr_running == 0`) then `nr_home`.
-   `select_wake_run_queue` matches `select_idle_sibling` (home if prev is
+2. Fair `select_run_queue` is idle-first (`nr_running == 0`) then `nr_home`.
+   Fair `select_wake_run_queue` matches `select_idle_sibling` (home if prev is
    idle, otherwise `nr_running == 0` from `load_count`; stay on prev if none idle; `find_idlest`
-   only when home is outside the cpumask and no idle CPU exists). Do not add
+   only when home is outside the cpumask and no idle CPU exists). RT spawn and
+   wake use `find_lowest_rq` on `rt_preempt_rank`, not SIS. Do not add
    a separate sticky-home idle overflow before SIS.
 3. SMP must enable `ipi`: a remote wake's `kick` sets `need_resched`
    through IPI. `interrupt()` of a running task (signal delivery) uses the

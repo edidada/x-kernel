@@ -6,12 +6,12 @@
 
 use alloc::sync::Arc;
 #[cfg(feature = "smp")]
-use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::{AtomicU8, AtomicUsize};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use kcpu_id_map::LogicalCpuId;
 use khal::percpu::this_cpu_id;
-use ksched::{Decision, EnqueueKind, Nice, SchedAttr, SchedPolicy, UpdateKind};
+use ksched::{Decision, EnqueueKind, Nice, UpdateKind};
 use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
 
 #[cfg(feature = "smp")]
@@ -503,26 +503,6 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         debug!("task block: {}", curr.id_name());
         self.inner.resched(pull_if_empty);
     }
-
-    pub fn set_current_priority(&mut self, prio: isize) -> bool {
-        let now_ns = khal::time::monotonic_time_nanos();
-        let Some(decision) = self.inner.set_fair_nice(&self.current_task, prio, now_ns) else {
-            return false;
-        };
-        self.inner.kick(decision);
-        true
-    }
-}
-
-impl<G: BaseGuard> KRunQueueRef<'_, G> {
-    pub fn set_task_priority(&mut self, task: &KtaskRef, prio: isize) -> bool {
-        let now_ns = khal::time::monotonic_time_nanos();
-        let Some(decision) = self.inner.set_fair_nice(task, prio, now_ns) else {
-            return false;
-        };
-        self.inner.kick(decision);
-        true
-    }
 }
 
 impl RunQueue {
@@ -541,6 +521,8 @@ impl RunQueue {
             nr_running: AtomicUsize::new(0),
             #[cfg(feature = "smp")]
             nr_home: AtomicUsize::new(0),
+            #[cfg(feature = "smp")]
+            rt_preempt_rank: AtomicU8::new(0),
         };
         // Publish through the ownership-aware entry so secondary-CPU gc tasks
         // do not keep the default `cpu_id == 0`.
@@ -552,7 +534,11 @@ impl RunQueue {
         let mut sched = self.scheduler.lock();
         let r = f(&mut sched);
         #[cfg(feature = "smp")]
-        self.store_load(Self::load_count(&sched));
+        {
+            self.store_load(Self::load_count(&sched));
+            self.rt_preempt_rank
+                .store(sched.rt_preempt_rank(), Ordering::Relaxed);
+        }
         r
     }
 
@@ -565,6 +551,12 @@ impl RunQueue {
     #[cfg(feature = "smp")]
     fn store_load(&self, n: usize) {
         self.nr_running.store(n, Ordering::Relaxed);
+    }
+
+    /// Lock-free copy of the runner's RT preempt rank.
+    #[cfg(feature = "smp")]
+    pub(super) fn rt_preempt_rank_snapshot(&self) -> u8 {
+        self.rt_preempt_rank.load(Ordering::Relaxed)
     }
 
     /// Leave the runner and report whether the ready tree is empty in the same hold.
@@ -589,24 +581,36 @@ impl RunQueue {
     /// or the affinity migration helper).
     pub(super) fn install_running(&self, task: &KtaskRef) {
         let now_ns = khal::time::monotonic_time_nanos();
-        self.with_sched(|s| s.install_current(task.clone(), now_ns));
+        self.with_sched(|s| {
+            let _entity = task.lock_sched_entity();
+            s.install_current(task.clone(), now_ns);
+        });
         self.last_accounted_ns.store(now_ns, Ordering::Relaxed);
     }
 
-    /// Store a Fair nice value. `None` when `prio` is out of range or the
-    /// task is the Idle class.
-    pub(super) fn set_fair_nice(
-        &self,
-        task: &KtaskRef,
-        prio: isize,
-        now_ns: u64,
-    ) -> Option<Decision> {
-        let nice = Nice::new(prio as i32).ok()?;
-        let attr = SchedAttr {
-            policy: SchedPolicy::Normal,
-            nice,
+    /// Store a nice value without changing policy or RT priority.
+    ///
+    /// Locks the run queue that currently owns `task`, rechecks `cpu_id`, and
+    /// holds the task entity lock across the update.
+    ///
+    /// Returns `false` when `prio` is outside `-20..=19` or the task is Idle.
+    pub(crate) fn set_task_nice(task: &KtaskRef, prio: isize) -> bool {
+        let Some(nice) = Nice::new(prio as i32).ok() else {
+            return false;
         };
-        self.with_sched(|s| s.set_attr(task, attr, now_ns)).ok()
+        let now_ns = khal::time::monotonic_time_nanos();
+        let mut locked = task_rq_lock::<kspin::NoPreemptIrqSave>(task);
+        let decision = {
+            let sched = locked.scheduler();
+            let mut attr = sched.attr(task);
+            attr.nice = nice;
+            match sched.set_attr(task, attr, now_ns) {
+                Ok(decision) => decision,
+                Err(_) => return false,
+            }
+        };
+        locked.kick(decision);
+        true
     }
 
     /// Advances the account epoch and returns elapsed wall time.
@@ -641,12 +645,20 @@ impl RunQueue {
     /// `cpu_id` / `nr_home` move with the enqueue. Callers must not
     /// `Scheduler::enqueue` a published task without this.
     pub(super) fn publish_task(&self, task: KtaskRef, kind: EnqueueKind, now_ns: u64) -> Decision {
-        #[cfg(feature = "smp")]
-        self.attach_owner(&task);
-        #[cfg(feature = "smp")]
-        self.charge_home(&task);
         let _elapsed = Self::advance_account_epoch(&self.last_accounted_ns, now_ns);
-        self.with_sched(|s| s.enqueue(task, kind, now_ns))
+        self.with_sched(|s| {
+            // Entity lock after the RQ lock. `cpu_id` changes here, still
+            // under this lock, so a remote nice update that already observed
+            // the old id retries instead of editing the task on the wrong RQ.
+            let _entity = task.lock_sched_entity();
+            #[cfg(feature = "smp")]
+            {
+                self.attach_owner(&task);
+                self.charge_home(&task);
+            }
+            let queued = task.clone();
+            s.enqueue(queued, kind, now_ns)
+        })
     }
 
     /// Enqueue a non-current ready task onto this run queue (migrate-in).
@@ -673,9 +685,9 @@ impl RunQueue {
     /// never takes this path.
     #[cfg(feature = "smp")]
     fn switch_to_local(&self, prev_task: CurrentTask, next_task: KtaskRef) {
-        #[cfg(feature = "smp")]
-        self.attach_owner(&next_task);
         self.with_sched(|s| {
+            let _entity = next_task.lock_sched_entity();
+            self.attach_owner(&next_task);
             s.install_current(next_task.clone(), khal::time::monotonic_time_nanos());
         });
         self.switch_to(prev_task, next_task);
@@ -708,7 +720,9 @@ impl RunQueue {
                 // `on_cpu=false` then swaps the flags. SeqCst atomics plus the
                 // store→load fence in `arm_wake_enqueue` / below; SeqCst
                 // store then SeqCst load of another location is not enough.
-                self.attach_owner(&task);
+                // Destination stays in `wake_cpu` until enqueue. `cpu_id` keeps
+                // naming the scheduler that still owns the entity.
+                task.set_wake_cpu(self.cpu_id);
                 task.arm_wake_enqueue(is_wake_sync, resched);
                 if task.on_cpu() {
                     return (WakeEnqueue::Deferred, None);
@@ -716,6 +730,7 @@ impl RunQueue {
                 if task.take_wake_enqueue().is_none() {
                     return (WakeEnqueue::Deferred, None);
                 }
+                let _ = task.take_wake_cpu();
             }
             let decision = self.enqueue_ready_task(task, is_wake_sync);
             (WakeEnqueue::Enqueued, Some(decision))
@@ -903,7 +918,9 @@ pub(crate) unsafe fn clear_prev_task_on_cpu(current_rq: &RunQueue) {
         prev_task.state()
     );
 
-    let target_cpu = prev_task.cpu_id();
+    let target_cpu = prev_task
+        .take_wake_cpu()
+        .unwrap_or_else(|| prev_task.cpu_id());
     let is_local = target_cpu == current_rq.cpu_id;
     let target_rq = if is_local {
         current_rq
@@ -913,5 +930,83 @@ pub(crate) unsafe fn clear_prev_task_on_cpu(current_rq: &RunQueue) {
     let decision = target_rq.enqueue_ready_task(prev_task, is_wake_sync);
     if resched {
         target_rq.kick(decision);
+    }
+}
+
+/// Run-queue lock for `task`, retried if `cpu_id` moves.
+///
+/// Acquires the IRQ/preempt guard, locks that CPU's scheduler, then the task
+/// entity lock, and rechecks `cpu_id`. Lock order is scheduler lock, then
+/// entity lock.
+fn task_rq_lock<G: BaseGuard>(task: &KtaskRef) -> TaskRqLock<'_, G> {
+    loop {
+        let state = G::acquire();
+        #[cfg(not(feature = "smp"))]
+        let rq = super::current_run_queue_ref();
+        #[cfg(feature = "smp")]
+        let rq = match super::RUN_QUEUES.try_get(task.cpu_id().as_usize()) {
+            Some(rq) => rq,
+            None => {
+                G::release(state);
+                core::hint::spin_loop();
+                continue;
+            }
+        };
+        let sched = rq.scheduler.lock();
+        let entity = task.lock_sched_entity();
+        if task.cpu_id() == rq.cpu_id {
+            return TaskRqLock {
+                rq,
+                sched: Some(sched),
+                entity: Some(entity),
+                state: Some(state),
+            };
+        }
+        drop(entity);
+        drop(sched);
+        G::release(state);
+    }
+}
+
+struct TaskRqLock<'a, G: BaseGuard> {
+    rq: &'static super::RunQueue,
+    sched: Option<kspin::SpinRawGuard<'static, Scheduler>>,
+    entity: Option<kspin::SpinRawGuard<'a, ()>>,
+    state: Option<G::State>,
+}
+
+impl<'a, G: BaseGuard> TaskRqLock<'a, G> {
+    fn scheduler(&mut self) -> &mut Scheduler {
+        self.sched.as_mut().expect("scheduler lock already dropped")
+    }
+
+    fn publish_load(&mut self) {
+        #[cfg(feature = "smp")]
+        if let Some(sched) = self.sched.as_ref() {
+            let n = super::RunQueue::load_count(sched);
+            self.rq.store_load(n);
+            self.rq
+                .rt_preempt_rank
+                .store(sched.rt_preempt_rank(), Ordering::Relaxed);
+        }
+    }
+
+    fn kick(mut self, decision: Decision) {
+        let rq = self.rq;
+        self.publish_load();
+        self.entity.take();
+        self.sched.take();
+        rq.kick(decision);
+    }
+}
+
+impl<G: BaseGuard> Drop for TaskRqLock<'_, G> {
+    fn drop(&mut self) {
+        self.publish_load();
+        self.entity.take();
+        self.sched.take();
+        if let Some(state) = self.state.take() {
+            G::release(state);
+        }
     }
 }
