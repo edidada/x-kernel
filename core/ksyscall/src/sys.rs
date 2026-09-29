@@ -310,3 +310,30 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> KResult<isize> {
 pub fn sys_seccomp(_op: u32, _flags: u32, _args: *const ()) -> KResult<isize> {
     Err(KError::from(kerrno::LinuxError::ENOSYS))
 }
+
+#[cfg(unittest)]
+mod tests_sysinfo {
+    use alloc::vec;
+    use core::mem::{offset_of, size_of};
+
+    use posix_types::{UserPtr, system::k_sysinfo};
+    use unittest::def_test;
+    use unittest_support::TestUserBuffer;
+
+    use super::sys_sysinfo;
+
+    #[def_test(user)]
+    fn test_sysinfo_zeroes_abi_padding() {
+        let size = size_of::<k_sysinfo>();
+        let buf = TestUserBuffer::new(size).unwrap();
+        buf.write_bytes(&vec![0x5a; size]).unwrap();
+
+        sys_sysinfo(UserPtr::from(buf.as_user_ptr::<k_sysinfo>())).unwrap();
+
+        let bytes = buf.read_bytes(size).unwrap();
+        let gap = offset_of!(k_sysinfo, pad) + size_of::<u16>()..offset_of!(k_sysinfo, totalhigh);
+        let tail = offset_of!(k_sysinfo, mem_unit) + size_of::<u32>()..size;
+        assert!(bytes[gap].iter().all(|&byte| byte == 0));
+        assert!(bytes[tail].iter().all(|&byte| byte == 0));
+    }
+}
