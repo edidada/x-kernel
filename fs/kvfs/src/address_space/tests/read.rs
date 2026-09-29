@@ -39,7 +39,7 @@ fn buffered_read_crosses_windows_with_unaligned_eof_and_cache_holes() {
     let mut output = vec![0xff; file_len];
     let mut iter = iov_iter_kvec_dest(&mut output);
     let copied = mapping
-        .read_from_page_cache(&mut iter, offset, file_len as u64)
+        .read_from_page_cache(&mut iter, offset, file_len as u64, None)
         .expect("read across multiple windows");
     assert_eq!(copied, file_len - offset as usize);
     for (position, byte) in output[..copied].iter().enumerate() {
@@ -79,7 +79,7 @@ fn buffered_read_stops_on_short_or_zero_copy() {
         let mut sink = ShortSink { copied: 0, limit };
         let mut iter = iov_iter_dest(&mut sink);
         assert_eq!(
-            mapping.read_from_page_cache(&mut iter, 0, (PAGE_SIZE_4K * 40) as u64),
+            mapping.read_from_page_cache(&mut iter, 0, (PAGE_SIZE_4K * 40) as u64, None),
             Ok(limit)
         );
         assert_eq!(sink.copied, limit);
@@ -130,7 +130,7 @@ fn buffered_read_resolves_pages_removed_after_window_preparation() {
     };
     let mut iter = iov_iter_dest(&mut sink);
     assert_eq!(
-        mapping.read_from_page_cache(&mut iter, 0, (PAGE_SIZE_4K * 3) as u64),
+        mapping.read_from_page_cache(&mut iter, 0, (PAGE_SIZE_4K * 3) as u64, None),
         Ok(PAGE_SIZE_4K * 3)
     );
     assert!(sink.output[..PAGE_SIZE_4K].iter().all(|byte| *byte == 0x99));
