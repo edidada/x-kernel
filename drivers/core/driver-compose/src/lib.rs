@@ -285,6 +285,9 @@ fn enumerate_static_devices() {
         DeviceLocation::PlatformStatic { id: 0 },
         DeviceIdentity::Platform(PlatformIdentity {
             firmware_id: None,
+            // Board-static devices carry no DT compatible list; drivers
+            // claim them by alias, not by of-match.
+            compatibles: alloc::vec::Vec::new(),
             alias: Some(alloc::string::String::from("ramdisk")),
         }),
     );
