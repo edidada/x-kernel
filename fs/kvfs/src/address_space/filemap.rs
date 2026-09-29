@@ -9,7 +9,7 @@ use alloc::sync::Arc;
 use iov_iter::{IovIterDest, IovIterSource};
 use kerrno::KResult;
 use memaddr::PAGE_SIZE_4K;
-use pagecache::{Folio, PageIndex};
+use pagecache::{Folio, FolioBatch, PageIndex};
 
 use super::{AddressSpace, WriteBeginRequest, WriteEndRequest};
 use crate::{Kiocb, VfsError, VfsInode, VfsResult};
@@ -328,6 +328,9 @@ impl AddressSpace {
     ) -> VfsResult<usize> {
         let mut written = 0usize;
         let mut visible_len = self.visible_len()?;
+        let mut batch: Option<(PageIndex, FolioBatch)> = None;
+        let first_page_off = (offset % PAGE_SIZE_4K as u64) as usize;
+        let mut can_batch_lookup = len > PAGE_SIZE_4K - first_page_off;
         while written < len {
             let pos = offset
                 .checked_add(written as u64)
@@ -346,15 +349,38 @@ impl AddressSpace {
             if grew_cache {
                 self.i_pages.resize_cached_folios(visible_len, prepared_end);
             }
+
+            if can_batch_lookup
+                && len - written > step
+                && batch
+                    .as_ref()
+                    .is_none_or(|(start, batch)| index - start >= batch.len() as u64)
+            {
+                let count = (len - written)
+                    .saturating_add(page_off)
+                    .div_ceil(PAGE_SIZE_4K);
+                let folios = self.i_pages.get_folios_contig(index, count);
+                // A short resident run identifies a hole. Consume that prefix,
+                // then keep remaining pages on the ordinary materialization path.
+                can_batch_lookup = folios.len() == count.min(FolioBatch::CAPACITY);
+                batch = (!folios.is_empty()).then_some((index, folios));
+            }
             let mut copied = 0;
-            let copy_result = self.with_folio_or_create_invalidate_locked(index, |folio| {
+            let mut copy_fn = |folio: &mut Folio| {
                 let data = folio.data();
                 copied = iter.copy_from_iter(&mut data[page_off..page_off + step])?;
                 if copied != 0 {
                     self.dirty_folio(folio)?;
                 }
                 Ok(())
-            });
+            };
+            let copy_result = batch
+                .as_ref()
+                .and_then(|(start, batch)| {
+                    let slot = usize::try_from(index - start).ok()?;
+                    self.i_pages.with_batch_folio(batch, slot, &mut copy_fn)
+                })
+                .unwrap_or_else(|| self.with_folio_or_create_invalidate_locked(index, copy_fn));
             if let Err(error) = copy_result {
                 iter.revert(copied)?;
                 if let Err(cancel_error) = self

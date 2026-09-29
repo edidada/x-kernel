@@ -50,6 +50,21 @@ impl MappingPages {
         (batch, run_len)
     }
 
+    /// Runs `f` with a valid folio at a batch position, reconciling dirty changes.
+    ///
+    /// The batch must have been collected from this mapping. The callback runs
+    /// once under the folio lock without a mapping lock and must not re-enter
+    /// this mapping. Returns `None` without calling `f` for absent or invalidated
+    /// entries; the caller must resolve the page again through ordinary lookup.
+    pub fn with_batch_folio<R>(
+        &self,
+        batch: &FolioBatch,
+        slot: usize,
+        f: impl FnOnce(&mut Folio) -> R,
+    ) -> Option<R> {
+        self.with_valid_folio(batch.get(slot)?, f)
+    }
+
     /// Runs `f` with the cached folio at `index`, if present.
     ///
     /// Retries removed candidates; calls `f` once under the folio lock.

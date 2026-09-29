@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Bounded references shared by cached reads, writeback and mapping traversal.
+//! Bounded references shared by cached I/O, writeback and mapping traversal.
 
 use alloc::sync::Arc;
 
@@ -52,6 +52,10 @@ impl FolioBatch {
             return None;
         }
         Some(read(locked.data()))
+    }
+
+    pub(crate) fn get(&self, slot: usize) -> Option<&Arc<Mutex<Folio>>> {
+        self.entries.get(slot)?.as_ref()
     }
 
     pub(crate) fn is_full(&self) -> bool {
