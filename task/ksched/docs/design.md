@@ -5,7 +5,10 @@
 `ksched` 的生产调度器是类仲裁器。`ktask` 在持有运行队列锁时调用
 `Scheduler`。仲裁器按 Linux 秩遍历 Stop、Deadline、RT、Fair、Idle：这一层
 实现 RT（FIFO/RR）、Fair（EEVDF）和 Idle。Stop 与 Deadline 仍只占秩，
-`pick_next` 返回空、`enqueue` 视为编程错误。
+`pick_next` 返回空、`enqueue` 视为编程错误。用户任务仍由
+`SchedTask::new` 建成 Fair：`sched_setscheduler` 只写线程快照，还不调用
+`Scheduler::set_attr`，所以生产路径上 `sched_class() == Rt` 目前不成立。
+`find_lowest_rq` 和 `rt_preempt_rank` 要等这条 ABI 接上才有任务走进去。
 
 ## 背景
 
@@ -213,5 +216,6 @@ EEVDF steal 逐节点检查时，以游标 get_ptr 构造 ManuallyDrop<Arc<_>>
 `Arc`。
 
 节流是每 RQ 的：`account` 累加 runner 的墙钟，达到 runtime 后 `has_runnable`
-为假，`class_timer_ns` 指向本周期结束。周期推进在 `advance` 里用绝对
-`RqClock`，不另采样时钟。
+为假，`pick_next` 跳过本队列的 RT，`class_timer_ns` 指向本周期结束。
+`steal` 不看节流：idle-pull 可以把这些 waiter 摘到另一颗仍有 runtime 的
+CPU，占用记在目标 RQ 上。周期推进在 `advance` 里用绝对 `RqClock`，不另采样时钟。

@@ -113,10 +113,10 @@ impl SchedPolicy {
 pub struct RtPrio(u8);
 
 impl RtPrio {
-    /// Highest valid RT priority.
-    pub const MAX: RtPrio = RtPrio(99);
-    /// Lowest valid RT priority.
-    pub const MIN: RtPrio = RtPrio(1);
+    /// Highest valid RT priority. Same bound as `config::MAX_RT_PRIORITY`.
+    pub const MAX: RtPrio = RtPrio(crate::config::MAX_RT_PRIORITY);
+    /// Lowest valid RT priority. Same bound as `config::MIN_RT_PRIORITY`.
+    pub const MIN: RtPrio = RtPrio(crate::config::MIN_RT_PRIORITY);
     /// Not a realtime task.
     pub const NONE: RtPrio = RtPrio(0);
 
@@ -127,7 +127,7 @@ impl RtPrio {
     /// Returns [`SchedError::InvalidPriority`] when `v` is outside `1..=99`.
     /// [`Self::NONE`] (`0`) is the non-RT sentinel and is not accepted here.
     pub const fn new(v: i32) -> Result<Self, SchedError> {
-        if v < 1 || v > 99 {
+        if v < Self::MIN.get() as i32 || v > Self::MAX.get() as i32 {
             Err(SchedError::InvalidPriority)
         } else {
             Ok(RtPrio(v as u8))

@@ -14,7 +14,7 @@ use crate::{
     DEFAULT_RR_SLICE_NS, DEFAULT_RT_PERIOD_NS, DEFAULT_RT_RUNTIME_NS,
     class::{ClassOps, EnqueueKind, LeaveReason},
     clock::RqClock,
-    config::{MIN_RT_PRIORITY, RT_PRIO_LEVELS},
+    config::{MAX_RT_PRIORITY, MIN_RT_PRIORITY, RT_PRIO_LEVELS},
     entity::{QueueSeat, RqLocked, SchedTask},
     policy::{SchedAttr, SchedClass, SchedError, SchedPolicy},
     ready_list::ReadyList,
@@ -28,9 +28,6 @@ pub(crate) struct RtClass<T> {
     used_ns: u64,
     period_start_ns: u64,
     is_throttled: bool,
-    /// The running RR task finished its quantum and should requeue at the tail
-    /// if this preemption is the one `account` just requested.
-    rr_rotate_curr: bool,
     rr_slice_ns: u64,
     rt_runtime_ns: u64,
     rt_period_ns: u64,
@@ -45,7 +42,6 @@ impl<T> RtClass<T> {
             used_ns: 0,
             period_start_ns: 0,
             is_throttled: false,
-            rr_rotate_curr: false,
             rr_slice_ns: DEFAULT_RR_SLICE_NS,
             rt_runtime_ns: DEFAULT_RT_RUNTIME_NS,
             rt_period_ns: DEFAULT_RT_PERIOD_NS,
@@ -53,6 +49,10 @@ impl<T> RtClass<T> {
     }
 
     fn idx(priority: u8) -> usize {
+        assert!(
+            (MIN_RT_PRIORITY..=MAX_RT_PRIORITY).contains(&priority),
+            "RT priority {priority} is outside {MIN_RT_PRIORITY}..={MAX_RT_PRIORITY}"
+        );
         (priority - MIN_RT_PRIORITY) as usize
     }
 
@@ -79,12 +79,11 @@ impl<T> RtClass<T> {
     }
 
     fn has_same_prio_waiter(&self, priority: u8) -> bool {
-        (MIN_RT_PRIORITY..=99).contains(&priority) && self.is_occupied(priority)
+        (MIN_RT_PRIORITY..=MAX_RT_PRIORITY).contains(&priority) && self.is_occupied(priority)
     }
 
     fn enqueue_ready(&mut self, task: Arc<SchedTask<T>>, front: bool, tok: RqLocked) {
         let priority = task.rt_priority(tok).get();
-        debug_assert!((MIN_RT_PRIORITY..=99).contains(&priority));
         task.set_seat(QueueSeat::Rt, tok);
         if front {
             self.queues[Self::idx(priority)].push_front(task);
@@ -109,7 +108,7 @@ impl<T> RtClass<T> {
         task: &SchedTask<T>,
         tok: RqLocked,
     ) -> Option<Arc<SchedTask<T>>> {
-        if !(MIN_RT_PRIORITY..=99).contains(&priority) || !self.is_occupied(priority) {
+        if !(MIN_RT_PRIORITY..=MAX_RT_PRIORITY).contains(&priority) || !self.is_occupied(priority) {
             return None;
         }
         let list = &mut self.queues[Self::idx(priority)];
@@ -188,6 +187,9 @@ impl<T> ClassOps<T> for RtClass<T> {
         _clk: &RqClock,
         tok: RqLocked,
     ) -> Option<Arc<SchedTask<T>>> {
+        // Throttle blocks `pick_next` on this RQ only. Bandwidth is per RQ,
+        // so idle-pull may move a waiter onto a CPU that still has runtime.
+        // The destination charges its own `used_ns` after the task runs there.
         let highest = self.highest_ready_prio()?;
         for prio in (MIN_RT_PRIORITY..=highest).rev() {
             if !self.is_occupied(prio) {
@@ -229,15 +231,15 @@ impl<T> ClassOps<T> for RtClass<T> {
         _clk: &RqClock,
         tok: RqLocked,
     ) -> bool {
+        let rotate = prev.rt().rr_rotate.get(tok);
+        prev.rt().rr_rotate.set(false, tok);
         match reason {
             LeaveReason::Yield => {
-                self.rr_rotate_curr = false;
                 self.enqueue_tail(prev, tok);
                 true
             }
             LeaveReason::Preempt => {
-                if self.rr_rotate_curr {
-                    self.rr_rotate_curr = false;
+                if rotate {
                     self.enqueue_tail(prev, tok);
                 } else {
                     self.enqueue_head(prev, tok);
@@ -246,10 +248,7 @@ impl<T> ClassOps<T> for RtClass<T> {
             }
             // Block, migrate, and exit stay off this CPU. The destination
             // enqueues a migrate with `EnqueueKind::MigrateIn`.
-            LeaveReason::Block | LeaveReason::Migrate | LeaveReason::Exit => {
-                self.rr_rotate_curr = false;
-                false
-            }
+            LeaveReason::Block | LeaveReason::Migrate | LeaveReason::Exit => false,
         }
     }
 
@@ -276,11 +275,14 @@ impl<T> ClassOps<T> for RtClass<T> {
                 // not find a zero slice and rotate immediately.
                 curr.rt().rr_left_ns.set(self.rr_slice_ns, tok);
                 let rotate = self.has_same_prio_waiter(curr.rt_priority(tok).get());
-                self.rr_rotate_curr = rotate;
+                curr.rt().rr_rotate.set(rotate, tok);
                 expired = rotate;
             } else {
                 curr.rt().rr_left_ns.set(left, tok);
-                self.rr_rotate_curr = false;
+                // Do not clear `rr_rotate` here. The tick that expired the
+                // slice refills it, then `preempt_resched` accounts again
+                // before `put_prev`. That second charge must not cancel the
+                // rotation or drop the reschedule.
             }
         }
         expired || self.is_throttled
@@ -291,6 +293,12 @@ impl<T> ClassOps<T> for RtClass<T> {
     }
 
     fn wakeup_preempts(&mut self, curr: &SchedTask<T>, _clk: &RqClock, tok: RqLocked) -> bool {
+        // A slice expiry already asked to rotate. A later WakeProbe must not
+        // drop that reschedule just because the same-priority peer is not
+        // strictly higher.
+        if curr.rt().rr_rotate.get(tok) {
+            return true;
+        }
         if self.is_throttled {
             return false;
         }
@@ -337,6 +345,9 @@ impl<T> ClassOps<T> for RtClass<T> {
         if entered_rr {
             task.rt().rr_left_ns.set(self.rr_slice_ns, tok);
         }
+        if task.policy(tok) != SchedPolicy::Rr {
+            task.rt().rr_rotate.set(false, tok);
+        }
         if is_curr {
             return;
         }
@@ -359,18 +370,26 @@ impl<T> ClassOps<T> for RtClass<T> {
         _new: SchedAttr,
         _tok: RqLocked,
     ) -> Result<(), SchedError> {
-        // `SchedAttr::validate` already rejected a bad FIFO/RR priority and
-        // Deadline. This class has no bandwidth admission.
+        // Structural checks are `SchedAttr::validate`: FIFO/RR priority
+        // `1..=99`, no Deadline. This class has no bandwidth cap.
+        //
+        // Privilege is not decided here. `ksched` never sees credentials.
+        // The only party that may call `Scheduler::set_attr` with an RT
+        // policy is responsible for `CAP_SYS_NICE` (here, `euid == 0`)
+        // first. Today's `sys_sched_setscheduler` does not call `set_attr`;
+        // wiring it without that check lets an unprivileged FIFO 99 task
+        // starve every Fair task.
         Ok(())
     }
 
     fn switched_from(
         &mut self,
-        _task: &SchedTask<T>,
+        task: &SchedTask<T>,
         _is_curr: bool,
         _clk: &RqClock,
-        _tok: RqLocked,
+        tok: RqLocked,
     ) {
+        task.rt().rr_rotate.set(false, tok);
     }
 
     fn switched_to(&mut self, task: &SchedTask<T>, _is_curr: bool, _clk: &RqClock, tok: RqLocked) {

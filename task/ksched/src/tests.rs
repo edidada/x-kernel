@@ -565,6 +565,26 @@ fn rt_rr_slice_rotates_same_priority() {
 }
 
 #[def_test]
+fn rt_rr_slice_survives_later_account() {
+    let mut s = sched();
+    let a = task(1);
+    let b = task(2);
+    s.set_attr(&a, rt_attr(SchedPolicy::Rr, 3), 0).unwrap();
+    s.set_attr(&b, rt_attr(SchedPolicy::Rr, 3), 0).unwrap();
+    enqueue_new(&mut s, a);
+    enqueue_new(&mut s, b);
+    assert_eq!(pick_id(&mut s, 0), 1);
+    let tick = s.update(DEFAULT_RR_SLICE_NS, UpdateKind::SchedTick);
+    assert!(tick.resched);
+    // Production preempt_resched accounts again, with a later timestamp,
+    // before leave. Same-priority RR must still rotate.
+    let probe = s.update(DEFAULT_RR_SLICE_NS + 1, UpdateKind::WakeProbe);
+    assert!(probe.resched);
+    s.preempt_current(DEFAULT_RR_SLICE_NS + 1);
+    assert_eq!(pick_id(&mut s, DEFAULT_RR_SLICE_NS + 1), 2);
+}
+
+#[def_test]
 fn rt_bandwidth_yields_to_fair() {
     let mut s = sched();
     let fair = task(1);
@@ -664,4 +684,66 @@ fn rt_throttle_lifts_after_skipped_periods() {
     let resumed = s.update(later, UpdateKind::Account);
     assert!(resumed.resched);
     assert_eq!(leave_pick(&mut s, later), 2);
+}
+
+#[def_test]
+fn rt_throttled_idle_keeps_period_event() {
+    let mut s = sched();
+    let rt = task(1);
+    s.set_attr(&rt, rt_attr(SchedPolicy::Fifo, 5), 0).unwrap();
+    enqueue_new(&mut s, rt);
+    assert_eq!(pick_id(&mut s, 0), 1);
+    let throttled = s.update(DEFAULT_RT_RUNTIME_NS, UpdateKind::Account);
+    assert!(throttled.resched);
+    s.preempt_current(DEFAULT_RT_RUNTIME_NS);
+    let next = s.pick_next(DEFAULT_RT_RUNTIME_NS);
+    assert!(next.is_idle_class());
+    let until_period = s.next_event_ns();
+    assert!(until_period.is_some_and(|ns| ns > 0));
+}
+
+#[def_test]
+fn rt_slice_rotate_does_not_stick_to_later_task() {
+    let mut s = sched();
+    let runner = task(1);
+    let peer = task(2);
+    s.set_attr(&runner, rt_attr(SchedPolicy::Rr, 1), 0).unwrap();
+    s.set_attr(&peer, rt_attr(SchedPolicy::Rr, 1), 0).unwrap();
+    enqueue_new(&mut s, runner.clone());
+    enqueue_new(&mut s, peer);
+    assert_eq!(pick_id(&mut s, 0), 1);
+    let expired = s.update(DEFAULT_RR_SLICE_NS, UpdateKind::Account);
+    assert!(expired.resched);
+    // Leave RT before put_prev. The rotate bit must not stay on the class.
+    s.set_attr(&runner, SchedAttr::DEFAULT, DEFAULT_RR_SLICE_NS)
+        .unwrap();
+    let front = task(3);
+    let behind = task(4);
+    s.set_attr(&front, rt_attr(SchedPolicy::Fifo, 5), 0)
+        .unwrap();
+    s.set_attr(&behind, rt_attr(SchedPolicy::Fifo, 5), 0)
+        .unwrap();
+    s.enqueue(
+        front.clone(),
+        EnqueueKind::Wake { sync: false },
+        DEFAULT_RR_SLICE_NS,
+    );
+    s.enqueue(
+        behind,
+        EnqueueKind::Wake { sync: false },
+        DEFAULT_RR_SLICE_NS,
+    );
+    s.preempt_current(DEFAULT_RR_SLICE_NS);
+    assert_eq!(pick_id(&mut s, DEFAULT_RR_SLICE_NS), 3);
+    let higher = task(5);
+    s.set_attr(&higher, rt_attr(SchedPolicy::Fifo, 9), 0)
+        .unwrap();
+    s.enqueue(
+        higher,
+        EnqueueKind::Wake { sync: false },
+        DEFAULT_RR_SLICE_NS,
+    );
+    assert_eq!(leave_pick(&mut s, DEFAULT_RR_SLICE_NS), 5);
+    s.block_current(DEFAULT_RR_SLICE_NS);
+    assert_eq!(pick_id(&mut s, DEFAULT_RR_SLICE_NS), 3);
 }

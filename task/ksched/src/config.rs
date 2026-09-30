@@ -39,5 +39,12 @@ pub(crate) const MIN_RT_PRIORITY: u8 = 1;
 /// Highest valid `SCHED_FIFO` / `SCHED_RR` priority.
 pub(crate) const MAX_RT_PRIORITY: u8 = 99;
 
-/// Number of user-visible RT priority levels (`1..=99`).
-pub(crate) const RT_PRIO_LEVELS: usize = MAX_RT_PRIORITY as usize;
+/// Number of user-visible RT priority levels (`MIN_RT_PRIORITY..=MAX_RT_PRIORITY`).
+pub(crate) const RT_PRIO_LEVELS: usize = (MAX_RT_PRIORITY - MIN_RT_PRIORITY) as usize + 1;
+
+const _: () = {
+    assert!(MIN_RT_PRIORITY >= 1);
+    assert!(MAX_RT_PRIORITY >= MIN_RT_PRIORITY);
+    // `idx` shifts a `u128` bitmap by `priority - MIN_RT_PRIORITY`.
+    assert!(RT_PRIO_LEVELS <= 128);
+};

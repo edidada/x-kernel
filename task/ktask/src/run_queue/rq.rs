@@ -41,13 +41,10 @@ pub(super) fn request_resched_on(rq: &RunQueue) {
         sched_stat_inc(&sched_stat_cpu(cpu_id).local_resched);
         current().set_preempt_pending(true);
         // A newly runnable peer may need an earlier deadline than the lone
-        // runner, whose schedule timer may currently be disarmed.
+        // runner, whose schedule timer may currently be disarmed. Idle keeps
+        // a class timer (throttled RT period boundary) when one is pending.
         let now_ns = khal::time::monotonic_time_nanos();
-        let next_rel = if current().is_idle() {
-            None
-        } else {
-            rq.scheduler.lock().next_event_ns()
-        };
+        let next_rel = rq.next_sched_event_ns();
         program_sched_deadline(now_ns, next_rel);
         rearm_local_timer();
     } else {
@@ -243,12 +240,12 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     }
 
     /// Recomputes the per-CPU schedule deadline for the running task.
+    ///
+    /// Idle is included: `next_event_ns` is `None` only when no class event
+    /// remains, so a quiet idle CPU still disarms. A throttled RT queue keeps
+    /// its period-boundary deadline.
     pub fn refresh_sched_deadline(&mut self, now_ns: u64) {
-        let next_rel = if self.current_task.is_idle() {
-            None
-        } else {
-            self.inner.with_sched(|s| s.next_event_ns())
-        };
+        let next_rel = self.inner.next_sched_event_ns();
         program_sched_deadline(now_ns, next_rel);
     }
 
@@ -366,12 +363,9 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             self.apply_runtime_account_side_effects(elapsed, is_idle, decision.resched);
             if !decision.resched {
                 self.current_task.set_preempt_pending(false);
-                let rel = if is_idle {
-                    None
-                } else {
-                    decision.next_event_ns
-                };
-                program_sched_deadline(now_ns, rel);
+                // `decision.next_event_ns` already includes class timers, so
+                // idle keeps an RT unthrottle deadline instead of disarming.
+                program_sched_deadline(now_ns, decision.next_event_ns);
                 rearm_local_timer();
                 return;
             }
@@ -565,6 +559,14 @@ impl RunQueue {
             let r = leave(s);
             (r, s.nr_queued() == 0)
         })
+    }
+
+    /// Relative ns until the next class event, including while the runner is idle.
+    ///
+    /// `None` means nothing is waiting and the local timer may disarm. A
+    /// throttled RT class reports the time left in its bandwidth period.
+    fn next_sched_event_ns(&self) -> Option<u64> {
+        self.with_sched(|s| s.next_event_ns())
     }
 
     /// Request a preempt probe on this RQ's CPU. Local: always set
@@ -794,11 +796,10 @@ impl RunQueue {
         next_task.set_state(TaskState::Running);
         let program_next_deadline = |rq: &Self, next: &KtaskRef, now: u64| {
             rq.last_accounted_ns.store(now, Ordering::Relaxed);
-            let next_rel = if next.is_idle() {
-                None
-            } else {
-                rq.with_sched(|s| s.next_event_ns())
-            };
+            // Idle still arms a class timer. A throttled RT task is not
+            // runnable, so without this deadline the period boundary never
+            // fires and the task stays queued behind idle.
+            let next_rel = rq.next_sched_event_ns();
             // Immediate requests must arm pending on the *incoming* task: at
             // this point `current()` is still the outgoing task.
             program_sched_deadline_for(Some(next), now, next_rel);
@@ -888,6 +889,16 @@ impl RunQueue {
     }
 }
 
+/// CPU a deferred wake should enqueue onto.
+///
+/// The waker records `wake_cpu` while the task is still `on_cpu`. The
+/// switch-out side claims that CPU and clears it. If no wake was recorded,
+/// the task stays on its owner `cpu_id`.
+#[cfg(feature = "smp")]
+pub(super) fn claimed_wake_cpu(task: &KtaskRef) -> LogicalCpuId {
+    task.take_wake_cpu().unwrap_or_else(|| task.cpu_id())
+}
+
 /// Clear the `on_cpu` field of previous task running on this CPU.
 #[cfg(feature = "smp")]
 pub(crate) unsafe fn clear_prev_task_on_cpu(current_rq: &RunQueue) {
@@ -918,9 +929,7 @@ pub(crate) unsafe fn clear_prev_task_on_cpu(current_rq: &RunQueue) {
         prev_task.state()
     );
 
-    let target_cpu = prev_task
-        .take_wake_cpu()
-        .unwrap_or_else(|| prev_task.cpu_id());
+    let target_cpu = claimed_wake_cpu(&prev_task);
     let is_local = target_cpu == current_rq.cpu_id;
     let target_rq = if is_local {
         current_rq

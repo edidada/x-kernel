@@ -155,12 +155,18 @@ pub(crate) struct FairEntity {
 pub(crate) struct RtEntity {
     /// Nanoseconds left in the current `SCHED_RR` quantum.
     pub rr_left_ns: RqCell<u64>,
+    /// This task's quantum expired with a same-priority waiter waiting.
+    ///
+    /// The next preempt of this task goes to the tail. Stored on the task so a
+    /// class switch cannot leave the flag for a later RT runner.
+    pub rr_rotate: RqCell<bool>,
 }
 
 impl RtEntity {
     const fn new(rr_slice_ns: u64) -> Self {
         Self {
             rr_left_ns: RqCell::new(rr_slice_ns),
+            rr_rotate: RqCell::new(false),
         }
     }
 }
@@ -267,7 +273,7 @@ impl<T> SchedTask<T> {
     /// Returns the first [`SchedAttr::validate`] failure.
     #[expect(
         dead_code,
-        reason = "ktask still publishes tasks through the plugin schedulers"
+        reason = "ktask does not publish a non-Fair SchedAttr until sched_* calls set_attr"
     )]
     pub(crate) fn init_attr_unpublished(&self, attr: SchedAttr) -> Result<(), SchedError> {
         attr.validate()?;

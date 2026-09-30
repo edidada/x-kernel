@@ -16,9 +16,14 @@ Stop / Deadline（未接线） -> RT FIFO/RR -> Fair EEVDF -> Idle
   `token()` 里：`ktask` 在持有该 RQ 锁时调用这些方法。
   `init_attr_unpublished` 仍是 `pub(crate)`，只适用于尚未发布、由创建者独占
   的任务。本 crate 不检查锁本身。
-- 调度器信任传入的任务状态已由调用方校验。用户策略只经 `SchedAttr::validate`。
-  FIFO/RR 的优先级必须在 `1..=99`。未特权的 `sched_setscheduler` 由 `ksyscall`
-  拒绝（`EPERM`），不进入本 crate。
+- 调度器信任传入的任务状态已由调用方校验。本 crate 只通过
+  `SchedAttr::validate` 检查结构：FIFO/RR 的优先级必须在 `1..=99`。
+  凭据校验不在这里做。调用 `set_attr` 放入 RT 之前，调用方必须已经确认
+  调用者具备实时调度权限（Linux `CAP_SYS_NICE`；当前内核用 `euid == 0` 代替）。
+  现在的 `sys_sched_setscheduler` 只校验 policy 和 priority 的取值，然后把
+  结果写进线程快照，既不查权限，也不调用 `Scheduler::set_attr`，所以非特权
+  进程可以让这次系统调用返回 0，但任务不会进入 `RtClass`。接线时如果漏掉
+  权限检查，FIFO 99 就能一直抢在全部 Fair 任务前面。
 
 ## 外部边界 / 攻击面
 
@@ -142,10 +147,14 @@ IRQ/preempt 约束提供。
 ## 已知限制
 
 - Stop 与 Deadline 没有队列。`SCHED_DEADLINE` 在 `SchedAttr::validate` 被拒绝。
+- `sched_setscheduler` 尚未把 FIFO/RR 送进 `RtClass`，也没有
+  `CAP_SYS_NICE` 检查。接线前必须先补上，否则非特权调用者可以长期占住 CPU。
 - `SCHED_RESET_ON_FORK` 能通过策略字校验并记在线程快照里，fork 尚未按该标志
   把子任务打回 `SCHED_NORMAL`。
-- RT 带宽按每个 RQ 计算，没有跨 CPU 的根域带宽池。选核是 `find_lowest_rq`
-  的优先级比较，没有 Linux `cpupri` push/pull。
+- RT 带宽按每个 RQ 计算，没有跨 CPU 的根域带宽池。本 RQ 节流后不再
+  `pick_next` 这些任务，但 idle-pull 仍可把它们摘到另一颗 CPU，改记那颗
+  CPU 的 runtime。选核是 `find_lowest_rq` 的优先级比较，没有 Linux
+  `cpupri` push/pull。
 
 ## 审计清单
 

@@ -420,7 +420,10 @@ deadline. They no longer depend on a fixed `TICKS_PER_SECOND` schedule tick:
 min(next_sched_deadline?, prepared_service_deadline?)
 ```
 
-   If both sources are empty, `disarm_timer()` runs. Stale/expired IRQs only
+   If both sources are empty, `disarm_timer()` runs. An idle CPU still keeps
+   a schedule deadline when `next_event_ns` reports a class timer, so a
+   throttled RT task is picked again at the bandwidth period boundary. A
+   quiet idle CPU (no class event) still disarms. Stale/expired IRQs only
    catch up accounting and rearm; they do not loop catch-up ticks. With
    `sched_stat`, IRQs are classified from the schedule slot and prepared
    dispatch result. The existing diagnostic field names remain
@@ -567,6 +570,10 @@ readiness precedence and Linux restart policy belong to their callers.
   and no idle CPU exists does it use `find_idlest_cpu`. RT wake and spawn use
   `find_lowest_rq`: stay on the hint CPU when this priority can preempt the
   runner there, otherwise the allowed CPU whose runner rank is weakest.
+  No production task is RT yet. `sched_setscheduler` stores the thread
+  snapshot and does not call `Scheduler::set_attr`, so this ranking is
+  unused until that ABI is wired. `find_lowest_rt_cpu` tests cover the
+  ranking itself.
 - `unblock_task(..., true)` sets `need_resched` on this CPU and, when
   `ipi + preempt` are available, requests the same on a remote CPU.
 - After waking `interrupt_waker`, `TaskInner::interrupt()` calls

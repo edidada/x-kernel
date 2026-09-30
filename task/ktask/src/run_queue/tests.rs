@@ -195,6 +195,30 @@ mod tests_wake_affinity {
         task.set_on_cpu(false);
     }
 
+    #[def_test]
+    fn deferred_wake_targets_recorded_cpu() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let task = test_task_on(0);
+            task.set_state(TaskState::Blocked);
+            task.set_on_cpu(true);
+
+            let (result, decision) = super::super::get_run_queue(1).put_task_with_state(
+                task.clone(),
+                TaskState::Blocked,
+                false,
+                true,
+            );
+
+            assert!(result == WakeEnqueue::Deferred);
+            assert!(decision.is_none());
+            assert_eq!(task.cpu_id().as_usize(), 0);
+            assert_eq!(task.take_wake_enqueue(), Some((false, true)));
+            assert_eq!(super::super::rq::claimed_wake_cpu(&task).as_usize(), 1);
+            assert!(task.take_wake_cpu().is_none());
+            task.set_on_cpu(false);
+        }
+    }
+
     #[cfg(feature = "sched_stat")]
     fn placement_counter(cpu: usize, place: WakePlacement) -> u64 {
         let stats = sched_stat_cpu(LogicalCpuId::new(cpu));
@@ -397,6 +421,21 @@ mod tests_wake_affinity {
             _ => None,
         });
         assert_eq!(idx, 1);
+    }
+
+    #[def_test]
+    fn find_lowest_rt_cpu_equal_rank_keeps_lowest_cpu_id() {
+        let mut mask = KCpuMask::new();
+        mask.set(0, true);
+        mask.set(1, true);
+        mask.set(2, true);
+        // Hint cannot be preempted, so it is not a tie-break candidate.
+        let idx = find_lowest_rt_cpu(&mask, 2, 5, |cpu| match cpu {
+            0 | 1 => Some(1),
+            2 => Some(9),
+            _ => None,
+        });
+        assert_eq!(idx, 0);
     }
 
     #[def_test]

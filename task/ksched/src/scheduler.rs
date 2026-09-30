@@ -388,7 +388,12 @@ impl<T> Scheduler<T> {
         self.curr.as_ref()
     }
 
-    /// Rank a remote RT placement may compare without this RQ lock.
+    /// RT placement rank of the runner, read under this RQ's scheduler lock.
+    ///
+    /// Call only while that lock is held. `token()` then reads the runner's
+    /// `RqCell` priority. `ktask` calls this from `with_sched` / `TaskRqLock`
+    /// and publishes the returned byte for remote placement, which compares
+    /// the snapshot without taking this lock.
     ///
     /// `0` means Fair, Idle, or no runner: any RT priority can preempt.
     /// `1..=99` is the running RT priority. `255` is Stop or Deadline, which

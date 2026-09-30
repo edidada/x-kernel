@@ -49,6 +49,9 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'s
     #[cfg(feature = "smp")]
     {
         // Spawn / migrate-in: Fair is find_idlest; RT is find_lowest_rq.
+        // Production tasks stay Fair: sched_* still writes the thread
+        // snapshot and does not call Scheduler::set_attr. This branch runs
+        // only after that ABI is wired.
         let index = if task.sched_class() == ksched::SchedClass::Rt {
             select_rt_cpu(task, this_cpu_id().as_usize(), &task.cpumask())
         } else {
@@ -311,6 +314,7 @@ fn is_runqueue_idle(idx: usize) -> bool {
 #[cfg(feature = "smp")]
 #[inline]
 pub(super) fn wake_affinity_select(task: &KtaskRef) -> (usize, WakePlacement) {
+    // Same limit as spawn: no production task is RT until sched_* calls set_attr.
     if task.sched_class() == ksched::SchedClass::Rt {
         return wake_rt(task);
     }
@@ -356,8 +360,8 @@ pub(crate) fn select_rt_cpu(task: &KtaskRef, hint: usize, cpumask: &KCpuMask) ->
 }
 
 /// Stay on `hint` when `prio` can preempt it. Otherwise pick the weakest
-/// still-preemptable runner; `hint` wins equal ranks. If none, stay on `hint`
-/// when it is allowed.
+/// still-preemptable runner. Equal ranks keep the first CPU in `cpumask`
+/// order. If none can be preempted, stay on `hint` when it is schedulable.
 ///
 /// `rank_of` returns [`None`] for a CPU that is not yet schedulable.
 ///
@@ -390,8 +394,9 @@ pub(super) fn find_lowest_rt_cpu(
         if prio <= rank {
             continue;
         }
-        let is_better =
-            best_cpu.is_none() || rank < best_rank || (rank == best_rank && idx == hint);
+        // `hint` is not in this scan: a preemptable hint already returned.
+        // Equal ranks therefore follow `cpumask` iteration order.
+        let is_better = best_cpu.is_none() || rank < best_rank;
         if is_better {
             best_rank = rank;
             best_cpu = Some(idx);
