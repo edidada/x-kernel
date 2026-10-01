@@ -74,8 +74,12 @@ impl UeventAction {
     }
 }
 
+/// The input does not name a supported uevent action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidUeventAction;
+
 impl TryFrom<&str> for UeventAction {
-    type Error = ();
+    type Error = InvalidUeventAction;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
@@ -87,7 +91,7 @@ impl TryFrom<&str> for UeventAction {
             "offline" => Ok(Self::Offline),
             "bind" => Ok(Self::Bind),
             "unbind" => Ok(Self::Unbind),
-            _ => Err(()),
+            _ => Err(InvalidUeventAction),
         }
     }
 }
@@ -324,6 +328,9 @@ mod tests {
     #[def_test]
     fn actions_accept_only_the_linux_kobject_set() {
         assert_eq!(UeventAction::try_from("change"), Ok(UeventAction::Change));
-        assert_eq!(UeventAction::try_from("change\0remove"), Err(()));
+        assert_eq!(
+            UeventAction::try_from("change\0remove"),
+            Err(InvalidUeventAction)
+        );
     }
 }
