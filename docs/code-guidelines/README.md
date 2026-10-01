@@ -109,6 +109,7 @@ checked through the configured kernel's `make clippy` during this migration.
 | [CG-002-static-mutex-registration](CG-002-static-mutex-registration.md) | MUST | dylint | `unregistered_static_lock` |
 | [CG-003-runtime-lock-tracking](CG-003-runtime-lock-tracking.md) | MUST | dylint | `untracked_runtime_lock` |
 | [CG-004-static-mut-option](CG-004-static-mut-option.md) | MUST | dylint | `static_mut_option` |
+| [CG-009-vec-shift-in-loop](CG-009-vec-shift-in-loop.md) | SHOULD | dylint | `vec_shift_in_loop` |
 | [CG-013-no-sleep-under-spinlock](CG-013-no-sleep-under-spinlock.md) | MUST | ai | — |
 | [CG-014-spin-noirq-needs-irq-contender](CG-014-spin-noirq-needs-irq-contender.md) | SHOULD | ai | — |
 | [CG-015-no-split-critical-section](CG-015-no-split-critical-section.md) | MUST | ai | — |
