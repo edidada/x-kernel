@@ -422,21 +422,34 @@ pub(crate) unsafe extern "C" fn __llvm_profile_instrument_memop(
 }
 
 #[unsafe(no_mangle)]
-pub(crate) extern "C" fn __llvm_profile_get_data_size() -> u64 {
-    let sections = platform::profile_sections();
-    sections.data.len() as u64 * core::mem::size_of::<LlvmProfileData>() as u64
+pub(crate) extern "C" fn __llvm_profile_get_data_size(
+    begin: *const LlvmProfileData,
+    end: *const LlvmProfileData,
+) -> u64 {
+    __llvm_profile_get_num_data(begin, end) * core::mem::size_of::<LlvmProfileData>() as u64
 }
 
 #[unsafe(no_mangle)]
-pub(crate) extern "C" fn __llvm_profile_get_counters_size() -> u64 {
-    let sections = platform::profile_sections();
-    sections.counters.byte_len() as u64
+pub(crate) extern "C" fn __llvm_profile_get_counters_size(begin: *const u8, end: *const u8) -> u64 {
+    let entry_size = if INSTR_PROF_RAW_VERSION & VARIANT_MASK_BYTE_COVERAGE != 0 {
+        1
+    } else {
+        core::mem::size_of::<u64>()
+    };
+    (end as usize)
+        .saturating_sub(begin as usize)
+        .div_ceil(entry_size) as u64
+        * entry_size as u64
 }
 
 #[unsafe(no_mangle)]
-pub(crate) extern "C" fn __llvm_profile_get_num_data() -> u64 {
-    let sections = platform::profile_sections();
-    sections.data.len() as u64
+pub(crate) extern "C" fn __llvm_profile_get_num_data(
+    begin: *const LlvmProfileData,
+    end: *const LlvmProfileData,
+) -> u64 {
+    (end as usize)
+        .saturating_sub(begin as usize)
+        .div_ceil(core::mem::size_of::<LlvmProfileData>()) as u64
 }
 
 #[unsafe(no_mangle)]
@@ -471,4 +484,45 @@ pub(crate) extern "C" fn __llvm_profile_initialize() {}
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn lprofGetLoadModuleSignature() -> u64 {
     crate::module_signature()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn llvm_22_size_helpers_round_partial_entries_up() {
+        let data = core::mem::MaybeUninit::<[LlvmProfileData; 3]>::uninit();
+        let data_begin = data.as_ptr().cast::<LlvmProfileData>();
+        let data_end = data_begin.wrapping_add(3);
+        let partial_data_end = data_begin
+            .cast::<u8>()
+            .wrapping_add(65)
+            .cast::<LlvmProfileData>();
+        let counters = [0u8; 13];
+        let counters_begin = counters.as_ptr();
+        let counters_end = counters_begin.wrapping_add(counters.len());
+
+        assert_eq!(core::mem::size_of::<LlvmProfileData>(), 64);
+        assert_eq!(__llvm_profile_get_num_data(data_begin, data_begin), 0);
+        assert_eq!(__llvm_profile_get_data_size(data_begin, data_begin), 0);
+        assert_eq!(__llvm_profile_get_num_data(data_begin, data_end), 3);
+        assert_eq!(
+            __llvm_profile_get_data_size(data_begin, data_end),
+            (3 * core::mem::size_of::<LlvmProfileData>()) as u64,
+        );
+        assert_eq!(__llvm_profile_get_num_data(data_begin, partial_data_end), 2);
+        assert_eq!(
+            __llvm_profile_get_data_size(data_begin, partial_data_end),
+            128
+        );
+        assert_eq!(
+            __llvm_profile_get_counters_size(counters_begin, counters_begin),
+            0
+        );
+        assert_eq!(
+            __llvm_profile_get_counters_size(counters_begin, counters_end),
+            16,
+        );
+    }
 }
