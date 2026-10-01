@@ -735,7 +735,7 @@ impl SimpleDirOps for SysfsDirectory {
                                     .map_err(|_| VfsError::InvalidInput)?
                                     .trim_matches(['\0', '\n', '\r', ' ']);
                                 let action = UeventAction::try_from(action)
-                                    .map_err(|()| VfsError::InvalidInput)?;
+                                    .map_err(|_| VfsError::InvalidInput)?;
                                 kdevice_uevent::publish(action, node, scope);
                                 Ok(())
                             })
