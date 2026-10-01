@@ -24,6 +24,7 @@ dylint_linting::dylint_library!();
 
 mod facts_export;
 mod std_box_in_kernel_tests;
+mod derive_not_last;
 mod exported_foreign_item;
 mod static_lock_helpers;
 mod static_mut_option;
@@ -63,6 +64,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         undocumented_unsafe_attribute::UNDOCUMENTED_UNSAFE_ATTRIBUTE,
         unsound_user_abi_impl::UNSOUND_USER_ABI_IMPL,
         user_copy_without_abi_contract::USER_COPY_WITHOUT_ABI_CONTRACT,
+        derive_not_last::DERIVE_NOT_LAST,
     ]);
     lint_store.register_late_pass(|_| Box::new(facts_export::FactsExport));
     // CG rules do not apply to vendored third-party code. Its facts are still
@@ -87,4 +89,5 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
     lint_store.register_late_pass(|_| {
         Box::new(user_copy_without_abi_contract::UserCopyWithoutAbiContract)
     });
+    lint_store.register_pre_expansion_pass(|| Box::new(derive_not_last::DeriveNotLast));
 }
