@@ -12,14 +12,14 @@ use kvfs::{
     VfsResult,
 };
 use memaddr::{PhysAddrRange, VirtAddr};
-use osvm::VirtMutPtr;
+use posix_types::{UserPtr, UserWrite};
 
 use crate::{DeviceFile, add_device_entry};
 
 // Types from https://github.com/Tangzh33/asterinas
 
 #[repr(C)]
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Default, Debug, Clone, Copy, UserWrite)]
 pub(crate) struct FrameBufferBitfield {
     /// The beginning of bitfield.
     offset: u32,
@@ -30,7 +30,7 @@ pub(crate) struct FrameBufferBitfield {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, UserWrite)]
 struct VarScreenInfo {
     pub xres: u32, // Visible resolution
     pub yres: u32,
@@ -65,7 +65,7 @@ struct VarScreenInfo {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, UserWrite)]
 struct FixScreenInfo {
     pub id: [u8; 16],       // Identification string, e.g., "TT Builtin"
     pub smem_start: u64,    // Start of framebuffer memory (physical address)
@@ -76,12 +76,15 @@ struct FixScreenInfo {
     pub xpanstep: u16,      // Zero if no hardware panning
     pub ypanstep: u16,      // Zero if no hardware panning
     pub ywrapstep: u16,     // Zero if no hardware ywrap
+    abi_pad0: u16,          // Implicit padding in the Linux ABI; always zero
     pub line_length: u32,   // Length of a line in bytes
+    abi_pad1: u32,          // Implicit padding in the Linux ABI; always zero
     pub mmio_start: u64,    // Start of Memory Mapped I/O (physical address)
     pub mmio_len: u32,      // Length of Memory Mapped I/O
     pub accel: u32,         // Indicate to driver which specific chip/card we have
     pub capabilities: u16,  // See FB_CAP_*
     pub reserved: [u16; 2], // Reserved for future compatibility
+    abi_pad_tail: u16,      // Implicit padding in the Linux ABI; always zero
 }
 
 /// Framebuffer device for graphics output, backed by fbdev emulation's shadow
@@ -171,7 +174,7 @@ impl DeviceFileOps for FrameBuffer {
                 // line length reported in FSCREENINFO is width * 4 with no
                 // row padding.
                 let bpp = 32u32;
-                (arg as *mut VarScreenInfo).write_vm(VarScreenInfo {
+                UserPtr::<VarScreenInfo>::from(arg).write_vm(VarScreenInfo {
                     xres: info.width,
                     yres: info.height,
                     xres_virtual: info.width,
@@ -226,7 +229,7 @@ impl DeviceFileOps for FrameBuffer {
             0x4602 => {
                 let info = fbdevice::fb_info();
                 let line_length = info.width.checked_mul(4).unwrap_or(0);
-                (arg as *mut FixScreenInfo).write_vm(FixScreenInfo {
+                UserPtr::<FixScreenInfo>::from(arg).write_vm(FixScreenInfo {
                     id: *b"Virtio Framebuf\0",
                     // smem_start is the physical base of the shadow buffer, so
                     // userspace (and the kernel mmap path) describe the same
@@ -239,12 +242,15 @@ impl DeviceFileOps for FrameBuffer {
                     xpanstep: 0,
                     ypanstep: 0,
                     ywrapstep: 0,
+                    abi_pad0: 0,
                     line_length,
+                    abi_pad1: 0,
                     mmio_start: 0,
                     mmio_len: 0,
                     accel: 0,
                     capabilities: 0,
                     reserved: [0; 2],
+                    abi_pad_tail: 0,
                 })?;
                 Ok(0)
             }

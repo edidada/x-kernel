@@ -86,6 +86,7 @@ implementation requires normal task context and may allocate.
 | T-04 | A stale remove deletes a new projection | Medium — the replacement device disappears from `/dev` | A future device id or assignment is reused | Removal compares the complete recorded `DeviceNode` before deleting it. |
 | T-05 | Removed device remains apparently readable | Medium — callers could mistake stale data or delayed errors for live hardware | An fd survives hot-unplug | evdev returns `ENODEV` and poll error/hangup; DRM checks `ClassDevice::is_available`. |
 | T-06 | `LOOP_GET_STATUS` leaks kernel memory through struct padding | High — uninitialized kernel bytes reach userspace | The ioctl copies the implicit padding in `linux_raw_sys::loop_info` | `LoopInfo` models each gap as an explicit zeroed field, asserts the Linux ABI layout, and copies through `UserPtr::write_vm` with `UserWrite`. |
+| T-07 | `FBIOGET_FSCREENINFO` leaks kernel memory through struct padding | High — uninitialized kernel bytes reach userspace | The ioctl copies implicit gaps in `FixScreenInfo` | The ABI gaps are explicit fields set to zero; framebuffer results copy through `UserPtr::write_vm` with `UserWrite`. |
 
 ## Failure modes and effects
 
