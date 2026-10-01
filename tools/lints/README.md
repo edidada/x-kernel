@@ -23,10 +23,19 @@ make install-tools
 
 ```bash
 make dylint          # scan the kernel selected by .config
+make dylint XKMAKE_ARGS=--fix  # apply machine suggestions in configured local packages
 make dylint_test     # run every lint's UI test
 make dylint XKMAKE_ARGS="-- --message-format=json"
 make dylint FACTS_OUT=<dir>   # also export code facts (see below)
 ```
+
+The fix mode selects local packages from Cargo's application compilation unit
+graph, so Cargo applies suggestions in dependencies of `entry` without
+selecting inactive platform or development packages. It checks that the fix
+build resolves the same package features as the scan. Dry-run reports how
+package selection will be resolved at run time without starting Cargo.
+Re-run fix mode after moving derives, because that can expose a derive list or
+attribute group that still needs sorting.
 
 A scan only sees code that the configuration compiles; CI scans the
 aarch64 and x86_64 `qemu_defconfig` configurations. Add the platform's
