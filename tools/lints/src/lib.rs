@@ -18,6 +18,7 @@ extern crate rustc_lint;
 extern crate rustc_middle;
 extern crate rustc_session;
 extern crate rustc_span;
+extern crate rustc_trait_selection;
 
 dylint_linting::dylint_library!();
 
@@ -33,6 +34,7 @@ mod unregistered_static_spinlock;
 mod unsound_user_abi_impl;
 mod untracked_runtime_lock;
 mod untyped_error_result;
+mod user_copy_without_abi_contract;
 mod vec_shift_in_loop;
 mod vendored;
 
@@ -60,6 +62,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         exported_foreign_item::EXPORTED_FOREIGN_ITEM,
         undocumented_unsafe_attribute::UNDOCUMENTED_UNSAFE_ATTRIBUTE,
         unsound_user_abi_impl::UNSOUND_USER_ABI_IMPL,
+        user_copy_without_abi_contract::USER_COPY_WITHOUT_ABI_CONTRACT,
     ]);
     lint_store.register_late_pass(|_| Box::new(facts_export::FactsExport));
     // CG rules do not apply to vendored third-party code. Its facts are still
@@ -81,4 +84,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         Box::new(undocumented_unsafe_attribute::UndocumentedUnsafeAttribute)
     });
     lint_store.register_late_pass(|_| Box::new(unsound_user_abi_impl::UnsoundUserAbiImpl));
+    lint_store.register_late_pass(|_| {
+        Box::new(user_copy_without_abi_contract::UserCopyWithoutAbiContract)
+    });
 }
