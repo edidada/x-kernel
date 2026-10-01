@@ -18,7 +18,7 @@ rustc_session::declare_lint! {
     /// These error types do not express a layer's failure contract.
     /// ### Example
     /// `fn parse() -> Result<Value, String>`
-    pub UNTYPED_ERROR_RESULT, Warn, "Result return signatures must use typed errors", report_in_external_macro
+    pub UNTYPED_ERROR_RESULT, Deny, "Result return signatures must use typed errors", report_in_external_macro
 }
 rustc_session::declare_lint_pass!(UntypedErrorResult => [UNTYPED_ERROR_RESULT]);
 
@@ -151,16 +151,16 @@ unsafe extern "Rust" { fn foreign() -> Result<(), String>; }
 fn ordinary() -> Result<(), String> { Ok(()) }
 fn main() {}
 "#,
-            r###"warning: function returns a Result with an untyped error
+            r###"error: function returns a Result with an untyped error
   --> $DIR/untyped_error_result.rs:4:1
    |
 LL | fn unit() -> Result<(), ()> { Ok(()) }
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: use a layer-appropriate error type; see docs/code-guidelines/CG-010-typed-error-result.md
-   = note: `#[warn(untyped_error_result)]` on by default
+   = note: `#[deny(untyped_error_result)]` on by default
 
-warning: function returns a Result with an untyped error
+error: function returns a Result with an untyped error
   --> $DIR/untyped_error_result.rs:5:1
    |
 LL | fn borrowed() -> Result<(), &'static str> { Ok(()) }
@@ -168,7 +168,7 @@ LL | fn borrowed() -> Result<(), &'static str> { Ok(()) }
    |
    = help: use a layer-appropriate error type; see docs/code-guidelines/CG-010-typed-error-result.md
 
-warning: function returns a Result with an untyped error
+error: function returns a Result with an untyped error
   --> $DIR/untyped_error_result.rs:6:1
    |
 LL | fn owned() -> Result<(), Alias> { Ok(()) }
@@ -176,7 +176,7 @@ LL | fn owned() -> Result<(), Alias> { Ok(()) }
    |
    = help: use a layer-appropriate error type; see docs/code-guidelines/CG-010-typed-error-result.md
 
-warning: function returns a Result with an untyped error
+error: function returns a Result with an untyped error
   --> $DIR/untyped_error_result.rs:9:10
    |
 LL | impl S { fn private_test(&self) -> Result<(), String> { Ok(()) } }
@@ -184,7 +184,7 @@ LL | impl S { fn private_test(&self) -> Result<(), String> { Ok(()) } }
    |
    = help: use a layer-appropriate error type; see docs/code-guidelines/CG-010-typed-error-result.md
 
-warning: function returns a Result with an untyped error
+error: function returns a Result with an untyped error
   --> $DIR/untyped_error_result.rs:10:11
    |
 LL | trait T { fn trait_method() -> Result<(), String>; }
@@ -192,7 +192,7 @@ LL | trait T { fn trait_method() -> Result<(), String>; }
    |
    = help: use a layer-appropriate error type; see docs/code-guidelines/CG-010-typed-error-result.md
 
-warning: function returns a Result with an untyped error
+error: function returns a Result with an untyped error
   --> $DIR/untyped_error_result.rs:14:20
    |
 LL | trait MacroTrait { fn handwritten(&self) -> Result<(), ()> { Ok(()) } }
@@ -200,7 +200,7 @@ LL | trait MacroTrait { fn handwritten(&self) -> Result<(), ()> { Ok(()) } }
    |
    = help: use a layer-appropriate error type; see docs/code-guidelines/CG-010-typed-error-result.md
 
-warning: function returns a Result with an untyped error
+error: function returns a Result with an untyped error
   --> $DIR/untyped_error_result.rs:21:24
    |
 LL | unsafe extern "Rust" { fn foreign() -> Result<(), String>; }
@@ -208,7 +208,7 @@ LL | unsafe extern "Rust" { fn foreign() -> Result<(), String>; }
    |
    = help: use a layer-appropriate error type; see docs/code-guidelines/CG-010-typed-error-result.md
 
-warning: function returns a Result with an untyped error
+error: function returns a Result with an untyped error
   --> $DIR/untyped_error_result.rs:22:1
    |
 LL | fn ordinary() -> Result<(), String> { Ok(()) }
@@ -216,7 +216,7 @@ LL | fn ordinary() -> Result<(), String> { Ok(()) }
    |
    = help: use a layer-appropriate error type; see docs/code-guidelines/CG-010-typed-error-result.md
 
-warning: 8 warnings emitted
+error: aborting due to 8 previous errors
 
 "###,
             &[crate::testing::MockCrate {
