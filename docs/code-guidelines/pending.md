@@ -21,8 +21,6 @@ backlog, and delete the row.
 
 | Lint | Original text (verbatim) | Source | Coverage | Judgment kept / exception reasons | Backlog | Cost | Priority |
 |---|---|---|---|---|---|---|---|
-| `derive_not_last` | "place `#[derive(...)]` after other outer attributes;"<br>"attributes or derives ordered inconsistently with the project convention;" | `modules-and-attributes.md:32`<br>`modules-and-attributes.md:59` | full (with `unsorted_attributes`) | None. Needs a pre-expansion pass (`derive` is gone from HIR). | ~102 | small | high |
-| `unsorted_attributes` | "keep attributes ordered predictably;"<br>"keep derived traits ordered consistently;" | `modules-and-attributes.md:31`<br>`modules-and-attributes.md:33` | full | The convention is alphabetical (non-derive attributes by name, traits inside `derive` by last path segment), as in `docs/coding-guidelines/rust-guidelines/language-items/macros-and-attributes.md`; the rule file must state it and the tie-break for `cfg_attr`. | ~641 derive lists, ~109 attribute groups | small (shares the `derive_not_last` pass) | medium |
 | `free_function_import` | "prefer importing a parent module and qualifying free-function calls rather than importing free functions directly by name;"<br>"direct free-function imports that remove call-site context;" | `modules-and-attributes.md:25-26`<br>`modules-and-attributes.md:56` | full (with an allowlist) | Allowlisted core helpers (`min`, `max`, `swap`, `replace`, `take`, `black_box`, `poll_fn`); decide up front whether test modules may import helpers from `super`. | ~1,300 in ~450 files | small | medium |
 
 ## Supporting lints (original text kept)
