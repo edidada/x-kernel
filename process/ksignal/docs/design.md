@@ -1047,6 +1047,9 @@ guarantee or Linux GFP_ATOMIC equivalence.
 - Kernel-originated `sigval` reads expose `None` unless `si_code` implies a
   user or timer payload, keeping union-arm reads (see `security.md`)
   guarded by the code that selected the arm.
+- Every architecture embeds the explicit `k_sigaltstack` carrier in
+  `ucontext.uc_stack`. Its `sp, flags, padding, size` byte order matches Linux
+  `stack_t`; the kernel-only `SignalStack` keeps its own field order.
 - POSIX timer notifications arrive with complete pointer-sized `sigval` bits.
   `SignalInfo::new_timer` writes those bits through the full-width pointer
   member of the zeroed outbound `siginfo` record.

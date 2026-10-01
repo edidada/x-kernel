@@ -4,6 +4,7 @@
 
 //! RISC-V signal frame layout and trampoline.
 use kcpu::{GeneralRegisters, userspace::UserContext};
+use posix_types::k_sigaltstack;
 
 use crate::{SignalSet, SignalStack};
 
@@ -59,7 +60,7 @@ pub struct UContext {
     /// `uc_link`; not used by signal frames and written as zero.
     pub link: usize,
     /// `uc_stack` snapshot of the alternate stack state.
-    pub stack: SignalStack,
+    pub stack: k_sigaltstack,
     /// `uc_sigmask` restored into the thread blocked set at `sigreturn`.
     pub sigmask: SignalSet,
     __unused: [u8; 1024 / 8 - size_of::<SignalSet>()],
@@ -73,7 +74,7 @@ impl UContext {
         Self {
             flags: 0,
             link: 0,
-            stack: SignalStack::default(),
+            stack: SignalStack::default().into(),
             sigmask,
             __unused: [0; 1024 / 8 - size_of::<SignalSet>()],
             mcontext: MContext::new(uctx),
