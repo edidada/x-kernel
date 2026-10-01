@@ -112,6 +112,7 @@ checked through the configured kernel's `make clippy` during this migration.
 | [CG-009-vec-shift-in-loop](CG-009-vec-shift-in-loop.md) | SHOULD | dylint | `vec_shift_in_loop` |
 | [CG-010-typed-error-result](CG-010-typed-error-result.md) | SHOULD | dylint | `untyped_error_result` |
 | [CG-011-time-unit-names](CG-011-time-unit-names.md) | SHOULD | dylint | `unitless_time_integer` |
+| [CG-012-private-foreign-items](CG-012-private-foreign-items.md) | SHOULD | dylint | `exported_foreign_item` |
 | [CG-013-no-sleep-under-spinlock](CG-013-no-sleep-under-spinlock.md) | MUST | ai | — |
 | [CG-014-spin-noirq-needs-irq-contender](CG-014-spin-noirq-needs-irq-contender.md) | SHOULD | ai | — |
 | [CG-015-no-split-critical-section](CG-015-no-split-critical-section.md) | MUST | ai | — |
