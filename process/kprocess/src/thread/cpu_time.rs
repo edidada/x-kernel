@@ -7,7 +7,7 @@
 use ktime_types::{MonotonicInstant, TimeSpan};
 
 /// Represents the current CPU-accounting state of a thread.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum CpuTimeState {
     /// The thread is off CPU or has finished CPU accounting.
     Inactive,

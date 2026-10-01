@@ -13,7 +13,7 @@ use ktask::yield_now;
 /// - `max_spins`: Should be in the range 1..=100 for reasonable behavior
 /// - `spin_before_yield`: Should be <= `max_spins` and typically <= 10 to avoid
 ///   excessive spin loop iterations (exponential backoff)
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct SpinConfig {
     /// Maximum number of spin iterations before blocking
     pub max_spins: u32,

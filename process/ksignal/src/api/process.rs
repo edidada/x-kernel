@@ -85,7 +85,7 @@ impl PreparedChildExitSignal {
 }
 
 /// Outcome of an immediately sent child-exit notification.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChildExitSignalOutcome {
     autoreap: bool,
 }

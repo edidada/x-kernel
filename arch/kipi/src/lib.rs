@@ -50,7 +50,7 @@ use queue::IpiEventQueue;
 pub type Result<T> = core::result::Result<T, KipiError>;
 
 /// Error types for IPI operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KipiError {
     /// Invalid CPU ID (exceeds system CPU count)
     InvalidCpuId,

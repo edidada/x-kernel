@@ -11,7 +11,7 @@
 /// the other ranks are reserved so later PRs can plug in without
 /// renumbering.
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum SchedClass {
     /// Highest rank. Kernel-only; not a user `SCHED_*` policy.
     Stop     = 0,
@@ -58,7 +58,7 @@ impl SchedClass {
 /// FIFO, RR, and Deadline decode and map to a class, but
 /// [`SchedAttr::validate`] still rejects them until those classes are wired.
 #[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchedPolicy {
     /// `SCHED_NORMAL`.
     Normal   = 0,
@@ -104,7 +104,7 @@ impl SchedPolicy {
 }
 
 /// Linux nice in `-20..=19`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Nice(i8);
 
 impl Nice {
@@ -177,7 +177,7 @@ pub(crate) const NICE_0_WEIGHT: i64 = 1024;
 const _: () = assert!(NICE_TO_WEIGHT[20] as i64 == NICE_0_WEIGHT);
 
 /// User-visible scheduling attributes. Unique fact on [`crate::SchedTask`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SchedAttr {
     /// Linux `sched_policy`.
     pub policy: SchedPolicy,
@@ -208,7 +208,7 @@ impl SchedAttr {
 }
 
 /// Policy / placement errors returned to `ktask` and mapped to errno there.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchedError {
     /// Unknown or unsupported `SCHED_*` value.
     InvalidPolicy,

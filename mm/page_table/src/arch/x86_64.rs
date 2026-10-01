@@ -27,8 +27,8 @@ const SEV_CBIT_MASK: Option<u64> = if kbuild_config::SEV_CBIT_POS == 0 {
     Some(1u64 << kbuild_config::SEV_CBIT_POS)
 };
 
-#[derive(Clone, Copy)]
 #[repr(transparent)]
+#[derive(Clone, Copy)]
 struct EncodedPtePhys(u64);
 
 impl EncodedPtePhys {
@@ -127,8 +127,8 @@ impl From<PagingFlags> for PTF {
 /// Physical addresses in the PTE are masked to cover bits 12–51
 /// (52-bit physical address space). The C-bit is embedded within this
 /// range when SEV is active.
-#[derive(Clone, Copy)]
 #[repr(transparent)]
+#[derive(Clone, Copy)]
 pub struct X64PageEntry(u64);
 
 impl X64PageEntry {

@@ -5,7 +5,7 @@
 //! Algorithm metadata for streaming cipher dispatch.
 
 /// Supported symmetric cipher algorithms + modes, including AEAD.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamingCipherAlgo {
     Aes128Ecb,
     Aes256Ecb,
@@ -29,7 +29,7 @@ pub enum StreamingCipherAlgo {
 }
 
 /// Padding mode for block ciphers.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PaddingMode {
     #[default]
     None,
@@ -37,7 +37,7 @@ pub enum PaddingMode {
 }
 
 /// Cipher operation direction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Direction {
     Encrypt,
     Decrypt,
@@ -54,7 +54,7 @@ impl Direction {
 }
 
 /// Algorithm family used to select backend primitives.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AlgorithmFamily {
     Aes128,
     Aes192,
@@ -65,7 +65,7 @@ pub enum AlgorithmFamily {
 }
 
 /// Cipher mode used by the streaming context state machine.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AlgorithmMode {
     Ecb,
     Cbc,
@@ -75,7 +75,7 @@ pub enum AlgorithmMode {
 }
 
 /// Static metadata for a streaming cipher algorithm.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AlgorithmSpec {
     pub family: AlgorithmFamily,
     pub mode: AlgorithmMode,

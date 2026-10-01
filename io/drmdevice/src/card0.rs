@@ -263,7 +263,7 @@ struct Framebuffer {
     height: u32,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Clone, Debug, Default)]
 struct LegacyCrtcState {
     fb_id: u32,
     connectors: Vec<u32>,
@@ -273,7 +273,7 @@ struct LegacyCrtcState {
     y: u32,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default)]
 struct ModesetState {
     crtc_active: u64,
     crtc_mode_id: u32,

@@ -28,7 +28,7 @@ use crate::{
 /// `Md5` and `Sha1` variants exist for GlobalPlatform TEE API compatibility
 /// (PKCS#1 v1.5, PSS, OAEP). Both are weak and must not be used for new
 /// security-sensitive RSA operations; prefer SHA-256 or stronger.
-#[derive(Clone, Debug, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum RsaHashAlgo {
     /// Legacy RSA hash — MD5; not recommended.
     Md5,
@@ -76,14 +76,14 @@ impl TryFrom<HashAlgorithm> for RsaHashAlgo {
 }
 
 /// RSA signature padding selector.
-#[derive(Clone, Debug, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum RsaSignPadding {
     Pkcs1v15,
     Pss,
 }
 
 /// RSA encryption padding selector.
-#[derive(Clone, Debug, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum RsaEncPadding {
     Pkcs1v15,
     Oaep,

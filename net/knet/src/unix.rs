@@ -29,7 +29,7 @@ use crate::{
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
 };
 
-#[derive(Default, Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum UnixAddr {
     #[default]
     Unbound,

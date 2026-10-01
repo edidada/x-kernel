@@ -130,7 +130,7 @@ pub(super) trait TeeCryptObjAttrOps {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct AttrValue(u32);
 
 impl AttrValue {
@@ -188,8 +188,8 @@ impl AsMut<u32> for AttrValue {
     }
 }
 
-#[derive(Debug, Clone)]
 #[allow(dead_code)]
+#[derive(Clone, Debug)]
 pub(super) enum TeeCryptObjAttr {
     /// GP: `secret_value`
     SecretValue(TeeCrypObjSecretWrapper),

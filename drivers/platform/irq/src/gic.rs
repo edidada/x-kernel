@@ -36,7 +36,7 @@ pub const fn edge_irq_desc(hwirq: usize) -> kirq::IrqDesc {
     kirq::gic_edge_irq_desc(hwirq)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum GicVersion {
     V2,
     V3,
@@ -51,13 +51,13 @@ impl fmt::Display for GicVersion {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GicMmioRegion {
     pub paddr: PhysAddr,
     pub size: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GicConfig {
     pub version: GicVersion,
     pub gicd: GicMmioRegion,

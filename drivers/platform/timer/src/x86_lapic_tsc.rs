@@ -85,7 +85,7 @@ impl khal::time::ClockEventIf {
 }
 
 /// Platform-provided fallback configuration for the x86 timer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimerConfig {
     /// Nominal TSC frequency used for the calibration timeout and final fallback.
     pub nominal_frequency: Frequency,
@@ -105,7 +105,7 @@ impl TimerConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TscFrequency {
     Pit(Frequency),
     Hypervisor(Frequency),

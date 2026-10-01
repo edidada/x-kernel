@@ -10,7 +10,7 @@
 pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 
 /// The information of the graphics display device.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct DisplayInfo {
     /// The visible width.
     pub width: u32,
@@ -19,7 +19,7 @@ pub struct DisplayInfo {
 }
 
 /// A 2D scanout rectangle.
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ScanoutRect {
     /// The left coordinate in pixels.
     pub x: u32,
@@ -32,14 +32,14 @@ pub struct ScanoutRect {
 }
 
 /// Pixel format used by scanout resources.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScanoutFormat {
     /// 32-bit BGRA/XRGB memory layout as consumed by virtio-gpu 2D resources.
     Bgra8888,
 }
 
 /// A host-visible 2D resource backed by guest memory.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ScanoutResource {
     /// Driver-local resource identifier.
     pub id: u32,

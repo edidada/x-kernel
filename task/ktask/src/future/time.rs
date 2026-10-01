@@ -118,7 +118,7 @@ pub async fn sleep_until(deadline: MonotonicInstant) {
 }
 
 /// Error returned by [`timeout`] and [`timeout_at`].
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct Elapsed(());
 
 impl fmt::Display for Elapsed {

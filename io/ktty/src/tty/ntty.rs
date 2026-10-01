@@ -19,7 +19,7 @@ pub type NTtyDriver = Tty<Console, Console>;
 pub struct Console;
 
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConsoleBackendState {
     BootDirect      = 0,
     HandoverPending = 1,

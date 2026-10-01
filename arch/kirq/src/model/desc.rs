@@ -7,7 +7,7 @@
 use bitflags::bitflags;
 
 /// Interrupt trigger mode understood by the generic IRQ core.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqTrigger {
     EdgeRising,
     EdgeFalling,
@@ -18,7 +18,7 @@ pub enum IrqTrigger {
 }
 
 /// Interrupt controller family for IRQ descriptor normalization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqController {
     Gic,
     Plic,
@@ -30,7 +30,7 @@ pub enum IrqController {
 }
 
 /// Opaque identifier for an IRQ domain managed by the kernel IRQ core.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct IrqDomainId(u32);
 
 impl IrqDomainId {
@@ -50,7 +50,7 @@ impl IrqDomainId {
 /// The source bitmap is interpreted by higher layers such as the devres-backed
 /// driver framework. `kirq` only uses `handled()` to distinguish claimed work
 /// from a shared-line miss.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IrqEvent {
     handled: bool,
     sources: u8,
@@ -130,7 +130,7 @@ pub type Virq = usize;
 pub type Hwirq = usize;
 
 /// Firmware or platform source that described an interrupt resource.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqSource {
     DeviceTree,
     Acpi,
@@ -144,7 +144,7 @@ pub const IO_APIC_DOMAIN: IrqDomainId = IrqDomainId::new(3);
 pub const MSI_DOMAIN: IrqDomainId = IrqDomainId::new(4);
 
 /// Signal polarity described for an interrupt resource.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqPolarity {
     High,
     Low,
@@ -173,7 +173,7 @@ bitflags! {
 }
 
 /// CPU targeting policy attached to an IRQ resource.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqAffinity {
     Any,
     Cpu(usize),
@@ -181,7 +181,7 @@ pub enum IrqAffinity {
 
 /// Normalized interrupt resource description passed between firmware parsing,
 /// platform wiring and higher-level IRQ setup code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IrqDesc {
     pub virq: Option<Virq>,
     pub hwirq: Hwirq,
@@ -195,7 +195,7 @@ pub struct IrqDesc {
 }
 
 /// Descriptor merge, mapping, or lifecycle error detected by the IRQ core.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqDescError {
     /// Two descriptors for the same logical IRQ name different hardware IRQs.
     HwirqConflict { existing: Hwirq, newer: Hwirq },
@@ -413,7 +413,7 @@ pub const fn io_apic_irq_desc(hwirq: Hwirq) -> IrqDesc {
 /// trigger, polarity, affinity, or flag state. Keeping these cases separate
 /// prevents the IRQ core from inferring caller intent from default
 /// `IrqDesc` fields.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqSpec {
     /// Use an already known OS-visible IRQ number.
     PlainVirq(Virq),

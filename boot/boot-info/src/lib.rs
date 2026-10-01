@@ -547,7 +547,7 @@ impl fmt::Debug for LinuxBootParams {
 }
 
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BootProtocol {
     Unknown    = 0,
     Multiboot1 = 1,
@@ -561,7 +561,7 @@ pub enum BootProtocol {
 }
 
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MemoryDescriptionRoot {
     Unknown         = 0,
     DeviceTree      = 1,
@@ -582,7 +582,7 @@ impl MemoryDescriptionRoot {
 }
 
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HardwareDescriptionRoot {
     None       = 0,
     DeviceTree = 1,
@@ -601,7 +601,7 @@ impl HardwareDescriptionRoot {
 }
 
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BootConsoleTransport {
     None   = 0,
     Mmio   = 1,
@@ -609,7 +609,7 @@ pub enum BootConsoleTransport {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct X86LinuxE820Entry {
     pub addr: u64,
     pub size: u64,
@@ -625,7 +625,7 @@ impl X86LinuxE820Entry {
 }
 
 #[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum X86LinuxE820EntryType {
     Ram          = 1,
     Reserved     = 2,
@@ -638,7 +638,7 @@ pub enum X86LinuxE820EntryType {
 }
 
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PixelFormat {
     Rgb       = 0,
     Bgr       = 1,
@@ -646,7 +646,7 @@ pub enum PixelFormat {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct FrameBufferInfo {
     pub addr: usize,
     pub width: u32,

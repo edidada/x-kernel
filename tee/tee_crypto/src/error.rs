@@ -4,7 +4,7 @@
 
 //! Error types for tee_crypto.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CryptoError {
     InvalidKey,
     InvalidInput,
@@ -25,7 +25,7 @@ pub enum CryptoError {
     InternalError,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackendError {
     InvalidEncoding,
     InvalidExponent,

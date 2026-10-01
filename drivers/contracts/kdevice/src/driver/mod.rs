@@ -20,7 +20,7 @@ use crate::{
 /// Snapshotted via [`DriverObject::probe_stats`] and
 /// [`crate::BusInstance::probe_stats`] to help diagnose drivers or buses
 /// with repeated probe failures (see review item D2).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ProbeStats {
     /// Total probe attempts dispatched.
     pub attempts: u64,
@@ -69,7 +69,7 @@ impl Default for ProbeCounters {
 }
 
 /// Globally unique driver identifier assigned at runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct DriverId(u64);
 
 impl DriverId {
@@ -85,7 +85,7 @@ impl DriverId {
 }
 
 /// Persistent driver metadata.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct DriverInfo {
     /// Unique driver ID.
     pub id: DriverId,
@@ -96,7 +96,7 @@ pub struct DriverInfo {
 }
 
 /// Result of a driver's match attempt against a discovery descriptor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MatchResult {
     /// The driver does not support this device.
     NoMatch,
@@ -115,7 +115,7 @@ pub mod priority {
 }
 
 /// PCI vendor/device ID pair for matching.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PciDeviceId {
     /// PCI vendor id to match against.
     pub vendor_id: u16,
@@ -128,7 +128,7 @@ pub struct PciDeviceId {
 /// The `alias` is the stable kernel-side identity used by platform-static
 /// fallback descriptors. Raw firmware identifiers stay split by source so DT,
 /// ACPI, and static fallbacks do not accidentally match each other.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FirmwareMatchSpec {
     /// Stable kernel-side identity name used for platform-static fallback devices.
     pub alias: &'static str,

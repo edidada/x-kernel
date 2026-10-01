@@ -15,6 +15,7 @@ pub const PMU_OVERFLOW_IRQ: u32 = 23;
 /// todo: more event to support
 #[derive(Clone, Copy, Debug)]
 #[repr(u32)]
+#[derive(Clone, Copy, Debug)]
 pub enum PmuEvent {
     CpuCycles      = 0x11, // Cpu Cycles counter
     MemAccess      = 0x13, // Data memory access
@@ -23,7 +24,7 @@ pub enum PmuEvent {
 }
 
 /// Error type for PMU operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PmuError {
     /// PMU not available on this platform.
     NotAvailable,

@@ -18,7 +18,7 @@ use crate::virtio;
 /// Trust / quality tier for an entropy source.
 ///
 /// Used in Step 2 to filter sources during multi-source reseed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SourceTier {
     /// CPU instructions or on-die / SoC HRNG accessed from the kernel.
     #[cfg(any(
@@ -33,7 +33,7 @@ enum SourceTier {
 }
 
 /// Runtime state for a compiled-in entropy source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SourceAvailability {
     /// The source can currently provide entropy samples.
     Available,
@@ -56,7 +56,7 @@ impl SourceAvailability {
 }
 
 /// Failure reason from a source read attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SourceReadError {
     /// Zero-length reads are ignored by the entropy mixer.
     EmptyRequest,

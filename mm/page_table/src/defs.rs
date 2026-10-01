@@ -114,7 +114,7 @@ pub trait PageTableEntry: fmt::Debug + Clone + Copy + Sync + Send + Sized {
 }
 
 /// Page table operation errors.
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PtError {
     /// Frame allocation failed (out of memory).
     NoMemory,
@@ -136,7 +136,7 @@ pub enum PtError {
 /// such as COW write faults. Callers may inspect the mapping identity
 /// and permissions, but only `page_table` interprets `raw_bits` when checking
 /// whether the observed PTE is still unchanged.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PteSnapshot {
     paddr: PhysAddr,
     flags: PagingFlags,
@@ -177,7 +177,7 @@ impl PteSnapshot {
 }
 
 /// Error returned by conditional PTE replacement.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PteReplaceError {
     /// Page-table walk, address validation, or replacement validation failed.
     PageTable(PtError),
@@ -203,7 +203,7 @@ impl From<PtError> for PteReplaceError {
 /// The receipt is intentionally small: it does not expose architecture flush
 /// details, but it gives higher layers an explicit sequencing point they can
 /// place before releasing frames or object-owned pages that were unmapped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TlbFlushReceipt {
     had_pending: bool,
 }
@@ -417,7 +417,7 @@ pub trait PagingHandler: Sized {
 ///
 /// The discriminant values are the actual byte sizes of each page.
 #[repr(usize)]
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PageSize {
     /// 4 KiB page (standard granularity).
     Size4K = 0x1000,

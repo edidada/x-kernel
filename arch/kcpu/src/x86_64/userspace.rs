@@ -29,8 +29,8 @@ use super::{
 pub use crate::userspace_common::{ExceptionKind, ReturnReason};
 
 /// Context to enter user space.
-#[derive(Debug, Clone, Copy)]
 #[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct UserContext {
     tf: TrapFrame,
     /// FS Segment Base
@@ -58,8 +58,8 @@ struct EnterUserFrame {
 /// x87/MMX/XMM/MXCSR state. A caught signal handler may clobber the live
 /// FP/SIMD registers, so the interrupted state must be captured per signal
 /// frame (including nested signals) and restored on `rt_sigreturn`.
-#[derive(Debug, Clone, Copy)]
 #[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct UserRestorableContext {
     fs_base: u64,
     gs_base: u64,
@@ -316,7 +316,7 @@ impl UserContext {
 impl_user_context_deref!(TrapFrame, tf);
 
 /// Information about an exception that occurred in user space.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct ExceptionInfo {
     /// The exception vector.
     pub vector: u8,

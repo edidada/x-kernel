@@ -32,14 +32,14 @@ pub mod msix;
 static PCI_CONFIG_BASE_OVERRIDE: AtomicU64 = AtomicU64::new(0);
 static PCI_BUS_END_OVERRIDE: AtomicU32 = AtomicU32::new(u32::MAX);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PciConfigSource {
     Static,
     Firmware,
     RuntimeOverride,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PciInitError {
     NoMemory,
     InvalidRange,
@@ -48,7 +48,7 @@ pub enum PciInitError {
     InvalidBar,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LegacyInterruptRoute {
     pub irq: usize,
     pub trigger: fw::InterruptTrigger,

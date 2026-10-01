@@ -623,7 +623,7 @@ impl Mount {
 }
 
 /// A resolved location within a mountpoint.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct Path {
     mnt: Arc<Mount>,
     dentry: Dentry,

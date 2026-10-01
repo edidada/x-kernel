@@ -38,7 +38,7 @@ static IO_APIC_CACHE: LazyInit<Option<usize>> = LazyInit::new();
 /// Kept as a flat enum here (rather than borrowing `kdriver`'s
 /// `DiscoveryOrigin`) so this layer stays free of driver-framework deps.
 /// Callers that need to record the origin can map this 1:1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FirmwareSource {
     /// Flattened Device Tree.
     DeviceTree,
@@ -55,7 +55,7 @@ pub enum FirmwareSource {
 /// against per-driver firmware ID tables. Resources are optional because not
 /// every firmware node carries them. `source` records which firmware table the
 /// description came from so consumers do not have to hard-code an origin.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct FirmwareDevice {
     pub firmware_id: &'static str,
     pub source: FirmwareSource,
@@ -63,7 +63,7 @@ pub struct FirmwareDevice {
     pub irq: Option<InterruptInfo>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct MmioResource {
     pub base: usize,
     pub size: usize,

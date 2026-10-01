@@ -207,8 +207,8 @@ impl Signo {
 }
 
 /// Signal set. Compatible with `struct sigset_t` in libc.
-#[derive(Default, Clone, Copy, Not, BitOr, BitOrAssign, BitAnd, BitAndAssign)]
 #[repr(transparent)]
+#[derive(Default, Clone, Copy, Not, BitOr, BitOrAssign, BitAnd, BitAndAssign)]
 pub struct SignalSet(u64);
 
 impl SignalSet {
@@ -300,8 +300,8 @@ impl fmt::Debug for SignalSet {
 }
 
 /// Signal information. Compatible with `struct siginfo` in libc.
-#[derive(Clone)]
 #[repr(transparent)]
+#[derive(Clone)]
 pub struct SignalInfo(
     /// Raw Linux `siginfo_t` ABI payload.
     ///
@@ -311,7 +311,7 @@ pub struct SignalInfo(
 );
 
 /// Linux child-exit signal payload fields.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChildExitInfo {
     /// Child PID as observed by the receiving parent.
     pid: u32,

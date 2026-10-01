@@ -48,7 +48,7 @@ pub struct ActiveDeviceAdoption {
 type UnpublishedDescDevice = (Arc<DeviceObject>, Arc<BusTypeObject>);
 
 /// Result of one driver-core probe attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProbeOutcome {
     /// The probe activated the device in this call.
     Activated,

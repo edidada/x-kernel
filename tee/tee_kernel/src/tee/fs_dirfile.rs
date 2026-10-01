@@ -23,7 +23,7 @@ use super::{
 /// - `file_number`: file number
 /// - `hash`: hash of the file, used to pass to `tee_fs_htree_open()`
 /// - `idx`: index of the file handle in dirfile
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub(super) struct TeeFsDirfileFileh {
     pub file_number: u32,
     /// hash of the file, used to pass to `tee_fs_htree_open()`
@@ -38,7 +38,7 @@ pub(super) struct TeeFsDirfileFileh {
 
 /// entry of dirfile dirfile_entry
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub(super) struct DirFileEntry {
     uuid: TEE_UUID,
     oid: [u8; TEE_OBJECT_ID_MAX_LEN as _],

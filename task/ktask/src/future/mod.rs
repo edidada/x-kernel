@@ -170,10 +170,10 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
 mod prepared_tests;
 
 /// Error returned by [`interruptible`].
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct Interrupted(InterruptCause);
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 enum InterruptCause {
     Signal,
     Registration(PollRegisterError),

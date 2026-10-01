@@ -1060,8 +1060,8 @@ mod tests {
         PteReplaceError,
     };
 
-    #[derive(Clone, Copy)]
     #[repr(transparent)]
+    #[derive(Clone, Copy)]
     struct TestEntry(usize);
 
     impl PageTableEntry for TestEntry {

@@ -34,7 +34,7 @@ macro_rules! define_options {
 
 /// Credentials delivered over Unix-domain sockets.
 #[repr(C)]
-#[derive(Default, Debug, Clone)]
+#[derive(Clone, Debug, Default)]
 pub struct UnixCredentials {
     pub pid: u32,
     pub uid: u32,
@@ -51,13 +51,13 @@ impl UnixCredentials {
     }
 }
 
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct PacketStatistics {
     pub packets: u32,
     pub drops: u32,
 }
 
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct PacketMembership {
     pub ifindex: i32,
     pub membership_type: u16,

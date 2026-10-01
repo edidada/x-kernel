@@ -26,7 +26,7 @@ const DRM_MAJOR: u32 = 226;
 const DRM_PRIMARY_COUNT: u32 = 64;
 
 /// Device-node class projected by devtmpfs and sysfs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceNodeKind {
     /// Linux evdev character device.
     Input,
@@ -58,7 +58,7 @@ impl DeviceNodeKind {
 }
 
 /// Linux input identity tuple captured when an input class device is published.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InputDeviceNodeId {
     /// Bus type identifier.
     pub bus_type: u16,
@@ -83,7 +83,7 @@ impl InputDeviceNodeId {
 }
 
 /// Input identity and capability data used by sysfs projection consumers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InputDeviceNodeMetadata {
     name: String,
     physical_location: String,
@@ -145,7 +145,7 @@ impl InputDeviceNodeMetadata {
 }
 
 /// Class-specific facts supplied when a runtime device publishes its node.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeviceNodeClass {
     /// Input device with identity and capability metadata.
     Input(InputDeviceNodeMetadata),
@@ -163,7 +163,7 @@ impl DeviceNodeClass {
 }
 
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DeviceNodeState {
     Publishing    = 0,
     Published     = 1,
@@ -283,7 +283,7 @@ impl DeviceNodeLifecycle {
 }
 
 /// Stable device-node identity assigned by the device core.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct DeviceNode {
     core_id: DeviceId,
     kind: DeviceNodeKind,
@@ -367,7 +367,7 @@ impl DeviceNode {
 }
 
 /// Device-node lifecycle notification for projection consumers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeviceNodeEvent {
     /// A fully assigned device node is available for projection.
     Added(DeviceNode),
@@ -381,7 +381,7 @@ pub enum DeviceNodeEvent {
 pub type DeviceNodeCallback = Arc<dyn Fn(DeviceNodeEvent) + Send + Sync>;
 
 /// Ordered device-node lifecycle event delivered to the host event publisher.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeviceNodeLifecycleEvent {
     /// Projection subscribers have made the new node visible.
     Added(DeviceNode),

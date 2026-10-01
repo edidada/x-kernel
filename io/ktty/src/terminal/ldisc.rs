@@ -92,7 +92,7 @@ struct InputReader<R, W> {
     clear_line_buf: Arc<AtomicBool>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 enum InputStop {
     InputEmpty,
     OutputFull,

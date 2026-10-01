@@ -123,7 +123,7 @@ impl<T> Published<T> {
 /// This is a per-domain declaration (D-10), **never** a failure fallback:
 /// resolution is lock-free, so a missing mapping can only mean the line is
 /// genuinely not mapped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UnmappedPolicy {
     /// Unmapped lines resolve to their raw hardware number (identity
     /// dispatch) — e.g. the GIC domain, where the arch timer and IPIs are
@@ -271,7 +271,7 @@ pub(crate) fn publish_snapshot(
 }
 
 /// How a claimed interrupt should be turned into an OS-visible logical IRQ.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqRef {
     /// Resolve through the domain's published reverse map (lock-free).
     Domain(IrqDomainId, Hwirq),

@@ -23,7 +23,7 @@ type MemRange = (usize, usize);
 ///
 /// All later table lookups walk from this root. Stored once by
 /// [`init`] and read back through [`desc`] / [`rsdp_addr`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AcpiDesc {
     rsdp_addr: usize,
 }
@@ -41,7 +41,7 @@ impl AcpiDesc {
 }
 
 /// Failure to initialize the ACPI subsystem.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AcpiInitError {
     /// `init` was called with a zero RSDP address.
     MissingRsdp,
@@ -51,7 +51,7 @@ pub enum AcpiInitError {
 ///
 /// Produced only after the raw header passed signature and checksum
 /// validation.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct AcpiTableHeader {
     /// Four-character table signature (e.g. `APIC`, `MCFG`, `FACP`).
     pub signature: [u8; 4],
@@ -103,7 +103,7 @@ pub struct McfgAllocation {
 }
 
 /// MADT table header facts: the legacy Local APIC address and flags.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct MadtInfo {
     /// Physical address of the local APIC register block.
     pub local_apic_address: u32,
@@ -112,7 +112,7 @@ pub struct MadtInfo {
 }
 
 /// Summarized APIC topology extracted from the MADT.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ApicInfo {
     /// Physical address of the local APIC register block.
     pub local_apic_address: usize,
@@ -122,7 +122,7 @@ pub struct ApicInfo {
 
 /// One memory window advertised by a PCI host bridge `_CRS` resource
 /// template.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PciHostMemWindow {
     /// CPU physical base address of the window.
     pub base: u64,
@@ -136,7 +136,7 @@ pub struct PciHostMemWindow {
 
 /// The ACPI PM1a control block from the FADT (ACPI 5.0 §4.8.3.2), reached
 /// through port IO: the register sleep-state requests are written to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Pm1aControlBlock {
     /// IO-port number of the control block.
     pub port: u16,
@@ -145,7 +145,7 @@ pub struct Pm1aControlBlock {
 }
 
 /// One processor entry from the MADT (type 0).
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct LocalApicEntry {
     /// Processor UID as listed by the firmware (often the ACPI UID).
     pub processor_uid: u8,
@@ -163,7 +163,7 @@ impl LocalApicEntry {
 }
 
 /// One I/O APIC entry from the MADT (type 1).
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct IoApicEntry {
     /// I/O APIC id as listed by the firmware.
     pub id: u8,
@@ -174,7 +174,7 @@ pub struct IoApicEntry {
 }
 
 /// A parsed MADT entry, narrowed to the kinds the kernel consumes.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum MadtEntry {
     /// Processor entry (MADT type 0).
     LocalApic(LocalApicEntry),

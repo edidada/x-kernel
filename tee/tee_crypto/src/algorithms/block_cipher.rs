@@ -25,7 +25,7 @@ pub trait BlockCipher {
 }
 
 /// Static metadata for a block-cipher wrapper.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlockCipherSpec {
     pub name: &'static str,
     pub block_size: usize,

@@ -73,7 +73,7 @@ fn init_memory_filesystems() {
     kvfs::register_filesystem(&TMPFS_TYPE).expect("tmpfs filesystem type must register once");
 }
 
-#[derive(PartialEq, Eq, Hash, Clone)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 struct FileName(String);
 
 impl PartialOrd for FileName {

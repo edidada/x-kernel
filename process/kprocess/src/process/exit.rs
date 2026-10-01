@@ -12,8 +12,8 @@ use ktime_types::TimeSpan;
 use super::{INIT_PROC, Process};
 use crate::{Pid, process_domain};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ProcessExitState {
     Running = 0,
     Zombie  = 1,

@@ -40,7 +40,7 @@ pub const K_COSE_KEY_KTY_EC2: i64 = 2;
 // Operations
 pub const K_COSE_KEY_OPS_VERIFY: i64 = 2;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Principal {
     Authority,
     Subject,
@@ -52,7 +52,7 @@ pub enum Principal {
 //     }
 // }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KeyParam<'a> {
     pub profile_name: &'a str,
 
@@ -65,7 +65,7 @@ pub struct KeyParam<'a> {
     pub cose_key_curve: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiceResult {
     Ok,
     InvalidInput,
@@ -410,14 +410,14 @@ pub fn dice_cose_sign_and_encode_sign1(
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum DiceMode {
     NotInitialized,
     Normal,
     Debug,
     Maintenance,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiceConfigType {
     Inline,
     Descriptor,

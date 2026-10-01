@@ -13,7 +13,7 @@ use super::unsigned::TeeBigNum;
 use crate::error::{CryptoError, Result};
 
 /// Sign for a signed TEE big integer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TeeBigIntSign {
     /// Negative value.
     Negative,
@@ -22,7 +22,7 @@ pub enum TeeBigIntSign {
 }
 
 /// A signed big integer for the GP TEE arithmetic API.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct TeeBigInt {
     sign: TeeBigIntSign,
     magnitude: BoxedUint,

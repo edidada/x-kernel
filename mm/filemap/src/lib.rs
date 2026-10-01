@@ -50,7 +50,7 @@ mod test_support {
 ///   content object (`address_space` / inode-owned mapping)
 /// - `Private`: initial reads come from the same object, but writes materialize
 ///   private COW pages for the mapping instance
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FileMappingMode {
     /// Linux `MAP_SHARED` / shared file-backed mapping.
     Shared,

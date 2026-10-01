@@ -54,8 +54,8 @@ pub(crate) fn present_count() -> usize {
     current_cpu_id_map().present_count()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct LogicalCpuId(usize);
 
 impl LogicalCpuId {
@@ -84,8 +84,8 @@ impl From<LogicalCpuId> for usize {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RawCpuId(usize);
 
 impl RawCpuId {
@@ -130,8 +130,8 @@ fn load_cpu_id_map(load: impl FnOnce(&mut CpuIdMap) -> bool) -> bool {
     truncated
 }
 
-#[derive(Clone, Copy)]
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub(crate) struct CpuIdMap {
     raw_cpu_ids_by_logical: [usize; NR_CPUS],
     present_count: usize,

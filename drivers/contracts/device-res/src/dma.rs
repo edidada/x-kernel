@@ -14,7 +14,7 @@ use crate::{ResError, ResResult};
 ///
 /// OS-neutral. Host kernels translate this into their own direction
 /// representation when performing cache maintenance or bounce buffering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DmaDirection {
     /// CPU writes, device reads (host flushes before device access).
     DriverToDevice,
@@ -25,7 +25,7 @@ pub enum DmaDirection {
 }
 
 /// A request for a coherent DMA buffer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DmaSpec {
     /// Buffer length in bytes.
     pub len: usize,
@@ -53,7 +53,7 @@ impl DmaSpec {
 }
 
 /// A coherent DMA allocation returned by [`DmaOp::alloc_coherent`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct DmaAllocation {
     /// Virtual address the CPU uses to access the buffer.
     pub cpu_addr: usize,
@@ -64,7 +64,7 @@ pub struct DmaAllocation {
 }
 
 /// A streaming DMA mapping returned by [`DmaOp::map_streaming`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct DmaMapping {
     /// CPU virtual address of the mapped buffer.
     pub cpu_addr: usize,

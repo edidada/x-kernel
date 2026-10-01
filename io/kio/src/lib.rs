@@ -34,7 +34,7 @@ mod test_seek;
 pub use self::{buffered::*, iobuf::*, read::*, seek::*, utils::*, write::*};
 
 /// I/O poll results.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct PollState {
     /// Object can be read now.
     pub readable: bool,

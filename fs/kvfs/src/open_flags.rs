@@ -167,7 +167,7 @@ impl OpenHow {
 }
 
 /// Open parameters consumed by namei.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct OpenParams {
     flags: OpenFlags,
     mode: Umode,

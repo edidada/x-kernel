@@ -15,7 +15,7 @@ use core::{fmt, ops::Deref};
 use digest::Digest as _;
 
 /// Supported hash algorithm selector.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HashAlgorithm {
     /// MD5 — legacy TEE support only; cryptographically broken, not recommended.
     Md5,
@@ -29,7 +29,7 @@ pub enum HashAlgorithm {
 }
 
 /// Static metadata for a hash algorithm.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HashSpec {
     pub algorithm: HashAlgorithm,
     pub name: &'static str,

@@ -13,7 +13,7 @@ use crate::{
 };
 
 /// Why a task is becoming runnable on this RQ.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EnqueueKind {
     /// First time runnable (spawn).
     New,
@@ -26,7 +26,7 @@ pub enum EnqueueKind {
 }
 
 /// Why the runner is leaving the CPU.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LeaveReason {
     /// Voluntary yield.
     Yield,
@@ -42,7 +42,7 @@ pub enum LeaveReason {
 }
 
 /// Policy decision after a mutation: whether to reschedule and when to look again.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Decision {
     /// A leave/pick should happen at the next safe point.
     pub resched: bool,
@@ -52,7 +52,7 @@ pub struct Decision {
 }
 
 /// How the class arbitrator `update` path should probe after charging.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UpdateKind {
     /// Charge only; resched if this class exhausted its request.
     Account,

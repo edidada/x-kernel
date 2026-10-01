@@ -10,7 +10,7 @@ use crypto_bigint::BoxedUint;
 use crate::error::{CryptoError, Result};
 
 /// An unsigned big number backed by `crypto-bigint`.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct TeeBigNum {
     pub(super) value: BoxedUint,
 }

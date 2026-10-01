@@ -68,13 +68,13 @@ pub(super) const fn htree_node_committed_child(n: usize) -> u32 {
 }
 
 #[repr(C)]
-#[derive(Copy, Debug, Clone, Default, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub(super) struct TeeFsHtreeMeta {
     pub length: u64,
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Default, Debug, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub(super) struct TeeFsHtreeImeta {
     pub meta: TeeFsHtreeMeta,
     pub max_node_id: u32,
@@ -83,7 +83,7 @@ pub(super) struct TeeFsHtreeImeta {
 
 pub(super) const TEE_FS_HTREE_IMETA_SIZE: usize = core::mem::size_of::<TeeFsHtreeImeta>();
 #[repr(C)]
-#[derive(Copy, Clone, Default, Pod, Zeroable)]
+#[derive(Clone, Copy, Default, Pod, Zeroable)]
 pub(super) struct TeeFsHtreeImage {
     pub iv: [u8; TEE_FS_HTREE_IV_SIZE],
     pub tag: [u8; TEE_FS_HTREE_TAG_SIZE],
@@ -107,7 +107,7 @@ impl Debug for TeeFsHtreeImage {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Default, Pod, Zeroable)]
+#[derive(Clone, Copy, Default, Pod, Zeroable)]
 pub(super) struct TeeFsHtreeNodeImage {
     pub hash: [u8; TEE_FS_HTREE_HASH_SIZE],
     pub iv: [u8; TEE_FS_HTREE_IV_SIZE],
@@ -140,7 +140,7 @@ impl Debug for TeeFsHtreeNodeImage {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum TeeFsHtreeType {
     Head,
     Node,
@@ -150,7 +150,7 @@ pub(super) enum TeeFsHtreeType {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Default, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub(super) struct TeeFsHtreeData {
     pub head: TeeFsHtreeImage,
     pub fek: [u8; TEE_FS_HTREE_FEK_SIZE],
@@ -1375,7 +1375,7 @@ pub(super) fn get_node(
 /// * `counter1` - the counter1
 /// # Returns
 /// * `Result<u8, CounterIndexError>` - the selected index or invalid counter state
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CounterIndexError {
     InvalidCounterPair,
 }

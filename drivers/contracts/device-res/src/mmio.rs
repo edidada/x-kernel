@@ -13,7 +13,7 @@ use core::{
 use crate::ResResult;
 
 /// A memory-mapped I/O region described by physical address and size.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MmioRegion {
     /// Physical base address.
     pub base: usize,
@@ -22,7 +22,7 @@ pub struct MmioRegion {
 }
 
 /// An x86 I/O port range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IoPortRange {
     /// Base port number.
     pub base: u16,
@@ -35,7 +35,7 @@ pub struct IoPortRange {
 /// The provider is responsible for interpreting the token in
 /// [`MmioOp::unmap_mmio`]. Drivers never construct this directly; they hold an
 /// [`Io`] handle instead.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct MmioMapping {
     /// Virtual address the CPU uses to access the region.
     pub vaddr: usize,

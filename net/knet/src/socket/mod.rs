@@ -148,7 +148,7 @@ impl RecvFlags {
 pub type AncillaryData = Box<dyn Any + Send + Sync>;
 
 /// Options for initiating a socket connection.
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ConnectOptions {
     /// Return the protocol-specific nonblocking result when the connection
     /// cannot complete immediately.
@@ -156,13 +156,13 @@ pub struct ConnectOptions {
 }
 
 /// Options for accepting a connection from a listening socket.
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct AcceptOptions {
     /// Return [`KError::WouldBlock`] when no connection is ready.
     pub nonblocking: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum SocketErrorOrigin {
     Local,
     Icmp,
@@ -171,7 +171,7 @@ pub enum SocketErrorOrigin {
 }
 
 /// A protocol error stored in a socket error queue.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct SocketErrorInfo {
     pub errno: LinuxError,
     pub origin: SocketErrorOrigin,
@@ -183,7 +183,7 @@ pub struct SocketErrorInfo {
 }
 
 /// Ancillary data produced by the networking stack itself.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub enum KernelAncillaryData {
     IpError(SocketErrorInfo),
     /// Trusted sender credentials attached by a kernel transport.
@@ -193,7 +193,7 @@ pub enum KernelAncillaryData {
 /// Options for sending data to a socket.
 ///
 /// See [`SocketOps::send`].
-#[derive(Default, Debug)]
+#[derive(Debug, Default)]
 pub struct SendOptions {
     pub to: Option<SocketAddrEx>,
     pub flags: SendFlags,
@@ -221,7 +221,7 @@ impl Debug for RecvOptions<'_> {
 }
 
 /// Kind of shutdown operation to perform on a socket.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Shutdown {
     Read,
     Write,

@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 use kerrno::KResult;
 
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum State {
     Idle,
     Busy,
@@ -17,7 +17,7 @@ pub(crate) enum State {
     Closed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct InvalidStateValue;
 
 impl TryFrom<u8> for State {

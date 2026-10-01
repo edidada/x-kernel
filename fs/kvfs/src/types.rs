@@ -10,7 +10,7 @@ use ktime_types::SystemTime;
 
 /// Filesystem node type values.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NodeType {
     Unknown         = 0,
     Fifo            = 0o1,
@@ -184,7 +184,7 @@ pub struct Metadata {
 }
 
 /// Filesystem node metadata update.
-#[derive(Default, Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct MetadataUpdate {
     /// File size
     pub size: Option<u64>,

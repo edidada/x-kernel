@@ -72,8 +72,8 @@ static_lock! {
 pub(super) static UEVENT_SEQNUM: AtomicU64 = AtomicU64::new(0);
 pub(super) const NETLINK_RX_QUEUE_LIMIT: usize = 64 * 1024;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct NetlinkAddr {
     pub pid: u32,
     pub groups: u32,

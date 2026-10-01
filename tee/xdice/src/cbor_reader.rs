@@ -9,7 +9,7 @@ pub struct CborIn<'a> {
     pub cursor: usize,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum CborReadResult {
     Ok,
     End,

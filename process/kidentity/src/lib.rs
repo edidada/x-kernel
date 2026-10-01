@@ -84,7 +84,7 @@ impl PidNamespace {
 }
 
 /// A namespace-scoped task number.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct Upid {
     nr: u32,
     ns: Arc<PidNamespace>,

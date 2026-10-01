@@ -24,7 +24,7 @@ use kspin::{NoPreempt, SpinNoIrq, static_lock};
 use ksync::Mutex;
 use linked_list_r4l::{GetLinks, Links, List};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProcessingPhase {
     Idle,
     Queued(usize),

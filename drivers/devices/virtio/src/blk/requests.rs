@@ -26,7 +26,7 @@ enum Operation {
     Flush,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequestState {
     Prepared,
     Pending,

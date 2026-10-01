@@ -16,7 +16,7 @@ use crate::{
 };
 
 /// ECC curve identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EccCurve {
     /// NIST P-192 (secp192r1)
     P192,
@@ -33,7 +33,7 @@ pub enum EccCurve {
 }
 
 /// RSA padding mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RsaPadding {
     /// PKCS#1 v1.5 padding
     Pkcs1v15,
@@ -46,7 +46,7 @@ pub enum RsaPadding {
 }
 
 /// RSA public key components in big-endian byte form.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RsaPublicComponents {
     n: BigEndianBytes,
     e: BigEndianBytes,
@@ -75,7 +75,7 @@ impl RsaPublicComponents {
 }
 
 /// ECC affine public point in big-endian byte form.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EccPublicPoint {
     curve: EccCurve,
     x: BigEndianBytes,
@@ -105,7 +105,7 @@ impl EccPublicPoint {
 }
 
 /// SM2 public point in big-endian byte form.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Sm2PublicPoint {
     x: BigEndianBytes,
     y: BigEndianBytes,
@@ -130,7 +130,7 @@ impl Sm2PublicPoint {
 }
 
 /// Public key components (algorithm-agnostic).
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub enum PublicKeyComponents {
     /// RSA public key: modulus `n` and public exponent `e`.
     Rsa(RsaPublicComponents),

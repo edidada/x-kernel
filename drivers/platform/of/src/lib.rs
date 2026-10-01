@@ -16,7 +16,7 @@ pub use rs_fdtree::{
 };
 
 /// Failure to initialize the global device-tree handle.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FirmwareInitError {
     /// The boot pointer was null.
     MissingDeviceTreePtr,
@@ -27,7 +27,7 @@ pub enum FirmwareInitError {
 static FDT: LazyInit<LinuxFdt<'static>> = LazyInit::new();
 
 /// Interrupt trigger mode decoded from firmware cells.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InterruptTrigger {
     /// Interrupt asserted on the rising edge.
     EdgeRising,
@@ -42,7 +42,7 @@ pub enum InterruptTrigger {
 }
 
 /// Interrupt controller family owning a decoded interrupt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InterruptControllerKind {
     /// ARM GIC (v2/v3/v4) family.
     Gic,
@@ -53,7 +53,7 @@ pub enum InterruptControllerKind {
 }
 
 /// Configuration access mechanism of a generic PCI host bridge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PciHostCam {
     /// Legacy memory-mapped config access (256 bytes per device function).
     Cam,
@@ -63,7 +63,7 @@ pub enum PciHostCam {
 
 /// Facts about a generic PCI host bridge: config window, mechanism, and bus
 /// range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PciHostInfo {
     /// Config access mechanism (`Cam` or `Ecam`).
     pub cam: PciHostCam,
@@ -78,7 +78,7 @@ pub struct PciHostInfo {
 }
 
 /// One CPU-visible memory window from a PCI host bridge's `ranges`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PciRangeInfo {
     /// CPU physical base address of the window.
     pub cpu_base: u64,
@@ -89,7 +89,7 @@ pub struct PciRangeInfo {
 }
 
 /// A fully decoded interrupt: number, trigger mode, and owning controller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InterruptInfo {
     /// Global IRQ number (GIC SPI/PPI numbering applied).
     pub irq: usize,
@@ -101,7 +101,7 @@ pub struct InterruptInfo {
 
 /// A reserved-memory region together with its DT node name (or
 /// `memreserve` provenance), for debugging and policy decisions.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NamedMemoryRegion {
     /// The reserved region itself.
     pub region: crate::MemoryRegion,

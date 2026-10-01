@@ -135,7 +135,7 @@ pub(crate) fn allocate_thread_task_number()
 }
 
 /// Runtime action requested by a syscall after handling a user trap.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum UserThreadRuntimeAction {
     /// Continue with the normal post-syscall signal check and syscall restart.
     #[default]

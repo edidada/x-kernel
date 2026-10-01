@@ -30,7 +30,7 @@ mod time;
 use alloc::boxed::Box;
 
 /// A single resource associated with a device.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum ResourceDesc {
     /// Memory-mapped I/O region.
     Mmio(crate::mmio::MmioRegion),
@@ -46,7 +46,7 @@ pub enum ResourceDesc {
 pub type ResourceSet = smallvec::SmallVec<[ResourceDesc; 4]>;
 
 /// Error returned by resource acquisition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResError {
     /// The resource descriptor was invalid (e.g. zero-sized region).
     InvalidResource,
@@ -108,7 +108,7 @@ mod tests {
         devm_iomap_with_provider, devm_request_irq_with_provider,
     };
 
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Event {
         MapMmio(MmioRegion),
         UnmapMmio(MmioRegion),

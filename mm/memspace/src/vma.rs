@@ -93,7 +93,7 @@ pub struct ForkCloneTarget<'a> {
 ///
 /// `MS_SYNC` and `MS_ASYNC` are mutually exclusive, so a single mode replaces
 /// two independent flags and cannot express the invalid combination.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MsyncWriteback {
     /// Neither `MS_SYNC` nor `MS_ASYNC` was requested.
     Unspecified,
@@ -104,7 +104,7 @@ pub enum MsyncWriteback {
 }
 
 /// Validated `msync()` policy visible to MM internals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MsyncPolicy {
     writeback: MsyncWriteback,
     invalidate: bool,
@@ -158,7 +158,7 @@ impl MsyncPolicy {
 }
 
 /// Result of a VMA runtime `msync()` hook.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MsyncRuntimeResult {
     /// The runtime has no file-backed sync work for this range.
     NotApplicable,
@@ -181,7 +181,7 @@ pub enum VmRuntimeRef {
 }
 
 /// Semantic class of a VMA-side runtime reference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum VmRuntimeKind {
     Linear,
     AnonShared,
@@ -440,7 +440,7 @@ impl fmt::Debug for VmRuntimeRef {
 /// This mirrors the Linux model more closely than the old backend type names:
 /// the VMA references either an anonymous object, a file-backed shared object,
 /// or a private file-backed mapping with COW semantics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VmBackingKind {
     /// Direct linear/physical mapping with no higher-level memory object.
     Linear,
@@ -460,7 +460,7 @@ pub enum VmBackingKind {
 }
 
 /// Description of the object referenced by a VMA.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VmBackingInfo {
     kind: VmBackingKind,
     page_size: PageSize,
@@ -487,7 +487,7 @@ impl VmBackingInfo {
 ///
 /// This is VMA metadata, not page-table state. Existing execution paths still
 /// translate it to `MappingFlags` when touching PTEs.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VmPerm {
     flags: MappingFlags,
 }
@@ -525,7 +525,7 @@ impl From<VmPerm> for MappingFlags {
 ///
 /// This corresponds to Linux `VM_MAY*`-style metadata. It must survive VMA
 /// split, merge, relocation, and fork independently from current permissions.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VmMayPerm {
     flags: MappingFlags,
 }
@@ -560,7 +560,7 @@ impl From<VmMayPerm> for MappingFlags {
 }
 
 /// Fork/exec inheritance policy carried by a VMA.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VmInheritance {
     /// Mapping is copied across `fork()` using normal shared/private rules.
     Copy,
@@ -578,7 +578,7 @@ impl VmInheritance {
 }
 
 /// File-backed metadata attached to a VMA for introspection.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileMappingInfo {
     /// File-relative byte offset corresponding to the VMA start.
     pub offset: u64,
@@ -589,7 +589,7 @@ pub struct FileMappingInfo {
 }
 
 /// Process-facing VMA metadata with explicit backing semantics.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct VmArea {
     range: VirtAddrRange,
     perm: VmPerm,

@@ -6,7 +6,7 @@
 
 use core::{mem, ptr};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LoadSegment<'a> {
     pub vaddr: u64,
     pub memsz: u64,

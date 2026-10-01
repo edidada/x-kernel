@@ -12,7 +12,7 @@ use linux_raw_sys::general::{
 };
 
 /// Kernel stat structure containing file metadata.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Kstat {
     /// Device identifier containing this inode.
     pub dev: u64,

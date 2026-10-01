@@ -61,7 +61,7 @@ impl EventType {
 
 /// An input event, as defined by the Linux input subsystem.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Event {
     /// Event category (matches `EventType`).
     pub event_type: u16,
@@ -89,7 +89,7 @@ impl Event {
 
 /// Identification tuple for an input device.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct InputDeviceId {
     /// The bustype identifier.
     pub bus_type: u16,
@@ -118,7 +118,7 @@ impl InputDeviceId {
 
 /// Axis information for absolute input devices.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AbsInfo {
     /// The minimum value for the axis.
     pub min: u32,

@@ -54,7 +54,7 @@ pub(crate) fn new_tmpfs_with_type(
 }
 
 /// Kind of shmem object represented by a tmpfs-backed inode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ShmemObjectKind {
     /// Anonymous file created for `memfd_create`.
     Memfd,

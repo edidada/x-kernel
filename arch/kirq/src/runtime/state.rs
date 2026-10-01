@@ -118,7 +118,7 @@ impl IrqActionSnapshot {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct IrqPlatformPlan {
     pub(super) desc: IrqDesc,
     pub(super) configure: bool,

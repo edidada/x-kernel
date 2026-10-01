@@ -197,7 +197,7 @@ fn resolve_boot_log_level() -> &'static str {
     configured_log_level()
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct RegionLogSummary {
     name: &'static str,
     flags: MemFlags,

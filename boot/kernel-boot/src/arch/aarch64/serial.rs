@@ -229,7 +229,7 @@ pub(crate) fn boot_print_usize(num: usize) {
     write_str_idmap("\r\n");
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Uart {
     base_address: usize,
 }

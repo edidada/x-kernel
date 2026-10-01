@@ -42,7 +42,7 @@ static_lock! {
 }
 
 /// Options for installing a regular IRQ handler.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IrqRegisterOptions {
     auto_enable: bool,
 }

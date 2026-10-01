@@ -82,7 +82,7 @@ pub fn looks_like_ta(path: &str) -> bool {
 }
 
 /// Identity of a TA session, stored in `TeeTaCtx.open_sessions`.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct SessionIdentity {
     pub uuid: String,
     pub session_id: u32,

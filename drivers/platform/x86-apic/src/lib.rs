@@ -60,13 +60,13 @@ pub const APIC_ERROR_VECTOR: u8 = 0xf2;
 pub const MSIX_VECTOR_BASE: u8 = 0x40;
 pub const IO_APIC_VECTOR_BASE: usize = 0x20;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IoApicTriggerMode {
     Edge,
     Level,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IoApicPolarity {
     High,
     Low,
