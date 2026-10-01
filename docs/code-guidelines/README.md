@@ -111,6 +111,7 @@ checked through the configured kernel's `make clippy` during this migration.
 | [CG-004-static-mut-option](CG-004-static-mut-option.md) | MUST | dylint | `static_mut_option` |
 | [CG-005-user-abi-layout](CG-005-user-abi-layout.md) | MUST | dylint | `unsound_user_abi_impl` |
 | [CG-006-user-copy-abi-contract](CG-006-user-copy-abi-contract.md) | MUST | dylint | `user_copy_without_abi_contract` |
+| [CG-007-attribute-order](CG-007-attribute-order.md) | MUST | dylint | `derive_not_last`, `unsorted_attributes` |
 | [CG-008-unsafe-attribute-safety](CG-008-unsafe-attribute-safety.md) | MUST | dylint | `undocumented_unsafe_attribute` |
 | [CG-009-vec-shift-in-loop](CG-009-vec-shift-in-loop.md) | SHOULD | dylint | `vec_shift_in_loop` |
 | [CG-010-typed-error-result](CG-010-typed-error-result.md) | SHOULD | dylint | `untyped_error_result` |
