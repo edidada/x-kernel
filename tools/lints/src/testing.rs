@@ -20,6 +20,7 @@ use std::{
 /// Test-only stand-in for the kernel `kspin` crate.
 pub(crate) const MOCK_KSPIN: MockCrate = MockCrate {
     name: "kspin",
+    proc_macro: false,
     source: r#"//! Test-only stand-in for the kernel `kspin` crate.
 //!
 //! The lint identifies lock types by (crate name, item name) and the
@@ -134,6 +135,7 @@ macro_rules! declare_unregistered {
 /// Test-only stand-in for the kernel `ksync` crate.
 pub(crate) const MOCK_KSYNC: MockCrate = MockCrate {
     name: "ksync",
+    proc_macro: false,
     source: r#"//! Test-only stand-in for the kernel `ksync` crate.
 
 pub struct RawMutex;
@@ -183,6 +185,8 @@ macro_rules! declare_unregistered {
 pub(crate) struct MockCrate {
     /// Crate name, as passed to `--extern`.
     pub(crate) name: &'static str,
+    /// Whether this mock is a procedural macro crate.
+    pub(crate) proc_macro: bool,
     /// Contents of the crate root.
     pub(crate) source: &'static str,
 }
@@ -273,7 +277,11 @@ fn target_dir() -> PathBuf {
 /// Builds `mock` into `deps/lib<name>.rlib` with the lint toolchain.
 fn build_mock(deps: &Path, mock: &MockCrate) -> PathBuf {
     let source = deps.join(format!("{}.rs", mock.name));
-    let rlib = deps.join(format!("lib{}.rlib", mock.name));
+    let artifact = if mock.proc_macro {
+        deps.join(format!("lib{}.so", mock.name))
+    } else {
+        deps.join(format!("lib{}.rlib", mock.name))
+    };
     write(&source, mock.source);
     let toolchain = toolchain();
     let status = Command::new("rustup")
@@ -282,12 +290,16 @@ fn build_mock(deps: &Path, mock: &MockCrate) -> PathBuf {
             "--edition",
             "2024",
             "--crate-type",
-            "rlib",
+            if mock.proc_macro {
+                "proc-macro"
+            } else {
+                "rlib"
+            },
             "--crate-name",
             mock.name,
         ])
         .arg("-o")
-        .arg(&rlib)
+        .arg(&artifact)
         .arg(&source)
         .status()
         .unwrap_or_else(|error| panic!("cannot run `rustup run {toolchain} rustc`: {error}"));
@@ -296,7 +308,7 @@ fn build_mock(deps: &Path, mock: &MockCrate) -> PathBuf {
         "building the mock {} crate with `rustup run {toolchain} rustc` failed: {status}",
         mock.name
     );
-    rlib
+    artifact
 }
 
 /// Returns the active rustup toolchain, falling back to `rust-toolchain.toml`.
