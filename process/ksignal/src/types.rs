@@ -330,7 +330,7 @@ pub struct SignalInfo(
     ///
     /// Accessing union arms directly is unsafe; use the decoding helpers on
     /// [`SignalInfo`], which select the arm implied by `si_code`.
-    pub siginfo_t,
+    siginfo_t,
 );
 
 /// Linux child-exit signal payload fields.
@@ -739,13 +739,15 @@ impl fmt::Debug for SignalInfo {
 
 impl From<SignalInfo> for k_siginfo {
     fn from(value: SignalInfo) -> Self {
-        Self(value.0)
+        // SAFETY: SignalInfo's raw field is private. Its constructors start
+        // from a fully zeroed record or an initialized k_siginfo user copy.
+        unsafe { Self::from_initialized_raw(value.0) }
     }
 }
 
 impl From<k_siginfo> for SignalInfo {
     fn from(value: k_siginfo) -> Self {
-        Self(value.0)
+        Self(value.into_raw())
     }
 }
 

@@ -80,8 +80,26 @@ unsafe impl UserWrite for k_sigaction {}
 )]
 pub struct k_siginfo(
     /// Raw Linux signal-information record, including its tagged union payload.
-    pub siginfo_t,
+    siginfo_t,
 );
+
+impl k_siginfo {
+    /// Returns the fully initialized Linux signal-information record.
+    pub fn into_raw(self) -> siginfo_t {
+        self.0
+    }
+
+    /// Wraps a raw record whose complete byte representation is initialized.
+    ///
+    /// # Safety
+    ///
+    /// `raw` must have every byte initialized, including unused union arms.
+    /// Construct it from an all-zero record before setting union members, or
+    /// obtain it from a complete user-memory copy.
+    pub unsafe fn from_initialized_raw(raw: siginfo_t) -> Self {
+        Self(raw)
+    }
+}
 
 #[expect(clippy::allow_attributes, reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy")]
 #[allow(
@@ -89,9 +107,9 @@ pub struct k_siginfo(
     unsound_user_abi_impl,
     reason = "CG-005-user-abi-layout: SignalInfo::empty zeroes the full union record"
 )]
-// SAFETY: all kernel-produced k_siginfo values come from SignalInfo::empty,
-// which initializes every byte of the union before any member is overwritten.
-// Values copied from userspace also have every byte initialized by the copy.
+// SAFETY: the raw field is private. Safe construction is through UserRead,
+// which copies every byte. The unsafe constructor requires an all-initialized
+// record; ksignal::SignalInfo starts from a zeroed record before member writes.
 unsafe impl UserWrite for k_siginfo {}
 
 /// A raw `sigval_t` carrier read at the syscall boundary.

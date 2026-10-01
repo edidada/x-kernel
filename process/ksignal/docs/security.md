@@ -179,6 +179,7 @@ an inline `SAFETY:` justification.
 
 | Location | Operation | Invariant |
 |---|---|---|
+| `types.rs` `From<SignalInfo> for k_siginfo` | unsafe wrapping of a raw union record | `SignalInfo` seals its raw field; all construction starts from a zeroed record or a complete `k_siginfo` user copy |
 | `types.rs` `header`/`header_mut`/`sifields`/`sifields_mut` | union arm access | bindgen preserves ABI offsets; readers only touch the arm selected by `si_code` or by the constructor that populated it |
 | `types.rs` `ChildExitSignalInfo::new` | `_sigchld` arm write | `CLD_*` codes select the arm and every exposed field is initialized |
 | `types.rs` `timer_id`/`timer_overrun`/`timer_signal_seq`/`sigval` | arm reads | guarded by `SI_TIMER` or negative `si_code` checks |
@@ -203,6 +204,7 @@ treats payload fields as raw bits and never dereferences pointer-like values
 | T-05 | Signal flood exhausting kernel memory | Medium | unbounded `rt_sigqueueinfo`/timer expirations | Ordinary standard sends coalesce while any record is pending; each prepared timer can hold one record even for a standard signo. Queued timer storage is reserved at creation. Ordinary realtime growth remains unbounded; Linux resource-limit parity is not claimed |
 | T-06 | Observer table races | Low | re-registering an observer while signals dequeue | Table access is `SpinNoIrq`-serialized; overwrite is documented last-wins |
 | T-07 | `SignalInfo` auto-trait unsoundness | High (if violated) | storing a `sival_ptr` that becomes a dereferenceable alias | `unsafe impl` is justified by opaque-bits treatment; all reads return raw values, no dereference of payload pointers exists in this crate |
+| T-08 | Signal-frame output may expose padding | High (unresolved) | `api/thread.rs` writes the whole Rust-layout `SignalFrame` through raw-pointer `write_vm` | CG-006 remains Warn on this call. A follow-up must prove an initialized ABI layout for `SignalFrame`, `UContext`, `SignalInfo`, and `UserRestorableContext`, or write a validated byte carrier. |
 
 ## FMEA
 
