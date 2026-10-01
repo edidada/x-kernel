@@ -89,6 +89,13 @@ impl k_siginfo {
         self.0
     }
 
+    /// Returns the complete initialized 128-byte Linux `siginfo_t` record.
+    pub fn into_bytes(self) -> [u8; 128] {
+        // SAFETY: k_siginfo's UserWrite contract requires every byte to be
+        // initialized, including inactive union arms; both types are 128 bytes.
+        unsafe { core::mem::transmute(self.0) }
+    }
+
     /// Wraps a raw record whose complete byte representation is initialized.
     ///
     /// # Safety

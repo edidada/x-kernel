@@ -13,7 +13,7 @@ use core::{
 use kcpu::userspace::{UserContext, UserRestorableContext};
 use kerrno::{KResult, LinuxError};
 use kspin::SpinNoIrq;
-use osvm::VirtMutPtr;
+use posix_types::{UserPtr, UserWrite, k_siginfo};
 
 use super::ProcessSignalManager;
 use crate::{
@@ -23,11 +23,20 @@ use crate::{
     arch::{self, UContext},
 };
 
+#[repr(C)]
 struct SignalFrame {
+    #[cfg(not(target_arch = "x86_64"))]
+    siginfo: [u8; 128],
     ucontext: UContext,
-    siginfo: SignalInfo,
+    #[cfg(target_arch = "x86_64")]
+    siginfo: [u8; 128],
     saved: UserRestorableContext,
+    #[cfg(target_arch = "aarch64")]
+    abi_pad: [u8; 8],
 }
+
+// SAFETY: all signal-frame ABI fields and alignment gaps must be explicit.
+unsafe impl UserWrite for SignalFrame {}
 
 // The x86_64 restorable context holds an FXSAVE block that `restore` feeds to
 // `FXRSTOR`, which requires 16-byte alignment. Rust's field layout keeps
@@ -36,6 +45,42 @@ const _: () = assert!(
     core::mem::offset_of!(SignalFrame, saved) % core::mem::align_of::<UserRestorableContext>() == 0,
     "signal-frame restorable state must be naturally aligned"
 );
+
+// These frame sizes and offsets pin the user-visible ABI while every gap is
+// represented by an initialized field in UContext, MContext, or SignalFrame.
+#[cfg(target_arch = "aarch64")]
+const _: () = {
+    assert!(core::mem::size_of::<SignalFrame>() == 4704);
+    assert!(core::mem::offset_of!(SignalFrame, siginfo) == 0);
+    assert!(core::mem::offset_of!(SignalFrame, ucontext) == 128);
+    assert!(core::mem::offset_of!(SignalFrame, saved) == 4688);
+};
+#[cfg(target_arch = "x86_64")]
+const _: () = {
+    assert!(core::mem::size_of::<SignalFrame>() == 1472);
+    // The restorer word is pushed immediately below this payload. From the
+    // handler's SP, X-Kernel's pretcode/uc/info offsets are 0/8/824. Linux's
+    // ucontext is 512 bytes shorter, placing info at 312. Both use pretcode
+    // at 0 and ucontext at 8; libgcc's fallback unwinder relies on this prefix.
+    assert!(core::mem::size_of::<usize>() == 8);
+    assert!(core::mem::offset_of!(SignalFrame, ucontext) == 0);
+    assert!(core::mem::offset_of!(SignalFrame, siginfo) == 816);
+    assert!(core::mem::offset_of!(SignalFrame, saved) == 944);
+    assert!(8 + core::mem::offset_of!(SignalFrame, siginfo) == 824);
+    assert!(8 + core::mem::offset_of!(SignalFrame, saved) == 952);
+};
+#[cfg(target_arch = "riscv64")]
+const _: () = {
+    assert!(core::mem::size_of::<SignalFrame>() == 1088);
+    assert!(core::mem::offset_of!(SignalFrame, siginfo) == 0);
+    assert!(core::mem::offset_of!(SignalFrame, ucontext) == 128);
+};
+#[cfg(target_arch = "loongarch64")]
+const _: () = {
+    assert!(core::mem::size_of::<SignalFrame>() == 576);
+    assert!(core::mem::offset_of!(SignalFrame, siginfo) == 0);
+    assert!(core::mem::offset_of!(SignalFrame, ucontext) == 128);
+};
 
 /// Thread-level signal manager.
 ///
@@ -118,7 +163,8 @@ impl ThreadSignalManager {
     ///
     /// Default and ignored dispositions only report the OS action; a caught
     /// signal rewrites `uctx` to enter the user handler on a freshly built
-    /// signal frame (`ucontext` + `siginfo` + restorable state) written to
+    /// signal frame (architecture-ordered `siginfo` and `ucontext`, then
+    /// restorable state) written to
     /// user memory, applies the handler mask and
     /// `SA_RESETHAND`, and returns [`SignalOsAction::Handler`].
     ///
@@ -161,11 +207,13 @@ impl ThreadSignalManager {
                 let aligned_sp = (sp - layout.size()) & !(frame_align - 1);
 
                 let frame_ptr = aligned_sp as *mut SignalFrame;
-                if frame_ptr
+                if UserPtr::from(frame_ptr)
                     .write_vm(SignalFrame {
                         ucontext: UContext::new(uctx, restore_blocked),
-                        siginfo: sig.clone(),
+                        siginfo: k_siginfo::from(sig.clone()).into_bytes(),
                         saved: uctx.save_user_restorable(),
+                        #[cfg(target_arch = "aarch64")]
+                        abi_pad: [0; 8],
                     })
                     .is_err()
                 {

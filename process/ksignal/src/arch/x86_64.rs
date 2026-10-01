@@ -152,6 +152,12 @@ pub struct UContext {
     pub fpregs_mem: [u64; 64],
 }
 
+const _: () = {
+    assert!(core::mem::offset_of!(UContext, stack) == 16);
+    assert!(core::mem::offset_of!(UContext, mcontext) == 40);
+    assert!(size_of::<UContext>() == 816);
+};
+
 impl UContext {
     /// Build a user context frame for signal handling.
     pub fn new(uctx: &UserContext, sigmask: SignalSet) -> Self {

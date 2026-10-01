@@ -80,7 +80,7 @@ slow path dequeues against `!blocked`, consults dequeue observers (used by
 `kprocess` timer delivery to drop stale POSIX timer signals), then dispatches
 through `handle_signal`.
 
-Handler dispatch builds a `SignalFrame { ucontext, siginfo, saved }` on the
+Handler dispatch builds an architecture-ordered `SignalFrame` on the
 user stack (alternate stack when `SA_ONSTACK` and configured), rewrites
 `UserContext` to enter the handler with `(signo, siginfo*, ucontext*)`
 arguments, sets the restorer return path (x86_64 pushes it on the stack,
@@ -169,6 +169,10 @@ set by `rt_sigsuspend` and consumed by the next caught-signal frame build
 - Every architecture embeds the explicit `k_sigaltstack` carrier in
   `ucontext.uc_stack`. Its `sp, flags, padding, size` byte order matches Linux
   `stack_t`; the kernel-only `SignalStack` keeps its own field order.
+- The outbound frame is a repr(C) carrier. Each architecture context models
+  alignment holes as zeroed fields, and the 128-byte `siginfo` member stores
+  the initialized record as bytes. RISC-V stores the Linux `user_regs_struct`
+  sequence (PC, x1..x31) rather than including the kernel's x0 word.
 - POSIX timer notifications arrive with complete pointer-sized `sigval` bits.
   `SignalInfo::new_timer` writes those bits through the full-width pointer
   member of the zeroed outbound `siginfo` record.

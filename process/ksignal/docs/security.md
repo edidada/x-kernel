@@ -15,7 +15,7 @@ holding signal frames, and the return address of the handler trampoline.
 
 | Boundary | Direction | Content |
 |---|---|---|
-| User memory (via `osvm` `write_vm`) | kernel writes | handler frame (`ucontext`, `siginfo`, restorer push) |
+| User memory (via `UserPtr::write_vm`) | kernel writes | handler frame (`ucontext`, `siginfo`, restorer push) |
 | User memory (direct deref) | kernel reads | `sigreturn` frame at user `sp` |
 | User ABI payloads via `ksyscall` | inbound | sigaction structs, siginfo (rt_sigqueueinfo), sigset words, sigaltstack |
 | Alternate signal stack | user-controlled addresses | `sp`/`size` used for frame placement |
@@ -23,7 +23,7 @@ holding signal frames, and the return address of the handler trampoline.
 
 ## Unsafe inventory
 
-All unsafe blocks are in `types.rs` plus one in `api/thread.rs`; each carries
+Unsafe blocks are in `types.rs`, `arch/riscv.rs`, and `api/thread.rs`; each carries
 an inline `SAFETY:` justification.
 
 | Location | Operation | Invariant |
@@ -33,7 +33,9 @@ an inline `SAFETY:` justification.
 | `types.rs` `ChildExitSignalInfo::new` | `_sigchld` arm write | `CLD_*` codes select the arm and every exposed field is initialized |
 | `types.rs` `timer_id`/`timer_overrun`/`timer_signal_seq`/`sigval` | arm reads | guarded by `SI_TIMER` or negative `si_code` checks |
 | `types.rs` `unsafe impl Send/Sync for SignalInfo` | auto-trait override | payload is opaque ABI bits, not dereferenceable aliases; mutation requires `&mut` |
-| `api/thread.rs` `restore` | `&*(sp as *const SignalFrame)` | trusts that user `sp` maps the frame previously written by `handle_signal` |
+| `arch/riscv.rs` `MContext::new`/`restore` | reinterpret the homogeneous repr(C) register record as 32 words | size and boundary offsets are asserted; Linux stores PC then x1..x31, omitting x0 |
+| `api/thread.rs` `UserWrite for SignalFrame` | outbound frame byte contract | repr(C) fields and nested contexts have explicit initialized alignment fields; siginfo is a complete 128-byte carrier |
+| `api/thread.rs` `restore` | direct frame dereference at `sp` | trusts that user `sp` maps the frame previously written by `handle_signal`; x86_64 `ret` has already consumed the preceding `pretcode` word |
 
 `SignalInfo::empty` safely initializes the full 128-byte `_si_pad` union arm
 with zeros; constructors then set the header and exposed payload fields.
@@ -55,7 +57,28 @@ full-width pointer arm, so an integer-width member cannot leave bytes unset.
 | T-05 | Signal flood exhausting kernel memory | Medium | unbounded `rt_sigqueueinfo`/timer expirations | Standard signals coalesce to one instance; real-time queues are bounded by sender rate — matches Linux behavior; no additional kernel cap (accepted residual risk, same as Linux) |
 | T-06 | Observer table races | Low | re-registering an observer while signals dequeue | Table access is `SpinNoIrq`-serialized; overwrite is documented last-wins |
 | T-07 | `SignalInfo` auto-trait unsoundness | High (if violated) | storing a `sival_ptr` that becomes a dereferenceable alias | `unsafe impl` is justified by opaque-bits treatment; all reads return raw values, no dereference of payload pointers exists in this crate |
-| T-08 | Signal-frame output may expose padding | High (unresolved) | `api/thread.rs` writes the whole Rust-layout `SignalFrame` through raw-pointer `write_vm` | CG-006 remains Warn on this call. A follow-up must prove an initialized ABI layout for `SignalFrame`, `UContext`, `SignalInfo`, and `UserRestorableContext`, or write a validated byte carrier. |
+| T-08 | Signal-frame output exposes padding | High (fixed) | field-initialized frame was copied with implicit architecture-dependent holes | `SignalFrame` is repr(C) and `UserWrite`, with explicit zeroed padding in the nested contexts and frame tail; siginfo is a fully initialized 128-byte carrier. CG-005 checks the compiled layouts and CG-006 checks the copy path. |
+
+The 64-bit frame layout is pinned by compile-time size and offset assertions.
+The following ranges had implicit padding before the fix; all are now explicit
+zeroed fields or eliminated by the corrected RISC-V register carrier:
+
+| Architecture | Before | After | Outbound field layout |
+|---|---|---|---|
+| aarch64 | 4704 bytes; 164–168, 296–304, 584–592, 4696–4704 | 4704 bytes; no implicit padding | `siginfo` 0–128, `ucontext` 128–4688, saved state 4688–4696, zero pad 4696–4704 |
+| x86_64 | 1472-byte payload; 164–168 | 1472-byte payload; no implicit padding | From handler SP, X-Kernel places `pretcode` at 0–8, `ucontext` at 8–824, `siginfo` at 824–952, and saved state at 952–1480. The payload begins at SP+8; `ret` consumes `pretcode` before `rt_sigreturn` reads it. |
+| riscv64 | 1104 bytes; 164–168, 296–304, 1096–1104 | 1088 bytes; no implicit padding | `siginfo` 0–128, `ucontext` 128–1088; Linux `user_regs_struct` omits x0 |
+| loongarch64 | 576 bytes; 164–168, 296–304, 572–576 | 576 bytes; no implicit padding | `siginfo` 0–128, `ucontext` 128–576 |
+
+The RISC-V before size and tail range come from the previous source layout
+(`pc` + 32 GPR words + 528-byte FP state, aligned to 16), reproduced with a
+64-bit Rust layout check. Linux UAPI uses PC + 31 GPR words. `k_sigaltstack`
+matches Linux `stack_t` offsets on all four targets.
+The signal-frame order follows Linux `rt_sigframe`: info precedes ucontext on
+arm64, RISC-V and LoongArch. On x86_64, X-Kernel has a Linux-compatible prefix:
+`pretcode` at 0 and `ucontext` at 8. X-Kernel's ucontext is 512 bytes larger,
+so its `siginfo` starts at 824 instead of Linux's 312. libgcc's fallback signal
+unwinder relies on the shared ucontext offset.
 
 ## FMEA
 

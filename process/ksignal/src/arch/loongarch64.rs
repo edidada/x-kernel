@@ -31,7 +31,13 @@ pub struct MContext {
     sc_pc: u64,
     sc_regs: GeneralRegisters,
     sc_flags: u32,
+    abi_pad: [u8; 4],
 }
+
+const _: () = {
+    assert!(size_of::<MContext>() == 272);
+    assert!(core::mem::offset_of!(MContext, abi_pad) == 268);
+};
 
 impl MContext {
     /// Build machine context from a user context snapshot.
@@ -40,6 +46,7 @@ impl MContext {
             sc_pc: uctx.era as _,
             sc_regs: uctx.regs,
             sc_flags: 0,
+            abi_pad: [0; 4],
         }
     }
 
@@ -63,9 +70,15 @@ pub struct UContext {
     /// `uc_sigmask` restored into the thread blocked set at `sigreturn`.
     pub sigmask: SignalSet,
     __unused: [u8; 1024 / 8 - size_of::<SignalSet>()],
+    abi_pad: [u8; 8],
     /// `uc_mcontext` general-purpose register snapshot.
     pub mcontext: MContext,
 }
+
+const _: () = {
+    assert!(core::mem::offset_of!(UContext, mcontext) == 176);
+    assert!(size_of::<UContext>() == 448);
+};
 
 impl UContext {
     /// Build a user context frame for signal handling.
@@ -76,6 +89,7 @@ impl UContext {
             stack: SignalStack::default().into(),
             sigmask,
             __unused: [0; 1024 / 8 - size_of::<SignalSet>()],
+            abi_pad: [0; 8],
             mcontext: MContext::new(uctx),
         }
     }
