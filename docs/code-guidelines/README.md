@@ -101,6 +101,7 @@ checked through the configured kernel's `make clippy` during this migration.
 | [CG-001-static-spinlock-registration](CG-001-static-spinlock-registration.md) | MUST | dylint | `unregistered_static_spinlock` |
 | [CG-002-static-mutex-registration](CG-002-static-mutex-registration.md) | MUST | dylint | `unregistered_static_lock` |
 | [CG-003-runtime-lock-tracking](CG-003-runtime-lock-tracking.md) | MUST | dylint | `untracked_runtime_lock` |
+| [CG-004-static-mut-option](CG-004-static-mut-option.md) | MUST | dylint | `static_mut_option` |
 | [CG-016-safety-comment-substance](CG-016-safety-comment-substance.md) | MUST | clippy | `clippy::undocumented_unsafe_blocks` |
 | [CG-018-uninitialized-storage-model](CG-018-uninitialized-storage-model.md) | MUST | clippy | `clippy::disallowed_methods` |
 | [CG-021-no-panic-on-reachable-failure](CG-021-no-panic-on-reachable-failure.md) | MUST | clippy | `clippy::panic`, `clippy::unwrap_used`, `clippy::expect_used` |
