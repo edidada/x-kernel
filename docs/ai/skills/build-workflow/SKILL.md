@@ -56,6 +56,10 @@ that the configuration compiles; CI scans the aarch64 and x86_64
 runs the lint's UI tests. The first run builds the Dylint driver and can take
 a few minutes; later runs are incremental. Install the pinned tools with
 `make install-tools` after adding the nightly components and target above.
+`make dylint XKMAKE_ARGS=--fix` applies machine suggestions across local
+packages in the configured application's compilation graph, including
+dependencies of `entry`. It checks that selecting those packages for fixes
+does not change their resolved features.
 
 ## Configuration
 

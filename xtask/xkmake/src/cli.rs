@@ -147,6 +147,10 @@ pub(crate) struct DylintArgs {
     #[arg(long)]
     pub(crate) self_test: bool,
 
+    /// Apply machine-applicable lint suggestions in configured local packages.
+    #[arg(long, conflicts_with = "self_test")]
+    pub(crate) fix: bool,
+
     /// Additional Cargo arguments passed after `cargo dylint --`.
     #[arg(last = true)]
     pub(crate) cargo_args: Vec<String>,
