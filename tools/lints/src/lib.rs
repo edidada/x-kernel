@@ -17,6 +17,7 @@ extern crate rustc_span;
 
 dylint_linting::dylint_library!();
 
+mod static_lock_helpers;
 mod unregistered_static_spinlock;
 
 #[cfg(test)]
