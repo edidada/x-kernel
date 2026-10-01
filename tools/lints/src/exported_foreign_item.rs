@@ -14,7 +14,7 @@ rustc_session::declare_lint! {
     /// Raw ABI declarations expose safety and ownership obligations to callers.
     /// ### Example
     /// `pub unsafe extern "C" { pub fn raw_operation(); }`
-    pub EXPORTED_FOREIGN_ITEM, Warn, "foreign item is reachable outside its crate", report_in_external_macro
+    pub EXPORTED_FOREIGN_ITEM, Deny, "foreign item is reachable outside its crate", report_in_external_macro
 }
 rustc_session::declare_lint_pass!(ExportedForeignItem => [EXPORTED_FOREIGN_ITEM]);
 
@@ -52,16 +52,16 @@ pub mod exposed { unsafe extern "C" { pub fn reacheable(); } }
 pub use hidden::reexported;
 fn main() {}
 "#,
-            r###"warning: foreign declaration is reachable outside its crate
+            r###"error: foreign declaration is reachable outside its crate
   --> $DIR/exported_foreign_item.rs:2:21
    |
 LL | unsafe extern "C" { pub fn visible(); }
    |                     ^^^^^^^^^^^^^^^^^
    |
    = help: keep the extern item private and expose a wrapper; see docs/code-guidelines/CG-012-private-foreign-items.md
-   = note: `#[warn(exported_foreign_item)]` on by default
+   = note: `#[deny(exported_foreign_item)]` on by default
 
-warning: foreign declaration is reachable outside its crate
+error: foreign declaration is reachable outside its crate
   --> $DIR/exported_foreign_item.rs:4:59
    |
 LL | mod hidden { unsafe extern "C" { pub fn module_private(); pub fn reexported(); } }
@@ -69,7 +69,7 @@ LL | mod hidden { unsafe extern "C" { pub fn module_private(); pub fn reexported
    |
    = help: keep the extern item private and expose a wrapper; see docs/code-guidelines/CG-012-private-foreign-items.md
 
-warning: foreign declaration is reachable outside its crate
+error: foreign declaration is reachable outside its crate
   --> $DIR/exported_foreign_item.rs:5:39
    |
 LL | pub mod exposed { unsafe extern "C" { pub fn reacheable(); } }
@@ -77,7 +77,7 @@ LL | pub mod exposed { unsafe extern "C" { pub fn reacheable(); } }
    |
    = help: keep the extern item private and expose a wrapper; see docs/code-guidelines/CG-012-private-foreign-items.md
 
-warning: 3 warnings emitted
+error: aborting due to 3 previous errors
 
 "###,
             &[],
