@@ -928,8 +928,8 @@ impl PollBackoff {
 
     fn snapshot(&self) -> (u64, u64) {
         let idle = self.consecutive_idle.load(Ordering::Relaxed);
-        let interval = self.next_interval().as_micros() as u64;
-        (idle, interval)
+        let interval_us = self.next_interval().as_micros() as u64;
+        (idle, interval_us)
     }
 }
 

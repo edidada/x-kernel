@@ -157,6 +157,16 @@ struct BpfProgTestRunAttrPrefix {
     data_in: u64,
     data_out: u64,
     repeat: u32,
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        unitless_time_integer,
+        reason = "CG-011-time-unit-names: Linux UAPI name `union bpf_attr` test-run field \
+                  `duration` from `include/uapi/linux/bpf.h`"
+    )]
     duration: u32,
 }
 
