@@ -20,7 +20,7 @@ rustc_session::declare_lint! {
     /// Reports safely reorderable outer attributes or built-in derive traits
     /// that are not alphabetized. See CG-007-attribute-order.
     pub UNSORTED_ATTRIBUTES,
-    Warn,
+    Deny,
     "safe attributes or built-in derives are not alphabetical"
 }
 
@@ -524,7 +524,7 @@ impl Members {
 fn main() {}
 "#;
 
-    const STDERR: &str = r#"warning: sort attributes alphabetically
+    const STDERR: &str = r#"error: sort attributes alphabetically
   --> $DIR/unsorted_attributes.rs:3:1
    |
 LL | / #[repr(C)]
@@ -532,14 +532,14 @@ LL | | #[cfg(all())]
    | |_____________^
    |
    = help: see docs/code-guidelines/CG-007-attribute-order.md
-   = note: `#[warn(unsorted_attributes)]` on by default
+   = note: `#[deny(unsorted_attributes)]` on by default
 help: use alphabetical order
    |
 LL + #[cfg(all())]
 LL + #[repr(C)]
    |
 
-warning: sort derived traits alphabetically
+error: sort derived traits alphabetically
   --> $DIR/unsorted_attributes.rs:5:1
    |
 LL | #[derive(Debug, Clone)]
@@ -547,7 +547,7 @@ LL | #[derive(Debug, Clone)]
    |
    = help: see docs/code-guidelines/CG-007-attribute-order.md
 
-warning: sort attributes alphabetically
+error: sort attributes alphabetically
   --> $DIR/unsorted_attributes.rs:18:1
    |
 LL | / #[cfg_attr(any(), must_use)]
@@ -561,7 +561,7 @@ LL + #[cfg_attr(any(), deprecated)]
 LL + #[cfg_attr(any(), must_use)]
    |
 
-warning: sort derived traits alphabetically
+error: sort derived traits alphabetically
   --> $DIR/unsorted_attributes.rs:59:5
    |
 LL |     #[derive(Debug, Clone)]
@@ -569,7 +569,7 @@ LL |     #[derive(Debug, Clone)]
    |
    = help: see docs/code-guidelines/CG-007-attribute-order.md
 
-warning: sort derived traits alphabetically
+error: sort derived traits alphabetically
   --> $DIR/unsorted_attributes.rs:63:1
    |
 LL | #[derive(Debug, /* keep this comment */ Clone)]
@@ -577,7 +577,7 @@ LL | #[derive(Debug, /* keep this comment */ Clone)]
    |
    = help: see docs/code-guidelines/CG-007-attribute-order.md
 
-warning: sort derived traits alphabetically
+error: sort derived traits alphabetically
   --> $DIR/unsorted_attributes.rs:66:1
    |
 LL | #[derive(Debug, Clone)]
@@ -585,7 +585,7 @@ LL | #[derive(Debug, Clone)]
    |
    = help: see docs/code-guidelines/CG-007-attribute-order.md
 
-warning: sort derived traits alphabetically
+error: sort derived traits alphabetically
   --> $DIR/unsorted_attributes.rs:70:1
    |
 LL | #[derive(Debug, Clone)]
@@ -593,7 +593,7 @@ LL | #[derive(Debug, Clone)]
    |
    = help: see docs/code-guidelines/CG-007-attribute-order.md
 
-warning: place derive after other outer attributes
+error: place derive after other outer attributes
   --> $DIR/unsorted_attributes.rs:75:1
    |
 LL | / #[derive(Clone)]
@@ -602,7 +602,7 @@ LL | | #[cfg(all())]
    | |_____________^
    |
    = help: see docs/code-guidelines/CG-007-attribute-order.md
-   = note: `#[warn(derive_not_last)]` on by default
+   = note: `#[deny(derive_not_last)]` on by default
 help: move derive after these attributes
    |
 LL + #[repr(C)]
@@ -616,7 +616,7 @@ error[E0433]: cannot find `Clone` in `custom`
 LL | #[derive(custom::Debug, custom::Clone)]
    |                                 ^^^^^ could not find `Clone` in `custom`
 
-error: aborting due to 1 previous error; 8 warnings emitted
+error: aborting due to 9 previous errors
 
 For more information about this error, try `rustc --explain E0433`.
 "#;

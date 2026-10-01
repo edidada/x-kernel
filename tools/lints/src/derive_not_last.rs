@@ -13,7 +13,7 @@ rustc_session::declare_lint! {
     /// Reports a `derive` followed by safe built-in outer attributes.
     /// See `docs/code-guidelines/CG-007-attribute-order.md`.
     pub DERIVE_NOT_LAST,
-    Warn,
+    Deny,
     "derive should follow other safe outer attributes"
 }
 
@@ -213,7 +213,7 @@ struct QualifiedDoc(u8);
 fn main() {}
 "#;
 
-    const STDERR: &str = r#"warning: place derive after other outer attributes
+    const STDERR: &str = r#"error: place derive after other outer attributes
   --> $DIR/derive_not_last.rs:3:1
    |
 LL | / #[derive(Debug, Clone)]
@@ -221,7 +221,7 @@ LL | | #[repr(C)]
    | |__________^
    |
    = help: see docs/code-guidelines/CG-007-attribute-order.md
-   = note: `#[warn(derive_not_last)]` on by default
+   = note: `#[deny(derive_not_last)]` on by default
 help: move derive after these attributes
    |
 LL + #[repr(C)]
@@ -234,7 +234,7 @@ error[E0433]: cannot find module or crate `custom` in this scope
 LL | #[custom::doc]
    |   ^^^^^^ use of unresolved module or unlinked crate `custom`
 
-error: aborting due to 1 previous error; 1 warning emitted
+error: aborting due to 2 previous errors
 
 For more information about this error, try `rustc --explain E0433`.
 "#;
