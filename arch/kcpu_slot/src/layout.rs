@@ -79,10 +79,6 @@ unsafe extern "C" {
 #[cfg(test)]
 #[unsafe(no_mangle)]
 static _cpu_slot_template_lma_start: u8 = 0;
-#[cfg(test)]
-#[unsafe(no_mangle)]
-static _cpu_slot_template_size: u8 = 0;
-
 pub(crate) fn template_start() -> usize {
     &raw const _cpu_slot_template_lma_start as usize
 }
