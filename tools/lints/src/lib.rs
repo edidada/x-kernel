@@ -32,6 +32,7 @@ mod undocumented_unsafe_attribute;
 mod unitless_time_integer;
 mod unregistered_static_lock;
 mod unregistered_static_spinlock;
+mod unsorted_attributes;
 mod unsound_user_abi_impl;
 mod untracked_runtime_lock;
 mod untyped_error_result;
@@ -65,6 +66,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         unsound_user_abi_impl::UNSOUND_USER_ABI_IMPL,
         user_copy_without_abi_contract::USER_COPY_WITHOUT_ABI_CONTRACT,
         derive_not_last::DERIVE_NOT_LAST,
+        unsorted_attributes::UNSORTED_ATTRIBUTES,
     ]);
     lint_store.register_late_pass(|_| Box::new(facts_export::FactsExport));
     // CG rules do not apply to vendored third-party code. Its facts are still
@@ -90,4 +92,6 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         Box::new(user_copy_without_abi_contract::UserCopyWithoutAbiContract)
     });
     lint_store.register_pre_expansion_pass(|| Box::new(derive_not_last::DeriveNotLast));
+    lint_store
+        .register_pre_expansion_pass(|| Box::new(unsorted_attributes::UnsortedAttributes::new()));
 }
