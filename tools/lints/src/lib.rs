@@ -30,6 +30,7 @@ mod undocumented_unsafe_attribute;
 mod unitless_time_integer;
 mod unregistered_static_lock;
 mod unregistered_static_spinlock;
+mod unsound_user_abi_impl;
 mod untracked_runtime_lock;
 mod untyped_error_result;
 mod vec_shift_in_loop;
@@ -58,6 +59,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         unitless_time_integer::UNITLESS_TIME_INTEGER,
         exported_foreign_item::EXPORTED_FOREIGN_ITEM,
         undocumented_unsafe_attribute::UNDOCUMENTED_UNSAFE_ATTRIBUTE,
+        unsound_user_abi_impl::UNSOUND_USER_ABI_IMPL,
     ]);
     lint_store.register_late_pass(|_| Box::new(facts_export::FactsExport));
     // CG rules do not apply to vendored third-party code. Its facts are still
@@ -78,4 +80,5 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
     lint_store.register_pre_expansion_pass(|| {
         Box::new(undocumented_unsafe_attribute::UndocumentedUnsafeAttribute)
     });
+    lint_store.register_late_pass(|_| Box::new(unsound_user_abi_impl::UnsoundUserAbiImpl));
 }
