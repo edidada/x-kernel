@@ -116,6 +116,7 @@ actual synchronization report arrives. A peer open's queue is never cleared.
 
 The crate contains two unsafe memory operations, one unsafe timer start, and
 two exported C ABI entry points:
+The crate contains one unsafe memory operation and two exported C ABI entry
 
 - `src/nodes/fb.rs::FrameBuffer::as_mut_slice` uses
   `slice::from_raw_parts_mut`. The constructor obtains `base` and `size` from
@@ -197,6 +198,7 @@ The client-to-timekeeper lock order has no reverse path: inputdev releases the
 timekeeper and endpoint locks before invoking clients. The BOOTTIME mapping
 currently lacks separate suspend accounting, matching `clock_gettime`; this
 limitation must not be presented as a complete suspend-aware clock.
+| T-06 | `LOOP_GET_STATUS` leaks kernel memory through struct padding | High — uninitialized kernel bytes reach userspace | The ioctl copies the implicit padding in `linux_raw_sys::loop_info` | `LoopInfo` models each gap as an explicit zeroed field, asserts the Linux ABI layout, and copies through `UserPtr::write_vm` with `UserWrite`. |
 
 ## Failure modes and effects
 
