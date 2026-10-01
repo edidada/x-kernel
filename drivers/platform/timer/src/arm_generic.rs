@@ -359,7 +359,7 @@ fn arm_timer(deadline: ktime_types::MonotonicInstant) {
     // the virtual-counter origin and optional resume offset. Converting an
     // absolute deadline to ticks can wrap before a later interval clamp.
     let now_ns = ticks_to_nanos(now_ticks_raw());
-    let interval = deadline_to_interval_ticks(
+    let interval_ticks = deadline_to_interval_ticks(
         deadline.as_nanos_u64_saturating(),
         now_ns,
         frequency().as_hz(),
@@ -370,11 +370,11 @@ fn arm_timer(deadline: ktime_types::MonotonicInstant) {
             // Enabling first would assert ISTATUS immediately. Linux
             // `arch_timer` `set_next_event` writes TVAL, then CTRL.ENABLE.
             // Physical writes go through the VMM-aware helpers (EL2 CNTHP_*).
-            write_physical_timer_tval(interval);
+            write_physical_timer_tval(interval_ticks);
             write_physical_timer_ctl(1);
         }
         TimerMode::Virtual => {
-            CNTV_TVAL_EL0.set(interval);
+            CNTV_TVAL_EL0.set(interval_ticks);
             CNTV_CTL_EL0.write(CNTV_CTL_EL0::ENABLE::SET);
         }
     }
@@ -637,14 +637,14 @@ mod tests {
             u32::MAX as u64,
         ] {
             for now in [0, 1, 1_000_000, 1 << 62, u64::MAX - 1] {
-                for deadline in [0, 1, 17, 1_000_000_001, 1 << 62, u64::MAX - 1, u64::MAX] {
-                    let remaining = u128::from(deadline.saturating_sub(now));
+                for deadline_ns in [0, 1, 17, 1_000_000_001, 1 << 62, u64::MAX - 1, u64::MAX] {
+                    let remaining = u128::from(deadline_ns.saturating_sub(now));
                     let expected = (remaining * u128::from(frequency))
                         .div_ceil(u128::from(ktime_types::NANOS_PER_SEC))
                         .min(u128::from(MAX_TIMER_INTERVAL_TICKS))
                         as u64;
                     assert_eq!(
-                        deadline_to_interval_ticks(deadline, now, frequency),
+                        deadline_to_interval_ticks(deadline_ns, now, frequency),
                         expected
                     );
                 }

@@ -17,7 +17,7 @@ rustc_session::declare_lint! {
     /// Integer time values with different units are otherwise easy to confuse.
     /// ### Example
     /// `let timeout = 100;`
-    pub UNITLESS_TIME_INTEGER, Warn, "integer time quantity name has no unit suffix", report_in_external_macro
+    pub UNITLESS_TIME_INTEGER, Deny, "integer time quantity name has no unit suffix", report_in_external_macro
 }
 rustc_session::declare_lint_pass!(UnitlessTimeInteger => [UNITLESS_TIME_INTEGER]);
 
@@ -201,16 +201,16 @@ struct DurationLike;
 fn typed(_time: DurationLike) {}
 fn main() {}
 "#,
-            r###"warning: integer time quantity `timeout` has no unit suffix
+            r###"error: integer time quantity `timeout` has no unit suffix
   --> $DIR/unitless_time_integer.rs:2:17
    |
 LL | struct Timers { timeout: u64, timeout_ms: u64, deadline: i32, byte_count: usize, period_ticks: u32, timeout_count: usize, poll_inter...
    |                 ^^^^^^^^^^^^
    |
    = help: add the stored unit to the name (for example `_ms`); see docs/code-guidelines/CG-011-time-unit-names.md
-   = note: `#[warn(unitless_time_integer)]` on by default
+   = note: `#[deny(unitless_time_integer)]` on by default
 
-warning: integer time quantity `deadline` has no unit suffix
+error: integer time quantity `deadline` has no unit suffix
   --> $DIR/unitless_time_integer.rs:2:48
    |
 LL | struct Timers { timeout: u64, timeout_ms: u64, deadline: i32, byte_count: usize, period_ticks: u32, timeout_count: usize, poll_inter...
@@ -218,7 +218,7 @@ LL | struct Timers { timeout: u64, timeout_ms: u64, deadline: i32, byte_count: u
    |
    = help: add the stored unit to the name (for example `_ms`); see docs/code-guidelines/CG-011-time-unit-names.md
 
-warning: integer time quantity `retry_delay` has no unit suffix
+error: integer time quantity `retry_delay` has no unit suffix
   --> $DIR/unitless_time_integer.rs:3:21
    |
 LL | enum Event { Wait { retry_delay: u64 } }
@@ -226,7 +226,7 @@ LL | enum Event { Wait { retry_delay: u64 } }
    |
    = help: add the stored unit to the name (for example `_ms`); see docs/code-guidelines/CG-011-time-unit-names.md
 
-warning: integer time quantity `timeout` has no unit suffix
+error: integer time quantity `timeout` has no unit suffix
   --> $DIR/unitless_time_integer.rs:4:24
    |
 LL | trait Poller { fn wait(timeout: u64, poll_interval_count: usize); }
@@ -234,7 +234,7 @@ LL | trait Poller { fn wait(timeout: u64, poll_interval_count: usize); }
    |
    = help: add the stored unit to the name (for example `_ms`); see docs/code-guidelines/CG-011-time-unit-names.md
 
-warning: integer time quantity `timeout` has no unit suffix
+error: integer time quantity `timeout` has no unit suffix
   --> $DIR/unitless_time_integer.rs:6:38
    |
 LL | trait TimeConstants { const timeout: u64; }
@@ -242,7 +242,7 @@ LL | trait TimeConstants { const timeout: u64; }
    |
    = help: add the stored unit to the name (for example `_ms`); see docs/code-guidelines/CG-011-time-unit-names.md
 
-warning: integer time quantity `TIMEOUT` has no unit suffix
+error: integer time quantity `TIMEOUT` has no unit suffix
   --> $DIR/unitless_time_integer.rs:8:29
    |
 LL | impl Clock { const TIMEOUT: u64 = 1; const TIMEOUT_MS: u64 = 1; const TIMEOUT_COUNT: u64 = 1; }
@@ -250,7 +250,7 @@ LL | impl Clock { const TIMEOUT: u64 = 1; const TIMEOUT_MS: u64 = 1; const TIMEO
    |
    = help: add the stored unit to the name (for example `_ms`); see docs/code-guidelines/CG-011-time-unit-names.md
 
-warning: integer time quantity `request_timeout` has no unit suffix
+error: integer time quantity `request_timeout` has no unit suffix
   --> $DIR/unitless_time_integer.rs:10:1
    |
 LL | const request_timeout: u64 = 3;
@@ -258,7 +258,7 @@ LL | const request_timeout: u64 = 3;
    |
    = help: add the stored unit to the name (for example `_ms`); see docs/code-guidelines/CG-011-time-unit-names.md
 
-warning: integer time quantity `poll_deadline` has no unit suffix
+error: integer time quantity `poll_deadline` has no unit suffix
   --> $DIR/unitless_time_integer.rs:12:1
    |
 LL | static poll_deadline: u32 = 4;
@@ -266,7 +266,7 @@ LL | static poll_deadline: u32 = 4;
    |
    = help: add the stored unit to the name (for example `_ms`); see docs/code-guidelines/CG-011-time-unit-names.md
 
-warning: integer time quantity `TIMEOUT` has no unit suffix
+error: integer time quantity `TIMEOUT` has no unit suffix
   --> $DIR/unitless_time_integer.rs:13:1
    |
 LL | const TIMEOUT: u64 = 4;
@@ -274,7 +274,7 @@ LL | const TIMEOUT: u64 = 4;
    |
    = help: add the stored unit to the name (for example `_ms`); see docs/code-guidelines/CG-011-time-unit-names.md
 
-warning: integer time quantity `RETRY_DELAY` has no unit suffix
+error: integer time quantity `RETRY_DELAY` has no unit suffix
   --> $DIR/unitless_time_integer.rs:14:1
    |
 LL | static RETRY_DELAY: u64 = 5;
@@ -282,7 +282,7 @@ LL | static RETRY_DELAY: u64 = 5;
    |
    = help: add the stored unit to the name (for example `_ms`); see docs/code-guidelines/CG-011-time-unit-names.md
 
-warning: integer time quantity `timeout` has no unit suffix
+error: integer time quantity `timeout` has no unit suffix
   --> $DIR/unitless_time_integer.rs:19:6
    |
 LL | fn f(timeout: u64, delay_ns: u32, unrelated: u32, timeout_address: usize, timeout_or_value2: usize) {
@@ -290,7 +290,7 @@ LL | fn f(timeout: u64, delay_ns: u32, unrelated: u32, timeout_address: usize, t
    |
    = help: add the stored unit to the name (for example `_ms`); see docs/code-guidelines/CG-011-time-unit-names.md
 
-warning: integer time quantity `interval` has no unit suffix
+error: integer time quantity `interval` has no unit suffix
   --> $DIR/unitless_time_integer.rs:20:9
    |
 LL |     let interval = 10u64;
@@ -298,7 +298,7 @@ LL |     let interval = 10u64;
    |
    = help: add the stored unit to the name (for example `_ms`); see docs/code-guidelines/CG-011-time-unit-names.md
 
-warning: 12 warnings emitted
+error: aborting due to 12 previous errors
 
 "###,
             &[],

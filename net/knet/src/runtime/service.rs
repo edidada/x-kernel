@@ -40,9 +40,9 @@ use crate::{
 const IPV4_HEADER_LEN: usize = 20;
 const RX_INGRESS_BATCH_PACKETS: usize = 64;
 const POLL_ROUND_TIME_LIMIT: TimeSpan = TimeSpan::from_millis(1);
-const POLL_TIME_CHECK_INTERVAL_WORK_ITEMS: usize = 32;
+const POLL_TIME_CHECK_WORK_ITEM_COUNT: usize = 32;
 const IPV4_REASSEMBLY_TIMER_PENDING: u64 = 1;
-const IPV4_REASSEMBLY_DEADLINE_OFFSET: u64 = 2;
+const IPV4_REASSEMBLY_DEADLINE_OFFSET_US: u64 = 2;
 
 #[derive(Default)]
 struct SmoltcpIngressProgress {
@@ -79,7 +79,7 @@ fn ipv4_reassembly_timer_state(next: Option<MonotonicInstant>) -> u64 {
     }
     u64::try_from(next.span_since_origin().as_micros())
         .unwrap_or(u64::MAX)
-        .saturating_add(IPV4_REASSEMBLY_DEADLINE_OFFSET)
+        .saturating_add(IPV4_REASSEMBLY_DEADLINE_OFFSET_US)
 }
 
 struct NetworkTimer;
@@ -128,8 +128,8 @@ pub(crate) struct Service {
     rx_batch: Mutex<Vec<PacketBuf>>,
     accepted_batch: Mutex<Vec<PacketBuf>>,
     control_batch: Mutex<Vec<Vec<u8>>>,
-    timeout_deadline_micros: AtomicU64,
-    ipv4_reassembly_deadline_micros: AtomicU64,
+    timeout_deadline_us: AtomicU64,
+    ipv4_reassembly_deadline_us: AtomicU64,
     timeout_poll: Arc<PollSet>,
     #[cfg(unittest)]
     rebuild_count: AtomicUsize,
@@ -148,8 +148,8 @@ impl Service {
             rx_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
             accepted_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
             control_batch: Mutex::new(Vec::new()),
-            timeout_deadline_micros: AtomicU64::new(0),
-            ipv4_reassembly_deadline_micros: AtomicU64::new(0),
+            timeout_deadline_us: AtomicU64::new(0),
+            ipv4_reassembly_deadline_us: AtomicU64::new(0),
             timeout_poll: Arc::new(PollSet::new()),
             #[cfg(unittest)]
             rebuild_count: AtomicUsize::new(0),
@@ -279,7 +279,7 @@ impl Service {
             if stack_tx_passes >= stack_tx_pass_limit || has_reached_time_limit {
                 break;
             }
-            if stack_tx_passes.is_multiple_of(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS)
+            if stack_tx_passes.is_multiple_of(POLL_TIME_CHECK_WORK_ITEM_COUNT)
                 && has_reached_poll_round_time_limit(round_started_at, monotonic_time())
             {
                 has_reached_time_limit = true;
@@ -294,7 +294,7 @@ impl Service {
         }
 
         let deferred_close_deadline = sockets.reap_deferred_tcp_closes(current);
-        let protocol_deadline = iface.poll_at(current, &sockets);
+        let protocol_deadline_us = iface.poll_at(current, &sockets);
         drop(iface);
         LISTEN_TABLE.refresh_acceptors(&mut sockets);
         drop(sockets);
@@ -334,7 +334,7 @@ impl Service {
             }
         }
 
-        let next_poll = earliest_poll_deadline(protocol_deadline, deferred_close_deadline);
+        let next_poll = earliest_poll_deadline(protocol_deadline_us, deferred_close_deadline);
         let timer_current = now();
         let timer_has_more = has_immediate_timer_work(timer_current, next_poll);
         self.update_poll_timeout(timer_current, next_poll);
@@ -382,7 +382,7 @@ impl Service {
         }
 
         while progress.packets < budget {
-            if packets_since_time_check >= POLL_TIME_CHECK_INTERVAL_WORK_ITEMS {
+            if packets_since_time_check >= POLL_TIME_CHECK_WORK_ITEM_COUNT {
                 packets_since_time_check = 0;
                 if has_reached_poll_round_time_limit(round_started_at, monotonic_time()) {
                     progress.has_reached_time_limit = true;
@@ -397,7 +397,7 @@ impl Service {
             let batch_budget = budget
                 .saturating_sub(progress.packets)
                 .min(RX_INGRESS_BATCH_PACKETS)
-                .min(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS)
+                .min(POLL_TIME_CHECK_WORK_ITEM_COUNT)
                 .min(router.ingress_capacity());
             if batch_budget == 0 {
                 break;
@@ -634,33 +634,33 @@ impl Service {
 
     fn update_poll_timeout(&self, current: SmoltcpInstant, next: Option<SmoltcpInstant>) {
         let Some(next) = next else {
-            self.timeout_deadline_micros.store(0, Ordering::Release);
+            self.timeout_deadline_us.store(0, Ordering::Release);
             return;
         };
 
         if next <= current {
-            self.timeout_deadline_micros.store(0, Ordering::Release);
+            self.timeout_deadline_us.store(0, Ordering::Release);
             self.publish_timer_expiration();
             return;
         }
 
-        let deadline = u64::try_from(next.total_micros())
+        let deadline_us = u64::try_from(next.total_micros())
             .unwrap_or(u64::MAX)
             .saturating_add(1);
-        self.timeout_deadline_micros
-            .store(deadline, Ordering::Release);
+        self.timeout_deadline_us
+            .store(deadline_us, Ordering::Release);
     }
 
     fn update_ipv4_reassembly_timeout(&self, next: Option<MonotonicInstant>) {
         let next_state = ipv4_reassembly_timer_state(next);
-        let mut current = self.ipv4_reassembly_deadline_micros.load(Ordering::Acquire);
+        let mut current = self.ipv4_reassembly_deadline_us.load(Ordering::Acquire);
         loop {
             // A timer tick owns the pending state until the poller consumes
             // the due queues. A concurrent RX refresh must not disarm it.
             if current == IPV4_REASSEMBLY_TIMER_PENDING {
                 return;
             }
-            match self.ipv4_reassembly_deadline_micros.compare_exchange_weak(
+            match self.ipv4_reassembly_deadline_us.compare_exchange_weak(
                 current,
                 next_state,
                 Ordering::AcqRel,
@@ -678,33 +678,32 @@ impl Service {
         } else {
             ipv4_reassembly_timer_state(next)
         };
-        self.ipv4_reassembly_deadline_micros
+        self.ipv4_reassembly_deadline_us
             .store(next_state, Ordering::Release);
     }
 
     fn has_pending_ipv4_reassembly_expiration(&self) -> bool {
-        self.ipv4_reassembly_deadline_micros.load(Ordering::Acquire)
-            == IPV4_REASSEMBLY_TIMER_PENDING
+        self.ipv4_reassembly_deadline_us.load(Ordering::Acquire) == IPV4_REASSEMBLY_TIMER_PENDING
     }
 
     pub(crate) fn handle_timer_tick(&self) {
         let current_micros = u64::try_from(now().total_micros()).unwrap_or(0);
-        let protocol_deadline = self.timeout_deadline_micros.load(Ordering::Acquire);
-        let has_protocol_expired = protocol_deadline != 0
-            && current_micros.saturating_add(1) >= protocol_deadline
+        let protocol_deadline_us = self.timeout_deadline_us.load(Ordering::Acquire);
+        let has_protocol_expired = protocol_deadline_us != 0
+            && current_micros.saturating_add(1) >= protocol_deadline_us
             && self
-                .timeout_deadline_micros
-                .compare_exchange(protocol_deadline, 0, Ordering::AcqRel, Ordering::Acquire)
+                .timeout_deadline_us
+                .compare_exchange(protocol_deadline_us, 0, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok();
 
-        let reassembly_deadline = self.ipv4_reassembly_deadline_micros.load(Ordering::Acquire);
-        let has_reassembly_expired = reassembly_deadline > IPV4_REASSEMBLY_TIMER_PENDING
-            && current_micros.saturating_add(IPV4_REASSEMBLY_DEADLINE_OFFSET)
-                >= reassembly_deadline
+        let reassembly_deadline_us = self.ipv4_reassembly_deadline_us.load(Ordering::Acquire);
+        let has_reassembly_expired = reassembly_deadline_us > IPV4_REASSEMBLY_TIMER_PENDING
+            && current_micros.saturating_add(IPV4_REASSEMBLY_DEADLINE_OFFSET_US)
+                >= reassembly_deadline_us
             && self
-                .ipv4_reassembly_deadline_micros
+                .ipv4_reassembly_deadline_us
                 .compare_exchange(
-                    reassembly_deadline,
+                    reassembly_deadline_us,
                     IPV4_REASSEMBLY_TIMER_PENDING,
                     Ordering::AcqRel,
                     Ordering::Acquire,
@@ -753,7 +752,7 @@ impl Service {
             }
         });
         *iface = new_iface;
-        self.timeout_deadline_micros.store(0, Ordering::Release);
+        self.timeout_deadline_us.store(0, Ordering::Release);
         self.timeout_poll.wake();
         #[cfg(unittest)]
         self.rebuild_count.fetch_add(1, Ordering::Relaxed);
@@ -908,7 +907,7 @@ impl Service {
         *self.router.lock() = router;
         *self.iface.lock() = iface;
         self.sync_local_ipv4_views();
-        self.timeout_deadline_micros.store(0, Ordering::Release);
+        self.timeout_deadline_us.store(0, Ordering::Release);
         self.timeout_poll.wake();
     }
 
@@ -966,7 +965,7 @@ fn poll_smoltcp_ingress_budgeted(
     while progress.packets < budget_packets {
         if progress
             .packets
-            .is_multiple_of(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS)
+            .is_multiple_of(POLL_TIME_CHECK_WORK_ITEM_COUNT)
             && progress.packets > 0
             && has_reached_poll_round_time_limit(round_started_at, monotonic_time())
         {
@@ -1030,7 +1029,7 @@ fn dispatch_tx_budgeted(
     let mut has_reached_time_limit = false;
 
     while remaining > 0 {
-        let chunk = remaining.min(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS);
+        let chunk = remaining.min(POLL_TIME_CHECK_WORK_ITEM_COUNT);
         let (dispatched, _) = router.dispatch_budgeted(timestamp, chunk);
         work_done += dispatched;
         remaining = remaining.saturating_sub(dispatched);
@@ -1163,18 +1162,14 @@ mod tests {
     #[def_test]
     fn protocol_deadline_update_preserves_ipv4_reassembly_timer_source() {
         let service = Service::new(Router::new());
-        let reassembly_deadline = monotonic_time() + TimeSpan::from_secs(30);
-        service.update_ipv4_reassembly_timeout(Some(reassembly_deadline));
-        let reassembly_state = service
-            .ipv4_reassembly_deadline_micros
-            .load(Ordering::Acquire);
+        let reassembly_deadline_us = monotonic_time() + TimeSpan::from_secs(30);
+        service.update_ipv4_reassembly_timeout(Some(reassembly_deadline_us));
+        let reassembly_state = service.ipv4_reassembly_deadline_us.load(Ordering::Acquire);
 
         service.update_poll_timeout(now(), None);
 
         assert_eq!(
-            service
-                .ipv4_reassembly_deadline_micros
-                .load(Ordering::Acquire),
+            service.ipv4_reassembly_deadline_us.load(Ordering::Acquire),
             reassembly_state
         );
     }
@@ -1265,7 +1260,7 @@ mod tests {
             .unwrap();
         let service = Service::new(router);
         service
-            .ipv4_reassembly_deadline_micros
+            .ipv4_reassembly_deadline_us
             .store(IPV4_REASSEMBLY_TIMER_PENDING, Ordering::Release);
         let _ingress = service.ingress.lock();
 
