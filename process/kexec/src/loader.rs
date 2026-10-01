@@ -9,7 +9,9 @@ use core::{ffi::CStr, iter};
 
 use filemap::new_file_private_vma;
 use kcred::Cred;
-use kernel_elf_parser::{AuxEntry, AuxType, ElfHeaders, ElfHeadersBuilder, app_stack_region};
+use kernel_elf_parser::{
+    AuxEntry, AuxType, ElfHeaders, ElfHeadersBuilder, ElfError, app_stack_region,
+};
 use kerrno::{KError, KResult};
 use khal::paging::{MappingFlags, PageSize};
 use ksync::{Mutex, static_lock};
@@ -316,7 +318,7 @@ fn map_elf(uspace: &mut MmSpace, load_bias: usize, prepared: &PreparedElfImage) 
     Ok(())
 }
 
-fn map_elf_error(err: &'static str) -> KError {
+fn map_elf_error(err: ElfError) -> KError {
     debug!("Failed to parse ELF file: {err}");
     KError::InvalidExecutable
 }
