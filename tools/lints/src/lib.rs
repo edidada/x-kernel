@@ -27,6 +27,7 @@ mod static_mut_option;
 mod unregistered_static_lock;
 mod unregistered_static_spinlock;
 mod untracked_runtime_lock;
+mod vec_shift_in_loop;
 mod vendored;
 
 #[cfg(test)]
@@ -45,6 +46,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         unregistered_static_lock::UNREGISTERED_STATIC_LOCK,
         untracked_runtime_lock::UNTRACKED_RUNTIME_LOCK,
         static_mut_option::STATIC_MUT_OPTION,
+        vec_shift_in_loop::VEC_SHIFT_IN_LOOP,
     ]);
     lint_store.register_late_pass(|_| Box::new(facts_export::FactsExport));
     // CG rules do not apply to vendored third-party code. Its facts are still
@@ -58,4 +60,5 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
     lint_store.register_late_pass(|_| Box::new(unregistered_static_lock::UnregisteredStaticLock));
     lint_store.register_late_pass(|_| Box::new(untracked_runtime_lock::UntrackedRuntimeLock));
     lint_store.register_late_pass(|_| Box::new(static_mut_option::StaticMutOption));
+    lint_store.register_late_pass(|_| Box::new(vec_shift_in_loop::VecShiftInLoop));
 }
