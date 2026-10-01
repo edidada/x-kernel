@@ -141,6 +141,9 @@ set by `rt_sigsuspend` and consumed by the next caught-signal frame build
 - Dead thread entries are pruned opportunistically during target scans.
 - `SignalInfo` is `Send + Sync` through an explicit `unsafe impl` because
   the payload is treated as opaque ABI bits (see `security.md`).
+- `SignalInfo` keeps its raw union field private. Conversion to `k_siginfo`
+  uses an unsafe constructor after the zeroed-or-user-copied invariant is
+  established.
 
 ## Design decisions
 
