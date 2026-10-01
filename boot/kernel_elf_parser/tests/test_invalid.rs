@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kernel_elf_parser::ElfHeadersBuilder;
+use kernel_elf_parser::{ElfHeadersBuilder, ElfError};
 
 const ELF_HEADER_SIZE: usize = 64;
 const PROGRAM_HEADER_SIZE: u16 = 56;
@@ -30,7 +30,7 @@ fn program_header_range_rejects_end_overflow() {
 
     assert_eq!(
         builder.ph_range(),
-        Err("Program-header table range overflows")
+        Err(ElfError::ProgramHeaderTableRangeOverflow)
     );
 }
 
@@ -39,7 +39,10 @@ fn program_header_range_rejects_wrong_entry_size() {
     let data = elf_header(ELF_HEADER_SIZE as u64, PROGRAM_HEADER_SIZE - 1, 1);
     let builder = ElfHeadersBuilder::new(&data).expect("ELF header must parse");
 
-    assert_eq!(builder.ph_range(), Err("Invalid program-header entry size"));
+    assert_eq!(
+        builder.ph_range(),
+        Err(ElfError::InvalidProgramHeaderEntrySize)
+    );
 }
 
 #[test]
