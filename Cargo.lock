@@ -3366,7 +3366,6 @@ dependencies = [
  "log",
  "memaddr",
  "memspace",
- "osvm",
  "posix-types",
  "strum",
  "unittest",
