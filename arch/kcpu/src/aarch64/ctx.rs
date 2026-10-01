@@ -286,6 +286,8 @@ impl TaskContext {
 /// resume address established by `TaskContext::init` or an earlier switch.
 /// Keep both contexts and stacks live until their saved continuations finish;
 /// TLS, FP state and address-space state must already match the next task.
+// SAFETY: The scheduler passes valid current and next TaskContext pointers in x0/x1; the naked
+// body only saves/restores the AArch64 callee-saved registers and stack pointer.
 #[unsafe(naked)]
 unsafe extern "C" fn context_switch(_current_task: &mut TaskContext, _next_task: &TaskContext) {
     naked_asm!(
@@ -319,6 +321,8 @@ unsafe extern "C" fn context_switch(_current_task: &mut TaskContext, _next_task:
 /// FP/SIMD access must be enabled on this CPU. Prevent task switches while
 /// saving so all registers belong to the same task; `state` is exclusively
 /// borrowed for the assembly writes.
+// SAFETY: The caller passes a writable FpState in x0 with FP/SIMD enabled; the naked body only
+// saves q0-q31, FPCR, and FPSR before returning.
 #[unsafe(naked)]
 #[cfg(feature = "fp-simd")]
 unsafe extern "C" fn fpstate_save(state: &mut FpState) {
@@ -356,6 +360,8 @@ unsafe extern "C" fn fpstate_save(state: &mut FpState) {
 /// FP/SIMD access must be enabled on this CPU, and `state` must contain
 /// valid saved or initial FP register values. Prevent task switches and
 /// ensure no live kernel FP/SIMD values depend on the registers replaced.
+// SAFETY: The caller passes a populated FpState in x0 with FP/SIMD enabled; the naked body only
+// restores q0-q31, FPCR, and FPSR before returning.
 #[unsafe(naked)]
 #[cfg(feature = "fp-simd")]
 unsafe extern "C" fn fpstate_restore(state: &FpState) {

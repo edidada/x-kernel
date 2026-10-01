@@ -126,6 +126,8 @@ impl Drop for NmiExceptionGuard {
     }
 }
 
+// SAFETY: AArch64 exception assembly branches to this unique symbol with pointers and trap
+// enums matching the Rust ABI; the supplied trap frame stays live through dispatch.
 /// Architecture-specific trap entry point.
 ///
 /// Pseudo-NMI PMR save/restore is performed here, gated on the runtime NMI
