@@ -20,7 +20,7 @@ use crate::{platform, value};
 // === #[unsafe(no_mangle)] exports required by compiler instrumentation ===
 
 #[unsafe(no_mangle)]
-pub(crate) static __llvm_profile_runtime: u8 = 0;
+pub(crate) static __llvm_profile_runtime: i32 = 0;
 
 #[unsafe(no_mangle)]
 pub(crate) static __llvm_profile_raw_version: u64 = INSTR_PROF_RAW_VERSION;
@@ -523,6 +523,10 @@ mod tests {
         assert_eq!(
             __llvm_profile_get_counters_size(counters_begin, counters_end),
             16,
+        );
+        assert_eq!(
+            core::mem::size_of_val(&__llvm_profile_runtime),
+            core::mem::size_of::<i32>()
         );
     }
 }
