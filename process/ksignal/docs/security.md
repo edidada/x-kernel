@@ -41,6 +41,8 @@ with zeros; constructors then set the header and exposed payload fields.
 The union-arm reads are the `k_sigval`/`siginfo_t` ABI boundary: the kernel
 treats payload fields as raw bits and never dereferences pointer-like values
 (`sival_ptr`) stored by userspace.
+`set_timer_fields` constructs the outbound timer `sigval` through its
+full-width pointer arm, so an integer-width member cannot leave bytes unset.
 
 ## Threat analysis
 

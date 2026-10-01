@@ -166,6 +166,9 @@ set by `rt_sigsuspend` and consumed by the next caught-signal frame build
 - Kernel-originated `sigval` reads expose `None` unless `si_code` implies a
   user or timer payload, keeping union-arm reads (see `security.md`)
   guarded by the code that selected the arm.
+- POSIX timer notifications arrive with complete pointer-sized `sigval` bits.
+  `SignalInfo::new_timer` writes those bits through the full-width pointer
+  member of the zeroed outbound `siginfo` record.
 
 ## Resource lifecycle
 

@@ -5,7 +5,6 @@
 //! Timer-domain delivery descriptions.
 
 use ksignal::Signo;
-use posix_types::k_sigval;
 
 use crate::Tid;
 
@@ -29,8 +28,8 @@ pub enum TimerSignal {
         /// Generation of the timer state at expiration; stale notifications
         /// are dropped at dequeue time.
         signal_seq: u32,
-        /// `sigval` payload requested at `timer_create`.
-        value: k_sigval,
+        /// Complete `sigval` payload bits requested at `timer_create`.
+        value: usize,
     },
 }
 
