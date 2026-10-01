@@ -590,18 +590,18 @@ impl SignalInfo {
         result
     }
 
-    /// Construct a timer-originated signal.
+    /// Construct a timer-originated signal from complete, opaque `sigval` bits.
     pub fn new_timer(
         signo: Signo,
         timer_id: i32,
         overrun: i32,
-        value: k_sigval,
+        value_bits: usize,
         signal_seq: u32,
     ) -> Self {
         let mut result = Self::empty();
         result.set_signo(signo);
         result.set_code(SI_TIMER as _);
-        result.set_timer_fields(timer_id, overrun, value, signal_seq);
+        result.set_timer_fields(timer_id, overrun, value_bits, signal_seq);
         result
     }
 
@@ -710,10 +710,20 @@ impl SignalInfo {
         })
     }
 
-    fn set_timer_fields(&mut self, timer_id: i32, overrun: i32, value: k_sigval, signal_seq: u32) {
+    fn set_timer_fields(
+        &mut self,
+        timer_id: i32,
+        overrun: i32,
+        value_bits: usize,
+        signal_seq: u32,
+    ) {
         self.sifields_mut()._timer._tid = timer_id;
         self.sifields_mut()._timer._overrun = overrun;
-        self.sifields_mut()._timer._sigval = value;
+        // The pointer arm covers the whole union; no bytes are left unset by
+        // a shorter integer arm when siginfo is later copied to userspace.
+        self.sifields_mut()._timer._sigval = k_sigval {
+            sival_ptr: value_bits as *mut _,
+        };
         self.sifields_mut()._timer._sys_private = signal_seq as _;
     }
 }
