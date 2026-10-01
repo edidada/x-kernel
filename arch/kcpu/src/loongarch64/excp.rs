@@ -27,7 +27,7 @@ fn handle_breakpoint(era: &mut usize) {
 /// Dispatches a page fault and panics if unhandled.
 fn handle_page_fault(tf: &mut ExceptionContext, access_flags: PageFaultFlags) {
     let vaddr = va!(badv::read().vaddr());
-    if dispatch_irq_trap!(PAGE_FAULT, vaddr, access_flags) {
+    if handle_trap!(PAGE_FAULT, vaddr, access_flags) {
         return;
     }
     if tf.fixup_exception() {
@@ -71,7 +71,7 @@ fn loongarch64_trap_handler(tf: &mut ExceptionContext) {
         },
         Trap::Interrupt(_) => {
             let interrupt_id: usize = estat.is().trailing_zeros() as usize;
-            dispatch_irq_trap!(IRQ, interrupt_id);
+            handle_trap!(IRQ, interrupt_id);
         }
         trap => {
             panic!(

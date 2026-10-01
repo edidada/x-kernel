@@ -32,7 +32,7 @@ fn handle_breakpoint(sepc: &mut usize) {
 /// Dispatches a page fault and panics if unhandled.
 fn handle_page_fault(tf: &mut ExceptionContext, access_flags: PageFaultFlags) {
     let vaddr = va!(stval::read());
-    if dispatch_irq_trap!(PAGE_FAULT, vaddr, access_flags) {
+    if handle_trap!(PAGE_FAULT, vaddr, access_flags) {
         return;
     }
     if tf.fixup_exception() {
@@ -63,7 +63,7 @@ fn riscv_trap_handler(tf: &mut ExceptionContext) {
             }
             Trap::Exception(E::Breakpoint) => handle_breakpoint(&mut tf.sepc),
             Trap::Interrupt(_) => {
-                dispatch_irq_trap!(IRQ, scause.bits());
+                handle_trap!(IRQ, scause.bits());
             }
             _ => {
                 panic!(

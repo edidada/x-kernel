@@ -31,7 +31,7 @@ fn handle_page_fault(tf: &mut ExceptionContext) {
         // SAFETY: Reading CR2 is a privileged but side-effect-free register read.
         cr2()
     });
-    if dispatch_irq_trap!(PAGE_FAULT, vaddr, access_flags) {
+    if handle_trap!(PAGE_FAULT, vaddr, access_flags) {
         return;
     }
     if tf.fixup_exception() {
@@ -66,7 +66,7 @@ fn x86_trap_handler(tf: &mut ExceptionContext) {
             );
         }
         IRQ_VECTOR_START..=IRQ_VECTOR_END => {
-            dispatch_irq_trap!(IRQ, tf.vector as _);
+            handle_trap!(IRQ, tf.vector as _);
         }
         _ => {
             panic!(
