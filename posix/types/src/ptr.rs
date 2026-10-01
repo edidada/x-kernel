@@ -78,6 +78,8 @@ macro_rules! impl_user_write_for_scalars {
 }
 
 impl_user_write_for_scalars!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
+// SAFETY: `()` has no bytes, so copying it to user memory writes nothing.
+unsafe impl UserWrite for () {}
 
 // SAFETY: fixed-size arrays are valid when each element upholds the same contract.
 unsafe impl<T: UserRead, const N: usize> UserRead for [T; N] where [T; N]: Copy {}

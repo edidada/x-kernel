@@ -22,8 +22,8 @@ use knet::{
 use linux_raw_sys::net::{
     SO_ATTACH_FILTER, SO_BINDTODEVICE, SO_DETACH_FILTER, SOL_SOCKET, socklen_t,
 };
-use osvm::{VirtPtr, write_vm_mem};
-use posix_types::{UserConstPtr, UserPtr, UserRead};
+use osvm::VirtPtr;
+use posix_types::{UserConstPtr, UserPtr, UserRead, UserWrite};
 
 const PROTO_TCP: u32 = linux_raw_sys::net::IPPROTO_TCP as u32;
 
@@ -180,7 +180,7 @@ mod conv {
     }
 
     #[repr(C)]
-    #[derive(Clone, Copy, Default)]
+    #[derive(Clone, Copy, Default, posix_types::UserWrite)]
     pub(super) struct tpacket_stats {
         pub tp_packets: u32,
         pub tp_drops: u32,
@@ -208,7 +208,7 @@ mod conv {
     }
 
     #[repr(C)]
-    #[derive(Clone, Copy, Default)]
+    #[derive(Clone, Copy, Default, posix_types::UserWrite)]
     pub(super) struct packet_mreq {
         pub mr_ifindex: i32,
         pub mr_type: u16,
@@ -327,16 +327,12 @@ pub fn sys_getsockopt(
         fd, level, optname, optlen,
     );
 
-    fn put<T>(dst: UserPtr<u8>, len: &mut socklen_t, value: &T) -> KResult<()> {
+    fn put<T: UserWrite + Copy>(dst: UserPtr<u8>, len: &mut socklen_t, value: &T) -> KResult<()> {
         if (*len as usize) < size_of::<T>() {
             return Err(KError::InvalidInput);
         }
         *len = size_of::<T>() as socklen_t;
-        write_vm_mem(
-            dst.cast::<T>().as_ptr().cast_mut(),
-            core::slice::from_ref(value),
-        )
-        .map_err(Into::into)
+        dst.cast::<T>().write_vm(*value).map_err(Into::into)
     }
 
     let file = kprocess::current_resources().get_file(fd)?;

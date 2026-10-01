@@ -18,7 +18,7 @@ use linux_raw_sys::net::{
     AF_INET, AF_UNSPEC, IP_RECVERR, IPPROTO_IP, SCM_RIGHTS, SOL_SOCKET, cmsghdr, in_addr,
     sockaddr_in,
 };
-use osvm::{VirtPtr, write_vm_mem};
+use osvm::VirtPtr;
 use posix_types::{UserConstPtr, UserPtr};
 
 #[repr(C)]
@@ -222,7 +222,7 @@ impl<'a> CMsgBuilder<'a> {
             cmsg_level: level as _,
             cmsg_type: ty as _,
         };
-        write_vm_mem(self.hdr.as_ptr().cast_mut(), core::slice::from_ref(&hdr))?;
+        self.hdr.write_vm(hdr)?;
 
         self.hdr = UserPtr::from(self.hdr.as_ptr() as usize + cmsg_len);
         *self.len += cmsg_len;
