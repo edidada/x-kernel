@@ -1374,8 +1374,13 @@ pub(super) fn get_node(
 /// * `counter0` - the counter0
 /// * `counter1` - the counter1
 /// # Returns
-/// * `Result<u8, ()>` - the index
-fn get_idx_from_counter(counter0: u32, counter1: u32) -> Result<u8, ()> {
+/// * `Result<u8, CounterIndexError>` - the selected index or invalid counter state
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CounterIndexError {
+    InvalidCounterPair,
+}
+
+fn get_idx_from_counter(counter0: u32, counter1: u32) -> Result<u8, CounterIndexError> {
     if (counter0 & 1) == 0 {
         // Equivalent to !(counter0 & 1)
         if (counter1 & 1) == 0 {
@@ -1393,7 +1398,7 @@ fn get_idx_from_counter(counter0: u32, counter1: u32) -> Result<u8, ()> {
         // Equivalent to (counter1 & 1)
         Ok(1)
     } else {
-        Err(())
+        Err(CounterIndexError::InvalidCounterPair)
     }
 }
 

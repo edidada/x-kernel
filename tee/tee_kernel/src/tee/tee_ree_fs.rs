@@ -111,13 +111,24 @@ fn pos_to_block_num(position: usize) -> usize {
     position >> BLOCK_SHIFT
 }
 
-pub(super) fn get_tmp_block() -> Result<Box<[u8; BLOCK_SIZE]>, ()> {
+/// Failure while reserving a temporary REE filesystem block.
+#[derive(Debug)]
+pub(super) enum TmpBlockError {
+    /// The block buffer could not be reserved.
+    AllocationFailed,
+    /// The allocated buffer did not have the requested block size.
+    UnexpectedLength,
+}
+
+pub(super) fn get_tmp_block() -> Result<Box<[u8; BLOCK_SIZE]>, TmpBlockError> {
     let mut vec = Vec::new();
     if vec.try_reserve_exact(BLOCK_SIZE).is_err() {
-        return Err(());
+        return Err(TmpBlockError::AllocationFailed);
     }
     vec.resize(BLOCK_SIZE, 0);
-    vec.into_boxed_slice().try_into().map_err(|_| ())
+    vec.into_boxed_slice()
+        .try_into()
+        .map_err(|_| TmpBlockError::UnexpectedLength)
 }
 
 fn put_tmp_block(_block: Box<[u8; BLOCK_SIZE]>) {}
