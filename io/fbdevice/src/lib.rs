@@ -82,15 +82,27 @@ pub fn fb_init() {
     }
 }
 
-fn try_setup() -> Result<(), ()> {
+#[derive(Debug)]
+enum SetupError {
+    NoDisplay,
+    InvalidResolution,
+    SizeOverflow,
+    AllocationFailed,
+    ResourceSetupFailed,
+}
+
+fn try_setup() -> Result<(), SetupError> {
     // Pick the primary display device. Display device registration races with
     // fb_init in general, but the kclass registry is seeded before fb_init
     // runs in the boot sequence; a missing device here means no display at all.
-    let device = class_display_devices().into_iter().next().ok_or(())?;
+    let device = class_display_devices()
+        .into_iter()
+        .next()
+        .ok_or(SetupError::NoDisplay)?;
     let info = device.info();
     if info.width == 0 || info.height == 0 {
         warn!("primary display reported zero resolution; skipping fbdev");
-        return Err(());
+        return Err(SetupError::InvalidResolution);
     }
 
     // Size the shadow for the full visible surface at BGRA8888, page-aligned so
@@ -99,12 +111,14 @@ fn try_setup() -> Result<(), ()> {
     let size = (info.width as usize)
         .checked_mul(info.height as usize)
         .and_then(|pixels| pixels.checked_mul(BYTES_PER_PIXEL))
-        .ok_or(())?;
+        .ok_or(SetupError::SizeOverflow)?;
     let pages = size.div_ceil(PAGE_SIZE_4K);
 
-    let mut shadow = GlobalPage::alloc_contiguous(pages, PAGE_SIZE_4K).map_err(|_| {
-        warn!("failed to allocate {}-page fbdev shadow buffer", pages);
-    })?;
+    let mut shadow = GlobalPage::alloc_contiguous(pages, PAGE_SIZE_4K)
+        .map_err(|_| {
+            warn!("failed to allocate {}-page fbdev shadow buffer", pages);
+        })
+        .map_err(|_| SetupError::AllocationFailed)?;
     shadow.zero();
 
     // Bind the shadow to the host as a scanout resource before moving it into
@@ -122,7 +136,7 @@ fn try_setup() -> Result<(), ()> {
     };
     if let Err(e) = device.create_scanout_resource(resource, paddr, (pages * PAGE_SIZE_4K) as u32) {
         warn!("create_scanout_resource failed on primary display: {:?}", e);
-        return Err(());
+        return Err(SetupError::ResourceSetupFailed);
     }
 
     *FB.lock() = Some(Arc::new(FbEmulation {
