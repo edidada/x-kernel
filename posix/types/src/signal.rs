@@ -144,3 +144,15 @@ pub struct k_sigaltstack {
     /// Alternate stack size in bytes.
     pub size: usize,
 }
+
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+
+    use linux_raw_sys::general::stack_t;
+
+    assert!(size_of::<k_sigaltstack>() == size_of::<stack_t>());
+    assert!(align_of::<k_sigaltstack>() == align_of::<stack_t>());
+    assert!(offset_of!(k_sigaltstack, sp) == offset_of!(stack_t, ss_sp));
+    assert!(offset_of!(k_sigaltstack, flags) == offset_of!(stack_t, ss_flags));
+    assert!(offset_of!(k_sigaltstack, size) == offset_of!(stack_t, ss_size));
+};
