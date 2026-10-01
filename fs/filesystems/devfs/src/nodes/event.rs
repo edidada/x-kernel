@@ -185,6 +185,9 @@ struct InputEvent {
     value: i32,
 }
 
+// SAFETY: `ongkey` has one definition in kernel sources. No caller exists in
+// this repository, so the QEMU link discards it; if retained, its C ABI must
+// remain `fn()` with no return value.
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub(crate) extern "C" fn ongkey() {
