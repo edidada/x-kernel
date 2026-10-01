@@ -163,6 +163,12 @@ impl<T> UserPtr<T> {
     /// # Errors
     ///
     /// Propagates the `osvm` memory-access error for the user source range.
+    #[allow(
+        unknown_lints,
+        user_copy_without_abi_contract,
+        reason = "CG-006-user-copy-abi-contract: UserPtr::read_uninit forwards opaque bytes as \
+                  MaybeUninit<T>; callers must validate before constructing T"
+    )]
     pub fn read_uninit(self) -> osvm::MemResult<MaybeUninit<T>> {
         self.as_const().read_uninit()
     }
