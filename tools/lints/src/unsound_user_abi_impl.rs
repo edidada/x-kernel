@@ -17,7 +17,7 @@ rustc_session::declare_lint! {
     /// pattern. `UserWrite` must have no implicit padding; each union member
     /// must cover the entire union. ABI records need a stable representation.
     pub UNSOUND_USER_ABI_IMPL,
-    Warn,
+    Deny,
     "UserRead or UserWrite implementation violates its layout contract",
     report_in_external_macro
 }
@@ -356,16 +356,16 @@ unsafe impl UserWrite for PaddedAllowed {}
 #[repr(C)] struct PaddedAllowed { a: u8, b: u32 }
 fn main() {}
 "#;
-    const STDERR: &str = r#"warning: unsound user ABI implementation: Padded has implicit padding at byte 1
+    const STDERR: &str = r#"error: unsound user ABI implementation: Padded has implicit padding at byte 1
   --> $DIR/unsound_user_abi_impl.rs:5:1
    |
 LL | unsafe impl UserWrite for Padded {}
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: see docs/code-guidelines/CG-005-user-abi-layout.md
-   = note: `#[warn(unsound_user_abi_impl)]` on by default
+   = note: `#[deny(unsound_user_abi_impl)]` on by default
 
-warning: unsound user ABI implementation: BadRead has invalid bit patterns
+error: unsound user ABI implementation: BadRead has invalid bit patterns
   --> $DIR/unsound_user_abi_impl.rs:8:1
    |
 LL | unsafe impl UserRead for BadRead {}
@@ -373,7 +373,7 @@ LL | unsafe impl UserRead for BadRead {}
    |
    = help: see docs/code-guidelines/CG-005-user-abi-layout.md
 
-warning: unsound user ABI implementation: union Partial member small covers 4 of 8 bytes
+error: unsound user ABI implementation: union Partial member small covers 4 of 8 bytes
   --> $DIR/unsound_user_abi_impl.rs:11:1
    |
 LL | unsafe impl UserWrite for Partial {}
@@ -381,7 +381,7 @@ LL | unsafe impl UserWrite for Partial {}
    |
    = help: see docs/code-guidelines/CG-005-user-abi-layout.md
 
-warning: unsound user ABI implementation: DataEnum is a data enum with unproven variant padding
+error: unsound user ABI implementation: DataEnum is a data enum with unproven variant padding
   --> $DIR/unsound_user_abi_impl.rs:25:1
    |
 LL | unsafe impl UserWrite for DataEnum {}
@@ -389,7 +389,7 @@ LL | unsafe impl UserWrite for DataEnum {}
    |
    = help: see docs/code-guidelines/CG-005-user-abi-layout.md
 
-warning: unsound user ABI implementation: AlignedEnum has implicit enum padding after byte 4
+error: unsound user ABI implementation: AlignedEnum has implicit enum padding after byte 4
   --> $DIR/unsound_user_abi_impl.rs:28:1
    |
 LL | unsafe impl UserWrite for AlignedEnum {}
@@ -397,7 +397,7 @@ LL | unsafe impl UserWrite for AlignedEnum {}
    |
    = help: see docs/code-guidelines/CG-005-user-abi-layout.md
 
-warning: unsound user ABI implementation: std::option::Option<&'static u32> has unproven enum discriminants or payloads
+error: unsound user ABI implementation: std::option::Option<&'static u32> has unproven enum discriminants or payloads
   --> $DIR/unsound_user_abi_impl.rs:31:1
    |
 LL | unsafe impl UserRead for RefOption {}
@@ -405,7 +405,7 @@ LL | unsafe impl UserRead for RefOption {}
    |
    = help: see docs/code-guidelines/CG-005-user-abi-layout.md
 
-warning: unsound user ABI implementation: generic enum GenericEnum<T> needs a concrete ABI proof
+error: unsound user ABI implementation: generic enum GenericEnum<T> needs a concrete ABI proof
   --> $DIR/unsound_user_abi_impl.rs:34:1
    |
 LL | unsafe impl<T> UserWrite for GenericEnum<T> {}
@@ -413,7 +413,7 @@ LL | unsafe impl<T> UserWrite for GenericEnum<T> {}
    |
    = help: see docs/code-guidelines/CG-005-user-abi-layout.md
 
-warning: unsound user ABI implementation: generic NestedNoBound<T, M, N> needs an element UserRead/UserWrite bound
+error: unsound user ABI implementation: generic NestedNoBound<T, M, N> needs an element UserRead/UserWrite bound
   --> $DIR/unsound_user_abi_impl.rs:49:1
    |
 LL | unsafe impl<T, const M: usize, const N: usize> UserWrite for NestedNoBound<T, M, N> {}
@@ -421,7 +421,7 @@ LL | unsafe impl<T, const M: usize, const N: usize> UserWrite for NestedNoBound<
    |
    = help: see docs/code-guidelines/CG-005-user-abi-layout.md
 
-warning: unsound user ABI implementation: generic Fat<T> has raw-pointer metadata without a validity proof
+error: unsound user ABI implementation: generic Fat<T> has raw-pointer metadata without a validity proof
   --> $DIR/unsound_user_abi_impl.rs:57:1
    |
 LL | unsafe impl<T: ?Sized> UserRead for Fat<T> {}
@@ -429,7 +429,7 @@ LL | unsafe impl<T: ?Sized> UserRead for Fat<T> {}
    |
    = help: see docs/code-guidelines/CG-005-user-abi-layout.md
 
-warning: unsound user ABI implementation: generic Generic<T> needs a layout-independent field proof
+error: unsound user ABI implementation: generic Generic<T> needs a layout-independent field proof
   --> $DIR/unsound_user_abi_impl.rs:63:1
    |
 LL | unsafe impl<T> UserWrite for Generic<T> {}
@@ -437,7 +437,7 @@ LL | unsafe impl<T> UserWrite for Generic<T> {}
    |
    = help: see docs/code-guidelines/CG-005-user-abi-layout.md
 
-warning: unsound user ABI implementation: AliasTarget has implicit padding at byte 1
+error: unsound user ABI implementation: AliasTarget has implicit padding at byte 1
   --> $DIR/unsound_user_abi_impl.rs:67:1
    |
 LL | unsafe impl UserWrite for Alias {}
@@ -445,7 +445,7 @@ LL | unsafe impl UserWrite for Alias {}
    |
    = help: see docs/code-guidelines/CG-005-user-abi-layout.md
 
-warning: unsound user ABI implementation: MacroTarget has implicit padding at byte 1
+error: unsound user ABI implementation: MacroTarget has implicit padding at byte 1
   --> $DIR/unsound_user_abi_impl.rs:71:5
    |
 LL |     unsafe impl UserWrite for MacroTarget {}
@@ -455,9 +455,9 @@ LL | emit_impl!();
    | ------------ in this macro invocation
    |
    = help: see docs/code-guidelines/CG-005-user-abi-layout.md
-   = note: this warning originates in the macro `emit_impl` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `emit_impl` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-warning: 12 warnings emitted
+error: aborting due to 12 previous errors
 
 "#;
     #[test]
