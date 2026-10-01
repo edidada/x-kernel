@@ -47,6 +47,12 @@ compile-time assertions pin their size, alignment, and field offsets to the
 `k_epoll_event` is re-exported at the crate root through `io`, while
 `k_sysinfo` and `k_flock64` stay under `system` and `fs`.
 
+Signal union carriers require a separate construction proof: `k_sigval` and
+`k_sigevent` are read-only at the user boundary because writing a short union
+member may leave bytes uninitialized. `k_siginfo` retains `UserWrite` only for
+the `ksignal::SignalInfo` path, which zeroes the whole record before updating
+the selected union fields.
+
 `IoVec::load_from_user` copies descriptor arrays; `IoVectorBuf::from_iovecs`
 enforces the Linux `IOV_MAX`-style bound (at most 1024 descriptors), rejects
 negative segment lengths, and checks total-length overflow before any user
