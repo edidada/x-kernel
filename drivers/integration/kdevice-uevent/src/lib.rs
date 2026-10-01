@@ -76,8 +76,12 @@ impl UeventAction {
     }
 }
 
+/// The input does not name a supported uevent action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidUeventAction;
+
 impl TryFrom<&str> for UeventAction {
-    type Error = ();
+    type Error = InvalidUeventAction;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
@@ -89,7 +93,7 @@ impl TryFrom<&str> for UeventAction {
             "offline" => Ok(Self::Offline),
             "bind" => Ok(Self::Bind),
             "unbind" => Ok(Self::Unbind),
-            _ => Err(()),
+            _ => Err(InvalidUeventAction),
         }
     }
 }
