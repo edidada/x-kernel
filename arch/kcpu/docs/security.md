@@ -132,6 +132,9 @@ unsafe extern "C" fn context_switch(_current_stack: &mut u64, _next_stack: &u64)
 
 **为何安全**：`FpState`/`FpuState`/`FxStateBlock` 的布局通过
 `static_assertions` 或 `repr(C, align(...))` 保证与指令期望一致。
+在 aarch64 上，32 个 128 位向量寄存器占用前 512 字节，`fpcr` 和
+`fpsr` 分别是偏移 512 和 516 的 32 位字段；naked 汇编必须以 32 位
+访问这两个字段，不能读取或写入尾部对齐填充。
 
 ### 5a. x86_64 信号帧 FP/SIMD 恢复（`x86_64/userspace.rs`）
 
