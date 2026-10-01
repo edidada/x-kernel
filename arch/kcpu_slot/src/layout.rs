@@ -76,6 +76,8 @@ unsafe extern "C" {
     static _cpu_slot_area_start: u8;
 }
 
+// SAFETY: Host-side tests replace the linker-defined symbol with this unique one-byte data
+// symbol so raw-address references link without the kernel script.
 #[cfg(test)]
 #[unsafe(no_mangle)]
 static _cpu_slot_template_lma_start: u8 = 0;

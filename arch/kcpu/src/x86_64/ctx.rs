@@ -502,6 +502,8 @@ impl TaskContext {
 /// switch or `prepare_initial_frame`, with a valid return address and ABI
 /// stack alignment. Keep both stacks and context slots live until resumed,
 /// with the next task's FP state and address space already installed.
+// SAFETY: The scheduler passes writable current-rsp storage in rdi and a valid next-rsp pointer
+// in rsi; the naked body only pushes/pops callee-saved registers and switches stacks.
 #[unsafe(naked)]
 unsafe extern "C" fn context_switch(_current_stack: &mut u64, _next_stack: &u64) {
     naked_asm!(

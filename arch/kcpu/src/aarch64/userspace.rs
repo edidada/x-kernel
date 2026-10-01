@@ -21,6 +21,8 @@ use crate::aarch64::ExceptionContext;
 use crate::excp::PageFaultFlags;
 pub use crate::userspace_common::{ExceptionKind, ReturnReason};
 
+// SAFETY: AArch64 exception assembly calls this unique no-argument C ABI symbol before user
+// entry to prepare IRQ state.
 #[unsafe(no_mangle)]
 extern "C" fn kcpu_prepare_enter_user_irq() {
     // Only an NMI build needs work at the final EL0 handoff. Pseudo-NMI masks
