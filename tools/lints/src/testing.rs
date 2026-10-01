@@ -131,6 +131,55 @@ macro_rules! declare_unregistered {
 "#,
 };
 
+/// Test-only stand-in for the kernel `ksync` crate.
+pub(crate) const MOCK_KSYNC: MockCrate = MockCrate {
+    name: "ksync",
+    source: r#"//! Test-only stand-in for the kernel `ksync` crate.
+
+pub struct RawMutex;
+impl RawMutex {
+    pub const fn new() -> Self { Self }
+    pub const fn with_config(_: SpinConfig) -> Self { Self }
+}
+
+pub struct RawRwLock;
+impl RawRwLock {
+    pub const fn new() -> Self { Self }
+    pub const fn with_config(_: SpinConfig) -> Self { Self }
+}
+
+pub struct SpinConfig;
+
+pub struct Mutex<T>(T);
+impl<T> Mutex<T> {
+    pub const fn new(value: T) -> Self { Self(value) }
+    pub const fn const_new(_: RawMutex, value: T) -> Self { Self(value) }
+}
+// SAFETY: This mock only exists to type-check lint UI fixtures.
+unsafe impl<T: Sync> Sync for Mutex<T> {}
+
+pub struct RwLock<T>(T);
+impl<T> RwLock<T> {
+    pub const fn new(value: T) -> Self { Self(value) }
+    pub const fn const_new(_: RawRwLock, value: T) -> Self { Self(value) }
+}
+// SAFETY: This mock only exists to type-check lint UI fixtures.
+unsafe impl<T: Sync> Sync for RwLock<T> {}
+
+#[macro_export]
+macro_rules! static_lock {
+    ($item:item) => { $item };
+}
+
+#[macro_export]
+macro_rules! declare_unregistered {
+    ($name:ident) => {
+        static $name: $crate::Mutex<u32> = $crate::Mutex::new(0);
+    };
+}
+"#,
+};
+
 /// A test-only crate that the UI test source can `use`, built from one file.
 pub(crate) struct MockCrate {
     /// Crate name, as passed to `--extern`.
