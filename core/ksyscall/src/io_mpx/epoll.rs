@@ -129,11 +129,11 @@ pub(crate) fn sys_epoll_pwait(
     epfd: i32,
     events: UserPtr<k_epoll_event>,
     maxevents: i32,
-    timeout: i32,
+    timeout_ms: i32,
     sigmask: UserConstPtr<k_sigset>,
     sigsetsize: usize,
 ) -> KResult<isize> {
-    let timeout = match timeout {
+    let timeout = match timeout_ms {
         -1 => None,
         t if t >= 0 => Some(TimeSpan::from_millis(t as u64)),
         _ => return Err(KError::InvalidInput),

@@ -329,7 +329,7 @@ impl<T> FairClass<T> {
         let vruntime = task.fair().vruntime.get(tok);
         let id = self.alloc_enqueue_id();
         task.fair().tree_id.set(id, tok);
-        let deadline = task.fair().deadline.get(tok);
+        let deadline_ns = task.fair().deadline.get(tok);
         let weight = Self::weight(&task, tok);
         task.set_seat(QueueSeat::from_sched_class(SchedClass::Fair), tok);
         debug_assert!(!task.fair().deadline_link.is_linked());
@@ -339,7 +339,7 @@ impl<T> FairClass<T> {
         if self
             .first_deadline
             .as_ref()
-            .is_none_or(|first| (deadline, id) < Self::deadline_key(first, tok))
+            .is_none_or(|first| (deadline_ns, id) < Self::deadline_key(first, tok))
         {
             self.first_deadline = Some(task.clone());
         }
@@ -438,10 +438,11 @@ impl<T> FairClass<T> {
     }
 
     fn entity_before(a: &SchedTask<T>, b: &SchedTask<T>, tok: RqLocked) -> bool {
-        let a_deadline = a.fair().deadline.get(tok);
-        let b_deadline = b.fair().deadline.get(tok);
-        a_deadline < b_deadline
-            || (a_deadline == b_deadline && a.fair().tree_id.get(tok) < b.fair().tree_id.get(tok))
+        let a_deadline_ns = a.fair().deadline.get(tok);
+        let b_deadline_ns = b.fair().deadline.get(tok);
+        a_deadline_ns < b_deadline_ns
+            || (a_deadline_ns == b_deadline_ns
+                && a.fair().tree_id.get(tok) < b.fair().tree_id.get(tok))
     }
 
     fn set_next_buddy(&mut self, wakee: Arc<SchedTask<T>>, tok: RqLocked) {

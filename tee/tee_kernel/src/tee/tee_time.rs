@@ -229,9 +229,9 @@ pub(super) fn tee_time_set_ta_time(uuid: &TEE_UUID, time: &TeeTime) -> TeeResult
 }
 
 // Busy wait function
-pub(super) fn tee_time_busy_wait(milliseconds_delay: u32) -> TeeResult {
+pub(super) fn tee_time_busy_wait(delay_ms: u32) -> TeeResult {
     let start_time = monotonic_time();
-    let delay = TimeSpan::from_millis(milliseconds_delay as u64);
+    let delay = TimeSpan::from_millis(delay_ms as u64);
     let end_time = start_time.checked_add(delay).ok_or(TEE_ERROR_OVERFLOW)?;
 
     loop {
@@ -244,6 +244,6 @@ pub(super) fn tee_time_busy_wait(milliseconds_delay: u32) -> TeeResult {
 }
 
 /// Wait for a specified number of milliseconds
-pub(super) fn sys_tee_scn_wait(milliseconds_delay: u32) -> TeeResult {
-    tee_time_busy_wait(milliseconds_delay)
+pub(super) fn sys_tee_scn_wait(delay_ms: u32) -> TeeResult {
+    tee_time_busy_wait(delay_ms)
 }

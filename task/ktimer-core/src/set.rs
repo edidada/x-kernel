@@ -358,9 +358,9 @@ pub(crate) mod tests {
     use super::*;
     use crate::cpu::CancelResult;
 
-    fn setting(deadline: u64) -> Deadline {
+    fn setting(deadline_ns: u64) -> Deadline {
         Deadline::new(MonotonicInstant::from_span_since_origin(
-            TimeSpan::from_nanos(deadline),
+            TimeSpan::from_nanos(deadline_ns),
         ))
         .unwrap()
     }
@@ -424,9 +424,9 @@ pub(crate) mod tests {
     fn reprogram_preserves_zero_horizon_and_other_deadline_sources() {
         let node = TimerNode::new(setting(0));
         let timer_set = TimerSet::<1>::new();
-        for deadline in [0, 10, u64::MAX] {
+        for deadline_ns in [0, 10, u64::MAX] {
             // SAFETY: fixed external node and one set, with no concurrent service.
-            unsafe { timer_set.arm_on(&node, 0.into(), setting(deadline)) }.unwrap();
+            unsafe { timer_set.arm_on(&node, 0.into(), setting(deadline_ns)) }.unwrap();
             let mut prepared = None;
             let mut programmed = None;
             // SAFETY: deterministic CPU0 programming stub with an independent
@@ -440,8 +440,8 @@ pub(crate) mod tests {
             .unwrap();
             // SAFETY: no running delivery; drain before assertions may return.
             unsafe { timer_set.cancel_sync(&node) };
-            assert_eq!(prepared, Some(deadline));
-            assert_eq!(programmed, Some(deadline.min(20)));
+            assert_eq!(prepared, Some(deadline_ns));
+            assert_eq!(programmed, Some(deadline_ns.min(20)));
         }
         for other in [Some(20), None] {
             let mut programmed = Some(99);
@@ -482,7 +482,7 @@ pub(crate) mod tests {
         // SAFETY: one stable external handler outlives the fixed node array;
         // all pending memberships are removed before any storage is released.
         let nodes = [30, 10, 20, 40, 5]
-            .map(|deadline| unsafe { TimerNode::with_handler(setting(deadline), &handler) });
+            .map(|deadline_ns| unsafe { TimerNode::with_handler(setting(deadline_ns), &handler) });
         for (index, node) in nodes.iter().enumerate() {
             let cpu = usize::from(index == 4);
             // SAFETY: each fixed node uses this same stable set, with no delivery
@@ -622,12 +622,12 @@ pub(crate) mod tests {
         for selected in [0, 1] {
             let node = TimerNode::new(setting(100));
             let timer_set = TimerSet::<2>::new();
-            for deadline in [9, 10] {
+            for deadline_ns in [9, 10] {
                 let mut clock_calls = 0;
                 // SAFETY: stable idle node and CPU collection. Clock only records
                 // local observations; no timer mutations or locks inside it.
                 let result = unsafe {
-                    timer_set.arm_on_if_future(&node, selected.into(), setting(deadline), || {
+                    timer_set.arm_on_if_future(&node, selected.into(), setting(deadline_ns), || {
                         clock_calls += 1;
                         10
                     })
@@ -746,10 +746,10 @@ pub(crate) mod tests {
         };
         assert_eq!(result, Err(KError::InvalidInput));
         assert_eq!(clock_calls, 0);
-        for deadline in [9, 10] {
+        for deadline_ns in [9, 10] {
             // SAFETY: fixed node, initialized CPU and serialized access. Ordinary
             // arm must not acquire the wait-specific rejection behavior.
-            let result = unsafe { timer_set.arm_on(&node, 0.into(), setting(deadline)) };
+            let result = unsafe { timer_set.arm_on(&node, 0.into(), setting(deadline_ns)) };
             // SAFETY: serve the matching test CPU with live callback-free storage.
             let delivered = unsafe {
                 crate::dispatch::dispatch_round(&timer_set.cpus[0], 10, timer_set.cpus[0].lock())
