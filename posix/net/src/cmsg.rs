@@ -23,7 +23,7 @@ use linux_raw_sys::net::{
     AF_INET, AF_UNSPEC, IP_RECVERR, IPPROTO_IP, SCM_CREDENTIALS, SCM_RIGHTS, SOL_IP, SOL_IPV6,
     SOL_SOCKET, cmsghdr, in_addr, sockaddr_in, ucred,
 };
-use osvm::{VirtPtr, write_vm_mem};
+use osvm::VirtPtr;
 use posix_types::UserPtr;
 
 #[repr(C)]
@@ -451,7 +451,7 @@ impl<'a> CMsgBuilder<'a> {
             cmsg_level: level as _,
             cmsg_type: ty as _,
         };
-        write_vm_mem(self.hdr.as_ptr().cast_mut(), core::slice::from_ref(&hdr))?;
+        self.hdr.write_vm(hdr)?;
 
         // cmsg_len excludes trailing padding, but the next header must start
         // at a CMSG_ALIGN boundary. A final message may fit without all of
