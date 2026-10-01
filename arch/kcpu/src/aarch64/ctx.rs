@@ -352,8 +352,8 @@ unsafe extern "C" fn fpstate_save(state: &mut FpState) {
         stp     q26, q27, [x0, 26 * 16]
         stp     q28, q29, [x0, 28 * 16]
         stp     q30, q31, [x0, 30 * 16]
-        str     x9, [x0, 64 *  8]
-        str     x10, [x0, 65 * 8]
+        str     w9, [x0, 64 * 8]
+        str     w10, [x0, 64 * 8 + 4]
 
         isb
         ret"
@@ -387,8 +387,8 @@ unsafe extern "C" fn fpstate_restore(state: &FpState) {
         ldp     q26, q27, [x0, 26 * 16]
         ldp     q28, q29, [x0, 28 * 16]
         ldp     q30, q31, [x0, 30 * 16]
-        ldr     x9, [x0, 64 * 8]
-        ldr     x10, [x0, 65 * 8]
+        ldr     w9, [x0, 64 * 8]
+        ldr     w10, [x0, 64 * 8 + 4]
         msr     fpcr, x9
         msr     fpsr, x10
 
