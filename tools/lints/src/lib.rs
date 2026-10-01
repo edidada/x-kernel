@@ -17,6 +17,7 @@ extern crate rustc_span;
 
 dylint_linting::dylint_library!();
 
+mod exported_foreign_item;
 mod static_lock_helpers;
 mod static_mut_option;
 mod unitless_time_integer;
@@ -42,6 +43,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         vec_shift_in_loop::VEC_SHIFT_IN_LOOP,
         untyped_error_result::UNTYPED_ERROR_RESULT,
         unitless_time_integer::UNITLESS_TIME_INTEGER,
+        exported_foreign_item::EXPORTED_FOREIGN_ITEM,
     ]);
     lint_store
         .register_late_pass(|_| Box::new(unregistered_static_spinlock::UnregisteredStaticSpinlock));
@@ -51,4 +53,5 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
     lint_store.register_late_pass(|_| Box::new(vec_shift_in_loop::VecShiftInLoop));
     lint_store.register_late_pass(|_| Box::new(untyped_error_result::UntypedErrorResult));
     lint_store.register_late_pass(|_| Box::new(unitless_time_integer::UnitlessTimeInteger));
+    lint_store.register_late_pass(|_| Box::new(exported_foreign_item::ExportedForeignItem));
 }
