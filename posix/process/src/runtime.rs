@@ -518,7 +518,7 @@ mod tests {
         ));
         let signal = ThreadSignalManager::new(1, process);
         let mut uctx = interrupted_context(LinuxError::ERESTARTSYS);
-        let action = signal.dispatch_irq_signal(
+        let action = signal.handle_signal(
             &mut uctx,
             SignalSet::default(),
             &SignalInfo::new_kernel(Signo::SIGCONT),
