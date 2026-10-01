@@ -20,7 +20,7 @@ rustc_session::declare_lint! {
     /// raw-pointer virtual-memory methods. Use `UserPtr` / `UserConstPtr` APIs
     /// requiring `UserWrite` / `UserRead` instead.
     pub USER_COPY_WITHOUT_ABI_CONTRACT,
-    Warn,
+    Deny,
     "typed user-memory copy without a UserRead or UserWrite bound",
     report_in_external_macro
 }
@@ -363,16 +363,16 @@ fn allowed(p: *mut Record, value: Record) {
 fn main() {}
 "#;
 
-    const STDERR: &str = r#"warning: `write_vm_mem` copies a typed value without a user ABI contract
+    const STDERR: &str = r#"error: `write_vm_mem` copies a typed value without a user ABI contract
   --> $DIR/user_copy_without_abi_contract.rs:15:5
    |
 LL |     copy_out(p, &[value]);
    |     ^^^^^^^^^^^^^^^^^^^^^
    |
    = help: prove UserRead/AnyBitPattern for reads or UserWrite for writes, or document a focused low-level exception; see docs/code-guidelines/CG-006-user-copy-abi-contract.md
-   = note: `#[warn(user_copy_without_abi_contract)]` on by default
+   = note: `#[deny(user_copy_without_abi_contract)]` on by default
 
-warning: `read_vm_mem` copies a typed value without a user ABI contract
+error: `read_vm_mem` copies a typed value without a user ABI contract
   --> $DIR/user_copy_without_abi_contract.rs:17:5
    |
 LL |     copy_in(p.cast_const(), &mut slot);
@@ -380,7 +380,7 @@ LL |     copy_in(p.cast_const(), &mut slot);
    |
    = help: prove UserRead/AnyBitPattern for reads or UserWrite for writes, or document a focused low-level exception; see docs/code-guidelines/CG-006-user-copy-abi-contract.md
 
-warning: `write_vm` copies a typed value without a user ABI contract
+error: `write_vm` copies a typed value without a user ABI contract
   --> $DIR/user_copy_without_abi_contract.rs:18:5
    |
 LL |     p.write_vm(value);
@@ -388,7 +388,7 @@ LL |     p.write_vm(value);
    |
    = help: prove UserRead/AnyBitPattern for reads or UserWrite for writes, or document a focused low-level exception; see docs/code-guidelines/CG-006-user-copy-abi-contract.md
 
-warning: `write_vm_slice` copies a typed value without a user ABI contract
+error: `write_vm_slice` copies a typed value without a user ABI contract
   --> $DIR/user_copy_without_abi_contract.rs:19:5
    |
 LL |     p.write_vm_slice(&[value]);
@@ -396,7 +396,7 @@ LL |     p.write_vm_slice(&[value]);
    |
    = help: prove UserRead/AnyBitPattern for reads or UserWrite for writes, or document a focused low-level exception; see docs/code-guidelines/CG-006-user-copy-abi-contract.md
 
-warning: `read_vm` copies a typed value without a user ABI contract
+error: `read_vm` copies a typed value without a user ABI contract
   --> $DIR/user_copy_without_abi_contract.rs:20:21
    |
 LL |     let _: Record = (p as *const Record).read_vm().unwrap();
@@ -404,7 +404,7 @@ LL |     let _: Record = (p as *const Record).read_vm().unwrap();
    |
    = help: prove UserRead/AnyBitPattern for reads or UserWrite for writes, or document a focused low-level exception; see docs/code-guidelines/CG-006-user-copy-abi-contract.md
 
-warning: `write_vm_mem` copies a typed value without a user ABI contract
+error: `write_vm_mem` copies a typed value without a user ABI contract
   --> $DIR/user_copy_without_abi_contract.rs:24:5
    |
 LL |     copy_out(p, &[value]);
@@ -412,7 +412,7 @@ LL |     copy_out(p, &[value]);
    |
    = help: prove UserRead/AnyBitPattern for reads or UserWrite for writes, or document a focused low-level exception; see docs/code-guidelines/CG-006-user-copy-abi-contract.md
 
-warning: `write_vm` copies a typed value without a user ABI contract
+error: `write_vm` copies a typed value without a user ABI contract
   --> $DIR/user_copy_without_abi_contract.rs:28:5
    |
 LL |     VirtMutPtr::write_vm(p, value);
@@ -420,7 +420,7 @@ LL |     VirtMutPtr::write_vm(p, value);
    |
    = help: prove UserRead/AnyBitPattern for reads or UserWrite for writes, or document a focused low-level exception; see docs/code-guidelines/CG-006-user-copy-abi-contract.md
 
-warning: `write_vm` copies a typed value without a user ABI contract
+error: `write_vm` copies a typed value without a user ABI contract
   --> $DIR/user_copy_without_abi_contract.rs:29:5
    |
 LL |     <*mut Record as VirtMutPtr>::write_vm(p, value);
@@ -428,7 +428,7 @@ LL |     <*mut Record as VirtMutPtr>::write_vm(p, value);
    |
    = help: prove UserRead/AnyBitPattern for reads or UserWrite for writes, or document a focused low-level exception; see docs/code-guidelines/CG-006-user-copy-abi-contract.md
 
-warning: `write_vm` copies a typed value without a user ABI contract
+error: `write_vm` copies a typed value without a user ABI contract
   --> $DIR/user_copy_without_abi_contract.rs:31:5
    |
 LL |     p.write_vm(value);
@@ -436,7 +436,7 @@ LL |     p.write_vm(value);
    |
    = help: prove UserRead/AnyBitPattern for reads or UserWrite for writes, or document a focused low-level exception; see docs/code-guidelines/CG-006-user-copy-abi-contract.md
 
-warning: `write_vm` copies a typed value without a user ABI contract
+error: `write_vm` copies a typed value without a user ABI contract
   --> $DIR/user_copy_without_abi_contract.rs:34:5
    |
 LL |     p.write_vm(value);
@@ -444,7 +444,7 @@ LL |     p.write_vm(value);
    |
    = help: prove UserRead/AnyBitPattern for reads or UserWrite for writes, or document a focused low-level exception; see docs/code-guidelines/CG-006-user-copy-abi-contract.md
 
-warning: `read_uninit` copies a typed value without a user ABI contract
+error: `read_uninit` copies a typed value without a user ABI contract
   --> $DIR/user_copy_without_abi_contract.rs:51:28
    |
 LL |     let _: bool = unsafe { p.read_uninit().unwrap().assume_init() };
@@ -452,7 +452,7 @@ LL |     let _: bool = unsafe { p.read_uninit().unwrap().assume_init() };
    |
    = help: prove UserRead/AnyBitPattern for reads or UserWrite for writes, or document a focused low-level exception; see docs/code-guidelines/CG-006-user-copy-abi-contract.md
 
-warning: `read_uninit` copies a typed value without a user ABI contract
+error: `read_uninit` copies a typed value without a user ABI contract
   --> $DIR/user_copy_without_abi_contract.rs:52:28
    |
 LL |     let _: bool = unsafe { UserPtr::from_ptr(p).read_uninit().unwrap().assume_init() };
@@ -460,7 +460,7 @@ LL |     let _: bool = unsafe { UserPtr::from_ptr(p).read_uninit().unwrap().assu
    |
    = help: prove UserRead/AnyBitPattern for reads or UserWrite for writes, or document a focused low-level exception; see docs/code-guidelines/CG-006-user-copy-abi-contract.md
 
-warning: `read_uninit` copies a typed value without a user ABI contract
+error: `read_uninit` copies a typed value without a user ABI contract
   --> $DIR/user_copy_without_abi_contract.rs:53:17
    |
 LL |     let value = p.read_uninit().unwrap();
@@ -468,7 +468,7 @@ LL |     let value = p.read_uninit().unwrap();
    |
    = help: prove UserRead/AnyBitPattern for reads or UserWrite for writes, or document a focused low-level exception; see docs/code-guidelines/CG-006-user-copy-abi-contract.md
 
-warning: `read_uninit` copies a typed value without a user ABI contract
+error: `read_uninit` copies a typed value without a user ABI contract
   --> $DIR/user_copy_without_abi_contract.rs:55:21
    |
 LL |     let _retained = p.read_uninit();
@@ -476,7 +476,7 @@ LL |     let _retained = p.read_uninit();
    |
    = help: prove UserRead/AnyBitPattern for reads or UserWrite for writes, or document a focused low-level exception; see docs/code-guidelines/CG-006-user-copy-abi-contract.md
 
-warning: `read_uninit` copies a typed value without a user ABI contract
+error: `read_uninit` copies a typed value without a user ABI contract
   --> $DIR/user_copy_without_abi_contract.rs:58:17
    |
 LL |     let value = p.read_uninit()?;
@@ -484,7 +484,7 @@ LL |     let value = p.read_uninit()?;
    |
    = help: prove UserRead/AnyBitPattern for reads or UserWrite for writes, or document a focused low-level exception; see docs/code-guidelines/CG-006-user-copy-abi-contract.md
 
-warning: `read_uninit` copies a typed value without a user ABI contract
+error: `read_uninit` copies a typed value without a user ABI contract
   --> $DIR/user_copy_without_abi_contract.rs:63:17
    |
 LL |     let saved = p.read_uninit();
@@ -492,16 +492,16 @@ LL |     let saved = p.read_uninit();
    |
    = help: prove UserRead/AnyBitPattern for reads or UserWrite for writes, or document a focused low-level exception; see docs/code-guidelines/CG-006-user-copy-abi-contract.md
 
-warning: `write_vm_mem` copies a typed value without a user ABI contract
+error: `write_vm_mem` copies a typed value without a user ABI contract
   --> $DIR/user_copy_without_abi_contract.rs:66:46
    |
 LL | fn external(p: *mut Record, value: Record) { osvm::external_copy!(p, value); }
    |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: prove UserRead/AnyBitPattern for reads or UserWrite for writes, or document a focused low-level exception; see docs/code-guidelines/CG-006-user-copy-abi-contract.md
-   = note: this warning originates in the macro `osvm::external_copy` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `osvm::external_copy` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-warning: `write_vm_mem` copies a typed value without a user ABI contract
+error: `write_vm_mem` copies a typed value without a user ABI contract
   --> $DIR/user_copy_without_abi_contract.rs:68:52
    |
 LL | macro_rules! copy_record { ($p:expr, $v:expr) => { copy_out($p, &[$v]); }; }
@@ -510,9 +510,9 @@ LL | fn expanded(p: *mut Record, value: Record) { copy_record!(p, value); }
    |                                              ---------------------- in this macro invocation
    |
    = help: prove UserRead/AnyBitPattern for reads or UserWrite for writes, or document a focused low-level exception; see docs/code-guidelines/CG-006-user-copy-abi-contract.md
-   = note: this warning originates in the macro `copy_record` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `copy_record` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-warning: 18 warnings emitted
+error: aborting due to 18 previous errors
 
 "#;
 
