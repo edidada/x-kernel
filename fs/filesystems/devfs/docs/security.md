@@ -31,7 +31,7 @@ returns `0`.
 
 ## Unsafe code and FFI inventory
 
-The crate contains two unsafe memory operations and two exported C ABI entry
+The crate contains one unsafe memory operation and two exported C ABI entry
 points:
 
 - `src/nodes/fb.rs::FrameBuffer::as_mut_slice` uses
@@ -41,11 +41,6 @@ points:
   call keeps the slice local to one operation. Userspace mappings may modify
   the same device memory concurrently, so callers treat visibility and write
   races as legacy framebuffer semantics and must not retain the Rust slice.
-- `src/nodes/loop.rs`, in the `LOOP_SET_STATUS` handler, uses
-  `slice::from_raw_parts_mut` to expose exactly `size_of::<loop_info>()` bytes
-  of a live, fully initialized POD `loop_info` value as
-  `MaybeUninit<u8>`. `osvm::read_vm_bytes` initializes that exact destination
-  range from userspace before the typed value is passed to `set_info`.
 - `src/nodes/event.rs::ongkey` is a crate-visible
   `#[unsafe(no_mangle)] extern "C"` function exported by its unmangled symbol
   name. Its stable C ABI takes no arguments, accesses no caller memory, and
@@ -90,6 +85,7 @@ implementation requires normal task context and may allocate.
 | T-03 | Device event arrives before the class is active | Medium — node creation fails and userspace cannot access the device | Node publication is moved ahead of the `Activated` transition | `kclass` registers the node inside its activation callback; devfs then resolves an available class handle. |
 | T-04 | A stale remove deletes a new projection | Medium — the replacement device disappears from `/dev` | A future device id or assignment is reused | Removal compares the complete recorded `DeviceNode` before deleting it. |
 | T-05 | Removed device remains apparently readable | Medium — callers could mistake stale data or delayed errors for live hardware | An fd survives hot-unplug | evdev returns `ENODEV` and poll error/hangup; DRM checks `ClassDevice::is_available`. |
+| T-06 | `LOOP_GET_STATUS` leaks kernel memory through struct padding | High — uninitialized kernel bytes reach userspace | The ioctl copies the implicit padding in `linux_raw_sys::loop_info` | `LoopInfo` models each gap as an explicit zeroed field, asserts the Linux ABI layout, and copies through `UserPtr::write_vm` with `UserWrite`. |
 
 ## Failure modes and effects
 
