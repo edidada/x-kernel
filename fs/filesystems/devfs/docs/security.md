@@ -189,6 +189,7 @@ and wakes client-owned poll registrations.
 | T-06 | An input event arrives between readiness check and waiter registration | Medium — a reader could sleep despite queued input | The queue changes while a task is preparing to sleep | Registration precedes the caller's second readiness check; either the client `PollSet` wake or the recheck observes the event. |
 | T-07 | One slow reader exhausts input buffers | Medium — another reader loses events or the VirtIO queue stalls | A process leaves its event file open without reading | Each file has a 256-event cap; overflow emits `SYN_DROPPED`; inputdev continues draining the hardware queue. |
 | T-08 | Short driver capability reply exposes stale kernel memory | High — kernel stack/heap disclosure | A driver reports fewer bitmap bytes than the ioctl buffer | The ioctl zero-fills its scratch bitmap and abs value before querying; the driver can only overwrite initialized bytes, and the user copy is clipped to the requested length. |
+| T-09 | `LOOP_GET_STATUS` leaks kernel memory through struct padding | High — uninitialized kernel bytes reach userspace | The ioctl copies the implicit padding in `linux_raw_sys::loop_info` | `LoopInfo` models each gap as an explicit zeroed field, asserts the Linux ABI layout, and copies through `UserPtr::write_vm` with `UserWrite`. |
 
 Queued input records retain the clock selected when they were enqueued.
 The timekeeper supplies a correlated pair at event receipt, preventing delayed
@@ -198,7 +199,6 @@ The client-to-timekeeper lock order has no reverse path: inputdev releases the
 timekeeper and endpoint locks before invoking clients. The BOOTTIME mapping
 currently lacks separate suspend accounting, matching `clock_gettime`; this
 limitation must not be presented as a complete suspend-aware clock.
-| T-06 | `LOOP_GET_STATUS` leaks kernel memory through struct padding | High — uninitialized kernel bytes reach userspace | The ioctl copies the implicit padding in `linux_raw_sys::loop_info` | `LoopInfo` models each gap as an explicit zeroed field, asserts the Linux ABI layout, and copies through `UserPtr::write_vm` with `UserWrite`. |
 
 ## Failure modes and effects
 
