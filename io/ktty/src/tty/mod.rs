@@ -11,7 +11,6 @@ use kprocess::{AsThread, ControllingTerminal, Pid, Process, ProcessGroup, SetTer
 use ksync::Mutex;
 use ktask::future::{block_on, poll_io};
 use kvfs::{DeviceFileOps, NodeFlags, VfsFile, VfsFileBuilder, VfsInode};
-use osvm::{VirtMutPtr, VirtPtr};
 
 use crate::terminal::{
     Terminal, WindowSize,
@@ -240,20 +239,24 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
         use linux_raw_sys::ioctl::*;
         match cmd {
             TCGETS => {
-                (arg as *mut Termios).write_vm(*self.terminal.termios.lock().as_ref().deref())?;
+                posix_types::UserPtr::<Termios>::from(arg)
+                    .write_vm(*self.terminal.termios.lock().as_ref().deref())?;
             }
             TCGETS2 => {
-                (arg as *mut Termios2).write_vm(*self.terminal.termios.lock().as_ref())?;
+                posix_types::UserPtr::<Termios2>::from(arg)
+                    .write_vm(*self.terminal.termios.lock().as_ref())?;
             }
             TCSETS | TCSETSF | TCSETSW => {
-                *self.terminal.termios.lock() =
-                    Arc::new(Termios2::new((arg as *const Termios).read_vm()?));
+                *self.terminal.termios.lock() = Arc::new(Termios2::new(
+                    posix_types::UserConstPtr::<Termios>::from(arg).read_vm()?,
+                ));
                 if cmd == TCSETSF {
                     self.ldisc.lock().drain_input();
                 }
             }
             TCSETS2 | TCSETSF2 | TCSETSW2 => {
-                *self.terminal.termios.lock() = Arc::new((arg as *const Termios2).read_vm()?);
+                *self.terminal.termios.lock() =
+                    Arc::new(posix_types::UserConstPtr::<Termios2>::from(arg).read_vm()?);
                 if cmd == TCSETSF2 {
                     self.ldisc.lock().drain_input();
                 }
@@ -284,7 +287,7 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
                     let caller_session = kprocess::current_user_process().group().session();
                     self.terminal.job_control.foreground_for(&caller_session)?
                 };
-                (arg as *mut i32).write_vm(foreground.pgid() as i32)?;
+                posix_types::UserPtr::<i32>::from(arg).write_vm(foreground.pgid() as i32)?;
             }
             TIOCGSID => {
                 let session = if self.is_ptm {
@@ -293,10 +296,10 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
                     let caller_session = kprocess::current_user_process().group().session();
                     self.terminal.job_control.session_for(&caller_session)?
                 };
-                (arg as *mut u32).write_vm(session.sid())?;
+                posix_types::UserPtr::<u32>::from(arg).write_vm(session.sid())?;
             }
             TIOCSPGRP => {
-                let pgid = (arg as *const i32).read_vm()?;
+                let pgid = posix_types::UserConstPtr::<i32>::from(arg).read_vm()?;
                 if pgid <= 0 {
                     return Err(KError::InvalidInput);
                 }
@@ -308,14 +311,16 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
                     .set_foreground_for(&current_session, &target_group)?;
             }
             TIOCGWINSZ => {
-                (arg as *mut WindowSize).write_vm(*self.terminal.window_size.lock())?;
+                posix_types::UserPtr::<WindowSize>::from(arg)
+                    .write_vm(*self.terminal.window_size.lock())?;
             }
             TIOCSWINSZ => {
-                *self.terminal.window_size.lock() = (arg as *const WindowSize).read_vm()?;
+                *self.terminal.window_size.lock() =
+                    posix_types::UserConstPtr::<WindowSize>::from(arg).read_vm()?;
             }
             TIOCSPTLCK => {}
             TIOCGPTN => {
-                (arg as *mut u32).write_vm(self.pty_number())?;
+                posix_types::UserPtr::<u32>::from(arg).write_vm(self.pty_number())?;
             }
             TIOCSCTTY => {
                 if arg != 0 {

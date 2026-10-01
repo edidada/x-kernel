@@ -30,8 +30,10 @@ kernel objects in `kprocess`.
 ## Memory-Safety Invariants
 
 ioctl user pointers are dereferenced only at the ABI boundary in
-`src/tty/mod.rs`, through `read_vm`/`write_vm` with user-address
-validation. The job-control layer stores no user pointers — only weak
+`src/tty/mod.rs`, through `UserConstPtr::read_vm` and `UserPtr::write_vm`
+with user-address validation and `UserRead`/`UserWrite` ABI bounds. The
+padding-free `Termios`, `Termios2`, and `WindowSize` carriers implement both
+contracts. The job-control layer stores no user pointers — only weak
 references to `Session` and `ProcessGroup` objects.
 
 ## Thread Safety

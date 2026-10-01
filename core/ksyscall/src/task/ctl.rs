@@ -161,14 +161,14 @@ pub(crate) fn sys_prctl(
         // child subreaper semantics are not tracked.
         PR_GET_CHILD_SUBREAPER => {
             if arg2 != 0 {
-                write_vm_mem(arg2 as _, &[0u32])?;
+                UserPtr::<u32>::from(arg2).write_vm(0)?;
             }
         }
         PR_SET_CHILD_SUBREAPER => {}
         // We do not expose a separate tid_address; report none.
         PR_GET_TID_ADDRESS => {
             if arg2 != 0 {
-                write_vm_mem(arg2 as _, &[0usize])?;
+                UserPtr::<usize>::from(arg2).write_vm(0)?;
             }
         }
         // Transparent hugepages are not supported; report disabled.

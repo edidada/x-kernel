@@ -16,7 +16,6 @@ use kpoll::{IoEvents, PollContext, PollRegisterError};
 use ksync::static_lock;
 use linux_raw_sys::ioctl::{BLKGETSIZE, BLKGETSIZE64, BLKROGET, BLKROSET};
 use memaddr::PhysAddrRange;
-use osvm::{VirtMutPtr, VirtPtr};
 
 use crate::{
     DeviceId, FMode, FileOperations, Mutex, NodeFlags, VfsError, VfsFile, VfsFileBuilder, VfsInode,
@@ -386,19 +385,19 @@ impl DeviceFileOps for BlockDevice {
             BLKGETSIZE => {
                 let sectors =
                     usize::try_from(self.size() / 512).map_err(|_| VfsError::FileTooLarge)?;
-                (arg as *mut usize).write_vm(sectors)?;
+                posix_types::UserPtr::<usize>::from(arg).write_vm(sectors)?;
                 Ok(0)
             }
             BLKGETSIZE64 => {
-                (arg as *mut u64).write_vm(self.size())?;
+                posix_types::UserPtr::<u64>::from(arg).write_vm(self.size())?;
                 Ok(0)
             }
             BLKROGET => {
-                (arg as *mut u32).write_vm(self.is_read_only() as u32)?;
+                posix_types::UserPtr::<u32>::from(arg).write_vm(self.is_read_only() as u32)?;
                 Ok(0)
             }
             BLKROSET => {
-                let read_only = (arg as *const u32).read_vm()?;
+                let read_only = posix_types::UserConstPtr::<u32>::from(arg).read_vm()?;
                 if read_only > 1 {
                     return Err(KError::InvalidInput);
                 }

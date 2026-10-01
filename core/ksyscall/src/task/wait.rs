@@ -22,7 +22,7 @@ use ktask::{current, future::block_on};
 use linux_raw_sys::general::{
     __WALL, __WCLONE, __WNOTHREAD, WCONTINUED, WEXITED, WNOHANG, WNOWAIT, WUNTRACED,
 };
-use osvm::{VirtMutPtr, VirtPtr};
+use osvm::VirtPtr;
 
 bitflags! {
     #[derive(Debug, Clone, Copy)]
@@ -137,7 +137,7 @@ fn scan_waitable_child(
     ) {
         wait_reap::WaitChildScan::Ready(waited) => {
             if let Some(exit_code) = exit_code.check_non_null() {
-                exit_code.write_vm(waited.exit_code())?;
+                posix_types::UserPtr::from(exit_code).write_vm(waited.exit_code())?;
             }
             Ok(WaitScanResult::Ready(waited.pid() as _))
         }

@@ -22,7 +22,6 @@ use kprocess::{
 use ksignal::Signo;
 use ktask::current;
 use linux_raw_sys::general::*;
-use osvm::VirtMutPtr;
 use posix_process::new_user_task;
 
 bitflags! {
@@ -300,7 +299,7 @@ impl CloneRequest {
 
         publish_user_task(new_task)?.commit(|_| {
             if self.flags.contains(CloneFlags::PARENT_SETTID)
-                && let Err(err) = (self.parent_tid as *mut Pid).write_vm(tid)
+                && let Err(err) = posix_types::UserPtr::<Pid>::from(self.parent_tid).write_vm(tid)
             {
                 if let Some((resources, fd)) = pidfd_install.as_ref() {
                     // Rollback is best effort; preserve the original user-memory error.
@@ -309,7 +308,7 @@ impl CloneRequest {
                 return Err(err.into());
             }
             if let Some((resources, fd)) = pidfd_install.as_ref()
-                && let Err(err) = (self.pidfd as *mut i32).write_vm(*fd)
+                && let Err(err) = posix_types::UserPtr::<i32>::from(self.pidfd).write_vm(*fd)
             {
                 // Rollback is best effort; preserve the original user-memory error.
                 let _ = resources.close_file(*fd);

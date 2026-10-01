@@ -184,7 +184,10 @@ impl ThreadSignalManager {
                 #[cfg(target_arch = "x86_64")]
                 {
                     let new_sp = uctx.sp() - 8;
-                    if (new_sp as *mut usize).write_vm(restorer).is_err() {
+                    if posix_types::UserPtr::<usize>::from(new_sp)
+                        .write_vm(restorer)
+                        .is_err()
+                    {
                         return Some(SignalOsAction::CoreDump);
                     }
                     uctx.set_sp(new_sp);

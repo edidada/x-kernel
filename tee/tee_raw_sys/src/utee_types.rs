@@ -40,11 +40,13 @@ pub struct utee_params {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, posix_types::UserRead)]
+#[derive(Clone, Copy, Default, posix_types::UserRead, posix_types::UserWrite)]
 pub struct utee_attribute {
     pub a: u64,
     pub b: u64,
     pub attribute_id: u32,
+    /// Explicitly initialized tail bytes of the 24-byte user ABI record.
+    pub abi_pad: u32,
 }
 
 impl Debug for utee_attribute {
@@ -66,7 +68,7 @@ impl Debug for utee_attribute {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, posix_types::UserWrite)]
+#[derive(Clone, Copy, Default, posix_types::UserRead, posix_types::UserWrite)]
 pub struct utee_object_info {
     pub obj_type: u32,
     pub obj_size: u32,

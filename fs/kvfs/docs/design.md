@@ -200,6 +200,8 @@ block-special inode 统一安装 KVFS 的 `DefaultBlkdevFileOperations`，对应
 `BLKGETSIZE*` 操作作用于同一个 resident `BlockDevice`，未知 ioctl 再分派到
 `Gendisk` 的 `BlockDeviceOperations`。普通 close 和 write 不隐式 flush，显式 fsync 才把
 durability 请求传给 backend。KVFS 不维护第二张 `dev_t -> DeviceFileOps` 表；
+这些块设备 ioctl 的标量参数通过 `posix_types::UserPtr` / `UserConstPtr` 复制，
+在调用点由 `UserWrite` / `UserRead` 约束 ABI 类型。
 devfs 只投影名称与 `rdev`，loop 设备也按普通 `Gendisk` 发布。
 
 块设备文件的 byte I/O 先按当前容量裁剪。若 offset 和裁剪后的长度均按 backend

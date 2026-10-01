@@ -20,7 +20,6 @@ use linux_raw_sys::{
         LOOP_SET_STATUS, loop_info,
     },
 };
-use osvm::{VirtMutPtr, VirtPtr};
 use posix_types::{UserPtr, UserRead, UserWrite};
 
 static_lock! {
@@ -228,11 +227,11 @@ impl LoopDevice {
                 self.set_info(UserPtr::<LoopInfo>::from(arg).read_vm()?)?;
             }
             BLKRAGET => {
-                (arg as *mut u32).write_vm(self.ra.load(Ordering::Relaxed))?;
+                UserPtr::<u32>::from(arg).write_vm(self.ra.load(Ordering::Relaxed))?;
             }
             BLKRASET => {
                 self.ra
-                    .store((arg as *const u32).read_vm()?, Ordering::Relaxed);
+                    .store(UserPtr::<u32>::from(arg).read_vm()?, Ordering::Relaxed);
             }
             _ => return Err(KError::NotATty),
         }

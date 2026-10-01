@@ -13,7 +13,7 @@ use linux_raw_sys::general::{
 };
 
 #[repr(C)]
-#[derive(Clone, Copy, AnyBitPattern)]
+#[derive(Clone, Copy, AnyBitPattern, posix_types::UserRead, posix_types::UserWrite)]
 pub struct Termios {
     c_iflag: tcflag_t,
     c_oflag: tcflag_t,
@@ -117,7 +117,7 @@ impl Termios {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, AnyBitPattern)]
+#[derive(Clone, Copy, AnyBitPattern, posix_types::UserRead, posix_types::UserWrite)]
 pub struct Termios2 {
     termios: Termios,
     c_ispeed: speed_t,
