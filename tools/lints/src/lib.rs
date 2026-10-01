@@ -22,6 +22,7 @@ dylint_linting::dylint_library!();
 
 mod facts_export;
 mod std_box_in_kernel_tests;
+mod static_lock_helpers;
 mod unregistered_static_spinlock;
 mod vendored;
 
