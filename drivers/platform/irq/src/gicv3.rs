@@ -32,7 +32,9 @@ pub(super) fn init(gicd_base: memaddr::VirtAddr, gicr_base: memaddr::VirtAddr) {
 pub(super) fn init_current_cpu() {
     debug!("Initialize GICv3 CPU Interface...");
     let mut cpu = GIC.lock().cpu_interface();
-    let _ = cpu.init_current_cpu();
+    if let Err(err) = cpu.init_current_cpu() {
+        error!("GICv3 CPU initialization failed: {err}");
+    }
     cpu.set_eoi_mode(true);
 }
 

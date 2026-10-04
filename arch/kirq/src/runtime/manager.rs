@@ -903,6 +903,7 @@ pub mod tests_irq {
         if IRQ_WAIT_TEST_TARGET.load(Ordering::Acquire) != virq {
             return;
         }
+        // Keep the first observed in-flight count when callbacks race.
         let _ = IRQ_WAIT_TEST_OBSERVED.compare_exchange(
             0,
             in_flight,
@@ -932,6 +933,7 @@ pub mod tests_irq {
     fn record_irq_tail_order(slot: &AtomicUsize) {
         if slot.load(Ordering::Relaxed) == 0 {
             let order = IRQ_TAIL_ORDER_SEQ.fetch_add(1, Ordering::Relaxed);
+            // A competing callback may have published the first observation; keep it.
             let _ = slot.compare_exchange(0, order, Ordering::Relaxed, Ordering::Relaxed);
         }
     }

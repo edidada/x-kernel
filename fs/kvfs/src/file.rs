@@ -970,6 +970,7 @@ impl VfsFile {
     pub fn replace_flags(&self, mask: OpenFlags, flags: OpenFlags) {
         let mask = mask.bits();
         let flags = flags.bits();
+        // The closure always returns Some; callers need only the updated flags.
         let _ = self
             .flags
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {

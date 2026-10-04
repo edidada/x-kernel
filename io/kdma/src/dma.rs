@@ -148,7 +148,9 @@ impl DmaAllocator {
         let size = num_pages * PAGE_SIZE_4K;
         let vaddr = va!(virt_raw);
 
+        // Deallocation cannot fail; the helper already logs platform release errors.
         let _ = self.release_platform_dma(v2p(vaddr), size);
+        // Deallocation cannot fail; update_flags already logs restoration errors.
         let _ = self.update_flags(vaddr, num_pages, MappingFlags::READ | MappingFlags::WRITE);
 
         global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);

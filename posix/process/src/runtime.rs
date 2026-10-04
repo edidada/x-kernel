@@ -303,6 +303,7 @@ fn exit_robust_list(head: *const RobustListHead, tid: Tid) {
     }
 
     if !pending_address.is_null() && !pending_is_pi {
+        // Robust-list cleanup is best effort; a stale user pointer must not stop exit.
         let _ = handle_futex_death(pending_address, offset, tid, true);
     }
 }
@@ -401,6 +402,7 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         // only surviving sibling threads.
         for task in kprocess::scheduler::process_tasks(process.as_ref()) {
             let tid = task.as_thread().tid();
+            // A sibling may already have exited and needs no delivery.
             let _ = kprocess::process_signals::send_to_thread(None, tid, Some(sig.clone()));
         }
     }

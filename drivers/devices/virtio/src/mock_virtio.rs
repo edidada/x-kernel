@@ -96,6 +96,7 @@ pub struct MockTransport {
     pub features: u64,
     pub config_space: RefCell<[u8; 256]>,
     pub interrupt_ack_count: Arc<AtomicUsize>,
+    pub queue_device_area: Option<PhysAddr>,
 }
 
 impl MockTransport {
@@ -110,6 +111,7 @@ impl MockTransport {
             features: 0,
             config_space: RefCell::new([0; 256]),
             interrupt_ack_count: Arc::new(AtomicUsize::new(0)),
+            queue_device_area: None,
         }
     }
 }
@@ -157,8 +159,9 @@ impl Transport for MockTransport {
         _size: u32,
         _descriptors: PhysAddr,
         _driver_area: PhysAddr,
-        _device_area: PhysAddr,
+        device_area: PhysAddr,
     ) {
+        self.queue_device_area = Some(device_area);
     }
 
     fn queue_unset(&mut self, _queue: u16) {}

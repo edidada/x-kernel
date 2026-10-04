@@ -858,6 +858,6 @@ const _: () = {
     assert!(mem::size_of::<MadtHeader>() == 8);
     assert!(mem::size_of::<MadtLocalApic>() == 8);
     assert!(mem::size_of::<MadtIoApic>() == 12);
-    let _ = str::from_utf8(b"MCFG");
-    let _ = str::from_utf8(b"APIC");
+    assert!(str::from_utf8(b"MCFG").is_ok());
+    assert!(str::from_utf8(b"APIC").is_ok());
 };

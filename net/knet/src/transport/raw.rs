@@ -411,6 +411,7 @@ impl Pollable for RawSocket {
 
 impl Drop for RawSocket {
     fn drop(&mut self) {
+        // Drop cannot report shutdown errors; the socket must still be removed.
         let _ = self.shutdown(Shutdown::Both);
         SOCKET_SET.remove(self.handle);
     }

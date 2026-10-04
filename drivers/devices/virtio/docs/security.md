@@ -345,3 +345,6 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 - [ ] 新增原子操作的内存序不低于已有要求
 - [ ] Drop 实现正确处理所有状态（已实现 net 设备 Drop，其他设备无需自定义 Drop）
 - [ ] 新增 panic 路径有对应的 PanicGuard 或等效保护
+
+RNG 完成队列属于不可信设备边界。错误 token 不代表原请求已停止 DMA；
+回收失败时必须保留 pending 缓冲区，禁止释放后再被设备访问。

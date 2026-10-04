@@ -510,3 +510,6 @@ No concrete driver imports ktask/kirq.
 Request tests live in blk/tests/requests.rs and remain a child of the requests
 module through #[path]. The blk directory holds runtime request code; requests
 does not need a separate directory solely to contain tests.
+
+VirtIO RNG 超时请求只有在 used ring 返回匹配 token、描述符回收成功后才释放
+其 DMA 缓冲区；错误 token 保留 pending 所有权，并使后续读取返回 WouldBlock。

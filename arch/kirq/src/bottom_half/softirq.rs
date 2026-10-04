@@ -711,6 +711,7 @@ pub mod tests_softirq {
     fn record_order(slot: &AtomicUsize) {
         if slot.load(Ordering::Relaxed) == 0 {
             let order = ORDER_SEQ.fetch_add(1, Ordering::Relaxed);
+            // A competing callback may have published the first observation; keep it.
             let _ = slot.compare_exchange(0, order, Ordering::Relaxed, Ordering::Relaxed);
         }
     }

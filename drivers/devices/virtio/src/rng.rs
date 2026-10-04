@@ -87,7 +87,11 @@ impl<H: Hal, T: Transport> RngInner<H, T> {
         let mut outputs = [pending.buf.as_mut()];
         // SAFETY: `pending.buf` is the same allocation passed to `add` for
         // `token`, and has not been accessed since then.
-        let _ = unsafe { self.queue.pop_used(token, &[], &mut outputs) };
+        if unsafe { self.queue.pop_used(token, &[], &mut outputs) }.is_err() {
+            // A mismatched completion did not recycle this descriptor. Keep its
+            // DMA buffer alive and reject new requests until it can be reclaimed.
+            return false;
+        }
         self.pending = None;
         let _ = self.transport.ack_interrupt();
         true
@@ -237,6 +241,40 @@ mod tests {
         } else {
             assert!(dev.is_err());
         }
+    }
+
+    #[def_test]
+    fn test_reclaim_keeps_pending_buffer_until_matching_completion() {
+        let transport = MockTransport::new_with_type(DeviceType::EntropySource);
+        let mut device = RngInner::<MockHal, MockTransport>::try_new(transport, &MOCK_TIME)
+            .expect("mock RNG initialization");
+        let mut buf = alloc::vec![0u8; 16].into_boxed_slice();
+        // SAFETY: the allocation is retained in device.pending until its descriptor completes.
+        let token = unsafe { device.queue.add(&[], &mut [buf.as_mut()]) }.unwrap();
+        device.pending = Some(PendingRequest { token, buf });
+        let used = device.transport.queue_device_area.unwrap() as *mut u8;
+        // SAFETY: MockHal exposes the live used ring through an identity-mapped allocation;
+        // the first ring element's id is the aligned u32 at byte offset 4.
+        unsafe {
+            used.wrapping_add(4)
+                .cast::<u32>()
+                .write_volatile(u32::from(token.wrapping_add(1)))
+        };
+        // SAFETY: byte offset 2 is the aligned u16 used index in the same live ring.
+        unsafe { used.wrapping_add(2).cast::<u16>().write_volatile(1) };
+        assert!(!device.reclaim_pending_if_ready());
+        assert!(
+            device.pending.is_some(),
+            "wrong-token completion must retain DMA ownership"
+        );
+        // SAFETY: the first ring element remains live; now report the queued descriptor.
+        unsafe {
+            used.wrapping_add(4)
+                .cast::<u32>()
+                .write_volatile(u32::from(token))
+        };
+        assert!(device.reclaim_pending_if_ready());
+        assert!(device.pending.is_none());
     }
 
     #[def_test]

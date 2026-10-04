@@ -139,6 +139,7 @@ impl Log for KernelLogger {
                 let tid = LoggerAdapter::task_id();
                 let now = LoggerAdapter::now();
 
+                // Logging is best effort; reporting its format error via the logger would recurse.
                 let _ = match (compact, cpu_id, tid) {
                     (true, Some(c), Some(t)) => print_fmt(color_fmt!(
                         AnsiColor::White,

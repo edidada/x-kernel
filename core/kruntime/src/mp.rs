@@ -342,12 +342,14 @@ mod tests_tlb_shootdown {
             // Map a page to set ToFlush::Addresses.
             let test_vaddr = VirtAddr::from(0x7F00_0000usize);
             let mut pt_mut = pt.modify();
-            let _ = pt_mut.map(
-                test_vaddr,
-                PhysAddr::from(0x8000_0000usize),
-                khal::paging::PageSize::Size4K,
-                khal::paging::MappingFlags::READ,
-            );
+            pt_mut
+                .map(
+                    test_vaddr,
+                    PhysAddr::from(0x8000_0000usize),
+                    khal::paging::PageSize::Size4K,
+                    khal::paging::MappingFlags::READ,
+                )
+                .expect("fresh test page table must accept its first mapping");
 
             // Dropping pt_mut calls finish() → flush_tlb_all_cpus → flush_remote.
             // On architectures without hardware broadcast (x86_64, riscv64), this sends IPIs.
@@ -460,7 +462,9 @@ mod tests_tlb_shootdown {
             {
                 let mut aspace = memspace::kernel_layout().lock();
                 let mut pt_mut = aspace.page_table_mut().modify();
-                let _ = pt_mut.unmap(test_vaddr);
+                pt_mut
+                    .unmap(test_vaddr)
+                    .expect("test mapping must remain installed until cleanup");
             }
             kalloc::global_allocator().dealloc_pages(v1, 1, kalloc::UsageKind::PageTable);
             kalloc::global_allocator().dealloc_pages(v2, 1, kalloc::UsageKind::PageTable);
@@ -612,7 +616,9 @@ mod tests_tlb_shootdown {
             {
                 let mut aspace = memspace::kernel_layout().lock();
                 let mut pt_mut = aspace.page_table_mut().modify();
-                let _ = pt_mut.unmap(test_vaddr);
+                pt_mut
+                    .unmap(test_vaddr)
+                    .expect("test mapping must remain installed until cleanup");
             }
             kalloc::global_allocator().dealloc_pages(v1, 1, kalloc::UsageKind::PageTable);
             kalloc::global_allocator().dealloc_pages(v2, 1, kalloc::UsageKind::PageTable);

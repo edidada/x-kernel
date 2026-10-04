@@ -130,19 +130,26 @@ pub fn sys_brk(addr: usize) -> KResult<isize> {
                     {
                         return Ok(current_top as isize);
                     }
-                    let _ = aspace.map(
-                        map_start,
-                        map_size,
-                        MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
-                        false,
-                        VmRuntimeRef::new_anon_private(map_start, PageSize::Size4K),
-                    );
+                    if aspace
+                        .map(
+                            map_start,
+                            map_size,
+                            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
+                            false,
+                            VmRuntimeRef::new_anon_private(map_start, PageSize::Size4K),
+                        )
+                        .is_err()
+                    {
+                        return Ok(current_top as isize);
+                    }
                 }
             }
         }
     } else if let Some((shrink_start, shrink_size)) = request.shrink_range() {
         let aspace_ref = current_user_process_address_space();
-        let _ = aspace_ref.lock().unmap(shrink_start, shrink_size);
+        if aspace_ref.lock().unmap(shrink_start, shrink_size).is_err() {
+            return Ok(current_top as isize);
+        }
     }
 
     current_user_process()

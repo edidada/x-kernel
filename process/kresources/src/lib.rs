@@ -141,6 +141,7 @@ impl ProcessResources {
 
     fn close_descriptors(descriptors: impl IntoIterator<Item = FileDescriptor>) {
         for descriptor in descriptors {
+            // Teardown must close every descriptor; close errors have no receiver.
             let _ = descriptor.close();
         }
     }

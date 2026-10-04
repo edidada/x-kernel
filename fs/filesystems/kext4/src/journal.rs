@@ -450,6 +450,7 @@ impl Ext4SbInfo {
         };
         journal.insert_checkpoint_policy(transaction, recovery_flag_policy)?;
         if let Err(error) = journal.transactions.start_checkpoint(&commit, persisted) {
+            // Rollback is best effort; return the original checkpoint-start error.
             let _ = journal.remove_checkpoint_policy(transaction);
             return Err(error);
         }

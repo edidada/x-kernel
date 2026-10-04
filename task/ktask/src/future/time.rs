@@ -408,7 +408,7 @@ mod tests_subtick_precision {
     fn test_idle_subtick_timeout_is_not_rounded_to_tick() {
         const REQUEST: TimeSpan = TimeSpan::from_millis(2);
 
-        let _ = block_on(timeout(Some(REQUEST), pending::<()>()));
+        assert!(block_on(timeout(Some(REQUEST), pending::<()>())).is_err());
         let mut samples = [TimeSpan::ZERO; SAMPLES];
         for slot in &mut samples {
             let start = monotonic_time();
@@ -463,7 +463,7 @@ mod tests_subtick_precision {
         let limit = contended_limit(REQUEST);
         let spinner = spawn_same_cpu_spinner();
 
-        let _ = block_on(timeout(Some(REQUEST), pending::<()>()));
+        assert!(block_on(timeout(Some(REQUEST), pending::<()>())).is_err());
         let mut samples = [TimeSpan::ZERO; SAMPLES];
         for slot in &mut samples {
             let start = monotonic_time();
