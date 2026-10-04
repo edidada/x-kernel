@@ -11,6 +11,9 @@ allow-panic-in-tests = true
 
 # Check exported APIs as well as private implementation details.
 avoid-breaking-exported-api = false
+disallowed-methods = [
+    { path = "core::mem::zeroed", reason = "Prefer safe construction; exceptions must prove that the concrete type contract admits the all-zero bit pattern." },
+]
 
 # Boolean parameter limit for clippy::fn_params_excessive_bools (the clippy default).
 max-fn-params-bools = 3
