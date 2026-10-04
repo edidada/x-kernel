@@ -43,15 +43,17 @@ unsafe fn init_ap_boot_state() {
     const PAGE_SIZE_4K: usize = 0x1000;
     const PTE_PER_PT: usize = 512;
 
+    let gdt_desc_ptr = core::ptr::addr_of_mut!(x86_ap_boot_gdt_desc);
     // SAFETY: AP bootstrap state is initialized once during early boot before
     // any concurrent access to these static handoff tables exists.
-    let gdt_desc = unsafe { &mut *core::ptr::addr_of_mut!(x86_ap_boot_gdt_desc) };
+    let gdt_desc = unsafe { &mut *gdt_desc_ptr };
     let gdt_paddr = kaddr_layout::v2p(core::ptr::addr_of!(x86_ap_boot_gdt) as usize) as u32;
     gdt_desc[2..6].copy_from_slice(&gdt_paddr.to_le_bytes());
 
+    let pml4_ptr = core::ptr::addr_of_mut!(x86_ap_boot_pml4);
     // SAFETY: AP bootstrap state is initialized once during early boot before
     // any concurrent access to these static handoff tables exists.
-    let pml4 = unsafe { &mut *core::ptr::addr_of_mut!(x86_ap_boot_pml4) };
+    let pml4 = unsafe { &mut *pml4_ptr };
     let pdpt_low = kaddr_layout::v2p(core::ptr::addr_of!(x86_ap_boot_pdpt_low) as usize) as u64;
     let pdpt_high = kaddr_layout::v2p(core::ptr::addr_of!(x86_ap_boot_pdpt_high) as usize) as u64;
     let pdpt_kimage =
@@ -60,18 +62,21 @@ unsafe fn init_ap_boot_state() {
     pml4[256] = pdpt_high | 0x3;
     pml4[511] = pdpt_kimage | 0x3;
 
+    let pdpt_kimage_ptr = core::ptr::addr_of_mut!(x86_ap_boot_pdpt_kimage);
     // SAFETY: AP bootstrap state is initialized once during early boot before
     // any concurrent access to these static handoff tables exists.
-    let pdpt_kimage = unsafe { &mut *core::ptr::addr_of_mut!(x86_ap_boot_pdpt_kimage) };
+    let pdpt_kimage = unsafe { &mut *pdpt_kimage_ptr };
     let pd_kimage = kaddr_layout::v2p(core::ptr::addr_of!(x86_ap_boot_pd_kimage) as usize) as u64;
     pdpt_kimage[0] = pd_kimage | 0x3;
 
+    let pd_kimage_ptr = core::ptr::addr_of_mut!(x86_ap_boot_pd_kimage);
     // SAFETY: AP bootstrap state is initialized once during early boot before
     // any concurrent access to these static handoff tables exists.
-    let pd_kimage = unsafe { &mut *core::ptr::addr_of_mut!(x86_ap_boot_pd_kimage) };
+    let pd_kimage = unsafe { &mut *pd_kimage_ptr };
+    let pt_kimage_ptr = core::ptr::addr_of_mut!(x86_ap_boot_pt_kimage);
     // SAFETY: AP bootstrap state is initialized once during early boot before
     // any concurrent access to these static handoff tables exists.
-    let pt_kimage = unsafe { &mut *core::ptr::addr_of_mut!(x86_ap_boot_pt_kimage) };
+    let pt_kimage = unsafe { &mut *pt_kimage_ptr };
     pd_kimage.fill(0);
     pt_kimage.fill(0);
 

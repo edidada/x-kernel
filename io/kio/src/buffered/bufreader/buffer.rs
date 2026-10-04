@@ -79,11 +79,10 @@ impl Buffer {
         // SAFETY: the buffer invariant is pos <= filled <= capacity, with all
         // bytes below filled initialized. The shared borrow prevents mutation
         // for the lifetime of the returned slice.
-        unsafe {
-            self.buf
-                .get_unchecked(self.pos..self.filled)
-                .assume_init_ref()
-        }
+        let unread = unsafe { self.buf.get_unchecked(self.pos..self.filled) };
+        // SAFETY: fill_buf initializes all bytes below filled, including unread;
+        // the shared borrow keeps them unchanged for the returned lifetime.
+        unsafe { unread.assume_init_ref() }
     }
 
     #[inline]

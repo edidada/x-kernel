@@ -92,7 +92,10 @@ impl<W: Drain> Owner<W> {
     pub(super) fn work(&self) -> Pin<&W> {
         // SAFETY: a live Owner borrow excludes last-handle Drop and reclamation.
         // The private Arc storage is stable and no mutable W access is exposed.
-        unsafe { Pin::new_unchecked(&*self.storage.work.get().cast::<W>()) }
+        let work = unsafe { &*self.storage.work.get().cast::<W>() };
+        // SAFETY: Private Arc storage cannot move W and exposes no mutable W
+        // access; this Owner borrow prevents final-handle reclamation.
+        unsafe { Pin::new_unchecked(work) }
     }
 
     pub(super) fn submit<R>(&self, submit: impl FnOnce(Pin<&W>) -> R) -> Result<R, SubmitError> {
@@ -130,7 +133,10 @@ impl<W: Drain> Owner<W> {
         // SAFETY: no handles/API borrows remain and successful drain ended all
         // asynchronous W access. UnsafeCell permits destruction of this field
         // while the publishing CPU may still borrow the separate reclaim field.
-        unsafe { ManuallyDrop::drop(&mut *storage.work.get()) };
+        let work = unsafe { &mut *storage.work.get() };
+        // SAFETY: This final-Owner retirement is the sole destruction of W;
+        // successful drain ended all asynchronous work accesses.
+        unsafe { ManuallyDrop::drop(work) };
         // Storage's remaining fields contain no user captures. Arc keeps the
         // reclaim node allocated until its publisher has also returned.
     }
@@ -145,10 +151,14 @@ impl<W: Drain> Drop for Owner<W> {
         // self.queue is the permanent normal default chosen exclusively by new(),
         // so the retirement hook's cancel_sync/drain may sleep in worker context.
         // This node is private, submitted once and never independently canceled.
-        let result = unsafe {
-            self.queue
-                .queue_work(Pin::new_unchecked(&(*context).reclaim), None)
-        };
+        let reclaim = unsafe { &(*context).reclaim };
+        // SAFETY: The transferred Arc and self.storage keep this private node
+        // at a stable address; no mutable access can move it after publication.
+        let reclaim = unsafe { Pin::new_unchecked(reclaim) };
+        // SAFETY: The raw Arc survives until the terminal hook and self.storage
+        // keeps the node live through publication. The permanent normal queue
+        // permits the retirement hook's sleeping drain, and this is its sole submit.
+        let result = unsafe { self.queue.queue_work(reclaim, None) };
         // Failure cannot free W prematurely: the raw strong reference remains.
         // The permanent default queue cannot close; other failures are fatal
         // invariant/exhaustion conditions, consistent with kernel OOM policy.

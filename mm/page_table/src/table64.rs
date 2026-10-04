@@ -1239,7 +1239,7 @@ mod tests {
             // SAFETY: Unit tests allocate each frame at most once by advancing
             // `NEXT_FRAME`. `FramePool` is 4K-aligned and each slot is exactly
             // one page, so the returned address satisfies `PagingHandler`.
-            let ptr = unsafe { (*FRAME_POOL.0.get()).as_mut_ptr().add(index) };
+            let ptr = unsafe { FRAME_POOL.0.get().cast::<TestFrame>().add(index) };
             Some(PhysAddr::from(ptr as usize))
         }
 

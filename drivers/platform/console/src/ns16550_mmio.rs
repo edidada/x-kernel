@@ -137,7 +137,10 @@ impl Port {
     pub(crate) unsafe fn init_preserve_baud(&self) {
         // SAFETY: `self` carries the MMIO window invariants established by
         // `Self::new`; these accesses are to standard NS16550 registers.
-        unsafe { self.write_reg(Self::LCR, self.read_reg(Self::LCR) & !Self::LCR_DLAB) };
+        let lcr = unsafe { self.read_reg(Self::LCR) };
+        // SAFETY: The caller exclusively owns the live UART during init; LCR
+        // is writable at the configured register width and only DLAB is cleared.
+        unsafe { self.write_reg(Self::LCR, lcr & !Self::LCR_DLAB) };
         // SAFETY: same MMIO register window invariant as above.
         unsafe { self.write_reg(Self::FCR, 0xC7) };
         // SAFETY: same MMIO register window invariant as above.

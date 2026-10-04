@@ -307,14 +307,9 @@ impl<T> Once<T> {
                 }
             };
 
-            // Write the initialized value to storage
-            unsafe {
-                // SAFETY:
-                // - We have exclusive write access via CAS
-                // - Pointer is derived from MaybeUninit
-                let storage_ptr = (*self.storage.get()).as_mut_ptr();
-                storage_ptr.write(initialized_value);
-            };
+            // SAFETY: The successful CAS gives this thread exclusive initialization
+            // rights. MaybeUninit<T> has T's layout, and storage belongs to this cell.
+            unsafe { self.storage.get().cast::<T>().write(initialized_value) };
 
             // Initialization succeeded, disarm panic guard
             core::mem::forget(panic_guard);
@@ -442,10 +437,9 @@ impl<T> Once<T> {
     /// ordering, or own the cell exclusively. Keep it initialized for the
     /// borrow and permit mutation only through its interior-mutable fields.
     unsafe fn get_value_unchecked(&self) -> &T {
-        // SAFETY:
-        // - Caller ensures value is initialized
-        // - Data is immutable after initialization
-        unsafe { &*(*self.storage.get()).as_ptr() }
+        // SAFETY: The caller observed Ready after initialization, and the cell
+        // keeps T live without further mutation. MaybeUninit<T> shares T's layout.
+        unsafe { &*self.storage.get().cast::<T>() }
     }
 
     /// Get a mutable reference to the initialized value. Must only be called when Ready.
@@ -458,7 +452,7 @@ impl<T> Once<T> {
         // SAFETY:
         // - Caller ensures value is initialized
         // - We have exclusive mutable access
-        unsafe { &mut *(*self.storage.get()).as_mut_ptr() }
+        unsafe { self.storage.get_mut().assume_init_mut() }
     }
 
     /// Moves the initialized value out of storage.
@@ -474,7 +468,8 @@ impl<T> Once<T> {
         // - Caller ensures value is initialized
         // - We own the Once, so we can move the value out
         // - ManuallyDrop prevents the Ready cell from dropping the moved value
-        unsafe { (*this.storage.get()).as_ptr().read() }
+        // - MaybeUninit<T> shares T's layout, so the cast preserves alignment
+        unsafe { this.storage.get().cast::<T>().read() }
     }
 
     /// Returns a reference to the inner value if the [`Once`] has been initialized.
@@ -607,7 +602,7 @@ impl<T> Drop for Once<T> {
             // SAFETY: `Status::Ready` guarantees the slot contains a live `T`,
             // and `&mut self` guarantees exclusive access during drop.
             unsafe {
-                core::ptr::drop_in_place((*self.storage.get()).as_mut_ptr());
+                self.storage.get_mut().assume_init_drop();
             }
         }
     }

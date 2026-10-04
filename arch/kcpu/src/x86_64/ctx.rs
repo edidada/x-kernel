@@ -419,7 +419,10 @@ impl TaskContext {
         let top_u64 = kstack_top.as_mut_ptr() as *mut u64;
         // SAFETY: pointer arithmetic stays within the reserved initial-frame
         // space at the top of the kernel stack.
-        let frame_ptr = unsafe { top_u64.sub(1).cast::<ContextSwitchFrame>().sub(1) };
+        let top_frame = unsafe { top_u64.sub(1).cast::<ContextSwitchFrame>() };
+        // SAFETY: The caller reserves a ContextSwitchFrame below this word;
+        // subtracting one frame stays within the live kernel stack allocation.
+        let frame_ptr = unsafe { top_frame.sub(1) };
         // SAFETY: `frame_ptr` points to writable stack memory reserved for the
         // initial context-switch frame.
         unsafe {

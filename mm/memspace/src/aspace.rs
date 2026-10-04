@@ -1217,13 +1217,10 @@ impl MmSpace {
         self.process_area_data(start, buf.len(), |src, offset, read_size| {
             // SAFETY: `process_area_data` bounds-checks the source region, and
             // `offset..offset + read_size` lies within the destination slice.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    src.as_ptr(),
-                    buf.as_mut_ptr().add(offset),
-                    read_size,
-                );
-            }
+            let destination = unsafe { buf.as_mut_ptr().add(offset) };
+            // SAFETY: process_area_data supplies a readable mapped source for
+            // read_size bytes, disjoint from the exclusively borrowed output slice.
+            unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), destination, read_size) };
         })
     }
 
@@ -1237,13 +1234,10 @@ impl MmSpace {
         self.process_area_data(start, buf.len(), |dst, offset, write_size| {
             // SAFETY: `process_area_data` bounds-checks the destination region,
             // and `offset..offset + write_size` lies within the source slice.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    buf.as_ptr().add(offset),
-                    dst.as_mut_ptr(),
-                    write_size,
-                );
-            }
+            let source = unsafe { buf.as_ptr().add(offset) };
+            // SAFETY: process_area_data supplies a writable mapped destination
+            // for write_size bytes, disjoint from this initialized source slice.
+            unsafe { core::ptr::copy_nonoverlapping(source, dst.as_mut_ptr(), write_size) };
         })
     }
 

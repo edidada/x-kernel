@@ -175,15 +175,17 @@ impl PitChannel2 {
         let gated_system_control = (self.original_system_control
             & !SYSTEM_CONTROL_SPEAKER_DATA_ENABLE)
             | SYSTEM_CONTROL_TIMER2_GATE;
-        // SAFETY: this bootstrap path retains exclusive ownership of PIT
-        // channel 2 throughout the guard lifetime. The command selects channel 2, mode 0, binary LSB/MSB writes;
-        // the following two writes provide the complete nonzero reload value.
-        unsafe {
-            self.system_control.write(gated_system_control);
-            self.command.write(PIT_CMD_CHANNEL2_MODE0_LSB_MSB);
-            self.channel_data.write(ticks as u8);
-            self.channel_data.write((ticks >> 8) as u8);
-        }
+        // SAFETY: The bootstrap guard exclusively owns PIT channel 2 and its mapped PC control port
+        // at CPL0.
+        unsafe { self.system_control.write(gated_system_control) };
+        // SAFETY: The guard owns the PIT command port; select channel 2 binary mode 0 with LSB/MSB
+        // writes.
+        unsafe { self.command.write(PIT_CMD_CHANNEL2_MODE0_LSB_MSB) };
+        // SAFETY: The preceding command selected channel 2 reload LSB; the guard excludes competing
+        // PIT access.
+        unsafe { self.channel_data.write(ticks as u8) };
+        // SAFETY: The next write completes channel 2 reload MSB under the same exclusive guard.
+        unsafe { self.channel_data.write((ticks >> 8) as u8) };
     }
 
     /// Reports whether the PIT channel 2 countdown has finished.
@@ -423,14 +425,18 @@ fn read_tsc_raw() -> u64 {
 ///
 /// Panics if the calling CPU has no initialized local APIC handle.
 pub fn init_primary() {
-    // SAFETY: the bootstrap CPU has already initialized the local APIC, and the
-    // helper masks local interrupts while borrowing its CPU-local LAPIC handle.
-    unsafe {
+    {
         use x2apic::lapic::{TimerDivide, TimerMode};
         x86_apic::with_local_apic(|lapic| {
-            lapic.set_timer_mode(TimerMode::OneShot);
-            lapic.set_timer_divide(TimerDivide::Div1);
-            lapic.enable_timer();
+            // SAFETY: with_local_apic retains the initialized current-CPU
+            // controller with IRQs/preemption disabled and exclusive access.
+            unsafe { lapic.set_timer_mode(TimerMode::OneShot) };
+            // SAFETY: with_local_apic retains the initialized current-CPU
+            // controller with IRQs/preemption disabled and exclusive access.
+            unsafe { lapic.set_timer_divide(TimerDivide::Div1) };
+            // SAFETY: with_local_apic retains the initialized current-CPU
+            // controller with IRQs/preemption disabled and exclusive access.
+            unsafe { lapic.enable_timer() };
         });
     }
 }
@@ -443,15 +449,18 @@ pub fn init_primary() {
 ///
 /// Panics if the calling CPU has no initialized local APIC handle.
 pub fn init_secondary() {
-    // SAFETY: secondary CPUs call this only after LAPIC bring-up; the helper
-    // programs the current CPU's private LAPIC timer state to match the BSP's
-    // one-shot / divide-by-1 configuration.
-    unsafe {
+    {
         use x2apic::lapic::{TimerDivide, TimerMode};
         x86_apic::with_local_apic(|lapic| {
-            lapic.set_timer_mode(TimerMode::OneShot);
-            lapic.set_timer_divide(TimerDivide::Div1);
-            lapic.enable_timer();
+            // SAFETY: with_local_apic retains the initialized current-CPU
+            // controller with IRQs/preemption disabled and exclusive access.
+            unsafe { lapic.set_timer_mode(TimerMode::OneShot) };
+            // SAFETY: with_local_apic retains the initialized current-CPU
+            // controller with IRQs/preemption disabled and exclusive access.
+            unsafe { lapic.set_timer_divide(TimerDivide::Div1) };
+            // SAFETY: with_local_apic retains the initialized current-CPU
+            // controller with IRQs/preemption disabled and exclusive access.
+            unsafe { lapic.enable_timer() };
         })
     }
 }
@@ -517,7 +526,7 @@ fn arm_timer(deadline: ktime_types::MonotonicInstant) {
     let deadline_ns = deadline.as_nanos_u64_saturating();
     // SAFETY: the local APIC timer is initialized before deadline programming, and
     // the helper masks local interrupts while borrowing the CPU-local LAPIC handle.
-    unsafe {
+    {
         x86_apic::with_local_apic(|lapic| {
             if now_ns < deadline_ns {
                 let apic_ticks = NANOS_TO_LAPIC_TICKS_RATIO
@@ -526,9 +535,13 @@ fn arm_timer(deadline: ktime_types::MonotonicInstant) {
                     // Initial-count is 32-bit; clamp and re-arbitrate on the early IRQ.
                     .mul_trunc(deadline_ns - now_ns)
                     .clamp(1, u32::MAX as u64);
-                lapic.set_timer_initial(apic_ticks as u32);
+                // SAFETY: with_local_apic holds the initialized current-CPU
+                // controller exclusively with IRQs and preemption disabled.
+                unsafe { lapic.set_timer_initial(apic_ticks as u32) };
             } else {
-                lapic.set_timer_initial(1);
+                // SAFETY: with_local_apic holds the initialized current-CPU
+                // controller exclusively with IRQs and preemption disabled.
+                unsafe { lapic.set_timer_initial(1) };
             }
         });
     }

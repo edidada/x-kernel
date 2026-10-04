@@ -97,12 +97,14 @@ fn map_boot_idmap_block_if_absent(block_base: usize, flags: PagingFlags) {
     );
     // SAFETY: boot page tables are only mutated during early single-core bring-up,
     // and `l1_idx` was bounds-checked against the statically sized table.
-    unsafe {
-        if BOOT_PT_L1_IDMAP[l1_idx].is_present() {
-            return;
-        }
-        BOOT_PT_L1_IDMAP[l1_idx] = A64PageEntry::new_page(PhysAddr::from(block_base), flags, true);
+    if unsafe { BOOT_PT_L1_IDMAP[l1_idx].is_present() } {
+        return;
     }
+    // SAFETY: Single-core boot still owns the table exclusively, and l1_idx
+    // was bounds-checked above before installing this absent entry.
+    unsafe {
+        BOOT_PT_L1_IDMAP[l1_idx] = A64PageEntry::new_page(PhysAddr::from(block_base), flags, true)
+    };
 }
 
 fn map_boot_linear_block_if_absent(block_base: usize, flags: PagingFlags) {
@@ -113,12 +115,14 @@ fn map_boot_linear_block_if_absent(block_base: usize, flags: PagingFlags) {
     );
     // SAFETY: boot page tables are only mutated during early single-core bring-up,
     // and `l1_idx` was bounds-checked against the statically sized table.
-    unsafe {
-        if BOOT_PT_L1_LINEAR[l1_idx].is_present() {
-            return;
-        }
-        BOOT_PT_L1_LINEAR[l1_idx] = A64PageEntry::new_page(PhysAddr::from(block_base), flags, true);
+    if unsafe { BOOT_PT_L1_LINEAR[l1_idx].is_present() } {
+        return;
     }
+    // SAFETY: Single-core boot still owns the table exclusively, and l1_idx
+    // was bounds-checked above before installing this absent entry.
+    unsafe {
+        BOOT_PT_L1_LINEAR[l1_idx] = A64PageEntry::new_page(PhysAddr::from(block_base), flags, true)
+    };
 }
 
 /// # Safety
@@ -213,23 +217,30 @@ unsafe fn create_boot_uart_map(l2_boot_uart_pa: usize) {
     let boot_uart_block_pa = boot_console_paddr & !(MIB_2 - 1);
     let kimage_l1_idx = (KIMAGE_VADDR & !0xFFFF_0000_0000_0000) >> 30 & (PT_ENTRIES - 1);
 
-    // SAFETY: boot page tables are only mutated during early single-core bring-up,
-    // and the computed indices target either the dedicated UART L2 table or a
-    // non-overlapping slot in the kernel-image L2 table.
-    unsafe {
-        if boot_uart_l1_idx == kimage_l1_idx {
-            assert!(
-                !BOOT_PT_L2_KIMAGE[boot_uart_l2_idx].is_present(),
-                "boot UART VA overlaps kernel-image boot map"
-            );
+    if boot_uart_l1_idx == kimage_l1_idx {
+        // SAFETY: Single-core boot exclusively owns this table and the masked
+        // UART index lies within PT_ENTRIES.
+        let is_present = unsafe { BOOT_PT_L2_KIMAGE[boot_uart_l2_idx].is_present() };
+        assert!(!is_present, "boot UART VA overlaps kernel-image boot map");
+        // SAFETY: The overlap check established an unused in-bounds entry;
+        // boot remains the sole writer until the MMU handoff.
+        unsafe {
             BOOT_PT_L2_KIMAGE[boot_uart_l2_idx] = A64PageEntry::new_page(
                 PhysAddr::from(boot_uart_block_pa),
                 PagingFlags::READ | PagingFlags::WRITE | PagingFlags::DEVICE,
                 true,
             );
-        } else {
+        }
+    } else {
+        // SAFETY: Single-core boot exclusively owns this in-bounds UART L1 slot,
+        // distinct from the kernel image slot. The caller supplies the UART L2 PA.
+        unsafe {
             BOOT_PT_L1_KIMAGE[boot_uart_l1_idx] =
                 A64PageEntry::new_table(PhysAddr::from(l2_boot_uart_pa));
+        }
+        // SAFETY: The dedicated UART table remains exclusively boot-owned,
+        // and masking above bounded this leaf index by PT_ENTRIES.
+        unsafe {
             BOOT_PT_L2_BOOT_UART[boot_uart_l2_idx] = A64PageEntry::new_page(
                 PhysAddr::from(boot_uart_block_pa),
                 PagingFlags::READ | PagingFlags::WRITE | PagingFlags::DEVICE,
@@ -262,13 +273,17 @@ pub(super) unsafe fn create_boot_page_tables() {
 
     // SAFETY: boot page-table roots are single-writer globals during early
     // bring-up, and the computed indices select valid top-level slots.
-    unsafe {
-        BOOT_PT_L0_TTBR0[0] = A64PageEntry::new_table(PhysAddr::from(l1_idmap_pa));
-        BOOT_PT_L0_TTBR1[0] = A64PageEntry::new_table(PhysAddr::from(l1_linear_pa));
+    unsafe { BOOT_PT_L0_TTBR0[0] = A64PageEntry::new_table(PhysAddr::from(l1_idmap_pa)) };
+    // SAFETY: Boot exclusively owns TTBR1's root; slot zero links the physical
+    // L1 linear-map table from this image before secondary CPUs start.
+    unsafe { BOOT_PT_L0_TTBR1[0] = A64PageEntry::new_table(PhysAddr::from(l1_linear_pa)) };
 
-        let kimage_l0_idx = (KIMAGE_VADDR & !0xFFFF_0000_0000_0000) >> 39;
-        BOOT_PT_L0_TTBR1[kimage_l0_idx] = A64PageEntry::new_table(PhysAddr::from(l1_kimage_pa));
-    }
+    let kimage_l0_idx = (KIMAGE_VADDR & !0xFFFF_0000_0000_0000) >> 39;
+    // SAFETY: The kernel image VA selects an in-bounds root slot, still under
+    // exclusive single-core boot ownership, linked to this image's L1 table.
+    unsafe {
+        BOOT_PT_L0_TTBR1[kimage_l0_idx] = A64PageEntry::new_table(PhysAddr::from(l1_kimage_pa))
+    };
 
     // SAFETY: early boot saved the raw DTB pointer in `SAVED_BOOT_ARGS[0]`.
     let dtb_paddr = unsafe { super::entry::SAVED_BOOT_ARGS[0] as usize };

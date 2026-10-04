@@ -326,12 +326,13 @@ impl<const N: usize> TimerSet<N> {
             // No delivery is running. Remove old membership before touching the
             // new index, retaining external storage throughout. Publish the route
             // only after insertion and before either lock is released.
-            let was_pending = unsafe {
-                let was_pending = matches!(old.try_cancel(node), CancelResult::Removed(_));
-                new.arm(node, deadline);
-                node.set_owner_cpu(selected_cpu);
-                was_pending
-            };
+            let was_pending = matches!(unsafe { old.try_cancel(node) }, CancelResult::Removed(_));
+            // SAFETY: Cancellation removed the old membership and no delivery
+            // runs; both owner locks still protect the retained stable node.
+            unsafe { new.arm(node, deadline) };
+            // SAFETY: Both ordered locks remain held after insertion; publish
+            // the new route before either lock permits another node operation.
+            unsafe { node.set_owner_cpu(selected_cpu) };
             return Ok(Some((selected_cpu, !was_pending)));
         }
     }
@@ -594,10 +595,10 @@ pub(crate) mod tests {
         let second = TimerSet::<1>::new();
         // SAFETY: distinct stable nodes are each used with exactly one set;
         // both sets are drained before any external node storage is released.
-        unsafe {
-            first.arm_on(&nodes[0], 0.into(), setting(10)).unwrap();
-            second.arm_on(&nodes[1], 0.into(), setting(20)).unwrap();
-        }
+        unsafe { first.arm_on(&nodes[0], 0.into(), setting(10)) }.unwrap();
+        // SAFETY: nodes[1] is distinct, stack-stable, and used only with second;
+        // second is drained below before node storage is released.
+        unsafe { second.arm_on(&nodes[1], 0.into(), setting(20)) }.unwrap();
         // SAFETY: first owns this node's membership, with no running callback.
         let removed_first = unsafe { first.cancel_sync(&nodes[0]) };
         let first_deadline = first.cpus[0].lock().earliest_deadline_ns();
@@ -914,10 +915,10 @@ pub(crate) mod tests {
             let (_, mut timers) = timer_set.lock_owner(&node);
             // SAFETY: borrowed execution accesses finished; only saved identity
             // is needed to retire it, then cancellation removes the successor.
-            unsafe {
-                timers.clear_running(address);
-                timers.try_cancel(&node);
-            }
+            unsafe { timers.clear_running(address) };
+            // SAFETY: The same revalidated owner lock remains held, the running
+            // delivery is retired, and the successor belongs to this collection.
+            unsafe { timers.try_cancel(&node) };
         }
         assert_eq!(
             // SAFETY: now idle; same stable node may move to the selected slot.

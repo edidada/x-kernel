@@ -389,10 +389,10 @@ mod tests_tlb_shootdown {
             // freshly allocated physical pages owned by this test.  Writing
             // magic values through volatile pointers is safe because no other
             // code holds references to these pages.
-            unsafe {
-                core::ptr::write_volatile(v1 as *mut u64, MAGIC_A);
-                core::ptr::write_volatile(v2 as *mut u64, MAGIC_B);
-            }
+            unsafe { core::ptr::write_volatile(v1 as *mut u64, MAGIC_A) };
+            // SAFETY: v2 is the aligned kernel mapping of the second freshly
+            // allocated page, exclusively owned by this test with no references.
+            unsafe { core::ptr::write_volatile(v2 as *mut u64, MAGIC_B) };
 
             // Pick a kernel-high virtual address in the reserved region.
             // Must be valid across all architectures (SV39 needs ≥0xFFFFFFC0).
@@ -518,10 +518,10 @@ mod tests_tlb_shootdown {
             // freshly allocated physical pages owned by this test.  Writing
             // magic values through volatile pointers is safe because no other
             // code holds references to these pages.
-            unsafe {
-                core::ptr::write_volatile(v1 as *mut u64, MAGIC_A);
-                core::ptr::write_volatile(v2 as *mut u64, MAGIC_B);
-            }
+            unsafe { core::ptr::write_volatile(v1 as *mut u64, MAGIC_A) };
+            // SAFETY: v2 is the aligned kernel mapping of the second freshly
+            // allocated page, exclusively owned by this test with no references.
+            unsafe { core::ptr::write_volatile(v2 as *mut u64, MAGIC_B) };
 
             let test_vaddr = VirtAddr::from(kaddr_layout::IOMAP_VADDR + kaddr_layout::IOMAP_VSIZE);
 

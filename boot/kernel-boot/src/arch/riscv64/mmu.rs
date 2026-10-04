@@ -107,13 +107,15 @@ const fn pte_paddr(pte: u64) -> usize {
 /// previously returned pool pointer may be used after this reset.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn zero_boot_tables() {
-    // SAFETY: boot page tables are single-writer globals during early
-    // bring-up before paging handoff or secondary CPU start.
-    unsafe {
-        BOOT_PT_L2 = PageAligned::new([0; PT_ENTRIES]);
-        BOOT_PT_L1_POOL = [PageAligned::new([0; PT_ENTRIES]); MAX_BOOT_L1_TABLES];
-        NEXT_BOOT_L1_TABLE = 0;
-    }
+    // SAFETY: Single-CPU boot exclusively owns BOOT_PT_L2; no hardware
+    // walks or outstanding pool references exist during this reset.
+    unsafe { BOOT_PT_L2 = PageAligned::new([0; PT_ENTRIES]) };
+    // SAFETY: Single-CPU boot exclusively owns BOOT_PT_L1_POOL; no hardware
+    // walks or outstanding pool references exist during this reset.
+    unsafe { BOOT_PT_L1_POOL = [PageAligned::new([0; PT_ENTRIES]); MAX_BOOT_L1_TABLES] };
+    // SAFETY: Single-CPU boot exclusively owns NEXT_BOOT_L1_TABLE; no hardware
+    // walks or outstanding pool references exist during this reset.
+    unsafe { NEXT_BOOT_L1_TABLE = 0 };
 }
 
 /// # Safety
@@ -135,13 +137,10 @@ unsafe fn alloc_l1_table() -> (*mut PageAligned<[u64; PT_ENTRIES]>, usize) {
         NEXT_BOOT_L1_TABLE += 1;
     }
 
+    let pool = core::ptr::addr_of_mut!(BOOT_PT_L1_POOL).cast::<PageAligned<[u64; PT_ENTRIES]>>();
     // SAFETY: `idx < MAX_BOOT_L1_TABLES` was checked above, so this points to
     // an in-bounds table slot inside the static pool.
-    let ptr = unsafe {
-        core::ptr::addr_of_mut!(BOOT_PT_L1_POOL)
-            .cast::<PageAligned<[u64; PT_ENTRIES]>>()
-            .add(idx)
-    };
+    let ptr = unsafe { pool.add(idx) };
     let pa = phys_addr_of!(BOOT_PT_L1_POOL) + idx * PAGE_SIZE_4K;
     // SAFETY: `ptr` names the newly allocated pool slot exclusively during
     // early boot, so zeroing it is valid.
@@ -179,13 +178,11 @@ unsafe fn root_l1_table(root_idx: usize) -> *mut PageAligned<[u64; PT_ENTRIES]> 
         let pa = pte_paddr(unsafe { BOOT_PT_L2[root_idx] });
         let pool_base = phys_addr_of!(BOOT_PT_L1_POOL);
         let idx = (pa - pool_base) / PAGE_SIZE_4K;
+        let pool =
+            core::ptr::addr_of_mut!(BOOT_PT_L1_POOL).cast::<PageAligned<[u64; PT_ENTRIES]>>();
         // SAFETY: `idx` was recovered from a PTE that points into the static
         // boot L1 pool, so this recomputes that in-bounds pool slot.
-        unsafe {
-            core::ptr::addr_of_mut!(BOOT_PT_L1_POOL)
-                .cast::<PageAligned<[u64; PT_ENTRIES]>>()
-                .add(idx)
-        }
+        unsafe { pool.add(idx) }
     }
 }
 
@@ -336,18 +333,22 @@ unsafe fn map_boot_linear_ram_from_dtb(dtb_paddr: usize) {
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_kernel_image(kernel_start_pa: usize, kernel_end_pa: usize) {
     let size = kernel_end_pa.saturating_sub(kernel_start_pa);
-    // SAFETY: the caller provides the kernel image physical range, and boot
-    // mapping code is the sole mutator of these page tables during setup.
+    // SAFETY: Single-core boot owns the tables; caller-supplied image bounds define this identity
+    // mapping.
+    unsafe { map_range_2m(kernel_start_pa, kernel_start_pa, size, PTE_RWX) };
+    // SAFETY: The same image bounds and matching 2 MiB offsets define the dedicated kernel VA
+    // mapping.
+    unsafe { map_range_2m(KIMAGE_VADDR, kernel_start_pa, size, PTE_RWX) };
+    // SAFETY: The caller guarantees the linear image range fits without overflow or mapping
+    // conflicts.
     unsafe {
-        map_range_2m(kernel_start_pa, kernel_start_pa, size, PTE_RWX);
-        map_range_2m(KIMAGE_VADDR, kernel_start_pa, size, PTE_RWX);
         map_range_2m(
             PAGE_OFFSET + kernel_start_pa,
             kernel_start_pa,
             size,
             PTE_RWX,
-        );
-    }
+        )
+    };
 }
 
 /// # Safety
@@ -385,15 +386,21 @@ pub(super) unsafe fn create_boot_page_tables(dtb_paddr: usize) {
     let kernel_start_pa = phys_addr_of!(_start);
     let kernel_end_pa = phys_addr_of!(_ekernel);
 
-    // SAFETY: this is the one-time early-boot page-table construction phase,
-    // before secondary CPUs start or paging is switched.
-    unsafe {
-        zero_boot_tables();
-        map_kernel_image(kernel_start_pa, kernel_end_pa);
-        map_boot_linear_ram_from_dtb(dtb_paddr);
-        map_dtb_linear(dtb_paddr);
-        map_mmio_linear_ranges();
-    }
+    // SAFETY: One-time single-CPU boot owns all inactive tables and pool cursors, with no
+    // outstanding aliases.
+    unsafe { zero_boot_tables() };
+    // SAFETY: Fresh tables and linker-derived physical image bounds satisfy the image mapping
+    // contract.
+    unsafe { map_kernel_image(kernel_start_pa, kernel_end_pa) };
+    // SAFETY: The firmware DTB remains readable and immutable; single-core boot owns the
+    // initialized tables.
+    unsafe { map_boot_linear_ram_from_dtb(dtb_paddr) };
+    // SAFETY: The same firmware DTB must remain accessible through the linear map after paging
+    // activation.
+    unsafe { map_dtb_linear(dtb_paddr) };
+    // SAFETY: The configured console identifies UART MMIO; the initialized boot tables remain
+    // exclusively owned.
+    unsafe { map_mmio_linear_ranges() };
 }
 
 #[unsafe(link_section = ".text.boot")]

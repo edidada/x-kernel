@@ -110,17 +110,33 @@ fn boot_symbol_paddr(linked_va: usize) -> PhysAddr {
 /// previously returned pool pointer may be used after this reset.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn zero_boot_tables() {
-    // SAFETY: boot page-table globals are single-writer state during early
-    // single-CPU bring-up before MMU handoff.
+    // SAFETY: Single-CPU boot exclusively owns BOOT_PT_ROOT; no hardware
+    // walks or outstanding pool references exist during this reset.
+    unsafe { BOOT_PT_ROOT = PageAligned::new([LA64PTE::EMPTY; PT_ENTRIES]) };
+    // SAFETY: Single-CPU boot exclusively owns BOOT_PT_L1_POOL; no hardware
+    // walks or outstanding pool references exist during this reset.
     unsafe {
-        BOOT_PT_ROOT = PageAligned::new([LA64PTE::EMPTY; PT_ENTRIES]);
-        BOOT_PT_L1_POOL = [PageAligned::new([LA64PTE::EMPTY; PT_ENTRIES]); MAX_BOOT_L1_TABLES];
-        BOOT_PT_L2_POOL = [PageAligned::new([LA64PTE::EMPTY; PT_ENTRIES]); MAX_BOOT_L2_TABLES];
-        BOOT_PT_L3_POOL = [PageAligned::new([LA64PTE::EMPTY; PT_ENTRIES]); MAX_BOOT_L3_TABLES];
-        NEXT_BOOT_L1_TABLE = 0;
-        NEXT_BOOT_L2_TABLE = 0;
-        NEXT_BOOT_L3_TABLE = 0;
-    }
+        BOOT_PT_L1_POOL = [PageAligned::new([LA64PTE::EMPTY; PT_ENTRIES]); MAX_BOOT_L1_TABLES]
+    };
+    // SAFETY: Single-CPU boot exclusively owns BOOT_PT_L2_POOL; no hardware
+    // walks or outstanding pool references exist during this reset.
+    unsafe {
+        BOOT_PT_L2_POOL = [PageAligned::new([LA64PTE::EMPTY; PT_ENTRIES]); MAX_BOOT_L2_TABLES]
+    };
+    // SAFETY: Single-CPU boot exclusively owns BOOT_PT_L3_POOL; no hardware
+    // walks or outstanding pool references exist during this reset.
+    unsafe {
+        BOOT_PT_L3_POOL = [PageAligned::new([LA64PTE::EMPTY; PT_ENTRIES]); MAX_BOOT_L3_TABLES]
+    };
+    // SAFETY: Single-CPU boot exclusively owns NEXT_BOOT_L1_TABLE; no hardware
+    // walks or outstanding pool references exist during this reset.
+    unsafe { NEXT_BOOT_L1_TABLE = 0 };
+    // SAFETY: Single-CPU boot exclusively owns NEXT_BOOT_L2_TABLE; no hardware
+    // walks or outstanding pool references exist during this reset.
+    unsafe { NEXT_BOOT_L2_TABLE = 0 };
+    // SAFETY: Single-CPU boot exclusively owns NEXT_BOOT_L3_TABLE; no hardware
+    // walks or outstanding pool references exist during this reset.
+    unsafe { NEXT_BOOT_L3_TABLE = 0 };
 }
 
 /// # Safety
@@ -142,13 +158,11 @@ unsafe fn alloc_l1_table() -> (*mut PageAligned<[LA64PTE; PT_ENTRIES]>, PhysAddr
         NEXT_BOOT_L1_TABLE += 1;
     }
 
+    let pool =
+        core::ptr::addr_of_mut!(BOOT_PT_L1_POOL).cast::<PageAligned<[LA64PTE; PT_ENTRIES]>>();
     // SAFETY: `idx < MAX_BOOT_L1_TABLES` was checked above, so this points to
     // an in-bounds table slot in the static L1 pool.
-    let ptr = unsafe {
-        core::ptr::addr_of_mut!(BOOT_PT_L1_POOL)
-            .cast::<PageAligned<[LA64PTE; PT_ENTRIES]>>()
-            .add(idx)
-    };
+    let ptr = unsafe { pool.add(idx) };
     // SAFETY: `ptr` names the newly allocated L1 pool slot exclusively here.
     unsafe {
         *ptr = PageAligned::new([LA64PTE::EMPTY; PT_ENTRIES]);
@@ -179,13 +193,11 @@ unsafe fn alloc_l2_table() -> (*mut PageAligned<[LA64PTE; PT_ENTRIES]>, PhysAddr
         NEXT_BOOT_L2_TABLE += 1;
     }
 
+    let pool =
+        core::ptr::addr_of_mut!(BOOT_PT_L2_POOL).cast::<PageAligned<[LA64PTE; PT_ENTRIES]>>();
     // SAFETY: `idx < MAX_BOOT_L2_TABLES` was checked above, so this points to
     // an in-bounds table slot in the static L2 pool.
-    let ptr = unsafe {
-        core::ptr::addr_of_mut!(BOOT_PT_L2_POOL)
-            .cast::<PageAligned<[LA64PTE; PT_ENTRIES]>>()
-            .add(idx)
-    };
+    let ptr = unsafe { pool.add(idx) };
     // SAFETY: `ptr` names the newly allocated L2 pool slot exclusively here.
     unsafe {
         *ptr = PageAligned::new([LA64PTE::EMPTY; PT_ENTRIES]);
@@ -216,13 +228,11 @@ unsafe fn alloc_l3_table() -> (*mut PageAligned<[LA64PTE; PT_ENTRIES]>, PhysAddr
         NEXT_BOOT_L3_TABLE += 1;
     }
 
+    let pool =
+        core::ptr::addr_of_mut!(BOOT_PT_L3_POOL).cast::<PageAligned<[LA64PTE; PT_ENTRIES]>>();
     // SAFETY: `idx < MAX_BOOT_L3_TABLES` was checked above, so this points to
     // an in-bounds table slot in the static L3 pool.
-    let ptr = unsafe {
-        core::ptr::addr_of_mut!(BOOT_PT_L3_POOL)
-            .cast::<PageAligned<[LA64PTE; PT_ENTRIES]>>()
-            .add(idx)
-    };
+    let ptr = unsafe { pool.add(idx) };
     // SAFETY: `ptr` names the newly allocated L3 pool slot exclusively here.
     unsafe {
         *ptr = PageAligned::new([LA64PTE::EMPTY; PT_ENTRIES]);
@@ -262,13 +272,11 @@ unsafe fn root_l1_table(root_idx: usize) -> *mut PageAligned<[LA64PTE; PT_ENTRIE
         let pa = unsafe { BOOT_PT_ROOT[root_idx] }.paddr().as_usize();
         let pool_base = boot_symbol_paddr(core::ptr::addr_of!(BOOT_PT_L1_POOL) as usize).as_usize();
         let idx = (pa - pool_base) / PAGE_SIZE_4K;
+        let pool =
+            core::ptr::addr_of_mut!(BOOT_PT_L1_POOL).cast::<PageAligned<[LA64PTE; PT_ENTRIES]>>();
         // SAFETY: `idx` was recovered from a root entry that points into the
         // static L1 pool, so this recomputes that in-bounds slot.
-        unsafe {
-            core::ptr::addr_of_mut!(BOOT_PT_L1_POOL)
-                .cast::<PageAligned<[LA64PTE; PT_ENTRIES]>>()
-                .add(idx)
-        }
+        unsafe { pool.add(idx) }
     }
 }
 
@@ -299,13 +307,11 @@ unsafe fn next_l2_table(
         let pa = entry.paddr().as_usize();
         let pool_base = boot_symbol_paddr(core::ptr::addr_of!(BOOT_PT_L2_POOL) as usize).as_usize();
         let idx = (pa - pool_base) / PAGE_SIZE_4K;
+        let pool =
+            core::ptr::addr_of_mut!(BOOT_PT_L2_POOL).cast::<PageAligned<[LA64PTE; PT_ENTRIES]>>();
         // SAFETY: `idx` was recovered from a table entry that points into the
         // static L2 pool, so this recomputes that in-bounds slot.
-        unsafe {
-            core::ptr::addr_of_mut!(BOOT_PT_L2_POOL)
-                .cast::<PageAligned<[LA64PTE; PT_ENTRIES]>>()
-                .add(idx)
-        }
+        unsafe { pool.add(idx) }
     }
 }
 
@@ -336,13 +342,11 @@ unsafe fn next_l3_table(
         let pa = entry.paddr().as_usize();
         let pool_base = boot_symbol_paddr(core::ptr::addr_of!(BOOT_PT_L3_POOL) as usize).as_usize();
         let idx = (pa - pool_base) / PAGE_SIZE_4K;
+        let pool =
+            core::ptr::addr_of_mut!(BOOT_PT_L3_POOL).cast::<PageAligned<[LA64PTE; PT_ENTRIES]>>();
         // SAFETY: `idx` was recovered from a table entry that points into the
         // static L3 pool, so this recomputes that in-bounds slot.
-        unsafe {
-            core::ptr::addr_of_mut!(BOOT_PT_L3_POOL)
-                .cast::<PageAligned<[LA64PTE; PT_ENTRIES]>>()
-                .add(idx)
-        }
+        unsafe { pool.add(idx) }
     }
 }
 
@@ -477,7 +481,11 @@ const fn boot_phys_ptr<T>(paddr: usize) -> *const T {
 pub(super) unsafe fn boot_firmware_tables() -> (usize, usize) {
     // SAFETY: these globals are written once during early firmware mapping and
     // then read-only until kernel handoff.
-    unsafe { (BOOT_DTB_PADDR, BOOT_RSDP_PADDR) }
+    let dtb = unsafe { BOOT_DTB_PADDR };
+    // SAFETY: map_linear_firmware_memory also initialized the RSDP cache;
+    // it stays immutable through this early-boot handoff read.
+    let rsdp = unsafe { BOOT_RSDP_PADDR };
+    (dtb, rsdp)
 }
 
 #[unsafe(link_section = ".text.boot")]
@@ -662,22 +670,27 @@ unsafe fn map_linear_firmware_memory(systemtable_paddr: usize) {
     // SAFETY: `systemtable_paddr` comes from firmware handoff and points to the
     // live EFI system table for this boot.
     let context = unsafe { raw_efi_context(systemtable_paddr) };
-    // SAFETY: early boot performs one-time caching of firmware table addresses
-    // into boot globals before kernel handoff.
-    unsafe {
-        BOOT_DTB_PADDR = context
-            .dtb_addr(boot_phys_ptr::<ConfigurationTable>)
-            .expect("invalid EFI configuration table")
-            .unwrap_or(0);
-        BOOT_UEFI_MEMMAP_PADDR = context
-            .linux_boot_memmap_addr(boot_phys_ptr::<ConfigurationTable>)
-            .expect("invalid EFI configuration table")
-            .unwrap_or(0);
-        BOOT_RSDP_PADDR = context
-            .rsdp_addr(boot_phys_ptr::<ConfigurationTable>)
-            .expect("invalid EFI configuration table")
-            .unwrap_or(0);
-    }
+    // SAFETY: raw_efi_context validated the live system table; the caller
+    // retains its immutable configuration array, readable through boot_phys_ptr.
+    let dtb = unsafe { context.dtb_addr(boot_phys_ptr::<ConfigurationTable>) }
+        .expect("invalid EFI configuration table")
+        .unwrap_or(0);
+    // SAFETY: Single-core boot exclusively owns the firmware cache before handoff.
+    unsafe { BOOT_DTB_PADDR = dtb };
+    // SAFETY: raw_efi_context validated the live system table; the caller
+    // retains its immutable configuration array, readable through boot_phys_ptr.
+    let memmap = unsafe { context.linux_boot_memmap_addr(boot_phys_ptr::<ConfigurationTable>) }
+        .expect("invalid EFI configuration table")
+        .unwrap_or(0);
+    // SAFETY: No other CPU or observer accesses this boot-only memmap cache yet.
+    unsafe { BOOT_UEFI_MEMMAP_PADDR = memmap };
+    // SAFETY: raw_efi_context validated the live system table; the caller
+    // retains its immutable configuration array, readable through boot_phys_ptr.
+    let rsdp = unsafe { context.rsdp_addr(boot_phys_ptr::<ConfigurationTable>) }
+        .expect("invalid EFI configuration table")
+        .unwrap_or(0);
+    // SAFETY: Single-core boot exclusively initializes the RSDP cache before use.
+    unsafe { BOOT_RSDP_PADDR = rsdp };
     // SAFETY: the validated EFI metadata described by `context` must be linearly mapped.
     unsafe { map_efi_metadata(&context, systemtable_paddr) };
 
@@ -787,15 +800,21 @@ pub(super) unsafe fn create_boot_page_tables(
     _cmdline_paddr: usize,
     systemtable_paddr: usize,
 ) {
-    // SAFETY: this is the one-time early-boot page-table construction phase
-    // before secondary CPUs start or MMU handoff completes.
-    unsafe {
-        BOOT_KIMAGE_VOFFSET = KIMAGE_VADDR - kernel_start_pa;
-        zero_boot_tables();
-        map_kernel_image(kernel_start_pa);
-        map_linear_firmware_memory(systemtable_paddr);
-        map_mmio_linear_ranges();
-    }
+    // SAFETY: Single-core boot owns the offset global and the caller supplies this image physical
+    // start.
+    unsafe { BOOT_KIMAGE_VOFFSET = KIMAGE_VADDR - kernel_start_pa };
+    // SAFETY: Before paging handoff no table aliases or other CPU accesses exist; all pools are
+    // boot-owned.
+    unsafe { zero_boot_tables() };
+    // SAFETY: The offset and fresh pools describe the linker-bounded kernel image supplied by the
+    // caller.
+    unsafe { map_kernel_image(kernel_start_pa) };
+    // SAFETY: The caller retains valid firmware handoff objects; initialized pools remain
+    // exclusively owned.
+    unsafe { map_linear_firmware_memory(systemtable_paddr) };
+    // SAFETY: The configured UART MMIO has a valid boot layout and the populated pools remain
+    // boot-owned.
+    unsafe { map_mmio_linear_ranges() };
 }
 
 #[unsafe(link_section = ".text.boot")]
