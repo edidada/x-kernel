@@ -302,14 +302,16 @@ impl CloneRequest {
                 && let Err(err) = (self.parent_tid as *mut Pid).write_vm(tid)
             {
                 if let Some((resources, fd)) = pidfd_install.as_ref() {
-                    resources.close_file(*fd).ok();
+                    // Rollback is best effort; preserve the original user-memory error.
+                    let _ = resources.close_file(*fd);
                 }
                 return Err(err.into());
             }
             if let Some((resources, fd)) = pidfd_install.as_ref()
                 && let Err(err) = (self.pidfd as *mut i32).write_vm(*fd)
             {
-                resources.close_file(*fd).ok();
+                // Rollback is best effort; preserve the original user-memory error.
+                let _ = resources.close_file(*fd);
                 return Err(err.into());
             }
             Ok(())

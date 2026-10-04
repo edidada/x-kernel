@@ -859,13 +859,13 @@ mod tests {
             thread::spawn(move || {
                 let (once, called) = &*shared;
 
-                once.try_call_once(|| {
+                let result = once.try_call_once(|| {
                     called.fetch_add(1, Ordering::AcqRel);
                     tx.send(()).unwrap();
                     thread::sleep(std::time::Duration::from_millis(50));
                     Err(())
-                })
-                .ok();
+                });
+                assert_eq!(result, Err(()));
             })
         };
 

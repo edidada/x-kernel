@@ -604,7 +604,8 @@ impl Pollable for UdpSocket {
 
 impl Drop for UdpSocket {
     fn drop(&mut self) {
-        self.shutdown(Shutdown::Both).ok();
+        // Drop cannot report shutdown errors and must still unregister the PCB.
+        let _ = self.shutdown(Shutdown::Both);
         registry::unregister_udp_pcb(&self.pcb);
     }
 }

@@ -50,6 +50,7 @@ linkedlist = "warn"
 too_many_lines = "warn"
 excessive_nesting = "warn"
 upper_case_acronyms = "warn"
+unused_result_ok = "warn"
 
 [workspace.dependencies]
 # Internal: API and core services

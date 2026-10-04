@@ -832,7 +832,8 @@ pub fn ree_fs_open(po: &TeePobj, size: Option<&mut usize>) -> TeeResult<Box<TeeF
     };
 
     if ret.is_err() {
-        state.put_dirh_primitive(true).ok();
+        // Releasing the cached handle is best effort; preserve the open error.
+        let _ = state.put_dirh_primitive(true);
     }
     ret
 }
@@ -930,10 +931,12 @@ fn ree_fs_create(
     );
 
     if ret.is_err() {
-        state.put_dirh_primitive(true).ok();
+        // Releasing the cached handle is best effort; retain the operation result.
+        let _ = state.put_dirh_primitive(true);
         if let Some(ref mut fdp_val) = fdp {
             ree_fs_close_primitive(fdp_val);
-            tee_fs_rpc_remove_dfh(Some(&dfh)).ok();
+            // Removing the partial file must not replace the creation error.
+            let _ = tee_fs_rpc_remove_dfh(Some(&dfh));
         }
     }
     ret
@@ -1004,7 +1007,8 @@ pub fn ree_fs_close(fh: &mut Option<Box<TeeFsFd>>) {
         let _global_lock = REE_FS_MUTEX.lock();
         {
             let mut state = REE_FS_STATE.lock();
-            state.put_dirh_primitive(false).ok();
+            // Close has no error channel and must still release the file handle below.
+            let _ = state.put_dirh_primitive(false);
         }
         // Avoid dropping file handles while REE_FS_STATE is held.
         // Drop path may touch global fd/VFS locks and can deadlock with
@@ -1055,7 +1059,8 @@ pub fn ree_fs_write(
         Ok(())
     })();
 
-    state.put_dirh_primitive(ret.is_err()).ok();
+    // Releasing the cached handle is best effort; retain the operation result.
+    let _ = state.put_dirh_primitive(ret.is_err());
     ret
 }
 
@@ -1075,7 +1080,8 @@ pub fn ree_fs_truncate(fh: &mut TeeFsFd, len: usize) -> TeeResult {
         Ok(())
     })();
 
-    state.put_dirh_primitive(ret.is_err()).ok();
+    // Releasing the cached handle is best effort; retain the operation result.
+    let _ = state.put_dirh_primitive(ret.is_err());
     ret
 }
 
@@ -1120,7 +1126,8 @@ pub fn ree_fs_rename(old: &TeePobj, new: &TeePobj, overwrite: bool) -> TeeResult
         Ok(())
     })();
 
-    state.put_dirh_primitive(ret.is_err()).ok();
+    // Releasing the cached handle is best effort; retain the operation result.
+    let _ = state.put_dirh_primitive(ret.is_err());
     ret
 }
 
@@ -1144,7 +1151,8 @@ pub fn ree_fs_remove(po: &TeePobj) -> TeeResult {
         Ok(())
     })();
 
-    state.put_dirh_primitive(ret.is_err()).ok();
+    // Releasing the cached handle is best effort; retain the operation result.
+    let _ = state.put_dirh_primitive(ret.is_err());
     ret
 }
 
@@ -1329,7 +1337,8 @@ pub fn ree_fs_opendir_rpc(uuid: &TEE_UUID) -> TeeResult<Box<TeeFsDir>> {
         }
         Err(e) => {
             d.has_dirh_ref = false;
-            state.put_dirh_primitive(false).ok();
+            // Releasing the cached handle is best effort; retain the operation result.
+            let _ = state.put_dirh_primitive(false);
             Err(e)
         }
     }
@@ -1339,7 +1348,8 @@ pub fn ree_fs_closedir_rpc(d: &mut TeeFsDir) -> TeeResult {
     if d.has_dirh_ref {
         let _global_lock = REE_FS_MUTEX.lock();
         let mut state = REE_FS_STATE.lock();
-        state.put_dirh_primitive(false).ok();
+        // The reference was consumed; preserve best-effort close without retrying it.
+        let _ = state.put_dirh_primitive(false);
         d.has_dirh_ref = false;
     }
 

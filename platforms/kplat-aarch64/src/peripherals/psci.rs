@@ -81,7 +81,8 @@ pub fn init(method: &str) {
 /// Powers off the whole system via PSCI `SYSTEM_OFF`.
 pub fn system_power_off() -> ! {
     info!("Shutting down...");
-    psci_call(PSCI_0_2_FN_SYSTEM_OFF, 0, 0, 0).ok();
+    // Any return, including an error, takes the warning and local halt path below.
+    let _ = psci_call(PSCI_0_2_FN_SYSTEM_OFF, 0, 0, 0);
     warn!("PSCI SYSTEM_OFF returned; halting the current CPU");
     karch::stop_cpu()
 }
@@ -112,5 +113,6 @@ pub fn cpu_off() {
     const PSCI_POWER_STATE_TYPE_POWER_DOWN: u32 = 1;
     const PSCI_0_2_POWER_STATE_TYPE_SHIFT: u32 = 16;
     let state: u32 = PSCI_POWER_STATE_TYPE_POWER_DOWN << PSCI_0_2_POWER_STATE_TYPE_SHIFT;
-    psci_call(PSCI_0_2_FN_CPU_OFF, state as usize, 0, 0).ok();
+    // This best-effort request has no error channel; leave control with the caller.
+    let _ = psci_call(PSCI_0_2_FN_CPU_OFF, state as usize, 0, 0);
 }

@@ -287,6 +287,11 @@ impl StringWriter {
     pub fn clear(&mut self) {
         self.pos = 0;
     }
+
+    fn write_best_effort(&mut self, args: Arguments<'_>) {
+        // A reporting failure must not change test execution or recorded results.
+        let _ = self.write_fmt(args);
+    }
 }
 
 impl Write for StringWriter {
@@ -328,13 +333,11 @@ impl TestRunner {
         self.output.clear();
 
         // Print test start information with module path
-        write!(
-            self.output,
+        self.output.write_best_effort(format_args!(
             "  Running test: {}:{}",
             test.module(),
             test.name()
-        )
-        .ok();
+        ));
         crate::ktest_println!("{}", self.output.as_str());
 
         // Run the test
@@ -344,31 +347,25 @@ impl TestRunner {
         self.output.clear();
         match result {
             TestResult::Ok => {
-                write!(
-                    self.output,
+                self.output.write_best_effort(format_args!(
                     "  test {}::{} ... ok",
                     test.module(),
                     test.name()
-                )
-                .ok();
+                ));
             }
             TestResult::Failed => {
-                write!(
-                    self.output,
+                self.output.write_best_effort(format_args!(
                     "  test {}::{} failed: test function returned TestResult::Failed",
                     test.module(),
                     test.name()
-                )
-                .ok();
+                ));
             }
             TestResult::Ignored => {
-                write!(
-                    self.output,
+                self.output.write_best_effort(format_args!(
                     "  test {}::{} ... ignored",
                     test.module(),
                     test.name()
-                )
-                .ok();
+                ));
             }
         }
         crate::ktest_println!("{}", self.output.as_str());
@@ -443,17 +440,20 @@ impl TestRunner {
 
     fn print_failed_test(&mut self, test: &TestDescriptor, result: TestResult) {
         self.output.clear();
-        write!(self.output, "    {}", test.name()).ok();
+        self.output
+            .write_best_effort(format_args!("    {}", test.name()));
         crate::ktest_println!("{}", self.output.as_str());
 
         self.output.clear();
         match result {
             TestResult::Failed => {
-                write!(self.output, "      => FAILED").ok();
+                self.output
+                    .write_best_effort(format_args!("      => FAILED"));
                 crate::ktest_println!("{}", self.output.as_str());
             }
             TestResult::Ignored => {
-                write!(self.output, "      => IGNORED").ok();
+                self.output
+                    .write_best_effort(format_args!("      => IGNORED"));
                 crate::ktest_println!("{}", self.output.as_str());
             }
             TestResult::Ok => {}
@@ -465,7 +465,8 @@ impl TestRunner {
         self.output.clear();
 
         // Print test name only
-        write!(self.output, "    {}", test.name()).ok();
+        self.output
+            .write_best_effort(format_args!("    {}", test.name()));
         crate::ktest_println!("{}", self.output.as_str());
 
         // Run the test
@@ -475,19 +476,19 @@ impl TestRunner {
         self.output.clear();
         match result {
             TestResult::Ok => {
-                write!(self.output, "      {} ... ok", test.name()).ok();
+                self.output
+                    .write_best_effort(format_args!("      {} ... ok", test.name()));
             }
             TestResult::Failed => {
-                write!(
-                    self.output,
+                self.output.write_best_effort(format_args!(
                     "      {}::{} failed: test function returned TestResult::Failed",
                     test.module(),
                     test.name()
-                )
-                .ok();
+                ));
             }
             TestResult::Ignored => {
-                write!(self.output, "      {} ... ignored", test.name()).ok();
+                self.output
+                    .write_best_effort(format_args!("      {} ... ignored", test.name()));
             }
         }
         crate::ktest_println!("{}", self.output.as_str());
@@ -500,12 +501,10 @@ impl TestRunner {
 
     pub fn print_final_stats(&mut self) {
         self.output.clear();
-        write!(
-            self.output,
+        self.output.write_best_effort(format_args!(
             "  >>> Test results: {} passed, {} failed, {} ignored, {} total",
             self.stats.passed, self.stats.failed, self.stats.ignored, self.stats.total
-        )
-        .ok();
+        ));
         crate::ktest_println!("{}", self.output.as_str());
         crate::ktest_println!(
             "  >>> Unit tests {}",
