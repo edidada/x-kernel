@@ -56,9 +56,10 @@ impl<C> Instant<C> {
 
     /// Returns nanoseconds since this clock's origin, saturating at `u64::MAX`.
     ///
+    /// Borrows the instant without consuming a custom clock-domain value.
     /// This method is intended only for hardware, ABI, serialization, and
     /// third-party adapter boundaries.
-    pub const fn as_nanos_u64_saturating(self) -> u64 {
+    pub const fn as_nanos_u64_saturating(&self) -> u64 {
         self.since_origin.as_nanos_u64_saturating()
     }
 
