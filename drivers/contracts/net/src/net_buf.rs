@@ -95,6 +95,11 @@ impl NetBuf {
     }
 
     fn get_slice(&self, start: usize, len: usize) -> &[u8] {
+        #[expect(
+            clippy::expect_used,
+            reason = "NetBuf setters validate header and payload lengths against the backing \
+                      buffer before slice access"
+        )]
         let end = start
             .checked_add(len)
             .expect("network buffer slice end overflow");
@@ -108,6 +113,11 @@ impl NetBuf {
     }
 
     fn get_slice_mut(&mut self, start: usize, len: usize) -> &mut [u8] {
+        #[expect(
+            clippy::expect_used,
+            reason = "NetBuf setters validate header and payload lengths against the backing \
+                      buffer before slice access"
+        )]
         let end = start
             .checked_add(len)
             .expect("network buffer slice end overflow");
@@ -208,6 +218,11 @@ impl NetBuf {
     }
 
     const fn frame_len(&self) -> usize {
+        #[expect(
+            clippy::expect_used,
+            reason = "NetBuf setters validate header and payload lengths against the backing \
+                      buffer before slice access"
+        )]
         let frame_len = self
             .hdr_len
             .checked_add(self.payload_len)

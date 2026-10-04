@@ -479,6 +479,11 @@ fn build_local_apic() -> LocalApic {
         assert!(xapic_base != 0, "xAPIC base is not initialized");
         builder.set_xapic_base(xapic_base);
     }
+    #[expect(
+        clippy::expect_used,
+        reason = "The builder receives valid fixed APIC vectors and, for xAPIC, an asserted \
+                  nonzero MMIO base"
+    )]
     builder.build().expect("failed to build local APIC")
 }
 

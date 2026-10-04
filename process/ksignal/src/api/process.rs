@@ -241,6 +241,10 @@ impl ProcessSignalManager {
                 handlers.actions.lock().reset_for_exec();
                 return Ok(());
             }
+            #[expect(
+                clippy::expect_used,
+                reason = "replacement was created above and is not shared until owner.replace"
+            )]
             let actions = Arc::get_mut(&mut replacement)
                 .expect("unpublished action table has one owner")
                 .actions

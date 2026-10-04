@@ -270,6 +270,11 @@ impl TimerIndex {
         // SAFETY: the caller proves node belongs to this tree; &mut self
         // serializes tree access and external node operations are excluded.
         let mut cursor = unsafe { self.tree.cursor_mut_from_ptr(node) };
+        #[expect(
+            clippy::expect_used,
+            reason = "The unsafe remove contract proves membership in this exclusively borrowed \
+                      timer index"
+        )]
         let removed = cursor.remove().expect("timer index member missing");
         if was_earliest {
             // remove leaves the cursor at the successor, now the minimum.

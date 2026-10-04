@@ -71,6 +71,10 @@ static CONSOLE_CLASS_BRIDGE: LazyInit<()> = LazyInit::new();
 
 fn console_subsystem() -> &'static SpinNoPreempt<ConsoleSubsystem> {
     CONSOLE_SUBSYS.call_once(|| SpinNoPreempt::new(ConsoleSubsystem::new()));
+    #[expect(
+        clippy::expect_used,
+        reason = "call_once completed successfully and permanently published the console subsystem"
+    )]
     CONSOLE_SUBSYS
         .get()
         .expect("console subsystem call_once succeeded")

@@ -103,7 +103,17 @@ impl FrameBuffer {
     pub(crate) fn new() -> Self {
         // fb_available() is checked by the caller (add_root_entries) before
         // constructing us, so the shadow is guaranteed present.
+        #[expect(
+            clippy::expect_used,
+            reason = "The caller checks fb_available and the framebuffer shadow remains allocated \
+                      for kernel lifetime"
+        )]
         let base = fbdevice::fb_shadow_vaddr().expect("fbdev shadow missing");
+        #[expect(
+            clippy::expect_used,
+            reason = "The caller checks fb_available and the framebuffer shadow remains allocated \
+                      for kernel lifetime"
+        )]
         let size = fbdevice::fb_shadow_size().expect("fbdev shadow missing");
         Self { base, size }
     }

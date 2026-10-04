@@ -71,11 +71,27 @@ impl GicConfig {
     }
 
     fn map_gicc(self) -> VirtAddr {
-        map_mmio_region(self.gicc.expect("missing GICC region"), GICC_NAME)
+        map_mmio_region(
+            #[expect(
+                clippy::expect_used,
+                reason = "Fatal boot: GICv2 has no CPU-interface region; interrupt-controller \
+                          initialization has no error return or recovery"
+            )]
+            self.gicc.expect("missing GICC region"),
+            GICC_NAME,
+        )
     }
 
     fn map_gicr(self) -> VirtAddr {
-        map_mmio_region(self.gicr.expect("missing GICR region"), GICR_NAME)
+        map_mmio_region(
+            #[expect(
+                clippy::expect_used,
+                reason = "Fatal boot: GICv3 has no redistributor region; interrupt-controller \
+                          initialization has no error return or recovery"
+            )]
+            self.gicr.expect("missing GICR region"),
+            GICR_NAME,
+        )
     }
 }
 
@@ -168,6 +184,11 @@ pub fn set_config(config: GicConfig) {
 }
 
 pub fn active_version() -> GicVersion {
+    #[expect(
+        clippy::expect_used,
+        reason = "GIC initialization records its configuration before publishing interrupt \
+                  operations"
+    )]
     ACTIVE_GIC
         .get()
         .copied()
@@ -195,6 +216,11 @@ pub fn init(config: GicConfig) {
 }
 
 pub fn init_from_device_tree() {
+    #[expect(
+        clippy::expect_used,
+        reason = "Fatal boot: required GIC configuration cannot be parsed; interrupt \
+                  initialization has no error return or recovery"
+    )]
     let config = config_from_device_tree().expect("failed to parse GIC from device tree");
     init(config);
 }

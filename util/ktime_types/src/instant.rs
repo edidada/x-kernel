@@ -106,6 +106,11 @@ impl<C> Add<TimeSpan> for Instant<C> {
     /// Panics if the resulting instant is not representable. Use
     /// [`Instant::checked_add`] for values derived from external input.
     fn add(self, rhs: TimeSpan) -> Self::Output {
+        #[expect(
+            clippy::expect_used,
+            reason = "Unchecked time arithmetic requires representable, correctly ordered \
+                      operands; external values use the checked variants"
+        )]
         self.checked_add(rhs).expect("instant addition overflow")
     }
 }
@@ -120,6 +125,11 @@ impl<C> Sub<TimeSpan> for Instant<C> {
     /// Panics if the result precedes the clock origin. Use
     /// [`Instant::checked_sub`] when the ordering is not an invariant.
     fn sub(self, rhs: TimeSpan) -> Self::Output {
+        #[expect(
+            clippy::expect_used,
+            reason = "Unchecked time arithmetic requires representable, correctly ordered \
+                      operands; external values use the checked variants"
+        )]
         self.checked_sub(rhs)
             .expect("instant subtraction precedes clock origin")
     }
@@ -135,6 +145,11 @@ impl<C> Sub for Instant<C> {
     /// Panics if `rhs` is later than `self`. Use
     /// [`Instant::checked_duration_since`] when the ordering is not an invariant.
     fn sub(self, rhs: Self) -> Self::Output {
+        #[expect(
+            clippy::expect_used,
+            reason = "Unchecked time arithmetic requires representable, correctly ordered \
+                      operands; external values use the checked variants"
+        )]
         self.checked_duration_since(rhs)
             .expect("instant subtraction has reversed ordering")
     }

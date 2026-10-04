@@ -39,6 +39,11 @@ impl ConsoleConnection {
     }
 
     fn attach_input(&self, waker: Waker) {
+        #[expect(
+            clippy::expect_used,
+            reason = "The singleton N_TTY binds once after console IRQ initialization has \
+                      installed the stdout port and prepared its input buffer"
+        )]
         self.boot_port
             .as_ref()
             .expect("console input IRQ requires a stdout port")

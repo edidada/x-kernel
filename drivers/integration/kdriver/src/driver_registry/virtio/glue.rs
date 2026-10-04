@@ -154,6 +154,11 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
                 // and returned via `dma_dealloc`. We deliberately do NOT wrap it
                 // in `DmaCoherent` (whose Drop would free it on return).
                 let paddr = alloc.bus_addr as PhysAddr;
+                #[expect(
+                    clippy::expect_used,
+                    reason = "The resource-provider contract guarantees a non-null CPU address on \
+                              successful DMA allocation or MMIO mapping"
+                )]
                 let ptr = NonNull::new(cpu_ptr).expect("dma allocation stored a null CPU address");
                 (paddr, ptr)
             }
@@ -186,8 +191,16 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
             size,
         };
         match crate::resource::resource_provider().map_mmio(region, "virtio-hal") {
-            Ok(m) => NonNull::new(m.vaddr as *mut u8)
-                .expect("virtio mmio mapping stored a null virtual address"),
+            Ok(m) =>
+            {
+                #[expect(
+                    clippy::expect_used,
+                    reason = "The resource-provider contract guarantees a non-null CPU address on \
+                              successful DMA allocation or MMIO mapping"
+                )]
+                NonNull::new(m.vaddr as *mut u8)
+                    .expect("virtio mmio mapping stored a null virtual address")
+            }
             #[expect(
                 clippy::panic,
                 reason = "TODO(cg): map_mmio can fail with NoMemory, InvalidResource or \

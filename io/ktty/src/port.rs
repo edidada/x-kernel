@@ -271,11 +271,15 @@ impl<R: TtyRead, W: TtyWrite> TtyPort<R, W> {
                             work.queue();
                         }
                     });
+                    #[expect(
+                        clippy::expect_used,
+                        reason = "TTY work mode is constructed in sleepable task context after \
+                                  the permanent normal worker service is installed"
+                    )]
+                    let work =
+                        WorkHandle::new(callback_fn).expect("TTY input requires normal workers");
                     InputWork {
-                        work: SpinNoIrq::new(Some(
-                            WorkHandle::new(callback_fn)
-                                .expect("TTY input requires normal workers"),
-                        )),
+                        work: SpinNoIrq::new(Some(work)),
                         cpu_id,
                     }
                 });

@@ -260,6 +260,11 @@ impl ProcessTimerManager {
             .settime(absolute, interval, value, process_utime, process_stime)?;
 
         let signal_seq = self.allocate_posix_signal_seq();
+        #[expect(
+            clippy::expect_used,
+            reason = "The timer ID was validated in this exclusively borrowed manager and \
+                      sequence allocation does not remove timers"
+        )]
         let timer = self
             .posix_timers
             .get_mut(&timer_id)

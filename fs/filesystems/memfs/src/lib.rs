@@ -58,8 +58,18 @@ pub static TMPFS_TYPE: FileSystemType = FileSystemType::nodev("tmpfs", init_tmpf
 
 #[macros::register_init]
 fn init_memory_filesystems() {
+    #[expect(
+        clippy::expect_used,
+        reason = "Each statically named filesystem is registered once by its unique linker \
+                  initialization entry"
+    )]
     kvfs::register_filesystem(&ramfs::RAMFS_TYPE)
         .expect("ramfs filesystem type must register once");
+    #[expect(
+        clippy::expect_used,
+        reason = "Each statically named filesystem is registered once by its unique linker \
+                  initialization entry"
+    )]
     kvfs::register_filesystem(&TMPFS_TYPE).expect("tmpfs filesystem type must register once");
 }
 

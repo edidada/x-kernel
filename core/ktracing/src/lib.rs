@@ -116,6 +116,11 @@ ktracepoint::define_event_trace!(
 pub fn trace_point_manager() -> &'static TracingEventsManager<TraceRawLock, Kops> {
     TRACE_MANAGER.call_once(|| {
         static_keys::global_init();
+        #[expect(
+            clippy::expect_used,
+            reason = "ktracepoint global_init_events constructs the linker-registered event map \
+                      and unconditionally returns Ok"
+        )]
         let manager =
             global_init_events::<TraceRawLock, Kops>().expect("failed to initialize trace events");
         ktask::register_sched_trace_hooks(trace_sched_wakeup, trace_sched_switch);

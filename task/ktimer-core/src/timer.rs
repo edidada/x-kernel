@@ -99,6 +99,10 @@ impl<H: TimerHandler + 'static, const N: usize> Timer<H, N> {
             node: TimerNode::new(deadline),
             handler,
         });
+        #[expect(
+            clippy::expect_used,
+            reason = "This Arc was just allocated and no strong or weak alias has been published"
+        )]
         let entry = Arc::get_mut(&mut data).expect("new timer storage is exclusively owned");
         // SAFETY: the unique, unpublished allocation is already at its final
         // address. Only the disjoint node field is replaced. No mutable access

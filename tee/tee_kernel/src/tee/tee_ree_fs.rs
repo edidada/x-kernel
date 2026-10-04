@@ -1288,6 +1288,11 @@ impl ReeFsDirh {
     /// # Panics
     /// Panics if `get_dirh()` has not been called successfully first.
     pub(super) fn dirh_mut(&mut self) -> &mut TeeFsDirfileDirh {
+        #[expect(
+            clippy::expect_used,
+            reason = "dirh_mut requires a preceding successful get_dirh that retains the cached \
+                      handle"
+        )]
         self.handle.as_mut().expect("dirh not opened").as_mut()
     }
 

@@ -33,6 +33,11 @@
 //! }
 //! ```
 
+#![allow(
+    clippy::expect_used,
+    reason = "case (b): legacy kworkqueue_ng has 32 diagnostic sites, too many to judge \
+              individually in this migration; new code remains reviewed"
+)]
 #![no_std]
 #![allow(
     clippy::unwrap_used,

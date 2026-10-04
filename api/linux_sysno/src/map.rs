@@ -326,12 +326,22 @@ impl<T> core::ops::Index<Sysno> for SysnoMap<T> {
     type Output = T;
 
     fn index(&self, sysno: Sysno) -> &T {
+        #[expect(
+            clippy::expect_used,
+            reason = "Index requires an occupied syscall entry; optional lookups use get or \
+                      get_mut"
+        )]
         self.get(sysno).expect("no entry found for key")
     }
 }
 
 impl<T> core::ops::IndexMut<Sysno> for SysnoMap<T> {
     fn index_mut(&mut self, sysno: Sysno) -> &mut T {
+        #[expect(
+            clippy::expect_used,
+            reason = "Index requires an occupied syscall entry; optional lookups use get or \
+                      get_mut"
+        )]
         self.get_mut(sysno).expect("no entry found for key")
     }
 }

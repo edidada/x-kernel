@@ -30,6 +30,11 @@ const PCH_PIC_PADDR: usize = 0x1000_0000;
 static PCH_PIC_BASE: LazyInit<VirtAddr> = LazyInit::new();
 
 fn mmio_base() -> usize {
+    #[expect(
+        clippy::expect_used,
+        reason = "PCH PIC initialization installs the MMIO mapping before interrupt operations \
+                  are exposed"
+    )]
     PCH_PIC_BASE
         .get()
         .expect("pch-pic iomap not initialized")

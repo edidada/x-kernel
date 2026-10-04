@@ -288,16 +288,23 @@ fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> 
 /// Resolve the crate path for `posix_types::__private` trait aliases.
 ///
 /// Returns `crate` when invoked inside `posix-types` itself,
-/// and the external crate name otherwise.
-fn posix_types_private_path() -> proc_macro2::TokenStream {
+/// and the external crate name otherwise. Missing dependencies produce a
+/// derive-site compile error rather than a procedural-macro panic.
+fn posix_types_private_path() -> syn::Result<proc_macro2::TokenStream> {
     use proc_macro_crate::{FoundCrate, crate_name};
-    match crate_name("posix-types").expect("posix-types is present in `Cargo.toml`") {
+    let found = crate_name("posix-types").map_err(|error| {
+        syn::Error::new(
+            Span::call_site(),
+            format!("posix-types dependency is required: {error}"),
+        )
+    })?;
+    Ok(match found {
         FoundCrate::Itself => quote!(crate),
         FoundCrate::Name(name) => {
             let ident = Ident::new(&name, Span::call_site());
             quote!(#ident)
         }
-    }
+    })
 }
 
 /// Derive macro that generates `unsafe impl UserRead for T {}`.
@@ -308,7 +315,10 @@ pub fn derive_user_read(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    let path = posix_types_private_path();
+    let path = match posix_types_private_path() {
+        Ok(path) => path,
+        Err(error) => return error.to_compile_error().into(),
+    };
     quote! {
         unsafe impl #impl_generics #path::__private::UserReadTrait for #name #ty_generics #where_clause {}
     }
@@ -323,7 +333,10 @@ pub fn derive_user_write(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    let path = posix_types_private_path();
+    let path = match posix_types_private_path() {
+        Ok(path) => path,
+        Err(error) => return error.to_compile_error().into(),
+    };
     quote! {
         unsafe impl #impl_generics #path::__private::UserWriteTrait for #name #ty_generics #where_clause {}
     }

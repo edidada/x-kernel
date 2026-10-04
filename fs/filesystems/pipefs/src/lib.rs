@@ -41,6 +41,11 @@ impl PipeFs {
     }
 
     fn global() -> &'static Self {
+        #[expect(
+            clippy::expect_used,
+            reason = "Boot installs the permanent pseudo filesystem before any anonymous-file or \
+                      pipe creation"
+        )]
         PIPE_FS
             .get()
             .expect("pipe filesystem must be initialized before use")

@@ -345,7 +345,17 @@ pub fn register_input_irq_handler() {
     if INPUT_IRQ_REGISTERED.load(Ordering::Acquire) {
         return;
     }
+    #[expect(
+        clippy::expect_used,
+        reason = "The resolved console IRQ belongs to the stdout port installed before IRQ input \
+                  initialization"
+    )]
     let port = serial::stdout_port().expect("console IRQ requires a stdout port");
+    #[expect(
+        clippy::expect_used,
+        reason = "Fatal boot: the console input buffer cannot be prepared; console IRQ \
+                  initialization has no error return or recovery"
+    )]
     port.prepare_irq_input()
         .expect("failed to allocate console input buffer");
     if INPUT_IRQ_REGISTERED

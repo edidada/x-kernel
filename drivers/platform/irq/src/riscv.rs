@@ -35,6 +35,11 @@ pub const fn plic_irq_desc(hwirq: usize) -> kirq::IrqDesc {
 }
 
 fn plic() -> &'static SpinNoIrq<Plic> {
+    #[expect(
+        clippy::expect_used,
+        reason = "Primary interrupt initialization installs the permanent PLIC before per-CPU \
+                  setup or interrupt dispatch"
+    )]
     PLIC.get().expect("PLIC is not initialized")
 }
 
