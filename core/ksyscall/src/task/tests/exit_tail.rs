@@ -115,6 +115,10 @@ pub(in crate::task) fn check_current_root(empty_sentinel: Option<usize>) -> usiz
     check()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "unittest scenario: one linear exit-tail test script in a file test module"
+)]
 fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
     let cpu = khal::percpu::this_cpu_id().as_usize();
     let affinity = ktask::current().cpumask();

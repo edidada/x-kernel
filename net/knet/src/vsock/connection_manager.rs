@@ -524,6 +524,10 @@ impl VsockConnectionManager {
         Ok(self.bridge_events.pop_front())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "TODO(cg): legacy vsock event handler; split per event type"
+    )]
     fn handle_raw_event(&mut self, event: VsockTransportEvent, body: &[u8]) -> DriverResult<()> {
         let conn_id = VsockConnId {
             peer_addr: event.source,

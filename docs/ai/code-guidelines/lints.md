@@ -67,7 +67,6 @@ AI 编写与审查也不重复检查。
 | lint | 组 | 1.95.0 默认 | 目标等级 | 覆盖的规则原文（逐字，可多条） | 来源 `文件:行` | 覆盖程度 | 需要的 clippy.toml 配置 | 预计例外与判断标准 | 存量 |
 |---|---|---|---|---|---|---|---|---|---|
 | `clippy::missing_safety_doc` | style | warn（只查 pub 项） | deny | "every `unsafe fn` and `unsafe trait` must include a `# Safety` rustdoc section;"<br>"`unsafe fn` without `# Safety`;" | `unsafety.md:9`<br>`unsafety.md:521` | full（需配置；默认漏掉私有 `unsafe fn`） | `check-private-items = true` | 无 | 0（仅 pub）；私有项未测 |
-| `clippy::too_many_lines` | pedantic | allow | warn | "keep functions small and focused;" | `api-design.md:8` | partial（只量行数） | `too-many-lines-threshold`（默认 100，按实测分布定） | 启动/初始化长函数；reason 须说明函数仍只做一件事（如线性的初始化序列），否则按职责拆分 | 29（阈值 100，测试 1） |
 | `clippy::excessive_nesting` | complexity | warn（阈值默认 0，即不触发） | warn | "minimize unnecessary nesting;" | `api-design.md:9` | partial（只量深度） | `excessive-nesting-threshold`（起议 4，按实测分布定） | 少量；reason 须说明嵌套没有掩盖主路径，且无法用提前返回或提取函数展平 | 未测 |
 | `clippy::unused_result_ok` | restriction | allow | warn | （skill 中无原文） | — | — | — | 无 | 29（测试 12） |
 | `clippy::multiple_unsafe_ops_per_block` | restriction | allow | deny | "keep each `unsafe` block as small as practical, so the audited region is obvious;"<br>"then use the smallest remaining `unsafe` block and `// SAFETY:` comment to discharge what cannot be encoded statically;"<br>"shrink unsafe blocks to the minimal audited operation;"<br>"unsafe operations inside `unsafe fn` that are not wrapped in a minimal `unsafe {}` block;" | `unsafety.md:12-13`<br>`unsafety.md:106-107`<br>`unsafety.md:163`<br>`unsafety.md:522-523` | partial（一块一个 unsafe 操作；块内夹带安全逻辑见 `unsafety.md` Invalid Patterns，仍靠审查） | — | 宏内 unsafe 序列 | 80（测试 2） |
@@ -87,7 +86,7 @@ AI 编写与审查也不重复检查。
 ## 辅助性 lint（不删原文）
 
 这些 lint 只检查原文的某个侧面，不能替代审查，对应原文保留
-（`api-design.md:8` 除外，它已随待迁入表中的 `clippy::too_many_lines` 删除）。
+（`api-design.md:8` 除外，它已随已启用的 `clippy::too_many_lines` 删除）。
 
 | lint | 组 | 1.95.0 默认 | 相关原文 | 来源 `文件:行` | 说明 |
 |---|---|---|---|---|---|
@@ -104,6 +103,7 @@ AI 编写与审查也不重复检查。
 
 | lint | 组 | 1.95.0 默认 | 当前生效方式 | 覆盖的规则原文（逐字） | 来源 `文件:行` | 覆盖程度 | 处理 |
 |---|---|---|---|---|---|---|---|
+| `clippy::too_many_lines` | pedantic | allow | `[workspace.lints]` warn；`clippy.toml` 的 `too-many-lines-threshold = 100` | "keep functions small and focused;" | `api-design.md:8` | partial（只量行数；"focused" 即单一职责仍由审查判断） | 例外逐函数写 `#[expect(clippy::too_many_lines, reason = "...")]`，只限三类：（1）分发表或注册表：主体为一个 `match` 或一串独立注册语句，每个分支约 10 行以内，分支间不共享可变状态，reason 以 "linear ... table" 开头；（2）测试场景：`def_test`、`mod_test` 已统一豁免，文件形式测试模块中的辅助函数逐个写，reason 以 "unittest scenario" 开头；（3）待拆分的遗留函数：reason 以 "TODO(cg): legacy" 开头并写明按什么职责拆分，拆分需单独审查锁、事务和清理顺序，不在 lint 提交中进行。其余超长函数按职责拆分。按 crate 关闭：`kext4`（9 个分配、writeback 与磁盘结构解码函数）。 |
 | `clippy::linkedlist` | pedantic | allow | `[workspace.lints]` warn | "fall back to `alloc::collections::LinkedList` only when elements cannot own their linkage (for example the list must outlive or be decoupled from element ownership);" | `performance-and-resources.md:33-35` | partial（lint 标出每处 `LinkedList`） | 极少；reason 须说明元素无法自带链接（例如链表须比元素所有权活得久，或与之解耦），因而不能用 `linked_list_r4l`；参数：`avoid-breaking-exported-api = false`（否则 pub 签名中的不报；见表后注） |
 | `clippy::unimplemented` | restriction | allow | `[workspace.lints]` deny | "avoid `.unwrap()` and hidden panics where failure is a legitimate possibility;" | `error-handling-and-logging.md:9-10` | partial（只覆盖 `unimplemented!` 引入的 panic） | 无例外；删除已由 crate 级 AArch64 cfg 排除的 PMUv3 非 AArch64 分支，共 2 处；未接入编译的 `khal` dummy 实现（`// mod dummy;`）不参与编译，lint 不检查，原样保留；原文已从 skill 删除，其余 panic 路径仍由待迁入表管理 |
 | `clippy::todo` | restriction | allow | `[workspace.lints]` deny | "avoid `.unwrap()` and hidden panics where failure is a legitimate possibility;" | `error-handling-and-logging.md:9-10` | partial（只覆盖 `todo!` 引入的 panic） | 仅允许逐点 `TODO(cg)` 例外，reason 写明缺失的实现。现有 6 处逐点 `expect`，均保留原 `todo!` 行为，不改成静默空操作：TEE 密钥生成中 DSA、DH、X25519、X448 四种密钥类型（`match` 分支上）；LoongArch IRQ 的 `notify_cpu`（IPI 投递）和 `set_prio`（优先级设置）（函数上；rustc 忽略宏调用语句上的 `expect`，函数体只有 `todo!()`）。无按 crate 关闭 |

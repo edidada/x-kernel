@@ -287,6 +287,10 @@ fn do_range_backwards(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "unittest scenario: one linear hash-tree rewrite script in a file test module"
+)]
 fn htree_test_rewrite(
     aux: &mut TestHtreeStorage,
     num_blocks: usize,

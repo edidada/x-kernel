@@ -1022,6 +1022,10 @@ pub(crate) mod tests {
     /// scenario provides a fresh node and a two-CPU timer set. Panics from the
     /// supplied worker driver or yield function are not caught.
     #[cfg(feature = "smp")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "test scenario: one linear concurrent-cancel script exposed for SMP tests"
+    )]
     pub fn concurrent_cancel_waits_for_cleanup(
         run_workers: impl FnOnce([alloc::boxed::Box<dyn FnOnce() + Send>; 2]) -> bool,
         yield_now: fn(),

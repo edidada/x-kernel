@@ -17,5 +17,8 @@ disallowed-methods = [
 
 upper-case-acronyms-aggressive = true
 
+# Function length limit for clippy::too_many_lines (non-blank, non-comment lines).
+too-many-lines-threshold = 100
+
 # Boolean parameter limit for clippy::fn_params_excessive_bools (the clippy default).
 max-fn-params-bools = 3

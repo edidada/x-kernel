@@ -2411,6 +2411,10 @@ pub fn tee_svc_obj_generate_key_ed25519(
 ///
 /// # Returns
 /// Returns a `TeeResult` indicating success or failure.
+#[expect(
+    clippy::too_many_lines,
+    reason = "TODO(cg): legacy key generation; split per key type"
+)]
 pub fn syscall_obj_generate_key(
     obj: c_ulong,
     key_size: c_ulong,

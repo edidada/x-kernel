@@ -566,6 +566,10 @@ pub fn sys_msgrcv(
 /// Returns EINVAL for unsupported commands/IDs/stat indices, EIDRM for a
 /// removed queue, EACCES on a failed read permission check, and EPERM for
 /// failed owner/creator/privilege or byte-limit checks. Forwards ABI copy errors.
+#[expect(
+    clippy::too_many_lines,
+    reason = "TODO(cg): legacy msgctl; split per command"
+)]
 pub fn sys_msgctl(msqid: i32, cmd: i32, buf: UserPtr<u8>) -> KResult<isize> {
     let current_uid: u32 = 0;
     let current_gid: u32 = 0;

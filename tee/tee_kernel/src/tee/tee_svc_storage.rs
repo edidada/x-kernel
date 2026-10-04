@@ -571,6 +571,11 @@ struct CreateInnerCtx {
 /// * `obj_is_null` - whether the object is null
 /// # Returns
 /// * `CreateInnerResult` - the result of the operation
+#[expect(
+    clippy::too_many_lines,
+    reason = "TODO(cg): legacy storage object creation; split validation, allocation and \
+              persistence"
+)]
 fn syscall_storage_obj_create_inner(
     ctx: &mut CreateInnerCtx,
     flags: c_ulong,

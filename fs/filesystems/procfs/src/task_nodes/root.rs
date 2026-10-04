@@ -612,6 +612,11 @@ impl SimpleDirOps for ThreadDir {
         ))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "TODO(cg): legacy per-task lookup with long arms; move each entry kind into its \
+                  own builder"
+    )]
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
         let fs = self.fs.clone();
         let task_weak = self.task.clone();
