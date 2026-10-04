@@ -8,7 +8,7 @@ use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::fmt;
 
 use anon::{AnonLineageId, AnonSharedObject};
-use kerrno::{KError, KResult};
+use kerrno::KResult;
 use khal::{
     paging::{MappingFlags, PageSize, PageTableMut},
     trap::PageFaultFlags,
@@ -89,37 +89,61 @@ pub struct ForkCloneTarget<'a> {
     pub invalidate: Option<InvalidateHandle>,
 }
 
+/// Writeback mode requested by an `msync()` call.
+///
+/// `MS_SYNC` and `MS_ASYNC` are mutually exclusive, so a single mode replaces
+/// two independent flags and cannot express the invalid combination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MsyncWriteback {
+    /// Neither `MS_SYNC` nor `MS_ASYNC` was requested.
+    Unspecified,
+    /// `MS_ASYNC`: writeback may be scheduled without waiting.
+    Async,
+    /// `MS_SYNC`: file writeback must complete before returning.
+    Sync,
+}
+
 /// Validated `msync()` policy visible to MM internals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MsyncPolicy {
-    sync: bool,
-    async_: bool,
+    writeback: MsyncWriteback,
     invalidate: bool,
     data_only: bool,
 }
 
 impl MsyncPolicy {
-    /// Creates a new validated `msync()` policy.
-    pub fn try_new(sync: bool, async_: bool, invalidate: bool, data_only: bool) -> KResult<Self> {
-        if sync && async_ {
-            return Err(KError::InvalidInput);
+    /// Creates a policy with the given writeback mode, without
+    /// `MS_INVALIDATE`, and with metadata sync included.
+    pub const fn new(writeback: MsyncWriteback) -> Self {
+        Self {
+            writeback,
+            invalidate: false,
+            data_only: false,
         }
-        Ok(Self {
-            sync,
-            async_,
-            invalidate,
-            data_only,
-        })
+    }
+
+    /// Returns this policy with `MS_INVALIDATE` set as requested.
+    #[must_use]
+    pub const fn with_invalidate(mut self, invalidate: bool) -> Self {
+        self.invalidate = invalidate;
+        self
+    }
+
+    /// Returns this policy with metadata sync skipped when `data_only` is set.
+    #[must_use]
+    pub const fn with_data_only(mut self, data_only: bool) -> Self {
+        self.data_only = data_only;
+        self
     }
 
     /// Returns whether this request requires synchronous file writeback.
     pub const fn is_sync(self) -> bool {
-        self.sync
+        matches!(self.writeback, MsyncWriteback::Sync)
     }
 
     /// Returns whether this request is `MS_ASYNC`.
     pub const fn is_async(self) -> bool {
-        self.async_
+        matches!(self.writeback, MsyncWriteback::Async)
     }
 
     /// Returns whether this request carries `MS_INVALIDATE`.

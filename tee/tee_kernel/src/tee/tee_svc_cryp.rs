@@ -2513,10 +2513,20 @@ pub fn syscall_obj_generate_key(
                 tee_debug!("tee_svc_obj_generate_key_rsa error: {:X?}", e);
             })?;
         }
+        #[expect(
+            clippy::todo,
+            reason = "TODO(cg): DSA key-pair generation is not implemented; the mbedtls backend \
+                      provides no DSA key generation"
+        )]
         TEE_TYPE_DSA_KEYPAIR => {
             // mbedtls do not support DSA key generation
             todo!()
         }
+        #[expect(
+            clippy::todo,
+            reason = "TODO(cg): DH key-pair generation is not implemented; the mbedtls backend \
+                      provides no DH key generation"
+        )]
         TEE_TYPE_DH_KEYPAIR => {
             // mbedtls do not support DH key generation
             todo!()
@@ -2534,9 +2544,17 @@ pub fn syscall_obj_generate_key(
                 object_type,
             )?;
         }
+        #[expect(
+            clippy::todo,
+            reason = "TODO(cg): X25519 key-pair generation is not implemented"
+        )]
         TEE_TYPE_X25519_KEYPAIR => {
             todo!()
         }
+        #[expect(
+            clippy::todo,
+            reason = "TODO(cg): X448 key-pair generation is not implemented"
+        )]
         TEE_TYPE_X448_KEYPAIR => {
             todo!()
         }
