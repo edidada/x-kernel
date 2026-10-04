@@ -621,19 +621,35 @@ impl FileOperations for PipeFileOperations {
     }
 
     fn read(&self, file: &VfsFile, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
-        pipe_read(file, buf)
+        let read = pipe_read(file, buf)?;
+        if read > 0 {
+            file.file_accessed();
+        }
+        Ok(read)
     }
 
     fn read_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterDest<'_>) -> VfsResult<usize> {
-        pipe_read_iter(iocb, iter)
+        let read = pipe_read_iter(iocb, iter)?;
+        if read > 0 {
+            iocb.file().file_accessed();
+        }
+        Ok(read)
     }
 
     fn write(&self, file: &VfsFile, buf: &[u8], _offset: u64) -> VfsResult<usize> {
-        pipe_write(file, buf)
+        let written = pipe_write(file, buf)?;
+        if written > 0 {
+            file.file_update_time()?;
+        }
+        Ok(written)
     }
 
     fn write_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterSource<'_>) -> VfsResult<usize> {
-        pipe_write_iter(iocb, iter)
+        let written = pipe_write_iter(iocb, iter)?;
+        if written > 0 {
+            iocb.file().file_update_time()?;
+        }
+        Ok(written)
     }
 
     fn ioctl(&self, file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
