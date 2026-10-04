@@ -5,6 +5,7 @@
 //! Context-policy tests not covered by the worker lifecycle tests in
 //! `worker.rs` (which observe the spawned threads directly).
 
+use kerrno::KError;
 use unittest::def_test;
 
 use crate::{
@@ -100,7 +101,13 @@ fn shutdown_cancels_queued_ops_with_canceled_result() {
         assert_eq!(completion.res, ASYNCIO_RES_CANCELED);
     }
 
-    // A submission racing the shutdown drain must be rejected, never
-    // silently queued on a context no worker will serve again.
-    assert!(ctx.push_ready(PreparedOp { cookie: 9 }).is_err());
+    // A submission racing the shutdown drain must be rejected with the
+    // documented error, never silently queued on a context no worker will
+    // serve again, and must leave both queues untouched.
+    assert!(matches!(
+        ctx.push_ready(PreparedOp { cookie: 9 }),
+        Err(KError::BadFileDescriptor)
+    ));
+    assert!(!ctx.has_ready());
+    assert!(ctx.take_completions().is_empty());
 }

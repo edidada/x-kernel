@@ -144,11 +144,15 @@ fn spawn_worker(ctx: &Arc<AsyncContext>, ordinal: u32) -> KResult<ktask::KtaskRe
     // the owning process's address space.
     task.set_cpumask(ktask::current().cpumask());
     task.ctx_mut().set_page_table_root(page_table_root);
-    let task_ref = kprocess::publish_user_task(task)?.commit(|_| Ok(()))?;
-    // Count only after membership published, per the attach contract: the
-    // transient direction keeps `has_only_in_process_workers` conservative.
+    let published = kprocess::publish_user_task(task)?;
+    // Attach between publication and activation: the worker cannot be
+    // scheduled before `commit`, so it can never observe an un-attached
+    // count and detach from zero. The transient over-count direction
+    // (membership published, count not yet) is the conservative one. The
+    // commit cannot fail here — its finalize closure is infallible — so no
+    // rollback detach is needed.
     process.attach_in_process_worker();
-    Ok(task_ref)
+    published.commit(|_| Ok(()))
 }
 
 /// Worker entry loop: dispatch queued operations, park when idle, retire on
@@ -416,9 +420,84 @@ mod tests {
         // The test body runs on an ordinary (non-worker) thread of its
         // process, and no worker is attached, so the retirement condition
         // must stay false. The complementary case (only workers left) is
-        // covered by the counter contract documented on
-        // `Process::attach_in_process_worker`/`detach_in_process_worker`.
+        // covered by `last_ordinary_thread_exit_retires_the_worker`.
         let thread = kprocess::current_user_thread();
         assert!(!thread.process().has_only_in_process_workers());
+    }
+
+    #[def_test(user, serial)]
+    fn last_ordinary_thread_exit_retires_the_worker() {
+        use kprocess::{
+            ForkAddressSpace, ForkFdTable, ForkFs, ForkParent, ForkSignalActions, ProcessForkConfig,
+        };
+
+        // Fork a child whose only ordinary thread spawns one worker and then
+        // exits plainly — the exact shape of the stranded-worker hazard: no
+        // group exit runs, so only the last-ordinary-thread condition can
+        // retire the worker and let the child process tail complete.
+        let parent_thread = kprocess::current_user_thread();
+        let prepared = parent_thread
+            .prepare_process_fork(ProcessForkConfig {
+                parent: ForkParent::Caller,
+                address_space: ForkAddressSpace::Private,
+                fs: ForkFs::Shared,
+                signal_actions: ForkSignalActions::Shared,
+                fd_table: ForkFdTable::Private,
+                namespace_flags: kns::NamespaceFlags::empty(),
+                exit_signal: Some(Signo::SIGCHLD),
+            })
+            .expect("fork must succeed");
+        let child_process = prepared.process().clone();
+        let page_table_root = prepared.page_table_root();
+        let (child_thread, task_number) = prepared.into_parts();
+
+        // The context is created on the parent; the child pushes its op and
+        // spawns the worker, so the worker thread belongs to the child
+        // process.
+        let ctx = AsyncContext::new().expect("context creation");
+        let child_ctx = ctx.clone();
+        let child = ktask::TaskInner::new_user(
+            move || {
+                child_ctx
+                    .push_ready(PreparedOp { cookie: 1 })
+                    .expect("op below queue limit");
+                ensure_worker(&child_ctx).expect("worker spawn must succeed");
+                wait_for_op_completion(&child_ctx, 1);
+                // Plain thread exit: no group_exit broadcast, is_last_thread
+                // is false while the worker is alive.
+                posix_process::do_exit(0, false);
+            },
+            alloc::string::String::from("kasyncio-test-child"),
+            task_number,
+            child_thread,
+        );
+        let mut child = child;
+        child.set_cpumask(ktask::current().cpumask());
+        child.ctx_mut().set_page_table_root(page_table_root);
+        kprocess::publish_user_task(child)
+            .expect("child publication must succeed")
+            .commit(|_| Ok(()))
+            .expect("child activation must succeed");
+
+        // The parked worker has no wake source here: only the bounded-park
+        // re-check of the retirement condition can retire it, after which
+        // its do_exit is the last membership removal and runs the child
+        // process tail — the waitpid-equivalent observable.
+        wait_until(|| child_process.is_exited());
+        assert!(
+            child_process.is_waitable_zombie(),
+            "the child must end as a waitable zombie for its parent"
+        );
+        assert_eq!(ctx.total_workers(), 0);
+    }
+
+    /// Waits until the operation with `cookie` appears in the completions of
+    /// `ctx` (test-side observation for the fork child's context).
+    fn wait_for_op_completion(ctx: &Arc<AsyncContext>, cookie: u64) {
+        wait_until(|| {
+            ctx.take_completions()
+                .into_iter()
+                .any(|completion| completion.cookie == cookie)
+        });
     }
 }

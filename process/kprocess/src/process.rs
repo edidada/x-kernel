@@ -495,6 +495,12 @@ impl Process {
     /// Callers must invoke this before the worker's thread exits, so a
     /// still-published exiting worker never lets the counts coincide
     /// prematurely. Returns the worker count after the detach.
+    ///
+    /// # Panics
+    ///
+    /// Panics when detaching a worker that was never attached (the count is
+    /// already zero): only the attach/detach pair above may drive this
+    /// counter.
     pub fn detach_in_process_worker(&self) -> u32 {
         let prior = self.in_process_workers.fetch_sub(1, Ordering::AcqRel);
         prior
@@ -503,7 +509,7 @@ impl Process {
     }
 
     /// Returns the number of in-process kernel workers currently attached.
-    pub fn in_process_worker_count(&self) -> u32 {
+    pub(crate) fn in_process_worker_count(&self) -> u32 {
         self.in_process_workers.load(Ordering::Acquire)
     }
 
