@@ -162,22 +162,42 @@ mod tests {
         }
     }
 
+    /// # Safety
+    ///
+    /// `data` must be the aligned pointer to a live static `AtomicUsize`
+    /// installed by `make_waker`. It must remain valid for every cloned waker;
+    /// these callbacks borrow the counter and never reclaim its allocation.
     unsafe fn waker_clone(data: *const ()) -> RawWaker {
         RawWaker::new(data, &WAKER_VTABLE)
     }
 
+    /// # Safety
+    ///
+    /// `data` must be the aligned pointer to a live static `AtomicUsize`
+    /// installed by `make_waker`. It must remain valid for every cloned waker;
+    /// these callbacks borrow the counter and never reclaim its allocation.
     unsafe fn waker_wake(data: *const ()) {
         // SAFETY: test wakers install a leaked, aligned `AtomicUsize` pointer.
         let counter = unsafe { &*(data as *const AtomicUsize) };
         counter.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// # Safety
+    ///
+    /// `data` must be the aligned pointer to a live static `AtomicUsize`
+    /// installed by `make_waker`. It must remain valid for every cloned waker;
+    /// these callbacks borrow the counter and never reclaim its allocation.
     unsafe fn waker_wake_by_ref(data: *const ()) {
         // SAFETY: test wakers install a leaked, aligned `AtomicUsize` pointer.
         let counter = unsafe { &*(data as *const AtomicUsize) };
         counter.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// # Safety
+    ///
+    /// `data` must be the aligned pointer to a live static `AtomicUsize`
+    /// installed by `make_waker`. It must remain valid for every cloned waker;
+    /// these callbacks borrow the counter and never reclaim its allocation.
     unsafe fn waker_drop(_data: *const ()) {}
 
     static WAKER_VTABLE: RawWakerVTable =

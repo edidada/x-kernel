@@ -847,21 +847,41 @@ pub mod tests_irq {
         IrqEvent::HANDLED
     }
 
+    /// # Safety
+    ///
+    /// `data` must be the aligned pointer to a live static `AtomicUsize`
+    /// installed by `make_waker`. It must remain valid for every cloned waker;
+    /// these callbacks borrow the counter and never reclaim its allocation.
     unsafe fn clone_waker(data: *const ()) -> RawWaker {
         RawWaker::new(data, &WAKER_VTABLE)
     }
 
+    /// # Safety
+    ///
+    /// `data` must be the aligned pointer to a live static `AtomicUsize`
+    /// installed by `make_waker`. It must remain valid for every cloned waker;
+    /// these callbacks borrow the counter and never reclaim its allocation.
     unsafe fn wake_waker(data: *const ()) {
         // SAFETY: `make_waker` installs a leaked, aligned `AtomicUsize` pointer.
         let counter = unsafe { &*(data as *const AtomicUsize) };
         counter.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// # Safety
+    ///
+    /// `data` must be the aligned pointer to a live static `AtomicUsize`
+    /// installed by `make_waker`. It must remain valid for every cloned waker;
+    /// these callbacks borrow the counter and never reclaim its allocation.
     unsafe fn wake_waker_by_ref(data: *const ()) {
         // SAFETY: same invariant as `wake_waker`.
         unsafe { wake_waker(data) };
     }
 
+    /// # Safety
+    ///
+    /// `data` must be the aligned pointer to a live static `AtomicUsize`
+    /// installed by `make_waker`. It must remain valid for every cloned waker;
+    /// these callbacks borrow the counter and never reclaim its allocation.
     unsafe fn drop_waker(_data: *const ()) {}
 
     static WAKER_VTABLE: RawWakerVTable =

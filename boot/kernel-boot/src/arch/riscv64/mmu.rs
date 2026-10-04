@@ -99,6 +99,12 @@ const fn pte_paddr(pte: u64) -> usize {
     ((pte >> 10) << 12) as usize
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// No outstanding references may access any table being reset, and no
+/// previously returned pool pointer may be used after this reset.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn zero_boot_tables() {
     // SAFETY: boot page tables are single-writer globals during early
@@ -110,6 +116,15 @@ unsafe fn zero_boot_tables() {
     }
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// The L1 pool and cursor must have been initialized by `zero_boot_tables`
+/// and advanced only by this allocator; a returned slot must not have
+/// outstanding aliases.
+/// Execute in the physical-address boot environment so `phys_addr_of!`
+/// resolves this image's physical symbols.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn alloc_l1_table() -> (*mut PageAligned<[u64; PT_ENTRIES]>, usize) {
     // SAFETY: early boot is the sole writer of the L1 table pool cursor.
@@ -136,6 +151,16 @@ unsafe fn alloc_l1_table() -> (*mut PageAligned<[u64; PT_ENTRIES]>, usize) {
     (ptr, pa)
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// `root_idx` must be below `PT_ENTRIES`; the root must have been zeroed,
+/// and every populated root entry must name a table allocated from the L1
+/// pool by this module. No reference may alias the returned table during
+/// mutation.
+/// Execute in the physical-address boot environment so `phys_addr_of!`
+/// resolves this image's physical symbols.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn root_l1_table(root_idx: usize) -> *mut PageAligned<[u64; PT_ENTRIES]> {
     // SAFETY: `root_idx` is derived from a Sv39 VPN index, so it is within the
@@ -164,6 +189,16 @@ unsafe fn root_l1_table(root_idx: usize) -> *mut PageAligned<[u64; PT_ENTRIES]> 
     }
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// The pools must be initialized and all table links must point to their
+/// corresponding pool slots. `va` and `pa` must be 2 MiB aligned; the
+/// requested mapping and permissions must be valid for the boot memory
+/// layout. The target slot must not contain a lower-level table.
+/// Execute in the physical-address boot environment so `phys_addr_of!`
+/// resolves this image's physical symbols.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_2m_page(va: usize, pa: usize, flags: u64) {
     let root_idx = vpn2(va);
@@ -185,6 +220,16 @@ unsafe fn map_2m_page(va: usize, pa: usize, flags: u64) {
     *entry = make_leaf_pte(pa, flags);
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// The pool-link invariants of `map_2m_page` must hold. `va` and `pa` must
+/// have matching 2 MiB offsets, and rounding and address advancement must
+/// not overflow. Mapping the entire rounded range with `flags` must be
+/// valid for the boot layout.
+/// Execute in the physical-address boot environment so `phys_addr_of!`
+/// resolves this image's physical symbols.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_range_2m(va: usize, pa: usize, size: usize, flags: u64) {
     if size == 0 {
@@ -206,6 +251,15 @@ unsafe fn map_range_2m(va: usize, pa: usize, size: usize, flags: u64) {
     }
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// The tables must be initialized, and the configured boot-console address
+/// must identify UART MMIO that may be mapped through its containing
+/// 2 MiB blocks without conflicting with existing RAM mappings.
+/// Execute in the physical-address boot environment so `phys_addr_of!`
+/// resolves this image's physical symbols.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_mmio_linear_ranges() {
     if BOOT_CONSOLE_TYPE == "mmio" && BOOT_CONSOLE_ADDR != 0 {
@@ -222,6 +276,16 @@ unsafe fn map_mmio_linear_ranges() {
     }
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// A nonzero `dtb_paddr` must point to a complete, readable and immutable
+/// DTB in the physical boot mapping. Its memory regions must describe
+/// actual RAM, and their linear addresses and 2 MiB rounding must not
+/// overflow or conflict with the boot mappings.
+/// Execute in the physical-address boot environment so `phys_addr_of!`
+/// resolves this image's physical symbols.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_boot_linear_ram_from_dtb(dtb_paddr: usize) {
     if dtb_paddr == 0 {
@@ -247,6 +311,16 @@ unsafe fn map_boot_linear_ram_from_dtb(dtb_paddr: usize) {
     }
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// The ordered physical bounds must describe the loaded kernel. The
+/// identity, linear and `KIMAGE_VADDR` mappings must have matching 2 MiB
+/// offsets and fit the address space after rounding, without conflicting
+/// with existing mappings.
+/// Execute in the physical-address boot environment so `phys_addr_of!`
+/// resolves this image's physical symbols.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_kernel_image(kernel_start_pa: usize, kernel_end_pa: usize) {
     let size = kernel_end_pa.saturating_sub(kernel_start_pa);
@@ -264,6 +338,15 @@ unsafe fn map_kernel_image(kernel_start_pa: usize, kernel_end_pa: usize) {
     }
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// A nonzero `dtb_paddr` must identify the firmware DTB. Its linear address
+/// and the rounded 2 MiB mapping range must not overflow or conflict with
+/// existing boot mappings.
+/// Execute in the physical-address boot environment so `phys_addr_of!`
+/// resolves this image's physical symbols.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_dtb_linear(dtb_paddr: usize) {
     if dtb_paddr == 0 {

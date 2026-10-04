@@ -1090,6 +1090,12 @@ impl CurrentTask {
         Arc::ptr_eq(&self.0, other)
     }
 
+    /// # Safety
+    ///
+    /// Call once during this CPU's scheduler initialization, with its per-CPU
+    /// area installed and no current task yet. Exclude interrupts and migration
+    /// until publication completes; `init_task` must be this CPU's initial task
+    /// with its TLS initialized when enabled.
     pub(crate) unsafe fn init_current(init_task: KtaskRef) {
         assert!(init_task.is_init());
         #[cfg(all(feature = "tls", target_os = "none"))]
@@ -1106,6 +1112,13 @@ impl CurrentTask {
         }
     }
 
+    /// # Safety
+    ///
+    /// `prev` must represent this CPU's owning current-task reference, consumed
+    /// exactly once. Exclude interrupts, migration, and observers of the slot
+    /// during replacement. Keep another strong reference to the previous task
+    /// until its stack and context are no longer in use, and coordinate this
+    /// publication with the context switch to `next`.
     pub(crate) unsafe fn set_current(prev: Self, next: KtaskRef) {
         let Self(arc) = prev;
         ManuallyDrop::into_inner(arc); // `call Arc::drop()` to decrease prev task reference count.

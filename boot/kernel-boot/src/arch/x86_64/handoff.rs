@@ -32,6 +32,13 @@ unsafe extern "C" {
     static _ekernel: u8;
 }
 
+/// # Safety
+///
+/// Call once on the bootstrap CPU before any AP uses the bootstrap GDT
+/// or page tables, with exclusive access to those linker-defined objects.
+/// The kernel virtual-to-physical offset must already be installed for this
+/// image; the AP bootstrap GDT and table symbols must name live, writable
+/// objects with the declared layouts and required physical alignment.
 unsafe fn init_ap_boot_state() {
     const PAGE_SIZE_4K: usize = 0x1000;
     const PTE_PER_PT: usize = 512;

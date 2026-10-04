@@ -20,22 +20,42 @@ fn new_counter() -> &'static AtomicUsize {
     Box::leak(Box::new(AtomicUsize::new(0)))
 }
 
+/// # Safety
+///
+/// `data` must be the aligned pointer to a live static `AtomicUsize`
+/// installed by `make_waker`. It must remain valid for every cloned waker;
+/// these callbacks borrow the counter and never reclaim its allocation.
 unsafe fn waker_clone(data: *const ()) -> RawWaker {
     RawWaker::new(data, &WAKER_VTABLE)
 }
 
+/// # Safety
+///
+/// `data` must be the aligned pointer to a live static `AtomicUsize`
+/// installed by `make_waker`. It must remain valid for every cloned waker;
+/// these callbacks borrow the counter and never reclaim its allocation.
 unsafe fn waker_wake(data: *const ()) {
     // SAFETY: `make_waker` installs a leaked, aligned `AtomicUsize` pointer.
     let counter = unsafe { &*(data as *const AtomicUsize) };
     counter.fetch_add(1, Ordering::SeqCst);
 }
 
+/// # Safety
+///
+/// `data` must be the aligned pointer to a live static `AtomicUsize`
+/// installed by `make_waker`. It must remain valid for every cloned waker;
+/// these callbacks borrow the counter and never reclaim its allocation.
 unsafe fn waker_wake_by_ref(data: *const ()) {
     // SAFETY: `make_waker` installs a leaked, aligned `AtomicUsize` pointer.
     let counter = unsafe { &*(data as *const AtomicUsize) };
     counter.fetch_add(1, Ordering::SeqCst);
 }
 
+/// # Safety
+///
+/// `data` must be the aligned pointer to a live static `AtomicUsize`
+/// installed by `make_waker`. It must remain valid for every cloned waker;
+/// these callbacks borrow the counter and never reclaim its allocation.
 unsafe fn waker_drop(_data: *const ()) {}
 
 static WAKER_VTABLE: RawWakerVTable =
@@ -114,10 +134,20 @@ struct ReentrantWake {
     count: AtomicUsize,
 }
 
+/// # Safety
+///
+/// `data` must point to the initialized, leaked `ReentrantWake` used
+/// with this vtable. The state and its referenced polling object must remain
+/// live for every clone; callbacks share the state and never deallocate it.
 unsafe fn reentrant_clone(data: *const ()) -> RawWaker {
     RawWaker::new(data, &REENTRANT_VTABLE)
 }
 
+/// # Safety
+///
+/// `data` must point to the initialized, leaked `ReentrantWake` used
+/// with this vtable. The state and its referenced polling object must remain
+/// live for every clone; callbacks share the state and never deallocate it.
 unsafe fn reentrant_wake(data: *const ()) {
     // SAFETY: the pointer is created from a leaked `ReentrantWake`.
     let state = unsafe { &*(data as *const ReentrantWake) };
@@ -127,11 +157,21 @@ unsafe fn reentrant_wake(data: *const ()) {
     core::assert!(state.set.wake() == 0);
 }
 
+/// # Safety
+///
+/// `data` must point to the initialized, leaked `ReentrantWake` used
+/// with this vtable. The state and its referenced polling object must remain
+/// live for every clone; callbacks share the state and never deallocate it.
 unsafe fn reentrant_wake_by_ref(data: *const ()) {
     // SAFETY: same invariant as `reentrant_wake`.
     unsafe { reentrant_wake(data) };
 }
 
+/// # Safety
+///
+/// `data` must point to the initialized, leaked `ReentrantWake` used
+/// with this vtable. The state and its referenced polling object must remain
+/// live for every clone; callbacks share the state and never deallocate it.
 unsafe fn reentrant_drop(_data: *const ()) {}
 
 static REENTRANT_VTABLE: RawWakerVTable = RawWakerVTable::new(
@@ -290,10 +330,20 @@ struct ReentrantCompletionWake {
     count: AtomicUsize,
 }
 
+/// # Safety
+///
+/// `data` must point to the initialized, leaked `ReentrantCompletionWake` used
+/// with this vtable. The state and its referenced polling object must remain
+/// live for every clone; callbacks share the state and never deallocate it.
 unsafe fn reentrant_completion_clone(data: *const ()) -> RawWaker {
     RawWaker::new(data, &REENTRANT_COMPLETION_VTABLE)
 }
 
+/// # Safety
+///
+/// `data` must point to the initialized, leaked `ReentrantCompletionWake` used
+/// with this vtable. The state and its referenced polling object must remain
+/// live for every clone; callbacks share the state and never deallocate it.
 unsafe fn reentrant_completion_wake(data: *const ()) {
     // SAFETY: the pointer is created from a leaked `ReentrantCompletionWake`.
     let state = unsafe { &*(data as *const ReentrantCompletionWake) };
@@ -301,11 +351,21 @@ unsafe fn reentrant_completion_wake(data: *const ()) {
     core::assert!(state.completion.try_wait());
 }
 
+/// # Safety
+///
+/// `data` must point to the initialized, leaked `ReentrantCompletionWake` used
+/// with this vtable. The state and its referenced polling object must remain
+/// live for every clone; callbacks share the state and never deallocate it.
 unsafe fn reentrant_completion_wake_by_ref(data: *const ()) {
     // SAFETY: same invariant as `reentrant_completion_wake`.
     unsafe { reentrant_completion_wake(data) };
 }
 
+/// # Safety
+///
+/// `data` must point to the initialized, leaked `ReentrantCompletionWake` used
+/// with this vtable. The state and its referenced polling object must remain
+/// live for every clone; callbacks share the state and never deallocate it.
 unsafe fn reentrant_completion_drop(_data: *const ()) {}
 
 static REENTRANT_COMPLETION_VTABLE: RawWakerVTable = RawWakerVTable::new(

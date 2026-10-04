@@ -102,6 +102,12 @@ fn boot_symbol_paddr(linked_va: usize) -> PhysAddr {
     pa!(linked_va - unsafe { BOOT_KIMAGE_VOFFSET })
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// No outstanding references may access any table being reset, and no
+/// previously returned pool pointer may be used after this reset.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn zero_boot_tables() {
     // SAFETY: boot page-table globals are single-writer state during early
@@ -117,6 +123,15 @@ unsafe fn zero_boot_tables() {
     }
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// The L1 pool and cursor must have been initialized by `zero_boot_tables`
+/// and advanced only by this allocator; a returned slot must not have
+/// outstanding aliases.
+/// Boot symbol mappings and `BOOT_KIMAGE_VOFFSET` must already describe
+/// the loaded image so pool physical addresses can be recovered.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn alloc_l1_table() -> (*mut PageAligned<[LA64PTE; PT_ENTRIES]>, PhysAddr) {
     // SAFETY: early boot is the sole writer of the L1 table pool cursor.
@@ -145,6 +160,15 @@ unsafe fn alloc_l1_table() -> (*mut PageAligned<[LA64PTE; PT_ENTRIES]>, PhysAddr
     (ptr, pa)
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// The L2 pool and cursor must have been initialized by `zero_boot_tables`
+/// and advanced only by this allocator; a returned slot must not have
+/// outstanding aliases.
+/// Boot symbol mappings and `BOOT_KIMAGE_VOFFSET` must already describe
+/// the loaded image so pool physical addresses can be recovered.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn alloc_l2_table() -> (*mut PageAligned<[LA64PTE; PT_ENTRIES]>, PhysAddr) {
     // SAFETY: early boot is the sole writer of the L2 table pool cursor.
@@ -173,6 +197,15 @@ unsafe fn alloc_l2_table() -> (*mut PageAligned<[LA64PTE; PT_ENTRIES]>, PhysAddr
     (ptr, pa)
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// The L3 pool and cursor must have been initialized by `zero_boot_tables`
+/// and advanced only by this allocator; a returned slot must not have
+/// outstanding aliases.
+/// Boot symbol mappings and `BOOT_KIMAGE_VOFFSET` must already describe
+/// the loaded image so pool physical addresses can be recovered.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn alloc_l3_table() -> (*mut PageAligned<[LA64PTE; PT_ENTRIES]>, PhysAddr) {
     // SAFETY: early boot is the sole writer of the L3 table pool cursor.
@@ -201,6 +234,16 @@ unsafe fn alloc_l3_table() -> (*mut PageAligned<[LA64PTE; PT_ENTRIES]>, PhysAddr
     (ptr, pa)
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// `root_idx` must be below `PT_ENTRIES`; the root must have been zeroed,
+/// and every populated root entry must name a table allocated from the L1
+/// pool by this module. No reference may alias the returned table during
+/// mutation.
+/// Boot symbol mappings and `BOOT_KIMAGE_VOFFSET` must already describe
+/// the loaded image so pool physical addresses can be recovered.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn root_l1_table(root_idx: usize) -> *mut PageAligned<[LA64PTE; PT_ENTRIES]> {
     // SAFETY: `root_idx` comes from the translated VA root index and therefore
@@ -229,6 +272,17 @@ unsafe fn root_l1_table(root_idx: usize) -> *mut PageAligned<[LA64PTE; PT_ENTRIE
     }
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// `l1_table` must point to an initialized, aligned L1 pool table
+/// that is exclusively accessible; `l1_idx` must be below `PT_ENTRIES`.
+/// The selected entry must be unused or a table link into the L2 pool,
+/// never a leaf mapping. No reference may alias the returned table during
+/// mutation.
+/// Boot symbol mappings and `BOOT_KIMAGE_VOFFSET` must already describe
+/// the loaded image so pool physical addresses can be recovered.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn next_l2_table(
     l1_table: *mut PageAligned<[LA64PTE; PT_ENTRIES]>,
@@ -255,6 +309,17 @@ unsafe fn next_l2_table(
     }
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// `l2_table` must point to an initialized, aligned L2 pool table
+/// that is exclusively accessible; `l2_idx` must be below `PT_ENTRIES`.
+/// The selected entry must be unused or a table link into the L3 pool,
+/// never a leaf mapping. No reference may alias the returned table during
+/// mutation.
+/// Boot symbol mappings and `BOOT_KIMAGE_VOFFSET` must already describe
+/// the loaded image so pool physical addresses can be recovered.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn next_l3_table(
     l2_table: *mut PageAligned<[LA64PTE; PT_ENTRIES]>,
@@ -281,6 +346,16 @@ unsafe fn next_l3_table(
     }
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// The pools must be initialized and all table links must point to their
+/// corresponding pool slots. `va` and `pa` must be 2 MiB aligned; the
+/// requested mapping and permissions must be valid for the boot memory
+/// layout. The target slot must not contain a lower-level table.
+/// Boot symbol mappings and `BOOT_KIMAGE_VOFFSET` must already describe
+/// the loaded image so pool physical addresses can be recovered.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_2m_page(va: usize, pa: usize, flags: PagingFlags) {
     // SAFETY: the derived root index selects the boot root slot for `va`.
@@ -298,6 +373,16 @@ unsafe fn map_2m_page(va: usize, pa: usize, flags: PagingFlags) {
     *entry = LA64PTE::new_page(pa!(pa), flags, true);
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// The pools must be initialized and the walk to the L3 table must contain
+/// only links into the corresponding pools, never huge-page leaves. `va`
+/// and `pa` must have matching page offsets; the resulting page mapping
+/// and permissions must be valid for the boot layout.
+/// Boot symbol mappings and `BOOT_KIMAGE_VOFFSET` must already describe
+/// the loaded image so pool physical addresses can be recovered.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_4k_page(va: usize, pa: usize, flags: PagingFlags) {
     // SAFETY: the derived indices select the boot page-table path for `va`.
@@ -323,6 +408,17 @@ unsafe fn map_4k_page(va: usize, pa: usize, flags: PagingFlags) {
     *entry = LA64PTE::from_raw(raw);
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// The initialized pool-link invariants of `map_2m_page` and `map_4k_page`
+/// must hold throughout the walk. `va` and `pa` must have matching page
+/// offsets; range-end and page-step arithmetic must not overflow. The
+/// covered pages and permissions must be valid for the boot layout, and
+/// existing mappings must not conflict in address or page-table level.
+/// Boot symbol mappings and `BOOT_KIMAGE_VOFFSET` must already describe
+/// the loaded image so pool physical addresses can be recovered.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_range(va: usize, pa: usize, size: usize, flags: PagingFlags) {
     if size == 0 {
@@ -383,6 +479,12 @@ pub unsafe fn boot_uefi_memmap_paddr() -> usize {
     unsafe { BOOT_UEFI_MEMMAP_PADDR }
 }
 
+/// # Safety
+///
+/// `systemtable_paddr` must name a live, initialized EFI `SystemTable`,
+/// properly aligned and readable through `BOOT_DMW_UNCACHED_BASE`. The
+/// backing table must remain immutable and allocated for the returned
+/// `'static` context; signature validation cannot prove pointer validity.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn raw_efi_context(systemtable_paddr: usize) -> RawEfiContext<'static> {
     let systemtable: *const SystemTable = boot_phys_ptr(systemtable_paddr);
@@ -391,6 +493,13 @@ unsafe fn raw_efi_context(systemtable_paddr: usize) -> RawEfiContext<'static> {
     unsafe { RawEfiContext::from_ptr(systemtable) }.expect("invalid EFI system table")
 }
 
+/// # Safety
+///
+/// `context` must describe the current EFI system table. Its configuration
+/// array and any Linux boot-memory-map header and descriptor array must be
+/// initialized, aligned and readable via `boot_phys_ptr`, with lengths
+/// within their backing allocations. They must remain immutable and live
+/// for the returned `'static` borrow.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn raw_efi_boot_memmap(context: &RawEfiContext<'static>) -> Option<BootMemmapRef<'static>> {
     let memmap_paddr =
@@ -406,6 +515,16 @@ unsafe fn raw_efi_boot_memmap(context: &RawEfiContext<'static>) -> Option<BootMe
     )
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// The initialized table and mapping invariants of `map_range` must hold.
+/// The physical region must permit `flags` on every covered page; adding
+/// `PAGE_OFFSET`, the length and page-rounding increments must not overflow
+/// or conflict with existing mappings.
+/// Boot symbol mappings and `BOOT_KIMAGE_VOFFSET` must already describe
+/// the loaded image so pool physical addresses can be recovered.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_linear_region(phys_start: usize, size: usize, flags: PagingFlags) {
     if size == 0 {
@@ -415,6 +534,16 @@ unsafe fn map_linear_region(phys_start: usize, size: usize, flags: PagingFlags) 
     unsafe { map_range(PAGE_OFFSET + phys_start, phys_start, size, flags) };
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// `context` and `systemtable_paddr` must identify the same live EFI table
+/// and configuration array. Their sizes and linear-address arithmetic must
+/// not overflow, and their covered pages must permit writable metadata
+/// mappings satisfying `map_linear_region`.
+/// Boot symbol mappings and `BOOT_KIMAGE_VOFFSET` must already describe
+/// the loaded image so pool physical addresses can be recovered.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_efi_metadata(context: &RawEfiContext<'static>, systemtable_paddr: usize) {
     let flags = PagingFlags::READ | PagingFlags::WRITE;
@@ -431,6 +560,15 @@ unsafe fn map_efi_metadata(context: &RawEfiContext<'static>, systemtable_paddr: 
     };
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// A nonzero `dtb_paddr` must point to a complete, readable, immutable DTB
+/// through `boot_phys_ptr`. Its memory regions must describe actual RAM
+/// and satisfy the range and table-link invariants of `map_linear_region`.
+/// Boot symbol mappings and `BOOT_KIMAGE_VOFFSET` must already describe
+/// the loaded image so pool physical addresses can be recovered.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_linear_ram_from_dtb(dtb_paddr: usize) {
     if dtb_paddr == 0 {
@@ -461,6 +599,15 @@ unsafe fn map_linear_ram_from_dtb(dtb_paddr: usize) {
     }
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// A nonzero `dtb_paddr` must point to a readable, initialized DTB header
+/// through `boot_phys_ptr`. The blob and its claimed size must describe
+/// firmware-owned memory whose mapping satisfies `map_linear_region`.
+/// Boot symbol mappings and `BOOT_KIMAGE_VOFFSET` must already describe
+/// the loaded image so pool physical addresses can be recovered.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_dtb_linear(dtb_paddr: usize) {
     if dtb_paddr == 0 {
@@ -475,6 +622,17 @@ unsafe fn map_dtb_linear(dtb_paddr: usize) {
     unsafe { map_linear_region(dtb_paddr, dtb_size, PagingFlags::READ | PagingFlags::WRITE) };
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// `systemtable_paddr` and all referenced configuration, memory-map and
+/// DTB objects must satisfy `raw_efi_context`, `raw_efi_boot_memmap` and the
+/// DTB readers' validity and lifetime requirements. Firmware ranges must
+/// represent actual RAM or metadata and satisfy `map_linear_region`; no
+/// other observer may access the cached firmware globals during updates.
+/// Boot symbol mappings and `BOOT_KIMAGE_VOFFSET` must already describe
+/// the loaded image so pool physical addresses can be recovered.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_linear_firmware_memory(systemtable_paddr: usize) {
     // SAFETY: `systemtable_paddr` comes from firmware handoff and points to the
@@ -538,6 +696,15 @@ unsafe fn map_linear_firmware_memory(systemtable_paddr: usize) {
     unsafe { map_dtb_linear(dtb_paddr) };
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// `kernel_start_pa` and the linker end symbol must bound the loaded
+/// kernel, and the resulting `KIMAGE_VADDR` mapping must satisfy the range
+/// and pool-link requirements of `map_range`.
+/// Boot symbol mappings and `BOOT_KIMAGE_VOFFSET` must already describe
+/// the loaded image so pool physical addresses can be recovered.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_kernel_image(kernel_start_pa: usize) {
     unsafe extern "C" {
@@ -560,6 +727,15 @@ unsafe fn map_kernel_image(kernel_start_pa: usize) {
     };
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot, with exclusive access to the boot
+/// tables and pool cursors, before hardware page walks use these tables.
+/// The configured console address must identify UART MMIO whose covered
+/// page permits device accesses and does not conflict with existing boot
+/// mappings. The tables must satisfy `map_range` invariants.
+/// Boot symbol mappings and `BOOT_KIMAGE_VOFFSET` must already describe
+/// the loaded image so pool physical addresses can be recovered.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_mmio_linear_ranges() {
     if BOOT_CONSOLE_ADDR != 0 {

@@ -1179,6 +1179,12 @@ mod tests {
     /// `TestMeta::flush_tlb_process_mask`, which has no access to the test
     /// instance) makes each parallel test case self-contained: the counter
     /// lives on the test-owned `ProviderCtx`, not a shared module static.
+    ///
+    /// # Safety
+    ///
+    /// `ctx` must point to the initialized, aligned `ProviderCtx` registered
+    /// by the test. The test must keep it alive for every provider invocation;
+    /// concurrent reads and updates must use its atomic fields.
     #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
     unsafe fn test_user_cpu_mask_provider(ctx: NonNull<()>) -> KCpuMask {
         // SAFETY: the caller (PageTable64::set_user_cpu_mask_provider) upholds

@@ -121,6 +121,12 @@ fn map_boot_linear_block_if_absent(block_base: usize, flags: PagingFlags) {
     }
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot with exclusive access to the inactive
+/// boot tables. `kernel_start_pa` and any nonzero `dtb_paddr` must describe
+/// the current image and firmware blob so the resulting mappings preserve
+/// them across MMU activation.
 unsafe fn create_boot_minimal_maps(kernel_start_pa: usize, dtb_paddr: usize) {
     if let Some(uart_paddr) = bootconsole_config::mmio_addr() {
         let uart_block_base = uart_paddr & !(GIB - 1);
@@ -153,6 +159,12 @@ unsafe fn create_boot_minimal_maps(kernel_start_pa: usize, dtb_paddr: usize) {
     }
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot with exclusive access to the inactive
+/// boot tables. The ordered image bounds must describe the loaded kernel
+/// and fit the dedicated L2 table after 2 MiB rounding without overflow.
+/// `l2_kimage_pa` must be the physical address of `BOOT_PT_L2_KIMAGE`.
 unsafe fn create_boot_kimage_map(
     kernel_start_pa: usize,
     kernel_end_pa: usize,
@@ -185,6 +197,12 @@ unsafe fn create_boot_kimage_map(
     }
 }
 
+/// # Safety
+///
+/// Call only during single-CPU boot with exclusive access to the inactive
+/// boot tables after the kernel image mapping is installed.
+/// `l2_boot_uart_pa` must be the physical address of `BOOT_PT_L2_BOOT_UART`,
+/// and the configured MMIO address must identify the boot UART.
 unsafe fn create_boot_uart_map(l2_boot_uart_pa: usize) {
     let Some(boot_console_paddr) = bootconsole_config::mmio_addr() else {
         return;

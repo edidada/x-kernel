@@ -50,6 +50,11 @@ use crate::{
     vma::VmRuntimeRef,
 };
 
+/// # Safety
+///
+/// `ctx` must be the aligned pointer to the initialized `MmCpuResidency`
+/// registered with this page table. Its owning `Arc` must outlive this call;
+/// all concurrent residency changes must use the object's synchronization.
 #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
 unsafe fn page_table_user_cpu_mask(ctx: NonNull<()>) -> kcpu_id_map::KCpuMask {
     // SAFETY: `ctx` is installed from `Arc::as_ref(&cpu_residency)` in
