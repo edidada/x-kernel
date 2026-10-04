@@ -99,4 +99,8 @@ fn shutdown_cancels_queued_ops_with_canceled_result() {
         assert_eq!(completion.cookie, index as u64 + 1);
         assert_eq!(completion.res, ASYNCIO_RES_CANCELED);
     }
+
+    // A submission racing the shutdown drain must be rejected, never
+    // silently queued on a context no worker will serve again.
+    assert!(ctx.push_ready(PreparedOp { cookie: 9 }).is_err());
 }

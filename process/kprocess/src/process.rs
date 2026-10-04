@@ -124,6 +124,11 @@ pub struct Process {
     /// Published PID slot, retained so exit/reap can retire visibility without
     /// taking the publication table lock inside `process_domain`.
     pid_publication_slot: SpinNoIrq<Option<Weak<PublishedProcessSlot>>>,
+    /// Count of kernel-mode sibling threads (e.g. `kasyncio` workers)
+    /// attached to this process. Single-field independent state, so a bare
+    /// atomic suffices; ordering documents the attach/detach contract on the
+    /// accessor methods.
+    in_process_workers: AtomicU32,
 }
 
 impl Process {
@@ -464,12 +469,57 @@ impl Process {
             runtime_ref: SpinNoIrq::new(None),
             retained_nsproxy: SpinNoPreempt::new(None),
             pid_publication_slot: SpinNoIrq::new(None),
+            in_process_workers: AtomicU32::new(0),
         })
     }
 
     /// Serializes thread publication and whole-process cgroup migration.
     pub(crate) fn cgroup_transaction(&self) -> MutexGuard<'_, Option<Arc<kcgroup::Cgroup>>> {
         self.cgroup_target.lock()
+    }
+
+    /// Accounts an in-process kernel worker attaching to this process.
+    ///
+    /// Callers must invoke this after the worker's thread is published, so
+    /// [`Process::has_only_in_process_workers`] never observes a counted
+    /// worker whose membership has not landed yet (that direction is
+    /// conservative: an over-counted membership blocks retirement).
+    ///
+    /// Returns the worker count after the attach.
+    pub fn attach_in_process_worker(&self) -> u32 {
+        self.in_process_workers.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// Accounts an in-process kernel worker detaching from this process.
+    ///
+    /// Callers must invoke this before the worker's thread exits, so a
+    /// still-published exiting worker never lets the counts coincide
+    /// prematurely. Returns the worker count after the detach.
+    pub fn detach_in_process_worker(&self) -> u32 {
+        let prior = self.in_process_workers.fetch_sub(1, Ordering::AcqRel);
+        prior
+            .checked_sub(1)
+            .expect("in-process worker count underflow")
+    }
+
+    /// Returns the number of in-process kernel workers currently attached.
+    pub fn in_process_worker_count(&self) -> u32 {
+        self.in_process_workers.load(Ordering::Acquire)
+    }
+
+    /// Returns whether every published thread of this process is an
+    /// in-process kernel worker (and at least one exists).
+    ///
+    /// This is the "last ordinary thread is gone" condition: subsystems that
+    /// keep kernel-mode sibling threads (such as `kasyncio` workers) use it
+    /// to retire them when no ordinary thread can submit, exit, or service
+    /// them anymore. The comparison races with thread publication and exit,
+    /// so callers must tolerate both a stale `false` (harmless: workers stay
+    /// and re-check) and a transient `true` (callers retire, which the
+    /// attach/detach ordering above keeps safe).
+    pub fn has_only_in_process_workers(&self) -> bool {
+        let workers = self.in_process_worker_count();
+        workers > 0 && workers as usize == self.thread_count()
     }
 
     fn attach_prepared_locked(

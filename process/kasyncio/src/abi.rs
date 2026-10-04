@@ -98,8 +98,9 @@ pub const ASYNCIO_CQE_SIZE: usize = 32;
 pub const ASYNCIO_MAX_SQ_ENTRIES: u32 = 4096;
 
 /// CQE `res` for an operation discarded before it started: negated Linux
-/// `ECANCELED` (125), which the errno tables do not carry yet.
-pub const ASYNCIO_RES_CANCELED: i64 = -125;
+/// `ECANCELED` (125 on the generic UAPI errno table; `kerrno` carries no
+/// matching variant yet).
+pub const ASYNCIO_RES_CANCELED: i64 = -(linux_raw_sys::errno::ECANCELED as i64);
 
 /// One submission-queue entry (64 bytes).
 ///

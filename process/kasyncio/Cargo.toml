@@ -19,6 +19,7 @@ ksignal.workspace = true
 ksync.workspace = true
 ktask.workspace = true
 ktime_types.workspace = true
+linux-raw-sys = { workspace = true, features = ["errno"] }
 posix-process.workspace = true
 posix-types.workspace = true
 unittest.workspace = true

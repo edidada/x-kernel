@@ -33,7 +33,7 @@ pub(crate) const READY_LIMIT: usize = 1024;
 /// A submission prepared for execution.
 ///
 /// The spike carries only the user cookie; the syscall-facing steps extend
-/// this with resolved [`kvfs::VfsFile`] handles and decoded arguments.
+/// this with resolved file handles and decoded arguments.
 pub(crate) struct PreparedOp {
     /// User cookie echoed verbatim in the completion entry.
     pub(crate) cookie: u64,
@@ -92,10 +92,16 @@ impl AsyncContext {
     ///
     /// # Errors
     ///
+    /// [`kerrno::KError::BadFileDescriptor`] when the context already shut
+    /// down: `shutdown` drained the queue, so an accepted operation here
+    /// would never be executed, cancelled, or otherwise observable.
     /// [`kerrno::KError::WouldBlock`] when the queue is full.
     pub fn push_ready(&self, op: PreparedOp) -> KResult<()> {
         {
             let mut inner = self.inner.lock();
+            if inner.shutdown {
+                return Err(kerrno::KError::BadFileDescriptor);
+            }
             if inner.ready.len() >= READY_LIMIT {
                 return Err(kerrno::KError::WouldBlock);
             }

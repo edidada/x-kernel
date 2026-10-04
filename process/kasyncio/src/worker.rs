@@ -34,7 +34,9 @@
 //!   path probes the thread's pending-signal set itself (`kill -9` on a
 //!   worker tid ends the worker). Handler-visible fatal signals other than
 //!   `SIGKILL` still require a userspace return and are out of scope.
-//! - The last ordinary (non-worker) thread of the process is gone. Workers
+//! - The last ordinary (non-worker) thread of the process is gone, observed
+//!   as `Process::has_only_in_process_workers` — an explicit per-process
+//!   worker counter maintained by the spawn/retire paths below. Workers
 //!   re-evaluate this at least every [`IDLE_PARK_BOUND`]; without it the
 //!   final ordinary thread's plain exit would leave parked workers holding
 //!   membership forever and `waitpid` would never complete.
@@ -69,8 +71,9 @@ use crate::context::{AsyncContext, CompletedOp, PreparedOp, WorkSource};
 pub(crate) const WORKER_CAP: u32 = 4;
 
 /// Task-name prefix of every kasyncio worker thread, followed by
-/// `{pid}/{ordinal}`. Retirement scans use it to tell worker threads from
-/// ordinary threads of the process.
+/// `{pid}/{ordinal}`. Purely for identification in listings and logs; the
+/// retirement decision uses `Process::has_only_in_process_workers`, not the
+/// name.
 const WORKER_NAME_PREFIX: &str = "kaiow/";
 
 /// Upper bound of one idle park.
@@ -130,6 +133,7 @@ fn spawn_worker(ctx: &Arc<AsyncContext>, ordinal: u32) -> KResult<ktask::KtaskRe
     );
     debug!("asyncio spawn worker {name}");
     let page_table_root = prepared.page_table_root();
+    let process = prepared.process().clone();
     let (thread, task_number) = prepared.into_parts();
 
     let worker_ctx = ctx.clone();
@@ -140,7 +144,11 @@ fn spawn_worker(ctx: &Arc<AsyncContext>, ordinal: u32) -> KResult<ktask::KtaskRe
     // the owning process's address space.
     task.set_cpumask(ktask::current().cpumask());
     task.ctx_mut().set_page_table_root(page_table_root);
-    kprocess::publish_user_task(task)?.commit(|_| Ok(()))
+    let task_ref = kprocess::publish_user_task(task)?.commit(|_| Ok(()))?;
+    // Count only after membership published, per the attach contract: the
+    // transient direction keeps `has_only_in_process_workers` conservative.
+    process.attach_in_process_worker();
+    Ok(task_ref)
 }
 
 /// Worker entry loop: dispatch queued operations, park when idle, retire on
@@ -168,10 +176,22 @@ fn worker_loop(ctx: Arc<AsyncContext>) {
                         // a group exit only re-run the retire checks; a
                         // pending SIGKILL must end the worker, which never
                         // returns to userspace for fatal-signal delivery.
+                        park_failures = 0;
                         if pending_sigkill() {
                             break;
                         }
-                        park_failures = 0;
+                    }
+                    ParkOutcome::InterruptedWithoutSignal => {
+                        // `interruptible`'s own wait registration failed
+                        // (e.g. PollSet OOM): same hot-loop hazard as the
+                        // poll_io path, so back off identically.
+                        park_failures = park_failures.saturating_add(1);
+                        let shift = park_failures.saturating_sub(1).min(6);
+                        let backoff_ms = PARK_FAILURE_BACKOFF_BASE_MS
+                            .saturating_mul(1 << shift)
+                            .min(PARK_FAILURE_BACKOFF_MAX_MS);
+                        debug!("asyncio idle registration failed, backing off {backoff_ms}ms");
+                        block_on(sleep(TimeSpan::from_millis(backoff_ms)));
                     }
                     ParkOutcome::RegistrationFailed(err) => {
                         // Persistently failing registrations (notably
@@ -193,6 +213,11 @@ fn worker_loop(ctx: Arc<AsyncContext>) {
         }
     }
     ctx.retire_worker();
+    // Detach before membership removal, per the detach contract on
+    // `Process::detach_in_process_worker`: the transient direction keeps
+    // `has_only_in_process_workers` conservative for sibling workers.
+    let process = kprocess::current_user_thread().process().clone();
+    process.detach_in_process_worker();
     // Exit as a normal thread of the process. `group_exit = false`: the
     // leader's exit already broadcast SIGKILL to surviving siblings, which is
     // what unwinds any in-flight operation.
@@ -212,8 +237,11 @@ enum ParkOutcome {
     Work,
     /// The park bound expired without work or a signal.
     ParkBound,
-    /// A signal interrupted the wait.
+    /// A signal (`Interrupted::is_signal`) interrupted the wait.
     Interrupted,
+    /// The wait was interrupted by a registration failure inside
+    /// `interruptible` itself (no signal involved).
+    InterruptedWithoutSignal,
     /// The wait machinery itself failed (e.g. `PollSet` registration OOM).
     RegistrationFailed(KError),
 }
@@ -235,7 +263,8 @@ fn park_until_work(ctx: &Arc<AsyncContext>) -> ParkOutcome {
     ctx.leave_idle();
     match outcome {
         Err(_) => ParkOutcome::ParkBound,
-        Ok(Err(_interrupted)) => ParkOutcome::Interrupted,
+        Ok(Err(interrupted)) if interrupted.is_signal() => ParkOutcome::Interrupted,
+        Ok(Err(_interrupted)) => ParkOutcome::InterruptedWithoutSignal,
         Ok(Ok(Ok(()))) => ParkOutcome::Work,
         Ok(Ok(Err(err))) => ParkOutcome::RegistrationFailed(err),
     }
@@ -251,20 +280,7 @@ fn should_retire(ctx: &Arc<AsyncContext>) -> bool {
     if thread.is_exiting() || thread.process().is_group_exited() {
         return true;
     }
-    ordinary_threads_absent(thread.process())
-}
-
-/// Returns `true` when every published member task of `process` is a
-/// kasyncio worker, so no thread can ever submit or shut the context down
-/// again.
-///
-/// The scan keys on [`WORKER_NAME_PREFIX`], the spawn-side naming
-/// convention, and re-runs at least once per [`IDLE_PARK_BOUND`] per parked
-/// worker.
-fn ordinary_threads_absent(process: &Arc<kprocess::Process>) -> bool {
-    !kprocess::scheduler::process_tasks(process)
-        .iter()
-        .any(|task| !task.name().starts_with(WORKER_NAME_PREFIX))
+    thread.process().has_only_in_process_workers()
 }
 
 /// Returns whether the current worker thread has a pending `SIGKILL`.
@@ -396,13 +412,13 @@ mod tests {
     }
 
     #[def_test(user, serial)]
-    fn ordinary_thread_scan_sees_the_running_test_thread() {
+    fn ordinary_thread_presence_blocks_worker_retirement() {
         // The test body runs on an ordinary (non-worker) thread of its
-        // process, so the scan must report ordinary threads present. The
-        // complementary case (only workers left) requires the scanner to
-        // run on the last ordinary thread's exit and is covered by the
-        // naming convention documented on WORKER_NAME_PREFIX.
+        // process, and no worker is attached, so the retirement condition
+        // must stay false. The complementary case (only workers left) is
+        // covered by the counter contract documented on
+        // `Process::attach_in_process_worker`/`detach_in_process_worker`.
         let thread = kprocess::current_user_thread();
-        assert!(!ordinary_threads_absent(thread.process()));
+        assert!(!thread.process().has_only_in_process_workers());
     }
 }

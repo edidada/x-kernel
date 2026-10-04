@@ -24,12 +24,13 @@ process/kasyncio/src/
 ├── abi.rs       user ABI: opcodes, flags, SQE/CQE/params layouts, ring header
 ├── context.rs   AsyncContext: ready/completed staging, worker accounting, wake sources
 ├── worker.rs    spawn, idle park, retirement, signal/exit contracts
-├── file.rs      anon-inode fops (poll/register_poll/release) — with the syscall step
-├── ops.rs       operation decode/dispatch — with the syscall step
-├── ring.rs      SharedPages ring memory and kernel-side accessors — with the syscall step
-├── setup.rs     context creation and user mapping — with the syscall step
 └── lib.rs       re-exports
 ```
+
+Planned with the syscall step (not part of the tree yet): `file.rs`
+(anon-inode fops: poll/register_poll/release), `ops.rs` (operation
+decode/dispatch), `ring.rs` (SharedPages ring memory and kernel-side
+accessors), and `setup.rs` (context creation and user mapping).
 
 ## Execution model
 
@@ -78,8 +79,8 @@ here explicitly to avoid rework under an ABI-compatibility pretext.
 
 ## Completion contract
 
-A queued operation has exactly one of three outcomes, and every user
-cookie is observable in exactly one completion:
+Every operation **accepted onto the ready queue** has exactly one of three
+outcomes, and its user cookie is observable in exactly one completion:
 
 - **Executed**: a worker dispatched it; the completion carries the natural
   result (non-negative count or negated errno).
@@ -88,6 +89,10 @@ cookie is observable in exactly one completion:
 - **In flight at shutdown**: already dispatched operations run to their
   natural completion even after shutdown; the context stays alive until
   the last worker retires.
+
+A submission rejected at enqueue produces no completion — the submitter
+observes the error directly (`WouldBlock` on a full queue,
+`BadFileDescriptor` on a shut-down context).
 
 ## Worker exit contract
 
@@ -110,19 +115,20 @@ by the ordinary exit path — when any of the following holds:
 4. **Last ordinary thread gone**: the final ordinary (non-worker) thread's
    plain exit must not strand parked workers holding membership — that
    would stall `waitpid` forever. Workers re-evaluate at least once per
-   `IDLE_PARK_BOUND` (200 ms) whether every published member task is a
-   worker (keyed on the `kaiow/` task-name prefix) and retire if so, which
-   lets the final `do_exit` complete the process tail. This also removes
-   the need for a cross-context notifier when a process owns several
-   async contexts.
+   `IDLE_PARK_BOUND` (200 ms) whether `Process::has_only_in_process_workers`
+   holds — an explicit per-process worker counter maintained by the spawn
+   (attach after membership publication) and retire (detach before
+   membership removal) paths, so it cannot be forged through task naming
+   and is conservative under races. The last `do_exit` then completes the
+   process tail. This also removes the need for a cross-context notifier
+   when a process owns several async contexts.
 
 ## Known limitations
 
 - Multiple contexts per process each park independently; the periodic
   park bound (not a cross-context wake) is what eventually retires their
   workers. Latency in that corner is bounded but not prompt.
-- The last-ordinary-thread scan keys on the `kaiow/` name prefix, a
-  convention owned by this crate. If task naming ever becomes user-visible
-  or mutable, the scan must move to an explicit marker.
 - The completion path stages completions in a kernel-side deque until the
   completion ring lands; ring publication replaces the staging step.
+- Handler-visible fatal signals other than `SIGKILL` still require a
+  userspace return; workers only self-terminate on pending `SIGKILL`.
