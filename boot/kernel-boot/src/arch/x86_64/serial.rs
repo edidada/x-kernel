@@ -40,17 +40,23 @@ fn init_once() {
     }
 
     let port = bootconsole_config::ioport_addr().expect("missing x86 boot console ioport");
-    // SAFETY: these programmed-I/O writes target the configured UART registers
-    // and are the standard early-console initialization sequence.
-    unsafe {
-        outb(port + UART_IER_OFFSET, UART_IER_DISABLE_ALL);
-        outb(port + UART_LCR_OFFSET, UART_LCR_DLAB);
-        outb(port + UART_DATA_OFFSET, UART_DLL_38400_BAUD);
-        outb(port + UART_IER_OFFSET, UART_DLM_38400_BAUD);
-        outb(port + UART_LCR_OFFSET, UART_LCR_8N1);
-        outb(port + UART_FCR_OFFSET, UART_FCR_ENABLE_AND_CLEAR);
-        outb(port + UART_MCR_OFFSET, UART_MCR_IRQ_RTS_DTR);
-    }
+    // SAFETY: The configured UART IER is writable at CPL0; disable interrupts before changing its
+    // divisor.
+    unsafe { outb(port + UART_IER_OFFSET, UART_IER_DISABLE_ALL) };
+    // SAFETY: The configured UART LCR is writable; setting DLAB selects the divisor registers for
+    // the next writes.
+    unsafe { outb(port + UART_LCR_OFFSET, UART_LCR_DLAB) };
+    // SAFETY: DLAB is set, so this UART data-port address selects the divisor low byte.
+    unsafe { outb(port + UART_DATA_OFFSET, UART_DLL_38400_BAUD) };
+    // SAFETY: DLAB remains set, so this UART IER address selects the divisor high byte.
+    unsafe { outb(port + UART_IER_OFFSET, UART_DLM_38400_BAUD) };
+    // SAFETY: The divisor is complete; the UART LCR accepts 8N1 and clearing DLAB restores normal
+    // registers.
+    unsafe { outb(port + UART_LCR_OFFSET, UART_LCR_8N1) };
+    // SAFETY: The configured UART FIFO-control port accepts this enable-and-clear command.
+    unsafe { outb(port + UART_FCR_OFFSET, UART_FCR_ENABLE_AND_CLEAR) };
+    // SAFETY: The configured UART modem-control port accepts IRQ, RTS and DTR during early boot.
+    unsafe { outb(port + UART_MCR_OFFSET, UART_MCR_IRQ_RTS_DTR) };
 
     BOOT_CONSOLE_INITIALIZED.store(true, Ordering::Release);
 }
@@ -61,10 +67,10 @@ fn write_raw_byte(byte: u8) {
     let port = bootconsole_config::ioport_addr().expect("missing x86 boot console ioport");
     // SAFETY: these programmed-I/O operations poll the configured UART status
     // register and write one byte to its data register.
-    unsafe {
-        while inb(port + UART_LSR_OFFSET) & UART_LSR_THR_EMPTY == 0 {}
-        outb(port + UART_DATA_OFFSET, byte);
-    }
+    while unsafe { inb(port + UART_LSR_OFFSET) } & UART_LSR_THR_EMPTY == 0 {}
+    // SAFETY: This is the configured UART data register; the preceding status
+    // read observed transmit space and early boot executes with I/O privilege.
+    unsafe { outb(port + UART_DATA_OFFSET, byte) };
 }
 
 #[inline]

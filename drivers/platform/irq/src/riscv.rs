@@ -109,13 +109,14 @@ pub fn init_current_cpu_context() {
 }
 
 pub fn init_percpu() {
-    // SAFETY: these CSR writes only affect interrupt-enable bits on the
-    // current hart during local interrupt-controller initialization.
-    unsafe {
-        sie::set_ssoft();
-        sie::set_stimer();
-        sie::set_sext();
-    }
+    // SAFETY: Local interrupt initialization runs in supervisor mode; SSIE belongs to this hart.
+    unsafe { sie::set_ssoft() };
+    // SAFETY: The current hart owns its supervisor timer-enable CSR bit during local
+    // initialization.
+    unsafe { sie::set_stimer() };
+    // SAFETY: The current hart owns its supervisor external-enable CSR bit during local
+    // initialization.
+    unsafe { sie::set_sext() };
     init_current_cpu_context();
 }
 
@@ -152,12 +153,14 @@ impl kirq::IntrManagerIf {
             @S_TIMER => {
                 // SAFETY: these CSR writes only toggle the current hart's
                 // supervisor-timer enable bit.
-                unsafe {
-                    if enabled {
-                        sie::set_stimer();
-                    } else {
-                        sie::clear_stimer();
-                    }
+                if enabled {
+                    // SAFETY: Running in supervisor mode; this changes only
+                    // the current hart's timer interrupt-enable bit.
+                    unsafe { sie::set_stimer() };
+                } else {
+                    // SAFETY: Running in supervisor mode; this masks only the
+                    // current hart's supervisor timer interrupt.
+                    unsafe { sie::clear_stimer() };
                 }
             },
             @S_SOFT => {},

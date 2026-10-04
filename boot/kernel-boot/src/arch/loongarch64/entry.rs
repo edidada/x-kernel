@@ -177,13 +177,16 @@ fn cmdline_len(cmdline_paddr: usize) -> usize {
     let mut len = 0usize;
     // SAFETY: `cmdline_paddr` comes from firmware handoff; after `p2v` it
     // points to a readable NUL-terminated command-line buffer during early boot.
-    unsafe {
-        while len < 4096 {
-            if cmdline.add(len).read_volatile() == 0 {
-                break;
-            }
-            len += 1;
+    while len < 4096 {
+        // SAFETY: Firmware supplies a readable NUL-terminated command line;
+        // this loop stops at the terminator within the boot protocol bound.
+        let byte = unsafe { cmdline.add(len) };
+        // SAFETY: byte points at the next readable firmware command-line byte
+        // through the active boot mapping; firmware no longer mutates it.
+        if unsafe { byte.read_volatile() } == 0 {
+            break;
         }
+        len += 1;
     }
     len
 }

@@ -150,14 +150,15 @@ impl CpuSlotChunk {
         debug_assert!(cpu < self.cpu_count);
         // SAFETY: Callers validate cpu and offset; the chunk contract covers
         // the resulting pointer and alignment is checked by the allocator.
-        unsafe {
-            NonNull::new_unchecked(
-                self.base
-                    .as_ptr()
-                    .add(cpu * self.area_stride + offset)
-                    .cast(),
-            )
-        }
+        let element = unsafe {
+            self.base
+                .as_ptr()
+                .add(cpu * self.area_stride + offset)
+                .cast()
+        };
+        // SAFETY: The validated CPU/offset locates an element within the live,
+        // non-null chunk allocation, so its address cannot be null.
+        unsafe { NonNull::new_unchecked(element) }
     }
 }
 

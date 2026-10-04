@@ -101,7 +101,10 @@ impl NetBuf {
         debug_assert!(end <= self.buf_len, "network buffer slice out of bounds");
         // SAFETY: `start..end` is checked against this buffer's backing
         // allocation, so the raw slice stays within the owned storage.
-        unsafe { core::slice::from_raw_parts(self.base_ptr().add(start), len) }
+        let data = unsafe { self.base_ptr().add(start) };
+        // SAFETY: The checked range contains len initialized bytes of this owned
+        // allocation; self keeps storage live and excludes mutation.
+        unsafe { core::slice::from_raw_parts(data, len) }
     }
 
     fn get_slice_mut(&mut self, start: usize, len: usize) -> &mut [u8] {
@@ -114,7 +117,10 @@ impl NetBuf {
         );
         // SAFETY: `start..end` is checked against this buffer's backing
         // allocation, and `&mut self` guarantees exclusive access.
-        unsafe { core::slice::from_raw_parts_mut(self.base_ptr().add(start), len) }
+        let data = unsafe { self.base_ptr().add(start) };
+        // SAFETY: The checked range contains len initialized bytes of this owned
+        // allocation; &mut self excludes all other access.
+        unsafe { core::slice::from_raw_parts_mut(data, len) }
     }
 
     /// Returns the capacity of the buffer.

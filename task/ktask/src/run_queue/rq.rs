@@ -830,46 +830,56 @@ impl RunQueue {
         // Program the schedule timer for the incoming task before switching.
         program_next_deadline(self, &next_task, now_ns);
 
-        // SAFETY: scheduling owns both task contexts here, IRQs are disabled,
-        // and the percpu scheduler/task pointers being updated are local to
-        // the current CPU.
-        unsafe {
-            let prev_ctx_ptr = prev_task.ctx_mut_ptr();
-            let next_ctx_ptr = next_task.ctx_mut_ptr();
+        let prev_ctx_ptr = prev_task.ctx_mut_ptr();
+        let next_ctx_ptr = next_task.ctx_mut_ptr();
 
-            #[cfg(target_arch = "aarch64")]
-            if let Some(root) = next_task
-                .user_runtime()
-                .and_then(|runtime| runtime.switch_page_table_root())
-            {
-                (*next_ctx_ptr).set_page_table_root(root);
-            }
-
-            // Store the weak pointer of **prev_task** in percpu variable `PREV_TASK`.
-            #[cfg(feature = "smp")]
-            {
-                *PREV_TASK.shared_current().lock() = Arc::downgrade(&prev_task);
-            }
-
-            // The strong reference count of `prev_task` will be decremented by 1,
-            // but won't be dropped until `gc_entry()` is called.
-            assert!(Arc::strong_count(&prev_task) > 1);
-            assert!(Arc::strong_count(&next_task) >= 1);
-
-            let suspended_exception = khal::context::suspend_active_exception_context();
-            CurrentTask::set_current(prev_task, next_task);
-
-            (*prev_ctx_ptr).switch_to(&*next_ctx_ptr);
-            khal::context::resume_active_exception_context(suspended_exception);
-            if let Some(runtime) = current().user_runtime() {
-                runtime.on_enter();
-            }
-
-            // Current it's **next_task** running on this CPU, clear the `prev_task`'s `on_cpu` field
-            // to indicate that it has finished its scheduling process and no longer running on this CPU.
-            #[cfg(feature = "smp")]
-            clear_prev_task_on_cpu(self);
+        #[cfg(target_arch = "aarch64")]
+        if let Some(root) = next_task
+            .user_runtime()
+            .and_then(|runtime| runtime.switch_page_table_root())
+        {
+            // SAFETY: The scheduler owns next_task's inactive context;
+            // IRQs are disabled and it cannot be run by another CPU here.
+            unsafe { (*next_ctx_ptr).set_page_table_root(root) };
         }
+
+        // Store the weak pointer of **prev_task** in percpu variable `PREV_TASK`.
+        #[cfg(feature = "smp")]
+        {
+            *PREV_TASK.shared_current().lock() = Arc::downgrade(&prev_task);
+        }
+
+        // The strong reference count of `prev_task` will be decremented by 1,
+        // but won't be dropped until `gc_entry()` is called.
+        assert!(Arc::strong_count(&prev_task) > 1);
+        assert!(Arc::strong_count(&next_task) >= 1);
+
+        let suspended_exception = khal::context::suspend_active_exception_context();
+        // SAFETY: IRQs and migration are disabled, prev_task is current, and
+        // the scheduler owns the next task and transfers its retained reference.
+        unsafe { CurrentTask::set_current(prev_task, next_task) };
+
+        // SAFETY: Scheduling owns the outgoing context exclusively; its task
+        // remains retained after set_current and cannot be reclaimed here.
+        let prev_ctx = unsafe { &mut *prev_ctx_ptr };
+        // SAFETY: next_task's retained context is initialized and distinct from
+        // prev_ctx; scheduler ownership excludes concurrent context mutation.
+        let next_ctx = unsafe { &*next_ctx_ptr };
+        prev_ctx.switch_to(next_ctx);
+        khal::context::resume_active_exception_context(suspended_exception);
+        if let Some(runtime) = current().user_runtime() {
+            runtime.on_enter();
+        }
+
+        // Current it's **next_task** running on this CPU, clear the `prev_task`'s `on_cpu` field
+        // to indicate that it has finished its scheduling process and no longer running on this
+        // CPU.
+        #[cfg(feature = "smp")]
+        // SAFETY: The switch finished on this run queue with IRQs/migration
+        // disabled; PREV_TASK still retains the task whose old stack is inactive.
+        unsafe {
+            clear_prev_task_on_cpu(self)
+        };
     }
 }
 

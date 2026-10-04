@@ -283,13 +283,11 @@ unsafe impl VirtMemIo for Vm {
         copy_user_pages(start, buf.len(), MappingFlags::READ, |offset, count| {
             // SAFETY: the validated user page and this subrange of `buf` cover
             // `count` bytes. The exception table reports inaccessible memory.
-            unsafe {
-                user_copy(
-                    buf.as_mut_ptr().cast::<u8>().add(offset),
-                    (start + offset) as _,
-                    count,
-                )
-            }
+            let destination = unsafe { buf.as_mut_ptr().cast::<u8>().add(offset) };
+            // SAFETY: copy_user_pages validated the user source; destination
+            // covers count exclusively borrowed kernel bytes. Faults are handled
+            // by user_copy's exception-table path.
+            unsafe { user_copy(destination, (start + offset) as _, count) }
         })
     }
 
@@ -297,7 +295,10 @@ unsafe impl VirtMemIo for Vm {
         copy_user_pages(start, buf.len(), MappingFlags::WRITE, |offset, count| {
             // SAFETY: the validated user page and this subrange of `buf` cover
             // `count` bytes. The exception table reports inaccessible memory.
-            unsafe { user_copy((start + offset) as _, buf.as_ptr().add(offset), count) }
+            let source = unsafe { buf.as_ptr().add(offset) };
+            // SAFETY: The kernel source has count initialized bytes, and
+            // copy_user_pages validated the user destination; user_copy handles faults.
+            unsafe { user_copy((start + offset) as _, source, count) }
         })
     }
 }

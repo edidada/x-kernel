@@ -112,7 +112,10 @@ unsafe impl<T, const D: bool> Adapter for FairAdapter<T, D> {
         // SAFETY: Adapter supplies a live entity; OFFSET selects its
         // aligned, initialized link field without creating an exclusive
         // entity reference.
-        unsafe { NonNull::new_unchecked(value.cast::<u8>().add(Self::OFFSET).cast_mut().cast()) }
+        let link = unsafe { value.cast::<u8>().add(Self::OFFSET).cast_mut().cast() };
+        // SAFETY: A field within the caller's live SchedTask allocation cannot
+        // have a null address.
+        unsafe { NonNull::new_unchecked(link) }
     }
 
     fn link_ops(&self) -> &Self::LinkOps {

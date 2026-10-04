@@ -58,7 +58,10 @@ impl Frame {
         let offset = CurrentArch::FRAME_OFFSET;
         // SAFETY: The caller guarantees `fp` points at a readable frame record
         // with the architecture-specific offset already accounted for.
-        unsafe { (fp as *const Frame).sub(offset).read() }
+        let frame = unsafe { (fp as *const Frame).sub(offset) };
+        // SAFETY: read_unchecked's caller supplies a readable, aligned frame
+        // record at the architecture-adjusted address.
+        unsafe { frame.read() }
     }
 
     /// Adjust the instruction pointer for symbolication.

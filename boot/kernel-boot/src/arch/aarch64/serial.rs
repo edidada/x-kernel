@@ -232,14 +232,18 @@ fn counter_ticks() -> u64 {
     // SAFETY: Firmware/hypervisor entry must permit reads of the configured
     // counter at the kernel's exception level. Selecting the virtual view
     // avoids CNTPCT_EL0 accesses that may trap in an EL1 guest.
-    unsafe {
-        if IS_VIRTUAL_COUNTER {
+    if IS_VIRTUAL_COUNTER {
+        // SAFETY: Firmware permits the selected virtual counter at this EL.
+        unsafe {
             core::arch::asm!(
                 "mrs {0}, CNTVCT_EL0",
                 out(reg) ticks,
                 options(nostack, preserves_flags)
             );
-        } else {
+        }
+    } else {
+        // SAFETY: The configured physical-counter view is readable at this EL.
+        unsafe {
             core::arch::asm!(
                 "mrs {0}, CNTPCT_EL0",
                 out(reg) ticks,
@@ -257,14 +261,18 @@ fn counter_ticks_idmap() -> u64 {
     // SAFETY: Firmware/hypervisor entry must permit reads of the configured
     // counter at the kernel's exception level. Selecting the virtual view
     // avoids CNTPCT_EL0 accesses that may trap in an EL1 guest.
-    unsafe {
-        if IS_VIRTUAL_COUNTER {
+    if IS_VIRTUAL_COUNTER {
+        // SAFETY: Firmware permits the selected virtual counter at this EL.
+        unsafe {
             core::arch::asm!(
                 "mrs {0}, CNTVCT_EL0",
                 out(reg) ticks,
                 options(nostack, preserves_flags)
             );
-        } else {
+        }
+    } else {
+        // SAFETY: The configured physical-counter view is readable at this EL.
+        unsafe {
             core::arch::asm!(
                 "mrs {0}, CNTPCT_EL0",
                 out(reg) ticks,

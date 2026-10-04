@@ -345,11 +345,10 @@ impl PciConfigAccess {
         let address = self.cam_offset(device_function, register_offset);
         // SAFETY: The pointer arithmetic stays within the MMIO window because
         // cam_offset() produces offsets bounded by Cam::size().
-        unsafe {
-            (self.mmio_base as *mut u32)
-                .add((address >> 2) as usize)
-                .read_volatile()
-        }
+        let register = unsafe { (self.mmio_base as *mut u32).add((address >> 2) as usize) };
+        // SAFETY: Construction retains a mapped CAM window, and cam_offset
+        // selects a naturally aligned 32-bit configuration register within it.
+        unsafe { register.read_volatile() }
     }
 
     /// Writes a 32-bit word to PCI configuration space.
@@ -358,11 +357,10 @@ impl PciConfigAccess {
     pub fn write_word(&mut self, device_function: DeviceFunction, register_offset: u16, data: u32) {
         let address = self.cam_offset(device_function, register_offset);
         // SAFETY: Same as read_word.
-        unsafe {
-            (self.mmio_base as *mut u32)
-                .add((address >> 2) as usize)
-                .write_volatile(data);
-        }
+        let register = unsafe { (self.mmio_base as *mut u32).add((address >> 2) as usize) };
+        // SAFETY: Construction retains a mapped CAM window, and cam_offset
+        // selects a naturally aligned 32-bit configuration register within it.
+        unsafe { register.write_volatile(data) };
     }
 }
 

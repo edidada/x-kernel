@@ -58,12 +58,16 @@ pub(super) fn init() {
     // guard-free shared accessor yields the `&'static` descriptor needs.
     let tss = gdt.append(Descriptor::tss_segment(TSS.current_shared()));
     gdt.load();
-    // SAFETY: Segment selectors are compile-time constants verified by `assert_eq!` above. Loading them after `gdt.load()` is valid because the GDT now contains the referenced descriptors.
-    unsafe {
-        DS::set_reg(KDATA);
-        ES::set_reg(KDATA);
-        SS::set_reg(KDATA);
-        CS::set_reg(KCODE64);
-        load_tss(tss);
-    }
+    // SAFETY: KDATA was verified against the descriptor installed in the now-loaded GDT; DS may
+    // select it.
+    unsafe { DS::set_reg(KDATA) };
+    // SAFETY: KDATA names the verified kernel data descriptor in the loaded GDT; ES may select it.
+    unsafe { ES::set_reg(KDATA) };
+    // SAFETY: KDATA names the verified writable kernel stack/data descriptor in the loaded GDT.
+    unsafe { SS::set_reg(KDATA) };
+    // SAFETY: KCODE64 names the verified 64-bit kernel code descriptor in the loaded GDT.
+    unsafe { CS::set_reg(KCODE64) };
+    // SAFETY: tss selects the TSS descriptor just appended; its per-CPU storage is permanent and
+    // the GDT is loaded.
+    unsafe { load_tss(tss) };
 }
