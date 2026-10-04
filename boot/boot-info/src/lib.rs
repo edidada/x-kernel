@@ -555,7 +555,7 @@ pub enum BootProtocol {
     Uefi       = 3,
     DeviceTree = 4,
     LinuxBoot  = 5,
-    OpenSBI    = 6,
+    OpenSbi    = 6,
     UBoot      = 7,
     Bios       = 8,
 }

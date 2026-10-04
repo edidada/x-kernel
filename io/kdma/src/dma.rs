@@ -15,7 +15,7 @@ use log::error;
 use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr, va};
 
 use crate::{
-    DMAInfo, DmaBusAddress, DmaDirection,
+    DmaBusAddress, DmaDirection, DmaInfo,
     bounce_pool::{BounceMapping, BouncePool, DMA_BOUNCE_POOL_PAGES, bounce_pool_size},
     p2b,
 };
@@ -71,17 +71,17 @@ impl DmaAllocator {
     ///
     /// # Safety
     ///
-    /// The caller must treat the returned [`DMAInfo`] as coherent DMA memory:
+    /// The caller must treat the returned [`DmaInfo`] as coherent DMA memory:
     /// deallocate it exactly once with the same `layout`, do not forge or
     /// offset the returned CPU address, and only hand the bus address to a
     /// device that is allowed to DMA that range.
     #[track_caller]
-    pub unsafe fn allocate_dma_memory(&mut self, layout: Layout) -> AllocResult<DMAInfo> {
+    pub unsafe fn allocate_dma_memory(&mut self, layout: Layout) -> AllocResult<DmaInfo> {
         self.alloc_coherent_pages(layout)
     }
 
     #[track_caller]
-    fn alloc_coherent_pages(&mut self, layout: Layout) -> AllocResult<DMAInfo> {
+    fn alloc_coherent_pages(&mut self, layout: Layout) -> AllocResult<DmaInfo> {
         let num_pages = layout_pages(&layout);
         let vaddr_raw = global_allocator().alloc_dma_pages(
             num_pages,
@@ -95,7 +95,7 @@ impl DmaAllocator {
             | MappingFlags::SHARED;
         self.update_flags(vaddr, num_pages, flags)?;
         self.prepare_platform_dma(v2p(vaddr), num_pages * PAGE_SIZE_4K)?;
-        let dma_info = DMAInfo {
+        let dma_info = DmaInfo {
             // SAFETY: `vaddr_raw` is the start of the freshly allocated DMA mapping
             // and therefore cannot be null.
             cpu_addr: unsafe { NonNull::new_unchecked(vaddr_raw as *mut u8) },
@@ -139,7 +139,7 @@ impl DmaAllocator {
     /// `dma` must come from a prior successful [`allocate_dma_memory`] call on
     /// this allocator, and `layout` must exactly match that allocation.
     #[track_caller]
-    pub unsafe fn deallocate_dma_memory(&mut self, dma: DMAInfo, layout: Layout) {
+    pub unsafe fn deallocate_dma_memory(&mut self, dma: DmaInfo, layout: Layout) {
         let num_pages = layout_pages(&layout);
         if !self.trace_coherent_free(dma, num_pages) {
             return;
@@ -165,7 +165,7 @@ impl DmaAllocator {
         &mut self,
         buffer: NonNull<[u8]>,
         direction: DmaDirection,
-    ) -> AllocResult<DMAInfo> {
+    ) -> AllocResult<DmaInfo> {
         use core::sync::atomic::{Ordering, fence};
 
         let len = buffer.len();
@@ -253,7 +253,7 @@ impl DmaAllocator {
         self.recycle_bounce_buffer(mapping.cpu_addr, mapping.layout);
     }
 
-    fn alloc_bounce_buffer(&mut self, len: usize) -> AllocResult<(DMAInfo, Layout)> {
+    fn alloc_bounce_buffer(&mut self, len: usize) -> AllocResult<(DmaInfo, Layout)> {
         let pool = self.bounce_pool_mut()?;
         pool.allocate(len)
     }
@@ -276,7 +276,7 @@ impl DmaAllocator {
 
     #[cfg(feature = "dma-trace")]
     #[track_caller]
-    fn trace_coherent_alloc(&mut self, dma: DMAInfo, num_pages: usize) {
+    fn trace_coherent_alloc(&mut self, dma: DmaInfo, num_pages: usize) {
         let cpu_addr = dma.cpu_addr.as_ptr() as usize;
         let site = TraceSite::caller();
         if let Some(prev) = self.coherent_allocs.get(&cpu_addr).copied() {
@@ -305,11 +305,11 @@ impl DmaAllocator {
     }
 
     #[cfg(not(feature = "dma-trace"))]
-    fn trace_coherent_alloc(&mut self, _dma: DMAInfo, _num_pages: usize) {}
+    fn trace_coherent_alloc(&mut self, _dma: DmaInfo, _num_pages: usize) {}
 
     #[cfg(feature = "dma-trace")]
     #[track_caller]
-    fn trace_coherent_free(&mut self, dma: DMAInfo, num_pages: usize) -> bool {
+    fn trace_coherent_free(&mut self, dma: DmaInfo, num_pages: usize) -> bool {
         let cpu_addr = dma.cpu_addr.as_ptr() as usize;
         let site = TraceSite::caller();
 
@@ -367,7 +367,7 @@ impl DmaAllocator {
     }
 
     #[cfg(not(feature = "dma-trace"))]
-    fn trace_coherent_free(&mut self, _dma: DMAInfo, _num_pages: usize) -> bool {
+    fn trace_coherent_free(&mut self, _dma: DmaInfo, _num_pages: usize) -> bool {
         true
     }
 }

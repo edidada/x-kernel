@@ -29,7 +29,7 @@ impl DmaOp for XKernelResourceProvider {
         let Ok(layout) = Layout::from_size_align(alloc.spec.len, alloc.spec.align) else {
             return;
         };
-        let info = kdma::DMAInfo {
+        let info = kdma::DmaInfo {
             cpu_addr: NonNull::new(alloc.cpu_addr as *mut u8)
                 .expect("coherent DMA allocation stored a null CPU address"),
             bus_addr: kdma::DmaBusAddress::new(alloc.bus_addr),

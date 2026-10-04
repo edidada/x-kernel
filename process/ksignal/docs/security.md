@@ -85,7 +85,7 @@ metadata, not user file content. No other user data is processed or logged.
 ## Known limitations
 
 - `SIGSTKFLT` default action follows Linux (terminate) though it is unused.
-- `SignalOSAction::Stop`/`Continue` are reported, but job-control stop state
+- `SignalOsAction::Stop`/`Continue` are reported, but job-control stop state
   is approximated by the posix runtime (documented there: stop currently
   exits with code 1).
 - FPU/vector state is not carried in the ABI `fpregs` (x86_64 zeroes

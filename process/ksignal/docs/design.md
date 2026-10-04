@@ -9,7 +9,7 @@ construction/restoration of user handler frames. `kprocess` embeds its
 managers into process/thread runtimes; `kexec` maps the signal trampoline
 during exec; `ktimer` produces timer `siginfo` payloads and depends on
 `ksignal` types; `ksyscall` and the posix process runtime own ABI decoding,
-permission checks, and the teardown actions behind `SignalOSAction`.
+permission checks, and the teardown actions behind `SignalOsAction`.
 
 ## Scope
 
@@ -107,7 +107,7 @@ and `SA_NOCLDWAIT` request autoreap.
   user memory through `osvm` checked access (`write_vm`), so it may fail on
   an unmapped stack, which is reported as `CoreDump`.
 - Handler invocation itself never happens here: the caller observing
-  `SignalOSAction::Terminate/CoreDump/Stop/Continue` performs teardown in
+  `SignalOsAction::Terminate/CoreDump/Stop/Continue` performs teardown in
   the posix process runtime, which may sleep.
 - Dequeue observers run synchronously inside the dequeue path; observers
   must only rely on properties guaranteed by every path that can dequeue

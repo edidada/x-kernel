@@ -703,7 +703,7 @@ fn setup_gic(vm: &mut Vm<CurrentArch>) -> VfsResult<()> {
     // (before create_vcpu clones it), since guest_mem_mut needs Arc::get_mut.
     match vm.guest_mem_mut() {
         Some(gm) => {
-            if !gm.map_region(GICC_BASE, GICV_BASE, GIC_IF_SIZE, GuestPerm::DeviceRW) {
+            if !gm.map_region(GICC_BASE, GICV_BASE, GIC_IF_SIZE, GuestPerm::DeviceRw) {
                 log::error!("[kvmm-api] GICC→GICV map_region failed");
                 return Err(VfsError::NoSuchDevice);
             }

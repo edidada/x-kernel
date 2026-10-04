@@ -14,10 +14,10 @@ use xmas_elf::{
 
 use crate::auxv::{AuxEntry, AuxType};
 
-pub struct ELFHeadersBuilder<'a>(ELFHeaders<'a>);
-impl<'a> ELFHeadersBuilder<'a> {
+pub struct ElfHeadersBuilder<'a>(ElfHeaders<'a>);
+impl<'a> ElfHeadersBuilder<'a> {
     pub fn new(input: &'a [u8]) -> Result<Self, &'static str> {
-        Ok(Self(ELFHeaders {
+        Ok(Self(ElfHeaders {
             header: xmas_elf::header::parse_header(input)?,
             ph: Vec::new(),
         }))
@@ -62,7 +62,7 @@ impl<'a> ELFHeadersBuilder<'a> {
     /// Returns an error when the ELF class is unsupported, the program-header
     /// entry size or table length is inconsistent with the ELF header, or a
     /// program-header entry cannot be parsed.
-    pub fn build(mut self, ph: &[u8]) -> Result<ELFHeaders<'a>, &'static str> {
+    pub fn build(mut self, ph: &[u8]) -> Result<ElfHeaders<'a>, &'static str> {
         let entry_size = usize::from(self.0.header.pt2.ph_entry_size());
         let expected_entry_size = match self.0.header.pt1.class() {
             Class::ThirtyTwo => size_of::<ProgramHeader32>(),
@@ -103,21 +103,21 @@ impl<'a> ELFHeadersBuilder<'a> {
     }
 }
 
-pub struct ELFHeaders<'a> {
+pub struct ElfHeaders<'a> {
     pub header: xmas_elf::header::Header<'a>,
     pub ph: Vec<ProgramHeader64>,
 }
 
 /// A wrapper for the ELF file data with some useful methods.
-pub struct ELFParser<'a> {
-    headers: &'a ELFHeaders<'a>,
+pub struct ElfParser<'a> {
+    headers: &'a ElfHeaders<'a>,
     /// Base address of the ELF file loaded into the memory.
     base: usize,
 }
 
-impl<'a> ELFParser<'a> {
+impl<'a> ElfParser<'a> {
     /// Create a new `ELFInfo` instance.
-    pub fn new(headers: &'a ELFHeaders<'a>, bias: usize) -> Result<Self, &'static str> {
+    pub fn new(headers: &'a ElfHeaders<'a>, bias: usize) -> Result<Self, &'static str> {
         let base = if headers.header.pt2.type_().as_type() == xmas_elf::header::Type::SharedObject {
             bias
         } else {
@@ -161,7 +161,7 @@ impl<'a> ELFParser<'a> {
         self.base
     }
 
-    pub fn headers(&self) -> &'a ELFHeaders<'a> {
+    pub fn headers(&self) -> &'a ElfHeaders<'a> {
         self.headers
     }
 

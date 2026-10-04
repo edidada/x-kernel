@@ -28,7 +28,7 @@ pub struct DrmAuth {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModeDirtyFB {
+pub struct DrmModeDirtyFb {
     pub fb_id: u32,
     pub flags: u32,
     pub color: u32,

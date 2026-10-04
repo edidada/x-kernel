@@ -16,7 +16,7 @@ use kprocess::{
     current_user_process_address_space, current_user_thread, poll_cpu_timers, process_exit,
     process_signals,
 };
-use ksignal::{SignalInfo, SignalOSAction, SignalSet, Signo};
+use ksignal::{SignalInfo, SignalOsAction, SignalSet, Signo};
 use ktask::{TaskInner, current};
 use kuaccess::{atomic_cmpxchg_u32, atomic_load_u32};
 use linux_raw_sys::general::{FUTEX_OWNER_DIED, FUTEX_TID_MASK, FUTEX_WAITERS, ROBUST_LIST_LIMIT};
@@ -153,7 +153,7 @@ pub(crate) fn run_user_thread_loop(
         // built, so signal return must not roll the restored context back.
         let mut has_installed_handler = false;
         while let Some(action) = check_signals(&thr, &mut uctx, None) {
-            has_installed_handler |= matches!(action, SignalOSAction::Handler);
+            has_installed_handler |= matches!(action, SignalOsAction::Handler);
         }
         restart_syscall_without_handler(&mut uctx, runtime_action, has_installed_handler);
 
@@ -446,7 +446,7 @@ pub fn check_signals(
     thr: &Thread,
     uctx: &mut UserContext,
     restore_blocked: Option<SignalSet>,
-) -> Option<SignalOSAction> {
+) -> Option<SignalOsAction> {
     // do_exit returns to the kernel loop; its remaining iterations must not
     // touch user mappings or repeat teardown after membership/MM release.
     if thr.is_exiting() {
@@ -456,10 +456,10 @@ pub fn check_signals(
 
     let signo = sig.signo();
     match os_action {
-        SignalOSAction::Terminate => do_exit(signo as i32, true),
-        SignalOSAction::CoreDump => do_exit(128 + signo as i32, true),
-        SignalOSAction::Stop => do_exit(1, true),
-        SignalOSAction::Continue | SignalOSAction::Handler => {}
+        SignalOsAction::Terminate => do_exit(signo as i32, true),
+        SignalOsAction::CoreDump => do_exit(128 + signo as i32, true),
+        SignalOsAction::Stop => do_exit(1, true),
+        SignalOsAction::Continue | SignalOsAction::Handler => {}
     }
     Some(os_action)
 }
@@ -524,8 +524,8 @@ mod tests {
             &SignalInfo::new_kernel(Signo::SIGCONT),
             &SignalAction::default(),
         );
-        assert_eq!(action, Some(SignalOSAction::Continue));
-        let has_installed_handler = matches!(action, Some(SignalOSAction::Handler));
+        assert_eq!(action, Some(SignalOsAction::Continue));
+        let has_installed_handler = matches!(action, Some(SignalOsAction::Handler));
         restart_syscall_without_handler(
             &mut uctx,
             UserThreadRuntimeAction::Continue,

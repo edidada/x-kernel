@@ -257,7 +257,7 @@ Location: `src/driver_registry/virtio/glue.rs:148,150`
 Location: `src/driver_registry/virtio/glue.rs:165,178`
 
 - Uses the same `Layout` as allocation: `pages * PAGE_SIZE_4K` bytes aligned to `PAGE_SIZE_4K`.
-- Reconstructs `DMAInfo` from `paddr` and `vaddr` before calling `deallocate_dma_memory`.
+- Reconstructs `DmaInfo` from `paddr` and `vaddr` before calling `deallocate_dma_memory`.
 
 #### 3c. `mmio_phys_to_virt`
 
