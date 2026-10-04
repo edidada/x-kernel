@@ -946,6 +946,11 @@ pub(crate) mod tests {
     /// Propagates panics from the supplied worker driver or yield function; this
     /// helper does not catch them.
     #[cfg(feature = "smp")]
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "test scenario: the routing check runs inside worker closures of one linear SMP \
+                  script"
+    )]
     pub fn concurrent_owner_routes(
         run_workers: impl FnOnce([alloc::boxed::Box<dyn FnOnce() + Send>; 2]) -> bool,
         yield_now: fn(),
@@ -1025,6 +1030,10 @@ pub(crate) mod tests {
     #[expect(
         clippy::too_many_lines,
         reason = "test scenario: one linear concurrent-cancel script exposed for SMP tests"
+    )]
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "test scenario: the timer handler is defined inside one linear SMP script"
     )]
     pub fn concurrent_cancel_waits_for_cleanup(
         run_workers: impl FnOnce([alloc::boxed::Box<dyn FnOnce() + Send>; 2]) -> bool,
