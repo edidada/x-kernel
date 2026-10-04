@@ -110,13 +110,15 @@ static MEMFS_TYPE: FileSystemType = FileSystemType::internal("memfs");
 
 impl MemoryFs {
     /// Creates an in-memory superblock.
-    #[allow(clippy::new_ret_no_self)]
+    #[expect(
+        clippy::new_ret_no_self,
+        reason = "MemFs construction returns the mounted SuperBlock that owns the filesystem"
+    )]
     pub fn new() -> Arc<SuperBlock> {
         Self::new_with_superblock_flags(SuperBlockFlags::empty())
     }
 
     /// Creates an in-memory superblock with explicit VFS-wide flags.
-    #[allow(clippy::new_ret_no_self)]
     pub fn new_with_superblock_flags(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
         Self::new_with_name_superblock_flags_and_root_mode(
             &MEMFS_TYPE,

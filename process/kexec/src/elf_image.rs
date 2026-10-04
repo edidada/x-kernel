@@ -306,7 +306,11 @@ fn machine_matches_current_arch(machine: Machine) -> bool {
     return machine == Machine::RISC_V;
     #[cfg(target_arch = "loongarch64")]
     return machine == Machine::Other(258);
-    #[allow(unreachable_code)]
+    #[allow(
+        unreachable_code,
+        reason = "Supported architecture cfg branches return before this unsupported-architecture \
+                  fallback"
+    )]
     false
 }
 

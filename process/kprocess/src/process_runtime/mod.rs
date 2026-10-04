@@ -199,7 +199,6 @@ impl Drop for AttachedForkProcess {
 
 impl ProcessRuntime {
     /// Creates a new [`ProcessRuntime`].
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         process: Arc<Process>,
         exe_path: String,
@@ -223,7 +222,11 @@ impl ProcessRuntime {
     }
 
     /// Creates a new [`ProcessRuntime`] with an explicit [`NsProxy`].
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Construct one process runtime from its executable, address space, descriptor \
+                  table and namespace owners"
+    )]
     pub(crate) fn new_with_nsproxy(
         process: Arc<Process>,
         exe_path: String,
@@ -248,7 +251,11 @@ impl ProcessRuntime {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Construct one process runtime from its executable, address space, descriptor \
+                  table and namespace owners"
+    )]
     fn new_with_nsproxy_and_mm_user(
         process: Arc<Process>,
         exe_path: String,

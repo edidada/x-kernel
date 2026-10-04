@@ -66,7 +66,10 @@ enum StdoutKind {
 
 /// Parsed device-tree stdout node: just enough to build a [`SerialPort`] and
 /// wire its input interrupt.
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "Parsed stdout fields are consumed by different enabled serial backends"
+)]
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 struct StdoutDesc {
     kind: StdoutKind,

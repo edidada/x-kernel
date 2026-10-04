@@ -29,7 +29,10 @@ pub static NMI: [fn(usize) -> bool];
 #[def_trap_handler]
 pub static PAGE_FAULT: [fn(VirtAddr, PageFaultFlags) -> bool];
 
-#[allow(unused_macros)]
+#[allow(
+    unused_macros,
+    reason = "Trap dispatch macro is used by architecture-specific exception handlers"
+)]
 macro_rules! handle_trap {
     ($trap:ident, $($args:tt)*) => {{
         let mut iter = $crate::excp::$trap.iter();

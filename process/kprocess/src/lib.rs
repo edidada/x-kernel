@@ -205,7 +205,11 @@ pub fn publish_user_task(task: ktask::TaskInner) -> kerrno::KResult<PublishedUse
 /// its runtime are constructed as one object.
 /// `signal_actions` is an owned initial configuration; use the thread clone
 /// preparation APIs to share an existing process's signal configuration.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Thread construction binds process ownership, identity, kernel entry and user \
+              runtime state together"
+)]
 pub fn build_process_thread(
     process: alloc::sync::Arc<Process>,
     task_number: alloc::sync::Arc<kidentity::PidHandle>,
@@ -229,7 +233,11 @@ pub fn build_process_thread(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Thread construction binds process ownership, identity, kernel entry and user \
+              runtime state together"
+)]
 pub(crate) fn build_process_thread_with_config(
     process: alloc::sync::Arc<Process>,
     task_number: alloc::sync::Arc<kidentity::PidHandle>,

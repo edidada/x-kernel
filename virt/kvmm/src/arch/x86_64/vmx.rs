@@ -80,7 +80,6 @@ pub const X86_SEL_TSS: u64 = 0x28; // GDT index 5 (16-byte descriptor)
 /// VMCS field encodings.
 #[repr(u64)]
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
 pub enum VmcsField {
     // 16-bit guest
     GuestSelEs       = 0x0800,

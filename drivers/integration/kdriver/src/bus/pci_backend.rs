@@ -122,7 +122,10 @@ struct BridgeEntry {
     /// Upper bound of bus numbers behind this bridge. Not used by the
     /// current flat scan (`0..=bus_end`), but kept for future recursive
     /// enumeration and range validation.
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "Retain the discovered subordinate bus bound for bridge-range validation"
+    )]
     subordinate_bus: u8,
 }
 

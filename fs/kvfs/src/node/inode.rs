@@ -1832,7 +1832,11 @@ impl VfsInode {
     }
 
     /// Gets the size of the node.
-    #[allow(clippy::len_without_is_empty)]
+    #[expect(
+        clippy::len_without_is_empty,
+        reason = "Length is the inode byte size, not collection membership; directories have \
+                  separate entry semantics"
+    )]
     pub fn len(&self) -> VfsResult<u64> {
         Ok(self.size())
     }

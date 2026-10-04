@@ -18,7 +18,6 @@ use crate::{DeviceFile, add_device_entry};
 pub(crate) const RTC0_DEVICE_ID: DeviceId = DeviceId::new(250, 0);
 
 #[repr(C)]
-#[allow(non_camel_case_types, dead_code)]
 struct rtc_time {
     tm_sec: c_int,
     tm_min: c_int,

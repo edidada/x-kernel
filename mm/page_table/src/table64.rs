@@ -357,7 +357,10 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop for PageTabl
             M::flush_tlb_process_asid(None, asid);
         }
         let root = self.table_of(self.root_paddr);
-        #[allow(unused_variables)]
+        #[allow(
+            unused_variables,
+            reason = "The root-entry index is used only with the copy-from feature"
+        )]
         for (i, entry) in root.iter().enumerate() {
             #[cfg(feature = "copy-from")]
             if self.borrowed_entries.get(i) {

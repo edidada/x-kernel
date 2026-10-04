@@ -219,7 +219,11 @@ impl<T: 'static> DynamicCpuSlot<'_, T> {
     /// The caller must pin execution with a valid CPU ID and provide exclusive
     /// access to this CPU's value, including exclusion of local IRQ handlers
     /// that can access it.
-    #[allow(clippy::mut_from_ref)]
+    #[expect(
+        clippy::mut_from_ref,
+        reason = "The unsafe caller guarantees exclusive access to the pinned CPU slot for the \
+                  returned lifetime"
+    )]
     pub unsafe fn get_mut_unchecked<'a>(&'a self, pin: &'a impl CpuPin) -> Option<&'a mut T> {
         let cpu = pin.current_cpu().as_usize();
         if cpu >= self.chunk.cpu_count {

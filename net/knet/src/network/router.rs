@@ -46,7 +46,10 @@ pub(crate) struct Rule {
     pub protocol: u8,
     pub scope: u8,
     pub route_type: u8,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "Retain the route preferred-source attribute for source-address selection"
+    )]
     pub prefsrc: Option<IpAddress>,
     source: RuleSource,
     origin: RuleOrigin,

@@ -1088,7 +1088,10 @@ impl CurrentTask {
     }
 
     /// Clone the inner `KtaskRef`.
-    #[allow(clippy::should_implement_trait)]
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "This clone returns a KtaskRef rather than duplicating the current-task wrapper"
+    )]
     pub fn clone(&self) -> KtaskRef {
         self.0.deref().clone()
     }

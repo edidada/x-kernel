@@ -116,7 +116,10 @@ macro_rules! virtio_driver_pair {
 
 /// Activate a VirtIO device whose type is known (PCI path).
 #[cfg(feature = "virtio")]
-#[allow(unused_variables)]
+#[allow(
+    unused_variables,
+    reason = "Device activation inputs are used only by enabled VirtIO device features"
+)]
 fn activate_virtio_device(
     device: Arc<DeviceObject>,
     device_kind: DeviceKind,

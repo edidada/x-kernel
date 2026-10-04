@@ -312,7 +312,11 @@ impl<T: 'static> CpuSlotCell<T> {
     /// [`CpuLocalGuard`] bounds only its own borrow: two different guards can
     /// both name this slot. The caller must therefore hold exclusive access to
     /// this CPU's value for the returned lifetime.
-    #[allow(clippy::mut_from_ref)]
+    #[expect(
+        clippy::mut_from_ref,
+        reason = "The unsafe caller guarantees exclusive access to the pinned CPU slot for the \
+                  returned lifetime"
+    )]
     pub unsafe fn get_mut_unchecked<'a>(&'a self, pin: &'a impl CpuPin) -> &'a mut T {
         // SAFETY: see [`Self::get_unchecked`]; exclusive access is supplied by
         // the caller.
@@ -415,7 +419,6 @@ impl<T: 'static> CpuSlotCell<T> {
     /// # Safety
     /// The caller must be the single execution context on this CPU and must
     /// not alias the value for the returned lifetime.
-    #[allow(clippy::mut_from_ref)]
     pub unsafe fn current_shared_mut(&self) -> &'static mut T {
         // SAFETY: caller's contract; the slot storage is permanent.
         unsafe { &mut *((crate::arch::current_base() + self.offset()) as *mut T) }

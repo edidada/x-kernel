@@ -49,7 +49,11 @@ pub struct UdpSocket {
 
 impl UdpSocket {
     /// Creates a new UDP socket.
-    #[allow(clippy::new_without_default)]
+    #[expect(
+        clippy::new_without_default,
+        reason = "Creating a socket initializes the UDP registry and allocates a PCB rather than \
+                  representing a default value"
+    )]
     pub fn new() -> Self {
         registry::init_udp_registry();
         let state = UdpSocketState::new();

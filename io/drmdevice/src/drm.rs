@@ -7,8 +7,6 @@
 //! See Linux's `include/uapi/drm/drm.h` for the canonical definitions —
 //! everything here is layout-compatible with that header.
 
-#![allow(dead_code)]
-
 use core::ffi::c_int;
 
 use bytemuck::{AnyBitPattern, NoUninit};

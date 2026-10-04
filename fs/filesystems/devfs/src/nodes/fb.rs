@@ -108,7 +108,11 @@ impl FrameBuffer {
         Self { base, size }
     }
 
-    #[allow(clippy::mut_from_ref)]
+    #[expect(
+        clippy::mut_from_ref,
+        reason = "DeviceFileOps supplies a shared receiver for access to the externally mapped \
+                  fbdev shadow buffer"
+    )]
     fn as_mut_slice(&self) -> &mut [u8] {
         // SAFETY: `base..base+size` is the fbdev emulation shadow buffer,
         // which stays mapped for the kernel lifetime; concurrent userspace

@@ -409,7 +409,6 @@ impl DeviceFileOps for EventDev {
                     1 => return Err(KError::InvalidInput),
                     // IOC_READ
                     2 => {
-                        #[allow(clippy::single_match)]
                         match nr {
                             // EVIOCGNAME
                             0x06 => {

@@ -351,7 +351,11 @@ impl Dentry {
         self.vfs_inode().update_metadata(self, update)
     }
 
-    #[allow(clippy::len_without_is_empty)]
+    #[expect(
+        clippy::len_without_is_empty,
+        reason = "Length is the inode byte size, not collection membership; directories have \
+                  separate entry semantics"
+    )]
     /// Gets the byte length of the instantiated dentry.
     pub fn len(&self) -> VfsResult<u64> {
         self.vfs_inode().len()

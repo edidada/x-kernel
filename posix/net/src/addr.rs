@@ -231,7 +231,6 @@ impl SocketAddrExt for NetlinkAddr {
     }
 }
 
-#[allow(non_camel_case_types)]
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub(crate) struct sockaddr_ll {

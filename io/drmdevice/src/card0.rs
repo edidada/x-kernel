@@ -248,13 +248,10 @@ impl DrmIoctl for DrmModeCrtc {
     }
 }
 
-#[allow(dead_code)]
 struct DumbBuffer {
     width: u32,
     height: u32,
-    bpp: u32,
     pitch: u32,
-    size: u64,
     offset: u64,
     resource_id: u32,
     pages: Arc<GlobalPage>,
@@ -824,9 +821,7 @@ impl DrmIoctl for DrmModeCreateDumb {
             DumbBuffer {
                 width: c.width,
                 height: c.height,
-                bpp: c.bpp,
                 pitch: c.pitch,
-                size: c.size,
                 offset,
                 resource_id,
                 pages: pages_arc,

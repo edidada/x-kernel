@@ -100,11 +100,17 @@ pub(crate) fn normalize_file_metadata_update(mut update: MetadataUpdate) -> Meta
 pub(crate) fn update_file_metadata(file: &mut ff::File, update: MetadataUpdate) -> MetadataUpdate {
     let applied = normalize_file_metadata_update(update);
     if let Some(atime) = applied.atime {
-        #[allow(deprecated)]
+        #[expect(
+            deprecated,
+            reason = "fatfs has no non-deprecated setter for explicit utimens access dates"
+        )]
         file.set_accessed(unix_to_dos(atime).date);
     }
     if let Some(mtime) = applied.mtime {
-        #[allow(deprecated)]
+        #[expect(
+            deprecated,
+            reason = "fatfs has no non-deprecated setter for explicit utimens modification times"
+        )]
         file.set_modified(unix_to_dos(mtime));
     }
     applied

@@ -212,7 +212,6 @@ pub(crate) fn boot_print_str(data: &str) {
     write_str_idmap(data);
 }
 
-#[allow(dead_code)]
 pub(crate) fn boot_print_usize(num: usize) {
     write_hex_idmap(num);
     write_str_idmap("\r\n");
@@ -440,7 +439,11 @@ impl Uart {
     }
 }
 
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "Retain register-dump helpers for diagnosing boot failures before normal logging is \
+              available"
+)]
 pub(crate) fn print_el1_reg(switch: bool) {
     if !switch {
         return;
@@ -494,7 +497,11 @@ macro_rules! boot_print_reg {
     };
 }
 
-#[allow(unused)]
+#[expect(
+    dead_code,
+    reason = "Retain direct serial output for diagnosing failures before normal logging is \
+              available"
+)]
 #[unsafe(link_section = ".idmap.text")]
 pub(crate) fn boot_serial_send(data: u8) {
     write_prefixed_byte(data);

@@ -75,7 +75,10 @@ pub(crate) struct Connection {
     /// Current connection info (address + credit) for outgoing packet headers.
     pub(crate) info: VsockConnectionInfo,
     /// True for connections owned by the vsock-TIPC bridge.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Bridge ownership is inspected only with the vsock_tipc_bridge feature"
+    )]
     is_bridge: bool,
     /// `fwd_cnt` value included in the last credit update we sent to the peer.
     last_sent_fwd_cnt: u32,

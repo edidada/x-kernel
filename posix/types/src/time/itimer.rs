@@ -8,7 +8,6 @@ use strum::FromRepr;
 
 /// The POSIX/Linux interval timer kind used by `getitimer(2)` / `setitimer(2)`.
 #[repr(i32)]
-#[allow(non_camel_case_types)]
 #[derive(Eq, PartialEq, Debug, Clone, Copy, FromRepr)]
 pub enum ITimerType {
     /// Wall-clock interval timer.

@@ -3,7 +3,11 @@
 // See LICENSES for license details.
 
 #![no_std]
-#![allow(non_camel_case_types, non_snake_case)]
+#![expect(
+    non_camel_case_types,
+    non_snake_case,
+    reason = "Expose GlobalPlatform TEE C ABI type and field names verbatim"
+)]
 
 pub use tee_api_defines::*;
 pub use tee_api_types::*;
