@@ -266,6 +266,11 @@ impl DmaAllocator {
     }
 
     fn recycle_bounce_buffer(&mut self, cpu_addr: usize, layout: Layout) {
+        #[expect(
+            clippy::expect_used,
+            reason = "Active bounce mappings retain the bounce pool until their buffers are \
+                      recycled"
+        )]
         let pool = self
             .bounce_pool
             .as_mut()

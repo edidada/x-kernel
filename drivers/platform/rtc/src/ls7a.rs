@@ -97,10 +97,15 @@ fn build_system_time(year: u32, toy_low: u32) -> Option<SystemTime> {
         .single()?;
     let date_time =
         date_time.with_nanosecond(extract_bits(toy_low, 0..4) * NANOS_PER_MILLIS as u32)?;
-    Some(
+    Some({
+        #[expect(
+            clippy::expect_used,
+            reason = "chrono has validated the timestamp and normalized its nanoseconds below one \
+                      billion"
+        )]
         SystemTime::from_unix_parts(date_time.timestamp(), date_time.nanosecond())
-            .expect("chrono returns normalized nanoseconds"),
-    )
+            .expect("chrono returns normalized nanoseconds")
+    })
 }
 
 /// Sample `(year, toy_low)` with a year-boundary consistency check.

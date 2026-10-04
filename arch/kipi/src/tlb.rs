@@ -199,6 +199,11 @@ impl ShootdownRequestSlot {
     }
 
     fn allocate_seq(&self) -> RequestSeq {
+        #[expect(
+            clippy::expect_used,
+            reason = "fetch_update cannot return Err because its closure unconditionally returns \
+                      Some"
+        )]
         let previous = self
             .next_seq
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {

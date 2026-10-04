@@ -238,8 +238,14 @@ impl<const N: usize> TimerSet<N> {
     ) -> KResult<(LogicalCpuId, bool)> {
         // SAFETY: forwards the same storage and routing contract. Unconditional
         // acceptance cannot produce None and does not call any external code.
-        unsafe { self.arm_on_checked(node, selected_cpu, deadline, || true) }
-            .map(|armed| armed.expect("unconditional arm must be accepted"))
+        unsafe { self.arm_on_checked(node, selected_cpu, deadline, || true) }.map(|armed| {
+            #[expect(
+                clippy::expect_used,
+                reason = "The acceptance closure always returns true, so successful \
+                          arm_on_checked always returns Some"
+            )]
+            armed.expect("unconditional arm must be accepted")
+        })
     }
 
     /// Arms only if the deadline is still in the future at the locked time check.

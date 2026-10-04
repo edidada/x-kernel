@@ -30,6 +30,11 @@ static BOOT_CONSOLE_START_OF_LINE: AtomicBool = AtomicBool::new(true);
 
 #[inline]
 fn assert_boot_uart_fits_boot_io_window() {
+    #[expect(
+        clippy::expect_used,
+        reason = "Fatal boot: the configured early UART address is absent or invalid; \
+                  boot-console access has no error return or recovery"
+    )]
     let uart_paddr = bootconsole_config::mmio_addr().expect("missing boot console mmio address");
     let offset = uart_paddr & (BOOT_IO_SLOT_SIZE - 1);
     let span = (offset + PAGE_SIZE_4K).align_up_4k();

@@ -153,6 +153,11 @@ fn new_n_tty() -> Arc<NTtyDriver> {
                       installs input_work"
         )]
         let (work, cpu_id) = tty.ldisc.lock().input_work().unwrap();
+        #[expect(
+            clippy::expect_used,
+            reason = "The singleton N_TTY binds once after console IRQ initialization has \
+                      installed the stdout port and prepared its input buffer"
+        )]
         console_driver::serial::stdout_port()
             .expect("console input IRQ requires a stdout port")
             .attach_input_work(work, cpu_id)

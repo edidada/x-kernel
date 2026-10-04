@@ -462,10 +462,15 @@ impl<T> FairClass<T> {
         }
         let buddy = self.next_buddy.take()?;
         self.has_sync_wake = false;
-        Some(
+        Some({
+            #[expect(
+                clippy::expect_used,
+                reason = "A nominated eligible buddy remains in the ready tree under the runqueue \
+                          lock"
+            )]
             self.dequeue_entity(Self::deadline_key(&buddy, tok), tok)
-                .expect("nominated buddy is in the ready tree"),
-        )
+                .expect("nominated buddy is in the ready tree")
+        })
     }
 
     fn update_entity_lag(&self, curr: &SchedTask<T>, tok: RqLocked) {
@@ -562,6 +567,10 @@ impl<T> FairClass<T> {
         let Some(key) = self.earliest_eligible(avg, tok) else {
             return false;
         };
+        #[expect(
+            clippy::expect_used,
+            reason = "earliest_eligible returns a key from this unchanged, locked ready tree"
+        )]
         let peer = self
             .ready
             .find(&key)
@@ -667,10 +676,22 @@ impl<T> ClassOps<T> for FairClass<T> {
         let avg = self.avg_vruntime(None, tok);
         let key = match self.earliest_eligible(avg, tok) {
             Some(key) => key,
-            None => self
-                .first_deadline_key(tok)
-                .expect("ready tree is not empty"),
+            None =>
+            {
+                #[expect(
+                    clippy::expect_used,
+                    reason = "The ready tree was checked nonempty and the selected key remains \
+                              present under the runqueue lock"
+                )]
+                self.first_deadline_key(tok)
+                    .expect("ready tree is not empty")
+            }
         };
+        #[expect(
+            clippy::expect_used,
+            reason = "The ready tree was checked nonempty and the selected key remains present \
+                      under the runqueue lock"
+        )]
         let picked = self
             .dequeue_entity(key, tok)
             .expect("pick key is in the ready tree");

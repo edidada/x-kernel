@@ -202,18 +202,35 @@ pub struct NodeProperty<'a> {
 
 impl<'a> NodeProperty<'a> {
     fn parse(stream: &mut FdtData<'a>, header: &LinuxFdt<'a>) -> Self {
+        #[expect(
+            clippy::expect_used,
+            reason = "LinuxFdt construction validates every property header, string offset and \
+                      node name before traversal"
+        )]
         let tag = stream.u32().expect("FDT property tag").get();
         assert_eq!(tag, FDT_PROP, "bad prop, tag: {}", tag);
 
+        #[expect(
+            clippy::expect_used,
+            reason = "LinuxFdt construction validates every property header, string offset and \
+                      node name before traversal"
+        )]
         let prop = FdtProperty::from_bytes(stream).expect("FDT property");
         let data_len = prop.len.get() as usize;
         let data = &stream.remaining()[..data_len];
         skip_4_aligned(stream, data_len);
 
         NodeProperty {
-            name: header
-                .string_at_offset(prop.name_offset.get() as usize)
-                .expect("invalid FDT string offset"),
+            name: {
+                #[expect(
+                    clippy::expect_used,
+                    reason = "LinuxFdt construction validates every property header, string \
+                              offset and node name before traversal"
+                )]
+                header
+                    .string_at_offset(prop.name_offset.get() as usize)
+                    .expect("invalid FDT string offset")
+            },
             value: data,
         }
     }
@@ -456,6 +473,11 @@ pub(crate) fn skip_current_node<'a>(stream: &mut FdtData<'a>, header: &LinuxFdt<
     #[expect(
         clippy::unwrap_used,
         reason = "constructor validation proves every node name is NUL-terminated UTF-8"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "LinuxFdt construction validates every property header, string offset and node \
+                  name before traversal"
     )]
     let unit_name = CStr::new(stream.remaining())
         .expect("unit_name C str")

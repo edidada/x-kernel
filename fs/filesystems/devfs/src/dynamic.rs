@@ -49,6 +49,11 @@ static DEVICES: LazyInit<Mutex<DeviceProjection>> = LazyInit::new();
 static DEVICE_INITIALIZATION: Once<()> = Once::new();
 
 fn projection() -> &'static Mutex<DeviceProjection> {
+    #[expect(
+        clippy::expect_used,
+        reason = "Filesystem initialization installs the permanent devtmpfs projection before \
+                  device callbacks"
+    )]
     DEVICES
         .get()
         .expect("dynamic devtmpfs projection must initialize with its filesystem")
@@ -126,6 +131,11 @@ fn remove_device(node: &DeviceNode) {
         if record.node != *node {
             return;
         }
+        #[expect(
+            clippy::expect_used,
+            reason = "The same locked projection map was checked for this node immediately before \
+                      removal"
+        )]
         projection
             .records
             .remove(&node.core_id())

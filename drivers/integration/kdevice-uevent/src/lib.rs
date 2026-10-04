@@ -98,6 +98,11 @@ impl TryFrom<&str> for UeventAction {
 /// late installation so boot cannot silently omit earlier add events.
 pub fn init() {
     INITIALIZATION.call_once(|| {
+        #[expect(
+            clippy::expect_used,
+            reason = "Boot installs the uevent publisher exactly once before discovery, as \
+                      required by the device lifecycle contract"
+        )]
         install_device_node_lifecycle_publisher(Arc::new(handle_lifecycle_event))
             .expect("device-node uevent publisher must initialize before device discovery");
     });

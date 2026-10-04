@@ -36,6 +36,10 @@ fn truncate_fat_mtime(timestamp: SystemTime) -> SystemTime {
 fn unix_to_dos(datetime: SystemTime) -> fatfs::DateTime {
     let datetime = clamp_fat_timestamp(datetime);
 
+    #[expect(
+        clippy::expect_used,
+        reason = "clamp_fat_timestamp limits the value to the FAT range, which chrono represents"
+    )]
     let dt = DateTime::from_timestamp(datetime.unix_seconds(), datetime.subsec_nanos())
         .expect("clamped FAT timestamp is representable by chrono");
     let dt = dt.naive_utc();

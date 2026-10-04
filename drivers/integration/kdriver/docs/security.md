@@ -122,6 +122,9 @@ that bookkeeping or mask a shared line. Current kirq synchronization waits for
 line-wide in-flight dispatches, not only this device's callback.
 
 Provider resource/capacity errors propagate without publication or fallback.
+Platform-local ID exhaustion likewise returns `DriverError::NoMemory` through
+the existing enumeration error path, preserving the counter instead of wrapping
+or panicking on firmware-controlled device counts.
 The closure is dropped on failed registration, releasing its reclaimer clone.
 The adapter mock verifies forwarding and token ownership, not asynchronous
 release; existing kirq tests cover in-flight dispatch synchronization.

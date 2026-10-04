@@ -409,6 +409,11 @@ impl<R: TtyRead, W: TtyWrite> LineDiscipline<R, W> {
                             queue_input_work(cpu_id, &work);
                         }
                     });
+                    #[expect(
+                        clippy::expect_used,
+                        reason = "TTY work mode is constructed in sleepable task context after \
+                                  the permanent normal worker service is installed"
+                    )]
                     WorkHandle::new(callback).expect("TTY input requires normal workers")
                 });
                 Processor::Work {

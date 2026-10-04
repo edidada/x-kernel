@@ -127,6 +127,11 @@ impl<W: Drain> Owner<W> {
             // SAFETY: W has not yet been destroyed; all producers have lost their
             // handles. Drain ends both callbacks and, for delayed Work, timer tails.
             let work = unsafe { &*storage.work.get().cast::<W>() };
+            #[expect(
+                clippy::expect_used,
+                reason = "Reclamation runs on the normal worker outside the reclaimed callback; \
+                          fresh completion observers have inline registration capacity"
+            )]
             work.drain()
                 .expect("normal reclamation can drain owned work");
         }

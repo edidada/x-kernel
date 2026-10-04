@@ -446,7 +446,17 @@ impl BlockDevice {
     /// publication time, which [`Gendisk::new`] and [`Self::set_capacity`]
     /// already enforce.
     pub fn size(&self) -> u64 {
+        #[expect(
+            clippy::expect_used,
+            reason = "Gendisk construction and capacity updates validate the block size and its \
+                      capacity product"
+        )]
         let block_size = u64::try_from(self.block_size()).expect("validated block size");
+        #[expect(
+            clippy::expect_used,
+            reason = "Gendisk construction and capacity updates validate the block size and its \
+                      capacity product"
+        )]
         self.num_blocks()
             .checked_mul(block_size)
             .expect("validated block-device capacity")

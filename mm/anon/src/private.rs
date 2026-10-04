@@ -471,6 +471,11 @@ impl AnonPrivateObject {
         }
         let new_handle = AnonPrivatePageHandle::new(pa, size);
         commit().map_err(AnonPrivatePageCommitError::Commit)?;
+        #[expect(
+            clippy::expect_used,
+            reason = "The same exclusively held page map was checked for this key before \
+                      replacement"
+        )]
         let old = pages
             .insert(object_start, new_handle)
             .expect("validated private page slot must exist");

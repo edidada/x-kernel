@@ -57,6 +57,11 @@ pub static FILE_SYSTEM_TYPE: kvfs::FileSystemType =
 
 #[macros::register_init]
 fn init_bpf_fs() {
+    #[expect(
+        clippy::expect_used,
+        reason = "Each statically named filesystem is registered once by its unique linker \
+                  initialization entry"
+    )]
     kvfs::register_filesystem(&FILE_SYSTEM_TYPE).expect("BPF filesystem type must register once");
 }
 const PIN_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o600);

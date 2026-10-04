@@ -154,6 +154,11 @@ impl PidHandle {
     /// Panics if the handle has no root projection; both public constructors
     /// maintain that invariant.
     pub fn root_nr(&self) -> u32 {
+        #[expect(
+            clippy::expect_used,
+            reason = "Both PID-handle constructors install a root-visible number alongside any \
+                      nested namespace projections"
+        )]
         self.numbers
             .iter()
             .find(|upid| upid.ns.is_root())

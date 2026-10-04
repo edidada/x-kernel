@@ -52,8 +52,10 @@ mod crypto;
 mod curve25519_key;
 mod fs_dirfile;
 mod fs_htree;
-#[cfg(unittest)]
-mod fs_htree_tests;
+#[unittest::mod_test]
+mod fs_htree_tests {
+    include!("fs_htree_tests.rs");
+}
 mod huk_subkey;
 
 mod libutee;

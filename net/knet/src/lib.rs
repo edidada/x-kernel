@@ -10,6 +10,11 @@
 //! - [`UdpSocket`](udp::UdpSocket): A UDP socket that provides POSIX-like APIs.
 //! - [`send_link_frame`]: Sends a link-layer frame through a selected interface.
 //! - [`UdpDatagramRelay`]: A persistent nonblocking UDP relay socket.
+#![allow(
+    clippy::expect_used,
+    reason = "case (b): legacy knet has 20 diagnostic sites, too many to judge individually in \
+              this migration; new code remains reviewed"
+)]
 #![no_std]
 
 #[macro_use]

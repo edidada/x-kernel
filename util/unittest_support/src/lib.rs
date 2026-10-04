@@ -2,6 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+#![allow(
+    clippy::expect_used,
+    reason = "case (a): this crate only constructs kernel test fixtures; fixture and cleanup \
+              failures must fail the test"
+)]
 #![no_std]
 
 extern crate alloc;

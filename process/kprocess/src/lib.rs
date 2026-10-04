@@ -45,6 +45,11 @@
 //! assert_eq!(nice.proc_stat_priority(), 0);
 //! ```
 
+#![allow(
+    clippy::expect_used,
+    reason = "case (b): legacy kprocess has 31 diagnostic sites, too many to judge individually \
+              in this migration; new code remains reviewed"
+)]
 #![no_std]
 #![warn(missing_docs)]
 

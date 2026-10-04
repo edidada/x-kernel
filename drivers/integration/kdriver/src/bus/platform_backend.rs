@@ -113,10 +113,15 @@ impl PlatformBackend {
                         }
                     }
                 } else {
+                    let id = match self.id_alloc.alloc() {
+                        Ok(id) => id,
+                        Err(error) => {
+                            first_error.get_or_insert(error);
+                            return;
+                        }
+                    };
                     Some((
-                        DeviceLocation::FirmwareNode {
-                            id: self.id_alloc.alloc(),
-                        },
+                        DeviceLocation::FirmwareNode { id },
                         DeviceIdentity::Platform(PlatformIdentity {
                             alias: None,
                             firmware_id: Some(dev.firmware_id),
@@ -254,7 +259,7 @@ impl PlatformBackend {
             context.register_device(
                 bus_id,
                 DeviceLocation::PlatformStatic {
-                    id: self.id_alloc.alloc(),
+                    id: self.id_alloc.alloc()?,
                 },
                 DiscoveryOrigin::PlatformStatic,
                 DeviceIdentity::Platform(PlatformIdentity {
@@ -275,7 +280,7 @@ impl PlatformBackend {
             context.register_device(
                 bus_id,
                 DeviceLocation::PlatformStatic {
-                    id: self.id_alloc.alloc(),
+                    id: self.id_alloc.alloc()?,
                 },
                 DiscoveryOrigin::PlatformStatic,
                 DeviceIdentity::Platform(PlatformIdentity {
@@ -304,7 +309,7 @@ impl PlatformBackend {
             context.register_device(
                 bus_id,
                 DeviceLocation::PlatformStatic {
-                    id: self.id_alloc.alloc(),
+                    id: self.id_alloc.alloc()?,
                 },
                 DiscoveryOrigin::PlatformStatic,
                 DeviceIdentity::Platform(PlatformIdentity {
@@ -330,7 +335,7 @@ impl PlatformBackend {
             context.register_device(
                 bus_id,
                 DeviceLocation::PlatformStatic {
-                    id: self.id_alloc.alloc(),
+                    id: self.id_alloc.alloc()?,
                 },
                 DiscoveryOrigin::PlatformStatic,
                 DeviceIdentity::Platform(PlatformIdentity {
@@ -356,7 +361,7 @@ impl PlatformBackend {
             context.register_device(
                 bus_id,
                 DeviceLocation::PlatformStatic {
-                    id: self.id_alloc.alloc(),
+                    id: self.id_alloc.alloc()?,
                 },
                 DiscoveryOrigin::PlatformStatic,
                 DeviceIdentity::Platform(PlatformIdentity {

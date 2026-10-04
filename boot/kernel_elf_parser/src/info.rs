@@ -113,17 +113,42 @@ pub struct ElfParser<'a> {
     headers: &'a ElfHeaders<'a>,
     /// Base address of the ELF file loaded into the memory.
     base: usize,
+    /// Validated virtual address of the program-header table.
+    phdr: usize,
 }
 
 impl<'a> ElfParser<'a> {
-    /// Create a new `ELFInfo` instance.
+    /// Creates a parser with a validated program-header address.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no segment covers the program-header table offset
+    /// or its biased virtual address cannot be represented.
     pub fn new(headers: &'a ElfHeaders<'a>, bias: usize) -> Result<Self, &'static str> {
         let base = if headers.header.pt2.type_().as_type() == xmas_elf::header::Type::SharedObject {
             bias
         } else {
             0
         };
-        Ok(Self { headers, base })
+        let ph_offset = headers.header.pt2.ph_offset();
+        let header = headers
+            .ph
+            .iter()
+            .find(|header| {
+                header.offset <= ph_offset && ph_offset - header.offset < header.file_size
+            })
+            .ok_or("program-header table is not covered by a segment")?;
+        let phdr = header
+            .virtual_addr
+            .checked_add(ph_offset - header.offset)
+            .and_then(|address| usize::try_from(address).ok())
+            .and_then(|address| address.checked_add(base))
+            .ok_or("program-header address overflows")?;
+        Ok(Self {
+            headers,
+            base,
+            phdr,
+        })
     }
 
     /// The entry point of the ELF file.
@@ -142,18 +167,9 @@ impl<'a> ElfParser<'a> {
         self.headers.header.pt2.ph_entry_size() as usize
     }
 
-    /// The offset of the program header table in the ELF file.
+    /// The validated virtual address of the program-header table.
     pub fn phdr(&self) -> usize {
-        let ph_offset = self.headers.header.pt2.ph_offset() as usize;
-        let header = self
-            .headers
-            .ph
-            .iter()
-            .find(|header| {
-                (header.offset..header.offset + header.file_size).contains(&(ph_offset as u64))
-            })
-            .expect("can not find program header table address in elf");
-        ph_offset - header.offset as usize + header.virtual_addr as usize + self.base
+        self.phdr
     }
 
     /// The base address of the ELF file loaded into the memory.

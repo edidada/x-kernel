@@ -3,6 +3,11 @@
 // See LICENSES for license details.
 
 #![allow(
+    clippy::expect_used,
+    reason = "case (a): missing generated build configuration must terminate this host build \
+              script"
+)]
+#![allow(
     clippy::unwrap_used,
     reason = "case (a): this host build script intentionally fails the build when Cargo \
               environment or repository layout is unavailable"

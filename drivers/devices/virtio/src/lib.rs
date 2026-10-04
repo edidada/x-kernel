@@ -13,6 +13,11 @@
 //! [`virtio-drivers`]: https://docs.rs/virtio-drivers/latest/virtio_drivers/
 //! [`driver_base`]: driver_base
 
+#![allow(
+    clippy::expect_used,
+    reason = "case (b): legacy virtio has 14 diagnostic sites, too many to judge individually in \
+              this migration; new code remains reviewed"
+)]
 #![no_std]
 #![allow(
     clippy::unwrap_used,

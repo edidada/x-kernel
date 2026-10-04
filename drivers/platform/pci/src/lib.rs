@@ -417,7 +417,7 @@ pub fn configure_device<C: ConfigurationAccess>(
         {
             let new_addr = allocator
                 .as_mut()
-                .expect("No memory ranges available for PCI BARs!")
+                .ok_or(PciInitError::NoMemory)?
                 .alloc_buf(size as _)
                 .ok_or(PciInitError::NoMemory)?;
             if address_type == MemoryBarType::Width32 {

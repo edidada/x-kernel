@@ -221,6 +221,11 @@ impl DeviceNodeLifecycle {
             | DeviceNodeState::Removing
             | DeviceNodeState::Removed => return false,
         };
+        #[expect(
+            clippy::expect_used,
+            reason = "The device registry serializes state transitions, so the previously read \
+                      state cannot change before compare_exchange"
+        )]
         self.state
             .compare_exchange(
                 current as u8,
@@ -252,6 +257,11 @@ impl DeviceNodeLifecycle {
             )]
             state => panic!("cannot finish publishing a node in state {state:?}"),
         };
+        #[expect(
+            clippy::expect_used,
+            reason = "The device registry serializes state transitions, so the previously read \
+                      state cannot change before compare_exchange"
+        )]
         self.state
             .compare_exchange(
                 current as u8,
@@ -538,6 +548,11 @@ static DEVICE_NODES: LazyInit<SpinNoPreempt<DeviceNodeRegistry>> = LazyInit::new
 
 fn device_node_registry() -> SpinNoPreemptGuard<'static, DeviceNodeRegistry> {
     DEVICE_NODES.call_once(|| SpinNoPreempt::new(DeviceNodeRegistry::new()));
+    #[expect(
+        clippy::expect_used,
+        reason = "call_once completed successfully and permanently published the device-node \
+                  registry"
+    )]
     DEVICE_NODES
         .get()
         .expect("device-node registry call_once succeeded")

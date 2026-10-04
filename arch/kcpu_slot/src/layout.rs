@@ -203,6 +203,10 @@ pub unsafe fn begin_cpu_init(cpu: CpuId) -> Result<BootCpuToken, CpuInitError> {
         });
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "The linker reserves non-null kernel storage for every validated CPU slot index"
+    )]
     let base = NonNull::new(cpu_area_base(cpu_index) as *mut u8)
         .expect("linker supplied a null CPU slot area");
     let size = template_size();

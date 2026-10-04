@@ -630,6 +630,11 @@ impl Ext4SbInfo {
             let progress = match result {
                 Ok(progress) => progress,
                 Err(error) => {
+                    #[expect(
+                        clippy::expect_used,
+                        reason = "complete_metadata_mutation preserves the supplied operation \
+                                  error even when transaction completion also fails"
+                    )]
                     let error = self
                         .complete_metadata_mutation::<()>(handle, Err(error))
                         .expect_err("ordered writeback transaction returned an error");

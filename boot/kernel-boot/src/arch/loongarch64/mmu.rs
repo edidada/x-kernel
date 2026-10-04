@@ -508,6 +508,11 @@ pub(super) unsafe fn boot_uefi_memmap_paddr() -> usize {
 #[unsafe(link_section = ".text.boot")]
 unsafe fn raw_efi_context(systemtable_paddr: usize) -> RawEfiContext<'static> {
     let systemtable: *const SystemTable = boot_phys_ptr(systemtable_paddr);
+    #[expect(
+        clippy::expect_used,
+        reason = "Fatal boot: EFI boot tables are invalid; early page-table setup cannot proceed \
+                  and has no error return or recovery"
+    )]
     // SAFETY: `systemtable_paddr` comes from firmware handoff and points to a
     // readable EFI system table in boot-physical addressing.
     unsafe { RawEfiContext::from_ptr(systemtable) }.expect("invalid EFI system table")
@@ -522,12 +527,22 @@ unsafe fn raw_efi_context(systemtable_paddr: usize) -> RawEfiContext<'static> {
 /// for the returned `'static` borrow.
 #[unsafe(link_section = ".text.boot")]
 unsafe fn raw_efi_boot_memmap(context: &RawEfiContext<'static>) -> Option<BootMemmapRef<'static>> {
+    #[expect(
+        clippy::expect_used,
+        reason = "Fatal boot: EFI boot tables are invalid; early page-table setup cannot proceed \
+                  and has no error return or recovery"
+    )]
+    // SAFETY: `context` was constructed from the live EFI system table and
+    // the configuration-table pointer remains readable during early boot.
     let memmap_paddr =
-        // SAFETY: `context` was constructed from the live EFI system table and
-        // the configuration-table pointer remains readable during early boot.
         unsafe { context.linux_boot_memmap_addr(boot_phys_ptr::<ConfigurationTable>) }
             .expect("invalid EFI configuration table")?;
     Some(
+        #[expect(
+            clippy::expect_used,
+            reason = "Fatal boot: EFI boot tables are invalid; early page-table setup cannot \
+                      proceed and has no error return or recovery"
+        )]
         // SAFETY: `memmap_paddr` comes from the validated Linux EFI memmap
         // config-table entry and points to a readable boot memmap header.
         unsafe { BootMemmapRef::from_ptr(boot_phys_ptr::<LinuxEfiBootMemmapHeader>(memmap_paddr)) }
@@ -670,6 +685,11 @@ unsafe fn map_linear_firmware_memory(systemtable_paddr: usize) {
     // SAFETY: `systemtable_paddr` comes from firmware handoff and points to the
     // live EFI system table for this boot.
     let context = unsafe { raw_efi_context(systemtable_paddr) };
+    #[expect(
+        clippy::expect_used,
+        reason = "Fatal boot: EFI boot tables are invalid; early page-table setup cannot proceed \
+                  and has no error return or recovery"
+    )]
     // SAFETY: raw_efi_context validated the live system table; the caller
     // retains its immutable configuration array, readable through boot_phys_ptr.
     let dtb = unsafe { context.dtb_addr(boot_phys_ptr::<ConfigurationTable>) }
@@ -677,6 +697,11 @@ unsafe fn map_linear_firmware_memory(systemtable_paddr: usize) {
         .unwrap_or(0);
     // SAFETY: Single-core boot exclusively owns the firmware cache before handoff.
     unsafe { BOOT_DTB_PADDR = dtb };
+    #[expect(
+        clippy::expect_used,
+        reason = "Fatal boot: EFI boot tables are invalid; early page-table setup cannot proceed \
+                  and has no error return or recovery"
+    )]
     // SAFETY: raw_efi_context validated the live system table; the caller
     // retains its immutable configuration array, readable through boot_phys_ptr.
     let memmap = unsafe { context.linux_boot_memmap_addr(boot_phys_ptr::<ConfigurationTable>) }
@@ -684,6 +709,11 @@ unsafe fn map_linear_firmware_memory(systemtable_paddr: usize) {
         .unwrap_or(0);
     // SAFETY: No other CPU or observer accesses this boot-only memmap cache yet.
     unsafe { BOOT_UEFI_MEMMAP_PADDR = memmap };
+    #[expect(
+        clippy::expect_used,
+        reason = "Fatal boot: EFI boot tables are invalid; early page-table setup cannot proceed \
+                  and has no error return or recovery"
+    )]
     // SAFETY: raw_efi_context validated the live system table; the caller
     // retains its immutable configuration array, readable through boot_phys_ptr.
     let rsdp = unsafe { context.rsdp_addr(boot_phys_ptr::<ConfigurationTable>) }

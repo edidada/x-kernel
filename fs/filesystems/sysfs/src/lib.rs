@@ -147,12 +147,22 @@ impl DeviceProjection {
 }
 
 fn device_projection() -> &'static Mutex<DeviceProjection> {
+    #[expect(
+        clippy::expect_used,
+        reason = "Device projection initialization installs both permanent locks before callbacks \
+                  or lookups are exposed"
+    )]
     DEVICE_PROJECTION
         .get()
         .expect("sysfs device projection must initialize before lookup")
 }
 
 fn device_projection_events() -> &'static Mutex<()> {
+    #[expect(
+        clippy::expect_used,
+        reason = "Device projection initialization installs both permanent locks before callbacks \
+                  or lookups are exposed"
+    )]
     DEVICE_PROJECTION_EVENTS
         .get()
         .expect("sysfs device projection event serialization must initialize before callbacks")
@@ -258,6 +268,11 @@ pub static FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("sysfs", ini
 
 #[macros::register_init]
 fn init_sysfs() {
+    #[expect(
+        clippy::expect_used,
+        reason = "Each statically named filesystem is registered once by its unique linker \
+                  initialization entry"
+    )]
     kvfs::register_filesystem(&FILE_SYSTEM_TYPE).expect("sysfs filesystem type must register once");
 }
 

@@ -157,6 +157,11 @@ fn try_enable_irq_inner(spec: IrqSpec, force_platform_enable: bool) -> Result<()
                           logical IRQ"
             )]
             let virq = desc.logical_irq().unwrap();
+            #[expect(
+                clippy::expect_used,
+                reason = "try_resolve_and_publish installed this descriptor in the same \
+                          exclusively borrowed registry"
+            )]
             let entry = state
                 .descs
                 .get_mut(&virq)
@@ -459,6 +464,11 @@ fn resolve_action_install_entry<'a>(
         reason = "try_resolve_and_publish succeeded and assigned this descriptor a logical IRQ"
     )]
     let virq = desc.logical_irq().unwrap();
+    #[expect(
+        clippy::expect_used,
+        reason = "try_resolve_and_publish installed this descriptor in the same exclusively \
+                  borrowed registry"
+    )]
     let entry = state
         .descs
         .get_mut(&virq)

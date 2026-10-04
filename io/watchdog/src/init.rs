@@ -203,6 +203,11 @@ pub fn init_softlockup_detection() {
         let slot = unsafe { SOFTLOCKUP_TIMER.get_mut_unchecked(&guard) };
         assert!(slot.is_none(), "softlockup timer already initialized");
         let timer = slot.insert(timer);
+        #[expect(
+            clippy::expect_used,
+            reason = "Fatal boot: the watchdog sampling timer cannot start; this CPU \
+                      initialization entry has no error return or recovery"
+        )]
         // SAFETY: the local scheduler/IRQ service is initialized. The per-CPU
         // slot retains storage forever; the handler preserves IRQ context and
         // only performs the existing IRQ-safe local watchdog check/report.

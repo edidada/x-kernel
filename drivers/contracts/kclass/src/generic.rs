@@ -146,6 +146,10 @@ impl<T> ClassDevice<T> {
     /// through [`publish`](crate::prelude) validates this, so tripping
     /// the check indicates a bypass of the publish path.
     pub fn driver_name(&self) -> &'static str {
+        #[expect(
+            clippy::expect_used,
+            reason = "Class-device publication validates the retained parent has a bound driver"
+        )]
         self.inner
             .parent
             .driver_name()
@@ -161,6 +165,10 @@ impl<T> ClassDevice<T> {
     /// validates this, so tripping the check indicates a bypass of the
     /// publish path.
     pub fn driver_id(&self) -> DriverId {
+        #[expect(
+            clippy::expect_used,
+            reason = "Class-device publication validates the retained parent has a bound driver"
+        )]
         self.inner
             .parent
             .driver_id()

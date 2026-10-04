@@ -2,10 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Real exit tails block twice and optionally migrate across a remote window.
-//! Both resume boundaries check saved/hardware roots and MM scheduling metadata.
-//! Noexec controls also retain M through the runtime. Exec cases replace that
-//! binding twice while the unpublished sibling must keep using its captured M.
+// Real exit tails block twice and optionally migrate across a remote window.
+// Both resume boundaries check saved/hardware roots and MM scheduling metadata.
+// Noexec controls also retain M through the runtime. Exec cases replace that
+// binding twice while the unpublished sibling must keep using its captured M.
 
 use alloc::{format, sync::Arc, vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

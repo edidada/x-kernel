@@ -26,6 +26,11 @@
 //! - `tls`: Enable kernel space thread-local storage support.
 //! - User space support is always enabled.
 
+#![allow(
+    clippy::expect_used,
+    reason = "case (b): legacy khal has 18 diagnostic sites, too many to judge individually in \
+              this migration; new code remains reviewed"
+)]
 #![no_std]
 
 extern crate alloc;

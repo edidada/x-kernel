@@ -101,6 +101,11 @@ impl TimerFdInner {
             self.expirations = self.expirations.saturating_add(1);
             self.deadline = None;
         } else {
+            #[expect(
+                clippy::expect_used,
+                reason = "The deadline and current time use the immutable timerfd clock domain \
+                          and now was checked not earlier"
+            )]
             let overdue = now
                 .checked_duration_since(deadline)
                 .expect("timerfd clock domain is fixed at creation");
@@ -140,6 +145,11 @@ impl ktask::TimerHandler for TimerFdHandler {
         if !has_expiration && let Some(deadline) = inner.deadline {
             // Realtime may have moved backwards. Normal expiration stays
             // disarmed until read; tiny user intervals must not loop in IRQ.
+            #[expect(
+                clippy::expect_used,
+                reason = "core_deadline bounds the deadline and the initialized task or timer \
+                          callback supplies a valid CPU route"
+            )]
             timer
                 .rearm(core_deadline(deadline))
                 .expect("bounded timerfd deadline is valid");
@@ -274,6 +284,11 @@ impl TimerFd {
         inner.expirations = 0;
         let fired = inner.tick(clock_now(state.clock_id));
         if !fired && let Some(deadline) = inner.deadline {
+            #[expect(
+                clippy::expect_used,
+                reason = "core_deadline bounds the deadline and the initialized task or timer \
+                          callback supplies a valid CPU route"
+            )]
             // SAFETY: settime runs in initialized task context. The FD retains
             // stable handler state; the handler preserves hard-IRQ context
             // and only updates locked state/rearms before waking outside locks.
@@ -321,6 +336,11 @@ impl TimerFd {
         }
         let count = core::mem::take(&mut inner.expirations);
         if let Some(deadline) = inner.deadline {
+            #[expect(
+                clippy::expect_used,
+                reason = "core_deadline bounds the deadline and the initialized task or timer \
+                          callback supplies a valid CPU route"
+            )]
             // SAFETY: file reads run in initialized task context. The owned
             // handler retains only independent state and obeys IRQ constraints.
             // The state lock serializes this rearm with callback accounting.

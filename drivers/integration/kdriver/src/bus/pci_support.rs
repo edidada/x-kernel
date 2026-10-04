@@ -23,6 +23,11 @@ fn pci_bar_allocator() -> SpinNoPreemptGuard<'static, Option<pci::PciRangeAlloca
             .map(|(start, len, _)| pci::PciRangeAllocator::new(start, len));
         SpinNoPreempt::new(alloc)
     });
+    #[expect(
+        clippy::expect_used,
+        reason = "call_once completed successfully and permanently published the PCI BAR \
+                  allocator slot"
+    )]
     PCI_BAR_ALLOCATOR
         .get()
         .expect("PCI_BAR_ALLOCATOR call_once succeeded")

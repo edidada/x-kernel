@@ -243,6 +243,10 @@ fn system_time_to_ext4(timestamp: SystemTime) -> Ext4Timestamp {
 }
 
 fn ext4_timestamp_to_system_time(timestamp: Ext4Timestamp) -> SystemTime {
+    #[expect(
+        clippy::expect_used,
+        reason = "Ext4Timestamp constructors normalize nanoseconds below one billion"
+    )]
     SystemTime::from_unix_parts(timestamp.seconds(), timestamp.nanos())
         .expect("Ext4Timestamp normalizes sub-second nanoseconds")
 }
@@ -323,6 +327,10 @@ impl Ext4SuperOperations {
         super_block: &Arc<SuperBlock>,
         options: Ext4MountOptions,
     ) -> VfsResult<()> {
+        #[expect(
+            clippy::expect_used,
+            reason = "get_tree_bdev installs the block device before invoking fill_super"
+        )]
         let device = super_block
             .block_device()
             .expect("get_tree_bdev must set s_bdev before fill_super")
@@ -449,6 +457,11 @@ impl Ext4SuperOperations {
 
 impl SuperBlockOperations for Ext4SuperOperations {
     fn timestamp_limits(&self, super_block: &SuperBlock) -> kvfs::TimestampLimits {
+        #[expect(
+            clippy::expect_used,
+            reason = "Successful ext4 fill_super installs filesystem-private state before \
+                      publishing timestamp operations"
+        )]
         let ext4 = ext4_private(super_block)
             .expect("ext4 fill_super must install private state before timestamp capabilities");
         sync::read_lock(ext4).timestamp_limits()

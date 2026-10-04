@@ -3,6 +3,11 @@
 // See LICENSES for license details.
 
 //! Virtual address space management utilities.
+#![allow(
+    clippy::expect_used,
+    reason = "case (b): legacy memspace has 12 diagnostic sites, too many to judge individually \
+              in this migration; new code remains reviewed"
+)]
 #![no_std]
 
 #[macro_use]
