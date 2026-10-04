@@ -31,6 +31,11 @@ fn add_slave(fs: Arc<SimpleFs>, pty: Arc<PtyDriver>) -> KResult<u32> {
         ))
         .map_err(|_| KError::TooManyOpenFiles)? as u32;
     pty.set_pty_number(pty_number);
+    #[expect(
+        clippy::unwrap_used,
+        reason = "table.add just inserted this slot and PTS_TABLE remains locked until its device \
+                  ID is set"
+    )]
     table
         .get(pty_number as usize)
         .unwrap()

@@ -402,6 +402,9 @@ impl Service {
             }
             let drain = router.drain_rx_budgeted_into(device_timestamp, batch_budget, rx_batch);
             drop(router);
+            if let Some((ifindex, error)) = &drain.error {
+                warn!("network RX poll failed on ifindex {ifindex}: {error:?}");
+            }
             progress.packets += drain.work_done;
             packets_since_time_check = packets_since_time_check.saturating_add(drain.work_done);
 
@@ -413,6 +416,11 @@ impl Service {
             ) || !self.try_flush_ingress_batches(accepted_packets, control_packets)
             {
                 progress.has_lock_contention = true;
+                break;
+            }
+            // Keep the partial batch above, but end this round rather than
+            // spinning on a failed device; later poll rounds may retry it.
+            if drain.error.is_some() {
                 break;
             }
             if !drain.has_more || drain.work_done == 0 {

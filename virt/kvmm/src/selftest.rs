@@ -44,6 +44,10 @@ impl GuestPages {
 ///
 /// Returns `(entry_va, stack_top_va, pages)` — kernel VAs suitable for
 /// `init_vcpu`. The `GuestPages` must be kept alive for the vCPU's lifetime.
+#[expect(
+    clippy::unwrap_used,
+    reason = "test scenario: page allocation failure aborts the VMM self-test"
+)]
 fn load_guest<A: VmmArch>() -> (u64, u64, GuestPages) {
     let (code_src, code_size) = A::guest_test_code();
     let copy_len = if code_size > 0 { code_size } else { 4096 };
@@ -140,6 +144,10 @@ pub fn vmm_selftest_smp() -> bool {
     selftest_smp_impl::<CurrentArch>()
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test scenario: page allocation failure aborts the VMM self-test"
+)]
 fn selftest_smp_impl<A: VmmArch + 'static>() -> bool {
     let nr_cpus = kcpu_id_map::nr_cpus();
     let total = nr_cpus * VCPUS_PER_CPU;

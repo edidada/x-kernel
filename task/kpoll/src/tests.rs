@@ -2,9 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Unit tests for kpoll using the unittest framework.
 
-#![cfg(unittest)]
 
 use alloc::{boxed::Box, vec::Vec};
 use core::{

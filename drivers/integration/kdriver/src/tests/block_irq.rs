@@ -2,8 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Adapter tests: dispatch here is synchronous, so mock release has no escaped
-//! callbacks to wait for. Concurrent release is covered by kirq's own tests.
 
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

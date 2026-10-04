@@ -381,6 +381,10 @@ pub fn drm_ioctl(args: TokenStream, input: TokenStream) -> TokenStream {
     // Extract the struct name from `impl DrmIoctl for T`.
     // self_ty is the type after `for`, e.g. `DrmVersion`.
     let struct_name = if let syn::Type::Path(type_path) = &*impl_block.self_ty {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "syn parses a Type::Path with at least one path segment"
+        )]
         &type_path.path.segments.last().unwrap().ident
     } else {
         return Error::new_spanned(&impl_block.self_ty, "expected a path type")

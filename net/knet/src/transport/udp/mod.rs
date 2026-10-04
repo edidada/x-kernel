@@ -191,6 +191,7 @@ mod tests {
         assert!(
             device
                 .poll_rx(1, ktime_types::MonotonicInstant::ORIGIN)
+                .unwrap()
                 .is_none()
         );
 
@@ -222,6 +223,7 @@ mod tests {
 
         let leftover = device
             .poll_rx(1, ktime_types::MonotonicInstant::ORIGIN)
+            .unwrap()
             .expect("unmatched UDP should remain for the task poller");
         assert!(leftover.udp_metadata().is_none());
 

@@ -54,6 +54,7 @@ excessive_nesting = "warn"
 upper_case_acronyms = "warn"
 unused_result_ok = "warn"
 panic = "warn"
+unwrap_used = "warn"
 
 [workspace.dependencies]
 # Internal: API and core services

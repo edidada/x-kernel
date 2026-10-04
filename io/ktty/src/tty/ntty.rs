@@ -147,6 +147,11 @@ fn new_n_tty() -> Arc<NTtyDriver> {
         },
     );
     if has_input_irq {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "has_input_irq selected ProcessMode::Work when constructing this TTY, which \
+                      installs input_work"
+        )]
         let (work, cpu_id) = tty.ldisc.lock().input_work().unwrap();
         console_driver::serial::stdout_port()
             .expect("console input IRQ requires a stdout port")

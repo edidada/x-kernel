@@ -94,6 +94,10 @@ pub fn register_nmi(desc: IrqDesc, handler: Handler) -> bool {
             return false;
         }
     };
+    #[expect(
+        clippy::unwrap_used,
+        reason = "try_resolve_and_publish succeeded and assigned this descriptor a logical IRQ"
+    )]
     let virq = desc.logical_irq().unwrap();
     let entry = state
         .descs

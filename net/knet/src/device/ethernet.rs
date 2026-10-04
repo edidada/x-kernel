@@ -637,26 +637,21 @@ impl NetDeviceOps for EthernetDevice {
         Some(self.inner.id())
     }
 
-    fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> Option<PacketBuf> {
+    fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> KResult<Option<PacketBuf>> {
         if !self.is_link_up() {
-            return None;
+            return Ok(None);
         }
         loop {
             let rx_buf: NetBufHandle = match self.inner.recv() {
                 Ok(buf) => buf,
-                Err(err) => {
-                    if !matches!(err, DriverError::WouldBlock) {
-                        warn!("recv failed: {:?}", err);
-                    }
-                    return None;
-                }
+                Err(DriverError::WouldBlock) => return Ok(None),
+                Err(err) => return Err(map_dev_err(err)),
             };
             trace!("RECV {} bytes: {:02X?}", rx_buf.len(), rx_buf.data());
-
             let packet = self.handle_rx_frame(ifindex, rx_buf.data(), timestamp);
-            self.inner.recycle_rx(rx_buf).unwrap();
+            self.inner.recycle_rx(rx_buf).map_err(map_dev_err)?;
             if packet.is_some() {
-                return packet;
+                return Ok(packet);
             }
         }
     }

@@ -147,7 +147,11 @@ pub(crate) trait NetDevice: Send + Sync {
     }
 
     /// Polls one received packet from the device.
-    fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> Option<PacketBuf>;
+    ///
+    /// `Ok(None)` means no packet is available. Receive or buffer-recycling
+    /// failures are returned separately so the caller can end and report a
+    /// failed poll instead of treating a device error as an empty queue.
+    fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> KResult<Option<PacketBuf>>;
 
     /// Returns whether the device has RX work available without waiting.
     fn has_rx_work(&self) -> bool;

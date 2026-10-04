@@ -248,11 +248,16 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
 
     // All target CPUs can now receive notifications and run worker tasks.
     // Publish services before exposing any work-producing drivers.
+    #[expect(
+        clippy::unwrap_used,
+        reason = "64 is a nonzero fixed workqueue batch limit"
+    )]
+    let batch_limit = core::num::NonZeroUsize::new(64).unwrap();
     kworkng::runtime::init(
         core::num::NonZeroUsize::new(kbuild_config::WORKQUEUE_WORKERS_PER_POOL)
             .expect("positive configured worker limit"),
         ktime_types::TimeSpan::from_secs(30),
-        core::num::NonZeroUsize::new(64).unwrap(),
+        batch_limit,
     )
     .expect("system workqueue services must be ready before driver initialization");
 

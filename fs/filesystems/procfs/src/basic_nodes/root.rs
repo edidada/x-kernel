@@ -45,6 +45,11 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
         SimpleFile::new_regular(fs.clone(), || {
             let mut info = String::new();
             for_each_present_logical_cpu(|present_index, cpu_id, cpu_count| {
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "String writes are infallible and the formatted integers and strings \
+                              cannot return fmt::Error"
+                )]
                 writeln!(
                     info,
                     "processor\t: {}\ncpu cores\t: {}\narchitecture\t: {}",
@@ -65,6 +70,11 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
         SimpleFile::new_regular(fs.clone(), || {
             let mut info = String::new();
             for file_system_type in kvfs::registered_filesystems() {
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "String writes are infallible and the formatted integers and strings \
+                              cannot return fmt::Error"
+                )]
                 writeln!(
                     info,
                     "{}\t{}",

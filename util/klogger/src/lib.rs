@@ -210,6 +210,11 @@ pub fn print_fmt(args: fmt::Arguments) -> fmt::Result {
 }
 
 pub fn init_klogger() {
+    #[expect(
+        clippy::unwrap_used,
+        reason = "failure to install the global logger during primary boot is unrecoverable; this \
+                  initialization entry has no error return or recovery caller"
+    )]
     log::set_logger(&KernelLogger).unwrap();
     log::set_max_level(LevelFilter::Warn);
 }

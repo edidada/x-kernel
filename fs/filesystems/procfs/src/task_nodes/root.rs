@@ -194,6 +194,11 @@ const PROC_MAPS_PATH_COLUMN: usize = 73;
 
 fn render_maps_line(item: &MapsEntry) -> String {
     let perms = maps_permissions(item.flags);
+    #[expect(
+        clippy::unwrap_used,
+        reason = "maps_permissions emits only the ASCII permission letters r, w, x, s, p and the \
+                  dash"
+    )]
     let mut line = format!(
         "{:0width$x}-{:0width$x} {} {:08x} 00:00 {}",
         item.start,

@@ -1272,7 +1272,13 @@ pub(super) fn find_closest_node(ht: &mut TeeFsHtree, node_id: usize) -> &mut Htr
 
         if child_exists {
             // 重新获取子节点引用，因为之前的引用已经释放
-            current = current.get_child_by_index_mut(index).unwrap();
+            #[expect(
+                clippy::unwrap_used,
+                reason = "child_exists checked this same index while the tree is exclusively \
+                          borrowed and no mutation intervenes"
+            )]
+            let child = current.get_child_by_index_mut(index).unwrap();
+            current = child;
         } else {
             // 子节点不存在，返回当前节点
             return current;

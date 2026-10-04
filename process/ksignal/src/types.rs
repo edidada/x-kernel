@@ -572,6 +572,11 @@ impl SignalInfo {
     /// (`1..=64`). Values imported from user ABI payloads
     /// (via [`From<k_siginfo>`](SignalInfo::from)) must be validated by the
     /// syscall layer before any method that decodes the signo is called.
+    #[expect(
+        clippy::unwrap_used,
+        reason = "SignalInfo constructors store a valid Signo; raw siginfo callers must validate \
+                  si_signo as required by this method"
+    )]
     pub fn signo(&self) -> Signo {
         Signo::from_repr(self.header().si_signo as _).unwrap()
     }

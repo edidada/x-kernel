@@ -178,19 +178,13 @@ impl NetBuf {
 
     /// Converts the buffer into a [`NetBufHandle`].
     ///
-    /// # Panics
-    ///
-    /// Only through the internal `NonNull::new(..).unwrap()` calls if the
-    /// box pointer or the payload pointer were null, which cannot happen
-    /// for a live pooled buffer.
+    /// Transfers ownership of the box while retaining its non-null object and
+    /// payload pointers in the handle.
     pub fn into_handle(mut self: Box<Self>) -> NetBufHandle {
-        let data_ptr = self.payload_mut().as_mut_ptr();
+        let data_ptr = NonNull::from(self.payload_mut()).cast();
         let data_len = self.payload_len;
-        NetBufHandle::new(
-            NonNull::new(Box::into_raw(self) as *mut u8).unwrap(),
-            NonNull::new(data_ptr).unwrap(),
-            data_len,
-        )
+        let object_ptr = NonNull::from(Box::leak(self)).cast();
+        NetBufHandle::new(object_ptr, data_ptr, data_len)
     }
 
     /// Restore [`NetBuf`] from a handle.

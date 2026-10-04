@@ -84,7 +84,7 @@ struct ClientEndian;
 
 impl TeeProps for ClientIdentity {
     fn name(&self) -> CString {
-        CString::new("gpd.client.identity").unwrap()
+        c"gpd.client.identity".into()
     }
 
     fn prop_type(&self) -> PropType {
@@ -107,7 +107,7 @@ impl TeeProps for ClientIdentity {
 
 impl TeeProps for ClientEndian {
     fn name(&self) -> CString {
-        CString::new("gpd.client.endian").unwrap()
+        c"gpd.client.endian".into()
     }
 
     fn prop_type(&self) -> PropType {
@@ -133,7 +133,7 @@ struct TaAppId;
 
 impl TeeProps for TaAppId {
     fn name(&self) -> CString {
-        CString::new("gpd.ta.appID").unwrap()
+        c"gpd.ta.appID".into()
     }
 
     fn prop_type(&self) -> PropType {

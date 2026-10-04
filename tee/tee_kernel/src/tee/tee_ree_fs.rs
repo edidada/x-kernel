@@ -1268,11 +1268,18 @@ impl ReeFsDirh {
         }
         self.refcount += 1;
 
-        tee_debug!(
-            "get_dirh: refcount: {:?}, h: {:p}",
-            self.refcount,
-            self.handle.as_ref().unwrap().as_ref() as *const _
-        );
+        #[allow(
+            clippy::unwrap_used,
+            reason = "the None branch installs the directory handle or returns its open error; \
+                      this debug macro can be disabled by cfg"
+        )]
+        {
+            tee_debug!(
+                "get_dirh: refcount: {:?}, h: {:p}",
+                self.refcount,
+                self.handle.as_ref().unwrap().as_ref() as *const _
+            );
+        }
         Ok(())
     }
 

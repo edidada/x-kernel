@@ -94,6 +94,10 @@ pub fn init_network() {
     let mut router = Router::new();
     let lo_dev = router.add_device(Box::new(LoopbackDevice::new()));
 
+    #[expect(
+        clippy::unwrap_used,
+        reason = "the fixed loopback prefix length 8 is within the IPv4 range 0 through 32"
+    )]
     let lo_ip = Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8).unwrap();
     router
         .add_ipv4_addr(Ipv4AddrEntry {
@@ -123,6 +127,10 @@ pub fn init_network() {
                 broadcast: None,
             })
             .expect("Ethernet IPv4 address must fit the interface");
+        #[expect(
+            clippy::unwrap_used,
+            reason = "the fixed default-route IPv4 prefix length 0 is valid"
+        )]
         router.add_rule(Rule::new(
             Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).unwrap().into(),
             Some(IpAddress::Ipv4(

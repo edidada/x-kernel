@@ -152,6 +152,10 @@ fn submit(guest: &TestGuestDma, request_type: u32, data_len: u32, write_to_devic
 
 /// Drive one request through the device and validate status, used ring and
 /// interrupt injection.
+#[expect(
+    clippy::unwrap_used,
+    reason = "test scenario: each used-element field is a fixed four-byte slice"
+)]
 fn drive_and_check(
     dev: &mut VirtioBlkDevice,
     guest: &TestGuestDma,

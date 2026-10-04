@@ -99,6 +99,11 @@
               over the line limit that need per-function split review; new code remains reviewed"
 )]
 #![no_std]
+#![allow(
+    clippy::unwrap_used,
+    reason = "case (b): 133 legacy diagnostic sites need individual failure-contract review; new \
+              code remains subject to the no-legitimate-failure-panic rule"
+)]
 #![forbid(unsafe_code)]
 
 extern crate alloc;

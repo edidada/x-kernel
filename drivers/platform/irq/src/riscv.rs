@@ -64,6 +64,10 @@ pub fn init_primary() {
     )]
     let plic_base = iomap_device(paddr, size, PLIC_IOMAP_NAME)
         .unwrap_or_else(|err| panic!("failed to iomap PLIC: {err:?}"));
+    #[expect(
+        clippy::unwrap_used,
+        reason = "iomap_device succeeded and returned the live non-null PLIC MMIO mapping"
+    )]
     // SAFETY: `plic_base` comes from a successful `iomap_device` of the PLIC
     // MMIO window, so the pointer is non-null and references the live register
     // block for the duration of the driver.

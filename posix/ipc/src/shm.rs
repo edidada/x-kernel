@@ -424,7 +424,7 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
 
-    let mut mapping_flags = MappingFlags::from_name("USER").unwrap();
+    let mut mapping_flags = MappingFlags::USER;
     if shmflg & 0o400 != 0 {
         mapping_flags.insert(MappingFlags::READ);
     }
