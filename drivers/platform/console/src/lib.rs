@@ -72,6 +72,10 @@ enum StdoutKind {
 
 /// Parsed device-tree stdout node: just enough to build a [`SerialPort`] and
 /// wire its input interrupt.
+#[expect(
+    clippy::allow_attributes,
+    reason = "Parsed stdout fields are consumed by different enabled serial backends"
+)]
 #[allow(
     dead_code,
     reason = "Parsed stdout fields are consumed by different enabled serial backends"

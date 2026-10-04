@@ -94,6 +94,11 @@
 //! validating storage plumbing; it is not exported as an ext4 API.
 
 #![allow(
+    clippy::allow_attributes,
+    reason = "case (b): 52 legacy outer allowances need individual contract review; new code must \
+              prefer narrow expect attributes and justify cfg-dependent allowances"
+)]
+#![allow(
     clippy::allow_attributes_without_reason,
     reason = "case (b): 52 legacy sites across ext4 disk structures and filesystem operations \
               need individual review; new code must use narrow lint exceptions with substantive \

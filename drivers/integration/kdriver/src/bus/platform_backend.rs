@@ -234,6 +234,11 @@ impl PlatformBackend {
     /// device leaves both unused. The names are kept non-underscored because
     /// they are genuine inputs; the allowance below covers configurations
     /// without a matching static device, as in `virtio::activate_virtio_device`.
+    #[expect(
+        clippy::allow_attributes,
+        reason = "Static enumeration inputs are used only when a matching platform driver feature \
+                  is enabled"
+    )]
     #[allow(
         unused_variables,
         reason = "Static enumeration inputs are used only when a matching platform driver feature \

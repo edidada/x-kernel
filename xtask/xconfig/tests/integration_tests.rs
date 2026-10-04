@@ -80,6 +80,11 @@ fn test_complete_workflow() {
         .filter(|line| line.starts_with("#[allow("))
         .collect();
     assert_eq!(allowances.len(), config.len());
+    for pair in config_rs.lines().collect::<Vec<_>>().windows(2) {
+        if pair[1].starts_with("#[allow(") {
+            assert!(pair[0].starts_with("#[expect(clippy::allow_attributes, reason = "));
+        }
+    }
     for attribute in allowances {
         assert!(attribute.contains("reason = \"Kconfig emits all resolved symbols;"));
     }

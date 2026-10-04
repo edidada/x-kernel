@@ -29,6 +29,10 @@ pub static NMI: [fn(usize) -> bool];
 #[def_trap_handler]
 pub static PAGE_FAULT: [fn(VirtAddr, PageFaultFlags) -> bool];
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "Trap dispatch macro is used by architecture-specific exception handlers"
+)]
 #[allow(
     unused_macros,
     reason = "Trap dispatch macro is used by architecture-specific exception handlers"
