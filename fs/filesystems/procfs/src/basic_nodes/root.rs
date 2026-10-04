@@ -12,6 +12,11 @@ use kvfs::{
     VfsError,
 };
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear registration table: each statement registers one independent procfs root \
+              entry"
+)]
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     root.add(
         "cmdline",

@@ -47,6 +47,7 @@ undocumented_unsafe_blocks = "deny" # moved from xkmake
 unimplemented = "deny"
 used_underscore_binding = "warn"
 linkedlist = "warn"
+too_many_lines = "warn"
 upper_case_acronyms = "warn"
 
 [workspace.dependencies]

@@ -189,6 +189,10 @@ pub(crate) struct ParsedProfraw {
 
 /// Parses a `.profraw` byte buffer into structured data.
 #[cfg(feature = "alloc")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "TODO(cg): legacy profraw parser; split per input section"
+)]
 pub fn parse_profraw(bytes: &[u8]) -> Result<ParsedProfraw, ProfileError> {
     let header = RawHeader::parse(bytes).ok_or(ProfileError::MalformedInput)?;
     if !header.is_valid() {

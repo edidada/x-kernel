@@ -491,6 +491,10 @@ pub(in crate::task) fn executable_root(data: Vec<u8>) -> Path {
     Mount::new_root(&super_block).root_path()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "unittest scenario: one linear exec child script in a file test module"
+)]
 fn run_child(
     case: Case,
     sentinel_addr: usize,
@@ -710,6 +714,10 @@ fn run_case(case: Case) {
     );
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "unittest scenario: one linear exec session script in a file test module"
+)]
 fn run_case_with_session(
     case: Case,
     target_cpu: Option<usize>,

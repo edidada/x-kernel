@@ -463,6 +463,11 @@ impl DeviceFileOps for DrmCard {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "linear DRM ioctl dispatch table: one short match arm per command, arms share no \
+                  state"
+    )]
     fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
         self.display()?;
         match cmd {

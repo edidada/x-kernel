@@ -180,6 +180,10 @@ impl Service {
     /// pending batches intact and reports immediate work for a later round.
     /// A due IPv4 reassembly timer remains pending across ingress-lock
     /// contention without aborting TX or protocol progress in the current round.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "TODO(cg): legacy budgeted poll round; split ingress, timers and transmit phases"
+    )]
     pub fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
         let round_started_at = monotonic_time();
         let device_timestamp = round_started_at;

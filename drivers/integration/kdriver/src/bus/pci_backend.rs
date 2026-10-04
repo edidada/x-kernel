@@ -152,6 +152,11 @@ impl BusBackend for PciBackend {
         BusTypeId::PCI
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "TODO(cg): legacy PCI enumeration; split bus scan, BAR allocation and device \
+                  registration"
+    )]
     fn enumerate(&mut self, context: &mut EnumerationContext, bus_id: BusId) -> DriverResult {
         let mut bus = match PciBus::new(self.cam) {
             Ok(bus) => bus,

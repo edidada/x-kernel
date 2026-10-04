@@ -230,6 +230,10 @@ impl PlatformBackend {
     /// they are genuine inputs; `#[allow(unused_variables)]` covers the empty
     /// configuration (same convention as `virtio::activate_virtio_device`).
     #[allow(unused_variables)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "TODO(cg): legacy static platform enumeration; split per device class"
+    )]
     fn enumerate_static(
         &mut self,
         context: &mut EnumerationContext,

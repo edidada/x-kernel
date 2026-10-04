@@ -172,6 +172,10 @@ pub fn encoded_size(snapshot: &ProfileSnapshot) -> u64 {
 
 /// Encodes a `ProfileSnapshot` into profraw bytes and writes via `ProfileWriter`.
 #[cfg(feature = "alloc")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "TODO(cg): legacy profraw encoder; split per output section"
+)]
 pub fn encode(
     snapshot: &ProfileSnapshot,
     writer: &mut dyn ProfileWriter,

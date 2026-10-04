@@ -93,6 +93,11 @@
 //! Crate-internal tests keep a raw allocated-data overwrite helper for
 //! validating storage plumbing; it is not exported as an ext4 API.
 
+#![allow(
+    clippy::too_many_lines,
+    reason = "case (b): legacy kext4 has 9 allocation, writeback and on-disk decode functions \
+              over the line limit that need per-function split review; new code remains reviewed"
+)]
 #![no_std]
 #![forbid(unsafe_code)]
 

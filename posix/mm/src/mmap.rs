@@ -604,6 +604,10 @@ bitflags::bitflags! {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "TODO(cg): legacy mremap; split argument checks, in-place resize and move paths"
+)]
 pub fn sys_mremap(
     addr: usize,
     old_size: usize,

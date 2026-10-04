@@ -177,6 +177,10 @@ impl CloneRequest {
     }
 
     /// Consume this request and execute the clone operation.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "TODO(cg): legacy clone; split flag validation, resource sharing and task start"
+    )]
     pub fn do_clone(mut self, uctx: &UserContext) -> KResult<isize> {
         if self.flags.contains(CloneFlags::VFORK) {
             // TODO: Implement Linux vfork semantics: keep the mm shared, block

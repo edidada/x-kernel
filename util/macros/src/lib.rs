@@ -113,7 +113,7 @@ pub fn mod_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // An inline module takes the allowances as inner attributes, a file module
     // (`mod foo;`) as outer ones. rustc currently rejects attribute macros on
     // file modules (E0658), so the outer form is not reachable on stable.
-    let mut allows: [Attribute; 2] = [
+    let mut allows: [Attribute; 3] = [
         parse_quote! {
             #[allow(
                 clippy::unwrap_used,
@@ -124,6 +124,12 @@ pub fn mod_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
         },
         parse_quote! {
             #[allow(missing_docs, reason = "unittest module: test code is outside rustdoc scope")]
+        },
+        parse_quote! {
+            #[allow(
+                clippy::too_many_lines,
+                reason = "unittest module: a test scenario reads as one linear script"
+            )]
         },
     ];
     if module.content.is_some() {
@@ -215,6 +221,10 @@ fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> 
             clippy::expect_used,
             clippy::panic,
             reason = "unittest body: a failed assertion is the intended outcome"
+        )]
+        #[allow(
+            clippy::too_many_lines,
+            reason = "unittest body: a test scenario reads as one linear script"
         )]
     };
 
