@@ -278,6 +278,11 @@ impl DmaAllocator {
             let dma = self.alloc_coherent_pages(layout_for_pages(DMA_BOUNCE_POOL_PAGES))?;
             self.bounce_pool = Some(BouncePool::new(dma, bounce_pool_size()));
         }
+        #[expect(
+            clippy::unwrap_used,
+            reason = "the None branch installs the bounce pool or returns the allocation error \
+                      before reaching this expression"
+        )]
         Ok(self.bounce_pool.as_mut().unwrap())
     }
 
@@ -409,5 +414,10 @@ const fn layout_pages(layout: &Layout) -> usize {
 }
 
 fn layout_for_pages(num_pages: usize) -> Layout {
+    #[expect(
+        clippy::unwrap_used,
+        reason = "the only caller passes the fixed DMA_BOUNCE_POOL_PAGES constant; its byte size \
+                  fits Layout and PAGE_SIZE_4K is a power of two"
+    )]
     Layout::from_size_align(num_pages * PAGE_SIZE_4K, PAGE_SIZE_4K).unwrap()
 }

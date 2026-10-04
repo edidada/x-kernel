@@ -50,7 +50,11 @@
 
 extern crate alloc;
 
-mod tests;
+/// Unit tests for kprocess
+#[unittest::mod_test]
+mod tests {
+    include!("tests.rs");
+}
 
 /// Capability-target validation helpers.
 pub mod capability;

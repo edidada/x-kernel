@@ -20,6 +20,11 @@ pub fn reserved_regions(
 
     for &region in described_reserved_regions() {
         let single = [region.range()];
+        #[expect(
+            clippy::unwrap_used,
+            reason = "exclusion_ranges contains only the kernel image, so the cut list cannot \
+                      overlap itself"
+        )]
         sub_ranges(&single, &exclusions, |(start, size)| {
             push_reserved_region(
                 &mut reserved,

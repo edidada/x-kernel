@@ -13,6 +13,11 @@
 //! - [`IdAllocator`]: Used to allocate unique IDs.
 
 #![no_std]
+#![allow(
+    clippy::unwrap_used,
+    reason = "case (b): 10 legacy diagnostic sites need individual failure-contract review; new \
+              code remains subject to the no-legitimate-failure-panic rule"
+)]
 #![cfg_attr(feature = "allocator_api", feature(allocator_api))]
 
 #[cfg(any(test, unittest))]

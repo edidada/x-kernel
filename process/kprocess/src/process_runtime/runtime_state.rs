@@ -275,6 +275,7 @@ impl Drop for ProcessRuntimeState {
     }
 }
 
-#[cfg(unittest)]
-#[path = "tests_runtime_state.rs"]
-mod tests;
+#[unittest::mod_test]
+mod tests {
+    include!("tests_runtime_state.rs");
+}

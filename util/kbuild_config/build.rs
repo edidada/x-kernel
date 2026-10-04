@@ -2,6 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+#![allow(
+    clippy::unwrap_used,
+    reason = "case (a): this host build script intentionally fails the build when Cargo \
+              environment or repository layout is unavailable"
+)]
+
 use std::{env, fs, path::Path};
 
 fn main() {

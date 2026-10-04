@@ -107,6 +107,7 @@ impl SimpleDirOps for PtsDir {
     }
 }
 
-#[cfg(unittest)]
-#[path = "../tests/pts.rs"]
-mod tests;
+#[unittest::mod_test]
+mod tests {
+    include!("../tests/pts.rs");
+}

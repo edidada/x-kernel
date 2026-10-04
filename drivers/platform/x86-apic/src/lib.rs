@@ -363,6 +363,11 @@ pub fn init_primary(io_apic_paddr: PhysAddr) {
         XAPIC_BASE.store(base_vaddr.as_usize() as u64, Ordering::Relaxed);
         builder.set_xapic_base(base_vaddr.as_usize() as u64);
     }
+    #[expect(
+        clippy::unwrap_used,
+        reason = "all required timer, error and spurious vectors are supplied, and the xAPIC path \
+                  supplies the mapped base"
+    )]
     let mut lapic = builder.build().unwrap();
     // SAFETY: the LAPIC instance was built from either x2APIC CPU state or a
     // freshly mapped xAPIC MMIO base, so enabling it is valid during boot init.

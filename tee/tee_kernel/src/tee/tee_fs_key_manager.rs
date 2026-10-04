@@ -181,7 +181,8 @@ pub(super) fn tee_fs_fek_crypt(
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }
 
-    if size != TEE_FS_KM_FEK_SIZE || size != out_key.as_ref().unwrap().len() {
+    if size != TEE_FS_KM_FEK_SIZE || size != out_key.as_ref().ok_or(TEE_ERROR_BAD_PARAMETERS)?.len()
+    {
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }
 

@@ -715,13 +715,10 @@ pub fn load_prepared_user_app(
     map_prepared_image(uspace, &prepared)?;
     #[cfg(unittest)]
     if let Some(probe) = &prepared.partial_probe {
-        assert!(
-            uspace
-                .find_vma(prepared.entry)
-                .unwrap()
-                .flags()
+        assert!(uspace.find_vma(prepared.entry).is_some_and(|vma| {
+            vma.flags()
                 .contains(MappingFlags::USER | MappingFlags::EXECUTE)
-        );
+        }));
         assert!(uspace.find_vma(prepared.user_sp).is_none());
         assert!(
             uspace

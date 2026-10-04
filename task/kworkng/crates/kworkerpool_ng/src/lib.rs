@@ -43,6 +43,11 @@
 //! ```
 
 #![no_std]
+#![allow(
+    clippy::unwrap_used,
+    reason = "case (b): 19 legacy diagnostic sites need individual failure-contract review; new \
+              code remains subject to the no-legitimate-failure-panic rule"
+)]
 
 extern crate alloc;
 

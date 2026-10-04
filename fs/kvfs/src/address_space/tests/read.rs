@@ -123,6 +123,10 @@ impl IovSink for InvalidatingSink<'_> {
             // Remove only future pages: the current folio is still locked by
             // the copy callback. This models residency changing during a read.
             if self.truncate {
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "test scenario: the sink borrows the mapping of a live test inode"
+                )]
                 self.mapping.inode().unwrap().set_len(PAGE_SIZE_4K as u64)?;
             } else {
                 self.mapping
@@ -194,15 +198,15 @@ struct ReadaheadOps;
 static READAHEAD_OPS: ReadaheadOps = ReadaheadOps;
 
 impl AddressSpaceOperations for ReadaheadOps {
-    fn read_folio(&self, mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
-        // Initialize the isolated miss or retry the consumed, incomplete EOF page.
-        assert!(mapping.invalidate_lock.try_write().is_none());
-        let byte = match folio.index() {
     #[expect(
         clippy::panic,
         reason = "test scenario: rereading a completed readahead page is the regression this mock \
                   reports"
     )]
+    fn read_folio(&self, mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
+        // Initialize the isolated miss or retry the consumed, incomplete EOF page.
+        assert!(mapping.invalidate_lock.try_write().is_none());
+        let byte = match folio.index() {
             0 => 0x11,
             3 => 0x33,
             _ => panic!("completed readahead pages must not be read again"),
@@ -216,15 +220,15 @@ impl AddressSpaceOperations for ReadaheadOps {
         Ok(())
     }
 
-    fn readahead(&self, control: &mut crate::ReadaheadControl<'_, '_>) -> VfsResult<()> {
-        assert!(control.mapping().invalidate_lock.try_write().is_none());
-        match control.index() {
-            0 => panic!("single-page misses must use read_folio"),
     #[expect(
         clippy::panic,
         reason = "test scenario: an unexpected readahead request is the regression this mock \
                   reports"
     )]
+    fn readahead(&self, control: &mut crate::ReadaheadControl<'_, '_>) -> VfsResult<()> {
+        assert!(control.mapping().invalidate_lock.try_write().is_none());
+        match control.index() {
+            0 => panic!("single-page misses must use read_folio"),
             2 => {
                 assert_eq!(control.count(), 2);
                 // The run is already resident and locked; completion fills
@@ -307,6 +311,10 @@ static GATED_READ_OPS: GatedReadOps = GatedReadOps;
 impl AddressSpaceOperations for GatedReadOps {
     fn readahead(&self, control: &mut crate::ReadaheadControl<'_, '_>) -> VfsResult<()> {
         use core::sync::atomic::Ordering;
+        #[expect(
+            clippy::unwrap_used,
+            reason = "test scenario: the gated mapping belongs to a live test inode"
+        )]
         let inode = control.mapping().inode().unwrap();
         let gate = inode.private::<ReadGate>()?;
         gate.entered.store(true, Ordering::Release);
@@ -461,6 +469,11 @@ pub(crate) fn observe_readahead_run(mapping: &AddressSpace, run: &core::ops::Ran
     if run.start == 4 {
         assert_eq!(run, &(4..8));
         // Model a competing publisher after the missing-run hint was sampled.
+        #[expect(
+            clippy::panic,
+            reason = "test scenario: a resident first hinted page is the regression this observer \
+                      reports"
+        )]
         mapping
             .i_pages
             .filemap_add_folio(super::folio_from_bytes(
@@ -469,11 +482,6 @@ pub(crate) fn observe_readahead_run(mapping: &AddressSpace, run: &core::ops::Ran
             ))
             .unwrap_or_else(|_| panic!("first hinted page must still be absent"));
     } else {
-        #[expect(
-            clippy::panic,
-            reason = "test scenario: a resident first hinted page is the regression this observer \
-                      reports"
-        )]
         assert_eq!(run, &(5..8));
     }
 }
@@ -481,6 +489,11 @@ pub(crate) fn observe_readahead_run(mapping: &AddressSpace, run: &core::ops::Ran
 static CONFLICTED_READAHEAD_OPS: ReadaheadConflict = ReadaheadConflict;
 
 impl AddressSpaceOperations for ReadaheadConflict {
+    #[expect(
+        clippy::panic,
+        reason = "test scenario: a demand read of the remaining run is the regression this mock \
+                  reports"
+    )]
     fn read_folio(&self, _mapping: &AddressSpace, _folio: &mut Folio) -> VfsResult<()> {
         panic!("the remaining run must be initialized by batch readahead");
     }
@@ -489,11 +502,6 @@ impl AddressSpaceOperations for ReadaheadConflict {
         assert_eq!(control.index(), 5);
         assert_eq!(control.count(), 3);
         while control.count() != 0 {
-    #[expect(
-        clippy::panic,
-        reason = "test scenario: a demand read of the remaining run is the regression this mock \
-                  reports"
-    )]
             control.complete_folio(&vec![0x55; PAGE_SIZE_4K])?;
         }
         Ok(())

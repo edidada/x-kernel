@@ -377,6 +377,11 @@ impl<T> FairClass<T> {
                 .is_some_and(|found| core::ptr::eq(found, Arc::as_ptr(&task))),
             "EEVDF vruntime tree out of sync with ready for task {id}"
         );
+        #[expect(
+            clippy::unwrap_used,
+            reason = "the preceding assertion proves this cursor points to the ready task in the \
+                      vruntime tree"
+        )]
         let secondary = cursor.remove().unwrap();
         if self
             .first_vruntime

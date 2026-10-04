@@ -268,12 +268,14 @@ fn create_anonymous_file(
     let root = match kind {
         ShmemObjectKind::Kernel => {
             let mut guard = KERNEL_SHM_FS.lock();
-            if guard.is_none() {
-                let fs = new_tmpfs(SuperBlockFlags::empty());
-                let root = Path::new(Mount::new_root(&fs), fs.root_dir());
-                *guard = Some((fs, root.clone()));
-            }
-            guard.as_ref().unwrap().1.clone()
+            guard
+                .get_or_insert_with(|| {
+                    let fs = new_tmpfs(SuperBlockFlags::empty());
+                    let root = Path::new(Mount::new_root(&fs), fs.root_dir());
+                    (fs, root)
+                })
+                .1
+                .clone()
         }
         ShmemObjectKind::Memfd => {
             let fs = new_tmpfs(SuperBlockFlags::empty());

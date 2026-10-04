@@ -1066,6 +1066,11 @@ impl VmAreaSet {
             let mut split_right = None;
             let mut remove_before = false;
             {
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "before_start came from this map and no entry was removed before \
+                              acquiring its mutable reference"
+                )]
                 let before = self.areas.get_mut(&before_start).unwrap();
                 let before_end = before.end();
                 if before_end > start {
@@ -1088,8 +1093,17 @@ impl VmAreaSet {
 
         let after_key = self.areas.range(start..).next().map(|(&key, _)| key);
         if let Some(after_start) = after_key {
+            #[expect(
+                clippy::unwrap_used,
+                reason = "after_start was just obtained from this map with no intervening mutation"
+            )]
             let after_end = self.areas.get(&after_start).unwrap().end();
             if after_start < end {
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "after_start was just found in this map and the shared lookup cannot \
+                              remove it"
+                )]
                 let mut new_area = self.areas.remove(&after_start).unwrap();
                 let delta_pages = ((end - after_start) / PAGE_SIZE_4K) as u64;
                 new_area.page_offset += delta_pages;
@@ -1119,6 +1133,10 @@ impl VmAreaSet {
             } else if area_start >= start && area_end <= end {
                 area.set_flags(new_flags);
             } else if area_start < start && area_end > end {
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "the overlap branches prove end lies strictly inside this VMA"
+                )]
                 let right = area.split(end).unwrap();
                 area.set_end(start);
 
@@ -1136,10 +1154,19 @@ impl VmAreaSet {
                 to_insert.push((right.start(), right));
                 to_insert.push((middle.start(), middle));
             } else if area_end > end {
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "the overlap branches prove end lies strictly inside this VMA"
+                )]
                 let right = area.split(end).unwrap();
                 area.set_flags(new_flags);
                 to_insert.push((right.start(), right));
             } else {
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "the preceding overlap branches leave only a VMA with start strictly \
+                              inside its range"
+                )]
                 let mut right = area.split(start).unwrap();
                 right.set_flags(new_flags);
                 to_insert.push((right.start(), right));

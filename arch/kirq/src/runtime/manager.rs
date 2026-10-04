@@ -79,6 +79,10 @@ fn apply_platform_plan(plan: IrqPlatformPlan) {
 /// Try to map a hardware IRQ resource into the OS-visible logical IRQ namespace.
 pub fn try_map(desc: IrqDesc) -> Result<Virq, IrqDescError> {
     let mut state = IRQ_STATE.lock();
+    #[expect(
+        clippy::unwrap_used,
+        reason = "try_resolve_and_publish returns only descriptors assigned a logical IRQ"
+    )]
     Ok(try_resolve_and_publish(&mut state, IrqSpec::Desc(desc))?
         .logical_irq()
         .unwrap())
@@ -147,6 +151,11 @@ fn try_enable_irq_inner(spec: IrqSpec, force_platform_enable: bool) -> Result<()
                 )?;
             }
             let desc = try_resolve_and_publish(&mut state, spec)?;
+            #[expect(
+                clippy::unwrap_used,
+                reason = "try_resolve_and_publish succeeded and assigned this descriptor a \
+                          logical IRQ"
+            )]
             let virq = desc.logical_irq().unwrap();
             let entry = state
                 .descs
@@ -445,6 +454,10 @@ fn resolve_action_install_entry<'a>(
         return Ok(None);
     }
     let desc = try_resolve_and_publish(state, spec)?;
+    #[expect(
+        clippy::unwrap_used,
+        reason = "try_resolve_and_publish succeeded and assigned this descriptor a logical IRQ"
+    )]
     let virq = desc.logical_irq().unwrap();
     let entry = state
         .descs

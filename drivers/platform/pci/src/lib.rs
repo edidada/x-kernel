@@ -44,6 +44,8 @@ pub enum PciInitError {
     NoMemory,
     InvalidRange,
     MappingFailed,
+    /// The device exposes an invalid PCI BAR encoding.
+    InvalidBar,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,7 +407,7 @@ pub struct PciRangeAllocator {
 /// # Errors
 ///
 /// Returns [`PciInitError::NoMemory`] when the allocator cannot satisfy a
-/// BAR request.
+/// BAR request, or [`PciInitError::InvalidBar`] for an invalid device BAR encoding.
 ///
 /// # Panics
 ///
@@ -419,7 +421,10 @@ pub fn configure_device<C: ConfigurationAccess>(
 ) -> Result<(), PciInitError> {
     let mut bar = 0;
     while bar < 6 {
-        let info = match root.bar_info(bdf, bar).unwrap() {
+        let info = match root
+            .bar_info(bdf, bar)
+            .map_err(|_| PciInitError::InvalidBar)?
+        {
             Some(info) => info,
             None => {
                 bar += 1;
@@ -448,7 +453,10 @@ pub fn configure_device<C: ConfigurationAccess>(
             }
         }
 
-        let info = match root.bar_info(bdf, bar).unwrap() {
+        let info = match root
+            .bar_info(bdf, bar)
+            .map_err(|_| PciInitError::InvalidBar)?
+        {
             Some(info) => info,
             None => {
                 bar += 1;

@@ -170,12 +170,18 @@ fn new_n_tty() -> Arc<NTtyDriver> {
         },
     );
     if has_input_irq {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "has_input_irq selected ProcessMode::Work when constructing this TTY, which \
+                      installs the input waker"
+        )]
         let waker = tty.input.lock().input_waker().unwrap();
         connection.attach_input(waker);
     }
     tty
 }
 
-#[cfg(unittest)]
-#[path = "../tests/connection.rs"]
-mod tests;
+#[unittest::mod_test]
+mod tests {
+    include!("../tests/connection.rs");
+}

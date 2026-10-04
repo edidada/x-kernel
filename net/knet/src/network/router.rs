@@ -98,8 +98,13 @@ impl Rule {
         owner_dev: usize,
         owner_addr: Ipv4Cidr,
     ) -> Self {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "32 is a valid IPv4 prefix length for the local host route"
+        )]
+        let filter = Ipv4Cidr::new(owner_addr.address(), 32).unwrap();
         Self::for_ipv4_address(
-            Ipv4Cidr::new(owner_addr.address(), 32).unwrap(),
+            filter,
             loopback_dev,
             owner_dev,
             owner_addr,

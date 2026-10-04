@@ -190,6 +190,10 @@ static ROOT_PID_NS: LazyInit<Arc<PidNamespace>> = LazyInit::new();
 /// violate the lazy-initialization contract.
 pub fn root_pid_namespace() -> &'static Arc<PidNamespace> {
     ROOT_PID_NS.call_once(|| Arc::new(PidNamespace::new_root()));
+    #[expect(
+        clippy::unwrap_used,
+        reason = "call_once completes root namespace initialization before get reads it"
+    )]
     ROOT_PID_NS.get().unwrap()
 }
 

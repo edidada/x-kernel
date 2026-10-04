@@ -1033,13 +1033,21 @@ struct TaskStack {
 
 impl TaskStack {
     pub(crate) fn alloc(size: usize) -> Self {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "kernel task constructors supply page-aligned stack sizes within the kernel \
+                      address space; alignment 16 is valid"
+        )]
         let layout = Layout::from_size_align(size, 16).unwrap();
-        Self {
-            // SAFETY: `layout` is validated above and the returned allocation
-            // is owned exclusively by this `TaskStack`.
-            ptr: NonNull::new(unsafe { alloc::alloc::alloc(layout) }).unwrap(),
-            layout,
-        }
+        #[expect(
+            clippy::unwrap_used,
+            reason = "the kernel GlobalAllocator calls handle_alloc_error on allocation failure \
+                      and never returns null"
+        )]
+        // SAFETY: `layout` is validated above and the returned allocation
+        // is owned exclusively by this `TaskStack`.
+        let ptr = NonNull::new(unsafe { alloc::alloc::alloc(layout) }).unwrap();
+        Self { ptr, layout }
     }
 
     pub(crate) fn top(&self) -> VirtAddr {

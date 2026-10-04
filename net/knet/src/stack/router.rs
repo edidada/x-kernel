@@ -80,6 +80,9 @@ pub(crate) struct Router {
 pub(crate) struct RxDrain {
     pub work_done: usize,
     pub has_more: bool,
+    /// A failed device poll, distinct from an empty queue. Already collected
+    /// packets remain in the caller's batch and must still be processed.
+    pub error: Option<(i32, KError)>,
 }
 impl Router {
     pub(crate) fn new() -> Self {
@@ -791,6 +794,7 @@ impl Router {
             return RxDrain {
                 work_done: 0,
                 has_more: self.has_immediate_rx_work(),
+                error: None,
             };
         }
 
@@ -809,6 +813,7 @@ impl Router {
                     return RxDrain {
                         work_done,
                         has_more: self.has_immediate_rx_work(),
+                        error: None,
                     };
                 }
 
@@ -816,8 +821,17 @@ impl Router {
                     let dev = &mut self.devices[dev_index];
                     dev.poll_rx(ifindex, timestamp)
                 };
-                let Some(packet) = packet else {
-                    break;
+                let packet = match packet {
+                    Ok(Some(packet)) => packet,
+                    Ok(None) => break,
+                    Err(error) => {
+                        self.next_rx_device = next_device_index(dev_index, device_count);
+                        return RxDrain {
+                            work_done,
+                            has_more: self.has_immediate_rx_work(),
+                            error: Some((ifindex, error)),
+                        };
+                    }
                 };
                 work_done += 1;
                 packets.push(packet);
@@ -828,6 +842,7 @@ impl Router {
         RxDrain {
             work_done,
             has_more: false,
+            error: None,
         }
     }
 
@@ -1088,6 +1103,91 @@ mod tests {
         router
     }
 
+    struct FailingRxDevice {
+        link: LoopbackDevice,
+        packet: Option<PacketBuf>,
+    }
+
+    impl NetDevice for FailingRxDevice {
+        fn name(&self) -> &str {
+            self.link.name()
+        }
+
+        fn link_kind(&self) -> LinkKind {
+            self.link.link_kind()
+        }
+
+        fn mtu(&self) -> usize {
+            self.link.mtu()
+        }
+
+        fn is_link_up(&self) -> bool {
+            true
+        }
+
+        fn link_snapshot(&self, ifindex: i32) -> LinkSnapshot {
+            self.link.link_snapshot(ifindex)
+        }
+
+        fn link_send_snapshot(&self) -> LinkSendSnapshot {
+            self.link.link_send_snapshot()
+        }
+
+        fn poll_rx(
+            &mut self,
+            _ifindex: i32,
+            _timestamp: MonotonicInstant,
+        ) -> KResult<Option<PacketBuf>> {
+            self.packet.take().map(Some).ok_or(KError::Io)
+        }
+
+        fn has_rx_work(&self) -> bool {
+            self.packet.is_some()
+        }
+
+        fn send_ip_packet(
+            &mut self,
+            _ifindex: i32,
+            _next_hop: IpAddress,
+            _source_addr: IpAddress,
+            _packet: PacketBuf,
+            _timestamp: MonotonicInstant,
+        ) -> bool {
+            false
+        }
+
+        fn register_rx_waker(
+            &self,
+            source_waker: &core::task::Waker,
+            context: &mut PollContext<'_>,
+        ) -> Result<(), PollRegisterError> {
+            self.link.register_rx_waker(source_waker, context)
+        }
+    }
+
+    #[def_test]
+    fn rx_failure_preserves_partial_batch_and_advances_device_cursor() {
+        let mut router = Router::new();
+        for _ in 0..2 {
+            router.add_device(Box::new(FailingRxDevice {
+                link: LoopbackDevice::new(),
+                packet: Some(tx_packet_buf(vec![0x45, 0, 0, 20])),
+            }));
+        }
+        let mut packets = Vec::new();
+        let first = router.drain_rx_budgeted_into(MonotonicInstant::ORIGIN, 4, &mut packets);
+        assert_eq!(first.work_done, 1);
+        assert_eq!(packets.len(), 1);
+        assert_eq!(first.error, Some((1, KError::Io)));
+        assert!(first.has_more);
+
+        let second = router.drain_rx_budgeted_into(MonotonicInstant::ORIGIN, 4, &mut packets);
+        assert_eq!(second.work_done, 1);
+        assert_eq!(packets.len(), 1);
+        assert_eq!(second.error, Some((2, KError::Io)));
+        assert!(!second.has_more);
+    }
+
     #[def_test(serial)]
     fn exact_rx_budget_does_not_report_empty_device() {
         let mut router = router_with_ready_loopback_packet();
@@ -1096,6 +1196,7 @@ mod tests {
         let drain = router.drain_rx_budgeted_into(MonotonicInstant::ORIGIN, 1, &mut packets);
 
         assert_eq!(drain.work_done, 1);
+        assert_eq!(drain.error, None);
         assert!(!drain.has_more);
     }
 
@@ -1419,14 +1520,11 @@ impl smoltcp::phy::Device for Router {
     type TxToken<'a> = TxToken<'a>;
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        if self.rx_queue.is_empty() || self.data_tx_queue.is_full() {
-            None
-        } else {
-            Some((
-                RxToken(self.rx_queue.pop_front().unwrap()),
-                TxToken(&mut self.data_tx_queue),
-            ))
+        if self.data_tx_queue.is_full() {
+            return None;
         }
+        let packet = self.rx_queue.pop_front()?;
+        Some((RxToken(packet), TxToken(&mut self.data_tx_queue)))
     }
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {

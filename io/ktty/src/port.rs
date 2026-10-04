@@ -109,6 +109,11 @@ impl InputWork {
     }
 
     #[cfg(unittest)]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: test scenario: shutdown failure fails the \
+                  calling unittest"
+    )]
     fn shutdown(&self) {
         let work = self.work.lock().take();
         if let Some(work) = work {
@@ -392,6 +397,7 @@ impl<R, W> Drop for TtyPort<R, W> {
     }
 }
 
-#[cfg(unittest)]
-#[path = "tests/port.rs"]
-mod tests;
+#[unittest::mod_test]
+mod tests {
+    include!("tests/port.rs");
+}

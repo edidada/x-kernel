@@ -14,6 +14,11 @@
 //! [`driver_base`]: driver_base
 
 #![no_std]
+#![allow(
+    clippy::unwrap_used,
+    reason = "case (b): 11 legacy diagnostic sites need individual failure-contract review; new \
+              code remains subject to the no-legitimate-failure-panic rule"
+)]
 #![cfg_attr(doc, feature(doc_cfg))]
 
 #[cfg(feature = "alloc")]

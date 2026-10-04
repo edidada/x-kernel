@@ -3,7 +3,7 @@
 lint 等级集中在根 `Cargo.toml` 的 `[workspace.lints]`，
 lint 参数（阈值、禁用列表、测试豁免）集中在根 `clippy.toml`。
 凡是 lint 能强制的规则，不再写进 `docs/ai/skills/code-guidelines/`，
-AI 编写与审查也不重复检查。
+AI 编写与审查也不重复检查，但下述按 crate 关闭的 case (b) 仍保留原规则审查。
 本文件是这些 lint 的唯一政策入口。
 
 ## Lint 政策
@@ -14,7 +14,7 @@ AI 编写与审查也不重复检查。
 - **例外写法**：逐点例外是在最窄作用域上
   `#[expect(<lint>, reason = "...")]`。
   reason 要说明此处为什么不适用，不写 "needed"、"legacy" 之类的空话。
-  `#[allow]` 只用于 `expect` 不可靠的场合：
+  除下述「按 crate 关闭」外，`#[allow]` 只用于 `expect` 不可靠的场合：
   lint 只在部分 cfg/feature/平台下触发，或代码由宏展开或生成工具（如 rust-bindgen）生成；
   同样必须带 reason。
 - **按 crate 关闭**：只允许两类：case (a) 规则不适用，例如以终止构建为预期失败方式的
@@ -53,13 +53,24 @@ AI 编写与审查也不重复检查。
   测试代码里不手写 `allow` / `expect`；
   内联测试模块用 `#[mod_test]` 声明，不用裸 `#[cfg(unittest)] mod`。
   文件模块（`mod name;`）上的属性宏在 stable 上被拒（E0658），仍用 `#[cfg(unittest)]`，
-  其中 `#[def_test]` 以外的辅助函数不在豁免范围内。
+  其中 `#[def_test]` 以外的辅助函数不在豁免范围内。可用
+  `#[mod_test] mod tests { include!("tests.rs"); }` 保留文件组织并覆盖辅助函数；
+  被 include 的文件不重复声明内层 cfg 或模块文档，模块文档放在外层声明处。
   host 侧 std `#[test]` 由 `clippy.toml` 的 `allow-*-in-tests` 覆盖。
   宏支持在启用 `clippy::panic` 之前落地。
+- **实际检查范围**：`make clippy` 从选定平台的 entry manifest 检查依赖图，并启用
+  `--cfg unittest`（包含编入普通 target 的测试代码），不使用 `--all-targets`。
+  图中的本地库、proc-macro 和 host `build.rs` 按各自 target 根检查；
+  不会因此检查未选中的集成测试或 bench target。内核使用 registry `tee_crypto`，
+  本地 `tee/tee_crypto` 的测试与 bench 不在此图中。`xtask` 是独立 workspace，
+  不继承根 lint；`make clippy` 通过 `cargo run` 使用它，不等于对它运行 Clippy。
+  host 工具检查需显式执行 `cargo clippy --manifest-path xtask/Cargo.toml -p xkmake --no-deps`。
 - **范围**：`missing_docs` 和 `rustdoc::*` lint 归 module-docs 轨道
   （`docs/ai/review/module-docs/`），不在本文件管理。
 - **与 AI 审查的分工**：`[workspace.lints]` 已启用的 lint，
-  以及 clippy 默认组和 rustc 默认 lint 已强制的内容，不属于 code-guidelines skill 与 AI 审查的范围。
+  以及 clippy 默认组和 rustc 默认 lint 已强制的内容，通常不属于 code-guidelines skill 与 AI 审查的范围。
+  case (b) 按 crate 关闭后，表中保留的规则原文对这些 crate 的新增代码仍有效，
+  AI/人工审查必须检查这些代码，不能因为 workspace 已启用就跳过；case (a) 按其不适用范围处理。
   待迁入表中的 lint 尚未启用；在它落地前，表中列出的原文仍是有效规则。
 
 ## 待迁入表
@@ -80,7 +91,6 @@ AI 编写与审查也不重复检查。
 | `clippy::allow_attributes_without_reason` | restriction | allow | deny | "suppress lints at the narrowest practical scope;"<br>"broad lint suppression;" | `modules-and-attributes.md:34`<br>`modules-and-attributes.md:58` | partial（强制 reason） | — | 无；审查时仍看例外的作用域是否最窄、reason 是否属实（见上方"例外写法"） | 350（测试 6） |
 | `clippy::allow_attributes` | restriction | allow | deny | "suppress lints at the narrowest practical scope;"<br>"use `#[expect(dead_code)]` only when the dead code is simple, clearly intentional, and likely to become used."<br>"broad lint suppression;" | `modules-and-attributes.md:34-36`<br>`modules-and-attributes.md:58` | partial（强制外层 `#[allow]` 改 `#[expect]`；不检查内层 `#![allow]`） | — | cfg/宏/平台差异处带 reason 的 `allow`；`#[expect(dead_code, reason = "...")]` 只用于简单、明显有意且很可能会被用上的死代码，reason 说明它何时被用上 | 332（测试 5） |
 | `clippy::expect_used` | restriction | allow | warn | 同 `clippy::panic` | 同 `clippy::panic` | partial | `allow-expect-in-tests = true` | 同 `clippy::panic`；可按上方 case (a)/(b) 关闭具体 crate 的已 lint target，须在本行列明；当前未关闭任何 crate | 1187（测试 326） |
-| `clippy::unwrap_used` | restriction | allow | warn | 同 `clippy::panic` | 同 `clippy::panic` | partial | `allow-unwrap-in-tests = true` | 同 `clippy::panic`；存量密集的 kext4 等可按上方 case (b) 在已 lint 的 target 根关闭，已关闭列表随启用提交写入本行 | 3494（测试 1578） |
 
 注：`avoid-breaking-exported-api = false` 是全局开关，
 还会让 `box_collection`、`vec_box`、`redundant_allocation`、`enum_variant_names`、
@@ -115,6 +125,7 @@ AI 编写与审查也不重复检查。
 |---|---|---|---|---|---|---|---|
 | `clippy::panic` | restriction | allow | `[workspace.lints]` warn；`clippy.toml` 的 `allow-panic-in-tests = true` | "avoid `.unwrap()` and hidden panics where failure is a legitimate possibility;"<br>"unwrap-like failure paths hidden inside normal control flow;"<br>"error paths use `Result` and `?` rather than hidden panics;" | `error-handling-and-logging.md:9-10`<br>`error-handling-and-logging.md:36`<br>`SKILL.md:126` | partial（只标出 `panic!`；`unwrap`/`expect` 归 `clippy::unwrap_used`、`clippy::expect_used` 行） | 合法失败（取决于输入、资源或环境）作为错误返回，能在现有 `Result`/`Option` 通道内局部转换的直接转换。其余逐点写 `#[expect(clippy::panic, reason = "...")]`，只限四类：（1）不可恢复的 fatal boot：reason 以 "Fatal boot:" 开头，写明实际启动失败条件，并说明无恢复办法且无错误返回通道；不因此修改启动接口或关闭整个启动 crate；（2）内部不变量：reason 写明具体不变量及其成立原因；（3）失败契约待修：失败合法但当前接口无法上报、需要接口或生命周期改动的，reason 以 "TODO(cg): " 开头并写明预定修复方式；（4）测试场景：`def_test`、`mod_test` 已统一豁免，文件形式测试模块中的辅助函数逐个写，reason 以 "test scenario: " 开头。按 crate 关闭 case (b)：`acpi`（`drivers/platform/acpi/src/lib.rs`，16 处固件表缺失或格式错误）和 `kcpu`（`arch/kcpu/src/lib.rs`，15 处四架构异常与非对齐模拟路径），在 crate 根写 `#![allow(clippy::panic, reason = "case (b): ...")]`；门槛为 Jenkins 各 `make clippy` 配置诊断并集中每 crate ≥10 处，新增代码仍审查本行原文；启动 crate 不按此门槛关闭，其余 target 未关闭。 |
 | `unreachable_pub` | rustc | allow | `[workspace.lints]` warn | "default to the narrowest visibility that works;"（两处）<br>"over-wide visibility;"<br>"helpers exposed more widely than required." | `modules-and-attributes.md:8`<br>`naming-and-structure.md:37`<br>`modules-and-attributes.md:49`<br>`naming-and-structure.md:48` | partial（只查从 crate 根不可达的 `pub`） | 四平台诊断并集 1425 处，通过 1400 个可见性收窄与 1 处宏生成项例外处理（共享 `pub use` 一次修改覆盖多个诊断）；另同步 13 个同名 cfg 分支；诊断包括 tee_kernel 425、knet 220、ksyscall 161 处，无 crate 根豁免或新增 dead_code 豁免；`unittest::tests_name!` 生成的公开 suite 保留 `pub`，在生成项上带 reason 的 `allow` 处理展开位置决定可达性的差异。另按 Jenkins 其余 clippy 配置、`UNITTEST=y` 和 feature 扫描收窄只在部分 cfg/feature 下编译的项；rust-bindgen 生成的绑定模块不手工编辑，在其模块声明处带 reason 的 `allow` 中包含此 lint。cfg/feature 下的公开 API 和导出宏辅助项须保留所需可达性；确需例外时遵循上方最窄作用域与实质 reason 政策。lint 不查 `pub(crate)`，新增代码审查仍须判断能否收窄为 `pub(super)` 或私有 |
+| `clippy::unwrap_used` | restriction | allow | `[workspace.lints]` warn；`allow-unwrap-in-tests = true` | "avoid `.unwrap()` and hidden panics where failure is a legitimate possibility;"<br>"unwrap-like failure paths hidden inside normal control flow;"<br>"error paths use `Result` and `?` rather than hidden panics;" | `error-handling-and-logging.md:9-10`<br>`error-handling-and-logging.md:36`<br>`SKILL.md:126` | partial（lint 标出每处） | 合法失败（输入、资源或环境）作为错误返回；逐点 `expect` 用于内部不变量，reason 写明具体不变量；另允许无法恢复的启动失败，reason 必须说明实际失败条件、无恢复办法和无错误返回通道（当前 `klogger::init_klogger` 的全局 logger 安装、`khal::mem::init` 的最终物理内存重叠检查），不借此按 crate 关闭。测试经宏豁免；不经宏的运行期自测辅助函数逐个写 `expect`，reason 以 "test scenario: " 开头。按 crate 关闭 case (a)：`kbuild_config`（`build.rs`，4 个诊断）、`ksignal`（仅 `build.rs`，1 个诊断），host 构建环境缺失时预期终止构建，库根不关闭。case (b)：`alloc-engine`（10）、`kworkerpool_ng`（19）、`virtio`（11）、`kworkqueue_ng`（30）、`kext4`（133）、`ksyscall`（69），均只在各自 `src/lib.rs`；新增代码仍审查本行原文。规模依据四平台诊断并集，以每 crate ≥10 个诊断位置为阈值，避免在本次启用中混入大量失败契约重构；少量位置逐点处理，不把阈值当作允许新增 unwrap 的配额。 |
 | `clippy::excessive_nesting` | complexity | warn（阈值默认 0，即不触发） | `[workspace.lints]` warn；`clippy.toml` 的 `excessive-nesting-threshold = 6` | "minimize unnecessary nesting;" | `api-design.md:9` | partial（只量块深度；"unnecessary" 仍由审查判断） | `mod`、`impl` 块和函数体都计入层数，6 即方法体内 4 层控制流；阈值 4、5 时存量为 448、93 处（aarch64），大多是正常的两三层控制流，不作为门禁。先用提前返回、`let ... else` 或把闭包体、循环体提取为具名函数展平，展平不得改变锁作用域与清理顺序；例外逐函数写 `#[expect(clippy::excessive_nesting, reason = "...")]`，只限测试场景（reason 以 "test scenario" 开头）和待拆分的遗留函数（reason 以 "TODO(cg): legacy" 开头并写明拆分方式）。 |
 | `clippy::too_many_lines` | pedantic | allow | `[workspace.lints]` warn；`clippy.toml` 的 `too-many-lines-threshold = 100` | "keep functions small and focused;" | `api-design.md:8` | partial（只量行数；"focused" 即单一职责仍由审查判断） | 例外逐函数写 `#[expect(clippy::too_many_lines, reason = "...")]`，只限三类：（1）分发表或注册表：主体为一个 `match` 或一串独立注册语句，每个分支约 10 行以内，分支间不共享可变状态，reason 以 "linear ... table" 开头；（2）测试场景：`def_test`、`mod_test` 已统一豁免，文件形式测试模块中的辅助函数逐个写，reason 以 "unittest scenario" 开头；（3）待拆分的遗留函数：reason 以 "TODO(cg): legacy" 开头并写明按什么职责拆分，拆分需单独审查锁、事务和清理顺序，不在 lint 提交中进行。其余超长函数按职责拆分。按 crate 关闭：`kext4`（9 个分配、writeback 与磁盘结构解码函数）。 |
 | `clippy::linkedlist` | pedantic | allow | `[workspace.lints]` warn | "fall back to `alloc::collections::LinkedList` only when elements cannot own their linkage (for example the list must outlive or be decoupled from element ownership);" | `performance-and-resources.md:33-35` | partial（lint 标出每处 `LinkedList`） | 极少；reason 须说明元素无法自带链接（例如链表须比元素所有权活得久，或与之解耦），因而不能用 `linked_list_r4l`；参数：`avoid-breaking-exported-api = false`（否则 pub 签名中的不报；见表后注） |
