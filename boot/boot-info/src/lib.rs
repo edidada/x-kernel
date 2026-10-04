@@ -680,6 +680,8 @@ const _: () = {
     );
 };
 
+// Gate before resolving the macro: boot loaders use this crate without an allocator.
+#[cfg(unittest)]
 #[unittest::mod_test]
 mod unittest_tests {
     use alloc::{boxed::Box, format, vec, vec::Vec};
