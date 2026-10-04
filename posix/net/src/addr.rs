@@ -43,6 +43,12 @@ fn read_family(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<u16>
     Ok(family)
 }
 /// Cast a reference to a byte slice
+///
+/// # Safety
+///
+/// Every byte of `value`, including any padding, must be initialized and
+/// remain immutable for the returned borrow. A valid `T` alone does not
+/// guarantee initialized padding or exclude mutation through `UnsafeCell`.
 unsafe fn cast_to_slice<T>(value: &T) -> &[u8] {
     // SAFETY: `value` is a live reference, and reborrowing its contiguous
     // storage as a same-sized byte slice preserves layout and lifetime.

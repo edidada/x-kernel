@@ -103,12 +103,22 @@ impl<const BLK_SIZE: usize> Slab<BLK_SIZE> {
 
     // --- intrusive freelist helpers ---
 
+    /// # Safety
+    ///
+    /// `addr` must address a live free slab block, aligned for `usize`, whose
+    /// first word contains an initialized freelist link. The allocator must
+    /// exclude concurrent writes to that word for this read.
     unsafe fn read_next(addr: usize) -> usize {
         // SAFETY: caller guarantees addr points to a free slab block whose
         // first bytes store the next pointer.
         unsafe { *(addr as *const usize) }
     }
 
+    /// # Safety
+    ///
+    /// `addr` must address a live free slab block, aligned for `usize`, with
+    /// at least one writable word and no outstanding user access. The allocator
+    /// must exclusively own that word while installing the new freelist link.
     unsafe fn write_next(addr: usize, next: usize) {
         // SAFETY: caller guarantees addr points to a free slab block;
         // writing the next pointer there is safe.

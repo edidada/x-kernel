@@ -4,6 +4,9 @@
 # `Cargo.toml`. This file only holds lint parameters: thresholds,
 # disallowed lists, and test exemptions.
 
+# Apply documentation lints such as clippy::missing_safety_doc to private items too.
+check-private-items = true
+
 # std `#[test]` code only; `cfg(unittest)` code is exempted by `util/macros`.
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true

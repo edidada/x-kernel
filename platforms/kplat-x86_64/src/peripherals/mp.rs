@@ -14,6 +14,13 @@ use x86_apic as apic;
 
 use crate::peripherals::bootmem::ap_trampoline_page_paddr;
 
+/// # Safety
+///
+/// The reserved AP trampoline page must be mapped writable and exclusively
+/// owned while copying and patching; no AP may still execute or read it.
+/// The linker symbols must delimit the trampoline image and its in-bounds
+/// patch slots. `stack_top` must be the aligned top of a live AP stack
+/// reachable through the AP bootstrap mappings until it leaves that stack.
 unsafe fn setup_startup_page(stack_top: PhysAddr) {
     unsafe extern "C" {
         fn ap_entry32();

@@ -112,6 +112,11 @@ pub(crate) fn write_hex(num: usize) {
     }
 }
 
+/// # Safety
+///
+/// The CPU must have permission for port I/O. `port` must identify the
+/// intended UART register, and reading it must be valid in the current
+/// device state. Serialize access with other users of the UART.
 #[inline]
 unsafe fn inb(port: u16) -> u8 {
     let value: u8;
@@ -127,6 +132,11 @@ unsafe fn inb(port: u16) -> u8 {
     value
 }
 
+/// # Safety
+///
+/// The CPU must have permission for port I/O. `port` must identify the
+/// intended UART register, and writing it must be valid in the current
+/// device state. Serialize access with other users of the UART.
 #[inline]
 unsafe fn outb(port: u16, value: u8) {
     // SAFETY: performs one x86 port-I/O write to the caller-specified UART register.

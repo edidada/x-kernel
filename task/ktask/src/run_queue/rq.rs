@@ -874,6 +874,13 @@ impl RunQueue {
 }
 
 /// Clear the `on_cpu` field of previous task running on this CPU.
+///
+/// # Safety
+///
+/// Call on the CPU owning `current_rq`, with IRQs and migration disabled,
+/// after switching away from the task recorded in `PREV_TASK` and before
+/// replacing that record. That task must remain alive and must no longer
+/// execute on its old stack, since clearing `on_cpu` permits remote enqueue.
 #[cfg(feature = "smp")]
 pub(crate) unsafe fn clear_prev_task_on_cpu(current_rq: &RunQueue) {
     // SAFETY: this is called on the CPU that owns `PREV_TASK`, after the

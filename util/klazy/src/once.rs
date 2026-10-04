@@ -424,6 +424,13 @@ impl<T> Once<T> {
     }
 
     /// Get a reference to the initialized value. Must only be called when Ready.
+    ///
+    /// # Safety
+    ///
+    /// The value must be initialized and published as `Status::Ready`. The
+    /// caller must have initialized it, observed publication with acquire
+    /// ordering, or own the cell exclusively. Keep it initialized for the
+    /// borrow and permit mutation only through its interior-mutable fields.
     unsafe fn get_value_unchecked(&self) -> &T {
         // SAFETY:
         // - Caller ensures value is initialized
@@ -432,6 +439,11 @@ impl<T> Once<T> {
     }
 
     /// Get a mutable reference to the initialized value. Must only be called when Ready.
+    ///
+    /// # Safety
+    ///
+    /// The cell must be `Status::Ready` with a fully initialized value that
+    /// has not been moved out. The exclusive borrow covers all value access.
     unsafe fn get_value_mut_unchecked(&mut self) -> &mut T {
         // SAFETY:
         // - Caller ensures value is initialized
@@ -439,7 +451,13 @@ impl<T> Once<T> {
         unsafe { &mut *(*self.storage.get()).as_mut_ptr() }
     }
 
-    /// Extract the initialized value. Must only be called when Ready.
+    /// Moves the initialized value out of storage.
+    ///
+    /// # Safety
+    ///
+    /// The cell must contain a fully initialized value that has not been moved
+    /// out. Consuming the cell gives this operation exclusive access to storage;
+    /// the operation suppresses the cell destructor when moving the value out.
     unsafe fn extract_value_unchecked(self) -> T {
         let this = core::mem::ManuallyDrop::new(self);
         // SAFETY:
