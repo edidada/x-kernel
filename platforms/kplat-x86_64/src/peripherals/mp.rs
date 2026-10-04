@@ -81,7 +81,7 @@ unsafe fn setup_startup_page(stack_top: PhysAddr) {
 }
 
 /// Starts a secondary CPU with the given raw APIC ID and stack.
-pub fn start_secondary_cpu(raw_apic_id: RawCpuId, stack_top: PhysAddr) {
+pub(crate) fn start_secondary_cpu(raw_apic_id: RawCpuId, stack_top: PhysAddr) {
     // SAFETY: the caller passes the stack top for the target AP, and this helper
     // prepares the reserved trampoline page before any SIPI is sent.
     unsafe { setup_startup_page(stack_top) };

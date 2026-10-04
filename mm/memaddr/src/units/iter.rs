@@ -97,7 +97,7 @@ where
 }
 
 #[unittest::mod_test]
-pub mod tests_iter {
+pub(super) mod tests_iter {
     use unittest::def_test;
 
     use super::{DynPageIter, PageIter};

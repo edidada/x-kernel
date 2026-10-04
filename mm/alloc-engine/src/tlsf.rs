@@ -95,7 +95,7 @@ impl ByteAllocator for TlsfByteAllocator {
 
 #[cfg(all(unittest, feature = "tlsf"))]
 #[allow(missing_docs)]
-pub mod tests_tlsf {
+pub(crate) mod tests_tlsf {
     use core::alloc::Layout;
 
     use unittest::def_test;

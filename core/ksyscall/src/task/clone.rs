@@ -112,7 +112,7 @@ pub(crate) struct CloneRequest {
 
 impl CloneRequest {
     /// Creates a new request with all fields zeroed (defaults).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             flags: CloneFlags::empty(),
             exit_signal: 0,
@@ -125,53 +125,53 @@ impl CloneRequest {
         }
     }
 
-    pub fn flags(&self) -> CloneFlags {
+    pub(crate) fn flags(&self) -> CloneFlags {
         self.flags
     }
 
-    pub fn set_flags(&mut self, flags: CloneFlags) -> &mut Self {
+    pub(crate) fn set_flags(&mut self, flags: CloneFlags) -> &mut Self {
         self.flags = flags;
         self
     }
 
-    pub fn set_exit_signal(&mut self, sig: u64) -> &mut Self {
+    pub(crate) fn set_exit_signal(&mut self, sig: u64) -> &mut Self {
         self.exit_signal = sig;
         self
     }
 
-    pub fn set_stack(&mut self, sp: usize) -> &mut Self {
+    pub(crate) fn set_stack(&mut self, sp: usize) -> &mut Self {
         self.stack = sp;
         self
     }
 
     /// Set the stack from a base address and size (clone3 convention).
     /// SP is computed as `base + size` for downward-growing architectures.
-    pub fn set_stack_with_size(&mut self, base: u64, size: u64) -> &mut Self {
+    pub(crate) fn set_stack_with_size(&mut self, base: u64, size: u64) -> &mut Self {
         self.stack = if base == 0 { 0 } else { (base + size) as usize };
         self
     }
 
-    pub fn set_parent_tid(&mut self, ptr: usize) -> &mut Self {
+    pub(crate) fn set_parent_tid(&mut self, ptr: usize) -> &mut Self {
         self.parent_tid = ptr;
         self
     }
 
-    pub fn set_child_tid(&mut self, ptr: usize) -> &mut Self {
+    pub(crate) fn set_child_tid(&mut self, ptr: usize) -> &mut Self {
         self.child_tid = ptr;
         self
     }
 
-    pub fn set_tls(&mut self, tls: usize) -> &mut Self {
+    pub(crate) fn set_tls(&mut self, tls: usize) -> &mut Self {
         self.tls = tls;
         self
     }
 
-    pub fn set_pidfd(&mut self, ptr: usize) -> &mut Self {
+    pub(crate) fn set_pidfd(&mut self, ptr: usize) -> &mut Self {
         self.pidfd = ptr;
         self
     }
 
-    pub fn reject_exit_signal_with_shared_parent(&mut self) -> &mut Self {
+    pub(crate) fn reject_exit_signal_with_shared_parent(&mut self) -> &mut Self {
         self.reject_exit_signal_with_shared_parent = true;
         self
     }
@@ -181,7 +181,7 @@ impl CloneRequest {
         clippy::too_many_lines,
         reason = "TODO(cg): legacy clone; split flag validation, resource sharing and task start"
     )]
-    pub fn do_clone(mut self, uctx: &UserContext) -> KResult<isize> {
+    pub(crate) fn do_clone(mut self, uctx: &UserContext) -> KResult<isize> {
         if self.flags.contains(CloneFlags::VFORK) {
             // TODO: Implement Linux vfork semantics: keep the mm shared, block
             // the parent until the child successfully execs or exits, and wake
@@ -418,7 +418,7 @@ impl CloneRequest {
     }
 }
 
-pub fn sys_clone(
+pub(crate) fn sys_clone(
     uctx: &UserContext,
     flags: u32,
     stack: usize,
@@ -456,12 +456,12 @@ pub fn sys_clone(
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn sys_fork(uctx: &UserContext) -> KResult<isize> {
+pub(crate) fn sys_fork(uctx: &UserContext) -> KResult<isize> {
     sys_clone(uctx, SIGCHLD, 0, 0, 0, 0)
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn sys_vfork(uctx: &UserContext) -> KResult<isize> {
+pub(crate) fn sys_vfork(uctx: &UserContext) -> KResult<isize> {
     let mut request = CloneRequest::new();
     request
         .set_flags(CloneFlags::VM | CloneFlags::VFORK)

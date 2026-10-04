@@ -29,7 +29,7 @@ use crate::tee::{
 /// - user_id: Identifier of the user associated with this session
 ///
 /// This structure is attached to each thread handling a client session
-pub struct TeeSessionCtx {
+pub(super) struct TeeSessionCtx {
     pub clnt_id: TEE_Identity,
     pub cancel: bool,
     pub cancel_mask: bool,
@@ -85,7 +85,7 @@ impl Default for TeeSessionCtx {
 ///
 /// # Note
 /// Creates a default session context if none exists for the current thread
-pub fn with_tee_session_ctx_mut<F, R>(f: F) -> TeeResult<R>
+pub(super) fn with_tee_session_ctx_mut<F, R>(f: F) -> TeeResult<R>
 where
     F: FnOnce(&mut TeeSessionCtx) -> TeeResult<R>,
 {
@@ -117,7 +117,7 @@ where
 ///
 /// # Note
 /// Creates a default session context if none exists for the current thread
-pub fn with_tee_session_ctx<F, R>(f: F) -> TeeResult<R>
+pub(super) fn with_tee_session_ctx<F, R>(f: F) -> TeeResult<R>
 where
     F: FnOnce(&TeeSessionCtx) -> TeeResult<R>,
 {
@@ -341,7 +341,7 @@ mod exec_fixture {
 ///
 /// # Returns
 /// The result of the closure execution
-pub fn with_tee_ta_ctx_mut<F, R>(f: F) -> TeeResult<R>
+pub(super) fn with_tee_ta_ctx_mut<F, R>(f: F) -> TeeResult<R>
 where
     F: FnOnce(&mut TeeTaCtx) -> TeeResult<R>,
 {
@@ -360,7 +360,7 @@ where
 ///
 /// # Returns
 /// The result of the closure execution
-pub fn with_tee_ta_ctx<F, R>(f: F) -> TeeResult<R>
+pub(super) fn with_tee_ta_ctx<F, R>(f: F) -> TeeResult<R>
 where
     F: FnOnce(&TeeTaCtx) -> TeeResult<R>,
 {
@@ -373,7 +373,7 @@ where
 // Test module for TEE session functionality
 // Only compiled when the tee_test feature is enabled
 #[unittest::mod_test]
-pub mod tests_tee_session {
+pub(super) mod tests_tee_session {
     use alloc::string::String;
 
     use unittest::assert_eq;

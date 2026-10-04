@@ -18,11 +18,11 @@ use super::{VsockAddr, VsockConnId};
 
 /// Twice the TIPC channel buffer so that pending messages can be buffered
 /// when TIPC blocks, matching Trusty's vsock bridge design.
-pub const BRIDGE_RX_BUFFER_SIZE: usize = 2 * IPC_CHAN_MAX_BUF_SIZE;
+pub(super) const BRIDGE_RX_BUFFER_SIZE: usize = 2 * IPC_CHAN_MAX_BUF_SIZE;
 
 /// Bridge lifecycle states, matching Trusty's vsock bridge state machine.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BridgeConnectionState {
+pub(super) enum BridgeConnectionState {
     /// Entry is not usable.
     #[expect(dead_code)]
     Invalid,
@@ -45,7 +45,7 @@ pub enum BridgeConnectionState {
 }
 
 /// One bridged vsock/TIPC connection.
-pub struct BridgeConnection {
+pub(super) struct BridgeConnection {
     /// Stable bridge-local token used as TIPC handle-set cookie.
     token: usize,
     /// Host peer address.
@@ -64,7 +64,7 @@ pub struct BridgeConnection {
 
 impl BridgeConnection {
     /// Creates a host-originated connection entry.
-    pub fn new(token: usize, peer: VsockAddr, local_port: u32) -> Self {
+    pub(super) fn new(token: usize, peer: VsockAddr, local_port: u32) -> Self {
         Self {
             token,
             peer,
@@ -80,7 +80,7 @@ impl BridgeConnection {
     }
 
     /// Creates a TIPC-originated connection entry.
-    pub fn new_tipc_only(
+    pub(super) fn new_tipc_only(
         token: usize,
         peer: VsockAddr,
         local_port: u32,
@@ -94,27 +94,27 @@ impl BridgeConnection {
     }
 
     /// Returns the stable bridge-local token used as TIPC handle-set cookie.
-    pub fn token(&self) -> usize {
+    pub(super) fn token(&self) -> usize {
         self.token
     }
 
     /// Returns the guest local vsock port.
-    pub fn local_port(&self) -> u32 {
+    pub(super) fn local_port(&self) -> u32 {
         self.local_port
     }
 
     /// Returns the current bridge lifecycle state.
-    pub fn state(&self) -> BridgeConnectionState {
+    pub(super) fn state(&self) -> BridgeConnectionState {
         self.state
     }
 
     /// Updates the current bridge lifecycle state.
-    pub fn set_state(&mut self, state: BridgeConnectionState) {
+    pub(super) fn set_state(&mut self, state: BridgeConnectionState) {
         self.state = state;
     }
 
     /// Returns the driver connection identifier for this bridge entry.
-    pub fn conn_id(&self) -> VsockConnId {
+    pub(super) fn conn_id(&self) -> VsockConnId {
         VsockConnId {
             peer_addr: self.peer,
             local_port: self.local_port,
@@ -122,18 +122,18 @@ impl BridgeConnection {
     }
 
     /// Returns the attached TIPC channel.
-    pub fn channel(&self) -> KResult<Arc<IpcChan>> {
+    pub(super) fn channel(&self) -> KResult<Arc<IpcChan>> {
         self.tipc_channel.clone().ok_or(KError::NotConnected)
     }
 
     /// Attaches a TIPC channel to this connection.
-    pub fn set_tipc_channel(&mut self, name: &str, channel: Arc<IpcChan>) {
+    pub(super) fn set_tipc_channel(&mut self, name: &str, channel: Arc<IpcChan>) {
         self.tipc_port_name = Some(name.to_string());
         self.tipc_channel = Some(channel);
     }
 
     /// Stages one complete vsock packet for delivery to TIPC.
-    pub fn stage_rx(&mut self, data: &[u8]) -> KResult {
+    pub(super) fn stage_rx(&mut self, data: &[u8]) -> KResult {
         if data.len() > self.rx_buffer.len() {
             return Err(KError::OutOfRange);
         }
@@ -143,7 +143,7 @@ impl BridgeConnection {
     }
 
     /// Attempts to send the staged packet to TIPC.
-    pub fn tipc_try_send(&mut self) -> KResult {
+    pub(super) fn tipc_try_send(&mut self) -> KResult {
         if self.rx_pending == 0 {
             self.set_state(BridgeConnectionState::Active);
             return Ok(());
@@ -166,12 +166,12 @@ impl BridgeConnection {
     }
 
     /// Returns whether a vsock packet is staged.
-    pub fn has_pending_rx(&self) -> bool {
+    pub(super) fn has_pending_rx(&self) -> bool {
         self.rx_pending != 0
     }
 
     /// Accounts one message sent from TIPC to vsock.
-    pub fn add_tx_bytes(&mut self, len: usize) {
+    pub(super) fn add_tx_bytes(&mut self, len: usize) {
         self.tx_bytes += len;
     }
 }

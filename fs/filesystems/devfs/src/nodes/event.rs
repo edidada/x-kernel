@@ -78,14 +78,14 @@ impl Inner {
     }
 }
 
-pub struct EventDev {
+pub(crate) struct EventDev {
     inner: Mutex<Inner>,
     ev_bits: Bitmap<{ EventType::COUNT as usize }>,
     poll_set: PollSet,
 }
 
 impl EventDev {
-    pub fn new(device: ClassDevice<InputDeviceImpl>) -> Self {
+    pub(crate) fn new(device: ClassDevice<InputDeviceImpl>) -> Self {
         let mut ev_bits = Bitmap::new();
         for i in 0..EventType::COUNT {
             let Some(ty) = EventType::from_repr(i) else {
@@ -170,7 +170,7 @@ fn return_zero_bits(arg: usize, size: usize, bits: usize) -> KResult<usize> {
 
 #[repr(C)]
 #[derive(FromBytes, IntoBytes, Immutable)]
-pub struct KernelTimeval {
+pub(crate) struct KernelTimeval {
     pub tv_sec: __kernel_old_time_t,
     pub tv_usec: __kernel_suseconds_t,
 }
@@ -186,7 +186,7 @@ struct InputEvent {
 
 #[unsafe(no_mangle)]
 #[inline(never)]
-pub extern "C" fn ongkey() {
+pub(crate) extern "C" fn ongkey() {
     core::hint::black_box(());
 }
 

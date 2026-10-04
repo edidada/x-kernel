@@ -32,7 +32,7 @@ fn validate_cap_header(header_ptr: UserPtr<__user_cap_header_struct>) -> KResult
     Ok(())
 }
 
-pub fn sys_capget(
+pub(crate) fn sys_capget(
     header: UserPtr<__user_cap_header_struct>,
     data: UserPtr<__user_cap_data_struct>,
 ) -> KResult<isize> {
@@ -46,7 +46,7 @@ pub fn sys_capget(
     Ok(0)
 }
 
-pub fn sys_capset(
+pub(crate) fn sys_capset(
     header: UserPtr<__user_cap_header_struct>,
     _data: UserPtr<__user_cap_data_struct>,
 ) -> KResult<isize> {
@@ -55,7 +55,7 @@ pub fn sys_capset(
     Ok(0)
 }
 
-pub fn sys_get_mempolicy(
+pub(crate) fn sys_get_mempolicy(
     _policy: *mut i32,
     _nodemask: *mut usize,
     _maxnode: usize,
@@ -83,7 +83,7 @@ pub fn sys_get_mempolicy(
 /// accepted as no-ops. This matches the behavior user space expects from a
 /// Linux-like kernel on these (often merely probed) options, and avoids noisy
 /// warnings for each unimplemented option.
-pub fn sys_prctl(
+pub(crate) fn sys_prctl(
     option: u32,
     arg2: usize,
     arg3: usize,

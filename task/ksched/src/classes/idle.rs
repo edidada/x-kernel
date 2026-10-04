@@ -22,7 +22,7 @@ pub(crate) struct IdleClass<T> {
 }
 
 impl<T> IdleClass<T> {
-    pub fn new(idle: Arc<SchedTask<T>>) -> Self {
+    pub(crate) fn new(idle: Arc<SchedTask<T>>) -> Self {
         Self { idle }
     }
 

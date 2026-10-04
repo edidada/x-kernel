@@ -88,7 +88,7 @@ impl ByteAllocator for SlabByteAllocator {
 
 #[cfg(all(unittest, feature = "slab"))]
 #[allow(missing_docs)]
-pub mod tests_slab {
+pub(crate) mod tests_slab {
     use core::alloc::Layout;
 
     use unittest::def_test;

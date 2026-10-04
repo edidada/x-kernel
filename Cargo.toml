@@ -36,6 +36,7 @@ categories = ["os", "no-std"]
 
 # Lint levels; lint parameters live in clippy.toml.
 [workspace.lints.rust]
+unreachable_pub = "warn"
 unsafe_op_in_unsafe_fn = "deny"
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(unittest)"] }
 

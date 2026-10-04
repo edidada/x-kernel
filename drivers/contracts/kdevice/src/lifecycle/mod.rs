@@ -5,7 +5,7 @@
 //! Driver-core lifecycle orchestration over discovery descriptors and live objects.
 
 pub(crate) mod dispatch;
-pub mod event;
+pub(crate) mod event;
 pub(crate) mod subscribers;
 
 use alloc::{sync::Arc, vec::Vec};
@@ -569,7 +569,7 @@ pub fn detach_device_parent(child_id: DeviceId) -> Result<(), DriverError> {
 }
 
 /// Mark a device removed in the object index and notify driver-core observers.
-pub fn remove_device_from_index(id: DeviceId) {
+pub(crate) fn remove_device_from_index(id: DeviceId) {
     // Lock-order discipline: take Arc snapshots under the registry guard,
     // drop the guard, then mutate per-object state. This avoids the
     // registry -> per-object nesting that was previously inverting the

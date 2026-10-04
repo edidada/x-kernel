@@ -11,4 +11,4 @@
 mod futex;
 mod membarrier;
 
-pub use self::{futex::*, membarrier::*};
+pub(crate) use self::{futex::*, membarrier::*};

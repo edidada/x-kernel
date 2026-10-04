@@ -113,7 +113,7 @@ impl<R: TtyRead, W: TtyWrite> InputReader<R, W> {
     ///
     /// Only via the internal `try_push(..).unwrap()` if the output ring
     /// were full; the `is_full` guard above the push excludes that path.
-    pub fn poll(&mut self) -> bool {
+    pub(crate) fn poll(&mut self) -> bool {
         self.process_batch(usize::MAX, usize::MAX).bytes_published > 0
     }
 
@@ -277,7 +277,7 @@ struct SimpleReader<R> {
     buf_tx: CachingProd<ReadBuf>,
 }
 impl<R: TtyRead> SimpleReader<R> {
-    pub fn poll(&mut self) {
+    pub(crate) fn poll(&mut self) {
         let read = self.reader.read(&mut self.read_buf);
         for ch in &self.read_buf[..read] {
             if *ch == b'\n' {

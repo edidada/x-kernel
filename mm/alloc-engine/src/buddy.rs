@@ -77,7 +77,7 @@ impl ByteAllocator for BuddyByteAllocator {
 }
 
 #[unittest::mod_test]
-pub mod tests_buddy {
+pub(crate) mod tests_buddy {
     use core::alloc::Layout;
 
     use unittest::def_test;

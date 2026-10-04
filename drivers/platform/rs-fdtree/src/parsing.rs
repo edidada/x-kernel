@@ -4,15 +4,15 @@
 
 use core::convert::TryInto;
 
-pub struct CStr<'a>(&'a [u8]);
+pub(crate) struct CStr<'a>(&'a [u8]);
 
 impl<'a> CStr<'a> {
-    pub fn new(data: &'a [u8]) -> Option<Self> {
+    pub(crate) fn new(data: &'a [u8]) -> Option<Self> {
         let end = data.iter().position(|&b| b == 0)?;
         Some(Self(&data[..end]))
     }
 
-    pub fn as_str(&self) -> Option<&'a str> {
+    pub(crate) fn as_str(&self) -> Option<&'a str> {
         core::str::from_utf8(self.0).ok()
     }
 }

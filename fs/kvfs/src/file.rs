@@ -75,11 +75,11 @@ impl FMode {
 pub(crate) struct EmptyFileOperations;
 
 /// `SEEK_SET`.
-pub const SEEK_SET: i32 = 0;
+pub(crate) const SEEK_SET: i32 = 0;
 /// `SEEK_CUR`.
-pub const SEEK_CUR: i32 = 1;
+pub(crate) const SEEK_CUR: i32 = 1;
 /// `SEEK_END`.
-pub const SEEK_END: i32 = 2;
+pub(crate) const SEEK_END: i32 = 2;
 
 /// Directory iteration operations installed on opened directory files.
 pub trait FileDirOperations: Send + Sync {

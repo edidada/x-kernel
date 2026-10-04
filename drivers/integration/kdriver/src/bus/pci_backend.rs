@@ -127,18 +127,18 @@ struct BridgeEntry {
 }
 
 /// PCI bus discovery backend.
-pub struct PciBackend {
+pub(crate) struct PciBackend {
     cam: Cam,
 }
 
 impl PciBackend {
     /// Create a PCI backend with the given CAM type.
-    pub fn new(cam: Cam) -> Self {
+    pub(crate) fn new(cam: Cam) -> Self {
         Self { cam }
     }
 
     /// Auto-detect the right CAM type based on feature flags.
-    pub fn auto() -> Self {
+    pub(crate) fn auto() -> Self {
         Self::new(super::pci_support::pci_cam_kind())
     }
 }

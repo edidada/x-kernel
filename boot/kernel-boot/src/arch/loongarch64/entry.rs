@@ -153,7 +153,7 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
 /// Must only be entered from [`_start_secondary`] after the secondary CPU has
 /// enabled the boot mappings and adjusted its stack into the kernel virtual
 /// address space.
-pub unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) -> ! {
+pub(super) unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) -> ! {
     let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
         panic!(
             "missing logical cpu id mapping for raw cpu id {:#x}",
@@ -187,7 +187,7 @@ fn cmdline_len(cmdline_paddr: usize) -> usize {
 /// Must only be entered from [`_start`] after the boot mappings are active and
 /// `kimage_voffset` matches the current kernel image mapping. The firmware
 /// pointers passed in must still refer to the current boot handoff objects.
-pub unsafe extern "C" fn __primary_switched(
+pub(super) unsafe extern "C" fn __primary_switched(
     raw_cpu_id: RawCpuId,
     cmdline_paddr: usize,
     systemtable_paddr: usize,

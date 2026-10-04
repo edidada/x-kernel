@@ -305,7 +305,7 @@ pub fn restore_irq(state: usize) {
 /// [`super::cpu::stop_cpu`]. PMR is not touched: once every DAIF class is
 /// masked, the CPU takes no interrupt at any priority.
 #[inline]
-pub fn disable_local_exceptions() {
+pub(super) fn disable_local_exceptions() {
     DAIF.write(DAIF::D::Masked + DAIF::A::Masked + DAIF::I::Masked + DAIF::F::Masked);
 }
 

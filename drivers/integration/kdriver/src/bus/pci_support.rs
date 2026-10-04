@@ -29,7 +29,7 @@ fn pci_bar_allocator() -> SpinNoPreemptGuard<'static, Option<pci::PciRangeAlloca
         .lock()
 }
 
-pub fn pci_cam_kind() -> pci::Cam {
+pub(crate) fn pci_cam_kind() -> pci::Cam {
     #[cfg(feature = "pci-non-ecam")]
     {
         pci::Cam::MmioCam
@@ -84,7 +84,7 @@ fn has_unassigned_memory_bar<C: pci::ConfigurationAccess>(
 /// touched; the call only refreshes the device command bits. If any memory BAR
 /// is unassigned and no allocation range is available, returns
 /// [`DriverError::NoMemory`].
-pub fn configure_pci_device_if_needed<C: pci::ConfigurationAccess>(
+pub(crate) fn configure_pci_device_if_needed<C: pci::ConfigurationAccess>(
     root: &mut pci::PciRoot<C>,
     bdf: pci::DeviceFunction,
 ) -> DriverResult {

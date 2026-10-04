@@ -26,7 +26,7 @@ static_lock! {
 }
 
 /// State owned by one loop disk.
-pub struct LoopDevice {
+pub(crate) struct LoopDevice {
     number: u32,
     /// Underlying file for the loop device, if any.
     pub file: Mutex<Option<Arc<VfsFile>>>,
@@ -62,7 +62,7 @@ impl LoopDevice {
     }
 
     /// Returns the current loop configuration.
-    pub fn get_info(&self, block_device: &block::BlockDevice) -> KResult<loop_info> {
+    pub(crate) fn get_info(&self, block_device: &block::BlockDevice) -> KResult<loop_info> {
         if self.file.lock().is_none() {
             return Err(KError::from(LinuxError::ENXIO));
         }
@@ -87,12 +87,12 @@ impl LoopDevice {
     }
 
     /// Applies loop configuration fields supported by this driver.
-    pub fn set_info(&self, _src: loop_info) -> KResult<()> {
+    pub(crate) fn set_info(&self, _src: loop_info) -> KResult<()> {
         Ok(())
     }
 
     /// Returns the currently bound backing file.
-    pub fn clone_file(&self) -> VfsResult<Arc<VfsFile>> {
+    pub(crate) fn clone_file(&self) -> VfsResult<Arc<VfsFile>> {
         self.file
             .lock()
             .clone()

@@ -132,7 +132,7 @@ impl PendingInvalidations {
 }
 
 #[derive(Default)]
-pub struct InvalidateSink {
+pub(crate) struct InvalidateSink {
     queue: SpinNoIrq<PendingInvalidations>,
 }
 

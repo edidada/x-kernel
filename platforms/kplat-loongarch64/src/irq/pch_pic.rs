@@ -85,7 +85,7 @@ impl PchPicRegs for MmioPchPic {
     }
 }
 
-pub fn init() {
+pub(super) fn init() {
     let base = memspace::iomap_device(PhysAddr::from_usize(PCH_PIC_PADDR), PCH_PIC_SIZE, "pch-pic")
         .unwrap_or_else(|err| panic!("failed to iomap pch-pic: {err:?}"));
     PCH_PIC_BASE.init_once(base);
@@ -133,11 +133,11 @@ fn disable_irq_impl<R: PchPicRegs>(regs: &mut R, irq: usize) {
     regs.reg_write(addr, val | bit);
 }
 
-pub fn enable_irq(irq: usize) {
+pub(super) fn enable_irq(irq: usize) {
     enable_irq_impl(&mut MmioPchPic, irq);
 }
 
-pub fn disable_irq(irq: usize) {
+pub(super) fn disable_irq(irq: usize) {
     disable_irq_impl(&mut MmioPchPic, irq);
 }
 

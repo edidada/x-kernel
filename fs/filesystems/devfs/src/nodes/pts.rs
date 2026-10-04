@@ -66,7 +66,7 @@ impl DeviceFileOps for Ptmx {
 }
 
 /// /dev/pts directory containing slave pseudo-terminal devices.
-pub struct PtsDir;
+pub(crate) struct PtsDir;
 
 impl SimpleDirOps for PtsDir {
     fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {

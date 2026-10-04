@@ -16,12 +16,12 @@ use posix_process::do_exit;
 #[path = "tests/exit_tail.rs"]
 pub(super) mod exit_tail;
 
-pub fn sys_exit(exit_code: i32) -> KResult<isize> {
+pub(crate) fn sys_exit(exit_code: i32) -> KResult<isize> {
     do_exit(exit_code << 8, false);
     Ok(0)
 }
 
-pub fn sys_exit_group(exit_code: i32) -> KResult<isize> {
+pub(crate) fn sys_exit_group(exit_code: i32) -> KResult<isize> {
     do_exit(exit_code << 8, true);
     Ok(0)
 }

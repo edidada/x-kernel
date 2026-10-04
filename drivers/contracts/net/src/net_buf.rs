@@ -309,7 +309,7 @@ impl NetBufPool {
 }
 
 #[unittest::mod_test]
-pub mod tests_netbuf {
+pub(crate) mod tests_netbuf {
     use unittest::def_test;
     extern crate alloc;
     use alloc::{vec, vec::Vec};

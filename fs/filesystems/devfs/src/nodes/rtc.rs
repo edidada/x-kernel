@@ -15,7 +15,7 @@ use osvm::VirtMutPtr;
 use crate::{DeviceFile, add_device_entry};
 
 /// The device ID for /dev/rtc0
-pub const RTC0_DEVICE_ID: DeviceId = DeviceId::new(250, 0);
+pub(crate) const RTC0_DEVICE_ID: DeviceId = DeviceId::new(250, 0);
 
 #[repr(C)]
 #[allow(non_camel_case_types, dead_code)]
@@ -33,7 +33,7 @@ struct rtc_time {
 
 /// RTC device
 /// Real-time clock device
-pub struct Rtc;
+pub(crate) struct Rtc;
 
 impl DeviceFileOps for Rtc {
     fn supports_read(&self) -> bool {

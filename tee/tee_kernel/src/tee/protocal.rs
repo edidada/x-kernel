@@ -48,12 +48,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwn
 
 #[allow(dead_code)]
 #[derive(Serialize, Deserialize)]
-pub enum TaRequest {
+pub(super) enum TaRequest {
     Register { uuid: String },
 }
 
 #[derive(Serialize, Deserialize)]
-pub enum TeeRequest {
+pub(super) enum TeeRequest {
     OpenSession {
         uuid: String,
         connection_method: u32,
@@ -76,7 +76,7 @@ pub enum TeeRequest {
 }
 
 #[derive(Serialize, Deserialize)]
-pub enum TeeResponse {
+pub(super) enum TeeResponse {
     OpenSession { session_id: u32, result: u32 },
     CloseSession { result: u32 },
     InvokeCommand { params: Parameters, result: u32 },
@@ -84,10 +84,10 @@ pub enum TeeResponse {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct Parameters(pub Parameter, pub Parameter, pub Parameter, pub Parameter);
+pub(super) struct Parameters(pub Parameter, pub Parameter, pub Parameter, pub Parameter);
 
 impl Parameters {
-    pub fn default() -> Self {
+    pub(super) fn default() -> Self {
         Parameters(
             Parameter::default(),
             Parameter::default(),
@@ -98,13 +98,13 @@ impl Parameters {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct Parameter {
+pub(super) struct Parameter {
     pub raw: TeeParam,
     pub param_type: ParamType,
 }
 
 impl Parameter {
-    pub fn default() -> Self {
+    pub(super) fn default() -> Self {
         Parameter {
             raw: TeeParam {
                 data: Vec::new(),
@@ -116,20 +116,20 @@ impl Parameter {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct TeeParam {
+pub(super) struct TeeParam {
     pub data: Vec<u8>,
     pub value: Value,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
-pub struct Value {
+pub(super) struct Value {
     pub a: u32,
     pub b: u32,
 }
 
 /// GP TEE parameter type values (serialized as the GP constant, not variant index).
 #[derive(Clone, Copy)]
-pub enum ParamType {
+pub(super) enum ParamType {
     None         = 0,
     ValueInput   = 1,
     ValueOutput  = 2,

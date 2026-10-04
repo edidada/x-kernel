@@ -254,7 +254,7 @@ fn tee_curve_to_ecc_curve(curve: u32) -> TeeResult<EccCurve> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 /// GP: `struct ecc_public_key`
-pub struct EccPublicKey {
+pub(crate) struct EccPublicKey {
     pub x: BigNum,
     pub y: BigNum,
     curve: u32,
@@ -291,7 +291,7 @@ impl TeeCryptoOps for EccPublicKey {
 }
 #[derive(Default)]
 /// GP: `struct ecc_keypair`
-pub struct EccKeypair {
+pub(crate) struct EccKeypair {
     pub d: BigNum,
     pub x: BigNum,
     pub y: BigNum,
@@ -352,7 +352,7 @@ impl PartialEq for EccKeypair {
 impl Eq for EccKeypair {}
 
 /// GP: `struct rsa_keypair`
-pub struct RsaKeypair {
+pub(crate) struct RsaKeypair {
     pub e: BigNum, // Public exponent
     pub d: BigNum, // Private exponent
     pub n: BigNum, // Modulus
@@ -410,7 +410,7 @@ impl TeeCryptoOps for RsaKeypair {
 }
 
 /// GP: `struct rsa_public_key`
-pub struct RsaPublicKey {
+pub(crate) struct RsaPublicKey {
     pub e: BigNum, // Public exponent
     pub n: BigNum, // Modulus
 }
@@ -441,7 +441,7 @@ impl TeeCryptoOps for RsaPublicKey {
     }
 }
 
-pub fn crypto_acipher_gen_ecc_key(
+pub(crate) fn crypto_acipher_gen_ecc_key(
     key: &mut EccKeypair,
     key_size_bits: usize,
     object_type: u32,
@@ -1605,14 +1605,14 @@ pub(crate) fn crypto_acipher_ecc_verify(
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct Ed25519Keypair {
+pub(crate) struct Ed25519Keypair {
     pub priv_key: [u8; ED25519_KEY_SIZE_BYTES],
     pub pub_key: [u8; ED25519_KEY_SIZE_BYTES],
     pub curve: u32,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct Ed25519PublicKey {
+pub(crate) struct Ed25519PublicKey {
     pub pub_key: [u8; ED25519_KEY_SIZE_BYTES],
     pub curve: u32,
 }

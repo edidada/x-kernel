@@ -29,7 +29,7 @@ mod thread;
 mod umask;
 mod wait;
 
-pub use self::{
+pub(crate) use self::{
     clone::*, clone3::*, cpu_time::*, credentials::*, ctl::*, execve::*, exit::*, ids::*, job::*,
     limits::*, pidfd::*, rusage::*, sched::*, signal::*, thread::*, umask::*, wait::*,
 };

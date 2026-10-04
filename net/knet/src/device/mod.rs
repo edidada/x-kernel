@@ -14,8 +14,8 @@ mod ethernet;
 mod loopback;
 mod net_rx;
 
-pub use ethernet::*;
-pub use loopback::*;
+pub(crate) use ethernet::*;
+pub(crate) use loopback::*;
 
 use crate::{
     buf::PacketBuf,
@@ -123,7 +123,7 @@ pub(crate) struct NeighborUpdate {
 }
 
 /// Trait implemented by network device backends.
-pub trait NetDevice: Send + Sync {
+pub(crate) trait NetDevice: Send + Sync {
     fn name(&self) -> &str;
 
     /// Returns the link-layer kind without allocating a snapshot.

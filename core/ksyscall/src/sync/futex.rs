@@ -116,7 +116,7 @@ fn parse_timeout(
 /// Fast userspace mutex (futex) system call.
 ///
 /// Linux semantics follow `futex(2)`.
-pub fn sys_futex(
+pub(crate) fn sys_futex(
     uaddr: UserPtr<u32>,
     futex_op: u32,
     value: u32,
@@ -209,7 +209,7 @@ pub fn sys_futex(
 }
 
 /// Returns the robust-list head of the selected thread.
-pub fn sys_get_robust_list(
+pub(crate) fn sys_get_robust_list(
     tid: u32,
     head: UserPtr<*const robust_list_head>,
     size: UserPtr<usize>,
@@ -224,7 +224,10 @@ pub fn sys_get_robust_list(
 }
 
 /// Sets the robust-list head for the current thread.
-pub fn sys_set_robust_list(head: UserConstPtr<robust_list_head>, size: usize) -> KResult<isize> {
+pub(crate) fn sys_set_robust_list(
+    head: UserConstPtr<robust_list_head>,
+    size: usize,
+) -> KResult<isize> {
     if size != size_of::<robust_list_head>() {
         return Err(KError::InvalidInput);
     }

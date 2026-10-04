@@ -221,7 +221,7 @@ struct Inode {
 }
 
 impl Inode {
-    pub fn new(
+    pub(crate) fn new(
         fs: &Arc<MemoryFs>,
         parent: Option<u64>,
         node_type: NodeType,
@@ -315,7 +315,7 @@ struct InodeRef {
 }
 
 impl InodeRef {
-    pub fn new(fs: Arc<MemoryFs>, ino: u64) -> Self {
+    pub(crate) fn new(fs: Arc<MemoryFs>, ino: u64) -> Self {
         fs.get(ino).metadata.lock().nlink += 1;
         Self { fs, ino }
     }
@@ -337,7 +337,7 @@ struct MemoryNode {
 }
 
 impl MemoryNode {
-    pub fn new(fs: Arc<MemoryFs>, inode: Arc<Inode>) -> Arc<Self> {
+    pub(crate) fn new(fs: Arc<MemoryFs>, inode: Arc<Inode>) -> Arc<Self> {
         Arc::new(Self { fs, inode })
     }
 

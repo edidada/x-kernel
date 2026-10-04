@@ -71,12 +71,12 @@ struct PublishedPort {
 }
 
 /// Initializes the bridge against the registered vsock connection manager.
-pub fn init() -> KResult {
+pub(crate) fn init() -> KResult {
     VSOCK_BRIDGE.init()
 }
 
 /// Starts bridge worker tasks once the scheduler can spawn on every CPU.
-pub fn start() {
+pub(crate) fn start() {
     VSOCK_BRIDGE.start()
 }
 
