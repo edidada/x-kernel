@@ -113,7 +113,11 @@ pub(crate) fn run_user_thread_loop(
             ReturnReason::Interrupt => {
                 ktask::check_preempt_pending();
             }
-            #[allow(unused_labels)]
+            #[allow(
+                unused_labels,
+                reason = "The exception label is used only by architecture-specific exception \
+                          recovery branches"
+            )]
             ReturnReason::Exception(exc_info) => 'exc: {
                 let signo = match exc_info.kind() {
                     ExceptionKind::Misaligned => {

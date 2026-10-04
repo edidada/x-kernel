@@ -24,13 +24,6 @@ impl IpiEventQueue {
         }
     }
 
-    /// Checks if there are no pending events.
-    #[allow(dead_code)]
-    #[inline]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.events.is_empty()
-    }
-
     /// Enqueues a new event into this queue.
     pub(crate) fn push(&mut self, src_cpu_id: LogicalCpuId, callback: Callback) {
         self.events.push_back(IpiEvent {

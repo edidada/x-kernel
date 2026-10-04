@@ -3,7 +3,6 @@
 // See LICENSES for license details.
 
 //! PSCI interface helpers for power management and CPU control.
-#![allow(dead_code)]
 
 use kcpu_id_map::RawCpuId;
 use kerrno::{KError, KErrorKind};
@@ -11,15 +10,9 @@ use kerrno::{KError, KErrorKind};
 use crate::peripherals::smccc;
 const PSCI_0_2_FN_BASE: u32 = 0x84000000;
 const PSCI_0_2_64BIT: u32 = 0x40000000;
-const PSCI_0_2_FN_CPU_SUSPEND: u32 = PSCI_0_2_FN_BASE + 1;
 const PSCI_0_2_FN_CPU_OFF: u32 = PSCI_0_2_FN_BASE + 2;
-const PSCI_0_2_FN_CPU_ON: u32 = PSCI_0_2_FN_BASE + 3;
-const PSCI_0_2_FN_MIGRATE: u32 = PSCI_0_2_FN_BASE + 5;
 const PSCI_0_2_FN_SYSTEM_OFF: u32 = PSCI_0_2_FN_BASE + 8;
-const PSCI_0_2_FN_SYSTEM_RESET: u32 = PSCI_0_2_FN_BASE + 9;
-const PSCI_0_2_FN64_CPU_SUSPEND: u32 = PSCI_0_2_FN_BASE + PSCI_0_2_64BIT + 1;
 const PSCI_0_2_FN64_CPU_ON: u32 = PSCI_0_2_FN_BASE + PSCI_0_2_64BIT + 3;
-const PSCI_0_2_FN64_MIGRATE: u32 = PSCI_0_2_FN_BASE + PSCI_0_2_64BIT + 5;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(i32)]
 pub enum PsciError {
@@ -114,7 +107,6 @@ pub fn cpu_on(
 }
 /// Power off the current CPU via PSCI.
 pub fn cpu_off() {
-    const PSCI_POWER_STATE_TYPE_STANDBY: u32 = 0;
     const PSCI_POWER_STATE_TYPE_POWER_DOWN: u32 = 1;
     const PSCI_0_2_POWER_STATE_TYPE_SHIFT: u32 = 16;
     let state: u32 = PSCI_POWER_STATE_TYPE_POWER_DOWN << PSCI_0_2_POWER_STATE_TYPE_SHIFT;

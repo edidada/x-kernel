@@ -128,7 +128,10 @@ const fn as_device_kind(t: VirtIoDevType) -> Option<DeviceKind> {
     }
 }
 
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "Error conversion is used only by enabled VirtIO device backends"
+)]
 pub(crate) const fn as_driver_error(e: virtio_drivers::Error) -> DriverError {
     use virtio_drivers::{Error::*, device::socket::SocketError::*};
     match e {

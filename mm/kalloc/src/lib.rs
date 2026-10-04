@@ -16,7 +16,10 @@ use core::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "Allocator traits and types are used only by the selected allocator backend"
+)]
 use alloc_engine::{
     AllocError, AllocResult, BaseAllocator, BuddyPageAllocator, ByteAllocator, PageAllocator,
 };

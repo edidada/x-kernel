@@ -168,7 +168,11 @@ impl SimpleFsNode {
     }
 
     /// Returns this node's `inode::i_size`.
-    #[allow(clippy::len_without_is_empty)]
+    #[expect(
+        clippy::len_without_is_empty,
+        reason = "Length is the inode byte size, not collection membership; directories have \
+                  separate entry semantics"
+    )]
     pub fn len(&self) -> VfsResult<u64> {
         Ok(self.metadata.lock().size)
     }

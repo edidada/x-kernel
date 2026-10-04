@@ -177,7 +177,6 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         }
     }
 
-    #[allow(unused_variables)]
     unsafe fn dma_dealloc(
         paddr: PhysAddr,
         vaddr: NonNull<u8>,
@@ -221,7 +220,6 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         }
     }
 
-    #[allow(unused_variables)]
     #[inline]
     unsafe fn share(
         buffer: NonNull<[u8]>,
@@ -238,7 +236,6 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
     }
 
     #[inline]
-    #[allow(unused_variables)]
     unsafe fn unshare(
         paddr: PhysAddr,
         buffer: NonNull<[u8]>,

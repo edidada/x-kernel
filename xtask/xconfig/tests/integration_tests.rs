@@ -75,6 +75,14 @@ fn test_complete_workflow() {
     assert!(config_rs.contains("pub const TEST_BOOL: bool = true;"));
     assert!(config_rs.contains("pub const TEST_STRING: &str = \"hello\";"));
     assert!(config_rs.contains("pub const TEST_INT: u32 = 42;"));
+    let allowances: Vec<_> = config_rs
+        .lines()
+        .filter(|line| line.starts_with("#[allow("))
+        .collect();
+    assert_eq!(allowances.len(), config.len());
+    for attribute in allowances {
+        assert!(attribute.contains("reason = \"Kconfig emits all resolved symbols;"));
+    }
 }
 
 #[test]

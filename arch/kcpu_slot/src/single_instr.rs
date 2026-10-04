@@ -84,7 +84,11 @@ pub trait SingleInstructionStore {
     unsafe fn store(offset: usize, val: Self);
 }
 
-#[allow(unused_macros)]
+#[allow(
+    unused_macros,
+    reason = "IRQ-save fallback macros are used only on architectures lacking the corresponding \
+              single instruction"
+)]
 /// Generates the arithmetic `SingleInstruction*` impls with the IRQ-save
 /// fallback for the listed integer types.
 macro_rules! impl_single_instr_fallback_arith {
@@ -147,7 +151,11 @@ macro_rules! impl_single_instr_fallback_arith {
     )*};
 }
 
-#[allow(unused_macros)]
+#[allow(
+    unused_macros,
+    reason = "IRQ-save fallback macros are used only on architectures lacking the corresponding \
+              single instruction"
+)]
 /// Generates the `load`/`store` impls with the IRQ-save fallback.
 macro_rules! impl_single_instr_fallback_load_store {
     ($($ty:ty),* $(,)?) => {$(
@@ -175,7 +183,15 @@ macro_rules! impl_single_instr_fallback_load_store {
     )*};
 }
 
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "Architecture backends import fallback macros only when single-instruction support \
+              is unavailable"
+)]
 pub(crate) use impl_single_instr_fallback_arith;
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "Architecture backends import fallback macros only when single-instruction support \
+              is unavailable"
+)]
 pub(crate) use impl_single_instr_fallback_load_store;

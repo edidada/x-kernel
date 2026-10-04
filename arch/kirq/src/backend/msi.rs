@@ -183,8 +183,8 @@ mod tests {
     }
 }
 
-#[cfg(all(unittest, not(target_arch = "x86_64")))]
-#[allow(missing_docs)]
+#[cfg(not(target_arch = "x86_64"))]
+#[unittest::mod_test]
 mod unittest_tests {
     use unittest::def_test;
 

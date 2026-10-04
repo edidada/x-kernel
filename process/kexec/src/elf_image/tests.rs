@@ -32,7 +32,12 @@ fn current_machine() -> u16 {
     return 243;
     #[cfg(target_arch = "loongarch64")]
     return 258;
-    #[allow(unreachable_code)]
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        target_arch = "x86_64",
+        target_arch = "riscv64",
+        target_arch = "loongarch64"
+    )))]
     0
 }
 

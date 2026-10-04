@@ -41,6 +41,7 @@ unsafe_op_in_unsafe_fn = "deny"
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(unittest)"] }
 
 [workspace.lints.clippy]
+allow_attributes_without_reason = "deny"
 disallowed_methods = "warn"
 fn_params_excessive_bools = "warn"
 missing_safety_doc = "deny"

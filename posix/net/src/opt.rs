@@ -179,7 +179,6 @@ mod conv {
         }
     }
 
-    #[allow(non_camel_case_types)]
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     pub(super) struct tpacket_stats {
@@ -208,7 +207,6 @@ mod conv {
         }
     }
 
-    #[allow(non_camel_case_types)]
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     pub(super) struct packet_mreq {

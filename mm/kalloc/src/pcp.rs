@@ -106,7 +106,7 @@ impl<const NR_PAGES: usize, const COUNT: usize> PerCpuPages<NR_PAGES, COUNT> {
     }
 
     /// Current number of cached entries.
-    #[allow(dead_code)]
+    #[cfg(unittest)]
     fn len(&self) -> usize {
         self.size as usize
     }

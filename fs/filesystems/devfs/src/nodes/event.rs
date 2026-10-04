@@ -5,9 +5,10 @@
 use alloc::{string::ToString, sync::Arc, vec, vec::Vec};
 
 use bitmaps::Bitmap;
-use kclass::ClassDevice;
-#[allow(unused_imports)]
-use kclass::prelude::{DriverError, Event, EventType, InputDevice, InputDeviceId, InputDeviceImpl};
+use kclass::{
+    ClassDevice,
+    prelude::{DriverError, Event, EventType, InputDevice, InputDeviceImpl},
+};
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::Mutex;
@@ -288,7 +289,6 @@ impl DeviceFileOps for EventDev {
                     1 => return Err(KError::InvalidInput),
                     // IOC_READ
                     2 => {
-                        #[allow(clippy::single_match)]
                         match nr {
                             // EVIOCGNAME
                             0x06 => {

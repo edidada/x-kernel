@@ -20,7 +20,7 @@ const PLIC_MMIO_SIZE: usize = 0x0400_0000;
 const PLIC_IOMAP_NAME: &str = "plic";
 pub const PLIC_DOMAIN: kirq::IrqDomainId = kirq::PLIC_ROOT_DOMAIN;
 pub const INTC_IRQ_BASE: usize = 1 << (usize::BITS - 1);
-#[allow(unused)]
+
 pub const S_SOFT: usize = INTC_IRQ_BASE + 1;
 pub const S_TIMER: usize = INTC_IRQ_BASE + 5;
 pub const S_EXT: usize = INTC_IRQ_BASE + 9;

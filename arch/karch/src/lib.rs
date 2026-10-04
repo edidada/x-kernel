@@ -29,7 +29,11 @@ impl IcacheFlushIf {
 
 /// Sends IPIs to all other PEs requesting they flush their instruction pipeline.
 #[inline]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "Remote instruction-cache flush is called only by architectures that require \
+              explicit broadcast"
+)]
 pub(crate) fn flush_icache_others() {
     crate::IcacheFlushIf::flush_others();
 }

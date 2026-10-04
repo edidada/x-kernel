@@ -86,7 +86,6 @@ impl BpfProgramMapValue {
 
 /// Loaded BPF program object shared by anonymous fds and bpffs pins.
 pub struct BpfProgram {
-    #[allow(dead_code)]
     insns: Arc<[u8]>,
     prog_type: u32,
     map_values: Arc<[BpfProgramMapValue]>,

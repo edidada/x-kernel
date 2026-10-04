@@ -40,7 +40,6 @@ pub struct TraceRawLock(SpinRaw<()>);
 unsafe impl lock_api::RawMutex for TraceRawLock {
     type GuardMarker = lock_api::GuardSend;
 
-    #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = Self(SpinRaw::new(()));
 
     fn lock(&self) {

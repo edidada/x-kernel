@@ -6,13 +6,11 @@
 //!
 //! # Organization
 //!
-//! - [`TcpSocket`]: A TCP socket that provides POSIX-like APIs.
-//! - [`UdpSocket`]: A UDP socket that provides POSIX-like APIs.
+//! - [`TcpSocket`](tcp::TcpSocket): A TCP socket that provides POSIX-like APIs.
+//! - [`UdpSocket`](udp::UdpSocket): A UDP socket that provides POSIX-like APIs.
 //! - [`send_link_frame`]: Sends a link-layer frame through a selected interface.
 //! - [`UdpDatagramRelay`]: A persistent nonblocking UDP relay socket.
-//! - [`dns_query`]: Function for DNS query.
 #![no_std]
-#![allow(rustdoc::broken_intra_doc_links)]
 
 #[macro_use]
 extern crate log;

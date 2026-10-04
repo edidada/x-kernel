@@ -2,8 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-#![allow(dead_code)]
-
 //! Tee Unit Test Framework
 //!
 //! This module implements a custom unit test framework for Rust code.
@@ -98,16 +96,6 @@ impl<T: Copy> TestExecutorSlot<T> {
 
     fn store(&self, executor: T, _ordering: Ordering) {
         self.with_lock(|slot| *slot = Some(executor));
-    }
-
-    #[cfg(unittest)]
-    fn replace(&self, value: Option<T>, _ordering: Ordering) -> Option<T> {
-        self.with_lock(|slot| core::mem::replace(slot, value))
-    }
-
-    #[cfg(unittest)]
-    fn store_raw(&self, value: Option<T>, _ordering: Ordering) {
-        self.with_lock(|slot| *slot = value);
     }
 
     fn load(&self, _ordering: Ordering) -> Option<T> {
@@ -461,6 +449,7 @@ impl TestRunner {
     }
 
     /// Run a single test without printing module info (for grouped output)
+    #[cfg(unittest)]
     fn run_test_simple(&mut self, test: &TestDescriptor) -> TestResult {
         self.output.clear();
 
@@ -708,11 +697,6 @@ mod tests_test_framework {
         crate::assert!(true);
         crate::assert_eq!(1_u32, 1_u32);
         crate::assert_ne!(1_u32, 2_u32);
-        TestResult::Ok
-    }
-
-    fn assert_fail_test() -> TestResult {
-        crate::assert_eq!(1_u32, 2_u32);
         TestResult::Ok
     }
 

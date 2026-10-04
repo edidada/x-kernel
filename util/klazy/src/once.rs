@@ -393,7 +393,10 @@ impl<T> Once<T> {
     /// A const-initialized [`Once`] in the `Uninitialized` state.
     ///
     /// Equivalent to [`Once::new()`], but as an associated constant.
-    #[allow(clippy::declare_interior_mutable_const)]
+    #[expect(
+        clippy::declare_interior_mutable_const,
+        reason = "INIT constructs independent Once cells; it does not name shared mutable storage"
+    )]
     pub const INIT: Self = Self {
         state: AtomicStatus::new(Status::Uninitialized),
         storage: UnsafeCell::new(MaybeUninit::uninit()),

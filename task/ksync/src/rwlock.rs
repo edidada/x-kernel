@@ -50,7 +50,6 @@ impl Default for RawRwLock {
 unsafe impl lock_api::RawRwLock for RawRwLock {
     type GuardMarker = lock_api::GuardSend;
 
-    #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = RawRwLock::new();
 
     #[inline]

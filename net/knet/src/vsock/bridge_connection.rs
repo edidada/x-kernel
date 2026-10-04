@@ -24,7 +24,10 @@ pub(super) const BRIDGE_RX_BUFFER_SIZE: usize = 2 * IPC_CHAN_MAX_BUF_SIZE;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum BridgeConnectionState {
     /// Entry is not usable.
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "Keep the unusable-entry sentinel for bridge lifecycle validation"
+    )]
     Invalid,
     /// Host-side vsock exists, but no TIPC channel has been attached yet.
     VsockOnly,
@@ -37,10 +40,16 @@ pub(super) enum BridgeConnectionState {
     /// Both endpoints are connected and data may flow in either direction.
     Active,
     /// TIPC side closed while vsock cleanup is in progress.
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "Keep an explicit TIPC-closed state while vsock cleanup completes"
+    )]
     TipcClosed,
     /// Connection has been closed.
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "Keep the terminal state for marking completed bridge teardown"
+    )]
     Closed,
 }
 

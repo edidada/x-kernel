@@ -9,7 +9,10 @@ use zerocopy::{Immutable, IntoBytes};
 
 /// Represents the type of an auxiliary vector entry.
 #[derive(Clone, Copy, PartialEq, Eq, IntoBytes, Immutable)]
-#[allow(non_camel_case_types, unused)]
+#[expect(
+    non_camel_case_types,
+    reason = "Preserve Linux AT_* auxiliary-vector names, including underscore-separated variants"
+)]
 #[repr(usize)]
 #[expect(
     clippy::upper_case_acronyms,

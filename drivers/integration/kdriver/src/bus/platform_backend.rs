@@ -227,9 +227,13 @@ impl PlatformBackend {
     /// `context` and `bus_id` are consumed only inside the per-device `#[cfg]`
     /// blocks below, so a configuration that compiles in no platform-static
     /// device leaves both unused. The names are kept non-underscored because
-    /// they are genuine inputs; `#[allow(unused_variables)]` covers the empty
-    /// configuration (same convention as `virtio::activate_virtio_device`).
-    #[allow(unused_variables)]
+    /// they are genuine inputs; the allowance below covers configurations
+    /// without a matching static device, as in `virtio::activate_virtio_device`.
+    #[allow(
+        unused_variables,
+        reason = "Static enumeration inputs are used only when a matching platform driver feature \
+                  is enabled"
+    )]
     #[expect(
         clippy::too_many_lines,
         reason = "TODO(cg): legacy static platform enumeration; split per device class"

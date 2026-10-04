@@ -74,7 +74,11 @@ unsafe impl Sync for SecondaryBootStacks {}
 /// spans every present CPU; without this barrier a round-robin selection
 /// could land on a secondary that has entered but not yet registered its
 /// run queue, panicking in `RUN_QUEUES.get().expect()`.
-#[allow(clippy::absurd_extreme_comparisons)]
+#[allow(
+    clippy::absurd_extreme_comparisons,
+    reason = "The CPU loop bound is generated from NR_CPUS and can be one in a uniprocessor \
+              configuration"
+)]
 pub(crate) fn start_secondary_cpus(primary_cpu_id: LogicalCpuId) -> KResult {
     let mut secondary_logical_cpu_id = 0;
     let mut start_result = Ok(());

@@ -183,7 +183,6 @@ pub fn device_desc_add(
 
 /// Same as [`device_desc_add`], but records a parent device the resulting
 /// runtime object will be attached under.
-#[allow(clippy::too_many_arguments)]
 pub fn device_desc_add_with_parent(
     bus_id: BusId,
     parent: Option<DeviceId>,
