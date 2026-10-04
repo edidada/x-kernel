@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! Signal types, sets, and siginfo helpers.
-use core::{fmt, mem};
+use core::fmt;
 
 use derive_more::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 use ktime_types::TimeSpan;
@@ -497,10 +497,11 @@ impl From<SigchldChildExitSignalInfo> for SignalInfo {
 
 impl SignalInfo {
     fn empty() -> Self {
-        // SAFETY: Linux `siginfo_t` uses an integer/union payload ABI where an
-        // all-zero bit pattern is a valid baseline state. Constructors below
-        // immediately set the active header fields and any payload they expose.
-        unsafe { mem::zeroed() }
+        // The ABI padding arm covers the entire siginfo payload, including
+        // fields not populated by the signal-specific constructors below.
+        Self(siginfo_t {
+            __bindgen_anon_1: linux_raw_sys::general::siginfo__bindgen_ty_1 { _si_pad: [0; 32] },
+        })
     }
 
     fn header(&self) -> &linux_raw_sys::general::siginfo__bindgen_ty_1__bindgen_ty_1 {

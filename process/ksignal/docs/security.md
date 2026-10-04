@@ -28,12 +28,14 @@ an inline `SAFETY:` justification.
 
 | Location | Operation | Invariant |
 |---|---|---|
-| `types.rs` `SignalInfo::empty` | `mem::zeroed()` for `siginfo_t` | all-zero is a valid baseline; constructors set header and exposed payload fields before observation |
 | `types.rs` `header`/`header_mut`/`sifields`/`sifields_mut` | union arm access | bindgen preserves ABI offsets; readers only touch the arm selected by `si_code` or by the constructor that populated it |
 | `types.rs` `ChildExitSignalInfo::new` | `_sigchld` arm write | `CLD_*` codes select the arm and every exposed field is initialized |
 | `types.rs` `timer_id`/`timer_overrun`/`timer_signal_seq`/`sigval` | arm reads | guarded by `SI_TIMER` or negative `si_code` checks |
 | `types.rs` `unsafe impl Send/Sync for SignalInfo` | auto-trait override | payload is opaque ABI bits, not dereferenceable aliases; mutation requires `&mut` |
 | `api/thread.rs` `restore` | `&*(sp as *const SignalFrame)` | trusts that user `sp` maps the frame previously written by `handle_signal` |
+
+`SignalInfo::empty` safely initializes the full 128-byte `_si_pad` union arm
+with zeros; constructors then set the header and exposed payload fields.
 
 The union-arm reads are the `k_sigval`/`siginfo_t` ABI boundary: the kernel
 treats payload fields as raw bits and never dereferences pointer-like values
