@@ -116,7 +116,9 @@ impl AsyncContext {
         self.inner.lock().ready.pop_front()
     }
 
-    /// Returns `true` when at least one operation is queued.
+    /// Returns `true` when at least one operation is queued (test
+    /// observation; the park path reads `work_readiness` instead).
+    #[cfg(unittest)]
     pub(crate) fn has_ready(&self) -> bool {
         !self.inner.lock().ready.is_empty()
     }
@@ -253,9 +255,6 @@ impl AsyncContext {
     }
 
     /// Poll-side readiness of the completion source for submitters.
-    // Consumed by the completion-wait path of the upcoming enter syscall and
-    // by unit tests until then.
-    #[allow(dead_code)]
     pub(crate) fn completion_readiness(&self) -> IoEvents {
         let inner = self.inner.lock();
         if inner.shutdown || !inner.completed.is_empty() {
@@ -274,7 +273,6 @@ impl AsyncContext {
     }
 
     /// Registers a waker on the completion source.
-    #[allow(dead_code)]
     pub(crate) fn register_completion_wait(
         &self,
         context: &mut PollContext<'_>,
@@ -301,9 +299,6 @@ impl Pollable for WorkSource<'_> {
 }
 
 /// `poll_io` source for submitters waiting for completions.
-// Consumed by the completion-wait path of the upcoming enter syscall and by
-// unit tests until then.
-#[allow(dead_code)]
 pub(crate) struct CompletionSource<'a>(pub(crate) &'a AsyncContext);
 
 impl Pollable for CompletionSource<'_> {

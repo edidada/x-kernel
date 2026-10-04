@@ -198,16 +198,29 @@ fn worker_loop(ctx: Arc<AsyncContext>) {
                         block_on(sleep(TimeSpan::from_millis(backoff_ms)));
                     }
                     ParkOutcome::RegistrationFailed(err) => {
-                        // Persistently failing registrations (notably
-                        // `PollRegisterError` OOM) must not spin: back off
-                        // before the next park attempt.
-                        park_failures = park_failures.saturating_add(1);
-                        let shift = park_failures.saturating_sub(1).min(6);
-                        let backoff_ms = PARK_FAILURE_BACKOFF_BASE_MS
-                            .saturating_mul(1 << shift)
-                            .min(PARK_FAILURE_BACKOFF_MAX_MS);
-                        debug!("asyncio idle park failed, backing off {backoff_ms}ms: {err}");
-                        block_on(sleep(TimeSpan::from_millis(backoff_ms)));
+                        // `poll_io`'s inner `interruptible` compresses a
+                        // signal-induced interruption into
+                        // `KError::Interrupted` (one-shot consumption), so
+                        // the SIGKILL check must run on that cause too —
+                        // otherwise `kill -9` has a window where the signal
+                        // is swallowed by the backoff branch.
+                        if err == KError::Interrupted {
+                            park_failures = 0;
+                            if pending_sigkill() {
+                                break;
+                            }
+                        } else {
+                            // Persistently failing registrations (notably
+                            // `PollRegisterError` OOM) must not spin: back
+                            // off before the next park attempt.
+                            park_failures = park_failures.saturating_add(1);
+                            let shift = park_failures.saturating_sub(1).min(6);
+                            let backoff_ms = PARK_FAILURE_BACKOFF_BASE_MS
+                                .saturating_mul(1 << shift)
+                                .min(PARK_FAILURE_BACKOFF_MAX_MS);
+                            debug!("asyncio idle park failed, backing off {backoff_ms}ms: {err}");
+                            block_on(sleep(TimeSpan::from_millis(backoff_ms)));
+                        }
                     }
                 }
             }
@@ -257,7 +270,10 @@ fn park_until_work(ctx: &Arc<AsyncContext>) -> ParkOutcome {
     let outcome = block_on(timeout(
         Some(IDLE_PARK_BOUND),
         interruptible(poll_io(&WorkSource(ctx), IoEvents::IN, false, || {
-            if ctx.has_ready() || ctx.is_shutdown() {
+            // Single critical section via the same readiness the poll side
+            // uses (`WorkSource::poll` → `work_readiness`); the ready/shutdown
+            // predicate must keep exactly one definition.
+            if ctx.work_readiness().contains(IoEvents::IN) {
                 Ok(())
             } else {
                 Err(KError::WouldBlock)
@@ -482,13 +498,18 @@ mod tests {
         // The parked worker has no wake source here: only the bounded-park
         // re-check of the retirement condition can retire it, after which
         // its do_exit is the last membership removal and runs the child
-        // process tail — the waitpid-equivalent observable.
+        // process tail.
         wait_until(|| child_process.is_exited());
         assert!(
             child_process.is_waitable_zombie(),
             "the child must end as a waitable zombie for its parent"
         );
         assert_eq!(ctx.total_workers(), 0);
+
+        // Reap the child through the ordinary wait path — the real
+        // waitpid-equivalent observable — so the test does not leak a
+        // zombie into later serial cases.
+        kprocess::wait_reap::assert_reap_zombie_process(&child_process);
     }
 
     /// Waits until the operation with `cookie` appears in the completions of

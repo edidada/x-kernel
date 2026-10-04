@@ -6,11 +6,12 @@
 //! `worker.rs` (which observe the spawned threads directly).
 
 use kerrno::KError;
+use ktask::future::{block_on, poll_io};
 use unittest::def_test;
 
 use crate::{
     abi::ASYNCIO_RES_CANCELED,
-    context::{AsyncContext, PreparedOp, READY_LIMIT},
+    context::{AsyncContext, CompletionSource, PreparedOp, READY_LIMIT},
     worker::ensure_worker,
 };
 
@@ -44,12 +45,17 @@ fn full_ready_queue_rejects_until_drained() {
         "the queue past its limit must report WouldBlock"
     );
 
-    let mut drained = 0;
-    while ctx.pop_ready().is_some() {
-        drained += 1;
+    let mut drained: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(READY_LIMIT);
+    while let Some(op) = ctx.pop_ready() {
+        drained.push(op.cookie);
     }
-    assert_eq!(drained, READY_LIMIT, "drain must observe every queued op");
-    // FIFO order was spot-checked via the first/last cookies.
+    assert_eq!(drained.len(), READY_LIMIT, "drain must observe every op");
+    assert_eq!(drained[0], 0, "FIFO: the first queued op drains first");
+    assert_eq!(
+        drained[READY_LIMIT - 1],
+        READY_LIMIT as u64 - 1,
+        "FIFO: the last queued op drains last"
+    );
     ctx.push_ready(PreparedOp { cookie: 0 })
         .expect("drained queue must accept again");
 }
@@ -94,6 +100,24 @@ fn shutdown_cancels_queued_ops_with_canceled_result() {
     ctx.shutdown();
 
     assert!(!ctx.has_ready(), "shutdown must drain the ready queue");
+
+    // The completion wait path (`CompletionSource` through `poll_io`, the
+    // path the enter syscall will block on) must observe the published
+    // cancellations immediately.
+    block_on(poll_io(
+        &CompletionSource(&ctx),
+        kpoll::IoEvents::IN,
+        false,
+        || {
+            if ctx.has_completions() {
+                Ok(())
+            } else {
+                Err(KError::WouldBlock)
+            }
+        },
+    ))
+    .expect("completion source must report ready after shutdown");
+
     let completions: alloc::vec::Vec<_> = ctx.take_completions().into_iter().collect();
     assert_eq!(completions.len(), 3);
     for (index, completion) in completions.iter().enumerate() {
