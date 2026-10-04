@@ -25,6 +25,10 @@ pub const MAX_SIGNALS: usize = 64;
 /// and real-time signals `32..=64` (`SIGRTMIN` is 32).
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, FromRepr, EnumIter)]
+#[expect(
+    clippy::upper_case_acronyms,
+    reason = "signal variants use the Linux SIG* ABI names"
+)]
 pub enum Signo {
     /// Hangup (`SIGHUP`, 1).
     SIGHUP    = 1,

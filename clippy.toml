@@ -9,5 +9,8 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
 
+# Check exported APIs as well as private implementation details.
+avoid-breaking-exported-api = false
+
 # Boolean parameter limit for clippy::fn_params_excessive_bools (the clippy default).
 max-fn-params-bools = 3

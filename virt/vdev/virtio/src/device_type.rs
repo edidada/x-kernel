@@ -35,8 +35,8 @@ impl VirtioDeviceID {
     }
 
     /// Convert device type to device ID
-    pub fn to_device_id(&self) -> u32 {
-        *self as u32
+    pub fn to_device_id(self) -> u32 {
+        self as u32
     }
 
     /// Get the human-readable name of the device type
