@@ -15,6 +15,7 @@ khal.workspace = true
 klogger.workspace = true
 kpoll.workspace = true
 kprocess.workspace = true
+ksignal.workspace = true
 ksync.workspace = true
 ktask.workspace = true
 ktime_types.workspace = true

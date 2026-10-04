@@ -28,7 +28,7 @@ use crate::worker::WORKER_CAP;
 /// Maximum queued submissions before the submitter must wait for the ring
 /// to drain. The completion ring bounds this once the rings land; the spike
 /// uses a plain queue bound to keep the test deterministic.
-const READY_LIMIT: usize = 1024;
+pub(crate) const READY_LIMIT: usize = 1024;
 
 /// A submission prepared for execution.
 ///
@@ -149,14 +149,27 @@ impl AsyncContext {
 
     /// Marks the context shut down and wakes workers and completion waiters.
     ///
-    /// Never blocks: the caller is the fd `release` path or a test.
+    /// Operations still queued and never dispatched are cancelled with an
+    /// `ASYNCIO_RES_CANCELED` completion so no user cookie is lost; operations
+    /// already dispatched to a worker run to their natural completion. Never
+    /// blocks: the caller is the fd `release` path or a test.
     pub fn shutdown(&self) {
-        {
+        let cancelled = {
             let mut inner = self.inner.lock();
             if inner.shutdown {
                 return;
             }
             inner.shutdown = true;
+            core::mem::take(&mut inner.ready)
+        };
+        if !cancelled.is_empty() {
+            let mut inner = self.inner.lock();
+            inner
+                .completed
+                .extend(cancelled.into_iter().map(|op| CompletedOp {
+                    cookie: op.cookie,
+                    res: crate::abi::ASYNCIO_RES_CANCELED,
+                }));
         }
         // Wake outside the lock; PollSet::wake detaches registrations under
         // its own spinlock and invokes wakers after releasing it.
@@ -164,20 +177,24 @@ impl AsyncContext {
         self.cq_wake.wake();
     }
 
-    /// Returns whether a new worker may spawn: the context is live, queued
-    /// work exceeds idle workers, and the pool is below
-    /// [`crate::worker::WORKER_CAP`].
-    pub(crate) fn wants_worker(&self) -> bool {
-        let inner = self.inner.lock();
-        !inner.shutdown
+    /// Reserves a worker slot when the context is live, queued work exceeds
+    /// idle workers, and the pool is below [`crate::worker::WORKER_CAP`].
+    ///
+    /// The eligibility check and the slot charge happen in one critical
+    /// section so concurrent submitters cannot oversubscribe the cap. A
+    /// `true` return must be paired with [`AsyncContext::unreserve_worker`]
+    /// when the spawn fails, or naturally retires through
+    /// [`AsyncContext::retire_worker`] once the worker exits.
+    pub(crate) fn try_reserve_worker(&self) -> bool {
+        let mut inner = self.inner.lock();
+        if !inner.shutdown
             && inner.ready.len() > inner.idle_workers as usize
             && inner.total_workers < WORKER_CAP
-    }
-
-    /// Reserves a worker slot before spawning; must be paired with
-    /// [`AsyncContext::unreserve_worker`] when the spawn fails.
-    pub(crate) fn reserve_worker(&self) {
-        self.inner.lock().total_workers += 1;
+        {
+            inner.total_workers += 1;
+            return true;
+        }
+        false
     }
 
     /// Returns the name ordinal for the next spawned worker.

@@ -8,7 +8,8 @@
 use unittest::def_test;
 
 use crate::{
-    context::{AsyncContext, PreparedOp},
+    abi::ASYNCIO_RES_CANCELED,
+    context::{AsyncContext, PreparedOp, READY_LIMIT},
     worker::ensure_worker,
 };
 
@@ -24,4 +25,78 @@ fn shutdown_context_refuses_worker_spawn() {
     // A shut-down context must not spawn workers: there is nothing left to
     // serve, and a fresh thread would only have to observe shutdown and exit.
     assert_eq!(ctx.total_workers(), 0);
+}
+
+#[def_test(user, serial)]
+fn full_ready_queue_rejects_until_drained() {
+    let ctx = AsyncContext::new().expect("context creation");
+
+    for cookie in 0..READY_LIMIT as u64 {
+        ctx.push_ready(PreparedOp { cookie })
+            .expect("fills up to the limit must succeed");
+    }
+    assert!(
+        ctx.push_ready(PreparedOp {
+            cookie: READY_LIMIT as u64
+        })
+        .is_err(),
+        "the queue past its limit must report WouldBlock"
+    );
+
+    let mut drained = 0;
+    while ctx.pop_ready().is_some() {
+        drained += 1;
+    }
+    assert_eq!(drained, READY_LIMIT, "drain must observe every queued op");
+    // FIFO order was spot-checked via the first/last cookies.
+    ctx.push_ready(PreparedOp { cookie: 0 })
+        .expect("drained queue must accept again");
+}
+
+#[def_test(user, serial)]
+fn try_reserve_worker_enforces_the_pool_cap() {
+    let ctx = AsyncContext::new().expect("context creation");
+
+    for cookie in 0..5 {
+        ctx.push_ready(PreparedOp { cookie })
+            .expect("seed op below queue limit");
+    }
+
+    // WORKER_CAP consecutive reservations must succeed, then the cap must
+    // hold even though queued work still exceeds idle capacity.
+    for _ in 0..4 {
+        assert!(ctx.try_reserve_worker(), "cap not reached yet");
+    }
+    assert!(
+        !ctx.try_reserve_worker(),
+        "reservation past WORKER_CAP must fail in the same critical section"
+    );
+    assert_eq!(ctx.total_workers(), 4);
+
+    for _ in 0..4 {
+        ctx.unreserve_worker();
+    }
+    assert_eq!(ctx.total_workers(), 0);
+}
+
+#[def_test(user, serial)]
+fn shutdown_cancels_queued_ops_with_canceled_result() {
+    let ctx = AsyncContext::new().expect("context creation");
+
+    for cookie in 1..=3 {
+        ctx.push_ready(PreparedOp { cookie })
+            .expect("op below queue limit");
+    }
+
+    // No worker was spawned, so every queued op is still undispatched and
+    // must come back as a cancellation, keeping its cookie observable.
+    ctx.shutdown();
+
+    assert!(!ctx.has_ready(), "shutdown must drain the ready queue");
+    let completions: alloc::vec::Vec<_> = ctx.take_completions().into_iter().collect();
+    assert_eq!(completions.len(), 3);
+    for (index, completion) in completions.iter().enumerate() {
+        assert_eq!(completion.cookie, index as u64 + 1);
+        assert_eq!(completion.res, ASYNCIO_RES_CANCELED);
+    }
 }

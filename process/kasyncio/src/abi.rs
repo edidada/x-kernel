@@ -10,8 +10,11 @@
 //! the bottom of this file pin every size and stride.
 //!
 //! The ABI ships complete rather than incrementally, so items that the not
-//! yet landed ring/syscall steps will consume are staged here.
-#![allow(dead_code)]
+//! yet landed ring/syscall steps will consume are staged here. Allow the
+//! resulting dead-code findings only in unittest builds, where the syscall
+//! consumers are absent; in plain builds the `expect(dead_code)` on the
+//! module declaration accounts for them instead.
+#![cfg_attr(unittest, allow(dead_code))]
 
 use core::mem::{offset_of, size_of};
 
@@ -44,7 +47,8 @@ pub const ASYNCIO_SQE_FD2_VALID: u8 = 1 << 1;
 /// All SQE flag bits defined so far; anything else is rejected.
 pub const ASYNCIO_SQE_FLAGS_KNOWN: u8 = ASYNCIO_SQE_OFF_VALID | ASYNCIO_SQE_FD2_VALID;
 
-/// `AsyncioParams.flags` accepted by [`crate::setup_context`].
+/// `AsyncioParams.flags` accepted by the setup entry point (landed with the
+/// `asyncio_setup` syscall step).
 pub const ASYNCIO_PARAMS_VERSION: u32 = 0;
 
 /// `enter` flag: block until `min_complete` completions are published.
@@ -92,6 +96,10 @@ pub const ASYNCIO_SQE_SIZE: usize = 64;
 pub const ASYNCIO_CQE_SIZE: usize = 32;
 /// Maximum supported submission-ring depth.
 pub const ASYNCIO_MAX_SQ_ENTRIES: u32 = 4096;
+
+/// CQE `res` for an operation discarded before it started: negated Linux
+/// `ECANCELED` (125), which the errno tables do not carry yet.
+pub const ASYNCIO_RES_CANCELED: i64 = -125;
 
 /// One submission-queue entry (64 bytes).
 ///
