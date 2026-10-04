@@ -314,6 +314,37 @@ pub struct LineDiscipline<R, W> {
     processor: Processor<R, W>,
 }
 
+impl<R: TtyRead, W: TtyWrite> InputReader<R, W> {
+    /// Runs the dedicated reader task of [`ProcessMode::External`]; never returns.
+    ///
+    /// Drains input, then registers `poll_tx` and the external rx waker before
+    /// draining again, so input that arrives during registration is not lost.
+    /// A failed registration is logged and retried after the scheduler yields.
+    fn run_external(mut self, register: &ExternalRegisterFn, poll_rx: &PollSet, poll_tx: &PollSet) {
+        let mut registrations = PollRegistrations::new();
+        block_on(poll_fn(|cx| {
+            while self.poll() {
+                poll_rx.wake();
+            }
+            let mut context = registrations.context(cx);
+            if let Err(error) = context
+                .register(poll_tx)
+                .and_then(|()| register(&mut context))
+            {
+                warn!("Failed to register TTY input waiter: {error}");
+                // Retry after scheduler yields; do not exit the reader.
+                context.wake_by_ref();
+                return Poll::Pending;
+            }
+            drop(context);
+            while self.poll() {
+                poll_rx.wake();
+            }
+            Poll::Pending
+        }))
+    }
+}
+
 impl<R: TtyRead, W: TtyWrite> LineDiscipline<R, W> {
     /// Creates input processing state without starting Work-mode callbacks.
     ///
@@ -324,7 +355,7 @@ impl<R: TtyRead, W: TtyWrite> LineDiscipline<R, W> {
         let (buf_tx, buf_rx) = ReadBuf::default().split();
 
         let clear_line_buf = Arc::new(AtomicBool::new(false));
-        let mut reader = InputReader {
+        let reader = InputReader {
             terminal: terminal.clone(),
 
             reader: config.reader,
@@ -348,29 +379,7 @@ impl<R: TtyRead, W: TtyWrite> LineDiscipline<R, W> {
                     {
                         let poll_rx = poll_rx.clone();
                         let poll_tx = poll_tx.clone();
-                        move || {
-                            let mut registrations = PollRegistrations::new();
-                            block_on(poll_fn(|cx| {
-                                while reader.poll() {
-                                    poll_rx.wake();
-                                }
-                                let mut context = registrations.context(cx);
-                                if let Err(error) = context
-                                    .register(&poll_tx)
-                                    .and_then(|()| register(&mut context))
-                                {
-                                    warn!("Failed to register TTY input waiter: {error}");
-                                    // Retry after scheduler yields; do not exit the reader.
-                                    context.wake_by_ref();
-                                    return Poll::Pending;
-                                }
-                                drop(context);
-                                while reader.poll() {
-                                    poll_rx.wake();
-                                }
-                                Poll::Pending
-                            }))
-                        }
+                        move || reader.run_external(&register, &poll_rx, &poll_tx)
                     },
                     "tty-reader".into(),
                 );

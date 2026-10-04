@@ -1227,6 +1227,11 @@ impl Ext4Inode {
     ///
     /// Returns an extent-validation, overflow, accounting, or no-space error
     /// without publishing a partial mount reservation.
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "TODO(cg): legacy delayed-allocation reservation; move the per-extent mapping \
+                  walk and hole coalescing into a helper"
+    )]
     pub(crate) fn reserve_delalloc_range(
         &self,
         sb: &Ext4SbInfo,
