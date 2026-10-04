@@ -16,7 +16,7 @@ struct Random;
 
 impl Random {
     /// Create a new random device node.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 

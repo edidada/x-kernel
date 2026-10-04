@@ -45,7 +45,7 @@ pub(crate) struct NeighborUpdatePolicy {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Ipv4AddrEntry {
+pub(crate) struct Ipv4AddrEntry {
     pub dev: usize,
     pub addr: Ipv4Cidr,
     pub scope: u8,
@@ -65,7 +65,7 @@ pub(crate) struct Ipv4AddrSnapshot {
     pub label: String,
 }
 
-pub struct Router {
+pub(crate) struct Router {
     rx_queue: VecDeque<PacketBuf>,
     control_tx_queue: VecDeque<PacketBuf>,
     data_tx_queue: DataTxQueue,
@@ -82,7 +82,7 @@ pub(crate) struct RxDrain {
     pub has_more: bool,
 }
 impl Router {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             rx_queue: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
             control_tx_queue: VecDeque::with_capacity(CONTROL_TX_QUEUE_SIZE),
@@ -96,7 +96,7 @@ impl Router {
         }
     }
 
-    pub fn route_mtu(&self, dst: &IpAddress) -> Option<usize> {
+    pub(crate) fn route_mtu(&self, dst: &IpAddress) -> Option<usize> {
         let rule = self.table.lookup(dst)?;
         self.devices
             .get(rule.dev)
@@ -114,7 +114,7 @@ impl Router {
     /// Returns `ENETUNREACH` when the route or its device is absent, when
     /// the selected device is administratively down, or when `oif` disagrees
     /// with the looked-up output device.
-    pub fn output_route_source(&self, dst: &IpAddress, oif: i32) -> KResult<IpAddress> {
+    pub(crate) fn output_route_source(&self, dst: &IpAddress, oif: i32) -> KResult<IpAddress> {
         if dst.is_broadcast() && oif > 0 {
             let device = self
                 .devices
@@ -154,7 +154,7 @@ impl Router {
         }
     }
 
-    pub fn can_enqueue_tx_packet(&self) -> bool {
+    pub(crate) fn can_enqueue_tx_packet(&self) -> bool {
         !self.data_tx_queue.is_full()
     }
 
@@ -173,11 +173,11 @@ impl Router {
         self.data_tx_queue.capacity_poll()
     }
 
-    pub fn can_enqueue_tx_packets(&self, packet_count: usize) -> bool {
+    pub(crate) fn can_enqueue_tx_packets(&self, packet_count: usize) -> bool {
         self.data_tx_queue.can_push(packet_count)
     }
 
-    pub fn queue_ipv4_packet(&mut self, packet: Vec<u8>, oif: i32) -> KResult {
+    pub(crate) fn queue_ipv4_packet(&mut self, packet: Vec<u8>, oif: i32) -> KResult {
         let packets = self.fragment_ipv4_packet_for_output(packet)?;
         self.data_tx_queue
             .try_extend(
@@ -221,11 +221,11 @@ impl Router {
         Ok(())
     }
 
-    pub fn add_rule(&mut self, rule: Rule) {
+    pub(crate) fn add_rule(&mut self, rule: Rule) {
         self.table.add_rule(rule);
     }
 
-    pub fn add_device(&mut self, device: Box<dyn NetDevice>) -> usize {
+    pub(crate) fn add_device(&mut self, device: Box<dyn NetDevice>) -> usize {
         self.devices.push(device);
         self.sync_device_ipv4_addrs();
         self.recompute_effective_mtu();
@@ -266,7 +266,7 @@ impl Router {
         Some(())
     }
 
-    pub fn local_ipv4_addrs(&self) -> Vec<Ipv4Cidr> {
+    pub(crate) fn local_ipv4_addrs(&self) -> Vec<Ipv4Cidr> {
         self.ipv4_addrs.iter().map(|entry| entry.addr).collect()
     }
 
@@ -283,11 +283,11 @@ impl Router {
     }
 
     /// Returns the MTU advertised through the smoltcp device capabilities.
-    pub fn effective_mtu(&self) -> usize {
+    pub(crate) fn effective_mtu(&self) -> usize {
         self.effective_mtu
     }
 
-    pub fn link_snapshots(&self) -> Vec<LinkSnapshot> {
+    pub(crate) fn link_snapshots(&self) -> Vec<LinkSnapshot> {
         self.devices
             .iter()
             .enumerate()
@@ -295,18 +295,18 @@ impl Router {
             .collect()
     }
 
-    pub fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
+    pub(crate) fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
         let dev_index = Self::device_index(ifindex)?;
         self.devices
             .get(dev_index)
             .map(|device| device.link_snapshot(ifindex))
     }
 
-    pub fn has_device(&self, ifindex: i32) -> bool {
+    pub(crate) fn has_device(&self, ifindex: i32) -> bool {
         Self::device_index(ifindex).is_some_and(|dev_index| self.devices.get(dev_index).is_some())
     }
 
-    pub fn device_index_by_name(&self, name: &str) -> Option<usize> {
+    pub(crate) fn device_index_by_name(&self, name: &str) -> Option<usize> {
         self.devices.iter().position(|device| device.name() == name)
     }
 
@@ -340,18 +340,18 @@ impl Router {
             .map(|entry| entry.addr)
     }
 
-    pub fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
+    pub(crate) fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
         let dev_index = Self::device_index(ifindex)?;
         self.devices
             .get(dev_index)
             .map(|device| device.link_send_snapshot())
     }
 
-    pub fn ipv4_addr_entries(&self) -> &[Ipv4AddrEntry] {
+    pub(crate) fn ipv4_addr_entries(&self) -> &[Ipv4AddrEntry] {
         &self.ipv4_addrs
     }
 
-    pub fn ipv4_addr_snapshots(&self) -> Vec<Ipv4AddrSnapshot> {
+    pub(crate) fn ipv4_addr_snapshots(&self) -> Vec<Ipv4AddrSnapshot> {
         self.ipv4_addrs
             .iter()
             .filter_map(|entry| {
@@ -363,7 +363,7 @@ impl Router {
             .collect()
     }
 
-    pub fn add_ipv4_addr(&mut self, entry: Ipv4AddrEntry) -> Result<(), LinuxError> {
+    pub(crate) fn add_ipv4_addr(&mut self, entry: Ipv4AddrEntry) -> Result<(), LinuxError> {
         if entry.dev >= self.devices.len() {
             return Err(LinuxError::ENODEV);
         }
@@ -392,7 +392,11 @@ impl Router {
     /// Other addresses on the device remain unchanged. Updating an existing
     /// address resets its scope and broadcast fields like Linux
     /// `SIOCSIFADDR`; setting the same local address is a no-op.
-    pub fn set_primary_ipv4_addr(&mut self, dev: usize, addr: Ipv4Cidr) -> Result<(), LinuxError> {
+    pub(crate) fn set_primary_ipv4_addr(
+        &mut self,
+        dev: usize,
+        addr: Ipv4Cidr,
+    ) -> Result<(), LinuxError> {
         if dev >= self.devices.len() {
             return Err(LinuxError::ENODEV);
         }
@@ -437,7 +441,7 @@ impl Router {
     ///
     /// Other addresses on the device remain unchanged. An interface without
     /// an IPv4 address is accepted to match `SIOCSIFADDR 0.0.0.0`.
-    pub fn remove_primary_ipv4_addr(&mut self, dev: usize) -> Result<(), LinuxError> {
+    pub(crate) fn remove_primary_ipv4_addr(&mut self, dev: usize) -> Result<(), LinuxError> {
         if dev >= self.devices.len() {
             return Err(LinuxError::ENODEV);
         }
@@ -451,7 +455,7 @@ impl Router {
         Ok(())
     }
 
-    pub fn remove_ipv4_addr(&mut self, entry: Ipv4AddrEntry) -> bool {
+    pub(crate) fn remove_ipv4_addr(&mut self, entry: Ipv4AddrEntry) -> bool {
         let old_len = self.ipv4_addrs.len();
         self.ipv4_addrs
             .retain(|existing| existing.dev != entry.dev || existing.addr != entry.addr);
@@ -465,36 +469,40 @@ impl Router {
         true
     }
 
-    pub fn has_ipv4_address(&self, address: Ipv4Address) -> bool {
+    pub(crate) fn has_ipv4_address(&self, address: Ipv4Address) -> bool {
         self.ipv4_addrs
             .iter()
             .any(|entry| entry.addr.address() == address)
     }
 
-    pub fn route_snapshot(&self) -> Vec<Rule> {
+    pub(crate) fn route_snapshot(&self) -> Vec<Rule> {
         self.table.rules().to_vec()
     }
 
-    pub fn has_ipv4_subnet_for_device(&self, dev: usize, address: IpAddress) -> bool {
+    pub(crate) fn has_ipv4_subnet_for_device(&self, dev: usize, address: IpAddress) -> bool {
         self.ipv4_addrs
             .iter()
             .any(|entry| entry.dev == dev && entry.addr.contains_addr(&address))
     }
 
-    pub fn is_ipv4_directed_broadcast_for_device(&self, dev: usize, address: Ipv4Address) -> bool {
+    pub(crate) fn is_ipv4_directed_broadcast_for_device(
+        &self,
+        dev: usize,
+        address: Ipv4Address,
+    ) -> bool {
         self.ipv4_addrs
             .iter()
             .filter(|entry| entry.dev == dev)
             .any(|entry| entry.addr.is_directed_broadcast(address))
     }
 
-    pub fn add_route_rule(&mut self, rule: Rule) -> Result<(), LinuxError> {
+    pub(crate) fn add_route_rule(&mut self, rule: Rule) -> Result<(), LinuxError> {
         self.validate_configured_route(rule)?;
         self.table.add_rule(rule);
         Ok(())
     }
 
-    pub fn replace_route_rule(
+    pub(crate) fn replace_route_rule(
         &mut self,
         existing: Rule,
         replacement: Rule,
@@ -505,11 +513,11 @@ impl Router {
         Ok(())
     }
 
-    pub fn remove_exact_route_rule(&mut self, route: Rule) {
+    pub(crate) fn remove_exact_route_rule(&mut self, route: Rule) {
         self.table.remove_exact_rule(route);
     }
 
-    pub fn set_ipv4_broadcast(
+    pub(crate) fn set_ipv4_broadcast(
         &mut self,
         dev: usize,
         broadcast: Ipv4Address,
@@ -527,7 +535,11 @@ impl Router {
     ///
     /// Linux `SIOCSIFNETMASK` keeps `ifa_scope` and only recalculates
     /// `ifa_broadcast` when it still matches the old derived mask.
-    pub fn set_ipv4_netmask(&mut self, dev: usize, prefix_len: u8) -> Result<(), LinuxError> {
+    pub(crate) fn set_ipv4_netmask(
+        &mut self,
+        dev: usize,
+        prefix_len: u8,
+    ) -> Result<(), LinuxError> {
         if prefix_len > 32 {
             return Err(LinuxError::EINVAL);
         }
@@ -617,7 +629,7 @@ impl Router {
     ///
     /// Returns `Ok(true)` when the effective device MTU changed and the
     /// smoltcp interface must be rebuilt to refresh its cached capabilities.
-    pub fn update_device_link(
+    pub(crate) fn update_device_link(
         &mut self,
         ifindex: i32,
         update: LinkConfigUpdate,
@@ -663,7 +675,7 @@ impl Router {
         (ifindex > 0).then_some((ifindex - 1) as usize)
     }
 
-    pub fn apply_neighbor_update(
+    pub(crate) fn apply_neighbor_update(
         &mut self,
         update: NeighborUpdate,
         policy: NeighborUpdatePolicy,
@@ -680,7 +692,7 @@ impl Router {
     }
 
     #[cfg(unittest)]
-    pub fn has_neighbor(&self, dev: usize, dst: IpAddress) -> bool {
+    pub(crate) fn has_neighbor(&self, dev: usize, dst: IpAddress) -> bool {
         self.devices
             .get(dev)
             .is_some_and(|device| device.has_neighbor(dst))
@@ -768,7 +780,7 @@ impl Router {
             .unwrap_or(STANDARD_MTU);
     }
 
-    pub fn drain_rx_budgeted_into(
+    pub(crate) fn drain_rx_budgeted_into(
         &mut self,
         timestamp: MonotonicInstant,
         budget: usize,
@@ -819,20 +831,20 @@ impl Router {
         }
     }
 
-    pub fn enqueue_ingress_packets(&mut self, packets: &mut Vec<PacketBuf>) {
+    pub(crate) fn enqueue_ingress_packets(&mut self, packets: &mut Vec<PacketBuf>) {
         debug_assert!(packets.len() <= self.ingress_capacity());
         self.rx_queue.extend(packets.drain(..));
     }
 
-    pub fn ingress_capacity(&self) -> usize {
+    pub(crate) fn ingress_capacity(&self) -> usize {
         SOCKET_BUFFER_SIZE.saturating_sub(self.rx_queue.len())
     }
 
-    pub fn has_pending_ingress(&self) -> bool {
+    pub(crate) fn has_pending_ingress(&self) -> bool {
         !self.rx_queue.is_empty()
     }
 
-    pub fn send_link_frame(&mut self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
+    pub(crate) fn send_link_frame(&mut self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
         let dev_index = Self::device_index(ifindex).ok_or(KError::InvalidInput)?;
         let dev = self
             .devices
@@ -841,7 +853,7 @@ impl Router {
         dev.send_link_frame(ifindex, frame)
     }
 
-    pub fn dispatch_budgeted(
+    pub(crate) fn dispatch_budgeted(
         &mut self,
         timestamp: MonotonicInstant,
         budget: usize,
@@ -1006,7 +1018,7 @@ impl Router {
         src_addr.is_unspecified() || self.is_local_ipv4_source(src_addr)
     }
 
-    pub fn queue_control_ipv4_packet(&mut self, packet: Vec<u8>) -> KResult {
+    pub(crate) fn queue_control_ipv4_packet(&mut self, packet: Vec<u8>) -> KResult {
         if self.control_tx_queue.len() >= CONTROL_TX_QUEUE_SIZE {
             return Err(KError::WouldBlock);
         }
@@ -1365,7 +1377,7 @@ mod tests {
     }
 }
 
-pub struct TxToken<'a>(&'a mut DataTxQueue);
+pub(crate) struct TxToken<'a>(&'a mut DataTxQueue);
 
 impl smoltcp::phy::TxToken for TxToken<'_> {
     fn consume<R, F>(self, len: usize, f: F) -> R
@@ -1388,7 +1400,7 @@ impl smoltcp::phy::TxToken for TxToken<'_> {
     }
 }
 
-pub struct RxToken(PacketBuf);
+pub(crate) struct RxToken(PacketBuf);
 
 impl smoltcp::phy::RxToken for RxToken {
     fn consume<R, F>(self, f: F) -> R

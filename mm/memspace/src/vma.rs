@@ -182,7 +182,7 @@ pub enum VmRuntimeRef {
 
 /// Semantic class of a VMA-side runtime reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VmRuntimeKind {
+pub(crate) enum VmRuntimeKind {
     Linear,
     AnonShared,
     AnonPrivate,

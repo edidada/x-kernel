@@ -198,7 +198,7 @@ pub(crate) fn activate_boot_map() -> bool {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _boot_print_usize(num: usize) {
+pub(crate) extern "C" fn _boot_print_usize(num: usize) {
     if !is_enabled_idmap() {
         return;
     }
@@ -208,18 +208,18 @@ pub extern "C" fn _boot_print_usize(num: usize) {
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".idmap.text")]
-pub fn boot_print_str(data: &str) {
+pub(crate) fn boot_print_str(data: &str) {
     write_str_idmap(data);
 }
 
 #[allow(dead_code)]
-pub fn boot_print_usize(num: usize) {
+pub(crate) fn boot_print_usize(num: usize) {
     write_hex_idmap(num);
     write_str_idmap("\r\n");
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct Uart {
+pub(crate) struct Uart {
     base_address: usize,
 }
 
@@ -409,23 +409,23 @@ fn write_data_reg_idmap(base_address: usize, c: u8) {
 }
 
 impl Uart {
-    pub const fn new(base_address: usize) -> Self {
+    pub(crate) const fn new(base_address: usize) -> Self {
         Self { base_address }
     }
 
     #[unsafe(link_section = ".idmap.text")]
-    pub const fn new_idmap(base_address: usize) -> Self {
+    pub(crate) const fn new_idmap(base_address: usize) -> Self {
         Self { base_address }
     }
 
-    pub fn put(&self, c: u8) -> Option<u8> {
+    pub(crate) fn put(&self, c: u8) -> Option<u8> {
         write_data_reg(self.base_address, c);
         pace_one_byte();
         Some(c)
     }
 
     #[unsafe(link_section = ".idmap.text")]
-    pub fn put_idmap(&self, c: u8) -> Option<u8> {
+    pub(crate) fn put_idmap(&self, c: u8) -> Option<u8> {
         write_data_reg_idmap(self.base_address, c);
         pace_one_byte_idmap();
         Some(c)
@@ -433,7 +433,7 @@ impl Uart {
 }
 
 #[allow(dead_code)]
-pub fn print_el1_reg(switch: bool) {
+pub(crate) fn print_el1_reg(switch: bool) {
     if !switch {
         return;
     }
@@ -488,6 +488,6 @@ macro_rules! boot_print_reg {
 
 #[allow(unused)]
 #[unsafe(link_section = ".idmap.text")]
-pub fn boot_serial_send(data: u8) {
+pub(crate) fn boot_serial_send(data: u8) {
     write_prefixed_byte(data);
 }

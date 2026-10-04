@@ -75,7 +75,7 @@ unsafe impl Sync for SecondaryBootStacks {}
 /// could land on a secondary that has entered but not yet registered its
 /// run queue, panicking in `RUN_QUEUES.get().expect()`.
 #[allow(clippy::absurd_extreme_comparisons)]
-pub fn start_secondary_cpus(primary_cpu_id: LogicalCpuId) -> KResult {
+pub(crate) fn start_secondary_cpus(primary_cpu_id: LogicalCpuId) -> KResult {
     let mut secondary_logical_cpu_id = 0;
     let mut start_result = Ok(());
     for_each_present_logical_cpu(|_, logical_cpu_id, _| {

@@ -189,7 +189,7 @@ struct SimpleReader<R> {
     buf_tx: CachingProd<ReadBuf>,
 }
 impl<R: TtyRead> SimpleReader<R> {
-    pub fn poll(&mut self) {
+    pub(crate) fn poll(&mut self) {
         let read = self.reader.read(&mut self.read_buf);
         for ch in &self.read_buf[..read] {
             if *ch == b'\n' {

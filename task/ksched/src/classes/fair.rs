@@ -185,7 +185,7 @@ pub(crate) struct FairClass<T> {
 }
 
 impl<T> FairClass<T> {
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             ready: RBTree::new(FairAdapter::NEW),
             vruntime_tree: RBTree::new(FairAdapter::NEW),

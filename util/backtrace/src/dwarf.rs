@@ -98,7 +98,7 @@ pub(crate) fn is_ready() -> bool {
 }
 
 #[cfg_attr(any(test, unittest), allow(dead_code))]
-pub fn init() {
+pub(crate) fn init() {
     INIT_ONCE.call_once(|| {
         // Only initialize DWARF in kernel builds
         #[cfg(not(any(test, unittest)))]

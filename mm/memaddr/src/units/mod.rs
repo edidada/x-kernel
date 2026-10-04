@@ -14,7 +14,7 @@ pub use self::{
 };
 
 #[unittest::mod_test]
-pub mod tests_units {
+pub(crate) mod tests_units {
     use unittest::def_test;
 
     use super::{AddrRange, MemoryAddr, PhysAddr, VirtAddr};

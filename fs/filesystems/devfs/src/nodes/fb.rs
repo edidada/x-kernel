@@ -20,7 +20,7 @@ use crate::{DeviceFile, add_device_entry};
 
 #[repr(C)]
 #[derive(Default, Debug, Clone, Copy)]
-pub struct FrameBufferBitfield {
+pub(crate) struct FrameBufferBitfield {
     /// The beginning of bitfield.
     offset: u32,
     /// The length of bitfield.
@@ -95,12 +95,12 @@ struct FixScreenInfo {
 /// demand: `write()` to `/dev/fb0` and the `FBIOPAN_DISPLAY` ioctl both
 /// trigger [`fbdevice::fb_present`], so writes to the node stay visible while
 /// an active DRM master keeps the scanout to itself.
-pub struct FrameBuffer {
+pub(crate) struct FrameBuffer {
     base: VirtAddr,
     size: usize,
 }
 impl FrameBuffer {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         // fb_available() is checked by the caller (add_root_entries) before
         // constructing us, so the shadow is guaranteed present.
         let base = fbdevice::fb_shadow_vaddr().expect("fbdev shadow missing");

@@ -397,15 +397,15 @@ mod unsupported {
         vcpu::{ExitAction, Vcpu},
     };
 
-    pub struct UnsupportedArch;
+    pub(crate) struct UnsupportedArch;
 
     #[derive(Default)]
-    pub struct UnsupportedVcpu;
+    pub(crate) struct UnsupportedVcpu;
 
     // SAFETY: UnsupportedVcpu is zero-sized and stateless.
     unsafe impl Send for UnsupportedVcpu {}
 
-    pub struct UnsupportedGuestMem;
+    pub(crate) struct UnsupportedGuestMem;
 
     impl crate::mm::GuestMem for UnsupportedGuestMem {
         fn new(_mem_base: u64, _mem_size: u64, _hpa_base: u64, _vmid: u32) -> Option<Self> {

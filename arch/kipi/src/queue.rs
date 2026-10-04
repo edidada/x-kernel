@@ -12,13 +12,13 @@ use crate::event::{Callback, IpiEvent};
 ///
 /// Uses FIFO ordering (VecDeque) to ensure callbacks are executed
 /// in the order they were enqueued.
-pub struct IpiEventQueue {
+pub(crate) struct IpiEventQueue {
     events: VecDeque<IpiEvent>,
 }
 
 impl IpiEventQueue {
     /// Creates a new empty IPI event queue.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             events: VecDeque::new(),
         }
@@ -27,12 +27,12 @@ impl IpiEventQueue {
     /// Checks if there are no pending events.
     #[allow(dead_code)]
     #[inline]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.events.is_empty()
     }
 
     /// Enqueues a new event into this queue.
-    pub fn push(&mut self, src_cpu_id: LogicalCpuId, callback: Callback) {
+    pub(crate) fn push(&mut self, src_cpu_id: LogicalCpuId, callback: Callback) {
         self.events.push_back(IpiEvent {
             src_cpu_id,
             callback,
@@ -43,7 +43,7 @@ impl IpiEventQueue {
     ///
     /// Returns `None` if the queue is empty.
     #[must_use]
-    pub fn pop_one(&mut self) -> Option<(LogicalCpuId, Callback)> {
+    pub(crate) fn pop_one(&mut self) -> Option<(LogicalCpuId, Callback)> {
         if let Some(e) = self.events.pop_front() {
             Some((e.src_cpu_id, e.callback))
         } else {
@@ -59,7 +59,7 @@ impl Default for IpiEventQueue {
 }
 
 #[unittest::mod_test]
-pub mod tests_queue {
+pub(crate) mod tests_queue {
     use kcpu_id_map::LogicalCpuId;
     use unittest::def_test;
 

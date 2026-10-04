@@ -246,7 +246,7 @@ unsafe fn create_boot_uart_map(l2_boot_uart_pa: usize) {
 /// handoff completes. The caller must ensure the linker symbols, saved DTB
 /// pointer, and boot page-table globals all refer to the current boot image
 /// and are not concurrently mutated.
-pub unsafe fn create_boot_page_tables() {
+pub(super) unsafe fn create_boot_page_tables() {
     let l1_idmap_pa = phys_addr_of!(BOOT_PT_L1_IDMAP);
     let l1_linear_pa = phys_addr_of!(BOOT_PT_L1_LINEAR);
     let l1_kimage_pa = phys_addr_of!(BOOT_PT_L1_KIMAGE);
@@ -282,7 +282,7 @@ pub unsafe fn create_boot_page_tables() {
     barrier::dsb(barrier::SY);
 }
 
-pub fn extend_boot_linear_ram_from_dtb(dtb_paddr: usize) {
+pub(super) fn extend_boot_linear_ram_from_dtb(dtb_paddr: usize) {
     if dtb_paddr == 0 {
         return;
     }
@@ -320,7 +320,7 @@ pub fn extend_boot_linear_ram_from_dtb(dtb_paddr: usize) {
 /// must already be fully initialized for the current boot image, and the
 /// caller must ensure enabling the MMU will keep the current execution path
 /// and required data mapped.
-pub unsafe fn init_mmu() {
+pub(super) unsafe fn init_mmu() {
     let ttbr0_root_pa = phys_addr_of!(BOOT_PT_L0_TTBR0);
     let ttbr1_root_pa = phys_addr_of!(BOOT_PT_L0_TTBR1);
 

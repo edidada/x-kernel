@@ -13,10 +13,10 @@ use virtio::{BufferDirection, PhysAddr, VirtIoHal};
 
 cfg_if! {
     if #[cfg(feature = "virtio-net")] {
-        pub struct VirtIoNet;
+        pub(super) struct VirtIoNet;
 
         impl VirtIoNet {
-            pub fn try_new<T: virtio::Transport + 'static>(
+            pub(super) fn try_new<T: virtio::Transport + 'static>(
                 transport: T,
                 irq: Option<usize>,
             ) -> DriverResult<kclass::prelude::NetDeviceImpl> {
@@ -32,10 +32,10 @@ cfg_if! {
 
 cfg_if! {
     if #[cfg(feature = "virtio-gpu")] {
-        pub struct VirtIoGpu;
+        pub(super) struct VirtIoGpu;
 
         impl VirtIoGpu {
-            pub fn try_new<T: virtio::Transport + 'static>(
+            pub(super) fn try_new<T: virtio::Transport + 'static>(
                 transport: T,
                 _irq: Option<usize>,
             ) -> DriverResult<kclass::prelude::DisplayDeviceImpl> {
@@ -49,10 +49,10 @@ cfg_if! {
 
 cfg_if! {
     if #[cfg(feature = "virtio-socket")] {
-        pub struct VirtIoSocket;
+        pub(super) struct VirtIoSocket;
 
         impl VirtIoSocket {
-            pub fn try_new<T: virtio::Transport + 'static>(
+            pub(super) fn try_new<T: virtio::Transport + 'static>(
                 transport: T,
                 _irq: Option<usize>,
             ) -> DriverResult<kclass::prelude::VsockDeviceImpl> {
@@ -67,10 +67,10 @@ cfg_if! {
 
 cfg_if! {
     if #[cfg(feature = "virtio-9p")] {
-        pub struct VirtIo9p;
+        pub(super) struct VirtIo9p;
 
         impl VirtIo9p {
-            pub fn try_new<T: virtio::Transport + 'static>(
+            pub(super) fn try_new<T: virtio::Transport + 'static>(
                 transport: T,
                 _irq: Option<usize>,
             ) -> DriverResult<kclass::prelude::Virtio9pDeviceImpl> {
@@ -84,10 +84,10 @@ cfg_if! {
 
 cfg_if! {
     if #[cfg(feature = "virtio-rng")] {
-        pub struct VirtIoRng;
+        pub(super) struct VirtIoRng;
 
         impl VirtIoRng {
-            pub fn try_new<T: virtio::Transport + Send + 'static>(
+            pub(super) fn try_new<T: virtio::Transport + Send + 'static>(
                 transport: T,
                 irq: Option<usize>,
             ) -> DriverResult<kclass::prelude::HwrngDeviceImpl> {
@@ -105,7 +105,7 @@ cfg_if! {
 }
 
 use memaddr::PAGE_SIZE_4K;
-pub struct VirtIoHalImpl;
+pub(super) struct VirtIoHalImpl;
 
 // SAFETY: `VirtIoHal` requires that DMA buffers handed to the device are
 // valid for the device's view of memory and stay alive until `dma_dealloc`

@@ -101,7 +101,7 @@ pub fn set_secondary_boot_context(logical_cpu_id: LogicalCpuId, stack_top_paddr:
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".head.text")]
-pub unsafe extern "C" fn _start() -> ! {
+pub(super) unsafe extern "C" fn _start() -> ! {
     naked_asm!(
         "add     x13, x18, #0x16",         // "MZ" magic (valid ARM64 no-op instruction)
         "bl      {entry}",                 // branch to kernel start
@@ -134,7 +134,7 @@ pub unsafe extern "C" fn _start() -> ! {
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".idmap.text")]
-pub unsafe extern "C" fn primary_entry() -> ! {
+pub(super) unsafe extern "C" fn primary_entry() -> ! {
     naked_asm!(
         // Capture the current CPU MPIDR affinity value and the DTB pointer
         // before any call clobbers them. The logical runtime CPU id is derived
@@ -211,7 +211,7 @@ pub unsafe extern "C" fn primary_entry() -> ! {
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".idmap.text")]
-pub unsafe extern "C" fn preserve_boot_args() {
+pub(super) unsafe extern "C" fn preserve_boot_args() {
     naked_asm!(
         // Get the physical address of SAVED_BOOT_ARGS via adrp/add.
         "adrp    x8, {saved_args}",
@@ -285,7 +285,7 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
 ///
 /// Must only be entered from [`_start_secondary`] after the secondary CPU has
 /// switched to the boot page tables and established a valid virtual stack.
-pub unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) {
+pub(super) unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) {
     let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
         panic!(
             "missing logical cpu id mapping for raw cpu id {:#x}",
@@ -308,7 +308,7 @@ pub unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) {
 ///
 /// Must only be called once, from [`primary_entry`], after the MMU has been
 /// enabled and the stack pointer adjusted to a virtual address.
-pub unsafe extern "C" fn __primary_switched(
+pub(super) unsafe extern "C" fn __primary_switched(
     cpu_mpidr: usize,
     dtb_paddr: usize,
     kimage_voffset: usize,

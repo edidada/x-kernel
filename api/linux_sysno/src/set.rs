@@ -280,7 +280,7 @@ struct NonZeroUsizeIter<'a> {
 }
 
 impl<'a> NonZeroUsizeIter<'a> {
-    pub fn new(iter: core::slice::Iter<'a, usize>) -> Self {
+    pub(crate) fn new(iter: core::slice::Iter<'a, usize>) -> Self {
         Self { iter, count: 0 }
     }
 }

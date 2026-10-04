@@ -89,14 +89,14 @@ mod status {
     // a value for which there exists a valid Status. This means that users of this API must only
     // be allowed to load and store `Status`es.
     #[repr(transparent)]
-    pub struct AtomicStatus(AtomicU8);
+    pub(super) struct AtomicStatus(AtomicU8);
 
     /// Four possible states for the `Once` cell, encoded as `u8` discriminants in
     /// the atomic state word. Represents the lifecycle:
     /// `Uninitialized` → `Initializing` → `Ready` / `Failed`
     #[repr(u8)]
     #[derive(Clone, Copy, Debug, PartialEq)]
-    pub enum Status {
+    pub(super) enum Status {
         Uninitialized = 0x00,
         Initializing  = 0x01,
         Ready         = 0x02,
@@ -116,27 +116,27 @@ mod status {
 
     impl AtomicStatus {
         #[inline(always)]
-        pub const fn new(status: Status) -> Self {
+        pub(super) const fn new(status: Status) -> Self {
             // Convert Status enum to underlying u8 representation
             Self(AtomicU8::new(status as u8))
         }
 
         #[inline(always)]
-        pub fn load(&self, ordering: Ordering) -> Status {
+        pub(super) fn load(&self, ordering: Ordering) -> Status {
             // The invariant ensures the loaded u8 is a valid Status variant
             let raw_value = self.0.load(ordering);
             Status::from_raw(raw_value)
         }
 
         #[inline(always)]
-        pub fn store(&self, status: Status, ordering: Ordering) {
+        pub(super) fn store(&self, status: Status, ordering: Ordering) {
             // Store the enum discriminant value directly
             let raw_value = status as u8;
             self.0.store(raw_value, ordering);
         }
 
         #[inline(always)]
-        pub fn compare_exchange(
+        pub(super) fn compare_exchange(
             &self,
             old: Status,
             new: Status,
@@ -156,7 +156,7 @@ mod status {
         }
 
         #[inline(always)]
-        pub fn get_mut(&mut self) -> Status {
+        pub(super) fn get_mut(&mut self) -> Status {
             Status::from_raw(*self.0.get_mut())
         }
     }

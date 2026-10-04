@@ -462,7 +462,7 @@ const fn boot_phys_ptr<T>(paddr: usize) -> *const T {
 /// Must only be called after [`map_linear_firmware_memory`] has populated the
 /// cached firmware handoff globals for the current boot image, and before any
 /// later stage that may repurpose those early-boot globals.
-pub unsafe fn boot_firmware_tables() -> (usize, usize) {
+pub(super) unsafe fn boot_firmware_tables() -> (usize, usize) {
     // SAFETY: these globals are written once during early firmware mapping and
     // then read-only until kernel handoff.
     unsafe { (BOOT_DTB_PADDR, BOOT_RSDP_PADDR) }
@@ -473,7 +473,7 @@ pub unsafe fn boot_firmware_tables() -> (usize, usize) {
 ///
 /// Must only be called during early boot after the EFI handoff has been
 /// parsed for the current image and before those cached globals can change.
-pub unsafe fn boot_uefi_memmap_paddr() -> usize {
+pub(super) unsafe fn boot_uefi_memmap_paddr() -> usize {
     // SAFETY: this global is written once during early firmware mapping and
     // then read-only until kernel handoff.
     unsafe { BOOT_UEFI_MEMMAP_PADDR }
@@ -758,7 +758,7 @@ unsafe fn map_mmio_linear_ranges() {
 /// final runtime MMU state is installed. The caller must pass the physical
 /// kernel start address for the current image plus the live firmware handoff
 /// pointers for this boot.
-pub unsafe fn create_boot_page_tables(
+pub(super) unsafe fn create_boot_page_tables(
     kernel_start_pa: usize,
     _cmdline_paddr: usize,
     systemtable_paddr: usize,
@@ -780,7 +780,7 @@ pub unsafe fn create_boot_page_tables(
 /// `BOOT_PT_ROOT` and the associated LoongArch boot paging metadata must
 /// already be fully initialized for the current image, and enabling the MMU
 /// must preserve the current execution path and required boot data mappings.
-pub unsafe fn init_mmu() {
+pub(super) unsafe fn init_mmu() {
     unsafe extern "C" {
         fn handle_tlb_refill();
     }

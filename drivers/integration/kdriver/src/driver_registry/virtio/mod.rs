@@ -100,11 +100,11 @@ macro_rules! virtio_driver_pair {
     (
         $pci_ctor:ident, $mmio_ctor:ident, $kind:expr, $vtype:expr, $pci_name:expr, $mmio_name:expr
     ) => {
-        pub fn $pci_ctor() -> BoxedDriver {
+        pub(crate) fn $pci_ctor() -> BoxedDriver {
             make_virtio_driver($pci_name, $kind, $vtype, BusTypeId::PCI)
         }
 
-        pub fn $mmio_ctor() -> BoxedDriver {
+        pub(crate) fn $mmio_ctor() -> BoxedDriver {
             make_virtio_driver($mmio_name, $kind, $vtype, BusTypeId::PLATFORM)
         }
     };
@@ -372,6 +372,6 @@ const DRIVER_FACTORIES: &[crate::driver_registry::DriverFactory] = &[
 
 /// Register all enabled VirtIO drivers with the given registrar.
 #[cfg(feature = "virtio")]
-pub fn register_all(registrar: &mut crate::driver_registry::DriverRegistrar) {
+pub(crate) fn register_all(registrar: &mut crate::driver_registry::DriverRegistrar) {
     crate::driver_registry::register_factories(registrar, DRIVER_FACTORIES);
 }

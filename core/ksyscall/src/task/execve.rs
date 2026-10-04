@@ -24,7 +24,7 @@ use kuaccess::vm_load_string;
 use kvfs::{Filename, LookupFlags, LookupIntent};
 use osvm::load_vec_until_null;
 
-pub fn sys_execve(
+pub(crate) fn sys_execve(
     uctx: &mut UserContext,
     path: *const c_char,
     argv: *const *const c_char,

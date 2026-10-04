@@ -192,7 +192,7 @@ impl Ext4SbInfo {
     /// Until a kernel background worker is wired in, `syncfs`, KVFS unmount
     /// writeback, and journal-space pressure drive the queue. Freeze should
     /// call the same drain path once that lifecycle hook exists in KVFS.
-    pub fn sync_filesystem(&mut self) -> Ext4Result<()> {
+    pub(crate) fn sync_filesystem(&mut self) -> Ext4Result<()> {
         let result = (|| {
             self.commit_running_metadata_transaction()?;
             self.drain_pending_checkpoints()?;

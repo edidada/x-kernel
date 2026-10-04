@@ -235,14 +235,14 @@ impl<T> core::fmt::Debug for ClassDevice<T> {
 pub type ClassAvailabilityCallback<T> = Arc<dyn Fn(ClassDevice<T>) + Send + Sync>;
 
 /// Typed registry for one runtime device class.
-pub struct ClassRegistry<T> {
+pub(crate) struct ClassRegistry<T> {
     devices: Vec<ClassDevice<T>>,
     availability_subscribers: Vec<ClassAvailabilityCallback<T>>,
 }
 
 impl<T> ClassRegistry<T> {
     /// Create an empty class registry.
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             devices: Vec::new(),
             availability_subscribers: Vec::new(),
@@ -253,7 +253,7 @@ impl<T> ClassRegistry<T> {
     ///
     /// Linux device registration rejects duplicate identities; replacement is
     /// a remove-then-add lifecycle rather than an implicit registry update.
-    pub fn publish(&mut self, device: ClassDevice<T>) -> DriverResult<()> {
+    pub(crate) fn publish(&mut self, device: ClassDevice<T>) -> DriverResult<()> {
         let id = device.id();
         if self.devices.iter().any(|existing| existing.id() == id) {
             return Err(DriverError::AlreadyExists);
@@ -263,7 +263,7 @@ impl<T> ClassRegistry<T> {
     }
 
     /// Return currently active devices in this class.
-    pub fn devices(&self) -> Vec<ClassDevice<T>> {
+    pub(crate) fn devices(&self) -> Vec<ClassDevice<T>> {
         self.devices
             .iter()
             .filter(|device| device.is_available())
@@ -272,7 +272,7 @@ impl<T> ClassRegistry<T> {
     }
 
     /// Find a currently active device in this class.
-    pub fn find(&self, id: DeviceId) -> Option<ClassDevice<T>> {
+    pub(crate) fn find(&self, id: DeviceId) -> Option<ClassDevice<T>> {
         self.devices
             .iter()
             .find(|device| device.id() == id && device.is_available())
@@ -280,17 +280,17 @@ impl<T> ClassRegistry<T> {
     }
 
     /// Subscribe to future availability notifications for this class.
-    pub fn subscribe_available(&mut self, callback: ClassAvailabilityCallback<T>) {
+    pub(crate) fn subscribe_available(&mut self, callback: ClassAvailabilityCallback<T>) {
         self.availability_subscribers.push(callback);
     }
 
     /// Snapshot availability callbacks. Callers should invoke them outside locks.
-    pub fn availability_callbacks(&self) -> Vec<ClassAvailabilityCallback<T>> {
+    pub(crate) fn availability_callbacks(&self) -> Vec<ClassAvailabilityCallback<T>> {
         self.availability_subscribers.clone()
     }
 
     /// Remove a class device by parent device ID.
-    pub fn remove(&mut self, id: DeviceId) -> Option<ClassDevice<T>> {
+    pub(crate) fn remove(&mut self, id: DeviceId) -> Option<ClassDevice<T>> {
         let pos = self.devices.iter().position(|device| device.id() == id)?;
         Some(self.devices.swap_remove(pos))
     }

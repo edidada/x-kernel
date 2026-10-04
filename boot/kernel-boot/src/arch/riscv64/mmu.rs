@@ -364,7 +364,7 @@ unsafe fn map_dtb_linear(dtb_paddr: usize) {
 /// is enabled. The caller must ensure `dtb_paddr` is the boot firmware DTB for
 /// the current machine image and that the boot page-table pools are not being
 /// concurrently accessed.
-pub unsafe fn create_boot_page_tables(dtb_paddr: usize) {
+pub(super) unsafe fn create_boot_page_tables(dtb_paddr: usize) {
     unsafe extern "C" {
         fn _start();
         fn _ekernel();
@@ -390,7 +390,7 @@ pub unsafe fn create_boot_page_tables(dtb_paddr: usize) {
 /// `BOOT_PT_L2` must already contain the fully initialized root page table for
 /// the current boot image, and the caller must ensure switching to it keeps
 /// the current execution path and required boot data mapped.
-pub unsafe fn init_mmu() {
+pub(super) unsafe fn init_mmu() {
     let root_pa = phys_addr_of!(BOOT_PT_L2);
     // SAFETY: `BOOT_PT_L2` was fully initialized by `create_boot_page_tables`,
     // and switching to it plus flushing the local TLB only affects the current hart.

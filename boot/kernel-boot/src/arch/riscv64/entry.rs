@@ -116,7 +116,7 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
 /// Must only be entered from [`_start_secondary`] after paging is enabled and
 /// the secondary CPU stack has been adjusted into the kernel virtual address
 /// space.
-pub unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) -> ! {
+pub(super) unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) -> ! {
     let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
         panic!(
             "missing logical cpu id mapping for raw cpu id {:#x}",
@@ -133,7 +133,7 @@ pub unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) -> ! {
 /// Must only be entered from [`_start`] after the boot page tables are active,
 /// `kimage_voffset` matches the current image mapping, and `dtb_paddr` still
 /// points to the immutable boot DTB.
-pub unsafe extern "C" fn __primary_switched(
+pub(super) unsafe extern "C" fn __primary_switched(
     raw_cpu_id: RawCpuId,
     dtb_paddr: usize,
     kimage_voffset: usize,

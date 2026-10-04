@@ -149,7 +149,7 @@ impl FileSharedRuntimeInner {
 pub(crate) struct FileSharedRuntime(pub(crate) Arc<FileSharedRuntimeInner>);
 
 impl FileSharedRuntime {
-    pub fn object_id(&self) -> vmobj::VmObjectId {
+    pub(crate) fn object_id(&self) -> vmobj::VmObjectId {
         self.0.object_id()
     }
 

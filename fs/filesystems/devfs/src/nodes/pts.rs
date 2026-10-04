@@ -83,7 +83,7 @@ impl DeviceFileOps for Ptmx {
 }
 
 /// /dev/pts directory containing only slaves with a live master.
-pub struct PtsDir;
+pub(crate) struct PtsDir;
 
 impl SimpleDirOps for PtsDir {
     fn supports_dentry_cache(&self) -> bool {

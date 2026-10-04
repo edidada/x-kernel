@@ -90,7 +90,7 @@ pub(crate) fn init_exception_table() {
 }
 
 #[unittest::mod_test]
-pub mod tests_userspace_common {
+pub(crate) mod tests_userspace_common {
     use unittest::def_test;
 
     use super::{ExceptionKind, ReturnReason};

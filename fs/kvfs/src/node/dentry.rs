@@ -94,7 +94,7 @@ impl DentryFlags {
 
 /// Key type for dentry cache lookups.
 #[derive(Clone, Debug)]
-pub struct DentryKey {
+pub(crate) struct DentryKey {
     parent: Option<Weak<DentryInner>>,
     name: String,
 }

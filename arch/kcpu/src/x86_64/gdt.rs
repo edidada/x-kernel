@@ -17,12 +17,12 @@ use x86_64::{
 #[unsafe(no_mangle)]
 #[used]
 #[unsafe(link_section = ".cpu_slot.template")]
-pub static __KCPU_SLOT_TSS: x86_64::structures::tss::TaskStateSegment =
+pub(super) static __KCPU_SLOT_TSS: x86_64::structures::tss::TaskStateSegment =
     x86_64::structures::tss::TaskStateSegment::new();
 
 /// Typed descriptor over the raw TSS template above.
 #[doc(hidden)]
-pub static TSS: CpuSlot<x86_64::structures::tss::TaskStateSegment> =
+pub(super) static TSS: CpuSlot<x86_64::structures::tss::TaskStateSegment> =
     // SAFETY: the offset function names the raw template above.
     unsafe {
         CpuSlot::from_offset_fn(|| kcpu_slot::__cpu_slot_symbol_offset!(__KCPU_SLOT_TSS))
@@ -34,13 +34,13 @@ cpu_slot_cell! {
 }
 
 /// Kernel code segment for 64-bit mode.
-pub const KCODE64: SegmentSelector = SegmentSelector::new(1, PrivilegeLevel::Ring0);
+pub(super) const KCODE64: SegmentSelector = SegmentSelector::new(1, PrivilegeLevel::Ring0);
 /// Kernel data segment.
-pub const KDATA: SegmentSelector = SegmentSelector::new(2, PrivilegeLevel::Ring0);
+pub(super) const KDATA: SegmentSelector = SegmentSelector::new(2, PrivilegeLevel::Ring0);
 /// User data segment.
-pub const UDATA: SegmentSelector = SegmentSelector::new(3, PrivilegeLevel::Ring3);
+pub(super) const UDATA: SegmentSelector = SegmentSelector::new(3, PrivilegeLevel::Ring3);
 /// User code segment for 64-bit mode.
-pub const UCODE64: SegmentSelector = SegmentSelector::new(4, PrivilegeLevel::Ring3);
+pub(super) const UCODE64: SegmentSelector = SegmentSelector::new(4, PrivilegeLevel::Ring3);
 
 /// Initializes the per-CPU TSS and GDT structures and loads them into the
 /// current CPU.

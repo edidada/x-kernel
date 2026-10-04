@@ -649,6 +649,10 @@ macro_rules! tests {
 #[macro_export]
 macro_rules! tests_name {
     ($suite_name:ident; $module_name:ident; $($test_name:ident),* $(,)?) => {
+        #[allow(
+            unreachable_pub,
+            reason = "the exported macro publishes a suite for caller-selected registration paths; reachability depends on the expansion module"
+        )]
         pub static $suite_name: &[$crate::TestDescriptor] = &[
             $(
                 $crate::TestDescriptor::new(

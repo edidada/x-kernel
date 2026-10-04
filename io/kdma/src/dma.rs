@@ -54,7 +54,7 @@ struct CoherentAllocation {
 }
 
 impl DmaAllocator {
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             bounce_pool: None,
             active_mappings: BTreeMap::new(),
@@ -76,7 +76,7 @@ impl DmaAllocator {
     /// offset the returned CPU address, and only hand the bus address to a
     /// device that is allowed to DMA that range.
     #[track_caller]
-    pub unsafe fn allocate_dma_memory(&mut self, layout: Layout) -> AllocResult<DmaInfo> {
+    pub(crate) unsafe fn allocate_dma_memory(&mut self, layout: Layout) -> AllocResult<DmaInfo> {
         self.alloc_coherent_pages(layout)
     }
 
@@ -139,7 +139,7 @@ impl DmaAllocator {
     /// `dma` must come from a prior successful [`allocate_dma_memory`] call on
     /// this allocator, and `layout` must exactly match that allocation.
     #[track_caller]
-    pub unsafe fn deallocate_dma_memory(&mut self, dma: DmaInfo, layout: Layout) {
+    pub(crate) unsafe fn deallocate_dma_memory(&mut self, dma: DmaInfo, layout: Layout) {
         let num_pages = layout_pages(&layout);
         if !self.trace_coherent_free(dma, num_pages) {
             return;
@@ -161,7 +161,7 @@ impl DmaAllocator {
     /// `buffer` must remain live and exclusively owned by the caller until the
     /// matching [`unmap_dma_buffer`] call. The caller must not let the device
     /// access the returned bus address after unmapping.
-    pub unsafe fn map_dma_buffer(
+    pub(crate) unsafe fn map_dma_buffer(
         &mut self,
         buffer: NonNull<[u8]>,
         direction: DmaDirection,
@@ -216,7 +216,7 @@ impl DmaAllocator {
     /// `dma_addr` must be the still-active mapping returned by
     /// [`map_dma_buffer`] for the same `buffer`, and this function must be
     /// called exactly once for that mapping.
-    pub unsafe fn unmap_dma_buffer(
+    pub(crate) unsafe fn unmap_dma_buffer(
         &mut self,
         dma_addr: DmaBusAddress,
         buffer: NonNull<[u8]>,

@@ -27,12 +27,12 @@ const VIRTIO_MMIO_DT_COMPATIBLE: &str = "virtio,mmio";
 
 /// Unified platform bus backend covering both firmware-described and
 /// compile-time-known devices.
-pub struct PlatformBackend {
+pub(crate) struct PlatformBackend {
     id_alloc: LocalIdAlloc,
 }
 
 impl PlatformBackend {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             id_alloc: LocalIdAlloc::new(),
         }

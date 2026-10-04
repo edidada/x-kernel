@@ -183,7 +183,7 @@ macro_rules! pa_range {
 }
 
 #[unittest::mod_test]
-pub mod tests_range {
+pub(super) mod tests_range {
     use unittest::def_test;
 
     use super::AddrRange;

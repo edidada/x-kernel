@@ -234,7 +234,7 @@ impl SocketAddrExt for NetlinkAddr {
 #[allow(non_camel_case_types)]
 #[repr(C)]
 #[derive(Copy, Clone)]
-pub struct sockaddr_ll {
+pub(crate) struct sockaddr_ll {
     pub sll_family: __kernel_sa_family_t,
     pub sll_protocol: u16,
     pub sll_ifindex: i32,

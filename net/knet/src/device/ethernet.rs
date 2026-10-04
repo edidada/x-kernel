@@ -271,7 +271,7 @@ struct PendingTxPacket {
 }
 
 /// Ethernet device backed by a driver-provided NIC.
-pub struct EthernetDevice {
+pub(crate) struct EthernetDevice {
     name: String,
     flags: u32,
     mtu: usize,
@@ -289,7 +289,7 @@ impl EthernetDevice {
     const NEIGHBOR_TTL: TimeSpan = TimeSpan::from_secs(300);
 
     /// Create a new Ethernet device wrapper.
-    pub fn new(name: String, inner: ClassDevice<NetDeviceImpl>) -> Self {
+    pub(crate) fn new(name: String, inner: ClassDevice<NetDeviceImpl>) -> Self {
         let rx_source = if let Some(rx_source) = register_net_rx_source() {
             let scheduler: Arc<dyn NetRxScheduler> = Arc::new(KnetRxScheduler {
                 source: Arc::downgrade(&rx_source),

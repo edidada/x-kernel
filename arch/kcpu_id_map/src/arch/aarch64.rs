@@ -7,7 +7,7 @@ use crate::cpu_id::{RawCpuId, cpu_map_initialized, load_cpu_id_map_from_fdt};
 const MPIDR_AFFINITY_MASK: usize = 0x00ff_ffff | (0xffusize << 32);
 
 #[inline]
-pub const fn normalize_raw_id(raw_cpu_id: RawCpuId) -> RawCpuId {
+pub(crate) const fn normalize_raw_id(raw_cpu_id: RawCpuId) -> RawCpuId {
     RawCpuId::new(raw_cpu_id.as_usize() & MPIDR_AFFINITY_MASK)
 }
 

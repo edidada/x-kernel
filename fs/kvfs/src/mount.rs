@@ -63,7 +63,7 @@ bitflags::bitflags! {
 /// and sleep. It must therefore happen in sleepable task context, without
 /// holding a non-sleepable lock or a lock required by filesystem shutdown.
 #[derive(Debug)]
-pub struct VfsMount {
+pub(crate) struct VfsMount {
     mnt_root: Dentry,
     mnt_sb: Arc<SuperBlock>,
     mnt_flags: AtomicU32,

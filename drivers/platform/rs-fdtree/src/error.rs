@@ -27,4 +27,4 @@ impl core::fmt::Display for FdtError {
 
 /// Convenience type alias for Result with FdtError
 #[allow(dead_code)]
-pub type Result<T> = core::result::Result<T, FdtError>;
+pub(crate) type Result<T> = core::result::Result<T, FdtError>;

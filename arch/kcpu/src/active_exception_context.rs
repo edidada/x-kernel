@@ -218,7 +218,7 @@ impl Drop for ExceptionContextGuard {
 }
 
 #[unittest::mod_test]
-pub mod tests_active_exception_context {
+pub(crate) mod tests_active_exception_context {
     use unittest::def_test;
 
     use super::*;

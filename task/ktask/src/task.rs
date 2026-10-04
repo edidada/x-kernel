@@ -1032,7 +1032,7 @@ struct TaskStack {
 }
 
 impl TaskStack {
-    pub fn alloc(size: usize) -> Self {
+    pub(crate) fn alloc(size: usize) -> Self {
         let layout = Layout::from_size_align(size, 16).unwrap();
         Self {
             // SAFETY: `layout` is validated above and the returned allocation
@@ -1042,7 +1042,7 @@ impl TaskStack {
         }
     }
 
-    pub fn top(&self) -> VirtAddr {
+    pub(crate) fn top(&self) -> VirtAddr {
         // SAFETY: adding `layout.size()` to the base allocation pointer yields
         // the one-past-the-end stack-top address represented as `VirtAddr`.
         VirtAddr::from(self.ptr.as_ptr().wrapping_add(self.layout.size()) as usize)

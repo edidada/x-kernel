@@ -41,7 +41,7 @@ use crate::{
 /// Complete IPv4 UDP datagrams are delivered from `NetRx` (Linux
 /// `loopback_xmit` → `__netif_rx` → `NET_RX_SOFTIRQ`). TCP, ICMP, IPv6,
 /// fragments, and unmatched UDP stay on the deferred queue for the task poller.
-pub struct LoopbackDevice {
+pub(crate) struct LoopbackDevice {
     name: String,
     flags: u32,
     mtu: usize,
@@ -57,7 +57,7 @@ pub struct LoopbackDevice {
 
 impl LoopbackDevice {
     /// Create a new loopback device.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let _ = super::ethernet::ensure_net_rx_softirq_available();
         Self {
             name: String::from("lo"),

@@ -10,7 +10,7 @@ use klazy::Once;
 use multiboot2::{BootInformation, BootInformationHeader, MemoryAreaType};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BootMemoryKind {
+pub(crate) enum BootMemoryKind {
     Ram,
     Reserved {
         kind: ReservedKind,
@@ -23,13 +23,13 @@ const AP_TRAMPOLINE_MAX_PADDR: usize = 0xA_0000;
 
 static AP_TRAMPOLINE_PAGE: Once<usize> = Once::new();
 
-pub fn init_ap_trampoline_page(boot_info: &BootInfo) {
+pub(crate) fn init_ap_trampoline_page(boot_info: &BootInfo) {
     let paddr = choose_ap_trampoline_page(boot_info)
         .expect("failed to find a low-memory x86 AP trampoline page");
     AP_TRAMPOLINE_PAGE.call_once(|| paddr);
 }
 
-pub fn ap_trampoline_page_paddr() -> usize {
+pub(crate) fn ap_trampoline_page_paddr() -> usize {
     AP_TRAMPOLINE_PAGE
         .get()
         .copied()
@@ -41,7 +41,7 @@ pub fn ap_trampoline_page_paddr() -> usize {
 /// Call only during primary boot, before `memspace::init_memory_management`
 /// replaces the boot stub's identity mapping; the protocol tables are read
 /// through their physical addresses. See [`for_each_memory_region`].
-pub fn for_each_ram_region<F>(boot_info: &BootInfo, mut f: F)
+pub(crate) fn for_each_ram_region<F>(boot_info: &BootInfo, mut f: F)
 where
     F: FnMut(usize, usize),
 {
@@ -59,7 +59,7 @@ where
 /// identity mapping of low memory is active and the page allocator has not
 /// reused those pages. Call this only from the `prepare_boot_memory` boot hook
 /// that `khal::mem::init` runs during primary boot.
-pub fn for_each_memory_region<F>(boot_info: &BootInfo, f: F)
+pub(crate) fn for_each_memory_region<F>(boot_info: &BootInfo, f: F)
 where
     F: FnMut(BootMemoryKind, usize, usize),
 {
