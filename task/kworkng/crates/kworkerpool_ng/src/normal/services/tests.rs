@@ -18,6 +18,10 @@ impl crate::PartitionWorkSource for Empty {
     }
 }
 impl crate::AcquiredExecution for Empty {
+    #[expect(
+        clippy::panic,
+        reason = "test scenario: an empty work source never yields an execution to run"
+    )]
     fn run(self) {
         panic!("empty source cannot execute");
     }

@@ -2615,6 +2615,11 @@ fn long2byte(value: u64, ch: &mut [u8]) -> u32 {
 }
 
 #[cfg(unittest)]
+#[expect(
+    clippy::panic,
+    reason = "test scenario: unittest-only helper that rejects a value-attribute id passed as a \
+              reference attribute"
+)]
 pub(crate) fn tee_init_ref_attribute(
     attr: &mut utee_attribute,
     attribute_id: u32,

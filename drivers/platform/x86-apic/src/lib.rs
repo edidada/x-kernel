@@ -351,6 +351,11 @@ pub fn init_primary(io_apic_paddr: PhysAddr) {
         IS_X2APIC.store(true, Ordering::Relaxed);
     } else {
         info!("Using xAPIC.");
+        #[expect(
+            clippy::panic,
+            reason = "Fatal boot: the xAPIC register page cannot be mapped; interrupt-controller \
+                      initialization has no error return or recovery"
+        )]
         // SAFETY: on the xAPIC path, `xapic_base` reads the architectural LAPIC
         // base address, which is then mapped before the builder uses it.
         let base_vaddr = iomap_device(pa!(unsafe { xapic_base() } as usize), 0x1000, "lapic")
@@ -366,6 +371,11 @@ pub fn init_primary(io_apic_paddr: PhysAddr) {
     }
     install_local_apic(lapic);
 
+    #[expect(
+        clippy::panic,
+        reason = "Fatal boot: the IOAPIC register page cannot be mapped; interrupt-controller \
+                  initialization has no error return or recovery"
+    )]
     let io_apic_base = iomap_device(io_apic_paddr, 0x1000, "ioapic")
         .unwrap_or_else(|err| panic!("failed to iomap IOAPIC: {err:?}"));
     // SAFETY: `io_apic_base` is the MMIO mapping for the platform IO-APIC and is

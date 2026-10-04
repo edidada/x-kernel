@@ -114,6 +114,11 @@ impl<T> Once<T> {
                         // SAFETY: another thread published READY.
                         return Ok(unsafe { &*(*self.storage.get()).as_ptr() });
                     }
+                    #[expect(
+                        clippy::panic,
+                        reason = "A previous initializer panicked and left no value; like std's \
+                                  poisoned Once and LazyLock, the value can never be produced"
+                    )]
                     POISONED => {
                         panic!("Once poisoned by a previous panic during initialization")
                     }

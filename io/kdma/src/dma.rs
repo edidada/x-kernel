@@ -225,6 +225,11 @@ impl DmaAllocator {
         use core::sync::atomic::{Ordering, fence};
 
         let len = buffer.len();
+        #[expect(
+            clippy::panic,
+            reason = "The Safety contract requires dma_addr to be the still-active mapping from \
+                      map_dma_buffer, unmapped exactly once"
+        )]
         let mapping = self
             .active_mappings
             .remove(&dma_addr.as_u64())

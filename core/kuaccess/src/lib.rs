@@ -32,6 +32,12 @@ use osvm::{MemError, MemResult, VirtMemIo};
 /// kernel.
 pub fn access_user_memory<R>(f: impl FnOnce() -> R) -> R {
     let curr = current();
+    #[expect(
+        clippy::panic,
+        reason = "Fault-resolving user atomics serve futex and robust-list operations on the user \
+                  thread that owns the address space; a kernel task has no user address space to \
+                  access"
+    )]
     let Some(thread) = curr.try_as_thread() else {
         panic!("access_user_memory called outside of thread context");
     };

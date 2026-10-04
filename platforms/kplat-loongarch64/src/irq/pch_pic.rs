@@ -86,6 +86,11 @@ impl PchPicRegs for MmioPchPic {
 }
 
 pub(super) fn init() {
+    #[expect(
+        clippy::panic,
+        reason = "Fatal boot: the PCH-PIC register aperture cannot be mapped; \
+                  interrupt-controller initialization has no error return or recovery"
+    )]
     let base = memspace::iomap_device(PhysAddr::from_usize(PCH_PIC_PADDR), PCH_PIC_SIZE, "pch-pic")
         .unwrap_or_else(|err| panic!("failed to iomap pch-pic: {err:?}"));
     PCH_PIC_BASE.init_once(base);

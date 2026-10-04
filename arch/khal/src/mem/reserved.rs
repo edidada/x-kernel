@@ -101,6 +101,12 @@ fn exclusion_ranges(
     exclusions
 }
 
+#[expect(
+    clippy::panic,
+    reason = "Fatal boot: firmware reserved regions overlap with different kind, source or name, \
+              so the reserved map cannot be normalized; boot memory initialization has no error \
+              return or recovery"
+)]
 fn push_reserved_region<const N: usize>(
     regions: &mut Vec<ReservedRegion, N>,
     region: ReservedRegion,

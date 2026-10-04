@@ -79,6 +79,11 @@ impl GicConfig {
     }
 }
 
+#[expect(
+    clippy::panic,
+    reason = "Fatal boot: a firmware-described GIC register region cannot be mapped; \
+              interrupt-controller initialization has no error return or recovery"
+)]
 fn map_mmio_region(region: GicMmioRegion, name: &'static str) -> VirtAddr {
     iomap_device(region.paddr, region.size, name)
         .unwrap_or_else(|err| panic!("failed to map {name}: {err:?}"))

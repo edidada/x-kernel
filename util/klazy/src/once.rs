@@ -265,6 +265,11 @@ impl<T> Once<T> {
                     // Successfully claimed initialization responsibility
                     // Implementation continues below
                 }
+                #[expect(
+                    clippy::panic,
+                    reason = "A previous initializer panicked and left no value; like std's \
+                              poisoned Once and LazyLock, the value can never be produced"
+                )]
                 Err(Status::Failed) => {
                     panic!("OnceCell has failed during a previous initialization attempt")
                 }
@@ -376,6 +381,11 @@ impl<T> Once<T> {
                     // initialized value has been published to `storage`.
                     return Some(unsafe { self.get_value_unchecked() });
                 }
+                #[expect(
+                    clippy::panic,
+                    reason = "A previous initializer panicked and left no value; like std's \
+                              poisoned Once and LazyLock, the value can never be produced"
+                )]
                 Status::Failed => {
                     panic!("OnceCell was contaminated by a previous panic")
                 }

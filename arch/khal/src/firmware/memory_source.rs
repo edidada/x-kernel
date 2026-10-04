@@ -44,6 +44,11 @@ pub(super) fn init_memory_description(boot_info: &BootInfo) {
         MemoryDescriptionRoot::X86BootProtocol => {
             unreachable!("non-x86 target does not use x86 boot protocol memory source")
         }
+        #[expect(
+            clippy::panic,
+            reason = "Fatal boot: the boot handoff selected no memory description root, so RAM \
+                      cannot be discovered; memory initialization has no error return or recovery"
+        )]
         MemoryDescriptionRoot::Unknown => {
             panic!("boot handoff did not choose a memory description root")
         }

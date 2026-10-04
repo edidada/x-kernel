@@ -12,6 +12,12 @@
         reason = "x86_64 TaskContext::new() reads the live CR3, so it must not be Default"
     )
 )]
+#![allow(
+    clippy::panic,
+    reason = "case (b): 15 legacy trap-path panics (unhandled exceptions, kernel faults, invalid \
+              page-fault codes, LoongArch unaligned emulation) across four architectures need a \
+              recovery-policy review rather than per-site judgement; new code remains reviewed"
+)]
 
 #[macro_use]
 extern crate log;

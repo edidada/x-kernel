@@ -17,6 +17,10 @@ where
     A: MemoryAddr,
 {
     #[inline]
+    #[expect(
+        clippy::panic,
+        reason = "Callers pass ordered bounds as for a Range; fallible construction uses try_new"
+    )]
     pub fn new(start: A, end: A) -> Self {
         if start <= end {
             Self { start, end }
@@ -49,6 +53,11 @@ where
     pub fn from_start_size(start: A, size: usize) -> Self {
         match start.checked_add(size) {
             Some(end) => Self { start, end },
+            #[expect(
+                clippy::panic,
+                reason = "A valid memory range fits in the address space; an overflowing end is a \
+                          caller bug like an integer overflow"
+            )]
             None => panic!(
                 "size too large for `AddrRange`: {} + {}",
                 start.into(),

@@ -77,6 +77,12 @@ fn init_nmi_watchdog() {
     // delivery works even without the hardlockup watchdog.
     if !khal::nmi::enable_periodic_nmi(
         crate::lockup_detection::DEFAULT_HARDLOCKUP_THRESHOLD.as_nanos() as u64,
+        #[expect(
+            clippy::panic,
+            reason = "The hard-lockup watchdog's contract is to stop the system once the cause \
+                      CPU has dumped all CPUs for a failed watchdog-task check; there is no \
+                      recovery path"
+        )]
         || {
             // Every NMI checks whether watchdog tasks on THIS CPU are healthy.
             // If a failure is detected, THIS CPU becomes the cause CPU and

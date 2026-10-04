@@ -356,6 +356,12 @@ unsafe fn next_l3_table(
 /// layout. The target slot must not contain a lower-level table.
 /// Boot symbol mappings and `BOOT_KIMAGE_VOFFSET` must already describe
 /// the loaded image so pool physical addresses can be recovered.
+#[expect(
+    clippy::panic,
+    reason = "Boot callers map each VA window at one fixed VA-to-PA offset (linear map at \
+              PAGE_OFFSET, kernel image at its image offset) and the windows do not overlap, so a \
+              present entry for va already maps pa"
+)]
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_2m_page(va: usize, pa: usize, flags: PagingFlags) {
     // SAFETY: the derived root index selects the boot root slot for `va`.
@@ -383,6 +389,12 @@ unsafe fn map_2m_page(va: usize, pa: usize, flags: PagingFlags) {
 /// and permissions must be valid for the boot layout.
 /// Boot symbol mappings and `BOOT_KIMAGE_VOFFSET` must already describe
 /// the loaded image so pool physical addresses can be recovered.
+#[expect(
+    clippy::panic,
+    reason = "Boot callers map each VA window at one fixed VA-to-PA offset (linear map at \
+              PAGE_OFFSET, kernel image at its image offset) and the windows do not overlap, so a \
+              present entry for va already maps pa"
+)]
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_4k_page(va: usize, pa: usize, flags: PagingFlags) {
     // SAFETY: the derived indices select the boot page-table path for `va`.
@@ -575,6 +587,12 @@ unsafe fn map_linear_ram_from_dtb(dtb_paddr: usize) {
         return;
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "Fatal boot: the firmware DTB pointer does not reference a readable device tree, \
+                  so boot RAM cannot be mapped; early page-table setup has no error return or \
+                  recovery"
+    )]
     // SAFETY: `dtb_paddr` is the firmware-provided DTB pointer and this helper
     // only reads its memory-region description.
     let Ok((regions, count)) = (unsafe {
@@ -633,6 +651,12 @@ unsafe fn map_dtb_linear(dtb_paddr: usize) {
 /// other observer may access the cached firmware globals during updates.
 /// Boot symbol mappings and `BOOT_KIMAGE_VOFFSET` must already describe
 /// the loaded image so pool physical addresses can be recovered.
+#[expect(
+    clippy::panic,
+    reason = "Fatal boot: firmware provides neither a Linux EFI boot memory map nor a device-tree \
+              configuration table, so RAM cannot be linearly mapped; early page-table setup has \
+              no error return or recovery"
+)]
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_linear_firmware_memory(systemtable_paddr: usize) {
     // SAFETY: `systemtable_paddr` comes from firmware handoff and points to the

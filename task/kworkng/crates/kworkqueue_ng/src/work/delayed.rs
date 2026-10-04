@@ -384,6 +384,12 @@ impl<H: Fn() + Send + Sync> DelayedWork<H> {
             Ok(_) | Err(SubmitError::Disabled | SubmitError::Closed) => {}
             // Accepted work cannot silently disappear on an impossible accounting
             // overflow. Other errors are not produced by the transfer transaction.
+            #[expect(
+                clippy::panic,
+                reason = "The transfer transaction fails only as Disabled or Closed; any other \
+                          error is an impossible accounting overflow, and accepted work must not \
+                          silently disappear"
+            )]
             Err(error) => panic!("delayed transfer invariant failed: {error:?}"),
         }
     }

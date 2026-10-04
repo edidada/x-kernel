@@ -45,6 +45,13 @@ impl IrqOp for XKernelResourceProvider {
                             irq.number
                         );
                     }
+                    #[expect(
+                        clippy::panic,
+                        reason = "TODO(cg): IrqOp::release_irq returns (), so a kirq free error \
+                                  such as an invalid calling context cannot reach the driver; \
+                                  make release_irq fallible and propagate the error through \
+                                  device teardown"
+                    )]
                     Err(err) => {
                         panic!(
                             "failed to release IRQ {} regular action: {err:?}",
@@ -64,6 +71,13 @@ impl IrqOp for XKernelResourceProvider {
                             id
                         );
                     }
+                    #[expect(
+                        clippy::panic,
+                        reason = "TODO(cg): IrqOp::release_irq returns (), so a kirq free error \
+                                  such as an invalid calling context cannot reach the driver; \
+                                  make release_irq fallible and propagate the error through \
+                                  device teardown"
+                    )]
                     Err(err) => {
                         panic!(
                             "failed to release IRQ {} action token {}: {err:?}",

@@ -287,6 +287,12 @@ pub(super) fn extend_boot_linear_ram_from_dtb(dtb_paddr: usize) {
         return;
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "Fatal boot: the firmware DTB pointer does not reference a readable device tree, \
+                  so boot RAM cannot be mapped; early page-table setup has no error return or \
+                  recovery"
+    )]
     // SAFETY: `dtb_paddr` comes from boot firmware and points to the immutable
     // device-tree blob used for early RAM discovery.
     let Ok((regions, count)) = (unsafe {

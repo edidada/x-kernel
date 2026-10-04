@@ -13,7 +13,7 @@
 
 use core::alloc::Layout;
 
-use crate::{AllocError, buddy_alloc::BuddyAllocator};
+use crate::{AllocError, AllocResult, buddy_alloc::BuddyAllocator};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -173,6 +173,12 @@ impl SlabHeap {
             slab_2048: Slab::new(),
             buddy: BuddyAllocator::new(),
         };
+        #[expect(
+            clippy::panic,
+            reason = "TODO(cg): BaseAllocator::init_region returns (), so a misaligned or \
+                      undersized initial region cannot be reported; make init_region return \
+                      AllocResult like add_region and propagate the error"
+        )]
         heap.buddy.init_region(start, size).unwrap_or_else(|e| {
             panic!(
                 "SlabHeap::new init_region({:#x}, {:#x}) failed: {:?}",
@@ -188,13 +194,14 @@ impl SlabHeap {
     ///
     /// The caller must ensure the memory range is valid and does not
     /// overlap with existing managed memory.
-    pub unsafe fn add_memory(&mut self, start: usize, size: usize) {
-        self.buddy.add_region(start, size).unwrap_or_else(|e| {
-            panic!(
-                "SlabHeap::add_memory add_region({:#x}, {:#x}) failed: {:?}",
-                start, size, e
-            )
-        });
+    ///
+    /// # Errors
+    ///
+    /// Returns the backing buddy allocator's registration error when the
+    /// range is misaligned, too small, overflows, overlaps managed memory, or
+    /// exceeds the region table.
+    pub unsafe fn add_memory(&mut self, start: usize, size: usize) -> AllocResult {
+        self.buddy.add_region(start, size)
     }
 
     // ------------------------------------------------------------------

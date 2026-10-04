@@ -154,6 +154,12 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
 /// enabled the boot mappings and adjusted its stack into the kernel virtual
 /// address space.
 pub(super) unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) -> ! {
+    #[expect(
+        clippy::panic,
+        reason = "Secondary CPUs are started only through boot_ap for logical ids from the \
+                  present-CPU map, using the raw id recorded there, so an entering CPU has a \
+                  mapping"
+    )]
     let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
         panic!(
             "missing logical cpu id mapping for raw cpu id {:#x}",
@@ -215,6 +221,12 @@ pub(super) unsafe extern "C" fn __primary_switched(
     // boot globals that remain valid until kernel handoff.
     let (dtb_paddr, rsdp_paddr) = unsafe { super::mmu::boot_firmware_tables() };
     kcpu_id_map::init_boot_cpu_id_map(dtb_paddr);
+    #[expect(
+        clippy::panic,
+        reason = "Fatal boot: the firmware CPU description lacks the boot CPU's raw id, so no \
+                  logical CPU id exists for per-CPU setup; the boot entry has no error return or \
+                  recovery"
+    )]
     let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
         panic!(
             "missing logical cpu id mapping for raw cpu id {:#x}",
@@ -230,6 +242,11 @@ pub(super) unsafe extern "C" fn __primary_switched(
     } else {
         kaddr_layout::p2v(uefi_memmap_paddr)
     };
+    #[expect(
+        clippy::panic,
+        reason = "Fatal boot: the UEFI handoff provides neither an EFI memory map nor a DTB, so \
+                  RAM cannot be described; the boot entry has no error return or recovery"
+    )]
     let memory_root = if uefi_memmap_paddr != 0 {
         MemoryDescriptionRoot::UefiMemmap
     } else if dtb_paddr != 0 {

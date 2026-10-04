@@ -191,6 +191,11 @@ impl DeviceNodeLifecycle {
             2 => DeviceNodeState::RemovePending,
             3 => DeviceNodeState::Removing,
             4 => DeviceNodeState::Removed,
+            #[expect(
+                clippy::panic,
+                reason = "The lifecycle byte is written only from DeviceNodeState discriminants, \
+                          so every stored value decodes to a state"
+            )]
             state => panic!("invalid device-node lifecycle state: {state}"),
         }
     }
@@ -239,6 +244,12 @@ impl DeviceNodeLifecycle {
                 DeviceNodeState::Removing,
                 true,
             ),
+            #[expect(
+                clippy::panic,
+                reason = "The registry serializes transitions and finish_publish runs once for a \
+                          node it created in Publishing; removal moves Publishing only to \
+                          RemovePending"
+            )]
             state => panic!("cannot finish publishing a node in state {state:?}"),
         };
         self.state

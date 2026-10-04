@@ -373,6 +373,11 @@ impl ProcessTimerManager {
     fn arm_itimer_real(timer: &mut ITimer, owner_pid: Pid) {
         let deadline = timer.deadline().map(|deadline| match deadline {
             TimerInstant::Monotonic(deadline) => deadline,
+            #[expect(
+                clippy::panic,
+                reason = "ITIMER_REAL timers are created on the monotonic clock, so their \
+                          deadlines are monotonic instants"
+            )]
             _ => panic!("ITIMER_REAL deadline must use the monotonic clock"),
         });
         timer.set_alarm(deadline, Some(owner_pid));

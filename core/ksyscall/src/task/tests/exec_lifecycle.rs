@@ -58,6 +58,11 @@ fn assert_retirement_pending(mut pending: SignalSet) {
 }
 
 impl Retirement {
+    #[expect(
+        clippy::panic,
+        reason = "test scenario: a retired MM gaining a user is the regression this exec \
+                  lifecycle check reports, after dropping that user outside the MM lock"
+    )]
     fn block_release_and_queue_signals(&self, child: &ktask::KtaskRef, sentinel: usize) {
         bounded_wait(|| self.is_ready.load(Ordering::Acquire));
         let thread = child.as_thread();
