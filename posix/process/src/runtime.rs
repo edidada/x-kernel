@@ -63,7 +63,8 @@ pub(crate) fn run_user_thread_loop(
     let thr = current_user_thread();
 
     if let Some(tid) = (set_child_tid as *mut Pid).check_non_null() {
-        tid.write_vm(thr.tid()).ok();
+        // The child is already published; a failed TID writeback must not prevent it running.
+        let _ = tid.write_vm(thr.tid());
     }
 
     info!("Enter user space: ip={:#x}, sp={:#x}", uctx.ip(), uctx.sp());

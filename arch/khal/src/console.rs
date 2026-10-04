@@ -76,7 +76,8 @@ pub fn _sys_log(fmt: Arguments) {
 
 #[doc(hidden)]
 pub fn _sys_log_atomic(fmt: Arguments) {
-    AtomicLogger.write_fmt(fmt).ok();
+    // Emergency output is best effort; reporting a formatting error here could recurse.
+    let _ = AtomicLogger.write_fmt(fmt);
 }
 
 #[macro_export]

@@ -60,7 +60,8 @@ pub(crate) fn file_metadata(
     use fatfs::Seek;
     let pos = file.seek(fatfs::SeekFrom::Current(0)).unwrap_or(0);
     let size = file.seek(fatfs::SeekFrom::End(0)).unwrap_or(0);
-    file.seek(fatfs::SeekFrom::Start(pos)).ok();
+    // This best-effort size query keeps its result even if restoring the cursor fails.
+    let _ = file.seek(fatfs::SeekFrom::Start(pos));
     Metadata {
         inode,
         device: 0,
