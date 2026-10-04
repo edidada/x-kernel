@@ -7,7 +7,7 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use kernel_elf_parser::ELFHeaders;
+use kernel_elf_parser::ElfHeaders;
 use kerrno::{KError, KResult};
 use memaddr::PAGE_SIZE_4K;
 use xmas_elf::{
@@ -113,7 +113,7 @@ impl ExecLayoutPlan {
 }
 
 impl ValidatedElfImage {
-    pub(super) fn new(headers: &ELFHeaders<'_>, file_size: u64) -> KResult<Self> {
+    pub(super) fn new(headers: &ElfHeaders<'_>, file_size: u64) -> KResult<Self> {
         validate_identification(headers)?;
         let elf_type = validate_header_type(headers)?;
         let program_header_range = program_header_range(headers)?;
@@ -277,7 +277,7 @@ impl ValidatedElfImage {
     }
 }
 
-fn validate_identification(headers: &ELFHeaders<'_>) -> KResult {
+fn validate_identification(headers: &ElfHeaders<'_>) -> KResult {
     if headers.header.pt1.class() != Class::SixtyFour
         || headers.header.pt1.data() != Data::LittleEndian
         || headers.header.pt1.version() != Version::Current
@@ -289,7 +289,7 @@ fn validate_identification(headers: &ELFHeaders<'_>) -> KResult {
     Ok(())
 }
 
-fn validate_header_type(headers: &ELFHeaders<'_>) -> KResult<ElfType> {
+fn validate_header_type(headers: &ElfHeaders<'_>) -> KResult<ElfType> {
     match headers.header.pt2.type_().as_type() {
         ElfHeaderType::Executable => Ok(ElfType::Executable),
         ElfHeaderType::SharedObject => Ok(ElfType::PositionIndependent),
@@ -310,7 +310,7 @@ fn machine_matches_current_arch(machine: Machine) -> bool {
     false
 }
 
-fn program_header_range(headers: &ELFHeaders<'_>) -> KResult<Range<u64>> {
+fn program_header_range(headers: &ElfHeaders<'_>) -> KResult<Range<u64>> {
     let start = headers.header.pt2.ph_offset();
     let size = u64::from(headers.header.pt2.ph_entry_size())
         .checked_mul(u64::from(headers.header.pt2.ph_count()))
@@ -320,7 +320,7 @@ fn program_header_range(headers: &ELFHeaders<'_>) -> KResult<Range<u64>> {
 }
 
 fn program_header_address(
-    headers: &ELFHeaders<'_>,
+    headers: &ElfHeaders<'_>,
     table_range: Range<u64>,
     segments: &[ValidatedLoadSegment],
 ) -> KResult<usize> {

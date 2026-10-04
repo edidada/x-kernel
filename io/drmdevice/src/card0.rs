@@ -159,8 +159,8 @@ impl DrmIoctl for DrmAuthMagic {
     }
 }
 
-impl DrmIoctl for DrmModeDirtyFB {
-    const CMD: u32 = iowr::<DrmModeDirtyFB>(DRM_TYPE, 0xB1);
+impl DrmIoctl for DrmModeDirtyFb {
+    const CMD: u32 = iowr::<DrmModeDirtyFb>(DRM_TYPE, 0xB1);
 
     fn handle(dev: &DrmCard, dirty: &mut Self) -> VfsResult<usize> {
         // Linux's drm_mode_dirtyfb_ioctl() rejects an unknown fb_id with
@@ -495,9 +495,9 @@ impl DeviceFileOps for DrmCard {
                 let user_ptr = UserPtr::<DrmAuthMagic>::from(arg);
                 <DrmAuthMagic as DrmIoctl>::handle_raw(self, user_ptr)
             }
-            <DrmModeDirtyFB as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeDirtyFB>::from(arg);
-                <DrmModeDirtyFB as DrmIoctl>::handle_raw(self, user_ptr)
+            <DrmModeDirtyFb as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeDirtyFb>::from(arg);
+                <DrmModeDirtyFb as DrmIoctl>::handle_raw(self, user_ptr)
             }
             <DrmPrimeHandle as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmPrimeHandle>::from(arg);

@@ -10,7 +10,16 @@ pub use tee_api_types::*;
 pub use utee_types::*;
 
 mod tee_api_defines;
+#[expect(
+    clippy::upper_case_acronyms,
+    reason = "raw GlobalPlatform TEE ABI bindings retain the external C type and enum names"
+)]
 mod tee_api_types;
+#[expect(
+    clippy::upper_case_acronyms,
+    reason = "raw OP-TEE syscall ABI bindings retain the external operation and time-category \
+              names"
+)]
 mod utee_types;
 
 /// Libc compatibility types

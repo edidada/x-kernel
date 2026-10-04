@@ -447,6 +447,10 @@ struct ResourceCreate2D {
 #[repr(u32)]
 #[derive(Debug, Immutable, IntoBytes, KnownLayout)]
 enum Format {
+    #[expect(
+        clippy::upper_case_acronyms,
+        reason = "pixel format name mirrors the virtio GPU hardware format B8G8R8A8_UNORM"
+    )]
     B8G8R8A8UNORM = 1,
 }
 

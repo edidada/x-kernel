@@ -48,7 +48,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwn
 
 #[allow(dead_code)]
 #[derive(Serialize, Deserialize)]
-pub enum TARequest {
+pub enum TaRequest {
     Register { uuid: String },
 }
 
@@ -99,14 +99,14 @@ impl Parameters {
 
 #[derive(Serialize, Deserialize)]
 pub struct Parameter {
-    pub raw: TEEParam,
+    pub raw: TeeParam,
     pub param_type: ParamType,
 }
 
 impl Parameter {
     pub fn default() -> Self {
         Parameter {
-            raw: TEEParam {
+            raw: TeeParam {
                 data: Vec::new(),
                 value: Value { a: 0, b: 0 },
             },
@@ -116,7 +116,7 @@ impl Parameter {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct TEEParam {
+pub struct TeeParam {
     pub data: Vec<u8>,
     pub value: Value,
 }
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn param_type_serializes_gp_values() {
         let param = Parameter {
-            raw: TEEParam {
+            raw: TeeParam {
                 data: Vec::new(),
                 value: Value { a: 0, b: 0 },
             },

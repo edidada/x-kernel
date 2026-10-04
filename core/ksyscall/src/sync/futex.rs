@@ -132,7 +132,7 @@ fn parse_timeout(
 /// wait. `SA_RESTART` does not restart a timed futex wait. When no handler is
 /// delivered, the user-return path rewrites the syscall number to
 /// `restart_syscall` and leaves the block armed. Default `SIGCONT` is the
-/// third case: it is dequeued as `SignalOSAction::Continue`, not as a
+/// third case: it is dequeued as `SignalOsAction::Continue`, not as a
 /// handler, so it neither converts this code to `EINTR` nor suppresses the
 /// rewrite to `restart_syscall`.
 pub fn sys_futex(

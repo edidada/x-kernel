@@ -244,8 +244,8 @@ impl GuestMem for Stage2 {
         let end = (gpa + size + 0xFFF) & !0xFFF;
 
         let attr = match perm {
-            GuestPerm::RamRW => LPAE_AF | LPAE_SH_IS | LPAE_MATTR_NORM | LPAE_S2AP_RW,
-            GuestPerm::DeviceRW => LPAE_AF | LPAE_MATTR_DEV | LPAE_S2AP_RW | LPAE_XN,
+            GuestPerm::RamRw => LPAE_AF | LPAE_SH_IS | LPAE_MATTR_NORM | LPAE_S2AP_RW,
+            GuestPerm::DeviceRw => LPAE_AF | LPAE_MATTR_DEV | LPAE_S2AP_RW | LPAE_XN,
         };
 
         let mut offset: u64 = 0;

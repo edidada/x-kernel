@@ -5,7 +5,7 @@
 use alloc::vec::Vec;
 
 use crate::{
-    GuestPhysAddr, VirtioDeviceID,
+    GuestPhysAddr, VirtioDeviceId,
     constants::*,
     error::{VirtioError, VirtioResult},
     memory::GuestMemory,
@@ -431,12 +431,12 @@ impl DescriptorTable {
     ) -> VirtioResult<Vec<(GuestPhysAddr, usize, bool)>> {
         let descriptors = self.follow_chain(head_index, memory)?;
 
-        if descriptors.len() < 2 && device_type == VirtioDeviceID::Block {
+        if descriptors.len() < 2 && device_type == VirtioDeviceId::Block {
             return Ok(Vec::new());
         }
 
         let mut buffers = Vec::new();
-        if device_type == VirtioDeviceID::Block {
+        if device_type == VirtioDeviceId::Block {
             for desc in &descriptors[1..descriptors.len() - 1] {
                 buffers.push((desc.base_addr, desc.len as usize, desc.is_write()));
             }

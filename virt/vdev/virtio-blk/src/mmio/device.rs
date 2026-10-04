@@ -8,7 +8,7 @@ use kspin::SpinNoIrq;
 use log::{trace, warn};
 use vdev_virtio::{
     AccessWidth, AddressSpaceMemory, GuestPhysAddr, MmioReadOutcome, MmioWriteAction,
-    VirtioDeviceID, VirtioError, VirtioMmioState, VirtioQueue, VirtioResult,
+    VirtioDeviceId, VirtioError, VirtioMmioState, VirtioQueue, VirtioResult,
     memory::GuestMemoryAccessor, mmio::transport, queue::VirtQueueDesc,
 };
 
@@ -64,7 +64,7 @@ impl<B: BlockBackend, T: GuestMemoryAccessor + Clone> VirtioMmioBlockDevice<B, T
         let state = VirtioMmioState::new(
             base_ipa,
             length,
-            VirtioDeviceID::Block.to_device_id(),
+            VirtioDeviceId::Block.to_device_id(),
             VIRTIO_VENDOR_ID,
             VIRTIO_BLK_FEATURES,
             queues,

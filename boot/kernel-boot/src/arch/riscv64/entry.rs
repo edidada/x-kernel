@@ -20,7 +20,7 @@ use super::mmu;
 static mut BOOT_STACK: [u8; BOOT_STACK_SIZE] = [0; BOOT_STACK_SIZE];
 
 /// Unified boot info passed from the RISC-V boot entry into the runtime.
-static mut RISCV_BOOT_INFO: BootInfo = BootInfo::new(BootProtocol::OpenSBI);
+static mut RISCV_BOOT_INFO: BootInfo = BootInfo::new(BootProtocol::OpenSbi);
 
 #[unsafe(link_section = ".text.boot")]
 fn enable_fp_simd() {
@@ -169,7 +169,7 @@ pub unsafe extern "C" fn __primary_switched(
     // SAFETY: primary boot CPU performs one-time initialization of the global
     // boot-info structure after BSS clear and before handing control to the kernel.
     unsafe {
-        RISCV_BOOT_INFO = BootInfo::new(BootProtocol::OpenSBI)
+        RISCV_BOOT_INFO = BootInfo::new(BootProtocol::OpenSbi)
             .with_memory_description_root(MemoryDescriptionRoot::DeviceTree)
             .with_hardware_description_root(HardwareDescriptionRoot::DeviceTree)
             .with_protocol_info_addr(dtb_paddr)

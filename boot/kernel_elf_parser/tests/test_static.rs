@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kernel_elf_parser::{AuxType, ELFHeadersBuilder, ELFParser};
+use kernel_elf_parser::{AuxType, ElfHeadersBuilder, ElfParser};
 
 #[test]
 fn test_elf_parser() {
@@ -20,14 +20,14 @@ fn test_elf_parser() {
     }
 
     let builder =
-        ELFHeadersBuilder::new(aligned_elf_bytes.as_slice()).expect("Failed to parse ELF header");
+        ElfHeadersBuilder::new(aligned_elf_bytes.as_slice()).expect("Failed to parse ELF header");
     let range = builder.ph_range().expect("Invalid program-header range");
     let headers = builder
         .build(&aligned_elf_bytes[range.start as usize..range.end as usize])
         .expect("Failed to parse program headers");
 
     let interp_base = 0x1000;
-    let elf_parser = kernel_elf_parser::ELFParser::new(&headers, interp_base).unwrap();
+    let elf_parser = kernel_elf_parser::ElfParser::new(&headers, interp_base).unwrap();
     let base_addr = elf_parser.base();
     assert_eq!(base_addr, 0);
 
@@ -49,7 +49,7 @@ fn test_elf_parser() {
     test_ustack(&elf_parser);
 }
 
-fn test_ustack(elf_parser: &ELFParser) {
+fn test_ustack(elf_parser: &ElfParser) {
     let auxv = elf_parser.aux_vector(0x1000, None).collect::<Vec<_>>();
     // let phent = auxv.get(&AT_PHENT).unwrap();
     // assert_eq!(*phent, 56);

@@ -113,7 +113,7 @@ metadata, not user file content. No other user data is processed or logged.
 - Notification scope does not imply readable data: pending queues remain private
   to a process/thread, and unselected or repeated signals may request rechecks.
 - `SIGSTKFLT` default action follows Linux (terminate) though it is unused.
-- `SignalOSAction::Stop`/`Continue` are reported, but job-control stop state
+- `SignalOsAction::Stop`/`Continue` are reported, but job-control stop state
   is approximated by the posix runtime (documented there: stop currently
   exits with code 1).
 - FPU/vector state is not carried in the ABI `fpregs` (x86_64 zeroes

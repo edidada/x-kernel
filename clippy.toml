@@ -15,5 +15,7 @@ disallowed-methods = [
     { path = "core::mem::zeroed", reason = "Prefer safe construction; exceptions must prove that the concrete type contract admits the all-zero bit pattern." },
 ]
 
+upper-case-acronyms-aggressive = true
+
 # Boolean parameter limit for clippy::fn_params_excessive_bools (the clippy default).
 max-fn-params-bools = 3
