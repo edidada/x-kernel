@@ -8,3 +8,6 @@
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
+
+# Boolean parameter limit for clippy::fn_params_excessive_bools (the clippy default).
+max-fn-params-bools = 3

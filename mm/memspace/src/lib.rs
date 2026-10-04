@@ -43,8 +43,9 @@ pub use self::{
     },
     lifetime::MmObserver,
     vma::{
-        FileMappingInfo, ForkCloneTarget, MsyncPolicy, MsyncRuntimeResult, VmArea, VmAreaSet,
-        VmBackingInfo, VmBackingKind, VmInheritance, VmMayPerm, VmPerm, VmRuntimeOps, VmRuntimeRef,
+        FileMappingInfo, ForkCloneTarget, MsyncPolicy, MsyncRuntimeResult, MsyncWriteback, VmArea,
+        VmAreaSet, VmBackingInfo, VmBackingKind, VmInheritance, VmMayPerm, VmPerm, VmRuntimeOps,
+        VmRuntimeRef,
     },
 };
 

@@ -9,7 +9,7 @@ use kprocess::current_user_process;
 use kvfs::{FMode, VfsFile};
 use linux_raw_sys::general::*;
 use memaddr::{MemoryAddr, VirtAddr, align_up_4k};
-use memspace::{AddrPolicy, MsyncPolicy, VmRuntimeRef};
+use memspace::{AddrPolicy, MsyncPolicy, MsyncWriteback, VmRuntimeRef};
 
 bitflags::bitflags! {
     /// `PROT_*` flags for use with [`sys_mmap`].
@@ -449,12 +449,18 @@ impl MsyncRequest {
     }
 
     pub(crate) fn policy(&self) -> KResult<MsyncPolicy> {
-        MsyncPolicy::try_new(
+        let writeback = match (
             self.flags.contains(MsyncFlags::SYNC),
             self.flags.contains(MsyncFlags::ASYNC),
-            self.flags.contains(MsyncFlags::INVALIDATE),
-            true,
-        )
+        ) {
+            (true, true) => return Err(KError::InvalidInput),
+            (true, false) => MsyncWriteback::Sync,
+            (false, true) => MsyncWriteback::Async,
+            (false, false) => MsyncWriteback::Unspecified,
+        };
+        Ok(MsyncPolicy::new(writeback)
+            .with_invalidate(self.flags.contains(MsyncFlags::INVALIDATE))
+            .with_data_only(true))
     }
 }
 
