@@ -26,6 +26,11 @@ impl BootHandler {
             // The LS7A RTC sits at the static `RTC_PADDR` aperture; map it and
             // sample a year-consistent wall clock via the shared `rtc_driver`
             // LS7A backend, then seed the realtime clock.
+            #[expect(
+                clippy::panic,
+                reason = "Fatal boot: the LS7A RTC aperture cannot be mapped; early driver \
+                          initialization has no error return or recovery"
+            )]
             let vaddr =
                 memspace::iomap_device(PhysAddr::from_usize(RTC_PADDR), LS7A_RTC_SIZE, "ls7a-rtc")
                     .unwrap_or_else(|err| panic!("failed to iomap ls7a rtc: {err:?}"));

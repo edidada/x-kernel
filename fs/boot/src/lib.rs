@@ -185,6 +185,11 @@ impl BootVfs {
         Self { namespace, root }
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "Fatal boot: /dev/log cannot be bound for a reason other than missing support; \
+                  virtual filesystem setup has no error return or recovery"
+    )]
     fn mount_virtual_filesystems(&self) {
         self.ensure_directory_path("/dev")
             .expect("Failed to create /dev mountpoint");
@@ -337,6 +342,12 @@ impl BootVfs {
     }
 }
 
+#[expect(
+    clippy::panic,
+    reason = "Fatal boot: the root block device cannot be mounted (a non-probe mount error, or \
+              every registered filesystem rejects it); root mounting has no error return or \
+              recovery"
+)]
 fn mount_root_file_system(boot: &BootVfs) {
     info!("Initialize filesystem subsystem...");
 
@@ -415,6 +426,11 @@ fn mount_root_file_system(boot: &BootVfs) {
 fn select_root_block(devs: &mut Vec<Arc<block::BlockDevice>>) -> Arc<block::BlockDevice> {
     let preferred = kbuild_config::KFEAT_ROOT_BLOCK.trim();
     if !preferred.is_empty() {
+        #[expect(
+            clippy::panic,
+            reason = "Fatal boot: the configured root block device is absent; root mounting has \
+                      no error return or recovery"
+        )]
         let index = devs
             .iter()
             .position(|device| device.name() == preferred)

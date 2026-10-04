@@ -57,6 +57,11 @@ fn plic_region_from_device_tree() -> Option<(PhysAddr, usize)> {
 pub fn init_primary() {
     let (paddr, size) = plic_region_from_device_tree()
         .unwrap_or((PhysAddr::from_usize(PLIC_PADDR), PLIC_MMIO_SIZE));
+    #[expect(
+        clippy::panic,
+        reason = "Fatal boot: the PLIC register window cannot be mapped; interrupt-controller \
+                  initialization has no error return or recovery"
+    )]
     let plic_base = iomap_device(paddr, size, PLIC_IOMAP_NAME)
         .unwrap_or_else(|err| panic!("failed to iomap PLIC: {err:?}"));
     // SAFETY: `plic_base` comes from a successful `iomap_device` of the PLIC
@@ -68,6 +73,11 @@ pub fn init_primary() {
 
 fn this_context() -> usize {
     let logical_cpu_id = this_cpu_id();
+    #[expect(
+        clippy::panic,
+        reason = "The current CPU's logical id was assigned from the present-CPU map at entry, so \
+                  it has a raw hart id"
+    )]
     let hart_id = raw_cpu_id(logical_cpu_id)
         .unwrap_or_else(|| {
             panic!(
@@ -224,6 +234,11 @@ impl kirq::IntrManagerIf {
         match target {
             TargetCpu::Self_ => {
                 let logical_cpu_id = this_cpu_id();
+                #[expect(
+                    clippy::panic,
+                    reason = "The current CPU's logical id was assigned from the present-CPU map \
+                              at entry, so it has a raw hart id"
+                )]
                 let raw_cpu_id = raw_cpu_id(logical_cpu_id).unwrap_or_else(|| {
                     panic!(
                         "missing raw CPU id mapping for current logical CPU {}",

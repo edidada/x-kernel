@@ -46,7 +46,12 @@ impl From<i32> for PsciError {
             -7 => NotPresent,
             -8 => Disabled,
             -9 => InvalidAddress,
-            _ => panic!("Unknown PSCI error code: {}", code),
+            // PSCI defines no other return codes. Treat an out-of-spec firmware
+            // value as an internal failure so callers take their error paths.
+            _ => {
+                warn!("unknown PSCI return code {code}; treating it as INTERNAL_FAILURE");
+                InternalFailure
+            }
         }
     }
 }

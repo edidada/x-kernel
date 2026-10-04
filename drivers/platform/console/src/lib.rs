@@ -260,6 +260,11 @@ fn device_tree_irq_desc(info: of::InterruptInfo) -> IrqDesc {
 /// Map the stdout MMIO window and build the matching [`SerialPort`].
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 fn build_stdout_port(desc: &StdoutDesc) -> SerialPort {
+    #[expect(
+        clippy::panic,
+        reason = "Fatal boot: the firmware-described stdout UART window cannot be mapped; console \
+                  initialization has no error return or recovery"
+    )]
     let uart_base = memspace::iomap_device(desc.paddr, desc.size, "console")
         .unwrap_or_else(|err| panic!("failed to iomap console: {err:?}"));
     match desc.kind {
@@ -348,10 +353,21 @@ pub fn register_input_irq_handler() {
     }
     match kirq::try_register_shared(virq, Arc::new(move |_| port.handle_input_irq())) {
         Ok(Some(token)) => *INPUT_IRQ.lock() = Some(token),
+        #[expect(
+            clippy::panic,
+            reason = "Fatal boot: kirq cannot install a shared action on the stdout input IRQ \
+                      (unresolved line, teardown or a non-shared action); console IRQ \
+                      initialization has no error return or recovery"
+        )]
         Ok(None) => {
             INPUT_IRQ_REGISTERED.store(false, Ordering::Release);
             panic!("failed to register console input IRQ handler: {desc:?}");
         }
+        #[expect(
+            clippy::panic,
+            reason = "Fatal boot: kirq rejects the stdout input IRQ registration; console IRQ \
+                      initialization has no error return or recovery"
+        )]
         Err(err) => {
             INPUT_IRQ_REGISTERED.store(false, Ordering::Release);
             panic!("failed to register console input IRQ handler: {desc:?} ({err:?})");

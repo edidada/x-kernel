@@ -567,6 +567,12 @@ pub fn try_free_irq_action(
     try_free_irq_inner(spec.into(), Some(token))
 }
 
+#[expect(
+    clippy::panic,
+    reason = "TODO(cg): waiter registration can fail (e.g. NoMemory) after the action is removed \
+              and teardown has begun; preallocate and register the completion waiter before \
+              removing the action so the failure returns an error with the action still installed"
+)]
 fn try_free_irq_inner(
     spec: IrqSpec,
     token: Option<IrqActionToken>,

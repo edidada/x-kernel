@@ -85,6 +85,11 @@ pub trait AddrOps: Copy + From<usize> + Into<usize> + Ord {
     #[inline]
     #[must_use = "this function has no side effects, so it can be removed if the return value is \
                   not used"]
+    #[expect(
+        clippy::panic,
+        reason = "Addresses in one mapped range differ by less than isize::MAX; an overflowing \
+                  delta is a caller bug like an integer overflow"
+    )]
     fn delta_from(self, base: Self) -> isize {
         let current: usize = self.into();
         let origin: usize = base.into();

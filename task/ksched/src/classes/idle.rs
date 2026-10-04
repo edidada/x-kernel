@@ -47,6 +47,11 @@ impl<T> ClassOps<T> for IdleClass<T> {
 
     fn advance(&mut self, _clk: &RqClock, _tok: RqLocked) {}
 
+    #[expect(
+        clippy::panic,
+        reason = "Each run queue installs its idle task directly and never enqueues it; the \
+                  SCHED_IDLE policy maps to the Fair class, not this one"
+    )]
     fn enqueue(
         &mut self,
         _task: Arc<SchedTask<T>>,

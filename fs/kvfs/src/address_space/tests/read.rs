@@ -198,6 +198,11 @@ impl AddressSpaceOperations for ReadaheadOps {
         // Initialize the isolated miss or retry the consumed, incomplete EOF page.
         assert!(mapping.invalidate_lock.try_write().is_none());
         let byte = match folio.index() {
+    #[expect(
+        clippy::panic,
+        reason = "test scenario: rereading a completed readahead page is the regression this mock \
+                  reports"
+    )]
             0 => 0x11,
             3 => 0x33,
             _ => panic!("completed readahead pages must not be read again"),
@@ -215,6 +220,11 @@ impl AddressSpaceOperations for ReadaheadOps {
         assert!(control.mapping().invalidate_lock.try_write().is_none());
         match control.index() {
             0 => panic!("single-page misses must use read_folio"),
+    #[expect(
+        clippy::panic,
+        reason = "test scenario: an unexpected readahead request is the regression this mock \
+                  reports"
+    )]
             2 => {
                 assert_eq!(control.count(), 2);
                 // The run is already resident and locked; completion fills
@@ -459,6 +469,11 @@ pub(crate) fn observe_readahead_run(mapping: &AddressSpace, run: &core::ops::Ran
             ))
             .unwrap_or_else(|_| panic!("first hinted page must still be absent"));
     } else {
+        #[expect(
+            clippy::panic,
+            reason = "test scenario: a resident first hinted page is the regression this observer \
+                      reports"
+        )]
         assert_eq!(run, &(5..8));
     }
 }
@@ -474,6 +489,11 @@ impl AddressSpaceOperations for ReadaheadConflict {
         assert_eq!(control.index(), 5);
         assert_eq!(control.count(), 3);
         while control.count() != 0 {
+    #[expect(
+        clippy::panic,
+        reason = "test scenario: a demand read of the remaining run is the regression this mock \
+                  reports"
+    )]
             control.complete_folio(&vec![0x55; PAGE_SIZE_4K])?;
         }
         Ok(())

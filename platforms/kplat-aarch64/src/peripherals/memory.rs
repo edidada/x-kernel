@@ -174,6 +174,12 @@ fn push_reserved_non_overlapping<const N: usize>(
     sort_and_merge_reserved(regions);
 }
 
+#[expect(
+    clippy::panic,
+    reason = "Fatal boot: firmware reserved regions overlap with different kind, source or name, \
+              so the reserved map cannot be normalized; boot memory initialization has no error \
+              return or recovery"
+)]
 fn sort_and_merge_reserved<const N: usize>(regions: &mut Vec<ReservedRegion, N>) {
     regions.sort_unstable_by_key(|region| region.start);
     if regions.len() < 2 {

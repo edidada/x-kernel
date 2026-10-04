@@ -4,6 +4,12 @@
 
 //! ACPI firmware description and table helpers.
 
+#![allow(
+    clippy::panic,
+    reason = "case (b): 16 legacy panics on absent or malformed firmware tables (RSDP, XSDT/RSDT, \
+              MADT and SDT headers) need one parser failure contract rather than per-site \
+              judgement; new code remains reviewed"
+)]
 #![no_std]
 
 use core::{mem, slice, str};

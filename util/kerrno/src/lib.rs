@@ -447,6 +447,12 @@ impl KError {
         if self.0 < 0 {
             KErrorData::Linux(LinuxError::new(-self.0))
         } else {
+            #[expect(
+                clippy::panic,
+                reason = "Positive codes are stored only from KErrorKind::code or after \
+                          try_from_i32 finds a matching KErrorKind, so every positive value \
+                          decodes to a kind"
+            )]
             let kind = KErrorKind::from_code(self.0)
                 .unwrap_or_else(|| panic!("invalid positive KError code: {}", self.0));
             KErrorData::Ky(kind)

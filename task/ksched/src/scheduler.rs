@@ -53,6 +53,11 @@ impl<T> ClassOps<T> for UnwiredClass<T> {
 
     fn advance(&mut self, _clk: &RqClock, _tok: RqLocked) {}
 
+    #[expect(
+        clippy::panic,
+        reason = "SchedAttr::validate admits only Fair policies until other classes are wired, so \
+                  no task reaches an unwired class's enqueue"
+    )]
     fn enqueue(
         &mut self,
         _task: Arc<SchedTask<T>>,

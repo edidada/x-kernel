@@ -162,6 +162,11 @@ static KIMAGE_VOFFSET: AtomicUsize = AtomicUsize::new(0);
 
 /// Records the kernel-image VA-to-PA offset established during early boot.
 #[inline]
+#[expect(
+    clippy::panic,
+    reason = "Only the primary boot entry records the offset, once per boot, so a second \
+              differing value cannot occur"
+)]
 pub fn set_kimage_voffset(offset: usize) {
     let current = KIMAGE_VOFFSET.load(Ordering::Relaxed);
     if current != 0 && current != offset {
@@ -188,6 +193,11 @@ const fn in_window(va: usize, start: usize, size: usize) -> bool {
 }
 
 #[inline]
+#[expect(
+    clippy::panic,
+    reason = "Callers translate only linear-map or kernel-image addresses, the windows with a \
+              fixed physical offset; v2p has no error return"
+)]
 pub(crate) fn v2p_with_kimage_window(va: usize, layout: LayoutConsts) -> usize {
     if in_window(va, layout.kimage_vaddr, layout.kimage_vsize) {
         va.checked_sub(kimage_voffset())

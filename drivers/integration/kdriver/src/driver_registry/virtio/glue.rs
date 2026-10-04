@@ -189,6 +189,13 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         match crate::resource::resource_provider().map_mmio(region, "virtio-hal") {
             Ok(m) => NonNull::new(m.vaddr as *mut u8)
                 .expect("virtio mmio mapping stored a null virtual address"),
+            #[expect(
+                clippy::panic,
+                reason = "TODO(cg): map_mmio can fail with NoMemory, InvalidResource or \
+                          MappingFailed during a fallible PCI probe, but this VirtIO HAL callback \
+                          can only return a pointer; pre-map the MMIO regions before constructing \
+                          the transport and fail the probe on mapping errors"
+            )]
             Err(err) => {
                 log::error!(
                     "virtio mmio_phys_to_virt failed: paddr={:#x}, size={:#x}, err={:?}",

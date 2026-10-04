@@ -47,10 +47,7 @@ impl BaseAllocator for SlabByteAllocator {
     fn add_region(&mut self, start: usize, size: usize) -> AllocResult {
         // SAFETY: The caller provides a valid backing region at
         // `[start, start + size)` to extend the slab heap.
-        unsafe {
-            self.inner_mut().add_memory(start, size);
-        }
-        Ok(())
+        unsafe { self.inner_mut().add_memory(start, size) }
     }
 }
 

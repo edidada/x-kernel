@@ -227,6 +227,12 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
         // Returns only after every present secondary CPU has registered its
         // run queue, so cross-CPU spawn during the driver/subsystem init
         // below cannot land on an unregistered CPU.
+        #[expect(
+            clippy::panic,
+            reason = "Fatal boot: the platform cannot start a present secondary CPU (boot_ap \
+                      error); CPU readiness and task placement assume every present CPU runs, and \
+                      late init has no error return or recovery"
+        )]
         self::mp::start_secondary_cpus(cpu_id).unwrap_or_else(|err| {
             panic!(
                 "failed to start secondary CPUs after boot CPU {} init: {err:?}",
@@ -482,6 +488,11 @@ impl PrimaryKernelEntry {
 #[cfg(not(feature = "smp"))]
 #[kiface::provide]
 impl SecondaryKernelEntry {
+    #[expect(
+        clippy::panic,
+        reason = "A uniprocessor build never calls boot_ap, so no secondary CPU is released into \
+                  this entry; it has no per-CPU runtime to join"
+    )]
     fn enter(_logical_cpu_id: kcpu_id_map::LogicalCpuId) -> ! {
         panic!("secondary CPU entered a uniprocessor kernel")
     }

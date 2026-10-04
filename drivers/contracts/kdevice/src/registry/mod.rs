@@ -30,6 +30,11 @@ static NEXT_DRIVER_ID: AtomicU64 = AtomicU64::new(0);
 static NEXT_DESC_ID: AtomicU64 = AtomicU64::new(0);
 static NEXT_DEVICE_ID: AtomicU64 = AtomicU64::new(0);
 
+#[expect(
+    clippy::panic,
+    reason = "Monotonic 64-bit ID counters cannot reach u64::MAX through ID allocation in \
+              practice, as the counter comment explains"
+)]
 fn fetch_add_u64(counter: &AtomicU64, what: &'static str) -> u64 {
     let prev = counter.fetch_add(1, Ordering::Relaxed);
     if prev == u64::MAX {
@@ -268,6 +273,12 @@ impl DeviceRegistry {
     ///
     /// Panics if the bus type was not registered before use. Call
     /// [`register_bus_type`] during init before creating bus instances.
+    #[expect(
+        clippy::panic,
+        reason = "Driver-core init (default_bus_manager) registers the PCI and platform bus types \
+                  before any bus instance or driver refers to them, as the Panics section \
+                  documents"
+    )]
     pub(crate) fn find_bus_type(&self, id: BusTypeId) -> Arc<BusTypeObject> {
         self.bus_types
             .iter()

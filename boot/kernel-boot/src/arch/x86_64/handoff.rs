@@ -130,6 +130,12 @@ pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, handoff_arg
         kaddr_layout::set_kimage_voffset(kimage_voffset);
         // SAFETY: early boot performs the one-time AP bootstrap table setup here.
         unsafe { init_ap_boot_state() };
+        #[expect(
+            clippy::panic,
+            reason = "Fatal boot: the ACPI MADT CPU description lacks the boot CPU's APIC id, so \
+                      no logical CPU id exists for per-CPU setup; the boot entry has no error \
+                      return or recovery"
+        )]
         let logical_cpu_id = kcpu_id_map::logical_cpu_id(get_cpu_id())
             .unwrap_or_else(|| panic!("missing logical cpu id mapping for boot cpu"));
         let kernel_load_paddr = KIMAGE_VADDR - kimage_voffset;
@@ -175,6 +181,12 @@ pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, handoff_arg
 pub(super) unsafe extern "C" fn rust_entry_secondary(magic: usize) {
     if magic == MULTIBOOT_BOOTLOADER_MAGIC {
         let raw_cpu_id = get_cpu_id();
+        #[expect(
+            clippy::panic,
+            reason = "Secondary CPUs are started only through boot_ap for logical ids from the \
+                      present-CPU map, using the raw id recorded there, so an entering CPU has a \
+                      mapping"
+        )]
         let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
             panic!(
                 "missing logical cpu id mapping for raw cpu id {}",
