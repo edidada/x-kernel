@@ -116,6 +116,10 @@ impl ConfigGenerator {
             let value = &config[key];
 
             content.push_str(
+                "#[expect(clippy::allow_attributes, reason = \"Generated constants are consumed by \
+                 different platform and feature subsets, so dead_code expectations are unreliable\")]\n",
+            );
+            content.push_str(
                 "#[allow(dead_code, reason = \"Kconfig emits all resolved symbols; each consumer \
                  uses only its platform and feature subset\")]\n",
             );

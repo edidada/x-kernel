@@ -133,11 +133,6 @@ fn capture_into(fp: usize, out: &mut [Frame]) -> usize {
 /// State of a captured backtrace.
 // `Unsupported` is only constructed on architectures without unwinding
 // support, so it is dead on supported targets.
-#[allow(
-    dead_code,
-    reason = "The unsupported-unwind variant is used only on targets without frame-pointer \
-              unwinding"
-)]
 // The fixed capture buffer dwarfs the empty variant; that is the point of
 // the allocation-free design.
 #[expect(
@@ -148,6 +143,16 @@ fn capture_into(fp: usize, out: &mut [Frame]) -> usize {
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
 enum Inner {
     /// Architecture does not support unwinding.
+    #[expect(
+        clippy::allow_attributes,
+        reason = "The unsupported-unwind variant is used only on targets without frame-pointer \
+                  unwinding"
+    )]
+    #[allow(
+        dead_code,
+        reason = "The unsupported-unwind variant is used only on targets without frame-pointer \
+                  unwinding"
+    )]
     Unsupported,
     /// Successfully captured backtrace (fixed buffer + frame count).
     Captured([Frame; MAX_FRAMES], usize),

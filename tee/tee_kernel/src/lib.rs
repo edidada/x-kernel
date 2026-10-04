@@ -3,6 +3,11 @@
 // See LICENSES for license details.
 
 #![allow(
+    clippy::allow_attributes,
+    reason = "case (b): 21 legacy outer allowances need individual contract review; new code must \
+              prefer narrow expect attributes and justify cfg-dependent allowances"
+)]
+#![allow(
     clippy::allow_attributes_without_reason,
     reason = "case (b): 22 legacy sites across TEE crypto, storage and protocol code need \
               individual review; new code must use narrow lint exceptions with substantive reasons"

@@ -29,6 +29,11 @@ impl IcacheFlushIf {
 
 /// Sends IPIs to all other PEs requesting they flush their instruction pipeline.
 #[inline]
+#[expect(
+    clippy::allow_attributes,
+    reason = "Remote instruction-cache flush is called only by architectures that require \
+              explicit broadcast"
+)]
 #[allow(
     dead_code,
     reason = "Remote instruction-cache flush is called only by architectures that require \

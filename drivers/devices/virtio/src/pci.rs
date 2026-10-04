@@ -60,7 +60,7 @@ impl PciTransport {
         bdf: DeviceFunction,
         #[cfg_attr(
             not(target_arch = "x86_64"),
-            allow(
+            expect(
                 unused_variables,
                 reason = "MSI-X transport setup is implemented only on x86_64"
             )

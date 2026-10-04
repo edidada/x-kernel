@@ -74,6 +74,11 @@ unsafe impl Sync for SecondaryBootStacks {}
 /// spans every present CPU; without this barrier a round-robin selection
 /// could land on a secondary that has entered but not yet registered its
 /// run queue, panicking in `RUN_QUEUES.get().expect()`.
+#[expect(
+    clippy::allow_attributes,
+    reason = "The CPU loop bound is generated from NR_CPUS and can be one in a uniprocessor \
+              configuration"
+)]
 #[allow(
     clippy::absurd_extreme_comparisons,
     reason = "The CPU loop bound is generated from NR_CPUS and can be one in a uniprocessor \

@@ -133,6 +133,10 @@ const fn as_device_kind(t: VirtIoDevType) -> Option<DeviceKind> {
     }
 }
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "Error conversion is used only by enabled VirtIO device backends"
+)]
 #[allow(
     dead_code,
     reason = "Error conversion is used only by enabled VirtIO device backends"

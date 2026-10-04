@@ -113,6 +113,11 @@ pub(crate) fn run_user_thread_loop(
             ReturnReason::Interrupt => {
                 ktask::check_preempt_pending();
             }
+            #[expect(
+                clippy::allow_attributes,
+                reason = "The exception label is used only by architecture-specific exception \
+                          recovery branches"
+            )]
             #[allow(
                 unused_labels,
                 reason = "The exception label is used only by architecture-specific exception \

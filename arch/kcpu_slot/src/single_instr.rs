@@ -84,6 +84,11 @@ pub trait SingleInstructionStore {
     unsafe fn store(offset: usize, val: Self);
 }
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "IRQ-save fallback macros are used only on architectures lacking the corresponding \
+              single instruction"
+)]
 #[allow(
     unused_macros,
     reason = "IRQ-save fallback macros are used only on architectures lacking the corresponding \
@@ -151,6 +156,11 @@ macro_rules! impl_single_instr_fallback_arith {
     )*};
 }
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "IRQ-save fallback macros are used only on architectures lacking the corresponding \
+              single instruction"
+)]
 #[allow(
     unused_macros,
     reason = "IRQ-save fallback macros are used only on architectures lacking the corresponding \
@@ -183,15 +193,7 @@ macro_rules! impl_single_instr_fallback_load_store {
     )*};
 }
 
-#[allow(
-    unused_imports,
-    reason = "Architecture backends import fallback macros only when single-instruction support \
-              is unavailable"
-)]
+#[cfg(not(target_arch = "x86_64"))]
 pub(crate) use impl_single_instr_fallback_arith;
-#[allow(
-    unused_imports,
-    reason = "Architecture backends import fallback macros only when single-instruction support \
-              is unavailable"
-)]
+#[cfg(not(target_arch = "x86_64"))]
 pub(crate) use impl_single_instr_fallback_load_store;

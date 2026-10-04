@@ -143,6 +143,11 @@ pub fn check_access(start: usize, len: usize) -> MemResult {
 
 /// Load a null-terminated string from user virtual memory.
 pub fn vm_load_string(ptr: *const c_char) -> KResult<String> {
+    #[expect(
+        clippy::allow_attributes,
+        reason = "C char is signed on some architectures; user-memory helpers require byte \
+                  pointers"
+    )]
     #[allow(
         clippy::unnecessary_cast,
         reason = "C char is signed on some architectures; user-memory helpers require byte \
@@ -154,6 +159,11 @@ pub fn vm_load_string(ptr: *const c_char) -> KResult<String> {
 
 /// Load a string with a fixed byte length from user virtual memory.
 pub fn vm_load_string_with_len(ptr: *const c_char, len: usize) -> KResult<String> {
+    #[expect(
+        clippy::allow_attributes,
+        reason = "C char is signed on some architectures; user-memory helpers require byte \
+                  pointers"
+    )]
     #[allow(
         clippy::unnecessary_cast,
         reason = "C char is signed on some architectures; user-memory helpers require byte \

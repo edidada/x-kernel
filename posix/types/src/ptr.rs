@@ -401,6 +401,11 @@ impl UserConstPtr<c_char> {
     /// Propagates the `osvm` string-copy error or returns `IllegalBytes` for
     /// invalid UTF-8. Allocation failure follows allocator policy.
     pub fn load_string(self) -> KResult<String> {
+        #[expect(
+            clippy::allow_attributes,
+            reason = "C char is signed on some architectures; user-memory helpers require byte \
+                      pointers"
+        )]
         #[allow(
             clippy::unnecessary_cast,
             reason = "C char is signed on some architectures; user-memory helpers require byte \
@@ -446,6 +451,11 @@ impl UserConstPtr<c_char> {
 
         for offset in 0..=max_len {
             let mut byte = MaybeUninit::<u8>::uninit();
+            #[expect(
+                clippy::allow_attributes,
+                reason = "C char is signed on some architectures; user-memory helpers require \
+                          byte pointers"
+            )]
             #[allow(
                 clippy::unnecessary_cast,
                 reason = "C char is signed on some architectures; user-memory helpers require \

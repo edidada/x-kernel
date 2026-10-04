@@ -46,6 +46,10 @@ struct ProcessTimers {
 /// Immutable scheduling ownership for a thread that has left its process.
 /// Contains no active MM user; mappings may be cleared while the root is pinned.
 pub(crate) struct ExitAddressSpace {
+    #[expect(
+        clippy::allow_attributes,
+        reason = "owns the exit snapshot pin until Drop; inspected only by unittest observers"
+    )]
     #[allow(
         dead_code,
         reason = "owns the exit snapshot pin until Drop; inspected only by unittest observers"

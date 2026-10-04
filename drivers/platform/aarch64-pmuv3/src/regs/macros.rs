@@ -36,6 +36,7 @@ macro_rules! mrs {
     (@inner $val:expr, $reg:expr) => {{
         // `out(reg)` requires the destination variable directly in the
         // asm! block — local capture is not possible.
+        #[expect(clippy::allow_attributes, reason = "The register-read macro must pass the caller destination directly to asm out(reg)")]
         #[allow(clippy::macro_metavars_in_unsafe, reason = "The register-read macro must pass the caller destination directly to asm out(reg)")]
         {
             // SAFETY: reads a system register identified by the caller.
@@ -46,6 +47,7 @@ macro_rules! mrs {
         }
     }};
     (@inner_w $val:expr, $reg:expr, $asm_width:tt) => {{
+        #[expect(clippy::allow_attributes, reason = "The register-read macro must pass the caller destination directly to asm out(reg)")]
         #[allow(clippy::macro_metavars_in_unsafe, reason = "The register-read macro must pass the caller destination directly to asm out(reg)")]
         {
             // SAFETY: reads a system register identified by the caller.

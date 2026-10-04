@@ -75,6 +75,10 @@ pub(crate) struct Connection {
     /// Current connection info (address + credit) for outgoing packet headers.
     pub(crate) info: VsockConnectionInfo,
     /// True for connections owned by the vsock-TIPC bridge.
+    #[expect(
+        clippy::allow_attributes,
+        reason = "Bridge ownership is inspected only with the vsock_tipc_bridge feature"
+    )]
     #[allow(
         dead_code,
         reason = "Bridge ownership is inspected only with the vsock_tipc_bridge feature"

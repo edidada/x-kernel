@@ -389,6 +389,13 @@ impl IrqDescRuntimeState {
 
     #[cfg_attr(
         not(target_arch = "x86_64"),
+        expect(
+            clippy::allow_attributes,
+            reason = "MSI teardown queries are used only by the x86 MSI backend"
+        )
+    )]
+    #[cfg_attr(
+        not(target_arch = "x86_64"),
         allow(
             dead_code,
             reason = "MSI teardown queries are used only by the x86 MSI backend"
@@ -526,6 +533,13 @@ impl IrqStateDesc {
         self.runtime.is_teardown_in_progress()
     }
 
+    #[cfg_attr(
+        not(target_arch = "x86_64"),
+        expect(
+            clippy::allow_attributes,
+            reason = "MSI teardown queries are used only by the x86 MSI backend"
+        )
+    )]
     #[cfg_attr(
         not(target_arch = "x86_64"),
         allow(

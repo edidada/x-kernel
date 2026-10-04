@@ -68,6 +68,10 @@ pub(super) struct IrqAction {
     primary: Handler,
     thread: Option<IrqThreadSlot>,
     flags: IrqActionFlags,
+    #[expect(
+        clippy::allow_attributes,
+        reason = "Action names are read by unittest until named handler registration is exposed"
+    )]
     #[allow(
         dead_code,
         reason = "Action names are read by unittest until named handler registration is exposed"
@@ -171,6 +175,11 @@ pub(super) enum IrqActionReturn {
     ///
     /// This variant is inert until a later threaded-IRQ milestone creates a
     /// real thread slot and scheduler handoff.
+    #[expect(
+        clippy::allow_attributes,
+        reason = "Only unittest constructs this variant until threaded IRQ registration is \
+                  implemented"
+    )]
     #[allow(
         dead_code,
         reason = "Only unittest constructs this variant until threaded IRQ registration is \

@@ -116,6 +116,10 @@ macro_rules! virtio_driver_pair {
 
 /// Activate a VirtIO device whose type is known (PCI path).
 #[cfg(feature = "virtio")]
+#[expect(
+    clippy::allow_attributes,
+    reason = "Device activation inputs are used only by enabled VirtIO device features"
+)]
 #[allow(
     unused_variables,
     reason = "Device activation inputs are used only by enabled VirtIO device features"

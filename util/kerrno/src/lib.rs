@@ -576,7 +576,7 @@ impl fmt::Display for KError {
 
 macro_rules! kerror_consts {
     ($($name:ident),*) => {
-        #[allow(non_upper_case_globals, reason = "Macro-generated error constants retain the KErrorKind variant spelling")]
+        #[expect(non_upper_case_globals, reason = "Macro-generated error constants retain the KErrorKind variant spelling")]
         impl KError {
             $(
                 #[doc = concat!("An [`KError`] with kind [`KErrorKind::", stringify!($name), "`].")]
