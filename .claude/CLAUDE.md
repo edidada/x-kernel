@@ -26,8 +26,10 @@ review-opinion reading are covered by
 
 When writing or reviewing Rust kernel code,
 read and follow `docs/ai/skills/code-guidelines/SKILL.md`.
-Lint policy and exception syntax live in
-`docs/ai/code-guidelines/lints.md`.
+Read `docs/code-guidelines/README.md` for all rule backends and the unified
+exception policy before writing or reviewing lint attributes. Rustc/Clippy
+policy and coverage live in `docs/code-guidelines/lints.md`; individual rules
+live in `docs/code-guidelines/CG-*.md`.
 
 ## Change Completeness
 

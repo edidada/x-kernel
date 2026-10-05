@@ -3,10 +3,11 @@
 Use this skill when an AI agent needs to write,
 edit, or review Rust kernel code in the X-Kernel repository.
 
-This skill is the canonical shared entry point
-for code-writing and code-review conventions.
-The detailed topic rules live in sibling files
-under this same directory.
+This skill routes code-writing and code-review work.
+Read `docs/code-guidelines/README.md` for the rule registry, backend format
+and unified exception policy. Migrated requirements and judgment criteria
+live in `docs/code-guidelines/CG-*.md`; the sibling topic files retain
+requirements that have not migrated and scenario guidance.
 
 ## Scope
 
@@ -29,8 +30,8 @@ This skill does not replace:
   (`docs/ai/skills/build-workflow/SKILL.md`);
 - per-crate design and security documentation generation
   (`docs/ai/skills/module-docs/SKILL.md`);
-- lint-enforced rules
-  (`docs/ai/code-guidelines/lints.md`).
+- the shared rule registry (`docs/code-guidelines/README.md`)
+  and rustc/Clippy policy and coverage (`docs/code-guidelines/lints.md`).
 
 This skill primarily targets Rust code-writing and code review.
 It also includes lightweight extension topics for:
@@ -64,7 +65,9 @@ the core topic files above them are the primary path.
 
 When writing or editing Rust kernel code:
 
-1. Identify whether the change touches `unsafe`,
+1. Read the applicable CG files from `docs/code-guidelines/README.md`,
+   including the exception policy when changing lint attributes.
+   Identify whether the change touches `unsafe`,
    raw pointers, FFI, uninitialized storage,
    shared state, logging, public APIs, or hot paths.
 2. Load the matching topic files from this skill directory.
@@ -85,7 +88,10 @@ When writing or editing Rust kernel code:
 
 When reviewing Rust kernel code:
 
-1. Check whether names reflect the real semantics and units.
+1. Read the applicable CG files and their backend coverage from
+   `docs/code-guidelines/README.md` and `lints.md`. For x-review-ng, only
+   rules with an `ai` check enter AI review; rustc/Clippy-only files have
+   no triggers. Check whether names reflect the real semantics and units.
 2. Check whether comments explain intent rather than paraphrasing code.
 3. If the patch touches `unsafe`, load `unsafety.md`
    and review against its scenario catalog,
