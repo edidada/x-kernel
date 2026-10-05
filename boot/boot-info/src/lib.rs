@@ -448,12 +448,19 @@ impl LinuxBootParams {
         (size != 0).then_some(size)
     }
 
-    pub fn cmdline(self) -> Option<&'static str> {
+    /// Returns the start address and length of the bytes [`Self::cmdline`]
+    /// reads: `cmdline_size + 1` bytes at `cmd_line_ptr` (256 when
+    /// `cmdline_size` is zero), or `None` when `cmd_line_ptr` is zero.
+    pub fn cmdline_range(self) -> Option<(usize, usize)> {
         let ptr = self.cmdline_ptr()?;
         let max_len = self
             .cmdline_size()
             .unwrap_or(X86_LINUX_BOOT_LEGACY_CMDLINE_MAX);
-        let scan_len = max_len.checked_add(1)?;
+        Some((ptr, max_len.checked_add(1)?))
+    }
+
+    pub fn cmdline(self) -> Option<&'static str> {
+        let (ptr, scan_len) = self.cmdline_range()?;
         // SAFETY: `ptr` is the nonzero `cmd_line_ptr` field and `scan_len` is
         // `cmdline_size + 1` (or 256 when that field is zero). The
         // `LinuxBootParams::new` contract requires exactly that many bytes at

@@ -19,6 +19,11 @@ use boot_info::LinuxBootParams;
 /// # Safety
 ///
 /// `protocol_info_addr` must satisfy the [`LinuxBootParams::new`] contract.
+/// In particular, call this only while the zeropage at that address is still
+/// mapped in the current address space, normally by the boot stub's temporary
+/// identity mapping of low memory, and is not being written. Once the kernel
+/// page table replaces that mapping, a raw physical zeropage address no longer
+/// meets the contract.
 #[inline]
 pub unsafe fn boot_params(protocol_info_addr: usize) -> Option<LinuxBootParams> {
     // SAFETY: this function's caller upholds the `LinuxBootParams::new`
