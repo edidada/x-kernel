@@ -29,7 +29,8 @@ checks:
      macro that merely shares the name grants no exemption.
 - **Exceptions**:
   - Test-only locks: test functions, `#[cfg(unittest)]` items and unit-test
-    support crates. Suppress on the item with
+    support crates. Use the paired Dylint exception attributes from
+    [README.md](README.md#suppressing-a-check), with the following rule allowance:
     `#[allow(unknown_lints, unregistered_static_spinlock, reason = "CG-001-static-spinlock-registration: <why>")]`.
   - Out of scope (not reported, no suppression needed): wrapper types holding a
     lock, including per-CPU `cpu_slot_cell_with_template!` templates; locks

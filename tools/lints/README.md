@@ -79,3 +79,8 @@ and bump its Rustup volume suffix.
 The library's own crates in `Cargo.lock` are not vendored. CI fetches them
 through the same registry mirror as the kernel crates and keeps them in the
 Cargo cache volume.
+
+This standalone host workspace does not inherit the kernel root
+`[workspace.lints]`. Validate its compiler-private code and embedded fixtures
+with its pinned nightly through `make dylint_test`; kernel lint policy remains
+in [the unified guidelines](../../docs/code-guidelines/README.md).

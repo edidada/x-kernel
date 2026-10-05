@@ -313,7 +313,8 @@ mod out_of_scope {
 mod allow {
     use kspin::SpinNoIrq;
 
-    #[allow(unknown_lints, unregistered_static_spinlock)]
+    #[expect(clippy::allow_attributes, reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy")]
+    #[allow(unknown_lints, unregistered_static_spinlock, reason = "CG-001-static-spinlock-registration: scratch test-only lock")]
     static A: SpinNoIrq<u32> = SpinNoIrq::new(0);
 
     #[allow(unregistered_static_spinlock)]
