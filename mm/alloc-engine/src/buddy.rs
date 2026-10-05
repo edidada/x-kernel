@@ -36,10 +36,16 @@ impl Default for BuddyByteAllocator {
 
 impl BaseAllocator for BuddyByteAllocator {
     fn init_region(&mut self, start: usize, size: usize) {
+        // SAFETY: The caller provides a valid, writable region at
+        // `[start, start + size)` and transfers its exclusive use to the buddy
+        // heap for as long as the heap manages it.
         unsafe { self.inner.init(start, size) };
     }
 
     fn add_region(&mut self, start: usize, size: usize) -> AllocResult {
+        // SAFETY: The caller provides a valid, writable region at
+        // `[start, start + size)` and transfers its exclusive use to the buddy
+        // heap for as long as the heap manages it.
         unsafe { self.inner.add_to_heap(start, start + size) };
         Ok(())
     }

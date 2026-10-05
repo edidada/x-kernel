@@ -59,8 +59,7 @@ mod math_tests {
     /// Test Vec operations
     #[def_test]
     fn test_vec_push() {
-        let mut v = alloc::vec::Vec::new();
-        v.push(1);
+        let mut v = alloc::vec![1];
         v.push(2);
         v.push(3);
         assert_eq!(v.len(), 3);
