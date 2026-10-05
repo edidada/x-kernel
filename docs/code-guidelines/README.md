@@ -28,8 +28,8 @@ belong to the tool's own README.
 - `CG-*.md`: the rule registry for all backends, indexed below. Reused ids
   CG-016, CG-018 and CG-021 receive their AI checks when the stack lands;
   CG-017 stays the separate Send/Sync argument rule.
-- `pending.md`: Dylint candidates; [pending.md](pending.md) becomes available
-  when the Dylint stack lands. Rustc/Clippy candidates stay in `lints.md`.
+- `pending.md` (stack placeholder): Dylint candidates. Add its link when
+  part 2 lands. Rustc/Clippy candidates stay in `lints.md`.
 
 ## Suppressing a check
 
