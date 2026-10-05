@@ -636,6 +636,13 @@ impl FileOperations for PipeFileOperations {
         Ok(read)
     }
 
+    // Timestamps update only after the bytes are already queued for the
+    // reader, and a timestamp failure propagates as the syscall result. This
+    // mirrors Linux `pipe_write()` (`err = file_update_time(filp);
+    // if (err) ret = err;` after the copy loop, fs/pipe.c:617) and the shared
+    // pathname FIFO table below. The common `setattr` fallback cannot fail
+    // for times-only updates, so the propagation is defensive Linux parity
+    // rather than a reachable error path.
     fn write(&self, file: &VfsFile, buf: &[u8], _offset: u64) -> VfsResult<usize> {
         let written = pipe_write(file, buf)?;
         if written > 0 {
@@ -644,6 +651,7 @@ impl FileOperations for PipeFileOperations {
         Ok(written)
     }
 
+    /// See [`Self::write`] for the timestamp-update contract.
     fn write_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterSource<'_>) -> VfsResult<usize> {
         let written = pipe_write_iter(iocb, iter)?;
         if written > 0 {
