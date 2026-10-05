@@ -13,7 +13,15 @@
 
 use boot_info::LinuxBootParams;
 
+/// Returns a view over the zeropage at `protocol_info_addr`, or `None` when it
+/// is zero.
+///
+/// # Safety
+///
+/// `protocol_info_addr` must satisfy the [`LinuxBootParams::new`] contract.
 #[inline]
-pub fn boot_params(protocol_info_addr: usize) -> Option<LinuxBootParams> {
-    LinuxBootParams::new(protocol_info_addr)
+pub unsafe fn boot_params(protocol_info_addr: usize) -> Option<LinuxBootParams> {
+    // SAFETY: this function's caller upholds the `LinuxBootParams::new`
+    // contract for `protocol_info_addr`, as required by its `# Safety` section.
+    unsafe { LinuxBootParams::new(protocol_info_addr) }
 }
