@@ -135,10 +135,10 @@ fn kernel_main() {
             fs_struct.pwd(),
             &cred,
         );
-        if let Err(err) = remove_result {
-            if err.canonicalize() != kvfs::VfsError::NotFound {
-                warn!("Failed to remove stale coverage data: {:?}", err);
-            }
+        if let Err(err) = remove_result
+            && err.canonicalize() != kvfs::VfsError::NotFound
+        {
+            warn!("Failed to remove stale coverage data: {:?}", err);
         }
     }
 
@@ -178,8 +178,8 @@ fn kernel_main() {
         // Flatten to owned descriptors so test execution never reads the
         // writable linker registration section after discovery.
         let flat: Vec<unittest::TestDescriptor> = grouped
-            .iter()
-            .flat_map(|(_, tests)| tests.iter().copied())
+            .values()
+            .flat_map(|tests| tests.iter().copied())
             .collect();
 
         for (module, tests) in &grouped {
