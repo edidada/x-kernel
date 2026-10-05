@@ -164,6 +164,7 @@ pub unsafe extern "C" fn grouped() {
     core::arch::naked_asm!("ret");
 }
 
+#[expect(clippy::allow_attributes, reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy")]
 #[allow(unknown_lints, undocumented_unsafe_attribute, reason = "CG-008-unsafe-attribute-safety: generated external contract")]
 #[unsafe(no_mangle)]
 pub extern "C" fn allowed() {}
@@ -210,6 +211,7 @@ impl Provider {
     #[unsafe(no_mangle)]
     pub extern "C" fn documented_associated() {}
 
+    #[expect(clippy::allow_attributes, reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy")]
     #[allow(unknown_lints, undocumented_unsafe_attribute, reason = "CG-008-unsafe-attribute-safety: test allow")]
     #[unsafe(no_mangle)]
     pub extern "C" fn allowed_associated() {}
@@ -225,6 +227,7 @@ unsafe extern "C" {
     fn missing_foreign();
 }
 
+#[expect(clippy::allow_attributes, reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy")]
 #[allow(unknown_lints, undocumented_unsafe_attribute, reason = "CG-008-unsafe-attribute-safety: test allow")]
 unsafe extern "C" {
     #[unsafe(no_mangle)]
@@ -280,7 +283,7 @@ LL | #[unsafe(naked)]
    = help: add a // SAFETY: justification above the attribute group; see docs/code-guidelines/CG-008-unsafe-attribute-safety.md
 
 error: unsafe attribute has no preceding SAFETY comment
-  --> $DIR/undocumented_unsafe_attribute.rs:30:1
+  --> $DIR/undocumented_unsafe_attribute.rs:31:1
    |
 LL | #[unsafe(no_mangle)]
    | ^^^^^^^^^^^^^^^^^^^^
@@ -288,7 +291,7 @@ LL | #[unsafe(no_mangle)]
    = help: add a // SAFETY: justification above the attribute group; see docs/code-guidelines/CG-008-unsafe-attribute-safety.md
 
 error: unsafe attribute has no preceding SAFETY comment
-  --> $DIR/undocumented_unsafe_attribute.rs:52:5
+  --> $DIR/undocumented_unsafe_attribute.rs:53:5
    |
 LL |     #[unsafe(/* comment */ no_mangle)]
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -296,7 +299,7 @@ LL |     #[unsafe(/* comment */ no_mangle)]
    = help: add a // SAFETY: justification above the attribute group; see docs/code-guidelines/CG-008-unsafe-attribute-safety.md
 
 error: unsafe attribute has no preceding SAFETY comment
-  --> $DIR/undocumented_unsafe_attribute.rs:59:1
+  --> $DIR/undocumented_unsafe_attribute.rs:60:1
    |
 LL | #[unsafe(no_mangle)]
    | ^^^^^^^^^^^^^^^^^^^^
@@ -304,7 +307,7 @@ LL | #[unsafe(no_mangle)]
    = help: add a // SAFETY: justification above the attribute group; see docs/code-guidelines/CG-008-unsafe-attribute-safety.md
 
 error: unsafe attribute has no preceding SAFETY comment
-  --> $DIR/undocumented_unsafe_attribute.rs:64:5
+  --> $DIR/undocumented_unsafe_attribute.rs:65:5
    |
 LL |     #[unsafe(no_mangle)]
    |     ^^^^^^^^^^^^^^^^^^^^
@@ -312,7 +315,7 @@ LL |     #[unsafe(no_mangle)]
    = help: add a // SAFETY: justification above the attribute group; see docs/code-guidelines/CG-008-unsafe-attribute-safety.md
 
 error: unsafe attribute has no preceding SAFETY comment
-  --> $DIR/undocumented_unsafe_attribute.rs:77:5
+  --> $DIR/undocumented_unsafe_attribute.rs:79:5
    |
 LL |     #[unsafe(no_mangle)]
    |     ^^^^^^^^^^^^^^^^^^^^
@@ -320,7 +323,7 @@ LL |     #[unsafe(no_mangle)]
    = help: add a // SAFETY: justification above the attribute group; see docs/code-guidelines/CG-008-unsafe-attribute-safety.md
 
 error: unsafe attribute has no preceding SAFETY comment
-  --> $DIR/undocumented_unsafe_attribute.rs:82:5
+  --> $DIR/undocumented_unsafe_attribute.rs:84:5
    |
 LL |     #[unsafe(no_mangle)]
    |     ^^^^^^^^^^^^^^^^^^^^
@@ -328,7 +331,7 @@ LL |     #[unsafe(no_mangle)]
    = help: add a // SAFETY: justification above the attribute group; see docs/code-guidelines/CG-008-unsafe-attribute-safety.md
 
 error: unsafe attribute has no preceding SAFETY comment
-  --> $DIR/undocumented_unsafe_attribute.rs:94:5
+  --> $DIR/undocumented_unsafe_attribute.rs:97:5
    |
 LL |     #![unsafe(no_mangle)]
    |     ^^^^^^^^^^^^^^^^^^^^^
@@ -336,7 +339,7 @@ LL |     #![unsafe(no_mangle)]
    = help: add a // SAFETY: justification above the attribute group; see docs/code-guidelines/CG-008-unsafe-attribute-safety.md
 
 error: unsafe attribute has no preceding SAFETY comment
-  --> $DIR/undocumented_unsafe_attribute.rs:103:1
+  --> $DIR/undocumented_unsafe_attribute.rs:106:1
    |
 LL | #[unsafe(no_mangle)]
    | ^^^^^^^^^^^^^^^^^^^^
@@ -344,7 +347,7 @@ LL | #[unsafe(no_mangle)]
    = help: add a // SAFETY: justification above the attribute group; see docs/code-guidelines/CG-008-unsafe-attribute-safety.md
 
 error: unsafe attribute has no preceding SAFETY comment
-  --> $DIR/undocumented_unsafe_attribute.rs:109:1
+  --> $DIR/undocumented_unsafe_attribute.rs:112:1
    |
 LL | #[unsafe(no_mangle)]
    | ^^^^^^^^^^^^^^^^^^^^

@@ -16,7 +16,8 @@ checks:
   1. Find the first attribute in the contiguous group containing the unsafe attribute, whether outer or inner. A `// SAFETY:` comment must be directly above that group, with no blank line or unrelated code between it and the group. A multi-line `// SAFETY:` comment is accepted.
   2. One comment covers all three in-scope unsafe attributes in that group. A comment after an attribute does not cover an earlier attribute.
   3. The lint checks presence only. Review must check whether the justification names the real entry-state assumptions as required by `docs/ai/skills/code-guidelines/unsafety.md:425-427`. For `no_mangle` and `export_name`, explain why the symbol is unique and matches its assembly, linker, compiler, or C ABI consumer, including ABI and signature. For `naked`, explain the entry state used by the assembly and why its body is only assembly.
-- **Exceptions**: Suppress a generated or externally constrained case only on the smallest enclosing item with `#[allow(unknown_lints, undocumented_unsafe_attribute, reason = "CG-008-unsafe-attribute-safety: <why a local comment cannot document this attribute>")]`. For an item inside an `extern` block, place the allow on the block; early lint levels are not applied to individual foreign items. A reason must explain the actual constraint; convenience is not an exception.
+- **Exceptions**: Use the paired Dylint exception attributes from
+  [README.md](README.md#suppressing-a-check). Suppress a generated or externally constrained case only on the smallest enclosing item with `#[allow(unknown_lints, undocumented_unsafe_attribute, reason = "CG-008-unsafe-attribute-safety: <why a local comment cannot document this attribute>")]`. For an item inside an `extern` block, place the allow on the block; early lint levels are not applied to individual foreign items. A reason must explain the actual constraint; convenience is not an exception.
 - **Counter-example**:
 
 ```rust
