@@ -350,6 +350,7 @@ emit_impl!();
 #[cfg(any())]
 // SAFETY: disabled configuration is not compiled.
 unsafe impl UserRead for bool {}
+#[expect(clippy::allow_attributes, reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy")]
 #[allow(unknown_lints, unsound_user_abi_impl, reason = "CG-005-user-abi-layout: fixture demonstrates focused exception")]
 // SAFETY: test fixture intentionally violates the contract.
 unsafe impl UserWrite for PaddedAllowed {}

@@ -41,7 +41,8 @@ checks:
      satisfy CG-005. Those wrappers copy bytes and accept misaligned user
      addresses; callers that relied on an alignment error must validate it
      explicitly.
-- **Exceptions**: A low-level API that only forwards opaque bytes as
+- **Exceptions**: Use the paired Dylint exception attributes from
+  [README.md](README.md#suppressing-a-check). A low-level API that only forwards opaque bytes as
   `MaybeUninit<T>` may use a focused allow when its public contract requires
   callers to validate before constructing `T`. Test fixtures may use direct
   copy primitives when they deliberately exercise that low-level API.

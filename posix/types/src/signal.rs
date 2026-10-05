@@ -108,7 +108,10 @@ impl k_siginfo {
     }
 }
 
-#[expect(clippy::allow_attributes, reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy")]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
 #[allow(
     unknown_lints,
     unsound_user_abi_impl,
@@ -123,7 +126,10 @@ unsafe impl UserWrite for k_siginfo {}
 ///
 /// A value initialized through `sival_int` may leave the upper union bytes
 /// uninitialized, so this type does not implement `UserWrite`.
-#[expect(non_camel_case_types, reason = "CG-032-camel-case-types: Preserve the Linux ABI type name used by syscall records")]
+#[expect(
+    non_camel_case_types,
+    reason = "CG-032-camel-case-types: Preserve the Linux ABI type name used by syscall records"
+)]
 pub type k_sigval = sigval_t;
 
 // SAFETY: `sigval_t` is an ABI POD type copied verbatim at the syscall boundary.
@@ -132,7 +138,10 @@ unsafe impl UserRead for k_sigval {}
 /// A raw `sigevent` carrier read at the syscall boundary.
 ///
 /// Its nested `sigval_t` has the same partial-initialization risk.
-#[expect(non_camel_case_types, reason = "CG-032-camel-case-types: Preserve the Linux ABI type name used by syscall records")]
+#[expect(
+    non_camel_case_types,
+    reason = "CG-032-camel-case-types: Preserve the Linux ABI type name used by syscall records"
+)]
 pub type k_sigevent = sigevent;
 
 // SAFETY: `sigevent` is an ABI POD type copied verbatim at the syscall boundary.
