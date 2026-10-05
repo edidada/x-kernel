@@ -326,8 +326,8 @@ impl ProcessResources {
             let new_table = FdTable::clone_shared_from(table);
             #[expect(
                 clippy::expect_used,
-                reason = "The fd-table owner was checked while holding the same exclusive write \
-                          lock"
+                reason = "CG-021-no-panic-on-reachable-failure: The fd-table owner was checked \
+                          while holding the same exclusive write lock"
             )]
             owner
                 .replace(new_table)

@@ -129,8 +129,9 @@ impl<W: Drain> Owner<W> {
             let work = unsafe { &*storage.work.get().cast::<W>() };
             #[expect(
                 clippy::expect_used,
-                reason = "Reclamation runs on the normal worker outside the reclaimed callback; \
-                          fresh completion observers have inline registration capacity"
+                reason = "CG-021-no-panic-on-reachable-failure: Reclamation runs on the normal \
+                          worker outside the reclaimed callback; fresh completion observers have \
+                          inline registration capacity"
             )]
             work.drain()
                 .expect("normal reclamation can drain owned work");

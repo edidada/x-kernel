@@ -308,13 +308,13 @@ fn machine_matches_current_arch(machine: Machine) -> bool {
     return machine == Machine::Other(258);
     #[expect(
         clippy::allow_attributes,
-        reason = "Supported architecture cfg branches return before this unsupported-architecture \
-                  fallback"
+        reason = "CG-024-lint-exceptions: Supported architecture cfg branches return before this \
+                  unsupported-architecture fallback"
     )]
     #[allow(
         unreachable_code,
-        reason = "Supported architecture cfg branches return before this unsupported-architecture \
-                  fallback"
+        reason = "CG-024-lint-exceptions: unreachable_code: Supported architecture cfg branches \
+                  return before this unsupported-architecture fallback"
     )]
     false
 }

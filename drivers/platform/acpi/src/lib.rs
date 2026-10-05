@@ -6,9 +6,9 @@
 
 #![allow(
     clippy::panic,
-    reason = "case (b): 16 legacy panics on absent or malformed firmware tables (RSDP, XSDT/RSDT, \
-              MADT and SDT headers) need one parser failure contract rather than per-site \
-              judgement; new code remains reviewed"
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): 16 legacy panics on absent or \
+              malformed firmware tables (RSDP, XSDT/RSDT, MADT and SDT headers) need one parser \
+              failure contract rather than per-site judgement; new code remains reviewed"
 )]
 #![no_std]
 

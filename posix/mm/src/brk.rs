@@ -154,8 +154,8 @@ pub fn sys_brk(addr: usize) -> KResult<isize> {
 
     #[expect(
         clippy::expect_used,
-        reason = "A running user thread retains live process heap state for the duration of its \
-                  syscall"
+        reason = "CG-021-no-panic-on-reachable-failure: A running user thread retains live \
+                  process heap state for the duration of its syscall"
     )]
     current_user_process()
         .set_heap_top(request.requested_top)

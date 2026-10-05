@@ -51,8 +51,9 @@ impl UdpSocket {
     /// Creates a new UDP socket.
     #[expect(
         clippy::new_without_default,
-        reason = "Creating a socket initializes the UDP registry and allocates a PCB rather than \
-                  representing a default value"
+        reason = "CG-024-lint-exceptions: clippy::new_without_default: Creating a socket \
+                  initializes the UDP registry and allocates a PCB rather than representing a \
+                  default value"
     )]
     pub fn new() -> Self {
         registry::init_udp_registry();

@@ -41,8 +41,8 @@ pub fn is_bsp() -> bool {
 pub fn boot_cpu_init(id: LogicalCpuId) {
     #[expect(
         clippy::expect_used,
-        reason = "Fatal boot: the BSP or AP CPU slot cannot initialize; CPU entry has no error \
-                  return and cannot run without its slot"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the BSP or AP CPU slot cannot \
+                  initialize; CPU entry has no error return and cannot run without its slot"
     )]
     // SAFETY: boot CPU bring-up exclusively owns this CPU's unpublished area.
     let token = unsafe { kcpu_slot::begin_cpu_init(id) }
@@ -61,8 +61,8 @@ pub fn boot_cpu_init(id: LogicalCpuId) {
 pub fn ap_cpu_init(id: LogicalCpuId) {
     #[expect(
         clippy::expect_used,
-        reason = "Fatal boot: the BSP or AP CPU slot cannot initialize; CPU entry has no error \
-                  return and cannot run without its slot"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the BSP or AP CPU slot cannot \
+                  initialize; CPU entry has no error return and cannot run without its slot"
     )]
     // SAFETY: AP bring-up exclusively owns this CPU's unpublished area.
     let token = unsafe { kcpu_slot::begin_cpu_init(id) }

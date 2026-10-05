@@ -36,8 +36,8 @@ macro_rules! mrs {
     (@inner $val:expr, $reg:expr) => {{
         // `out(reg)` requires the destination variable directly in the
         // asm! block — local capture is not possible.
-        #[expect(clippy::allow_attributes, reason = "The register-read macro must pass the caller destination directly to asm out(reg)")]
-        #[allow(clippy::macro_metavars_in_unsafe, reason = "The register-read macro must pass the caller destination directly to asm out(reg)")]
+        #[expect(clippy::allow_attributes, reason = "CG-024-lint-exceptions: The register-read macro must pass the caller destination directly to asm out(reg)")]
+        #[allow(clippy::macro_metavars_in_unsafe, reason = "CG-024-lint-exceptions: clippy::macro_metavars_in_unsafe: The register-read macro must pass the caller destination directly to asm out(reg)")]
         {
             // SAFETY: reads a system register identified by the caller.
             // `nomem nostack` constrain the asm to the register access only.
@@ -47,8 +47,8 @@ macro_rules! mrs {
         }
     }};
     (@inner_w $val:expr, $reg:expr, $asm_width:tt) => {{
-        #[expect(clippy::allow_attributes, reason = "The register-read macro must pass the caller destination directly to asm out(reg)")]
-        #[allow(clippy::macro_metavars_in_unsafe, reason = "The register-read macro must pass the caller destination directly to asm out(reg)")]
+        #[expect(clippy::allow_attributes, reason = "CG-024-lint-exceptions: The register-read macro must pass the caller destination directly to asm out(reg)")]
+        #[allow(clippy::macro_metavars_in_unsafe, reason = "CG-024-lint-exceptions: clippy::macro_metavars_in_unsafe: The register-read macro must pass the caller destination directly to asm out(reg)")]
         {
             // SAFETY: reads a system register identified by the caller.
             // `nomem nostack` constrain the asm to the register access only.

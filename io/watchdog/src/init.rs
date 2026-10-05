@@ -79,9 +79,9 @@ fn init_nmi_watchdog() {
         crate::lockup_detection::DEFAULT_HARDLOCKUP_THRESHOLD.as_nanos() as u64,
         #[expect(
             clippy::panic,
-            reason = "The hard-lockup watchdog's contract is to stop the system once the cause \
-                      CPU has dumped all CPUs for a failed watchdog-task check; there is no \
-                      recovery path"
+            reason = "CG-021-no-panic-on-reachable-failure: The hard-lockup watchdog's contract \
+                      is to stop the system once the cause CPU has dumped all CPUs for a failed \
+                      watchdog-task check; there is no recovery path"
         )]
         || {
             // Every NMI checks whether watchdog tasks on THIS CPU are healthy.
@@ -205,8 +205,9 @@ pub fn init_softlockup_detection() {
         let timer = slot.insert(timer);
         #[expect(
             clippy::expect_used,
-            reason = "Fatal boot: the watchdog sampling timer cannot start; this CPU \
-                      initialization entry has no error return or recovery"
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the watchdog sampling \
+                      timer cannot start; this CPU initialization entry has no error return or \
+                      recovery"
         )]
         // SAFETY: the local scheduler/IRQ service is initialized. The per-CPU
         // slot retains storage forever; the handler preserves IRQ context and

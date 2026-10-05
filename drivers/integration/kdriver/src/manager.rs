@@ -147,7 +147,8 @@ pub fn device_manager() -> &'static DeviceManager {
     DEVICE_MANAGER.call_once(DeviceManager::new);
     #[expect(
         clippy::expect_used,
-        reason = "call_once completed successfully and permanently published the device manager"
+        reason = "CG-021-no-panic-on-reachable-failure: call_once completed successfully and \
+                  permanently published the device manager"
     )]
     DEVICE_MANAGER
         .get()

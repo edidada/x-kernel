@@ -182,7 +182,8 @@ impl Service {
     /// contention without aborting TX or protocol progress in the current round.
     #[expect(
         clippy::too_many_lines,
-        reason = "TODO(cg): legacy budgeted poll round; split ingress, timers and transmit phases"
+        reason = "CG-028-focused-functions: TODO(cg): legacy budgeted poll round; split ingress, \
+                  timers and transmit phases"
     )]
     pub(crate) fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
         let round_started_at = monotonic_time();

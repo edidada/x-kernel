@@ -169,8 +169,9 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
                 let paddr = alloc.bus_addr as PhysAddr;
                 #[expect(
                     clippy::expect_used,
-                    reason = "The resource-provider contract guarantees a non-null CPU address on \
-                              successful DMA allocation or MMIO mapping"
+                    reason = "CG-021-no-panic-on-reachable-failure: The resource-provider \
+                              contract guarantees a non-null CPU address on successful DMA \
+                              allocation or MMIO mapping"
                 )]
                 let ptr = NonNull::new(cpu_ptr).expect("dma allocation stored a null CPU address");
                 (paddr, ptr)
@@ -208,18 +209,20 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
             {
                 #[expect(
                     clippy::expect_used,
-                    reason = "The resource-provider contract guarantees a non-null CPU address on \
-                              successful DMA allocation or MMIO mapping"
+                    reason = "CG-021-no-panic-on-reachable-failure: The resource-provider \
+                              contract guarantees a non-null CPU address on successful DMA \
+                              allocation or MMIO mapping"
                 )]
                 NonNull::new(m.vaddr as *mut u8)
                     .expect("virtio mmio mapping stored a null virtual address")
             }
             #[expect(
                 clippy::panic,
-                reason = "TODO(cg): map_mmio can fail with NoMemory, InvalidResource or \
-                          MappingFailed during a fallible PCI probe, but this VirtIO HAL callback \
-                          can only return a pointer; pre-map the MMIO regions before constructing \
-                          the transport and fail the probe on mapping errors"
+                reason = "CG-021-no-panic-on-reachable-failure: TODO(cg): map_mmio can fail with \
+                          NoMemory, InvalidResource or MappingFailed during a fallible PCI probe, \
+                          but this VirtIO HAL callback can only return a pointer; pre-map the \
+                          MMIO regions before constructing the transport and fail the probe on \
+                          mapping errors"
             )]
             Err(err) => {
                 log::error!(

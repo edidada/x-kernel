@@ -22,8 +22,8 @@ pub fn reserved_regions(
         let single = [region.range()];
         #[expect(
             clippy::unwrap_used,
-            reason = "exclusion_ranges contains only the kernel image, so the cut list cannot \
-                      overlap itself"
+            reason = "CG-021-no-panic-on-reachable-failure: exclusion_ranges contains only the \
+                      kernel image, so the cut list cannot overlap itself"
         )]
         sub_ranges(&single, &exclusions, |(start, size)| {
             push_reserved_region(
@@ -108,9 +108,9 @@ fn exclusion_ranges(
 
 #[expect(
     clippy::panic,
-    reason = "Fatal boot: firmware reserved regions overlap with different kind, source or name, \
-              so the reserved map cannot be normalized; boot memory initialization has no error \
-              return or recovery"
+    reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: firmware reserved regions overlap \
+              with different kind, source or name, so the reserved map cannot be normalized; boot \
+              memory initialization has no error return or recovery"
 )]
 fn push_reserved_region<const N: usize>(
     regions: &mut Vec<ReservedRegion, N>,

@@ -103,8 +103,8 @@ impl TimerFdInner {
         } else {
             #[expect(
                 clippy::expect_used,
-                reason = "The deadline and current time use the immutable timerfd clock domain \
-                          and now was checked not earlier"
+                reason = "CG-021-no-panic-on-reachable-failure: The deadline and current time use \
+                          the immutable timerfd clock domain and now was checked not earlier"
             )]
             let overdue = now
                 .checked_duration_since(deadline)
@@ -147,8 +147,8 @@ impl ktask::TimerHandler for TimerFdHandler {
             // disarmed until read; tiny user intervals must not loop in IRQ.
             #[expect(
                 clippy::expect_used,
-                reason = "core_deadline bounds the deadline and the initialized task or timer \
-                          callback supplies a valid CPU route"
+                reason = "CG-021-no-panic-on-reachable-failure: core_deadline bounds the deadline \
+                          and the initialized task or timer callback supplies a valid CPU route"
             )]
             timer
                 .rearm(core_deadline(deadline))
@@ -286,8 +286,8 @@ impl TimerFd {
         if !fired && let Some(deadline) = inner.deadline {
             #[expect(
                 clippy::expect_used,
-                reason = "core_deadline bounds the deadline and the initialized task or timer \
-                          callback supplies a valid CPU route"
+                reason = "CG-021-no-panic-on-reachable-failure: core_deadline bounds the deadline \
+                          and the initialized task or timer callback supplies a valid CPU route"
             )]
             // SAFETY: settime runs in initialized task context. The FD retains
             // stable handler state; the handler preserves hard-IRQ context
@@ -338,8 +338,8 @@ impl TimerFd {
         if let Some(deadline) = inner.deadline {
             #[expect(
                 clippy::expect_used,
-                reason = "core_deadline bounds the deadline and the initialized task or timer \
-                          callback supplies a valid CPU route"
+                reason = "CG-021-no-panic-on-reachable-failure: core_deadline bounds the deadline \
+                          and the initialized task or timer callback supplies a valid CPU route"
             )]
             // SAFETY: file reads run in initialized task context. The owned
             // handler retains only independent state and obeys IRQ constraints.

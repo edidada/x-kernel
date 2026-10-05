@@ -184,8 +184,8 @@ pub fn enable_fixed_notifications() {
     let _guard = kspin::IrqSave::new();
     #[expect(
         clippy::expect_used,
-        reason = "Fatal boot: the fixed IPI IRQ cannot be enabled; CPU notification \
-                  initialization has no error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the fixed IPI IRQ cannot be \
+                  enabled; CPU notification initialization has no error return or recovery"
     )]
     kirq::try_enable(kbuild_config::IPI_IRQ, true).expect("fixed IPI line enable failed");
     PENDING[this_cpu_id().as_usize()].enable();

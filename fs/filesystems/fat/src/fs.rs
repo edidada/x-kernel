@@ -78,7 +78,8 @@ impl FatFilesystem {
     pub(crate) fn fill_super(super_block: &Arc<SuperBlock>) -> VfsResult<()> {
         #[expect(
             clippy::expect_used,
-            reason = "get_tree_bdev installs the block device before invoking fill_super"
+            reason = "CG-021-no-panic-on-reachable-failure: get_tree_bdev installs the block \
+                      device before invoking fill_super"
         )]
         let dev = super_block
             .block_device()

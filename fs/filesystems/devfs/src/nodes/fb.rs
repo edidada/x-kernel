@@ -105,14 +105,14 @@ impl FrameBuffer {
         // constructing us, so the shadow is guaranteed present.
         #[expect(
             clippy::expect_used,
-            reason = "The caller checks fb_available and the framebuffer shadow remains allocated \
-                      for kernel lifetime"
+            reason = "CG-021-no-panic-on-reachable-failure: The caller checks fb_available and \
+                      the framebuffer shadow remains allocated for kernel lifetime"
         )]
         let base = fbdevice::fb_shadow_vaddr().expect("fbdev shadow missing");
         #[expect(
             clippy::expect_used,
-            reason = "The caller checks fb_available and the framebuffer shadow remains allocated \
-                      for kernel lifetime"
+            reason = "CG-021-no-panic-on-reachable-failure: The caller checks fb_available and \
+                      the framebuffer shadow remains allocated for kernel lifetime"
         )]
         let size = fbdevice::fb_shadow_size().expect("fbdev shadow missing");
         Self { base, size }
@@ -120,8 +120,8 @@ impl FrameBuffer {
 
     #[expect(
         clippy::mut_from_ref,
-        reason = "DeviceFileOps supplies a shared receiver for access to the externally mapped \
-                  fbdev shadow buffer"
+        reason = "CG-024-lint-exceptions: clippy::mut_from_ref: DeviceFileOps supplies a shared \
+                  receiver for access to the externally mapped fbdev shadow buffer"
     )]
     fn as_mut_slice(&self) -> &mut [u8] {
         // SAFETY: `base..base+size` is the fbdev emulation shadow buffer,

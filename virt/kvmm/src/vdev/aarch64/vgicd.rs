@@ -153,7 +153,8 @@ impl MmioDevice for Vgicd {
 
     #[expect(
         clippy::unwrap_used,
-        reason = "each unwrap repeats the word_index call that its match guard proved is Some"
+        reason = "CG-021-no-panic-on-reachable-failure: each unwrap repeats the word_index call \
+                  that its match guard proved is Some"
     )]
     fn read_for_vcpu(&self, offset: u64, size: u8, vcpu_id: u32) -> u64 {
         match offset {
@@ -183,7 +184,8 @@ impl MmioDevice for Vgicd {
 
     #[expect(
         clippy::unwrap_used,
-        reason = "each unwrap repeats the word_index call that its match guard proved is Some"
+        reason = "CG-021-no-panic-on-reachable-failure: each unwrap repeats the word_index call \
+                  that its match guard proved is Some"
     )]
     fn write_for_vcpu(&mut self, offset: u64, size: u8, value: u64, vcpu_id: u32) {
         let v = value as u32;

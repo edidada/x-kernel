@@ -59,8 +59,8 @@ pub static FILE_SYSTEM_TYPE: kvfs::FileSystemType =
 fn init_bpf_fs() {
     #[expect(
         clippy::expect_used,
-        reason = "Each statically named filesystem is registered once by its unique linker \
-                  initialization entry"
+        reason = "CG-021-no-panic-on-reachable-failure: Each statically named filesystem is \
+                  registered once by its unique linker initialization entry"
     )]
     kvfs::register_filesystem(&FILE_SYSTEM_TYPE).expect("BPF filesystem type must register once");
 }

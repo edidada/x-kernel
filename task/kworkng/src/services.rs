@@ -63,8 +63,8 @@ pub(crate) fn prepare_queue(
         let binding = |cpu| {
             #[expect(
                 clippy::expect_used,
-                reason = "The complete immutable CPU service coverage was validated before \
-                          binding the queue"
+                reason = "CG-021-no-panic-on-reachable-failure: The complete immutable CPU \
+                          service coverage was validated before binding the queue"
             )]
             services
                 .binding(cpu, kind)
@@ -156,16 +156,18 @@ impl Services {
                 {
                     #[expect(
                         clippy::expect_used,
-                        reason = "Successful normal and bottom-half startup covers every CPU in \
-                                  the same boot CPU configuration"
+                        reason = "CG-021-no-panic-on-reachable-failure: Successful normal and \
+                                  bottom-half startup covers every CPU in the same boot CPU \
+                                  configuration"
                     )]
                     normal.binding(cpu).expect("normal boot CPU coverage")
                 }
                 ExecutionKind::BottomHalf(priority) => {
                     #[expect(
                         clippy::expect_used,
-                        reason = "Successful normal and bottom-half startup covers every CPU in \
-                                  the same boot CPU configuration"
+                        reason = "CG-021-no-panic-on-reachable-failure: Successful normal and \
+                                  bottom-half startup covers every CPU in the same boot CPU \
+                                  configuration"
                     )]
                     let service = bottom_half
                         .service(cpu, priority)
@@ -349,8 +351,8 @@ fn install_with_actions(
             Ok({
                 #[expect(
                     clippy::expect_used,
-                    reason = "try_call_once invokes this closure at most once and candidate \
-                              starts as Some"
+                    reason = "CG-021-no-panic-on-reachable-failure: try_call_once invokes this \
+                              closure at most once and candidate starts as Some"
                 )]
                 candidate.take().expect("initializing candidate")
             })
@@ -363,15 +365,15 @@ fn install_with_actions(
     };
     #[expect(
         clippy::expect_used,
-        reason = "A published candidate returned above; all remaining outcomes retain the \
-                  unpublished candidate"
+        reason = "CG-021-no-panic-on-reachable-failure: A published candidate returned above; all \
+                  remaining outcomes retain the unpublished candidate"
     )]
     let retired = candidate.expect("failed candidate was not published");
     // Once has ended initialization; join tasks and timer cleanup without locks.
     #[expect(
         clippy::expect_used,
-        reason = "Rollback runs in the same sleepable task after dropping the preemption guard, \
-                  with fresh inline completion registrations"
+        reason = "CG-021-no-panic-on-reachable-failure: Rollback runs in the same sleepable task \
+                  after dropping the preemption guard, with fresh inline completion registrations"
     )]
     retired
         .normal
@@ -399,8 +401,8 @@ fn run(priority: BottomHalfPriority) {
         };
         #[expect(
             clippy::expect_used,
-            reason = "Bottom-half registration installs services for every immutable boot CPU \
-                      before publishing actions"
+            reason = "CG-021-no-panic-on-reachable-failure: Bottom-half registration installs \
+                      services for every immutable boot CPU before publishing actions"
         )]
         let service = services
             .bottom_half
@@ -408,8 +410,8 @@ fn run(priority: BottomHalfPriority) {
             .expect("BH registration covers every boot CPU");
         #[expect(
             clippy::expect_used,
-            reason = "The registered softirq action runs on its pinned owner CPU in bottom-half \
-                      context"
+            reason = "CG-021-no-panic-on-reachable-failure: The registered softirq action runs on \
+                      its pinned owner CPU in bottom-half context"
         )]
         service.run_pass().expect("registered local softirq entry");
     });

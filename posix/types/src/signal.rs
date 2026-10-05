@@ -16,7 +16,7 @@ use crate::{UserRead, UserWrite};
 #[repr(transparent)]
 #[expect(
     non_camel_case_types,
-    reason = "Preserve the Linux ABI type name used by syscall records"
+    reason = "CG-032-camel-case-types: Preserve the Linux ABI type name used by syscall records"
 )]
 pub struct k_sigset(
     /// Raw signal bits; bit zero represents signal 1.
@@ -56,7 +56,7 @@ impl From<kernel_sigset_t> for k_sigset {
 /// so syscall copies cannot diverge from the architecture's field layout.
 #[expect(
     non_camel_case_types,
-    reason = "Preserve the Linux ABI type name used by syscall records"
+    reason = "CG-032-camel-case-types: Preserve the Linux ABI type name used by syscall records"
 )]
 pub type k_sigaction = kernel_sigaction;
 
@@ -72,7 +72,7 @@ unsafe impl UserWrite for k_sigaction {}
 #[repr(transparent)]
 #[expect(
     non_camel_case_types,
-    reason = "Preserve the Linux ABI type name used by syscall records"
+    reason = "CG-032-camel-case-types: Preserve the Linux ABI type name used by syscall records"
 )]
 pub struct k_siginfo(
     /// Raw Linux signal-information record, including its tagged union payload.
@@ -82,7 +82,7 @@ pub struct k_siginfo(
 /// A raw `sigval_t` carrier used at the syscall boundary.
 #[expect(
     non_camel_case_types,
-    reason = "Preserve the Linux ABI type name used by syscall records"
+    reason = "CG-032-camel-case-types: Preserve the Linux ABI type name used by syscall records"
 )]
 pub type k_sigval = sigval_t;
 
@@ -94,7 +94,7 @@ unsafe impl UserWrite for k_sigval {}
 /// A raw `sigevent` carrier used at the syscall boundary.
 #[expect(
     non_camel_case_types,
-    reason = "Preserve the Linux ABI type name used by syscall records"
+    reason = "CG-032-camel-case-types: Preserve the Linux ABI type name used by syscall records"
 )]
 pub type k_sigevent = sigevent;
 

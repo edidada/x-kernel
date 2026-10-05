@@ -382,8 +382,8 @@ impl<T> FairClass<T> {
         );
         #[expect(
             clippy::unwrap_used,
-            reason = "the preceding assertion proves this cursor points to the ready task in the \
-                      vruntime tree"
+            reason = "CG-021-no-panic-on-reachable-failure: the preceding assertion proves this \
+                      cursor points to the ready task in the vruntime tree"
         )]
         let secondary = cursor.remove().unwrap();
         if self
@@ -465,8 +465,8 @@ impl<T> FairClass<T> {
         Some({
             #[expect(
                 clippy::expect_used,
-                reason = "A nominated eligible buddy remains in the ready tree under the runqueue \
-                          lock"
+                reason = "CG-021-no-panic-on-reachable-failure: A nominated eligible buddy \
+                          remains in the ready tree under the runqueue lock"
             )]
             self.dequeue_entity(Self::deadline_key(&buddy, tok), tok)
                 .expect("nominated buddy is in the ready tree")
@@ -569,7 +569,8 @@ impl<T> FairClass<T> {
         };
         #[expect(
             clippy::expect_used,
-            reason = "earliest_eligible returns a key from this unchanged, locked ready tree"
+            reason = "CG-021-no-panic-on-reachable-failure: earliest_eligible returns a key from \
+                      this unchanged, locked ready tree"
         )]
         let peer = self
             .ready
@@ -680,8 +681,9 @@ impl<T> ClassOps<T> for FairClass<T> {
             {
                 #[expect(
                     clippy::expect_used,
-                    reason = "The ready tree was checked nonempty and the selected key remains \
-                              present under the runqueue lock"
+                    reason = "CG-021-no-panic-on-reachable-failure: The ready tree was checked \
+                              nonempty and the selected key remains present under the runqueue \
+                              lock"
                 )]
                 self.first_deadline_key(tok)
                     .expect("ready tree is not empty")
@@ -689,8 +691,8 @@ impl<T> ClassOps<T> for FairClass<T> {
         };
         #[expect(
             clippy::expect_used,
-            reason = "The ready tree was checked nonempty and the selected key remains present \
-                      under the runqueue lock"
+            reason = "CG-021-no-panic-on-reachable-failure: The ready tree was checked nonempty \
+                      and the selected key remains present under the runqueue lock"
         )]
         let picked = self
             .dequeue_entity(key, tok)

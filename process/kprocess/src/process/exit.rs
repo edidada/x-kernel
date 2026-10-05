@@ -371,8 +371,8 @@ impl Process {
         // TODO: child subreaper
         #[expect(
             clippy::unwrap_used,
-            reason = "the initial process is published before any process can enter exit and \
-                      reparent children"
+            reason = "CG-021-no-panic-on-reachable-failure: the initial process is published \
+                      before any process can enter exit and reparent children"
         )]
         let reaper = INIT_PROC.get().unwrap();
 

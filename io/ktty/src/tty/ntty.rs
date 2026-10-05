@@ -149,14 +149,15 @@ fn new_n_tty() -> Arc<NTtyDriver> {
     if has_input_irq {
         #[expect(
             clippy::unwrap_used,
-            reason = "has_input_irq selected ProcessMode::Work when constructing this TTY, which \
-                      installs input_work"
+            reason = "CG-021-no-panic-on-reachable-failure: has_input_irq selected \
+                      ProcessMode::Work when constructing this TTY, which installs input_work"
         )]
         let (work, cpu_id) = tty.ldisc.lock().input_work().unwrap();
         #[expect(
             clippy::expect_used,
-            reason = "The singleton N_TTY binds once after console IRQ initialization has \
-                      installed the stdout port and prepared its input buffer"
+            reason = "CG-021-no-panic-on-reachable-failure: The singleton N_TTY binds once after \
+                      console IRQ initialization has installed the stdout port and prepared its \
+                      input buffer"
         )]
         console_driver::serial::stdout_port()
             .expect("console input IRQ requires a stdout port")

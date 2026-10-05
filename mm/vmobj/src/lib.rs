@@ -179,8 +179,8 @@ impl MappingView {
     ) -> Self {
         #[expect(
             clippy::expect_used,
-            reason = "The infallible mapping-view constructor requires a valid range; unvalidated \
-                      inputs use try_new"
+            reason = "CG-021-no-panic-on-reachable-failure: The infallible mapping-view \
+                      constructor requires a valid range; unvalidated inputs use try_new"
         )]
         Self::try_new(id, mm_id, range, kind).expect("mapping view range must be valid")
     }
@@ -376,8 +376,8 @@ impl ObjectViewHit {
     pub fn vma_start(&self) -> u64 {
         #[expect(
             clippy::expect_used,
-            reason = "ObjectViewHit construction checks that the object hit lies inside its \
-                      mapped view"
+            reason = "CG-021-no-panic-on-reachable-failure: ObjectViewHit construction checks \
+                      that the object hit lies inside its mapped view"
         )]
         let offset = self
             .view
@@ -457,8 +457,8 @@ impl ObjectInvalidateWork {
     ) -> Self {
         #[expect(
             clippy::expect_used,
-            reason = "The infallible invalidation constructor requires a valid covering range; \
-                      unvalidated inputs use try_new"
+            reason = "CG-021-no-panic-on-reachable-failure: The infallible invalidation \
+                      constructor requires a valid covering range; unvalidated inputs use try_new"
         )]
         Self::try_new(object, object_start, object_len, hits)
             .expect("invalidate work range must be valid and cover every hit")

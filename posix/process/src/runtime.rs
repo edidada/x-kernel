@@ -115,13 +115,13 @@ pub(crate) fn run_user_thread_loop(
             }
             #[expect(
                 clippy::allow_attributes,
-                reason = "The exception label is used only by architecture-specific exception \
-                          recovery branches"
+                reason = "CG-024-lint-exceptions: The exception label is used only by \
+                          architecture-specific exception recovery branches"
             )]
             #[allow(
                 unused_labels,
-                reason = "The exception label is used only by architecture-specific exception \
-                          recovery branches"
+                reason = "CG-024-lint-exceptions: unused_labels: The exception label is used only \
+                          by architecture-specific exception recovery branches"
             )]
             ReturnReason::Exception(exc_info) => 'exc: {
                 let signo = match exc_info.kind() {

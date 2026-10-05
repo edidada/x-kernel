@@ -12,8 +12,8 @@
 //! - [`UdpDatagramRelay`]: A persistent nonblocking UDP relay socket.
 #![allow(
     clippy::expect_used,
-    reason = "case (b): legacy knet has 20 diagnostic sites, too many to judge individually in \
-              this migration; new code remains reviewed"
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): legacy knet has 20 diagnostic \
+              sites, too many to judge individually in this migration; new code remains reviewed"
 )]
 #![no_std]
 
@@ -99,7 +99,8 @@ pub fn init_network() {
 
     #[expect(
         clippy::unwrap_used,
-        reason = "the fixed loopback prefix length 8 is within the IPv4 range 0 through 32"
+        reason = "CG-021-no-panic-on-reachable-failure: the fixed loopback prefix length 8 is \
+                  within the IPv4 range 0 through 32"
     )]
     let lo_ip = Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8).unwrap();
     router
@@ -132,7 +133,8 @@ pub fn init_network() {
             .expect("Ethernet IPv4 address must fit the interface");
         #[expect(
             clippy::unwrap_used,
-            reason = "the fixed default-route IPv4 prefix length 0 is valid"
+            reason = "CG-021-no-panic-on-reachable-failure: the fixed default-route IPv4 prefix \
+                      length 0 is valid"
         )]
         router.add_rule(Rule::new(
             Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).unwrap().into(),

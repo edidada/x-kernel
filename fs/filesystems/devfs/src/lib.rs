@@ -55,8 +55,8 @@ pub static FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("devtmpfs", 
 fn init_devfs_fs() {
     #[expect(
         clippy::expect_used,
-        reason = "Each statically named filesystem is registered once by its unique linker \
-                  initialization entry"
+        reason = "CG-021-no-panic-on-reachable-failure: Each statically named filesystem is \
+                  registered once by its unique linker initialization entry"
     )]
     kvfs::register_filesystem(&FILE_SYSTEM_TYPE)
         .expect("devtmpfs filesystem type must register once");

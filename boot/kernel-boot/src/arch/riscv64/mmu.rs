@@ -198,9 +198,9 @@ unsafe fn root_l1_table(root_idx: usize) -> *mut PageAligned<[u64; PT_ENTRIES]> 
 /// resolves this image's physical symbols.
 #[expect(
     clippy::panic,
-    reason = "Boot callers map each VA window at one fixed VA-to-PA offset (linear map at \
-              PAGE_OFFSET, kernel image at its image offset) and the windows do not overlap, so a \
-              present entry for va already maps pa"
+    reason = "CG-021-no-panic-on-reachable-failure: Boot callers map each VA window at one fixed \
+              VA-to-PA offset (linear map at PAGE_OFFSET, kernel image at its image offset) and \
+              the windows do not overlap, so a present entry for va already maps pa"
 )]
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_2m_page(va: usize, pa: usize, flags: u64) {
@@ -297,9 +297,9 @@ unsafe fn map_boot_linear_ram_from_dtb(dtb_paddr: usize) {
 
     #[expect(
         clippy::panic,
-        reason = "Fatal boot: the firmware DTB pointer does not reference a readable device tree, \
-                  so boot RAM cannot be mapped; early page-table setup has no error return or \
-                  recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the firmware DTB pointer does \
+                  not reference a readable device tree, so boot RAM cannot be mapped; early \
+                  page-table setup has no error return or recovery"
     )]
     // SAFETY: `dtb_paddr` is the boot firmware DTB pointer supplied to early
     // boot, and this helper only reads the fixed memory-region description from it.

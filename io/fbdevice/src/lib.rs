@@ -152,8 +152,8 @@ pub fn fb_available() -> bool {
 pub fn fb_info() -> DisplayInfo {
     #[expect(
         clippy::expect_used,
-        reason = "fb_info requires fb_available; the initialized framebuffer is retained for \
-                  kernel lifetime"
+        reason = "CG-021-no-panic-on-reachable-failure: fb_info requires fb_available; the \
+                  initialized framebuffer is retained for kernel lifetime"
     )]
     FB.lock()
         .as_ref()

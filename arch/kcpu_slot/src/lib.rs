@@ -7,7 +7,8 @@
 #![warn(missing_docs)]
 #![allow(
     clippy::new_without_default,
-    reason = "carried over from Cargo.toml; no public argument-less new() exists today"
+    reason = "CG-024-lint-exceptions: clippy::new_without_default: carried over from Cargo.toml; \
+              no public argument-less new() exists today"
 )]
 
 //! Architecture-backed typed per-CPU storage.

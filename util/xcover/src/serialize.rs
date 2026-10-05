@@ -174,7 +174,7 @@ pub(crate) fn encoded_size(snapshot: &ProfileSnapshot) -> u64 {
 #[cfg(feature = "alloc")]
 #[expect(
     clippy::too_many_lines,
-    reason = "TODO(cg): legacy profraw encoder; split per output section"
+    reason = "CG-028-focused-functions: TODO(cg): legacy profraw encoder; split per output section"
 )]
 pub(crate) fn encode(
     snapshot: &ProfileSnapshot,

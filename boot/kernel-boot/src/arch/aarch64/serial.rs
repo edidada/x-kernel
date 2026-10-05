@@ -32,8 +32,9 @@ static BOOT_CONSOLE_START_OF_LINE: AtomicBool = AtomicBool::new(true);
 fn assert_boot_uart_fits_boot_io_window() {
     #[expect(
         clippy::expect_used,
-        reason = "Fatal boot: the configured early UART address is absent or invalid; \
-                  boot-console access has no error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the configured early UART \
+                  address is absent or invalid; boot-console access has no error return or \
+                  recovery"
     )]
     let uart_paddr = bootconsole_config::mmio_addr().expect("missing boot console mmio address");
     let offset = uart_paddr & (BOOT_IO_SLOT_SIZE - 1);
@@ -446,8 +447,8 @@ impl Uart {
 
 #[expect(
     dead_code,
-    reason = "Retain register-dump helpers for diagnosing boot failures before normal logging is \
-              available"
+    reason = "CG-024-lint-exceptions: dead_code: Retain register-dump helpers for diagnosing boot \
+              failures before normal logging is available"
 )]
 pub(crate) fn print_el1_reg(switch: bool) {
     if !switch {
@@ -504,8 +505,8 @@ macro_rules! boot_print_reg {
 
 #[expect(
     dead_code,
-    reason = "Retain direct serial output for diagnosing failures before normal logging is \
-              available"
+    reason = "CG-024-lint-exceptions: dead_code: Retain direct serial output for diagnosing \
+              failures before normal logging is available"
 )]
 #[unsafe(link_section = ".idmap.text")]
 pub(crate) fn boot_serial_send(data: u8) {

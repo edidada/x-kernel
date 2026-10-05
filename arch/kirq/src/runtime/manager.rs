@@ -81,7 +81,8 @@ pub fn try_map(desc: IrqDesc) -> Result<Virq, IrqDescError> {
     let mut state = IRQ_STATE.lock();
     #[expect(
         clippy::unwrap_used,
-        reason = "try_resolve_and_publish returns only descriptors assigned a logical IRQ"
+        reason = "CG-021-no-panic-on-reachable-failure: try_resolve_and_publish returns only \
+                  descriptors assigned a logical IRQ"
     )]
     Ok(try_resolve_and_publish(&mut state, IrqSpec::Desc(desc))?
         .logical_irq()
@@ -153,14 +154,14 @@ fn try_enable_irq_inner(spec: IrqSpec, force_platform_enable: bool) -> Result<()
             let desc = try_resolve_and_publish(&mut state, spec)?;
             #[expect(
                 clippy::unwrap_used,
-                reason = "try_resolve_and_publish succeeded and assigned this descriptor a \
-                          logical IRQ"
+                reason = "CG-021-no-panic-on-reachable-failure: try_resolve_and_publish succeeded \
+                          and assigned this descriptor a logical IRQ"
             )]
             let virq = desc.logical_irq().unwrap();
             #[expect(
                 clippy::expect_used,
-                reason = "try_resolve_and_publish installed this descriptor in the same \
-                          exclusively borrowed registry"
+                reason = "CG-021-no-panic-on-reachable-failure: try_resolve_and_publish installed \
+                          this descriptor in the same exclusively borrowed registry"
             )]
             let entry = state
                 .descs
@@ -461,13 +462,14 @@ fn resolve_action_install_entry<'a>(
     let desc = try_resolve_and_publish(state, spec)?;
     #[expect(
         clippy::unwrap_used,
-        reason = "try_resolve_and_publish succeeded and assigned this descriptor a logical IRQ"
+        reason = "CG-021-no-panic-on-reachable-failure: try_resolve_and_publish succeeded and \
+                  assigned this descriptor a logical IRQ"
     )]
     let virq = desc.logical_irq().unwrap();
     #[expect(
         clippy::expect_used,
-        reason = "try_resolve_and_publish installed this descriptor in the same exclusively \
-                  borrowed registry"
+        reason = "CG-021-no-panic-on-reachable-failure: try_resolve_and_publish installed this \
+                  descriptor in the same exclusively borrowed registry"
     )]
     let entry = state
         .descs
@@ -592,9 +594,10 @@ pub fn try_free_irq_action(
 
 #[expect(
     clippy::panic,
-    reason = "TODO(cg): waiter registration can fail (e.g. NoMemory) after the action is removed \
-              and teardown has begun; preallocate and register the completion waiter before \
-              removing the action so the failure returns an error with the action still installed"
+    reason = "CG-021-no-panic-on-reachable-failure: TODO(cg): waiter registration can fail (e.g. \
+              NoMemory) after the action is removed and teardown has begun; preallocate and \
+              register the completion waiter before removing the action so the failure returns an \
+              error with the action still installed"
 )]
 fn try_free_irq_inner(
     spec: IrqSpec,

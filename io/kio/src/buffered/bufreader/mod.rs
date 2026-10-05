@@ -359,9 +359,9 @@ impl<R: ?Sized + Seek> Seek for BufReader<R> {
         self.inner.stream_position().map(|pos| {
             #[expect(
                 clippy::expect_used,
-                reason = "BufReader owns the buffered bytes preceding the underlying position; \
-                          seeking the inner reader behind them violates stream_position \
-                          requirements"
+                reason = "CG-021-no-panic-on-reachable-failure: BufReader owns the buffered bytes \
+                          preceding the underlying position; seeking the inner reader behind them \
+                          violates stream_position requirements"
             )]
             pos.checked_sub(remainder).expect(
                 "overflow when subtracting remaining buffer size from inner stream position",

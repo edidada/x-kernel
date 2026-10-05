@@ -266,8 +266,9 @@ impl UserContext {
 
         #[expect(
             clippy::unwrap_used,
-            reason = "kernel four-level paging records canonical page-fault addresses in CR2; no \
-                      kernel path writes a noncanonical CR2 value"
+            reason = "CG-021-no-panic-on-reachable-failure: kernel four-level paging records \
+                      canonical page-fault addresses in CR2; no kernel path writes a noncanonical \
+                      CR2 value"
         )]
         let cr2 = Cr2::read().unwrap().as_u64() as usize;
         let vector = self.vector as u8;
@@ -347,8 +348,8 @@ pub(super) fn init_syscall() {
     ));
     #[expect(
         clippy::unwrap_used,
-        reason = "the fixed GDT selectors satisfy STAR ordering: UCODE64 follows UDATA and KDATA \
-                  follows KCODE64"
+        reason = "CG-021-no-panic-on-reachable-failure: the fixed GDT selectors satisfy STAR \
+                  ordering: UCODE64 follows UDATA and KDATA follows KCODE64"
     )]
     Star::write(gdt::UCODE64, gdt::UDATA, gdt::KCODE64, gdt::KDATA).unwrap();
     SFMask::write(

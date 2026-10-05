@@ -60,15 +60,15 @@ pub static TMPFS_TYPE: FileSystemType = FileSystemType::nodev("tmpfs", init_tmpf
 fn init_memory_filesystems() {
     #[expect(
         clippy::expect_used,
-        reason = "Each statically named filesystem is registered once by its unique linker \
-                  initialization entry"
+        reason = "CG-021-no-panic-on-reachable-failure: Each statically named filesystem is \
+                  registered once by its unique linker initialization entry"
     )]
     kvfs::register_filesystem(&ramfs::RAMFS_TYPE)
         .expect("ramfs filesystem type must register once");
     #[expect(
         clippy::expect_used,
-        reason = "Each statically named filesystem is registered once by its unique linker \
-                  initialization entry"
+        reason = "CG-021-no-panic-on-reachable-failure: Each statically named filesystem is \
+                  registered once by its unique linker initialization entry"
     )]
     kvfs::register_filesystem(&TMPFS_TYPE).expect("tmpfs filesystem type must register once");
 }
@@ -122,7 +122,8 @@ impl MemoryFs {
     /// Creates an in-memory superblock.
     #[expect(
         clippy::new_ret_no_self,
-        reason = "MemFs construction returns the mounted SuperBlock that owns the filesystem"
+        reason = "CG-024-lint-exceptions: clippy::new_ret_no_self: MemFs construction returns the \
+                  mounted SuperBlock that owns the filesystem"
     )]
     pub fn new() -> Arc<SuperBlock> {
         Self::new_with_superblock_flags(SuperBlockFlags::empty())

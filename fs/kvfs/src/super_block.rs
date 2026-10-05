@@ -425,8 +425,9 @@ impl SuperBlockLifecycle {
     fn release_unless_last(&mut self) -> bool {
         #[expect(
             clippy::panic,
-            reason = "Each release pairs with a successful try_acquire_mount, which succeeds only \
-                      in Available and keeps the state there until the last release"
+            reason = "CG-021-no-panic-on-reachable-failure: Each release pairs with a successful \
+                      try_acquire_mount, which succeeds only in Available and keeps the state \
+                      there until the last release"
         )]
         let Self::Available { active_mounts } = self else {
             panic!("every active mount release must match an acquisition");
@@ -434,8 +435,9 @@ impl SuperBlockLifecycle {
         match *active_mounts {
             #[expect(
                 clippy::panic,
-                reason = "Each release pairs with a successful try_acquire_mount, so an Available \
-                          state being released holds at least one active mount"
+                reason = "CG-021-no-panic-on-reachable-failure: Each release pairs with a \
+                          successful try_acquire_mount, so an Available state being released \
+                          holds at least one active mount"
             )]
             0 => panic!("every active mount release must match an acquisition"),
             1 => true,

@@ -49,8 +49,9 @@ impl<T> ClassOps<T> for IdleClass<T> {
 
     #[expect(
         clippy::panic,
-        reason = "Each run queue installs its idle task directly and never enqueues it; the \
-                  SCHED_IDLE policy maps to the Fair class, not this one"
+        reason = "CG-021-no-panic-on-reachable-failure: Each run queue installs its idle task \
+                  directly and never enqueues it; the SCHED_IDLE policy maps to the Fair class, \
+                  not this one"
     )]
     fn enqueue(
         &mut self,

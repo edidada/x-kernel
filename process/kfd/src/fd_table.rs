@@ -274,8 +274,8 @@ impl Drop for FdTable {
             };
             #[expect(
                 clippy::expect_used,
-                reason = "Exclusive descriptor-table teardown removes the ID just obtained from \
-                          this same table"
+                reason = "CG-021-no-panic-on-reachable-failure: Exclusive descriptor-table \
+                          teardown removes the ID just obtained from this same table"
             )]
             let descriptor = self.remove(fd).expect("descriptor id must remain present");
             // Teardown has no error channel and must close the remaining descriptors.

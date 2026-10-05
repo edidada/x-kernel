@@ -9,14 +9,16 @@
     target_arch = "x86_64",
     expect(
         clippy::new_without_default,
-        reason = "x86_64 TaskContext::new() reads the live CR3, so it must not be Default"
+        reason = "CG-024-lint-exceptions: clippy::new_without_default: x86_64 TaskContext::new() \
+                  reads the live CR3, so it must not be Default"
     )
 )]
 #![allow(
     clippy::panic,
-    reason = "case (b): 15 legacy trap-path panics (unhandled exceptions, kernel faults, invalid \
-              page-fault codes, LoongArch unaligned emulation) across four architectures need a \
-              recovery-policy review rather than per-site judgement; new code remains reviewed"
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): 15 legacy trap-path panics \
+              (unhandled exceptions, kernel faults, invalid page-fault codes, LoongArch unaligned \
+              emulation) across four architectures need a recovery-policy review rather than \
+              per-site judgement; new code remains reviewed"
 )]
 
 #[macro_use]

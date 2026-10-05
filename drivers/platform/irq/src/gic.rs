@@ -74,8 +74,9 @@ impl GicConfig {
         map_mmio_region(
             #[expect(
                 clippy::expect_used,
-                reason = "Fatal boot: GICv2 has no CPU-interface region; interrupt-controller \
-                          initialization has no error return or recovery"
+                reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: GICv2 has no \
+                          CPU-interface region; interrupt-controller initialization has no error \
+                          return or recovery"
             )]
             self.gicc.expect("missing GICC region"),
             GICC_NAME,
@@ -86,8 +87,9 @@ impl GicConfig {
         map_mmio_region(
             #[expect(
                 clippy::expect_used,
-                reason = "Fatal boot: GICv3 has no redistributor region; interrupt-controller \
-                          initialization has no error return or recovery"
+                reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: GICv3 has no \
+                          redistributor region; interrupt-controller initialization has no error \
+                          return or recovery"
             )]
             self.gicr.expect("missing GICR region"),
             GICR_NAME,
@@ -97,8 +99,9 @@ impl GicConfig {
 
 #[expect(
     clippy::panic,
-    reason = "Fatal boot: a firmware-described GIC register region cannot be mapped; \
-              interrupt-controller initialization has no error return or recovery"
+    reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: a firmware-described GIC register \
+              region cannot be mapped; interrupt-controller initialization has no error return or \
+              recovery"
 )]
 fn map_mmio_region(region: GicMmioRegion, name: &'static str) -> VirtAddr {
     iomap_device(region.paddr, region.size, name)
@@ -186,8 +189,8 @@ pub fn set_config(config: GicConfig) {
 pub fn active_version() -> GicVersion {
     #[expect(
         clippy::expect_used,
-        reason = "GIC initialization records its configuration before publishing interrupt \
-                  operations"
+        reason = "CG-021-no-panic-on-reachable-failure: GIC initialization records its \
+                  configuration before publishing interrupt operations"
     )]
     ACTIVE_GIC
         .get()
@@ -218,8 +221,8 @@ pub fn init(config: GicConfig) {
 pub fn init_from_device_tree() {
     #[expect(
         clippy::expect_used,
-        reason = "Fatal boot: required GIC configuration cannot be parsed; interrupt \
-                  initialization has no error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: required GIC configuration \
+                  cannot be parsed; interrupt initialization has no error return or recovery"
     )]
     let config = config_from_device_tree().expect("failed to parse GIC from device tree");
     init(config);

@@ -314,8 +314,8 @@ impl<T: 'static> CpuSlotCell<T> {
     /// this CPU's value for the returned lifetime.
     #[expect(
         clippy::mut_from_ref,
-        reason = "The unsafe caller guarantees exclusive access to the pinned CPU slot for the \
-                  returned lifetime"
+        reason = "CG-024-lint-exceptions: clippy::mut_from_ref: The unsafe caller guarantees \
+                  exclusive access to the pinned CPU slot for the returned lifetime"
     )]
     pub unsafe fn get_mut_unchecked<'a>(&'a self, pin: &'a impl CpuPin) -> &'a mut T {
         // SAFETY: see [`Self::get_unchecked`]; exclusive access is supplied by

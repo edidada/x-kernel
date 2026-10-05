@@ -522,7 +522,8 @@ impl Ext4SbInfo {
     /// source and target directory entries.
     #[expect(
         clippy::too_many_arguments,
-        reason = "rename receives the complete set of VFS-locked namespace participants"
+        reason = "CG-024-lint-exceptions: clippy::too_many_arguments: rename receives the \
+                  complete set of VFS-locked namespace participants"
     )]
     pub(crate) fn rename(
         &mut self,

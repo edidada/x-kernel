@@ -27,7 +27,7 @@ pub const MAX_SIGNALS: usize = 64;
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, FromRepr, EnumIter)]
 #[expect(
     clippy::upper_case_acronyms,
-    reason = "signal variants use the Linux SIG* ABI names"
+    reason = "CG-032-camel-case-types: signal variants use the Linux SIG* ABI names"
 )]
 pub enum Signo {
     /// Hangup (`SIGHUP`, 1).
@@ -574,8 +574,8 @@ impl SignalInfo {
     /// syscall layer before any method that decodes the signo is called.
     #[expect(
         clippy::unwrap_used,
-        reason = "SignalInfo constructors store a valid Signo; raw siginfo callers must validate \
-                  si_signo as required by this method"
+        reason = "CG-021-no-panic-on-reachable-failure: SignalInfo constructors store a valid \
+                  Signo; raw siginfo callers must validate si_signo as required by this method"
     )]
     pub fn signo(&self) -> Signo {
         Signo::from_repr(self.header().si_signo as _).unwrap()

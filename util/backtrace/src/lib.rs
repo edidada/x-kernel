@@ -137,21 +137,21 @@ fn capture_into(fp: usize, out: &mut [Frame]) -> usize {
 // the allocation-free design.
 #[expect(
     clippy::large_enum_variant,
-    reason = "The captured backtrace deliberately embeds its fixed frame buffer to avoid \
-              allocation"
+    reason = "CG-024-lint-exceptions: clippy::large_enum_variant: The captured backtrace \
+              deliberately embeds its fixed frame buffer to avoid allocation"
 )]
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
 enum Inner {
     /// Architecture does not support unwinding.
     #[expect(
         clippy::allow_attributes,
-        reason = "The unsupported-unwind variant is used only on targets without frame-pointer \
-                  unwinding"
+        reason = "CG-024-lint-exceptions: The unsupported-unwind variant is used only on targets \
+                  without frame-pointer unwinding"
     )]
     #[allow(
         dead_code,
-        reason = "The unsupported-unwind variant is used only on targets without frame-pointer \
-                  unwinding"
+        reason = "CG-024-lint-exceptions: dead_code: The unsupported-unwind variant is used only \
+                  on targets without frame-pointer unwinding"
     )]
     Unsupported,
     /// Successfully captured backtrace (fixed buffer + frame count).

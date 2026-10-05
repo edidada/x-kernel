@@ -81,8 +81,9 @@ pub fn dice_android_format_config_descriptor(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors the Open DICE DiceAndroidMainFlow ABI: context, both current CDIs, chain, \
-              inputs, output buffer and both next CDIs are distinct caller-owned values"
+    reason = "CG-024-lint-exceptions: clippy::too_many_arguments: mirrors the Open DICE \
+              DiceAndroidMainFlow ABI: context, both current CDIs, chain, inputs, output buffer \
+              and both next CDIs are distinct caller-owned values"
 )]
 pub fn dice_android_main_flow(
     context: &mut u8,

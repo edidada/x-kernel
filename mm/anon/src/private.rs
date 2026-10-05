@@ -473,8 +473,8 @@ impl AnonPrivateObject {
         commit().map_err(AnonPrivatePageCommitError::Commit)?;
         #[expect(
             clippy::expect_used,
-            reason = "The same exclusively held page map was checked for this key before \
-                      replacement"
+            reason = "CG-021-no-panic-on-reachable-failure: The same exclusively held page map \
+                      was checked for this key before replacement"
         )]
         let old = pages
             .insert(object_start, new_handle)

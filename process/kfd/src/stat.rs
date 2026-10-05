@@ -87,9 +87,9 @@ impl From<Kstat> for stat {
     fn from(value: Kstat) -> Self {
         #[expect(
             clippy::disallowed_methods,
-            reason = "linux_raw_sys::general::stat contains only integers and integer arrays, \
-                      which admit all-zero bits; zeroing also covers its architecture-specific \
-                      reserved fields"
+            reason = "CG-018-uninitialized-storage-model: linux_raw_sys::general::stat contains \
+                      only integers and integer arrays, which admit all-zero bits; zeroing also \
+                      covers its architecture-specific reserved fields"
         )]
         // SAFETY: The Linux `stat` bindings contain only integers and integer
         // arrays on every supported architecture, so all-zero bits are valid.

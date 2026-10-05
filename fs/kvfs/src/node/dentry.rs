@@ -353,8 +353,8 @@ impl Dentry {
 
     #[expect(
         clippy::len_without_is_empty,
-        reason = "Length is the inode byte size, not collection membership; directories have \
-                  separate entry semantics"
+        reason = "CG-024-lint-exceptions: clippy::len_without_is_empty: Length is the inode byte \
+                  size, not collection membership; directories have separate entry semantics"
     )]
     /// Gets the byte length of the instantiated dentry.
     pub fn len(&self) -> VfsResult<u64> {

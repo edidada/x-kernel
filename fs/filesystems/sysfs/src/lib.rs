@@ -149,8 +149,8 @@ impl DeviceProjection {
 fn device_projection() -> &'static Mutex<DeviceProjection> {
     #[expect(
         clippy::expect_used,
-        reason = "Device projection initialization installs both permanent locks before callbacks \
-                  or lookups are exposed"
+        reason = "CG-021-no-panic-on-reachable-failure: Device projection initialization installs \
+                  both permanent locks before callbacks or lookups are exposed"
     )]
     DEVICE_PROJECTION
         .get()
@@ -160,8 +160,8 @@ fn device_projection() -> &'static Mutex<DeviceProjection> {
 fn device_projection_events() -> &'static Mutex<()> {
     #[expect(
         clippy::expect_used,
-        reason = "Device projection initialization installs both permanent locks before callbacks \
-                  or lookups are exposed"
+        reason = "CG-021-no-panic-on-reachable-failure: Device projection initialization installs \
+                  both permanent locks before callbacks or lookups are exposed"
     )]
     DEVICE_PROJECTION_EVENTS
         .get()
@@ -270,8 +270,8 @@ pub static FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("sysfs", ini
 fn init_sysfs() {
     #[expect(
         clippy::expect_used,
-        reason = "Each statically named filesystem is registered once by its unique linker \
-                  initialization entry"
+        reason = "CG-021-no-panic-on-reachable-failure: Each statically named filesystem is \
+                  registered once by its unique linker initialization entry"
     )]
     kvfs::register_filesystem(&FILE_SYSTEM_TYPE).expect("sysfs filesystem type must register once");
 }

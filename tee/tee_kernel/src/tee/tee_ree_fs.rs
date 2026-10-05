@@ -1270,8 +1270,9 @@ impl ReeFsDirh {
 
         #[allow(
             clippy::unwrap_used,
-            reason = "the None branch installs the directory handle or returns its open error; \
-                      this debug macro can be disabled by cfg"
+            reason = "CG-021-no-panic-on-reachable-failure: the None branch installs the \
+                      directory handle or returns its open error; this debug macro can be \
+                      disabled by cfg"
         )]
         {
             tee_debug!(
@@ -1290,8 +1291,8 @@ impl ReeFsDirh {
     pub(super) fn dirh_mut(&mut self) -> &mut TeeFsDirfileDirh {
         #[expect(
             clippy::expect_used,
-            reason = "dirh_mut requires a preceding successful get_dirh that retains the cached \
-                      handle"
+            reason = "CG-021-no-panic-on-reachable-failure: dirh_mut requires a preceding \
+                      successful get_dirh that retains the cached handle"
         )]
         self.handle.as_mut().expect("dirh not opened").as_mut()
     }

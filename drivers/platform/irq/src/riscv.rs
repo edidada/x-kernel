@@ -37,8 +37,8 @@ pub const fn plic_irq_desc(hwirq: usize) -> kirq::IrqDesc {
 fn plic() -> &'static SpinNoIrq<Plic> {
     #[expect(
         clippy::expect_used,
-        reason = "Primary interrupt initialization installs the permanent PLIC before per-CPU \
-                  setup or interrupt dispatch"
+        reason = "CG-021-no-panic-on-reachable-failure: Primary interrupt initialization installs \
+                  the permanent PLIC before per-CPU setup or interrupt dispatch"
     )]
     PLIC.get().expect("PLIC is not initialized")
 }
@@ -64,14 +64,16 @@ pub fn init_primary() {
         .unwrap_or((PhysAddr::from_usize(PLIC_PADDR), PLIC_MMIO_SIZE));
     #[expect(
         clippy::panic,
-        reason = "Fatal boot: the PLIC register window cannot be mapped; interrupt-controller \
-                  initialization has no error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the PLIC register window \
+                  cannot be mapped; interrupt-controller initialization has no error return or \
+                  recovery"
     )]
     let plic_base = iomap_device(paddr, size, PLIC_IOMAP_NAME)
         .unwrap_or_else(|err| panic!("failed to iomap PLIC: {err:?}"));
     #[expect(
         clippy::unwrap_used,
-        reason = "iomap_device succeeded and returned the live non-null PLIC MMIO mapping"
+        reason = "CG-021-no-panic-on-reachable-failure: iomap_device succeeded and returned the \
+                  live non-null PLIC MMIO mapping"
     )]
     // SAFETY: `plic_base` comes from a successful `iomap_device` of the PLIC
     // MMIO window, so the pointer is non-null and references the live register
@@ -84,8 +86,8 @@ fn this_context() -> usize {
     let logical_cpu_id = this_cpu_id();
     #[expect(
         clippy::panic,
-        reason = "The current CPU's logical id was assigned from the present-CPU map at entry, so \
-                  it has a raw hart id"
+        reason = "CG-021-no-panic-on-reachable-failure: The current CPU's logical id was assigned \
+                  from the present-CPU map at entry, so it has a raw hart id"
     )]
     let hart_id = raw_cpu_id(logical_cpu_id)
         .unwrap_or_else(|| {
@@ -248,8 +250,9 @@ impl kirq::IntrManagerIf {
                 let logical_cpu_id = this_cpu_id();
                 #[expect(
                     clippy::panic,
-                    reason = "The current CPU's logical id was assigned from the present-CPU map \
-                              at entry, so it has a raw hart id"
+                    reason = "CG-021-no-panic-on-reachable-failure: The current CPU's logical id \
+                              was assigned from the present-CPU map at entry, so it has a raw \
+                              hart id"
                 )]
                 let raw_cpu_id = raw_cpu_id(logical_cpu_id).unwrap_or_else(|| {
                     panic!(

@@ -97,8 +97,8 @@ impl NetBuf {
     fn get_slice(&self, start: usize, len: usize) -> &[u8] {
         #[expect(
             clippy::expect_used,
-            reason = "NetBuf setters validate header and payload lengths against the backing \
-                      buffer before slice access"
+            reason = "CG-021-no-panic-on-reachable-failure: NetBuf setters validate header and \
+                      payload lengths against the backing buffer before slice access"
         )]
         let end = start
             .checked_add(len)
@@ -115,8 +115,8 @@ impl NetBuf {
     fn get_slice_mut(&mut self, start: usize, len: usize) -> &mut [u8] {
         #[expect(
             clippy::expect_used,
-            reason = "NetBuf setters validate header and payload lengths against the backing \
-                      buffer before slice access"
+            reason = "CG-021-no-panic-on-reachable-failure: NetBuf setters validate header and \
+                      payload lengths against the backing buffer before slice access"
         )]
         let end = start
             .checked_add(len)
@@ -220,8 +220,8 @@ impl NetBuf {
     const fn frame_len(&self) -> usize {
         #[expect(
             clippy::expect_used,
-            reason = "NetBuf setters validate header and payload lengths against the backing \
-                      buffer before slice access"
+            reason = "CG-021-no-panic-on-reachable-failure: NetBuf setters validate header and \
+                      payload lengths against the backing buffer before slice access"
         )]
         let frame_len = self
             .hdr_len

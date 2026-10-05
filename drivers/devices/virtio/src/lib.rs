@@ -15,14 +15,15 @@
 
 #![allow(
     clippy::expect_used,
-    reason = "case (b): legacy virtio has 14 diagnostic sites, too many to judge individually in \
-              this migration; new code remains reviewed"
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): legacy virtio has 14 diagnostic \
+              sites, too many to judge individually in this migration; new code remains reviewed"
 )]
 #![no_std]
 #![allow(
     clippy::unwrap_used,
-    reason = "case (b): 11 legacy diagnostic sites need individual failure-contract review; new \
-              code remains subject to the no-legitimate-failure-panic rule"
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): 11 legacy diagnostic sites need \
+              individual failure-contract review; new code remains subject to the \
+              no-legitimate-failure-panic rule"
 )]
 #![cfg_attr(doc, feature(doc_cfg))]
 
@@ -135,11 +136,13 @@ const fn as_device_kind(t: VirtIoDevType) -> Option<DeviceKind> {
 
 #[expect(
     clippy::allow_attributes,
-    reason = "Error conversion is used only by enabled VirtIO device backends"
+    reason = "CG-024-lint-exceptions: Error conversion is used only by enabled VirtIO device \
+              backends"
 )]
 #[allow(
     dead_code,
-    reason = "Error conversion is used only by enabled VirtIO device backends"
+    reason = "CG-024-lint-exceptions: dead_code: Error conversion is used only by enabled VirtIO \
+              device backends"
 )]
 pub(crate) const fn as_driver_error(e: virtio_drivers::Error) -> DriverError {
     use virtio_drivers::{Error::*, device::socket::SocketError::*};

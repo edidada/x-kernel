@@ -26,8 +26,8 @@ static AP_TRAMPOLINE_PAGE: Once<usize> = Once::new();
 pub(crate) fn init_ap_trampoline_page(boot_info: &BootInfo) {
     #[expect(
         clippy::expect_used,
-        reason = "Fatal boot: no low-memory AP trampoline page is available; BSP memory \
-                  preparation has no error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: no low-memory AP trampoline \
+                  page is available; BSP memory preparation has no error return or recovery"
     )]
     let paddr = choose_ap_trampoline_page(boot_info)
         .expect("failed to find a low-memory x86 AP trampoline page");
@@ -37,8 +37,8 @@ pub(crate) fn init_ap_trampoline_page(boot_info: &BootInfo) {
 pub(crate) fn ap_trampoline_page_paddr() -> usize {
     #[expect(
         clippy::expect_used,
-        reason = "BSP memory preparation installs the permanent AP trampoline page before AP \
-                  startup"
+        reason = "CG-021-no-panic-on-reachable-failure: BSP memory preparation installs the \
+                  permanent AP trampoline page before AP startup"
     )]
     AP_TRAMPOLINE_PAGE
         .get()
@@ -102,8 +102,8 @@ where
     }
     #[expect(
         clippy::expect_used,
-        reason = "Fatal boot: multiboot2 boot information is invalid; memory discovery has no \
-                  error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: multiboot2 boot information \
+                  is invalid; memory discovery has no error return or recovery"
     )]
     // SAFETY: the boot protocol provides `multiboot_info_ptr` as a valid pointer to
     // the immutable Multiboot2 information block for the duration of early boot.
@@ -157,7 +157,8 @@ where
     for index in 0..params.e820_entries() {
         #[expect(
             clippy::expect_used,
-            reason = "The loop index is bounded by the validated LinuxBootParams e820 entry count"
+            reason = "CG-021-no-panic-on-reachable-failure: The loop index is bounded by the \
+                      validated LinuxBootParams e820 entry count"
         )]
         let entry = params
             .e820_entry(index)

@@ -132,9 +132,9 @@ fn sort_and_merge_ranges<const N: usize>(regions: &mut heapless::Vec<MemRange, N
 
 #[expect(
     clippy::panic,
-    reason = "Fatal boot: firmware reserved regions overlap with different kind, source or name, \
-              so the reserved map cannot be normalized; boot memory initialization has no error \
-              return or recovery"
+    reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: firmware reserved regions overlap \
+              with different kind, source or name, so the reserved map cannot be normalized; boot \
+              memory initialization has no error return or recovery"
 )]
 fn sort_and_merge_reserved<const N: usize>(regions: &mut heapless::Vec<ReservedRegion, N>) {
     regions.sort_unstable_by_key(|region| region.start);

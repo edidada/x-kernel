@@ -52,8 +52,8 @@ impl<const RAM: usize, const FW: usize> Aarch64MemState<RAM, FW> {
     pub fn ram_regions(&'static self) -> &'static [MemRange] {
         #[expect(
             clippy::expect_used,
-            reason = "Platform memory initialization publishes RAM ranges before exposing the \
-                      memory provider"
+            reason = "CG-021-no-panic-on-reachable-failure: Platform memory initialization \
+                      publishes RAM ranges before exposing the memory provider"
         )]
         self.ram_regions
             .get()
@@ -68,8 +68,8 @@ impl<const RAM: usize, const FW: usize> Aarch64MemState<RAM, FW> {
         }
         #[expect(
             clippy::expect_used,
-            reason = "A nonzero reserved count is published only after its region array is \
-                      installed"
+            reason = "CG-021-no-panic-on-reachable-failure: A nonzero reserved count is published \
+                      only after its region array is installed"
         )]
         &self
             .fw_reserved_regions
@@ -167,8 +167,8 @@ fn push_reserved_non_overlapping<const N: usize>(
     for existing in regions.iter() {
         #[expect(
             clippy::expect_used,
-            reason = "The cut vector and source region vector share capacity N, with one cut per \
-                      existing region"
+            reason = "CG-021-no-panic-on-reachable-failure: The cut vector and source region \
+                      vector share capacity N, with one cut per existing region"
         )]
         cut.push(existing.range()).expect("too many cut ranges");
     }
@@ -176,8 +176,9 @@ fn push_reserved_non_overlapping<const N: usize>(
     let single = [region.range()];
     #[expect(
         clippy::expect_used,
-        reason = "Fatal boot: firmware reservations overlap after normalization or exceed \
-                  fixed-capacity storage; memory discovery has no error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: firmware reservations overlap \
+                  after normalization or exceed fixed-capacity storage; memory discovery has no \
+                  error return or recovery"
     )]
     sub_ranges(&single, cut.as_slice(), |(start, size)| {
         regions
@@ -196,9 +197,9 @@ fn push_reserved_non_overlapping<const N: usize>(
 
 #[expect(
     clippy::panic,
-    reason = "Fatal boot: firmware reserved regions overlap with different kind, source or name, \
-              so the reserved map cannot be normalized; boot memory initialization has no error \
-              return or recovery"
+    reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: firmware reserved regions overlap \
+              with different kind, source or name, so the reserved map cannot be normalized; boot \
+              memory initialization has no error return or recovery"
 )]
 fn sort_and_merge_reserved<const N: usize>(regions: &mut Vec<ReservedRegion, N>) {
     regions.sort_unstable_by_key(|region| region.start);

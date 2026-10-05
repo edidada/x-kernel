@@ -5,8 +5,8 @@
 //! Next-generation VFS interfaces and data structures.
 #![allow(
     clippy::expect_used,
-    reason = "case (b): legacy kvfs has 24 diagnostic sites, too many to judge individually in \
-              this migration; new code remains reviewed"
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): legacy kvfs has 24 diagnostic \
+              sites, too many to judge individually in this migration; new code remains reviewed"
 )]
 #![no_std]
 

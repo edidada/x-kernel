@@ -69,8 +69,9 @@ fn loongarch64_trap_handler(tf: &mut ExceptionContext) {
             // `tf` is a valid ExceptionContext with `era` pointing to the faulting instruction.
             #[expect(
                 clippy::unwrap_used,
-                reason = "this handler runs only for kernel PLV0 traps; kernel unaligned accesses \
-                          must use supported instructions on valid memory"
+                reason = "CG-021-no-panic-on-reachable-failure: this handler runs only for kernel \
+                          PLV0 traps; kernel unaligned accesses must use supported instructions \
+                          on valid memory"
             )]
             tf.emulate_unaligned().unwrap();
         },

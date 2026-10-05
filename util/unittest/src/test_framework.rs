@@ -638,10 +638,10 @@ macro_rules! tests {
 #[macro_export]
 macro_rules! tests_name {
     ($suite_name:ident; $module_name:ident; $($test_name:ident),* $(,)?) => {
-        #[expect(clippy::allow_attributes, reason = "the exported macro publishes a suite for caller-selected registration paths; reachability depends on the expansion module")]
+        #[expect(clippy::allow_attributes, reason = "CG-024-lint-exceptions: the exported macro publishes a suite for caller-selected registration paths; reachability depends on the expansion module")]
         #[allow(
             unreachable_pub,
-            reason = "the exported macro publishes a suite for caller-selected registration paths; reachability depends on the expansion module"
+            reason = "CG-027-narrow-visibility: the exported macro publishes a suite for caller-selected registration paths; reachability depends on the expansion module"
         )]
         pub static $suite_name: &[$crate::TestDescriptor] = &[
             $(

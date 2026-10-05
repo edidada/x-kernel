@@ -132,8 +132,8 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     /// ```
     #[expect(
         clippy::panic,
-        reason = "A previous initializer panicked and left no value; like std's poisoned Once and \
-                  LazyLock, the value can never be produced"
+        reason = "CG-021-no-panic-on-reachable-failure: A previous initializer panicked and left \
+                  no value; like std's poisoned Once and LazyLock, the value can never be produced"
     )]
     pub fn force(this: &Self) -> &T {
         // Ensure single initialization through once-cell mechanism

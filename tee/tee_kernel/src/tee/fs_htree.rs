@@ -1274,8 +1274,8 @@ pub(super) fn find_closest_node(ht: &mut TeeFsHtree, node_id: usize) -> &mut Htr
             // 重新获取子节点引用，因为之前的引用已经释放
             #[expect(
                 clippy::unwrap_used,
-                reason = "child_exists checked this same index while the tree is exclusively \
-                          borrowed and no mutation intervenes"
+                reason = "CG-021-no-panic-on-reachable-failure: child_exists checked this same \
+                          index while the tree is exclusively borrowed and no mutation intervenes"
             )]
             let child = current.get_child_by_index_mut(index).unwrap();
             current = child;

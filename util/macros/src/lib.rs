@@ -119,16 +119,16 @@ pub fn mod_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 clippy::unwrap_used,
                 clippy::expect_used,
                 clippy::panic,
-                reason = "unittest module: test helpers may panic on failure"
+                reason = "CG-021-no-panic-on-reachable-failure: unittest module: test helpers may panic on failure"
             )]
         },
         parse_quote! {
-            #[allow(missing_docs, reason = "unittest module: test code is outside rustdoc scope")]
+            #[allow(missing_docs, reason = "CG-024-lint-exceptions: missing_docs: unittest module: test code is outside rustdoc scope")]
         },
         parse_quote! {
             #[allow(
                 clippy::too_many_lines,
-                reason = "unittest module: a test scenario reads as one linear script"
+                reason = "CG-028-focused-functions: unittest module: a test scenario reads as one linear script"
             )]
         },
     ];
@@ -220,11 +220,11 @@ fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> 
             clippy::unwrap_used,
             clippy::expect_used,
             clippy::panic,
-            reason = "unittest body: a failed assertion is the intended outcome"
+            reason = "CG-021-no-panic-on-reachable-failure: unittest body: a failed assertion is the intended outcome"
         )]
         #[allow(
             clippy::too_many_lines,
-            reason = "unittest body: a test scenario reads as one linear script"
+            reason = "CG-028-focused-functions: unittest body: a test scenario reads as one linear script"
         )]
     };
 
@@ -396,7 +396,8 @@ pub fn drm_ioctl(args: TokenStream, input: TokenStream) -> TokenStream {
     let struct_name = if let syn::Type::Path(type_path) = &*impl_block.self_ty {
         #[expect(
             clippy::unwrap_used,
-            reason = "syn parses a Type::Path with at least one path segment"
+            reason = "CG-021-no-panic-on-reachable-failure: syn parses a Type::Path with at least \
+                      one path segment"
         )]
         &type_path.path.segments.last().unwrap().ident
     } else {

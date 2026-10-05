@@ -236,17 +236,18 @@ impl PlatformBackend {
     /// without a matching static device, as in `virtio::activate_virtio_device`.
     #[expect(
         clippy::allow_attributes,
-        reason = "Static enumeration inputs are used only when a matching platform driver feature \
-                  is enabled"
+        reason = "CG-024-lint-exceptions: Static enumeration inputs are used only when a matching \
+                  platform driver feature is enabled"
     )]
     #[allow(
         unused_variables,
-        reason = "Static enumeration inputs are used only when a matching platform driver feature \
-                  is enabled"
+        reason = "CG-024-lint-exceptions: unused_variables: Static enumeration inputs are used \
+                  only when a matching platform driver feature is enabled"
     )]
     #[expect(
         clippy::too_many_lines,
-        reason = "TODO(cg): legacy static platform enumeration; split per device class"
+        reason = "CG-028-focused-functions: TODO(cg): legacy static platform enumeration; split \
+                  per device class"
     )]
     fn enumerate_static(
         &mut self,

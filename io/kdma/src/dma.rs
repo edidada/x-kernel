@@ -229,8 +229,8 @@ impl DmaAllocator {
         let len = buffer.len();
         #[expect(
             clippy::panic,
-            reason = "The Safety contract requires dma_addr to be the still-active mapping from \
-                      map_dma_buffer, unmapped exactly once"
+            reason = "CG-021-no-panic-on-reachable-failure: The Safety contract requires dma_addr \
+                      to be the still-active mapping from map_dma_buffer, unmapped exactly once"
         )]
         let mapping = self
             .active_mappings
@@ -268,8 +268,8 @@ impl DmaAllocator {
     fn recycle_bounce_buffer(&mut self, cpu_addr: usize, layout: Layout) {
         #[expect(
             clippy::expect_used,
-            reason = "Active bounce mappings retain the bounce pool until their buffers are \
-                      recycled"
+            reason = "CG-021-no-panic-on-reachable-failure: Active bounce mappings retain the \
+                      bounce pool until their buffers are recycled"
         )]
         let pool = self
             .bounce_pool
@@ -285,8 +285,8 @@ impl DmaAllocator {
         }
         #[expect(
             clippy::unwrap_used,
-            reason = "the None branch installs the bounce pool or returns the allocation error \
-                      before reaching this expression"
+            reason = "CG-021-no-panic-on-reachable-failure: the None branch installs the bounce \
+                      pool or returns the allocation error before reaching this expression"
         )]
         Ok(self.bounce_pool.as_mut().unwrap())
     }
@@ -421,8 +421,9 @@ const fn layout_pages(layout: &Layout) -> usize {
 fn layout_for_pages(num_pages: usize) -> Layout {
     #[expect(
         clippy::unwrap_used,
-        reason = "the only caller passes the fixed DMA_BOUNCE_POOL_PAGES constant; its byte size \
-                  fits Layout and PAGE_SIZE_4K is a power of two"
+        reason = "CG-021-no-panic-on-reachable-failure: the only caller passes the fixed \
+                  DMA_BOUNCE_POOL_PAGES constant; its byte size fits Layout and PAGE_SIZE_4K is a \
+                  power of two"
     )]
     Layout::from_size_align(num_pages * PAGE_SIZE_4K, PAGE_SIZE_4K).unwrap()
 }

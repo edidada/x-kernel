@@ -317,8 +317,9 @@ impl FutexTable {
         for _ in 0..original_len {
             #[expect(
                 clippy::expect_used,
-                reason = "The locked bucket is visited exactly its original length times, \
-                          removing at most one original waiter per iteration"
+                reason = "CG-021-no-panic-on-reachable-failure: The locked bucket is visited \
+                          exactly its original length times, removing at most one original waiter \
+                          per iteration"
             )]
             let waiter = queue
                 .pop_front()
@@ -352,8 +353,9 @@ impl FutexTable {
         for _ in 0..original_len {
             #[expect(
                 clippy::expect_used,
-                reason = "The locked bucket is visited exactly its original length times, \
-                          removing at most one original waiter per iteration"
+                reason = "CG-021-no-panic-on-reachable-failure: The locked bucket is visited \
+                          exactly its original length times, removing at most one original waiter \
+                          per iteration"
             )]
             let waiter = source_queue
                 .pop_front()
@@ -418,8 +420,9 @@ impl FutexTable {
             for _ in 0..len {
                 #[expect(
                     clippy::expect_used,
-                    reason = "The locked bucket is visited exactly its original length times, \
-                              removing at most one original waiter per iteration"
+                    reason = "CG-021-no-panic-on-reachable-failure: The locked bucket is visited \
+                              exactly its original length times, removing at most one original \
+                              waiter per iteration"
                 )]
                 let waiter = queue
                     .pop_front()

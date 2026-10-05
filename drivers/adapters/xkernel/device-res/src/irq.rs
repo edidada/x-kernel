@@ -47,10 +47,11 @@ impl IrqOp for XKernelResourceProvider {
                     }
                     #[expect(
                         clippy::panic,
-                        reason = "TODO(cg): IrqOp::release_irq returns (), so a kirq free error \
-                                  such as an invalid calling context cannot reach the driver; \
-                                  make release_irq fallible and propagate the error through \
-                                  device teardown"
+                        reason = "CG-021-no-panic-on-reachable-failure: TODO(cg): \
+                                  IrqOp::release_irq returns (), so a kirq free error such as an \
+                                  invalid calling context cannot reach the driver; make \
+                                  release_irq fallible and propagate the error through device \
+                                  teardown"
                     )]
                     Err(err) => {
                         panic!(
@@ -73,10 +74,11 @@ impl IrqOp for XKernelResourceProvider {
                     }
                     #[expect(
                         clippy::panic,
-                        reason = "TODO(cg): IrqOp::release_irq returns (), so a kirq free error \
-                                  such as an invalid calling context cannot reach the driver; \
-                                  make release_irq fallible and propagate the error through \
-                                  device teardown"
+                        reason = "CG-021-no-panic-on-reachable-failure: TODO(cg): \
+                                  IrqOp::release_irq returns (), so a kirq free error such as an \
+                                  invalid calling context cannot reach the driver; make \
+                                  release_irq fallible and propagate the error through device \
+                                  teardown"
                     )]
                     Err(err) => {
                         panic!(

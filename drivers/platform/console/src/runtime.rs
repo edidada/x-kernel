@@ -114,7 +114,8 @@ fn console_subsystem() -> &'static SpinNoPreempt<ConsoleSubsystem> {
     CONSOLE_SUBSYS.call_once(|| SpinNoPreempt::new(ConsoleSubsystem::new()));
     #[expect(
         clippy::expect_used,
-        reason = "call_once completed successfully and permanently published the console subsystem"
+        reason = "CG-021-no-panic-on-reachable-failure: call_once completed successfully and \
+                  permanently published the console subsystem"
     )]
     CONSOLE_SUBSYS
         .get()

@@ -245,8 +245,8 @@ impl DeviceDesc {
     /// controller they already adopted.
     #[expect(
         clippy::too_many_arguments,
-        reason = "Construct one device descriptor from its identity, parent, resources and \
-                  matching metadata"
+        reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Construct one device \
+                  descriptor from its identity, parent, resources and matching metadata"
     )]
     pub fn new_with_parent(
         id: DeviceDescId,

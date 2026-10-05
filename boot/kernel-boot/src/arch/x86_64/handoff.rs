@@ -137,9 +137,9 @@ pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, handoff_arg
         unsafe { init_ap_boot_state() };
         #[expect(
             clippy::panic,
-            reason = "Fatal boot: the ACPI MADT CPU description lacks the boot CPU's APIC id, so \
-                      no logical CPU id exists for per-CPU setup; the boot entry has no error \
-                      return or recovery"
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the ACPI MADT CPU \
+                      description lacks the boot CPU's APIC id, so no logical CPU id exists for \
+                      per-CPU setup; the boot entry has no error return or recovery"
         )]
         let logical_cpu_id = kcpu_id_map::logical_cpu_id(get_cpu_id())
             .unwrap_or_else(|| panic!("missing logical cpu id mapping for boot cpu"));
@@ -188,9 +188,9 @@ pub(super) unsafe extern "C" fn rust_entry_secondary(magic: usize) {
         let raw_cpu_id = get_cpu_id();
         #[expect(
             clippy::panic,
-            reason = "Secondary CPUs are started only through boot_ap for logical ids from the \
-                      present-CPU map, using the raw id recorded there, so an entering CPU has a \
-                      mapping"
+            reason = "CG-021-no-panic-on-reachable-failure: Secondary CPUs are started only \
+                      through boot_ap for logical ids from the present-CPU map, using the raw id \
+                      recorded there, so an entering CPU has a mapping"
         )]
         let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
             panic!(

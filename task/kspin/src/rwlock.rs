@@ -95,8 +95,9 @@ impl<G: BaseGuard, T: ?Sized> SpinRwLock<G, T> {
     #[inline(always)]
     #[expect(
         clippy::panic,
-        reason = "Overflow needs 2^63 - 1 simultaneously held read guards, far beyond any number \
-                  of CPUs and tasks; std's RwLock likewise panics on reader overflow"
+        reason = "CG-021-no-panic-on-reachable-failure: Overflow needs 2^63 - 1 simultaneously \
+                  held read guards, far beyond any number of CPUs and tasks; std's RwLock \
+                  likewise panics on reader overflow"
     )]
     pub fn read(&self) -> SpinRwLockReadGuard<'_, G, T> {
         let guard_state = G::acquire();

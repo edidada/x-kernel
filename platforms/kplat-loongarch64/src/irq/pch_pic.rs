@@ -32,8 +32,8 @@ static PCH_PIC_BASE: LazyInit<VirtAddr> = LazyInit::new();
 fn mmio_base() -> usize {
     #[expect(
         clippy::expect_used,
-        reason = "PCH PIC initialization installs the MMIO mapping before interrupt operations \
-                  are exposed"
+        reason = "CG-021-no-panic-on-reachable-failure: PCH PIC initialization installs the MMIO \
+                  mapping before interrupt operations are exposed"
     )]
     PCH_PIC_BASE
         .get()
@@ -93,8 +93,9 @@ impl PchPicRegs for MmioPchPic {
 pub(super) fn init() {
     #[expect(
         clippy::panic,
-        reason = "Fatal boot: the PCH-PIC register aperture cannot be mapped; \
-                  interrupt-controller initialization has no error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the PCH-PIC register aperture \
+                  cannot be mapped; interrupt-controller initialization has no error return or \
+                  recovery"
     )]
     let base = memspace::iomap_device(PhysAddr::from_usize(PCH_PIC_PADDR), PCH_PIC_SIZE, "pch-pic")
         .unwrap_or_else(|err| panic!("failed to iomap pch-pic: {err:?}"));

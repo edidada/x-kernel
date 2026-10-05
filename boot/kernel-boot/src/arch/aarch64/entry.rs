@@ -70,8 +70,8 @@ impl SecondaryBootContext {
 pub fn set_secondary_boot_context(logical_cpu_id: LogicalCpuId, stack_top_paddr: usize) {
     #[expect(
         clippy::panic,
-        reason = "start_secondary_cpus passes only logical ids enumerated from the present-CPU \
-                  map, so each one has a raw id"
+        reason = "CG-021-no-panic-on-reachable-failure: start_secondary_cpus passes only logical \
+                  ids enumerated from the present-CPU map, so each one has a raw id"
     )]
     let target_raw_cpu_id = raw_cpu_id(logical_cpu_id).unwrap_or_else(|| {
         panic!(
@@ -293,9 +293,9 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
 pub(super) unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) {
     #[expect(
         clippy::panic,
-        reason = "Secondary CPUs are started only through boot_ap for logical ids from the \
-                  present-CPU map, using the raw id recorded there, so an entering CPU has a \
-                  mapping"
+        reason = "CG-021-no-panic-on-reachable-failure: Secondary CPUs are started only through \
+                  boot_ap for logical ids from the present-CPU map, using the raw id recorded \
+                  there, so an entering CPU has a mapping"
     )]
     let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
         panic!(
@@ -347,9 +347,9 @@ pub(super) unsafe extern "C" fn __primary_switched(
 
     #[expect(
         clippy::panic,
-        reason = "Fatal boot: the firmware CPU description lacks the boot CPU's raw id, so no \
-                  logical CPU id exists for per-CPU setup; the boot entry has no error return or \
-                  recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the firmware CPU description \
+                  lacks the boot CPU's raw id, so no logical CPU id exists for per-CPU setup; the \
+                  boot entry has no error return or recovery"
     )]
     let logical_cpu_id = kcpu_id_map::logical_cpu_id(RawCpuId::new(cpu_mpidr))
         .unwrap_or_else(|| panic!("missing logical cpu id mapping for raw cpu id {cpu_mpidr:#x}"));

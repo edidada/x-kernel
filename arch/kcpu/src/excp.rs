@@ -31,11 +31,13 @@ pub static PAGE_FAULT: [fn(VirtAddr, PageFaultFlags) -> bool];
 
 #[expect(
     clippy::allow_attributes,
-    reason = "Trap dispatch macro is used by architecture-specific exception handlers"
+    reason = "CG-024-lint-exceptions: Trap dispatch macro is used by architecture-specific \
+              exception handlers"
 )]
 #[allow(
     unused_macros,
-    reason = "Trap dispatch macro is used by architecture-specific exception handlers"
+    reason = "CG-024-lint-exceptions: unused_macros: Trap dispatch macro is used by \
+              architecture-specific exception handlers"
 )]
 macro_rules! handle_trap {
     ($trap:ident, $($args:tt)*) => {{

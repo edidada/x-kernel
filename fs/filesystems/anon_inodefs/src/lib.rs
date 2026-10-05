@@ -60,8 +60,8 @@ impl AnonInodeFs {
     pub fn global() -> &'static Self {
         #[expect(
             clippy::expect_used,
-            reason = "Boot installs the permanent pseudo filesystem before any anonymous-file or \
-                      pipe creation"
+            reason = "CG-021-no-panic-on-reachable-failure: Boot installs the permanent pseudo \
+                      filesystem before any anonymous-file or pipe creation"
         )]
         ANON_INODE_FS
             .get()

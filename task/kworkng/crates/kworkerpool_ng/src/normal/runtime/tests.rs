@@ -20,7 +20,8 @@ impl crate::PartitionWorkSource for Empty {
 impl crate::AcquiredExecution for Empty {
     #[expect(
         clippy::panic,
-        reason = "test scenario: an empty work provider never yields an execution to run"
+        reason = "CG-021-no-panic-on-reachable-failure: test scenario: an empty work provider \
+                  never yields an execution to run"
     )]
     fn run(self) {
         panic!("empty provider has no execution");

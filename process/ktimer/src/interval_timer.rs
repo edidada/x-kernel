@@ -54,8 +54,8 @@ impl TimerInstant {
             }
             #[expect(
                 clippy::panic,
-                reason = "Callers compare instants read from the same timer's clock, so both \
-                          sides share one clock domain"
+                reason = "CG-021-no-panic-on-reachable-failure: Callers compare instants read \
+                          from the same timer's clock, so both sides share one clock domain"
             )]
             (now, earlier) => {
                 panic!("timer instant clock-domain mismatch: {now:?} vs {earlier:?}")

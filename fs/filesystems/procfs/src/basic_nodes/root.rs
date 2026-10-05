@@ -14,8 +14,8 @@ use kvfs::{
 
 #[expect(
     clippy::too_many_lines,
-    reason = "linear registration table: each statement registers one independent procfs root \
-              entry"
+    reason = "CG-028-focused-functions: linear registration table: each statement registers one \
+              independent procfs root entry"
 )]
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     root.add(
@@ -47,8 +47,8 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
             for_each_present_logical_cpu(|present_index, cpu_id, cpu_count| {
                 #[expect(
                     clippy::unwrap_used,
-                    reason = "String writes are infallible and the formatted integers and strings \
-                              cannot return fmt::Error"
+                    reason = "CG-021-no-panic-on-reachable-failure: String writes are infallible \
+                              and the formatted integers and strings cannot return fmt::Error"
                 )]
                 writeln!(
                     info,
@@ -72,8 +72,8 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
             for file_system_type in kvfs::registered_filesystems() {
                 #[expect(
                     clippy::unwrap_used,
-                    reason = "String writes are infallible and the formatted integers and strings \
-                              cannot return fmt::Error"
+                    reason = "CG-021-no-panic-on-reachable-failure: String writes are infallible \
+                              and the formatted integers and strings cannot return fmt::Error"
                 )]
                 writeln!(
                     info,

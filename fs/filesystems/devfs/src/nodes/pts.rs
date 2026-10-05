@@ -33,8 +33,8 @@ fn add_slave(fs: Arc<SimpleFs>, pty: Arc<PtyDriver>) -> KResult<u32> {
     pty.set_pty_number(pty_number);
     #[expect(
         clippy::unwrap_used,
-        reason = "table.add just inserted this slot and PTS_TABLE remains locked until its device \
-                  ID is set"
+        reason = "CG-021-no-panic-on-reachable-failure: table.add just inserted this slot and \
+                  PTS_TABLE remains locked until its device ID is set"
     )]
     table
         .get(pty_number as usize)

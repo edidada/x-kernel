@@ -62,8 +62,8 @@ impl EnumerationContext {
     /// runtime object will be attached under once it is published.
     #[expect(
         clippy::too_many_arguments,
-        reason = "Enumeration supplies the complete device descriptor and parent relationship in \
-                  one registration"
+        reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Enumeration supplies the \
+                  complete device descriptor and parent relationship in one registration"
     )]
     pub fn register_device_with_parent(
         &mut self,

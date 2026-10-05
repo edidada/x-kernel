@@ -483,8 +483,8 @@ fn read_tsc_ticks_raw() -> u64 {
 fn ticks_to_nanos(ticks: u64) -> u64 {
     #[expect(
         clippy::expect_used,
-        reason = "TSC initialization installs both conversion ratios before publishing clock \
-                  operations"
+        reason = "CG-021-no-panic-on-reachable-failure: TSC initialization installs both \
+                  conversion ratios before publishing clock operations"
     )]
     TSC_TICKS_TO_NANOS_RATIO
         .get()
@@ -496,8 +496,8 @@ fn ticks_to_nanos(ticks: u64) -> u64 {
 fn nanos_to_ticks(nanos: u64) -> u64 {
     #[expect(
         clippy::expect_used,
-        reason = "TSC initialization installs both conversion ratios before publishing clock \
-                  operations"
+        reason = "CG-021-no-panic-on-reachable-failure: TSC initialization installs both \
+                  conversion ratios before publishing clock operations"
     )]
     NANOS_TO_TSC_TICKS_RATIO
         .get()
@@ -541,8 +541,8 @@ fn arm_timer(deadline: ktime_types::MonotonicInstant) {
             if now_ns < deadline_ns {
                 #[expect(
                     clippy::expect_used,
-                    reason = "LAPIC timer initialization installs its conversion ratio before \
-                              publishing timer operations"
+                    reason = "CG-021-no-panic-on-reachable-failure: LAPIC timer initialization \
+                              installs its conversion ratio before publishing timer operations"
                 )]
                 let apic_ticks = NANOS_TO_LAPIC_TICKS_RATIO
                     .get()

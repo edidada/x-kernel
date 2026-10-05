@@ -309,8 +309,8 @@ pub fn handle_ipi_fixup() {
 fn ticks_to_nanos(ticks: u64) -> u64 {
     #[expect(
         clippy::expect_used,
-        reason = "Generic timer initialization installs conversion ratios before publishing clock \
-                  and timer operations"
+        reason = "CG-021-no-panic-on-reachable-failure: Generic timer initialization installs \
+                  conversion ratios before publishing clock and timer operations"
     )]
     CNTPCT_TO_NANOS_RATIO
         .get()
@@ -322,8 +322,8 @@ fn ticks_to_nanos(ticks: u64) -> u64 {
 fn nanos_to_ticks(nanos: u64) -> u64 {
     #[expect(
         clippy::expect_used,
-        reason = "Generic timer initialization installs conversion ratios before publishing clock \
-                  and timer operations"
+        reason = "CG-021-no-panic-on-reachable-failure: Generic timer initialization installs \
+                  conversion ratios before publishing clock and timer operations"
     )]
     NANOS_TO_CNTPCT_RATIO
         .get()

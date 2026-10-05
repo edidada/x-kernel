@@ -270,10 +270,10 @@ impl BlockRequests {
                 Err(Error::Unsupported) => Err(DriverError::Unsupported),
                 #[expect(
                     clippy::panic,
-                    reason = "After a successful pop_used for this token, the pinned \
-                              virtio-drivers completion returns only Ok, IoError or Unsupported; \
-                              any other error means the descriptor chain cannot be reclaimed \
-                              safely"
+                    reason = "CG-021-no-panic-on-reachable-failure: After a successful pop_used \
+                              for this token, the pinned virtio-drivers completion returns only \
+                              Ok, IoError or Unsupported; any other error means the descriptor \
+                              chain cannot be reclaimed safely"
                 )]
                 Err(error) => panic!("virtio block descriptor reclamation failed: {error:?}"),
             };

@@ -193,8 +193,9 @@ impl DeviceNodeLifecycle {
             4 => DeviceNodeState::Removed,
             #[expect(
                 clippy::panic,
-                reason = "The lifecycle byte is written only from DeviceNodeState discriminants, \
-                          so every stored value decodes to a state"
+                reason = "CG-021-no-panic-on-reachable-failure: The lifecycle byte is written \
+                          only from DeviceNodeState discriminants, so every stored value decodes \
+                          to a state"
             )]
             state => panic!("invalid device-node lifecycle state: {state}"),
         }
@@ -223,8 +224,9 @@ impl DeviceNodeLifecycle {
         };
         #[expect(
             clippy::expect_used,
-            reason = "The device registry serializes state transitions, so the previously read \
-                      state cannot change before compare_exchange"
+            reason = "CG-021-no-panic-on-reachable-failure: The device registry serializes state \
+                      transitions, so the previously read state cannot change before \
+                      compare_exchange"
         )]
         self.state
             .compare_exchange(
@@ -251,16 +253,17 @@ impl DeviceNodeLifecycle {
             ),
             #[expect(
                 clippy::panic,
-                reason = "The registry serializes transitions and finish_publish runs once for a \
-                          node it created in Publishing; removal moves Publishing only to \
-                          RemovePending"
+                reason = "CG-021-no-panic-on-reachable-failure: The registry serializes \
+                          transitions and finish_publish runs once for a node it created in \
+                          Publishing; removal moves Publishing only to RemovePending"
             )]
             state => panic!("cannot finish publishing a node in state {state:?}"),
         };
         #[expect(
             clippy::expect_used,
-            reason = "The device registry serializes state transitions, so the previously read \
-                      state cannot change before compare_exchange"
+            reason = "CG-021-no-panic-on-reachable-failure: The device registry serializes state \
+                      transitions, so the previously read state cannot change before \
+                      compare_exchange"
         )]
         self.state
             .compare_exchange(
@@ -550,8 +553,8 @@ fn device_node_registry() -> SpinNoPreemptGuard<'static, DeviceNodeRegistry> {
     DEVICE_NODES.call_once(|| SpinNoPreempt::new(DeviceNodeRegistry::new()));
     #[expect(
         clippy::expect_used,
-        reason = "call_once completed successfully and permanently published the device-node \
-                  registry"
+        reason = "CG-021-no-panic-on-reachable-failure: call_once completed successfully and \
+                  permanently published the device-node registry"
     )]
     DEVICE_NODES
         .get()

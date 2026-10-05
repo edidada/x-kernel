@@ -55,8 +55,9 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
     #[inline]
     #[expect(
         clippy::panic,
-        reason = "Overflow needs 2^31 - 1 simultaneously held read guards, far beyond any number \
-                  of tasks; std's RwLock likewise panics on reader overflow"
+        reason = "CG-021-no-panic-on-reachable-failure: Overflow needs 2^31 - 1 simultaneously \
+                  held read guards, far beyond any number of tasks; std's RwLock likewise panics \
+                  on reader overflow"
     )]
     fn lock_shared(&self) {
         #[cfg(feature = "stats")]

@@ -242,8 +242,8 @@ fn boot_linux(rest: &str) -> VfsResult<Vm<CurrentArch>> {
 #[cfg(target_arch = "riscv64")]
 #[expect(
     clippy::too_many_lines,
-    reason = "TODO(cg): legacy: split image/DTB/initrd loading, virtual device wiring and vCPU0 \
-              start into helpers"
+    reason = "CG-028-focused-functions: TODO(cg): legacy: split image/DTB/initrd loading, virtual \
+              device wiring and vCPU0 start into helpers"
 )]
 fn build_and_start_rv64(
     vm_id: u32,
@@ -495,8 +495,8 @@ fn setup_rv64_devices(vm: &Vm<CurrentArch>, console: &Arc<vdev_uart16550::Uart16
 #[cfg(target_arch = "aarch64")]
 #[expect(
     clippy::too_many_lines,
-    reason = "TODO(cg): legacy: split image/DTB/initrd loading, virtual device wiring and vCPU0 \
-              start into helpers"
+    reason = "CG-028-focused-functions: TODO(cg): legacy: split image/DTB/initrd loading, virtual \
+              device wiring and vCPU0 start into helpers"
 )]
 fn build_and_start_aarch64(
     vm_id: u32,

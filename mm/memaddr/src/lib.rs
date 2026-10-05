@@ -52,8 +52,9 @@ pub const fn ceil_align(addr: usize, align: usize) -> usize {
         Some(addr) => addr & !mask,
         #[expect(
             clippy::panic,
-            reason = "Only an address within align - 1 of usize::MAX overflows, which no valid \
-                      address range reaches; this mirrors an integer overflow check in a const fn"
+            reason = "CG-021-no-panic-on-reachable-failure: Only an address within align - 1 of \
+                      usize::MAX overflows, which no valid address range reaches; this mirrors an \
+                      integer overflow check in a const fn"
         )]
         None => panic!("aligned address overflow"),
     }

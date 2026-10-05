@@ -100,8 +100,8 @@ pub fn init() {
     INITIALIZATION.call_once(|| {
         #[expect(
             clippy::expect_used,
-            reason = "Boot installs the uevent publisher exactly once before discovery, as \
-                      required by the device lifecycle contract"
+            reason = "CG-021-no-panic-on-reachable-failure: Boot installs the uevent publisher \
+                      exactly once before discovery, as required by the device lifecycle contract"
         )]
         install_device_node_lifecycle_publisher(Arc::new(handle_lifecycle_event))
             .expect("device-node uevent publisher must initialize before device discovery");

@@ -262,8 +262,8 @@ impl ProcessTimerManager {
         let signal_seq = self.allocate_posix_signal_seq();
         #[expect(
             clippy::expect_used,
-            reason = "The timer ID was validated in this exclusively borrowed manager and \
-                      sequence allocation does not remove timers"
+            reason = "CG-021-no-panic-on-reachable-failure: The timer ID was validated in this \
+                      exclusively borrowed manager and sequence allocation does not remove timers"
         )]
         let timer = self
             .posix_timers
@@ -380,8 +380,8 @@ impl ProcessTimerManager {
             TimerInstant::Monotonic(deadline) => deadline,
             #[expect(
                 clippy::panic,
-                reason = "ITIMER_REAL timers are created on the monotonic clock, so their \
-                          deadlines are monotonic instants"
+                reason = "CG-021-no-panic-on-reachable-failure: ITIMER_REAL timers are created on \
+                          the monotonic clock, so their deadlines are monotonic instants"
             )]
             _ => panic!("ITIMER_REAL deadline must use the monotonic clock"),
         });

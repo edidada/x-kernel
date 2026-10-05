@@ -4,8 +4,8 @@
 
 #![allow(
     clippy::expect_used,
-    reason = "case (a): this crate only constructs kernel test fixtures; fixture and cleanup \
-              failures must fail the test"
+    reason = "CG-021-no-panic-on-reachable-failure: case (a): this crate only constructs kernel \
+              test fixtures; fixture and cleanup failures must fail the test"
 )]
 #![no_std]
 

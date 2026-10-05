@@ -97,8 +97,8 @@ impl NsProxy {
         Arc::clone(INIT_NSPROXY.call_once(|| {
             #[expect(
                 clippy::expect_used,
-                reason = "VFS boot initializes the permanent mount namespace before initial \
-                          namespace-proxy creation"
+                reason = "CG-021-no-panic-on-reachable-failure: VFS boot initializes the \
+                          permanent mount namespace before initial namespace-proxy creation"
             )]
             let mnt_ns =
                 MntNamespace::initial().expect("initial VFS mount namespace must be initialized");

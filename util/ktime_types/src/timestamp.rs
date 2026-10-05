@@ -77,8 +77,8 @@ impl TimestampLimits {
         };
         #[expect(
             clippy::expect_used,
-            reason = "Validated granularity only decreases normalized subsecond nanoseconds, \
-                      keeping them below one billion"
+            reason = "CG-021-no-panic-on-reachable-failure: Validated granularity only decreases \
+                      normalized subsecond nanoseconds, keeping them below one billion"
         )]
         SystemTime::from_unix_parts(seconds, nanoseconds)
             .expect("validated timestamp granularity preserves normalized nanoseconds")

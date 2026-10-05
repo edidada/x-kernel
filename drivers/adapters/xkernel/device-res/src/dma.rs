@@ -33,8 +33,8 @@ impl DmaOp for XKernelResourceProvider {
             cpu_addr: {
                 #[expect(
                     clippy::expect_used,
-                    reason = "The resource handle returns the original non-null CPU address \
-                              supplied by this DMA provider"
+                    reason = "CG-021-no-panic-on-reachable-failure: The resource handle returns \
+                              the original non-null CPU address supplied by this DMA provider"
                 )]
                 NonNull::new(alloc.cpu_addr as *mut u8)
                     .expect("coherent DMA allocation stored a null CPU address")
@@ -75,8 +75,8 @@ impl DmaOp for XKernelResourceProvider {
 
         #[expect(
             clippy::expect_used,
-            reason = "The resource handle returns the original non-null CPU address supplied by \
-                      this DMA provider"
+            reason = "CG-021-no-panic-on-reachable-failure: The resource handle returns the \
+                      original non-null CPU address supplied by this DMA provider"
         )]
         let cpu_addr = NonNull::new(mapping.cpu_addr as *mut u8)
             .expect("streaming DMA mapping stored a null CPU address");

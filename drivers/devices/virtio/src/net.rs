@@ -184,8 +184,8 @@ pub struct VirtIoNetDev<H: Hal, T: Transport, const QS: usize> {
     // Kept alive so that `NetBufBox`es in `bufs` remain valid.
     #[expect(
         dead_code,
-        reason = "Own the RX buffer pool for the lifetime of the network device even when no \
-                  direct field read is needed"
+        reason = "CG-024-lint-exceptions: dead_code: Own the RX buffer pool for the lifetime of \
+                  the network device even when no direct field read is needed"
     )]
     buf_pool: Arc<NetBufPool>,
     inner: Arc<SpinNoIrq<InnerDev<H, T, QS>>>,
