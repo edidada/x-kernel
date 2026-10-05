@@ -60,3 +60,8 @@ The library links against rustc internals. Bump these together:
 `rust-toolchain.toml`, the Makefile `fmt` toolchain, Jenkins
 `AUX_RUST_TOOLCHAIN`, and the `dylint_*` / `cargo-dylint` / `dylint-link`
 versions.
+
+This standalone host workspace does not inherit the kernel root
+`[workspace.lints]`. Validate its compiler-private code and embedded fixtures
+with its pinned nightly through `make dylint_test`; kernel lint policy remains
+in [the unified guidelines](../../docs/code-guidelines/README.md).
