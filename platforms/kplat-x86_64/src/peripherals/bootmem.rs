@@ -126,7 +126,16 @@ fn for_each_linuxboot_region<F>(params_addr: usize, mut f: F)
 where
     F: FnMut(BootMemoryKind, usize, usize),
 {
-    let Some(params) = LinuxBootParams::new(params_addr) else {
+    // SAFETY: the x86_64 boot stub is the only producer of
+    // `BootProtocol::LinuxBoot`, and it sets `protocol_info_addr` to the
+    // physical address of the 4 KiB zeropage it already validated. Its only
+    // caller path is `prepare_boot_memory` from `khal::mem::init` during
+    // primary boot, which runs before `memspace::init_memory_management`
+    // replaces the stub's page table (which identity-maps the low 512 GiB) and
+    // before the page allocator can hand out that memory, so the zeropage
+    // stays mapped and unmodified while `params` is used. `params` does not
+    // escape and `cmdline()` is not called.
+    let Some(params) = (unsafe { LinuxBootParams::new(params_addr) }) else {
         return;
     };
 

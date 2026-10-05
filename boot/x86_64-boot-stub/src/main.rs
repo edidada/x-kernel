@@ -183,7 +183,16 @@ fn load_linuxboot_kernel(
     usize,
     Option<BootCmdline>,
 ) {
-    let params = LinuxBootParams::new(boot_params_paddr).expect("missing linux boot params");
+    // SAFETY: `boot.S` takes this Linux-boot path only after checking the
+    // "HdrS" setup-header signature at `boot_params_paddr + 0x202`, so it is the
+    // bootloader's 4 KiB zeropage. The temporary page table identity-maps the
+    // low 512 GiB, so that address and the 32-bit `cmd_line_ptr` are readable
+    // as-is. The stub only rewrites the zeropage in `boot.S` before this point,
+    // and `load_linuxboot_elf_image` keeps the kernel load range off its page.
+    // The command-line bytes are not written by the stub, whose execution (and
+    // with it the `&'static str` from `cmdline()`) ends at the kernel jump.
+    let params =
+        unsafe { LinuxBootParams::new(boot_params_paddr) }.expect("missing linux boot params");
     let payload_offset = params
         .payload_offset()
         .expect("missing linux payload offset");
