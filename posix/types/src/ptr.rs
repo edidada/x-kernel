@@ -162,6 +162,10 @@ impl<T> UserPtr<T> {
     /// # Errors
     ///
     /// Propagates the `osvm` memory-access error for the user source range.
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
     #[allow(
         unknown_lints,
         user_copy_without_abi_contract,

@@ -50,7 +50,8 @@ checks:
   4. Check the record's representation and the bounds on generic array
      elements. Review constructors of union-bearing records: a type-level
      layout check alone cannot prove that every union byte was initialized.
-- **Exceptions**: A focused `#[allow(unknown_lints, unsound_user_abi_impl,
+- **Exceptions**: Use the paired Dylint exception attributes from
+  [README.md](README.md#suppressing-a-check). A focused `#[allow(unknown_lints, unsound_user_abi_impl,
   reason = "CG-005-user-abi-layout: <layout or construction proof>")]` may
   document an invariant the lint cannot prove, such as an always-zeroed union
   or a separately proven generic layout. The reason must identify the constructor

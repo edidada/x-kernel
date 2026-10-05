@@ -11,6 +11,7 @@ use kprocess::{AsThread, ControllingTerminal, Pid, Process, ProcessGroup, SetTer
 use ksync::Mutex;
 use ktask::future::{block_on, poll_io};
 use kvfs::{DeviceFileOps, NodeFlags, VfsFile, VfsFileBuilder, VfsInode};
+use posix_types::{UserConstPtr, UserPtr};
 
 use crate::terminal::{
     Terminal, WindowSize,
@@ -239,24 +240,22 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
         use linux_raw_sys::ioctl::*;
         match cmd {
             TCGETS => {
-                posix_types::UserPtr::<Termios>::from(arg)
+                UserPtr::<Termios>::from(arg)
                     .write_vm(*self.terminal.termios.lock().as_ref().deref())?;
             }
             TCGETS2 => {
-                posix_types::UserPtr::<Termios2>::from(arg)
-                    .write_vm(*self.terminal.termios.lock().as_ref())?;
+                UserPtr::<Termios2>::from(arg).write_vm(*self.terminal.termios.lock().as_ref())?;
             }
             TCSETS | TCSETSF | TCSETSW => {
-                *self.terminal.termios.lock() = Arc::new(Termios2::new(
-                    posix_types::UserConstPtr::<Termios>::from(arg).read_vm()?,
-                ));
+                *self.terminal.termios.lock() =
+                    Arc::new(Termios2::new(UserConstPtr::<Termios>::from(arg).read_vm()?));
                 if cmd == TCSETSF {
                     self.ldisc.lock().drain_input();
                 }
             }
             TCSETS2 | TCSETSF2 | TCSETSW2 => {
                 *self.terminal.termios.lock() =
-                    Arc::new(posix_types::UserConstPtr::<Termios2>::from(arg).read_vm()?);
+                    Arc::new(UserConstPtr::<Termios2>::from(arg).read_vm()?);
                 if cmd == TCSETSF2 {
                     self.ldisc.lock().drain_input();
                 }
@@ -287,7 +286,7 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
                     let caller_session = kprocess::current_user_process().group().session();
                     self.terminal.job_control.foreground_for(&caller_session)?
                 };
-                posix_types::UserPtr::<i32>::from(arg).write_vm(foreground.pgid() as i32)?;
+                UserPtr::<i32>::from(arg).write_vm(foreground.pgid() as i32)?;
             }
             TIOCGSID => {
                 let session = if self.is_ptm {
@@ -296,10 +295,10 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
                     let caller_session = kprocess::current_user_process().group().session();
                     self.terminal.job_control.session_for(&caller_session)?
                 };
-                posix_types::UserPtr::<u32>::from(arg).write_vm(session.sid())?;
+                UserPtr::<u32>::from(arg).write_vm(session.sid())?;
             }
             TIOCSPGRP => {
-                let pgid = posix_types::UserConstPtr::<i32>::from(arg).read_vm()?;
+                let pgid = UserConstPtr::<i32>::from(arg).read_vm()?;
                 if pgid <= 0 {
                     return Err(KError::InvalidInput);
                 }
@@ -311,16 +310,15 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
                     .set_foreground_for(&current_session, &target_group)?;
             }
             TIOCGWINSZ => {
-                posix_types::UserPtr::<WindowSize>::from(arg)
-                    .write_vm(*self.terminal.window_size.lock())?;
+                UserPtr::<WindowSize>::from(arg).write_vm(*self.terminal.window_size.lock())?;
             }
             TIOCSWINSZ => {
                 *self.terminal.window_size.lock() =
-                    posix_types::UserConstPtr::<WindowSize>::from(arg).read_vm()?;
+                    UserConstPtr::<WindowSize>::from(arg).read_vm()?;
             }
             TIOCSPTLCK => {}
             TIOCGPTN => {
-                posix_types::UserPtr::<u32>::from(arg).write_vm(self.pty_number())?;
+                UserPtr::<u32>::from(arg).write_vm(self.pty_number())?;
             }
             TIOCSCTTY => {
                 if arg != 0 {

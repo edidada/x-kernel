@@ -355,6 +355,7 @@ fn bytes(p: *mut u8, value: u8) {
     p.write_vm(value);
 }
 
+#[expect(clippy::allow_attributes, reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy")]
 #[allow(unknown_lints, user_copy_without_abi_contract, reason = "CG-006-user-copy-abi-contract: low-level copy test")]
 fn allowed(p: *mut Record, value: Record) {
     p.write_vm(value);
