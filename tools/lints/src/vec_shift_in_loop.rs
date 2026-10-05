@@ -114,6 +114,7 @@ mod tests {
     }
     // Bounded vector exception.
     let mut bounded = vec![1, 2];
+    #[expect(clippy::allow_attributes, reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy")]
     #[allow(unknown_lints, vec_shift_in_loop, reason = "CG-009-vec-shift-in-loop: vector grows from two to at most four entries")]
     for _ in 0..2 { bounded.insert(0, 1); }
 }

@@ -703,6 +703,10 @@ impl Ext4SbInfo {
         Ok(true)
     }
 
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
     #[allow(
         unknown_lints,
         vec_shift_in_loop,
