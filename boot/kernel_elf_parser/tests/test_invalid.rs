@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kernel_elf_parser::{ElfHeadersBuilder, ElfError};
+use kernel_elf_parser::{ElfError, ElfHeadersBuilder};
 
 const ELF_HEADER_SIZE: usize = 64;
 const PROGRAM_HEADER_SIZE: u16 = 56;

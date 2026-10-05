@@ -1316,6 +1316,10 @@ fn external_xattr_block_action(
     }
 }
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
 #[allow(
     unknown_lints,
     vec_shift_in_loop,

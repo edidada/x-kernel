@@ -16,7 +16,8 @@ checks:
   1. Find calls to `Vec::remove` or `Vec::insert` whose receiver is a `Vec`.
   2. Check whether the call is nested in a loop body.
   3. If it is intentional, verify the vector is small or bounded so the O(n) shift does not matter.
-- **Exceptions**: An allow reason must identify why the vector is small or bounded. Use `#[allow(unknown_lints, vec_shift_in_loop, reason = "CG-009-vec-shift-in-loop: <why the vector is small or bounded>")]`. Review still covers `Vec` growth on hot paths.
+- **Exceptions**: Use the paired Dylint exception attributes from
+  [README.md](README.md#suppressing-a-check). An allow reason must identify why the vector is small or bounded. Use `#[allow(unknown_lints, vec_shift_in_loop, reason = "CG-009-vec-shift-in-loop: <why the vector is small or bounded>")]`. Review still covers `Vec` growth on hot paths.
 - **Counter-example**:
 
 ```rust,ignore
@@ -28,6 +29,7 @@ Repeated shifting can make this loop quadratic.
 
 ```rust,ignore
 // The queue contains at most four entries by construction.
+#[expect(clippy::allow_attributes, reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy")]
 #[allow(unknown_lints, vec_shift_in_loop, reason = "CG-009-vec-shift-in-loop: queue is bounded to four entries")]
 for _ in 0..count { queue.remove(0); }
 ```
