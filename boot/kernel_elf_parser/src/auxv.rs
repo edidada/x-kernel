@@ -19,7 +19,7 @@ use zerocopy::{Immutable, IntoBytes};
     reason = "CG-032-camel-case-types: variant names preserve Linux AT_* auxiliary-vector ABI \
               terminology"
 )]
-#[derive(Clone, Copy, PartialEq, Eq, IntoBytes, Immutable)]
+#[derive(Clone, Copy, Eq, PartialEq, IntoBytes, Immutable)]
 pub enum AuxType {
     /// End of vector
     NULL              = 0,

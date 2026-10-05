@@ -439,6 +439,7 @@ struct Flagged(u8);
 #[derive(Clone, Debug)]
 struct Sorted(u8);
 
+#[expect(clippy::allow_attributes, reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy")]
 #[allow(unknown_lints, unsorted_attributes, reason = "CG-007-attribute-order: test suppression")]
 #[repr(C)]
 #[cfg(all())]
@@ -561,7 +562,7 @@ LL | #[derive(Debug, Clone)]
    = help: see docs/code-guidelines/CG-007-attribute-order.md
 
 error: sort attributes alphabetically
-  --> $DIR/unsorted_attributes.rs:18:1
+  --> $DIR/unsorted_attributes.rs:19:1
    |
 LL | / #[cfg_attr(any(), must_use)]
 LL | | #[cfg_attr(any(), deprecated)]
@@ -575,7 +576,7 @@ LL + #[cfg_attr(any(), must_use)]
    |
 
 error: sort derived traits alphabetically
-  --> $DIR/unsorted_attributes.rs:59:5
+  --> $DIR/unsorted_attributes.rs:60:5
    |
 LL |     #[derive(Debug, Clone)]
    |     ^^^^^^^^^^^^^^^^^^^^^^^ help: use alphabetical order: `#[derive(Clone, Debug)]`
@@ -583,7 +584,7 @@ LL |     #[derive(Debug, Clone)]
    = help: see docs/code-guidelines/CG-007-attribute-order.md
 
 error: sort derived traits alphabetically
-  --> $DIR/unsorted_attributes.rs:63:1
+  --> $DIR/unsorted_attributes.rs:64:1
    |
 LL | #[derive(Debug, /* keep this comment */ Clone)]
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -591,7 +592,7 @@ LL | #[derive(Debug, /* keep this comment */ Clone)]
    = help: see docs/code-guidelines/CG-007-attribute-order.md
 
 error: sort derived traits alphabetically
-  --> $DIR/unsorted_attributes.rs:66:1
+  --> $DIR/unsorted_attributes.rs:67:1
    |
 LL | #[derive(Debug, Clone)]
    | ^^^^^^^^^^^^^^^^^^^^^^^ help: use alphabetical order: `#[derive(Clone, Debug)]`
@@ -599,7 +600,7 @@ LL | #[derive(Debug, Clone)]
    = help: see docs/code-guidelines/CG-007-attribute-order.md
 
 error: sort derived traits alphabetically
-  --> $DIR/unsorted_attributes.rs:70:1
+  --> $DIR/unsorted_attributes.rs:71:1
    |
 LL | #[derive(Debug, Clone)]
    | ^^^^^^^^^^^^^^^^^^^^^^^ help: use alphabetical order: `#[derive(Clone, Debug)]`
@@ -607,7 +608,7 @@ LL | #[derive(Debug, Clone)]
    = help: see docs/code-guidelines/CG-007-attribute-order.md
 
 error: place derive after other outer attributes
-  --> $DIR/unsorted_attributes.rs:75:1
+  --> $DIR/unsorted_attributes.rs:76:1
    |
 LL | / #[derive(Clone)]
 LL | | #[repr(C)]
@@ -624,7 +625,7 @@ LL + #[derive(Clone)]
    |
 
 error[E0433]: cannot find `Clone` in `custom`
-  --> $DIR/unsorted_attributes.rs:30:33
+  --> $DIR/unsorted_attributes.rs:31:33
    |
 LL | #[derive(custom::Debug, custom::Clone)]
    |                                 ^^^^^ could not find `Clone` in `custom`
