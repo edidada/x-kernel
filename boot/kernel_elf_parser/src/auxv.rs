@@ -8,7 +8,6 @@
 use zerocopy::{Immutable, IntoBytes};
 
 /// Represents the type of an auxiliary vector entry.
-#[derive(Clone, Copy, Eq, PartialEq, IntoBytes, Immutable)]
 #[expect(
     non_camel_case_types,
     reason = "CG-032-camel-case-types: Preserve Linux AT_* auxiliary-vector names, including \
@@ -20,6 +19,7 @@ use zerocopy::{Immutable, IntoBytes};
     reason = "CG-032-camel-case-types: variant names preserve Linux AT_* auxiliary-vector ABI \
               terminology"
 )]
+#[derive(Clone, Copy, Eq, PartialEq, IntoBytes, Immutable)]
 pub enum AuxType {
     /// End of vector
     NULL              = 0,

@@ -180,6 +180,7 @@ struct Flagged(u8);
 #[derive(Clone, Debug)]
 struct AlreadyLast(u8);
 
+#[expect(clippy::allow_attributes, reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy")]
 #[allow(unknown_lints, derive_not_last, reason = "CG-007-attribute-order: test suppression")]
 #[derive(Debug, Clone)]
 #[repr(C)]
@@ -229,7 +230,7 @@ LL + #[derive(Debug, Clone)]
    |
 
 error[E0433]: cannot find module or crate `custom` in this scope
-  --> $DIR/derive_not_last.rs:37:3
+  --> $DIR/derive_not_last.rs:38:3
    |
 LL | #[custom::doc]
    |   ^^^^^^ use of unresolved module or unlinked crate `custom`

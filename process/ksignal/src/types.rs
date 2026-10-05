@@ -24,11 +24,11 @@ pub const MAX_SIGNALS: usize = 64;
 /// The discriminants match the Linux signal ABI: standard signals `1..=31`
 /// and real-time signals `32..=64` (`SIGRTMIN` is 32).
 #[repr(u8)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, FromRepr, EnumIter)]
 #[expect(
     clippy::upper_case_acronyms,
     reason = "CG-032-camel-case-types: signal variants use the Linux SIG* ABI names"
 )]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, FromRepr, EnumIter)]
 pub enum Signo {
     /// Hangup (`SIGHUP`, 1).
     SIGHUP    = 1,
