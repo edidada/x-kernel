@@ -10,7 +10,7 @@ use core::{ffi::CStr, iter};
 use filemap::new_file_private_vma;
 use kcred::Cred;
 use kernel_elf_parser::{
-    AuxEntry, AuxType, ElfHeaders, ElfHeadersBuilder, ElfError, app_stack_region,
+    AuxEntry, AuxType, ElfError, ElfHeaders, ElfHeadersBuilder, app_stack_region,
 };
 use kerrno::{KError, KResult};
 use khal::paging::{MappingFlags, PageSize};

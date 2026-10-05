@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kernel_elf_parser::{ElfError, AuxType, ElfHeadersBuilder, ElfParser};
+use kernel_elf_parser::{AuxType, ElfError, ElfHeadersBuilder, ElfParser};
 
 #[test]
 fn test_elf_parser() {

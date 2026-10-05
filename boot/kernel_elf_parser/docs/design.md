@@ -5,7 +5,8 @@
 该 crate 提供 ELF 头部解析、辅助向量表示和初始用户栈字节布局。
 它不拥有进程地址空间，也不负责映射或装载 ELF 段。
 `src/info.rs` 管理解析结果，`src/auxv.rs` 表示辅助向量，
-`src/user_stack.rs` 生成栈内容；公开 API 的参数和错误契约见 rustdoc。
+`src/user_stack.rs` 生成栈内容；`src/error.rs` 定义解析与栈构造共用的
+`ElfError`，将各个失败条件保持为可区分的变体。公开 API 的参数和错误契约见 rustdoc。
 
 ## 架构与算法流程
 
@@ -13,7 +14,9 @@
 再将传入的完整程序头表复制成统一的 `ProgramHeader64` 数组。
 `ElfParser` 借用这些头部，并根据 ELF 类型选择装载偏移。
 构造时查找覆盖程序头表文件偏移的段，使用受检加法和整数转换计算
-程序头表虚拟地址。缺少覆盖段或地址溢出通过现有 `Result` 返回。
+程序头表虚拟地址。缺少覆盖段与地址溢出分别返回
+`ElfError::ProgramHeaderTableUnmapped` 和 `ElfError::ProgramHeaderAddressOverflow`；
+诊断文本与原来的字符串错误一致。
 
 构造成功后，`phdr` 字段保留这个地址；`phdr()` 和 `aux_vector()`
 不再重复搜索头部或因缺少覆盖段而 panic。头部通过共享引用借用，
