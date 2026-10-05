@@ -1,6 +1,7 @@
 # Lint 政策与规则覆盖
 
-本文件是 lint 的唯一政策入口：等级在根 `Cargo.toml` 的 `[workspace.lints]`，
+本目录的统一入口是 [README.md](README.md)。本文件记录 rustc/Clippy 政策与覆盖：
+等级在根 `Cargo.toml` 的 `[workspace.lints]`，
 参数（阈值、禁用列表、测试豁免）在根 `clippy.toml`。
 lint 已强制的规则不再写进 `docs/ai/skills/code-guidelines/`。
 `missing_docs` 和 `rustdoc::*` 归 module-docs 轨道（`docs/ai/review/module-docs/`）。
@@ -13,30 +14,18 @@ lint 已强制的规则不再写进 `docs/ai/skills/code-guidelines/`。
 - `xtask` 是独立 workspace，不继承根 lint；单独运行
   `cargo clippy --manifest-path xtask/Cargo.toml -p xkmake --no-deps`。
 
-## 例外写法
+## 例外与按 crate 关闭
 
-- 在最窄作用域写 `#[expect(<lint>, reason = "...")]`，reason 说明此处为何不适用，不写 "needed"、"legacy" 等空话。
-- `#[allow]` 只用于 `expect` 不可靠处（只在部分 cfg/feature/平台命中、宏展开、
-  rust-bindgen 等生成代码），同样带 reason。
-- reason 写法：`TODO(cg): ` 应修未修，写明修复方式；`test scenario: ` 测试宏未覆盖的测试代码；
-  `Fatal boot: ` 写明启动失败条件、无恢复办法、无错误返回通道；内部不变量写明不变量及其成立原因。
-- rustc 忽略宏调用语句（`panic!();`、`todo!();`）上的 `#[expect]`，改放在最小的外层项（`match` 分支或函数）。
-
-## 按 crate 关闭
-
-- 只允许 case (a) 规则不适用（如以终止构建为预期失败的 host `build.rs`、纯测试 crate），
-  或 case (b) 存量密集：Jenkins 各 `make clippy` 配置诊断并集中每 crate ≥10 处（单条 lint 可更严）。
-- 在每个实际被 lint 的 target 根写 `#![allow(<lint>, reason = "case (a|b): <具体原因>")]`，
-  不用 `#![expect]`、不要求 issue，未被 lint 的 target 不预先豁免；并登记在下表该 lint 行。
-- 逐点修复优先，门槛不是新增配额；case (b) crate 的新增代码仍按原规则审查。
-- 另可在 crate 根写过渡豁免 `#![expect(<lint>, reason = "TODO(cg): legacy cleanup, tracked in <issue>")]`，须有 issue。
+统一语法、reason 的规则 id、`allow_attributes` 配对、case (a)/(b) 和 fatal-boot
+政策只在 [README.md 的 Suppressing a check](README.md#suppressing-a-check) 定义。
+各规则的语义例外和已登记的关闭 target 见对应 CG 文件。
 
 ## 测试代码
 
 - `#[def_test]` / `#[mod_test]`（`util/macros`）豁免 `unwrap_used`、`expect_used`、`panic`、`too_many_lines`，
   `#[mod_test]` 另豁免 `missing_docs`。测试代码不手写 `allow`/`expect`；内联测试模块用 `#[mod_test]`。
 - 文件模块（`mod name;`）不能用属性宏（E0658）：写成 `#[mod_test] mod tests { include!("tests.rs"); }`
-  （被 include 的文件不重复声明 cfg 或模块文档），或在辅助函数上逐点写 `test scenario: ` 例外。
+  （被 include 的文件不重复声明 cfg 或模块文档），或在辅助函数上逐点写 `<rule-id>: test scenario: ` 例外。
 - host 侧 `#[test]` 由 `clippy.toml` 的 `allow-*-in-tests` 覆盖。
 
 ## 新增 lint 与工具链升级
