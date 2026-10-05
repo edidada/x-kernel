@@ -157,6 +157,7 @@ mod closures_are_runtime {
 
 mod const_fn_exception {
     use ksync::{Mutex, RawMutex};
+    #[expect(clippy::allow_attributes, reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy")]
     #[allow(unknown_lints, untracked_runtime_lock,
         reason = "CG-003-runtime-lock-tracking: called from CONST_LOCK")]
     const fn make() -> Mutex<u32> { Mutex::const_new(RawMutex::new(), 0) }

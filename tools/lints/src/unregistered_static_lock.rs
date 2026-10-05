@@ -169,6 +169,7 @@ mod out_of_scope {
 
 mod allow {
     use ksync::Mutex;
+    #[expect(clippy::allow_attributes, reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy")]
     #[allow(
         unknown_lints,
         unregistered_static_lock,

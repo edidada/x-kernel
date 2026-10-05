@@ -17,7 +17,8 @@ checks:
   2. Leave calls in a const context alone, including inline const blocks. Treat a closure body as runtime code even when it appears in a `const` or `static` initializer.
   3. Report only when the raw-lock argument is a direct default `RawMutex::new()` or `RawRwLock::new()` call. Custom raw-lock values are out of scope.
   4. For a call inside a `const fn`, confirm it is actually used by a const initializer. Any exception reason must name that caller.
-- **Exceptions**:
+- **Exceptions**: Dylint allowances use the paired attributes in
+  [README.md](README.md#suppressing-a-check).
   - A `const fn` constructor may use `const_new` only if it is really called from a const initializer. Suppress the call with `#[allow(unknown_lints, untracked_runtime_lock, reason = "CG-003-runtime-lock-tracking: called from <const initializer>")]`; the reason must name the caller.
   - Custom raw locks are out of scope. The lint only covers a direct default raw constructor; do not replace a custom raw lock with the default merely to satisfy this lint.
 - **Counter-example**:

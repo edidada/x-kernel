@@ -17,7 +17,8 @@ checks:
   2. Confirm the item was produced by the real `static_lock!` macro. Renamed imports are supported; a local macro with the same name is not.
   3. Rewrite a reported item into the macro's accepted form: spell the type as `Mutex` or `RwLock`, use a direct `X::new(arg)` initializer, and remove `mut` from `static mut`.
   4. For new or moved `Mutex` / `RwLock` / spin statics, also check `concurrency.md` lock construction (`static_lock!` vs `::new`).
-- **Exceptions**:
+- **Exceptions**: Dylint allowances use the paired attributes in
+  [README.md](README.md#suppressing-a-check).
   - Static locks using custom raw locks constructed with `RawMutex::with_config(..)` or `RawRwLock::with_config(..)` are outside this rule.
   - Test-only locks may be exempted on the item with `#[allow(unknown_lints, unregistered_static_lock, reason = "CG-002-static-mutex-registration: <why>")]`, consistently with CG-001.
   - Ordinary non-static values should use `::new`; `static_lock!` applies to static lock items.
