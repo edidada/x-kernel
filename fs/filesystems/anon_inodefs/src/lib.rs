@@ -117,13 +117,19 @@ impl InodeOperations for AnonInodeOperations {
     // file, so accepting a fallback update would let one `fchown`/`fchmod`/
     // `utimensat` through any of those descriptors mutate metadata that every
     // other process observes on its own anonymous fds. Keep the explicit
-    // rejection semantics instead of inheriting the fallback.
+    // rejection semantics for those fields instead of inheriting the
+    // fallback. Size updates keep the fallback's `EINVAL`: the singleton is
+    // not a regular file, so `ftruncate` stays on the documented errno,
+    // consistent with anonymous pipes and without publishing any state.
     fn setattr(
         &self,
         _idmap: &MountIdmap,
         _dentry: &Dentry,
-        _update: MetadataUpdate,
+        update: MetadataUpdate,
     ) -> VfsResult<MetadataUpdate> {
+        if update.size.is_some() {
+            return Err(VfsError::InvalidInput);
+        }
         Err(VfsError::OperationNotSupported)
     }
 }
@@ -222,7 +228,8 @@ mod tests {
 
         // The singleton is shared across every process's anonymous fds, so
         // authorized metadata updates must keep failing instead of mutating
-        // state other processes observe.
+        // state other processes observe. Truncation keeps the fallback's
+        // `EINVAL` for non-regular files.
         assert_eq!(
             file.path().chown(Some(1234), None, &cred),
             Err(VfsError::OperationNotSupported)
@@ -236,7 +243,7 @@ mod tests {
             file.path().set_times(Some(now), Some(now), &cred),
             Err(VfsError::OperationNotSupported)
         );
-        assert_eq!(file.truncate(8), Err(VfsError::OperationNotSupported));
+        assert_eq!(file.truncate(8), Err(VfsError::InvalidInput));
 
         let metadata = file.path().getattr().unwrap();
         assert_eq!(metadata.uid, 0);
