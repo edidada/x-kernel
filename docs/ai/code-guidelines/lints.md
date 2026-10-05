@@ -1,128 +1,95 @@
 # Lint 政策与规则覆盖
 
-lint 等级集中在根 `Cargo.toml` 的 `[workspace.lints]`，
-lint 参数（阈值、禁用列表、测试豁免）集中在根 `clippy.toml`。
-凡是 lint 能强制的规则，不再写进 `docs/ai/skills/code-guidelines/`，
-AI 编写与审查也不重复检查，但下述按 crate 关闭的 case (b) 仍保留原规则审查。
-本文件是这些 lint 的唯一政策入口。
+本文件是 lint 的唯一政策入口：等级在根 `Cargo.toml` 的 `[workspace.lints]`，
+参数（阈值、禁用列表、测试豁免）在根 `clippy.toml`。
+lint 已强制的规则不再写进 `docs/ai/skills/code-guidelines/`。
+`missing_docs` 和 `rustdoc::*` 归 module-docs 轨道（`docs/ai/review/module-docs/`）。
 
-## Lint 政策
+## 等级与检查范围
 
-- **等级映射**：规范中的 MUST 对应 `deny`，SHOULD 对应 `warn`。
-  门禁 `make clippy` 带 `-D warnings`，两者都阻塞合入；
-  等级只表达规则强度。
-- **例外写法**：逐点例外是在最窄作用域上
-  `#[expect(<lint>, reason = "...")]`。
-  reason 要说明此处为什么不适用，不写 "needed"、"legacy" 之类的空话。
-  除下述「按 crate 关闭」外，`#[allow]` 只用于 `expect` 不可靠的场合：
-  lint 只在部分 cfg/feature/平台下触发，或代码由宏展开或生成工具（如 rust-bindgen）生成；
-  同样必须带 reason。
-- **按 crate 关闭**：只允许两类：case (a) 规则不适用，例如以终止构建为预期失败方式的
-  host 构建工具或纯测试 crate；case (b) 存量点过多，当前无法逐点判断，
-  但新增代码仍由 AI/人工按原规则审查。
-  在该 crate 实际被 lint 的每个 target 根使用
-  `#![allow(<lint>, reason = "case (a): <具体不适用原因>")]` 或
-  `#![allow(<lint>, reason = "case (b): <存量规模和逐点判断困难；新增代码仍遵守原规则>")]`；
-  不使用 `#![expect]`，不要求 issue。reason 必须标明 case，不能只有 "legacy"。
-  每条 lint 的表格行必须明确列出关闭的 crate 和 target 根、类别及判断标准；
-  未被 lint 的 target 不预先添加豁免。逐点修复仍优先于按 crate 关闭。
-  下方带 issue 的过渡豁免保留为另一种选择。
-- **过渡豁免**：存量来不及清理时，只能在 crate 根写
-  `#![expect(<lint>, reason = "TODO(cg): legacy cleanup, tracked in <issue>")]`，
-  并且必须有对应 issue。
-  清理完成后 `expect` 不再命中，会触发 `unfulfilled_lint_expectations`，届时删除。
-- **新增 lint**：一条 lint 一个提交，提交内容包括：
-  `[workspace.lints]` 一行（及需要的 `clippy.toml` 参数）、
-  全部存量处理（修复、逐点 `expect`、crate 根过渡豁免或按 crate 关闭）、
-  在本文件已启用表中登记该 lint（覆盖的原文、覆盖程度、例外标准、关闭的 crate），
-  并从 skill 删除被它覆盖的原文；
-  提交说明写启用动机和存量处理方式。
-  落地前在 Jenkins 运行 `make clippy` 的六个配置上各跑一次 `make clippy`
-  （以 `Jenkinsfile` 的构建检查阶段为准：四个架构的 `qemu_defconfig`，
-  以及 aarch64 的 crosvm 和 virtcca 配置），
-  并在 aarch64 `qemu_defconfig` 上跑一次 `make clippy UNITTEST=y`。
-  lint 是否命中随 cfg/feature 变化时（如 `unreachable_pub`、只在可选 feature 下编译的代码、
-  只在部分配置下命中的 `expect`），另做 feature 扫描：
-  分别用打开和关闭相关可选 feature 的配置跑 `make clippy`。
-  loongarch64 目前在主线上因无关原因失败，
-  对比启用前后的错误集合，不新增即可。
-- **工具链升级**：修改 `rust-toolchain.toml` 的 PR 必须按上条的配置集合附 `make clippy` 全量复核，
-  并确认本文件引用的 lint 名和 `clippy.toml` 键在新版本中仍然存在。
-- **测试代码**：`#[def_test]` / `#[mod_test]` 生成的测试函数和测试模块
-  由 `util/macros` 统一豁免 `clippy::unwrap_used`、`clippy::expect_used`、`clippy::panic`；
-  `#[mod_test]` 另豁免 `missing_docs`（测试代码不在 module-docs 审计范围内）。
-  测试代码里不手写 `allow` / `expect`；
-  内联测试模块用 `#[mod_test]` 声明，不用裸 `#[cfg(unittest)] mod`。
-  文件模块（`mod name;`）上的属性宏在 stable 上被拒（E0658），仍用 `#[cfg(unittest)]`，
-  其中 `#[def_test]` 以外的辅助函数不在豁免范围内。可用
-  `#[mod_test] mod tests { include!("tests.rs"); }` 保留文件组织并覆盖辅助函数；
-  被 include 的文件不重复声明内层 cfg 或模块文档，模块文档放在外层声明处。
-  host 侧 std `#[test]` 由 `clippy.toml` 的 `allow-*-in-tests` 覆盖。
-  宏支持在启用 `clippy::panic` 之前落地。
-- **实际检查范围**：`make clippy` 从选定平台的 entry manifest 检查依赖图，并启用
-  `--cfg unittest`（包含编入普通 target 的测试代码），不使用 `--all-targets`。
-  图中的本地库、proc-macro 和 host `build.rs` 按各自 target 根检查；
-  不会因此检查未选中的集成测试或 bench target。内核使用 registry `tee_crypto`，
-  本地 `tee/tee_crypto` 的测试与 bench 不在此图中。`xtask` 是独立 workspace，
-  不继承根 lint；`make clippy` 通过 `cargo run` 使用它，不等于对它运行 Clippy。
-  host 工具检查需显式执行 `cargo clippy --manifest-path xtask/Cargo.toml -p xkmake --no-deps`。
-- **范围**：`missing_docs` 和 `rustdoc::*` lint 归 module-docs 轨道
-  （`docs/ai/review/module-docs/`），不在本文件管理。
-- **与 AI 审查的分工**：`[workspace.lints]` 已启用的 lint，
-  以及 clippy 默认组和 rustc 默认 lint 已强制的内容，通常不属于 code-guidelines skill 与 AI 审查的范围。
-  case (b) 按 crate 关闭后，表中保留的规则原文对这些 crate 的新增代码仍有效，
-  AI/人工审查必须检查这些代码，不能因为 workspace 已启用就跳过；case (a) 按其不适用范围处理。
-  尚未由 lint 覆盖的规则以 skill 原文为准。
+- MUST 对应 `deny`，SHOULD 对应 `warn`；`make clippy` 带 `-D warnings`，两者都阻塞合入。
+- `make clippy` 带 `--cfg unittest` 检查选定平台的依赖图（本地库、proc-macro、host `build.rs`），
+  不带 `--all-targets`。因此 `cfg(not(unittest))` 代码、未选中的测试/bench target 从不被 lint。
+- `xtask` 是独立 workspace，不继承根 lint；单独运行
+  `cargo clippy --manifest-path xtask/Cargo.toml -p xkmake --no-deps`。
 
-## 辅助性 lint（不删原文）
+## 例外写法
 
-这些 lint 只检查原文的某个侧面，不能替代审查，对应原文保留
-（`api-design.md:8` 除外，它已随已启用的 `clippy::too_many_lines` 删除）。
+- 在最窄作用域写 `#[expect(<lint>, reason = "...")]`，reason 说明此处为何不适用，不写 "needed"、"legacy" 等空话。
+- `#[allow]` 只用于 `expect` 不可靠处（只在部分 cfg/feature/平台命中、宏展开、
+  rust-bindgen 等生成代码），同样带 reason。
+- reason 写法：`TODO(cg): ` 应修未修，写明修复方式；`test scenario: ` 测试宏未覆盖的测试代码；
+  `Fatal boot: ` 写明启动失败条件、无恢复办法、无错误返回通道；内部不变量写明不变量及其成立原因。
+- rustc 忽略宏调用语句（`panic!();`、`todo!();`）上的 `#[expect]`，改放在最小的外层项（`match` 分支或函数）。
 
-| lint | 组 | 1.95.0 默认 | 相关原文 | 来源 `文件:行` | 说明 |
-|---|---|---|---|---|---|
-| `static_mut_refs` | rustc | warn | "`static mut` for ordinary shared state;" | `unsafety.md:240` | 只拦对 `static mut` 取引用，不拦声明；已默认开启 |
-| `improper_ctypes` / `improper_ctypes_definitions` | rustc | warn | "`repr(C)` structs and explicit ABI newtypes at the boundary;" | `unsafety.md:401` | 只查 FFI 签名中的类型是否 FFI 安全；已默认开启 |
-| `clippy::wrong_self_convention` | style | warn | "use accurate names that reflect actual semantics and cost;" | `naming-and-structure.md:9` | 只查 `as_` / `to_` / `into_` 等前缀与 `self` 形式是否匹配；已默认开启 |
-| `clippy::too_many_arguments` | complexity | warn | "keep functions small and focused;" | `api-design.md:8` | 只数参数个数（默认阈值 7）；已默认开启，现有约 31 处 `allow` |
-| `unsafe_code` | rustc | allow | "when a crate or module is expected to remain safe-only, do not introduce `unsafe` casually;" | `unsafety.md:19-20` | 只能由各 crate 在根部声明 `#![forbid(unsafe_code)]`，不做 workspace 统一配置 |
+## 按 crate 关闭
+
+- 只允许 case (a) 规则不适用（如以终止构建为预期失败的 host `build.rs`、纯测试 crate），
+  或 case (b) 存量密集：Jenkins 各 `make clippy` 配置诊断并集中每 crate ≥10 处（单条 lint 可更严）。
+- 在每个实际被 lint 的 target 根写 `#![allow(<lint>, reason = "case (a|b): <具体原因>")]`，
+  不用 `#![expect]`、不要求 issue，未被 lint 的 target 不预先豁免；并登记在下表该 lint 行。
+- 逐点修复优先，门槛不是新增配额；case (b) crate 的新增代码仍按原规则审查。
+- 另可在 crate 根写过渡豁免 `#![expect(<lint>, reason = "TODO(cg): legacy cleanup, tracked in <issue>")]`，须有 issue。
+
+## 测试代码
+
+- `#[def_test]` / `#[mod_test]`（`util/macros`）豁免 `unwrap_used`、`expect_used`、`panic`、`too_many_lines`，
+  `#[mod_test]` 另豁免 `missing_docs`。测试代码不手写 `allow`/`expect`；内联测试模块用 `#[mod_test]`。
+- 文件模块（`mod name;`）不能用属性宏（E0658）：写成 `#[mod_test] mod tests { include!("tests.rs"); }`
+  （被 include 的文件不重复声明 cfg 或模块文档），或在辅助函数上逐点写 `test scenario: ` 例外。
+- host 侧 `#[test]` 由 `clippy.toml` 的 `allow-*-in-tests` 覆盖。
+
+## 新增 lint 与工具链升级
+
+- 一条 lint 一个提交：启用（含 `clippy.toml` 参数）、处理全部存量、在下表登记、从 skill 删除被覆盖的原文。
+- 验证：`Jenkinsfile` 中每个 `make clippy` 配置；aarch64 `qemu_defconfig` 的 `make clippy UNITTEST=y`；
+  命中随 cfg/feature 变化的 lint 另分别开、关可选 feature 跑。
+  loongarch64 目前有无关的既有失败，比较启用前后的错误集合即可。
+- 修改 `rust-toolchain.toml` 时跑同一矩阵，并确认本文件中的 lint 名和 `clippy.toml` 键仍存在。
+
+## 与 AI 审查的分工
+
+- full 的规则不再审查；partial 只审"覆盖"列留下的判断。
+- case (b) 关闭的 crate，新增代码仍按该行规则审查；case (a) 按不适用范围处理。
+- 未被 lint 覆盖的规则以 skill 为准。
+
+## 已启用 lint
+
+"规则"列为已从 skill 删除的原文要点；"（默认）"指 rustc/clippy 默认开启、删除原文时所依赖的 lint。
+
+| lint | 等级与参数 | 规则 | 覆盖 | 例外；关闭的 crate |
+|---|---|---|---|---|
+| `clippy::panic`<br>`clippy::unwrap_used`<br>`clippy::expect_used` | warn；`allow-*-in-tests` | "avoid `.unwrap()` and hidden panics where failure is a legitimate possibility"（`error-handling-and-logging.md`、`SKILL.md`） | partial：失败是否合法由审查判断 | 合法失败（输入、资源、环境）返回错误。逐点例外：内部不变量、`Fatal boot: `（不为此改启动接口或关闭启动 crate）、`test scenario: `；`panic` 另允许 `TODO(cg): `（失败合法但现接口无法上报）。<br>`panic` (b)：`acpi`、`kcpu`。<br>`unwrap_used` (a)：`kbuild_config`、`ksignal` 的 `build.rs`；(b)：`alloc-engine`、`kworkerpool_ng`、`virtio`、`kworkqueue_ng`、`kext4`、`ksyscall`。<br>`expect_used` (a)：`kbuild_config`、`backtrace` 的 `build.rs`，`unittest_support`；(b)：`kalloc`、`khal`、`ktask`、`kworkerpool_ng`、`memspace`、`virtio`、`kworkqueue_ng`、`kvfs`、`kprocess`、`knet`、`posix-process`。<br>(b) 均只在 `src/lib.rs`；`kernel-boot`、`fs_boot` 不关闭 |
+| `clippy::todo`<br>`clippy::unimplemented` | deny | 同上 | partial | `todo`：仅 `TODO(cg): ` 写明缺失实现，保留 `todo!` 不改成静默空操作；`unimplemented`：无 |
+| `clippy::allow_attributes`<br>`clippy::allow_attributes_without_reason` | deny | "suppress lints at the narrowest practical scope"（`modules-and-attributes.md`） | partial：不查内层 `#![allow]`；作用域与 reason 是否属实由审查判断 | 必需的外层 `allow` 在同一作用域配 `#[expect(clippy::allow_attributes, reason)]` 说明 `expect` 为何不可靠（Kconfig emitter 统一生成）。`expect(dead_code)` 只用于简单、有意、很可能被用上的死代码，reason 说明何时使用。(b)：`kext4`、`tee_kernel`（两条均关，门槛 ≥20） |
+| `clippy::multiple_unsafe_ops_per_block`<br>`unsafe_op_in_unsafe_fn` | deny | "keep each `unsafe` block as small as practical"，`unsafe fn` 内也用最小 `unsafe {}`（`unsafety.md`） | partial：块内夹带的安全逻辑按 `unsafety.md` Invalid Patterns 审查 | 宏内 unsafe 序列用最窄 `expect`（不可靠时 `allow`） |
+| `clippy::undocumented_unsafe_blocks` | deny | 每个 `unsafe` 块前有 `// SAFETY:`，`unsafe impl` 有安全论证（`unsafety.md`） | partial：注释内容按 `unsafety.md` SAFETY Comment Standard 审查 | 无 |
+| `clippy::missing_safety_doc` | deny；`check-private-items = true` | `unsafe fn` / `unsafe trait` 必须有 `# Safety`（`unsafety.md`） | full（含私有项） | 仅 bindgen 绑定模块 `allow` |
+| `clippy::disallowed_methods`<br>`invalid_value`（默认）<br>`clippy::uninit_assumed_init`（默认） | warn；`disallowed-methods` 禁 `core::mem::zeroed` | 不对位模式未经类型契约证明的类型用 `mem::zeroed()` / `assume_init()`（`unsafety.md`） | partial：其余 `assume_init()` 由 `// SAFETY:` 证明已初始化 | 优先安全构造；`zeroed` 的 reason 说明全零对该类型有效且由类型契约保证 |
+| `unreachable_pub` | warn | "default to the narrowest visibility that works"（`modules-and-attributes.md`、`naming-and-structure.md`） | partial：`pub(crate)` 能否收窄由审查判断 | cfg/feature 下的公开 API 和导出宏辅助项保留可达性；宏生成项（如 `unittest::tests_name!`）、bindgen 模块用 `allow`；需 feature 扫描 |
+| `clippy::too_many_lines` | warn；阈值 100 | "keep functions small and focused"（`api-design.md`） | partial：单一职责由审查判断 | 逐函数，只限：线性分发/注册表（一个 `match` 或一串独立注册，每分支约 10 行内，不共享可变状态，reason 以 "linear ... table" 开头）；测试场景；`TODO(cg): legacy` 写明拆分方式（拆分另行提交并审查锁、事务、清理顺序）。(b)：`kext4` |
+| `clippy::excessive_nesting` | warn；阈值 6（`mod`/`impl`/函数体计层） | "minimize unnecessary nesting"（`api-design.md`） | partial | 先用提前返回、`let ... else`、提取函数展平，不改变锁作用域与清理顺序；例外只限测试场景和 `TODO(cg): legacy` |
+| `clippy::fn_params_excessive_bools` | warn；`max-fn-params-bools = 3` | "avoid boolean arguments when the call site becomes unclear"（`api-design.md`） | partial：阈值以下的单个 `bool` 由审查判断 | 无；拆成独立入口或改用 enum/flags |
+| `clippy::linkedlist` | warn | 只在元素无法自带链接时才用 `alloc::collections::LinkedList`（`performance-and-resources.md`） | partial | reason 说明为何不能用 `linked_list_r4l` |
+| `clippy::upper_case_acronyms`<br>`non_camel_case_types`（默认） | warn；`upper-case-acronyms-aggressive = true` | 类型名用 CamelCase，缩写也按词首大写（`IoMemoryArea`；`naming-and-structure.md`） | full | 镜像 Linux/硬件 ABI 名称的类型 |
+| `clippy::question_mark`（默认） | warn | "use `?` for ordinary error propagation"（`error-handling-and-logging.md`） | partial：只识别可直接改写的提前返回 | — |
+| `clippy::unused_result_ok` | warn | 无原文：不用 `.ok();` 丢弃 `Result` | full | 无；有意丢弃写 `let _ = expr;`，不明显时注释原因 |
+| `clippy::used_underscore_binding` | warn | 无原文：被使用的绑定不加 `_` 前缀 | full | 无 |
+| `unexpected_cfgs` | warn；`check-cfg = ["cfg(unittest)"]` | 无原文：未知 cfg 名或 feature 值 | full | 无 |
+
+`avoid-breaking-exported-api = false` 让上表及其他默认 clippy lint 也检查 pub 项。
+
+## 辅助性 lint
+
+只查原文的一个侧面，原文保留在 skill：
+
+- `static_mut_refs`（默认）：只拦对 `static mut` 取引用，不拦声明。
+- `improper_ctypes` / `improper_ctypes_definitions`（默认）：只查 FFI 签名类型。
+- `clippy::wrong_self_convention`（默认）：只查 `as_`/`to_`/`into_` 前缀与 `self` 形式。
+- `clippy::too_many_arguments`（默认）：只数参数个数。
+- `unsafe_code`：由 safe-only crate 自行在根部 `#![forbid(unsafe_code)]`，不统一配置。
 
 ## 不采用的 lint
 
-| lint | 组 | 结论 |
-|---|---|---|
-| `clippy::let_underscore_must_use` | restriction | 不采用。有意丢弃 `#[must_use]` 结果的惯用写法是 `let _ = expr;`，原因不明显时在上一行用 `//` 注释说明；是否应当处理错误由人工/AI 审查判断。隐式的 `.ok();` 丢弃仍由已启用的 `clippy::unused_result_ok` 禁止。参照 Rust-for-Linux：Linux v7.2 顶层 `Makefile` 的 `rust_common_flags` 与 clippy 参数、以及 `.clippy.toml` 均未启用此 lint 和 `unused_result_ok`，内核 Rust 代码直接写 `let _ =` |
-
-## 已由默认 lint 或现有配置强制
-
-这些 lint 已经生效（clippy 默认组、rustc 默认 lint，或已在 `[workspace.lints]` 中），
-对应原文已从 skill 中删除。
-
-- 来源 `文件:行` 指原文迁出前 skill 文件中的位置（`origin/main` 0968f131）。
-- 覆盖程度：full 表示 lint 单独即可替代原文；
-  partial 表示 lint 只覆盖机械部分，其余判断标准写在"处理"列（多为 `expect` 的 reason 须说明的内容），skill 中不再重复。
-
-| lint | 组 | 1.95.0 默认 | 当前生效方式 | 覆盖的规则原文（逐字） | 来源 `文件:行` | 覆盖程度 | 处理 |
-|---|---|---|---|---|---|---|---|
-| `clippy::expect_used` | restriction | allow | `[workspace.lints]` warn；`allow-expect-in-tests = true` | "avoid `.unwrap()` and hidden panics where failure is a legitimate possibility;"<br>"unwrap-like failure paths hidden inside normal control flow;"<br>"error paths use `Result` and `?` rather than hidden panics;" | `error-handling-and-logging.md:9-10`<br>`error-handling-and-logging.md:36`<br>`SKILL.md:126` | partial（lint 标出每处） | 合法失败（输入、资源或环境）作为错误返回；逐点 `expect` 须写明实际内部不变量。另允许 fatal boot：reason 明确启动失败条件、无恢复办法和无错误返回通道，不改启动接口，不关闭启动 crate。测试经共享宏豁免；不经宏的运行期自测辅助函数逐个写 `expect`，reason 以 "test scenario: " 开头。<br>case (a)：`kbuild_config`（仅 `util/kbuild_config/build.rs`，生成配置不可用时终止构建）、`backtrace`（仅 `util/backtrace/build.rs`，Cargo 环境或符号输出不可用时终止构建）、`unittest_support`（`util/unittest_support/src/lib.rs`，纯测试 fixture/清理失败应终止测试）；前两者库根不关闭。<br>case (b)：`kalloc`（15，`mm/kalloc/src/lib.rs`）；`khal`（18，`arch/khal/src/lib.rs`）；`ktask`（11，`task/ktask/src/lib.rs`）；`kworkerpool_ng`（12，`task/kworkng/crates/kworkerpool_ng/src/lib.rs`）；`memspace`（12，`mm/memspace/src/lib.rs`）；`virtio`（14，`drivers/devices/virtio/src/lib.rs`）；`kworkqueue_ng`（32，`task/kworkng/crates/kworkqueue_ng/src/lib.rs`）；`kvfs`（24，`fs/kvfs/src/lib.rs`）；`kprocess`（31，`process/kprocess/src/lib.rs`）；`knet`（20，`net/knet/src/lib.rs`）；`posix-process`（11，`posix/process/src/lib.rs`）。以四平台诊断并集每 crate ≥10 处为密集存量门槛；上述 11 个非启动 crate 共 200 处，逐点契约重构超出本次迁移，新增代码仍审查本行原文。`kernel-boot`（10）和 `fs_boot`（18）不按 crate 关闭。<br>fatal boot 逐点范围：`kcpu_id_map` 三架构 CPU-map 初始化；`kplat::cpu::{boot_cpu_init, ap_cpu_init}`；`kernel-boot` 的 UART 地址与 LoongArch EFI 表读取；`kipi::enable_fixed_notifications`；`watchdog::init_softlockup_detection`；`console_driver::register_input_irq_handler`；GIC CPU/redistributor 区域及 DT 配置；四平台 `early_driver_init`（包括 RISC-V/LoongArch 初始 RTC 采样）；AArch64 固件保留区容量；x86 AP trampoline 分配和 multiboot 读取；`fs_boot::{prepare_namespace, mount_virtual_filesystems, mount_host_share}` 的必需目录与挂载；`kruntime` 的 worker 服务、boot UART 运行期映射、早期内存日志容量和 allocator 扩展。无其他关闭 target。 |
-| `clippy::allow_attributes_without_reason` | restriction | allow | `[workspace.lints]` deny | "suppress lints at the narrowest practical scope;"<br>"broad lint suppression;" | `modules-and-attributes.md:34`<br>`modules-and-attributes.md:58` | partial（强制 reason） | 生成配置常量在 xconfig emitter 中统一说明消费方随平台/feature 改变，四平台诊断并集 366 处；手写属性优先删除失效抑制或补充具体 reason，稳定命中处改用最窄 `expect`，仅 cfg/宏不可靠处保留带 reason 的 `allow`。无逐点 lint 自身豁免。case (b) 仅关闭 `kext4` lib（`fs/filesystems/kext4/src/lib.rs`，52 处）和 `tee_kernel` lib（`tee/tee_kernel/src/lib.rs`，22 处）；本次门槛为每 crate 至少 20 个需分别判断语义的存量属性，覆盖磁盘布局/文件系统及 TEE crypto/storage/protocol 多类例外，当前无法逐点确认；两者新增代码仍审查作用域和实质 reason。低计数 crate 逐点修复，ABI 命名等可统一核对的存量也直接处理；不预先豁免未被 lint 的 target。审查仍须确认作用域最窄、reason 属实；此 lint 不替代 `clippy::allow_attributes`，后者已在本表启用并单独管理 cfg/宏例外 |
-| `clippy::panic` | restriction | allow | `[workspace.lints]` warn；`clippy.toml` 的 `allow-panic-in-tests = true` | "avoid `.unwrap()` and hidden panics where failure is a legitimate possibility;"<br>"unwrap-like failure paths hidden inside normal control flow;"<br>"error paths use `Result` and `?` rather than hidden panics;" | `error-handling-and-logging.md:9-10`<br>`error-handling-and-logging.md:36`<br>`SKILL.md:126` | partial（只标出 `panic!`；`unwrap`/`expect` 归 `clippy::unwrap_used`、`clippy::expect_used` 行） | 合法失败（取决于输入、资源或环境）作为错误返回，能在现有 `Result`/`Option` 通道内局部转换的直接转换。其余逐点写 `#[expect(clippy::panic, reason = "...")]`，只限四类：（1）不可恢复的 fatal boot：reason 以 "Fatal boot:" 开头，写明实际启动失败条件，并说明无恢复办法且无错误返回通道；不因此修改启动接口或关闭整个启动 crate；（2）内部不变量：reason 写明具体不变量及其成立原因；（3）失败契约待修：失败合法但当前接口无法上报、需要接口或生命周期改动的，reason 以 "TODO(cg): " 开头并写明预定修复方式；（4）测试场景：`def_test`、`mod_test` 已统一豁免，文件形式测试模块中的辅助函数逐个写，reason 以 "test scenario: " 开头。按 crate 关闭 case (b)：`acpi`（`drivers/platform/acpi/src/lib.rs`，16 处固件表缺失或格式错误）和 `kcpu`（`arch/kcpu/src/lib.rs`，15 处四架构异常与非对齐模拟路径），在 crate 根写 `#![allow(clippy::panic, reason = "case (b): ...")]`；门槛为 Jenkins 各 `make clippy` 配置诊断并集中每 crate ≥10 处，新增代码仍审查本行原文；启动 crate 不按此门槛关闭，其余 target 未关闭。 |
-| `unreachable_pub` | rustc | allow | `[workspace.lints]` warn | "default to the narrowest visibility that works;"（两处）<br>"over-wide visibility;"<br>"helpers exposed more widely than required." | `modules-and-attributes.md:8`<br>`naming-and-structure.md:37`<br>`modules-and-attributes.md:49`<br>`naming-and-structure.md:48` | partial（只查从 crate 根不可达的 `pub`） | 四平台诊断并集 1425 处，通过 1400 个可见性收窄与 1 处宏生成项例外处理（共享 `pub use` 一次修改覆盖多个诊断）；另同步 13 个同名 cfg 分支；诊断包括 tee_kernel 425、knet 220、ksyscall 161 处，无 crate 根豁免或新增 dead_code 豁免；`unittest::tests_name!` 生成的公开 suite 保留 `pub`，在生成项上带 reason 的 `allow` 处理展开位置决定可达性的差异。另按 Jenkins 其余 clippy 配置、`UNITTEST=y` 和 feature 扫描收窄只在部分 cfg/feature 下编译的项；rust-bindgen 生成的绑定模块不手工编辑，在其模块声明处带 reason 的 `allow` 中包含此 lint。cfg/feature 下的公开 API 和导出宏辅助项须保留所需可达性；确需例外时遵循上方最窄作用域与实质 reason 政策。lint 不查 `pub(crate)`，新增代码审查仍须判断能否收窄为 `pub(super)` 或私有 |
-| `clippy::unwrap_used` | restriction | allow | `[workspace.lints]` warn；`allow-unwrap-in-tests = true` | "avoid `.unwrap()` and hidden panics where failure is a legitimate possibility;"<br>"unwrap-like failure paths hidden inside normal control flow;"<br>"error paths use `Result` and `?` rather than hidden panics;" | `error-handling-and-logging.md:9-10`<br>`error-handling-and-logging.md:36`<br>`SKILL.md:126` | partial（lint 标出每处） | 合法失败（输入、资源或环境）作为错误返回；逐点 `expect` 用于内部不变量，reason 写明具体不变量；另允许无法恢复的启动失败，reason 必须说明实际失败条件、无恢复办法和无错误返回通道（当前 `klogger::init_klogger` 的全局 logger 安装、`khal::mem::init` 的最终物理内存重叠检查），不借此按 crate 关闭。测试经宏豁免；不经宏的运行期自测辅助函数逐个写 `expect`，reason 以 "test scenario: " 开头。按 crate 关闭 case (a)：`kbuild_config`（`build.rs`，4 个诊断）、`ksignal`（仅 `build.rs`，1 个诊断），host 构建环境缺失时预期终止构建，库根不关闭。case (b)：`alloc-engine`（10）、`kworkerpool_ng`（19）、`virtio`（11）、`kworkqueue_ng`（30）、`kext4`（133）、`ksyscall`（69），均只在各自 `src/lib.rs`；新增代码仍审查本行原文。规模依据四平台诊断并集，以每 crate ≥10 个诊断位置为阈值，避免在本次启用中混入大量失败契约重构；少量位置逐点处理，不把阈值当作允许新增 unwrap 的配额。 |
-| `clippy::excessive_nesting` | complexity | warn（阈值默认 0，即不触发） | `[workspace.lints]` warn；`clippy.toml` 的 `excessive-nesting-threshold = 6` | "minimize unnecessary nesting;" | `api-design.md:9` | partial（只量块深度；"unnecessary" 仍由审查判断） | `mod`、`impl` 块和函数体都计入层数，6 即方法体内 4 层控制流；阈值 4、5 时存量为 448、93 处（aarch64），大多是正常的两三层控制流，不作为门禁。先用提前返回、`let ... else` 或把闭包体、循环体提取为具名函数展平，展平不得改变锁作用域与清理顺序；例外逐函数写 `#[expect(clippy::excessive_nesting, reason = "...")]`，只限测试场景（reason 以 "test scenario" 开头）和待拆分的遗留函数（reason 以 "TODO(cg): legacy" 开头并写明拆分方式）。 |
-| `clippy::too_many_lines` | pedantic | allow | `[workspace.lints]` warn；`clippy.toml` 的 `too-many-lines-threshold = 100` | "keep functions small and focused;" | `api-design.md:8` | partial（只量行数；"focused" 即单一职责仍由审查判断） | 例外逐函数写 `#[expect(clippy::too_many_lines, reason = "...")]`，只限三类：（1）分发表或注册表：主体为一个 `match` 或一串独立注册语句，每个分支约 10 行以内，分支间不共享可变状态，reason 以 "linear ... table" 开头；（2）测试场景：`def_test`、`mod_test` 已统一豁免，文件形式测试模块中的辅助函数逐个写，reason 以 "unittest scenario" 开头；（3）待拆分的遗留函数：reason 以 "TODO(cg): legacy" 开头并写明按什么职责拆分，拆分需单独审查锁、事务和清理顺序，不在 lint 提交中进行。其余超长函数按职责拆分。按 crate 关闭：`kext4`（9 个分配、writeback 与磁盘结构解码函数）。 |
-| `clippy::linkedlist` | pedantic | allow | `[workspace.lints]` warn | "fall back to `alloc::collections::LinkedList` only when elements cannot own their linkage (for example the list must outlive or be decoupled from element ownership);" | `performance-and-resources.md:33-35` | partial（lint 标出每处 `LinkedList`） | 极少；reason 须说明元素无法自带链接（例如链表须比元素所有权活得久，或与之解耦），因而不能用 `linked_list_r4l`；参数：`avoid-breaking-exported-api = false`（否则 pub 签名中的不报；它是全局开关，同时让 `box_collection`、`vec_box`、`redundant_allocation`、`enum_variant_names`、`wrong_self_convention` 等默认 lint 检查 pub 项） |
-| `clippy::unimplemented` | restriction | allow | `[workspace.lints]` deny | "avoid `.unwrap()` and hidden panics where failure is a legitimate possibility;" | `error-handling-and-logging.md:9-10` | partial（只覆盖 `unimplemented!` 引入的 panic） | 无例外；删除已由 crate 级 AArch64 cfg 排除的 PMUv3 非 AArch64 分支，共 2 处；未接入编译的 `khal` dummy 实现（`// mod dummy;`）不参与编译，lint 不检查，原样保留；原文已从 skill 删除，其余显式 `panic!` 由 `clippy::panic` 管理 |
-| `clippy::todo` | restriction | allow | `[workspace.lints]` deny | "avoid `.unwrap()` and hidden panics where failure is a legitimate possibility;" | `error-handling-and-logging.md:9-10` | partial（只覆盖 `todo!` 引入的 panic） | 仅允许逐点 `TODO(cg)` 例外，reason 写明缺失的实现。现有 6 处逐点 `expect`，均保留原 `todo!` 行为，不改成静默空操作：TEE 密钥生成中 DSA、DH、X25519、X448 四种密钥类型（`match` 分支上）；LoongArch IRQ 的 `notify_cpu`（IPI 投递）和 `set_prio`（优先级设置）（函数上；rustc 忽略宏调用语句上的 `expect`，函数体只有 `todo!()`）。无按 crate 关闭 |
-| `clippy::fn_params_excessive_bools` | pedantic | allow | `[workspace.lints]` warn；`clippy.toml` 的 `max-fn-params-bools = 3`（clippy 默认值） | "avoid boolean arguments when the call site becomes unclear;"<br>"boolean flags that should be split into clearer entry points;" | `api-design.md:10`<br>`api-design.md:42` | partial（只数 `bool` 参数个数） | 无例外；超过阈值的拆成独立入口，或改用 enum/flags 类型。阈值以下同样适用：单个 `bool` 参数让调用点不清楚时，拆成独立入口或改用 enum。唯一存量 `memspace::MsyncPolicy` 原四个 `bool` 参数的构造函数改为 `MsyncWriteback` 枚举（`MS_SYNC`/`MS_ASYNC` 互斥）加 `with_invalidate`/`with_data_only` 构造方法，行为不变 |
-| `clippy::disallowed_methods` | style | warn（无配置时不触发） | `[workspace.lints]` warn；`clippy.toml` 的 `disallowed-methods` 禁用 `core::mem::zeroed` | "`mem::zeroed()` or `assume_init()` for arbitrary `T`;"<br>"`mem::zeroed()` or `assume_init()` for types whose valid bit patterns are not proven by the type contract;" | `unsafety.md:208`<br>`unsafety.md:508-509` | partial（只接管 `mem::zeroed()` 一半；`assume_init()` 见下方默认 lint） | 优先安全构造；逐点 `expect` 的 reason 须说明全零位模式对该具体类型有效，且由类型契约保证。与 `invalid_value`、`clippy::uninit_assumed_init` 合起来，两条原文整条删除 |
-| `clippy::upper_case_acronyms` | style | warn（只查全大写名） | `[workspace.lints]` warn | "follow Rust CamelCase and acronym capitalization for type names;"<br>"use `IoMemoryArea`, not `IOMemoryArea`" | `naming-and-structure.md:18`<br>`naming-and-structure.md:28` | full（与下方默认 lint 表中的 `non_camel_case_types` 合起来） | 镜像 Linux/硬件 ABI 名称的类型；参数：`upper-case-acronyms-aggressive = true`<br>`avoid-breaking-exported-api = false` |
-| `clippy::unused_result_ok` | restriction | allow | `[workspace.lints]` warn | （skill 中无原文） | — | — | 无例外；禁止用 `.ok();` 隐式丢弃 `Result`。有意丢弃（best-effort 清理、回滚、输出等）写 `let _ = expr;`，原因不明显时在上一行用 `//` 注释说明 |
-| `clippy::missing_safety_doc` | style | warn（只查 pub 项） | `[workspace.lints]` deny；`check-private-items = true` | "every `unsafe fn` and `unsafe trait` must include a `# Safety` rustdoc section;"<br>"`unsafe fn` without `# Safety`;" | `unsafety.md:9`<br>`unsafety.md:521` | full（包含私有项） | 原文已删除；手写代码逐点补充实际调用前提与不变量，不允许例外，无豁免 crate。唯一例外是不手工编辑的 rust-bindgen 生成绑定模块：在其模块声明处带 reason 的 `allow` 中包含此 lint |
-| `clippy::multiple_unsafe_ops_per_block` | restriction | allow | `[workspace.lints]` deny | "keep each `unsafe` block as small as practical, so the audited region is obvious;"<br>"then use the smallest remaining `unsafe` block and `// SAFETY:` comment to discharge what cannot be encoded statically;"<br>"shrink unsafe blocks to the minimal audited operation;"<br>"unsafe operations inside `unsafe fn` that are not wrapped in a minimal `unsafe {}` block;" | `unsafety.md:12-13`<br>`unsafety.md:106-107`<br>`unsafety.md:163`<br>`unsafety.md:522-523` | partial（一块一个 unsafe 操作；块内夹带安全逻辑见 `unsafety.md` Invalid Patterns，仍靠审查） | 宏内 unsafe 序列可在最窄作用域使用带具体 reason 的 `expect`；宏展开使 `expect` 不可靠时才用带 reason 的 `allow`。本次修复四平台诊断并集 142 个块及 2 个相同模式的 `cfg(test)` helper，逐操作说明初始化、地址范围、锁/固定 CPU、生命周期或启动阶段不变量；无例外、无 crate 豁免。保留 `unsafety.md` Invalid Patterns 对块内安全逻辑的人工审查要求 |
-| `clippy::allow_attributes` | restriction | allow | `[workspace.lints]` deny | "suppress lints at the narrowest practical scope;"<br>"use `#[expect(dead_code)]` only when the dead code is simple, clearly intentional, and likely to become used."<br>"broad lint suppression;" | `modules-and-attributes.md:34-36`<br>`modules-and-attributes.md:58` | partial（强制外层 `#[allow]` 改 `#[expect]`；不检查内层 `#![allow]`） | 先前 reason 清理已处理稳定例外；本次继续收窄宏抑制和 cfg 导入，稳定命名/参数告警改 `expect`。cfg/宏/平台差异确需保留的带 reason 外层 `allow`，在同一最窄作用域用 `expect(clippy::allow_attributes)` 说明不可靠的具体原因；Kconfig 在 emitter 中为每个生成常量统一生成此例外（四平台原诊断并集 366 处）。按 crate 关闭 case (b) 仅 `kext4` lib（`fs/filesystems/kext4/src/lib.rs`，52 个存量外层属性）和 `tee_kernel` lib（`tee/tee_kernel/src/lib.rs`，21 个存量诊断），阈值为每 crate ≥20 个需逐项判断契约的外层属性，新增代码仍审查原文。未对其他 target 或 host workspace 关闭。内层 `#![allow]` 不在此 lint 的检查范围；其作用域和 reason 仍须按政策审查。`expect(dead_code)` 只用于简单、有意且很可能被用上的死代码，reason 说明何时使用。 |
-| `clippy::undocumented_unsafe_blocks` | restriction | allow | `[workspace.lints]` deny | "every `unsafe` block must have a preceding `// SAFETY:` comment;"<br>"`unsafe impl` must have an explicit safety argument in nearby comments or docs;"<br>"missing `// SAFETY:` comments;"<br>"every `unsafe` block has a nearby `SAFETY:` comment that names the real invariants rather than using placeholders;" | `unsafety.md:8`<br>`unsafety.md:10`<br>`unsafety.md:520`<br>`SKILL.md:112-113` | full（`SKILL.md:112-113` 为 partial） | 整条删除；注释内容要求（写真实不变量、不用占位语）由 `SKILL.md` 审查清单 "every `unsafe` site has a concrete safety argument" 和 `unsafety.md` SAFETY Comment Standard 承担 |
-| `non_camel_case_types` | rustc | warn | 默认 | "follow Rust CamelCase and acronym capitalization for type names;" | `naming-and-structure.md:18` | partial（CamelCase 一半；缩写大小写一半见已启用的 `clippy::upper_case_acronyms`） | 与 `clippy::upper_case_acronyms` 一起删除 |
-| `invalid_value` | rustc | warn | 默认 | "`mem::zeroed()` or `assume_init()` for arbitrary `T`;"<br>"`mem::zeroed()` or `assume_init()` for types whose valid bit patterns are not proven by the type contract;" | `unsafety.md:208`<br>`unsafety.md:508-509` | partial（只拦已知零值或未初始化无效的类型，如引用、`NonNull`、函数指针） | 与已启用的 `clippy::disallowed_methods` 及下一行 `clippy::uninit_assumed_init` 合起来，两条原文整条删除 |
-| `clippy::uninit_assumed_init` | correctness | deny | 默认 | 同上（`assume_init()` 一半） | `unsafety.md:208`<br>`unsafety.md:508-509` | partial（只拦 `MaybeUninit::uninit().assume_init()` 直接调用） | 整条删除；lint 拦不到的 `assume_init()` 只用于初始化已被证明的位置，由其 `// SAFETY:` 说明初始化如何被证明（`unsafety.md` Uninitialized Storage 保留 whole-array 一条） |
-| `clippy::question_mark` | style | warn | 默认 | "use `?` for ordinary error propagation;"<br>"Check whether `?`, typed errors, and logging levels are used appropriately."<br>"error paths use `Result` and `?` rather than hidden panics;" | `error-handling-and-logging.md:8`<br>`SKILL.md:99`<br>`SKILL.md:126` | partial（只识别可直接改写为 `?` 的提前返回） | 第一条整条删除；`SKILL.md:99`、`:126` 只删 `?` 一半（`:126` 的 panic 一半见已启用的 `clippy::panic`） |
+`clippy::let_underscore_must_use`：有意丢弃就写 `let _ = expr;`，原因不明显时注释说明；
+`.ok();` 已由 `unused_result_ok` 禁止。Rust-for-Linux 两者都未启用。

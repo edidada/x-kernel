@@ -255,8 +255,8 @@ diff 出现内联汇编、手写底层 CPU 操作或通用数据结构/算法时
 - 把大规模重构作为修复一条局部规范问题的前提；
 - 评论未修改的历史代码；
 - rustfmt、编译器或 lint 已能准确自动处理的问题
-  （lint 范围见 `docs/ai/code-guidelines/lints.md`；
-  其待迁入表中尚未启用的 lint，对应原文仍需审查）。
+  （lint 范围和覆盖程度见 `docs/ai/code-guidelines/lints.md`；
+  partial 覆盖留下的判断和 case (b) 关闭 crate 的新增代码仍需审查）。
 
 ## 输出要求
 
