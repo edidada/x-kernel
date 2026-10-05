@@ -69,8 +69,9 @@ impl MappingPages {
         let consumed = {
             #[expect(
                 clippy::unwrap_used,
-                reason = "the first batch.len() slots were locked above and count is at most \
-                          batch.len(); the callback needs an exact-size iterator"
+                reason = "CG-021-no-panic-on-reachable-failure: the first batch.len() slots were \
+                          locked above and count is at most batch.len(); the callback needs an \
+                          exact-size iterator"
             )]
             let mut folios = locked[..count]
                 .iter_mut()

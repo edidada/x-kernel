@@ -118,8 +118,8 @@ pub fn trace_point_manager() -> &'static TracingEventsManager<TraceRawLock, Kops
         static_keys::global_init();
         #[expect(
             clippy::expect_used,
-            reason = "ktracepoint global_init_events constructs the linker-registered event map \
-                      and unconditionally returns Ok"
+            reason = "CG-021-no-panic-on-reachable-failure: ktracepoint global_init_events \
+                      constructs the linker-registered event map and unconditionally returns Ok"
         )]
         let manager =
             global_init_events::<TraceRawLock, Kops>().expect("failed to initialize trace events");

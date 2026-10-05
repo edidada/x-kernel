@@ -350,7 +350,8 @@ fn translate_compat_algo(algo: u32) -> u32 {
 
 #[expect(
     clippy::too_many_lines,
-    reason = "linear algorithm-to-key-type table: one short match arm per algorithm class"
+    reason = "CG-028-focused-functions: linear algorithm-to-key-type table: one short match arm \
+              per algorithm class"
 )]
 fn tee_svc_cryp_check_key_type(o: &TeeObj, algo: u32, mode: TEE_OperationMode) -> TeeResult {
     let req_key_type;

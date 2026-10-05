@@ -6,7 +6,8 @@
 #![expect(
     non_camel_case_types,
     non_snake_case,
-    reason = "Expose GlobalPlatform TEE C ABI type and field names verbatim"
+    reason = "CG-024-lint-exceptions: non_camel_case_types, non_snake_case: Expose GlobalPlatform \
+              TEE C ABI type and field names verbatim"
 )]
 
 pub use tee_api_defines::*;
@@ -16,13 +17,14 @@ pub use utee_types::*;
 mod tee_api_defines;
 #[expect(
     clippy::upper_case_acronyms,
-    reason = "raw GlobalPlatform TEE ABI bindings retain the external C type and enum names"
+    reason = "CG-032-camel-case-types: raw GlobalPlatform TEE ABI bindings retain the external C \
+              type and enum names"
 )]
 mod tee_api_types;
 #[expect(
     clippy::upper_case_acronyms,
-    reason = "raw OP-TEE syscall ABI bindings retain the external operation and time-category \
-              names"
+    reason = "CG-032-camel-case-types: raw OP-TEE syscall ABI bindings retain the external \
+              operation and time-category names"
 )]
 mod utee_types;
 

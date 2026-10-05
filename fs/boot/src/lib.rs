@@ -124,8 +124,8 @@ static HOST_9P_TYPE: FileSystemType = FileSystemType::nodev("9p", init_host_9p_c
 fn init_host_9p_fs() {
     #[expect(
         clippy::expect_used,
-        reason = "Each statically named filesystem is registered once by its unique linker \
-                  initialization entry"
+        reason = "CG-021-no-panic-on-reachable-failure: Each statically named filesystem is \
+                  registered once by its unique linker initialization entry"
     )]
     kvfs::register_filesystem(&HOST_9P_TYPE).expect("9P filesystem type must register once");
 }
@@ -144,15 +144,15 @@ pub fn prepare_namespace() {
     let boot = BootVfs::initial();
     #[expect(
         clippy::expect_used,
-        reason = "Fatal boot: failed to create bootstrap /dev mountpoint; filesystem startup has \
-                  no error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to create bootstrap \
+                  /dev mountpoint; filesystem startup has no error return or recovery"
     )]
     boot.ensure_directory_path("/dev")
         .expect("Failed to create bootstrap /dev mountpoint");
     #[expect(
         clippy::expect_used,
-        reason = "Fatal boot: failed to mount bootstrap devfs; filesystem startup has no error \
-                  return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to mount bootstrap \
+                  devfs; filesystem startup has no error return or recovery"
     )]
     boot.mount_at(
         "/dev",
@@ -166,8 +166,8 @@ pub fn prepare_namespace() {
     let root = boot.namespace.visible_root_path();
     #[expect(
         clippy::expect_used,
-        reason = "Boot installs a directory root from the newly constructed root filesystem \
-                  before user tasks run"
+        reason = "CG-021-no-panic-on-reachable-failure: Boot installs a directory root from the \
+                  newly constructed root filesystem before user tasks run"
     )]
     fs_context::init_fs()
         .lock()
@@ -195,8 +195,8 @@ impl BootVfs {
         let root = namespace.visible_root_path();
         #[expect(
             clippy::expect_used,
-            reason = "Boot installs a directory root from the newly constructed root filesystem \
-                      before user tasks run"
+            reason = "CG-021-no-panic-on-reachable-failure: Boot installs a directory root from \
+                      the newly constructed root filesystem before user tasks run"
         )]
         fs_context::init_fs()
             .lock()
@@ -207,8 +207,8 @@ impl BootVfs {
     fn initial() -> Self {
         #[expect(
             clippy::expect_used,
-            reason = "install_initial_root created the permanent initial mount namespace before \
-                      BootVfs::initial"
+            reason = "CG-021-no-panic-on-reachable-failure: install_initial_root created the \
+                      permanent initial mount namespace before BootVfs::initial"
         )]
         let namespace = MntNamespace::initial().expect("mount namespace must be initialized");
         let root = namespace.visible_root_path();
@@ -217,26 +217,27 @@ impl BootVfs {
 
     #[expect(
         clippy::panic,
-        reason = "Fatal boot: /dev/log cannot be bound for a reason other than missing support; \
-                  virtual filesystem setup has no error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: /dev/log cannot be bound for \
+                  a reason other than missing support; virtual filesystem setup has no error \
+                  return or recovery"
     )]
     #[expect(
         clippy::too_many_lines,
-        reason = "linear registration table: each block creates and mounts one independent \
-                  virtual filesystem"
+        reason = "CG-028-focused-functions: linear registration table: each block creates and \
+                  mounts one independent virtual filesystem"
     )]
     fn mount_virtual_filesystems(&self) {
         #[expect(
             clippy::expect_used,
-            reason = "Fatal boot: failed to create /dev mountpoint; filesystem startup has no \
-                      error return or recovery"
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to create /dev \
+                      mountpoint; filesystem startup has no error return or recovery"
         )]
         self.ensure_directory_path("/dev")
             .expect("Failed to create /dev mountpoint");
         #[expect(
             clippy::expect_used,
-            reason = "Fatal boot: failed to mount devfs; filesystem startup has no error return \
-                      or recovery"
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to mount devfs; \
+                      filesystem startup has no error return or recovery"
         )]
         self.mount_at(
             "/dev",
@@ -248,15 +249,15 @@ impl BootVfs {
         .expect("Failed to mount devfs");
         #[expect(
             clippy::expect_used,
-            reason = "Fatal boot: failed to create /dev/shm mountpoint; filesystem startup has no \
-                      error return or recovery"
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to create /dev/shm \
+                      mountpoint; filesystem startup has no error return or recovery"
         )]
         self.ensure_directory_path("/dev/shm")
             .expect("Failed to create /dev/shm mountpoint");
         #[expect(
             clippy::expect_used,
-            reason = "Fatal boot: failed to mount /dev/shm; filesystem startup has no error \
-                      return or recovery"
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to mount /dev/shm; \
+                      filesystem startup has no error return or recovery"
         )]
         self.mount_at(
             "/dev/shm",
@@ -268,15 +269,15 @@ impl BootVfs {
         .expect("Failed to mount /dev/shm");
         #[expect(
             clippy::expect_used,
-            reason = "Fatal boot: failed to create /tmp mountpoint; filesystem startup has no \
-                      error return or recovery"
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to create /tmp \
+                      mountpoint; filesystem startup has no error return or recovery"
         )]
         self.ensure_directory_path("/tmp")
             .expect("Failed to create /tmp mountpoint");
         #[expect(
             clippy::expect_used,
-            reason = "Fatal boot: failed to mount /tmp; filesystem startup has no error return or \
-                      recovery"
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to mount /tmp; \
+                      filesystem startup has no error return or recovery"
         )]
         self.mount_at(
             "/tmp",
@@ -288,15 +289,15 @@ impl BootVfs {
         .expect("Failed to mount /tmp");
         #[expect(
             clippy::expect_used,
-            reason = "Fatal boot: failed to create /proc mountpoint; filesystem startup has no \
-                      error return or recovery"
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to create /proc \
+                      mountpoint; filesystem startup has no error return or recovery"
         )]
         self.ensure_directory_path("/proc")
             .expect("Failed to create /proc mountpoint");
         #[expect(
             clippy::expect_used,
-            reason = "Fatal boot: failed to mount procfs; filesystem startup has no error return \
-                      or recovery"
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to mount procfs; \
+                      filesystem startup has no error return or recovery"
         )]
         self.mount_at(
             "/proc",
@@ -308,15 +309,15 @@ impl BootVfs {
         .expect("Failed to mount procfs");
         #[expect(
             clippy::expect_used,
-            reason = "Fatal boot: failed to create /sys mountpoint; filesystem startup has no \
-                      error return or recovery"
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to create /sys \
+                      mountpoint; filesystem startup has no error return or recovery"
         )]
         self.ensure_directory_path("/sys")
             .expect("Failed to create /sys mountpoint");
         #[expect(
             clippy::expect_used,
-            reason = "Fatal boot: failed to mount sysfs; filesystem startup has no error return \
-                      or recovery"
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to mount sysfs; \
+                      filesystem startup has no error return or recovery"
         )]
         self.mount_at(
             "/sys",
@@ -331,15 +332,16 @@ impl BootVfs {
         {
             #[expect(
                 clippy::expect_used,
-                reason = "Fatal boot: failed to create /sys/fs/cgroup mountpoint; filesystem \
-                          startup has no error return or recovery"
+                reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to create \
+                          /sys/fs/cgroup mountpoint; filesystem startup has no error return or \
+                          recovery"
             )]
             self.ensure_directory_path("/sys/fs/cgroup")
                 .expect("Failed to create /sys/fs/cgroup mountpoint");
             #[expect(
                 clippy::expect_used,
-                reason = "The immediately preceding ensure_directory_path succeeded during \
-                          serialized boot filesystem setup"
+                reason = "CG-021-no-panic-on-reachable-failure: The immediately preceding \
+                          ensure_directory_path succeeded during serialized boot filesystem setup"
             )]
             let mountpoint = self
                 .lookup("/sys/fs/cgroup")
@@ -347,8 +349,8 @@ impl BootVfs {
             let super_block = cgroup2fs::new_initial_cgroup2fs(SuperBlockFlags::empty());
             #[expect(
                 clippy::expect_used,
-                reason = "Fatal boot: failed to mount cgroup2fs; filesystem startup has no error \
-                          return or recovery"
+                reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to mount \
+                          cgroup2fs; filesystem startup has no error return or recovery"
             )]
             self.namespace
                 .attach_with_flags_and_devname(
@@ -364,15 +366,16 @@ impl BootVfs {
         {
             #[expect(
                 clippy::expect_used,
-                reason = "Fatal boot: failed to create /sys/fs/bpf mountpoint; filesystem startup \
-                          has no error return or recovery"
+                reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to create \
+                          /sys/fs/bpf mountpoint; filesystem startup has no error return or \
+                          recovery"
             )]
             self.ensure_directory_path("/sys/fs/bpf")
                 .expect("Failed to create /sys/fs/bpf mountpoint");
             #[expect(
                 clippy::expect_used,
-                reason = "Fatal boot: failed to mount bpffs; filesystem startup has no error \
-                          return or recovery"
+                reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to mount \
+                          bpffs; filesystem startup has no error return or recovery"
             )]
             self.mount_at(
                 "/sys/fs/bpf",
@@ -454,9 +457,9 @@ impl BootVfs {
 
 #[expect(
     clippy::panic,
-    reason = "Fatal boot: the root block device cannot be mounted (a non-probe mount error, or \
-              every registered filesystem rejects it); root mounting has no error return or \
-              recovery"
+    reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the root block device cannot be \
+              mounted (a non-probe mount error, or every registered filesystem rejects it); root \
+              mounting has no error return or recovery"
 )]
 fn mount_root_file_system(boot: &BootVfs) {
     info!("Initialize filesystem subsystem...");
@@ -538,8 +541,8 @@ fn select_root_block(devs: &mut Vec<Arc<block::BlockDevice>>) -> Arc<block::Bloc
     if !preferred.is_empty() {
         #[expect(
             clippy::panic,
-            reason = "Fatal boot: the configured root block device is absent; root mounting has \
-                      no error return or recovery"
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the configured root block \
+                      device is absent; root mounting has no error return or recovery"
         )]
         let index = devs
             .iter()
@@ -571,15 +574,15 @@ pub fn mount_host_share(mount_path: &str) {
     let boot = BootVfs::initial();
     #[expect(
         clippy::expect_used,
-        reason = "Fatal boot: failed to create the 9P host-share mountpoint; filesystem startup \
-                  has no error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to create the 9P \
+                  host-share mountpoint; filesystem startup has no error return or recovery"
     )]
     boot.ensure_directory_path(mount_path)
         .expect("Failed to create 9P mountpoint path");
     #[expect(
         clippy::expect_used,
-        reason = "Fatal boot: failed to mount the 9P host share; filesystem startup has no error \
-                  return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to mount the 9P host \
+                  share; filesystem startup has no error return or recovery"
     )]
     boot.mount_at(
         mount_path,

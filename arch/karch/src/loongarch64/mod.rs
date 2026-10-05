@@ -21,7 +21,8 @@ pub use cpu::{await_interrupts, stop_cpu};
 pub use fp::{enable_fp, enable_lsx};
 #[expect(
     deprecated,
-    reason = "Preserve compatibility aliases while callers migrate to the local-IRQ API"
+    reason = "CG-024-lint-exceptions: deprecated: Preserve compatibility aliases while callers \
+              migrate to the local-IRQ API"
 )]
 pub use irq::{
     disable_irq, disable_local_irq, enable_irq, enable_local_irq, irq_enabled, local_irq_enabled,

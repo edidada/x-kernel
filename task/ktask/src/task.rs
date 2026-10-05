@@ -1035,14 +1035,15 @@ impl TaskStack {
     pub(crate) fn alloc(size: usize) -> Self {
         #[expect(
             clippy::unwrap_used,
-            reason = "kernel task constructors supply page-aligned stack sizes within the kernel \
-                      address space; alignment 16 is valid"
+            reason = "CG-021-no-panic-on-reachable-failure: kernel task constructors supply \
+                      page-aligned stack sizes within the kernel address space; alignment 16 is \
+                      valid"
         )]
         let layout = Layout::from_size_align(size, 16).unwrap();
         #[expect(
             clippy::unwrap_used,
-            reason = "the kernel GlobalAllocator calls handle_alloc_error on allocation failure \
-                      and never returns null"
+            reason = "CG-021-no-panic-on-reachable-failure: the kernel GlobalAllocator calls \
+                      handle_alloc_error on allocation failure and never returns null"
         )]
         // SAFETY: `layout` is validated above and the returned allocation
         // is owned exclusively by this `TaskStack`.
@@ -1090,7 +1091,8 @@ impl CurrentTask {
     /// Clone the inner `KtaskRef`.
     #[expect(
         clippy::should_implement_trait,
-        reason = "This clone returns a KtaskRef rather than duplicating the current-task wrapper"
+        reason = "CG-024-lint-exceptions: clippy::should_implement_trait: This clone returns a \
+                  KtaskRef rather than duplicating the current-task wrapper"
     )]
     pub fn clone(&self) -> KtaskRef {
         self.0.deref().clone()

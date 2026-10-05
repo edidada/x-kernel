@@ -387,9 +387,9 @@ impl<H: Fn() + Send + Sync> DelayedWork<H> {
             // overflow. Other errors are not produced by the transfer transaction.
             #[expect(
                 clippy::panic,
-                reason = "The transfer transaction fails only as Disabled or Closed; any other \
-                          error is an impossible accounting overflow, and accepted work must not \
-                          silently disappear"
+                reason = "CG-021-no-panic-on-reachable-failure: The transfer transaction fails \
+                          only as Disabled or Closed; any other error is an impossible accounting \
+                          overflow, and accepted work must not silently disappear"
             )]
             Err(error) => panic!("delayed transfer invariant failed: {error:?}"),
         }

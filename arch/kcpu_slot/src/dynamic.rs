@@ -221,8 +221,8 @@ impl<T: 'static> DynamicCpuSlot<'_, T> {
     /// that can access it.
     #[expect(
         clippy::mut_from_ref,
-        reason = "The unsafe caller guarantees exclusive access to the pinned CPU slot for the \
-                  returned lifetime"
+        reason = "CG-024-lint-exceptions: clippy::mut_from_ref: The unsafe caller guarantees \
+                  exclusive access to the pinned CPU slot for the returned lifetime"
     )]
     pub unsafe fn get_mut_unchecked<'a>(&'a self, pin: &'a impl CpuPin) -> Option<&'a mut T> {
         let cpu = pin.current_cpu().as_usize();

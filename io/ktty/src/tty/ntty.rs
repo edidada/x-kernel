@@ -41,8 +41,9 @@ impl ConsoleConnection {
     fn attach_input(&self, waker: Waker) {
         #[expect(
             clippy::expect_used,
-            reason = "The singleton N_TTY binds once after console IRQ initialization has \
-                      installed the stdout port and prepared its input buffer"
+            reason = "CG-021-no-panic-on-reachable-failure: The singleton N_TTY binds once after \
+                      console IRQ initialization has installed the stdout port and prepared its \
+                      input buffer"
         )]
         self.boot_port
             .as_ref()
@@ -177,8 +178,8 @@ fn new_n_tty() -> Arc<NTtyDriver> {
     if has_input_irq {
         #[expect(
             clippy::unwrap_used,
-            reason = "has_input_irq selected ProcessMode::Work when constructing this TTY, which \
-                      installs the input waker"
+            reason = "CG-021-no-panic-on-reachable-failure: has_input_irq selected \
+                      ProcessMode::Work when constructing this TTY, which installs the input waker"
         )]
         let waker = tty.input.lock().input_waker().unwrap();
         connection.attach_input(waker);

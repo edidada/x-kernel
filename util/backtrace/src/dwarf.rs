@@ -32,8 +32,8 @@ impl DwarfContextStorage {
         any(test, unittest),
         expect(
             dead_code,
-            reason = "test builds compile out the linker-section DWARF loading that stores the \
-                      context"
+            reason = "CG-024-lint-exceptions: dead_code: test builds compile out the \
+                      linker-section DWARF loading that stores the context"
         )
     )]
     fn init_once(&self, ctx: Context<DwarfReader>) {
@@ -94,7 +94,11 @@ pub(crate) fn is_ready() -> bool {
 
 #[cfg_attr(
     test,
-    expect(dead_code, reason = "host tests do not call init from backtrace::init")
+    expect(
+        dead_code,
+        reason = "CG-024-lint-exceptions: dead_code: host tests do not call init from \
+                  backtrace::init"
+    )
 )]
 pub(crate) fn init() {
     INIT_ONCE.call_once(|| {

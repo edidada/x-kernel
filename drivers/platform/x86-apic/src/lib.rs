@@ -360,8 +360,9 @@ pub fn init_primary(io_apic_paddr: PhysAddr) {
         info!("Using xAPIC.");
         #[expect(
             clippy::panic,
-            reason = "Fatal boot: the xAPIC register page cannot be mapped; interrupt-controller \
-                      initialization has no error return or recovery"
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the xAPIC register page \
+                      cannot be mapped; interrupt-controller initialization has no error return \
+                      or recovery"
         )]
         // SAFETY: on the xAPIC path, `xapic_base` reads the architectural LAPIC
         // base address, which is then mapped before the builder uses it.
@@ -372,8 +373,8 @@ pub fn init_primary(io_apic_paddr: PhysAddr) {
     }
     #[expect(
         clippy::unwrap_used,
-        reason = "all required timer, error and spurious vectors are supplied, and the xAPIC path \
-                  supplies the mapped base"
+        reason = "CG-021-no-panic-on-reachable-failure: all required timer, error and spurious \
+                  vectors are supplied, and the xAPIC path supplies the mapped base"
     )]
     let mut lapic = builder.build().unwrap();
     // SAFETY: the LAPIC instance was built from either x2APIC CPU state or a
@@ -385,8 +386,9 @@ pub fn init_primary(io_apic_paddr: PhysAddr) {
 
     #[expect(
         clippy::panic,
-        reason = "Fatal boot: the IOAPIC register page cannot be mapped; interrupt-controller \
-                  initialization has no error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the IOAPIC register page \
+                  cannot be mapped; interrupt-controller initialization has no error return or \
+                  recovery"
     )]
     let io_apic_base = iomap_device(io_apic_paddr, 0x1000, "ioapic")
         .unwrap_or_else(|err| panic!("failed to iomap IOAPIC: {err:?}"));
@@ -481,8 +483,8 @@ fn build_local_apic() -> LocalApic {
     }
     #[expect(
         clippy::expect_used,
-        reason = "The builder receives valid fixed APIC vectors and, for xAPIC, an asserted \
-                  nonzero MMIO base"
+        reason = "CG-021-no-panic-on-reachable-failure: The builder receives valid fixed APIC \
+                  vectors and, for xAPIC, an asserted nonzero MMIO base"
     )]
     builder.build().expect("failed to build local APIC")
 }

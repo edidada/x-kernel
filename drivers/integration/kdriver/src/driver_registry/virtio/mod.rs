@@ -118,11 +118,13 @@ macro_rules! virtio_driver_pair {
 #[cfg(feature = "virtio")]
 #[expect(
     clippy::allow_attributes,
-    reason = "Device activation inputs are used only by enabled VirtIO device features"
+    reason = "CG-024-lint-exceptions: Device activation inputs are used only by enabled VirtIO \
+              device features"
 )]
 #[allow(
     unused_variables,
-    reason = "Device activation inputs are used only by enabled VirtIO device features"
+    reason = "CG-024-lint-exceptions: unused_variables: Device activation inputs are used only by \
+              enabled VirtIO device features"
 )]
 fn activate_virtio_device(
     device: Arc<DeviceObject>,

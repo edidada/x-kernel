@@ -48,7 +48,8 @@ pub(crate) struct Rule {
     pub route_type: u8,
     #[expect(
         dead_code,
-        reason = "Retain the route preferred-source attribute for source-address selection"
+        reason = "CG-024-lint-exceptions: dead_code: Retain the route preferred-source attribute \
+                  for source-address selection"
     )]
     pub prefsrc: Option<IpAddress>,
     source: RuleSource,
@@ -103,7 +104,8 @@ impl Rule {
     ) -> Self {
         #[expect(
             clippy::unwrap_used,
-            reason = "32 is a valid IPv4 prefix length for the local host route"
+            reason = "CG-021-no-panic-on-reachable-failure: 32 is a valid IPv4 prefix length for \
+                      the local host route"
         )]
         let filter = Ipv4Cidr::new(owner_addr.address(), 32).unwrap();
         Self::for_ipv4_address(

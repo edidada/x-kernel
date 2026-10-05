@@ -290,8 +290,8 @@ pub(crate) static INIT_PROC: LazyInit<Arc<Process>> = LazyInit::new();
 pub fn init_proc() -> Arc<Process> {
     #[expect(
         clippy::unwrap_used,
-        reason = "init_proc requires the initial process to have been constructed, as documented \
-                  in its contract"
+        reason = "CG-021-no-panic-on-reachable-failure: init_proc requires the initial process to \
+                  have been constructed, as documented in its contract"
     )]
     INIT_PROC.get().unwrap().clone()
 }

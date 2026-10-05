@@ -477,8 +477,8 @@ fn build_guest_identity_pt(vcpu: &mut crate::vcpu::Vcpu<super::X86Vmx>) -> Optio
 /// Initialize a VMCS for a vCPU. Allocates a VMCS page and programs all fields.
 #[expect(
     clippy::too_many_lines,
-    reason = "TODO(cg): legacy: split VMCS allocation, control, host-state and guest-state \
-              programming into helpers"
+    reason = "CG-028-focused-functions: TODO(cg): legacy: split VMCS allocation, control, \
+              host-state and guest-state programming into helpers"
 )]
 pub fn vmcs_init_vcpu(
     vcpu: &mut crate::vcpu::Vcpu<super::X86Vmx>,

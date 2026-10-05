@@ -41,8 +41,9 @@ fn init_once() {
 
     #[expect(
         clippy::expect_used,
-        reason = "Fatal boot: the configured early UART address is absent or invalid; \
-                  boot-console access has no error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the configured early UART \
+                  address is absent or invalid; boot-console access has no error return or \
+                  recovery"
     )]
     let port = bootconsole_config::ioport_addr().expect("missing x86 boot console ioport");
     // SAFETY: The configured UART IER is writable at CPL0; disable interrupts before changing its
@@ -71,8 +72,9 @@ fn write_raw_byte(byte: u8) {
     init_once();
     #[expect(
         clippy::expect_used,
-        reason = "Fatal boot: the configured early UART address is absent or invalid; \
-                  boot-console access has no error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the configured early UART \
+                  address is absent or invalid; boot-console access has no error return or \
+                  recovery"
     )]
     let port = bootconsole_config::ioport_addr().expect("missing x86 boot console ioport");
     // SAFETY: these programmed-I/O operations poll the configured UART status

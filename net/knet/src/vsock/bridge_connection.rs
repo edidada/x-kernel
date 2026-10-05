@@ -26,7 +26,8 @@ pub(super) enum BridgeConnectionState {
     /// Entry is not usable.
     #[expect(
         dead_code,
-        reason = "Keep the unusable-entry sentinel for bridge lifecycle validation"
+        reason = "CG-024-lint-exceptions: dead_code: Keep the unusable-entry sentinel for bridge \
+                  lifecycle validation"
     )]
     Invalid,
     /// Host-side vsock exists, but no TIPC channel has been attached yet.
@@ -42,13 +43,15 @@ pub(super) enum BridgeConnectionState {
     /// TIPC side closed while vsock cleanup is in progress.
     #[expect(
         dead_code,
-        reason = "Keep an explicit TIPC-closed state while vsock cleanup completes"
+        reason = "CG-024-lint-exceptions: dead_code: Keep an explicit TIPC-closed state while \
+                  vsock cleanup completes"
     )]
     TipcClosed,
     /// Connection has been closed.
     #[expect(
         dead_code,
-        reason = "Keep the terminal state for marking completed bridge teardown"
+        reason = "CG-024-lint-exceptions: dead_code: Keep the terminal state for marking \
+                  completed bridge teardown"
     )]
     Closed,
 }

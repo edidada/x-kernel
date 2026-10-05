@@ -1229,8 +1229,8 @@ impl Ext4Inode {
     /// without publishing a partial mount reservation.
     #[expect(
         clippy::excessive_nesting,
-        reason = "TODO(cg): legacy delayed-allocation reservation; move the per-extent mapping \
-                  walk and hole coalescing into a helper"
+        reason = "CG-029-shallow-control-flow: TODO(cg): legacy delayed-allocation reservation; \
+                  move the per-extent mapping walk and hole coalescing into a helper"
     )]
     pub(crate) fn reserve_delalloc_range(
         &self,

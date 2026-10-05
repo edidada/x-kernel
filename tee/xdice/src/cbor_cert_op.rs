@@ -595,9 +595,9 @@ pub fn dice_clear_memory(_context: &mut u8, buffer: &mut [u8]) {
 
 #[expect(
     clippy::too_many_lines,
-    reason = "TODO(cg): legacy: split subject/authority key and ID derivation, certificate size \
-              estimation and COSE_Sign1 encoding/signing into helpers; each error path must keep \
-              clearing both private keys in the current order"
+    reason = "CG-028-focused-functions: TODO(cg): legacy: split subject/authority key and ID \
+              derivation, certificate size estimation and COSE_Sign1 encoding/signing into \
+              helpers; each error path must keep clearing both private keys in the current order"
 )]
 pub fn dice_generate_certificate(
     context: &mut u8,

@@ -28,8 +28,8 @@ pub(crate) fn membership_file(
                 for process_id in kprocess::cgroup_member_process_ids(&cgroup) {
                     #[expect(
                         clippy::expect_used,
-                        reason = "Formatting an integer into alloc::String cannot return \
-                                  fmt::Error"
+                        reason = "CG-021-no-panic-on-reachable-failure: Formatting an integer \
+                                  into alloc::String cannot return fmt::Error"
                     )]
                     writeln!(output, "{process_id}").expect("writing to a String cannot fail");
                 }

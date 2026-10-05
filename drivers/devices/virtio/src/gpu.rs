@@ -444,7 +444,8 @@ struct ResourceCreate2D {
 enum Format {
     #[expect(
         clippy::upper_case_acronyms,
-        reason = "pixel format name mirrors the virtio GPU hardware format B8G8R8A8_UNORM"
+        reason = "CG-032-camel-case-types: pixel format name mirrors the virtio GPU hardware \
+                  format B8G8R8A8_UNORM"
     )]
     B8G8R8A8UNORM = 1,
 }

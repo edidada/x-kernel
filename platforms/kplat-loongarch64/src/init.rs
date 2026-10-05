@@ -20,8 +20,8 @@ impl BootHandler {
         crate::irq::init();
         #[expect(
             clippy::expect_used,
-            reason = "Fatal boot: console configuration cannot be parsed; early_driver_init has \
-                      no error return or recovery"
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: console configuration \
+                      cannot be parsed; early_driver_init has no error return or recovery"
         )]
         console_driver::init_stdout_from_device_tree()
             .expect("failed to parse console from device tree");
@@ -33,8 +33,9 @@ impl BootHandler {
             // LS7A backend, then seed the realtime clock.
             #[expect(
                 clippy::panic,
-                reason = "Fatal boot: the LS7A RTC aperture cannot be mapped; early driver \
-                          initialization has no error return or recovery"
+                reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the LS7A RTC aperture \
+                          cannot be mapped; early driver initialization has no error return or \
+                          recovery"
             )]
             let vaddr =
                 memspace::iomap_device(PhysAddr::from_usize(RTC_PADDR), LS7A_RTC_SIZE, "ls7a-rtc")
@@ -46,8 +47,9 @@ impl BootHandler {
             );
             #[expect(
                 clippy::expect_used,
-                reason = "Fatal boot: the LS7A RTC cannot supply the startup wall clock; \
-                          early_driver_init has no error return or recovery"
+                reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the LS7A RTC cannot \
+                          supply the startup wall clock; early_driver_init has no error return or \
+                          recovery"
             )]
             let sample = rtc_driver::read(config).expect("failed to read ls7a rtc");
             ktime::initialize_realtime(sample);

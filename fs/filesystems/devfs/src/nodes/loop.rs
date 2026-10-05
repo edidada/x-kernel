@@ -273,7 +273,8 @@ static LOOP_DEVICES: Lazy<Vec<Arc<LoopDevice>>> = Lazy::new(|| {
             let device = Arc::new(LoopDevice::new(number));
             #[expect(
                 clippy::expect_used,
-                reason = "Loop devices use a fixed valid block size and initially zero capacity"
+                reason = "CG-021-no-panic-on-reachable-failure: Loop devices use a fixed valid \
+                          block size and initially zero capacity"
             )]
             let disk = block::Gendisk::alloc(
                 format!("loop{number}"),
@@ -285,8 +286,8 @@ static LOOP_DEVICES: Lazy<Vec<Arc<LoopDevice>>> = Lazy::new(|| {
             .expect("valid loop gendisk");
             #[expect(
                 clippy::expect_used,
-                reason = "The once-initialized loop array uniquely owns major 7 minors 0 through \
-                          15"
+                reason = "CG-021-no-panic-on-reachable-failure: The once-initialized loop array \
+                          uniquely owns major 7 minors 0 through 15"
             )]
             block::add_disk(disk).expect("loop device number must be unique");
             device

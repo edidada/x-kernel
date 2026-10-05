@@ -95,25 +95,28 @@
 
 #![allow(
     clippy::allow_attributes,
-    reason = "case (b): 52 legacy outer allowances need individual contract review; new code must \
-              prefer narrow expect attributes and justify cfg-dependent allowances"
+    reason = "CG-024-lint-exceptions: case (b): 52 legacy outer allowances need individual \
+              contract review; new code must prefer narrow expect attributes and justify \
+              cfg-dependent allowances"
 )]
 #![allow(
     clippy::allow_attributes_without_reason,
-    reason = "case (b): 52 legacy sites across ext4 disk structures and filesystem operations \
-              need individual review; new code must use narrow lint exceptions with substantive \
-              reasons"
+    reason = "CG-024-lint-exceptions: clippy::allow_attributes_without_: case (b): 52 legacy \
+              sites across ext4 disk structures and filesystem operations need individual review; \
+              new code must use narrow lint exceptions with substantive reasons"
 )]
 #![allow(
     clippy::too_many_lines,
-    reason = "case (b): legacy kext4 has 9 allocation, writeback and on-disk decode functions \
-              over the line limit that need per-function split review; new code remains reviewed"
+    reason = "CG-028-focused-functions: case (b): legacy kext4 has 9 allocation, writeback and \
+              on-disk decode functions over the line limit that need per-function split review; \
+              new code remains reviewed"
 )]
 #![no_std]
 #![allow(
     clippy::unwrap_used,
-    reason = "case (b): 133 legacy diagnostic sites need individual failure-contract review; new \
-              code remains subject to the no-legitimate-failure-panic rule"
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): 133 legacy diagnostic sites need \
+              individual failure-contract review; new code remains subject to the \
+              no-legitimate-failure-panic rule"
 )]
 #![forbid(unsafe_code)]
 
@@ -208,8 +211,8 @@ static FILE_SYSTEM_TYPE: kvfs::FileSystemType =
 fn init_ext4_fs() {
     #[expect(
         clippy::expect_used,
-        reason = "Each statically named filesystem is registered once by its unique linker \
-                  initialization entry"
+        reason = "CG-021-no-panic-on-reachable-failure: Each statically named filesystem is \
+                  registered once by its unique linker initialization entry"
     )]
     kvfs::register_filesystem(&FILE_SYSTEM_TYPE).expect("ext4 filesystem type must register once");
 }

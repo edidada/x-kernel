@@ -42,7 +42,7 @@ impl IrqOp for MockProvider {
 
     #[expect(
         clippy::panic,
-        reason = "test scenario: the mock IRQ provider accepts only the shared-action tokens it \
+        reason = "CG-021-no-panic-on-reachable-failure: test scenario: the mock IRQ provider accepts only the shared-action tokens it \
                   issued to the block driver"
     )]
     fn release_irq(&self, irq: IrqResource, token: IrqHandlerToken) {
@@ -54,7 +54,7 @@ impl IrqOp for MockProvider {
 
     #[expect(
         clippy::panic,
-        reason = "test scenario: masking the shared line is the regression this mock IRQ provider \
+        reason = "CG-021-no-panic-on-reachable-failure: test scenario: masking the shared line is the regression this mock IRQ provider \
                   reports"
     )]
     fn set_irq_enabled(&self, _irq: IrqResource, _enabled: bool) {

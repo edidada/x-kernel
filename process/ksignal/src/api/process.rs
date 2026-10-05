@@ -243,7 +243,8 @@ impl ProcessSignalManager {
             }
             #[expect(
                 clippy::expect_used,
-                reason = "replacement was created above and is not shared until owner.replace"
+                reason = "CG-021-no-panic-on-reachable-failure: replacement was created above and \
+                          is not shared until owner.replace"
             )]
             let actions = Arc::get_mut(&mut replacement)
                 .expect("unpublished action table has one owner")

@@ -128,8 +128,8 @@ impl SystemTime {
                 duration: {
                     #[expect(
                         clippy::expect_used,
-                        reason = "Two i64-second SystemTime values differ by at most u64::MAX \
-                                  seconds, which fits TimeSpan"
+                        reason = "CG-021-no-panic-on-reachable-failure: Two i64-second SystemTime \
+                                  values differ by at most u64::MAX seconds, which fits TimeSpan"
                     )]
                     TimeSpan::try_from_nanos((-delta) as u128)
                         .expect("SystemTime difference fits in TimeSpan")
@@ -139,8 +139,8 @@ impl SystemTime {
         Ok({
             #[expect(
                 clippy::expect_used,
-                reason = "Two i64-second SystemTime values differ by at most u64::MAX seconds, \
-                          which fits TimeSpan"
+                reason = "CG-021-no-panic-on-reachable-failure: Two i64-second SystemTime values \
+                          differ by at most u64::MAX seconds, which fits TimeSpan"
             )]
             TimeSpan::try_from_nanos(delta as u128).expect("SystemTime difference fits in TimeSpan")
         })
@@ -167,8 +167,9 @@ impl Add<TimeSpan> for SystemTime {
     fn add(self, rhs: TimeSpan) -> Self::Output {
         #[expect(
             clippy::expect_used,
-            reason = "Unchecked time arithmetic requires representable, correctly ordered \
-                      operands; external values use the checked variants"
+            reason = "CG-021-no-panic-on-reachable-failure: Unchecked time arithmetic requires \
+                      representable, correctly ordered operands; external values use the checked \
+                      variants"
         )]
         self.checked_add(rhs)
             .expect("system time addition overflow")
@@ -186,8 +187,9 @@ impl Sub<TimeSpan> for SystemTime {
     fn sub(self, rhs: TimeSpan) -> Self::Output {
         #[expect(
             clippy::expect_used,
-            reason = "Unchecked time arithmetic requires representable, correctly ordered \
-                      operands; external values use the checked variants"
+            reason = "CG-021-no-panic-on-reachable-failure: Unchecked time arithmetic requires \
+                      representable, correctly ordered operands; external values use the checked \
+                      variants"
         )]
         self.checked_sub(rhs)
             .expect("system time subtraction overflow")

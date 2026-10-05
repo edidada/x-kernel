@@ -119,9 +119,9 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
 pub(super) unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) -> ! {
     #[expect(
         clippy::panic,
-        reason = "Secondary CPUs are started only through boot_ap for logical ids from the \
-                  present-CPU map, using the raw id recorded there, so an entering CPU has a \
-                  mapping"
+        reason = "CG-021-no-panic-on-reachable-failure: Secondary CPUs are started only through \
+                  boot_ap for logical ids from the present-CPU map, using the raw id recorded \
+                  there, so an entering CPU has a mapping"
     )]
     let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
         panic!(
@@ -161,9 +161,9 @@ pub(super) unsafe extern "C" fn __primary_switched(
     kcpu_id_map::init_boot_cpu_id_map(dtb_paddr);
     #[expect(
         clippy::panic,
-        reason = "Fatal boot: the firmware CPU description lacks the boot CPU's raw id, so no \
-                  logical CPU id exists for per-CPU setup; the boot entry has no error return or \
-                  recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the firmware CPU description \
+                  lacks the boot CPU's raw id, so no logical CPU id exists for per-CPU setup; the \
+                  boot entry has no error return or recovery"
     )]
     let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
         panic!(

@@ -568,7 +568,7 @@ pub fn sys_msgrcv(
 /// failed owner/creator/privilege or byte-limit checks. Forwards ABI copy errors.
 #[expect(
     clippy::too_many_lines,
-    reason = "TODO(cg): legacy msgctl; split per command"
+    reason = "CG-028-focused-functions: TODO(cg): legacy msgctl; split per command"
 )]
 pub fn sys_msgctl(msqid: i32, cmd: i32, buf: UserPtr<u8>) -> KResult<isize> {
     let current_uid: u32 = 0;

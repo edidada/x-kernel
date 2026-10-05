@@ -241,8 +241,8 @@ impl<const N: usize> TimerSet<N> {
         unsafe { self.arm_on_checked(node, selected_cpu, deadline, || true) }.map(|armed| {
             #[expect(
                 clippy::expect_used,
-                reason = "The acceptance closure always returns true, so successful \
-                          arm_on_checked always returns Some"
+                reason = "CG-021-no-panic-on-reachable-failure: The acceptance closure always \
+                          returns true, so successful arm_on_checked always returns Some"
             )]
             armed.expect("unconditional arm must be accepted")
         })
@@ -955,8 +955,8 @@ pub(crate) mod tests {
     #[cfg(feature = "smp")]
     #[expect(
         clippy::excessive_nesting,
-        reason = "test scenario: the routing check runs inside worker closures of one linear SMP \
-                  script"
+        reason = "CG-029-shallow-control-flow: test scenario: the routing check runs inside \
+                  worker closures of one linear SMP script"
     )]
     pub fn concurrent_owner_routes(
         run_workers: impl FnOnce([alloc::boxed::Box<dyn FnOnce() + Send>; 2]) -> bool,
@@ -1036,11 +1036,13 @@ pub(crate) mod tests {
     #[cfg(feature = "smp")]
     #[expect(
         clippy::too_many_lines,
-        reason = "test scenario: one linear concurrent-cancel script exposed for SMP tests"
+        reason = "CG-028-focused-functions: test scenario: one linear concurrent-cancel script \
+                  exposed for SMP tests"
     )]
     #[expect(
         clippy::excessive_nesting,
-        reason = "test scenario: the timer handler is defined inside one linear SMP script"
+        reason = "CG-029-shallow-control-flow: test scenario: the timer handler is defined inside \
+                  one linear SMP script"
     )]
     pub fn concurrent_cancel_waits_for_cleanup(
         run_workers: impl FnOnce([alloc::boxed::Box<dyn FnOnce() + Send>; 2]) -> bool,

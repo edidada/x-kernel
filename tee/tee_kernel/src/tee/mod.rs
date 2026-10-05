@@ -126,8 +126,8 @@ fn tee_syscall_storage_create_extras(uctx: &UserContext) -> (usize, *mut c_uint)
 /// Dispatch TEE-specific syscalls from the userspace context
 #[expect(
     clippy::too_many_lines,
-    reason = "TODO(cg): legacy TEE syscall dispatch whose arms marshal arguments inline; move \
-              marshalling into per-syscall helpers"
+    reason = "CG-028-focused-functions: TODO(cg): legacy TEE syscall dispatch whose arms marshal \
+              arguments inline; move marshalling into per-syscall helpers"
 )]
 pub fn handle_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResult {
     // Handle TEE-specific syscalls here

@@ -51,8 +51,8 @@ static DEVICE_INITIALIZATION: Once<()> = Once::new();
 fn projection() -> &'static Mutex<DeviceProjection> {
     #[expect(
         clippy::expect_used,
-        reason = "Filesystem initialization installs the permanent devtmpfs projection before \
-                  device callbacks"
+        reason = "CG-021-no-panic-on-reachable-failure: Filesystem initialization installs the \
+                  permanent devtmpfs projection before device callbacks"
     )]
     DEVICES
         .get()
@@ -160,8 +160,8 @@ fn remove_device(node: &DeviceNode) {
         }
         #[expect(
             clippy::expect_used,
-            reason = "The same locked projection map was checked for this node immediately before \
-                      removal"
+            reason = "CG-021-no-panic-on-reachable-failure: The same locked projection map was \
+                      checked for this node immediately before removal"
         )]
         projection
             .records

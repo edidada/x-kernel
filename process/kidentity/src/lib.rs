@@ -156,8 +156,8 @@ impl PidHandle {
     pub fn root_nr(&self) -> u32 {
         #[expect(
             clippy::expect_used,
-            reason = "Both PID-handle constructors install a root-visible number alongside any \
-                      nested namespace projections"
+            reason = "CG-021-no-panic-on-reachable-failure: Both PID-handle constructors install \
+                      a root-visible number alongside any nested namespace projections"
         )]
         self.numbers
             .iter()
@@ -197,7 +197,8 @@ pub fn root_pid_namespace() -> &'static Arc<PidNamespace> {
     ROOT_PID_NS.call_once(|| Arc::new(PidNamespace::new_root()));
     #[expect(
         clippy::unwrap_used,
-        reason = "call_once completes root namespace initialization before get reads it"
+        reason = "CG-021-no-panic-on-reachable-failure: call_once completes root namespace \
+                  initialization before get reads it"
     )]
     ROOT_PID_NS.get().unwrap()
 }

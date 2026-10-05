@@ -362,9 +362,9 @@ unsafe fn next_l3_table(
 /// the loaded image so pool physical addresses can be recovered.
 #[expect(
     clippy::panic,
-    reason = "Boot callers map each VA window at one fixed VA-to-PA offset (linear map at \
-              PAGE_OFFSET, kernel image at its image offset) and the windows do not overlap, so a \
-              present entry for va already maps pa"
+    reason = "CG-021-no-panic-on-reachable-failure: Boot callers map each VA window at one fixed \
+              VA-to-PA offset (linear map at PAGE_OFFSET, kernel image at its image offset) and \
+              the windows do not overlap, so a present entry for va already maps pa"
 )]
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_2m_page(va: usize, pa: usize, flags: PagingFlags) {
@@ -395,9 +395,9 @@ unsafe fn map_2m_page(va: usize, pa: usize, flags: PagingFlags) {
 /// the loaded image so pool physical addresses can be recovered.
 #[expect(
     clippy::panic,
-    reason = "Boot callers map each VA window at one fixed VA-to-PA offset (linear map at \
-              PAGE_OFFSET, kernel image at its image offset) and the windows do not overlap, so a \
-              present entry for va already maps pa"
+    reason = "CG-021-no-panic-on-reachable-failure: Boot callers map each VA window at one fixed \
+              VA-to-PA offset (linear map at PAGE_OFFSET, kernel image at its image offset) and \
+              the windows do not overlap, so a present entry for va already maps pa"
 )]
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_4k_page(va: usize, pa: usize, flags: PagingFlags) {
@@ -510,8 +510,8 @@ unsafe fn raw_efi_context(systemtable_paddr: usize) -> RawEfiContext<'static> {
     let systemtable: *const SystemTable = boot_phys_ptr(systemtable_paddr);
     #[expect(
         clippy::expect_used,
-        reason = "Fatal boot: EFI boot tables are invalid; early page-table setup cannot proceed \
-                  and has no error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: EFI boot tables are invalid; \
+                  early page-table setup cannot proceed and has no error return or recovery"
     )]
     // SAFETY: `systemtable_paddr` comes from firmware handoff and points to a
     // readable EFI system table in boot-physical addressing.
@@ -529,8 +529,8 @@ unsafe fn raw_efi_context(systemtable_paddr: usize) -> RawEfiContext<'static> {
 unsafe fn raw_efi_boot_memmap(context: &RawEfiContext<'static>) -> Option<BootMemmapRef<'static>> {
     #[expect(
         clippy::expect_used,
-        reason = "Fatal boot: EFI boot tables are invalid; early page-table setup cannot proceed \
-                  and has no error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: EFI boot tables are invalid; \
+                  early page-table setup cannot proceed and has no error return or recovery"
     )]
     // SAFETY: `context` was constructed from the live EFI system table and
     // the configuration-table pointer remains readable during early boot.
@@ -540,8 +540,9 @@ unsafe fn raw_efi_boot_memmap(context: &RawEfiContext<'static>) -> Option<BootMe
     Some(
         #[expect(
             clippy::expect_used,
-            reason = "Fatal boot: EFI boot tables are invalid; early page-table setup cannot \
-                      proceed and has no error return or recovery"
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: EFI boot tables are \
+                      invalid; early page-table setup cannot proceed and has no error return or \
+                      recovery"
         )]
         // SAFETY: `memmap_paddr` comes from the validated Linux EFI memmap
         // config-table entry and points to a readable boot memmap header.
@@ -612,9 +613,9 @@ unsafe fn map_linear_ram_from_dtb(dtb_paddr: usize) {
 
     #[expect(
         clippy::panic,
-        reason = "Fatal boot: the firmware DTB pointer does not reference a readable device tree, \
-                  so boot RAM cannot be mapped; early page-table setup has no error return or \
-                  recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the firmware DTB pointer does \
+                  not reference a readable device tree, so boot RAM cannot be mapped; early \
+                  page-table setup has no error return or recovery"
     )]
     // SAFETY: `dtb_paddr` is the firmware-provided DTB pointer and this helper
     // only reads its memory-region description.
@@ -676,9 +677,9 @@ unsafe fn map_dtb_linear(dtb_paddr: usize) {
 /// the loaded image so pool physical addresses can be recovered.
 #[expect(
     clippy::panic,
-    reason = "Fatal boot: firmware provides neither a Linux EFI boot memory map nor a device-tree \
-              configuration table, so RAM cannot be linearly mapped; early page-table setup has \
-              no error return or recovery"
+    reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: firmware provides neither a Linux \
+              EFI boot memory map nor a device-tree configuration table, so RAM cannot be \
+              linearly mapped; early page-table setup has no error return or recovery"
 )]
 #[unsafe(link_section = ".text.boot")]
 unsafe fn map_linear_firmware_memory(systemtable_paddr: usize) {
@@ -687,8 +688,8 @@ unsafe fn map_linear_firmware_memory(systemtable_paddr: usize) {
     let context = unsafe { raw_efi_context(systemtable_paddr) };
     #[expect(
         clippy::expect_used,
-        reason = "Fatal boot: EFI boot tables are invalid; early page-table setup cannot proceed \
-                  and has no error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: EFI boot tables are invalid; \
+                  early page-table setup cannot proceed and has no error return or recovery"
     )]
     // SAFETY: raw_efi_context validated the live system table; the caller
     // retains its immutable configuration array, readable through boot_phys_ptr.
@@ -699,8 +700,8 @@ unsafe fn map_linear_firmware_memory(systemtable_paddr: usize) {
     unsafe { BOOT_DTB_PADDR = dtb };
     #[expect(
         clippy::expect_used,
-        reason = "Fatal boot: EFI boot tables are invalid; early page-table setup cannot proceed \
-                  and has no error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: EFI boot tables are invalid; \
+                  early page-table setup cannot proceed and has no error return or recovery"
     )]
     // SAFETY: raw_efi_context validated the live system table; the caller
     // retains its immutable configuration array, readable through boot_phys_ptr.
@@ -711,8 +712,8 @@ unsafe fn map_linear_firmware_memory(systemtable_paddr: usize) {
     unsafe { BOOT_UEFI_MEMMAP_PADDR = memmap };
     #[expect(
         clippy::expect_used,
-        reason = "Fatal boot: EFI boot tables are invalid; early page-table setup cannot proceed \
-                  and has no error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: EFI boot tables are invalid; \
+                  early page-table setup cannot proceed and has no error return or recovery"
     )]
     // SAFETY: raw_efi_context validated the live system table; the caller
     // retains its immutable configuration array, readable through boot_phys_ptr.

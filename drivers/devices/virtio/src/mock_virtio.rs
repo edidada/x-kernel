@@ -31,8 +31,9 @@ pub struct MockHal;
 unsafe impl Hal for MockHal {
     #[expect(
         clippy::panic,
-        reason = "test scenario: MockHal backs DMA with the global allocator and the Hal callback \
-                  has no error channel for allocation failure"
+        reason = "CG-021-no-panic-on-reachable-failure: test scenario: MockHal backs DMA with the \
+                  global allocator and the Hal callback has no error channel for allocation \
+                  failure"
     )]
     fn dma_alloc(
         pages: usize,

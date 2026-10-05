@@ -100,8 +100,8 @@ fn build_system_time(year: u32, toy_low: u32) -> Option<SystemTime> {
     Some({
         #[expect(
             clippy::expect_used,
-            reason = "chrono has validated the timestamp and normalized its nanoseconds below one \
-                      billion"
+            reason = "CG-021-no-panic-on-reachable-failure: chrono has validated the timestamp \
+                      and normalized its nanoseconds below one billion"
         )]
         SystemTime::from_unix_parts(date_time.timestamp(), date_time.nanosecond())
             .expect("chrono returns normalized nanoseconds")

@@ -196,8 +196,8 @@ fn render_maps_line(item: &MapsEntry) -> String {
     let perms = maps_permissions(item.flags);
     #[expect(
         clippy::unwrap_used,
-        reason = "maps_permissions emits only the ASCII permission letters r, w, x, s, p and the \
-                  dash"
+        reason = "CG-021-no-panic-on-reachable-failure: maps_permissions emits only the ASCII \
+                  permission letters r, w, x, s, p and the dash"
     )]
     let mut line = format!(
         "{:0width$x}-{:0width$x} {} {:08x} 00:00 {}",
@@ -619,13 +619,13 @@ impl SimpleDirOps for ThreadDir {
 
     #[expect(
         clippy::too_many_lines,
-        reason = "TODO(cg): legacy per-task lookup with long arms; move each entry kind into its \
-                  own builder"
+        reason = "CG-028-focused-functions: TODO(cg): legacy per-task lookup with long arms; move \
+                  each entry kind into its own builder"
     )]
     #[expect(
         clippy::excessive_nesting,
-        reason = "TODO(cg): legacy per-task lookup; the builder split for too_many_lines also \
-                  flattens it"
+        reason = "CG-029-shallow-control-flow: TODO(cg): legacy per-task lookup; the builder \
+                  split for too_many_lines also flattens it"
     )]
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
         let fs = self.fs.clone();

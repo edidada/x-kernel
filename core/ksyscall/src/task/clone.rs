@@ -179,7 +179,8 @@ impl CloneRequest {
     /// Consume this request and execute the clone operation.
     #[expect(
         clippy::too_many_lines,
-        reason = "TODO(cg): legacy clone; split flag validation, resource sharing and task start"
+        reason = "CG-028-focused-functions: TODO(cg): legacy clone; split flag validation, \
+                  resource sharing and task start"
     )]
     pub(crate) fn do_clone(mut self, uctx: &UserContext) -> KResult<isize> {
         if self.flags.contains(CloneFlags::VFORK) {

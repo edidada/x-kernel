@@ -33,8 +33,8 @@ fn invoke_mmio_guard_map(phys_addr: usize, granule_count: usize) -> usize {
 fn map_guarded_granules(phys_addr: usize, size_bytes: usize) {
     #[expect(
         clippy::expect_used,
-        reason = "khal::mem::init runs prepare_boot_memory, which initializes the guard granule, \
-                  before any device MMIO range is mapped"
+        reason = "CG-021-no-panic-on-reachable-failure: khal::mem::init runs prepare_boot_memory, \
+                  which initializes the guard granule, before any device MMIO range is mapped"
     )]
     let guard_granule_bytes = *GUARD_GRANULE_BYTES
         .get()

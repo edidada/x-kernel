@@ -29,8 +29,8 @@ pub unsafe fn load_vec_unsafe<T>(p: *const T, count: usize) -> MemResult<Vec<T>>
 
 #[expect(
     clippy::not_unsafe_ptr_arg_deref,
-    reason = "The provider checks the user range during copying and AnyBitPattern permits every \
-              copied representation"
+    reason = "CG-024-lint-exceptions: clippy::not_unsafe_ptr_arg_deref: The provider checks the \
+              user range during copying and AnyBitPattern permits every copied representation"
 )]
 /// Load a fixed-length vector from user memory.
 ///

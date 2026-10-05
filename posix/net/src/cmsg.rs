@@ -158,7 +158,8 @@ impl CMsg {
                 for fd in data.chunks_exact(size_of::<i32>()) {
                     #[expect(
                         clippy::unwrap_used,
-                        reason = "chunks_exact(size_of::<i32>()) yields exactly the four bytes \
+                        reason = "CG-021-no-panic-on-reachable-failure: \
+                                  chunks_exact(size_of::<i32>()) yields exactly the four bytes \
                                   required by i32::from_ne_bytes"
                     )]
                     let fd = i32::from_ne_bytes(fd.try_into().unwrap());

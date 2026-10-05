@@ -148,7 +148,8 @@ impl<T> ClassDevice<T> {
     pub fn driver_name(&self) -> &'static str {
         #[expect(
             clippy::expect_used,
-            reason = "Class-device publication validates the retained parent has a bound driver"
+            reason = "CG-021-no-panic-on-reachable-failure: Class-device publication validates \
+                      the retained parent has a bound driver"
         )]
         self.inner
             .parent
@@ -167,7 +168,8 @@ impl<T> ClassDevice<T> {
     pub fn driver_id(&self) -> DriverId {
         #[expect(
             clippy::expect_used,
-            reason = "Class-device publication validates the retained parent has a bound driver"
+            reason = "CG-021-no-panic-on-reachable-failure: Class-device publication validates \
+                      the retained parent has a bound driver"
         )]
         self.inner
             .parent

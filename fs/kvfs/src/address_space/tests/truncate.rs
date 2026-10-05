@@ -61,8 +61,8 @@ impl AddressSpaceOperations for PanicWritebackOps {
 
     #[expect(
         clippy::panic,
-        reason = "test scenario: ordinary writeback during final eviction is the regression this \
-                  address-space test reports"
+        reason = "CG-021-no-panic-on-reachable-failure: test scenario: ordinary writeback during \
+                  final eviction is the regression this address-space test reports"
     )]
     fn writepages(
         &self,

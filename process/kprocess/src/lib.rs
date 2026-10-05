@@ -47,8 +47,8 @@
 
 #![allow(
     clippy::expect_used,
-    reason = "case (b): legacy kprocess has 31 diagnostic sites, too many to judge individually \
-              in this migration; new code remains reviewed"
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): legacy kprocess has 31 diagnostic \
+              sites, too many to judge individually in this migration; new code remains reviewed"
 )]
 #![no_std]
 #![warn(missing_docs)]
@@ -212,8 +212,8 @@ pub fn publish_user_task(task: ktask::TaskInner) -> kerrno::KResult<PublishedUse
 /// preparation APIs to share an existing process's signal configuration.
 #[expect(
     clippy::too_many_arguments,
-    reason = "Thread construction binds process ownership, identity, kernel entry and user \
-              runtime state together"
+    reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Thread construction binds \
+              process ownership, identity, kernel entry and user runtime state together"
 )]
 pub fn build_process_thread(
     process: alloc::sync::Arc<Process>,
@@ -240,8 +240,8 @@ pub fn build_process_thread(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "Thread construction binds process ownership, identity, kernel entry and user \
-              runtime state together"
+    reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Thread construction binds \
+              process ownership, identity, kernel entry and user runtime state together"
 )]
 pub(crate) fn build_process_thread_with_config(
     process: alloc::sync::Arc<Process>,

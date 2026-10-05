@@ -26,9 +26,9 @@ pub(super) fn collect_from_boot_protocol(
         }
         #[expect(
             clippy::panic,
-            reason = "Fatal boot: the handoff selected the UEFI memory root without a UEFI boot \
-                      protocol, so RAM cannot be discovered; memory initialization has no error \
-                      return or recovery"
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the handoff selected the \
+                      UEFI memory root without a UEFI boot protocol, so RAM cannot be discovered; \
+                      memory initialization has no error return or recovery"
         )]
         _ => panic!("non-device-tree platform memory description is not initialized"),
     }

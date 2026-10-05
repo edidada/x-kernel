@@ -35,8 +35,9 @@ impl EmergencyTx {
         #[cfg(unittest)]
         #[expect(
             clippy::panic,
-            reason = "test scenario: the unittest-only Test port must never reach emergency \
-                      output; reaching it fails the test that wrote to it"
+            reason = "CG-021-no-panic-on-reachable-failure: test scenario: the unittest-only Test \
+                      port must never reach emergency output; reaching it fails the test that \
+                      wrote to it"
         )]
         if matches!(self, Self::Test) {
             panic!("unexpected emergency output on a test serial port");
@@ -60,8 +61,9 @@ impl EmergencyTx {
             #[cfg(unittest)]
             #[expect(
                 clippy::panic,
-                reason = "test scenario: the unittest-only Test port must never reach emergency \
-                          output; reaching it fails the test that wrote to it"
+                reason = "CG-021-no-panic-on-reachable-failure: test scenario: the unittest-only \
+                          Test port must never reach emergency output; reaching it fails the test \
+                          that wrote to it"
             )]
             Self::Test => panic!("unexpected emergency output on a test serial port"),
             #[cfg(feature = "pl011")]
@@ -88,8 +90,9 @@ impl EmergencyTx {
             #[cfg(unittest)]
             #[expect(
                 clippy::panic,
-                reason = "test scenario: the unittest-only Test port must never reach emergency \
-                          output; reaching it fails the test that wrote to it"
+                reason = "CG-021-no-panic-on-reachable-failure: test scenario: the unittest-only \
+                          Test port must never reach emergency output; reaching it fails the test \
+                          that wrote to it"
             )]
             Self::Test => panic!("unexpected emergency output on a test serial port"),
             #[cfg(feature = "pl011")]

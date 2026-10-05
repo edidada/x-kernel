@@ -37,8 +37,8 @@ pub static FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("cgroup2", i
 fn init_fs() {
     #[expect(
         clippy::expect_used,
-        reason = "Each statically named filesystem is registered once by its unique linker \
-                  initialization entry"
+        reason = "CG-021-no-panic-on-reachable-failure: Each statically named filesystem is \
+                  registered once by its unique linker initialization entry"
     )]
     kvfs::register_filesystem(&FILE_SYSTEM_TYPE)
         .expect("cgroup2 filesystem type must register once");
@@ -68,8 +68,8 @@ fn new_with_type(
         fs.set_private(state.clone());
         #[expect(
             clippy::expect_used,
-            reason = "The root materialization closure holds a strong filesystem reference, so \
-                      the stored Weak can upgrade"
+            reason = "CG-021-no-panic-on-reachable-failure: The root materialization closure \
+                      holds a strong filesystem reference, so the stored Weak can upgrade"
         )]
         let root = state
             .node(root.clone())

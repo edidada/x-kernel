@@ -273,8 +273,9 @@ impl<R: TtyRead, W: TtyWrite> TtyPort<R, W> {
                     });
                     #[expect(
                         clippy::expect_used,
-                        reason = "TTY work mode is constructed in sleepable task context after \
-                                  the permanent normal worker service is installed"
+                        reason = "CG-021-no-panic-on-reachable-failure: TTY work mode is \
+                                  constructed in sleepable task context after the permanent \
+                                  normal worker service is installed"
                     )]
                     let work =
                         WorkHandle::new(callback_fn).expect("TTY input requires normal workers");

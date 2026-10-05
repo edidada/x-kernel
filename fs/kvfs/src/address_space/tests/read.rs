@@ -125,7 +125,8 @@ impl IovSink for InvalidatingSink<'_> {
             if self.truncate {
                 #[expect(
                     clippy::unwrap_used,
-                    reason = "test scenario: the sink borrows the mapping of a live test inode"
+                    reason = "CG-021-no-panic-on-reachable-failure: test scenario: the sink \
+                              borrows the mapping of a live test inode"
                 )]
                 self.mapping.inode().unwrap().set_len(PAGE_SIZE_4K as u64)?;
             } else {
@@ -200,8 +201,8 @@ static READAHEAD_OPS: ReadaheadOps = ReadaheadOps;
 impl AddressSpaceOperations for ReadaheadOps {
     #[expect(
         clippy::panic,
-        reason = "test scenario: rereading a completed readahead page is the regression this mock \
-                  reports"
+        reason = "CG-021-no-panic-on-reachable-failure: test scenario: rereading a completed \
+                  readahead page is the regression this mock reports"
     )]
     fn read_folio(&self, mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
         // Initialize the isolated miss or retry the consumed, incomplete EOF page.
@@ -222,8 +223,8 @@ impl AddressSpaceOperations for ReadaheadOps {
 
     #[expect(
         clippy::panic,
-        reason = "test scenario: an unexpected readahead request is the regression this mock \
-                  reports"
+        reason = "CG-021-no-panic-on-reachable-failure: test scenario: an unexpected readahead \
+                  request is the regression this mock reports"
     )]
     fn readahead(&self, control: &mut crate::ReadaheadControl<'_, '_>) -> VfsResult<()> {
         assert!(control.mapping().invalidate_lock.try_write().is_none());
@@ -313,7 +314,8 @@ impl AddressSpaceOperations for GatedReadOps {
         use core::sync::atomic::Ordering;
         #[expect(
             clippy::unwrap_used,
-            reason = "test scenario: the gated mapping belongs to a live test inode"
+            reason = "CG-021-no-panic-on-reachable-failure: test scenario: the gated mapping \
+                      belongs to a live test inode"
         )]
         let inode = control.mapping().inode().unwrap();
         let gate = inode.private::<ReadGate>()?;
@@ -471,8 +473,8 @@ pub(crate) fn observe_readahead_run(mapping: &AddressSpace, run: &core::ops::Ran
         // Model a competing publisher after the missing-run hint was sampled.
         #[expect(
             clippy::panic,
-            reason = "test scenario: a resident first hinted page is the regression this observer \
-                      reports"
+            reason = "CG-021-no-panic-on-reachable-failure: test scenario: a resident first \
+                      hinted page is the regression this observer reports"
         )]
         mapping
             .i_pages
@@ -491,8 +493,8 @@ static CONFLICTED_READAHEAD_OPS: ReadaheadConflict = ReadaheadConflict;
 impl AddressSpaceOperations for ReadaheadConflict {
     #[expect(
         clippy::panic,
-        reason = "test scenario: a demand read of the remaining run is the regression this mock \
-                  reports"
+        reason = "CG-021-no-panic-on-reachable-failure: test scenario: a demand read of the \
+                  remaining run is the regression this mock reports"
     )]
     fn read_folio(&self, _mapping: &AddressSpace, _folio: &mut Folio) -> VfsResult<()> {
         panic!("the remaining run must be initialized by batch readahead");

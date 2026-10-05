@@ -106,8 +106,8 @@ impl<'a> LinuxFdt<'a> {
 
         #[expect(
             clippy::unwrap_used,
-            reason = "tmp_header contains size_of::<FdtHeader>() bytes and the parser only \
-                      consumes its ten u32 fields"
+            reason = "CG-021-no-panic-on-reachable-failure: tmp_header contains \
+                      size_of::<FdtHeader>() bytes and the parser only consumes its ten u32 fields"
         )]
         let real_size = FdtHeader::from_bytes(&mut FdtData::new(tmp_header))
             .unwrap()

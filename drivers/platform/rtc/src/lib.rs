@@ -215,8 +215,8 @@ pub fn read_from_device_tree() -> Option<SystemTime> {
         }
         #[expect(
             clippy::panic,
-            reason = "Device-tree discovery builds only MMIO RTC configurations, so no other \
-                      transport reaches this match"
+            reason = "CG-021-no-panic-on-reachable-failure: Device-tree discovery builds only \
+                      MMIO RTC configurations, so no other transport reaches this match"
         )]
         other => panic!("unsupported rtc configuration: {other:?}"),
     };
@@ -242,9 +242,10 @@ pub fn read(config: RtcConfig) -> Option<SystemTime> {
         (RtcKind::Ls7a, RtcTransport::MmioMapped { vaddr }) => ls7a::read_mapped(vaddr),
         #[expect(
             clippy::panic,
-            reason = "Each RtcConfig producer (device-tree discovery or a platform's static RTC \
-                      setup) is built with the matching backend feature, so an unmatched kind and \
-                      transport is a build-configuration error"
+            reason = "CG-021-no-panic-on-reachable-failure: Each RtcConfig producer (device-tree \
+                      discovery or a platform's static RTC setup) is built with the matching \
+                      backend feature, so an unmatched kind and transport is a \
+                      build-configuration error"
         )]
         (kind, transport) => {
             panic!("unsupported rtc configuration: kind={kind:?} transport={transport:?}");

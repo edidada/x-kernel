@@ -175,9 +175,10 @@ impl SlabHeap {
         };
         #[expect(
             clippy::panic,
-            reason = "TODO(cg): BaseAllocator::init_region returns (), so a misaligned or \
-                      undersized initial region cannot be reported; make init_region return \
-                      AllocResult like add_region and propagate the error"
+            reason = "CG-021-no-panic-on-reachable-failure: TODO(cg): BaseAllocator::init_region \
+                      returns (), so a misaligned or undersized initial region cannot be \
+                      reported; make init_region return AllocResult like add_region and propagate \
+                      the error"
         )]
         heap.buddy.init_region(start, size).unwrap_or_else(|e| {
             panic!(

@@ -45,9 +45,9 @@ pub(crate) fn default_write_fmt<W: Write + ?Sized>(
         Ok(()) => Ok(()),
         #[expect(
             clippy::panic,
-            reason = "fmt::write fails without a stream error only if a formatting trait impl \
-                      returns Err spuriously, which violates the fmt contract; std's write_fmt \
-                      panics likewise"
+            reason = "CG-021-no-panic-on-reachable-failure: fmt::write fails without a stream \
+                      error only if a formatting trait impl returns Err spuriously, which \
+                      violates the fmt contract; std's write_fmt panics likewise"
         )]
         Err(..) => {
             if output.error.is_err() {

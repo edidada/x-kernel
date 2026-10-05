@@ -1043,7 +1043,8 @@ impl VmAreaSet {
         not(unittest),
         expect(
             dead_code,
-            reason = "production merge call sites need runtime/view lifecycle updates"
+            reason = "CG-024-lint-exceptions: dead_code: production merge call sites need \
+                      runtime/view lifecycle updates"
         )
     )]
     pub(crate) fn merge_adjacent(&mut self, start: VirtAddr) -> Option<VirtAddr> {
@@ -1068,8 +1069,8 @@ impl VmAreaSet {
             {
                 #[expect(
                     clippy::unwrap_used,
-                    reason = "before_start came from this map and no entry was removed before \
-                              acquiring its mutable reference"
+                    reason = "CG-021-no-panic-on-reachable-failure: before_start came from this \
+                              map and no entry was removed before acquiring its mutable reference"
                 )]
                 let before = self.areas.get_mut(&before_start).unwrap();
                 let before_end = before.end();
@@ -1095,14 +1096,15 @@ impl VmAreaSet {
         if let Some(after_start) = after_key {
             #[expect(
                 clippy::unwrap_used,
-                reason = "after_start was just obtained from this map with no intervening mutation"
+                reason = "CG-021-no-panic-on-reachable-failure: after_start was just obtained \
+                          from this map with no intervening mutation"
             )]
             let after_end = self.areas.get(&after_start).unwrap().end();
             if after_start < end {
                 #[expect(
                     clippy::unwrap_used,
-                    reason = "after_start was just found in this map and the shared lookup cannot \
-                              remove it"
+                    reason = "CG-021-no-panic-on-reachable-failure: after_start was just found in \
+                              this map and the shared lookup cannot remove it"
                 )]
                 let mut new_area = self.areas.remove(&after_start).unwrap();
                 let delta_pages = ((end - after_start) / PAGE_SIZE_4K) as u64;
@@ -1135,7 +1137,8 @@ impl VmAreaSet {
             } else if area_start < start && area_end > end {
                 #[expect(
                     clippy::unwrap_used,
-                    reason = "the overlap branches prove end lies strictly inside this VMA"
+                    reason = "CG-021-no-panic-on-reachable-failure: the overlap branches prove \
+                              end lies strictly inside this VMA"
                 )]
                 let right = area.split(end).unwrap();
                 area.set_end(start);
@@ -1156,7 +1159,8 @@ impl VmAreaSet {
             } else if area_end > end {
                 #[expect(
                     clippy::unwrap_used,
-                    reason = "the overlap branches prove end lies strictly inside this VMA"
+                    reason = "CG-021-no-panic-on-reachable-failure: the overlap branches prove \
+                              end lies strictly inside this VMA"
                 )]
                 let right = area.split(end).unwrap();
                 area.set_flags(new_flags);
@@ -1164,8 +1168,8 @@ impl VmAreaSet {
             } else {
                 #[expect(
                     clippy::unwrap_used,
-                    reason = "the preceding overlap branches leave only a VMA with start strictly \
-                              inside its range"
+                    reason = "CG-021-no-panic-on-reachable-failure: the preceding overlap \
+                              branches leave only a VMA with start strictly inside its range"
                 )]
                 let mut right = area.split(start).unwrap();
                 right.set_flags(new_flags);

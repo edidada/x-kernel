@@ -4,8 +4,8 @@
 
 #![allow(
     clippy::unwrap_used,
-    reason = "case (a): this host build script intentionally fails the build when Cargo does not \
-              supply CARGO_CFG_TARGET_ARCH"
+    reason = "CG-021-no-panic-on-reachable-failure: case (a): this host build script \
+              intentionally fails the build when Cargo does not supply CARGO_CFG_TARGET_ARCH"
 )]
 
 fn main() {

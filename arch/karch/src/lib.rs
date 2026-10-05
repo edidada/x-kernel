@@ -31,13 +31,13 @@ impl IcacheFlushIf {
 #[inline]
 #[expect(
     clippy::allow_attributes,
-    reason = "Remote instruction-cache flush is called only by architectures that require \
-              explicit broadcast"
+    reason = "CG-024-lint-exceptions: Remote instruction-cache flush is called only by \
+              architectures that require explicit broadcast"
 )]
 #[allow(
     dead_code,
-    reason = "Remote instruction-cache flush is called only by architectures that require \
-              explicit broadcast"
+    reason = "CG-024-lint-exceptions: dead_code: Remote instruction-cache flush is called only by \
+              architectures that require explicit broadcast"
 )]
 pub(crate) fn flush_icache_others() {
     crate::IcacheFlushIf::flush_others();

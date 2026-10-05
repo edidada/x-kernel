@@ -43,8 +43,9 @@ pub(crate) fn ioport_addr() -> Option<u16> {
     Some({
         #[expect(
             clippy::expect_used,
-            reason = "Fatal boot: the configured early UART address is absent or invalid; \
-                      boot-console access has no error return or recovery"
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the configured early UART \
+                      address is absent or invalid; boot-console access has no error return or \
+                      recovery"
         )]
         u16::try_from(kbuild_config::BOOT_CONSOLE_ADDR)
             .expect("boot console ioport must fit in u16")

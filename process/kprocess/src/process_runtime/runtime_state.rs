@@ -48,11 +48,13 @@ struct ProcessTimers {
 pub(crate) struct ExitAddressSpace {
     #[expect(
         clippy::allow_attributes,
-        reason = "owns the exit snapshot pin until Drop; inspected only by unittest observers"
+        reason = "CG-024-lint-exceptions: owns the exit snapshot pin until Drop; inspected only \
+                  by unittest observers"
     )]
     #[allow(
         dead_code,
-        reason = "owns the exit snapshot pin until Drop; inspected only by unittest observers"
+        reason = "CG-024-lint-exceptions: dead_code: owns the exit snapshot pin until Drop; \
+                  inspected only by unittest observers"
     )]
     mm_pin: MmPin,
     mm_cpu_residency: MmCpuResidencyRef,

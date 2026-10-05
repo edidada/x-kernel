@@ -76,13 +76,13 @@ unsafe impl Sync for SecondaryBootStacks {}
 /// run queue, panicking in `RUN_QUEUES.get().expect()`.
 #[expect(
     clippy::allow_attributes,
-    reason = "The CPU loop bound is generated from NR_CPUS and can be one in a uniprocessor \
-              configuration"
+    reason = "CG-024-lint-exceptions: The CPU loop bound is generated from NR_CPUS and can be one \
+              in a uniprocessor configuration"
 )]
 #[allow(
     clippy::absurd_extreme_comparisons,
-    reason = "The CPU loop bound is generated from NR_CPUS and can be one in a uniprocessor \
-              configuration"
+    reason = "CG-024-lint-exceptions: clippy::absurd_extreme_comparisons: The CPU loop bound is \
+              generated from NR_CPUS and can be one in a uniprocessor configuration"
 )]
 pub(crate) fn start_secondary_cpus(primary_cpu_id: LogicalCpuId) -> KResult {
     let mut secondary_logical_cpu_id = 0;

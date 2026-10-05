@@ -77,11 +77,13 @@ pub(crate) struct Connection {
     /// True for connections owned by the vsock-TIPC bridge.
     #[expect(
         clippy::allow_attributes,
-        reason = "Bridge ownership is inspected only with the vsock_tipc_bridge feature"
+        reason = "CG-024-lint-exceptions: Bridge ownership is inspected only with the \
+                  vsock_tipc_bridge feature"
     )]
     #[allow(
         dead_code,
-        reason = "Bridge ownership is inspected only with the vsock_tipc_bridge feature"
+        reason = "CG-024-lint-exceptions: dead_code: Bridge ownership is inspected only with the \
+                  vsock_tipc_bridge feature"
     )]
     is_bridge: bool,
     /// `fwd_cnt` value included in the last credit update we sent to the peer.
@@ -536,7 +538,8 @@ impl VsockConnectionManager {
 
     #[expect(
         clippy::too_many_lines,
-        reason = "TODO(cg): legacy vsock event handler; split per event type"
+        reason = "CG-028-focused-functions: TODO(cg): legacy vsock event handler; split per event \
+                  type"
     )]
     fn handle_raw_event(&mut self, event: VsockTransportEvent, body: &[u8]) -> DriverResult<()> {
         let conn_id = VsockConnId {

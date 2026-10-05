@@ -11,8 +11,8 @@
 
 #![allow(
     clippy::expect_used,
-    reason = "case (a): missing Cargo environment or unwritable symbol output must terminate this \
-              host build script"
+    reason = "CG-021-no-panic-on-reachable-failure: case (a): missing Cargo environment or \
+              unwritable symbol output must terminate this host build script"
 )]
 
 use std::{env, fs, path::Path};

@@ -224,8 +224,9 @@ impl ProcessRuntime {
     /// Creates a new [`ProcessRuntime`] with an explicit [`NsProxy`].
     #[expect(
         clippy::too_many_arguments,
-        reason = "Construct one process runtime from its executable, address space, descriptor \
-                  table and namespace owners"
+        reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Construct one process \
+                  runtime from its executable, address space, descriptor table and namespace \
+                  owners"
     )]
     pub(crate) fn new_with_nsproxy(
         process: Arc<Process>,
@@ -253,8 +254,9 @@ impl ProcessRuntime {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "Construct one process runtime from its executable, address space, descriptor \
-                  table and namespace owners"
+        reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Construct one process \
+                  runtime from its executable, address space, descriptor table and namespace \
+                  owners"
     )]
     fn new_with_nsproxy_and_mm_user(
         process: Arc<Process>,

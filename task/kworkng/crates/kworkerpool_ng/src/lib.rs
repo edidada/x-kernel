@@ -44,14 +44,16 @@
 
 #![allow(
     clippy::expect_used,
-    reason = "case (b): legacy kworkerpool_ng has 12 diagnostic sites, too many to judge \
-              individually in this migration; new code remains reviewed"
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): legacy kworkerpool_ng has 12 \
+              diagnostic sites, too many to judge individually in this migration; new code \
+              remains reviewed"
 )]
 #![no_std]
 #![allow(
     clippy::unwrap_used,
-    reason = "case (b): 19 legacy diagnostic sites need individual failure-contract review; new \
-              code remains subject to the no-legitimate-failure-panic rule"
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): 19 legacy diagnostic sites need \
+              individual failure-contract review; new code remains subject to the \
+              no-legitimate-failure-panic rule"
 )]
 
 extern crate alloc;

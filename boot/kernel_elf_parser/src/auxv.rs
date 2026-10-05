@@ -11,12 +11,14 @@ use zerocopy::{Immutable, IntoBytes};
 #[derive(Clone, Copy, PartialEq, Eq, IntoBytes, Immutable)]
 #[expect(
     non_camel_case_types,
-    reason = "Preserve Linux AT_* auxiliary-vector names, including underscore-separated variants"
+    reason = "CG-032-camel-case-types: Preserve Linux AT_* auxiliary-vector names, including \
+              underscore-separated variants"
 )]
 #[repr(usize)]
 #[expect(
     clippy::upper_case_acronyms,
-    reason = "variant names preserve Linux AT_* auxiliary-vector ABI terminology"
+    reason = "CG-032-camel-case-types: variant names preserve Linux AT_* auxiliary-vector ABI \
+              terminology"
 )]
 pub enum AuxType {
     /// End of vector

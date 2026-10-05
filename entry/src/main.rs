@@ -115,8 +115,8 @@ fn kernel_main() {
 #[cfg(feature = "unittest")]
 #[expect(
     clippy::too_many_lines,
-    reason = "TODO(cg): legacy: split stale coverage cleanup, serial and parallel test execution, \
-              result reporting and coverage export into helpers"
+    reason = "CG-028-focused-functions: TODO(cg): legacy: split stale coverage cleanup, serial \
+              and parallel test execution, result reporting and coverage export into helpers"
 )]
 fn kernel_main() {
     use alloc::{sync::Arc, vec::Vec};

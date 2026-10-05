@@ -255,8 +255,8 @@ impl MappingPages {
     /// their writeback completes only after the callback returns.
     #[expect(
         clippy::too_many_lines,
-        reason = "TODO(cg): legacy writeback batch loop; split collection, submission and \
-                  completion, preserving lock order"
+        reason = "CG-028-focused-functions: TODO(cg): legacy writeback batch loop; split \
+                  collection, submission and completion, preserving lock order"
     )]
     pub fn write_cache_pages(
         &self,

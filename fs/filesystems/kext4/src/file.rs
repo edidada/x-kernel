@@ -632,7 +632,8 @@ impl Ext4SbInfo {
                 Err(error) => {
                     #[expect(
                         clippy::expect_used,
-                        reason = "complete_metadata_mutation preserves the supplied operation \
+                        reason = "CG-021-no-panic-on-reachable-failure: \
+                                  complete_metadata_mutation preserves the supplied operation \
                                   error even when transaction completion also fails"
                     )]
                     let error = self

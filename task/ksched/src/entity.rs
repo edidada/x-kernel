@@ -232,7 +232,8 @@ impl<T> SchedTask<T> {
     /// Returns the first [`SchedAttr::validate`] failure.
     #[expect(
         dead_code,
-        reason = "ktask still publishes tasks through the plugin schedulers"
+        reason = "CG-024-lint-exceptions: dead_code: ktask still publishes tasks through the \
+                  plugin schedulers"
     )]
     pub(crate) fn init_attr_unpublished(&self, attr: SchedAttr) -> Result<(), SchedError> {
         attr.validate()?;

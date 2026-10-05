@@ -62,7 +62,8 @@ impl PciTransport {
             not(target_arch = "x86_64"),
             expect(
                 unused_variables,
-                reason = "MSI-X transport setup is implemented only on x86_64"
+                reason = "CG-024-lint-exceptions: unused_variables: MSI-X transport setup is \
+                          implemented only on x86_64"
             )
         )]
         msix: PciMsixStateOption,

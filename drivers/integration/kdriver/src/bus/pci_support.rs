@@ -25,8 +25,8 @@ fn pci_bar_allocator() -> SpinNoPreemptGuard<'static, Option<pci::PciRangeAlloca
     });
     #[expect(
         clippy::expect_used,
-        reason = "call_once completed successfully and permanently published the PCI BAR \
-                  allocator slot"
+        reason = "CG-021-no-panic-on-reachable-failure: call_once completed successfully and \
+                  permanently published the PCI BAR allocator slot"
     )]
     PCI_BAR_ALLOCATOR
         .get()

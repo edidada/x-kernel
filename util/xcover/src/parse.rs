@@ -191,7 +191,7 @@ pub(crate) struct ParsedProfraw {
 #[cfg(feature = "alloc")]
 #[expect(
     clippy::too_many_lines,
-    reason = "TODO(cg): legacy profraw parser; split per input section"
+    reason = "CG-028-focused-functions: TODO(cg): legacy profraw parser; split per input section"
 )]
 pub(crate) fn parse_profraw(bytes: &[u8]) -> Result<ParsedProfraw, ProfileError> {
     let header = RawHeader::parse(bytes).ok_or(ProfileError::MalformedInput)?;

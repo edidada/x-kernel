@@ -69,8 +69,8 @@ impl TryRng for GlobalSoftwareRng {
         let mut bytes = [0u8; 4];
         #[expect(
             clippy::expect_used,
-            reason = "crypto_rng_read fills from the kernel entropy pool and unconditionally \
-                      returns Ok"
+            reason = "CG-021-no-panic-on-reachable-failure: crypto_rng_read fills from the kernel \
+                      entropy pool and unconditionally returns Ok"
         )]
         crypto_rng_read(&mut bytes).expect("global RNG failure");
         Ok(u32::from_le_bytes(bytes))
@@ -80,8 +80,8 @@ impl TryRng for GlobalSoftwareRng {
         let mut bytes = [0u8; 8];
         #[expect(
             clippy::expect_used,
-            reason = "crypto_rng_read fills from the kernel entropy pool and unconditionally \
-                      returns Ok"
+            reason = "CG-021-no-panic-on-reachable-failure: crypto_rng_read fills from the kernel \
+                      entropy pool and unconditionally returns Ok"
         )]
         crypto_rng_read(&mut bytes).expect("global RNG failure");
         Ok(u64::from_le_bytes(bytes))
@@ -90,8 +90,8 @@ impl TryRng for GlobalSoftwareRng {
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
         #[expect(
             clippy::expect_used,
-            reason = "crypto_rng_read fills from the kernel entropy pool and unconditionally \
-                      returns Ok"
+            reason = "CG-021-no-panic-on-reachable-failure: crypto_rng_read fills from the kernel \
+                      entropy pool and unconditionally returns Ok"
         )]
         crypto_rng_read(dest).expect("global RNG failure");
         Ok(())

@@ -204,16 +204,16 @@ impl<'a> NodeProperty<'a> {
     fn parse(stream: &mut FdtData<'a>, header: &LinuxFdt<'a>) -> Self {
         #[expect(
             clippy::expect_used,
-            reason = "LinuxFdt construction validates every property header, string offset and \
-                      node name before traversal"
+            reason = "CG-021-no-panic-on-reachable-failure: LinuxFdt construction validates every \
+                      property header, string offset and node name before traversal"
         )]
         let tag = stream.u32().expect("FDT property tag").get();
         assert_eq!(tag, FDT_PROP, "bad prop, tag: {}", tag);
 
         #[expect(
             clippy::expect_used,
-            reason = "LinuxFdt construction validates every property header, string offset and \
-                      node name before traversal"
+            reason = "CG-021-no-panic-on-reachable-failure: LinuxFdt construction validates every \
+                      property header, string offset and node name before traversal"
         )]
         let prop = FdtProperty::from_bytes(stream).expect("FDT property");
         let data_len = prop.len.get() as usize;
@@ -224,8 +224,9 @@ impl<'a> NodeProperty<'a> {
             name: {
                 #[expect(
                     clippy::expect_used,
-                    reason = "LinuxFdt construction validates every property header, string \
-                              offset and node name before traversal"
+                    reason = "CG-021-no-panic-on-reachable-failure: LinuxFdt construction \
+                              validates every property header, string offset and node name before \
+                              traversal"
                 )]
                 header
                     .string_at_offset(prop.name_offset.get() as usize)
@@ -466,18 +467,20 @@ pub(crate) fn memory_regions<'b, 'a: 'b>(
 pub(crate) fn skip_current_node<'a>(stream: &mut FdtData<'a>, header: &LinuxFdt<'a>) {
     #[expect(
         clippy::unwrap_used,
-        reason = "constructor validation proves this node has a complete BEGIN_NODE token"
+        reason = "CG-021-no-panic-on-reachable-failure: constructor validation proves this node \
+                  has a complete BEGIN_NODE token"
     )]
     let tag = stream.u32().unwrap().get();
     assert_eq!(tag, FDT_BEGIN_NODE, "bad node");
     #[expect(
         clippy::unwrap_used,
-        reason = "constructor validation proves every node name is NUL-terminated UTF-8"
+        reason = "CG-021-no-panic-on-reachable-failure: constructor validation proves every node \
+                  name is NUL-terminated UTF-8"
     )]
     #[expect(
         clippy::expect_used,
-        reason = "LinuxFdt construction validates every property header, string offset and node \
-                  name before traversal"
+        reason = "CG-021-no-panic-on-reachable-failure: LinuxFdt construction validates every \
+                  property header, string offset and node name before traversal"
     )]
     let unit_name = CStr::new(stream.remaining())
         .expect("unit_name C str")
@@ -488,7 +491,8 @@ pub(crate) fn skip_current_node<'a>(stream: &mut FdtData<'a>, header: &LinuxFdt<
     stream.skip_nops();
     #[expect(
         clippy::unwrap_used,
-        reason = "validated property records and balanced nodes always leave a following token"
+        reason = "CG-021-no-panic-on-reachable-failure: validated property records and balanced \
+                  nodes always leave a following token"
     )]
     while stream.peek_u32().unwrap().get() == FDT_PROP {
         NodeProperty::parse(stream, header);
@@ -498,8 +502,8 @@ pub(crate) fn skip_current_node<'a>(stream: &mut FdtData<'a>, header: &LinuxFdt<
         stream.skip_nops();
         #[expect(
             clippy::unwrap_used,
-            reason = "constructor validation proves a token follows each property or completed \
-                      child"
+            reason = "CG-021-no-panic-on-reachable-failure: constructor validation proves a token \
+                      follows each property or completed child"
         )]
         let next = stream.peek_u32().unwrap().get();
         if next != FDT_BEGIN_NODE {
@@ -510,7 +514,8 @@ pub(crate) fn skip_current_node<'a>(stream: &mut FdtData<'a>, header: &LinuxFdt<
     stream.skip_nops();
     #[expect(
         clippy::unwrap_used,
-        reason = "constructor validation balances every BEGIN_NODE with a complete END_NODE token"
+        reason = "CG-021-no-panic-on-reachable-failure: constructor validation balances every \
+                  BEGIN_NODE with a complete END_NODE token"
     )]
     let tag = stream.u32().unwrap().get();
     assert_eq!(tag, FDT_END_NODE, "bad node");

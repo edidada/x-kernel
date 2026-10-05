@@ -73,8 +73,9 @@ pub trait AddrOps: Copy + From<usize> + Into<usize> + Ord {
         let base: usize = self.into();
         #[expect(
             clippy::expect_used,
-            reason = "Non-wrapping address arithmetic requires in-range ordered operands; \
-                      fallible callers use the checked variants"
+            reason = "CG-021-no-panic-on-reachable-failure: Non-wrapping address arithmetic \
+                      requires in-range ordered operands; fallible callers use the checked \
+                      variants"
         )]
         let next =
             usize::checked_add_signed(base, delta).expect("overflow in `AddrOps::offset_signed`");
@@ -92,8 +93,9 @@ pub trait AddrOps: Copy + From<usize> + Into<usize> + Ord {
                   not used"]
     #[expect(
         clippy::panic,
-        reason = "Addresses in one mapped range differ by less than isize::MAX; an overflowing \
-                  delta is a caller bug like an integer overflow"
+        reason = "CG-021-no-panic-on-reachable-failure: Addresses in one mapped range differ by \
+                  less than isize::MAX; an overflowing delta is a caller bug like an integer \
+                  overflow"
     )]
     fn delta_from(self, base: Self) -> isize {
         let current: usize = self.into();
@@ -115,8 +117,9 @@ pub trait AddrOps: Copy + From<usize> + Into<usize> + Ord {
     fn add_usize(self, rhs: usize) -> Self {
         #[expect(
             clippy::expect_used,
-            reason = "Non-wrapping address arithmetic requires in-range ordered operands; \
-                      fallible callers use the checked variants"
+            reason = "CG-021-no-panic-on-reachable-failure: Non-wrapping address arithmetic \
+                      requires in-range ordered operands; fallible callers use the checked \
+                      variants"
         )]
         let sum = usize::checked_add(self.into(), rhs).expect("overflow in `AddrOps::add_usize`");
         Self::from(sum)
@@ -146,8 +149,9 @@ pub trait AddrOps: Copy + From<usize> + Into<usize> + Ord {
     fn sub_usize(self, rhs: usize) -> Self {
         #[expect(
             clippy::expect_used,
-            reason = "Non-wrapping address arithmetic requires in-range ordered operands; \
-                      fallible callers use the checked variants"
+            reason = "CG-021-no-panic-on-reachable-failure: Non-wrapping address arithmetic \
+                      requires in-range ordered operands; fallible callers use the checked \
+                      variants"
         )]
         let value = usize::checked_sub(self.into(), rhs).expect("overflow in `AddrOps::sub_usize`");
         Self::from(value)
@@ -178,8 +182,9 @@ pub trait AddrOps: Copy + From<usize> + Into<usize> + Ord {
     fn diff(self, rhs: Self) -> usize {
         #[expect(
             clippy::expect_used,
-            reason = "Non-wrapping address arithmetic requires in-range ordered operands; \
-                      fallible callers use the checked variants"
+            reason = "CG-021-no-panic-on-reachable-failure: Non-wrapping address arithmetic \
+                      requires in-range ordered operands; fallible callers use the checked \
+                      variants"
         )]
         usize::checked_sub(self.into(), rhs.into()).expect("overflow in `AddrOps::diff`")
     }

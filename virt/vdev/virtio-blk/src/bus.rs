@@ -150,8 +150,8 @@ impl VirtioBlkDevice {
         // state rather than a recoverable runtime error.
         #[expect(
             clippy::expect_used,
-            reason = "VirtioMmioBlockDevice::new fails only on queue-size validation, and the \
-                      default 256-entry queues are valid"
+            reason = "CG-021-no-panic-on-reachable-failure: VirtioMmioBlockDevice::new fails only \
+                      on queue-size validation, and the default 256-entry queues are valid"
         )]
         let model = Arc::new(
             VirtioMmioBlockDevice::new(

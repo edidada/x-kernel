@@ -70,11 +70,13 @@ pub(super) struct IrqAction {
     flags: IrqActionFlags,
     #[expect(
         clippy::allow_attributes,
-        reason = "Action names are read by unittest until named handler registration is exposed"
+        reason = "CG-024-lint-exceptions: Action names are read by unittest until named handler \
+                  registration is exposed"
     )]
     #[allow(
         dead_code,
-        reason = "Action names are read by unittest until named handler registration is exposed"
+        reason = "CG-024-lint-exceptions: dead_code: Action names are read by unittest until \
+                  named handler registration is exposed"
     )]
     name: Option<&'static str>,
 }
@@ -177,13 +179,13 @@ pub(super) enum IrqActionReturn {
     /// real thread slot and scheduler handoff.
     #[expect(
         clippy::allow_attributes,
-        reason = "Only unittest constructs this variant until threaded IRQ registration is \
-                  implemented"
+        reason = "CG-024-lint-exceptions: Only unittest constructs this variant until threaded \
+                  IRQ registration is implemented"
     )]
     #[allow(
         dead_code,
-        reason = "Only unittest constructs this variant until threaded IRQ registration is \
-                  implemented"
+        reason = "CG-024-lint-exceptions: dead_code: Only unittest constructs this variant until \
+                  threaded IRQ registration is implemented"
     )]
     WakeThread { sources: u8 },
 }

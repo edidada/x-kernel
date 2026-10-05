@@ -69,8 +69,8 @@ pub fn spawn_init_process(
         .expect("init spawn requires a non-empty args vector with the exe path");
     #[expect(
         clippy::panic,
-        reason = "Fatal boot: the configured PID 1 executable cannot be resolved; init spawning \
-                  has no error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the configured PID 1 \
+                  executable cannot be resolved; init spawning has no error return or recovery"
     )]
     let binprm = ExecRequest::from_path(
         init_path.clone(),
@@ -91,8 +91,8 @@ pub fn spawn_init_process(
     // destructive exec commitment or current-user-runtime requirement.
     #[expect(
         clippy::panic,
-        reason = "Fatal boot: the PID 1 executable image cannot be prepared; init spawning has no \
-                  error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the PID 1 executable image \
+                  cannot be prepared; init spawning has no error return or recovery"
     )]
     let prepared = prepare_user_app_request(ExecRequest::from_resolved(
         binprm.location().clone(),
@@ -103,8 +103,8 @@ pub fn spawn_init_process(
     .unwrap_or_else(|e| panic!("Failed to prepare init image: {e}"));
     #[expect(
         clippy::panic,
-        reason = "Fatal boot: the PID 1 image cannot be loaded into its address space; init \
-                  spawning has no error return or recovery"
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the PID 1 image cannot be \
+                  loaded into its address space; init spawning has no error return or recovery"
     )]
     let (entry_vaddr, ustack_top) = load_prepared_user_app(&mut uspace, prepared)
         .unwrap_or_else(|e| panic!("Failed to load init image: {e}"));

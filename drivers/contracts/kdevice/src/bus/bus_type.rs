@@ -167,8 +167,9 @@ impl BusTypeObject {
     /// and platform are built in).
     #[expect(
         clippy::panic,
-        reason = "Callers pass a built-in BusTypeId constant (PCI or PLATFORM); other bus types \
-                  are created with new() and their own matcher, as the Panics section documents"
+        reason = "CG-021-no-panic-on-reachable-failure: Callers pass a built-in BusTypeId \
+                  constant (PCI or PLATFORM); other bus types are created with new() and their \
+                  own matcher, as the Panics section documents"
     )]
     pub fn new_builtin(id: BusTypeId) -> Self {
         if id == BusTypeId::PCI {

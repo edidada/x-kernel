@@ -2425,7 +2425,7 @@ pub(super) fn tee_svc_obj_generate_key_ed25519(
 /// Returns a `TeeResult` indicating success or failure.
 #[expect(
     clippy::too_many_lines,
-    reason = "TODO(cg): legacy key generation; split per key type"
+    reason = "CG-028-focused-functions: TODO(cg): legacy key generation; split per key type"
 )]
 pub(super) fn syscall_obj_generate_key(
     obj: c_ulong,
@@ -2531,8 +2531,8 @@ pub(super) fn syscall_obj_generate_key(
         }
         #[expect(
             clippy::todo,
-            reason = "TODO(cg): DSA key-pair generation is not implemented; the mbedtls backend \
-                      provides no DSA key generation"
+            reason = "CG-023-unfinished-implementations: TODO(cg): DSA key-pair generation is not \
+                      implemented; the mbedtls backend provides no DSA key generation"
         )]
         TEE_TYPE_DSA_KEYPAIR => {
             // mbedtls do not support DSA key generation
@@ -2540,8 +2540,8 @@ pub(super) fn syscall_obj_generate_key(
         }
         #[expect(
             clippy::todo,
-            reason = "TODO(cg): DH key-pair generation is not implemented; the mbedtls backend \
-                      provides no DH key generation"
+            reason = "CG-023-unfinished-implementations: TODO(cg): DH key-pair generation is not \
+                      implemented; the mbedtls backend provides no DH key generation"
         )]
         TEE_TYPE_DH_KEYPAIR => {
             // mbedtls do not support DH key generation
@@ -2562,14 +2562,16 @@ pub(super) fn syscall_obj_generate_key(
         }
         #[expect(
             clippy::todo,
-            reason = "TODO(cg): X25519 key-pair generation is not implemented"
+            reason = "CG-023-unfinished-implementations: TODO(cg): X25519 key-pair generation is \
+                      not implemented"
         )]
         TEE_TYPE_X25519_KEYPAIR => {
             todo!()
         }
         #[expect(
             clippy::todo,
-            reason = "TODO(cg): X448 key-pair generation is not implemented"
+            reason = "CG-023-unfinished-implementations: TODO(cg): X448 key-pair generation is \
+                      not implemented"
         )]
         TEE_TYPE_X448_KEYPAIR => {
             todo!()
@@ -2617,8 +2619,8 @@ fn long2byte(value: u64, ch: &mut [u8]) -> u32 {
 #[cfg(unittest)]
 #[expect(
     clippy::panic,
-    reason = "test scenario: unittest-only helper that rejects a value-attribute id passed as a \
-              reference attribute"
+    reason = "CG-021-no-panic-on-reachable-failure: test scenario: unittest-only helper that \
+              rejects a value-attribute id passed as a reference attribute"
 )]
 pub(crate) fn tee_init_ref_attribute(
     attr: &mut utee_attribute,

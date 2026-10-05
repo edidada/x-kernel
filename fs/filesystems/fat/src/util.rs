@@ -38,7 +38,8 @@ fn unix_to_dos(datetime: SystemTime) -> fatfs::DateTime {
 
     #[expect(
         clippy::expect_used,
-        reason = "clamp_fat_timestamp limits the value to the FAT range, which chrono represents"
+        reason = "CG-021-no-panic-on-reachable-failure: clamp_fat_timestamp limits the value to \
+                  the FAT range, which chrono represents"
     )]
     let dt = DateTime::from_timestamp(datetime.unix_seconds(), datetime.subsec_nanos())
         .expect("clamped FAT timestamp is representable by chrono");
@@ -106,14 +107,16 @@ pub(crate) fn update_file_metadata(file: &mut ff::File, update: MetadataUpdate) 
     if let Some(atime) = applied.atime {
         #[expect(
             deprecated,
-            reason = "fatfs has no non-deprecated setter for explicit utimens access dates"
+            reason = "CG-024-lint-exceptions: deprecated: fatfs has no non-deprecated setter for \
+                      explicit utimens access dates"
         )]
         file.set_accessed(unix_to_dos(atime).date);
     }
     if let Some(mtime) = applied.mtime {
         #[expect(
             deprecated,
-            reason = "fatfs has no non-deprecated setter for explicit utimens modification times"
+            reason = "CG-024-lint-exceptions: deprecated: fatfs has no non-deprecated setter for \
+                      explicit utimens modification times"
         )]
         file.set_modified(unix_to_dos(mtime));
     }

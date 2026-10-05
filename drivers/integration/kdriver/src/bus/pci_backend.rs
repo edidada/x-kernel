@@ -124,7 +124,8 @@ struct BridgeEntry {
     /// enumeration and range validation.
     #[expect(
         dead_code,
-        reason = "Retain the discovered subordinate bus bound for bridge-range validation"
+        reason = "CG-024-lint-exceptions: dead_code: Retain the discovered subordinate bus bound \
+                  for bridge-range validation"
     )]
     subordinate_bus: u8,
 }
@@ -157,8 +158,8 @@ impl BusBackend for PciBackend {
 
     #[expect(
         clippy::too_many_lines,
-        reason = "TODO(cg): legacy PCI enumeration; split bus scan, BAR allocation and device \
-                  registration"
+        reason = "CG-028-focused-functions: TODO(cg): legacy PCI enumeration; split bus scan, BAR \
+                  allocation and device registration"
     )]
     fn enumerate(&mut self, context: &mut EnumerationContext, bus_id: BusId) -> DriverResult {
         let mut bus = match PciBus::new(self.cam) {

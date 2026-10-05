@@ -83,8 +83,9 @@ impl PartitionDispatchState {
             Self::InspectingNotified => true,
             #[expect(
                 clippy::panic,
-                reason = "Callers finish only a turn started by begin_inspection, and notices or \
-                          detach keep that turn in an inspecting state"
+                reason = "CG-021-no-panic-on-reachable-failure: Callers finish only a turn \
+                          started by begin_inspection, and notices or detach keep that turn in an \
+                          inspecting state"
             )]
             _ => panic!("source has no selection to finish"),
         };

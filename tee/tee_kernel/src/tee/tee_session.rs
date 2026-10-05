@@ -348,7 +348,8 @@ where
     let process = kprocess::current_user_process();
     #[expect(
         clippy::expect_used,
-        reason = "A running TEE user session retains its live process TEE context during the call"
+        reason = "CG-021-no-panic-on-reachable-failure: A running TEE user session retains its \
+                  live process TEE context during the call"
     )]
     process
         .with_tee_ta_ctx_mut(f)
@@ -371,7 +372,8 @@ where
     let process = kprocess::current_user_process();
     #[expect(
         clippy::expect_used,
-        reason = "A running TEE user session retains its live process TEE context during the call"
+        reason = "CG-021-no-panic-on-reachable-failure: A running TEE user session retains its \
+                  live process TEE context during the call"
     )]
     process
         .with_tee_ta_ctx(f)

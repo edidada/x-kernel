@@ -30,8 +30,8 @@ use crate::{FMode, VfsFile, pipe::PipeObject};
 /// pipe-readiness wait.
 #[expect(
     clippy::too_many_lines,
-    reason = "TODO(cg): legacy file transfer; split position-lock setup, the per-chunk copy step \
-              and position write-back"
+    reason = "CG-028-focused-functions: TODO(cg): legacy file transfer; split position-lock \
+              setup, the per-chunk copy step and position write-back"
 )]
 pub fn transfer_files(
     input: &Arc<VfsFile>,

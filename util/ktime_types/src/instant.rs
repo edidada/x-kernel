@@ -108,8 +108,9 @@ impl<C> Add<TimeSpan> for Instant<C> {
     fn add(self, rhs: TimeSpan) -> Self::Output {
         #[expect(
             clippy::expect_used,
-            reason = "Unchecked time arithmetic requires representable, correctly ordered \
-                      operands; external values use the checked variants"
+            reason = "CG-021-no-panic-on-reachable-failure: Unchecked time arithmetic requires \
+                      representable, correctly ordered operands; external values use the checked \
+                      variants"
         )]
         self.checked_add(rhs).expect("instant addition overflow")
     }
@@ -127,8 +128,9 @@ impl<C> Sub<TimeSpan> for Instant<C> {
     fn sub(self, rhs: TimeSpan) -> Self::Output {
         #[expect(
             clippy::expect_used,
-            reason = "Unchecked time arithmetic requires representable, correctly ordered \
-                      operands; external values use the checked variants"
+            reason = "CG-021-no-panic-on-reachable-failure: Unchecked time arithmetic requires \
+                      representable, correctly ordered operands; external values use the checked \
+                      variants"
         )]
         self.checked_sub(rhs)
             .expect("instant subtraction precedes clock origin")
@@ -147,8 +149,9 @@ impl<C> Sub for Instant<C> {
     fn sub(self, rhs: Self) -> Self::Output {
         #[expect(
             clippy::expect_used,
-            reason = "Unchecked time arithmetic requires representable, correctly ordered \
-                      operands; external values use the checked variants"
+            reason = "CG-021-no-panic-on-reachable-failure: Unchecked time arithmetic requires \
+                      representable, correctly ordered operands; external values use the checked \
+                      variants"
         )]
         self.checked_duration_since(rhs)
             .expect("instant subtraction has reversed ordering")

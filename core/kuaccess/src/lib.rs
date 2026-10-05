@@ -34,9 +34,9 @@ pub fn access_user_memory<R>(f: impl FnOnce() -> R) -> R {
     let curr = current();
     #[expect(
         clippy::panic,
-        reason = "Fault-resolving user atomics serve futex and robust-list operations on the user \
-                  thread that owns the address space; a kernel task has no user address space to \
-                  access"
+        reason = "CG-021-no-panic-on-reachable-failure: Fault-resolving user atomics serve futex \
+                  and robust-list operations on the user thread that owns the address space; a \
+                  kernel task has no user address space to access"
     )]
     let Some(thread) = curr.try_as_thread() else {
         panic!("access_user_memory called outside of thread context");
@@ -145,13 +145,13 @@ pub fn check_access(start: usize, len: usize) -> MemResult {
 pub fn vm_load_string(ptr: *const c_char) -> KResult<String> {
     #[expect(
         clippy::allow_attributes,
-        reason = "C char is signed on some architectures; user-memory helpers require byte \
-                  pointers"
+        reason = "CG-024-lint-exceptions: C char is signed on some architectures; user-memory \
+                  helpers require byte pointers"
     )]
     #[allow(
         clippy::unnecessary_cast,
-        reason = "C char is signed on some architectures; user-memory helpers require byte \
-                  pointers"
+        reason = "CG-024-lint-exceptions: clippy::unnecessary_cast: C char is signed on some \
+                  architectures; user-memory helpers require byte pointers"
     )]
     let bytes = osvm::load_vec_until_null(ptr as *const u8)?;
     String::from_utf8(bytes).map_err(|_| KError::IllegalBytes)
@@ -161,13 +161,13 @@ pub fn vm_load_string(ptr: *const c_char) -> KResult<String> {
 pub fn vm_load_string_with_len(ptr: *const c_char, len: usize) -> KResult<String> {
     #[expect(
         clippy::allow_attributes,
-        reason = "C char is signed on some architectures; user-memory helpers require byte \
-                  pointers"
+        reason = "CG-024-lint-exceptions: C char is signed on some architectures; user-memory \
+                  helpers require byte pointers"
     )]
     #[allow(
         clippy::unnecessary_cast,
-        reason = "C char is signed on some architectures; user-memory helpers require byte \
-                  pointers"
+        reason = "CG-024-lint-exceptions: clippy::unnecessary_cast: C char is signed on some \
+                  architectures; user-memory helpers require byte pointers"
     )]
     let bytes = osvm::load_vec(ptr as *const u8, len)?;
     String::from_utf8(bytes).map_err(|_| KError::IllegalBytes)

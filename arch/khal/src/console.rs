@@ -72,8 +72,8 @@ pub fn _sys_log(fmt: Arguments) {
     let lock = IO_LOCK.lock();
     #[expect(
         clippy::unwrap_used,
-        reason = "Logger::write_str always succeeds; formatters must not report errors unless the \
-                  writer fails"
+        reason = "CG-021-no-panic-on-reachable-failure: Logger::write_str always succeeds; \
+                  formatters must not report errors unless the writer fails"
     )]
     Logger.write_fmt(fmt).unwrap();
     drop(lock);

@@ -55,8 +55,9 @@ impl<T> ClassOps<T> for UnwiredClass<T> {
 
     #[expect(
         clippy::panic,
-        reason = "SchedAttr::validate admits only Fair policies until other classes are wired, so \
-                  no task reaches an unwired class's enqueue"
+        reason = "CG-021-no-panic-on-reachable-failure: SchedAttr::validate admits only Fair \
+                  policies until other classes are wired, so no task reaches an unwired class's \
+                  enqueue"
     )]
     fn enqueue(
         &mut self,
@@ -337,8 +338,8 @@ impl<T> Scheduler<T> {
         let _ = self.charge(now_ns, tok);
         #[expect(
             clippy::expect_used,
-            reason = "leave is only entered for the installed current runner under the runqueue \
-                      lock"
+            reason = "CG-021-no-panic-on-reachable-failure: leave is only entered for the \
+                      installed current runner under the runqueue lock"
         )]
         let curr = self.curr.take().expect("leave without runner");
         let class = curr.sched_class();

@@ -101,7 +101,8 @@ impl<H: TimerHandler + 'static, const N: usize> Timer<H, N> {
         });
         #[expect(
             clippy::expect_used,
-            reason = "This Arc was just allocated and no strong or weak alias has been published"
+            reason = "CG-021-no-panic-on-reachable-failure: This Arc was just allocated and no \
+                      strong or weak alias has been published"
         )]
         let entry = Arc::get_mut(&mut data).expect("new timer storage is exclusively owned");
         // SAFETY: the unique, unpublished allocation is already at its final

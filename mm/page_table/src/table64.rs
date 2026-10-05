@@ -359,11 +359,13 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop for PageTabl
         let root = self.table_of(self.root_paddr);
         #[expect(
             clippy::allow_attributes,
-            reason = "The root-entry index is used only with the copy-from feature"
+            reason = "CG-024-lint-exceptions: The root-entry index is used only with the \
+                      copy-from feature"
         )]
         #[allow(
             unused_variables,
-            reason = "The root-entry index is used only with the copy-from feature"
+            reason = "CG-024-lint-exceptions: unused_variables: The root-entry index is used only \
+                      with the copy-from feature"
         )]
         for (i, entry) in root.iter().enumerate() {
             #[cfg(feature = "copy-from")]

@@ -311,8 +311,8 @@ impl Gendisk {
         // BlockDevice. Both keep part0 alive; no standalone disk Arc escapes.
         #[expect(
             clippy::expect_used,
-            reason = "a disk is only borrowed through a live GendiskRef or its owning \
-                      BlockDevice, both of which keep part0 alive"
+            reason = "CG-021-no-panic-on-reachable-failure: a disk is only borrowed through a \
+                      live GendiskRef or its owning BlockDevice, both of which keep part0 alive"
         )]
         self.part0
             .upgrade()

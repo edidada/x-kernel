@@ -272,8 +272,8 @@ impl TimerIndex {
         let mut cursor = unsafe { self.tree.cursor_mut_from_ptr(node) };
         #[expect(
             clippy::expect_used,
-            reason = "The unsafe remove contract proves membership in this exclusively borrowed \
-                      timer index"
+            reason = "CG-021-no-panic-on-reachable-failure: The unsafe remove contract proves \
+                      membership in this exclusively borrowed timer index"
         )]
         let removed = cursor.remove().expect("timer index member missing");
         if was_earliest {

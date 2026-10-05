@@ -28,8 +28,8 @@
 
 #![allow(
     clippy::expect_used,
-    reason = "case (b): legacy khal has 18 diagnostic sites, too many to judge individually in \
-              this migration; new code remains reviewed"
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): legacy khal has 18 diagnostic \
+              sites, too many to judge individually in this migration; new code remains reviewed"
 )]
 #![no_std]
 
