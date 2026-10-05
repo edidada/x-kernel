@@ -98,25 +98,28 @@ checked through the configured kernel's `make clippy` during this migration.
 
 | Rule | Level | Backend | Lints |
 | --- | --- | --- | --- |
-| [CG-001-static-spinlock-registration](CG-001-static-spinlock-registration.md) | MUST | dylint | `unregistered_static_spinlock` |
-| [CG-002-static-mutex-registration](CG-002-static-mutex-registration.md) | MUST | dylint | `unregistered_static_lock` |
-| [CG-003-runtime-lock-tracking](CG-003-runtime-lock-tracking.md) | MUST | dylint | `untracked_runtime_lock` |
-| [CG-004-static-mut-option](CG-004-static-mut-option.md) | MUST | dylint | `static_mut_option` |
-| [CG-007-attribute-order](CG-007-attribute-order.md) | MUST | dylint | `derive_not_last`, `unsorted_attributes` |
-| [CG-009-vec-shift-in-loop](CG-009-vec-shift-in-loop.md) | SHOULD | dylint | `vec_shift_in_loop` |
-| [CG-010-typed-error-result](CG-010-typed-error-result.md) | SHOULD | dylint | `untyped_error_result` |
-| [CG-011-time-unit-names](CG-011-time-unit-names.md) | SHOULD | dylint | `unitless_time_integer` |
-| [CG-012-private-foreign-items](CG-012-private-foreign-items.md) | SHOULD | dylint | `exported_foreign_item` |
-| [CG-013-no-sleep-under-spinlock](CG-013-no-sleep-under-spinlock.md) | MUST | ai | — |
-| [CG-014-spin-noirq-needs-irq-contender](CG-014-spin-noirq-needs-irq-contender.md) | SHOULD | ai | — |
-| [CG-015-no-split-critical-section](CG-015-no-split-critical-section.md) | MUST | ai | — |
-| [CG-016-safety-comment-substance](CG-016-safety-comment-substance.md) | MUST | ai | — |
-| [CG-017-unsafe-impl-send-sync-argument](CG-017-unsafe-impl-send-sync-argument.md) | MUST | ai | — |
-| [CG-018-uninitialized-storage-model](CG-018-uninitialized-storage-model.md) | MUST | ai | — |
-| [CG-019-user-pointers-stop-at-syscall-boundary](CG-019-user-pointers-stop-at-syscall-boundary.md) | MUST | ai | — |
-| [CG-020-raw-output-buffer-capacity](CG-020-raw-output-buffer-capacity.md) | MUST | ai | — |
-| [CG-021-no-panic-on-reachable-failure](CG-021-no-panic-on-reachable-failure.md) | MUST | ai | — |
-| [CG-022-log-level-matches-event](CG-022-log-level-matches-event.md) | SHOULD | ai | — |
+| [CG-016-safety-comment-substance](CG-016-safety-comment-substance.md) | MUST | clippy | `undocumented_unsafe_blocks` |
+| [CG-018-uninitialized-storage-model](CG-018-uninitialized-storage-model.md) | MUST | clippy | `disallowed_methods` |
+| [CG-021-no-panic-on-reachable-failure](CG-021-no-panic-on-reachable-failure.md) | MUST | clippy | `panic`, `unwrap_used`, `expect_used` |
+| [CG-023-unfinished-implementations](CG-023-unfinished-implementations.md) | MUST | clippy | `todo`, `unimplemented` |
+| [CG-024-lint-exceptions](CG-024-lint-exceptions.md) | MUST | clippy | `allow_attributes`, `allow_attributes_without_reason` |
+| [CG-025-minimal-unsafe-scope](CG-025-minimal-unsafe-scope.md) | MUST | clippy, rustc | `multiple_unsafe_ops_per_block`, `unsafe_op_in_unsafe_fn` |
+| [CG-026-unsafe-api-safety-docs](CG-026-unsafe-api-safety-docs.md) | MUST | clippy | `missing_safety_doc` |
+| [CG-027-narrow-visibility](CG-027-narrow-visibility.md) | SHOULD | rustc | `unreachable_pub` |
+| [CG-028-focused-functions](CG-028-focused-functions.md) | SHOULD | clippy | `too_many_lines` |
+| [CG-029-shallow-control-flow](CG-029-shallow-control-flow.md) | SHOULD | clippy | `excessive_nesting` |
+| [CG-030-explicit-boolean-parameters](CG-030-explicit-boolean-parameters.md) | SHOULD | clippy | `fn_params_excessive_bools` |
+| [CG-031-intrusive-linked-lists](CG-031-intrusive-linked-lists.md) | SHOULD | clippy | `linkedlist` |
+| [CG-032-camel-case-types](CG-032-camel-case-types.md) | SHOULD | clippy | `upper_case_acronyms` |
+| [CG-033-explicit-result-discard](CG-033-explicit-result-discard.md) | SHOULD | clippy | `unused_result_ok` |
+| [CG-034-used-binding-names](CG-034-used-binding-names.md) | SHOULD | clippy | `used_underscore_binding` |
+| [CG-035-declared-cfgs](CG-035-declared-cfgs.md) | SHOULD | rustc | `unexpected_cfgs` |
+| [CG-036-ordinary-error-propagation](CG-036-ordinary-error-propagation.md) | SHOULD | clippy | `question_mark` |
+
+Ids CG-001–022 are reserved for the Dylint/AI stack. Reused files here are
+CG-016 (unsafe comments), CG-018 (initialization validity), and CG-021
+(reachable-failure panics). CG-017 is not reused: its Send/Sync concurrency
+argument is more specific than comment presence. The first free id is CG-037.
 
 ## Adding a rule
 
