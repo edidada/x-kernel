@@ -359,10 +359,14 @@ pub trait InodeOperations: Send + Sync + 'static {
     /// VFS layer where `notify_change()` routes an inode without a
     /// `->setattr` method to `simple_setattr()`. Owner, permission mode, and
     /// timestamp updates are accepted and published to the resident attributes,
-    /// so anonymous inodes without backing storage (pipes, `anon_inodefs`
-    /// files, pseudo-filesystem roots) support `fchownat`, `fchmod`, and
-    /// `utimensat` without installing a dedicated table. Size changes are
-    /// refused: these inodes carry no truncate semantics, and reporting a
+    /// so anonymous inodes without backing storage (pipes, pseudo-filesystem
+    /// roots) support `fchownat`, `fchmod`, and `utimensat` without installing
+    /// a dedicated table. The fallback presumes the inode's identity and
+    /// metadata are its own: an inode deliberately shared across unrelated
+    /// files (the `anon_inodefs` singleton) must override `setattr` to keep
+    /// rejection semantics, because a fallback update there would mutate
+    /// metadata that every holder of the shared inode observes. Size changes
+    /// are refused: these inodes carry no truncate semantics, and reporting a
     /// fabricated size through `fstat` would misrepresent them. This matches
     /// Linux, where truncation of a non-regular file is rejected with
     /// `EINVAL` before any `->setattr` runs.

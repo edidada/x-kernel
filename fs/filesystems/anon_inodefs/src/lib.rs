@@ -15,9 +15,9 @@ use kcred::Cred;
 use klazy::Once;
 use kvfs::{
     Dentry, DentryOperations, FMode, FileOperations, FileSystemType, GetattrQueryFlags,
-    GetattrRequestMask, InodeOperations, Metadata, Mount, MountFlags, MountIdmap, NodeFlags,
-    NodePermission, NodeType, OpenFlags, Path, Umode, VfsError, VfsFile, VfsInode, VfsInodeInit,
-    VfsResult, get_next_ino, libfs::new_pseudo_super_block,
+    GetattrRequestMask, InodeOperations, Metadata, MetadataUpdate, Mount, MountFlags, MountIdmap,
+    NodeFlags, NodePermission, NodeType, OpenFlags, Path, SetattrTime, Umode, VfsError, VfsFile,
+    VfsInode, VfsInodeInit, VfsResult, get_next_ino, libfs::new_pseudo_super_block,
 };
 use memaddr::PAGE_SIZE_4K;
 
@@ -110,6 +110,22 @@ impl InodeOperations for AnonInodeOperations {
         metadata.mode = metadata.mode.with_node_type(NodeType::Unknown);
         Ok(metadata)
     }
+
+    // The common `setattr` fallback assumes each inode's metadata is resident
+    // to itself. This table backs the shared singleton inode behind every
+    // eventfd, epoll, timerfd, signalfd, pidfd, socket, and BPF anonymous
+    // file, so accepting a fallback update would let one `fchown`/`fchmod`/
+    // `utimensat` through any of those descriptors mutate metadata that every
+    // other process observes on its own anonymous fds. Keep the explicit
+    // rejection semantics instead of inheriting the fallback.
+    fn setattr(
+        &self,
+        _idmap: &MountIdmap,
+        _dentry: &Dentry,
+        _update: MetadataUpdate,
+    ) -> VfsResult<MetadataUpdate> {
+        Err(VfsError::OperationNotSupported)
+    }
 }
 
 fn new_anon_inode() -> Arc<VfsInode> {
@@ -185,6 +201,49 @@ mod tests {
         assert_eq!(
             first.path().filesystem_stat().unwrap().fs_type,
             ANON_INODE_FS_MAGIC
+        );
+    }
+
+    #[def_test]
+    fn metadata_updates_stay_rejected_on_shared_anon_inode() {
+        init_anon_inodefs();
+        let file = AnonInodeFs::global()
+            .get_file(
+                "[meta]",
+                Arc::new(TestFileOperations),
+                Arc::new(()),
+                FMode::READ | FMode::WRITE,
+                OpenFlags::empty(),
+                kcred::initial_cred(),
+            )
+            .expect("anonymous file opens");
+        let cred = kcred::initial_cred();
+        let now = SetattrTime::Explicit(ktime::realtime());
+
+        // The singleton is shared across every process's anonymous fds, so
+        // authorized metadata updates must keep failing instead of mutating
+        // state other processes observe.
+        assert_eq!(
+            file.path().chown(Some(1234), None, &cred),
+            Err(VfsError::OperationNotSupported)
+        );
+        assert_eq!(
+            file.path()
+                .chmod(NodePermission::from_bits_truncate(0o600), &cred),
+            Err(VfsError::OperationNotSupported)
+        );
+        assert_eq!(
+            file.path().set_times(Some(now), Some(now), &cred),
+            Err(VfsError::OperationNotSupported)
+        );
+        assert_eq!(file.truncate(8), Err(VfsError::OperationNotSupported));
+
+        let metadata = file.path().getattr().unwrap();
+        assert_eq!(metadata.uid, 0);
+        assert_eq!(metadata.gid, 0);
+        assert_eq!(
+            metadata.mode.permission().bits(),
+            (NodePermission::OWNER_READ | NodePermission::OWNER_WRITE).bits()
         );
     }
 }

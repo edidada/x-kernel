@@ -640,9 +640,12 @@ impl FileOperations for PipeFileOperations {
     // reader, and a timestamp failure propagates as the syscall result. This
     // mirrors Linux `pipe_write()` (`err = file_update_time(filp);
     // if (err) ret = err;` after the copy loop, fs/pipe.c:617) and the shared
-    // pathname FIFO table below. The common `setattr` fallback cannot fail
-    // for times-only updates, so the propagation is defensive Linux parity
-    // rather than a reachable error path.
+    // pathname FIFO table below. Reachability differs between the two: the
+    // anonymous-pipe inode uses `empty_inode_operations()`, whose common
+    // `setattr` fallback cannot fail for times-only updates, so propagation
+    // here is defensive parity rather than a reachable error path; pathname
+    // FIFOs keep their backend filesystem table, whose `setattr` can fail,
+    // making the propagated error reachable there by design.
     fn write(&self, file: &VfsFile, buf: &[u8], _offset: u64) -> VfsResult<usize> {
         let written = pipe_write(file, buf)?;
         if written > 0 {
