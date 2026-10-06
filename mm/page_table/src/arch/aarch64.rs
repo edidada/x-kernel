@@ -210,7 +210,8 @@ impl PagingMetaData for A64PagingMetaData {
     // PR !852) correlated with KVM-killed vCPUs on aarch64 daily runs
     // ("kvm run failed Function not implemented", Stage-2 aborts on IPA
     // outside RAM, builds #78-#85). Fresh user mappings re-issue the
-    // conservative `tlbi vaae1is` until the root cause is proven otherwise.
+    // conservative ASID-scoped `tlbi vale1is` (+ `dsb sy; isb`) until the
+    // root cause is proven otherwise.
 
     const LEVELS: usize = 4;
     const PA_MAX_BITS: usize = 48;
