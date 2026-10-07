@@ -136,7 +136,6 @@ fn dispatch<T: virtio::Transport + Send + 'static>(
             {
                 let irq = dev
                     .irq(0)
-                    .map(|spec| spec.number)
                     .map_err(|_| ProbeError::Fatal(RuntimeError::Invalid))?;
                 crate::blk::activate_mmio(dev, transport, irq, builder)
             }

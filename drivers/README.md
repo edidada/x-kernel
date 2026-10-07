@@ -44,16 +44,9 @@ ground. Anything class-specific belongs in `subsystems/`.
 | Crate | Role |
 |------|------|
 | `driver_base` | Common driver error/result and base device trait. |
-<<<<<<< HEAD
-| `device-res` | Kernel capability contracts requested by drivers: MMIO, IRQ, DMA, time, and devres ownership helpers. |
-| `kdevice` | Shared bus/device/driver model, topology, matching, lifecycle, and device-managed cleanup storage. |
-| `kclass` | Runtime publication layer for typed device classes. |
-| `block`, `char_driver`, `display`, `input`, `net`, `vsock`, `hwrng` | Device class contracts that concrete drivers implement and kernel subsystems consume. |
-=======
 | `device-res` | Capability contracts (MMIO, IRQ, DMA, time) with RAII handles. |
 | `devnode` | Model-agnostic userland node projection (devtmpfs/sysfs/uevent): data-driven `DevNodeType`, `DeviceNumber`, `DeviceLocation`. |
-| `kclass` | Typed class publication: detached class parents, per-class registries, availability/removal subscriptions. |
->>>>>>> 06c873276 (refactor(drivers): reorganize top-level layout for unambiguous driver placement)
+| `kclass` | Typed class publication: detached class parents, per-class registries, availability/removal subscriptions. |>>>>>>> 06c873276 (refactor(drivers): reorganize top-level layout for unambiguous driver placement)
 
 ## Per-Class Subsystems (`subsystems/`)
 

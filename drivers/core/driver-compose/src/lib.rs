@@ -271,30 +271,54 @@ fn build_descriptor(dev: firmware::FirmwareDevice) {
     global_domain().add_device(descriptor);
 }
 
-/// Board-static devices (no firmware description): the compose layer owns
-/// the one static device we migrate; the legacy backend registers the rest.
+/// x86 ISA COM port bases (board-static: no firmware description).
 #[cfg(feature = "serial-ns16550-ioport")]
 static COM_PORTS: [u16; 4] = [0x3f8, 0x2f8, 0x3e8, 0x2e8];
 
-#[cfg(feature = "ramdisk")]
+/// Board-static devices (no firmware description): the compose layer is
+/// the only registrar since the legacy backend went away — the ramdisk and
+/// the x86 COM ports both live here.
 fn enumerate_static_devices() {
-    use driver_core::desc::{DeviceIdentity, DeviceLocation, PlatformIdentity};
-    let descriptor = DeviceDescriptor::new(
-        <PlatformBus as Bus>::ID,
-        DeviceLocation::PlatformStatic { id: 0 },
-        DeviceIdentity::Platform(PlatformIdentity {
-            firmware_id: None,
-            // Board-static devices carry no DT compatible list; drivers
-            // claim them by alias, not by of-match.
-            compatibles: alloc::vec::Vec::new(),
-            alias: Some(alloc::string::String::from("ramdisk")),
-        }),
-    );
-    global_domain().add_device(descriptor);
-}
+    #[cfg(feature = "ramdisk")]
+    {
+        let descriptor = DeviceDescriptor::new(
+            <PlatformBus as Bus>::ID,
+            DeviceLocation::PlatformStatic { id: 0 },
+            DeviceIdentity::Platform(PlatformIdentity {
+                firmware_id: None,
+                // Board-static devices carry no DT compatible list; drivers
+                // claim them by alias, not by of-match.
+                compatibles: alloc::vec::Vec::new(),
+                alias: Some(alloc::string::String::from("ramdisk")),
+            }),
+        );
+        global_domain().add_device(descriptor);
+    }
 
-#[cfg(not(feature = "ramdisk"))]
-fn enumerate_static_devices() {}
+    // Each ISA COM port becomes a platform-static device carrying its I/O
+    // port range; Ns16550IoPortDriver claims them by alias and reads the
+    // range from the resource table.
+    #[cfg(feature = "serial-ns16550-ioport")]
+    for (idx, base) in COM_PORTS.iter().enumerate() {
+        let mut resources = ResourceMap::new();
+        resources.push_kind(ResourceKind::IoPort(driver_core::IoPortRange {
+            base: *base,
+            size: 8,
+        }));
+        let descriptor = DeviceDescriptor::new(
+            <PlatformBus as Bus>::ID,
+            DeviceLocation::PlatformStatic { id: 1 + idx as u16 },
+            DeviceIdentity::Platform(PlatformIdentity {
+                firmware_id: None,
+                compatibles: alloc::vec::Vec::new(),
+                alias: Some(alloc::string::String::from("serial-ns16550-ioport")),
+            }),
+        )
+        .with_origin(DiscoveryOrigin::PlatformStatic)
+        .with_resources(resources);
+        global_domain().add_device(descriptor);
+    }
+}
 
 fn map_trigger(trigger: firmware::InterruptTrigger) -> IrqTrigger {
     match trigger {

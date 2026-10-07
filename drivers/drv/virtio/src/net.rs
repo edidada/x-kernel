@@ -40,12 +40,12 @@ impl DriverOps<PciBus> for VirtioNetDriver {
     type Data = NetData;
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PciBus>) -> Result<NetData, ProbeError> {
-        let (kind, transport, _irq) = crate::common::pci_transport(dev)?;
+        let (kind, transport, msi_irq) = crate::common::pci_transport(dev)?;
         if !matches!(kind, driver_base::DeviceKind::Net) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
-        let irq = activate(dev, transport)?;
+        let irq = activate(dev, transport, msi_irq)?;
         Ok(NetData { _irq: irq })
     }
 
@@ -61,10 +61,11 @@ impl DriverOps<PciBus> for VirtioNetDriver {
 pub fn activate<B: driver_core::Bus>(
     dev: &mut DeviceCtx<'_, B>,
     transport: impl virtio::Transport + 'static,
+    msi_irq: Option<usize>,
 ) -> Result<Option<DevIrq>, ProbeError> {
     // The PCI path's publication is withdrawn by the composition root's
     // remove notifier (before Data drops — the domain ordering contract).
-    let (_publication, irq) = activate_with_irq(dev, transport)?;
+    let (_publication, irq) = activate_with_irq(dev, transport, msi_irq)?;
     Ok(irq)
 }
 
@@ -73,6 +74,7 @@ pub fn activate<B: driver_core::Bus>(
 fn activate_with_irq<B: driver_core::Bus, T: virtio::Transport + 'static>(
     dev: &mut DeviceCtx<'_, B>,
     transport: T,
+    msi_irq: Option<usize>,
 ) -> Result<(kclass::ClassDevice<kclass::NetDeviceImpl>, Option<DevIrq>), ProbeError> {
     let device = Arc::new(
         VirtIoNetDev::<driver_runtime::hal::Hal, _, 64>::try_new(transport)
@@ -84,16 +86,43 @@ fn activate_with_irq<B: driver_core::Bus, T: virtio::Transport + 'static>(
     let device = Arc::try_unwrap(device).map_err(|_| ProbeError::Fatal(RuntimeError::BadState))?;
 
     // Interrupt ownership: the handler holds only a share of the device
-    // internals; the guard releases when the activation closes.
-    let irq = match dev.irq(0) {
-        Ok(spec) => Some(dev.request_irq(spec, "virtio-net", move || {
-            if worker.service() {
-                IrqAction::Handled
-            } else {
-                IrqAction::NotHandled
-            }
-        })?),
-        Err(_) => None,
+    // internals; the guard releases when the activation closes. The
+    // transport-bound vector comes first: when MSI-X was set up the device
+    // interrupts ONLY on that vector (prepare_msix disabled legacy INTx),
+    // so a handler on the descriptor's legacy line would never fire.
+    let irq = match msi_irq.map(|number| {
+        dev.request_irq(
+            driver_core::IrqSpec::global(number, driver_core::IrqTrigger::Unknown),
+            "virtio-net",
+            {
+                let worker = worker.clone();
+                move || {
+                    if worker.service() {
+                        IrqAction::Handled
+                    } else {
+                        IrqAction::NotHandled
+                    }
+                }
+            },
+        )
+    }) {
+        Some(Ok(irq)) => Some(irq),
+        Some(Err(err)) => return Err(err),
+        // No MSI-X vector (aarch64 legacy INTx): the descriptor's route
+        // resolves through the controller's irq domain.
+        None => match dev.irq(0) {
+            Ok(spec) => Some(dev.request_irq(spec, "virtio-net", {
+                let worker = worker.clone();
+                move || {
+                    if worker.service() {
+                        IrqAction::Handled
+                    } else {
+                        IrqAction::NotHandled
+                    }
+                }
+            })?),
+            Err(_) => None,
+        },
     };
     let location = crate::common::legacy_location(dev.descriptor().location);
     let handle = publish_net(
@@ -113,7 +142,8 @@ pub fn activate_mmio<B: driver_core::Bus, T: virtio::Transport + 'static>(
     transport: T,
     builder: crate::mmio::ActivationBuilder,
 ) -> Result<crate::mmio::MmioData, ProbeError> {
-    let (publication, irq) = activate_with_irq(dev, transport)?;
+    // virtio-mmio has no MSI-X vector: legacy route only.
+    let (publication, irq) = activate_with_irq(dev, transport, None)?;
     struct NetMmioActivation {
         publication: kclass::ClassDevice<kclass::NetDeviceImpl>,
         irq: Option<DevIrq>,

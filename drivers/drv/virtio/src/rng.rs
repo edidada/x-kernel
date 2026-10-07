@@ -25,15 +25,15 @@ use pci::{PciBus, PciMatch};
 use virtio::VirtIoRngDev;
 
 /// `struct pci_device_id virtio_rng_id_table[]`: transitional 0x1005 and
-/// modern 0x1045.
+/// modern 0x1044 (0x1040 + entropy device type 4).
 static IDS: &[PciMatch] = &[
     PciMatch::device(0x1af4, 0x1005),
-    PciMatch::device(0x1af4, 0x1045),
+    PciMatch::device(0x1af4, 0x1044),
 ];
 
-/// Driver-private data: the completion IRQ guard, released when the device
-/// is removed (data drops before the class publication is withdrawn). The
-/// published device itself is owned by the hwrng class registry.
+/// Driver-private data: the completion IRQ guard. The removal order is
+/// driver.remove() (quiesce) → the composition root's remove notifier
+/// withdraws the hwrng publication → drop(Data) releases the IRQ guard.
 pub struct RngData {
     _irq: driver_core::DevIrq,
 }

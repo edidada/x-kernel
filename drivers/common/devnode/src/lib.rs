@@ -141,6 +141,9 @@ impl DevNodeType {
 pub struct DevNode {
     id: u64,
     subsystem: &'static str,
+    /// The allocated per-class index when this node came from
+    /// [`publish_auto_indexed`] (released back to the pool on withdraw).
+    pub(crate) allocated_index: Option<u32>,
     devname: String,
     device_number: DeviceNumber,
     /// Physical device path (`devices/...` prefix source for DEVPATH).
@@ -246,6 +249,88 @@ pub fn publish_indexed(
     )
 }
 
+/// Per-`DevNodeType` min-free index pool with release-on-withdraw.
+///
+/// Linux equivalence: each class hands out the lowest free minor range
+/// (`input/inputN`, `dri/cardN`) and returns it when the device goes away.
+/// Exhaustion is [`PublishError::ResourceBusy`] — never a silent alias.
+struct IndexPools {
+    /// (subsystem, allocated-sorted set); the pool reuses the lowest hole.
+    pools: Vec<(&'static str, Vec<u32>)>,
+}
+
+static INDEX_POOLS: SpinNoPreempt<IndexPools> =
+    SpinNoPreempt::new(IndexPools { pools: Vec::new() });
+
+/// Errors from [`publish_auto_indexed`].
+#[derive(Debug)]
+pub enum PublishError {
+    /// All indices of this node type are taken (`index_count` exhausted).
+    ResourceBusy,
+    /// A node with this id already exists.
+    AlreadyExists,
+}
+
+impl IndexPools {
+    fn alloc(&mut self, subsystem: &'static str, limit: u32) -> Option<u32> {
+        let entry = self.pools.iter_mut().find(|(s, _)| *s == subsystem);
+        let taken = match entry {
+            Some((_, v)) => v,
+            None => {
+                self.pools.push((subsystem, Vec::new()));
+                &mut self.pools.last_mut().unwrap().1
+            }
+        };
+        // Min-free: the first gap in the sorted used set.
+        let mut candidate = 0;
+        for &used in taken.iter() {
+            if used == candidate {
+                candidate += 1;
+            } else {
+                break;
+            }
+        }
+        if candidate >= limit {
+            return None;
+        }
+        taken.push(candidate);
+        taken.sort_unstable();
+        Some(candidate)
+    }
+
+    fn release(&mut self, subsystem: &'static str, index: u32) {
+        if let Some((_, taken)) = self.pools.iter_mut().find(|(s, _)| *s == subsystem) {
+            taken.retain(|&i| i != index);
+        }
+    }
+}
+
+/// Publish with an automatically allocated per-class index: the lowest
+/// free index of `node_type`, released when the node is withdrawn.
+/// Distinct devices never share a devname or dev_t.
+pub fn publish_auto_indexed(
+    id: u64,
+    node_type: &DevNodeType,
+    physical_path: &str,
+    modalias: Option<String>,
+    properties: Vec<(String, String)>,
+) -> Result<DevNode, PublishError> {
+    let index = INDEX_POOLS
+        .lock()
+        .alloc(node_type.subsystem, node_type.index_count);
+    let Some(index) = index else {
+        return Err(PublishError::ResourceBusy);
+    };
+    let mut node = publish_indexed(id, node_type, index, physical_path, modalias, properties);
+    node.allocated_index = Some(index);
+    if REGISTRY.lock().nodes.iter().any(|n| n.id == id) {
+        // Duplicate id: give the index back before reporting.
+        INDEX_POOLS.lock().release(node_type.subsystem, index);
+        return Err(PublishError::AlreadyExists);
+    }
+    Ok(node)
+}
+
 /// Publish a node with an explicit devname and `dev_t` (block disks name
 /// themselves: `vda`, `sda`, ...).
 /// The wide parameter list mirrors Linux's `device_add`-era descriptor
@@ -265,6 +350,7 @@ pub fn publish(
 ) -> DevNode {
     let node = DevNode {
         id,
+        allocated_index: None,
         subsystem,
         devname,
         device_number,
@@ -300,6 +386,9 @@ pub fn withdraw(id: u64) {
         node.available = false;
         node.clone()
     };
+    if let Some(index) = node.allocated_index {
+        INDEX_POOLS.lock().release(node.subsystem, index);
+    }
     let (subscribers, publisher) = {
         let registry = REGISTRY.lock();
         (

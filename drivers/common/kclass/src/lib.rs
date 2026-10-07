@@ -604,31 +604,63 @@ mod node_compat {
                 properties.push((String::from(key), bitmap_value(bits)));
             }
         }
-        devnode::publish(
+        match devnode::publish_auto_indexed(
             id,
-            "input",
-            INPUT_TYPE.devname(0),
-            INPUT_TYPE.device_number(0),
+            &INPUT_TYPE,
             &format!("{physical}/input"),
             None,
             properties,
-            Some(String::from(driver_name)),
-        )
+        ) {
+            Ok(node) => node,
+            Err(devnode::PublishError::ResourceBusy) => {
+                log::error!(
+                    "input: event index space exhausted ({}); device {} gets no /dev node",
+                    INPUT_TYPE.index_count,
+                    metadata.name
+                );
+                devnode::publish(
+                    id,
+                    "input",
+                    alloc::format!("input/event-unclaimed-{id}"),
+                    INPUT_TYPE.device_number(INPUT_TYPE.index_count - 1),
+                    &format!("{physical}/input"),
+                    None,
+                    alloc::vec::Vec::new(),
+                    Some(String::from(driver_name)),
+                )
+            }
+            Err(devnode::PublishError::AlreadyExists) => devnode::publish(
+                id,
+                "input",
+                alloc::format!("input/event-dup-{id}"),
+                INPUT_TYPE.device_number(INPUT_TYPE.index_count - 1),
+                &format!("{physical}/input"),
+                None,
+                alloc::vec::Vec::new(),
+                Some(String::from(driver_name)),
+            ),
+        }
     }
 
     /// Build the drm node publication (cardN).
     pub(super) fn drm_node(id: u64, driver_name: &str, location: DeviceLocation) -> DevNode {
         let physical = physical_path(location);
-        devnode::publish(
-            id,
-            "drm",
-            DRM_TYPE.devname(0),
-            DRM_TYPE.device_number(0),
-            &physical,
-            None,
-            Vec::new(),
-            Some(String::from(driver_name)),
-        )
+        // udev rules match DRM nodes on DEVTYPE=drm_minor (permissions,
+        // device ownership); losing it changes /dev/dri/cardN handling.
+        let properties = alloc::vec![(String::from("DEVTYPE"), String::from("drm_minor"))];
+        match devnode::publish_auto_indexed(id, &DRM_TYPE, &physical, None, properties) {
+            Ok(node) => node,
+            Err(_) => devnode::publish(
+                id,
+                "drm",
+                alloc::format!("dri/card-unclaimed-{id}"),
+                DRM_TYPE.device_number(DRM_TYPE.index_count - 1),
+                &physical,
+                None,
+                alloc::vec::Vec::new(),
+                Some(String::from(driver_name)),
+            ),
+        }
     }
 }
 

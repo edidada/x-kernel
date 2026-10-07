@@ -447,8 +447,16 @@ pub fn interrupt_descs(node: FdtNode<'static, 'static>) -> Vec<InterruptInfo> {
     if let Some(parent) = interrupt_parent_node(node) {
         let controller = controller_kind(parent);
         if let Some(cells_width) = property_u32(parent, "#interrupt-cells") {
-            let width = cells_width as usize;
-            if let Some(value) = node.property("interrupts").map(|prop| prop.value) {
+            if cells_width == 0 {
+                // A zero-width specifier is malformed firmware data; the
+                // modulo and chunks_exact below would otherwise panic.
+                log::warn!(
+                    "DT node '{}': interrupt parent declares #interrupt-cells=<0>; interrupts \
+                     skipped",
+                    node.name
+                );
+            } else if let Some(value) = node.property("interrupts").map(|prop| prop.value) {
+                let width = cells_width as usize;
                 if !value.is_empty() && value.len() % (width * 4) == 0 {
                     for chunk in value.chunks_exact(width * 4) {
                         let cells: Vec<u32> = chunk

@@ -171,7 +171,6 @@ menu "Device Drivers"
 comment "Block device drivers"
 
 
-
 config KFEAT_DRIVER_RAMDISK_STATIC
     bool "Back the RAM disk with an embedded filesystem image"
     depends on KFEAT_DRIVER_RAMDISK
@@ -186,7 +185,6 @@ config KFEAT_DRIVER_RAMDISK_STATIC
       the kernel binary grows by roughly the image size.
 
 comment "Network drivers"
-
 
 
 config KFEAT_DRIVER_VIRTIO_RNG
@@ -277,90 +275,6 @@ config KFEAT_DRIVER_CONSOLE_NS16550_IOPORT
     help
       Build the NS16550 I/O-port UART backend used by the early-boot console
       and the per-instance serial driver.
-
-    bool "PL011 per-instance serial driver"
-    depends on KFEAT_CHAR && ARCH_AARCH64
-    select KFEAT_DRIVER_CONSOLE_PL011
-    default y if MACHINE_AARCH64_QEMU
-    help
-      Enable the kdriver per-instance serial driver for PL011 UARTs. Each UART
-      node becomes a character device; the stdout UART shares the early-boot
-      instance.
-
-    bool "virtio-blk driver on the driver-core model (PCI)"
-    default n
-    help
-      Enable the new-model virtio-blk driver registered in the driver-core
-      device domain: const PCI id table, guards-in-Data activation (no
-      global side tables), and block-class publication through a detached
-      class parent. This is the migration target for
-      KFEAT_DRIVER_VIRTIO_BLK; enable it instead of (not in addition to)
-      the legacy symbol.
-
-    bool "virtio-net driver on the driver-core model (PCI)"
-    default n
-    help
-      Enable the new-model virtio-net driver: const PCI id table, per-device
-      interrupt ownership (no global IRQ routing), and net-class publication
-      through a detached class parent. Migration target for
-      KFEAT_DRIVER_VIRTIO_NET; enable it instead of the legacy symbol.
-
-    bool "virtio-rng driver on the driver-core model (PCI)"
-    default n
-    help
-      Enable the new-model virtio-rng driver: const PCI id table and char
-      class publication through a detached parent. Migration target for
-      KFEAT_DRIVER_VIRTIO_RNG.
-
-    bool "ramdisk driver on the driver-core model"
-    default n
-    help
-      Enable the new-model ramdisk driver: alias-matched board-static device
-      publishing a block disk. Migration target for KFEAT_DRIVER_RAMDISK.
-
-    bool "virtio-gpu driver on the driver-core model (PCI)"
-    default n
-    help
-
-    bool "virtio-input driver on the driver-core model (PCI)"
-    default n
-    help
-
-    bool "virtio-vsock driver on the driver-core model (PCI)"
-    default n
-    help
-
-    bool "virtio-9p driver on the driver-core model (PCI)"
-    default n
-    help
-
-    bool "NS16550 MMIO serial driver on the driver-core model"
-    default n
-    help
-
-    bool "NS16550 I/O-port serial driver on the driver-core model"
-    depends on ARCH_X86_64
-    default n
-    help
-
-    bool "virtio-mmio transport driver on the driver-core model"
-    default n
-    help
-      Claims DT "virtio,mmio" nodes and dispatches to the per-family
-      driver-core virtio drivers. Migration target for the legacy
-      platform-backend virtio-mmio probing.
-
-    bool "PL011 serial driver on the driver-core model (with fixed-clock provider)"
-    depends on ARCH_AARCH64
-    default n
-    help
-      Enable the new-model PL011 serial driver and the fixed-clock clock
-      provider driver, both registered in the driver-core device domain with
-      deferred probe. This is the migration target for KFEAT_DRIVER_SERIAL_PL011;
-      enable it instead of (not in addition to) the legacy symbol.
-
-
-
 
 config KFEAT_DRIVER_SERIAL_PL011
     bool "PL011 per-instance serial driver"
@@ -460,7 +374,6 @@ comment "Filesystem transport drivers"
 
 
 comment "Display / input drivers"
-
 
 
 endmenu # Device Drivers

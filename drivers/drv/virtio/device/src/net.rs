@@ -24,6 +24,7 @@ const NET_BUF_LEN: usize = 1526;
 /// scheduler slot), so it stays valid independently of who owns the
 /// published device. The caller registers it with the device's interrupt
 /// through its own device model — there is no global IRQ routing here.
+#[derive(Clone)]
 pub struct VirtIoNetIrqWorker {
     service: Arc<dyn Fn() -> bool + Send + Sync>,
 }

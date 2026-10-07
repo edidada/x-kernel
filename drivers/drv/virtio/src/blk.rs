@@ -69,8 +69,14 @@ impl DriverOps<PciBus> for VirtioBlkDriver {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
-        let activation = match irq {
-            Some(irq) => activate(dev, transport, irq)?,
+        // The transport-bound vector is already an OS-visible virq; the
+        // descriptor's legacy route (controller+hwirq) resolves through the
+        // irq domain. Either way `activate` receives the full spec.
+        let spec = irq
+            .map(|number| driver_core::IrqSpec::global(number, driver_core::IrqTrigger::Unknown))
+            .or_else(|| dev.irq(0).ok());
+        let activation = match spec {
+            Some(spec) => activate(dev, transport, spec)?,
             None => return Err(ProbeError::Fatal(RuntimeError::Invalid)),
         };
         Ok(BlkData {
@@ -131,7 +137,7 @@ impl<H: VirtIoHal + 'static, T: Transport + 'static> Activation for BlkActivatio
 pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
     dev: &mut DeviceCtx<'_, B>,
     transport: T,
-    irq: usize,
+    irq: driver_core::IrqSpec,
 ) -> Result<Box<dyn Activation>, ProbeError> {
     let device = Arc::new(
         VirtIoBlkDev::<driver_runtime::hal::Hal, T>::try_new_irq(
@@ -158,23 +164,19 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
     let handler: Arc<dyn device_res::IrqHandler> = device.clone();
     let weak_handler = Arc::downgrade(&handler);
     let weak_reclaimer = alloc::sync::Arc::downgrade(&activation.reclaimer);
-    activation.irq = Some(dev.request_irq(
-        driver_core::IrqSpec::global(irq, driver_core::IrqTrigger::Unknown),
-        "virtio-blk",
-        move || {
-            let Some(device) = weak_handler.upgrade() else {
-                return IrqAction::NotHandled;
-            };
-            if device.handle(0).handled() {
-                if let Some(reclaimer) = weak_reclaimer.upgrade() {
-                    reclaimer.mark_pending();
-                }
-                IrqAction::Handled
-            } else {
-                IrqAction::NotHandled
+    activation.irq = Some(dev.request_irq(irq, "virtio-blk", move || {
+        let Some(device) = weak_handler.upgrade() else {
+            return IrqAction::NotHandled;
+        };
+        if device.handle(0).handled() {
+            if let Some(reclaimer) = weak_reclaimer.upgrade() {
+                reclaimer.mark_pending();
             }
-        },
-    )?);
+            IrqAction::Handled
+        } else {
+            IrqAction::NotHandled
+        }
+    })?);
 
     let modalias = dev.modalias().map(alloc::string::String::from);
     let parent_path = crate::common::physical_path(dev.descriptor().location);
@@ -212,7 +214,7 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
 pub fn activate_mmio<B: driver_core::Bus, T: Transport + 'static>(
     dev: &mut DeviceCtx<'_, B>,
     transport: T,
-    irq: usize,
+    irq: driver_core::IrqSpec,
     builder: crate::mmio::ActivationBuilder,
 ) -> Result<crate::mmio::MmioData, ProbeError> {
     let activation = activate(dev, transport, irq)?;

@@ -217,9 +217,14 @@ impl Divider {
             .checked_div(target)
             .map(|r| r.min(u32::MAX as u64) as u32)
             .unwrap_or(1);
-        let lo = approx.saturating_sub(1).max(1);
-        let hi = (approx + 1).min(self.max_div());
-        let mut best = 1u32;
+        // Clamp BOTH ends into the achievable range: an unreachable low
+        // target (approx - 1 > max_div) must yield the max divider (the
+        // lowest reachable rate), not the empty candidate range that left
+        // `best = 1` returning full parent speed; saturating_add keeps
+        // debug builds from panicking on huge parent/target ratios.
+        let hi = approx.saturating_add(1).min(self.max_div());
+        let lo = approx.saturating_sub(1).clamp(1, hi);
+        let mut best = self.max_div();
         let mut best_diff = u64::MAX;
         for d in lo..=hi {
             let r = rate_for(parent_rate, d);

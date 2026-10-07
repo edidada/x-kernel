@@ -10,8 +10,6 @@
 //!   decoded from the early-console layout table;
 //! * `ioport` — x86 ISA COM ports (platform-static alias, no firmware).
 
-#![no_std]
-
 use alloc::{boxed::Box, sync::Arc};
 
 use char_driver::CharDevice;
@@ -178,10 +176,12 @@ impl DriverOps<PlatformBus> for Ns16550IoPortDriver {
             None => {
                 // SAFETY: the port range comes from the platform-static
                 // descriptor and is exclusively owned by this device.
-                unsafe { SerialPort::new_ioport_ns16550(port_base, SerialRole::Auxiliary) }
+                Arc::new(unsafe {
+                    SerialPort::new_ioport_ns16550(port_base, SerialRole::Auxiliary)
+                })
             }
         };
-        publish(dev, Arc::new(port))?;
+        publish(dev, port)?;
         // The ioport variant owns no MMIO mapping (cold-start guard is the
         // MMIO path's); regs stays empty.
         Ok(SerialData { regs: None })

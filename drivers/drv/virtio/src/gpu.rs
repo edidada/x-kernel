@@ -14,10 +14,7 @@ use kclass::{ClassParent, publish_display};
 use pci::{PciBus, PciMatch};
 
 /// `struct pci_device_id virtio_gpu_id_table[]`.
-static IDS: &[PciMatch] = &[
-    PciMatch::device(0x1af4, 0x1000),
-    PciMatch::device(0x1af4, 0x1050),
-];
+static IDS: &[PciMatch] = &[PciMatch::device(0x1af4, 0x1050)];
 
 /// Driver-private data: the published device is owned by its class registry.
 pub struct GpuData;

@@ -472,18 +472,22 @@ fn add_common_device_entries(
 
 fn add_input_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<ProjectedDevice>) {
     let node = &projected.node;
-    let event = format!("devices/{}/{}", node.physical_path(), node.devname());
-    let input = event
-        .strip_suffix(|c: char| c.is_ascii_digit())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| event.clone());
+    // The parent directory is derived from the event index, not by string
+    // trimming: `input/event12` must produce `.../input/input12`, and a
+    // suffix strip cannot tell `event1` from `event12`.
     let index = node
         .devname()
-        .rsplit('t')
+        .rsplit('/')
         .next()
-        .and_then(|t| t.parse::<u32>().ok())
-        .unwrap_or(0);
+        .and_then(|leaf| leaf.strip_prefix("event"))
+        .and_then(|n| n.parse::<u32>().ok());
+    let input = match index {
+        Some(index) => format!("devices/{}/input/input{index}", node.physical_path()),
+        None => format!("devices/{}", node.physical_path()),
+    };
+    let event = format!("devices/{}/{}", node.physical_path(), node.devname());
     add_directory(tree, &event);
+    add_directory(tree, &input);
     add_common_device_entries(tree, projected, &event);
     let event_device_link = format!("{event}/device");
     add_entry(
@@ -491,6 +495,12 @@ fn add_input_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<Pro
         event_device_link.clone(),
         TreeEntry::Symlink(relative_symlink(&event_device_link, &input)),
     );
+    let Some(index) = index else {
+        // Malformed devname: no index to derive the parent from; the event
+        // device itself still projects.
+        add_common_device_entries(tree, projected, &event);
+        return;
+    };
     let input_class_link = format!("class/input/input{index}");
     add_entry(
         tree,
@@ -509,36 +519,70 @@ fn add_input_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<Pro
         input_subsystem_link.clone(),
         TreeEntry::Symlink(relative_symlink(&input_subsystem_link, "class/input")),
     );
-    // The !796 input-parent attributes (name/phys/uniq/id/capabilities)
-    // are carried on the node's class properties; project any
-    // `sysfs:<file>`-prefixed ones plus the id fields when present.
+    // Input-parent attributes come from the class properties the kclass
+    // publisher already produces (single data source: NAME/PHYS/UNIQ,
+    // PRODUCT = bustype/vendor/product/version hex, and the capability
+    // bitmaps EV/KEY/REL/ABS/...). `sysfs:`-prefixed properties, when a
+    // producer adds them later, take precedence for the same file.
+    let mut file_attrs: Vec<(String, String)> = Vec::new();
     for (key, value) in node.properties() {
-        if let Some(file) = key.strip_prefix("sysfs:id/") {
-            add_entry(
-                tree,
-                format!("{input}/id/{file}"),
-                TreeEntry::Attribute(projected.clone(), append_line(value)),
-            );
-        } else if let Some(file) = key.strip_prefix("sysfs:capabilities/") {
-            add_entry(
-                tree,
-                format!("{input}/capabilities/{file}"),
-                TreeEntry::Attribute(projected.clone(), append_line(value)),
-            );
-        } else if let Some(file) = key.strip_prefix("sysfs:") {
-            add_entry(
-                tree,
-                format!("{input}/{file}"),
-                TreeEntry::Attribute(projected.clone(), append_line(value)),
-            );
+        match key.as_str() {
+            "NAME" => file_attrs.push((String::from("name"), value.clone())),
+            "PHYS" => file_attrs.push((String::from("phys"), value.clone())),
+            "UNIQ" => file_attrs.push((String::from("uniq"), value.clone())),
+            "PROP" => file_attrs.push((String::from("properties"), value.clone())),
+            "EV" | "KEY" | "REL" | "ABS" | "MSC" | "SW" | "LED" | "SND" | "FF" | "FF_STATUS" => {
+                file_attrs.push((
+                    format!("capabilities/{}", key.to_lowercase()),
+                    value.clone(),
+                ));
+            }
+            "PRODUCT" => {
+                // bustype/vendor/product/version, slash-separated hex.
+                let parts: Vec<&str> = value.split('/').collect();
+                if parts.len() == 4 {
+                    for (file, part) in [
+                        ("bustype", 0),
+                        ("vendor", 1),
+                        ("product", 2),
+                        ("version", 3),
+                    ] {
+                        file_attrs.push((format!("id/{file}"), String::from(parts[part])));
+                    }
+                }
+            }
+            _ => {
+                if let Some(file) = key.strip_prefix("sysfs:") {
+                    file_attrs.push((String::from(file), value.clone()));
+                }
+            }
         }
+    }
+    for (file, value) in file_attrs {
+        add_entry(
+            tree,
+            format!("{input}/{file}"),
+            TreeEntry::Attribute(projected.clone(), append_line(&value)),
+        );
     }
 }
 
 fn add_drm_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<ProjectedDevice>) {
     let node = &projected.node;
     let physical = node.physical_path();
-    let card = format!("devices/{}/{}", node.physical_path(), node.devname());
+    // sysfs uses the in-class name (`cardN`, Linux `/sys/class/drm/cardN`);
+    // the devnode devname (`dri/cardN`) is the /dev projection's business.
+    let sysfs_name = node
+        .devname()
+        .rsplit('/')
+        .next()
+        .map(|leaf| {
+            leaf.strip_prefix("card")
+                .map(|_| String::from(leaf))
+                .unwrap_or_else(|| String::from(leaf))
+        })
+        .unwrap_or_else(|| node.devname().to_string());
+    let card = format!("devices/{physical}/drm/{sysfs_name}");
     add_directory(tree, &card);
     add_common_device_entries(tree, projected, &card);
     let physical_device = format!("devices/{physical}");
@@ -548,7 +592,7 @@ fn add_drm_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<Proje
         card_device_link.clone(),
         TreeEntry::Symlink(relative_symlink(&card_device_link, &physical_device)),
     );
-    let class_link = format!("class/drm/{}", node.devname());
+    let class_link = format!("class/drm/{sysfs_name}");
     add_entry(
         tree,
         class_link.clone(),
