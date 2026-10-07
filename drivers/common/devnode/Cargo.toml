@@ -12,5 +12,4 @@ categories = ["os", "no-std"]
 
 [dependencies]
 kspin.workspace = true
-log.workspace = true
 unittest = { workspace = true }

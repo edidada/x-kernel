@@ -35,7 +35,6 @@ use driver_core::{
     platform::PlatformBus,
 };
 use khal::firmware::devices as firmware;
-use of;
 
 /// Bring up the new device model.
 pub fn init() {

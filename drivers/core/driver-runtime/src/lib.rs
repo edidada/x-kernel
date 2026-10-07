@@ -275,7 +275,7 @@ impl XKernelRuntime {
             ..
         } = descriptor.location
         else {
-            return Err(RuntimeError::Invalid.into());
+            return Err(RuntimeError::Invalid);
         };
         let bdf = DeviceFunction {
             bus: bus_nr,
@@ -287,7 +287,7 @@ impl XKernelRuntime {
         // no bus re-enumeration here. prog_if/revision/header/multifunction
         // are not consumed by virtio transport setup.
         let DeviceIdentity::Pci(pci_identity) = &descriptor.identity else {
-            return Err(RuntimeError::Invalid.into());
+            return Err(RuntimeError::Invalid);
         };
         let dev_info = DeviceFunctionInfo {
             vendor_id: pci_identity.vendor_id,

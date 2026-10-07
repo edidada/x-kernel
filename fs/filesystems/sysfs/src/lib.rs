@@ -690,7 +690,7 @@ impl SimpleDirOps for SysfsDirectory {
                 let file = CommandFile::new(move |operation| -> VfsResult<Option<Vec<u8>>> {
                     match operation {
                         SimpleFileOperation::Read => projected
-                            .with_available(|node| uevent::uevent_file_contents(node))
+                            .with_available(uevent::uevent_file_contents)
                             .map(Some),
                         SimpleFileOperation::Write { data, .. } => projected
                             .with_available(|node| -> VfsResult<()> {

@@ -191,6 +191,8 @@ impl IoMap {
 
     #[inline]
     pub fn read8(&self, offset: usize) -> u8 {
+        // SAFETY: `access_ptr` bounds-checks the offset against the mapped
+        // region and the pointer is aligned for u8 by construction.
         let value = unsafe { ptr::read_volatile(self.access_ptr(offset, 1)) };
         fence(Ordering::Acquire);
         value
@@ -198,6 +200,8 @@ impl IoMap {
 
     #[inline]
     pub fn read16(&self, offset: usize) -> u16 {
+        // SAFETY: bounds-checked by `access_ptr`; MMIO u16 registers are
+        // naturally aligned, so the cast keeps alignment.
         let value = unsafe { ptr::read_volatile(self.access_ptr(offset, 2) as *const u16) };
         fence(Ordering::Acquire);
         value
@@ -205,6 +209,8 @@ impl IoMap {
 
     #[inline]
     pub fn read32(&self, offset: usize) -> u32 {
+        // SAFETY: bounds-checked by `access_ptr`; MMIO u32 registers are
+        // naturally aligned, so the cast keeps alignment.
         let value = unsafe { ptr::read_volatile(self.access_ptr(offset, 4) as *const u32) };
         fence(Ordering::Acquire);
         value
@@ -212,6 +218,8 @@ impl IoMap {
 
     #[inline]
     pub fn read64(&self, offset: usize) -> u64 {
+        // SAFETY: bounds-checked by `access_ptr`; MMIO u64 registers are
+        // naturally aligned, so the cast keeps alignment.
         let value = unsafe { ptr::read_volatile(self.access_ptr(offset, 8) as *const u64) };
         fence(Ordering::Acquire);
         value
@@ -220,24 +228,28 @@ impl IoMap {
     #[inline]
     pub fn write8(&self, offset: usize, value: u8) {
         fence(Ordering::Release);
+        // SAFETY: bounds-checked by `access_ptr`; u8 needs no alignment.
         unsafe { ptr::write_volatile(self.access_ptr(offset, 1), value) };
     }
 
     #[inline]
     pub fn write16(&self, offset: usize, value: u16) {
         fence(Ordering::Release);
+        // SAFETY: bounds-checked by `access_ptr`; naturally aligned for u16.
         unsafe { ptr::write_volatile(self.access_ptr(offset, 2) as *mut u16, value) };
     }
 
     #[inline]
     pub fn write32(&self, offset: usize, value: u32) {
         fence(Ordering::Release);
+        // SAFETY: bounds-checked by `access_ptr`; naturally aligned for u32.
         unsafe { ptr::write_volatile(self.access_ptr(offset, 4) as *mut u32, value) };
     }
 
     #[inline]
     pub fn write64(&self, offset: usize, value: u64) {
         fence(Ordering::Release);
+        // SAFETY: bounds-checked by `access_ptr`; naturally aligned for u64.
         unsafe { ptr::write_volatile(self.access_ptr(offset, 8) as *mut u64, value) };
     }
 }

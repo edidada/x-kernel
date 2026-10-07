@@ -180,9 +180,6 @@ fn resolve_legacy_route<C: crate::ConfigurationAccess>(
             spec.hwirq = Some(0x20 + (bdf.device & 3) as usize);
             Some(spec)
         }
-        t => {
-            let _ = t;
-            None
-        }
+        _ => None,
     }
 }

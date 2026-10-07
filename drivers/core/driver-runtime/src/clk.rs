@@ -213,7 +213,6 @@ mod tests {
 
         let domain: &'static DeviceDomain = Box::leak(Box::new(DeviceDomain::new()));
         let runtime = {
-            let domain = domain;
             crate::XKernelRuntime::new(move |dep| {
                 domain.wake(dep);
             })

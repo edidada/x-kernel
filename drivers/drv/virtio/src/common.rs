@@ -65,17 +65,6 @@ pub(crate) fn physical_path(location: DeviceLocation) -> String {
     }
 }
 
-pub(crate) fn map_res_error(err: device_res::ResError) -> ProbeError {
-    let error = match err {
-        device_res::ResError::InvalidResource => RuntimeError::Invalid,
-        device_res::ResError::MappingFailed => RuntimeError::Io,
-        device_res::ResError::NoMemory => RuntimeError::NoMemory,
-        device_res::ResError::Busy => RuntimeError::Busy,
-        device_res::ResError::Unsupported => RuntimeError::Unsupported,
-    };
-    ProbeError::Fatal(error)
-}
-
 /// Probe this device's virtio PCI transport through the runtime's
 /// `PciTransportService` extension: kind + concrete transport + irq, with
 /// the PCI/provider boilerplate owned by the service. Compile-time typed —

@@ -28,7 +28,6 @@ ramdisk-static = ["ramdisk", "drv-block/ramdisk-static"]
 fixed-clock = ["dep:drv-clk"]
 
 [dependencies]
-console_driver.workspace = true
 driver-core.workspace = true
 driver-runtime.workspace = true
 kclass = { workspace = true, features = ["char"] }

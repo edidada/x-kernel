@@ -19,6 +19,9 @@ use crate::resource_provider;
 
 pub struct Hal;
 
+// SAFETY: the HAL routes every operation through the global x-kernel
+// resource provider with the lifetimes the vendored trait documents
+// (DMA and MMIO live until the matching dealloc/unmap).
 unsafe impl VirtIoHal for Hal {
     fn dma_alloc(
         pages: usize,
@@ -30,6 +33,8 @@ unsafe impl VirtIoHal for Hal {
         match resource_provider().alloc_coherent(spec) {
             Ok(alloc) => {
                 let cpu_ptr = alloc.cpu_addr as *mut u8;
+                // SAFETY: the provider returned `size` bytes of coherent
+                // memory exclusively owned by this allocation.
                 unsafe { core::ptr::write_bytes(cpu_ptr, 0, size) };
                 (
                     alloc.bus_addr as PhysAddr,
@@ -126,6 +131,8 @@ unsafe impl VirtIoHal for Hal {
             BufferDirection::DeviceToDriver => device_res::DmaDirection::DeviceToDriver,
             BufferDirection::Both => device_res::DmaDirection::Bidirectional,
         };
+        // SAFETY: the vendored contract hands us a buffer valid for the
+        // duration of this call; only a shared read happens here.
         let slice = unsafe { buffer.as_ref() };
         let cpu_addr = NonNull::from(slice).cast::<u8>();
         resource_provider().unmap_streaming(DmaMapping {

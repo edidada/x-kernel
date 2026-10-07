@@ -318,10 +318,10 @@ fn class_notify<T: ClassRuntimeMetadata>(
         let parent_location = device.location();
         match node_class {
             NodeClass::Input(metadata) => {
-                node_compat::input_node(node_id, metadata, &device.driver_name(), parent_location);
+                node_compat::input_node(node_id, metadata, device.driver_name(), parent_location);
             }
             NodeClass::Drm => {
-                node_compat::drm_node(node_id, &device.driver_name(), parent_location);
+                node_compat::drm_node(node_id, device.driver_name(), parent_location);
             }
         }
     }
@@ -959,8 +959,8 @@ pub fn remove_all_detached(owner: u64) {
 /// removals update the active console (the one class-specific consumer
 /// action that is not expressible as a removed-subscription).
 #[cfg(feature = "char")]
-static CHAR_CONSOLE_HOOK: SpinNoPreempt<Option<Arc<dyn Fn(ClassDeviceId) + Send + Sync>>> =
-    SpinNoPreempt::new(None);
+type ConsoleHook = Option<Arc<dyn Fn(ClassDeviceId) + Send + Sync>>;
+static CHAR_CONSOLE_HOOK: SpinNoPreempt<ConsoleHook> = SpinNoPreempt::new(None);
 
 #[cfg(feature = "char")]
 fn char_console_hook() -> Option<Arc<dyn Fn(ClassDeviceId) + Send + Sync>> {

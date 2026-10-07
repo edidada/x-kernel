@@ -34,8 +34,10 @@ static INITIALIZATION: Once<()> = Once::new();
 /// late installation so boot cannot silently omit earlier add events.
 pub fn init() {
     INITIALIZATION.call_once(|| {
-        install_lifecycle_publisher(Arc::new(handle_lifecycle_event))
-            .expect("device-node uevent publisher must initialize before device discovery");
+        assert!(
+            install_lifecycle_publisher(Arc::new(handle_lifecycle_event)),
+            "device-node uevent publisher must initialize before device discovery"
+        );
     });
 }
 

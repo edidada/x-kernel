@@ -214,6 +214,18 @@ impl Transport for SendMmioTransport {
     }
 }
 
+/// Probe a  register window: validate the header magic and
+/// version, read the device type, and build a transport over it.
+///
+/// # Panics
+///
+/// Panics if  is null.
+///
+/// # Safety
+///
+/// `reg_base` must point at a valid virtio-mmio register window of at
+/// least `reg_size` bytes, mapped for the lifetime of the returned
+/// transport (the `'static` in the return type is the caller's promise).
 pub unsafe fn probe_mmio_device(
     reg_base: *mut u8,
     reg_size: usize,

@@ -32,7 +32,6 @@ hwrng = { workspace = true }
 kpoll = { workspace = true, optional = true }
 ktask = { workspace = true, optional = true }
 log.workspace = true
-memaddr.workspace = true
 pci = { workspace = true }
 virtio = { workspace = true, features = ["alloc"] }
 device_res = { workspace = true }

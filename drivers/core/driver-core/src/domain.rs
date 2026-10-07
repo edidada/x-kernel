@@ -377,10 +377,10 @@ impl DeviceDomain {
         };
         for (id, dep) in stuck {
             let mut inner = self.inner.lock();
-            if let Some(entry) = inner.devices.get_mut(&id) {
-                if entry.state == DeviceState::Deferred {
-                    entry.state = DeviceState::Unclaimed;
-                }
+            if let Some(entry) = inner.devices.get_mut(&id)
+                && entry.state == DeviceState::Deferred
+            {
+                entry.state = DeviceState::Unclaimed;
             }
             log::warn!(
                 "driver-core: device {id} gave up waiting on dependency {dep}                  \

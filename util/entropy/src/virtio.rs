@@ -278,6 +278,7 @@ mod tests {
             Ok(output.len())
         }
     }
+    #[def_test(serial)]
     fn collector_retries_without_new_demand_and_stops_only_on_device_failure()
     -> unittest::TestResult {
         for index in 0..3u32 {

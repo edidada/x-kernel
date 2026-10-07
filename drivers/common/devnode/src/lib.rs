@@ -248,6 +248,11 @@ pub fn publish_indexed(
 
 /// Publish a node with an explicit devname and `dev_t` (block disks name
 /// themselves: `vda`, `sda`, ...).
+/// The wide parameter list mirrors Linux's `device_add`-era descriptor
+/// fields (identity, naming, dev_t, topology path, modalias, uevent
+/// properties); grouping them into a struct would hide which fields are
+/// optional at a glance.
+#[allow(clippy::too_many_arguments)]
 pub fn publish(
     id: u64,
     subsystem: &'static str,
@@ -339,16 +344,18 @@ pub fn subscribe(callback: DevNodeCallback) -> Vec<DevNode> {
 
 /// Install the single uevent lifecycle publisher. Must run before any
 /// publication (boot-order discipline, same as !796).
-pub fn install_lifecycle_publisher(callback: DevNodeCallback) -> Result<(), ()> {
+/// Returns `false` if a publisher is already installed (boot-order
+/// discipline, same as !796).
+pub fn install_lifecycle_publisher(callback: DevNodeCallback) -> bool {
     let mut registry = REGISTRY.lock();
     if registry.lifecycle_publisher.is_some() {
-        return Err(());
+        return false;
     }
     if !registry.nodes.is_empty() {
-        return Err(());
+        return false;
     }
     registry.lifecycle_publisher = Some(callback);
-    Ok(())
+    true
 }
 
 fn dispatch_added(

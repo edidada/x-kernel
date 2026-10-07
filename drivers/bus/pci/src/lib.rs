@@ -254,7 +254,11 @@ struct EcamWindow {
 ///  would be.
 #[derive(Clone, Copy)]
 struct SendPtr(NonNull<u8>);
+// SAFETY: the wrapped pointer is plain shareable data (the mapped ECAM
+// base); it is never dereferenced through this wrapper — consumers
+// re-derive an `MmioCam` under their own safety obligations.
 unsafe impl Send for SendPtr {}
+// SAFETY: see the Send impl.
 unsafe impl Sync for SendPtr {}
 
 impl EcamOwner {
