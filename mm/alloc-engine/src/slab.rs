@@ -39,6 +39,9 @@ impl Default for SlabByteAllocator {
 
 impl BaseAllocator for SlabByteAllocator {
     fn init_region(&mut self, start: usize, size: usize) {
+        // Retire overflow descriptors before replacement construction can reuse
+        // their backing storage and overwrite them with new allocator metadata.
+        self.heap = None;
         // SAFETY: The caller provides a valid backing region at
         // `[start, start + size)` for constructing the slab heap.
         self.heap = unsafe { Some(SlabHeap::new(start, size)) };
@@ -118,7 +121,7 @@ pub(crate) mod tests_slab {
     }
 
     #[def_test]
-    fn test_slab_add_region_propagates_region_exhaustion() {
+    fn test_slab_add_region_rejects_too_small_overflow_region() {
         const REGION_SIZE: usize = 4096;
 
         #[derive(Clone)]

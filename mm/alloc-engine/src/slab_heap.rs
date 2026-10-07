@@ -132,7 +132,7 @@ impl<const BLK_SIZE: usize> Slab<BLK_SIZE> {
 
 /// Size-class slab byte allocator.
 ///
-/// Manages a fixed memory region via an internal buddy page allocator.
+/// Manages caller-supplied memory regions via an internal buddy page allocator.
 /// Allocations are served from the slab whose block size is the smallest
 /// that fits the request.
 pub struct SlabHeap {
@@ -171,7 +171,7 @@ impl SlabHeap {
             slab_512: Slab::new(),
             slab_1024: Slab::new(),
             slab_2048: Slab::new(),
-            buddy: BuddyAllocator::new(),
+            buddy: BuddyAllocator::new_with_extra_regions(),
         };
         #[expect(
             clippy::panic,
@@ -193,13 +193,15 @@ impl SlabHeap {
     ///
     /// # Errors
     ///
-    /// Propagates region-table exhaustion and invalid or overlapping input from
-    /// the internal buddy allocator.
+    /// Propagates invalid, overlapping or too-small input from the internal
+    /// buddy allocator. Beyond its inline table, descriptors occupy reserved
+    /// storage in each added region rather than limiting the heap's capacity.
     ///
     /// # Safety
     ///
-    /// The caller must ensure the memory range is valid and does not
-    /// overlap with existing managed memory.
+    /// The caller must ensure the memory range is valid, writable and exclusively
+    /// owned, does not overlap existing managed memory, and remains accessible
+    /// until the heap is dropped. Drop retires descriptors in reserved tails.
     pub unsafe fn add_memory(&mut self, start: usize, size: usize) -> AllocResult {
         self.buddy.add_region(start, size)
     }

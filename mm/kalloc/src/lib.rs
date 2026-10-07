@@ -45,8 +45,8 @@ const LARGE_ALLOC_THRESHOLD_BYTES: usize = 1024 * 1024;
 /// `used=0xd0a3800 avail=0xaf2fe00`, i.e. 175 MiB of its 384 MiB idle.
 ///
 /// Growth stays geometric below this step and linear above it, which bounds the
-/// idle surplus to one step while keeping the region count well under the byte
-/// allocator's region limit.
+/// requested surplus to one step. The slab heap stores overflow region
+/// descriptors in the supplied backing memory rather than a fixed-size table.
 const HEAP_GROW_STEP_MAX_BYTES: usize = 32 * 1024 * 1024;
 
 fn pages_to_bytes(num_pages: usize) -> usize {

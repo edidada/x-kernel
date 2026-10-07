@@ -16,6 +16,14 @@ region overlap before initializing a reserved bitmap tail. Bitmap word access
 uses indices derived from usable pages; storage is sized for all registered
 pages and is never returned by allocation.
 
+For slab growth beyond 64 regions, the reserved tail also contains an aligned
+`ExtraRegion`. The bitmap is rounded to machine words before the descriptor,
+and their combined length is rounded to pages. Registration rejects insufficient
+capacity before writes and checks overlap against both inline and overflow
+regions, including their entire metadata tails. An exclusive iterator advances
+the chain before yielding each mutable region and never visits a descriptor
+twice; the allocator borrow excludes registration, reset and concurrent access.
+
 `push_free` initializes a `FreeNode` in an exclusively owned free chunk and links
 it before setting its head bit. `is_free` rejects an unset bit before reading a
 candidate header. `remove_free` only receives nodes from the matching list or a
@@ -30,7 +38,11 @@ node, and those nodes live in caller memory that may already be reused or
 re-registered by another allocator instance; the marker would then sit in a
 block that a live bitmap still certifies, and a later removal would follow it as
 a node pointer. Retiring a region therefore touches only the allocator's own
-list headers. This crate also calls no allocating API of `intrusive-collections`
+list headers. Overflow list headers reside in caller-owned reserved tails:
+reset and Drop read those descriptors before retiring them, so the tails must
+remain valid until retirement completes. Reinitializing the slab adapter drops
+its old heap before constructing replacement metadata in potentially reused
+storage. This crate also calls no allocating API of `intrusive-collections`
 (its workspace `alloc` feature is unused here), keeping the allocator free of
 recursive heap allocation.
 
@@ -49,6 +61,7 @@ independent atomic cache and must never be updated outside this protocol.
 | A-05 | Double free, wrong allocation size, premature reuse or invalid backing pointer | Caller ownership, matching allocation/free sizes and higher-layer reuse completion are required; debug assertions detect some internal violations | External dependency; not fully detected by this API |
 | A-07 | Retiring a region writes unlink markers into memory another allocator already owns | `Region::drop` calls `fast_clear`, which drops list headers only and performs no node stores | Mitigated |
 | A-06 | Concurrent list/bitmap updates diverge | Exclusive allocator access and `kalloc` locking serialize the full operation | External synchronization required |
+| A-08 | Bounded slab growth reaches the region-table ceiling while old regions remain live | Slab overflow descriptors reside in reserved backing tails; live-region and metadata-boundary regression tests cover growth past 64 regions | Mitigated |
 
 ## Failure and resource handling
 
@@ -61,11 +74,13 @@ independent atomic cache and must never be updated outside this protocol.
 Invalid registration and overlaps return `AllocError` before writing new bitmap
 storage. Allocation exhaustion returns `NoMemory`; no partial allocation is
 published. Metadata reservation reduces allocatable capacity by a few pages;
-because it sits at the tail, `heap_start` stays at the caller's base and the
-largest available block is not reduced. Freeing does not scrub old payload: initialization and
+because it sits at the tail, `heap_start` preserves the caller's base alignment.
+The reduced usable capacity can still lower the largest available block order.
+Freeing does not scrub old payload: initialization and
 confidentiality before reuse remain the caller's responsibility.
 
-Backing memory is not freed by `reset` or Drop. Test fixtures explicitly retire
+Backing memory is not freed by `reset` or Drop. Reserved overflow descriptors
+must stay mapped until those operations return. Test fixtures explicitly retire
 the nested allocator before releasing backing allocations with their original
 layouts. Audits must check every new split/removal path for synchronized head-bit,
 list and free-page-count updates, and every metadata access for region bounds.

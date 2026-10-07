@@ -9,6 +9,8 @@
 //! chunk heads before their headers are read. Coalescing probes one buddy per
 //! order and unlinks it directly, independent of free-list length.
 
+use core::marker::PhantomData;
+
 use intrusive_collections::{LinkedList, LinkedListAtomicLink, UnsafeRef, intrusive_adapter};
 
 use crate::{AllocError, AllocResult};
@@ -16,7 +18,7 @@ use crate::{AllocError, AllocResult};
 /// Maximum buddy order. With 4 KiB pages this gives 2^20 × 4 KiB = 4 GiB blocks.
 const MAX_ORDER: usize = 20;
 
-/// Up to 64 separate memory regions can be registered.
+/// Inline region capacity; the slab heap stores further descriptors in region tails.
 const MAX_REGIONS: usize = 64;
 
 /// Small regions keep their free-head bitmap inside the allocator itself.
@@ -100,6 +102,54 @@ struct Region {
     free_pages: usize,
     free_lists: [LinkedList<FreeNodeAdapter>; MAX_ORDER + 1],
     free_heads: FreeHeadBitmap,
+}
+
+/// Overflow bookkeeping lives in the region's reserved tail, never in the heap.
+struct ExtraRegion {
+    region: Region,
+    next: usize,
+}
+
+struct ExtraRegions<'a> {
+    next: usize,
+    owner: PhantomData<&'a Region>,
+}
+
+impl<'a> Iterator for ExtraRegions<'a> {
+    type Item = &'a Region;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next == 0 {
+            return None;
+        }
+        // SAFETY: Each node is initialized in a disjoint, reserved region tail
+        // and remains mapped until reset. The iterator borrows the allocator,
+        // which prevents removal or modification of the chain during traversal.
+        let node = unsafe { &*(self.next as *const ExtraRegion) };
+        self.next = node.next;
+        Some(&node.region)
+    }
+}
+
+struct ExtraRegionsMut<'a> {
+    next: usize,
+    owner: PhantomData<&'a mut Region>,
+}
+
+impl<'a> Iterator for ExtraRegionsMut<'a> {
+    type Item = &'a mut Region;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next == 0 {
+            return None;
+        }
+        // SAFETY: Exclusive allocator access protects an acyclic chain whose
+        // nodes occupy disjoint reserved tails. Each node is visited once, and
+        // advancing before returning its region prevents overlapping borrows.
+        let node = unsafe { &mut *(self.next as *mut ExtraRegion) };
+        self.next = node.next;
+        Some(&mut node.region)
+    }
 }
 
 impl Drop for Region {
@@ -246,6 +296,8 @@ impl Region {
 pub struct BuddyAllocator<const PAGE_SIZE: usize> {
     regions: [Option<Region>; MAX_REGIONS],
     region_count: usize,
+    extra_regions: usize,
+    allows_extra_regions: bool,
 }
 
 impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
@@ -258,7 +310,18 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
         Self {
             regions: [const { None }; MAX_REGIONS],
             region_count: 0,
+            extra_regions: 0,
+            allows_extra_regions: false,
         }
+    }
+
+    /// Allows the slab heap to grow without exhausting the inline region table.
+    /// Extra descriptors consume reserved backing storage, avoiding recursive
+    /// allocation while the heap is being extended.
+    pub(crate) const fn new_with_extra_regions() -> Self {
+        let mut allocator = Self::new();
+        allocator.allows_extra_regions = true;
+        allocator
     }
 }
 
@@ -282,13 +345,15 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
     /// Add exclusively owned, page-aligned writable storage to the allocator.
     ///
     /// Regions larger than the inline bitmap reserve page-rounded trailing
-    /// storage for one free-head bit per registered page. The heap therefore
-    /// still starts at `base` and keeps its natural alignment; statistics and
+    /// storage for one free-head bit per registered page. Slab heap regions
+    /// beyond the inline region table also reserve their descriptors here.
+    /// The heap still starts at `base` and keeps its natural alignment; statistics and
     /// allocations exclude the reserved tail. Storage must remain valid until
     /// reset and must not overlap live allocations or another allocator's
     /// region.
     pub fn add_region(&mut self, base: usize, size: usize) -> AllocResult {
-        if self.region_count >= MAX_REGIONS {
+        let uses_extra_region = self.region_count >= MAX_REGIONS;
+        if uses_extra_region && !self.allows_extra_regions {
             return Err(AllocError::NoMemory);
         }
         if !PAGE_SIZE.is_power_of_two()
@@ -305,17 +370,28 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
             .ok_or(AllocError::InvalidInput)?;
         let registered_pages = heap_size / PAGE_SIZE;
         // Overlap checks include metadata pages, not just allocatable chunks.
-        for region in self.regions[..self.region_count].iter().flatten() {
+        for region in self.regions() {
             if base < region.region_end && region.heap_start < region_end {
                 return Err(AllocError::MemoryOverlap);
             }
         }
-        let metadata_pages = if registered_pages <= INLINE_BITMAP_WORDS * WORD_BITS {
+        let bitmap_bytes = if registered_pages <= INLINE_BITMAP_WORDS * WORD_BITS {
             0
         } else {
-            registered_pages.div_ceil(8).div_ceil(PAGE_SIZE)
+            registered_pages.div_ceil(WORD_BITS) * core::mem::size_of::<usize>()
         };
-        debug_assert!(metadata_pages < registered_pages);
+        let descriptor_bytes = if uses_extra_region {
+            core::mem::size_of::<ExtraRegion>()
+        } else {
+            0
+        };
+        let metadata_pages = bitmap_bytes
+            .checked_add(descriptor_bytes)
+            .ok_or(AllocError::InvalidInput)?
+            .div_ceil(PAGE_SIZE);
+        if metadata_pages >= registered_pages {
+            return Err(AllocError::NoMemory);
+        }
         // The bitmap goes at the tail so `heap_start` stays equal to `base`.
         // A head prefix would drop the heap's alignment to
         // `tz(metadata_pages)` -- usually 0, since that page count is odd --
@@ -340,7 +416,7 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
             free_lists: [const { LinkedList::new(FreeNodeAdapter::NEW) }; MAX_ORDER + 1],
             free_heads: FreeHeadBitmap {
                 inline: [0; INLINE_BITMAP_WORDS],
-                storage: if metadata_pages == 0 { 0 } else { bitmap_start },
+                storage: if bitmap_bytes == 0 { 0 } else { bitmap_start },
             },
         };
 
@@ -367,14 +443,40 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
             offset += 1 << order;
         }
 
-        self.regions[self.region_count] = Some(region);
+        if uses_extra_region {
+            let node_addr = bitmap_start + bitmap_bytes;
+            // SAFETY: The caller guarantees mapped, writable, exclusively owned
+            // storage. Registration checked overlap and bounds before any writes.
+            // The word-rounded bitmap leaves the descriptor aligned, and their
+            // combined length fits entirely in the reserved tail.
+            unsafe {
+                (node_addr as *mut ExtraRegion).write(ExtraRegion {
+                    region,
+                    next: self.extra_regions,
+                });
+            }
+            self.extra_regions = node_addr;
+        } else {
+            self.regions[self.region_count] = Some(region);
+        }
         self.region_count += 1;
         Ok(())
     }
 
     /// Reset the allocator (discard all regions).
+    ///
+    /// Registered storage must remain mapped and exclusively owned until this
+    /// call returns, including the slab heap's overflow descriptor tails.
     pub fn reset(&mut self) {
-        for i in 0..self.region_count {
+        while self.extra_regions != 0 {
+            // SAFETY: Extra nodes remain exclusively owned and mapped until
+            // reset. Move each descriptor out before retiring it; Region::drop
+            // clears only local list headers and never walks backing free nodes.
+            let node = unsafe { (self.extra_regions as *const ExtraRegion).read() };
+            self.extra_regions = node.next;
+            drop(node);
+        }
+        for i in 0..self.region_count.min(MAX_REGIONS) {
             self.regions[i] = None;
         }
         self.region_count = 0;
@@ -408,8 +510,7 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
         // align_pages determines how alignment constrains the search.
         let align_pages = align / PAGE_SIZE;
 
-        for i in 0..self.region_count {
-            let region = self.regions[i].as_mut().unwrap();
+        for region in self.regions_mut() {
             if let Some(addr) = Self::alloc_aligned::<PAGE_SIZE>(region, order, align_pages) {
                 return Ok(addr);
             }
@@ -497,8 +598,7 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
             return Err(AllocError::InvalidInput);
         }
 
-        for i in 0..self.region_count {
-            let region = self.regions[i].as_mut().unwrap();
+        for region in self.regions_mut() {
             if let Some(addr) = region.alloc_at::<PAGE_SIZE>(base, order) {
                 return Ok(addr);
             }
@@ -511,22 +611,14 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
     // Statistics
     // ------------------------------------------------------------------
 
-    /// Total number of allocatable pages, excluding reserved bitmap storage.
+    /// Total number of allocatable pages, excluding reserved metadata storage.
     pub fn total_pages(&self) -> usize {
-        let mut total = 0;
-        for i in 0..self.region_count {
-            total += self.regions[i].as_ref().unwrap().total_pages;
-        }
-        total
+        self.regions().map(|region| region.total_pages).sum()
     }
 
     /// Number of free pages.
     pub fn free_pages(&self) -> usize {
-        let mut free = 0;
-        for i in 0..self.region_count {
-            free += self.regions[i].as_ref().unwrap().free_pages;
-        }
-        free
+        self.regions().map(|region| region.free_pages).sum()
     }
 
     /// Number of allocated pages.
@@ -575,12 +667,34 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
     // ------------------------------------------------------------------
 
     fn find_region_mut<const PS: usize>(&mut self, addr: usize) -> Option<&mut Region> {
-        for i in 0..self.region_count {
-            if self.regions[i].as_ref().unwrap().contains::<PS>(addr) {
-                return self.regions[i].as_mut();
-            }
-        }
-        None
+        self.regions_mut()
+            .find(|region| region.contains::<PS>(addr))
+    }
+
+    fn regions(&self) -> impl Iterator<Item = &Region> {
+        self.regions[..self.region_count.min(MAX_REGIONS)]
+            .iter()
+            .flatten()
+            .chain(ExtraRegions {
+                next: self.extra_regions,
+                owner: PhantomData,
+            })
+    }
+
+    fn regions_mut(&mut self) -> impl Iterator<Item = &mut Region> {
+        self.regions[..self.region_count.min(MAX_REGIONS)]
+            .iter_mut()
+            .flatten()
+            .chain(ExtraRegionsMut {
+                next: self.extra_regions,
+                owner: PhantomData,
+            })
+    }
+}
+
+impl<const PAGE_SIZE: usize> Drop for BuddyAllocator<PAGE_SIZE> {
+    fn drop(&mut self) {
+        self.reset();
     }
 }
 
