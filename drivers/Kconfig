@@ -191,13 +191,15 @@ comment "Network drivers"
 
 config KFEAT_DRIVER_VIRTIO_RNG
     bool "virtio-rng hardware driver"
-    default n
+    default y if MACHINE_AARCH64_QEMU
+    default y if MACHINE_RISCV64_QEMU
+    default y if MACHINE_X86_64_QEMU
+    default y if MACHINE_LOONGARCH64_QEMU
     help
       Enable the virtio-rng hardware entropy source driver. Required on
       virtio-based virtual platforms (QEMU/CrosVM) when guest randomness should
       come from the VMM-provided entropy device. Enable
       KFEAT_ENTROPY_VIRTIO_RNG separately to connect it to the entropy pool.
-      Disabled by default; virtual platform defconfigs enable it explicitly.
 
 config KFEAT_ENTROPY_VIRTIO_RNG
     bool "Use VirtIO RNG as a trusted entropy source"
@@ -392,17 +394,6 @@ config KFEAT_DRIVER_VIRTIO_NET
     help
       virtio-net on the driver-core model: const PCI id table, per-device
       interrupt ownership, net-class publication through a detached parent.
-
-config KFEAT_DRIVER_VIRTIO_RNG
-    bool "virtio-rng entropy source"
-    depends on KFEAT_CHAR
-    default y if MACHINE_AARCH64_QEMU
-    default y if MACHINE_RISCV64_QEMU
-    default y if MACHINE_X86_64_QEMU
-    default y if MACHINE_LOONGARCH64_QEMU
-    help
-      virtio-rng on the driver-core model: char-class publication consumed
-      by the entropy subsystem.
 
 config KFEAT_DRIVER_VIRTIO_GPU
     bool "virtio-gpu display driver"

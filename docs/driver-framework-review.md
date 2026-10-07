@@ -657,3 +657,60 @@ log（pci_cam_kind 是 feature 常量，实际不会漂移；类型化 cam 属�
 3. **QEMU 恒等映射会掩盖表示层错误**（IRQ 三连修的现场）：IRQ 域路由第一版
    破坏注册而启动照常通过。对策：中断类改动必须 LOG=debug 验证注册路径，
    不能只看启动到 shell。
+
+### 8.5 主线 rebase 与 hwrng 语义移植（截至 6cb2b1229）
+
+Rebase 到 main `f178b7a81`（21 个主线提交）。其中 !912（hwrng 设备契约）+ !916
+（IRQ 驱动熵收集）写在本分支已删除/重组的旧框架路径上——典型的语义冲突而非文本
+冲突。处理：
+
+- **rename 追踪自动携带的部分**：设备层 rng 实现（RngRequest/IRQ 机制）、mock
+  增强、entropy 消费者、Kconfig 的"硬件驱动/可信熵源"拆分、`DeviceKind::Hwrng`。
+- **手工移植的部分**（6cb2b1229）：hwrng 契约落位 drivers/common（跨子系统契约
+  层，与 device-res/driver_base 同类）；kclass 注册 + `with_available` 门禁转发；
+  设备构造与 IRQ 注册分离——驱动层走 `DeviceCtx::request_irq` 单一入口而不是
+  main 的 provider 直传签名；HostRngCompletion 落在驱动层（无全局逃生舱口）；
+  DevIrq guard 由 RngData/mmio activation 持有（撤 IRQ 先于撤发布）。
+- **发现 main 自身的同模式问题**：vendored `MmioTransport` 只声明 `Sync` 没有
+  `Send`，!916 的 `T: Send` 约束让 main 自己的 mmio+rng 组合编译不过——main
+  无人启用 mmio，"从未编译组合"在主线同样发生。我们的处理：`SendMmioTransport`
+  包装（SAFETY 论证写明：Sync 已断言跨线程共享，Send 是更弱主张），并由 feature
+  矩阵覆盖该组合。
+- **验证**：启动日志 `entropy pool initialized (virtio-rng, jitter,
+  hardware_ready=true)`（IRQ 驱动链路端到端）；矩阵 21 组合 + x86 全绿；单测
+  entropy 33（含移植后的 collector 回归）、virtio 28、driver_core 11。
+
+rebase 期间的教训补充：手工解冲突时一次 `&&` 链把带 3 个冲突标记的 kclass 提交
+了进去（grep 计数在链中间、退出码 0 继续走）——下一轮验证评审抓到后 amend 修复。
+教训：**解冲突脚本必须以"标记计数为零"为继续的前置条件**，不能靠链式副效应。
+
+### 8.6 第六轮验证评审修复 + 潜伏死锁的发现（含教训升级）
+
+第六轮评审的三项修复（Kconfig 重复符号、rng mmio 空 close、remove_all_detached 缺
+hwrng 分支）在修复过程中暴露了一个**更有价值的潜伏 bug**：
+
+**`remove_all_detached` 的 while/if-let 自死锁**（全部 8 个类分支，自诞生起存在）：
+Rust 的 while-let/if-let scrutinee 临时量（这里是 registry 的 SpinNoPreempt guard）
+存活贯穿整个循环体，体内 `class_remove` 重取同一把非重入锁 → 自死锁。旧 `if let`
+版本同样有此 bug——**从未触发只因 remove 路径从未被执行**（8.4 教训第 2 条的第
+四个实例，也是最有说服力的一个：不是"测试没覆盖"，是"整条路径零执行"）。新加的
+drain 测试是它第一次运行，softlockup backtrace 符号化直接定位到 lib.rs:864 的
+lock()。修复：全部分支改 `loop { let Some(id) = ... else { break; }; ... }`——
+`let` 语句的临时 guard 在分号处释放。
+
+其余修复：
+- **Kconfig 重复符号**：rebase 残留的 `KFEAT_DRIVER_VIRTIO_RNG` 双定义（192/396，
+  depends/default 各不相同）合并为一处（保留 main 的拆分说明 + 我们的 QEMU
+  default y，删除过时的 depends on KFEAT_CHAR——rng 现在发布 hwrng 类）；
+  check_feature_matrix.sh 加重复符号 lint（`uniq -d` 非空即 fail）。
+- **rng mmio 清理缺口**：activate 返回 (publication, irq)；mmio close 显式
+  `unpublish_hwrng`（与 PCI 移除路径同序：撤发布 → 释 IRQ → 撤映射）；
+  remove_all_detached 补 hwrng 分支。
+- **drain 回归测试**：向每个无投影副作用的启用类（hwrng + net）发布 sentinel、
+  断言 remove_all_detached 排干——新类忘加分支时测试变红。char/display/input
+  排除原因记录在测试注释（发布/移除路径带 devnode 投影与 console 切换，需要
+  完整组合根，由启动时移除覆盖）。
+
+评审建议的"remove_all_detached 收进 class_api! 宏成对生成"记为中期项：宏展开的
+registry 泛型可以生成 drain fn，但 console hook 特例与聚合调用列表仍在——drain
+测试已提供等价的回归护栏，宏化等真正加第二个特例时再做。

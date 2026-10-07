@@ -477,6 +477,134 @@ mod tests {
         assert!(a.detached_owner() != b.detached_owner());
     }
 
+    /// Regression: `remove_all_detached` has a hand-written per-class drain
+    /// branch; a new class added to `class_api!` gets publish/unpublish
+    /// generated but its remove branch must be added by hand — hwrng landed
+    /// without one and its publications leaked on device removal. This test
+    /// publishes a sentinel to the classes without composition-root
+    /// side effects (hwrng — the actual regression — and net) and asserts
+    /// the aggregate drain empties them. char/display/input are excluded:
+    /// their publish/remove paths project devnode publications and switch
+    /// the console, which needs the full composition root — those run
+    /// under boot-time removal instead. Forgetting a branch still turns
+    /// this red through hwrng/net.
+    #[def_test(serial)]
+    fn remove_all_detached_drains_every_enabled_class() {
+        use crate::remove_all_detached;
+
+        fn loc(id: u16) -> DeviceLocation {
+            DeviceLocation::PlatformStatic { id }
+        }
+
+        let owner: u64 = 0xfeed_beef;
+        let mut published = 0usize;
+
+        #[cfg(feature = "hwrng")]
+        {
+            struct SentinelHwrng;
+            impl hwrng::Device for SentinelHwrng {
+                fn name(&self) -> &str {
+                    "drain-sentinel"
+                }
+
+                fn device_kind(&self) -> driver_base::DeviceKind {
+                    driver_base::DeviceKind::Hwrng
+                }
+            }
+            impl hwrng::HwrngDevice for SentinelHwrng {
+                fn read(&self, _buf: &mut [u8]) -> driver_base::DriverResult<usize> {
+                    Ok(0)
+                }
+
+                fn is_failed(&self) -> bool {
+                    false
+                }
+            }
+            crate::publish_hwrng(
+                ClassParent::detached(owner, "drain-test", loc(1)),
+                alloc::sync::Arc::new(SentinelHwrng),
+            )
+            .unwrap();
+            published += 1;
+        }
+
+        #[cfg(feature = "net")]
+        {
+            struct SentinelNet;
+            impl driver_base::Device for SentinelNet {
+                fn name(&self) -> &str {
+                    "net-sentinel"
+                }
+
+                fn device_kind(&self) -> driver_base::DeviceKind {
+                    driver_base::DeviceKind::Net
+                }
+            }
+            impl net::NetDevice for SentinelNet {
+                fn mac(&self) -> net::MacAddress {
+                    net::MacAddress([0; 6])
+                }
+
+                fn can_tx(&self) -> bool {
+                    false
+                }
+
+                fn can_rx(&self) -> bool {
+                    false
+                }
+
+                fn rx_queue_len(&self) -> usize {
+                    0
+                }
+
+                fn tx_queue_len(&self) -> usize {
+                    0
+                }
+
+                fn recycle_rx(&self, _rx_buf: net::NetBufHandle) -> driver_base::DriverResult {
+                    Ok(())
+                }
+
+                fn recycle_tx(&self) -> driver_base::DriverResult {
+                    Ok(())
+                }
+
+                fn send(&self, _tx_buf: net::NetBufHandle) -> driver_base::DriverResult {
+                    Err(driver_base::DriverError::Unsupported)
+                }
+
+                fn recv(&self) -> driver_base::DriverResult<net::NetBufHandle> {
+                    Err(driver_base::DriverError::Unsupported)
+                }
+
+                fn alloc_tx_buf(
+                    &self,
+                    _size: usize,
+                ) -> driver_base::DriverResult<net::NetBufHandle> {
+                    Err(driver_base::DriverError::Unsupported)
+                }
+            }
+            crate::publish_net(
+                ClassParent::detached(owner, "drain-test", loc(3)),
+                alloc::boxed::Box::new(SentinelNet),
+            )
+            .unwrap();
+            published += 1;
+        }
+
+        assert!(published > 0, "no class features enabled in this build");
+        remove_all_detached(owner);
+
+        macro_rules! assert_drained {
+            ($feature:literal, $registry:path) => {
+                #[cfg(feature = $feature)]
+                assert!($registry().lock().find_detached(owner).is_none());
+            };
+        }
+        assert_drained!("hwrng", crate::hwrng_class_registry);
+        assert_drained!("net", crate::net_class_registry);
+    }
+
     #[def_test(serial)]
     fn same_owner_multiple_publications_all_removable() {
         // Regression: remove_all_detached used to take only the FIRST

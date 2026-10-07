@@ -50,7 +50,9 @@ impl DriverOps<PciBus> for VirtioRngDriver {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
-        let irq = activate(dev, transport)?;
+        // The hwrng registry owns the publication; the composition root's
+        // remove notifier withdraws it when this device goes away.
+        let (_publication, irq) = activate(dev, transport)?;
         Ok(RngData { _irq: irq })
     }
 
@@ -111,7 +113,13 @@ fn registration_error(error: PollRegisterError) -> DriverError {
 pub fn activate<B: driver_core::Bus>(
     dev: &mut DeviceCtx<'_, B>,
     transport: impl virtio::Transport + Send + 'static,
-) -> Result<driver_core::DevIrq, ProbeError> {
+) -> Result<
+    (
+        kclass::ClassDevice<kclass::HwrngDeviceImpl>,
+        driver_core::DevIrq,
+    ),
+    ProbeError,
+> {
     let completion: Arc<dyn RngCompletion> = Arc::new(HostRngCompletion::new());
     let device = VirtIoRngDev::<driver_runtime::hal::Hal, _>::try_new(transport, completion)
         .map_err(crate::common::map_driver_error)?;
@@ -136,12 +144,12 @@ pub fn activate<B: driver_core::Bus>(
     device.enable_completion_irq();
 
     let location = crate::common::legacy_location(dev.descriptor().location);
-    publish_hwrng(
+    let publication = publish_hwrng(
         ClassParent::detached(dev.id(), "virtio-rng", location),
         device,
     )
     .map_err(crate::common::map_driver_error)?;
-    Ok(irq)
+    Ok((publication, irq))
 }
 
 /// virtio-mmio activation: owns the class publication; close() unpublishes
@@ -152,21 +160,27 @@ pub fn activate_mmio(
     transport: impl virtio::Transport + Send + 'static,
     builder: crate::mmio::ActivationBuilder,
 ) -> Result<crate::mmio::MmioData, ProbeError> {
-    let irq = activate(dev, transport)?;
+    let (publication, irq) = activate(dev, transport)?;
 
     struct RngActivation {
+        publication: kclass::ClassDevice<kclass::HwrngDeviceImpl>,
         _irq: driver_core::DevIrq,
     }
 
     impl crate::mmio::MmioActivation for RngActivation {
         fn close(self: alloc::boxed::Box<Self>) {
-            // Dropping releases the IRQ guard first; the composition root's
-            // remove notifier withdraws the hwrng publication for this
-            // device, then the mmio mapping drops.
+            // Same order as the PCI removal path: withdraw the class
+            // publication (full removal: callbacks, devnode, unpublish),
+            // then dropping self releases the IRQ guard before the mmio
+            // mapping goes away.
+            kclass::unpublish_hwrng(self.publication.id());
         }
     }
 
-    Ok(builder.build(RngActivation { _irq: irq }))
+    Ok(builder.build(RngActivation {
+        publication,
+        _irq: irq,
+    }))
 }
 
 /// `module_pci_driver()` equivalent.

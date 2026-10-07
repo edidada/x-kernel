@@ -16,6 +16,17 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 TARGET="${1:-aarch64-unknown-none-softfloat}"
+
+# Kconfig duplicate-symbol guard: rebase resolutions have twice left two
+# definitions of one KFEAT symbol (different depends/defaults silently
+# merging). A duplicate makes every derived feature list ambiguous.
+dups="$(grep -oE '^config [A-Z0-9_]+' drivers/Kconfig | sort | uniq -d)"
+if [ -n "$dups" ]; then
+    echo "!!! duplicate Kconfig symbols:" >&2
+    echo "$dups" >&2
+    exit 1
+fi
+
 BASE="$(python3 scripts/kfeat-features.py)"
 
 # KFEAT_DRIVER_* → kfeat feature name (lowercase, dash→underscore like

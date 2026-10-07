@@ -464,14 +464,14 @@ class_api!(
 // Removal entries (compose root's remove notifier)
 // ---------------------------------------------------------------------------
 
-/// Unpublish by publication id — the family activation's close() path.
-#[cfg(feature = "char")]
 /// Remove one hwrng publication by id (full removal path).
 #[cfg(feature = "hwrng")]
 pub fn unpublish_hwrng(id: ClassDeviceId) {
     class_remove(hwrng_class_registry, id);
 }
 
+/// Unpublish by publication id — the family activation's close() path.
+#[cfg(feature = "char")]
 pub fn unpublish_char(id: ClassDeviceId) {
     class_remove(char_class_registry, id);
 }
@@ -859,38 +859,98 @@ pub fn remove_all_detached(owner: u64) {
     // close() paths use. This guarantees no cleanup step is bypassed and
     // both removal entry points (composition-root notifier and activation
     // close) are idempotent with each other.
+    #[cfg(feature = "hwrng")]
+    loop {
+        // Bind via `let`-else: the registry lock guard is a temporary of the
+        // scrutinee and would otherwise live through the loop body (the
+        // `while let` temporary-lifetime rule) — class_remove re-locks the
+        // same registry and would self-deadlock on the non-reentrant spin.
+        let Some(id) = hwrng_class_registry().lock().find_detached(owner) else {
+            break;
+        };
+        class_remove(hwrng_class_registry, id);
+    }
     #[cfg(feature = "char")]
-    while let Some(id) = char_class_registry().lock().find_detached(owner) {
+    loop {
+        // Bind via `let`-else: the registry lock guard is a temporary of the
+        // scrutinee and would otherwise live through the loop body (the
+        // `while let` temporary-lifetime rule) — class_remove re-locks the
+        // same registry and would self-deadlock on the non-reentrant spin.
+        let Some(id) = char_class_registry().lock().find_detached(owner) else {
+            break;
+        };
         class_remove(char_class_registry, id);
         if let Some(console) = char_console_hook() {
             console(id);
         }
     }
     #[cfg(feature = "net")]
-    while let Some(id) = net_class_registry().lock().find_detached(owner) {
+    loop {
+        // Bind via `let`-else: the registry lock guard is a temporary of the
+        // scrutinee and would otherwise live through the loop body (the
+        // `while let` temporary-lifetime rule) — class_remove re-locks the
+        // same registry and would self-deadlock on the non-reentrant spin.
+        let Some(id) = net_class_registry().lock().find_detached(owner) else {
+            break;
+        };
         class_remove(net_class_registry, id);
     }
     #[cfg(feature = "input")]
-    while let Some(id) = input_class_registry().lock().find_detached(owner) {
+    loop {
+        // Bind via `let`-else: the registry lock guard is a temporary of the
+        // scrutinee and would otherwise live through the loop body (the
+        // `while let` temporary-lifetime rule) — class_remove re-locks the
+        // same registry and would self-deadlock on the non-reentrant spin.
+        let Some(id) = input_class_registry().lock().find_detached(owner) else {
+            break;
+        };
         class_remove(input_class_registry, id);
     }
     #[cfg(feature = "display")]
-    while let Some(id) = display_class_registry().lock().find_detached(owner) {
+    loop {
+        // Bind via `let`-else: the registry lock guard is a temporary of the
+        // scrutinee and would otherwise live through the loop body (the
+        // `while let` temporary-lifetime rule) — class_remove re-locks the
+        // same registry and would self-deadlock on the non-reentrant spin.
+        let Some(id) = display_class_registry().lock().find_detached(owner) else {
+            break;
+        };
         class_remove(display_class_registry, id);
     }
     #[cfg(feature = "vsock")]
-    while let Some(id) = vsock_class_registry().lock().find_detached(owner) {
+    loop {
+        // Bind via `let`-else: the registry lock guard is a temporary of the
+        // scrutinee and would otherwise live through the loop body (the
+        // `while let` temporary-lifetime rule) — class_remove re-locks the
+        // same registry and would self-deadlock on the non-reentrant spin.
+        let Some(id) = vsock_class_registry().lock().find_detached(owner) else {
+            break;
+        };
         class_remove(vsock_class_registry, id);
     }
     #[cfg(feature = "virtio-9p")]
-    while let Some(id) = virtio_9p_class_registry().lock().find_detached(owner) {
+    loop {
+        // Bind via `let`-else: the registry lock guard is a temporary of the
+        // scrutinee and would otherwise live through the loop body (the
+        // `while let` temporary-lifetime rule) — class_remove re-locks the
+        // same registry and would self-deadlock on the non-reentrant spin.
+        let Some(id) = virtio_9p_class_registry().lock().find_detached(owner) else {
+            break;
+        };
         class_remove(virtio_9p_class_registry, id);
     }
     // Block publications carry the gendisk lifecycle in
     // ClassRuntimeMetadata::unpublish_class (del_gendisk); the full
     // class_remove path triggers it.
     #[cfg(feature = "block")]
-    while let Some(id) = block_class_registry().lock().find_detached(owner) {
+    loop {
+        // Bind via `let`-else: the registry lock guard is a temporary of the
+        // scrutinee and would otherwise live through the loop body (the
+        // `while let` temporary-lifetime rule) — class_remove re-locks the
+        // same registry and would self-deadlock on the non-reentrant spin.
+        let Some(id) = block_class_registry().lock().find_detached(owner) else {
+            break;
+        };
         class_remove(block_class_registry, id);
     }
 }
