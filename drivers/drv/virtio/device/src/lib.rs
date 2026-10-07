@@ -70,11 +70,14 @@ pub use self::virtio_9p::{VirtIo9pDev, Virtio9pDevice};
 pub mod mock_virtio;
 #[cfg(feature = "socket")]
 mod socket;
+use core::{fmt::Debug, ops::BitAnd};
+
+use bitflags::Flags;
 use driver_base::{DeviceKind, DriverError};
 use virtio_drivers::transport::DeviceType as VirtIoDevType;
 pub use virtio_drivers::{
     BufferDirection, Hal as VirtIoHal, PhysAddr,
-    transport::{Transport, mmio::MmioTransport},
+    transport::{DeviceStatus, InterruptStatus, Transport, mmio::MmioTransport},
 };
 
 #[cfg(feature = "socket")]
@@ -104,10 +107,117 @@ pub use self::socket::VirtIoVsockDev;
 /// # Panics
 ///
 /// Panics if `reg_base` is null.
+/// `MmioTransport` with the `Send` the vendored crate deliberately leaves
+/// out (it only declares `Sync`).
+///
+/// # SAFETY
+///
+/// The vendored `unsafe impl Sync` already asserts cross-thread *sharing*
+/// of MMIO access is sound; `Send` (moving the handle between threads) is
+/// the strictly weaker claim. The wrapped transport's MMIO window is
+/// process-global hardware memory — moving the handle aliases nothing the
+/// `Sync` impl does not already permit, and every device serializes its own
+/// access. Only valid for the `'static` form returned by
+/// [`probe_mmio_device`], whose mapping the caller guarantees for the
+/// device lifetime.
+pub struct SendMmioTransport(pub(crate) MmioTransport<'static>);
+
+// SAFETY: see the type-level comment.
+unsafe impl Send for SendMmioTransport {}
+
+impl Transport for SendMmioTransport {
+    fn device_type(&self) -> self::VirtIoDevType {
+        self.0.device_type()
+    }
+
+    fn read_device_features(&mut self) -> u64 {
+        self.0.read_device_features()
+    }
+
+    fn write_driver_features(&mut self, driver_features: u64) {
+        self.0.write_driver_features(driver_features)
+    }
+
+    fn max_queue_size(&mut self, queue: u16) -> u32 {
+        self.0.max_queue_size(queue)
+    }
+
+    fn notify(&mut self, queue: u16) {
+        self.0.notify(queue)
+    }
+
+    fn get_status(&self) -> DeviceStatus {
+        self.0.get_status()
+    }
+
+    fn set_status(&mut self, status: DeviceStatus) {
+        self.0.set_status(status)
+    }
+
+    fn set_guest_page_size(&mut self, guest_page_size: u32) {
+        self.0.set_guest_page_size(guest_page_size)
+    }
+
+    fn requires_legacy_layout(&self) -> bool {
+        self.0.requires_legacy_layout()
+    }
+
+    fn queue_set(
+        &mut self,
+        queue: u16,
+        size: u32,
+        descriptors: PhysAddr,
+        driver_area: PhysAddr,
+        device_area: PhysAddr,
+    ) {
+        self.0
+            .queue_set(queue, size, descriptors, driver_area, device_area)
+    }
+
+    fn queue_unset(&mut self, queue: u16) {
+        self.0.queue_unset(queue)
+    }
+
+    fn queue_used(&mut self, queue: u16) -> bool {
+        self.0.queue_used(queue)
+    }
+
+    fn ack_interrupt(&mut self) -> InterruptStatus {
+        self.0.ack_interrupt()
+    }
+
+    fn begin_init<F: Flags<Bits = u64> + BitAnd<Output = F> + Debug>(&mut self, features: F) -> F {
+        self.0.begin_init(features)
+    }
+
+    fn finish_init(&mut self) {
+        self.0.finish_init()
+    }
+
+    fn read_config_generation(&self) -> u32 {
+        self.0.read_config_generation()
+    }
+
+    fn read_config_space<T: zerocopy::FromBytes + zerocopy::IntoBytes>(
+        &self,
+        offset: usize,
+    ) -> virtio_drivers::Result<T> {
+        self.0.read_config_space(offset)
+    }
+
+    fn write_config_space<T: zerocopy::IntoBytes + zerocopy::Immutable>(
+        &mut self,
+        offset: usize,
+        value: T,
+    ) -> virtio_drivers::Result<()> {
+        self.0.write_config_space(offset, value)
+    }
+}
+
 pub unsafe fn probe_mmio_device(
     reg_base: *mut u8,
     reg_size: usize,
-) -> Option<(DeviceKind, MmioTransport<'static>)> {
+) -> Option<(DeviceKind, SendMmioTransport)> {
     use core::ptr::NonNull;
 
     use virtio_drivers::transport::mmio::VirtIOHeader;
@@ -116,7 +226,7 @@ pub unsafe fn probe_mmio_device(
     // SAFETY: The caller guarantees `reg_base` points to a valid MMIO region
     // of at least `reg_size` bytes. `MmioTransport::new` only reads the
     // header and validates the magic number and version.
-    let transport = unsafe { MmioTransport::new(header, reg_size) }.ok()?;
+    let transport = SendMmioTransport(unsafe { MmioTransport::new(header, reg_size) }.ok()?);
     let dev_kind = as_device_kind(transport.device_type())?;
     Some((dev_kind, transport))
 }

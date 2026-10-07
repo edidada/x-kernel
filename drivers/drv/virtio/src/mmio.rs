@@ -112,7 +112,7 @@ impl DriverOps<PlatformBus> for MmioDriver {
 }
 
 #[allow(unused_variables)]
-fn dispatch<T: virtio::Transport + 'static>(
+fn dispatch<T: virtio::Transport + Send + 'static>(
     dev: &mut DeviceCtx<'_, PlatformBus>,
     kind: driver_base::DeviceKind,
     transport: T,
@@ -120,7 +120,6 @@ fn dispatch<T: virtio::Transport + 'static>(
 ) -> Result<MmioData, ProbeError> {
     use driver_base::DeviceKind;
     match kind {
-        DeviceKind::Char => dispatch_char(dev, transport, builder),
         DeviceKind::Net => {
             #[cfg(feature = "net")]
             {
@@ -147,6 +146,7 @@ fn dispatch<T: virtio::Transport + 'static>(
                 Err(ProbeError::Fatal(RuntimeError::Unsupported))
             }
         }
+        DeviceKind::Char | DeviceKind::Hwrng => dispatch_char(dev, transport, builder),
         DeviceKind::Display => dispatch_simple_display(dev, transport, builder),
         DeviceKind::Input => dispatch_simple_input(dev, transport, builder),
         DeviceKind::Vsock => dispatch_simple_vsock(dev, transport, builder),
@@ -161,7 +161,7 @@ fn dispatch<T: virtio::Transport + 'static>(
 /// Char-family dispatch: exactly one char family is wired per build
 /// (virtio-rng today); future char families get their own kind-checked arm.
 #[allow(unused_variables)]
-fn dispatch_char<T: virtio::Transport + 'static>(
+fn dispatch_char<T: virtio::Transport + Send + 'static>(
     dev: &mut DeviceCtx<'_, PlatformBus>,
     transport: T,
     builder: ActivationBuilder,
@@ -181,7 +181,7 @@ fn dispatch_char<T: virtio::Transport + 'static>(
 macro_rules! simple_family_dispatch {
     ($fn_name:ident, $feature:literal, $module:ident) => {
         #[allow(unused_variables)]
-        fn $fn_name<T: virtio::Transport + 'static>(
+        fn $fn_name<T: virtio::Transport + Send + 'static>(
             dev: &mut DeviceCtx<'_, PlatformBus>,
             transport: T,
             builder: ActivationBuilder,

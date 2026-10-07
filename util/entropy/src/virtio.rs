@@ -219,7 +219,6 @@ mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use hwrng::{Device, DeviceKind, DriverError, DriverResult};
-    use kdevice::{BusTypeId, DeviceDesc, DeviceDriver, MatchResult};
 
     #[derive(Default)]
     struct HardwareState {
@@ -279,73 +278,25 @@ mod tests {
             Ok(output.len())
         }
     }
-    const BUS: BusTypeId = BusTypeId::new("entropy-collector-test");
-    struct Bus;
-    impl kdevice::BusType for Bus {
-        fn id(&self) -> BusTypeId {
-            BUS
-        }
-
-        fn match_desc(&self, _: &dyn DeviceDriver, _: &DeviceDesc) -> MatchResult {
-            MatchResult::NoMatch
-        }
-    }
-    struct Driver;
-    impl kdevice::DeviceMatcher for Driver {
-        fn matches(&self, _: &DeviceDesc) -> MatchResult {
-            MatchResult::NoMatch
-        }
-    }
-    impl DeviceDriver for Driver {
-        fn name(&self) -> &'static str {
-            "entropy-collector-test"
-        }
-
-        fn device_kind(&self) -> DeviceKind {
-            DeviceKind::Hwrng
-        }
-
-        fn bus_types(&self) -> &'static [BusTypeId] {
-            &[BUS]
-        }
-
-        fn matcher(&self) -> &dyn kdevice::DeviceMatcher {
-            self
-        }
-
-        fn probe_device(&self, _: Arc<kdevice::DeviceObject>) -> Result<(), DriverError> {
-            Err(DriverError::Unsupported)
-        }
-    }
-
-    #[def_test(serial)]
-    fn collector_retries_without_new_demand_and_stops_only_on_device_failure() {
-        kdevice::register_bus_type(Arc::new(kdevice::BusTypeObject::new(Arc::new(Bus))));
-        let bus = kdevice::register_bus_instance(BUS, "entropy-collector-test");
-        let driver = kdevice::register_driver_object(Arc::new(Driver));
-        for index in 0..3 {
-            let parent = kdevice::adopt_active_device(kdevice::ActiveDeviceAdoption {
-                bus_id: bus.id(),
-                parent: None,
-                location: kdevice::DeviceLocation::PlatformStatic { id: index },
-                origin: kdevice::DiscoveryOrigin::PlatformStatic,
-                identity: kdevice::DeviceIdentity::Platform(kdevice::PlatformIdentity {
-                    alias: Some("collector-test"),
-                    firmware_id: None,
-                }),
-                transport: None,
-                resources: kdevice::ResourceSet::new(),
-                driver: driver.clone(),
-            })
-            .unwrap();
+    fn collector_retries_without_new_demand_and_stops_only_on_device_failure()
+    -> unittest::TestResult {
+        for index in 0..3u32 {
             let hardware = Arc::new(Hardware {
                 state: Arc::new(SpinNoIrq::new(HardwareState::default())),
                 reads: AtomicUsize::new(0),
                 ready: WaitQueue::new(),
                 entered: WaitQueue::new(),
             });
-            let class = kclass::publish_hwrng(parent.clone(), hardware.clone()).unwrap();
-            let source = VirtioEntropySource::new(class).unwrap();
+            let class = kclass::publish_hwrng(
+                kclass::ClassParent::detached(
+                    index as u64,
+                    "entropy-collector-test",
+                    devnode::DeviceLocation::PlatformStatic { id: index as u16 },
+                ),
+                hardware.clone(),
+            )
+            .unwrap();
+            let source = VirtioEntropySource::new(class.clone()).unwrap();
             assert_eq!(hardware.reads.load(Ordering::Acquire), 0);
             source.request();
             hardware.wait_reads(1);
@@ -388,7 +339,8 @@ mod tests {
             source.work.flush().unwrap();
             assert_eq!(hardware.reads.load(Ordering::Acquire), reads);
             source.work.shutdown().unwrap();
-            kdevice::remove_device_managed(parent.id()).unwrap();
+            kclass::unpublish_hwrng(class.id());
         }
+        unittest::TestResult::Ok
     }
 }

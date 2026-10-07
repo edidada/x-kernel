@@ -83,6 +83,12 @@ impl HwrngDevice for ClassDevice<HwrngDeviceImpl> {
     fn read(&self, buf: &mut [u8]) -> DriverResult<usize> {
         self.with_available(|device| device.read(buf))
     }
+
+    fn is_failed(&self) -> bool {
+        // Query on cached state; a post-removal clone answers its last
+        // known terminal state.
+        self.with(|device| device.is_failed())
+    }
 }
 #[cfg(feature = "input")]
 pub use input::{Event, EventType, InputDevice, InputDeviceId};
@@ -460,6 +466,12 @@ class_api!(
 
 /// Unpublish by publication id — the family activation's close() path.
 #[cfg(feature = "char")]
+/// Remove one hwrng publication by id (full removal path).
+#[cfg(feature = "hwrng")]
+pub fn unpublish_hwrng(id: ClassDeviceId) {
+    class_remove(hwrng_class_registry, id);
+}
+
 pub fn unpublish_char(id: ClassDeviceId) {
     class_remove(char_class_registry, id);
 }

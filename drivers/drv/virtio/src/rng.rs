@@ -2,16 +2,25 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! virtio-rng driver on the driver-core model (PCI transport).
+//! virtio-rng driver on the driver-core model.
 //!
-//! The smallest consumer template: const PCI id table, one class
-//! publication (`char`), no interrupt. The entropy subsystem consumes it
-//! through the model-agnostic `kclass::char_devices()` view.
+//! The device collects entropy IRQ-driven (main's !916 semantics): reads
+//! sleep on the host [`RngCompletion`] capability until the queue interrupt
+//! delivers data. Published through the `hwrng` class; the entropy
+//! subsystem's VirtIO source consumes it when `KFEAT_ENTROPY_VIRTIO_RNG`
+//! connects the class to the pool (a separate trust decision).
 
-use alloc::boxed::Box;
+use alloc::sync::{Arc, Weak};
 
-use driver_core::{BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError};
-use kclass::{ClassParent, publish_char};
+use device_res::IrqHandler;
+use driver_base::DriverError;
+use driver_core::{
+    BoundDevice, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
+};
+use hwrng::completion::RngCompletion;
+use kclass::{ClassParent, publish_hwrng};
+use kpoll::{PollRegisterError, PollSet};
+use ktask::future::PreparedTaskWait;
 use pci::{PciBus, PciMatch};
 use virtio::VirtIoRngDev;
 
@@ -22,9 +31,12 @@ static IDS: &[PciMatch] = &[
     PciMatch::device(0x1af4, 0x1045),
 ];
 
-/// Driver-private data: the published char device itself is owned by the
-/// char class registry; there is nothing else to hold.
-pub struct RngData;
+/// Driver-private data: the completion IRQ guard, released when the device
+/// is removed (data drops before the class publication is withdrawn). The
+/// published device itself is owned by the hwrng class registry.
+pub struct RngData {
+    _irq: driver_core::DevIrq,
+}
 
 /// The driver ops.
 pub struct VirtioRngDriver;
@@ -34,12 +46,12 @@ impl DriverOps<PciBus> for VirtioRngDriver {
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PciBus>) -> Result<RngData, ProbeError> {
         let (kind, transport, _irq) = crate::common::pci_transport(dev)?;
-        if !matches!(kind, driver_base::DeviceKind::Char) {
+        if !matches!(kind, driver_base::DeviceKind::Hwrng) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
-        activate(dev, transport)?;
-        Ok(RngData)
+        let irq = activate(dev, transport)?;
+        Ok(RngData { _irq: irq })
     }
 
     fn remove(&self, _dev: &mut BoundDevice<'_, PciBus, RngData>) {
@@ -48,22 +60,88 @@ impl DriverOps<PciBus> for VirtioRngDriver {
     }
 }
 
+/// The host completion capability (main's `rng_completion` host provider):
+/// task-context wait on a PollSet, IRQ-safe wake.
+struct HostRngCompletion {
+    waiters: PollSet,
+}
+
+impl HostRngCompletion {
+    fn new() -> Self {
+        Self {
+            waiters: PollSet::new(),
+        }
+    }
+}
+
+impl RngCompletion for HostRngCompletion {
+    fn wait_until(&self, ready: &mut dyn FnMut() -> bool) -> driver_base::DriverResult {
+        let mut task_wait = PreparedTaskWait::prepare().map_err(|_| DriverError::InvalidInput)?;
+        if ready() {
+            return Ok(());
+        }
+
+        let waker = task_wait.waker();
+        loop {
+            // Register before rechecking so a wake between check and park
+            // cannot be lost; retry after spurious wakes.
+            let registration = self.waiters.register(&waker).map_err(registration_error)?;
+            if ready() {
+                return Ok(());
+            }
+            task_wait.park();
+            drop(registration);
+        }
+    }
+
+    fn notify(&self) {
+        self.waiters.wake();
+    }
+}
+
+fn registration_error(error: PollRegisterError) -> DriverError {
+    match error {
+        PollRegisterError::NoMemory | PollRegisterError::IdExhausted => DriverError::NoMemory,
+        PollRegisterError::InvalidState => DriverError::InvalidInput,
+    }
+}
+
 /// Construct and publish the device for a probed transport — shared by the
 /// PCI driver above and the virtio-mmio transport driver.
 pub fn activate<B: driver_core::Bus>(
     dev: &mut DeviceCtx<'_, B>,
-    transport: impl virtio::Transport + 'static,
-) -> Result<(), ProbeError> {
-    let time = dev.time().map_err(|err| ProbeError::Fatal(err))?;
-    let device = VirtIoRngDev::<driver_runtime::hal::Hal, _>::try_new(transport, time)
+    transport: impl virtio::Transport + Send + 'static,
+) -> Result<driver_core::DevIrq, ProbeError> {
+    let completion: Arc<dyn RngCompletion> = Arc::new(HostRngCompletion::new());
+    let device = VirtIoRngDev::<driver_runtime::hal::Hal, _>::try_new(transport, completion)
         .map_err(crate::common::map_driver_error)?;
+
+    // Completion delivery: the same single IRQ entry every driver uses. The
+    // closure keeps only a weak reference — the class publication owns the
+    // strong one and removal withdraws the irq before teardown.
+    let weak: Weak<VirtIoRngDev<driver_runtime::hal::Hal, _>> = Arc::downgrade(&device);
+    let spec = dev
+        .irq(0)
+        .map_err(|_| ProbeError::Fatal(RuntimeError::Invalid))?;
+    let irq = dev.request_irq(spec, "virtio-rng", move || {
+        let Some(device) = weak.upgrade() else {
+            return IrqAction::NotHandled;
+        };
+        if device.handle(0).handled() {
+            IrqAction::Handled
+        } else {
+            IrqAction::NotHandled
+        }
+    })?;
+    device.enable_completion_irq();
+
     let location = crate::common::legacy_location(dev.descriptor().location);
-    publish_char(
+    publish_hwrng(
         ClassParent::detached(dev.id(), "virtio-rng", location),
-        Box::new(device),
+        device,
     )
     .map_err(crate::common::map_driver_error)?;
-    Ok(())
+    Ok(irq)
 }
 
 /// virtio-mmio activation: owns the class publication; close() unpublishes
@@ -71,32 +149,24 @@ pub fn activate<B: driver_core::Bus>(
 #[cfg(feature = "mmio")]
 pub fn activate_mmio(
     dev: &mut driver_core::DeviceCtx<'_, driver_core::platform::PlatformBus>,
-    transport: impl virtio::Transport + 'static,
+    transport: impl virtio::Transport + Send + 'static,
     builder: crate::mmio::ActivationBuilder,
 ) -> Result<crate::mmio::MmioData, ProbeError> {
-    let time = dev.time().map_err(driver_core::ProbeError::Fatal)?;
-    let device = VirtIoRngDev::<driver_runtime::hal::Hal, _>::try_new(transport, time)
-        .map_err(crate::common::map_driver_error)?;
-    let location = crate::common::legacy_location(dev.descriptor().location);
-    let handle = publish_char(
-        ClassParent::detached(dev.id(), "virtio-rng", location),
-        Box::new(device),
-    )
-    .map_err(crate::common::map_driver_error)?;
+    let irq = activate(dev, transport)?;
 
     struct RngActivation {
-        publication: kclass::ClassDevice<kclass::CharDeviceImpl>,
+        _irq: driver_core::DevIrq,
     }
 
     impl crate::mmio::MmioActivation for RngActivation {
         fn close(self: alloc::boxed::Box<Self>) {
-            kclass::unpublish_char(self.publication.id());
+            // Dropping releases the IRQ guard first; the composition root's
+            // remove notifier withdraws the hwrng publication for this
+            // device, then the mmio mapping drops.
         }
     }
 
-    Ok(builder.build(RngActivation {
-        publication: handle,
-    }))
+    Ok(builder.build(RngActivation { _irq: irq }))
 }
 
 /// `module_pci_driver()` equivalent.

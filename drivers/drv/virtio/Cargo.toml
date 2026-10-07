@@ -14,7 +14,7 @@ categories = ["os", "no-std"]
 default = []
 blk = ["dep:block", "kclass/block", "virtio/block"]
 net = ["kclass/net", "virtio/net"]
-rng = ["kclass/char", "virtio/rng"]
+rng = ["kclass/hwrng", "dep:kpoll", "dep:ktask", "virtio/rng"]
 gpu = ["kclass/display", "virtio/gpu"]
 input = ["kclass/input", "virtio/input"]
 vsock = ["kclass/vsock", "virtio/socket"]
@@ -28,6 +28,9 @@ driver-core = { workspace = true }
 driver-runtime = { workspace = true, features = ["virtio-hal"] }
 driver_base = { workspace = true }
 kclass = { workspace = true }
+hwrng = { workspace = true }
+kpoll = { workspace = true, optional = true }
+ktask = { workspace = true, optional = true }
 log.workspace = true
 memaddr.workspace = true
 pci = { workspace = true }

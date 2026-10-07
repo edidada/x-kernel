@@ -14,14 +14,15 @@ default = []
 entropy_arch_cpu = ["dep:karch"]
 entropy_smccc_trng = ["dep:kplat-aarch64"]
 entropy_jitter = []
-entropy_virtio_rng = ["dep:hwrng", "dep:kspin", "dep:kdevice", "dep:kclass", "dep:kworkng"]
+entropy_virtio_rng = ["dep:hwrng", "dep:kspin", "dep:kclass", "dep:kworkng", "dep:driver-core", "dep:devnode"]
 
 [dependencies]
 kworkng = { workspace = true, optional = true }
 hwrng = { workspace = true, optional = true }
-kdevice = { workspace = true, optional = true }
 kspin = { workspace = true, optional = true }
 kclass = { workspace = true, features = ["hwrng"], optional = true }
+driver-core = { workspace = true, optional = true }
+devnode = { workspace = true, optional = true }
 khal.workspace = true
 karch = { workspace = true, optional = true }
 klazy.workspace = true

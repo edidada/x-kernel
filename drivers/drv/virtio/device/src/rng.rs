@@ -209,8 +209,22 @@ impl<H: Hal + Send + 'static, T: Transport + Send + 'static> VirtIoRngDev<H, T> 
         )
         .map_err(map_irq_error)?;
         *device.irq_guard.lock() = Some(irq);
-        device.request.lock().resources.device.enable_interrupts();
+        device.enable_completion_irq();
         Ok(device)
+    }
+
+    /// Construct without registering the completion IRQ — the driver layer
+    /// owns registration through its device services (`DeviceCtx::
+    /// request_irq`, the single entry point), then calls
+    /// [`Self::enable_completion_irq`]. The device implements
+    /// [`device_res::IrqHandler`] for the registration closure.
+    pub fn try_new(transport: T, completion: Arc<dyn RngCompletion>) -> DriverResult<Arc<Self>> {
+        Ok(Arc::new(Self::new(transport, completion)?))
+    }
+
+    /// Start completion delivery. Call once the IRQ handler is registered.
+    pub fn enable_completion_irq(&self) {
+        self.request.lock().resources.device.enable_interrupts();
     }
 }
 
