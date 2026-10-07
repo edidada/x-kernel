@@ -324,18 +324,19 @@ config KFEAT_DRIVER_VIRTIO_INPUT
       virtio-input on the driver-core model (PCI).
 
 config KFEAT_DRIVER_VIRTIO_SOCKET
-    bool "virtio-vsock driver"
+    bool "virtio-vsock transport"
     depends on KFEAT_VSOCK
-    default n
+    default y
     help
-      virtio-vsock on the driver-core model (PCI).
+      Enable the virtio-vsock transport driver used by AF_VSOCK on virtio
+      platforms.
 
 config KFEAT_DRIVER_VIRTIO_9P
     bool "virtio-9p filesystem transport"
     depends on KFEAT_FS_9P
-    default n
+    default y
     help
-      virtio-9p on the driver-core model (PCI).
+      Enable the virtio-9p filesystem transport driver.
 
 config KFEAT_DRIVER_VIRTIO_MMIO
     bool "virtio-mmio transport driver"
