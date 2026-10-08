@@ -26,10 +26,23 @@ scripts/ci/docker/
   FROM ${BASE_IMAGE}
   ```
 
-  文件里只写这一版的改动，构建时用 `--base <上一版镜像>@sha256:...` 指定上一版。
+  文件里只写这一版的改动，需要编译的工具可以照完整版本的做法放在单独的构建
+  阶段里。`BASE_IMAGE` 的默认值是基础镜像的唯一配置，必须是上一版已发布的
+  multi-arch 镜像的 digest 引用；`build.sh` 拒绝没有固定 digest 的增量版本。
 - 更换基础系统，或增量层积累太多时，新建一个完整版本（换系统时同时新建目录），
   主版本号加一。
 - 已发布版本的文件不再修改，要改就发一个新版本。
+
+## 镜像内容与缓存 volume
+
+流水线把几个节点本地 named volume 挂到镜像的 `/xkernel-cache/*` 和
+`/usr/local/rustup/toolchains` 上（见 `Jenkinsfile`）。镜像放在这些目录下的
+内容只会复制进新建的 volume，已有 volume 看不到：
+
+- 预装到 `/usr/local/rustup/toolchains` 的 toolchain 有变化时，同时递增
+  `Jenkinsfile` 中 Rustup volume 名称的后缀，让节点新建 volume。
+- 每个容器都必须看到的内容（例如预先构建的 Dylint driver）放在这些挂载点
+  之外。
 
 ## 构建与检查
 
@@ -50,6 +63,9 @@ scripts/ci/docker/build.sh "$DOCKERFILE" --repo xk-local-amd64
 scripts/ci/docker/build.sh "$DOCKERFILE" --repo xk-local-arm64 --platform linux/arm64
 ```
 
+增量版本从 `BASE_IMAGE` 固定的上一版构建。buildx 的 `docker-container` 构建器
+从镜像仓库拉取上一版，不读取本机的镜像。
+
 在 QEMU 模拟下构建 arm64 比原生慢得多。buildx 构建器会保留缓存，之后的构建
 只重做改动过的阶段。
 
@@ -69,7 +85,10 @@ shellcheck scripts/ci/docker/*.sh
    scripts/ci/docker/build.sh "$DOCKERFILE" --repo <registry>/x-kernel-builder --push
    ```
 
-3. 把镜像引用换成 `<repo>:<tag>@sha256:<digest>`：
+3. CI 节点无法访问 Docker Hub，在每个节点上用 `docker load` 预置对应平台的
+   镜像。`docker load` 只保留 tag，不保留 manifest digest，所以流水线按
+   `<repo>:<tag>` 引用镜像；digest 记在下一个增量版本的文件开头和 PR 描述里。
+4. 把镜像引用换成 `<repo>:<tag>`：
    - 本仓库 `Jenkinsfile` 顶部的 `agent { docker { image ... } }`；
    - starry-test-harness 仓库 `Jenkinsfile` 中的 `dailyBuilderImage()`。
 

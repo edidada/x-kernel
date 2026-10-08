@@ -35,8 +35,8 @@ xkernel-agent docker vhost-vsock container-vsock
 
 ## 容器与设备
 
-流水线使用的 builder 镜像以 `Jenkinsfile` 顶部 `agent { docker { image ... } }` 中的 tag 和
-digest 为准。镜像的 Dockerfile 在仓库内的 `scripts/ci/docker/` 维护，构建、
+流水线使用的 builder 镜像以 `Jenkinsfile` 顶部 `agent { docker { image ... } }` 中的引用
+为准。镜像的 Dockerfile 在仓库内的 `scripts/ci/docker/` 维护，构建、
 检查和发布方法见该目录的 README。OCI index 只包含原生 `linux/amd64` 和
 `linux/arm64` 镜像。镜像默认用户是
 `jenkins`（`1000:1000`）；设备组 `36` 由流水线在运行时通过 `--group-add 36`
@@ -75,16 +75,19 @@ $WORKSPACE/
 Build 与 Run 阶段之间需要连续使用的 Cargo、boot 和 kernel 产物。它不跨
 Jenkins Build 共享。
 
-以下节点本地 named volume 可以跨 Build 复用：
+以下节点本地 named volume 可以跨 Build 复用，volume 名称以 `Jenkinsfile` 中的
+`--mount` 参数为准：
 
-| Volume | 容器路径 | 内容 |
-| --- | --- | --- |
-| `xkernel-cargo-home-v2` | `/xkernel-cache/cargo` | Cargo registry、git 与元数据缓存 |
-| `xkernel-rustup-toolchains-v2` | `/usr/local/rustup/toolchains` | 固定版本 Rust toolchain |
-| `xkernel-rootfs-cache-v2` | `/xkernel-cache/rootfs` | 按架构校验后的 rootfs 模板 |
+| 容器路径 | 内容 |
+| --- | --- |
+| `/xkernel-cache/cargo` | Cargo registry、git 与元数据缓存 |
+| `/usr/local/rustup/toolchains` | 固定版本 Rust toolchain |
+| `/xkernel-cache/rootfs` | 按架构校验后的 rootfs 模板 |
 
-镜像中的这些挂载点已经是 `1000:1000`。Docker 第一次创建 volume 时会继承
-正确所有权，不需要预先进入 volume 修权限。Cargo 工具本体位于只读的
+镜像中的这些挂载点已经是 `1000:1000`。Docker 第一次创建 volume 时会把镜像中
+该目录的内容连同所有权复制进去，不需要预先进入 volume 修权限。已有的 volume
+不会再从镜像更新。volume 名称带版本后缀，需要让节点用新镜像重新初始化某个
+volume 时，递增 `Jenkinsfile` 中对应的后缀。Cargo 工具本体位于只读的
 `/usr/local/cargo`，与可变 Cargo 缓存分离。Cargo 的镜像源配置放在镜像的
 `/.cargo/config.toml`，不在缓存 volume 里，随镜像更新生效。
 
@@ -93,6 +96,14 @@ Jenkins Build 共享。
 版本到 Rustup volume；后续构建复用它。安装通过 volume 内文件锁串行化。
 rootfs 下载同样按架构加锁，并通过临时文件、完整性检查和原子替换避免并发
 读到半成品。
+
+Dylint 检查所需的工具都在镜像中：`cargo-dylint`、`dylint-link` 与其他 Cargo
+工具一起位于 `/usr/local/cargo/bin`；lint 库使用的 nightly toolchain 及其组件
+预装在 `/usr/local/rustup/toolchains` 下，新建的 Rustup volume 会带上它；与之
+匹配的 Dylint driver 预先构建在镜像环境变量 `DYLINT_DRIVER_PATH` 指向的目录，
+该目录不在任何缓存 volume 中。版本以 `scripts/ci/docker/` 中当前镜像版本的
+Dockerfile 为准。镜像改动预装 toolchain 时，同时递增 Rustup volume 的后缀，
+否则已有节点看不到新预装的内容。
 
 guest case target、kernel target、覆盖率与测试制品不能放入共享缓存。
 
