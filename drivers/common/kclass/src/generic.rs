@@ -33,10 +33,6 @@ impl ClassDeviceId {
         Self(NEXT_DETACHED_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed))
     }
 
-    /// Derive a record key from a devnode publication id (deterministic,
-    /// collision-free with allocated ids: node ids never carry the tag bit
-    /// used by allocated detached ids... actually they may; use a fresh
-    /// derivation instead — hash the node id into the tagged space).
     /// Wrap an existing raw id without re-deriving it.
     ///
     /// For lookups where the caller already holds the id's owner (e.g. the

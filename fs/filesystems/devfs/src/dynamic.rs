@@ -64,17 +64,14 @@ fn input_file(
     id: ClassDeviceId,
 ) -> Option<(Arc<DeviceFile>, DeviceRemovalCallback)> {
     let device = find_input_device(id)?;
-    let event = Arc::new(EventDev::new(device));>>>>>>> 9cfe18b9a (refactor(kclass): decouple the class layer from the legacy device object)
+    let event = Arc::new(EventDev::new(device));
     let weak_event = Arc::downgrade(&event);
     let on_remove: DeviceRemovalCallback = Arc::new(move || {
         if let Some(event) = weak_event.upgrade() {
             event.detach();
         }
     });
-    Ok(Some((
-        DeviceFile::new_character(fs, number, event)?,
-        on_remove,
-    )))
+    Some((DeviceFile::new_character(fs, number, event), on_remove))
 }
 
 fn display_file(
@@ -82,7 +79,7 @@ fn display_file(
     number: DeviceId,
     id: ClassDeviceId,
 ) -> Option<(Arc<DeviceFile>, DeviceRemovalCallback)> {
-    let device = find_display_device(id)?;>>>>>>> 9cfe18b9a (refactor(kclass): decouple the class layer from the legacy device object)
+    let device = find_display_device(id)?;
     let card = drmdevice::DrmCard::new(device);
     let weak_card = Arc::downgrade(&card);
     let on_remove: DeviceRemovalCallback = Arc::new(move || {
@@ -90,10 +87,7 @@ fn display_file(
             card.notify_removed();
         }
     });
-    Ok(Some((
-        DeviceFile::new_character(fs, number, card)?,
-        on_remove,
-    )))
+    Some((DeviceFile::new_character(fs, number, card), on_remove))
 }
 
 fn node_key(node: &DevNode) -> ClassDeviceId {
@@ -119,7 +113,7 @@ fn add_device(projection: &mut DeviceProjection, node: DevNode) {
             let file = DeviceFile::new_block(projection.fs.clone(), number);
             Some((file, Arc::new(|| {}) as DeviceRemovalCallback))
         }
-        _ => None,>>>>>>> 9faa13552 (feat(devnode): data-driven userland node projection with block and MODALIAS)
+        _ => None,
     };
     let Some((file, on_remove)) = file else {
         warn!(
@@ -158,9 +152,15 @@ fn remove_device(node: &DevNode) {
             .expect("checked device projection must remain present")
     };
     (record.on_remove)();
-    let number = node.device_number();
-    if cdev_del(DeviceId::new(number.major(), number.minor()), 1).is_none() {
-        warn!("devtmpfs: missing character device during removal: {number:?}");
+    // Only character-class nodes registered through cdev_add; block nodes
+    // carry just an inode (DeviceFile::new_block) — a cdev_del on their
+    // dev_t would miss (warning spam) or, worse, evict an unrelated
+    // character device that happens to share the number.
+    if node.subsystem() != "block" {
+        let number = node.device_number();
+        if cdev_del(DeviceId::new(number.major(), number.minor())).is_none() {
+            warn!("devtmpfs: missing character device during removal: {number:?}");
+        }
     }
 }
 

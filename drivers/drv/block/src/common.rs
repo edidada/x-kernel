@@ -43,3 +43,20 @@ pub(crate) fn map_driver_error(err: driver_base::DriverError) -> ProbeError {
     };
     ProbeError::Fatal(error)
 }
+
+/// Physical sysfs path for a device location (parent path for the disk's
+/// devnode publication — mirrors the virtio-side helper).
+pub(crate) fn physical_path(location: DeviceLocation) -> alloc::string::String {
+    match location {
+        DeviceLocation::Pci {
+            segment,
+            bus,
+            device,
+            function,
+        } => devnode::physical_path_pci(segment, bus, device, function),
+        DeviceLocation::Mmio { base, .. } => alloc::format!("platform/{base:x}.mmio"),
+        DeviceLocation::FirmwareNode { id } => alloc::format!("platform/firmware{id}"),
+        DeviceLocation::PlatformStatic { id } => alloc::format!("platform/static{id}"),
+        DeviceLocation::Bridge { domain } => alloc::format!("pci{domain:04x}:00"),
+    }
+}

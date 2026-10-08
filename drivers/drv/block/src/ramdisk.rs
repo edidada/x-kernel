@@ -58,7 +58,14 @@ impl DriverOps<PlatformBus> for RamdiskDriver {
                 alloc::string::String::from("ramdisk"),
             )
         };
-        let disk = Gendisk::new(name, 1, 0, 1, dev).map_err(crate::common::map_driver_error)?;
+        // Devnode context: without it the disk never reaches /dev, uevent
+        // or sysfs (add_disk publishes only when the parent path is set) —
+        // the same contract every block driver follows (virtio-blk).
+        let parent_path = crate::common::physical_path(_dev.descriptor().location);
+        let modalias = _dev.modalias().map(alloc::string::String::from);
+        let disk = Gendisk::new(name, 1, 0, 1, dev)
+            .map_err(crate::common::map_driver_error)?
+            .with_devnode_context(&parent_path, modalias);
         let location = crate::common::legacy_location(_dev.descriptor().location);
         publish_block(
             ClassParent::detached(_dev.id(), "ramdisk", location),

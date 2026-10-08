@@ -199,13 +199,26 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
         })
     }
 
+    /// Mark the device as interrupt-driven.
+    ///
+    /// Call ONLY after the irq registration succeeded; `recv()` and the
+    /// rx-scheduler contract depend on it (see `irq_worker`).
+    pub fn mark_irq_backed(&self) {
+        self.irq_backed.store(true, Ordering::Release);
+    }
+
     /// Build this device's interrupt worker (see [`VirtIoNetIrqWorker`]).
     ///
     /// The worker acknowledges only this device's queues and kicks the RX
     /// scheduler when one is installed; callers wire it to the device's
     /// interrupt through their device model.
     pub fn irq_worker(self: &Arc<Self>) -> VirtIoNetIrqWorker {
-        self.irq_backed.store(true, Ordering::Release);
+        // NOTE: this does NOT mark the device irq-backed. The caller wires
+        // the worker to an actual interrupt; only a SUCCESSFUL registration
+        // may flip the flag (mark_irq_backed). Building a worker before
+        // knowing the irq outcome used to leave interrupt-less devices
+        // pretending to be irq-backed: recv() skipped its task-context ack
+        // and the RX scheduler was armed but never fired.
         let core = Arc::new(IrqWorkerCore {
             inner: self.inner.clone(),
             rx_scheduler: self.rx_scheduler.clone(),
@@ -447,8 +460,15 @@ mod tests {
             Err(DriverError::Unsupported)
         );
 
-        // Handing out the worker marks the device interrupt-backed.
+        // The worker alone does NOT mark the device interrupt-backed —
+        // only a successful irq registration may (the driver calls
+        // mark_irq_backed).
         let worker = dev.irq_worker();
+        assert_eq!(
+            dev.set_rx_scheduler(Some(scheduler.clone())),
+            Err(DriverError::Unsupported)
+        );
+        dev.mark_irq_backed();
         assert_eq!(dev.set_rx_scheduler(Some(scheduler.clone())), Ok(()));
         assert_eq!(dev.set_rx_scheduler(None), Ok(()));
         drop(worker);
@@ -465,6 +485,7 @@ mod tests {
     fn test_recv_leaves_interrupt_ack_to_worker() {
         let (dev, interrupt_ack_count) = net_dev();
         let worker = dev.irq_worker();
+        dev.mark_irq_backed();
 
         assert!(matches!(dev.recv(), Err(DriverError::WouldBlock)));
         assert_eq!(interrupt_ack_count.load(Ordering::Relaxed), 0);
@@ -475,6 +496,7 @@ mod tests {
     fn test_worker_services_and_schedules_rx() {
         let (dev, interrupt_ack_count) = net_dev();
         let worker = dev.irq_worker();
+        dev.mark_irq_backed();
         let scheduler = Arc::new(MockRxScheduler {
             schedules: AtomicUsize::new(0),
         });

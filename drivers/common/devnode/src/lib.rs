@@ -417,15 +417,15 @@ pub fn withdraw(id: u64) {
         publisher(DevNodeEvent::Removed(node.clone()));
     }
     REGISTRY.lock().nodes.retain(|n| n.id != id);
-    // Release the index only after every subscriber processed Removed:
-    // the devname/dev_t must stay exclusive for as long as the node lives
-    // in devfs/sysfs, or a new device could cdev_add the same dev_t while
-    // the old node's teardown is still in flight.
-    if let Some(index) = node.allocated_index {
-        INDEX_POOLS.lock().release(node.subsystem, index);
-    }
     for subscriber in subscribers {
         subscriber(DevNodeEvent::Removed(node.clone()));
+    }
+    // Release the index only after EVERY Removed dispatch (publisher and
+    // subscribers): the devname/dev_t must stay exclusive for as long as
+    // the node lives in devfs/sysfs, or a new device could cdev_add the
+    // same dev_t while the old node's teardown is still in flight.
+    if let Some(index) = node.allocated_index {
+        INDEX_POOLS.lock().release(node.subsystem, index);
     }
 }
 

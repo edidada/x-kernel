@@ -124,6 +124,11 @@ fn activate_with_irq<B: driver_core::Bus, T: virtio::Transport + 'static>(
             Err(_) => None,
         },
     };
+    // The irq-backed flag must reflect reality: only a registered handler
+    // lets recv() skip its task-context ack and arms the RX scheduler.
+    if irq.is_some() {
+        device.mark_irq_backed();
+    }
     let location = crate::common::legacy_location(dev.descriptor().location);
     let handle = publish_net(
         ClassParent::detached(dev.id(), "virtio-net", location),

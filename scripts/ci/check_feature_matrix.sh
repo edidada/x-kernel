@@ -99,8 +99,13 @@ declare -A CLASS_DRIVER=(
 )
 CFG_BAK="$(mktemp)"
 XCONF_BAK="$(mktemp)"
+XCONF_HAD=0
+[ -f .cargo/.xconfig.toml ] && XCONF_HAD=1 && cp .cargo/.xconfig.toml "$XCONF_BAK"
+# Restore the caller's build state on ANY exit: a mid-loop abort under
+# `set -e` used to leave the trim configuration active, making every
+# later bare make/cargo silently build the wrong thing.
+trap 'cp "$CFG_BAK" .config 2>/dev/null || true; if [ "$XCONF_HAD" = 1 ]; then cp "$XCONF_BAK" .cargo/.xconfig.toml 2>/dev/null || true; else rm -f .cargo/.xconfig.toml; fi; rm -f "$CFG_BAK" "$XCONF_BAK"' EXIT
 cp .config "$CFG_BAK"
-cp .cargo/.xconfig.toml "$XCONF_BAK"
 for cls in block net display input hwrng vsock virtio-9p; do
     cp platforms/kplat-aarch64/qemu_defconfig .config
     {

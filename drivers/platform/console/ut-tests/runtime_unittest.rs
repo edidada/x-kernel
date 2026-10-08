@@ -39,11 +39,14 @@ impl CharDevice for DummyConsole {
 #[def_test]
 fn stdout_identity_requires_local_handle_and_clears_on_removal() {
     // Detached class parent: never touches a registry — identity test only.
+    // Offline mirrors the main-side bound-but-inactive device object: the
+    // handle exists, availability is false.
     let parent = kclass::ClassParent::detached(
         1,
         "console-test",
         devnode::DeviceLocation::PlatformStatic { id: 1 },
     );
+    parent.mark_offline();
     let runtime: CharDeviceImpl = Box::new(DummyConsole);
     let stdout = ClassDevice::try_new_with_info(
         parent,
