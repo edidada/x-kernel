@@ -87,7 +87,6 @@ pub struct FirmwareDevice {
     pub clock_output_name: Option<&'static str>,
     /// For consumer nodes: the parsed `clocks` property, each entry a
     /// (provider phandle, controller-local index) pair. Converted to
-    /// `ResourceDesc::Clk` by the DT-to-device builder so drivers resolve
     /// clocks through `first_clk()` like MMIO and IRQ.
     pub clock_specs: Vec<of::ClockSpec>,
 }

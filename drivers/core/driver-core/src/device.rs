@@ -129,10 +129,6 @@ pub trait DeviceServices: Send + Sync {
         align: usize,
     ) -> Result<CoherentMem, RuntimeError>;
 
-    /// The platform time source (`ktime_get`-equivalent for device
-    /// constructors; RNG request deadlines today).
-    fn time(&self) -> Result<&'static dyn device_res::TimeOp, RuntimeError>;
-
     /// Acquire a clock input (`clk_get`); may report that the provider has
     /// not registered yet.
     fn clk_get(&self, device: u64, spec: ClkSpec) -> Result<ClkHandle, ServiceError>;
@@ -587,12 +583,6 @@ impl<'a, B: Bus> DeviceCtx<'a, B> {
         self.services
             .request_irq(self.id, spec, name, Arc::new(handler))
             .map_err(ProbeError::Fatal)
-    }
-
-    /// The platform time source (`ktime_get`-equivalent), through the
-    /// device's services.
-    pub fn time(&self) -> Result<&'static dyn device_res::TimeOp, RuntimeError> {
-        self.services.time()
     }
 
     /// [`DeviceCtx::request_irq`] on the n-th interrupt resource.

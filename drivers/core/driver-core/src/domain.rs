@@ -237,10 +237,6 @@ impl DeviceServices for NoServices {
     fn clk_get(&self, _: u64, _: ClkSpec) -> Result<crate::device::ClkHandle, ServiceError> {
         Err(ServiceError::Fatal(RuntimeError::Unsupported))
     }
-
-    fn time(&self) -> Result<&'static dyn device_res::TimeOp, RuntimeError> {
-        Err(RuntimeError::Unsupported)
-    }
 }
 
 struct DomainInner {
@@ -923,10 +919,6 @@ mod tests {
                 Some(ops) => Ok(ClkHandle::new(ops, None)),
                 None => Err(ServiceError::Deferred(DepSource::clk(spec.provider))),
             }
-        }
-
-        fn time(&self) -> Result<&'static dyn device_res::TimeOp, RuntimeError> {
-            Err(RuntimeError::Unsupported)
         }
     }
 

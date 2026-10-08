@@ -17,7 +17,6 @@ extern crate alloc;
 mod dma;
 mod irq;
 mod mmio;
-mod time;
 
 /// X-Kernel implementation of the OS-agnostic resource provider traits.
 ///

@@ -25,24 +25,8 @@ extern crate alloc;
 mod dma;
 mod irq;
 mod mmio;
-mod time;
-
-/// A single resource associated with a device.
-#[derive(Debug, Clone, Copy)]
-pub enum ResourceDesc {
-    /// Memory-mapped I/O region.
-    Mmio(crate::mmio::MmioRegion),
-    /// x86 I/O port range.
-    IoPort(crate::mmio::IoPortRange),
-    /// Interrupt line.
-    Irq(crate::irq::IrqResource),
-    /// Coherent DMA buffer request.
-    Dma(crate::dma::DmaSpec),
-}
 
 /// A collection of resources for a single device.
-pub type ResourceSet = smallvec::SmallVec<[ResourceDesc; 4]>;
-
 /// Error returned by resource acquisition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResError {
@@ -67,4 +51,3 @@ pub type ResResult<T = ()> = Result<T, ResError>;
 pub use dma::*;
 pub use irq::*;
 pub use mmio::*;
-pub use time::*;

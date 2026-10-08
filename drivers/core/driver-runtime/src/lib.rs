@@ -68,12 +68,6 @@ pub fn register_clk_provider(provider: &'static dyn kclk::ClkLookup) {
 
 static RESOURCE_PROVIDER: XKernelResourceProvider = XKernelResourceProvider::new();
 
-/// The provider as a `&'static dyn TimeOp` (virtio-rng and other
-/// time-consuming device constructors).
-pub fn time_ops() -> &'static dyn device_res::TimeOp {
-    &RESOURCE_PROVIDER
-}
-
 /// The process-wide x-kernel resource provider as a `&'static` — for
 /// transport HALs and class services that still address the provider
 /// directly during the migration.
@@ -257,10 +251,6 @@ impl DeviceServices for XKernelRuntime {
 
     fn clk_get(&self, _device: u64, spec: driver_core::ClkSpec) -> Result<ClkHandle, ServiceError> {
         self.clks.get(spec)
-    }
-
-    fn time(&self) -> Result<&'static dyn device_res::TimeOp, RuntimeError> {
-        Ok(crate::time_ops())
     }
 }
 
