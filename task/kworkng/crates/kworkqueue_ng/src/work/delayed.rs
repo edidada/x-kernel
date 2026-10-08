@@ -280,6 +280,7 @@ impl<H: Fn() + Send + Sync> DelayedWork<H> {
         let (guard, revoked) = self.work.disable();
         // The held disable prevents any start while ordinary cancellation and
         // this physical attempt run. No management lock spans cleanup above.
+        // A Running result is harmless; final synchronized cancellation drains it.
         let _ = self.timer.try_cancel();
         (guard, revoked)
     }

@@ -957,6 +957,7 @@ fn vsock_poll_task() {
             break;
         }
 
+        // Interruption resumes the loop, which rechecks the stop flag.
         let _ = block_on(interruptible(poll_vsock_adaptive()));
     }
 }
@@ -1286,9 +1287,10 @@ pub(crate) fn recv_bridge(conn_id: VsockConnId, buf: &mut [u8]) -> DriverResult<
             count
         }
     };
-    if count > 0 {
-        let _ = advance_rx_credit(conn_id, count)
-            .map_err(|e| warn!("recv_bridge: failed to update credit: {e:?}"));
+    if count > 0
+        && let Err(e) = advance_rx_credit(conn_id, count)
+    {
+        warn!("recv_bridge: failed to update credit: {e:?}");
     }
     Ok(count)
 }

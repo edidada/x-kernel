@@ -265,6 +265,7 @@ impl KernelTraceOps for Kops {
 
         {
             let mut layout = memspace::kernel_layout().lock();
+            // Patched text cannot be rolled back; restoring protection is best effort.
             let _ = layout.protect(start_va, span, old_flags);
         }
 

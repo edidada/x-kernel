@@ -87,7 +87,7 @@ pub(crate) mod tests_queue {
     fn test_queue_reuse() {
         let mut queue = IpiEventQueue::new();
         queue.push(LogicalCpuId::new(3), Callback::new(|| {}));
-        let _ = queue.pop_one();
+        assert!(queue.pop_one().is_some());
         queue.push(LogicalCpuId::new(4), Callback::new(|| {}));
         let (src, _) = queue.pop_one().unwrap();
         assert_eq!(src, LogicalCpuId::new(4));

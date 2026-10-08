@@ -355,6 +355,7 @@ fn invalidate_changed_paths(paths: &[String]) {
         let mut components = path.split('/').peekable();
         while let Some(component) = components.next() {
             if components.peek().is_none() {
+                // Invalidation is idempotent; an absent cached entry is already the goal.
                 let _ = parent.invalidate_cached_child(component);
                 break;
             }
@@ -362,6 +363,7 @@ fn invalidate_changed_paths(paths: &[String]) {
                 break;
             };
             if !child.is_really_positive() || !child.can_lookup() {
+                // Invalidation is idempotent; an absent cached entry is already the goal.
                 let _ = parent.invalidate_cached_child(component);
                 break;
             }

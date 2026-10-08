@@ -273,6 +273,7 @@ impl Drop for FdTable {
                 break;
             };
             let descriptor = self.remove(fd).expect("descriptor id must remain present");
+            // Teardown has no error channel and must close the remaining descriptors.
             let _ = descriptor.close();
         }
     }

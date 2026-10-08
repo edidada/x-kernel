@@ -11,19 +11,29 @@ AI 编写与审查也不重复检查。
 - **等级映射**：规范中的 MUST 对应 `deny`，SHOULD 对应 `warn`。
   门禁 `make clippy` 带 `-D warnings`，两者都阻塞合入；
   等级只表达规则强度。
-- **例外写法**：唯一写法是在最窄作用域上
+- **例外写法**：逐点例外是在最窄作用域上
   `#[expect(<lint>, reason = "...")]`。
   reason 要说明此处为什么不适用，不写 "needed"、"legacy" 之类的空话。
   `#[allow]` 只用于 `expect` 不可靠的场合：
   lint 只在部分 cfg/feature/平台下触发，或代码由宏展开或生成工具（如 rust-bindgen）生成；
   同样必须带 reason。
+- **按 crate 关闭**：只允许两类：case (a) 规则不适用，例如以终止构建为预期失败方式的
+  host 构建工具或纯测试 crate；case (b) 存量点过多，当前无法逐点判断，
+  但新增代码仍由 AI/人工按原规则审查。
+  在该 crate 实际被 lint 的每个 target 根使用
+  `#![allow(<lint>, reason = "case (a): <具体不适用原因>")]` 或
+  `#![allow(<lint>, reason = "case (b): <存量规模和逐点判断困难；新增代码仍遵守原规则>")]`；
+  不使用 `#![expect]`，不要求 issue。reason 必须标明 case，不能只有 "legacy"。
+  每条 lint 的表格行必须明确列出关闭的 crate 和 target 根、类别及判断标准；
+  未被 lint 的 target 不预先添加豁免。逐点修复仍优先于按 crate 关闭。
+  下方带 issue 的过渡豁免保留为另一种选择。
 - **过渡豁免**：存量来不及清理时，只能在 crate 根写
   `#![expect(<lint>, reason = "TODO(cg): legacy cleanup, tracked in <issue>")]`，
   并且必须有对应 issue。
   清理完成后 `expect` 不再命中，会触发 `unfulfilled_lint_expectations`，届时删除。
 - **新增 lint**：一条 lint 一个提交，提交内容包括：
   `[workspace.lints]` 一行（及需要的 `clippy.toml` 参数）、
-  全部存量处理（修复、逐点 `expect` 或 crate 根过渡豁免）、
+  全部存量处理（修复、逐点 `expect`、crate 根过渡豁免或按 crate 关闭）、
   从本文件待迁入表删除对应行；
   提交说明写启用动机和存量处理方式。
   落地前在 Jenkins 运行 `make clippy` 的六个配置上各跑一次 `make clippy`
@@ -67,11 +77,10 @@ AI 编写与审查也不重复检查。
 | lint | 组 | 1.95.0 默认 | 目标等级 | 覆盖的规则原文（逐字，可多条） | 来源 `文件:行` | 覆盖程度 | 需要的 clippy.toml 配置 | 预计例外与判断标准 | 存量 |
 |---|---|---|---|---|---|---|---|---|---|
 | `clippy::multiple_unsafe_ops_per_block` | restriction | allow | deny | "keep each `unsafe` block as small as practical, so the audited region is obvious;"<br>"then use the smallest remaining `unsafe` block and `// SAFETY:` comment to discharge what cannot be encoded statically;"<br>"shrink unsafe blocks to the minimal audited operation;"<br>"unsafe operations inside `unsafe fn` that are not wrapped in a minimal `unsafe {}` block;" | `unsafety.md:12-13`<br>`unsafety.md:106-107`<br>`unsafety.md:163`<br>`unsafety.md:522-523` | partial（一块一个 unsafe 操作；块内夹带安全逻辑见 `unsafety.md` Invalid Patterns，仍靠审查） | — | 宏内 unsafe 序列 | 80（测试 2） |
-| `clippy::let_underscore_must_use` | restriction | allow | warn | （skill 中无原文，计划直接引入；与 `unused_result_ok` 一起防止静默丢弃 `#[must_use]` 结果；`concurrency.md:166` 示例相应去掉了 `let _ =`） | — | — | — | 有意丢弃处 `expect` | 128（测试 2） |
 | `clippy::allow_attributes_without_reason` | restriction | allow | deny | "suppress lints at the narrowest practical scope;"<br>"broad lint suppression;" | `modules-and-attributes.md:34`<br>`modules-and-attributes.md:58` | partial（强制 reason） | — | 无；审查时仍看例外的作用域是否最窄、reason 是否属实（见上方"例外写法"） | 350（测试 6） |
 | `clippy::allow_attributes` | restriction | allow | deny | "suppress lints at the narrowest practical scope;"<br>"use `#[expect(dead_code)]` only when the dead code is simple, clearly intentional, and likely to become used."<br>"broad lint suppression;" | `modules-and-attributes.md:34-36`<br>`modules-and-attributes.md:58` | partial（强制外层 `#[allow]` 改 `#[expect]`；不检查内层 `#![allow]`） | — | cfg/宏/平台差异处带 reason 的 `allow`；`#[expect(dead_code, reason = "...")]` 只用于简单、明显有意且很可能会被用上的死代码，reason 说明它何时被用上 | 332（测试 5） |
-| `clippy::expect_used` | restriction | allow | warn | 同 `clippy::panic` | 同 `clippy::panic` | partial | `allow-expect-in-tests = true` | 同 `clippy::panic` | 1187（测试 326） |
-| `clippy::unwrap_used` | restriction | allow | warn | 同 `clippy::panic` | 同 `clippy::panic` | partial | `allow-unwrap-in-tests = true` | 同 `clippy::panic`；kext4 等 crate 根过渡豁免 | 3494（测试 1578） |
+| `clippy::expect_used` | restriction | allow | warn | 同 `clippy::panic` | 同 `clippy::panic` | partial | `allow-expect-in-tests = true` | 同 `clippy::panic`；可按上方 case (a)/(b) 关闭具体 crate 的已 lint target，须在本行列明；当前未关闭任何 crate | 1187（测试 326） |
+| `clippy::unwrap_used` | restriction | allow | warn | 同 `clippy::panic` | 同 `clippy::panic` | partial | `allow-unwrap-in-tests = true` | 同 `clippy::panic`；存量密集的 kext4 等可按上方 case (b) 在已 lint 的 target 根关闭，已关闭列表随启用提交写入本行 | 3494（测试 1578） |
 
 注：`avoid-breaking-exported-api = false` 是全局开关，
 还会让 `box_collection`、`vec_box`、`redundant_allocation`、`enum_variant_names`、
@@ -90,6 +99,12 @@ AI 编写与审查也不重复检查。
 | `clippy::wrong_self_convention` | style | warn | "use accurate names that reflect actual semantics and cost;" | `naming-and-structure.md:9` | 只查 `as_` / `to_` / `into_` 等前缀与 `self` 形式是否匹配；已默认开启 |
 | `clippy::too_many_arguments` | complexity | warn | "keep functions small and focused;" | `api-design.md:8` | 只数参数个数（默认阈值 7）；已默认开启，现有约 31 处 `allow` |
 | `unsafe_code` | rustc | allow | "when a crate or module is expected to remain safe-only, do not introduce `unsafe` casually;" | `unsafety.md:19-20` | 只能由各 crate 在根部声明 `#![forbid(unsafe_code)]`，不做 workspace 统一配置 |
+
+## 不采用的 lint
+
+| lint | 组 | 结论 |
+|---|---|---|
+| `clippy::let_underscore_must_use` | restriction | 不采用。有意丢弃 `#[must_use]` 结果的惯用写法是 `let _ = expr;`，原因不明显时在上一行用 `//` 注释说明；是否应当处理错误由人工/AI 审查判断。隐式的 `.ok();` 丢弃仍由已启用的 `clippy::unused_result_ok` 禁止。参照 Rust-for-Linux：Linux v7.2 顶层 `Makefile` 的 `rust_common_flags` 与 clippy 参数、以及 `.clippy.toml` 均未启用此 lint 和 `unused_result_ok`，内核 Rust 代码直接写 `let _ =` |
 
 ## 已由默认 lint 或现有配置强制
 

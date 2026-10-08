@@ -193,6 +193,7 @@ impl<R: TtyRead> SimpleReader<R> {
         let read = self.reader.read(&mut self.read_buf);
         for ch in &self.read_buf[..read] {
             if *ch == b'\n' {
+                // Echo is best effort; bytes are dropped when the transmit queue is full.
                 let _ = self.buf_tx.try_push(b'\r');
             }
             let _ = self.buf_tx.try_push(*ch);
