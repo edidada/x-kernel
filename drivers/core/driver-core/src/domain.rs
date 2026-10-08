@@ -807,7 +807,9 @@ mod tests {
             _: &'static str,
         ) -> Result<IoMap, RuntimeError> {
             self.mapped.fetch_add(1, Ordering::Relaxed);
-            Ok(IoMap::new(region.base, region, None))
+            // SAFETY: test mock — the handle is never accessed, only
+            // carried; the vaddr is a dummy that satisfies alignment.
+            Ok(unsafe { IoMap::new(region.base, region, None) })
         }
 
         fn request_irq(

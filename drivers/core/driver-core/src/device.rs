@@ -161,8 +161,16 @@ impl fmt::Debug for IoMap {
 }
 
 impl IoMap {
-    /// Constructed by [`DeviceServices`] implementations.
-    pub fn new(vaddr: usize, region: MmioRegion, release: Option<ReleaseHook>) -> Self {
+    /// Construct an IoMap over an ALREADY-MAPPED region.
+    ///
+    /// # Safety
+    ///
+    /// `vaddr` must point at a valid mapping of at least `region.size`
+    /// bytes for the lifetime of this handle, and the caller must own the
+    /// mapping (pairing the eventual release). A safe constructor here
+    /// would let any `usize` reach the volatile accessors — that is a
+    /// soundness hole, not an inconvenience.
+    pub unsafe fn new(vaddr: usize, region: MmioRegion, release: Option<ReleaseHook>) -> Self {
         Self {
             vaddr,
             region,
@@ -180,6 +188,17 @@ impl IoMap {
 
     #[inline]
     fn access_ptr(&self, offset: usize, size: usize) -> *mut u8 {
+        // Alignment is part of the safe contract: `read_volatile::<u32>`
+        // requires 4-byte alignment and "registers are naturally aligned"
+        // comments cannot constrain a safe `usize` offset. Misalignment
+        // panics here instead of being UB at the volatile op.
+        let align = size.max(1);
+        if !(self.vaddr + offset).is_multiple_of(align) {
+            panic!(
+                "MMIO access misaligned: vaddr {:#x} + offset {:#x} not {}-byte aligned",
+                self.vaddr, offset, align
+            );
+        }
         let end = offset
             .checked_add(size)
             .expect("MMIO access offset overflow");
@@ -394,7 +413,14 @@ impl ClkHandle {
 
     pub fn prepare_enable(&self) -> Result<(), RuntimeError> {
         self.ops.prepare()?;
-        self.ops.enable()
+        if let Err(err) = self.ops.enable() {
+            // Roll back the prepare: a failed enable must not leave the
+            // clock half-prepared (review: acquisition had no undo).
+            let () = self.ops.disable();
+            self.ops.unprepare();
+            return Err(err);
+        }
+        Ok(())
     }
 
     pub fn disable_unprepare(&self) {

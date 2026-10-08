@@ -19,7 +19,10 @@ use crate::XKernelRuntime;
 /// and provider boilerplate that every virtio driver would otherwise
 /// duplicate.
 pub struct PciTransportService {
-    runtime: alloc::sync::Arc<XKernelRuntime>,
+    /// The PROVIDER handle recovered from the services instance this
+    /// extension was requested from — never the global fallback. A domain
+    /// with its own runtime binds its own provider (review II-6).
+    provider: alloc::sync::Arc<crate::XKernelResourceProvider>,
 }
 
 impl PciTransportService {
@@ -28,16 +31,20 @@ impl PciTransportService {
         &self,
         descriptor: &DeviceDescriptor,
     ) -> Result<(DeviceKind, virtio::PciTransport, Option<usize>), driver_core::RuntimeError> {
-        self.runtime.probe_pci_transport(descriptor)
+        crate::probe_pci_transport_with(&self.provider, descriptor)
     }
 }
 
 impl ExtensionService for PciTransportService {
     fn from_services(services: &dyn driver_core::DeviceServices) -> Option<Self> {
-        // Ensure the runtime is the installed global one (its provider and
-        // clock registry are the live instances), then capture its Arc.
-        let _ = services.as_any().downcast_ref::<XKernelRuntime>()?;
-        let runtime = crate::global_runtime_arc()?;
-        Some(Self { runtime })
+        // Recover the extension from THIS services instance, not a global
+        // fallback: the type check plus `global_runtime_arc()` bound
+        // domain A's devices to the global runtime even when the domain
+        // carries its own (review II-6). The probe path needs only the
+        // provider handle.
+        let runtime: &XKernelRuntime = services.as_any().downcast_ref()?;
+        Some(Self {
+            provider: runtime.provider_arc(),
+        })
     }
 }

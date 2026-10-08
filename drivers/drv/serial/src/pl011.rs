@@ -173,9 +173,18 @@ impl DriverOps<PlatformBus> for Pl011Driver {
         })
     }
 
-    fn remove(&self, _dev: &mut BoundDevice<'_, PlatformBus, Pl011Data>) {
-        // Guards in `Data` release after this in field order; nothing extra
-        // to quiesce (the adopted stdout port must keep printing).
+    fn remove(&self, dev: &mut BoundDevice<'_, PlatformBus, Pl011Data>) {
+        // Guards in `Data` release after this in field order. The clock
+        // needs an explicit balance first: its Drop releases the reference
+        // but does NOT disable — a prepared+enabled clock left behind keeps
+        // the provider on. The adopted stdout port deliberately stays
+        // running (console continuity across rebind); auxiliary ports
+        // balance their enable.
+        if let Some(clk) = dev.data_mut()._clk.take()
+            && clk.ops().is_enabled()
+        {
+            clk.disable_unprepare();
+        }
     }
 }
 

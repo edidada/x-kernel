@@ -138,6 +138,12 @@ pub struct XKernelRuntime {
 }
 
 impl XKernelRuntime {
+    /// The resource provider handle (for service extensions that need
+    /// direct provider access without going through the global runtime).
+    pub(crate) fn provider_arc(&self) -> Arc<XKernelResourceProvider> {
+        self.provider.clone()
+    }
+
     /// Build the runtime with a wake hook that re-probes the given domain
     /// when a clock provider registers.
     pub fn new(wake: impl Fn(driver_core::DepSource) + Send + Sync + 'static) -> Arc<Self> {
@@ -197,7 +203,9 @@ impl DeviceServices for XKernelRuntime {
             let provider = self.provider.clone();
             move || provider.unmap_mmio(mapping)
         };
-        Ok(IoMap::new(mapping.vaddr, region, Some(Arc::new(release))))
+        // SAFETY: the provider mapped the region; the handle pairs the
+        // provider's release hook.
+        Ok(unsafe { IoMap::new(mapping.vaddr, region, Some(Arc::new(release))) })
     }
 
     fn request_irq(
@@ -265,6 +273,19 @@ impl XKernelRuntime {
         &self,
         descriptor: &driver_core::desc::DeviceDescriptor,
     ) -> Result<(driver_core::DeviceKind, virtio::PciTransport, Option<usize>), RuntimeError> {
+        crate::probe_pci_transport_with(&self.provider, descriptor)
+    }
+}
+
+/// Provider-parameterized transport probe: the PciTransportService calls
+/// this with the provider recovered from ITS services instance, so a
+/// non-global domain binds its own provider.
+pub fn probe_pci_transport_with(
+    provider: &Arc<XKernelResourceProvider>,
+    descriptor: &driver_core::desc::DeviceDescriptor,
+) -> Result<(driver_core::DeviceKind, virtio::PciTransport, Option<usize>), RuntimeError> {
+    let _self = ();
+    {
         use driver_core::desc::{DeviceIdentity, DeviceLocation as Loc};
         use pci::{DeviceFunction, DeviceFunctionInfo, PciHost};
 
@@ -317,7 +338,7 @@ impl XKernelRuntime {
         // the mappings die with the failed probe.
         hal::begin_mmio_probe();
         let probed =
-            virtio::probe_pci_transport_only::<hal::Hal>(root, bdf, &dev_info, resource_provider());
+            virtio::probe_pci_transport_only::<hal::Hal>(root, bdf, &dev_info, provider.as_ref());
         let leases = hal::take_mmio_probe_leases();
         let (kind, mut transport, transport_irq) = probed.ok_or(RuntimeError::BadState)?;
         transport.retain_mappings(leases);
@@ -326,15 +347,9 @@ impl XKernelRuntime {
             descriptor
                 .resources
                 .irq(0)
-                .and_then(|spec| virtio::resolve_legacy_irq(&spec, resource_provider()))
+                .and_then(|spec| virtio::resolve_legacy_irq(&spec, provider.as_ref()))
         });
 
         Ok((kind, transport, irq))
     }
-}
-
-/// The Arc to the globally installed runtime (extension services capture
-/// this; install_global holds the same Arc alive).
-pub(crate) fn global_runtime_arc() -> Option<Arc<XKernelRuntime>> {
-    GLOBAL_RUNTIME.lock().clone()
 }

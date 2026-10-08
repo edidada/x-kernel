@@ -256,7 +256,7 @@ pub fn probe_pci_transport_only<H: VirtIoHal>(
     root: &mut PciRoot<MmioCam<'static>>,
     bdf: DeviceFunction,
     dev_info: &DeviceFunctionInfo,
-    irq_provider: &'static dyn IrqOp,
+    irq_provider: &dyn IrqOp,
 ) -> Option<(DeviceKind, PciTransport, Option<usize>)> {
     let dev_kind = virtio_device_type(dev_info).and_then(as_device_kind)?;
 
@@ -307,10 +307,7 @@ fn core_trigger_to_kind(t: driver_core::IrqTrigger) -> IrqTrigger {
 /// The bus resolved the firmware route once at discovery (hwirq + trigger +
 /// controller); this maps it to the OS-visible virtual irq. The static
 /// per-arch fallback covers platforms without firmware routing.
-pub fn resolve_legacy_irq(
-    spec: &driver_core::IrqSpec,
-    irq_provider: &'static dyn IrqOp,
-) -> Option<usize> {
+pub fn resolve_legacy_irq(spec: &driver_core::IrqSpec, irq_provider: &dyn IrqOp) -> Option<usize> {
     // The bus stores the firmware route as controller + hwirq (number 0 per
     // the IrqSpec contract); map it to the OS-visible virq here.
     let hwirq = spec.hwirq?;
