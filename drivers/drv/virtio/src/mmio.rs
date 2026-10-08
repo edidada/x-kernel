@@ -188,7 +188,7 @@ macro_rules! simple_family_dispatch {
             #[cfg(feature = $feature)]
             {
                 crate::$module::activate_mmio(
-                    dev.id(),
+                    dev.id().raw(),
                     dev.descriptor().location,
                     transport,
                     builder,

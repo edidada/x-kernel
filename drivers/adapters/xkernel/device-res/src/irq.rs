@@ -155,6 +155,10 @@ fn dev_irq_trigger_to_kirq(trigger: DevIrqTrigger) -> kirq::IrqTrigger {
 
 fn dev_irq_controller_to_kirq(controller: DevIrqController) -> kirq::IrqController {
     match controller {
+        // Msi exists only in kirq's vocabulary (MSI domains); the
+        // device-res side never produces it, map it back to the closest
+        // controller-agnostic answer.
+        DevIrqController::Msi => kirq::IrqController::Msi,
         DevIrqController::Gic => kirq::IrqController::Gic,
         DevIrqController::Plic => kirq::IrqController::Plic,
         DevIrqController::IoApic => kirq::IrqController::IoApic,
@@ -170,7 +174,11 @@ fn dev_irq_controller_to_kirq_domain(controller: DevIrqController) -> Option<kir
         DevIrqController::Gic => Some(kirq::GIC_ROOT_DOMAIN),
         DevIrqController::Plic => Some(kirq::PLIC_ROOT_DOMAIN),
         DevIrqController::IoApic => Some(kirq::IO_APIC_DOMAIN),
-        DevIrqController::LoongArchExtioi | DevIrqController::Unknown => None,
+        // Msi carries its own domain in kirq; the device-res side has no
+        // provider-registered Msi domain to name.
+        DevIrqController::Msi | DevIrqController::LoongArchExtioi | DevIrqController::Unknown => {
+            None
+        }
     }
 }
 
@@ -267,7 +275,7 @@ mod tests {
 
     #[def_test]
     fn test_device_irq_event_wake_request_maps_to_handled_until_threadirq_is_available() {
-        let event = dev_irq_event_to_kirq(DevIrqEvent::wake_thread_from_sources(0b1010));
+        let event = dev_irq_event_to_kirq(DevIrqEvent::from_sources(0b1010));
 
         assert!(event.handled());
         assert_eq!(event.sources(), 0b1010);

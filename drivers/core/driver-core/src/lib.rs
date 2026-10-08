@@ -74,8 +74,8 @@ pub use driver::{DriverDesc, DriverOps};
 pub use driver_base::DeviceKind;
 pub use error::{DepKind, DepSource, ProbeError, RuntimeError};
 pub use resource::{
-    ClkSpec, IoPortRange, IrqControllerKind, IrqSpec, IrqTrigger, MmioRegion, ResourceEntry,
-    ResourceKind, ResourceMap,
+    ClkSpec, IoPortRange, IrqController, IrqDomainId, IrqSpec, IrqTrigger, MmioRegion,
+    ResourceEntry, ResourceKind, ResourceMap,
 };
 
 pub mod desc {

@@ -116,7 +116,7 @@ fn map_trigger(trigger: crate::InterruptTrigger) -> driver_core::IrqTrigger {
         T::EdgeFalling => driver_core::IrqTrigger::EdgeFalling,
         T::LevelHigh => driver_core::IrqTrigger::LevelHigh,
         T::LevelLow => driver_core::IrqTrigger::LevelLow,
-        T::Unknown(_) => driver_core::IrqTrigger::Unknown,
+        T::Unknown(_) => driver_core::IrqTrigger::Unknown(0),
     }
 }
 
@@ -139,9 +139,9 @@ fn resolve_legacy_route<C: crate::ConfigurationAccess>(
         // firmware stated (or did not) maps to Unknown and the provider
         // falls back to its default resolution.
         spec.controller = Some(match route.controller {
-            crate::fw::InterruptControllerKind::Gic => driver_core::IrqControllerKind::Gic,
-            crate::fw::InterruptControllerKind::Plic => driver_core::IrqControllerKind::Plic,
-            crate::fw::InterruptControllerKind::Unknown => driver_core::IrqControllerKind::Unknown,
+            crate::fw::InterruptControllerKind::Gic => driver_core::IrqController::Gic,
+            crate::fw::InterruptControllerKind::Plic => driver_core::IrqController::Plic,
+            crate::fw::InterruptControllerKind::Unknown => driver_core::IrqController::Unknown,
         });
         spec.hwirq = Some(route.irq);
         return Some(spec);
@@ -158,25 +158,25 @@ fn resolve_legacy_route<C: crate::ConfigurationAccess>(
                 return None;
             }
             let mut spec = IrqSpec::global(0, driver_core::IrqTrigger::LevelLow);
-            spec.controller = Some(driver_core::IrqControllerKind::IoApic);
+            spec.controller = Some(driver_core::IrqController::IoApic);
             spec.hwirq = Some(irq_line);
             Some(spec)
         }
         target_arch = "loongarch64" => {
             let mut spec = IrqSpec::global(0, driver_core::IrqTrigger::LevelHigh);
-            spec.controller = Some(driver_core::IrqControllerKind::LoongArchExtioi);
+            spec.controller = Some(driver_core::IrqController::LoongArchExtioi);
             spec.hwirq = Some(0x10 + (bdf.device & 3) as usize);
             Some(spec)
         }
         target_arch = "aarch64" => {
             let mut spec = IrqSpec::global(0, driver_core::IrqTrigger::LevelHigh);
-            spec.controller = Some(driver_core::IrqControllerKind::Gic);
+            spec.controller = Some(driver_core::IrqController::Gic);
             spec.hwirq = Some(0x23 + (bdf.device & 3) as usize);
             Some(spec)
         }
         target_arch = "riscv64" => {
             let mut spec = IrqSpec::global(0, driver_core::IrqTrigger::LevelHigh);
-            spec.controller = Some(driver_core::IrqControllerKind::Plic);
+            spec.controller = Some(driver_core::IrqController::Plic);
             spec.hwirq = Some(0x20 + (bdf.device & 3) as usize);
             Some(spec)
         }

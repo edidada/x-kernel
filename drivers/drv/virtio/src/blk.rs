@@ -73,7 +73,7 @@ impl DriverOps<PciBus> for VirtioBlkDriver {
         // descriptor's legacy route (controller+hwirq) resolves through the
         // irq domain. Either way `activate` receives the full spec.
         let spec = irq
-            .map(|number| driver_core::IrqSpec::global(number, driver_core::IrqTrigger::Unknown))
+            .map(|number| driver_core::IrqSpec::global(number, driver_core::IrqTrigger::Unknown(0)))
             .or_else(|| dev.irq(0).ok());
         let activation = match spec {
             Some(spec) => activate(dev, transport, spec)?,

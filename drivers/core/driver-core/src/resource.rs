@@ -16,6 +16,10 @@
 
 use alloc::{string::String, vec::Vec};
 
+// IRQ vocabulary lives in kirq exactly once (the review's dedup table):
+// trigger, controller and domain ids are kirq's domain, not resource.rs's.
+pub use kirq::{IrqController, IrqDomainId, IrqTrigger};
+
 /// A physical MMIO region described by firmware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MmioRegion {
@@ -36,30 +40,6 @@ pub struct IoPortRange {
     pub size: u16,
 }
 
-/// Interrupt trigger semantics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IrqTrigger {
-    EdgeRising,
-    EdgeFalling,
-    LevelHigh,
-    LevelLow,
-    /// Firmware did not state a trigger.
-    Unknown,
-}
-
-/// The interrupt controller a firmware-described irq route belongs to.
-///
-/// Bus layers encode the controller they resolved at discovery; consumers
-/// decode it back to their provider-facing representation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IrqControllerKind {
-    Gic,
-    Plic,
-    IoApic,
-    LoongArchExtioi,
-    Unknown,
-}
-
 /// An interrupt as stated by firmware, before resolution to a virtual irq.
 ///
 /// The controller/domain/hwirq triple is preserved from the firmware node so
@@ -73,9 +53,9 @@ pub struct IrqSpec {
     pub number: usize,
     pub trigger: IrqTrigger,
     /// Interrupt controller, if the bus/firmware identified one.
-    pub controller: Option<IrqControllerKind>,
+    pub controller: Option<IrqController>,
     /// Interrupt domain id within the controller.
-    pub domain: Option<u32>,
+    pub domain: Option<IrqDomainId>,
     /// Controller-relative hardware irq.
     pub hwirq: Option<usize>,
 }

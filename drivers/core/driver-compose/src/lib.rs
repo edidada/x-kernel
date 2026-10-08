@@ -208,9 +208,9 @@ fn build_descriptor(dev: firmware::FirmwareDevice) {
         // controller-relative hwirq (GIC 32+SPI math applied by the parser),
         // not an OS-visible virq.
         spec.controller = Some(match irq.controller {
-            firmware::InterruptControllerKind::Gic => driver_core::IrqControllerKind::Gic,
-            firmware::InterruptControllerKind::Plic => driver_core::IrqControllerKind::Plic,
-            firmware::InterruptControllerKind::Unknown => driver_core::IrqControllerKind::Unknown,
+            firmware::InterruptControllerKind::Gic => driver_core::IrqController::Gic,
+            firmware::InterruptControllerKind::Plic => driver_core::IrqController::Plic,
+            firmware::InterruptControllerKind::Unknown => driver_core::IrqController::Unknown,
         });
         spec.hwirq = Some(irq.irq);
         let name = dev
@@ -326,7 +326,7 @@ fn map_trigger(trigger: firmware::InterruptTrigger) -> IrqTrigger {
         firmware::InterruptTrigger::EdgeFalling => IrqTrigger::EdgeFalling,
         firmware::InterruptTrigger::LevelHigh => IrqTrigger::LevelHigh,
         firmware::InterruptTrigger::LevelLow => IrqTrigger::LevelLow,
-        firmware::InterruptTrigger::Unknown(_) => IrqTrigger::Unknown,
+        firmware::InterruptTrigger::Unknown(_) => IrqTrigger::Unknown(0),
     }
 }
 

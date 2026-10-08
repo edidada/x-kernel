@@ -40,9 +40,8 @@ use alloc::sync::Arc;
 
 pub use clk::ClkRegistry;
 use device_res::{
-    DmaAllocation, DmaOp, DmaSpec, IrqController, IrqEvent as ResIrqEvent,
-    IrqHandler as ResIrqHandler, IrqOp, IrqResource, IrqTrigger as ResIrqTrigger, MmioMapping,
-    MmioOp, ResError,
+    DmaAllocation, DmaOp, DmaSpec, IrqEvent as ResIrqEvent, IrqHandler as ResIrqHandler, IrqOp,
+    IrqResource, MmioMapping, MmioOp, ResError,
 };
 use device_res_xkernel::XKernelResourceProvider;
 use driver_core::{
@@ -85,27 +84,6 @@ fn map_res_error(err: ResError) -> RuntimeError {
     }
 }
 
-fn map_controller(kind: Option<driver_core::IrqControllerKind>) -> Option<IrqController> {
-    Some(match kind? {
-        driver_core::IrqControllerKind::Gic => IrqController::Gic,
-        driver_core::IrqControllerKind::Plic => IrqController::Plic,
-        driver_core::IrqControllerKind::IoApic => IrqController::IoApic,
-        driver_core::IrqControllerKind::LoongArchExtioi => IrqController::LoongArchExtioi,
-        driver_core::IrqControllerKind::Unknown => IrqController::Unknown,
-    })
-}
-
-fn map_trigger(trigger: driver_core::IrqTrigger) -> ResIrqTrigger {
-    use driver_core::IrqTrigger as Ours;
-    match trigger {
-        Ours::EdgeRising => ResIrqTrigger::EdgeRising,
-        Ours::EdgeFalling => ResIrqTrigger::EdgeFalling,
-        Ours::LevelHigh => ResIrqTrigger::LevelHigh,
-        Ours::LevelLow => ResIrqTrigger::LevelLow,
-        Ours::Unknown => ResIrqTrigger::Unknown(0),
-    }
-}
-
 struct AdaptedIrqHandler {
     handler: IrqHandlerFn,
 }
@@ -115,7 +93,9 @@ impl ResIrqHandler for AdaptedIrqHandler {
         match (self.handler)() {
             IrqAction::Handled => ResIrqEvent::HANDLED,
             IrqAction::NotHandled => ResIrqEvent::NOT_HANDLED,
-            IrqAction::WakeThread => ResIrqEvent::WAKE_THREAD,
+            // kirq has no threaded-handler vocabulary yet (the review
+            // defers threaded IRQ); WakeThread degrades to Handled.
+            IrqAction::WakeThread => ResIrqEvent::HANDLED,
         }
     }
 }
@@ -212,8 +192,8 @@ impl DeviceServices for XKernelRuntime {
         // Preserve the firmware route: with controller (+ hwirq) present the
         // provider maps through the controller's irq domain; a bare number
         // becomes PlainVirq and assumes the bus already resolved it.
-        let mut resource = IrqResource::new(spec.number, map_trigger(spec.trigger));
-        resource.controller = map_controller(spec.controller);
+        let mut resource = IrqResource::new(spec.number, spec.trigger);
+        resource.controller = spec.controller;
         resource.hwirq = spec.hwirq;
         let adapted: Arc<dyn ResIrqHandler> = Arc::new(AdaptedIrqHandler { handler });
         let token = self

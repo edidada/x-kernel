@@ -6,7 +6,7 @@
 
 use alloc::vec::Vec;
 
-use device_res::{IrqController, IrqOp, IrqRouteDesc, IrqTrigger};
+use device_res::{IrqController, IrqOp, IrqRouteDesc};
 use driver_base::DeviceKind;
 use pci::MmioCam;
 
@@ -292,16 +292,6 @@ pub fn probe_pci_transport_only<H: VirtIoHal>(
     Some((dev_kind, transport, transport_irq))
 }
 
-fn core_trigger_to_kind(t: driver_core::IrqTrigger) -> IrqTrigger {
-    match t {
-        driver_core::IrqTrigger::EdgeRising => IrqTrigger::EdgeRising,
-        driver_core::IrqTrigger::EdgeFalling => IrqTrigger::EdgeFalling,
-        driver_core::IrqTrigger::LevelHigh => IrqTrigger::LevelHigh,
-        driver_core::IrqTrigger::LevelLow => IrqTrigger::LevelLow,
-        driver_core::IrqTrigger::Unknown => IrqTrigger::Unknown(0),
-    }
-}
-
 /// Resolve a legacy INTx irq from the descriptor's resource table entry.
 ///
 /// The bus resolved the firmware route once at discovery (hwirq + trigger +
@@ -313,12 +303,12 @@ pub fn resolve_legacy_irq(spec: &driver_core::IrqSpec, irq_provider: &dyn IrqOp)
     let hwirq = spec.hwirq?;
     let desc = IrqRouteDesc {
         hwirq,
-        trigger: core_trigger_to_kind(spec.trigger),
+        trigger: spec.trigger,
         controller: match spec.controller {
-            Some(driver_core::IrqControllerKind::Gic) => IrqController::Gic,
-            Some(driver_core::IrqControllerKind::Plic) => IrqController::Plic,
-            Some(driver_core::IrqControllerKind::IoApic) => IrqController::IoApic,
-            Some(driver_core::IrqControllerKind::LoongArchExtioi) => IrqController::LoongArchExtioi,
+            Some(driver_core::IrqController::Gic) => IrqController::Gic,
+            Some(driver_core::IrqController::Plic) => IrqController::Plic,
+            Some(driver_core::IrqController::IoApic) => IrqController::IoApic,
+            Some(driver_core::IrqController::LoongArchExtioi) => IrqController::LoongArchExtioi,
             _ => IrqController::Unknown,
         },
         domain: None,
