@@ -11,7 +11,8 @@
 
 use core::ptr::NonNull;
 
-use device_res::{DmaAllocation, DmaMapping, DmaOp, DmaSpec, Io, MmioOp, MmioRegion};
+use device_res::{DmaAllocation, DmaMapping, DmaOp, DmaSpec, MmioOp};
+use driver_core::MmioRegion;
 use memaddr::PAGE_SIZE_4K;
 use virtio::{BufferDirection, PhysAddr, VirtIoHal};
 
@@ -79,8 +80,17 @@ unsafe impl VirtIoHal for Hal {
                 // probe scope nobody can return it, so keep it in the
                 // fallback list — the mapping stays valid, matching the old
                 // drop-the-token behavior minus the silent ref leak.
-                let vaddr = m.vaddr;
-                let mut lease = Some(Io::from_mapping(provider, m));
+                // SAFETY: the provider mapped the region; the lease's
+                // release hook pairs the provider's unmap on drop.
+                let lease = unsafe {
+                    driver_core::IoMap::new(
+                        m.vaddr,
+                        region,
+                        Some(alloc::sync::Arc::new(move || provider.unmap_mmio(m))),
+                    )
+                };
+                let vaddr = lease.as_ptr() as usize;
+                let mut lease = Some(lease);
                 if !mmio_probe_collector(|leases| leases.push(lease.take().expect("lease present")))
                 {
                     FALLBACK_MMIO_LEASES
@@ -156,12 +166,12 @@ unsafe impl VirtIoHal for Hal {
 // still holding the device) — no leak, no premature unmap.
 // ---------------------------------------------------------------------------
 
-static PROBE_MMIO_LEASES: kspin::SpinNoPreempt<Option<alloc::vec::Vec<Io>>> =
+static PROBE_MMIO_LEASES: kspin::SpinNoPreempt<Option<alloc::vec::Vec<driver_core::IoMap>>> =
     kspin::SpinNoPreempt::new(None);
 
 /// Mappings taken outside any probe scope: kept alive forever (same
 /// validity as the old leaked tokens, now visible and countable).
-static FALLBACK_MMIO_LEASES: kspin::SpinNoPreempt<alloc::vec::Vec<Io>> =
+static FALLBACK_MMIO_LEASES: kspin::SpinNoPreempt<alloc::vec::Vec<driver_core::IoMap>> =
     kspin::SpinNoPreempt::new(alloc::vec::Vec::new());
 
 /// Open a probe collection scope, returning a guard.
@@ -200,7 +210,7 @@ pub struct MmioProbeScope<'a> {
 
 impl MmioProbeScope<'static> {
     /// Take every lease collected since the scope opened.
-    pub fn take_leases(self) -> alloc::vec::Vec<Io> {
+    pub fn take_leases(self) -> alloc::vec::Vec<driver_core::IoMap> {
         let leases = PROBE_MMIO_LEASES.lock().take().unwrap_or_default();
         core::mem::forget(self); // closed manually; Drop must not double-take
         leases
@@ -217,11 +227,11 @@ impl Drop for MmioProbeScope<'_> {
 
 /// Back-compat shim for callers using the begin/take pair manually.
 /// Prefer [`begin_mmio_probe`]'s guard.
-pub fn take_mmio_probe_leases() -> alloc::vec::Vec<Io> {
+pub fn take_mmio_probe_leases() -> alloc::vec::Vec<driver_core::IoMap> {
     PROBE_MMIO_LEASES.lock().take().unwrap_or_default()
 }
 
-fn mmio_probe_collector(f: impl FnOnce(&mut alloc::vec::Vec<Io>)) -> bool {
+fn mmio_probe_collector(f: impl FnOnce(&mut alloc::vec::Vec<driver_core::IoMap>)) -> bool {
     let mut guard = PROBE_MMIO_LEASES.lock();
     match guard.as_mut() {
         Some(leases) => {

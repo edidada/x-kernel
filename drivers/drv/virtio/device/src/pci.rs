@@ -39,7 +39,7 @@ pub struct PciTransport {
     /// mappings are released). The mapping lives exactly as long as this
     /// transport — and therefore as long as any class publication still
     /// holding the device.
-    mmio_leases: Vec<device_res::Io>,
+    mmio_leases: Vec<driver_core::IoMap>,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -90,7 +90,7 @@ impl PciTransport {
 
     /// Take ownership of the MMIO mapping leases gathered during the
     /// probe scope. Called once by the runtime right after construction.
-    pub fn retain_mappings(&mut self, leases: Vec<device_res::Io>) {
+    pub fn retain_mappings(&mut self, leases: Vec<driver_core::IoMap>) {
         debug_assert!(self.mmio_leases.is_empty(), "mappings retained twice");
         self.mmio_leases = leases;
     }
