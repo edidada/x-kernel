@@ -322,7 +322,11 @@ impl<T> ClassOps<T> for RtClass<T> {
     }
 
     fn class_timer_ns(&self, clk: &RqClock, _tok: RqLocked) -> Option<u64> {
-        if !self.is_throttled {
+        // `is_throttled` lasts until the period boundary. Block, migrate,
+        // exit, and steal can empty the queue first. An empty queue has no
+        // one to wake, so a quiet idle CPU must disarm. A later enqueue
+        // recomputes `next_event_ns` and arms the boundary again.
+        if self.queued == 0 || !self.is_throttled {
             return None;
         }
         Some(

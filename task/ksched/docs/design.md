@@ -216,6 +216,8 @@ EEVDF steal 逐节点检查时，以游标 get_ptr 构造 ManuallyDrop<Arc<_>>
 `Arc`。
 
 节流是每 RQ 的：`account` 累加 runner 的墙钟，达到 runtime 后 `has_runnable`
-为假，`pick_next` 跳过本队列的 RT，`class_timer_ns` 指向本周期结束。
+为假，`pick_next` 跳过本队列的 RT。`class_timer_ns` 只在仍节流且队列非空时
+指向本周期结束。队列被摘空后不再武装周期定时器；新的 waiter 由入队返回的
+`next_event_ns` 重新编程。
 `steal` 不看节流：idle-pull 可以把这些 waiter 摘到另一颗仍有 runtime 的
 CPU，占用记在目标 RQ 上。周期推进在 `advance` 里用绝对 `RqClock`，不另采样时钟。

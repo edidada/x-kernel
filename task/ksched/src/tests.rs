@@ -687,6 +687,41 @@ fn rt_throttle_lifts_after_skipped_periods() {
 }
 
 #[def_test]
+fn rt_throttle_without_waiter_disarms() {
+    let mut s = sched();
+    let rt = task(1);
+    s.set_attr(&rt, rt_attr(SchedPolicy::Fifo, 5), 0).unwrap();
+    enqueue_new(&mut s, rt.clone());
+    assert_eq!(pick_id(&mut s, 0), 1);
+    let throttled = s.update(DEFAULT_RT_RUNTIME_NS, UpdateKind::Account);
+    assert!(throttled.resched);
+    s.block_current(DEFAULT_RT_RUNTIME_NS);
+    let next = s.pick_next(DEFAULT_RT_RUNTIME_NS);
+    assert!(next.is_idle_class());
+    assert!(s.next_event_ns().is_none());
+    let woke = s.enqueue(rt, EnqueueKind::Wake { sync: false }, DEFAULT_RT_RUNTIME_NS);
+    assert!(woke.next_event_ns.is_some_and(|ns| ns > 0));
+}
+
+#[def_test]
+fn rt_steal_last_throttled_waiter_disarms() {
+    let mut s = sched();
+    let rt = task(1);
+    s.set_attr(&rt, rt_attr(SchedPolicy::Fifo, 5), 0).unwrap();
+    enqueue_new(&mut s, rt);
+    assert_eq!(pick_id(&mut s, 0), 1);
+    let throttled = s.update(DEFAULT_RT_RUNTIME_NS, UpdateKind::Account);
+    assert!(throttled.resched);
+    s.preempt_current(DEFAULT_RT_RUNTIME_NS);
+    let next = s.pick_next(DEFAULT_RT_RUNTIME_NS);
+    assert!(next.is_idle_class());
+    assert!(s.next_event_ns().is_some());
+    let stolen = s.steal(&mut |_| true, DEFAULT_RT_RUNTIME_NS);
+    assert!(stolen.is_some());
+    assert!(s.next_event_ns().is_none());
+}
+
+#[def_test]
 fn rt_throttled_idle_keeps_period_event() {
     let mut s = sched();
     let rt = task(1);
