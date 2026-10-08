@@ -195,8 +195,9 @@ fn load_linuxboot_kernel(
     // and the 32-bit `cmd_line_ptr` are readable as-is. The stub does not write
     // the zeropage after this point, and `load_linuxboot_elf_image` keeps the
     // kernel load range off both the zeropage page and the pages holding the
-    // command-line bytes `cmdline()` reads, so they stay unmodified until the
-    // stub's execution (and with it the `&'static str`) ends at the kernel jump.
+    // command-line bytes `cmdline()` reads, so they stay unmodified while
+    // `params` and the string borrowed from it are used, which ends before the
+    // kernel jump.
     let params =
         unsafe { LinuxBootParams::new(boot_params_paddr) }.expect("missing linux boot params");
     let payload_offset = params

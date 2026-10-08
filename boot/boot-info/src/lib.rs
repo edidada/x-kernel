@@ -385,11 +385,10 @@ impl LinuxBootParams {
     ///   `0x228`) is nonzero, that 32-bit value is usable as an address in the
     ///   current address space, the `cmdline_size + 1` bytes there (256 bytes
     ///   when `cmdline_size` at offset `0x238` is zero) are readable and
-    ///   initialized, and they are not written for as long as the string
-    ///   [`Self::cmdline`] returns, or any copy of it, is used. The `'static`
-    ///   lifetime only reflects that this `Copy` view carries no lifetime; it
-    ///   does not extend that window, so the caller must stop using the string
-    ///   before those bytes may change.
+    ///   initialized, and they stay mapped and unwritten for as long as the
+    ///   returned value or any copy of it is used. The string
+    ///   [`Self::cmdline`] returns borrows the view it was called on, so it
+    ///   cannot outlive that window.
     #[inline]
     pub const unsafe fn new(addr: usize) -> Option<Self> {
         if addr == 0 { None } else { Some(Self { addr }) }
@@ -462,14 +461,14 @@ impl LinuxBootParams {
         Some((ptr, max_len.checked_add(1)?))
     }
 
-    pub fn cmdline(self) -> Option<&'static str> {
+    pub fn cmdline(&self) -> Option<&str> {
         let (ptr, scan_len) = self.cmdline_range()?;
         // SAFETY: `ptr` is the nonzero `cmd_line_ptr` field and `scan_len` is
         // `cmdline_size + 1` (or 256 when that field is zero). The
         // `LinuxBootParams::new` contract requires exactly that many bytes at
-        // `ptr` to be readable, initialized, and unwritten for as long as the
-        // returned string is used, which is what the borrow relies on; the
-        // caller of `new` keeps every use inside that window.
+        // `ptr` to be readable, initialized, and unwritten for as long as this
+        // view or any copy of it is used. The returned string borrows `self`,
+        // so every use of it falls inside that window.
         let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, scan_len) };
         let nul_pos = bytes.iter().position(|&byte| byte == 0)?;
         core::str::from_utf8(&bytes[..nul_pos]).ok()
