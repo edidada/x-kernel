@@ -252,7 +252,7 @@ comment "Character drivers"
 
 config KFEAT_DRIVER_CONSOLE_PL011
     bool "PL011 UART backend (early console)"
-    depends on KFEAT_CHAR && ARCH_AARCH64
+    depends on ARCH_AARCH64
     default y if MACHINE_AARCH64_QEMU
     help
       Build the PL011 UART backend used by the early-boot console and the
@@ -260,7 +260,6 @@ config KFEAT_DRIVER_CONSOLE_PL011
 
 config KFEAT_DRIVER_CONSOLE_NS16550_MMIO
     bool "NS16550 MMIO UART backend (early console)"
-    depends on KFEAT_CHAR
     default y if MACHINE_AARCH64_RK3588
     default y if MACHINE_RISCV64_QEMU
     default y if MACHINE_LOONGARCH64_QEMU
@@ -270,7 +269,7 @@ config KFEAT_DRIVER_CONSOLE_NS16550_MMIO
 
 config KFEAT_DRIVER_CONSOLE_NS16550_IOPORT
     bool "NS16550 I/O-port UART backend (early console)"
-    depends on KFEAT_CHAR && ARCH_X86_64
+    depends on ARCH_X86_64
     default y if MACHINE_X86_64_QEMU
     help
       Build the NS16550 I/O-port UART backend used by the early-boot console

@@ -218,6 +218,7 @@ symbolize:
 
 clippy:
 	@$(MAKE) --no-print-directory check_deps check_header check_lints
+	@scripts/ci/check_class_trim.sh
 	@$(XKMAKE) clippy $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS)
 
 dylint:
@@ -263,6 +264,9 @@ savedefconfig:
 	@test -f .config || { echo "error: .config not found; run 'make defconfig' first"; exit 1; }
 	@$(XCONFIG) savedefconfig --config .config --output defconfig --kconfig Kconfig --srctree .
 	@echo "saved defconfig to ./defconfig"
+
+gen-cargo:
+	@$(XCONFIG) gen-cargo --config .config
 
 gen-const:
 	@platform="$$($(XKMAKE) config platform)"; \

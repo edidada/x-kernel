@@ -314,6 +314,7 @@ pub fn publish_auto_indexed(
     physical_path: &str,
     modalias: Option<String>,
     properties: Vec<(String, String)>,
+    driver_name: Option<String>,
 ) -> Result<DevNode, PublishError> {
     // The duplicate check must run BEFORE publishing: `publish_indexed`
     // registers the node, so checking afterwards would always find the id
@@ -327,7 +328,16 @@ pub fn publish_auto_indexed(
     let Some(index) = index else {
         return Err(PublishError::ResourceBusy);
     };
-    let mut node = publish_indexed(id, node_type, index, physical_path, modalias, properties);
+    let mut node = publish(
+        id,
+        node_type.subsystem,
+        node_type.devname(index),
+        node_type.device_number(index),
+        physical_path,
+        modalias,
+        properties,
+        driver_name,
+    );
     // The registry holds publish()'s own node copy; stamp the index THERE —
     // withdraw() reads that copy, and without this it would never return
     // the index to the pool (probe/remove cycles exhaust it).

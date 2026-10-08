@@ -610,6 +610,7 @@ mod node_compat {
             &format!("{physical}/input"),
             None,
             properties,
+            Some(String::from(driver_name)),
         ) {
             Ok(node) => Some(node),
             Err(devnode::PublishError::ResourceBusy) => {
@@ -644,7 +645,14 @@ mod node_compat {
         // udev rules match DRM nodes on DEVTYPE=drm_minor (permissions,
         // device ownership); losing it changes /dev/dri/cardN handling.
         let properties = alloc::vec![(String::from("DEVTYPE"), String::from("drm_minor"))];
-        match devnode::publish_auto_indexed(id, &DRM_TYPE, &physical, None, properties) {
+        match devnode::publish_auto_indexed(
+            id,
+            &DRM_TYPE,
+            &physical,
+            None,
+            properties,
+            Some(String::from(driver_name)),
+        ) {
             Ok(node) => Some(node),
             Err(devnode::PublishError::ResourceBusy) => {
                 log::error!(
@@ -989,6 +997,7 @@ pub fn remove_all_detached(owner: u64) {
 /// action that is not expressible as a removed-subscription).
 #[cfg(feature = "char")]
 type ConsoleHook = Option<Arc<dyn Fn(ClassDeviceId) + Send + Sync>>;
+#[cfg(feature = "char")]
 static CHAR_CONSOLE_HOOK: SpinNoPreempt<ConsoleHook> = SpinNoPreempt::new(None);
 
 #[cfg(feature = "char")]

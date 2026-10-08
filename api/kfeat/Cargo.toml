@@ -120,7 +120,7 @@ driver_virtio_socket = ["dep:drv-virtio", "drv-virtio/vsock", "driver-compose/vi
 driver_virtio_9p = ["dep:drv-virtio", "drv-virtio/fs9p", "driver-compose/virtio-9p", "fs_9p", "dep:kclass", "kclass/virtio-9p"]
 # Hardware driver and trusted-source connection are separate knobs (main's
 # !916 split): the driver can exist without feeding the entropy pool.
-driver_virtio_rng = ["dep:drv-virtio", "drv-virtio/rng", "driver-compose/virtio-rng", "char", "dep:kclass", "kclass/hwrng"]
+driver_virtio_rng = ["dep:drv-virtio", "drv-virtio/rng", "driver-compose/virtio-rng", "dep:kclass", "kclass/hwrng"]
 entropy_virtio_rng = ["driver_virtio_rng", "dep:entropy", "entropy/entropy_virtio_rng"]
 driver_virtio_mmio = ["dep:drv-virtio", "drv-virtio/mmio", "driver-compose/virtio-mmio"]
 entropy_arch_cpu = ["dep:entropy", "entropy/entropy_arch_cpu"]

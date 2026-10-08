@@ -84,6 +84,57 @@ for label in "${!MATRIX[@]}"; do
     fi
 done
 
+# --- kclass per-class trim: each class driver ALONE (char class off) ---
+# The combined class-trim runs from `make clippy`; here every class gets a
+# build with ONLY its own driver enabled, verifying the "independently
+# selectable" premise per class.
+declare -A CLASS_DRIVER=(
+    [block]=KFEAT_DRIVER_VIRTIO_BLK
+    [net]=KFEAT_DRIVER_VIRTIO_NET
+    [display]=KFEAT_DRIVER_VIRTIO_GPU
+    [input]=KFEAT_DRIVER_VIRTIO_INPUT
+    [hwrng]=KFEAT_DRIVER_VIRTIO_RNG
+    [vsock]=KFEAT_DRIVER_VIRTIO_SOCKET
+    [virtio-9p]=KFEAT_DRIVER_VIRTIO_9P
+)
+CFG_BAK="$(mktemp)"
+XCONF_BAK="$(mktemp)"
+cp .config "$CFG_BAK"
+cp .cargo/.xconfig.toml "$XCONF_BAK"
+for cls in block net display input hwrng vsock virtio-9p; do
+    cp platforms/kplat-aarch64/qemu_defconfig .config
+    {
+        echo '# KFEAT_CHAR is not set'
+        echo '# KFEAT_DRIVER_SERIAL_PL011 is not set'
+        echo 'KFEAT_DRIVER_CONSOLE_PL011=y'
+        for d in "${CLASS_DRIVER[@]}"; do echo "# $d is not set"; done
+        echo "${CLASS_DRIVER[$cls]}=y"
+        [ "$cls" = "virtio-9p" ] && echo 'KFEAT_FS_9P=y'
+    } >> .config
+    make olddefconfig >/dev/null 2>&1
+    # Regenerate the aarch64 build state (kbuild config.rs + k_plat_name
+    # rustflags cfg): a stale one from another platform breaks bare cargo.
+    make gen-const >/dev/null 2>&1
+    make -s gen-cargo >/dev/null 2>&1
+    trim_feats="$(python3 scripts/kfeat-features.py)"
+    echo ">>> [trim:$cls] cargo check (char off, only $cls driver)"
+    rm -rf target/class-trim/debug/build/kbuild_config-*
+    rm -rf target/class-trim/*/debug/build/kbuild_config-*
+    if ! K_PLAT_NAME=kplat-aarch64 RUST_TARGET_PATH=platforms/kplat-aarch64 \
+        cargo check --manifest-path entry/Cargo.toml --target "$TARGET" \
+        --target-dir target/class-trim -p entry --features "$trim_feats" --quiet; then
+        echo "!!! [trim:$cls] FAILED"
+        fail=1
+    fi
+done
+cp "$CFG_BAK" .config
+cp "$XCONF_BAK" .cargo/.xconfig.toml
+rm -f "$CFG_BAK" "$XCONF_BAK"
+# Restore the build state for the restored .config too, so anything after
+# this script (or the user's next bare cargo) sees consistent files.
+make gen-const >/dev/null 2>&1
+make -s gen-cargo >/dev/null 2>&1
+
 # x86 pass: the base driver set that must build there (covers the ioport
 # serial/console variants).
 cp .config /tmp/feat-matrix-config.bak
