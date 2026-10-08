@@ -317,7 +317,18 @@ pub fn publish_auto_indexed(
         driver_name,
         available: true,
     };
-    Ok(register_and_dispatch(node))
+    let allocated = node.allocated_index;
+    match register_and_dispatch(node) {
+        RegisterOutcome::Registered(node) => Ok(node),
+        // Duplicate AFTER the pre-check: a concurrent publisher won the
+        // race. Its index stays with the winner; ours must be returned.
+        RegisterOutcome::DuplicateId => {
+            if let Some(allocated) = allocated {
+                INDEX_POOLS.lock().release(node_type.subsystem, allocated);
+            }
+            Err(PublishError::AlreadyExists)
+        }
+    }
 }
 
 /// Publish a node with an explicit devname and `dev_t` (block disks name
@@ -350,19 +361,46 @@ pub fn publish(
         driver_name,
         available: true,
     };
-    register_and_dispatch(node)
+    match register_and_dispatch(node) {
+        RegisterOutcome::Registered(node) => node,
+        // Explicit-publish duplicate: keep the ORIGINAL registration and
+        // its dispatched state (the old replace-in-place desynced every
+        // subscriber). Log loudly; the caller's node is dropped.
+        RegisterOutcome::DuplicateId => {
+            log::warn!(
+                "devnode: publish id {} ({}) duplicated an existing node; keeping the original",
+                id,
+                subsystem
+            );
+            REGISTRY
+                .lock()
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .cloned()
+                .expect("duplicate reported, node must exist")
+        }
+    }
 }
 
 /// Register one fully-built node and dispatch its Added event. Registry
 /// entry, dispatched copies and the returned handle are the SAME node —
 /// callers that patch fields after `publish()` would race every subscriber
 /// with a stale copy (the indexed path hit exactly that with sysfs_path).
-fn register_and_dispatch(node: DevNode) -> DevNode {
+/// Registration result: a duplicate id is a caller error, not a silent
+/// replace. The old code swapped the existing node in place — the first
+/// publication's Added event consumers kept stale copies and its class
+/// index leaked (two concurrent publishes could each pass the pre-check).
+pub(crate) enum RegisterOutcome {
+    Registered(DevNode),
+    DuplicateId,
+}
+
+fn register_and_dispatch(node: DevNode) -> RegisterOutcome {
     let (subscribers, publisher) = {
         let mut registry = REGISTRY.lock();
-        if let Some(existing) = registry.nodes.iter_mut().find(|n| n.id == node.id) {
-            *existing = node.clone();
-            return existing.clone();
+        if registry.nodes.iter().any(|n| n.id == node.id) {
+            return RegisterOutcome::DuplicateId;
         }
         registry.nodes.push(node.clone());
         (
@@ -371,7 +409,7 @@ fn register_and_dispatch(node: DevNode) -> DevNode {
         )
     };
     dispatch_added(&node, subscribers, publisher);
-    node
+    RegisterOutcome::Registered(node)
 }
 
 /// Remove the publication for `id` (idempotent).
@@ -381,6 +419,14 @@ pub fn withdraw(id: u64) {
         let Some(node) = registry.nodes.iter_mut().find(|n| n.id == id) else {
             return;
         };
+        // Single teardown owner: the FIRST withdraw flips availability;
+        // a second withdraw (concurrent or repeated) finds it already
+        // false and returns — previously both dispatchers ran Removing/
+        // Removed and both released the class index (a reused index could
+        // be freed while its new owner was live).
+        if !node.available {
+            return;
+        }
         node.available = false;
         node.clone()
     };
