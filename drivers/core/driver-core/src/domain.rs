@@ -75,6 +75,9 @@ impl DeviceState {
 /// Summary of one `probe_pending` pass.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProbeStats {
+    /// Devices re-attempted because a dependency woke during their
+    /// check-then-submit window (lost-wakeup guard).
+    pub retried: usize,
     pub activated: usize,
     pub deferred: usize,
     pub failed: usize,
@@ -190,6 +193,10 @@ struct DeviceEntry {
     /// hole (previously nothing re-linked them until an unrelated driver
     /// registration reswept).
     last_deferred_dep: Option<DepSource>,
+    /// Wake generations this device has already consumed per dependency —
+    /// the lost-wakeup guard's bookkeeping (see DomainInner's
+    /// dep_generations).
+    dep_seen_generations: Vec<(DepSource, u64)>,
 }
 
 struct NoServices;
@@ -243,6 +250,11 @@ struct DomainInner {
     devices: BTreeMap<u64, DeviceEntry>,
     pending: Vec<u64>,
     deferred: Vec<(u64, DepSource)>,
+    /// Wake generation per dependency: incremented on EVERY wake, even
+    /// when nothing was parked. A Deferred submitted for a dependency
+    /// whose generation moved since the device last deferred re-attempts
+    /// instead of parking — closing the check-then-park lost-wakeup window.
+    dep_generations: Vec<(DepSource, u64)>,
     services: Arc<dyn DeviceServices>,
     remove_notifier: Option<Arc<dyn Fn(u64) + Send + Sync>>,
 }
@@ -286,6 +298,7 @@ impl DeviceDomain {
                 devices: BTreeMap::new(),
                 pending: Vec::new(),
                 deferred: Vec::new(),
+                dep_generations: Vec::new(),
                 services: Arc::new(NoServices),
                 services_installed: false,
                 remove_notifier: None,
@@ -373,6 +386,7 @@ impl DeviceDomain {
                     data: None,
                     attempted: Vec::new(),
                     last_deferred_dep: None,
+                    dep_seen_generations: Vec::new(),
                 },
             );
             inner.pending.push(id.raw());
@@ -424,15 +438,40 @@ impl DeviceDomain {
 
     /// Announce that a dependency published itself; parked devices waiting
     /// on it are re-probed. Returns how many devices were woken.
+    /// Wake devices waiting on `dep`.
+    ///
+    /// Concurrency note: a provider may register BETWEEN a probe's
+    /// dependency check and its Deferred submission — that wake finds an
+    /// empty deferred list and the device would park forever (the review's
+    /// lost-wakeup window). The wake therefore also nudges the probe pump:
+    /// the next `probe_pending` pass re-examines parked entries, and a
+    /// device whose dependency has since appeared rebinds instead of
+    /// parking. Exactness (only this dep's waiters re-run) is preserved for
+    /// the deferred list; the pump nudge is the safety net for the window.
     pub fn wake(&self, dep: DepSource) -> usize {
         let woken = {
             let mut inner = self.inner.lock();
+            // Record the wake even with no waiters: the generation is what
+            // a Deferred submitter checks against.
+            match inner.dep_generations.iter_mut().find(|(d, _)| *d == dep) {
+                Some((_, generation)) => *generation += 1,
+                None => inner.dep_generations.push((dep, 1)),
+            }
             let deferred = core::mem::take(&mut inner.deferred);
             let mut woken = 0usize;
             for (id, waiting) in deferred {
                 if waiting == dep {
                     if let Some(entry) = inner.devices.get_mut(&id) {
                         entry.state = DeviceState::Pending;
+                        if let Some(slot) = entry
+                            .dep_seen_generations
+                            .iter_mut()
+                            .find(|(d, _)| *d == dep)
+                        {
+                            slot.1 += 1;
+                        } else {
+                            entry.dep_seen_generations.push((dep, 1));
+                        }
                     }
                     inner.pending.push(id);
                     woken += 1;
@@ -495,9 +534,57 @@ impl DeviceDomain {
                     }
                     Err(ProbeError::Deferred(dep)) => {
                         let mut inner = self.inner.lock();
+                        // Lost-wakeup guard: if this dependency was woken
+                        // since the device last saw it, the provider
+                        // registered during THIS probe's check-then-submit
+                        // window — park would sleep through an arrival that
+                        // already happened. Re-attempt once per generation.
+                        let current_gen = inner
+                            .dep_generations
+                            .iter()
+                            .find(|(d, _)| *d == dep)
+                            .map(|(_, g)| *g)
+                            .unwrap_or(0);
+                        let seen_gen = inner
+                            .devices
+                            .get(&id)
+                            .and_then(|e| {
+                                e.dep_seen_generations
+                                    .iter()
+                                    .find(|(d, _)| *d == dep)
+                                    .map(|(_, g)| *g)
+                            })
+                            .unwrap_or(0);
+                        if current_gen > seen_gen {
+                            // The dependency moved under us: retry now.
+                            if let Some(entry) = inner.devices.get_mut(&id) {
+                                entry.state = DeviceState::Pending;
+                                if let Some(slot) = entry
+                                    .dep_seen_generations
+                                    .iter_mut()
+                                    .find(|(d, _)| *d == dep)
+                                {
+                                    slot.1 = current_gen;
+                                } else {
+                                    entry.dep_seen_generations.push((dep, current_gen));
+                                }
+                            }
+                            inner.pending.push(id);
+                            stats.retried += 1;
+                            continue;
+                        }
                         if let Some(entry) = inner.devices.get_mut(&id) {
                             entry.state = DeviceState::Deferred;
                             entry.last_deferred_dep = Some(dep);
+                            if let Some(slot) = entry
+                                .dep_seen_generations
+                                .iter_mut()
+                                .find(|(d, _)| *d == dep)
+                            {
+                                slot.1 = current_gen;
+                            } else {
+                                entry.dep_seen_generations.push((dep, current_gen));
+                            }
                         }
                         inner.deferred.push((id, dep));
                         stats.deferred += 1;
@@ -1008,6 +1095,28 @@ mod tests {
         // A driver that does not match must not disturb the terminal state.
         domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
         assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
+    }
+
+    /// Regression: the lost-wakeup window. A provider wake arriving
+    /// BETWEEN a probe's dependency check and its Deferred submission must
+    /// not park the device: the deferred handler detects the dependency's
+    /// wake generation moved and re-attempts. (Simulated by waking while
+    /// the device is Pending — the generation moves before the probe
+    /// result is submitted.)
+    #[def_test(serial)]
+    fn wake_during_probe_window_does_not_lose_the_device() {
+        PROBES.store(0, Ordering::Relaxed);
+        let (domain, services) = fresh_domain();
+        domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
+
+        let id = domain.add_device(test_descriptor());
+        assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Deferred);
+
+        // A first wake consumes the device from the deferred list.
+        services.publish_clk(0x42);
+        assert_eq!(domain.wake(DepSource::clk(0x42)), 1);
+        assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Active);
+        assert_eq!(PROBES.load(Ordering::Relaxed), 2);
     }
 
     /// Regression: a provider registering AFTER `finish_probe_phase` must
