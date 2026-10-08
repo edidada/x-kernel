@@ -848,6 +848,7 @@ mod unittest_tests {
         assert!(params.e820_entry(2).is_none());
         assert_eq!(params.cmdline_ptr(), Some(0x1234_5678));
         assert_eq!(params.cmdline_size(), Some(32));
+        assert_eq!(params.cmdline_range(), Some((0x1234_5678, 33)));
         assert_eq!(params.payload_offset(), Some(0x1200));
         assert_eq!(params.payload_length(), Some(0x3400));
         assert!(format!("{params:?}").contains("payload_offset"));
@@ -874,6 +875,7 @@ mod unittest_tests {
         assert_eq!(params.e820_entries(), X86_LINUX_BOOT_E820_MAX_ENTRIES);
         assert_eq!(params.cmdline_ptr(), Some(0x2000_0000));
         assert_eq!(params.cmdline_size(), None);
+        assert_eq!(params.cmdline_range(), Some((0x2000_0000, 256)));
         assert_eq!(params.payload_offset(), None);
         assert_eq!(params.payload_length(), None);
     }
