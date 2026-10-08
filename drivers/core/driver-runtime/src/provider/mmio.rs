@@ -2,11 +2,14 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! X-Kernel implementation of the [`device_res::MmioOp`] provider contract.
+//! X-Kernel implementation of the [`driver_core::provider::MmioOp`] contract.
 
 use core::ptr::NonNull;
 
-use device_res::{MmioMapping, MmioOp, MmioRegion, ResError, ResResult};
+use driver_core::{
+    MmioRegion,
+    provider::{MmioMapping, MmioOp, ResError, ResResult},
+};
 
 use super::XKernelResourceProvider;
 

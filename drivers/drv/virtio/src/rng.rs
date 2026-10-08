@@ -12,13 +12,13 @@
 
 use alloc::sync::{Arc, Weak};
 
-use device_res::IrqHandler;
 use driver_base::DriverError;
 use driver_core::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
 };
 use hwrng::completion::RngCompletion;
 use kclass::{ClassParent, publish_hwrng};
+use kirq::IrqHandler;
 use kpoll::{PollRegisterError, PollSet};
 use ktask::future::PreparedTaskWait;
 use pci::{PciBus, PciMatch};

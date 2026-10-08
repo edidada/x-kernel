@@ -7,9 +7,9 @@
 use alloc::{boxed::Box, sync::Arc, vec};
 use core::{mem::ManuallyDrop, ops::Range};
 
-use device_res::{IrqEvent, IrqHandler};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use hwrng::{HwrngDevice, completion::RngCompletion};
+use kirq::{IrqEvent, IrqHandler};
 use kspin::SpinNoIrq;
 use virtio_drivers::{
     Hal,
@@ -179,7 +179,7 @@ impl<H: Hal + Send + 'static, T: Transport + Send + 'static> VirtIoRngDev<H, T> 
     /// owns registration through its device services (`DeviceCtx::
     /// request_irq`, the single entry point), then calls
     /// [`Self::enable_completion_irq`]. The device implements
-    /// [`device_res::IrqHandler`] for the registration closure.
+    /// [`kirq::IrqHandler`] for the registration closure.
     pub fn try_new(transport: T, completion: Arc<dyn RngCompletion>) -> DriverResult<Arc<Self>> {
         Ok(Arc::new(Self::new(transport, completion)?))
     }

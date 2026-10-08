@@ -10,7 +10,7 @@ use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::{cell::UnsafeCell, marker::PhantomPinned, pin::pin, ptr::NonNull};
 
 use block::completion::{BlockCompletionOperations, BlockSignals, BlockWaiter, PrepareBlockWait};
-use device_res::{IrqEvent, IrqHandler};
+use kirq::{IrqEvent, IrqHandler};
 use linked_list_r4l::{GetLinks, Links, RawList};
 use virtio_drivers::{
     Error,

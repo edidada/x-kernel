@@ -161,7 +161,7 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
     // device reference (the activation owns the strong one and withdraws
     // the irq before teardown) and marks the reclaimer for deferred I/O
     // reclaiming when the device claimed the event.
-    let handler: Arc<dyn device_res::IrqHandler> = device.clone();
+    let handler: Arc<dyn kirq::IrqHandler> = device.clone();
     let weak_handler = Arc::downgrade(&handler);
     let weak_reclaimer = alloc::sync::Arc::downgrade(&activation.reclaimer);
     activation.irq = Some(dev.request_irq(irq, "virtio-blk", move || {

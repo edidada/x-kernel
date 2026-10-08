@@ -6,8 +6,9 @@
 
 use alloc::vec::Vec;
 
-use device_res::{IrqController, IrqOp, IrqRouteDesc};
 use driver_base::DeviceKind;
+use driver_core::provider::{IrqOp, IrqRouteDesc};
+use kirq::IrqController;
 use pci::MmioCam;
 
 #[cfg(target_arch = "x86_64")]

@@ -20,7 +20,7 @@
 //! `clock-names` entry to its declaration index.
 //!
 //! The return type [`ClockSpec`] is deliberately *not* the device-res
-//! [`ClkSpec`](device_res::ClkSpec) — this crate sits below `device-res` in
+//! [`ClkSpec`](driver_core::ClkSpec) — this crate sits below the driver framework in
 //! the dependency graph and must stay firmware-only. Callers (the DT-to-device
 //! builders) convert `ClockSpec` to ResourceKind::Clk entries.
 //!

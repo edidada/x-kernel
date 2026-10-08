@@ -11,8 +11,10 @@
 
 use core::ptr::NonNull;
 
-use device_res::{DmaAllocation, DmaMapping, DmaOp, DmaSpec, MmioOp};
-use driver_core::MmioRegion;
+use driver_core::{
+    MmioRegion,
+    provider::{DmaAllocation, DmaMapping, DmaOp, DmaSpec, MmioOp},
+};
 use memaddr::PAGE_SIZE_4K;
 use virtio::{BufferDirection, PhysAddr, VirtIoHal};
 
@@ -113,9 +115,9 @@ unsafe impl VirtIoHal for Hal {
         _access_platform: bool,
     ) -> PhysAddr {
         let dir = match direction {
-            BufferDirection::DriverToDevice => device_res::DmaDirection::DriverToDevice,
-            BufferDirection::DeviceToDriver => device_res::DmaDirection::DeviceToDriver,
-            BufferDirection::Both => device_res::DmaDirection::Bidirectional,
+            BufferDirection::DriverToDevice => driver_core::provider::DmaDirection::DriverToDevice,
+            BufferDirection::DeviceToDriver => driver_core::provider::DmaDirection::DeviceToDriver,
+            BufferDirection::Both => driver_core::provider::DmaDirection::Bidirectional,
         };
         match resource_provider().map_streaming(buffer, dir) {
             Ok(m) => m.bus_addr as PhysAddr,
@@ -137,9 +139,9 @@ unsafe impl VirtIoHal for Hal {
             return;
         }
         let dir = match direction {
-            BufferDirection::DriverToDevice => device_res::DmaDirection::DriverToDevice,
-            BufferDirection::DeviceToDriver => device_res::DmaDirection::DeviceToDriver,
-            BufferDirection::Both => device_res::DmaDirection::Bidirectional,
+            BufferDirection::DriverToDevice => driver_core::provider::DmaDirection::DriverToDevice,
+            BufferDirection::DeviceToDriver => driver_core::provider::DmaDirection::DeviceToDriver,
+            BufferDirection::Both => driver_core::provider::DmaDirection::Bidirectional,
         };
         // SAFETY: the vendored contract hands us a buffer valid for the
         // duration of this call; only a shared read happens here.

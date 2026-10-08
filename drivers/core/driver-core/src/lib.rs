@@ -56,6 +56,7 @@ mod device;
 mod domain;
 mod driver;
 mod error;
+pub mod provider;
 mod resource;
 
 pub use bus::{

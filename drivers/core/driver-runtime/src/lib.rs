@@ -40,14 +40,12 @@ pub mod virtio_service;
 use alloc::sync::Arc;
 
 pub use clk::ClkRegistry;
-use device_res::{
-    DmaAllocation, DmaOp, DmaSpec, IrqEvent as ResIrqEvent, IrqHandler as ResIrqHandler, IrqOp,
-    IrqResource, MmioMapping, MmioOp, ResError,
-};
 use driver_core::{
     ClkHandle, CoherentMem, DevIrq, DeviceServices, IoMap, IrqAction, IrqHandlerFn, RuntimeError,
     ServiceError,
+    provider::{DmaAllocation, DmaOp, DmaSpec, IrqOp, IrqResource, MmioMapping, MmioOp, ResError},
 };
+use kirq::{IrqEvent as ResIrqEvent, IrqHandler as ResIrqHandler};
 use provider::XKernelResourceProvider;
 
 static GLOBAL_RUNTIME: kspin::SpinNoPreempt<Option<Arc<XKernelRuntime>>> =
@@ -153,6 +151,7 @@ impl XKernelRuntime {
         // device-res re-exports driver-core's MmioRegion — one type, no
         // field-by-field re-construction.
         self.provider
+            .as_ref()
             .map_mmio(region, "driver-core")
             .map_err(map_res_error)
     }
@@ -199,7 +198,7 @@ impl DeviceServices for XKernelRuntime {
             .map_err(map_res_error)?;
         let release = {
             let provider = self.provider.clone();
-            move || provider.release_irq(resource, token)
+            move || provider.as_ref().release_irq(resource, token)
         };
         let _ = name;
         Ok(DevIrq::new(spec.number, Some(Arc::new(release))))

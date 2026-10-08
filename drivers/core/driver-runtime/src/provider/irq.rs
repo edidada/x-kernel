@@ -2,15 +2,15 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! X-Kernel implementation of the [`device_res::IrqOp`] provider contract.
+//! X-Kernel implementation of the [`driver_core::provider::IrqOp`] contract.
 
 use alloc::sync::Arc;
 
-use device_res::{
-    IrqController as DevIrqController, IrqEvent as DevIrqEvent, IrqHandler as DevIrqHandler,
-    IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc, IrqTrigger as DevIrqTrigger, MsiResource,
-    ResError, ResResult,
-};
+pub use driver_core::provider::{IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc, MsiResource};
+use driver_core::provider::{ResError, ResResult};
+// The provider contract (formerly device-res): this module IS the
+// definition site now. IRQ vocabulary re-exports from kirq.
+pub use kirq::{IrqController, IrqEvent, IrqHandler, IrqTrigger};
 
 use super::XKernelResourceProvider;
 
@@ -18,11 +18,11 @@ impl IrqOp for XKernelResourceProvider {
     fn request_irq(
         &self,
         irq: IrqResource,
-        handler: Arc<dyn DevIrqHandler>,
+        handler: Arc<dyn IrqHandler>,
     ) -> ResResult<IrqHandlerToken> {
         let dispatch_handler: Arc<dyn kirq::IrqHandler> = Arc::new(move |virq| {
             let event = handler.handle(virq);
-            dev_irq_event_to_kirq(event)
+            event_to_kirq(event)
         });
         match kirq::try_register_shared(irq_resource_to_kirq_spec(irq), dispatch_handler) {
             Ok(Some(token)) => Ok(IrqHandlerToken::shared_action(token.id())),
@@ -110,12 +110,12 @@ impl IrqOp for XKernelResourceProvider {
         #[cfg(target_arch = "x86_64")]
         {
             let allocation = kirq::alloc_msix(kirq::IrqAffinity::Any).ok_or(ResError::NoMemory)?;
-            let irq = IrqResource::new(allocation.virq(), DevIrqTrigger::EdgeRising)
-                .with_controller(DevIrqController::Unknown);
+            let irq = IrqResource::new(allocation.virq(), IrqTrigger::EdgeRising)
+                .with_controller(IrqController::Unknown);
             let message = allocation.message();
             Ok(MsiResource::new(
                 irq,
-                device_res::MsiMessage::new(message.address(), message.data()),
+                driver_core::provider::MsiMessage::new(message.address(), message.data()),
             ))
         }
 
@@ -143,48 +143,21 @@ impl IrqOp for XKernelResourceProvider {
     }
 }
 
-fn dev_irq_trigger_to_kirq(trigger: DevIrqTrigger) -> kirq::IrqTrigger {
-    match trigger {
-        DevIrqTrigger::EdgeRising => kirq::IrqTrigger::EdgeRising,
-        DevIrqTrigger::EdgeFalling => kirq::IrqTrigger::EdgeFalling,
-        DevIrqTrigger::LevelHigh => kirq::IrqTrigger::LevelHigh,
-        DevIrqTrigger::LevelLow => kirq::IrqTrigger::LevelLow,
-        DevIrqTrigger::Unknown(flags) => kirq::IrqTrigger::Unknown(flags),
-    }
-}
-
-fn dev_irq_controller_to_kirq(controller: DevIrqController) -> kirq::IrqController {
-    match controller {
-        // Msi exists only in kirq's vocabulary (MSI domains); the
-        // device-res side never produces it, map it back to the closest
-        // controller-agnostic answer.
-        DevIrqController::Msi => kirq::IrqController::Msi,
-        DevIrqController::Gic => kirq::IrqController::Gic,
-        DevIrqController::Plic => kirq::IrqController::Plic,
-        DevIrqController::IoApic => kirq::IrqController::IoApic,
-        DevIrqController::LoongArchExtioi => kirq::IrqController::LoongArchExtioi,
-        DevIrqController::Unknown => kirq::IrqController::Unknown,
-    }
-}
-
-fn dev_irq_controller_to_kirq_domain(controller: DevIrqController) -> Option<kirq::IrqDomainId> {
+fn dev_irq_controller_to_kirq_domain(controller: kirq::IrqController) -> Option<kirq::IrqDomainId> {
     // `device_res::IrqDomainId` is provider-local. Only controllers with a
     // registered kirq domain can produce data-plane-resolvable mappings here.
     match controller {
-        DevIrqController::Gic => Some(kirq::GIC_ROOT_DOMAIN),
-        DevIrqController::Plic => Some(kirq::PLIC_ROOT_DOMAIN),
-        DevIrqController::IoApic => Some(kirq::IO_APIC_DOMAIN),
+        IrqController::Gic => Some(kirq::GIC_ROOT_DOMAIN),
+        IrqController::Plic => Some(kirq::PLIC_ROOT_DOMAIN),
+        IrqController::IoApic => Some(kirq::IO_APIC_DOMAIN),
         // Msi carries its own domain in kirq; the device-res side has no
         // provider-registered Msi domain to name.
-        DevIrqController::Msi | DevIrqController::LoongArchExtioi | DevIrqController::Unknown => {
-            None
-        }
+        IrqController::Msi | IrqController::LoongArchExtioi | IrqController::Unknown => None,
     }
 }
 
 fn irq_route_to_kirq_desc(route: IrqRouteDesc) -> kirq::IrqDesc {
-    let mut desc = kirq::IrqDesc::new(route.hwirq, dev_irq_trigger_to_kirq(route.trigger))
-        .with_controller(dev_irq_controller_to_kirq(route.controller));
+    let mut desc = kirq::IrqDesc::new(route.hwirq, route.trigger).with_controller(route.controller);
     if let Some(domain) = dev_irq_controller_to_kirq_domain(route.controller) {
         desc = desc.with_domain(domain);
     }
@@ -194,15 +167,14 @@ fn irq_route_to_kirq_desc(route: IrqRouteDesc) -> kirq::IrqDesc {
 fn irq_resource_to_kirq_spec(irq: IrqResource) -> kirq::IrqSpec {
     if irq.hwirq.is_none()
         && irq.domain.is_none()
-        && irq.controller.unwrap_or(DevIrqController::Unknown) == DevIrqController::Unknown
+        && irq.controller.unwrap_or(IrqController::Unknown) == IrqController::Unknown
     {
         return kirq::IrqSpec::PlainVirq(irq.number);
     }
 
     let hwirq = irq.hwirq.unwrap_or(irq.number);
-    let controller = irq.controller.unwrap_or(DevIrqController::Unknown);
-    let mut desc = kirq::IrqDesc::new(hwirq, dev_irq_trigger_to_kirq(irq.trigger))
-        .with_controller(dev_irq_controller_to_kirq(controller));
+    let controller = irq.controller.unwrap_or(IrqController::Unknown);
+    let mut desc = kirq::IrqDesc::new(hwirq, irq.trigger).with_controller(controller);
     // Only pin the logical irq when the caller actually resolved one
     // (number != 0). A firmware route (number 0 + hwirq + controller) maps
     // through the controller's domain: an existing mapping is reused, a
@@ -217,7 +189,7 @@ fn irq_resource_to_kirq_spec(irq: IrqResource) -> kirq::IrqSpec {
     kirq::IrqSpec::Desc(desc)
 }
 
-fn dev_irq_event_to_kirq(event: DevIrqEvent) -> kirq::IrqEvent {
+fn event_to_kirq(event: kirq::IrqEvent) -> kirq::IrqEvent {
     if event.handled() {
         kirq::IrqEvent::from_sources(event.sources())
     } else {
@@ -250,7 +222,7 @@ mod tests {
 
     #[def_test]
     fn test_plain_irq_resource_maps_to_plain_virq_spec() {
-        let resource = IrqResource::new(32, DevIrqTrigger::Unknown(0));
+        let resource = IrqResource::new(32, IrqTrigger::Unknown(0));
 
         let spec = irq_resource_to_kirq_spec(resource);
 
@@ -259,8 +231,8 @@ mod tests {
 
     #[def_test]
     fn test_routed_irq_resource_maps_to_descriptor_spec() {
-        let resource = IrqResource::new(48, DevIrqTrigger::LevelHigh)
-            .with_controller(DevIrqController::Gic)
+        let resource = IrqResource::new(48, IrqTrigger::LevelHigh)
+            .with_controller(IrqController::Gic)
             .with_hwirq(30);
 
         let spec = irq_resource_to_kirq_spec(resource);
@@ -275,7 +247,7 @@ mod tests {
 
     #[def_test]
     fn test_device_irq_event_wake_request_maps_to_handled_until_threadirq_is_available() {
-        let event = dev_irq_event_to_kirq(DevIrqEvent::from_sources(0b1010));
+        let event = event_to_kirq(IrqEvent::from_sources(0b1010));
 
         assert!(event.handled());
         assert_eq!(event.sources(), 0b1010);
@@ -283,7 +255,7 @@ mod tests {
 
     #[def_test]
     fn test_device_irq_event_handled_does_not_wake_thread() {
-        let event = dev_irq_event_to_kirq(DevIrqEvent::from_sources(0b0101));
+        let event = event_to_kirq(IrqEvent::from_sources(0b0101));
 
         assert!(event.handled());
         assert_eq!(event.sources(), 0b0101);

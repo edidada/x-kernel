@@ -30,9 +30,9 @@ driver_base = { workspace = true }
 kclass = { workspace = true }
 hwrng = { workspace = true }
 kpoll = { workspace = true, optional = true }
+kirq = { workspace = true }
 ktask = { workspace = true, optional = true }
 log.workspace = true
 pci = { workspace = true }
 virtio = { workspace = true, features = ["alloc"] }
-device_res = { workspace = true }
 

@@ -2,11 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! X-Kernel implementation of the [`device_res::DmaOp`] provider contract.
+//! X-Kernel implementation of the [`driver_core::provider::DmaOp`] contract.
 
 use core::{alloc::Layout, ptr::NonNull};
 
-use device_res::{DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, ResError, ResResult};
+use driver_core::provider::{
+    DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, ResError, ResResult,
+};
 
 use super::XKernelResourceProvider;
 

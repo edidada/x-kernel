@@ -198,7 +198,6 @@ block = { path = "drivers/subsystems/block" }
 char_driver = { path = "drivers/subsystems/char" }
 display = { path = "drivers/subsystems/display" }
 driver_base = { path = "drivers/common/driver_base" }
-device_res = { path = "drivers/common/device-res", package = "device-res" }
 hwrng = { path = "drivers/common/hwrng" }
 kclk = { path = "core/kclk" }
 driver-core = { path = "drivers/core/driver-core" }

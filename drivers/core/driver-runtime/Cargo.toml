@@ -3,7 +3,7 @@ name = "driver-runtime"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "Per-device service runtime for driver-core: bridges device-res providers, owns the clk registry"
+description = "Per-device service runtime for driver-core: owns the host resource provider, owns the clk registry"
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
@@ -12,7 +12,6 @@ categories = ["os", "no-std"]
 
 [dependencies]
 driver-core.workspace = true
-device_res.workspace = true
 kirq = { workspace = true }
 memspace = { workspace = true }
 kdma = { workspace = true }
