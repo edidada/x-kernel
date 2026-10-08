@@ -164,17 +164,59 @@ static PROBE_MMIO_LEASES: kspin::SpinNoPreempt<Option<alloc::vec::Vec<Io>>> =
 static FALLBACK_MMIO_LEASES: kspin::SpinNoPreempt<alloc::vec::Vec<Io>> =
     kspin::SpinNoPreempt::new(alloc::vec::Vec::new());
 
-/// Open a probe collection scope. Panics if one is already open (probes
-/// are not nested today; a nesting need is a design conversation).
-pub fn begin_mmio_probe() {
+/// Open a probe collection scope, returning a guard.
+///
+/// # Serialization contract
+///
+/// PCI transport probes are serialized today (the boot-time probe pump
+/// runs single-threaded; the review's concurrent-probe scenario is an
+/// architecture change, not a current path). The single-slot collector
+/// ENFORCES that contract: a second scope while one is open panics
+/// loudly instead of silently mixing leases across probes.
+///
+/// The guard's Drop closes the scope — a panic between open and take
+/// no longer leaves the slot stuck open (the old begin/take pair had no
+/// error-path recovery).
+pub fn begin_mmio_probe() -> MmioProbeScope<'static> {
     let mut guard = PROBE_MMIO_LEASES.lock();
-    assert!(guard.is_none(), "nested mmio probe scopes");
+    assert!(
+        guard.is_none(),
+        "concurrent mmio probe scopes: transport probes are serialized by contract; nesting is a \
+         design change, not a bug workaround"
+    );
     *guard = Some(alloc::vec::Vec::new());
+    drop(guard);
+    MmioProbeScope {
+        _priv: core::marker::PhantomData,
+    }
 }
 
-/// Close the scope and take every lease collected since
-/// [`begin_mmio_probe`]. Always call on the error path too — the leases
-/// drop here and the mappings are released.
+/// Scope guard: closing on Drop releases the slot. Use
+/// [`MmioProbeScope::take_leases`] to move the collected mappings out
+/// (the scope is then closed by the same Drop).
+pub struct MmioProbeScope<'a> {
+    _priv: core::marker::PhantomData<&'a ()>,
+}
+
+impl MmioProbeScope<'static> {
+    /// Take every lease collected since the scope opened.
+    pub fn take_leases(self) -> alloc::vec::Vec<Io> {
+        let leases = PROBE_MMIO_LEASES.lock().take().unwrap_or_default();
+        core::mem::forget(self); // closed manually; Drop must not double-take
+        leases
+    }
+}
+
+impl Drop for MmioProbeScope<'_> {
+    fn drop(&mut self) {
+        // Error path: drop the collected leases (mappings released) and
+        // close the slot.
+        let _ = PROBE_MMIO_LEASES.lock().take();
+    }
+}
+
+/// Back-compat shim for callers using the begin/take pair manually.
+/// Prefer [`begin_mmio_probe`]'s guard.
 pub fn take_mmio_probe_leases() -> alloc::vec::Vec<Io> {
     PROBE_MMIO_LEASES.lock().take().unwrap_or_default()
 }

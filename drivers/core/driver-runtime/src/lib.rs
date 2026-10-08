@@ -336,11 +336,14 @@ pub fn probe_pci_transport_with(
         // ride with the transport (released when it drops) instead of
         // leaking at the trait boundary. On failure the leases drop here and
         // the mappings die with the failed probe.
-        hal::begin_mmio_probe();
+        // Scope guard: the slot closes and collected leases drop even if
+        // the vendored constructor panics mid-walk (the old begin/take pair
+        // left the slot stuck open on panic).
+        let scope = hal::begin_mmio_probe();
         let probed =
             virtio::probe_pci_transport_only::<hal::Hal>(root, bdf, &dev_info, provider.as_ref());
-        let leases = hal::take_mmio_probe_leases();
         let (kind, mut transport, transport_irq) = probed.ok_or(RuntimeError::BadState)?;
+        let leases = scope.take_leases();
         transport.retain_mappings(leases);
 
         let irq = transport_irq.or_else(|| {
