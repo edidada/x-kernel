@@ -8,7 +8,7 @@ use core::ptr::NonNull;
 
 use device_res::{MmioMapping, MmioOp, MmioRegion, ResError, ResResult};
 
-use crate::XKernelResourceProvider;
+use super::XKernelResourceProvider;
 
 impl MmioOp for XKernelResourceProvider {
     fn map_mmio(&self, region: MmioRegion, name: &'static str) -> ResResult<MmioMapping> {

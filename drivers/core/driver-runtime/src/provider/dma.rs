@@ -8,7 +8,7 @@ use core::{alloc::Layout, ptr::NonNull};
 
 use device_res::{DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, ResError, ResResult};
 
-use crate::XKernelResourceProvider;
+use super::XKernelResourceProvider;
 
 impl DmaOp for XKernelResourceProvider {
     fn alloc_coherent(&self, spec: DmaSpec) -> ResResult<DmaAllocation> {

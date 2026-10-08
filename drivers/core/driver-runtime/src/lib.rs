@@ -33,6 +33,7 @@ mod clk;
 
 #[cfg(feature = "virtio-hal")]
 pub mod hal;
+pub mod provider;
 #[cfg(feature = "virtio-hal")]
 pub mod virtio_service;
 
@@ -43,11 +44,11 @@ use device_res::{
     DmaAllocation, DmaOp, DmaSpec, IrqEvent as ResIrqEvent, IrqHandler as ResIrqHandler, IrqOp,
     IrqResource, MmioMapping, MmioOp, ResError,
 };
-use device_res_xkernel::XKernelResourceProvider;
 use driver_core::{
     ClkHandle, CoherentMem, DevIrq, DeviceServices, IoMap, IrqAction, IrqHandlerFn, RuntimeError,
     ServiceError,
 };
+use provider::XKernelResourceProvider;
 
 static GLOBAL_RUNTIME: kspin::SpinNoPreempt<Option<Arc<XKernelRuntime>>> =
     kspin::SpinNoPreempt::new(None);

@@ -13,7 +13,9 @@ categories = ["os", "no-std"]
 [dependencies]
 driver-core.workspace = true
 device_res.workspace = true
-device_res_xkernel.workspace = true
+kirq = { workspace = true }
+memspace = { workspace = true }
+kdma = { workspace = true }
 kclk.workspace = true
 pci.workspace = true
 virtio = { workspace = true, optional = true }

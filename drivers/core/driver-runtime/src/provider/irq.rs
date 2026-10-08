@@ -12,7 +12,7 @@ use device_res::{
     ResError, ResResult,
 };
 
-use crate::XKernelResourceProvider;
+use super::XKernelResourceProvider;
 
 impl IrqOp for XKernelResourceProvider {
     fn request_irq(

@@ -218,7 +218,6 @@ vsock = { path = "drivers/subsystems/vsock" }
 virtio = { path = "drivers/drv/virtio/device" }
 
 # Internal: driver adapters and integration
-device_res_xkernel = { path = "drivers/adapters/xkernel/device-res", package = "device-res-xkernel" }
 uevent_netlink = { path = "drivers/integration/uevent-netlink", package = "uevent-netlink" }
 
 # Internal: platform, firmware, and host driver support
