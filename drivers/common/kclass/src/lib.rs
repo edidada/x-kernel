@@ -554,21 +554,6 @@ mod node_compat {
         |physical, index| format!("{physical}/drm/card{index}"),
     );
 
-    fn physical_path(location: DeviceLocation) -> String {
-        match location {
-            DeviceLocation::Pci {
-                segment,
-                bus,
-                device,
-                function,
-            } => devnode::physical_path_pci(segment, bus, device, function),
-            DeviceLocation::Mmio { base, .. } => format!("platform/{base:x}.mmio"),
-            DeviceLocation::FirmwareNode { id } => format!("platform/firmware{id}"),
-            DeviceLocation::PlatformStatic { id } => format!("platform/static{id}"),
-            DeviceLocation::Bridge { domain } => format!("pci{domain:04x}:00"),
-        }
-    }
-
     fn sanitize(value: &str) -> String {
         value
             .chars()
@@ -597,7 +582,7 @@ mod node_compat {
         driver_name: &str,
         location: DeviceLocation,
     ) {
-        let physical = physical_path(location);
+        let physical = devnode::physical_path(&location);
         let mut properties = Vec::new();
         properties.push((
             String::from("PRODUCT"),
@@ -649,7 +634,7 @@ mod node_compat {
 
     /// Build the drm node publication (cardN).
     pub(super) fn drm_node(id: u64, driver_name: &str, location: DeviceLocation) {
-        let physical = physical_path(location);
+        let physical = devnode::physical_path(&location);
         // udev rules match DRM nodes on DEVTYPE=drm_minor (permissions,
         // device ownership); losing it changes /dev/dri/cardN handling.
         let properties = alloc::vec![(String::from("DEVTYPE"), String::from("drm_minor"))];

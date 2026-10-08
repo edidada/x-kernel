@@ -68,7 +68,6 @@ done
 # (include_bytes!(env!("XKERNEL_RAMDISK_IMG"))); the full build flow provides
 # one. Type-check it standalone with a small stub image.
 STUB_IMG="$(mktemp)"
-trap 'rm -f "$STUB_IMG"' EXIT
 dd if=/dev/zero of="$STUB_IMG" bs=4096 count=1 status=none
 export XKERNEL_RAMDISK_IMG="$STUB_IMG"
 export XKERNEL_RAMDISK_IMG_LEN=4096
@@ -104,7 +103,7 @@ XCONF_HAD=0
 # Restore the caller's build state on ANY exit: a mid-loop abort under
 # `set -e` used to leave the trim configuration active, making every
 # later bare make/cargo silently build the wrong thing.
-trap 'cp "$CFG_BAK" .config 2>/dev/null || true; if [ "$XCONF_HAD" = 1 ]; then cp "$XCONF_BAK" .cargo/.xconfig.toml 2>/dev/null || true; else rm -f .cargo/.xconfig.toml; fi; rm -f "$CFG_BAK" "$XCONF_BAK"' EXIT
+trap 'cp "$CFG_BAK" .config 2>/dev/null || true; if [ "$XCONF_HAD" = 1 ]; then cp "$XCONF_BAK" .cargo/.xconfig.toml 2>/dev/null || true; else rm -f .cargo/.xconfig.toml; fi; rm -f "$CFG_BAK" "$XCONF_BAK" "$STUB_IMG"' EXIT
 cp .config "$CFG_BAK"
 for cls in block net display input hwrng vsock virtio-9p; do
     cp platforms/kplat-aarch64/qemu_defconfig .config

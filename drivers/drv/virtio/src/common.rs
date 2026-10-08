@@ -50,19 +50,9 @@ pub(crate) fn map_driver_error(err: driver_base::DriverError) -> ProbeError {
 /// Format the DEVPATH physical path from a location (the same string the
 /// devnode registry stores).
 pub(crate) fn physical_path(location: DeviceLocation) -> String {
-    use devnode::physical_path_pci;
-    match location {
-        DeviceLocation::Pci {
-            segment,
-            bus,
-            device,
-            function,
-        } => physical_path_pci(segment, bus, device, function),
-        DeviceLocation::Mmio { base, .. } => format!("platform/{base:x}.mmio"),
-        DeviceLocation::FirmwareNode { id } => format!("platform/firmware{id}"),
-        DeviceLocation::PlatformStatic { id } => format!("platform/static{id}"),
-        DeviceLocation::Bridge { domain } => format!("pci{domain:04x}:00"),
-    }
+    // The DEVPATH format lives in devnode exactly once; this is a plain
+    // adapter over the core→devnode location conversion we already do.
+    devnode::physical_path(&legacy_location(location))
 }
 
 /// Probe this device's virtio PCI transport through the runtime's
