@@ -78,9 +78,14 @@ impl TryFrom<&str> for UeventAction {
     }
 }
 
-/// The `DEVPATH` payload path for a node (`/devices/<physical>/<devname>`).
+/// The `DEVPATH` payload path for a node.
+///
+/// The canonical sysfs device path is carried ON the node (filled by the
+/// publisher, which knows the per-class layout); deriving it here from
+/// `physical_path + devname` produced paths the sysfs tree never created
+/// for nested layouts like `input/inputN/eventN`.
 pub fn uevent_devpath(node: &DevNode) -> String {
-    format!("/devices/{}/{}", node.physical_path(), node.devname())
+    format!("/devices/{}", node.sysfs_path())
 }
 
 /// The environment variables of one uevent: `ACTION`, `DEVPATH`,

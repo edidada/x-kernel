@@ -106,8 +106,14 @@ pub struct DevNodeType {
     /// Minor base plus per-index count (input reserves 32 event minors).
     pub minor_base: u32,
     pub index_count: u32,
-    /// devname for `index` (`input/event{index}`, `dri/card{index}`).
+    /// devname for `index` (`input/event{index}`, `dri/card{index}`) — the
+    /// /dev projection path.
     pub devname_for: fn(index: u32) -> String,
+    /// Canonical sysfs device path for `index` under `physical_path`
+    /// (`{phys}/input/input{index}/event{index}`, `{phys}/drm/card{index}`).
+    /// The uevent `DEVPATH` and the sysfs tree share this one derivation —
+    /// two independent path constructions WILL drift apart (they did).
+    pub sysfs_path_for: fn(physical_path: &str, index: u32) -> String,
 }
 
 impl DevNodeType {
@@ -117,6 +123,7 @@ impl DevNodeType {
         minor_base: u32,
         index_count: u32,
         devname_for: fn(index: u32) -> String,
+        sysfs_path_for: fn(physical_path: &str, index: u32) -> String,
     ) -> Self {
         Self {
             subsystem,
@@ -124,6 +131,7 @@ impl DevNodeType {
             minor_base,
             index_count,
             devname_for,
+            sysfs_path_for,
         }
     }
 
@@ -144,6 +152,9 @@ pub struct DevNode {
     /// The allocated per-class index when this node came from
     /// [`publish_auto_indexed`] (released back to the pool on withdraw).
     pub(crate) allocated_index: Option<u32>,
+    /// Canonical sysfs-relative device path (no `/devices` prefix). The
+    /// uevent `DEVPATH` and the sysfs tree both consume exactly this.
+    sysfs_path: String,
     devname: String,
     device_number: DeviceNumber,
     /// Physical device path (`devices/...` prefix source for DEVPATH).
@@ -172,6 +183,12 @@ impl DevNode {
 
     pub const fn device_number(&self) -> DeviceNumber {
         self.device_number
+    }
+
+    /// Canonical sysfs-relative device path (shared by DEVPATH and the
+    /// sysfs tree — the single path derivation).
+    pub fn sysfs_path(&self) -> &str {
+        &self.sysfs_path
     }
 
     pub fn physical_path(&self) -> &str {
@@ -338,6 +355,7 @@ pub fn publish_auto_indexed(
         properties,
         driver_name,
     );
+    node.sysfs_path = (node_type.sysfs_path_for)(physical_path, index);
     // The registry holds publish()'s own node copy; stamp the index THERE —
     // withdraw() reads that copy, and without this it would never return
     // the index to the pool (probe/remove cycles exhaust it).
@@ -371,6 +389,7 @@ pub fn publish(
     let node = DevNode {
         id,
         allocated_index: None,
+        sysfs_path: format!("{}/{}", physical_path, devname),
         subsystem,
         devname,
         device_number,

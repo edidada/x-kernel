@@ -535,10 +535,24 @@ mod node_compat {
 
     use super::InputNodeMetadata;
 
-    static INPUT_TYPE: DevNodeType =
-        DevNodeType::new("input", 13, 64, 32, |index| format!("input/event{index}"));
-    static DRM_TYPE: DevNodeType =
-        DevNodeType::new("drm", 226, 0, 64, |index| format!("dri/card{index}"));
+    static INPUT_TYPE: DevNodeType = DevNodeType::new(
+        "input",
+        13,
+        64,
+        32,
+        |index| format!("input/event{index}"),
+        // physical_path here already ends with the `input` segment; the
+        // canonical layout nests inputN under it and eventN under inputN.
+        |physical, index| format!("{physical}/input{index}/event{index}"),
+    );
+    static DRM_TYPE: DevNodeType = DevNodeType::new(
+        "drm",
+        226,
+        0,
+        64,
+        |index| format!("dri/card{index}"),
+        |physical, index| format!("{physical}/drm/card{index}"),
+    );
 
     fn physical_path(location: DeviceLocation) -> String {
         match location {
@@ -582,7 +596,7 @@ mod node_compat {
         metadata: InputNodeMetadata,
         driver_name: &str,
         location: DeviceLocation,
-    ) -> Option<DevNode> {
+    ) {
         let physical = physical_path(location);
         let mut properties = Vec::new();
         properties.push((
@@ -612,7 +626,7 @@ mod node_compat {
             properties,
             Some(String::from(driver_name)),
         ) {
-            Ok(node) => Some(node),
+            Ok(_) => {}
             Err(devnode::PublishError::ResourceBusy) => {
                 // Index space exhausted: NO fallback node. Any synthesized
                 // dev_t either aliases a live device (devfs cdev_add would
@@ -626,21 +640,15 @@ mod node_compat {
                     INPUT_TYPE.index_count,
                     metadata.name
                 );
-                None
             }
             Err(devnode::PublishError::AlreadyExists) => {
                 log::error!("input: devnode id {id} already published; skipping");
-                None
             }
         }
     }
 
     /// Build the drm node publication (cardN).
-    pub(super) fn drm_node(
-        id: u64,
-        driver_name: &str,
-        location: DeviceLocation,
-    ) -> Option<DevNode> {
+    pub(super) fn drm_node(id: u64, driver_name: &str, location: DeviceLocation) {
         let physical = physical_path(location);
         // udev rules match DRM nodes on DEVTYPE=drm_minor (permissions,
         // device ownership); losing it changes /dev/dri/cardN handling.
@@ -653,17 +661,15 @@ mod node_compat {
             properties,
             Some(String::from(driver_name)),
         ) {
-            Ok(node) => Some(node),
+            Ok(_) => {}
             Err(devnode::PublishError::ResourceBusy) => {
                 log::error!(
                     "drm: card index space exhausted ({}); device gets no /dev node and no uevent",
                     DRM_TYPE.index_count
                 );
-                None
             }
             Err(devnode::PublishError::AlreadyExists) => {
                 log::error!("drm: devnode id {id} already published; skipping");
-                None
             }
         }
     }

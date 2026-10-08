@@ -218,7 +218,6 @@ symbolize:
 
 clippy:
 	@$(MAKE) --no-print-directory check_deps check_header check_lints
-	@scripts/ci/check_class_trim.sh
 	@$(XKMAKE) clippy $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS)
 
 dylint:

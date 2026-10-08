@@ -472,30 +472,15 @@ fn add_common_device_entries(
 
 fn add_input_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<ProjectedDevice>) {
     let node = &projected.node;
-    // The parent directory is derived from the event index, not by string
-    // trimming: `input/event12` must produce `.../input/input12`, and a
-    // suffix strip cannot tell `event1` from `event12`.
-    let index = node
-        .devname()
-        .rsplit('/')
-        .next()
-        .and_then(|leaf| leaf.strip_prefix("event"))
-        .and_then(|n| n.parse::<u32>().ok());
-    // The publisher's physical path already ends with the `input` segment;
-    // Linux layout is .../input/inputN/eventN: inputN is a child of that
-    // segment, eventN a child of inputN. (The devname `input/eventN` is the
-    // /dev projection path and must not be re-joined here — it would
-    // produce a literal `.../input/input/eventN`.)
-    let (input, event) = match index {
-        Some(index) => {
-            let input = format!("devices/{}/input{index}", node.physical_path());
-            let event = format!("{input}/event{index}");
-            (input, event)
-        }
-        None => (
-            format!("devices/{}", node.physical_path()),
-            format!("devices/{}", node.physical_path()),
-        ),
+    // Both paths come from the node's canonical sysfs path (set by the
+    // publisher, shared with the uevent DEVPATH): the event device IS that
+    // path, the input parent is it minus the last segment. No local
+    // re-derivation — a second path construction would drift again.
+    let sysfs = node.sysfs_path();
+    let event = format!("devices/{sysfs}");
+    let input = match sysfs.rsplit_once('/') {
+        Some((parent, _)) => format!("devices/{parent}"),
+        None => event.clone(),
     };
     add_directory(tree, &event);
     add_directory(tree, &input);
@@ -506,19 +491,18 @@ fn add_input_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<Pro
         event_device_link.clone(),
         TreeEntry::Symlink(relative_symlink(&event_device_link, &input)),
     );
-    let Some(index) = index else {
-        // Malformed devname: no index to derive the parent from; the event
-        // device itself still projects.
-        add_common_device_entries(tree, projected, &event);
-        return;
-    };
-    let input_class_link = format!("class/input/input{index}");
+    // In-class names for the class links come from the canonical path's
+    // segments: `.../inputN/eventN` → class/input/inputN and
+    // class/input/eventN.
+    let input_name = input.rsplit('/').next().unwrap_or(&input);
+    let event_name = event.rsplit('/').next().unwrap_or(&event);
+    let input_class_link = format!("class/input/{input_name}");
     add_entry(
         tree,
         input_class_link.clone(),
         TreeEntry::Symlink(relative_symlink(&input_class_link, &input)),
     );
-    let event_class_link = format!("class/input/event{index}");
+    let event_class_link = format!("class/input/{event_name}");
     add_entry(
         tree,
         event_class_link.clone(),
@@ -581,15 +565,15 @@ fn add_input_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<Pro
 fn add_drm_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<ProjectedDevice>) {
     let node = &projected.node;
     let physical = node.physical_path();
-    // sysfs uses the in-class name (`cardN`, Linux `/sys/class/drm/cardN`);
-    // the devnode devname (`dri/cardN`) is the /dev projection's business.
+    // The canonical sysfs path (`{phys}/drm/cardN`, shared with the uevent
+    // DEVPATH) is carried by the node; the in-class name for the
+    // `class/drm` link is its last segment.
+    let card = format!("devices/{}", node.sysfs_path());
     let sysfs_name = node
-        .devname()
+        .sysfs_path()
         .rsplit('/')
-        .map(|s| s.to_string())
         .next()
-        .unwrap_or_else(|| node.devname().to_string());
-    let card = format!("devices/{physical}/drm/{sysfs_name}");
+        .unwrap_or(node.sysfs_path());
     add_directory(tree, &card);
     add_common_device_entries(tree, projected, &card);
     let physical_device = format!("devices/{physical}");

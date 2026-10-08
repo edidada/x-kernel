@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kclass class-feature trimming check.
+# kclass class-feature trimming check (standalone).
 #
 # Rationale: five separate regressions in this PR series came from "changed
 # cfg-gated code, verified only the currently-built feature combinations"
@@ -9,19 +9,19 @@
 # defaults (char is always on via the console path in every standard
 # defconfig, which is exactly how CHAR_CONSOLE_HOOK survived CI green).
 #
-# This check builds one entry-level configuration with the char class off
-# (early console backend kept: it is a platform requirement, decoupled from
-# KFEAT_CHAR) and every other class driver present. Run from `make clippy`
-# so every commit and CI run exercises it.
+# This is part of the feature matrix suite (check_feature_matrix.sh also
+# runs per-class trims); run it standalone for a quick single check:
+#   scripts/ci/check_class_trim.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 TARGET=aarch64-unknown-none-softfloat
 CFG_BAK="$(mktemp)"
 XCONF_BAK="$(mktemp)"
-trap 'cp "$CFG_BAK" .config 2>/dev/null || true; cp "$XCONF_BAK" .cargo/.xconfig.toml 2>/dev/null || true; rm -f "$CFG_BAK" "$XCONF_BAK"' EXIT
+XCONF_HAD=0
+[ -f .cargo/.xconfig.toml ] && XCONF_HAD=1 && cp .cargo/.xconfig.toml "$XCONF_BAK"
+trap 'cp "$CFG_BAK" .config 2>/dev/null || true; if [ "$XCONF_HAD" = 1 ]; then cp "$XCONF_BAK" .cargo/.xconfig.toml; else rm -f .cargo/.xconfig.toml; fi; rm -f "$CFG_BAK" "$XCONF_BAK"' EXIT
 cp .config "$CFG_BAK"
-cp .cargo/.xconfig.toml "$XCONF_BAK"
 
 cp platforms/kplat-aarch64/qemu_defconfig .config
 {
