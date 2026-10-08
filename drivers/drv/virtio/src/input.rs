@@ -49,7 +49,7 @@ pub fn activate<B: driver_core::Bus>(
 ) -> Result<(), ProbeError> {
     let device = virtio::VirtIoInputDev::<driver_runtime::hal::Hal, _>::try_new(transport)
         .map_err(crate::common::map_driver_error)?;
-    let location = crate::common::legacy_location(dev.descriptor().location);
+    let location = dev.descriptor().location;
     publish_input(
         ClassParent::detached(dev.id(), "virtio-input", location),
         Box::new(device),

@@ -18,7 +18,6 @@ ns16550-ioport = ["console_driver/ns16550-ioport"]
 
 [dependencies]
 console_driver = { workspace = true, features = ["ns16550-mmio", "ns16550-ioport"] }
-devnode = { workspace = true }
 driver-core = { workspace = true }
 driver_base = { workspace = true }
 kclass = { workspace = true, features = ["char"] }

@@ -52,7 +52,7 @@ pub fn activate<B: driver_core::Bus>(
 ) -> Result<(), ProbeError> {
     let device = virtio::VirtIoVsockDev::<driver_runtime::hal::Hal, _>::try_new(transport)
         .map_err(crate::common::map_driver_error)?;
-    let location = crate::common::legacy_location(dev.descriptor().location);
+    let location = dev.descriptor().location;
     publish_vsock(
         ClassParent::detached(dev.id(), "virtio-vsock", location),
         Box::new(device),

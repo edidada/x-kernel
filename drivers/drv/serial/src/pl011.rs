@@ -129,7 +129,7 @@ impl DriverOps<PlatformBus> for Pl011Driver {
         // subsystem (/dev/console backing), auxiliary ports become char
         // devices. Both use a detached class parent — the class layer is
         // model-agnostic since the class-layer decoupling.
-        let location = crate::common::legacy_location(dev.descriptor().location);
+        let location = dev.descriptor().location;
         let char_dev: kclass::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
         match port.role() {
             SerialRole::Stdout => {

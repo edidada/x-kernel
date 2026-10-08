@@ -4,29 +4,7 @@
 
 //! Shared helpers for the serial driver modules.
 
-use devnode::DeviceLocation as LegacyLocation;
-use driver_core::{ProbeError, RuntimeError, desc::DeviceLocation};
-
-pub(crate) fn legacy_location(location: DeviceLocation) -> LegacyLocation {
-    use driver_core::desc::DeviceLocation as Ours;
-    match location {
-        Ours::Pci {
-            segment,
-            bus,
-            device,
-            function,
-        } => LegacyLocation::Pci {
-            segment,
-            bus,
-            device,
-            function,
-        },
-        Ours::Mmio { base, size } => LegacyLocation::Mmio { base, size },
-        Ours::FirmwareNode { id } => LegacyLocation::FirmwareNode { id },
-        Ours::PlatformStatic { id } => LegacyLocation::PlatformStatic { id },
-        Ours::Bridge { domain } => LegacyLocation::Bridge { domain },
-    }
-}
+use driver_core::{ProbeError, RuntimeError};
 
 pub(crate) fn map_driver_error(err: driver_base::DriverError) -> ProbeError {
     let error = match err {

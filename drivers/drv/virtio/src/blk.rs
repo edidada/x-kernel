@@ -195,7 +195,7 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
 
     device.enable_interrupts();
 
-    let location = crate::common::legacy_location(dev.descriptor().location);
+    let location = dev.descriptor().location;
     if let Err(error) = publish_block(
         ClassParent::detached(dev.id(), "virtio-blk", location),
         disk,

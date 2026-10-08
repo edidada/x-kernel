@@ -189,7 +189,7 @@ macro_rules! simple_family_dispatch {
             {
                 crate::$module::activate_mmio(
                     dev.id(),
-                    crate::common::legacy_location(dev.descriptor().location),
+                    dev.descriptor().location,
                     transport,
                     builder,
                 )

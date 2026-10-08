@@ -5,31 +5,9 @@
 //! Shared helpers for the virtio driver modules (error mapping, class
 //! parent location conversion) — one copy instead of ten.
 
-use alloc::{format, string::String};
+use alloc::string::String;
 
-use devnode::DeviceLocation as LegacyLocation;
 use driver_core::{ProbeError, RuntimeError, desc::DeviceLocation};
-
-pub(crate) fn legacy_location(location: DeviceLocation) -> LegacyLocation {
-    use driver_core::desc::DeviceLocation as Ours;
-    match location {
-        Ours::Pci {
-            segment,
-            bus,
-            device,
-            function,
-        } => LegacyLocation::Pci {
-            segment,
-            bus,
-            device,
-            function,
-        },
-        Ours::Mmio { base, size } => LegacyLocation::Mmio { base, size },
-        Ours::FirmwareNode { id } => LegacyLocation::FirmwareNode { id },
-        Ours::PlatformStatic { id } => LegacyLocation::PlatformStatic { id },
-        Ours::Bridge { domain } => LegacyLocation::Bridge { domain },
-    }
-}
 
 pub(crate) fn map_driver_error(err: driver_base::DriverError) -> ProbeError {
     let error = match err {
@@ -52,7 +30,7 @@ pub(crate) fn map_driver_error(err: driver_base::DriverError) -> ProbeError {
 pub(crate) fn physical_path(location: DeviceLocation) -> String {
     // The DEVPATH format lives in devnode exactly once; this is a plain
     // adapter over the core→devnode location conversion we already do.
-    devnode::physical_path(&legacy_location(location))
+    devnode::physical_path(&location)
 }
 
 /// Probe this device's virtio PCI transport through the runtime's

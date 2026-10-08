@@ -52,7 +52,7 @@ pub fn activate<B: driver_core::Bus>(
 ) -> Result<(), ProbeError> {
     let device = virtio::VirtIo9pDev::<driver_runtime::hal::Hal, _>::try_new(transport)
         .map_err(crate::common::map_driver_error)?;
-    let location = crate::common::legacy_location(dev.descriptor().location);
+    let location = dev.descriptor().location;
     publish_virtio_9p(
         ClassParent::detached(dev.id(), "virtio-9p", location),
         Box::new(device),

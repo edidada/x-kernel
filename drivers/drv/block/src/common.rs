@@ -4,29 +4,7 @@
 
 //! Shared helpers for the block driver modules.
 
-use devnode::DeviceLocation as LegacyLocation;
 use driver_core::{ProbeError, RuntimeError, desc::DeviceLocation};
-
-pub(crate) fn legacy_location(location: DeviceLocation) -> LegacyLocation {
-    use driver_core::desc::DeviceLocation as Ours;
-    match location {
-        Ours::Pci {
-            segment,
-            bus,
-            device,
-            function,
-        } => LegacyLocation::Pci {
-            segment,
-            bus,
-            device,
-            function,
-        },
-        Ours::Mmio { base, size } => LegacyLocation::Mmio { base, size },
-        Ours::FirmwareNode { id } => LegacyLocation::FirmwareNode { id },
-        Ours::PlatformStatic { id } => LegacyLocation::PlatformStatic { id },
-        Ours::Bridge { domain } => LegacyLocation::Bridge { domain },
-    }
-}
 
 pub(crate) fn map_driver_error(err: driver_base::DriverError) -> ProbeError {
     let error = match err {
@@ -47,5 +25,5 @@ pub(crate) fn map_driver_error(err: driver_base::DriverError) -> ProbeError {
 /// Physical sysfs path for a device location (parent path for the disk's
 /// devnode publication — mirrors the virtio-side helper).
 pub(crate) fn physical_path(location: DeviceLocation) -> alloc::string::String {
-    devnode::physical_path(&legacy_location(location))
+    devnode::physical_path(&location)
 }

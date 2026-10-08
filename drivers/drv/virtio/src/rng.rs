@@ -143,7 +143,7 @@ pub fn activate<B: driver_core::Bus>(
     })?;
     device.enable_completion_irq();
 
-    let location = crate::common::legacy_location(dev.descriptor().location);
+    let location = dev.descriptor().location;
     let publication = publish_hwrng(
         ClassParent::detached(dev.id(), "virtio-rng", location),
         device,

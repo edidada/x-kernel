@@ -78,7 +78,7 @@ impl CharDevice for SerialCharDev {
 /// Publish the resolved port: stdout joins the console subsystem, auxiliary
 /// ports become char devices.
 fn publish(dev: &mut DeviceCtx<'_, PlatformBus>, port: Arc<SerialPort>) -> Result<(), ProbeError> {
-    let location = crate::common::legacy_location(dev.descriptor().location);
+    let location = dev.descriptor().location;
     let char_dev: kclass::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
     match port.role() {
         SerialRole::Stdout => console_driver::runtime::register_console_parented(

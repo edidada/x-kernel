@@ -31,32 +31,13 @@ use kspin::SpinNoPreempt;
 
 pub mod uevent;
 
+/// Device topology location — owned by the device model
+/// (`driver_core::DeviceLocation`), re-exported here so devnode consumers
+/// keep a single import path. There is exactly ONE DeviceLocation in the
+/// tree: the pre-refactor duplicate (kept so the projection stayed
+/// model-agnostic across two device models) died with the old model.
+pub use driver_core::DeviceLocation;
 pub use uevent::bitmap_value;
-
-/// Firmware-stated location of a device (the model-agnostic form every
-/// consumer — kclass parents, uevent paths — agrees on).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeviceLocation {
-    Pci {
-        segment: u16,
-        bus: u8,
-        device: u8,
-        function: u8,
-    },
-    Mmio {
-        base: usize,
-        size: usize,
-    },
-    FirmwareNode {
-        id: u32,
-    },
-    PlatformStatic {
-        id: u16,
-    },
-    Bridge {
-        domain: u16,
-    },
-}
 
 /// Packed `dev_t`: the same layout the block core and devfs use
 /// (block and kvfs re-export this type as their DeviceId).
