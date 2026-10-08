@@ -43,6 +43,24 @@ struct BackingStorage {
     layout: Layout,
 }
 
+#[cfg(feature = "slab")]
+#[test]
+fn slab_heap_can_register_a_65th_live_region() {
+    use alloc_engine::SlabHeap;
+
+    let regions: Vec<_> = (0..65).map(|_| BackingStorage::new(2)).collect();
+    // SAFETY: Every backing allocation is distinct, page-aligned, and remains
+    // live until the heap has been dropped.
+    let mut heap = unsafe { SlabHeap::new(regions[0].base(), regions[0].size()) };
+    for region in regions.iter().skip(1) {
+        // SAFETY: Each mapped region is exclusively owned by this fixture and
+        // outlives the heap, including any in-region metadata it installs.
+        unsafe { heap.add_memory(region.base(), region.size()) }
+            .expect("slab heap should grow beyond its inline region table");
+    }
+    drop(heap);
+}
+
 impl BackingStorage {
     fn new(pages: usize) -> Self {
         let layout =
