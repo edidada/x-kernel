@@ -149,14 +149,10 @@ impl XKernelRuntime {
     }
 
     fn iomap_resource(&self, region: driver_core::MmioRegion) -> Result<MmioMapping, RuntimeError> {
+        // device-res re-exports driver-core's MmioRegion — one type, no
+        // field-by-field re-construction.
         self.provider
-            .map_mmio(
-                device_res::MmioRegion {
-                    base: region.base,
-                    size: region.size,
-                },
-                "driver-core",
-            )
+            .map_mmio(region, "driver-core")
             .map_err(map_res_error)
     }
 }

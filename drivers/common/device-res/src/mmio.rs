@@ -10,25 +10,9 @@ use core::{
     sync::atomic::{Ordering, fence},
 };
 
+pub use driver_core::{IoPortRange, MmioRegion};
+
 use crate::ResResult;
-
-/// A memory-mapped I/O region described by physical address and size.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MmioRegion {
-    /// Physical base address.
-    pub base: usize,
-    /// Region size in bytes.
-    pub size: usize,
-}
-
-/// An x86 I/O port range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IoPortRange {
-    /// Base port number.
-    pub base: u16,
-    /// Number of consecutive ports.
-    pub size: u16,
-}
 
 /// A mapping token returned by [`MmioOp::map_mmio`].
 ///
