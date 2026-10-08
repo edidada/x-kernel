@@ -48,6 +48,16 @@ impl ClassDeviceId {
         Self(h)
     }
 
+    /// Wrap an existing raw id without re-deriving it.
+    ///
+    /// For lookups where the caller already holds the id's owner (e.g. the
+    /// devfs projection, whose node ids ARE class-device raw ids). Unlike
+    /// [`Self::new_detached_for_node`] this preserves the value: a hashed
+    /// key can never match the registry entry it was derived from.
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
     pub const fn raw(self) -> u64 {
         self.0
     }

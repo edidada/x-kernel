@@ -315,6 +315,12 @@ pub fn publish_auto_indexed(
     modalias: Option<String>,
     properties: Vec<(String, String)>,
 ) -> Result<DevNode, PublishError> {
+    // The duplicate check must run BEFORE publishing: `publish_indexed`
+    // registers the node, so checking afterwards would always find the id
+    // we just inserted (and hand the freshly allocated index straight back).
+    if REGISTRY.lock().nodes.iter().any(|n| n.id == id) {
+        return Err(PublishError::AlreadyExists);
+    }
     let index = INDEX_POOLS
         .lock()
         .alloc(node_type.subsystem, node_type.index_count);
@@ -322,12 +328,16 @@ pub fn publish_auto_indexed(
         return Err(PublishError::ResourceBusy);
     };
     let mut node = publish_indexed(id, node_type, index, physical_path, modalias, properties);
-    node.allocated_index = Some(index);
-    if REGISTRY.lock().nodes.iter().any(|n| n.id == id) {
-        // Duplicate id: give the index back before reporting.
-        INDEX_POOLS.lock().release(node_type.subsystem, index);
-        return Err(PublishError::AlreadyExists);
+    // The registry holds publish()'s own node copy; stamp the index THERE —
+    // withdraw() reads that copy, and without this it would never return
+    // the index to the pool (probe/remove cycles exhaust it).
+    {
+        let mut registry = REGISTRY.lock();
+        if let Some(registered) = registry.nodes.iter_mut().find(|n| n.id == id) {
+            registered.allocated_index = Some(index);
+        }
     }
+    node.allocated_index = Some(index);
     Ok(node)
 }
 

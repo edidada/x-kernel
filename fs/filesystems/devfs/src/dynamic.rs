@@ -97,9 +97,12 @@ fn display_file(
 }
 
 fn node_key(node: &DevNode) -> ClassDeviceId {
-    // Node ids are unique opaque handles already; reuse one as the record
-    // key so removal finds the same entry.
-    ClassDeviceId::new_detached_for_node(node.id())
+    // Node ids ARE the publishing class device's raw id (kclass passes
+    // `parent_ref().id().raw()`), so the record key must preserve it:
+    // `find_input_device`/`find_display_device` look the CLASS registry up
+    // by this id, and a hashed derivation would never match — the /dev
+    // input/drm projections silently never materialized.
+    ClassDeviceId::from_raw(node.id())
 }
 
 fn add_device(projection: &mut DeviceProjection, node: DevNode) {

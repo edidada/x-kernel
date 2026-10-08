@@ -46,7 +46,7 @@ ground. Anything class-specific belongs in `subsystems/`.
 | `driver_base` | Common driver error/result and base device trait. |
 | `device-res` | Capability contracts (MMIO, IRQ, DMA, time) with RAII handles. |
 | `devnode` | Model-agnostic userland node projection (devtmpfs/sysfs/uevent): data-driven `DevNodeType`, `DeviceNumber`, `DeviceLocation`. |
-| `kclass` | Typed class publication: detached class parents, per-class registries, availability/removal subscriptions. |>>>>>>> 06c873276 (refactor(drivers): reorganize top-level layout for unambiguous driver placement)
+| `kclass` | Typed class publication: detached class parents, per-class registries, availability/removal subscriptions. |
 
 ## Per-Class Subsystems (`subsystems/`)
 

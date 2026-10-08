@@ -582,7 +582,7 @@ mod node_compat {
         metadata: InputNodeMetadata,
         driver_name: &str,
         location: DeviceLocation,
-    ) -> DevNode {
+    ) -> Option<DevNode> {
         let physical = physical_path(location);
         let mut properties = Vec::new();
         properties.push((
@@ -611,55 +611,52 @@ mod node_compat {
             None,
             properties,
         ) {
-            Ok(node) => node,
+            Ok(node) => Some(node),
             Err(devnode::PublishError::ResourceBusy) => {
+                // Index space exhausted: NO fallback node. Any synthesized
+                // dev_t either aliases a live device (devfs cdev_add would
+                // overwrite it; removing either device tears down both) or
+                // fabricates a node userspace cannot distinguish. The class
+                // device itself keeps working; only the /dev and uevent
+                // projections are absent, loudly.
                 log::error!(
-                    "input: event index space exhausted ({}); device {} gets no /dev node",
+                    "input: event index space exhausted ({}); device '{}' gets no /dev node and \
+                     no uevent",
                     INPUT_TYPE.index_count,
                     metadata.name
                 );
-                devnode::publish(
-                    id,
-                    "input",
-                    alloc::format!("input/event-unclaimed-{id}"),
-                    INPUT_TYPE.device_number(INPUT_TYPE.index_count - 1),
-                    &format!("{physical}/input"),
-                    None,
-                    alloc::vec::Vec::new(),
-                    Some(String::from(driver_name)),
-                )
+                None
             }
-            Err(devnode::PublishError::AlreadyExists) => devnode::publish(
-                id,
-                "input",
-                alloc::format!("input/event-dup-{id}"),
-                INPUT_TYPE.device_number(INPUT_TYPE.index_count - 1),
-                &format!("{physical}/input"),
-                None,
-                alloc::vec::Vec::new(),
-                Some(String::from(driver_name)),
-            ),
+            Err(devnode::PublishError::AlreadyExists) => {
+                log::error!("input: devnode id {id} already published; skipping");
+                None
+            }
         }
     }
 
     /// Build the drm node publication (cardN).
-    pub(super) fn drm_node(id: u64, driver_name: &str, location: DeviceLocation) -> DevNode {
+    pub(super) fn drm_node(
+        id: u64,
+        driver_name: &str,
+        location: DeviceLocation,
+    ) -> Option<DevNode> {
         let physical = physical_path(location);
         // udev rules match DRM nodes on DEVTYPE=drm_minor (permissions,
         // device ownership); losing it changes /dev/dri/cardN handling.
         let properties = alloc::vec![(String::from("DEVTYPE"), String::from("drm_minor"))];
         match devnode::publish_auto_indexed(id, &DRM_TYPE, &physical, None, properties) {
-            Ok(node) => node,
-            Err(_) => devnode::publish(
-                id,
-                "drm",
-                alloc::format!("dri/card-unclaimed-{id}"),
-                DRM_TYPE.device_number(DRM_TYPE.index_count - 1),
-                &physical,
-                None,
-                alloc::vec::Vec::new(),
-                Some(String::from(driver_name)),
-            ),
+            Ok(node) => Some(node),
+            Err(devnode::PublishError::ResourceBusy) => {
+                log::error!(
+                    "drm: card index space exhausted ({}); device gets no /dev node and no uevent",
+                    DRM_TYPE.index_count
+                );
+                None
+            }
+            Err(devnode::PublishError::AlreadyExists) => {
+                log::error!("drm: devnode id {id} already published; skipping");
+                None
+            }
         }
     }
 }

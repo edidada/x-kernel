@@ -481,11 +481,22 @@ fn add_input_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<Pro
         .next()
         .and_then(|leaf| leaf.strip_prefix("event"))
         .and_then(|n| n.parse::<u32>().ok());
-    let input = match index {
-        Some(index) => format!("devices/{}/input/input{index}", node.physical_path()),
-        None => format!("devices/{}", node.physical_path()),
+    // The publisher's physical path already ends with the `input` segment;
+    // Linux layout is .../input/inputN/eventN: inputN is a child of that
+    // segment, eventN a child of inputN. (The devname `input/eventN` is the
+    // /dev projection path and must not be re-joined here — it would
+    // produce a literal `.../input/input/eventN`.)
+    let (input, event) = match index {
+        Some(index) => {
+            let input = format!("devices/{}/input{index}", node.physical_path());
+            let event = format!("{input}/event{index}");
+            (input, event)
+        }
+        None => (
+            format!("devices/{}", node.physical_path()),
+            format!("devices/{}", node.physical_path()),
+        ),
     };
-    let event = format!("devices/{}/{}", node.physical_path(), node.devname());
     add_directory(tree, &event);
     add_directory(tree, &input);
     add_common_device_entries(tree, projected, &event);
@@ -575,12 +586,8 @@ fn add_drm_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<Proje
     let sysfs_name = node
         .devname()
         .rsplit('/')
+        .map(|s| s.to_string())
         .next()
-        .map(|leaf| {
-            leaf.strip_prefix("card")
-                .map(|_| String::from(leaf))
-                .unwrap_or_else(|| String::from(leaf))
-        })
         .unwrap_or_else(|| node.devname().to_string());
     let card = format!("devices/{physical}/drm/{sysfs_name}");
     add_directory(tree, &card);
