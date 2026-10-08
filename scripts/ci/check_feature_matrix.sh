@@ -27,6 +27,11 @@ if [ -n "$dups" ]; then
     exit 1
 fi
 
+# Regenerate the aarch64 build state (kbuild config.rs + k_plat_name
+# rustflags): bare cargo inherits whatever the LAST xkmake run produced,
+# and a cross-platform session leaves the other platform's state behind.
+make gen-const >/dev/null 2>&1
+make -s gen-cargo >/dev/null 2>&1
 BASE="$(python3 scripts/kfeat-features.py)"
 
 # KFEAT_DRIVER_* → kfeat feature name (lowercase, dash→underscore like
@@ -144,8 +149,17 @@ make -s gen-cargo >/dev/null 2>&1
 cp .config /tmp/feat-matrix-config.bak
 cp platforms/kplat-x86_64/qemu_defconfig .config
 printf 'KFEAT_ALLOC=y\nKFEAT_ALLOC_SLAB=y\nKFEAT_DRIVER_VIRTIO_BLK=y\nKFEAT_DRIVER_VIRTIO_NET=y\nKFEAT_DRIVER_VIRTIO_GPU=y\nKFEAT_DRIVER_VIRTIO_INPUT=y\n' >> .config
+# Regenerate the aarch64 build state (kbuild config.rs + k_plat_name
+# rustflags): bare cargo inherits whatever the LAST xkmake run produced,
+# and a cross-platform session leaves the other platform's state behind.
+make olddefconfig >/dev/null 2>&1
+make gen-const >/dev/null 2>&1
+make -s gen-cargo >/dev/null 2>&1
 X86_BASE="$(python3 scripts/kfeat-features.py)"
 cp /tmp/feat-matrix-config.bak .config
+make olddefconfig >/dev/null 2>&1
+make gen-const >/dev/null 2>&1
+make -s gen-cargo >/dev/null 2>&1
 echo ">>> [x86_64 base+drivers] cargo check"
 if ! cargo check --manifest-path entry/Cargo.toml --target x86_64-unknown-none \
     --target-dir target -p entry --features "$X86_BASE" --quiet; then

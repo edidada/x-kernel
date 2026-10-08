@@ -7,7 +7,7 @@
 use alloc::{boxed::Box, sync::Arc, vec};
 use core::{mem::ManuallyDrop, ops::Range};
 
-use device_res::{Irq, IrqEvent, IrqHandler, IrqOp, IrqResource, ResError};
+use device_res::{IrqEvent, IrqHandler};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use hwrng::{HwrngDevice, completion::RngCompletion};
 use kspin::SpinNoIrq;
@@ -20,16 +20,6 @@ use virtio_drivers::{
 use crate::as_driver_error;
 
 const MAX_REQUEST_BYTES: usize = 256;
-
-fn map_irq_error(error: ResError) -> DriverError {
-    match error {
-        ResError::InvalidResource => DriverError::InvalidInput,
-        ResError::MappingFailed => DriverError::Io,
-        ResError::NoMemory => DriverError::NoMemory,
-        ResError::Busy => DriverError::ResourceBusy,
-        ResError::Unsupported => DriverError::Unsupported,
-    }
-}
 
 enum RequestState {
     Idle,
@@ -182,37 +172,9 @@ pub struct VirtIoRngDev<H: Hal, T: Transport> {
     completion: Arc<dyn RngCompletion>,
     // Drop after `request`, so a normal request cleanup runs before this guard
     // unregisters its completion handler.
-    irq_guard: SpinNoIrq<Option<Irq>>,
 }
 
 impl<H: Hal + Send + 'static, T: Transport + Send + 'static> VirtIoRngDev<H, T> {
-    /// Register completion delivery before allowing reads.
-    ///
-    /// The returned device owns the IRQ registration. Hardware teardown and
-    /// rebinding are not supported by this adapter yet.
-    pub fn try_new_irq(
-        transport: T,
-        completion: Arc<dyn RngCompletion>,
-        provider: &'static dyn IrqOp,
-        resource: IrqResource,
-    ) -> DriverResult<Arc<Self>> {
-        let device = Arc::new(Self::new(transport, completion)?);
-        let handler: Arc<dyn IrqHandler> = device.clone();
-        let weak = Arc::downgrade(&handler);
-        let irq = Irq::request_with(
-            provider,
-            resource,
-            Arc::new(move |number| {
-                weak.upgrade()
-                    .map_or(IrqEvent::NOT_HANDLED, |device| device.handle(number))
-            }),
-        )
-        .map_err(map_irq_error)?;
-        *device.irq_guard.lock() = Some(irq);
-        device.enable_completion_irq();
-        Ok(device)
-    }
-
     /// Construct without registering the completion IRQ — the driver layer
     /// owns registration through its device services (`DeviceCtx::
     /// request_irq`, the single entry point), then calls
@@ -229,12 +191,11 @@ impl<H: Hal + Send + 'static, T: Transport + Send + 'static> VirtIoRngDev<H, T> 
 }
 
 impl<H: Hal, T: Transport> VirtIoRngDev<H, T> {
-    // Only try_new_irq publishes this object; tests drive its IRQ explicitly.
+    // Tests drive the IRQ path explicitly; production registration goes through DeviceCtx::request_irq.
     fn new(transport: T, completion: Arc<dyn RngCompletion>) -> DriverResult<Self> {
         Ok(Self {
             request: SpinNoIrq::new(RngRequest::new(transport)?),
             completion,
-            irq_guard: SpinNoIrq::new(None),
         })
     }
 }

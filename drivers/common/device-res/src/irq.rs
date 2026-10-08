@@ -171,7 +171,7 @@ impl IrqHandlerToken {
 /// domain-translation and MSI-X methods have default implementations so a host
 /// only overrides what its interrupt controller supports (e.g. non-x86 leaves
 /// MSI-X as `Unsupported`).
-pub trait IrqOp: Sync {
+pub trait IrqOp: Send + Sync {
     /// Register an interrupt handler for `irq`.
     fn request_irq(
         &self,

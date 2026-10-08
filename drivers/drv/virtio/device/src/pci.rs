@@ -256,7 +256,7 @@ pub fn probe_pci_transport_only<H: VirtIoHal>(
     root: &mut PciRoot<MmioCam<'static>>,
     bdf: DeviceFunction,
     dev_info: &DeviceFunctionInfo,
-    irq_provider: &dyn IrqOp,
+    irq_provider: alloc::sync::Arc<dyn IrqOp>,
 ) -> Option<(DeviceKind, PciTransport, Option<usize>)> {
     let dev_kind = virtio_device_type(dev_info).and_then(as_device_kind)?;
 

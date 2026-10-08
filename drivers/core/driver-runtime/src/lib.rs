@@ -250,11 +250,11 @@ impl XKernelRuntime {
 /// Provider-parameterized transport probe: the PciTransportService calls
 /// this with the provider recovered from ITS services instance, so a
 /// non-global domain binds its own provider.
+#[cfg(feature = "virtio-hal")]
 pub fn probe_pci_transport_with(
     provider: &Arc<XKernelResourceProvider>,
     descriptor: &driver_core::desc::DeviceDescriptor,
 ) -> Result<(driver_core::DeviceKind, virtio::PciTransport, Option<usize>), RuntimeError> {
-    let _self = ();
     {
         use driver_core::desc::{DeviceIdentity, DeviceLocation as Loc};
         use pci::{DeviceFunction, DeviceFunctionInfo, PciHost};
@@ -311,7 +311,7 @@ pub fn probe_pci_transport_with(
         // left the slot stuck open on panic).
         let scope = hal::begin_mmio_probe();
         let probed =
-            virtio::probe_pci_transport_only::<hal::Hal>(root, bdf, &dev_info, provider.as_ref());
+            virtio::probe_pci_transport_only::<hal::Hal>(root, bdf, &dev_info, provider.clone());
         let (kind, mut transport, transport_irq) = probed.ok_or(RuntimeError::BadState)?;
         let leases = scope.take_leases();
         transport.retain_mappings(leases);

@@ -23,7 +23,7 @@ pub(super) struct PciMsixState {
     root: PciRoot<MmioCam<'static>>,
     cap: MsixCapability,
     bdf: DeviceFunction,
-    irq_provider: &'static dyn IrqOp,
+    irq_provider: alloc::sync::Arc<dyn IrqOp>,
     msi: MsiResource,
 }
 
@@ -298,7 +298,7 @@ fn map_virtio_common_cfg<H: VirtIoHal>(
 pub(super) fn setup_msix<H: VirtIoHal>(
     root: &mut PciRoot<MmioCam<'static>>,
     bdf: DeviceFunction,
-    irq_provider: &'static dyn IrqOp,
+    irq_provider: alloc::sync::Arc<dyn IrqOp>,
 ) -> Option<(usize, PciMsixState)> {
     use core::mem::size_of;
 
@@ -358,7 +358,7 @@ pub(super) fn setup_msix<H: VirtIoHal>(
         // size was validated against the BAR size above.
         let table = unsafe { MsixTable::new(table_base, usize::from(cap.table_size)) };
 
-        let msi = irq_provider.alloc_msix().ok()?;
+        let msi = irq_provider.as_ref().alloc_msix().ok()?;
         Some((common_cfg, table, msi))
     })();
     let Some((common_cfg, table, msi)) = prepared else {
