@@ -197,7 +197,7 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
 
     let location = dev.descriptor().location;
     if let Err(error) = publish_block(
-        ClassParent::detached(dev.id(), "virtio-blk", location),
+        ClassParent::detached(dev.id().raw(), "virtio-blk", location),
         disk,
     ) {
         return Err(crate::common::map_driver_error(error));

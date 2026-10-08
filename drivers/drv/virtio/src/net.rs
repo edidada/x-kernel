@@ -131,7 +131,7 @@ fn activate_with_irq<B: driver_core::Bus, T: virtio::Transport + 'static>(
     }
     let location = dev.descriptor().location;
     let handle = publish_net(
-        ClassParent::detached(dev.id(), "virtio-net", location),
+        ClassParent::detached(dev.id().raw(), "virtio-net", location),
         Box::new(device),
     )
     .map_err(crate::common::map_driver_error)?;

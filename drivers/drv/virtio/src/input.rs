@@ -51,7 +51,7 @@ pub fn activate<B: driver_core::Bus>(
         .map_err(crate::common::map_driver_error)?;
     let location = dev.descriptor().location;
     publish_input(
-        ClassParent::detached(dev.id(), "virtio-input", location),
+        ClassParent::detached(dev.id().raw(), "virtio-input", location),
         Box::new(device),
     )
     .map_err(crate::common::map_driver_error)?;

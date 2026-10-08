@@ -68,7 +68,7 @@ impl DriverOps<PlatformBus> for RamdiskDriver {
             .with_devnode_context(&parent_path, modalias);
         let location = _dev.descriptor().location;
         publish_block(
-            ClassParent::detached(_dev.id(), "ramdisk", location),
+            ClassParent::detached(_dev.id().raw(), "ramdisk", location),
             Arc::new(disk),
         )
         .map_err(crate::common::map_driver_error)?;

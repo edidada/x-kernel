@@ -153,6 +153,27 @@ pub struct FirmwareNodeInfo {
 /// The product of bus enumeration: everything the model knows about a device
 /// before any driver binds. Ids are assigned by the
 /// [`DeviceDomain`](crate::DeviceDomain) on insertion.
+/// Domain-allocated device identity (monotonic, per-`DeviceDomain`).
+///
+/// A newtype: device ids, class publication ids and devnode ids are three
+/// DISTINCT u64 spaces — bare `u64` at every boundary is how the class
+/// layer once derived an owner from the wrong space (the off-by-one bug).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DeviceId(pub(crate) u64);
+
+impl DeviceId {
+    /// Raw value (diagnostics, record keys that tag the space explicitly).
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+impl core::fmt::Display for DeviceId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DeviceDescriptor {
     pub bus: BusId,

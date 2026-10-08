@@ -30,7 +30,7 @@ use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
 use crate::{
-    bus::{Bus, BusId, DeviceDescriptor, IdMatchEntry, MatchScore},
+    bus::{Bus, BusId, DeviceDescriptor, DeviceId, IdMatchEntry, MatchScore},
     device::{BoundDevice, DeviceCtx, DeviceServices, ServiceError},
     error::{DepSource, ProbeError, RuntimeError},
     resource::{ClkSpec, IrqSpec, MmioRegion},
@@ -83,7 +83,7 @@ pub struct ProbeStats {
 /// Read-only view of one device for introspection and tests.
 #[derive(Debug, Clone)]
 pub struct DeviceSnapshot {
-    pub id: u64,
+    pub id: DeviceId,
     pub bus: BusId,
     pub state: DeviceState,
     pub driver: Option<&'static str>,
@@ -183,6 +183,13 @@ struct DeviceEntry {
     data: Option<Box<DataBox>>,
     /// Drivers that failed this device permanently (ptr keys).
     attempted: Vec<usize>,
+    /// The dependency this device last deferred on. Kept through the
+    /// `finish_probe_phase` → Unclaimed transition so a LATE provider can
+    /// still wake it: `wake` re-matches Unclaimed devices against their
+    /// last dependency, closing the "provider registered after boot end"
+    /// hole (previously nothing re-linked them until an unrelated driver
+    /// registration reswept).
+    last_deferred_dep: Option<DepSource>,
 }
 
 struct NoServices;
@@ -243,6 +250,31 @@ struct DomainInner {
 /// An instance of the device model.
 pub struct DeviceDomain {
     inner: SpinNoPreempt<DomainInner>,
+}
+
+/// Build a consistent snapshot: one filling for `snapshot()` and
+/// `devices()` alike (they used to disagree — identity was dead in
+/// `snapshot()`). `kind` stays None until a class view exists; the field
+/// is documented as driver-bound.
+fn snapshot_of(id: DeviceId, entry: &DeviceEntry) -> DeviceSnapshot {
+    DeviceSnapshot {
+        id,
+        bus: entry.desc.bus,
+        state: entry.state,
+        driver: entry.driver.as_ref().map(|driver| driver.name()),
+        kind: None,
+        identity: match &entry.desc.identity {
+            crate::desc::DeviceIdentity::Platform(platform) => platform
+                .firmware_id
+                .clone()
+                .or_else(|| platform.alias.clone()),
+            crate::desc::DeviceIdentity::Pci(pci) => Some(alloc::format!(
+                "pci {:#06x}:{:#06x}",
+                pci.vendor_id,
+                pci.device_id
+            )),
+        },
+    }
 }
 
 impl DeviceDomain {
@@ -317,7 +349,7 @@ impl DeviceDomain {
     }
 
     /// Insert an enumeration product and probe it eagerly.
-    pub fn add_device(&self, desc: DeviceDescriptor) -> u64 {
+    pub fn add_device(&self, desc: DeviceDescriptor) -> DeviceId {
         let id = {
             let mut inner = self.inner.lock();
             if !inner.services_installed {
@@ -330,19 +362,20 @@ impl DeviceDomain {
                      permanently — call set_services first"
                 );
             }
-            let id = inner.next_device_id;
+            let id = DeviceId(inner.next_device_id);
             inner.next_device_id += 1;
             inner.devices.insert(
-                id,
+                id.raw(),
                 DeviceEntry {
                     desc,
                     state: DeviceState::Pending,
                     driver: None,
                     data: None,
                     attempted: Vec::new(),
+                    last_deferred_dep: None,
                 },
             );
-            inner.pending.push(id);
+            inner.pending.push(id.raw());
             id
         };
         self.probe_pending();
@@ -407,6 +440,26 @@ impl DeviceDomain {
                     inner.deferred.push((id, waiting));
                 }
             }
+            // Late providers: devices that deferred on this dependency,
+            // exhausted the boot phase and turned Unclaimed still remember
+            // what they waited for — wake them too, or nothing links a
+            // post-boot provider registration to its consumers until an
+            // unrelated driver registration happens to resweep.
+            let unclaimed: Vec<u64> = inner
+                .devices
+                .iter()
+                .filter(|(_, entry)| {
+                    entry.state == DeviceState::Unclaimed && entry.last_deferred_dep == Some(dep)
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            for id in unclaimed {
+                if let Some(entry) = inner.devices.get_mut(&id) {
+                    entry.state = DeviceState::Pending;
+                }
+                inner.pending.push(id);
+                woken += 1;
+            }
             woken
         };
         if woken > 0 {
@@ -444,6 +497,7 @@ impl DeviceDomain {
                         let mut inner = self.inner.lock();
                         if let Some(entry) = inner.devices.get_mut(&id) {
                             entry.state = DeviceState::Deferred;
+                            entry.last_deferred_dep = Some(dep);
                         }
                         inner.deferred.push((id, dep));
                         stats.deferred += 1;
@@ -543,10 +597,10 @@ impl DeviceDomain {
     /// it is withdrawn from the pending/deferred worklists and its entry is
     /// freed immediately; there is no binding to quiesce. `Removing`/`
     /// `Removed` entries reject re-removal with `BadState`.
-    pub fn remove_device(&self, id: u64) -> Result<(), RuntimeError> {
+    pub fn remove_device(&self, id: DeviceId) -> Result<(), RuntimeError> {
         let (desc, driver, data, services, light_path) = {
             let mut inner = self.inner.lock();
-            let Some(entry) = inner.devices.get_mut(&id) else {
+            let Some(entry) = inner.devices.get_mut(&id.raw()) else {
                 return Err(RuntimeError::NotFound);
             };
             match entry.state {
@@ -575,9 +629,9 @@ impl DeviceDomain {
                 // withdraw, no guards to release. Free the entry now —
                 // keeping it would grow the table unboundedly under churn.
                 DeviceState::Pending | DeviceState::Deferred | DeviceState::Unclaimed => {
-                    inner.devices.remove(&id);
-                    inner.pending.retain(|pending| *pending != id);
-                    inner.deferred.retain(|(deferred, _)| *deferred != id);
+                    inner.devices.remove(&id.raw());
+                    inner.pending.retain(|pending| *pending != id.raw());
+                    inner.deferred.retain(|(deferred, _)| *deferred != id.raw());
                     (None, None, None, inner.services.clone(), true)
                 }
             }
@@ -594,7 +648,7 @@ impl DeviceDomain {
         );
 
         if let (Some(driver), Some(data)) = (driver.as_ref(), data.as_mut()) {
-            driver.remove(&desc, id, data.as_mut(), services.as_ref());
+            driver.remove(&desc, id.raw(), data.as_mut(), services.as_ref());
         }
 
         // Withdraw class publications (and notify consumers) BEFORE dropping
@@ -602,30 +656,23 @@ impl DeviceDomain {
         // inside a publication dereferences the MMIO mapping held by `Data`.
         let notifier = self.inner.lock().remove_notifier.clone();
         if let Some(notify) = notifier {
-            notify(id);
+            notify(id.raw());
         }
 
         drop(data);
         {
             let mut inner = self.inner.lock();
-            if let Some(entry) = inner.devices.get_mut(&id) {
+            if let Some(entry) = inner.devices.get_mut(&id.raw()) {
                 entry.state = DeviceState::Removed;
             }
         }
         Ok(())
     }
 
-    pub fn snapshot(&self, id: u64) -> Option<DeviceSnapshot> {
+    pub fn snapshot(&self, id: DeviceId) -> Option<DeviceSnapshot> {
         let inner = self.inner.lock();
-        let entry = inner.devices.get(&id)?;
-        Some(DeviceSnapshot {
-            id,
-            bus: entry.desc.bus,
-            state: entry.state,
-            driver: entry.driver.as_ref().map(|driver| driver.name()),
-            kind: None,
-            identity: None,
-        })
+        let entry = inner.devices.get(&id.raw())?;
+        Some(snapshot_of(id, entry))
     }
 
     pub fn devices(&self) -> Vec<DeviceSnapshot> {
@@ -633,24 +680,7 @@ impl DeviceDomain {
         inner
             .devices
             .iter()
-            .map(|(id, entry)| DeviceSnapshot {
-                id: *id,
-                bus: entry.desc.bus,
-                state: entry.state,
-                driver: entry.driver.as_ref().map(|driver| driver.name()),
-                kind: None,
-                identity: match &entry.desc.identity {
-                    crate::desc::DeviceIdentity::Platform(platform) => platform
-                        .firmware_id
-                        .clone()
-                        .or_else(|| platform.alias.clone()),
-                    crate::desc::DeviceIdentity::Pci(pci) => Some(alloc::format!(
-                        "pci {:#06x}:{:#06x}",
-                        pci.vendor_id,
-                        pci.device_id
-                    )),
-                },
-            })
+            .map(|(id, entry)| snapshot_of(DeviceId(*id), entry))
             .collect()
     }
 
@@ -658,11 +688,11 @@ impl DeviceDomain {
     /// for class layers and tests).
     pub fn with_data<D: Any + Send + Sync, R>(
         &self,
-        id: u64,
+        id: DeviceId,
         visit: impl FnOnce(&D) -> R,
     ) -> Option<R> {
         let inner = self.inner.lock();
-        let entry = inner.devices.get(&id)?;
+        let entry = inner.devices.get(&id.raw())?;
         let data = entry.data.as_ref()?.as_ref().downcast_ref::<D>()?;
         Some(visit(data))
     }
@@ -978,6 +1008,33 @@ mod tests {
         assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
     }
 
+    /// Regression: a provider registering AFTER `finish_probe_phase` must
+    /// still wake the devices that deferred on it. They turned Unclaimed at
+    /// boot end, but the last dependency is remembered — `wake` re-matches
+    /// them instead of waiting for an unrelated driver registration.
+    #[def_test(serial)]
+    fn late_provider_wakes_unclaimed_device() {
+        let (domain, services) = fresh_domain();
+        domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
+
+        let id = domain.add_device(test_descriptor());
+        assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Deferred);
+
+        // Boot end: the stuck device converts to Unclaimed...
+        domain.finish_probe_phase(false);
+        assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
+
+        // ...and the provider arrives only now. The device must wake and
+        // bind (previously it stayed Unclaimed until an unrelated
+        // register_driver reswept it).
+        services.publish_clk(0x42);
+        // Mock services publish without auto-waking (the real runtime's
+        // registry wake hook does); drive it explicitly as the runtime would.
+        assert_eq!(domain.wake(DepSource::clk(0x42)), 1);
+        assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Active);
+        assert_eq!(domain.snapshot(id).unwrap().driver, Some("test-serial"));
+    }
+
     #[def_test(serial)]
     fn finish_probe_phase_unsticks_deferred_with_diagnostics() {
         let (domain, _services) = fresh_domain();
@@ -995,11 +1052,9 @@ mod tests {
 
         // And the provider arriving late still claims it (resweep path).
         _services.publish_clk(0x42);
-        assert_eq!(
-            domain.wake(DepSource::clk(0x42)),
-            0,
-            "no deferred left to wake"
-        );
+        // Late provider still wakes it: Unclaimed devices remember their
+        // last dependency (the finish_probe_phase verdict is not terminal).
+        assert_eq!(domain.wake(DepSource::clk(0x42)), 1);
     }
 
     #[def_test(serial)]

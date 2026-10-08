@@ -35,7 +35,7 @@ use core::{
 };
 
 use crate::{
-    bus::{Bus, DeviceDescriptor},
+    bus::{Bus, DeviceDescriptor, DeviceId},
     error::{DepSource, ProbeError, RuntimeError},
     resource::{ClkSpec, IrqSpec, MmioRegion},
 };
@@ -482,8 +482,8 @@ impl<'a, B: Bus> DeviceCtx<'a, B> {
         self.modalias
     }
 
-    pub const fn id(&self) -> u64 {
-        self.id
+    pub const fn id(&self) -> DeviceId {
+        DeviceId(self.id)
     }
 
     pub const fn descriptor(&self) -> &'a DeviceDescriptor {
@@ -656,8 +656,8 @@ impl<'a, B: Bus, D> BoundDevice<'a, B, D> {
         }
     }
 
-    pub const fn id(&self) -> u64 {
-        self.id
+    pub const fn id(&self) -> DeviceId {
+        DeviceId(self.id)
     }
 
     pub const fn descriptor(&self) -> &'a DeviceDescriptor {

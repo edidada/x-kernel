@@ -145,7 +145,7 @@ pub fn activate<B: driver_core::Bus>(
 
     let location = dev.descriptor().location;
     let publication = publish_hwrng(
-        ClassParent::detached(dev.id(), "virtio-rng", location),
+        ClassParent::detached(dev.id().raw(), "virtio-rng", location),
         device,
     )
     .map_err(crate::common::map_driver_error)?;
