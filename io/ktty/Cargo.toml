@@ -17,7 +17,7 @@ kcpu_id_map.workspace = true
 console_driver.workspace = true
 char_driver.workspace = true
 kclass = { workspace = true, features = ["char"] }
-kdevice.workspace = true
+devnode = { workspace = true }
 kerrno.workspace = true
 khal.workspace = true
 klogger.workspace = true

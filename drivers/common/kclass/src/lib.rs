@@ -531,7 +531,7 @@ pub fn remove_net_device(id: ClassDeviceId) {
 mod node_compat {
     use alloc::{format, string::String, vec::Vec};
 
-    use devnode::{DevNode, DevNodeType, DeviceLocation, bitmap_value};
+    use devnode::{DevNodeType, DeviceLocation, bitmap_value};
 
     use super::InputNodeMetadata;
 

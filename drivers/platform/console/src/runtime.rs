@@ -14,19 +14,15 @@ use alloc::{sync::Arc, vec::Vec};
 
 use driver_base::DriverResult;
 use kclass::{
-    CharDeviceImpl, ClassDevice, char_devices, find_char_device, publish_char,
-    subscribe_char_available,
+    CharDeviceImpl, ClassDevice, ClassDeviceId, char_devices, find_char_device, publish_char,
+    subscribe_char_available, subscribe_char_removed,
 };
-<<<<<<< HEAD
 use kspin::SpinNoPreempt;
-=======
-use kspin::{SpinNoIrq, SpinNoPreempt};
->>>>>>> eec3d1eb4 (refactor(driver): remove the legacy device model entirely — one model, one pipeline)
 use lazyinit::LazyInit;
 
 struct ConsoleSubsystem {
     devices: Vec<ClassDevice<CharDeviceImpl>>,
-    stdout: Option<DeviceId>,
+    stdout: Option<ClassDeviceId>,
 }
 
 impl ConsoleSubsystem {
@@ -50,7 +46,7 @@ impl ConsoleSubsystem {
         self.devices.push(handle);
     }
 
-    fn remove(&mut self, id: DeviceId) -> Option<ClassDevice<CharDeviceImpl>> {
+    fn remove(&mut self, id: ClassDeviceId) -> Option<ClassDevice<CharDeviceImpl>> {
         if self.stdout == Some(id) {
             self.stdout = None;
         }
@@ -105,9 +101,10 @@ fn ensure_console_bridge() {
             add_console_device(handle);
         }
         subscribe_char_available(Arc::new(add_console_device));
-<<<<<<< HEAD
-        subscribe_device_removed(Arc::new(|id| {
-            let _ = unregister_console_device(id);
+        // Class-layer removal subscription replaces the old device-model
+        // removal event: the console keeps no stale handles.
+        subscribe_char_removed(Arc::new(|handle| {
+            let _ = unregister_console_device(handle.id());
         }));
     });
 }
@@ -121,12 +118,12 @@ fn ensure_console_bridge() {
 /// The runtime implementation must wrap the same early stdout port, not another
 /// device. Called by serial adoption in task context, before driver activation.
 pub fn register_stdout_console(
-    parent: Arc<DeviceObject>,
+    parent: impl Into<kclass::ClassParent>,
     runtime: CharDeviceImpl,
 ) -> DriverResult<()> {
     ensure_console_bridge();
-    let id = parent.id();
-    publish_char(parent, runtime)?;
+    let handle = publish_char(parent, runtime)?;
+    let id = handle.id();
     console_subsystem().lock().stdout = Some(id);
     // This runs inside the driver's `probe_device`, so the device is usually
     // not active yet and `find_char_device()` (which filters on availability)
@@ -139,6 +136,19 @@ pub fn register_stdout_console(
     Ok(())
 }
 
+/// Publish the boot stdout port's runtime wrapper under the caller's class
+/// parent and register it as THE console.
+///
+/// New-model serial drivers call this for their stdout role (the old
+/// `Arc<DeviceObject>` parent became a `ClassParent`); auxiliary ports use
+/// plain `publish_char` and stay out of the console subsystem.
+pub fn register_console_parented(
+    parent: impl Into<kclass::ClassParent>,
+    runtime: CharDeviceImpl,
+) -> DriverResult<()> {
+    register_stdout_console(parent, runtime)
+}
+
 /// Snapshot the available runtime device associated with boot stdout.
 ///
 /// Task context. Returns none until the device is published and active. The
@@ -148,27 +158,17 @@ pub fn stdout_console() -> Option<ClassDevice<CharDeviceImpl>> {
     let handle = console_subsystem().lock().stdout_handle()?;
     handle.is_available().then_some(handle)
 }
-=======
-    });
-}
-
-/// The stdout device id that was registered before the device became active,
-/// waiting for its activation notification so it can be adopted into the
-/// console subsystem.
-static PENDING_STDOUT: SpinNoIrq<Option<ClassDeviceId>> = SpinNoIrq::new(None);
-static STDOUT_ADOPTION_BRIDGE: LazyInit<()> = LazyInit::new();
->>>>>>> eec3d1eb4 (refactor(driver): remove the legacy device model entirely — one model, one pipeline)
 
 /// Identity of the adopted boot stdout.
 ///
 /// Task context. Available after publication, including before activation;
 /// cleared on removal. This identifies the port, not its I/O availability.
-pub fn stdout_console_id() -> Option<DeviceId> {
+pub fn stdout_console_id() -> Option<ClassDeviceId> {
     console_subsystem().lock().stdout
 }
 
 /// Remove a runtime console from the console subsystem.
-pub fn unregister_console_device(id: DeviceId) -> Option<ClassDevice<CharDeviceImpl>> {
+pub fn unregister_console_device(id: ClassDeviceId) -> Option<ClassDevice<CharDeviceImpl>> {
     console_subsystem().lock().remove(id)
 }
 

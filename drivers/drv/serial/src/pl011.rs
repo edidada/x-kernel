@@ -109,13 +109,18 @@ impl DriverOps<PlatformBus> for Pl011Driver {
             }
         };
 
-        // Interrupt: the handler captures the port (the `dev_id` pattern).
+        // Interrupt: !920 semantics — the port's handler acknowledges and
+        // collects input internally and wakes the attached tty waker
+        // (ack_interrupt no longer exists as a public API).
         let irq = match dev.irq(0) {
             Ok(spec) => {
                 let handler_port = port.clone();
                 Some(dev.request_irq(spec, "pl011", move || {
-                    handler_port.ack_interrupt();
-                    IrqAction::Handled
+                    if handler_port.handle_input_irq().handled() {
+                        IrqAction::Handled
+                    } else {
+                        IrqAction::NotHandled
+                    }
                 })?)
             }
             Err(_) => None,

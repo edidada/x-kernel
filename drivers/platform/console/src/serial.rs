@@ -370,7 +370,7 @@ impl SerialPort {
     ///
     /// IRQ-safe, not NMI-safe. Hardware sampling is bounded and serialized with
     /// task reads; notification happens after releasing the port lock.
-    pub(crate) fn handle_input_irq(&self) -> IrqEvent {
+    pub fn handle_input_irq(&self) -> IrqEvent {
         let (has_input_event, waker) = {
             let mut io = self.io.lock();
             let SerialIo { backend, input } = &mut *io;

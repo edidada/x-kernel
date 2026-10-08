@@ -345,28 +345,20 @@ pub fn publish_auto_indexed(
     let Some(index) = index else {
         return Err(PublishError::ResourceBusy);
     };
-    let mut node = publish(
+    let node = DevNode {
         id,
-        node_type.subsystem,
-        node_type.devname(index),
-        node_type.device_number(index),
-        physical_path,
+        allocated_index: Some(index),
+        sysfs_path: (node_type.sysfs_path_for)(physical_path, index),
+        subsystem: node_type.subsystem,
+        devname: node_type.devname(index),
+        device_number: node_type.device_number(index),
+        physical_path: String::from(physical_path),
         modalias,
         properties,
         driver_name,
-    );
-    node.sysfs_path = (node_type.sysfs_path_for)(physical_path, index);
-    // The registry holds publish()'s own node copy; stamp the index THERE —
-    // withdraw() reads that copy, and without this it would never return
-    // the index to the pool (probe/remove cycles exhaust it).
-    {
-        let mut registry = REGISTRY.lock();
-        if let Some(registered) = registry.nodes.iter_mut().find(|n| n.id == id) {
-            registered.allocated_index = Some(index);
-        }
-    }
-    node.allocated_index = Some(index);
-    Ok(node)
+        available: true,
+    };
+    Ok(register_and_dispatch(node))
 }
 
 /// Publish a node with an explicit devname and `dev_t` (block disks name
@@ -399,9 +391,17 @@ pub fn publish(
         driver_name,
         available: true,
     };
+    register_and_dispatch(node)
+}
+
+/// Register one fully-built node and dispatch its Added event. Registry
+/// entry, dispatched copies and the returned handle are the SAME node —
+/// callers that patch fields after `publish()` would race every subscriber
+/// with a stale copy (the indexed path hit exactly that with sysfs_path).
+fn register_and_dispatch(node: DevNode) -> DevNode {
     let (subscribers, publisher) = {
         let mut registry = REGISTRY.lock();
-        if let Some(existing) = registry.nodes.iter_mut().find(|n| n.id == id) {
+        if let Some(existing) = registry.nodes.iter_mut().find(|n| n.id == node.id) {
             *existing = node.clone();
             return existing.clone();
         }

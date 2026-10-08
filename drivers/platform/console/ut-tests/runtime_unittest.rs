@@ -38,10 +38,12 @@ impl CharDevice for DummyConsole {
 
 #[def_test]
 fn stdout_identity_requires_local_handle_and_clears_on_removal() {
-    let parent = Arc::new(DeviceObject::new_bound_for_test(
-        DeviceId::new(1),
-        DeviceKind::Char,
-    ));
+    // Detached class parent: never touches a registry — identity test only.
+    let parent = kclass::ClassParent::detached(
+        1,
+        "console-test",
+        devnode::DeviceLocation::PlatformStatic { id: 1 },
+    );
     let runtime: CharDeviceImpl = Box::new(DummyConsole);
     let stdout = ClassDevice::try_new_with_info(
         parent,
@@ -61,7 +63,7 @@ fn stdout_identity_requires_local_handle_and_clears_on_removal() {
     subsystem.add(stdout);
     assert_eq!(subsystem.stdout_handle().unwrap().id(), id);
     assert!(!subsystem.stdout_handle().unwrap().is_available());
-    let other = DeviceId::new(id.raw().wrapping_add(1));
+    let other = kclass::ClassDeviceId::new_detached();
     assert!(subsystem.remove(other).is_none());
     assert_eq!(subsystem.stdout_handle().unwrap().id(), id);
     assert!(subsystem.remove(id).is_some());

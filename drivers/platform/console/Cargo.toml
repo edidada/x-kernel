@@ -18,6 +18,7 @@ ns16550-ioport = ["dep:uart_16550"]
 [dependencies]
 driver_base = { workspace = true }
 kclass = { workspace = true, features = ["char"] }
+devnode = { workspace = true }
 khal = { workspace = true }
 kiface = { workspace = true }
 kirq = { workspace = true }
