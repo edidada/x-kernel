@@ -86,8 +86,10 @@ Stop / Deadline 只占秩。`SchedAttr::validate` 拒绝 Deadline。FIFO/RR
 
 RT 与 Fair 同级切换时，排队任务先从旧类摘下再进新类；正在运行的任务只改
 class，不入队。更高优先级的 RT waiter 通过 `higher_class_runnable` 抢占
-Fair。同一 RT 优先级里，更高优先级 waiter 走 `wakeup_preempts`。`SCHED_RR`
-在同优先级还有 waiter 且时间片耗尽时要求重新调度，并把该任务放到队尾。
+Fair。同一 RT 优先级里，更高优先级 waiter 走 `wakeup_preempts`。自愿
+`yield`（POSIX `sched_yield`，Linux `yield_task_rt`）把 FIFO 和 RR 都放到
+同优先级队尾。被抢占的任务插回队头；只有 `SCHED_RR` 时间片耗尽
+（`rr_rotate`）时，被抢占者才改插队尾。
 一个 RT 周期内 `used_ns` 达到 `SCHED_RT_RUNTIME_US` 后整类节流，`pick_next`
 跳过 RT，让 Fair 运行，直到周期边界 `advance` 清零。
 
@@ -205,8 +207,9 @@ EEVDF steal 逐节点检查时，以游标 get_ptr 构造 ManuallyDrop<Arc<_>>
 ## RT 队列
 
 `RtClass` 为优先级 `1..=99` 各放一条 `ready_list::ReadyList`。`occupied`
-位图标出非空级，最高级是 `leading_zeros`。同优先级 FIFO 保持入队顺序；被抢占
-的任务插回队头，`SCHED_RR` 时间片耗尽后插回队尾。
+位图标出非空级，最高级是 `leading_zeros`。同优先级的入队顺序就是 FIFO。
+自愿 yield 把当前任务放到该优先级队尾，FIFO 与 RR 相同。被抢占的任务插回
+队头；`SCHED_RR` 时间片耗尽后的抢占才插回队尾。
 
 每条链表有一个首次入队时分配的、永不复用的身份。实体内嵌
 `LinkedListAtomicLink` 和归属字。入链成功后才写归属；摘除前先清归属，避免

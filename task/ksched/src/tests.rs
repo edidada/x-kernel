@@ -530,6 +530,7 @@ fn rt_same_priority_is_fifo() {
     enqueue_new(&mut s, first);
     enqueue_new(&mut s, second);
     assert_eq!(pick_id(&mut s, 0), 1);
+    // POSIX `sched_yield`: the running FIFO thread becomes the tail.
     s.yield_current(0);
     assert_eq!(pick_id(&mut s, 0), 2);
 }

@@ -235,6 +235,9 @@ impl<T> ClassOps<T> for RtClass<T> {
         prev.rt().rr_rotate.set(false, tok);
         match reason {
             LeaveReason::Yield => {
+                // POSIX `sched_yield` and Linux `yield_task_rt` place the
+                // caller at the tail of its priority. That includes FIFO.
+                // Involuntary preempt stays at the head unless RR rotated.
                 self.enqueue_tail(prev, tok);
                 true
             }
