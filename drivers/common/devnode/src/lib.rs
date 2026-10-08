@@ -244,28 +244,6 @@ static REGISTRY: SpinNoPreempt<Registry> = SpinNoPreempt::new(Registry {
     lifecycle_publisher: None,
 });
 
-/// Publish a node for `id`; `index` resolves devname/`dev_t` through
-/// `node_type`. Returns the node.
-pub fn publish_indexed(
-    id: u64,
-    node_type: &DevNodeType,
-    index: u32,
-    physical_path: &str,
-    modalias: Option<String>,
-    properties: Vec<(String, String)>,
-) -> DevNode {
-    publish(
-        id,
-        node_type.subsystem,
-        node_type.devname(index),
-        node_type.device_number(index),
-        physical_path,
-        modalias,
-        properties,
-        None,
-    )
-}
-
 /// Per-`DevNodeType` min-free index pool with release-on-withdraw.
 ///
 /// Linux equivalence: each class hands out the lowest free minor range
@@ -333,9 +311,9 @@ pub fn publish_auto_indexed(
     properties: Vec<(String, String)>,
     driver_name: Option<String>,
 ) -> Result<DevNode, PublishError> {
-    // The duplicate check must run BEFORE publishing: `publish_indexed`
-    // registers the node, so checking afterwards would always find the id
-    // we just inserted (and hand the freshly allocated index straight back).
+    // The duplicate check must run BEFORE registering: checking afterwards
+    // would always find the id we just inserted (and hand the freshly
+    // allocated index straight back).
     if REGISTRY.lock().nodes.iter().any(|n| n.id == id) {
         return Err(PublishError::AlreadyExists);
     }
@@ -425,9 +403,6 @@ pub fn withdraw(id: u64) {
         node.available = false;
         node.clone()
     };
-    if let Some(index) = node.allocated_index {
-        INDEX_POOLS.lock().release(node.subsystem, index);
-    }
     let (subscribers, publisher) = {
         let registry = REGISTRY.lock();
         (
@@ -442,6 +417,13 @@ pub fn withdraw(id: u64) {
         publisher(DevNodeEvent::Removed(node.clone()));
     }
     REGISTRY.lock().nodes.retain(|n| n.id != id);
+    // Release the index only after every subscriber processed Removed:
+    // the devname/dev_t must stay exclusive for as long as the node lives
+    // in devfs/sysfs, or a new device could cdev_add the same dev_t while
+    // the old node's teardown is still in flight.
+    if let Some(index) = node.allocated_index {
+        INDEX_POOLS.lock().release(node.subsystem, index);
+    }
     for subscriber in subscribers {
         subscriber(DevNodeEvent::Removed(node.clone()));
     }

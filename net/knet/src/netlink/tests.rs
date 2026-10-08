@@ -15,7 +15,7 @@ use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address};
 use unittest::def_test;
 
 fn kclass_test_device_id(raw: u64) -> kclass::ClassDeviceId {
-    kclass::ClassDeviceId::new_detached_for_node(raw)
+    kclass::ClassDeviceId::from_raw(raw)
 }
 
 use super::{

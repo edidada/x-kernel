@@ -146,6 +146,9 @@ pub fn register_console_parented(
     parent: impl Into<kclass::ClassParent>,
     runtime: CharDeviceImpl,
 ) -> DriverResult<()> {
+    // Thin alias of [`register_stdout_console`] kept as the serial drivers'
+    // naming (parent-shaped entry); the semantics are identical — see
+    // register_stdout_console for the full contract.
     register_stdout_console(parent, runtime)
 }
 

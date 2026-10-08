@@ -32,7 +32,6 @@ use console_driver::{
 use driver_base::{Device, DeviceKind, DriverResult};
 use driver_core::{
     BoundDevice, ClkHandle, DevIrq, DeviceCtx, DriverDesc, DriverOps, IoMap, IrqAction, ProbeError,
-    RuntimeError,
     platform::{OfMatch, PlatformBus, PlatformId},
 };
 use kclass::{ClassParent, publish_char};
@@ -166,7 +165,6 @@ impl DriverOps<PlatformBus> for Pl011Driver {
                 .and_then(|spec| spec.hwirq)
                 .unwrap_or(usize::MAX),
         );
-        let _ = RuntimeError::NotFound; // keep error vocabulary imported for future use
         Ok(Pl011Data {
             _irq: irq,
             _port: port,

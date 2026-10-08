@@ -37,23 +37,12 @@ impl ClassDeviceId {
     /// collision-free with allocated ids: node ids never carry the tag bit
     /// used by allocated detached ids... actually they may; use a fresh
     /// derivation instead — hash the node id into the tagged space).
-    pub fn new_detached_for_node(node_id: u64) -> Self {
-        // Simple FNV-style fold into the tagged space; node ids and
-        // allocated ids share the space but this derivation is injective
-        // enough for record keys (id equality is what matters).
-        let mut h = node_id ^ DRIVER_CORE_ID_TAG;
-        h ^= h >> 33;
-        h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
-        h ^= h >> 33;
-        Self(h)
-    }
-
     /// Wrap an existing raw id without re-deriving it.
     ///
     /// For lookups where the caller already holds the id's owner (e.g. the
-    /// devfs projection, whose node ids ARE class-device raw ids). Unlike
-    /// [`Self::new_detached_for_node`] this preserves the value: a hashed
-    /// key can never match the registry entry it was derived from.
+    /// devfs projection, whose node ids ARE class-device raw ids): the
+    /// value is preserved exactly — any re-derivation (hashing) could
+    /// never match the registry entry it came from.
     pub const fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
