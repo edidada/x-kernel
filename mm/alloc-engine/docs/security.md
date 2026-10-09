@@ -77,3 +77,10 @@ zero-filled allocations. Callers must initialize pages before exposing them to
 another protection domain. There is no direct user-pointer, device, DMA, firmware
 parser or syscall interface here; trusted callers translate those inputs into
 owned, mapped memory and validated allocation requests.
+
+## Unpublished Registration Rollback
+
+`BuddyPageAllocator::MAX_REGIONS` exposes the actual capacity to boot planners.
+`reset` discards registrations without accessing caller storage, using the existing
+buddy region teardown. It is valid only when no allocations remain, including the
+unpublished boot-registration rollback case. It is not a runtime memory-hot-remove API.

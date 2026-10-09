@@ -18,6 +18,7 @@ backtrace = { workspace = true, optional = true }
 cfg-if.workspace = true
 kaddr_layout.workspace = true
 kerrno.workspace = true
+klazy.workspace = true
 kspin.workspace = true
 log.workspace = true
 memaddr.workspace = true

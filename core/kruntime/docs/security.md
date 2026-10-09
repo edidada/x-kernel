@@ -249,3 +249,13 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 ## ARM64 counter recovery dispatch
 
 With `arm-timer-resume-fixup`, the timer IRQ handler dispatches pending counter-recovery notifications before processing task timers. Clock reads only repair shared counter state and rearm CPU-local registers; IPI delivery is deferred until caller-held clock-read locks have been released. The dispatch runs without the counter lock, does not sleep, and requires initialized interrupt routing. It does not reconstruct elapsed host sleep time.
+
+## Resident Page Metadata Handoff
+
+`init_allocator` gathers all firmware-classified FREE ranges in fixed-capacity storage and calls
+`kalloc::global_init_with_regions` once, before runtime page-table construction. Its unsafe boundary
+transfers exclusive, writable RAM through the permanent linear mapping; firmware and kernel
+reservations are excluded by `khal`. Kalloc plans descriptor backing without heap allocation and
+publishes the registry before ordinary allocations. Boot aborts on invalid geometry or insufficient
+backing instead of partially exposing the allocator. The original RAM mapping remains intact across
+the runtime page-table switch. The logged inventory separates descriptors, buddy metadata and usable pages.

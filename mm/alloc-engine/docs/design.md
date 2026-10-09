@@ -74,3 +74,10 @@ live page contents, recovery of maximal coalesced blocks, inline and reserved
 bitmaps, overlapping registration, non-power-of-two region edges, alignment,
 fixed-address splitting and reset. Timing and scaling measurements belong in
 external benchmarks, not timing assertions in unit tests.
+
+## Unpublished Registration Rollback
+
+`BuddyPageAllocator::MAX_REGIONS` exposes the actual capacity to boot planners.
+`reset` discards registrations without accessing caller storage, using the existing
+buddy region teardown. It is valid only when no allocations remain, including the
+unpublished boot-registration rollback case. It is not a runtime memory-hot-remove API.

@@ -17,7 +17,7 @@ use crate::{AllocError, AllocResult};
 const MAX_ORDER: usize = 20;
 
 /// Up to 64 separate memory regions can be registered.
-const MAX_REGIONS: usize = 64;
+pub(crate) const MAX_REGIONS: usize = 64;
 
 /// Small regions keep their free-head bitmap inside the allocator itself.
 const INLINE_BITMAP_WORDS: usize = 4;

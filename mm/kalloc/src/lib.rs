@@ -26,6 +26,7 @@ use alloc_engine::{
 };
 use kaddr_layout::v2p;
 use kcpu_slot::{CpuId, CpuPin, cpu_slot_cell};
+use klazy::Once;
 use kspin::{NoPreempt, NoPreemptIrqSave, SpinNoIrq};
 use memaddr::PAGE_SIZE_4K;
 use strum::{IntoStaticStr, VariantArray};
@@ -45,10 +46,12 @@ fn kernel_virt_to_phys(vaddr: usize) -> usize {
     v2p(vaddr)
 }
 
+mod frame;
 mod page;
 mod pcp;
 #[cfg(feature = "slab")]
 mod slab_cache;
+pub use frame::{FrameBootstrapInfo, FrameMeta, FrameRegion};
 pub use page::GlobalPage;
 
 #[cfg(feature = "tracking")]
@@ -303,6 +306,7 @@ pub struct GlobalAllocator {
     /// Whether the page allocator has at least one usable memory region.
     page_ready: AtomicBool,
     palloc: SpinNoIrq<BuddyPageAllocator<{ PAGE_SIZE_4K }>>,
+    frames: Once<frame::FrameRegistry>,
 }
 
 impl Default for GlobalAllocator {
@@ -319,6 +323,7 @@ impl GlobalAllocator {
             heap_ready: AtomicBool::new(false),
             page_ready: AtomicBool::new(false),
             palloc: SpinNoIrq::new(BuddyPageAllocator::new()),
+            frames: Once::new(),
         }
     }
 
@@ -355,6 +360,51 @@ impl GlobalAllocator {
     pub fn init_page_allocator(&self, va: usize, size: usize) {
         self.init_or_extend_page_allocator(va, size)
             .expect("failed to initialize page allocator");
+    }
+
+    /// Initializes resident descriptors and the complete boot page inventory.
+    ///
+    /// Descriptor backing and buddy bitmaps are permanently excluded from
+    /// allocations. This entry does not initialize the byte heap. All regions
+    /// must use one linear VA-to-PA offset; partial edge pages are excluded.
+    /// Subsequent calls to the legacy region-extension APIs are rejected.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an initialized allocator, overlapping or invalid ranges, too
+    /// many regions, and the absence of contiguous descriptor backing. Failed
+    /// planning does not write into RAM or publish allocator state.
+    ///
+    /// # Safety
+    ///
+    /// Every input range must be exclusively owned writable RAM mapped at its
+    /// given VA, with both mapping and storage valid until this allocator and
+    /// all of its users are destroyed. Initialization must be serialized with
+    /// boot memory handoff; callers must not access the handed-off storage.
+    pub unsafe fn init_page_allocator_with_regions(
+        &self,
+        regions: &[FrameRegion],
+    ) -> AllocResult<FrameBootstrapInfo> {
+        let mut pages = self.palloc.lock();
+        if self.page_ready.load(Ordering::Acquire) || self.frames.get().is_some() {
+            return Err(AllocError::AlreadyInitialized);
+        }
+        // SAFETY: the caller supplies exclusive, valid mapped RAM and keeps
+        // it alive. The page lock serializes initialization, and readiness has
+        // not yet been published to any allocation path.
+        let (registry, info) = unsafe { frame::bootstrap(regions, &mut pages) }?;
+        self.frames.call_once(|| registry);
+        self.page_ready.store(true, Ordering::Release);
+        Ok(info)
+    }
+
+    /// Locates the resident descriptor for a covered physical base-page number.
+    ///
+    /// Missing means the PFN is outside this registry, not necessarily outside
+    /// RAM. The returned borrow neither owns the page nor authorizes access to
+    /// its current allocation or contents.
+    pub fn frame_meta(&self, pfn: usize) -> Option<&FrameMeta> {
+        self.frames.get()?.lookup(pfn)
     }
 
     /// Return whether the backing page allocator has a usable memory region.
@@ -722,10 +772,14 @@ impl GlobalAllocator {
     }
 
     fn init_or_extend_page_allocator(&self, va: usize, size: usize) -> AllocResult {
+        let mut pages = self.palloc.lock();
+        if self.frames.get().is_some() {
+            return Err(AllocError::AlreadyInitialized);
+        }
         if self.page_ready.load(Ordering::Acquire) {
-            self.palloc.lock().add_region(va, size)?;
+            pages.add_region(va, size)?;
         } else {
-            self.palloc.lock().init_region(va, size);
+            pages.init_region(va, size);
             self.page_ready.store(true, Ordering::Release);
         }
         Ok(())
@@ -888,12 +942,30 @@ pub fn global_allocator() -> &'static GlobalAllocator {
     &GLOBAL_ALLOCATOR
 }
 
+/// Hands all boot RAM to the global allocator with resident page descriptors.
+///
+/// Metadata is prepared before page allocation becomes ready, then the byte
+/// heap is bootstrapped from the remaining inventory. A heap-bootstrap error
+/// leaves the page allocator initialized; callers must not repeat the handoff.
+///
+/// # Safety
+///
+/// Regions must be exclusive writable RAM at permanently valid linear kernel
+/// mappings. This is a one-time boot operation, before other allocator users.
+/// The storage must remain valid for the lifetime of the kernel.
+pub unsafe fn global_init_with_regions(regions: &[FrameRegion]) -> AllocResult<FrameBootstrapInfo> {
+    // SAFETY: the caller transfers exclusive, permanently mapped boot RAM and
+    // guarantees that allocator initialization is serialized.
+    let info = unsafe { GLOBAL_ALLOCATOR.init_page_allocator_with_regions(regions) }?;
+    GLOBAL_ALLOCATOR.bootstrap_heap_if_needed()?;
+    Ok(info)
+}
+
 /// Initializes the global allocator with the given memory region.
 ///
-/// Note that the memory region bounds are just numbers, and the allocator
-/// does not actually access the region. Users should ensure that the region
-/// is valid and not being used by others, so that the allocated memory is also
-/// valid.
+/// The allocator writes free-list and bitmap metadata into the region during
+/// registration, so it must already be writable, mapped, and exclusively owned.
+/// Use [`global_init_with_regions`] for the kernel's descriptor-backed handoff.
 ///
 /// The first call bootstraps the allocator, and later calls extend it.
 pub fn global_init(va: usize, size: usize) {

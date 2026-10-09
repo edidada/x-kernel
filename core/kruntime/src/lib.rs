@@ -656,20 +656,34 @@ fn init_allocator() {
 
     info!("Initialize global memory allocator...");
     info!("  use {} allocator.", kalloc::global_allocator().name());
-    let mut free_regions = memory_regions().filter(|r| r.flags.contains(MemFlags::FREE));
-    if let Some(region) = free_regions.next() {
-        kalloc::global_init(p2v(region.paddr).as_usize(), region.size);
-    }
-    for region in free_regions {
+    let mut regions = heapless::Vec::<kalloc::FrameRegion, 64>::new();
+    for region in memory_regions().filter(|r| r.flags.contains(MemFlags::FREE)) {
         #[expect(
             clippy::expect_used,
-            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: a free memory region \
-                      cannot be added to the allocator; allocator initialization has no error \
-                      return or recovery"
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: firmware RAM exceeds \
+                      the page registry's fixed capacity; this initialization path has no \
+                      recovery or error-return channel"
         )]
-        kalloc::global_add_memory(p2v(region.paddr).as_usize(), region.size)
-            .expect("failed to add free region to allocator");
+        regions
+            .push(kalloc::FrameRegion::new(
+                region.paddr,
+                p2v(region.paddr),
+                region.size,
+            ))
+            .expect("too many free RAM regions for page allocator");
     }
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: physical page metadata \
+                  and allocator setup failed; runtime cannot proceed without a page allocator"
+    )]
+    // SAFETY: khal removed kernel and firmware reservations from these RAM
+    // ranges. Boot mappings make them writable, they are not yet allocated,
+    // and the kernel's linear mapping keeps them valid after the page-table
+    // switch. Primary boot is the sole owner during this permanent handoff.
+    let frames = unsafe { kalloc::global_init_with_regions(&regions) }
+        .expect("failed to initialize resident frame metadata and allocator");
+    kernel_boot::bootln!("kruntime resident frames: {frames:?}");
 }
 
 fn finish_allocator_init() {

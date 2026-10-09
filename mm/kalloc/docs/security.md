@@ -312,3 +312,21 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
 - [ ] tracking visitor 是否在持锁期间调用，是否存在递归 state lock 或敏感地址泄露？
 - [ ] 新增统计是否明确计量单位和层次，且没有被用作 allocator correctness/reclaim 条件？
 - [ ] 新增 cache 或 allocator 状态是否同步更新初始化、CPU hotplug、reclaim 和关机策略？
+
+## Resident Frame Metadata Bootstrap
+
+`init_page_allocator_with_regions` / `global_init_with_regions` 是 unsafe 所有权交接。
+调用者证明每个 VA 是对应 RAM 的稳定可写映射、storage 独占且覆盖 allocator 的全部寿命。
+算术验证不能证明硬件映射或 firmware ownership；kruntime 的 FREE 分类承担这一边界。
+
+规划完全不写 RAM。它检查端点/描述符字节数溢出、页内偏移、统一线性偏移、重叠和
+目录容量，并从 region 尾部选择 page-aligned backing。没有足够大的连续范围时返回
+NoMemory，不静默退回无描述符模式。指针初始化逐项构造原子对象，不把全零字节当作
+任意 Rust 对象。FrameRegistry 的 Send/Sync 依赖目录不可变、backing 不被归还及状态原子访问。
+
+描述符 backing 和 buddy 位图页均为 permanent，注册时排除；运行时内核映射继续覆盖它们。
+`frame_meta` 的借用只证明槽位存储有效，不授权访问内容、free 或重新取得已复用页的引用。
+目录在完整构造后发布，page_ready 随后发布。第一次交接必须先于并发分配；动态扩展目前拒绝。
+
+验证覆盖物理空洞、向内对齐、相邻合并、范围/算术错误、重复初始化、元数据库存守恒和
+buddy 位图保留。元数据永久占用量在启动日志中可观测，不算作可分配 free pages。

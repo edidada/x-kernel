@@ -53,6 +53,7 @@ mm/kalloc/
 ├── src/
 │   ├── lib.rs          # 全局 allocator、初始化、路由、统计和 GlobalAlloc
 │   ├── page.rs         # GlobalPage RAII 封装
+│   ├── frame/          # 常驻基础页描述符、启动规划与 PFN 索引
 │   ├── pcp.rs          # 1–4 页 per-CPU page cache
 │   ├── slab_cache.rs   # slab 配置下的 per-CPU object cache
 │   └── tracking.rs     # 可选 allocation tracking
@@ -134,7 +135,8 @@ Other paths:
 | `balloc` | `SpinNoIrq` | 当前配置的中央 byte allocator |
 | `palloc` | `SpinNoIrq` | 4 KiB page buddy |
 | `heap_ready` | `AtomicBool` | byte allocator 是否已获得首个 heap region |
-| `page_ready` | `AtomicBool` | page allocator 是否已获得至少一个 region |
+| `page_ready` | `AtomicBool` | page inventory 已发布；descriptor 模式下目录也已初始化 |
+| `frames` | `klazy::Once` | immutable PFN 目录和永久 backing |
 | per-CPU usage counters | 每 CPU、每 `UsageKind` 两个累计 atomic | caller-live 诊断计数 |
 
 ## 初始化状态
@@ -153,21 +155,32 @@ PageReady
   v
 HeapReady
 
-PageReady / HeapReady -- add_memory() --> 保持当前状态并扩展 palloc
+Legacy PageReady / HeapReady -- add_memory() --> 扩展 palloc
+Descriptor-backed allocator -- add_memory() --> AlreadyInitialized
 ```
 
-实际启动路径由 `kruntime` 按以下顺序执行：
+实际启动路径由 `kruntime` 一次性交付全部 FREE RAM：
 
-1. 初始化主 CPU 的 per-CPU storage；
-2. 初始化内存映射并枚举带 `FREE` 标记的 region；
-3. 第一段 region 通过 `global_init()` 初始化 page allocator，并从中取得至少
-   `MIN_HEAP_SIZE`（32 KiB）作为首个 byte heap；
-4. 后续 region 通过 `global_add_memory()` 加入 page allocator；
-5. AP 在进入普通内核代码前安装各自的 per-CPU register。
+1. 固件和 `khal` 排除内核/固件保留区；启动线性映射已经可写。
+2. `FrameRegion` 记录 PA、对应 VA 和字节数；规划向内页对齐、排序、合并相邻范围，
+   拒绝重叠、溢出、超过 buddy region 容量或不同线性偏移的输入。
+3. 用固定容量目录和一块紧凑的 `FrameMeta` 数组覆盖这些 PFN；物理空洞没有描述符。
+   在一个足够大的 RAM 范围尾部预留描述符 backing，不依赖普通堆。
+4. 描述符逐项构造后，仅把剩余范围注册给 buddy。buddy 自己保留的位图前缀也标为
+   permanent；覆盖总页数 = 描述符页 + buddy 元数据页 + 可分配页。
+5. 完整目录通过 `klazy::Once` 发布，再 Release 发布 page_ready，最后建立 byte heap。
+   运行时页表仍映射原来的 RAM 范围，因此切换页表不会丢失描述符 backing。
 
-`init_page_allocator()` 支持只发布 page allocator、稍后再惰性建立 byte heap 的路径。
-`page_ready` 和 `heap_ready` 使用 Release/Acquire 发布状态；内存区域的加入和 allocator
-metadata mutation 仍由对应锁串行化。初始化调用本身依赖启动流程串行执行。
+`frame_meta(pfn)` 对目录二分查找，只返回描述符借用；没有条目表示 NotManaged，
+不代表该 PFN 不是 RAM。常驻槽位不证明当前页的所有权，permanent 页不进入库存。
+首版冻结覆盖范围；descriptor-backed allocator 拒绝 legacy add_memory 扩展。
+独立测试仍可使用没有 registry 的 legacy 初始化及 alloc-engine 算法。
+
+所有 region 先规划再写入。注册失败 reset 尚未发布的 buddy；heap bootstrap 失败时
+page allocator 已完成交接，调用者不得重复初始化。该启动失败由 kruntime 终止启动。
+
+`init_page_allocator()` 的旧路径仍可用于独立 allocator，但 production 使用
+`global_init_with_regions()`。初始化和 registry 发布由 page lock 串行化；不支持热插拔。
 
 ## 核心算法流程
 

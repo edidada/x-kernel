@@ -12,6 +12,17 @@ pub struct BuddyPageAllocator<const PAGE_SIZE: usize> {
 }
 
 impl<const PAGE_SIZE: usize> BuddyPageAllocator<PAGE_SIZE> {
+    /// Maximum number of separately registered memory regions.
+    pub const MAX_REGIONS: usize = crate::buddy_alloc::MAX_REGIONS;
+
+    /// Discards registered regions without modifying their backing storage.
+    ///
+    /// All allocations must have ended before resetting. This is also used to
+    /// roll back an unpublished boot-time registration.
+    pub fn reset(&mut self) {
+        self.inner.reset();
+    }
+
     /// Creates a new empty `BuddyPageAllocator`.
     pub const fn new() -> Self {
         Self {
