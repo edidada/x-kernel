@@ -35,11 +35,15 @@ net/knet/
     │   ├── tests.rs
     │   └── wire.rs
     ├── netfilter/
-    │   ├── filter/
-    │   │   ├── evaluator.rs
-    │   │   ├── legacy/
+    │   ├── compat/
+    │   │   ├── iptables_legacy/
+    │   │   │   ├── abi.rs
     │   │   │   └── decode.rs
-    │   │   ├── legacy.rs
+    │   │   ├── iptables_legacy.rs
+    │   │   └── mod.rs
+    │   ├── filter/
+    │   │   ├── config.rs
+    │   │   ├── evaluator.rs
     │   │   ├── matcher.rs
     │   │   ├── mod.rs
     │   │   └── model.rs
@@ -155,7 +159,7 @@ Guest-host streams")
         end
 
         FILTER("IPv4 filter model
-Legacy table snapshot")
+Configuration / evaluation")
 
         subgraph IP["IP processing"]
             SMOL("smoltcp
@@ -213,7 +217,8 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 | vsock | Provides optional guest-host stream communication through virtio-vsock. |
 | smoltcp | Provides IPv4/IPv6 processing for the smoltcp socket path. |
 | knet IPv4 / ICMPv4 | Validates and reassembles IPv4 packets, delivers UDP input, and handles ICMPv4 errors and responses. |
-| IPv4 filter model | Defines the validated `filter` table, evaluates INPUT/FORWARD/OUTPUT packets, counts matching entries, and exports legacy `ipt_entry` snapshots. |
+| IPv4 filter configuration | Owns validated semantic tables, atomic publication, rule/chain counters, and INPUT/FORWARD/OUTPUT evaluation. |
+| iptables-legacy adapter | Decodes and exports native legacy entries and translates counter records through the shared filter configuration API. |
 | Router | Selects routes, fragments outgoing IPv4 packets, and dispatches RX/TX queues across devices. |
 | LoopbackDevice | Returns locally transmitted packets to the receive path. |
 | EthernetDevice | Adapts kclass network devices to knet's NetDevice interface and handles Ethernet and ARP. |
@@ -618,13 +623,94 @@ or network processing. Notifications arriving before queue readiness retain
 pending demand and are replayed by `start`. These IRQ-side notifications do
 not allocate submission storage or execute the data plane.
 
-### Legacy IPv4 Filter Replacement and Export
+### IPv4 Filter Configuration and Management Adapters
 
-The legacy serializer calculates chain and rule offsets before producing bytes. Built-in chain heads populate `hook_entry`; built-in policy entries populate `underflow`. User-defined chains receive an `ERROR` marker followed by their rules and a standard `RETURN` footer. Standard jump verdicts point to the first rule after the destination chain marker. A terminal `ERROR` entry closes the table. Fixed IPv4 fields and the supported TCP, UDP, and ICMP matches use native legacy structure alignment, while IPv4 addresses and masks remain in network byte order. Each published table generation owns atomic packet/byte counters for every native entry. Packet evaluation and counter additions hold a shared publication guard; export takes the exclusive guard before copying both fields into each `ipt_entry`, so it cannot observe half of one update.
+`netfilter/filter/config.rs` owns the published semantic `FilterTable` and its
+rule and chain-completion counters. `FilterConfig::snapshot` returns an owned
+immutable table, opaque generation identity, and coherent counter snapshot.
+`replace` builds new state before taking the write lock, checks the adapter's
+precondition against the current immutable table and generation, and publishes
+one complete table. It returns the previous snapshot and new generation.
+`add_counters` maps requests to semantic chain/rule counters under a shared
+guard and validates every chain's shape before applying any addition. These
+operations retain ownership of publication locks and mutable counter state.
+Adapters use validated `Rule` and `FilterTable` constructors through the
+`filter` module's semantic facade; their callbacks perform bounded validation
+and acquire no additional adapter or configuration locks.
 
-The POSIX layer wraps this entry array in Linux `ipt_getinfo` and `ipt_get_entries` responses. `GET_INFO` returns the hook offsets, entry count, and byte size. `GET_ENTRIES` accepts only the size from the preceding snapshot and returns `EAGAIN` when it differs from the current size. Revision queries report revision zero for the supported TCP, UDP, ICMP, standard, and ERROR extensions. `/proc/net/ip_tables_names` advertises `filter` so `iptables-save` can discover the table.
+Packet evaluation uses this same configuration store. Each evaluation holds a
+shared guard through its rule and chain-completion counter updates, so a
+replacement or snapshot waits for in-flight updates. Snapshotting takes an
+exclusive guard to capture both packet and byte fields consistently. The store
+contains no legacy entry bytes, byte offsets, hook numbers, or ABI codecs.
 
-`IPT_SO_SET_REPLACE` copies a bounded native `ipt_replace` header and entry array from the caller. The decoder checks entry alignment and boundaries, match and target sizes, hook and policy offsets, supported IPv4 and TCP/UDP/ICMP conditions, and user-chain jumps before building a validated `FilterTable`. Serialization of the new table completes before a write-locked swap publishes the semantic table and legacy export bytes together. Packet evaluation holds a read lock through its counter updates, so replacement reads the old generation's complete counters after in-flight evaluations finish. The replacement compares `num_counters` with the current entry count at publication and returns `EAGAIN` on a stale request. Successful replacement writes the old generation's counters to the supplied userspace array. `IPT_SO_SET_ADD_COUNTERS` adds the supplied packet and byte totals to each current entry after checking its entry count.
+The management paths have these boundaries:
+
+```mermaid
+flowchart TD
+    LEGACY[iptables-legacy socket options] --> L[compat/iptables_legacy]
+    NFT[iptables-nft and nft clients] --> N[Future nftables Netlink adapter]
+    L --> M[Validated Rule and FilterTable]
+    N --> M
+    M --> C[filter/config publication API]
+    C --> E[filter matcher and evaluator]
+    C --> S[Semantic snapshots and counters]
+    S --> L
+    S --> N
+```
+
+The implemented adapter is `netfilter/compat/iptables_legacy.rs`; its private
+`iptables_legacy/abi.rs` and `decode.rs` own the native 64-bit `ipt_replace`
+format. The decoder validates entry alignment, boundaries, extension sizes,
+hook/policy offsets, supported matches, and jumps before producing a semantic
+table. Chain reconstruction and conversion of byte-offset jumps to `ChainId`
+remain in this adapter. Linux UAPI hook, verdict, extension-flag, and name-limit
+constants come from `linux-raw-sys`. Fixed headers use copied `zerocopy` reads
+and initialized writes with explicit padding; compile-time layout assertions
+and variable-record checks enforce the separate ABI contracts. Scalar fields
+use native byte order; IPv4 addresses and masks use network-order octets. The
+POSIX boundary owns credentials, request lengths, and user-memory copying, and
+derives header offsets and sizes from C layouts and existing UAPI types.
+
+The legacy serializer derives all offsets from an immutable semantic snapshot.
+Built-in chain heads populate `hook_entry`; policy entries populate `underflow`.
+User chains have an `ERROR` marker and `RETURN` footer. Jumps point to the first
+rule after the destination marker, and a terminal `ERROR` closes the export.
+Semantic rule and chain-completion counters map to the corresponding native
+entries. Marker and terminal counters belong exclusively to `LegacyProjection`
+because Linux ADD_COUNTERS can supply values for these non-executable records.
+The adapter's mutex precedes the configuration lock and serializes legacy
+projection changes; the core and data path never acquire that mutex. An opaque
+generation associates the projection with exactly one published table. A table
+published through any other management adapter resets these legacy-only values
+when the next legacy operation observes the new generation.
+
+`IPT_SO_SET_REPLACE` submits its decoded table through `FilterConfig::replace`.
+The adapter checks `num_counters` against the current table's projected native
+entry count inside the publication lock and maps a mismatch to `EAGAIN`. This
+preserves Linux's count-based check even if a different table has the same
+entry count. The previous semantic counters and adapter-only counters form the
+returned native array; the syscall follows Linux's success result if copying
+that array fails after publication. ADD_COUNTERS uses `FilterConfig::add_counters`
+for rules and chain completions and retains marker/terminal values in the
+matching adapter generation. The POSIX layer wraps exports in `ipt_getinfo` and
+`ipt_get_entries`. GET_ENTRIES returns `EAGAIN` for a size mismatch, revision
+queries expose revision zero for supported extensions, and
+`/proc/net/ip_tables_names` advertises `filter`.
+
+`iptables-nft` and native `nft` use the nf_tables Netlink management protocol,
+as described by the [Netfilter developer documentation](https://wiki.nftables.org/wiki-nftables/index.php/Portal%3ADeveloperDocs/nftables_internals).
+Future support adds a `NETLINK_NETFILTER`/`NFNL_SUBSYS_NFTABLES` adapter alongside
+the legacy adapter. That adapter owns Netlink attributes, handles, expression
+translation, and batch staging; it resolves a batch into semantic chains/rules,
+constructs a validated `FilterTable`, and calls the same `replace` API with a
+generation precondition. Dumps use `snapshot`, and semantic counter updates use
+`add_counters`. Failed parsing, validation, or generation checks publish no
+partial rules. nftables Netlink handling is not implemented by this change.
+The current core covers the bounded IPv4 filter subset; additional expressions,
+address families, hooks, priorities, and multi-table atomic transactions require
+explicit extensions of the semantic model and publication scope before their
+management operations can be accepted.
 
 Local IPv4 packets enter INPUT after reassembly and before UDP delivery or smoltcp ingress. Complete loopback UDP packets enter INPUT in the task-context loopback transmit path before the NetRx fast delivery; a packet marker prevents a second evaluation if UDP has no receiver and falls back to normal ingress. Router evaluates OUTPUT for local stack packets before fragmentation, including smoltcp packets that enter through its TX token. Unbound limited broadcasts are evaluated once per device while the complete IPv4 packet is available. Accepted interface indices and names travel with one queued packet, which is fragmented at dispatch. Packet metadata prevents dispatch from evaluating already filtered packets a second time. Synchronous UDP sends return `EPERM` when OUTPUT drops every eligible copy. Kernel-generated IPv4 control packets and loopback traffic pass through OUTPUT. Nonlocal unicast packets enter a retained forwarding batch; with `/proc/sys/net/ipv4/ip_forward` set to `1`, Router accepts only host-addressed link frames, selects the egress route, checks DF against path MTU, evaluates FORWARD, decrements TTL, preserves the original IPv4 identification during egress fragmentation, and queues the packet for device dispatch without local-source validation or OUTPUT evaluation. The IP source remains the sender's address, while the egress device receives a local address for ARP. TTL expiry and DF packets above path MTU generate ICMP errors through the OUTPUT path when a reverse route exists. Forwarding is disabled at boot. Input and forwarding interface matches use device names derived from packet ifindex; output interface matches use the selected route or bound device.
 

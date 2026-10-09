@@ -7,22 +7,24 @@
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 use super::{
-    IPT_ENTRY_SIZE, IPT_ICMP_INV, IPT_INV_DSTIP, IPT_INV_PROTO, IPT_INV_SRCIP, IPT_INV_VIA_IN,
-    IPT_INV_VIA_OUT, LegacyFilterReplace, LegacyReplaceError, NF_INET_FORWARD, NF_INET_LOCAL_IN,
-    NF_INET_LOCAL_OUT, XT_ENTRY_HEADER_SIZE, XT_ERROR_TARGET_SIZE, XT_STANDARD_TARGET_SIZE,
-    XT_TCP_INV_DSTPT, XT_TCP_INV_FLAGS, XT_TCP_INV_SRCPT, XT_UDP_INV_DSTPT, XT_UDP_INV_SRCPT,
+    LegacyFilterReplace, LegacyReplaceError,
+    abi::{
+        self, FILTER_VALID_HOOKS, IPT_ENTRY_SIZE, IPT_ICMP_INV, IPT_ICMP_MATCH_SIZE, IPT_INV_DSTIP,
+        IPT_INV_PROTO, IPT_INV_SRCIP, IPT_INV_VIA_IN, IPT_INV_VIA_OUT, IPV4_ADDRESS_SIZE, IptEntry,
+        IptIcmp, IptIp, NF_INET_FORWARD, NF_INET_LOCAL_IN, NF_INET_LOCAL_OUT, XT_ALIGN,
+        XT_ENTRY_HEADER_SIZE, XT_ERROR_TARGET, XT_ERROR_TARGET_SIZE, XT_RETURN,
+        XT_STANDARD_TARGET_SIZE, XT_TCP_INV_DSTPT, XT_TCP_INV_FLAGS, XT_TCP_INV_SRCPT,
+        XT_TCP_MATCH_SIZE, XT_UDP_INV_DSTPT, XT_UDP_INV_SRCPT, XT_UDP_MATCH_SIZE,
+        XT_VERDICT_ACCEPT, XT_VERDICT_DROP, XtEntryHeader, XtErrorTarget, XtStandardTarget, XtTcp,
+        XtUdp,
+    },
 };
 use crate::{
     ip::{Ipv4Address, Ipv4Cidr},
     netfilter::filter::{
-        matcher::{
-            BaseMatch, ExtensionMatch, IcmpMatch, InterfaceMatch, Negated, PortRange,
-            TcpFlagsMatch, TcpMatch, UdpMatch,
-        },
-        model::{
-            Chain, ChainId, FilterHook, FilterTable, MAX_CHAINS, MAX_EXTENSION_MATCHES_PER_RULE,
-            MAX_RULES, Rule, Target, Verdict,
-        },
+        BaseMatch, Chain, ChainId, ExtensionMatch, FilterHook, FilterTable, IcmpMatch,
+        InterfaceMatch, MAX_CHAINS, MAX_EXTENSION_MATCHES_PER_RULE, MAX_RULES, Negated, PortRange,
+        Rule, Target, TcpFlagsMatch, TcpMatch, UdpMatch, Verdict,
     },
 };
 
@@ -50,7 +52,7 @@ struct DecodedEntry {
 }
 
 pub(super) fn decode_table(request: &LegacyFilterReplace<'_>) -> DecodeResult<FilterTable> {
-    if request.valid_hooks != 0x0e
+    if request.valid_hooks != FILTER_VALID_HOOKS
         || request.entries.len() > MAX_ENTRIES_SIZE
         || request.num_entries == 0
         || request.num_entries as usize > MAX_ENTRY_COUNT
@@ -136,9 +138,9 @@ pub(super) fn decode_table(request: &LegacyFilterReplace<'_>) -> DecodeResult<Fi
             return invalid();
         };
         let policy = match (&footer.target, hook) {
-            (DecodedTarget::Standard(-2), Some(_)) => Some(Verdict::Accept),
-            (DecodedTarget::Standard(-1), Some(_)) => Some(Verdict::Drop),
-            (DecodedTarget::Standard(-5), None) => None,
+            (DecodedTarget::Standard(XT_VERDICT_ACCEPT), Some(_)) => Some(Verdict::Accept),
+            (DecodedTarget::Standard(XT_VERDICT_DROP), Some(_)) => Some(Verdict::Drop),
+            (DecodedTarget::Standard(XT_RETURN), None) => None,
             _ => return invalid(),
         };
 
@@ -176,9 +178,9 @@ fn decode_target(
         return invalid();
     };
     match *verdict {
-        -2 => Ok(Target::Verdict(Verdict::Accept)),
-        -1 => Ok(Target::Verdict(Verdict::Drop)),
-        -5 => Ok(Target::Return),
+        XT_VERDICT_ACCEPT => Ok(Target::Verdict(Verdict::Accept)),
+        XT_VERDICT_DROP => Ok(Target::Verdict(Verdict::Drop)),
+        XT_RETURN => Ok(Target::Return),
         value if value >= 0 && value as usize == entry.offset + entry.next_offset => {
             Ok(Target::Continue)
         }
@@ -199,17 +201,18 @@ fn decode_entry(bytes: &[u8], offset: usize) -> DecodeResult<DecodedEntry> {
     if bytes.len() < IPT_ENTRY_SIZE + XT_ENTRY_HEADER_SIZE {
         return invalid();
     }
-    let target_offset = read_u16(bytes, 88) as usize;
-    let next_offset = read_u16(bytes, 90) as usize;
+    let header: IptEntry = abi::read(bytes)?;
+    let target_offset = header.target_offset as usize;
+    let next_offset = header.next_offset as usize;
     if target_offset < IPT_ENTRY_SIZE
-        || !target_offset.is_multiple_of(8)
-        || !next_offset.is_multiple_of(8)
+        || !target_offset.is_multiple_of(XT_ALIGN)
+        || !next_offset.is_multiple_of(XT_ALIGN)
         || next_offset > bytes.len()
         || target_offset + XT_ENTRY_HEADER_SIZE > next_offset
     {
         return invalid();
     }
-    let base = decode_base(&bytes[..IPT_ENTRY_SIZE])?;
+    let base = decode_base(&header.ip)?;
     let mut extensions = Vec::new();
     let mut match_offset = IPT_ENTRY_SIZE;
     while match_offset < target_offset {
@@ -218,9 +221,10 @@ fn decode_entry(bytes: &[u8], offset: usize) -> DecodeResult<DecodedEntry> {
         {
             return invalid();
         }
-        let size = read_u16(bytes, match_offset) as usize;
+        let header: XtEntryHeader = abi::read(&bytes[match_offset..])?;
+        let size = header.size as usize;
         if size < XT_ENTRY_HEADER_SIZE
-            || !size.is_multiple_of(8)
+            || !size.is_multiple_of(XT_ALIGN)
             || match_offset + size > target_offset
         {
             return invalid();
@@ -229,25 +233,24 @@ fn decode_entry(bytes: &[u8], offset: usize) -> DecodeResult<DecodedEntry> {
         match_offset += size;
     }
     let target = &bytes[target_offset..next_offset];
-    let size = read_u16(target, 0) as usize;
-    if size != target.len() || target[31] != 0 {
+    let header: XtEntryHeader = abi::read(target)?;
+    let size = header.size as usize;
+    if size != target.len() || header.revision != 0 {
         return invalid();
     }
-    let target = if target[2] == 0 {
+    let target = if header.name[0] == 0 {
         if size != XT_STANDARD_TARGET_SIZE {
             return invalid();
         }
-        DecodedTarget::Standard(read_i32(target, XT_ENTRY_HEADER_SIZE))
-    } else if &target[2..8] == b"ERROR\0" {
+        DecodedTarget::Standard(abi::read::<XtStandardTarget>(target)?.verdict)
+    } else if &header.name[..XT_ERROR_TARGET.len()] == XT_ERROR_TARGET {
         if size != XT_ERROR_TARGET_SIZE
             || target_offset != IPT_ENTRY_SIZE
             || base != BaseMatch::default()
         {
             return invalid();
         }
-        DecodedTarget::Error(read_name(
-            &target[XT_ENTRY_HEADER_SIZE..XT_ENTRY_HEADER_SIZE + 30],
-        )?)
+        DecodedTarget::Error(read_name(&abi::read::<XtErrorTarget>(target)?.name)?)
     } else {
         return invalid();
     };
@@ -260,26 +263,34 @@ fn decode_entry(bytes: &[u8], offset: usize) -> DecodeResult<DecodedEntry> {
     })
 }
 
-fn decode_base(ip: &[u8]) -> DecodeResult<BaseMatch> {
-    let inverse = ip[83];
-    if ip[82] != 0
+fn decode_base(ip: &IptIp) -> DecodeResult<BaseMatch> {
+    let inverse = ip.inverse_flags;
+    if ip.flags != 0
         || inverse
             & !(IPT_INV_VIA_IN | IPT_INV_VIA_OUT | IPT_INV_SRCIP | IPT_INV_DSTIP | IPT_INV_PROTO)
             != 0
     {
         return invalid();
     }
-    let proto = read_u16(ip, 80);
+    let proto = ip.protocol;
     if proto > u8::MAX as u16 {
         return invalid();
     }
     Ok(BaseMatch {
-        source: decode_cidr(&ip[0..4], &ip[8..12], inverse & IPT_INV_SRCIP != 0)?,
-        destination: decode_cidr(&ip[4..8], &ip[12..16], inverse & IPT_INV_DSTIP != 0)?,
-        input_interface: decode_interface(&ip[16..32], &ip[48..64], inverse & IPT_INV_VIA_IN != 0)?,
+        source: decode_cidr(&ip.source, &ip.source_mask, inverse & IPT_INV_SRCIP != 0)?,
+        destination: decode_cidr(
+            &ip.destination,
+            &ip.destination_mask,
+            inverse & IPT_INV_DSTIP != 0,
+        )?,
+        input_interface: decode_interface(
+            &ip.input_interface,
+            &ip.input_interface_mask,
+            inverse & IPT_INV_VIA_IN != 0,
+        )?,
         output_interface: decode_interface(
-            &ip[32..48],
-            &ip[64..80],
+            &ip.output_interface,
+            &ip.output_interface_mask,
             inverse & IPT_INV_VIA_OUT != 0,
         )?,
         protocol: (proto != 0).then_some(Negated::new(proto as u8, inverse & IPT_INV_PROTO != 0)),
@@ -293,7 +304,11 @@ fn decode_cidr(
 ) -> DecodeResult<Option<Negated<Ipv4Cidr>>> {
     let bits = u32::from_be_bytes(mask.try_into().unwrap());
     let prefix = bits.leading_ones() as u8;
-    if bits != u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0) {
+    if bits
+        != u32::MAX
+            .checked_shl(u32::BITS - u32::from(prefix))
+            .unwrap_or(0)
+    {
         return invalid();
     }
     let addr = u32::from_be_bytes(address.try_into().unwrap());
@@ -303,7 +318,7 @@ fn decode_cidr(
     if prefix == 0 && !inverse {
         return Ok(None);
     }
-    let octets: [u8; 4] = address.try_into().unwrap();
+    let octets: [u8; IPV4_ADDRESS_SIZE] = address.try_into().unwrap();
     let cidr = Ipv4Cidr::new(
         Ipv4Address::new(octets[0], octets[1], octets[2], octets[3]),
         prefix,
@@ -317,7 +332,7 @@ fn decode_interface(
     mask: &[u8],
     inverse: bool,
 ) -> DecodeResult<Option<Negated<InterfaceMatch>>> {
-    let prefix = mask.iter().take_while(|&&byte| byte == 0xff).count();
+    let prefix = mask.iter().take_while(|&&byte| byte == u8::MAX).count();
     if mask[prefix..].iter().any(|&byte| byte != 0) {
         return invalid();
     }
@@ -342,55 +357,71 @@ fn decode_interface(
 }
 
 fn decode_match(extension: &[u8]) -> DecodeResult<ExtensionMatch> {
-    if extension[31] != 0 {
+    let header: XtEntryHeader = abi::read(extension)?;
+    if header.revision != 0 {
         return invalid();
     }
-    let name = read_name(&extension[2..31])?;
+    let name = read_name(&header.name)?;
     let data = &extension[XT_ENTRY_HEADER_SIZE..];
     match name.as_str() {
-        "tcp" if extension.len() == 48 => {
-            if data[8] != 0
-                || data[11] & !(XT_TCP_INV_SRCPT | XT_TCP_INV_DSTPT | XT_TCP_INV_FLAGS) != 0
+        "tcp" if extension.len() == XT_TCP_MATCH_SIZE => {
+            let header: XtTcp = abi::read(data)?;
+            let inverse = header.inverse_flags;
+            if header.option != 0
+                || inverse & !(XT_TCP_INV_SRCPT | XT_TCP_INV_DSTPT | XT_TCP_INV_FLAGS) != 0
             {
                 return invalid();
             }
             let mut tcp = TcpMatch::new();
-            tcp = tcp.with_source_port(decode_ports(data, 0, data[11] & XT_TCP_INV_SRCPT != 0)?);
-            tcp =
-                tcp.with_destination_port(decode_ports(data, 4, data[11] & XT_TCP_INV_DSTPT != 0)?);
-            let flags =
-                TcpFlagsMatch::new(data[9], data[10]).ok_or(LegacyReplaceError::InvalidInput)?;
-            if flags.mask() != 0 || data[11] & XT_TCP_INV_FLAGS != 0 {
-                tcp = tcp.with_flags(Negated::new(flags, data[11] & XT_TCP_INV_FLAGS != 0));
+            tcp = tcp.with_source_port(decode_ports(
+                header.source_ports,
+                inverse & XT_TCP_INV_SRCPT != 0,
+            )?);
+            tcp = tcp.with_destination_port(decode_ports(
+                header.destination_ports,
+                inverse & XT_TCP_INV_DSTPT != 0,
+            )?);
+            let flags = TcpFlagsMatch::new(header.flags_mask, header.flags_compare)
+                .ok_or(LegacyReplaceError::InvalidInput)?;
+            if flags.mask() != 0 || inverse & XT_TCP_INV_FLAGS != 0 {
+                tcp = tcp.with_flags(Negated::new(flags, inverse & XT_TCP_INV_FLAGS != 0));
             }
             Ok(ExtensionMatch::Tcp(tcp))
         }
-        "udp" if extension.len() == 48 => {
-            if data[8] & !(XT_UDP_INV_SRCPT | XT_UDP_INV_DSTPT) != 0 {
+        "udp" if extension.len() == XT_UDP_MATCH_SIZE => {
+            let header: XtUdp = abi::read(data)?;
+            let inverse = header.inverse_flags;
+            if inverse & !(XT_UDP_INV_SRCPT | XT_UDP_INV_DSTPT) != 0 {
                 return invalid();
             }
             let udp = UdpMatch::new()
-                .with_source_port(decode_ports(data, 0, data[8] & XT_UDP_INV_SRCPT != 0)?)
-                .with_destination_port(decode_ports(data, 4, data[8] & XT_UDP_INV_DSTPT != 0)?);
+                .with_source_port(decode_ports(
+                    header.source_ports,
+                    inverse & XT_UDP_INV_SRCPT != 0,
+                )?)
+                .with_destination_port(decode_ports(
+                    header.destination_ports,
+                    inverse & XT_UDP_INV_DSTPT != 0,
+                )?);
             Ok(ExtensionMatch::Udp(udp))
         }
-        "icmp" if extension.len() == 40 => {
-            if data[3] & !IPT_ICMP_INV != 0 {
+        "icmp" if extension.len() == IPT_ICMP_MATCH_SIZE => {
+            let header: IptIcmp = abi::read(data)?;
+            if header.inverse_flags & !IPT_ICMP_INV != 0 {
                 return invalid();
             }
-            let icmp_type = (data[0] != u8::MAX).then_some(data[0]);
-            let icmp = IcmpMatch::new(icmp_type, data[1], data[2])
+            let icmp_type = (header.icmp_type != u8::MAX).then_some(header.icmp_type);
+            let icmp = IcmpMatch::new(icmp_type, header.code[0], header.code[1])
                 .ok_or(LegacyReplaceError::InvalidInput)?
-                .with_inversion(data[3] & IPT_ICMP_INV != 0);
+                .with_inversion(header.inverse_flags & IPT_ICMP_INV != 0);
             Ok(ExtensionMatch::Icmp(icmp))
         }
         _ => invalid(),
     }
 }
 
-fn decode_ports(data: &[u8], offset: usize, inverse: bool) -> DecodeResult<Negated<PortRange>> {
-    let range = PortRange::new(read_u16(data, offset), read_u16(data, offset + 2))
-        .ok_or(LegacyReplaceError::InvalidInput)?;
+fn decode_ports(ports: [u16; 2], inverse: bool) -> DecodeResult<Negated<PortRange>> {
+    let range = PortRange::new(ports[0], ports[1]).ok_or(LegacyReplaceError::InvalidInput)?;
     Ok(Negated::new(range, inverse))
 }
 
@@ -405,14 +436,6 @@ fn read_name(bytes: &[u8]) -> DecodeResult<String> {
     core::str::from_utf8(&bytes[..end])
         .map(String::from)
         .map_err(|_| LegacyReplaceError::InvalidInput)
-}
-
-fn read_u16(input: &[u8], offset: usize) -> u16 {
-    u16::from_ne_bytes(input[offset..offset + 2].try_into().unwrap())
-}
-
-fn read_i32(input: &[u8], offset: usize) -> i32 {
-    i32::from_ne_bytes(input[offset..offset + 4].try_into().unwrap())
 }
 
 #[cfg(unittest)]

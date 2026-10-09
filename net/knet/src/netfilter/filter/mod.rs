@@ -2,16 +2,20 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! IPv4 `filter` table model, matcher, and evaluator.
+//! IPv4 `filter` table model, configuration, matcher, and evaluator.
 
+pub(super) mod config;
 mod evaluator;
-mod legacy;
 mod matcher;
 mod model;
 
-pub use legacy::{
-    LegacyCounter, LegacyFilterReplace, LegacyFilterTable, LegacyReplaceError,
-    MAX_LEGACY_FILTER_ENTRIES_SIZE, MAX_LEGACY_FILTER_ENTRY_COUNT, add_counters, replace,
+pub(crate) use config::evaluate_ipv4;
+pub(super) use matcher::{
+    BaseMatch, ExtensionMatch, IcmpMatch, InterfaceMatch, Negated, PortRange, TcpFlagsMatch,
+    TcpMatch, UdpMatch,
 };
-pub(crate) use legacy::{evaluate_ipv4, snapshot};
+pub(super) use model::{
+    Chain, ChainId, ChainKind, FilterTable, MAX_CHAINS, MAX_EXTENSION_MATCHES_PER_RULE, MAX_RULES,
+    Rule, Target,
+};
 pub(crate) use model::{FilterHook, Verdict};

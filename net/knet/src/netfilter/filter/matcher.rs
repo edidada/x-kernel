@@ -78,16 +78,16 @@ impl PortRange {
         self.start <= port && port <= self.end
     }
 
-    pub(super) const fn start(self) -> u16 {
+    pub(in crate::netfilter) const fn start(self) -> u16 {
         self.start
     }
 
-    pub(super) const fn end(self) -> u16 {
+    pub(in crate::netfilter) const fn end(self) -> u16 {
         self.end
     }
 }
 
-/// Interface-name condition accepted from legacy iptables syntax.
+/// Interface-name condition with exact or prefix matching.
 ///
 /// Linux interface names occupy a 16-byte array including the trailing NUL.
 pub(crate) const MAX_INTERFACE_NAME_LEN: usize = 15;
@@ -266,7 +266,7 @@ impl IcmpMatch {
         self.code_end
     }
 
-    pub(super) const fn is_inverted(self) -> bool {
+    pub(in crate::netfilter) const fn is_inverted(self) -> bool {
         self.is_inverted
     }
 }

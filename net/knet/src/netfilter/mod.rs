@@ -2,25 +2,26 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Internal IPv4 netfilter representation.
+//! IPv4 netfilter configuration, packet evaluation, and management adapters.
 //!
-//! Legacy iptables ABI data must be decoded and validated before it enters
-//! this module. The model stores owned semantic values and does not retain
-//! offsets or pointers into the userspace replacement blob.
+//! Management ABIs decode into validated semantic tables and publish them
+//! through `filter::config`. Packet evaluation depends only on that semantic
+//! configuration; `compat` owns wire formats and protocol-specific metadata.
 
+mod compat;
 pub(crate) mod filter;
-pub(crate) use filter::{FilterHook, Verdict, evaluate_ipv4};
-pub use filter::{
+pub use compat::iptables_legacy::{
     LegacyCounter, LegacyFilterReplace, LegacyFilterTable, LegacyReplaceError,
     MAX_LEGACY_FILTER_ENTRIES_SIZE, MAX_LEGACY_FILTER_ENTRY_COUNT,
 };
+pub(crate) use filter::{FilterHook, Verdict, evaluate_ipv4};
 
 /// Captures the current IPv4 `filter` table in the legacy iptables layout.
 ///
 /// The returned snapshot owns its entry bytes and remains stable if a later
 /// table replacement publishes new state.
 pub fn legacy_ipv4_filter_table() -> LegacyFilterTable {
-    filter::snapshot()
+    compat::iptables_legacy::snapshot()
 }
 
 /// Validates and publishes a complete legacy IPv4 `filter` replacement.
@@ -32,7 +33,7 @@ pub fn legacy_ipv4_filter_table() -> LegacyFilterTable {
 pub fn replace_legacy_ipv4_filter_table(
     request: LegacyFilterReplace<'_>,
 ) -> Result<alloc::vec::Vec<LegacyCounter>, LegacyReplaceError> {
-    filter::replace(request)
+    compat::iptables_legacy::replace(request)
 }
 
 /// Adds packet and byte counters to the current IPv4 `filter` table.
@@ -44,5 +45,5 @@ pub fn replace_legacy_ipv4_filter_table(
 pub fn add_legacy_ipv4_filter_counters(
     counters: &[LegacyCounter],
 ) -> Result<(), LegacyReplaceError> {
-    filter::add_counters(counters)
+    compat::iptables_legacy::add_counters(counters)
 }
