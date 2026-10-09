@@ -457,3 +457,13 @@ traversal adapt to either layout.
   `TlbFlushReceipt`, providing an explicit flush-before-free ordering point.
 - **`PageTableMut::drop`** calls `finish()` automatically as a fallback when
   explicit finalization is omitted.
+
+## Provider-Owned Table References
+
+The PagingHandler provider owns one allocation/reference for each returned table
+frame until dealloc_frame. The hook retires table storage exactly once, after any
+required hardware/software walkers and borrowed users are excluded. It does not
+release the user-data pages described by leaf entries. X-Kernel's HAL adapter now
+pairs a FrameRef raw transfer with restoration at this hook; other test providers
+retain their own allocation contracts. The page_table crate remains independent
+of kalloc and does not acquire generic user-PTE references as part of this change.

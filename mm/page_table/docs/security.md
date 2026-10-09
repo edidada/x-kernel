@@ -398,3 +398,13 @@ parent publication and the final `dsb ishst` before the mapping is used. Clearin
 an old mapping still queues invalidation even if the same virtual address is
 remapped in that batch. A fresh-map fence does not replace that invalidation or
 a caller's obligation to finish before reclaiming backing pages.
+
+## Provider-Owned Table References
+
+The PagingHandler provider owns one allocation/reference for each returned table
+frame until dealloc_frame. The hook retires table storage exactly once, after any
+required hardware/software walkers and borrowed users are excluded. It does not
+release the user-data pages described by leaf entries. X-Kernel's HAL adapter now
+pairs a FrameRef raw transfer with restoration at this hook; other test providers
+retain their own allocation contracts. The page_table crate remains independent
+of kalloc and does not acquire generic user-PTE references as part of this change.

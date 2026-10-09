@@ -96,3 +96,17 @@ unknown IRQ/NMI warning 和 completion 管理。adapter 返回 `kirq` handler �
 - trap handler 是否在调用 `kirq` 前创建 `NoPreempt`。
 - `khal::irq` 是否没有重新导出 generic `kirq` API。
 - x86 APIC helper 是否仍未回流到 `khal::irq`。
+
+## Page-Table Frame Lifetime
+
+PagingHandlerImpl allocates a PageTable-category FrameRef and transfers its single
+reference into the physical-address table owner. It restores and drops that exact
+reference when page_table retires the frame; no raw dealloc_pages bypass is used.
+This adapter owns page-table storage, not the data pages encoded in leaf PTEs.
+
+The unsafe restoration relies on the handler contract: the PA came from this
+handler's allocation, the reference is consumed once, borrowed tables are skipped,
+and required hardware/software table retirement is already complete. Resident
+metadata does not infer those conditions from PA alone. The unit fixture checks
+one reference survives raw transfer and is released at handler retirement without
+installing a live hardware table.

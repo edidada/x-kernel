@@ -126,3 +126,16 @@ guest 测试位于 crate 根目录 `ut-tests/`，由原所属源码模块通过
 CPU 身份测试依赖已初始化的平台 CPU 环境，不是独立 host 测试。
 所有挂载外显式保留 `#[cfg(unittest)]`，使非 UT 构建无需解析该 runtime 宏；
 这不改变 Cargo 依赖图，也不代替 boot helper 清除内核 UT 编译标志。
+## Page-Table Frame Lifetime
+
+PagingHandlerImpl allocates a PageTable-category FrameRef and transfers its single
+reference into the physical-address table owner. It restores and drops that exact
+reference when page_table retires the frame; no raw dealloc_pages bypass is used.
+This adapter owns page-table storage, not the data pages encoded in leaf PTEs.
+
+The unsafe restoration relies on the handler contract: the PA came from this
+handler's allocation, the reference is consumed once, borrowed tables are skipped,
+and required hardware/software table retirement is already complete. Resident
+metadata does not infer those conditions from PA alone. The unit fixture checks
+one reference survives raw transfer and is released at handler retirement without
+installing a live hardware table.

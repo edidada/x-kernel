@@ -413,7 +413,12 @@ pub trait PagingHandler: Sized {
     /// `Some(paddr)` on success, `None` if no frames are available.
     fn alloc_frame() -> Option<PhysAddr>;
 
-    /// Deallocates a previously allocated physical frame.
+    /// Ends ownership of a frame previously returned by this handler.
+    ///
+    /// Page-table callers must retire the frame exactly once, after required
+    /// hardware/software walkers and borrowed table users can no longer access
+    /// it. This hook must not be used to release mapped user data pages. The
+    /// provider may consume a transferred page-lifetime reference here.
     fn dealloc_frame(paddr: PhysAddr);
 
     /// Converts a physical address to a virtual address via the direct mapping.

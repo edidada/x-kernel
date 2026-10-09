@@ -5,14 +5,14 @@
 //! Page table manipulation.
 
 use kalloc::{UsageKind, global_allocator};
-use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
+use memaddr::{PhysAddr, VirtAddr};
 use page_table::PagingHandler;
 #[doc(no_inline)]
 pub use page_table::{
     PageSize, PagingFlags as MappingFlags, PtError as PagingError, PtResult as PagingResult,
 };
 
-use crate::mem::{p2v, v2p};
+use crate::mem::p2v;
 
 /// Implementation of [`PagingHandler`], to provide physical memory manipulation
 /// to the [page_table] crate.
@@ -25,13 +25,17 @@ impl PagingHandler for PagingHandlerImpl {
             "page-table allocation requested before page allocator initialization"
         );
         global_allocator()
-            .alloc_pages(1, PAGE_SIZE_4K, UsageKind::PageTable)
-            .map(|vaddr| v2p(vaddr.into()))
+            .alloc_frame(UsageKind::PageTable)
+            .map(kalloc::FrameRef::into_raw)
             .ok()
     }
 
     fn dealloc_frame(paddr: PhysAddr) {
-        global_allocator().dealloc_pages(p2v(paddr).as_usize(), 1, UsageKind::PageTable);
+        // SAFETY: page_table retires only frames returned by this handler,
+        // exactly once after their table ownership and required translation
+        // retirement end. Each allocation transferred one reference into the
+        // raw PA; borrowed table entries are not deallocated by their borrower.
+        drop(unsafe { global_allocator().frame_from_raw(paddr) });
     }
 
     #[inline]
@@ -62,3 +66,30 @@ cfg_if::cfg_if! {
 
 #[cfg(unittest)]
 unittest::path_mod_test!(pub mod tests_paging, "../ut-tests/paging.rs");
+
+#[cfg(unittest)]
+mod tests_frame_refs {
+    use kalloc::{FrameState, global_allocator};
+    use kspin::NoPreemptIrqSave;
+    use memaddr::PAGE_SIZE_4K;
+    use page_table::PagingHandler;
+    use unittest::def_test;
+
+    use super::PagingHandlerImpl;
+
+    #[def_test]
+    fn handler_transfers_one_reference_until_table_retirement() {
+        // Local IRQ/preemption exclusion also keeps this base-page cache's
+        // newly returned page from being reused before the final assertion.
+        let _guard = NoPreemptIrqSave::new();
+        let pa = PagingHandlerImpl::alloc_frame().unwrap();
+        let meta = global_allocator()
+            .frame_meta(pa.as_usize() / PAGE_SIZE_4K)
+            .unwrap();
+        assert_eq!(meta.state(), FrameState::Shared { references: 1 });
+        // The fixture never installs this frame as an active hardware table,
+        // so no translation retirement is needed before ending its ownership.
+        PagingHandlerImpl::dealloc_frame(pa);
+        assert_eq!(meta.state(), FrameState::Unshared);
+    }
+}

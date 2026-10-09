@@ -360,3 +360,11 @@ reservations are excluded by `khal`. Kalloc plans descriptor backing without hea
 publishes the registry before ordinary allocations. Boot aborts on invalid geometry or insufficient
 backing instead of partially exposing the allocator. The original RAM mapping remains intact across
 the runtime page-table switch. The logged inventory separates descriptors, buddy metadata and usable pages.
+
+## Frame Reference Integration Test
+
+Unittest builds run a scoped frame-reference probe on up to four published CPUs.
+The root holder keeps the allocation live, workers clone/drop their own references
+with guarded per-CPU heap-allocation counters, and task joins establish completion.
+No wall-clock threshold, spin-delay or persistent global test hook is used. The
+root observes exactly one remaining holder after all joins, then ends it normally.

@@ -45,6 +45,7 @@ pub fn run_boot_benchmarks() {
 }
 
 unittest::path_mod_test!(tests_workqueue, "../ut-tests/tests_workqueue/mod.rs");
+unittest::path_mod_test!(tests_frame_lifetime, "../ut-tests/tests_frame_lifetime.rs");
 
 #[macro_use]
 extern crate klogger;
