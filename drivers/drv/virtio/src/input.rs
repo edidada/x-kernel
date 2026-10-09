@@ -26,12 +26,11 @@ impl DriverOps<PciBus> for InputDriver {
     type Data = InputData;
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PciBus>) -> Result<InputData, ProbeError> {
-        let (kind, transport, _irq) = crate::common::pci_transport(dev)?;
+        let (kind, transport, irq) = crate::common::pci_transport(dev)?;
         if !matches!(kind, driver_base::DeviceKind::Input) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
-
-        activate(dev, transport)?;
+        activate(dev, transport, irq.unwrap_or(0))?;
         Ok(InputData)
     }
 
@@ -46,8 +45,9 @@ impl DriverOps<PciBus> for InputDriver {
 pub fn activate<B: driver_core::Bus>(
     dev: &mut DeviceCtx<'_, B>,
     transport: impl virtio::Transport + 'static,
+    irq: usize,
 ) -> Result<(), ProbeError> {
-    let device = virtio::VirtIoInputDev::<driver_runtime::hal::Hal, _>::try_new(transport)
+    let device = virtio::VirtIoInputDev::<driver_runtime::hal::Hal, _>::try_new(transport, irq)
         .map_err(crate::common::map_driver_error)?;
     let location = dev.descriptor().location;
     publish_input(
@@ -61,13 +61,18 @@ pub fn activate<B: driver_core::Bus>(
 /// virtio-mmio activation: owns the class publication; close() unpublishes
 /// so nothing dereferences the transport after the mapping drops.
 #[cfg(feature = "mmio")]
-pub fn activate_mmio<T: virtio::Transport + 'static>(
-    owner: u64,
-    location: devnode::DeviceLocation,
-    transport: T,
+pub fn activate_mmio(
+    dev: &mut driver_core::DeviceCtx<'_, driver_core::platform::PlatformBus>,
+    transport: impl virtio::Transport + 'static,
     builder: crate::mmio::ActivationBuilder,
 ) -> Result<crate::mmio::MmioData, ProbeError> {
-    let device = virtio::VirtIoInputDev::<driver_runtime::hal::Hal, _>::try_new(transport)
+    let irq = dev
+        .irq(0)
+        .map_err(|_| ProbeError::Fatal(RuntimeError::Invalid))?
+        .number;
+    let owner = dev.id().raw();
+    let location = dev.descriptor().location;
+    let device = virtio::VirtIoInputDev::<driver_runtime::hal::Hal, _>::try_new(transport, irq)
         .map_err(crate::common::map_driver_error)?;
     let handle = publish_input(
         ClassParent::detached(owner, "virtio-input", location),

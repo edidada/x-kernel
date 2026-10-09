@@ -64,12 +64,13 @@ pub fn activate<B: driver_core::Bus>(
 /// virtio-mmio activation: owns the class publication; close() unpublishes
 /// so nothing dereferences the transport after the mapping drops.
 #[cfg(feature = "mmio")]
-pub fn activate_mmio<T: virtio::Transport + 'static>(
-    owner: u64,
-    location: devnode::DeviceLocation,
-    transport: T,
+pub fn activate_mmio(
+    dev: &mut driver_core::DeviceCtx<'_, driver_core::platform::PlatformBus>,
+    transport: impl virtio::Transport + 'static,
     builder: crate::mmio::ActivationBuilder,
 ) -> Result<crate::mmio::MmioData, ProbeError> {
+    let owner = dev.id().raw();
+    let location = dev.descriptor().location;
     let device = virtio::VirtIoVsockDev::<driver_runtime::hal::Hal, _>::try_new(transport)
         .map_err(crate::common::map_driver_error)?;
     let handle = publish_vsock(

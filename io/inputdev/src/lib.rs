@@ -14,7 +14,12 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
->>>>>>> a62f4faf1 (refactor(driver): remove the legacy device model entirely — one model, one pipeline)
+
+use bitmaps::Bitmap;
+use kclass::{
+    ClassDevice, Event, EventType, InputDevice, InputDeviceImpl, InputEventNotifier,
+    input_devices as class_input_devices, subscribe_input_available, subscribe_input_removed,
+};
 use ksync::Mutex;
 use ktime_types::{MonotonicInstant, SystemTime};
 use kworkng::{SubmitError, WorkHandle};
@@ -337,17 +342,11 @@ static INPUT_ENDPOINTS: LazyInit<Mutex<Vec<Arc<InputEndpoint>>>> = LazyInit::new
 /// Initialize input devices and subscribe to later class activation/removal.
 pub fn init_input() {
     info!("Initialize input subsystem...");
-
-    INPUT_DEVICES.init_once(Mutex::new(Vec::new()));
-
-    register_input_devices(class_input_devices());
+    INPUT_ENDPOINTS.init_once(Mutex::new(Vec::new()));
+    subscribe_input_removed(Arc::new(remove_input_device));
     subscribe_input_available(Arc::new(register_input_device));
-    subscribe_input_unregister();
-}
-
-fn register_input_devices(devices: Vec<ClassDevice<InputDeviceImpl>>) {
-    for handle in devices {
-        register_input_device(handle);>>>>>>> a62f4faf1 (refactor(driver): remove the legacy device model entirely — one model, one pipeline)
+    for device in class_input_devices() {
+        register_input_device(device);
     }
 }
 
@@ -358,18 +357,18 @@ fn register_input_device(device: ClassDevice<InputDeviceImpl>) {
     }
 }
 
-fn subscribe_input_unregister() {
-    kclass::subscribe_input_removed(Arc::new(|removed| {
-        if !INPUT_DEVICES.is_inited() {
-            return;
-        }
-        let class_id = removed.id();
-        let mut devs = INPUT_DEVICES.lock();
-        if let Some(pos) = devs.iter().position(|h| h.id() == class_id) {
-            devs.swap_remove(pos);
-            info!("input: unregistered removed device {:?}", class_id);
-        }
-    }));>>>>>>> 9cfe18b9a (refactor(kclass): decouple the class layer from the legacy device object)
+fn remove_input_device(device: ClassDevice<InputDeviceImpl>) {
+    let endpoint = {
+        let mut endpoints = INPUT_ENDPOINTS.lock();
+        endpoints
+            .iter()
+            .position(|endpoint| endpoint.device.id() == device.id())
+            .map(|index| endpoints.swap_remove(index))
+    };
+    if let Some(endpoint) = endpoint {
+        endpoint.detach();
+    }
+    let _ = device;
 }
 
 /// Return the unique event endpoint for an active input class device.

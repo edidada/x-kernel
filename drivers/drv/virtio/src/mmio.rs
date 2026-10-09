@@ -187,12 +187,7 @@ macro_rules! simple_family_dispatch {
         ) -> Result<MmioData, ProbeError> {
             #[cfg(feature = $feature)]
             {
-                crate::$module::activate_mmio(
-                    dev.id().raw(),
-                    dev.descriptor().location,
-                    transport,
-                    builder,
-                )
+                crate::$module::activate_mmio(dev, transport, builder)
             }
             #[cfg(not(feature = $feature))]
             {

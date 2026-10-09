@@ -5,9 +5,9 @@
 //! VirtIO input driver adapter.
 use alloc::{string::String, sync::Arc};
 
-use device_res::{IrqEvent, IrqHandler};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use input::{Event, EventType, InputDevice, InputDeviceId, InputEventNotifier};
+use kirq::{IrqEvent, IrqHandler};
 use kspin::SpinNoIrq;
 use virtio_drivers::{
     Hal,

@@ -457,7 +457,6 @@ pub fn legacy_interrupt_route<C: ConfigurationAccess>(
     })
 }
 
->>>>>>> 3d5d64b1b (refactor(pci): drop PciConfigAccess, use the vendored root's public config field)
 /// Sequential allocator for MMIO address space used by PCI Base Address Registers.
 ///
 /// This allocator manages a contiguous range of physical addresses and dispenses

@@ -91,7 +91,7 @@ impl HwrngDevice for ClassDevice<HwrngDeviceImpl> {
     }
 }
 #[cfg(feature = "input")]
-pub use input::{Event, EventType, InputDevice, InputDeviceId};
+pub use input::{Event, EventType, InputDevice, InputDeviceId, InputEventNotifier};
 #[cfg(feature = "net")]
 pub use net::{NetBufHandle, NetDevice, NetRxScheduler};
 #[cfg(feature = "virtio-9p")]

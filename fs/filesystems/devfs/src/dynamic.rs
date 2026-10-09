@@ -64,14 +64,26 @@ fn input_file(
     id: ClassDeviceId,
 ) -> Option<(Arc<DeviceFile>, DeviceRemovalCallback)> {
     let device = find_input_device(id)?;
-    let event = Arc::new(EventDev::new(device));
+    // The endpoint keeps the driver's event queue draining even with no
+    // open fd (main !887); the EventDev pairs view + endpoint.
+    let endpoint = match inputdev::input_endpoint(device.clone()) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            warn!("devtmpfs: input endpoint for {id:?} failed: {error:?}");
+            return None;
+        }
+    };
+    let event = Arc::new(EventDev::new(device, endpoint));
     let weak_event = Arc::downgrade(&event);
     let on_remove: DeviceRemovalCallback = Arc::new(move || {
         if let Some(event) = weak_event.upgrade() {
             event.detach();
         }
     });
-    Some((DeviceFile::new_character(fs, number, event), on_remove))
+    Some((
+        DeviceFile::new_character(fs, number, event).ok()?,
+        on_remove,
+    ))
 }
 
 fn display_file(
@@ -87,7 +99,7 @@ fn display_file(
             card.notify_removed();
         }
     });
-    Some((DeviceFile::new_character(fs, number, card), on_remove))
+    Some((DeviceFile::new_character(fs, number, card).ok()?, on_remove))
 }
 
 fn node_key(node: &DevNode) -> ClassDeviceId {
@@ -158,7 +170,7 @@ fn remove_device(node: &DevNode) {
     // character device that happens to share the number.
     if node.subsystem() != "block" {
         let number = node.device_number();
-        if cdev_del(DeviceId::new(number.major(), number.minor())).is_none() {
+        if cdev_del(DeviceId::new(number.major(), number.minor()), 1).is_none() {
             warn!("devtmpfs: missing character device during removal: {number:?}");
         }
     }

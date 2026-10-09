@@ -1126,22 +1126,24 @@ mod tests {
         let reads = Arc::new(core::sync::atomic::AtomicUsize::new(0));
         let writes = Arc::new(core::sync::atomic::AtomicUsize::new(0));
         let fail_io = Arc::new(core::sync::atomic::AtomicBool::new(false));
-        let disk = block::Gendisk::alloc(
-            String::from("kvfs-block-test"),
-            243,
-            0,
-            1,
-            Box::new(MemoryBlockDevice {
-                storage: storage.clone(),
-                block_size: BLOCK_SIZE,
-                flushes: flushes.clone(),
-                reads: reads.clone(),
-                writes: writes.clone(),
-                fail_io: fail_io.clone(),
-                fail_after_write_bytes: core::sync::atomic::AtomicUsize::new(usize::MAX),
-            }),
-        )
-        .expect("valid KVFS test disk");
+        let disk = alloc::sync::Arc::new(
+            block::Gendisk::new(
+                String::from("kvfs-block-test"),
+                243,
+                0,
+                1,
+                Box::new(MemoryBlockDevice {
+                    storage: storage.clone(),
+                    block_size: BLOCK_SIZE,
+                    flushes: flushes.clone(),
+                    reads: reads.clone(),
+                    writes: writes.clone(),
+                    fail_io: fail_io.clone(),
+                    fail_after_write_bytes: core::sync::atomic::AtomicUsize::new(usize::MAX),
+                }),
+            )
+            .expect("valid KVFS test disk"),
+        );
         let device = block::add_disk(disk.clone()).expect("publish KVFS test disk");
 
         let mut output = vec![0; 1024];
@@ -1239,14 +1241,16 @@ mod tests {
                 fail_io: Arc::new(AtomicBool::new(false)),
                 fail_after_write_bytes: AtomicUsize::new(usize::MAX),
             });
-            let disk = block::Gendisk::alloc(
-                String::from("kvfs-extent-test"),
-                244,
-                0,
-                1,
-                Box::new(backend.clone()),
-            )
-            .expect("valid extent test disk");
+            let disk = alloc::sync::Arc::new(
+                block::Gendisk::new(
+                    String::from("kvfs-extent-test"),
+                    244,
+                    0,
+                    1,
+                    Box::new(backend.clone()),
+                )
+                .expect("valid extent test disk"),
+            );
             let device = block::add_disk(disk).expect("publish extent test disk");
             Self { device, backend }
         }

@@ -380,6 +380,41 @@ impl Drop for BlockDeviceClaim {
 }
 
 impl BlockDevice {
+    /// Opens this block-device view with the requested access mode.
+    ///
+    /// One-argument form for filesystem-level callers (`kvfs`): the view is
+    /// the receiver; the trait takes the view as its second argument.
+    pub fn open(&self, mode: crate::BlockOpenMode) -> KResult<()> {
+        self.disk.operations.open(self, mode)
+    }
+
+    /// Releases a previously opened block-device view.
+    pub fn release(&self) {
+        self.disk.operations.release(self)
+    }
+
+    /// Reads one block through the driver operations table.
+    pub fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+        self.disk.operations.read_block(block_id, buf)
+    }
+
+    /// Writes one block through the driver operations table.
+    pub fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
+        self.disk.operations.write_block(block_id, buf)
+    }
+
+    /// Flushes pending writes through the driver operations table.
+    pub fn flush(&self) -> DriverResult {
+        self.disk.operations.flush()
+    }
+
+    /// Passes a device-specific ioctl to the driver operations table.
+    ///
+    /// Generic block ioctls are consumed before this method is called.
+    pub fn driver_ioctl(&self, mode: crate::BlockOpenMode, cmd: u32, arg: usize) -> KResult<usize> {
+        self.disk.operations.ioctl(self, mode, cmd, arg)
+    }
+
     fn whole(disk: Arc<Gendisk>) -> Self {
         let device_number = disk.device_number();
         let num_blocks = disk.num_blocks();
