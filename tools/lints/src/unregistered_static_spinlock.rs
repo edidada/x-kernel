@@ -7,7 +7,7 @@
 //!
 //! Rule: `docs/code-guidelines/CG-001-static-spinlock-registration.md`.
 
-use rustc_hir::{Expr, ExprKind, Item, ItemKind, def_id::DefId};
+use rustc_hir::{Expr, ExprKind, Item, ItemKind, Mutability, QPath, TyKind, def_id::DefId};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::{self, Ty, TyCtxt, TypeckResults};
 use rustc_span::{ExpnId, Span};
@@ -21,7 +21,10 @@ rustc_session::declare_lint! {
     /// projection), whose initializer is a direct call to `SpinLock::new`,
     /// and which was not declared inside the real `static_lock!` macro from
     /// `kspin`, `ksync` or `klockstat_macros`. Items produced by other macros,
-    /// including macros from other crates, are reported.
+    /// including macros from other crates, are reported. When `static_lock!`
+    /// cannot take the item as written (`static mut`, a type name other than
+    /// the guard's `Spin*` alias, or a block-wrapped initializer), the
+    /// diagnostic also names the rewrite the macro needs.
     ///
     /// ### Why is this bad?
     ///
@@ -127,7 +130,7 @@ fn direct_spinlock_new<'tcx>(
 
 impl<'tcx> LateLintPass<'tcx> for UnregisteredStaticSpinlock {
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
-        let ItemKind::Static(_, _, _, body_id) = item.kind else {
+        let ItemKind::Static(mutability, _, written_ty, body_id) = item.kind else {
             return;
         };
         let tcx = cx.tcx;
@@ -145,9 +148,17 @@ impl<'tcx> LateLintPass<'tcx> for UnregisteredStaticSpinlock {
         }
         let types = tcx.typeck(owner.def_id);
         let body = tcx.hir_body(body_id);
-        let Some(call) = direct_spinlock_new(tcx, types, peel_blocks(body.value)) else {
+        let initializer = peel_blocks(body.value);
+        let Some(call) = direct_spinlock_new(tcx, types, initializer) else {
             return;
         };
+        let rewrites = macro_rewrites(
+            tcx,
+            item_ty,
+            mutability,
+            written_ty,
+            !std::ptr::eq(initializer, body.value),
+        );
         tcx.node_span_lint(
             UNREGISTERED_STATIC_SPINLOCK,
             item.hir_id(),
@@ -164,9 +175,87 @@ impl<'tcx> LateLintPass<'tcx> for UnregisteredStaticSpinlock {
                      SpinNoIrq::new(..); }` (import `kspin::static_lock`); see \
                      docs/code-guidelines/CG-001-static-spinlock-registration.md",
                 );
+                for rewrite in rewrites {
+                    diagnostic.help(rewrite);
+                }
             },
         );
     }
+}
+
+/// `static_lock!` names the lock kind after the written type and rewrites a
+/// bare `X::new(arg)` initializer, so wrapping does not compile for every
+/// reported spelling. Returns the rewrites this item needs first.
+fn macro_rewrites(
+    tcx: TyCtxt<'_>,
+    item_ty: Ty<'_>,
+    mutability: Mutability,
+    written_ty: &rustc_hir::Ty<'_>,
+    is_initializer_wrapped: bool,
+) -> Vec<String> {
+    let mut rewrites = Vec::new();
+    if mutability == Mutability::Mut {
+        rewrites.push(
+            "drop `mut`: `static_lock!` does not accept `static mut`, and the lock already \
+             provides interior mutability"
+                .to_owned(),
+        );
+    }
+    match spin_alias(tcx, item_ty) {
+        Some(alias) if written_type_name(written_ty).as_deref() != Some(alias) => {
+            rewrites.push(format!(
+                "spell the type as `{alias}<..>`: `static_lock!` identifies the lock by its \
+                 written type name, so renamed imports, type aliases and projections do not \
+                 compile under `stats`"
+            ));
+        }
+        Some(_) => {}
+        None => rewrites.push(
+            "`static_lock!` has no type name for this guard; see the exceptions in \
+             docs/code-guidelines/CG-001-static-spinlock-registration.md"
+                .to_owned(),
+        ),
+    }
+    if is_initializer_wrapped {
+        rewrites.push(
+            "write the initializer as a bare `::new(..)` call: `static_lock!` does not look \
+             inside `{ }` or `unsafe { }` blocks"
+                .to_owned(),
+        );
+    }
+    rewrites
+}
+
+/// Returns the `kspin` alias that `static_lock!` accepts for this lock's guard.
+fn spin_alias(tcx: TyCtxt<'_>, ty: Ty<'_>) -> Option<&'static str> {
+    let ty::Adt(_, arguments) = ty.kind() else {
+        return None;
+    };
+    let ty::Adt(guard, _) = arguments.type_at(0).kind() else {
+        return None;
+    };
+    if tcx.crate_name(guard.did().krate).as_str() != "kspin" {
+        return None;
+    }
+    match tcx.item_name(guard.did()).as_str() {
+        "NoOp" => Some("SpinRaw"),
+        "NoPreempt" => Some("SpinNoPreempt"),
+        "NoPreemptIrqSave" => Some("SpinNoIrq"),
+        _ => None,
+    }
+}
+
+/// Returns the last path segment of the type as written, which is all a
+/// procedural macro can see.
+fn written_type_name(ty: &rustc_hir::Ty<'_>) -> Option<String> {
+    let TyKind::Path(path) = ty.kind else {
+        return None;
+    };
+    let segment = match path {
+        QPath::Resolved(_, path) => path.segments.last()?,
+        QPath::TypeRelative(_, segment) => segment,
+    };
+    Some(segment.ident.name.to_string())
 }
 
 #[cfg(test)]
@@ -232,6 +321,20 @@ mod flagged {
         type L = kspin::SpinRaw<u32>;
     }
     static J: <() as Types>::L = kspin::SpinRaw::new(0);
+
+    // K: renamed to another lock family's name.
+    mod misnamed {
+        use kspin::SpinNoIrq as Mutex;
+
+        static K: Mutex<u32> = Mutex::new(0);
+    }
+
+    // L: `type` alias.
+    type Table = kspin::SpinNoIrq<u32>;
+    static L: Table = Table::new(0);
+
+    // M: a guard without a `static_lock!` type name.
+    static M: kspin::SpinLock<kspin::IrqSave, u32> = kspin::SpinLock::new(0);
 }
 
 // Registered through the real `kspin::static_lock!`: no diagnostics.
@@ -345,6 +448,7 @@ LL |         static B: L<u32> = L::new(0);
    |                            `SpinLock::new` binds `klockstat::NOOP_CLASS` under the `stats` feature; this lock never appears in /proc/lock_stat
    |
    = help: wrap the item: `static_lock! { static NAME: SpinNoIrq<T> = SpinNoIrq::new(..); }` (import `kspin::static_lock`); see docs/code-guidelines/CG-001-static-spinlock-registration.md
+   = help: spell the type as `SpinRaw<..>`: `static_lock!` identifies the lock by its written type name, so renamed imports, type aliases and projections do not compile under `stats`
 
 error: static spinlock is not registered with static_lock!
   --> $DIR/unregistered_static_spinlock.rs:18:5
@@ -365,6 +469,7 @@ LL |     static mut D: SpinRaw<u32> = SpinRaw::new(0);
    |                                  `SpinLock::new` binds `klockstat::NOOP_CLASS` under the `stats` feature; this lock never appears in /proc/lock_stat
    |
    = help: wrap the item: `static_lock! { static NAME: SpinNoIrq<T> = SpinNoIrq::new(..); }` (import `kspin::static_lock`); see docs/code-guidelines/CG-001-static-spinlock-registration.md
+   = help: drop `mut`: `static_lock!` does not accept `static mut`, and the lock already provides interior mutability
 
 error: static spinlock is not registered with static_lock!
   --> $DIR/unregistered_static_spinlock.rs:24:5
@@ -375,6 +480,7 @@ LL |     static E: SpinNoIrq<u32> = unsafe { SpinNoIrq::new(0) };
    |                                         `SpinLock::new` binds `klockstat::NOOP_CLASS` under the `stats` feature; this lock never appears in /proc/lock_stat
    |
    = help: wrap the item: `static_lock! { static NAME: SpinNoIrq<T> = SpinNoIrq::new(..); }` (import `kspin::static_lock`); see docs/code-guidelines/CG-001-static-spinlock-registration.md
+   = help: write the initializer as a bare `::new(..)` call: `static_lock!` does not look inside `{ }` or `unsafe { }` blocks
 
 error: static spinlock is not registered with static_lock!
   --> $DIR/unregistered_static_spinlock.rs:28:9
@@ -395,6 +501,7 @@ LL |     pub(crate) static G: SpinNoIrq<u32> = { SpinNoIrq::new(0) };
    |                                             `SpinLock::new` binds `klockstat::NOOP_CLASS` under the `stats` feature; this lock never appears in /proc/lock_stat
    |
    = help: wrap the item: `static_lock! { static NAME: SpinNoIrq<T> = SpinNoIrq::new(..); }` (import `kspin::static_lock`); see docs/code-guidelines/CG-001-static-spinlock-registration.md
+   = help: write the initializer as a bare `::new(..)` call: `static_lock!` does not look inside `{ }` or `unsafe { }` blocks
 
 error: static spinlock is not registered with static_lock!
   --> $DIR/unregistered_static_spinlock.rs:46:13
@@ -424,8 +531,42 @@ LL |     static J: <() as Types>::L = kspin::SpinRaw::new(0);
    |                                  `SpinLock::new` binds `klockstat::NOOP_CLASS` under the `stats` feature; this lock never appears in /proc/lock_stat
    |
    = help: wrap the item: `static_lock! { static NAME: SpinNoIrq<T> = SpinNoIrq::new(..); }` (import `kspin::static_lock`); see docs/code-guidelines/CG-001-static-spinlock-registration.md
+   = help: spell the type as `SpinRaw<..>`: `static_lock!` identifies the lock by its written type name, so renamed imports, type aliases and projections do not compile under `stats`
 
-error: aborting due to 10 previous errors
+error: static spinlock is not registered with static_lock!
+  --> $DIR/unregistered_static_spinlock.rs:66:9
+   |
+LL |         static K: Mutex<u32> = Mutex::new(0);
+   |         ^^^^^^^^^^^^^^^^^^^^^^^----------^^^^
+   |                                |
+   |                                `SpinLock::new` binds `klockstat::NOOP_CLASS` under the `stats` feature; this lock never appears in /proc/lock_stat
+   |
+   = help: wrap the item: `static_lock! { static NAME: SpinNoIrq<T> = SpinNoIrq::new(..); }` (import `kspin::static_lock`); see docs/code-guidelines/CG-001-static-spinlock-registration.md
+   = help: spell the type as `SpinNoIrq<..>`: `static_lock!` identifies the lock by its written type name, so renamed imports, type aliases and projections do not compile under `stats`
+
+error: static spinlock is not registered with static_lock!
+  --> $DIR/unregistered_static_spinlock.rs:71:5
+   |
+LL |     static L: Table = Table::new(0);
+   |     ^^^^^^^^^^^^^^^^^^----------^^^^
+   |                       |
+   |                       `SpinLock::new` binds `klockstat::NOOP_CLASS` under the `stats` feature; this lock never appears in /proc/lock_stat
+   |
+   = help: wrap the item: `static_lock! { static NAME: SpinNoIrq<T> = SpinNoIrq::new(..); }` (import `kspin::static_lock`); see docs/code-guidelines/CG-001-static-spinlock-registration.md
+   = help: spell the type as `SpinNoIrq<..>`: `static_lock!` identifies the lock by its written type name, so renamed imports, type aliases and projections do not compile under `stats`
+
+error: static spinlock is not registered with static_lock!
+  --> $DIR/unregistered_static_spinlock.rs:74:5
+   |
+LL |     static M: kspin::SpinLock<kspin::IrqSave, u32> = kspin::SpinLock::new(0);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^--------------------^^^^
+   |                                                      |
+   |                                                      `SpinLock::new` binds `klockstat::NOOP_CLASS` under the `stats` feature; this lock never appears in /proc/lock_stat
+   |
+   = help: wrap the item: `static_lock! { static NAME: SpinNoIrq<T> = SpinNoIrq::new(..); }` (import `kspin::static_lock`); see docs/code-guidelines/CG-001-static-spinlock-registration.md
+   = help: `static_lock!` has no type name for this guard; see the exceptions in docs/code-guidelines/CG-001-static-spinlock-registration.md
+
+error: aborting due to 13 previous errors
 
 "#;
 

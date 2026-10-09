@@ -27,6 +27,13 @@ checks:
   3. If the item is not expanded from the real `static_lock!` macro (defined in
      `kspin`, `ksync` or `klockstat-macros`), it violates this rule. A local
      macro that merely shares the name grants no exemption.
+  4. Before wrapping, rewrite the item into the form `static_lock!` accepts;
+     the diagnostic names each rewrite it needs. Spell the type as the guard's
+     alias `SpinRaw`, `SpinNoPreempt` or `SpinNoIrq`: with `stats` the macro
+     picks the lock kind from the written type name, so renamed imports,
+     `type` aliases and projections do not compile. Write the initializer as a
+     bare `::new(..)` call without a `{ }` or `unsafe { }` block. Drop `mut`
+     from `static mut`; the lock already provides interior mutability.
 - **Exceptions**:
   - Test-only locks: test functions, `#[cfg(unittest)]` items and unit-test
     support crates. Use the paired Dylint exception attributes from
@@ -37,9 +44,13 @@ checks:
     built by `const fn` helpers; closures, `LazyLock`, `LazyInit`;
     `SpinRwLock` / `SpinRwNoIrq`; explicit `new_with_stats`;
     `ksync::Mutex` / `ksync::RwLock`.
+  - A `SpinLock<G, T>` whose guard has no `Spin*` alias, such as `IrqSave`,
+    has no `static_lock!` spelling. Prefer an aliased guard; otherwise use the
+    paired exception attributes with
+    `reason = "CG-001-static-spinlock-registration: no static_lock! alias for guard <G>: <why this guard>"`.
   - Macro constraints: `#[cfg(..)]` goes outside the `static_lock!`
-    invocation, doc comments go inside on the item, `static mut` is not
-    supported. The crate that owns the static must depend on `kspin`
+    invocation, doc comments go inside on the item, and `static mut` is
+    rejected. The crate that owns the static must depend on `kspin`
     directly: with `stats` the macro resolves that crate name from
     `Cargo.toml`, even when the type is imported through `ksync`.
 - **Counter-example**:

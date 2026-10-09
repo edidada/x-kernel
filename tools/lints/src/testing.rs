@@ -40,6 +40,8 @@ pub struct NoOp;
 pub struct NoPreempt;
 /// Guard marker: disables preemption and IRQs.
 pub struct NoPreemptIrqSave;
+/// Guard marker: disables IRQs only; it has no `Spin*` alias.
+pub struct IrqSave;
 
 /// Spin lock parameterised by a guard marker.
 pub struct SpinLock<G, T> {
