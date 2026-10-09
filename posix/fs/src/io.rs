@@ -18,7 +18,10 @@ use core::ffi::{c_char, c_int};
 use iov_iter::{IovSink, IovSource, iov_iter_dest, iov_iter_source};
 use kerrno::{KError, KResult, LinuxError};
 use kio::prelude::*;
-use kvfs::{FMode, Filename, LookupFlags, LookupIntent, OpenFlags, VfsFile, pipe::PipeObject};
+use kvfs::{
+    FMode, Filename, LookupFlags, LookupIntent, OpenFlags, TransferPosition, VfsFile,
+    pipe::PipeObject,
+};
 use linux_raw_sys::general::__kernel_off_t;
 use linux_sysno::Sysno;
 use osvm::{VirtPtr, VmBytes, VmBytesMut};
@@ -289,7 +292,12 @@ mod restart_tests {
                 .alloc_clone(FMode::WRITE, OpenFlags::empty(), destination.clone())
                 .unwrap();
             let result = finish_restartable_io(kvfs::transfer_files(
-                &input, None, &output, None, 8192, false,
+                &input,
+                TransferPosition::Managed,
+                &output,
+                TransferPosition::Managed,
+                8192,
+                false,
             ));
             assert_eq!(
                 result,
@@ -333,7 +341,12 @@ mod restart_tests {
             .unwrap();
         assert_eq!(
             finish_restartable_io(kvfs::transfer_files(
-                &input, None, &output, None, 8192, false,
+                &input,
+                TransferPosition::Managed,
+                &output,
+                TransferPosition::Managed,
+                8192,
+                false,
             )),
             Ok(123)
         );
@@ -444,11 +457,21 @@ mod transfer_count_tests {
                         let output = transfer_file(destination.clone(), FMode::WRITE);
                         let mut input_offset = 0;
                         let mut output_offset = 0;
+                        let input_position = if has_explicit_offsets {
+                            TransferPosition::At(&mut input_offset)
+                        } else {
+                            TransferPosition::Managed
+                        };
+                        let output_position = if has_explicit_offsets {
+                            TransferPosition::At(&mut output_offset)
+                        } else {
+                            TransferPosition::Managed
+                        };
                         let result = transfer_files(
                             &input,
-                            has_explicit_offsets.then_some(&mut input_offset),
+                            input_position,
                             &output,
-                            has_explicit_offsets.then_some(&mut output_offset),
+                            output_position,
                             8192,
                             false,
                         );
@@ -853,7 +876,18 @@ pub fn sys_sendfile(
         }
         Some(position)
     };
-    let result = kvfs::transfer_files(&input, input_offset.as_mut(), &output, None, len, false);
+    let input_position = match input_offset.as_mut() {
+        Some(offset) => TransferPosition::At(offset),
+        None => TransferPosition::Managed,
+    };
+    let result = kvfs::transfer_files(
+        &input,
+        input_position,
+        &output,
+        TransferPosition::Managed,
+        len,
+        false,
+    );
     // Linux sendfile copies back an explicit offset even after EOF or error.
     if let Some(position) = input_offset {
         offset.write_vm(position)?;
@@ -862,44 +896,67 @@ pub fn sys_sendfile(
 }
 
 /// Copies a file range with optional explicit source and destination offsets.
+///
+/// The checks (`generic_file_rw_checks`/`generic_copy_file_checks` parity),
+/// the position protocol and the buffered copy live in
+/// [`kvfs::copy_file_range`]; this wrapper only parses the ABI: non-zero
+/// flags are rejected, and negative explicit offsets are rejected with
+/// `EINVAL` the way Linux `rw_verify_area` does.
 pub fn sys_copy_file_range(
     fd_in: c_int,
-    off_in: UserPtr<u64>,
+    off_in: UserPtr<i64>,
     fd_out: c_int,
-    off_out: UserPtr<u64>,
+    off_out: UserPtr<i64>,
     len: usize,
     flags: u32,
 ) -> KResult<isize> {
     if flags != 0 {
         return Err(KError::InvalidInput);
     }
-    // TODO: check both regular files, same-file overlap and filesystem support.
     let resources = kprocess::current_resources();
     let input = resources.get_file(fd_in)?;
     let output = resources.get_file(fd_out)?;
     let mut input_offset = if off_in.is_null() {
         None
     } else {
-        Some(off_in.read_vm()?)
+        let value = off_in.read_vm()?;
+        if value < 0 {
+            return Err(KError::InvalidInput);
+        }
+        Some(value as u64)
     };
     let mut output_offset = if off_out.is_null() {
         None
     } else {
-        Some(off_out.read_vm()?)
+        let value = off_out.read_vm()?;
+        if value < 0 {
+            return Err(KError::InvalidInput);
+        }
+        Some(value as u64)
     };
-    let result = kvfs::transfer_files(
-        &input,
-        input_offset.as_mut(),
-        &output,
-        output_offset.as_mut(),
-        len,
-        false,
-    );
-    // Unlike splice, copy_file_range copies offsets out only after progress.
-    // Both offsets record committed output even if one copyout faults.
+    let input_position = match input_offset.as_mut() {
+        Some(offset) => TransferPosition::At(offset),
+        None => TransferPosition::Managed,
+    };
+    let output_position = match output_offset.as_mut() {
+        Some(offset) => TransferPosition::At(offset),
+        None => TransferPosition::Managed,
+    };
+    let result =
+        kvfs::copy_file_range(&input, input_position, &output, output_position, len, false);
+    // Linux copy_file_range copies offsets out only after progress; both
+    // write-backs are attempted before the first fault is reported.
     if matches!(result, Ok(count) if count > 0) {
-        let input_copyout = input_offset.map_or(Ok(()), |position| off_in.write_vm(position));
-        let output_copyout = output_offset.map_or(Ok(()), |position| off_out.write_vm(position));
+        let output_copyout = if let Some(position) = output_offset {
+            off_out.write_vm(position as i64)
+        } else {
+            Ok(())
+        };
+        let input_copyout = if let Some(position) = input_offset {
+            off_in.write_vm(position as i64)
+        } else {
+            Ok(())
+        };
         input_copyout?;
         output_copyout?;
     }
@@ -948,11 +1005,19 @@ pub fn sys_splice(
     if !has_input_pipe && !has_output_pipe {
         return Err(KError::InvalidInput);
     }
+    let input_position = match input_offset.as_mut() {
+        Some(offset) => TransferPosition::At(offset),
+        None => TransferPosition::Managed,
+    };
+    let output_position = match output_offset.as_mut() {
+        Some(offset) => TransferPosition::At(offset),
+        None => TransferPosition::Managed,
+    };
     let result = kvfs::transfer_files(
         &input,
-        input_offset.as_mut(),
+        input_position,
         &output,
-        output_offset.as_mut(),
+        output_position,
         len,
         flags & linux_raw_sys::general::SPLICE_F_NONBLOCK != 0,
     );

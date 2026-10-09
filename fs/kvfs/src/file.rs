@@ -164,6 +164,14 @@ pub trait FileOperations: Send + Sync + 'static {
         false
     }
 
+    /// Returns whether this table supports file-to-file copying, mirroring
+    /// Linux `->copy_file_range`: `copy_file_range` may cross super blocks
+    /// only when both sides report support, and otherwise rejects the pair
+    /// with `EXDEV`.
+    fn supports_file_copy(&self) -> bool {
+        false
+    }
+
     /// Changes this open file description's file offset.
     fn llseek(&self, file: &VfsFile, offset: i64, whence: i32) -> VfsResult<u64> {
         if file.is_stream() || matches!(file.inode().node_type(), NodeType::Fifo | NodeType::Socket)
@@ -736,6 +744,12 @@ impl VfsFile {
     /// Returns whether this file's inode is a regular file.
     pub fn is_regular_file(&self) -> bool {
         self.node_type() == NodeType::RegularFile
+    }
+
+    /// Returns whether this file's operation table supports file-to-file
+    /// copying across super blocks.
+    pub fn supports_file_copy(&self) -> bool {
+        self.operations().supports_file_copy()
     }
 
     /// Returns this file's inode size.

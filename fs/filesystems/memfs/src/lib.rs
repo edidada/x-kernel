@@ -755,6 +755,10 @@ impl FileOperations for MemoryNode {
         )
     }
 
+    fn supports_file_copy(&self) -> bool {
+        true
+    }
+
     fn supports_write(&self) -> bool {
         matches!(self.inode.content.as_ref(), Some(InodeContent::File(_)))
     }
