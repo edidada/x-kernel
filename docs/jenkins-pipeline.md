@@ -110,7 +110,10 @@ Build 阶段并行运行 `Lint Check: dylint kplat-aarch64` 和
 实际编译的代码，两个分支分别覆盖两种架构的专属代码。每个分支在独立 workspace 中
 使用对应平台的 `qemu_defconfig` 执行 `make defconfig`、`make dylint_test` 和
 `make dylint`，并使用独立的 `/xkernel-target/dylint-<platform>` 构建输出目录。
-检查结果与其他并行阶段一起进入 Gitee Check Run。
+aarch64 分支随后向 `.config` 追加 `KFEAT_LOCK_STAT=y`，执行 `make olddefconfig`
+并确认该选项生效后，在同一构建输出目录再运行一次 `make dylint`。只有打开锁统计时，
+`static_lock!` 才展开为注册锁类的过程宏，锁统计相关代码才参与编译；其他 CI 配置都
+不打开该选项。检查结果与其他并行阶段一起进入 Gitee Check Run。
 
 `Jenkinsfile` 不覆盖 `DYLINT_DRIVER_PATH`，Dylint 直接使用镜像预构建的 driver。
 环境检查只核对 Dylint 工具、lint toolchain 及其组件和 driver 是否与仓库固定的

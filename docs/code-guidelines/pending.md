@@ -49,8 +49,8 @@ so the text stays in the skill.
 
 - `concurrency.md:77-79`, `:95`, `:171-172` (lock construction must compile
   with `stats`; no `Mutex::new` in const context): rustc already rejects
-  these with `KFEAT_LOCK_STAT=y`. A stats-on gate build covers them without
-  lint code.
+  these with `KFEAT_LOCK_STAT=y`. The aarch64 Jenkins dylint branch rescans
+  with that option, which covers them without lint code.
 - `assembly.md:17`, `:26` (`.balign` over `.align`): a text check over `*.S`
   and `*.rs` covers more files than a lint; backlog 0.
 - `api-design.md:19` (enums instead of trait objects for closed sets): the
