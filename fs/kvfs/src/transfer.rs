@@ -228,7 +228,7 @@ pub fn transfer_files(
 /// reported as `EOVERFLOW` before the EOF shortening, so an overflowing
 /// request cannot masquerade as a valid no-op. A start at or past EOF — or a
 /// request longer than the remaining bytes — yields a zero-length no-op.
-pub fn verify_copy_file_range(
+fn verify_copy_file_range(
     input: &VfsFile,
     output: &VfsFile,
     input_start: u64,
@@ -256,6 +256,11 @@ pub fn verify_copy_file_range(
     let copy_supported = input.supports_file_copy() && output.supports_file_copy();
     if !same_super_block && !copy_supported {
         return Err(LinuxError::EXDEV.into());
+    }
+    // Linux reports `EOVERFLOW` when the range is not representable by
+    // `off_t`; the ABI layer already rejected negative starts.
+    if requested > i64::MAX as u64 {
+        return Err(LinuxError::EOVERFLOW.into());
     }
     if input_start.checked_add(requested).is_none() || output_start.checked_add(requested).is_none()
     {
@@ -303,6 +308,8 @@ pub fn copy_file_range(
     len: usize,
     _nonblocking: bool,
 ) -> KResult<usize> {
+    input.verify_mode(FMode::READ)?;
+    output.verify_mode(FMode::WRITE)?;
     let input_managed = matches!(input_position, TransferPosition::Managed);
     let output_managed = matches!(output_position, TransferPosition::Managed);
     let mut input_at = match input_position {
@@ -314,9 +321,9 @@ pub fn copy_file_range(
         TransferPosition::At(offset) => Some(offset),
     };
 
-    // Position locks in address order; one lock covers a same-description
-    // pair. Only `Managed` sides participate — `At` sides carry their own
-    // offsets and leave `f_pos` alone.
+    // Position locks in address order; a same-description pair shares one
+    // lock, which serves both sides whenever either is `Managed`. Distinct
+    // files take their locks in address order.
     let same_file = Arc::ptr_eq(input, output);
     let input_first = Arc::as_ptr(input) <= Arc::as_ptr(output);
     let (first, second) = if input_first {
@@ -324,18 +331,15 @@ pub fn copy_file_range(
     } else {
         (output, input)
     };
-    let first_needs_lock = if input_first {
-        input_managed
+    let (first_needs_lock, second_needs_lock) = if same_file {
+        (input_managed || output_managed, false)
+    } else if input_first {
+        (input_managed, output_managed)
     } else {
-        output_managed
-    };
-    let second_needs_lock = if input_first {
-        output_managed
-    } else {
-        input_managed
+        (output_managed, input_managed)
     };
     let mut first_guard = first_needs_lock.then(|| first.position_lock());
-    let mut second_guard = (!same_file && second_needs_lock).then(|| second.position_lock());
+    let mut second_guard = second_needs_lock.then(|| second.position_lock());
     let first_start = first_guard.as_ref().map_or(0, |guard| **guard);
     let second_start = second_guard.as_ref().map_or(first_start, |guard| **guard);
     let (mut input_start, mut output_start) = if input_first {
@@ -359,6 +363,9 @@ pub fn copy_file_range(
         let count_chunk = (buf.len() as u64).min(remaining) as usize;
         let mut read_pos = input_start;
         let read = input.read_from(&mut buf[..count_chunk], &mut read_pos)?;
+        if read > count_chunk {
+            return Err(KError::Io);
+        }
         if read == 0 {
             break; // EOF reached.
         }
