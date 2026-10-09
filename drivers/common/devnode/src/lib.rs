@@ -322,7 +322,7 @@ pub fn publish_auto_indexed(
         RegisterOutcome::Registered(node) => Ok(node),
         // Duplicate AFTER the pre-check: a concurrent publisher won the
         // race. Its index stays with the winner; ours must be returned.
-        RegisterOutcome::DuplicateId => {
+        RegisterOutcome::DuplicateId(_) => {
             if let Some(allocated) = allocated {
                 INDEX_POOLS.lock().release(node_type.subsystem, allocated);
             }
@@ -366,19 +366,13 @@ pub fn publish(
         // Explicit-publish duplicate: keep the ORIGINAL registration and
         // its dispatched state (the old replace-in-place desynced every
         // subscriber). Log loudly; the caller's node is dropped.
-        RegisterOutcome::DuplicateId => {
+        RegisterOutcome::DuplicateId(existing) => {
             log::warn!(
                 "devnode: publish id {} ({}) duplicated an existing node; keeping the original",
                 id,
                 subsystem
             );
-            REGISTRY
-                .lock()
-                .nodes
-                .iter()
-                .find(|n| n.id == id)
-                .cloned()
-                .expect("duplicate reported, node must exist")
+            existing
         }
     }
 }
@@ -393,21 +387,29 @@ pub fn publish(
 /// index leaked (two concurrent publishes could each pass the pre-check).
 pub(crate) enum RegisterOutcome {
     Registered(DevNode),
-    DuplicateId,
+    /// Duplicate id: carries the EXISTING node, captured in the same
+    /// registry hold that detected the duplicate (a second lock lookup
+    /// could race a withdraw and panic).
+    DuplicateId(DevNode),
 }
 
 fn register_and_dispatch(node: DevNode) -> RegisterOutcome {
-    let (subscribers, publisher) = {
-        let mut registry = REGISTRY.lock();
-        if registry.nodes.iter().any(|n| n.id == node.id) {
-            return RegisterOutcome::DuplicateId;
-        }
-        registry.nodes.push(node.clone());
-        (
-            registry.subscribers.clone(),
-            registry.lifecycle_publisher.clone(),
-        )
-    };
+    // Insert AND dispatch Added under one registry hold: releasing the lock
+    // between them let a concurrent withdraw finish its whole Removing →
+    // Removed → delete sequence BEFORE the Added dispatch — subscribers
+    // observed a device appear that the registry no longer had. The
+    // subscribers are projection layers (devfs/sysfs/uevent) that do not
+    // re-enter the devnode registry (verified: only pure helpers like
+    // physical_path_pci), so holding the spinlock across dispatch is sound;
+    // any future subscriber that needs registry re-entry must queue.
+    let mut registry = REGISTRY.lock();
+    if let Some(existing) = registry.nodes.iter().find(|n| n.id == node.id) {
+        let existing = existing.clone();
+        return RegisterOutcome::DuplicateId(existing);
+    }
+    registry.nodes.push(node.clone());
+    let subscribers = registry.subscribers.clone();
+    let publisher = registry.lifecycle_publisher.clone();
     dispatch_added(&node, subscribers, publisher);
     RegisterOutcome::Registered(node)
 }

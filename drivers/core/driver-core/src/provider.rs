@@ -13,9 +13,9 @@
 use alloc::sync::Arc;
 use core::ptr::NonNull;
 
+use kirq::{IrqEvent, IrqHandler};
 
 pub use crate::resource::{IrqController, IrqDomainId, IrqTrigger, MmioRegion};
-use kirq::{IrqEvent, IrqHandler};
 
 /// Device-visible MSI message returned by the host IRQ core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +25,6 @@ pub struct MsiMessage {
     /// Message data programmed into the device.
     pub data: u32,
 }
-
 
 impl MsiMessage {
     /// Creates a device-visible MSI message.

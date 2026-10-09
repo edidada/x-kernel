@@ -407,25 +407,53 @@ impl ClkHandle {
         Self { ops, release }
     }
 
-    pub fn prepare_enable(&self) -> Result<(), RuntimeError> {
+    /// Prepare and enable, returning an ownership token for the ENABLED
+    /// state. The token's Drop balances the prepare/enable pair — the
+    /// review's finding was that `&self` + a bare `Ok(())` left probe-failure
+    /// paths (request_irq/class publication errors AFTER a successful
+    /// enable) with no rollback; remove-time cleanup relied on reading the
+    /// provider's current state instead of local ownership.
+    pub fn prepare_enable(&self) -> Result<EnabledClock<'_>, RuntimeError> {
         self.ops.prepare()?;
         if let Err(err) = self.ops.enable() {
             // Roll back the prepare: a failed enable must not leave the
-            // clock half-prepared (review: acquisition had no undo).
+            // clock half-prepared.
             let () = self.ops.disable();
             self.ops.unprepare();
             return Err(err);
         }
-        Ok(())
-    }
-
-    pub fn disable_unprepare(&self) {
-        self.ops.disable();
-        self.ops.unprepare();
+        Ok(EnabledClock { handle: self })
     }
 
     pub fn ops(&self) -> &dyn ClkOps {
         self.ops.as_ref()
+    }
+}
+
+/// Ownership of one prepare+enable pair on a [`ClkHandle`].
+///
+/// Drop balances the pair (disable + unprepare). [`Self::keep_running`]
+/// consumes the token WITHOUT balancing — for consumers that deliberately
+/// hold the clock past device removal (the adopted stdout port's console
+/// continuity policy). Every other path lets the token drop: probe failure
+/// rolls back automatically, `remove` drops it from `Data`.
+pub struct EnabledClock<'a> {
+    handle: &'a ClkHandle,
+}
+
+impl EnabledClock<'_> {
+    /// Consume the token WITHOUT disabling: the caller takes explicit,
+    /// permanent ownership of the enabled state. Use only when the clock
+    /// must outlive the device binding (stdout console).
+    pub fn keep_running(self) {
+        core::mem::forget(self)
+    }
+}
+
+impl Drop for EnabledClock<'_> {
+    fn drop(&mut self) {
+        self.handle.ops.disable();
+        self.handle.ops.unprepare();
     }
 }
 

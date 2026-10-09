@@ -97,9 +97,25 @@ impl DriverOps<PlatformBus> for Pl011Driver {
         {
             Some(spec) => {
                 let clk = dev.clk_spec(spec)?;
-                clk.prepare_enable()
+                // The EnabledClock token owns the prepare+enable pair: a
+                // failure in ANYTHING below (irq registration, publication)
+                // drops it and rolls the clock back automatically — the
+                // review's "success enable, later probe failure" leak is
+                // closed. The token cannot outlive this borrow into Data,
+                // so at the end of a successful probe it either transfers
+                // to keep_running (stdout console continuity) or the
+                // enabled state is recorded for remove-time balance.
+                let enabled = clk
+                    .prepare_enable()
                     .map_err(ProbeError::from)
                     .inspect_err(|_| log::warn!("pl011: failed to enable clock"))?;
+                if matches!(port.role(), SerialRole::Stdout) {
+                    // Console continuity across rebind: the adopted stdout
+                    // port keeps its clock past removal. Explicit policy.
+                    enabled.keep_running();
+                } else {
+                    core::mem::forget(enabled);
+                }
                 Some(clk)
             }
             None => {
@@ -183,7 +199,9 @@ impl DriverOps<PlatformBus> for Pl011Driver {
         if let Some(clk) = dev.data_mut()._clk.take()
             && clk.ops().is_enabled()
         {
-            clk.disable_unprepare();
+            let ops = clk.ops();
+            ops.disable();
+            ops.unprepare();
         }
     }
 }

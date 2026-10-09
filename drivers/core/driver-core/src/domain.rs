@@ -258,6 +258,13 @@ struct DomainInner {
 /// An instance of the device model.
 pub struct DeviceDomain {
     inner: SpinNoPreempt<DomainInner>,
+    /// Serializes the probe pump across callers. The probe path runs
+    /// driver code outside the domain lock, and parts of the host runtime
+    /// (the MMIO lease collector) rely on probe serialization — the
+    /// review asked for that contract to be enforced at the entry, not
+    /// assumed. A second probe_pending while one runs returns immediately:
+    /// the running pump owns the pending queue's progress.
+    probing: SpinNoPreempt<bool>,
 }
 
 /// Build a consistent snapshot: one filling for `snapshot()` and
@@ -288,6 +295,7 @@ fn snapshot_of(id: DeviceId, entry: &DeviceEntry) -> DeviceSnapshot {
 impl DeviceDomain {
     pub fn new() -> Self {
         Self {
+            probing: SpinNoPreempt::new(false),
             inner: SpinNoPreempt::new(DomainInner {
                 next_device_id: 0,
                 drivers: Vec::new(),
@@ -498,13 +506,46 @@ impl DeviceDomain {
             woken
         };
         if woken > 0 {
-            self.probe_pending();
+            // Re-entrant-safe pump: if a probe pump already runs (this wake
+            // fired mid-probe — the generation guard will re-attempt in
+            // ITS loop), don't recurse into the pump (the serialization
+            // lock would deadlock). Standalone wakes run the full pump.
+            let already_probing = {
+                let mut probing = self.probing.lock();
+                if *probing {
+                    true
+                } else {
+                    *probing = true;
+                    false
+                }
+            };
+            if !already_probing {
+                self.probe_pending_locked();
+                *self.probing.lock() = false;
+            }
         }
         woken
     }
 
     /// Run the probe algorithm until no progress remains.
     pub fn probe_pending(&self) -> ProbeStats {
+        {
+            let mut probing = self.probing.lock();
+            if *probing {
+                // Another pump owns the queue; its pass covers devices
+                // added before its current batch selection. Returning here
+                // also guards the single-slot host resources (the MMIO
+                // probe collector asserts serialization).
+                return ProbeStats::default();
+            }
+            *probing = true;
+        }
+        let stats = self.probe_pending_locked();
+        *self.probing.lock() = false;
+        stats
+    }
+
+    fn probe_pending_locked(&self) -> ProbeStats {
         let mut stats = ProbeStats::default();
         loop {
             let batch = self.select_batch();
@@ -861,11 +902,25 @@ mod tests {
     struct MockServices {
         clk_providers: SpinNoPreempt<BTreeMap<u64, Arc<dyn ClkOps>>>,
         mapped: AtomicUsize,
+        /// Test injection: fired on the clk Deferred path (mid-probe),
+        /// simulating a provider registering between the dependency check
+        /// and the Deferred submission (the lost-wakeup window).
+        mid_check_hook: SpinNoPreempt<Option<Arc<dyn Fn() + Send + Sync>>>,
     }
 
     impl MockServices {
+        /// Install the mid-check wake hook (see the struct field docs).
+        fn mid_check_hook(&self, hook: &SpinNoPreempt<Option<Arc<dyn Fn() + Send + Sync>>>) {
+            *self.mid_check_hook.lock() = hook.lock().clone();
+        }
+
+        fn mid_check_hook_clear(&self) {
+            *self.mid_check_hook.lock() = None;
+        }
+
         fn new() -> Arc<Self> {
             Arc::new(Self {
+                mid_check_hook: SpinNoPreempt::new(None),
                 clk_providers: SpinNoPreempt::new(BTreeMap::new()),
                 mapped: AtomicUsize::new(0),
             })
@@ -915,9 +970,20 @@ mod tests {
         }
 
         fn clk_get(&self, _: u64, spec: ClkSpec) -> Result<ClkHandle, ServiceError> {
-            match self.clk_providers.lock().get(&spec.provider).cloned() {
+            // Bind the lookup OUTSIDE the match: a match scrutinee's
+            // temporary lock guard lives for the whole match arm, and the
+            // mid-check hook re-enters publish_clk (same clk_providers
+            // lock) — the classic self-deadlock the review warned about
+            // for registry callbacks.
+            let existing = self.clk_providers.lock().get(&spec.provider).cloned();
+            match existing {
                 Some(ops) => Ok(ClkHandle::new(ops, None)),
-                None => Err(ServiceError::Deferred(DepSource::clk(spec.provider))),
+                None => {
+                    if let Some(hook) = self.mid_check_hook.lock().clone() {
+                        hook();
+                    }
+                    Err(ServiceError::Deferred(DepSource::clk(spec.provider)))
+                }
             }
         }
     }
@@ -1089,26 +1155,62 @@ mod tests {
         assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
     }
 
-    /// Regression: the lost-wakeup window. A provider wake arriving
-    /// BETWEEN a probe's dependency check and its Deferred submission must
-    /// not park the device: the deferred handler detects the dependency's
-    /// wake generation moved and re-attempts. (Simulated by waking while
-    /// the device is Pending — the generation moves before the probe
-    /// result is submitted.)
+    /// Regression: the lost-wakeup window, exercised as a REAL
+    /// interleaving. The wake fires INSIDE the dependency check that
+    /// decides to defer — before the Deferred result reaches the domain
+    /// (the review's exact CPU A/B interleave). Without the generation
+    /// guard the device parks forever: the wake found an empty deferred
+    /// list and nothing re-links them.
     #[def_test(serial)]
     fn wake_during_probe_window_does_not_lose_the_device() {
-        PROBES.store(0, Ordering::Relaxed);
-        let (domain, services) = fresh_domain();
+        // The mock services' clk_get invokes this hook on the Deferred
+        // path (before returning) — simulating the provider registering
+        // mid-check. Arc<dyn Fn> over a global slot: tests are serial.
+        static MID_CHECK_HOOK: SpinNoPreempt<Option<Arc<dyn Fn() + Send + Sync>>> =
+            SpinNoPreempt::new(None);
+
+        // The hook needs 'static references into the domain under test.
+        // Leaking one test domain per run is acceptable (serial tests,
+        // bounded by the single test that uses this hook) and keeps the
+        // injection a real mid-probe wake rather than a flag dance.
+        let (domain, services): (&'static DeviceDomain, &'static MockServices) = {
+            let (domain, services) = fresh_domain();
+            // SAFETY: the Arc is deliberately leaked for the 'static test
+            // hook (serial tests; bounded by this single test).
+            let services: &'static MockServices = unsafe { &*Arc::into_raw(services) };
+            (Box::leak(Box::new(domain)), services)
+        };
+        *MID_CHECK_HOOK.lock() = Some(Arc::new(move || {
+            services.publish_clk(0x42);
+            // Wake with an EMPTY deferred list: the device is mid-probe,
+            // not parked yet. This is the exact window.
+            let woken = domain.wake(DepSource::clk(0x42));
+            assert!(woken == 0, "nothing parked yet — this IS the window");
+        }));
+        services.mid_check_hook(&MID_CHECK_HOOK);
+
         domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
-
+        let probes_before = PROBES.load(Ordering::Relaxed);
         let id = domain.add_device(test_descriptor());
-        assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Deferred);
 
-        // A first wake consumes the device from the deferred list.
-        services.publish_clk(0x42);
-        assert_eq!(domain.wake(DepSource::clk(0x42)), 1);
-        assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Active);
-        assert_eq!(PROBES.load(Ordering::Relaxed), 2);
+        // The probe ran: clk_get deferred AND the hook fired its wake.
+        // (PROBES is shared across tests — assert the delta.)
+        let probes_after = PROBES.load(Ordering::Relaxed);
+        assert!(probes_after > probes_before);
+        let second_pass = probes_after - probes_before >= 2;
+        // The device must not be parked in Deferred — the generation guard
+        // sees the dependency moved and the pump re-attempts; TestSer's
+        // second probe finds the provider and binds.
+        let state = domain.snapshot(id).unwrap().state;
+        assert_eq!(state, DeviceState::Active);
+        assert_eq!(domain.snapshot(id).unwrap().driver, Some("test-serial"));
+        // The guard re-attempted (at least two probe passes for this
+        // device) — without it the FIRST pass would have parked the
+        // device in Deferred forever.
+        assert!(second_pass, "generation guard did not re-attempt");
+
+        *MID_CHECK_HOOK.lock() = None;
+        services.mid_check_hook_clear();
     }
 
     /// Regression: a provider registering AFTER `finish_probe_phase` must
