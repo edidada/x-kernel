@@ -11,8 +11,10 @@ use rustc_hir::{ExprKind, Item, ItemKind};
 use rustc_lint::{LateContext, LateLintPass};
 
 use crate::static_lock_helpers::{
-    defined_by_static_lock, direct_call_to_type, is_type, peel_blocks,
+    defined_by_static_lock, direct_call_to_type, is_type, macro_rewrites, peel_blocks,
 };
+
+const RULE_FILE: &str = "docs/code-guidelines/CG-002-static-mutex-registration.md";
 
 rustc_session::declare_lint! {
     /// ### What it does
@@ -49,7 +51,7 @@ rustc_session::declare_lint_pass!(UnregisteredStaticLock => [UNREGISTERED_STATIC
 
 impl<'tcx> LateLintPass<'tcx> for UnregisteredStaticLock {
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
-        let ItemKind::Static(_, _, _, body_id) = item.kind else {
+        let ItemKind::Static(mutability, _, written_ty, body_id) = item.kind else {
             return;
         };
         let tcx = cx.tcx;
@@ -70,21 +72,35 @@ impl<'tcx> LateLintPass<'tcx> for UnregisteredStaticLock {
         let body = tcx.hir_body(body_id);
         let lock_name = if is_mutex { "Mutex" } else { "RwLock" };
         let initializer = peel_blocks(body.value);
-        let call =
-            direct_call_to_type(tcx, types, initializer, "ksync", lock_name, "new").or_else(|| {
-                let call =
-                    direct_call_to_type(tcx, types, initializer, "ksync", lock_name, "const_new")?;
-                let ExprKind::Call(_, arguments) = initializer.kind else {
-                    return None;
-                };
-                let raw_name = if is_mutex { "RawMutex" } else { "RawRwLock" };
-                let raw_constructor = arguments.first().map(|argument| peel_blocks(argument))?;
-                direct_call_to_type(tcx, types, raw_constructor, "ksync", raw_name, "new")?;
-                Some(call)
-            });
+        let new_call = direct_call_to_type(tcx, types, initializer, "ksync", lock_name, "new");
+        let is_const_new = new_call.is_none();
+        let call = new_call.or_else(|| {
+            let call =
+                direct_call_to_type(tcx, types, initializer, "ksync", lock_name, "const_new")?;
+            let ExprKind::Call(_, arguments) = initializer.kind else {
+                return None;
+            };
+            let raw_name = if is_mutex { "RawMutex" } else { "RawRwLock" };
+            let raw_constructor = arguments.first().map(|argument| peel_blocks(argument))?;
+            direct_call_to_type(tcx, types, raw_constructor, "ksync", raw_name, "new")?;
+            Some(call)
+        });
         let Some(call) = call else {
             return;
         };
+        let mut rewrites = macro_rewrites(
+            mutability,
+            written_ty,
+            Some(lock_name),
+            !std::ptr::eq(initializer, body.value),
+            RULE_FILE,
+        );
+        if is_const_new {
+            rewrites.push(format!(
+                "write the initializer as `{lock_name}::new(..)`: `static_lock!` rewrites only \
+                 `::new(..)`, not `const_new`"
+            ));
+        }
         tcx.node_span_lint(
             UNREGISTERED_STATIC_LOCK,
             item.hir_id(),
@@ -97,11 +113,13 @@ impl<'tcx> LateLintPass<'tcx> for UnregisteredStaticLock {
                     call,
                     "register this lock so it receives a per-lock statistics class",
                 );
-                diagnostic.help(
-                    "rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use \
-                     `RwLock` as needed; remove `mut`); see \
-                     docs/code-guidelines/CG-002-static-mutex-registration.md",
-                );
+                diagnostic.help(format!(
+                    "rewrite as `static_lock! {{ static NAME: Mutex<T> = Mutex::new(arg); }}` \
+                     (use `RwLock` as needed); see {RULE_FILE}"
+                ));
+                for rewrite in rewrites {
+                    diagnostic.help(rewrite);
+                }
             },
         );
     }
@@ -141,6 +159,9 @@ mod flagged {
     trait Types { type Lock; }
     impl Types for () { type Lock = ksync::Mutex<u32>; }
     static H: <() as Types>::Lock = ksync::Mutex::new(4);
+
+    type Db = ksync::Mutex<u32>;
+    static I: Db = Db::new(5);
 }
 
 mod registered {
@@ -189,7 +210,7 @@ LL |     static A: Mutex<u32> = Mutex::new(0);
    |                            |
    |                            register this lock so it receives a per-lock statistics class
    |
-   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed; remove `mut`); see docs/code-guidelines/CG-002-static-mutex-registration.md
+   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed); see docs/code-guidelines/CG-002-static-mutex-registration.md
    = note: `#[deny(unregistered_static_lock)]` on by default
 
 error: static RwLock is not registered with static_lock!
@@ -200,7 +221,7 @@ LL |     static B: RwLock<u32> = RwLock::new(0);
    |                             |
    |                             register this lock so it receives a per-lock statistics class
    |
-   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed; remove `mut`); see docs/code-guidelines/CG-002-static-mutex-registration.md
+   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed); see docs/code-guidelines/CG-002-static-mutex-registration.md
 
 error: static Mutex is not registered with static_lock!
   --> $DIR/unregistered_static_lock.rs:11:9
@@ -210,7 +231,8 @@ LL |         static C: M<u32> = M::new(0);
    |                            |
    |                            register this lock so it receives a per-lock statistics class
    |
-   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed; remove `mut`); see docs/code-guidelines/CG-002-static-mutex-registration.md
+   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed); see docs/code-guidelines/CG-002-static-mutex-registration.md
+   = help: spell the type as `Mutex<..>`: `static_lock!` identifies the lock by its written type name, so renamed imports, type aliases and projections do not compile under `stats`
 
 error: static Mutex is not registered with static_lock!
   --> $DIR/unregistered_static_lock.rs:14:5
@@ -220,7 +242,8 @@ LL |     static D: ksync::Mutex<u32> = unsafe { ksync::Mutex::new(1) };
    |                                            |
    |                                            register this lock so it receives a per-lock statistics class
    |
-   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed; remove `mut`); see docs/code-guidelines/CG-002-static-mutex-registration.md
+   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed); see docs/code-guidelines/CG-002-static-mutex-registration.md
+   = help: write the initializer as a bare `::new(..)` call: `static_lock!` does not look inside `{ }` or `unsafe { }` blocks
 
 error: static Mutex is not registered with static_lock!
   --> $DIR/unregistered_static_lock.rs:15:5
@@ -230,7 +253,8 @@ LL |     static mut MUTABLE: Mutex<u32> = Mutex::new(2);
    |                                      |
    |                                      register this lock so it receives a per-lock statistics class
    |
-   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed; remove `mut`); see docs/code-guidelines/CG-002-static-mutex-registration.md
+   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed); see docs/code-guidelines/CG-002-static-mutex-registration.md
+   = help: drop `mut`: `static_lock!` does not accept `static mut`, and the lock already provides interior mutability
 
 error: static Mutex is not registered with static_lock!
   --> $DIR/unregistered_static_lock.rs:16:5
@@ -240,7 +264,8 @@ LL |     static WITH_CONST_NEW: Mutex<u32> = Mutex::const_new(RawMutex::new(), 4
    |                                         |
    |                                         register this lock so it receives a per-lock statistics class
    |
-   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed; remove `mut`); see docs/code-guidelines/CG-002-static-mutex-registration.md
+   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed); see docs/code-guidelines/CG-002-static-mutex-registration.md
+   = help: write the initializer as `Mutex::new(..)`: `static_lock!` rewrites only `::new(..)`, not `const_new`
 
 error: static RwLock is not registered with static_lock!
   --> $DIR/unregistered_static_lock.rs:19:9
@@ -250,7 +275,8 @@ LL |         static E: ksync::RwLock<u32> = { ksync::RwLock::new(2) };
    |                                          |
    |                                          register this lock so it receives a per-lock statistics class
    |
-   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed; remove `mut`); see docs/code-guidelines/CG-002-static-mutex-registration.md
+   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed); see docs/code-guidelines/CG-002-static-mutex-registration.md
+   = help: write the initializer as a bare `::new(..)` call: `static_lock!` does not look inside `{ }` or `unsafe { }` blocks
 
 error: static Mutex is not registered with static_lock!
   --> $DIR/unregistered_static_lock.rs:25:24
@@ -260,7 +286,7 @@ LL |         static_lock! { static F: Mutex<u32> = Mutex::new(3); }
    |                                               |
    |                                               register this lock so it receives a per-lock statistics class
    |
-   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed; remove `mut`); see docs/code-guidelines/CG-002-static-mutex-registration.md
+   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed); see docs/code-guidelines/CG-002-static-mutex-registration.md
 
 error: static Mutex is not registered with static_lock!
   --> $DIR/unregistered_static_lock.rs:28:5
@@ -268,7 +294,7 @@ error: static Mutex is not registered with static_lock!
 LL |     ksync::declare_unregistered!(G);
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ register this lock so it receives a per-lock statistics class
    |
-   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed; remove `mut`); see docs/code-guidelines/CG-002-static-mutex-registration.md
+   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed); see docs/code-guidelines/CG-002-static-mutex-registration.md
    = note: this error originates in the macro `ksync::declare_unregistered` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: static Mutex is not registered with static_lock!
@@ -279,9 +305,21 @@ LL |     static H: <() as Types>::Lock = ksync::Mutex::new(4);
    |                                     |
    |                                     register this lock so it receives a per-lock statistics class
    |
-   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed; remove `mut`); see docs/code-guidelines/CG-002-static-mutex-registration.md
+   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed); see docs/code-guidelines/CG-002-static-mutex-registration.md
+   = help: spell the type as `Mutex<..>`: `static_lock!` identifies the lock by its written type name, so renamed imports, type aliases and projections do not compile under `stats`
 
-error: aborting due to 10 previous errors
+error: static Mutex is not registered with static_lock!
+  --> $DIR/unregistered_static_lock.rs:35:5
+   |
+LL |     static I: Db = Db::new(5);
+   |     ^^^^^^^^^^^^^^^-------^^^^
+   |                    |
+   |                    register this lock so it receives a per-lock statistics class
+   |
+   = help: rewrite as `static_lock! { static NAME: Mutex<T> = Mutex::new(arg); }` (use `RwLock` as needed); see docs/code-guidelines/CG-002-static-mutex-registration.md
+   = help: spell the type as `Mutex<..>`: `static_lock!` identifies the lock by its written type name, so renamed imports, type aliases and projections do not compile under `stats`
+
+error: aborting due to 11 previous errors
 
 "#;
 

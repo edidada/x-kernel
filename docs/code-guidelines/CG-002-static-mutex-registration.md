@@ -15,7 +15,7 @@ checks:
 - **How to check**:
   1. Find static items whose resolved type is `ksync::Mutex` or `ksync::RwLock` and whose outer initializer, after peeling statement-free `{ .. }` and `unsafe { .. }` blocks, directly calls `::new(..)` or `const_new(Raw*::new(), ..)`.
   2. Confirm the item was produced by the real `static_lock!` macro. Renamed imports are supported; a local macro with the same name is not.
-  3. Rewrite a reported item into the macro's accepted form: spell the type as `Mutex` or `RwLock`, use a direct `X::new(arg)` initializer, and remove `mut` from `static mut`.
+  3. Rewrite a reported item into the macro's accepted form; the diagnostic names each rewrite it needs. Spell the type as `Mutex` or `RwLock`: with `stats` the macro picks the lock kind from the written type name, so renamed imports, `type` aliases and projections do not compile. Use a bare `X::new(arg)` initializer rather than a block or `const_new`, and remove `mut` from `static mut`, which `static_lock!` rejects.
   4. For new or moved `Mutex` / `RwLock` / spin statics, also check `concurrency.md` lock construction (`static_lock!` vs `::new`).
 - **Exceptions**: Dylint allowances use the paired attributes in
   [README.md](README.md#suppressing-a-check).
