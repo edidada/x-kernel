@@ -168,13 +168,16 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
         prepare_wait: PrepareBlockWait,
         mmio_regs: Option<driver_core::IoMap>,
     ) -> DriverResult<Self> {
-        let _ = mmio_regs; // threaded to from_device below
         if cfg!(panic = "unwind") {
             return Err(DriverError::Unsupported);
         }
         let mut device = Self::init_device(transport)?;
         device.disable_interrupts();
-        Ok(Self::from_device(device, Some(prepare_wait), None))
+        // The register mapping rides the device object: dropping it HERE
+        // (passing None) would unmap the window while the transport still
+        // holds a raw pointer to it — queue notifies and interrupt acks
+        // after probe would touch unmapped memory.
+        Ok(Self::from_device(device, Some(prepare_wait), mmio_regs))
     }
 
     fn from_device(

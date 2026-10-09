@@ -72,6 +72,27 @@ done
 # KFEAT_DRIVER_RAMDISK_STATIC embeds an image at compile time
 # (include_bytes!(env!("XKERNEL_RAMDISK_IMG"))); the full build flow provides
 # one. Type-check it standalone with a small stub image.
+#
+# Cleanup contract: every temp path is declared EMPTY before anything can
+# fail (set -u makes the trap reference them safely) and the EXIT trap is
+# installed BEFORE the first mktemp — a dd failure under set -e used to
+# strand the stub image with no trap armed.
+STUB_IMG=""
+CFG_BAK=""
+XCONF_BAK=""
+# 2 = trim section not reached (leave .cargo alone); 1 = caller had
+# .xconfig.toml (restore it); 0 = trim replaced a nonexistent file (remove).
+XCONF_HAD=2
+cleanup() {
+    if [ -n "$CFG_BAK" ]; then cp "$CFG_BAK" .config 2>/dev/null || true; fi
+    if [ "$XCONF_HAD" = 1 ] && [ -n "$XCONF_BAK" ]; then
+        cp "$XCONF_BAK" .cargo/.xconfig.toml 2>/dev/null || true
+    elif [ "$XCONF_HAD" = 0 ]; then
+        rm -f .cargo/.xconfig.toml
+    fi
+    rm -f "$CFG_BAK" "$XCONF_BAK" "$STUB_IMG"
+}
+trap cleanup EXIT
 STUB_IMG="$(mktemp)"
 dd if=/dev/zero of="$STUB_IMG" bs=4096 count=1 status=none
 export XKERNEL_RAMDISK_IMG="$STUB_IMG"
@@ -101,14 +122,18 @@ declare -A CLASS_DRIVER=(
     [vsock]=KFEAT_DRIVER_VIRTIO_SOCKET
     [virtio-9p]=KFEAT_DRIVER_VIRTIO_9P
 )
+# The trap (installed above) restores the caller's build state on ANY
+# exit: a mid-loop abort under `set -e` used to leave the trim
+# configuration active, making every later bare make/cargo silently
+# build the wrong thing.
 CFG_BAK="$(mktemp)"
-XCONF_BAK="$(mktemp)"
-XCONF_HAD=0
-[ -f .cargo/.xconfig.toml ] && XCONF_HAD=1 && cp .cargo/.xconfig.toml "$XCONF_BAK"
-# Restore the caller's build state on ANY exit: a mid-loop abort under
-# `set -e` used to leave the trim configuration active, making every
-# later bare make/cargo silently build the wrong thing.
-trap 'cp "$CFG_BAK" .config 2>/dev/null || true; if [ "$XCONF_HAD" = 1 ]; then cp "$XCONF_BAK" .cargo/.xconfig.toml 2>/dev/null || true; else rm -f .cargo/.xconfig.toml; fi; rm -f "$CFG_BAK" "$XCONF_BAK" "$STUB_IMG"' EXIT
+if [ -f .cargo/.xconfig.toml ]; then
+    XCONF_BAK="$(mktemp)"
+    cp .cargo/.xconfig.toml "$XCONF_BAK"
+    XCONF_HAD=1
+else
+    XCONF_HAD=0
+fi
 cp .config "$CFG_BAK"
 for cls in block net display input hwrng vsock virtio-9p; do
     cp platforms/kplat-aarch64/qemu_defconfig .config

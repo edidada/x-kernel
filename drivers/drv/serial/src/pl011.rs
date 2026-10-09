@@ -50,6 +50,11 @@ pub struct Pl011Data {
     _port: Arc<SerialPort>,
     _regs: Option<IoMap>,
     _clk: Option<ClkHandle>,
+    /// The enabled-state token for auxiliary ports: dropping it balances
+    /// the prepare/enable pair (disable + unprepare) — the structural
+    /// counterpart of the stdout port's `keep_running` escape hatch. The
+    /// stdout path stores `None` (its token was consumed at probe).
+    _enabled_clk: Option<driver_core::EnabledClock>,
 }
 
 /// The driver ops (`struct amba_pl011_driver`).
@@ -97,26 +102,19 @@ impl DriverOps<PlatformBus> for Pl011Driver {
         {
             Some(spec) => {
                 let clk = dev.clk_spec(spec)?;
-                // The EnabledClock token owns the prepare+enable pair: a
-                // failure in ANYTHING below (irq registration, publication)
-                // drops it and rolls the clock back automatically — the
-                // review's "success enable, later probe failure" leak is
-                // closed. The token cannot outlive this borrow into Data,
-                // so at the end of a successful probe it either transfers
-                // to keep_running (stdout console continuity) or the
-                // enabled state is recorded for remove-time balance.
+                // The EnabledClock token owns the prepare+enable pair and
+                // stays ALIVE through every fallible step below (IRQ
+                // registration, publication): any failure drops it here
+                // and the clock rolls back (disable + unprepare). Only a
+                // fully successful probe hands the enabled state onward —
+                // stdout consumes it with `keep_running` (console
+                // continuity across rebind); auxiliary ports store the
+                // token in `Data`, whose drop balances it at remove.
                 let enabled = clk
                     .prepare_enable()
                     .map_err(ProbeError::from)
                     .inspect_err(|_| log::warn!("pl011: failed to enable clock"))?;
-                if matches!(port.role(), SerialRole::Stdout) {
-                    // Console continuity across rebind: the adopted stdout
-                    // port keeps its clock past removal. Explicit policy.
-                    enabled.keep_running();
-                } else {
-                    core::mem::forget(enabled);
-                }
-                Some(clk)
+                Some((clk, enabled))
             }
             None => {
                 log::debug!("pl011: no clock input described by firmware");
@@ -172,7 +170,7 @@ impl DriverOps<PlatformBus> for Pl011Driver {
                 ""
             },
             mmio.base,
-            clk.as_ref().map(|c| c.get_rate()).unwrap_or(0),
+            clk.as_ref().map(|(c, _)| c.get_rate()).unwrap_or(0),
             // Log the hardware line (the descriptor's hwirq): for
             // route-style specs the DevIrq number is 0 until the domain
             // mapping resolves it.
@@ -181,28 +179,37 @@ impl DriverOps<PlatformBus> for Pl011Driver {
                 .and_then(|spec| spec.hwirq)
                 .unwrap_or(usize::MAX),
         );
+        // The enabled-clock policy resolves only now, after EVERY fallible
+        // step has succeeded: stdout consumes the token (the adopted
+        // console keeps its clock past removal — explicit continuity
+        // policy); auxiliary ports carry the token in Data, and its Drop
+        // balances the prepare/enable pair at remove.
+        let (clk, enabled_clk) = match clk {
+            Some((handle, token)) => {
+                if matches!(port.role(), SerialRole::Stdout) {
+                    token.keep_running();
+                    (Some(handle), None)
+                } else {
+                    (Some(handle), Some(token))
+                }
+            }
+            None => (None, None),
+        };
         Ok(Pl011Data {
             _irq: irq,
             _port: port,
             _regs: regs,
             _clk: clk,
+            _enabled_clk: enabled_clk,
         })
     }
 
-    fn remove(&self, dev: &mut BoundDevice<'_, PlatformBus, Pl011Data>) {
+    fn remove(&self, _dev: &mut BoundDevice<'_, PlatformBus, Pl011Data>) {
         // Guards in `Data` release after this in field order. The clock
-        // needs an explicit balance first: its Drop releases the reference
-        // but does NOT disable — a prepared+enabled clock left behind keeps
-        // the provider on. The adopted stdout port deliberately stays
-        // running (console continuity across rebind); auxiliary ports
-        // balance their enable.
-        if let Some(clk) = dev.data_mut()._clk.take()
-            && clk.ops().is_enabled()
-        {
-            let ops = clk.ops();
-            ops.disable();
-            ops.unprepare();
-        }
+        // balance is structural: `_enabled_clk`'s Drop disables + unprepares
+        // auxiliary ports; the adopted stdout port deliberately keeps
+        // running (its token was consumed via `keep_running` at probe —
+        // console continuity across rebind).
     }
 }
 

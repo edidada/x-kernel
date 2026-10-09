@@ -394,13 +394,22 @@ impl BlockDevice {
     }
 
     /// Reads one block through the driver operations table.
+    ///
+    /// Same semantics as the trait method (method resolution on a
+    /// `&BlockDevice` receiver finds THIS one first): validate alignment
+    /// and capacity, translate through the view's `start_block` — never a
+    /// raw forward into the driver ops.
     pub fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
-        self.disk.operations.read_block(block_id, buf)
+        self.read_block_checked(block_id, buf)
     }
 
     /// Writes one block through the driver operations table.
+    ///
+    /// Same semantics as the trait method, including the read-only check:
+    /// `&BlockDevice` callers (kvfs `read_block_device`, fs/block) resolve
+    /// here, so an unvalidated forward would give one API two semantics.
     pub fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
-        self.disk.operations.write_block(block_id, buf)
+        self.write_block_checked(block_id, buf)
     }
 
     /// Flushes pending writes through the driver operations table.
@@ -550,6 +559,33 @@ impl BlockDevice {
         self.disk.name()
     }
 
+    /// Checked read: validate alignment/capacity, translate through the
+    /// view's `start_block`, then forward to the driver ops. The single
+    /// implementation behind BOTH the inherent method and the trait
+    /// method — one API, one semantics.
+    fn read_block_checked(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+        self.validate_io(block_id, buf.len())?;
+        let backend_block = self
+            .start_block
+            .checked_add(block_id)
+            .ok_or(DriverError::InvalidInput)?;
+        self.disk.read_block(backend_block, buf)
+    }
+
+    /// Checked write: read-only gate, validate, `start_block` translation,
+    /// then forward. See [`Self::read_block_checked`].
+    fn write_block_checked(&self, block_id: u64, buf: &[u8]) -> DriverResult {
+        if self.is_read_only() {
+            return Err(DriverError::ReadOnly);
+        }
+        self.validate_io(block_id, buf.len())?;
+        let backend_block = self
+            .start_block
+            .checked_add(block_id)
+            .ok_or(DriverError::InvalidInput)?;
+        self.disk.write_block(backend_block, buf)
+    }
+
     fn validate_io(&self, block_id: u64, len: usize) -> DriverResult<()> {
         let block_size = self.block_size();
         if block_size == 0 || !len.is_multiple_of(block_size) {
@@ -595,24 +631,11 @@ impl BlockDeviceOperations for BlockDevice {
     }
 
     fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
-        self.validate_io(block_id, buf.len())?;
-        let backend_block = self
-            .start_block
-            .checked_add(block_id)
-            .ok_or(DriverError::InvalidInput)?;
-        self.disk.read_block(backend_block, buf)
+        self.read_block_checked(block_id, buf)
     }
 
     fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
-        if self.is_read_only() {
-            return Err(DriverError::ReadOnly);
-        }
-        self.validate_io(block_id, buf.len())?;
-        let backend_block = self
-            .start_block
-            .checked_add(block_id)
-            .ok_or(DriverError::InvalidInput)?;
-        self.disk.write_block(backend_block, buf)
+        self.write_block_checked(block_id, buf)
     }
 
     fn flush(&self) -> DriverResult {

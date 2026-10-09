@@ -214,10 +214,46 @@ pub enum DevNodeEvent {
 pub type DevNodeCallback = Arc<dyn Fn(DevNodeEvent) + Send + Sync>;
 
 struct Registry {
-    nodes: Vec<DevNode>,
+    nodes: Vec<RegistryEntry>,
     subscribers: Vec<DevNodeCallback>,
     lifecycle_publisher: Option<DevNodeCallback>,
 }
+
+/// Registry entry plus the dispatch handshake flag (see [`DISPATCH_ORDER`]).
+struct RegistryEntry {
+    node: DevNode,
+    /// Whether the `Added` event for this node has been dispatched (by its
+    /// registering thread, or taken over by a withdraw). Lives ONLY here —
+    /// never on the public `DevNode` — so it cannot leak into subscriber
+    /// comparisons.
+    added_dispatched: bool,
+}
+
+/// Serializes EVENT DISPATCH ORDER (not registry mutation): `Added`,
+/// `Removing`, `Removed` for one id become observable in that order while
+/// NO dispatch runs under the registry spinlock.
+///
+/// Why not dispatch under `REGISTRY`: the registry lock is
+/// `SpinNoPreempt` (preemption disabled), and the subscribers are real
+/// projection layers that may block — devfs takes a task-context `Mutex`
+/// (real sleep on contention), sysfs rebuilds its tree, uevent allocates
+/// and sends. Sleeping with preemption disabled can wedge a core. The
+/// same reasoning as `withdraw`'s lock-free dispatch, now applied to
+/// `Added`.
+///
+/// Why the order lock at all: inserting and dispatching `Added` in two
+/// steps reopens the historical reorder — a concurrent `withdraw` could
+/// finish its whole Removing → Removed → delete sequence before the
+/// `Added` dispatch, showing subscribers a device the registry no longer
+/// had. Every dispatch path takes this lock first and re-checks the
+/// entry's `added_dispatched` under it, so an `Added` is dispatched
+/// exactly once, always before that node's `Removing`. A withdraw that
+/// finds the `Added` still pending takes it over itself, in order.
+///
+/// Contract: subscriber callbacks must NOT re-enter devnode
+/// register/withdraw — they would self-deadlock on this mutex. (Verified
+/// today: subscribers are devfs/sysfs/uevent projections.)
+static DISPATCH_ORDER: ksync::Mutex<()> = ksync::Mutex::new(());
 
 static REGISTRY: SpinNoPreempt<Registry> = SpinNoPreempt::new(Registry {
     nodes: Vec::new(),
@@ -295,7 +331,7 @@ pub fn publish_auto_indexed(
     // The duplicate check must run BEFORE registering: checking afterwards
     // would always find the id we just inserted (and hand the freshly
     // allocated index straight back).
-    if REGISTRY.lock().nodes.iter().any(|n| n.id == id) {
+    if REGISTRY.lock().nodes.iter().any(|e| e.node.id == id) {
         return Err(PublishError::AlreadyExists);
     }
     let index = INDEX_POOLS
@@ -394,23 +430,47 @@ pub(crate) enum RegisterOutcome {
 }
 
 fn register_and_dispatch(node: DevNode) -> RegisterOutcome {
-    // Insert AND dispatch Added under one registry hold: releasing the lock
-    // between them let a concurrent withdraw finish its whole Removing →
-    // Removed → delete sequence BEFORE the Added dispatch — subscribers
-    // observed a device appear that the registry no longer had. The
-    // subscribers are projection layers (devfs/sysfs/uevent) that do not
-    // re-enter the devnode registry (verified: only pure helpers like
-    // physical_path_pci), so holding the spinlock across dispatch is sound;
-    // any future subscriber that needs registry re-entry must queue.
-    let mut registry = REGISTRY.lock();
-    if let Some(existing) = registry.nodes.iter().find(|n| n.id == node.id) {
-        let existing = existing.clone();
-        return RegisterOutcome::DuplicateId(existing);
+    // Insert under the registry lock, dispatch Added OUTSIDE it (see
+    // DISPATCH_ORDER). The handshake: the dispatch claim and the
+    // subscriber snapshot are taken in ONE registry critical section while
+    // holding the dispatch-order mutex, so an `Added` is never dispatched
+    // twice (a withdraw between our insert and dispatch either waits on
+    // DISPATCH_ORDER behind us, or has already taken the dispatch over and
+    // flipped the flag — then we skip).
+    {
+        let mut registry = REGISTRY.lock();
+        if let Some(existing) = registry.nodes.iter().find(|e| e.node.id == node.id) {
+            let existing = existing.node.clone();
+            return RegisterOutcome::DuplicateId(existing);
+        }
+        registry.nodes.push(RegistryEntry {
+            node: node.clone(),
+            added_dispatched: false,
+        });
     }
-    registry.nodes.push(node.clone());
-    let subscribers = registry.subscribers.clone();
-    let publisher = registry.lifecycle_publisher.clone();
-    dispatch_added(&node, subscribers, publisher);
+    let _order = DISPATCH_ORDER.lock();
+    let dispatch = {
+        let mut registry = REGISTRY.lock();
+        let Some(entry) = registry.nodes.iter_mut().find(|e| e.node.id == node.id) else {
+            // A withdraw took the dispatch over AND removed the node while
+            // we waited for the order mutex — nothing left to announce.
+            return RegisterOutcome::Registered(node);
+        };
+        if entry.added_dispatched {
+            // The id was withdrawn and re-published (index reuse): the new
+            // publication's thread owns the dispatch.
+            None
+        } else {
+            entry.added_dispatched = true;
+            Some((
+                registry.subscribers.clone(),
+                registry.lifecycle_publisher.clone(),
+            ))
+        }
+    };
+    if let Some((subscribers, publisher)) = dispatch {
+        dispatch_added(&node, subscribers, publisher);
+    }
     RegisterOutcome::Registered(node)
 }
 
@@ -418,7 +478,7 @@ fn register_and_dispatch(node: DevNode) -> RegisterOutcome {
 pub fn withdraw(id: u64) {
     let node = {
         let mut registry = REGISTRY.lock();
-        let Some(node) = registry.nodes.iter_mut().find(|n| n.id == id) else {
+        let Some(entry) = registry.nodes.iter_mut().find(|e| e.node.id == id) else {
             return;
         };
         // Single teardown owner: the FIRST withdraw flips availability;
@@ -426,26 +486,49 @@ pub fn withdraw(id: u64) {
         // false and returns — previously both dispatchers ran Removing/
         // Removed and both released the class index (a reused index could
         // be freed while its new owner was live).
-        if !node.available {
+        if !entry.node.available {
             return;
         }
-        node.available = false;
-        node.clone()
+        entry.node.available = false;
+        entry.node.clone()
     };
-    let (subscribers, publisher) = {
-        let registry = REGISTRY.lock();
+    // All teardown dispatches run under DISPATCH_ORDER so an in-flight
+    // `Added` cannot be overtaken (subscribers must observe Added before
+    // Removing for this node). If the Added is still pending — the
+    // registering thread has not dispatched it — this withdraw takes it
+    // over and dispatches it here, in order, exactly once: the register
+    // thread re-checks `added_dispatched` under this mutex and skips.
+    let _order = DISPATCH_ORDER.lock();
+    let (subscribers, publisher, dispatch_added_first) = {
+        let mut registry = REGISTRY.lock();
+        let take_over_added = registry
+            .nodes
+            .iter_mut()
+            .find(|e| e.node.id == id)
+            .is_some_and(|entry| {
+                if entry.added_dispatched {
+                    false
+                } else {
+                    entry.added_dispatched = true;
+                    true
+                }
+            });
         (
             registry.subscribers.clone(),
             registry.lifecycle_publisher.clone(),
+            take_over_added,
         )
     };
+    if dispatch_added_first {
+        dispatch_added(&node, subscribers.clone(), publisher.clone());
+    }
     for subscriber in &subscribers {
         subscriber(DevNodeEvent::Removing(node.clone()));
     }
     if let Some(publisher) = publisher {
         publisher(DevNodeEvent::Removed(node.clone()));
     }
-    REGISTRY.lock().nodes.retain(|n| n.id != id);
+    REGISTRY.lock().nodes.retain(|e| e.node.id != id);
     for subscriber in subscribers {
         subscriber(DevNodeEvent::Removed(node.clone()));
     }
@@ -464,8 +547,8 @@ pub fn nodes() -> Vec<DevNode> {
         .lock()
         .nodes
         .iter()
-        .filter(|n| n.available)
-        .cloned()
+        .filter(|e| e.node.available)
+        .map(|e| e.node.clone())
         .collect()
 }
 
@@ -476,8 +559,8 @@ pub fn subscribe(callback: DevNodeCallback) -> Vec<DevNode> {
     registry
         .nodes
         .iter()
-        .filter(|n| n.available)
-        .cloned()
+        .filter(|e| e.node.available)
+        .map(|e| e.node.clone())
         .collect()
 }
 
@@ -535,4 +618,107 @@ pub fn physical_path(location: &DeviceLocation) -> String {
 
 pub fn physical_path_pci(segment: u16, bus: u8, device: u8, function: u8) -> String {
     format!("pci{segment:04x}:{bus:02x}/{segment:04x}:{bus:02x}:{device:02x}.{function}")
+}
+
+#[unittest::mod_test]
+mod dispatch_order_tests {
+    //! The dispatch-order protocol: NO event dispatch runs under the
+    //! registry spinlock (subscribers are projection layers that may
+    //! block — devfs's task-context Mutex, sysfs rebuilds), and
+    //! Added stays observable before Removing/Removed.
+    //!
+    //! Re-entry contract tested here: subscribers may READ the registry
+    //! (`nodes()`) from inside a callback. Under the old protocol the
+    //! Added dispatch held the SpinNoPreempt registry lock, so this
+    //! re-entrant read self-deadlocked on the same CPU.
+
+    use alloc::{
+        string::{String, ToString},
+        sync::Arc,
+        vec,
+        vec::Vec,
+    };
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use ksync::Mutex;
+    use unittest::{assert_eq, def_test};
+
+    use super::{DevNodeEvent, DeviceNumber, publish, withdraw};
+
+    #[def_test]
+    fn added_dispatch_runs_outside_the_registry_lock() {
+        // A subscriber reading the registry from INSIDE its Added callback
+        // must not deadlock: the callback runs outside REGISTRY, under
+        // DISPATCH_ORDER only (reads take REGISTRY briefly — no cycle).
+        let reentered = Arc::new(AtomicBool::new(false));
+        let order = Arc::new(AtomicUsize::new(0));
+        let (re_flag, order_flag) = (reentered.clone(), order.clone());
+        let _sub = crate::subscribe(Arc::new(move |event| {
+            if let DevNodeEvent::Added(node) = event {
+                // Re-entrant registry read — the assertion this test exists
+                // for (deadlocks under the old dispatch-under-lock).
+                re_flag.store(
+                    crate::nodes().iter().any(|n| n.id == node.id),
+                    Ordering::Release,
+                );
+                order_flag.store(1, Ordering::Release);
+            }
+        }));
+
+        let node = publish(
+            0x1d01,
+            "dispatch_test",
+            String::from("reentry0"),
+            DeviceNumber(0x1d0),
+            "platform/dispatch-test",
+            None,
+            Vec::new(),
+            None,
+        );
+        assert!(reentered.load(Ordering::Acquire));
+        assert_eq!(order.load(Ordering::Acquire), 1);
+        withdraw(node.id);
+    }
+
+    #[def_test]
+    fn added_is_observed_before_removing_and_removed() {
+        // Event order per node: Added → Removing → Removed. The take-over
+        // path (a withdraw racing a pending Added dispatch) preserves the
+        // same order by construction — it serializes on DISPATCH_ORDER.
+        // The registry is process-global and earlier tests may still hold
+        // subscriptions: record only THIS node's events.
+        let watched = 0x1d02u64;
+        let seq = Arc::new(Mutex::new(Vec::new()));
+        let seq2 = seq.clone();
+        let _sub = crate::subscribe(Arc::new(move |event| {
+            let (label, id) = match event {
+                DevNodeEvent::Added(n) => ("added", n.id),
+                DevNodeEvent::Removing(n) => ("removing", n.id),
+                DevNodeEvent::Removed(n) => ("removed", n.id),
+            };
+            if id == watched {
+                seq2.lock().push(label);
+            }
+        }));
+
+        let node = publish(
+            0x1d02,
+            "dispatch_test",
+            String::from("order0"),
+            DeviceNumber(0x1d1),
+            "platform/dispatch-test",
+            None,
+            Vec::new(),
+            None,
+        );
+        withdraw(node.id);
+        assert_eq!(
+            *seq.lock(),
+            vec![
+                "added".to_string(),
+                "removing".to_string(),
+                "removed".to_string()
+            ]
+        );
+    }
 }

@@ -28,8 +28,9 @@ pub(crate) fn map_driver_error(err: driver_base::DriverError) -> ProbeError {
 /// Format the DEVPATH physical path from a location (the same string the
 /// devnode registry stores).
 pub(crate) fn physical_path(location: DeviceLocation) -> String {
-    // The DEVPATH format lives in devnode exactly once; this is a plain
-    // adapter over the core→devnode location conversion we already do.
+    // The DEVPATH format lives in devnode exactly once. `devnode` re-exports
+    // the location type from driver-core, so this passes the SAME type
+    // straight through — no adapter or conversion layer.
     devnode::physical_path(&location)
 }
 

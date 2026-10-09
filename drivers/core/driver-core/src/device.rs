@@ -413,7 +413,7 @@ impl ClkHandle {
     /// paths (request_irq/class publication errors AFTER a successful
     /// enable) with no rollback; remove-time cleanup relied on reading the
     /// provider's current state instead of local ownership.
-    pub fn prepare_enable(&self) -> Result<EnabledClock<'_>, RuntimeError> {
+    pub fn prepare_enable(&self) -> Result<EnabledClock, RuntimeError> {
         self.ops.prepare()?;
         if let Err(err) = self.ops.enable() {
             // Roll back the prepare: a failed enable must not leave the
@@ -422,7 +422,9 @@ impl ClkHandle {
             self.ops.unprepare();
             return Err(err);
         }
-        Ok(EnabledClock { handle: self })
+        Ok(EnabledClock {
+            ops: Arc::clone(&self.ops),
+        })
     }
 
     pub fn ops(&self) -> &dyn ClkOps {
@@ -437,11 +439,16 @@ impl ClkHandle {
 /// hold the clock past device removal (the adopted stdout port's console
 /// continuity policy). Every other path lets the token drop: probe failure
 /// rolls back automatically, `remove` drops it from `Data`.
-pub struct EnabledClock<'a> {
-    handle: &'a ClkHandle,
+///
+/// The token OWNS a clone of the handle's operations arc (not a borrow):
+/// it is `'static` and can live in driver `Data`, so the balance is
+/// structural — no `remove`-time "is it still enabled?" re-reading of
+/// provider state.
+pub struct EnabledClock {
+    ops: Arc<dyn ClkOps>,
 }
 
-impl EnabledClock<'_> {
+impl EnabledClock {
     /// Consume the token WITHOUT disabling: the caller takes explicit,
     /// permanent ownership of the enabled state. Use only when the clock
     /// must outlive the device binding (stdout console).
@@ -450,10 +457,10 @@ impl EnabledClock<'_> {
     }
 }
 
-impl Drop for EnabledClock<'_> {
+impl Drop for EnabledClock {
     fn drop(&mut self) {
-        self.handle.ops.disable();
-        self.handle.ops.unprepare();
+        self.ops.disable();
+        self.ops.unprepare();
     }
 }
 

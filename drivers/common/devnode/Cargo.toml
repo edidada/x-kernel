@@ -12,6 +12,7 @@ categories = ["os", "no-std"]
 
 [dependencies]
 kspin.workspace = true
+ksync.workspace = true
 log.workspace = true
 driver-core = { workspace = true }
 unittest = { workspace = true }
