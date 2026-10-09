@@ -25,6 +25,13 @@ can still prevent receive progress.
 
 ## Trust Model
 
+The IPv4 filter model validates owned kernel values before constructing an
+immutable table. Rule and chain constructors establish local invariants;
+table construction checks aggregate limits, hook coverage, and the jump graph.
+These limits bound accepted policies and validation work. Callers must bound
+input allocation before construction. Userspace decoding and packet evaluation
+lie outside this model.
+
 The prepared poller Work and its private NormalQueue live for the kernel
 lifetime. Initialization prepares storage before NIC notification sources can
 call it, and queue startup follows network state initialization. An IRQ-safe

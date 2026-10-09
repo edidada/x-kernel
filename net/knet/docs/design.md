@@ -36,6 +36,12 @@ net/knet/
     │   ├── mod.rs
     │   ├── packet.rs
     │   └── wire.rs
+    ├── netfilter/
+    │   ├── mod.rs
+    │   └── filter/
+    │       ├── mod.rs
+    │       ├── matcher.rs
+    │       └── model.rs
     ├── netlink/
     │   ├── mod.rs
     │   ├── rtnetlink.rs
@@ -213,6 +219,19 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 | kclass network device · NIC driver | Exposes the registered NIC and performs hardware packet I/O. |
 | kclass vsock device · virtio-vsock driver | Exposes the registered vsock device and transports guest-host packets. |
 
+### IPv4 Filter Table Model
+
+`netfilter/filter` stores IPv4 filtering policies as immutable tables of ordered
+rules. Each table has INPUT, FORWARD, and OUTPUT chains for the LOCAL_IN,
+FORWARD, and LOCAL_OUT hooks, plus named user chains. Rules hold match conditions
+and a target; jumps refer to user chains by table-local `ChainId` values.
+Match conditions live in `matcher.rs`; rules, chains, and tables live in `model.rs`.
+
+Rules validate extension counts and protocol compatibility, chains validate
+their names, and tables enforce name uniqueness, hook coverage, aggregate limits,
+and jump-graph constraints. Tables allow at most 256 chains, 4096 rules,
+16 extensions per rule, 29-byte chain names, and eight nested jumps.
+
 ## Calling Constraints and Execution Context
 
 `knet` runs in kernel context, but different code paths have different execution-context requirements. Callers must follow the constraints below.
@@ -228,6 +247,11 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 * **Normal protocol processing runs in task context**
 
   Paths such as `NetworkPoller::assist_once`, socket `send` / `recv` / `connect` / `accept`, and netlink mutations may acquire `Mutex` or `RwLock` objects and may execute relatively heavy data-plane work. These paths must run in normal task context.
+
+* **IPv4 filter model construction**
+
+  Construct filter policies in task context after allocator initialization.
+  Table validation allocates temporary storage.
 
 * **IRQ handlers only signal RX work**
 
@@ -594,6 +618,13 @@ In the `SCHEDULED` state, the reusable static Work of `knet-poller` and socket a
 `Interface::poll_at` and TCP deferred close share the protocol timer source, while the IPv4 reassembly queue uses a separate timer source. When a timer expires, it schedules the poller and wakes tasks waiting for socket readiness.
 
 ## Algorithms
+
+### IPv4 Filter Jump-Graph Validation
+
+The jump graph is checked with iterative topological traversal. Traversal
+counts processed chains to detect cycles and propagates longest-path lengths
+to enforce the eight-jump limit. It visits the entire table, including user
+chains unreachable from built-in hooks.
 
 ### Prepared Polling Work
 
@@ -965,6 +996,7 @@ Implementation details: [packet.rs](../src/link/packet.rs), [rtnetlink.rs](../sr
 
 | Resource / trigger | Cleanup and remaining state |
 |---|---|
+| IPv4 filter table drop | Releases owned chains, rules, and match values. Construction scratch storage is temporary. |
 | TCP file close | Removes a `Closed` handle immediately when no reset is pending. Unread RX data causes abort, with the handle retained until RST is sent. Other handles remain in deferred close while the poller completes transmission and closure. Detached connections receive a 60-second reclamation deadline only in `FIN_WAIT_2`. |
 | TCP listener close | Marks the listener closed, drains child handles, and removes them from `SOCKET_SET`. |
 | Unix stream listener drop | Closes the listener queue, wakes waiters, clears the binding slot, and releases pending requests and ring buffers. |
