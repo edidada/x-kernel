@@ -407,3 +407,36 @@ usage、`used_bytes()` 和 `used_pages()` 分别反映不同层次，且读取�
 - PCP 和 slab cache 在达到各自水位时批量归还，但没有 shutdown、CPU-offline 或全局
   pressure flush。
 - 直接 page API 的 caller 必须显式成对 deallocate；`GlobalPage` 通过 `Drop` 自动完成。
+
+## Shared Base-Page Lifetime
+
+`alloc_frame` / `alloc_zeroed_frame` produce `FrameRef` for exactly one 4 KiB page.
+Each descriptor stores an atomic lifetime word plus an allocation category. The
+category is immutable while references exist; release publication of the initial
+reference and acquisition when reconstructing a transferred raw reference publish it.
+Clone is checked against the reference limit and never allocates another control block.
+
+The protocol is Unshared → Initializing → Shared(n) → Retiring → Unshared. Unshared
+is not free-state certification: raw owners, heaps and PCP still use that state.
+The last holder wins a single CAS into Retiring, acquiring earlier holders' releases.
+It captures provenance, resets to Unshared before inventory publication, then returns
+one page and records one free. No metadata reset occurs after a page is reusable.
+
+`FrameRef` provides PA, PFN and kernel-address values, not arbitrary mutable Rust
+slices. It guarantees lifetime, not content exclusivity, COW eligibility or mapping
+invalidation. Consumers must keep references until their I/O/device/translation use
+is finished. This change does not migrate user-PTE ownership or repair truncate.
+
+Raw page and DMA release validate the whole range before accounting or PCP/buddy
+mutation. A Shared, Initializing, Retiring or Permanent slot is rejected. This is an
+admission guard, not proof of legacy raw provenance or complete double-free detection.
+The range check is linear in the number of base pages, with one segment lookup.
+Global PCP belongs only to GLOBAL_ALLOCATOR; independently initialized allocators
+use their central inventory, so fixtures and private owners cannot exchange pages.
+
+`into_raw` is available only for static allocators: it transfers one reference without
+changing its count. Unsafe `frame_from_raw` consumes that precise outstanding reference;
+a descriptor lookup or a raw alloc_pages address is insufficient. Per-page accounting
+survives the last holder changing CPU; clone/transfer do not account again. FrameRef
+allocations charge a complete page even for RustHeap, unlike byte-heap backing requests.
+Multi-page/huge-page ownership and compound-page splitting remain outside this API.

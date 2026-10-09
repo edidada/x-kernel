@@ -330,3 +330,30 @@ NoMemory，不静默退回无描述符模式。指针初始化逐项构造原子
 
 验证覆盖物理空洞、向内对齐、相邻合并、范围/算术错误、重复初始化、元数据库存守恒和
 buddy 位图保留。元数据永久占用量在启动日志中可观测，不算作可分配 free pages。
+
+## Shared Reference Boundary
+
+The descriptor count uses reserved encodings for Permanent, Initializing and Retiring.
+A new reference originates from exclusive allocator ownership, an existing FrameRef,
+or an unsafe, exactly-once restoration of an into_raw transfer. Safe PFN lookup never
+revives allocations. Refcount overflow returns NoMemory without changing the owner.
+
+Non-final releases are Release CAS operations; the unique final CAS is AcqRel and
+observes prior holders before reuse. Category state is changed only while exclusive
+initialization owns the page, then published before the first reference. The retiring
+holder is the only inventory publisher, and it never resets metadata after publication.
+
+The Rust lifetime ties non-static FrameRef values to their allocator. Raw reference
+transfers require a static allocator so its registry cannot disappear before hardware
+or foreign owners retire the reference. frame_from_raw's unsafe contract also requires
+the same allocation incarnation: an old physical address cannot authorize a new object.
+
+Raw release checks every slot before accounting and rejects the complete request on
+a referenced, permanent, missing or invalid range. Existing raw free APIs still rely
+on their trusted caller's matching size and ownership, and cannot detect every stale
+address/double free. Mapping references, TLB completion and data aliasing are not
+inferred from a positive count; the caller retains these separate obligations.
+
+Tests cover clone/last release with real inventory reuse, whole-range raw rejection,
+permanent backing, zeroing, category accounting, overflow, and exactly-once raw transfer.
+Usage assertions use guarded per-CPU deltas instead of unstable global snapshots.

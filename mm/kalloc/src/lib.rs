@@ -51,7 +51,7 @@ mod page;
 mod pcp;
 #[cfg(feature = "slab")]
 mod slab_cache;
-pub use frame::{FrameBootstrapInfo, FrameMeta, FrameRegion};
+pub use frame::{FrameBootstrapInfo, FrameMeta, FrameRef, FrameRegion, FrameState};
 pub use page::GlobalPage;
 
 #[cfg(feature = "tracking")]
@@ -630,7 +630,10 @@ impl GlobalAllocator {
         );
 
         // Fast path: 1–4 pages with standard alignment -> PCP cache.
-        if (1..=pcp::PCP_MAX_PAGES).contains(&num_pages) && align_pow2 <= PAGE_SIZE_4K {
+        if core::ptr::eq(self, &GLOBAL_ALLOCATOR)
+            && (1..=pcp::PCP_MAX_PAGES).contains(&num_pages)
+            && align_pow2 <= PAGE_SIZE_4K
+        {
             let mut local_owner = AllocLocalOwner::acquire();
             if let Some(addr) = pcp::try_alloc(&mut local_owner, num_pages) {
                 drop(local_owner);
@@ -663,6 +666,68 @@ impl GlobalAllocator {
             self.record_usage_alloc(kind, pages_to_bytes(num_pages));
         }
         Ok(addr)
+    }
+
+    /// Allocates one base page with a shared lifetime reference.
+    ///
+    /// Requires descriptor-backed initialization. Every category is charged
+    /// one page until the last reference ends; cloning does not charge again.
+    /// The returned page is uninitialized and has not been published to any
+    /// other user. This does not allocate a separate metadata control block.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotInitialized` before descriptor-backed handoff, or `NoMemory`
+    /// when page inventory cannot satisfy the request. No reclaim is attempted.
+    pub fn alloc_frame(&self, kind: UsageKind) -> AllocResult<FrameRef<'_>> {
+        if !self.page_ready.load(Ordering::Acquire) {
+            return Err(AllocError::NotInitialized);
+        }
+        let registry = self.frames.get().ok_or(AllocError::NotInitialized)?;
+        let va = self.alloc_pages(1, PAGE_SIZE_4K, kind)?;
+        let paddr = registry
+            .physical_address(va.into())
+            .expect("allocator returned a page outside resident frame coverage");
+        // SAFETY: alloc_pages returned exclusive one-page storage from this
+        // allocator. It is still unpublished and has no other live owner.
+        let frame = unsafe { FrameRef::from_allocation(self, paddr, kind) };
+        if matches!(kind, UsageKind::RustHeap) {
+            // Raw page backing skips RustHeap accounting because byte callers
+            // account their layouts; a FrameRef directly owns the whole page.
+            self.record_usage_alloc(kind, PAGE_SIZE_4K);
+        }
+        Ok(frame)
+    }
+
+    /// Allocates one zero-filled base page with a shared lifetime reference.
+    pub fn alloc_zeroed_frame(&self, kind: UsageKind) -> AllocResult<FrameRef<'_>> {
+        let frame = self.alloc_frame(kind)?;
+        // SAFETY: this newly allocated page has one unpublished owner and no
+        // content aliases. Its stable mapping covers exactly one writable page.
+        unsafe { core::ptr::write_bytes(frame.kernel_addr().as_mut_ptr(), 0, PAGE_SIZE_4K) };
+        Ok(frame)
+    }
+
+    /// Consumes a previously transferred raw reference without incrementing it.
+    ///
+    /// # Safety
+    ///
+    /// `paddr` must own exactly one unreconstructed reference from
+    /// `FrameRef::into_raw` on this static allocator and allocation instance.
+    /// The reference must not have been freed, and required mapping/device
+    /// completion must precede dropping the reconstructed owner. A bare PFN,
+    /// raw `alloc_pages` address or descriptor lookup does not meet this contract.
+    pub unsafe fn frame_from_raw(&'static self, paddr: memaddr::PhysAddr) -> FrameRef<'static> {
+        // SAFETY: the caller owns the exact outstanding reference transferred
+        // by into_raw on this static allocator and consumes it only once.
+        unsafe { FrameRef::from_transferred_reference(self, paddr) }
+    }
+
+    fn validate_raw_page_release(&self, va: usize, num_pages: usize) -> AllocResult {
+        if let Some(registry) = self.frames.get() {
+            registry.validate_raw_release(va.into(), num_pages)?;
+        }
+        Ok(())
     }
 
     /// Allocates contiguous DMA pages.
@@ -727,15 +792,26 @@ impl GlobalAllocator {
     /// should be the same as the one used in [`alloc_pages`]. Otherwise, the
     /// behavior is undefined.
     ///
+    /// In descriptor-backed allocators, every slot is checked before accounting
+    /// or inventory mutation. Referenced and permanent pages must not be freed
+    /// through this raw interface; misuse panics. This check does not prove raw
+    /// allocation provenance or detect all stale-address/double frees.
+    ///
     /// 1–4 page deallocations are cached per-CPU to reduce global lock
     /// contention.
     ///
     /// [`alloc_pages`]: GlobalAllocator::alloc_pages
     pub fn dealloc_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
+        self.validate_raw_page_release(va, num_pages)
+            .expect("raw deallocation cannot return a referenced or permanent frame");
+        self.dealloc_pages_inner(va, num_pages, kind);
+    }
+
+    fn dealloc_pages_inner(&self, va: usize, num_pages: usize, kind: UsageKind) {
         self.record_usage_dealloc(kind, pages_to_bytes(num_pages));
 
         // Fast path: 1–4 pages -> try to cache them per-CPU.
-        if (1..=pcp::PCP_MAX_PAGES).contains(&num_pages) {
+        if core::ptr::eq(self, &GLOBAL_ALLOCATOR) && (1..=pcp::PCP_MAX_PAGES).contains(&num_pages) {
             let mut local_owner = AllocLocalOwner::acquire();
             if pcp::try_free(&mut local_owner, num_pages, va) {
                 return;
@@ -757,6 +833,8 @@ impl GlobalAllocator {
 
     /// Gives back the allocated DMA pages starts from `va` to the DMA page allocator.
     pub fn dealloc_dma_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
+        self.validate_raw_page_release(va, num_pages)
+            .expect("raw DMA deallocation cannot return a referenced or permanent frame");
         self.record_usage_dealloc(kind, pages_to_bytes(num_pages));
         self.palloc.lock().deallocate_pages(va, num_pages);
     }

@@ -4,10 +4,11 @@
 
 use core::{ptr::NonNull, sync::atomic::Ordering};
 
-use memaddr::{PAGE_SIZE_4K, VirtAddr};
+use alloc_engine::{AllocError, AllocResult};
+use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
 
 use super::{
-    FrameMeta, PERMANENT,
+    FrameMeta, PERMANENT, UNSHARED,
     region::{FramePlan, MAX_REGIONS},
 };
 
@@ -99,6 +100,40 @@ impl FrameRegistry {
         }
         let pfn = pa / PAGE_SIZE_4K;
         self.lookup(pfn).map(|_| pfn)
+    }
+
+    pub(crate) fn mapped_address(&self, pfn: usize) -> VirtAddr {
+        debug_assert!(self.lookup(pfn).is_some());
+        VirtAddr::from_usize(pfn * PAGE_SIZE_4K + self.linear_offset)
+    }
+
+    pub(crate) fn physical_address(&self, vaddr: VirtAddr) -> Option<PhysAddr> {
+        self.pfn_for_va(vaddr)
+            .map(|pfn| PhysAddr::from_usize(pfn * PAGE_SIZE_4K))
+    }
+
+    pub(crate) fn validate_raw_release(&self, start: VirtAddr, pages: usize) -> AllocResult {
+        if pages == 0 {
+            return Ok(());
+        }
+        let pfn = self.pfn_for_va(start).ok_or(AllocError::NotFound)?;
+        let end_pfn = pfn.checked_add(pages).ok_or(AllocError::InvalidInput)?;
+        let segments = &self.segments[..self.count];
+        let upper = segments.partition_point(|segment| segment.start_pfn <= pfn);
+        let segment = &segments[upper - 1];
+        if end_pfn > segment.end_pfn {
+            return Err(AllocError::NotFound);
+        }
+        let first = segment.first_index + pfn - segment.start_pfn;
+        for index in first..first + pages {
+            // SAFETY: the checked range lies within one initialized segment;
+            // metadata backing outlives the registry and only atomics are read.
+            let meta = unsafe { &*self.descriptors.as_ptr().add(index) };
+            if meta.refs.load(Ordering::Acquire) != UNSHARED {
+                return Err(AllocError::NotAllocated);
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn reserve(&self, start: VirtAddr, pages: usize) {
