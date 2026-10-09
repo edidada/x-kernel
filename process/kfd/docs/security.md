@@ -72,3 +72,13 @@ are intentionally stale, and external `Arc`s may delay final close.
 - Preserve per-descriptor flags when cloning tables.
 - Do not authorize current-FD operations from stale snapshots.
 - Validate actual byte initialization at metadata copyout boundaries.
+
+## Record-lock lifecycle invariants
+
+A copied table must never copy the record owner. Every removal must use `remove`
+so closing another descriptor to the same inode releases all of this owner's
+records. The table lock precedes the record-registry mutex; no record wait can
+hold either. File snapshots preserve storage only and must not authorize acquisition
+on a reused descriptor. Registry cleanup precedes external flush, including error
+paths, so a failed flush cannot keep an advisory lock. Shared table teardown releases
+records only when entries are actually removed or the final table owner disappears.

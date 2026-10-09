@@ -10,19 +10,21 @@ use core::ffi::c_int;
 use flatten_objects::FlattenObjects;
 use kerrno::{KError, KResult};
 use ksync::RwLock;
-use kvfs::VfsFile;
+use kvfs::{VfsFile, record_lock::RecordLockOwner};
 
 use crate::{FdSnapshot, FileDescriptor};
 
 /// Process-local file descriptor table.
 pub struct FdTable {
     entries: FlattenObjects<FileDescriptor, { krlimit::FILE_LIMIT }>,
+    record_lock_owner: RecordLockOwner,
 }
 
 impl Default for FdTable {
     fn default() -> Self {
         Self {
             entries: FlattenObjects::new(),
+            record_lock_owner: RecordLockOwner::default(),
         }
     }
 }
@@ -77,7 +79,18 @@ impl FdTable {
 
     /// Removes the descriptor entry at the given index.
     pub(crate) fn remove(&mut self, fd: usize) -> Option<FileDescriptor> {
-        self.entries.remove(fd)
+        let descriptor = self.entries.remove(fd)?;
+        self.record_lock_owner
+            .release_file(descriptor.file().inode());
+        Some(descriptor)
+    }
+
+    /// Returns the advisory record-lock owner shared by this descriptor table.
+    ///
+    /// Hold the table lock while querying or acquiring records so a concurrent
+    /// close cannot leave a newly acquired record without a descriptor.
+    pub fn record_lock_owner(&self) -> &RecordLockOwner {
+        &self.record_lock_owner
     }
 
     /// Clones the table contents from another descriptor table.

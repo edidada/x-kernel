@@ -85,3 +85,22 @@ Merely dropping that value releases its `Arc` but is not the explicit descriptor
 flush operation. `FdTable::drop` removes and closes all remaining descriptors,
 ignoring individual close errors so one failure cannot prevent other cleanup.
 A snapshot or cloned table owner can intentionally delay final file release.
+
+## Record-lock ownership
+
+Every table constructs one `kvfs::record_lock::RecordLockOwner`. Table sharing also
+shares this owner; cloning slots constructs a fresh owner, so fork does not inherit
+held records. `remove` releases all records owned by the table on the removed
+file's inode before returning the descriptor. Explicit close, range removal,
+close-on-exec removal, dup replacement and final Drop all pass through this helper.
+Closing any descriptor for an inode releases the owner's records even if other
+opens, duplicates or snapshots still pin the file. Explicit VFS flush remains the
+caller's obligation after unlocking.
+
+Lock acquisition uses the table read lock through registry publication; removal
+uses its write lock. The lock order is descriptor table then record registry.
+Neither guard may span a blocking record-lock wait. Retaining an `Arc` table handle
+keeps the owner stable through wait; the syscall rechecks that the descriptor still
+refers to the captured open file before each retry. Final owner drop releases any
+remaining records. Table construction and removal now access a sleepable registry
+mutex and remain task-context operations.

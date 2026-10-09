@@ -21,6 +21,7 @@ mod mount;
 mod namei;
 mod open;
 mod path;
+mod record_lock;
 mod stat;
 mod sync;
 mod xattr;

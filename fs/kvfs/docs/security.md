@@ -441,3 +441,30 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 - shared-file write fault 是否在 address-space invalidate shared lock 和 folio lock 内完成
   `FileMappingOperations::page_mkwrite` prepare、folio dirty 和 writable PTE publish，且不取得 inode
   exclusive data lock。
+
+## Advisory record-lock boundary
+
+The registry accepts validated ranges and explicit owner/TGID values from trusted
+kernel callers. User pointers and descriptor access-mode checks remain in POSIX.
+Lock metadata adds no unsafe operation. Inode allocation-address keys are pinned
+with strong references until the last held record and waiter disappear, preventing
+identity reuse. Owner and wait IDs are allocated under the registry mutex and are
+never recycled; exhausting the 64-bit identity counter is an invariant panic.
+
+Descriptor removal must be serialized against acquisition using the caller's table
+lock. `kfd` removes all records for that owner on the inode, including records
+established through another open or duplicate. Queries exclude the caller's owner
+and disclose another holder's supplied TGID only through authorized syscall copyout.
+Records do not grant file permissions or prohibit I/O from applications that ignore
+advisory locking. Pending request Drop removes all wait metadata and event
+registration Drop removes wake subscriptions, including signal and allocation-error
+paths. Deadlock checks derive edges from live held records, avoiding stale copied
+blocker lists after unlock. Interval replacement is committed only after conflict
+and cycle checks succeed.
+
+Resource risks are metadata growth from many disjoint ranges and traversal cost in
+large wait graphs. The allocator's existing failure policy applies to these
+containers; registration failures return errors. There is no independent lock
+quota, fairness guarantee or distributed lock recovery. Audit close, dup replacement,
+close_range, close-on-exec, fork copying, shared tables and final table teardown
+whenever descriptor ownership paths change.

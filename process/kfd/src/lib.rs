@@ -206,3 +206,86 @@ mod tests {
         assert_eq!(successful_flushes.load(Ordering::Relaxed), 1);
     }
 }
+
+#[cfg(unittest)]
+mod record_lock_tests {
+    use alloc::sync::Arc;
+
+    use anon_inodefs::AnonInodeFs;
+    use kvfs::{
+        FMode, FileOperations, OpenFlags,
+        record_lock::{RecordLockKind, RecordLockRange},
+    };
+    use unittest::def_test;
+
+    use super::FdTable;
+
+    struct LockTestFops;
+    impl FileOperations for LockTestFops {}
+
+    #[def_test(serial)]
+    fn copied_tables_do_not_inherit_locks_and_any_close_releases_owner() {
+        let file = AnonInodeFs::global()
+            .get_file(
+                "[fd-record-lock-test]",
+                Arc::new(LockTestFops),
+                Arc::new(()),
+                FMode::READ | FMode::WRITE,
+                OpenFlags::empty(),
+                kcred::initial_cred(),
+            )
+            .unwrap();
+        let table = FdTable::new_shared();
+        let fd = table.write().add_file(16, file.clone(), false).unwrap();
+        let duplicate = table.write().add_file(16, file.clone(), true).unwrap();
+        let copied = FdTable::clone_shared_from(&table);
+        let range = RecordLockRange::new(0, 99).unwrap();
+        table
+            .read()
+            .record_lock_owner()
+            .set(file.inode(), range, Some(RecordLockKind::Write), 71, false)
+            .unwrap();
+        assert!(
+            table
+                .read()
+                .record_lock_owner()
+                .conflict(file.inode(), range, RecordLockKind::Write)
+                .is_none()
+        );
+        assert_eq!(
+            copied
+                .read()
+                .record_lock_owner()
+                .conflict(file.inode(), range, RecordLockKind::Write)
+                .unwrap()
+                .pid,
+            71
+        );
+        copied
+            .write()
+            .file_close_fd_locked(fd)
+            .unwrap()
+            .close()
+            .unwrap();
+        assert!(
+            copied
+                .read()
+                .record_lock_owner()
+                .conflict(file.inode(), range, RecordLockKind::Write)
+                .is_some()
+        );
+        let removed = table.write().remove_cloexec_files();
+        for descriptor in removed {
+            descriptor.close().unwrap();
+        }
+        assert!(
+            copied
+                .read()
+                .record_lock_owner()
+                .conflict(file.inode(), range, RecordLockKind::Write)
+                .is_none()
+        );
+        assert!(table.read().get_file(fd).is_ok());
+        assert!(table.read().get_file(duplicate).is_err());
+    }
+}

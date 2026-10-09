@@ -169,7 +169,7 @@ kfd resources / kvfs / device and pipe implementations
 | T-06 | `fallocate` offset/len 溢出破坏文件大小或范围操作 | scalar 参数 / VFS | 高 | 负数或 `offset + len` 溢出 | 校验非负并用 `checked_add` |
 | T-07 | `copy_file_range` 同文件重叠复制造成数据破坏 | fd-to-fd 复制 | 中 | 同文件重叠检查未实现 | 已在设计文档列为限制；非零 flags 在边界被拒绝；当前不宣称等价 Linux |
 | T-08 | mount flags 被错误分层、类型分派漂移或 unsupported 语义被静默忽略 | mount flags / filesystem type | 高 | 用户态把 move、shared/slave/unbindable propagation 或 recursive-bind bit 与 bind/remount/new mount 组合，或 syscall/procfs 各自维护支持集合 | `path_mount` 在任何 operation dispatch 前统一拒绝未实现位，再独立生成 superblock/per-mount flags；`MS_PRIVATE[|MS_REC]` 仅对 mount root 成功，因为 KVFS mount tree 天生不传播；初次 bind 按 Linux 继承源 flags 并忽略普通请求位，bind remount 才替换 flags；普通 remount 仅默认保留 atime mask；新挂载和 `/proc/filesystems` 共用 KVFS registry |
-| T-09 | 文件锁占位返回成功导致应用误以为互斥成立 | fd_ops | 中 | `fcntl`/`flock` 锁语义未实现 | 文档列为限制；锁相关返回路径必须按当前占位语义审计 |
+| T-09 | 文件锁互斥或清理失效 | fd_ops / record_lock | 中 | fd 复用、区间越界、wait/close 竞争，或依赖未实现的 flock | POSIX 参数规范化、table→registry 锁序、retry 重新校验 fd；close 清理所有 inode records；OFD 返回 EINVAL，flock 占位仍为限制 |
 | T-10 | 创建文件使用错误所有者导致 DAC 语义错误 | open/create | 高 | 固定 root owner，或忽略 setgid 父目录 | syscall 传递当前 `Cred`，后端用 `inode_init_owner()` 初始化 fsuid/fsgid 与继承组 |
 | T-11 | `faccessat2` 权限检查使用错误身份 | access | 高 | 默认错误使用 filesystem IDs，或 `AT_EACCESS` 强行覆盖显式 fs ID | 默认构造 real-ID credential；`AT_EACCESS` 直接使用当前 credential 的 `fsuid/fsgid`，并用于完整遍历与最终检查 |
 | T-12 | 设备 ioctl 参数被错误解释 | ioctl / 设备对象 | 中 | syscall 层错误处理设备私有命令 | `FIONBIO` 在本层处理，其它命令转交 `FileLike::ioctl`；常见 isatty 探测错误不刷 warning |
@@ -250,7 +250,7 @@ kfd resources / kvfs / device and pipe implementations
 
 1. 凭据 DAC 尚无 capability、LSM、ACL、user namespace ID 映射和 idmapped mount。
 2. FAT 等不能表达 Unix owner 的后端无法完整保存创建者 UID/GID。
-3. `fcntl` 文件锁和 `flock` 未实现真实锁。
+3. OFD 记录锁未实现并返回 EINVAL；`flock` 仍未实现真实锁。
 4. `copy_file_range` 对普通文件类型、同文件重叠和跨文件系统限制仍为 TODO。
 5. `mount` 支持已注册 nodev filesystem、已接入 `get_tree_bdev()` 的 block-backed type、
    非递归 bind、普通只读 remount、bind remount，以及普通新挂载的一页 opaque mount data
@@ -288,3 +288,15 @@ kfd resources / kvfs / device and pipe implementations
 - [ ] 新增日志不输出文件内容或敏感用户缓冲区。
 - [ ] xattr list 是否逐项检查累计长度、只使用一个输出缓冲区，并在 `size == 0` 时只计数？
 - [ ] 若修复当前已知限制，同步更新本文和 `design.md`。
+
+## Record-lock syscall inputs
+
+The boundary copies `k_flock64` once and never holds user pointers in wait metadata.
+Signed starts, positive/negative lengths and whence are normalized before registry
+entry; overflow returns EOVERFLOW without installing a partial range. GETLK requires
+read/write query kind and retains every caller field except l_type when unlocked.
+The explicit ABI padding carrier prevents leaking uninitialized kernel bytes.
+Access-mode checks apply to acquisition; unlock does not require write access.
+Captured file references preserve identity, but retry checks the FD under its table
+lock before publication. Interrupted waits leave no graph registration or acquired
+record; dispatcher restart policy is applied only to actual signal interruption.

@@ -23,7 +23,7 @@ POSIX 文件系统 syscall 同时接触用户指针、路径字符串、进程�
 
 当前实现以兼容常用 Linux 用户态程序为目标，
 优先覆盖常用路径和明确拒绝尚不支持的模式。
-部分接口采用兼容占位行为，例如部分 `fcntl` 锁操作和 `flock`，
+部分接口采用兼容占位行为，例如 `flock`，
 这些限制记录在本文的设计决策和已知限制中。
 
 ## 范围
@@ -421,13 +421,27 @@ namespace detach 之前校验。因此不可解析的 target 仍优先返回查�
 尚未实现 capability 与 user namespace 授权；`MntNamespace` 的 `mount_new`、`attach_bind`、
 `remount`、`reconfigure_mount` 和 `detach` 保留显式调用契约，授权由调用方负责。
 
-### 部分兼容占位
+### Process-associated record locks
 
-当前 `F_SETLK`、`F_SETLKW`、`F_OFD_SETLK` 和 `F_OFD_SETLKW` 返回成功，
-`F_GETLK`/`F_OFD_GETLK` 写回 `F_UNLCK`，
-`sys_flock` 返回成功但未实现真实锁。
-这有助于部分用户态程序继续运行，
-但不是完整的 POSIX/ Linux 文件锁语义。
+`record_lock.rs` implements `F_GETLK`, `F_SETLK` and `F_SETLKW`. It captures the
+file and table before copying user `flock`; rejects path-only descriptors; normalizes
+SEEK_SET/CUR/END and negative lengths with checked wide arithmetic; and validates
+read/write access for acquisition. Conflicts are managed by KVFS and owned by the
+FD table, with a supplied current TGID for `F_GETLK`. Queries report the complete
+conflicting record in SEEK_SET coordinates; no conflict changes only `l_type`.
+Explicit ABI padding remains caller-provided bytes through `k_flock64` copyout.
+
+Each acquisition retry verifies the captured file still occupies the FD under the
+table lock. Blocking waits release the table lock, retain the table owner and cancel
+wait graph registrations through RAII. Signal interruption becomes `ERESTARTSYS`;
+the syscall dispatcher and handler's SA_RESTART policy decide restart or EINTR.
+Nonblocking conflicts return EAGAIN, cycles EDEADLK, negative ranges EINVAL and
+signed-offset overflow EOVERFLOW. Closing any descriptor for that inode releases
+all records for its table owner, including close-on-exec and dup replacement.
+
+OFD record commands are rejected with EINVAL until their separate open-description
+ownership contract is implemented. `sys_flock` retains its existing success stub;
+BSD flock and mandatory locks remain separate work.
 
 ### memfd sealing fcntl
 
@@ -490,7 +504,7 @@ KVFS 的传输入口负责文件缓冲和管道消费，syscall 不自行循环�
 
 1. 凭据 DAC 尚无 capability、LSM、ACL、user namespace ID 映射或 idmapped mount。
 2. FAT 等不能表达 Unix UID/GID 的后端无法完整持久化创建者身份。
-3. `fcntl` 文件锁和 `flock` 目前是兼容占位，不提供真实互斥。
+3. OFD 记录锁返回 EINVAL；`flock` 仍是兼容占位，不提供真实互斥。
 4. `copy_file_range` 尚未检查普通文件类型、同文件重叠和跨文件系统条件。
 5. `mount` 尚不支持 move、recursive bind、shared/slave/unbindable propagation，以及
    只读策略之外的文件系统专用

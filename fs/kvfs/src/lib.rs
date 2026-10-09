@@ -26,6 +26,7 @@ pub mod path;
 mod permission;
 pub mod pipe;
 mod poll;
+pub mod record_lock;
 mod seq_file;
 mod simple_dir;
 mod simple_file;

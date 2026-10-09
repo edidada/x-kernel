@@ -869,3 +869,41 @@ FIFO 最后一个 open file 关闭时清空 inode pipe slot，`Arc<PipeObject>` 
   `unregister_filesystem()` 生命周期。
 - `FsContext` 只传递一页 opaque mount data；具体 binary/text format 和支持的 option 集合属于
   各 filesystem type。
+
+## Advisory record locks
+
+`record_lock` owns process-associated byte-range records. `kfd::FdTable` owns one
+`RecordLockOwner`; copied tables create a fresh owner and shared tables retain
+one identity. POSIX converts `flock` into a validated inclusive range and a read,
+write or unlock request. Records are advisory: ordinary I/O does not consult them.
+
+A sleepable registry mutex serializes interval changes, owner-to-inode cleanup
+indexes and pending wait requests. Inodes are indexed by allocation identity and
+pinned by `Arc` while records or waiters exist. Each inode has a `PollEvent`.
+Requests ignore their own owner's records, permit overlapping readers, and reject
+other overlapping access involving a writer. Successful replacement splits old
+owner ranges around the requested interval and merges adjacent equal modes.
+Through-EOF ranges end at the maximum signed file offset, independent of file size.
+
+Callers take the descriptor-table lock before the registry mutex. Acquisition
+holds the table's read side through publication; close/removal holds its write
+side through owner cleanup. Blocking conflicts register a cancellable request,
+then release both locks before sleeping. Deadlock detection follows current
+conflicting owners across all pending requests, including different inodes and
+multiple waits from a shared owner. A visited set bounds traversal by the live
+graph; a detected cycle returns `EDEADLK` without changing held records.
+
+Event generation is published with the interval change before unlocking the
+registry, and wake callbacks run afterwards. A waiter registers and rechecks the
+generation before sleep. Drop removes its graph entry and inode waiter count on
+retry, interruption or cancellation. Empty inode entries are retired; final inode
+references are released outside the registry lock. Final owner drop uses the owner
+index to release remaining records without scanning unrelated inodes.
+
+Registry and interval operations require initialized allocation and sleepable
+locks. Waiting additionally requires a current task and a functioning scheduler.
+No IRQ caller is supported. Metadata uses the kernel allocator; no per-owner lock
+quota or explicit `ENOLCK` budget is implemented. The global mutex is a correctness
+choice for cross-inode deadlock detection; this implementation makes no throughput
+claim. OFD locks, BSD flock locks, mandatory I/O locking, filesystem lock callbacks
+and distributed locking are outside this contract.
