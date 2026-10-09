@@ -24,6 +24,11 @@ const SCANOUT_ID: u32 = 0;
 
 /// The VirtIO GPU device driver.
 pub struct VirtIoGpuDev<H: Hal, T: Transport> {
+    /// MMIO register lease: the mapping stays mapped as long as ANY
+    /// reference to this device object (class publication, consumer clones)
+    /// lives — the last drop releases the mapping (Linux: pci_release_regions
+    /// runs after the last put_device).
+    _mmio_regs: Option<driver_core::IoMap>,
     info: DisplayInfo,
     inner: SpinNoIrq<VirtIoGpu2d<H, T>>,
 }
@@ -38,11 +43,12 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoGpuDev<H, T> {}
 
 impl<H: Hal, T: Transport> VirtIoGpuDev<H, T> {
     /// Creates a new driver instance and reads the display resolution.
-    pub fn try_new(transport: T) -> DriverResult<Self> {
+    pub fn try_new(transport: T, mmio_regs: Option<driver_core::IoMap>) -> DriverResult<Self> {
         let mut device = VirtIoGpu2d::new(transport).map_err(crate::as_driver_error)?;
         let (width, height) = device.resolution().map_err(crate::as_driver_error)?;
 
         Ok(Self {
+            _mmio_regs: mmio_regs,
             info: DisplayInfo { width, height },
             inner: SpinNoIrq::new(device),
         })

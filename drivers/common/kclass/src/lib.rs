@@ -745,11 +745,14 @@ impl NetDevice for ClassDevice<NetDeviceImpl> {
     }
 
     fn can_tx(&self) -> bool {
-        self.with(|device| device.can_tx())
+        // Linux netif_tx_disable parity: after the offline flag flips the
+        // queue reports stopped, so the network stack's poll loop stops
+        // selecting this NIC instead of retrying `send` into `BadState`.
+        self.is_available() && self.with(|device| device.can_tx())
     }
 
     fn can_rx(&self) -> bool {
-        self.with(|device| device.can_rx())
+        self.is_available() && self.with(|device| device.can_rx())
     }
 
     fn rx_queue_len(&self) -> usize {

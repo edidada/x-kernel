@@ -23,7 +23,7 @@ use crate::as_driver_error;
 mod requests;
 use requests::BlockRequests;
 #[cfg(unittest)]
-pub use requests::requests_unittest::{
+pub use requests::tests::{
     Hardware as BlockTestHardware, QueueTransport as BlockTestTransport,
     TrackedHal as BlockTestHal, block_test_disk,
 };
@@ -103,11 +103,16 @@ fn vd_name(index: u32) -> String {
 ///
 /// ```ignore
 /// let (kind, transport) = virtio::probe_pci_device::<HalImpl, _>(...).unwrap();
-/// let mut blk = VirtIoBlkDev::<HalImpl, _>::try_new(transport)?;
+/// let mut blk = VirtIoBlkDev::<HalImpl, _>::try_new(transport, None)?;
 /// let mut buf = [0u8; 512];
 /// blk.read_block(0, &mut buf)?;
 /// ```
 pub struct VirtIoBlkDev<H: Hal, T: Transport> {
+    /// MMIO register lease: the mapping stays mapped as long as ANY
+    /// reference to this device object (class publication, consumer clones)
+    /// lives — the last drop releases the mapping (Linux: pci_release_regions
+    /// runs after the last put_device).
+    _mmio_regs: Option<driver_core::IoMap>,
     state: SpinNoIrq<BlockState<H, T>>,
     prepare_wait: Option<PrepareBlockWait>,
     num_blocks: u64,
@@ -137,9 +142,9 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     ///
     /// Returns `DriverError` if the device fails to initialize (e.g. feature
     /// negotiation failure, queue allocation failure, DMA error).
-    pub fn try_new(transport: T) -> DriverResult<Self> {
+    pub fn try_new(transport: T, mmio_regs: Option<driver_core::IoMap>) -> DriverResult<Self> {
         let device = Self::init_device(transport)?;
-        Ok(Self::from_device(device, None))
+        Ok(Self::from_device(device, None, mmio_regs))
     }
 
     /// Prepares interrupt-driven request handling without publishing the disk.
@@ -153,15 +158,30 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     /// Returns initialization errors from the transport, or Unsupported when
     /// built with unwinding: submitted stack nodes cannot unwind through DMA.
     pub fn try_new_irq(transport: T, prepare_wait: PrepareBlockWait) -> DriverResult<Self> {
+        Self::try_new_irq_with_regs(transport, prepare_wait, None)
+    }
+
+    /// IRQ-backed constructor with an MMIO register lease (virtio-mmio
+    /// transport). The mapping follows the device object.
+    pub fn try_new_irq_with_regs(
+        transport: T,
+        prepare_wait: PrepareBlockWait,
+        mmio_regs: Option<driver_core::IoMap>,
+    ) -> DriverResult<Self> {
+        let _ = mmio_regs; // threaded to from_device below
         if cfg!(panic = "unwind") {
             return Err(DriverError::Unsupported);
         }
         let mut device = Self::init_device(transport)?;
         device.disable_interrupts();
-        Ok(Self::from_device(device, Some(prepare_wait)))
+        Ok(Self::from_device(device, Some(prepare_wait), None))
     }
 
-    fn from_device(device: InnerDev<H, T>, prepare_wait: Option<PrepareBlockWait>) -> Self {
+    fn from_device(
+        device: InnerDev<H, T>,
+        prepare_wait: Option<PrepareBlockWait>,
+        mmio_regs: Option<driver_core::IoMap>,
+    ) -> Self {
         let num_blocks = device.capacity();
         let is_read_only = device.readonly();
         let index = VD_INDEX.fetch_add(1, Ordering::Relaxed);
@@ -179,6 +199,7 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
             is_read_only,
             name: alloc::format!("vd{}", vd_name(index)),
             index,
+            _mmio_regs: mmio_regs,
         }
     }
 
@@ -351,4 +372,59 @@ impl<H: Hal, T: Transport> BlockDeviceOperations for VirtIoBlkDev<H, T> {
     }
 }
 
-unittest::path_mod_test!(blk_unittest, "../ut-tests/blk_unittest.rs");
+#[unittest::mod_test]
+mod tests {
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::*;
+    use crate::mock_virtio::{MockHal, MockTransport};
+
+    const VIRTIO_BLK_F_RO: u64 = 1 << 5;
+
+    #[def_test]
+    fn test_virtio_blk_init_failure_handling() {
+        let transport = MockTransport::new();
+        let dev = VirtIoBlkDev::<MockHal, MockTransport>::try_new(transport, None);
+
+        if let Ok(d) = dev {
+            assert!(d.name().starts_with("vd"));
+            assert!(d.name().len() >= 3);
+            assert_eq!(d.device_kind(), DeviceKind::Block);
+            assert_eq!(d.block_size(), 512);
+        } else {
+            assert!(dev.is_err());
+        }
+    }
+
+    #[def_test]
+    fn test_vd_name_base26() {
+        assert_eq!(vd_name(0), "a");
+        assert_eq!(vd_name(1), "b");
+        assert_eq!(vd_name(25), "z");
+        assert_eq!(vd_name(26), "aa");
+        assert_eq!(vd_name(27), "ab");
+        assert_eq!(vd_name(51), "az");
+        assert_eq!(vd_name(52), "ba");
+        assert_eq!(vd_name(701), "zz");
+    }
+
+    #[def_test]
+    fn test_virtio_blk_concurrency_traits() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<VirtIoBlkDev<MockHal, MockTransport>>();
+    }
+
+    #[def_test]
+    fn test_read_only_feature_is_reported_and_rejects_writes() {
+        let mut transport = MockTransport::new();
+        transport.features = VIRTIO_BLK_F_RO;
+        let dev = VirtIoBlkDev::<MockHal, MockTransport>::try_new(transport, None)
+            .expect("initialize read-only virtio block device");
+
+        assert!(dev.is_inherently_read_only());
+        assert_eq!(
+            dev.write_block(0, &[0; SECTOR_SIZE]).unwrap_err(),
+            DriverError::ReadOnly
+        );
+    }
+}

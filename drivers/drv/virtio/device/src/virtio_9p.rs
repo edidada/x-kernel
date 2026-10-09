@@ -39,12 +39,17 @@ pub trait Virtio9pDevice: Device {
 /// ```ignore
 /// use virtio::Virtio9pDevice;
 /// let (kind, transport) = virtio::probe_pci_device::<HalImpl, _>(...).unwrap();
-/// let mut dev = VirtIo9pDev::<HalImpl, _>::try_new(transport)?;
+/// let mut dev = VirtIo9pDev::<HalImpl, _>::try_new(transport, None)?;
 /// let tag = dev.mount_tag();
 /// let mut resp = [0u8; 256];
 /// let n = dev.request(&req_buf, &mut resp)?;
 /// ```
 pub struct VirtIo9pDev<H: Hal, T: Transport> {
+    /// MMIO register lease: the mapping stays mapped as long as ANY
+    /// reference to this device object (class publication, consumer clones)
+    /// lives — the last drop releases the mapping (Linux: pci_release_regions
+    /// runs after the last put_device).
+    _mmio_regs: Option<driver_core::IoMap>,
     inner: SpinNoIrq<InnerDev<H, T>>,
     mount_tag: String,
 }
@@ -64,10 +69,11 @@ impl<H: Hal, T: Transport> VirtIo9pDev<H, T> {
     /// # Errors
     ///
     /// Returns `DriverError` if the VirtIO 9p device fails to initialize.
-    pub fn try_new(transport: T) -> DriverResult<Self> {
+    pub fn try_new(transport: T, mmio_regs: Option<driver_core::IoMap>) -> DriverResult<Self> {
         let inner = InnerDev::new(transport).map_err(as_driver_error)?;
         let mount_tag = inner.mount_tag().to_string();
         Ok(Self {
+            _mmio_regs: mmio_regs,
             inner: SpinNoIrq::new(inner),
             mount_tag,
         })
@@ -118,4 +124,42 @@ impl<H: Hal, T: Transport> Device for VirtIo9pDev<H, T> {
     }
 }
 
-unittest::path_mod_test!(virtio_9p_unittest, "../ut-tests/virtio_9p_unittest.rs");
+#[unittest::mod_test]
+mod tests {
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::*;
+    use crate::mock_virtio::{MockHal, MockTransport};
+
+    #[def_test]
+    fn test_virtio_9p_init_failure() {
+        let mut transport = MockTransport::new();
+        transport.device_type = virtio_drivers::transport::DeviceType::_9P;
+        let dev = VirtIo9pDev::<MockHal, MockTransport>::try_new(transport, None);
+        assert!(dev.is_err());
+    }
+
+    #[def_test]
+    fn test_virtio_9p_mount_tag() {
+        let mut transport = MockTransport::new();
+        transport.device_type = virtio_drivers::transport::DeviceType::_9P;
+        let tag = b"hostshare";
+        let len = tag.len() as u16;
+        {
+            let mut config = transport.config_space.borrow_mut();
+            config[0..2].copy_from_slice(&len.to_le_bytes());
+            config[2..2 + tag.len()].copy_from_slice(tag);
+        }
+
+        let dev = VirtIo9pDev::<MockHal, MockTransport>::try_new(transport, None).unwrap();
+        assert_eq!(dev.name(), "virtio-9p");
+        assert_eq!(dev.device_kind(), DeviceKind::Fs9p);
+        assert_eq!(dev.mount_tag(), "hostshare");
+    }
+
+    #[def_test]
+    fn test_virtio_9p_concurrency_traits() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<VirtIo9pDev<MockHal, MockTransport>>();
+    }
+}

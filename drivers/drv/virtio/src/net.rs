@@ -65,7 +65,7 @@ pub fn activate<B: driver_core::Bus>(
 ) -> Result<Option<DevIrq>, ProbeError> {
     // The PCI path's publication is withdrawn by the composition root's
     // remove notifier (before Data drops — the domain ordering contract).
-    let (_publication, irq) = activate_with_irq(dev, transport, msi_irq)?;
+    let (_publication, irq) = activate_with_irq(dev, transport, msi_irq, None)?;
     Ok(irq)
 }
 
@@ -75,9 +75,10 @@ fn activate_with_irq<B: driver_core::Bus, T: virtio::Transport + 'static>(
     dev: &mut DeviceCtx<'_, B>,
     transport: T,
     msi_irq: Option<usize>,
+    mmio_regs: Option<driver_core::IoMap>,
 ) -> Result<(kclass::ClassDevice<kclass::NetDeviceImpl>, Option<DevIrq>), ProbeError> {
     let device = Arc::new(
-        VirtIoNetDev::<driver_runtime::hal::Hal, _, 64>::try_new(transport)
+        VirtIoNetDev::<driver_runtime::hal::Hal, _, 64>::try_new(transport, mmio_regs)
             .map_err(crate::common::map_driver_error)?,
     );
     let worker = device.irq_worker();
@@ -145,10 +146,13 @@ fn activate_with_irq<B: driver_core::Bus, T: virtio::Transport + 'static>(
 pub fn activate_mmio<B: driver_core::Bus, T: virtio::Transport + 'static>(
     dev: &mut DeviceCtx<'_, B>,
     transport: T,
-    builder: crate::mmio::ActivationBuilder,
+    mut builder: crate::mmio::ActivationBuilder,
 ) -> Result<crate::mmio::MmioData, ProbeError> {
+    // The MMIO register mapping follows the device object (the Linux BAR
+    // model): the last ClassDevice clone referencing this NIC releases it.
+    let mmio_regs = builder.take_regs();
     // virtio-mmio has no MSI-X vector: legacy route only.
-    let (publication, irq) = activate_with_irq(dev, transport, None)?;
+    let (publication, irq) = activate_with_irq(dev, transport, None, mmio_regs)?;
     struct NetMmioActivation {
         publication: kclass::ClassDevice<kclass::NetDeviceImpl>,
         irq: Option<DevIrq>,

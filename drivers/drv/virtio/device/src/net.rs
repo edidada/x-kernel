@@ -82,6 +82,11 @@ impl VirtIoNetIrqWorker {
 /// let rx_buf = net.recv()?;
 /// ```
 pub struct VirtIoNetDev<H: Hal, T: Transport, const QS: usize> {
+    /// MMIO register lease: the mapping stays mapped as long as ANY
+    /// reference to this device object (class publication, consumer clones)
+    /// lives — the last drop releases the mapping (Linux: pci_release_regions
+    /// runs after the last put_device).
+    _mmio_regs: Option<driver_core::IoMap>,
     bufs: SpinNoPreempt<NetBufState<QS>>,
     // Kept alive so that `NetBufBox`es in `bufs` remain valid.
     #[expect(
@@ -139,7 +144,7 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
     ///
     /// Panics if `receive_begin` returns a token that does not match the
     /// expected sequential index (asserts internal consistency).
-    pub fn try_new(transport: T) -> DriverResult<Self> {
+    pub fn try_new(transport: T, mmio_regs: Option<driver_core::IoMap>) -> DriverResult<Self> {
         // 0. Create a new driver instance.
         const NONE_BUF: Option<NetBufBox> = None;
         let inner = Arc::new(SpinNoIrq::new(
@@ -186,6 +191,7 @@ impl<H: Hal + 'static, T: Transport + 'static, const QS: usize> VirtIoNetDev<H, 
 
         // 4. Return the driver instance.
         Ok(Self {
+            _mmio_regs: mmio_regs,
             bufs: SpinNoPreempt::new(NetBufState {
                 rx_buffers,
                 tx_buffers,
@@ -442,7 +448,7 @@ mod tests {
         transport.device_type = virtio_drivers::transport::DeviceType::Network;
         let interrupt_ack_count = transport.interrupt_ack_count.clone();
         (
-            Arc::new(VirtIoNetDev::try_new(transport).unwrap()),
+            Arc::new(VirtIoNetDev::try_new(transport, None).unwrap()),
             interrupt_ack_count,
         )
     }

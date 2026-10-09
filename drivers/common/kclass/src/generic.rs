@@ -657,4 +657,122 @@ mod tests {
         assert_eq!(a.detached_owner(), Some(7));
         assert_eq!(b.detached_owner(), Some(7));
     }
+    /// The MMIO lease model, pinned end to end at the class layer: the
+    /// register mapping lives in the RUNTIME object, so unpublishing (the
+    /// activation's close — driver Data teardown) must not release it while
+    /// a consumer clone is still out. Linux parity: `pci_release_regions`
+    /// runs after the LAST `put_device`, not at driver unbind; and once the
+    /// removal orchestration flips the offline flag, the data plane is
+    /// refused (`netif_tx_disable`) while observation still resolves valid
+    /// memory (no dangling window).
+    #[cfg(feature = "net")]
+    #[def_test(serial)]
+    fn unpublish_keeps_consumer_clone_leases_alive() {
+        use core::sync::atomic::{AtomicBool, Ordering};
+
+        use crate::NetDevice;
+
+        struct LeaseOnDrop(Arc<AtomicBool>);
+        impl Drop for LeaseOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        struct SentinelNet {
+            _lease: LeaseOnDrop,
+        }
+        impl driver_base::Device for SentinelNet {
+            fn name(&self) -> &str {
+                "lease-sentinel"
+            }
+
+            fn device_kind(&self) -> driver_base::DeviceKind {
+                driver_base::DeviceKind::Net
+            }
+        }
+        impl NetDevice for SentinelNet {
+            fn mac(&self) -> net::MacAddress {
+                net::MacAddress([0; 6])
+            }
+
+            fn can_tx(&self) -> bool {
+                false
+            }
+
+            fn can_rx(&self) -> bool {
+                false
+            }
+
+            fn rx_queue_len(&self) -> usize {
+                0
+            }
+
+            fn tx_queue_len(&self) -> usize {
+                0
+            }
+
+            fn recycle_rx(&self, _rx_buf: net::NetBufHandle) -> driver_base::DriverResult {
+                Ok(())
+            }
+
+            fn recycle_tx(&self) -> driver_base::DriverResult {
+                Ok(())
+            }
+
+            fn send(&self, _tx_buf: net::NetBufHandle) -> driver_base::DriverResult {
+                Err(driver_base::DriverError::Unsupported)
+            }
+
+            fn recv(&self) -> driver_base::DriverResult<net::NetBufHandle> {
+                Err(driver_base::DriverError::Unsupported)
+            }
+
+            fn alloc_tx_buf(&self, _size: usize) -> driver_base::DriverResult<net::NetBufHandle> {
+                Err(driver_base::DriverError::Unsupported)
+            }
+
+            fn set_rx_scheduler(
+                &self,
+                _scheduler: Option<Arc<dyn net::NetRxScheduler>>,
+            ) -> driver_base::DriverResult {
+                Err(driver_base::DriverError::Unsupported)
+            }
+        }
+
+        let released = Arc::new(AtomicBool::new(false));
+        let runtime: crate::NetDeviceImpl = alloc::boxed::Box::new(SentinelNet {
+            _lease: LeaseOnDrop(released.clone()),
+        });
+        let publication = crate::publish_net(
+            ClassParent::detached(0x1eaf, "lease-test", loc(0x1eaf)),
+            runtime,
+        )
+        .unwrap();
+
+        // A consumer holds a clone across the device's removal — the exact
+        // window the old Data-scoped mapping made a dangling pointer.
+        let consumer = publication.clone();
+
+        // The activation's close: unpublish by publication id.
+        crate::unpublish_net(publication.id());
+        drop(publication);
+
+        // The mapping is NOT released with the publication (nor with the
+        // driver Data): the clone's runtime still owns it.
+        assert!(!released.load(Ordering::Acquire));
+
+        // Data-plane admission is closed — netif_tx_disable parity: the
+        // poll loop sees a stopped queue instead of retrying errors.
+        assert!(!consumer.can_tx());
+        assert!(!consumer.can_rx());
+        // Observation still resolves valid memory (the runtime is alive);
+        // nothing dangles.
+        let _mac = consumer.mac();
+
+        // The LAST reference drops — only now does the mapping release
+        // (pci_release_regions after the last put_device).
+        drop(consumer);
+        assert!(released.load(Ordering::Acquire));
+    }
 }

@@ -34,7 +34,7 @@ impl DriverOps<PciBus> for VsockDriver {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
-        activate(dev, transport)?;
+        activate(dev, transport, None)?;
         Ok(VsockData)
     }
 
@@ -49,9 +49,11 @@ impl DriverOps<PciBus> for VsockDriver {
 pub fn activate<B: driver_core::Bus>(
     dev: &mut DeviceCtx<'_, B>,
     transport: impl virtio::Transport + 'static,
+    mmio_regs: Option<driver_core::IoMap>,
 ) -> Result<(), ProbeError> {
-    let device = virtio::VirtIoVsockDev::<driver_runtime::hal::Hal, _>::try_new(transport)
-        .map_err(crate::common::map_driver_error)?;
+    let device =
+        virtio::VirtIoVsockDev::<driver_runtime::hal::Hal, _>::try_new(transport, mmio_regs)
+            .map_err(crate::common::map_driver_error)?;
     let location = dev.descriptor().location;
     publish_vsock(
         ClassParent::detached(dev.id().raw(), "virtio-vsock", location),
@@ -67,12 +69,17 @@ pub fn activate<B: driver_core::Bus>(
 pub fn activate_mmio(
     dev: &mut driver_core::DeviceCtx<'_, driver_core::platform::PlatformBus>,
     transport: impl virtio::Transport + 'static,
-    builder: crate::mmio::ActivationBuilder,
+    mut builder: crate::mmio::ActivationBuilder,
 ) -> Result<crate::mmio::MmioData, ProbeError> {
+    // The MMIO register mapping follows the device object (Linux BAR
+    // model): released with the last ClassDevice clone.
+    let mmio_regs = builder.take_regs();
+
     let owner = dev.id().raw();
     let location = dev.descriptor().location;
-    let device = virtio::VirtIoVsockDev::<driver_runtime::hal::Hal, _>::try_new(transport)
-        .map_err(crate::common::map_driver_error)?;
+    let device =
+        virtio::VirtIoVsockDev::<driver_runtime::hal::Hal, _>::try_new(transport, mmio_regs)
+            .map_err(crate::common::map_driver_error)?;
     let handle = publish_vsock(
         ClassParent::detached(owner, "virtio-vsock", location),
         Box::new(device),

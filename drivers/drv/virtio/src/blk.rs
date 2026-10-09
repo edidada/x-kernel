@@ -76,7 +76,7 @@ impl DriverOps<PciBus> for VirtioBlkDriver {
             .map(|number| driver_core::IrqSpec::global(number, driver_core::IrqTrigger::Unknown(0)))
             .or_else(|| dev.irq(0).ok());
         let activation = match spec {
-            Some(spec) => activate(dev, transport, spec)?,
+            Some(spec) => activate(dev, transport, spec, None)?,
             None => return Err(ProbeError::Fatal(RuntimeError::Invalid)),
         };
         Ok(BlkData {
@@ -138,11 +138,13 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
     dev: &mut DeviceCtx<'_, B>,
     transport: T,
     irq: driver_core::IrqSpec,
+    mmio_regs: Option<driver_core::IoMap>,
 ) -> Result<Box<dyn Activation>, ProbeError> {
     let device = Arc::new(
-        VirtIoBlkDev::<driver_runtime::hal::Hal, T>::try_new_irq(
+        VirtIoBlkDev::<driver_runtime::hal::Hal, T>::try_new_irq_with_regs(
             transport,
             block_wait::prepare_block_wait,
+            mmio_regs,
         )
         .map_err(crate::common::map_driver_error)?,
     );
@@ -215,9 +217,12 @@ pub fn activate_mmio<B: driver_core::Bus, T: Transport + 'static>(
     dev: &mut DeviceCtx<'_, B>,
     transport: T,
     irq: driver_core::IrqSpec,
-    builder: crate::mmio::ActivationBuilder,
+    mut builder: crate::mmio::ActivationBuilder,
 ) -> Result<crate::mmio::MmioData, ProbeError> {
-    let activation = activate(dev, transport, irq)?;
+    // The MMIO register mapping follows the device object (Linux BAR
+    // model): released when the last ClassDevice clone drops the disk.
+    let mmio_regs = builder.take_regs();
+    let activation = activate(dev, transport, irq, mmio_regs)?;
     struct BlkMmioActivation {
         inner: Box<dyn Activation>,
     }

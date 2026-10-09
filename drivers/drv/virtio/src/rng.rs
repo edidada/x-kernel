@@ -52,7 +52,7 @@ impl DriverOps<PciBus> for VirtioRngDriver {
 
         // The hwrng registry owns the publication; the composition root's
         // remove notifier withdraws it when this device goes away.
-        let (_publication, irq) = activate(dev, transport)?;
+        let (_publication, irq) = activate(dev, transport, None)?;
         Ok(RngData { _irq: irq })
     }
 
@@ -113,6 +113,7 @@ fn registration_error(error: PollRegisterError) -> DriverError {
 pub fn activate<B: driver_core::Bus>(
     dev: &mut DeviceCtx<'_, B>,
     transport: impl virtio::Transport + Send + 'static,
+    mmio_regs: Option<driver_core::IoMap>,
 ) -> Result<
     (
         kclass::ClassDevice<kclass::HwrngDeviceImpl>,
@@ -121,8 +122,9 @@ pub fn activate<B: driver_core::Bus>(
     ProbeError,
 > {
     let completion: Arc<dyn RngCompletion> = Arc::new(HostRngCompletion::new());
-    let device = VirtIoRngDev::<driver_runtime::hal::Hal, _>::try_new(transport, completion)
-        .map_err(crate::common::map_driver_error)?;
+    let device =
+        VirtIoRngDev::<driver_runtime::hal::Hal, _>::try_new(transport, completion, mmio_regs)
+            .map_err(crate::common::map_driver_error)?;
 
     // Completion delivery: the same single IRQ entry every driver uses. The
     // closure keeps only a weak reference — the class publication owns the
@@ -158,9 +160,12 @@ pub fn activate<B: driver_core::Bus>(
 pub fn activate_mmio(
     dev: &mut driver_core::DeviceCtx<'_, driver_core::platform::PlatformBus>,
     transport: impl virtio::Transport + Send + 'static,
-    builder: crate::mmio::ActivationBuilder,
+    mut builder: crate::mmio::ActivationBuilder,
 ) -> Result<crate::mmio::MmioData, ProbeError> {
-    let (publication, irq) = activate(dev, transport)?;
+    // The MMIO register mapping follows the device object (Linux BAR
+    // model): the last ClassDevice clone releases it.
+    let mmio_regs = builder.take_regs();
+    let (publication, irq) = activate(dev, transport, mmio_regs)?;
 
     struct RngActivation {
         publication: kclass::ClassDevice<kclass::HwrngDeviceImpl>,

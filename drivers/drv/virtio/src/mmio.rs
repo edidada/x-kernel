@@ -44,41 +44,51 @@ pub trait MmioActivation: Send + Sync {
 /// mapping, so the transport's raw pointer stays valid for exactly as long
 /// as the activation object.
 pub struct ActivationBuilder {
-    regs: IoMap,
+    regs: Option<IoMap>,
 }
 
 impl ActivationBuilder {
     pub fn new(regs: IoMap) -> Self {
-        Self { regs }
+        Self { regs: Some(regs) }
+    }
+
+    /// Hand the register mapping to the device object being constructed.
+    ///
+    /// The mapping's lifetime follows the RUNTIME (the published device
+    /// and every consumer clone), not the driver Data — the Linux BAR
+    /// model (pci_release_regions runs after the last put_device, not at
+    /// driver unbind). Families call this before constructing their device
+    /// object, then [`Self::build`] the activation without the mapping.
+    pub fn take_regs(&mut self) -> Option<IoMap> {
+        self.regs.take()
     }
 
     /// Wrap a family activation: publication guard first (withdrawn at
-    /// close), then IRQ, then the register mapping last.
+    /// close), then IRQ. The register mapping is NOT held here — the
+    /// family moved it into the device object via [`Self::take_regs`].
     pub fn build<A: MmioActivation + 'static>(self, inner: A) -> MmioData {
         MmioData {
             activation: Some(alloc::boxed::Box::new(inner)),
-            regs: Some(self.regs),
         }
     }
 }
 
 /// Driver-private data: the family activation (publication + IRQ guards +
-/// transport) and the register mapping, one ownership chain.
+/// transport). The register mapping is NOT part of this chain — it follows
+/// the device object (see []).
 pub struct MmioData {
     activation: Option<alloc::boxed::Box<dyn MmioActivation>>,
-    /// Register mapping; drops LAST (after the activation has closed and
-    /// nothing dereferences the window anymore).
-    regs: Option<IoMap>,
 }
 
 impl Drop for MmioData {
     fn drop(&mut self) {
-        // Field order would do this, but the explicit sequence documents
-        // the contract and guards against future field reordering.
+        // The register mapping is NOT dropped here: the family moved it
+        // into the device object (ActivationBuilder::take_regs), so it
+        // lives as long as any ClassDevice clone referencing the device —
+        // unpublish cannot leave a consumer clone with a dangling pointer.
         if let Some(activation) = self.activation.take() {
             activation.close();
         }
-        drop(self.regs.take());
     }
 }
 

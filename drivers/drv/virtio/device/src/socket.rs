@@ -35,6 +35,11 @@ const RX_BUFFER_SIZE: usize = 8192;
 /// accept queues, or per-connection receive buffers. Those are owned by the
 /// connection manager in `net/knet`.
 pub struct VirtIoVsockDev<H: Hal, T: Transport, const RX_BUF_SIZE: usize = RX_BUFFER_SIZE> {
+    /// MMIO register lease: the mapping stays mapped as long as ANY
+    /// reference to this device object (class publication, consumer clones)
+    /// lives — the last drop releases the mapping (Linux: pci_release_regions
+    /// runs after the last put_device).
+    _mmio_regs: Option<driver_core::IoMap>,
     inner: SpinNoIrq<VirtIOSocket<H, T, RX_BUF_SIZE>>,
     guest_cid: u64,
 }
@@ -69,10 +74,11 @@ impl<H: Hal, T: Transport, const RX_BUF_SIZE: usize> VirtIoVsockDev<H, T, RX_BUF
     ///
     /// Returns an error if the device fails to initialize (feature
     /// negotiation, queue allocation, etc.).
-    pub fn try_new(transport: T) -> DriverResult<Self> {
+    pub fn try_new(transport: T, mmio_regs: Option<driver_core::IoMap>) -> DriverResult<Self> {
         let inner = VirtIOSocket::<H, T, RX_BUF_SIZE>::new(transport).map_err(as_driver_error)?;
         let guest_cid = inner.guest_cid();
         Ok(Self {
+            _mmio_regs: mmio_regs,
             inner: SpinNoIrq::new(inner),
             guest_cid,
         })
