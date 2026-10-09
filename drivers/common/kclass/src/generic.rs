@@ -148,7 +148,7 @@ struct ClassDeviceInner<T> {
     metadata: ClassDeviceMetadata,
 }
 
-pub(crate) struct ClassDeviceMetadata {
+pub struct ClassDeviceMetadata {
     input_identity: Option<InputIdentity>,
 }
 
@@ -158,13 +158,13 @@ struct InputIdentity {
 }
 
 impl ClassDeviceMetadata {
-    pub(crate) const fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self {
             input_identity: None,
         }
     }
 
-    pub(crate) fn input(physical_location: String, unique_id: String) -> Self {
+    pub fn input(physical_location: String, unique_id: String) -> Self {
         Self {
             input_identity: Some(InputIdentity {
                 physical_location,
@@ -201,7 +201,7 @@ impl<T> ClassDevice<T> {
         )
     }
 
-    pub(crate) fn try_new_with_class_metadata(
+    pub fn try_new_with_class_metadata(
         parent: impl Into<ClassParent>,
         inner: T,
         name: String,
@@ -262,10 +262,17 @@ impl<T> ClassDevice<T> {
     /// through [`publish`](crate::prelude) validates this, so tripping
     /// the check indicates a bypass of the publish path.
     pub fn driver_name(&self) -> &'static str {
-        self.inner
-            .parent
-            .driver_name()
-            .expect("class device must have a bound driver")
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: publication validates the retained \
+                      parent has a bound driver"
+        )]
+        {
+            self.inner
+                .parent
+                .driver_name()
+                .expect("class device must have a bound driver")
+        }
     }
 
     /// Borrow the runtime capability.
@@ -303,7 +310,7 @@ impl<T> ClassDevice<T> {
         f(&self.inner.runtime)
     }
 
-    pub(crate) fn input_physical_location(&self) -> &str {
+    pub fn input_physical_location(&self) -> &str {
         self.inner
             .metadata
             .input_identity
@@ -311,7 +318,7 @@ impl<T> ClassDevice<T> {
             .map_or("", |identity| identity.physical_location.as_str())
     }
 
-    pub(crate) fn input_unique_id(&self) -> &str {
+    pub fn input_unique_id(&self) -> &str {
         self.inner
             .metadata
             .input_identity
@@ -351,10 +358,10 @@ impl<T> core::fmt::Debug for ClassDevice<T> {
 pub type ClassAvailabilityCallback<T> = Arc<dyn Fn(ClassDevice<T>) + Send + Sync>;
 
 /// Callback invoked when a class device is removed.
-pub type ClassRemovalCallback<T> = Arc<dyn Fn(ClassDevice<T>) + Send + Sync>;
+pub(crate) type ClassRemovalCallback<T> = Arc<dyn Fn(ClassDevice<T>) + Send + Sync>;
 
 /// Typed registry for one runtime device class.
-pub struct ClassRegistry<T> {
+pub(crate) struct ClassRegistry<T> {
     devices: Vec<ClassDevice<T>>,
     availability_subscribers: Vec<ClassAvailabilityCallback<T>>,
     removal_subscribers: Vec<ClassAvailabilityCallback<T>>,
@@ -362,7 +369,7 @@ pub struct ClassRegistry<T> {
 
 impl<T> ClassRegistry<T> {
     /// Create an empty class registry.
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             devices: Vec::new(),
             availability_subscribers: Vec::new(),
@@ -374,7 +381,7 @@ impl<T> ClassRegistry<T> {
     ///
     /// Linux device registration rejects duplicate identities; replacement is
     /// a remove-then-add lifecycle rather than an implicit registry update.
-    pub fn publish(&mut self, device: ClassDevice<T>) -> DriverResult<()> {
+    pub(crate) fn publish(&mut self, device: ClassDevice<T>) -> DriverResult<()> {
         let id = device.id();
         if self.devices.iter().any(|existing| existing.id() == id) {
             return Err(DriverError::AlreadyExists);
@@ -384,7 +391,7 @@ impl<T> ClassRegistry<T> {
     }
 
     /// Return currently active devices in this class.
-    pub fn devices(&self) -> Vec<ClassDevice<T>> {
+    pub(crate) fn devices(&self) -> Vec<ClassDevice<T>> {
         self.devices
             .iter()
             .filter(|device| device.is_available())
@@ -393,7 +400,7 @@ impl<T> ClassRegistry<T> {
     }
 
     /// Find a currently active device in this class.
-    pub fn find(&self, id: ClassDeviceId) -> Option<ClassDevice<T>> {
+    pub(crate) fn find(&self, id: ClassDeviceId) -> Option<ClassDevice<T>> {
         self.devices
             .iter()
             .find(|device| device.id() == id && device.is_available())
@@ -401,25 +408,25 @@ impl<T> ClassRegistry<T> {
     }
 
     /// Subscribe to future availability notifications for this class.
-    pub fn subscribe_available(&mut self, callback: ClassAvailabilityCallback<T>) {
+    pub(crate) fn subscribe_available(&mut self, callback: ClassAvailabilityCallback<T>) {
         self.availability_subscribers.push(callback);
     }
 
-    pub fn subscribe_removed(&mut self, callback: ClassAvailabilityCallback<T>) {
+    pub(crate) fn subscribe_removed(&mut self, callback: ClassAvailabilityCallback<T>) {
         self.removal_subscribers.push(callback);
     }
 
-    pub fn removal_callbacks(&self) -> Vec<ClassAvailabilityCallback<T>> {
+    pub(crate) fn removal_callbacks(&self) -> Vec<ClassAvailabilityCallback<T>> {
         self.removal_subscribers.clone()
     }
 
     /// Snapshot availability callbacks. Callers should invoke them outside locks.
-    pub fn availability_callbacks(&self) -> Vec<ClassAvailabilityCallback<T>> {
+    pub(crate) fn availability_callbacks(&self) -> Vec<ClassAvailabilityCallback<T>> {
         self.availability_subscribers.clone()
     }
 
     /// Remove a class device by its publication handle.
-    pub fn remove(&mut self, id: ClassDeviceId) -> Option<ClassDevice<T>> {
+    pub(crate) fn remove(&mut self, id: ClassDeviceId) -> Option<ClassDevice<T>> {
         let pos = self.devices.iter().position(|device| device.id() == id)?;
         Some(self.devices.swap_remove(pos))
     }
@@ -427,7 +434,7 @@ impl<T> ClassRegistry<T> {
     /// Find the publication id for a detached (driver-core owned) device.
     /// Legacy-model publications are never matched. Callers use this to run
     /// the FULL removal path (callbacks, devnode, unpublish) via `remove`.
-    pub fn find_detached(&self, owner: u64) -> Option<crate::ClassDeviceId> {
+    pub(crate) fn find_detached(&self, owner: u64) -> Option<crate::ClassDeviceId> {
         self.devices
             .iter()
             .find(|device| device.inner.parent.detached_owner() == Some(owner))

@@ -452,36 +452,119 @@ impl DeviceDomain {
     /// device whose dependency has since appeared rebinds instead of
     /// parking. Exactness (only this dep's waiters re-run) is preserved for
     /// the deferred list; the pump nudge is the safety net for the window.
+    /// Set `entry`'s state bookkeeping for `dep` at `generation`: the
+    /// lost-wakeup guard compares this against the domain generation when a
+    /// Deferred probe parks, and refreshes it on every retry or wake.
+    fn record_dep_generation(entry: &mut DeviceEntry, dep: DepSource, generation: u64) {
+        match entry
+            .dep_seen_generations
+            .iter_mut()
+            .find(|(d, _)| *d == dep)
+        {
+            Some(slot) => slot.1 = generation,
+            None => entry.dep_seen_generations.push((dep, generation)),
+        }
+    }
+
+    /// Park a Deferred probe, guarded against the lost-wakeup window: if
+    /// the dependency was woken since the device last saw it, the provider
+    /// registered during THIS probe's check-then-submit window — parking
+    /// would sleep through an arrival that already happened. Re-attempt
+    /// once per generation instead.
+    fn park_deferred(
+        &self,
+        inner: &mut DomainInner,
+        id: u64,
+        dep: DepSource,
+        stats: &mut ProbeStats,
+        driver_name: &str,
+    ) {
+        let current_gen = inner
+            .dep_generations
+            .iter()
+            .find(|(d, _)| *d == dep)
+            .map(|(_, g)| *g)
+            .unwrap_or(0);
+        let seen_gen = inner
+            .devices
+            .get(&id)
+            .and_then(|e| {
+                e.dep_seen_generations
+                    .iter()
+                    .find(|(d, _)| *d == dep)
+                    .map(|(_, g)| *g)
+            })
+            .unwrap_or(0);
+        if current_gen > seen_gen {
+            // The dependency moved under us: retry now.
+            if let Some(entry) = inner.devices.get_mut(&id) {
+                entry.state = DeviceState::Pending;
+                Self::record_dep_generation(entry, dep, current_gen);
+            }
+            inner.pending.push(id);
+            stats.retried += 1;
+            return;
+        }
+        if let Some(entry) = inner.devices.get_mut(&id) {
+            entry.state = DeviceState::Deferred;
+            entry.last_deferred_dep = Some(dep);
+            Self::record_dep_generation(entry, dep, current_gen);
+        }
+        inner.deferred.push((id, dep));
+        stats.deferred += 1;
+        log::debug!("driver-core: `{driver_name}` deferred device {id} on {dep}");
+    }
+
+    /// Record a fatal probe failure: the driver joins the attempted set;
+    /// the device requeues if another driver might still claim it, else
+    /// turns Unclaimed.
+    fn record_failure(inner: &mut DomainInner, id: u64, driver: &Arc<dyn AnyDriver>) {
+        let attempted_key = driver_key(driver);
+        let Some(entry) = inner.devices.get_mut(&id) else {
+            return;
+        };
+        entry.attempted.push(attempted_key);
+        let retryable = inner
+            .drivers
+            .iter()
+            .filter(|candidate| !entry.attempted.contains(&driver_key(candidate)))
+            .any(|candidate| candidate.matches(&entry.desc) != MatchScore::NoMatch);
+        if retryable {
+            entry.state = DeviceState::Pending;
+            inner.pending.push(id);
+        } else {
+            entry.state = DeviceState::Unclaimed;
+        }
+    }
+
     pub fn wake(&self, dep: DepSource) -> usize {
         let woken = {
             let mut inner = self.inner.lock();
             // Record the wake even with no waiters: the generation is what
             // a Deferred submitter checks against.
-            match inner.dep_generations.iter_mut().find(|(d, _)| *d == dep) {
-                Some((_, generation)) => *generation += 1,
-                None => inner.dep_generations.push((dep, 1)),
-            }
+            let generation = match inner.dep_generations.iter_mut().find(|(d, _)| *d == dep) {
+                Some((_, generation)) => {
+                    *generation += 1;
+                    *generation
+                }
+                None => {
+                    inner.dep_generations.push((dep, 1));
+                    1
+                }
+            };
             let deferred = core::mem::take(&mut inner.deferred);
             let mut woken = 0usize;
             for (id, waiting) in deferred {
-                if waiting == dep {
-                    if let Some(entry) = inner.devices.get_mut(&id) {
-                        entry.state = DeviceState::Pending;
-                        if let Some(slot) = entry
-                            .dep_seen_generations
-                            .iter_mut()
-                            .find(|(d, _)| *d == dep)
-                        {
-                            slot.1 += 1;
-                        } else {
-                            entry.dep_seen_generations.push((dep, 1));
-                        }
-                    }
-                    inner.pending.push(id);
-                    woken += 1;
-                } else {
+                if waiting != dep {
                     inner.deferred.push((id, waiting));
+                    continue;
                 }
+                if let Some(entry) = inner.devices.get_mut(&id) {
+                    entry.state = DeviceState::Pending;
+                    Self::record_dep_generation(entry, dep, generation);
+                }
+                inner.pending.push(id);
+                woken += 1;
             }
             // Late providers: devices that deferred on this dependency,
             // exhausted the boot phase and turned Unclaimed still remember
@@ -571,93 +654,11 @@ impl DeviceDomain {
                     }
                     Err(ProbeError::Deferred(dep)) => {
                         let mut inner = self.inner.lock();
-                        // Lost-wakeup guard: if this dependency was woken
-                        // since the device last saw it, the provider
-                        // registered during THIS probe's check-then-submit
-                        // window — park would sleep through an arrival that
-                        // already happened. Re-attempt once per generation.
-                        let current_gen = inner
-                            .dep_generations
-                            .iter()
-                            .find(|(d, _)| *d == dep)
-                            .map(|(_, g)| *g)
-                            .unwrap_or(0);
-                        let seen_gen = inner
-                            .devices
-                            .get(&id)
-                            .and_then(|e| {
-                                e.dep_seen_generations
-                                    .iter()
-                                    .find(|(d, _)| *d == dep)
-                                    .map(|(_, g)| *g)
-                            })
-                            .unwrap_or(0);
-                        if current_gen > seen_gen {
-                            // The dependency moved under us: retry now.
-                            if let Some(entry) = inner.devices.get_mut(&id) {
-                                entry.state = DeviceState::Pending;
-                                if let Some(slot) = entry
-                                    .dep_seen_generations
-                                    .iter_mut()
-                                    .find(|(d, _)| *d == dep)
-                                {
-                                    slot.1 = current_gen;
-                                } else {
-                                    entry.dep_seen_generations.push((dep, current_gen));
-                                }
-                            }
-                            inner.pending.push(id);
-                            stats.retried += 1;
-                            continue;
-                        }
-                        if let Some(entry) = inner.devices.get_mut(&id) {
-                            entry.state = DeviceState::Deferred;
-                            entry.last_deferred_dep = Some(dep);
-                            if let Some(slot) = entry
-                                .dep_seen_generations
-                                .iter_mut()
-                                .find(|(d, _)| *d == dep)
-                            {
-                                slot.1 = current_gen;
-                            } else {
-                                entry.dep_seen_generations.push((dep, current_gen));
-                            }
-                        }
-                        inner.deferred.push((id, dep));
-                        stats.deferred += 1;
-                        log::debug!(
-                            "driver-core: `{}` deferred device {id} on {dep}",
-                            driver.name()
-                        );
+                        self.park_deferred(&mut inner, id, dep, &mut stats, driver.name());
                     }
                     Err(ProbeError::Fatal(err)) => {
                         let mut inner = self.inner.lock();
-                        if let Some(entry) = inner.devices.get_mut(&id) {
-                            entry.attempted.push(driver_key(&driver));
-                        }
-                        let retryable = inner
-                            .devices
-                            .get(&id)
-                            .map(|entry| {
-                                inner
-                                    .drivers
-                                    .iter()
-                                    .filter(|candidate| {
-                                        !entry.attempted.contains(&driver_key(candidate))
-                                    })
-                                    .any(|candidate| {
-                                        candidate.matches(&entry.desc) != MatchScore::NoMatch
-                                    })
-                            })
-                            .unwrap_or(false);
-                        if let Some(entry) = inner.devices.get_mut(&id) {
-                            if retryable {
-                                entry.state = DeviceState::Pending;
-                                inner.pending.push(id);
-                            } else {
-                                entry.state = DeviceState::Unclaimed;
-                            }
-                        }
+                        Self::record_failure(&mut inner, id, &driver);
                         stats.failed += 1;
                         log::debug!(
                             "driver-core: `{}` gave up on device {id}: {err}",

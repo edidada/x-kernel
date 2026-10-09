@@ -358,7 +358,12 @@ impl PciHost {
     /// the ECAM window cannot be mapped.
     pub fn new(cam: Cam) -> Result<Self, PciInitError> {
         ECAM_MAPPING.call_once(|| EcamOwner::resolve(cam));
-        match ECAM_MAPPING.get().expect("ECAM_MAPPING call_once ran") {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: call_once completed immediately above"
+        )]
+        let ecam = ECAM_MAPPING.get().expect("ECAM_MAPPING call_once ran");
+        match ecam {
             EcamOwner::Absent => Err(PciInitError::InvalidRange),
             EcamOwner::Failed(err) => Err(*err),
             EcamOwner::Mapped(ecam) => {

@@ -112,6 +112,14 @@ pub struct NamedMemoryRegion {
     pub name: &'static str,
 }
 
+/// Parse a byte slice into big-endian u32 words; `None` if not 4-byte aligned.
+fn be_u32_words(value: &[u8]) -> Option<Vec<u32>> {
+    value
+        .chunks_exact(4)
+        .map(|w| Some(u32::from_be_bytes(w.try_into().ok()?)))
+        .collect()
+}
+
 fn property_u32_cells<const N: usize>(node: FdtNode<'_, '_>, name: &str) -> Option<[u32; N]> {
     let value = node.property(name)?.value;
     if value.len() < N * 4 {
@@ -458,15 +466,12 @@ pub fn interrupt_descs(node: FdtNode<'static, 'static>) -> Vec<InterruptInfo> {
             } else if let Some(value) = node.property("interrupts").map(|prop| prop.value) {
                 let width = cells_width as usize;
                 if !value.is_empty() && value.len() % (width * 4) == 0 {
-                    for chunk in value.chunks_exact(width * 4) {
-                        let cells: Vec<u32> = chunk
-                            .chunks_exact(4)
-                            .map(|w| u32::from_be_bytes(w.try_into().unwrap()))
-                            .collect();
-                        if let Some(info) = parse_interrupt_by_controller(controller, &cells) {
-                            out.push(info);
-                        }
-                    }
+                    out.extend(
+                        value
+                            .chunks_exact(width * 4)
+                            .filter_map(be_u32_words)
+                            .filter_map(|cells| parse_interrupt_by_controller(controller, &cells)),
+                    );
                     return out;
                 }
                 if !value.is_empty() {
@@ -487,11 +492,9 @@ pub fn interrupt_descs(node: FdtNode<'static, 'static>) -> Vec<InterruptInfo> {
         }
     }
 
-    if let Some(value) = node.property("interrupts-extended").map(|prop| prop.value) {
-        let words: Vec<u32> = value
-            .chunks_exact(4)
-            .map(|w| u32::from_be_bytes(w.try_into().unwrap()))
-            .collect();
+    if let Some(value) = node.property("interrupts-extended").map(|prop| prop.value)
+        && let Some(words) = be_u32_words(value)
+    {
         // Each entry: controller phandle, then that controller's
         // `#interrupt-cells` specifiers.
         let mut idx = 0usize;
@@ -952,9 +955,10 @@ pub fn read_named_reserved_memory_regions<const N: usize>() -> ([NamedMemoryRegi
 }
 
 mod clocks;
-#[cfg(unittest)]
-#[path = "test_of.rs"]
-mod unittest_tests;
+#[unittest::mod_test]
+mod unittest_tests {
+    include!("test_of.rs");
+}
 
 pub use clocks::{
     ClockSpec, clock_output_name, device_clock_index_by_name, device_clock_names,

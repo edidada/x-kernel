@@ -10,13 +10,13 @@ use core::fmt::Write;
 use kvfs::{DirMapping, SeqFileInode, SeqIterator};
 
 /// `/proc/devices`: one line per bound device, grouped by class view.
-pub struct DevicesIter {
+pub(crate) struct DevicesIter {
     text: String,
     done: bool,
 }
 
 impl DevicesIter {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             text: String::new(),
             done: false,
@@ -84,13 +84,13 @@ impl SeqIterator for DevicesIter {
 }
 
 /// `/proc/bus/devices`: bus-grouped listing.
-pub struct BusDevicesIter {
+pub(crate) struct BusDevicesIter {
     text: String,
     done: bool,
 }
 
 impl BusDevicesIter {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             text: String::new(),
             done: false,

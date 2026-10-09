@@ -25,10 +25,16 @@ fn pci_bar_allocator() -> SpinNoPreemptGuard<'static, Option<crate::PciRangeAllo
             .map(|(start, len, _)| crate::PciRangeAllocator::new(start, len));
         SpinNoPreempt::new(alloc)
     });
-    PCI_BAR_ALLOCATOR
-        .get()
-        .expect("PCI_BAR_ALLOCATOR call_once succeeded")
-        .lock()
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: call_once completed immediately above"
+    )]
+    {
+        PCI_BAR_ALLOCATOR
+            .get()
+            .expect("PCI_BAR_ALLOCATOR call_once succeeded")
+            .lock()
+    }
 }
 
 pub fn pci_cam_kind() -> crate::Cam {

@@ -500,10 +500,16 @@ impl BlockDevice {
     /// publication time, which [`Gendisk::new`] and [`Self::set_capacity`]
     /// already enforce.
     pub fn size(&self) -> u64 {
-        let block_size = u64::try_from(self.block_size()).expect("validated block size");
-        self.num_blocks()
-            .checked_mul(block_size)
-            .expect("validated block-device capacity")
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: block size and capacity are                       validated at publication (Gendisk::new / set_capacity)"
+        )]
+        {
+            let block_size = u64::try_from(self.block_size()).expect("validated block size");
+            self.num_blocks()
+                .checked_mul(block_size)
+                .expect("validated block-device capacity")
+        }
     }
 
     /// Returns whether inherent or administrative policy prohibits writes.
@@ -721,6 +727,7 @@ pub fn block_devices() -> Vec<Arc<BlockDevice>> {
 }
 
 #[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{boxed::Box, string::String, sync::Arc, vec, vec::Vec};
 
