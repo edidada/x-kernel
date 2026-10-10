@@ -386,7 +386,7 @@ pub(super) fn setup_msix<H: VirtIoHal>(
         return None;
     }
 
-    let irq = msi.irq.number;
+    let irq = msi.irq.number();
     // SAFETY: the state-owned root aliases the probe root's ECAM window.
     // This is sound here because the state's config-space accesses (MSI-X
     // enable/mask word and command register writes) are volatile MMIO

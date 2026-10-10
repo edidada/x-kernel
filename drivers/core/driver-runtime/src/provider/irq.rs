@@ -44,7 +44,7 @@ impl IrqOp for XKernelResourceProvider {
                     Ok(None) => {
                         log::warn!(
                             "IRQ {} regular action was not registered or was not released",
-                            irq.number
+                            irq.number()
                         );
                     }
                     #[expect(
@@ -58,7 +58,7 @@ impl IrqOp for XKernelResourceProvider {
                     Err(err) => {
                         panic!(
                             "failed to release IRQ {} regular action: {err:?}",
-                            irq.number
+                            irq.number()
                         );
                     }
                 }
@@ -70,7 +70,7 @@ impl IrqOp for XKernelResourceProvider {
                     Ok(None) => {
                         log::warn!(
                             "IRQ {} action token {} was not registered or was not released",
-                            irq.number,
+                            irq.number(),
                             id
                         );
                     }
@@ -85,7 +85,8 @@ impl IrqOp for XKernelResourceProvider {
                     Err(err) => {
                         panic!(
                             "failed to release IRQ {} action token {}: {err:?}",
-                            irq.number, id
+                            irq.number(),
+                            id
                         );
                     }
                 }
@@ -98,22 +99,26 @@ impl IrqOp for XKernelResourceProvider {
     }
 
     fn map_irq(&self, route: IrqRouteDesc) -> ResResult<IrqResource> {
+        let domain = effective_route_domain(route.controller, route.domain);
         let desc = irq_route_to_kirq_desc(route);
         let virq = kirq::try_map(desc).map_err(|err| {
             log::warn!("failed to map IRQ route {route:?}: {err:?}");
             map_irq_desc_error(err)
         })?;
-        Ok(IrqResource::new(virq, route.trigger)
-            .with_controller(route.controller)
-            .with_hwirq(route.hwirq))
+        Ok(IrqResource::mapped(
+            virq,
+            route.trigger,
+            route.controller,
+            domain,
+            route.hwirq,
+        ))
     }
 
     fn alloc_msix(&self) -> ResResult<MsiResource> {
         #[cfg(target_arch = "x86_64")]
         {
             let allocation = kirq::alloc_msix(kirq::IrqAffinity::Any).ok_or(ResError::NoMemory)?;
-            let irq = IrqResource::new(allocation.virq(), IrqTrigger::EdgeRising)
-                .with_controller(IrqController::Unknown);
+            let irq = IrqResource::plain(allocation.virq(), IrqTrigger::EdgeRising);
             let message = allocation.message();
             Ok(MsiResource::new(
                 irq,
@@ -130,10 +135,10 @@ impl IrqOp for XKernelResourceProvider {
     fn free_msix(&self, resource: MsiResource) {
         #[cfg(target_arch = "x86_64")]
         {
-            if !kirq::free_msix(resource.irq.number) {
+            if !kirq::free_msix(resource.irq.number()) {
                 log::warn!(
                     "failed to free MSI-X IRQ {} (not allocated?)",
-                    resource.irq.number
+                    resource.irq.number()
                 );
             }
         }
@@ -143,6 +148,29 @@ impl IrqOp for XKernelResourceProvider {
             let _ = resource;
         }
     }
+}
+
+/// driver-core controller vocabulary → the runtime provider's (kirq).
+pub(crate) fn to_runtime_controller(controller: driver_core::IrqController) -> kirq::IrqController {
+    use driver_core::IrqController as C;
+    match controller {
+        C::Gic => kirq::IrqController::Gic,
+        C::Plic => kirq::IrqController::Plic,
+        C::IoApic => kirq::IrqController::IoApic,
+        C::LoongArchExtioi => kirq::IrqController::LoongArchExtioi,
+        C::Msi | C::Unknown => kirq::IrqController::Unknown,
+    }
+}
+
+/// The effective domain a driver-core firmware route maps through:
+/// firmware-stated when present, else the controller's root domain. The
+/// result is recorded on the mapped resource — the identity never
+/// diverges between request-time mapping and release.
+pub(crate) fn effective_domain(
+    controller: driver_core::IrqController,
+    stated: Option<kirq::IrqDomainId>,
+) -> Option<kirq::IrqDomainId> {
+    effective_route_domain(to_runtime_controller(controller), stated)
 }
 
 fn dev_irq_controller_to_kirq_domain(controller: kirq::IrqController) -> Option<kirq::IrqDomainId> {
@@ -159,37 +187,54 @@ fn dev_irq_controller_to_kirq_domain(controller: kirq::IrqController) -> Option<
     }
 }
 
+/// The domain a route maps through: firmware-stated when present, else the
+/// controller's root domain (single-domain controllers — today's GIC/PLIC
+/// roots). The SAME effective domain is recorded on the mapped resource, so
+/// the identity never diverges between mapping and later release.
+fn effective_route_domain(
+    controller: kirq::IrqController,
+    stated: Option<kirq::IrqDomainId>,
+) -> Option<kirq::IrqDomainId> {
+    stated.or_else(|| dev_irq_controller_to_kirq_domain(controller))
+}
+
 fn irq_route_to_kirq_desc(route: IrqRouteDesc) -> kirq::IrqDesc {
     let mut desc = kirq::IrqDesc::new(route.hwirq, route.trigger).with_controller(route.controller);
-    if let Some(domain) = dev_irq_controller_to_kirq_domain(route.controller) {
+    if let Some(domain) = effective_route_domain(route.controller, route.domain) {
         desc = desc.with_domain(domain);
     }
     desc
 }
 
 fn irq_resource_to_kirq_spec(irq: IrqResource) -> kirq::IrqSpec {
-    if irq.hwirq.is_none()
-        && irq.domain.is_none()
-        && irq.controller.unwrap_or(IrqController::Unknown) == IrqController::Unknown
-    {
-        return kirq::IrqSpec::PlainVirq(irq.number);
+    match irq {
+        IrqResource::PlainVirq { number, .. } => kirq::IrqSpec::PlainVirq(number),
+        IrqResource::DomainMapped {
+            number,
+            trigger,
+            controller,
+            domain,
+            hwirq,
+        } => {
+            let mut desc = kirq::IrqDesc::new(hwirq, trigger).with_controller(controller);
+            // Only pin the logical irq when the caller actually resolved
+            // one (number != 0). A firmware route handed straight to
+            // `request_irq` (number 0) maps through the controller's
+            // domain: an existing mapping is reused, a fresh dynamic virq
+            // is allocated — never a collision with a stale "preferred"
+            // number.
+            if number != 0 {
+                desc = desc.with_virq(number);
+            }
+            // The origin's domain is authoritative — no controller-based
+            // re-derivation here (that guess is what used to drop
+            // firmware-stated domains).
+            if let Some(domain) = domain {
+                desc = desc.with_domain(domain);
+            }
+            kirq::IrqSpec::Desc(desc)
+        }
     }
-
-    let hwirq = irq.hwirq.unwrap_or(irq.number);
-    let controller = irq.controller.unwrap_or(IrqController::Unknown);
-    let mut desc = kirq::IrqDesc::new(hwirq, irq.trigger).with_controller(controller);
-    // Only pin the logical irq when the caller actually resolved one
-    // (number != 0). A firmware route (number 0 + hwirq + controller) maps
-    // through the controller's domain: an existing mapping is reused, a
-    // fresh dynamic virq is allocated — never a collision with a stale
-    // "preferred" number.
-    if irq.number != 0 {
-        desc = desc.with_virq(irq.number);
-    }
-    if let Some(domain) = dev_irq_controller_to_kirq_domain(controller) {
-        desc = desc.with_domain(domain);
-    }
-    kirq::IrqSpec::Desc(desc)
 }
 
 fn event_to_kirq(event: kirq::IrqEvent) -> kirq::IrqEvent {
@@ -225,7 +270,7 @@ mod tests {
 
     #[def_test]
     fn test_plain_irq_resource_maps_to_plain_virq_spec() {
-        let resource = IrqResource::new(32, IrqTrigger::Unknown(0));
+        let resource = IrqResource::plain(32, IrqTrigger::Unknown(0));
 
         let spec = irq_resource_to_kirq_spec(resource);
 
@@ -234,9 +279,13 @@ mod tests {
 
     #[def_test]
     fn test_routed_irq_resource_maps_to_descriptor_spec() {
-        let resource = IrqResource::new(48, IrqTrigger::LevelHigh)
-            .with_controller(IrqController::Gic)
-            .with_hwirq(30);
+        let resource = IrqResource::mapped(
+            48,
+            IrqTrigger::LevelHigh,
+            IrqController::Gic,
+            Some(kirq::GIC_ROOT_DOMAIN),
+            30,
+        );
 
         let spec = irq_resource_to_kirq_spec(resource);
         let kirq::IrqSpec::Desc(desc) = spec else {
@@ -246,6 +295,47 @@ mod tests {
         assert_eq!(desc.logical_irq(), Some(48));
         assert_eq!(desc.hwirq, 30);
         assert_eq!(desc.domain, Some(kirq::GIC_ROOT_DOMAIN));
+    }
+
+    /// Regression: a firmware-STATED domain is authoritative. The old
+    /// field-based resource re-derived the domain from the controller on
+    /// every conversion — a second GIC instance (or any non-root domain)
+    /// silently lost its identity between request and release.
+    #[def_test]
+    fn test_stated_domain_is_not_re_derived_from_controller() {
+        let stated = kirq::IrqDomainId::new(7); // a non-root domain id
+        let resource = IrqResource::mapped(
+            0,
+            IrqTrigger::LevelHigh,
+            IrqController::Gic,
+            Some(stated),
+            30,
+        );
+
+        let spec = irq_resource_to_kirq_spec(resource);
+        let kirq::IrqSpec::Desc(desc) = spec else {
+            panic!("routed IRQ resource should map to descriptor spec");
+        };
+
+        assert_eq!(desc.domain, Some(stated));
+        assert_ne!(desc.domain, Some(kirq::GIC_ROOT_DOMAIN));
+        // Pre-mapping (number 0): no stale preferred virq is pinned.
+        assert_eq!(desc.logical_irq(), None);
+    }
+
+    /// `effective_domain` derives the controller's root domain only when
+    /// firmware stated none — the single-domain-controller fallback.
+    #[def_test]
+    fn test_effective_domain_falls_back_to_controller_root() {
+        assert_eq!(
+            effective_domain(IrqController::Gic, None),
+            Some(kirq::GIC_ROOT_DOMAIN)
+        );
+        let stated = kirq::IrqDomainId::new(9);
+        assert_eq!(
+            effective_domain(IrqController::Gic, Some(stated)),
+            Some(stated)
+        );
     }
 
     #[def_test]

@@ -988,7 +988,15 @@ mod tests {
             _: &'static str,
             _: crate::device::IrqHandlerFn,
         ) -> Result<DevIrq, RuntimeError> {
-            Ok(DevIrq::new(spec.number, None))
+            Ok(DevIrq::new(
+                match spec {
+                    IrqSpec::ResolvedVirq { number, .. } => number,
+                    // The mock does not map routes; a placeholder number
+                    // suffices for the tests that exercise this service.
+                    IrqSpec::FirmwareRoute { hwirq, .. } => hwirq,
+                },
+                None,
+            ))
         }
 
         fn alloc_coherent(
@@ -1075,7 +1083,7 @@ mod tests {
         resources.push_kind(crate::resource::ResourceKind::Mmio(MmioRegion::new(
             0x1000, 0x100,
         )));
-        resources.push_kind(crate::resource::ResourceKind::Irq(IrqSpec::global(
+        resources.push_kind(crate::resource::ResourceKind::Irq(IrqSpec::resolved(
             32,
             crate::resource::IrqTrigger::LevelHigh,
         )));

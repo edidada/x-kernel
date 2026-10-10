@@ -35,18 +35,26 @@ impl MsiMessage {
 
 /// An interrupt resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IrqResource {
-    /// IRQ number visible to the OS (virtual IRQ after domain translation).
-    pub number: usize,
-    /// Trigger mode.
-    pub trigger: IrqTrigger,
-    /// Controller family that owns this IRQ, if known.
-    pub controller: Option<IrqController>,
-    /// Domain this IRQ belongs to, if the host partitions IRQ number space.
-    pub domain: Option<IrqDomainId>,
-    /// Hardware IRQ number within `controller` / `domain`, when distinct from
-    /// the OS-visible `number`.
-    pub hwirq: Option<usize>,
+pub enum IrqResource {
+    /// A plain virtual irq with no retained origin.
+    PlainVirq { number: usize, trigger: IrqTrigger },
+    /// A domain-mapped irq that remembers its firmware origin: the
+    /// controller/domain/hwirq the mapping went through — identity audits
+    /// and release go through the same domain the mapping came from,
+    /// never a re-derived guess.
+    DomainMapped {
+        /// OS-visible irq number (the domain translation's output; 0 while
+        /// the resource is still pre-mapping, e.g. handed from a firmware
+        /// route straight into `request_irq`).
+        number: usize,
+        trigger: IrqTrigger,
+        controller: IrqController,
+        /// The domain the mapping used: firmware-stated, or the
+        /// controller's root domain when firmware named none (single-domain
+        /// controllers).
+        domain: Option<IrqDomainId>,
+        hwirq: usize,
+    },
 }
 
 /// MSI/MSI-X interrupt resource allocated by the host IRQ core.
@@ -147,7 +155,13 @@ pub trait IrqOp: Send + Sync {
     /// Default: treat the hardware number as the OS-visible number with no
     /// translation.
     fn map_irq(&self, route: IrqRouteDesc) -> ResResult<IrqResource> {
-        Ok(IrqResource::new(route.hwirq, route.trigger).with_controller(route.controller))
+        Ok(IrqResource::mapped(
+            route.hwirq,
+            route.trigger,
+            route.controller,
+            route.domain,
+            route.hwirq,
+        ))
     }
 
     /// Allocate a PCI MSI-X interrupt resource.
@@ -196,33 +210,40 @@ pub trait IrqThreadHandler: Send + Sync {
 }
 
 impl IrqResource {
-    /// Construct a minimal IRQ resource with just a number and trigger.
-    pub const fn new(number: usize, trigger: IrqTrigger) -> Self {
-        Self {
+    /// A plain (origin-less) virtual irq.
+    pub const fn plain(number: usize, trigger: IrqTrigger) -> Self {
+        Self::PlainVirq { number, trigger }
+    }
+
+    /// A domain-mapped irq with its firmware origin.
+    pub const fn mapped(
+        number: usize,
+        trigger: IrqTrigger,
+        controller: IrqController,
+        domain: Option<IrqDomainId>,
+        hwirq: usize,
+    ) -> Self {
+        Self::DomainMapped {
             number,
             trigger,
-            controller: None,
-            domain: None,
-            hwirq: None,
+            controller,
+            domain,
+            hwirq,
         }
     }
 
-    /// Builder: attach a controller family.
-    pub const fn with_controller(mut self, c: IrqController) -> Self {
-        self.controller = Some(c);
-        self
+    /// The OS-visible irq number of either shape.
+    pub const fn number(&self) -> usize {
+        match self {
+            Self::PlainVirq { number, .. } | Self::DomainMapped { number, .. } => *number,
+        }
     }
 
-    /// Builder: attach a domain id.
-    pub const fn with_domain(mut self, d: IrqDomainId) -> Self {
-        self.domain = Some(d);
-        self
-    }
-
-    /// Builder: attach the hardware IRQ number.
-    pub const fn with_hwirq(mut self, n: usize) -> Self {
-        self.hwirq = Some(n);
-        self
+    /// The trigger mode of either shape.
+    pub const fn trigger(&self) -> IrqTrigger {
+        match self {
+            Self::PlainVirq { trigger, .. } | Self::DomainMapped { trigger, .. } => *trigger,
+        }
     }
 }
 

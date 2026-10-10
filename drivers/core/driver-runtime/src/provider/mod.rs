@@ -12,7 +12,7 @@
 //! bought nothing but a dependency edge.
 
 mod dma;
-mod irq;
+pub(crate) mod irq;
 mod mmio;
 
 /// The stateless X-Kernel resource provider.

@@ -299,20 +299,33 @@ pub fn probe_pci_transport_only<H: VirtIoHal>(
 /// controller); this maps it to the OS-visible virtual irq. The static
 /// per-arch fallback covers platforms without firmware routing.
 pub fn resolve_legacy_irq(spec: &driver_core::IrqSpec, irq_provider: &dyn IrqOp) -> Option<usize> {
-    // The bus stores the firmware route as controller + hwirq (number 0 per
-    // the IrqSpec contract); map it to the OS-visible virq here.
-    let hwirq = spec.hwirq?;
+    // Only a firmware route needs mapping here; a resolved virq passes
+    // through unchanged.
+    let driver_core::IrqSpec::FirmwareRoute {
+        controller,
+        domain,
+        hwirq,
+        trigger,
+    } = *spec
+    else {
+        return match *spec {
+            driver_core::IrqSpec::ResolvedVirq { number, .. } => Some(number),
+            driver_core::IrqSpec::FirmwareRoute { .. } => None,
+        };
+    };
     let desc = IrqRouteDesc {
         hwirq,
-        trigger: spec.trigger,
-        controller: match spec.controller {
-            Some(driver_core::IrqController::Gic) => IrqController::Gic,
-            Some(driver_core::IrqController::Plic) => IrqController::Plic,
-            Some(driver_core::IrqController::IoApic) => IrqController::IoApic,
-            Some(driver_core::IrqController::LoongArchExtioi) => IrqController::LoongArchExtioi,
-            _ => IrqController::Unknown,
+        trigger,
+        controller: match controller {
+            driver_core::IrqController::Gic => IrqController::Gic,
+            driver_core::IrqController::Plic => IrqController::Plic,
+            driver_core::IrqController::IoApic => IrqController::IoApic,
+            driver_core::IrqController::LoongArchExtioi => IrqController::LoongArchExtioi,
+            driver_core::IrqController::Msi | driver_core::IrqController::Unknown => {
+                IrqController::Unknown
+            }
         },
-        domain: None,
+        domain,
     };
-    irq_provider.map_irq(desc).ok().map(|irq| irq.number)
+    irq_provider.map_irq(desc).ok().map(|irq| irq.number())
 }

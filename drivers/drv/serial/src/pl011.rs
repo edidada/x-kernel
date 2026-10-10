@@ -180,7 +180,7 @@ impl DriverOps<PlatformBus> for Pl011Driver {
             // mapping resolves it.
             dev.irq(0)
                 .ok()
-                .and_then(|spec| spec.hwirq)
+                .and_then(|spec| spec.hwirq())
                 .unwrap_or(usize::MAX),
         );
         // The enabled-clock policy resolves only now, after EVERY fallible

@@ -40,34 +40,69 @@ pub struct IoPortRange {
     pub size: u16,
 }
 
-/// An interrupt as stated by firmware, before resolution to a virtual irq.
+/// An interrupt as stated by firmware or the bus, before the host's IRQ
+/// core resolves it — one of exactly two shapes, never a field-combination
+/// convention.
 ///
-/// The controller/domain/hwirq triple is preserved from the firmware node so
-/// the interrupt subsystem can perform the translation at request time. This
-/// mirrors `struct of_phandle_args` / `struct acpi_gsi` rather than a global
-/// irq number.
+/// This mirrors `struct of_phandle_args` / `struct acpi_gsi` for the
+/// firmware shape and a resolved gsi/virq for the bus shape. The old struct
+/// encoded "which shape am I?" through `number == 0 && hwirq.is_some()`;
+/// the enum makes both shapes and their obligations type-level: a
+/// [`IrqSpec::ResolvedVirq`] needs no domain translation at request time, a
+/// [`IrqSpec::FirmwareRoute`] carries its controller/domain/hwirq triple to
+/// the provider unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IrqSpec {
-    /// Global irq number when already resolved by the bus (e.g. PCI legacy
-    /// INTx). Zero with a set domain means "resolve via domain".
-    pub number: usize,
-    pub trigger: IrqTrigger,
-    /// Interrupt controller, if the bus/firmware identified one.
-    pub controller: Option<IrqController>,
-    /// Interrupt domain id within the controller.
-    pub domain: Option<IrqDomainId>,
-    /// Controller-relative hardware irq.
-    pub hwirq: Option<usize>,
+pub enum IrqSpec {
+    /// An OS-wide virtual irq the bus already resolved (an MSI-X vector
+    /// returned by transport setup, or a port where the firmware number
+    /// already IS the virq).
+    ResolvedVirq { number: usize, trigger: IrqTrigger },
+    /// A firmware route: controller-relative hwirq (+ optional domain id)
+    /// awaiting translation through the controller's irq domain at
+    /// request time. Linux keeps DT spec cells until
+    /// `irq_create_of_mapping`; compressing early only worked where the
+    /// domain map is the identity.
+    FirmwareRoute {
+        controller: IrqController,
+        /// Domain within the controller, when firmware named one. `None`
+        /// means single-domain controllers (today's GIC/PLIC roots); the
+        /// provider derives the root domain and records it on the mapped
+        /// resource.
+        domain: Option<IrqDomainId>,
+        hwirq: usize,
+        trigger: IrqTrigger,
+    },
 }
 
 impl IrqSpec {
-    pub const fn global(number: usize, trigger: IrqTrigger) -> Self {
-        Self {
-            number,
-            trigger,
-            controller: None,
+    /// A bus-resolved virtual irq.
+    pub const fn resolved(number: usize, trigger: IrqTrigger) -> Self {
+        Self::ResolvedVirq { number, trigger }
+    }
+
+    /// A firmware route without a stated domain id.
+    pub const fn firmware(controller: IrqController, hwirq: usize, trigger: IrqTrigger) -> Self {
+        Self::FirmwareRoute {
+            controller,
             domain: None,
-            hwirq: None,
+            hwirq,
+            trigger,
+        }
+    }
+
+    /// The trigger mode of either shape.
+    pub const fn trigger(&self) -> IrqTrigger {
+        match self {
+            Self::ResolvedVirq { trigger, .. } | Self::FirmwareRoute { trigger, .. } => *trigger,
+        }
+    }
+
+    /// The controller-relative hwirq, if this is a firmware route
+    /// (diagnostics: the descriptor's hardware line).
+    pub const fn hwirq(&self) -> Option<usize> {
+        match self {
+            Self::ResolvedVirq { .. } => None,
+            Self::FirmwareRoute { hwirq, .. } => Some(*hwirq),
         }
     }
 }

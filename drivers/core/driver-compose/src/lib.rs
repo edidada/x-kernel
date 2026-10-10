@@ -202,17 +202,16 @@ fn build_descriptor(dev: firmware::FirmwareDevice) {
         // the controller's irq domain at request time (Linux keeps DT spec
         // cells until irq_create_of_mapping). Compressing to a bare global
         // number only worked where the domain map is the identity (QEMU).
-        let mut spec = driver_core::IrqSpec::global(0, map_trigger(irq.trigger));
-        // Per IrqSpec's field contract: number 0 + hwirq means "resolve via
-        // the controller's irq domain at request time". The DT number IS the
-        // controller-relative hwirq (GIC 32+SPI math applied by the parser),
-        // not an OS-visible virq.
-        spec.controller = Some(match irq.controller {
+        // A firmware route: the DT number IS the controller-relative
+        // hwirq (GIC 32+SPI math applied by the parser), not an
+        // OS-visible virq — resolution happens through the controller's
+        // irq domain at request time.
+        let controller = match irq.controller {
             firmware::InterruptControllerKind::Gic => driver_core::IrqController::Gic,
             firmware::InterruptControllerKind::Plic => driver_core::IrqController::Plic,
             firmware::InterruptControllerKind::Unknown => driver_core::IrqController::Unknown,
-        });
-        spec.hwirq = Some(irq.irq);
+        };
+        let spec = driver_core::IrqSpec::firmware(controller, irq.irq, map_trigger(irq.trigger));
         let name = dev
             .irq_names
             .as_ref()

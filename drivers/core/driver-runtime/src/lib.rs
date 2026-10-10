@@ -193,23 +193,40 @@ impl DeviceServices for XKernelRuntime {
         name: &'static str,
         handler: IrqHandlerFn,
     ) -> Result<DevIrq, RuntimeError> {
-        // Preserve the firmware route: with controller (+ hwirq) present the
-        // provider maps through the controller's irq domain; a bare number
-        // becomes PlainVirq and assumes the bus already resolved it.
-        let mut resource = IrqResource::new(spec.number, spec.trigger);
-        resource.controller = spec.controller;
-        resource.hwirq = spec.hwirq;
+        // Preserve the route shape end to end: a resolved virq stays
+        // plain; a firmware route keeps its controller/domain/hwirq
+        // triple (the domain the mapping will use — firmware-stated, or
+        // the controller's root when firmware named none). The provider
+        // maps through the controller's irq domain at request time.
+        let resource = match spec {
+            driver_core::IrqSpec::ResolvedVirq { number, trigger } => {
+                IrqResource::plain(number, trigger)
+            }
+            driver_core::IrqSpec::FirmwareRoute {
+                controller,
+                domain,
+                hwirq,
+                trigger,
+            } => IrqResource::mapped(
+                0,
+                trigger,
+                provider::irq::to_runtime_controller(controller),
+                provider::irq::effective_domain(controller, domain),
+                hwirq,
+            ),
+        };
         let adapted: Arc<dyn ResIrqHandler> = Arc::new(AdaptedIrqHandler { handler });
         let token = self
             .provider
             .request_irq(resource, adapted)
             .map_err(map_res_error)?;
+        let number = resource.number();
         let release = {
             let provider = self.provider;
             move || provider.release_irq(resource, token)
         };
         let _ = name;
-        Ok(DevIrq::new(spec.number, Some(Arc::new(release))))
+        Ok(DevIrq::new(number, Some(Arc::new(release))))
     }
 
     fn alloc_coherent(

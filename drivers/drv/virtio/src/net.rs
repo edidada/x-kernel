@@ -93,7 +93,7 @@ fn activate_with_irq<B: driver_core::Bus, T: virtio::Transport + 'static>(
     // so a handler on the descriptor's legacy line would never fire.
     let irq = match msi_irq.map(|number| {
         dev.request_irq(
-            driver_core::IrqSpec::global(number, driver_core::IrqTrigger::Unknown(0)),
+            driver_core::IrqSpec::resolved(number, driver_core::IrqTrigger::Unknown(0)),
             "virtio-net",
             {
                 let worker = worker.clone();

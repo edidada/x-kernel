@@ -132,19 +132,21 @@ fn resolve_legacy_route<C: crate::ConfigurationAccess>(
     bdf: crate::DeviceFunction,
 ) -> Option<IrqSpec> {
     if let Some(route) = crate::legacy_interrupt_route(root, bdf) {
-        // number 0 + hwirq: resolve via the controller's irq domain at
-        // request time (the raw firmware line is a hwirq, not a virq).
-        let mut spec = IrqSpec::global(0, map_trigger(route.trigger));
-        // khal's firmware enum only knows Gic/Plic today; anything else the
+        // A firmware route: the raw line is controller-relative, resolved
+        // through the controller's irq domain at request time. khal's
+        // firmware enum only knows Gic/Plic today; anything else the
         // firmware stated (or did not) maps to Unknown and the provider
         // falls back to its default resolution.
-        spec.controller = Some(match route.controller {
+        let controller = match route.controller {
             crate::fw::InterruptControllerKind::Gic => driver_core::IrqController::Gic,
             crate::fw::InterruptControllerKind::Plic => driver_core::IrqController::Plic,
             crate::fw::InterruptControllerKind::Unknown => driver_core::IrqController::Unknown,
-        });
-        spec.hwirq = Some(route.irq);
-        return Some(spec);
+        };
+        return Some(IrqSpec::firmware(
+            controller,
+            route.irq,
+            map_trigger(route.trigger),
+        ));
     }
 
     // Static fallback (no firmware routing): legacy PCI INTx ranges used by
@@ -157,28 +159,32 @@ fn resolve_legacy_route<C: crate::ConfigurationAccess>(
             if irq_line == 0 || irq_line == 0xff {
                 return None;
             }
-            let mut spec = IrqSpec::global(0, driver_core::IrqTrigger::LevelLow);
-            spec.controller = Some(driver_core::IrqController::IoApic);
-            spec.hwirq = Some(irq_line);
-            Some(spec)
+            Some(IrqSpec::firmware(
+                driver_core::IrqController::IoApic,
+                irq_line,
+                driver_core::IrqTrigger::LevelLow,
+            ))
         }
         target_arch = "loongarch64" => {
-            let mut spec = IrqSpec::global(0, driver_core::IrqTrigger::LevelHigh);
-            spec.controller = Some(driver_core::IrqController::LoongArchExtioi);
-            spec.hwirq = Some(0x10 + (bdf.device & 3) as usize);
-            Some(spec)
+            Some(IrqSpec::firmware(
+                driver_core::IrqController::LoongArchExtioi,
+                0x10 + (bdf.device & 3) as usize,
+                driver_core::IrqTrigger::LevelHigh,
+            ))
         }
         target_arch = "aarch64" => {
-            let mut spec = IrqSpec::global(0, driver_core::IrqTrigger::LevelHigh);
-            spec.controller = Some(driver_core::IrqController::Gic);
-            spec.hwirq = Some(0x23 + (bdf.device & 3) as usize);
-            Some(spec)
+            Some(IrqSpec::firmware(
+                driver_core::IrqController::Gic,
+                0x23 + (bdf.device & 3) as usize,
+                driver_core::IrqTrigger::LevelHigh,
+            ))
         }
         target_arch = "riscv64" => {
-            let mut spec = IrqSpec::global(0, driver_core::IrqTrigger::LevelHigh);
-            spec.controller = Some(driver_core::IrqController::Plic);
-            spec.hwirq = Some(0x20 + (bdf.device & 3) as usize);
-            Some(spec)
+            Some(IrqSpec::firmware(
+                driver_core::IrqController::Plic,
+                0x20 + (bdf.device & 3) as usize,
+                driver_core::IrqTrigger::LevelHigh,
+            ))
         }
         _ => None,
     }
