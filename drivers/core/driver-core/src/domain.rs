@@ -31,7 +31,10 @@ use lazyinit::LazyInit;
 
 use crate::{
     bus::{Bus, BusId, DeviceDescriptor, DeviceId, IdMatchEntry, MatchScore},
-    device::{BoundDevice, DeviceCtx, DeviceServices, ServiceError},
+    device::{
+        BoundDevice, ClockConsumerServices, DeviceCtx, DeviceResourceServices, DeviceServices,
+        ServiceError,
+    },
     error::{DepSource, ProbeError, RuntimeError},
     resource::{ClkSpec, IrqSpec, MmioRegion},
 };
@@ -224,6 +227,13 @@ struct DeviceEntry {
     /// hole (previously nothing re-linked them until an unrelated driver
     /// registration reswept).
     last_deferred_dep: Option<DepSource>,
+    /// Binding generation: bumped on every teardown (light and full) so a
+    /// probe result created against an older generation can never commit —
+    /// the structural stale-commit guard for future reentrancy (hotplug,
+    /// rebind). Today the Probing→Busy remove gate already prevents the
+    /// interleave; this makes the invariant local to the commit path
+    /// instead of incidental to the gate.
+    generation: u64,
     /// Wake generations this device has already consumed per dependency —
     /// the lost-wakeup guard's bookkeeping (see DomainInner's
     /// dep_generations).
@@ -232,11 +242,7 @@ struct DeviceEntry {
 
 struct NoServices;
 
-impl DeviceServices for NoServices {
-    fn as_any(&self) -> &dyn core::any::Any {
-        self
-    }
-
+impl DeviceResourceServices for NoServices {
     fn iomap(
         &self,
         _: u64,
@@ -264,9 +270,17 @@ impl DeviceServices for NoServices {
     ) -> Result<crate::device::CoherentMem, RuntimeError> {
         Err(RuntimeError::Unsupported)
     }
+}
 
+impl ClockConsumerServices for NoServices {
     fn clk_get(&self, _: u64, _: ClkSpec) -> Result<crate::device::ClkHandle, ServiceError> {
         Err(ServiceError::Fatal(RuntimeError::Unsupported))
+    }
+}
+
+impl DeviceServices for NoServices {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 }
 
@@ -464,6 +478,7 @@ impl DeviceDomain {
                     driver: None,
                     data: None,
                     children: Vec::new(),
+                    generation: 0,
                     attempted: Vec::new(),
                     last_deferred_dep: None,
                     dep_seen_generations: Vec::new(),
@@ -712,20 +727,40 @@ impl DeviceDomain {
             }
             for (id, desc, driver) in batch {
                 let services = self.inner.lock().services.clone();
+                let generation = self
+                    .inner
+                    .lock()
+                    .devices
+                    .get(&id)
+                    .map_or(0, |e| e.generation);
                 match driver.probe(&desc, id, services.as_ref()) {
                     Ok(data) => {
                         let mut inner = self.inner.lock();
-                        if let Some(entry) = inner.devices.get_mut(&id) {
-                            entry.state = DeviceState::Active;
-                            entry.driver = Some(driver.clone());
-                            entry.data = Some(data);
+                        match inner.devices.get_mut(&id) {
+                            Some(entry) if entry.generation == generation => {
+                                entry.state = DeviceState::Active;
+                                entry.driver = Some(driver.clone());
+                                entry.data = Some(data);
+                                stats.activated += 1;
+                                log::debug!(
+                                    "driver-core: `{}` activated device {id} ({:?})",
+                                    driver.name(),
+                                    desc.identity
+                                );
+                            }
+                            // Stale probe: the device's generation moved
+                            // (torn down and re-added) while this probe
+                            // ran. Its Data is not this entry's — drop it;
+                            // the guards inside release against the
+                            // services that created them.
+                            _ => {
+                                drop(data);
+                                log::warn!(
+                                    "driver-core: dropped stale probe result for device {id} \
+                                     (generation moved)"
+                                );
+                            }
                         }
-                        stats.activated += 1;
-                        log::debug!(
-                            "driver-core: `{}` activated device {id} ({:?})",
-                            driver.name(),
-                            desc.identity
-                        );
                     }
                     Err(ProbeError::Deferred(dep)) => {
                         let mut inner = self.inner.lock();
@@ -826,6 +861,7 @@ impl DeviceDomain {
             match entry.state {
                 DeviceState::Active => {
                     entry.state = DeviceState::Removing;
+                    entry.generation += 1;
                     (
                         Some(entry.desc.clone()),
                         entry.driver.take(),
@@ -850,6 +886,9 @@ impl DeviceDomain {
                 // keeping it would grow the table unboundedly under churn.
                 DeviceState::Pending | DeviceState::Deferred | DeviceState::Unclaimed => {
                     Self::unlink_from_parent(&mut inner, &id.raw());
+                    if let Some(entry) = inner.devices.get_mut(&id.raw()) {
+                        entry.generation += 1;
+                    }
                     inner.devices.remove(&id.raw());
                     inner.pending.retain(|pending| *pending != id.raw());
                     inner.deferred.retain(|(deferred, _)| *deferred != id.raw());
@@ -1051,11 +1090,7 @@ mod tests {
         }
     }
 
-    impl DeviceServices for MockServices {
-        fn as_any(&self) -> &dyn core::any::Any {
-            self
-        }
-
+    impl DeviceResourceServices for MockServices {
         fn iomap(
             &self,
             _: u64,
@@ -1094,7 +1129,9 @@ mod tests {
         ) -> Result<crate::device::CoherentMem, RuntimeError> {
             Err(RuntimeError::Unsupported)
         }
+    }
 
+    impl ClockConsumerServices for MockServices {
         fn clk_get(&self, _: u64, spec: ClkSpec) -> Result<ClkHandle, ServiceError> {
             // Bind the lookup OUTSIDE the match: a match scrutinee's
             // temporary lock guard lives for the whole match arm, and the
@@ -1111,6 +1148,12 @@ mod tests {
                     Err(ServiceError::Deferred(DepSource::clk(spec.provider)))
                 }
             }
+        }
+    }
+
+    impl DeviceServices for MockServices {
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
         }
     }
 

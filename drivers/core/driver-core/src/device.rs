@@ -108,7 +108,12 @@ pub trait ExtensionService: Sized {
 /// This is a framework-internal seam: drivers touch it only through
 /// [`DeviceCtx`]. It exists so the runtime (and test doubles) can be swapped
 /// without the model depending on any host implementation.
-pub trait DeviceServices: Send + Sync {
+/// MMIO/IRQ/DMA acquisition — the resource capabilities every host must
+/// provide. Split from the clock and extension capabilities so the contract
+/// states WHAT is mandatory per category instead of one flat "misc
+/// interface"; future capabilities (I/O ports, streaming DMA, MSI) join as
+/// their own traits, never as more methods on the aggregate.
+pub trait DeviceResourceServices: Send + Sync {
     /// Map an MMIO region for the device (`devm_ioremap`).
     fn iomap(
         &self,
@@ -134,11 +139,25 @@ pub trait DeviceServices: Send + Sync {
         len: usize,
         align: usize,
     ) -> Result<CoherentMem, RuntimeError>;
+}
 
+/// Clock acquisition — the capability that can DEFER (a provider may not
+/// have registered yet), hence its own error vocabulary.
+pub trait ClockConsumerServices: Send + Sync {
     /// Acquire a clock input (`clk_get`); may report that the provider has
     /// not registered yet.
     fn clk_get(&self, device: u64, spec: ClkSpec) -> Result<ClkHandle, ServiceError>;
+}
 
+/// The aggregate a [`DeviceCtx`](crate::DeviceCtx) holds: every mandatory
+/// capability plus the extension escape hatch.
+///
+/// `as_any` is THE one deliberate downcast surface: family transports that
+/// need host machinery beyond the capability traits (e.g. the virtio PCI
+/// transport service) name the runtime type they support and downcast —
+/// the core stays family-agnostic. New capabilities become new traits
+/// (supertraits here), not new `as_any` consumers.
+pub trait DeviceServices: DeviceResourceServices + ClockConsumerServices + Send + Sync {
     /// The runtime's concrete type, for extension-trait downcasts. The core
     /// stays family-agnostic: extensions name the runtime type they support.
     fn as_any(&self) -> &dyn core::any::Any;

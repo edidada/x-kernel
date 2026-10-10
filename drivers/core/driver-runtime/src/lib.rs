@@ -41,8 +41,8 @@ use alloc::sync::Arc;
 
 pub use clk::ClkRegistry;
 use driver_core::{
-    ClkHandle, CoherentMem, DevIrq, DeviceServices, IoMap, IrqAction, IrqHandlerFn, RuntimeError,
-    ServiceError,
+    ClkHandle, ClockConsumerServices, CoherentMem, DevIrq, DeviceResourceServices, DeviceServices,
+    IoMap, IrqAction, IrqHandlerFn, RuntimeError, ServiceError,
     provider::{DmaAllocation, DmaOp, DmaSpec, IrqOp, IrqResource, MmioMapping, MmioOp, ResError},
 };
 use kirq::{IrqEvent as ResIrqEvent, IrqHandler as ResIrqHandler};
@@ -165,11 +165,7 @@ impl XKernelRuntime {
     }
 }
 
-impl DeviceServices for XKernelRuntime {
-    fn as_any(&self) -> &dyn core::any::Any {
-        self
-    }
-
+impl DeviceResourceServices for XKernelRuntime {
     fn iomap(
         &self,
         _device: u64,
@@ -249,9 +245,17 @@ impl DeviceServices for XKernelRuntime {
             Some(Arc::new(release)),
         ))
     }
+}
 
+impl ClockConsumerServices for XKernelRuntime {
     fn clk_get(&self, _device: u64, spec: driver_core::ClkSpec) -> Result<ClkHandle, ServiceError> {
         self.clks.get(spec)
+    }
+}
+
+impl DeviceServices for XKernelRuntime {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 }
 

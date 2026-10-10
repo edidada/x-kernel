@@ -64,8 +64,9 @@ pub use bus::{
     MatchScore,
 };
 pub use device::{
-    BoundDevice, ClkHandle, ClkOps, CoherentMem, DevIrq, DeviceCtx, DeviceServices, EnabledClock,
-    ExtensionService, IoMap, IrqAction, IrqHandlerFn, ReleaseHook, ServiceError,
+    BoundDevice, ClkHandle, ClkOps, ClockConsumerServices, CoherentMem, DevIrq, DeviceCtx,
+    DeviceResourceServices, DeviceServices, EnabledClock, ExtensionService, IoMap, IrqAction,
+    IrqHandlerFn, ReleaseHook, ServiceError,
 };
 pub use domain::{
     DataBox, DeviceDomain, DeviceSnapshot, DeviceState, ProbeStats, global_domain,
