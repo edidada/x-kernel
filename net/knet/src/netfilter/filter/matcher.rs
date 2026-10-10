@@ -39,8 +39,8 @@ impl<T> Negated<T> {
 pub(crate) struct BaseMatch {
     pub(crate) source: Option<Negated<Ipv4Cidr>>,
     pub(crate) destination: Option<Negated<Ipv4Cidr>>,
-    pub(crate) input_interface: Option<Negated<InterfaceMatch>>,
-    pub(crate) output_interface: Option<Negated<InterfaceMatch>>,
+    pub(crate) input_interface: Option<Negated<InterfacePattern>>,
+    pub(crate) output_interface: Option<Negated<InterfacePattern>>,
     pub(crate) protocol: Option<Negated<u8>>,
 }
 
@@ -82,12 +82,12 @@ pub(crate) const MAX_INTERFACE_NAME_LEN: usize = 15;
 /// An empty exact name matches only an empty interface name;
 /// an empty prefix matches any interface name.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct InterfaceMatch {
+pub(crate) struct InterfacePattern {
     name: String,
     is_prefix: bool,
 }
 
-impl InterfaceMatch {
+impl InterfacePattern {
     /// Creates an exact condition, rejecting names longer than 15 bytes.
     ///
     /// Callers must bound name allocation before transferring ownership here.
@@ -120,12 +120,12 @@ impl InterfaceMatch {
 
 /// TCP flag mask and expected value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct TcpFlagsMatch {
+pub(crate) struct TcpFlagsCondition {
     mask: u8,
     expected: u8,
 }
 
-impl TcpFlagsMatch {
+impl TcpFlagsCondition {
     pub(crate) const fn new(mask: u8, expected: u8) -> Option<Self> {
         if expected & !mask == 0 {
             Some(Self { mask, expected })
@@ -148,7 +148,7 @@ impl TcpFlagsMatch {
 pub(crate) struct TcpMatch {
     source_port: Option<Negated<PortRange>>,
     destination_port: Option<Negated<PortRange>>,
-    flags: Option<Negated<TcpFlagsMatch>>,
+    flags: Option<Negated<TcpFlagsCondition>>,
 }
 
 impl TcpMatch {
@@ -170,7 +170,7 @@ impl TcpMatch {
         self
     }
 
-    pub(crate) const fn with_flags(mut self, flags: Negated<TcpFlagsMatch>) -> Self {
+    pub(crate) const fn with_flags(mut self, flags: Negated<TcpFlagsCondition>) -> Self {
         self.flags = Some(flags);
         self
     }
@@ -183,7 +183,7 @@ impl TcpMatch {
         self.destination_port
     }
 
-    pub(crate) const fn flags_match(self) -> Option<Negated<TcpFlagsMatch>> {
+    pub(crate) const fn flags_condition(self) -> Option<Negated<TcpFlagsCondition>> {
         self.flags
     }
 }
@@ -296,17 +296,17 @@ mod tests {
     fn match_value_constructors_validate_ranges_and_masks() {
         assert!(PortRange::new(80, 443).is_some());
         assert_eq!(PortRange::new(443, 80), None);
-        assert!(TcpFlagsMatch::new(0x12, 0x02).is_some());
-        assert_eq!(TcpFlagsMatch::new(0x02, 0x12), None);
+        assert!(TcpFlagsCondition::new(0x12, 0x02).is_some());
+        assert_eq!(TcpFlagsCondition::new(0x02, 0x12), None);
         assert!(IcmpMatch::new(Some(3), 0, 15).is_some());
         assert_eq!(IcmpMatch::new(Some(3), 15, 0), None);
         assert_eq!(
-            InterfaceMatch::exact("X".repeat(MAX_INTERFACE_NAME_LEN + 1)),
+            InterfacePattern::exact("X".repeat(MAX_INTERFACE_NAME_LEN + 1)),
             None
         );
-        assert!(InterfaceMatch::exact("X".repeat(MAX_INTERFACE_NAME_LEN)).is_some());
-        assert!(InterfaceMatch::prefix("X".repeat(MAX_INTERFACE_NAME_LEN - 1)).is_some());
-        assert!(InterfaceMatch::prefix("X".repeat(MAX_INTERFACE_NAME_LEN)).is_none());
+        assert!(InterfacePattern::exact("X".repeat(MAX_INTERFACE_NAME_LEN)).is_some());
+        assert!(InterfacePattern::prefix("X".repeat(MAX_INTERFACE_NAME_LEN - 1)).is_some());
+        assert!(InterfacePattern::prefix("X".repeat(MAX_INTERFACE_NAME_LEN)).is_none());
     }
 
     #[def_test]
