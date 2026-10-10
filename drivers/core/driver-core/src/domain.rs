@@ -24,7 +24,7 @@
 //!   next candidate is tried in the same pass; exhaustion means `Unclaimed`.
 
 use alloc::{boxed::Box, collections::BTreeMap, sync::Arc, vec::Vec};
-use core::any::Any;
+use core::{any::Any, sync::atomic::Ordering};
 
 use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
@@ -266,6 +266,10 @@ impl DeviceServices for NoServices {
 }
 
 struct DomainInner {
+    /// Domain-local allocation cursor into the GLOBAL device-id space (see
+    /// DEVICE_ID_ALLOCATOR): domains never hand out colliding ids, so
+    /// owner-keyed global registries (class publications, devnode) stay
+    /// unambiguous with multiple live domains.
     next_device_id: u64,
     services_installed: bool,
     drivers: Vec<Arc<dyn AnyDriver>>,
@@ -281,7 +285,15 @@ struct DomainInner {
     observers: Vec<Arc<dyn DeviceLifecycleObserver>>,
 }
 
-/// An instance of the device model.
+/// The GLOBAL device-id allocator: every `DeviceDomain` reserves ids from
+/// this one atomic space. The old per-domain `0, 1, 2…` counters made two
+/// instantiated domains collide on owner-keyed global registries (class
+/// publications keyed by `dev.id().raw()`, devnode withdrawal) — removing
+/// domain A's device 0 could withdraw domain B's publication. Ids remain
+/// small (a domain claims its next id on creation and on every add);
+/// uniqueness across domains is the invariant that matters.
+static DEVICE_ID_ALLOCATOR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// Scope guard for the probe-pump serialization flag: releases it on
 /// every exit, including panics under `panic = "unwind"` builds (see
 /// [`DeviceDomain::probe_pending`]). Under `panic = "abort"` a panic ends
@@ -337,7 +349,7 @@ impl DeviceDomain {
         Self {
             probing: SpinNoPreempt::new(false),
             inner: SpinNoPreempt::new(DomainInner {
-                next_device_id: 0,
+                next_device_id: DEVICE_ID_ALLOCATOR.fetch_add(1, Ordering::Relaxed),
                 drivers: Vec::new(),
                 devices: BTreeMap::new(),
                 pending: Vec::new(),
@@ -426,7 +438,7 @@ impl DeviceDomain {
                 );
             }
             let id = DeviceId(inner.next_device_id);
-            inner.next_device_id += 1;
+            inner.next_device_id = DEVICE_ID_ALLOCATOR.fetch_add(1, Ordering::Relaxed);
             inner.devices.insert(
                 id.raw(),
                 DeviceEntry {
@@ -1219,6 +1231,27 @@ mod tests {
         // A driver that does not match must not disturb the terminal state.
         domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
         assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
+    }
+
+    /// Two instantiated domains never hand out the same device id: the
+    /// global allocator keeps owner-keyed global registries (class
+    /// publications, devnode) unambiguous. Regression for the per-domain
+    /// `0, 1, 2…` counters that made domain A's removal withdraw domain
+    /// B's publications.
+    #[def_test(serial)]
+    fn device_ids_are_unique_across_domains() {
+        let (domain_a, _services_a) = fresh_domain();
+        let (domain_b, _services_b) = fresh_domain();
+
+        let a0 = domain_a.add_device(test_descriptor());
+        let b0 = domain_b.add_device(test_descriptor());
+        let a1 = domain_a.add_device(test_descriptor());
+
+        assert_ne!(a0.raw(), b0.raw(), "first ids of two domains collide");
+        assert_ne!(a0.raw(), a1.raw());
+        assert_ne!(a1.raw(), b0.raw());
+        let _ = domain_a.probe_pending();
+        let _ = domain_b.probe_pending();
     }
 
     /// Regression: the lost-wakeup window, exercised as a REAL
