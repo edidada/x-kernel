@@ -2,7 +2,15 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Buffered file transfers and pipe-owned source consumption.
+//! Buffered file transfers: one settlement pump, explicit-offset steps.
+//!
+//! The engine below never touches `f_pos`. [`transfer_files`] and
+//! [`copy_file_range`] are the boundary: they resolve the caller's position
+//! protocol ([`TransferPosition`]) into explicit start offsets, run one of
+//! the step adapters through [`pump`], and publish the results back. Every
+//! shape shares the same settlement loop, so "errors after progress return
+//! the completed count" and "only the destination-accepted prefix commits"
+//! hold in exactly one place.
 
 use alloc::{sync::Arc, vec};
 
@@ -10,9 +18,10 @@ use kerrno::{KError, KResult, LinuxError};
 
 use crate::{FMode, MutexGuard, VfsFile, pipe::PipeObject};
 
-/// Position policy for one side of a transfer.
+/// Position policy for one side of a transfer. This is the POSIX boundary
+/// shim: the engine below only ever sees explicit start offsets.
 pub enum TransferPosition<'a> {
-    /// The engine reads `f_pos` under the position lock and commits the
+    /// The boundary reads `f_pos` under the position lock and publishes the
     /// transferred count back to it, mirroring Linux `fdget_pos`: checks and
     /// copy share the critical section with the position they validated.
     Managed,
@@ -173,6 +182,51 @@ fn resolve_pair_positions<'a>(
     }
 }
 
+/// One pump step: move up to `chunk` bytes through the shared buffer.
+enum Step {
+    /// The source is exhausted; stop with the completed prefix. Nothing was
+    /// confirmed and no destination side effect happened for this step.
+    Eof,
+    /// `confirmed` bytes landed at the destination. `stop` ends the pump
+    /// after this step — a short source chunk, or a stream source whose
+    /// published data must not be followed by a second blocking read.
+    Data { confirmed: usize, stop: bool },
+}
+
+/// The one settlement loop shared by every transfer shape. Each step moves
+/// at most `chunk` bytes through the buffer and reports what the destination
+/// confirmed (`total` flows back in so pipe steps can downgrade to
+/// non-blocking after the first byte). An error after progress returns the
+/// completed prefix; only a zero-progress failure propagates.
+fn pump(
+    len: usize,
+    mut step: impl FnMut(&mut [u8], usize, usize) -> KResult<Step>,
+) -> KResult<usize> {
+    let mut buf = vec![0; 0x1000]; // 4KB intermediate buffer
+    let mut total = 0;
+    let mut remaining = len;
+    let mut result = Ok(0);
+    while remaining > 0 {
+        let chunk = buf.len().min(remaining);
+        match step(&mut buf, chunk, total) {
+            Ok(Step::Eof) => break,
+            Ok(Step::Data { confirmed, stop }) => {
+                total += confirmed;
+                remaining -= confirmed;
+                result = Ok(total);
+                if stop || confirmed == 0 {
+                    break;
+                }
+            }
+            Err(error) => {
+                result = if total > 0 { Ok(total) } else { Err(error) };
+                break;
+            }
+        }
+    }
+    result
+}
+
 /// Transfers up to `len` bytes, committing only bytes accepted by the destination.
 ///
 /// [`TransferPosition::Managed`] sides use the open file descriptions'
@@ -182,19 +236,19 @@ fn resolve_pair_positions<'a>(
 /// Errors after progress return the completed byte count; a zero-progress
 /// wait preserves `IoWaitInterrupted`. File-to-file backend counts must fit
 /// the supplied buffers. An oversized result is EIO and does not commit that
-/// iteration's positions; earlier progress is retained. Backend data side
-/// effects cannot be rolled back.
+/// step's positions; earlier progress is retained. Backend data side effects
+/// cannot be rolled back.
 ///
 /// `nonblocking` controls pipe-readiness waits only; backend operations and
 /// mutex acquisition may still block. Explicit offsets on streams, and a
 /// non-pipe stream source with a non-pipe destination, return `ESPIPE`.
 ///
 /// Runs in sleepable task context. Callers must not hold file-position or pipe
-/// locks. Dispatch falls out by shape: pipe pairs to the pipe engine, a
-/// single pipe side to its dedicated leg, and plain file pairs to the
-/// buffered pair copy under `resolve_pair_positions`. File positions are
-/// locked in address order; pipe paths acquire a non-pipe position only
-/// inside the pipe-owned transfer, never across a pipe-readiness wait.
+/// locks. The boundary dispatches on shape: a pipe pair negotiates the direct
+/// store-to-store exchange, single pipe sides run through the pump with their
+/// cursor re-locked per step (never across a pipe-readiness wait), and plain
+/// file pairs run through the pump under the locks resolved by
+/// `resolve_pair_positions`.
 pub fn transfer_files(
     input: &Arc<VfsFile>,
     input_position: TransferPosition<'_>,
@@ -221,154 +275,18 @@ pub fn transfer_files(
         );
     }
     // A non-seekable source needs a destination that accepts its entire read.
-    // Pipe-to-file uses the pipe-owned consumption operation below instead.
     if input.is_stream() && source_pipe.is_none() && destination_pipe.is_none() {
         return Err(LinuxError::ESPIPE.into());
     }
-    // One pipe side per leg: each leg owns its position protocol, because a
-    // position lock is never held across a pipe-readiness wait.
     if let Some(pipe) = &destination_pipe {
-        return splice_file_to_pipe(pipe, output, input, input_position, len, nonblocking);
+        return pump_file_to_pipe(pipe, output, input, input_position, len, nonblocking);
     }
     if let Some(pipe) = &source_pipe {
-        return splice_pipe_to_file(pipe, input, output, output_position, len, nonblocking);
+        return pump_pipe_to_file(pipe, input, output, output_position, len, nonblocking);
     }
-    copy_file_pair(input, input_position, output, output_position, len)
-}
-
-/// Pipe-destination leg: pulls from `input` into the pipe. The input's
-/// `Managed` position re-locks per chunk, so the lock never spans a
-/// pipe-readiness wait; the pipe side itself is always `Managed` (an `At`
-/// position on a stream was rejected upstream).
-fn splice_file_to_pipe(
-    pipe: &PipeObject,
-    output: &Arc<VfsFile>,
-    input: &Arc<VfsFile>,
-    input_position: TransferPosition<'_>,
-    len: usize,
-    nonblocking: bool,
-) -> KResult<usize> {
-    let input_managed = matches!(input_position, TransferPosition::Managed);
-    let input_offset = match input_position {
-        TransferPosition::Managed => None,
-        TransferPosition::At(offset) => Some(offset),
-    };
-    let mut input_pos = input_offset.as_deref().copied().unwrap_or(0);
-    let mut buf = vec![0; 0x1000]; // 4KB intermediate buffer
-    let mut total_written = 0;
-    let mut remaining = len;
-    let mut result = Ok(0);
-    while remaining > 0 {
-        let count = buf.len().min(remaining);
-        let transfer = pipe.splice_write(
-            nonblocking || output.is_nonblocking() || total_written > 0,
-            &mut buf[..count],
-            |bytes| {
-                if input_managed && !input.is_stream() {
-                    input.read_from(bytes, &mut input.position_lock())
-                } else {
-                    input.read_from(bytes, &mut input_pos)
-                }
-            },
-        );
-        match transfer {
-            Ok(written) => {
-                total_written += written;
-                remaining -= written;
-                result = Ok(total_written);
-                // Do not start a second blocking source read after publishing
-                // stream data into the pipe; return that completed prefix.
-                if written < count || input.is_stream() {
-                    break;
-                }
-            }
-            Err(error) => {
-                result = if total_written > 0 {
-                    Ok(total_written)
-                } else {
-                    Err(error)
-                };
-                break;
-            }
-        }
-    }
-    if let Some(offset) = input_offset {
-        *offset = input_pos;
-    }
-    result
-}
-
-/// Pipe-source leg: drains the pipe into `output`. The output's `Managed`
-/// position re-locks per chunk, so the lock never spans a pipe-readiness
-/// wait; the pipe side itself is always `Managed` (an `At` position on a
-/// stream was rejected upstream).
-fn splice_pipe_to_file(
-    pipe: &PipeObject,
-    input: &Arc<VfsFile>,
-    output: &Arc<VfsFile>,
-    output_position: TransferPosition<'_>,
-    len: usize,
-    nonblocking: bool,
-) -> KResult<usize> {
-    let output_managed = matches!(output_position, TransferPosition::Managed);
-    let output_offset = match output_position {
-        TransferPosition::Managed => None,
-        TransferPosition::At(offset) => Some(offset),
-    };
-    let mut output_pos = output_offset.as_deref().copied().unwrap_or(0);
-    let mut buf = vec![0; 0x1000]; // 4KB intermediate buffer
-    let mut total_written = 0;
-    let mut remaining = len;
-    let mut result = Ok(0);
-    while remaining > 0 {
-        let count = buf.len().min(remaining);
-        let transfer = pipe.splice_read(
-            nonblocking || input.is_nonblocking() || total_written > 0,
-            &mut buf[..count],
-            |bytes| {
-                if output_managed && !output.is_stream() {
-                    output.write_from(bytes, &mut output.position_lock())
-                } else {
-                    output.write_from(bytes, &mut output_pos)
-                }
-            },
-        );
-        match transfer {
-            Ok(written) => {
-                total_written += written;
-                remaining -= written;
-                result = Ok(total_written);
-                if written < count {
-                    break;
-                }
-            }
-            Err(error) => {
-                result = if total_written > 0 {
-                    Ok(total_written)
-                } else {
-                    Err(error)
-                };
-                break;
-            }
-        }
-    }
-    if let Some(offset) = output_offset {
-        *offset = output_pos;
-    }
-    result
-}
-
-/// File-pair leg: the buffered copy between two files, under the position
-/// locks resolved by `resolve_pair_positions`. Both positions run on local
-/// copies and commit through the resolved slots, so a destination that
-/// refuses the tail rewinds the source for the next chunk.
-fn copy_file_pair(
-    input: &Arc<VfsFile>,
-    input_position: TransferPosition<'_>,
-    output: &Arc<VfsFile>,
-    output_position: TransferPosition<'_>,
-    len: usize,
-) -> KResult<usize> {
+    // Plain file pair: the boundary resolves the cursor protocol, the pump
+    // runs on local positions, and the results publish back through the
+    // resolved slots.
     let mut input_scratch = 0;
     let mut output_scratch = 0;
     let mut positions = resolve_pair_positions(
@@ -380,155 +298,217 @@ fn copy_file_pair(
         &mut output_scratch,
     );
     let (mut input_pos, mut output_pos) = positions.starts();
-    let mut buf = vec![0; 0x1000]; // 4KB intermediate buffer
-    let mut total_written = 0;
-    let mut remaining = len;
-    let mut result = Ok(0);
-    while remaining > 0 {
-        let count = buf.len().min(remaining);
+    let result = pump(len, |buf, chunk, _total| {
         let mut read_pos = input_pos;
-        let transfer = input
-            .read_from(&mut buf[..count], &mut read_pos)
-            .and_then(|read| {
-                if read > count {
-                    return Err(KError::Io);
-                }
-                if read == 0 {
-                    return Ok(0);
-                }
-                let mut write_pos = output_pos;
-                let written = output.write_from(&buf[..read], &mut write_pos)?;
-                if written > read {
-                    return Err(KError::Io);
-                }
-                // The buffered suffix was never committed to the destination.
-                input_pos += written as u64;
-                output_pos = write_pos;
-                Ok(written)
-            });
-        match transfer {
-            Ok(written) => {
-                total_written += written;
-                remaining -= written;
-                result = Ok(total_written);
-                if written < count {
-                    break;
-                }
-            }
-            Err(error) => {
-                result = if total_written > 0 {
-                    Ok(total_written)
-                } else {
-                    Err(error)
-                };
-                break;
-            }
+        let read = input.read_from(&mut buf[..chunk], &mut read_pos)?;
+        if read > chunk {
+            return Err(KError::Io);
         }
-    }
+        if read == 0 {
+            return Ok(Step::Eof);
+        }
+        let mut write_pos = output_pos;
+        let written = output.write_from(&buf[..read], &mut write_pos)?;
+        if written > read {
+            return Err(KError::Io);
+        }
+        // Only the accepted prefix commits: the tail stays at the source
+        // for the next step to re-read.
+        input_pos += written as u64;
+        output_pos = write_pos;
+        Ok(Step::Data {
+            confirmed: written,
+            stop: written < read,
+        })
+    });
     positions.commit(input_pos, output_pos);
     result
 }
 
-/// Runs the `copy_file_range(2)` prechecks and returns the request shortened
-/// to the effective copy length, mirroring Linux `generic_copy_file_checks`
-/// (`fs/read_write.c:1412`) plus `generic_file_rw_checks`: directories are
-/// rejected with `EISDIR`, every non-regular fd (pipes, sockets, devices)
-/// with `EINVAL`, a destination opened `O_APPEND` with `EBADF` (the copy
-/// would land at the wrong offset), and a cross-superblock pair with `EXDEV`
-/// unless both operation tables report the same native copy handler. The
-/// range checks then run in Linux's order: an unsigned wrap of the request
-/// is reported as `EOVERFLOW`, the request is shortened to the source EOF,
-/// and the destination's own ceiling applies — a start at or past the
-/// maximum file size is `EFBIG` and the count is clamped to what the
-/// destination can hold. Overlapping ranges within one inode are rejected
-/// with `EINVAL` so the chunked copy can never read bytes it has already
-/// rewritten; a zero-length request never overlaps and remains a no-op.
-fn verify_copy_file_range(
-    input: &VfsFile,
-    output: &VfsFile,
-    input_start: u64,
-    output_start: u64,
-    requested: u64,
-) -> KResult<u64> {
-    let input_inode = input.inode();
-    let output_inode = output.inode();
-    if input_inode.node_type() == crate::NodeType::Directory
-        || output_inode.node_type() == crate::NodeType::Directory
-    {
-        return Err(LinuxError::EISDIR.into());
-    }
-    if input_inode.node_type() != crate::NodeType::RegularFile
-        || output_inode.node_type() != crate::NodeType::RegularFile
-    {
-        return Err(LinuxError::EINVAL.into());
-    }
-    if output.flags().contains(crate::OpenFlags::APPEND) {
-        return Err(LinuxError::EBADF.into());
-    }
-    let input_super_block = input_inode.super_block()?;
-    let output_super_block = output_inode.super_block()?;
-    // Linux `generic_copy_file_checks` (fs/read_write.c:1436): a pair whose
-    // tables carry the same native copy handler is admitted across super
-    // blocks; every other pair needs the same super block.
-    let same_super_block = Arc::ptr_eq(&input_super_block, &output_super_block);
-    let same_handler = match (input.file_copy_handler(), output.file_copy_handler()) {
-        (Some(input_handler), Some(output_handler)) => input_handler == output_handler,
-        _ => false,
+/// File → pipe boundary: the pipe stages each chunk, the source fills it,
+/// and the pipe publishes exactly the confirmed prefix. The input's
+/// `Managed` position re-locks per step, so the lock never spans a
+/// pipe-readiness wait; the pipe side itself is always `Managed` (an `At`
+/// position on a stream was rejected upstream).
+fn pump_file_to_pipe(
+    pipe: &PipeObject,
+    output: &Arc<VfsFile>,
+    input: &Arc<VfsFile>,
+    input_position: TransferPosition<'_>,
+    len: usize,
+    nonblocking: bool,
+) -> KResult<usize> {
+    let input_offset = match input_position {
+        TransferPosition::Managed => None,
+        TransferPosition::At(offset) => Some(offset),
     };
-    if !same_super_block && !same_handler {
-        return Err(LinuxError::EXDEV.into());
+    let mut input_pos = input_offset.as_deref().copied().unwrap_or(0);
+    let input_managed = input_offset.is_none();
+    let result = pump(len, |buf, chunk, total| {
+        let wait = nonblocking || output.is_nonblocking() || total > 0;
+        let confirmed = pipe.splice_write(wait, &mut buf[..chunk], |staged| {
+            if input_managed && !input.is_stream() {
+                input.read_from(staged, &mut input.position_lock())
+            } else {
+                input.read_from(staged, &mut input_pos)
+            }
+        })?;
+        // Do not start a second blocking source read after publishing
+        // stream data into the pipe; return that completed prefix.
+        Ok(Step::Data {
+            confirmed,
+            stop: confirmed < chunk || input.is_stream(),
+        })
+    });
+    if let Some(offset) = input_offset {
+        *offset = input_pos;
     }
-    // Linux reports `EOVERFLOW` when the range wraps its unsigned arithmetic
-    // (`pos_in + count < pos_in || pos_out + count < pos_out`); the ABI layer
-    // already rejected negative starts. Requests beyond the source EOF are
-    // shortened below, not rejected.
-    if input_start.checked_add(requested).is_none() || output_start.checked_add(requested).is_none()
-    {
-        return Err(LinuxError::EOVERFLOW.into());
-    }
-    // Shorten to the source EOF before the destination ceiling and the
-    // overlap check, so a request past EOF is a no-op rather than a false
-    // overlap. The size is snapshotted once: a concurrent truncate between
-    // two reads would underflow the subtraction.
-    let size = input.size();
-    let count = if input_start >= size {
-        0
-    } else {
-        requested.min(size - input_start)
-    };
-    // Linux `generic_write_check_limits`: the destination's own ceiling
-    // applies in the checks phase — a start at or past the maximum file size
-    // is `EFBIG` even for an already-empty request, and the count is clamped
-    // to what the destination can hold from here.
-    let output_max = output.max_file_size();
-    if output_start >= output_max {
-        return Err(LinuxError::EFBIG.into());
-    }
-    let count = count.min(output_max - output_start);
-    // Overlapping ranges within one inode are rejected so the chunked copy
-    // can never read bytes it has already rewritten; a zero-length request
-    // never overlaps and remains a no-op success.
-    if Arc::ptr_eq(input_inode, output_inode)
-        && count != 0
-        && input_start < output_start.saturating_add(count)
-        && output_start < input_start.saturating_add(count)
-    {
-        return Err(LinuxError::EINVAL.into());
-    }
-    Ok(count)
+    result
 }
 
-/// `copy_file_range(2)` engine: the Linux checks and the buffered file-pair
-/// copy in one call. [`TransferPosition::Managed`] sides have `f_pos` read,
-/// validated and committed under the position locks — resolution, checks,
-/// copy and the position commit share one critical section (Linux
-/// `fdget_pos`), so concurrent transfers on a shared open file description
-/// neither duplicate ranges nor clobber a concurrent seek. [`At`] sides run
-/// at the given offsets and are advanced by the transferred count; `f_pos`
-/// is untouched for them. Like Linux `vfs_copy_file_range`, the copy allows
-/// partial success: an error after progress returns the completed prefix
-/// and commits it, so the published positions always describe the bytes
-/// the destination actually accepted.
+/// Pipe → file boundary: the pipe stages its data, the sink confirms how
+/// much landed, and the pipe consumes exactly that prefix. The output's
+/// `Managed` position re-locks per step, so the lock never spans a
+/// pipe-readiness wait; the pipe side itself is always `Managed` (an `At`
+/// position on a stream was rejected upstream).
+fn pump_pipe_to_file(
+    pipe: &PipeObject,
+    input: &Arc<VfsFile>,
+    output: &Arc<VfsFile>,
+    output_position: TransferPosition<'_>,
+    len: usize,
+    nonblocking: bool,
+) -> KResult<usize> {
+    let output_offset = match output_position {
+        TransferPosition::Managed => None,
+        TransferPosition::At(offset) => Some(offset),
+    };
+    let mut output_pos = output_offset.as_deref().copied().unwrap_or(0);
+    let output_managed = output_offset.is_none();
+    pump(len, |buf, chunk, total| {
+        let wait = nonblocking || input.is_nonblocking() || total > 0;
+        let confirmed = pipe.splice_read(wait, &mut buf[..chunk], |staged| {
+            if output_managed && !output.is_stream() {
+                output.write_from(staged, &mut output.position_lock())
+            } else {
+                output.write_from(staged, &mut output_pos)
+            }
+        })?;
+        Ok(Step::Data {
+            confirmed,
+            stop: confirmed < chunk,
+        })
+    })
+}
+
+/// A validated `copy_file_range(2)` request. Construction runs the full
+/// Linux check table in order, so the engine physically never sees an
+/// invalid request: directories are rejected with `EISDIR`, every
+/// non-regular fd (pipes, sockets, devices) with `EINVAL`, a destination
+/// opened `O_APPEND` with `EBADF` (the copy would land at the wrong offset),
+/// and a cross-superblock pair with `EXDEV` unless both operation tables
+/// report the same native copy handler. The range checks then run in Linux's
+/// order: an unsigned wrap of the request is reported as `EOVERFLOW`, the
+/// request is shortened to the source EOF, and the destination's own ceiling
+/// applies — a start at or past the maximum file size is `EFBIG` and the
+/// count is clamped to what the destination can hold. Overlapping ranges
+/// within one inode are rejected with `EINVAL` so the chunked copy can never
+/// read bytes it has already rewritten; a zero-length request never overlaps
+/// and remains a no-op.
+struct CopyRange {
+    count: u64,
+}
+
+impl CopyRange {
+    fn new(
+        input: &VfsFile,
+        output: &VfsFile,
+        input_start: u64,
+        output_start: u64,
+        requested: u64,
+    ) -> KResult<Self> {
+        let input_inode = input.inode();
+        let output_inode = output.inode();
+        if input_inode.node_type() == crate::NodeType::Directory
+            || output_inode.node_type() == crate::NodeType::Directory
+        {
+            return Err(LinuxError::EISDIR.into());
+        }
+        if input_inode.node_type() != crate::NodeType::RegularFile
+            || output_inode.node_type() != crate::NodeType::RegularFile
+        {
+            return Err(LinuxError::EINVAL.into());
+        }
+        if output.flags().contains(crate::OpenFlags::APPEND) {
+            return Err(LinuxError::EBADF.into());
+        }
+        let input_super_block = input_inode.super_block()?;
+        let output_super_block = output_inode.super_block()?;
+        // Linux `generic_copy_file_checks` (fs/read_write.c:1436): a pair
+        // whose tables carry the same native copy handler is admitted across
+        // super blocks; every other pair needs the same super block.
+        let same_super_block = Arc::ptr_eq(&input_super_block, &output_super_block);
+        let same_handler = match (input.file_copy_handler(), output.file_copy_handler()) {
+            (Some(input_handler), Some(output_handler)) => input_handler == output_handler,
+            _ => false,
+        };
+        if !same_super_block && !same_handler {
+            return Err(LinuxError::EXDEV.into());
+        }
+        // Linux reports `EOVERFLOW` when the range wraps its unsigned
+        // arithmetic (`pos_in + count < pos_in || pos_out + count <
+        // pos_out`); the ABI layer already rejected negative starts.
+        // Requests beyond the source EOF are shortened below, not rejected.
+        if input_start.checked_add(requested).is_none()
+            || output_start.checked_add(requested).is_none()
+        {
+            return Err(LinuxError::EOVERFLOW.into());
+        }
+        // Shorten to the source EOF before the destination ceiling and the
+        // overlap check, so a request past EOF is a no-op rather than a
+        // false overlap. The size is snapshotted once: a concurrent truncate
+        // between two reads would underflow the subtraction.
+        let size = input.size();
+        let count = if input_start >= size {
+            0
+        } else {
+            requested.min(size - input_start)
+        };
+        // Linux `generic_write_check_limits`: the destination's own ceiling
+        // applies in the checks phase — a start at or past the maximum file
+        // size is `EFBIG` even for an already-empty request, and the count
+        // is clamped to what the destination can hold from here.
+        let output_max = output.max_file_size();
+        if output_start >= output_max {
+            return Err(LinuxError::EFBIG.into());
+        }
+        let count = count.min(output_max - output_start);
+        // Overlapping ranges within one inode are rejected so the chunked
+        // copy can never read bytes it has already rewritten; a zero-length
+        // request never overlaps and remains a no-op success.
+        if Arc::ptr_eq(input_inode, output_inode)
+            && count != 0
+            && input_start < output_start.saturating_add(count)
+            && output_start < input_start.saturating_add(count)
+        {
+            return Err(LinuxError::EINVAL.into());
+        }
+        Ok(Self { count })
+    }
+}
+
+/// `copy_file_range(2)` boundary: the caller's position protocol resolves
+/// into explicit starts under the position locks, `CopyRange::new` runs the
+/// check table against those starts, and the pump copies between the local
+/// positions. Resolution, checks, copy and the position commit share one
+/// critical section (Linux `fdget_pos`), so concurrent transfers on a shared
+/// open file description neither duplicate ranges nor clobber a concurrent
+/// seek. [`TransferPosition::At`] sides run at the given offsets and are
+/// advanced by the transferred count; `f_pos` is untouched for them. Like
+/// Linux `vfs_copy_file_range`, the copy allows partial success: an error
+/// after progress returns the completed prefix and commits it, so the
+/// published positions always describe the bytes the destination actually
+/// accepted.
 ///
 /// `nonblocking` is accepted for symmetry with [`transfer_files`]; regular
 /// file backends ignore it.
@@ -543,10 +523,6 @@ pub fn copy_file_range(
     input.verify_mode(FMode::READ)?;
     output.verify_mode(FMode::WRITE)?;
 
-    // The position protocol resolves once — address-order locks, shared
-    // same-description locks and non-seekable inertness all live in
-    // `resolve_pair_positions` — so the checks, the copy and the commit
-    // below run against positions that share one critical section.
     let mut input_scratch = 0;
     let mut output_scratch = 0;
     let mut positions = resolve_pair_positions(
@@ -557,66 +533,38 @@ pub fn copy_file_range(
         &mut input_scratch,
         &mut output_scratch,
     );
-    let (mut input_start, mut output_start) = positions.starts();
+    let (mut input_pos, mut output_pos) = positions.starts();
 
-    let count = verify_copy_file_range(input, output, input_start, output_start, len as u64)?;
+    let request = CopyRange::new(input, output, input_pos, output_pos, len as u64)?;
 
-    let mut buf = vec![0; 0x1000]; // 4KB intermediate buffer
-    let mut total_written = 0;
-    let mut remaining = count;
-    let mut result = Ok(0);
-    while remaining > 0 {
-        let count_chunk = (buf.len() as u64).min(remaining) as usize;
-        let mut read_pos = input_start;
-        let transfer = input
-            .read_from(&mut buf[..count_chunk], &mut read_pos)
-            .and_then(|read| {
-                if read > count_chunk {
-                    return Err(KError::Io);
-                }
-                if read == 0 {
-                    return Ok((0, 0)); // EOF: stop without a destination write.
-                }
-                let mut write_pos = output_start;
-                let written = output.write_from(&buf[..read], &mut write_pos)?;
-                if written > read {
-                    return Err(KError::Io);
-                }
-                // Only the accepted prefix commits to both positions: the
-                // tail stays at the source for the next iteration to re-read.
-                input_start += written as u64;
-                output_start = write_pos;
-                Ok((read, written))
-            });
-        match transfer {
-            Ok((read, written)) => {
-                total_written += written;
-                remaining -= written as u64;
-                result = Ok(total_written);
-                // Stop at EOF or when the destination refuses the tail.
-                if read == 0 || written < read {
-                    break;
-                }
-            }
-            Err(error) => {
-                // copy_file_range allows partial success (Linux
-                // `vfs_copy_file_range`): an error after progress returns
-                // the completed prefix and the commit below publishes it.
-                result = if total_written > 0 {
-                    Ok(total_written)
-                } else {
-                    Err(error)
-                };
-                break;
-            }
+    let result = pump(request.count as usize, |buf, chunk, _total| {
+        let mut read_pos = input_pos;
+        let read = input.read_from(&mut buf[..chunk], &mut read_pos)?;
+        if read > chunk {
+            return Err(KError::Io);
         }
-    }
+        if read == 0 {
+            return Ok(Step::Eof);
+        }
+        let mut write_pos = output_pos;
+        let written = output.write_from(&buf[..read], &mut write_pos)?;
+        if written > read {
+            return Err(KError::Io);
+        }
+        // Only the accepted prefix commits: the tail stays at the source
+        // for the next step to re-read.
+        input_pos += written as u64;
+        output_pos = write_pos;
+        Ok(Step::Data {
+            confirmed: written,
+            stop: written < read,
+        })
+    });
 
-    // Position commit belongs to the transfer-completion protocol: publish
-    // the transferred positions under the resolved slots, only after real
-    // progress — a zero-byte return leaves `f_pos` alone.
-    if total_written > 0 {
-        positions.commit(input_start, output_start);
+    // Position commit belongs to the completion protocol: publish only
+    // after real progress — a zero-byte return leaves `f_pos` alone.
+    if matches!(result, Ok(count) if count > 0) {
+        positions.commit(input_pos, output_pos);
     }
     result
 }
