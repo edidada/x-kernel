@@ -222,7 +222,9 @@ mod tests {
         domain.register_driver(DriverDesc::new("test-serial", SER_IDS, SerDriver));
 
         // Controller not yet probed: the consumer must defer, not fail.
-        let id = domain.add_device(serial_descriptor(0x55));
+        let id = domain
+            .add_device(serial_descriptor(0x55))
+            .expect("add device");
         assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Deferred);
         assert_eq!(PROBES.load(Ordering::Relaxed), 1);
         assert!(!kclk::provider_installed());
@@ -238,7 +240,9 @@ mod tests {
         assert_eq!(rate, Some(24_000_000));
 
         // A different missing provider still defers (exact wakeups).
-        let other = domain.add_device(serial_descriptor(0x77));
+        let other = domain
+            .add_device(serial_descriptor(0x77))
+            .expect("add device");
         assert_eq!(domain.snapshot(other).unwrap().state, DeviceState::Deferred);
     }
 }

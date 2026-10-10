@@ -189,11 +189,13 @@ impl DeviceResourceServices for XKernelRuntime {
         name: &'static str,
         handler: IrqHandlerFn,
     ) -> Result<DevIrq, RuntimeError> {
-        // Preserve the route shape end to end: a resolved virq stays
-        // plain; a firmware route keeps its controller/domain/hwirq
-        // triple (the domain the mapping will use — firmware-stated, or
-        // the controller's root when firmware named none). The provider
-        // maps through the controller's irq domain at request time.
+        // Preserve the route shape end to end — and resolve firmware
+        // routes BEFORE registering: the provider maps through the
+        // controller's domain (reusing an existing mapping when one
+        // exists), so the registered resource and the returned DevIrq
+        // carry the REAL virq, never a placeholder 0. A
+        // `DomainMapped { number: 0 }` here would hand the driver an
+        // irq guard whose number is not the irq the host dispatches.
         let resource = match spec {
             driver_core::IrqSpec::ResolvedVirq { number, trigger } => {
                 IrqResource::plain(number, trigger)
@@ -203,13 +205,17 @@ impl DeviceResourceServices for XKernelRuntime {
                 domain,
                 hwirq,
                 trigger,
-            } => IrqResource::mapped(
-                0,
-                trigger,
-                provider::irq::to_runtime_controller(controller),
-                provider::irq::effective_domain(controller, domain),
-                hwirq,
-            ),
+            } => {
+                let route = provider::irq::to_runtime_route(controller, domain, hwirq, trigger);
+                let mapped = self.provider.map_irq(route).map_err(map_res_error)?;
+                match mapped {
+                    IrqResource::DomainMapped { .. } => mapped,
+                    // The provider's map returned a plain resource for a
+                    // route — treat as its resolved number with the route
+                    // origin lost; acceptable only for identity domains.
+                    plain @ IrqResource::PlainVirq { .. } => plain,
+                }
+            }
         };
         let adapted: Arc<dyn ResIrqHandler> = Arc::new(AdaptedIrqHandler { handler });
         let token = self
@@ -244,6 +250,28 @@ impl DeviceResourceServices for XKernelRuntime {
             spec.len,
             Some(Arc::new(release)),
         ))
+    }
+
+    fn map_irq(&self, _device: u64, spec: driver_core::IrqSpec) -> Result<usize, RuntimeError> {
+        match spec {
+            driver_core::IrqSpec::ResolvedVirq { number, .. } => Ok(number),
+            driver_core::IrqSpec::FirmwareRoute {
+                controller,
+                domain,
+                hwirq,
+                trigger,
+            } => {
+                // Map through the controller's irq domain (reusing an
+                // existing mapping when one exists) — the same
+                // resolution request_irq performs, available without
+                // registering a handler.
+                let route = provider::irq::to_runtime_route(controller, domain, hwirq, trigger);
+                self.provider
+                    .map_irq(route)
+                    .map(|irq| irq.number())
+                    .map_err(map_res_error)
+            }
+        }
     }
 }
 

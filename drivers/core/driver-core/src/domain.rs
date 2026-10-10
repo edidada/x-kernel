@@ -75,6 +75,17 @@ impl DeviceState {
     }
 }
 
+/// Why [`DeviceDomain::add_device`] rejected a descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddDeviceError {
+    /// The stated parent id does not exist in this domain (firmware typo,
+    /// discovery-order bug, or the parent was removed first).
+    ParentMissing(u64),
+    /// The parent exists but is tearing down (`Removing`) or is already
+    /// removed — it cannot accept children.
+    ParentUnavailable { parent: u64, state: &'static str },
+}
+
 /// Domain-owned lifecycle observer. Replaces the single-slot remove
 /// notifier: multiple subsystems subscribe, and the callbacks are part of
 /// the domain's own lifecycle (installed once, live as long as the domain).
@@ -270,6 +281,10 @@ impl DeviceResourceServices for NoServices {
     ) -> Result<crate::device::CoherentMem, RuntimeError> {
         Err(RuntimeError::Unsupported)
     }
+
+    fn map_irq(&self, _: u64, _: crate::resource::IrqSpec) -> Result<usize, RuntimeError> {
+        Err(RuntimeError::Unsupported)
+    }
 }
 
 impl ClockConsumerServices for NoServices {
@@ -443,7 +458,7 @@ impl DeviceDomain {
     }
 
     /// Insert an enumeration product and probe it eagerly.
-    pub fn add_device(&self, desc: DeviceDescriptor) -> DeviceId {
+    pub fn add_device(&self, desc: DeviceDescriptor) -> Result<DeviceId, AddDeviceError> {
         let id = {
             let mut inner = self.inner.lock();
             if !inner.services_installed {
@@ -458,17 +473,46 @@ impl DeviceDomain {
             }
             let id = DeviceId(inner.next_device_id);
             inner.next_device_id = DEVICE_ID_ALLOCATOR.fetch_add(1, Ordering::Relaxed);
-            // Topology validation: a stated parent must exist in THIS
-            // domain. Firmware typos and discovery-order bugs surface at
-            // add time, not as orphaned children at teardown.
-            if let Some(parent) = desc.parent
-                && let Some(entry) = inner.devices.get_mut(&parent)
-            {
-                entry.children.push(id.raw());
-            } else if let Some(parent) = desc.parent {
-                log::warn!(
-                    "driver-core: device {id:?} declares missing parent {parent:?}; added as root"
-                );
+            // Topology validation, under the SAME lock that governs
+            // removal: a stated parent must exist AND be accepting
+            // children. A parent mid-teardown (Removing) or gone
+            // (Removed) rejects the add — the cascade snapshot cannot see
+            // an entry added after it, so accepting it would orphan the
+            // child at the parent's teardown. A missing parent is an
+            // error, not a silent root placement: the descriptor's own
+            // `parent` field would disagree with the registry topology.
+            if let Some(parent) = desc.parent {
+                let parent_state = inner.devices.get(&parent).map(|entry| entry.state);
+                match parent_state {
+                    Some(
+                        DeviceState::Pending
+                        | DeviceState::Probing
+                        | DeviceState::Active
+                        | DeviceState::Deferred
+                        | DeviceState::Unclaimed,
+                    ) => {
+                        #[expect(
+                            clippy::expect_used,
+                            reason = "CG-021-no-panic-on-reachable-failure: the parent state \\
+                                      matched an accepting state above"
+                        )]
+                        {
+                            inner
+                                .devices
+                                .get_mut(&parent)
+                                .expect("parent present")
+                                .children
+                                .push(id.raw());
+                        }
+                    }
+                    Some(state @ (DeviceState::Removing | DeviceState::Removed)) => {
+                        return Err(AddDeviceError::ParentUnavailable {
+                            parent,
+                            state: state.as_str(),
+                        });
+                    }
+                    None => return Err(AddDeviceError::ParentMissing(parent)),
+                }
             }
             inner.devices.insert(
                 id.raw(),
@@ -488,7 +532,7 @@ impl DeviceDomain {
             id
         };
         self.probe_pending();
-        id
+        Ok(id)
     }
 
     /// One line per device still parked on a dependency: `(id, dep)`.
@@ -833,27 +877,27 @@ impl DeviceDomain {
     /// freed immediately; there is no binding to quiesce. `Removing`/`
     /// `Removed` entries reject re-removal with `BadState`.
     pub fn remove_device(&self, id: DeviceId) -> Result<(), RuntimeError> {
-        // Topology cascade, children first: a child's driver may hold
-        // resources (publications, mappings) that reference the parent's
-        // hardware (a bus host, a controller). Removing the parent while
-        // children live would leave them dereferencing dead hardware —
-        // the cascade guarantees the leaf-out teardown order. (Linux
-        // expresses the same ordering through the bus driver's own
+        // Three phases, with the topology entrance CLOSED first:
+        //
+        // 1. Under one lock: validate, flip to `Removing` (this stops
+        //    add_device from attaching new children — the cascade snapshot
+        //    below cannot see an entry added after it), bump the binding
+        //    generation, and snapshot the children. The binding's
+        //    driver/data are NOT taken yet.
+        // 2. Outside the lock: cascade children-first (a child's driver
+        //    may hold resources referencing this device's hardware).
+        //    ANY child failure aborts: the parent stays `Removing` —
+        //    closed to new children, binding intact — and the error is
+        //    returned for retry. A child mid-probe (Busy) or mid-teardown
+        //    (BadState) MUST block the parent's teardown: proceeding
+        //    would free the parent's resources under the child's feet.
+        // 3. Retake the lock (only this flow transitions Removing forward
+        //    for this id), take driver/data, and run the teardown:
+        //    remove() → observers → drop(Data).
+        //
+        // (Linux expresses the same ordering through the bus driver's own
         // remove walk; the device model here owns the link.)
-        let children: Vec<u64> = {
-            let inner = self.inner.lock();
-            inner
-                .devices
-                .get(&id.raw())
-                .map(|entry| entry.children.clone())
-                .unwrap_or_default()
-        };
-        for child in children {
-            if let Err(err) = self.remove_device(DeviceId(child)) {
-                log::warn!("driver-core: cascade remove of child {child} failed: {err:?}");
-            }
-        }
-        let (desc, driver, data, services, light_path) = {
+        let (children, light_path) = {
             let mut inner = self.inner.lock();
             let Some(entry) = inner.devices.get_mut(&id.raw()) else {
                 return Err(RuntimeError::NotFound);
@@ -862,15 +906,14 @@ impl DeviceDomain {
                 DeviceState::Active => {
                     entry.state = DeviceState::Removing;
                     entry.generation += 1;
-                    (
-                        Some(entry.desc.clone()),
-                        entry.driver.take(),
-                        entry.data.take(),
-                        inner.services.clone(),
-                        false,
-                    )
+                    (entry.children.clone(), false)
                 }
-                DeviceState::Removing | DeviceState::Removed => {
+                // Resuming an ABORTED cascade (a child was Busy earlier):
+                // the entry is already `Removing` and closed to new
+                // children — re-snapshot what remains and continue. Only
+                // this protocol transitions `Removing` forward.
+                DeviceState::Removing => (entry.children.clone(), false),
+                DeviceState::Removed => {
                     return Err(RuntimeError::BadState);
                 }
                 // A probe is in flight on another thread: its side effects
@@ -882,30 +925,77 @@ impl DeviceDomain {
                     return Err(RuntimeError::Busy);
                 }
                 // Never bound: nothing to quiesce, no publication to
-                // withdraw, no guards to release. Free the entry now —
-                // keeping it would grow the table unboundedly under churn.
+                // withdraw, no guards to release. Still cascade children
+                // first (topology is independent of binding state), then
+                // free the entry — keeping it would grow the table
+                // unboundedly under churn.
                 DeviceState::Pending | DeviceState::Deferred | DeviceState::Unclaimed => {
-                    Self::unlink_from_parent(&mut inner, &id.raw());
-                    if let Some(entry) = inner.devices.get_mut(&id.raw()) {
-                        entry.generation += 1;
-                    }
-                    inner.devices.remove(&id.raw());
-                    inner.pending.retain(|pending| *pending != id.raw());
-                    inner.deferred.retain(|(deferred, _)| *deferred != id.raw());
-                    (None, None, None, inner.services.clone(), true)
+                    entry.generation += 1;
+                    (entry.children.clone(), true)
                 }
             }
         };
+        for child in children {
+            match self.remove_device(DeviceId(child)) {
+                Ok(()) => {}
+                // The child is already gone: a prior cascade pass (or a
+                // concurrent remove) finished it. That satisfies the
+                // children-first requirement for this child.
+                Err(RuntimeError::NotFound) => {}
+                Err(RuntimeError::BadState) => {
+                    let child_gone = {
+                        let inner = self.inner.lock();
+                        matches!(
+                            inner.devices.get(&child).map(|entry| entry.state),
+                            Some(DeviceState::Removed) | None
+                        )
+                    };
+                    if !child_gone {
+                        log::warn!(
+                            "driver-core: cascade remove of child {child} under {id} hit BadState \
+                             mid-teardown; parent teardown ABORTED — retry to continue"
+                        );
+                        return Err(RuntimeError::BadState);
+                    }
+                }
+                // Busy (child probing) or any other failure: abort the
+                // parent teardown — the child still holds (or is
+                // acquiring) resources against this device. The parent is
+                // already `Removing`, closed to new children; a retry
+                // re-snapshots the remaining children and continues.
+                Err(err) => {
+                    log::warn!(
+                        "driver-core: cascade remove of child {child} under {id} failed \
+                         ({err:?}); parent teardown ABORTED — retry to continue"
+                    );
+                    return Err(err);
+                }
+            }
+        }
         if light_path {
+            let mut inner = self.inner.lock();
+            Self::unlink_from_parent(&mut inner, &id.raw());
+            inner.devices.remove(&id.raw());
+            inner.pending.retain(|pending| *pending != id.raw());
+            inner.deferred.retain(|(deferred, _)| *deferred != id.raw());
             log::debug!("driver-core: removed unbound device {id} (no binding to tear down)");
             return Ok(());
         }
-        #[expect(
-            clippy::expect_used,
-            reason = "CG-021-no-panic-on-reachable-failure: the light path returned above — only \
-                      Active bindings reach here, and they retain the descriptor"
-        )]
-        let desc = desc.expect("active path retains the descriptor");
+        let (desc, driver, data, services) = {
+            let mut inner = self.inner.lock();
+            let Some(entry) = inner.devices.get_mut(&id.raw()) else {
+                return Err(RuntimeError::NotFound);
+            };
+            if entry.state != DeviceState::Removing {
+                return Err(RuntimeError::BadState);
+            }
+            (
+                entry.desc.clone(),
+                entry.driver.take(),
+                entry.data.take(),
+                inner.services.clone(),
+            )
+        };
         let (driver, mut data, services) = (driver, data, services);
 
         if let (Some(driver), Some(data)) = (driver.as_ref(), data.as_mut()) {
@@ -1129,6 +1219,16 @@ mod tests {
         ) -> Result<crate::device::CoherentMem, RuntimeError> {
             Err(RuntimeError::Unsupported)
         }
+
+        fn map_irq(&self, _: u64, spec: crate::resource::IrqSpec) -> Result<usize, RuntimeError> {
+            // Test mock: identity resolution — firmware routes "map" to
+            // their hwirq (the identity domain), resolved virqs pass
+            // through.
+            Ok(match spec {
+                crate::resource::IrqSpec::ResolvedVirq { number, .. } => number,
+                crate::resource::IrqSpec::FirmwareRoute { hwirq, .. } => hwirq,
+            })
+        }
     }
 
     impl ClockConsumerServices for MockServices {
@@ -1247,7 +1347,7 @@ mod tests {
         services.publish_clk(0x42);
         domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
 
-        let id = domain.add_device(test_descriptor());
+        let id = domain.add_device(test_descriptor()).expect("add device");
         let snapshot = domain.snapshot(id).unwrap();
         assert_eq!(snapshot.state, DeviceState::Active);
         assert_eq!(snapshot.driver, Some("test-serial"));
@@ -1266,7 +1366,7 @@ mod tests {
         let (domain, services) = fresh_domain();
         domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
 
-        let id = domain.add_device(test_descriptor());
+        let id = domain.add_device(test_descriptor()).expect("add device");
         assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Deferred);
         assert_eq!(PROBES.load(Ordering::Relaxed), 1);
 
@@ -1302,7 +1402,7 @@ mod tests {
         services.publish_clk(0x42);
 
         // Device arrives before any driver: goes Unclaimed.
-        let id = domain.add_device(test_descriptor());
+        let id = domain.add_device(test_descriptor()).expect("add device");
         assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
 
         // A driver registered later must still claim it.
@@ -1320,7 +1420,7 @@ mod tests {
             compatibles: alloc::vec![alloc::string::String::from("nobody,matches")],
             alias: None,
         });
-        let id = domain.add_device(desc);
+        let id = domain.add_device(desc).expect("add device");
         assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
 
         // A driver that does not match must not disturb the terminal state.
@@ -1375,7 +1475,7 @@ mod tests {
                 alias: None,
             }),
         );
-        let parent_id = domain.add_device(parent_desc.clone());
+        let parent_id = domain.add_device(parent_desc.clone()).expect("add device");
         let _ = domain.probe_pending();
         assert_eq!(
             domain.snapshot(parent_id).unwrap().state,
@@ -1393,7 +1493,7 @@ mod tests {
             }),
         )
         .with_parent(Some(parent_id));
-        let child_id = domain.add_device(child_desc);
+        let child_id = domain.add_device(child_desc).expect("add device");
         let _ = domain.probe_pending();
         assert_eq!(
             domain.snapshot(child_id).unwrap().state,
@@ -1409,6 +1509,179 @@ mod tests {
         );
     }
 
+    /// Parent teardown is GATED on child teardown completion — a real
+    /// behavior test, not an enum assertion: the child's own probe
+    /// re-enters `remove_device(parent)` while the child is `Probing`
+    /// (exactly the interleave the Busy error exists for). The parent
+    /// must abort BEFORE releasing any binding resource, stay closed to
+    /// new children, and complete on retry.
+    #[def_test(serial)]
+    fn parent_teardown_waits_for_probing_child() {
+        use crate::bus::DeviceLocation;
+
+        struct ChildDriver {
+            domain: &'static DeviceDomain,
+            parent: u64,
+        }
+        impl DriverOps<PlatformBus> for ChildDriver {
+            type Data = ();
+
+            fn probe(&self, _dev: &mut DeviceCtx<'_, PlatformBus>) -> Result<(), ProbeError> {
+                // Mid-probe: the parent removal runs while THIS probe is
+                // in flight — the child entry is `Probing` on the
+                // registry, the exact interleave the Busy error exists
+                // for. remove_device does not pump probes, so the
+                // re-entrancy is lock-clean.
+                let err = self
+                    .domain
+                    .remove_device(DeviceId(self.parent))
+                    .expect_err("parent remove must abort on busy child");
+                assert!(matches!(err, RuntimeError::Busy));
+                Ok(())
+            }
+
+            fn remove(&self, _dev: &mut BoundDevice<'_, PlatformBus, ()>) {}
+        }
+        struct ParentDriver;
+        impl DriverOps<PlatformBus> for ParentDriver {
+            type Data = ();
+
+            fn probe(&self, _dev: &mut DeviceCtx<'_, PlatformBus>) -> Result<(), ProbeError> {
+                Ok(())
+            }
+
+            fn remove(&self, _dev: &mut BoundDevice<'_, PlatformBus, ()>) {}
+        }
+        static CHILD_IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("gate,child"))];
+        static PARENT_IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("gate,parent"))];
+
+        fn gated_descriptor(compatible: &str, firmware: u32) -> DeviceDescriptor {
+            DeviceDescriptor::new(
+                PlatformBus::ID,
+                DeviceLocation::FirmwareNode { id: firmware },
+                crate::bus::DeviceIdentity::Platform(crate::bus::PlatformIdentity {
+                    firmware_id: Some(alloc::string::String::from(compatible)),
+                    compatibles: alloc::vec![alloc::string::String::from(compatible)],
+                    alias: None,
+                }),
+            )
+        }
+
+        // The child driver needs to re-enter the domain: tests are serial,
+        // so a leaked static domain is bounded and safe here.
+        let (domain, services) = fresh_domain();
+        let services = services;
+        let domain: &'static DeviceDomain = Box::leak(Box::new(domain));
+        domain.set_services(services);
+        domain.register_driver(DriverDesc::new("gate-parent", PARENT_IDS, ParentDriver));
+        let parent_id = domain
+            .add_device(gated_descriptor("gate,parent", 1))
+            .expect("add parent");
+        let _ = domain.probe_pending();
+        assert_eq!(
+            domain.snapshot(parent_id).unwrap().state,
+            DeviceState::Active
+        );
+
+        // Child whose probe re-enters the parent removal mid-flight.
+        domain.register_driver(DriverDesc::new(
+            "gate-child",
+            CHILD_IDS,
+            ChildDriver {
+                domain,
+                parent: parent_id.raw(),
+            },
+        ));
+        let child_id = domain
+            .add_device(gated_descriptor("gate,child", 2).with_parent(Some(parent_id)))
+            .expect("add child");
+        let _ = domain.probe_pending();
+        // The in-probe removal aborted: the parent is mid-teardown
+        // (Removing — closed to children, retryable), its binding intact.
+        assert_eq!(
+            domain.snapshot(parent_id).unwrap().state,
+            DeviceState::Removing
+        );
+        assert_eq!(
+            domain.snapshot(child_id).unwrap().state,
+            DeviceState::Active
+        );
+
+        // While the parent is mid-teardown it takes no new children.
+        let err = domain
+            .add_device(gated_descriptor("gate,late", 3).with_parent(Some(parent_id)))
+            .expect_err("Removing parent must reject children");
+        assert!(matches!(
+            err,
+            AddDeviceError::ParentUnavailable { parent, state: "removing" }
+                if parent == parent_id.raw()
+        ));
+
+        // Retry: the child finished probing; the cascade completes and the
+        // parent tears down fully (child Removed first).
+        domain.remove_device(parent_id).expect("retry completes");
+        assert_eq!(
+            domain.snapshot(parent_id).unwrap().state,
+            DeviceState::Removed
+        );
+        assert_eq!(
+            domain.snapshot(child_id).unwrap().state,
+            DeviceState::Removed
+        );
+    }
+
+    /// `add_device` rejects a missing parent outright — the descriptor's
+    /// parent field and the registry topology must never disagree.
+    #[def_test(serial)]
+    fn add_device_rejects_missing_parent() {
+        let (domain, services) = fresh_domain();
+        domain.set_services(services);
+        let err = domain
+            .add_device(test_descriptor().with_parent(Some(DeviceId(0xdead))))
+            .expect_err("missing parent");
+        assert_eq!(err, AddDeviceError::ParentMissing(0xdead));
+    }
+
+    /// `DeviceCtx::resolve_irq` resolves a firmware route through the
+    /// host service — the seam the virtio-input shared-line handler filter
+    /// depends on (reading the route's raw fields confuses hwirq with
+    /// virq; rejecting routes broke the only firmware-enumerated path).
+    #[def_test(serial)]
+    fn resolve_irq_maps_firmware_routes_through_services() {
+        // Firmware-route descriptor (DT enumeration's shape).
+        let mut resources = crate::resource::ResourceMap::new();
+        resources.push_kind(crate::resource::ResourceKind::Irq(IrqSpec::firmware(
+            crate::resource::IrqController::Gic,
+            77,
+            crate::resource::IrqTrigger::LevelHigh,
+        )));
+        let desc = test_descriptor().with_resources(resources);
+
+        let (domain, services) = fresh_domain();
+        domain.set_services(services);
+        // The ops instance the domain holds is a CLONE of the struct by
+        // value — capture the answer through the registry instead: the
+        // probe wrote into ITS copy; read it back via with_data is
+        // impossible (unit Data). Use a static slot instead.
+        static RESOLVED: SpinNoPreempt<Option<usize>> = SpinNoPreempt::new(None);
+        struct SlotDriver;
+        impl DriverOps<PlatformBus> for SlotDriver {
+            type Data = ();
+
+            fn probe(&self, dev: &mut DeviceCtx<'_, PlatformBus>) -> Result<(), ProbeError> {
+                *RESOLVED.lock() = Some(dev.resolve_irq(0)?);
+                Ok(())
+            }
+
+            fn remove(&self, _dev: &mut BoundDevice<'_, PlatformBus, ()>) {}
+        }
+        domain.register_driver(DriverDesc::new("resolver-slot", IDS, SlotDriver));
+        domain.add_device(desc).expect("add device");
+        let _ = domain.probe_pending();
+        // The mock's identity domain: the GIC route's hwirq IS the virq.
+        assert_eq!(*RESOLVED.lock(), Some(77));
+    }
+
     /// Two instantiated domains never hand out the same device id: the
     /// global allocator keeps owner-keyed global registries (class
     /// publications, devnode) unambiguous. Regression for the per-domain
@@ -1419,9 +1692,9 @@ mod tests {
         let (domain_a, _services_a) = fresh_domain();
         let (domain_b, _services_b) = fresh_domain();
 
-        let a0 = domain_a.add_device(test_descriptor());
-        let b0 = domain_b.add_device(test_descriptor());
-        let a1 = domain_a.add_device(test_descriptor());
+        let a0 = domain_a.add_device(test_descriptor()).expect("add device");
+        let b0 = domain_b.add_device(test_descriptor()).expect("add device");
+        let a1 = domain_a.add_device(test_descriptor()).expect("add device");
 
         assert_ne!(a0.raw(), b0.raw(), "first ids of two domains collide");
         assert_ne!(a0.raw(), a1.raw());
@@ -1466,7 +1739,7 @@ mod tests {
 
         domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
         let probes_before = PROBES.load(Ordering::Relaxed);
-        let id = domain.add_device(test_descriptor());
+        let id = domain.add_device(test_descriptor()).expect("add device");
 
         // The probe ran: clk_get deferred AND the hook fired its wake.
         // (PROBES is shared across tests — assert the delta.)
@@ -1497,7 +1770,7 @@ mod tests {
         let (domain, services) = fresh_domain();
         domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
 
-        let id = domain.add_device(test_descriptor());
+        let id = domain.add_device(test_descriptor()).expect("add device");
         assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Deferred);
 
         // Boot end: the stuck device converts to Unclaimed...
@@ -1521,7 +1794,7 @@ mod tests {
         domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
 
         // Provider 0x42 never publishes: the device stays deferred.
-        let id = domain.add_device(test_descriptor());
+        let id = domain.add_device(test_descriptor()).expect("add device");
         assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Deferred);
         assert_eq!(domain.deferred_report().len(), 1);
 
@@ -1548,7 +1821,7 @@ mod tests {
             compatibles: alloc::vec![alloc::string::String::from("nobody,matches")],
             alias: None,
         });
-        let unclaimed = domain.add_device(desc);
+        let unclaimed = domain.add_device(desc).expect("add device");
         assert_eq!(
             domain.snapshot(unclaimed).unwrap().state,
             DeviceState::Unclaimed
@@ -1556,7 +1829,7 @@ mod tests {
 
         // Deferred device (driver registered, provider missing).
         domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
-        let deferred = domain.add_device(test_descriptor());
+        let deferred = domain.add_device(test_descriptor()).expect("add device");
         assert_eq!(
             domain.snapshot(deferred).unwrap().state,
             DeviceState::Deferred
@@ -1573,7 +1846,7 @@ mod tests {
 
         // A removed-unbound id can be re-added cleanly (ids are monotonic;
         // no state collision).
-        let readded = domain.add_device(test_descriptor());
+        let readded = domain.add_device(test_descriptor()).expect("add device");
         assert_eq!(
             domain.snapshot(readded).unwrap().state,
             DeviceState::Deferred
@@ -1585,7 +1858,7 @@ mod tests {
         let (domain, services) = fresh_domain();
         services.publish_clk(0x42);
         domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
-        let id = domain.add_device(test_descriptor());
+        let id = domain.add_device(test_descriptor()).expect("add device");
 
         domain.remove_device(id).unwrap();
         assert!(matches!(
@@ -1601,7 +1874,7 @@ mod tests {
         domain.register_driver(DriverDesc::new("picky", PICKY_IDS, PickyDriver));
         domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
 
-        let id = domain.add_device(test_descriptor());
+        let id = domain.add_device(test_descriptor()).expect("add device");
         let snapshot = domain.snapshot(id).unwrap();
         assert_eq!(snapshot.state, DeviceState::Active);
         assert_eq!(snapshot.driver, Some("test-serial"));
@@ -1616,7 +1889,7 @@ mod tests {
             compatibles: alloc::vec![alloc::string::String::from("nobody,matches")],
             alias: None,
         });
-        let id = domain.add_device(desc);
+        let id = domain.add_device(desc).expect("add device");
         assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
     }
 }

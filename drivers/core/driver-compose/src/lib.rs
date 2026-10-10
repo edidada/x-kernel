@@ -258,7 +258,7 @@ fn build_descriptor(dev: firmware::FirmwareDevice) {
         descriptor
     };
 
-    global_domain().add_device(descriptor);
+    let _ = global_domain().add_device(descriptor);
 }
 
 /// x86 ISA COM port bases (board-static: no firmware description).
@@ -282,7 +282,7 @@ fn enumerate_static_devices() {
                 alias: Some(alloc::string::String::from("ramdisk")),
             }),
         );
-        global_domain().add_device(descriptor);
+        let _ = global_domain().add_device(descriptor);
     }
 
     // Each ISA COM port becomes a platform-static device carrying its I/O
@@ -306,7 +306,7 @@ fn enumerate_static_devices() {
         )
         .with_origin(DiscoveryOrigin::PlatformStatic)
         .with_resources(resources);
-        global_domain().add_device(descriptor);
+        let _ = global_domain().add_device(descriptor);
     }
 }
 

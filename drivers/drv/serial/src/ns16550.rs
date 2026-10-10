@@ -151,7 +151,16 @@ impl DriverOps<PlatformBus> for Ns16550MmioDriver {
                     (Arc::new(port), Some(regs))
                 }
             };
-        let publication = publish(dev, port)?;
+        let publication = publish(dev, port.clone())?;
+        // Console continuity, ownership side (see pl011): the stdout
+        // binding's guards transfer to the console subsystem — the
+        // publication outlives the binding, so the mapping (cold-start
+        // ports) must survive with it. The adopted early stdout carries
+        // no mapping (regs already None).
+        let mut regs = regs;
+        if matches!(port.role(), SerialRole::Stdout) {
+            console_driver::runtime::adopt_stdout_guards(None, regs.take());
+        }
         Ok(SerialData {
             _publication: publication,
             regs,
@@ -197,9 +206,14 @@ impl DriverOps<PlatformBus> for Ns16550IoPortDriver {
                 })
             }
         };
-        let publication = publish(dev, port)?;
+        let publication = publish(dev, port.clone())?;
         // The ioport variant owns no MMIO mapping (cold-start guard is the
-        // MMIO path's); regs stays empty.
+        // MMIO path's); regs stays empty. Stdout continuity still applies
+        // to whatever guards this binding DOES own (none today — ioport
+        // stdout is the adopted early port with no binding-owned guards).
+        if matches!(port.role(), SerialRole::Stdout) {
+            console_driver::runtime::adopt_stdout_guards(None, None);
+        }
         Ok(SerialData {
             _publication: publication,
             regs: None,

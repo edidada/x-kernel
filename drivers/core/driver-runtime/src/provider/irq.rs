@@ -151,6 +151,21 @@ impl IrqOp for XKernelResourceProvider {
     }
 }
 
+/// Assemble a provider [`IrqRouteDesc`] from a driver-core firmware route.
+pub(crate) fn to_runtime_route(
+    controller: driver_core::IrqController,
+    domain: Option<kirq::IrqDomainId>,
+    hwirq: usize,
+    trigger: kirq::IrqTrigger,
+) -> IrqRouteDesc {
+    IrqRouteDesc {
+        hwirq,
+        trigger,
+        controller: to_runtime_controller(controller),
+        domain,
+    }
+}
+
 /// driver-core controller vocabulary → the runtime provider's (kirq).
 pub(crate) fn to_runtime_controller(controller: driver_core::IrqController) -> kirq::IrqController {
     use driver_core::IrqController as C;
@@ -218,12 +233,11 @@ fn irq_resource_to_kirq_spec(irq: IrqResource) -> kirq::IrqSpec {
             hwirq,
         } => {
             let mut desc = kirq::IrqDesc::new(hwirq, trigger).with_controller(controller);
-            // Only pin the logical irq when the caller actually resolved
-            // one (number != 0). A firmware route handed straight to
-            // `request_irq` (number 0) maps through the controller's
-            // domain: an existing mapping is reused, a fresh dynamic virq
-            // is allocated — never a collision with a stale "preferred"
-            // number.
+            // Pin the logical irq when one is stated (the request paths
+            // resolve firmware routes through map_irq first, so a
+            // DomainMapped resource carries its real virq here; a 0 can
+            // only come from a bespoke provider and means "allocate
+            // fresh").
             if number != 0 {
                 desc = desc.with_virq(number);
             }

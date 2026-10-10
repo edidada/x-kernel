@@ -139,6 +139,17 @@ pub trait DeviceResourceServices: Send + Sync {
         len: usize,
         align: usize,
     ) -> Result<CoherentMem, RuntimeError>;
+
+    /// Resolve an [`IrqSpec`] to its OS-visible virtual irq WITHOUT
+    /// registering a handler (`irq_create_of_mapping`): a firmware route
+    /// maps through its controller's domain (reusing an existing mapping
+    /// when one exists), a resolved virq passes through unchanged.
+    ///
+    /// Consumers that need the NUMBER itself — a shared-line handler
+    /// filter, an MSI-X vector pairing — must resolve here; reading a
+    /// firmware route's fields directly confuses the hardware irq with
+    /// the logical one on every non-identity domain.
+    fn map_irq(&self, device: u64, spec: IrqSpec) -> Result<usize, RuntimeError>;
 }
 
 /// Clock acquisition — the capability that can DEFER (a provider may not
@@ -614,6 +625,17 @@ impl<'a, B: Bus> DeviceCtx<'a, B> {
         self.resources()
             .irq_by_name(name)
             .ok_or(ProbeError::Fatal(RuntimeError::NotFound))
+    }
+
+    /// Resolve an irq resource to its OS-visible virtual irq (the number
+    /// the host IRQ core dispatches) without registering a handler.
+    /// Drivers whose handlers filter by irq number MUST go through here —
+    /// a firmware route's `hwirq` is controller-relative, not the virq.
+    pub fn resolve_irq(&self, index: usize) -> Result<usize, ProbeError> {
+        let spec = self.irq(index)?;
+        self.services
+            .map_irq(self.id, spec)
+            .map_err(ProbeError::from)
     }
 
     /// `devm_ioremap_resource(dev, res)` on the n-th MMIO region.

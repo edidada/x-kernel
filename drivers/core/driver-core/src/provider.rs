@@ -41,11 +41,12 @@ pub enum IrqResource {
     /// A domain-mapped irq that remembers its firmware origin: the
     /// controller/domain/hwirq the mapping went through — identity audits
     /// and release go through the same domain the mapping came from,
-    /// never a re-derived guess.
+    /// never a re-derived guess. The mapping has HAPPENED: `number` is
+    /// the real virq (request paths resolve firmware routes through
+    /// `map_irq` before registering — no pre-mapping placeholder state
+    /// exists in this shape anymore).
     DomainMapped {
-        /// OS-visible irq number (the domain translation's output; 0 while
-        /// the resource is still pre-mapping, e.g. handed from a firmware
-        /// route straight into `request_irq`).
+        /// OS-visible irq number (the domain translation's output).
         number: usize,
         trigger: IrqTrigger,
         controller: IrqController,

@@ -205,6 +205,18 @@ impl DriverOps<PlatformBus> for Pl011Driver {
             }
             None => (None, None),
         };
+        // Console continuity, ownership side: the stdout publication
+        // survives this binding (no withdrawal guard), so its runtime
+        // instance must survive with it — the input IRQ and (for a
+        // cold-start port) the register mapping transfer to the console
+        // subsystem here instead of dying at Data drop. A publication
+        // that outlives its IRQ would read as an available console that
+        // can never receive input.
+        let is_stdout = matches!(port.role(), SerialRole::Stdout);
+        let (mut irq, mut regs) = (irq, regs);
+        if is_stdout {
+            console_driver::runtime::adopt_stdout_guards(irq.take(), regs.take());
+        }
         Ok(Pl011Data {
             _publication: publication,
             _irq: irq,

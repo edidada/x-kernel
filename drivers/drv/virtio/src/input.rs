@@ -76,10 +76,14 @@ pub fn activate_mmio(
     // model): released with the last ClassDevice clone.
     let mmio_regs = builder.take_regs();
 
-    let irq = match dev.irq(0) {
-        Ok(driver_core::IrqSpec::ResolvedVirq { number, .. }) => number,
-        _ => return Err(ProbeError::Fatal(RuntimeError::Invalid)),
-    };
+    // The vendored input device filters its shared-line handler by the
+    // LOGICAL virq (the number the host IRQ core dispatches). Resolve the
+    // descriptor's irq through the host service — a firmware route (the
+    // shape DT enumeration produces) maps through its controller's domain
+    // here; reading raw fields would confuse hwirq with virq on every
+    // non-identity domain, and rejecting routes broke the only real
+    // firmware-enumerated path.
+    let irq = dev.resolve_irq(0)?;
     let publication = activate(dev, transport, irq, mmio_regs)?;
 
     struct InputMmioActivation {

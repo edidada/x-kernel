@@ -97,7 +97,7 @@ pub fn discover(domain: &driver_core::DeviceDomain) {
             .with_origin(DiscoveryOrigin::PlatformStatic)
             .with_resources(resources);
 
-            domain.add_device(descriptor);
+            let _ = domain.add_device(descriptor);
             log::debug!(
                 "pci: registered {bdf} ({:04x}:{:04x} class {:02x}:{:02x})",
                 info.vendor_id,
