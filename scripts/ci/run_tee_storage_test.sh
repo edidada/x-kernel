@@ -20,15 +20,46 @@ if [ "${#tee_test_bins[@]}" -eq 0 ]; then
 fi
 
 libutee_dir="/xkernel-target/libutee-${arch}"
-mkdir -p "${libutee_dir}"
-
+mkdir -p "$(dirname "${libutee_dir}")"
 echo "==> Syncing rust-libutee..."
-if [ -d "${libutee_dir}/.git" ]; then
-    git -C "${libutee_dir}" fetch --depth 1 origin HEAD
-    git -C "${libutee_dir}" reset --hard FETCH_HEAD
-else
-    git clone --depth 1 "${LIBUTEE_REPO}" "${libutee_dir}"
-fi
+fallback_clone_dir=""
+cleanup_fallback_clone() {
+    if [ -n "${fallback_clone_dir}" ]; then
+        rm -rf "${fallback_clone_dir}"
+    fi
+}
+trap cleanup_fallback_clone EXIT
+for attempt in 1 2 3; do
+    if [ -d "${libutee_dir}/.git" ]; then
+        if git -C "${libutee_dir}" fetch --depth 1 origin HEAD &&
+            git -C "${libutee_dir}" reset --hard FETCH_HEAD; then
+            break
+        fi
+    fi
+    # A stale or damaged cache must not force every retry through the same
+    # repository. Clone into a task-owned directory without deleting the cache;
+    # another job may still use it, and it remains available for diagnosis.
+    fallback_clone_dir=$(mktemp -d "${libutee_dir}.clone.XXXXXX")
+    if git clone --depth 1 "${LIBUTEE_REPO}" "${fallback_clone_dir}"; then
+        # Publish a completed cold cache without replacing a concurrent job's
+        # directory. Damaged or already occupied caches keep the private copy.
+        if [ ! -e "${libutee_dir}" ] &&
+            mv -T -n "${fallback_clone_dir}" "${libutee_dir}" &&
+            [ ! -d "${fallback_clone_dir}" ]; then
+            fallback_clone_dir=""
+        else
+            libutee_dir="${fallback_clone_dir}"
+        fi
+        break
+    fi
+    cleanup_fallback_clone
+    fallback_clone_dir=""
+    if [ "${attempt}" -eq 3 ]; then
+        echo "rust-libutee sync failed after ${attempt} attempts" >&2
+        exit 1
+    fi
+    sleep "$((attempt * 5))"
+done
 
 echo "==> Building TEE tests for ${musl_target}: ${tee_test_bins[*]}"
 (
