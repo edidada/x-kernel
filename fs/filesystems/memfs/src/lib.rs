@@ -755,8 +755,12 @@ impl FileOperations for MemoryNode {
         )
     }
 
-    fn supports_file_copy(&self) -> bool {
-        true
+    fn file_copy_handler(&self) -> Option<&'static str> {
+        // Every memfs node is served by this one implementation, so the
+        // shared handler identity admits cross-instance copies the way one
+        // nfs handler serves several nfs filesystem types (Linux
+        // `generic_copy_file_checks` compares handler identity, not mounts).
+        Some("memfs")
     }
 
     fn supports_write(&self) -> bool {

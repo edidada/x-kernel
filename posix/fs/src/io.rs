@@ -545,6 +545,353 @@ mod transfer_count_tests {
     }
 }
 
+/// Boundary checks and settlement semantics of the `copy_file_range(2)`
+/// engine, mirroring Linux `generic_copy_file_checks` (`fs/read_write.c`).
+#[unittest::mod_test]
+mod copy_file_range_checks_tests {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use iov_iter::{IovIterDest, IovIterSource};
+    use kvfs::{FileOperations, Kiocb, MAX_LFS_FILESIZE, SuperBlockFlags};
+    use linux_raw_sys::general::{O_APPEND, O_RDONLY, O_RDWR};
+
+    use super::*;
+
+    /// Opens a memfd-backed regular file with the memfs operation table.
+    fn memfd_file(name: &str) -> Arc<VfsFile> {
+        memfs::shmem::create_memfd_file(name, false, kcred::initial_cred())
+            .unwrap()
+            .into_file(kcred::initial_cred())
+            .unwrap()
+    }
+
+    fn fill(file: &Arc<VfsFile>, len: usize) {
+        let pattern: alloc::vec::Vec<u8> = (0..len).map(|index| (index % 251) as u8).collect();
+        let mut position = 0;
+        assert_eq!(file.write_from(&pattern, &mut position), Ok(len));
+    }
+
+    /// Instrumented backend whose `poisoned_call`-th write fails, modelling
+    /// a destination that runs out of space mid-copy. `handler` controls the
+    /// native-copy identity the table reports: `Some("memfs")` stands for an
+    /// instrumented memfs file, `None` for a foreign table.
+    struct CountingBackend {
+        handler: Option<&'static str>,
+        poisoned_call: usize,
+        calls: AtomicUsize,
+    }
+
+    impl FileOperations for CountingBackend {
+        fn supports_read(&self) -> bool {
+            true
+        }
+
+        fn supports_write(&self) -> bool {
+            true
+        }
+
+        fn file_copy_handler(&self) -> Option<&'static str> {
+            self.handler
+        }
+
+        fn read_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterDest<'_>) -> KResult<usize> {
+            let count = iter.count();
+            iocb.advance(count);
+            Ok(count)
+        }
+
+        fn write_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterSource<'_>) -> KResult<usize> {
+            let count = iter.count();
+            if self.calls.fetch_add(1, Ordering::Relaxed) == self.poisoned_call {
+                return Err(KError::StorageFull);
+            }
+            iocb.advance(count);
+            Ok(count)
+        }
+    }
+
+    /// Linux `vfs_copy_file_range` allows partial success: an error after
+    /// progress returns the completed prefix, and the published positions
+    /// must describe the bytes the destination actually accepted.
+    #[unittest::def_test]
+    fn copy_error_after_progress_returns_completed_prefix() {
+        let source = Arc::new(CountingBackend {
+            handler: Some("memfs"),
+            poisoned_call: usize::MAX,
+            calls: AtomicUsize::new(0),
+        });
+        let destination = Arc::new(CountingBackend {
+            handler: Some("memfs"),
+            poisoned_call: 1,
+            calls: AtomicUsize::new(0),
+        });
+        let source_base = memfd_file("copy-partial-src");
+        fill(&source_base, 8192);
+        let input = source_base
+            .alloc_clone(FMode::READ, OpenFlags::empty(), source)
+            .unwrap();
+        let output = memfd_file("copy-partial-dst")
+            .alloc_clone(FMode::WRITE, OpenFlags::empty(), destination)
+            .unwrap();
+        // Two 4 KiB chunks requested: the first lands, the second write
+        // fails with ENOSPC.
+        let mut input_offset = 0;
+        let mut output_offset = 0;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &input,
+                TransferPosition::At(&mut input_offset),
+                &output,
+                TransferPosition::At(&mut output_offset),
+                8192,
+                false,
+            ),
+            Ok(4096)
+        );
+        assert_eq!(input_offset, 4096);
+        assert_eq!(output_offset, 4096);
+        assert_eq!(input.position(), 0);
+        assert_eq!(output.position(), 0);
+    }
+
+    /// Linux shortens an oversized request at the source EOF; an unsigned
+    /// range wrap is the only `EOVERFLOW`, so a request beyond `off_t`
+    /// against a short source still copies what exists.
+    #[unittest::def_test]
+    fn oversized_request_shortens_at_source_eof() {
+        let input = memfd_file("copy-shorten-src");
+        fill(&input, 8192);
+        let output = memfd_file("copy-shorten-dst");
+        let mut input_offset = 0;
+        let mut output_offset = 0;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &input,
+                TransferPosition::At(&mut input_offset),
+                &output,
+                TransferPosition::At(&mut output_offset),
+                (i64::MAX as u64 + 1) as usize,
+                false,
+            ),
+            Ok(8192)
+        );
+        assert_eq!(input_offset, 8192);
+        assert_eq!(output_offset, 8192);
+    }
+
+    /// The destination ceiling applies in the checks phase: a start at or
+    /// past the maximum file size is `EFBIG` even for an empty source, and
+    /// a copy crossing the ceiling is clamped to the tail room.
+    #[unittest::def_test]
+    fn destination_ceiling_checks_before_copying() {
+        let source = memfd_file("copy-ceiling-src");
+        let output = memfd_file("copy-ceiling-dst");
+        let mut input_offset = 0;
+        let mut output_offset = MAX_LFS_FILESIZE;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &source,
+                TransferPosition::At(&mut input_offset),
+                &output,
+                TransferPosition::At(&mut output_offset),
+                10,
+                false,
+            ),
+            Err(KError::from(LinuxError::EFBIG))
+        );
+
+        let source = memfd_file("copy-clamp-src");
+        fill(&source, 8192);
+        let output = memfd_file("copy-clamp-dst");
+        let mut input_offset = 0;
+        let mut output_offset = MAX_LFS_FILESIZE - 4;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &source,
+                TransferPosition::At(&mut input_offset),
+                &output,
+                TransferPosition::At(&mut output_offset),
+                8192,
+                false,
+            ),
+            Ok(4)
+        );
+        assert_eq!(input_offset, 4);
+        assert_eq!(output_offset, MAX_LFS_FILESIZE);
+    }
+
+    /// Directory descriptors are rejected with `EISDIR` on either side.
+    #[unittest::def_test]
+    fn directory_sides_are_rejected_with_eisdir() {
+        let fs = memfs::shmem::new_tmpfs(SuperBlockFlags::empty());
+        let root = kvfs::Path::new(kvfs::Mount::new_root(&fs), fs.root_dir());
+        let dir = kvfs::dentry_open(root, O_RDONLY, kcred::initial_cred()).unwrap();
+        let input = memfd_file("copy-eisdir-src");
+        fill(&input, 16);
+        let mut offset = 0;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &dir,
+                TransferPosition::At(&mut offset),
+                &input,
+                TransferPosition::Managed,
+                16,
+                false,
+            ),
+            Err(KError::from(LinuxError::EISDIR))
+        );
+        // A directory can only be opened for reading, so the output-side
+        // directory case never reaches the type check: the access-mode
+        // verification (Linux `rw_verify_area`) reports `EBADF` first.
+        let mut offset = 0;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &input,
+                TransferPosition::At(&mut offset),
+                &dir,
+                TransferPosition::Managed,
+                16,
+                false,
+            ),
+            Err(KError::BadFileDescriptor)
+        );
+    }
+
+    /// A destination opened `O_APPEND` is rejected with `EBADF`: the copy
+    /// would land at the wrong offset.
+    #[unittest::def_test]
+    fn append_destination_is_rejected_with_ebadf() {
+        let source = memfd_file("copy-append-src");
+        fill(&source, 16);
+        let target =
+            memfs::shmem::create_memfd_file("copy-append-dst", false, kcred::initial_cred())
+                .unwrap();
+        let output =
+            kvfs::dentry_open(target.into_path(), O_RDWR | O_APPEND, kcred::initial_cred())
+                .unwrap();
+        let mut input_offset = 0;
+        let mut output_offset = 0;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &source,
+                TransferPosition::At(&mut input_offset),
+                &output,
+                TransferPosition::At(&mut output_offset),
+                16,
+                false,
+            ),
+            Err(KError::from(LinuxError::EBADF))
+        );
+    }
+
+    /// Overlapping ranges within one inode are rejected so the chunked copy
+    /// can never observe its own writes; a zero-length request never
+    /// overlaps and stays a no-op success.
+    #[unittest::def_test]
+    fn overlapping_same_inode_ranges_are_rejected() {
+        let file = memfd_file("copy-overlap");
+        fill(&file, 8192);
+        let mut input_offset = 0;
+        let mut output_offset = 4096;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &file,
+                TransferPosition::At(&mut input_offset),
+                &file,
+                TransferPosition::At(&mut output_offset),
+                8192,
+                false,
+            ),
+            Err(KError::from(LinuxError::EINVAL))
+        );
+        let mut input_offset = 4096;
+        let mut output_offset = 0;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &file,
+                TransferPosition::At(&mut input_offset),
+                &file,
+                TransferPosition::At(&mut output_offset),
+                0,
+                false,
+            ),
+            Ok(0)
+        );
+    }
+
+    /// A start at or past EOF is a zero-length no-op that leaves the
+    /// explicit offsets alone.
+    #[unittest::def_test]
+    fn request_past_eof_is_a_no_op() {
+        let input = memfd_file("copy-past-eof-src");
+        fill(&input, 8);
+        let output = memfd_file("copy-past-eof-dst");
+        let mut input_offset = 100;
+        let mut output_offset = 0;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &input,
+                TransferPosition::At(&mut input_offset),
+                &output,
+                TransferPosition::At(&mut output_offset),
+                10,
+                false,
+            ),
+            Ok(0)
+        );
+        assert_eq!(input_offset, 100);
+        assert_eq!(output_offset, 0);
+    }
+
+    /// Cross-superblock admission follows handler identity: plain memfs
+    /// tables share one handler and copy across instances, while a pair
+    /// carrying a foreign, handler-less table is confined with `EXDEV`.
+    #[unittest::def_test]
+    fn cross_superblock_pairs_need_matching_handlers() {
+        let input = memfd_file("xdev-plain-src");
+        fill(&input, 16);
+        let output = memfd_file("xdev-plain-dst");
+        let mut input_offset = 0;
+        let mut output_offset = 0;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &input,
+                TransferPosition::At(&mut input_offset),
+                &output,
+                TransferPosition::At(&mut output_offset),
+                16,
+                false,
+            ),
+            Ok(16)
+        );
+
+        let backend = Arc::new(CountingBackend {
+            handler: None,
+            poisoned_call: usize::MAX,
+            calls: AtomicUsize::new(0),
+        });
+        let source_base = memfd_file("xdev-anon-src");
+        fill(&source_base, 16);
+        let input = source_base
+            .alloc_clone(FMode::READ, OpenFlags::empty(), backend)
+            .unwrap();
+        let output = memfd_file("xdev-anon-dst");
+        let mut input_offset = 0;
+        let mut output_offset = 0;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &input,
+                TransferPosition::At(&mut input_offset),
+                &output,
+                TransferPosition::At(&mut output_offset),
+                16,
+                false,
+            ),
+            Err(KError::from(LinuxError::EXDEV))
+        );
+    }
+}
+
 /// Repositions the read/write file offset.
 pub fn sys_lseek(fd: c_int, offset: __kernel_off_t, whence: c_int) -> KResult<isize> {
     debug!("sys_lseek <= {fd} {offset} {whence}");

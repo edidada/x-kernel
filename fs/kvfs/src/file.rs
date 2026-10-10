@@ -164,12 +164,14 @@ pub trait FileOperations: Send + Sync + 'static {
         false
     }
 
-    /// Returns whether this table supports file-to-file copying, mirroring
-    /// Linux `->copy_file_range`: `copy_file_range` may cross super blocks
-    /// only when both sides report support, and otherwise rejects the pair
-    /// with `EXDEV`.
-    fn supports_file_copy(&self) -> bool {
-        false
+    /// Identity of the native file-copy implementation this table carries,
+    /// mirroring Linux's `f_op->copy_file_range` pointer: a pair may copy
+    /// across super blocks only when both tables report the SAME handler
+    /// identity (one shared implementation, the way nfs serves several
+    /// filesystem types with one handler); every other pair needs the same
+    /// super block and is rejected with `EXDEV` otherwise.
+    fn file_copy_handler(&self) -> Option<&'static str> {
+        None
     }
 
     /// Changes this open file description's file offset.
@@ -746,10 +748,10 @@ impl VfsFile {
         self.node_type() == NodeType::RegularFile
     }
 
-    /// Returns whether this file's operation table supports file-to-file
-    /// copying across super blocks.
-    pub fn supports_file_copy(&self) -> bool {
-        self.operations().supports_file_copy()
+    /// Returns the native file-copy handler identity this file's operation
+    /// table carries, if any.
+    pub fn file_copy_handler(&self) -> Option<&'static str> {
+        self.operations().file_copy_handler()
     }
 
     /// Returns this file's inode size.
