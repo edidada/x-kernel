@@ -106,6 +106,7 @@ checked through the configured kernel's `make clippy` during this migration.
 | Rule | Level | Backend | Lints |
 | --- | --- | --- | --- |
 | [CG-001-static-spinlock-registration](CG-001-static-spinlock-registration.md) | MUST | dylint | `unregistered_static_spinlock` |
+| [CG-002-static-mutex-registration](CG-002-static-mutex-registration.md) | MUST | dylint | `unregistered_static_lock` |
 | [CG-013-no-sleep-under-spinlock](CG-013-no-sleep-under-spinlock.md) | MUST | ai | — |
 | [CG-014-spin-noirq-needs-irq-contender](CG-014-spin-noirq-needs-irq-contender.md) | SHOULD | ai | — |
 | [CG-015-no-split-critical-section](CG-015-no-split-critical-section.md) | MUST | ai | — |
