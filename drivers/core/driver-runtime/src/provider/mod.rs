@@ -5,11 +5,11 @@
 //! The X-Kernel resource provider — inlined from the former
 //! `device-res-xkernel` adapter crate.
 //!
-//! `device_res`'s Op traits describe *what* drivers need; this module binds
-//! those operations to memspace (MMIO), kirq (interrupts) and the coherent
-//! DMA allocator. It lives in driver-runtime now: exactly one consumer
-//! (XKernelRuntime + the vendor HAL surface), so an extra crate bought
-//! nothing but a dependency edge.
+//! `driver-core::provider`'s Op traits describe *what* drivers need; this
+//! module binds those operations to memspace (MMIO), kirq (interrupts) and
+//! the coherent DMA allocator. It lives in driver-runtime now: exactly one
+//! consumer (XKernelRuntime + the vendor HAL surface), so an extra crate
+//! bought nothing but a dependency edge.
 
 mod dma;
 mod irq;

@@ -21,8 +21,8 @@ modifying class registry semantics, or adding new device categories.
 - No framebuffer management: `/dev/fb0` emulation lives in `fbdevice`;
   kclass only delegates `DisplayDevice` calls (see the framebuffer path
   below).
-- No IRQ handling: interrupt registration and dispatch belong to `kirq`
-  and `device-res-xkernel`; kclass stores only the `irq` metadata value.
+- No IRQ handling: interrupt registration and dispatch belong to `kirq`;
+  kclass stores only the `irq` metadata value.
 - No driver binding or probing: the discover → match → bind pipeline is
   owned by the `driver-core` domain; kclass consumes the already-bound
   device object at publish time.

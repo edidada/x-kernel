@@ -108,7 +108,8 @@ host 注入普通准备函数，返回任务绑定的 waiter，由 waiter.signal
 
 waiter 不跨任务共享；signals 可以在 IRQ 中调用且不保留 request/data/device 指针。
 等待资源准备和准入注册允许返回错误，但已提交后的终态等待不再注册或返回等待
-错误。VirtIO 实现在 `virtio::blk`，等待及 IRQ/softirq 接入由 `kdriver` 提供；
+错误。VirtIO 实现在 `virtio::blk`，等待及 IRQ/softirq 接入由本 crate 的
+completion/reclaimer（内核类服务）提供；
 其他驱动接入这些契约不需要修改文件系统。
 
 `QueueLimits` 是设备几何的唯一 block-core 来源。当前 backend 只报告 logical block size，

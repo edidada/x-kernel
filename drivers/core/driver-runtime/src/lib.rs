@@ -5,11 +5,11 @@
 //! Host implementation of [`driver_core::DeviceServices`] plus the clock
 //! provider registry.
 //!
-//! This is the only place where the new device model touches the existing
-//! `device-res` provider stack: the x-kernel provider is wrapped once, behind
-//! the per-device service surface that drivers actually see. When the
-//! resource layer is later folded into `driver-runtime` proper (refactor
-//! section 4.4), driver-facing code does not change.
+//! This crate owns the resource provider (formerly the separate `device-res`
+//! stack, folded in here by the device-res refactor): it is bound once, behind
+//! the per-device service surface that drivers actually see. Driver-facing
+//! code does not change whether the provider lives here or in a dedicated
+//! crate — the seam is [`DeviceServices`].
 //!
 //! # Clock integration
 //!
@@ -99,7 +99,7 @@ impl ResIrqHandler for AdaptedIrqHandler {
     }
 }
 
-/// The x-kernel service runtime: one device-res provider plus the clk
+/// The x-kernel service runtime: one host resource provider plus the clk
 /// registry, presented as [`DeviceServices`].
 ///
 /// Probe-time services carry the requesting device id so per-device
@@ -148,8 +148,8 @@ impl XKernelRuntime {
     }
 
     fn iomap_resource(&self, region: driver_core::MmioRegion) -> Result<MmioMapping, RuntimeError> {
-        // device-res re-exports driver-core's MmioRegion — one type, no
-        // field-by-field re-construction.
+        // driver-core's MmioRegion is the single address vocabulary — one
+        // type, no field-by-field re-construction.
         self.provider
             .as_ref()
             .map_mmio(region, "driver-core")

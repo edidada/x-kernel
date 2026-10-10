@@ -57,14 +57,15 @@ Major areas:
 - `drivers/`: the driver framework and concrete drivers.
   - `core/`: device model (`driver-core`), host service bridge
     (`driver-runtime`), composition root (`driver-compose`).
-  - `common/`: cross-subsystem foundations (`driver_base`, `device-res`,
-    `kclass`, `devnode`).
+  - `common/`: cross-subsystem foundations (`driver_base`, `kclass`,
+    `devnode`, `hwrng`).
   - `subsystems/`: per-class APIs and services (block/net/char/...).
   - `drv/`: concrete drivers, one subsystem crate per family, one module
     per driver (`drv/virtio`, `drv/serial`, `drv/clk`, `drv/block`).
   - `bus/`, `firmware/`: PCI access; DT/ACPI/FDT parsing.
-  - `adapters/` (kernel capabilities -> framework), `integration/`
-    (framework -> kernel facilities).
+  - `integration/`: framework -> kernel facilities (`uevent-netlink`); the
+    kernel-capabilities -> framework direction is implemented by the
+    provider inside `core/driver-runtime`.
 - `platforms/`: platform glue and defconfigs.
 - `process/`, `task/`, `fs/`, `io/`, `net/`, and `tee/`: subsystem crates.
 - `util/`: shared utility crates such as `klazy`.
@@ -88,15 +89,14 @@ ownership boundaries.
   forks.
 - Treat `kirq` as X-Kernel's common interrupt core. Generic IRQ descriptor,
   mapping, registration, dispatch, context, softirq, workerqueue, and threaded
-  IRQ semantics belong in `kirq`, not in `khal`, `device_res`, or irqchip
-  drivers.
+  IRQ semantics belong in `kirq`, not in `khal` or irqchip drivers.
 - Keep irqchip drivers below `kirq`: they implement concrete controller
   behavior such as configure, mask/unmask, claim, complete, priority, and IPI
   delivery through `kirq::IntrManagerIf`.
-- Keep `device_res` OS-agnostic. The driver framework exposes kernel IRQ
-  capability to drivers by adapting devres IRQ resources to `kirq` in
-  `driver-runtime` (the DeviceServices bridge over `device-res-xkernel`);
-  `kirq` must not depend on `device_res`.
+- Keep the driver framework OS-agnostic. The driver framework exposes kernel
+  IRQ capability to drivers by adapting provider IRQ resources to `kirq` in
+  `driver-runtime` (the DeviceServices bridge over `kirq`/`kdma`/`memspace`);
+  `kirq` must not depend on driver-subsystem crates.
 - Treat `docs/ai/driver-subsystem-boundaries.md` as a hard constraint for
   driver work. Concrete reusable drivers must depend on driver subsystem
   contracts, not host-kernel crates such as `khal`, `kirq`, `memspace`,

@@ -144,13 +144,14 @@ impl IrqOp for XKernelResourceProvider {
 }
 
 fn dev_irq_controller_to_kirq_domain(controller: kirq::IrqController) -> Option<kirq::IrqDomainId> {
-    // `device_res::IrqDomainId` is provider-local. Only controllers with a
-    // registered kirq domain can produce data-plane-resolvable mappings here.
+    // The provider's `IrqDomainId` vocabulary is provider-local. Only
+    // controllers with a registered kirq domain can produce
+    // data-plane-resolvable mappings here.
     match controller {
         IrqController::Gic => Some(kirq::GIC_ROOT_DOMAIN),
         IrqController::Plic => Some(kirq::PLIC_ROOT_DOMAIN),
         IrqController::IoApic => Some(kirq::IO_APIC_DOMAIN),
-        // Msi carries its own domain in kirq; the device-res side has no
+        // Msi carries its own domain in kirq; the provider contract has no
         // provider-registered Msi domain to name.
         IrqController::Msi | IrqController::LoongArchExtioi | IrqController::Unknown => None,
     }

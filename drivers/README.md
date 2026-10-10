@@ -19,13 +19,13 @@ contract it is implementing or consuming.
   subsystem         + class services,      per driver,       DT/ACPI/FDT
   foundations:      e.g. block dispatch)   family crates)    parsing)
   driver_base,
-  device-res,           │                    │
   kclass, devnode)      │                    │
-                        └────► adapters/xkernel/device-res ◄──┘
-                               (capability backend bridge)
+                        └────► driver-runtime provider ◄──────┘
+                               (capability backend bridge:
+                                memspace / kirq / kdma / khal)
                                         │
                                 integration/
-                                (console runtime, uevent-netlink)
+                                (uevent-netlink)
 ```
 
 ## Device Model and Runtime (`core/`)
@@ -33,7 +33,7 @@ contract it is implementing or consuming.
 | Crate | Role |
 |------|------|
 | `core/driver-core` | The device model: bus/device/driver contracts, id tables, deferred probe, the device domain, extension services. Family-agnostic by construction. |
-| `core/driver-runtime` | Per-device services (`DeviceServices` over the resource providers), the virtio transport extension and HAL, and the clock registry. |
+| `core/driver-runtime` | Per-device services (`DeviceServices`), the resource provider binding them to `memspace`/`kirq`/`kdma`/`khal` (formerly the `device-res` stack), the virtio transport extension and HAL, and the clock registry. |
 | `core/driver-compose` | Composition root: runtime install, driver registration, DT/PCI enumeration into the domain. Called once from `kruntime`. |
 
 ## Cross-Subsystem Foundations (`common/`)
@@ -44,9 +44,9 @@ ground. Anything class-specific belongs in `subsystems/`.
 | Crate | Role |
 |------|------|
 | `driver_base` | Common driver error/result and base device trait. |
-| `device-res` | Capability contracts (MMIO, IRQ, DMA, time) with RAII handles. |
 | `devnode` | Model-agnostic userland node projection (devtmpfs/sysfs/uevent): data-driven `DevNodeType`, `DeviceNumber`, `DeviceLocation`. |
 | `kclass` | Typed class publication: detached class parents, per-class registries, availability/removal subscriptions. |
+| `hwrng` | Cross-subsystem hardware RNG device contract (request/completion APIs shared by drivers and the entropy consumer). |
 
 ## Per-Class Subsystems (`subsystems/`)
 
@@ -70,8 +70,8 @@ class layers, hence a separate package), so one family is one tree.
 drivers. `firmware/{of,acpi,rs-fdtree}` — DT/ACPI parsing and node
 discovery. The remaining `platform/` residents (irqchip, timer, rtc,
 apic, pmu, console) are hardware controller drivers and boot
-integration; their long-term home is `drv/<family>` and
-`integration/console`, migrated one-by-one when touched.
+integration; their long-term home is `drv/<family>` (console likewise
+landing beside the char subsystem), migrated one-by-one when touched.
 
 ## Subsystem Drivers (`drv/`)
 
@@ -91,15 +91,15 @@ Kconfig block.
 
 | Crate | Role |
 |------|------|
-| `devices/virtio` | Virtio device-family constructors (`VirtIoBlkDev`, …) over the vendored `virtio-drivers` transport, implementing the class traits. Shared by the drv/virtio modules and the HAL. |
+| `drv/virtio/device` (package `virtio`) | Virtio device-family constructors (`VirtIoBlkDev`, …) over the vendored `virtio-drivers` transport, implementing the class traits. Shared by the drv/virtio modules and the HAL. |
 | `integration/uevent-netlink` | Netlink transport for kobject uevents — the one drivers-tree consumer of `knet`. The payload format (a udev-visible compatibility surface) lives in `common/devnode::uevent`, shared with sysfs attributes. |
 
 ## Host Adapters and Platform Support
 
 | Crate | Role |
 |------|------|
-| `adapters/xkernel/device-res` | Implements the `device-res` capability traits against `memspace`, `kirq`, `kdma`, `khal`. |
-| `platform/*` (`pci`, `of`, `acpi`, `console`, `irq`, `timer`, `rtc`, `x86-apic`, `aarch64-pmuv3`, `rs-fdtree`, `dice`) | Bus, firmware, and platform infrastructure; `pci::support` owns CAM/BAR configuration shared by enumeration and drivers. |
+| `core/driver-runtime/src/provider/` | Binds the driver-core provider contracts (MMIO/IRQ/DMA ops) to `memspace`, `kirq`, `kdma`, `khal` — the former `adapters/xkernel/device-res` adapter, now inlined. |
+| `platform/*` (`console`, `irq`, `timer`, `rtc`, `x86-apic`, `aarch64-pmuv3`, `dice`) | Hardware controller drivers and boot integration; their long-term home is `drv/<family>`, migrated one-by-one when touched. |
 
 ## Porting Workflow
 

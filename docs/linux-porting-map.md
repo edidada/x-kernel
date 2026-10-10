@@ -2,10 +2,10 @@
 
 > 规范性文档（normative）：转写 Linux 驱动到 x-kernel `driver-core` 模型时，
 > 按本表做机械映射。Golden 模板见 `drivers/drv/`：
-> `serial-pl011`（platform/DT 消费者）、`fixed-clock`（provider）、
-> `virtio-blk-core`（PCI 消费者 + 类发布 + devnode）、
-> `virtio-net-core`（中断所有权）、`virtio-rng-core`（最小消费者）、
-> `ramdisk`（板级静态设备）。
+> `drv/serial` 的 `pl011`（platform/DT 消费者）、`drv/clk` 的 `fixed_clock`（provider）、
+> `drv/virtio` 的 `blk`（PCI 消费者 + 类发布 + devnode）、
+> `net`（中断所有权）、`rng`（最小消费者）、
+> `drv/block` 的 `ramdisk`（板级静态设备）。
 
 ## 0. 转写流程（一个驱动的完整步骤）
 
@@ -122,22 +122,23 @@ driver_<name> = [
 ```
 
 注意：如果 QEMU 需要为该设备挂硬件（如 virtio-blk/net/rng），
-`xtask/xkmake/src/qemu.rs` 的 `needs_*` 要同时认新旧符号。
+`xtask/xkmake/src/qemu.rs` 的 `needs_*` 认 `KFEAT_DRIVER_*` 符号（旧符号已随旧模型删除）。
 
 ## 8. 验证
 
 - 单 crate 类型检查：`make check-crate CRATE=<pkg>`
 - 内核单测：`make unittest UNITTEST_CRATE=<module_path>`（下划线 crate 名）
-- 实机：`make build && make justrun`（新符号开、旧符号关，看 probe 日志和消费者）
+- feature 矩阵：`scripts/ci/check_feature_matrix.sh`（从 Kconfig 自动派生组合）
+- 实机：`make build && make justrun`（看 probe 日志和消费者）
 
 ## 9. 已知不映射项（长期项）
 
 | Linux 概念 | 状态 |
 |---|---|
-| `struct page`/DMA scatter-gather API | `device_res` 的 streaming DMA（map_streaming/unmap_streaming）已覆盖单缓冲区；SG 待补 |
+| `struct page`/DMA scatter-gather API | `driver-core::provider` 的 streaming DMA（map_streaming/unmap_streaming，由 driver-runtime 绑定主机）已覆盖单缓冲区；SG 待补 |
 | `struct work_struct` / delayed work | 用 `ktask`/`kwork`（非驱动模型管辖） |
 | `devm_*` 完整矩阵（devm_kmemdup 等） | guards-in-Data 覆盖主路径；特殊形态按需加 `DeviceCtx` 方法 |
 | runtime PM（pm_runtime_get/put） | 未建模（`suspend/resume` 在 `DeviceDriver` 预留位，尚未接 PM 框架） |
 | virtio transport 的 MMIO/DMA 映射所有权 | 仍由 vendored `virtio-drivers` HAL 持有（映射生命周期 = transport 生命周期）；内核自有 transport 是后续工作 |
 | 设备 remove/hotplug 的消费者安全 | registry 移除后，外部持有的 `ClassDevice` clone 仍可访问设备；transport/mapping 由 `Data`（driver-core 域）持有，clone 不阻止 unmap。完整闭合需要 mapping 由共享 transport 对象持有或离线语义——hotplug 模板暂不推荐 |
-| MSI-X per-queue向量 | `device_res::MsiResource` 已有分配接口，`DeviceCtx` 方法未暴露 |
+| MSI-X per-queue向量 | `driver_core::provider::MsiResource` 已有分配接口，`DeviceCtx` 方法未暴露 |

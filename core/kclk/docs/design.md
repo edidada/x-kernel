@@ -58,7 +58,7 @@ sharing), so flags must be written by name, never by numeric value.
 ## Layering
 
 Clock support is split across three crates, mirroring how IRQ is wired through
-`device-res` → `driver-runtime` → `kirq`:
+`driver-core` (provider contracts) → `driver-runtime` → `kirq`:
 
 ```text
 driver-core (device model)
@@ -501,8 +501,8 @@ impl DriverOps<PlatformBus> for Rk3588CruDriver {
 
 ### Step 5 — consume a clock from any driver
 
-Drivers never name `kclk` directly; they go through the `device-res` resource
-model, exactly like MMIO and IRQ:
+Drivers never name `kclk` directly; they go through the `driver-core` resource
+model (`DeviceCtx`), exactly like MMIO and IRQ:
 
 ```rust
 // From any driver probe on the driver-core model:

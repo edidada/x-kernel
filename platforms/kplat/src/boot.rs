@@ -22,7 +22,8 @@ pub trait BootHandler {
     /// This hook is only for hardware required before generic descriptor-first
     /// probing can run, such as timer, interrupt controller, and boot console
     /// setup. Devices initialized here should be adopted into the runtime
-    /// driver model only when a later subsystem needs a `DeviceObject` handle.
+    /// driver model only when a later subsystem needs a `driver-core` device
+    /// handle.
     fn early_driver_init();
 
     /// Final initialization on the boot CPU.

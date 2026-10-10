@@ -26,10 +26,8 @@
 //!   the late-init gate-down pass.
 //!
 //! Concrete clock-controller drivers (SoC PLL/mux/divider chips) register their
-//! outputs here, mirroring how the [`device_res`] capability providers are
-//! wired into the kernel.
-//!
-//! [`device_res`]: device_res
+//! outputs here, mirroring how the driver-core capability providers are wired
+//! into the kernel through `driver-runtime`.
 #![cfg_attr(not(test), no_std)]
 #![warn(missing_docs)]
 

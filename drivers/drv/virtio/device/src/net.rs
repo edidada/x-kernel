@@ -74,8 +74,11 @@ impl VirtIoNetIrqWorker {
 /// # Example
 ///
 /// ```ignore
-/// let (kind, transport, irq) = virtio::probe_pci_device::<HalImpl, _>(...).unwrap();
-/// let mut net = VirtIoNetDev::<HalImpl, _, 256>::try_new(transport, Some(irq), Some(irq_provider))?;
+/// // Transport probing goes through the virtio extension service
+/// // (`DeviceCtx::extension::<PciTransportService>()` in drv/virtio);
+/// // the device takes only the transport and an optional MMIO register
+/// // lease (virtio-mmio path):
+/// let mut net = VirtIoNetDev::<HalImpl, _, 256>::try_new(transport, None)?;
 /// let tx_buf = net.alloc_tx_buf(1500)?;
 /// // ... fill tx_buf and send ...
 /// net.send(tx_buf)?;

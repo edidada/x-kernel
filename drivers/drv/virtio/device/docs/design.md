@@ -7,8 +7,8 @@ VirtIO 设备封装为 [`driver_base`] 系列 trait 的实现。块设备、网�
 vsock、9p 等子系统通过本模块访问 VirtIO 虚拟设备。
 
 本 crate 属于可复用具体驱动层。它不能直接依赖 X-Kernel host API；需要的 DMA、
-IRQ 映射和时间能力必须通过 `virtio_drivers::Hal` 或 `device_res` provider
-contract 传入。
+IRQ 映射和时间能力必须通过 `virtio_drivers::Hal` 或 `driver-core` 的 provider
+contract（由 `driver-runtime` 绑定到主机）传入。
 
 ## 背景
 
@@ -397,16 +397,21 @@ headers and allocator overhead. The logical sector size is the protocol's fixed
 
 **IRQ 处理流程**：
 
-1. `register_virtio_net_irq(irq, irq_provider, inner)`：将 `VirtIoNetIrqHandle` 存入全局 `NET_IRQ_HANDLES`
-2. 若该 IRQ 首次注册（`REGISTERED_NET_IRQS` 去重），调用 `Irq::request_with(irq_provider, resource, Arc::new(handle_virtio_net_irq))` 注册中断，guard 存入 `NET_IRQ_GUARDS`
-3. 中断到来时 `handle_virtio_net_irq()` 遍历所有句柄，调用 `ack_interrupt()` 确认中断，返回包含来源位图的 `IrqEvent`，没有句柄确认中断时返回 `IrqEvent::NOT_HANDLED`
-4. 已注册 IRQ 时，`ack_interrupt()` 仅由 IRQ handler 调用，避免 RX 任务清除运行期间新到达但尚未调度的设备事件；未注册 IRQ 时，由 `recv()` 在纯轮询路径中确认中断
+1. 设备侧通过 `irq_worker()` 交出 `VirtIoNetIrqWorker`——只持有设备内部状态的
+   一份共享句柄，不拥有设备本身
+2. 驱动层（`drv/virtio/src/net.rs`）通过 `DeviceCtx::request_irq()` 注册中断：
+   handler 闭包捕获 worker，调用 `worker.service()` 认领并处理设备事件；返回的
+   `DevIrq` guard 由驱动 `Data`（或 mmio activation）持有
+3. 中断到来时 handler 只服务**本设备**：没有全局路由表、没有跨设备遍历；
+   共享中断线的分发语义由 kirq 的 action 机制承担（返回 `IrqAction::NotHandled`）
+4. 已注册 IRQ 时，`ack_interrupt()` 仅由 IRQ handler 调用，避免 RX 任务清除运行
+   期间新到达但尚未调度的设备事件；未注册 IRQ 时，由 `recv()` 在纯轮询路径中确认中断
 
 ### VirtIO 输入设备中断流程
 
 1. `VirtIoInputDev::try_new(transport, irq)` 初始化两个输入队列，缓存设备标识信息，
    并记录解析后的 IRQ。
-2. host 集成层获取 `irq_handler()`，通过 `device_res` 契约注册处理程序，
+2. host 集成层获取 `irq_handler()`，通过 `DeviceCtx::request_irq` 注册处理程序，
    随后再发布 class 设备。
 3. 硬中断处理程序检查回调传入的 IRQ，在共享的 `SpinNoIrq` 保护下确认 transport
    ISR，并且仅在 ISR 非空时认领该中断线。只有队列中断才调用已安装的
@@ -485,11 +490,10 @@ host IRQ 核心或工作队列。
   硬中断上下文中的中断确认与任务上下文中的能力查询或事件访问互斥；
   任务不会持有该锁等待。
 - **net**：`InnerDev` 被 `Arc<SpinNoIrq<...>>` 包裹，因为 IRQ 回调在中断上下文中
-  访问设备（`ack_interrupt`），与正常收发路径并发。全局静态变量
-  `NET_IRQ_HANDLES`、`NET_IRQ_GUARDS` 和 `REGISTERED_NET_IRQS` 也使用 `SpinNoIrq` 保护。
-- **IRQ 注册**：`register_virtio_net_irq()` 在 `NET_IRQ_HANDLES` 中注册回调句柄，
-  同一 IRQ 仅注册一次（通过 `REGISTERED_NET_IRQS` 去重）。`Irq::request_with()` 返回的
-  guard 存入 `NET_IRQ_GUARDS`，设备 Drop 时自动注销。
+  访问设备（`ack_interrupt`），与正常收发路径并发。
+- **IRQ 注册**：设备不自行注册中断。驱动层通过 `DeviceCtx::request_irq()` 注册
+  per-device handler，返回的 `DevIrq` guard 存入驱动 `Data`——设备移除时 guard
+  先于设备本体释放，没有全局注册表需要清理。
 
 ## 设计决策
 
@@ -505,17 +509,17 @@ host IRQ 核心或工作队列。
 `Send`/`Sync`。但 VirtIO 设备在 x-kernel 中确实可以跨线程传递和共享引用
 （通过锁保护），因此手动 `unsafe impl Send/Sync`。
 
-### 为什么 net 的 IRQ 处理使用全局静态变量
+### 为什么 net 的中断按设备注册而不是全局表
 
-中断处理函数 `handle_virtio_net_irq` 作为返回 `IrqEvent` 的回调注册，但仍需访问
-所有网络设备实例。使用全局 `NET_IRQ_HANDLES` 存储所有网络设备的 IRQ 回调句柄，
-中断到来时遍历所有句柄执行 `ack_interrupt()`。
-`NET_IRQ_GUARDS` 持有 `Irq` guard，确保设备 Drop 时自动注销中断。
+旧模型曾用全局 `NET_IRQ_HANDLES` 表做 IRQ 号 → 设备句柄的反查，handler 遍历所有
+网络设备——共享中断的职责被错误地压到了驱动层。新模型中 handler 闭包在注册时就
+绑定到**本设备**的 `VirtIoNetIrqWorker`（dev_id 模式），guard 的生命周期由
+`DevIrq` guard（存于驱动 `Data`）表达；注销即 guard 释放，无需任何全局状态。
 
 ## Drop / 资源释放
 
-`VirtIoNetDev` 实现了自定义 `Drop`：在设备销毁时调用 `unregister_virtio_net_irq()`
-注销 IRQ 回调，释放 `NET_IRQ_GUARDS` 中对应的 guard。其他设备适配器未实现自定义
+net 的 IRQ guard 由驱动层持有（`Data` 字段，先于设备本体释放），设备适配器
+本身不注册中断。其他设备适配器未实现自定义
 `Drop`，设备资源（DMA 缓冲区、VirtIO 队列）的释放依赖 `virtio-drivers` 内部类型的
 `Drop` 实现。当设备结构体离开作用域时，`InnerDev` 的 `Drop` 会自动通知设备重置
 并释放 DMA 内存。
@@ -553,7 +557,7 @@ Only VirtIO RNG devices with a usable IRQ are supported. Missing IRQ resources
 or failure to register the completion IRQ cause probe to fail, and the device
 is not published in the Hwrng class. This intentionally narrows compatibility
 relative to the old polling adapter; there is no polling fallback.
-`driver_virtio_rng` enables Hwrng through `kdriver/virtio-rng`; neither its
+`driver_virtio_rng` enables Hwrng through `drv-virtio`'s `rng` module; neither its
 Cargo feature nor `KFEAT_DRIVER_VIRTIO_RNG` requires the Char subsystem.
 The driver defaults to disabled globally. QEMU/crosvm defconfigs enable it
 explicitly; bare-metal configurations such as RK3588 do not inherit it.

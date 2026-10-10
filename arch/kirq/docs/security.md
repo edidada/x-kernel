@@ -64,8 +64,8 @@ kirq
 - NMI handler 满足更严格的 pseudo-NMI 执行约束；
 - lifecycle hook 和 deferred executor 都只由一个明确 owner 安装；当前 deferred
   executor owner 是 softirq。
-- `device_res` / devres 是驱动框架适配层，不能成为 `kirq` 的依赖。驱动资源到
-  kernel IRQ core 的转换由 `driver-runtime` 负责。
+- driver-core 的 provider contract / devres 是驱动框架适配层，不能成为 `kirq`
+  的依赖。驱动资源到 kernel IRQ core 的转换由 `driver-runtime` 负责。
 - `IrqAction`、`IrqDescRuntimeState` 和 `IrqActionSnapshot` 是 `kirq` 内部状态
   边界。驱动、devres 和 irqchip backend 不能直接复用或修改这些结构。
 - Generic IRQ line/source subscriptions are not provided. Device subsystems
@@ -163,7 +163,8 @@ per-CPU atomic pending mask。调用方在访问前 pin 当前 CPU；pending mas
   publish a replacement snapshot after mapping changes; old snapshots are never
   mutated or freed while data-plane readers may still hold them.
 - MSI allocation 必须只向调用者暴露 virq 和 `MsiMessage`；backend-local vector、
-  APIC id 和 affinity 选择不能泄露到 `device_res` 或 generic driver。
+  APIC id 和 affinity 选择不能泄露到 driver-core 的 provider contract 或 generic
+  driver。
 - NMI dispatch 不得依赖 `IRQ_STATE`，否则 pseudo-NMI 可能打断 normal IRQ 持锁路径并
   自锁。
 - lifecycle exit hook 必须与本次 enter 捕获的 hook 配对，不能在处理中途因全局 hook

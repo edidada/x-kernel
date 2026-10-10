@@ -12,7 +12,8 @@ interfaces:
   construction — no device family is named in its API.
 - **Kernel capability contracts**: interfaces that drivers require from a
   host kernel, such as MMIO mapping, IRQ registration, DMA, time, and clocks
-  (`device-res`), exposed to drivers through `DeviceCtx`.
+  (the provider contracts in `driver-core::provider`), exposed to drivers
+  through `DeviceCtx` and bound to the host by `driver-runtime`.
 - **Device class subsystems**: per-class APIs and services (`subsystems/`)
   that drivers publish into via `kclass` detached parents.
 - **Extension services**: family-specific service capabilities (the virtio
@@ -31,7 +32,7 @@ drv/<family> (one module per driver)
         └── extension::<FamilyService>()           (family-specific probing)
 
 core/driver-runtime (the host bridge)
-        ├── implements DeviceServices over device-res providers
+        ├── implements DeviceServices over its resource provider
         └── provides family extension services (typed, compile-checked)
 ```
 
@@ -39,16 +40,17 @@ core/driver-runtime (the host bridge)
 
 - `driver-core` must not name any device family, depend on device stacks,
   or gain family-specific methods. Adding a driver never touches the core.
-- `common/` crates (`driver_base`, `device-res`, `devnode`, `kclass`) stay
+- `common/` crates (`driver_base`, `devnode`, `kclass`, `hwrng`) stay
   host-kernel-free.
 - Concrete driver code must not call host-kernel APIs (`khal`, `kirq`,
   `memspace`, `kdma`, `kruntime`, `ktask`, `kwork`) directly; the two
   documented exceptions are subsystem-owned services (`subsystems/block`
   dispatch) and constructors requiring `&'static` provider traits from the
   vendored virtio layer.
-- Host-specific code lives in `adapters/xkernel/device-res` (capabilities
-  -> framework) and `integration/` (framework -> kernel facilities); the
-  direction rule is fixed.
+- Host-specific code lives in the `driver-runtime` provider (capabilities
+  -> framework: the only place the model touches `memspace`/`kirq`/`kdma`)
+  and `integration/` (framework -> kernel facilities); the direction rule
+  is fixed.
 - Kernel subsystems (`kirq`, `memspace`, `kdma`) must not depend on
   driver-subsystem crates.
 - New driver needs become capability contracts or subsystem services first.
