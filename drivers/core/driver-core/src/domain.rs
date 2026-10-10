@@ -72,6 +72,22 @@ impl DeviceState {
     }
 }
 
+/// Domain-owned lifecycle observer. Replaces the single-slot remove
+/// notifier: multiple subsystems subscribe, and the callbacks are part of
+/// the domain's own lifecycle (installed once, live as long as the domain).
+///
+/// Contract: invoked outside the domain lock, after `DriverOps::remove`
+/// returned and BEFORE `Data` drops. Handlers must not re-enter the domain
+/// (no probe/remove/snapshot from inside an observer).
+pub trait DeviceLifecycleObserver: Send + Sync {
+    /// A device finished teardown: `remove()` ran; `Data` drops next.
+    ///
+    /// Future hooks (add/bind/unbind/deferred) land on this trait next;
+    /// removal exists first because every current consumer only needed
+    /// that phase.
+    fn device_removed(&self, owner: u64);
+}
+
 /// Summary of one `probe_pending` pass.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProbeStats {
@@ -262,7 +278,7 @@ struct DomainInner {
     /// instead of parking — closing the check-then-park lost-wakeup window.
     dep_generations: Vec<(DepSource, u64)>,
     services: Arc<dyn DeviceServices>,
-    remove_notifier: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+    observers: Vec<Arc<dyn DeviceLifecycleObserver>>,
 }
 
 /// An instance of the device model.
@@ -329,7 +345,7 @@ impl DeviceDomain {
                 dep_generations: Vec::new(),
                 services: Arc::new(NoServices),
                 services_installed: false,
-                remove_notifier: None,
+                observers: Vec::new(),
             }),
         }
     }
@@ -342,11 +358,17 @@ impl DeviceDomain {
         inner.services_installed = true;
     }
 
-    /// Install a callback invoked (outside the domain lock) after a device is
-    /// removed. The composition root uses it to drop class publications that
-    /// were created on behalf of the removed device.
-    pub fn set_remove_notifier(&self, callback: Arc<dyn Fn(u64) + Send + Sync>) {
-        self.inner.lock().remove_notifier = Some(callback);
+    /// Add a lifecycle observer. Observers are domain-owned (live until the
+    /// domain does) and see every device removal — unlike the old
+    /// single-slot remove notifier, multiple subsystems can subscribe.
+    ///
+    /// Class publications are NOT dispatched through observers anymore:
+    /// each driver `Data` owns its publications (withdrawal guards, see
+    /// `kclass::ClassWithdraw`) and unpublishes at its own drop. Observers
+    /// are for subsystems that need removal visibility beyond publications
+    /// (diagnostics, accounting, future hotplug policies).
+    pub fn add_lifecycle_observer(&self, observer: Arc<dyn DeviceLifecycleObserver>) {
+        self.inner.lock().observers.push(observer);
     }
 
     /// Register a driver and immediately probe anything waiting for it.
@@ -800,12 +822,13 @@ impl DeviceDomain {
             driver.remove(&desc, id.raw(), data.as_mut(), services.as_ref());
         }
 
-        // Withdraw class publications (and notify consumers) BEFORE dropping
-        // `Data`: consumers may still touch the device, and the transport
-        // inside a publication dereferences the MMIO mapping held by `Data`.
-        let notifier = self.inner.lock().remove_notifier.clone();
-        if let Some(notify) = notifier {
-            notify(id.raw());
+        // Lifecycle observers run BEFORE dropping `Data` (consumers may
+        // still touch the device while its guards hold the hardware). The
+        // publications themselves are Data-owned now: they withdraw inside
+        // `drop(data)` below, sequenced by each Data's field order.
+        let observers = self.inner.lock().observers.clone();
+        for observer in &observers {
+            observer.device_removed(id.raw());
         }
 
         drop(data);

@@ -17,7 +17,11 @@ use pci::{PciBus, PciMatch};
 static IDS: &[PciMatch] = &[PciMatch::device(0x1af4, 0x1050)];
 
 /// Driver-private data: the published device is owned by its class registry.
-pub struct GpuData;
+pub struct GpuData {
+    /// The Data-owned publication: dropping unpublishes (first field —
+    /// runs before any later guard releases).
+    _publication: kclass::ClassWithdraw,
+}
 
 /// The driver ops.
 pub struct GpuDriver;
@@ -31,13 +35,15 @@ impl DriverOps<PciBus> for GpuDriver {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
-        activate(dev, transport, None)?;
-        Ok(GpuData)
+        let publication = activate(dev, transport, None)?;
+        Ok(GpuData {
+            _publication: publication,
+        })
     }
 
     fn remove(&self, _dev: &mut BoundDevice<'_, PciBus, GpuData>) {
-        // Class publication is dropped by the composition root's remove
-        // notifier.
+        // The Data-owned publication guard unpublishes at Data drop
+        // (remove returns first, then the framework drops Data).
     }
 }
 
@@ -47,16 +53,18 @@ pub fn activate<B: driver_core::Bus>(
     dev: &mut DeviceCtx<'_, B>,
     transport: impl virtio::Transport + 'static,
     mmio_regs: Option<driver_core::IoMap>,
-) -> Result<(), ProbeError> {
+) -> Result<kclass::ClassWithdraw, ProbeError> {
     let device = virtio::VirtIoGpuDev::<driver_runtime::hal::Hal, _>::try_new(transport, mmio_regs)
         .map_err(crate::common::map_driver_error)?;
     let location = dev.descriptor().location;
-    publish_display(
+    let handle = publish_display(
         ClassParent::detached(dev.id().raw(), "virtio-gpu", location),
         Box::new(device),
     )
     .map_err(crate::common::map_driver_error)?;
-    Ok(())
+    // The Data-owned publication: dropping the guard unpublishes (the
+    // single-owner contract — no composition-root class drain at remove).
+    Ok(kclass::display_withdraw(&handle))
 }
 
 /// virtio-mmio activation: owns the class publication; close() unpublishes
@@ -71,28 +79,23 @@ pub fn activate_mmio(
     // model): released with the last ClassDevice clone.
     let mmio_regs = builder.take_regs();
 
-    let owner = dev.id().raw();
-    let location = dev.descriptor().location;
-    let device = virtio::VirtIoGpuDev::<driver_runtime::hal::Hal, _>::try_new(transport, mmio_regs)
-        .map_err(crate::common::map_driver_error)?;
-    let handle = publish_display(
-        ClassParent::detached(owner, "virtio-gpu", location),
-        Box::new(device),
-    )
-    .map_err(crate::common::map_driver_error)?;
+    // Publish through the shared constructor and carry the withdrawal
+    // guard: the activation's fields drop in declaration order, so the
+    // unpublish runs first and the mapping guard releases last.
+    let withdraw = activate(dev, transport, mmio_regs)?;
 
     struct GpuMmioActivation {
-        publication: kclass::ClassDevice<kclass::DisplayDeviceImpl>,
+        _withdraw: kclass::ClassWithdraw,
     }
 
     impl crate::mmio::MmioActivation for GpuMmioActivation {
         fn close(self: alloc::boxed::Box<Self>) {
-            kclass::unpublish_display(self.publication.id());
+            // Field order does the sequencing: withdraw (unpublish) first.
         }
     }
 
     Ok(builder.build(GpuMmioActivation {
-        publication: handle,
+        _withdraw: withdraw,
     }))
 }
 

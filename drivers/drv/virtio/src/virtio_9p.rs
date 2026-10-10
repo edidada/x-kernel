@@ -20,7 +20,10 @@ static IDS: &[PciMatch] = &[
 ];
 
 /// Driver-private data: the published device is owned by its class registry.
-pub struct NinepData;
+pub struct NinepData {
+    /// The Data-owned publication: dropping unpublishes (first field).
+    _publication: kclass::ClassWithdraw,
+}
 
 /// The driver ops.
 pub struct NinepDriver;
@@ -34,8 +37,10 @@ impl DriverOps<PciBus> for NinepDriver {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
-        activate(dev, transport, None)?;
-        Ok(NinepData)
+        let publication = activate(dev, transport, None)?;
+        Ok(NinepData {
+            _publication: publication,
+        })
     }
 
     fn remove(&self, _dev: &mut BoundDevice<'_, PciBus, NinepData>) {
@@ -50,16 +55,18 @@ pub fn activate<B: driver_core::Bus>(
     dev: &mut DeviceCtx<'_, B>,
     transport: impl virtio::Transport + 'static,
     mmio_regs: Option<driver_core::IoMap>,
-) -> Result<(), ProbeError> {
+) -> Result<kclass::ClassWithdraw, ProbeError> {
     let device = virtio::VirtIo9pDev::<driver_runtime::hal::Hal, _>::try_new(transport, mmio_regs)
         .map_err(crate::common::map_driver_error)?;
     let location = dev.descriptor().location;
-    publish_virtio_9p(
+    let handle = publish_virtio_9p(
         ClassParent::detached(dev.id().raw(), "virtio-9p", location),
         Box::new(device),
     )
     .map_err(crate::common::map_driver_error)?;
-    Ok(())
+    // The Data-owned publication: dropping the guard unpublishes (the
+    // single-owner contract — no composition-root class drain at remove).
+    Ok(kclass::virtio_9p_withdraw(&handle))
 }
 
 /// virtio-mmio activation: owns the class publication; close() unpublishes
@@ -73,29 +80,20 @@ pub fn activate_mmio(
     // The MMIO register mapping follows the device object (Linux BAR
     // model): released with the last ClassDevice clone.
     let mmio_regs = builder.take_regs();
-
-    let owner = dev.id().raw();
-    let location = dev.descriptor().location;
-    let device = virtio::VirtIo9pDev::<driver_runtime::hal::Hal, _>::try_new(transport, mmio_regs)
-        .map_err(crate::common::map_driver_error)?;
-    let handle = publish_virtio_9p(
-        ClassParent::detached(owner, "virtio-9p", location),
-        Box::new(device),
-    )
-    .map_err(crate::common::map_driver_error)?;
+    let publication = activate(dev, transport, mmio_regs)?;
 
     struct Virtio9pMmioActivation {
-        publication: kclass::ClassDevice<kclass::Virtio9pDeviceImpl>,
+        _withdraw: kclass::ClassWithdraw,
     }
 
     impl crate::mmio::MmioActivation for Virtio9pMmioActivation {
         fn close(self: alloc::boxed::Box<Self>) {
-            kclass::unpublish_virtio_9p(self.publication.id());
+            // Field order sequences the unpublish before later guards.
         }
     }
 
     Ok(builder.build(Virtio9pMmioActivation {
-        publication: handle,
+        _withdraw: publication,
     }))
 }
 

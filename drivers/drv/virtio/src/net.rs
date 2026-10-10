@@ -30,6 +30,10 @@ static IDS: &[PciMatch] = &[
 /// Driver-private data: the interrupt guard. The published network device
 /// itself is owned by the net class registry.
 pub struct NetData {
+    /// The Data-owned publication: dropping unpublishes. FIRST field —
+    /// runs before the IRQ guard below releases (consumers detach while
+    /// the device is still live).
+    _publication: kclass::ClassWithdraw,
     _irq: Option<DevIrq>,
 }
 
@@ -45,8 +49,11 @@ impl DriverOps<PciBus> for VirtioNetDriver {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
-        let irq = activate(dev, transport, msi_irq)?;
-        Ok(NetData { _irq: irq })
+        let (publication, irq) = activate(dev, transport, msi_irq)?;
+        Ok(NetData {
+            _publication: publication,
+            _irq: irq,
+        })
     }
 
     fn remove(&self, _dev: &mut BoundDevice<'_, PciBus, NetData>) {
@@ -62,11 +69,12 @@ pub fn activate<B: driver_core::Bus>(
     dev: &mut DeviceCtx<'_, B>,
     transport: impl virtio::Transport + 'static,
     msi_irq: Option<usize>,
-) -> Result<Option<DevIrq>, ProbeError> {
-    // The PCI path's publication is withdrawn by the composition root's
-    // remove notifier (before Data drops — the domain ordering contract).
-    let (_publication, irq) = activate_with_irq(dev, transport, msi_irq, None)?;
-    Ok(irq)
+) -> Result<(kclass::ClassWithdraw, Option<DevIrq>), ProbeError> {
+    // The publication rides the caller's Data (withdrawal guard): the
+    // Data-owner contract — no composition-root class drain at remove.
+    let (publication, irq) = activate_with_irq(dev, transport, msi_irq, None)?;
+    let withdraw = kclass::net_withdraw(&publication);
+    Ok((withdraw, irq))
 }
 
 /// Construct and publish the NIC, returning the publication handle and the
@@ -154,16 +162,20 @@ pub fn activate_mmio<B: driver_core::Bus, T: virtio::Transport + 'static>(
     // virtio-mmio has no MSI-X vector: legacy route only.
     let (publication, irq) = activate_with_irq(dev, transport, None, mmio_regs)?;
     struct NetMmioActivation {
-        publication: kclass::ClassDevice<kclass::NetDeviceImpl>,
+        // Field order = teardown order: unpublish (consumers detach while
+        // the device is live), then the IRQ guard releases.
+        _withdraw: kclass::ClassWithdraw,
         irq: Option<DevIrq>,
     }
     impl crate::mmio::MmioActivation for NetMmioActivation {
         fn close(self: alloc::boxed::Box<Self>) {
-            kclass::unpublish_net(self.publication.id());
-            drop(self.irq);
+            // Field order does the sequencing.
         }
     }
-    Ok(builder.build(NetMmioActivation { publication, irq }))
+    Ok(builder.build(NetMmioActivation {
+        _withdraw: kclass::net_withdraw(&publication),
+        irq,
+    }))
 }
 
 /// `module_pci_driver()` equivalent.

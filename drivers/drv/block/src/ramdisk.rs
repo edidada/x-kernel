@@ -25,7 +25,11 @@ static IDS: &[PlatformId] = &[PlatformId::Alias(driver_core::platform::AliasMatc
 
 /// Driver-private data: the Gendisk stays owned by the block class
 /// registry; nothing else to hold.
-pub struct RamdiskData;
+pub struct RamdiskData {
+    /// The Data-owned publication: dropping unpublishes (first field —
+    /// registry removal → del_gendisk + devnode withdraw).
+    _publication: kclass::ClassWithdraw,
+}
 
 /// The driver ops.
 pub struct RamdiskDriver;
@@ -67,15 +71,19 @@ impl DriverOps<PlatformBus> for RamdiskDriver {
             .map_err(crate::common::map_driver_error)?
             .with_devnode_context(&parent_path, modalias);
         let location = _dev.descriptor().location;
-        publish_block(
+        let publication = publish_block(
             ClassParent::detached(_dev.id().raw(), "ramdisk", location),
             Arc::new(disk),
         )
         .map_err(crate::common::map_driver_error)?;
-        Ok(RamdiskData)
+        Ok(RamdiskData {
+            _publication: kclass::block_withdraw(&publication),
+        })
     }
 
-    fn remove(&self, _dev: &mut BoundDevice<'_, PlatformBus, RamdiskData>) {}
+    fn remove(&self, _dev: &mut BoundDevice<'_, PlatformBus, RamdiskData>) {
+        // The Data-owned publication guard unpublishes at Data drop.
+    }
 }
 
 /// `module_platform_driver()` equivalent.

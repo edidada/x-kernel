@@ -30,7 +30,6 @@ fixed-clock = ["dep:drv-clk"]
 [dependencies]
 driver-core.workspace = true
 driver-runtime.workspace = true
-kclass = { workspace = true, features = ["char"] }
 khal.workspace = true
 pci.workspace = true
 of.workspace = true

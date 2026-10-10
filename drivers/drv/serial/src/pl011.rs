@@ -46,6 +46,10 @@ static IDS: &[PlatformId] = &[PlatformId::Of(OfMatch::compatible("arm,pl011"))];
 /// port is quiesced, then the (cold-start) mapping is torn down, and the
 /// clock reference goes last.
 pub struct Pl011Data {
+    /// The Data-owned char publication (auxiliary ports): dropping
+    /// unpublishes. FIRST field — before every guard below. The stdout
+    /// port deliberately holds none (console continuity across rebind).
+    _publication: Option<kclass::ClassWithdraw>,
     _irq: Option<DevIrq>,
     _port: Arc<SerialPort>,
     _regs: Option<IoMap>,
@@ -149,6 +153,7 @@ impl DriverOps<PlatformBus> for Pl011Driver {
         // model-agnostic since the class-layer decoupling.
         let location = dev.descriptor().location;
         let char_dev: kclass::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
+        let mut publication: Option<kclass::ClassWithdraw> = None;
         match port.role() {
             SerialRole::Stdout => {
                 register_console_parented(
@@ -158,11 +163,12 @@ impl DriverOps<PlatformBus> for Pl011Driver {
                 .map_err(crate::common::map_driver_error)?;
             }
             SerialRole::Auxiliary => {
-                publish_char(
+                let handle = publish_char(
                     ClassParent::detached(dev.id().raw(), "pl011-serial", location),
                     char_dev,
                 )
                 .map_err(crate::common::map_driver_error)?;
+                publication = Some(kclass::char_withdraw(&handle));
             }
         }
 
@@ -200,6 +206,7 @@ impl DriverOps<PlatformBus> for Pl011Driver {
             None => (None, None),
         };
         Ok(Pl011Data {
+            _publication: publication,
             _irq: irq,
             _port: port,
             _regs: regs,

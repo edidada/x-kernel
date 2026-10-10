@@ -22,7 +22,6 @@
 
 extern crate alloc;
 
-use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use driver_core::{
@@ -39,14 +38,6 @@ use khal::firmware::devices as firmware;
 /// Bring up the new device model.
 pub fn init() {
     driver_runtime::XKernelRuntime::install_global();
-
-    // Drop detached class publications when their owning device goes away.
-    // One entry point: kclass owns the class list, not this composition
-    // root. (New classes become removable by existing in kclass, not by
-    // editing this closure.)
-    global_domain().set_remove_notifier(Arc::new(|owner| {
-        kclass::remove_all_detached(owner);
-    }));
 
     #[cfg(feature = "fixed-clock")]
     drv_clk::fixed_clock::register();

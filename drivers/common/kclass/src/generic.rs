@@ -21,6 +21,40 @@ use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ClassDeviceId(u64);
 
+/// Ownership of one class publication's WITHDRAWAL: dropping this guard
+/// unpublishes the publication it was created from.
+///
+/// This is the single publication-owner contract: the driver's `Data`
+/// carries the guard as its FIRST field, so the withdrawal runs at the
+/// start of `Data` drop — while the hardware is still mapped (consumer
+/// detach callbacks see a live device) and BEFORE the IRQ/MMIO guards in
+/// later fields release. The composition root no longer drains class
+/// registries by owner id at remove time; each publication goes away with
+/// exactly the Data that created it.
+///
+/// Creating the guard from a [`ClassDevice`](crate::ClassDevice) does not
+/// keep the runtime alive: the registry's Arc and any consumer clones do
+/// that; this guard only names the registry entry to withdraw.
+pub struct ClassWithdraw {
+    unpublish: fn(ClassDeviceId),
+    id: ClassDeviceId,
+}
+
+impl ClassWithdraw {
+    /// Build from the class-specific withdraw constructor generated per
+    /// class (e.g. [`crate::net_withdraw`]); `unpublish` is that class's
+    /// id-keyed removal entry.
+    pub(crate) fn new(unpublish: fn(ClassDeviceId), id: ClassDeviceId) -> Self {
+        Self { unpublish, id }
+    }
+}
+
+impl Drop for ClassWithdraw {
+    fn drop(&mut self) {
+        (self.unpublish)(self.id);
+    }
+}
+
 /// High bit tags driver-core (new model) owned publications.
 const DRIVER_CORE_ID_TAG: u64 = 1 << 63;
 

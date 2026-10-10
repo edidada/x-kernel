@@ -42,8 +42,13 @@ static IOPORT_IDS: &[PlatformId] = &[PlatformId::Alias(driver_core::platform::Al
 /// registry; the mapping guard (MMIO variant, cold-start path) stays here so
 /// the mapping lives exactly as long as the binding.
 pub struct SerialData {
+    /// The Data-owned char publication (auxiliary ports only): dropping
+    /// unpublishes. FIRST field — before the mapping guard below, so
+    /// consumer detach sees a live device. The stdout port deliberately
+    /// holds none (console continuity across rebind).
+    _publication: Option<kclass::ClassWithdraw>,
     /// Kept alive for the binding: dropping it unmaps the cold-start UART
-    /// window. Field placement (after the port) encodes release order.
+    /// window. Field placement (after the publication) encodes release order.
     // Ownership-only field: read access is intentionally impossible.
     #[expect(
         dead_code,
@@ -81,7 +86,10 @@ impl CharDevice for SerialCharDev {
 
 /// Publish the resolved port: stdout joins the console subsystem, auxiliary
 /// ports become char devices.
-fn publish(dev: &mut DeviceCtx<'_, PlatformBus>, port: Arc<SerialPort>) -> Result<(), ProbeError> {
+fn publish(
+    dev: &mut DeviceCtx<'_, PlatformBus>,
+    port: Arc<SerialPort>,
+) -> Result<Option<kclass::ClassWithdraw>, ProbeError> {
     let location = dev.descriptor().location;
     let char_dev: kclass::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
     match port.role() {
@@ -89,12 +97,13 @@ fn publish(dev: &mut DeviceCtx<'_, PlatformBus>, port: Arc<SerialPort>) -> Resul
             ClassParent::detached(dev.id().raw(), "serial-ns16550", location),
             char_dev,
         )
+        .map(|_| None) // console continuity: no withdrawal guard
         .map_err(crate::common::map_driver_error),
         SerialRole::Auxiliary => publish_char(
             ClassParent::detached(dev.id().raw(), "serial-ns16550", location),
             char_dev,
         )
-        .map(drop)
+        .map(|handle| Some(kclass::char_withdraw(&handle)))
         .map_err(crate::common::map_driver_error),
     }
 }
@@ -142,8 +151,11 @@ impl DriverOps<PlatformBus> for Ns16550MmioDriver {
                     (Arc::new(port), Some(regs))
                 }
             };
-        publish(dev, port)?;
-        Ok(SerialData { regs })
+        let publication = publish(dev, port)?;
+        Ok(SerialData {
+            _publication: publication,
+            regs,
+        })
     }
 
     fn remove(&self, _dev: &mut BoundDevice<'_, PlatformBus, SerialData>) {}
@@ -185,10 +197,13 @@ impl DriverOps<PlatformBus> for Ns16550IoPortDriver {
                 })
             }
         };
-        publish(dev, port)?;
+        let publication = publish(dev, port)?;
         // The ioport variant owns no MMIO mapping (cold-start guard is the
         // MMIO path's); regs stays empty.
-        Ok(SerialData { regs: None })
+        Ok(SerialData {
+            _publication: publication,
+            regs: None,
+        })
     }
 
     fn remove(&self, _dev: &mut BoundDevice<'_, PlatformBus, SerialData>) {}

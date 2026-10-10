@@ -20,7 +20,10 @@ static IDS: &[PciMatch] = &[
 ];
 
 /// Driver-private data: the published device is owned by its class registry.
-pub struct VsockData;
+pub struct VsockData {
+    /// The Data-owned publication: dropping unpublishes (first field).
+    _publication: kclass::ClassWithdraw,
+}
 
 /// The driver ops.
 pub struct VsockDriver;
@@ -34,13 +37,14 @@ impl DriverOps<PciBus> for VsockDriver {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
-        activate(dev, transport, None)?;
-        Ok(VsockData)
+        let publication = activate(dev, transport, None)?;
+        Ok(VsockData {
+            _publication: publication,
+        })
     }
 
     fn remove(&self, _dev: &mut BoundDevice<'_, PciBus, VsockData>) {
-        // Class publication is dropped by the composition root's remove
-        // notifier.
+        // The Data-owned publication guard unpublishes at Data drop.
     }
 }
 
@@ -50,17 +54,17 @@ pub fn activate<B: driver_core::Bus>(
     dev: &mut DeviceCtx<'_, B>,
     transport: impl virtio::Transport + 'static,
     mmio_regs: Option<driver_core::IoMap>,
-) -> Result<(), ProbeError> {
+) -> Result<kclass::ClassWithdraw, ProbeError> {
     let device =
         virtio::VirtIoVsockDev::<driver_runtime::hal::Hal, _>::try_new(transport, mmio_regs)
             .map_err(crate::common::map_driver_error)?;
     let location = dev.descriptor().location;
-    publish_vsock(
+    let handle = publish_vsock(
         ClassParent::detached(dev.id().raw(), "virtio-vsock", location),
         Box::new(device),
     )
     .map_err(crate::common::map_driver_error)?;
-    Ok(())
+    Ok(kclass::vsock_withdraw(&handle))
 }
 
 /// virtio-mmio activation: owns the class publication; close() unpublishes
@@ -74,30 +78,20 @@ pub fn activate_mmio(
     // The MMIO register mapping follows the device object (Linux BAR
     // model): released with the last ClassDevice clone.
     let mmio_regs = builder.take_regs();
-
-    let owner = dev.id().raw();
-    let location = dev.descriptor().location;
-    let device =
-        virtio::VirtIoVsockDev::<driver_runtime::hal::Hal, _>::try_new(transport, mmio_regs)
-            .map_err(crate::common::map_driver_error)?;
-    let handle = publish_vsock(
-        ClassParent::detached(owner, "virtio-vsock", location),
-        Box::new(device),
-    )
-    .map_err(crate::common::map_driver_error)?;
+    let publication = activate(dev, transport, mmio_regs)?;
 
     struct VsockMmioActivation {
-        publication: kclass::ClassDevice<kclass::VsockDeviceImpl>,
+        _withdraw: kclass::ClassWithdraw,
     }
 
     impl crate::mmio::MmioActivation for VsockMmioActivation {
         fn close(self: alloc::boxed::Box<Self>) {
-            kclass::unpublish_vsock(self.publication.id());
+            // Field order sequences the unpublish before later guards.
         }
     }
 
     Ok(builder.build(VsockMmioActivation {
-        publication: handle,
+        _withdraw: publication,
     }))
 }
 

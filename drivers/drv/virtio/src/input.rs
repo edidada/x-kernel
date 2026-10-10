@@ -17,7 +17,10 @@ use pci::{PciBus, PciMatch};
 static IDS: &[PciMatch] = &[PciMatch::device(0x1af4, 0x1052)];
 
 /// Driver-private data: the published device is owned by its class registry.
-pub struct InputData;
+pub struct InputData {
+    /// The Data-owned publication: dropping unpublishes (first field).
+    _publication: kclass::ClassWithdraw,
+}
 
 /// The driver ops.
 pub struct InputDriver;
@@ -30,13 +33,14 @@ impl DriverOps<PciBus> for InputDriver {
         if !matches!(kind, driver_base::DeviceKind::Input) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
-        activate(dev, transport, irq.unwrap_or(0), None)?;
-        Ok(InputData)
+        let publication = activate(dev, transport, irq.unwrap_or(0), None)?;
+        Ok(InputData {
+            _publication: publication,
+        })
     }
 
     fn remove(&self, _dev: &mut BoundDevice<'_, PciBus, InputData>) {
-        // Class publication is dropped by the composition root's remove
-        // notifier.
+        // The Data-owned publication guard unpublishes at Data drop.
     }
 }
 
@@ -47,17 +51,17 @@ pub fn activate<B: driver_core::Bus>(
     transport: impl virtio::Transport + 'static,
     irq: usize,
     mmio_regs: Option<driver_core::IoMap>,
-) -> Result<(), ProbeError> {
+) -> Result<kclass::ClassWithdraw, ProbeError> {
     let device =
         virtio::VirtIoInputDev::<driver_runtime::hal::Hal, _>::try_new(transport, irq, mmio_regs)
             .map_err(crate::common::map_driver_error)?;
     let location = dev.descriptor().location;
-    publish_input(
+    let handle = publish_input(
         ClassParent::detached(dev.id().raw(), "virtio-input", location),
         Box::new(device),
     )
     .map_err(crate::common::map_driver_error)?;
-    Ok(())
+    Ok(kclass::input_withdraw(&handle))
 }
 
 /// virtio-mmio activation: owns the class publication; close() unpublishes
@@ -72,33 +76,24 @@ pub fn activate_mmio(
     // model): released with the last ClassDevice clone.
     let mmio_regs = builder.take_regs();
 
-    let irq = dev
-        .irq(0)
-        .map_err(|_| ProbeError::Fatal(RuntimeError::Invalid))?
-        .number;
-    let owner = dev.id().raw();
-    let location = dev.descriptor().location;
-    let device =
-        virtio::VirtIoInputDev::<driver_runtime::hal::Hal, _>::try_new(transport, irq, mmio_regs)
-            .map_err(crate::common::map_driver_error)?;
-    let handle = publish_input(
-        ClassParent::detached(owner, "virtio-input", location),
-        Box::new(device),
-    )
-    .map_err(crate::common::map_driver_error)?;
+    let irq = match dev.irq(0) {
+        Ok(driver_core::IrqSpec::ResolvedVirq { number, .. }) => number,
+        _ => return Err(ProbeError::Fatal(RuntimeError::Invalid)),
+    };
+    let publication = activate(dev, transport, irq, mmio_regs)?;
 
     struct InputMmioActivation {
-        publication: kclass::ClassDevice<kclass::InputDeviceImpl>,
+        _withdraw: kclass::ClassWithdraw,
     }
 
     impl crate::mmio::MmioActivation for InputMmioActivation {
         fn close(self: alloc::boxed::Box<Self>) {
-            kclass::unpublish_input(self.publication.id());
+            // Field order sequences the unpublish before later guards.
         }
     }
 
     Ok(builder.build(InputMmioActivation {
-        publication: handle,
+        _withdraw: publication,
     }))
 }
 

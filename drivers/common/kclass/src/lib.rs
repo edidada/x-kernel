@@ -30,7 +30,8 @@ use lazyinit::LazyInit;
 mod generic;
 
 pub use generic::{
-    ClassAvailabilityCallback, ClassDevice, ClassDeviceId, ClassParent, DetachedParent,
+    ClassAvailabilityCallback, ClassDevice, ClassDeviceId, ClassParent, ClassWithdraw,
+    DetachedParent,
 };
 use generic::{ClassDeviceMetadata, ClassRegistry, ClassRemovalCallback};
 
@@ -470,10 +471,24 @@ pub fn unpublish_hwrng(id: ClassDeviceId) {
     class_remove(hwrng_class_registry, id);
 }
 
+/// Withdrawal guard for one `hwrng` publication: the Data-owned owner of
+/// the unpublish (see [`ClassWithdraw`]).
+#[cfg(feature = "hwrng")]
+pub fn hwrng_withdraw(device: &ClassDevice<HwrngDeviceImpl>) -> ClassWithdraw {
+    ClassWithdraw::new(unpublish_hwrng, device.id())
+}
+
 /// Unpublish by publication id — the family activation's close() path.
 #[cfg(feature = "char")]
 pub fn unpublish_char(id: ClassDeviceId) {
     class_remove(char_class_registry, id);
+}
+
+/// Withdrawal guard for one `char` publication: the Data-owned owner of
+/// the unpublish (see [`ClassWithdraw`]).
+#[cfg(feature = "char")]
+pub fn char_withdraw(device: &ClassDevice<CharDeviceImpl>) -> ClassWithdraw {
+    ClassWithdraw::new(unpublish_char, device.id())
 }
 
 /// Unpublish by publication id — the family activation's close() path.
@@ -482,10 +497,24 @@ pub fn unpublish_net(id: ClassDeviceId) {
     class_remove(net_class_registry, id);
 }
 
+/// Withdrawal guard for one `net` publication: the Data-owned owner of
+/// the unpublish (see [`ClassWithdraw`]).
+#[cfg(feature = "net")]
+pub fn net_withdraw(device: &ClassDevice<NetDeviceImpl>) -> ClassWithdraw {
+    ClassWithdraw::new(unpublish_net, device.id())
+}
+
 /// Unpublish by publication id — the family activation's close() path.
 #[cfg(feature = "display")]
 pub fn unpublish_display(id: ClassDeviceId) {
     class_remove(display_class_registry, id);
+}
+
+/// Withdrawal guard for one `display` publication: the Data-owned owner of
+/// the unpublish (see [`ClassWithdraw`]).
+#[cfg(feature = "display")]
+pub fn display_withdraw(device: &ClassDevice<DisplayDeviceImpl>) -> ClassWithdraw {
+    ClassWithdraw::new(unpublish_display, device.id())
 }
 
 /// Unpublish by publication id — the family activation's close() path.
@@ -494,10 +523,24 @@ pub fn unpublish_input(id: ClassDeviceId) {
     class_remove(input_class_registry, id);
 }
 
+/// Withdrawal guard for one `input` publication: the Data-owned owner of
+/// the unpublish (see [`ClassWithdraw`]).
+#[cfg(feature = "input")]
+pub fn input_withdraw(device: &ClassDevice<InputDeviceImpl>) -> ClassWithdraw {
+    ClassWithdraw::new(unpublish_input, device.id())
+}
+
 /// Unpublish by publication id — the family activation's close() path.
 #[cfg(feature = "vsock")]
 pub fn unpublish_vsock(id: ClassDeviceId) {
     class_remove(vsock_class_registry, id);
+}
+
+/// Withdrawal guard for one `vsock` publication: the Data-owned owner of
+/// the unpublish (see [`ClassWithdraw`]).
+#[cfg(feature = "vsock")]
+pub fn vsock_withdraw(device: &ClassDevice<VsockDeviceImpl>) -> ClassWithdraw {
+    ClassWithdraw::new(unpublish_vsock, device.id())
 }
 
 /// Unpublish by publication id — the family activation's close() path.
@@ -506,11 +549,27 @@ pub fn unpublish_virtio_9p(id: ClassDeviceId) {
     class_remove(virtio_9p_class_registry, id);
 }
 
+/// Withdrawal guard for one `virtio_9p` publication: the Data-owned owner of
+/// the unpublish (see [`ClassWithdraw`]).
+#[cfg(feature = "virtio-9p")]
+pub fn virtio_9p_withdraw(device: &ClassDevice<Virtio9pDeviceImpl>) -> ClassWithdraw {
+    ClassWithdraw::new(unpublish_virtio_9p, device.id())
+}
+
 /// Unpublish a block disk by dev_t (add_disk's inverse, invoked from the
 /// block activation close).
 #[cfg(feature = "block")]
 pub fn unpublish_block(device_number: devnode::DeviceNumber) {
     block::del_gendisk(device_number);
+}
+
+/// Withdrawal guard for one block publication: the full class_remove path
+/// (registry removal → `del_gendisk` + devnode withdraw via
+/// `ClassRuntimeMetadata::unpublish_class`). The Data-owned owner of the
+/// unpublish (see [`ClassWithdraw`]).
+#[cfg(feature = "block")]
+pub fn block_withdraw(device: &ClassDevice<BlockDeviceImpl>) -> ClassWithdraw {
+    ClassWithdraw::new(|id| class_remove(block_class_registry, id), device.id())
 }
 
 /// Unpublish by publication id (event-driven removal, all classes).
@@ -879,10 +938,13 @@ pub mod prelude {
     };
 }
 
-/// The domain remove-notifier entry point: withdraws the detached
-/// publication of EVERY registered class for the owning device id. The
-/// per-class entries self-register below — the composition root calls this
-/// one function and never enumerates classes.
+/// Safety-net drain: withdraws the detached publication of EVERY
+/// registered class for the owning device id. NOT the production removal
+/// path anymore — each driver `Data` owns its publications via
+/// withdrawal guards (`ClassWithdraw`) and unpublishes at its own drop.
+/// This remains for diagnostics (leaked-publicion audits) and as the
+/// fallback for a driver that forgets its guard; the per-class entries
+/// self-register below so new classes drain without editing callers.
 pub fn remove_all_detached(owner: u64) {
     // Find each class publication for this owner, then run the FULL removal
     // path (removal callbacks, devnode withdraw, class unpublish) via the

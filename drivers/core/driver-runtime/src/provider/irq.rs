@@ -12,7 +12,8 @@ pub(crate) use driver_core::provider::{
 use driver_core::provider::{ResError, ResResult};
 // The provider contract (formerly device-res): this module IS the
 // definition site now. IRQ vocabulary re-exports from kirq.
-pub(crate) use kirq::{IrqController, IrqEvent, IrqHandler, IrqTrigger};
+pub(crate) use kirq::{IrqController, IrqHandler};
+use kirq::{IrqEvent, IrqTrigger};
 
 use super::XKernelResourceProvider;
 

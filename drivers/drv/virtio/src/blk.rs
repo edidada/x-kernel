@@ -108,6 +108,10 @@ struct BlkActivation<H: VirtIoHal, T: Transport> {
     irq: Option<driver_core::DevIrq>,
     reclaimer: Arc<BlockIoReclaimer>,
     disk: Option<Arc<Gendisk>>,
+    /// The Data-owned publication: taken and dropped at the exact
+    /// begin_close → unpublish → drain point in `Drop` (field order alone
+    /// cannot express the interleaving).
+    publication: Option<kclass::ClassWithdraw>,
 }
 
 impl<H: VirtIoHal, T: Transport> Drop for BlkActivation<H, T> {
@@ -165,6 +169,7 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
     let completion: Arc<dyn block::completion::BlockCompletionOperations> = device.clone();
     let reclaimer = BlockIoReclaimer::new(Arc::downgrade(&completion));
     let mut activation = BlkActivation {
+        publication: None,
         device: device.clone(),
         irq: None,
         reclaimer,
@@ -211,12 +216,12 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
     device.enable_interrupts();
 
     let location = dev.descriptor().location;
-    if let Err(error) = publish_block(
+    let publication = publish_block(
         ClassParent::detached(dev.id().raw(), "virtio-blk", location),
         disk,
-    ) {
-        return Err(crate::common::map_driver_error(error));
-    }
+    )
+    .map_err(crate::common::map_driver_error)?;
+    activation.publication = Some(kclass::block_withdraw(&publication));
 
     Ok(Box::new(activation))
 }

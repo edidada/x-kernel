@@ -35,6 +35,9 @@ static IDS: &[PciMatch] = &[
 /// driver.remove() (quiesce) → the composition root's remove notifier
 /// withdraws the hwrng publication → drop(Data) releases the IRQ guard.
 pub struct RngData {
+    /// The Data-owned publication: dropping unpublishes (first field —
+    /// before the IRQ guard below releases).
+    _publication: kclass::ClassWithdraw,
     _irq: driver_core::DevIrq,
 }
 
@@ -50,15 +53,17 @@ impl DriverOps<PciBus> for VirtioRngDriver {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
-        // The hwrng registry owns the publication; the composition root's
-        // remove notifier withdraws it when this device goes away.
-        let (_publication, irq) = activate(dev, transport, None)?;
-        Ok(RngData { _irq: irq })
+        // The publication rides RngData (withdrawal guard): the Data-owner
+        // contract — no composition-root class drain at remove.
+        let (publication, irq) = activate(dev, transport, None)?;
+        Ok(RngData {
+            _publication: kclass::hwrng_withdraw(&publication),
+            _irq: irq,
+        })
     }
 
     fn remove(&self, _dev: &mut BoundDevice<'_, PciBus, RngData>) {
-        // Class publication is dropped by the composition root's remove
-        // notifier.
+        // The Data-owned publication guard unpublishes at Data drop.
     }
 }
 
@@ -168,22 +173,23 @@ pub fn activate_mmio(
     let (publication, irq) = activate(dev, transport, mmio_regs)?;
 
     struct RngActivation {
-        publication: kclass::ClassDevice<kclass::HwrngDeviceImpl>,
+        // Field order = teardown order (same as the PCI Data): withdraw the
+        // class publication first (full removal: callbacks, devnode,
+        // unpublish) — consumers detach while the device is still live —
+        // then the IRQ guard releases, and the mmio mapping goes with the
+        // device object (the last ClassDevice clone).
+        _withdraw: kclass::ClassWithdraw,
         _irq: driver_core::DevIrq,
     }
 
     impl crate::mmio::MmioActivation for RngActivation {
         fn close(self: alloc::boxed::Box<Self>) {
-            // Same order as the PCI removal path: withdraw the class
-            // publication (full removal: callbacks, devnode, unpublish),
-            // then dropping self releases the IRQ guard before the mmio
-            // mapping goes away.
-            kclass::unpublish_hwrng(self.publication.id());
+            // Field order does the sequencing.
         }
     }
 
     Ok(builder.build(RngActivation {
-        publication,
+        _withdraw: kclass::hwrng_withdraw(&publication),
         _irq: irq,
     }))
 }
