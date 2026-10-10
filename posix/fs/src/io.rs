@@ -508,6 +508,41 @@ mod transfer_count_tests {
             }
         }
     }
+
+    /// A managed output side takes its copy origin from `f_pos`, not from
+    /// zero. Pinning the same-description mixed-direction fix: with `f_pos`
+    /// at 4096 the ranges no longer overlap, whereas the earlier anchor-at-
+    /// zero behavior rejected the request with `EINVAL`.
+    #[unittest::def_test]
+    fn same_file_managed_output_uses_f_pos_as_copy_origin() {
+        let base = memfs::shmem::create_memfd_file("same-file-copy", false, kcred::initial_cred())
+            .unwrap()
+            .into_file(kcred::initial_cred())
+            .unwrap();
+        let pattern: [u8; 8192] = core::array::from_fn(|index| (index % 251) as u8);
+        let mut position = 0;
+        assert_eq!(base.write_from(&pattern, &mut position), Ok(8192));
+
+        base.set_position(4096);
+        let mut input_offset = 0;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &base,
+                TransferPosition::At(&mut input_offset),
+                &base,
+                TransferPosition::Managed,
+                4096,
+                false,
+            ),
+            Ok(4096)
+        );
+        assert_eq!(input_offset, 4096);
+        assert_eq!(base.position(), 8192);
+        let mut copied = [0; 4096];
+        let mut read_position = 4096;
+        assert_eq!(base.read_from(&mut copied, &mut read_position), Ok(4096));
+        assert_eq!(copied, pattern[..4096]);
+    }
 }
 
 /// Repositions the read/write file offset.
