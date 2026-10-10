@@ -20,6 +20,7 @@ dylint_linting::dylint_library!();
 mod static_lock_helpers;
 mod unregistered_static_lock;
 mod unregistered_static_spinlock;
+mod untracked_runtime_lock;
 
 #[cfg(test)]
 mod testing;
@@ -32,8 +33,10 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
     lint_store.register_lints(&[
         unregistered_static_spinlock::UNREGISTERED_STATIC_SPINLOCK,
         unregistered_static_lock::UNREGISTERED_STATIC_LOCK,
+        untracked_runtime_lock::UNTRACKED_RUNTIME_LOCK,
     ]);
     lint_store
         .register_late_pass(|_| Box::new(unregistered_static_spinlock::UnregisteredStaticSpinlock));
     lint_store.register_late_pass(|_| Box::new(unregistered_static_lock::UnregisteredStaticLock));
+    lint_store.register_late_pass(|_| Box::new(untracked_runtime_lock::UntrackedRuntimeLock));
 }
