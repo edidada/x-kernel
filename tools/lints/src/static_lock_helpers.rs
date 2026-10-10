@@ -4,7 +4,7 @@
 
 //! Shared type, macro-origin and initializer helpers for static lock lints.
 
-use rustc_hir::{Expr, ExprKind};
+use rustc_hir::{Expr, ExprKind, Mutability, QPath, TyKind};
 use rustc_middle::ty::{self, Ty, TyCtxt, TypeckResults};
 use rustc_span::{ExpnId, Span};
 
@@ -78,4 +78,59 @@ pub(crate) fn direct_call_to_type<'tcx>(
         type_name,
     )
     .then_some(callee.span)
+}
+
+/// Lists the rewrites `static_lock!` needs before it accepts the item as
+/// written: it names the lock kind after the written type and rewrites only a
+/// bare `X::new(arg)` initializer. `lock_name` is the type name the macro
+/// accepts for this lock, if any; `rule_file` covers the remaining cases.
+pub(crate) fn macro_rewrites(
+    mutability: Mutability,
+    written_ty: &rustc_hir::Ty<'_>,
+    lock_name: Option<&str>,
+    is_initializer_wrapped: bool,
+    rule_file: &str,
+) -> Vec<String> {
+    let mut rewrites = Vec::new();
+    if mutability == Mutability::Mut {
+        rewrites.push(
+            "drop `mut`: `static_lock!` does not accept `static mut`, and the lock already \
+             provides interior mutability"
+                .to_owned(),
+        );
+    }
+    match lock_name {
+        Some(name) if written_type_name(written_ty).as_deref() != Some(name) => {
+            rewrites.push(format!(
+                "spell the type as `{name}<..>`: `static_lock!` identifies the lock by its \
+                 written type name, so renamed imports, type aliases and projections do not \
+                 compile under `stats`"
+            ));
+        }
+        Some(_) => {}
+        None => rewrites.push(format!(
+            "`static_lock!` has no type name for this guard; see the exceptions in {rule_file}"
+        )),
+    }
+    if is_initializer_wrapped {
+        rewrites.push(
+            "write the initializer as a bare `::new(..)` call: `static_lock!` does not look \
+             inside `{ }` or `unsafe { }` blocks"
+                .to_owned(),
+        );
+    }
+    rewrites
+}
+
+/// Returns the last path segment of the type as written, which is all a
+/// procedural macro can see.
+fn written_type_name(ty: &rustc_hir::Ty<'_>) -> Option<String> {
+    let TyKind::Path(path) = ty.kind else {
+        return None;
+    };
+    let segment = match path {
+        QPath::Resolved(_, path) => path.segments.last()?,
+        QPath::TypeRelative(_, segment) => segment,
+    };
+    Some(segment.ident.name.to_string())
 }

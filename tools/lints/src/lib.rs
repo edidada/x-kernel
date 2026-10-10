@@ -18,6 +18,7 @@ extern crate rustc_span;
 dylint_linting::dylint_library!();
 
 mod static_lock_helpers;
+mod unregistered_static_lock;
 mod unregistered_static_spinlock;
 
 #[cfg(test)]
@@ -28,7 +29,11 @@ mod testing;
 #[unsafe(no_mangle)]
 pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint::LintStore) {
     dylint_linting::init_config(sess);
-    lint_store.register_lints(&[unregistered_static_spinlock::UNREGISTERED_STATIC_SPINLOCK]);
+    lint_store.register_lints(&[
+        unregistered_static_spinlock::UNREGISTERED_STATIC_SPINLOCK,
+        unregistered_static_lock::UNREGISTERED_STATIC_LOCK,
+    ]);
     lint_store
         .register_late_pass(|_| Box::new(unregistered_static_spinlock::UnregisteredStaticSpinlock));
+    lint_store.register_late_pass(|_| Box::new(unregistered_static_lock::UnregisteredStaticLock));
 }
