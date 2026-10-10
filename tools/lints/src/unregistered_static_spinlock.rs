@@ -7,13 +7,15 @@
 //!
 //! Rule: `docs/code-guidelines/CG-001-static-spinlock-registration.md`.
 
-use rustc_hir::{Item, ItemKind, Mutability, QPath, TyKind};
+use rustc_hir::{Item, ItemKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::{self, Ty, TyCtxt};
 
 use crate::static_lock_helpers::{
-    defined_by_static_lock, direct_call_to_type, is_type, peel_blocks,
+    defined_by_static_lock, direct_call_to_type, is_type, macro_rewrites, peel_blocks,
 };
+
+const RULE_FILE: &str = "docs/code-guidelines/CG-001-static-spinlock-registration.md";
 
 rustc_session::declare_lint! {
     /// ### What it does
@@ -94,11 +96,11 @@ impl<'tcx> LateLintPass<'tcx> for UnregisteredStaticSpinlock {
             return;
         };
         let rewrites = macro_rewrites(
-            tcx,
-            item_ty,
             mutability,
             written_ty,
+            spin_alias(tcx, item_ty),
             !std::ptr::eq(initializer, body.value),
+            RULE_FILE,
         );
         tcx.node_span_lint(
             UNREGISTERED_STATIC_SPINLOCK,
@@ -124,49 +126,6 @@ impl<'tcx> LateLintPass<'tcx> for UnregisteredStaticSpinlock {
     }
 }
 
-/// `static_lock!` names the lock kind after the written type and rewrites a
-/// bare `X::new(arg)` initializer, so wrapping does not compile for every
-/// reported spelling. Returns the rewrites this item needs first.
-fn macro_rewrites(
-    tcx: TyCtxt<'_>,
-    item_ty: Ty<'_>,
-    mutability: Mutability,
-    written_ty: &rustc_hir::Ty<'_>,
-    is_initializer_wrapped: bool,
-) -> Vec<String> {
-    let mut rewrites = Vec::new();
-    if mutability == Mutability::Mut {
-        rewrites.push(
-            "drop `mut`: `static_lock!` does not accept `static mut`, and the lock already \
-             provides interior mutability"
-                .to_owned(),
-        );
-    }
-    match spin_alias(tcx, item_ty) {
-        Some(alias) if written_type_name(written_ty).as_deref() != Some(alias) => {
-            rewrites.push(format!(
-                "spell the type as `{alias}<..>`: `static_lock!` identifies the lock by its \
-                 written type name, so renamed imports, type aliases and projections do not \
-                 compile under `stats`"
-            ));
-        }
-        Some(_) => {}
-        None => rewrites.push(
-            "`static_lock!` has no type name for this guard; see the exceptions in \
-             docs/code-guidelines/CG-001-static-spinlock-registration.md"
-                .to_owned(),
-        ),
-    }
-    if is_initializer_wrapped {
-        rewrites.push(
-            "write the initializer as a bare `::new(..)` call: `static_lock!` does not look \
-             inside `{ }` or `unsafe { }` blocks"
-                .to_owned(),
-        );
-    }
-    rewrites
-}
-
 /// Returns the `kspin` alias that `static_lock!` accepts for this lock's guard.
 fn spin_alias(tcx: TyCtxt<'_>, ty: Ty<'_>) -> Option<&'static str> {
     let ty::Adt(_, arguments) = ty.kind() else {
@@ -184,19 +143,6 @@ fn spin_alias(tcx: TyCtxt<'_>, ty: Ty<'_>) -> Option<&'static str> {
         "NoPreemptIrqSave" => Some("SpinNoIrq"),
         _ => None,
     }
-}
-
-/// Returns the last path segment of the type as written, which is all a
-/// procedural macro can see.
-fn written_type_name(ty: &rustc_hir::Ty<'_>) -> Option<String> {
-    let TyKind::Path(path) = ty.kind else {
-        return None;
-    };
-    let segment = match path {
-        QPath::Resolved(_, path) => path.segments.last()?,
-        QPath::TypeRelative(_, segment) => segment,
-    };
-    Some(segment.ident.name.to_string())
 }
 
 #[cfg(test)]
