@@ -154,6 +154,19 @@ pub fn register_stdout_console(
     runtime: CharDeviceImpl,
 ) -> DriverResult<()> {
     ensure_console_bridge();
+    // Rebind: withdraw the PREVIOUS stdout publication before publishing
+    // the replacement — one stdout identity carries exactly one class
+    // publication. Without this, a same-port rebind left the old
+    // publication live in the char registry while the console pointed at
+    // the new one (and STDOUT_GUARDS had already released the old
+    // binding's irq/mapping): a stale handle any consumer could still
+    // find, referencing dead hardware.
+    {
+        let mut subsystem = console_subsystem().lock();
+        if let Some(previous) = subsystem.stdout.take() {
+            kclass::unpublish_char(previous);
+        }
+    }
     let handle = publish_char(parent, runtime)?;
     let id = handle.id();
     console_subsystem().lock().stdout = Some(id);

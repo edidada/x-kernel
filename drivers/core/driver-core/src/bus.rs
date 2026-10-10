@@ -18,6 +18,34 @@ use crate::resource::ResourceMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BusId(&'static str);
 
+/// Identity of one CONCRETE bus instance (`struct pci_bus`'s number /
+/// segment identity, `struct i2c_adapter`'s adapter number): the bridge
+/// device that created it plus an addressing label.
+///
+/// Distinct from the bus TYPE ([`BusId`]) — the type selects the driver
+/// family's id table; the instance answers "WHICH bus of that type does
+/// this device sit on" (address names, eject groups, instance-scoped
+/// rescan). Ids come from the same global space as device ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BusInstanceId(u64);
+
+impl BusInstanceId {
+    pub(crate) const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Raw value (diagnostics, record keys that tag the space explicitly).
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+impl core::fmt::Display for BusInstanceId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "bus-instance:{}", self.0)
+    }
+}
+
 impl BusId {
     pub const fn new(name: &'static str) -> Self {
         Self(name)
@@ -177,6 +205,10 @@ impl core::fmt::Display for DeviceId {
 #[derive(Debug, Clone)]
 pub struct DeviceDescriptor {
     pub bus: BusId,
+    /// The CONCRETE bus instance this device sits on (`pci_dev->bus`),
+    /// when the bus has instances. Validated at `add_device`: the
+    /// instance must exist and its type must equal `bus`.
+    pub bus_instance: Option<BusInstanceId>,
     pub parent: Option<u64>,
     pub location: DeviceLocation,
     pub origin: DiscoveryOrigin,
@@ -189,6 +221,7 @@ impl DeviceDescriptor {
     pub fn new(bus: BusId, location: DeviceLocation, identity: DeviceIdentity) -> Self {
         Self {
             bus,
+            bus_instance: None,
             parent: None,
             location,
             origin: DiscoveryOrigin::PlatformStatic,
@@ -210,6 +243,15 @@ impl DeviceDescriptor {
 
     pub fn with_firmware(mut self, firmware: FirmwareNodeInfo) -> Self {
         self.firmware = Some(firmware);
+        self
+    }
+
+    /// Attach to a concrete bus instance (`pci_set_dev` on the bus
+    /// object): the instance must have been created with
+    /// [`DeviceDomain::add_bus_instance`](crate::DeviceDomain::add_bus_instance)
+    /// and its bus type must equal this descriptor's.
+    pub fn with_bus_instance(mut self, instance: BusInstanceId) -> Self {
+        self.bus_instance = Some(instance);
         self
     }
 

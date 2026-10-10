@@ -344,9 +344,13 @@ fn class_remove<T: ClassRuntimeMetadata>(
         (removed, callbacks)
     };
     if let Some(device) = removed {
-        // Quiesce first: the driver's remove callbacks still see an
-        // available device. Only then flip the shared offline flag every
-        // consumer clone can observe, and withdraw the publication.
+        // Usage gate FIRST: new acquire_use calls fail from here; the
+        // in-flight count at close time is what a draining subsystem
+        // waits on. Then the driver's remove callbacks still see an
+        // available device (their own final operations run under the
+        // gate they already hold). Only then flip the shared offline
+        // flag every consumer clone can observe, and withdraw.
+        device.begin_drain();
         for callback in callbacks {
             callback(device.clone());
         }

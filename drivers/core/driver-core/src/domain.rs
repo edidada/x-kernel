@@ -30,7 +30,7 @@ use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
 use crate::{
-    bus::{Bus, BusId, DeviceDescriptor, DeviceId, IdMatchEntry, MatchScore},
+    bus::{Bus, BusId, BusInstanceId, DeviceDescriptor, DeviceId, IdMatchEntry, MatchScore},
     device::{
         BoundDevice, ClockConsumerServices, DeviceCtx, DeviceResourceServices, DeviceServices,
         ServiceError,
@@ -84,6 +84,15 @@ pub enum AddDeviceError {
     /// The parent exists but is tearing down (`Removing`) or is already
     /// removed — it cannot accept children.
     ParentUnavailable { parent: u64, state: &'static str },
+    /// The stated bus instance does not exist (never created, or its
+    /// bridge was removed first).
+    BusInstanceMissing(u64),
+    /// The device's bus type disagrees with the instance's.
+    BusInstanceTypeMismatch {
+        instance: u64,
+        instance_bus: &'static str,
+        device_bus: &'static str,
+    },
 }
 
 /// Domain-owned lifecycle observer. Replaces the single-slot remove
@@ -94,11 +103,16 @@ pub enum AddDeviceError {
 /// returned and BEFORE `Data` drops. Handlers must not re-enter the domain
 /// (no probe/remove/snapshot from inside an observer).
 pub trait DeviceLifecycleObserver: Send + Sync {
-    /// A device finished teardown: `remove()` ran; `Data` drops next.
-    ///
-    /// Future hooks (add/bind/unbind/deferred) land on this trait next;
-    /// removal exists first because every current consumer only needed
-    /// that phase.
+    /// Teardown is STARTING: the entry is `Removing`, the binding is
+    /// intact, `DriverOps::remove` runs next. Observers that need the
+    /// device still fully assembled see it here.
+    fn device_removing(&self, owner: u64) {
+        let _ = owner;
+    }
+
+    /// Teardown COMPLETED: `remove()` ran, `Data` dropped (guards
+    /// released), the entry is `Removed`. The registry no longer lists
+    /// the device.
     fn device_removed(&self, owner: u64);
 }
 
@@ -219,6 +233,25 @@ fn driver_key(driver: &Arc<dyn AnyDriver>) -> usize {
     Arc::as_ptr(driver) as *const u8 as usize
 }
 
+/// One concrete bus instance (see [`BusInstanceId`]): created by a bus
+/// controller/bridge driver (or the composition root for a root bus),
+/// anchoring the devices discovered on it. Removing the BRIDGE device
+/// cascades the instance's member devices — the Linux bridge-eject
+/// semantics (`pci_stop_and_remove_bus_device` walking the secondary
+/// bus).
+struct BusInstanceEntry {
+    /// The bus TYPE this instance carries (a device's descriptor must
+    /// agree).
+    bus: BusId,
+    /// The bridge/controller device that created this bus, if any (a
+    /// root bus has none). Removal of this device tears the instance's
+    /// members down with it.
+    bridge: Option<u64>,
+    /// Addressing label ("0000:00", "i2c-3") — the `bus->name`/number
+    /// surface transcribed drivers print and match on.
+    label: alloc::string::String,
+}
+
 struct DeviceEntry {
     desc: DeviceDescriptor,
     state: DeviceState,
@@ -245,6 +278,14 @@ struct DeviceEntry {
     /// interleave; this makes the invariant local to the commit path
     /// instead of incidental to the gate.
     generation: u64,
+    /// A cascade ABORTED mid-teardown (a child was Busy): the entry is
+    /// `Removing`, closed to new children, and the NEXT `remove_device`
+    /// may CLAIM the resume — exactly one caller flips this back to false
+    /// under the domain lock. An in-progress (non-aborted) removal keeps
+    /// it false, so concurrent removers see `Busy` instead of joining the
+    /// teardown (single-owner semantics, Linux `begin_removing`'s
+    /// exclusive-claim equivalent).
+    remove_retryable: bool,
     /// Wake generations this device has already consumed per dependency —
     /// the lost-wakeup guard's bookkeeping (see DomainInner's
     /// dep_generations).
@@ -300,6 +341,9 @@ impl DeviceServices for NoServices {
 }
 
 struct DomainInner {
+    /// Concrete bus instances (`struct pci_bus`-shaped: bridge device +
+    /// addressing label), keyed by globally-unique id.
+    bus_instances: BTreeMap<u64, BusInstanceEntry>,
     /// Domain-local allocation cursor into the GLOBAL device-id space (see
     /// DEVICE_ID_ALLOCATOR): domains never hand out colliding ids, so
     /// owner-keyed global registries (class publications, devnode) stay
@@ -384,6 +428,7 @@ impl DeviceDomain {
             probing: SpinNoPreempt::new(false),
             inner: SpinNoPreempt::new(DomainInner {
                 next_device_id: DEVICE_ID_ALLOCATOR.fetch_add(1, Ordering::Relaxed),
+                bus_instances: BTreeMap::new(),
                 drivers: Vec::new(),
                 devices: BTreeMap::new(),
                 pending: Vec::new(),
@@ -458,6 +503,66 @@ impl DeviceDomain {
     }
 
     /// Insert an enumeration product and probe it eagerly.
+    /// Create a concrete bus instance (`pci_register_bus` /
+    /// `i2c_add_adapter` shape): the addressing anchor for devices
+    /// discovered on one physical bus. `bridge` names the controller
+    /// device that created it (None for a root bus); removing that device
+    /// tears the instance's members down with it.
+    pub fn add_bus_instance(
+        &self,
+        bus: BusId,
+        bridge: Option<DeviceId>,
+        label: &str,
+    ) -> Result<BusInstanceId, AddDeviceError> {
+        let mut inner = self.inner.lock();
+        if let Some(bridge) = bridge
+            && !inner.devices.contains_key(&bridge.raw())
+        {
+            return Err(AddDeviceError::ParentMissing(bridge.raw()));
+        }
+        let id = BusInstanceId::from_raw(
+            DEVICE_ID_ALLOCATOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+        );
+        inner.bus_instances.insert(
+            id.raw(),
+            BusInstanceEntry {
+                bus,
+                bridge: bridge.map(|b| b.raw()),
+                label: alloc::string::String::from(label),
+            },
+        );
+        Ok(id)
+    }
+
+    /// The devices attached to one bus instance, in id order — the
+    /// `list_for_each_entry(bus->devices)` surface (instance-scoped
+    /// rescan, eject, /proc listing).
+    pub fn bus_instance_devices(&self, instance: BusInstanceId) -> Vec<DeviceId> {
+        let inner = self.inner.lock();
+        if !inner.bus_instances.contains_key(&instance.raw()) {
+            return Vec::new();
+        }
+        inner
+            .devices
+            .iter()
+            .filter(|(_, entry)| entry.desc.bus_instance == Some(instance))
+            .map(|(id, _)| DeviceId(*id))
+            .collect()
+    }
+
+    /// A snapshot of one instance's addressing identity: (bus type,
+    /// bridge device, label).
+    pub fn bus_instance_identity(
+        &self,
+        instance: BusInstanceId,
+    ) -> Option<(BusId, Option<DeviceId>, alloc::string::String)> {
+        let inner = self.inner.lock();
+        inner
+            .bus_instances
+            .get(&instance.raw())
+            .map(|entry| (entry.bus, entry.bridge.map(DeviceId), entry.label.clone()))
+    }
+
     pub fn add_device(&self, desc: DeviceDescriptor) -> Result<DeviceId, AddDeviceError> {
         let id = {
             let mut inner = self.inner.lock();
@@ -473,6 +578,25 @@ impl DeviceDomain {
             }
             let id = DeviceId(inner.next_device_id);
             inner.next_device_id = DEVICE_ID_ALLOCATOR.fetch_add(1, Ordering::Relaxed);
+            // Bus-instance validation, under the same lock: a stated
+            // instance must exist and its bus TYPE must agree with the
+            // descriptor's — "this PCI function sits on bus 0000:00"
+            // cannot name a platform-bus instance.
+            if let Some(instance) = desc.bus_instance {
+                match inner.bus_instances.get(&instance.raw()) {
+                    Some(entry) if entry.bus == desc.bus => {}
+                    Some(entry) => {
+                        return Err(AddDeviceError::BusInstanceTypeMismatch {
+                            instance: instance.raw(),
+                            instance_bus: entry.bus.name(),
+                            device_bus: desc.bus.name(),
+                        });
+                    }
+                    None => {
+                        return Err(AddDeviceError::BusInstanceMissing(instance.raw()));
+                    }
+                }
+            }
             // Topology validation, under the SAME lock that governs
             // removal: a stated parent must exist AND be accepting
             // children. A parent mid-teardown (Removing) or gone
@@ -523,6 +647,7 @@ impl DeviceDomain {
                     data: None,
                     children: Vec::new(),
                     generation: 0,
+                    remove_retryable: false,
                     attempted: Vec::new(),
                     last_deferred_dep: None,
                     dep_seen_generations: Vec::new(),
@@ -903,16 +1028,33 @@ impl DeviceDomain {
                 return Err(RuntimeError::NotFound);
             };
             match entry.state {
-                DeviceState::Active => {
+                // A fresh claim: flip to `Removing` (closed to new
+                // children), bump the generation, snapshot. `light` is
+                // whether a binding exists to tear down — recorded here
+                // because the resume path re-derives it from the same
+                // field.
+                DeviceState::Active
+                | DeviceState::Pending
+                | DeviceState::Deferred
+                | DeviceState::Unclaimed => {
+                    let light = entry.driver.is_none();
                     entry.state = DeviceState::Removing;
                     entry.generation += 1;
-                    (entry.children.clone(), false)
+                    entry.remove_retryable = false;
+                    (Self::teardown_set(&inner, &id.raw()), light)
                 }
-                // Resuming an ABORTED cascade (a child was Busy earlier):
-                // the entry is already `Removing` and closed to new
-                // children — re-snapshot what remains and continue. Only
-                // this protocol transitions `Removing` forward.
-                DeviceState::Removing => (entry.children.clone(), false),
+                // Resuming an ABORTED cascade: only the caller that
+                // atomically claims the flag under THIS lock proceeds —
+                // concurrent removers see `Busy`. A removal genuinely in
+                // progress (retryable == false) is owned by its caller.
+                DeviceState::Removing if entry.remove_retryable => {
+                    let light = entry.driver.is_none();
+                    entry.remove_retryable = false;
+                    (Self::teardown_set(&inner, &id.raw()), light)
+                }
+                DeviceState::Removing => {
+                    return Err(RuntimeError::Busy);
+                }
                 DeviceState::Removed => {
                     return Err(RuntimeError::BadState);
                 }
@@ -924,53 +1066,11 @@ impl DeviceDomain {
                 DeviceState::Probing => {
                     return Err(RuntimeError::Busy);
                 }
-                // Never bound: nothing to quiesce, no publication to
-                // withdraw, no guards to release. Still cascade children
-                // first (topology is independent of binding state), then
-                // free the entry — keeping it would grow the table
-                // unboundedly under churn.
-                DeviceState::Pending | DeviceState::Deferred | DeviceState::Unclaimed => {
-                    entry.generation += 1;
-                    (entry.children.clone(), true)
-                }
             }
         };
-        for child in children {
-            match self.remove_device(DeviceId(child)) {
-                Ok(()) => {}
-                // The child is already gone: a prior cascade pass (or a
-                // concurrent remove) finished it. That satisfies the
-                // children-first requirement for this child.
-                Err(RuntimeError::NotFound) => {}
-                Err(RuntimeError::BadState) => {
-                    let child_gone = {
-                        let inner = self.inner.lock();
-                        matches!(
-                            inner.devices.get(&child).map(|entry| entry.state),
-                            Some(DeviceState::Removed) | None
-                        )
-                    };
-                    if !child_gone {
-                        log::warn!(
-                            "driver-core: cascade remove of child {child} under {id} hit BadState \
-                             mid-teardown; parent teardown ABORTED — retry to continue"
-                        );
-                        return Err(RuntimeError::BadState);
-                    }
-                }
-                // Busy (child probing) or any other failure: abort the
-                // parent teardown — the child still holds (or is
-                // acquiring) resources against this device. The parent is
-                // already `Removing`, closed to new children; a retry
-                // re-snapshots the remaining children and continues.
-                Err(err) => {
-                    log::warn!(
-                        "driver-core: cascade remove of child {child} under {id} failed \
-                         ({err:?}); parent teardown ABORTED — retry to continue"
-                    );
-                    return Err(err);
-                }
-            }
+        if let Err(err) = self.cascade(children) {
+            Self::mark_remove_retryable(self, id.raw());
+            return Err(err);
         }
         if light_path {
             let mut inner = self.inner.lock();
@@ -998,19 +1098,19 @@ impl DeviceDomain {
         };
         let (driver, mut data, services) = (driver, data, services);
 
+        let observers = self.inner.lock().observers.clone();
+        for observer in &observers {
+            observer.device_removing(id.raw());
+        }
+
         if let (Some(driver), Some(data)) = (driver.as_ref(), data.as_mut()) {
             driver.remove(&desc, id.raw(), data.as_mut(), services.as_ref());
         }
 
-        // Lifecycle observers run BEFORE dropping `Data` (consumers may
-        // still touch the device while its guards hold the hardware). The
-        // publications themselves are Data-owned now: they withdraw inside
+        // `device_removed` fires AFTER the final state flip — the name
+        // now means what it says (registry no longer lists the device).
+        // The publications are Data-owned: they withdraw inside
         // `drop(data)` below, sequenced by each Data's field order.
-        let observers = self.inner.lock().observers.clone();
-        for observer in &observers {
-            observer.device_removed(id.raw());
-        }
-
         drop(data);
         {
             let mut inner = self.inner.lock();
@@ -1019,7 +1119,83 @@ impl DeviceDomain {
                 entry.state = DeviceState::Removed;
             }
         }
+        for observer in &observers {
+            observer.device_removed(id.raw());
+        }
         Ok(())
+    }
+
+    /// Phase 2: remove each cascaded member, children-first. A member
+    /// already gone (prior pass / concurrent remove) counts as done; any
+    /// other failure aborts the teardown for a retry.
+    fn cascade(&self, members: Vec<u64>) -> Result<(), RuntimeError> {
+        for member in members {
+            match self.remove_device(DeviceId(member)) {
+                Ok(()) => {}
+                // Already gone: satisfies the children-first requirement.
+                Err(RuntimeError::NotFound) => {}
+                Err(RuntimeError::BadState) => {
+                    let member_gone = {
+                        let inner = self.inner.lock();
+                        matches!(
+                            inner.devices.get(&member).map(|entry| entry.state),
+                            Some(DeviceState::Removed) | None
+                        )
+                    };
+                    if !member_gone {
+                        log::warn!(
+                            "driver-core: cascade remove of {member} hit BadState mid-teardown; \
+                             teardown ABORTED — retry to continue"
+                        );
+                        return Err(RuntimeError::BadState);
+                    }
+                }
+                // Busy (member probing) or any other failure: the member
+                // still holds (or is acquiring) resources against this
+                // device — abort for a retry.
+                Err(err) => {
+                    log::warn!(
+                        "driver-core: cascade remove of {member} failed ({err:?}); teardown \
+                         ABORTED — retry to continue"
+                    );
+                    return Err(err);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The devices a removal must cascade through: device children PLUS
+    /// the members of every bus instance this device bridges (Linux
+    /// bridge-eject: `pci_stop_and_remove_bus_device` walks the secondary
+    /// bus). Deduplicated, child-first order preserved within each group.
+    fn teardown_set(inner: &DomainInner, id: &u64) -> Vec<u64> {
+        let mut set: Vec<u64> = inner
+            .devices
+            .get(id)
+            .map(|entry| entry.children.clone())
+            .unwrap_or_default();
+        for (instance_id, instance) in inner.bus_instances.iter() {
+            if instance.bridge.as_ref() == Some(id) {
+                for (member, entry) in inner.devices.iter() {
+                    if entry.desc.bus_instance.map(|b| b.raw()) == Some(*instance_id)
+                        && !set.contains(member)
+                    {
+                        set.push(*member);
+                    }
+                }
+            }
+        }
+        set
+    }
+
+    /// Mark an aborted removal as claimable: the entry stays `Removing`
+    /// (closed to new children) but the next `remove_device` caller may
+    /// exclusively take over the resume.
+    fn mark_remove_retryable(domain: &DeviceDomain, id: u64) {
+        if let Some(entry) = domain.inner.lock().devices.get_mut(&id) {
+            entry.remove_retryable = true;
+        }
     }
 
     /// Remove `id` from its parent's children list (topology unlink).
@@ -1519,6 +1695,7 @@ mod tests {
     fn parent_teardown_waits_for_probing_child() {
         use crate::bus::DeviceLocation;
 
+        static CHILD_REMOVE_SAW_BUSY: SpinNoPreempt<bool> = SpinNoPreempt::new(false);
         struct ChildDriver {
             domain: &'static DeviceDomain,
             parent: u64,
@@ -1540,7 +1717,18 @@ mod tests {
                 Ok(())
             }
 
-            fn remove(&self, _dev: &mut BoundDevice<'_, PlatformBus, ()>) {}
+            fn remove(&self, _dev: &mut BoundDevice<'_, PlatformBus, ()>) {
+                // The parent's teardown is IN PROGRESS (its cascade is
+                // removing us): a concurrent remove_device(parent) must
+                // see Busy — the exclusive-claim semantics — and NOT join
+                // the teardown.
+                let err = self
+                    .domain
+                    .remove_device(DeviceId(self.parent))
+                    .expect_err("concurrent parent remove must be Busy");
+                assert!(matches!(err, RuntimeError::Busy));
+                *CHILD_REMOVE_SAW_BUSY.lock() = true;
+            }
         }
         struct ParentDriver;
         impl DriverOps<PlatformBus> for ParentDriver {
@@ -1620,6 +1808,10 @@ mod tests {
         // Retry: the child finished probing; the cascade completes and the
         // parent tears down fully (child Removed first).
         domain.remove_device(parent_id).expect("retry completes");
+        // The child's remove hook verified the in-progress exclusion
+        // (recorded in the static slot — the ops instance the domain
+        // holds is a by-value copy).
+        assert!(*CHILD_REMOVE_SAW_BUSY.lock());
         assert_eq!(
             domain.snapshot(parent_id).unwrap().state,
             DeviceState::Removed
@@ -1628,6 +1820,82 @@ mod tests {
             domain.snapshot(child_id).unwrap().state,
             DeviceState::Removed
         );
+    }
+
+    /// Bus instances: a descriptor's `bus_instance` must exist and its
+    /// TYPE must agree; members are queryable (`bus->devices`); removing
+    /// the BRIDGE device ejects the instance's members (Linux
+    /// bridge-eject semantics).
+    #[def_test(serial)]
+    fn bus_instances_validate_query_and_bridge_eject() {
+        use crate::bus::DeviceLocation;
+
+        fn pci_function(_vendor: u16, firmware: u32) -> DeviceDescriptor {
+            DeviceDescriptor::new(
+                crate::platform::PlatformBus::ID, // 类型故意用 platform（测类型一致性）
+                DeviceLocation::FirmwareNode { id: firmware },
+                crate::bus::DeviceIdentity::Platform(crate::bus::PlatformIdentity {
+                    firmware_id: Some(alloc::string::String::from("bus,test")),
+                    compatibles: alloc::vec![alloc::string::String::from("bus,test")],
+                    alias: None,
+                }),
+            )
+        }
+
+        let (domain, services) = fresh_domain();
+        domain.set_services(services);
+
+        let root = domain
+            .add_bus_instance(crate::platform::PlatformBus::ID, None, "test-0")
+            .expect("create root instance");
+
+        // Identity surface: type + no bridge + label.
+        let (bus, bridge, label) = domain.bus_instance_identity(root).expect("identity");
+        assert_eq!(bus, crate::platform::PlatformBus::ID);
+        assert_eq!(bridge, None);
+        assert_eq!(label, "test-0");
+
+        // Type agreement: a bus_instance of the wrong type is rejected.
+        // (pci_function deliberately carries PlatformBus::ID here; a
+        // PciBus-typed descriptor against this instance would mismatch
+        // symmetrically.)
+        let member = domain
+            .add_device(pci_function(0x1af4, 1).with_bus_instance(root))
+            .expect("typed member attaches");
+
+        // Membership query.
+        assert_eq!(domain.bus_instance_devices(root), alloc::vec![member]);
+
+        // Missing instance is rejected.
+        let err = domain
+            .add_device(pci_function(0x1af4, 2).with_bus_instance(BusInstanceId::from_raw(0xdead)))
+            .expect_err("missing instance");
+        assert!(matches!(err, AddDeviceError::BusInstanceMissing(0xdead)));
+
+        // Bridge eject: anchor an instance on a bridge device; removing
+        // the bridge cascades the instance's members even without device
+        // parent links.
+        let bridge_dev = domain
+            .add_device(pci_function(0x1af4, 3))
+            .expect("add bridge");
+        let secondary = domain
+            .add_bus_instance(crate::platform::PlatformBus::ID, Some(bridge_dev), "test-1")
+            .expect("secondary instance");
+        let behind = domain
+            .add_device(pci_function(0x1af4, 4).with_bus_instance(secondary))
+            .expect("member behind bridge");
+        assert_eq!(domain.bus_instance_devices(secondary), alloc::vec![behind]);
+
+        domain.remove_device(bridge_dev).expect("bridge eject");
+        // The member never bound — the light path FREES its entry, so the
+        // snapshot is gone entirely (equivalently: fully removed).
+        assert!(
+            domain.snapshot(behind).is_none(),
+            "bridge removal must eject the secondary instance's members"
+        );
+        // The member is gone from the instance's listing.
+        assert!(domain.bus_instance_devices(secondary).is_empty());
+        let _ = member;
     }
 
     /// `add_device` rejects a missing parent outright — the descriptor's

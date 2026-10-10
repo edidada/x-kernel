@@ -33,6 +33,17 @@ pub fn discover(domain: &driver_core::DeviceDomain) {
     let bus_end = pci.bus_end();
     let root = pci.root_mut();
 
+    // One ROOT bus instance for this host (segment 0, bus 0): the
+    // addressing anchor every discovered function attaches to
+    // (`pci_dev->bus`). A bridge driver creating a SECONDARY instance
+    // would register it anchored on its own bridge device — removing that
+    // bridge then ejects the instance's members (the domain's
+    // bridge-cascade).
+    let root_instance = domain
+        .add_bus_instance(<crate::PciBus as Bus>::ID, None, "0000:00")
+        .inspect_err(|err| log::warn!("pci: root bus instance rejected: {err:?}"))
+        .ok();
+
     for bus_nr in 0..=bus_end {
         for (bdf, info) in root.enumerate_bus(bus_nr) {
             if !matches!(info.header_type, HeaderType::Standard) {
@@ -96,8 +107,15 @@ pub fn discover(domain: &driver_core::DeviceDomain) {
             )
             .with_origin(DiscoveryOrigin::PlatformStatic)
             .with_resources(resources);
+            let descriptor = match root_instance {
+                Some(instance) => descriptor.with_bus_instance(instance),
+                None => descriptor,
+            };
 
-            let _ = domain.add_device(descriptor);
+            match domain.add_device(descriptor) {
+                Ok(added) => log::debug!("pci: registered {added:?}"),
+                Err(err) => log::warn!("pci: device registration rejected: {err:?}"),
+            }
             log::debug!(
                 "pci: registered {bdf} ({:04x}:{:04x} class {:02x}:{:02x})",
                 info.vendor_id,

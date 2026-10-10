@@ -258,7 +258,10 @@ fn build_descriptor(dev: firmware::FirmwareDevice) {
         descriptor
     };
 
-    let _ = global_domain().add_device(descriptor);
+    match global_domain().add_device(descriptor) {
+        Ok(added) => log::debug!("driver-core: enumerated {added:?}"),
+        Err(err) => log::warn!("driver-core: device enumeration rejected: {err:?}"),
+    }
 }
 
 /// x86 ISA COM port bases (board-static: no firmware description).
@@ -282,7 +285,10 @@ fn enumerate_static_devices() {
                 alias: Some(alloc::string::String::from("ramdisk")),
             }),
         );
-        let _ = global_domain().add_device(descriptor);
+        match global_domain().add_device(descriptor) {
+            Ok(added) => log::debug!("driver-core: enumerated {added:?}"),
+            Err(err) => log::warn!("driver-core: device enumeration rejected: {err:?}"),
+        }
     }
 
     // Each ISA COM port becomes a platform-static device carrying its I/O
@@ -306,7 +312,10 @@ fn enumerate_static_devices() {
         )
         .with_origin(DiscoveryOrigin::PlatformStatic)
         .with_resources(resources);
-        let _ = global_domain().add_device(descriptor);
+        match global_domain().add_device(descriptor) {
+            Ok(added) => log::debug!("driver-core: enumerated {added:?}"),
+            Err(err) => log::warn!("driver-core: device enumeration rejected: {err:?}"),
+        }
     }
 }
 

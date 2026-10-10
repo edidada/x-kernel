@@ -35,6 +35,29 @@ pub struct ClassDeviceId(u64);
 /// Creating the guard from a [`ClassDevice`](crate::ClassDevice) does not
 /// keep the runtime alive: the registry's Arc and any consumer clones do
 /// that; this guard only names the registry entry to withdraw.
+/// One counted device use (see [`ClassDevice::acquire_use`]): dropping
+/// decrements the in-flight count.
+pub struct ClassUse<T> {
+    device: ClassDevice<T>,
+}
+
+impl<T> Drop for ClassUse<T> {
+    fn drop(&mut self) {
+        self.device
+            .inner
+            .uses
+            .fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+impl<T> core::ops::Deref for ClassUse<T> {
+    type Target = ClassDevice<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.device
+    }
+}
+
 pub struct ClassWithdraw {
     unpublish: fn(ClassDeviceId),
     id: ClassDeviceId,
@@ -180,6 +203,16 @@ struct ClassDeviceInner<T> {
     device_kind: DeviceKind,
     irq: Option<usize>,
     metadata: ClassDeviceMetadata,
+    /// Device-usage protocol (Linux `device usage`/`try_acquire`
+    /// analogue): in-flight operations count here, and `class_remove`
+    /// flips `draining` BEFORE the removal callbacks run — new acquires
+    /// fail from that point. Operations already past the gate complete
+    /// against the still-live runtime (the mapping follows the object —
+    /// see the virtio lease model); WAITING for the count to drain is a
+    /// subsystem-level protocol (block's `del_gendisk` drain, net's
+    /// quiesce), not a class-core one.
+    uses: core::sync::atomic::AtomicUsize,
+    draining: core::sync::atomic::AtomicBool,
 }
 
 pub struct ClassDeviceMetadata {
@@ -247,6 +280,8 @@ impl<T> ClassDevice<T> {
         parent.driver_name().ok_or(DriverError::BadState)?;
         Ok(Self {
             inner: Arc::new(ClassDeviceInner {
+                uses: core::sync::atomic::AtomicUsize::new(0),
+                draining: core::sync::atomic::AtomicBool::new(false),
                 parent,
                 runtime: inner,
                 name,
@@ -341,7 +376,47 @@ impl<T> ClassDevice<T> {
         if !self.is_available() {
             return Err(DriverError::BadState);
         }
+        let _use = self.acquire_use()?;
         f(&self.inner.runtime)
+    }
+
+    /// Acquire a device-usage guard: counts one in-flight operation,
+    /// refused once the removal orchestration closed the gate
+    /// (`class_remove` flips `draining` before its callbacks). The guard
+    /// decrements on drop. Long-running consumers (workers holding the
+    /// device across awaits) hold THIS instead of a bare clone so removal
+    /// observability is real: `in_flight()` reports the count.
+    pub fn acquire_use(&self) -> Result<ClassUse<T>, DriverError> {
+        if !self.is_available()
+            || self
+                .inner
+                .draining
+                .load(core::sync::atomic::Ordering::Acquire)
+        {
+            return Err(DriverError::BadState);
+        }
+        self.inner
+            .uses
+            .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        Ok(ClassUse {
+            device: self.clone(),
+        })
+    }
+
+    /// In-flight operation count (diagnostics, removal orchestration).
+    pub fn in_flight(&self) -> usize {
+        self.inner.uses.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Close the usage gate: new `acquire_use` calls fail. Returns the
+    /// in-flight count AT close time — operations already past the gate
+    /// complete against the still-live runtime; subsystems that must WAIT
+    /// implement their drain (block: `del_gendisk`).
+    pub fn begin_drain(&self) -> usize {
+        self.inner
+            .draining
+            .store(true, core::sync::atomic::Ordering::Release);
+        self.in_flight()
     }
 
     pub fn input_physical_location(&self) -> &str {

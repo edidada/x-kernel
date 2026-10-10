@@ -60,8 +60,8 @@ pub mod provider;
 mod resource;
 
 pub use bus::{
-    Bus, BusId, DeviceDescriptor, DeviceIdentity, DeviceLocation, DiscoveryOrigin, IdMatchEntry,
-    MatchScore,
+    Bus, BusId, BusInstanceId, DeviceDescriptor, DeviceIdentity, DeviceLocation, DiscoveryOrigin,
+    IdMatchEntry, MatchScore,
 };
 pub use device::{
     BoundDevice, ClkHandle, ClkOps, ClockConsumerServices, CoherentMem, DevIrq, DeviceCtx,
