@@ -253,42 +253,55 @@ struct BusInstanceEntry {
 }
 
 struct DeviceEntry {
+    /// Identity: the immutable descriptor (bus type, instance, parent,
+    /// resources, firmware identity).
     desc: DeviceDescriptor,
+    /// Lifecycle: state machine + teardown bookkeeping.
+    lifecycle: LifecycleState,
+    /// Binding: what driver claimed this device and the Data it produced.
+    binding: BindingState,
+    /// Topology: the devices whose `desc.parent` names this one.
+    topology: TopologyState,
+    /// Probe scheduling: deferred-dependency bookkeeping (parked-on-what,
+    /// wake generations consumed).
+    probe: ProbeState,
+}
+
+/// Lifecycle state domain of [`DeviceEntry`].
+struct LifecycleState {
     state: DeviceState,
+    /// Bumped on every teardown — the stale-probe-commit guard (see
+    /// `probe_pending_locked`).
+    generation: u64,
+    /// A cascade ABORTED mid-teardown: the entry is `Removing` and the
+    /// NEXT `remove_device` may CLAIM the resume — exactly one caller
+    /// flips this back to false under the domain lock; concurrent
+    /// removers see `Busy` (single-owner semantics, Linux
+    /// `begin_removing`'s exclusive-claim equivalent).
+    remove_retryable: bool,
+}
+
+/// Binding state domain of [`DeviceEntry`].
+struct BindingState {
     driver: Option<Arc<dyn AnyDriver>>,
     data: Option<Box<DataBox>>,
-    /// Topology children (ids of devices whose `desc.parent` is this
-    /// device). Maintained by add/remove so teardown can cascade
-    /// children-first — a parent never disappears while a child
-    /// references it.
-    children: Vec<u64>,
     /// Drivers that failed this device permanently (ptr keys).
     attempted: Vec<usize>,
+}
+
+/// Topology state domain of [`DeviceEntry`].
+struct TopologyState {
+    children: Vec<u64>,
+}
+
+/// Probe-scheduling state domain of [`DeviceEntry`].
+struct ProbeState {
     /// The dependency this device last deferred on. Kept through the
     /// `finish_probe_phase` → Unclaimed transition so a LATE provider can
-    /// still wake it: `wake` re-matches Unclaimed devices against their
-    /// last dependency, closing the "provider registered after boot end"
-    /// hole (previously nothing re-linked them until an unrelated driver
-    /// registration reswept).
+    /// still wake it.
     last_deferred_dep: Option<DepSource>,
-    /// Binding generation: bumped on every teardown (light and full) so a
-    /// probe result created against an older generation can never commit —
-    /// the structural stale-commit guard for future reentrancy (hotplug,
-    /// rebind). Today the Probing→Busy remove gate already prevents the
-    /// interleave; this makes the invariant local to the commit path
-    /// instead of incidental to the gate.
-    generation: u64,
-    /// A cascade ABORTED mid-teardown (a child was Busy): the entry is
-    /// `Removing`, closed to new children, and the NEXT `remove_device`
-    /// may CLAIM the resume — exactly one caller flips this back to false
-    /// under the domain lock. An in-progress (non-aborted) removal keeps
-    /// it false, so concurrent removers see `Busy` instead of joining the
-    /// teardown (single-owner semantics, Linux `begin_removing`'s
-    /// exclusive-claim equivalent).
-    remove_retryable: bool,
     /// Wake generations this device has already consumed per dependency —
-    /// the lost-wakeup guard's bookkeeping (see DomainInner's
-    /// dep_generations).
+    /// the lost-wakeup guard's bookkeeping.
     dep_seen_generations: Vec<(DepSource, u64)>,
 }
 
@@ -352,15 +365,24 @@ struct DomainInner {
     services_installed: bool,
     drivers: Vec<Arc<dyn AnyDriver>>,
     devices: BTreeMap<u64, DeviceEntry>,
+    /// The probe-scheduling protocol's state (the DependencyWaiter data
+    /// domain): one coherent unit — the queues and their generation
+    /// guard move together through park/wake/finish_phase.
+    sched: SchedulingState,
+    services: Arc<dyn DeviceServices>,
+    observers: Vec<Arc<dyn DeviceLifecycleObserver>>,
+}
+
+/// Probe-scheduling state: the pending/deferred queues plus the wake
+/// generation guard that closes the check-then-park lost-wakeup window.
+struct SchedulingState {
     pending: Vec<u64>,
     deferred: Vec<(u64, DepSource)>,
     /// Wake generation per dependency: incremented on EVERY wake, even
     /// when nothing was parked. A Deferred submitted for a dependency
     /// whose generation moved since the device last deferred re-attempts
-    /// instead of parking — closing the check-then-park lost-wakeup window.
+    /// instead of parking.
     dep_generations: Vec<(DepSource, u64)>,
-    services: Arc<dyn DeviceServices>,
-    observers: Vec<Arc<dyn DeviceLifecycleObserver>>,
 }
 
 /// The GLOBAL device-id allocator: every `DeviceDomain` reserves ids from
@@ -405,8 +427,8 @@ fn snapshot_of(id: DeviceId, entry: &DeviceEntry) -> DeviceSnapshot {
     DeviceSnapshot {
         id,
         bus: entry.desc.bus,
-        state: entry.state,
-        driver: entry.driver.as_ref().map(|driver| driver.name()),
+        state: entry.lifecycle.state,
+        driver: entry.binding.driver.as_ref().map(|driver| driver.name()),
         kind: None,
         identity: match &entry.desc.identity {
             crate::desc::DeviceIdentity::Platform(platform) => platform
@@ -429,11 +451,13 @@ impl DeviceDomain {
             inner: SpinNoPreempt::new(DomainInner {
                 next_device_id: DEVICE_ID_ALLOCATOR.fetch_add(1, Ordering::Relaxed),
                 bus_instances: BTreeMap::new(),
+                sched: SchedulingState {
+                    pending: Vec::new(),
+                    deferred: Vec::new(),
+                    dep_generations: Vec::new(),
+                },
                 drivers: Vec::new(),
                 devices: BTreeMap::new(),
-                pending: Vec::new(),
-                deferred: Vec::new(),
-                dep_generations: Vec::new(),
                 services: Arc::new(NoServices),
                 services_installed: false,
                 observers: Vec::new(),
@@ -479,10 +503,10 @@ impl DeviceDomain {
             let resweep: Vec<u64> = inner
                 .devices
                 .iter()
-                .filter(|(_, entry)| entry.state == DeviceState::Unclaimed)
+                .filter(|(_, entry)| entry.lifecycle.state == DeviceState::Unclaimed)
                 .filter(|(_, entry)| {
                     inner.drivers.iter().any(|candidate| {
-                        !entry.attempted.contains(&driver_key(candidate))
+                        !entry.binding.attempted.contains(&driver_key(candidate))
                             && candidate.matches(&entry.desc) != MatchScore::NoMatch
                     })
                 })
@@ -490,9 +514,9 @@ impl DeviceDomain {
                 .collect();
             for id in resweep {
                 if let Some(entry) = inner.devices.get_mut(&id) {
-                    entry.state = DeviceState::Pending;
+                    entry.lifecycle.state = DeviceState::Pending;
                 }
-                inner.pending.push(id);
+                inner.sched.pending.push(id);
             }
             log::debug!(
                 "driver-core: registered driver `{name}` for bus `{}`",
@@ -606,7 +630,10 @@ impl DeviceDomain {
             // error, not a silent root placement: the descriptor's own
             // `parent` field would disagree with the registry topology.
             if let Some(parent) = desc.parent {
-                let parent_state = inner.devices.get(&parent).map(|entry| entry.state);
+                let parent_state = inner
+                    .devices
+                    .get(&parent)
+                    .map(|entry| entry.lifecycle.state);
                 match parent_state {
                     Some(
                         DeviceState::Pending
@@ -625,6 +652,7 @@ impl DeviceDomain {
                                 .devices
                                 .get_mut(&parent)
                                 .expect("parent present")
+                                .topology
                                 .children
                                 .push(id.raw());
                         }
@@ -642,18 +670,26 @@ impl DeviceDomain {
                 id.raw(),
                 DeviceEntry {
                     desc,
-                    state: DeviceState::Pending,
-                    driver: None,
-                    data: None,
-                    children: Vec::new(),
-                    generation: 0,
-                    remove_retryable: false,
-                    attempted: Vec::new(),
-                    last_deferred_dep: None,
-                    dep_seen_generations: Vec::new(),
+                    lifecycle: LifecycleState {
+                        state: DeviceState::Pending,
+                        generation: 0,
+                        remove_retryable: false,
+                    },
+                    binding: BindingState {
+                        driver: None,
+                        data: None,
+                        attempted: Vec::new(),
+                    },
+                    topology: TopologyState {
+                        children: Vec::new(),
+                    },
+                    probe: ProbeState {
+                        last_deferred_dep: None,
+                        dep_seen_generations: Vec::new(),
+                    },
                 },
             );
-            inner.pending.push(id.raw());
+            inner.sched.pending.push(id.raw());
             id
         };
         self.probe_pending();
@@ -667,7 +703,7 @@ impl DeviceDomain {
     /// root knows when enumeration + provider registration completed, so it
     /// decides when a deferred device is stuck rather than still waiting.
     pub fn deferred_report(&self) -> Vec<(u64, DepSource)> {
-        self.inner.lock().deferred.clone()
+        self.inner.lock().sched.deferred.clone()
     }
 
     /// Declare probe activity finished (the boot/scan phase is over).
@@ -684,14 +720,14 @@ impl DeviceDomain {
             if keep_waiting {
                 return;
             }
-            core::mem::take(&mut inner.deferred)
+            core::mem::take(&mut inner.sched.deferred)
         };
         for (id, dep) in stuck {
             let mut inner = self.inner.lock();
             if let Some(entry) = inner.devices.get_mut(&id)
-                && entry.state == DeviceState::Deferred
+                && entry.lifecycle.state == DeviceState::Deferred
             {
-                entry.state = DeviceState::Unclaimed;
+                entry.lifecycle.state = DeviceState::Unclaimed;
             }
             log::warn!(
                 "driver-core: device {id} gave up waiting on dependency {dep}                  \
@@ -717,12 +753,13 @@ impl DeviceDomain {
     /// Deferred probe parks, and refreshes it on every retry or wake.
     fn record_dep_generation(entry: &mut DeviceEntry, dep: DepSource, generation: u64) {
         match entry
+            .probe
             .dep_seen_generations
             .iter_mut()
             .find(|(d, _)| *d == dep)
         {
             Some(slot) => slot.1 = generation,
-            None => entry.dep_seen_generations.push((dep, generation)),
+            None => entry.probe.dep_seen_generations.push((dep, generation)),
         }
     }
 
@@ -740,6 +777,7 @@ impl DeviceDomain {
         driver_name: &str,
     ) {
         let current_gen = inner
+            .sched
             .dep_generations
             .iter()
             .find(|(d, _)| *d == dep)
@@ -749,7 +787,8 @@ impl DeviceDomain {
             .devices
             .get(&id)
             .and_then(|e| {
-                e.dep_seen_generations
+                e.probe
+                    .dep_seen_generations
                     .iter()
                     .find(|(d, _)| *d == dep)
                     .map(|(_, g)| *g)
@@ -758,19 +797,19 @@ impl DeviceDomain {
         if current_gen > seen_gen {
             // The dependency moved under us: retry now.
             if let Some(entry) = inner.devices.get_mut(&id) {
-                entry.state = DeviceState::Pending;
+                entry.lifecycle.state = DeviceState::Pending;
                 Self::record_dep_generation(entry, dep, current_gen);
             }
-            inner.pending.push(id);
+            inner.sched.pending.push(id);
             stats.retried += 1;
             return;
         }
         if let Some(entry) = inner.devices.get_mut(&id) {
-            entry.state = DeviceState::Deferred;
-            entry.last_deferred_dep = Some(dep);
+            entry.lifecycle.state = DeviceState::Deferred;
+            entry.probe.last_deferred_dep = Some(dep);
             Self::record_dep_generation(entry, dep, current_gen);
         }
-        inner.deferred.push((id, dep));
+        inner.sched.deferred.push((id, dep));
         stats.deferred += 1;
         log::debug!("driver-core: `{driver_name}` deferred device {id} on {dep}");
     }
@@ -783,17 +822,17 @@ impl DeviceDomain {
         let Some(entry) = inner.devices.get_mut(&id) else {
             return;
         };
-        entry.attempted.push(attempted_key);
+        entry.binding.attempted.push(attempted_key);
         let retryable = inner
             .drivers
             .iter()
-            .filter(|candidate| !entry.attempted.contains(&driver_key(candidate)))
+            .filter(|candidate| !entry.binding.attempted.contains(&driver_key(candidate)))
             .any(|candidate| candidate.matches(&entry.desc) != MatchScore::NoMatch);
         if retryable {
-            entry.state = DeviceState::Pending;
-            inner.pending.push(id);
+            entry.lifecycle.state = DeviceState::Pending;
+            inner.sched.pending.push(id);
         } else {
-            entry.state = DeviceState::Unclaimed;
+            entry.lifecycle.state = DeviceState::Unclaimed;
         }
     }
 
@@ -802,28 +841,33 @@ impl DeviceDomain {
             let mut inner = self.inner.lock();
             // Record the wake even with no waiters: the generation is what
             // a Deferred submitter checks against.
-            let generation = match inner.dep_generations.iter_mut().find(|(d, _)| *d == dep) {
+            let generation = match inner
+                .sched
+                .dep_generations
+                .iter_mut()
+                .find(|(d, _)| *d == dep)
+            {
                 Some((_, generation)) => {
                     *generation += 1;
                     *generation
                 }
                 None => {
-                    inner.dep_generations.push((dep, 1));
+                    inner.sched.dep_generations.push((dep, 1));
                     1
                 }
             };
-            let deferred = core::mem::take(&mut inner.deferred);
+            let deferred = core::mem::take(&mut inner.sched.deferred);
             let mut woken = 0usize;
             for (id, waiting) in deferred {
                 if waiting != dep {
-                    inner.deferred.push((id, waiting));
+                    inner.sched.deferred.push((id, waiting));
                     continue;
                 }
                 if let Some(entry) = inner.devices.get_mut(&id) {
-                    entry.state = DeviceState::Pending;
+                    entry.lifecycle.state = DeviceState::Pending;
                     Self::record_dep_generation(entry, dep, generation);
                 }
-                inner.pending.push(id);
+                inner.sched.pending.push(id);
                 woken += 1;
             }
             // Late providers: devices that deferred on this dependency,
@@ -835,15 +879,16 @@ impl DeviceDomain {
                 .devices
                 .iter()
                 .filter(|(_, entry)| {
-                    entry.state == DeviceState::Unclaimed && entry.last_deferred_dep == Some(dep)
+                    entry.lifecycle.state == DeviceState::Unclaimed
+                        && entry.probe.last_deferred_dep == Some(dep)
                 })
                 .map(|(id, _)| *id)
                 .collect();
             for id in unclaimed {
                 if let Some(entry) = inner.devices.get_mut(&id) {
-                    entry.state = DeviceState::Pending;
+                    entry.lifecycle.state = DeviceState::Pending;
                 }
-                inner.pending.push(id);
+                inner.sched.pending.push(id);
                 woken += 1;
             }
             woken
@@ -901,15 +946,15 @@ impl DeviceDomain {
                     .lock()
                     .devices
                     .get(&id)
-                    .map_or(0, |e| e.generation);
+                    .map_or(0, |e| e.lifecycle.generation);
                 match driver.probe(&desc, id, services.as_ref()) {
                     Ok(data) => {
                         let mut inner = self.inner.lock();
                         match inner.devices.get_mut(&id) {
-                            Some(entry) if entry.generation == generation => {
-                                entry.state = DeviceState::Active;
-                                entry.driver = Some(driver.clone());
-                                entry.data = Some(data);
+                            Some(entry) if entry.lifecycle.generation == generation => {
+                                entry.lifecycle.state = DeviceState::Active;
+                                entry.binding.driver = Some(driver.clone());
+                                entry.binding.data = Some(data);
                                 stats.activated += 1;
                                 log::debug!(
                                     "driver-core: `{}` activated device {id} ({:?})",
@@ -952,13 +997,17 @@ impl DeviceDomain {
     fn select_batch(&self) -> Vec<(u64, DeviceDescriptor, Arc<dyn AnyDriver>)> {
         let mut inner = self.inner.lock();
         let mut batch = Vec::new();
-        let pending = core::mem::take(&mut inner.pending);
+        let pending = core::mem::take(&mut inner.sched.pending);
         for id in pending {
             let (state, attempted, desc) = {
                 let Some(entry) = inner.devices.get_mut(&id) else {
                     continue;
                 };
-                (entry.state, entry.attempted.clone(), entry.desc.clone())
+                (
+                    entry.lifecycle.state,
+                    entry.binding.attempted.clone(),
+                    entry.desc.clone(),
+                )
             };
             if matches!(
                 state,
@@ -977,13 +1026,13 @@ impl DeviceDomain {
             match best {
                 Some(driver) => {
                     if let Some(entry) = inner.devices.get_mut(&id) {
-                        entry.state = DeviceState::Probing;
+                        entry.lifecycle.state = DeviceState::Probing;
                     }
                     batch.push((id, desc, driver));
                 }
                 None => {
                     if let Some(entry) = inner.devices.get_mut(&id) {
-                        entry.state = DeviceState::Unclaimed;
+                        entry.lifecycle.state = DeviceState::Unclaimed;
                     }
                 }
             }
@@ -1027,7 +1076,7 @@ impl DeviceDomain {
             let Some(entry) = inner.devices.get_mut(&id.raw()) else {
                 return Err(RuntimeError::NotFound);
             };
-            match entry.state {
+            match entry.lifecycle.state {
                 // A fresh claim: flip to `Removing` (closed to new
                 // children), bump the generation, snapshot. `light` is
                 // whether a binding exists to tear down — recorded here
@@ -1037,19 +1086,19 @@ impl DeviceDomain {
                 | DeviceState::Pending
                 | DeviceState::Deferred
                 | DeviceState::Unclaimed => {
-                    let light = entry.driver.is_none();
-                    entry.state = DeviceState::Removing;
-                    entry.generation += 1;
-                    entry.remove_retryable = false;
+                    let light = entry.binding.driver.is_none();
+                    entry.lifecycle.state = DeviceState::Removing;
+                    entry.lifecycle.generation += 1;
+                    entry.lifecycle.remove_retryable = false;
                     (Self::teardown_set(&inner, &id.raw()), light)
                 }
                 // Resuming an ABORTED cascade: only the caller that
                 // atomically claims the flag under THIS lock proceeds —
                 // concurrent removers see `Busy`. A removal genuinely in
                 // progress (retryable == false) is owned by its caller.
-                DeviceState::Removing if entry.remove_retryable => {
-                    let light = entry.driver.is_none();
-                    entry.remove_retryable = false;
+                DeviceState::Removing if entry.lifecycle.remove_retryable => {
+                    let light = entry.binding.driver.is_none();
+                    entry.lifecycle.remove_retryable = false;
                     (Self::teardown_set(&inner, &id.raw()), light)
                 }
                 DeviceState::Removing => {
@@ -1076,8 +1125,11 @@ impl DeviceDomain {
             let mut inner = self.inner.lock();
             Self::unlink_from_parent(&mut inner, &id.raw());
             inner.devices.remove(&id.raw());
-            inner.pending.retain(|pending| *pending != id.raw());
-            inner.deferred.retain(|(deferred, _)| *deferred != id.raw());
+            inner.sched.pending.retain(|pending| *pending != id.raw());
+            inner
+                .sched
+                .deferred
+                .retain(|(deferred, _)| *deferred != id.raw());
             log::debug!("driver-core: removed unbound device {id} (no binding to tear down)");
             return Ok(());
         }
@@ -1086,13 +1138,13 @@ impl DeviceDomain {
             let Some(entry) = inner.devices.get_mut(&id.raw()) else {
                 return Err(RuntimeError::NotFound);
             };
-            if entry.state != DeviceState::Removing {
+            if entry.lifecycle.state != DeviceState::Removing {
                 return Err(RuntimeError::BadState);
             }
             (
                 entry.desc.clone(),
-                entry.driver.take(),
-                entry.data.take(),
+                entry.binding.driver.take(),
+                entry.binding.data.take(),
                 inner.services.clone(),
             )
         };
@@ -1116,7 +1168,7 @@ impl DeviceDomain {
             let mut inner = self.inner.lock();
             Self::unlink_from_parent(&mut inner, &id.raw());
             if let Some(entry) = inner.devices.get_mut(&id.raw()) {
-                entry.state = DeviceState::Removed;
+                entry.lifecycle.state = DeviceState::Removed;
             }
         }
         for observer in &observers {
@@ -1138,7 +1190,10 @@ impl DeviceDomain {
                     let member_gone = {
                         let inner = self.inner.lock();
                         matches!(
-                            inner.devices.get(&member).map(|entry| entry.state),
+                            inner
+                                .devices
+                                .get(&member)
+                                .map(|entry| entry.lifecycle.state),
                             Some(DeviceState::Removed) | None
                         )
                     };
@@ -1173,7 +1228,7 @@ impl DeviceDomain {
         let mut set: Vec<u64> = inner
             .devices
             .get(id)
-            .map(|entry| entry.children.clone())
+            .map(|entry| entry.topology.children.clone())
             .unwrap_or_default();
         for (instance_id, instance) in inner.bus_instances.iter() {
             if instance.bridge.as_ref() == Some(id) {
@@ -1194,7 +1249,7 @@ impl DeviceDomain {
     /// exclusively take over the resume.
     fn mark_remove_retryable(domain: &DeviceDomain, id: u64) {
         if let Some(entry) = domain.inner.lock().devices.get_mut(&id) {
-            entry.remove_retryable = true;
+            entry.lifecycle.remove_retryable = true;
         }
     }
 
@@ -1205,7 +1260,7 @@ impl DeviceDomain {
         };
         let Some(parent) = parent else { return };
         if let Some(parent_entry) = inner.devices.get_mut(&parent) {
-            parent_entry.children.retain(|child| child != id);
+            parent_entry.topology.children.retain(|child| child != id);
         }
     }
 
@@ -1233,7 +1288,7 @@ impl DeviceDomain {
     ) -> Option<R> {
         let inner = self.inner.lock();
         let entry = inner.devices.get(&id.raw())?;
-        let data = entry.data.as_ref()?.as_ref().downcast_ref::<D>()?;
+        let data = entry.binding.data.as_ref()?.as_ref().downcast_ref::<D>()?;
         Some(visit(data))
     }
 }

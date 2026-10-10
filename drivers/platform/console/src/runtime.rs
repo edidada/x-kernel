@@ -23,6 +23,8 @@ use lazyinit::LazyInit;
 struct ConsoleSubsystem {
     devices: Vec<ClassDevice<CharDeviceImpl>>,
     stdout: Option<ClassDeviceId>,
+    /// The adopted stdout's transferred guards (see [`StdoutBinding`]).
+    stdout_binding: Option<StdoutBinding>,
 }
 
 impl ConsoleSubsystem {
@@ -30,6 +32,7 @@ impl ConsoleSubsystem {
         Self {
             devices: Vec::new(),
             stdout: None,
+            stdout_binding: None,
         }
     }
 
@@ -68,23 +71,28 @@ impl ConsoleSubsystem {
 static CONSOLE_SUBSYS: LazyInit<SpinNoPreempt<ConsoleSubsystem>> = LazyInit::new();
 static CONSOLE_CLASS_BRIDGE: LazyInit<()> = LazyInit::new();
 
-/// The adopted stdout binding's resource guards, held for the KERNEL's
-/// lifetime — the ownership side of the console-continuity policy.
+/// The adopted stdout binding: THE explicit cross-binding owner of the
+/// boot console — publication identity, input IRQ, and (for cold-start
+/// ports) the register mapping, held for the KERNEL's lifetime.
 ///
-/// The stdout publication deliberately survives driver removal (the serial
-/// driver stores no withdrawal guard for it); for that to be coherent the
-/// binding's ENTIRE runtime instance must survive with it, not just the
-/// class handle: dropping the input IRQ at Data-drop would silence the
-/// console while it still reads as available. `adopt_stdout_guards`
-/// transfers the guards here when a stdout serial probe succeeds; the
-/// slots are never cleared (there is exactly one boot stdout; a rebind of
-/// the SAME port replaces its guards, releasing the previous pair).
-static STDOUT_GUARDS: SpinNoPreempt<StdoutGuards> = SpinNoPreempt::new(StdoutGuards {
-    irq: None,
-    regs: None,
-});
-
-struct StdoutGuards {
+/// This is the console-continuity policy as ONE type instead of a
+/// special case leaking through the driver: the serial driver's stdout
+/// probe TRANSFERS its guards here (`adopt_stdout_guards`) and keeps no
+/// withdrawal guard in its Data — the binding's entire runtime instance
+/// survives driver removal together, or it does not survive at all (a
+/// publication outliving its IRQ would read as an available console
+/// that can never receive input).
+///
+/// A same-port rebind REPLACES the binding: the previous publication is
+/// withdrawn (see `register_stdout_console`) and the previous guards
+/// release with this assignment.
+#[expect(
+    dead_code,
+    reason = "CG-024-lint-exceptions: ownership-only fields — the guards exist               for \
+              their Drop (released at rebind replacement or subsystem               teardown), \
+              never for reads"
+)]
+struct StdoutBinding {
     irq: Option<driver_core::DevIrq>,
     regs: Option<driver_core::IoMap>,
 }
@@ -93,11 +101,9 @@ struct StdoutGuards {
 /// subsystem (call from a successful stdout probe, AFTER publication).
 /// Takes ownership: the caller's `Data` keeps `None` for these fields.
 pub fn adopt_stdout_guards(irq: Option<driver_core::DevIrq>, regs: Option<driver_core::IoMap>) {
-    let mut guards = STDOUT_GUARDS.lock();
     // Replace: releasing the previous pair handles the rebind case (the
     // old registration/handlers belong to the superseded binding).
-    guards.irq = irq;
-    guards.regs = regs;
+    console_subsystem().lock().stdout_binding = Some(StdoutBinding { irq, regs });
 }
 
 fn console_subsystem() -> &'static SpinNoPreempt<ConsoleSubsystem> {
