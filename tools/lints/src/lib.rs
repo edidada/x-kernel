@@ -23,6 +23,7 @@ dylint_linting::dylint_library!();
 mod facts_export;
 mod std_box_in_kernel_tests;
 mod static_lock_helpers;
+mod static_mut_option;
 mod unregistered_static_lock;
 mod unregistered_static_spinlock;
 mod untracked_runtime_lock;
@@ -43,6 +44,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         std_box_in_kernel_tests::STD_BOX_IN_KERNEL_TESTS,
         unregistered_static_lock::UNREGISTERED_STATIC_LOCK,
         untracked_runtime_lock::UNTRACKED_RUNTIME_LOCK,
+        static_mut_option::STATIC_MUT_OPTION,
     ]);
     lint_store.register_late_pass(|_| Box::new(facts_export::FactsExport));
     // CG rules do not apply to vendored third-party code. Its facts are still
@@ -55,4 +57,5 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         .register_late_pass(|_| Box::new(unregistered_static_spinlock::UnregisteredStaticSpinlock));
     lint_store.register_late_pass(|_| Box::new(unregistered_static_lock::UnregisteredStaticLock));
     lint_store.register_late_pass(|_| Box::new(untracked_runtime_lock::UntrackedRuntimeLock));
+    lint_store.register_late_pass(|_| Box::new(static_mut_option::StaticMutOption));
 }
