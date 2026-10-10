@@ -29,35 +29,38 @@ cleanup_fallback_clone() {
     fi
 }
 trap cleanup_fallback_clone EXIT
+# This directory is owned by the current Pipeline container and architecture.
+# Publish a fresh clone only after success; keep the old tree on clone failures.
 for attempt in 1 2 3; do
     if [ -d "${libutee_dir}/.git" ]; then
         if git -C "${libutee_dir}" fetch --depth 1 origin HEAD &&
             git -C "${libutee_dir}" reset --hard FETCH_HEAD; then
+            echo "rust-libutee cache synchronized (attempt ${attempt}/3)" >&2
             break
         fi
+        echo "rust-libutee fetch/reset failed (attempt ${attempt}/3); cloning a replacement" >&2
+    elif [ -e "${libutee_dir}" ]; then
+        echo "rust-libutee cache is invalid (attempt ${attempt}/3); cloning a replacement" >&2
+    else
+        echo "rust-libutee cold clone (attempt ${attempt}/3)" >&2
     fi
-    # A stale or damaged cache must not force every retry through the same
-    # repository. Clone into a task-owned directory without deleting the cache;
-    # another job may still use it, and it remains available for diagnosis.
     fallback_clone_dir=$(mktemp -d "${libutee_dir}.clone.XXXXXX")
     if git clone --depth 1 "${LIBUTEE_REPO}" "${fallback_clone_dir}"; then
-        # Publish a completed cold cache without replacing a concurrent job's
-        # directory. Damaged or already occupied caches keep the private copy.
-        if [ ! -e "${libutee_dir}" ] &&
-            mv -T -n "${fallback_clone_dir}" "${libutee_dir}" &&
-            [ ! -d "${fallback_clone_dir}" ]; then
-            fallback_clone_dir=""
-        else
-            libutee_dir="${fallback_clone_dir}"
-        fi
+        # No other job uses this per-container, per-architecture source tree.
+        # Replace a damaged tree so subsequent calls reuse the repaired cache.
+        rm -rf "${libutee_dir}"
+        mv -T "${fallback_clone_dir}" "${libutee_dir}"
+        fallback_clone_dir=""
+        echo "rust-libutee replacement clone published (attempt ${attempt}/3)" >&2
         break
     fi
     cleanup_fallback_clone
     fallback_clone_dir=""
     if [ "${attempt}" -eq 3 ]; then
-        echo "rust-libutee sync failed after ${attempt} attempts" >&2
+        echo "rust-libutee clone failed after ${attempt} attempts" >&2
         exit 1
     fi
+    echo "rust-libutee clone failed (attempt ${attempt}/3); retrying in $((attempt * 5))s" >&2
     sleep "$((attempt * 5))"
 done
 
