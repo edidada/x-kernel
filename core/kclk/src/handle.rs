@@ -143,9 +143,9 @@ impl ClkHandle {
             // the per-node count, and two unsynchronized callers can both see
             // 0, both fire ops.enable, and double-increment — the hardware-op
             // counters then unbalance (caught by the concurrency stress test).
-            let _el = crate::core::enable_lock();
+            let el = crate::core::enable_lock();
             if let Err(err) = self.core.enable_locked() {
-                drop(_el);
+                drop(el);
                 let _ = self.core.unprepare_locked();
                 return Err(err);
             }
@@ -162,9 +162,9 @@ impl ClkHandle {
     /// [`unprepare`](Self::unprepare) directly to observe it.
     pub fn disable_unprepare(&self) {
         crate::core::with_clk_lock(|| {
-            let _el = crate::core::enable_lock();
+            let el = crate::core::enable_lock();
             self.core.disable_locked();
-            drop(_el);
+            drop(el);
             let _ = self.core.unprepare_locked();
         });
     }
@@ -256,8 +256,10 @@ impl ClkHandle {
     /// drop will not unregister it twice.
     pub fn unregister_notifier(&self, id: ClkNotifierId) {
         self.core.remove_notifier(id);
-        self.notifier_id
-            .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire)
-            .ok();
+        // CAS result is intentionally discarded: on success drop will not
+        // unregister twice; on failure this was not the tracked id.
+        let _ = self
+            .notifier_id
+            .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire);
     }
 }

@@ -290,7 +290,13 @@ impl IndexPools {
             Some((_, v)) => v,
             None => {
                 self.pools.push((subsystem, Vec::new()));
-                &mut self.pools.last_mut().unwrap().1
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: the push above guarantees                               the pool exists"
+                )]
+                {
+                    &mut self.pools.last_mut().unwrap().1
+                }
             }
         };
         // Min-free: the first gap in the sorted used set.
@@ -373,7 +379,12 @@ pub fn publish_auto_indexed(
 /// fields (identity, naming, dev_t, topology path, modalias, uevent
 /// properties); grouping them into a struct would hide which fields are
 /// optional at a glance.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "CG-024-lint-exceptions: the publication carries the node's full projection identity \
+              (devname, dev_t, paths, modalias, properties, driver) — one struct- like call \
+              instead of a builder for a boot-time path"
+)]
 pub fn publish(
     id: u64,
     subsystem: &'static str,

@@ -20,3 +20,6 @@ driver-runtime = { workspace = true }
 kclk = { workspace = true }
 log.workspace = true
 
+
+[lints]
+workspace = true

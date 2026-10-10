@@ -39,10 +39,17 @@ unsafe impl VirtIoHal for Hal {
                 // SAFETY: the provider returned `size` bytes of coherent
                 // memory exclusively owned by this allocation.
                 unsafe { core::ptr::write_bytes(cpu_ptr, 0, size) };
-                (
-                    alloc.bus_addr as PhysAddr,
-                    NonNull::new(cpu_ptr).expect("non-null dma"),
-                )
+                #[expect(
+                    clippy::expect_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: the provider handed out \\
+                              an exclusive allocation — its cpu_addr cannot be null"
+                )]
+                {
+                    (
+                        alloc.bus_addr as PhysAddr,
+                        NonNull::new(cpu_ptr).expect("non-null dma"),
+                    )
+                }
             }
             Err(err) => {
                 log::error!("virtio-blk dma_alloc failed: pages={pages} err={err:?}");
@@ -92,18 +99,45 @@ unsafe impl VirtIoHal for Hal {
                     )
                 };
                 let vaddr = lease.as_ptr() as usize;
-                let mut lease = Some(lease);
-                if !mmio_probe_collector(|leases| leases.push(lease.take().expect("lease present")))
+                // The two `expect`s and the closing one assert the same
+                // invariant: `lease` was just wrapped in `Some` and taken
+                // at most once by the collector closure.
+                #[expect(
+                    clippy::expect_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: the lease was wrapped in \\
+                              Some immediately above; the collector takes it at most once"
+                )]
                 {
-                    FALLBACK_MMIO_LEASES
-                        .lock()
-                        .push(lease.expect("lease present"));
+                    let mut lease = Some(lease);
+                    if !mmio_probe_collector(|leases| {
+                        leases.push(lease.take().expect("lease present"))
+                    }) {
+                        FALLBACK_MMIO_LEASES
+                            .lock()
+                            .push(lease.expect("lease present"));
+                    }
                 }
-                NonNull::new(vaddr as *mut u8).expect("non-null mmio")
+                #[expect(
+                    clippy::expect_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: the provider mapped the \\
+                              region — its vaddr cannot be null"
+                )]
+                {
+                    NonNull::new(vaddr as *mut u8).expect("non-null mmio")
+                }
             }
             Err(err) => {
-                log::error!("virtio mmio map failed paddr={paddr:#x}: {err:?}");
-                panic!("virtio mmio map failed")
+                #[expect(
+                    clippy::panic,
+                    reason = "CG-021-no-panic-on-reachable-failure: the vendored Hal trait's \\
+                              associated function cannot return an error — a failed map is \\
+                              unrecoverable at this boundary (driver paths map through \\
+                              DeviceCtx::iomap, which reports ProbeError properly)"
+                )]
+                {
+                    log::error!("virtio mmio map failed paddr={paddr:#x}: {err:?}");
+                    panic!("virtio mmio map failed")
+                }
             }
         }
     }

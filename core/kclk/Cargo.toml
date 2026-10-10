@@ -23,3 +23,6 @@ unittest = { workspace = true }
 # A normal dependency (not dev-dependency) because `--cfg unittest` builds do
 # not separate dev deps in this workspace's Kconfig flow.
 ktask = { workspace = true }
+
+[lints]
+workspace = true

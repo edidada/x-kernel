@@ -91,7 +91,6 @@ impl Divider {
     }
 
     /// Construct and upcast in one step for [`crate::ClkBuilder::new`].
-    #[allow(clippy::too_many_arguments)]
     pub fn into_ops(
         reg: Arc<dyn ClkRegAccess>,
         offset: usize,

@@ -44,7 +44,11 @@ static IOPORT_IDS: &[PlatformId] = &[PlatformId::Alias(driver_core::platform::Al
 pub struct SerialData {
     /// Kept alive for the binding: dropping it unmaps the cold-start UART
     /// window. Field placement (after the port) encodes release order.
-    #[allow(dead_code)] // ownership-only field: read access is intentionally impossible
+    // Ownership-only field: read access is intentionally impossible.
+    #[expect(
+        dead_code,
+        reason = "CG-024-lint-exceptions: the guard exists for its Drop, never for reads"
+    )]
     regs: Option<driver_core::IoMap>,
 }
 

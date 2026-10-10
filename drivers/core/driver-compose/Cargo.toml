@@ -40,3 +40,6 @@ drv-virtio = { workspace = true, optional = true }
 drv-serial = { workspace = true, optional = true }
 drv-clk = { workspace = true, optional = true }
 drv-block = { workspace = true, optional = true }
+
+[lints]
+workspace = true

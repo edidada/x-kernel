@@ -121,7 +121,6 @@ impl DriverOps<PlatformBus> for MmioDriver {
     }
 }
 
-#[allow(unused_variables)]
 fn dispatch<T: virtio::Transport + Send + 'static>(
     dev: &mut DeviceCtx<'_, PlatformBus>,
     kind: driver_base::DeviceKind,
@@ -169,7 +168,6 @@ fn dispatch<T: virtio::Transport + Send + 'static>(
 
 /// Char-family dispatch: exactly one char family is wired per build
 /// (virtio-rng today); future char families get their own kind-checked arm.
-#[allow(unused_variables)]
 fn dispatch_char<T: virtio::Transport + Send + 'static>(
     dev: &mut DeviceCtx<'_, PlatformBus>,
     transport: T,
@@ -189,7 +187,6 @@ fn dispatch_char<T: virtio::Transport + Send + 'static>(
 
 macro_rules! simple_family_dispatch {
     ($fn_name:ident, $feature:literal, $module:ident) => {
-        #[allow(unused_variables)]
         fn $fn_name<T: virtio::Transport + Send + 'static>(
             dev: &mut DeviceCtx<'_, PlatformBus>,
             transport: T,

@@ -257,16 +257,17 @@ const fn as_device_kind(t: VirtIoDevType) -> Option<DeviceKind> {
     }
 }
 
-#[expect(
-    clippy::allow_attributes,
-    reason = "CG-024-lint-exceptions: Error conversion is used only by enabled VirtIO device \
-              backends"
-)]
-#[allow(
-    dead_code,
-    reason = "CG-024-lint-exceptions: dead_code: Error conversion is used only by enabled VirtIO \
-              device backends"
-)]
+/// Enabled exactly when at least one VirtIO device backend module is
+/// compiled — the only consumers of the conversion.
+#[cfg(any(
+    feature = "block",
+    feature = "gpu",
+    feature = "input",
+    feature = "net",
+    feature = "rng",
+    feature = "socket",
+    feature = "virtio-9p",
+))]
 pub(crate) const fn as_driver_error(e: virtio_drivers::Error) -> DriverError {
     use virtio_drivers::{Error::*, device::socket::SocketError::*};
     match e {

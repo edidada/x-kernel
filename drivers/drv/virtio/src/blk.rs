@@ -110,8 +110,19 @@ struct BlkActivation<H: VirtIoHal, T: Transport> {
 
 impl<H: VirtIoHal, T: Transport> Drop for BlkActivation<H, T> {
     fn drop(&mut self) {
-        let mut drain = block_wait::prepare_block_wait().expect("block close task context");
-        let mut stop = block_wait::prepare_block_wait().expect("block close task context");
+        // Remove runs in task context by construction (the device model's
+        // teardown owner is the composition root's remove path).
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: remove-path teardown runs in task \
+                      context; a wait-source allocation failure here cannot be recovered from \
+                      inside Drop"
+        )]
+        let (mut drain, mut stop) = {
+            let drain = block_wait::prepare_block_wait().expect("block close task context");
+            let stop = block_wait::prepare_block_wait().expect("block close task context");
+            (drain, stop)
+        };
         self.device.begin_close(drain.signals());
         if let Some(disk) = &self.disk
             && disk.part0().is_some()

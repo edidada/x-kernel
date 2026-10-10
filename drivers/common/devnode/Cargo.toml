@@ -16,3 +16,6 @@ ksync.workspace = true
 log.workspace = true
 driver-core = { workspace = true }
 unittest = { workspace = true }
+
+[lints]
+workspace = true

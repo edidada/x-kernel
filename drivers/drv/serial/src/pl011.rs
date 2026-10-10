@@ -60,6 +60,33 @@ pub struct Pl011Data {
 /// The driver ops (`struct amba_pl011_driver`).
 pub struct Pl011Driver;
 
+/// Acquire and enable the port's baud clock. Returns the handle plus the
+/// ENABLED-state token, which the caller keeps alive through every fallible
+/// probe step (IRQ registration, publication) — a failure drops it and the
+/// pair rolls back. See `Pl011Data::_enabled_clk` for the success policy.
+fn enable_baud_clock(
+    dev: &mut DeviceCtx<'_, PlatformBus>,
+) -> Result<Option<(ClkHandle, driver_core::EnabledClock)>, ProbeError> {
+    match dev
+        .resources()
+        .clk_by_name("uartclk")
+        .or_else(|| dev.resources().clk_at(0))
+    {
+        Some(spec) => {
+            let clk = dev.clk_spec(spec)?;
+            let enabled = clk
+                .prepare_enable()
+                .map_err(ProbeError::from)
+                .inspect_err(|_| log::warn!("pl011: failed to enable clock"))?;
+            Ok(Some((clk, enabled)))
+        }
+        None => {
+            log::debug!("pl011: no clock input described by firmware");
+            Ok(None)
+        }
+    }
+}
+
 impl DriverOps<PlatformBus> for Pl011Driver {
     type Data = Pl011Data;
 
@@ -94,33 +121,10 @@ impl DriverOps<PlatformBus> for Pl011Driver {
         };
 
         // Clock inputs (`clocks = <&phandle>`, `clock-names = "uartclk" ...`).
-        // Defers cleanly while the provider has not probed yet.
-        let clk = match dev
-            .resources()
-            .clk_by_name("uartclk")
-            .or_else(|| dev.resources().clk_at(0))
-        {
-            Some(spec) => {
-                let clk = dev.clk_spec(spec)?;
-                // The EnabledClock token owns the prepare+enable pair and
-                // stays ALIVE through every fallible step below (IRQ
-                // registration, publication): any failure drops it here
-                // and the clock rolls back (disable + unprepare). Only a
-                // fully successful probe hands the enabled state onward —
-                // stdout consumes it with `keep_running` (console
-                // continuity across rebind); auxiliary ports store the
-                // token in `Data`, whose drop balances it at remove.
-                let enabled = clk
-                    .prepare_enable()
-                    .map_err(ProbeError::from)
-                    .inspect_err(|_| log::warn!("pl011: failed to enable clock"))?;
-                Some((clk, enabled))
-            }
-            None => {
-                log::debug!("pl011: no clock input described by firmware");
-                None
-            }
-        };
+        // Defers cleanly while the provider has not probed yet. The token
+        // stays alive through every fallible step below; only a fully
+        // successful probe hands the enabled state onward.
+        let clk = enable_baud_clock(dev)?;
 
         // Interrupt: !920 semantics — the port's handler acknowledges and
         // collects input internally and wakes the attached tty waker

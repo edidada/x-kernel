@@ -172,6 +172,11 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
         data: &mut DataBox,
         services: &dyn DeviceServices,
     ) {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: the domain only hands a binding's \
+                      data back to the driver that created it (typed key)"
+        )]
         let data = data
             .downcast_mut::<P::Data>()
             .expect("device data belongs to the driver that probed it");
@@ -783,12 +788,13 @@ impl DeviceDomain {
             log::debug!("driver-core: removed unbound device {id} (no binding to tear down)");
             return Ok(());
         }
-        let (desc, driver, mut data, services) = (
-            desc.expect("active path retains the descriptor"),
-            driver,
-            data,
-            services,
-        );
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: the light path returned above — only \
+                      Active bindings reach here, and they retain the descriptor"
+        )]
+        let desc = desc.expect("active path retains the descriptor");
+        let (driver, mut data, services) = (driver, data, services);
 
         if let (Some(driver), Some(data)) = (driver.as_ref(), data.as_mut()) {
             driver.remove(&desc, id.raw(), data.as_mut(), services.as_ref());
@@ -858,9 +864,15 @@ pub fn global_topology_summary() -> Vec<DeviceSnapshot> {
 
 pub fn global_domain() -> &'static DeviceDomain {
     GLOBAL_DOMAIN.call_once(DeviceDomain::new);
-    GLOBAL_DOMAIN
-        .get()
-        .expect("global device domain call_once succeeded")
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: call_once completed immediately above"
+    )]
+    {
+        GLOBAL_DOMAIN
+            .get()
+            .expect("global device domain call_once succeeded")
+    }
 }
 
 #[cfg(unittest)]
@@ -1007,7 +1019,11 @@ mod tests {
         }
     }
 
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "CG-024-lint-exceptions: unittest fixture guards exist for their Drop side \
+                  effects"
+    )]
     struct SerData {
         regs: IoMap,
         irq: DevIrq,
@@ -1261,7 +1277,7 @@ mod tests {
 
     #[def_test(serial)]
     fn finish_probe_phase_unsticks_deferred_with_diagnostics() {
-        let (domain, _services) = fresh_domain();
+        let (domain, services) = fresh_domain();
         domain.register_driver(DriverDesc::new("test-serial", IDS, TestSer));
 
         // Provider 0x42 never publishes: the device stays deferred.
@@ -1275,7 +1291,7 @@ mod tests {
         assert!(domain.deferred_report().is_empty());
 
         // And the provider arriving late still claims it (resweep path).
-        _services.publish_clk(0x42);
+        services.publish_clk(0x42);
         // Late provider still wakes it: Unclaimed devices remember their
         // last dependency (the finish_probe_phase verdict is not terminal).
         assert_eq!(domain.wake(DepSource::clk(0x42)), 1);

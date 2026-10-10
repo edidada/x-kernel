@@ -26,7 +26,7 @@ use kclk::{ClkError, ClkLookup};
 
 /// Newtype adapting a [`kclk::ClkHandle`] to the device-model clock
 /// operations (the orphan-rule bridge).
-pub struct KclkHandle(kclk::ClkHandle);
+pub(crate) struct KclkHandle(kclk::ClkHandle);
 
 impl ClkOps for KclkHandle {
     fn name(&self) -> &str {
@@ -120,6 +120,7 @@ impl ClkRegistry {
 }
 
 #[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::boxed::Box;
     use core::sync::atomic::{AtomicUsize, Ordering};

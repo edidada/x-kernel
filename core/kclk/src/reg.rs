@@ -72,15 +72,19 @@ impl MmioClkReg {
 impl ClkRegAccess for MmioClkReg {
     fn reg_read(&self, offset: usize) -> u32 {
         // SAFETY: the caller of `new` guaranteed `base` is a valid mapped MMIO
-        // window and `offset` is within it and word-aligned; volatile prevents
+        // window and `offset` is within it and word-aligned.
+        let addr = unsafe { self.base.add(offset) };
+        // SAFETY: `addr` points inside the mapped window; volatile prevents
         // the compiler from eliding or reordering the device read.
-        unsafe { ptr::read_volatile(self.base.add(offset) as *const u32) }
+        unsafe { ptr::read_volatile(addr as *const u32) }
     }
 
     fn reg_write(&self, offset: usize, value: u32) {
-        // SAFETY: as above; the volatile store orders the device write so it is
+        // SAFETY: as `reg_read` — `base` is valid, `offset` in-window.
+        let addr = unsafe { self.base.add(offset) };
+        // SAFETY: the volatile store orders the device write so it is
         // not combined with neighboring stores.
-        unsafe { ptr::write_volatile(self.base.add(offset) as *mut u32, value) }
+        unsafe { ptr::write_volatile(addr as *mut u32, value) }
     }
 }
 

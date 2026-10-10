@@ -235,7 +235,10 @@ impl ClkBranch {
     }
 
     /// Divider clock (programmable divider field).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "CG-024-lint-exceptions: the constructor carries the clock table plus its                   parent context, matching the firmware description"
+    )]
     pub const fn divider(
         index: ClkIndex,
         name: &'static str,

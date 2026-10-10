@@ -6,11 +6,13 @@
 
 use alloc::sync::Arc;
 
-pub use driver_core::provider::{IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc, MsiResource};
+pub(crate) use driver_core::provider::{
+    IrqHandlerToken, IrqOp, IrqResource, IrqRouteDesc, MsiResource,
+};
 use driver_core::provider::{ResError, ResResult};
 // The provider contract (formerly device-res): this module IS the
 // definition site now. IRQ vocabulary re-exports from kirq.
-pub use kirq::{IrqController, IrqEvent, IrqHandler, IrqTrigger};
+pub(crate) use kirq::{IrqController, IrqEvent, IrqHandler, IrqTrigger};
 
 use super::XKernelResourceProvider;
 

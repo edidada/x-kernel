@@ -36,3 +36,6 @@ log.workspace = true
 pci = { workspace = true }
 virtio = { workspace = true, features = ["alloc"] }
 
+
+[lints]
+workspace = true

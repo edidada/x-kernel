@@ -194,13 +194,25 @@ impl IoMap {
         // requires 4-byte alignment and "registers are naturally aligned"
         // comments cannot constrain a safe `usize` offset. Misalignment
         // panics here instead of being UB at the volatile op.
-        let align = size.max(1);
-        if !(self.vaddr + offset).is_multiple_of(align) {
-            panic!(
-                "MMIO access misaligned: vaddr {:#x} + offset {:#x} not {}-byte aligned",
-                self.vaddr, offset, align
-            );
+        #[expect(
+            clippy::panic,
+            reason = "CG-021-no-panic-on-reachable-failure: a misaligned MMIO offset is a driver \
+                      programming error; a loud immediate failure beats UB at the volatile op"
+        )]
+        {
+            let align = size.max(1);
+            if !(self.vaddr + offset).is_multiple_of(align) {
+                panic!(
+                    "MMIO access misaligned: vaddr {:#x} + offset {:#x} not {}-byte aligned",
+                    self.vaddr, offset, align
+                );
+            }
         }
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: offsets come from region-bounded \
+                      register accessors; overflow means a malformed accessor, not runtime data"
+        )]
         let end = offset
             .checked_add(size)
             .expect("MMIO access offset overflow");

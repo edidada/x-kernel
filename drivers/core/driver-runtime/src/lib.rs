@@ -57,6 +57,11 @@ static GLOBAL_RUNTIME: kspin::SpinNoPreempt<Option<Arc<XKernelRuntime>>> =
 /// equivalent to `runtime.register_clk_provider` on the installed global
 /// runtime. Wakes every probe parked on this provider's phandle.
 pub fn register_clk_provider(provider: &'static dyn kclk::ClkLookup) {
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: boot-order discipline — the \\
+                  composition root installs the global runtime before any driver runs"
+    )]
     let runtime = GLOBAL_RUNTIME
         .lock()
         .clone()

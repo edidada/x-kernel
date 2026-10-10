@@ -21,3 +21,6 @@ driver-core = { workspace = true }
 driver_base = { workspace = true }
 kclass = { workspace = true, features = ["block"] }
 
+
+[lints]
+workspace = true

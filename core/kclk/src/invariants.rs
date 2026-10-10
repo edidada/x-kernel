@@ -1,3 +1,11 @@
+// (unittest module: lint allowances as file-top inner attributes — the
+// `mod_test` macro cannot attach to file modules on stable rustc.)
+#![expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "CG-021-no-panic-on-reachable-failure: unittest module: test helpers may panic on \
+              failure"
+)]
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.

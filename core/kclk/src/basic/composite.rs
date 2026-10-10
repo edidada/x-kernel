@@ -24,7 +24,11 @@ pub struct Composite {
 
 impl Composite {
     /// Create a composite clock from optional sub-node roles.
-    #[allow(clippy::new_ret_no_self)]
+    #[expect(
+        clippy::new_ret_no_self,
+        reason = "CG-024-lint-exceptions: new() returns the composite node handle, not Self — the \
+                  composite is a set of children, not one clock"
+    )]
     pub fn new(
         mux: Option<Arc<dyn ClkHwOps>>,
         div: Option<Arc<dyn ClkHwOps>>,
