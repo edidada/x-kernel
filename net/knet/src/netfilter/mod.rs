@@ -6,7 +6,8 @@
 
 #[expect(
     dead_code,
-    reason = "CG-024-lint-exceptions: dead_code: packet evaluation and legacy iptables consumers \
-              follow in IKIXDM"
+    reason = "CG-024-lint-exceptions: dead_code: the private filter subtree is staged as one unit \
+              with the follow-up rule model in IKIXDM; packet evaluation and legacy iptables \
+              consumers follow"
 )]
 mod filter;

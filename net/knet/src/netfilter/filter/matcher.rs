@@ -77,6 +77,8 @@ impl PortRange {
 pub(crate) const MAX_INTERFACE_NAME_LEN: usize = 15;
 
 /// Exact or prefix interface-name condition.
+///
+/// Name lengths follow legacy iptables command-line interface syntax.
 /// An empty exact name matches only an empty interface name;
 /// an empty prefix matches any interface name.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -86,10 +88,18 @@ pub(crate) struct InterfaceMatch {
 }
 
 impl InterfaceMatch {
+    /// Creates an exact condition, rejecting names longer than 15 bytes.
+    ///
+    /// Callers must bound name allocation before transferring ownership here.
     pub(crate) fn exact(name: String) -> Option<Self> {
         Self::new(name, false)
     }
 
+    /// Creates a prefix condition from a name without the trailing `+`.
+    ///
+    /// The prefix is limited to 14 bytes: iptables' `xtables_parse_interface`
+    /// in `libxtables/xtables.c` fits the name, `+`, and NUL into `IFNAMSIZ`.
+    /// Callers must bound name allocation before transferring ownership here.
     pub(crate) fn prefix(name: String) -> Option<Self> {
         Self::new(name, true)
     }
@@ -297,5 +307,23 @@ mod tests {
         assert!(InterfaceMatch::exact("X".repeat(MAX_INTERFACE_NAME_LEN)).is_some());
         assert!(InterfaceMatch::prefix("X".repeat(MAX_INTERFACE_NAME_LEN - 1)).is_some());
         assert!(InterfaceMatch::prefix("X".repeat(MAX_INTERFACE_NAME_LEN)).is_none());
+    }
+
+    #[def_test]
+    fn port_ranges_include_both_endpoints() {
+        let range = PortRange::new(80, 443).unwrap();
+        assert!(!range.contains(79));
+        assert!(range.contains(80));
+        assert!(range.contains(443));
+        assert!(!range.contains(444));
+
+        let single_port = PortRange::new(80, 80).unwrap();
+        assert!(!single_port.contains(79));
+        assert!(single_port.contains(80));
+        assert!(!single_port.contains(81));
+
+        let all_ports = PortRange::new(0, u16::MAX).unwrap();
+        assert!(all_ports.contains(0));
+        assert!(all_ports.contains(u16::MAX));
     }
 }
