@@ -212,6 +212,16 @@ impl DeviceDescriptor {
         self.firmware = Some(firmware);
         self
     }
+
+    /// Set the parent device (the topology link). The domain validates the
+    /// parent exists at `add_device` time and cascades removals through
+    /// children first — a parent never disappears while a child references
+    /// it. `None` (the default) marks root devices (bus hosts, firmware
+    /// roots).
+    pub fn with_parent(mut self, parent: Option<DeviceId>) -> Self {
+        self.parent = parent.map(|id| id.raw());
+        self
+    }
 }
 
 /// One platform id-table row: a firmware compatible string or a
