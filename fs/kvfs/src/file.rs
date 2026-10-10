@@ -133,6 +133,23 @@ pub trait FileMappingOperations: Send + Sync {
     fn page_mkwrite(&self, file: &VfsFile, pos: u64, len: usize) -> VfsResult<()>;
 }
 
+/// Identity of one native file-copy implementation — the analog of a Linux
+/// `f_op->copy_file_range` function pointer. Equality is the address
+/// identity of the implementation's token: two operation tables count as the
+/// same implementation only when they present the very same token, never
+/// when they merely spell the same name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CopyHandlerId(usize);
+
+impl CopyHandlerId {
+    /// Creates the identity token of one implementation from its dedicated
+    /// `static`. Distinct implementations pass distinct statics, so equality
+    /// is pointer identity.
+    pub fn of<T>(token: &'static T) -> Self {
+        Self(core::ptr::from_ref(token).addr())
+    }
+}
+
 /// File operations installed on file-capable inodes.
 ///
 /// The same operation table is attached to the inode and used by opened file
@@ -170,7 +187,7 @@ pub trait FileOperations: Send + Sync + 'static {
     /// identity (one shared implementation, the way nfs serves several
     /// filesystem types with one handler); every other pair needs the same
     /// super block and is rejected with `EXDEV` otherwise.
-    fn file_copy_handler(&self) -> Option<&'static str> {
+    fn file_copy_handler(&self) -> Option<CopyHandlerId> {
         None
     }
 
@@ -750,7 +767,7 @@ impl VfsFile {
 
     /// Returns the native file-copy handler identity this file's operation
     /// table carries, if any.
-    pub fn file_copy_handler(&self) -> Option<&'static str> {
+    pub fn file_copy_handler(&self) -> Option<CopyHandlerId> {
         self.operations().file_copy_handler()
     }
 

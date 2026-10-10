@@ -459,7 +459,10 @@ mod tests {
         assert!(!Arc::ptr_eq(&first_sb, &second_sb));
 
         let first_file = first.into_file(kcred::initial_cred()).unwrap();
-        assert_eq!(first_file.file_copy_handler(), Some("memfs"));
+        assert_eq!(
+            first_file.file_copy_handler(),
+            Some(crate::copy_handler_id())
+        );
     }
 
     #[def_test]

@@ -733,6 +733,15 @@ impl InodeDirOperations for MemoryNode {
     }
 }
 
+/// The dedicated identity token of the memfs copy implementation: equality
+/// of [`copy_handler_id()`] values is pointer identity of this static.
+static COPY_HANDLER: u8 = 0;
+
+/// The native file-copy identity every memfs operation table reports.
+pub fn copy_handler_id() -> kvfs::CopyHandlerId {
+    kvfs::CopyHandlerId::of(&COPY_HANDLER)
+}
+
 impl FileOperations for MemoryNode {
     fn fsync(&self, _file: &VfsFile, _data_only: bool) -> VfsResult<()> {
         // Memory-backed files and directories have no persistent writeback.
@@ -755,12 +764,12 @@ impl FileOperations for MemoryNode {
         )
     }
 
-    fn file_copy_handler(&self) -> Option<&'static str> {
+    fn file_copy_handler(&self) -> Option<kvfs::CopyHandlerId> {
         // Every memfs node is served by this one implementation, so the
         // shared handler identity admits cross-instance copies the way one
         // nfs handler serves several nfs filesystem types (Linux
         // `generic_copy_file_checks` compares handler identity, not mounts).
-        Some("memfs")
+        Some(copy_handler_id())
     }
 
     fn supports_write(&self) -> bool {

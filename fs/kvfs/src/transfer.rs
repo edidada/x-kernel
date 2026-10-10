@@ -385,7 +385,7 @@ fn pump_pipe_to_file(
     };
     let mut output_pos = output_offset.as_deref().copied().unwrap_or(0);
     let output_managed = output_offset.is_none();
-    pump(len, |buf, chunk, total| {
+    let result = pump(len, |buf, chunk, total| {
         let wait = nonblocking || input.is_nonblocking() || total > 0;
         let confirmed = pipe.splice_read(wait, &mut buf[..chunk], |staged| {
             if output_managed && !output.is_stream() {
@@ -398,7 +398,11 @@ fn pump_pipe_to_file(
             confirmed,
             stop: confirmed < chunk,
         })
-    })
+    });
+    if let Some(offset) = output_offset {
+        *offset = output_pos;
+    }
+    result
 }
 
 /// A validated `copy_file_range(2)` request. Construction runs the full

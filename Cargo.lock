@@ -3840,6 +3840,7 @@ dependencies = [
  "ktime_types",
  "kvfs",
  "memaddr",
+ "memfs",
  "unittest",
 ]
 

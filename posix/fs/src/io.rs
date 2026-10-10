@@ -552,7 +552,7 @@ mod copy_file_range_checks_tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use iov_iter::{IovIterDest, IovIterSource};
-    use kvfs::{FileOperations, Kiocb, MAX_LFS_FILESIZE, SuperBlockFlags};
+    use kvfs::{CopyHandlerId, FileOperations, Kiocb, MAX_LFS_FILESIZE, SuperBlockFlags};
     use linux_raw_sys::general::{O_APPEND, O_RDONLY, O_RDWR};
 
     use super::*;
@@ -573,10 +573,10 @@ mod copy_file_range_checks_tests {
 
     /// Instrumented backend whose `poisoned_call`-th write fails, modelling
     /// a destination that runs out of space mid-copy. `handler` controls the
-    /// native-copy identity the table reports: `Some("memfs")` stands for an
+    /// native-copy identity the table reports: the memfs token stands for an
     /// instrumented memfs file, `None` for a foreign table.
     struct CountingBackend {
-        handler: Option<&'static str>,
+        handler: Option<CopyHandlerId>,
         poisoned_call: usize,
         calls: AtomicUsize,
     }
@@ -590,7 +590,7 @@ mod copy_file_range_checks_tests {
             true
         }
 
-        fn file_copy_handler(&self) -> Option<&'static str> {
+        fn file_copy_handler(&self) -> Option<CopyHandlerId> {
             self.handler
         }
 
@@ -616,12 +616,12 @@ mod copy_file_range_checks_tests {
     #[unittest::def_test]
     fn copy_error_after_progress_returns_completed_prefix() {
         let source = Arc::new(CountingBackend {
-            handler: Some("memfs"),
+            handler: Some(memfs::copy_handler_id()),
             poisoned_call: usize::MAX,
             calls: AtomicUsize::new(0),
         });
         let destination = Arc::new(CountingBackend {
-            handler: Some("memfs"),
+            handler: Some(memfs::copy_handler_id()),
             poisoned_call: 1,
             calls: AtomicUsize::new(0),
         });
@@ -889,6 +889,53 @@ mod copy_file_range_checks_tests {
             ),
             Err(KError::from(LinuxError::EXDEV))
         );
+    }
+
+    /// Both sides `Managed` on one open file description take the shared
+    /// single-lock path: one logical position advances by the transferred
+    /// count, and the range rewritten onto itself keeps its content.
+    #[unittest::def_test]
+    fn same_description_managed_sides_share_one_position() {
+        let file = memfd_file("shared-managed");
+        fill(&file, 8192);
+        assert_eq!(
+            kvfs::transfer_files(
+                &file,
+                TransferPosition::Managed,
+                &file,
+                TransferPosition::Managed,
+                4096,
+                false,
+            ),
+            Ok(4096)
+        );
+        assert_eq!(file.position(), 4096);
+        let mut check = alloc::vec![0u8; 8192];
+        let mut position = 0;
+        assert_eq!(file.read_from(&mut check, &mut position), Ok(8192));
+        let pattern: alloc::vec::Vec<u8> = (0..8192).map(|index| (index % 251) as u8).collect();
+        assert_eq!(check, pattern);
+    }
+
+    /// A `Managed`-on-both-sides `copy_file_range` starts both sides at
+    /// `f_pos`, so the ranges overlap and are rejected with `EINVAL`
+    /// without moving the position.
+    #[unittest::def_test]
+    fn same_description_managed_copy_overlap_is_rejected() {
+        let file = memfd_file("shared-overlap");
+        fill(&file, 8192);
+        assert_eq!(
+            kvfs::copy_file_range(
+                &file,
+                TransferPosition::Managed,
+                &file,
+                TransferPosition::Managed,
+                4096,
+                false,
+            ),
+            Err(KError::from(LinuxError::EINVAL))
+        );
+        assert_eq!(file.position(), 0);
     }
 }
 
