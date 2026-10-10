@@ -145,15 +145,20 @@ impl<B: Bus, P: crate::driver::DriverOps<B>> AnyDriver for RegisteredDriver<B, P
         id: u64,
         services: &dyn DeviceServices,
     ) -> Result<Box<DataBox>, ProbeError> {
-        // MODALIAS: the best-scoring matching id row's alias, computed once
-        // here so drivers forward it into their class publications.
+        // MODALIAS: the alias of the BEST-SCORING matching id row — the
+        // same row `matches()` selects the driver by. A first-match pick
+        // here could pair an exact-match device with a generic row's
+        // alias (uevent/module loading would see the wrong identity).
         let modalias = self
             .desc
             .ids
             .iter()
-            .filter(|entry| entry.matches(desc) != MatchScore::NoMatch)
-            .filter_map(|entry| entry.modalias())
-            .next();
+            .filter_map(|entry| {
+                let score = entry.matches(desc);
+                (score != MatchScore::NoMatch).then(|| (score, entry.modalias()))
+            })
+            .max_by_key(|(score, _)| *score)
+            .and_then(|(_, alias)| alias);
         let modalias_ref = modalias.as_deref();
         let mut ctx = DeviceCtx::with_modalias(desc, id, modalias_ref, services);
         let data = self.desc.ops.probe(&mut ctx)?;
@@ -256,6 +261,20 @@ struct DomainInner {
 }
 
 /// An instance of the device model.
+/// Scope guard for the probe-pump serialization flag: releases it on
+/// every exit, including panics under `panic = "unwind"` builds (see
+/// [`DeviceDomain::probe_pending`]). Under `panic = "abort"` a panic ends
+/// the system anyway; the guard is for the unwind configurations.
+struct ProbePumpGuard<'a> {
+    domain: &'a DeviceDomain,
+}
+
+impl Drop for ProbePumpGuard<'_> {
+    fn drop(&mut self) {
+        *self.domain.probing.lock() = false;
+    }
+}
+
 pub struct DeviceDomain {
     inner: SpinNoPreempt<DomainInner>,
     /// Serializes the probe pump across callers. The probe path runs
@@ -603,8 +622,8 @@ impl DeviceDomain {
                 }
             };
             if !already_probing {
+                let _guard = ProbePumpGuard { domain: self };
                 self.probe_pending_locked();
-                *self.probing.lock() = false;
             }
         }
         woken
@@ -623,9 +642,8 @@ impl DeviceDomain {
             }
             *probing = true;
         }
-        let stats = self.probe_pending_locked();
-        *self.probing.lock() = false;
-        stats
+        let _guard = ProbePumpGuard { domain: self };
+        self.probe_pending_locked()
     }
 
     fn probe_pending_locked(&self) -> ProbeStats {

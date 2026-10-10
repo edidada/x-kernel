@@ -22,7 +22,7 @@ pub struct PciTransportService {
     /// The PROVIDER handle recovered from the services instance this
     /// extension was requested from — never the global fallback. A domain
     /// with its own runtime binds its own provider (review II-6).
-    provider: alloc::sync::Arc<crate::XKernelResourceProvider>,
+    provider: &'static crate::XKernelResourceProvider,
 }
 
 impl PciTransportService {
@@ -31,7 +31,7 @@ impl PciTransportService {
         &self,
         descriptor: &DeviceDescriptor,
     ) -> Result<(DeviceKind, virtio::PciTransport, Option<usize>), driver_core::RuntimeError> {
-        crate::probe_pci_transport_with(&self.provider, descriptor)
+        crate::probe_pci_transport_with(self.provider, descriptor)
     }
 }
 
@@ -44,7 +44,7 @@ impl ExtensionService for PciTransportService {
         // provider handle.
         let runtime: &XKernelRuntime = services.as_any().downcast_ref()?;
         Some(Self {
-            provider: runtime.provider_arc(),
+            provider: runtime.static_provider(),
         })
     }
 }

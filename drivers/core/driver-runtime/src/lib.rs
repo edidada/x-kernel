@@ -92,9 +92,6 @@ impl ResIrqHandler for AdaptedIrqHandler {
         match (self.handler)() {
             IrqAction::Handled => ResIrqEvent::HANDLED,
             IrqAction::NotHandled => ResIrqEvent::NOT_HANDLED,
-            // kirq has no threaded-handler vocabulary yet (the review
-            // defers threaded IRQ); WakeThread degrades to Handled.
-            IrqAction::WakeThread => ResIrqEvent::HANDLED,
         }
     }
 }
@@ -106,22 +103,29 @@ impl ResIrqHandler for AdaptedIrqHandler {
 /// accounting, DMA attributes, and interrupt routing stay possible as the
 /// resource layer is folded in.
 pub struct XKernelRuntime {
-    provider: Arc<XKernelResourceProvider>,
+    /// The ONE process-wide provider — the same instance the transport
+    /// HAL addresses via [`resource_provider`]. The vendored virtio `Hal`
+    /// trait exposes associated functions (no `&self` receiver), so a HAL
+    /// cannot carry a per-runtime provider instance; a second,
+    /// runtime-private `Arc::new(provider)` would silently fork the
+    /// provider world (per-device accounting, future IOMMU domains) from
+    /// the HAL's. Both sides therefore share this single static.
+    provider: &'static XKernelResourceProvider,
     clks: ClkRegistry,
 }
 
 impl XKernelRuntime {
     /// The resource provider handle (for service extensions that need
     /// direct provider access without going through the global runtime).
-    pub(crate) fn provider_arc(&self) -> Arc<XKernelResourceProvider> {
-        self.provider.clone()
+    pub(crate) fn static_provider(&self) -> &'static XKernelResourceProvider {
+        self.provider
     }
 
     /// Build the runtime with a wake hook that re-probes the given domain
     /// when a clock provider registers.
     pub fn new(wake: impl Fn(driver_core::DepSource) + Send + Sync + 'static) -> Arc<Self> {
         Arc::new(Self {
-            provider: Arc::new(XKernelResourceProvider::new()),
+            provider: resource_provider(),
             clks: ClkRegistry::new(wake),
         })
     }
@@ -151,7 +155,6 @@ impl XKernelRuntime {
         // driver-core's MmioRegion is the single address vocabulary — one
         // type, no field-by-field re-construction.
         self.provider
-            .as_ref()
             .map_mmio(region, "driver-core")
             .map_err(map_res_error)
     }
@@ -170,7 +173,7 @@ impl DeviceServices for XKernelRuntime {
     ) -> Result<IoMap, RuntimeError> {
         let mapping = self.iomap_resource(region)?;
         let release = {
-            let provider = self.provider.clone();
+            let provider = self.provider;
             move || provider.unmap_mmio(mapping)
         };
         // SAFETY: the provider mapped the region; the handle pairs the
@@ -197,8 +200,8 @@ impl DeviceServices for XKernelRuntime {
             .request_irq(resource, adapted)
             .map_err(map_res_error)?;
         let release = {
-            let provider = self.provider.clone();
-            move || provider.as_ref().release_irq(resource, token)
+            let provider = self.provider;
+            move || provider.release_irq(resource, token)
         };
         let _ = name;
         Ok(DevIrq::new(spec.number, Some(Arc::new(release))))
@@ -214,7 +217,7 @@ impl DeviceServices for XKernelRuntime {
         let allocation: DmaAllocation =
             self.provider.alloc_coherent(spec).map_err(map_res_error)?;
         let release = {
-            let provider = self.provider.clone();
+            let provider = self.provider;
             move || provider.free_coherent(allocation)
         };
         Ok(CoherentMem::new(
@@ -239,7 +242,7 @@ impl XKernelRuntime {
         &self,
         descriptor: &driver_core::desc::DeviceDescriptor,
     ) -> Result<(driver_core::DeviceKind, virtio::PciTransport, Option<usize>), RuntimeError> {
-        crate::probe_pci_transport_with(&self.provider, descriptor)
+        crate::probe_pci_transport_with(self.provider, descriptor)
     }
 }
 
@@ -248,7 +251,7 @@ impl XKernelRuntime {
 /// non-global domain binds its own provider.
 #[cfg(feature = "virtio-hal")]
 pub fn probe_pci_transport_with(
-    provider: &Arc<XKernelResourceProvider>,
+    provider: &'static XKernelResourceProvider,
     descriptor: &driver_core::desc::DeviceDescriptor,
 ) -> Result<(driver_core::DeviceKind, virtio::PciTransport, Option<usize>), RuntimeError> {
     {
@@ -306,8 +309,7 @@ pub fn probe_pci_transport_with(
         // the vendored constructor panics mid-walk (the old begin/take pair
         // left the slot stuck open on panic).
         let scope = hal::begin_mmio_probe();
-        let probed =
-            virtio::probe_pci_transport_only::<hal::Hal>(root, bdf, &dev_info, provider.clone());
+        let probed = virtio::probe_pci_transport_only::<hal::Hal>(root, bdf, &dev_info, provider);
         let (kind, mut transport, transport_irq) = probed.ok_or(RuntimeError::BadState)?;
         let leases = scope.take_leases();
         transport.retain_mappings(leases);
@@ -316,7 +318,7 @@ pub fn probe_pci_transport_with(
             descriptor
                 .resources
                 .irq(0)
-                .and_then(|spec| virtio::resolve_legacy_irq(&spec, provider.as_ref()))
+                .and_then(|spec| virtio::resolve_legacy_irq(&spec, provider))
         });
 
         Ok((kind, transport, irq))
