@@ -227,6 +227,43 @@ fn pump(
     result
 }
 
+/// The buffered file-pair copy step shared by [`transfer_files`] and
+/// [`copy_file_range`]: one read at the local source position, one write at
+/// the local destination position, the oversized-backend-count guards, and
+/// the accepted-prefix rewind. [`pump`] owns the settlement around it.
+struct FilePairStep<'a> {
+    input: &'a Arc<VfsFile>,
+    output: &'a Arc<VfsFile>,
+    input_pos: &'a mut u64,
+    output_pos: &'a mut u64,
+}
+
+impl FilePairStep<'_> {
+    fn step(&mut self, buf: &mut [u8], chunk: usize) -> KResult<Step> {
+        let mut read_pos = *self.input_pos;
+        let read = self.input.read_from(&mut buf[..chunk], &mut read_pos)?;
+        if read > chunk {
+            return Err(KError::Io);
+        }
+        if read == 0 {
+            return Ok(Step::Eof);
+        }
+        let mut write_pos = *self.output_pos;
+        let written = self.output.write_from(&buf[..read], &mut write_pos)?;
+        if written > read {
+            return Err(KError::Io);
+        }
+        // Only the accepted prefix commits: the tail stays at the source
+        // for the next step to re-read.
+        *self.input_pos += written as u64;
+        *self.output_pos = write_pos;
+        Ok(Step::Data {
+            confirmed: written,
+            stop: written < read,
+        })
+    }
+}
+
 /// Transfers up to `len` bytes, committing only bytes accepted by the destination.
 ///
 /// [`TransferPosition::Managed`] sides use the open file descriptions'
@@ -297,30 +334,16 @@ pub fn transfer_files(
         &mut input_scratch,
         &mut output_scratch,
     );
-    let (mut input_pos, mut output_pos) = positions.starts();
-    let result = pump(len, |buf, chunk, _total| {
-        let mut read_pos = input_pos;
-        let read = input.read_from(&mut buf[..chunk], &mut read_pos)?;
-        if read > chunk {
-            return Err(KError::Io);
-        }
-        if read == 0 {
-            return Ok(Step::Eof);
-        }
-        let mut write_pos = output_pos;
-        let written = output.write_from(&buf[..read], &mut write_pos)?;
-        if written > read {
-            return Err(KError::Io);
-        }
-        // Only the accepted prefix commits: the tail stays at the source
-        // for the next step to re-read.
-        input_pos += written as u64;
-        output_pos = write_pos;
-        Ok(Step::Data {
-            confirmed: written,
-            stop: written < read,
-        })
-    });
+    let (input_start, output_start) = positions.starts();
+    let mut input_pos = input_start;
+    let mut output_pos = output_start;
+    let mut step = FilePairStep {
+        input,
+        output,
+        input_pos: &mut input_pos,
+        output_pos: &mut output_pos,
+    };
+    let result = pump(len, |buf, chunk, _total| step.step(buf, chunk));
     positions.commit(input_pos, output_pos);
     result
 }
@@ -405,104 +428,98 @@ fn pump_pipe_to_file(
     result
 }
 
-/// A validated `copy_file_range(2)` request. Construction runs the full
-/// Linux check table in order, so the engine physically never sees an
-/// invalid request: directories are rejected with `EISDIR`, every
-/// non-regular fd (pipes, sockets, devices) with `EINVAL`, a destination
-/// opened `O_APPEND` with `EBADF` (the copy would land at the wrong offset),
-/// and a cross-superblock pair with `EXDEV` unless both operation tables
-/// report the same native copy handler. The range checks then run in Linux's
-/// order: an unsigned wrap of the request is reported as `EOVERFLOW`, the
-/// request is shortened to the source EOF, and the destination's own ceiling
-/// applies — a start at or past the maximum file size is `EFBIG` and the
-/// count is clamped to what the destination can hold. Overlapping ranges
-/// within one inode are rejected with `EINVAL` so the chunked copy can never
-/// read bytes it has already rewritten; a zero-length request never overlaps
-/// and remains a no-op.
-struct CopyRange {
-    count: u64,
-}
-
-impl CopyRange {
-    fn new(
-        input: &VfsFile,
-        output: &VfsFile,
-        input_start: u64,
-        output_start: u64,
-        requested: u64,
-    ) -> KResult<Self> {
-        let input_inode = input.inode();
-        let output_inode = output.inode();
-        if input_inode.node_type() == crate::NodeType::Directory
-            || output_inode.node_type() == crate::NodeType::Directory
-        {
-            return Err(LinuxError::EISDIR.into());
-        }
-        if input_inode.node_type() != crate::NodeType::RegularFile
-            || output_inode.node_type() != crate::NodeType::RegularFile
-        {
-            return Err(LinuxError::EINVAL.into());
-        }
-        if output.flags().contains(crate::OpenFlags::APPEND) {
-            return Err(LinuxError::EBADF.into());
-        }
-        let input_super_block = input_inode.super_block()?;
-        let output_super_block = output_inode.super_block()?;
-        // Linux `generic_copy_file_checks` (fs/read_write.c:1436): a pair
-        // whose tables carry the same native copy handler is admitted across
-        // super blocks; every other pair needs the same super block.
-        let same_super_block = Arc::ptr_eq(&input_super_block, &output_super_block);
-        let same_handler = match (input.file_copy_handler(), output.file_copy_handler()) {
-            (Some(input_handler), Some(output_handler)) => input_handler == output_handler,
-            _ => false,
-        };
-        if !same_super_block && !same_handler {
-            return Err(LinuxError::EXDEV.into());
-        }
-        // Linux reports `EOVERFLOW` when the range wraps its unsigned
-        // arithmetic (`pos_in + count < pos_in || pos_out + count <
-        // pos_out`); the ABI layer already rejected negative starts.
-        // Requests beyond the source EOF are shortened below, not rejected.
-        if input_start.checked_add(requested).is_none()
-            || output_start.checked_add(requested).is_none()
-        {
-            return Err(LinuxError::EOVERFLOW.into());
-        }
-        // Shorten to the source EOF before the destination ceiling and the
-        // overlap check, so a request past EOF is a no-op rather than a
-        // false overlap. The size is snapshotted once: a concurrent truncate
-        // between two reads would underflow the subtraction.
-        let size = input.size();
-        let count = if input_start >= size {
-            0
-        } else {
-            requested.min(size - input_start)
-        };
-        // Linux `generic_write_check_limits`: the destination's own ceiling
-        // applies in the checks phase — a start at or past the maximum file
-        // size is `EFBIG` even for an already-empty request, and the count
-        // is clamped to what the destination can hold from here.
-        let output_max = output.max_file_size();
-        if output_start >= output_max {
-            return Err(LinuxError::EFBIG.into());
-        }
-        let count = count.min(output_max - output_start);
-        // Overlapping ranges within one inode are rejected so the chunked
-        // copy can never read bytes it has already rewritten; a zero-length
-        // request never overlaps and remains a no-op success.
-        if Arc::ptr_eq(input_inode, output_inode)
-            && count != 0
-            && input_start < output_start.saturating_add(count)
-            && output_start < input_start.saturating_add(count)
-        {
-            return Err(LinuxError::EINVAL.into());
-        }
-        Ok(Self { count })
+/// Runs the full Linux check table in order and returns the effective copy
+/// length: directories are rejected with `EISDIR`, every non-regular fd
+/// (pipes, sockets, devices) with `EINVAL`, a destination opened `O_APPEND`
+/// with `EBADF` (the copy would land at the wrong offset), and the pair is
+/// matched against Linux's handler branch (`fs/read_write.c:1436`). The
+/// range checks then run in Linux's order: an unsigned wrap of the request
+/// is reported as `EOVERFLOW`, the request is shortened to the source EOF,
+/// and the destination's own ceiling applies — a start at or past the
+/// maximum file size is `EFBIG` and the count is clamped to what the
+/// destination can hold. Overlapping ranges within one inode are rejected
+/// with `EINVAL` so the chunked copy can never read bytes it has already
+/// rewritten; a zero-length request never overlaps and remains a no-op.
+fn verify_copy_file_range(
+    input: &VfsFile,
+    output: &VfsFile,
+    input_start: u64,
+    output_start: u64,
+    requested: u64,
+) -> KResult<u64> {
+    let input_inode = input.inode();
+    let output_inode = output.inode();
+    if input_inode.node_type() == crate::NodeType::Directory
+        || output_inode.node_type() == crate::NodeType::Directory
+    {
+        return Err(LinuxError::EISDIR.into());
     }
+    if input_inode.node_type() != crate::NodeType::RegularFile
+        || output_inode.node_type() != crate::NodeType::RegularFile
+    {
+        return Err(LinuxError::EINVAL.into());
+    }
+    if output.flags().contains(crate::OpenFlags::APPEND) {
+        return Err(LinuxError::EBADF.into());
+    }
+    let input_super_block = input_inode.super_block()?;
+    let output_super_block = output_inode.super_block()?;
+    // Linux `generic_copy_file_checks` (fs/read_write.c:1436) branches on
+    // the DESTINATION table: a table that carries a native copy handler
+    // must be paired with the same handler — even within one super
+    // block; only a handler-less destination falls back to the
+    // same-superblock rule.
+    let same_super_block = Arc::ptr_eq(&input_super_block, &output_super_block);
+    let admitted = match output.file_copy_handler() {
+        Some(output_handler) => input.file_copy_handler() == Some(output_handler),
+        None => same_super_block,
+    };
+    if !admitted {
+        return Err(LinuxError::EXDEV.into());
+    }
+    // Linux reports `EOVERFLOW` when the range wraps its unsigned
+    // arithmetic (`pos_in + count < pos_in || pos_out + count <
+    // pos_out`); the ABI layer already rejected negative starts.
+    // Requests beyond the source EOF are shortened below, not rejected.
+    if input_start.checked_add(requested).is_none() || output_start.checked_add(requested).is_none()
+    {
+        return Err(LinuxError::EOVERFLOW.into());
+    }
+    // Shorten to the source EOF before the destination ceiling and the
+    // overlap check, so a request past EOF is a no-op rather than a
+    // false overlap. The size is snapshotted once: a concurrent truncate
+    // between two reads would underflow the subtraction.
+    let size = input.size();
+    let count = if input_start >= size {
+        0
+    } else {
+        requested.min(size - input_start)
+    };
+    // Linux `generic_write_check_limits`: the destination's own ceiling
+    // applies in the checks phase — a start at or past the maximum file
+    // size is `EFBIG` even for an already-empty request, and the count
+    // is clamped to what the destination can hold from here.
+    let output_max = output.max_file_size();
+    if output_start >= output_max {
+        return Err(LinuxError::EFBIG.into());
+    }
+    let count = count.min(output_max - output_start);
+    // Overlapping ranges within one inode are rejected so the chunked
+    // copy can never read bytes it has already rewritten; a zero-length
+    // request never overlaps and remains a no-op success.
+    if Arc::ptr_eq(input_inode, output_inode)
+        && count != 0
+        && input_start < output_start.saturating_add(count)
+        && output_start < input_start.saturating_add(count)
+    {
+        return Err(LinuxError::EINVAL.into());
+    }
+    Ok(count)
 }
 
 /// `copy_file_range(2)` boundary: the caller's position protocol resolves
-/// into explicit starts under the position locks, `CopyRange::new` runs the
+/// into explicit starts under the position locks, `verify_copy_file_range`
+/// runs the
 /// check table against those starts, and the pump copies between the local
 /// positions. Resolution, checks, copy and the position commit share one
 /// critical section (Linux `fdget_pos`), so concurrent transfers on a shared
@@ -537,33 +554,18 @@ pub fn copy_file_range(
         &mut input_scratch,
         &mut output_scratch,
     );
-    let (mut input_pos, mut output_pos) = positions.starts();
+    let (input_start, output_start) = positions.starts();
+    let count = verify_copy_file_range(input, output, input_start, output_start, len as u64)?;
 
-    let request = CopyRange::new(input, output, input_pos, output_pos, len as u64)?;
-
-    let result = pump(request.count as usize, |buf, chunk, _total| {
-        let mut read_pos = input_pos;
-        let read = input.read_from(&mut buf[..chunk], &mut read_pos)?;
-        if read > chunk {
-            return Err(KError::Io);
-        }
-        if read == 0 {
-            return Ok(Step::Eof);
-        }
-        let mut write_pos = output_pos;
-        let written = output.write_from(&buf[..read], &mut write_pos)?;
-        if written > read {
-            return Err(KError::Io);
-        }
-        // Only the accepted prefix commits: the tail stays at the source
-        // for the next step to re-read.
-        input_pos += written as u64;
-        output_pos = write_pos;
-        Ok(Step::Data {
-            confirmed: written,
-            stop: written < read,
-        })
-    });
+    let mut input_pos = input_start;
+    let mut output_pos = output_start;
+    let mut step = FilePairStep {
+        input,
+        output,
+        input_pos: &mut input_pos,
+        output_pos: &mut output_pos,
+    };
+    let result = pump(count as usize, |buf, chunk, _total| step.step(buf, chunk));
 
     // Position commit belongs to the completion protocol: publish only
     // after real progress — a zero-byte return leaves `f_pos` alone.

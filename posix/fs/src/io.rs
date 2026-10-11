@@ -891,6 +891,38 @@ mod copy_file_range_checks_tests {
         );
     }
 
+    /// Linux branches on the DESTINATION table: a native-handler
+    /// destination demands the same handler on the input even within one
+    /// super block; only a handler-less destination falls back to the
+    /// same-superblock rule. The input here carries a foreign handler-less
+    /// table on the very inode the plain memfs output shares.
+    #[unittest::def_test]
+    fn same_superblock_pairs_still_need_matching_handlers() {
+        let base = memfd_file("xdev-same-sb");
+        fill(&base, 16);
+        let backend = Arc::new(CountingBackend {
+            handler: None,
+            poisoned_call: usize::MAX,
+            calls: AtomicUsize::new(0),
+        });
+        let input = base
+            .alloc_clone(FMode::READ, OpenFlags::empty(), backend)
+            .unwrap();
+        let mut input_offset = 0;
+        let mut output_offset = 0;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &input,
+                TransferPosition::At(&mut input_offset),
+                &base,
+                TransferPosition::At(&mut output_offset),
+                16,
+                false,
+            ),
+            Err(KError::from(LinuxError::EXDEV))
+        );
+    }
+
     /// Both sides `Managed` on one open file description take the shared
     /// single-lock path: one logical position advances by the transferred
     /// count, and the range rewritten onto itself keeps its content.
