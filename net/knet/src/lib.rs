@@ -12,7 +12,15 @@
 //! - [`UdpDatagramRelay`]: A persistent nonblocking UDP relay socket.
 //! - [`dns_query`]: Function for DNS query.
 #![no_std]
-#![allow(rustdoc::broken_intra_doc_links)]
+#![allow(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): legacy knet has 20 diagnostic \
+              sites, too many to judge individually in this migration; new code remains reviewed"
+)]
+#![allow(
+    rustdoc::broken_intra_doc_links,
+    reason = "rustdoc links target kernel-only items unavailable to the host documentation build"
+)]
 
 #[macro_use]
 extern crate log;
@@ -61,7 +69,7 @@ pub(crate) use transport::{listen_table, udp_err};
 pub use transport::{raw, tcp, udp, udp::UdpDatagramRelay};
 
 use crate::{
-    consts::{GATEWAY, IP, IP_PREFIX, TIMER_SAMPLE_PERIOD},
+    consts::{GATEWAY, IP, IP_PREFIX},
     device::{EthernetDevice, LoopbackDevice, interfaces::Ipv4AddrEntry},
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
     listen_table::ListenTable,
@@ -147,10 +155,7 @@ pub fn init_network() {
     LISTEN_TABLE.init_once(ListenTable::new());
     udp::init_udp_registry();
     poller::network_poller().start();
-    ktask::register_timer_callback(
-        core::time::Duration::from_nanos(TIMER_SAMPLE_PERIOD.as_nanos_u64_saturating()),
-        |_| SERVICE.handle_timer_tick(),
-    );
+    SERVICE.start_timer();
 }
 
 fn subscribe_network_unregister(id: kdevice::DeviceId) {

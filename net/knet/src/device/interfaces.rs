@@ -65,11 +65,11 @@ impl InterfaceSet {
     }
 
     /// Returns the MTU advertised through the smoltcp device capabilities.
-    pub fn effective_mtu(&self) -> usize {
+    pub(crate) fn effective_mtu(&self) -> usize {
         self.effective_mtu
     }
 
-    pub fn link_snapshots(&self) -> Vec<LinkSnapshot> {
+    pub(crate) fn link_snapshots(&self) -> Vec<LinkSnapshot> {
         self.devices
             .iter()
             .enumerate()
@@ -77,22 +77,22 @@ impl InterfaceSet {
             .collect()
     }
 
-    pub fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
+    pub(crate) fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
         let dev_index = Self::device_index(ifindex)?;
         self.devices
             .get(dev_index)
             .map(|device| device.link_snapshot(ifindex))
     }
 
-    pub fn has_device(&self, ifindex: i32) -> bool {
+    pub(crate) fn has_device(&self, ifindex: i32) -> bool {
         Self::device_index(ifindex).is_some_and(|dev_index| self.devices.get(dev_index).is_some())
     }
 
-    pub fn device_index_by_name(&self, name: &str) -> Option<usize> {
+    pub(crate) fn device_index_by_name(&self, name: &str) -> Option<usize> {
         self.devices.iter().position(|device| device.name() == name)
     }
 
-    pub fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
+    pub(crate) fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
         let dev_index = Self::device_index(ifindex)?;
         self.devices
             .get(dev_index)
@@ -103,7 +103,7 @@ impl InterfaceSet {
     ///
     /// Returns `Ok(true)` when the effective device MTU changed and the
     /// smoltcp interface must be rebuilt to refresh its cached capabilities.
-    pub fn update_device_link(
+    pub(crate) fn update_device_link(
         &mut self,
         ifindex: i32,
         update: LinkConfigUpdate,
@@ -140,7 +140,7 @@ impl InterfaceSet {
         (ifindex > 0).then_some((ifindex - 1) as usize)
     }
 
-    pub fn apply_neighbor_update(
+    pub(crate) fn apply_neighbor_update(
         &mut self,
         update: NeighborUpdate,
         policy: NeighborUpdatePolicy,
@@ -150,7 +150,7 @@ impl InterfaceSet {
     }
 
     #[cfg(unittest)]
-    pub fn has_neighbor(&self, dev: usize, dst: IpAddress) -> bool {
+    pub(crate) fn has_neighbor(&self, dev: usize, dst: IpAddress) -> bool {
         self.devices
             .get(dev)
             .is_some_and(|device| device.has_neighbor(dst))
@@ -165,7 +165,7 @@ impl InterfaceSet {
             .unwrap_or(STANDARD_MTU);
     }
 
-    pub fn add_device(&mut self, device: Box<dyn NetDevice>) -> usize {
+    pub(crate) fn add_device(&mut self, device: Box<dyn NetDevice>) -> usize {
         self.devices.push(DeviceHandle::new(device));
         self.sync_device_ipv4_addrs();
         self.recompute_effective_mtu();
@@ -202,7 +202,7 @@ impl InterfaceSet {
         Some(pos)
     }
 
-    pub fn local_ipv4_addrs(&self) -> Vec<Ipv4Cidr> {
+    pub(crate) fn local_ipv4_addrs(&self) -> Vec<Ipv4Cidr> {
         self.ipv4_addrs.iter().map(|entry| entry.addr).collect()
     }
 
@@ -243,11 +243,11 @@ impl InterfaceSet {
             .map(|entry| entry.addr)
     }
 
-    pub fn ipv4_addr_entries(&self) -> &[Ipv4AddrEntry] {
+    pub(crate) fn ipv4_addr_entries(&self) -> &[Ipv4AddrEntry] {
         &self.ipv4_addrs
     }
 
-    pub fn ipv4_addr_snapshots(&self) -> Vec<Ipv4AddrSnapshot> {
+    pub(crate) fn ipv4_addr_snapshots(&self) -> Vec<Ipv4AddrSnapshot> {
         self.ipv4_addrs
             .iter()
             .filter_map(|entry| {
@@ -259,7 +259,7 @@ impl InterfaceSet {
             .collect()
     }
 
-    pub fn add_ipv4_addr(&mut self, entry: Ipv4AddrEntry) -> Result<(), LinuxError> {
+    pub(crate) fn add_ipv4_addr(&mut self, entry: Ipv4AddrEntry) -> Result<(), LinuxError> {
         if entry.dev >= self.devices.len() {
             return Err(LinuxError::ENODEV);
         }
@@ -284,7 +284,11 @@ impl InterfaceSet {
 
     /// Updates the primary IPv4 address on `dev`; other addresses remain unchanged.
     /// Updating an existing address resets its scope and broadcast fields.
-    pub fn set_primary_ipv4_addr(&mut self, dev: usize, addr: Ipv4Cidr) -> Result<(), LinuxError> {
+    pub(crate) fn set_primary_ipv4_addr(
+        &mut self,
+        dev: usize,
+        addr: Ipv4Cidr,
+    ) -> Result<(), LinuxError> {
         if dev >= self.devices.len() {
             return Err(LinuxError::ENODEV);
         }
@@ -326,7 +330,7 @@ impl InterfaceSet {
 
     /// Removes the primary IPv4 address from `dev`; other addresses remain
     /// unchanged and a device without one is accepted.
-    pub fn remove_primary_ipv4_addr(&mut self, dev: usize) -> Result<(), LinuxError> {
+    pub(crate) fn remove_primary_ipv4_addr(&mut self, dev: usize) -> Result<(), LinuxError> {
         if dev >= self.devices.len() {
             return Err(LinuxError::ENODEV);
         }
@@ -339,7 +343,7 @@ impl InterfaceSet {
         Ok(())
     }
 
-    pub fn remove_ipv4_addr(&mut self, entry: Ipv4AddrEntry) -> bool {
+    pub(crate) fn remove_ipv4_addr(&mut self, entry: Ipv4AddrEntry) -> bool {
         let old_len = self.ipv4_addrs.len();
         self.ipv4_addrs
             .retain(|existing| existing.dev != entry.dev || existing.addr != entry.addr);
@@ -352,26 +356,30 @@ impl InterfaceSet {
         true
     }
 
-    pub fn has_ipv4_address(&self, address: Ipv4Address) -> bool {
+    pub(crate) fn has_ipv4_address(&self, address: Ipv4Address) -> bool {
         self.ipv4_addrs
             .iter()
             .any(|entry| entry.addr.address() == address)
     }
 
-    pub fn has_ipv4_subnet_for_device(&self, dev: usize, address: IpAddress) -> bool {
+    pub(crate) fn has_ipv4_subnet_for_device(&self, dev: usize, address: IpAddress) -> bool {
         self.ipv4_addrs
             .iter()
             .any(|entry| entry.dev == dev && entry.addr.contains_addr(&address))
     }
 
-    pub fn is_ipv4_directed_broadcast_for_device(&self, dev: usize, address: Ipv4Address) -> bool {
+    pub(crate) fn is_ipv4_directed_broadcast_for_device(
+        &self,
+        dev: usize,
+        address: Ipv4Address,
+    ) -> bool {
         self.ipv4_addrs
             .iter()
             .filter(|entry| entry.dev == dev)
             .any(|entry| entry.addr.is_directed_broadcast(address))
     }
 
-    pub fn set_ipv4_broadcast(
+    pub(crate) fn set_ipv4_broadcast(
         &mut self,
         dev: usize,
         broadcast: Ipv4Address,
@@ -387,7 +395,11 @@ impl InterfaceSet {
 
     /// Updates the prefix length of the primary IPv4 address on `dev`, keeping
     /// its scope and recomputing a mask-derived broadcast only.
-    pub fn set_ipv4_netmask(&mut self, dev: usize, prefix_len: u8) -> Result<(), LinuxError> {
+    pub(crate) fn set_ipv4_netmask(
+        &mut self,
+        dev: usize,
+        prefix_len: u8,
+    ) -> Result<(), LinuxError> {
         if prefix_len > 32 {
             return Err(LinuxError::EINVAL);
         }

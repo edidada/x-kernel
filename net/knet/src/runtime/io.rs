@@ -84,6 +84,7 @@ pub(crate) struct RxDrain {
     pub work_done: usize,
     pub has_more: bool,
     pub has_lock_contention: bool,
+    pub error: Option<(i32, KError)>,
 }
 
 impl NetIo {
@@ -96,21 +97,26 @@ impl NetIo {
         }
     }
 
-    pub fn available_stack_ingress_slots(&self) -> usize {
+    pub(crate) fn available_stack_ingress_slots(&self) -> usize {
         self.rx_queue.available()
     }
 
     /// Returns whether smoltcp may emit one stack-originated datagram.
-    pub fn can_transmit_from_stack(&self) -> bool {
+    pub(crate) fn can_transmit_from_stack(&self) -> bool {
         !self.data_tx_queue.is_full()
     }
 
     /// Returns whether IPv4 egress can admit `packet_count` data-TX packets.
-    pub fn can_admit_ipv4_egress(&self, packet_count: usize) -> bool {
+    pub(crate) fn can_admit_ipv4_egress(&self, packet_count: usize) -> bool {
         self.data_tx_queue.can_push(packet_count)
     }
 
     /// Appends a complete output batch after capacity preflight under the same transaction.
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: callers preflight the complete batch \
+                  under the same queue ownership"
+    )]
     pub(crate) fn enqueue_tx(&mut self, packets: impl ExactSizeIterator<Item = PacketBuf>) {
         debug_assert!(self.data_tx_queue.can_push(packets.len()));
         if self.data_tx_queue.try_extend(packets).is_err() {
@@ -118,7 +124,7 @@ impl NetIo {
         }
     }
 
-    pub fn can_receive_from_stack(&self) -> bool {
+    pub(crate) fn can_receive_from_stack(&self) -> bool {
         !self.rx_queue.is_empty() && self.can_transmit_from_stack()
     }
 
@@ -148,7 +154,7 @@ impl NetIo {
         self.data_tx_queue.available() > capacity_before
     }
 
-    pub fn drain_device_rx_budgeted(
+    pub(crate) fn drain_device_rx_budgeted(
         &mut self,
         devices: &[DeviceHandle],
         timestamp: MonotonicInstant,
@@ -164,6 +170,7 @@ impl NetIo {
                 work_done: 0,
                 has_more: has_rx_work(),
                 has_lock_contention: false,
+                error: None,
             };
         }
 
@@ -188,15 +195,25 @@ impl NetIo {
                             work_done,
                             has_more: has_lock_contention || has_rx_work(),
                             has_lock_contention,
+                            error: None,
                         };
                     }
 
                     match device.poll_rx(ifindex, timestamp) {
-                        Some(packet) => {
+                        Ok(Some(packet)) => {
                             work_done += 1;
                             packets.push(packet);
                         }
-                        None => break,
+                        Ok(None) => break,
+                        Err(error) => {
+                            self.next_rx_device = next_device_index(dev_index, device_count);
+                            return RxDrain {
+                                work_done,
+                                has_more: has_rx_work(),
+                                has_lock_contention,
+                                error: Some((ifindex, error)),
+                            };
+                        }
                     }
                 },
 
@@ -212,11 +229,12 @@ impl NetIo {
             work_done,
             has_more: has_lock_contention,
             has_lock_contention,
+            error: None,
         }
     }
 
     /// Enqueues the whole batch, preserving both queue and input on `WouldBlock`.
-    pub fn enqueue_stack_ingress(&mut self, packets: &mut Vec<PacketBuf>) -> KResult {
+    pub(crate) fn enqueue_stack_ingress(&mut self, packets: &mut Vec<PacketBuf>) -> KResult {
         // Creating a Drain before this check would drop rejected packets.
         if !self.rx_queue.can_push(packets.len()) {
             return Err(KError::WouldBlock);
@@ -226,11 +244,11 @@ impl NetIo {
             .map_err(|_| KError::WouldBlock)
     }
 
-    pub fn has_stack_ingress(&self) -> bool {
+    pub(crate) fn has_stack_ingress(&self) -> bool {
         !self.rx_queue.is_empty()
     }
 
-    pub fn enqueue_control_tx(&mut self, packet: Vec<u8>) -> KResult {
+    pub(crate) fn enqueue_control_tx(&mut self, packet: Vec<u8>) -> KResult {
         self.control_tx_queue
             .try_push(tx_packet_buf(packet))
             .map_err(|_| KError::WouldBlock)

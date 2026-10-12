@@ -136,14 +136,14 @@ pub(crate) struct Ipv4IngressState {
 }
 
 impl Ipv4IngressState {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             local_ipv4_addrs: Vec::new(),
             ipv4_reassembler: Ipv4Reassembler::new(),
         }
     }
 
-    pub fn update_local_ipv4_addrs(&mut self, addrs: &[Ipv4Cidr]) {
+    pub(crate) fn update_local_ipv4_addrs(&mut self, addrs: &[Ipv4Cidr]) {
         self.local_ipv4_addrs.clear();
         self.local_ipv4_addrs.extend_from_slice(addrs);
     }

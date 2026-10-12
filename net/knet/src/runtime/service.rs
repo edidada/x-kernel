@@ -35,7 +35,19 @@ use crate::{
 const POLL_ROUND_TIME_LIMIT: TimeSpan = TimeSpan::from_millis(1);
 pub(crate) const POLL_TIME_CHECK_INTERVAL_WORK_ITEMS: usize = 32;
 
+struct NetworkTimer;
+
+impl ktask::TimerHandler for NetworkTimer {
+    fn on_expiration(&self, timer: ktask::TimerControl<'_>, _: ktask::Expiration) {
+        crate::SERVICE.handle_timer_tick();
+        if let Err(error) = timer.rearm(monotonic_time() + crate::consts::TIMER_SAMPLE_PERIOD) {
+            log::error!("[knet] timer sampling stopped: {error:?}");
+        }
+    }
+}
+
 pub(crate) struct Service {
+    timer: ktask::Timer<NetworkTimer>,
     pub(crate) stack: Stack,
     network: NetworkState,
     io: Mutex<NetIo>,
@@ -95,6 +107,7 @@ impl Service {
         ipv4_ingress.set_ipv4_addrs(&addrs);
         stack.set_ipv4_addrs(&addrs);
         Self {
+            timer: ktask::Timer::new(NetworkTimer),
             stack,
             network: state,
             io: Mutex::new(io),
@@ -103,6 +116,21 @@ impl Service {
             ipv4_ingress,
             events: ServiceEvents::new(),
         }
+    }
+
+    pub(crate) fn start_timer(&'static self) {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: the periodic network timer deadline \
+                      must fit the initialized timer core"
+        )]
+        // SAFETY: the service is published after scheduler and timer setup;
+        // the callback performs only IRQ-safe state transitions and wakes.
+        unsafe {
+            self.timer
+                .start(monotonic_time() + crate::consts::TIMER_SAMPLE_PERIOD)
+        }
+        .expect("network sampling deadline must fit the timer core");
     }
 
     pub(crate) fn network(&self) -> &NetworkState {
@@ -148,7 +176,7 @@ impl Service {
 
     /// Advances a bounded round in task context, retaining batches on contention.
     /// Device TX/RX and reassembly contention allow protocol progress to continue.
-    pub fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
+    pub(crate) fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
         let mut round = PollRound::new(budget, monotonic_time());
         self.poll_ipv4_timers(&mut round);
         self.flush_retained_ingress(&mut round);
@@ -342,7 +370,7 @@ impl Service {
 
     /// Resolves the route before the queue preparation and enqueue transaction.
     /// Capacity failure preserves the caller's packet for retry.
-    pub fn prepare_and_send_ipv4_packet(
+    pub(crate) fn prepare_and_send_ipv4_packet(
         &self,
         bound_src: Option<IpAddress>,
         dst_addr: &IpAddress,

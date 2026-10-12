@@ -230,7 +230,7 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 
 * **vsock startup and callbacks**
 
-  `init_vsock` installs the available raw transport and registers availability/removal callbacks. `start_vsock_bridge` must run after all scheduler run queues are initialized because it starts bridge tasks. Device availability and removal callbacks take sleepable locks. `publish_kobject_uevent`, `send_link_frame`, and relay operations also allocate or acquire sleepable locks and belong in task context. The periodic `Service::handle_timer_tick` callback uses atomic deadline checks, waiter notification, and IRQ-safe poller scheduling.
+  `init_vsock` installs the available raw transport and registers availability/removal callbacks. `start_vsock_bridge` must run after all scheduler run queues are initialized because it starts bridge tasks. Device availability and removal callbacks take sleepable locks. `publish_kobject_uevent`, `send_link_frame`, and relay operations also allocate or acquire sleepable locks and belong in task context. The periodic `NetworkTimer` callback invokes `Service::handle_timer_tick`, which uses atomic deadline checks, waiter notification, and IRQ-safe poller scheduling.
 
 * **Normal protocol processing runs in task context**
 
@@ -603,7 +603,7 @@ In the `SCHEDULED` state, the dynamic kwork of `knet-poller` and socket assist c
 | 13 | &emsp;`LISTEN_TABLE.init_once(ListenTable.new())` |
 | 14 | &emsp;`init_udp_registry()` |
 | 15 | &emsp;`network_poller.start()` |
-| 16 | &emsp;`register_timer_callback(TIMER_SAMPLE_PERIOD, SERVICE.handle_timer_tick)` |
+| 16 | &emsp;`SERVICE.start_timer()` |
 
 Source: [`init_network`](../src/lib.rs) and [`Service::new`](../src/runtime/service.rs). The pseudocode abbreviates address and route construction.
 

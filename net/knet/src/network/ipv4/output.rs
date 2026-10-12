@@ -53,7 +53,7 @@ impl Ipv4Output {
 
     /// Resolves output, then prepares and enqueues fragments under one `NetIo` lock.
     /// Capacity failure preserves the packet; loopback bypasses the queue.
-    pub fn prepare_and_send(
+    pub(crate) fn prepare_and_send(
         &self,
         state: &NetworkState,
         io: &Mutex<NetIo>,
@@ -99,7 +99,7 @@ impl Ipv4Output {
         self.send(&mut io, Some(route.mtu), packet, oif)
     }
 
-    pub fn send(
+    pub(crate) fn send(
         &self,
         io: &mut NetIo,
         route_mtu: Option<usize>,

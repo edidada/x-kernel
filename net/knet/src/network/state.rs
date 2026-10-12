@@ -362,23 +362,23 @@ impl NetworkState {
 }
 
 impl NetworkState {
-    pub fn link_snapshots(&self) -> Vec<LinkSnapshot> {
+    pub(crate) fn link_snapshots(&self) -> Vec<LinkSnapshot> {
         self.with_interfaces(|interfaces| interfaces.link_snapshots())
     }
 
-    pub fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
+    pub(crate) fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
         self.with_interfaces(|interfaces| interfaces.link_snapshot_for_ifindex(ifindex))
     }
 
-    pub fn has_device(&self, ifindex: i32) -> bool {
+    pub(crate) fn has_device(&self, ifindex: i32) -> bool {
         self.with_interfaces(|interfaces| interfaces.has_device(ifindex))
     }
 
-    pub fn device_index_by_name(&self, name: &str) -> Option<usize> {
+    pub(crate) fn device_index_by_name(&self, name: &str) -> Option<usize> {
         self.with_interfaces(|interfaces| interfaces.device_index_by_name(name))
     }
 
-    pub fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
+    pub(crate) fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
         self.with_interfaces(|interfaces| interfaces.link_send_snapshot_for_ifindex(ifindex))
     }
 
@@ -493,7 +493,9 @@ impl TxBatch<'_> {
             };
             self.egress = Some((device_index, device));
         }
-        let (_, device) = self.egress.as_mut().unwrap();
+        let Some((_, device)) = self.egress.as_mut() else {
+            return Ok(false);
+        };
         Ok(device.send_ip_packet(device_index as i32 + 1, next_hop, source, packet, timestamp))
     }
 

@@ -23,7 +23,7 @@ impl<'a> StackDevice<'a> {
         Self { io, mtu }
     }
 }
-pub struct TxToken<'a>(&'a mut NetIo);
+pub(crate) struct TxToken<'a>(&'a mut NetIo);
 
 impl smoltcp::phy::TxToken for TxToken<'_> {
     fn consume<R, F>(self, len: usize, f: F) -> R
@@ -39,7 +39,7 @@ impl smoltcp::phy::TxToken for TxToken<'_> {
     }
 }
 
-pub struct RxToken(PacketBuf);
+pub(crate) struct RxToken(PacketBuf);
 
 impl smoltcp::phy::RxToken for RxToken {
     fn consume<R, F>(self, f: F) -> R

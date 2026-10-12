@@ -6,7 +6,7 @@
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::task::Waker;
 
-use kerrno::LinuxError;
+use kerrno::{KResult, LinuxError};
 use ktime_types::MonotonicInstant;
 
 use super::{
@@ -75,8 +75,12 @@ impl NetDevice for TestDevice {
         self.device_id
     }
 
-    fn poll_rx(&mut self, _ifindex: i32, _timestamp: MonotonicInstant) -> Option<PacketBuf> {
-        None
+    fn poll_rx(
+        &mut self,
+        _ifindex: i32,
+        _timestamp: MonotonicInstant,
+    ) -> KResult<Option<PacketBuf>> {
+        Ok(None)
     }
 
     fn has_rx_work(&self) -> bool {

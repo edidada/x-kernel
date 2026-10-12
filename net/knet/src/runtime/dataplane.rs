@@ -154,6 +154,10 @@ impl NetworkDataPlane {
             progress.is_deferred |= drain.has_lock_contention;
             packets_since_time_check = packets_since_time_check.saturating_add(drain.work_done);
 
+            if let Some((ifindex, error)) = &drain.error {
+                warn!("network RX poll failed on ifindex {ifindex}: {error:?}");
+            }
+
             if !self.process_rx_batch(
                 service,
                 device_timestamp,
@@ -165,7 +169,11 @@ impl NetworkDataPlane {
                 progress.is_deferred = true;
                 break;
             }
-            if drain.has_lock_contention || !drain.has_more || drain.work_done == 0 {
+            if drain.error.is_some()
+                || drain.has_lock_contention
+                || !drain.has_more
+                || drain.work_done == 0
+            {
                 break;
             }
         }

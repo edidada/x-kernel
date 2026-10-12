@@ -15,10 +15,7 @@ pub(crate) use crate::netlink::{
     RTPROT_KERNEL as ROUTE_PROTOCOL_KERNEL,
 };
 use crate::{
-    device::{
-        LinkKind,
-        interfaces::InterfaceSet,
-    },
+    device::interfaces::InterfaceSet,
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
 };
 
@@ -65,7 +62,7 @@ pub(crate) struct Rule {
 }
 
 impl Rule {
-    pub fn new(filter: IpCidr, via: Option<IpAddress>, dev: usize, src: IpAddress) -> Self {
+    pub(crate) fn new(filter: IpCidr, via: Option<IpAddress>, dev: usize, src: IpAddress) -> Self {
         Self {
             filter,
             via,
@@ -81,7 +78,7 @@ impl Rule {
         }
     }
 
-    pub fn with_route_attrs(
+    pub(crate) fn with_route_attrs(
         filter: IpCidr,
         via: Option<IpAddress>,
         dev: usize,
@@ -202,11 +199,11 @@ struct RouteTable {
     rules: Vec<Rule>,
 }
 impl RouteTable {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { rules: Vec::new() }
     }
 
-    pub fn add_rule(&mut self, rule: Rule) {
+    pub(crate) fn add_rule(&mut self, rule: Rule) {
         let rank = (
             rule.filter.prefix_len(),
             matches!(
@@ -233,17 +230,17 @@ impl RouteTable {
         self.rules.insert(idx, rule);
     }
 
-    pub fn lookup(&self, dst: &IpAddress) -> Option<&Rule> {
+    pub(crate) fn lookup(&self, dst: &IpAddress) -> Option<&Rule> {
         self.rules
             .iter()
             .find(|rule| rule.filter.contains_addr(dst))
     }
 
-    pub fn rules(&self) -> &[Rule] {
+    pub(crate) fn rules(&self) -> &[Rule] {
         &self.rules
     }
 
-    pub fn remove_exact_rule(&mut self, route: Rule) {
+    pub(crate) fn remove_exact_rule(&mut self, route: Rule) {
         if let Some(index) = self.rules.iter().position(|rule| {
             matches!(rule.origin, RuleOrigin::Configured) && rule.same_route_as(route)
         }) {
@@ -263,7 +260,7 @@ impl RouteTable {
         });
     }
 
-    pub fn remove_device(&mut self, dev: usize) {
+    pub(crate) fn remove_device(&mut self, dev: usize) {
         self.rules.retain(|rule| {
             rule.dev != dev
                 && !matches!(
@@ -306,7 +303,7 @@ impl Router {
     /// limited broadcast uses that device's primary address without a unicast
     /// route. Missing routes, down devices, and an `oif` mismatch return
     /// `ENETUNREACH`.
-    pub fn output_route_source(
+    pub(crate) fn output_route_source(
         &self,
         interfaces: &InterfaceSet,
         dst: &IpAddress,
@@ -351,7 +348,7 @@ impl Router {
         }
     }
 
-    pub fn add_rule(&mut self, rule: Rule) {
+    pub(crate) fn add_rule(&mut self, rule: Rule) {
         self.table.add_rule(rule);
     }
 
@@ -364,11 +361,11 @@ impl Router {
             .copied()
     }
 
-    pub fn route_snapshot(&self) -> Vec<Rule> {
+    pub(crate) fn route_snapshot(&self) -> Vec<Rule> {
         self.table.rules().to_vec()
     }
 
-    pub fn add_route_rule(
+    pub(crate) fn add_route_rule(
         &mut self,
         interfaces: &InterfaceSet,
         rule: Rule,
@@ -378,7 +375,7 @@ impl Router {
         Ok(())
     }
 
-    pub fn replace_route_rule(
+    pub(crate) fn replace_route_rule(
         &mut self,
         interfaces: &InterfaceSet,
         existing: Rule,
@@ -390,7 +387,7 @@ impl Router {
         Ok(())
     }
 
-    pub fn remove_exact_route_rule(&mut self, route: Rule) {
+    pub(crate) fn remove_exact_route_rule(&mut self, route: Rule) {
         self.table.remove_exact_rule(route);
     }
 
@@ -465,9 +462,7 @@ impl Router {
                 ROUTE_SCOPE_LINK
             };
             self.table.add_rule(Rule::for_connected_ipv4_address(
-                entry.dev,
-                entry.addr,
-                scope,
+                entry.dev, entry.addr, scope,
             ));
         }
     }
