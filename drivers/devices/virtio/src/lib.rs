@@ -5,9 +5,10 @@
 //! Wrappers of some devices in the [`virtio-drivers`] crate, that implement
 //! traits in the [`driver_base`] series crates.
 //!
-//! Hosts implement [`VirtIoHal`] for MMIO and the legacy DMA backend. With the
-//! `alloc` feature, [`dma_provider`] binds an OS-neutral [`device_res::DmaOp`]
-//! provider to one device; its queues and DMA allocations retain that provider.
+//! Like the [`virtio-drivers`] crate, you must implement the [`VirtIoHal`]
+//! trait (alias of `virtio_drivers::Hal`), to allocate DMA regions and
+//! translate between physical addresses (as seen by devices) and virtual
+//! addresses (as seen by your program).
 //!
 //! [`virtio-drivers`]: https://docs.rs/virtio-drivers/latest/virtio_drivers/
 //! [`driver_base`]: driver_base
@@ -69,10 +70,6 @@ pub mod mock_virtio;
 #[cfg(feature = "socket")]
 mod socket;
 use driver_base::{DeviceKind, DriverError};
-#[cfg(feature = "alloc")]
-mod dma;
-#[cfg(feature = "alloc")]
-pub use dma::dma_provider;
 use virtio_drivers::transport::DeviceType as VirtIoDevType;
 pub use virtio_drivers::{
     BufferDirection, Hal as VirtIoHal, PhysAddr,

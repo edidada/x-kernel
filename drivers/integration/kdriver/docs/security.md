@@ -186,19 +186,13 @@ is Copy; ownership rests with the handle, and unsafe free requires unchanged
 original metadata plus stopped hardware/CPU aliases. Hook failure quarantines
 pages in kdma instead of recycling uncertain attributes.
 
-VirtIO probe binds the provider before binding the transport DMA provider. The concrete
-adapter `drivers/devices/virtio/src/dma.rs` zeroes coherent pages and forwards all
-queue and GPU DMA operations to the retained provider. Queue preparation is
-transactional, so failed buffer/indirect-table mapping rolls back prior mappings
-before publication. CPU receive storage is initialized before map; this preserves
-bytes during cancellation and partial writes. Queue completion uses the original
-provider even if device-core binding is later cleaned up.
-
-`src/driver_registry/virtio/glue.rs::VirtIoHalImpl` retains static MMIO translation
-and a compatibility DMA backend for transports without injection. Legacy ixgbe
-uses that platform backend too. Default VirtIO contexts preserve unrestricted platform addressing; actual mask and translation declarations remain host/probe responsibility.
-Provider Arc lifetime does not drain hardware DMA. Driver removal stops device
-activity and retires queue/storage users before devres release.
+`src/driver_registry/virtio/glue.rs::VirtIoHalImpl` uses the shared platform DMA
+provider through the mainline static HAL. There is no transport-specific DMA
+injection or library-side fallible queue extension in this integration. The HAL
+retains original pointer, length and direction for matching unshare. kdma selects
+direct/bounce and completes the required CPU ownership handoff before release.
+Mapping failures remain subject to the mainline HAL's infallible share contract.
+Driver removal must stop hardware and retire queue/storage users before release.
 
 ### 4. VirtIO MMIO Discovery During Platform Enumeration
 
@@ -554,10 +548,11 @@ registration failures do not establish a device fault.
 ## DMA capability retention and limits
 
 Device cleanup drains devres before dropping its DMA capability; each owned
-coherent handle and queue backend independently retains the original provider.
-Binding and resource registration rely on serialized probe/remove execution.
-All current contexts share one lazy 4 MiB pool and one IRQ-disabling mapping
-lock; allocation/page-table locks remain shared. Firmware DMA-ranges, IOMMU and
-cacheable/direct mapping policy are outside the current implementation. Review
-new activation paths for provider binding before the first queue allocation,
-accurate device declarations, and stop-before-release teardown ordering.
+coherent handle independently retains its original provider. VirtIO uses the
+shared platform provider through its static HAL. Binding and resource registration
+rely on serialized probe/remove execution. Current contexts share the bounce pool,
+active mapping table and IRQ-disabling backend lock. Direct mappings require
+stable contiguous RAM, complete reachable bus intervals and supported cache
+handoff. Review stop-before-release ordering and exact matching map/unmap
+arguments. Hardware DMA isolation and independent device domains remain platform
+responsibilities.

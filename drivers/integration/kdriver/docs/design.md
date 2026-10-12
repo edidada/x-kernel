@@ -207,10 +207,10 @@ are unchanged. Request-local waiting remains separately owned in block_completio
 
 ### DMA And Execution Context
 
-Ordinary block completion follows `complete_* -> pop_used -> retained DmaProvider::unshare ->
-device_res::unmap_streaming -> kdma::unmap_dma_buffer`. The existing provider
-removes its mapping, copies reads back and returns bounce storage to the TLSF
-pool. Pool creation is on map, not unmap; pool recycling and indirect descriptor
+Ordinary block completion follows `complete_* -> pop_used -> VirtIoHalImpl::unshare ->
+device_res::unmap_streaming -> kdma::unmap_dma_buffer`. The shared provider
+returns ownership by cache handoff or bounce copy, retires its mapping, and
+recycles staging storage when a bounce backend was selected. Pool creation is on map, not unmap; pool recycling and indirect descriptor
 deallocation do not sleep in the audited implementation. Coherent virtqueue
 destruction may perform different work and remains in task-context close.
 
@@ -705,23 +705,15 @@ issuing reads serially.
 
 The `hwrng` feature compiles this provider for injection into concrete drivers.
 
-## Device DMA policy during VirtIO probe
+## Unified DMA domain for VirtIO
 
-VirtIO MMIO and PCI activation bind a distinct
-`XKernelDmaProvider::platform_default` when the device has no provider yet, then
-bind the adapted `dma_provider` directly to the MMIO or PCI transport before
-runtime driver construction. The PCI input fast path uses the same binding.
-A provider supplied beforehand by probe/glue is preserved. Current platform
-defaults describe unrestricted addressing, uncached shared memory and the
-PHYS_BUS_OFFSET translation; automatic firmware DMA-range and
-PCI-width negotiation are outside this change.
+VirtIO uses the mainline registry kvirtiodrivers dependency and its static HAL
+contract. `VirtIoHalImpl` calls the shared `XKernelResourceProvider` for coherent
+allocation and streaming map/unmap. Transport and queue APIs carry no per-device
+DMA provider extension. The provider delegates backend choice and cache handoff
+to kdma; the HAL retains its existing infallible share signature and reports a
+mapping failure through its existing zero-address sentinel.
 
-`resource::devm_alloc_coherent` obtains `device.dma`, allocates an Arc-retaining
-DmaCoherent and registers its cleanup. Other resource methods retain the existing
-platform MMIO/IRQ/time provider. The static VirtIoHal continues to provide MMIO
-and legacy DMA fallback, and legacy ixgbe/other integration remains on the
-compatibility DMA provider. Bound queues carry the device provider through
-completion and destruction, including indirect tables and GPU allocations.
-
-The integration `dma-trace` feature forwards to device-res-xkernel; the host
-adapter owns the direct kdma dependency and diagnostic feature propagation.
+Device-bound capability APIs remain available for drivers which already use
+`device_res`. Independent hardware DMA domains and heterogeneous device masks
+require a separate integration change with concrete driver failure cases.

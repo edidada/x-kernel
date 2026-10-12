@@ -68,13 +68,6 @@ impl DeviceDriver for VirtioDriver {
     }
 
     fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
-        if device.dma().is_err() {
-            device
-                .bind_dma(Arc::new(
-                    device_res_xkernel::XKernelDmaProvider::platform_default(),
-                ))
-                .map_err(crate::resource::map_res_err)?;
-        }
         activate_virtio_device(device, self.kind, self.device_type)
     }
 
@@ -197,7 +190,7 @@ fn activate_virtio_pci(device: Arc<DeviceObject>, device_kind: DeviceKind) -> Dr
         .map(|(_, info)| info)
         .ok_or(DriverError::BadState)?;
 
-    let (ty, mut transport, irq) =
+    let (ty, transport, irq) =
         virtio::probe_pci_device::<glue::VirtIoHalImpl, pci::MmioCam<'static>>(
             root,
             bdf,
@@ -210,10 +203,6 @@ fn activate_virtio_pci(device: Arc<DeviceObject>, device_kind: DeviceKind) -> Dr
     if ty != device_kind {
         return Err(DriverError::Unsupported);
     }
-
-    transport.set_dma_provider(virtio::dma_provider(
-        device.dma().map_err(crate::resource::map_res_err)?,
-    ));
 
     #[cfg(feature = "virtio-input")]
     if device_kind == DeviceKind::Input {
@@ -234,16 +223,12 @@ fn activate_virtio_mmio(device: Arc<DeviceObject>, device_kind: DeviceKind) -> D
     let irq = device.first_irq().map(|resource| resource.number);
     // SAFETY: `regs` was obtained from `iomap_mmio` which maps a valid
     // physical MMIO region, and `size` matches the region size.
-    let (ty, mut transport) =
+    let (ty, transport) =
         unsafe { virtio::probe_mmio_device(regs.as_ptr(), size) }.ok_or(DriverError::BadState)?;
 
     if ty != device_kind {
         return Err(DriverError::Unsupported);
     }
-
-    transport.set_dma_provider(virtio::dma_provider(
-        device.dma().map_err(crate::resource::map_res_err)?,
-    ));
 
     dispatch_virtio_try_new(device, device_kind, transport, irq)
 }
