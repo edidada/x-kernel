@@ -2261,7 +2261,6 @@ dependencies = [
  "kclass",
  "kcpu_id_map",
  "kdevice",
- "kdma",
  "khal",
  "kirq",
  "kpoll",

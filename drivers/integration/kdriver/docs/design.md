@@ -721,3 +721,6 @@ platform MMIO/IRQ/time provider. The static VirtIoHal continues to provide MMIO
 and legacy DMA fallback, and legacy ixgbe/other integration remains on the
 compatibility DMA provider. Bound queues carry the device provider through
 completion and destruction, including indirect tables and GPU allocations.
+
+The integration `dma-trace` feature forwards to device-res-xkernel; the host
+adapter owns the direct kdma dependency and diagnostic feature propagation.

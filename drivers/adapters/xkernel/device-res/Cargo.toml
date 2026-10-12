@@ -12,6 +12,9 @@ documentation.workspace = true
 [lib]
 name = "device_res_xkernel"
 
+[features]
+dma-trace = ["kdma/dma-trace"]
+
 [dependencies]
 alloc-engine.workspace = true
 device_res = { workspace = true }

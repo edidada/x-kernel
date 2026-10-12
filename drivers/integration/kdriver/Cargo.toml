@@ -21,7 +21,7 @@ char = ["dep:char_driver", "kclass/char"]
 display = ["dep:display", "kclass/display"]
 input = ["dep:input", "kclass/input"]
 vsock = ["dep:vsock", "kclass/vsock"]
-dma-trace = ["kdma/dma-trace"]
+dma-trace = ["device_res_xkernel/dma-trace"]
 
 # Concrete driver selection now gates directly on Cargo features; there is no
 # build.rs-generated cfg translation layer anymore.
@@ -74,7 +74,6 @@ default = []
 
 [dependencies]
 kalloc = { workspace = true, optional = true }
-kdma.workspace = true
 device_res = { workspace = true }
 device_res_xkernel = { workspace = true }
 driver_base = { workspace = true }

@@ -110,3 +110,6 @@ zero is a valid successful provider result; fallibility is represented by Result
 Streaming sync performs bounce copies through kdma instead of inherited no-ops.
 `InvalidInput` maps to `InvalidResource`; allocation/hook exhaustion maps to
 `NoMemory`. Cache policy remains uncached/shared for all devices.
+
+The `dma-trace` feature forwards coherent diagnostics to kdma. Integration
+selects this adapter feature without a direct dependency on the DMA core.
