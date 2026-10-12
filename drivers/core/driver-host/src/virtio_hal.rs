@@ -261,12 +261,6 @@ impl Drop for MmioProbeScope<'_> {
     }
 }
 
-/// Back-compat shim for callers using the begin/take pair manually.
-/// Prefer [`begin_mmio_probe`]'s guard.
-pub fn take_mmio_probe_leases() -> alloc::vec::Vec<driver_core::IoMap> {
-    PROBE_MMIO_LEASES.lock().take().unwrap_or_default()
-}
-
 fn mmio_probe_collector(f: impl FnOnce(&mut alloc::vec::Vec<driver_core::IoMap>)) -> bool {
     let mut guard = PROBE_MMIO_LEASES.lock();
     match guard.as_mut() {

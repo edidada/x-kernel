@@ -3,12 +3,32 @@
 // See LICENSES for license details.
 
 //! VirtIO PCI transport integration.
+//!
+//! # Host-side surface (registered exception E-01)
+//!
+//! This module is the one place under `drv/` that names
+//! [`driver_core::provider::IrqOp`]. That is deliberate and registered:
+//!
+//! * the MSI-X **config vector belongs to the transport**, not to a device
+//!   driver's `Data` — Linux keeps it in `virtio_pci_modern.c` for the same
+//!   reason, and its lifetime is transport-scoped (allocated in
+//!   `setup_msix`, released when the transport drops);
+//! * the vector is driven from inside the vendored [`Transport`] impl
+//!   (`max_queue_size` programs the queue vector, `set_status` programs the
+//!   config vector and activates), so it cannot be an acquisition a driver
+//!   performs through `DeviceCtx`;
+//! * the provider is **injected** by `driver-host`
+//!   ([`probe_pci_transport_only`]'s `irq_provider` parameter). Nothing here
+//!   reaches for a global provider singleton.
+//!
+//! Everything a *device driver* needs still goes through `DeviceCtx`. The
+//! legacy-INTx route resolution that used to live here moved to
+//! `driver-host`, which owns the provider vocabulary.
 
 use alloc::vec::Vec;
 
 use device_traits::DeviceKind;
-use driver_core::provider::{IrqOp, IrqRouteDesc};
-use kirq::IrqController;
+use driver_core::provider::IrqOp;
 use pci::MmioCam;
 
 #[cfg(target_arch = "x86_64")]
@@ -291,41 +311,4 @@ pub fn probe_pci_transport_only<H: VirtIoHal>(
         root.set_command(bdf, command | Command::INTERRUPT_DISABLE);
     }
     Some((dev_kind, transport, transport_irq))
-}
-
-/// Resolve a legacy INTx irq from the descriptor's resource table entry.
-///
-/// The bus resolved the firmware route once at discovery (hwirq + trigger +
-/// controller); this maps it to the OS-visible virtual irq. The static
-/// per-arch fallback covers platforms without firmware routing.
-pub fn resolve_legacy_irq(spec: &driver_core::IrqSpec, irq_provider: &dyn IrqOp) -> Option<usize> {
-    // Only a firmware route needs mapping here; a resolved virq passes
-    // through unchanged.
-    let driver_core::IrqSpec::FirmwareRoute {
-        controller,
-        domain,
-        hwirq,
-        trigger,
-    } = *spec
-    else {
-        return match *spec {
-            driver_core::IrqSpec::ResolvedVirq { number, .. } => Some(number),
-            driver_core::IrqSpec::FirmwareRoute { .. } => None,
-        };
-    };
-    let desc = IrqRouteDesc {
-        hwirq,
-        trigger,
-        controller: match controller {
-            driver_core::IrqController::Gic => IrqController::Gic,
-            driver_core::IrqController::Plic => IrqController::Plic,
-            driver_core::IrqController::IoApic => IrqController::IoApic,
-            driver_core::IrqController::LoongArchExtioi => IrqController::LoongArchExtioi,
-            driver_core::IrqController::Msi | driver_core::IrqController::Unknown => {
-                IrqController::Unknown
-            }
-        },
-        domain,
-    };
-    irq_provider.map_irq(desc).ok().map(|irq| irq.number())
 }

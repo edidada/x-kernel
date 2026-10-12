@@ -178,6 +178,42 @@ pub(crate) fn to_runtime_controller(controller: driver_core::IrqController) -> k
     }
 }
 
+/// Resolve a descriptor IRQ resource to the OS-visible virtual irq WITHOUT
+/// registering a handler.
+///
+/// A firmware route (hwirq + trigger + controller, captured once at
+/// discovery) maps through its controller's irq domain; an already-resolved
+/// virq passes through unchanged. This is the provider-side half of
+/// [`driver_core::DeviceResourceServices::map_irq`] for callers holding a
+/// bare [`driver_core::IrqSpec`] instead of a service handle — today only
+/// the virtio transport probe, which resolves the descriptor's legacy INTx
+/// route as the fallback for a transport-bound MSI-X vector.
+///
+/// Lives here, not in the virtio family library: the controller-vocabulary
+/// translation and the domain fallback are provider knowledge, and a driver
+/// crate must not carry them (see
+/// `docs/ai/driver-subsystem-boundaries.md`, rule L1).
+///
+/// Returns `None` when the route cannot be mapped (no domain registered for
+/// the controller, or the hwirq is already claimed).
+pub(crate) fn resolve_irq_spec(
+    provider: &XKernelResourceProvider,
+    spec: &driver_core::IrqSpec,
+) -> Option<usize> {
+    match *spec {
+        driver_core::IrqSpec::ResolvedVirq { number, .. } => Some(number),
+        driver_core::IrqSpec::FirmwareRoute {
+            controller,
+            domain,
+            hwirq,
+            trigger,
+        } => {
+            let route = to_runtime_route(controller, domain, hwirq, trigger);
+            provider.map_irq(route).ok().map(|irq| irq.number())
+        }
+    }
+}
+
 /// The effective domain a driver-core firmware route maps through:
 /// firmware-stated when present, else the controller's root domain. The
 /// result is recorded on the mapped resource — the identity never

@@ -357,10 +357,6 @@ pub fn probe_pci_transport_with(
             header_type: pci::HeaderType::Standard,
         };
 
-        // IRQ: the transport-bound vector (x86 MSI-X) first; otherwise the
-        // descriptor's legacy route (resolved once at discovery) mapped to
-        // a virtual irq by the platform provider.
-
         // Discovery already configured the function (BARs assigned, memory
         // decoded). Only per-device config access remains for the virtio
         // capability walk.
@@ -384,11 +380,14 @@ pub fn probe_pci_transport_with(
         let leases = scope.take_leases();
         transport.retain_mappings(leases);
 
+        // Legacy INTx fallback: the descriptor's firmware route resolves
+        // through the controller's irq domain here, in the host bridge —
+        // the family library no longer carries provider vocabulary.
         let irq = transport_irq.or_else(|| {
             descriptor
                 .resources
                 .irq(0)
-                .and_then(|spec| virtio_devices::resolve_legacy_irq(&spec, provider))
+                .and_then(|spec| crate::provider::irq::resolve_irq_spec(provider, &spec))
         });
 
         Ok((kind, transport, irq))
