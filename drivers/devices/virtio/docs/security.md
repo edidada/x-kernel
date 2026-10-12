@@ -408,12 +408,12 @@ before allocation and coherent pages are zeroed before publication. Streaming
 sources are initialized and retained exclusively until completion or rollback.
 The queue freezes the original pointer, length and direction for matching unmap.
 
-The vendored queue extension maps every buffer and indirect table before making
+The kvirtiodrivers queue extension maps every buffer and indirect table before making
 the chain available to hardware. Any preparation failure releases only mappings
 already created and leaves queue bookkeeping unchanged. Receive map copies
 initialized original bytes, preserving cancellation and unwritten bytes on
 partial completions. Arc retention carries provider lifetime through queue and
 GPU allocation destruction. Hardware DMA stop remains the consumer's cleanup
 obligation; masks and separate contexts provide software checks, while unrestricted
-hardware DMA still requires a platform isolation mechanism. Vendor tests exercise
+hardware DMA still requires a platform isolation mechanism. Library tests exercise
 two providers, delayed owner destruction and failed preparation rollback.

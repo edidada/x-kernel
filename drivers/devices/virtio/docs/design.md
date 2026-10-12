@@ -602,10 +602,18 @@ an OS-neutral `virtio_drivers::DmaProvider`. `DeviceDma` translates direction,
 zeroes coherent pages and pairs allocation/map release on that provider.
 Concrete drivers remain independent of host crates.
 
-The vendored kvirtiodrivers extension retains the transport provider in queue
+The device-bound kvirtiodrivers extension retains the transport provider in queue
 backends and coherent Dma objects, including GPU framebuffer/cursor allocations.
 Buffer and indirect descriptor mapping errors propagate as DmaError before
 publication, with earlier mappings rolled back and queue capacity preserved.
 Every successful unshare uses the backend selected at queue construction.
 Transports without a bound provider retain the static Hal fallback. Host probe
 binds DMA policy independently from the static MMIO Hal implementation.
+
+The library is maintained in the separate sibling checkout `../kvirtiodrivers`,
+with its DMA implementation and regression tests on `feat/device-dma-context`.
+The kernel workspace dependency points to that checkout. Local builds require
+X-Kernel and kvirtiodrivers under the same parent directory. The portable
+`dma.rs` adapter remains in this crate and implements the library contract
+through device-res capabilities. Run the library tests from its checkout with
+`cargo test --lib` and `cargo test --lib --no-default-features`.

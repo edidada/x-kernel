@@ -1,6 +1,5 @@
 change_in_place: true
-excludes:
-  - ^third-party/kvirtiodrivers/
+excludes: []
 
 licenses:
   - files: any
