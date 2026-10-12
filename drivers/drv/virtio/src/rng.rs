@@ -67,7 +67,34 @@ impl DriverOps<PciBus> for VirtioRngDriver {
 }
 
 /// The host completion capability (main's `rng_completion` host provider):
-/// task-context wait on a PollSet, IRQ-safe wake.
+/// task-context wait on a `PollSet`, IRQ-safe wake.
+///
+/// # Execution context
+///
+/// [`RngCompletion::wait_until`] **must run in task context**. It calls
+/// [`PreparedTaskWait::prepare`], which parks the *current task*; from hard-IRQ
+/// or softirq context there is no task to park, and `prepare()` fails — the
+/// error surfaces as [`DriverError::InvalidInput`], not as a hang, but the
+/// entropy read fails. [`RngCompletion::notify`] is the IRQ-side half and is
+/// safe from interrupt context: it only wakes.
+///
+/// Today the sole caller chain is
+/// `util/entropy` → `hwrng` class → `VirtIoRngDev::read` → `wait_until`, all of
+/// which run on the entropy collector's task. **If you add a second caller,
+/// check its context first.**
+///
+/// # Registered exception E-04
+///
+/// This is the one place under `drv/` that names `ktask` and `kpoll` directly.
+/// `subsystems/block::dispatch::wait` already wraps the identical primitive
+/// (`PreparedTaskWait` + a poll registration, same register-before-recheck
+/// ordering) as a subsystem *service* — that is where this belongs, and the
+/// hwrng side should get the same `subsystems/hwrng::dispatch` module. It has
+/// not, because hwrng has exactly one consumer and the project's own rule is
+/// not to build machinery ahead of a second one
+/// (`docs/driver-framework-review.md` §8.3 class B). **Fold this into a service
+/// when a second hwrng driver appears.** See
+/// `docs/ai/driver-subsystem-boundaries.md`, exception E-04.
 struct HostRngCompletion {
     waiters: PollSet,
 }
@@ -81,6 +108,8 @@ impl HostRngCompletion {
 }
 
 impl RngCompletion for HostRngCompletion {
+    /// Block until `ready()` holds. **Task context only** — see the
+    /// execution-context note on [`HostRngCompletion`].
     fn wait_until(&self, ready: &mut dyn FnMut() -> bool) -> device_traits::DriverResult {
         let mut task_wait = PreparedTaskWait::prepare().map_err(|_| DriverError::InvalidInput)?;
         if ready() {

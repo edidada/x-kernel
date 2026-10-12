@@ -79,8 +79,14 @@ This is a **fan-in** rule, not a portability rule: `driver-core` is ~4.5k lines
 with the model's whole test suite behind it. Every family-specific method added
 there is a change that risks every already-transcribed driver.
 
-Check: `grep -rni 'virtio|nvme|ahci|mmc|i2c|usb' drivers/core/driver-core/src`
-must return comments only.
+Check: `grep -rniE 'virtio|nvme|ahci|sdhci|mmc|i2c|usb|pl011|ns16550'
+drivers/core/driver-core/src` must return comment lines only. `spi` is not in
+the mechanical pattern because it collides with `spin`/`kspin`/`SpinNoPreempt`;
+an SPI bus added to the core is caught by the review checklist below instead.
+
+`scripts/ci/check_driver_boundaries.sh` runs this (and L0-b, L1 and the
+register's integrity) mechanically; it is wired into `make clippy` via the
+`check_boundaries` target, so it also gates the pre-commit hook.
 
 ### L0-b — contracts are host-free; services may use the host
 
@@ -127,9 +133,13 @@ An exception is allowed, but it must appear in the register below with a
 reason and an exit condition. An unregistered host dependency in `drv/**` is a
 defect; a registered one is a decision.
 
-`scripts/ci/check_driver_boundaries.sh` enforces the register: the deny-list
-and the allow-list are files, so drift shows up as a red build instead of as a
-review argument.
+`scripts/ci/check_driver_boundaries.sh` enforces L0-a, L0-b, L1 and this
+register: the allow-lists live in the script as data, each entry carries the
+E-0x id it is registered under, and the script fails if an id is missing from
+this document **or** if an allow-listed path no longer needs its exception. A
+register that cannot go stale is the only kind worth having. The script is
+wired into `make clippy` (`check_boundaries`), so it gates the pre-commit hook
+too.
 
 ### Direction rules (unchanged, still hard)
 

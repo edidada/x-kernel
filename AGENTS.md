@@ -134,6 +134,12 @@ make unittest
 cargo +nightly-2026-03-08 fmt --all
 ```
 
+`make clippy` also runs the tree hygiene checks (`check_deps`, `check_header`,
+`check_lints`) and `check_boundaries`, the mechanical half of
+`docs/ai/driver-subsystem-boundaries.md`. `make check_boundaries` runs that one
+on its own; it is pure grep, needs no build, and fails if a `drv/**` crate
+gains an unregistered host dependency.
+
 Do not use bare `cargo check -p <crate>` as the main validation path.
 The project relies on Kconfig-generated features and `.cargo/.xconfig.toml`,
 so prefer the Makefile/Kconfig flow.

@@ -95,7 +95,7 @@ QEMU 进程），它对 guest 而言是**半可信**的——它通常是同一�
 | T-06 | `del_gendisk` 之后仍有在途 I/O 完成，写回已注销的请求 | 高 | drain 缺失或顺序错误 | **已实现**：`begin_close(drain.signals())` 先登记在途请求，`del_gendisk` 撤销设备号，然后 `drain.wait_completion()` 等干净。这正是 `BlockActivation::drop` 里两个 `prepare_block_wait().expect(...)` 的用途（带 `CG-021` 说明：remove 在任务上下文，分配失败不可恢复） |
 | T-07 | 消费者持有 `ClassDevice` clone，在设备移除后继续提交 I/O | 高 | 热插拔 | **部分实现**：`device_class` 的数据面走 `with_available` → `acquire_use`，移除编排翻 `draining`/`offline` 后返回 `BadState`。**残余风险**：已过门禁的在途操作与裸 `with()` 调用不受保护，完整闭合需要 per-op 完成计数（`docs/driver-framework-review.md` §8.3 类别 A） |
 | T-08 | `mmio` 变体的寄存器映射在最后一个消费者 clone 释放前被 unmap | 高 | 映射所有权放错位置 | **已实现**：不变量 1。映射经 `take_regs()` 移进设备对象，`MmioData::drop` **不**释放它（代码注释明确写了这一点） |
-| T-09 | `rng` 的 `HostRngCompletion::wait_until` 在非任务上下文调用 | 中 | 未来某个调用者从中断里读熵 | **部分实现**：`PreparedTaskWait::prepare()` 会在错误上下文失败并返回 `InvalidInput`。**残余风险**：执行上下文前提只写在注释里（例外 E-04 的 rustdoc 要求）。`subsystems/block::dispatch::wait` 有同构的服务化版本可对照 |
+| T-09 | `rng` 的 `HostRngCompletion::wait_until` 在非任务上下文调用 | 中 | 未来某个调用者从中断里读熵 | **已实现**：`PreparedTaskWait::prepare()` 在错误上下文会失败并返回 `InvalidInput`（不是 hang），且 `HostRngCompletion` 的 rustdoc 写明了上下文前提、唯一调用链与"新增调用者先查上下文"的要求（例外 E-04）。**残余风险**：仍然只是文档约束，类型上没有 barrier。彻底修法是把等待收进 `subsystems/hwrng::dispatch` 服务（与 `block::dispatch::wait` 同构），等第二个 hwrng 消费者出现时做 |
 | T-10 | 熵源被 VMM 控制（virtio-rng 输出的随机数可预测） | 高 | 恶意 VMM | **不在本 crate**。`KFEAT_ENTROPY_VIRTIO_RNG` 决定是否把 virtio-rng 接入熵池；`util/entropy` 负责混合与可信度标记（启动日志 `hardware_ready=true`）。本 crate 只提供设备驱动 |
 
 ## 故障模式与影响分析（FMEA）
@@ -147,7 +147,8 @@ QEMU 进程），它对 guest 而言是**半可信**的——它通常是同一�
 4. **MSI-X 只在 x86_64、只对 net 启用**（`devices/src/pci.rs` 的
    `if dev_kind == DeviceKind::Net`）。其他家族用 legacy INTx，直到它们的
    中断行为在共享 queue-vector 下被审计过。
-5. **`rng` 的完成等待内联在驱动里**（例外 E-04），未服务化。
+5. **`rng` 的完成等待内联在驱动里**（例外 E-04），未服务化；执行上下文
+   前提写在 `HostRngCompletion` 的 rustdoc 里，类型上没有 barrier。
 6. **`ktask`/`kpoll`/`driver_host` 依赖**（例外 E-02、E-04），因此本 crate
    不是主机无关的。`kirq` **不在其中**：中断注册全部经
    `DeviceCtx::request_irq`，家族库只暴露固有方法 `ack_irq`。

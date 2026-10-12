@@ -404,13 +404,17 @@ mod tests {
 
     #[def_test(serial)]
     fn of_match_hits_any_compatible_not_just_primary() {
-        let generic_entry = OfMatch::compatible("arm,pl011");
+        // Neutral fixture strings on purpose: rule L0-a says this crate names
+        // no device family, and the check is mechanical (no family name on a
+        // non-comment line). The module docs above carry the real-world
+        // `"vendor,soc-uart", "arm,pl011"` example for readers.
+        let generic_entry = OfMatch::compatible("acme-ip,uart");
         // SoC-specific primary, generic IP second: must match on the second.
-        let soc_node = descriptor_with(&["vendor,soc-uart", "arm,pl011"]);
+        let soc_node = descriptor_with(&["acme,soc-uart", "acme-ip,uart"]);
         assert_eq!(generic_entry.matches(&soc_node), MatchScore::Exact);
 
         // A node that does not carry the entry's string anywhere: no match.
-        let other_node = descriptor_with(&["vendor,other-uart", "vendor,legacy"]);
+        let other_node = descriptor_with(&["acme,other-uart", "acme,legacy"]);
         assert_eq!(generic_entry.matches(&other_node), MatchScore::NoMatch);
     }
 }
