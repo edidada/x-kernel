@@ -6,8 +6,8 @@
 
 use alloc::boxed::Box;
 
-use display::{DisplayDevice, DisplayInfo, ScanoutRect, ScanoutResource};
 use device_traits::{Device, DeviceKind, DriverError, DriverResult};
+use display::{DisplayDevice, DisplayInfo, ScanoutRect, ScanoutResource};
 use kspin::SpinNoIrq;
 use virtio_drivers::{
     Hal, PAGE_SIZE,

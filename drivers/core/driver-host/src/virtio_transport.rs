@@ -30,7 +30,8 @@ impl PciTransportService {
     pub fn probe(
         &self,
         descriptor: &DeviceDescriptor,
-    ) -> Result<(DeviceKind, virtio_devices::PciTransport, Option<usize>), driver_core::RuntimeError> {
+    ) -> Result<(DeviceKind, virtio_devices::PciTransport, Option<usize>), driver_core::RuntimeError>
+    {
         crate::probe_pci_transport_with(self.provider, descriptor)
     }
 }

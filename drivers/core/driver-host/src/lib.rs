@@ -31,9 +31,9 @@ extern crate alloc;
 
 mod clk;
 
+pub mod provider;
 #[cfg(feature = "virtio-hal")]
 pub mod virtio_hal;
-pub mod provider;
 #[cfg(feature = "virtio-hal")]
 pub mod virtio_transport;
 
@@ -295,7 +295,14 @@ impl XKernelRuntime {
     pub fn probe_pci_transport(
         &self,
         descriptor: &driver_core::desc::DeviceDescriptor,
-    ) -> Result<(driver_core::DeviceKind, virtio_devices::PciTransport, Option<usize>), RuntimeError> {
+    ) -> Result<
+        (
+            driver_core::DeviceKind,
+            virtio_devices::PciTransport,
+            Option<usize>,
+        ),
+        RuntimeError,
+    > {
         crate::probe_pci_transport_with(self.provider, descriptor)
     }
 }
@@ -307,7 +314,14 @@ impl XKernelRuntime {
 pub fn probe_pci_transport_with(
     provider: &'static XKernelResourceProvider,
     descriptor: &driver_core::desc::DeviceDescriptor,
-) -> Result<(driver_core::DeviceKind, virtio_devices::PciTransport, Option<usize>), RuntimeError> {
+) -> Result<
+    (
+        driver_core::DeviceKind,
+        virtio_devices::PciTransport,
+        Option<usize>,
+    ),
+    RuntimeError,
+> {
     {
         use driver_core::desc::{DeviceIdentity, DeviceLocation as Loc};
         use pci::{DeviceFunction, DeviceFunctionInfo, PciHost};
@@ -363,7 +377,9 @@ pub fn probe_pci_transport_with(
         // the vendored constructor panics mid-walk (the old begin/take pair
         // left the slot stuck open on panic).
         let scope = virtio_hal::begin_mmio_probe();
-        let probed = virtio_devices::probe_pci_transport_only::<virtio_hal::Hal>(root, bdf, &dev_info, provider);
+        let probed = virtio_devices::probe_pci_transport_only::<virtio_hal::Hal>(
+            root, bdf, &dev_info, provider,
+        );
         let (kind, mut transport, transport_irq) = probed.ok_or(RuntimeError::BadState)?;
         let leases = scope.take_leases();
         transport.retain_mappings(leases);

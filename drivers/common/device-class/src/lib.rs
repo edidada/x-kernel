@@ -27,8 +27,8 @@ use device_traits::{Device, DeviceKind, DriverError, DriverResult};
 use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
-mod forwarding;
 mod class;
+mod forwarding;
 mod removal;
 
 pub use class::{

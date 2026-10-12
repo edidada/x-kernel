@@ -10,8 +10,8 @@
 
 use alloc::{string::String, sync::Arc, vec::Vec};
 
-use devnode::DeviceLocation;
 use device_traits::{Device, DeviceKind, DriverError, DriverResult};
+use devnode::DeviceLocation;
 
 /// Opaque handle of one class-device publication.
 ///
