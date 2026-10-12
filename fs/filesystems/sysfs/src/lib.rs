@@ -514,7 +514,7 @@ fn add_input_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<Pro
         input_subsystem_link.clone(),
         TreeEntry::Symlink(relative_symlink(&input_subsystem_link, "class/input")),
     );
-    // Input-parent attributes come from the class properties the kclass
+    // Input-parent attributes come from the class properties the device_class
     // publisher already produces (single data source: NAME/PHYS/UNIQ,
     // PRODUCT = bustype/vendor/product/version hex, and the capability
     // bitmaps EV/KEY/REL/ABS/...). `sysfs:`-prefixed properties, when a

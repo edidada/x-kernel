@@ -47,8 +47,8 @@ device callbacks, user pointers, or network/file inputs in this crate):
 | `unmap_dma_buffer(dma_addr, buffer, direction)` | `dma_addr: DmaBusAddress`, `buffer: NonNull<[u8]>` | must match a prior `map_dma_buffer` result | mapping must be active and length must match — panics otherwise |
 
 A production call site exercising `allocate_dma_memory` /
-`deallocate_dma_memory` is the driver-runtime provider
-`drivers/core/driver-runtime/src/provider/dma.rs`
+`deallocate_dma_memory` is the driver-host provider
+`drivers/core/driver-host/src/provider/dma.rs`
 (`alloc_coherent` / `free_coherent`), which drivers reach through
 `DeviceCtx::alloc_coherent` (the `CoherentMem` guard).
 

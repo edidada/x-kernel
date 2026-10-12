@@ -13,7 +13,7 @@ extern crate alloc;
 #[cfg(feature = "unittest")]
 extern crate driver_core;
 #[cfg(feature = "unittest")]
-extern crate driver_host as driver_runtime;
+extern crate driver_host;
 extern crate kfeat;
 extern crate kruntime;
 extern crate kuaccess;

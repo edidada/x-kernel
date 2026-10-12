@@ -104,7 +104,7 @@ impl ClkRegistry {
     pub fn register_provider(&self, provider: &'static dyn ClkLookup) {
         let provider_id = provider.provider_id();
         kclk::register_provider(provider);
-        log::debug!("driver-runtime: clk provider {provider_id:#x} registered");
+        log::debug!("driver-host: clk provider {provider_id:#x} registered");
         (self.wake)(DepSource::clk(provider_id as u64));
     }
 

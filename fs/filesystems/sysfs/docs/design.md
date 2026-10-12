@@ -31,7 +31,7 @@ device-management clients.
 `sysfs` does not discover hardware, bind drivers, assign class indices,
 allocate device numbers, create `/dev` nodes, or publish automatic lifecycle
 events. `devnode` owns node identity and lifecycle ordering,
-`devnode-uevent` publishes automatic events, `kclass` publishes runtime
+`devnode-uevent` publishes automatic events, `device-class` publishes runtime
 capabilities, and devfs independently projects the same facts into `/dev`.
 KVFS owns generic pathname, inode, mount, and permission enforcement. This
 crate does not parse firmware, access hardware, or implement userspace udev
@@ -46,7 +46,7 @@ construction, input attributes, and user-triggered uevent files.
 ## Architecture
 
 ```text
-kclass input/display activation
+device-class input/display activation
               │
               ▼
     devnode registry

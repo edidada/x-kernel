@@ -3,7 +3,7 @@
 ## Scope
 
 This analysis covers the entire crate — `src/lib.rs`, the `CharDevice`
-trait plus the `driver_base` re-exports. The crate defines no other
+trait plus the `device-traits` re-exports. The crate defines no other
 modules and holds no state; obligations placed on implementers are
 recorded because this contract layer cannot enforce them itself.
 

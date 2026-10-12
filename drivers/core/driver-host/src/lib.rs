@@ -65,7 +65,7 @@ pub fn register_clk_provider(provider: &'static dyn kclk::ClkLookup) {
     let runtime = GLOBAL_RUNTIME
         .lock()
         .clone()
-        .expect("driver-runtime: XKernelRuntime::install_global must run first");
+        .expect("driver-host: XKernelRuntime::install_global must run first");
     runtime.register_clk_provider(provider);
 }
 

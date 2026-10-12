@@ -7,7 +7,7 @@ The package name is `char_driver` (directory `drivers/subsystems/char/`).
 `char_driver` defines the minimal contract for character device drivers that join
 the unified discover → bind → activate driver pipeline: the `CharDevice`
 trait, a byte-stream read/write/flush surface implemented on top of the
-shared `driver_base::Device` base. Typical implementers are `hwrng`
+shared `device_traits::Device` base. Typical implementers are `hwrng`
 sources, secondary serial/UART expansion cards, and runtime wrappers that
 hand a boot-initialized device to the generic pipeline.
 
@@ -18,7 +18,7 @@ hand a boot-initialized device to the generic pipeline.
   `write` (bounded byte write), and `flush` (no-op default for stateless
   devices).
 - Re-export the shared driver vocabulary — `Device`, `DeviceKind`,
-  `DriverError`, `DriverResult` — from `driver_base` (`#[doc(no_inline)]`)
+  `DriverError`, `DriverResult` — from `device-traits` (`#[doc(no_inline)]`)
   so char drivers import one contract root.
 
 ## Non-Responsibilities
@@ -40,14 +40,14 @@ hand a boot-initialized device to the generic pipeline.
 ```text
 drivers/subsystems/char/
 ├── src/
-│   └── lib.rs        # CharDevice trait, driver_base re-exports
+│   └── lib.rs        # CharDevice trait, device-traits re-exports
 └── Cargo.toml
 ```
 
 ## Architecture
 
 ```text
-driver_base (Device, DriverError/Result, discovery pipeline)
+device-traits (Device, DriverError/Result, discovery pipeline)
       ^
       |  impl CharDevice for <driver>
       |
@@ -69,11 +69,11 @@ registry, and no object type.
 - `read`/`write` take `&self`, so implementations must be internally
   synchronized if the device is shared.
 - No early-boot restriction: implementers may exist only after the driver
-  pipeline is up, per the pipeline contract in `driver_base`.
+  pipeline is up, per the pipeline contract in `device-traits`.
 
 ## Error Model
 
-All results are `driver_base::DriverResult`:
+All results are `device_traits::DriverResult`:
 
 - `read` — `Ok(n)` with `n <= buf.len()`; `Ok(0)` is end-of-stream for
   finite sources; open-ended sources return `Err(DriverError::WouldBlock)`
@@ -89,7 +89,7 @@ All results are `driver_base::DriverResult`:
 - Non-blocking contract with `WouldBlock`: kernel callers need explicit
   control over waiting; hidden spinning inside drivers would couple driver
   implementations to scheduler state.
-- Re-export `driver_base` types instead of redefining errors: one error
+- Re-export `device-traits` types instead of redefining errors: one error
   vocabulary across all driver contract crates, one import root for
   implementers.
 - Boot console stays outside this contract: the console must work before

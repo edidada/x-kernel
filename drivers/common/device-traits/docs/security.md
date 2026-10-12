@@ -1,4 +1,4 @@
-# driver_base — Security And Reliability
+# device-traits — Security And Reliability
 
 ## Scope
 
@@ -17,7 +17,7 @@ Driver crates (subsystems/*, drv/*)
    │
    v
 ┌──────────────────────────┐
-│  driver_base             │
+│  device-traits           │
 │                          │
 │  ┌── unsafe boundary ──┐ │
 │  │  (no unsafe code)   │ │

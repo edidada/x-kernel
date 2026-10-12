@@ -1,4 +1,4 @@
-# kclass — Security And Reliability
+# device-class — Security And Reliability
 
 ## Scope
 
@@ -18,7 +18,7 @@ reachable from the documented publish/query/subscribe API.
        │          runtime trait object (driver-constructed)
        v
 ┌─────────────────────────────┐
-│ kclass                      │
+│ device-class                │
 │                             │
 │ safe boundary               │
 │  ├─ ClassRegistry publish/  │
@@ -30,7 +30,7 @@ reachable from the documented publish/query/subscribe API.
 │      handoff to devnode     │
 │                             │
 │ (no unsafe boundary in      │
-│  kclass — see below)        │
+│  device-class — see below)  │
 └──────────────┬──────────────┘
                │
                │ query / subscribe / trait calls
@@ -38,37 +38,37 @@ reachable from the documented publish/query/subscribe API.
     knet / fs_boot / input subsystem / ...
 ```
 
-- `kclass` trusts the driver model to have finished the driver probe before
+- `device-class` trusts the driver model to have finished the driver probe before
   calling `publish_<class>()`, with the parent's `driver_name()` /
   `driver_id()` set and the driver match validated by `devnode`.
-- `kclass` trusts the runtime trait object to be `Send + Sync` and
+- `device-class` trusts the runtime trait object to be `Send + Sync` and
   internally concurrency-safe.
-- `kclass` trusts `devnode` to dispatch `Activated` / `Removed` events in
+- `device-class` trusts `devnode` to dispatch `Activated` / `Removed` events in
   the correct order.
-- Upper subsystems trust that a `ClassDevice<T>` returned by `kclass`
+- Upper subsystems trust that a `ClassDevice<T>` returned by `device-class`
   stays safely accessible after device removal (guaranteed by holding
   the shared runtime `Arc`).
 
 ## External Boundaries / Attack Surface
 
-`kclass` is a typed runtime device-capability registry layer that never
+`device-class` is a typed runtime device-capability registry layer that never
 touches hardware or external input directly. Its attack surface comes
 from:
 
 - **driver publish input**: the driver-supplied
-  `parent: ClassParent` (detached identity) and `runtime: T`. kclass assumes the parent
+  `parent: ClassParent` (detached identity) and `runtime: T`. device-class assumes the parent
   went through the full `devnode` probe pipeline — driver matching
   validated, `parent.state` transitions protected by `devnode` internal
   locks.
 - **Event bridge**: the arrival order of `Activated` / `Removed` events
-  dispatched by `devnode`. kclass trusts devnode to dispatch only after
+  dispatched by `devnode`. device-class trusts devnode to dispatch only after
   state transitions complete.
 - **Device-node metadata**: active input and display runtimes supply immutable
   class metadata to `devnode`. The node registry validates class capacity and
   owns index, major/minor, and `devname` assignment.
 - **ClassDevice trait delegation**: when upper subsystems call trait
   methods through `ClassDevice<T>`, calls delegate to the runtime trait
-  object. kclass itself performs no argument validation — it trusts each
+  object. device-class itself performs no argument validation — it trusts each
   subsystem and driver to validate.
 
 The threat analysis should focus on:
@@ -81,7 +81,7 @@ The threat analysis should focus on:
 
 ## Unsafe Code Inventory
 
-kclass contains no `unsafe` code blocks. Historically
+device-class contains no `unsafe` code blocks. Historically
 `DisplayDevice::fb()` built a framebuffer reference from a raw vaddr via
 `display::FrameBuffer::from_raw_parts_mut`; that path was removed along
 with the directly-mapped framebuffer abstraction. `/dev/fb0` is now
@@ -114,7 +114,7 @@ by a `GlobalPage` RAII allocation that lives for the kernel lifetime).
 6. **device_kind validation**: `publish_<class>()` verifies the runtime's
    `device_kind` against the registry type before constructing the
    `ClassDevice`; a mismatch returns `InvalidInput` without publishing.
-7. **Node assignment follows activation**: kclass requests a `DeviceNode` only
+7. **Node assignment follows activation**: device-class requests a `DeviceNode` only
    after observing `DeviceEvent::Activated`. It unregisters that node before
    class-specific cleanup on `DeviceEvent::Removed`.
 8. **Node allocation failure does not hide the runtime**: a failed node
@@ -163,7 +163,7 @@ Impact levels:
 | F-06 | `devices()` returns a very large `Vec` | Many devices active at once | Allocation may fail | Caller gets an empty `Vec` (no OOM handling) | 4 | `Vec::collect` may fail; callers should handle empty results |
 | F-07 | Duplicate publish | Driver bypasses the normal remove/add lifecycle | publish returns `AlreadyExists` | New runtime not visible | 4 | Class-specific publish is rolled back; the resident object is kept |
 | F-08 | Missing input metadata | Non-input class does not override `class_metadata` | `physical_location()` / `unique_id()` return empty strings | Input device identity incomplete | 4 | `ClassRuntimeMetadata` default returns `empty()`; the input class overrides explicitly |
-| F-09 | Device-node allocation fails | The fixed class index range is exhausted | No `/dev` or `/sys` projection is created for the runtime | Linux-compatible discovery is unavailable for that device | 3 | devnode returns an error; kclass logs it and still notifies typed class consumers |
+| F-09 | Device-node allocation fails | The fixed class index range is exhausted | No `/dev` or `/sys` projection is created for the runtime | Linux-compatible discovery is unavailable for that device | 3 | devnode returns an error; device-class logs it and still notifies typed class consumers |
 
 Severity levels:
 
@@ -185,13 +185,13 @@ Severity levels:
 - `ClassDevice`'s `driver_name()` / `driver_id()` use `expect` — valid
   because publish validated them; tripping the `expect` indicates a bug
   in the publish path.
-- kclass contains no `unsafe` blocks, so class adapter logic cannot cause
+- device-class contains no `unsafe` blocks, so class adapter logic cannot cause
   UB; the historical framebuffer raw-pointer path moved to `fbdevice`'s
   fbdev emulation.
 
 ## Privacy Analysis
 
-`kclass` processes no user data. Device metadata (name, device_kind,
+`device-class` processes no user data. Device metadata (name, device_kind,
 driver_name, irq) is logged at debug level and contains no user-process
 data or device payloads. The input class's `physical_location` and
 `unique_id` are device identity strings, not user input data.
@@ -212,7 +212,7 @@ registries and `ClassDevice` objects.
 - `ClassDevice` has no pre-removal notification (e.g. "device about to be
   removed").
 - Device-node templates currently cover only input event devices and DRM
-  primary nodes. Other classes remain discoverable through kclass without a
+  primary nodes. Other classes remain discoverable through device-class without a
   Linux-compatible node projection.
 
 ## Audit Checklist

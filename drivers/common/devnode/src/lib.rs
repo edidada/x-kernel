@@ -610,7 +610,7 @@ fn dispatch_added(
 /// `devices/...` prefix source for DEVPATH and sysfs).
 ///
 /// THE single derivation: the block driver, the virtio drivers and the
-/// kclass projections must all call this — independent copies drifted
+/// device_class projections must all call this — independent copies drifted
 /// before (DEVPATH vs sysfs tree mismatch).
 pub fn physical_path(location: &DeviceLocation) -> String {
     match location {

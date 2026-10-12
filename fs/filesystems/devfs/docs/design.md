@@ -19,7 +19,7 @@ adapts input and display class handles to VFS file operations.
 
 `devfs` does not discover hardware, bind drivers, assign class indices,
 allocate major/minor numbers, choose `devname` values, or publish facts to
-sysfs. `devnode` owns those identities and their lifecycle; `kclass` publishes
+sysfs. `devnode` owns those identities and their lifecycle; `device-class` publishes
 the runtime input and display capabilities. KVFS owns generic pathname,
 permission, inode, mount, and character-device dispatch semantics.
 
@@ -90,7 +90,7 @@ failure policy in `drivers/tty/pty.c:unix98_pty_init`; it is distinct from omitt
 an optional device node whose registration conflicts with an existing owner.
 
 ```text
-kclass input/display activation
+device-class input/display activation
                │
                │ devnode publish
                ▼
@@ -119,12 +119,12 @@ and clones the matching `DeviceFile` for lookup.
 
 ## Configuration and dependencies
 
-The optional Cargo feature `input` enables `kclass/input` and `inputdev`; the top-level
+The optional Cargo feature `input` enables `device-class/input` and `inputdev`; the top-level
 `kfeat/input` feature selects it through `devfs/input`. When enabled, devfs can
 adapt input node assignments to `EventDev`. Display support is unconditional
-through `kclass/display`, so DRM primary nodes remain available independently.
+through `device-class/display`, so DRM primary nodes remain available independently.
 
-`devfs` depends on `devnode` and `kclass`. `sysfs` depends directly on
+`devfs` depends on `devnode` and `device-class`. `sysfs` depends directly on
 `devnode`; there is no dependency edge from sysfs to devfs.
 
 ## Initialization and lifecycle

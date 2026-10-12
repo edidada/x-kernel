@@ -1,4 +1,4 @@
-# driver_base — Design
+# device-traits — Design
 
 ## Purpose
 
@@ -21,7 +21,7 @@ identity.
 ## Scope
 
 ```text
-drivers/common/driver_base/
+drivers/common/device-traits/
 ├── src/
 │   └── lib.rs
 └── Cargo.toml
@@ -31,7 +31,7 @@ drivers/common/driver_base/
 
 ```text
 ┌──────────────────────────────────────────────────────────────┐
-│                        driver_base                           │
+│                        device-traits                         │
 │                                                              │
 │  DeviceKind ──classification──> Device                       │
 │       │                │                                     │

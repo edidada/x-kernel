@@ -18,7 +18,7 @@ framework and devfs respectively.
 ## Non-responsibilities
 
 `inputdev` does not detect hardware, bind drivers, or define input-device
-identity; `devnode`, `kclass`, and input drivers own those tasks. It does not
+identity; `devnode`, `device-class`, and input drivers own those tasks. It does not
 read input events, implement evdev operations, or provide blocking waits.
 Userspace device-node creation, numbering, file operations, and hot-remove
 behavior belong to devfs and its `EventDev` adapter.
@@ -26,7 +26,7 @@ behavior belong to devfs and its `EventDev` adapter.
 ## Architecture and lifecycle
 
 ```text
-kclass input snapshot + availability callback
+device-class input snapshot + availability callback
                     │
                     ▼
 INPUT_DEVICES: Mutex<Vec<ClassDevice<InputDeviceImpl>>>

@@ -27,7 +27,7 @@
 //!
 //! Concrete clock-controller drivers (SoC PLL/mux/divider chips) register their
 //! outputs here, mirroring how the driver-core capability providers are wired
-//! into the kernel through `driver-runtime`.
+//! into the kernel through `driver-host`.
 #![cfg_attr(not(test), no_std)]
 #![warn(missing_docs)]
 

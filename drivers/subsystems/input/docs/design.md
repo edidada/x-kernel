@@ -6,7 +6,7 @@
 mice, tablets) and the kernel input layer: Linux-evdev-compatible event
 types and payloads (`EventType`, `Event`, `InputDeviceId`, `AbsInfo`) and
 the `InputDevice` trait that drivers implement on top of the shared
-`driver_base::Device` base.
+`device_traits::Device` base.
 
 ## Responsibilities
 
@@ -31,7 +31,7 @@ the `InputDevice` trait that drivers implement on top of the shared
 - No user-space interface: `/dev/input` node exposure and the evdev
   `ioctl` surface belong to the device/fs layers; this crate only fixes
   the data layout.
-- No device discovery or binding: the `driver_base` pipeline owns probe
+- No device discovery or binding: the `device-traits` pipeline owns probe
   and activation.
 - No bitmap storage: `get_event_bits` fills a caller-provided buffer; the
   crate does not allocate or cache capability bitmaps.
@@ -48,7 +48,7 @@ drivers/subsystems/input/
 ## Architecture
 
 ```text
-driver_base (Device base, DriverError/Result, discovery pipeline)
+device-traits (Device base, DriverError/Result, discovery pipeline)
       ^
       |  impl InputDevice for <driver>
       |
@@ -103,7 +103,7 @@ copies a complete `input_event` record to userspace.
 
 ## Error Model
 
-All fallible operations return `driver_base::DriverResult`:
+All fallible operations return `device_traits::DriverResult`:
 
 - `get_event_bits` — `Ok(true)` when the event type is supported and the
   bitmap was written into `out`; `Ok(false)` when the type is not
@@ -128,5 +128,5 @@ All fallible operations return `driver_base::DriverResult`:
   of drivers.
 - An IRQ-safe notifier follows the existing network receive scheduler
   contract and keeps host workerqueue policy in the input subsystem.
-- Re-export `driver_base` types: one vocabulary and one import root for
+- Re-export `device-traits` types: one vocabulary and one import root for
   implementers, matching the sibling contract crates.

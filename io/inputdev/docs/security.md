@@ -8,7 +8,7 @@ This analysis covers the whole crate, which currently consists of
 ## Trust model
 
 The crate receives class handles and removal ids from trusted kernel driver
-infrastructure. `devnode` and `kclass` create and validate those handles and
+infrastructure. `devnode` and `device-class` create and validate those handles and
 ids; `inputdev` trusts that contract and does not independently revalidate
 their provenance or internal identity. Its local validation is limited to
 deduplicating registration by id and removing the matching lifecycle entry.

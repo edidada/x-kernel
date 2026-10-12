@@ -16,7 +16,7 @@ the consumed buffer handle even on error.
 
 x-kernel needs socket semantics that can serve both POSIX syscalls and in-kernel clients. `knet` owns protocol state, packet queues, routing, and progress scheduling, while its surrounding subsystems supply device access, task scheduling, filesystem operations, and caller context.
 
-The POSIX network layer in `posix/net` handles syscall arguments, user-memory access, file descriptors, and ABI conversion. `kvfs` owns pathname resolution and access checks, and `anon_inodefs` creates socket files. `kclass` supplies registered network and vsock device handles; concrete drivers own hardware and virtqueue operations. `kirq` supplies the generic softirq mechanism, while `ktask`, `kworkng`, and `kpoll` supply timer callbacks, task-context polling, and readiness registration. `knet` determines how these facilities advance network work.
+The POSIX network layer in `posix/net` handles syscall arguments, user-memory access, file descriptors, and ABI conversion. `kvfs` owns pathname resolution and access checks, and `anon_inodefs` creates socket files. `device-class` supplies registered network and vsock device handles; concrete drivers own hardware and virtqueue operations. `kirq` supplies the generic softirq mechanism, while `ktask`, `kworkng`, and `kpoll` supply timer callbacks, task-context polling, and readiness registration. `knet` determines how these facilities advance network work.
 
 ## Scope
 
@@ -183,9 +183,9 @@ Ethernet / ARP")
         end
     end
 
-    NIC("kclass network device
+    NIC("device-class network device
 NIC driver")
-    VIRTIO("kclass vsock device
+    VIRTIO("device-class vsock device
 virtio-vsock driver")
 
     CALLER --> API
@@ -222,9 +222,9 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 | Router | Selects routes, fragments outgoing IPv4 packets, and dispatches RX/TX queues across devices. |
 | StackDevice | Borrows the admitted RX queue, data TX queue, and MTU for smoltcp; has no access to routes or physical devices. |
 | LoopbackDevice | Returns locally transmitted packets to the receive path. |
-| EthernetDevice | Adapts kclass network devices to knet's NetDevice interface and handles Ethernet and ARP. |
-| kclass network device · NIC driver | Exposes the registered NIC and performs hardware packet I/O. |
-| kclass vsock device · virtio-vsock driver | Exposes the registered vsock device and transports guest-host packets. |
+| EthernetDevice | Adapts device-class network devices to knet's NetDevice interface and handles Ethernet and ARP. |
+| device-class network device · NIC driver | Exposes the registered NIC and performs hardware packet I/O. |
+| device-class vsock device · virtio-vsock driver | Exposes the registered vsock device and transports guest-host packets. |
 
 `Router::stack_device()` constructs a temporary `StackDevice` for interface
 initialization, ingress, and egress. Router still owns and serializes the queues;
@@ -670,7 +670,7 @@ not allocate submission storage or execute the data plane.
 | Line | Operation |
 |---:|:---|
 | 1 | **Procedure** `init_network()` |
-| 2 | &emsp;`nics = kclass.net_devices()` |
+| 2 | &emsp;`nics = device_class::net_devices()` |
 | 3 | &emsp;`router = Router.new()` |
 | 4 | &emsp;`lo = router.add_device(LoopbackDevice.new())` |
 | 5 | &emsp;`router.add_ipv4_addr(lo, 127.0.0.1/8, host_scope)` |
@@ -1054,7 +1054,7 @@ Ethernet devices use `pending_tx` to hold IP packets awaiting next-hop address r
 
 When `vsock_tipc_bridge` is enabled, `bridge` and AF_VSOCK share `VSOCK_CONN_MANAGER`. The connection manager owns access to the raw `VsockDevice`, and the bridge uses its interfaces to manage connections and data.
 
-During initialization, `net/knet`'s `init_vsock()` obtains the raw virtio-vsock device from kclass and registers it with `VSOCK_CONN_MANAGER` through `connection_manager::register_vsock_dev()`. The manager maintains connection and listener tables, credits, and the bridge event queue, and polls the raw RX virtqueue through `poll_event()`. For ordinary ports, it performs accept and force_close operations, writes data into connection receive buffers, and updates credits. For bridge ports and connections, it queues `ConnectionRequest`, `Connected`, `Received`, `Disconnected`, and `CreditUpdate` events for `VsockBridge::rx_task` to consume through `pop_bridge_event()`.
+During initialization, `net/knet`'s `init_vsock()` obtains the raw virtio-vsock device from device-class and registers it with `VSOCK_CONN_MANAGER` through `connection_manager::register_vsock_dev()`. The manager maintains connection and listener tables, credits, and the bridge event queue, and polls the raw RX virtqueue through `poll_event()`. For ordinary ports, it performs accept and force_close operations, writes data into connection receive buffers, and updates credits. For bridge ports and connections, it queues `ConnectionRequest`, `Connected`, `Received`, `Disconnected`, and `CreditUpdate` events for `VsockBridge::rx_task` to consume through `pop_bridge_event()`.
 
 AF_VSOCK accesses the manager through socket-facing helpers in `connection_manager`. `bridge::init()` registers ports 0–4 from `BRIDGE_PORT_MAP`, which the manager listens on while queueing bridge events. Bridge operations use `listen_bridge_port`, `create_bridge_connection`, `send_bridge`, `recv_bridge`, `disconnect_bridge`, and `abort_bridge` to listen, create connections, exchange data, and close connections.
 

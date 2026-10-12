@@ -3,18 +3,18 @@
 ## 定位
 
 本模块是 x-kernel 的 VirtIO 驱动适配层，将 [`virtio-drivers`] crate 提供的各类
-VirtIO 设备封装为 [`driver_base`] 系列 trait 的实现。块设备、网络、显示、输入、
+VirtIO 设备封装为 [`device-traits`] 系列 trait 的实现。块设备、网络、显示、输入、
 vsock、9p 等子系统通过本模块访问 VirtIO 虚拟设备。
 
 本 crate 属于可复用具体驱动层。它不能直接依赖 X-Kernel host API；需要的 DMA、
 IRQ 映射和时间能力必须通过 `virtio_drivers::Hal` 或 `driver-core` 的 provider
-contract（由 `driver-runtime` 绑定到主机）传入。
+contract（由 `driver-host` 绑定到主机）传入。
 
 ## 背景
 
 x-kernel 运行在裸机 `no_std` 环境中，需要通过 VirtIO 协议与虚拟机监控器（VMM）
 通信来使用虚拟设备。`virtio-drivers` crate 提供了 VirtIO 协议的基础实现（队列管理、
-配置空间访问等），但其接口与 x-kernel 的驱动框架（`driver_base` 系列 trait）不一致，
+配置空间访问等），但其接口与 x-kernel 的驱动框架（`device-traits` 系列 trait）不一致，
 因此需要本适配层进行桥接，使上层子系统无需关心 VirtIO 协议细节。
 
 ## 范围
@@ -509,7 +509,7 @@ host IRQ 核心或工作队列。
 ### 为什么用适配器模式而非直接实现
 
 `virtio-drivers` crate 的设备类型（如 `VirtIOBlk<H, T>`）是泛型结构体，
-直接为其实现 `driver_base` 的 trait 会违反孤儿规则（orphan rule）。
+直接为其实现 `device-traits` 的 trait 会违反孤儿规则（orphan rule）。
 因此采用 newtype 适配器模式，在每个子模块中定义自己的包装类型。
 
 ### 为什么手动实现 Send/Sync

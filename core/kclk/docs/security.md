@@ -17,7 +17,7 @@ field encoding is the controller driver's responsibility.
 
 - **Firmware register base addresses** are consumed by the controller driver to
   build an `MmioClkReg`. The framework receives an already-mapped virtual
-  address; mapping validity is owned by `memspace` / the driver-runtime
+  address; mapping validity is owned by `memspace` / the driver-host
   provider.
 - **MMIO register contents** are read by `Gate`, `Mux`, and `Divider` through
   `ClkRegAccess`. They are treated as untrusted integers; field extraction never
@@ -107,7 +107,7 @@ sealed to the crate, so every such object was created from `Arc<ClkCore>`.
 | F-01 | A hardware `prepare`/`enable` fails mid-chain | Parent already enabled | Clock left disabled | 3 | Roll-back: the parent's count is decremented and its hardware op reversed before returning the error. |
 | F-02 | `set_rate` unsupported on a node without `SET_RATE_PARENT` | Rate unchanged | Driver sees `NotSupported` | 3 | Propagated as `ClkError::NotSupported` → `ResError::Unsupported`. |
 | F-03 | `set_parent` to an orphan slot | Parent unchanged | Driver sees `InvalidParent` | 3 | Rejected before any register write. |
-| F-04 | Provider not installed at lookup time | `NoProvider` returned | Consumer probe is retried | 3 | `driver-runtime` preserves `NoProvider` semantics and maps it to `ServiceError::Deferred` / `ProbeError::Deferred`, keeping the same driver eligible. |
+| F-04 | Provider not installed at lookup time | `NoProvider` returned | Consumer probe is retried | 3 | `driver-host` preserves `NoProvider` semantics and maps it to `ServiceError::Deferred` / `ProbeError::Deferred`, keeping the same driver eligible. |
 | F-05 | Divider field width >= 32 | Configuration error | Probe-time panic | 2 | `1u32 << width` is undefined behavior at width >= 32; `Divider::new` asserts `width` is in `1..32` (hard `assert!`, not debug-only, so release builds fail loudly too). |
 
 ## Known Limitations

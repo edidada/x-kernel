@@ -11,7 +11,7 @@ shadow reaches the screen only when explicitly presented.
 
 ## Responsibilities
 
-- `fb_init`: pick the primary display device from the `kclass` display
+- `fb_init`: pick the primary display device from the `device-class` display
   registry, validate its resolution, allocate a packed BGRA8888 shadow
   (`GlobalPage::alloc_contiguous`, page-aligned, zeroed), and bind it via
   `DisplayDevice::create_scanout_resource` (`FB_RESOURCE_ID`, physical
@@ -52,7 +52,7 @@ io/fbdevice/
 ## Architecture
 
 ```text
-kclass display registry -> primary ClassDevice<DisplayDeviceImpl>
+device-class display registry -> primary ClassDevice<DisplayDeviceImpl>
         | info()
         v
 GlobalPage shadow (BGRA8888, packed) --v2p--> create_scanout_resource
@@ -65,7 +65,7 @@ FB: LazyInit<SpinNoIrq<Option<Arc<FbEmulation>>>>
 
 ## Execution Context
 
-- `fb_init` runs once during device bring-up, after the `kclass` display
+- `fb_init` runs once during device bring-up, after the `device-class` display
   registry is seeded; a missing display device is treated as "no display
   hardware", not an error.
 - Queries and `fb_present` are callable from syscall context; the state

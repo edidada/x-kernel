@@ -84,7 +84,7 @@ pub fn fb_init() {
 
 fn try_setup() -> Result<(), ()> {
     // Pick the primary display device. Display device registration races with
-    // fb_init in general, but the kclass registry is seeded before fb_init
+    // fb_init in general, but the device_class registry is seeded before fb_init
     // runs in the boot sequence; a missing device here means no display at all.
     let device = class_display_devices().into_iter().next().ok_or(())?;
     let info = device.info();

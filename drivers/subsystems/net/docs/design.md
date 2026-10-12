@@ -7,7 +7,7 @@ the `NetDevice` trait that a NIC driver implements, the `NetRxScheduler` hook
 the network stack attaches to interrupt-driven drivers, and the pooled
 `NetBuf` buffer family exchanged across that boundary. The crate also
 re-exports the shared driver vocabulary (`Device`, `DeviceKind`,
-`DriverError`, `DriverResult`) from `driver_base` so that NIC drivers depend
+`DriverError`, `DriverResult`) from `device-traits` so that NIC drivers depend
 on a single contract crate.
 
 ## Responsibilities
@@ -60,7 +60,7 @@ network stack (caller)                NIC driver (implementer)
                                    `NetBufPool` (fixed slots, RAII)
 ```
 
-- `NetDevice` extends `driver_base::Device`; every NIC driver implements it
+- `NetDevice` extends `device_traits::Device`; every NIC driver implements it
   and the network stack is its consumer.
 - `NetRxScheduler::schedule_rx` is provided by the network stack, attached
   through `NetDevice::set_rx_scheduler`, and called by the driver from its
@@ -113,7 +113,7 @@ zero `slot_count` and any `buf_len` outside `1526..=65535` with
 
 ## Error Model
 
-All fallible operations return `driver_base::DriverResult`; no crate-local
+All fallible operations return `device_traits::DriverResult`; no crate-local
 error type is defined. Documented failure results:
 
 - `NetBufPool::new` — `DriverError::InvalidInput` for a zero slot count or
@@ -137,5 +137,5 @@ error type is defined. Documented failure results:
 - Contract-only crate: hardware knowledge stays in driver crates; keeping the
   dormant `fxmac`/`ixgbe` sources here is historical and they compile only if
   their module declarations and features are re-enabled.
-- `driver_base` types are re-exported (not redefined) so the NIC driver
+- `device-traits` types are re-exported (not redefined) so the NIC driver
   surface has one import root and error semantics stay defined in one place.

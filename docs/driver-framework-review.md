@@ -8,6 +8,23 @@
 >
 > **修订 II**：第 7 节为重构落地进度；第 8 节为架构债清理、三轮外部评审
 > 闭环、明确不修清单（含理由分类）与教训记录，截至 `35ad14c89`。
+>
+> **命名说明（本文保持历史原样，不做重命名）**：第 1~3 节描述的是 **main 的旧
+> 框架**，其中的 `kdevice` / `kdriver` / `kclass` / `driver_base` / `device-res`
+> 是 main 上真实的 crate 名，读者不应在当前分支里去找它们。第 4 节之后描述的
+> 是新框架的**设计提案**，落地后又经历了一轮改名（`f0eeecfe8`）：
+>
+> | 本文用名 | 当前名字 |
+> |---|---|
+> | `driver-runtime` / `driver_runtime` | `driver-host` / `driver_host` |
+> | `kclass` | `device-class`（包 `device-class`，Rust 导入 `device_class`） |
+> | `driver_base` | `device-traits`（Rust 导入 `device_traits`） |
+> | `hwrng`（列在 `common/`） | `subsystems/hwrng` |
+> | `drv/virtio/device`（包 `virtio`） | `drv/virtio/devices`（包 `virtio-devices`） |
+>
+> 当前权威清单见 `drivers/README.md`，规则见
+> `docs/ai/driver-subsystem-boundaries.md`。**另外**：跨主机可移植性已不再
+> 是目标，第 4 节中以可移植性为理由的设计取舍需按那份规则文档重新理解。
 
 ---
 

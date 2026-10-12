@@ -58,14 +58,14 @@ sharing), so flags must be written by name, never by numeric value.
 ## Layering
 
 Clock support is split across three crates, mirroring how IRQ is wired through
-`driver-core` (provider contracts) → `driver-runtime` → `kirq`:
+`driver-core` (provider contracts) → `driver-host` → `kirq`:
 
 ```text
 driver-core (device model)
   ClkSpec / DeviceCtx::clk() — the driver-facing surface
         |  does NOT depend on kclk
         v
-driver-runtime (host bridge)
+driver-host (host bridge)
   ClkRegistry::get(spec) -> kclk::clk_get_by_index
   KclkHandle              -> wraps kclk's ClkHandle as driver-core's ClkOps
         |
@@ -251,7 +251,7 @@ DT node (compatible = "fixed-clock" or SoC-specific controller)
    \-- driver.probe():
          |-- builds ClkHwOps (basic type or custom PLL)
          |-- ClkBuilder::new(name, ops).parent(..).flags(..).build() -> Arc<ClkCore>
-         \-- driver_runtime::register_clk_provider(&lookup)
+         \-- driver_host::register_clk_provider(&lookup)
                (publishes under the DT phandle; wakes deferred consumers)
 ```
 
@@ -266,7 +266,7 @@ records a named `ClkSpec` entry in the descriptor's ResourceMap. `dev.clk(
 
 ```text
 driver: dev.clk("baudclk")   (DeviceCtx resolves the clock-names entry)
-   -> DeviceServices::clk_get -> driver-runtime ClkRegistry::get
+   -> DeviceServices::clk_get -> driver-host ClkRegistry::get
    -> kclk::clk_get_by_index(phandle, index)
    -> ClkLookup::get_by_index -> Arc<ClkCore>
    -> wrapped as driver_core::ClkHandle (ClkOps)
@@ -481,7 +481,7 @@ impl DriverOps<PlatformBus> for FixedClockDriver {
             .map_err(|_| ProbeError::Fatal(RuntimeError::Io))?;
         let lookup: &'static FixedClockLookup = Box::leak(Box::new(
             FixedClockLookup { provider_id: phandle, core: core.clone() }));
-        driver_runtime::register_clk_provider(lookup);
+        driver_host::register_clk_provider(lookup);
         Ok(FixedClockData { _core: core })
     }
 }
@@ -493,7 +493,7 @@ impl DriverOps<PlatformBus> for Rk3588CruDriver {
         let regs = dev.iomap(0)?;                 // guards-in-Data ownership
         let reg: Arc<dyn ClkRegAccess> = Arc::new(unsafe { MmioClkReg::new(regs.as_ptr()) });
         let ccu = build_ccu_tree(&reg)?;          // kclk branches
-        driver_runtime::register_clk_provider(&ccu.lookup);
+        driver_host::register_clk_provider(&ccu.lookup);
         Ok(CruData { _regs: regs, _ccu: ccu })
     }
 }

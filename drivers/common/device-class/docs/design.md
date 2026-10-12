@@ -1,8 +1,8 @@
-# kclass — Design
+# device-class — Design
 
 ## Purpose
 
-`kclass` is x-kernel's typed runtime device class layer. Built on top of
+`device-class` is x-kernel's typed runtime device class layer. Built on top of
 the `driver-core` device model, it provides type-safe publication, enumeration,
 lookup, and availability-subscription interfaces for each device category
 (net / block / char / hwrng / display / input / vsock / 9p).
@@ -19,31 +19,31 @@ modifying class registry semantics, or adding new device categories.
 ## Out of Scope
 
 - No framebuffer management: `/dev/fb0` emulation lives in `fbdevice`;
-  kclass only delegates `DisplayDevice` calls (see the framebuffer path
+  device-class only delegates `DisplayDevice` calls (see the framebuffer path
   below).
 - No IRQ handling: interrupt registration and dispatch belong to `kirq`;
-  kclass stores only the `irq` metadata value.
+  device-class stores only the `irq` metadata value.
 - No driver binding or probing: the discover → match → bind pipeline is
-  owned by the `driver-core` domain; kclass consumes the already-bound
+  owned by the `driver-core` domain; device-class consumes the already-bound
   device object at publish time.
 - No device lifecycle or node-allocation ownership: hotplug state transitions,
   class indices, major/minor numbers, and `devname` templates belong to
-  `driver-core`. kclass only supplies class-specific metadata at activation.
+  `driver-core`. device-class only supplies class-specific metadata at activation.
 - No runtime dispatch policy between consumers: after publication the
-  consumer holds `ClassDevice<T>` directly and kclass steps out of the
+  consumer holds `ClassDevice<T>` directly and device-class steps out of the
   call path.
 
 ## Background
 
 The Linux kernel class mechanism (`/sys/class/`) provides a view of
 devices organized by functional category, orthogonal to bus topology
-(`/sys/bus/`). `kclass` fills the same role in x-kernel:
+(`/sys/bus/`). `device-class` fills the same role in x-kernel:
 
 - **driver-core** owns bus attachment, lifecycle state, and driver binding;
-- **kclass** adds the typed per-category view
+- **device-class** adds the typed per-category view
   (net/block/char/display/input/vsock/9p) on top;
 - Drivers call `publish_*()` after a successful probe to inject the
-  runtime capability into the kclass registries.
+  runtime capability into the device-class registries.
 
 This layering lets upper subsystems (network stack, filesystem) stay
 agnostic of both the bus (PCI vs platform) and the probe order — they only
@@ -53,7 +53,7 @@ future availability notifications.
 ## Scope
 
 ```text
-drivers/common/kclass/
+drivers/common/device-class/
 ├── Cargo.toml
 ├── docs/
 │   ├── design.md
@@ -71,7 +71,7 @@ drivers/common/kclass/
                      │ publish_net / publish_block / publish_display / ...
                      v
     ┌────────────────────────────────────────┐
-    │ kclass                                  │
+    │ device-class                           │
     │                                         │
     │  ┌─────────────────────────────────┐    │
     │  │     ClassRegistry (per class)   │    │
@@ -219,7 +219,7 @@ resident runtime is never silently replaced.
 
 There is no legacy event bridge. Removal flows through the composition
 root's remove notifier: `driver-compose` calls
-`kclass::remove_all_detached(owner)` between `remove()` and `drop(Data)`,
+`device_class::remove_all_detached(owner)` between `remove()` and `drop(Data)`,
 so publications are withdrawn while the hardware is still mapped:
 
 1. `class_remove(registry, id)`: remove from the registry, snapshot the
@@ -263,7 +263,7 @@ runtime is the driver's own responsibility (usually interior mutability).
 The `DisplayDevice` trait exposes only the resolution
 (`DisplayInfo { width, height }`) and the scanout resource interface
 (`create_scanout_resource` / `destroy_scanout_resource` /
-`present_scanout_resource`). The kclass class adapter is a pure
+`present_scanout_resource`). The device-class class adapter is a pure
 delegation for those methods and holds no framebuffer raw pointers or
 direct memory mappings.
 
@@ -276,7 +276,7 @@ display device, binds it as a host-visible 2D resource through
 physical scanout and cause flicker, so only `/dev/fb0` writes and the
 `FBIOPAN_DISPLAY` ioctl trigger a present). This "fbdev emulation over
 scanout" model applies uniformly to any `DisplayDevice`, so drivers never
-need to expose a directly-mapped framebuffer, and kclass needs no
+need to expose a directly-mapped framebuffer, and device-class needs no
 framebuffer special-casing or unsafe boundary.
 
 ## Hardware entropy class
@@ -285,7 +285,7 @@ The `hwrng` feature adds `HwrngDeviceImpl = Arc<dyn HwrngDevice + Send + Sync>`
 and the standard class publication and discovery APIs.
 `ClassDevice<HwrngDeviceImpl>` forwards `read` and the terminal `is_failed`
 query without holding the registry lock. Only the read operation may sleep. The host must prepare completion delivery
-before publication; kclass does not implement waiting or entropy trust policy.
+before publication; device-class does not implement waiting or entropy trust policy.
 
 ## Concurrency Model
 
@@ -347,7 +347,7 @@ encapsulation — callers could bypass device state checks.
 
 **Choice**: there is no lazily initialized event bridge. Publications are
 withdrawn by the composition root's remove notifier
-(`kclass::remove_all_detached(owner)`), which `driver-compose` invokes
+(`device_class::remove_all_detached(owner)`), which `driver-compose` invokes
 between `remove()` and `drop(Data)` — while the hardware is still mapped.
 
 **Trade-off**: one explicit call site instead of transparent event
@@ -360,7 +360,7 @@ plumbing, in exchange for:
 
 **Rejected alternative**: the earlier `ensure_event_bridge()` design
 (subscribing to device-model events on first registry access) — it
-coupled kclass to the device model's event vocabulary and hid the
+coupled device-class to the device model's event vocabulary and hid the
 teardown order inside lazy initialization.
 
 ## Drop / Resource Release
@@ -369,7 +369,7 @@ teardown order inside lazy initialization.
   device operations.
 - Registry removal is a `Vec::swap_remove` of the `ClassDevice` entry.
 - Resource guards (MMIO mappings, IRQs, DMA buffers) are owned by the
-  driver's `Data` in the device model, not by kclass; they release when
+  driver's `Data` in the device model, not by device-class; they release when
   the model drops `Data` after publication withdrawal.
 - The runtime trait object is dropped by its `Box<T>` when
   `ClassDeviceInner` drops.

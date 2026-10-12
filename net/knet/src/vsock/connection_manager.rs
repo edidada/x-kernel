@@ -1405,11 +1405,11 @@ pub(crate) fn advance_rx_credit(conn_id: VsockConnId, count: usize) -> DriverRes
     Ok(())
 }
 
-/// Wrapper that turns a kclass `ClassDevice<VsockDeviceImpl>` into a
+/// Wrapper that turns a device_class `ClassDevice<VsockDeviceImpl>` into a
 /// [`VsockDevice`] by calling `ClassDevice::with()` on each method.
 ///
 /// The connection manager owns this wrapper and uses it to drive the raw
-/// virtqueue without knowing about kclass locking.
+/// virtqueue without knowing about device_class locking.
 struct RawTransportWrapper(ClassDevice<VsockDeviceImpl>);
 
 impl RawTransportWrapper {
