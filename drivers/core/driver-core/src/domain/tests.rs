@@ -122,10 +122,23 @@ impl DeviceResourceServices for MockServices {
     fn alloc_coherent(
         &self,
         _: u64,
+        dma: crate::DmaInfo,
         _: usize,
         _: usize,
     ) -> Result<crate::device::CoherentMem, RuntimeError> {
-        Err(RuntimeError::Unsupported)
+        // Test mock: fake identity allocator honoring the device's DMA
+        // view through the same translate() the real host uses, so the
+        // mask/offset contract is exercised in tests too.
+        let paddr = 0x4000_0000u64 + self.mapped.load(Ordering::Relaxed) as u64;
+        match dma.translate(paddr) {
+            Some(bus) => Ok(crate::device::CoherentMem::new(
+                paddr as usize,
+                bus,
+                0x1000,
+                None,
+            )),
+            None => Err(RuntimeError::NoMemory),
+        }
     }
 
     fn map_irq(&self, _: u64, spec: crate::resource::IrqSpec) -> Result<usize, RuntimeError> {
@@ -890,4 +903,109 @@ fn unmatched_descriptor_is_unclaimed() {
     });
     let id = domain.add_device(desc).expect("add device");
     assert_eq!(domain.snapshot(id).unwrap().state, DeviceState::Unclaimed);
+}
+
+#[def_test]
+fn dma_view_translate_applies_offset_and_enforces_mask() {
+    // Identity view: pass-through.
+    let identity = crate::DmaInfo::DEFAULT;
+    assert_eq!(identity.translate(0x8000_1234), Some(0x8000_1234));
+
+    // dma-ranges offset: CPU 0x8000_0000 window appears at device 0x4000_0000.
+    let offset_view = crate::DmaInfo {
+        mask: u64::MAX,
+        offset: 0x4000_0000,
+        coherent: true,
+    };
+    assert_eq!(offset_view.translate(0x8000_1234), Some(0x4000_1234));
+
+    // A 32-bit device: anything above the mask is REJECTED, not truncated —
+    // the failure a real host converts into a failed allocation.
+    let narrow = crate::DmaInfo {
+        mask: 0xFFFF_FFFF,
+        offset: 0,
+        coherent: true,
+    };
+    assert_eq!(narrow.translate(0x1_0000_0000), None);
+    assert_eq!(narrow.translate(0xFFFF_FFFF), Some(0xFFFF_FFFF));
+
+    // The translated address (not the physical one) is what the mask gates.
+    let narrow_offset = crate::DmaInfo {
+        mask: 0xFFFF_FFFF,
+        offset: -0x4000_0000, // device ids sit ABOVE the CPU window
+        coherent: true,
+    };
+    assert_eq!(narrow_offset.translate(0x4000_0000), Some(0x8000_0000));
+    assert_eq!(narrow_offset.translate(0x1_4000_0000), None);
+}
+
+#[def_test]
+fn probe_reads_firmware_property_snapshot() {
+    use crate::device::DeviceCtx;
+
+    let (domain, services) = fresh_domain();
+    let mut desc = test_descriptor();
+    desc.firmware = Some(crate::desc::FirmwareNodeInfo {
+        phandle: None,
+        clock_frequency: Some(24_000_000),
+        clock_cells: None,
+        clock_output_name: None,
+        properties: alloc::vec![
+            ("vendor,quirk-cap", crate::FirmwareProp::U32(7)),
+            ("vendor,label", crate::FirmwareProp::Str("rev-b")),
+            ("dma-coherent", crate::FirmwareProp::Empty),
+            (
+                "vendor,dma-window",
+                crate::FirmwareProp::Bytes(&[0, 0, 0, 1, 0, 0, 0, 2]),
+            ),
+            // The extracted clock fast-fact ALSO lives in the bag — the
+            // enumeration snapshot captures every property.
+            ("clock-frequency", crate::FirmwareProp::U32(24_000_000)),
+        ],
+    });
+    let _ = domain;
+
+    let ctx = DeviceCtx::<PlatformBus>::new(&desc, 1, &*services);
+    assert_eq!(ctx.fw_u32("vendor,quirk-cap"), Some(7));
+    assert_eq!(ctx.fw_str("vendor,label"), Some("rev-b"));
+    assert!(ctx.fw_flag("dma-coherent"));
+    assert_eq!(ctx.fw_prop("nope"), None);
+    // Multi-cell payloads reinterpret on demand — the parse never guessed.
+    assert_eq!(
+        ctx.fw_prop("vendor,dma-window").and_then(|p| p.u32_list()),
+        Some(alloc::vec![1, 2])
+    );
+    // Every property is in the bag, including ones with extracted
+    // fast-facts.
+    assert_eq!(ctx.fw_u32("clock-frequency"), Some(24_000_000));
+}
+
+#[def_test]
+fn alloc_coherent_translates_through_the_devices_dma_view() {
+    // The mock's fake allocator hands out identity CPU-physical pages
+    // around 0x4000_0000; the DEVICE-visible address must come back
+    // translated through the descriptor's dma view.
+    use crate::device::DeviceCtx;
+
+    let (_domain, services) = fresh_domain();
+    let mut desc = test_descriptor();
+    desc.dma = crate::DmaInfo {
+        mask: 0xFFFF_FFFF,
+        offset: 0x2000_0000,
+        coherent: false,
+    };
+
+    let mut ctx = DeviceCtx::<PlatformBus>::new(&desc, 1, &*services);
+    let mem = ctx.alloc_coherent(0x1000, 0x1000).expect("alloc");
+    // paddr 0x4000_0000 → device 0x2000_0000, both under the 32-bit mask.
+    assert_eq!(mem.bus_addr(), 0x2000_0000);
+
+    // A device whose window cannot address the mock's pages fails CLEANLY.
+    desc.dma = crate::DmaInfo {
+        mask: 0x0FFF_FFFF,
+        offset: 0,
+        coherent: true,
+    };
+    let mut ctx = DeviceCtx::<PlatformBus>::new(&desc, 2, &*services);
+    assert!(ctx.alloc_coherent(0x1000, 0x1000).is_err());
 }

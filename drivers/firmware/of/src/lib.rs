@@ -18,6 +18,229 @@ pub use rs_fdtree::{
     RegIter,
 };
 
+/// Firmware-stated DMA view facts of one bus/device, decoded from
+/// `dma-ranges` and `dma-coherent`.
+///
+/// * `offset`: cumulative `dma-ranges` translation such that
+///   `dma_addr = cpu_paddr - offset` (signed: device ids may sit ABOVE the
+///   CPU window).
+/// * `size_mask`: device-usable address bits derived from the range window
+///   size (`min(64, ilog2(size))` bits) — the `dev->dma_mask` floor a bus
+///   narrower than RAM imposes.
+/// * `coherent`: `Some(true)`/`Some(false)` only when firmware STATED
+///   coherency via `dma-coherent`; `None` = not stated (caller applies
+///   its architecture default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DmaFacts {
+    pub offset: i64,
+    pub size_mask: u64,
+    pub coherent: Option<bool>,
+}
+
+impl DmaFacts {
+    /// No translation stated: identity view, full 64-bit mask, coherency
+    /// un-stated. What a bus without `dma-ranges` says (and the common
+    /// case — QEMU virt).
+    pub const IDENTITY: Self = Self {
+        offset: 0,
+        size_mask: u64::MAX,
+        coherent: None,
+    };
+}
+
+/// One firmware node property, eagerly typed when the byte encoding is
+/// unambiguous (`of_property_read_u32`-style views come from these).
+///
+/// Multi-cell payloads stay [`PropValue::Bytes`] — length alone cannot
+/// prove list intent; consumers reinterpret with the same rules the
+/// device-tree specification states for the specific property they know.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PropValue {
+    /// Zero-length property — presence is the information.
+    Empty,
+    /// One NUL-terminated string.
+    Str(&'static str),
+    /// NUL-separated string list.
+    StrList(Vec<&'static str>),
+    /// One big-endian u32 cell.
+    U32(u32),
+    /// One big-endian u64 value.
+    U64(u64),
+    /// Everything else (raw cells, mixed payloads).
+    Bytes(&'static [u8]),
+}
+
+/// Decode one property payload. Typing follows the device-tree
+/// specification's disambiguation rule (the same one
+/// `of_property_read_string` applies): a payload whose LAST byte is NUL is
+/// a string/stringlist; otherwise it is cells (4 → u32, 8 → u64, else raw
+/// bytes). Ambiguities remain only where firmware itself encoded
+/// string-looking cell values — `of_property_read_u32` callers get those
+/// through [`PropValue::Bytes`] reinterpretation by property NAME, which
+/// is how Linux resolves typing too.
+fn decode_prop_value(value: &'static [u8]) -> PropValue {
+    if value.is_empty() {
+        return PropValue::Empty;
+    }
+    // The strings encoding is ENTIRE NUL-separated UTF-8 segments ending
+    // in a NUL — anything else is cells.
+    if value[value.len() - 1] == 0
+        && let Some(list) = decode_string_list(value)
+    {
+        return if list.len() == 1 {
+            PropValue::Str(list[0])
+        } else {
+            PropValue::StrList(list)
+        };
+    }
+    if value.len() == 4 {
+        return PropValue::U32(u32::from_be_bytes([value[0], value[1], value[2], value[3]]));
+    }
+    if value.len() == 8 {
+        let cells = [
+            u32::from_be_bytes([value[0], value[1], value[2], value[3]]),
+            u32::from_be_bytes([value[4], value[5], value[6], value[7]]),
+        ];
+        return PropValue::U64((cells[0] as u64) << 32 | cells[1] as u64);
+    }
+    PropValue::Bytes(value)
+}
+
+fn decode_string_list(value: &'static [u8]) -> Option<Vec<&'static str>> {
+    let mut out = Vec::new();
+    let mut rest = value;
+    loop {
+        let Some(pos) = rest.iter().position(|&byte| byte == 0) else {
+            // Non-NUL-terminated tail: not a stringlist.
+            if rest.is_empty() {
+                break;
+            }
+            return None;
+        };
+        out.push(core::str::from_utf8(&rest[..pos]).ok()?);
+        rest = &rest[pos + 1..];
+    }
+    Some(out)
+}
+
+/// Every property of a node, in firmware order, typed per
+/// [`decode_prop_value`] — the snapshot a bus backend hands to the device
+/// model so probe code can read quirk properties (`of_find_property` /
+/// `of_property_read_*` surface, minus a live tree).
+pub fn node_properties(node: FdtNode<'static, 'static>) -> Vec<(&'static str, PropValue)> {
+    node.properties()
+        .map(|prop| (prop.name, decode_prop_value(prop.value)))
+        .collect()
+}
+
+/// Decode the DMA facts a bus node states for its CHILDREN — `dma-ranges`
+/// and `dma-coherent` ON the given bus/bridge node (the PCI host-bridge
+/// spelling: the node IS the parent bus).
+///
+/// `dma-ranges` rows are `<child-addr> <parent-addr> <size>` triples: the
+/// child address space is the DMA (device) space, the parent space is CPU
+/// physical, so `dma_addr = paddr - (parent - child)`. Returns `None` when
+/// the node states no translation at all (identity — the caller's default).
+pub fn bus_dma_facts(bus_node: FdtNode<'static, 'static>) -> Option<DmaFacts> {
+    // Own #address-cells sizes the child (DMA) side; the parent hop sizes
+    // the CPU side; own #size-cells sizes the window. All three reachable
+    // from a bus node under the one-hop API.
+    let child_cells = bus_node.property_u32("#address-cells")? as usize;
+    let parent_cells = bus_node
+        .parent_property_u32("#address-cells")
+        .unwrap_or(child_cells as u32) as usize;
+    let size_cells = bus_node.property_u32("#size-cells")? as usize;
+    let coherent = bus_node.property("dma-coherent").map(|_| true);
+    let ranges = bus_node.property("dma-ranges")?;
+    decode_dma_ranges(
+        ranges.value,
+        child_cells,
+        parent_cells,
+        size_cells,
+        coherent,
+    )
+}
+
+/// Decode the DMA facts for a DEVICE node: translation from its direct
+/// parent bus (`dma-ranges` on the parent), coherency from the node itself
+/// or that parent (`of_dma_is_coherent`'s reachable levels).
+///
+/// Geometry: the parent's own `#address-cells` sizes the child (DMA) side
+/// and — per the device-tree specification's root/one-level convention —
+/// also the CPU side; a mixed-cell nesting would fail the row-divisibility
+/// check inside and be ignored with a warning rather than half-decoded.
+/// Returns `None` when neither the node nor its parent states anything —
+/// the caller keeps its architecture default.
+pub fn device_dma_facts(node: FdtNode<'static, 'static>) -> Option<DmaFacts> {
+    let coherent = if node.property("dma-coherent").is_some() {
+        Some(true)
+    } else {
+        node.parent_property("dma-coherent").map(|_| true)
+    };
+    let ranges = node.parent_property("dma-ranges")?;
+    let cells = node.parent_property_u32("#address-cells").unwrap_or(2) as usize;
+    let size_cells = node.parent_property_u32("#size-cells").unwrap_or(2) as usize;
+    decode_dma_ranges(ranges.value, cells, cells, size_cells, coherent)
+}
+
+/// Decode `dma-ranges` payloads: rows of `(child, parent, size)` big-endian
+/// cell triples. `offset = Σ(parent - child)` (signed); the device-usable
+/// mask is the smallest window-derived `ilog2` bound (Linux
+/// `of_dma_configure`'s mask derivation).
+fn decode_dma_ranges(
+    value: &[u8],
+    child_cells: usize,
+    parent_cells: usize,
+    size_cells: usize,
+    coherent: Option<bool>,
+) -> Option<DmaFacts> {
+    let row_cells = child_cells + parent_cells + size_cells;
+    if row_cells == 0
+        || !value
+            .len()
+            .is_multiple_of(row_cells * core::mem::size_of::<u32>())
+    {
+        log::warn!(
+            "of: dma-ranges cell geometry invalid (child={child_cells} parent={parent_cells} \
+             size={size_cells}) — ignoring"
+        );
+        return None;
+    }
+    let cells = value
+        .chunks_exact(4)
+        .map(|cell| u32::from_be_bytes([cell[0], cell[1], cell[2], cell[3]]) as u64)
+        .collect::<Vec<_>>();
+    let mut offset: i64 = 0;
+    let mut mask: u64 = u64::MAX;
+    for row in cells.chunks_exact(row_cells) {
+        let child = cells_to_u64(&row[..child_cells]);
+        let parent = cells_to_u64(&row[child_cells..child_cells + parent_cells]);
+        let size = cells_to_u64(&row[child_cells + parent_cells..]);
+        offset += parent as i64 - child as i64;
+        if size > 0 {
+            let bits = (u64::BITS - 1 - size.leading_zeros()).min(64);
+            mask = mask.min(if bits >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << bits) - 1
+            });
+        }
+    }
+    Some(DmaFacts {
+        offset,
+        size_mask: mask,
+        coherent,
+    })
+}
+
+fn cells_to_u64(cells: &[u64]) -> u64 {
+    let mut value: u64 = 0;
+    for cell in cells {
+        value = (value << 32) | cell;
+    }
+    value
+}
+
 /// Failure to initialize the global device-tree handle.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FirmwareInitError {

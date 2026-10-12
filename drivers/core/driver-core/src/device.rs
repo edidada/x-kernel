@@ -35,9 +35,9 @@ use core::{
 };
 
 use crate::{
-    bus::{Bus, DeviceDescriptor, DeviceId},
+    bus::{Bus, DeviceDescriptor, DeviceId, FirmwareProp},
     error::{DepSource, ProbeError, RuntimeError},
-    resource::{ClkSpec, IrqSpec, MmioRegion},
+    resource::{ClkSpec, DmaInfo, IrqSpec, MmioRegion},
 };
 
 /// Deferred resource release hook carried by every guard.
@@ -132,10 +132,16 @@ pub trait DeviceResourceServices: Send + Sync {
         handler: IrqHandlerFn,
     ) -> Result<DevIrq, RuntimeError>;
 
-    /// Allocate coherent DMA memory (`dmam_alloc_coherent`).
+    /// Allocate coherent DMA memory (`dmam_alloc_coherent`) FOR THIS
+    /// DEVICE'S DMA VIEW: the caller passes the descriptor's
+    /// [`DmaInfo`](crate::DmaInfo) so the host applies the device's
+    /// `dma-ranges` translation, enforces its `dma_mask`, and runs the
+    /// coherency protocol — per-device DMA facts have a home in the
+    /// descriptor, not in host-global assumptions.
     fn alloc_coherent(
         &self,
         device: u64,
+        dma: DmaInfo,
         len: usize,
         align: usize,
     ) -> Result<CoherentMem, RuntimeError>;
@@ -697,11 +703,42 @@ impl<'a, B: Bus> DeviceCtx<'a, B> {
         self.request_irq(spec, "irq", handler)
     }
 
-    /// `dmam_alloc_coherent(dev, size, dma_handle, gfp)`.
+    /// `dmam_alloc_coherent(dev, size, dma_handle, gfp)` — the device's own
+    /// DMA view (mask/offset/coherency from the descriptor) travels with
+    /// the request; the returned `CoherentMem::bus_addr` is the
+    /// DEVICE-visible address (CPU-physical translated through
+    /// `dma-ranges`), not the host allocation's raw paddr.
     pub fn alloc_coherent(&mut self, len: usize, align: usize) -> Result<CoherentMem, ProbeError> {
         self.services
-            .alloc_coherent(self.id, len, align)
+            .alloc_coherent(self.id, self.descriptor.dma, len, align)
             .map_err(ProbeError::Fatal)
+    }
+
+    /// Look up one firmware node property by name (`of_property_read_*`):
+    /// the enumeration-time snapshot of the node, eagerly typed. Returns
+    /// `None` for devices with no firmware description (static devices)
+    /// or when the property is absent — the `vendor,foo-capability` quirk
+    /// path, answerable at probe without re-walking firmware.
+    pub fn fw_prop(&self, name: &str) -> Option<&FirmwareProp> {
+        self.descriptor.firmware.as_ref()?.prop(name)
+    }
+
+    /// `of_property_read_u32` on the snapshot.
+    pub fn fw_u32(&self, name: &str) -> Option<u32> {
+        self.fw_prop(name).and_then(FirmwareProp::as_u32)
+    }
+
+    /// `of_property_read_string` on the snapshot.
+    pub fn fw_str(&self, name: &str) -> Option<&'static str> {
+        match self.fw_prop(name)? {
+            FirmwareProp::Str(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// `of_property_read_bool` on the snapshot: presence is the value.
+    pub fn fw_flag(&self, name: &str) -> bool {
+        self.fw_prop(name).is_some()
     }
 
     /// `clk_get(dev, id)`: resolves a `clock-names` entry and acquires the

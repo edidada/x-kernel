@@ -93,7 +93,7 @@ mod resource;
 
 pub use bus::{
     Bus, BusId, BusInstanceId, DeviceDescriptor, DeviceIdentity, DeviceLocation, DiscoveryOrigin,
-    IdMatchEntry, MatchScore,
+    FirmwareProp, IdMatchEntry, MatchScore,
 };
 pub use device::{
     BoundDevice, ClkHandle, ClkOps, ClockConsumerServices, CoherentMem, DevIrq, DeviceCtx,
@@ -108,7 +108,7 @@ pub use domain::{
 pub use driver::{DriverDesc, DriverOps};
 pub use error::{DepKind, DepSource, ProbeError, RuntimeError};
 pub use resource::{
-    ClkSpec, IoPortRange, IrqController, IrqDomainId, IrqSpec, IrqTrigger, MmioRegion,
+    ClkSpec, DmaInfo, IoPortRange, IrqController, IrqDomainId, IrqSpec, IrqTrigger, MmioRegion,
     ResourceEntry, ResourceKind, ResourceMap,
 };
 
@@ -117,7 +117,7 @@ pub mod desc {
 
     pub use crate::bus::{
         DeviceDescriptor, DeviceIdentity, DeviceLocation, DiscoveryOrigin, FirmwareNodeInfo,
-        PciIdentity, PlatformIdentity,
+        FirmwareProp, PciIdentity, PlatformIdentity,
     };
 }
 

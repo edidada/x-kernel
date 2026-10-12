@@ -89,6 +89,15 @@ impl TestDtbBuilder {
         self.prop(name, &[]);
     }
 
+    fn prop_strs(&mut self, name: &str, values: &[&str]) {
+        let mut bytes = Vec::new();
+        for value in values {
+            bytes.extend_from_slice(value.as_bytes());
+            bytes.push(0);
+        }
+        self.prop(name, &bytes);
+    }
+
     fn prop_str(&mut self, name: &str, value: &str) {
         let mut bytes = value.as_bytes().to_vec();
         bytes.push(0);
@@ -251,6 +260,25 @@ fn build_test_dtb() -> Vec<u8> {
 
     builder.begin_node("empty@0");
     builder.prop_reg64("reg", &[(0x8300_0000, 0)]);
+    builder.end_node();
+    builder.end_node();
+
+    builder.begin_node("dma-bus@40000000");
+    builder.prop_u32("#address-cells", 2);
+    builder.prop_u32("#size-cells", 2);
+    builder.prop_empty("dma-coherent");
+    // One dma-ranges row: child 0x4000_0000 ↔ parent 0x8000_0000, size 0x1000_0000.
+    builder.prop_u32s(
+        "dma-ranges",
+        &[0, 0x4000_0000, 0, 0x8000_0000, 0, 0x1000_0000],
+    );
+    builder.begin_node("nic@40001000");
+    builder.prop_str("compatible", "vendor,nic");
+    builder.prop_u32("vendor,tx-queues", 4);
+    builder.prop_str("vendor,board-rev", "b3");
+    builder.prop_strs("vendor,alias-list", &["a", "b"]);
+    builder.prop_u32s("vendor,cfg-cells", &[1, 2, 3]);
+    builder.prop_reg64("reg", &[(0x4000_1000, 0x100)]);
     builder.end_node();
     builder.end_node();
 
@@ -680,4 +708,65 @@ fn read_memory_regions_from_ptr_reports_memory_node_ranges() {
     assert_eq!(count, 1);
     assert_eq!(regions[0].starting_address as usize, 0x8000_0000);
     assert_eq!(regions[0].size, 0x4000_0000);
+}
+
+#[def_test]
+fn node_properties_types_each_encoding() {
+    let fdt = test_fdt();
+    let nic = fdt.find_node("/dma-bus@40000000/nic@40001000").unwrap();
+    let props = node_properties(nic);
+    let get = |name: &str| {
+        props
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value)
+    };
+    // Single string, single u32, stringlist, multi-cell payload, and
+    // firmware ORDER preserved (compatible first, as written).
+    assert_eq!(get("vendor,board-rev"), Some(&PropValue::Str("b3")));
+    assert_eq!(get("vendor,tx-queues"), Some(&PropValue::U32(4)));
+    assert_eq!(
+        get("vendor,alias-list"),
+        Some(&PropValue::StrList(vec!["a", "b"]))
+    );
+    assert_eq!(
+        get("vendor,cfg-cells"),
+        Some(&PropValue::Bytes(&[0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3][..]))
+    );
+    assert_eq!(props.first().map(|(name, _)| *name), Some("compatible"));
+}
+
+#[def_test]
+fn device_dma_facts_decode_parent_translation_and_coherency() {
+    let fdt = test_fdt();
+    let nic = fdt.find_node("/dma-bus@40000000/nic@40001000").unwrap();
+    let facts = device_dma_facts(nic).expect("parent states dma-ranges");
+    // child 0x4000_0000 ↔ parent 0x8000_0000 ⇒ dma = paddr - 0x4000_0000.
+    assert_eq!(facts.offset, 0x4000_0000);
+    // Window 0x1000_0000 ⇒ 28-bit mask floor.
+    assert_eq!(facts.size_mask, 0x0FFF_FFFF);
+    // dma-coherent is stated on the PARENT bus — the reachable level.
+    assert_eq!(facts.coherent, Some(true));
+}
+
+#[def_test]
+fn device_dma_facts_absent_when_nothing_stated() {
+    let fdt = test_fdt();
+    // uart@1000's parent is the root, which states no dma-ranges.
+    let uart = fdt.find_node("/uart@1000").unwrap();
+    assert_eq!(device_dma_facts(uart), None);
+}
+
+#[def_test]
+fn bus_dma_facts_decode_own_ranges() {
+    let fdt = test_fdt();
+    let bus = fdt.find_node("/dma-bus@40000000").unwrap();
+    let facts = bus_dma_facts(bus).expect("own dma-ranges");
+    assert_eq!(facts.offset, 0x4000_0000);
+    assert_eq!(facts.size_mask, 0x0FFF_FFFF);
+    assert_eq!(facts.coherent, Some(true));
+
+    // The pci@ node states no dma-ranges: identity, None.
+    let pci = fdt.find_node("/pci@30000000").unwrap();
+    assert_eq!(bus_dma_facts(pci), None);
 }

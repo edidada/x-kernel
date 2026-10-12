@@ -13,6 +13,7 @@ use driver_core::{
     Bus, IrqSpec, MmioRegion, ResourceKind, ResourceMap,
     desc::{DeviceDescriptor, DeviceIdentity, DeviceLocation, DiscoveryOrigin, PciIdentity},
 };
+use khal::firmware::devices as fw;
 
 use crate::{HeaderType, PciHost, device_setup};
 
@@ -34,6 +35,12 @@ pub fn discover(domain: &driver_core::DeviceDomain) {
     let bus_end = pci.bus_end();
     let segment = pci.segment();
     let root = pci.root_mut();
+
+    // The DMA view every function below this host inherits (see
+    // `host_dma_view`): firmware-stated facts, strict reading for a
+    // firmware-described host that stated nothing, or the static default
+    // with an explicit warning.
+    let host_dma = host_dma_view(segment);
 
     // One ROOT bus instance per discovered host, labeled from the
     // FIRMWARE's own addressing facts (`pci_bus->name` is
@@ -110,7 +117,8 @@ pub fn discover(domain: &driver_core::DeviceDomain) {
                 }),
             )
             .with_origin(DiscoveryOrigin::PlatformStatic)
-            .with_resources(resources);
+            .with_resources(resources)
+            .with_dma(host_dma);
             let descriptor = match root_instance {
                 Some(instance) => descriptor.with_bus_instance(instance),
                 None => descriptor,
@@ -127,6 +135,35 @@ pub fn discover(domain: &driver_core::DeviceDomain) {
                 info.class,
                 info.subclass
             );
+        }
+    }
+}
+
+/// The DMA view a discovered host grants every function below it
+/// (`of_dma_configure(bridge)` analogue): firmware's `dma-ranges` /
+/// `dma-coherent` on the bridge node, with three provenance-honest cases —
+/// firmware STATED facts; firmware-described host that stated NOTHING
+/// (strict reading: identity, full mask, non-coherent — firmware had its
+/// chance); no firmware description at all (static-device default +
+/// explicit warning, the same policy as every other static fallback).
+fn host_dma_view(segment: u16) -> driver_core::DmaInfo {
+    match fw::pci_dma_info() {
+        Some(facts) => driver_core::DmaInfo {
+            mask: facts.size_mask,
+            offset: facts.offset,
+            coherent: facts.coherent.unwrap_or(false),
+        },
+        None if fw::pci_host_source().is_some() => driver_core::DmaInfo {
+            mask: u64::MAX,
+            offset: 0,
+            coherent: false,
+        },
+        None => {
+            log::warn!(
+                "pci: no firmware DMA description for host {segment:04x} — defaulting to identity \
+                 64-bit coherent (board-static fallback)"
+            );
+            driver_core::DmaInfo::DEFAULT
         }
     }
 }

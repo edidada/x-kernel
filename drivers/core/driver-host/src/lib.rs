@@ -234,19 +234,47 @@ impl DeviceResourceServices for XKernelRuntime {
     fn alloc_coherent(
         &self,
         _device: u64,
+        dma: driver_core::DmaInfo,
         len: usize,
         align: usize,
     ) -> Result<CoherentMem, RuntimeError> {
         let spec = DmaSpec::new(len.max(1), align.max(1));
         let allocation: DmaAllocation =
             self.provider.alloc_coherent(spec).map_err(map_res_error)?;
+        // The provider returns CPU-physical identity; the DEVICE-visible
+        // address goes through this device's dma-ranges translation and
+        // must fit under its dma_mask — an allocation outside the device's
+        // view is a failure (Linux dma_direct_alloc retry/fail), never a
+        // silently truncated bus address.
+        let Some(bus_addr) = dma.translate(allocation.bus_addr) else {
+            self.provider.free_coherent(allocation);
+            return Err(RuntimeError::NoMemory);
+        };
+        // dmam_alloc_coherent zeroes (Linux parity); on a device the
+        // firmware declared non-coherent, the writes must then be pushed
+        // out of CPU caches before the device can see the buffer.
+        // SAFETY: the provider returned `spec.len` bytes exclusively
+        // owned by this allocation.
+        unsafe {
+            core::ptr::write_bytes(allocation.cpu_addr as *mut u8, 0, spec.len);
+        }
+        if !dma.coherent {
+            // SAFETY: the range is the provider-returned exclusive buffer
+            // of `spec.len` bytes at `cpu_addr`.
+            unsafe {
+                self.provider.flush_cache(
+                    core::ptr::NonNull::new_unchecked(allocation.cpu_addr as *mut u8),
+                    spec.len,
+                );
+            }
+        }
         let release = {
             let provider = self.provider;
             move || provider.free_coherent(allocation)
         };
         Ok(CoherentMem::new(
             allocation.cpu_addr,
-            allocation.bus_addr,
+            bus_addr,
             spec.len,
             Some(Arc::new(release)),
         ))

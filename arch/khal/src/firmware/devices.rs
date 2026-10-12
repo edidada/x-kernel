@@ -28,8 +28,8 @@ use alloc::vec::Vec;
 #[cfg(target_arch = "x86_64")]
 use lazyinit::LazyInit;
 pub use of::{
-    ClockSpec, InterruptControllerKind, InterruptInfo, InterruptTrigger, PciHostCam, PciHostInfo,
-    PciRangeInfo,
+    ClockSpec, DmaFacts, InterruptControllerKind, InterruptInfo, InterruptTrigger, PciHostCam,
+    PciHostInfo, PciRangeInfo, PropValue,
 };
 
 /// Cached IO-APIC physical address from ACPI MADT.
@@ -89,6 +89,13 @@ pub struct FirmwareDevice {
     /// (provider phandle, controller-local index) pair. Converted to
     /// clocks through `first_clk()` like MMIO and IRQ.
     pub clock_specs: Vec<of::ClockSpec>,
+    /// The node's full property set, firmware order, typed — the quirk
+    /// snapshot (`of_property_read_*` surface) the device model carries.
+    pub props: Vec<(&'static str, PropValue)>,
+    /// The device's DMA view as stated by firmware (`dma-ranges` on the
+    /// parent bus, `dma-coherent` on the node/parent); `None` = nothing
+    /// stated (architecture default).
+    pub dma: Option<of::DmaFacts>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -97,6 +104,17 @@ pub struct MmioResource {
     pub size: usize,
     /// Entry `i` of `reg-names`, when the node provides it.
     pub name: Option<&'static str>,
+}
+
+/// Resolve the DMA view the firmware-described primary PCI host bridge
+/// states for its children (`dma-ranges` / `dma-coherent` on the DT bridge
+/// node — every function below that bridge inherits it, the
+/// `of_dma_configure(bridge)` analogue).
+///
+/// ACPI `_DMA` on the host bridge is not parsed yet: `None` there is a
+/// known gap, not a statement that the bridge is identity-mapped.
+pub fn pci_dma_info() -> Option<DmaFacts> {
+    of::generic_pci_host().and_then(of::bus_dma_facts)
 }
 
 /// Returns `true` if any firmware device description (DT or ACPI) has been
@@ -261,6 +279,8 @@ pub fn for_each_compatible(
             clock_cells: node.property_u32("#clock-cells"),
             clock_output_name: of::clock_output_name(node),
             clock_specs: of::device_clock_specs(node),
+            props: of::node_properties(node),
+            dma: of::device_dma_facts(node),
         });
     }
 }

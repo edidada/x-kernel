@@ -25,7 +25,7 @@ extern crate alloc;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use driver_core::{
-    Bus, IrqTrigger, ResourceKind, ResourceMap,
+    Bus, DmaInfo, FirmwareProp, IrqTrigger, ResourceKind, ResourceMap,
     desc::{
         DeviceDescriptor, DeviceIdentity, DeviceLocation, DiscoveryOrigin, FirmwareNodeInfo,
         PlatformIdentity,
@@ -173,8 +173,49 @@ fn enumerate_firmware_nodes_direct() {
             clock_cells: node.property_u32("#clock-cells"),
             clock_output_name: of::clock_output_name(node),
             clock_specs: of::device_clock_specs(node),
+            props: of::node_properties(node),
+            dma: of::device_dma_facts(node),
         };
         build_descriptor(dev);
+    }
+}
+
+/// Map a firmware-layer property value into the device model's snapshot
+/// vocabulary (firmware crate stays model-agnostic; this is the one
+/// translation point).
+fn map_prop(value: &firmware::PropValue) -> FirmwareProp {
+    match value {
+        firmware::PropValue::Empty => FirmwareProp::Empty,
+        firmware::PropValue::Str(value) => FirmwareProp::Str(value),
+        firmware::PropValue::StrList(list) => FirmwareProp::StrList(list.clone()),
+        firmware::PropValue::U32(value) => FirmwareProp::U32(*value),
+        firmware::PropValue::U64(value) => FirmwareProp::U64(*value),
+        firmware::PropValue::Bytes(bytes) => FirmwareProp::Bytes(bytes),
+    }
+}
+
+/// Combine firmware-stated DMA facts into the model's DMA view.
+///
+/// Firmware authority: a DT node with NO DMA facts at all is NOT silently
+/// given the static-device default — firmware had its chance to speak and
+/// said nothing about coherency, so the view is strict identity,
+/// full-mask, NON-coherent (the arch64 Linux reading of a missing
+/// `dma-coherent`); the host's cache-maintenance protocol is then on and
+/// is a no-op only on hosts whose memory is physically coherent. Only
+/// facts the firmware actually stated (`dma-ranges` rows) override the
+/// identity translation.
+fn dma_info_from_facts(facts: Option<firmware::DmaFacts>) -> DmaInfo {
+    match facts {
+        Some(facts) => DmaInfo {
+            mask: facts.size_mask,
+            offset: facts.offset,
+            coherent: facts.coherent.unwrap_or(false),
+        },
+        None => DmaInfo {
+            mask: u64::MAX,
+            offset: 0,
+            coherent: false,
+        },
     }
 }
 
@@ -224,12 +265,16 @@ fn build_descriptor(dev: firmware::FirmwareDevice) {
         }
     }
 
-    let is_provider = dev.clock_cells.is_some();
     let firmware_info = FirmwareNodeInfo {
         phandle: dev.phandle,
         clock_frequency: dev.clock_frequency,
         clock_cells: dev.clock_cells,
         clock_output_name: dev.clock_output_name,
+        properties: dev
+            .props
+            .iter()
+            .map(|(name, value)| (*name, map_prop(value)))
+            .collect(),
     };
 
     let Some(node_id) = next_firmware_node_id() else {
@@ -251,12 +296,11 @@ fn build_descriptor(dev: firmware::FirmwareDevice) {
         }),
     )
     .with_origin(DiscoveryOrigin::DeviceTree)
-    .with_resources(resources);
-    let descriptor = if is_provider || firmware_info != FirmwareNodeInfo::default() {
-        descriptor.with_firmware(firmware_info)
-    } else {
-        descriptor
-    };
+    .with_resources(resources)
+    .with_dma(dma_info_from_facts(dev.dma));
+    // A firmware-described device ALWAYS carries its node snapshot now —
+    // the property bag is the quirk surface, not a provider-only extra.
+    let descriptor = descriptor.with_firmware(firmware_info);
 
     match global_domain().add_device(descriptor) {
         Ok(added) => log::debug!("driver-core: enumerated {added:?}"),

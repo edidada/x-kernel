@@ -12,7 +12,8 @@
 //! `DmaSpec`-style allocation *requests* deliberately do not appear here:
 //! DMA memory is requested at runtime through
 //! [`DeviceCtx::alloc_coherent`](crate::DeviceCtx::alloc_coherent), it is not
-//! a firmware fact.
+//! a firmware fact; what IS a firmware fact is the device's DMA VIEW of
+//! physical memory ([`DmaInfo`] — mask, translation offset, coherency).
 
 use alloc::{string::String, vec::Vec};
 
@@ -38,6 +39,67 @@ impl MmioRegion {
 pub struct IoPortRange {
     pub base: u16,
     pub size: u16,
+}
+
+/// A device's DMA view of physical memory — `struct device`'s
+/// `dma_mask`/`dma_pfn_offset`/coherency triad, snapshotted at enumeration
+/// from firmware facts.
+///
+/// * `mask` (`dev->dma_mask`): the address bits the device actually drives.
+///   Every allocation handed to the device must land under it.
+/// * `offset` (`dev->dma_pfn_offset << PAGE_SHIFT` with sign): the
+///   cumulative `dma-ranges` translation, `dma_addr = paddr - offset`.
+///   Signed: a bus can map device ids ABOVE the CPU window.
+/// * `coherent` (`dev_is_dma_coherent`): whether the device sees CPU caches;
+///   when `false` the host must run the DmaOp cache-maintenance protocol
+///   around buffers.
+///
+/// Derived by the enumerators (DT `dma-ranges`/`dma-coherent`, PCI host
+/// bridge window), stored in
+/// [`DeviceDescriptor::dma`](crate::desc::DeviceDescriptor::dma), and
+/// consulted by [`DeviceServices::alloc_coherent`](crate::DeviceResourceServices::alloc_coherent)
+/// through [`DmaInfo::translate`] — one translation rule, one mask check,
+/// no per-driver re-derivation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DmaInfo {
+    /// Device-usable address bits (`DMA_BIT_MASK(n)`); translated device
+    /// addresses must satisfy `addr & !mask == 0`.
+    pub mask: u64,
+    /// `dma_addr = paddr - offset` (signed, cumulative `dma-ranges`).
+    pub offset: i64,
+    /// Firmware-stated cache coherency (`dma-coherent`).
+    pub coherent: bool,
+}
+
+impl DmaInfo {
+    /// The host default for devices with NO firmware DMA description:
+    /// full 64-bit identity view, coherent. Only board-static devices and
+    /// firmware-less hosts fall back to this; firmware-described devices
+    /// carry firmware's statement instead.
+    pub const DEFAULT: Self = Self {
+        mask: u64::MAX,
+        offset: 0,
+        coherent: true,
+    };
+
+    /// Translate a CPU physical address into this device's DMA address,
+    /// rejecting addresses the device cannot address.
+    ///
+    /// `None` means the allocation cannot work for this device (outside the
+    /// `dma-ranges` window or above `mask`) — callers fail the request
+    /// instead of silently wrapping a 64-bit bus address into 32 truncated
+    /// device bits.
+    pub const fn translate(&self, paddr: u64) -> Option<u64> {
+        let dma = paddr as i128 - self.offset as i128;
+        if dma < 0 {
+            return None;
+        }
+        let dma = dma as u64;
+        if dma & !self.mask != 0 {
+            return None;
+        }
+        Some(dma)
+    }
 }
 
 /// An interrupt as stated by firmware or the bus, before the host's IRQ

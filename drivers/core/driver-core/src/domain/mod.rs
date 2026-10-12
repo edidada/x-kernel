@@ -357,6 +357,7 @@ impl DeviceResourceServices for NoServices {
     fn alloc_coherent(
         &self,
         _: u64,
+        _: crate::DmaInfo,
         _: usize,
         _: usize,
     ) -> Result<crate::device::CoherentMem, RuntimeError> {
