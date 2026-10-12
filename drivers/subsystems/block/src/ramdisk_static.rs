@@ -4,7 +4,7 @@
 
 //! A RAM disk driver implemented with a static slice as storage.
 
-use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+use device_traits::{Device, DeviceKind, DriverError, DriverResult};
 use kspin::SpinNoPreempt;
 
 use crate::BlockDeviceOperations;

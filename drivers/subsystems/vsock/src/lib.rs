@@ -8,7 +8,7 @@
 #![cfg_attr(doc, feature(doc_cfg))]
 
 #[doc(no_inline)]
-pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+pub use device_traits::{Device, DeviceKind, DriverError, DriverResult};
 
 /// Vsock address.
 #[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]

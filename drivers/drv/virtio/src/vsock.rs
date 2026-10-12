@@ -9,8 +9,8 @@
 
 use alloc::boxed::Box;
 
+use device_class::{ClassParent, publish_vsock};
 use driver_core::{BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError};
-use kclass::{ClassParent, publish_vsock};
 use pci::{PciBus, PciMatch};
 
 /// `struct pci_device_id virtio_vsock_id_table[]`.
@@ -22,7 +22,7 @@ static IDS: &[PciMatch] = &[
 /// Driver-private data: the published device is owned by its class registry.
 pub struct VsockData {
     /// The Data-owned publication: dropping unpublishes (first field).
-    _publication: kclass::ClassWithdraw,
+    _publication: device_class::ClassWithdraw,
 }
 
 /// The driver ops.
@@ -33,7 +33,7 @@ impl DriverOps<PciBus> for VsockDriver {
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PciBus>) -> Result<VsockData, ProbeError> {
         let (kind, transport, _irq) = crate::common::pci_transport(dev)?;
-        if !matches!(kind, driver_base::DeviceKind::Vsock) {
+        if !matches!(kind, device_traits::DeviceKind::Vsock) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
@@ -52,19 +52,20 @@ impl DriverOps<PciBus> for VsockDriver {
 /// PCI driver above and the virtio-mmio transport driver.
 pub fn activate<B: driver_core::Bus>(
     dev: &mut DeviceCtx<'_, B>,
-    transport: impl virtio::Transport + 'static,
+    transport: impl virtio_devices::Transport + 'static,
     mmio_regs: Option<driver_core::IoMap>,
-) -> Result<kclass::ClassWithdraw, ProbeError> {
-    let device =
-        virtio::VirtIoVsockDev::<driver_runtime::hal::Hal, _>::try_new(transport, mmio_regs)
-            .map_err(crate::common::map_driver_error)?;
+) -> Result<device_class::ClassWithdraw, ProbeError> {
+    let device = virtio_devices::VirtIoVsockDev::<driver_host::virtio_hal::Hal, _>::try_new(
+        transport, mmio_regs,
+    )
+    .map_err(crate::common::map_driver_error)?;
     let location = dev.descriptor().location;
     let handle = publish_vsock(
         ClassParent::detached(dev.id().raw(), "virtio-vsock", location),
         Box::new(device),
     )
     .map_err(crate::common::map_driver_error)?;
-    Ok(kclass::vsock_withdraw(&handle))
+    Ok(device_class::vsock_withdraw(&handle))
 }
 
 /// virtio-mmio activation: owns the class publication; close() unpublishes
@@ -72,7 +73,7 @@ pub fn activate<B: driver_core::Bus>(
 #[cfg(feature = "mmio")]
 pub fn activate_mmio(
     dev: &mut driver_core::DeviceCtx<'_, driver_core::platform::PlatformBus>,
-    transport: impl virtio::Transport + 'static,
+    transport: impl virtio_devices::Transport + 'static,
     mut builder: crate::mmio::ActivationBuilder,
 ) -> Result<crate::mmio::MmioData, ProbeError> {
     // The MMIO register mapping follows the device object (Linux BAR
@@ -81,7 +82,7 @@ pub fn activate_mmio(
     let publication = activate(dev, transport, mmio_regs)?;
 
     struct VsockMmioActivation {
-        _withdraw: kclass::ClassWithdraw,
+        _withdraw: device_class::ClassWithdraw,
     }
 
     impl crate::mmio::MmioActivation for VsockMmioActivation {

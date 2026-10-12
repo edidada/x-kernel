@@ -12,11 +12,11 @@
 
 use alloc::{sync::Arc, vec::Vec};
 
-use driver_base::DriverResult;
-use kclass::{
+use device_class::{
     CharDeviceImpl, ClassDevice, ClassDeviceId, char_devices, find_char_device, publish_char,
     subscribe_char_available, subscribe_char_removed,
 };
+use device_traits::DriverResult;
 use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
@@ -156,7 +156,7 @@ fn ensure_console_bridge() {
 /// The runtime implementation must wrap the same early stdout port, not another
 /// device. Called by serial adoption in task context, before driver activation.
 pub fn register_stdout_console(
-    parent: impl Into<kclass::ClassParent>,
+    parent: impl Into<device_class::ClassParent>,
     runtime: CharDeviceImpl,
 ) -> DriverResult<()> {
     ensure_console_bridge();
@@ -170,7 +170,7 @@ pub fn register_stdout_console(
     {
         let mut subsystem = console_subsystem().lock();
         if let Some(previous) = subsystem.stdout.take() {
-            kclass::unpublish_char(previous);
+            device_class::unpublish_char(previous);
         }
     }
     let handle = publish_char(parent, runtime)?;
@@ -194,7 +194,7 @@ pub fn register_stdout_console(
 /// `Arc<DeviceObject>` parent became a `ClassParent`); auxiliary ports use
 /// plain `publish_char` and stay out of the console subsystem.
 pub fn register_console_parented(
-    parent: impl Into<kclass::ClassParent>,
+    parent: impl Into<device_class::ClassParent>,
     runtime: CharDeviceImpl,
 ) -> DriverResult<()> {
     // Thin alias of [`register_stdout_console`] kept as the serial drivers'

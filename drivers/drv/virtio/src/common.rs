@@ -9,18 +9,18 @@ use alloc::string::String;
 
 use driver_core::{ProbeError, RuntimeError, desc::DeviceLocation};
 
-pub(crate) fn map_driver_error(err: driver_base::DriverError) -> ProbeError {
+pub(crate) fn map_driver_error(err: device_traits::DriverError) -> ProbeError {
     let error = match err {
-        driver_base::DriverError::InvalidInput | driver_base::DriverError::ReadOnly => {
+        device_traits::DriverError::InvalidInput | device_traits::DriverError::ReadOnly => {
             RuntimeError::Invalid
         }
-        driver_base::DriverError::NoMemory => RuntimeError::NoMemory,
-        driver_base::DriverError::ResourceBusy | driver_base::DriverError::AlreadyExists => {
+        device_traits::DriverError::NoMemory => RuntimeError::NoMemory,
+        device_traits::DriverError::ResourceBusy | device_traits::DriverError::AlreadyExists => {
             RuntimeError::Busy
         }
-        driver_base::DriverError::BadState => RuntimeError::BadState,
-        driver_base::DriverError::Io | driver_base::DriverError::WouldBlock => RuntimeError::Io,
-        driver_base::DriverError::Unsupported => RuntimeError::Unsupported,
+        device_traits::DriverError::BadState => RuntimeError::BadState,
+        device_traits::DriverError::Io | device_traits::DriverError::WouldBlock => RuntimeError::Io,
+        device_traits::DriverError::Unsupported => RuntimeError::Unsupported,
     };
     ProbeError::Fatal(error)
 }
@@ -40,10 +40,16 @@ pub(crate) fn physical_path(location: DeviceLocation) -> String {
 /// the wrong transport type cannot get past the compiler.
 pub(crate) fn pci_transport<B: driver_core::Bus>(
     dev: &mut driver_core::DeviceCtx<'_, B>,
-) -> Result<(driver_core::DeviceKind, virtio::PciTransport, Option<usize>), driver_core::ProbeError>
-{
+) -> Result<
+    (
+        driver_core::DeviceKind,
+        virtio_devices::PciTransport,
+        Option<usize>,
+    ),
+    driver_core::ProbeError,
+> {
     let service = dev
-        .extension::<driver_runtime::virtio_service::PciTransportService>()
+        .extension::<driver_host::virtio_transport::PciTransportService>()
         .ok_or(driver_core::ProbeError::Fatal(
             driver_core::RuntimeError::Unsupported,
         ))?;

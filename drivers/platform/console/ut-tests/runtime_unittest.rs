@@ -4,8 +4,8 @@
 
 use alloc::boxed::Box;
 
-use driver_base::{Device, DeviceKind};
-use kclass::CharDevice;
+use device_traits::{Device, DeviceKind};
+use device_class::CharDevice;
 use unittest::def_test;
 
 use super::*;
@@ -41,7 +41,7 @@ fn stdout_identity_requires_local_handle_and_clears_on_removal() {
     // Detached class parent: never touches a registry — identity test only.
     // Offline mirrors the main-side bound-but-inactive device object: the
     // handle exists, availability is false.
-    let parent = kclass::ClassParent::detached(
+    let parent = device_class::ClassParent::detached(
         1,
         "console-test",
         devnode::DeviceLocation::PlatformStatic { id: 1 },
@@ -66,7 +66,7 @@ fn stdout_identity_requires_local_handle_and_clears_on_removal() {
     subsystem.add(stdout);
     assert_eq!(subsystem.stdout_handle().unwrap().id(), id);
     assert!(!subsystem.stdout_handle().unwrap().is_available());
-    let other = kclass::ClassDeviceId::new_detached();
+    let other = device_class::ClassDeviceId::new_detached();
     assert!(subsystem.remove(other).is_none());
     assert_eq!(subsystem.stdout_handle().unwrap().id(), id);
     assert!(subsystem.remove(id).is_some());

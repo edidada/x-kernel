@@ -27,13 +27,13 @@ use block::{
     Gendisk,
     dispatch::{reclaimer::BlockIoReclaimer, wait as block_wait},
 };
-use driver_base::Device as _;
+use device_class::{ClassParent, publish_block};
+use device_traits::Device as _;
 use driver_core::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
 };
-use kclass::{ClassParent, publish_block};
 use pci::{PciBus, PciMatch};
-use virtio::{Transport, VirtIoBlkDev, VirtIoHal};
+use virtio_devices::{Transport, VirtIoBlkDev, VirtIoHal};
 
 /// `struct pci_device_id virtio_blk_id_table[]`: modern 0x1042 and
 /// transitional 0x1001. Note the transitional series is type-indexed
@@ -65,7 +65,7 @@ impl DriverOps<PciBus> for VirtioBlkDriver {
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PciBus>) -> Result<BlkData, ProbeError> {
         let (kind, transport, irq) = crate::common::pci_transport(dev)?;
-        if !matches!(kind, driver_base::DeviceKind::Block) {
+        if !matches!(kind, device_traits::DeviceKind::Block) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
@@ -111,7 +111,7 @@ struct BlkActivation<H: VirtIoHal, T: Transport> {
     /// The Data-owned publication: taken and dropped at the exact
     /// begin_close → unpublish → drain point in `Drop` (field order alone
     /// cannot express the interleaving).
-    publication: Option<kclass::ClassWithdraw>,
+    publication: Option<device_class::ClassWithdraw>,
 }
 
 impl<H: VirtIoHal, T: Transport> Drop for BlkActivation<H, T> {
@@ -158,7 +158,7 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
     mmio_regs: Option<driver_core::IoMap>,
 ) -> Result<Box<dyn Activation>, ProbeError> {
     let device = Arc::new(
-        VirtIoBlkDev::<driver_runtime::hal::Hal, T>::try_new_irq_with_regs(
+        VirtIoBlkDev::<driver_host::virtio_hal::Hal, T>::try_new_irq_with_regs(
             transport,
             block_wait::prepare_block_wait,
             mmio_regs,
@@ -203,9 +203,9 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
     let disk = Arc::new(
         Gendisk::new(
             device.name().into(),
-            virtio::VIRTIO_BLK_MAJOR,
-            device.index() << virtio::VIRTIO_BLK_PART_BITS,
-            1 << virtio::VIRTIO_BLK_PART_BITS,
+            virtio_devices::VIRTIO_BLK_MAJOR,
+            device.index() << virtio_devices::VIRTIO_BLK_PART_BITS,
+            1 << virtio_devices::VIRTIO_BLK_PART_BITS,
             Box::new(device.clone()),
         )
         .map_err(crate::common::map_driver_error)?
@@ -221,7 +221,7 @@ pub fn activate<B: driver_core::Bus, T: Transport + 'static>(
         disk,
     )
     .map_err(crate::common::map_driver_error)?;
-    activation.publication = Some(kclass::block_withdraw(&publication));
+    activation.publication = Some(device_class::block_withdraw(&publication));
 
     Ok(Box::new(activation))
 }

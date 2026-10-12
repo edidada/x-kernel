@@ -19,9 +19,9 @@ use alloc::{
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use bytemuck::bytes_of;
+use device_class::{ClassDevice, DisplayDeviceImpl};
 use display::{DisplayDevice, ScanoutFormat, ScanoutRect, ScanoutResource};
 use kalloc::GlobalPage;
-use kclass::{ClassDevice, DisplayDeviceImpl};
 use khal::mem::v2p;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::Mutex;

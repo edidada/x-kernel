@@ -12,29 +12,29 @@ categories = ["os", "no-std"]
 
 [features]
 default = []
-blk = ["dep:block", "kclass/block", "virtio/block"]
-net = ["kclass/net", "virtio/net"]
-rng = ["kclass/hwrng", "dep:kpoll", "dep:ktask", "virtio/rng"]
-gpu = ["kclass/display", "virtio/gpu"]
-input = ["kclass/input", "virtio/input"]
-vsock = ["kclass/vsock", "virtio/socket"]
-fs9p = ["kclass/virtio-9p", "virtio/virtio-9p"]
+blk = ["dep:block", "device_class/block", "virtio_devices/block"]
+net = ["device_class/net", "virtio_devices/net"]
+rng = ["device_class/hwrng", "dep:kpoll", "dep:ktask", "virtio_devices/rng"]
+gpu = ["device_class/display", "virtio_devices/gpu"]
+input = ["device_class/input", "virtio_devices/input"]
+vsock = ["device_class/vsock", "virtio_devices/socket"]
+fs9p = ["device_class/virtio-9p", "virtio_devices/virtio-9p"]
 mmio = []
 
 [dependencies]
 block = { workspace = true, optional = true }
 devnode = { workspace = true }
 driver-core = { workspace = true }
-driver-runtime = { workspace = true, features = ["virtio-hal"] }
-driver_base = { workspace = true }
-kclass = { workspace = true }
+driver_host = { workspace = true, features = ["virtio-hal"] }
+device_traits = { workspace = true }
+device_class = { workspace = true }
 hwrng = { workspace = true }
 kpoll = { workspace = true, optional = true }
 kirq = { workspace = true }
 ktask = { workspace = true, optional = true }
 log.workspace = true
 pci = { workspace = true }
-virtio = { workspace = true, features = ["alloc"] }
+virtio_devices = { workspace = true, features = ["alloc"] }
 
 
 [lints]

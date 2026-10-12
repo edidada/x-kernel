@@ -14,7 +14,7 @@ use alloc::sync::Arc;
 // #[cfg(feature = "ixgbe")]
 // /// ixgbe NIC device driver.
 #[doc(no_inline)]
-pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+pub use device_traits::{Device, DeviceKind, DriverError, DriverResult};
 
 mod net_buf;
 pub use self::net_buf::{NetBuf, NetBufBox, NetBufHandle, NetBufPool};

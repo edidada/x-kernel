@@ -14,8 +14,8 @@ use ktime_types::MonotonicInstant;
 use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address};
 use unittest::def_test;
 
-fn kclass_test_device_id(raw: u64) -> kclass::ClassDeviceId {
-    kclass::ClassDeviceId::from_raw(raw)
+fn kclass_test_device_id(raw: u64) -> device_class::ClassDeviceId {
+    device_class::ClassDeviceId::from_raw(raw)
 }
 
 use super::{
@@ -102,7 +102,7 @@ impl NetDevice for TestDevice {
         }
     }
 
-    fn device_id(&self) -> Option<kclass::ClassDeviceId> {
+    fn device_id(&self) -> Option<device_class::ClassDeviceId> {
         self.device_id.map(kclass_test_device_id)
     }
 

@@ -53,7 +53,7 @@ impl DeviceDomain {
     ///
     /// Class publications are NOT dispatched through observers anymore:
     /// each driver `Data` owns its publications (withdrawal guards, see
-    /// `kclass::ClassWithdraw`) and unpublishes at its own drop. Observers
+    /// `device_class::ClassWithdraw`) and unpublishes at its own drop. Observers
     /// are for subsystems that need removal visibility beyond publications
     /// (diagnostics, accounting, future hotplug policies).
     pub fn add_lifecycle_observer(&self, observer: Arc<dyn DeviceLifecycleObserver>) {

@@ -16,7 +16,7 @@
 //!
 //! publishes a single fixed-rate kclk output under its phandle. Consumers
 //! that probed earlier and deferred on this phandle are woken by
-//! [`driver_runtime::register_clk_provider`].
+//! [`driver_host::register_clk_provider`].
 //!
 //! This is the golden template for **provider drivers**: everything
 //! is one file, registration is data, and the probe-to-wakeup handshake is
@@ -93,7 +93,7 @@ impl DriverOps<PlatformBus> for FixedClockDriver {
             provider_id: phandle,
             core: core.clone(),
         }));
-        driver_runtime::register_clk_provider(lookup);
+        driver_host::register_clk_provider(lookup);
 
         log::info!("fixed-clock: published `{name}` @ {frequency} Hz (phandle {phandle:#x})");
         Ok(FixedClockData { _core: core })

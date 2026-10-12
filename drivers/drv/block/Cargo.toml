@@ -19,8 +19,8 @@ block = { workspace = true, features = ["ramdisk"] }
 kbuild_config = { workspace = true }
 devnode = { workspace = true }
 driver-core = { workspace = true }
-driver_base = { workspace = true }
-kclass = { workspace = true, features = ["block"] }
+device_traits = { workspace = true }
+device_class = { workspace = true, features = ["block"] }
 
 
 [lints]

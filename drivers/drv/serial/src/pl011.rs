@@ -17,7 +17,7 @@
 //! * guards-in-`Data` ownership (drop order is the release order)
 //!
 //! Runtime console/char publication goes through the class layer
-//! (`kclass::publish_*` with a detached `ClassParent`): the stdout port
+//! (`device_class::publish_*` with a detached `ClassParent`): the stdout port
 //! registers as the console subsystem's device, auxiliary ports publish
 //! as char devices. Console output never stops — the early-stdout port
 //! this driver adopts is the same hardware instance printk keeps using.
@@ -29,12 +29,12 @@ use console_driver::{
     runtime::register_console_parented,
     serial::{SerialIdent, SerialPort, SerialRole, take_early_port},
 };
-use driver_base::{Device, DeviceKind, DriverResult};
+use device_class::{ClassParent, publish_char};
+use device_traits::{Device, DeviceKind, DriverResult};
 use driver_core::{
     BoundDevice, ClkHandle, DevIrq, DeviceCtx, DriverDesc, DriverOps, IoMap, IrqAction, ProbeError,
     platform::{OfMatch, PlatformBus, PlatformId},
 };
-use kclass::{ClassParent, publish_char};
 use memaddr::{PhysAddr, VirtAddr};
 
 /// `static const struct of_device_id pl011_of_match[]`.
@@ -49,7 +49,7 @@ pub struct Pl011Data {
     /// The Data-owned char publication (auxiliary ports): dropping
     /// unpublishes. FIRST field — before every guard below. The stdout
     /// port deliberately holds none (console continuity across rebind).
-    _publication: Option<kclass::ClassWithdraw>,
+    _publication: Option<device_class::ClassWithdraw>,
     _irq: Option<DevIrq>,
     _port: Arc<SerialPort>,
     _regs: Option<IoMap>,
@@ -152,23 +152,23 @@ impl DriverOps<PlatformBus> for Pl011Driver {
         // devices. Both use a detached class parent — the class layer is
         // model-agnostic since the class-layer decoupling.
         let location = dev.descriptor().location;
-        let char_dev: kclass::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
-        let mut publication: Option<kclass::ClassWithdraw> = None;
+        let char_dev: device_class::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
+        let mut publication: Option<device_class::ClassWithdraw> = None;
         match port.role() {
             SerialRole::Stdout => {
                 register_console_parented(
                     ClassParent::detached(dev.id().raw(), "pl011-serial", location),
                     char_dev,
                 )
-                .map_err(crate::common::map_driver_error)?;
+                .map_err(crate::probe_error::map_driver_error)?;
             }
             SerialRole::Auxiliary => {
                 let handle = publish_char(
                     ClassParent::detached(dev.id().raw(), "pl011-serial", location),
                     char_dev,
                 )
-                .map_err(crate::common::map_driver_error)?;
-                publication = Some(kclass::char_withdraw(&handle));
+                .map_err(crate::probe_error::map_driver_error)?;
+                publication = Some(device_class::char_withdraw(&handle));
             }
         }
 

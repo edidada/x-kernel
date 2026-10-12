@@ -6,7 +6,7 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
-use driver_base::{DriverError, DriverResult};
+use device_traits::{DriverError, DriverResult};
 use kpoll::{Completion, PollRegisterError, PollRegistration};
 use ktask::future::PreparedTaskWait;
 

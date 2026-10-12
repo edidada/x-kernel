@@ -21,7 +21,7 @@ use alloc::boxed::Box;
 use alloc::{format, sync::Arc, vec::Vec};
 
 #[cfg(feature = "fs9p")]
-use kclass::{
+use device_class::{
     ClassDevice, Virtio9pDevice as _, Virtio9pDeviceImpl, prelude::DriverError, virtio_9p_devices,
 };
 #[cfg(feature = "fs9p")]

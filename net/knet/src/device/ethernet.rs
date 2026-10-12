@@ -11,8 +11,8 @@ use alloc::{
 };
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use device_class::{ClassDevice, prelude::*};
 use hashbrown::HashMap;
-use kclass::{ClassDevice, prelude::*};
 use kerrno::{KError, KResult, LinuxError};
 use kpoll::PollSet;
 use kspin::{SpinNoIrq, static_lock};
@@ -635,7 +635,7 @@ impl NetDeviceOps for EthernetDevice {
         }
     }
 
-    fn device_id(&self) -> Option<kclass::ClassDeviceId> {
+    fn device_id(&self) -> Option<device_class::ClassDeviceId> {
         Some(self.inner.id())
     }
 

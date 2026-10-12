@@ -11,7 +11,7 @@ members = [
     "task/kworkng",
     "task/ktimer-core",
     "drivers/core/driver-core",
-    "drivers/core/driver-runtime",
+    "drivers/core/driver-host",
     "drivers/core/driver-compose",
     "drivers/common/devnode",
     "drivers/drv/*",
@@ -197,24 +197,24 @@ watchdog = { path = "io/watchdog" }
 block = { path = "drivers/subsystems/block" }
 char_driver = { path = "drivers/subsystems/char" }
 display = { path = "drivers/subsystems/display" }
-driver_base = { path = "drivers/common/driver_base" }
-hwrng = { path = "drivers/common/hwrng" }
+device_traits = { path = "drivers/common/device-traits", package = "device-traits" }
+hwrng = { path = "drivers/subsystems/hwrng" }
 kclk = { path = "core/kclk" }
 driver-core = { path = "drivers/core/driver-core" }
-driver-runtime = { path = "drivers/core/driver-runtime" }
+driver_host = { path = "drivers/core/driver-host", package = "driver-host" }
 driver-compose = { path = "drivers/core/driver-compose" }
 drv-virtio = { path = "drivers/drv/virtio" }
 drv-serial = { path = "drivers/drv/serial" }
 drv-clk = { path = "drivers/drv/clk" }
 drv-block = { path = "drivers/drv/block" }
 devnode = { path = "drivers/common/devnode" }
-kclass = { path = "drivers/common/kclass" }
+device_class = { path = "drivers/common/device-class", package = "device-class" }
 input = { path = "drivers/subsystems/input" }
 net = { path = "drivers/subsystems/net" }
 vsock = { path = "drivers/subsystems/vsock" }
 
 # Internal: portable concrete drivers
-virtio = { path = "drivers/drv/virtio/device" }
+virtio_devices = { path = "drivers/drv/virtio/devices", package = "virtio-devices" }
 
 # Internal: driver adapters and integration
 uevent_netlink = { path = "drivers/integration/uevent-netlink", package = "uevent-netlink" }
@@ -227,7 +227,7 @@ rs_fdtree = { path = "drivers/firmware/rs-fdtree" }
 acpi = { path = "drivers/firmware/acpi" }
 of = { path = "drivers/firmware/of" }
 dice_driver = { path = "drivers/platform/dice", package = "dice-driver" }
-irq_driver = { path = "drivers/platform/irq", package = "irq-driver" }
+irqchip_driver = { path = "drivers/platform/irqchip", package = "irqchip-driver" }
 rtc_driver = { path = "drivers/platform/rtc", package = "rtc-driver" }
 timer_driver = { path = "drivers/platform/timer", package = "timer-driver" }
 x86_apic = { path = "drivers/platform/x86-apic", package = "x86-apic" }

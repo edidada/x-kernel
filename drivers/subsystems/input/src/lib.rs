@@ -11,7 +11,7 @@ extern crate alloc;
 use alloc::sync::Arc;
 
 #[doc(no_inline)]
-pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+pub use device_traits::{Device, DeviceKind, DriverError, DriverResult};
 use strum::FromRepr;
 
 /// Input event categories defined by the Linux input subsystem.

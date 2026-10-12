@@ -24,7 +24,7 @@ use core::{
     task::Poll,
 };
 
-use kclass::prelude::DriverError;
+use device_class::prelude::DriverError;
 use kerrno::{KError, KResult};
 use klazy::Lazy;
 use kpoll::{PollRegisterError, PollRegistrations, PollSet};

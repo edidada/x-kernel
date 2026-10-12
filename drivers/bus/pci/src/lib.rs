@@ -30,8 +30,8 @@ pub use virtio_drivers::transport::pci::bus::{
     HeaderType, MemoryBarType, MmioCam, PciError, PciRoot, Status,
 };
 
+pub mod device_setup;
 pub mod msix;
-pub mod support;
 
 pub mod discover;
 

@@ -13,12 +13,12 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
+use device_class::{ClassParent, publish_net};
 use driver_core::{
     BoundDevice, DevIrq, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
 };
-use kclass::{ClassParent, publish_net};
 use pci::{PciBus, PciMatch};
-use virtio::VirtIoNetDev;
+use virtio_devices::VirtIoNetDev;
 
 /// `struct pci_device_id virtio_net_id_table[]`: transitional 0x1000 and
 /// modern 0x1041.
@@ -33,7 +33,7 @@ pub struct NetData {
     /// The Data-owned publication: dropping unpublishes. FIRST field —
     /// runs before the IRQ guard below releases (consumers detach while
     /// the device is still live).
-    _publication: kclass::ClassWithdraw,
+    _publication: device_class::ClassWithdraw,
     _irq: Option<DevIrq>,
 }
 
@@ -45,7 +45,7 @@ impl DriverOps<PciBus> for VirtioNetDriver {
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PciBus>) -> Result<NetData, ProbeError> {
         let (kind, transport, msi_irq) = crate::common::pci_transport(dev)?;
-        if !matches!(kind, driver_base::DeviceKind::Net) {
+        if !matches!(kind, device_traits::DeviceKind::Net) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
@@ -67,26 +67,32 @@ impl DriverOps<PciBus> for VirtioNetDriver {
 /// interrupt guard.
 pub fn activate<B: driver_core::Bus>(
     dev: &mut DeviceCtx<'_, B>,
-    transport: impl virtio::Transport + 'static,
+    transport: impl virtio_devices::Transport + 'static,
     msi_irq: Option<usize>,
-) -> Result<(kclass::ClassWithdraw, Option<DevIrq>), ProbeError> {
+) -> Result<(device_class::ClassWithdraw, Option<DevIrq>), ProbeError> {
     // The publication rides the caller's Data (withdrawal guard): the
     // Data-owner contract — no composition-root class drain at remove.
     let (publication, irq) = activate_with_irq(dev, transport, msi_irq, None)?;
-    let withdraw = kclass::net_withdraw(&publication);
+    let withdraw = device_class::net_withdraw(&publication);
     Ok((withdraw, irq))
 }
 
 /// Construct and publish the NIC, returning the publication handle and the
 /// registered IRQ guard (shared by the PCI driver and the mmio transport).
-fn activate_with_irq<B: driver_core::Bus, T: virtio::Transport + 'static>(
+fn activate_with_irq<B: driver_core::Bus, T: virtio_devices::Transport + 'static>(
     dev: &mut DeviceCtx<'_, B>,
     transport: T,
     msi_irq: Option<usize>,
     mmio_regs: Option<driver_core::IoMap>,
-) -> Result<(kclass::ClassDevice<kclass::NetDeviceImpl>, Option<DevIrq>), ProbeError> {
+) -> Result<
+    (
+        device_class::ClassDevice<device_class::NetDeviceImpl>,
+        Option<DevIrq>,
+    ),
+    ProbeError,
+> {
     let device = Arc::new(
-        VirtIoNetDev::<driver_runtime::hal::Hal, _, 64>::try_new(transport, mmio_regs)
+        VirtIoNetDev::<driver_host::virtio_hal::Hal, _, 64>::try_new(transport, mmio_regs)
             .map_err(crate::common::map_driver_error)?,
     );
     let worker = device.irq_worker();
@@ -151,7 +157,7 @@ fn activate_with_irq<B: driver_core::Bus, T: virtio::Transport + 'static>(
 /// close() unpublishes first (consumers stop), then releases the IRQ, so
 /// nothing dereferences the transport after the mapping drops.
 #[cfg(feature = "mmio")]
-pub fn activate_mmio<B: driver_core::Bus, T: virtio::Transport + 'static>(
+pub fn activate_mmio<B: driver_core::Bus, T: virtio_devices::Transport + 'static>(
     dev: &mut DeviceCtx<'_, B>,
     transport: T,
     mut builder: crate::mmio::ActivationBuilder,
@@ -164,7 +170,7 @@ pub fn activate_mmio<B: driver_core::Bus, T: virtio::Transport + 'static>(
     struct NetMmioActivation {
         // Field order = teardown order: unpublish (consumers detach while
         // the device is live), then the IRQ guard releases.
-        _withdraw: kclass::ClassWithdraw,
+        _withdraw: device_class::ClassWithdraw,
         irq: Option<DevIrq>,
     }
     impl crate::mmio::MmioActivation for NetMmioActivation {
@@ -173,7 +179,7 @@ pub fn activate_mmio<B: driver_core::Bus, T: virtio::Transport + 'static>(
         }
     }
     Ok(builder.build(NetMmioActivation {
-        _withdraw: kclass::net_withdraw(&publication),
+        _withdraw: device_class::net_withdraw(&publication),
         irq,
     }))
 }

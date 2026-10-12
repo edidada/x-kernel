@@ -16,10 +16,10 @@ workqueue-bench = ["kworkng/bench"]
 smp = ["khal/smp", "ktask/smp", "memspace/smp", "fs_boot?/smp", "ipi"]
 ipi = ["dep:kipi", "ktask/ipi"]
 
-char = ["dep:ktty", "dep:kclass", "kclass/char"]
-display = ["dep:fbdevice", "dep:kclass", "kclass/display"]
-input = ["dep:inputdev", "dep:kclass", "kclass/input"]
-fs = ["dep:fs_boot", "dep:block", "dep:kclass", "kclass/block"]
+char = ["dep:ktty", "dep:device_class", "device_class/char"]
+display = ["dep:fbdevice", "dep:device_class", "device_class/display"]
+input = ["dep:inputdev", "dep:device_class", "device_class/input"]
+fs = ["dep:fs_boot", "dep:block", "dep:device_class", "device_class/block"]
 # 9P runtime glue only. The transport driver is selected at the top level via
 # `kfeat/driver_virtio_9p` (or any future 9P transport driver feature).
 fs9p = [
@@ -28,8 +28,8 @@ fs9p = [
 ]
 fs_cgroup2 = ["fs", "fs_boot/cgroup2"]
 fs_ebpf = ["fs", "fs_boot/ebpf"]
-net = ["dep:knet", "dep:kclass", "kclass/net"]
-vsock = ["net", "dep:kclass", "kclass/vsock"]
+net = ["dep:knet", "dep:device_class", "device_class/net"]
+vsock = ["net", "dep:device_class", "device_class/vsock"]
 vsock_tipc_bridge = []
 
 rtc = []
@@ -40,7 +40,7 @@ watchdog_hardlockup = ["watchdog/nmi"]
 pmu = ["khal/pmu"]
 
 [dependencies]
-kclass = { workspace = true, optional = true }
+device_class = { workspace = true, optional = true }
 block = { workspace = true, optional = true }
 kspin.workspace = true
 kalloc.workspace = true

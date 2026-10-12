@@ -10,7 +10,7 @@ repository.workspace = true
 categories.workspace = true
 
 [dependencies]
-driver_base = { workspace = true }
+device_traits = { workspace = true }
 unittest.workspace = true
 
 [lints]

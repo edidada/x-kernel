@@ -6,8 +6,8 @@
 
 use alloc::{boxed::Box, sync::Arc};
 
+use device_class::{ClassDevice, HwrngDeviceImpl, hwrng_devices, subscribe_hwrng_available};
 use hwrng::HwrngDevice;
-use kclass::{ClassDevice, HwrngDeviceImpl, hwrng_devices, subscribe_hwrng_available};
 use klazy::Lazy;
 use kspin::SpinNoIrq;
 use ksync::Mutex;
@@ -288,8 +288,8 @@ mod tests {
                 ready: WaitQueue::new(),
                 entered: WaitQueue::new(),
             });
-            let class = kclass::publish_hwrng(
-                kclass::ClassParent::detached(
+            let class = device_class::publish_hwrng(
+                device_class::ClassParent::detached(
                     index as u64,
                     "entropy-collector-test",
                     devnode::DeviceLocation::PlatformStatic { id: index as u16 },
@@ -340,7 +340,7 @@ mod tests {
             source.work.flush().unwrap();
             assert_eq!(hardware.reads.load(Ordering::Acquire), reads);
             source.work.shutdown().unwrap();
-            kclass::unpublish_hwrng(class.id());
+            device_class::unpublish_hwrng(class.id());
         }
         unittest::TestResult::Ok
     }

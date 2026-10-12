@@ -14,12 +14,12 @@ use alloc::{boxed::Box, sync::Arc};
 
 use char_driver::CharDevice;
 use console_driver::serial::{SerialIdent, SerialPort, SerialRole, take_early_port};
-use driver_base::{Device, DeviceKind, DriverResult};
+use device_class::{ClassParent, publish_char};
+use device_traits::{Device, DeviceKind, DriverResult};
 use driver_core::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError, RuntimeError,
     platform::{PlatformBus, PlatformId},
 };
-use kclass::{ClassParent, publish_char};
 
 /// `struct of_device_id ns16550_of_match[]` (MMIO variant).
 #[cfg(feature = "ns16550-mmio")]
@@ -46,7 +46,7 @@ pub struct SerialData {
     /// unpublishes. FIRST field — before the mapping guard below, so
     /// consumer detach sees a live device. The stdout port deliberately
     /// holds none (console continuity across rebind).
-    _publication: Option<kclass::ClassWithdraw>,
+    _publication: Option<device_class::ClassWithdraw>,
     /// Kept alive for the binding: dropping it unmaps the cold-start UART
     /// window. Field placement (after the publication) encodes release order.
     // Ownership-only field: read access is intentionally impossible.
@@ -89,22 +89,22 @@ impl CharDevice for SerialCharDev {
 fn publish(
     dev: &mut DeviceCtx<'_, PlatformBus>,
     port: Arc<SerialPort>,
-) -> Result<Option<kclass::ClassWithdraw>, ProbeError> {
+) -> Result<Option<device_class::ClassWithdraw>, ProbeError> {
     let location = dev.descriptor().location;
-    let char_dev: kclass::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
+    let char_dev: device_class::CharDeviceImpl = Box::new(SerialCharDev(port.clone()));
     match port.role() {
         SerialRole::Stdout => console_driver::runtime::register_console_parented(
             ClassParent::detached(dev.id().raw(), "serial-ns16550", location),
             char_dev,
         )
         .map(|_| None) // console continuity: no withdrawal guard
-        .map_err(crate::common::map_driver_error),
+        .map_err(crate::probe_error::map_driver_error),
         SerialRole::Auxiliary => publish_char(
             ClassParent::detached(dev.id().raw(), "serial-ns16550", location),
             char_dev,
         )
-        .map(|handle| Some(kclass::char_withdraw(&handle)))
-        .map_err(crate::common::map_driver_error),
+        .map(|handle| Some(device_class::char_withdraw(&handle)))
+        .map_err(crate::probe_error::map_driver_error),
     }
 }
 

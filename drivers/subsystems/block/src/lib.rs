@@ -17,7 +17,7 @@ extern crate alloc;
 pub mod completion;
 
 #[cfg(feature = "ramdisk")]
-pub mod ramdisk;
+pub mod ramdisk_heap;
 
 #[cfg(feature = "ramdisk-static")]
 pub mod ramdisk_static;
@@ -29,13 +29,13 @@ pub mod ramdisk_image;
 use alloc::{boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use devnode::DeviceNumber;
 // #[cfg(feature = "bcm2835-sdhci")]
 
 // #[cfg(feature = "ahci")]
 // #[cfg(feature = "sdmmc")]
 #[doc(no_inline)]
-pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+pub use device_traits::{Device, DeviceKind, DriverError, DriverResult};
+use devnode::DeviceNumber;
 use kerrno::{KError, KResult};
 use klazy::Lazy;
 use ksync::Mutex;

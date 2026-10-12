@@ -20,7 +20,7 @@ ramdisk-static = []
 
 [dependencies]
 bitflags = { workspace = true }
-driver_base = { workspace = true }
+device_traits = { workspace = true }
 kerrno = { workspace = true }
 klazy = { workspace = true }
 ksync = { workspace = true }

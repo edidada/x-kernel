@@ -104,7 +104,7 @@ impl DriverOps<PlatformBus> for MmioDriver {
         // SAFETY: `regs` covers the firmware-declared virtio-mmio register
         // window; the probe only reads the header.
         let Some((kind, transport)) =
-            (unsafe { virtio::probe_mmio_device(regs.as_ptr(), mmio.size) })
+            (unsafe { virtio_devices::probe_mmio_device(regs.as_ptr(), mmio.size) })
         else {
             log::debug!("virtio-mmio: slot at {:#x} is empty", mmio.base);
             return Err(ProbeError::Fatal(RuntimeError::BadState));
@@ -121,13 +121,13 @@ impl DriverOps<PlatformBus> for MmioDriver {
     }
 }
 
-fn dispatch<T: virtio::Transport + Send + 'static>(
+fn dispatch<T: virtio_devices::Transport + Send + 'static>(
     dev: &mut DeviceCtx<'_, PlatformBus>,
-    kind: driver_base::DeviceKind,
+    kind: device_traits::DeviceKind,
     transport: T,
     builder: ActivationBuilder,
 ) -> Result<MmioData, ProbeError> {
-    use driver_base::DeviceKind;
+    use device_traits::DeviceKind;
     match kind {
         DeviceKind::Net => {
             #[cfg(feature = "net")]
@@ -168,7 +168,7 @@ fn dispatch<T: virtio::Transport + Send + 'static>(
 
 /// Char-family dispatch: exactly one char family is wired per build
 /// (virtio-rng today); future char families get their own kind-checked arm.
-fn dispatch_char<T: virtio::Transport + Send + 'static>(
+fn dispatch_char<T: virtio_devices::Transport + Send + 'static>(
     dev: &mut DeviceCtx<'_, PlatformBus>,
     transport: T,
     builder: ActivationBuilder,
@@ -187,7 +187,7 @@ fn dispatch_char<T: virtio::Transport + Send + 'static>(
 
 macro_rules! simple_family_dispatch {
     ($fn_name:ident, $feature:literal, $module:ident) => {
-        fn $fn_name<T: virtio::Transport + Send + 'static>(
+        fn $fn_name<T: virtio_devices::Transport + Send + 'static>(
             dev: &mut DeviceCtx<'_, PlatformBus>,
             transport: T,
             builder: ActivationBuilder,

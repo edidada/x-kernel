@@ -6,18 +6,18 @@
 
 use driver_core::{ProbeError, RuntimeError, desc::DeviceLocation};
 
-pub(crate) fn map_driver_error(err: driver_base::DriverError) -> ProbeError {
+pub(crate) fn map_driver_error(err: device_traits::DriverError) -> ProbeError {
     let error = match err {
-        driver_base::DriverError::InvalidInput | driver_base::DriverError::ReadOnly => {
+        device_traits::DriverError::InvalidInput | device_traits::DriverError::ReadOnly => {
             RuntimeError::Invalid
         }
-        driver_base::DriverError::NoMemory => RuntimeError::NoMemory,
-        driver_base::DriverError::ResourceBusy | driver_base::DriverError::AlreadyExists => {
+        device_traits::DriverError::NoMemory => RuntimeError::NoMemory,
+        device_traits::DriverError::ResourceBusy | device_traits::DriverError::AlreadyExists => {
             RuntimeError::Busy
         }
-        driver_base::DriverError::BadState => RuntimeError::BadState,
-        driver_base::DriverError::Io | driver_base::DriverError::WouldBlock => RuntimeError::Io,
-        driver_base::DriverError::Unsupported => RuntimeError::Unsupported,
+        device_traits::DriverError::BadState => RuntimeError::BadState,
+        device_traits::DriverError::Io | device_traits::DriverError::WouldBlock => RuntimeError::Io,
+        device_traits::DriverError::Unsupported => RuntimeError::Unsupported,
     };
     ProbeError::Fatal(error)
 }

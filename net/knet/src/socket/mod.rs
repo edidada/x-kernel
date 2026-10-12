@@ -21,9 +21,9 @@ use core::{
 };
 
 use bitflags::bitflags;
-use enum_dispatch::enum_dispatch;
 #[cfg(feature = "vsock")]
-use kclass::prelude::VsockAddr;
+use device_class::prelude::VsockAddr;
+use enum_dispatch::enum_dispatch;
 use kcred::Cred;
 use kerrno::{KError, KResult, LinuxError};
 use kio::prelude::*;

@@ -248,7 +248,10 @@ impl Router {
         Ok(id)
     }
 
-    pub(crate) fn remove_device_by_model_id(&mut self, id: kclass::ClassDeviceId) -> Option<()> {
+    pub(crate) fn remove_device_by_model_id(
+        &mut self,
+        id: device_class::ClassDeviceId,
+    ) -> Option<()> {
         let pos = self
             .devices
             .iter()

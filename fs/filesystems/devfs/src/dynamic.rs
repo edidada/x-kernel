@@ -6,10 +6,10 @@
 
 use alloc::{borrow::Cow, boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 
-use devnode::{DevNode, DevNodeEvent, subscribe};
 #[cfg(feature = "input")]
-use kclass::find_input_device;
-use kclass::{ClassDeviceId, find_display_device};
+use device_class::find_input_device;
+use device_class::{ClassDeviceId, find_display_device};
+use devnode::{DevNode, DevNodeEvent, subscribe};
 use klazy::Once;
 use ksync::Mutex;
 use kvfs::{

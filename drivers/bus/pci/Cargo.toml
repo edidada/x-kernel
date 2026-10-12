@@ -20,7 +20,7 @@ kbuild_config = { workspace = true }
 log.workspace = true
 memspace.workspace = true
 khal = { workspace = true }
-driver_base = { workspace = true }
+device_traits = { workspace = true }
 driver-core = { workspace = true }
 kspin = { workspace = true }
 lazyinit = { workspace = true }

@@ -33,9 +33,9 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
+use device_class::{ClassDevice, DisplayDeviceImpl, display_devices as class_display_devices};
 use display::{DisplayDevice, DisplayInfo, ScanoutFormat, ScanoutRect, ScanoutResource};
 use kalloc::GlobalPage;
-use kclass::{ClassDevice, DisplayDeviceImpl, display_devices as class_display_devices};
 use khal::mem::v2p;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;

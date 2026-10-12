@@ -16,8 +16,8 @@ pub(crate) mod stream;
 
 use alloc::boxed::Box;
 
+pub use device_class::prelude::{VsockAddr, VsockConnId};
 use enum_dispatch::enum_dispatch;
-pub use kclass::prelude::{VsockAddr, VsockConnId};
 use kerrno::{KError, KResult};
 use kio::{IoBuf, IoBufMut, Read, Write};
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};

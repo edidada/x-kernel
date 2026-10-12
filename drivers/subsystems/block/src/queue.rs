@@ -4,7 +4,7 @@
 
 //! Block request-queue geometry and topology.
 
-use driver_base::{DriverError, DriverResult};
+use device_traits::{DriverError, DriverResult};
 
 /// Shift from bytes to Linux block sectors.
 pub const SECTOR_SHIFT: u32 = 9;

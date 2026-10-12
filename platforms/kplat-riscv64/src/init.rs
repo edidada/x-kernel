@@ -15,11 +15,11 @@ impl BootHandler {
 
     fn early_driver_init() {
         timer_driver::riscv_sbi::init(timer_driver::riscv_sbi::TimerConfig::platform_static(
-            irq_driver::riscv::S_TIMER,
+            irqchip_driver::riscv::S_TIMER,
             ktime_types::Frequency::from_hz(10_000_000),
         ));
-        irq_driver::riscv::init_primary();
-        irq_driver::riscv::init_current_cpu_context();
+        irqchip_driver::riscv::init_primary();
+        irqchip_driver::riscv::init_current_cpu_context();
         #[expect(
             clippy::expect_used,
             reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: stdout configuration \
@@ -46,13 +46,13 @@ impl BootHandler {
     }
 
     fn final_init(_boot_info: &BootInfo) {
-        irq_driver::riscv::init_percpu();
+        irqchip_driver::riscv::init_percpu();
         timer_driver::riscv_sbi::init_percpu();
     }
 
     #[cfg(feature = "smp")]
     fn final_init_ap(_logical_cpu_id: LogicalCpuId) {
-        irq_driver::riscv::init_percpu();
+        irqchip_driver::riscv::init_percpu();
         timer_driver::riscv_sbi::init_percpu();
     }
 }

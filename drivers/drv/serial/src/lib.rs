@@ -8,7 +8,7 @@
 
 extern crate alloc;
 
-mod common;
+mod probe_error;
 
 #[cfg(any(feature = "ns16550-mmio", feature = "ns16550-ioport"))]
 pub mod ns16550;

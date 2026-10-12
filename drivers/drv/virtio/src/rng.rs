@@ -12,17 +12,17 @@
 
 use alloc::sync::{Arc, Weak};
 
-use driver_base::DriverError;
+use device_class::{ClassParent, publish_hwrng};
+use device_traits::DriverError;
 use driver_core::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, IrqAction, ProbeError, RuntimeError,
 };
 use hwrng::completion::RngCompletion;
-use kclass::{ClassParent, publish_hwrng};
 use kirq::IrqHandler;
 use kpoll::{PollRegisterError, PollSet};
 use ktask::future::PreparedTaskWait;
 use pci::{PciBus, PciMatch};
-use virtio::VirtIoRngDev;
+use virtio_devices::VirtIoRngDev;
 
 /// `struct pci_device_id virtio_rng_id_table[]`: transitional 0x1005 and
 /// modern 0x1044 (0x1040 + entropy device type 4).
@@ -37,7 +37,7 @@ static IDS: &[PciMatch] = &[
 pub struct RngData {
     /// The Data-owned publication: dropping unpublishes (first field —
     /// before the IRQ guard below releases).
-    _publication: kclass::ClassWithdraw,
+    _publication: device_class::ClassWithdraw,
     _irq: driver_core::DevIrq,
 }
 
@@ -49,7 +49,7 @@ impl DriverOps<PciBus> for VirtioRngDriver {
 
     fn probe(&self, dev: &mut DeviceCtx<'_, PciBus>) -> Result<RngData, ProbeError> {
         let (kind, transport, _irq) = crate::common::pci_transport(dev)?;
-        if !matches!(kind, driver_base::DeviceKind::Hwrng) {
+        if !matches!(kind, device_traits::DeviceKind::Hwrng) {
             return Err(ProbeError::Fatal(RuntimeError::Unsupported));
         }
 
@@ -57,7 +57,7 @@ impl DriverOps<PciBus> for VirtioRngDriver {
         // contract — no composition-root class drain at remove.
         let (publication, irq) = activate(dev, transport, None)?;
         Ok(RngData {
-            _publication: kclass::hwrng_withdraw(&publication),
+            _publication: device_class::hwrng_withdraw(&publication),
             _irq: irq,
         })
     }
@@ -82,7 +82,7 @@ impl HostRngCompletion {
 }
 
 impl RngCompletion for HostRngCompletion {
-    fn wait_until(&self, ready: &mut dyn FnMut() -> bool) -> driver_base::DriverResult {
+    fn wait_until(&self, ready: &mut dyn FnMut() -> bool) -> device_traits::DriverResult {
         let mut task_wait = PreparedTaskWait::prepare().map_err(|_| DriverError::InvalidInput)?;
         if ready() {
             return Ok(());
@@ -117,24 +117,24 @@ fn registration_error(error: PollRegisterError) -> DriverError {
 /// PCI driver above and the virtio-mmio transport driver.
 pub fn activate<B: driver_core::Bus>(
     dev: &mut DeviceCtx<'_, B>,
-    transport: impl virtio::Transport + Send + 'static,
+    transport: impl virtio_devices::Transport + Send + 'static,
     mmio_regs: Option<driver_core::IoMap>,
 ) -> Result<
     (
-        kclass::ClassDevice<kclass::HwrngDeviceImpl>,
+        device_class::ClassDevice<device_class::HwrngDeviceImpl>,
         driver_core::DevIrq,
     ),
     ProbeError,
 > {
     let completion: Arc<dyn RngCompletion> = Arc::new(HostRngCompletion::new());
     let device =
-        VirtIoRngDev::<driver_runtime::hal::Hal, _>::try_new(transport, completion, mmio_regs)
+        VirtIoRngDev::<driver_host::virtio_hal::Hal, _>::try_new(transport, completion, mmio_regs)
             .map_err(crate::common::map_driver_error)?;
 
     // Completion delivery: the same single IRQ entry every driver uses. The
     // closure keeps only a weak reference — the class publication owns the
     // strong one and removal withdraws the irq before teardown.
-    let weak: Weak<VirtIoRngDev<driver_runtime::hal::Hal, _>> = Arc::downgrade(&device);
+    let weak: Weak<VirtIoRngDev<driver_host::virtio_hal::Hal, _>> = Arc::downgrade(&device);
     let spec = dev
         .irq(0)
         .map_err(|_| ProbeError::Fatal(RuntimeError::Invalid))?;
@@ -164,7 +164,7 @@ pub fn activate<B: driver_core::Bus>(
 #[cfg(feature = "mmio")]
 pub fn activate_mmio(
     dev: &mut driver_core::DeviceCtx<'_, driver_core::platform::PlatformBus>,
-    transport: impl virtio::Transport + Send + 'static,
+    transport: impl virtio_devices::Transport + Send + 'static,
     mut builder: crate::mmio::ActivationBuilder,
 ) -> Result<crate::mmio::MmioData, ProbeError> {
     // The MMIO register mapping follows the device object (Linux BAR
@@ -178,7 +178,7 @@ pub fn activate_mmio(
         // unpublish) — consumers detach while the device is still live —
         // then the IRQ guard releases, and the mmio mapping goes with the
         // device object (the last ClassDevice clone).
-        _withdraw: kclass::ClassWithdraw,
+        _withdraw: device_class::ClassWithdraw,
         _irq: driver_core::DevIrq,
     }
 
@@ -189,7 +189,7 @@ pub fn activate_mmio(
     }
 
     Ok(builder.build(RngActivation {
-        _withdraw: kclass::hwrng_withdraw(&publication),
+        _withdraw: device_class::hwrng_withdraw(&publication),
         _irq: irq,
     }))
 }

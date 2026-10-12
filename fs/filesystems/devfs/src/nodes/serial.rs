@@ -14,8 +14,8 @@
 use alloc::{format, sync::Arc};
 
 use console_driver::runtime::stdout_console_id;
-use driver_base::DriverError;
-use kclass::{CharDevice, CharDeviceImpl, ClassDevice, char_devices};
+use device_class::{CharDevice, CharDeviceImpl, ClassDevice, char_devices};
+use device_traits::DriverError;
 use kerrno::KError;
 use kvfs::{
     DeviceFileOps, DeviceId, DirMapping, NodeFlags, SimpleDir, SimpleFs, VfsFile, VfsFileBuilder,

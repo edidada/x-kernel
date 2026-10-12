@@ -68,12 +68,12 @@ pub use device::{
     DeviceResourceServices, DeviceServices, EnabledClock, ExtensionService, IoMap, IrqAction,
     IrqHandlerFn, ReleaseHook, ServiceError,
 };
+pub use device_traits::DeviceKind;
 pub use domain::{
     DataBox, DeviceDomain, DeviceSnapshot, DeviceState, ProbeStats, global_domain,
     global_topology_summary,
 };
 pub use driver::{DriverDesc, DriverOps};
-pub use driver_base::DeviceKind;
 pub use error::{DepKind, DepSource, ProbeError, RuntimeError};
 pub use resource::{
     ClkSpec, IoPortRange, IrqController, IrqDomainId, IrqSpec, IrqTrigger, MmioRegion,

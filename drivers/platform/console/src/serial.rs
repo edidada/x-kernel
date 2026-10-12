@@ -24,7 +24,7 @@ use core::task::Waker;
 
 #[cfg(feature = "pl011")]
 use arm_pl011::Pl011Uart;
-use driver_base::DriverError;
+use device_traits::DriverError;
 use emergency::EmergencyTx;
 use input::SerialInput;
 use khal::mem::PhysAddr;

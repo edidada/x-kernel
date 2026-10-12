@@ -12,11 +12,11 @@
 use alloc::{boxed::Box, sync::Arc};
 
 use block::Gendisk;
+use device_class::{ClassParent, publish_block};
 use driver_core::{
     BoundDevice, DeviceCtx, DriverDesc, DriverOps, ProbeError,
     platform::{PlatformBus, PlatformId},
 };
-use kclass::{ClassParent, publish_block};
 
 /// `struct platform_device_id ramdisk_ids[]`: one board alias row.
 static IDS: &[PlatformId] = &[PlatformId::Alias(driver_core::platform::AliasMatch::new(
@@ -28,7 +28,7 @@ static IDS: &[PlatformId] = &[PlatformId::Alias(driver_core::platform::AliasMatc
 pub struct RamdiskData {
     /// The Data-owned publication: dropping unpublishes (first field —
     /// registry removal → del_gendisk + devnode withdraw).
-    _publication: kclass::ClassWithdraw,
+    _publication: device_class::ClassWithdraw,
 }
 
 /// The driver ops.
@@ -60,7 +60,7 @@ impl DriverOps<PlatformBus> for RamdiskDriver {
             // Linux brd's rd_size): a synthetic device has no firmware
             // description to read it from.
             (
-                Box::new(block::ramdisk::RamDisk::new(
+                Box::new(block::ramdisk_heap::RamDisk::new(
                     kbuild_config::KFEAT_RAMDISK_SIZE as usize,
                 )),
                 alloc::string::String::from("ramdisk"),
@@ -81,7 +81,7 @@ impl DriverOps<PlatformBus> for RamdiskDriver {
         )
         .map_err(crate::common::map_driver_error)?;
         Ok(RamdiskData {
-            _publication: kclass::block_withdraw(&publication),
+            _publication: device_class::block_withdraw(&publication),
         })
     }
 

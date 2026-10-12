@@ -29,7 +29,7 @@ fixed-clock = ["dep:drv-clk"]
 
 [dependencies]
 driver-core.workspace = true
-driver-runtime.workspace = true
+driver_host.workspace = true
 khal.workspace = true
 pci.workspace = true
 of.workspace = true

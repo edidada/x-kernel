@@ -37,7 +37,7 @@ use khal::firmware::devices as firmware;
 
 /// Bring up the new device model.
 pub fn init() {
-    driver_runtime::XKernelRuntime::install_global();
+    driver_host::XKernelRuntime::install_global();
 
     #[cfg(feature = "fixed-clock")]
     drv_clk::fixed_clock::register();
